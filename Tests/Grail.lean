@@ -861,6 +861,11 @@ def grailDepsGroup : Group where
         -- another requirement on p narrows it (1.0.0 satisfies both)
         let .ok rs := resolved [⟨"p", "^1"⟩, ⟨"p", "1.0"⟩] | throw (IO.userError "resolve failed")
         checkEq "1.0.0" ((rs.find? (·.name == "p")).map (Grail.Version.render ·.version) |>.getD "?")
+        -- `~1` is `>=1.0.0 <2.0.0`; `~1.0` is `>=1.0.0 <1.1.0`
+        let .ok rs := resolved [⟨"p", "~1"⟩] | throw (IO.userError "resolve failed")
+        checkEq "1.2.0" ((rs.find? (·.name == "p")).map (Grail.Version.render ·.version) |>.getD "?")
+        let .ok rs := resolved [⟨"p", "~1.0"⟩] | throw (IO.userError "resolve failed")
+        checkEq "1.0.0" ((rs.find? (·.name == "p")).map (Grail.Version.render ·.version) |>.getD "?")
         -- 2.0.0 is yanked; 2.1.0 needs a newer toolchain
         match resolved [⟨"p", "^2"⟩] with
         | .error e => check ((e.splitOn "no version satisfies").length > 1) e

@@ -105,6 +105,9 @@ inductive Op where
 structure Clause where
   op : Op
   v : Version
+  /-- how many components the requirement was written with (`~1`, `~1.2`, `~1.2.3`):
+  `~1` means `<2.0.0`, `~1.2` and `~1.2.3` mean `<1.3.0` -/
+  components : Nat := 3
   deriving Repr, Inhabited, BEq
 
 /-- A version requirement: every clause must hold; no clause means any version. -/
@@ -122,7 +125,8 @@ def parseOne (tok : String) : Except String Clause := do
     else if tok.startsWith "~" then (Op.tilde, (tok.drop 1).toString)
     else if tok.startsWith "=" then (Op.eq, (tok.drop 1).toString)
     else (Op.eq, tok)
-  pure { op, v := ← Version.parse rest }
+  let core := (rest.splitOn "-").head!
+  pure { op, v := ← Version.parse rest, components := (core.splitOn ".").length }
 
 /-- `^1.2`, `~1.2.3`, `>=0.1 <0.3`, `1.2.3`, `*`. -/
 def parse (s : String) : Except String Requirement := do
@@ -132,15 +136,16 @@ def parse (s : String) : Except String Requirement := do
   toks.mapM parseOne
 
 /-- The exclusive upper bound a `^` or `~` clause implies. -/
-def upper (op : Op) (v : Version) : Version :=
-  match op with
+def upper (c : Clause) : Version :=
+  let v := c.v
+  match c.op with
   | .caret =>
     if v.major != 0 then { v with major := v.major + 1, minor := 0, patch := 0, pre := "" }
     else if v.minor != 0 then { v with minor := v.minor + 1, patch := 0, pre := "" }
     else { v with patch := v.patch + 1, pre := "" }
   | .tilde =>
-    if v.major != 0 || v.minor != 0 then { v with minor := v.minor + 1, patch := 0, pre := "" }
-    else { v with patch := v.patch + 1, pre := "" }
+    if c.components <= 1 then { v with major := v.major + 1, minor := 0, patch := 0, pre := "" }
+    else { v with minor := v.minor + 1, patch := 0, pre := "" }
   | _ => v
 
 /-- How a requirement prints in messages. -/
@@ -166,7 +171,7 @@ def Clause.holds (c : Clause) (v : Version) (allowPre : Bool := false) : Bool :=
     | .gt => Version.lt c.v v
     | .le => Version.le v c.v
     | .lt => Version.lt v c.v
-    | .caret | .tilde => Version.le c.v v && Version.lt v (Requirement.upper c.op c.v)
+    | .caret | .tilde => Version.le c.v v && Version.lt v (Requirement.upper c)
 
 /-- Whether every clause of `r` holds of `v`. -/
 def Requirement.satisfies (r : Requirement) (v : Version) (allowPre : Bool := false) : Bool :=
