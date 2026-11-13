@@ -1,0 +1,346 @@
+import Grail.Config
+
+/-!
+# The package index (stage 23m, prototype)
+
+A **static index** is text: one S-expression file per package name, in a git repository
+(so a mirror, a fork or a private index is just another URL). This file is the pure part:
+versions and version requirements, the index format, and the resolver. `Grail/Registry.lean`
+reads the index and the lock, and fetches.
+
+    (index
+      (package "greet"
+        (summary "Hello, in Wiz")
+        (repo "https://github.com/example/greet")
+        (version "1.2.0"
+          (source "https://github.com/example/greet/releases/download/v1.2.0/greet-1.2.0.tar.gz")
+          (sha256 "9f2c…")
+          (toolchain ">=0.1.0 <0.3.0")
+          (deps (dep "std" "^0.1")))
+        (yanked "1.2.0" "wrong tarball; use 1.2.1")))
+
+Versions are semver (`1.2.3`, `1.2.3-rc.1`) and requirements are `1.2.3`, `^1.2.3`,
+`~1.2.3`, `>=1.2.3 <2.0.0`, or `*`. There is one version of a name in a build (Wiz has one
+global name space), so the resolver picks the highest version that satisfies *every*
+requirement on that name, and errors when none does.
+-/
+
+namespace Grail
+
+/-- A version: `major.minor.patch[-pre]` -/
+structure Version where
+  major : Nat
+  minor : Nat
+  patch : Nat
+  /-- `""` for a release; `rc.1`, `dev` for a pre-release (sorts before the release) -/
+  pre : String := ""
+  deriving Repr, Inhabited, BEq
+
+namespace Version
+
+def render (v : Version) : String :=
+  s!"{v.major}.{v.minor}.{v.patch}" ++ (if v.pre.isEmpty then "" else "-" ++ v.pre)
+
+def ofParts (core pre : String) : Except String Version := do
+  let parts := core.splitOn "."
+  if parts.length > 3 then throw s!"not a version: {core}"
+  let nums ← parts.mapM fun p => match p.toNat? with
+    | some n => pure n
+    | none => throw s!"not a version: {core}"
+  match nums with
+  | [a] => pure { major := a, minor := 0, patch := 0, pre }
+  | [a, b] => pure { major := a, minor := b, patch := 0, pre }
+  | [a, b, c] => pure { major := a, minor := b, patch := c, pre }
+  | _ => throw s!"not a version: {core}"
+
+/-- Parse `1.2.3`, `1.2`, `1`, `1.2.3-rc.1`. -/
+def parse (s : String) : Except String Version := do
+  let s := s.trimAscii.toString
+  if s.isEmpty then throw "empty version"
+  match s.splitOn "-" with
+  | [core] => ofParts core ""
+  | core :: pre => ofParts core ("-".intercalate pre)
+  | [] => throw s!"not a version: {s}"
+
+/-- Pre-release identifiers compared field by field: a numeric one numerically, an
+alphanumeric one as text; a release sorts after its pre-releases. -/
+def cmpPre (a b : String) : Ordering :=
+  if a == b then .eq
+  else if a.isEmpty then .gt
+  else if b.isEmpty then .lt
+  else
+    let rec go (xs ys : List String) : Ordering :=
+      match xs, ys with
+      | [], [] => .eq
+      | [], _ => .lt
+      | _, [] => .gt
+      | x :: xs, y :: ys =>
+        match x.toNat?, y.toNat? with
+        | some m, some n => if m == n then go xs ys else if m < n then .lt else .gt
+        | none, none => if x == y then go xs ys else if x < y then .lt else .gt
+        | some _, none => .lt
+        | none, some _ => .gt
+    go (a.splitOn ".") (b.splitOn ".")
+
+def cmp (a b : Version) : Ordering :=
+  if a.major != b.major then (if a.major < b.major then .lt else .gt)
+  else if a.minor != b.minor then (if a.minor < b.minor then .lt else .gt)
+  else if a.patch != b.patch then (if a.patch < b.patch then .lt else .gt)
+  else cmpPre a.pre b.pre
+
+def lt (a b : Version) : Bool := cmp a b == .lt
+def le (a b : Version) : Bool := cmp a b != .gt
+
+end Version
+
+/-- One comparison of a requirement -/
+inductive Op where
+  | eq | ge | gt | le | lt
+  /-- `^1.2.3`: `>=1.2.3`, below the next major (below the next minor when major is 0) -/
+  | caret
+  /-- `~1.2.3`: `>=1.2.3`, below the next minor -/
+  | tilde
+  deriving Repr, Inhabited, BEq
+
+structure Clause where
+  op : Op
+  v : Version
+  deriving Repr, Inhabited, BEq
+
+/-- A version requirement: every clause must hold; no clause means any version. -/
+abbrev Requirement := List Clause
+
+namespace Requirement
+
+def parseOne (tok : String) : Except String Clause := do
+  let (op, rest) :=
+    if tok.startsWith ">=" then (Op.ge, (tok.drop 2).toString)
+    else if tok.startsWith "<=" then (Op.le, (tok.drop 2).toString)
+    else if tok.startsWith ">" then (Op.gt, (tok.drop 1).toString)
+    else if tok.startsWith "<" then (Op.lt, (tok.drop 1).toString)
+    else if tok.startsWith "^" then (Op.caret, (tok.drop 1).toString)
+    else if tok.startsWith "~" then (Op.tilde, (tok.drop 1).toString)
+    else if tok.startsWith "=" then (Op.eq, (tok.drop 1).toString)
+    else (Op.eq, tok)
+  pure { op, v := ← Version.parse rest }
+
+/-- `^1.2`, `~1.2.3`, `>=0.1 <0.3`, `1.2.3`, `*`. -/
+def parse (s : String) : Except String Requirement := do
+  let s := s.trimAscii.toString
+  if s.isEmpty || s == "*" then return []
+  let toks := (s.splitOn " ").filter (!·.isEmpty)
+  toks.mapM parseOne
+
+/-- The exclusive upper bound a `^` or `~` clause implies. -/
+def upper (op : Op) (v : Version) : Version :=
+  match op with
+  | .caret =>
+    if v.major != 0 then { v with major := v.major + 1, minor := 0, patch := 0, pre := "" }
+    else if v.minor != 0 then { v with minor := v.minor + 1, patch := 0, pre := "" }
+    else { v with patch := v.patch + 1, pre := "" }
+  | .tilde =>
+    if v.major != 0 || v.minor != 0 then { v with minor := v.minor + 1, patch := 0, pre := "" }
+    else { v with patch := v.patch + 1, pre := "" }
+  | _ => v
+
+/-- How a requirement prints in messages. -/
+def render (r : Requirement) : String :=
+  if r.isEmpty then "*" else
+    " ".intercalate (r.map fun c =>
+      (match c.op with
+       | .eq => "" | .ge => ">=" | .gt => ">" | .le => "<=" | .lt => "<"
+       | .caret => "^" | .tilde => "~") ++ Version.render c.v)
+
+end Requirement
+
+/-- Whether `c` holds of `v`. `allowPre`: the toolchain's own version (`0.1.0-dev`) is a
+pre-release, and a range like `>=0.1.0 <0.3.0` should still admit it. -/
+def Clause.holds (c : Clause) (v : Version) (allowPre : Bool := false) : Bool :=
+  -- a `-dev` toolchain (the unreleased X.Y.Z) counts as X.Y.Z
+  let v := if allowPre && v.pre != "" then { v with pre := "" } else v
+  if v.pre != "" && !allowPre && c.op != .eq && c.v.pre == "" then false
+  else
+    match c.op with
+    | .eq => v == c.v
+    | .ge => Version.le c.v v
+    | .gt => Version.lt c.v v
+    | .le => Version.le v c.v
+    | .lt => Version.lt v c.v
+    | .caret | .tilde => Version.le c.v v && Version.lt v (Requirement.upper c.op c.v)
+
+/-- Whether every clause of `r` holds of `v`. -/
+def Requirement.satisfies (r : Requirement) (v : Version) (allowPre : Bool := false) : Bool :=
+  r.all (Clause.holds · v allowPre)
+
+/-- One published version of a package -/
+structure IxVersion where
+  version : Version
+  /-- the immutable source archive (a URL `curl` takes; `file://` works too) -/
+  source : String
+  /-- the SHA-256 of that archive, 64 lowercase hex digits -/
+  sha256 : String
+  /-- the toolchain the author tested with (a requirement; `""` means any) -/
+  toolchain : String := ""
+  /-- its dependencies, as the index records them (authoritative for resolution) -/
+  deps : List Req := []
+  /-- why it is yanked; `""` when it isn't -/
+  yanked : String := ""
+  deriving Repr, Inhabited
+
+/-- A package's index entry -/
+structure IxPackage where
+  name : String
+  summary : String := ""
+  repo : String := ""
+  versions : List IxVersion := []
+  deriving Repr, Inhabited
+
+namespace Index
+
+open Wiz.Cache
+
+def decodeReq (x : Sx) : Except String Req :=
+  match x with
+  | .l #[.a "dep", .a n, .a r] => pure { name := n, req := r }
+  | x => throw s!"bad requirement {x.render}"
+
+def decodeVersion (x : Sx) : Except String IxVersion := do
+  let .l xs := x | throw s!"bad version {x.render}"
+  let mut out : IxVersion := { version := { major := 0, minor := 0, patch := 0 }, source := "", sha256 := "" }
+  let (v, fields) ← match xs.toList with
+    | .a "version" :: .a v :: rest => pure (v, rest)
+    | _ => throw s!"bad version {x.render}"
+  out := { out with version := ← Version.parse v }
+  for f in fields do
+    match f with
+    | .l #[.a "source", .a s] => out := { out with source := s }
+    | .l #[.a "sha256", .a s] => out := { out with sha256 := s }
+    | .l #[.a "toolchain", .a s] => out := { out with toolchain := s }
+    | .l ys =>
+      match ys.toList with
+      | .a "deps" :: rest => out := { out with deps := ← rest.mapM decodeReq }
+      | _ => throw s!"version {v}: unknown field {f.render}"
+    | x => throw s!"version {v}: unknown field {x.render}"
+  if out.source.isEmpty then throw s!"version {v}: no source"
+  if out.sha256.length != 64 then throw s!"version {v}: sha256 must be 64 hex digits"
+  pure out
+
+/-- A `(version …)` node, without the fields it doesn't need (`deps`, `toolchain`). -/
+def decodePackage (x : Sx) : Except String IxPackage := do
+  let .l xs := x | throw s!"bad package {x.render}"
+  let (name, fields) ← match xs.toList with
+    | .a "package" :: .a name :: rest => pure (name, rest)
+    | _ => throw s!"bad package {x.render}"
+  let mut out : IxPackage := { name }
+  let mut yanked : List (String × String) := []
+  for f in fields do
+    match f with
+    | .l #[.a "summary", .a s] => out := { out with summary := s }
+    | .l #[.a "repo", .a s] => out := { out with repo := s }
+    | .l #[.a "yanked", .a v, .a why] => yanked := yanked ++ [(v, why)]
+    | .l ys =>
+      match ys.toList with
+      | .a "version" :: _ => out := { out with versions := out.versions ++ [← decodeVersion f] }
+      | _ => throw s!"package {name}: unknown field {f.render}"
+    | x => throw s!"package {name}: unknown field {x.render}"
+  for (v, why) in yanked do
+    let isIt (iv : IxVersion) : Bool := Version.render iv.version == v
+    if out.versions.any isIt then
+      out := { out with versions := out.versions.map fun iv => if isIt iv then { iv with yanked := why } else iv }
+    else throw s!"package {name}: yanked version {v} is not in the index"
+  out := { out with versions := (out.versions.toArray.qsort fun a b => Version.lt a.version b.version).toList }
+  pure out
+
+/-- Parse one index document: `(index (package …) …)`. -/
+def parse (s : String) : Except String (List IxPackage) := do
+  let some (.l xs) := Sx.parse s | throw "expected (index (package …) …)"
+  let some (.a "index") := xs[0]? | throw "expected (index (package …) …)"
+  xs.toList.drop 1 |>.mapM fun f =>
+    match f with
+    | .l ys =>
+      match ys.toList with
+      | .a "package" :: _ => decodePackage f
+      | _ => throw s!"index: expected a package, got {f.render}"
+    | x => throw s!"index: expected a package, got {x.render}"
+
+end Index
+
+/-- A resolved package: one version of one name, with the archive to fetch -/
+structure Resolved where
+  name : String
+  version : Version
+  source : String
+  sha256 : String
+  toolchain : String := ""
+  deps : List Req := []
+  deriving Repr, Inhabited
+
+namespace Resolve
+
+/-- A requirement on a name, and who asked for it (for messages) -/
+abbrev Ask := String × String
+
+/-- Whether the running `toolchain` satisfies a version's `toolchain` field. -/
+def toolchainOk (toolchain : String) (v : IxVersion) : Bool :=
+  if v.toolchain.isEmpty then true
+  else match Requirement.parse v.toolchain with
+    | .error _ => false
+    | .ok r => match Version.parse toolchain with
+      | .error _ => true
+      | .ok tc => Requirement.satisfies r tc (allowPre := true)
+
+/-- Ask the index for `name`'s highest version that satisfies every one of `asks` and the
+running toolchain. -/
+def pick (p : IxPackage) (asks : List Ask) (toolchain : String) : Except String IxVersion := do
+  let reqs ← asks.mapM fun (r, who) => do pure (← Requirement.parse r, who)
+  let want := reqs.map (·.1)
+  let ok (v : IxVersion) : Bool :=
+    v.yanked.isEmpty && want.all (fun r => Requirement.satisfies r v.version) && toolchainOk toolchain v
+  match (p.versions.filter ok).getLast? with
+  | some v => pure v
+  | none =>
+    let asked := " ".intercalate (reqs.map fun (r, who) => s!"{Requirement.render r} (from {who})")
+    let avail := " ".intercalate (p.versions.map fun v =>
+      Version.render v.version ++ (if v.yanked.isEmpty then "" else " (yanked)"))
+    throw s!"{p.name}: no version satisfies {asked}; the index has {avail}"
+
+def sortedAsks (m : Std.HashMap String (List Ask)) : List (String × List Ask) :=
+  (m.toList.toArray.qsort (fun a b => a.1 < b.1)).toList.map fun (n, a) =>
+    (n, (a.toArray.qsort (fun x y => x.1 < y.1)).toList)
+
+/-- The fixpoint: choose a version per name, add the requirements of what was chosen, and
+repeat until the requirement set is stable. (One version per name, so a change can only
+appear when a newly-reachable package asks for something stricter.) -/
+partial def step (index : Std.HashMap String IxPackage) (toolchain : String)
+    (fuel : Nat) (cons : Std.HashMap String (List Ask)) :
+    Except String (List (String × IxVersion)) := do
+  if fuel == 0 then throw "dependency resolution does not settle (a cycle whose requirements change?)"
+  let mut chosen : List (String × IxVersion) := []
+  let mut cons2 := cons
+  for (name, asks) in sortedAsks cons do
+    let some p := index[name]? | throw s!"no package {name} in the index (asked for by {asks.head!.2})"
+    let v ← pick p asks toolchain
+    chosen := chosen ++ [(name, v)]
+    for d in v.deps do
+      let cur := cons2.getD d.name []
+      if !cur.contains (d.req, name) then
+        cons2 := cons2.insert d.name (cur ++ [(d.req, name)])
+  if sortedAsks cons2 == sortedAsks cons then pure chosen else step index toolchain (fuel - 1) cons2
+
+/-- Resolve `roots` against `index`: the highest version of each reachable name that
+satisfies every requirement on it. Flat: one version per name (Wiz has one global name
+space, and grail refuses two commits of one dependency name). -/
+def resolve (index : Std.HashMap String IxPackage) (roots : List Req) (toolchain : String) :
+    Except String (List Resolved) := do
+  let mut cons : Std.HashMap String (List Ask) := {}
+  for r in roots do
+    cons := cons.insert r.name ((cons.getD r.name []).cons (r.req, "this package"))
+  let chosen ← step index toolchain 64 cons
+  pure (chosen.map fun (name, v) => {
+    name := name, version := v.version, source := v.source, sha256 := v.sha256,
+    toolchain := v.toolchain, deps := v.deps })
+
+end Resolve
+
+end Grail
+

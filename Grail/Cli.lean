@@ -1,5 +1,6 @@
 import Grail.Graph
 import Grail.Deps
+import Grail.Registry
 import Grail.Lsp
 import Wiz.Version
 
@@ -19,8 +20,16 @@ def usage : String := "usage:
   grail test [FILTER…] [--update]
                           run the tests (of `tests` targets) whose path contains a
                           filter; --update writes the actual output to .expected
-  grail update            resolve the git dependencies again and write grail.lock
-                          (builds use the lock only)
+  grail update [--locked] resolve the dependencies again and write grail.lock
+                          (builds use the lock only); --locked fails if the lock
+                          would change
+  grail fetch [--locked] [--offline]
+                          make every package of grail.lock present and verified,
+                          without building; --locked never writes the lock,
+                          --offline uses the cache only
+  grail index resolve [--index URL] [--offline]
+                          print the versions `grail update` would pick
+  grail index show NAME   print a package's index entry
   grail run TARGET [-- ARGS…]
                           build an exe or command target's needs and run it with
                           ARGS, its input and output grail's own; exits with its code
@@ -42,6 +51,8 @@ options: -C DIR (the package directory), --std DIR (the standard library),
   --timeout SECS (a job's time limit, default 1800), --test-timeout SECS (default 300),
   --cc X --cflags \"…\" --ldflags \"…\" --libs \"…\" --llc X --gc-cflags \"…\" --gc-ldflags \"…\" -I DIR,
   --cache DIR (the elaboration cache, default ~/.cache/wiz), --no-cache,
+  --index URL (the package index: a directory, a file, or a git URL; default: the
+  `index` setting of grail.wiz), --offline (never touch the network),
   --trust-native (27a: allow `native_refl`, passed on to every check and to `wiz lsp`), --native-fuel N
 Machine settings (where GMP lives) go in an uncommitted grail.local.wiz:
   import Grail
@@ -59,6 +70,12 @@ structure Opts where
   testTimeout : Option Nat := none
   /-- `grail lsp`: the `wiz` to run -/
   wiz : Option String := none
+  /-- (23m) the package index: a directory, a file, or a git URL -/
+  index : Option String := none
+  /-- (23m) never touch the network -/
+  offline : Bool := false
+  /-- (23m) fail instead of writing grail.lock -/
+  locked : Bool := false
 
 /-- `-C DIR`, `--std DIR`, `-j N`, `--timeout SECS`, `--test-timeout SECS`, taken out of the arguments. -/
 partial def grailOpts (o : Opts) : List String → Opts × List String
@@ -68,6 +85,9 @@ partial def grailOpts (o : Opts) : List String → Opts × List String
   | "--timeout" :: n :: rest => grailOpts { o with timeout := n.toNat? } rest
   | "--test-timeout" :: n :: rest => grailOpts { o with testTimeout := n.toNat? } rest
   | "--wiz" :: w :: rest => grailOpts { o with wiz := some w } rest
+  | "--index" :: i :: rest => grailOpts { o with index := some i } rest
+  | "--offline" :: rest => grailOpts { o with offline := true } rest
+  | "--locked" :: rest => grailOpts { o with locked := true } rest
   | a :: rest =>
     if a.startsWith "-j" && (a.drop 2).toString.toNat?.isSome then grailOpts { o with jobs := (a.drop 2).toString.toNat? } rest
     else let (o, r) := grailOpts o rest; (o, a :: r)
@@ -111,6 +131,8 @@ def cliMain (args : List String) : IO UInt32 := do
   let raw := args
   let (flagged, args) := defaults.parseFlags args
   let binId ← binaryId flagged.cacheDir
+  -- (23m) the registry cache (archives, the index) shares --cache with elaboration
+  let cache : System.FilePath := flagged.cacheDir.getD (System.FilePath.mk home / ".cache" / "wiz")
   match args with
   | ["clean"] =>
     -- (23i) the outputs grail installed in the package, unless they were changed since
@@ -136,7 +158,7 @@ def cliMain (args : List String) : IO UInt32 := do
       tc := (tc.parseFlags raw).1
       let readPkg (d : System.FilePath) : IO (Except String Package) := do
         pure ((← readConfig tc binId std d).map (·.1))
-      let deps ← match ← lockedRoots readPkg dir pkg IO.eprint with
+      let deps ← match ← Registry.lockedRoots cache readPkg dir pkg IO.eprint with
         | .ok rs => rs.mapM absolute
         | .error e => do IO.eprintln s!"grail lsp: {e} (the dependencies' modules are not found)"; pure []
       runLsp wiz (lspArgs tc ([dirAbs] ++ libRootsOf dirAbs pkg.targets ++ deps) lspOpts) dirAbs
@@ -149,13 +171,14 @@ def cliMain (args : List String) : IO UInt32 := do
       | .error e => do IO.eprintln e; return 1
     let mut tc := defaults
     for (k, v) in pkg.settings ++ localSettings do
+      if k == "index" then continue
       match tc.set k v with
       | some t => tc := t
       | none => IO.eprintln s!"unknown setting {k}"; return 1
     tc := (tc.parseFlags raw).1
     let readPkg (d : System.FilePath) : IO (Except String Package) := do
       pure ((← readConfig tc binId std d).map (·.1))
-    let deps ← match ← lockedRoots readPkg dir pkg IO.eprint with
+    let deps ← match ← Registry.lockedRoots cache readPkg dir pkg IO.eprint with
       | .ok rs => rs.mapM absolute
       | .error e => do IO.eprintln e; return 1
     -- TARGET… (lib targets) and wiz doc's own options
@@ -179,12 +202,14 @@ def cliMain (args : List String) : IO UInt32 := do
     let child ← try IO.Process.spawn { cmd := wiz, args, cwd := dirAbs }
       catch e => IO.eprintln s!"grail doc: {wiz}: {e}"; return 127
     child.wait
-  | "build" :: _ | "test" :: _ | ["targets"] | ["config"] | ["update"] | ["run", _] =>
+  | "build" :: _ | "test" :: _ | ["targets"] | ["config"] | "update" :: _ | "fetch" :: _
+  | "index" :: _ | ["run", _] =>
     let (pkg, localSettings) ← match ← readConfig flagged binId std dir with
       | .ok r => pure r
       | .error e => do IO.eprintln e; return 1
     let mut tc := defaults
     for (k, v) in pkg.settings ++ localSettings do
+      if k == "index" then continue
       match tc.set k v with
       | some t => tc := t
       | none => IO.eprintln s!"unknown setting {k}"; return 1
@@ -193,18 +218,78 @@ def cliMain (args : List String) : IO UInt32 := do
     -- a dependency's build file
     let readPkg (d : System.FilePath) : IO (Except String Package) := do
       pure ((← readConfig tc binId std d).map (·.1))
+    -- (23m) the index: --index wins, then the `index` setting of grail.wiz/grail.local.wiz
+    let indexSpec : String :=
+      match opts.index with
+      | some i => i
+      | none => ((pkg.settings ++ localSettings).reverse.find? (·.1 == "index")).map (·.2) |>.getD ""
+    let readLock : IO (Except String Lock) := do
+      if ← (lockFile dir).pathExists then
+        pure (Lock.parse (← IO.FS.readFile (lockFile dir)))
+      else pure (.error s!"no {lockFile dir}: run `grail update`")
     let depRoots : IO (Option (List System.FilePath)) := do
-      match ← lockedRoots readPkg dir pkg IO.eprint with
+      match ← Registry.lockedRoots cache readPkg dir pkg IO.eprint with
       | .ok rs => pure (some rs)
       | .error e => IO.eprintln e; pure none
     match args with
     | ["config"] => IO.print tc.render; pure 0
-    | ["update"] =>
-      match ← update readPkg dir pkg with
+    | "update" :: _ =>
+      match ← Registry.resolveLock cache indexSpec opts.offline readPkg dir pkg with
       | .error e => IO.eprintln e; pure 1
-      | .ok ls =>
-        for l in ls do IO.println s!"{l.name}\t{l.url} {l.rev}\t{l.commit}"
-        pure 0
+      | .ok l =>
+        let text := Lock.render l
+        let old ← if ← (lockFile dir).pathExists then some <$> IO.FS.readFile (lockFile dir) else pure none
+        if opts.locked && old != some text then
+          IO.eprintln "grail.lock is out of date: run `grail update` without --locked"
+          pure 1
+        else
+          if old != some text then Cache.writeAtomic (lockFile dir) text
+          for p in l.pkgs do IO.println s!"{p.name}\t{p.version}\t{p.source}"
+          for g in l.git do IO.println s!"{g.name}\t{g.url} {g.rev}\t{g.commit}"
+          pure 0
+    | "fetch" :: _ =>
+      -- `--locked`: never write the lock, and fail if it is missing or out of date
+      let getLock : IO (Except String Lock) := do
+        match ← readLock with
+        | .ok l =>
+          match Registry.checkLocked l pkg with
+          | .ok () => pure (.ok l)
+          | .error e => pure (.error e)
+        | .error e =>
+          if opts.locked then pure (.error e) else
+            match ← Registry.resolveLock cache indexSpec opts.offline readPkg dir pkg with
+            | .error e => pure (.error e)
+            | .ok l =>
+              Cache.writeAtomic (lockFile dir) (Lock.render l)
+              pure (.ok l)
+      match ← getLock with
+      | .error e => IO.eprintln e; pure 1
+      | .ok l =>
+        match ← Registry.fetch cache dir l with
+        | .error e => IO.eprintln e; pure 1
+        | .ok lines =>
+          for line in lines do IO.println line
+          pure 0
+    | "index" :: "resolve" :: _ =>
+      match ← Registry.loadIndex cache indexSpec opts.offline with
+      | .error e => IO.eprintln e; pure 1
+      | .ok src =>
+        match Resolve.resolve src.pkgs pkg.requires Wiz.version with
+        | .error e => IO.eprintln e; pure 1
+        | .ok rs =>
+          for r in rs do IO.println s!"{r.name}\t{Version.render r.version}\t{r.sha256}\t{r.source}"
+          pure 0
+    | "index" :: "show" :: name :: _ =>
+      match ← Registry.loadIndex cache indexSpec opts.offline with
+      | .error e => IO.eprintln e; pure 1
+      | .ok src =>
+        match src.pkgs[name]? with
+        | none => IO.eprintln s!"no package {name} in the index"; pure 1
+        | some p =>
+          IO.println s!"{p.name}\t{p.summary}"
+          for v in p.versions do
+            IO.println s!"  {Version.render v.version}\t{v.sha256}\t{v.toolchain}\t{v.source}{if v.yanked.isEmpty then "" else " (yanked: " ++ v.yanked ++ ")"}"
+          pure 0
     | ["targets"] =>
       for t in pkg.targets do
         match t with

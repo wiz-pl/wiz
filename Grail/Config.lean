@@ -75,11 +75,23 @@ structure Dep where
   rev : String
   deriving Repr, Inhabited, BEq
 
+/-- (23m) A package from the registry: its name and version requirement -/
+structure Req where
+  name : String
+  req : String
+  deriving Repr, Inhabited, BEq
+
 structure Package where
   name : String
   targets : List Target
   settings : List (String × String)
   deps : List Dep := []
+  /-- (23m) this package's version ("" when it has none) -/
+  version : String := ""
+  /-- (23m) the toolchain it was tested with (a version requirement) -/
+  toolchain : String := ""
+  /-- (23m) registry dependencies -/
+  requires : List Req := []
   deriving Repr, Inhabited
 
 open Cache in
@@ -137,7 +149,13 @@ def decodeCommand (name : String) (tool : Sx) (steps : Sx) : Except String Comma
 
 open Cache in
 def decodePackage (x : Sx) : Except String Package := do
-  let .l #[.a "package", .a name, ts, ss, ds] := x | throw "expected (package name targets settings deps)"
+  -- (23m) the last three fields (version, toolchain, requires) are optional, so a
+  -- manifest written for an older grail still decodes
+  let .l xs := x | throw "expected (package name targets settings deps)"
+  let (name, ts, ss, ds, extra) ← match xs with
+    | #[.a "package", .a name, ts, ss, ds] => pure (name, ts, ss, ds, #[])
+    | #[.a "package", .a name, ts, ss, ds, v, tc, rs] => pure (name, ts, ss, ds, #[v, tc, rs])
+    | _ => throw "expected (package name targets settings deps [version toolchain requires])"
   let some ts := items? ts | throw "targets: expected a list"
   let targets ← ts.toList.drop 1 |>.mapM fun
     | .l #[.a "lib", .a n, .a r] => pure (Target.lib n r)
@@ -156,7 +174,16 @@ def decodePackage (x : Sx) : Except String Package := do
   let deps ← ds.toList.drop 1 |>.mapM fun
     | .l #[.a "dep", .a name, .a url, .a rev] => pure { name, url, rev : Dep }
     | d => throw s!"bad dependency {d.render}"
-  pure { name, targets, settings := ← decodeSettings ss, deps }
+  let (version, toolchain, requires) ← match extra with
+    | #[] => pure ("", "", [])
+    | #[.a v, .a tc, rs] =>
+      let some rs := items? rs | throw "requires: expected a list"
+      let requires ← rs.toList.drop 1 |>.mapM fun
+        | .l #[.a "require", .a n, .a r] => pure { name := n, req := r : Req }
+        | r => throw s!"bad requirement {r.render}"
+      pure (v, tc, requires)
+    | _ => throw "expected (package name targets settings deps version toolchain requires)"
+  pure { name, targets, settings := ← decodeSettings ss, deps, version, toolchain, requires }
 
 /-- Evaluate `expr` (a `String`) in the build file `path`. -/
 def evalBuildFile (tc : Toolchain) (salt : UInt64) (roots : List System.FilePath) (path : System.FilePath)

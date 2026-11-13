@@ -53,16 +53,22 @@ inductive Settings where
 inductive Dep where
   | mk (name : String) (url : String) (rev : String)
 
+-- A package from the registry: its name and a version requirement (`^1.2`, `~0.1.3`,
+-- `>=0.1 <0.3`, `1.2.0`); `grail update` resolves it through the index.
+inductive Req where
+  | mk (name : String) (req : String)
+
 inductive Package where
   | mk (name : String) (targets : List Target) (settings : Settings) (deps : List Dep)
+       (version : String) (toolchain : String) (requires : List Req)
 
 def Settings.empty : Settings := .mk .nil
 def Settings.set (key value : String) : Settings → Settings
   | .mk ps => .mk (List.append ps (.cons (Setting.mk key value) .nil))
 
-def Package.new (name : String) : Package := .mk name .nil Settings.empty .nil
+def Package.new (name : String) : Package := .mk name .nil Settings.empty .nil "" "" .nil
 def Package.add (t : Target) : Package → Package
-  | .mk n ts s ds => .mk n (List.append ts (.cons t .nil)) s ds
+  | .mk n ts s ds v tc rs => .mk n (List.append ts (.cons t .nil)) s ds v tc rs
 def Package.lib (name root : String) (p : Package) : Package := Package.add (.lib name root) p
 def Package.check (name file : String) (p : Package) : Package := Package.add (.check name file) p
 def Package.exe (name file : String) (p : Package) : Package := Package.add (.exe name file) p
@@ -111,10 +117,21 @@ def Package.command (c : Command) (p : Package) : Package := Package.add (.comma
 def Package.phony (c : Command) (p : Package) : Package := Package.add (.command (Command.add .phony c)) p
 
 def Package.set (key value : String) : Package → Package
-  | .mk n ts s ds => .mk n ts (Settings.set key value s) ds
+  | .mk n ts s ds v tc rs => .mk n ts (Settings.set key value s) ds v tc rs
 -- depend on the package at a git URL and revision
 def Package.dep (name url rev : String) : Package → Package
-  | .mk n ts s ds => .mk n ts s (List.append ds (.cons (Dep.mk name url rev) .nil))
+  | .mk n ts s ds v tc rs => .mk n ts s (List.append ds (.cons (Dep.mk name url rev) .nil)) v tc rs
+
+-- ## The registry (23m)
+-- This package's version (`1.2.3`, `1.2.3-rc.1`) and the toolchain it was tested with
+-- (`>=0.1 <0.3`); `grail publish` puts both in the index entry.
+def Package.version (v : String) : Package → Package
+  | .mk n ts s ds _ tc rs => .mk n ts s ds v tc rs
+def Package.toolchain (req : String) : Package → Package
+  | .mk n ts s ds v _ rs => .mk n ts s ds v req rs
+-- depend on a package from the registry by version requirement
+def Package.require (name req : String) : Package → Package
+  | .mk n ts s ds v tc rs => .mk n ts s ds v tc (List.append rs (.cons (Req.mk name req) .nil))
 
 -- ## Rendering, as S-expressions
 def Grail.cat (a b : String) : String := String.append a b
@@ -178,6 +195,13 @@ def Settings.render : Settings → String
 def Grail.renderDeps : List Dep → List String
   | .nil => .nil
   | .cons (.mk n u r) ds => .cons (Grail.node "dep" (.cons (Grail.quote n) (.cons (Grail.quote u) (.cons (Grail.quote r) .nil)))) (Grail.renderDeps ds)
+-- (23m) the manifest's registry fields, as a list of tagged nodes (absent ones are "")
+def Grail.renderReqList : List Req → List String
+  | .nil => .nil
+  | .cons (.mk n r) rs => .cons (Grail.node "require" (.cons (Grail.quote n) (.cons (Grail.quote r) .nil))) (Grail.renderReqList rs)
+def Grail.renderRequires : List Req → String
+  | rs => Grail.list (Grail.renderReqList rs)
 def Package.render : Package → String
-  | .mk n ts s ds => Grail.node "package" (.cons (Grail.quote n) (.cons (Grail.list (Grail.renderTargets ts))
-      (.cons (Settings.render s) (.cons (Grail.list (Grail.renderDeps ds)) .nil))))
+  | .mk n ts s ds v tc rs => Grail.node "package" (.cons (Grail.quote n) (.cons (Grail.list (Grail.renderTargets ts))
+      (.cons (Settings.render s) (.cons (Grail.list (Grail.renderDeps ds))
+        (.cons (Grail.quote v) (.cons (Grail.quote tc) (.cons (Grail.renderRequires rs) .nil)))))))
