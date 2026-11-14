@@ -43,6 +43,21 @@ is updated after review. The `native` group runs the `lib/` part in CI, the
 baseline (build the driver first). `--print` shows the recorded sources; the baseline's
 header explains the format.
 
+### Differential pipelines (COMP-02)
+
+`scripts/differential.sh` runs a small corpus through the five pipelines that exist
+today: Lean→C, Lean→LLVM, the self-hosted compiler's C with GC, the same with reference
+counting (`--rc`), and the Lean frontend's IR interpreter (`#run`). It compares program
+stdout and exit codes, pins compile-time diagnostics per pipeline, and compares a hash of
+normalized generated C/LLVM for compile-only cases. The golden baseline is
+`Tests/Differential/baseline.tsv`; `--update` rewrites it deliberately (review the diff,
+on a machine with the full toolchain) and `--report FILE` writes the Markdown report.
+The same corpus is the CI group `differential` (`Tests/Groups/Differential.lean`), one
+test case per program and pipeline. A missing `llc`, Boehm GC, GMP or C compiler, and a
+case a pipeline cannot exercise, are reported as skipped with a reason; a skip is not a
+pass. Corpus, report and false-difference filters are documented in
+`Tests/Differential/README.md`.
+
 ### Running cases in parallel (`--jobs`)
 
 `lake test -- --jobs N` (default 1) runs the cases of a group that opted in N at a time, in

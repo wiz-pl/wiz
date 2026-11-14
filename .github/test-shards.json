@@ -28,6 +28,12 @@
     "serial",
     "sys"
   ]},
+  {"name": "differential", "jobs": 4,
+   "inputs": ["selfhost/*", "lib/*", "Tests/Differential/*", "Tests/Differential.lean",
+              "Tests/Groups/Differential.lean"],
+   "select": [
+    "=differential"
+  ]},
   {"name": "library", "split": 5, "jobs": 4, "default": true, "select": [
     "builtins",
     "classes",

@@ -3,6 +3,7 @@ import Tests.Eval
 import Tests.Check
 import Tests.Parser
 import Tests.Elab
+import Tests.Differential
 import Tests.Groups
 import Tests.ElabFix
 import Tests.Grail
@@ -273,6 +274,8 @@ def main (args : List String) : IO UInt32 := do
         for c in g.cases, i in [0:g.cases.length] do
           if only.all (·.contains i) then IO.println s!"{g.name}\t{i}\t{c.name}"
     pure 0
+  -- the multi-pipeline differential corpus (COMP-02)
+  | "--differential" :: rest => Differential.main rest
   | args => do
     let (timings, args) := takeFlag "--timings" args
     let (shard, args) := takeFlag "--shard" args

@@ -1,0 +1,78 @@
+# Tests/Differential/baseline.tsv — golden baseline for the COMP-02 pipelines.
+# Regenerate deliberately with `scripts/differential.sh --update`; review the diff.
+# case	pipeline	verdict	exit	observed	note
+arith-big	lean-c	pass	0	2432902008176640000\n	
+arith-big	lean-llvm	pass	0	2432902008176640000\n	
+arith-big	wiz-c-gc	pass	0	2432902008176640000\n	
+arith-big	wiz-c-rc	pass	0	2432902008176640000\n	
+arith-big	ir-interp	pass	0	2432902008176640000	
+arith-ops	lean-c	pass	0	62300\n	
+arith-ops	lean-llvm	pass	0	62300\n	
+arith-ops	wiz-c-gc	pass	0	62300\n	
+arith-ops	wiz-c-rc	pass	0	62300\n	
+arith-ops	ir-interp	pass	0	62300	
+data-list	lean-c	pass	0	285\n	
+data-list	lean-llvm	pass	0	285\n	
+data-list	wiz-c-gc	pass	0	285\n	
+data-list	wiz-c-rc	pass	0	285\n	
+data-list	ir-interp	pass	0	285	
+data-tree	lean-c	pass	0	6\n	
+data-tree	lean-llvm	pass	0	6\n	
+data-tree	wiz-c-gc	pass	0	6\n	
+data-tree	wiz-c-rc	pass	0	6\n	
+data-tree	ir-interp	pass	0	6	
+data-array-map	lean-c	pass	0	16\n	
+data-array-map	lean-llvm	pass	0	16\n	
+data-array-map	wiz-c-gc	pass	0	16\n	
+data-array-map	wiz-c-rc	pass	0	16\n	
+data-array-map	ir-interp	skip	0		the IR interpreter has no Array/StrMap natives
+data-string	lean-c	pass	0	10\n	
+data-string	lean-llvm	pass	0	10\n	
+data-string	wiz-c-gc	pass	0	10\n	
+data-string	wiz-c-rc	pass	0	10\n	
+data-string	ir-interp	pass	0	10	
+io-sequence	lean-c	pass	0	differential\n42\n	
+io-sequence	lean-llvm	pass	0	differential\n42\n	
+io-sequence	wiz-c-gc	pass	0	differential\n42\n	
+io-sequence	wiz-c-rc	pass	0	differential\n42\n	
+io-sequence	ir-interp	skip	0		the IR interpreter does not run an IO `main`
+classes	lean-c	pass	0	41\n	
+classes	lean-llvm	pass	0	41\n	
+classes	wiz-c-gc	skip	0		the self-hosted frontend has no type classes
+classes	wiz-c-rc	skip	0		the self-hosted frontend has no type classes
+classes	ir-interp	pass	0	41	
+ffi-strlen	lean-c	pass	0	5\n	
+ffi-strlen	lean-llvm	pass	0	5\n	
+ffi-strlen	wiz-c-gc	pass	0	5\n	
+ffi-strlen	wiz-c-rc	pass	0	5\n	
+ffi-strlen	ir-interp	skip	0		the IR interpreter cannot call a foreign function
+exit-code	lean-c	pass	7	exit\n	
+exit-code	lean-llvm	pass	7	exit\n	
+exit-code	wiz-c-gc	pass	7	exit\n	
+exit-code	wiz-c-rc	pass	7	exit\n	
+exit-code	ir-interp	skip	0		the IR interpreter does not run an IO `main`
+error-type-mismatch	lean-c	pass	0	type mismatch\nexpected: Type\ninferred: A	
+error-type-mismatch	lean-llvm	pass	0	type mismatch\nexpected: Type\ninferred: A	
+error-type-mismatch	wiz-c-gc	pass	0	error: type mismatch: expected U0, got A	
+error-type-mismatch	wiz-c-rc	pass	0	error: type mismatch: expected U0, got A	
+error-type-mismatch	ir-interp	skip	0		rejected before the IR exists
+error-unknown	lean-c	pass	0	unknown identifier 'Nope'	
+error-unknown	lean-llvm	pass	0	unknown identifier 'Nope'	
+error-unknown	wiz-c-gc	pass	0	error: unknown identifier Nope	
+error-unknown	wiz-c-rc	pass	0	error: unknown identifier Nope	
+error-unknown	ir-interp	skip	0		rejected before the IR exists
+error-linear	lean-c	pass	0	variable x declared with quantity 1 but used ω\n(a linear variable, of quantity 1, must be used exactly once, and x is used more than once)	
+error-linear	lean-llvm	pass	0	variable x declared with quantity 1 but used ω\n(a linear variable, of quantity 1, must be used exactly once, and x is used more than once)	
+error-linear	wiz-c-gc	pass	0	error: the bound variable's usage does not fit its quantity (used too often, or a variable at quantity 1 not used)	
+error-linear	wiz-c-rc	pass	0	error: the bound variable's usage does not fit its quantity (used too often, or a variable at quantity 1 not used)	
+error-linear	ir-interp	skip	0		rejected before the IR exists
+compile-struct	lean-c	pass	0	5733942435082156108	
+compile-struct	lean-llvm	pass	0	2000849598272019344	
+compile-struct	wiz-c-gc	pass	0	17483849638267856305	
+compile-struct	wiz-c-rc	pass	0	9935270775114118049	
+compile-struct	ir-interp	skip	0		no pure expression for the interpreter
+compile-string	lean-c	pass	0	14499136000578751856	
+compile-string	lean-llvm	pass	0	15832612953881882031	
+compile-string	wiz-c-gc	pass	0	9624553996166698869	
+compile-string	wiz-c-rc	pass	0	4104672179864692262	
+compile-string	ir-interp	skip	0		no pure expression for the interpreter
