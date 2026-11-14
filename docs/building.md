@@ -201,7 +201,8 @@ cached between runs.
   in one part).
   `scripts/ci.py plan` shows the parts and their
   estimates. The heavy groups have dedicated shards of their own (`hdl-verified`,
-  `prop`, `audit`), so adding a slow case there does not unbalance `core`.
+  `hdl-uart-temporal`, `prop`, `audit`), so adding a slow case there does not unbalance
+  `core`.
   To refresh the baseline from a CI run:
   `gh run download RUN -n test-timings && scripts/ci.py baseline timings.jsonl > .github/test-timings.json`.
 * **`"jobs"`.** A shard may say `"jobs": N` to give `lake test` `--jobs N` (above): its
