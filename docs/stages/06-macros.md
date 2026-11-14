@@ -316,6 +316,12 @@ def k : Nat := twice 21                     -- 42
   goal open, "… did not close the goal:" with the goal. The assigned term is then
   elaborated and unified with the expected type like any other term, and the kernel
   checks the finished declaration: nothing here is trusted (`#print axioms` is clean).
+* **`local`.** `local attribute [elab k] f` registers the elaborator for the module being
+  elaborated only (like a `local` notation or macro): `Globals` reach the modules an
+  `import` loads, so a registration in a module is visible to its importers unless it is
+  `local`, and `endModule` drops the `local` ones (`CommandState.localElabs`, numbered
+  from the oldest, as the other `local` registrations are). `[term_elab k]` is accepted
+  as the long spelling of the attribute.
 * **When it runs.** The dispatch is **after macro expansion**: `check`/`infer` call
   `expand?` first, then `userElab?`. A kind with both a `macro_rules` rule and an `elab`
   entry is expanded by the macro, and the output is elaborated again (it may itself hit
@@ -340,8 +346,9 @@ def k : Nat := twice 21                     -- 42
 | 6.8 | `Elab/Command.lean`  | `command.attrElab`: parsing, the `TermElab` type check, the registry |
 | 6.9 | `Elab/Term.lean`     | `userElab?`: the hole, `runTac`, the solved/unsolved check |
 
-Tests: group `elab-ext` (12 cases): `twice` builds `2 * x`, a dependent `List.nil` at
+Tests: group `elab-ext` (15 cases): `twice` builds `2 * x`, a dependent `List.nil` at
 the expected element type, `boolOf` reading `goalType` (and its rejection), a failing
 elaborator, one that leaves the goal open, a kind with no elaborator (macro
-fall-through), macro-before-elab order, the two registries being separate both ways, and
-`attribute [elab]` rejecting a wrong type.
+fall-through), macro-before-elab order, the two registries being separate both ways,
+`attribute [elab]` rejecting a wrong type, the long spelling, a registration reaching an
+importer, and a `local` one ending with its module.

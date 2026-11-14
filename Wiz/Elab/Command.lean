@@ -176,6 +176,9 @@ structure CommandState (R : Type) where
   localProcs : List Nat := []
   /-- (11w) `local instance`s: their positions in `instances` (numbered from the oldest) -/
   localInsts : List Nat := []
+  /-- `local attribute [elab k] f`: the registrations' positions in `elabs` (numbered
+  from the oldest), dropped when the module's import ends (`endModule`) -/
+  localElabs : List Nat := []
 
   /-- (11r) unexpanders declared with `app_unexpander c` and `attribute [app_unexpander c] f`,
   latest first, and which of them are `local` (numbered from the oldest) -/
@@ -1336,16 +1339,18 @@ def CommandState.endModule (inner outer : CommandState R) : CommandState R :=
   let rules := inner.localRules.take (inner.localRules.length - outer.localRules.length)
   let procs := inner.localProcs.take (inner.localProcs.length - outer.localProcs.length)
   let insts := inner.localInsts.take (inner.localInsts.length - outer.localInsts.length)
+  let elabsLocal := inner.localElabs.take (inner.localElabs.length - outer.localElabs.length)
   let pps := inner.localPP.take (inner.localPP.length - outer.localPP.length)
   -- (11r) `set_option pp.…` is the module's own
   let reset := { inner with localKinds := outer.localKinds, localCats := outer.localCats,
                             localRules := outer.localRules, localProcs := outer.localProcs,
-                            localInsts := outer.localInsts, localPP := outer.localPP,
+                            localInsts := outer.localInsts, localElabs := outer.localElabs,
+                            localPP := outer.localPP,
                             globals := { inner.globals with pp := { inner.globals.pp with useNotation := outer.globals.pp.useNotation } } }
   -- (11w) a `local instance` is found only in its module (its definition stays: a name)
   let reset := if insts.isEmpty then reset else
     { reset with instances := (reset.instances.zipIdx.filter fun (_, i) => !insts.contains i).map (·.1) }
-  if kinds.isEmpty && cats.isEmpty && rules.isEmpty && procs.isEmpty && pps.isEmpty then reset else
+  if kinds.isEmpty && cats.isEmpty && rules.isEmpty && procs.isEmpty && elabsLocal.isEmpty && pps.isEmpty then reset else
   let t := inner.tables
   let cats' := t.cats.fold (init := ({} : Std.HashMap Name Category)) fun acc c cat =>
     if cats.contains c then acc else
@@ -1363,7 +1368,7 @@ def CommandState.endModule (inner outer : CommandState R) : CommandState R :=
     macros := keep (·.kind) inner.macros rules
     procMacros := keep (·.1) inner.procMacros procs
     tactics := inner.tactics.filter (!kinds.contains ·.1)
-    elabs := inner.elabs.filter (!kinds.contains ·.1)
+    elabs := keep (·.1) inner.elabs elabsLocal
     cmdMacros := inner.cmdMacros.filter (!kinds.contains ·.1)
     ppUser := keep (·.head) inner.ppUser pps }
   s'.refreshPP
@@ -1572,8 +1577,9 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
     -- (13m) grammar that stays in this module: remember what the command adds
     let inner := cmd.getArg 1
     unless ["command.syntax", "command.declareSyntaxCat", "command.notation", "command.infix",
-            "command.macroRules", "command.attrMacro", "command.instance", "command.appUnexpander", "command.attrUnexpander"].contains inner.kind do
-      report .error cmd.info "only `syntax`, `declare_syntax_cat`, `notation`, `infixl`/`infixr`/`infix`, `macro_rules`, `attribute [macro …]`, `instance` and unexpanders can be `local`"
+            "command.macroRules", "command.attrMacro", "command.attrElab", "command.instance",
+            "command.appUnexpander", "command.attrUnexpander"].contains inner.kind do
+      report .error cmd.info "only `syntax`, `declare_syntax_cat`, `notation`, `infixl`/`infixr`/`infix`, `macro_rules`, `attribute [macro …]`, `attribute [elab …]`, `instance` and unexpanders can be `local`"
       return
     let before ← get
     elabCommand inner
@@ -1583,6 +1589,7 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
       { s with localKinds := kinds ++ s.localKinds, localCats := cats ++ s.localCats
                localRules := (List.range' before.macros.length (s.macros.length - before.macros.length)).reverse ++ s.localRules
                localProcs := (List.range' before.procMacros.length (s.procMacros.length - before.procMacros.length)).reverse ++ s.localProcs
+               localElabs := (List.range' before.elabs.length (s.elabs.length - before.elabs.length)).reverse ++ s.localElabs
                localInsts := (List.range' before.instances.size (s.instances.size - before.instances.size)).reverse ++ s.localInsts
                localPP := (List.range' before.ppUser.length (s.ppUser.length - before.ppUser.length)).reverse ++ s.localPP }
   | "command.def" | "command.axiom" =>

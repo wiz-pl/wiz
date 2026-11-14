@@ -14,15 +14,27 @@ host makes a hole at the expected type, runs `f` with that hole as its only goal
 accepts the term only if `f` closes the goal. -/
 
 /-- `twice t` is elaborated by a Wiz function to `2 * t`. (The numeral `2` is built as
-the term syntax `2`: `term.num` over a `num` node.) -/
-def twicePrelude : String := "import Prelude
-def twoSyntax : Syntax := Syntax.mkNode \"term.num\" (.cons (Syntax.mkNode \"num\" (.cons (.atom \"2\") .nil)) .nil)
+the term syntax `2`: `term.num` over a `num` node.) The registration is left to the
+caller, so that a test can make it `local`. -/
+def twiceDefs : String := "def twoSyntax : Syntax := Syntax.mkNode \"term.num\" (.cons (Syntax.mkNode \"num\" (.cons (.atom \"2\") .nil)) .nil)
 syntax (name := twice) \"twice\" term : term
 def twiceElab : TermElab := fun stx => do
   g ← TacticM.mainGoal;
   TacticM.exact g (Syntax.mkApp (Syntax.mkVar \"Nat.mul\") (.cons twoSyntax (.cons (Syntax.getArg stx 1) .nil)))
-attribute [elab term.twice] twiceElab
 "
+
+def twicePrelude : String := "import Prelude\n" ++ twiceDefs ++
+  "attribute [elab term.twice] twiceElab\n"
+
+/-- Run `main` with the modules `mods` importable (`lib/Prelude.wiz` is `Prelude`): every
+message as `severity: text`, as `msgsLib` does. -/
+def elabExtModules (mods : List (String × String)) (main : String) : IO (Array String) := do
+  let prelude ← IO.FS.readFile "lib/Prelude.wiz"
+  let loader : Name → Option String := fun m =>
+    if m == "Prelude" then some prelude else (mods.find? (·.1 == m)).map (·.2)
+  let s := runFrontend (R := ZeroOneMany) main { loader, trustedModule := Tests.libModule }
+  pure (s.messages.map fun m =>
+    s!"{match m.severity with | .error => "error" | .warning => "warning" | .info => "info"}: {m.text}")
 
 /-- A term elaborator that sees the expected type: `boolOf t` is `t`, but only at `Bool`. -/
 def boolOfPrelude : String := "import Prelude
@@ -95,7 +107,25 @@ def elabExtGroup : Group where
     { name := "attribute [elab] rejects a function of the wrong type", run := fun _ =>
         failsLib ("import Prelude\ndef idNat (n : Nat) : Nat := n\n" ++
           "attribute [elab term.idNat] idNat")
-          "is not a term elaborator (a `Syntax → TacticM Unit`)" }
+          "is not a term elaborator (a `Syntax → TacticM Unit`)" },
+    { name := "the long spelling [term_elab] is accepted", run := fun _ =>
+        okLib ("import Prelude\n" ++ twiceDefs ++
+          "attribute [term_elab term.twice] twiceElab\ndef k : Nat := twice 21\n#eval k") ["42"] },
+    -- a registration reaches the modules an import loads, unless it is `local`
+    { name := "an elab registration reaches the importer", run := fun _ => do
+        let ms ← elabExtModules
+          [("ElabDefs", "import Prelude\n" ++ twiceDefs ++ "attribute [elab term.twice] twiceElab\n")]
+          "import Prelude\nimport ElabDefs\ndef k : Nat := twice 21\n#eval k"
+        checkEq ["info: 42"] ms.toList },
+    { name := "a local elab registration ends with its module", run := fun _ => do
+        let ms ← elabExtModules
+          [("ElabDefs", "import Prelude\n" ++ twiceDefs ++
+            "local attribute [elab term.twice] twiceElab\ndef inside : Nat := twice 21\n")]
+          "import Prelude\nimport ElabDefs\ndef k : Nat := twice 21"
+        let errs := ms.filter (·.startsWith "error:")
+        checkEq 1 errs.size
+        unless (errs[0]!.splitOn "the syntax term.twice has no meaning").length > 1 do
+          throw (IO.userError s!"the local registration was not dropped:\n{errs[0]!}") }
   ]
 
 builtin_initialize registerGroup elabExtGroup
