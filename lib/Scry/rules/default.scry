@@ -1,0 +1,56 @@
+# scry's default rule pack (S4)
+#
+# The canonical text is mirrored by `Scry.demoPackText` in
+# `lib/Scry/RuleExamples.wiz`, which the `scry-taint` tests parse. The format is
+# implemented by `Scry.parseRulePack` (`lib/Scry/Rules.wiz`):
+#
+#   rule ID
+#     kind taint | forbidden
+#     severity error | warning | note
+#     message TEXT
+#     source NAME result | arg K
+#     sanitise NAME result | arg K
+#     sink NAME arg K
+#     call NAME                     (forbidden rules)
+#   end
+#
+# Names match with `*` as a wildcard over the whole callee name.
+
+rule command-injection
+  kind taint
+  severity error
+  message Attacker-controlled data reaches a command interpreter
+  source getenv result
+  source recv result
+  source read arg 1
+  sanitise escape_shell result
+  sanitise sanitize arg 0
+  sink system arg 0
+  sink popen arg 0
+end
+
+rule format-string
+  kind taint
+  severity warning
+  message Attacker-controlled data is used as a format string
+  source getenv result
+  source recv result
+  sanitise escape_shell result
+  sink printf arg 0
+  sink fprintf arg 1
+end
+
+rule gets-overflow
+  kind forbidden
+  severity error
+  message gets cannot bound its write; use fgets with a size
+  call gets
+end
+
+rule strcpy-overflow
+  kind forbidden
+  severity warning
+  message strcpy does not bound the copy; use strlcpy or a checked length
+  call strcpy
+  call strcat
+end
