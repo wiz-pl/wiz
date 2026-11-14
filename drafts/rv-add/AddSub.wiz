@@ -1,0 +1,60 @@
+import Rv.Proofs
+import BitVecAdd
+-- ADD, ADDI and SUB against the canonical multi-cycle core (`wiz -I /workspace/wiz-rv/src`).
+--
+-- The core's ALU adds in 34 bits with the carry in the low bit (`Rv.Core`):
+--
+--   s34 = add (zext1 (cat a 1)) (zext1 (cat b' sub)),   sum = slice 1 32 s34
+--
+-- with `b' = mux sub (not b) b`. For a fixed instruction the `sub` control signal is a
+-- concrete bit, so `lib/BitVecAdd.wiz`'s `BitVec.adc_zero`/`adc_one` (the carry/borrow
+-- bridge) turn the register value into `BitVec.add a b` or `BitVec.sub a b`, which is
+-- what `Rv.alu` gives. That is the same shape as `drafts/rv-shift/SLLI.wiz`: one
+-- `Eq.congrArg` on the register half of `Pf.G`, and `Pf.ok` for the two cycles.
+--
+-- Check: wiz check -I /workspace/wiz-rv/src drafts/rv-add/AddSub.wiz  (77 s uncached)
+
+-- the PC after the execute cycle (`pc + 4`; ADD, ADDI and SUB do not jump)
+def RvAdd.pc4 (a : Arch) : BitVec 32 := BitVec.add a.pc (BitVec.ofNat 32 4)
+
+-- ## ADD
+
+def RvAdd.add_G (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32)
+    (cnt srd : BitVec 5) (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) :
+    Pf.G a (Pf.w (A.add 9 2 3)) 9 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio
+        (Pf.bytes (Pf.w (A.add 9 2 3))) = Pf.spec a (Pf.w (A.add 9 2 3)) 9 :=
+  Eq.congrArg (fun v => (RvAdd.pc4 a, v))
+    (BitVec.adc_zero (Pf.rf a (BitVec.ofNat 4 2)) (Pf.rf a (BitVec.ofNat 4 3)))
+
+def RvAdd.add_ok : Pf.Claim (Pf.w (A.add 9 2 3)) 9 :=
+  fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
+    Pf.ok a (Pf.w (A.add 9 2 3)) 9 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio
+      (RvAdd.add_G a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio) h
+
+-- ## ADDI: `b` is the (concrete) immediate
+
+def RvAdd.addi_G (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32)
+    (cnt srd : BitVec 5) (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) :
+    Pf.G a (Pf.w (A.addi 7 7 1365)) 7 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio
+        (Pf.bytes (Pf.w (A.addi 7 7 1365))) = Pf.spec a (Pf.w (A.addi 7 7 1365)) 7 :=
+  Eq.congrArg (fun v => (RvAdd.pc4 a, v))
+    (BitVec.adc_zero (Pf.rf a (BitVec.ofNat 4 7)) (BitVec.ofNat 32 1365))
+
+def RvAdd.addi_ok : Pf.Claim (Pf.w (A.addi 7 7 1365)) 7 :=
+  fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
+    Pf.ok a (Pf.w (A.addi 7 7 1365)) 7 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio
+      (RvAdd.addi_G a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio) h
+
+-- ## SUB: the carry-in is 1 and the operand is `~b`
+
+def RvAdd.sub_G (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32)
+    (cnt srd : BitVec 5) (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) :
+    Pf.G a (Pf.w (A.sub 5 5 1)) 5 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio
+        (Pf.bytes (Pf.w (A.sub 5 5 1))) = Pf.spec a (Pf.w (A.sub 5 5 1)) 5 :=
+  Eq.congrArg (fun v => (RvAdd.pc4 a, v))
+    (BitVec.adc_one (Pf.rf a (BitVec.ofNat 4 5)) (Pf.rf a (BitVec.ofNat 4 1)))
+
+def RvAdd.sub_ok : Pf.Claim (Pf.w (A.sub 5 5 1)) 5 :=
+  fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
+    Pf.ok a (Pf.w (A.sub 5 5 1)) 5 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio
+      (RvAdd.sub_G a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio) h
