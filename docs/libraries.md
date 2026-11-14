@@ -176,8 +176,9 @@ def top : Circuit In.code Out.code := Circuit.bundled Tx.bundle In.bundle Out.bu
   `NetReg`, `NetPort`. (`<+>` stays.)
 
 Not done: module hierarchy in the Verilog, enumerations at `HwTy`, wire names from `let`
-binders (an elaborator hook, wishful `hdl-let-names`), asynchronous reset, several clocks.
-(Numerals and operators: H14 S2.)
+binders (an elaborator hook, wishful `hdl-let-names`), and a circuit-level
+asynchronous-reset combinator (the netlist has `NetReg.rstAsync`, used by
+`Cdc.resetSync`; several clocks are H14 P2/P3). (Numerals and operators: H14 S2.)
 
 ## H14 S2: operator notation for signals
 
@@ -455,8 +456,9 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
 
 Not done: a general bit-level round-trip lemma for bundles (above), `BitPack` for
 inductive types with fields (a tag and the widest constructor's fields), `!` on signals,
-`match` on an enumeration signal (staged `match`, hdl-staging-research S3), asynchronous
-reset.
+`match` on an enumeration signal (staged `match`, hdl-staging-research S3), and a
+circuit-level asynchronous-reset combinator (H14 P3 has the netlist form
+`NetReg.rstAsync`).
 
 ## Xilinx 7-series pin constraints and the Arty A7 (`Hdl.Xdc`, `Hdl.Arty`)
 
@@ -533,6 +535,11 @@ clock used as data, and data fed to a clock port, stay kind errors. A primitive 
 output can name its domain (`Prim.withOutDom`; `X7.bufgIn d` is a BUFG on `d`'s output),
 so a synchroniser clocked by a BUFG output is in that domain.
 
+Resets are crossings too: a reset is its own domain (`ResetDomain`, declared in
+`Netlist.resets`) and reaches each clock domain through `Cdc.resetSync` (async assert,
+synchronous deassert), with `Cdc.unsafeCross` as the explicit escape. `Clocking.resets`
+puts the reset synchronisers in the wrapper. See H14 P3 below.
+
 Simulation: a primitive without a model is 0 at values and in `Netlist.simulate`.
 `Netlist.unmodelled`/`Circuit.unmodelled` name such instances, and
 `Circuit.runModelled`/`Netlist.simulateModelled` refuse to run a circuit with one. They
@@ -576,47 +583,85 @@ one. The example/tests (group `hdl`, examples/hdl-cdc.wiz) are a `link` crossing
 Verilog, the XDC/PCF text, a BUFG output as a synchroniser's clock (`Prim.withOutDom`),
 and the multi-clock simulation refusal.
 
-## H14 P3: the CDC obligations C1–C8 (`lib/Hdl/Cdc.wiz`)
+## H14 P3: CDC obligations C1–C8 and reset domains (`lib/Hdl/Cdc.wiz`)
 
-The CDC rules of H14 P1/P2 are written down as data. `Cdc.Id` is C1–C8, `Cdc.Obligation`
-records each one's title, status and the code that discharges it, and
+The CDC rules of H14 P1/P2 are written down as data. `Cdc.Id` is C1–C8,
+`Cdc.Obligation` records each one's title, status and the code that discharges it, and
 `Cdc.obligations` is the table in order. A status is `checked` (a netlist rule rejects a
 design that breaks it), `proved`, `tested`, `assumed` (a physical/board assumption) or
 `gap`; `Cdc.statusCount` counts them. `Cdc.checkAll n` runs the netlist-checkable ones
 on a design and `Cdc.failures n` keeps the reports that found something (`Cdc.ok` is the
-boolean form). `Cdc.check` reports C1 (`Netlist.domainErrors`, which now includes the
-single-bit rule `Netlist.syncWidthErrors`) and C3 separately; C8 is discharged by the
-refusal itself, so it never reports a failure.
+boolean form). `Cdc.check` reports C1 (`Netlist.domainErrors`, which includes the
+single-bit and reset-domain rules) and C3 separately; C4's reset-domain errors are the
+same C1 reports (not duplicated), and C8 is discharged by the refusal itself, so neither
+reports a failure.
 
 | # | obligation | status | discharged by |
 |---|---|---|---|
 | C1 | one domain per net, crossings only through declared cells | checked | `Netlist.domainErrors` |
 | C2 | the source holds a value for the synchroniser's window | tested | `Cdc.stable n σ` (a predicate; `Cdc.stable_const` is proved), `Cdc.pulse` |
 | C3 | a synchroniser crosses one bit | checked | `Netlist.syncWidthErrors` |
-| C4 | asynchronous assert, synchronous deassert | tested | `Cdc.resetBridge` (the cell; no reset tree into `NetReg` yet) |
+| C4 | asynchronous assert, synchronous deassert, never used as data | checked | reset-domain rules in `Netlist.domainErrors`; `NetReg.markAsync`/`rstAsync`; `Cdc.resetSync`; `Cdc.resetBridgeOut` laws |
 | C5 | the handshake preserves items and makes progress | tested | `Cdc.hsTx`/`Cdc.hsRx` values, `Cdc.handshakeReqMulti` passes the checks |
 | C6 | P&R is told the clocks are asynchronous | checked | `Xdc.emit` writes `set_clock_groups -asynchronous` |
 | C7 | the synchroniser's MTBF meets the product target | assumed | `Cdc.Mtbf.problems` (the 3τ rule; the number needs `T_0`) |
 | C8 | a multi-clock design is never simulated as single-rate | checked | `Netlist.domainRefusals` |
 
-The cells: `Cdc.sync2` (two destination flops, one bit), `Cdc.pulse` (two flops and an
-edge detector: a level held for two destination edges becomes one destination-cycle
-pulse), `Cdc.resetBridge` (two flops with `arst` asynchronous, so assert is immediate and
-deassert is two edges later), and the four-phase handshake pair `Cdc.hsTx`/`Cdc.hsRx`.
-`Cdc.allVerilog` is the three Verilog modules the cells instantiate
-(`wiz_sync2`, `wiz_cdc_pulse`, `wiz_reset_sync`, all with `async_reg`); append it to the
-emitted design. `Cdc.handshakeReqMulti name src dst` builds the request direction as two
-single-clock parts and one `Cdc.wire`; the `ack` return is the same wire with the domains
-swapped, kept separate because a `Multi` cannot flatten a cyclic wire graph.
+**Reset domains.** A reset is not a clock-domain signal: it has its own domain
+(`ResetDomain`, a named asynchronous reset tree) and is declared in `Netlist.resets`
+(`Multi.resets` for a design; `MultiPart.withResets` names a part's reset inputs). An
+asynchronous reset source (a button, a power-on reset, a PLL's `LOCKED`) reaches a clock
+domain through `Cdc.resetSync dst arst`: two flops in `dst` asynchronously cleared by
+`arst`, so the reset asserts at once and deasserts two `dst` edges after `arst` goes low.
+It is declared with `Prim.declResetSync` (`PrimKind.resetSync`), so
+`Netlist.domainErrors`: accepts its data only from a declared reset domain (not from a
+clock domain); puts its output in `dst`, where it may drive that domain's registers'
+`rst`; rejects a reset source that drives a register directly
+(`the asynchronous reset rst (...) is used by clk2 logic (...): no reset synchroniser`);
+rejects a reset used as data (`... a reset stays in its own domain`); rejects a data
+synchroniser (`Cdc.sync2`) used for a reset; and rejects a reset synchroniser clocked by
+a reset domain. A register whose reset comes from the synchroniser is `rstAsync` and is
+emitted with `always @(posedge clk or posedge rst)`; `Net.rstAsyncErrors` rejects an
+asynchronous-reset form whose reset is not a synchroniser. `Cdc.resetBridgeOut` is the
+two-edge deassert model, with the proved laws `Cdc.resetBridge_assert`,
+`Cdc.resetBridge_hold` and `Cdc.resetBridge_deassert`.
 
-Tests (group `hdl`, examples/hdl-cdc-law.wiz): the status table and counts, the
-stability predicate, a four-bit synchroniser and a four-bit unsynchronised crossing
-rejected (the negative test for C1/C3), the pulse/reset netlists clean, the handshake
-values and its `Multi`, the `set_clock_groups` line, the MTBF rule, and the exact module
-text; a second case runs the modules through Icarus and yosys `synth_ice40` (skipped
-without the tools). Not checked: reconvergence of two synchronised paths, a driver's data
-stability, the reset distribution tree, and an MTBF number. The design note is
-`wiz-notes/hdl-cdc.md`.
+The escape is explicit: `Cdc.unsafeCross dst d` (`Prim.declUnsafe`, `PrimKind.unsafe`)
+has the shape of `Cdc.sync2` but emits `assign q = d;`, and the checker accepts the
+crossing (one clock input, one data domain, no synchroniser claimed). `Cdc.unsafeWire`
+is its `Multi` wire form. There is no other way to skip a reset synchroniser.
+
+`Clocking` gets `resets : List (String × String)`, mapping each core reset input port to
+its asynchronous source. `Verilog.emitTop` emits one `wiz_reset_sync` per core reset port,
+clocked by that port's domain, and connects the core port to the synchronised copy; the
+source becomes a top-level input if it is not a core input, and `Clocking.resetProblems`
+reports a reset port that is not a core input or not on a clock domain.
+
+The other cells: `Cdc.sync2` (two destination flops, one bit), `Cdc.pulse` (two flops and
+an edge detector: a level held for two destination edges becomes one destination-cycle
+pulse), and the four-phase handshake pair `Cdc.hsTx`/`Cdc.hsRx`.
+`Cdc.allVerilog` is the four Verilog modules the cells instantiate (`wiz_sync2`,
+`wiz_cdc_pulse`, `wiz_reset_sync`, `wiz_unsafe_cross`, all with `async_reg` where it
+matters); append it to the emitted design. `Cdc.handshakeReqMulti name src dst` builds
+the request direction as two single-clock parts and one `Cdc.wire`; the `ack` return is
+the same wire with the domains swapped, kept separate because a `Multi` cannot flatten a
+cyclic wire graph.
+
+Tests (group `hdl`): examples/hdl-cdc-law.wiz evaluates the status table and counts (5
+checked, 0 proved, 2 tested, 1 assumed, 0 gap), the stability predicate, a four-bit
+synchroniser and a four-bit unsynchronised crossing rejected (the negative test for
+C1/C3), the pulse/reset netlists clean, the handshake values and its `Multi`, the
+`set_clock_groups` line, the MTBF rule, and the exact module text; a second case runs the
+modules through Icarus and yosys `synth_ice40` (skipped without the tools).
+examples/hdl-cdc-reset.wiz covers the reset cell-level accepted, rejected, escape,
+wrong-clock, data-synchroniser and reset-as-data netlists; a two-domain `Multi` design
+with one synchronised reset per clock domain, its two errors without the synchronisers,
+and the escape; the wrapper's reset synchronisers; the asynchronous-reset-form negative;
+the two-edge bridge laws; and the agreement of the value simulation, `Netlist.simulate`
+and the compiled `simFast` on the single-clock reset netlist (the cell's model is the
+identity). Not checked: reconvergence of two synchronised paths, a driver's data
+stability, and an MTBF number; the multi-clock deassert timing is not simulated (C8). The
+design note is `wiz-notes/hdl-cdc.md`.
 
 ## H14 V1: verified circuit optimisation (`lib/Hdl/Verified.wiz`)
 

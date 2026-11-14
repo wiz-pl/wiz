@@ -3,7 +3,8 @@ import Hdl.Prim
 /-!
 # Hdl.Cdc
 
-Clock-domain crossings (`import Hdl.Cdc`), and the CDC obligations they discharge.
+Clock-domain and reset-domain crossings (`import Hdl.Cdc`), and the CDC obligations they
+discharge.
 
 A `Circuit` has one clock domain: all its registers tick together and `Circuit.run` is
 one step per input. A design with two clocks is a composition of such circuits, each
@@ -13,12 +14,12 @@ clocked by its own domain, wired at the top: `ClockDomain` names the Verilog net
 Data that crosses from one domain into another must go through a synchroniser. `Cdc.sync2
 dst d` is two flops in the destination domain (`dst`'s), the first one sampling the
 asynchronous data `d`; it is a `Prim` declared with `Prim.declSync`, so
-`Netlist.domainErrors` lets its data come from exactly one other domain, puts its output
-in `dst`'s domain, and rejects every other crossing (a register sampling another domain,
-a combinational path that mixes domains, a memory written from another domain, ...).
-`Netlist.syncWidthErrors` (part of `domainErrors`) additionally rejects a synchroniser
-whose data is wider than one bit: a bus needs a handshake or a FIFO, not a bank of
-two-flop synchronisers.
+`Netlist.domainErrors` lets its data come from exactly one other clock domain, puts its
+output in `dst`'s domain, and rejects every other crossing (a register sampling another
+domain, a combinational path that mixes domains, a memory written from another domain,
+...). `Netlist.syncWidthErrors` (part of `domainErrors`) additionally rejects a
+synchroniser whose data is wider than one bit: a bus needs a handshake or a FIFO, not a
+bank of two-flop synchronisers.
 
 ```
 def d2 : ClockDomain := ClockDomain.named "clk2"
@@ -34,6 +35,34 @@ event schedule, which `Netlist.simulate` does not have. `Cdc.verilog` is the Ver
 module the emitted instance refers to; append `Cdc.allVerilog` to the module's file (the
 `async_reg` attributes keep the flops together in synthesis).
 
+A reset is **not** a clock-domain signal: it has its own domain (`ResetDomain`, declared
+in `Netlist.resets`). An asynchronous reset source (a button, a power-on reset, a PLL's
+`LOCKED`) must reach each clock domain through a **reset synchroniser**:
+`Cdc.resetSync dst arst` is two flops in `dst` with an asynchronous reset input, so the
+reset asserts as soon as `arst` does and deasserts two `dst` edges after it goes low.
+`Netlist.domainErrors` rejects a reset source that drives a register directly
+(`the asynchronous reset rst (...) is used by clk logic (...): no reset synchroniser`),
+a reset used as data, a data synchroniser used for a reset, and a reset synchroniser
+whose data is a clock-domain signal. A register whose reset comes from a reset
+synchroniser is emitted with an asynchronous reset form
+(`always @(posedge clk or posedge rst)`), so the assert reaches the register file without
+a clock edge. `Cdc.resetBridgeOut` is the cell's two-edge deassert model, with the laws
+`Cdc.resetBridge_assert`/`Cdc.resetBridge_deassert`.
+
+`Cdc.unsafeCross dst d` is the explicit escape: a crossing the design declares on
+purpose (the signal is already stable, or the crossing was reviewed by hand). It has the
+same shape as `Cdc.sync2` but emits a plain wire, and the checker accepts it. Use it
+sparingly; it is the only way to cross a reset without a reset synchroniser.
+
+The cells have no faithful behavioural model: a model is one total function of its
+inputs, so a two-flop delay can only be written as the identity. `Netlist.domainRefusals`
+refuses a multi-clock netlist (a two-clock design needs an event schedule, which
+`Netlist.simulate` does not have), so the checked runners never report those numbers as
+a timing claim. The reset synchroniser's model is the identity too (the asynchronous
+assert passes through, the two-edge deassert is not modelled); the `hdl` group compares it
+with the value simulation on a single-clock netlist, which is a statement about the
+netlist, not about the flops.
+
 ## Obligations C1–C8
 
 `Cdc.Obligation` writes down the eight obligations of the CDC design note
@@ -47,8 +76,8 @@ obligations usable:
 * `Cdc.sync2` — a single bit, two destination flops (C1, C3);
 * `Cdc.pulse` — a level held for two destination edges becomes one destination-cycle
   pulse (a two-flop synchroniser and an edge detector; C2, C3);
-* `Cdc.resetBridge` — asynchronous assert, synchronous deassert, two destination flops
-  (C4; the reset tree itself is not emitted yet);
+* `Cdc.resetSync` — asynchronous assert, synchronous deassert, two destination flops
+  (C4; a register driven by it is emitted with an asynchronous reset);
 * `Cdc.handshakeReqMulti` — a four-phase request/acknowledge pair of single-clock
   circuits (`Cdc.hsTx`, `Cdc.hsRx`) with the `req` wire (C5; a bus may cross beside it
   while `req` is held). Its `Multi` passes `Netlist.domainErrors`; the protocol is
@@ -107,35 +136,108 @@ def Cdc.pulseVerilog : String :=
   <+> "  always @(posedge clk) begin\n    q0 <= d;\n    q1 <= q0;\n  end\n"
   <+> "  assign q = q0 ^ q1;\nendmodule\n"
 
---------------------------------------------------------------------------------
--- Reset bridge (asynchronous assert, synchronous deassert).
+---------------------------------------------------------------------------------------
+-- (D5) Resets: asynchronous assert, synchronous deassert, per destination clock domain.
 
-/-- The reset bridge's input: the destination clock and the asynchronous reset. -/
-def Cdc.resetBridgeIn : HwTy := HwTy.prod HwTy.clock HwTy.bit
-/-- `wiz_reset_sync` (`Prim.declSync`): two destination flops with `arst` asynchronous. -/
-def Cdc.resetBridgeP : Prim Cdc.resetBridgeIn HwTy.bit :=
-  Prim.declSync "wiz_reset_sync" .nil (.cons "clk" (.cons "arst" .nil)) (.cons "rst" .nil) .none
-/-- `Cdc.resetBridge dst arst`: an asynchronous reset asserted at once, deasserted two
-`dst` edges later. The reset tree that distributes `rst` to the registers is not emitted
-yet (`NetReg` has no asynchronous reset form), so this is the cell, not the whole of C4. -/
-def Cdc.resetBridge {r : HwTy → Type} [Hw r] (dst : r HwTy.clock) (arst : r HwTy.bit) : r HwTy.bit :=
-  Hw.prim Cdc.resetBridgeP (Hw.pair dst arst)
-/-- A top-level `Multi` wire through `Cdc.resetBridge`. -/
+/-- A reset domain for the net `name` (a named asynchronous reset tree). -/
+def Cdc.resetDomain (name : String) : ResetDomain := ResetDomain.named name
+/-- The reset synchroniser's input: the destination clock and the asynchronous reset. -/
+def Cdc.resetSyncIn : HwTy := HwTy.prod HwTy.clock HwTy.bit
+/-- `wiz_reset_sync`: two flops in the destination clock's domain, asynchronously cleared
+by the reset source (`Prim.declResetSync`). Its output is the domain's reset: high
+immediately when the source is high, low two clocks after it goes low. -/
+def Cdc.resetSyncP : Prim Cdc.resetSyncIn HwTy.bit :=
+  Prim.declResetSync "wiz_reset_sync" .nil (.cons "clk" (.cons "arst" .nil)) (.cons "rst" .nil)
+    (Option.some (fun (x : HwTy.El Cdc.resetSyncIn) => x.2))
+/-- `Cdc.resetSync dst arst`: the asynchronous reset `arst` (a `ResetDomain` source)
+synchronised into clock domain `dst` (async assert, synchronous deassert). Use the result
+as the `rst` of `dst`'s registers; it is in `dst`'s domain, so the checker accepts it only
+for those. -/
+def Cdc.resetSync {r : HwTy → Type} [Hw r] (dst : r HwTy.clock) (arst : r HwTy.bit) : r HwTy.bit :=
+  Hw.prim Cdc.resetSyncP (Hw.pair dst arst)
+/-- A top-level `Multi` wire through `Cdc.resetSync` into domain `dst`: the destination
+part's reset input `dstName` is the synchronised source `src` (an asynchronous reset
+domain of the design). -/
 def Cdc.resetWire (dst : ClockDomain) (src dstName : String) : MultiWire :=
-  MultiWire.through (Prim.erase Cdc.resetBridgeP) (.cons dst.name (.cons src .nil)) (.cons dstName .nil)
-/-- The Verilog module `wiz_reset_sync`. -/
+  MultiWire.through (Prim.erase Cdc.resetSyncP) (.cons dst.name (.cons src .nil)) (.cons dstName .nil)
+/-- The Verilog module `wiz_reset_sync` that `Cdc.resetSyncP`'s instances refer to. -/
 def Cdc.resetVerilog : String :=
   "module wiz_reset_sync(input clk, input arst, output rst);\n"
-  <+> "  (* async_reg = \"true\" *) reg r1;\n"
-  <+> "  (* async_reg = \"true\" *) reg r2;\n"
+  <+> "  (* async_reg = \"true\" *) reg s0;\n"
+  <+> "  (* async_reg = \"true\" *) reg s1;\n"
   <+> "  always @(posedge clk or posedge arst) begin\n"
-  <+> "    if (arst) begin r1 <= 1'b1; r2 <= 1'b1; end\n"
-  <+> "    else begin r1 <= 1'b0; r2 <= r1; end\n"
+  <+> "    if (arst) begin s0 <= 1'b1; s1 <= 1'b1; end\n"
+  <+> "    else begin s0 <= 1'b0; s1 <= s0; end\n"
   <+> "  end\n"
-  <+> "  assign rst = r2;\nendmodule\n"
+  <+> "  assign rst = s1;\nendmodule\n"
+
+---------------------------------------------------------------------------------------
+-- The reset bridge's laws (C4): asynchronous assert, synchronous deassert.
+
+/-- The reset synchroniser's output model, from cleared flops, over the asynchronous
+source's trace: `arst t` at time 0; after that `arst t or arst (t-1)`. The assert is
+immediate; the deassert waits until two consecutive low samples (the two destination
+flops). This is the timing law the cell's Verilog implements; the `Prim` model is the
+identity (a single total function cannot express the two-edge delay). -/
+def Cdc.resetBridgeOut (arst : Trace Bool) : Trace Bool := fun (t : Nat) => match t with
+  | .zero => arst 0
+  | .succ u => Bool.or (arst (Nat.succ u)) (arst u)
+
+/-- `Bool.or a true = true` (the second argument is enough). -/
+def Cdc.boolOrTrue (a : Bool) : Bool.or a .true = .true := match a with
+  | .true => rfl
+  | .false => rfl
+
+/-- (law) An asserted asynchronous reset is high in the same cycle: the assert does not
+wait for a clock edge. -/
+def Cdc.resetBridge_assert (arst : Trace Bool) : (t : Nat) → arst t = .true →
+    Cdc.resetBridgeOut arst t = .true
+  | .zero, h => h
+  | .succ u, h => Eq.substProp (fun (b : Bool) => Bool.or b (arst u) = .true) (Eq.symm h) rfl
+
+/-- (law) A high reset holds for the next destination edge (the source is not sampled
+away while it is asserted). -/
+def Cdc.resetBridge_hold (arst : Trace Bool) (t : Nat) (h : arst t = .true) :
+    Cdc.resetBridgeOut arst (Nat.succ t) = .true :=
+  Eq.substProp (fun (b : Bool) => Bool.or (arst (Nat.succ t)) b = .true) (Eq.symm h)
+    (Cdc.boolOrTrue (arst (Nat.succ t)))
+
+/-- (law) Two consecutive low samples deassert: the output is low at `t+1` when both
+`arst t` and `arst (t+1)` are low. One low cycle alone does not deassert (the
+`Cdc.resetVerilog` two-flop shift). -/
+def Cdc.resetBridge_deassert (arst : Trace Bool) (t : Nat)
+    (h0 : arst t = .false) (h1 : arst (Nat.succ t) = .false) :
+    Cdc.resetBridgeOut arst (Nat.succ t) = .false :=
+  Eq.substProp (fun (b : Bool) => Bool.or b (arst t) = .false) (Eq.symm h1)
+    (Eq.substProp (fun (b : Bool) => Bool.or .false b = .false) (Eq.symm h0) rfl)
+
+---------------------------------------------------------------------------------------
+-- The explicit escape: a crossing with no synchroniser, declared on purpose.
+
+/-- The unsafe crossing's input: the destination clock and the data. -/
+def Cdc.unsafeCrossIn : HwTy := HwTy.prod HwTy.clock HwTy.bit
+/-- `wiz_unsafe_cross`: a plain wire; the design declares that this asynchronous crossing
+is deliberate (`Prim.declUnsafe`). -/
+def Cdc.unsafeCrossP : Prim Cdc.unsafeCrossIn HwTy.bit :=
+  Prim.declUnsafe "wiz_unsafe_cross" .nil (.cons "clk" (.cons "d" .nil)) (.cons "q" .nil)
+    (Option.some (fun (x : HwTy.El Cdc.unsafeCrossIn) => x.2))
+/-- `Cdc.unsafeCross dst d`: `d` from another domain without a synchroniser, explicitly.
+The result is in `dst`'s domain; `Netlist.domainErrors` does not report this crossing
+(that is the escape). -/
+def Cdc.unsafeCross {r : HwTy → Type} [Hw r] (dst : r HwTy.clock) (d : r HwTy.bit) : r HwTy.bit :=
+  Hw.prim Cdc.unsafeCrossP (Hw.pair dst d)
+/-- A top-level `Multi` wire through `Cdc.unsafeCross`: the escape for a `link` crossing. -/
+def Cdc.unsafeWire (dst : ClockDomain) (src dstName : String) : MultiWire :=
+  MultiWire.through (Prim.erase Cdc.unsafeCrossP) (.cons dst.name (.cons src .nil)) (.cons dstName .nil)
+/-- The Verilog module `wiz_unsafe_cross` that `Cdc.unsafeCrossP`'s instances refer to. -/
+def Cdc.unsafeVerilog : String :=
+  "module wiz_unsafe_cross(input clk, input d, output q);\n"
+  <+> "  // deliberate asynchronous crossing: no synchroniser (Cdc.unsafeCross)\n"
+  <+> "  assign q = d;\nendmodule\n"
 
 /-- Every Verilog module the CDC cells instantiate: append this to the emitted design. -/
-def Cdc.allVerilog : String := Cdc.verilog <+> Cdc.pulseVerilog <+> Cdc.resetVerilog
+def Cdc.allVerilog : String :=
+  Cdc.verilog <+> Cdc.pulseVerilog <+> Cdc.resetVerilog <+> Cdc.unsafeVerilog
 
 --------------------------------------------------------------------------------
 -- Four-phase handshake (two single-clock circuits and two synchronised wires).
@@ -194,7 +296,7 @@ def Cdc.handshakeReqMulti (name : String) (src dst : ClockDomain) : Multi :=
               (.cons "go" (.cons "ack_in" .nil)) (.cons "req" (.cons "tick" .nil)))
       (.cons (MultiPart.circuit "rx" dst Cdc.hsRx
                 (.cons "req" .nil) (.cons "ack" (.cons "done" .nil))) .nil))
-    (.cons (Cdc.wire dst "req" "req") .nil)
+    (.cons (Cdc.wire dst "req" "req") .nil) List.nil
 
 --------------------------------------------------------------------------------
 -- Data stability (C2).
@@ -320,9 +422,9 @@ def Cdc.obligation : Cdc.Id → Cdc.Obligation
   | .singleBit => Cdc.Obligation.mk .singleBit "single bit: a synchroniser crosses one bit; a bus needs a handshake or a FIFO" .checked
       "Netlist.syncWidthErrors"
       "rejects a sync cell whose data leaf is wider than one bit; the handshake pair is the bus crossing (C5)"
-  | .reset => Cdc.Obligation.mk .reset "reset: asynchronous assert, synchronous deassert, never used as data" .tested
-      "Cdc.resetBridge"
-      "the cell's Verilog is async-assert/sync-deassert; the reset tree into NetReg is not emitted and reset domains are not separate on this branch (the hdl-d5 ResetDomain rules are the full C4)"
+  | .reset => Cdc.Obligation.mk .reset "reset: asynchronous assert, synchronous deassert, never used as data" .checked
+      "Netlist.domainErrors (reset rules); NetReg.markAsync; Cdc.resetBridgeOut"
+      "a reset is its own domain: a reset source on a register needs Cdc.resetSync, a reset used as data is rejected, and a register driven by a reset synchroniser is emitted with an asynchronous reset. Cdc.resetBridge_assert/hold/deassert are the two-edge laws of the bridge; the multi-clock deassert timing is not simulated (C8)"
   | .protocol => Cdc.Obligation.mk .protocol "protocol: a handshake/FIFO preserves order, never duplicates or loses an item" .tested
       "Cdc.hsTx, Cdc.hsRx, Cdc.handshakeMulti"
       "the four-phase pair is exercised by value traces and its Multi passes the netlist checks; there is no refinement theorem against a queue spec"
@@ -363,10 +465,12 @@ def Cdc.Report.ok (r : Cdc.Report) : Bool := match r.errors with
   | _ => .false
 
 /-- Run the netlist-checkable obligations on `n`. C1 is `Netlist.domainErrors` (which
-includes the single-bit rule); C3 is reported separately for a precise message. C2, C4,
-C5 and C7 are not decidable from a netlist alone; C6 is a constraint text (`Xdc.emit`),
-not a netlist property. C8 is discharged by the refusal itself (`Netlist.domainRefusals`):
-a multi-domain netlist that the checked runner will not simulate is honest, so there is
+includes the single-bit and reset-domain rules); C3 is reported separately for a precise
+message, and C4's reset-domain errors are those C1 reports (the reset rules are not
+duplicated here; the bridge itself is the `Cdc.resetBridgeOut` law). C2, C5 and C7 are
+not decidable from a netlist alone; C6 is a constraint text (`Xdc.emit`), not a netlist
+property. C8 is discharged by the refusal itself (`Netlist.domainRefusals`): a
+multi-domain netlist that the checked runner will not simulate is honest, so there is
 nothing to report; the example checks the refusal directly. -/
 def Cdc.check (n : Netlist) (i : Cdc.Id) : Cdc.Report :=
   Cdc.Report.mk i (match i with

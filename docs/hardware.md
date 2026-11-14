@@ -123,6 +123,13 @@ Memories (`HwTy.mem`) become Verilog arrays,
 which yosys maps to the iCE40's block RAM; at values a memory is a function, so a proof
 about it is pointwise (`HwTy.El.memRead_write_miss`).
 
+Clock domains and resets: a design with two clocks is a composition of single-clock
+circuits wired at the top (`Multi`/`Clocking`), and text moves between domains only
+through a synchroniser (`Cdc.sync2`) or an explicit escape (`Cdc.unsafeCross`); a reset is
+its own domain and reaches each clock domain through `Cdc.resetSync` (async assert,
+synchronous deassert), which `Netlist.domainErrors` requires. `Clocking.resets` puts the
+reset synchronisers in the wrapper. See `docs/libraries.md` H14 P1–P3.
+
 ## Running examples
 
 * `examples/hardware-tour.wiz`: this page.
@@ -131,6 +138,9 @@ about it is pointwise (`HwTy.El.memRead_write_miss`).
 * `examples/hdl-mem.wiz`: a RAM with a registered read, a ROM, block RAM inference.
 * `examples/hdl-temporal.wiz` (PR #146): a UART's line is idle-high for ever, the
   loopback delivers every byte, a valid/ready buffer is stable and live.
+* `examples/hdl-cdc.wiz`: clock-domain crossings (`Cdc.sync2`, `Multi`, `Clocking`).
+* `examples/hdl-cdc-reset.wiz`: reset crossings (`Cdc.resetSync`, `Cdc.unsafeCross`,
+  `Clocking.resets`).
 * The iCEstick project (UART, toy CPU) uses all of the above; its findings drove them.
 
 Design notes: `wiz-notes/cohesion-hardware.md`.

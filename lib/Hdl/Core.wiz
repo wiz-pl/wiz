@@ -36,6 +36,12 @@ whose step is such code; its state is the registers.
   another must pass a synchroniser (`Prim.declSync`, `Hdl.Cdc`'s `Cdc.sync2`), and
   `Netlist.domainErrors` rejects every other crossing. A synchroniser's data is one bit
   (`Netlist.syncWidthErrors`, part of `domainErrors`): a bus needs a handshake or a FIFO.
+* **Reset domains**: a reset is its own domain (`ResetDomain`, `Netlist.resets`), and
+  reaches a clock domain through a reset synchroniser (`Prim.declResetSync`,
+  `Cdc.resetSync`: async assert, synchronous deassert); the register it drives is emitted
+  with an asynchronous reset form. `Cdc.unsafeCross` (`Prim.declUnsafe`) is the explicit
+  escape. A reset used as data, or a reset source on a register directly, is a domain
+  error.
 * **Bundles**: structures of signals (`structure Tx (r : HwTy → Type) where line : r Bit …`)
   are `Bundle`s: `deriving Bundle` gives their code and the conversions, and field access
   is the ordinary `s.line`.
@@ -248,20 +254,46 @@ def ClockDomain.sys : ClockDomain := ClockDomain.mk "clk" 10000
 `Clocking`'s wrapper). -/
 def ClockDomain.named (name : String) : ClockDomain := ClockDomain.mk name 0
 
+-- (D5) Reset domains: an asynchronous reset tree, and the synchronised copies of it.
+/-- A reset domain: an asynchronous reset tree (active high, asserted asynchronously),
+named by the top-level net that carries it (`rst`). A register takes a reset from its own
+clock domain only: a reset that starts in another domain (the asynchronous source) must
+pass `Cdc.resetSync` (async assert, synchronous deassert) in the destination clock domain.
+A reset is not a clock-domain signal: it may not be used as data, and a clock-domain signal
+may not be used as an asynchronous reset (that is what `Cdc.unsafeCross` is for, when it is
+deliberate). The netlist declares its reset trees in `Netlist.resets`. -/
+structure ResetDomain where
+  name : String
+/-- A reset domain for the net `name`. -/
+def ResetDomain.named (name : String) : ResetDomain := ResetDomain.mk name
+
 -- A primitive (a vendor cell, a black box: `lib/Hdl/Prim.wiz`): module name, parameters,
 -- port names (one per leaf of `i`, then of `o`), and a behavioural model at values, if any.
+/-- The kind of a primitive: ordinary, a data synchroniser (`Prim.declSync`), a reset
+synchroniser (`Prim.declResetSync`: async assert, synchronous deassert), or an explicit
+unsafe crossing (`Prim.declUnsafe`: the design deliberately skips a synchroniser). -/
+inductive PrimKind where
+  | normal
+  | sync
+  | resetSync
+  | unsafe
+/-- Whether the cell crosses a domain boundary (and so has the crossing cell's rules). -/
+def PrimKind.crossing : PrimKind → Bool
+  | .normal => .false
+  | _ => .true
+
 /-- A primitive (a vendor cell, a black box: `lib/Hdl/Prim.wiz`): its module name, its
 parameters (names and Verilog text), its port names (one per leaf of `i`, then of `o`),
-a behavioural model at values, if it has one, and whether it is a synchroniser
-(`Prim.declSync`: a cell that may take its data from another clock domain, and whose
-output is in its clock's domain). -/
+a behavioural model at values, if it has one, its `kind` (a crossing cell's output is in
+its clock input's domain, and `Netlist.domainErrors` applies that cell's rules), and its
+clock outputs' domains. -/
 structure Prim (i o : HwTy) where
   name : String
   params : List (String × String)   -- Verilog text (`PrimParam.pairs` writes it)
   ins : List String
   outs : List String
   model : Option (HwTy.El i → HwTy.El o)
-  sync : Bool                       -- a clock-domain crossing cell (`Prim.declSync`)
+  kind : PrimKind                  -- `.sync`, `.resetSync`, `.unsafe`, or `.normal`
   outDom : List (Option String)     -- one per output leaf: the clock domain of a clock output
 
 
@@ -679,9 +711,9 @@ def HwTy.leafKinds (t : HwTy) : List PortKind := HwTy.kindsAux PortKind.data t
 /-- A primitive instance as the netlist keeps it: the Verilog module, its parameters
 (names and Verilog text), its port names (one per leaf, inputs then outputs), the
 leaves' kinds, the outputs' widths, the behavioural model on leaves (input values ↦
-output values), when the declaration has one, and whether it is a synchroniser
-(`Prim.sync`: its output is in its clock input's domain, and the domain checker lets its
-data come from one other domain). -/
+output values), when the declaration has one, and the cell's `kind` (a crossing cell's
+output is in its clock input's domain, and `Netlist.domainErrors` applies that cell's
+rules). -/
 structure NetPrim where
   name : String
   params : List (String × String)
@@ -691,7 +723,7 @@ structure NetPrim where
   outKinds : List PortKind
   outWidths : List Nat
   model : Option (List Nat → List Nat)
-  sync : Bool
+  kind : PrimKind
   outDom : List (Option String)   -- one per output leaf: a clock output's domain
 
 -- (`inst p`: one node of width 0 per instance, whose arguments are the instance's
@@ -738,15 +770,17 @@ structure NetNode where
   args : List Nat
 
 /-- A register: its name, width and initial value; `next` is the node it loads; with `rst`,
-a one-bit node that makes it load `init` instead (synchronous reset, before the
-enable); with `en`, a one-bit node without which it keeps its value; `dom` is its clock
-domain's net (`clk` for the implicit clock). -/
+a one-bit node that makes it load `init` instead (before the enable); with `rstAsync`,
+that reset is asynchronous (the `always` block has `or posedge rst`, the reset
+synchroniser form `Cdc.resetSync`); with `en`, a one-bit node without which it keeps its
+value; `dom` is its clock domain's net (`clk` for the implicit clock). -/
 structure NetReg where
   name : String
   width : Nat
   init : Nat
   next : Nat
   rst : Option Nat
+  rstAsync : Bool
   en : Option Nat
   dom : String
 
@@ -773,8 +807,10 @@ structure NetPort where
 /-- A netlist: flat, widths concrete, one node per bit-vector operation (or primitive
 instance). Node `k` is the `k`-th of `nodes` and its arguments refer to earlier nodes;
 `hints` are wire names (from `Hw.label`); `clocks` are its clock domains (one `always`
-block each; a single-clock design has just `ClockDomain.sys`). `Circuit.netlist` makes
-one, `Netlist.simulate` runs it and `Verilog.emit` prints it. -/
+block each; a single-clock design has just `ClockDomain.sys`) and `resets` its
+asynchronous reset trees (`ResetDomain`: a reset source that reaches a clock domain
+through `Cdc.resetSync`). `Circuit.netlist` makes one, `Netlist.simulate` runs it and
+`Verilog.emit` prints it. -/
 structure Netlist where
   name : String
   nodes : List NetNode       -- node k is the k-th; arguments refer to earlier nodes
@@ -784,6 +820,7 @@ structure Netlist where
   hints : List (Nat × String) -- wire names (`Hw.label`)
   mems : List NetMem         -- memory k is the k-th; read by `memRead k` nodes
   clocks : List ClockDomain  -- one `always` block per domain
+  resets : List ResetDomain  -- asynchronous reset trees (D5)
   errors : List String       -- what the netlist cannot express (a memory used wrongly)
 
 /-- Hash-consing keys: an operation as a code and its payload. With the width and the
@@ -1221,7 +1258,7 @@ def Prim.erase {ω i o : HwTy} (p : Prim i o) : NetPrim :=
     (match p.model with
     | .none => Option.none
     | .some f => Option.some (fun (ls : List Nat) => HwTy.leaves o (f (HwTy.ofLeaves i ls))))
-    p.sync p.outDom
+    p.kind p.outDom
 
 -- What is wrong with a declaration: port names that do not match the leaves.
 /-- What is wrong with a primitive declaration: port names that do not match the leaves. -/
@@ -1548,6 +1585,56 @@ def Netlist.count (p : NetOp → Bool) (n : Netlist) : Nat :=
 /-- A dummy node (a default for lookups). -/
 def NetNode.none : NetNode := NetNode.mk (NetOp.const 0) 0 List.nil
 
+/-- Whether node `k` is an output of a reset synchroniser (`PrimKind.resetSync`): its
+register is emitted with an asynchronous reset (`always @(posedge clk or posedge rst)`). -/
+def Net.resetSyncOut (nodes : Hdl.Vec NetNode) (k : Nat) : Bool :=
+  let ω nd := Hdl.Vec.get NetNode.none nodes k;
+  match nd.op, nd.args with
+  | .instOut _ _, .cons i _ => (match (Hdl.Vec.get NetNode.none nodes i).op with
+      | .inst p => match p.kind with
+        | .resetSync => .true
+        | _ => .false
+      | _ => .false)
+  | _, _ => .false
+
+/-- The register with `rstAsync` set when its reset node comes from a reset synchroniser:
+`Cdc.resetSync` drives a destination register's asynchronous reset, not a synchronous
+one. -/
+def NetReg.markAsync (nodes : Hdl.Vec NetNode) (r : NetReg) : NetReg :=
+  match r.rst with
+  | .some k => match Net.resetSyncOut nodes k with
+    | .true => NetReg.mk r.name r.width r.init r.next r.rst .true r.en r.dom
+    | .false => r
+  | .none => r
+
+/-- The register with the asynchronous reset form (`rstAsync = true`). -/
+def NetReg.withAsync (r : NetReg) : NetReg :=
+  NetReg.mk r.name r.width r.init r.next r.rst .true r.en r.dom
+
+/-- Whether input port `p` is node `k` and named in `names`. -/
+def NetPort.isNodeNamed (names : List String) (k : Nat) (p : NetPort) : Bool :=
+  match Nat.beq p.node k with
+  | .true => Hdl.member p.name names
+  | .false => .false
+/-- Whether node `k` is one of the named input ports. -/
+def Net.portNodeNamed (names : List String) (k : Nat) : List NetPort → Bool
+  | .nil => .false
+  | .cons p ps => match NetPort.isNodeNamed names k p with
+    | .true => .true
+    | .false => Net.portNodeNamed names k ps
+
+/-- Mark the registers whose reset is one of the named input ports as asynchronous: the
+`Clocking` wrapper synchronises such a reset outside the core (`Clocking.resets`), so the
+core's registers take it on an asynchronous reset pin. -/
+def Netlist.markAsyncInputs (n : Netlist) (names : List String) : Netlist :=
+  Netlist.mk n.name n.nodes
+    (Hdl.map (fun (r : NetReg) => match r.rst with
+      | .some k => match Net.portNodeNamed names k n.inputs with
+        | .true => NetReg.withAsync r
+        | .false => r
+      | .none => r) n.regs)
+    n.inputs n.outputs n.hints n.mems n.clocks n.resets n.errors
+
 /-- A `hold en x cur` in front of the register reading `cur`: an enable `en`, and `x` as the
 next value; otherwise no enable. -/
 def Net.peelEn (nodes : Hdl.Vec NetNode) (cur x : Nat) : Option Nat × Nat :=
@@ -1572,7 +1659,7 @@ values, with resets and enables peeled off; all on clock domain `dom`. -/
 def Net.regs (nodes : Hdl.Vec NetNode) (dom : String) : List String → List Nat → List Nat → List Nat → List Nat → List NetReg
   | .cons nm nms, .cons w ws, .cons v vs, .cons c cs, .cons x xs =>
     let ω p := Net.peel nodes c v x;
-    .cons (NetReg.mk nm w v p.2.2 p.1 p.2.1 dom) (Net.regs nodes dom nms ws vs cs xs)
+    .cons (NetReg.mk nm w v p.2.2 p.1 .false p.2.1 dom) (Net.regs nodes dom nms ws vs cs xs)
   | _, _, _, _, _ => .nil
 
 /-- Ports from their names, widths and nodes, in clock domain `dom`. -/
@@ -1629,7 +1716,7 @@ def Net.mapOpt (m : HTrie Nat) : Option Nat → Option Nat
   | .some k => .some (Net.mapId m k)
 /-- A register with its nodes renumbered. -/
 def NetReg.remap (m : HTrie Nat) (r : NetReg) : NetReg :=
-  NetReg.mk r.name r.width r.init (Net.mapId m r.next) (Net.mapOpt m r.rst) (Net.mapOpt m r.en) r.dom
+  NetReg.mk r.name r.width r.init (Net.mapId m r.next) (Net.mapOpt m r.rst) r.rstAsync (Net.mapOpt m r.en) r.dom
 /-- A port with its node renumbered. -/
 def NetPort.remap (m : HTrie Nat) (p : NetPort) : NetPort := NetPort.mk p.name p.width (Net.mapId m p.node) p.dom
 /-- The wire names of live nodes, renumbered. -/
@@ -1677,9 +1764,10 @@ def Net.finish (name : String) (clocks : List ClockDomain) (dom : String) (s : N
       (List.append (NetReg.readsAll regs) (NetMem.readsAll mems))));
   let ω live := Net.liveAux s.nodes (s.next - 1) (Hdl.Set.addAll roots HTrie.tip) List.nil;
   let ω r := Net.renumber (Hdl.reverse s.nodes) live 0 0 HTrie.tip List.nil;
-  Netlist.mk name r.1 (Hdl.map (NetReg.remap r.2) regs) (Hdl.map (NetPort.remap r.2) ins)
+  let ω mark : NetReg → NetReg := fun (x : NetReg) => NetReg.markAsync (Hdl.Vec.ofList r.1) (NetReg.remap r.2 x);
+  Netlist.mk name r.1 (Hdl.map mark regs) (Hdl.map (NetPort.remap r.2) ins)
     (Hdl.map (NetPort.remap r.2) outs) (Net.remapHints (Net.liveSet live 0 HTrie.tip) r.2 (Hdl.reverse s.hints))
-    (Hdl.map (fun (m : NetMem) => NetMem.withDom dom (NetMem.remap r.2 m)) mems) clocks (Hdl.reverse s.errs)
+    (Hdl.map (fun (m : NetMem) => NetMem.withDom dom (NetMem.remap r.2 m)) mems) clocks List.nil (Hdl.reverse s.errs)
 
 ------------------------------------------------------------------------------------
 -- Circuits: Mealy machines whose step is tagless-final code. The only way to make
@@ -2152,7 +2240,7 @@ def Netlist.kindErrors (n : Netlist) (ins outs : List PortKind) : List String :=
     (List.append (Net.kindMems cx n.mems) (Net.kindOuts cx outs n.outputs)))
 /-- The netlist with more errors. -/
 def Netlist.withErrors (n : Netlist) (es : List String) : Netlist :=
-  Netlist.mk n.name n.nodes n.regs n.inputs n.outputs n.hints n.mems n.clocks (List.append n.errors es)
+  Netlist.mk n.name n.nodes n.regs n.inputs n.outputs n.hints n.mems n.clocks n.resets (List.append n.errors es)
 
 ------------------------------------------------------------------------------------
 -- (C2) Clock domains: which domain each node's value is in, and the crossings that no
@@ -2198,23 +2286,25 @@ def Net.otherDom (ds : Hdl.Vec (List String)) (d : String) : List Nat → Option
       | .true => Net.otherDom ds d as
       | .false => .some a
 
-/-- The domain checker's context: the netlist's nodes, registers, memories, inputs and the
-inputs' names. -/
+/-- The domain checker's context: the netlist's nodes, registers, memories, inputs, the
+inputs' names, and the names of its clock and reset domains. -/
 structure Net.DomCx where
   nodes : Hdl.Vec NetNode
   regs : Hdl.Vec NetReg
   mems : Hdl.Vec NetMem
   ins : Hdl.Vec NetPort
   inNames : List String
+  resets : List String
 /-- The domain checker's context of a netlist. -/
 def Net.domCx (n : Netlist) : Net.DomCx :=
   Net.DomCx.mk (Hdl.Vec.ofList n.nodes) (Hdl.Vec.ofList n.regs) (Hdl.Vec.ofList n.mems)
     (Hdl.Vec.ofList n.inputs) (Hdl.map (fun (p : NetPort) => p.name) n.inputs)
+    (Hdl.map (fun (r : ResetDomain) => r.name) n.resets)
 /-- Node `k`'s arguments. -/
 def Net.DomCx.args (cx : Net.DomCx) (k : Nat) : List Nat := (Hdl.Vec.get NetNode.none cx.nodes k).args
 /-- Register `r`, or a dummy past the end. -/
 def Net.DomCx.reg (cx : Net.DomCx) (r : Nat) : NetReg :=
-  Hdl.Vec.get (NetReg.mk "?" 0 0 0 .none .none "?") cx.regs r
+  Hdl.Vec.get (NetReg.mk "?" 0 0 0 .none .false .none "?") cx.regs r
 /-- Memory `m`, or a dummy past the end. -/
 def Net.DomCx.mem (cx : Net.DomCx) (m : Nat) : NetMem :=
   Hdl.Vec.get (NetMem.mk "?" 0 0 .nil .nil "?") cx.mems m
@@ -2245,16 +2335,16 @@ def Net.clockDom (nodes : Hdl.Vec NetNode) (k : Nat) : Option String :=
     | .inst q => Hdl.nthD (Option.none : Option String) q.outDom j
     | _ => .none)
   | _, _ => .none
-/-- A synchroniser's clock leaves, in step with its arguments: the domain its clock input
+/-- A crossing cell's clock leaves, in step with its arguments: the domain its clock input
 names (the first clock leaf's). -/
-def Net.syncDomAux (nodes : Hdl.Vec NetNode) : List PortKind → List Nat → Option String
+def Net.cellDomAux (nodes : Hdl.Vec NetNode) : List PortKind → List Nat → Option String
   | .cons k ks, .cons a as => match k with
     | .clock => Net.clockDom nodes a
-    | _ => Net.syncDomAux nodes ks as
+    | _ => Net.cellDomAux nodes ks as
   | _, _ => .none
-/-- The domain a synchroniser instance is in: its clock input's. -/
-def Net.syncDom (nodes : Hdl.Vec NetNode) (p : NetPrim) (args : List Nat) : Option String :=
-  Net.syncDomAux nodes p.inKinds args
+/-- The domain a crossing cell instance is in: its clock input's. -/
+def Net.cellDom (nodes : Hdl.Vec NetNode) (p : NetPrim) (args : List Nat) : Option String :=
+  Net.cellDomAux nodes p.inKinds args
 /-- How many clock leaves a primitive declaration has. -/
 def Net.clockLeaves : List PortKind → Nat
   | .nil => 0
@@ -2283,8 +2373,8 @@ def Net.domOfNode (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (nd : NetNode) :
   | .clock _, _ => List.nil
   | .const _, _ => List.nil
   | .instOut j _, .cons i _ => match Net.DomCx.instAt cx i with
-    | .some p => match p.sync with
-      | .true => match Net.syncDom cx.nodes p (Net.DomCx.args cx i) with
+    | .some p => match p.kind.crossing with
+      | .true => match Net.cellDom cx.nodes p (Net.DomCx.args cx i) with
         | .some d => .cons d List.nil
         | .none => List.nil
       | .false => match Hdl.nthD (Option.none : Option String) p.outDom j with
@@ -2305,17 +2395,39 @@ def Net.domOf (n : Netlist) : Hdl.Vec (List String) := Net.domOfAux (Net.domCx n
 /-- Whether clock domain `d` is one of the netlist's (`Netlist.clocks`). -/
 def Netlist.hasDom (n : Netlist) (d : String) : Bool :=
   Hdl.member d (Hdl.map (fun (c : ClockDomain) => c.name) n.clocks)
+/-- Whether `d` is one of the netlist's reset domains (`Netlist.resets`, D5). -/
+def Netlist.hasResetDom (n : Netlist) (d : String) : Bool :=
+  Hdl.member d (Hdl.map (fun (r : ResetDomain) => r.name) n.resets)
+/-- Whether `d` is a clock or a reset domain of the netlist. -/
+def Netlist.declared (n : Netlist) (d : String) : Bool :=
+  Bool.or (Netlist.hasDom n d) (Netlist.hasResetDom n d)
 /-- The netlist's clock domains as prose (`clk, clk2`). -/
 def Netlist.domNames (n : Netlist) : String :=
   Hdl.sepBy ", " (Hdl.map (fun (c : ClockDomain) => c.name) n.clocks)
+/-- The netlist's reset domains as prose (`rst`). -/
+def Netlist.resetNames (n : Netlist) : String :=
+  Hdl.sepBy ", " (Hdl.map (fun (r : ResetDomain) => r.name) n.resets)
 /-- The error where something (`what`) is on clock domain `d`, which the netlist does not
 declare. -/
 def Netlist.undeclared (n : Netlist) (what d : String) : List String :=
   match Netlist.hasDom n d with
   | .true => List.nil
-  | .false => .cons (what <+> " is on clock domain " <+> d <+> ", which the netlist does not declare ("
+  | .false => match Netlist.hasResetDom n d with
+    | .true => .cons (what <+> " is on " <+> d <+> ", a reset domain, not a clock domain") List.nil
+    | .false => .cons (what <+> " is on clock domain " <+> d <+> ", which the netlist does not declare ("
       <+> Netlist.domNames n <+> ")") List.nil
+/-- The error where something (`what`) is on domain `d`, which is neither a clock nor a
+reset domain the netlist declares. -/
+def Netlist.undeclaredAny (n : Netlist) (what d : String) : List String :=
+  match Netlist.declared n d with
+  | .true => List.nil
+  | .false => .cons (what <+> " is on domain " <+> d <+> ", which the netlist does not declare (clocks: "
+      <+> Netlist.domNames n <+> "; resets: " <+> Netlist.resetNames n <+> ")") List.nil
 
+/-- The domains of node `a` as a set (`[]` if none). -/
+def Net.domsOf (ds : Hdl.Vec (List String)) (a : Nat) : List String := Hdl.Vec.get Net.noDom ds a
+/-- Whether domain `d` is one of the netlist's reset domains. -/
+def Net.DomCx.isReset (cx : Net.DomCx) (d : String) : Bool := Hdl.member d cx.resets
 /-- The error where node `a`, in another clock domain, is used by `d` logic (`what`). A
 node that mixes domains is reported where they meet (or upstream), not again here. -/
 def Net.domSink (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (d : String) (a : Nat) (what : String) : List String :=
@@ -2326,11 +2438,43 @@ def Net.domSink (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (d : String) (a : 
     | .false => .cons ("a " <+> x <+> " signal (" <+> Net.DomCx.describe cx a <+> ") is used by " <+> d
         <+> " logic (" <+> what <+> "): no synchroniser") List.nil
   | .cons _ (.cons _ _) => List.nil
+/-- The error where a reset from domain `x` reaches `d` logic (`what`) without a reset
+synchroniser: the reset-domain case of `Net.domSink`. -/
+def Net.domRstSink (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (d : String) (a : Nat) (what : String) : List String :=
+  match Hdl.Vec.get Net.noDom ds a with
+  | .nil => List.nil
+  | .cons x .nil => match Hdl.strEq x d, Net.DomCx.isReset cx x with
+    | .true, _ => List.nil
+    | _, .true => .cons ("the asynchronous reset " <+> x <+> " (" <+> Net.DomCx.describe cx a <+> ") is used by "
+        <+> d <+> " logic (" <+> what <+> "): no reset synchroniser") List.nil
+    | _, .false => Net.domSink cx ds d a what
+  | .cons _ (.cons _ _) => List.nil
 /-- `Net.domSink` for an optional node (a register's reset or enable). -/
 def Net.domOptSink (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (d : String) (a : Option Nat) (what : String) : List String :=
   match a with
   | .none => List.nil
   | .some k => Net.domSink cx ds d k what
+/-- `Net.domRstSink` for an optional node (a register's reset). -/
+def Net.domOptRstSink (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (d : String) (a : Option Nat) (what : String) : List String :=
+  match a with
+  | .none => List.nil
+  | .some k => Net.domRstSink cx ds d k what
+/-- The first argument whose domain is one of the netlist's reset domains. -/
+def Net.resetOf (cx : Net.DomCx) (ds : Hdl.Vec (List String)) : List Nat → Option String
+  | .nil => .none
+  | .cons a as => match Hdl.Vec.get Net.noDom ds a with
+    | .cons x _ => match Net.DomCx.isReset cx x with
+      | .true => .some x
+      | .false => Net.resetOf cx ds as
+    | .nil => Net.resetOf cx ds as
+
+/-- The error where a reset-domain signal is used as data by `what`: a reset is its own
+domain (D5), not a clock-domain signal. -/
+def Net.domResetUse (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (args : List Nat) (what : String) : List String :=
+  match Net.resetOf cx ds args with
+  | .none => List.nil
+  | .some d => .cons ("the asynchronous reset " <+> d <+> " is used as data (" <+> what
+      <+> "): a reset stays in its own domain") List.nil
 /-- The crossing error where a node's arguments mix two clock domains (the first argument
 in a domain, and a later one in another): the crossing that no synchroniser makes. -/
 def Net.domMix (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (k : Nat) (nd : NetNode) : List String :=
@@ -2341,56 +2485,97 @@ def Net.domMix (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (k : Nat) (nd : Net
     | .some b => .cons ("a " <+> Net.domHead ds b <+> " signal (" <+> Net.DomCx.describe cx b
         <+> ") and a " <+> a.2 <+> " signal (" <+> Net.DomCx.describe cx a.1 <+> ") meet at node "
         <+> Hdl.show k <+> ": no synchroniser") List.nil
-/-- The errors of a synchroniser instance: exactly one clock input, naming the destination
-domain, and data in exactly one other domain. (Its output, and so the logic it feeds, is
-in the clock's domain; `Net.domOfNode` puts it there.) -/
-def Net.domSync (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (k : Nat) (p : NetPrim) : List String :=
-  let ω name := "synchroniser " <+> p.name <+> " (node " <+> Hdl.show k <+> ")";
+/-- The errors of a crossing cell: exactly one clock input, naming a declared clock domain,
+and data in exactly one domain. The cell's kind decides which:
+* `.sync` syncs data from another *clock* domain (not from a reset: a reset needs the
+  reset synchroniser);
+* `.resetSync` syncs an asynchronous reset (a declared reset domain) into the clock's
+  domain (async assert, synchronous deassert);
+* `.unsafe` is the explicit escape: one clock input, one data domain, no synchroniser
+  claimed (a deliberate asynchronous crossing, e.g. a reset that is already synchronous).
+Its output, and so the logic it feeds, is in the clock's domain; `Net.domOfNode` puts it
+there. -/
+def Net.domCell (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (k : Nat) (p : NetPrim) : List String :=
+  let ω head := match p.kind with
+    | .resetSync => "reset synchroniser " <+> p.name
+    | .unsafe => "unsafe crossing " <+> p.name
+    | _ => "synchroniser " <+> p.name;
+  let ω name := head <+> " (node " <+> Hdl.show k <+> ")";
   match Nat.beq 1 (Net.clockLeaves p.inKinds) with
-  | .false => .cons (name <+> ": a synchroniser needs exactly one clock input") List.nil
-  | .true => match Net.syncDom cx.nodes p (Net.DomCx.args cx k) with
+  | .false => .cons (name <+> ": a crossing cell needs exactly one clock input") List.nil
+  | .true => match Net.cellDom cx.nodes p (Net.DomCx.args cx k) with
     | .none => .cons (name <+> ": no clock net (Hw.clockOf d) at its clock input") List.nil
-    | .some d => match Net.dataDom ds p (Net.DomCx.args cx k) with
-      | .nil => List.nil
-      | .cons src rest => match rest with
-        | .cons _ _ => .cons (name <+> ": its data mixes clock domains") List.nil
-        | .nil => match Hdl.strEq src d with
-          | .true => .cons (name <+> ": its data is in its clock's own domain " <+> d
-              <+> ", not another one") List.nil
-          | .false => List.nil
-/-- The crossing errors of one node: a mix of domains in its arguments, or a
-synchroniser's own rules. -/
+    | .some d => match Net.DomCx.isReset cx d with
+      | .true => .cons (name <+> ": it is clocked by " <+> d <+> ", a reset domain, not a clock domain") List.nil
+      | .false => match Net.dataDom ds p (Net.DomCx.args cx k) with
+        | .nil => List.nil
+        | .cons src rest => match rest with
+          | .cons _ _ => .cons (name <+> ": its data mixes clock domains") List.nil
+          | .nil => match Hdl.strEq src d, Net.DomCx.isReset cx src, p.kind with
+            | .true, .false, .sync => .cons (name <+> ": its data is in its clock's own domain " <+> d
+                <+> ", not another one") List.nil
+            | .true, .true, .resetSync => .cons (name <+> ": its reset is already in " <+> d
+                <+> ", its own clock domain") List.nil
+            | .true, _, .unsafe => List.nil
+            | .true, _, _ => .cons (name <+> ": its data is in its clock's own domain " <+> d
+                <+> ", not another one") List.nil
+            | .false, .true, .sync => .cons (name <+> ": its data is the reset " <+> src
+                <+> ": a reset needs a reset synchroniser (Cdc.resetSync)") List.nil
+            | .false, .false, .resetSync => .cons (name <+> ": its data is a " <+> src
+                <+> " signal, not an asynchronous reset (reset domains: " <+> Hdl.sepBy ", " cx.resets
+                <+> ")") List.nil
+            | .false, _, _ => List.nil
+/-- The crossing errors of one node: a mix of domains in its arguments, a reset used as
+data, or a crossing cell's own rules. -/
 def Net.domNode (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (k : Nat) (nd : NetNode) : List String :=
   match nd.op with
-  | .inst p => match p.sync with
-    | .true => Net.domSync cx ds k p
-    | .false => Net.domMix cx ds k nd
+  | .inst p => match p.kind.crossing with
+    | .true => Net.domCell cx ds k p
+    | .false => List.append (Net.domResetUse cx ds nd.args ("node " <+> Hdl.show k)) (Net.domMix cx ds k nd)
   | .input _ => List.nil
   | .const _ => List.nil
   | .reg _ => List.nil
   | .clock _ => List.nil
   | .instOut _ _ => List.nil
-  | _ => Net.domMix cx ds k nd
+  | _ => List.append (Net.domResetUse cx ds nd.args ("node " <+> Hdl.show k)) (Net.domMix cx ds k nd)
 /-- The crossing errors of every node, in order. -/
 def Net.domNodes (cx : Net.DomCx) (ds : Hdl.Vec (List String)) : Nat → List NetNode → List String
   | _, .nil => List.nil
   | k, .cons nd nds => List.append (Net.domNode cx ds k nd) (Net.domNodes cx ds (Nat.succ k) nds)
-/-- The crossing errors of one register: what it loads, its reset and its enable must be
-in its own domain. -/
+/-- The crossing errors of one register: what it loads and its enable must be in its own
+domain (and not a reset), and its reset must be in its own domain (a reset from a reset
+domain needs `Cdc.resetSync`). -/
 def Net.domReg (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (r : NetReg) : List String :=
-  List.append (Net.domSink cx ds r.dom r.next ("register " <+> r.name))
-    (List.append (Net.domOptSink cx ds r.dom r.rst ("the reset of register " <+> r.name))
-      (Net.domOptSink cx ds r.dom r.en ("the enable of register " <+> r.name)))
+  List.append (Net.domResetUse cx ds (List.cons r.next (Hdl.optList r.en)) ("register " <+> r.name))
+    (List.append (Net.domSink cx ds r.dom r.next ("register " <+> r.name))
+      (List.append (Net.domOptRstSink cx ds r.dom r.rst ("the reset of register " <+> r.name))
+        (Net.domOptSink cx ds r.dom r.en ("the enable of register " <+> r.name))))
 /-- The crossing errors of the registers, in order. -/
 def Net.domRegs (cx : Net.DomCx) (ds : Hdl.Vec (List String)) : List NetReg → List String
   | .nil => List.nil
   | .cons r rs => List.append (Net.domReg cx ds r) (Net.domRegs cx ds rs)
+/-- The negative rule for the asynchronous reset form: a register marked `rstAsync` must
+have a reset, and it must be a reset synchroniser's output (`Cdc.resetSync`); a plain
+synchronous reset stays synchronous. -/
+def Net.rstAsyncErrors (nodes : Hdl.Vec NetNode) : List NetReg → List String
+  | .nil => List.nil
+  | .cons r rs => List.append (match r.rstAsync with
+    | .false => List.nil
+    | .true => match r.rst with
+      | .none => .cons ("register " <+> r.name
+          <+> " is in the asynchronous reset form but has no reset") List.nil
+      | .some k => match Net.resetSyncOut nodes k with
+        | .true => List.nil
+        | .false => .cons ("register " <+> r.name
+            <+> " is in the asynchronous reset form but its reset is not a reset synchroniser (Cdc.resetSync)")
+            List.nil) (Net.rstAsyncErrors nodes rs)
 /-- The crossing errors of one memory write: its enable, address and data must be in the
 memory's domain. -/
 def Net.domMemWrite (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (m : NetMem) (we wa wd : Nat) : List String :=
-  List.append (Net.domSink cx ds m.dom we ("the write enable of memory " <+> m.name))
-    (List.append (Net.domSink cx ds m.dom wa ("the write address of memory " <+> m.name))
-      (Net.domSink cx ds m.dom wd ("the write data of memory " <+> m.name)))
+  List.append (Net.domResetUse cx ds (.cons we (.cons wa (.cons wd .nil))) ("memory " <+> m.name))
+    (List.append (Net.domSink cx ds m.dom we ("the write enable of memory " <+> m.name))
+      (List.append (Net.domSink cx ds m.dom wa ("the write address of memory " <+> m.name))
+        (Net.domSink cx ds m.dom wd ("the write data of memory " <+> m.name))))
 /-- The crossing errors of a memory's writes, in order. -/
 def Net.domMemWrites (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (m : NetMem) : List (Nat × (Nat × Nat)) → List String
   | .nil => List.nil
@@ -2399,10 +2584,11 @@ def Net.domMemWrites (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (m : NetMem) 
 def Net.domMems (cx : Net.DomCx) (ds : Hdl.Vec (List String)) : List NetMem → List String
   | .nil => List.nil
   | .cons m ms => List.append (Net.domMemWrites cx ds m m.writes) (Net.domMems cx ds ms)
-/-- The undeclared domains of the input ports. -/
+/-- The undeclared domains of the input ports (an input may be in a clock or a reset
+domain: a top-level asynchronous reset is a reset-domain input). -/
 def Net.domPorts (n : Netlist) : List NetPort → List String
   | .nil => List.nil
-  | .cons p ps => List.append (Netlist.undeclared n ("input " <+> p.name) p.dom) (Net.domPorts n ps)
+  | .cons p ps => List.append (Netlist.undeclaredAny n ("input " <+> p.name) p.dom) (Net.domPorts n ps)
 /-- The undeclared domain of every port, register and memory. -/
 def Net.domDeclared (n : Netlist) : List String :=
   List.append (Net.domPorts n n.inputs)
@@ -2443,9 +2629,9 @@ def Net.wideData (name : String) (k : Nat) : List Nat → List String
 def Net.syncWidthNodes (cx : Net.DomCx) : Nat → List NetNode → List String
   | _, .nil => List.nil
   | k, .cons nd ns => List.append (match nd.op with
-      | .inst p => match p.sync with
-        | .true => Net.wideData p.name k (Net.syncDataWidths cx.nodes p.inKinds nd.args)
-        | .false => List.nil
+      | .inst p => match p.kind with
+        | .sync => Net.wideData p.name k (Net.syncDataWidths cx.nodes p.inKinds nd.args)
+        | _ => List.nil
       | _ => List.nil) (Net.syncWidthNodes cx (Nat.succ k) ns)
 /-- The single-bit rule: every declared synchroniser's data is one bit wide (C3). A
 handshake or a FIFO carries a bus; a two-flop synchroniser carries one bit. -/
@@ -2455,15 +2641,17 @@ def Netlist.syncWidthErrors (n : Netlist) : List String :=
 /-- What is wrong with a netlist's clock domains: data crossing a domain boundary without
 a synchroniser, a synchroniser in the wrong domain, a synchroniser carrying more than one
 bit (`Netlist.syncWidthErrors`), a clock used as data (that one is `Netlist.kindErrors`),
-and a domain the netlist does not declare. -/
+a reset crossing without `Cdc.resetSync`, an asynchronous reset form that is not driven by
+one (`Net.rstAsyncErrors`), and a domain the netlist does not declare. -/
 def Netlist.domainErrors (n : Netlist) : List String :=
   let ω cx := Net.domCx n;
   let ω ds := Net.domOf n;
   List.append (Net.domNodes cx ds 0 n.nodes)
     (List.append (Net.domRegs cx ds n.regs)
-      (List.append (Net.domMems cx ds n.mems)
-        (List.append (Net.domDeclared n) (List.append (Net.domClockNets n 0 n.nodes)
-          (List.append (Net.domPrimOuts n 0 n.nodes) (Netlist.syncWidthErrors n))))))
+      (List.append (Net.rstAsyncErrors (Hdl.Vec.ofList n.nodes) n.regs)
+        (List.append (Net.domMems cx ds n.mems)
+          (List.append (Net.domDeclared n) (List.append (Net.domClockNets n 0 n.nodes)
+            (List.append (Net.domPrimOuts n 0 n.nodes) (Netlist.syncWidthErrors n)))))))
 
 /-- What makes the checked runners refuse a netlist: more than one clock domain. The
 single-tick simulation (`Netlist.simulate`, `Circuit.run`) has one clock; a design whose
@@ -2538,7 +2726,9 @@ def Circuit.netlistNaive {ω i o : HwTy} (name : String) (c : Circuit i o) : Net
 -- part's name, and the existing emitter and checker do the rest.
 
 /-- A part of a `Multi`: a circuit in clock domain `dom`, with the top-level name of each
-input leaf (`ins`) and output leaf (`outs`), in leaf order. -/
+input leaf (`ins`) and output leaf (`outs`), in leaf order; `resets` names the input
+leaves that are the circuit's reset inputs (a reset that reaches one of them from an
+asynchronous reset domain must pass a reset synchroniser, `Cdc.resetWire`). -/
 structure MultiPart where
   name : String
   dom : ClockDomain
@@ -2547,11 +2737,15 @@ structure MultiPart where
   outs : List String
   inKinds : List PortKind
   outKinds : List PortKind
+  resets : List String
 /-- A circuit as a `Multi` part on domain `d`, with top-level names `ins`/`outs` for its
 input and output leaves. -/
 def MultiPart.circuit {ω i o : HwTy} (name : String) (d : ClockDomain) (c : Circuit i o)
     (ins outs : List String) : MultiPart :=
-  MultiPart.mk name d (Circuit.netlistIn d name c) ins outs (HwTy.leafKinds i) (HwTy.leafKinds o)
+  MultiPart.mk name d (Circuit.netlistIn d name c) ins outs (HwTy.leafKinds i) (HwTy.leafKinds o) List.nil
+/-- The part with `resets` as its reset input names (`MultiPart.circuit` has none). -/
+def MultiPart.withResets (p : MultiPart) (resets : List String) : MultiPart :=
+  MultiPart.mk p.name p.dom p.net p.ins p.outs p.inKinds p.outKinds resets
 
 /-- A top-level wire of a `Multi`: a rename (`link`, no primitive) or a primitive cell
 (`through`, e.g. a synchroniser) with one source name per input leaf and one destination
@@ -2573,12 +2767,14 @@ def MultiWire.hasOut (name : String) : MultiWire → Bool
   | .link _ dst => Hdl.strEq name dst
   | .through _ _ outs => Hdl.member name outs
 
-/-- A top-level design of several single-clock parts, named clock domains and wires. -/
+/-- A top-level design of several single-clock parts, named clock domains and wires, and
+its asynchronous reset trees (`resets`: each named net is a reset domain). -/
 structure Multi where
   name : String
   domains : List ClockDomain
   parts : List MultiPart
   wires : List MultiWire
+  resets : List ResetDomain
 
 /-- Add `d` to a domain list unless its name is already there. -/
 def Multi.addClock (cs : List ClockDomain) (d : ClockDomain) : List ClockDomain :=
@@ -2595,6 +2791,9 @@ def Multi.clocks (m : Multi) : List ClockDomain := Multi.clocksParts m.parts m.d
 /-- Whether `name` is one of the design's clock domains. -/
 def Multi.isDomain (m : Multi) (name : String) : Bool :=
   Hdl.member name (Hdl.map (fun (c : ClockDomain) => c.name) (Multi.clocks m))
+/-- Whether `name` is one of the design's asynchronous reset domains (`Multi.resets`). -/
+def Multi.isReset (m : Multi) (name : String) : Bool :=
+  Hdl.member name (Hdl.map (fun (r : ResetDomain) => r.name) m.resets)
 /-- The first wire with an output named `name`. -/
 def Multi.wireIn (name : String) : List MultiWire → Option MultiWire
   | .nil => .none
@@ -2717,14 +2916,17 @@ def Multi.allReady (m : Multi) (s : MultiS) : List String → Bool
       | .none => Multi.isDomain m x) (Multi.allReady m s xs)
 def Multi.wireReady (m : Multi) (s : MultiS) (w : MultiWire) : Bool := Multi.allReady m s (MultiWire.ins w)
 
-/-- Resolve a name a wire reads: a part output or another wire output already built, or a
-clock domain's net. A wire must read names built before it (parts in order). -/
+/-- Resolve a name a wire reads: a part output or another wire output already built, a
+clock domain's net, or an asynchronous reset domain's source (a top-level input in the
+reset domain). A wire must read names built before it (parts in order). -/
 def MultiM.resolveName (m : Multi) (name : String) : MultiM Nat := fun s =>
   match Hdl.lookupNat name s.names with
   | .some k => (k, s)
   | .none => match Multi.isDomain m name with
     | .true => MultiM.clockNode name s
-    | .false => (0, MultiM.errorS ("Multi: no source " <+> name <+> " (wires may only read earlier parts or clock domains)") s)
+    | .false => match Multi.isReset m name with
+      | .true => MultiM.addInput name 1 name PortKind.data s
+      | .false => (0, MultiM.errorS ("Multi: no source " <+> name <+> " (wires may only read earlier parts or clock domains)") s)
 /-- Resolve a list of names, in order. -/
 def MultiM.resolveNames (m : Multi) : List String → MultiM (List Nat)
   | .nil => MultiM.pure List.nil
@@ -2787,7 +2989,10 @@ def MultiM.partInput (m : Multi) (p : MultiPart) (j : Nat) : MultiM Nat := fun s
       | .none => (0, MultiM.errorS ("Multi: wire output " <+> name <+> " is unresolved") r.2))
     | .none =>
       let pt := Hdl.nthD (NetPort.mk "?" 0 0 "?") p.net.inputs j;
-      MultiM.addInput name pt.width p.dom.name (Hdl.nthD PortKind.data p.inKinds j) s
+      let ω dom : String := match Hdl.member name p.resets, Multi.isReset m name with
+        | .true, .true => name
+        | _, _ => p.dom.name;
+      MultiM.addInput name pt.width dom (Hdl.nthD PortKind.data p.inKinds j) s
 /-- Replay a part's nodes into the flattening state, mapping local node ids to global ones. -/
 def MultiM.partNodes (m : Multi) (p : MultiPart) (regBase memBase : Nat) : List NetNode → Hdl.Vec Nat → MultiM (Hdl.Vec Nat)
   | .nil, rem => MultiM.pure rem
@@ -2801,7 +3006,7 @@ def MultiM.partNodes (m : Multi) (p : MultiPart) (regBase memBase : Nat) : List 
 /-- A part's register with the part's name prefixed and its nodes remapped. -/
 def Multi.regOf (p : MultiPart) (rem : Hdl.Vec Nat) (r : NetReg) : NetReg :=
   NetReg.mk (p.name <+> "_" <+> r.name) r.width r.init (Multi.remapNode rem r.next)
-    (Multi.remapOpt rem r.rst) (Multi.remapOpt rem r.en) p.dom.name
+    (Multi.remapOpt rem r.rst) r.rstAsync (Multi.remapOpt rem r.en) p.dom.name
 def Multi.regsOf (p : MultiPart) (rem : Hdl.Vec Nat) : List NetReg → List NetReg
   | .nil => .nil
   | .cons r rs => .cons (Multi.regOf p rem r) (Multi.regsOf p rem rs)
@@ -2888,7 +3093,9 @@ def Multi.netlist (m : Multi) : Netlist :=
   let ω r := MultiM.bind (MultiM.partsGo m m.parts) (fun _ =>
     MultiM.bind (MultiM.wiresGo m m.wires) (fun _ => MultiM.wireOuts m)) (MultiS.init (Multi.clocks m));
   let ω s := r.2;
-  let ω n := Netlist.mk m.name (Hdl.reverse s.nodes) s.regs s.inputs s.outputs s.hints s.mems s.clocks s.errs;
+  let ω ns := Hdl.reverse s.nodes;
+  let ω regs := Hdl.map (fun (x : NetReg) => NetReg.markAsync (Hdl.Vec.ofList ns) x) s.regs;
+  let ω n := Netlist.mk m.name ns regs s.inputs s.outputs s.hints s.mems s.clocks m.resets s.errs;
   Netlist.withErrors n (List.append (Netlist.kindErrors n s.inKinds s.outKinds) (Netlist.domainErrors n))
 
 /-- Simulation by values, on leaves (one number per port per cycle). Compare with
@@ -3179,12 +3386,21 @@ def Verilog.load (cx : VCtx) (nm : String) (r : NetReg) : String :=
   match r.rst with
   | .none => enabled
   | .some k => "if (" <+> VCtx.ref cx k <+> ") " <+> nm <+> " <= " <+> Verilog.lit r.width r.init <+> "; else " <+> enabled
-/-- An `always @(posedge <dom>)` per register of clock domain `dom`. -/
+/-- The asynchronous reset in a register's sensitivity list (` or posedge rst`) when the
+register's reset is a reset synchroniser's output (`NetReg.rstAsync`), else nothing. -/
+def Verilog.asyncEdge (cx : VCtx) (r : NetReg) : String :=
+  match r.rst with
+  | .some k => match Bool.or r.rstAsync (Net.resetSyncOut cx.nodes k) with
+    | .true => " or posedge " <+> VCtx.ref cx k
+    | .false => ""
+  | .none => ""
+/-- An `always @(posedge <dom>)` (or `@(posedge <dom> or posedge <rst>)` for an
+asynchronous reset) per register of clock domain `dom`. -/
 def Verilog.updates (cx : VCtx) (dom : String) : List String → List NetReg → String
   | .cons nm nms, .cons r rs => (match Hdl.strEq r.dom dom with
     | .true => (match r.width with
       | .zero => ""
-      | .succ _ => "  always @(posedge " <+> dom <+> ") " <+> Verilog.load cx nm r <+> "\n")
+      | .succ _ => "  always @(posedge " <+> dom <+> Verilog.asyncEdge cx r <+> ") " <+> Verilog.load cx nm r <+> "\n")
     | .false => "") <+> Verilog.updates cx dom nms rs
   | _, _ => ""
 -- A memory: an array with its contents, then (after the wires) its writes in one block,
