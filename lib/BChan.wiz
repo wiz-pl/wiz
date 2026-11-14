@@ -1,95 +1,271 @@
 import MVar
+import Sys
 /-!
 # BChan
 
-Bounded channels with backpressure: `import BChan` (stage 25f,
-docs/stages/25-concurrency.md).
+Bounded channels with backpressure, non-blocking operations and `close`:
+`import BChan` (stage 25f, docs/stages/25-concurrency.md).
 
 A `Chan` (lib/Session.wiz) buffers without limit: `send` never blocks, so a producer
 that runs faster than its consumer grows the heap. A `BChan A` is a bounded FIFO
-queue that any number of threads may share: the sender at the ring position waits
-while all `capacity` slots hold unconsumed items (other senders wait behind it), and
-`recv` waits while the next slot is empty, so the two sides run at the slower one's
-pace. Unlike `Chan`, a `BChan` is an ordinary (ω) value: it can be copied, stored and
-passed to both threads, and there is no protocol type to keep in step.
+queue that any number of threads may share: a sender waits while all `capacity` slots
+hold unconsumed items, and `recv` waits while the queue is empty, so the two sides run
+at the slower one's pace. Unlike `Chan`, a `BChan` is an ordinary (ω) value: it can be
+copied, stored and passed to both threads, and there is no protocol type to keep in
+step.
 
-Order: both sides take turns by borrowing one of two `MVar`s (`inPos`, `outPos`)
-that hold the ring position, so sends are written to the ring one at a time and
-receives read it in the same order. Receives therefore see items in the order they
-were sent (which thread receives which item is up to the scheduler).
+The API:
 
-**Limits.** This is a buffer, not a protocol: there is no `close`, no `trySend` and
-no `select`, and dropping a `BChan` does not wake a thread blocked on it. A thread
-blocked in `send`/`recv` cannot be cancelled, and the runtime waits for every
-thread at exit (25a), so a producer with no consumer hangs the process. A
-`capacity` of 0 is treated as 1 (an `MVar` slot always holds at most one item, so
-there is no rendezvous mode). Blocking is built from the MVar mutexes and condition
-variables, not from atomics: Wiz has no user-level atomics or fences, and the RC
-counts are relaxed (their order comes from the MVar locks); do not build lock-free
-structures on the RC words.
+```
+BChan.new      : (capacity : Nat) → IO (BChan A)  -- at least one slot (0 means 1)
+BChan.send     : (c : BChan A) → A → IO Bool      -- waits while full; false = closed
+BChan.recv     : (c : BChan A) → IO (Option A)    -- waits while empty; none = closed
+BChan.trySend  : (c : BChan A) → A → IO Bool      -- never waits; false = full or closed
+BChan.tryRecv  : (c : BChan A) → IO (Option A)    -- never waits; none = empty (or closed)
+BChan.close    : (c : BChan A) → IO Unit          -- idempotent; wakes every blocked peer
+BChan.isClosed : (c : BChan A) → IO Bool
+BChan.select   : (c d : BChan A) → IO (Option (Bool × A))  -- polls, see the limits
+```
+
+**Close.** `close` sets a closed flag and wakes every blocked sender and receiver.
+After that `send` returns `false` without enqueueing the item, and `recv` keeps
+returning the items that were already buffered, then `none` once the buffer is empty:
+closing never loses an item that `send` reported as sent. `close` is idempotent, and a
+send/receive that arrives after it fails at once. A blocked call therefore returns a
+value (`false` or `none`), not a panic; a caller that must distinguish "full/empty"
+from "closed" calls `isClosed`. `trySend`/`tryRecv` have the same flags: they are just
+the non-blocking forms, and they respect close too.
+
+**Lifetime.** A `BChan` is copied and dropped like any ω value; dropping the last copy
+does not wake blocked peers (that is the cancellation limit below). A blocked
+operation holds the channel alive, so a channel whose peers are all blocked is not
+freed until the operation returns or the process exits. The runtime waits for every
+thread before it checks for leaks (25a), so a blocked peer with no `close` hangs the
+process; `close` is how a program gets blocked peers back.
+
+**Order.** Each sender's items enter the queue in the order that sender sent them, and
+receivers take them in queue order (FIFO). Which thread receives which item, and how
+two senders' items interleave, are up to the scheduler: a blocked sender is woken in
+arrival order, but a `trySend` can take the free slot first, so there is no global
+fairness guarantee for concurrent *senders*.
+
+**Limits.** (a) *Select.* `BChan.select` is a poll over the two channels (a 1 ms
+`Clock.sleep` between attempts), because the MVar API has no "take one of two" wait and
+a shared wake-up cell across two channels can deadlock; it prefers the first channel
+when both have items. (b) *Cancellation.* A blocked `send`/`recv` can only be woken by
+`close` (or by the peer making progress); there is no way to cancel one call while
+leaving the channel open, and a thread blocked without `close` keeps the process
+alive. (c) *Memory order.* Blocking is built from the MVar mutexes and condition
+variables, not atomics: Wiz has no user-level atomics or fences, and the RC counts are
+relaxed; do not build lock-free structures on the RC words. (d) A `capacity` of 0 is
+treated as 1 (there is no rendezvous mode).
 
 ```
 def main : IO Unit := IO.bind (BChan.new (A := Nat) 8) (fun c =>
   IO.bind (BChan.send c 1) (fun _ =>
-    IO.bind (BChan.recv c) (fun x => IO.println (Nat.toString x))))
+    IO.bind (BChan.recv c) (fun x => IO.println (match x with
+      | .some n => Nat.toString n
+      | .none => "closed"))))
 ```
 
 Compiled code only: the interpreters (`#eval`, `#run`) don't run the MVar natives.
 -/
 
-/-- The ring's position: the next slot, and the slots after it in order. Internal:
-`BChan`'s constructor and position fields are private, so the ring can't get out of
-step with a user's own `MVar`s. -/
-private structure BChan.Ring (A : Type) where
-  head : MVar A
-  rest : List (MVar A)
+/-- The channel's shared state, always held by `BChan.state` (a one-place MVar is the
+mutex: a borrow is the critical section). `items` is FIFO, oldest first; `senders` and
+`receivers` are the blocked peers in arrival order, each waiting on a one-place `Bool`
+cell that a waker fills. Internal. -/
+private structure BChan.State (A : Type) where
+  items : List A
+  closed : Bool
+  senders : List (MVar Bool)
+  receivers : List (MVar Bool)
 
-/-- Advance the ring by one slot (wrapping around a one-slot ring). -/
-private def BChan.Ring.next {A : Type} (r : BChan.Ring A) : BChan.Ring A :=
-  match r.rest with
-  | .nil => r
-  | .cons x xs => BChan.Ring.mk x xs
-
-/-- `n` empty one-place slots, in a ring. `n ≥ 1` (`BChan.new` ensures it). -/
-private def BChan.mkRing {A : Type} : Nat → IO (BChan.Ring A)
-  | .zero => IO.bind (MVar.new (A := A)) (fun m => IO.pure (BChan.Ring.mk m .nil))
-  | .succ k => IO.bind (BChan.mkRing k) (fun r =>
-      IO.bind (MVar.new (A := A)) (fun m =>
-        IO.pure (BChan.Ring.mk m (.cons r.head r.rest))))
+/-- What one atomic step of `send`/`recv` did. Internal: `now` completed with a value,
+`failed` found the channel closed, `wait` registered the caller and returns the cell to
+block on (the caller re-runs the step after it is woken, so a wake is only a hint). -/
+private inductive BChan.Step (A : Type) where
+  | now (a : A)
+  | failed
+  | wait (w : MVar Bool)
 
 /-- A bounded FIFO channel holding at most `capacity` unconsumed items. -/
 structure BChan (A : Type) where
   private mk ::
   /-- the effective capacity (`Nat.max 1 capacity`) -/
   capacity : Nat
-  /-- the ring position of the next `send` -/
-  private inPos : MVar (BChan.Ring A)
-  /-- the ring position of the next `recv` -/
-  private outPos : MVar (BChan.Ring A)
+  /-- the shared queue, closed flag and blocked peers -/
+  private state : MVar (BChan.State A)
 
 /-- A new bounded channel with `capacity` slots (at least one: 0 is treated as 1). -/
 def BChan.new {A : Type} (capacity : Nat) : IO (BChan A) :=
-  let n := Nat.max 1 capacity;
-  IO.bind (BChan.mkRing (A := A) n) (fun r =>
-    IO.bind (MVar.newFull (A := BChan.Ring A) r) (fun inPos =>
-      IO.bind (MVar.newFull (A := BChan.Ring A) r) (fun outPos =>
-        IO.pure (BChan.mk n inPos outPos))))
+  IO.bind
+    (MVar.newFull (A := BChan.State A)
+      (BChan.State.mk (List.nil) Bool.false (List.nil) (List.nil)))
+    (fun s => IO.pure (BChan.mk (Nat.max 1 capacity) s))
 
-/-- Put `a` at the end of the channel. Waits while all slots hold unconsumed items.
+/-- Wake one blocked peer: fill its cell (it is always empty, so this never waits) and
+return the rest of the queue. Internal. -/
+private def BChan.wakeOne (ws : List (MVar Bool)) : IO (List (MVar Bool)) :=
+  match ws with
+  | .nil => IO.pure (List.nil)
+  | .cons w rest => IO.bind (MVar.put w Bool.true) (fun _ => IO.pure rest)
 
-`inPos` is held across the (possibly blocking) `MVar.put`, so sends reach the ring
-in one order even with several senders; the slot's own `MVar` is the condition
-variable that waits for the consumer. -/
-def BChan.send {A : Type} (c : BChan A) (a : A) : IO Unit :=
-  MVar.borrow c.inPos (fun r h =>
-    IO.bind (MVar.put r.head a) (fun _ =>
-      MVar.fill c.inPos h (BChan.Ring.next r) (IO.pure ())))
+/-- Wake every blocked peer in `ws` (used by `close`). Internal. -/
+private def BChan.wakeAll (ws : List (MVar Bool)) : IO Unit :=
+  match ws with
+  | .nil => IO.pure ()
+  | .cons w rest => IO.bind (MVar.put w Bool.true) (fun _ => BChan.wakeAll rest)
 
-/-- Take the oldest item. Waits while the next slot is empty.
+/-- Try to enqueue `a` without waiting. Internal step of `send`. -/
+private def BChan.sendStep {A : Type} (c : BChan A) (a : A) : IO (BChan.Step Unit) :=
+  MVar.borrow c.state (fun s h =>
+    let items := s.items;
+    let senders := s.senders;
+    let receivers := s.receivers;
+    match s.closed with
+    | .true => MVar.fill c.state h s (IO.pure (BChan.Step.failed))
+    | .false =>
+      match Nat.lt (List.length items) c.capacity with
+      | .true =>
+        IO.bind (BChan.wakeOne receivers) (fun rs =>
+          MVar.fill c.state h
+            (BChan.State.mk (List.append items (.cons a .nil)) Bool.false senders rs)
+            (IO.pure (BChan.Step.now ())))
+      | .false =>
+        IO.bind (MVar.new (A := Bool)) (fun w =>
+          MVar.fill c.state h
+            (BChan.State.mk items Bool.false (List.append senders (.cons w .nil)) receivers)
+            (IO.pure (BChan.Step.wait w))))
 
-`outPos` is held across the (possibly blocking) `MVar.take`, so receives happen in
-the ring's order (the order the items were sent). -/
-def BChan.recv {A : Type} (c : BChan A) : IO A :=
-  MVar.borrow c.outPos (fun r h =>
-    IO.bind (MVar.take r.head) (fun a =>
-      MVar.fill c.outPos h (BChan.Ring.next r) (IO.pure a)))
+/-- Try to take an item without waiting. Internal step of `recv`. -/
+private def BChan.recvStep {A : Type} (c : BChan A) : IO (BChan.Step A) :=
+  MVar.borrow c.state (fun s h =>
+    let closed := s.closed;
+    let senders := s.senders;
+    let receivers := s.receivers;
+    match s.items with
+    | .cons x xs =>
+      IO.bind (BChan.wakeOne senders) (fun ss =>
+        MVar.fill c.state h (BChan.State.mk xs closed ss receivers)
+          (IO.pure (BChan.Step.now x)))
+    | .nil =>
+      match closed with
+      | .true => MVar.fill c.state h s (IO.pure (BChan.Step.failed))
+      | .false =>
+        IO.bind (MVar.new (A := Bool)) (fun w =>
+          MVar.fill c.state h
+            (BChan.State.mk (List.nil) Bool.false senders
+              (List.append receivers (.cons w .nil)))
+            (IO.pure (BChan.Step.wait w))))
+
+/-- The blocking send loop: a step either enqueues, reports close, or registers a cell;
+after a wake the step is retried (the wake is only a hint, another sender may have won
+the race). Internal. -/
+private partial def BChan.sendLoop {A : Type} (c : BChan A) (a : A) : IO Bool :=
+  IO.bind (BChan.sendStep c a) (fun st =>
+    match st with
+    | .now _ => IO.pure Bool.true
+    | .failed => IO.pure Bool.false
+    | .wait w => IO.bind (MVar.take w) (fun _ => BChan.sendLoop c a))
+
+/-- The blocking receive loop, as `BChan.sendLoop`. Internal. -/
+private partial def BChan.recvLoop {A : Type} (c : BChan A) : IO (Option A) :=
+  IO.bind (BChan.recvStep c) (fun st =>
+    match st with
+    | .now x => IO.pure (Option.some x)
+    | .failed => IO.pure (Option.none)
+    | .wait w => IO.bind (MVar.take w) (fun _ => BChan.recvLoop c))
+
+/-- Put `a` at the end of the channel, waiting while all slots hold unconsumed items.
+`true` if it was enqueued; `false` if the channel was closed (the item was not
+enqueued, and the caller still owns it). -/
+def BChan.send {A : Type} (c : BChan A) (a : A) : IO Bool := BChan.sendLoop c a
+
+/-- Take the oldest item, waiting while the channel is empty. `none` once the channel
+is closed and every buffered item has been received. -/
+def BChan.recv {A : Type} (c : BChan A) : IO (Option A) := BChan.recvLoop c
+
+/-- Enqueue `a` without waiting: `false` if the channel is full or closed (use
+`BChan.isClosed` to tell those apart). -/
+def BChan.trySend {A : Type} (c : BChan A) (a : A) : IO Bool :=
+  MVar.borrow c.state (fun s h =>
+    let items := s.items;
+    let senders := s.senders;
+    let receivers := s.receivers;
+    match s.closed with
+    | .true => MVar.fill c.state h s (IO.pure Bool.false)
+    | .false =>
+      match Nat.lt (List.length items) c.capacity with
+      | .false => MVar.fill c.state h s (IO.pure Bool.false)
+      | .true =>
+        IO.bind (BChan.wakeOne receivers) (fun rs =>
+          MVar.fill c.state h
+            (BChan.State.mk (List.append items (.cons a .nil)) Bool.false senders rs)
+            (IO.pure Bool.true)))
+
+/-- Take the oldest item without waiting: `none` if the channel is empty (or closed and
+empty; use `BChan.isClosed` to tell those apart). Items buffered before `close` are
+still returned. -/
+def BChan.tryRecv {A : Type} (c : BChan A) : IO (Option A) :=
+  MVar.borrow c.state (fun s h =>
+    let closed := s.closed;
+    let senders := s.senders;
+    let receivers := s.receivers;
+    match s.items with
+    | .nil => MVar.fill c.state h s (IO.pure (Option.none))
+    | .cons x xs =>
+      IO.bind (BChan.wakeOne senders) (fun ss =>
+        MVar.fill c.state h (BChan.State.mk xs closed ss receivers)
+          (IO.pure (Option.some x))))
+
+/-- Close the channel: wake every blocked sender (their `send` returns `false`) and
+receiver (their `recv` returns `none` once the buffer is drained), then make every
+later `send`/`trySend` fail and every later `recv`/`tryRecv` return the remaining
+buffered items and then `none`. Idempotent. -/
+def BChan.close {A : Type} (c : BChan A) : IO Unit :=
+  MVar.borrow c.state (fun s h =>
+    match s.closed with
+    | .true => MVar.fill c.state h s (IO.pure ())
+    | .false =>
+      let items := s.items;
+      IO.bind (BChan.wakeAll s.senders) (fun _ =>
+        IO.bind (BChan.wakeAll s.receivers) (fun _ =>
+          MVar.fill c.state h
+            (BChan.State.mk items Bool.true (List.nil) (List.nil))
+            (IO.pure ()))))
+
+/-- Whether `close` has been called (a snapshot: another thread may close immediately
+after). -/
+def BChan.isClosed {A : Type} (c : BChan A) : IO Bool :=
+  IO.bind (MVar.read c.state) (fun s => IO.pure s.closed)
+
+/-- The polling loop of `BChan.select`: take from `c`, then `d`; `none` once both are
+closed and drained; otherwise sleep 1 ms and try again. Internal. -/
+private partial def BChan.selectLoop {A : Type} (c d : BChan A) : IO (Option (Bool × A)) :=
+  IO.bind (BChan.tryRecv c) (fun x =>
+    match x with
+    | .some a => IO.pure (Option.some (Bool.true, a))
+    | .none =>
+      IO.bind (BChan.tryRecv d) (fun y =>
+        match y with
+        | .some b => IO.pure (Option.some (Bool.false, b))
+        | .none =>
+          IO.bind (BChan.isClosed c) (fun cc =>
+            IO.bind (BChan.isClosed d) (fun cd =>
+              match Bool.and cc cd with
+              | .true => IO.pure (Option.none)
+              | .false =>
+                IO.bind (Clock.sleep (Duration.millis 1)) (fun _ =>
+                  BChan.selectLoop c d)))))
+
+/-- Wait for the first item available on `c` or `d`: `some (true, a)` for `c`,
+`some (false, a)` for `d`, and `none` once both are closed and drained. The first
+channel is preferred when both have items.
+
+This is a **poll** (1 ms `Clock.sleep` between attempts), not a blocking MVar wait:
+the MVar API has no "take from either of two cells", and sharing one wake-up cell
+between two channels can deadlock a waker. It costs one wake-up per millisecond while
+both channels are empty, and it is not fair between concurrent selectors. -/
+def BChan.select {A : Type} (c d : BChan A) : IO (Option (Bool × A)) :=
+  BChan.selectLoop c d

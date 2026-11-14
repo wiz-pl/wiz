@@ -177,11 +177,14 @@ import Session
 import BChan
 def sendAll (c : BChan Nat) : Nat → Nat → IO Unit
   | .zero, _ => IO.pure ()
-  | .succ n, i => IO.bind (BChan.send c i) (fun _ => sendAll c n (i + 1))
+  | .succ n, i => IO.bind (BChan.send c i) (fun ok => match ok with
+      | .true => sendAll c n (i + 1)
+      | .false => IO.pure ())
 def recvCheck (c : BChan Nat) : Nat → Nat → Bool → IO Bool
   | .zero, _, ok => IO.pure ok
-  | .succ k, i, ok => IO.bind (BChan.recv c) (fun x =>
-      recvCheck c k (i + 1) (Bool.and ok (Nat.beq x i)))
+  | .succ k, i, ok => IO.bind (BChan.recv c) (fun x => match x with
+      | .some v => recvCheck c k (i + 1) (Bool.and ok (Nat.beq v i))
+      | .none => IO.pure Bool.false)
 def phase (cap n : Nat) : IO Bool :=
   IO.bind (BChan.new (A := Nat) cap) (fun c =>
     Chan.fork Proto.done
@@ -205,7 +208,9 @@ def produce (c : BChan Nat) : Nat → Nat → IO Unit
   | .succ n, i => IO.bind (BChan.send c (i + 1)) (fun _ => produce c n (i + 1))
 def consume (c : BChan Nat) : Nat → Nat → IO Nat
   | .zero, acc => IO.pure acc
-  | .succ k, acc => IO.bind (BChan.recv c) (fun x => consume c k (acc + x))
+  | .succ k, acc => IO.bind (BChan.recv c) (fun x => match x with
+      | .some v => consume c k (acc + v)
+      | .none => IO.pure acc)
 def second (c : BChan Nat) : IO Unit :=
   Chan.fork Proto.done
     (fun ch => Chan.close ch (produce c 500 0))
@@ -215,6 +220,117 @@ def main : IO Unit := IO.bind (BChan.new (A := Nat) 3) (fun c =>
   Chan.fork Proto.done
     (fun ch => Chan.close ch (produce c 500 0))
     (fun ch => Chan.close ch (second c)))
+"
+
+/-- Try operations and close on a bounded channel (stage 25f): `trySend` succeeds until
+the channel is full, `tryRecv` until it is empty, and `close` makes both fail at once
+without losing buffered items. -/
+def concBChanTry : String := "import IO
+import BChan
+def optStr (o : Option Nat) : String := match o with
+  | .some n => Nat.toString n
+  | .none => \"none\"
+def bStr (b : Bool) : String := match b with
+  | .true => \"T\"
+  | .false => \"F\"
+def main : IO Unit := do
+  c ← BChan.new (A := Nat) 2;
+  b1 ← BChan.trySend c 10;
+  b2 ← BChan.trySend c 11;
+  b3 ← BChan.trySend c 12;
+  x1 ← BChan.tryRecv c;
+  x2 ← BChan.tryRecv c;
+  x3 ← BChan.tryRecv c;
+  BChan.close c;
+  b4 ← BChan.trySend c 13;
+  x4 ← BChan.tryRecv c;
+  f ← BChan.isClosed c;
+  IO.println (bStr b1);
+  IO.println (bStr b2);
+  IO.println (bStr b3);
+  IO.println (optStr x1);
+  IO.println (optStr x2);
+  IO.println (optStr x3);
+  IO.println (bStr b4);
+  IO.println (optStr x4);
+  IO.println (bStr f)
+"
+
+/-- `close` wakes a blocked sender (its item is not enqueued, so `send` returns `false`)
+and a blocked receiver (it returns `none`); the item buffered before close is still
+received, so close loses nothing. -/
+def concBChanClose : String := "import IO
+import Session
+import MVar
+import BChan
+import Sys
+def bStr (b : Bool) : String := match b with
+  | .true => \"T\"
+  | .false => \"F\"
+def optStr (o : Option Nat) : String := match o with
+  | .some n => Nat.toString n
+  | .none => \"none\"
+def main : IO Unit := do
+  c ← BChan.new (A := Nat) 1;
+  b0 ← BChan.send c 1;
+  r ← MVar.new (A := Bool);
+  Chan.fork Proto.done
+    (fun ch => Chan.close ch (do
+      b ← BChan.send c 2;
+      MVar.put r b))
+    (fun ch => Chan.close ch (do
+      Clock.sleep (Duration.millis 30);
+      BChan.close c;
+      b ← MVar.take r;
+      IO.println (bStr b);
+      x ← BChan.recv c;
+      IO.println (optStr x);
+      y ← BChan.recv c;
+      IO.println (optStr y)));
+  d ← BChan.new (A := Nat) 1;
+  r2 ← MVar.new (A := Nat);
+  Chan.fork Proto.done
+    (fun ch => Chan.close ch (do
+      x ← BChan.recv d;
+      MVar.put r2 (match x with | .some n => n | .none => 0)))
+    (fun ch => Chan.close ch (do
+      Clock.sleep (Duration.millis 30);
+      BChan.close d;
+      v ← MVar.take r2;
+      IO.println (Nat.toString v)))
+"
+
+/-- `select` takes from either channel (first channel preferred when both have items),
+waits for a later producer, and returns `none` once both are closed and drained. -/
+def concBChanSelect : String := "import IO
+import Session
+import BChan
+import Sys
+def optStr (o : Option (Bool × Nat)) : String := match o with
+  | .some p => String.append (match p.1 with | .true => \"L\" | .false => \"R\")
+      (Nat.toString p.2)
+  | .none => \"none\"
+def main : IO Unit := do
+  c ← BChan.new (A := Nat) 1;
+  d ← BChan.new (A := Nat) 1;
+  b1 ← BChan.send c 1;
+  b2 ← BChan.send d 2;
+  x ← BChan.select c d;
+  IO.println (optStr x);
+  y ← BChan.select c d;
+  IO.println (optStr y);
+  Chan.fork Proto.done
+    (fun ch => Chan.close ch (do
+      Clock.sleep (Duration.millis 20);
+      b ← BChan.send c 9;
+      IO.pure ()))
+    (fun ch => Chan.close ch (do
+      z ← BChan.select c d;
+      IO.println (optStr z);
+      BChan.close c;
+      BChan.close d;
+      w ← BChan.select c d;
+      IO.println (optStr w)))
 "
 
 def concGroup : Group where
@@ -296,6 +412,18 @@ def concGroup : Group where
         cRunLibs concBChan "ok\n" (llvm := true) },
     { name := "bounded channel (BChan): two producers, one consumer, capacity 3, each item once; no leaks", run := fun _ =>
         cRunLibs concBChanMany "250500\n" },
+    { name := "bounded channel (BChan): two producers, one consumer under LLVM", run := fun _ =>
+        cRunLibs concBChanMany "250500\n" (llvm := true) },
+    { name := "bounded channel (BChan): trySend/tryRecv at full and empty, then close; no leaks (C)", run := fun _ =>
+        cRunLibs concBChanTry "T\nT\nF\n10\n11\nnone\nF\nnone\nT\n" },
+    { name := "bounded channel (BChan): trySend/tryRecv and close under LLVM", run := fun _ =>
+        cRunLibs concBChanTry "T\nT\nF\n10\n11\nnone\nF\nnone\nT\n" (llvm := true) },
+    { name := "bounded channel (BChan): close wakes a blocked sender and a blocked receiver, buffered items survive; no leaks (C)", run := fun _ =>
+        cRunLibs concBChanClose "F\n1\nnone\n0\n" },
+    { name := "bounded channel (BChan): close with blocked peers under LLVM", run := fun _ =>
+        cRunLibs concBChanClose "F\n1\nnone\n0\n" (llvm := true) },
+    { name := "bounded channel (BChan): select over two channels, then none after both close; no leaks", run := fun _ =>
+        cRunLibs concBChanSelect "L1\nR2\nL9\nnone\n" },
     { name := "a lazy stream shared between threads", run := fun _ =>
         cRunLibs concStream "3998000\n" },
     { name := "closed definitions (CAFs, 15i) used by eight threads at once: a table and a memoised suspension in it", run := fun _ =>

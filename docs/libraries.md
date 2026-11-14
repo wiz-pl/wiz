@@ -614,13 +614,17 @@ of lib/Ref.wiz has the argument. Compiled code only.
 ## Bounded channels (`lib/BChan.wiz`)
 
 `BChan A` is a bounded FIFO queue shared by any number of threads (`import BChan`):
-`BChan.new capacity`, `BChan.send` (waits while full) and `BChan.recv` (waits while
-empty). Unlike the session-typed `Chan` it is an ordinary value with no protocol and
-no linearity; unlike `MVar` it buffers more than one item, and unlike `Chan` it gives
-backpressure. It is built over `MVar` alone (the buffer is a ring of one-place
-`MVar`s), so it needs no runtime changes; the limits (no `close`, no cancellation of a
-blocked thread, no atomics beyond the MVar locks) are in
-[25f](stages/25-concurrency.md).
+`BChan.new capacity`, `BChan.send` (waits while full, returns `false` if closed) and
+`BChan.recv` (waits while empty, returns `none` if closed and drained). The non-blocking
+forms `BChan.trySend`/`BChan.tryRecv` never wait for a slot or an item; `BChan.close`
+wakes every blocked peer, fails later sends and lets receivers drain the buffered items,
+so no item a `send` reported as sent is lost; `BChan.isClosed` tells full/empty from
+closed, and `BChan.select` waits over two channels (a 1 ms poll). Unlike the
+session-typed `Chan` it is an ordinary value with no protocol and no linearity; unlike
+`MVar` it buffers more than one item, and unlike `Chan` it gives backpressure. It is
+built over `MVar` alone (one state `MVar` holding the queue and the blocked peers), so
+it needs no runtime changes; the close/cancellation, select-polling and ordering limits
+are in [25f](stages/25-concurrency.md).
 
 ## Owned handles (`lib/Handle.wiz`)
 

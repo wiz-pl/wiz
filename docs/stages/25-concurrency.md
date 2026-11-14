@@ -3,7 +3,8 @@
 Real threads in compiled code, and two peer APIs on top of them (decision CS1):
 session-typed linear channels (`lib/Session.wiz`), deadlock-free by construction, and
 MVars and locks (`lib/MVar.wiz`), which are more flexible and give weaker guarantees.
-A bounded buffer with backpressure (`lib/BChan.wiz`) is built on the MVars (25f).
+A bounded buffer with backpressure, non-blocking operations and close (`lib/BChan.wiz`) is
+built on the MVars (25f).
 Plan and survey: `concurrency-seplogic-plan.md` (stages C0, C2–C3, C8 there); runtime
 design: `concurrency.md`. Tests: group `conc`.
 
@@ -176,13 +177,18 @@ differential test; structured scopes (C4); a concurrency effect with a pure sche
 (sending endpoints) with protocol-level linear payloads; a mechanised deadlock-freedom
 proof (C7); `selfhost/rt.c` threads.
 
-## 25f: bounded channels and backpressure
+## 25f: bounded channels, non-blocking operations and close
 
 ```
 import BChan
-BChan.new  : (capacity : Nat) → IO (BChan A)     -- at least one slot (0 means 1)
-BChan.send : (c : BChan A) → A → IO Unit         -- waits while every slot is full
-BChan.recv : (c : BChan A) → IO A                -- waits while the next slot is empty
+BChan.new      : (capacity : Nat) → IO (BChan A)   -- at least one slot (0 means 1)
+BChan.send     : (c : BChan A) → A → IO Bool       -- waits while full; false = closed
+BChan.recv     : (c : BChan A) → IO (Option A)     -- waits while empty; none = closed
+BChan.trySend  : (c : BChan A) → A → IO Bool       -- never waits for a slot
+BChan.tryRecv  : (c : BChan A) → IO (Option A)     -- never waits for an item
+BChan.close    : (c : BChan A) → IO Unit           -- idempotent; wakes every peer
+BChan.isClosed : (c : BChan A) → IO Bool
+BChan.select   : (c d : BChan A) → IO (Option (Bool × A))   -- polls, see the limits
 ```
 
 A `Chan` (25c) is unbounded: `send` never blocks, so a producer faster than its
@@ -190,33 +196,57 @@ consumer grows the heap. `lib/BChan.wiz` is the bounded alternative: a FIFO buff
 `capacity` items that any number of threads may share. It is an ordinary (ω) value (it
 can be copied and handed to producers and consumers alike), it has no protocol type,
 and receiving gives the items in the order they were sent (which thread gets which
-item is the scheduler's business). Two producers and one consumer are the test in the
-`conc` group.
+item is the scheduler's business). Each sender's items keep their order; two senders'
+items interleave by the scheduler.
 
-The implementation is library-only, over `MVar` (no new natives, so the stage-25a
+**Implementation.** Library-only, over `MVar` (no new natives, so the stage-25a
 runtime is unchanged; like the MVars it runs in compiled code only, `#eval`/`#run`
-cannot run it): the buffer is a ring of one-place `MVar A` slots. Each side has
-an `MVar` holding its ring position, and holds it across its possibly blocking step, so
-sends enter the ring one at a time and receives leave it in the same order; `MVar.put`
-on the next slot is the condition variable that waits for a free slot, `MVar.take` the
-one that waits for an item. The ring advance wraps after `capacity` slots, so the
-sender whose turn it is blocks exactly when `capacity` items are unconsumed (the other
-senders wait behind it), and a receiver exactly when none are queued. Every receive is
-a `take` and every send a `put` on the slot's own `MVar`, so the buffer cannot
-deadlock on its own (the two indices are always within `capacity` of each other); the
-usual deadlock caveat of `MVar` (25d) still applies to programs built around it.
+cannot run it). One `MVar (BChan.State A)` holds the queue as a list (oldest first), a
+`closed` flag, and the blocked senders and receivers in arrival order; every operation
+is one `MVar.borrow` … `MVar.fill` critical section, so a state change is atomic with
+respect to every other operation. A peer that cannot proceed registers a fresh
+one-place `MVar Bool`, appends it to its side's list, releases the state and waits with
+`MVar.take`; the peer that adds an item or frees a slot removes one waiter from the
+other list and fills its cell, and `close` fills every cell. The woken peer re-runs
+its step after waking: a wake is a hint, not a token, so a `trySend` can take the
+freed slot first (there is no global fairness among concurrent senders). Waiting on
+per-peer cells, rather than on the state MVar, is what lets `close` wake every blocked
+peer without losing an item.
 
-**Limits.** (a) *Ordering.* The only happens-before edges are the `MVar`/`Lock`
-mutexes: the runtime's RC counts are relaxed atomics (`rt_core.inc`), the shared-marking
-walk (`wiz_mark_mt`) runs before the value is published under the mutex, and Wiz has no
+**Close and cancellation.** `close` is one critical section: it sets the flag, wakes
+every blocked sender and receiver, and leaves the buffered items in place. After it:
+
+* a blocked `send` (and any later `send`/`trySend`) returns `false`; its item was not
+  enqueued, so the caller still owns it;
+* a blocked `recv` (and any later `recv`/`tryRecv`) returns the items buffered before
+  the close, in FIFO order, and `none` once none are left. **No item that `send`
+  reported as sent is lost**, and a receiver never observes a closed channel before the
+  items queued ahead of it.
+* `close` is idempotent; `isClosed` distinguishes "full/empty" from "closed" after a
+  `try*` fails.
+
+There is no per-call cancellation: a thread blocked in `send`/`recv` can only be woken
+by `close` (or by the peer making progress), and dropping the last `BChan` does not
+wake it. A blocked operation holds the channel (and its own waiter cell) alive; the
+runtime waits for every thread before it checks for leaks (25a), so a blocked peer with
+no `close` hangs the process instead of reporting a leak, and the test driver's
+`timeout` is the only bound. `close` is the supported way to shut a channel down: once
+the blocked peers return, their references are dropped and the state MVar goes with the
+last copy of the `BChan` (the leak check that ends every compiled program,
+`wiz_finish_io`, is the safety net: the `conc` cases leak nothing).
+
+**Limits.** (a) *Select.* `BChan.select` is a poll: `tryRecv` on each channel, then a
+1 ms `Clock.sleep`, until one has an item or both are closed and drained. The MVar API
+has no "take from either of two cells", and one wake-up cell shared by two channels can
+deadlock a waker that fills it while the selector is not waiting on it, so a true
+two-cell wait is not available without a runtime change. The poll prefers the first
+channel when both have items and is not fair between concurrent selectors.
+(b) *Ordering.* The only happens-before edges are the `MVar`/`Lock` mutexes: the
+runtime's RC counts are relaxed atomics (`rt_core.inc`), the shared-marking walk
+(`wiz_mark_mt`) runs before the value is published under the mutex, and Wiz has no
 user-level atomics or fences, so the buffer (like the rest of the concurrency API)
 cannot be the basis of a lock-free structure — synchronise with `MVar`/`Lock`.
-(b) *Cancellation.* A thread blocked in `send`/`recv` cannot be interrupted, and there
-is no `close`: dropping a `BChan` does not wake its blocked peers. The runtime waits
-for every thread before it checks for leaks (25a), so a producer with no consumer hangs
-the process rather than reporting a leak; the test driver's `timeout` is the only
-bound. There is also no `trySend`/`tryRecv`/`select` (they need non-blocking MVar
-operations in the runtime). (c) The leak check that ends every compiled program
-(`wiz_finish_io` compares the live-object count with zero after the threads join) is
-the safety net for the tests: the `conc` cases for `BChan` leak nothing.
-
+(c) A `capacity` of 0 is treated as 1 (an MVar slot holds at most one item, so there
+is no rendezvous mode). (d) `trySend`/`tryRecv` never wait for the buffer's full/empty
+condition, but they do take the state MVar's mutex, so they can wait for the duration
+of another operation's (short, non-blocking) critical section.
