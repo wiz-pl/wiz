@@ -67,15 +67,20 @@ def Scry.certifyFinding (pr : Scry.ProgramResult) (f : Scry.RuleFinding) :
     | .some st =>
       let row := match f.kind with
         | .taint => [U64.ofNat f.sink, U64.ofNat f.arg]
-        | .forbidden => [U64.ofNat f.sink];
+        | .forbidden => [U64.ofNat f.sink]
+        | .memory => .nil;
       let rel := match f.kind with
         | .taint => Scry.rtAlert
-        | .forbidden => Scry.rtBadAlert;
-      match Scry.State.explainTuple Scry.ruleTaintProgram fr.edb.db st rel row with
-      | .none => .none
-      | .some d =>
-        let verified := Scry.Derivation.check Scry.ruleTaintProgram fr.edb.db d;
-        .some (Scry.Certificate.mk f d (Scry.renderAxioms d) (Scry.assumptionsOf f) verified)
+        | .forbidden => Scry.rtBadAlert
+        | .memory => Scry.rtAlert;
+      match f.kind with
+      | .memory => .none
+      | _ =>
+        match Scry.State.explainTuple Scry.ruleTaintProgram fr.edb.db st rel row with
+        | .none => .none
+        | .some d =>
+          let verified := Scry.Derivation.check Scry.ruleTaintProgram fr.edb.db d;
+          .some (Scry.Certificate.mk f d (Scry.renderAxioms d) (Scry.assumptionsOf f) verified)
 
 /-- Certify every finding of a program. -/
 def Scry.certifyAll (pr : Scry.ProgramResult) : List Scry.Certificate :=

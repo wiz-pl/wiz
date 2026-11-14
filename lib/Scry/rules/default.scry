@@ -5,44 +5,110 @@
 # implemented by `Scry.parseRulePack` (`lib/Scry/Rules.wiz`):
 #
 #   rule ID
-#     kind taint | forbidden
+#     kind taint | forbidden | memory
 #     severity error | warning | note
+#     cwe CWE-NN                    (metadata; emitted in SARIF properties.cwe)
 #     message TEXT
 #     source NAME result | arg K
 #     sanitise NAME result | arg K
 #     sink NAME arg K
 #     call NAME                     (forbidden rules)
+#     check NAME                    (memory rules: use-after-free)
 #   end
 #
-# Names match with `*` as a wildcard over the whole callee name.
+# Names match with `*` as a wildcard over the whole callee name. A `kind memory` rule
+# promotes a points-to warning to a finding; that finding is `unchecked` (its evidence
+# is the memory model, not a source -> sink derivation).
+#
+# The CWE tags are the *targeted* weakness, not a claim that a finding proves the
+# weakness. A taint rule says "attacker-controlled data reaches this argument"; whether
+# that is exploitable still depends on the callee and the surrounding checks.
+#
+# source/sink/sanitiser table (also in docs/libraries.md):
+#
+#   rule              sources                                  sanitisers
+#   command-injection getenv,recv,read[1],fgets[0],getline[0]   escape_shell,shellescape,
+#                     fread[0]                                 sanitize[0],quote_arg
+#   format-string     getenv,recv,read[1],fgets[0]              sanitize_format
+#   buffer-overflow   getenv,recv,read[1],fgets[0]              clamp_len,checked_size
+#   integer-overflow  getenv,recv,read[1],fgets[0]              checked_size,clamp_size
+#   path-traversal    getenv,recv,read[1],fgets[0]              sanitize_path,confine_path
+#
+# `strcpy-overflow` and `gets-overflow` are forbidden calls: unsafe regardless of taint.
+#
+# The C lowering folds `malloc`/`calloc` into `Wil.alloc` and leaves `realloc` havoc, so
+# the `integer-overflow` size sinks for those names are a documented gap in this C
+# slice; `alloca` stays a call and is the positive control. The pack keeps the names so
+# another frontend (or a later `alloc`-size model) can use the same rule.
 
 rule command-injection
   kind taint
   severity error
+  cwe CWE-78
   message Attacker-controlled data reaches a command interpreter
   source getenv result
   source recv result
   source read arg 1
+  source fgets arg 0
+  source getline arg 0
+  source fread arg 0
   sanitise escape_shell result
+  sanitise shellescape result
   sanitise sanitize arg 0
+  sanitise quote_arg result
   sink system arg 0
   sink popen arg 0
+  sink exec* arg 0
+  sink posix_spawn arg 1
+  sink posix_spawnp arg 1
 end
 
 rule format-string
   kind taint
   severity warning
+  cwe CWE-134
   message Attacker-controlled data is used as a format string
   source getenv result
   source recv result
-  sanitise escape_shell result
+  source read arg 1
+  source fgets arg 0
+  sanitise sanitize_format result
   sink printf arg 0
   sink fprintf arg 1
+  sink sprintf arg 1
+  sink snprintf arg 2
+  sink vprintf arg 0
+  sink vfprintf arg 1
+  sink vsprintf arg 1
+  sink vsnprintf arg 2
+  sink syslog arg 1
+  sink dprintf arg 1
+  sink asprintf arg 1
+end
+
+rule buffer-overflow
+  kind taint
+  severity warning
+  cwe CWE-787
+  message Attacker-controlled length reaches a copy or read; the destination can overflow
+  source getenv result
+  source recv result
+  source read arg 1
+  source fgets arg 0
+  sanitise clamp_len result
+  sanitise checked_size result
+  sink memcpy arg 2
+  sink memmove arg 2
+  sink memset arg 2
+  sink read arg 2
+  sink recv arg 2
+  sink snprintf arg 1
 end
 
 rule gets-overflow
   kind forbidden
   severity error
+  cwe CWE-242
   message gets cannot bound its write; use fgets with a size
   call gets
 end
@@ -50,7 +116,65 @@ end
 rule strcpy-overflow
   kind forbidden
   severity warning
-  message strcpy does not bound the copy; use strlcpy or a checked length
+  cwe CWE-120
+  message the copy does not bound its destination; use a size-checked variant
   call strcpy
   call strcat
+  call sprintf
+  call vsprintf
+  call stpcpy
+end
+
+rule integer-overflow
+  kind taint
+  severity warning
+  cwe CWE-190
+  message Attacker-controlled value reaches an allocation size; the size may overflow or exhaust memory
+  source getenv result
+  source recv result
+  source read arg 1
+  source fgets arg 0
+  sanitise checked_size result
+  sanitise clamp_size result
+  sink malloc arg 0
+  sink calloc arg 0
+  sink calloc arg 1
+  sink realloc arg 1
+  sink alloca arg 0
+end
+
+rule path-traversal
+  kind taint
+  severity error
+  cwe CWE-22
+  message Attacker-controlled data reaches a filesystem path
+  source getenv result
+  source recv result
+  source read arg 1
+  source fgets arg 0
+  sanitise sanitize_path result
+  sanitise confine_path result
+  sink fopen arg 0
+  sink freopen arg 0
+  sink open arg 0
+  sink openat arg 1
+  sink creat arg 0
+  sink stat arg 0
+  sink lstat arg 0
+  sink unlink arg 0
+  sink remove arg 0
+  sink rename arg 0
+  sink rename arg 1
+  sink chdir arg 0
+  sink opendir arg 0
+  sink access arg 0
+  sink mkdir arg 0
+end
+
+rule use-after-free
+  kind memory
+  severity error
+  cwe CWE-416
+  message A memory location is accessed after a free on some path
+  check use-after-free
 end

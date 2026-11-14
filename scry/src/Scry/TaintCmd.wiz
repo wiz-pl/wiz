@@ -222,12 +222,14 @@ def Scry.boundaryFindings (uri text : String) (tu : Scry.TU) : List Scry.Boundar
   List.map (Scry.boundaryOfWarning uri text) tu.warnings
 
 /-- The points-to diagnostics as warning findings, located with the same origin map the
-findings use. -/
-def Scry.memoryFindings (origins : Scry.OriginMap) (ws : List Scry.MemWarning) :
+findings use. A warning a `kind memory` pack rule already reports as a finding is
+skipped here, so it is not printed twice. -/
+def Scry.memoryFindings (origins : Scry.OriginMap) (pr : Scry.ProgramResult) :
     List Scry.BoundaryFinding :=
   List.map (fun w => Scry.BoundaryFinding.mk
     (String.append "scry/memory/" (Scry.MemWarnKind.show w.kind)) w.detail
-    w.func w.point (Scry.originAt origins w.func w.point)) ws
+    w.func w.point (Scry.originAt origins w.func w.point))
+    (List.filter (fun w => Bool.not (Scry.memWarningCovered pr w)) pr.warnings)
 
 -- ## Derivation status
 
@@ -340,7 +342,8 @@ structure Scry.TaintReport where
   checks : List Bool
   origins : Scry.OriginMap
   boundaries : List Scry.BoundaryFinding
-  /-- Points-to diagnostics: unknown memory, use after free, unresolved indirect calls. -/
+  /-- Points-to diagnostics not promoted by a `kind memory` rule: unknown memory and
+  unresolved indirect calls (use after free is a finding when the pack has the rule). -/
   memory : List Scry.BoundaryFinding
   /-- The points-to solution (locations and indirect targets), for `--origin-map`-style
   inspection and the tests. -/
@@ -364,7 +367,7 @@ def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do
     let findings := Scry.programFindings pr;
     let origins := Scry.originEntries o.file text tu.funcs;
     let boundaries := Scry.boundaryFindings o.file text tu;
-    let memory := Scry.memoryFindings origins pr.warnings;
+    let memory := Scry.memoryFindings origins pr;
     let checks := List.map (fun f => Scry.findingChecked pr f) findings;
     EIO.pure (Scry.TaintReport.mk o.file errs pack tu findings checks origins boundaries
       memory pr.pointsTo)

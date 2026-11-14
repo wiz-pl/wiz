@@ -3,12 +3,20 @@
 This directory is the checked-in S0/S2 corpus for `scry bench`:
 
 * `manifest.json` — the cases: suite, CWE, file, `expect`, and the expected findings.
-* `cwe78/` — CWE-78 command injection.
-* `cwe120/`, `cwe121/` — unbounded `strcpy`/`strcat` (the default pack's forbidden
-  calls).
-* `cwe134/` — format strings.
+* `cwe22/` — CWE-22 path traversal (`fopen`/`open`, a confinement sanitiser).
+* `cwe78/` — CWE-78 command injection (`system`, `popen`, `exec*`).
+* `cwe120/`, `cwe121/` — unbounded `strcpy`/`strcat`/`sprintf` (the default pack's
+  forbidden calls) and the array-boundary probe.
+* `cwe134/` — format strings (`printf`, `fprintf`, `syslog`).
+* `cwe190/` — CWE-190 attacker-controlled allocation size.
 * `cwe242/` — `gets`.
+* `cwe416/` — CWE-416 use after free (a `kind memory` rule; the finding is unchecked).
+* `cwe787/` — CWE-787 attacker-controlled copy length.
 * `../../tests/fixtures/taint-*.c` — the S0 fixtures the taint test group already uses.
+
+The CWE tag is the targeted weakness, not a claim that a finding proves it. A taint
+finding says "attacker-controlled data reaches this argument"; a memory finding says "this
+access follows a free on some path". Both are may-analyses and are scored as such.
 
 The fixtures are deliberately small and hand-authored. They are a regression and
 debugging corpus, not evidence of real-world precision; S1/S3/S4 are optional external
@@ -33,7 +41,9 @@ corpora (see below).
 * `expect` is `unsafe`, `safe`, or `unknown`.
 * An `unsafe` case lists every expected finding. Matching is one-to-one on
   `(rule, function, callee, argument)`; `sinkLine` and `sourceLine` are optional and,
-  when present, must match the reported locations.
+  when present, must match the reported locations. A `kind memory` finding has no callee:
+  its `callee` field is the access (`store`, `load`, `external <name>`), e.g.
+  `{"rule": "use-after-free", "callee": "load", "argument": 0}`.
 * A `safe` case expects no finding.
 * An `unknown` case is a documented coverage probe. It is reported as `unknown` and is
   excluded from TPR/FPR; use it for a construct the frontend cannot model yet.

@@ -222,6 +222,9 @@ structure Scry.ProgramResult where
   pointsTo : Scry.PtResult
   /-- Memory diagnostics (unknown target, use after free, unresolved indirect call). -/
   warnings : List Scry.MemWarning
+  /-- The pack the program was analysed with; a `kind memory` rule promotes matching
+  warnings to findings. -/
+  pack : Scry.RulePack
 
 def Scry.findResult (pr : Scry.ProgramResult) (name : String) : Option Scry.FuncResult :=
   List.find (fun r => String.eq r.fn.name name) pr.results
@@ -229,7 +232,8 @@ def Scry.findResult (pr : Scry.ProgramResult) (name : String) : Option Scry.Func
 /-- Deduplicate diagnostics (a function is evaluated once per summary round only in the
 final pass, but be defensive). -/
 def Scry.memWarnKey (w : Scry.MemWarning) : String :=
-  (Scry.MemWarnKind.show w.kind) ++ "|" ++ w.func ++ "|" ++ Nat.repr w.point ++ "|" ++ w.detail
+  (Scry.MemWarnKind.show w.kind) ++ "|" ++ w.func ++ "|" ++ Nat.repr w.point ++ "|"
+  ++ w.op ++ "|" ++ w.detail
 
 def Scry.dedupWarnings (ws : List Scry.MemWarning) : List Scry.MemWarning :=
   List.foldl (fun acc w =>
@@ -248,7 +252,7 @@ def Scry.analyze (p : Wil.Program) (pack : Scry.RulePack) : Scry.ProgramResult :
   let sums := Scry.summaryLoop p pack graph pt fuel sums0;
   let results := Scry.resultsWith p pack graph pt sums;
   let warnings := Scry.dedupWarnings (Scry.concatLists (fun r => r.plan.memWarnings) results);
-  Scry.ProgramResult.mk results sums graph pt warnings
+  Scry.ProgramResult.mk results sums graph pt warnings pack
 
 -- ## Stitching paths across calls
 
@@ -402,12 +406,38 @@ def Scry.insertRuleFinding (f : Scry.RuleFinding) (fs : List Scry.RuleFinding) :
 def Scry.sortRuleFindings (fs : List Scry.RuleFinding) : List Scry.RuleFinding :=
   List.foldr (fun f acc => Scry.insertRuleFinding f acc) .nil fs
 
-/-- All findings of an analysed program, with interprocedural paths. -/
+/-- A points-to memory warning reported by a `kind memory` pack rule. Its evidence is
+the offending access itself (a one-node path), never a source -> sink derivation, and
+it has no certificate; the CLI and SARIF mark it `unchecked`. -/
+def Scry.memoryRuleFinding (r : Scry.MemoryRule) (w : Scry.MemWarning) : Scry.RuleFinding :=
+  Scry.RuleFinding.mk r.id r.severity r.message Scry.FindingKind.memory w.func w.point
+    w.op 0 (List.cons (Scry.PathNode.mk w.func w.point 0 Scry.PathKind.sink) .nil)
+
+/-- The memory findings a pack asks for: for every warning whose kind a `kind memory`
+rule checks, one finding. The warnings stay in `ProgramResult.warnings`; a consumer that
+prints both should use `Scry.memWarningCovered` to avoid reporting it twice. -/
+def Scry.memoryRuleFindings (pr : Scry.ProgramResult) : List Scry.RuleFinding :=
+  Scry.concatLists (fun w =>
+    match Scry.RulePack.memoryRuleFor pr.pack (Scry.MemWarnKind.show w.kind) with
+    | .none => .nil
+    | .some r => List.cons (Scry.memoryRuleFinding r w) .nil) pr.warnings
+
+/-- Whether a pack memory rule already reports this warning as a finding. -/
+def Scry.memWarningCovered (pr : Scry.ProgramResult) (w : Scry.MemWarning) : Bool :=
+  match Scry.RulePack.memoryRuleFor pr.pack (Scry.MemWarnKind.show w.kind) with
+  | .none => .false
+  | .some _ => .true
+
+/-- All findings of an analysed program, with interprocedural paths. Taint and forbidden
+findings come from the Datalog engine; memory findings come from the points-to warnings a
+`kind memory` rule promotes. -/
 def Scry.programFindings (pr : Scry.ProgramResult) : List Scry.RuleFinding :=
-  Scry.sortRuleFindings (Scry.concatLists (fun r =>
-    List.map (fun f =>
-      { f with path := Scry.extendPath pr .nil 16 r f.path }) (Scry.resultFindings r))
-    pr.results)
+  Scry.sortRuleFindings (List.append
+    (Scry.concatLists (fun r =>
+      List.map (fun f =>
+        { f with path := Scry.extendPath pr .nil 16 r f.path }) (Scry.resultFindings r))
+      pr.results)
+    (Scry.memoryRuleFindings pr))
 
 /-- The findings of one function (its intraprocedural part; the path is not stitched). -/
 def Scry.funcFindings (pr : Scry.ProgramResult) (name : String) : List Scry.RuleFinding :=

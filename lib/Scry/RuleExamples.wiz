@@ -28,9 +28,10 @@ Point numbering follows `Scry.Analysis` (statements then a terminator per block)
 comments name the interesting ones.
 
 The rule pack is `Scry.demoPackText` / `Scry.demoRules`: command injection, format
-strings, `gets` and `strcpy`. `lib/Scry/rules/default.scry` is the same pack as a real
-spec file; `Scry.demoPackText` mirrors it so the tests exercise the parser without file
-IO.
+strings, copy/read lengths, `gets`, unbounded `strcpy`/`sprintf`, integer sizes, path
+traversal and use after free (the `kind memory` rule). `lib/Scry/rules/default.scry` is
+the same pack as a real spec file; `Scry.demoPackText` mirrors it so the tests exercise
+the parser without file IO.
 -/
 
 def Scry.rtv (n : Nat) : Wil.Var := Wil.var n Wil.i32
@@ -38,40 +39,185 @@ def Scry.rtv (n : Nat) : Wil.Var := Wil.var n Wil.i32
 -- ## The rule pack
 
 def Scry.demoPackText : String :=
-  "rule command-injection\n" ++
-  "  kind taint\n" ++
-  "  severity error\n" ++
-  "  message Attacker-controlled data reaches a command interpreter\n" ++
-  "  source getenv result\n" ++
-  "  source recv result\n" ++
-  "  source read arg 1\n" ++
-  "  sanitise escape_shell result\n" ++
-  "  sanitise sanitize arg 0\n" ++
-  "  sink system arg 0\n" ++
-  "  sink popen arg 0\n" ++
-  "end\n" ++
-  "rule format-string\n" ++
-  "  kind taint\n" ++
-  "  severity warning\n" ++
-  "  message Attacker-controlled data is used as a format string\n" ++
-  "  source getenv result\n" ++
-  "  source recv result\n" ++
-  "  sanitise escape_shell result\n" ++
-  "  sink printf arg 0\n" ++
-  "  sink fprintf arg 1\n" ++
-  "end\n" ++
-  "rule gets-overflow\n" ++
-  "  kind forbidden\n" ++
-  "  severity error\n" ++
-  "  message gets cannot bound its write; use fgets with a size\n" ++
-  "  call gets\n" ++
-  "end\n" ++
-  "rule strcpy-overflow\n" ++
-  "  kind forbidden\n" ++
-  "  severity warning\n" ++
-  "  message strcpy does not bound the copy; use strlcpy or a checked length\n" ++
-  "  call strcpy\n" ++
-  "  call strcat\n" ++
+  "# scry's default rule pack (S4)\n" ++ 
+  "#\n" ++ 
+  "# The canonical text is mirrored by `Scry.demoPackText` in\n" ++ 
+  "# `lib/Scry/RuleExamples.wiz`, which the `scry-taint` tests parse. The format is\n" ++ 
+  "# implemented by `Scry.parseRulePack` (`lib/Scry/Rules.wiz`):\n" ++ 
+  "#\n" ++ 
+  "#   rule ID\n" ++ 
+  "#     kind taint | forbidden | memory\n" ++ 
+  "#     severity error | warning | note\n" ++ 
+  "#     cwe CWE-NN                    (metadata; emitted in SARIF properties.cwe)\n" ++ 
+  "#     message TEXT\n" ++ 
+  "#     source NAME result | arg K\n" ++ 
+  "#     sanitise NAME result | arg K\n" ++ 
+  "#     sink NAME arg K\n" ++ 
+  "#     call NAME                     (forbidden rules)\n" ++ 
+  "#     check NAME                    (memory rules: use-after-free)\n" ++ 
+  "#   end\n" ++ 
+  "#\n" ++ 
+  "# Names match with `*` as a wildcard over the whole callee name. A `kind memory` rule\n" ++ 
+  "# promotes a points-to warning to a finding; that finding is `unchecked` (its evidence\n" ++ 
+  "# is the memory model, not a source -> sink derivation).\n" ++ 
+  "#\n" ++ 
+  "# The CWE tags are the *targeted* weakness, not a claim that a finding proves the\n" ++ 
+  "# weakness. A taint rule says \"attacker-controlled data reaches this argument\"; whether\n" ++ 
+  "# that is exploitable still depends on the callee and the surrounding checks.\n" ++ 
+  "#\n" ++ 
+  "# source/sink/sanitiser table (also in docs/libraries.md):\n" ++ 
+  "#\n" ++ 
+  "#   rule              sources                                  sanitisers\n" ++ 
+  "#   command-injection getenv,recv,read[1],fgets[0],getline[0]   escape_shell,shellescape,\n" ++ 
+  "#                     fread[0]                                 sanitize[0],quote_arg\n" ++ 
+  "#   format-string     getenv,recv,read[1],fgets[0]              sanitize_format\n" ++ 
+  "#   buffer-overflow   getenv,recv,read[1],fgets[0]              clamp_len,checked_size\n" ++ 
+  "#   integer-overflow  getenv,recv,read[1],fgets[0]              checked_size,clamp_size\n" ++ 
+  "#   path-traversal    getenv,recv,read[1],fgets[0]              sanitize_path,confine_path\n" ++ 
+  "#\n" ++ 
+  "# `strcpy-overflow` and `gets-overflow` are forbidden calls: unsafe regardless of taint.\n" ++ 
+  "#\n" ++ 
+  "# The C lowering folds `malloc`/`calloc` into `Wil.alloc` and leaves `realloc` havoc, so\n" ++ 
+  "# the `integer-overflow` size sinks for those names are a documented gap in this C\n" ++ 
+  "# slice; `alloca` stays a call and is the positive control. The pack keeps the names so\n" ++ 
+  "# another frontend (or a later `alloc`-size model) can use the same rule.\n" ++ 
+  "\n" ++ 
+  "rule command-injection\n" ++ 
+  "  kind taint\n" ++ 
+  "  severity error\n" ++ 
+  "  cwe CWE-78\n" ++ 
+  "  message Attacker-controlled data reaches a command interpreter\n" ++ 
+  "  source getenv result\n" ++ 
+  "  source recv result\n" ++ 
+  "  source read arg 1\n" ++ 
+  "  source fgets arg 0\n" ++ 
+  "  source getline arg 0\n" ++ 
+  "  source fread arg 0\n" ++ 
+  "  sanitise escape_shell result\n" ++ 
+  "  sanitise shellescape result\n" ++ 
+  "  sanitise sanitize arg 0\n" ++ 
+  "  sanitise quote_arg result\n" ++ 
+  "  sink system arg 0\n" ++ 
+  "  sink popen arg 0\n" ++ 
+  "  sink exec* arg 0\n" ++ 
+  "  sink posix_spawn arg 1\n" ++ 
+  "  sink posix_spawnp arg 1\n" ++ 
+  "end\n" ++ 
+  "\n" ++ 
+  "rule format-string\n" ++ 
+  "  kind taint\n" ++ 
+  "  severity warning\n" ++ 
+  "  cwe CWE-134\n" ++ 
+  "  message Attacker-controlled data is used as a format string\n" ++ 
+  "  source getenv result\n" ++ 
+  "  source recv result\n" ++ 
+  "  source read arg 1\n" ++ 
+  "  source fgets arg 0\n" ++ 
+  "  sanitise sanitize_format result\n" ++ 
+  "  sink printf arg 0\n" ++ 
+  "  sink fprintf arg 1\n" ++ 
+  "  sink sprintf arg 1\n" ++ 
+  "  sink snprintf arg 2\n" ++ 
+  "  sink vprintf arg 0\n" ++ 
+  "  sink vfprintf arg 1\n" ++ 
+  "  sink vsprintf arg 1\n" ++ 
+  "  sink vsnprintf arg 2\n" ++ 
+  "  sink syslog arg 1\n" ++ 
+  "  sink dprintf arg 1\n" ++ 
+  "  sink asprintf arg 1\n" ++ 
+  "end\n" ++ 
+  "\n" ++ 
+  "rule buffer-overflow\n" ++ 
+  "  kind taint\n" ++ 
+  "  severity warning\n" ++ 
+  "  cwe CWE-787\n" ++ 
+  "  message Attacker-controlled length reaches a copy or read; the destination can overflow\n" ++ 
+  "  source getenv result\n" ++ 
+  "  source recv result\n" ++ 
+  "  source read arg 1\n" ++ 
+  "  source fgets arg 0\n" ++ 
+  "  sanitise clamp_len result\n" ++ 
+  "  sanitise checked_size result\n" ++ 
+  "  sink memcpy arg 2\n" ++ 
+  "  sink memmove arg 2\n" ++ 
+  "  sink memset arg 2\n" ++ 
+  "  sink read arg 2\n" ++ 
+  "  sink recv arg 2\n" ++ 
+  "  sink snprintf arg 1\n" ++ 
+  "end\n" ++ 
+  "\n" ++ 
+  "rule gets-overflow\n" ++ 
+  "  kind forbidden\n" ++ 
+  "  severity error\n" ++ 
+  "  cwe CWE-242\n" ++ 
+  "  message gets cannot bound its write; use fgets with a size\n" ++ 
+  "  call gets\n" ++ 
+  "end\n" ++ 
+  "\n" ++ 
+  "rule strcpy-overflow\n" ++ 
+  "  kind forbidden\n" ++ 
+  "  severity warning\n" ++ 
+  "  cwe CWE-120\n" ++ 
+  "  message the copy does not bound its destination; use a size-checked variant\n" ++ 
+  "  call strcpy\n" ++ 
+  "  call strcat\n" ++ 
+  "  call sprintf\n" ++ 
+  "  call vsprintf\n" ++ 
+  "  call stpcpy\n" ++ 
+  "end\n" ++ 
+  "\n" ++ 
+  "rule integer-overflow\n" ++ 
+  "  kind taint\n" ++ 
+  "  severity warning\n" ++ 
+  "  cwe CWE-190\n" ++ 
+  "  message Attacker-controlled value reaches an allocation size; the size may overflow or exhaust memory\n" ++ 
+  "  source getenv result\n" ++ 
+  "  source recv result\n" ++ 
+  "  source read arg 1\n" ++ 
+  "  source fgets arg 0\n" ++ 
+  "  sanitise checked_size result\n" ++ 
+  "  sanitise clamp_size result\n" ++ 
+  "  sink malloc arg 0\n" ++ 
+  "  sink calloc arg 0\n" ++ 
+  "  sink calloc arg 1\n" ++ 
+  "  sink realloc arg 1\n" ++ 
+  "  sink alloca arg 0\n" ++ 
+  "end\n" ++ 
+  "\n" ++ 
+  "rule path-traversal\n" ++ 
+  "  kind taint\n" ++ 
+  "  severity error\n" ++ 
+  "  cwe CWE-22\n" ++ 
+  "  message Attacker-controlled data reaches a filesystem path\n" ++ 
+  "  source getenv result\n" ++ 
+  "  source recv result\n" ++ 
+  "  source read arg 1\n" ++ 
+  "  source fgets arg 0\n" ++ 
+  "  sanitise sanitize_path result\n" ++ 
+  "  sanitise confine_path result\n" ++ 
+  "  sink fopen arg 0\n" ++ 
+  "  sink freopen arg 0\n" ++ 
+  "  sink open arg 0\n" ++ 
+  "  sink openat arg 1\n" ++ 
+  "  sink creat arg 0\n" ++ 
+  "  sink stat arg 0\n" ++ 
+  "  sink lstat arg 0\n" ++ 
+  "  sink unlink arg 0\n" ++ 
+  "  sink remove arg 0\n" ++ 
+  "  sink rename arg 0\n" ++ 
+  "  sink rename arg 1\n" ++ 
+  "  sink chdir arg 0\n" ++ 
+  "  sink opendir arg 0\n" ++ 
+  "  sink access arg 0\n" ++ 
+  "  sink mkdir arg 0\n" ++ 
+  "end\n" ++ 
+  "\n" ++ 
+  "rule use-after-free\n" ++ 
+  "  kind memory\n" ++ 
+  "  severity error\n" ++ 
+  "  cwe CWE-416\n" ++ 
+  "  message A memory location is accessed after a free on some path\n" ++ 
+  "  check use-after-free\n" ++ 
   "end\n"
 
 def Scry.demoRules : Scry.RulePack := Scry.parseRulePack Scry.demoPackText
@@ -307,3 +453,21 @@ def Scry.indirectMainFn : Wil.Func :=
 
 def Scry.indirectProgram : Wil.Program :=
   Wil.program [Scry.indirectMainFn, Scry.indirectCalleeFn]
+
+-- ## A memory-lifetime rule finding
+
+/-- `uafMain() { p = alloc(1); *p = v; free(p); v = *p }`: the load after `free` is a
+points-to warning, and the pack's `kind memory` rule promotes it to a finding.
+Points: 0 alloc, 1 store, 2 free, 3 load, 4 return. -/
+def Scry.uafFn : Wil.Func :=
+  let p := Wil.var 0 (.ptr Wil.i32);
+  let v := Scry.rtv 1;
+  Wil.func "uafMain" [] [p, v]
+    [ Wil.block
+        [ Wil.alloc p 1
+        , Wil.store p v
+        , Wil.free p
+        , Wil.load v p ]
+        (Wil.ret .none) ]
+
+def Scry.uafProgram : Wil.Program := Wil.program [Scry.uafFn]

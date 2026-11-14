@@ -109,8 +109,9 @@ Fixtures and their expected results are in `tests/fixtures/mem-*.c` and asserted
 different slot (0), struct fields and a global field (2, and the sibling field 0), array
 elements (1, sibling elements/arrays 0), a variable index (`a[i]` keeps the array, so 1
 finding and no false positive on `b[i]`), heap (1), pointer-to-pointer (1), aliased
-parameters (1 across two calls), `free` then use (1 finding + `use-after-free`), known
-indirect target (1), unknown indirect target (0 findings + `unknown-indirect`),
+parameters (1 across two calls), `free` then use (2 findings: the taint flow and the
+`use-after-free` memory rule), known indirect target (1), unknown indirect target
+(0 findings + `unknown-indirect`),
 returned pointer (1), `strcpy` into one array (1, the other array 0), and an unmodelled
 external's pointer (1 finding + two `unknown-memory` warnings).
 
@@ -133,9 +134,11 @@ by `parseChecked` (tree-sitter's recovery tree has 2 `ERROR`/`MISSING` nodes).
 `scry bench` runs the same pipeline as `scry taint` over `bench/corpus/manifest.json`,
 compares the findings with the manifest's expectations, and writes stable JSON and
 Markdown. The checked-in corpus is **S0/S2**: the existing `tests/fixtures/taint-*.c`
-goldens plus hand-authored safe/unsafe pairs for CWE-78 (command injection), CWE-134
-(format string), CWE-242 (`gets`) and CWE-120/121 (`strcpy`/`strcat`). S1/S3/S4 are
-optional external corpora (`--extra DIR`); no third-party corpus is checked in.
+goldens plus hand-authored safe/unsafe pairs for CWE-22 (path traversal), CWE-78
+(command injection), CWE-120/121/242/787 (unbounded copy, `gets`, tainted copy length),
+CWE-134 (format string), CWE-190 (tainted allocation size) and CWE-416 (use after free).
+S1/S3/S4 are optional external corpora (`--extra DIR`); no third-party corpus is checked
+in.
 
 ```sh
 grail run scry -- bench                         # build/bench.json + build/bench.md

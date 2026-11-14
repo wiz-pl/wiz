@@ -916,10 +916,16 @@ engine's provenance. `import Scry.TaintExamples` is the hand-built corpus used b
 
 The S4 rule pack and interprocedural slice are separate modules:
 
-* `import Scry.Rules` — named rules with an id, severity and message, sources/sinks/
-  sanitisers **per argument** (`source read arg 1`, `sanitise sanitize arg 0`), a textual
-  `.scry` block format (`Scry.parseRulePack`) and `*` function-name matching.
-  `lib/Scry/rules/default.scry` is the demo pack as a real spec file.
+* `import Scry.Rules` — named rules with an id, severity, message and CWE tag,
+  sources/sinks/sanitisers **per argument** (`source read arg 1`, `sanitise sanitize
+  arg 0`), a textual `.scry` block format (`Scry.parseRulePack`) and `*` function-name
+  matching. Three kinds: `taint`, `forbidden` (an unconditionally unsafe call) and
+  `memory` (a points-to lifetime diagnostic promoted to a finding, today
+  `check use-after-free`). `lib/Scry/rules/default.scry` is the demo pack as a real spec
+  file; it targets CWE-78, CWE-134, CWE-787/CWE-120/CWE-242, CWE-190, CWE-22 and
+  CWE-416. A `memory` finding is always `unchecked`: its evidence is the points-to model,
+  not a source -> sink derivation. The pack's source/sink/sanitiser table is in the file's
+  header and in `wiz-notes/scry-taint.md` §12.9.
 * `import Scry.RuleTaint` — variable-indexed taint as Datalog over a rule pack; an
   argument source/sanitiser becomes an extra definition point, and a `gen` fact is the
   ordinary definition a statement's tainted input transfers to.
@@ -937,14 +943,16 @@ The S4 rule pack and interprocedural slice are separate modules:
 * `import Scry.RuleTaint` also carries the memory rules: `mstore`/`mload`/`mtainted`
   make a `store` taint the locations it may alias and a later `load` receive it, with
   `store`/`load` path nodes. Diagnostics that are not findings (unknown memory, use after
-  free, unresolved indirect call) are `Scry.MemWarning`s with a function and program
-  point.
+  free, unresolved indirect call) are `Scry.MemWarning`s with a function, program point,
+  access (`store`/`load`/`external …`) and detail. A pack `kind memory` rule turns the
+  warning kinds it checks into findings; the remaining warnings stay diagnostics.
 * `import Scry.Sarif` — SARIF 2.1.0 JSON with rule metadata, primary and related
   locations from an `OriginMap` (S2's `Wil.Span` supplies the entries; a finding's
   `properties.derivation` is `checked`/`unchecked`), namespaced rule ids
   (`scry/c/<rule>`, `scry/lowering/boundary`, `scry/memory/<kind>`) and
   `columnKind: utf16CodeUnits`; `Scry.boundaryResultJson` emits a warning result whose
-  location is the offending statement's span.
+  location is the offending statement's span. Each rule descriptor carries
+  `properties.kind` and, when the pack gives one, `properties.cwe`.
 * `import Scry.Certify` — a finding as a `Scry.Derivation` checked by `Scry.Cert`
   against the function's EDB, reporting its axioms and the interprocedural assumptions
   the path walk supplies.

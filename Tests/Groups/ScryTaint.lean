@@ -16,7 +16,8 @@ The cases cover:
   same program without the sanitiser), no flow, a branch merge, a loop fixpoint, the
   false-positive/false-negative pair, the spec parser, the sink argument index, CFG
   edges, dominators, reaching definitions, PDG edges and stratification;
-* the `.scry` rule pack: four rules, per-argument sources/sinks, severities, kinds and
+* the `.scry` rule pack: eight rules across seven CWEs, per-argument sources/sinks,
+  severities, kinds (including `memory`) and
   function-name matching;
 * interprocedural flow: argument -> parameter, return-value summaries, and a recursive
   parameter fixpoint, with the stitched source -> sink paths;
@@ -260,7 +261,7 @@ def group : Group where
           "#eval Nat.add (Nat.mul (List.length Scry.demoRules.rules) 10000) (Nat.add (Nat.mul (List.length (Scry.RulePack.taintRules Scry.demoRules)) 1000) (Nat.add (Nat.mul (List.length (Scry.RulePack.forbiddenRules Scry.demoRules)) 100) (Nat.add (Nat.mul (totalSinks (Scry.RulePack.taintRules Scry.demoRules)) 10) (totalSources (Scry.RulePack.taintRules Scry.demoRules)))))\n" ++
           "#eval if Scry.nameMatches \"mem*\" \"memcpy\" then 1 else 0\n" ++
           "#eval if Scry.nameMatches \"strcpy*\" \"astrcpy\" then 1 else 0\n" ++
-          "#eval match Scry.Program.check Scry.ruleTaintProgram with | .none => 999 | .some st => List.length st") [42245, 1, 0, 14]
+          "#eval match Scry.Program.check Scry.ruleTaintProgram with | .none => 999 | .some st => List.length st") [85642, 1, 0, 14]
         evalRuleTexts (rulePrelude ++
           "#eval ruleSev Scry.demoRules.rules \"gets-overflow\"\n" ++
           "#eval ruleKind Scry.demoRules.rules \"gets-overflow\"")
@@ -268,7 +269,7 @@ def group : Group where
         let text ← IO.FS.readFile "lib/Scry/rules/default.scry"
         let lit := (text.replace "\\" "\\\\").replace "\"" "\\\"" |>.replace "\n" "\\n"
         evalRuleNats (rulePrelude ++
-          s!"#eval List.length (Scry.parseRulePack \"{lit}\").rules") [4] },
+          s!"#eval List.length (Scry.parseRulePack \"{lit}\").rules") [8] },
     { name := "interprocedural: argument taint crosses a direct call to the callee's sink",
       run := fun _ => do
         evalRuleNats (rulePrelude ++
@@ -374,6 +375,34 @@ def group : Group where
         "  | .cons f _ => Nat.add (if String.eq f.func \"memReader\" then 10 else 0)\n" ++
         "      (if String.eq (firstFn f.path) \"memWriter\" then 1 else 0)\n" ++
         "  | .nil => 0") [1, 0, 8201, 11] },
+    { name := "memory rule: use after free is a pack finding (unchecked by design)",
+      run := fun _ => evalRuleNats (rulePrelude ++
+        "def uafPr : Scry.ProgramResult := Scry.analyze Scry.uafProgram Scry.demoRules\n" ++
+        "def uafFs : List Scry.RuleFinding := Scry.programFindings uafPr\n" ++
+        "#eval List.length uafFs\n" ++
+        "#eval match uafFs with\n" ++
+        "  | .cons f _ => Nat.add (Nat.mul (List.length f.path) 10)\n" ++
+        "      (if String.eq f.rule \"use-after-free\" then 1 else 0)\n" ++
+        "  | .nil => 0\n" ++
+        "#eval match uafFs with\n" ++
+        "  | .cons f _ => Nat.add (if String.eq (Scry.FindingKind.show f.kind) \"memory\" then 10 else 0)\n" ++
+        "      (if String.eq f.name \"load\" then 1 else 0)\n" ++
+        "  | .nil => 0\n" ++
+        "#eval List.length uafPr.warnings\n" ++
+        "#eval Scry.certificateCount uafPr") [1, 11, 11, 1, 0] },
+    { name := "expanded CWE pack: tags, memory kind and wildcard sinks",
+      run := fun _ => do
+        evalRuleTexts (rulePrelude ++
+          "def packT : Scry.RulePack := Scry.parseRulePack Scry.demoPackText\n" ++
+          "def cweOf : List Scry.PackRule → String → String\n" ++
+          "  | .nil, _ => \"\"\n" ++
+          "  | .cons r rest, id => if String.eq (Scry.PackRule.id r) id then Scry.PackRule.cwe r else cweOf rest id\n" ++
+          "#eval cweOf packT.rules \"path-traversal\"\n" ++
+          "#eval cweOf packT.rules \"use-after-free\"\n" ++
+          "#eval match Scry.RulePack.memoryRuleFor packT \"use-after-free\" with | .some r => String.append r.id r.cwe | .none => \"\"")
+          ["\"CWE-22\"", "\"CWE-416\"", "\"use-after-freeCWE-416\""]
+        evalRuleNats (rulePrelude ++
+          "#eval List.length (Scry.RulePack.memoryRules (Scry.parseRulePack \"rule e\\n  kind memory\\n  check use-after-free\\nend\"))") [1] },
     { name := "points-to: location kinds of a field-sensitive object",
       run := fun _ => evalRuleTexts (rulePrelude ++
         "def ptF := Scry.pointsTo (Wil.program [Scry.fieldFn])\n" ++
@@ -412,7 +441,7 @@ def group : Group where
           "#eval Json.getNat (firstResult sar) \"ruleIndex\"\n" ++
           "#eval match Json.getList (firstResult sar) \"locations\" with | .cons loc _ => (match Json.get loc \"physicalLocation\" with | .some _ => 1 | .none => 0) | .nil => 9\n" ++
           "#eval match Json.getList (firstResult sarNo) \"locations\" with | .cons loc _ => (match Json.get loc \"physicalLocation\" with | .some _ => 1 | .none => 0) | .nil => 9\n" ++
-          "#eval match Json.getList (firstResult sarNo) \"locations\" with | .cons loc _ => (match Json.get loc \"logicalLocations\" with | .some _ => 1 | .none => 0) | .nil => 9") [1, 4, 1, 1, 3, 0, 1, 0, 1]
+          "#eval match Json.getList (firstResult sarNo) \"locations\" with | .cons loc _ => (match Json.get loc \"logicalLocations\" with | .some _ => 1 | .none => 0) | .nil => 9") [1, 8, 1, 1, 3, 0, 1, 0, 1]
         evalRuleTexts (rulePrelude ++
           "def prI : Scry.ProgramResult := Scry.analyze Scry.interprocProgram Scry.demoRules\n" ++
           "def sar : Json := Scry.sarif \"scry\" originMap Scry.demoRules (Scry.programFindings prI)\n" ++
@@ -420,8 +449,11 @@ def group : Group where
           "#eval jStr (sarifDriver sar) \"name\"\n" ++
           "#eval jStr (firstResult sar) \"ruleId\"\n" ++
           "#eval jStr (firstResult sar) \"level\"\n" ++
+          "#eval match Json.get (headJ Json.mkNull (Json.getList (sarifDriver sar) \"rules\")) \"properties\" with | .some p => Json.getStr p \"cwe\" | .none => \"\"\n" ++
+          "#eval match Json.get (headJ Json.mkNull (Json.getList (sarifDriver sar) \"rules\")) \"properties\" with | .some p => Json.getStr p \"kind\" | .none => \"\"\n" ++
           "#eval match Json.parse (Scry.renderSarif \"scry\" originMap Scry.demoRules (Scry.programFindings prI)) with | .ok j => Json.getStr j \"version\" | .error e => e")
-          ["\"2.1.0\"", "\"scry\"", "\"scry/c/command-injection\"", "\"error\"", "\"2.1.0\""] },
+          ["\"2.1.0\"", "\"scry\"", "\"scry/c/command-injection\"", "\"error\"",
+           "\"CWE-78\"", "\"taint\"", "\"2.1.0\""] },
     { name := "pipeline: C to Wil to rule pack, the CLI's path on a checked-in CST",
       run := fun _ => do
         let csrc ← IO.FS.readFile "scry/tests/fixtures/taint-unsafe.c"
