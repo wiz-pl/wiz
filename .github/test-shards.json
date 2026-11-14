@@ -29,6 +29,7 @@
   ]},
   {"name": "library", "split": 5, "jobs": 4, "default": true, "select": [
     "builtins",
+    "calc",
     "classes",
     "deriving",
     "=doc",
