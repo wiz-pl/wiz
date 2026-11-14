@@ -1,22 +1,28 @@
 #!/bin/sh
-# Smoke tests of the web infoview: build the page (web/build.sh); run its Wasm module
-# under Node with infoview/stub_server.py (canned goals) as the server
-# (web/node_test.mjs); then serve it with web/bridge.sh in front of the real server
-# (`wiz lsp --ws`, .lake/build/bin/wiz), load it in headless Chromium
-# (web/chrome_test.mjs, over the DevTools protocol), put the cursor in the page's proof,
-# click a subterm and look for the goals and what the subterm is in the DOM.
+# Smoke tests of the web infoview and the playground: build the pages (web/build.sh,
+# web/build-playground.sh); run the infoview's Wasm module under Node with
+# infoview/stub_server.py (canned goals) as the server (web/node_test.mjs), and the
+# playground's under Node (web/playground_test.mjs); then serve the infoview with
+# web/bridge.sh in front of the real server (`wiz lsp --ws`, .lake/build/bin/wiz), load
+# it in headless Chromium (web/chrome_test.mjs, over the DevTools protocol), put the
+# cursor in the page's proof, click a subterm and look for the goals and what the subterm
+# is in the DOM.
 #   usage: web/test.sh [PORT]       (needs nix for emscripten and chromium)
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PORT=${1:-18765}
 OUT=$(mktemp -d)
-trap 'pkill -P $BRIDGE 2>/dev/null; kill $BRIDGE 2>/dev/null; rm -rf "$OUT"' EXIT
+trap 'if [ -n "$BRIDGE" ]; then pkill -P "$BRIDGE" 2>/dev/null || true; kill "$BRIDGE" 2>/dev/null || true; fi; rm -rf "$OUT"' EXIT
 WIZ=${WIZ:-$ROOT/.lake/build/bin/wiz}
 "$ROOT/web/build.sh" "$OUT" >/dev/null
+"$ROOT/web/build-playground.sh" "$OUT" >/dev/null
 node "$ROOT/web/node_test.mjs" "$OUT" python3 "$ROOT/infoview/stub_server.py" --stdio > "$OUT/node.txt"
 for want in 'class="names">A</span>' 'data-ref="5"' 'info: <span class="kind">const</span> <code>Nat : Type</code>'; do
   if grep -qF "$want" "$OUT/node.txt"; then echo "ok (node): $want"; else echo "FAIL (node): missing $want"; cat "$OUT/node.txt"; exit 1; fi
 done
+# (11ab) the playground's module: the self-hosted checker, one evaluation
+node "$ROOT/web/playground_test.mjs" "$OUT" > "$OUT/playground.txt"
+if grep -qF 'playground: all checks passed' "$OUT/playground.txt"; then echo "ok (playground, node)"; else echo "FAIL (playground, node)"; cat "$OUT/playground.txt"; exit 1; fi
 # (11s) the documentation pages' half of the module, on a page `wiz doc` made (the
 # Wasm module's own JSON: the declaration `pick` alone)
 mkdir -p "$OUT/doc/src"

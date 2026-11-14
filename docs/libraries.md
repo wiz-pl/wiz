@@ -60,6 +60,27 @@ the right-shift instruction probes are blocked on a conversion limitation, see
 `wiz-notes/rv-shift-lemmas.md`). It imports `BitBlast` for `Bits.low`, so it is a proof
 module, not part of `BitVec` itself.
 
+`lib/BitVecAdd.wiz` (`import BitVecAdd`): the 34-bit carry/borrow adder of a RISC-V ALU
+in word form. `BitVec.adcForm` is `zext1 {a, 1} + zext1 {b', sub}` (`b' = b`, or `~b`
+when subtracting, `BitVec.muxBit` being `Hw.mux` at values) and `BitVec.adc` is its
+`slice 1 32`, so `BitVec.adc s a b` is the core's expression for any control bit `s`.
+The bridge puts the pieces in the same `toNat`/`Bits.low` normal form as
+`BitVecShift`: `BitVec.catToNat`/`zext1ToNat` for a concatenation, `Bits.low33_cat`/
+`low33_cat0` (`Bits.low_of_lt` under `A * 2 + 1 < 2^33`, from `Bits.cat_lt`),
+`Bits.div_low_succ` (a `low (w+1)` divided by 2 is the `low w` of the divide, so the
+carry bit falls off) and `Bits.div_two_add`/`div_two`. The result is
+`BitVec.adc_zero`/`adc_one` (`add`/`sub`) and `BitVec.adc_eq`
+(`adc s a b = muxBit s (sub a b) (add a b)`), plus the `toNat` forms `adcW1`,
+`adcW2_zero`, `adcW2_one`, `adc_zero_toNat`, `adc_one_toNat`. This closes FINDINGS.md
+H2 for `wiz-rv`: ADD, ADDI and SUB are one `Eq.congrArg` each
+(`drafts/rv-add/AddSub.wiz`). For the comparisons it also has the carry-out half:
+`Bits.div_div` (`(n/2^k)/2^j = n/2^(k+j)`), `Bits.div_low_pow`
+(`div (low (w+1) n) 2^w = low 1 (div n 2^w)`), `Bits.div_one_of` (`P ≤ Z < 2P → Z/P = 1`)
+and `Bits.borrow_le`/`borrow_gt` (the borrow of `a + (2^32 - b)`, i.e. `a < b`). It
+imports `BitVecShift` for the `Bits.low`/`low_low` lemmas, so it is a proof module too;
+what remains for SLT/SLTU is the 1-bit assembly around `bitOf 33` (see
+`drafts/rv-add/README.md` and `wiz-notes/rv-core-proofs.md`).
+
 ## H14 S0: hardware as tagless-final code, with sharing
 
 `lib/Hdl/Core.wiz` (`import Hdl.Core`) is the L2 layer of the HDL plan: combinational
