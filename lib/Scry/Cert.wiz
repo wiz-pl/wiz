@@ -179,7 +179,7 @@ def Scry.factHolds {L : Type} (ops : Scry.LatOps L) (db : Scry.Db L)
 fact; a negated atom's instantiated row is absent (`db` is the completed lower strata);
 a lattice atom reads the value bound to its lattice variable. -/
 def Scry.atomHolds {L : Type} (p : Scry.Program L) (db : Scry.Db L)
-    (a : Scry.Atom) (env : Scry.AiEnv L) : Prop :=
+    (a : Scry.Atom) (env : Scry.Env L) : Prop :=
   match a with
   | .pos rel args =>
     Scry.factHolds p.ops db (Scry.PFact.mk rel (Scry.evalTerms env.vals args) .none)
@@ -191,7 +191,7 @@ def Scry.atomHolds {L : Type} (p : Scry.Program L) (db : Scry.Db L)
 
 /-- Every body atom holds under `env`, in order. -/
 def Scry.bodyHolds {L : Type} (p : Scry.Program L) (db : Scry.Db L) :
-    List Scry.Atom → Scry.AiEnv L → Prop
+    List Scry.Atom → Scry.Env L → Prop
   | .nil, _ => True
   | .cons a rest, env => Scry.atomHolds p db a env ∧ Scry.bodyHolds p db rest env
 
@@ -201,7 +201,7 @@ def Scry.bodyHolds {L : Type} (p : Scry.Program L) (db : Scry.Db L) :
 always smaller than the node's own position. -/
 inductive Scry.ProofKind (L : Type) where
   | edb
-  | rule (ri : Nat) (env : Scry.AiEnv L) (pids : List Nat)
+  | rule (ri : Nat) (env : Scry.Env L) (pids : List Nat)
   | join (left : Nat) (right : Nat)
 
 /-- One node: its fact and how it was obtained. -/
@@ -230,7 +230,7 @@ def Scry.defaultStep {L : Type} : Scry.ProofStep L :=
 
 /-- A head fact under an environment. -/
 def Scry.headFactOf {L : Type} (p : Scry.Program L) (head : Scry.Head L)
-    (env : Scry.AiEnv L) : Scry.PFact L :=
+    (env : Scry.Env L) : Scry.PFact L :=
   match head with
   | .tuple rel args => Scry.PFact.mk rel (Scry.evalTerms env.vals args) .none
   | .lat rel key val =>
@@ -239,13 +239,13 @@ def Scry.headFactOf {L : Type} (p : Scry.Program L) (head : Scry.Head L)
 
 /-- A rule's head fact under an environment. -/
 def Scry.headFact {L : Type} (p : Scry.Program L) (r : Scry.Rule L)
-    (env : Scry.AiEnv L) : Scry.PFact L :=
+    (env : Scry.Env L) : Scry.PFact L :=
   Scry.headFactOf p r.head env
 
 /-- A database is closed under a program: every rule instance whose body holds has its
 head fact. -/
 def Scry.closed {L : Type} (p : Scry.Program L) (db : Scry.Db L) : Prop :=
-  (ri : Nat) → (env : Scry.AiEnv L) →
+  (ri : Nat) → (env : Scry.Env L) →
     Nat.lt ri (List.length p.rules) = .true →
     Scry.bodyHolds p db (List.getD p.rules ri Scry.defaultRule).body env →
     Scry.factHolds p.ops db (Scry.headFact p (List.getD p.rules ri Scry.defaultRule) env)
@@ -339,7 +339,7 @@ def Scry.factEqT_true {L : Type} (rel : Nat) (row : List U64) :
 /-- Head equality for a rule instance: tuple heads use the specialized tuple equality,
 lattice heads the general one (with `ops.eq`). -/
 def Scry.checkHeadEq {L : Type} (p : Scry.Program L) (head : Scry.Head L)
-    (env : Scry.AiEnv L) (fact : Scry.PFact L) : Bool :=
+    (env : Scry.Env L) (fact : Scry.PFact L) : Bool :=
   match head with
   | .tuple rel args => Scry.factEqT rel (Scry.evalTerms env.vals args) fact
   | .lat _ _ _ => Scry.factEq p.ops (Scry.headFactOf p head env) fact
@@ -358,7 +358,7 @@ def Scry.factInDb_true {L : Type} :
 /-- Check the bodies of a rule instance against the premise positions. The
 environment is supplied by the certificate but every atom is re-instantiated and
 compared with a premise (or the database), so it is not trusted. -/
-def Scry.checkAtoms {L : Type} (p : Scry.Program L) (db : Scry.Db L) (env : Scry.AiEnv L)
+def Scry.checkAtoms {L : Type} (p : Scry.Program L) (db : Scry.Db L) (env : Scry.Env L)
     (done : List (Scry.ProofNode L)) : List Scry.Atom → List Nat → Bool
   | .nil, .nil => .true
   | .nil, .cons _ _ => .false
@@ -409,7 +409,7 @@ def Scry.checkJoin {L : Type} (p : Scry.Program L) (fa fb f : Scry.PFact L) : Bo
 /-- Check the head and body of a rule instance (the bound on `ri` is the caller's). -/
 def Scry.checkRuleParts {L : Type} (p : Scry.Program L) (db : Scry.Db L)
     (done : List (Scry.ProofNode L)) (fact : Scry.PFact L) (head : Scry.Head L)
-    (body : List Scry.Atom) (env : Scry.AiEnv L) (pids : List Nat) : Bool :=
+    (body : List Scry.Atom) (env : Scry.Env L) (pids : List Nat) : Bool :=
   if Scry.checkAtoms p db env done body pids then
     Scry.checkHeadEq p head env fact
   else .false
@@ -567,7 +567,7 @@ def Scry.inLfp_congr {L : Type} (p : Scry.Program L) (db : Scry.Db L) :
 /-- **The body of a checked rule instance holds in every closed database containing
 the EDB**, given that every premise fact is in the least fixpoint. -/
 def Scry.checkAtoms_sound {L : Type} (p : Scry.Program L) (db : Scry.Db L)
-    (env : Scry.AiEnv L) (done : List (Scry.ProofNode L)) :
+    (env : Scry.Env L) (done : List (Scry.ProofNode L)) :
     (body : List Scry.Atom) → (pids : List Nat) →
     Scry.allInLfp p db done →
     Scry.bodyPos body = .true →
@@ -626,7 +626,7 @@ def Scry.checkRuleParts_sound {L : Type} (p : Scry.Program L) (db : Scry.Db L)
     (hheadEq : (List.getD p.rules ri Scry.defaultRule).head = head) →
     (body : List Scry.Atom) →
     (hbodyEq : (List.getD p.rules ri Scry.defaultRule).body = body) →
-    (env : Scry.AiEnv L) → (pids : List Nat) → (fact : Scry.PFact L) →
+    (env : Scry.Env L) → (pids : List Nat) → (fact : Scry.PFact L) →
     Scry.headTupleB head = .true →
     Scry.bodyPos body = .true →
     Scry.checkRuleParts p db done fact head body env pids = .true →
@@ -843,7 +843,7 @@ positive atom's terms with the premise's row, and bind each lattice variable to 
 premise's value. (A reconstruction that disagrees with the facts is simply rejected by
 the checker, so this is untrusted convenience, not a trusted part.) -/
 def Scry.envOfAtoms {L : Type} (p : Scry.Program L) (steps : List (Scry.ProofStep L)) :
-    List Scry.Atom → List Nat → Scry.AiEnv L → Option (Scry.AiEnv L)
+    List Scry.Atom → List Nat → Scry.Env L → Option (Scry.Env L)
   | .nil, _, env => .some env
   | .cons a rest, pids, env =>
     match a with
@@ -866,7 +866,7 @@ def Scry.envOfAtoms {L : Type} (p : Scry.Program L) (steps : List (Scry.ProofSte
         | .mk _ row (.some v) =>
           match Scry.unifyTerms p.ops key row env with
           | .some env' =>
-            match Scry.AiEnv.bindLat env' p.ops vv v with
+            match Scry.Env.bindLat env' p.ops vv v with
             | .some env'' => Scry.envOfAtoms p steps rest ps env''
             | .none => .none
           | .none => .none
@@ -881,7 +881,7 @@ def Scry.nodeOfStep {L : Type} (p : Scry.Program L) (steps : List (Scry.ProofSte
     if Nat.lt ri (List.length p.rules) then
       let rule : Scry.Rule L := List.getD p.rules ri Scry.defaultRule;
       let pids : List Nat := Scry.renumberPids steps s.premises;
-      match Scry.envOfAtoms p steps rule.body pids Scry.AiEnv.empty with
+      match Scry.envOfAtoms p steps rule.body pids Scry.Env.empty with
       | .some env => .some (Scry.ProofNode.mk s.fact (.rule ri env pids))
       | .none => .none
     else .none
@@ -1064,7 +1064,7 @@ def Scry.factEq_sound {L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws ops)
 /-- `checkHeadEq` soundness: a checked node fact is the rule head's fact under the
 certificate's environment. -/
 def Scry.checkHeadEq_sound {L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops) :
-    (head : Scry.Head L) -> (env : Scry.AiEnv L) -> (fact : Scry.PFact L) ->
+    (head : Scry.Head L) -> (env : Scry.Env L) -> (fact : Scry.PFact L) ->
     Scry.checkHeadEq p head env fact = .true ->
       fact = Scry.headFactOf p head env
   | .tuple rel args, env, fact, h =>
@@ -1216,7 +1216,7 @@ def Scry.matchSome_eq {A B : Type} (o : Option A) (a : A) (d : B) (f : A -> B)
 /-- The `lat` branch's Boolean test, with the looked-up value passed explicitly (so a
 proof can case on it as a variable). -/
 def Scry.checkLatMatchB {L : Type} (p : Scry.Program L) (db : Scry.Db L)
-    (env : Scry.AiEnv L) (done : List (Scry.ProofNode L))
+    (env : Scry.Env L) (done : List (Scry.ProofNode L))
     (rel : Nat) (key : List Scry.Term) (rest : List Scry.Atom)
     (ps : List Nat) (pid : Nat) (o : Option L) : Bool :=
   match o with
@@ -1240,7 +1240,7 @@ fact, and the premise is in the least fixpoint, so the atom holds. -/
 def Scry.checkLatAtom_sound {L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops)
     (db : Scry.Db L) (agree : Scry.Db L -> Prop) (db' : Scry.Db L)
     (hincl : Scry.dbIncl p.ops db db') (hclosed : Scry.closed p db')
-    (hagree : agree db') (env : Scry.AiEnv L) (done : List (Scry.ProofNode L))
+    (hagree : agree db') (env : Scry.Env L) (done : List (Scry.ProofNode L))
     (rel : Nat) (key : List Scry.Term) (vv : Nat) (rest : List Scry.Atom)
     (ps : List Nat) (pid : Nat)
     (hdone : Scry.AllOn (Scry.inLfpAgree p db agree) done)
@@ -1290,7 +1290,7 @@ def Scry.checkAtoms_sound_all {L : Type} (p : Scry.Program L) (laws : Scry.LatLa
     (db : Scry.Db L) (agree : Scry.Db L -> Prop) (frozen : Nat -> Bool)
     (db' : Scry.Db L)
     (hincl : Scry.dbIncl p.ops db db') (hclosed : Scry.closed p db')
-    (hagree : agree db') (env : Scry.AiEnv L) (done : List (Scry.ProofNode L)) :
+    (hagree : agree db') (env : Scry.Env L) (done : List (Scry.ProofNode L)) :
     (body : List Scry.Atom) -> (pids : List Nat) ->
     Scry.AllOn (Scry.inLfpAgree p db agree) done ->
     ((rel : Nat) -> (row : List U64) -> frozen rel = .true ->
@@ -1499,7 +1499,7 @@ def Scry.checkRuleParts_sound_all {L : Type} (p : Scry.Program L) (laws : Scry.L
     (hheadEq : (List.getD p.rules ri Scry.defaultRule).head = head) ->
     (body : List Scry.Atom) ->
     (hbodyEq : (List.getD p.rules ri Scry.defaultRule).body = body) ->
-    (env : Scry.AiEnv L) -> (pids : List Nat) -> (fact : Scry.PFact L) ->
+    (env : Scry.Env L) -> (pids : List Nat) -> (fact : Scry.PFact L) ->
     ((db' : Scry.Db L) -> agree db' -> (rel : Nat) -> (row : List U64) ->
       frozen rel = .true -> Scry.Db.memTuple db rel row = .false ->
       Scry.Db.memTuple db' rel row = .false) ->

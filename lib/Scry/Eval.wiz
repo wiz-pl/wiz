@@ -147,7 +147,7 @@ def Scry.State.addDerivedLat {L : Type} (st : Scry.State L) (ops : Scry.LatOps L
 
 -- ## Environments
 
-structure Scry.AiEnv (L : Type) where
+structure Scry.Env (L : Type) where
   vals : List (Nat × U64)
   lats : List (Nat × L)
 
@@ -155,18 +155,18 @@ def Scry.envGet {A : Type} (n : Nat) : List (Nat × A) → Option A
   | .nil => .none
   | .cons e rest => if Nat.beq n e.1 then .some e.2 else Scry.envGet n rest
 
-def Scry.AiEnv.bindVal {L : Type} (env : Scry.AiEnv L) (n : Nat) (v : U64) : Option (Scry.AiEnv L) :=
+def Scry.Env.bindVal {L : Type} (env : Scry.Env L) (n : Nat) (v : U64) : Option (Scry.Env L) :=
   match Scry.envGet n env.vals with
-  | .none => .some (Scry.AiEnv.mk (.cons (n, v) env.vals) env.lats)
+  | .none => .some (Scry.Env.mk (.cons (n, v) env.vals) env.lats)
   | .some old => if Scry.eqU64 old v then .some env else .none
 
-def Scry.AiEnv.bindLat {L : Type} (env : Scry.AiEnv L) (ops : Scry.LatOps L) (n : Nat) (v : L) :
-    Option (Scry.AiEnv L) :=
+def Scry.Env.bindLat {L : Type} (env : Scry.Env L) (ops : Scry.LatOps L) (n : Nat) (v : L) :
+    Option (Scry.Env L) :=
   match Scry.envGet n env.lats with
-  | .none => .some (Scry.AiEnv.mk env.vals (.cons (n, v) env.lats))
+  | .none => .some (Scry.Env.mk env.vals (.cons (n, v) env.lats))
   | .some old => if ops.eq old v then .some env else .none
 
-def Scry.AiEnv.empty {L : Type} : Scry.AiEnv L := Scry.AiEnv.mk .nil .nil
+def Scry.Env.empty {L : Type} : Scry.Env L := Scry.Env.mk .nil .nil
 
 -- ## Term and lattice-expression evaluation
 
@@ -191,7 +191,7 @@ def Scry.LExpr.eval {L : Type} (ops : Scry.LatOps L) (funcs : List (L → L)) :
 -- ## Matching a body
 
 def Scry.unifyTerms {L : Type} (ops : Scry.LatOps L) :
-    List Scry.Term → List U64 → Scry.AiEnv L → Option (Scry.AiEnv L)
+    List Scry.Term → List U64 → Scry.Env L → Option (Scry.Env L)
   | .nil, .nil, env => .some env
   | .nil, .cons _ _, _ => .none
   | .cons _ _, .nil, _ => .none
@@ -204,7 +204,7 @@ def Scry.unifyTerms {L : Type} (ops : Scry.LatOps L) :
 
 /-- Match a positive tuple atom against a list of rows. -/
 def Scry.matchRows {L : Type} (ops : Scry.LatOps L) (st : Scry.State L) (rel : Nat)
-    (args : List Scry.Term) : List (List U64) → Scry.AiEnv L → List (Scry.AiEnv L × List Nat)
+    (args : List Scry.Term) : List (List U64) → Scry.Env L → List (Scry.Env L × List Nat)
   | .nil, _ => .nil
   | .cons row rows, env =>
     match Scry.unifyTerms ops args row env with
@@ -215,7 +215,7 @@ def Scry.matchRows {L : Type} (ops : Scry.LatOps L) (st : Scry.State L) (rel : N
 /-- Match a lattice atom against `(key, value)` entries. -/
 def Scry.matchLatEntries {L : Type} (ops : Scry.LatOps L) (st : Scry.State L) (rel : Nat)
     (keyTerms : List Scry.Term) (vvar : Nat) :
-    List (List U64 × L) → Scry.AiEnv L → List (Scry.AiEnv L × List Nat)
+    List (List U64 × L) → Scry.Env L → List (Scry.Env L × List Nat)
   | .nil, _ => .nil
   | .cons e rest, env =>
     match Scry.unifyTerms ops keyTerms e.1 env with
@@ -227,7 +227,7 @@ def Scry.matchLatEntries {L : Type} (ops : Scry.LatOps L) (st : Scry.State L) (r
           (Scry.matchLatEntries ops st rel keyTerms vvar rest env)
 
 def Scry.Atom.matches {L : Type} (ops : Scry.LatOps L) (st : Scry.State L) (a : Scry.Atom)
-    (env : Scry.AiEnv L) : List (Scry.AiEnv L × List Nat) :=
+    (env : Scry.Env L) : List (Scry.Env L × List Nat) :=
   match a with
   | .pos rel args =>
     Scry.matchRows ops st rel args (Scry.Db.tupleAt st.db rel).toList env
@@ -240,7 +240,7 @@ def Scry.Atom.matches {L : Type} (ops : Scry.LatOps L) (st : Scry.State L) (a : 
 
 /-- `atoms` against the whole database: every match and the premise ids it used. -/
 def Scry.evalAtoms {L : Type} (ops : Scry.LatOps L) (st : Scry.State L) :
-    List Scry.Atom → Scry.AiEnv L → List (Scry.AiEnv L × List Nat)
+    List Scry.Atom → Scry.Env L → List (Scry.Env L × List Nat)
   | .nil, env => .cons (env, .nil) .nil
   | .cons a rest, env =>
     Scry.concatMap (fun m =>
@@ -272,7 +272,7 @@ def Scry.deltaLatEntries {L : Type} (st : Scry.State L) (d : Scry.Delta L) (rel 
     else acc) .nil d.lats
 
 def Scry.Atom.matchesDelta {L : Type} (ops : Scry.LatOps L) (st : Scry.State L)
-    (d : Scry.Delta L) (a : Scry.Atom) (env : Scry.AiEnv L) : List (Scry.AiEnv L × List Nat) :=
+    (d : Scry.Delta L) (a : Scry.Atom) (env : Scry.Env L) : List (Scry.Env L × List Nat) :=
   match a with
   | .pos rel args => Scry.matchRows ops st rel args (Scry.deltaRows d rel) env
   | .lat rel key vv =>
@@ -281,7 +281,7 @@ def Scry.Atom.matchesDelta {L : Type} (ops : Scry.LatOps L) (st : Scry.State L)
 
 /-- `evalAtoms`, with the atom at index `anchor` matched against the delta. -/
 def Scry.evalAtomsD {L : Type} (ops : Scry.LatOps L) (st : Scry.State L) (d : Scry.Delta L)
-    (anchor : Nat) : List Scry.Atom → Nat → Scry.AiEnv L → List (Scry.AiEnv L × List Nat)
+    (anchor : Nat) : List Scry.Atom → Nat → Scry.Env L → List (Scry.Env L × List Nat)
   | .nil, _, env => .cons (env, .nil) .nil
   | .cons a rest, i, env =>
     Scry.concatMap (fun m =>
@@ -304,7 +304,7 @@ def Scry.Round.empty {L : Type} (st : Scry.State L) : Scry.Round L :=
 
 /-- Apply one rule's matches: derive each head and record what is new. -/
 def Scry.applyMatches {L : Type} (p : Scry.Program L) (ri : Nat) (rule : Scry.Rule L) :
-    List (Scry.AiEnv L × List Nat) → Scry.Round L → Scry.Round L
+    List (Scry.Env L × List Nat) → Scry.Round L → Scry.Round L
   | .nil, acc => acc
   | .cons m ms, acc =>
     match rule.head with
@@ -377,7 +377,7 @@ def Scry.evalNonRecursive {L : Type} (p : Scry.Program L) (strat : List Nat) (s 
       if Scry.inStratum strat s rule.head.rel then
         if List.isEmpty (Scry.Rule.positionsIn strat s rule) then
           (Scry.applyMatches p i rule
-            (Scry.evalAtoms p.ops st rule.body Scry.AiEnv.empty) (Scry.Round.empty st)).st
+            (Scry.evalAtoms p.ops st rule.body Scry.Env.empty) (Scry.Round.empty st)).st
         else st
       else st;
     Scry.evalNonRecursive p strat s rest (Nat.succ i) st'
@@ -393,7 +393,7 @@ def Scry.evalRound {L : Type} (p : Scry.Program L) (strat : List Nat) (s : Nat)
       if Scry.inStratum strat s rule.head.rel then
         List.foldr (fun pos r =>
           Scry.applyMatches p i rule
-            (Scry.evalAtomsD p.ops r.st d pos rule.body 0 Scry.AiEnv.empty) r)
+            (Scry.evalAtomsD p.ops r.st d pos rule.body 0 Scry.Env.empty) r)
           (Scry.Round.mk acc.st acc.newTuples acc.newLats)
           (Scry.Rule.positionsIn strat s rule)
       else acc;
