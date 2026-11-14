@@ -1,4 +1,5 @@
 import Grail.Build
+import Wiz.Test
 
 /-!
 # The test runner (stage 23f)
@@ -22,45 +23,12 @@ for `run`, and the expected output, and a passing test is recorded under
 namespace Grail
 open Wiz
 
-inductive TestKind where
-  | check
-  | run
-  deriving BEq, Repr
-
-def TestKind.ofSource (src : String) : Except String TestKind :=
-  let first := (src.splitOn "\n").headD ""
-  if !first.startsWith "-- test:" then .ok .check else
-  match ((first.drop 8).trimAscii.toString) with
-  | "check" => .ok .check
-  | "run" => .ok .run
-  | k => .error s!"unknown test kind {k} (check, run)"
-
-/-- What a failing test without a `-- test:` line is told (it was taken for a `check`,
-which compares the messages of elaborating the file: a program's output never shows up). -/
-def TestKind.defaultNote (src : String) : String :=
-  if ((src.splitOn "\n").headD "").startsWith "-- test:" then "" else
-  "\n      (no `-- test:` line, so this was a `check` test: the expected output is the " ++
-  "messages of checking the file; for what `main` prints, make `-- test: run` the first line)"
-
-def TestKind.name : TestKind → String
-  | .check => "check" | .run => "run"
-
 structure TestResult where
   file : String
   ok : Bool
   /-- came from a recorded pass -/
   cached : Bool := false
   message : String := ""
-
-/-- The first line where two texts differ, for the report. -/
-def firstDifference (expected actual : String) : String := Id.run do
-  let es := expected.splitOn "\n"
-  let as := actual.splitOn "\n"
-  for i in [0:max es.length as.length] do
-    let e := es[i]?.getD "<end>"
-    let a := as[i]?.getD "<end>"
-    if e != a then return s!"line {i + 1}:\n      expected: {e}\n      actual:   {a}"
-  pure "(the same)"
 
 /-- What the test prints (in the job's process); `exe` is the test's executable, for `run`. -/
 def Runner.testOutput (r : Runner) (file : String) (kind : TestKind) (exe : System.FilePath) :
@@ -89,11 +57,6 @@ def Runner.testKey (r : Runner) (file : String) (kind : TestKind) (expected : Op
   let l ← r.load file
   pure (mixHash (hash "test") (hash (toString [toString r.ctx.binId, toString l.key, kind.name,
     if kind == .run then toString r.ctx.tc.id else "", expected.getD "\x00none"])))
-
-/-- The expected output of a test, and where it lives. -/
-def expectedOf (dir : System.FilePath) (file : String) : IO (System.FilePath × Option String) := do
-  let expFile := dir / ((System.FilePath.mk file).withExtension "expected")
-  pure (expFile, ← if ← expFile.pathExists then some <$> IO.FS.readFile expFile else pure none)
 
 /-- The test files of a `tests` target, relative to the package, sorted. -/
 def testFiles (dir : System.FilePath) (root : String) : IO (Array String) := do

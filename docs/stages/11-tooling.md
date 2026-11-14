@@ -603,3 +603,46 @@ page runs.
   language-server client: they can ask a server for goals and diagnostics but cannot
   evaluate a term. The playground's evaluator is the self-hosted checker, which is Wiz
   code; exporting it is the only missing piece, and it needs no server.
+
+## 11ah: `wiz test FILE`
+
+`wiz test FILE` is the single-file form of grail's test runner (23f): the directive and
+the comparison are shared with `grail test` through `Wiz/Test.lean`, and the output is
+exactly what `wiz check` or `wiz run` prints.
+
+```wiz
+-- test: run
+import IO
+def main : IO Unit := IO.println "hello"
+```
+
+with `hello.expected` holding `hello` and a newline, or the expected output on the
+directive line:
+
+```wiz
+-- test: run hello\n
+```
+
+* **The directive** is the file's first line. `-- test: check` (also the default, with
+  no directive) compares the messages of elaborating the file, one
+  `path:line:col: severity: text` per message, as `wiz check` prints them; warnings,
+  `#eval` infos and errors are all part of the output, so a `check` test may expect an
+  error. `-- test: run` compares what `wiz run` prints: an `IO` program's standard
+  output, or `main`'s value read back with its type and a newline.
+* **The expected output** comes from the text after the kind, or else `FILE.expected`.
+  The inline form is one source line; `\n`, `\t`, `\r` and `\\` are expanded, so
+  multi-line output fits on it. An inline expectation wins over `FILE.expected`.
+* **Exit codes**: 0 passed, 1 failed (a mismatch, a file that does not check or build,
+  a program that exits nonzero or times out after 60 s, a malformed directive, or no
+  expected output), 2 a missing FILE. A failing test prints the first differing line
+  (`expected:` / `actual:`).
+* **What it reuses**: the same `elaborate` as `wiz check` (module roots, `-I`, the
+  shared cache and the experimental kernel flags) and `Build.runGlobal` as `wiz run`,
+  so `wiz test` adds no second elaborator, compiler path or test graph. It is not a
+  package build: there is no `.grail/build` record and every run checks the file again.
+* **Limits and open questions.** A directive marks a *file*, not a declaration. There
+  is no `--update` (write `FILE.expected` by hand, or take the diff from the failure),
+  no stdin or program arguments, and `run` compares stdout only. Forwarding bare
+  `wiz test` to the Lean test driver (`tests`, the "wrapper" in the 11ac proposal) is
+  still open: this command deliberately takes a file and runs it, so the two meanings
+  of `wiz test` need a decision before both land.

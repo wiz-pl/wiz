@@ -63,6 +63,7 @@
     "tactics",
     "testrunner",
     "=text",
+    "=wiz-test",
     "toolchain",
     "tooling",
     "tour",

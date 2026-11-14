@@ -1,6 +1,7 @@
 import Wiz
 import Wiz.Version
 import Wiz.Doc.Site
+import Wiz.Test
 
 open Wiz
 
@@ -17,6 +18,12 @@ def usage : String := "usage:
   wiz build FILE -o OUT --no-main  … or the exported functions, linked without a `main`
                                    (say, a Wasm module: --cc emcc --ldflags --no-entry)
   wiz run FILE [--llvm]            build and run `main`, printing its value
+  wiz test FILE                    run FILE as a test: the first line says the kind,
+                                   `-- test: check` (default: the messages of checking
+                                   it, as `wiz check` prints them) or `-- test: run`
+                                   (what `main` prints, as `wiz run` does); the expected
+                                   output is FILE.expected, or after the kind on that
+                                   line (`-- test: run Hi\\n`; escapes \\n, \\t, \\r, \\\\)
   wiz doc [MODULE|FILE|DIR…] -o OUT [--lib] [--source-url URL] [--title T] [--web DIR]
                                    documentation: a static site (one page per module,
                                    index, search); --lib: the toolchain's library;
@@ -332,6 +339,58 @@ def runCmd (tc : Toolchain) (path : String) (llvm : Bool) (split : Nat := 0) : I
   | .error e => IO.eprintln e; pure 1
   | .ok v => IO.print (if v.endsWith "\n" then v else v ++ "\n"); pure 0
 
+/-- What a test prints: for `check`, the messages of elaborating the file exactly as
+`wiz check` prints them; for `run`, what `wiz run` prints (an `IO` program's output, or
+`main`'s value read back with its type). A program that does not check or build is an
+error, not output: a `run` test fails whatever its expected output says. -/
+def testOutput (tc : Toolchain) (path input : String) (kind : TestKind) : IO (Except String String) := do
+  let s ← elaborate tc path input
+  let messages := String.join (s.messages.toList.map fun m => s!"{path}:{m.render input}\n")
+  match kind with
+  | .check => pure (.ok messages)
+  | .run =>
+    if s.messages.any (·.severity == .error) then
+      pure (.error ("the file does not check:\n" ++ messages))
+    else
+      let dir ← IO.FS.createTempDir
+      match ← Build.runGlobal tc s "main" dir false (timeout := some 60) with
+      | .error e => pure (.error e)
+      | .ok v => pure (.ok (if v.endsWith "\n" then v else v ++ "\n"))
+
+/-- `wiz test FILE`: compare FILE's output (as `wiz check` or `wiz run` prints it) with
+the expected output, from `FILE.expected` or the `-- test:` directive. Exit codes: 0
+passed, 1 failed (mismatch, build/run error, bad directive, no expected output), 2 a
+missing file. -/
+def testCmd (tc : Toolchain) (path : String) : IO UInt32 := do
+  let file : System.FilePath := path
+  unless ← file.pathExists do
+    IO.eprintln s!"wiz test: no such file: {path}"
+    return 2
+  let input ← IO.FS.readFile file
+  let d ← match directiveOf input with
+    | .ok d => pure d
+    | .error e => IO.eprintln s!"{path}: {e}"; return 1
+  let (expFile, expected) ← expectedOfFile file
+  -- the directive's inline expected output wins over the file
+  let expected := d.expected.orElse fun _ => expected
+  let some expected := expected
+    | do IO.eprintln s!"{path}: FAILED ({d.kind.name})"
+         IO.eprintln s!"  no {expFile} (write it, or put the expected output after `-- test: {d.kind.name}`)"
+         return 1
+  match ← testOutput tc path input d.kind with
+  | .error msg =>
+    IO.eprintln s!"{path}: FAILED ({d.kind.name})"
+    IO.eprintln s!"  {msg.replace "\n" "\n  "}"
+    return 1
+  | .ok actual =>
+    if expected == actual then
+      IO.println s!"{path}: passed ({d.kind.name})"
+      pure 0
+    else
+      IO.eprintln s!"{path}: FAILED ({d.kind.name})"
+      IO.eprintln s!"  {firstDifference expected actual}"
+      pure 1
+
 /-- The experimental kernel options, taken out of the arguments. -/
 def kernelOpt : List String → Except String (Regularity × Bool × List String)
   | "--regularity" :: m :: rest => do
@@ -403,6 +462,7 @@ def main (args : List String) : IO UInt32 := do
   | "doc" :: rest => docCmd tc rest
   | ["run", path] => runCmd tc path false (split := split)
   | ["run", path, "--llvm"] => runCmd tc path true (split := split)
+  | ["test", path] => testCmd tc path
   | "lsp" :: opts => do
     match lspOptions opts with
     | none => IO.println usage; pure 2
