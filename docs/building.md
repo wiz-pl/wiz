@@ -300,6 +300,53 @@ cached between runs.
   without it. Without a queue (a user-owned repository), `--auto` waits for the required
   check and merges, and "require branches to be up to date" serialises merges instead.
 
+### Publishing aarch64 builds
+
+GitHub's hosted runners, and so CI's `nix package` job, are x86_64: CI's Cachix push
+has x86_64 paths only. The heavy test shards can run on a self-hosted aarch64 runner
+([ci-runner.md](ci-runner.md)), which is a local/network runner, not a GitHub-hosted
+one; ARM test shards are not part of GitHub CI. `scripts/publish-arm-cache.sh` publishes
+`packages.aarch64-linux.wiz` and `packages.aarch64-linux.tests` from a checkout so that
+runner can substitute them instead of building the tree.
+
+Prerequisites, once per machine:
+
+* an aarch64-linux builder in the Nix configuration (on NixOS, `nix.buildMachines` in
+  `/etc/nix/machines`), e.g.
+  `ssh-ng://reuben@millionants aarch64-linux /root/.ssh/millionants 8 2 big-parallel,kvm - -`,
+  with `builders-use-substitutes = true`. The local x86_64 machine then does not build
+  the ARM packages itself; `nix config show builders` prints the entry.
+* `ssh millionants` works without a password, and that machine has `nix` and the
+  `cachix` CLI on the non-interactive `PATH`.
+* `~/.config/cachix/cachix.dhall` on the builder holds a token for the cache
+  `badlydrawnwizards` (mode 600). The script never reads it: it runs `cachix push` over
+  SSH, so the token stays on the builder. Do not copy the token into the checkout or
+  print it.
+* the cache's public key is in this machine's `trusted-public-keys` (`cachix use
+  badlydrawnwizards`, or the key in [ci-runner.md](ci-runner.md)); the verification
+  step substitutes through Nix with a clean `HOME` and needs it.
+
+```sh
+scripts/publish-arm-cache.sh                # build, push and verify (paths on stdout)
+scripts/publish-arm-cache.sh arm-paths.txt  # also write the paths to a file
+scripts/publish-arm-cache.sh --check        # report local/builder/cache; no build or push
+scripts/publish-arm-cache.sh --dry-run      # print the commands instead of running them
+scripts/publish-arm-cache.sh --flake /path/to/checkout --target wiz
+```
+
+The script evaluates `.#wiz` and `.#tests` for `aarch64-linux` and skips a target whose
+store path already exists locally, so a second run does not rebuild. It builds with
+`nix build --system aarch64-linux`, which the Nix daemon sends to the builder, copies
+the results to `millionants` if they are not there, runs
+`cachix push badlydrawnwizards …` there, and checks that each path's narinfo is in the
+cache. The final check builds the packages again in a throwaway store with a clean
+`HOME`, no builders and the cache among the substituters: a path that is missing from
+the cache fails the check instead of being rebuilt for the wrong architecture.
+`--no-verify` skips that last step.
+
+`--target` is repeatable and replaces the default (`wiz tests`). A tree whose flake does
+not yet define `packages.tests` needs `--target wiz` (or a `--flake` that does).
+
 To run Wiz without a checkout or a Lean toolchain, with the binaries from Cachix:
 
 ```

@@ -181,9 +181,18 @@ and Cachix. Pushing to Cachix needs the `CACHIX_AUTH_TOKEN` secret, which the jo
   binaries. The build job runs on GitHub's x86_64 runner, so an ARM test job builds the
   tree itself the first time (`lake test` builds what it needs; tens of minutes) and saves
   that build for the next ARM run of the same sources ("Save the Lake build (ARM64)").
-* Cachix holds x86_64 builds only (the `nix package` job runs on x86_64): on aarch64 the
-  dev shell's packages come from cache.nixos.org (nixpkgs builds aarch64-linux), and the
-  image's pre-fetch step matters more.
+  If the aarch64 Nix packages have been published (below), a test job that uses them
+  substitutes `wiz` and the test driver instead of building the tree.
+* GitHub CI's Cachix push holds x86_64 builds only (the `nix package` job runs on
+  x86_64). `scripts/publish-arm-cache.sh` (`building.md`, "Publishing aarch64 builds")
+  adds `.#wiz` and `.#tests` for aarch64-linux from a checkout, through the aarch64
+  builder in `nix.buildMachines`; the runner then substitutes them. On aarch64 the dev
+  shell's packages still come from cache.nixos.org (nixpkgs builds aarch64-linux), and
+  the image's pre-fetch step matters more.
+* ARM test shards are not GitHub-hosted: GitHub's runners are x86_64, and an aarch64 run
+  happens only on this self-hosted runner (`WIZ_RUNNER_HEAVY`), which is the
+  local/network path. Publish the ARM packages with `scripts/publish-arm-cache.sh`
+  before switching a fresh runner to them.
 * The release tarball (`release.yml`, `wiz-x86_64-linux.tar.gz`) and its bundled C
   toolchain are x86_64 only, and `tower`'s release source picks the tarball by `uname -m`:
   the release workflow stays on GitHub's runner, and tests that install a real release
