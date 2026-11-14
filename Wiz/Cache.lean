@@ -1045,11 +1045,229 @@ def parseGeneration (text : String) : Option Generation := do
 def readGeneration (dir : System.FilePath) : IO (Option Generation) := do
   let f := generationFile dir
   if ← f.pathExists then
-    try pure (parseGeneration (← IO.FS.readFile f)) catch _ => pure none
+    try
+      match parseGeneration (← IO.FS.readFile f) with
+      -- (the root covers the metadata and the records: a file whose root does not match
+      -- its own bytes is not an index at all)
+      | some g => pure (if g.root == g.rootOf then some g else none)
+      | none => pure none
+    catch _ => pure none
   else pure none
 
 def unixNow : IO Nat := do
   pure (← Std.Time.Timestamp.now).val.toSeconds.toInt.toNat
+
+/-! ## Detached signatures (P3, cache authenticity)
+
+A manifest binds a cache key to the bytes it serves; a signature binds the **manifest** to
+an offline key. The signature is OpenSSH's detached `SSHSIG` format (`ssh-keygen -Y sign`),
+stored beside the generation index and covering its exact bytes:
+
+```
+<cache>/manifest.sexpr.sig   -- SSHSIG over manifest.sexpr, namespace wiz-cache-manifest
+```
+
+Signing writes only the sidecar: `manifest.sexpr` keeps its bytes, so the SHA-256 checks of
+P1/P2 still apply and an unsigned cache is unchanged. The namespace is fixed; the SSHSIG
+does not carry a key identity, so the verifier maps the signing key to a **key id** (or to
+its `SHA256:` fingerprint) in an OpenSSH `allowed_signers` file. That file is the policy:
+keeping a key's line accepts it, removing it revokes it, and adding a line rotates it.
+`valid-until` in the index bounds a signature made by a key that is later withdrawn, and
+`--min-generation` (or a pinned generation) rejects a rollback to an older signed index.
+No private key is ever read by the cache or written into a layer. -/
+
+/-- The SSHSIG namespace of cache-manifest signatures. Changing it deliberately invalidates
+every existing signature. -/
+def signatureNamespace : String := "wiz-cache-manifest"
+
+/-- The detached signature of the layer's `manifest.sexpr`. -/
+def signatureFile (dir : System.FilePath) : System.FilePath := dir / "manifest.sexpr.sig"
+
+/-- How `wiz cache verify` treats a layer's signature. -/
+structure SignaturePolicy where
+  /-- an OpenSSH `allowed_signers` file: the key-id/fingerprint allowlist -/
+  signers : Option System.FilePath := none
+  /-- require this principal (a key id or a `SHA256:` fingerprint); `none`: any listed one -/
+  keyId : Option String := none
+  /-- fail closed when a signature is missing, unverifiable or invalid -/
+  require : Bool := false
+  /-- explicitly accept an unsigned layer (never an invalid signature) -/
+  allowUnsigned : Bool := false
+  /-- reject a generation index older than this (a rollback) -/
+  minGeneration : Option Nat := none
+  deriving Repr, Inhabited
+
+/-- The outcome of checking one layer's signature. -/
+structure SignatureResult where
+  /-- `valid`, `missing`, `expired`, `unverified` or `invalid` -/
+  status : String := "missing"
+  /-- the principal that verified (a key id or a `SHA256:` fingerprint) -/
+  keyId : String := ""
+  /-- the signing key's SHA-256 fingerprint -/
+  fingerprint : String := ""
+  /-- the layer's generation number -/
+  generation : Nat := 0
+  /-- the layer's manifest root -/
+  root : String := ""
+  /-- a human-readable reason for a missing/invalid/expired signature -/
+  detail : String := ""
+  /-- did the policy accept this layer? -/
+  accepted : Bool := true
+  deriving Repr, Inhabited
+
+/-- One key line of an `allowed_signers` file (its principals, key type and key blob). -/
+structure SignerKey where
+  /-- the principals (key ids, or `SHA256:` fingerprints) this key may sign as -/
+  identities : Array String := #[]
+  keyType : String := ""
+  key : String := ""
+  deriving Repr, Inhabited
+
+def isSshKeyType (s : String) : Bool :=
+  s.startsWith "ssh-" || s.startsWith "ecdsa-" || s.startsWith "sk-ssh-" || s.startsWith "sk-ecdsa-"
+
+private partial def findKeyType (toks : List String) (i : Nat) : Option Nat :=
+  match toks with
+  | [] => none
+  | t :: ts => if isSshKeyType t then some i else findKeyType ts (i + 1)
+
+/-- Parse one `allowed_signers` line: `principals [options] keytype key [comment]`.
+Blank lines and `#` comments are ignored; an options field is skipped by locating the key
+type. A principal can be a key id (`wiz-release-1`) or a `SHA256:` fingerprint. -/
+def parseSignerLine (line : String) : Option SignerKey := do
+  let line : String := (line.takeWhile (· != '#')).toString
+  let line := line.trimAscii.toString
+  if line.isEmpty then none
+  let toks := (line.splitOn " ").filter (fun t => !t.isEmpty)
+  let idx ← findKeyType toks 0
+  if idx == 0 then none
+  let idTok := toks[0]!
+  let ids := (idTok.splitOn ",").filter (fun s => !s.isEmpty)
+  if ids.isEmpty then none
+  let keyType := toks[idx]!
+  let key := (toks[idx + 1]?).getD ""
+  if key.isEmpty then none
+  pure { identities := ids.toArray, keyType, key }
+
+def readSigners (file : System.FilePath) : IO (Array SignerKey) := do
+  let text ← IO.FS.readFile file
+  pure ((text.splitOn "\n").filterMap parseSignerLine).toArray
+
+/-- The SHA-256 fingerprint of a public key, as `ssh-keygen -lf` prints it. -/
+def sshPublicFingerprint (keyType key : String) : IO (Option String) := do
+  try
+    let tmp ← IO.FS.createTempDir
+    let f := tmp / "key.pub"
+    IO.FS.writeFile f s!"{keyType} {key}\n"
+    let o ← IO.Process.output { cmd := "ssh-keygen", args := #["-lf", f.toString, "-E", "sha256"] }
+    IO.FS.removeDirAll tmp
+    if o.exitCode != 0 then return none
+    pure ((o.stdout.splitOn " ").find? (fun t => t.startsWith "SHA256:"))
+  catch _ => pure none
+
+/-- The fingerprint of a private (or public) key. -/
+def keyFingerprint (key : System.FilePath) : IO (Option String) := do
+  try
+    let o ← IO.Process.output { cmd := "ssh-keygen", args := #["-y", "-f", key.toString] }
+    if o.exitCode == 0 then
+      match (o.stdout.splitOn " ").filter (fun t => !t.isEmpty) with
+      | kt :: k :: _ => sshPublicFingerprint kt k
+      | _ => pure none
+    else
+      let o ← IO.Process.output { cmd := "ssh-keygen", args := #["-lf", key.toString, "-E", "sha256"] }
+      if o.exitCode == 0 then
+        pure ((o.stdout.splitOn " ").find? (fun t => t.startsWith "SHA256:"))
+      else pure none
+  catch _ => pure none
+
+/-- Verify `manifest.sexpr.sig` against `signers` with `ssh-keygen -Y verify`. With no
+`keyId`, every listed principal is tried; a `SHA256:` principal must also be the actual
+fingerprint of its line's key. -/
+def verifySignatureWith (dir signers : System.FilePath) (keyId : Option String) :
+    IO (Except String (String × String)) := do
+  let sig := signatureFile dir
+  let payload ← IO.FS.readFile (generationFile dir)
+  let keys ← readSigners signers
+  let mut detail := ""
+  for s in keys do
+    for id in s.identities do
+      if keyId.isNone || keyId == some id then
+        let fpOk ← if id.startsWith "SHA256:" then
+            match ← sshPublicFingerprint s.keyType s.key with
+            | some fp => pure (fp == id)
+            | none => pure false
+          else pure true
+        if fpOk then
+          let o ← IO.Process.output { cmd := "ssh-keygen", args := #["-Y", "verify", "-f", signers.toString, "-I", id, "-n", signatureNamespace, "-s", sig.toString] } (some payload)
+          if o.exitCode == 0 then
+            let fp ← sshPublicFingerprint s.keyType s.key
+            return .ok (id, fp.getD "")
+          else
+            detail := o.stderr.trimAscii.toString
+  pure (.error (if detail.isEmpty then s!"no allowlisted key verified {sig}" else detail))
+
+/-- Check a layer's detached signature under `policy`. A missing signature is accepted
+only when the policy does not require one; an invalid or expired one is never accepted. -/
+def checkLayerSignature (dir : System.FilePath) (policy : SignaturePolicy) : IO SignatureResult := do
+  let gen? ← readGeneration dir
+  let hasSig ← (signatureFile dir).pathExists
+  match gen? with
+  | none =>
+    if hasSig then
+      pure { status := "invalid", detail := "signature without a valid manifest.sexpr", accepted := false }
+    else
+      pure { status := "missing", accepted := !policy.require || policy.allowUnsigned }
+  | some g =>
+    let base : SignatureResult := { generation := g.generation, root := g.root }
+    let now ← unixNow
+    if let some min := policy.minGeneration then
+      if g.generation < min then
+        return { base with status := "invalid", detail := s!"generation rollback: {g.generation} < {min}", accepted := false }
+    if g.validUntil != 0 && now > g.validUntil then
+      return { base with status := "expired", detail := s!"valid-until {g.validUntil}", accepted := false }
+    if !hasSig then
+      return { base with status := "missing", detail := (if policy.allowUnsigned then "unsigned (explicitly allowed)" else "unsigned"), accepted := !policy.require || policy.allowUnsigned }
+    match policy.signers with
+    | none => pure { base with status := "unverified", detail := "no --signers file", accepted := !policy.require }
+    | some signers =>
+      let r ← try verifySignatureWith dir signers policy.keyId
+        catch e => pure (.error s!"signature policy: {e}")
+      match r with
+      | .ok (id, fp) => pure { base with status := "valid", keyId := id, fingerprint := fp }
+      | .error e => pure { base with status := "invalid", detail := e, accepted := false }
+
+/-- What signing did, for `wiz cache sign`. -/
+structure SignResult where
+  generation : Nat := 0
+  root : String := ""
+  signature : System.FilePath := ""
+  keyId : String := ""
+  fingerprint : String := ""
+  deriving Repr, Inhabited
+
+/-- Sign a layer's `manifest.sexpr` (its exact bytes) with an offline key. The key is used
+by `ssh-keygen -Y sign` and never copied into the layer. `keyId` defaults to the key's
+fingerprint, which is also what the signer should put in `allowed_signers`. -/
+def signLayer (dir : System.FilePath) (key : System.FilePath) (keyId : Option String) :
+    IO (Except String SignResult) := do
+  let gen := generationFile dir
+  unless ← gen.pathExists do
+    return .error s!"no {gen} (run 'wiz cache manifest' first)"
+  let g ← match ← readGeneration dir with
+    | some g => pure g
+    | none => return .error s!"{gen} is not a self-consistent generation index"
+  let sig := signatureFile dir
+  removeQuietly sig
+  let o ← try
+      IO.Process.output { cmd := "ssh-keygen", args := #["-Y", "sign", "-q", "-f", key.toString, "-n", signatureNamespace, gen.toString] }
+    catch e => return .error s!"ssh-keygen: {e}"
+  if o.exitCode != 0 then
+    return .error s!"ssh-keygen -Y sign failed: {o.stderr.trimAscii.toString}"
+  unless ← sig.pathExists do
+    return .error "ssh-keygen wrote no signature file"
+  let fp ← keyFingerprint key
+  let id := match keyId with | some i => i | none => fp.getD ""
+  pure (.ok { generation := g.generation, root := g.root, signature := sig, keyId := id, fingerprint := fp.getD "" })
 
 /-- What verification did, for `--cache-verify-stats` and `wiz cache verify`. -/
 structure VerifyCounts where
@@ -1252,6 +1470,8 @@ def ManifestStore.flush (m : ManifestStore) : IO Unit := do
     (old.map (·.root) |>.getD "") (old.map (·.validUntil) |>.getD 0) mods ""
   let g := { g0 with root := g0.rootOf }
   writeAtomic (generationFile dir) (g.toSx.render ++ "\n")
+  -- (a rewritten index invalidates its detached signature; signing writes a new one)
+  removeQuietly (signatureFile dir)
 
 /-- Verify the keyed files of one layer against its manifests (the full-scan tool). This
 is what `wiz cache verify` reports; normal runs verify only what they read. -/
@@ -1270,6 +1490,15 @@ structure LayerVerify where
   unmanifested : Nat := 0
   /-- manifests past their (or their layer's) `valid-until` -/
   expired : Nat := 0
+  /-- the layer's detached signature (`none` when signatures were not checked) -/
+  signature : String := "none"
+  /-- the principal that verified, if any -/
+  signatureKey : String := ""
+  /-- why a signature was missing/invalid/expired -/
+  signatureDetail : String := ""
+  /-- the policy rejected the signature (a missing one under `--require-signature`, or a
+  bad/expired one) -/
+  signatureBad : Bool := false
   deriving Inhabited, Repr
 
 partial def allFiles (dir : System.FilePath) : IO (Array System.FilePath) := do
@@ -1280,9 +1509,14 @@ partial def allFiles (dir : System.FilePath) : IO (Array System.FilePath) := do
   pure out
 
 /-- Check every manifest in `dir` against the bytes beside it, and count keyed files that
-no manifest lists. The layer is read only. -/
-def verifyLayer (dir : System.FilePath) : IO LayerVerify := do
-  let mut c : LayerVerify := {}
+no manifest lists. The layer is read only. With a `policy`, its detached
+`manifest.sexpr.sig` is checked too (P3). -/
+def verifyLayer (dir : System.FilePath) (policy : Option SignaturePolicy := none) : IO LayerVerify := do
+  let sig ← match policy with
+    | some p => checkLayerSignature dir p
+    | none => pure ({ status := "none" } : SignatureResult)
+  let mut c : LayerVerify := { signature := sig.status, signatureKey := sig.keyId,
+                               signatureDetail := sig.detail, signatureBad := !sig.accepted }
   let mut named : Std.HashSet String := {}
   let now ← unixNow
   let layerUntil ← match ← readGeneration dir with
@@ -1348,6 +1582,8 @@ def sealLayer (dir : System.FilePath) (write : Bool) (validUntil : Nat := 0) : I
       (if validUntil == 0 then (old.map (·.validUntil) |>.getD 0) else validUntil) mergedMods ""
     let g := { g0 with root := g0.rootOf }
     writeAtomic (generationFile dir) (g.toSx.render ++ "\n")
+    -- (a rewritten index invalidates its detached signature; `wiz cache sign` writes one)
+    removeQuietly (signatureFile dir)
   pure (mods.size, entries)
 
 /-- The toolchain tag: SHA-256 of the executable, memoised in the write cache's `bin/` by

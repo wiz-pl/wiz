@@ -25,8 +25,18 @@ def usage : String := "usage:
                                     remove keyed cache files (.wizc/.wizm/.wizr) older than
                                     N days (default 30) from the write cache; a pruned file is
                                     just a miss, and --cache-ro layers are never touched
-  wiz cache verify [--strict]        check every cache entry against its output manifest
-                                    (a full scan); exit 1 on a mismatch or missing file
+  wiz cache verify [--strict] [--require-signature] [--allow-unsigned]
+                   [--signers FILE] [--key-id ID] [--min-generation N]
+                                    check every cache entry against its output manifest
+                                    (a full scan); exit 1 on a mismatch or missing file;
+                                    --require-signature also fails on a missing or invalid
+                                    manifest.sexpr.sig; --signers FILE is the OpenSSH
+                                    allowed_signers allowlist (key ids/fingerprints)
+  wiz cache sign --key FILE [--key-id ID] [--valid-days N]
+                                    sign each layer's manifest.sexpr with an offline Ed25519
+                                    key (`ssh-keygen -Y sign`); the detached signature is
+                                    manifest.sexpr.sig and the key id names its line in
+                                    --signers (default: the key's SHA256 fingerprint)
   wiz cache manifest                 rebuild the write cache's manifest.sexpr generation
                                     index from its per-module manifests
   wiz lsp                          a language server on stdin/stdout
@@ -362,23 +372,91 @@ def cachePruneCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
 
 /-- `wiz cache verify`: check every manifest in each cache layer against the bytes beside
 it (a full scan; normal runs verify only what they read). Exit 1 on a mismatch or a missing
-file, and in `strict`/`--strict` also on an unmanifested keyed file. -/
+file, and in `strict`/`--strict` also on an unmanifested keyed file. With
+`--require-signature`, each layer's `manifest.sexpr.sig` must verify under `--signers` (or
+the layer fails); `--allow-unsigned` accepts a missing signature explicitly. -/
 def cacheVerifyCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
-  let strict := tc.cacheVerify == "strict" || args.contains "--strict" || !tc.readCaches.isEmpty
-  for a in args do
-    unless a == "--strict" do
-      IO.eprintln s!"cache verify: unknown argument {a}"
-      return 2
+  let rec parse (strict : Bool) (policy : Cache.SignaturePolicy) :
+      List String → Except String (Bool × Cache.SignaturePolicy)
+    | [] => pure (strict, policy)
+    | "--strict" :: rest => parse true policy rest
+    | "--require-signature" :: rest => parse strict { policy with require := true } rest
+    | "--allow-unsigned" :: rest => parse strict { policy with allowUnsigned := true } rest
+    | "--signers" :: f :: rest => parse strict { policy with signers := some (System.FilePath.mk f) } rest
+    | "--key-id" :: k :: rest => parse strict { policy with keyId := some k } rest
+    | "--min-generation" :: n :: rest => do
+      let some k := n.toNat? | throw s!"--min-generation needs a number, not {n}"
+      if k == 0 then throw "--min-generation must be at least 1"
+      parse strict { policy with minGeneration := some k } rest
+    | a :: _ => throw s!"cache verify: unknown argument {a}"
+  let (strictArg, policy0) ← match parse false {} args with
+    | .ok r => pure r
+    | .error e => do IO.eprintln e; return 2
+  if policy0.require && policy0.allowUnsigned then
+    IO.eprintln "cache verify: --require-signature and --allow-unsigned are contradictory"
+    return 2
+  let strict := tc.cacheVerify == "strict" || strictArg || !tc.readCaches.isEmpty
+  let policy : Option Cache.SignaturePolicy :=
+    if policy0.require || policy0.allowUnsigned || policy0.signers.isSome ||
+        policy0.minGeneration.isSome then some policy0 else none
   let dirs := tc.cacheDir.toList ++ tc.readCaches
   if dirs.isEmpty then
     IO.eprintln "cache verify: no cache (--cache DIR, --cache-ro DIR)"
     return 2
   let mut bad := 0
   for dir in dirs do
-    let c ← Cache.verifyLayer dir
+    let c ← Cache.verifyLayer dir policy
+    let sigText :=
+      if c.signature == "none" then ""
+      else
+        s!", signature {c.signature}" ++
+        (if c.signatureKey == "" then "" else s!" ({c.signatureKey})") ++
+        (if c.signatureDetail == "" then "" else s!" — {c.signatureDetail}")
     IO.println (s!"cache verify: {dir}: {c.modules} modules, {c.entries} entries, {c.regions} regions, " ++
-      s!"{c.mismatches} mismatched, {c.missing} missing, {c.expired} expired, {c.unmanifested} unmanifested")
-    if c.mismatches + c.missing + c.expired > 0 || (strict && c.unmanifested > 0) then bad := bad + 1
+      s!"{c.mismatches} mismatched, {c.missing} missing, {c.expired} expired, {c.unmanifested} unmanifested" ++
+      sigText)
+    if c.mismatches + c.missing + c.expired > 0 || (strict && c.unmanifested > 0) ||
+        c.signatureBad then bad := bad + 1
+  pure (if bad == 0 then 0 else 1)
+
+/-- `wiz cache sign`: write `manifest.sexpr.sig` for each layer with an offline Ed25519 key.
+`--valid-days N` first reseals the index with that expiry (a new generation). -/
+def cacheSignCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
+  let rec parse (key : Option String) (id : Option String) (days : Option Nat) :
+      List String → Except String (Option String × Option String × Option Nat)
+    | [] => pure (key, id, days)
+    | "--key" :: k :: rest => parse (some k) id days rest
+    | "--key-id" :: k :: rest => parse key (some k) days rest
+    | "--valid-days" :: n :: rest => do
+      let some k := n.toNat? | throw s!"--valid-days needs a number, not {n}"
+      if k == 0 then throw "--valid-days must be at least 1"
+      parse key id (some k) rest
+    | a :: _ => throw s!"cache sign: unknown argument {a}"
+  let (key?, id, days) ← match parse none none none args with
+    | .ok r => pure r
+    | .error e => do IO.eprintln e; return 2
+  let key ← match key? with
+    | some k => pure k
+    | none => do IO.eprintln "cache sign: --key FILE is required"; return 2
+  let dirs := tc.cacheDir.toList ++ tc.readCaches
+  if dirs.isEmpty then
+    IO.eprintln "cache sign: no cache (--cache DIR, --cache-ro DIR)"
+    return 2
+  let validUntil ← match days with
+    | some d => pure ((← Cache.unixNow) + d * 86400)
+    | none => pure 0
+  let mut bad := 0
+  for dir in dirs do
+    if days.isSome then
+      let (mods, entries) ← Cache.sealLayer dir true validUntil
+      IO.println s!"cache sign: {dir}: sealed {mods} modules, {entries} entries (generation ready)"
+    match ← Cache.signLayer dir (System.FilePath.mk key) id with
+    | .ok r =>
+      IO.println (s!"cache sign: {dir}: generation {r.generation}, root {r.root}, " ++
+        s!"key {r.keyId} ({r.fingerprint}), signature {r.signature}")
+    | .error e => do
+      IO.eprintln s!"cache sign: {dir}: {e}"
+      bad := bad + 1
   pure (if bad == 0 then 0 else 1)
 
 /-- `wiz cache manifest`: rebuild (or, for a read-only layer, report) the generation index
@@ -519,6 +597,7 @@ def main (args : List String) : IO UInt32 := do
   | ["parse", path] => parseCmd path
   | "cache" :: "prune" :: rest => cachePruneCmd tc rest
   | "cache" :: "verify" :: rest => cacheVerifyCmd tc rest
+  | "cache" :: "sign" :: rest => cacheSignCmd tc rest
   | "cache" :: "manifest" :: rest => cacheManifestCmd tc rest
   | ["check", path] => checkCmd tc path
   | ["build", path, "-o", out] => buildCmd tc path out false (split := split)

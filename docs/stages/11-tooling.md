@@ -91,8 +91,8 @@ be at least 1, and a read-only layer cannot be pruned even if it is passed with 
 until this stage the bytes an entry returns (its *output*) were trusted because they were
 in the cache. `wiz` now writes a manifest with a SHA-256 of each entry's bytes and checks
 it before applying the effect: a truncated, rewritten or swapped entry is a **miss** (the
-text entry, the next layer, or re-elaboration answers), never a wrong result. There is no
-signature yet — see P3 below.
+text entry, the next layer, or re-elaboration answers), never a wrong result. The
+generation index can also carry a detached signature; see P3 below.
 
 The layout is one manifest per module (the note's P2) plus a per-layer generation index
 (P1):
@@ -127,9 +127,10 @@ The policy is `--cache-verify off|warn|strict` (`--cache-verify=MODE` also works
 
 A manifest whose root does not validate, whose `valid-until` (or whose layer generation's)
 has passed, or whose entry digest does not match is a miss: it is not repaired in a
-read-only layer. `wiz cache verify [--strict]` scans every layer's manifests against the
-bytes (exit 1 on a mismatch, a missing file, an expired manifest, or — with
-`--strict`/`--cache-ro` — an unmanifested keyed file); `wiz cache manifest [--valid-days N]` rebuilds the generation
+read-only layer. `wiz cache verify [--strict] [--require-signature --signers FILE]` scans
+every layer's manifests against the bytes (exit 1 on a mismatch, a missing file, an expired
+manifest, or — with `--strict`/`--cache-ro` — an unmanifested keyed file; the signature
+flags are described below); `wiz cache manifest [--valid-days N]` rebuilds the generation
 index (`prev` chains it to the old one) and can set its expiry. `--cache-verify-stats`
 prints the per-run counts (manifests, verified entries/regions, mismatches, unverified).
 
@@ -138,12 +139,32 @@ their old behaviour; the write cache's old unverified path is still available in
 Manifests are additive files — `.wizc`, `.wizr` and `.wizs` keep their names and bytes,
 so an unmanifested cache is byte-identical and no key or salt changes.
 
-**Not signatures (P3).** An unsigned manifest detects corruption and a mirror that swaps
-a listed entry, but a writer who controls the manifest can rewrite both it and the bytes,
-and can delete it (in `warn`, for the write cache). The missing half is an external
-signature over the manifest (DSSE/minisign/`ssh-keygen -Y sign`), a key-id policy with
-revocation, and a witnessed log; the attestation prior-art note calls this E2/P3. So do
-not read these manifests as provenance: they are integrity, not authenticity.
+**Signatures (P3, authenticity).** The generation index can carry a **detached OpenSSH
+signature**, `<cache>/manifest.sexpr.sig`: an SSHSIG over the exact bytes of
+`manifest.sexpr`, in the namespace `wiz-cache-manifest`. Signing writes only the sidecar,
+so the SHA-256 checks above are unchanged and an unsigned cache stays byte-identical.
+`wiz cache sign --key FILE [--key-id ID] [--valid-days N]` signs each layer with an
+offline Ed25519 key (`ssh-keygen -Y sign`); the key is not copied into the cache, and the
+default key id is the key's `SHA256:` fingerprint. `--valid-days` first reseals the index
+with that expiry (a new generation), so `prev` and `valid-until` are inside the signature.
+
+Verification is a policy: `wiz cache verify --signers FILE` reads an OpenSSH
+`allowed_signers` file. A principal is a key id (`wiz-release-1`) or a `SHA256:`
+fingerprint; any listed key is accepted, or `--key-id ID` requires one.
+`--require-signature` fails closed on a missing, invalid or expired signature (and on one
+it cannot check), while `--allow-unsigned` explicitly accepts a missing signature.
+`--min-generation N` rejects an older generation: a signature alone cannot detect a
+rollback to an older signed generation, so the expected head is pinned out of band. An
+expired index is rejected even when its signature is valid.
+
+The `allowed_signers` file is also the rotation and revocation mechanism: add the new
+key's line and sign a new generation with it (rotation), and remove an old key's line to
+revoke it (the next verification rejects its signatures). Revocation has no trusted time
+here — a signature made before removal still verifies while the line remains — so keep
+`valid-until` short for release layers and pin the expected generation. This is
+single-provider authenticity, not provenance: it does not catch a compromised signer, a
+wrong build, or a split view. See [cache-signing.md](../cache-signing.md) for the file
+format, key handling, and the rotation/revocation checklist.
 
 Next: finer dependencies (re-elaborate only what an edit affects, not everything
 after it).

@@ -86,6 +86,18 @@ def tamperManifestRoot (f : System.FilePath) : IO Unit := do
     IO.FS.writeFile f (before ++ "(root " ++ bad ++ after.drop 1)
   | _ => IO.FS.writeFile f (text ++ " ")
 
+/-- An ephemeral Ed25519 key for the signature tests (never committed). -/
+def testKey (dir : System.FilePath) (name : String) : IO System.FilePath := do
+  let key := dir / name
+  let o ← IO.Process.output { cmd := "ssh-keygen", args := #["-q", "-t", "ed25519", "-N", "", "-C", "wiz-cache-test", "-f", key.toString] }
+  if o.exitCode != 0 then throw (IO.userError s!"ssh-keygen: {o.exitCode} {o.stderr}")
+  pure key
+
+/-- Write an `allowed_signers` line: a key id (or `SHA256:` fingerprint) and the public key. -/
+def writeSigners (path : System.FilePath) (id : String) (key : System.FilePath) : IO Unit := do
+  let pub ← IO.FS.readFile (System.FilePath.mk (key.toString ++ ".pub"))
+  IO.FS.writeFile path s!"{id} {pub.trimAscii.toString}\n"
+
 /-- Every file under `dir`, recursively. -/
 partial def everyFile (dir : System.FilePath) : IO (Array System.FilePath) := do
   let mut out := #[]
@@ -988,6 +1000,102 @@ def toolchainGroup : Group where
         checkEq cold.stdout o2.stdout
         check ((o2.stderr.splitOn "no manifest for a module").length > 1) s!"no warning: {o2.stderr}"
         checkEq after (← snapshot ro) },
+    { name := "cache signatures: sign/verify, key-id and fingerprint allowlists, a wrong key and a tampered root", run := fun _ => do
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 2\n"),
+                          ("main.wiz", "import M\n#eval x\n")]
+        let cache ← IO.FS.createTempDir
+        let wiz := (← IO.FS.realPath ".lake/build/bin/wiz").toString
+        let run (args : Array String) := IO.Process.output { cmd := wiz, args, cwd := some dir }
+        let base : Array String := #["check", "main.wiz", "-I", dir.toString]
+        let cold ← run (base ++ #["--cache", cache.toString])
+        checkEq 0 cold.exitCode
+        checkEq "main.wiz:2:1: info: 2\n" cold.stdout
+        checkEq 0 (← run #["cache", "manifest", "--cache", cache.toString]).exitCode
+        let keyDir ← IO.FS.createTempDir
+        let key ← testKey keyDir "id"
+        let allowed := keyDir / "allowed"
+        writeSigners allowed "test-key" key
+        -- signing writes only the sidecar: manifest.sexpr keeps its bytes (SHA-256 checks)
+        let before ← IO.FS.readFile (cache / "manifest.sexpr")
+        let sign ← run #["cache", "sign", "--cache", cache.toString, "--key", key.toString, "--key-id", "test-key"]
+        checkEq 0 sign.exitCode
+        check ((sign.stdout.splitOn "signature").length > 1) s!"sign: {sign.stdout}"
+        checkEq before (← IO.FS.readFile (cache / "manifest.sexpr"))
+        check (← (cache / "manifest.sexpr.sig").pathExists) "no signature file"
+        -- a key-id allowlist
+        let v ← run #["cache", "verify", "--cache", cache.toString, "--signers", allowed.toString, "--key-id", "test-key"]
+        checkEq 0 v.exitCode
+        check ((v.stdout.splitOn "signature valid").length > 1) s!"verify: {v.stdout}"
+        -- and a fingerprint allowlist (the signer's default id is its fingerprint)
+        let fp ← match ← Cache.keyFingerprint key with
+          | some fp => pure fp
+          | none => throw (IO.userError "no key fingerprint")
+        let allowedFp := keyDir / "allowed-fp"
+        writeSigners allowedFp fp key
+        checkEq 0 (← run #["cache", "verify", "--cache", cache.toString, "--signers", allowedFp.toString, "--key-id", fp]).exitCode
+        -- a wrong key verifies nothing
+        let other ← testKey keyDir "other"
+        let otherAllowed := keyDir / "other-allowed"
+        writeSigners otherAllowed "other" other
+        let wrong ← run #["cache", "verify", "--cache", cache.toString, "--signers", otherAllowed.toString]
+        checkEq 1 wrong.exitCode
+        check ((wrong.stdout.splitOn "signature invalid").length > 1) s!"wrong key: {wrong.stdout}"
+        -- editing the generation index breaks the signature
+        let original ← IO.FS.readFile (cache / "manifest.sexpr")
+        IO.FS.writeFile (cache / "manifest.sexpr") (original.replace "(generation " "(generation 9")
+        let tampered ← run #["cache", "verify", "--cache", cache.toString, "--signers", allowed.toString]
+        checkEq 1 tampered.exitCode
+        IO.FS.writeFile (cache / "manifest.sexpr") original
+        checkEq 0 (← run #["cache", "verify", "--cache", cache.toString, "--signers", allowed.toString]).exitCode },
+    { name := "cache signatures: expiry, missing/unsigned policy, and generation rollback", run := fun _ => do
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 2\n"),
+                          ("main.wiz", "import M\n#eval x\n")]
+        let cache ← IO.FS.createTempDir
+        let wiz := (← IO.FS.realPath ".lake/build/bin/wiz").toString
+        let run (args : Array String) := IO.Process.output { cmd := wiz, args, cwd := some dir }
+        let base : Array String := #["check", "main.wiz", "-I", dir.toString]
+        checkEq 0 (← run (base ++ #["--cache", cache.toString])).exitCode
+        let keyDir ← IO.FS.createTempDir
+        let key ← testKey keyDir "id"
+        let allowed := keyDir / "allowed"
+        writeSigners allowed "test-key" key
+        let sign (args : Array String := #[]) := run (#["cache", "sign", "--cache", cache.toString, "--key", key.toString, "--key-id", "test-key"] ++ args)
+        -- an expired generation: valid-until is 1970, so even a valid signature is rejected
+        let _ ← Cache.sealLayer cache true 1  -- (writes the index and drops the signature)
+        checkEq 0 (← sign).exitCode
+        let expired ← run #["cache", "verify", "--cache", cache.toString, "--require-signature", "--signers", allowed.toString]
+        checkEq 1 expired.exitCode
+        check ((expired.stdout.splitOn "signature expired").length > 1) s!"expired: {expired.stdout}"
+        -- a current index signed again
+        let future ← Cache.unixNow
+        let _ ← Cache.sealLayer cache true (future + 86400)
+        checkEq 0 (← sign).exitCode
+        checkEq 0 (← run #["cache", "verify", "--cache", cache.toString, "--require-signature", "--signers", allowed.toString]).exitCode
+        -- a missing signature fails closed under --require-signature, and only --allow-unsigned accepts it
+        IO.FS.removeFile (cache / "manifest.sexpr.sig")
+        let missing ← run #["cache", "verify", "--cache", cache.toString, "--require-signature", "--signers", allowed.toString]
+        checkEq 1 missing.exitCode
+        check ((missing.stdout.splitOn "signature missing").length > 1) s!"missing: {missing.stdout}"
+        let allowedUnsigned ← run #["cache", "verify", "--cache", cache.toString, "--allow-unsigned", "--signers", allowed.toString]
+        checkEq 0 allowedUnsigned.exitCode
+        check ((allowedUnsigned.stdout.splitOn "explicitly allowed").length > 1) s!"allow unsigned: {allowedUnsigned.stdout}"
+        checkEq 2 (← run #["cache", "verify", "--cache", cache.toString, "--require-signature", "--allow-unsigned"]).exitCode
+        -- a generation rollback: an older signed index is still a valid signature, so only
+        -- the expected minimum generation rejects it
+        checkEq 0 (← sign).exitCode
+        let oldGen ← IO.FS.readFile (cache / "manifest.sexpr")
+        let oldSig ← IO.FS.readFile (cache / "manifest.sexpr.sig")
+        let _ ← Cache.sealLayer cache true 0
+        let current ← match ← Cache.readGeneration cache with
+          | some g => pure g.generation
+          | none => throw (IO.userError "no generation after resealing")
+        checkEq 0 (← sign).exitCode
+        IO.FS.writeFile (cache / "manifest.sexpr") oldGen
+        IO.FS.writeFile (cache / "manifest.sexpr.sig") oldSig
+        checkEq 0 (← run #["cache", "verify", "--cache", cache.toString, "--signers", allowed.toString]).exitCode
+        let rollback ← run #["cache", "verify", "--cache", cache.toString, "--signers", allowed.toString, "--min-generation", toString current]
+        checkEq 1 rollback.exitCode
+        check ((rollback.stdout.splitOn "generation rollback").length > 1) s!"rollback: {rollback.stdout}" },
     { name := "-I DIR adds a module root", run := fun _ => do
         let dir ← mkTree [("Pkg/Three.wiz", "import Prelude\ndef three : Nat := 3\n")]
         let (tc, _) := ({} : Toolchain).parseFlags ["check", "main.wiz", "-I", dir.toString]

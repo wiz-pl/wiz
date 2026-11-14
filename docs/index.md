@@ -12,6 +12,7 @@ docs/building.md, "Documentation site").
 * [release.md](release.md): making a release (checklist, tagging, smoke test)
 * [CHANGELOG.md](../CHANGELOG.md)
 * [building.md](building.md)
+* [cache-signing.md](cache-signing.md): signing cache manifests, key ids, rotation and revocation
 * [ci-runner.md](ci-runner.md): a self-hosted runner for the heavy CI shards
 * [exercises.md](exercises.md): generating the exercise tree from this one
 * [hardware.md](hardware.md): hardware in Wiz, from a circuit to a proved temporal property

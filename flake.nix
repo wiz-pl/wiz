@@ -282,8 +282,9 @@
       devShells = forAll (pkgs: {
         default = pkgs.mkShell {
           # neovim: the `nvim` test group (editors/nvim); z3 and cadical: the `smt` and `sat` groups
-          # (stage 28b: `sat_decide` finds it on PATH)
-          packages = [ pkgs.elan pkgs.gmp pkgs.boehmgc pkgs.llvm pkgs.python3 pkgs.git pkgs.neovim pkgs.z3 pkgs.cadical ];
+          # (stage 28b: `sat_decide` finds it on PATH); openssh: `ssh-keygen` for the cache
+          # signature tests (and for signing a release cache).
+          packages = [ pkgs.elan pkgs.gmp pkgs.boehmgc pkgs.llvm pkgs.python3 pkgs.git pkgs.neovim pkgs.z3 pkgs.cadical pkgs.openssh ];
           # `wiz` and `grail` take the toolchain as flags (stage 23a); grail and the test
           # driver read this machine's paths from the uncommitted grail.local.wiz written
           # here (when run from the repository root). Nothing reads the environment.
