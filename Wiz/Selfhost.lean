@@ -65,7 +65,8 @@ def tablesSource : String :=
   wizTables t ++ s!"def tokens : List String := {wizList (t.tokens.toList.map wizLit)}\n"
 
 def checkerFiles : List String :=
-  ["selfhost/Lex.wiz", "selfhost/Parse.wiz", "selfhost/Kernel.wiz", "selfhost/Frontend.wiz"]
+  ["selfhost/Lex.wiz", "selfhost/Parse.wiz", "selfhost/Kernel.wiz", "selfhost/CParse.wiz",
+   "selfhost/CGlue.wiz", "selfhost/Frontend.wiz"]
 
 def compilerFiles : List String := checkerFiles ++ ["selfhost/Backend.wiz"]
 
@@ -93,8 +94,8 @@ def compilerSource (srcs : List String) : String :=
     "  match List.append (errLines (List.reverseOf out .nil)) missing with\n  | .nil => do\n    printAll (commentLines (List.reverseOf out .nil));\n" ++
     "    printDocs (genProgramArgs args text gs)\n  | .cons e es => do\n    ePrintAll (.cons e es);\n    Process.exit 1\n" ++
     "def main : IO Unit := do\n  args ← IO.args;\n  text ← IO.readFile \"input.wiz\";\n" ++
-    "  tab ← moduleRootSources cats tokens (modRoots args) text;\n" ++
-    "  match modCheckRun cats tokens tab (.cons \"Main\" .nil) with\n" ++
+    "  hs ← moduleHeaderTexts text;\n  tab ← moduleRootSources cats tokens (modRoots args) text;\n" ++
+    "  match modCheckRunH cats tokens hs tab (.cons \"Main\" .nil) with\n" ++
     "    | .mk run _ _ _ => IO.bind (missingLinks (List.reverseOf (Globals.ffi (Run.gs run)) .nil)) (fun missing => finish args text (Run.out run) (Run.gs run) missing)\n"
 
 /-- The toolchain as its own input (for the bootstrap check): the compiler's source, with

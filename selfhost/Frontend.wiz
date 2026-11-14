@@ -279,7 +279,15 @@ def elab : Scope → Syntax → Elab
                             | _ => .err "let needs a name"
                           | e => e
                         | e => e
-                    | .false => .err ("unsupported syntax " +++ kindOf s)
+                    | .false => match strEq (kindOf s) "term.prod" with
+                      | .true => match elab names (kid s 0) with
+                        | .ok a => match elab (Scope.bind names "_") (kid s 2) with
+                          | .ok b => .ok (.sigma .qw .lhole .lhole a b)
+                          | e => e
+                        | e => e
+                      -- (Σ types are elaborated by `inferType`; this scope-level path is
+                      -- used for the simple type annotations in the C header parser)
+                      | .false => .err ("unsupported syntax " +++ kindOf s)
   --|ex
   --| | _, _ => .err "not implemented"
   --sol>
@@ -370,6 +378,10 @@ inductive Ctor where
   | mk (name : String) (fields : List CField) (res : Tm) (qs : List Q) (impl : List Bool)
 inductive IndInfo where
   | mk (np : Nat) (I D DI : Tm) (ctors : List Ctor) (fixed : Option Tm) (fam : Tm)
+structure Header where
+  name : String
+  text : String
+
 -- the C side of a program (stage 21l): its foreign functions (`extern`: the Wiz name,
 -- the C name, the header or "", the marshalling kinds of the parameters and of the
 -- result as in the Lean frontend, whether the result is in `IO`, and the finalizer of a
@@ -377,7 +389,7 @@ inductive IndInfo where
 -- finalizers), the latest first
 inductive Foreign where
   | fn (name cname header : String) (params : List String) (res : String) (io : Bool) (fin : String)
-  | ty (name fin : String)
+  | ty (name fin cname : String)
   -- (stage 21o) `link_c "f.c"` (`lib := false`) and `link_lib "m"`, and `export "c" f`:
   -- the Wiz name, the C name, the kinds of the parameters and of the result, `IO`
   | link (path : String) (lib : Bool)
@@ -388,45 +400,65 @@ inductive Foreign where
   | cstruct (name ctype header : String) (fields kinds : List String)
   -- (stage 21t) `attribute [implemented_by g] f`: compiled code runs `g` for `f`
   | impl (name target : String)
+  -- (stage 30) a native representation: `attribute [implemented_by mk get] T.mk`
+  | repr (T mk get : String)
+  -- (stage 30) `import_c`: the functions glue may call, the header's structs, and the C
+  -- text (an include, a glue function) the backend puts before the wrappers
+  | cfunc (name : String) (params : List String) (res : String)
+  | code (text : String)
 -- the globals so far: by position (the first is `0`), their names in scope, the
--- inductive types by name, the foreign declarations, and (A10) the classes and the
--- instances (the latest first)
+-- inductive types by name, the foreign declarations, (A10) the classes and the
+-- instances (the latest first), and the preprocessed header texts (`import_c`; the
+-- driver reads them, since the frontend is pure)
 inductive Globals where
   | mk (all : Array Global) (scope : Scope) (inds : StrMap (Option IndInfo)) (ffi : List Foreign)
-       (classes : StrMap (Option ClassInfo)) (insts : List InstInfo)
-def Globals.empty : Globals := .mk Array.empty Scope.empty StrMap.empty .nil StrMap.empty .nil
+       (classes : StrMap (Option ClassInfo)) (insts : List InstInfo) (headers : List Header)
+def Globals.empty : Globals := .mk Array.empty Scope.empty StrMap.empty .nil StrMap.empty .nil .nil
 def Globals.scope : Globals → Scope
-  | .mk _ sc _ _ _ _ => sc
+  | .mk _ sc _ _ _ _ _ => sc
 def Globals.add (gs : Globals) (g : Global) : Globals := match gs with
-  | .mk all sc inds ffi cls ins => match g with
-    | .mk x _ _ _ _ _ _ => .mk (Array.push all g) (Scope.addGlobal sc x) inds ffi cls ins
+  | .mk all sc inds ffi cls ins hs => match g with
+    | .mk x _ _ _ _ _ _ => .mk (Array.push all g) (Scope.addGlobal sc x) inds ffi cls ins hs
 def Globals.addInd (gs : Globals) (T : String) (info : IndInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins => .mk all sc (StrMap.insert inds (Str.ofString T) (.some info)) ffi cls ins
+  | .mk all sc inds ffi cls ins hs => .mk all sc (StrMap.insert inds (Str.ofString T) (.some info)) ffi cls ins hs
 def Globals.ind (gs : Globals) (T : String) : Option IndInfo := match gs with
-  | .mk _ _ inds _ _ _ => StrMap.findD inds (Str.ofString T) .none
+  | .mk _ _ inds _ _ _ _ => StrMap.findD inds (Str.ofString T) .none
 def Globals.ffi : Globals → List Foreign
-  | .mk _ _ _ ffi _ _ => ffi
+  | .mk _ _ _ ffi _ _ _ => ffi
 def Globals.addFFI (gs : Globals) (f : Foreign) : Globals := match gs with
-  | .mk all sc inds ffi cls ins => .mk all sc inds (.cons f ffi) cls ins
+  | .mk all sc inds ffi cls ins hs => .mk all sc inds (.cons f ffi) cls ins hs
+def Globals.headers : Globals → List Header
+  | .mk _ _ _ _ _ _ hs => hs
+def Globals.addHeader (gs : Globals) (name text : String) : Globals := match gs with
+  | .mk all sc inds ffi cls ins hs => .mk all sc inds ffi cls ins (.cons (Header.mk name text) hs)
+def headerGo (name : String) : List Header → Option String
+  | .nil => .none
+  | .cons e rest => match strEq e.name name with
+    | .true => .some e.text
+    | .false => headerGo name rest
+def Globals.header (gs : Globals) (name : String) : Option String :=
+  headerGo name (Globals.headers gs)
+def Globals.withHeaders (gs : Globals) (hs : List Header) : Globals := match gs with
+  | .mk all sc inds ffi cls ins _ => .mk all sc inds ffi cls ins hs
 -- (A10) the classes by name
 def Globals.class (gs : Globals) (T : String) : Option ClassInfo := match gs with
-  | .mk _ _ _ _ cls _ => match StrMap.findD cls (Str.ofString T) .none with
+  | .mk _ _ _ _ cls _ _ => match StrMap.findD cls (Str.ofString T) .none with
     | .some info => .some info
     | .none => .none
 def Globals.addClass (gs : Globals) (T : String) (info : ClassInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins => .mk all sc inds ffi (StrMap.insert cls (Str.ofString T) (.some info)) ins
+  | .mk all sc inds ffi cls ins hs => .mk all sc inds ffi (StrMap.insert cls (Str.ofString T) (.some info)) ins hs
 -- (A10) the instances, the latest first
 def Globals.insts : Globals → List InstInfo
-  | .mk _ _ _ _ _ ins => ins
+  | .mk _ _ _ _ _ ins _ => ins
 def Globals.addInst (gs : Globals) (i : InstInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins => .mk all sc inds ffi cls (.cons i ins)
+  | .mk all sc inds ffi cls ins hs => .mk all sc inds ffi cls (.cons i ins) hs
 -- (A10) a global's parameter kinds replaced (a class's type former inserts its
 -- instance parameters at every use, as in Lean)
 def Globals.setMask (gs : Globals) (n : String) (m : List BKind) : Globals := match gs with
-  | .mk all sc inds ffi cls ins => match Scope.lookup sc n with
+  | .mk all sc inds ffi cls ins hs => match Scope.lookup sc n with
     | .none => gs
     | .some i => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
-      | .mk nm ps ty v iv _ ns => .mk (Array.set all (Array.size all - 1 - i) (.mk nm ps ty v iv m ns)) sc inds ffi cls ins
+      | .mk nm ps ty v iv _ ns => .mk (Array.set all (Array.size all - 1 - i) (.mk nm ps ty v iv m ns)) sc inds ffi cls ins hs
 -- the instances of class `C`, the latest first
 def instsOf : String → List InstInfo → List InstInfo
   | _, .nil => .nil
@@ -435,13 +467,13 @@ def instsOf : String → List InstInfo → List InstInfo
     | .false => instsOf C rest
 -- the global at index `i` (the latest is `0`): a constant, or its value inlined
 def globalTm (inline : Bool) (gs : Globals) (i : Nat) : Tm := match gs with
-  | .mk all _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk n _ ty v iv _ _ => match inline with
       | .true => iv
       | .false => .const n .nil .nil v ty
 -- the universe parameters a global declares (none at all before U1 for every definition)
 def globalParams (gs : Globals) (i : Nat) : List String := match gs with
-  | .mk all _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk _ ps _ _ _ _ _ => ps
 -- a global's own parameters as levels (`fun u => .lparam u`, for a polymorphic global
 -- used where no level syntax is available)
@@ -480,7 +512,7 @@ inductive Step where
 -- added may be in scope before it, or twice among them. One exception: a partial
 -- definition's signature (an axiom) is followed, once, by its body under the same name.
 def Globals.all : Globals → Array Global
-  | .mk all _ _ _ _ _ => all
+  | .mk all _ _ _ _ _ _ => all
 inductive Seen where
   | mk (name : String) (axiomOnly : Bool)
 def isAxiomTm : Tm → Bool
@@ -2014,11 +2046,11 @@ inductive TE where
   | err (msg : String)
 -- a global's implicit parameters (by its index from the latest)
 def globalMask (gs : Globals) (i : Nat) : List BKind := match gs with
-  | .mk all _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk _ _ _ _ _ m _ => m
 -- a global's parameter names (A9: named arguments)
 def globalNames (gs : Globals) (i : Nat) : List String := match gs with
-  | .mk all _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk _ _ _ _ _ _ ns => ns
 -- Pattern matching in definitions (stages 16b, 16e): `def f (ps) : R := match x, y with
 -- | p₁, q₁ => rhs₁ …`, the scrutinees parameters and `R` not mentioning them, is
@@ -4806,7 +4838,7 @@ partial def headIndex (all : Array Global) (i : Nat) (m : StrMap (List Nat)) : S
     | .none => m
     | .some h => StrMap.insert m (Str.ofString h) (.cons j (StrMap.findD m (Str.ofString h) .nil)))
 def WEnv.of (gs : Globals) : WEnv := match gs with
-  | .mk all _ _ _ _ _ => .mk all (headIndex all (Array.size all) StrMap.empty)
+  | .mk all _ _ _ _ _ _ => .mk all (headIndex all (Array.size all) StrMap.empty)
 def WEnv.global (we : WEnv) (i : Nat) : Global := match we with
   | .mk all _ => Array.getD all i (.mk "?" .nil .star .star .star .nil .nil)
 def WEnv.cands (we : WEnv) (h : HeadArgs) : List Nat := match we with
@@ -4953,7 +4985,7 @@ def tmHead : Tm → Tm
 def foreignFin : List Foreign → String → Option String
   | .nil, _ => .none
   | .cons f rest, n => match f with
-    | .ty m fin => match strEq m n with
+    | .ty m fin _ => match strEq m n with
       | .true => .some fin
       | .false => foreignFin rest n
     | _ => foreignFin rest n
@@ -5148,8 +5180,8 @@ def externCmd (gs : Globals) (stx : Syntax) : Step :=
   match axiomCmd gs (mkNode "command.axiom" (.cons (.atom "axiom") (.cons (kid stx 3)
       (.cons (mkNull .nil) (.cons (mkNull .nil) (one (mkNull (.cons (.atom ":") (one (kid stx 5)))))))))) with
   | .mk line gs' => match gs' with
-    | .mk all _ _ _ _ _ => match Nat.beq (Array.size all) (match gs with
-      | .mk all0 _ _ _ _ _ => Array.size all0) with
+    | .mk all _ _ _ _ _ _ => match Nat.beq (Array.size all) (match gs with
+      | .mk all0 _ _ _ _ _ _ => Array.size all0) with
       | .true => .mk line gs'
       | .false => match Array.getD all (Array.size all - 1) (.mk "?" .nil .star .star .star .nil .nil) with
         | .mk _ _ ty _ _ _ _ => match ffiSig (Globals.ffi gs) (isNativeC cname) ty with
@@ -5164,7 +5196,7 @@ def foreignTypeCmd (gs : Globals) (stx : Syntax) : Step := match kid stx 1 with
     | .some _ => errStep gs (String.append (String.append "'" T) "' has already been declared")
     | .none =>
       let gs' := Globals.add gs (.mk T .nil (.univ 0) (.axiomC T (.univ 0)) (.axiomC T (.univ 0)) .nil .nil);
-      .mk (String.append T " : U0") (Globals.addFFI gs' (.ty T (strValue (kid (kid stx 2) 3))))
+      .mk (String.append T " : U0") (Globals.addFFI gs' (.ty T (strValue (kid (kid stx 2) 3)) (strValue (kid (kid stx 3) 3))))
   | _ => errStep gs "a foreign type needs a name"
 -- (stage 21o) `link_c` and `link_lib`, as `command.linkC`/`linkLib` in the Lean
 -- frontend: recorded once each, for the backend, which names them in the C it prints
@@ -5215,7 +5247,7 @@ def exportedAs (cname : String) : List Foreign → Bool
 def globalTyOf (gs : Globals) (f : String) : Option Tm := match Scope.lookup (Globals.scope gs) f with
   | .none => .none
   | .some i => match gs with
-    | .mk all _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk all _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
       | .mk _ _ ty _ _ _ _ => .some ty
 -- `export "c_name" f (: T)?` (stage 21o, as `command.export` in the Lean frontend)
 def exportCmd (gs : Globals) (stx : Syntax) : LinkR :=
@@ -5264,6 +5296,11 @@ def externNamed (n : String) : List Foreign → Bool
   | .cons f rest => match f with
     | .fn m _ _ _ _ _ _ => Bool.or (strEq m n) (externNamed n rest)
     | _ => externNamed n rest
+def reprExists (ffi : List Foreign) (T : String) : Bool := match ffi with
+  | .nil => .false
+  | .cons f rest => match f with
+    | .repr t _ _ => Bool.or (strEq t T) (reprExists rest T)
+    | _ => reprExists rest T
 def implementedByCmd (gs : Globals) (stx : Syntax) : LinkR :=
   let g := identOf' (kid stx 3);
   let f := identOf' (kid stx 6);
@@ -5273,7 +5310,29 @@ def implementedByCmd (gs : Globals) (stx : Syntax) : LinkR :=
   | .some tyF => match globalTyOf gs g with
     | .none => err (String.append "unknown declaration " g)
     | .some tyG => match kids (kid stx 4) with
-      | .cons _ _ => err "a native representation (implemented_by mk get) is not supported by the self-hosted frontend"
+      | .cons getStx _ =>
+        -- `attribute [implemented_by mk get] T.mk` (stage 22d): values of `T` are native.
+        -- The self-hosted backend records the constructor's implementation (`mk`) and the
+        -- representation; a program that only uses the type through its `implemented_by`
+        -- operations (as `U32Array`/`U64Map` do) compiles to those natives.
+        let get := identOf' getStx;
+        match globalTyOf gs get with
+        | .none => err (String.append "unknown declaration " get)
+        | .some tyGet =>
+          let T := match splitLast f with
+            | .some (.mk base _) => base
+            | .none => f;
+          match reprExists (Globals.ffi gs) T with
+          | .true => err (String.append T " already has a native representation")
+          | .false => match Scope.lookup (Globals.scope gs) (String.append T ".seal✝") with
+            | .none => err (String.append "a native representation needs `sealed inductive " (String.append T "`: a look-alike of an unsealed type is the same type"))
+            | .some _ =>
+              -- `mk` must have the constructor's type, and `get` must end in `T`
+              if Bool.not (convTy empty (eval .nil tyG) (eval .nil tyF)) then
+                err (g +++ " can't implement " +++ f +++ ": its type " +++ show .nil 0 tyG +++ " is not " +++ f +++ "'s type")
+              else (
+                let gs1 := Globals.addFFI gs (.impl f g);
+                LinkR.mk .none (Globals.addFFI gs1 (.repr T g get)))
       | .nil => match Bool.or (externNamed f (Globals.ffi gs)) (elemStr f nativeNames) with
         | .true => err (String.append f " is a builtin or foreign function: it already has an implementation")
         | .false => match strEq f g with
@@ -5666,8 +5725,298 @@ def cStructCmd (gs : Globals) (stx : Syntax) : Step :=
             | .true => .mk line gs'
             | .false => .mk line (Globals.addFFI gs' (.cstruct T ctype header names ks))
 
--- The self-hosted frontend's Prelude (stage 19a), read by `import Prelude`: numbers,
--- Booleans, lists, options, pairs, characters (by their code) and strings.
+-- **`import_c` and `glue`** (stage 30; `command.importC` and `command.glue` in
+-- `Elab/Command.lean`). The self-hosted frontend is pure, so the driver reads the header
+-- texts (`Globals.headers`) and the frontend parses them with `CParse.wiz`. The subset
+-- here is scalar C (integers, floats, `char *`, `Bool`, `void`, foreign pointers and
+-- `c_struct`s that were declared explicitly); a header must be self-contained (the
+-- self-hosted compiler does not run the C preprocessor), and structs by value are not
+-- mapped automatically from a header yet (declare a `c_struct` for them).
+def namedConst (gs : Globals) (n : String) : Tm :=
+  match Scope.lookup (Globals.scope gs) n with
+  | .some i => globalTm .false gs i
+  | .none => .const n .nil .nil (.axiomC n (.univ 0)) (.univ 0)
+def kindTy2 (gs : Globals) (k n : String) : Tm :=
+  if strEq k "b" then namedConst gs "Bool"
+  else if strEq k "v" then .unit 0
+  else namedConst gs n
+
+def kindTy (gs : Globals) (k n : String) : Tm :=
+  if strEq k "n" then namedConst gs "Nat"
+  else if strEq k "u" then namedConst gs "UInt64"
+  else if strEq k "f" then namedConst gs "Float64"
+  else if strEq k "s" then namedConst gs "String"
+  else kindTy2 gs k n
+def ioKindTy (t : Tm) : Tm := .app (.const "IO" .nil .nil (.axiomC "IO" (.univ 0)) (.univ 0)) t
+structure KN where
+  kind : String
+  name : String
+partial def piKinds (gs : Globals) : List KN → Tm → Tm
+  | .nil, t => t
+  | .cons e rest, t => .pi .qw .lhole .lhole (kindTy gs e.kind e.name) (piKinds gs rest t)
+def tyOfKinds (gs : Globals) (ks : List KN) (rk rn : String) (isPure : Bool) : Tm :=
+  let r := kindTy gs rk rn;
+  piKinds gs ks (match isPure with
+    | .true => r
+    | .false => ioKindTy r)
+def cstructNameless (ffi : List Foreign) (sp : String) : Option String := match ffi with
+  | .nil => .none
+  | .cons f rest => match f with
+    | .cstruct n c _ _ _ => match strEq c sp with
+      | .true => .some n
+      | .false => cstructNameless rest sp
+    | _ => cstructNameless rest sp
+def cstructCType (ffi : List Foreign) (n : String) : String := match ffi with
+  | .nil => "void *"
+  | .cons f rest => match f with
+    | .cstruct m c _ _ _ => match strEq m n with
+      | .true => c
+      | .false => cstructCType rest n
+    | _ => cstructCType rest n
+def foreignTypeFor (ffi : List Foreign) (sp : String) : Option String := match ffi with
+  | .nil => .none
+  | .cons f rest => match f with
+    | .ty n _ c => match strEq c sp with
+      | .true => .some n
+      | .false => foreignTypeFor rest sp
+    | _ => foreignTypeFor rest sp
+def hasForeignTypeName (ffi : List Foreign) (n : String) : Bool := match ffi with
+  | .nil => .false
+  | .cons f rest => match f with
+    | .ty m _ _ => Bool.or (strEq m n) (hasForeignTypeName rest n)
+    | _ => hasForeignTypeName rest n
+def addForeignType (gs : Globals) (name cname : String) : Option Globals :=
+  match Scope.lookup (Globals.scope gs) name with
+  | .some _ => .none
+  | .none =>
+    let gs1 := Globals.add gs (.mk name .nil (.univ 0) (.axiomC name (.univ 0)) (.axiomC name (.univ 0)) .nil .nil);
+    .some (Globals.addFFI gs1 (.ty name "" cname))
+-- the kind of a C type: scalar C, a `char *`, a foreign pointer, or a declared c_struct
+inductive KR where
+  | kok (kind name : String) (gs : Globals)
+  | kerr
+def cDropStructPrefix (s : String) : String := match s with
+  | .mk cs => match cs with
+    | .cons a (.cons b (.cons c (.cons d (.cons e (.cons f (.cons g rest)))))) =>
+      match strEq (String.mk (.cons a (.cons b (.cons c (.cons d (.cons e (.cons f (.cons g .nil)))))))) "struct " with
+      | .true => String.mk rest
+      | .false => s
+    | _ => s
+def hdrWizPtrName (sp : String) : String := String.append "C." (cDropStructPrefix sp)
+def kindPtr (sp : String) (gs : Globals) (noAuto : Bool) (skips : List String) : KR := match foreignTypeFor (Globals.ffi gs) sp with
+  | .some n => .kok "p" n gs
+  | .none =>
+    let name := hdrWizPtrName sp
+    match hasForeignTypeName (Globals.ffi gs) name with
+    | .true => .kok "p" name gs
+    | .false =>
+      if Bool.or noAuto (elemStr sp skips) then .kerr else
+      match addForeignType gs name sp with
+      | .some gs1 => .kok "p" name gs1
+      | .none => .kerr
+mutual
+
+partial def kindOfCTy2 (isResult : Bool) (ct : CTy) (gs : Globals) (noAuto : Bool) (skips : List String) (fuel : Nat) : KR := match ct with
+    | .cptr t => match t with
+      | .cint n => if strEq n "char" then .kok "s" "" gs else .kerr
+      | .cconst u => match u with
+        | .cint n => if strEq n "char" then .kok "s" "" gs else .kerr
+        | .cstruct sp => kindPtr sp gs noAuto skips
+        | _ => .kerr
+      | .cstruct sp => kindPtr sp gs noAuto skips
+      | _ => .kerr
+    | .cstruct sp => match cstructNameless (Globals.ffi gs) sp with
+      | .some n => .kok ("S:" +++ n) n gs
+      | .none => .kerr
+    | .carray t _ => kindOfCTy isResult (.cptr t) gs noAuto skips fuel
+    | _ => .kerr
+
+partial def kindOfCTy (isResult : Bool) (ct : CTy) (gs : Globals) (noAuto : Bool) (skips : List String) (fuel : Nat) : KR := match fuel with
+  | .zero => .kerr
+  | .succ f => match ct with
+    | .cconst t => kindOfCTy isResult t gs noAuto skips f
+    | .cvoid => match isResult with
+      | .true => .kok "v" "" gs
+      | .false => .kerr
+    | .cint n => if strEq n "_Bool" then .kok "b" "" gs else .kok "n" "" gs
+    | .cfloat _ => .kok "f" "" gs
+    | _ => kindOfCTy2 isResult ct gs noAuto skips f
+
+end
+
+partial def splitSpaces : List Char → List String
+  | .nil => .nil
+  | .cons c cs => match Nat.beq (Char.code c) 32 with
+    | .true => splitSpaces cs
+    | .false =>
+      let r := cTakeWhile (fun d => Bool.not (Nat.beq (Char.code d) 32)) (.cons c cs)
+      .cons (String.mk r.1) (splitSpaces r.2)
+def importSkips : List Syntax → List String
+  | .nil => .nil
+  | .cons o rest => match kid o 3 with
+    | .node _ _ => List.append (splitSpaces (match strValue (kid o 3) with | .mk cs => cs)) (importSkips rest)
+    | _ => importSkips rest
+def importNoAuto : List Syntax → Bool
+  | .nil => .false
+  | .cons o rest => Bool.or (match kids o with
+    | .cons _ (.cons _ (.cons _ .nil)) => .true
+    | _ => .false) (importNoAuto rest)
+partial def padNames : List String → Nat → List String
+  | .nil, .zero => .nil
+  | .nil, .succ k => .cons "_" (padNames .nil k)
+  | .cons n ns, .succ k => .cons n (padNames ns k)
+  | .cons n ns, .zero => .nil
+def zipKinds : List String → List String → List KN
+  | .cons k ks, .cons n ns => .cons (KN.mk k n) (zipKinds ks ns)
+  | _, _ => .nil
+inductive KList where
+  | kok (ks : List String) (gs : Globals)
+  | kerr
+partial def kindList (gs : Globals) (noAuto : Bool) (skips : List String) : List CTy → KList
+  | .nil => .kok .nil gs
+  | .cons t ts => match kindOfCTy .false t gs noAuto skips 8 with
+    | .kerr => .kerr
+    | .kok k _ gs1 => match kindList gs1 noAuto skips ts with
+      | .kerr => .kerr
+      | .kok ks gs2 => .kok (.cons k ks) gs2
+partial def importFuncs (gs : Globals) (header : String) (noAuto : Bool) (skips : List String) (isPure : Bool) : List CFn → Globals
+  | .nil => gs
+  | .cons (.mk name ret ps variadic pnames) rest =>
+    let gs1 := match variadic with
+      | .true => gs
+      | .false => match elemStr name skips with
+        | .true => gs
+        | .false => match kindList gs noAuto skips ps with
+          | .kerr => gs
+          | .kok ks gsA => match kindOfCTy .true ret gsA noAuto skips 8 with
+            | .kerr => gsA
+            | .kok rk rn gsB =>
+              let gname := "C." +++ name;
+              match Scope.lookup (Globals.scope gsB) gname with
+              | .some _ => gsB
+              | .none =>
+                let ty := tyOfKinds gsB (zipKinds ks (padNames pnames (lenL ks))) rk rn isPure;
+                let fin := match strEq rk "p" with
+                  | .true => match foreignFin (Globals.ffi gsB) rn with
+                    | .some x => x
+                    | .none => ""
+                  | .false => ""
+                let gsC := Globals.add gsB (.mk gname .nil ty (.axiomC gname ty) (.axiomC gname ty) (dfltKinds (lenL ks)) .nil);
+                Globals.addFFI gsC (.fn gname name header ks rk (Bool.not isPure) fin)
+    importFuncs gs1 header noAuto skips isPure rest
+def addImportedFuncs (gs : Globals) (header : String) (fs : List CFn) (noAuto : Bool) (skips : List String) (isPure : Bool) : Globals :=
+  importFuncs gs header noAuto skips isPure fs
+partial def addCfuncs (gs : Globals) (noAuto : Bool) (skips : List String) : List CFn → Globals
+  | .nil => gs
+  | .cons (.mk name ret ps variadic pnames) rest =>
+    let gs1 := match variadic with
+      | .true => gs
+      | .false => match kindList gs noAuto skips ps with
+        | .kerr => gs
+        | .kok ks gA => Globals.addFFI gA (.cfunc name ks (match kindOfCTy .true ret gA noAuto skips 8 with | .kok k _ _ => k | .kerr => ""))
+    addCfuncs gs1 noAuto skips rest
+def importCCmd (gs : Globals) (stx : Syntax) : Step :=
+  let header := strValue (kid stx 1);
+  let isPure : Bool := match kids (kid stx 2) with
+    | .cons _ _ => .true
+    | .nil => .false;
+  let opts := kids (kid stx 3);
+  let noAuto := importNoAuto opts;
+  let skips := importSkips opts;
+  match Globals.header gs header with
+  | .none => errStep gs (String.append "no header " (String.append header " (the self-hosted compiler reads import_c headers from the file system; use a self-contained header)"))
+  | .some text => match cParseHeader text with
+    | .mk fs sts =>
+      let gs2 := addImportedFuncs gs header fs noAuto skips isPure;
+      .mk "" (addCfuncs gs2 noAuto skips fs)
+-- `glue`: a checked C body. As in `Elab/Command.lean`, the Wiz type gives the signature;
+-- the body may call the functions `import_c` bound.
+def glueGtyOfKind (k : String) : GTy := match strEq k "f" with
+  | .true => .gdbl
+  | .false => match strEq k "s" with
+  | .true => .gstr
+  | .false => match strEq k "v" with
+  | .true => .gvoid
+  | .false => match strEq k "p" with
+  | .true => .gptr
+  | .false => .gint
+def kindCType (gs : Globals) (k : String) : String := match strEq k "f" with
+  | .true => "double"
+  | .false => match strEq k "s" with
+  | .true => "const char *"
+  | .false => match strEq k "b" with
+  | .true => "int"
+  | .false => match strEq k "p" with
+  | .true => "void *"
+  | .false => match strEq k "w" with
+  | .true => "wiz_val"
+  | .false => match strEq k "v" with
+  | .true => "void"
+  | .false => match dropPrefix (strChars "S:") (strChars k) with
+    | .some r => cstructCType (Globals.ffi gs) (String.mk r)
+    | .none => "uint64_t"
+def glueName (n : String) : String := "wiz_glue_" +++ String.mk (hexMangle (strChars n))
+def filterGlue : List KN → List KN
+  | .nil => .nil
+  | .cons e rest => match Bool.or (strEq e.kind "e") (strEq e.kind "v") with
+    | .true => filterGlue rest
+    | .false => .cons e (filterGlue rest)
+def pairNames : List KN → List String
+  | .nil => .nil
+  | .cons e rest => .cons e.name (pairNames rest)
+def pairKinds : List KN → List String
+  | .nil => .nil
+  | .cons e rest => .cons e.kind (pairKinds rest)
+def mapGlueParams : List KN → List NamedGTy
+  | .nil => .nil
+  | .cons e rest => .cons (NamedGTy.mk e.name (glueGtyOfKind e.kind)) (mapGlueParams rest)
+def glueParamDecls (gs : Globals) (names : List String) (ks : List String) : String := match names, ks with
+  | .cons n ns, .cons k ks1 =>
+    let more := glueParamDecls gs ns ks1; if strEq more "" then kindCType gs k +++ " " +++ n
+    else kindCType gs k +++ " " +++ n +++ ", " +++ more
+  | _, _ => ""
+def mapGlueKinds : List String → List GTy
+  | .nil => .nil
+  | .cons k rest => .cons (glueGtyOfKind k) (mapGlueKinds rest)
+def glueFuncs (ffi : List Foreign) : List Callable := match ffi with
+  | .nil => .nil
+  | .cons f rest => match f with
+    | .cfunc n ps r => .cons (Callable.mk n (mapGlueKinds ps) (glueGtyOfKind r)) (glueFuncs rest)
+    | _ => glueFuncs rest
+def glueDeclFields : List String → List String → List NamedGTy
+  | .cons n ns, .cons k ks => .cons (NamedGTy.mk n (glueGtyOfKind k)) (glueDeclFields ns ks)
+  | _, _ => .nil
+def glueStructDecls (ffi : List Foreign) : List StructDef := match ffi with
+  | .nil => .nil
+  | .cons f rest => match f with
+    | .cstruct n c _ fns ks => .cons (StructDef.mk n (glueDeclFields fns ks)) (.cons (StructDef.mk c (glueDeclFields fns ks)) (glueStructDecls rest))
+    | _ => glueStructDecls rest
+def glueCmd (gs : Globals) (stx : Syntax) : Step :=
+  let name := match kid stx 1 with
+    | .ident n => n
+    | _ => "_";
+  let body := strValue (kid stx 6);
+  let ax := mkNode "command.axiom" (.cons (.atom "axiom") (.cons (kid stx 1)
+    (.cons (mkNull .nil) (.cons (kid stx 2) (one (mkNull (.cons (.atom ":") (one (kid stx 4)))))))));
+  match sigType gs ax with
+  | .err m => errStep gs m
+  | .ok _ ty => match ffiSig (Globals.ffi gs) .false ty with
+    | .bad => errStep gs "a glue function's arguments and result must be Nat, UInt64, Float64, String, Bool, Unit, a foreign type or a c_struct (the result may be in IO)"
+    | .mk ks rk io fin =>
+      let names := binders (kids (kid stx 2));
+      let pairs := filterGlue (zipKinds ks (padNames names (lenL ks)));
+      match gCheckGlue body (mapGlueParams pairs) (glueFuncs (Globals.ffi gs)) (glueGtyOfKind rk) (glueStructDecls (Globals.ffi gs)) with
+      | .some m => errStep gs (String.append "glue: " m)
+      | .none =>
+        let cname := glueName name;
+        let cparams := glueParamDecls gs (pairNames pairs) (pairKinds pairs);
+        match Scope.lookup (Globals.scope gs) name with
+        | .some _ => errStep gs (String.append "error: '" (String.append name "' has already been declared"))
+        | .none =>
+          let gs1 := Globals.add gs (.mk name .nil ty (.axiomC name ty) (.axiomC name ty) (dfltKinds (lenL ks)) .nil);
+          let gs2 := Globals.addFFI gs1 (.code ("static " +++ kindCType gs rk +++ " " +++ cname +++ "(" +++
+            (if strEq cparams "" then "void" else cparams) +++ ") {\n" +++ body +++ "\n}"));
+          .mk "" (Globals.addFFI gs2 (.fn name cname "" ks rk io ""))
 def preludeText : String := "inductive Nat where\n  | zero\n  | succ (n : Nat)\ninductive Bool where\n  | false\n  | true\ninductive List (A : Type) where\n  | nil\n  | cons (head : A) (tail : List A)\ninductive Option (A : Type) where\n  | none\n  | some (val : A)\nstructure Prod (A B : Type) where\n  fst : A\n  snd : B\nstructure Char where\n  code : Nat\nstructure String where\n  data : List Char\ndef Nat.add : Nat → Nat → Nat\n  | .zero, n => n\n  | .succ m, n => .succ (Nat.add m n)\ndef Nat.mul : Nat → Nat → Nat\n  | .zero, _ => .zero\n  | .succ m, n => Nat.add n (Nat.mul m n)\ndef Nat.pred : Nat → Nat\n  | .zero => .zero\n  | .succ n => n\ndef Nat.sub : Nat → Nat → Nat\n  | m, .zero => m\n  | m, .succ n => Nat.pred (Nat.sub m n)\ninfixl:65 \" + \" => Nat.add\ninfixl:65 \" - \" => Nat.sub\ninfixl:70 \" * \" => Nat.mul\ndef Nat.beq : Nat → Nat → Bool\n  | .zero, .zero => .true\n  | .succ m, .succ n => Nat.beq m n\n  | _, _ => .false\ndef Nat.blt : Nat → Nat → Bool\n  | _, .zero => .false\n  | .zero, .succ _ => .true\n  | .succ m, .succ n => Nat.blt m n\ndef Nat.lt : Nat → Nat → Bool\n  | _, .zero => .false\n  | .zero, .succ _ => .true\n  | .succ m, .succ n => Nat.lt m n\ndef Nat.le (m n : Nat) : Bool := Nat.lt m (.succ n)\ndef Nat.max (m n : Nat) : Nat := if Nat.lt m n then n else m\ndef Bool.not : Bool → Bool\n  | .true => .false\n  | .false => .true\ndef Bool.and : Bool → Bool → Bool\n  | .true, b => b\n  | .false, _ => .false\ndef Bool.or : Bool → Bool → Bool\n  | .true, _ => .true\n  | .false, b => b\ndef Nat.divGo : Nat → Nat → Nat → Nat\n  | .zero, _, _ => .zero\n  | .succ fuel, n, m => if Nat.lt n m then .zero else .succ (Nat.divGo fuel (Nat.sub n m) m)\ndef Nat.div (n m : Nat) : Nat := match m with\n  | .zero => .zero\n  | .succ _ => Nat.divGo n n m\ndef Nat.mod (n m : Nat) : Nat := Nat.sub n (Nat.mul m (Nat.div n m))\ninfixl:70 \" / \" => Nat.div\ndef Nat.pow : Nat → Nat → Nat\n  | _, .zero => .succ .zero\n  | b, .succ e => Nat.mul b (Nat.pow b e)\ndef Bool.xor : Bool → Bool → Bool\n  | .true, b => Bool.not b\n  | .false, b => b\ndef Nat.isOdd (n : Nat) : Bool := Nat.beq (Nat.mod n 2) 1\ndef Nat.bitwise (f : Bool → Bool → Bool) : Nat → Nat → Nat → Nat\n  | .zero, _, _ => .zero\n  | .succ fuel, a, b =>\n    let rest := Nat.mul 2 (Nat.bitwise f fuel (Nat.div a 2) (Nat.div b 2));\n    if f (Nat.isOdd a) (Nat.isOdd b) then .succ rest else rest\ndef Nat.land (a b : Nat) : Nat := Nat.bitwise Bool.and (Nat.add a b) a b\ndef Nat.lor (a b : Nat) : Nat := Nat.bitwise Bool.or (Nat.add a b) a b\ndef Nat.xor (a b : Nat) : Nat := Nat.bitwise Bool.xor (Nat.add a b) a b\ndef Nat.shiftLeft (a n : Nat) : Nat := Nat.mul a (Nat.pow 2 n)\ndef Nat.shiftRight (a n : Nat) : Nat := Nat.div a (Nat.pow 2 n)\ndef Nat.log2Go : Nat → Nat → Nat\n  | .zero, _ => .zero\n  | .succ fuel, n => if Nat.lt n 2 then .zero else .succ (Nat.log2Go fuel (Nat.div n 2))\ndef Nat.log2 (n : Nat) : Nat := Nat.log2Go n n\ndef Nat.testBit (n i : Nat) : Bool := Nat.isOdd (Nat.shiftRight n i)\ndef List.length {A : Type} : List A → Nat\n  | .nil => .zero\n  | .cons _ t => .succ (List.length t)\ndef List.append {A : Type} : List A → List A → List A\n  | .nil, ys => ys\n  | .cons x xs, ys => .cons x (List.append xs ys)\ninfixr:67 \" ++ \" => List.append\ndef List.map {A B : Type} (f : A → B) : List A → List B\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (List.map f xs)\ndef String.append (a b : String) : String := .mk (List.append a.data b.data)\ndef String.length (s : String) : Nat := List.length s.data\ndef memo {A : Type} (f : Unit → A) : Unit → A := f\naxiom Array : Type → Type\naxiom Array.empty {A : Type} : Array A\naxiom Array.push {A : Type} (a : Array A) (x : A) : Array A\naxiom Array.size {A : Type} (a : Array A) : Nat\naxiom Array.getD {A : Type} (a : Array A) (i : Nat) (d : A) : A\naxiom Array.set {A : Type} (a : Array A) (i : Nat) (x : A) : Array A\naxiom World : Type\ndef IO (A : Type) : Type := World → Prod A World\ndef IO.pure {A : Type} (a : A) : IO A := fun w => .mk a w\ndef IO.bind {A B : Type} (x : IO A) (f : A → IO B) : IO B := fun w =>\n  let r := x w;\n  f r.fst r.snd\naxiom IO.println : String → IO Unit\naxiom IO.print : String → IO Unit\naxiom IO.ePrintln : String → IO Unit\naxiom Process.exit : Nat → IO Unit\naxiom IO.readFile : String → IO String\naxiom IO.argCount : IO Nat\naxiom IO.arg : Nat → IO String\ndef IO.argsFrom : Nat → Nat → IO (List String)\n  | .zero, _ => IO.pure .nil\n  | .succ k, i => IO.bind (IO.arg i) (fun a => IO.bind (IO.argsFrom k (Nat.succ i)) (fun rest => IO.pure (List.cons a rest)))\ndef IO.args : IO (List String) := IO.bind IO.argCount (fun n => IO.argsFrom n 0)\ndef Callback (T : Type) : Type := T\naxiom Nat.toString : Nat → String\naxiom UInt64 : Type\nextern \"wiz_u64_id\" UInt64.ofNat : Nat → UInt64\nextern \"wiz_u64_id\" UInt64.toNat : UInt64 → Nat\nextern \"wiz_u64_add\" UInt64.add : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_sub\" UInt64.sub : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_mul\" UInt64.mul : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_div\" UInt64.div : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_mod\" UInt64.mod : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_lt\" UInt64.lt : UInt64 → UInt64 → Bool\nextern \"wiz_u64_eq\" UInt64.eq : UInt64 → UInt64 → Bool\naxiom Float64 : Type\nextern \"wiz_f64_of_nat\" Float64.ofNat : Nat → Float64\nextern \"wiz_f64_add\" Float64.add : Float64 → Float64 → Float64\nextern \"wiz_f64_sub\" Float64.sub : Float64 → Float64 → Float64\nextern \"wiz_f64_mul\" Float64.mul : Float64 → Float64 → Float64\nextern \"wiz_f64_div\" Float64.div : Float64 → Float64 → Float64\nextern \"wiz_f64_lt\" Float64.lt : Float64 → Float64 → Bool\nextern \"wiz_f64_show\" Float64.toString : Float64 → String\naxiom Str : Type\naxiom Str.ofString : String → Str\naxiom StrMap : Type → Type\naxiom StrMap.empty {V : Type} : StrMap V\naxiom StrMap.insert {V : Type} (m : StrMap V) (k : Str) (v : V) : StrMap V\naxiom StrMap.findD {V : Type} (m : StrMap V) (k : Str) (d : V) : V\naxiom StrMap.size {V : Type} (m : StrMap V) : Nat\ninductive SyntaxF : Bool → Type where\n  | missing : SyntaxF .true\n  | atom (val : String) : SyntaxF .true\n  | ident (val : String) : SyntaxF .true\n  | node (kind : String) (args : SyntaxF .false) : SyntaxF .true\n  | nil : SyntaxF .false\n  | cons (head : SyntaxF .true) (tail : SyntaxF .false) : SyntaxF .false\ndef Syntax : Type := SyntaxF .true\ndef SyntaxF.nth {b : Bool} : SyntaxF b → Nat → Syntax\n  | .cons x t, n => match n with\n    | .zero => x\n    | .succ m => SyntaxF.nth t m\n  | _, _ => .missing\ndef Syntax.getArg (stx : Syntax) (i : Nat) : Syntax := match stx with\n  | .node _ args => SyntaxF.nth args i\n  | _ => .missing\n"
 
 -- Infix operators (stage 19b): `infixl:p " op " => f` (also `infixr`, `infix`) adds a
@@ -5865,6 +6214,10 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
                 | .true => externCmd gs stx
                 | .false => match strEq (kindOf stx) "command.foreignType" with
                   | .true => foreignTypeCmd gs stx
+                  | .false => match strEq (kindOf stx) "command.importC" with
+                  | .true => importCCmd gs stx
+                  | .false => match strEq (kindOf stx) "command.glue" with
+                  | .true => glueCmd gs stx
                   | .false => match strEq (kindOf stx) "command.cStruct" with
                   | .true => cStructCmd gs stx
                   | .false => match strEq (kindOf stx) "command.sealed" with
@@ -6068,8 +6421,32 @@ end
 
 -- the whole graph from `roots`, in order: dependencies first, each module once; its
 -- output lines, globals and tables (the load order is in `order`)
+def modCheckRunH (cats : List Cat) (tokens : List String) (headers : List Header)
+    (tab : List ModSrc) (roots : List String) : ModLoad :=
+  modLoadAll tab (.mk (Run.mk .nil (Globals.withHeaders Globals.empty headers) cats tokens .nil) StrMap.empty .nil .nil) roots
 def modCheckRun (cats : List Cat) (tokens : List String) (tab : List ModSrc) (roots : List String) : ModLoad :=
-  modLoadAll tab (.mk (Run.mk .nil Globals.empty cats tokens .nil) StrMap.empty .nil .nil) roots
+  modCheckRunH cats tokens .nil tab roots
+
+-- the `import_c "…"` header names of a source text, in order (no preprocessor)
+partial def modHeaderNamesAt : List Char → List String
+  | .nil => .nil
+  | .cons c rest =>
+    let cs : List Char := .cons c rest; if cStarts (toChars "import_c \"") cs then (
+      let after := cDrop 10 cs
+      let r := cTakeWhile (fun d => Bool.not (Nat.beq (Char.code d) 34)) after
+      .cons (String.mk r.1) (modHeaderNamesAt (cDrop 1 r.2)))
+    else modHeaderNamesAt rest
+def modHeaderNames (text : String) : List String := match text with
+  | .mk cs => modHeaderNamesAt cs
+partial def modHeaderTexts (names : List String) : IO (List Header) := match names with
+  | .nil => IO.pure .nil
+  | .cons n rest => do
+    t ← IO.readFile n;
+    match modEmpty t with
+    | .true => modHeaderTexts rest
+    | .false => IO.bind (modHeaderTexts rest) (fun more => IO.pure (.cons (Header.mk n t) more))
+def moduleHeaderTexts (text : String) : IO (List Header) :=
+  modHeaderTexts (modHeaderNames text)
 -- the output lines of the graph (each module's `#check`s and errors, in load order)
 def moduleCheck (cats : List Cat) (tokens : List String) (tab : List ModSrc) (roots : List String) : List String :=
   match modCheckRun cats tokens tab roots with
@@ -6129,8 +6506,9 @@ partial def modPrint : List String → IO Unit
 def moduleMain (cats : List Cat) (tokens : List String) : IO Unit := do
   args ← IO.args;
   text ← IO.readFile "input.wiz";
+  hs ← moduleHeaderTexts text;
   tab ← moduleRootSources cats tokens (modRoots args) text;
-  match modCheckRun cats tokens tab (.cons "Main" .nil) with
+  match modCheckRunH cats tokens hs tab (.cons "Main" .nil) with
   | .mk run _ _ order => match modHasFlag args "--key" with
     | .true => IO.println (Nat.toString (moduleGraphKey order tab))
     | .false => modPrint (List.reverseOf (Run.out run) .nil)

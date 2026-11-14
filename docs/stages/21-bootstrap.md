@@ -753,6 +753,7 @@ proofs/types (a wrong equation by `rfl`, `Prop := Type`, `Sort 1 := Type 1`, `ca
 accepted/rejected by the Lean frontend and the self-hosted one; U1's own cases cover
 `Sort u`, `Type u` and level inference. `wiz check` of the generated self-hosted sources
 passes, and the self-hosted frontend still checks itself.
+
 ## 21ab: named arguments (A9)
 
 `f a (x := e) b` now elaborates in the self-hosted frontend. The kernel's `Tm` and `Val`
@@ -787,3 +788,42 @@ arguments, a named implicit, `@f` with a named implicit and with a named explici
 implicit insertion around named arguments, checked against the Lean frontend; unknown,
 duplicate, ordering and bare named-argument errors; and the self-hosted frontend still
 checks itself.
+## 21aa: `import_c`, `glue` and native representations, self-hosted
+
+The self-hosted frontend now reads C headers (`selfhost/CParse.wiz`) and checks the C
+glue subset (`selfhost/CGlue.wiz`). The driver reads each `import_c "h"` header from the
+file system (the frontend is pure) and passes the texts in `Globals.headers`; there is
+no C preprocessor, so a header must be self-contained. `CParse` parses prototypes,
+typedefs and struct definitions. `import_c` binds the scalar prototypes it can marshal
+(`Nat`, `UInt64`, `Float64`, `String`, `Bool`, `Unit`, foreign pointers and declared
+`c_struct`s) as `C.name`, emits an implicit `#include`, and records the functions for
+`glue`; `(pure)`, `(no_auto)` and `(skip := "…")` are read as in the Lean frontend.
+`glue` checks numbers, strings, calls, assignments, `if`/`while` and struct field
+access, then emits a static C wrapper called by the backend's normal foreign path.
+
+`attribute [implemented_by mk get] T.mk` is accepted on a sealed constructor; the
+constructor's implementation is registered (`mk`), as is the representation. A type
+whose operations are all `implemented_by` runtime natives (the `U32Array`/`U64Map`
+pattern) therefore compiles to its natives. Direct pattern matching on a native value
+still needs `get` in erasure.
+
+**Not done.** No preprocessor, no automatic struct/pointer mapping from a header (declare
+a `c_struct`/`foreign_type`), no `Bytes`/buffer parameters, no `for` loops, struct locals
+or `&struct` in self-hosted glue, no rewriting of matches through `get`.
+
+**Tests** (group `selfhost`): an `import_c` header whose functions are called from Wiz
+and from `glue`, and a native representation on a sealed constructor that runs through
+`wiz_u32array_*`, in GC and RC modes.
+
+**ABI v1 (aligned with `wiz-notes/prior-art/compilers-runtime-ffi.md` §2.2, cheap
+parts only).** Kinds are explicit in every `Foreign.fn`: `n`/`u` are `uint64_t`, `f`
+is `double`, `s` is `const char *` (borrowed in, caller-owned out), `b` is `int`, `p`
+is `void *` (+1 wrapped, borrowed for a call), `w` is a Wiz `wiz_val` (+0 in, +1 out),
+and `e`/`v` are omitted from the C prototype. Structs by value go only through an
+explicit `c_struct`; a native representation is accepted only on a **sealed** type
+whose constructor's `mk`/`get` are registered, so values of the type are the runtime
+natives. The generated `--header` now defines `WIZ_ABI_MAJOR`/`WIZ_ABI_MINOR` (1/0)
+and carries the ownership table as comments. Deferred (documented, not implemented):
+a linked `wiz_abi_version` symbol, `_Static_assert`s for `c_struct` layouts, boxed
+`Nat`/`NatObj` by default, callback roots on both collectors, and the preprocessor or
+automatic struct/pointer import for `import_c`.
