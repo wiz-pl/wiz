@@ -19,6 +19,17 @@ def kindOf : Syntax → String
   | .node k _ => k
   | _ => ""
 def is (s : Syntax) (k : String) : Bool := strEq (kindOf s) k
+-- the universe parameters written after a command's name (`def f.{u, v} …`): the
+-- grammar's second child is `.{ … }`, whose second child is the list
+def levelParamNames : List Syntax → List String
+  | .nil => .nil
+  | .cons x rest => match x with
+    | .ident n => .cons n (levelParamNames rest)
+    | _ => levelParamNames rest
+def univParamsOf (cmd : Syntax) : List String := levelParamNames (kids (kid (kid cmd 2) 1))
+def hasUnivParams : List String → Bool
+  | .nil => .false
+  | .cons _ _ => .true
 
 def digits : List Char → Nat → Nat
   | .nil, acc => acc
@@ -140,14 +151,55 @@ def binders : List Syntax → List String
   | .nil => .nil
   | .cons b bs => List.append (binderNames b) (binders bs)
 
-def univLevel (s : Syntax) : Nat := match kids (kid s 1) with
-  | .cons l _ => match kid l 0 with
-    | .node _ args => match argsOf args with
-      | .cons (.atom d) _ => match d with
-        | .mk cs => digits cs 0
-      | _ => 0
-    | _ => 0
-  | .nil => 0
+-- a term's universe from its level: `Type 0` is `U 0` (and `Sort 0` is `Prop`); a level
+-- that is not a closed number stays a `sortL`, so a declaration's parameters stay symbolic
+def lvlTypeTm (l : Lvl) : Tm := match lvlClosed l with
+  | .some n => .univ n
+  | .none => .sortL (.lsucc l)
+def lvlTypeSort (l : Lvl) : Val := match lvlClosed l with
+  | .some n => .vsort (.lnum (n + 2))
+  | .none => .vsort (.lsucc (.lsucc l))
+def lvlSortTm (l : Lvl) : Tm := match lvlClosed l with
+  | .some n => match n with
+    | .zero => .prop
+    | .succ m => .univ m
+  | .none => .sortL l
+def lvlSortSort (l : Lvl) : Val := match lvlClosed l with
+  | .some n => .vsort (.lnum (n + 1))
+  | .none => .vsort (.lsucc l)
+-- a level in the scope-checked path (`elab` below, inductive and structure fields): a
+-- parameter is taken as written (the declaration check rejects one it does not declare)
+-- and `_` is left a hole (there is no metavariable state here)
+partial def lvlNumSyntax (s : Syntax) : Nat := match s with
+  | .atom d => match d with
+    | .mk cs => digits cs 0
+  | .node _ _ => lvlNumSyntax (kid s 0)
+  | _ => 0
+def addLvlSyntax : Lvl → Nat → Lvl
+  | l, .zero => l
+  | l, .succ n => .lsucc (addLvlSyntax l n)
+partial def levelSyntax (s : Syntax) : Lvl :=
+  let k := kindOf s;
+  match strEq k "level.num" with
+  | .true => .lnum (lvlNumSyntax s)
+  | .false => match strEq k "level.param" with
+    | .true => match kid s 0 with
+      | .ident u => .lparam u
+      | _ => .lnum 0
+    | .false => match strEq k "level.hole" with
+      | .true => .lhole
+      | .false => match strEq k "level.paren" with
+        | .true => levelSyntax (kid s 1)
+        | .false => match strEq k "level.max" with
+          | .true => .lmax (levelSyntax (kid s 1)) (levelSyntax (kid s 2))
+          | .false => match strEq k "level.imax" with
+            | .true => .limax (levelSyntax (kid s 1)) (levelSyntax (kid s 2))
+            | .false => match strEq k "level.add" with
+              | .true => addLvlSyntax (levelSyntax (kid s 0)) (lvlNumSyntax (kid s 2))
+              | .false => .lnum 0
+def levelArgSyntax (s : Syntax) (dflt : Lvl) : Lvl := match kids (kid s 1) with
+  | .nil => dflt
+  | .cons l _ => levelSyntax l
 
 -- **Exercise 14.4.** Scope checking: names to indices (`Scope.lookup`, `Scope.bind`).
 mutual
@@ -165,7 +217,11 @@ def elab : Scope → Syntax → Elab
       | .false => match strEq (kindOf s) "term.ascription" with
         | .true => both names (kid s 1) (kid s 3) (fun t ty => .ann t ty)
         | .false => match strEq (kindOf s) "term.type" with
-          | .true => .ok (.univ (univLevel s))
+          | .true => .ok (lvlTypeTm (levelArgSyntax s (.lnum 0)))
+          | .false => match strEq (kindOf s) "term.sort" with
+          | .true => .ok (lvlSortTm (levelArgSyntax s (.lnum 0)))
+          | .false => match strEq (kindOf s) "term.prop" with
+          | .true => .ok .prop
           | .false => match strEq (kindOf s) "term.arrow" with
             | .true => match elab names (kid s 0) with
               | .ok a => match elab (Scope.bind names "_") (kid s 2) with
@@ -259,11 +315,11 @@ def List.reverseOf {A : Type} : List A → List A → List A
   | .nil, acc => acc
   | .cons x xs, acc => List.reverseOf xs (.cons x acc)
 
--- a global: its name, type, and value as closed terms (other globals are constants
--- in them), and its value with every global inlined (for `#reduce`, since `quote`
--- doesn't unfold constants)
+-- a global: its name, its universe-level parameters, type, and value as closed terms
+-- (other globals are constants in them), and its value with every global inlined (for
+-- `#reduce`, since `quote` doesn't unfold constants)
 inductive Global where
-  | mk (name : String) (ty val inlined : Tm) (implicits : List Bool)
+  | mk (name : String) (lparams : List String) (ty val inlined : Tm) (implicits : List Bool)
 -- an inductive type (stage 16): its description (with constants, and inlined), and
 -- each constructor's fields: name, whether recursive, and type (over the fields before)
 inductive CField where
@@ -300,7 +356,7 @@ def Globals.scope : Globals → Scope
   | .mk _ sc _ _ => sc
 def Globals.add (gs : Globals) (g : Global) : Globals := match gs with
   | .mk all sc inds ffi => match g with
-    | .mk x _ _ _ _ => .mk (Array.push all g) (Scope.addGlobal sc x) inds ffi
+    | .mk x _ _ _ _ _ => .mk (Array.push all g) (Scope.addGlobal sc x) inds ffi
 def Globals.addInd (gs : Globals) (T : String) (info : IndInfo) : Globals := match gs with
   | .mk all sc inds ffi => .mk all sc (StrMap.insert inds (Str.ofString T) (.some info)) ffi
 def Globals.ind (gs : Globals) (T : String) : Option IndInfo := match gs with
@@ -311,17 +367,32 @@ def Globals.addFFI (gs : Globals) (f : Foreign) : Globals := match gs with
   | .mk all sc inds ffi => .mk all sc inds (.cons f ffi)
 -- the global at index `i` (the latest is `0`): a constant, or its value inlined
 def globalTm (inline : Bool) (gs : Globals) (i : Nat) : Tm := match gs with
-  | .mk all _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .star .star .star .nil) with
-    | .mk n ty v iv _ => match inline with
+  | .mk all _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil) with
+    | .mk n _ ty v iv _ => match inline with
       | .true => iv
       | .false => .const n .nil .nil v ty
+-- the universe parameters a global declares (none at all before U1 for every definition)
+def globalParams (gs : Globals) (i : Nat) : List String := match gs with
+  | .mk all _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil) with
+    | .mk _ ps _ _ _ _ => ps
+-- a global's own parameters as levels (`fun u => .lparam u`, for a polymorphic global
+-- used where no level syntax is available)
+def lparamLvls : List String → List Lvl
+  | .nil => .nil
+  | .cons p rest => .cons (.lparam p) (lparamLvls rest)
 -- close a scope-checked term: the variables beyond the `d` binders it is under are
 -- globals (each command is checked in the empty context, so usage vectors and lookups
 -- don't grow with the number of globals)
 def closeG (inline : Bool) (gs : Globals) : Nat → Tm → Tm
   | d, .var i => match Nat.lt i d with
     | .true => .var i
-    | .false => globalTm inline gs (i - d)
+    | .false => match inline with
+      | .true => globalTm .true gs (i - d)
+      -- (a polymorphic global is used at its own parameters: a field or a match's type
+      -- has no level syntax of its own)
+      | .false => let ps := globalParams gs (i - d); match globalTm .false gs (i - d) with
+        | .const n _ _ v ty => .const n ps (lparamLvls ps) v ty
+        | t => t
   | d, .pi q i j a b => .pi q i j (closeG inline gs d a) (closeG inline gs (d + 1) b)
   | d, .lam b => .lam (closeG inline gs (d + 1) b)
   | d, .app f a => .app (closeG inline gs d f) (closeG inline gs d a)
@@ -356,8 +427,8 @@ def seenAs : List Seen → String → Option Bool
 -- the first name declared twice among the globals `i, i + 1, …` (`fuel` of them)
 def dupFrom (old : Scope) (all : Array Global) : Nat → Nat → List Seen → Option String
   | .zero, _, _ => .none
-  | .succ fuel, i, seen => match Array.getD all i (.mk "?" .star .star .star .nil) with
-    | .mk x _ v _ _ => match Scope.lookup old x with
+  | .succ fuel, i, seen => match Array.getD all i (.mk "?" .nil .star .star .star .nil) with
+    | .mk x _ _ v _ _ => match Scope.lookup old x with
       | .some _ => .some x
       | .none => match seenAs seen x with
         | .none => dupFrom old all fuel (i + 1) (.cons (.mk x (isAxiomTm v)) seen)
@@ -811,7 +882,7 @@ def addCtors (T : String) (ps : List String) (pts : Tms) (nidx : Nat) (I : Tm) (
         let v := markClosed (tLams (np + n) (.con (.pair (.tag k i) (payloadP proof n (n - 1))))) ty;
         match check empty v (eval .nil ty) with
         | .err _ => .err
-        | .ok _ _ => match addCtors T ps pts nidx I Tc TcI k strct (Globals.add gs (.mk (String.append (String.append T ".") (ctorName c)) ty v v
+        | .ok _ _ => match addCtors T ps pts nidx I Tc TcI k strct (Globals.add gs (.mk (String.append (String.append T ".") (ctorName c)) .nil ty v v
           (List.append (trues np) (fieldImpl (ctorFields c))))) (i + 1) cs with
         | .ok gs' rest => .ok gs' (.cons (.mk (ctorName c) fs (match ics with
           | .tcons ic _ => ic
@@ -907,7 +978,7 @@ def isStructCmd (stx : Syntax) : Bool := match kid stx 7 with
   | .atom _ => .true
   | _ => .false
 -- (`seal`: the seal axiom of a `sealed inductive`, 22k, the first domain of the index tail)
-def inductiveCmdS (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := match ctorQtyErr (kids (kid stx0 3)) (kids (kid stx0 6)) with
+def inductiveCmdS0 (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := match ctorQtyErr (kids (kid stx0 3)) (kids (kid stx0 6)) with
   | .some m => errStep gs m
   | .none => match kid stx0 1 with
   | .ident T =>
@@ -979,12 +1050,19 @@ def inductiveCmdS (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := ma
               | .err m => errStep gs m
               | .ok _ _ =>
                 let valI := markClosed (tLams np (body (mkD dsI))) ty;
-                let gs1 := Globals.add gs (.mk T ty val valI .nil);
+                let gs1 := Globals.add gs (.mk T .nil ty val valI .nil);
                 match addCtors T ps pts nidx I (.const T .nil .nil val ty) valI k (isStructCmd stx0) gs1 0 ctors with
                 | .err => errStep gs "ill-typed constructor"
                 | .ok gs2 cs => .mk (String.append T (String.append " : " (show .nil 0 ty)))
                     (Globals.addInd gs2 T (.mk np I (mkD ds) (mkD dsI) cs .none (.const T .nil .nil val ty)))
   | _ => errStep gs "an inductive type needs a name"
+
+-- (U1) a data type's universe lives in its description (`descr l` takes a number), so
+-- level-polymorphic data types wait for U2 (symbolic levels in descriptions)
+def inductiveCmdS (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step :=
+  match hasUnivParams (univParamsOf stx0) with
+  | .true => errStep gs "a universe-polymorphic data type needs symbolic levels in its description (U2)"
+  | .false => inductiveCmdS0 gs stx0 seal
 
 def sndN : Nat → Tm → Tm
   | .zero, t => t
@@ -1030,19 +1108,108 @@ def Cx.define (cx : Cx) (x : String) (v ty : Val) : Cx := match cx with
   | .mk c sc t =>
     let d := TCtx.lvl c;
     .mk (TCtx.define c (.vglued (.hvar d) .snil (memo (fun _ => v))) ty) (Scope.bind sc x) (.cons (memo (fun _ => quote d ty)) t)
--- the metavariables: the depth each was made at, and its solution (a term at that depth)
+-- the metavariables: the depth each was made at, its solution (a term at that depth),
+-- and, for an implicit argument that is a type (`{A : Type u}`), the sort its solution
+-- must be in (`noteImplicitType` in `Elab/Term.lean`: the level constraint that solves
+-- `?u` once the argument is known, as in `id 5`)
 inductive MetaInfo where
-  | mk (depth : Nat) (sol : Option Tm)
+  | mk (depth : Nat) (sol : Option Tm) (sconstr : Option Lvl)
 -- a postponed argument: its syntax, type and context, and the metavariable standing for it
 inductive Pend where
   | mk (s : Syntax) (dom : Val) (m : Tm) (cx : Cx)
+-- the elaborator's state: the term metavariables, the postponed arguments, the level
+-- metavariables (U1: their solution, `none` while unsolved) and the current
+-- declaration's universe parameters (`._ {u}` on it)
 inductive ES where
-  | mk (metas : Array MetaInfo) (pending : List Pend)
-def ES.empty : ES := .mk Array.empty .nil
+  | mk (metas : Array MetaInfo) (pending : List Pend) (lmetas : Array (Option Lvl)) (lparams : List String)
+def ES.empty : ES := .mk Array.empty .nil Array.empty .nil
 def ES.get (es : ES) (i : Nat) : MetaInfo := match es with
-  | .mk ms _ => Array.getD ms i (.mk 0 .none)
+  | .mk ms _ _ _ => Array.getD ms i (.mk 0 .none .none)
+-- an implicit type argument's sort constraint (see `MetaInfo`)
+def metaSconstr (es : ES) (i : Nat) : Option Lvl := match ES.get es i with
+  | .mk _ _ sc => sc
 def ES.pend (es : ES) (p : Pend) : ES := match es with
-  | .mk ms ps => .mk ms (.cons p ps)
+  | .mk ms ps ls lps => .mk ms (.cons p ps) ls lps
+-- a level metavariable's solution (`none` while unsolved)
+def ES.getLvl (es : ES) (i : Nat) : Option Lvl := match es with
+  | .mk _ _ ls _ => Array.getD ls i .none
+def ES.setLvl (es : ES) (i : Nat) (l : Lvl) : ES := match es with
+  | .mk ms ps ls lps => .mk ms ps (Array.set ls i (.some l)) lps
+-- solving a level metavariable (a later `zonk` puts its solution in)
+def ES.solveLvl (es : ES) (i : Nat) (l : Lvl) : ES := ES.setLvl es i l
+-- the universe parameters of the declaration being elaborated (`.{u, v}`)
+def ES.params (es : ES) : List String := match es with
+  | .mk _ _ _ lps => lps
+def ES.withParams (es : ES) (ps : List String) : ES := match es with
+  | .mk ms pend ls _ => .mk ms pend ls ps
+-- a fresh level metavariable
+inductive LvlR where
+  | mk (l : Lvl) (es : ES)
+def newLvl (es : ES) : LvlR := match es with
+  | .mk ms ps ls lps =>
+    let id := Array.size ls;
+    .mk (.lmvar id) (.mk ms ps (Array.push ls .none) lps)
+-- `n` fresh level metavariables
+inductive LvlsR where
+  | mk (ls : List Lvl) (es : ES)
+def freshLvls : ES → Nat → LvlsR
+  | es, .zero => .mk .nil es
+  | es, .succ n => match newLvl es with
+    | .mk l es1 => match freshLvls es1 n with
+      | .mk rest es2 => .mk (.cons l rest) es2
+-- the solutions of the level metavariables put in (a solved one is replaced by its
+-- solution; an unsolved one stays, for `zonk` to report)
+partial def instLvl (es : ES) : Lvl → Lvl
+  | .lmvar i => match ES.getLvl es i with
+    | .some l => instLvl es l
+    | .none => .lmvar i
+  | .lsucc l => .lsucc (instLvl es l)
+  | .lmax a b => .lmax (instLvl es a) (instLvl es b)
+  | .limax a b => .limax (instLvl es a) (instLvl es b)
+  | l => l
+def instLvls (es : ES) : List Lvl → List Lvl
+  | .nil => .nil
+  | .cons l rest => .cons (instLvl es l) (instLvls es rest)
+-- does the level mention metavariable `i`?
+def lvlOccurs (i : Nat) : Lvl → Bool
+  | .lmvar j => Nat.beq i j
+  | .lsucc l => lvlOccurs i l
+  | .lmax a b => Bool.or (lvlOccurs i a) (lvlOccurs i b)
+  | .limax a b => Bool.or (lvlOccurs i a) (lvlOccurs i b)
+  | _ => .false
+-- `l` as `l' + 1` (`1` is `succ 0`: numerals are not `succ` chains)
+def lvlSucc : Lvl → Option Lvl
+  | .lnum n => match n with
+    | .zero => .none
+    | .succ m => .some (.lnum m)
+  | .lsucc l => .some l
+  | _ => .none
+-- unify two levels (`unifyLevel` in `Elab/Unify.lean`): equivalent levels succeed, a lone
+-- metavariable is assigned, `a+1 =?= b+1` recurses, and anything else is a mismatch. (A
+-- metavariable is never split: `max ?u ?v =?= 1` fails, as in the self-hosted port's
+-- documented subset.)
+partial def unifyLevel (es : ES) (a b : Lvl) : Option ES :=
+  let a' := instLvl es a;
+  let b' := instLvl es b;
+  match lvlEquiv a' b' with
+  | .true => .some es
+  | .false => match a' with
+    | .lmvar m => match lvlOccurs m b' with
+      | .true => .none
+      | .false => .some (ES.solveLvl es m b')
+    | _ => match b' with
+      | .lmvar m => match lvlOccurs m a' with
+        | .true => .none
+        | .false => .some (ES.solveLvl es m a')
+      | _ => match lvlSucc a' with
+        | .some x => match lvlSucc b' with
+          | .some y => unifyLevel es x y
+          | .none => .none
+        | .none => .none
+-- `l + n`
+def addLvl : Lvl → Nat → Lvl
+  | l, .zero => l
+  | l, .succ n => .lsucc (addLvl l n)
 def metaName (i : Nat) : String := String.append "?m" (Nat.toString i)
 -- the number of a metavariable's name
 def metaId (n : String) : Option Nat := match n with
@@ -1058,12 +1225,13 @@ def teleOf : List (Unit → Tm) → Tms → Tms
 -- a new metavariable of type `A`, as a term: `?mN x₀ … xₙ₋₁`
 inductive MetaR where
   | mk (t : Tm) (es : ES)
-def newMeta (es : ES) (cx : Cx) (A : Val) : MetaR := match es with
-  | .mk ms ps =>
+def newMetaS (es : ES) (cx : Cx) (A : Val) (sc : Option Lvl) : MetaR := match es with
+  | .mk ms ps ls lps =>
     let d := Cx.lvl cx;
     let id := Array.size ms;
     let ty := piTele (teleOf (Cx.tele cx) .tnil) (quote d A);
-    .mk (tApps (.axiomC (metaName id) ty) (pvars d d)) (.mk (Array.push ms (.mk d .none)) ps)
+    .mk (tApps (.axiomC (metaName id) ty) (pvars d d)) (.mk (Array.push ms (.mk d .none sc)) ps ls lps)
+def newMeta (es : ES) (cx : Cx) (A : Val) : MetaR := newMetaS es cx A .none
 
 -- a spine's arguments, first first (`none` if it isn't only applications)
 def spineArgs : Spine → Option (List Val)
@@ -1078,15 +1246,25 @@ def envOf : List Val → Env → Env
 def applyAll : Val → List Val → Val
   | f, .nil => f
   | f, .cons a rest => applyAll (vapp f a) rest
--- a solved metavariable's application, replaced by its solution
+-- a solved metavariable's application, replaced by its solution. Level metavariables are
+-- solved after the values that mention them were built, so a forced value is rebuilt
+-- with their solutions in every level it carries (the frontend's `instLevel`).
 partial def force (es : ES) (v : Val) : Val := match whnf v with
   | .vne (.haxiom n _) sp => match metaId n with
     | .some i => match ES.get es i with
-      | .mk k (.some sol) => match spineArgs sp with
+      | .mk k (.some sol) _ => match spineArgs sp with
         | .some as => force es (applyAll (eval (envOf (takeL k as) .nil) sol) (dropL k as))
         | .none => v
       | _ => v
     | .none => v
+  | .vsort l => .vsort (instLvl es l)
+  | .vglued (.hconst n ps ls val ty) sp _ =>
+    let ls' := instLvls es ls;
+    match lvlsEq ls ls' with
+    | .true => v
+    | .false => .vglued (.hconst n ps ls' val ty) sp (memo (fun _ => eval .nil (substIfAny ps ls' val)))
+  | .vpi q i j dom env cod => .vpi q (instLvl es i) (instLvl es j) dom env cod
+  | .vsigma q i j fst env snd => .vsigma q (instLvl es i) (instLvl es j) fst env snd
   | _ => v
 -- an unsolved metavariable applied to its context: its number and depth
 inductive MetaApp where
@@ -1095,7 +1273,7 @@ inductive MetaApp where
 def metaApp (es : ES) (v : Val) : MetaApp := match v with
   | .vne (.haxiom n _) sp => match metaId n with
     | .some i => match ES.get es i with
-      | .mk k .none => match spineArgs sp with
+      | .mk k .none _ => match spineArgs sp with
         | .some as => match Nat.beq (List.length as) k with
           | .true => .mk i k
           | .false => .none
@@ -1194,17 +1372,17 @@ partial def pruneTm (k d : Nat) (es : ES) (t : Tm) : Pruned := match spineHead t
   | .axiomC n ty => match metaId n with
     | .some j => match ES.get es j with
       -- (a solved one is replaced by its solution first)
-      | .mk _ (.some _) => pruneTm k d es (quote d (force es (eval (freshEnv d) t)))
-      | .mk kj .none => match Nat.lt k kj with
+      | .mk _ (.some _) _ => pruneTm k d es (quote d (force es (eval (freshEnv d) t)))
+      | .mk kj .none sc => match Nat.lt k kj with
         | .true => match piCod kj ty with
           | .some A => match lowerTm (kj - k) 0 A with
             | .some Ak => match piPrefix k ty Ak with
               | .some nty => match es with
-                | .mk ms ps =>
+                | .mk ms ps ls lps =>
                   let id := Array.size ms;
                   let fresh : Tm := .axiomC (metaName id) nty;
-                  let ms1 := Array.push ms (.mk k .none);
-                  .mk (.mk (Array.set ms1 j (.mk kj (.some (tApps fresh (pvars k kj))))) ps)
+                  let ms1 := Array.push ms (.mk k .none .none);
+                  .mk (.mk (Array.set ms1 j (.mk kj (.some (tApps fresh (pvars k kj))) sc)) ps ls lps)
                     (appsL fresh (takeL k (spineArgsTm t .nil)))
               | .none => .mk es t
             | .none => .mk es t
@@ -1238,7 +1416,16 @@ def solve (es0 : ES) (cx : Cx) (i k : Nat) (t : Val) : Option ES :=
       | .true => Option.some tm
       | .false => lowerTm (d - k) 0 tm) with
     | .some sol => match es with
-      | .mk ms ps => .some (.mk (Array.set ms i (.mk k (.some sol))) ps)
+      | .mk ms ps ls lps =>
+        let sc := metaSconstr es i;
+        let es1 : ES := .mk (Array.set ms i (.mk k (.some sol) sc)) ps ls lps;
+        -- (an implicit type argument's sort: the solution must be in it, which solves
+        -- the universe level it mentions)
+        match sc with
+        | .none => .some es1
+        | .some l => match sortOf (Cx.c cx) t with
+          | .none => .none
+          | .some sl => unifyLevel es1 sl l
     | .none => .none
 mutual
 -- unify two values (types, mostly) at depth `cx`, solving metavariables
@@ -1270,6 +1457,9 @@ def unifyW (es : ES) (cx : Cx) (a b : Val) : Option ES := match a with
     | _ => unifyS es cx (whnf a) (whnf b)
   | _ => unifyS es cx (whnf a) (whnf b)
 def unifyS (es : ES) (cx : Cx) (a b : Val) : Option ES := match a with
+  | .vsort l => match b with
+    | .vsort l' => unifyLevel es l l'
+    | _ => unifyConv es cx a b
   | .vpi q _ _ A e B => match b with
     | .vpi q' _ _ A' e' B' => match qEq q q' with
       | .true => match unify es cx A A' with
@@ -1321,7 +1511,7 @@ def tms6 (a b c e f g : Tm) : Tms := .tcons a (.tcons b (.tcons c (.tcons e (.tc
 mutual
 def zonk (es : ES) (d : Nat) (t : Tm) : Option Tm := match metaHead t 0 with
   | .mk i _ => match ES.get es i with
-    | .mk k (.some sol) => match zonk es k sol with
+    | .mk k (.some sol) _ => match zonk es k sol with
       | .some sol' =>
         let extra := dropL k (appArgs t .nil);
         match extra with
@@ -1334,7 +1524,7 @@ def zonk (es : ES) (d : Nat) (t : Tm) : Option Tm := match metaHead t 0 with
   | .none => match t with
     | .pi q i j a b => match zonk es d a with
       | .some a' => match zonk es (d + 1) b with
-        | .some b' => .some (.pi q i j a' b')
+        | .some b' => .some (.pi q (instLvl es i) (instLvl es j) a' b')
         | .none => .none
       | .none => .none
     | .lam b => match zonk es (d + 1) b with
@@ -1360,7 +1550,7 @@ def zonk (es : ES) (d : Nat) (t : Tm) : Option Tm := match metaHead t 0 with
     -- (the other forms a match or a postponed argument leaves: stage 20a)
     | .sigma q i j a b => match zonk es d a with
       | .some a' => match zonk es (d + 1) b with
-        | .some b' => .some (.sigma q i j a' b')
+        | .some b' => .some (.sigma q (instLvl es i) (instLvl es j) a' b')
         | .none => .none
       | .none => .none
     | .letq q ty v b => match zonk es d ty with
@@ -1399,6 +1589,12 @@ def zonkSub (es : ES) (d : Nat) (t : Tm) : Option Tm := match t with
   | .tyRefl X => zonk1 es d X (fun X' => .tyRefl X')
   | .pair a b => zonk2 es d a b (fun a' b' => .pair a' b')
   | .darg q S D => zonk2 es d S D (fun S' D' => .darg q S' D')
+  | .sigmaQ q i j a b => match zonkTms es d (.tcons q (.tcons a (.tcons b .tnil))) with
+    | .some (.tcons q' (.tcons a' (.tcons b' _))) => .some (.sigmaQ q' (instLvl es i) (instLvl es j) a' b')
+    | _ => .none
+  | .sortL l => .some (.sortL (instLvl es l))
+  | .const n ps ls v ty => .some (.const n ps (instLvls es ls) v ty)
+  | .prf l x => zonk1 es d x (fun x' => .prf (instLvl es l) x')
   | .drec q j D => zonk2 es d j D (fun j' D' => .drec q j' D')
   | .eqTy A B => zonk2 es d A B (fun A' B' => .eqTy A' B')
   | .eqRefl A a => zonk2 es d A a (fun A' a' => .eqRefl A' a')
@@ -1631,6 +1827,65 @@ def dotCtor (gs : Globals) (es : ES) (ty : Val) (s : Syntax) : Option Syntax :=
 def sortLvl (es : ES) (ty : Val) : Lvl := match whnf (force es ty) with
   | .vsort l => l
   | _ => .lnum 0
+-- an implicit argument's metavariable; when its type is a sort (`{A : Type u}`), the
+-- solution's own sort is recorded, which solves the level (`id 5` has `?u = 0`)
+def newImplicit (es : ES) (cx : Cx) (dom : Val) : MetaR := match whnf (force es dom) with
+  | .vsort l => newMetaS es cx dom (.some l)
+  | _ => newMeta es cx dom
+-- ---------------------------------------------------------------------------------------
+-- Universe levels (U1; `elabLevel` in `Elab/Term.lean`): `Type [l]`, `Sort [l]`, `Prop`
+-- and a constant's `.{l, …}`. A `level.param` must be one of the declaration's universe
+-- parameters (`.{u}` after its name); `_` is a fresh level metavariable.
+inductive LR where
+  | ok (l : Lvl) (es : ES)
+  | err (msg : String)
+partial def elabLevel (es : ES) (s : Syntax) : LR :=
+  let k := kindOf s;
+  match strEq k "level.num" with
+  | .true => .ok (.lnum (numValue s)) es
+  | .false => match strEq k "level.param" with
+    | .true => match kid s 0 with
+      | .ident u => match indexOf (ES.params es) u 0 with
+        | .some _ => .ok (.lparam u) es
+        | .none => .err (String.append (String.append "unknown universe level '" u) "'")
+      | _ => .err "a universe level must be a name"
+    | .false => match strEq k "level.hole" with
+      | .true => match newLvl es with
+        | .mk l es' => .ok l es'
+      | .false => match strEq k "level.paren" with
+        | .true => elabLevel es (kid s 1)
+        | .false => match strEq k "level.max" with
+          | .true => match elabLevel es (kid s 1) with
+            | .err m => .err m
+            | .ok a es1 => match elabLevel es1 (kid s 2) with
+              | .err m => .err m
+              | .ok b es2 => .ok (.lmax a b) es2
+          | .false => match strEq k "level.imax" with
+            | .true => match elabLevel es (kid s 1) with
+              | .err m => .err m
+              | .ok a es1 => match elabLevel es1 (kid s 2) with
+                | .err m => .err m
+                | .ok b es2 => .ok (.limax a b) es2
+            | .false => match strEq k "level.add" with
+              | .true => match elabLevel es (kid s 0) with
+                | .err m => .err m
+                | .ok a es1 => .ok (addLvl a (numValue (kid s 2))) es1
+              | .false => .err (String.append "unsupported level syntax " k)
+-- a list of explicit levels (`f.{l₁, …, lₙ}`)
+inductive LvlsE where
+  | ok (ls : List Lvl) (es : ES)
+  | err (msg : String)
+partial def elabLvls (es : ES) : List Syntax → LvlsE
+  | .nil => .ok .nil es
+  | .cons s rest => match elabLevel es s with
+    | .err m => .err m
+    | .ok l es1 => match elabLvls es1 rest with
+      | .err m => .err m
+      | .ok ls es2 => .ok (.cons l ls) es2
+-- the level argument of `Type l`/`Sort l` (absent: `dflt`)
+def levelArg (es : ES) (s : Syntax) (dflt : Lvl) : LR := match kids (kid s 1) with
+  | .nil => .ok dflt es
+  | .cons l _ => elabLevel es l
 -- `(x : a) → b` with its components' sorts, where known (a hole for the others)
 def sortOrHole (es : ES) (l : Val) : Lvl := match whnf (force es l) with
   | .vsort s => s
@@ -1655,8 +1910,8 @@ inductive TE where
   | err (msg : String)
 -- a global's implicit parameters (by its index from the latest)
 def globalMask (gs : Globals) (i : Nat) : List Bool := match gs with
-  | .mk all _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .star .star .star .nil) with
-    | .mk _ _ _ _ m => m
+  | .mk all _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil) with
+    | .mk _ _ _ _ _ m => m
 -- Pattern matching in definitions (stages 16b, 16e): `def f (ps) : R := match x, y with
 -- | p₁, q₁ => rhs₁ …`, the scrutinees parameters and `R` not mentioning them, is
 -- compiled column by column: split on the first column where the first clause has a
@@ -2140,7 +2395,7 @@ inductive PreR where
 partial def preArgs (es : ES) (cx : Cx) (fty : Val) (m : List Bool) (args : List Syntax) : Option PreR :=
   match m with
   | .cons .true m' => match whnf (force es fty) with
-    | .vpi _ _ _ dom env cod => match newMeta es cx dom with
+    | .vpi _ _ _ dom env cod => match newImplicit es cx dom with
       | .mk mt es1 => match preArgs es1 cx (eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod) m' args with
         | .some (.mk ims rty es2) => .some (.mk (.cons mt ims) rty es2)
         | .none => .none
@@ -2148,7 +2403,7 @@ partial def preArgs (es : ES) (cx : Cx) (fty : Val) (m : List Bool) (args : List
   | _ => match args with
     | .nil => .some (.mk .nil fty es)
     | .cons _ rest => match whnf (force es fty) with
-      | .vpi _ _ _ dom env cod => match newMeta es cx dom with
+      | .vpi _ _ _ dom env cod => match newImplicit es cx dom with
         | .mk mt es1 => preArgs es1 cx (eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod) (tailBools m) rest
       | _ => .none
 -- Literal patterns (13q; `compileLitTest` in the Lean elaborator). At `Nat` a numeral
@@ -2355,6 +2610,26 @@ def headImplicit : List Bool → Bool
 def descFn : Tm → Tm
   | .darg _ _ f => f
   | t => t
+-- a global at its declaration's level parameters: fresh level metavariables (inferred by
+-- unification), or the explicitly written ones. The constant carries its level
+-- instantiation, and its type is evaluated with it.
+inductive GL where
+  | ok (t : Tm) (ty : Val) (es : ES) (m : List Bool)
+  | err (msg : String)
+def globalUse (gs : Globals) (es : ES) (cx : Cx) (j : Nat) (explicit : List Syntax) : GL :=
+  let ps := globalParams gs j;
+  let m := globalMask gs j;
+  match globalTm .false gs j with
+  | .const nm _ _ v ty => match explicit with
+    | .nil => match freshLvls es (List.length ps) with
+      | .mk ls es' => .ok (.const nm ps ls v ty) (eval .nil (substIfAny ps ls ty)) es' m
+    | .cons _ _ => match Nat.beq (List.length ps) (List.length explicit) with
+      | .false => .err (String.append (String.append (String.append nm " has ") (Nat.toString (List.length ps)))
+          " universe parameters")
+      | .true => match elabLvls es explicit with
+        | .err msg => .err msg
+        | .ok ls es' => .ok (.const nm ps ls v ty) (eval .nil (substIfAny ps ls ty)) es' m
+  | t => .err "a global that isn't a constant"
 mutual
 -- infer the type of `s` (an identifier's leading implicit arguments are inserted)
 def inferT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
@@ -2379,7 +2654,11 @@ def inferHead (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : HE :=
   | .ident n => identHead gs es cx n
   | _ => match strEq k "term.ident" with
     | .true => identHead gs es cx (identOf s)
-    | .false => match strEq k "term.explicit" with
+    | .false => match strEq k "term.identUniv" with
+      | .true => match kid s 0 with
+        | .ident n => identUnivHead gs es cx n (kids (kid s 2))
+        | _ => HE.err "universe levels need a name"
+      | .false => match strEq k "term.explicit" with
       -- `@f`: no implicit arguments are inserted
       | .true => match kid s 1 with
         | .ident n => match identHead gs es cx n with
@@ -2407,9 +2686,22 @@ def identHead (gs : Globals) (es : ES) (cx : Cx) (n : String) : HE :=
       | .false => .err (String.append "unknown identifier " n)
   | .some i => match Nat.lt i d with
     | .true => .ok (.var i) (lookup (TCtx.types (Cx.c cx)) i) es .nil
-    | .false => match globalTm .false gs (i - d) with
-      | .const nm ps ls v ty => .ok (.const nm ps ls v ty) (eval .nil ty) es (globalMask gs (i - d))
-      | t => .err "a global that isn't a constant"
+    | .false => match globalUse gs es cx (i - d) .nil with
+      | .ok t ty es' m => .ok t ty es' m
+      | .err msg => .err msg
+-- `f.{l, …}`: a global at explicitly written levels (one per declaration parameter; `_` is
+-- a fresh level metavariable). A local variable has no levels.
+def identUnivHead (gs : Globals) (es : ES) (cx : Cx) (n : String) (ls : List Syntax) : HE :=
+  let d := Cx.lvl cx;
+  match Scope.lookup (Cx.sc cx) n with
+  | .some i => match Nat.lt i d with
+    | .true => HE.err (String.append "a local variable has no universe levels: " n)
+    | .false => match globalUse gs es cx (i - d) ls with
+      | .ok t ty es' m => .ok t ty es' m
+      | .err msg => .err msg
+  | .none => match strEq n "Unit" with
+    | .true => HE.err "Unit has no universe levels in the self-hosted frontend"
+    | .false => .err (String.append "unknown identifier " n)
 -- the projection `T.f t`, for `t : T …`
 def projT (gs : Globals) (es : ES) (cx : Cx) (bt : Tm) (bty : Val) (f : String) : HE := match force es bty with
   | .vglued (.hconst T _ _ _ _) _ _ => match identHead gs es cx (String.append (String.append T ".") f) with
@@ -2466,7 +2758,7 @@ def stringLit (gs : Globals) (es : ES) (cx : Cx) (v : String) : TE :=
 def insertImplicits (gs : Globals) (es : ES) (cx : Cx) (t : Tm) (ty : Val) (m : List Bool) : TE :=
   match m with
   | .cons .true rest => match whnf ty with
-    | .vpi _ _ _ dom env cod => match newMeta es cx dom with
+    | .vpi _ _ _ dom env cod => match newImplicit es cx dom with
       | .mk mt es' => insertImplicits gs es' cx (.app t mt) (eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod) rest
     | _ => .ok t ty es
   | _ => .ok t ty es
@@ -2484,7 +2776,15 @@ def inferT1 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
     | .false => match strEq k "term.unitVal" with
     | .true => .ok .star (.vunit 1) es
     | .false => match strEq k "term.type" with
-    | .true => .ok (.univ (univLevel s)) (.vsort (.lnum (univLevel s + 2))) es
+    | .true => match levelArg es s (.lnum 0) with
+      | .err m => .err m
+      | .ok l es1 => .ok (lvlTypeTm l) (lvlTypeSort l) es1
+    | .false => match strEq k "term.sort" with
+    | .true => match levelArg es s (.lnum 0) with
+      | .err m => .err m
+      | .ok l es1 => .ok (lvlSortTm l) (lvlSortSort l) es1
+    | .false => match strEq k "term.prop" with
+    | .true => .ok .prop (.vsort (.lnum 1)) es
     | .false => match strEq k "term.app" with
       | .true => match inferHead gs es cx (kid s 0) with
         | .ok f fty es' m => appArgsT gs es' cx f fty m (kids (kid s 1)) .nil .none .nil
@@ -2695,7 +2995,7 @@ def appArgsT (gs : Globals) (es : ES) (cx : Cx) (f : Tm) (fty : Val) (m : List B
             | .some z => z
             | .none => mt0;
           appArgsT gs es cx (.app f mt) (eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod) m' args post expected pre'
-        | .nil => match newMeta es cx dom with
+        | .nil => match newImplicit es cx dom with
           | .mk mt es' => appArgsT gs es' cx (.app f mt) (eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod) m' args post expected .nil
       | _ => .err "too many implicit arguments"
     | _ => match whnf (force es fty) with
@@ -2749,9 +3049,9 @@ def drainList (gs : Globals) : ES → Bool → List Pend → DR
         | .none => .err
       | .err _ => .err
 def drain (gs : Globals) (es : ES) : Option ES := match es with
-  | .mk ms ps => match ps with
+  | .mk ms ps ls lps => match ps with
     | .nil => .some es
-    | .cons _ _ => match drainList gs (.mk ms .nil) .false ps with
+    | .cons _ _ => match drainList gs (.mk ms .nil ls lps) .false ps with
       | .ok es' pr => match pr with
         | .true => drain gs es'
         | .false => .none
@@ -3261,8 +3561,8 @@ end
 -- `quote` doesn't unfold constants)
 mutual
 def inlineTm (gs : Globals) : Tm → Tm
-  | .const n _ _ _ _ => match Scope.lookup (Globals.scope gs) n with
-    | .some i => globalTm .true gs i
+  | .const n ps ls _ _ => match Scope.lookup (Globals.scope gs) n with
+    | .some i => tmSubst ps ls (globalTm .true gs i)
     | .none => .var 0
   | .pi q i j a b => .pi q i j (inlineTm gs a) (inlineTm gs b)
   | .lam b => .lam (inlineTm gs b)
@@ -3334,15 +3634,15 @@ def bindParams : Cx → Nat → List String → Tms → Cx
 inductive PR where
   | ok (tys : Tms) (cx : Cx)
   | err (msg : String)
-def elabParams (gs : Globals) : Cx → List Field → PR
+def elabParams (gs : Globals) (us : List String) : Cx → List Field → PR
   | cx, .nil => .ok .tnil cx
-  | cx, .cons (.mk x _ _ ty) rest => match inferType gs ES.empty cx ty with
+  | cx, .cons (.mk x _ _ ty) rest => match inferType gs (ES.withParams ES.empty us) cx ty with
     | .err m => .err m
     | .ok A0 _ es => match drain gs es with
       | .none => .err "could not elaborate a constructor argument"
       | .some es' => match zonk es' (Cx.lvl cx) A0 with
         | .none => .err "could not infer an implicit argument"
-        | .some A => match elabParams gs (Cx.bind cx x (eval (TCtx.env (Cx.c cx)) A)) rest with
+        | .some A => match elabParams gs us (Cx.bind cx x (eval (TCtx.env (Cx.c cx)) A)) rest with
           | .ok tys cx' => .ok (.tcons A tys) cx'
           | e => e
 -- does a clause's right-hand side mention `f`?
@@ -3365,11 +3665,12 @@ def matchDefCmd (gs : Globals) (stx : Syntax) : Step := match kid stx 1 with
       let params := fieldNames ps;
       let n := lenL params;
       let body := kid stx 6;
-      match elabParams gs (Cx.mk empty (Globals.scope gs) .nil) ps with
+      let us := univParamsOf stx;
+      match elabParams gs us (Cx.mk empty (Globals.scope gs) .nil) ps with
       | .err m => errStep gs m
       | .ok pts cxP0 => match scrutCols params pts pts (nonAtoms (kids (kid body 1))) with
         | .err m => errStep gs m
-        | .ok cols => match inferType gs ES.empty cxP0 rStx with
+        | .ok cols => match inferType gs (ES.withParams ES.empty us) cxP0 rStx with
           | .err m => errStep gs m
           | .ok RE0 _ esR => match zonk esR n RE0 with
           | .none => errStep gs "could not infer an implicit argument"
@@ -3401,10 +3702,10 @@ def matchDefCmd (gs : Globals) (stx : Syntax) : Step := match kid stx 1 with
                     | .err m => errStep gs m
                     | .ok t _ =>
                       -- (with its proof markers, if the kernel asks for them)
-                      match checkMarking (tLams n t) tyT with
+                      match checkMarkingParams us (tLams n t) tyT with
                       | .bad m => errStep gs m
                       | .good fn => .mk (String.append f (String.append " : " (show .nil 0 tyT)))
-                          (Globals.add gs (.mk f tyT fn (inlineTm gs fn) (paramMask (kids (kid stx 3)))))
+                          (Globals.add gs (.mk f us tyT fn (inlineTm gs fn) (paramMask (kids (kid stx 3)))))
     | _ => errStep gs "a definition needs a type"
   | _ => errStep gs "a definition needs a name"
 
@@ -3417,7 +3718,9 @@ def command (gs : Globals) (stx : Syntax) : Step :=
   match strEq (kindOf stx) "command.def" with
   | .true => match kid stx 1 with
     | .ident x => match kids (kid stx 4) with
-      | .cons _ (.cons tyStx _) => match defT gs ES.empty cx0 (kids (kid stx 3)) tyStx (kid stx 6) with
+      | .cons _ (.cons tyStx _) =>
+        let us := univParamsOf stx;
+        match defT gs (ES.withParams ES.empty us) cx0 (kids (kid stx 3)) tyStx (kid stx 6) with
         | .err m => errStep gs m
         | .ok ty0 v0 es0 => match drain gs es0 with
         | .none => errStep gs "could not elaborate a constructor argument"
@@ -3425,14 +3728,12 @@ def command (gs : Globals) (stx : Syntax) : Step :=
           | .none => errStep gs "could not infer an implicit argument"
           | .some tyZ => let tyT := sortTy tyZ; match zonk es 0 v0 with
             | .none => errStep gs "could not infer an implicit argument"
-            | .some v0z => match inferUniv empty tyT with
-              | .err m => errStep gs m
-              | .ok _ _ =>
-                -- (P2) with the proof markers the kernel requires, if it asks for them
-                match checkMarking v0z tyT with
-                | .bad m => errStep gs m
-                | .good v => .mk (String.append x (String.append " : " (show .nil 0 tyT)))
-                    (Globals.add gs (.mk x tyT v (inlineTm gs v) (paramMask (kids (kid stx 3)))))
+            | .some v0z =>
+              -- (P2) with the proof markers the kernel requires, if it asks for them
+              match checkMarkingParams us v0z tyT with
+              | .bad m => errStep gs m
+              | .good v => .mk (String.append x (String.append " : " (show .nil 0 tyT)))
+                  (Globals.add gs (.mk x us tyT v (inlineTm gs v) (paramMask (kids (kid stx 3)))))
       | _ => errStep gs "a definition needs a type"
     | _ => errStep gs "a definition needs a name"
   | .false =>
@@ -3541,7 +3842,7 @@ def addMembers (F FI : Tm) (np : Nat) (pts : Tms) (m : Nat) : Globals → Nat �
   | gs, _, .nil => gs
   | gs, j, .cons n rest =>
     let at := fun (f : Tm) => tLams np (.app (tApps f (pvars np np)) (.tag m j));
-    addMembers F FI np pts m (Globals.add gs (.mk n (sortTy (piTele pts (.univ 0))) (at F) (at FI) .nil)) (j + 1) rest
+    addMembers F FI np pts m (Globals.add gs (.mk n .nil (sortTy (piTele pts (.univ 0))) (at F) (at FI) .nil)) (j + 1) rest
 -- the member constructors `A.c := fun ps fields => con (tag, fields…, refl, tt)`
 inductive MAdded where
   | ok (gs : Globals) (ctors : List Ctor)
@@ -3573,7 +3874,7 @@ def addMCtors (members ps : List String) (pts : Tms) (m k : Nat) : Globals → N
         let v := markClosed (tLams (np + n) (.con (.pair (.tag k ci) (payloadP (.eqRefl (.enum m) (.tag m j)) n (n - 1))))) ty;
         match check empty v (eval .nil ty) with
         | .err e => .err e
-        | .ok _ _ => match addMCtors members ps pts m k (Globals.add gs (.mk (String.append (String.append T ".") (ctorName c)) ty v v
+        | .ok _ _ => match addMCtors members ps pts m k (Globals.add gs (.mk (String.append (String.append T ".") (ctorName c)) .nil ty v v
             (List.append (trues np) (fieldImpl fs0)))) (ci + 1) rest with
           | .ok gs' cs => .ok gs' (.cons (.mk (ctorName c) fs (.tag m j) (fieldQs fs0) (fieldImpl fs0)) cs)
           | e => e
@@ -3590,7 +3891,7 @@ def mutualQtyErr : List Syntax → Option String
   | .cons d ds => match ctorQtyErr (kids (kid d 3)) (kids (kid d 6)) with
     | .some m => .some m
     | .none => mutualQtyErr ds
-def mutualInductiveCmd (gs : Globals) (defs : List Syntax) : Step := match mutualQtyErr defs with
+def mutualInductiveCmd0 (gs : Globals) (defs : List Syntax) : Step := match mutualQtyErr defs with
   | .some m => errStep gs m
   | .none =>
   let members := memberNames defs;
@@ -3618,13 +3919,20 @@ def mutualInductiveCmd (gs : Globals) (defs : List Syntax) : Step := match mutua
         | .err e => errStep gs e
         | .ok _ _ =>
           let fvalI := markClosed (body (mkD dsI)) fty;
-          let gs1 := Globals.add gs (.mk F fty fval fvalI .nil);
+          let gs1 := Globals.add gs (.mk F .nil fty fval fvalI .nil);
           let Fc : Tm := .const F .nil .nil fval fty;
           let gs2 := addMembers Fc fvalI np pts m gs1 0 members;
           match addMCtors members ps pts m k gs2 0 mcs with
           | .err e => errStep gs e
           | .ok gs3 cs => .mk (memberLines (String.append " : " (show .nil 0 (piTele pts (.univ 0)))) members)
               (addMemberInds np I (mkD ds) (mkD dsI) cs Fc m gs3 0 members)
+def anyUnivParams : List Syntax → Bool
+  | .nil => .false
+  | .cons d rest => Bool.or (hasUnivParams (univParamsOf d)) (anyUnivParams rest)
+def mutualInductiveCmd (gs : Globals) (defs : List Syntax) : Step :=
+  match anyUnivParams defs with
+  | .true => errStep gs "a universe-polymorphic data type needs symbolic levels in its description (U2)"
+  | .false => mutualInductiveCmd0 gs defs
 
 -- Equations (stages 16d–e): `def f (ps) : A₁ → … → Aₘ → R | p₁, …, pₘ => rhs …` is
 -- `def f (ps) (x✝₁ : A₁) … : R := match x✝₁, … with | p₁, …, pₘ => rhs …`
@@ -3865,7 +4173,7 @@ def sealedCmd (gs : Globals) (stx : Syntax) : Step :=
     | .ident T =>
       let K := String.append T ".seal✝";
       let ax : Tm := .axiomC K (.univ 0);
-      inductiveCmdS (Globals.add gs (.mk K (.univ 0) ax ax .nil)) inner (.some ax)
+      inductiveCmdS (Globals.add gs (.mk K .nil (.univ 0) ax ax .nil)) inner (.some ax)
     | _ => errStep gs "an inductive type needs a name"
 -- one definition (or inductive type), by its form
 def defStep (gs : Globals) (stx : Syntax) : Step := match strEq (kindOf stx) "command.inductive" with
@@ -3993,18 +4301,18 @@ def sortWit (l : Lvl) : Option Tm := match l with
 inductive WEnv where
   | mk (all : Array Global) (ix : StrMap (List Nat))
 def globalHead (g : Global) : Option String := match g with
-  | .mk _ gty _ _ _ => match tmConcl gty 0 with
+  | .mk _ _ gty _ _ _ => match tmConcl gty 0 with
     | .mk concl _ => tmHeadName concl
 -- (from the latest global down, so each list is in declaration order)
 partial def headIndex (all : Array Global) (i : Nat) (m : StrMap (List Nat)) : StrMap (List Nat) := match i with
   | .zero => m
-  | .succ j => headIndex all j (match globalHead (Array.getD all j (.mk "?" .star .star .star .nil)) with
+  | .succ j => headIndex all j (match globalHead (Array.getD all j (.mk "?" .nil .star .star .star .nil)) with
     | .none => m
     | .some h => StrMap.insert m (Str.ofString h) (.cons j (StrMap.findD m (Str.ofString h) .nil)))
 def WEnv.of (gs : Globals) : WEnv := match gs with
   | .mk all _ _ _ => .mk all (headIndex all (Array.size all) StrMap.empty)
 def WEnv.global (we : WEnv) (i : Nat) : Global := match we with
-  | .mk all _ => Array.getD all i (.mk "?" .star .star .star .nil)
+  | .mk all _ => Array.getD all i (.mk "?" .nil .star .star .star .nil)
 def WEnv.cands (we : WEnv) (h : HeadArgs) : List Nat := match we with
   | .mk _ ix => match h with
     | .mk n _ => StrMap.findD ix (Str.ofString n) .nil
@@ -4046,7 +4354,7 @@ def byGlobals (we : WEnv) (c : TCtx) (ty : Val) (hs : List HeadArgs) (f : Nat) :
     | .none => byGlobals we c ty hs f rest
 def tryGlobal (we : WEnv) (c : TCtx) (ty : Val) (hs : List HeadArgs) (f : Nat) (g : Global) : Option Tm :=
   match g with
-  | .mk n gty v _ _ => match tmConcl gty 0 with
+  | .mk n _ gty v _ _ => match tmConcl gty 0 with
     | .mk concl k => match tmHeadName concl with
       | .none => .none
       | .some h => match headArgs h hs with
@@ -4074,20 +4382,24 @@ inductive PSigR where
 -- the type of `axiom f (bs) : T` or of a partial `def f (bs) : T`
 def sigType (gs : Globals) (d : Syntax) : PSigR := match kid d 1 with
   | .ident f => match kids (kid d 4) with
-    | .cons _ (.cons tyS _) => match teleT gs ES.empty (Cx.mk empty (Globals.scope gs) .nil) (kids (kid d 3)) tyS with
+    | .cons _ (.cons tyS _) =>
+      let us := univParamsOf d;
+      match teleT gs (ES.withParams ES.empty us) (Cx.mk empty (Globals.scope gs) .nil) (kids (kid d 3)) tyS with
       | .err m => .err m
       | .ok ty0 _ es => match zonk es 0 ty0 with
         | .none => .err "could not infer an implicit argument"
-        | .some tyZ => let ty := sortTy tyZ; match inferUniv empty ty with
-          | .err m => .err m
-          | .ok _ _ => .ok f ty
+        | .some tyZ => let ty := sortTy tyZ; match tmHasLvlMVar ty with
+          | .true => .err "could not infer a universe level; add a universe parameter or annotation"
+          | .false => match checkDeclParams us ty .none with
+            | .err m => .err m
+            | .ok _ _ => .ok f ty
     | _ => .err "a partial definition needs a type"
   | _ => .err "a definition needs a name"
 def addAxioms : Globals → List Syntax → AxR
   | gs, .nil => .ok gs
   | gs, .cons d rest => match sigType gs d with
     | .err m => .err m
-    | .ok f ty => addAxioms (Globals.add gs (.mk f ty (.axiomC f ty) (.axiomC f ty) (paramMask (kids (kid d 3))))) rest
+    | .ok f ty => addAxioms (Globals.add gs (.mk f (univParamsOf d) ty (.axiomC f ty) (.axiomC f ty) (paramMask (kids (kid d 3))))) rest
 -- a member of a partial group: `def …`, or `partial (default := w) def …`
 def unwrapDef (d : Syntax) : Syntax := match strEq (kindOf d) "command.partial" with
   | .true => kid d 2
@@ -4103,7 +4415,7 @@ def findWit (gs : Globals) (f : String) (ty : Tm) : PSigR := match wit (WEnv.of 
 def witnessOf (gs : Globals) (d : Syntax) (f : String) (ty : Tm) : PSigR := match strEq (kindOf d) "command.partial" with
   | .true => match kids (kid d 1) with
     | .nil => findWit gs f ty
-    | .cons _ _ => match checkT gs ES.empty (Cx.mk empty (Globals.scope gs) .nil) (kid (kid d 1) 3) (eval .nil ty) with
+    | .cons _ _ => match checkT gs (ES.withParams ES.empty (univParamsOf (unwrapDef d))) (Cx.mk empty (Globals.scope gs) .nil) (kid (kid d 1) 3) (eval .nil ty) with
       | .err m => .err m
       | .ok w0 _ es0 => match drain gs es0 with
         | .none => .err "could not elaborate the witness"
@@ -4118,9 +4430,9 @@ def addPartials : Globals → List Syntax → AxR
     | .err m => .err m
     | .ok f ty => match witnessOf gs d f ty with
       | .err m => .err m
-      | .ok _ w => match checkPartial ty (markClosed w ty) with
+      | .ok _ w => match checkPartialParams (univParamsOf (unwrapDef d)) ty (markClosed w ty) with
         | .err m => .err (String.append (String.append "the witness of " f) (String.append ": " m))
-        | .ok _ _ => addPartials (Globals.add gs (.mk f ty (.axiomC f ty) (.axiomC f ty) (paramMask (kids (kid (unwrapDef d) 3))))) rest
+        | .ok _ _ => addPartials (Globals.add gs (.mk f (univParamsOf (unwrapDef d)) ty (.axiomC f ty) (.axiomC f ty) (paramMask (kids (kid (unwrapDef d) 3))))) rest
 -- `axiom f (bs) : T` (stage 19c), printed like a definition
 def axiomCmd (gs : Globals) (stx : Syntax) : Step := match addAxioms gs (one stx) with
   | .err m => errStep gs m
@@ -4341,8 +4653,8 @@ def externCmd (gs : Globals) (stx : Syntax) : Step :=
     | .mk all _ _ _ => match Nat.beq (Array.size all) (match gs with
       | .mk all0 _ _ _ => Array.size all0) with
       | .true => .mk line gs'
-      | .false => match Array.getD all (Array.size all - 1) (.mk "?" .star .star .star .nil) with
-        | .mk _ ty _ _ _ => match ffiSig (Globals.ffi gs) (isNativeC cname) ty with
+      | .false => match Array.getD all (Array.size all - 1) (.mk "?" .nil .star .star .star .nil) with
+        | .mk _ _ ty _ _ _ => match ffiSig (Globals.ffi gs) (isNativeC cname) ty with
           | .bad => errStep gs "a foreign function's arguments and result must be Nat, UInt64, Float64, String, Bool, Unit, a c_struct, a Wiz data type or a function of those (a callback; the result may be in IO)"
           | .mk ks r io fin => match Bool.and (Bool.not io) (ioCallback ks) with
             | .true => errStep gs "a foreign function that takes a callback in IO must be in IO itself"
@@ -4353,7 +4665,7 @@ def foreignTypeCmd (gs : Globals) (stx : Syntax) : Step := match kid stx 1 with
   | .ident T => match Scope.lookup (Globals.scope gs) T with
     | .some _ => errStep gs (String.append (String.append "'" T) "' has already been declared")
     | .none =>
-      let gs' := Globals.add gs (.mk T (.univ 0) (.axiomC T (.univ 0)) (.axiomC T (.univ 0)) .nil);
+      let gs' := Globals.add gs (.mk T .nil (.univ 0) (.axiomC T (.univ 0)) (.axiomC T (.univ 0)) .nil);
       .mk (String.append T " : U0") (Globals.addFFI gs' (.ty T (strValue (kid (kid stx 2) 3))))
   | _ => errStep gs "a foreign type needs a name"
 -- (stage 21o) `link_c` and `link_lib`, as `command.linkC`/`linkLib` in the Lean
@@ -4405,8 +4717,8 @@ def exportedAs (cname : String) : List Foreign → Bool
 def globalTyOf (gs : Globals) (f : String) : Option Tm := match Scope.lookup (Globals.scope gs) f with
   | .none => .none
   | .some i => match gs with
-    | .mk all _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .star .star .star .nil) with
-      | .mk _ ty _ _ _ => .some ty
+    | .mk all _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil) with
+      | .mk _ _ ty _ _ _ => .some ty
 -- `export "c_name" f (: T)?` (stage 21o, as `command.export` in the Lean frontend)
 def exportCmd (gs : Globals) (stx : Syntax) : LinkR :=
   let cname := strValue (kid stx 1);
@@ -4449,9 +4761,6 @@ def nativeNames : List String :=
   (.cons "StrMap.empty" (.cons "StrMap.insert" (.cons "StrMap.findD" (.cons "StrMap.size" (.cons "memo"
   (.cons "Nat.div" (.cons "Nat.mod" (.cons "Nat.pow" (.cons "Nat.land" (.cons "Nat.lor" (.cons "Nat.xor"
   (.cons "Nat.shiftLeft" (.cons "Nat.shiftRight" (.cons "Nat.log2" .nil)))))))))))))))))))))))))))))))))))))
-def elemStr (x : String) : List String → Bool
-  | .nil => .false
-  | .cons y rest => Bool.or (strEq x y) (elemStr x rest)
 def externNamed (n : String) : List Foreign → Bool
   | .nil => .false
   | .cons f rest => match f with
