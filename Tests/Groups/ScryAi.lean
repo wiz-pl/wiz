@@ -92,6 +92,92 @@ def widthSrc : String := "import Scry.AiExamples
 #eval Interval.isTop (AExpr.eval AiEx.m8 [] (AExpr.sub (AExpr.lit 5) (AExpr.lit 9))).itv
 "
 
+
+-- ## The Wil path (`lib/Scry/AiWil*.wiz`)
+
+/-- Constant/interval proof over `Wil.Stmt`s: `x := 2; y := 3; z := x * y` in three
+blocks, with `WCfg.ofFunc` deriving the edges from the Wil terminators. -/
+def wilConstSrc : String := "import Scry.AiWilExamples
+
+#eval acceptsW AiWEx.m8u AiWEx.constCfg AiWEx.constInv
+#eval Interval.hiOpt (AiWEx.valueAt AiWEx.constCfg AiWEx.constInv 3 2).uItv
+"
+
+/-- The Wil loop needs widening; the widened post-fixpoint is rejected because `i + 1`
+may overflow, one narrowing pass (with the `< 10` guard refinement) accepts. -/
+def wilLoopSrc : String := "import Scry.AiWilExamples
+
+#eval Interval.isTop (AiWEx.valueAt AiWEx.loopCfg AiWEx.loopInv 1 0).uItv
+#eval acceptsW AiWEx.m8u AiWEx.loopCfg AiWEx.loopInv
+#eval Interval.hiOpt (AiWEx.valueAt AiWEx.loopCfg AiWEx.loopInvNarrow 2 0).uItv
+#eval acceptsW AiWEx.m8u AiWEx.loopCfg AiWEx.loopInvNarrow
+"
+
+/-- Nullness from Wil's `.nul`, exact and symbolic lengths: an in-bounds load is safe, a
+`p[8]` on length 4 alarms, and a symbolic `atLeast 0` length proves nothing (soundly). -/
+def wilMemorySrc : String := "import Scry.AiWilExamples
+
+#eval Alarm.has (Alarm.nullDeref 0) (checkW AiWEx.m8u AiWEx.nullCfg AiWEx.nullInv)
+#eval List.isEmpty (checkW AiWEx.m8u AiWEx.safeArrayCfg AiWEx.safeArrayInv)
+#eval Alarm.has (Alarm.outOfBounds 1 8 4) (checkW AiWEx.m8u AiWEx.oobCfg AiWEx.oobInv)
+#eval List.isEmpty (checkW AiWEx.m8u AiWEx.symSafeCfg AiWEx.symSafeInv)
+#eval Alarm.has (Alarm.outOfBoundsSym 1 0 0) (checkW AiWEx.m8u AiWEx.symTopCfg AiWEx.symTopInv)
+"
+
+/-- Overflow: unsigned keeps the conservative alarm; signed alarms only under the
+undefined-behaviour policy, while the `.wrap` policy treats it as defined. -/
+def wilOverflowSrc : String := "import Scry.AiWilExamples
+
+#eval Alarm.has (Alarm.overflow 0 \"add\") (checkW AiWEx.m8u AiWEx.ovfU8Cfg AiWEx.ovfU8Inv)
+#eval Alarm.has (Alarm.overflow 0 \"add\") (checkW AiWEx.m8s AiWEx.ovfS8Cfg AiWEx.ovfS8Inv)
+#eval List.isEmpty (checkW AiWEx.m8w AiWEx.ovfS8Cfg AiWEx.ovfS8WrapInv)
+#eval List.isEmpty (checkW AiWEx.m8s AiWEx.safeS8Cfg AiWEx.safeS8Inv)
+"
+
+/-- The Wil checker rejects an unsound post-fixpoint (`z = 5` where the edge gives 6). -/
+def wilUnsoundSrc : String := "import Scry.AiWilExamples
+
+#eval acceptsW AiWEx.m8u AiWEx.constCfg AiWEx.constBadInv
+#eval Alarm.has (Alarm.unsoundEdge 2 3) (checkW AiWEx.m8u AiWEx.constCfg AiWEx.constBadInv)
+"
+
+/-- Signed interval algebra: exact signed ranges, an out-of-range sum and a product
+become `Top`, and signed constants compute. -/
+def signedSrc : String := "import Scry.AiWilExamples
+
+#eval SInterval.loOpt (SInterval.add AiWEx.m8s (SInterval.range (-3) 10) (SInterval.range 1 2))
+#eval SInterval.hiOpt (SInterval.add AiWEx.m8s (SInterval.range (-3) 10) (SInterval.range 1 2))
+#eval SInterval.isTop (SInterval.add AiWEx.m8s (SInterval.range 120 120) (SInterval.range 10 10))
+#eval SInterval.isTop (SInterval.mul AiWEx.m8s (SInterval.range (-100) (-100)) (SInterval.range 2 2))
+#eval SConst.beq (SConst.addC AiWEx.m8s (SConst.known (-3)) (SConst.known 1)) (SConst.known (-2))
+"
+
+/-- The γ instance is the pointwise product, and the small literal CFG's certificate is
+checked by the kernel: `AiWEx.litAccepted` is `rfl`. -/
+def gammaReflSrc : String := "import Scry.AiWilExamples
+
+#eval Value.gamma (Value.ofNat 3) (VState.mk 3 Bool.false)
+#eval acceptsW AiWEx.m8u AiWEx.litCfg AiWEx.litInv
+#eval Nat.beq (WState.at AiWEx.litCfg AiWEx.litInv 1).length 2
+"
+
+/-- `cRunLibs`, but a missing C compiler is a skip (this host has no `cc`; CI does). -/
+def compiledOrSkip (src expected : String) (llvm : Bool) : IO Unit := do
+  try
+    Elab.cRunLibs src expected (llvm := llvm)
+  catch e =>
+    let msg := toString e
+    if (msg.splitOn "could not execute external process").length > 1 then
+      skip s!"no C toolchain ({msg})"
+    else
+      throw e
+
+/-- The same example compiled to C and LLVM (`examples/scry-ai-wil.wiz`, digest 111111). -/
+def wilCompiled : IO Unit := do
+  let src ← IO.FS.readFile "examples/scry-ai-wil.wiz"
+  compiledOrSkip src "111111" false
+  compiledOrSkip src "111111" true
+
 def scryGroup : Group where
   name := "scry-ai"
   exercise := "S5 (code-analysis-design §4.6, §5.3)"
@@ -111,7 +197,23 @@ def scryGroup : Group where
     { name := "lattice: join, contains, widen and narrow",
       run := fun _ => okLibs latticeSrc [".true", ".true", ".true", ".some 7"] },
     { name := "widths: wrap-around and underflow become Top, a safe sum stays exact",
-      run := fun _ => okLibs widthSrc [".true", ".some 5", ".true"] }
+      run := fun _ => okLibs widthSrc [".true", ".some 5", ".true"] },
+    { name := "Wil constants: x := 2; y := 3; z := x * y proves z = 6 (WCfg.ofFunc)",
+      run := fun _ => okLibs wilConstSrc [".true", ".some 6"] },
+    { name := "Wil loop: widening reaches Top and is rejected; one narrowing pass accepts",
+      run := fun _ => okLibs wilLoopSrc [".true", ".false", ".some 9", ".true"] },
+    { name := "Wil memory: null, exact and symbolic lengths, safe and out-of-bounds loads",
+      run := fun _ => okLibs wilMemorySrc [".true", ".true", ".true", ".true", ".true"] },
+    { name := "Wil overflow: unsigned and signed UB alarm; signed wrap does not",
+      run := fun _ => okLibs wilOverflowSrc [".true", ".true", ".true", ".true"] },
+    { name := "Wil unsound: a post-fixpoint claiming z = 5 is rejected (unsoundEdge 2 3)",
+      run := fun _ => okLibs wilUnsoundSrc [".false", ".true"] },
+    { name := "signed intervals: exact sums, out-of-range add/mul become Top",
+      run := fun _ => okLibs signedSrc [".some -2", ".some 12", ".true", ".true", ".true"] },
+    { name := "gamma/refl: the product gamma and a kernel-checked certificate on a small Wil CFG",
+      run := fun _ => okLibs gammaReflSrc ["()", ".true", ".true"] },
+    { name := "the Wil checker compiled to C and LLVM (digest 111111)",
+      run := fun _ => wilCompiled }
   ]
 
 builtin_initialize registerGroup scryGroup

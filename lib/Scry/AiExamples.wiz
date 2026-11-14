@@ -17,9 +17,9 @@ reproduces the same programs.
 -/
 
 /-- 8-bit unsigned machine. -/
-def AiEx.m8 : AiMach := AiMach.mk 8
+def AiEx.m8 : AiMach := AiMach.u 8
 /-- 16-bit unsigned machine (the loop's bound does not fit in 8 bits). -/
-def AiEx.m16 : AiMach := AiMach.mk 16
+def AiEx.m16 : AiMach := AiMach.u 16
 
 /-- A counter loop: `i := 0; while (i < 1000) { i := i + 1 }`. -/
 def AiEx.loopCfg : ACfg := ACfg.mk 0 [0]

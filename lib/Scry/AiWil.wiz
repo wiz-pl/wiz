@@ -1,0 +1,853 @@
+import Prelude
+import Text
+import Deriving
+import Logic
+import Nat
+import Int
+import Scry.AiDomain
+import Scry.AiCfg
+import Scry.AiFixpoint
+import Scry.Wil
+/-!
+# Scry.AiWil: abstract interpretation over Wil statements
+
+The Wil-facing half of S5. The toy `AExpr`/`AStmt` path in `Scry.AiCfg` is kept (its
+tests still run); this module adds a transfer function whose statements are Wil's
+(`assign`, `assume`, `call`, `store`, `nop`) with `Wil.Ty` widths, plus an explicit
+`load arr idx len` statement for arrays (Wil's pointer load has no index or length; the
+frontend or a points-to analysis supplies them, and a symbolic length is a `Len`).
+
+The numerical domain is signedness-aware: a `Wil.Ty.int w .false` uses the unsigned
+`Interval`/`Const` of `Scry.AiDomain`, a `Wil.Ty.int w .true` uses the signed
+`SInterval`/`SConst` of `Scry.AiCfg`. The overflow policy in `AiMach` decides whether a
+signed overflow is an alarm (`.ub`) or defined wrap-around (`.wrap`); unsigned overflow
+keeps the toy path's conservative alarm. Nullness is `Scry.AiDomain`'s `Null`, applied to
+Wil's `.nul`/`.ptr` values.
+
+`WCfg.ofFunc` derives a CFG from a `Wil.Func`'s blocks and terminators; `wFixpoint` is
+the same untrusted worklist as the toy path, and `checkW` is the post-fixpoint checker.
+`WStmt.transfer_sound_stmt` is the per-statement obligation in the shape of
+`Transfer.sound_stmt`; it is a `Prop` statement, not used by the checker.
+
+```
+import Scry.AiWilExamples
+
+#eval acceptsW AiWEx.m8u AiWEx.constCfg AiWEx.constInv
+```
+-/
+
+-- ## A signedness-aware value
+
+/-- A numerical abstract value, tagged by signedness. `bot` is unreachable, `any` is the
+universal integer when the type is unknown, `u` is an unsigned interval and constant,
+`s` a signed one. -/
+inductive NumV where
+  | bot
+  | u (itv : Interval) (cst : Const)
+  | s (itv : SInterval) (cst : SConst)
+  | any
+
+def NumV.botV : NumV := .bot
+
+def NumV.le : NumV → NumV → Bool
+  | .bot, _ => .true
+  | .u i c, .u i' c' => Bool.and (Interval.le i i') (Const.le c c')
+  | .s i c, .s i' c' => Bool.and (SInterval.le i i') (SConst.le c c')
+  | .any, .any => .true
+  | _, .any => .true
+  | _, _ => .false
+
+def NumV.join : NumV → NumV → NumV
+  | .bot, b => b
+  | a, .bot => a
+  | .u i c, .u i' c' => .u (Interval.join i i') (Const.join c c')
+  | .s i c, .s i' c' => .s (SInterval.join i i') (SConst.join c c')
+  | .any, _ => .any
+  | _, .any => .any
+  | _, _ => .any
+
+def NumV.widen : NumV → NumV → NumV
+  | .bot, b => b
+  | a, .bot => a
+  | .u i c, .u i' c' => .u (Interval.widen i i') (Const.widen c c')
+  | .s i c, .s i' c' => .s (SInterval.widen i i') (SConst.widen c c')
+  | _, _ => .any
+
+def NumV.narrow : NumV → NumV → NumV
+  | .bot, _ => .bot
+  | a, .bot => a
+  | .u i c, .u i' c' => .u (Interval.narrow i i') (Const.narrow c c')
+  | .s i c, .s i' c' => .s (SInterval.narrow i i') (SConst.narrow c c')
+  | a, _ => a
+
+instance : Lattice NumV where
+  bot := NumV.botV
+  le := NumV.le
+  join := NumV.join
+
+instance : Widen NumV where
+  widen := NumV.widen
+instance : Narrow NumV where
+  narrow := NumV.narrow
+
+/-- A Wil value: the numerical component and nullness. Pointers have `num = .bot`;
+integer words are `nonNull`, as the frontend guarantees that a word is not a pointer. -/
+structure WValue where
+  num : NumV
+  nul : Null
+
+def WValue.botV : WValue := WValue.mk .bot .nbot
+
+def WValue.norm (v : WValue) : WValue :=
+  match v.num with
+  | .u i c => match c with
+    | .known n => { v with num := .u (.range n n) c }
+    | _ => v
+  | .s i c => match c with
+    | .known z => { v with num := .s (.range z z) c }
+    | _ => v
+  | _ => v
+
+def WValue.le (a b : WValue) : Bool :=
+  Bool.and (NumV.le a.num b.num) (Null.le a.nul b.nul)
+
+def WValue.join (a b : WValue) : WValue :=
+  WValue.norm (WValue.mk (NumV.join a.num b.num) (Null.join a.nul b.nul))
+
+def WValue.widen (a b : WValue) : WValue :=
+  WValue.norm (WValue.mk (NumV.widen a.num b.num) (Null.widen a.nul b.nul))
+
+def WValue.narrow (a b : WValue) : WValue :=
+  WValue.norm (WValue.mk (NumV.narrow a.num b.num) (Null.narrow a.nul b.nul))
+
+instance : Lattice WValue where
+  bot := WValue.botV
+  le := WValue.le
+  join := WValue.join
+instance : Widen WValue where
+  widen := WValue.widen
+instance : Narrow WValue where
+  narrow := WValue.narrow
+
+/-- The universal value of a Wil type. -/
+def WValue.topTy : Wil.Ty → WValue
+  | .int _ .true => WValue.mk (.s .top .unknown) .nonNull
+  | .int _ .false => WValue.mk (.u .top .unknown) .nonNull
+  | .ptr _ => WValue.mk .bot .maybe
+  | _ => WValue.mk .any .maybe
+
+/-- A fresh non-null pointer. -/
+def WValue.ptrV : WValue := WValue.mk .bot .nonNull
+
+/-- The null pointer. -/
+def WValue.nullV : WValue := WValue.mk .bot .nul
+
+/-- The signed interpretation of a Wil integer (two's complement). -/
+def Wil.Val.toInt (v : Wil.Val) : Int :=
+  match v with
+  | .int w s b => match s, Nat.testBit b (Nat.sub w 1) with
+    | .true, .true => Int.negOfNat (Wil.Val.snegMag w b)
+    | _, _ => Int.ofNat b
+  | _ => 0
+
+def Wil.Val.isNullV : Wil.Val → Bool
+  | .nul => .true
+  | _ => .false
+
+/-- A concrete Wil value's γ for a `WValue`. Unsigned integers use `Interval` and
+`Const`; signed ones use `SInterval` and `SConst`. -/
+def NumV.gamma : NumV → Wil.Val → Prop
+  | .bot, _ => False
+  | .u i c, .int _ .false b => Interval.contains i b = .true ∧ Const.gamma c b
+  | .s i c, .int w .true b =>
+      SInterval.contains i (Wil.Val.toInt (.int w .true b)) = .true ∧
+        SConst.gamma c (Wil.Val.toInt (.int w .true b))
+  | .any, .int _ _ _ => True
+  | _, _ => False
+
+def WValue.gamma (v : WValue) (c : Wil.Val) : Prop :=
+  NumV.gamma v.num c ∧ Null.gamma v.nul (Wil.Val.isNullV c)
+
+def WConc : Type := List (Nat × Wil.Val)
+
+def WConc.getD (c : WConc) (x : Nat) (d : Wil.Val) : Wil.Val :=
+  match Wil.lookupReg x c with
+  | .some v => v
+  | .none => d
+
+def WEnv : Type := List (Nat × WValue)
+
+-- ## Environments
+
+def WEnv.lookup (x : Nat) : WEnv → Option WValue
+  | .nil => .none
+  | .cons (k, v) rest => match Nat.beq x k with
+    | .true => .some v
+    | .false => WEnv.lookup x rest
+
+def WEnv.getD (e : WEnv) (x : Nat) (d : WValue) : WValue := match WEnv.lookup x e with
+  | .some v => v
+  | .none => d
+
+/-- γ for the register environment: pointwise over the common keys. -/
+def WEnv.gamma (e : WEnv) (c : WConc) : Prop :=
+  (x : Nat) → (v : WValue) → WEnv.lookup x e = .some v → WValue.gamma v (WConc.getD c x .undef)
+
+def WEnv.set (x : Nat) (v : WValue) : WEnv → WEnv
+  | .nil => .cons (x, v) .nil
+  | .cons (k, w) rest => match Nat.beq x k with
+    | .true => .cons (k, v) rest
+    | .false => .cons (k, w) (WEnv.set x v rest)
+
+def WEnv.has (x : Nat) : WEnv → Bool
+  | .nil => .false
+  | .cons (k, _) rest => match Nat.beq x k with
+    | .true => .true
+    | .false => WEnv.has x rest
+
+def WEnv.allOf (vars : List Wil.Var) (v : WValue) : WEnv :=
+  List.map (fun x => (x.index, v)) vars
+
+def WEnv.topOf (vars : List Wil.Var) : WEnv :=
+  List.map (fun x => (x.index, WValue.topTy x.ty)) vars
+
+def WEnv.botOf (vars : List Wil.Var) : WEnv := WEnv.allOf vars WValue.botV
+
+def WEnv.le (a b : WEnv) : Bool :=
+  List.all (fun p => WValue.le p.2 (WEnv.getD b p.1 WValue.botV)) a
+
+def WEnv.join (a b : WEnv) : WEnv :=
+  List.append
+    (List.map (fun p => (p.1, WValue.join p.2 (WEnv.getD b p.1 WValue.botV))) a)
+    (List.filter (fun q => Bool.not (WEnv.has q.1 a)) b)
+
+def WEnv.widen (a b : WEnv) : WEnv :=
+  List.append
+    (List.map (fun p => (p.1, WValue.widen p.2 (WEnv.getD b p.1 WValue.botV))) a)
+    (List.filter (fun q => Bool.not (WEnv.has q.1 a)) b)
+
+def WEnv.narrow (a b : WEnv) : WEnv :=
+  List.map (fun p => (p.1, WValue.narrow p.2 (WEnv.getD b p.1 WValue.botV))) a
+
+def WEnv.kill : WEnv → WEnv := List.map (fun p => (p.1, WValue.botV))
+
+instance : Lattice WEnv where
+  bot := []
+  le := WEnv.le
+  join := WEnv.join
+instance : Widen WEnv where
+  widen := WEnv.widen
+instance : Narrow WEnv where
+  narrow := WEnv.narrow
+
+instance : AbsDomain WConc WEnv where
+  gamma := WEnv.gamma
+
+-- ## Signedness helpers
+
+def WValue.uItv (v : WValue) : Interval := match v.num with
+  | .u i _ => i
+  | .bot => .bot
+  | _ => .top
+
+def WValue.uCst (v : WValue) : Const := match v.num with
+  | .u _ c => c
+  | .bot => .cbot
+  | _ => .unknown
+
+def WValue.sItv (v : WValue) : SInterval := match v.num with
+  | .s i _ => i
+  | .bot => .bot
+  | _ => .top
+
+def WValue.sCst (v : WValue) : SConst := match v.num with
+  | .s _ c => c
+  | .bot => .cbot
+  | _ => .unknown
+
+/-- `snum itv cst`: a signed numerical value, normalised to a point on a known constant. -/
+def WValue.snum (i : SInterval) (c : SConst) : WValue :=
+  WValue.norm (WValue.mk (.s i c) .nonNull)
+
+def WValue.unum (i : Interval) (c : Const) : WValue :=
+  WValue.norm (WValue.mk (.u i c) .nonNull)
+
+def WValue.sameIntTy (a b : Wil.Ty) : Bool :=
+  match a, b with
+  | .int w s, .int w' s' => Bool.and (Nat.beq w w') (BEq.beq s s')
+  | _, _ => .false
+
+/-- Coerce an abstract value to a declared type: same integer type keeps it, anything
+else becomes the type's top. -/
+def WValue.coerce (from to : Wil.Ty) (v : WValue) : WValue :=
+  match WValue.sameIntTy from to with
+  | .true => v
+  | .false => match to with
+    | .int _ _ => v
+    | _ => WValue.topTy to
+
+-- ## Expressions
+
+def WValue.loadedValue (ty : Wil.Ty) : WValue :=
+  match ty with
+  | .ptr _ => WValue.mk .bot .maybe
+  | _ => WValue.topTy ty
+
+def WValue.unop (m : AiMach) (oty rty : Wil.Ty) (op : Wil.Op) (a : WValue) : WValue :=
+  match oty with
+  | .int _ .true =>
+      match op with
+      | .neg => WValue.snum (SInterval.mul m a.sItv (.range (Int.negOfNat 1) (Int.negOfNat 1))) (.unknown)
+      | _ => WValue.topTy rty
+  | .int _ .false =>
+      match op with
+      | .neg => WValue.unum (Interval.mul m a.uItv (.range 255 255)) (.unknown)
+      | _ => WValue.topTy rty
+  | _ => WValue.topTy rty
+
+def WValue.binop (m : AiMach) (oty rty : Wil.Ty) (op : Wil.Op)
+    (a b : WValue) : WValue :=
+  match op with
+  | .eq => WValue.mk (.u .top .unknown) .nonNull
+  | .ne => WValue.mk (.u .top .unknown) .nonNull
+  | .lt => WValue.mk (.u .top .unknown) .nonNull
+  | .le => WValue.mk (.u .top .unknown) .nonNull
+  | .gt => WValue.mk (.u .top .unknown) .nonNull
+  | .ge => WValue.mk (.u .top .unknown) .nonNull
+  | .neg => WValue.unop m oty rty op a
+  | .not => WValue.unop m oty rty op a
+  | _ =>
+    match oty with
+    | .int _ .true =>
+        let i := match op with
+          | .add => SInterval.add m a.sItv b.sItv
+          | .sub => SInterval.sub m a.sItv b.sItv
+          | .mul => SInterval.mul m a.sItv b.sItv
+          | _ => .top
+        let c := match op with
+          | .add => SConst.addC m a.sCst b.sCst
+          | .sub => SConst.subC m a.sCst b.sCst
+          | .mul => SConst.mulC m a.sCst b.sCst
+          | _ => .unknown
+        WValue.snum i c
+    | .int _ .false =>
+        let i := match op with
+          | .add => Interval.add m a.uItv b.uItv
+          | .sub => Interval.sub m a.uItv b.uItv
+          | .mul => Interval.mul m a.uItv b.uItv
+          | _ => .top
+        let c := match op with
+          | .add => Const.addC m a.uCst b.uCst
+          | .sub => Const.subC m a.uCst b.uCst
+          | .mul => Const.mulC m a.uCst b.uCst
+          | _ => .unknown
+        WValue.unum i c
+    | _ => WValue.topTy rty
+
+/-- A `Wil.Rhs` evaluated in a `WEnv`, at the result type `ty`. Width and signedness of
+arithmetic come from the operands' declared `Wil.Ty`, as in Wil's own semantics (the
+lowering inserts conversions). -/
+def WRhs.eval (m : AiMach) (env : WEnv) (ty : Wil.Ty) : Wil.Rhs → WValue
+  | .use v => WEnv.getD env v.index (WValue.topTy v.ty)
+  | .cst val => match val with
+    | .int _ s _ => match s with
+      | .true => WValue.snum (.range (Wil.Val.toInt val) (Wil.Val.toInt val)) (.known (Wil.Val.toInt val))
+      | .false => match val with
+        | .int _ _ b => WValue.unum (.range b b) (.known b)
+        | _ => WValue.topTy ty
+    | .nul => WValue.nullV
+    | .ptr _ _ => WValue.ptrV
+    | .undef => WValue.topTy ty
+  | .bin op a b =>
+      let av := WEnv.getD env a.index (WValue.topTy a.ty)
+      let bv := WEnv.getD env b.index (WValue.topTy b.ty)
+      WValue.binop m a.ty ty op av bv
+  | .un op a =>
+      let av := WEnv.getD env a.index (WValue.topTy a.ty)
+      WValue.unop m a.ty ty op av
+  | .load _ => WValue.loadedValue ty
+  | .gep p _ =>
+      let pv := WEnv.getD env p.index (WValue.topTy p.ty)
+      WValue.mk .bot pv.nul
+  | .alloc _ => WValue.ptrV
+  | .havoc t => WValue.topTy t
+
+-- ## Guard refinement
+
+/-- Refine a value's interval (and nullness) by an upper/lower bound. -/
+def WValue.refineU (i : Interval) (v : WValue) : WValue :=
+  match v.num with
+  | .u vi c => WValue.norm (WValue.mk (.u (Interval.meet vi i) c) v.nul)
+  | .any => WValue.mk (.u i .unknown) v.nul
+  | _ => v
+
+def WValue.refineS (i : SInterval) (v : WValue) : WValue :=
+  match v.num with
+  | .s vi c => WValue.norm (WValue.mk (.s (SInterval.meet vi i) c) v.nul)
+  | .any => WValue.mk (.s i .unknown) v.nul
+  | _ => v
+
+def WValue.refineNonNull (v : WValue) : WValue :=
+  match v.nul with
+  | .nul => v
+  | _ => { v with nul := .nonNull }
+
+def WValue.refineNul (v : WValue) : WValue :=
+  match v.nul with
+  | .nonNull => v
+  | _ => { v with nul := .nul }
+
+def Wil.Op.swap : Wil.Op → Wil.Op
+  | .lt => .gt
+  | .le => .ge
+  | .gt => .lt
+  | .ge => .le
+  | .eq => .eq
+  | .ne => .ne
+  | o => o
+
+def Wil.Op.negate : Wil.Op → Wil.Op
+  | .lt => .ge
+  | .le => .gt
+  | .gt => .le
+  | .ge => .lt
+  | .eq => .ne
+  | .ne => .eq
+  | o => o
+
+def WCond.bound (m : AiMach) (env : WEnv) (x boundVar : Wil.Var) (bound : WValue)
+    (strict : Bool) (upper : Bool) : WEnv :=
+  let xv := WEnv.getD env x.index (WValue.topTy x.ty)
+  match boundVar.ty with
+  | .int _ .true =>
+      let hi := match bound.sItv with
+        | .range _ h => h
+        | .top => AiMach.signedMax m
+        | .bot => AiMach.signedMin m
+      let lim := match strict with | .true => Int.sub hi (Int.ofNat 1) | .false => hi
+      let i : SInterval := .range (AiMach.signedMin m) lim
+      WEnv.set x.index (WValue.refineNonNull (WValue.refineS i xv)) env
+  | .int _ .false =>
+      let hi := match bound.uItv with
+        | .range _ h => h
+        | .top => AiMach.maxVal m
+        | .bot => 0
+      let lim := match strict with
+        | .true => match hi with | .zero => 0 | .succ k => k
+        | .false => hi
+      let i : Interval := .range 0 lim
+      WEnv.set x.index (WValue.refineNonNull (WValue.refineU i xv)) env
+  | _ => env
+
+def WCond.refineCmp (m : AiMach) (env : WEnv) (op : Wil.Op) (a b : Wil.Var) : WEnv :=
+  let va := WEnv.getD env a.index (WValue.topTy a.ty)
+  let vb := WEnv.getD env b.index (WValue.topTy b.ty)
+  match op with
+  | .eq =>
+      let va' := { vb with nul := match Null.join va.nul vb.nul with
+        | .nul => .nul
+        | .nonNull => .nonNull
+        | _ => va.nul };
+      let vb' := { va with nul := va'.nul };
+      WEnv.set b.index vb' (WEnv.set a.index va' env)
+  | .ne => WEnv.set a.index (WValue.refineNonNull va) env
+  | .lt => WCond.bound m env a b vb .true .true
+  | .le => WCond.bound m env a b vb .true .false
+  | .gt => WCond.bound m env b a va .true .true
+  | .ge => WCond.bound m env b a va .true .false
+  | _ => env
+
+/-- `x <(=) bound`, where `bound` is the abstract value of the other side. Only the
+upper bound of `bound` is used (`x ≤ hi - 1` for `<`, `x ≤ hi` for `≤`); the other side
+is left alone. -/
+def WCond.refineNot (m : AiMach) (env : WEnv) : Wil.Cond → WEnv
+  | .const b => match b with | .true => WEnv.kill env | .false => env
+  | .cmp op a b => WCond.refineCmp m env (Wil.Op.negate op) a b
+  | .not _ => env
+  | _ => env
+
+def WCond.refineGo (m : AiMach) : Wil.Cond → WEnv → WEnv
+  | .const .true, env => env
+  | .const .false, env => WEnv.kill env
+  | .not c, env => WCond.refineNot m env c
+  | .and a b, env => WCond.refineGo m b (WCond.refineGo m a env)
+  | .or _ _, env => env
+  | .cmp op a b, env => WCond.refineCmp m env op a b
+
+def WCond.refine (m : AiMach) (env : WEnv) (c : Wil.Cond) : WEnv :=
+  WCond.refineGo m c env
+
+/-- Refine `x` by `x ⋈ y` when `y` has a usable point/upper/lower bound. The refinement
+is deliberately simple but sound: it only *removes* values from the interval. -/
+-- ## Statements
+
+/-- A length as supplied by the frontend or a points-to analysis: an exact constant or a
+symbolic length with a known lower bound (`atLeast 0` is "unknown, could be 0"). -/
+inductive Len where
+  | exact (n : Nat)
+  | atLeast (n : Nat)
+  deriving Inhabited, BEq, Repr
+
+/-- A Wil CFG statement. `wil` is a real `Wil.Stmt`; `load` is the array model: read
+`arr[idx]` where `len` is supplied separately. -/
+inductive WStmt where
+  | wil (s : Wil.Stmt)
+  | load (x : Wil.Var) (arr : Wil.Var) (idx : Wil.Var) (len : Len)
+
+/-- The abstract transfer function of a Wil statement. -/
+def WStmt.transfer (m : AiMach) (env : WEnv) : WStmt → WEnv
+  | .wil (.assign x e) => WEnv.set x.index (WRhs.eval m env x.ty e) env
+  | .wil (.assume c) => WCond.refine m env c
+  | .wil (.store _ _) => env
+  | .wil (.free _) => env
+  | .wil (.call r _ _) => match r with
+    | .none => env
+    | .some x => WEnv.set x.index (WValue.topTy x.ty) env
+  | .wil .nop => env
+  | .load x _ _ _ => WEnv.set x.index (WValue.loadedValue x.ty) env
+
+instance : Transfer (AiMach × WStmt) WEnv where
+  step := fun p env => WStmt.transfer p.1 env p.2
+
+-- ## Alarms
+
+def Alarm.noneW : List Alarm := .nil
+
+/-- An interval's upper bound, for the alarm message. -/
+def Interval.hiOr (d : Nat) : Interval → Nat
+  | .range _ hi => hi
+  | _ => d
+
+def SInterval.hiOr (d : Int) : SInterval → Int
+  | .range _ hi => hi
+  | _ => d
+
+def Wil.Op.name : Wil.Op → String
+  | .add => "add"
+  | .sub => "sub"
+  | .mul => "mul"
+  | .div => "div"
+  | .rem => "rem"
+  | .and => "and"
+  | .or => "or"
+  | .xor => "xor"
+  | .shl => "shl"
+  | .shr => "shr"
+  | .eq => "eq"
+  | .ne => "ne"
+  | .lt => "lt"
+  | .le => "le"
+  | .gt => "gt"
+  | .ge => "ge"
+  | .neg => "neg"
+  | .not => "not"
+
+/-- Alarms of a right-hand side. Arithmetic alarms when the abstract result does not fit
+the word: unsigned keeps the toy path's conservative `overflow` alarm; signed alarms only
+under the `.ub` policy (`.wrap` is defined wrap-around). A pointer load alarms on a
+possibly-null pointer; a store/free likewise. -/
+def WRhs.alarms (m : AiMach) (at : Nat) (env : WEnv) (rty : Wil.Ty) : Wil.Rhs → List Alarm
+  | .use _ => Alarm.noneW
+  | .cst _ => Alarm.noneW
+  | .load p =>
+      let pv := WEnv.getD env p.index (WValue.topTy p.ty)
+      match Null.mayBeNull pv.nul with
+      | .true => List.cons (Alarm.nullDeref at) Alarm.noneW
+      | .false => Alarm.noneW
+  | .gep _ _ => Alarm.noneW
+  | .alloc _ => Alarm.noneW
+  | .havoc _ => Alarm.noneW
+  | .bin op a b =>
+      match op with
+      | .eq => Alarm.noneW
+      | .ne => Alarm.noneW
+      | .lt => Alarm.noneW
+      | .le => Alarm.noneW
+      | .gt => Alarm.noneW
+      | .ge => Alarm.noneW
+      | _ =>
+          let av := WEnv.getD env a.index (WValue.topTy a.ty)
+          let bv := WEnv.getD env b.index (WValue.topTy b.ty)
+          match a.ty with
+          | .int _ .true =>
+              let i := match op with
+                | .add => SInterval.add m av.sItv bv.sItv
+                | .sub => SInterval.sub m av.sItv bv.sItv
+                | .mul => SInterval.mul m av.sItv bv.sItv
+                | _ => .top
+              match m.overflow with
+              | .ub => match SInterval.within m i with
+                | .true => Alarm.noneW
+                | .false => List.cons (Alarm.overflow at (Wil.Op.name op)) Alarm.noneW
+              | .wrap => Alarm.noneW
+          | .int _ .false =>
+              let i := match op with
+                | .add => Interval.add m av.uItv bv.uItv
+                | .sub => Interval.sub m av.uItv bv.uItv
+                | .mul => Interval.mul m av.uItv bv.uItv
+                | _ => .top
+              match Interval.within m i with
+              | .true => Alarm.noneW
+              | .false => List.cons (Alarm.overflow at (Wil.Op.name op)) Alarm.noneW
+          | _ => Alarm.noneW
+  | .un op a =>
+      let av := WEnv.getD env a.index (WValue.topTy a.ty)
+      match a.ty with
+      | .int _ .true => match m.overflow with
+        | .ub => match op with
+          | .neg => match SInterval.within m (SInterval.mul m av.sItv (.range (Int.negOfNat 1) (Int.negOfNat 1))) with
+            | .true => Alarm.noneW
+            | .false => List.cons (Alarm.overflow at (Wil.Op.name op)) Alarm.noneW
+          | _ => Alarm.noneW
+        | .wrap => Alarm.noneW
+      | _ => Alarm.noneW
+
+/-- Check an array index against a supplied length. A symbolic length is only safe when
+the index's upper bound is below its known lower bound (`atLeast 0` proves nothing, as
+the length could be 0). -/
+def WStmt.lengthAlarms (at : Nat) (idx : WValue) (ty : Wil.Ty) (len : Len) : List Alarm :=
+  match ty with
+  | .int _ .true =>
+      let i := idx.sItv
+      match i with
+      | .bot => Alarm.noneW
+      | .top => match len with
+        | .exact n => List.cons (Alarm.outOfBounds at 0 n) Alarm.noneW
+        | .atLeast n => List.cons (Alarm.outOfBoundsSym at 0 n) Alarm.noneW
+      | .range lo hi =>
+          let nonNeg := Int.le (Int.ofNat 0) lo;
+          let lenI := match len with
+            | .exact n => Int.ofNat n
+            | .atLeast n => Int.ofNat n;
+          let below := Int.lt hi lenI;
+          match Bool.and nonNeg below with
+          | .true => Alarm.noneW
+          | .false => match len with
+            | .exact n => List.cons (Alarm.outOfBounds at (Int.toNat hi) n) Alarm.noneW
+            | .atLeast n => List.cons (Alarm.outOfBoundsSym at (Int.toNat hi) n) Alarm.noneW
+  | _ =>
+      let i := idx.uItv
+      match i with
+      | .bot => Alarm.noneW
+      | .top => match len with
+        | .exact n => List.cons (Alarm.outOfBounds at 0 n) Alarm.noneW
+        | .atLeast n => List.cons (Alarm.outOfBoundsSym at 0 n) Alarm.noneW
+      | .range _ hi =>
+          let lenN := match len with | .exact n => n | .atLeast n => n;
+          match Nat.lt hi lenN with
+          | .true => Alarm.noneW
+          | .false => match len with
+            | .exact n => List.cons (Alarm.outOfBounds at hi n) Alarm.noneW
+            | .atLeast n => List.cons (Alarm.outOfBoundsSym at hi n) Alarm.noneW
+
+/-- Alarms of a CFG statement in an invariant state. -/
+def WStmt.alarms (m : AiMach) (at : Nat) (env : WEnv) : WStmt → List Alarm
+  | .wil (.assign x e) => WRhs.alarms m at env x.ty e
+  | .wil (.store p _) =>
+      let pv := WEnv.getD env p.index (WValue.topTy p.ty)
+      match Null.mayBeNull pv.nul with
+      | .true => List.cons (Alarm.nullDeref at) Alarm.noneW
+      | .false => Alarm.noneW
+  | .wil (.free p) =>
+      let pv := WEnv.getD env p.index (WValue.topTy p.ty)
+      match Null.mayBeNull pv.nul with
+      | .true => List.cons (Alarm.nullDeref at) Alarm.noneW
+      | .false => Alarm.noneW
+  | .wil _ => Alarm.noneW
+  | .load _ arr idx len =>
+      let av := WEnv.getD env arr.index (WValue.topTy arr.ty)
+      let nullAlarm := match Null.mayBeNull av.nul with
+        | .true => List.cons (Alarm.nullDeref at) Alarm.noneW
+        | .false => Alarm.noneW
+      let iv := WEnv.getD env idx.index (WValue.topTy idx.ty)
+      List.append nullAlarm (WStmt.lengthAlarms at iv idx.ty len)
+
+-- ## CFGs
+
+structure WEdge where
+  src : Nat
+  dst : Nat
+  guard : Option Wil.Cond
+
+/-- A Wil CFG: entry block, variables (with types), block statements and edges. The
+edges are derived from Wil terminators by `WCfg.ofFunc`; a block ends in `ret` or
+`unreachable` with no outgoing edge. -/
+structure WCfg where
+  entry : Nat
+  vars : List Wil.Var
+  blocks : List (Nat × List WStmt)
+  edges : List WEdge
+
+def WCfg.stmtsGo (p : Nat) : List (Nat × List WStmt) → List WStmt
+  | .nil => []
+  | .cons (k, s) rest => match Nat.beq p k with
+    | .true => s
+    | .false => WCfg.stmtsGo p rest
+
+def WCfg.stmts (cfg : WCfg) (p : Nat) : List WStmt := WCfg.stmtsGo p cfg.blocks
+
+def WCfg.outEdges (cfg : WCfg) (p : Nat) : List WEdge :=
+  List.filter (fun e => Nat.beq e.src p) cfg.edges
+
+def WEdge.ofTerm (src : Wil.BlockId) : Wil.Term → List WEdge
+  | .goto b => List.cons (WEdge.mk src.index b.index .none) []
+  | .br c t f =>
+      List.cons (WEdge.mk src.index t.index (.some c))
+        (List.cons (WEdge.mk src.index f.index (.some (Wil.Cond.not c))) [])
+  | _ => []
+
+/-- Number a list with indices from `n`. -/
+def AiW.indexFrom {A : Type} : Nat → List A → List (Nat × A)
+  | _, .nil => .nil
+  | n, .cons x xs => .cons (n, x) (AiW.indexFrom (Nat.succ n) xs)
+
+/-- All statements of a Wil function become `WStmt.wil`; the array `load` model is
+supplied by the caller after lowering (or by a later frontend), so `ofFunc` is the
+generic, purely-Wil path. -/
+def WCfg.ofFunc (f : Wil.Func) : WCfg :=
+  let bs := AiW.indexFrom 0 f.blocks;
+  let blocks := List.map (fun p => (p.1, List.map (fun s => WStmt.wil s) p.2.stmts)) bs;
+  let edges := List.concat (List.map (fun p => WEdge.ofTerm (Wil.mkBlockId p.1) p.2.term) bs);
+  WCfg.mk f.entry.index (List.append f.params f.locals) blocks edges
+
+-- ## Post-fixpoint engine and checker
+
+def WState : Type := List (Nat × WEnv)
+
+def WState.lookupGo (p : Nat) (d : WEnv) : WState → WEnv
+  | .nil => d
+  | .cons (k, v) rest => match Nat.beq p k with
+    | .true => v
+    | .false => WState.lookupGo p d rest
+
+def WState.getD (st : WState) (p : Nat) (d : WEnv) : WEnv := WState.lookupGo p d st
+
+def WState.set (p : Nat) (v : WEnv) : WState → WState
+  | .nil => .cons (p, v) .nil
+  | .cons (k, w) rest => match Nat.beq p k with
+    | .true => .cons (k, v) rest
+    | .false => .cons (k, w) (WState.set p v rest)
+
+def WState.bot (cfg : WCfg) : WState :=
+  List.map (fun p => (p.1, WEnv.botOf cfg.vars)) cfg.blocks
+
+def WState.at (cfg : WCfg) (st : WState) (p : Nat) : WEnv :=
+  WState.getD st p (WEnv.botOf cfg.vars)
+
+def WCfg.enqueue (cfg : WCfg) (rest : List WEdge) (p : Nat) : List WEdge :=
+  List.append rest (WCfg.outEdges cfg p)
+
+partial def wSolveGo (m : AiMach) (cfg : WCfg) (st : WState) (queue : List WEdge)
+    (seen : List Nat) : WState :=
+  match queue with
+  | .nil => st
+  | .cons e rest =>
+      let src := WState.at cfg st e.src
+      let out := List.foldl (fun acc s => WStmt.transfer m acc s) src (WCfg.stmts cfg e.src)
+      let new := match e.guard with
+        | .none => out
+        | .some c => WCond.refine m out c
+      let old := WState.at cfg st e.dst
+      match WEnv.le new old with
+      | .true => wSolveGo m cfg st rest seen
+      | .false =>
+          let joined := WEnv.join old new
+          let step := match Ai.memNat e.dst seen with
+            | .true => WEnv.widen old joined
+            | .false => joined
+          let st' := WState.set e.dst step st
+          let seen' : List Nat := match Ai.memNat e.dst seen with
+            | .true => seen
+            | .false => List.cons e.dst seen
+          wSolveGo m cfg st' (WCfg.enqueue cfg rest e.dst) seen'
+
+def wFixpoint (m : AiMach) (cfg : WCfg) : WState :=
+  let init := WState.set cfg.entry (WEnv.topOf cfg.vars) (WState.bot cfg)
+  wSolveGo m cfg init (WCfg.outEdges cfg cfg.entry) (([cfg.entry]) : List Nat)
+
+def wIncomingJoin (m : AiMach) (cfg : WCfg) (st : WState) (q : Nat) : Option WEnv :=
+  let ins := List.filter (fun e => Nat.beq e.dst q) cfg.edges
+  match ins with
+  | .nil => .none
+  | .cons _ _ =>
+      let joined := List.foldl
+        (fun acc e =>
+          let src := WState.at cfg st e.src
+          let out := List.foldl (fun a s => WStmt.transfer m a s) src (WCfg.stmts cfg e.src)
+          let out' := match e.guard with
+            | .none => out
+            | .some c => WCond.refine m out c
+          WEnv.join acc out')
+        (WEnv.botOf cfg.vars) ins
+      .some joined
+
+def wNarrowOnce (m : AiMach) (cfg : WCfg) (st : WState) : WState :=
+  List.map (fun (p : Nat × List WStmt) =>
+    let q := p.1
+    match wIncomingJoin m cfg st q with
+    | .none => (q, WState.at cfg st q)
+    | .some j => (q, WEnv.narrow (WState.at cfg st q) j)) cfg.blocks
+
+/-- The abstract state an edge carries from `src` to `dst`: the source block's
+statements, then the edge guard. -/
+def WEdge.out (m : AiMach) (cfg : WCfg) (st : WState) (e : WEdge) : WEnv :=
+  let src := WState.at cfg st e.src
+  let out := List.foldl (fun acc s => WStmt.transfer m acc s) src (WCfg.stmts cfg e.src)
+  match e.guard with
+    | .none => out
+    | .some c => WCond.refine m out c
+
+/-- The post-fixpoint condition of one edge. -/
+def WEdge.post (m : AiMach) (cfg : WCfg) (st : WState) (e : WEdge) : Prop :=
+  WEnv.le (WEdge.out m cfg st e) (WState.at cfg st e.dst) = .true
+
+def checkWEdge (m : AiMach) (cfg : WCfg) (st : WState) (e : WEdge) : List Alarm :=
+  match WEnv.le (WEdge.out m cfg st e) (WState.at cfg st e.dst) with
+  | .true => .nil
+  | .false => List.cons (Alarm.unsoundEdge e.src e.dst) .nil
+
+def checkWEdges (m : AiMach) (cfg : WCfg) (st : WState) : List Alarm :=
+  List.concat (List.map (fun e => checkWEdge m cfg st e) cfg.edges)
+
+def checkWEntry (cfg : WCfg) (st : WState) : List Alarm :=
+  match WEnv.le (WEnv.topOf cfg.vars) (WState.at cfg st cfg.entry) with
+  | .true => .nil
+  | .false => List.cons Alarm.entryUncovered .nil
+
+/-- Alarms of a block, walking its statements left to right so each statement is checked
+under the state produced by its predecessors in the block. -/
+def WStmt.alarmsGo (m : AiMach) (at : Nat) : WEnv → List WStmt → List Alarm
+  | _, .nil => []
+  | env, .cons s rest =>
+      List.append (WStmt.alarms m at env s) (WStmt.alarmsGo m at (WStmt.transfer m env s) rest)
+
+def checkWAlarms (m : AiMach) (cfg : WCfg) (st : WState) : List Alarm :=
+  List.concat (List.map (fun p =>
+    WStmt.alarmsGo m p.1 (WState.at cfg st p.1) p.2) cfg.blocks)
+
+def checkW (m : AiMach) (cfg : WCfg) (st : WState) : List Alarm :=
+  List.append (checkWEntry cfg st)
+    (List.append (checkWEdges m cfg st) (checkWAlarms m cfg st))
+
+def acceptsW (m : AiMach) (cfg : WCfg) (st : WState) : Bool := List.isEmpty (checkW m cfg st)
+
+-- ## Obligations
+
+/-- The per-statement soundness obligation for `WStmt.transfer`, in the shape of
+`Transfer.sound_stmt`: γ before, a concrete statement step, γ after. `sem` is Wil's
+statement semantics (`Wil.step` restricted to one statement, once S2's frontend records
+origins and statement configurations); the checker does not call this. -/
+def WStmt.transfer_sound_stmt (m : AiMach) (sem : WStmt → WConc → WConc → Prop) : Prop :=
+  (s : WStmt) → (a : WEnv) → (c c' : WConc) → WEnv.gamma a c → sem s c c' →
+    WEnv.gamma (WStmt.transfer m a s) c'
+
+/-- The same obligation as the class's `Transfer.sound_stmt`, for the instance above. -/
+def WStmt.sound_stmt (m : AiMach) (sem : WStmt → WConc → WConc → Prop) : Prop :=
+  Transfer.sound_stmt (AiMach × WStmt) WConc WEnv
+    (fun p c c' => sem p.2 c c')
+
+/-- The post-fixpoint theorem's edge side: acceptance implies every edge's
+post-fixpoint condition. The run induction and the alarm side are S5's remaining proof;
+the per-statement transfer obligation is `WStmt.transfer_sound_stmt` above. -/
+def checkW_sound_stmt (m : AiMach) (cfg : WCfg) (inv : WState) : Prop :=
+  checkW m cfg inv = [] → (e : WEdge) → WEdge.post m cfg inv e

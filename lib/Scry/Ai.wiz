@@ -9,12 +9,14 @@ The parser-free core of stage S5 (design `wiz-notes/code-analysis-design.md` §4
 nullness, a widening worklist, narrowing, overflow/out-of-bounds/nullness alarms, and
 the post-fixpoint checker. See `wiz-notes/scry-ai.md`.
 
-`import Scry.Ai` gives the interfaces and the engine; tests and examples use
-`Scry.AiExamples` (`lib/Scry/AiExamples.wiz`). Nothing here imports Wil or tree-sitter.
+`import Scry.Ai` gives the interfaces and the toy engine; tests and examples use
+`Scry.AiExamples` (`lib/Scry/AiExamples.wiz`). Nothing here imports Wil or tree-sitter:
+the Wil-facing transfer, signed intervals and the `load arr idx len` model are in
+`Scry.AiWil` (`lib/Scry/AiWil.wiz`, with `Scry.AiWilExamples`).
 
 ```
 import Scry.Ai
 
-#eval accepts (AiMach.mk 8) cfg inv   -- the checker's verdict on a post-fixpoint
+#eval accepts (AiMach.u 8) cfg inv   -- the checker's verdict on a post-fixpoint
 ```
 -/

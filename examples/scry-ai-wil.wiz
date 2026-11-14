@@ -1,0 +1,15 @@
+import Scry.AiWilExamples
+-- The compiled (C/LLVM) case for S5's Wil checker: `main` is a digest of the
+-- acceptance bits of the Wil-shaped programs in `lib/Scry/AiWilExamples.wiz`.
+
+def bit (b : Bool) : Nat := match b with
+  | .true => 1
+  | .false => 0
+
+def main : Nat :=
+  bit (acceptsW AiWEx.m8u AiWEx.constCfg AiWEx.constInv) * 100000
+  + bit (acceptsW AiWEx.m8u AiWEx.loopCfg AiWEx.loopInvNarrow) * 10000
+  + bit (List.isEmpty (checkW AiWEx.m8u AiWEx.safeArrayCfg AiWEx.safeArrayInv)) * 1000
+  + bit (Alarm.has (Alarm.outOfBounds 1 8 4) (checkW AiWEx.m8u AiWEx.oobCfg AiWEx.oobInv)) * 100
+  + bit (List.isEmpty (checkW AiWEx.m8w AiWEx.ovfS8Cfg AiWEx.ovfS8WrapInv)) * 10
+  + bit (acceptsW AiWEx.m8u AiWEx.litCfg AiWEx.litInv)

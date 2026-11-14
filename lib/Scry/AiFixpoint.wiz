@@ -23,7 +23,7 @@ Stage S5's untrusted fast path and its result checker.
 ```
 import Scry.AiFixpoint
 
-#eval check (AiMach.mk 8) exampleCfg (fixpoint (AiMach.mk 8) exampleCfg)  -- []
+#eval check (AiMach.u 8) exampleCfg (fixpoint (AiMach.u 8) exampleCfg)  -- []
 ```
 -/
 
@@ -126,6 +126,8 @@ inductive Alarm where
   /-- edge `src → dst` does not satisfy the post-fixpoint condition -/
   | unsoundEdge (src dst : Nat)
   | outOfBounds (at : Nat) (index len : Nat)
+  /-- the length is symbolic (`Len.atLeast n`); `n` is only a lower bound -/
+  | outOfBoundsSym (at : Nat) (index lenAtLeast : Nat)
   | nullDeref (at : Nat)
   deriving BEq, Repr
 

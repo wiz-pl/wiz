@@ -2,6 +2,7 @@ import Prelude
 import Text
 import Deriving
 import Logic
+import Int
 import Scry.AiDomain
 /-!
 # Scry.AiCfg: a tiny three-address language, CFG and transfer functions
@@ -20,20 +21,46 @@ at the end of the module.
 ```
 import Scry.AiCfg
 
-#eval (AExpr.eval (AiMach.mk 8) [] (.lit 7)).itv
+#eval (AExpr.eval (AiMach.u 8) [] (.lit 7)).itv
 ```
 -/
 
-/-- The ambient machine: an unsigned width. Signedness and endianness belong to Wil;
-the core only needs the value range for overflow reasoning. -/
+/-- What an arithmetic overflow means: two's-complement wrap-around (C unsigned, Java)
+or undefined behaviour (C signed, `-fwrapv` off). The transfer functions return `Top` on
+either; the policy decides whether the checker reports an alarm (`.ub`) or treats the
+wrapped result as defined (`.wrap`). -/
+inductive Overflow where
+  /-- two's-complement wrap-around: defined, so no alarm -/
+  | wrap
+  /-- undefined behaviour: an operation whose range may leave the word alarms -/
+  | ub
+  deriving Inhabited, BEq, Repr
+
+/-- The ambient machine: a width, whether the integers are signed, and the overflow
+policy. The width is what the unsigned `Interval` and the signed `SInterval` operations
+use; the policy is what the alarm checks use. `AiMach.u`/`AiMach.s` are the usual
+constructors (unsigned wrap and signed undefined behaviour). -/
 structure AiMach where
   /-- the width in bits -/
   width : Nat
+  /-- interpret values as two's-complement signed -/
+  signed : Bool
+  /-- what an overflow means -/
+  overflow : Overflow
+
+def AiMach.u (width : Nat) : AiMach := AiMach.mk width .false .wrap
+def AiMach.s (width : Nat) : AiMach := AiMach.mk width .true .ub
+def AiMach.sw (width : Nat) : AiMach := AiMach.mk width .true .wrap
 
 /-- The largest unsigned value at this width. -/
 def AiMach.maxVal (m : AiMach) : Nat := Ai.maxVal m.width
 /-- The number of representable values. -/
 def AiMach.modulus (m : AiMach) : Nat := Nat.pow 2 m.width
+/-- `-2^(w-1)`, the smallest signed value of this width. -/
+def AiMach.signedMin (m : AiMach) : Int := Int.negOfNat (Nat.pow 2 (Nat.sub m.width 1))
+/-- `2^(w-1) - 1`, the largest signed value of this width. -/
+def AiMach.signedMax (m : AiMach) : Int :=
+  Int.ofNat (Nat.sub (Nat.pow 2 (Nat.sub m.width 1)) 1)
 
 -- ## Expressions
 
@@ -112,6 +139,256 @@ def Interval.mul (m : AiMach) : Interval → Interval → Interval
       | .true => .range (Nat.mul al bl) p
       | .false => .top
   | _, _ => .top
+
+-- ## Signed intervals
+
+/-- The smaller of two integers. -/
+def AiInt.min (a b : Int) : Int := match Int.le a b with
+  | .true => a
+  | .false => b
+/-- The larger of two integers. -/
+def AiInt.max (a b : Int) : Int := match Int.le a b with
+  | .true => b
+  | .false => a
+
+/-- A signed machine interval over `Int`, for `Wil.Ty.int w .true` values. Bounds are
+two's-complement values, so `top` means "any value of the ambient signed width" and the
+operations take the width from `AiMach`. The unsigned `Interval` is unchanged. -/
+inductive SInterval where
+  | bot
+  | top
+  | range (lo hi : Int)
+  deriving Inhabited
+
+def SInterval.beq : SInterval → SInterval → Bool
+  | .bot, .bot => .true
+  | .top, .top => .true
+  | .range lo hi, .range lo' hi' => Bool.and (Int.beq lo lo') (Int.beq hi hi')
+  | _, _ => .false
+
+instance : BEq SInterval where
+  beq := SInterval.beq
+
+def SInterval.le : SInterval → SInterval → Bool
+  | .bot, _ => .true
+  | .top, .top => .true
+  | .top, _ => .false
+  | _, .top => .true
+  | _, .bot => .false
+  | .range lo hi, .range lo' hi' => Bool.and (Int.le lo' lo) (Int.le hi hi')
+
+def SInterval.join : SInterval → SInterval → SInterval
+  | .bot, b => b
+  | a, .bot => a
+  | .top, _ => .top
+  | _, .top => .top
+  | .range lo hi, .range lo' hi' => .range (AiInt.min lo lo') (AiInt.max hi hi')
+
+def SInterval.ebot : SInterval := .bot
+def SInterval.etop : SInterval := .top
+def SInterval.point (w : Nat) (z : Int) : SInterval :=
+  match Int.le (Int.negOfNat (Nat.pow 2 (Nat.sub w 1))) z with
+  | .true => match Int.le z (Int.ofNat (Nat.sub (Nat.pow 2 (Nat.sub w 1)) 1)) with
+    | .true => .range z z
+    | .false => .top
+  | .false => .top
+
+def SInterval.loOpt : SInterval → Option Int
+  | .range lo _ => .some lo
+  | _ => .none
+def SInterval.hiOpt : SInterval → Option Int
+  | .range _ hi => .some hi
+  | _ => .none
+def SInterval.isBot : SInterval → Bool
+  | .bot => .true
+  | _ => .false
+def SInterval.isTop : SInterval → Bool
+  | .top => .true
+  | _ => .false
+
+/-- Computable concretisation: does the interval contain the signed integer `z`? -/
+def SInterval.contains (i : SInterval) (z : Int) : Bool := match i with
+  | .bot => .false
+  | .top => .true
+  | .range lo hi => Bool.and (Int.le lo z) (Int.le z hi)
+
+def SInterval.meet : SInterval → SInterval → SInterval
+  | .bot, _ => .bot
+  | _, .bot => .bot
+  | .top, b => b
+  | a, .top => a
+  | .range lo hi, .range lo' hi' =>
+      let l := AiInt.max lo lo'
+      let h := AiInt.min hi hi'
+      match Int.le l h with
+      | .true => .range l h
+      | .false => .bot
+
+instance : Lattice SInterval where
+  bot := SInterval.ebot
+  le := SInterval.le
+  join := SInterval.join
+
+def SInterval.widen (a b : SInterval) : SInterval := match SInterval.le b a with
+  | .true => a
+  | .false => SInterval.etop
+
+instance : Widen SInterval where
+  widen := SInterval.widen
+
+def SInterval.narrow (a b : SInterval) : SInterval := match SInterval.le b a with
+  | .true => b
+  | .false => a
+
+instance : Narrow SInterval where
+  narrow := SInterval.narrow
+
+def SInterval.laws : Prop :=
+  Lattice.le_refl_stmt SInterval × Lattice.le_trans_stmt SInterval ×
+  Lattice.bot_le_stmt SInterval × Lattice.join_ub_left_stmt SInterval ×
+  Lattice.join_ub_right_stmt SInterval × Lattice.join_least_stmt SInterval ×
+  Widen.widen_ub_stmt SInterval
+
+/-- Whether `[lo, hi]` fits the signed word of `m`. -/
+def AiMach.inSignedRange (m : AiMach) (lo hi : Int) : Bool :=
+  Bool.and (Int.le (AiMach.signedMin m) lo) (Int.le hi (AiMach.signedMax m))
+
+/-- Signed addition: exact when the sum range fits the word, else `Top` (both wrap and
+undefined behaviour are treated as a loss of precision here; the policy decides the
+alarm). -/
+def SInterval.add (m : AiMach) : SInterval → SInterval → SInterval
+  | .bot, _ => .bot
+  | _, .bot => .bot
+  | .range al ah, .range bl bh =>
+      let lo := Int.add al bl;
+      let hi := Int.add ah bh;
+      match AiMach.inSignedRange m lo hi with
+      | .true => .range lo hi
+      | .false => .top
+  | _, _ => .top
+
+/-- Signed subtraction: exact when `[al - bh, ah - bl]` fits. -/
+def SInterval.sub (m : AiMach) : SInterval → SInterval → SInterval
+  | .bot, _ => .bot
+  | _, .bot => .bot
+  | .range al ah, .range bl bh =>
+      let lo := Int.sub al bh;
+      let hi := Int.sub ah bl;
+      match AiMach.inSignedRange m lo hi with
+      | .true => .range lo hi
+      | .false => .top
+  | _, _ => .top
+
+/-- Signed multiplication: the min/max of the four endpoint products, exact when they
+fit. -/
+def SInterval.mul (m : AiMach) : SInterval → SInterval → SInterval
+  | .bot, _ => .bot
+  | _, .bot => .bot
+  | .range al ah, .range bl bh =>
+      let p1 := Int.mul al bl;
+      let p2 := Int.mul al bh;
+      let p3 := Int.mul ah bl;
+      let p4 := Int.mul ah bh;
+      let lo := AiInt.min (AiInt.min p1 p2) (AiInt.min p3 p4);
+      let hi := AiInt.max (AiInt.max p1 p2) (AiInt.max p3 p4);
+      match AiMach.inSignedRange m lo hi with
+      | .true => .range lo hi
+      | .false => .top
+  | _, _ => .top
+
+/-- A nonempty signed interval within the signed word? `bot` is trivially safe, `top` is
+not. Used by the overflow alarm. -/
+def SInterval.within (m : AiMach) : SInterval → Bool
+  | .bot => .true
+  | .range lo hi => Bool.and (Int.le (AiMach.signedMin m) lo) (Int.le hi (AiMach.signedMax m))
+  | .top => .false
+
+-- ## Signed constants
+
+/-- A signed constant domain (the signed counterpart of `Const`). -/
+inductive SConst where
+  | cbot
+  | known (z : Int)
+  | unknown
+  deriving Inhabited
+
+def SConst.beq : SConst → SConst → Bool
+  | .cbot, .cbot => .true
+  | .known a, .known b => Int.beq a b
+  | .unknown, .unknown => .true
+  | _, _ => .false
+
+instance : BEq SConst where
+  beq := SConst.beq
+
+/-- Concretisation of a signed constant. -/
+def SConst.gamma : SConst → Int → Prop
+  | .cbot => fun _ => False
+  | .known z => fun v => v = z
+  | .unknown => fun _ => True
+
+def SConst.le : SConst → SConst → Bool
+  | .cbot, _ => .true
+  | .known a, .known b => Int.beq a b
+  | .known _, .unknown => .true
+  | .known _, .cbot => .false
+  | .unknown, .unknown => .true
+  | .unknown, _ => .false
+
+def SConst.join : SConst → SConst → SConst
+  | .cbot, b => b
+  | a, .cbot => a
+  | .unknown, _ => .unknown
+  | _, .unknown => .unknown
+  | .known a, .known b => match Int.beq a b with
+    | .true => .known a
+    | .false => .unknown
+
+instance : Lattice SConst where
+  bot := SConst.cbot
+  le := SConst.le
+  join := SConst.join
+
+def SConst.widen (a b : SConst) : SConst := match SConst.le b a with
+  | .true => a
+  | .false => SConst.unknown
+instance : Widen SConst where
+  widen := SConst.widen
+
+def SConst.narrow (a b : SConst) : SConst := match SConst.le b a with
+  | .true => b
+  | .false => a
+instance : Narrow SConst where
+  narrow := SConst.narrow
+
+def SConst.laws : Prop :=
+  Lattice.le_refl_stmt SConst × Lattice.le_trans_stmt SConst ×
+  Lattice.bot_le_stmt SConst × Lattice.join_ub_left_stmt SConst ×
+  Lattice.join_ub_right_stmt SConst × Lattice.join_least_stmt SConst
+
+def SConst.addC (m : AiMach) : SConst → SConst → SConst
+  | .known a, .known b =>
+      let z := Int.add a b;
+      match AiMach.inSignedRange m z z with
+      | .true => .known z
+      | .false => .unknown
+  | _, _ => .unknown
+
+def SConst.subC (m : AiMach) : SConst → SConst → SConst
+  | .known a, .known b =>
+      let z := Int.sub a b;
+      match AiMach.inSignedRange m z z with
+      | .true => .known z
+      | .false => .unknown
+  | _, _ => .unknown
+
+def SConst.mulC (m : AiMach) : SConst → SConst → SConst
+  | .known a, .known b =>
+      let z := Int.mul a b;
+      match AiMach.inSignedRange m z z with
+      | .true => .known z
+      | .false => .unknown
+  | _, _ => .unknown
 
 /-- Constant arithmetic: known only when both sides are known and the result is
 representable. -/

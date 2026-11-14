@@ -2,6 +2,7 @@ import Prelude
 import Text
 import Deriving
 import Logic
+import Nat
 /-!
 # Scry.AiDomain: lattices and abstract domains
 
@@ -506,3 +507,97 @@ instance : Narrow Env where
 
 /-- Environment soundness reduces to the value obligations, pointwise. -/
 def Env.laws (vars : List Nat) : Prop := Value.laws
+
+-- ## Concretisation: γ as the pointwise product
+
+/-- A concrete value for the unsigned numerical product: an integer bit pattern and
+whether it is the null pointer. `Value.gamma` is the pointwise product of the three
+component γs. -/
+structure VState where
+  /-- the integer bit pattern -/
+  bits : Nat
+  /-- is this value the null pointer? -/
+  null : Bool
+  deriving Inhabited, BEq
+
+/-- Concretisation of `Const`: `known n` describes exactly `n`, `unknown` everything and
+`cbot` nothing. -/
+def Const.gamma : Const → Nat → Prop
+  | .cbot => fun _ => False
+  | .known n => fun v => v = n
+  | .unknown => fun _ => True
+
+/-- Concretisation of `Null`: `nul` describes true, `nonNull` false, `maybe` both and
+`nbot` nothing. -/
+def Null.gamma : Null → Bool → Prop
+  | .nbot => fun _ => False
+  | .nul => fun b => b = .true
+  | .nonNull => fun b => b = .false
+  | .maybe => fun _ => True
+
+/-- Concretisation of a `Value` as the pointwise product. -/
+def Value.gamma (v : Value) (c : VState) : Prop :=
+  Interval.contains v.itv c.bits = .true ∧ Const.gamma v.cst c.bits ∧
+    Null.gamma v.nul c.null
+
+/-- The pointwise product over an environment: every bound variable's value describes
+that variable's concrete state. A missing entry imposes nothing. -/
+def Env.gamma (e : Env) (c : Nat → VState) : Prop :=
+  (x : Nat) → (v : Value) → Env.lookup x e = .some v → Value.gamma v (c x)
+
+/-- `Interval` is a concretisation domain over `Nat` bit patterns. -/
+instance : AbsDomain Nat Interval where
+  gamma := fun i n => Interval.contains i n = .true
+
+/-- The reduced product is a concretisation domain. -/
+instance : AbsDomain VState Value where
+  gamma := Value.gamma
+
+/-- γ for an environment is the pointwise product of the values' γ. -/
+instance : AbsDomain (Nat → VState) Env where
+  gamma := Env.gamma
+
+-- ## γ instances and lemmas
+
+/-- `Const` as a concretisation domain over its bit pattern. -/
+instance : AbsDomain Nat Const where
+  gamma := Const.gamma
+
+/-- `Null` as a concretisation domain over "is null". -/
+instance : AbsDomain Bool Null where
+  gamma := Null.gamma
+
+/-- γ monotonicity for `Const`, as an obligation. -/
+def Const.gamma_mono_stmt : Prop := AbsDomain.gamma_mono_stmt Nat Const
+
+/-- γ-join soundness for `Const`, as an obligation. -/
+def Const.gamma_join_sound_stmt : Prop := AbsDomain.join_sound_stmt Nat Const
+
+/-- γ monotonicity for `Null`, as an obligation. -/
+def Null.gamma_mono_stmt : Prop := AbsDomain.gamma_mono_stmt Bool Null
+
+/-- γ-join soundness for `Null`, as an obligation. -/
+def Null.gamma_join_sound_stmt : Prop := AbsDomain.join_sound_stmt Bool Null
+
+/-- γ monotonicity for `Interval`, as an obligation. The proof is a routine case
+analysis of the bounds (the checker does not use it; see `wiz-notes/scry-ai.md`). -/
+def Interval.gamma_mono_stmt : Prop := AbsDomain.gamma_mono_stmt Nat Interval
+
+/-- γ-join soundness for `Interval`, as an obligation. -/
+def Interval.gamma_join_sound_stmt : Prop := AbsDomain.join_sound_stmt Nat Interval
+
+/-- γ monotonicity for the reduced product, as an obligation (it follows pointwise from
+the interval, constant and nullness lemmas once `Interval`'s is proved). -/
+def Value.gamma_mono_stmt : Prop := AbsDomain.gamma_mono_stmt VState Value
+
+/-- γ-join soundness for the reduced product, as an obligation. The only extra step over
+the components is that `Value.norm` turns a joined `known n` into the point `n`, which γ
+also validates. -/
+def Value.gamma_join_sound_stmt : Prop := AbsDomain.join_sound_stmt VState Value
+
+/-- γ-join soundness of the environment product, as an obligation (pointwise over the
+association list). -/
+def Env.gamma_join_sound_stmt : Prop := AbsDomain.join_sound_stmt (Nat → VState) Env
+
+/-- γ monotonicity for the environment product, as an obligation. -/
+def Env.gamma_mono_stmt : Prop := AbsDomain.gamma_mono_stmt (Nat → VState) Env

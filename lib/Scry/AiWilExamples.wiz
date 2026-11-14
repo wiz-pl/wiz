@@ -1,0 +1,127 @@
+import Scry.AiWil
+/-!
+# Scry.AiWilExamples: Wil-shaped programs for the S5 checker
+
+The CFGs are built from `Wil.Func`s with `WCfg.ofFunc`, or directly for the array
+`load` model (where the frontend supplies the length). The tests in
+`Tests/Groups/ScryAi.lean` evaluate these; `wiz-notes/scry-ai.md` reproduces them.
+-/
+
+def AiWEx.m8u : AiMach := AiMach.u 8
+def AiWEx.m8s : AiMach := AiMach.s 8
+def AiWEx.m8w : AiMach := AiMach.sw 8
+
+-- x := 2; y := 3; z := x * y
+def AiWEx.constFunc : Wil.Func :=
+  let x := Wil.var 0 Wil.u8;
+  let y := Wil.var 1 Wil.u8;
+  let z := Wil.var 2 Wil.u8;
+  Wil.func "main" [] [x, y, z]
+    [ Wil.block [Wil.num x 2] (Wil.jump (Wil.mkBlockId 1))
+    , Wil.block [Wil.num y 3] (Wil.jump (Wil.mkBlockId 2))
+    , Wil.block [Wil.binop z .mul x y] (Wil.jump (Wil.mkBlockId 3))
+    , Wil.block [] (Wil.retV z) ]
+
+def AiWEx.constCfg : WCfg := WCfg.ofFunc AiWEx.constFunc
+def AiWEx.constInv : WState := wFixpoint AiWEx.m8u AiWEx.constCfg
+
+-- x := 2; y := x + 1, with a *literal* invariant (not the partial fixpoint), so the
+-- kernel can check the certificate by `rfl`.
+def AiWEx.litFunc : Wil.Func :=
+  let x := Wil.var 0 Wil.u8;
+  let y := Wil.var 1 Wil.u8;
+  Wil.func "main" [] [x, y]
+    [ Wil.block [Wil.num x 2] (Wil.jump (Wil.mkBlockId 1))
+    , Wil.block [Wil.num y 1, Wil.binop y .add x y] (Wil.retV y) ]
+
+def AiWEx.litCfg : WCfg := WCfg.ofFunc AiWEx.litFunc
+
+def AiWEx.litInv : WState :=
+  let top := WEnv.topOf AiWEx.litCfg.vars
+  let one := WEnv.set 0 (WValue.unum (.range 2 2) (.known 2)) top
+  List.cons (0, top) (List.cons (1, one) List.nil)
+
+-- i := 0; while (i < 10) { i := i + 1 }
+def AiWEx.loopFunc : Wil.Func :=
+  let i := Wil.var 0 Wil.u8;
+  let one := Wil.var 1 Wil.u8;
+  let ten := Wil.var 2 Wil.u8;
+  Wil.func "main" [] [i, one, ten]
+    [ Wil.block [Wil.num i 0, Wil.num ten 10] (Wil.jump (Wil.mkBlockId 1))
+    , Wil.block [] (Wil.branch (Wil.condLt i ten) (Wil.mkBlockId 2) (Wil.mkBlockId 3))
+    , Wil.block [Wil.num one 1, Wil.binop i .add i one] (Wil.jump (Wil.mkBlockId 1))
+    , Wil.block [] (Wil.retV i) ]
+
+def AiWEx.loopCfg : WCfg := WCfg.ofFunc AiWEx.loopFunc
+def AiWEx.loopInv : WState := wFixpoint AiWEx.m8u AiWEx.loopCfg
+def AiWEx.loopInvNarrow : WState := wNarrowOnce AiWEx.m8u AiWEx.loopCfg AiWEx.loopInv
+
+-- p := null; x := *p
+def AiWEx.nullFunc : Wil.Func :=
+  let p := Wil.var 0 (Wil.Ty.ptr Wil.u8);
+  let x := Wil.var 1 Wil.u8;
+  Wil.func "main" [] [p, x]
+    [Wil.block [Wil.cst p (Wil.Val.nul), Wil.load x p] (Wil.retV x)]
+
+def AiWEx.nullCfg : WCfg := WCfg.ofFunc AiWEx.nullFunc
+def AiWEx.nullInv : WState := wFixpoint AiWEx.m8u AiWEx.nullCfg
+
+-- p := alloc 4; x := p[idx] with a supplied length
+def AiWEx.arrayCfg (len : Len) (i : Nat) : WCfg :=
+  let p := Wil.var 0 (Wil.Ty.ptr Wil.u8);
+  let x := Wil.var 1 Wil.u8;
+  let idx := Wil.var 2 Wil.u8;
+  WCfg.mk 0 [p, x, idx]
+    [(0, [WStmt.wil (Wil.alloc p 4), WStmt.wil (Wil.num idx i)]),
+     (1, [WStmt.load x p idx len]),
+     (2, [])]
+    [WEdge.mk 0 1 .none, WEdge.mk 1 2 .none]
+
+def AiWEx.safeArrayCfg : WCfg := AiWEx.arrayCfg (.exact 4) 2
+def AiWEx.safeArrayInv : WState := wFixpoint AiWEx.m8u AiWEx.safeArrayCfg
+def AiWEx.oobCfg : WCfg := AiWEx.arrayCfg (.exact 4) 8
+def AiWEx.oobInv : WState := wFixpoint AiWEx.m8u AiWEx.oobCfg
+def AiWEx.symSafeCfg : WCfg := AiWEx.arrayCfg (.atLeast 8) 2
+def AiWEx.symSafeInv : WState := wFixpoint AiWEx.m8u AiWEx.symSafeCfg
+def AiWEx.symTopCfg : WCfg := AiWEx.arrayCfg (.atLeast 0) 0
+def AiWEx.symTopInv : WState := wFixpoint AiWEx.m8u AiWEx.symTopCfg
+
+-- x := 250; y := 10; z := x + y  (unsigned, defined wrap but the toy alarm is kept)
+def AiWEx.ovfU8Func : Wil.Func :=
+  let x := Wil.var 0 Wil.u8;
+  let y := Wil.var 1 Wil.u8;
+  let z := Wil.var 2 Wil.u8;
+  Wil.func "main" [] [x, y, z]
+    [Wil.block [Wil.num x 250, Wil.num y 10, Wil.binop z .add x y] (Wil.retV z)]
+def AiWEx.ovfU8Cfg : WCfg := WCfg.ofFunc AiWEx.ovfU8Func
+def AiWEx.ovfU8Inv : WState := wFixpoint AiWEx.m8u AiWEx.ovfU8Cfg
+
+-- x := 120; y := 10; z := x + y  (signed i8)
+def AiWEx.ovfS8Func : Wil.Func :=
+  let x := Wil.var 0 Wil.i8;
+  let y := Wil.var 1 Wil.i8;
+  let z := Wil.var 2 Wil.i8;
+  Wil.func "main" [] [x, y, z]
+    [Wil.block [Wil.num x 120, Wil.num y 10, Wil.binop z .add x y] (Wil.retV z)]
+def AiWEx.ovfS8Cfg : WCfg := WCfg.ofFunc AiWEx.ovfS8Func
+def AiWEx.ovfS8Inv : WState := wFixpoint AiWEx.m8s AiWEx.ovfS8Cfg
+def AiWEx.ovfS8WrapInv : WState := wFixpoint AiWEx.m8w AiWEx.ovfS8Cfg
+
+-- x := 3; y := 4; z := x + y  (signed, in range)
+def AiWEx.safeS8Func : Wil.Func :=
+  let x := Wil.var 0 Wil.i8;
+  let y := Wil.var 1 Wil.i8;
+  let z := Wil.var 2 Wil.i8;
+  Wil.func "main" [] [x, y, z]
+    [Wil.block [Wil.num x 3, Wil.num y 4, Wil.binop z .add x y] (Wil.retV z)]
+def AiWEx.safeS8Cfg : WCfg := WCfg.ofFunc AiWEx.safeS8Func
+def AiWEx.safeS8Inv : WState := wFixpoint AiWEx.m8s AiWEx.safeS8Cfg
+
+/-- An unsound alleged post-fixpoint: block 3 claims `z = 5` while the transfer gives 6. -/
+def AiWEx.constBadInv : WState :=
+  let bad := WEnv.set 2 (WValue.unum (.range 5 5) (.known 5)) (WEnv.topOf AiWEx.constCfg.vars)
+  WState.set 3 bad AiWEx.constInv
+
+/-- The value of a variable in a block of a post-fixpoint. -/
+def AiWEx.valueAt (cfg : WCfg) (inv : WState) (p x : Nat) : WValue :=
+  WEnv.getD (WState.at cfg inv p) x WValue.botV
