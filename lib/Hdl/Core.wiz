@@ -836,10 +836,11 @@ def NetNode.canonArgs (op : NetOp) (args : List Nat) : List Nat := match NetOp.c
 def NetNode.key (op : NetOp) (w : Nat) (args : List Nat) : List Nat :=
   NetOp.code op ++ List.cons w args
 
-/-- A hash of a list of numbers, from the seed `h` (polynomial, modulo a prime below 2³²). -/
+/-- A hash of a list of numbers, from the seed `h` (polynomial, masked to 32 bits; a
+bitwise mask rather than a remainder, so hashing is one `Nat.land` per element). -/
 def NatList.hash : List Nat → Nat → Nat
   | .nil, h => h
-  | .cons k ks, h => NatList.hash ks (Nat.mod (h * 1000003 + k + 1) 4294967291)
+  | .cons k ks, h => NatList.hash ks (Nat.land (h * 1000003 + k + 1) 4294967295)
 
 /-- A hash trie: `depth` levels of binary branching on the hash's bits, exact buckets at the
 leaves (a lookup compares whole keys, so a hash collision costs time, never
@@ -860,35 +861,51 @@ def HTrie.assoc {V : Type} (key : List Nat) : List (List Nat × V) → Option V
     | .true => .some kv.2
     | .false => HTrie.assoc key kvs
 
-/-- `HTrie.find key h d t`: the value of `key` (hash `h`) in a trie of depth `d`. -/
-def HTrie.find {V : Type} (key : List Nat) (h : Nat) : Nat → HTrie V → Option V
-  | _, .tip => .none
-  | _, .bucket kvs => HTrie.assoc key kvs
-  | .zero, .node _ _ => .none
-  | .succ d, .node l r => match Nat.testBit h d with
-    | .true => HTrie.find key h d r
-    | .false => HTrie.find key h d l
+/-- The low `n` bits of `h`, least significant first: the branch decisions of a
+lookup, computed once per hash instead of shifting by a different amount at every
+level (`Nat.testBit h d` at depth `d`). -/
+def HTrie.hashBitsAux : Nat → Nat → List Bool
+  | .zero, _ => List.nil
+  | .succ n, h => List.cons (Nat.isOdd h) (HTrie.hashBitsAux n (Nat.div h 2))
+/-- The `HTrie.depth` branch decisions of a hash. -/
+def HTrie.hashBits (h : Nat) : List Bool := HTrie.hashBitsAux HTrie.depth h
 
-/-- `HTrie.insert key v h d t`: `t` with `key` (hash `h`) bound to `v` (in front of any
-older binding). -/
-def HTrie.insert {V : Type} (key : List Nat) (v : V) (h : Nat) : Nat → HTrie V → HTrie V
-  | .zero, .tip => .bucket (List.cons (key, v) List.nil)
-  | .zero, .bucket kvs => .bucket (List.cons (key, v) kvs)
-  | .zero, .node _ _ => .bucket (List.cons (key, v) List.nil)
-  | .succ d, .tip => match Nat.testBit h d with
-    | .true => .node .tip (HTrie.insert key v h d .tip)
-    | .false => .node (HTrie.insert key v h d .tip) .tip
-  | .succ d, .bucket kvs => .bucket (List.cons (key, v) kvs)
-  | .succ d, .node l r => match Nat.testBit h d with
-    | .true => .node l (HTrie.insert key v h d r)
-    | .false => .node (HTrie.insert key v h d l) r
+/-- `HTrie.find key t bits`: the value of `key` in a trie, following the remaining
+`bits` (one low bit per level). -/
+def HTrie.find {V : Type} (key : List Nat) : HTrie V → List Bool → Option V
+  | .tip, _ => .none
+  | .bucket kvs, _ => HTrie.assoc key kvs
+  | .node l r, bits => match bits with
+    | .nil => .none
+    | .cons b bs => match b with
+      | .true => HTrie.find key r bs
+      | .false => HTrie.find key l bs
+
+/-- The empty path to a leaf: `HTrie.insertNew key v bits` is a trie holding just `key`
+at the position `bits`. -/
+def HTrie.insertNew {V : Type} (key : List Nat) (v : V) : List Bool → HTrie V
+  | .nil => .bucket (List.cons (key, v) List.nil)
+  | .cons b bs => match b with
+    | .true => .node .tip (HTrie.insertNew key v bs)
+    | .false => .node (HTrie.insertNew key v bs) .tip
+
+/-- `HTrie.insert key v t bits`: `t` with `key` bound to `v` (in front of any older
+binding), following the remaining `bits` (as in `HTrie.find`). -/
+def HTrie.insert {V : Type} (key : List Nat) (v : V) : HTrie V → List Bool → HTrie V
+  | .tip, bits => HTrie.insertNew key v bits
+  | .bucket kvs, _ => .bucket (List.cons (key, v) kvs)
+  | .node l r, bits => match bits with
+    | .nil => .bucket (List.cons (key, v) List.nil)
+    | .cons b bs => match b with
+      | .true => .node l (HTrie.insert key v r bs)
+      | .false => .node (HTrie.insert key v l bs) r
 
 /-- The value of a key, if any (hashing it). -/
 def HTrie.get {V : Type} (key : List Nat) (t : HTrie V) : Option V :=
-  HTrie.find key (NatList.hash key 7) HTrie.depth t
+  HTrie.find key t (HTrie.hashBits (NatList.hash key 7))
 /-- Bind a key to a value (hashing it). -/
 def HTrie.put {V : Type} (key : List Nat) (v : V) (t : HTrie V) : HTrie V :=
-  HTrie.insert key v (NatList.hash key 7) HTrie.depth t
+  HTrie.insert key v t (HTrie.hashBits (NatList.hash key 7))
 /-- `HTrie.get` for a key that is a single number. -/
 def HTrie.getN {V : Type} (k : Nat) (t : HTrie V) : Option V := HTrie.get (List.cons k List.nil) t
 /-- `HTrie.put` for a key that is a single number. -/
@@ -931,10 +948,10 @@ def NetS.push (s : NetS) (op : NetOp) (w : Nat) (args : List Nat) (table : HTrie
 /-- Emit a node through the hash-consing table: an identical node already built is reused. -/
 def NetM.emitKeyed (op : NetOp) (w : Nat) (args : List Nat) (s : NetS) : Nat × NetS :=
   let key := NetNode.key op w args
-  let h := NatList.hash key 7
-  match HTrie.find key h HTrie.depth s.table with
+  let bits := HTrie.hashBits (NatList.hash key 7)
+  match HTrie.find key s.table bits with
   | .some k => (k, NetS.mk s.next s.nodes s.table s.cse (Nat.succ s.work) s.hints s.mems s.errs)
-  | .none => NetS.push s op w args (HTrie.insert key s.next h HTrie.depth s.table)
+  | .none => NetS.push s op w args (HTrie.insert key s.next s.table bits)
 
 /-- Emit a node `op` of width `w` with arguments `args` and return its id (hash-consed
 unless the builder's `cse` is off). -/

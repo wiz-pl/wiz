@@ -52,12 +52,32 @@ def NatExpr.eval (ρ : List Nat) : NatExpr → Nat
 -- ## Keys: sorted lists of atoms, and their order
 
 /-- Lexicographic comparison of keys (sorted lists of atom indices: a monomial's
-variables, with repetition). -/
+variables, with repetition). Equality and order are the native `Nat.beq`/`Nat.lt`
+(one Boolean test each), not `Nat.cmp`, which builds an `Ordering` per atom. -/
 def Ring.Key.cmp : List Nat → List Nat → Ordering
   | .nil, .nil => .eq
   | .nil, .cons _ _ => .lt
   | .cons _ _, .nil => .gt
-  | .cons x xs, .cons y ys => Ordering.andThen (Nat.cmp x y) (Ring.Key.cmp xs ys)
+  | .cons x xs, .cons y ys => match Nat.beq x y with
+    | .true => Ring.Key.cmp xs ys
+    | .false => match Nat.lt x y with
+      | .true => Ordering.lt
+      | .false => Ordering.gt
+
+/-- One step of `Ring.Key.cmp_eq`, with the two comparisons passed as values (so a
+case split on them refines the hypothesis, without rewriting along an equation). -/
+def Ring.Key.cmpCons_eq (x y : Nat) (xs ys : List Nat)
+    (tail : Ring.Key.cmp xs ys = .eq → xs = ys) :
+    (b c : Bool) → Nat.beq x y = b → Nat.lt x y = c →
+    (match b with
+      | .true => Ring.Key.cmp xs ys
+      | .false => match c with
+        | .true => Ordering.lt
+        | .false => Ordering.gt) = .eq →
+    List.cons x xs = List.cons y ys
+  | .true, _, hb, _, h => congrArg2 List.cons (Nat.beq_eq x y hb) (tail h)
+  | .false, .true, _, _, h => absurd h.1
+  | .false, .false, _, _, h => absurd h.1
 
 /-- Keys that compare `eq` are equal. -/
 def Ring.Key.cmp_eq : (xs ys : List Nat) → Ring.Key.cmp xs ys = .eq → xs = ys
@@ -65,8 +85,8 @@ def Ring.Key.cmp_eq : (xs ys : List Nat) → Ring.Key.cmp xs ys = .eq → xs = y
   | .nil, .cons _ _, h => absurd h.1
   | .cons _ _, .nil, h => absurd h.1
   | .cons x xs, .cons y ys, h =>
-    let hs := Ordering.andThen_eq (Nat.cmp x y) (Ring.Key.cmp xs ys) h;
-    congrArg2 List.cons (Nat.cmp_eq x y hs.1) (Ring.Key.cmp_eq xs ys hs.2)
+    Ring.Key.cmpCons_eq x y xs ys (Ring.Key.cmp_eq xs ys)
+      (Nat.beq x y) (Nat.lt x y) rfl rfl h
 
 /-- The product of the atoms of a key. -/
 def Ring.Key.prod (ρ : List Nat) : List Nat → Nat

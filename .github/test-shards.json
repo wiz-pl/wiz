@@ -47,6 +47,7 @@
     "modules",
     "=native",
     "=natives",
+    "=numeric-fast",
     "=nvim",
     "optic",
     "phantom",
