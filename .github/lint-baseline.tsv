@@ -1,0 +1,104 @@
+# ward (wiz lint) baseline: the warnings that are known today, so CI fails only
+# on new ones. COUNT<TAB>FILE<TAB>RULE<TAB>MESSAGE; positions are left out, so
+# moving a line does not make a warning new.
+# Refresh: python3 scripts/lint-baseline.py update
+72	lib/BitBlast.wiz	style.line-length	line is longer than --max-line
+12	lib/BvDecide.wiz	style.line-length	line is longer than --max-line
+3	lib/Deriving.wiz	style.line-length	line is longer than --max-line
+8	lib/Eff.wiz	style.line-length	line is longer than --max-line
+151	lib/Feral.wiz	style.line-length	line is longer than --max-line
+3	lib/Grail.wiz	style.line-length	line is longer than --max-line
+2	lib/HProp.wiz	style.line-length	line is longer than --max-line
+1	lib/Handle.wiz	axiom	'Owned' is an axiom: its type is trusted, not checked
+8	lib/Handle.wiz	shadowed-binder	binder 'f' shadows an enclosing binder 'f'
+1	lib/Handle.wiz	shadowed-binder	binder 'o' shadows an enclosing binder 'o'
+2	lib/Handle.wiz	style.line-length	line is longer than --max-line
+4	lib/Hdl/Arty.wiz	style.line-length	line is longer than --max-line
+12	lib/Hdl/Bits.wiz	style.line-length	line is longer than --max-line
+2	lib/Hdl/Core.wiz	shadowed-binder	binder 'a' shadows an enclosing binder 'a'
+1	lib/Hdl/Core.wiz	shadowed-binder	binder 'b' shadows an enclosing binder 'b'
+1	lib/Hdl/Core.wiz	shadowed-binder	binder 'k' shadows an enclosing binder 'k'
+3	lib/Hdl/Core.wiz	shadowed-binder	binder 'r' shadows an enclosing binder 'r'
+1	lib/Hdl/Core.wiz	shadowed-binder	binder 's' shadows an enclosing binder 's'
+5	lib/Hdl/Core.wiz	shadowed-binder	binder 'x' shadows an enclosing binder 'x'
+54	lib/Hdl/Core.wiz	style.line-length	line is longer than --max-line
+1	lib/Hdl/Optic.wiz	style.line-length	line is longer than --max-line
+5	lib/Hdl/Prim.wiz	style.line-length	line is longer than --max-line
+7	lib/Hdl/Sim.wiz	style.line-length	line is longer than --max-line
+12	lib/Hdl/Temporal.wiz	style.line-length	line is longer than --max-line
+1	lib/Hdl/Verified.wiz	shadowed-binder	binder 'hi' shadows the global 'hi' (this file)
+1	lib/Hdl/Verified.wiz	shadowed-binder	binder 'lo' shadows the global 'lo' (this file)
+1	lib/Hdl/Xdc.wiz	style.line-length	line is longer than --max-line
+9	lib/Hdl/Xilinx7.wiz	style.line-length	line is longer than --max-line
+2	lib/Hoare.wiz	style.line-length	line is longer than --max-line
+1	lib/HoareExamples.wiz	style.line-length	line is longer than --max-line
+6	lib/HoareTactics.wiz	style.line-length	line is longer than --max-line
+1	lib/IO.wiz	axiom	'Bytes' is an axiom: its type is trusted, not checked
+1	lib/IO.wiz	axiom	'Float64' is an axiom: its type is trusted, not checked
+1	lib/IO.wiz	axiom	'UInt64' is an axiom: its type is trusted, not checked
+1	lib/IO.wiz	axiom	'World' is an axiom: its type is trusted, not checked
+2	lib/IO.wiz	style.line-length	line is longer than --max-line
+1	lib/Infoview.wiz	shadowed-binder	binder 'all' shadows an enclosing binder 'all'
+1	lib/Infoview.wiz	shadowed-binder	binder 'h2' shadows an enclosing binder 'h2'
+9	lib/Infoview.wiz	style.line-length	line is longer than --max-line
+1	lib/Int.wiz	shadowed-binder	binder 'b' shadows an enclosing binder 'b'
+4	lib/IntOrder.wiz	style.line-length	line is longer than --max-line
+30	lib/IntRing.wiz	style.line-length	line is longer than --max-line
+2	lib/Logic.wiz	shadowed-binder	binder 'b' shadows an enclosing binder 'b'
+1	lib/Logic.wiz	shadowed-binder	binder 'c' shadows an enclosing binder 'c'
+1	lib/MVar.wiz	axiom	'Lock' is an axiom: its type is trusted, not checked
+1	lib/MVar.wiz	axiom	'Lock.Guard' is an axiom: its type is trusted, not checked
+1	lib/MVar.wiz	axiom	'MVar' is an axiom: its type is trusted, not checked
+1	lib/MVar.wiz	axiom	'MVar.Hole' is an axiom: its type is trusted, not checked
+1	lib/Nat.wiz	shadowed-binder	binder 'b' shadows an enclosing binder 'b'
+2	lib/Nat.wiz	style.line-length	line is longer than --max-line
+3	lib/Optic.wiz	style.line-length	line is longer than --max-line
+2	lib/OpticDerive.wiz	style.line-length	line is longer than --max-line
+1	lib/Prelude.wiz	axiom	'castRefl' is an axiom: its type is trusted, not checked
+1	lib/Prelude.wiz	elaborator	builtin memo := memo is not checked: it is an axiom of every declaration that depends on memo (see `#print axioms`)
+1	lib/Prelude.wiz	elaborator	builtin nat := Nat is not checked: it is an axiom of every declaration that depends on Nat (see `#print axioms`)
+1	lib/Prelude.wiz	elaborator	builtin nat.add := Nat.add is not checked: it is an axiom of every declaration that depends on Nat.add (see `#print axioms`)
+1	lib/Prelude.wiz	elaborator	builtin nat.beq := Nat.beq is not checked: it is an axiom of every declaration that depends on Nat.beq (see `#print axioms`)
+1	lib/Prelude.wiz	elaborator	builtin nat.blt := Nat.lt is not checked: it is an axiom of every declaration that depends on Nat.lt (see `#print axioms`)
+1	lib/Prelude.wiz	elaborator	builtin nat.div := Nat.div is not checked: it is an axiom of every declaration that depends on Nat.div (see `#print axioms`)
+1	lib/Prelude.wiz	elaborator	builtin nat.land := Nat.land is not checked: it is an axiom of every declaration that depends on Nat.land (see `#print axioms`)
+1	lib/Prelude.wiz	elaborator	builtin nat.log2 := Nat.log2 is not checked: it is an axiom of every declaration that depends on Nat.log2 (see `#print axioms`)
+1	lib/Prelude.wiz	elaborator	builtin nat.lor := Nat.lor is not checked: it is an axiom of every declaration that depends on Nat.lor (see `#print axioms`)
+1	lib/Prelude.wiz	elaborator	builtin nat.mod := Nat.mod is not checked: it is an axiom of every declaration that depends on Nat.mod (see `#print axioms`)
+1	lib/Prelude.wiz	elaborator	builtin nat.mul := Nat.mul is not checked: it is an axiom of every declaration that depends on Nat.mul (see `#print axioms`)
+1	lib/Prelude.wiz	elaborator	builtin nat.pow := Nat.pow is not checked: it is an axiom of every declaration that depends on Nat.pow (see `#print axioms`)
+1	lib/Prelude.wiz	elaborator	builtin nat.pred := Nat.pred is not checked: it is an axiom of every declaration that depends on Nat.pred (see `#print axioms`)
+1	lib/Prelude.wiz	elaborator	builtin nat.shiftLeft := Nat.shiftLeft is not checked: it is an axiom of every declaration that depends on Nat.shiftLeft (see `#print axioms`)
+1	lib/Prelude.wiz	elaborator	builtin nat.shiftRight := Nat.shiftRight is not checked: it is an axiom of every declaration that depends on Nat.shiftRight (see `#print axioms`)
+1	lib/Prelude.wiz	elaborator	builtin nat.sub := Nat.sub is not checked: it is an axiom of every declaration that depends on Nat.sub (see `#print axioms`)
+1	lib/Prelude.wiz	elaborator	builtin nat.succ := Nat.succ is not checked: it is an axiom of every declaration that depends on Nat.succ (see `#print axioms`)
+1	lib/Prelude.wiz	elaborator	builtin nat.xor := Nat.xor is not checked: it is an axiom of every declaration that depends on Nat.xor (see `#print axioms`)
+1	lib/Prelude.wiz	elaborator	builtin nat.zero := Nat.zero is not checked: it is an axiom of every declaration that depends on Nat.zero (see `#print axioms`)
+1	lib/Prelude.wiz	elaborator	builtin string := String is not checked: it is an axiom of every declaration that depends on String (see `#print axioms`)
+3	lib/Prelude.wiz	style.line-length	line is longer than --max-line
+12	lib/Rat.wiz	style.line-length	line is longer than --max-line
+1	lib/Ref.wiz	axiom	'Loc' is an axiom: its type is trusted, not checked
+1	lib/Ref.wiz	axiom	'Pts' is an axiom: its type is trusted, not checked
+1	lib/Ref.wiz	shadowed-binder	binder 't' shadows an enclosing binder 't'
+1	lib/Region.wiz	axiom	'Outlives' is an axiom: its type is trusted, not checked
+1	lib/Region.wiz	axiom	'Outlives.refl' is an axiom: its type is trusted, not checked
+1	lib/Region.wiz	axiom	'Outlives.static' is an axiom: its type is trusted, not checked
+1	lib/Region.wiz	axiom	'Outlives.trans' is an axiom: its type is trusted, not checked
+1	lib/Region.wiz	axiom	'Region' is an axiom: its type is trusted, not checked
+1	lib/Region.wiz	axiom	'Region.static' is an axiom: its type is trusted, not checked
+3	lib/Region.wiz	shadowed-binder	binder 'r' shadows an enclosing binder 'r'
+12	lib/Ring.wiz	style.line-length	line is longer than --max-line
+8	lib/RingTactic.wiz	style.line-length	line is longer than --max-line
+19	lib/Sat.wiz	style.line-length	line is longer than --max-line
+1	lib/SatTactic.wiz	shadowed-binder	binder 'memo' shadows the global 'memo' (module Prelude)
+15	lib/SatTactic.wiz	style.line-length	line is longer than --max-line
+2	lib/Serial.wiz	style.line-length	line is longer than --max-line
+1	lib/Session.wiz	axiom	'Chan' is an axiom: its type is trusted, not checked
+1	lib/Std.wiz	axiom	'Array' is an axiom: its type is trusted, not checked
+1	lib/Std.wiz	axiom	'Str' is an axiom: its type is trusted, not checked
+1	lib/Std.wiz	axiom	'StrMap' is an axiom: its type is trusted, not checked
+7	lib/Sys.wiz	style.line-length	line is longer than --max-line
+12	lib/Vec.wiz	style.line-length	line is longer than --max-line
+3	lib/Word.wiz	style.line-length	line is longer than --max-line
+3	lib/WordArray.wiz	style.line-length	line is longer than --max-line
+105	selfhost/Kernel.wiz	style.line-length	line is longer than --max-line

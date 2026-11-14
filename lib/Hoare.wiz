@@ -1,6 +1,5 @@
 import HProp
 import Nat
-import Text
 /-! # Hoare: Hoare triples over a model heap, with the frame rule
 
 Stage 24c. Programs that read, write, allocate and free cells of a model heap, a weakest

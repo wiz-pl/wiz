@@ -174,6 +174,20 @@ cached between runs.
   script's fixtures (`--self-test`) and then the check, on every push and pull request
   (including docs-only ones), and `CI result` requires it. No code block is exempt; a
   reviewed exception goes in the script's `ALLOW` list with a reason.
+* **The linter** (`.github/workflows/lint.yml`, advisory): `wiz lint` (`ward`, stage
+  11ad) runs over the `lib/**/*.wiz` and `selfhost/*.wiz` files that a pull request or a
+  push changes. Warnings that were already there are listed in
+  `.github/lint-baseline.tsv` (one `COUNT<TAB>FILE<TAB>RULE<TAB>MESSAGE` per line), so
+  the job fails only on a new warning or on an elaboration error. A `selfhost/*.wiz` file
+  is a fragment of the one concatenated self-hosted program (`Wiz/Selfhost.lean`), so one
+  that does not elaborate on its own is skipped with a notice; the `selfhost` shards,
+  which compile the concatenation, remain its gate. The job is deliberately not part of
+  `CI result` and is not a required check: it stays advisory until the library is clean.
+  The same comparison runs locally with
+  `python3 scripts/lint-baseline.py check` (add file arguments for only those files, or
+  no arguments for everything); `scripts/lint-baseline.py changed --base REV` lists the
+  files a diff would lint. After fixing a warning, refresh the baseline with
+  `python3 scripts/lint-baseline.py update` and commit `.github/lint-baseline.tsv`.
 * **Trust ledger** (the `trust-ledger` job): `scripts/trust-ledger.sh --check` runs the
   `--trust-ledger` mode of the test driver (`Tests/Native.lean`) over `lib/` and the
   axiom-free examples, and compares the sources of trust it finds with

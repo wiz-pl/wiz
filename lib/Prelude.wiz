@@ -50,10 +50,10 @@ linear, as in `Eq.cast`).
 Eq.subst (fun n => Vec A n) e v : Vec A m   -- for v : Vec A n, e : n = m
 ``` -/
 def Eq.subst.{u, v} {A : Type u} (0 P : A → Type v) {0 a b : A} (0 e : a = b) (1 pa : P a) : P b :=
-  cast (transp (fun b _ => P a = P b) (refl (P a)) e) pa
+  cast (transp (fun x _ => P a = P x) (refl (P a)) e) pa
 /-- Substitution backwards, without `Eq.symm`: from `e : a = b` and `pb : P b`, a `P a`. -/
 def Eq.substBack.{u, v} {A : Type u} (0 P : A → Type v) {0 a b : A} (0 e : a = b) (1 pb : P b) : P a :=
-  cast (transp (fun b _ => P b = P a) (refl (P a)) e) pb
+  cast (transp (fun x _ => P x = P a) (refl (P a)) e) pb
 
 /-- The Booleans, `false` and `true` (in that order: `Bool.casesOn` takes the `false`
 branch first). `if`, `&&`, `||` and `!` are notation over them (stage 13c). -/

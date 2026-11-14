@@ -1,0 +1,130 @@
+# ward (`wiz lint`) in CI. See "The linter" in docs/building.md.
+#
+# ADVISORY: this workflow is deliberately not part of `CI result` and is not a required
+# check, so a new warning cannot block a merge while the library is cleaned up. It runs
+# the linter over the `lib/**/*.wiz` and `selfhost/*.wiz` files a change touches and
+# compares its warnings with `.github/lint-baseline.tsv`: the warnings that are already
+# known. Only a warning that is not in the baseline (or an elaboration error) fails.
+# Refresh the baseline with `python3 scripts/lint-baseline.py update`.
+#
+# The `selfhost/*.wiz` files are fragments of the one concatenated self-hosted program
+# (Wiz/Selfhost.lean): a fragment that does not elaborate on its own is skipped with a
+# notice, and the `selfhost` shards (which compile the concatenation) remain its gate.
+name: lint
+
+on:
+  push:
+    branches: [master] # agent branches are tested through their PRs, as in ci.yml
+    paths:
+      - "lib/*.wiz"
+      - "lib/**/*.wiz"
+      - "selfhost/*.wiz"
+      - "Wiz/**"
+      - "Main.lean"
+      - "lakefile.lean"
+      - "lean-toolchain"
+      - "scripts/lint-baseline.py"
+      - ".github/lint-baseline.tsv"
+      - ".github/workflows/lint.yml"
+  pull_request:
+    branches: [master]
+    paths:
+      - "lib/*.wiz"
+      - "lib/**/*.wiz"
+      - "selfhost/*.wiz"
+      - "Wiz/**"
+      - "Main.lean"
+      - "lakefile.lean"
+      - "lean-toolchain"
+      - "scripts/lint-baseline.py"
+      - ".github/lint-baseline.tsv"
+      - ".github/workflows/lint.yml"
+  workflow_dispatch:
+
+# A newer push supersedes an older run of the same ref.
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CACHIX_NAME: badlydrawnwizards
+  LAKE_CACHE_DIR: ${{ github.workspace }}/.lake/cache
+
+defaults:
+  run:
+    shell: nix develop --command bash -eo pipefail {0}
+
+jobs:
+  ward:
+    name: ward (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # the base of the diff: a pull request's base branch, a push's `before`
+          fetch-depth: 0
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          # empty in pull requests from forks: Cachix is then pull-only
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      # The same key as ci.yml's build job, which builds wiz, grail and tests (there is
+      # no second copy of the 500 MB entry: this job only restores it, and catches up
+      # with `lake build wiz` when the exact build is not there yet).
+      - name: Cache key
+        id: key
+        shell: bash
+        run: |
+          echo "key=lake-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-${{ hashFiles('lakefile.lean', '**/*.lean') }}" >> "$GITHUB_OUTPUT"
+      - name: Restore the Lake build
+        id: lake-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .lake
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: lake-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-
+      - name: lake build wiz
+        run: |
+          if [ "${{ steps.lake-cache.outputs.cache-hit }}" != true ]; then
+            echo "::notice title=Lake cache::no exact Lake build for this commit: building wiz here"
+          fi
+          lake build wiz
+          [ -x .lake/build/bin/wiz ] || { echo "::error::.lake/build/bin/wiz is missing after lake build"; exit 1; }
+      # A pull request diffs its merge commit against its first parent (the base, as
+      # ci.yml's `changes` job does); a push against its previous tip (all zeroes on a
+      # new branch, and absent on a manual run: then every file).
+      - name: Changed lib/ and selfhost/ files
+        id: changed
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            base="HEAD^1"
+          else
+            base="${{ github.event.before }}"
+          fi
+          if [ -n "$base" ]; then
+            python3 scripts/lint-baseline.py changed --base "$base" > /tmp/lint-files.txt
+          else
+            python3 scripts/lint-baseline.py files > /tmp/lint-files.txt
+          fi
+          echo "base=${base:-all files}" >> "$GITHUB_STEP_SUMMARY"
+          sed 's/^/  /' /tmp/lint-files.txt >> "$GITHUB_STEP_SUMMARY" || true
+          {
+            echo "files<<LINT_FILES"
+            cat /tmp/lint-files.txt
+            echo "LINT_FILES"
+          } >> "$GITHUB_OUTPUT"
+      - name: wiz lint --deny (new warnings only)
+        env:
+          FILES: ${{ steps.changed.outputs.files }}
+        run: |
+          if [ -z "$FILES" ]; then
+            echo "no changed lib/ or selfhost/ .wiz files: nothing to lint"
+            exit 0
+          fi
+          mapfile -t files <<< "$FILES"
+          python3 scripts/lint-baseline.py check "${files[@]}"

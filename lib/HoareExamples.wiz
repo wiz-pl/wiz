@@ -1,4 +1,5 @@
 import HoareTactics
+import Text
 /-! # HoareExamples: verified programs over the model heap
 
 Stages 24c–24d. Small heap programs (`Prog`, lib/Hoare.wiz) with their specifications,
