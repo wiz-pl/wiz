@@ -99,9 +99,9 @@ Two mutually recursive judgments, each also producing a **usage vector**:
     ──────────────────────────────── eqTy
     Γ ⊢ A = B ⇒ Prop ⊣ 0ₙ
 
-    Γ ⊢ A type@l (isNeverZero l)   Γ ⊢ a ⇐ A
+    Γ ⊢ A type@l (isNeverZero l)   Γ⁰ ⊢ a ⇐ A
     ──────────────────────────────── refl          Γ ⊢ X type ⇒ Γ ⊢ reflTy X ⇒ (X = X) ⊣ 0ₙ
-    Γ ⊢ refl A a ⇒ (a = a) ⊣ 0ₙ
+    Γ ⊢ refl A a ⇒ (a = a) ⊣ 0ₙ                    (`a` is data only for the indices; the proof is erased)
 
     Γ ⊢ A, B type@l    Γ ⊢ e ⇐ (A = B)    Γ ⊢ t ⇐ A ⊣ U
     ──────────────────────────────── cast
@@ -157,7 +157,9 @@ both components. `fst p` and `snd p` each drop a component, so they use `p` ω t
 
 A position scaled by a constant 0 (an argument to a 0 binder, the value of a `let` at 0,
 the first part of a pair at a 0 field, the scrutinee of a `split` at 0) is never
-computed: it is checked as an erased position (`Ctx.erasedAt`).
+computed: it is checked as an erased position (`Ctx.erasedAt`). So is the term argument
+of `refl`: it is data only for the equation's indices, and the proof that mentions it is
+erased (B2).
 
 `Γ ⊢ A type@i` means `A ⇒ Sort i`, with its usage **thrown away**: types live in
 the erased (0) fragment, so they may mention 0-quantity variables freely.
@@ -836,7 +838,10 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
   | .refl A a => do
     let l ← checkType ctx A
     unless l.isNeverZero do throw (.other "refl is for terms of types in Type u")
-    let _ ← check ctx a (ctx.eval A)
+    -- (`a` is data only for the equation's indices, and the proof that mentions it is
+    -- erased: check it in an erased position, so a projection of a 0-quantity value is
+    -- fine there. B2: `refl p.a` for `{0 p : P}`.)
+    let _ ← check { ctx with erased := true } a (ctx.eval A)
     let va := ctx.eval a
     pure (vEq ctx.globals (ctx.eval A) va va, Usage.zeros ctx.lvl)
   | .reflTy X => do

@@ -86,9 +86,13 @@ def languageGroup : Group where
         okLib "import Prelude\ndef p (k : Nat) (e : k = k) : k = k := e\ndef q {k : Nat} (e : k = k) : k = k := p k e"
         okLib ("import Prelude\nstructure P where\n  a : Nat\n  b : Nat\n" ++
           "def lem0 (0 n : Nat) : n = n := refl n\ndef ok {0 p : P} : p.b = p.b := lem0 p.b\ndef bad {0 p : P} : p.a = p.a := refl p.a")
-        -- controls: a 0-variable in a relevant position, and a linear one used only in a proof
+        -- (B2, the minimal one-field shape: `refl`'s argument is checked erased)
+        okLib "import Prelude\nstructure P1 where\n  a : Nat\ndef bad1 {0 p : P1} : p.a = p.a := refl p.a"
+        -- controls: a 0-variable in a relevant position, a linear one used only in a proof,
+        -- and a genuinely duplicated linear value in a relevant position (B2 changes nothing there)
         failsLib "import Prelude\ndef badRel {0 n : Nat} : Nat := n" "quantity 0 but used 1"
         failsLib "import Prelude\ndef lem (n : Nat) : n = n := refl n\ndef badLin (1 n : Nat) : Nat := let h : n = n := lem n; 0" "quantity 1 but used 0"
+        failsLib "import Prelude\ndef dup (1 n : Nat) : Nat × Nat := (n, n)" "quantity 1 but used ω"
         -- the Wiz kernel: `fun n => p n refl` at `(0 n : Unit) → n = n`, `p` a proof function
         let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
         let main := "def uPf : Tm := .lam (.lam (.var 0))\n" ++

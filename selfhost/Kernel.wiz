@@ -2976,7 +2976,9 @@ def inferW : TCtx → Tm → TyRes
       | .false => .err "refl is for terms of types in Type u"
       | .true =>
         let vA := eval (TCtx.env c) A;
-        match check c a vA with
+        -- (B2) `a` is data only for the equation's indices and the proof is erased:
+        -- check it in an erased position, as an argument to a `0` binder is
+        match check (TCtx.erase c) a vA with
         | .ok _ _ => .ok (vEq vA (eval (TCtx.env c) a) (eval (TCtx.env c) a)) (uZeros (TCtx.lvl c))
         | r => r
     | r => r
