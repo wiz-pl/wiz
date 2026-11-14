@@ -300,6 +300,156 @@ def Bus.arbNMealy (n aw dw : Nat) :
   fun s x => Bus.arbNStep n aw dw s x.1 x.2
 
 ------------------------------------------------------------------------------------
+-- The N-master arbiter as a synthesisable circuit. `HwTy` has no vector code, so the
+-- request and response vectors are nested products (`Bus.prodN n t`): one leaf per
+-- field, no hardware of its own. The control is the same round-robin rule as
+-- `Bus.pickN`/`Bus.arbNStep`, written with the signal operations (`Hw.eq`, `Hw.ult`,
+-- `Hw.mux`) so the same definition runs at values, builds a netlist and synthesises.
+-- The grant is an index (`HwTy.bits n`, `n` meaning "none"); `gntValid` says whether it
+-- is in range.
+
+/-- `n` copies of a code, nested to the right: `Bus.prodN 2 t = HwTy.prod t (HwTy.prod t
+(HwTy.bits 0))`. The empty case is a zero-width leaf, so the code has no ports. -/
+def Bus.prodN : Nat → HwTy → HwTy
+  | .zero, _ => HwTy.bits 0
+  | .succ n, t => HwTy.prod t (Bus.prodN n t)
+
+/-- The elements of a `Bus.prodN n t` signal, in index order (projections: no hardware). -/
+def Bus.prodNToList {r : HwTy → Type} [Hw r] {ω t : HwTy} :
+    (n : Nat) → r (Bus.prodN n t) → List (r t)
+  | .zero, _ => .nil
+  | .succ n, x => .cons (Hw.fst x) (Bus.prodNToList n (Hw.snd x))
+
+/-- The nested product of a list of signals. `d` is used for missing elements (the
+circuits below pass exactly `n`); the empty product is a zero-width leaf. -/
+def Bus.listToProdN {r : HwTy → Type} [Hw r] {ω t : HwTy} (d : r t) :
+    (n : Nat) → List (r t) → r (Bus.prodN n t)
+  | .zero, _ => Hw.lit 0 0
+  | .succ n, .cons x xs => Hw.pair x (Bus.listToProdN d n xs)
+  | .succ n, .nil => Hw.pair d (Bus.listToProdN d n .nil)
+
+/-- The `valid` bit of a packed request (by unpacking its bundle field; no hardware). -/
+def Bus.reqValidHw {r : HwTy → Type} [Hw r] {ω aw dw : Nat}
+    (q : r (Bus.Req.code aw dw)) : r Bus.Bit :=
+  (Bus.Req.unpack aw dw q).valid
+
+/-- A zero response at a packed code (the default of `Bus.listToProdN`). -/
+def Bus.zeroResp {r : HwTy → Type} [Hw r] {ω dw : Nat} : r (Bus.Resp.code dw) :=
+  Hw.const (Bus.Resp.code dw)
+    (Bundle.toEl (Bus.Resp.bundle dw) (Bus.noResp : Bus.Resp dw HwTy.El))
+
+/-- `xs` with the element at index `k = g` (a signal): a multiplexer chain. `d` is the
+value when `g` is out of range. -/
+def Bus.muxAt {r : HwTy → Type} [Hw r] {ω t : HwTy} (n : Nat)
+    (g : r (HwTy.bits n)) (d : r t) : (k : Nat) → List (r t) → r t
+  | _, .nil => d
+  | k, .cons x xs => Hw.mux (Hw.eq g (Hw.lit n k)) x (Bus.muxAt n g d (Nat.succ k) xs)
+
+/-- The first index at or after `lo` whose `valid` is high, or `n`: the scan of
+`Bus.firstFrom` from a signal `lo`. -/
+def Bus.firstGE {r : HwTy → Type} [Hw r] (n : Nat) (lo : r (HwTy.bits n)) :
+    (k : Nat) → List (r Bus.Bit) → r (HwTy.bits n) × r Bus.Bit
+  | _, .nil => (Hw.lit n n, Hw.lit 1 0)
+  | k, .cons v vs =>
+    let hit := Hw.and v (Hw.not (Hw.ult (Hw.lit n k) lo));
+    let tl := Bus.firstGE n lo (Nat.succ k) vs;
+    (Hw.mux hit (Hw.lit n k) tl.1, Hw.or hit tl.2)
+
+/-- The first index at or before `hi` whose `valid` is high, or `n`: the wrapping half of
+`Bus.pickN` (the scan `Bus.firstFrom` from 0 up to `last + 1`). -/
+def Bus.firstLE {r : HwTy → Type} [Hw r] (n : Nat) (hi : r (HwTy.bits n)) :
+    (k : Nat) → List (r Bus.Bit) → r (HwTy.bits n) × r Bus.Bit
+  | _, .nil => (Hw.lit n n, Hw.lit 1 0)
+  | k, .cons v vs =>
+    let hit := Hw.and v (Hw.not (Hw.ult hi (Hw.lit n k)));
+    let tl := Bus.firstLE n hi (Nat.succ k) vs;
+    (Hw.mux hit (Hw.lit n k) tl.1, Hw.or hit tl.2)
+
+/-- The round-robin choice as a signal: `Bus.pickN` with the `last` index and the
+`valid` bits as signals. The first valid master after `last` (wrapping) wins; if none,
+the first at or before `last`; if none at all, the grant is `n` (out of range). -/
+def Bus.pickNHw {r : HwTy → Type} [Hw r] (n : Nat) (last : r (HwTy.bits n))
+    (vs : List (r Bus.Bit)) : r (HwTy.bits n) :=
+  let lp1 := Hw.add last (Hw.lit n 1);
+  let start := Hw.mux (Hw.ult lp1 (Hw.lit n n)) lp1 (Hw.lit n 0);
+  let a := Bus.firstGE n start 0 vs;
+  let b := Bus.firstLE n last 0 vs;
+  Hw.mux a.2 a.1 (Hw.mux b.2 b.1 (Hw.lit n n))
+
+/-- The response to master `i`: the slave's response when `g = i`, else quiet. -/
+def Bus.respAtHw {r : HwTy → Type} [Hw r] {ω n dw : Nat}
+    (g : r (HwTy.bits n)) (resp : Bus.Resp dw r) (i : Nat) : r (Bus.Resp.code dw) :=
+  Hw.mux (Hw.eq g (Hw.lit n i)) (Bus.Resp.pack dw resp) (Bus.zeroResp (dw := dw))
+
+/-- `m` responses from index `k`: one per master, the grant's one the slave's answer. -/
+def Bus.respListHw {r : HwTy → Type} [Hw r] {ω n dw : Nat}
+    (g : r (HwTy.bits n)) (resp : Bus.Resp dw r) :
+    (m k : Nat) → List (r (Bus.Resp.code dw))
+  | .zero, _ => .nil
+  | .succ m, k => .cons (Bus.respAtHw g resp k) (Bus.respListHw g resp m (Nat.succ k))
+
+/-- The N-master arbiter's circuit state: busy, the owner and the last grant, as indices
+(`owner`/`last` are only meaningful while `busy`). -/
+structure Bus.ArbNS (n : Nat) (r : HwTy → Type) where
+  busy : r Bus.Bit
+  owner : r (HwTy.bits n)
+  last : r (HwTy.bits n)
+  deriving Bundle
+
+/-- The circuit's input: the packed request vector and the slave's answer. -/
+structure Bus.ArbNIn (n aw dw : Nat) (r : HwTy → Type) where
+  qs : r (Bus.prodN n (Bus.Req.code aw dw))
+  slave : Bus.Resp dw r
+  deriving Bundle
+
+/-- The circuit's output: the forwarded request, the grant index, whether it is in range,
+and the packed response vector. -/
+structure Bus.ArbNOut (n aw dw : Nat) (r : HwTy → Type) where
+  req : Bus.Req aw dw r
+  grant : r (HwTy.bits n)
+  gntValid : r Bus.Bit
+  rs : r (Bus.prodN n (Bus.Resp.code dw))
+  deriving Bundle
+
+/-- One cycle of the N-master circuit: the same rule as `Bus.arbNStep`. The grant is the
+owner while busy, else `Bus.pickNHw`; the owner keeps the bus until the slave answers or
+drops `valid`; the forwarded request is the granted one (quiet when there is none); only
+the granted master gets the response. -/
+def Bus.arbNCStep {r : HwTy → Type} [Hw r] {ω n aw dw : Nat}
+    (busy : r Bus.Bit) (owner last : r (HwTy.bits n))
+    (qs : r (Bus.prodN n (Bus.Req.code aw dw))) (resp : Bus.Resp dw r) :
+    r (HwTy.prod (Bus.ArbNS.code n) (Bus.ArbNOut.code n aw dw)) :=
+  let ql := Bus.prodNToList n qs;
+  let vs := Hdl.map (fun (q : r (Bus.Req.code aw dw)) => Bus.reqValidHw q) ql;
+  let g := Hw.mux busy owner (Bus.pickNHw n last vs);
+  let selV := Bus.muxAt n g (Hw.lit 1 0) 0 vs;
+  let noQ := Bus.Req.pack aw dw (Bus.noReq : Bus.Req aw dw r);
+  let fwd := Hw.mux selV (Bus.muxAt n g noQ 0 ql) noQ;
+  let ack := Hw.or resp.ready resp.rvalid;
+  let done := Hw.or ack (Hw.and busy (Hw.not selV));
+  let busy' := Hw.mux done (Hw.lit 1 0) (Hw.mux busy (Hw.lit 1 1) selV);
+  let owner' := Hw.mux busy owner g;
+  let last' := Hw.mux busy last (Hw.mux selV g last);
+  let rs := Bus.listToProdN (Bus.zeroResp (dw := dw)) n (Bus.respListHw g resp n 0);
+  Hw.pair
+    (Bus.ArbNS.pack n (Bus.ArbNS.mk busy' owner' last'))
+    (Bus.ArbNOut.pack n aw dw (Bus.ArbNOut.mk
+      (Bus.Req.unpack aw dw fwd) g selV rs))
+
+/-- The arbiter at rest: no request in flight, all indices zero. -/
+def Bus.arbNSInit (n : Nat) : Bus.ArbNS n HwTy.El :=
+  Bus.ArbNS.mk (BitVec.ofNat 1 0) (BitVec.ofNat n 0) (BitVec.ofNat n 0)
+
+/-- The N-master arbiter as a synthesisable circuit (parameterised by `n`; `n ≥ 1`).
+`Bus.arbNC 2` is the same round-robin rule as `Bus.arbC`, with a grant index and an
+N-wide response vector. -/
+def Bus.arbNC (n aw dw : Nat) :
+    Circuit (Bus.ArbNIn.code n aw dw) (Bus.ArbNOut.code n aw dw) :=
+  Circuit.bundled (Bus.ArbNS.bundle n) (Bus.ArbNIn.bundle n aw dw)
+    (Bus.ArbNOut.bundle n aw dw) (Bus.arbNSInit n)
+    (fun s x => Bus.arbNCStep s.busy s.owner s.last x.qs x.slave)
+
+------------------------------------------------------------------------------------
 -- Decode and route. A request inside the window goes to the slave; one outside it is
 -- answered in the same cycle with `ready` (and `rvalid` for a read), zero data and `err`
 -- high. The forwarded request's `valid` is low on a miss, so the slave does not see it.

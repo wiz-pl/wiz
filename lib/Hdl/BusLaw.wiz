@@ -462,6 +462,51 @@ def Bus.Law.respAt_ack_val {ω dw : Nat} (g : Nat) (resp : Bus.Resp dw HwTy.El)
     (i : Nat) (h : Bus.Law.ackS (Bus.respAt g resp i) = .true) : i = g :=
   Nat.beq_eq i g (Bus.Law.ackIfBeq i g resp h)
 
+/-- `Bus.arbNStep`'s response vector is `Bus.respN` (definitional). -/
+def Bus.Law.arbNStep_resp {ω n aw dw : Nat} (s : Bus.ArbN)
+    (qs : Vec (Bus.Req aw dw HwTy.El) n) (resp : Bus.Resp dw HwTy.El) :
+    (Bus.arbNStep n aw dw s qs resp).2 =
+      Bus.respN n (if s.busy then s.owner else Bus.pickN n s.last (Bus.validVec qs)) resp :=
+  rfl
+
+/-- One output of the value step is the response function at that index. -/
+def Bus.Law.arbNStep_get {ω n aw dw : Nat} (s : Bus.ArbN)
+    (qs : Vec (Bus.Req aw dw HwTy.El) n) (resp : Bus.Resp dw HwTy.El) (i : Fin n) :
+    Vec.get (Bus.arbNStep n aw dw s qs resp).2 i =
+      Bus.respAt (if s.busy then s.owner else Bus.pickN n s.last (Bus.validVec qs))
+        resp i.val :=
+  Vec.get_ofFn n (fun (j : Fin n) => Bus.respAt
+    (if s.busy then s.owner else Bus.pickN n s.last (Bus.validVec qs)) resp j.val) i
+
+/-- The value model's response vector (`Bus.arbNStep`) satisfies the ownership/progress
+law for the grant it computes. This is the N-master law at the same representation the
+netlist is built from; the circuit's packed output is checked against it in
+`examples/hdl-arb-n.wiz`. -/
+def Bus.Law.arbNStep_resp_law {ω n aw dw : Nat} (s : Bus.ArbN)
+    (qs : Vec (Bus.Req aw dw HwTy.El) n) (resp : Bus.Resp dw HwTy.El) :
+    Bus.Law.ArbNLaw
+      (if s.busy then s.owner else Bus.pickN n s.last (Bus.validVec qs))
+      resp
+      (fun (i : Fin n) => Vec.get (Bus.arbNStep n aw dw s qs resp).2 i) :=
+  And.intro
+    (fun (i j : Fin n) (hij : ¬ (i.val = j.val))
+        (h : Bus.Law.ackS (Vec.get (Bus.arbNStep n aw dw s qs resp).2 i) = .true ∧
+             Bus.Law.ackS (Vec.get (Bus.arbNStep n aw dw s qs resp).2 j) = .true) =>
+      hij (Eq.trans
+        (Bus.Law.respAt_ack_val
+          (if s.busy then s.owner else Bus.pickN n s.last (Bus.validVec qs)) resp i.val
+          (Eq.trans (Eq.symm (Eq.congrArg Bus.Law.ackS
+            (Bus.Law.arbNStep_get s qs resp i))) h.1))
+        (Eq.symm (Bus.Law.respAt_ack_val
+          (if s.busy then s.owner else Bus.pickN n s.last (Bus.validVec qs)) resp j.val
+          (Eq.trans (Eq.symm (Eq.congrArg Bus.Law.ackS
+            (Bus.Law.arbNStep_get s qs resp j))) h.2)))))
+    (fun (i : Fin n) (hi : i.val = (if s.busy then s.owner else Bus.pickN n s.last (Bus.validVec qs)))
+        (ha : Bus.Law.ackS resp = .true) =>
+      Eq.trans (Eq.congrArg Bus.Law.ackS (Bus.Law.arbNStep_get s qs resp i))
+        (Bus.Law.respAt_ack_of
+          (if s.busy then s.owner else Bus.pickN n s.last (Bus.validVec qs)) resp i.val hi ha))
+
 /-- The N-master response function satisfies the ownership/progress law. -/
 def Bus.Law.respAt_law {ω n dw : Nat} (g : Nat) (resp : Bus.Resp dw HwTy.El) :
     Bus.Law.ArbNLaw g resp (fun (i : Fin n) => Bus.respAt g resp i.val) :=
