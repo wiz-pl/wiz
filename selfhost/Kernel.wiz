@@ -1764,6 +1764,29 @@ def nameFrom : List String → Nat → Nat → String
     | .succ k' => nameFrom ns k' l
 def nameAt (names : List String) (l : Nat) : String := nameFrom names l l
 
+-- (stage 21n) a private declaration's kernel name is `_private.M._0.x` (the Frontend's
+-- `privName`): print the source name `x`, as the Lean frontend does (`Globals.privateBase`)
+def kmatchPrefix : List Char → List Char → Option (List Char)
+  | .nil, rest => .some rest
+  | .cons a as, .cons b bs => match Nat.beq (Char.code a) (Char.code b) with
+    | .true => kmatchPrefix as bs
+    | .false => .none
+  | _, .nil => .none
+def kreverse : List Char → List Char → List Char
+  | .nil, acc => acc
+  | .cons c cs, acc => kreverse cs (.cons c acc)
+def ksplice : List Char → List Char → Option (List Char)
+  | _, .nil => .none
+  | acc, .cons c cs => match kmatchPrefix (match "._0." with | .mk ds => ds) (.cons c cs) with
+    | .some after => .some after
+    | .none => ksplice (.cons c acc) cs
+def privBase (x : String) : String := match x with
+  | .mk cs => match kmatchPrefix (match "_private." with | .mk ps => ps) cs with
+    | .some rest => match ksplice .nil rest with
+      | .some base => String.mk base
+      | .none => x
+    | .none => x
+
 mutual
 -- terms, printed with the variables named by level (`x0` is the outermost, unless
 -- `names` names it)
@@ -1832,13 +1855,13 @@ def show (names : List String) : Nat → Tm → String
       (String.append (String.append ", " (show names l sz)) (String.append (String.append ", " (show names l i)) (String.append ", " (String.append (show names l a) ")"))))
   | l, .coit _ _ _ S st i x => String.append (String.append (String.append "coit(" (show names l S)) (String.append ", " (show names l st)))
       (String.append (String.append ", " (show names l i)) (String.append ", " (String.append (show names l x) ")")))
-  | _, .const n _ ls _ _ => String.append n (showLvls ls)
+  | _, .const n _ ls _ _ => String.append (privBase n) (showLvls ls)
   | _, .sortL l => match lvlClosed l with
     | .some n => match n with
       | .zero => "Prop"
       | .succ m => String.append "U" (Nat.toString m)
     | .none => String.append (String.append "Sort(" (lvlShow l)) ")"
-  | _, .axiomC n _ => n
+  | _, .axiomC n _ => privBase n
   | l, .ind _ _ _ _ P m i x => String.append (String.append (String.append "ind(" (show names l P)) (String.append ", " (show names l m)))
       (String.append (String.append ", " (show names l i)) (String.append ", " (String.append (show names l x) ")")))
   | l, .tyRefl X => String.append (String.append "reflTy(" (show names l X)) ")"

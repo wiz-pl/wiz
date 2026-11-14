@@ -290,24 +290,61 @@ type or structure) was an error here ("unsupported syntax command.def"); private
 constructors (`| private c`), private fields and `private mk ::` were parsed and ignored.
 Now `private` before a command declares the same names as without it.
 
-**Privacy is not enforced, because nothing can reach it.** In the Lean toolchain a private
-name is private to its *module*: another module gets "'x' is private to module M", and
-there a type with private parts is opaque (it equals only itself, isn't matched, isn't
-built by tuples or look-alike types; its recursors are private). The module itself sees
-everything as usual. The self-hosted toolchain has exactly one module, the input file:
-every `import` loads the frontend's own Prelude (`preludeText`), which declares nothing
-private. So every check of 13b is about a use from another module, and in a one-module
-world each of them holds vacuously; treating `private` as public there is exactly the
-Lean frontend's behaviour inside the declaring module. Mirrored: the syntax in every
-position, and the in-module meaning. Not mirrored, and unreachable: the "private to
-module" errors, the opacity of types with private constructors or fields outside the
-module, private recursors. PR #79's `T.desc` and `--strict-privacy` are the same (module
-crossing). **The day the self-hosted toolchain gets modules**, privacy must come with them:
-`Globals` needs each name's module (and whether it is private); `Scope.lookup` from
-another module must reject a private name; a type with a private constructor or field
-must become an opaque constant outside its module (no unfolding of its `μ` in the
-frontend's conversion, no `match`, `.1` or constructor through the Σ), while the kernel
-keeps checking against the full definition, as 13b's elaborator view does.
+**Privacy is now module-scoped** (with the module loader, A14). In the Lean toolchain a
+private name is private to its *module*: another module gets "'x' is private to module
+M", and there a type with private parts is opaque (it equals only itself, isn't
+matched, isn't built by tuples or look-alike types; its recursors are private). The
+self-hosted frontend does the first of those, and only for the ordinary declarations
+(this slice):
+
+* **Representation.** A private declaration `x` of module `M` gets the kernel name
+  `_private.M._0.x` (the Lean frontend's `Globals.privateName` format), so two modules'
+  private `x`s are different constants (`Globals.declName`, `privName`); a public
+  declaration keeps its name. `Globals` carries the module being checked
+  (`Globals.setModule`; the loader sets it per module, `modRunBody`) and whether the
+  current command is `private` (`Globals.setPrivate`; `stepCommand` clears it after each
+  command). The scope maps a written name to the current module's private declaration
+  first (`privName M.cur x`), then to a public one, and otherwise — if the name is
+  private to another module — reports `Scope.privTo`; `Scope.find` is the raw
+  kernel-name lookup the internals use (`inlineTm`, the duplicate check). Messages and
+  `show` print the source name (`privBase`, also in `Kernel.wiz`, as Lean's
+  `Globals.privateBase`).
+* **Resolution.** Every path that resolves a written name goes through
+  `Scope.lookupV`: term elaboration (`elab`, `identHead`, so `@f`, `f` and `.c`/`T.c`
+  resolutions too), constructor-head detection (`ctorHead`), `beqHead` (a literal
+  pattern's `T.beq`), induction (`useInd`), structures (`structOf`/`structFields`, with
+  the private `structure T` marker under the same module prefix), `#check`/`#reduce`,
+  the extern/`c_struct`/`foreign_type` checks and `attribute [inline]`. A private name
+  used in the same module still resolves, including in the type or body of a public
+  definition (the compiled module references the private constant, which stays
+  inlinable: `inlineTm` reads the raw kernel name); an importer gets
+  `'x' is private to module A`, not "unknown identifier". `#print` by name is left on
+  the kernel-name lookup it needs (a debugging surface, and the frontend has no `#print`
+  of its own).
+* **Duplicates.** Kernel names are unique (`dupFrom` compares them), so two modules'
+  private `x`s are allowed, while a *source name* is declared once per module: a private
+  `x` and a public `x` in the same module clash (`Scope.declaredIn`), as they do in Lean,
+  and a public name declared in two modules still clashes. A public name shadows another
+  module's private one of the same spelling (the private one is invisible outside).
+* **Re-export is not attempted.** A module's public names are its exported set; a
+  private name is never visible through an importer, nor through a public definition that
+  mentions it (the imported *term* works, the name does not).
+* **One-shot mode.** `checkFile` (the checker's `--oneshot`, and the old single-file
+  behaviour) is one module, `input`: private names are visible throughout the file.
+* **Cache.** A module's elaborated output is unchanged, so the cache's module key/graph
+  key (`moduleGraphKey`, a hash of the modules' names and texts) stays as it is; the
+  visibility check is a lookup on every elaboration, so a warm cache hit can only replay
+  the diagnostics of the same graph (the key covers every module's text, and the toolchain
+  id every selfhost source).
+
+**Left for later slices.** Constructor- and field-level `private` (`| private c`,
+`private f : T`, `private mk ::`) is still parsed and *stripped*: it is not a
+module-scoped declaration of its own here. Nor is the opacity of a type with private
+parts outside its module (no un-unfoldable `μ`, no refusal to `match` or project), private
+recursors (the self-hosted frontend has none: matches are built directly), or private
+`deriving`. A private `extern`'s argument-count hint and `attribute [implemented_by]`
+on a private declaration are not resolved to its module name (the FFI records the
+kernel name; both are reachable only from the declaring module).
 
 An unknown command, or a modifier the frontend doesn't know (`sealed`, `noncomputable`
 when the grammar gets them), is an error naming it ("unsupported command
@@ -348,7 +385,13 @@ foreign function's Nat does not fit in 63 bits" (exit code 3). The Lean toolchai
 UInt64 is unaffected (its large values are objects).
 
 **Tests** (group `selfhost`): `private` in every position both frontends take it, and
-`private` inside `mutual` rejected by both; unknown commands named in the error; the
+`private` inside `mutual` rejected by both; module-scoped privacy through the self-hosted
+checker: a private name used in its module and rejected in an importer (naming the
+module), a private type and constructor rejected in an importer, two modules' private
+names of one spelling allowed, a source name declared once per module (private or
+public), a public name shadowing another module's private one, and the one-shot
+`checkFile` path; group `selfhost-cli`: a private diagnostic cold and warm in the
+driver's cache; unknown commands named in the error; the
 `export`/`link_lib` checks (9 declarations, same verdicts); one program with exports
 (numbers, strings both ways, `Bool`, `IO`) called from a `link_c` file and `link_lib
 "m"`, run by the Lean compiler and by the self-hosted one in both modes, same output;
@@ -530,10 +573,12 @@ rejected across modules as within one (the same `newDuplicate` check).
 
 The cache key (`moduleGraphKey`) is a rolling hash of the loaded modules' names and
 texts in load order; the checker prints it with `--key`. The real cache (D5) will key on
-it, plus the frontend's version.
+it, plus the frontend's version. The checker's `--oneshot` runs the pre-loader
+single-file path (`checkFile`) instead, for the old behaviour's own tests.
 
-**Not done.** `private` is still private to one file only: hiding names across modules
-needs each name's module in `Globals` (21n). `namespace`/`open`/`section` are not parsed
+**Not done.** `private` is module-scoped now (21n), but only at the declaration level:
+constructor- and field-level `private` is stripped, and a type with private parts is not
+opaque outside its module. `namespace`/`open`/`section` are not parsed
 (A23). The compiler driver accepts modules for checking, but `link_c` paths and the
 `-- wiz: rc` pragma are read from the root file only. Compiling `lib/` still needs
 classes/instances (A10), universe polymorphism (A15), the proof surface (A16), tactics

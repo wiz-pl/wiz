@@ -1637,7 +1637,54 @@ def selfHostGroup : Group where
         let some k1' ← selfhostModuleOutput files1 #["--key"] | return
         let some k2 ← selfhostModuleOutput files2 #["--key"] | return
         unless k1 == k1' do throw (IO.userError s!"the key is not stable: {k1} / {k1'}")
-        if k1 == k2 then throw (IO.userError s!"the key ignores a module's text: {k1}") }
+        if k1 == k2 then throw (IO.userError s!"the key ignores a module's text: {k1}") },
+    -- (21n) `private` is module-scoped: the importing modules are A <- B <- input
+    { name := "modules: a private name is visible in its module and rejected in an importer (21n)", run := fun _ =>
+        selfhostCheckModules
+          [("A.wiz", "import Prelude\nprivate def secret : Nat := 42\ndef visible : Nat := secret\n"),
+           ("B.wiz", "import Prelude\nimport A\ndef fromA : Nat := visible\ndef bad : Nat := secret\n"),
+           ("input.wiz", "import Prelude\nimport B\ndef total : Nat := fromA\n#check secret\n")]
+          ("secret : Nat\nvisible : Nat\nfromA : Nat\n" ++
+           "error: 'secret' is private to module A\n" ++
+           "total : Nat\nerror: 'secret' is private to module A\n") },
+    { name := "modules: a private type and constructor are rejected in an importer (21n)", run := fun _ =>
+        selfhostCheckModules
+          [("A.wiz", "import Prelude\nprivate inductive S where\n  | mk (n : Nat)\n" ++
+             "def s : S := S.mk 1\ndef nOf : S → Nat\n  | .mk n => n\n"),
+           ("input.wiz", "import Prelude\nimport A\ndef bad : Nat := S.mk 2\ndef badTy (s : S) : Nat := 0\n")]
+          ("S : U0\ns : S\nnOf : (x0 : S) → Nat\n" ++
+           "error: 'S.mk' is private to module A\nerror: 'S' is private to module A\n") },
+    { name := "modules: two modules' private names of the same spelling do not clash (21n)", run := fun _ =>
+        selfhostCheckModules
+          [("A.wiz", "import Prelude\nprivate def secret : Nat := 1\ndef a : Nat := secret\n"),
+           ("B.wiz", "import Prelude\nprivate def secret : Nat := 2\ndef b : Nat := secret\n"),
+           ("input.wiz", "import Prelude\nimport A\nimport B\ndef sum : Nat := a + b\n")]
+          "secret : Nat\na : Nat\nsecret : Nat\nb : Nat\nsum : Nat\n" },
+    { name := "modules: a source name is declared once per module, private or not (21n)", run := fun _ =>
+        selfhostCheckModules
+          [("input.wiz", "import Prelude\nprivate def p : Nat := 1\ndef p : Nat := 2\n" ++
+             "def q : Nat := 3\nprivate def q : Nat := 4\nprivate def r : Nat := 5\nprivate def r : Nat := 6\n")]
+          ("p : Nat\nerror: 'p' has already been declared\nq : Nat\nerror: 'q' has already been declared\n" ++
+           "r : Nat\nerror: 'r' has already been declared\n") },
+    { name := "modules: a public name shadows another module's private one (21n)", run := fun _ =>
+        selfhostCheckModules
+          [("A.wiz", "import Prelude\nprivate def x : Bool := .true\ndef a : Bool := x\n"),
+           ("B.wiz", "import Prelude\ndef x : Nat := 2\n"),
+           ("input.wiz", "import Prelude\nimport A\nimport B\n#check x\n#check a\n")]
+          "x : Bool\na : Bool\nx : Nat\nNat\nBool\n" },
+    { name := "the one-shot path (checkFile) is one module, input (21n)", run := fun _ =>
+        selfhostCheckModules
+          [("input.wiz", "import Prelude\nprivate def secret : Nat := 42\ndef use : Nat := secret\n#check use\n")]
+          "secret : Nat\nuse : Nat\nNat\n" (args := #["--oneshot"]) },
+    { name := "the self-hosted backend: private declarations compile and run (21n)", run := fun _ =>
+        selfhostCompileRun ("import Prelude\n" ++
+          "private def secret : Nat := 40\n" ++
+          "private inductive S where\n  | mk (n : Nat)\n" ++
+          "def useS : S → Nat\n  | .mk n => n\n" ++
+          "private structure P where\n  x : Nat\n" ++
+          "def useP (p : P) : Nat := p.x\n" ++
+          "def main : IO Unit := do\n  IO.println (Nat.toString (secret + useS (S.mk 1) + useP (P.mk 1)))\n")
+          "42\n" }
   ]
 
 builtin_initialize registerGroup selfHostGroup

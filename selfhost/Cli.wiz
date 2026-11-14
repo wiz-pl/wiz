@@ -345,12 +345,13 @@ def codeLookup (m : String) : List CodeEntry → String
 def codeTable : List CodeEntry :=
   .cons (.mk "has already been declared" "duplicate-declaration")
   (.cons (.mk "unknown identifier" "unknown-identifier")
+  (.cons (.mk "is private to module" "private")
   (.cons (.mk "type mismatch" "type-mismatch")
   (.cons (.mk "no field " "no-such-field")
   (.cons (.mk "cannot infer" "cannot-infer")
   (.cons (.mk "unknown declaration" "unknown-declaration")
   (.cons (.mk "unsupported command " "unknown-syntax")
-  (.cons (.mk "unsupported syntax " "unknown-syntax") .nil)))))))
+  (.cons (.mk "unsupported syntax " "unknown-syntax") .nil))))))))
 
 def codeOf (s : String) : String := match stripPrefix "error: " s with
   | .none => match strStarts "parse error" s with
