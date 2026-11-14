@@ -59,6 +59,8 @@ lake test           # the test suite (`lake test -- --list` for the groups)
 ```
 
 See [docs/building.md](docs/building.md) for the details, CI and caches.
+`nix build .#release-tarball` writes the reproducible source tarball and its manifest
+(`docs/building.md`, "Reproducible source tarball").
 
 ## Documentation
 

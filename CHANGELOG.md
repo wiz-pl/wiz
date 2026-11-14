@@ -10,6 +10,11 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* release: a deterministic source tarball (`nix build .#release-tarball`, or
+  `scripts/source-tarball.py`) with a canonical JSON manifest (every path, size and
+  SHA-256, plus a tree digest). A release publishes it beside the binary tarball, and CI
+  builds it twice and compares; the binary tarball is not deterministic yet
+  (docs/building.md, "Reproducible source tarball").
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to

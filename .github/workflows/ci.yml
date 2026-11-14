@@ -97,6 +97,23 @@ jobs:
           python3 scripts/check-docs-style.py --self-test
           python3 scripts/check-docs-style.py
 
+  # (seconds, no build) The source tarball (scripts/source-tarball.py,
+  # docs/building.md): two builds in different directories and environments are
+  # byte-identical, the manifest matches the archive, and SOURCE_DATE_EPOCH changes
+  # only the metadata. The Nix target (.#release-tarball) is checked with
+  # `nix build --check` in the `package` job.
+  source-tarball:
+    name: source tarball
+    needs: changes
+    if: github.event_name != 'schedule' && needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Two builds are identical, and the manifest matches
+        shell: bash
+        run: scripts/test-source-tarball.sh
+
   build:
     name: build
     needs: changes
@@ -330,6 +347,13 @@ jobs:
       - name: nix build .#wiz
         shell: bash
         run: nix build .#wiz -L --print-out-paths
+      - name: The source tarball is reproducible under Nix
+        # a second build in a different build directory, compared byte for byte
+        # (Nix 2.34 calls it --rebuild; older releases spell it --check)
+        shell: bash
+        run: |
+          nix build .#release-tarball -L --print-out-paths
+          nix build .#release-tarball --rebuild -L
       - name: The package checks, builds and runs a program outside the checkout
         shell: bash
         run: |
@@ -380,7 +404,7 @@ jobs:
   # One check for branch protection, and the whole suite's summary.
   result:
     name: CI result
-    needs: [changes, docs_style, build, test, trust-ledger, package]
+    needs: [changes, docs_style, source-tarball, build, test, trust-ledger, package]
     if: always() && github.event_name != 'schedule'
     runs-on: ubuntu-latest
     permissions:
@@ -465,6 +489,7 @@ jobs:
         run: |
           echo "changes: ${{ needs.changes.result }} (code: ${{ needs.changes.outputs.code }}, shards: ${{ needs.changes.outputs.shards }})"
           echo "docs style: ${{ needs.docs_style.result }}"
+          echo "source tarball: ${{ needs['source-tarball'].result }}"
           echo "trust ledger: ${{ needs['trust-ledger'].result }}"
           echo "build: ${{ needs.build.result }}, test: ${{ needs.test.result }}, package: ${{ needs.package.result }}"
           # the path filter must have run; a job it skipped is not a failure, but outside
@@ -480,6 +505,7 @@ jobs:
             else [ "$2" = success ] || [ "$2" = skipped ] || { echo "$1: $2"; exit 1; }; fi
           }
           check "docs style" "${{ needs.docs_style.result }}" true
+          check "source tarball" "${{ needs['source-tarball'].result }}" "$code"
           check "trust ledger" "${{ needs['trust-ledger'].result }}" "$code"
           check build "${{ needs.build.result }}" "$code"
           check test "${{ needs.test.result }}" "$want_tests"

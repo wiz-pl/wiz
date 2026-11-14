@@ -144,6 +144,95 @@ A release toolchain's `share/wiz/NOTICE` says the same, and also lists the third
 code linked into `wiz`, `grail` and `tower` themselves; the licence texts are in
 `share/wiz/LICENSES/` and `share/wiz/cc/LICENSES/`.
 
+## Reproducible source tarball
+
+`nix build .#release-tarball` (the same derivation as `.#source-tarball`) writes a
+deterministic source tarball and its manifest; `scripts/source-tarball.py` does the same
+for any checkout:
+
+```sh
+nix build .#release-tarball          # result/ holds the three files below
+python3 scripts/source-tarball.py --out dist --mode git
+scripts/test-source-tarball.sh       # the check CI runs
+```
+
+The output is
+
+```
+wiz-<version>-src.tar.gz                 the source tree under one wiz-<version>/ directory
+wiz-<version>-src.tar.gz.manifest.json   canonical JSON: every path, size and SHA-256
+wiz-<version>-src.tar.gz.sha256          the tarball's sha256sum line
+```
+
+`<version>` is `Wiz/Version.lean`'s version (`0.1.0-dev` today). The tar entries are
+sorted, every mtime is the source date epoch, uid/gid are 0 with empty uname/gname,
+files are 0644 (0755 when executable) and directories 0755, and the gzip header carries
+the epoch and no file name. `SOURCE_DATE_EPOCH` is honoured; without it the commit time
+is used (0 outside a git checkout), and the Nix target passes the flake's commit time.
+In git mode (`--mode git`, the default in a checkout) the file list is `git ls-files`,
+so an untracked scratch file or build output cannot leak in; in tree mode (`--mode
+tree`, what Nix uses) every regular file under the root is taken, and the exclusions
+below apply. Symlinks are rejected.
+
+**Included**: all tracked files, except the exclusions below — the Lean sources
+(`Wiz/`, `WizMeta/`, `Grail/`, `*.lean`), the runtime (`runtime/`), the C support code
+(`c/`), the standard library (`lib/`), the self-hosted toolchain (`selfhost/`), grail
+and tower (`tower/`), the editors (`editors/`), the infoview and web sources
+(`infoview/`, `web/`), tests and examples (`Tests/`, `examples/`), `docs/`, `scripts/`,
+the build files (`lakefile.lean`, `lake-manifest.json`, `lean-toolchain`, `flake.nix`,
+`flake.lock`, `devenv.*`, `grail.wiz`), CI (`.github/`) and the licence and prose files
+(`LICENSE`, `COPYING.RUNTIME`, `README.md`, `CHANGELOG.md`, `ROADMAP.md`).
+
+**Excluded**: VCS and tool state (`.git/`, `.lake/`, `.grail/`, `.wiz-cache/`,
+`.devenv*`, `.direnv/`), caches and package directories (`__pycache__/`, `node_modules/`),
+build outputs (`dist/`, `web/out/`, `cc-bundle/`, `bundle-downloads/`, `*.olean`,
+`*.ilean`, `*.o`, `*.a`, `*.so`, …), the developer's local files (`grail.local.wiz`,
+`wiz-toolchain.local`, `Tests/Groups.lean`), and `drafts/` (wishful code the release
+does not build). The manifest lists the exact set, so a reviewer need not trust this
+paragraph.
+
+The manifest is canonical JSON: sorted keys, compact separators (`,` and `:`), no
+trailing newline, so its bytes depend only on its content (`schema:
+wiz-source-tarball/v1`). Shown formatted; the file is one line:
+
+```json
+{
+  "files": [{ "mode": "0644", "path": "LICENSE", "sha256": "…", "size": 35140 }, …],
+  "name": "wiz-0.1.0-dev",
+  "revision": "<40-hex commit, or unknown; a dirty checkout ends -dirty>",
+  "schema": "wiz-source-tarball/v1",
+  "sourceDateEpoch": 1700000000,
+  "tarball": { "file": "wiz-0.1.0-dev-src.tar.gz", "sha256": "…", "size": 1234567 },
+  "tree": { "bytes": 8700000, "files": 580, "sha256": "…" }
+}
+```
+
+`tree.sha256` is the SHA-256 of the sorted lines `<file sha256>  <path>\n` over
+`files`; it is a content root, independent of the epoch, modes and compression. The
+tarball digest in `tarball.sha256` is the artifact's subject digest; an attestation
+(the E1 verifier sketched in `wiz-notes/attested-enclave-builds.md`) binds a TPM quote
+to the manifest by using the manifest's SHA-256 as the quote's `extraData`, and checks
+the file list and tree root against the tarball it was given. Nothing in the manifest is
+signed yet.
+
+**What is reproducible.** The source tarball is byte-identical for a commit across
+directories, caches, umask, `TZ`, `LANG`, `HOME` and `SOURCE_DATE_EPOCH` (when the
+epoch is the same): `scripts/test-source-tarball.sh` builds it twice in different
+directories with different environments and compares with `cmp` and `sha256sum`, and CI
+runs that check. `nix build .#release-tarball --rebuild` rebuilds the derivation in a
+different build directory and compares the output. Changing `SOURCE_DATE_EPOCH`
+changes the mtime headers and the gzip stream, hence the tarball's SHA-256, but not the
+per-file hashes or `tree.sha256`. The gzip stream also depends on the zlib version that
+wrote it; the tar content and the tree root do not.
+
+Generated C is already reproducible (same C for the same program across paths, caches,
+environments and even architectures); binaries are reproducible with the same compiler
+but differ across C compilers and architectures, so a cross-build's *binary* digest is
+not comparable. The binary release tarball (`scripts/release-tarball.sh`, what tower
+installs) is not yet deterministic: it copies build outputs and adds files in checkout
+order, so its digest can differ between builds of one commit. Signing (DSSE/cosign), an
+SBOM and SLSA provenance are not produced.
+
 ## Continuous integration
 
 `nix develop` gives the toolchain the tests need besides Lean (see `flake.nix`): GMP and
@@ -174,6 +263,10 @@ cached between runs.
   script's fixtures (`--self-test`) and then the check, on every push and pull request
   (including docs-only ones), and `CI result` requires it. No code block is exempt; a
   reviewed exception goes in the script's `ALLOW` list with a reason.
+* **Source tarball** (the `source-tarball` job): `scripts/test-source-tarball.sh`
+  builds the release source tarball twice in different directories and environments,
+  compares the archives and manifests, and checks the exclusions; the `package` job
+  also runs `nix build .#release-tarball --rebuild` ("Reproducible source tarball").
 * **Trust ledger** (the `trust-ledger` job): `scripts/trust-ledger.sh --check` runs the
   `--trust-ledger` mode of the test driver (`Tests/Native.lean`) over `lib/` and the
   axiom-free examples, and compares the sources of trust it finds with
