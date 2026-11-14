@@ -1,0 +1,79 @@
+-- The SPI library (`import Hdl.Spi`): a mode 0 master with a configurable divider, and
+-- the loopback circuit (`mosi` wired to `miso`). Checked by the `rune` test group: the
+-- rising edges carry the byte's bits most significant first, there are eight per byte,
+-- and the receiver gets the byte back; the value and fast netlist simulations agree.
+import Hdl.Core
+import Hdl.Sim
+import Hdl.Spi
+import IO
+
+def Bit : HwTy := HwTy.bits 1
+def B8 : HwTy := HwTy.bits 8
+
+def yes (b : Bool) : String := match b with
+  | .true => "yes"
+  | .false => "no"
+
+def shows : List Nat → String
+  | .nil => ""
+  | .cons x xs => Hdl.show x <+> " " <+> shows xs
+
+def leavesEq : List (List Nat) → List (List Nat) → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
+  | _, _ => .false
+
+def flat : List (List Nat) → List Nat
+  | .nil => .nil
+  | .cons xs xss => List.append xs (flat xss)
+
+-- the eight bits of a byte, most significant first (mode 0 sends that order)
+def bitsOf (d : Nat) : List Nat :=
+  Hdl.map (fun (k : Nat) => Nat.mod (Nat.shiftRight d (7 - k)) 2) (Hdl.upto 8 0)
+
+-- `mosi` (leaf 1) at every rising edge of `sclk` (leaf 0). The previous cycle is looked
+-- up by index (`Hdl.nthD`), so the recursion carries no extra parameter.
+def edgeAt (outs : List (List Nat)) (k : Nat) : List Nat :=
+  let o := Hdl.nthD List.nil outs k;
+  let prev := match k with
+    | .zero => List.nil
+    | .succ j => Hdl.nthD List.nil outs j;
+  match Bool.and (Nat.beq (Hdl.nthD 0 prev 0) 0) (Nat.beq (Hdl.nthD 0 o 0) 1) with
+  | .true => List.cons (Hdl.nthD 0 o 1) .nil
+  | .false => .nil
+
+def sampled (outs : List (List Nat)) : List Nat :=
+  flat (Hdl.map (fun (k : Nat) => edgeAt outs k) (Hdl.upto (List.length outs) 0))
+
+-- the byte received, at the one-cycle `done` (leaf 4), from `data` (leaf 5)
+def doneBytes : List (List Nat) → List Nat
+  | .nil => .nil
+  | .cons o os => match Nat.beq (Hdl.nthD 0 o 4) 1 with
+    | .true => List.cons (Hdl.nthD 0 o 5) (doneBytes os)
+    | .false => doneBytes os
+
+def cmdAt (spacing : Nat) (datas : List Nat) (k : Nat) : HwTy.El Spi.Cmd.code :=
+  match Nat.beq (Nat.mod k spacing) 0 with
+  | .true => Bundle.toEl Spi.Cmd.bundle
+      (Spi.Cmd.mk (BitVec.ofNat 1 1) (BitVec.ofNat 8 (Hdl.nthD 0 datas (Nat.div k spacing))))
+  | .false => Bundle.toEl Spi.Cmd.bundle
+      (Spi.Cmd.mk (BitVec.ofNat 1 0) (BitVec.ofNat 8 0))
+
+def report (div : Nat) (datas : List Nat) : String :=
+  let spacing := 16 * div + 8;
+  let cycles := List.length datas * spacing;
+  let ins := Hdl.map (fun (k : Nat) => cmdAt spacing datas k) (Hdl.upto cycles 0);
+  let c := Spi.loopC div;
+  let outs := Circuit.runLeaves c ins;
+  let edges := sampled outs;
+  let want := flat (Hdl.map bitsOf datas);
+  let got := doneBytes outs;
+  "spi div=" <+> Hdl.show div <+> ": sim " <+> yes (leavesEq outs (Circuit.simFast c ins))
+    <+> ", edges " <+> Hdl.show (List.length edges)
+    <+> ", shift " <+> yes (Hdl.natsEq edges want)
+    <+> ", bytes " <+> shows got <+> ", ok " <+> yes (Hdl.natsEq got datas)
+    <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "spi" c))
+
+def main : IO Unit := do
+  IO.println (report 1 (.cons 165 (.cons 60 .nil)));
+  IO.println (report 3 (.cons 165 (.cons 60 .nil)))

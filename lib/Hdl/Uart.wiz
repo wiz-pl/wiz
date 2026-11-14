@@ -1,0 +1,230 @@
+import Hdl.Core
+/-!
+# Hdl.Uart
+
+A reusable 8N1 UART (`import Hdl.Uart`): a baud generator, a transmitter and a receiver
+with a configurable number of clock cycles per bit, and a loopback circuit that wires the
+transmitter's line into the receiver. It is the UART of the iCEstick project
+(`/workspace/wiz-icestick-uart/src/Icestick/Uart.wiz`) with the board-specific parts
+removed, so that other designs can instantiate it: every part is a `Circuit` over bundles,
+polymorphic in the representation like the rest of the HDL, so the same definition
+simulates at values and synthesises to a netlist.
+
+Layout of one frame, least significant data bit first, line idle high:
+
+```
+idle  start  d0  d1  d2  d3  d4  d5  d6  d7  stop  idle
+ 1      0     …                                  1     1
+```
+
+`n` is the number of clock cycles per bit, a meta-level `Nat` (1 … 65536): it only ends up
+in the netlist as the constants the counters are compared with. `n = 104` turns the
+iCEstick's 12 MHz clock into 115384.6 baud (0.16 % above 115200); the Arty's 100 MHz
+clock with `n = 868` gives 115207 baud (0.006 % below).
+
+Clock domains: the receiver's input goes through two flip-flops inside the receiver (the
+`Rx` state's `ff1`/`ff2`), so a pin in another clock domain is synchronised before any
+logic looks at it. The transmitter's line is a register of its own, so the pin cannot
+glitch. Use `n ≥ 5`: the two synchroniser flip-flops delay the start edge by two cycles,
+and the receiver samples at the middle of each bit (see `Uart.rxStep`).
+
+The parts:
+
+* `Uart.baudC n`: a free-running baud generator (input `ce`, output `tick`) whose tick is
+  high one cycle in every `n`;
+* `Uart.txC n`: input `start`/`data`, output `line`/`busy`, 8N1, `start` taken when idle;
+* `Uart.rxC n`: input `line`, output `valid`/`data`/`busy`; `valid` is high for one cycle
+  at the sample of a stop bit that is high, with the byte in `data`;
+* `Uart.loopbackC n`: `txC` and `rxC` with the line wired from the transmitter to the
+  receiver (the loopback example), input `start`/`data`, output `busy`/`valid`/`data`.
+-/
+
+def Uart.Bit : HwTy := HwTy.bits 1
+def Uart.B4 : HwTy := HwTy.bits 4
+def Uart.B8 : HwTy := HwTy.bits 8
+def Uart.B9 : HwTy := HwTy.bits 9
+
+/-- The baud counter's width: a 16-bit counter covers 1 … 65536 cycles per bit. -/
+def Uart.cntW : Nat := 16
+
+------------------------------------------------------------------------------------
+-- Bit-level vocabulary (the same as the iCEstick project's `Icestick.Gates`).
+
+/-- The 9-bit shift register of a frame: the stop bit on top of the data. -/
+def Uart.frame9 {r : HwTy → Type} [Hw r] (d : r Uart.B8) : r Uart.B9 :=
+  Hw.cat (Hw.lit 1 1) d
+/-- Shift a bit in at the top of a 9-bit register (data goes out at the bottom). -/
+def Uart.shiftIn9 {r : HwTy → Type} [Hw r] (x : r Uart.B9) (b : r Uart.Bit) : r Uart.B9 :=
+  Hw.cat b (Hw.slice 1 8 x)
+/-- Shift a bit in at the top of an 8-bit register (data goes out at the bottom). -/
+def Uart.shiftIn8 {r : HwTy → Type} [Hw r] (x : r Uart.B8) (b : r Uart.Bit) : r Uart.B8 :=
+  Hw.cat b (Hw.slice 1 7 x)
+
+------------------------------------------------------------------------------------
+-- The baud generator: a 16-bit counter that counts 0 … n-1; `tick` is high in the last
+-- cycle of each period, and only while `ce` is high (for a clock enable).
+
+/-- The baud generator's state. -/
+structure Uart.Baud (r : HwTy → Type) where
+  cnt : r (HwTy.bits Uart.cntW)
+  deriving Bundle
+
+/-- The baud generator at rest (count 0). -/
+def Uart.Baud.init : Uart.Baud HwTy.El :=
+  Uart.Baud.mk (BitVec.ofNat Uart.cntW 0)
+
+/-- One cycle of the baud generator: count while `ce`, tick at `n - 1`, wrap to 0, hold
+when `ce` is low. -/
+def Uart.baudStep {r : HwTy → Type} [Hw r] (n : Nat) (s : Uart.Baud r) (ce : r Uart.Bit) :
+    r (HwTy.prod Uart.Baud.code Uart.Bit) :=
+  let last := s.cnt === Hw.ofNat (n - 1);
+  let tick := ce &&& last;
+  let next := if tick then 0 else if ce then s.cnt + 1 else s.cnt;
+  Hw.pair (Uart.Baud.pack (Uart.Baud.mk next)) tick
+
+/-- A baud generator as a circuit: input `ce`, output `tick`. -/
+def Uart.baudC (n : Nat) : Circuit Uart.Bit Uart.Bit :=
+  Circuit.mk Uart.Baud.code (Bundle.toEl Uart.Baud.bundle Uart.Baud.init)
+    (fun s ce => Uart.baudStep n (Uart.Baud.unpack s) ce)
+
+------------------------------------------------------------------------------------
+-- The transmitter. State: the line (a register of its own, so the pin is driven by a
+-- flip-flop and cannot glitch), the number of bit periods left (0: idle), the baud
+-- counter, and a 9-bit shift register (stop bit on top of the data, least significant
+-- bit first; ones are shifted in). `start` with `data` is taken when idle and ignored
+-- otherwise.
+
+/-- The transmitter's state. -/
+structure Uart.Tx (r : HwTy → Type) where
+  line : r Uart.Bit
+  left : r Uart.B4
+  cnt : r (HwTy.bits Uart.cntW)
+  sh : r Uart.B9
+  deriving Bundle
+
+/-- The transmitter at rest: the line high, no bit periods left. -/
+def Uart.Tx.init : Uart.Tx HwTy.El :=
+  Uart.Tx.mk (BitVec.ofNat 1 1) (BitVec.ofNat 4 0) (BitVec.ofNat Uart.cntW 0) (BitVec.ofNat 9 511)
+
+/-- The transmitter's input: a start pulse and the byte to send. -/
+structure Uart.TxIn (r : HwTy → Type) where
+  start : r Uart.Bit
+  data : r Uart.B8
+  deriving Bundle
+
+/-- The transmitter's output: the line and whether a frame is in progress. -/
+structure Uart.TxOut (r : HwTy → Type) where
+  line : r Uart.Bit
+  busy : r Uart.Bit
+  deriving Bundle
+
+/-- One cycle of the transmitter. -/
+def Uart.txStep {r : HwTy → Type} [Hw r] (n : Nat) (s : Uart.Tx r) (x : Uart.TxIn r) :
+    r (HwTy.prod Uart.Tx.code Uart.TxOut.code) :=
+  let idle := s.left === 0;
+  let go := idle &&& x.start;
+  let b := Uart.baudStep n (Uart.Baud.mk s.cnt) (Hw.lit 1 1);
+  let nb := Uart.Baud.unpack (Hw.fst b);
+  let tick := ~~~idle &&& Hw.snd b;
+  let line := if go then 0 else if tick then Hw.slice 0 1 s.sh else s.line;
+  let left := if go then 10 else if tick then s.left - 1 else s.left;
+  let cnt := if go then 0 else nb.cnt;
+  let sh := if go then Uart.frame9 x.data else if tick then Uart.shiftIn9 s.sh (Hw.lit 1 1) else s.sh;
+  Hw.pair (Uart.Tx.pack (Uart.Tx.mk line left cnt sh))
+    (Uart.TxOut.pack (Uart.TxOut.mk s.line (Hw.not idle)))
+
+/-- A transmitter as a circuit (8N1, `n` clocks per bit). -/
+def Uart.txC (n : Nat) : Circuit Uart.TxIn.code Uart.TxOut.code :=
+  Circuit.bundled Uart.Tx.bundle Uart.TxIn.bundle Uart.TxOut.bundle Uart.Tx.init
+    (fun s x => Uart.txStep n s x)
+
+------------------------------------------------------------------------------------
+-- The receiver. State: the phase (0: idle, 10: in the start bit, 9 … 2: data bits,
+-- 1: stop bit), the baud counter, the shift register, and the input synchroniser's two
+-- flip-flops. A low line when idle starts a frame; half a bit later the line must still
+-- be low (otherwise it was a glitch), and from there the line is sampled once per bit
+-- period, i.e. in the middle of each bit. `valid` is high for one cycle, at the sample of
+-- a stop bit that is high, and `data` is the byte then.
+
+/-- The receiver's state. -/
+structure Uart.Rx (r : HwTy → Type) where
+  ph : r Uart.B4
+  cnt : r (HwTy.bits Uart.cntW)
+  sh : r Uart.B8
+  ff1 : r Uart.Bit
+  ff2 : r Uart.Bit
+  deriving Bundle
+
+/-- The receiver at rest, with its synchroniser idle high. -/
+def Uart.Rx.init : Uart.Rx HwTy.El :=
+  Uart.Rx.mk (BitVec.ofNat 4 0) (BitVec.ofNat Uart.cntW 0) (BitVec.ofNat 8 0)
+    (BitVec.ofNat 1 1) (BitVec.ofNat 1 1)
+
+/-- The receiver's input: the line (an asynchronous pin is fine: it is synchronised). -/
+structure Uart.RxIn (r : HwTy → Type) where
+  line : r Uart.Bit
+  deriving Bundle
+
+/-- The receiver's output: a one-cycle `valid` and the byte, and whether a frame is in
+progress. -/
+structure Uart.RxOut (r : HwTy → Type) where
+  valid : r Uart.Bit
+  data : r Uart.B8
+  busy : r Uart.Bit
+  deriving Bundle
+
+/-- One cycle of the receiver. -/
+def Uart.rxStep {r : HwTy → Type} [Hw r] (n : Nat) (s : Uart.Rx r) (x : Uart.RxIn r) :
+    r (HwTy.prod Uart.Rx.code Uart.RxOut.code) :=
+  let idle := s.ph === 0;
+  let inStart := s.ph === 10;
+  let inStop := s.ph === 1;
+  let fall := idle &&& ~~~s.ff2;
+  let startTick := inStart &&& s.cnt === Hw.ofNat (Nat.div n 2 - 1);
+  let tick := ~~~idle &&& (~~~inStart &&& s.cnt === Hw.ofNat (n - 1));
+  let ph := if fall then 10
+    else if startTick then (if s.ff2 then 0 else 9)
+    else if tick then s.ph - 1 else s.ph;
+  let cnt := if fall ||| (startTick ||| tick) then 0 else s.cnt + 1;
+  let sh := if tick &&& ~~~inStop then Uart.shiftIn8 s.sh s.ff2 else s.sh;
+  Hw.pair (Uart.Rx.pack (Uart.Rx.mk ph cnt sh x.line s.ff1))
+    (Uart.RxOut.pack (Uart.RxOut.mk (tick &&& (inStop &&& s.ff2)) s.sh (Hw.not idle)))
+
+/-- A receiver as a circuit (8N1, `n` clocks per bit, with a two-flip-flop input
+synchroniser). -/
+def Uart.rxC (n : Nat) : Circuit Uart.RxIn.code Uart.RxOut.code :=
+  Circuit.bundled Uart.Rx.bundle Uart.RxIn.bundle Uart.RxOut.bundle Uart.Rx.init
+    (fun s x => Uart.rxStep n s x)
+
+------------------------------------------------------------------------------------
+-- The loopback example: the transmitter's line into the receiver, so a byte written comes
+-- back one frame later. Both parts keep their own state; the line is the only connection.
+
+/-- The loopback's state: a transmitter and a receiver. -/
+structure Uart.Loop (r : HwTy → Type) where
+  tx : Uart.Tx r
+  rx : Uart.Rx r
+  deriving Bundle
+
+/-- The loopback's output. -/
+structure Uart.LoopOut (r : HwTy → Type) where
+  busy : r Uart.Bit
+  valid : r Uart.Bit
+  data : r Uart.B8
+  deriving Bundle
+
+/-- One cycle of the loopback: run the transmitter, feed its line to the receiver. -/
+def Uart.loopStep {r : HwTy → Type} [Hw r] (n : Nat) (s : Uart.Loop r) (x : Uart.TxIn r) :
+    r (HwTy.prod Uart.Loop.code Uart.LoopOut.code) :=
+  let t := Circuit.inst (Uart.txC n) (Uart.Tx.pack s.tx) (Uart.TxIn.pack x);
+  let to := Uart.TxOut.unpack (Hw.snd t);
+  let r := Circuit.inst (Uart.rxC n) (Uart.Rx.pack s.rx) (Uart.RxIn.pack (Uart.RxIn.mk to.line));
+  let ro := Uart.RxOut.unpack (Hw.snd r);
+  Hw.pair
+    (Uart.Loop.pack (Uart.Loop.mk (Uart.Tx.unpack (Hw.fst t)) (Uart.Rx.unpack (Hw.fst r))))
+    (Uart.LoopOut.pack (Uart.LoopOut.mk to.busy ro.valid ro.data))
+
+/-- The loopback as a circuit: input `start`/`data`, output `busy`/`valid`/`data`. -/
+def Uart.loopbackC (n : Nat) : Circuit Uart.TxIn.code Uart.LoopOut.code :=
+  Circuit.bundled Uart.Loop.bundle Uart.TxIn.bundle Uart.LoopOut.bundle
+    (Uart.Loop.mk Uart.Tx.init Uart.Rx.init) (fun s x => Uart.loopStep n s x)

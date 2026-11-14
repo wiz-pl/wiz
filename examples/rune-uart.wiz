@@ -1,0 +1,78 @@
+-- The UART library (`import Hdl.Uart`): the baud generator, the transmitter and the
+-- receiver, and the loopback circuit (the line wired from the transmitter to the
+-- receiver). Checked by the `rune` test group: the value simulation and the fast netlist
+-- simulation (`Hdl.Sim`) agree, and every byte comes back through the loopback.
+import Hdl.Core
+import Hdl.Sim
+import Hdl.Uart
+import IO
+
+def Bit : HwTy := HwTy.bits 1
+def B8 : HwTy := HwTy.bits 8
+
+def yes (b : Bool) : String := match b with
+  | .true => "yes"
+  | .false => "no"
+
+-- a list of numbers as a line of decimal numbers
+def shows : List Nat → String
+  | .nil => ""
+  | .cons x xs => Hdl.show x <+> " " <+> shows xs
+
+def leavesEq : List (List Nat) → List (List Nat) → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
+  | _, _ => .false
+
+def countOnes : List (List Nat) → Nat
+  | .nil => 0
+  | .cons o os => match Nat.beq (Hdl.nthD 0 o 0) 1 with
+    | .true => Nat.succ (countOnes os)
+    | .false => countOnes os
+
+-- the byte received: `valid` (leaf 1) high, `data` (leaf 2)
+def bytes : List (List Nat) → List Nat
+  | .nil => .nil
+  | .cons o os => match Nat.beq (Hdl.nthD 0 o 1) 1 with
+    | .true => List.cons (Hdl.nthD 0 o 2) (bytes os)
+    | .false => bytes os
+
+------------------------------------------------------------------------------------
+-- The baud generator on its own: with the clock enable high, four ticks in four periods.
+
+def baudReport (n : Nat) : String :=
+  let cycles := 4 * n;
+  let ins := Hdl.map (fun (k : Nat) => BitVec.ofNat 1 1) (Hdl.upto cycles 0);
+  let c := Uart.baudC n;
+  let outs := Circuit.runLeaves c ins;
+  "baud n=" <+> Hdl.show n <+> ": sim " <+> yes (leavesEq outs (Circuit.simFast c ins))
+    <+> ", ticks " <+> Hdl.show (countOnes outs)
+
+------------------------------------------------------------------------------------
+-- The loopback: start a byte every `12 * n` cycles (a frame is 10 * n), so the
+-- transmitter is idle again well before the next start.
+
+def txAt (spacing : Nat) (datas : List Nat) (k : Nat) : HwTy.El Uart.TxIn.code :=
+  match Nat.beq (Nat.mod k spacing) 0 with
+  | .true => Bundle.toEl Uart.TxIn.bundle
+      (Uart.TxIn.mk (BitVec.ofNat 1 1) (BitVec.ofNat 8 (Hdl.nthD 0 datas (Nat.div k spacing))))
+  | .false => Bundle.toEl Uart.TxIn.bundle
+      (Uart.TxIn.mk (BitVec.ofNat 1 0) (BitVec.ofNat 8 0))
+
+def loopReport (n : Nat) (datas : List Nat) : String :=
+  let spacing := 12 * n;
+  let cycles := List.length datas * spacing;
+  let ins := Hdl.map (fun (k : Nat) => txAt spacing datas k) (Hdl.upto cycles 0);
+  let c := Uart.loopbackC n;
+  let outs := Circuit.runLeaves c ins;
+  let got := bytes outs;
+  "uart n=" <+> Hdl.show n <+> ": sim " <+> yes (leavesEq outs (Circuit.simFast c ins))
+    <+> ", sent " <+> shows datas <+> ", got " <+> shows got
+    <+> ", ok " <+> yes (Hdl.natsEq got datas)
+    <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "uart" c))
+
+def main : IO Unit := do
+  IO.println (baudReport 8);
+  IO.println (baudReport 16);
+  IO.println (loopReport 8 (.cons 85 (.cons 165 (.cons 0 (.cons 255 .nil)))));
+  IO.println (loopReport 16 (.cons 85 (.cons 165 (.cons 0 (.cons 255 .nil)))))
