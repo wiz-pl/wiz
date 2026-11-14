@@ -123,6 +123,18 @@ def vecGroup : Group where
           "def o (w k a : Nat) (hk : Nat.le k w = .true) (ha : Nat.lt a (Nat.pow 2 w) = .true) : " ++
           "Nat.sub (Bits.dec (Nat.pow 2 w)) (Bits.high k (Nat.sub (Bits.dec (Nat.pow 2 w)) a)) = " ++
           "Nat.add (Nat.sub (Nat.pow 2 w) (Nat.pow 2 (Nat.sub w k))) (Bits.high k a) := Bits.sub_one_high w k a hk ha\n") },
+    { name := "BitVecAdd: the 34-bit carry/borrow adder is add/sub (concatenation, slice)", run := fun _ =>
+        okLibs ("import BitVecAdd\n" ++
+          "def a (x y : BitVec 32) : BitVec.adc (BitVec.ofNat 1 0) x y = BitVec.add x y := BitVec.adc_zero x y\n" ++
+          "def b (x y : BitVec 32) : BitVec.adc (BitVec.ofNat 1 1) x y = BitVec.sub x y := BitVec.adc_one x y\n" ++
+          "def c (s : BitVec 1) (x y : BitVec 32) : BitVec.adc s x y = BitVec.muxBit s (BitVec.sub x y) (BitVec.add x y) := BitVec.adc_eq s x y\n" ++
+          "def d (x : BitVec 32) : (BitVec.zext1 (BitVec.concat x (BitVec.ofNat 1 1))).toNat = Nat.add (Nat.mul x.toNat 2) 1 := BitVec.adcW1 x\n" ++
+          "def e (A : Nat) (h : Nat.Lt A (Nat.pow 2 32)) : Bits.low 33 (Nat.add (Nat.mul A 2) 1) = Nat.add (Nat.mul A 2) 1 := Bits.low33_cat A h\n" ++
+          "def f (w n : Nat) : Nat.div (Bits.low (Nat.succ w) n) 2 = Bits.low w (Nat.div n 2) := Bits.div_low_succ w n\n" ++
+          "def g (x y : BitVec 32) : (BitVec.adc (BitVec.ofNat 1 0) x y).toNat = Bits.low 32 (Nat.add x.toNat y.toNat) := BitVec.adc_zero_toNat x y\n" ++
+          "#eval BitVec.toNat (BitVec.adc (BitVec.ofNat 1 0) (BitVec.ofNat 32 4294967295) (BitVec.ofNat 32 2))\n" ++
+          "#eval BitVec.toNat (BitVec.adc (BitVec.ofNat 1 1) (BitVec.ofNat 32 3) (BitVec.ofNat 32 5))")
+          ["1", "4294967294"] },
     { name := "bit vectors: widths and bits as a Vec", run := fun _ =>
         okLibs (bvPrelude ++ "#eval (BitVec.concat (BitVec.ofNat 4 10) (BitVec.ofNat 4 3)).toNat\n" ++
           "#eval (BitVec.extract 5 2 (b8 60)).toNat\n#eval (BitVec.zeroExtend 16 (b8 200)).toNat\n" ++
