@@ -107,17 +107,18 @@ def trustGroup : Group where
         check (rejected (f (.app .tt .tt)) "implementation of f") "an ill-typed implementation was accepted"
         check (rejected (f (.unit 1)) "implementation of f") "an implementation of another type was accepted"
         check (rejected (f (.pair .tt .tt)) "implementation of f") "an implementation of another type was accepted"
-        -- a `Π` noted to be in a sort it is not in (erasure reads the note): `let T : Type := Π… in tt`
-        let piNoted (s : Option Level) : Term ZeroOneMany :=
+        -- a `Π` whose codomain is noted to be in a sort it is not in (erasure reads the
+        -- sorts): `let T : Type := Π… in tt`; and one without its sorts (mandatory sorts)
+        let piNoted (s : BinderSorts) : Term ZeroOneMany :=
           .letE "T" (.qlit .zero) (.sort 1) (.pi "_" .default (.qlit .many) (.unit 1) (.unit 1) s) .tt
-        check ((addDecl {} (f (piNoted none))) matches .ok _) "an implementation without sort notes was rejected"
-        check ((addDecl {} (f (piNoted (some 1)))) matches .ok _) "a right sort note was rejected"
-        check (rejected (f (piNoted (some 0))) "marked as in sort") "a wrong sort note in an implementation was accepted"
-        check (rejected { f .tt with value := some (piNoted (some 0)), impl := none } "marked as in sort")
-          "a wrong sort note in a value was accepted"
+        check (rejected (f (piNoted .hole)) "without its sort") "an implementation without its sorts was accepted"
+        check ((addDecl {} (f (piNoted ⟨1, 1⟩))) matches .ok _) "right sorts were rejected"
+        check (rejected (f (piNoted ⟨1, 0⟩)) "marked as in Sort") "a wrong sort in an implementation was accepted"
+        check (rejected { f .tt with value := some (piNoted ⟨1, 0⟩), impl := none } "marked as in Sort")
+          "a wrong sort in a value was accepted"
         -- quantities: a linear variable used twice
         let lin (body : Term ZeroOneMany) : Decl ZeroOneMany :=
-          { name := "f", type := .pi "x" .default (.qlit .one) ty (.sigma "_" (.qlit .one) ty ty none) none,
+          { name := "f", type := .pi "x" .default (.qlit .one) ty (.sigma "_" (.qlit .one) ty ty ⟨1, 1⟩) ⟨1, 1⟩,
             value := some (.lam "x" (.pair (.var 0) .tt)), impl := some (.lam "x" body) }
         check ((addDecl {} (lin (.pair .tt (.var 0)))) matches .ok _) "a linear implementation was rejected"
         check (rejected (lin (.pair (.var 0) (.var 0))) "implementation of f") "an implementation using a linear variable twice was accepted"
@@ -357,7 +358,7 @@ def trustGroup : Group where
         check (once (runFrontend (R := ZeroOneMany) both init)) "the frontend took a second `builtin nat`"
         let cache ← IO.FS.createTempDir
         for _ in [0:2] do
-          let (s, _) ← Cache.elaborateCached cache both init 0
+          let (s, _) ← Cache.elaborateCached (some cache) [] both init 0
           check (once s) s!"the cache took a second `builtin nat`: {s.messages.toList.map (·.text)}"
           check (s.globals.builtins.lookup "nat" == some "Nat") "`nat` was redirected"
         IO.FS.removeDirAll dir },

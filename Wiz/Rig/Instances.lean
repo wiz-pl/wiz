@@ -44,6 +44,9 @@ instance : QuantitySyntax Unit where
   implicitDefault := ()
   display _ := ""
 
+instance : RigTag Unit where
+  tag := "unit"
+
 /-! ## `Nat`: exact usage counting -/
 
 instance : QRig Nat where
@@ -70,6 +73,9 @@ instance : QuantitySyntax Nat where
   explicitDefault := 1
   implicitDefault := 0
   display := toString
+
+instance : RigTag Nat where
+  tag := "nat"
 
 /-! ## `ZeroOneMany`: Idris 2's quantities -/
 
@@ -216,6 +222,9 @@ instance : QuantitySyntax ZeroOneMany where
   explicitDefault := many
   implicitDefault := zero
   display := toString
+
+instance : RigTag ZeroOneMany where
+  tag := "zero-one-many"
 
 end ZeroOneMany
 

@@ -39,15 +39,14 @@ lean_lib WizMeta where
 
 lean_lib Grail
 
--- the toolchain manager (stage 26): it doesn't import Wiz
-lean_lib Tower
-
 -- The C runtime as text (`include_str`, runtime/WizRuntime.lean), a library of its own so
--- that only it depends on runtime/wiz.c: `needs` mixes the file's hash into its modules'
--- traces, so editing wiz.c rebuilds it and its importers (Lake doesn't track include_str)
+-- that only it depends on the runtime's files: `needs` mixes their hashes into its
+-- modules' traces, so editing one rebuilds it and its importers (Lake doesn't track
+-- include_str). The runtime is the header's inline part plus six area files.
 lean_lib WizRuntime where
   srcDir := "runtime"
-  needs := #[`@/wizRuntimeC]
+  needs := #[`@/wizRuntimeHeader, `@/wizRuntimeCore, `@/wizRuntimeNum,
+    `@/wizRuntimeWords, `@/wizRuntimeData, `@/wizRuntimeSys, `@/wizRuntimeCon]
 
 @[default_target] lean_exe wiz where
   root := `Main
@@ -61,9 +60,6 @@ lean_exe tests where
   root := `Grail.Main
   moreLinkObjs := #[`@/sockets, `@/proc]
 
-@[default_target] lean_exe tower where
-  root := `Tower.Main
-
 -- Unix-domain sockets for `wiz lsp --infoview` (Lean's library has none): a C file that
 -- the linker compiles into each executable
 input_file sockets where
@@ -73,6 +69,32 @@ input_file sockets where
 input_file proc where
   path := "c/proc.c"
 
-input_file wizRuntimeC where
-  path := "runtime/wiz.c"
+-- The runtime's files: `runtime/WizRuntime.lean` embeds them with `include_str`. Each is
+-- an `input_file` so that its content hash is part of WizRuntime's trace.
+input_file wizRuntimeHeader where
+  path := "runtime/wiz_rt.h"
+  text := true
+
+input_file wizRuntimeCore where
+  path := "runtime/rt_core.inc"
+  text := true
+
+input_file wizRuntimeNum where
+  path := "runtime/rt_num.inc"
+  text := true
+
+input_file wizRuntimeWords where
+  path := "runtime/rt_words.inc"
+  text := true
+
+input_file wizRuntimeData where
+  path := "runtime/rt_data.inc"
+  text := true
+
+input_file wizRuntimeSys where
+  path := "runtime/rt_sys.inc"
+  text := true
+
+input_file wizRuntimeCon where
+  path := "runtime/rt_con.inc"
   text := true

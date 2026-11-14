@@ -34,6 +34,7 @@ def lawsHold {R : Type} [QRig R] [DecidableEq R] [ToString R] (elems : List R) :
 open ZeroOneMany in
 def group : Group where
   name := "rig"
+  parallel := true
   exercise := "Exercises 0.1, 0.2"
   cases := [
     { name := "Unit laws", run := fun _ => lawsHold [()] },

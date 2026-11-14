@@ -139,6 +139,7 @@ def rejectedNames : List String :=
 
 def group : Group where
   name := "feral"
+  parallel := true
   exercise := "lib/Feral.wiz (the Feral surface language)"
   cases :=
     surfaceNames.map (fun n => { name := s!"surface/{n} lowers, checks, and behaves like lowered/{n}", run := fun _ => accepted n }) ++

@@ -1,5 +1,5 @@
 import Tower.Cli
--- the pure parts of tower (stage 26e), as the Lean tests check them (Tests/Tower.lean)
+-- the pure parts of tower (stage 26e), also checked through the `tower` test group
 #eval Tower.latestTag (("refs/tags/v1.9.2", "") :> ("refs/tags/v1.10.0", "") :> ("refs/tags/x", "") :> ("refs/heads/v9", "") :> .nil)
 #eval Tower.flakeRef "github:o/r" "abc"
 #eval Tower.flakeRef "git+file:///r" "abc"

@@ -79,7 +79,7 @@ def elabBasic (cache : Option System.FilePath := none) : IO (CommandState ZeroOn
   let init : CommandState ZeroOneMany := { loader, trustedModule := Tests.libModule }
   match cache with
   | none => pure (runFrontend basicSrc init)
-  | some dir => pure (← Cache.elaborateCached dir basicSrc init 0).1
+  | some dir => pure (← Cache.elaborateCached (some dir) [] basicSrc init 0).1
 
 def docOf (s : CommandState ZeroOneMany) (n : Name) : String :=
   match s.declDocs.get? n with
@@ -166,6 +166,7 @@ def libDocCase : Case :=
 
 def docGroup : Group where
   name := "doc"
+  parallel := true
   exercise := "Stage 11s (docs/stages/11-tooling.md)"
   cases := [
     { name := "doc comments are stored on declarations: commands, constructors, fields, mutual, private", run := fun _ => do

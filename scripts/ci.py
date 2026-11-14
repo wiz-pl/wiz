@@ -4,8 +4,9 @@
   scripts/ci.py matrix [--only JSON] [BIN]
                                      the shards of .github/test-shards.json as a JSON
                                      matrix (one line, for $GITHUB_OUTPUT); each shard's
-                                     selectors are joined by newlines, and "heavy"
-                                     says whether it may use the self-hosted runner;
+                                     selectors are joined by newlines, "heavy"
+                                     says whether it may use the self-hosted runner, and
+                                     "jobs" how many cases it runs at a time (`--jobs`);
                                      with --only ["NAME",…], only those shards (and
                                      their parts) A shard with
                                      "split": N becomes N shards NAME-1 … NAME-N, its
@@ -184,18 +185,20 @@ def part_selectors(items):
 
 def expanded(binary, base=None):
     """The shards with each split shard replaced by its parts: [(name, selectors,
-    estimated seconds or None)]."""
+    estimated seconds or None, jobs)]; `jobs` is the shard's "--jobs" (1 unless the shard
+    says "jobs": N: the number of cases of a parallel-opted-in group it runs at a time)."""
     out = []
     for s in resolved(binary):
         n = s.get("split", 1)
+        jobs = s.get("jobs", 1)
         if n <= 1:
-            out.append((s["name"], s["select"], None))
+            out.append((s["name"], s["select"], None, jobs))
             continue
         base = base or baseline()
         items = estimate(list_cases(binary, s["select"]), base)
         for k, p in enumerate(partition(items, n, base["builds"]), 1):
             if p:
-                out.append((f"{s['name']}-{k}", part_selectors(p), part_cost(p, base["builds"])))
+                out.append((f"{s['name']}-{k}", part_selectors(p), part_cost(p, base["builds"]), jobs))
     return out
 
 
@@ -209,13 +212,14 @@ def matrix(binary, only=None):
         return n in heavy or (base in split and base in heavy)
     def wanted(n):
         return only is None or n in only or (n.rsplit("-", 1)[0] in split and n.rsplit("-", 1)[0] in only)
-    print(json.dumps({"shard": [{"name": n, "select": "\n".join(sel), "heavy": is_heavy(n)}
-                                for n, sel, _ in expanded(binary) if wanted(n)]}, ensure_ascii=False))
+    print(json.dumps({"shard": [{"name": n, "select": "\n".join(sel), "heavy": is_heavy(n),
+                                 "jobs": jobs}
+                                for n, sel, _, jobs in expanded(binary) if wanted(n)]}, ensure_ascii=False))
 
 
 def plan(binary):
     base = baseline()
-    for name, sel, est in expanded(binary, base):
+    for name, sel, est, _ in expanded(binary, base):
         if est is None:
             continue
         cases = list_cases(binary, sel)
@@ -241,7 +245,7 @@ def check_shards(binary):
                 errors.append(f"shard {s['name']!r}: selector {sel!r} selects no group")
     runs = {(g, i): [] for g, i, _ in list_cases(binary, [])}
     parts = expanded(binary)
-    for name, sel, _ in parts:
+    for name, sel, _, _ in parts:
         for g, i, _ in set(list_cases(binary, sel)):  # a case selected twice within a shard still runs once
             runs[(g, i)].append(name)
     for g in groups:
@@ -271,7 +275,7 @@ def check_shards(binary):
 # Path filters (`changes`). Files only people read: a change of only these runs no build
 # and no tests.
 DOCS = ["docs/*", "*.md", "LICENSE", "COPYING*"]
-# Files every shard depends on: the Lean sources (compiler, tests, grail, tower), the
+# Files every shard depends on: the Lean sources (compiler, tests, grail), the
 # build and its toolchain, the C runtime, CI itself. A change to any runs every shard.
 EVERYTHING = ["*.lean", "lakefile.*", "lean-toolchain", "lake-manifest.json", "flake.*",
               "devenv.*", ".envrc", "runtime/*", "c/*", "scripts/*", ".github/*", "grail.wiz"]

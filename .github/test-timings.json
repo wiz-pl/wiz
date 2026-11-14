@@ -772,15 +772,6 @@
    "examples/tour/11-mistakes.wiz": {"seconds": 2.373}
   },
   "tower": {
-   "from Nix: a flake's package, linked as a GC root": {"seconds": 0.515},
-   "from a release tarball (scripts/release-tarball.sh), and linked toolchains": {"seconds": 0.791},
-   "from source: install, channels, update, shims, +SPEC, run": {"seconds": 5.24},
-   "release snapshots: per-commit tarballs, nightly by its tag, pruned commits": {"seconds": 1.587},
-   "settings, wiz-toolchain files, overrides and the default": {"seconds": 0.482},
-   "the Lean functions: settings, specs, flake references": {"seconds": 0.039},
-   "wiz-toolchain.local: a spec or a path, over wiz-toolchain; bad paths; the shims": {"seconds": 0.769}
-  },
-  "tower-wiz": {
    "from Nix: a flake's package, linked as a GC root": {"seconds": 1.047, "uses": ["tower-wiz"]},
    "from a release tarball (scripts/release-tarball.sh), and linked toolchains": {"seconds": 1.132, "uses": ["tower-wiz"]},
    "from source: install, channels, update, shims, +SPEC, run": {"seconds": 5.087, "uses": ["tower-wiz"]},

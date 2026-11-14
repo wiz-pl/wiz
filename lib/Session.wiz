@@ -17,7 +17,7 @@ types, Toninho–Caires–Pfenning 2011). The other end follows the `dual`. Two 
     endpoint can be neither dropped nor copied), so every step of the protocol happens,
     in order, and the channel is closed at the end. `Chan.fork` is the only way to make
     a channel, and it hands the two ends to two different threads. In compiled code a
-    channel is a native queue and `fork` starts a thread (runtime/wiz.c, `wiz_chan_*`, 25a);
+    channel is a native queue and `fork` starts a thread (runtime/, `wiz_chan_*`, 25a);
     `#eval`/`#run` can't run threads, and run `Proc.runLinked`'s model (`link`) instead.
 
 Sequence linear steps with `do1` or `IO.bind` (both take the action and the continuation

@@ -30,7 +30,7 @@ checked. Making the handles themselves linear (and
 the operations direct style, `(1 o : Owned f) → … → IO (Owned f)`) needs linear Σ fields
 (linear-case stage 2); then lib/Sys.wiz and lib/Serial.wiz move onto this module.
 
-Trusted: the two natives `wiz_handle_own`/`wiz_handle_disown` (runtime/wiz.c: an empty
+Trusted: the two natives `wiz_handle_own`/`wiz_handle_disown` (runtime/: an empty
 box, as an MVar hole) and their private `extern`s; nothing else reaches `Owned`. Extern
 privacy is by name only: another module could bind `wiz_handle_own` with any type (it
 would show in `#print axioms`), the same gap as MVar.Hole, Lock.Guard and Chan.

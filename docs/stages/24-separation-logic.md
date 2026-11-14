@@ -214,7 +214,7 @@ model is argued in its header, not yet mechanised);
 then a scheduler semantics, CSL with resource invariants and PCM ghost state (CS10a).
 SteelCore's action trees with `Par` nodes are the model for where concurrency goes.
 
-## 24e: notation for specifications, and goals that print in it ✅
+## 24e: notation for specifications, and goals that print in it
 
 ```
 def Prog.read_spec (l v : Nat) : ⦃l ↦ v⦄ Prog.read l ⦃r, l ↦ v ⋆ ⌜r = v⌝⦄ := by xgo

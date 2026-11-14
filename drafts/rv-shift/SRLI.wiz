@@ -1,0 +1,160 @@
+import Rv.Proofs
+import BitVecShift
+-- SRLI probe: the barrel shifter's right stages as `BitVec.lshr`, for `SRLI x9, x2, 9`.
+--
+-- A right stage is `concat (fill) (slice j (32-j) x)`, i.e. `BitVec.shrStage (32-j) j f`
+-- (lib/BitVecShift.wiz). For SRLI the fill is `Hw.and d.alt (bit 31 a)` with `d.alt = 0`,
+-- so its value is 0 — but the proofs keep the fill *value* `K = fill.toNat` symbolic (a
+-- stuck application, so every `Nat` step is a genuine equation rather than the `Nat`
+-- normalizer's `True`; see wiz-notes/rv-shift-lemmas.md §7). `shamt = 9` turns on stages
+-- 1 and 8; `Bits.high_low`/`high_high`/`high_add_pow_l`/`low_low_rev` put the
+-- composition in `BitVec.lshr`'s normal form, and the final `K = 0` steps eliminate the
+-- fill products by `transp` from their (definitionally true) zero instances.
+--
+-- Check: wiz check --no-cache -I /workspace/wt/wiz-rv-rtl/src drafts/rv-shift/SRLI.wiz
+
+-- the barrel's fill word at width `j`, by the fill bit `F`
+def Rs.fillW (j : Nat) (F : BitVec 1) : BitVec j :=
+  match BitVec.isTrue F with
+  | .true => BitVec.ofNat j (Nat.sub (Nat.pow 2 j) 1)
+  | .false => BitVec.ofNat j 0
+
+-- its value, with the fill bit symbolic
+def Rs.fillW_toNat (j : Nat) (F : BitVec 1) :
+    (Rs.fillW j F).toNat = Nat.mul F.toNat (Nat.sub (Nat.pow 2 j) 1) :=
+  Or.elim (UIntN.cases1 F)
+    (fun e => transp (fun t _ => (Rs.fillW j t).toNat
+        = Nat.mul t.toNat (Nat.sub (Nat.pow 2 j) 1)) (BitVec.toNat_zero j) (Eq.symm e))
+    (fun e => transp (fun t _ => (Rs.fillW j t).toNat
+        = Nat.mul t.toNat (Nat.sub (Nat.pow 2 j) 1))
+      (Eq.trans
+        (Eq.trans (Bits.wofNat_val j (Nat.sub (Nat.pow 2 j) 1))
+          (Bits.low_of_lt j (Nat.sub (Nat.pow 2 j) 1) (Word.pow_pred_lt j)))
+        (Eq.symm (Nat.one_mul (Nat.sub (Nat.pow 2 j) 1))))
+      (Eq.symm e))
+
+-- one stage at width 32 (`m = 32 - j`), the barrel's own shape
+def Rs.stage1 (F : BitVec 1) (x : BitVec 32) : BitVec 32 :=
+  BitVec.concat (Rs.fillW 1 F) (BitVec.ofNat 31 (Nat.shiftRight x.toNat 1))
+def Rs.stage8 (F : BitVec 1) (y : BitVec 32) : BitVec 32 :=
+  BitVec.concat (Rs.fillW 8 F) (BitVec.ofNat 24 (Nat.shiftRight y.toNat 8))
+
+-- the stage chain of `shamt = 9` (stages 1 and 8; 2, 4 and 16 are off)
+def Rs.srli9Stages (F : BitVec 1) (x : BitVec 32) : BitVec 32 := Rs.stage8 F (Rs.stage1 F x)
+
+def Rs.barrel9_eq (F : BitVec 1) (x : BitVec 32) :
+    barrel (r := HwTy.El) (BitVec.ofNat 1 0) F (BitVec.ofNat 5 9) x = Rs.srli9Stages F x := rfl
+
+def Rs.stage1_toNat (F : BitVec 1) (x : BitVec 32) :
+    (Rs.stage1 F x).toNat
+      = Bits.low 32 (Nat.add (Nat.mul (Nat.mul F.toNat (Nat.sub (Nat.pow 2 1) 1)) (Nat.pow 2 31))
+          (Bits.low 31 (Bits.high 1 x.toNat))) :=
+  Eq.trans
+    (BitVec.shrStage_toNat 31 1 (Rs.fillW 1 F) x)
+    (Bits.congr (fun t => Bits.low 32 (Nat.add (Nat.mul t (Nat.pow 2 31))
+        (Bits.low 31 (Bits.high 1 x.toNat)))) (Rs.fillW_toNat 1 F))
+
+def Rs.stage8_toNat (F : BitVec 1) (y : BitVec 32) :
+    (Rs.stage8 F y).toNat
+      = Bits.low 32 (Nat.add (Nat.mul (Nat.mul F.toNat (Nat.sub (Nat.pow 2 8) 1)) (Nat.pow 2 24))
+          (Bits.low 24 (Bits.high 8 y.toNat))) :=
+  Eq.trans
+    (BitVec.shrStage_toNat 24 8 (Rs.fillW 8 F) y)
+    (Bits.congr (fun t => Bits.low 32 (Nat.add (Nat.mul t (Nat.pow 2 24))
+        (Bits.low 24 (Bits.high 8 y.toNat)))) (Rs.fillW_toNat 8 F))
+
+def Rs.srli9Stages_toNat (F : BitVec 1) (x : BitVec 32) :
+    (Rs.srli9Stages F x).toNat
+      = Bits.low 32 (Nat.add (Nat.mul (Nat.mul F.toNat (Nat.sub (Nat.pow 2 8) 1)) (Nat.pow 2 24))
+          (Bits.low 24 (Nat.add (Nat.mul (Nat.mul F.toNat (Nat.sub (Nat.pow 2 1) 1)) (Nat.pow 2 23))
+            (Bits.low 23 (Bits.high 9 x.toNat))))) :=
+  let K := F.toNat;
+  let F1 := Nat.mul K (Nat.sub (Nat.pow 2 1) 1);
+  let F8 := Nat.mul K (Nat.sub (Nat.pow 2 8) 1);
+  let L1 := Bits.low 31 (Bits.high 1 x.toNat);
+  let H9 := Bits.high 9 x.toNat;
+  Eq.trans
+    (Rs.stage8_toNat F (Rs.stage1 F x))
+    (Eq.trans
+      (Bits.congr (fun t => Bits.low 32 (Nat.add (Nat.mul F8 (Nat.pow 2 24))
+          (Bits.low 24 (Bits.high 8 t)))) (Rs.stage1_toNat F x))
+      (Eq.trans
+        (Bits.congr (fun t => Bits.low 32 (Nat.add (Nat.mul F8 (Nat.pow 2 24))
+            (Bits.low 24 t))) (Bits.high_low 8 24 (Nat.add (Nat.mul F1 (Nat.pow 2 31)) L1)))
+        (Eq.trans
+          (Bits.congr (fun t => Bits.low 32 (Nat.add (Nat.mul F8 (Nat.pow 2 24))
+              (Bits.low 24 (Bits.low 24 t)))) (Bits.high_add_pow_l 23 8 F1 L1))
+          (Eq.trans
+            (Bits.congr (fun t => Bits.low 32 (Nat.add (Nat.mul F8 (Nat.pow 2 24))
+                (Bits.low 24 (Bits.low 24 (Nat.add (Nat.mul F1 (Nat.pow 2 23)) t)))))
+              (Eq.trans
+                (Bits.high_low 8 23 (Bits.high 1 x.toNat))
+                (Bits.congr (fun t => Bits.low 23 t) (Bits.high_high 8 1 x.toNat))))
+            (Bits.congr (fun t => Bits.low 32 (Nat.add (Nat.mul F8 (Nat.pow 2 24)) t))
+              (Bits.low_low 24 24 (Nat.add (Nat.mul F1 (Nat.pow 2 23)) (Bits.low 23 H9)) rfl))))))
+
+-- the SRLI leaf: fill = 0, so the two fill products vanish and the chain ends at `lshr`.
+-- `F` and `hf : F.toNat = 0` are parameters (the fill is a variable in the proof, so
+-- none of the zero steps is a definitionally-`True` equation that `Eq.trans` cannot
+-- chain; the circuit's fill is the literal zero word, passed at the use below).
+def Rs.srli9_zero_toNat (F : BitVec 1) (x : BitVec 32) (hf : F.toNat = 0) :
+    (Rs.srli9Stages F x).toNat
+      = Bits.low 32 (Bits.high 9 x.toNat) :=
+  let K := F.toNat;
+  let F1 := Nat.mul K (Nat.sub (Nat.pow 2 1) 1);
+  let F8 := Nat.mul K (Nat.sub (Nat.pow 2 8) 1);
+  let L1 := Bits.low 31 (Bits.high 1 x.toNat);
+  let H9 := Bits.high 9 x.toNat;
+  let h23 : Nat.lt H9 (Nat.pow 2 23) = .true := Bits.high_lt 9 23 x.toNat (UIntN.toNat_lt x);
+  let h32 : Nat.lt H9 (Nat.pow 2 32) = .true := Bits.high_lt_pow 9 32 x.toNat (UIntN.toNat_lt x);
+  let hX : Nat.mul F8 (Nat.pow 2 24) = 0 :=
+    transp (fun t _ => Nat.mul (Nat.mul t (Nat.sub (Nat.pow 2 8) 1)) (Nat.pow 2 24) = 0)
+      rfl (Eq.symm hf);
+  let hZ : Nat.mul F1 (Nat.pow 2 23) = 0 :=
+    transp (fun t _ => Nat.mul (Nat.mul t (Nat.sub (Nat.pow 2 1) 1)) (Nat.pow 2 23) = 0)
+      rfl (Eq.symm hf);
+  let hY : Nat.add (Nat.mul F8 (Nat.pow 2 24))
+        (Bits.low 24 (Nat.add (Nat.mul F1 (Nat.pow 2 23)) (Bits.low 23 H9)))
+      = Bits.low 24 (Nat.add (Nat.mul F1 (Nat.pow 2 23)) (Bits.low 23 H9)) :=
+    transp (fun t _ => Nat.add t (Bits.low 24 (Nat.add (Nat.mul F1 (Nat.pow 2 23)) (Bits.low 23 H9)))
+        = Bits.low 24 (Nat.add (Nat.mul F1 (Nat.pow 2 23)) (Bits.low 23 H9))) rfl (Eq.symm hX);
+  let hW : Nat.add (Nat.mul F1 (Nat.pow 2 23)) (Bits.low 23 H9) = Bits.low 23 H9 :=
+    transp (fun t _ => Nat.add t (Bits.low 23 H9) = Bits.low 23 H9) rfl (Eq.symm hZ);
+  Eq.trans
+    (Rs.srli9Stages_toNat F x)
+    (Eq.trans
+      (Bits.congr (fun t => Bits.low 32 t) hY)
+      (Eq.trans
+        (Bits.congr (fun t => Bits.low 32 (Bits.low 24 t)) hW)
+        (Eq.trans
+          (Bits.low_low_rev 24 32 (Bits.low 23 H9) rfl)
+          (Eq.trans
+            (Bits.low_low_rev 23 24 H9 rfl)
+            (Eq.trans
+              (Bits.low_of_lt 23 H9 h23)
+              (Eq.symm (Bits.low_of_lt 32 H9 h32)))))))
+
+def Rs.barrel9_srli (x : BitVec 32) :
+    barrel (r := HwTy.El) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 5 9) x
+      = BitVec.lshr x 9 :=
+  UIntN.ext
+    (barrel (r := HwTy.El) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 5 9) x)
+    (BitVec.lshr x 9)
+    (Eq.trans
+      (Bits.congr (fun w => w.toNat) (Rs.barrel9_eq (BitVec.ofNat 1 0) x))
+      (Eq.trans (Rs.srli9_zero_toNat (BitVec.ofNat 1 0) x rfl)
+        (Eq.symm (BitVec.lshr_low_toNat 32 9 x))))
+
+-- The execute cycle, as `Pf.ok` needs it
+def Rs.srli_pc (a : Arch) : BitVec 32 := BitVec.add a.pc (BitVec.ofNat 32 4)
+
+def Rs.srli9_G (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32)
+    (cnt srd : BitVec 5) (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) :
+    Pf.G a (Pf.w (A.srli 9 2 9)) 9 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio
+        (Pf.bytes (Pf.w (A.srli 9 2 9))) = Pf.spec a (Pf.w (A.srli 9 2 9)) 9 :=
+  Eq.congrArg (fun v => (Rs.srli_pc a, v)) (Rs.barrel9_srli (Pf.rf a (BitVec.ofNat 4 2)))
+
+def Rs.srli_ok : Pf.Claim (Pf.w (A.srli 9 2 9)) 9 :=
+  fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
+    Pf.ok a (Pf.w (A.srli 9 2 9)) 9 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio
+      (Rs.srli9_G a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio) h

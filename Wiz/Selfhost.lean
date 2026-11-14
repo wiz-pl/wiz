@@ -69,10 +69,11 @@ def checkerFiles : List String :=
 
 def compilerFiles : List String := checkerFiles ++ ["selfhost/Backend.wiz"]
 
-/-- The self-hosted checker: reads `input.wiz` and prints what the frontend makes of it. -/
+/-- The self-hosted checker: reads `input.wiz` (and the modules it imports, with `-I`
+roots) and prints what the frontend makes of them. -/
 def checkerSource (srcs : List String) : String :=
   "import IO\nimport Std\n" ++ "\n".intercalate (srcs.map strip) ++ "\n" ++ tablesSource ++
-    "def main : IO Unit := do\n  text ← IO.readFile \"input.wiz\";\n  printAll (checkFile cats tokens text)\n"
+    "def main : IO Unit := moduleMain cats tokens\n"
 
 /-- The self-hosted compiler: reads `input.wiz` and prints C (the frontend's output as
 comments). `--rc` (or `--rc-owned`, `--gc`) on its command line picks the backend's
@@ -91,8 +92,10 @@ def compilerSource (srcs : List String) : String :=
     "def finish (args : List String) (text : String) (out : List String) (gs : Globals) (missing : List String) : IO Unit :=\n" ++
     "  match List.append (errLines (List.reverseOf out .nil)) missing with\n  | .nil => do\n    printAll (commentLines (List.reverseOf out .nil));\n" ++
     "    printDocs (genProgramArgs args text gs)\n  | .cons e es => do\n    ePrintAll (.cons e es);\n    Process.exit 1\n" ++
-    "def main : IO Unit := do\n  args ← IO.args;\n  text ← IO.readFile \"input.wiz\";\n  match runCommands cats tokens .nil (String.codes text) 0 Globals.empty .nil with\n" ++
-    "    | .mk out gs _ _ _ => IO.bind (missingLinks (List.reverseOf (Globals.ffi gs) .nil)) (fun missing => finish args text out gs missing)\n"
+    "def main : IO Unit := do\n  args ← IO.args;\n  text ← IO.readFile \"input.wiz\";\n" ++
+    "  tab ← moduleRootSources cats tokens (modRoots args) text;\n" ++
+    "  match modCheckRun cats tokens tab (.cons \"Main\" .nil) with\n" ++
+    "    | .mk run _ _ _ => IO.bind (missingLinks (List.reverseOf (Globals.ffi (Run.gs run)) .nil)) (fun missing => finish args text (Run.out run) (Run.gs run) missing)\n"
 
 /-- The toolchain as its own input (for the bootstrap check): the compiler's source, with
 `import Prelude` (the self-hosted frontend's prelude) instead of the Lean libraries. -/

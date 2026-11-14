@@ -9,7 +9,7 @@ representations, updated in place when they are unique.
 * `Str`: UTF-8 text in a native buffer (`Str.append`, `Str.slice`, `Str.byte`);
 * `StrMap V`: a map from `Str` keys to values (`StrMap.insert`, `StrMap.findD`).
 
-They are axioms with `extern` operations, implemented by the runtime (runtime/wiz.c).
+They are axioms with `extern` operations, implemented by the runtime (runtime/).
 When a value is unique (its reference count is one), `push`, `set` and `insert`
 update it in place instead of copying it.
 

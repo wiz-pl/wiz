@@ -38,7 +38,7 @@ $ wiz run fact.wiz        # def main : Nat := fact 30
   `main`'s type. The C compiler is `--cc X` (default `cc`), with `--cflags "…"` and
   `--ldflags "…"` for GMP ([stage 23a](23-grail.md): flags, not environment variables). The C tests
   skip themselves if GMP isn't found.
-* **Runtime** (`runtime/wiz.c`, embedded in the compiler): a value is a word; scalars
+* **Runtime** (`runtime/`, embedded in the compiler): a value is a word; scalars
   have the low bit set; objects have a header (reference count, tag, size). Closures
   point to a boxed entry and share or move their captured arguments when applied.
   Numbers that don't fit in 62 bits are GMP integers. Projecting a number gives its

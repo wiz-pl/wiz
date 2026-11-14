@@ -60,6 +60,19 @@ def builtinGroup : Group where
         okLib ("import Prelude\ndef t1 : Nat.divGo 17 17 5 = 3 := refl 3\n" ++
           "def t2 : Nat.bitwise Bool.xor 30 12 10 = 6 := refl 6\ndef t3 : Nat.bitwise Bool.and 30 12 10 = 8 := refl 8\n" ++
           "def t4 : Nat.log2Go 9 9 = 3 := refl 3\ndef t5 : Nat.powFrom 10 2 = 1024 := refl 1024") },
+    { name := "a Nat operation's erased argument is not compared (nat zero step)", run := fun _ =>
+        -- `Nat.add (Nat.mul 0 2) X` is `X`: conversion must not descend into a stuck `X`
+        -- (here `f y`, or a `Nat.div`-heavy tree) before finding that out; a re-entry there
+        -- made this comparison not terminate (wiz-notes/rv-shift-lemmas.md §7).
+        okLib ("import Prelude\n" ++
+          "def t (f : Nat → Nat) (y : Nat) : f y = Nat.add (Nat.mul 0 (Nat.pow 2 1)) (f y) := rfl\n" ++
+          "def tree : Nat → Nat → Nat\n  | .zero, z => z\n  | .succ k, z => Nat.add (tree k z) (tree k z)\n" ++
+          "def u (z : Nat) : Nat.mul 0 (tree 8 z) = Nat.mul 0 (tree 8 (Nat.add (Nat.mul 0 (Nat.pow 2 1)) z)) := rfl\n" ++
+          "def v (z : Nat) : Nat.div (Nat.add (Nat.mul 0 (Nat.pow 2 1)) z) 2 = Nat.div z 2 := rfl\n" ++
+          -- the product is 0 whatever `slow` is: forcing it here made the check cost `slow`'s
+          -- whole `Nat.divGo` recursion (200000 was 46 s before the fix)
+          "def slow : Nat := Nat.divGo 20000 20000 1\n" ++
+          "def w : Nat.mul 0 slow = Nat.mul 0 (Nat.add (Nat.mul 0 (Nat.pow 2 1)) slow) := rfl") },
     { name := "implemented_by: compiled code runs the implementation, the kernel the model", run := fun _ => do
         -- the implementation is trusted: here it deliberately differs, to show which runs
         let src := "import Prelude\ndef model (n : Nat) : Nat := n\ndef impl (n : Nat) : Nat := n + 1\n" ++

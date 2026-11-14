@@ -41,6 +41,46 @@ Not yet: facts like `Vec.get v (Fin.of 3 1 rfl) = 20 := rfl` (the `rfl` shape
 problem above; `drafts/vec-lib/VecProofs.wiz`), arithmetic facts about `BitVec` in general, numerals and operators
 (`a + b`) for `BitVec` (decision HD9).
 
+`lib/BitVecShift.wiz` (`import BitVecShift`): the first of those arithmetic facts, for
+shifts. `BitVec.toNat_concat_zero`, `BitVec.shl_toNat` and `BitVec.shlStage_toNat` put
+the barrel's left `concat`/`slice` stages and `BitVec.shl` in one normal form (the low
+bits of a product); `Bits.low_shift` and `Bits.low_low` compose stages. The right-shift
+side has `BitVec.lshr_toNat`/`lshr_low_toNat` (`Bits.high`, the barrel's other normal
+form), the stage `BitVec.shrStage`/`shrStage_toNat`, and the stage-composition facts
+`Bits.low_of_lt`, `Bits.low_low_rev`, `Bits.high_high`, `Bits.high_lt`,
+`Bits.div_add_pow`/`high_add_pow`, `Bits.high_add_pow_l`, `Bits.high_low`, plus the fill
+lemmas `BitVec.and_zero_left`/`and_one_left`/`and_zero_toNat` and the fill-by-value
+stage `BitVec.fillWord`/`shrStageK` (a symbolic fill value, so a probe's `Nat` steps are
+genuine equations). For arithmetic shifts `Bits.sub_one_high` and `Bits.sub_pow_ones` are
+the ones-fill identities, `Bits.pow_add`/`pow_sub`/`dec_mul`/`add_sub_one` are its `Nat`
+lemmas, and `IntN.shiftRight_pos_toNat`/`neg_toNat`/`neg_ones_toNat` read
+`IntN.shiftRight` (the `BitVec.ashr` of `lib/BitVec.wiz`) in `toNat` form; they use the
+now-public `IntN.shiftRightBody`/`IntN.below_toNat` of `lib/Word.wiz`. This is the lemma set the RV core's barrel shifter proofs need (SLLI is closed;
+the right-shift instruction probes are blocked on a conversion limitation, see
+`wiz-notes/rv-shift-lemmas.md`). It imports `BitBlast` for `Bits.low`, so it is a proof
+module, not part of `BitVec` itself.
+
+`lib/BitVecAdd.wiz` (`import BitVecAdd`): the 34-bit carry/borrow adder of a RISC-V ALU
+in word form. `BitVec.adcForm` is `zext1 {a, 1} + zext1 {b', sub}` (`b' = b`, or `~b`
+when subtracting, `BitVec.muxBit` being `Hw.mux` at values) and `BitVec.adc` is its
+`slice 1 32`, so `BitVec.adc s a b` is the core's expression for any control bit `s`.
+The bridge puts the pieces in the same `toNat`/`Bits.low` normal form as
+`BitVecShift`: `BitVec.catToNat`/`zext1ToNat` for a concatenation, `Bits.low33_cat`/
+`low33_cat0` (`Bits.low_of_lt` under `A * 2 + 1 < 2^33`, from `Bits.cat_lt`),
+`Bits.div_low_succ` (a `low (w+1)` divided by 2 is the `low w` of the divide, so the
+carry bit falls off) and `Bits.div_two_add`/`div_two`. The result is
+`BitVec.adc_zero`/`adc_one` (`add`/`sub`) and `BitVec.adc_eq`
+(`adc s a b = muxBit s (sub a b) (add a b)`), plus the `toNat` forms `adcW1`,
+`adcW2_zero`, `adcW2_one`, `adc_zero_toNat`, `adc_one_toNat`. This closes FINDINGS.md
+H2 for `wiz-rv`: ADD, ADDI and SUB are one `Eq.congrArg` each
+(`drafts/rv-add/AddSub.wiz`). For the comparisons it also has the carry-out half:
+`Bits.div_div` (`(n/2^k)/2^j = n/2^(k+j)`), `Bits.div_low_pow`
+(`div (low (w+1) n) 2^w = low 1 (div n 2^w)`), `Bits.div_one_of` (`P ≤ Z < 2P → Z/P = 1`)
+and `Bits.borrow_le`/`borrow_gt` (the borrow of `a + (2^32 - b)`, i.e. `a < b`). It
+imports `BitVecShift` for the `Bits.low`/`low_low` lemmas, so it is a proof module too;
+what remains for SLT/SLTU is the 1-bit assembly around `bitOf 33` (see
+`drafts/rv-add/README.md` and `wiz-notes/rv-core-proofs.md`).
+
 ## H14 S0: hardware as tagless-final code, with sharing
 
 `lib/Hdl/Core.wiz` (`import Hdl.Core`) is the L2 layer of the HDL plan: combinational
@@ -479,12 +519,32 @@ data fed to a clock port, a pad on a data output.
 Registers stay on the one implicit clock. For more clocks a `Clocking` (`Hdl.Prim`)
 describes a top-level wrapper: `Verilog.emitTop n ck` prints the circuit as `NAME_core`
 and a module `NAME` whose clock primitive (a PLL, `X7.pll`) takes the board's `clk`, and
-drives the core's `clk` and its clock inputs through BUFGs. Logic in several clock
-domains (CDC) is not supported.
+drives the core's first clock through a BUFG and each other domain from a PLL output
+(through a BUFG) or an input pin (`Clocking.domains`).
+
+Clock domains (`ClockDomain`: the Verilog net and its period; `ClockDomain.sys` is `clk`)
+name a design's clocks without giving a circuit a second one: a circuit's registers and
+memories are all on the domain `Circuit.netlistIn d` builds it for, and
+`Circuit.netlist` is the `sys` case. A design with two clocks is a composition of such
+circuits wired at the top; data crossing from one domain into another must pass a
+synchroniser (`Hdl.Cdc`'s `Cdc.sync2 dst d`: two flops in the destination domain,
+declared with `Prim.declSync`). `Netlist.domainErrors` (appended to `Netlist.errors` next
+to `Netlist.kindErrors`) infers each node's domain (`Net.domOf`: an input from its
+port's, a register or memory read from its own, a synchroniser's output from its clock's,
+anything else the union of its arguments') and rejects a combinational path that mixes
+domains, a register or memory write sampling another domain, a synchroniser clocked by
+the domain it samples, and a domain the netlist does not declare. `Cdc.verilog` is the
+Verilog module `wiz_sync2` that the emitted instances refer to, with `async_reg`. A
+clock used as data, and data fed to a clock port, stay kind errors. A primitive clock
+output can name its domain (`Prim.withOutDom`; `X7.bufgIn d` is a BUFG on `d`'s output),
+so a synchroniser clocked by a BUFG output is in that domain.
 
 Simulation: a primitive without a model is 0 at values and in `Netlist.simulate`.
 `Netlist.unmodelled`/`Circuit.unmodelled` name such instances, and
-`Circuit.runModelled`/`Netlist.simulateModelled` refuse to run a circuit with one.
+`Circuit.runModelled`/`Netlist.simulateModelled` refuse to run a circuit with one. They
+also refuse a netlist with more than one clock domain (`Netlist.domainRefusals`): its
+registers tick at different rates, which the one-tick-per-input simulation cannot
+express (a merged event schedule is not implemented).
 
 `Hdl.Xilinx7` (`X7.*`) declares the 7-series cells of a DDR3 PHY: OBUF, IBUF, IOBUF,
 OBUFDS, IOBUFDS, BUFG (with models), ODDR, OSERDESE2 (8:1 DDR with tristate),
@@ -492,6 +552,36 @@ ISERDESE2 (NETWORKING 8:1 DDR, from an IDELAYE2), IDELAYE2 (VAR_LOAD, 200 MHz re
 IDELAYCTRL, and PLLE2_BASE as a `Clocking`. Tests (group `hdl`, examples/hdl-prim.wiz):
 the Verilog, refusal, buffer models and kind errors, and yosys synth_xilinx keeping every
 cell.
+
+## H14 P2: several clock domains at the top: `Multi`, `Clocking.domains`, constraints
+
+`Multi` (`Hdl.Core`) composes single-clock `Circuit`s into one design. A `MultiPart` is a
+circuit, its `ClockDomain` and the top-level name of each input and output leaf
+(`MultiPart.circuit`); a `MultiWire` is either `link src dst`, which renames the
+destination input to the source node (no hardware, and the domain checker sees the
+crossing), or `through cell ins outs`, one primitive instance between named nets
+(`Cdc.wire dst src dstName` is `Cdc.sync2` as a top-level wire). `Multi.netlist` replays
+the parts into one netlist, prefixing registers and memories with the part's name,
+creates one top-level input/output for every unconnected port, shares one clock net per
+domain, and runs `Netlist.kindErrors`/`Netlist.domainErrors` on the result;
+`Multi.verilog` emits it. Wires must read names built earlier (parts are flattened in
+order), so a wire's source is a previous part's output or a clock domain.
+
+`Clocking.domains` maps each clock port/domain of the core to a `ClockSource`: `.pll out`
+(a PLL output, through a BUFG) or `.pin port` (an input pin, connected directly).
+`Verilog.emitTop` connects every clock port of the core (the first through `sys`'s BUFG)
+and declares the pin ports; `Clocking.problems` reports a domain with no source.
+
+`Xdc.emit` writes a `create_clock` for every clock domain (`ClockDomain.periodPs`; the
+first falls back to the board's period) and a package pin for a second clock the board's
+table names; `Xdc.check` also compares the first domain's period with the board's and
+asks every later domain for a period (`Netlist.clockProblems`). `Pcf.emit` writes a
+`set_frequency` for each domain with a known period, and `Pcf.check` reports a missing
+one. The example/tests (group `hdl`, examples/hdl-cdc.wiz) are a `link` crossing
+(rejected) and a `Cdc.wire` crossing (accepted) between two parts, their core and wrapper
+Verilog, the XDC/PCF text, a BUFG output as a synchroniser's clock (`Prim.withOutDom`),
+and the multi-clock simulation refusal.
+
 ## H14 V1: verified circuit optimisation (`lib/Hdl/Verified.wiz`)
 
 The OLED demo's arithmetic units (wiz-icestick-uart, branch oled-demo: `Sphere.wiz`,
@@ -594,7 +684,7 @@ at quantity 1, so one owner per cell, no leak, no double free and no use after f
 all type errors. The token's ghost index is the cell's value, so a function's type is its
 Hoare triple: `swap : (1 tp : Pts p a) → (1 tq : Pts q b) → (1 k : (1 tp : Pts p b) →
 (1 tq : Pts q a) → IO B) → IO B`. `Ref.get` hands back the value with an erased proof
-that it is the index. The trusted part is the four natives `wiz_ref_*` (runtime/wiz.c,
+that it is the index. The trusted part is the four natives `wiz_ref_*` (runtime/,
 over MVar cells) and their types, kept true by an invariant the API maintains; the header
 of lib/Ref.wiz has the argument. Compiled code only.
 

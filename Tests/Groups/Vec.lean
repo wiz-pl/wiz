@@ -104,6 +104,37 @@ def vecGroup : Group where
           "#eval (BitVec.lshr (b8 128) 3).toNat\n#eval (BitVec.ashr (b8 128) 3).toNat\n#eval BitVec.getBit (b8 5) 2\n" ++
           "#eval BitVec.msb (b8 128)\n#eval BitVec.slt (b8 255) (b8 0)\n#eval BitVec.ult (b8 255) (b8 0)")
           ["8", "14", "6", "243", "2", "16", "240", ".true", ".true", ".true", ".false"] },
+    { name := "BitVecShift: barrel-shifter stages in toNat/low form (shl, lshr, high/low)", run := fun _ =>
+        okLibs ("import BitVecShift\n" ++
+          "def a (x : BitVec 8) (k : Nat) : (BitVec.shl x k).toNat = Bits.low 8 (Nat.mul x.toNat (Nat.pow 2 k)) := BitVec.shl_toNat 8 k x\n" ++
+          "def b (x : BitVec 4) : (BitVec.shlStage 2 2 x).toNat = Bits.low 4 (Nat.mul x.toNat 4) := BitVec.shlStage_toNat 2 2 x\n" ++
+          "def c (w j a : Nat) : Bits.low (Nat.add w j) (Nat.mul a (Nat.pow 2 j)) = Nat.mul (Bits.low w a) (Nat.pow 2 j) := Bits.low_shift w j a\n" ++
+          "def d (x : BitVec 4) : Bits.low 2 (Bits.low 4 x.toNat) = Bits.low 2 x.toNat := Bits.low_low 2 4 x.toNat rfl\n" ++
+          "def e (x : BitVec 8) (k : Nat) : (BitVec.lshr x k).toNat = Bits.high k x.toNat := BitVec.lshr_toNat 8 k x\n" ++
+          "def f (x : BitVec 8) (k : Nat) : (BitVec.lshr x k).toNat = Bits.low 8 (Bits.high k x.toNat) := BitVec.lshr_low_toNat 8 k x\n" ++
+          "def g (k j n : Nat) : Bits.high k (Bits.high j n) = Bits.high (Nat.add j k) n := Bits.high_high k j n\n" ++
+          "def h (j m n : Nat) (hp : Nat.lt n (Nat.pow 2 (Nat.add j m)) = .true) : Nat.lt (Bits.high j n) (Nat.pow 2 m) = .true := Bits.high_lt j m n hp\n" ++
+          "def i (k A B : Nat) : Nat.div (Nat.add (Nat.mul A (Nat.pow 2 k)) B) (Nat.pow 2 k) = Nat.add A (Nat.div B (Nat.pow 2 k)) := Bits.div_add_pow k A B\n" ++
+          "def j (k A B : Nat) : Bits.high k (Nat.add (Nat.mul A (Nat.pow 2 k)) B) = Nat.add A (Bits.high k B) := Bits.high_add_pow k A B\n" ++
+          "def k (w n : Nat) (hp : Nat.lt n (Nat.pow 2 w) = .true) : Bits.low w n = n := Bits.low_of_lt w n hp\n" ++
+          "def l (w v n : Nat) (hp : Nat.le w v = .true) : Bits.low v (Bits.low w n) = Bits.low w n := Bits.low_low_rev w v n hp\n" ++
+          "def m (b : BitVec 3) : BitVec.and (BitVec.ofNat 3 0) b = BitVec.ofNat 3 0 := BitVec.and_zero_left b\n" ++
+          "def n (b : BitVec 1) : BitVec.and (BitVec.ofNat 1 1) b = b := BitVec.and_one_left b\n" ++
+          "def o (w k a : Nat) (hk : Nat.le k w = .true) (ha : Nat.lt a (Nat.pow 2 w) = .true) : " ++
+          "Nat.sub (Bits.dec (Nat.pow 2 w)) (Bits.high k (Nat.sub (Bits.dec (Nat.pow 2 w)) a)) = " ++
+          "Nat.add (Nat.sub (Nat.pow 2 w) (Nat.pow 2 (Nat.sub w k))) (Bits.high k a) := Bits.sub_one_high w k a hk ha\n") },
+    { name := "BitVecAdd: the 34-bit carry/borrow adder is add/sub (concatenation, slice)", run := fun _ =>
+        okLibs ("import BitVecAdd\n" ++
+          "def a (x y : BitVec 32) : BitVec.adc (BitVec.ofNat 1 0) x y = BitVec.add x y := BitVec.adc_zero x y\n" ++
+          "def b (x y : BitVec 32) : BitVec.adc (BitVec.ofNat 1 1) x y = BitVec.sub x y := BitVec.adc_one x y\n" ++
+          "def c (s : BitVec 1) (x y : BitVec 32) : BitVec.adc s x y = BitVec.muxBit s (BitVec.sub x y) (BitVec.add x y) := BitVec.adc_eq s x y\n" ++
+          "def d (x : BitVec 32) : (BitVec.zext1 (BitVec.concat x (BitVec.ofNat 1 1))).toNat = Nat.add (Nat.mul x.toNat 2) 1 := BitVec.adcW1 x\n" ++
+          "def e (A : Nat) (h : Nat.Lt A (Nat.pow 2 32)) : Bits.low 33 (Nat.add (Nat.mul A 2) 1) = Nat.add (Nat.mul A 2) 1 := Bits.low33_cat A h\n" ++
+          "def f (w n : Nat) : Nat.div (Bits.low (Nat.succ w) n) 2 = Bits.low w (Nat.div n 2) := Bits.div_low_succ w n\n" ++
+          "def g (x y : BitVec 32) : (BitVec.adc (BitVec.ofNat 1 0) x y).toNat = Bits.low 32 (Nat.add x.toNat y.toNat) := BitVec.adc_zero_toNat x y\n" ++
+          "#eval BitVec.toNat (BitVec.adc (BitVec.ofNat 1 0) (BitVec.ofNat 32 4294967295) (BitVec.ofNat 32 2))\n" ++
+          "#eval BitVec.toNat (BitVec.adc (BitVec.ofNat 1 1) (BitVec.ofNat 32 3) (BitVec.ofNat 32 5))")
+          ["1", "4294967294"] },
     { name := "bit vectors: widths and bits as a Vec", run := fun _ =>
         okLibs (bvPrelude ++ "#eval (BitVec.concat (BitVec.ofNat 4 10) (BitVec.ofNat 4 3)).toNat\n" ++
           "#eval (BitVec.extract 5 2 (b8 60)).toNat\n#eval (BitVec.zeroExtend 16 (b8 200)).toNat\n" ++

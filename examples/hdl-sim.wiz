@@ -140,10 +140,10 @@ def badNet : Netlist :=
   Netlist.mk "bad"
     (.cons (NetNode.mk (NetOp.input 0) 4 .nil) (.cons (NetNode.mk NetOp.add 4 (.cons 0 (.cons 2 .nil)))
       (.cons (NetNode.mk (NetOp.reg 0) 4 .nil) .nil)))
-    (.cons (NetReg.mk "r" 4 5 1 .none .none) .nil)
-    (.cons (NetPort.mk "x" 4 0) .nil)
-    (.cons (NetPort.mk "y" 4 1) (.cons (NetPort.mk "z" 4 7) .nil))
-    .nil .nil .nil
+    (.cons (NetReg.mk "r" 4 5 1 .none .none "clk") .nil)
+    (.cons (NetPort.mk "x" 4 0 "clk") .nil)
+    (.cons (NetPort.mk "y" 4 1 "clk") (.cons (NetPort.mk "z" 4 7 "clk") .nil))
+    .nil .nil (.cons ClockDomain.sys .nil) .nil
 
 def badIns : List (List Nat) := Hdl.map (fun (k : Nat) => List.cons k List.nil) (Rng.trace 16 20 9)
 

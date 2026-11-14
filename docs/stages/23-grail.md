@@ -76,7 +76,7 @@ of the files that import what changed, and an edit that leaves the C alone stops
 The key also covers the grail binary itself, so a new elaborator rebuilds everything.
 
 There are no environment variables: the C compiler and its flags come from flags
-(`--cc`, `--cflags`, `--ldflags`, `--llc`, `-I DIR`, `--cache DIR`, `--no-cache`) or from
+(`--cc`, `--cflags`, `--ldflags`, `--llc`, `-I DIR`, `--cache DIR`, `--cache-ro DIR`, `--no-cache`) or from
 an uncommitted `grail.local.wiz` with this machine's paths (`nix develop` writes it from
 `flake.nix`):
 
@@ -91,7 +91,7 @@ def settings : Settings := Settings.empty
 
 `wiz` reads no environment variables: the toolchain record (`Wiz/Toolchain.lean`: C
 compiler and flags, `llc`, the collector's flags, the cache, module roots) comes from
-`--cc`, `--cflags`, `--ldflags`, `--libs`, `--llc`, `--cache DIR`/`--no-cache` and
+`--cc`, `--cflags`, `--ldflags`, `--libs`, `--llc`, `--cache DIR`/`--cache-ro DIR`/`--no-cache` and
 `-I DIR` (which replaces `$WIZ_PATH`), and is passed explicitly to everything that
 compiles. Its compiler fields are its `id`, which enters grail's keys.
 
@@ -118,9 +118,12 @@ nothing; `grail test FILTER` runs the tests whose path contains it, and
 
 ## 23g: parallel jobs
 
-The jobs form an explicit graph (`Grail/Graph.lean`): `ir F` depends on `check F`, …,
-`link E` on `obj F`, a check on the checks of the package modules it imports, a `run` test
-on its executable, the bootstrap steps on each other. A node's key is computed when its
+The jobs form an explicit graph (`Grail/Graph.lean`): `obj F` depends on `build F`
+(which checks `F` and writes its IR and C in one job: as `check F`, `ir F` and `c F`
+it elaborated the same source three times), …, `link E` on `obj F`, a check on the
+checks of the package modules it imports, a `run` test on its executable, the bootstrap
+steps on each other. A file that is already checked as a package module keeps its
+`check F` job and its C comes from `ir F`. A node's key is computed when its
 dependencies are done (an object's key hashes the C its `c` node wrote); a node whose
 output exists is up to date, the rest are jobs in a ready queue. `grail build -j N`
 (default: the cores, at most 4) runs up to `N` jobs at a time, each as a separate process
@@ -302,3 +305,35 @@ workspace root.
 The server reads the package's modules when it starts, as before: an edit to a module
 is seen by the files that import it after a restart (`:WizLspRestart`), and so is an
 edit to `grail.wiz`.
+
+## 23o: `grail new`
+
+`grail new NAME [--dir DIR]` writes the smallest package that builds, runs and tests:
+
+```
+grail.wiz        Package.new "NAME"
+                   |> Package.lib "NAME-lib" "src"
+                   |> Package.exe "NAME" "src/Main.wiz"
+                   |> Package.tests "tests" "tests"
+src/Main.wiz     import Std; def main : IO Unit := IO.println "hello from NAME"
+tests/hello.wiz  a `-- test: run` golden test, with hello.expected
+README.md        how to build, run and test it
+.gitignore       .grail/
+```
+
+It goes into `DIR` — `./NAME` by default, `DIR/NAME` with `-C DIR` — and an existing
+non-empty directory is refused, so `new` never overwrites work. The name must be a
+letter followed by letters, digits, `_` or `-` (at most 64 characters); it is the
+package's name, its targets' names and the greeting. Inside the new directory
+`grail build`, `grail run NAME` and `grail test` work as they do here; the second build
+runs nothing.
+
+`grail new` found a link-key bug: a link job's key did not include the name of the
+binary it makes, so a test whose program compiles to the same C as an `exe` (the
+generated test and `src/Main.wiz` print the same line) was "up to date" from the exe's
+link directory and the test ran a binary that was not there. The key now includes the
+output's name (and whether it is installed in `.grail/bin`), so two programs with the
+same object and link files no longer share a directory.
+
+Tests: `grail-commands`, "new: the generated package builds, runs and tests; a
+non-empty directory is refused" (also covers the refusal and the name check).

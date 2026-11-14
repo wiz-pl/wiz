@@ -13,6 +13,7 @@ def chars (s : String) : Array Char := s.toList.toArray
 
 def lexGroup : Group where
   name := "lexer"
+  parallel := true
   exercise := "Exercises 2.1–2.3"
   cases := [
     { name := "skip spaces and newlines", run := fun _ => checkEq 4 (skipWs (chars "  \n x") 0) },
@@ -55,6 +56,7 @@ def fails (input : String) (errFragment : String) : IO Unit :=
 
 def termGroup : Group where
   name := "parser: terms"
+  parallel := true
   exercise := "Exercises 2.4–2.5"
   cases := [
     { name := "identifier", run := fun _ => parses "x" "(term.ident x)" },
@@ -160,6 +162,7 @@ def miniDsl (decl : String) : String :=
 
 def cmdGroup : Group where
   name := "parser: commands and syntax"
+  parallel := true
   exercise := "Exercises 2.4–2.6"
   cases := [
     { name := "def with binders and type", run := fun _ => do

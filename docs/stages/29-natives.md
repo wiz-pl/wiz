@@ -10,7 +10,7 @@ pattern:
   around a list, every operation defined on that list. The kernel computes with the
   definitions and proofs see them. `#eval` and `#run` run them too, so the
   interpreters give a reference implementation for free;
-* **natives** for compiled code (`runtime/wiz.c`). `attribute [implemented_by mk get]`
+* **natives** for compiled code (`runtime/`). `attribute [implemented_by mk get]`
   on the constructor gives the type a native representation, and `implemented_by` on
   each operation runs a C function instead of the definition. Both backends call them
   through the usual extern wrappers, so the LLVM backend needed no changes;
