@@ -6,6 +6,13 @@ import Wiz.Compiler.C
 The same IR as `C.lean`, as textual LLVM IR, compiled with `llc` and linked with the
 runtime (compiled separately, with its functions exported). Values are `i64`.
 
+**The LLVM backend is 64-bit only.** Its values are `i64` and its literals are
+`2 * n + 1`, so the module and the runtime must be built for a 64-bit pointer width; a
+32-bit target must use the C backend (`--cc` with the target's flags), whose runtime
+selects the 30-bit small-int path at compile time (`runtime/wiz_abi.h`). `llc` is never
+given a pointer-width flag by Wiz, so a 32-bit `--llc` wrapper would produce a module
+whose `i64` values disagree with a 32-bit `wiz_val` — do not use one.
+
 LLVM is in SSA form, so two things change compared to C:
 
 * a join point's parameters live in stack slots (`alloca`): a jump stores the

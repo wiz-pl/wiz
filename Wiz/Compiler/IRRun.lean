@@ -135,7 +135,7 @@ def nativeOp (op : Name) (args : Array IVal) : RunM IVal := do
     | some (.ptr id), some (.num m) => do
       match ← getObj id with
       | (rc, .ctor _ fs) =>
-        let moved (i : Nat) : Bool := i < 62 && (m >>> i) % 2 == 1
+        let moved (i : Nat) : Bool := i < 64 && (m >>> i) % 2 == 1
         if rc == 1 then
           modify fun h => { h with objs := h.objs.erase id }
           for (f, i) in fs.zipIdx do

@@ -73,14 +73,20 @@ embedded file gets a library of its own whose `needs` names the file as an
 `input_file` (`lakefile.lean`): Lake mixes the file's content hash into that library's
 module traces, so editing the file rebuilds the embedding module and its importers, and
 the artifact cache never serves a stale one. The only one today is the C runtime,
-`runtime/wiz_rt.h` plus `runtime/rt_{core,num,words,data,sys,con}.inc`, embedded by
-`runtime/WizRuntime.lean` (library `WizRuntime`, imported by `Wiz/Compiler/C.lean`); the
-parts are concatenated in the order of the old single file, so generated C is unchanged.
+`runtime/wiz_abi.h` plus `runtime/wiz_rt.h` and
+`runtime/rt_{core,num,words,data,sys,con}.inc`, embedded by `runtime/WizRuntime.lean`
+(library `WizRuntime`, imported by `Wiz/Compiler/C.lean`); the parts are concatenated in
+the order of the old single file. `runtime/wiz_abi.h` is the value representation
+(`wiz_val`, `WIZ_BOX`, `WIZ_MAX_SMALL` and the 64/32-bit choice); `wiz_rt.h` includes it
+when compiled on its own and the generated C gets its text instead (a generated file is
+standalone), which is also what the split build's header uses.
 A new `include_str` goes in such a library too, not in `Wiz` (a `needs` on `Wiz` would
 rebuild all of it); `scripts/test-embed.sh` checks the setup (CI runs it in the build
 job), and `scripts/test-runtime.sh` compiles the runtime alone with `cc -fsyntax-only
 -Wall -Wextra`, with `WIZ_API=` and `WIZ_API=static` (the header's prototypes are checked
-against the parts).
+against the parts), checks the 32/64-bit `WIZ_SMALL_BITS` selection and rejects any other
+pointer width, runs the 30-bit path's logic with the test seam, and runs it on a real
+32-bit word when the machine has a 32-bit `cc` and GMP.
 
 ## Test layout
 

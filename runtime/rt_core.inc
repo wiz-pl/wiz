@@ -1,4 +1,15 @@
 
+#if WIZ_WORD_BITS < 64
+/* On a 32-bit word `WIZ_BOX` is checked (`wiz_abi.h`): a value above `WIZ_MAX_SMALL`
+   is a GMP number, not a truncated scalar. `wiz_out_nat` (rt_words.inc) does the
+   normalisation; the declaration is in this header's embedder section too, but a
+   generated C file only pastes the part above that marker. */
+WIZ_API wiz_val wiz_out_nat(uint64_t n);
+WIZ_API wiz_val wiz_box_checked(uint64_t n) {
+  return n <= WIZ_MAX_SMALL ? (wiz_val)((n << 1) | 1) : wiz_out_nat(n);
+}
+#endif
+
 /* objects allocated minus objects freed, per thread (see `wiz_live_exited`) */
 static __thread int64_t wiz_live = 0;
 /* read a count that another thread may be changing (if the object is shared) */

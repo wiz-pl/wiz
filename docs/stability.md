@@ -145,6 +145,10 @@ Anything not listed above may change in a 0.1.z release. In particular:
   libraries, Feral, and everything documented as experimental in the stage docs.
 * **Platforms**: x86_64 Linux only, glibc 2.27 or later (2.30 or later for `wiz build`
   with the bundled C compiler). Other platforms work from source, without a promise.
+  The runtime's value representation (`runtime/wiz_abi.h`) selects a 62-bit small-int
+  range on a 64-bit word and a 30-bit one on a 32-bit word, and refuses any other
+  pointer width at compile time; 32-bit is not a supported platform yet (the LLVM
+  backend is 64-bit only), but a 32-bit build cannot silently take the 64-bit path.
 
 ## Changing this page
 

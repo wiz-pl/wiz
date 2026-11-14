@@ -156,7 +156,10 @@ jobs:
         run: scripts/test-embed.sh
       - name: The runtime compiles on its own
         # cc -fsyntax-only -Wall -Wextra, with WIZ_API= (the object ABI) and WIZ_API=static
-        # (a generated program); the header's prototypes are checked against the parts
+        # (a generated program); the header's prototypes are checked against the parts.
+        # It also checks the pointer-width guard (32/64-bit selection, other widths are an
+        # error) and runs the 30-bit small-int path's logic, plus a real -m32 run when the
+        # runner has a 32-bit cc and GMP.
         run: scripts/test-runtime.sh
 
   test:

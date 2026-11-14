@@ -1,14 +1,25 @@
 /* The Wiz runtime (stage 8b), included at the top of every generated C file.
 
-   A value is a machine word. If its lowest bit is 1 it is a **scalar** (a small
-   number, a tag, or ◾) holding `v >> 1`; otherwise it points to an **object**: a
-   header (reference count, tag, number of fields) and the fields. Closures and big
-   numbers (GMP) are objects with reserved tags. Reference counts follow the IR's
-   `dup`/`drop` (Perceus): every function owns its arguments.
+   A value is a machine word (`wiz_val`, pointer-sized). If its lowest bit is 1 it is a
+   **scalar** (a small number, a tag, or ◾) holding `v >> 1`; otherwise it points to an
+   **object**: a header (reference count, tag, number of fields) and the fields. Small
+   numbers are 62-bit values on a 64-bit word and 30-bit values on a 32-bit word
+   (`WIZ_MAX_SMALL` in `wiz_abi.h`; a smaller word never takes the 62-bit path, it is a
+   compile-time error). Closures and big numbers (GMP) are objects with reserved tags.
+   Reference counts follow the IR's `dup`/`drop` (Perceus): every function owns its
+   arguments.
 
    Threads (stage 25a): a count rc > 0 belongs to one thread, rc < 0 is an object shared
    between threads (its count is -rc, changed atomically), rc == 0 is immortal. See
    `wiz_mark_mt` for the transfer rule. */
+
+/* The word, the tag bit and the small-int range (`wiz_val`, `WIZ_BOX`, `WIZ_UNBOX`,
+   `WIZ_IS_SCALAR`, `WIZ_MAX_SMALL`). Included as a real header when the runtime is
+   compiled on its own; `runtime/WizRuntime.lean` embeds `wiz_abi.h`'s text instead of
+   this include, since a generated C file must be standalone. */
+#ifndef WIZ_ABI_INLINE
+#include "wiz_abi.h"
+#endif
 
 /* POSIX.1-2008 and the usual extensions, for the system interfaces (9h) */
 #ifndef _GNU_SOURCE
@@ -20,20 +31,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <gmp.h>
-
-typedef uintptr_t wiz_val;
 
 /* Generated C includes this file, so everything is `static`. For the LLVM backend it
    is compiled on its own with -DWIZ_API= so the functions are exported. */
 #ifndef WIZ_API
 #define WIZ_API static
 #endif
-
-#define WIZ_BOX(n) ((((wiz_val)(n)) << 1) | 1)
-#define WIZ_UNBOX(v) ((v) >> 1)
-#define WIZ_IS_SCALAR(v) ((v) & 1)
-#define WIZ_MAX_SMALL (((uintptr_t)1 << 62) - 1)
 
 enum { WIZ_TAG_FIRST_SPECIAL = 0xFFFF0000u, WIZ_TAG_CLO = 0xFFFF0000u, WIZ_TAG_BIG = 0xFFFF0001u, WIZ_TAG_RAW = 0xFFFF0002u,
        WIZ_TAG_EXT = 0xFFFF0003u, WIZ_TAG_BYTES = 0xFFFF0004u, WIZ_TAG_ARRAY = 0xFFFF0005u,
@@ -191,6 +196,10 @@ WIZ_API double wiz_in_f64(wiz_val v);
 WIZ_API wiz_val wiz_out_f64(double d);
 WIZ_API uint64_t wiz_in_nat(wiz_val v);
 WIZ_API wiz_val wiz_out_nat(uint64_t n);
+#if WIZ_WORD_BITS < 64
+/* 32-bit only: `WIZ_BOX` is checked and falls back to a GMP number (see wiz_abi.h) */
+WIZ_API wiz_val wiz_box_checked(uint64_t n);
+#endif
 WIZ_API wiz_val wiz_word_of_bits(wiz_val n);
 WIZ_API wiz_val wiz_word_to_bits(wiz_val v);
 WIZ_API wiz_val wiz_word_add(uint64_t w, wiz_val a, wiz_val b);

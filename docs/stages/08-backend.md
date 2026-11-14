@@ -38,11 +38,33 @@ $ wiz run fact.wiz        # def main : Nat := fact 30
   `main`'s type. The C compiler is `--cc X` (default `cc`), with `--cflags "…"` and
   `--ldflags "…"` for GMP ([stage 23a](23-grail.md): flags, not environment variables). The C tests
   skip themselves if GMP isn't found.
-* **Runtime** (`runtime/`, embedded in the compiler): a value is a word; scalars
-  have the low bit set; objects have a header (reference count, tag, size). Closures
-  point to a boxed entry and share or move their captured arguments when applied.
-  Numbers that don't fit in 62 bits are GMP integers. Projecting a number gives its
-  unary view. The program checks at exit that every object was freed.
+* **Runtime** (`runtime/`, embedded in the compiler): a value is a pointer-sized word
+  (`wiz_val`); scalars have the low bit set; objects have a header (reference count,
+  tag, size). Closures point to a boxed entry and share or move their captured
+  arguments when applied. Numbers that don't fit in the word's small range are GMP
+  integers (62 bits on a 64-bit word, 30 on a 32-bit one). Projecting a number gives
+  its unary view. The program checks at exit that every object was freed.
+* **Pointer width.** The representation is chosen at compile time in
+  `runtime/wiz_abi.h`: `WIZ_WORD_BITS` is 64 or 32 from `UINTPTR_MAX`,
+  `WIZ_SMALL_BITS` is `WIZ_WORD_BITS - 2` (62 or 30: one bit is the tag, one keeps
+  `WIZ_MAX_SMALL + WIZ_MAX_SMALL` and `WIZ_MAX_SMALL << 1 | 1` inside the word), and any
+  other pointer width is an `#error`, not a silent 64-bit build on a narrower word.
+  `_Static_assert`s check the width, the two-bit headroom and that `uintptr_t` is
+  pointer-sized. On a 64-bit word `WIZ_BOX` is the shift it always was and the value
+  representation is unchanged; on a 32-bit word it is the checked `wiz_box_checked`,
+  which makes a value above `WIZ_MAX_SMALL` (a literal `C.lean` emits as `WIZ_BOX`, a
+  length, a code point) a GMP `Nat` instead of a truncated scalar. The split build's
+  header (`C.splitPrelude`) and the `--lib` header use the same ABI text, so they cannot
+  select a different width from the pasted runtime. `scripts/test-runtime.sh` checks
+  both selections, rejects 16- and 128-bit words, always runs the 30-bit path's logic
+  with a test seam on the host, and (when the machine has a 32-bit `cc`/GMP) compiles and
+  runs the runtime on a real 32-bit word.
+  A **full** 32-bit target is still more than this: the LLVM backend emits `i64` values
+  and is 64-bit only ([8d](#8d-llvm)); 8-byte atomics on `i386` may need `-latomic`; the
+  C struct-by-value ABI is the target compiler's and has no layout asserts yet; and the
+  self-hosted runtime (`selfhost/rt.c`) has its own 63-bit `Nat` and is a separate
+  bootstrap. The host runtime is guarded so a 32-bit build cannot take the 63/62-bit
+  path silently.
 * **Codegen** (`Compiler/C.lean`): one C function per IR function (plus a boxed
   version for closures); `case` is a `switch`, join points are labels, `dup`/`drop`
   call the runtime.
