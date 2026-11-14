@@ -611,6 +611,17 @@ that it is the index. The trusted part is the four natives `wiz_ref_*` (runtime/
 over MVar cells) and their types, kept true by an invariant the API maintains; the header
 of lib/Ref.wiz has the argument. Compiled code only.
 
+## Bounded channels (`lib/BChan.wiz`)
+
+`BChan A` is a bounded FIFO queue shared by any number of threads (`import BChan`):
+`BChan.new capacity`, `BChan.send` (waits while full) and `BChan.recv` (waits while
+empty). Unlike the session-typed `Chan` it is an ordinary value with no protocol and
+no linearity; unlike `MVar` it buffers more than one item, and unlike `Chan` it gives
+backpressure. It is built over `MVar` alone (the buffer is a ring of one-place
+`MVar`s), so it needs no runtime changes; the limits (no `close`, no cancellation of a
+blocked thread, no atomics beyond the MVar locks) are in
+[25f](stages/25-concurrency.md).
+
 ## Owned handles (`lib/Handle.wiz`)
 
 `Owned h` is the obligation to release the handle `h`: a token at quantity 1 indexed by

@@ -169,9 +169,57 @@ def main : IO Unit := do1
   IO.println (Nat.toString n)
 "
 
+/-- A bounded channel (`lib/BChan.wiz`, stage 25f): capacity 1 forces the producer and
+the consumer to alternate, capacity 8 lets the producer run ahead; both receive the
+items in the order they were sent. Capacity 0 is documented to behave as 1. -/
+def concBChan : String := "import IO
+import Session
+import BChan
+def sendAll (c : BChan Nat) : Nat → Nat → IO Unit
+  | .zero, _ => IO.pure ()
+  | .succ n, i => IO.bind (BChan.send c i) (fun _ => sendAll c n (i + 1))
+def recvCheck (c : BChan Nat) : Nat → Nat → Bool → IO Bool
+  | .zero, _, ok => IO.pure ok
+  | .succ k, i, ok => IO.bind (BChan.recv c) (fun x =>
+      recvCheck c k (i + 1) (Bool.and ok (Nat.beq x i)))
+def phase (cap n : Nat) : IO Bool :=
+  IO.bind (BChan.new (A := Nat) cap) (fun c =>
+    Chan.fork Proto.done
+      (fun ch => Chan.close ch (sendAll c n 0))
+      (fun ch => Chan.close ch (recvCheck c n 0 Bool.true)))
+def main : IO Unit := IO.bind (BChan.new (A := Nat) 0) (fun z =>
+  IO.bind (phase 1 200) (fun a =>
+    IO.bind (phase 8 2000) (fun b =>
+      IO.bind (phase 0 50) (fun c =>
+        IO.print (if Bool.and (Nat.beq z.capacity 1) (Bool.and a (Bool.and b c))
+          then \"ok\\n\" else \"BAD\\n\")))))
+"
+
+/-- Two producers share one bounded channel (a `BChan` is an ordinary value) and one
+consumer drains it: every item is received exactly once. -/
+def concBChanMany : String := "import IO
+import Session
+import BChan
+def produce (c : BChan Nat) : Nat → Nat → IO Unit
+  | .zero, _ => IO.pure ()
+  | .succ n, i => IO.bind (BChan.send c (i + 1)) (fun _ => produce c n (i + 1))
+def consume (c : BChan Nat) : Nat → Nat → IO Nat
+  | .zero, acc => IO.pure acc
+  | .succ k, acc => IO.bind (BChan.recv c) (fun x => consume c k (acc + x))
+def second (c : BChan Nat) : IO Unit :=
+  Chan.fork Proto.done
+    (fun ch => Chan.close ch (produce c 500 0))
+    (fun ch => Chan.close ch (IO.bind (consume c 1000 0) (fun s =>
+      IO.println (Nat.toString s))))
+def main : IO Unit := IO.bind (BChan.new (A := Nat) 3) (fun c =>
+  Chan.fork Proto.done
+    (fun ch => Chan.close ch (produce c 500 0))
+    (fun ch => Chan.close ch (second c)))
+"
+
 def concGroup : Group where
   name := "conc"
-  exercise := "lib/Session.wiz, lib/MVar.wiz, runtime threads (stage 25)"
+  exercise := "lib/Session.wiz, lib/MVar.wiz, lib/BChan.wiz, runtime threads (stage 25)"
   cases := [
     { name := "a dependent protocol: the pure semantics `link` runs it", run := fun _ =>
         okLibs (concSum ++ "#eval (link sumProto (client 100) server).1") ["5050"] },
@@ -242,6 +290,12 @@ def concGroup : Group where
         failsLibs "import Ref\n-- a stale token can't read: the cell was written, the old token is gone\ndef stale : IO Nat := Ref.new 1 (fun p tp => Ref.set p 5 tp (fun tp' => Ref.get p tp (fun x _ t => Ref.free p t (Ref.free p tp' (IO.pure x)))))" "quantity 1" },
     { name := "MVars and locks: eight threads, one counter", run := fun _ =>
         cRunLibs concCounter "8000\n" },
+    { name := "bounded channel (BChan): FIFO at capacities 1, 8 and 0, blocking on full and empty; no leaks (C)", run := fun _ =>
+        cRunLibs concBChan "ok\n" },
+    { name := "bounded channel (BChan): the same under LLVM", run := fun _ =>
+        cRunLibs concBChan "ok\n" (llvm := true) },
+    { name := "bounded channel (BChan): two producers, one consumer, capacity 3, each item once; no leaks", run := fun _ =>
+        cRunLibs concBChanMany "250500\n" },
     { name := "a lazy stream shared between threads", run := fun _ =>
         cRunLibs concStream "3998000\n" },
     { name := "closed definitions (CAFs, 15i) used by eight threads at once: a table and a memoised suspension in it", run := fun _ =>

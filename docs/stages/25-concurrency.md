@@ -3,6 +3,7 @@
 Real threads in compiled code, and two peer APIs on top of them (decision CS1):
 session-typed linear channels (`lib/Session.wiz`), deadlock-free by construction, and
 MVars and locks (`lib/MVar.wiz`), which are more flexible and give weaker guarantees.
+A bounded buffer with backpressure (`lib/BChan.wiz`) is built on the MVars (25f).
 Plan and survey: `concurrency-seplogic-plan.md` (stages C0, C2–C3, C8 there); runtime
 design: `concurrency.md`. Tests: group `conc`.
 
@@ -174,3 +175,48 @@ differential test; structured scopes (C4); a concurrency effect with a pure sche
 (C5, needs one-shot continuations); recursive protocols over ν with sizes; delegation
 (sending endpoints) with protocol-level linear payloads; a mechanised deadlock-freedom
 proof (C7); `selfhost/rt.c` threads.
+
+## 25f: bounded channels and backpressure
+
+```
+import BChan
+BChan.new  : (capacity : Nat) → IO (BChan A)     -- at least one slot (0 means 1)
+BChan.send : (c : BChan A) → A → IO Unit         -- waits while every slot is full
+BChan.recv : (c : BChan A) → IO A                -- waits while the next slot is empty
+```
+
+A `Chan` (25c) is unbounded: `send` never blocks, so a producer faster than its
+consumer grows the heap. `lib/BChan.wiz` is the bounded alternative: a FIFO buffer of
+`capacity` items that any number of threads may share. It is an ordinary (ω) value (it
+can be copied and handed to producers and consumers alike), it has no protocol type,
+and receiving gives the items in the order they were sent (which thread gets which
+item is the scheduler's business). Two producers and one consumer are the test in the
+`conc` group.
+
+The implementation is library-only, over `MVar` (no new natives, so the stage-25a
+runtime is unchanged; like the MVars it runs in compiled code only, `#eval`/`#run`
+cannot run it): the buffer is a ring of one-place `MVar A` slots. Each side has
+an `MVar` holding its ring position, and holds it across its possibly blocking step, so
+sends enter the ring one at a time and receives leave it in the same order; `MVar.put`
+on the next slot is the condition variable that waits for a free slot, `MVar.take` the
+one that waits for an item. The ring advance wraps after `capacity` slots, so the
+sender whose turn it is blocks exactly when `capacity` items are unconsumed (the other
+senders wait behind it), and a receiver exactly when none are queued. Every receive is
+a `take` and every send a `put` on the slot's own `MVar`, so the buffer cannot
+deadlock on its own (the two indices are always within `capacity` of each other); the
+usual deadlock caveat of `MVar` (25d) still applies to programs built around it.
+
+**Limits.** (a) *Ordering.* The only happens-before edges are the `MVar`/`Lock`
+mutexes: the runtime's RC counts are relaxed atomics (`rt_core.inc`), the shared-marking
+walk (`wiz_mark_mt`) runs before the value is published under the mutex, and Wiz has no
+user-level atomics or fences, so the buffer (like the rest of the concurrency API)
+cannot be the basis of a lock-free structure — synchronise with `MVar`/`Lock`.
+(b) *Cancellation.* A thread blocked in `send`/`recv` cannot be interrupted, and there
+is no `close`: dropping a `BChan` does not wake its blocked peers. The runtime waits
+for every thread before it checks for leaks (25a), so a producer with no consumer hangs
+the process rather than reporting a leak; the test driver's `timeout` is the only
+bound. There is also no `trySend`/`tryRecv`/`select` (they need non-blocking MVar
+operations in the runtime). (c) The leak check that ends every compiled program
+(`wiz_finish_io` compares the live-object count with zero after the threads join) is
+the safety net for the tests: the `conc` cases for `BChan` leak nothing.
+

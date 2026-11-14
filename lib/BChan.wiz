@@ -1,0 +1,95 @@
+import MVar
+/-!
+# BChan
+
+Bounded channels with backpressure: `import BChan` (stage 25f,
+docs/stages/25-concurrency.md).
+
+A `Chan` (lib/Session.wiz) buffers without limit: `send` never blocks, so a producer
+that runs faster than its consumer grows the heap. A `BChan A` is a bounded FIFO
+queue that any number of threads may share: the sender at the ring position waits
+while all `capacity` slots hold unconsumed items (other senders wait behind it), and
+`recv` waits while the next slot is empty, so the two sides run at the slower one's
+pace. Unlike `Chan`, a `BChan` is an ordinary (ω) value: it can be copied, stored and
+passed to both threads, and there is no protocol type to keep in step.
+
+Order: both sides take turns by borrowing one of two `MVar`s (`inPos`, `outPos`)
+that hold the ring position, so sends are written to the ring one at a time and
+receives read it in the same order. Receives therefore see items in the order they
+were sent (which thread receives which item is up to the scheduler).
+
+**Limits.** This is a buffer, not a protocol: there is no `close`, no `trySend` and
+no `select`, and dropping a `BChan` does not wake a thread blocked on it. A thread
+blocked in `send`/`recv` cannot be cancelled, and the runtime waits for every
+thread at exit (25a), so a producer with no consumer hangs the process. A
+`capacity` of 0 is treated as 1 (an `MVar` slot always holds at most one item, so
+there is no rendezvous mode). Blocking is built from the MVar mutexes and condition
+variables, not from atomics: Wiz has no user-level atomics or fences, and the RC
+counts are relaxed (their order comes from the MVar locks); do not build lock-free
+structures on the RC words.
+
+```
+def main : IO Unit := IO.bind (BChan.new (A := Nat) 8) (fun c =>
+  IO.bind (BChan.send c 1) (fun _ =>
+    IO.bind (BChan.recv c) (fun x => IO.println (Nat.toString x))))
+```
+
+Compiled code only: the interpreters (`#eval`, `#run`) don't run the MVar natives.
+-/
+
+/-- The ring's position: the next slot, and the slots after it in order. Internal:
+`BChan`'s constructor and position fields are private, so the ring can't get out of
+step with a user's own `MVar`s. -/
+private structure BChan.Ring (A : Type) where
+  head : MVar A
+  rest : List (MVar A)
+
+/-- Advance the ring by one slot (wrapping around a one-slot ring). -/
+private def BChan.Ring.next {A : Type} (r : BChan.Ring A) : BChan.Ring A :=
+  match r.rest with
+  | .nil => r
+  | .cons x xs => BChan.Ring.mk x xs
+
+/-- `n` empty one-place slots, in a ring. `n ≥ 1` (`BChan.new` ensures it). -/
+private def BChan.mkRing {A : Type} : Nat → IO (BChan.Ring A)
+  | .zero => IO.bind (MVar.new (A := A)) (fun m => IO.pure (BChan.Ring.mk m .nil))
+  | .succ k => IO.bind (BChan.mkRing k) (fun r =>
+      IO.bind (MVar.new (A := A)) (fun m =>
+        IO.pure (BChan.Ring.mk m (.cons r.head r.rest))))
+
+/-- A bounded FIFO channel holding at most `capacity` unconsumed items. -/
+structure BChan (A : Type) where
+  private mk ::
+  /-- the effective capacity (`Nat.max 1 capacity`) -/
+  capacity : Nat
+  /-- the ring position of the next `send` -/
+  private inPos : MVar (BChan.Ring A)
+  /-- the ring position of the next `recv` -/
+  private outPos : MVar (BChan.Ring A)
+
+/-- A new bounded channel with `capacity` slots (at least one: 0 is treated as 1). -/
+def BChan.new {A : Type} (capacity : Nat) : IO (BChan A) :=
+  let n := Nat.max 1 capacity;
+  IO.bind (BChan.mkRing (A := A) n) (fun r =>
+    IO.bind (MVar.newFull (A := BChan.Ring A) r) (fun inPos =>
+      IO.bind (MVar.newFull (A := BChan.Ring A) r) (fun outPos =>
+        IO.pure (BChan.mk n inPos outPos))))
+
+/-- Put `a` at the end of the channel. Waits while all slots hold unconsumed items.
+
+`inPos` is held across the (possibly blocking) `MVar.put`, so sends reach the ring
+in one order even with several senders; the slot's own `MVar` is the condition
+variable that waits for the consumer. -/
+def BChan.send {A : Type} (c : BChan A) (a : A) : IO Unit :=
+  MVar.borrow c.inPos (fun r h =>
+    IO.bind (MVar.put r.head a) (fun _ =>
+      MVar.fill c.inPos h (BChan.Ring.next r) (IO.pure ())))
+
+/-- Take the oldest item. Waits while the next slot is empty.
+
+`outPos` is held across the (possibly blocking) `MVar.take`, so receives happen in
+the ring's order (the order the items were sent). -/
+def BChan.recv {A : Type} (c : BChan A) : IO A :=
+  MVar.borrow c.outPos (fun r h =>
+    IO.bind (MVar.take r.head) (fun a =>
+      MVar.fill c.outPos h (BChan.Ring.next r) (IO.pure a)))
