@@ -873,9 +873,14 @@ reverse once); and each call into C converts the list to a C string and back. Sp
 200000 characters, joining and trimming them takes 0.1 s compiled (the `text` tests).
 `Std.Str` is the native alternative for indexing.
 
-`lib/Json.wiz`, `lib/Deriving.wiz` and `lib/Hoare.wiz` import `Text` and use its
-`String.eq`, `String.chars`, `String.beq`, `Nat.repr`, `List.revApp` and `List.reverse`
-instead of copies of their own (two modules declaring one name are an error at import).
+`lib/Json.wiz`, `lib/Deriving.wiz`, `lib/Hoare.wiz` and `lib/Feral.wiz` import `Text` and
+use its helpers (`String.eq`, `String.chars`, `String.beq`, `Nat.repr`, `Nat.reprGo`,
+`List.revApp`, `List.reverse`, `List.map`, `List.filter`, `List.any`, `List.take`,
+`List.drop`, `List.isEmpty`, `String.lookup`, `String.elem`, `Chars.eq`,
+`Chars.isPrefix`) instead of copies of their own (two modules declaring one name are an
+error at import). Feral keeps only what Text lacks (`Fe.split`, `Fe.nth`, `Fe.memNat`);
+`Fe.split` and `Fe.wordsOf` keep a reversed accumulator and reverse it once, so they run
+in linear time.
 
 ## Numbers: classes, integers, words
 
