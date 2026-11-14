@@ -185,7 +185,7 @@ def Clocking.pinPorts (ck : Clocking) : List String :=
 def Clocking.inDecls (ck : Clocking) : List String → List NetPort → String
   | .cons nm nms, .cons p ps => (match p.width, Clocking.source ck nm, Hdl.lookup nm ck.signals with
     | .zero, _, _ => ""
-    | _, .none, .none => ", input " <+> Verilog.range p.width <+> nm
+    | _, .none, .none => ", input wire " <+> Verilog.range p.width <+> nm
     | _, _, _ => "") <+> Clocking.inDecls ck nms ps
   | _, _ => ""
 /-- The input pins a `Clocking` adds for clock domains that come from a pin: each once, and
@@ -195,7 +195,7 @@ def Clocking.extraInDecls (declared : List String) : List String → String
   | .cons p ps => (match Hdl.strEq p "clk", Hdl.member p declared with
     | .true, _ => ""
     | _, .true => ""
-    | _, .false => ", input " <+> p) <+> Clocking.extraInDecls declared ps
+    | _, .false => ", input wire " <+> p) <+> Clocking.extraInDecls declared ps
 def Clocking.coreConns (ck : Clocking) : List String → List NetPort → List String
   | .cons nm nms, .cons p ps => (match p.width with
     | .zero => Clocking.coreConns ck nms ps
@@ -263,7 +263,8 @@ def Verilog.emitTop (n : Netlist) (ck : Clocking) : String :=
   let ω cx := Verilog.ctx n vn;
   let ω declared := Hdl.map (fun (p : NetPort) => p.name) n.inputs;
   Verilog.emit core
-  <+> "module " <+> Verilog.ident n.name <+> "(input clk" <+> Clocking.inDecls ck vn.ins n.inputs
+  <+> Verilog.header
+  <+> "module " <+> Verilog.ident n.name <+> "(input wire clk" <+> Clocking.inDecls ck vn.ins n.inputs
   <+> Clocking.extraInDecls declared (Clocking.pinPorts ck)
   <+> Verilog.outDecls cx vn.outs n.outputs <+> ");\n"
   <+> Verilog.errors (Clocking.problems n ck)
@@ -274,3 +275,4 @@ def Verilog.emitTop (n : Netlist) (ck : Clocking) : String :=
   <+> "  " <+> Verilog.ident core.name <+> " core (" <+> Hdl.sepBy ", " (List.append (Clocking.clockConns n ck)
     (List.append (Clocking.coreConns ck vn.ins n.inputs) (Clocking.coreConns ck vn.outs n.outputs))) <+> ");\n"
   <+> "endmodule\n"
+  <+> Verilog.footer

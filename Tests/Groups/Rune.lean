@@ -27,27 +27,12 @@ def runeBlocks (raw : String) : List (String × String) :=
         else go rest (some n) (l :: buf) acc
   go (raw.splitOn "\n") none [] []
 
-/-- Drop the `initial begin … end` block that initialises a memory. The DDR model's
-65,536-line zero fill is simulation-only (8 Mbit is far beyond an iCE40), and yosys
-expands it to eight million flip-flops; the pre-map report does not need it. -/
-def runeStripMemInit (v : String) : String :=
-  let rec go (ls : List String) (skipping : Bool) (acc : List String) : List String :=
-    match ls with
-    | [] => acc.reverse
-    | l :: rest =>
-      let line := l.trimAscii.toString
-      if !skipping && line == "initial begin"
-          && (match rest with | r :: _ => r.trimAscii.toString.startsWith "mem[" | [] => false) then
-        go rest true acc
-      else if skipping then
-        if line == "end" then go rest false acc else go rest true acc
-      else go rest false (l :: acc)
-  "\n".intercalate (go (v.splitOn "\n") false [])
-
 /-- The Rune designs through Icarus Verilog and yosys: every module compiles, the
 self-checking benches replay the value simulation, and the logic maps to iCE40 cells
-(the DDR model before its memory map, as a `$mem_v2` cell). Skipped without the tools,
-like the `hdl` group's tool cases. -/
+(the DDR model before its memory map, as a `$mem_v2` cell). The DDR model's 64K-word
+store is a `$readmemh` side file (`ddr_model_mem.hex`), so it no longer needs an
+in-line initial block stripped before synthesis. Skipped without the tools, like the
+`hdl` group's tool cases. -/
 def runeSynthTools : IO Unit := do
   let has (c : String) : IO Bool :=
     (do let o ← IO.Process.output { cmd := c, args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
@@ -66,15 +51,16 @@ def runeSynthTools : IO Unit := do
             fun m => (e.splitOn m).length > 1 then skip "no toolchain"; return
         else throw (IO.userError e)
     let blocks := runeBlocks raw
-    unless blocks.length == 21 do
-      throw (IO.userError s!"expected 21 artifacts, got {blocks.length}")
+    unless blocks.length == 22 do
+      throw (IO.userError s!"expected 22 artifacts, got {blocks.length}")
     for (name, text) in blocks do IO.FS.writeFile (dir / name) text
     let mods := ["uart_baud", "uart_tx", "uart_rx", "uart_loopback", "spi_master", "spi_loop", "ddr_model"]
     for m in mods do
       let v := dir / (m ++ ".v")
-      let ivc ← IO.Process.output { cmd := "iverilog", args := #["-g2005", "-o", "/dev/null", v.toString] }
-      unless ivc.exitCode == 0 do
-        throw (IO.userError s!"iverilog rejects {m}.v:\n{ivc.stderr}")
+      -- the same lint gate as scripts/rune-synth.sh: `-Wall`, and no warning text
+      let ivc ← IO.Process.output { cmd := "iverilog", args := #["-g2005", "-Wall", "-o", "/dev/null", v.toString] }
+      unless ivc.exitCode == 0 && (ivc.stderr.splitOn "warning").length == 1 do
+        throw (IO.userError s!"iverilog -Wall rejects {m}.v:\n{ivc.stderr}")
       let tb := dir / (m ++ ".tb.v")
       if ← tb.pathExists then
         let vvp := dir / (m ++ ".vvp")
@@ -84,12 +70,10 @@ def runeSynthTools : IO Unit := do
         let r ← IO.Process.output { cmd := "vvp", args := #["-n", vvp.toString], cwd := dir }
         unless r.exitCode == 0 && (r.stdout.splitOn s!"PASS {m}:").length > 1 do
           throw (IO.userError s!"{m}'s bench fails:\n{r.stdout}{r.stderr}")
-      if m == "ddr_model" then
-        IO.FS.writeFile (dir / (m ++ ".synth.v")) (runeStripMemInit (← IO.FS.readFile v))
       let script := if m == "ddr_model" then
-          s!"read_verilog {m}.synth.v; hierarchy -top {m}; proc; memory -nomap; opt; tee -o {m}.stat stat"
+          s!"read_verilog {m}.v; hierarchy -top {m}; proc; check -assert; memory -nomap; opt; tee -o {m}.stat stat"
         else
-          s!"read_verilog {m}.v; synth_ice40 -top {m}; tee -o {m}.stat stat"
+          s!"read_verilog {m}.v; hierarchy -top {m}; proc; check -assert; synth_ice40 -top {m}; tee -o {m}.stat stat"
       let y ← IO.Process.output { cmd := "yosys", args := #["-q", "-p", script], cwd := dir }
       unless y.exitCode == 0 do
         throw (IO.userError s!"yosys fails on {m}:\n{y.stderr}")

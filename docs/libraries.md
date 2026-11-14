@@ -123,7 +123,7 @@ def txStep {r : HwTy → Type} [Hw r] (s : Tx r) (go : r Bit) : r Tx.code :=
   let idle := Hw.eq s.left (Hw.lit 4 0);  -- field access by name
   Tx.pack (Tx.mk (Hw.mux go (Hw.lit 1 0) s.line) (Hw.label "left" …))
 def top : Circuit In.code Out.code := Circuit.bundled Tx.bundle In.bundle Out.bundle init topStep
--- module top(input clk, input [0:0] rx, output [0:0] tx, output [4:0] leds); reg … line; reg … left;
+-- module top(input wire clk, input wire [0:0] rx, output wire [0:0] tx, output wire [4:0] leds); reg … line; reg … left;
 ```
 
 * **Structured wires.** `Wire t` is a product of node ids, one per leaf of `t`: pairs and
@@ -642,6 +642,37 @@ Boolean bridge `Bit.toBool` (a homomorphism: `toBool_and/or/xor/not/mux`;
 with gates, proved equal to its multiplexer form and, once the opcode is known, to
 `!txReady`, for every value of the status bits).
 
+## H14 E1: hardened Verilog-2005 emission (HW-01)
+
+The emitter (`Verilog.emit`, `Verilog.emitArtifact`, `Testbench.verilog` in
+`lib/Hdl/Core.wiz`) now emits Verilog that a lint/synthesis flow can trust, not just
+text a simulator accepts. Every module starts with a generated-code comment that states
+the reset convention, then `` `default_nettype none ``, and ends with
+`` `default_nettype wire ``: a name the emitter forgot to declare is an error instead of
+a silent one-bit implicit net. Ports are declared `input wire`/`output wire`/`inout wire`
+with explicit widths; constants, initial values and register declarations were already
+sized, and a zero-width value is still written `1'd0`, never as an implicit name. The
+test bench gets the same directive pair.
+
+Two memory policies complete the synthesis subset. A ROM of 4 Kbit or more keeps
+`(* rom_style = "block" *)`; a written RAM of that size asks with
+`(* ram_style = "block" *)`. From 4096 words (`Verilog.memLarge`) the contents are no
+longer an in-line `initial` block: the declaration loads a side file with
+`$readmemh("<module>_<memory>.hex", mem)`, and `Verilog.emitArtifact` returns
+`{ verilog, files }` so a caller writes the text and the hexadecimal files together.
+`Verilog.emit` remains the module text alone (self-contained for small designs). The DDR
+model (64K × 128, 8 Mbit) is the design above the cutoff; `examples/rune-synth.wiz` uses
+the artifact API, so `scripts/rune-synth.sh` no longer drops its initialisation.
+
+`scripts/rune-synth.sh` gates every Rune module with Icarus (`iverilog -g2005 -Wall`, a
+warning fails), Verilator (`--lint-only -Wall`, skipped with a note when absent) and
+yosys (`proc; check -assert`) before replaying the bench and synthesising with
+`synth_ice40`. `scripts/hdl-mutation.py` is the regression check for the emitter itself
+(out of `lib/`): it copies the library, injects one bug into `Verilog.expr` (operator
+swap), `Net.peelEn` (dropped enable) or `Net.domOfNode` (mixed domain), and requires the
+replay/structural checker to fail; see `wiz-notes/hdl-verilog.md` for the matrix, tool
+versions and results.
+
 ## Rune: a standard library of simulated primitives (UART, SPI, DDR)
 
 `lib/Hdl/Uart.wiz`, `lib/Hdl/Spi.wiz` and `lib/Hdl/Ddr.wiz` are the first slice of
@@ -668,28 +699,35 @@ Examples (run by the test group `rune`): `examples/rune-uart.wiz`,
 `examples/rune-spi.wiz`, `examples/rune-ddr.wiz` (value simulation = `Netlist.simFast`,
 the loopback bytes, the SPI shift order and edges, the DDR handshake and masked write).
 
-### Synthesis and Icarus Verilog (`scripts/rune-synth.sh`)
+### Synthesis, lint and Icarus Verilog (`scripts/rune-synth.sh`)
 
 The value simulation is the reference; `scripts/rune-synth.sh` takes the same designs
-past it. `examples/rune-synth.wiz` prints each design's Verilog (`Verilog.emit`), a
-self-checking bench (`Testbench.verilog`) and its vector file (`Circuit.vectors`). The
-script writes them out, compiles every module with `iverilog -g2005`, replays every
+past it. `examples/rune-synth.wiz` prints each design's Verilog (`Verilog.emitArtifact`),
+a self-checking bench (`Testbench.verilog`) and its vector file (`Circuit.vectors`). The
+artifact API also returns the side files of large memories: `Ddr.modelC`'s 64K × 128
+store is a `$readmemh` of `ddr_model_mem.hex`, not a 65,536-line `initial` block.
+
+The script writes the artifacts out, lints every module (`iverilog -g2005 -Wall`, where
+any warning fails; `verilator --lint-only -Wall`, skipped with a note when Verilator is
+absent), checks the process netlist with yosys (`proc; check -assert`), replays every
 bench (which must print `PASS <name>: N cycles`), and synthesises the logic with yosys
 `synth_ice40 -top <name>`. Run it in the tools' environment:
 
 ```
-nix shell nixpkgs#yosys nixpkgs#iverilog nixpkgs#gcc -c scripts/rune-synth.sh
+nix shell nixpkgs#yosys nixpkgs#iverilog nixpkgs#verilator nixpkgs#gcc -c scripts/rune-synth.sh
 ```
 
-The DDR model's 64K × 128 memory (8 Mbit) is simulation-only: it has no place on an
-iCE40 (4 kbit EBRs), and mapping its zero fill would create eight million flip-flops.
-The script therefore drops the memory initialisation and reports `proc; memory -nomap;
-opt` for `Ddr.modelC` instead: one `$mem_v2` cell (8,388,608 bits) plus the
-handshake/mask logic. This is the one non-synthesizable construct in the slice: a board
-design substitutes `Ddr3.Ctrl`, as the module header says. The test group `rune` runs
-the same flow and skips cleanly when yosys/iverilog are absent (the `=hdl` pattern).
+The DDR model's 8 Mbit memory is still simulation-only: it has no place on an iCE40
+(4 kbit EBRs). Its `$readmemh` contents map to `$meminit_v2` (not eight million
+flip-flops), and the script reports `proc; check; memory -nomap; opt` for `Ddr.modelC`
+instead: one `$mem_v2` cell (8,388,608 bits) plus the handshake/mask logic. This is the
+one non-synthesizable construct in the slice: a board design substitutes `Ddr3.Ctrl`, as
+the module header says. The `rune` test group runs the same flow and skips cleanly when
+yosys/iverilog are absent (the `=hdl` pattern).
 
-With yosys 0.70 and Icarus Verilog 13.0 (Nixpkgs), there are no warnings or errors:
+With yosys 0.70, Icarus Verilog 13.0 and Verilator 5.052 (Nixpkgs), there are no
+warnings or errors; Verilator's `UNUSEDSIGNAL` is the one design-level waiver (the DDR
+model deliberately ignores address bits 23:16), documented in the script.
 
 | design | cells | LUT4 | DFF | CARRY |
 |---|---:|---:|---:|---:|

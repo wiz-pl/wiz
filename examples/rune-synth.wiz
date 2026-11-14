@@ -11,16 +11,21 @@ import IO
 
 def Bit : HwTy := HwTy.bits 1
 
-/-- Print one artifact (its text already ends with a newline, as the emitters' do). -/
-def block (name text : String) : IO Unit :=
-  IO.print ("//@@file " <+> name <+> "\n" <+> text <+> "//@@end " <+> name <+> "\n")
+/-- One artifact between `//@@file` and `//@@end` lines (its text already ends with a
+newline, as the emitters' do). -/
+def block (name text : String) : String :=
+  "//@@file " <+> name <+> "\n" <+> text <+> "//@@end " <+> name <+> "\n"
 
-/-- Emit a circuit and, when `xs` is given, a self-checking test bench and its vectors. -/
+/-- Emit a circuit: its Verilog (and the side files of any large memory, such as the DDR
+model's 64K-word store, which the emitter loads with `$readmemh`), then its self-checking
+test bench and vectors. -/
 def emit {ω i o : HwTy} (name : String) (c : Circuit i o) (xs : List (HwTy.El i)) : IO Unit := do
   let n := Circuit.netlist name c;
-  block (name <+> ".v") (Verilog.emit n);
-  block (name <+> ".tb.v") (Testbench.verilog n (name <+> ".vec") (List.length xs));
-  block (name <+> ".vec") (Hdl.concat (Circuit.vectors n c xs))
+  let ω a := Verilog.emitArtifact n;
+  let ω mems := Hdl.concat (Hdl.map (fun (f : String × String) => block f.1 f.2) a.files);
+  IO.print (block (name <+> ".v") a.verilog <+> mems
+    <+> block (name <+> ".tb.v") (Testbench.verilog n (name <+> ".vec") (List.length xs))
+    <+> block (name <+> ".vec") (Hdl.concat (Circuit.vectors n c xs)))
 
 ------------------------------------------------------------------------------------
 -- UART: a baud generator, the transmitter, the receiver, and the loopback.

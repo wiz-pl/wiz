@@ -47,8 +47,10 @@ def Cdc.wire (dst : ClockDomain) (src dstName : String) : MultiWire :=
   MultiWire.through (Prim.erase Cdc.sync2P) (.cons dst.name (.cons src .nil)) (.cons dstName .nil)
 /-- The Verilog module `wiz_sync2` that `Cdc.sync2P`'s instances refer to. -/
 def Cdc.verilog : String :=
-  "module wiz_sync2(input clk, input d, output q);\n"
-  <+> "  (* async_reg = \"true\" *) reg q1;\n"
-  <+> "  (* async_reg = \"true\" *) reg q2;\n"
+  Verilog.header
+  <+> "module wiz_sync2(input wire clk, input wire [0:0] d, output wire [0:0] q);\n"
+  <+> "  (* async_reg = \"true\" *) reg [0:0] q1;\n"
+  <+> "  (* async_reg = \"true\" *) reg [0:0] q2;\n"
   <+> "  always @(posedge clk) begin\n    q1 <= d;\n    q2 <= q1;\n  end\n"
   <+> "  assign q = q2;\nendmodule\n"
+  <+> Verilog.footer
