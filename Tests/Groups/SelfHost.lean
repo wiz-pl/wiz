@@ -393,7 +393,7 @@ def quantityDecls : List (String × Bool) := [
   ("def l0 (x : Nat) : Nat := let 0 y := x; y\n", false),
   ("def linTwice (1 z : Nat) : Nat := lin z (fun y => Nat.add y y)\n", false)]
 
-/-- (stage 21w) Constructor fields with quantities (`Desc.arg q S D`) and implicit
+/-- (stage 21x) Constructor fields with quantities (`Desc.arg q S D`) and implicit
 constructor fields (at 0, filled in at the call, not named by patterns): the same
 verdicts in both frontends. -/
 def fieldQtyHeader : String :=
@@ -433,7 +433,7 @@ def fieldQtyDecls : List (String × Bool) := [
   ("inductive R1 where\n  | z\n  | s (1 r : R1)\n", true),
   ("inductive Q2 where\n  | mk (2 n : Nat)\n", false)]
 
-/-- (stage 21w) Field quantities and implicit fields, compiled and run. -/
+/-- (stage 21x) Field quantities and implicit fields, compiled and run. -/
 def fieldQtyProgram : String :=
   "import Prelude\n" ++
   "inductive E0 where\n  | mk (0 n : Nat) (m : Nat)\n" ++
@@ -451,7 +451,7 @@ def fieldQtyProgram : String :=
 accepts)` (docs/CoreSpec.md §15): the Lean frontend takes a `match` on a linear scrutinee
 apart with `T.casesOn1` (the case at 1), the self-hosted frontend's match is the case at
 ω, which uses the scrutinee ω times. (Constructor field quantities and implicit fields
-were differences until 21w; a linear variable used once in each branch of a `match`
+were differences until 21x; a linear variable used once in each branch of a `match`
 until 21v: `linearMatchDecls`.) -/
 def quantityDiffs : List (String × Bool × Bool) := [
   ("def m2 (1 x : Nat) : Nat := match x with\n  | .zero => 0\n  | .succ k => k\n", true, false),
@@ -1214,7 +1214,7 @@ def selfHostGroup : Group where
           "def main : IO Unit := IO.println (Nat.toString (get b + sum p))\n") "6\n" },
     { name := "the self-hosted frontend: written quantities, as in the Lean frontend (21m, K10)", run := fun _ =>
         selfhostAgrees quantityHeader quantityDecls },
-    { name := "Kernel.wiz quantity terms: the same variable is the same quantity, and a Σ at a stuck non-variable quantity is rejected, as in the Lean kernel (21w, review probes 7a, 15b)", run := fun _ => do
+    { name := "Kernel.wiz quantity terms: the same variable is the same quantity, and a Σ at a stuck non-variable quantity is rejected, as in the Lean kernel (21x, review probes 7a, 15b)", run := fun _ => do
         -- (`MTm` has no `Qty` terms; the Lean kernel's verdicts are in
         -- wiz-notes/fieldq-review-probes: 7a accepted, 15b rejected by `qtyPoly`)
         let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
@@ -1227,9 +1227,9 @@ def selfHostGroup : Group where
           "(.app (.ann (.lam (.darg (.var 0) (.unit 0) (.lam (.dret .star)))) (piW .qty (.descr 0 (.unit 0)))) (.app (.var 0) .star)) .star)))"
         ioRun (kernel ++ "\n" ++ verdict ++ s!"def main : IO Unit := do\n  IO.println (verdict {p7a});\n  IO.println (verdict {p15b})\n")
           "ok\nerror\n" },
-    { name := "the self-hosted frontend: constructor field quantities (0, 1, ω) and implicit fields, as in the Lean frontend (21w)", run := fun _ =>
+    { name := "the self-hosted frontend: constructor field quantities (0, 1, ω) and implicit fields, as in the Lean frontend (21x)", run := fun _ =>
         selfhostAgrees fieldQtyHeader fieldQtyDecls },
-    { name := "constructor field quantities and implicit fields: the Lean and the self-hosted compilers agree (21w)", run := fun _ => do
+    { name := "constructor field quantities and implicit fields: the Lean and the self-hosted compilers agree (21x)", run := fun _ => do
         ioRun (fieldQtyProgram.replace "import Prelude" "import IO") "4\n3\n9\n"
         selfhostCompileRun fieldQtyProgram "4\n3\n9\n"
         selfhostCompileRun fieldQtyProgram "4\n3\n9\n" (flags := #["--rc"]) },
@@ -1514,7 +1514,7 @@ def selfHostGroup : Group where
         | .ok _ => throw (IO.userError "an ill-typed declaration was accepted")
         | .error (.unmarkedProof ..) => throw (IO.userError "the error of the first check was reported")
         | .error _ => pure () },
-    { name := "P1: regularity at inert types is decided by conversion, in both kernels (the probes as core terms)", run := fun _ => do
+    { name := "P1/PF-C: regularity is decided by conversion in both kernels (the probes as core terms; the type-position control)", run := fun _ => do
         let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
         let samples := MTm.convSamples
         let show' (b : Bool) : String := if b then "ok" else "error"
@@ -1522,24 +1522,32 @@ def selfHostGroup : Group where
         for (n, t, ok) in samples do
           let v := leanVerdict t
           unless (v != "error") == ok do throw (IO.userError s!"{n}: the Lean kernel says {v}, expected {show' ok}")
-        -- with the fast path alone (`--inert ground`), the open-index probes are rejected
+        -- with the fast path alone (`--inert ground`): the *value* comparisons inside an
+        -- equation are still accepted (PF-C's prop gate sets conversion-level full
+        -- regularity, which does not consult `inertReg`); the *type* controls (`ty`, `tv`)
+        -- need the inert-only rule and are rejected
         let ground (t : MTm) : Bool :=
           let g : Globals ZeroOneMany := { leanGlobals () with inertReg := .ground }
-          (infer (R := ZeroOneMany) { globals := g } (Mark.infer (R := ZeroOneMany) { globals := g } t.toTerm).1).toBool
+          -- (mandatory sorts and proof markers: the same pre-check, sorts pass and marking
+          -- pass as `leanVerdict`, at the ground globals)
+          if !(infer (R := ZeroOneMany) { globals := { g with lazyProofs := false, sortHolesOk := true } } t.toTerm).toBool then false else
+          let t0 := (Mark.infer (R := ZeroOneMany) { globals := g, sortsOnly := true } t.toTerm).1
+          (infer (R := ZeroOneMany) { globals := g } (Mark.infer (R := ZeroOneMany) { globals := g } t0).1).toBool
         for (n, t, _) in samples do
-          unless ground t == (n == "ne") do throw (IO.userError s!"{n}: unexpected verdict with the fast path alone")
+          unless ground t == (n != "ty" && n != "tv") do throw (IO.userError s!"{n}: unexpected verdict with the fast path alone")
         -- the Wiz kernel
         let okV := "def okVerdict (t0 : Tm) : String :=\n  let t := sortsInfer t0;\n  match infer (TCtx.inProof empty) t with\n  | .err _ => \"error\"\n  | .ok _ _ => match infer empty (MR.tm (markInfer empty t)) with\n    | .ok _ _ => \"ok\"\n    | .err _ => \"error\"\n"
         let calls := samples.map fun (_, t, _) => s!"(okVerdict {t.toWiz})"
         let printAll := "def printAll : List String → IO Unit\n  | .nil => IO.pure ()\n  | .cons s ss => do\n    IO.println s;\n    printAll ss\n"
         ioRun (kernel ++ "\n" ++ wizVerdict ++ okV ++ printAll ++ s!"def main : IO Unit := printAll {wizList calls}\n")
           ("\n".intercalate (samples.map fun (_, _, ok) => show' ok) ++ "\n")
-        -- and with `kernelInertConv := .false` it rejects the same ones
+        -- and with `kernelInertConv := .false` the value comparisons are still accepted by
+        -- the prop gate; only the type controls (`ty`, `tv`) are rejected
         let on := "def kernelInertConv : Bool := .true"
         unless (kernel.splitOn on).length == 2 do throw (IO.userError "kernelInertConv not found")
         let groundK := kernel.replace on "def kernelInertConv : Bool := .false"
         ioRun (groundK ++ "\n" ++ wizVerdict ++ okV ++ printAll ++ s!"def main : IO Unit := printAll {wizList calls}\n")
-          ("\n".intercalate (samples.map fun (n, _, _) => show' (n == "ne")) ++ "\n") },
+          ("\n".intercalate (samples.map fun (n, _, _) => show' (n != "ty" && n != "tv")) ++ "\n") },
     { name := "U5b: a cast at a Π/Σ whose sort depends on a level variable is stuck, as the equation it goes along is; a Π without its sorts is rejected (both kernels)", run := fun _ => do
         -- (prop-harness, `wiz-notes/soundness-probes/ph-u5b-cast-at-unknown-sort.txt`) the cast
         -- used to compute, projecting a proof whose type is a stuck equation and no pair

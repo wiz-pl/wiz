@@ -1405,7 +1405,7 @@ partial def waitFor (f : System.FilePath) (ms : Nat) : IO String := do
 
 def grailCommandsGroup : Group where
   name := "grail-commands"
-  exercise := "Stage 23i–j"
+  exercise := "Stage 23i–j, 23o"
   cases := [
     { name := "commands chain through their outputs; a second build runs nothing", run := fun _ => do
         let dir ← mkTree (cmdFiles)
@@ -1558,7 +1558,40 @@ def grailCommandsGroup : Group where
         let tc ← cmdTc
         match ← Grail.readConfig tc (← binId tc) "lib" dir with
         | .ok _ => throw (IO.userError "accepted")
-        | .error e => check (has e "two targets are called x") e }
+        | .error e => check (has e "two targets are called x") e },
+    { name := "new: the generated package builds, runs and tests; a non-empty directory is refused", run := fun _ => do
+        let root ← IO.FS.createTempDir
+        let self ← IO.appPath
+        let grail (args : List String) : IO (UInt32 × String × String) := do
+          let o ← IO.Process.output { cmd := self.toString, args := ("--grail" :: args).toArray }
+          pure (o.exitCode, o.stdout, o.stderr)
+        let demo := root / "demo"
+        let (c, out, _) ← grail ["new", "demo", "--dir", demo.toString]
+        checkEq 0 c
+        check (has out "grail new: wrote") out
+        for f in ["grail.wiz", "src/Main.wiz", "README.md", ".gitignore", "tests/hello.wiz", "tests/hello.expected"] do
+          check (← (demo / f).pathExists) s!"missing {f}"
+        checkEq ".grail/\n" (← IO.FS.readFile (demo / ".gitignore"))
+        -- never overwrite a non-empty directory, and check the name
+        let (c2, _, err2) ← grail ["new", "demo", "--dir", demo.toString]
+        checkEq 1 c2
+        check (has err2 "is not empty") err2
+        let (c3, _, err3) ← grail ["new", "9bad", "--dir", (root / "x").toString]
+        checkEq 1 c3
+        check (has err3 "is not a package name") err3
+        -- build, run and test it with the suite's toolchain flags (as `nix develop` writes them)
+        let tc ← toolchain
+        let (c4, _, err4) ← grail (tc.toFlags ++ ["-C", demo.toString, "build"])
+        if c4 != 0 && (has err4 "could not execute external process" || has err4 "gmp.h") then
+          skip "no toolchain"
+          return
+        checkEq 0 c4
+        let (c5, out5, _) ← grail (tc.toFlags ++ ["-C", demo.toString, "run", "demo"])
+        checkEq 0 c5
+        check (has out5 "hello from demo") out5
+        let (c6, out6, err6) ← grail (tc.toFlags ++ ["-C", demo.toString, "test"])
+        checkEq 0 c6
+        check (has out6 "1 passed, 0 failed") (out6 ++ err6) }
   ]
 
 /-- A command that starts a grandchild (`sleep`), writes its pid, and waits. -/
