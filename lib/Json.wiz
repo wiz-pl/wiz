@@ -1,14 +1,38 @@
 import Prelude
 import Text
--- JSON (RFC 8259) in Wiz: values, a parser and a printer. The infoview clients use it
--- to speak the language server's protocol. Strings are code points throughout:
--- `\uXXXX` escapes (with surrogate pairs) are decoded on input, and the printer
--- either keeps non-ASCII characters as they are (they become UTF-8 at the C boundary)
--- or escapes them (`Json.renderAscii`).
+/-!
+# Json
 
--- A value. Arrays and objects hold values, so the three types are mutual (Wiz has no
--- nested inductive types). Integers are kept exactly; other numbers keep their text.
+JSON (RFC 8259) in Wiz: values (`Json`), a parser (`Json.parse`) and a printer
+(`Json.render`). The infoview clients use it to speak the language server's protocol.
+
+Strings are code points throughout: `\uXXXX` escapes (with surrogate pairs) are decoded
+on input, and the printer either keeps non-ASCII characters as they are (they become
+UTF-8 at the C boundary) or escapes them (`Json.renderAscii`). Integers are kept
+exactly; other numbers keep their text (`Json.dec`).
+
+* Building: `Json.mkObj`, `Json.mkArr`, `Json.mkStr`, `Json.ofNat`, `Json.mkBool`,
+  `Json.mkNull`.
+* Taking apart: `Json.get`, `Json.getPath`, `Json.asString`, `Json.asNat`,
+  `Json.asList`, and the defaulting `Json.getStr`, `Json.getNat`, `Json.getList`.
+
+Everything is pure, so `#eval` runs it:
+
+```
+#eval Json.render (Json.mkObj [("id", Json.ofNat 1), ("ok", Json.mkBool .true)])
+-- {"id":1,"ok":true}
+#eval match Json.parse "{\"a\": [1, 2]}" with
+  | .ok j => Json.render j
+  | .error e => e
+-- {"a":[1,2]}
+```
+-/
+
 mutual
+/-- A JSON value. Arrays and objects hold values, so `Json`, `Jsons` (the elements of an
+array) and `JFields` (the fields of an object) are mutual: Wiz has no nested inductive
+types. `int neg n` is the integer `n`, negative when `neg`; `dec text` is any other
+number, as its text. -/
 inductive Json where
   | null
   | bool (b : Bool)
@@ -17,16 +41,19 @@ inductive Json where
   | str (s : String)
   | arr (xs : Jsons)
   | obj (fs : JFields)
+/-- The elements of a JSON array, a list of `Json` (see `Jsons.ofList`, `Jsons.toList`). -/
 inductive Jsons where
   | nil
   | cons (head : Json) (tail : Jsons)
+/-- The fields of a JSON object, in order: key–value pairs (see `JFields.ofList`,
+`JFields.find`). -/
 inductive JFields where
   | fnil
   | fcons (key : String) (val : Json) (tail : JFields)
 end
 
--- Arithmetic the prelude doesn't have (pure, so `#eval` runs it).
--- `(n / d, n % d)` for `d > 0`, by long division in binary.
+/-- `(n / d, n % d)` for `d > 0`, by long division in binary. (Arithmetic the prelude
+doesn't have; pure, so `#eval` runs it.) -/
 partial def Json.divMod (n d : Nat) : Nat × Nat := match Nat.lt n d with
   | .true => (0, n)
   | .false =>
@@ -35,18 +62,22 @@ partial def Json.divMod (n d : Nat) : Nat × Nat := match Nat.lt n d with
     | .true => (p.1 + p.1, p.2)
     | .false => (p.1 + p.1 + 1, p.2 - d)
 
+/-- Whether `lo ≤ c ≤ hi`. -/
 def Json.between (c lo hi : Nat) : Bool := Bool.and (Nat.le lo c) (Nat.le c hi)
+/-- The character with code point `n`. -/
 def Json.chr (n : Nat) : Char := Char.mk n
+/-- Whether two lists of characters are equal. -/
 def Json.charsEq : List Char → List Char → Bool
   | .nil, .nil => .true
   | .cons a as, .cons b bs => Bool.and (Nat.beq (Char.code a) (Char.code b)) (Json.charsEq as bs)
   | _, _ => .false
--- (`String.eq`, `String.chars` and `Nat.repr` are lib/Text.wiz's)
+/-- The first list reversed in front of the second. (`String.eq`, `String.chars` and
+`Nat.repr` are lib/Text.wiz's.) -/
 def Json.revOnto : List Char → List Char → List Char
   | .nil, acc => acc
   | .cons c cs, acc => Json.revOnto cs (.cons c acc)
 
--- Decimal digits of `n`, in front of `tail`.
+/-- The decimal digits of `n`, in front of `tail`. -/
 partial def Json.natChars (n : Nat) (tail : List Char) : List Char := match Nat.lt n 10 with
   | .true => .cons (Json.chr (48 + n)) tail
   | .false =>
@@ -55,20 +86,23 @@ partial def Json.natChars (n : Nat) (tail : List Char) : List Char := match Nat.
 
 -- ## Printing
 
+/-- The lower-case hex digit for `d < 16`. -/
 def Json.hexDigit (d : Nat) : Char := match Nat.lt d 10 with
   | .true => Json.chr (48 + d)
   | .false => Json.chr (87 + d)
--- `\uXXXX` for `n < 0x10000`, lower-case hex
+/-- `\uXXXX` (lower-case hex) for `n < 0x10000`, in front of `tail`. -/
 def Json.u4 (n : Nat) (tail : List Char) : List Char :=
   let a := Json.divMod n 4096;
   let b := Json.divMod a.2 256;
   let c := Json.divMod b.2 16;
   .cons (Json.chr 92) (.cons (Json.chr 117) (.cons (Json.hexDigit a.1) (.cons (Json.hexDigit b.1)
     (.cons (Json.hexDigit c.1) (.cons (Json.hexDigit c.2) tail)))))
+/-- A backslash and the character `c`, in front of `tail`. -/
 def Json.esc (c : Nat) (tail : List Char) : List Char := .cons (Json.chr 92) (.cons (Json.chr c) tail)
 
--- One character of a string literal. `ascii`: escape everything above 0x7E too (as a
--- surrogate pair above 0xFFFF).
+/-- One character of a string literal, escaped as JSON needs (`"`, `\`, control
+characters), in front of `tail`. With `ascii`, everything above 0x7E is escaped too
+(as a surrogate pair above 0xFFFF). -/
 def Json.escapeChar (ascii : Bool) (c : Nat) (tail : List Char) : List Char :=
   match Nat.beq c 34 with
   | .true => Json.esc 34 tail
@@ -93,18 +127,21 @@ def Json.escapeChar (ascii : Bool) (c : Nat) (tail : List Char) : List Char :=
           | .false =>
             let v := Json.divMod (c - 0x10000) 1024;
             Json.u4 (0xD800 + v.1) (Json.u4 (0xDC00 + v.2) tail)
+/-- `Json.escapeChar` on each character. -/
 def Json.escapeChars (ascii : Bool) : List Char → List Char → List Char
   | .nil, tail => tail
   | .cons c cs, tail => Json.escapeChar ascii (Char.code c) (Json.escapeChars ascii cs tail)
+/-- A string literal's characters, with its quotes, in front of `tail`. -/
 def Json.quoteChars (ascii : Bool) (s : String) (tail : List Char) : List Char :=
   .cons (Json.chr 34) (Json.escapeChars ascii (String.chars s) (.cons (Json.chr 34) tail))
--- a JSON string literal, with its quotes
+/-- A JSON string literal, with its quotes: `Json.quote "a\"b"` is `"a\"b"`. -/
 def Json.quote (s : String) : String := .mk (Json.quoteChars .false s .nil)
 
+/-- The characters of `s` in front of `tail`. -/
 def Json.lit (s : String) (tail : List Char) : List Char := List.append (String.chars s) tail
 
--- The text of a value in front of `tail`, compact (no spaces).
 mutual
+/-- The text of a value in front of `tail`, compact (no spaces); with `ascii`, pure ASCII. -/
 def Json.emit (ascii : Bool) (j : Json) (tail : List Char) : List Char := match j with
   | .null => Json.lit "null" tail
   | .bool b => match b with
@@ -121,66 +158,80 @@ def Json.emit (ascii : Bool) (j : Json) (tail : List Char) : List Char := match 
   | .obj fs => match fs with
     | .fnil => Json.lit "{}" tail
     | .fcons k v rest => .cons (Json.chr 123) (Json.emitField ascii k v (Json.emitFields ascii rest tail))
+/-- The rest of an array after its first element, and the closing `]`. -/
 def Json.emitRest (ascii : Bool) (xs : Jsons) (tail : List Char) : List Char := match xs with
   | .nil => .cons (Json.chr 93) tail
   | .cons x rest => .cons (Json.chr 44) (Json.emit ascii x (Json.emitRest ascii rest tail))
+/-- One field, `"key":value`. -/
 def Json.emitField (ascii : Bool) (k : String) (v : Json) (tail : List Char) : List Char :=
   Json.quoteChars ascii k (.cons (Json.chr 58) (Json.emit ascii v tail))
+/-- The rest of an object after its first field, and the closing `}`. -/
 def Json.emitFields (ascii : Bool) (fs : JFields) (tail : List Char) : List Char := match fs with
   | .fnil => .cons (Json.chr 125) tail
   | .fcons k v rest => .cons (Json.chr 44) (Json.emitField ascii k v (Json.emitFields ascii rest tail))
 end
 
--- compact text, non-ASCII characters as they are
+/-- A value's compact text, non-ASCII characters as they are:
+`Json.render (Json.mkArr [Json.ofNat 1, Json.mkNull])` is `[1,null]`. -/
 def Json.render (j : Json) : String := .mk (Json.emit .false j .nil)
--- compact text, pure ASCII
+/-- A value's compact text, pure ASCII (non-ASCII characters as `\u` escapes). -/
 def Json.renderAscii (j : Json) : String := .mk (Json.emit .true j .nil)
 
 -- ## Parsing
 
--- A parse: the value and the rest of the input, or a message and where it failed.
+/-- The result of a parser: the value and the rest of the input, or a message and the
+input where it failed. -/
 inductive JParse (A : Type) where
   | ok (a : A) (rest : List Char)
   | err (msg : String) (rest : List Char)
 
+/-- Whether a code point is JSON whitespace (space, newline, return, tab). -/
 def Json.isWs (c : Nat) : Bool :=
   Bool.or (Bool.or (Nat.beq c 32) (Nat.beq c 10)) (Bool.or (Nat.beq c 13) (Nat.beq c 9))
+/-- The input after any leading whitespace. -/
 def Json.skipWs : List Char → List Char
   | .nil => .nil
   | .cons c cs => match Json.isWs (Char.code c) with
     | .true => Json.skipWs cs
     | .false => .cons c cs
--- the input after the literal `lit`, if it starts with it
+/-- The input after the literal `lit` (the first list), if it starts with it. -/
 def Json.expect : List Char → List Char → Option (List Char)
   | .nil, s => .some s
   | .cons l ls, .cons c cs => match Nat.beq (Char.code l) (Char.code c) with
     | .true => Json.expect ls cs
     | .false => .none
   | _, _ => .none
+/-- Parses the keyword `lit` (`true`, `false`, `null`) as the value `v`. -/
 def Json.keyword (lit : String) (v : Json) (s : List Char) : JParse Json :=
   match Json.expect (String.chars lit) s with
   | .some rest => .ok v rest
   | .none => .err "unexpected character" s
+/-- The code point of the next character, or 0 at the end. -/
 def Json.peek : List Char → Nat
   | .nil => 0
   | .cons c _ => Char.code c
+/-- The input without its first character. -/
 def Json.drop1 : List Char → List Char
   | .nil => .nil
   | .cons _ cs => cs
+/-- Whether an array's elements are empty. -/
 def Json.isNil : Jsons → Bool
   | .nil => .true
   | _ => .false
+/-- Whether an object's fields are empty. -/
 def Json.isNilF : JFields → Bool
   | .fnil => .true
   | _ => .false
+/-- The elements reversed onto `acc`. -/
 def Json.revJsons : Jsons → Jsons → Jsons
   | .nil, acc => acc
   | .cons x xs, acc => Json.revJsons xs (.cons x acc)
+/-- The fields reversed onto `acc`. -/
 def Json.revFields : JFields → JFields → JFields
   | .fnil, acc => acc
   | .fcons k v xs, acc => Json.revFields xs (.fcons k v acc)
 
--- the value of a hex digit, or 16
+/-- The value of a hex digit (either case), or 16 if it isn't one. -/
 def Json.hexVal (c : Nat) : Nat := match Json.between c 48 57 with
   | .true => c - 48
   | .false => match Json.between c 97 102 with
@@ -188,7 +239,7 @@ def Json.hexVal (c : Nat) : Nat := match Json.between c 48 57 with
     | .false => match Json.between c 65 70 with
       | .true => c - 55
       | .false => 16
--- four hex digits
+/-- Four hex digits: their value and the rest of the input. -/
 def Json.hex4 : List Char → Option (Nat × List Char)
   | .cons a (.cons b (.cons c (.cons d rest))) =>
     let va := Json.hexVal (Char.code a);
@@ -202,8 +253,10 @@ def Json.hex4 : List Char → Option (Nat × List Char)
 
 -- `a - b`, opaque to the elaborator: today `(hi - 0xD800) * 1024 + …` written out makes
 -- elaboration unfold the subtraction 55296 times and run out of memory
+/-- `a - b`, opaque to the elaborator (see the note above). -/
 partial def Json.sub (a b : Nat) : Nat := a - b
--- after `\u` and a high surrogate `hi`: a low one makes a pair; otherwise U+FFFD
+/-- After `\u` and a high surrogate `hi`: a following `\u` low surrogate makes a pair (the
+code point above 0xFFFF); otherwise U+FFFD. -/
 def Json.surrogate (hi : Nat) (s : List Char) : Nat × List Char :=
   match Json.expect (.cons (Json.chr 92) (.cons (Json.chr 117) .nil)) s with
   | .none => (0xFFFD, s)
@@ -213,9 +266,9 @@ def Json.surrogate (hi : Nat) (s : List Char) : Nat × List Char :=
       | .true => (0x10000 + (Json.sub hi 0xD800 * 1024 + Json.sub p.1 0xDC00), p.2)
       | .false => (0xFFFD, s)
 
--- The body of a string literal after the opening quote; `acc` holds the characters
--- read so far, reversed.
 mutual
+/-- The body of a string literal after its opening quote, up to and including the closing
+one; `acc` holds the characters read so far, reversed. -/
 def Json.strBody (s : List Char) (acc : List Char) : JParse String := match s with
   | .nil => .err "unterminated string" s
   | .cons c rest => match Nat.beq (Char.code c) 34 with
@@ -227,6 +280,8 @@ def Json.strBody (s : List Char) (acc : List Char) : JParse String := match s wi
       | .true => match rest with
         | .nil => .err "unterminated string" rest
         | .cons e rest2 => Json.strEscape (Char.code e) rest2 acc
+/-- After a backslash in a string: the escape `e` (`\n`, `\uXXXX`, …), then the rest of
+the string. -/
 def Json.strEscape (e : Nat) (s : List Char) (acc : List Char) : JParse String :=
   match Nat.beq e 117 with
   | .true => match Json.hex4 s with
@@ -255,7 +310,8 @@ def Json.strEscape (e : Nat) (s : List Char) (acc : List Char) : JParse String :
               | .false => .err "bad escape" s
 end
 
--- Digits: their value, and how many there were. `acc` is the reversed text so far.
+/-- Decimal digits: their value `n`, how many there were `k`, the reversed text `acc` so
+far, and the rest. -/
 partial def Json.digits (s : List Char) (n k : Nat) (acc : List Char) : Nat × Nat × List Char × List Char :=
   match s with
   | .cons c rest => match Json.between (Char.code c) 48 57 with
@@ -263,8 +319,8 @@ partial def Json.digits (s : List Char) (n k : Nat) (acc : List Char) : Nat × N
     | .false => (n, k, acc, s)
   | .nil => (n, k, acc, s)
 
--- `.digits` (an optional fraction), then `e±digits` (an optional exponent): the
--- reversed text, whether there was any, and the rest
+/-- An optional fraction `.digits`: whether there was one, the reversed text, and the rest
+(`none` for a `.` without digits). -/
 def Json.fracPart (s : List Char) (acc : List Char) : Option (Bool × List Char × List Char) :=
   match Nat.beq (Json.peek s) 46 with
   | .false => .some (Bool.false, acc, s)
@@ -273,6 +329,8 @@ def Json.fracPart (s : List Char) (acc : List Char) : Option (Bool × List Char 
     match Nat.beq d.2.1 0 with
     | .true => .none
     | .false => .some (Bool.true, d.2.2.1, d.2.2.2)
+/-- An optional exponent `e±digits`: whether there was one, the reversed text, and the rest
+(`none` for an `e` without digits). -/
 def Json.expPart (s : List Char) (acc : List Char) : Option (Bool × List Char × List Char) :=
   match s with
   | .cons e rest => match Bool.or (Nat.beq (Char.code e) 101) (Nat.beq (Char.code e) 69) with
@@ -289,7 +347,8 @@ def Json.expPart (s : List Char) (acc : List Char) : Option (Bool × List Char �
       | .false => .some (Bool.true, d.2.2.1, d.2.2.2)
   | .nil => .some (Bool.false, acc, s)
 
--- A number: `-`? (`0` | digits) fraction? exponent?
+/-- A number: `-`? (`0` | digits) fraction? exponent?. Without a fraction or an exponent
+it is a `Json.int`, else a `Json.dec` keeping its text. -/
 def Json.number (s : List Char) : JParse Json :=
   let neg := Nat.beq (Json.peek s) 45;
   let s1 : List Char := match neg with
@@ -313,6 +372,7 @@ def Json.number (s : List Char) : JParse Json :=
         | .true => .ok (.dec (.mk (Json.revOnto e.2.1 .nil))) e.2.2
 
 mutual
+/-- One value, after any whitespace: the parser's entry point for a value. -/
 def Json.value (s0 : List Char) : JParse Json :=
   let s := Json.skipWs s0;
   let c := Json.peek s;
@@ -335,7 +395,8 @@ def Json.value (s0 : List Char) : JParse Json :=
               | .false => match Nat.beq c 0 with
                 | .true => .err "unexpected end of input" s
                 | .false => .err "unexpected character" s
--- after `[` (and whitespace); `acc` is the elements so far, reversed
+/-- The rest of an array, after `[` (and whitespace); `acc` is the elements so far,
+reversed. -/
 def Json.array (s : List Char) (acc : Jsons) : JParse Json :=
   match Bool.and (Nat.beq (Json.peek s) 93) (Json.isNil acc) with
   | .true => .ok (.arr .nil) (Json.drop1 s)
@@ -348,7 +409,8 @@ def Json.array (s : List Char) (acc : Jsons) : JParse Json :=
           | .true => .ok (.arr (Json.revJsons (.cons v acc) .nil)) r
           | .false => .err "expected , or ]" (.cons c r)
       | .nil => .err "unexpected end of input" .nil
--- after `{` (and whitespace)
+/-- The rest of an object, after `{` (and whitespace); `acc` is the fields so far,
+reversed. -/
 def Json.object (s : List Char) (acc : JFields) : JParse Json :=
   match Bool.and (Nat.beq (Json.peek s) 125) (Json.isNilF acc) with
   | .true => .ok (.obj .fnil) (Json.drop1 s)
@@ -371,8 +433,13 @@ def Json.object (s : List Char) (acc : JFields) : JParse Json :=
         | .nil => .err "unexpected end of input" .nil
 end
 
--- A whole document: one value, then only whitespace. An error says where (in code
--- points from the start).
+/-- A whole document: one value, then only whitespace. An error says what went wrong and
+where (in code points from the start):
+
+```
+Json.parse "[1, 2"    -- .error "unexpected end of input at offset 5"
+Json.parse "{\"a\":1}"  -- .ok (Json.mkObj [("a", Json.ofNat 1)])
+``` -/
 def Json.parse (text : String) : Except String Json :=
   let s := String.chars text;
   let fail : String → List Char → Except String Json := fun m rest =>
@@ -386,62 +453,83 @@ def Json.parse (text : String) : Except String Json :=
 
 -- ## Building and taking apart
 
+/-- A natural number as a JSON integer. -/
 def Json.ofNat (n : Nat) : Json := .int .false n
+/-- A string as a JSON string. -/
 def Json.ofString (s : String) : Json := .str s
--- (constructors of a mutual type have no `Json.` names, so these stand in where no
--- expected type selects them, e.g. the second component of a pair)
+/-- A JSON string. (Constructors of a mutual type have no `Json.` names, so these stand
+in where no expected type selects them, e.g. the second component of a pair.) -/
 def Json.mkStr (s : String) : Json := .str s
+/-- The pair `(k, v)`, one field for `Json.mkObj`. -/
 def Json.field (k : String) (v : Json) : String × Json := (k, v)
+/-- `null`. -/
 def Json.mkNull : Json := .null
+/-- A JSON boolean. -/
 def Json.mkBool (b : Bool) : Json := .bool b
+/-- A list of values as an array's elements. -/
 def Jsons.ofList : List Json → Jsons
   | .nil => .nil
   | .cons x xs => .cons x (Jsons.ofList xs)
+/-- An array's elements as a list. -/
 def Jsons.toList : Jsons → List Json
   | .nil => .nil
   | .cons x xs => .cons x (Jsons.toList xs)
+/-- A list of key–value pairs as an object's fields. -/
 def JFields.ofList : List (String × Json) → JFields
   | .nil => .fnil
   | .cons p ps => .fcons p.1 p.2 (JFields.ofList ps)
+/-- A JSON array: `Json.mkArr [Json.ofNat 1, Json.ofNat 2]` renders as `[1,2]`. -/
 def Json.mkArr (xs : List Json) : Json := .arr (Jsons.ofList xs)
+/-- A JSON object from its fields in order: `Json.mkObj [("a", Json.ofNat 1)]` renders as
+`{"a":1}`. -/
 def Json.mkObj (fs : List (String × Json)) : Json := .obj (JFields.ofList fs)
 
+/-- The value of the first field named `key`, if any. -/
 def JFields.find : JFields → String → Option Json
   | .fnil, _ => .none
   | .fcons k v rest, key => match String.eq k key with
     | .true => .some v
     | .false => JFields.find rest key
--- the field `key` of an object
+/-- The field `key` of an object (`none` if it has none, or isn't an object). -/
 def Json.get (j : Json) (key : String) : Option Json := match j with
   | .obj fs => JFields.find fs key
   | _ => .none
+/-- Follows a path of keys: `Json.getPath j ["params", "position", "line"]`. -/
 def Json.getPath : Json → List String → Option Json
   | j, .nil => .some j
   | j, .cons k ks => match Json.get j k with
     | .some v => Json.getPath v ks
     | .none => .none
+/-- The string, if the value is one. -/
 def Json.asString : Json → Option String
   | .str s => .some s
   | _ => .none
+/-- The natural number, if the value is a non-negative integer. -/
 def Json.asNat : Json → Option Nat
   | .int .false n => .some n
   | _ => .none
+/-- The boolean, if the value is one. -/
 def Json.asBool : Json → Option Bool
   | .bool b => .some b
   | _ => .none
+/-- An array's elements; the empty list for anything else. -/
 def Json.asList : Json → List Json
   | .arr xs => Jsons.toList xs
   | _ => .nil
+/-- Whether the value is `null`. -/
 def Json.isNull : Json → Bool
   | .null => .true
   | _ => .false
--- with defaults, for fields that may be missing
+/-- The string field `key`, or `""` if it is missing or not a string. (With defaults, for
+fields that may be missing.) -/
 def Json.getStr (j : Json) (key : String) : String := match Json.get j key with
   | .some (.str s) => s
   | _ => ""
+/-- The natural-number field `key`, or 0. -/
 def Json.getNat (j : Json) (key : String) : Nat := match Json.get j key with
   | .some (.int .false n) => n
   | _ => 0
+/-- The array field `key` as a list, or the empty list. -/
 def Json.getList (j : Json) (key : String) : List Json := match Json.get j key with
   | .some v => Json.asList v
   | .none => .nil

@@ -1,0 +1,198 @@
+import Rv.Proofs
+import BitVecShift
+-- SRAI probe: the barrel shifter's right stage as `BitVec.ashr`, for `SRAI x9, x2, 1`.
+--
+-- The core computes an arithmetic right shift in the *complement* form the
+-- specification uses: `ashr x k = ~(~x >> k)` for a negative `x` (`IntN.shiftRight`'s
+-- body is exactly `not (below ((~a) >> k) (~a))`). The barrel therefore always shifts
+-- right with a zero fill; `sraNeg` (the sign bit) selects the complemented operand and
+-- the complemented result (src/Rv/Core.wiz, `shRes`). That keeps every `low`/`Nat.lt` in
+-- the proof on a *symbolic* operand: the old ones-fill needed `Bits.sub_one_high` at
+-- w = 32, whose `Nat.add_sub_of_le` recurses over `2^31` and overflows the checker's
+-- stack. The two branches below are the definitional `IntN.shiftRight` branches plus
+-- the zero-fill stage chain (`SRLI.wiz`).
+--
+-- Check: wiz check --no-cache -I /workspace/wt/wiz-rv-rtl/src drafts/rv-shift/SRAI.wiz
+
+-- the fill word at width `j` by the fill bit `F` (the barrel's own stage shape)
+def Rs.fillW (j : Nat) (F : BitVec 1) : BitVec j :=
+  match BitVec.isTrue F with
+  | .true => BitVec.ofNat j (Nat.sub (Nat.pow 2 j) 1)
+  | .false => BitVec.ofNat j 0
+
+-- its value, with the fill bit symbolic
+def Rs.fillW_toNat (j : Nat) (F : BitVec 1) :
+    (Rs.fillW j F).toNat = Nat.mul F.toNat (Nat.sub (Nat.pow 2 j) 1) :=
+  Or.elim (UIntN.cases1 F)
+    (fun e => transp (fun t _ => (Rs.fillW j t).toNat
+        = Nat.mul t.toNat (Nat.sub (Nat.pow 2 j) 1)) (BitVec.toNat_zero j) (Eq.symm e))
+    (fun e => transp (fun t _ => (Rs.fillW j t).toNat
+        = Nat.mul t.toNat (Nat.sub (Nat.pow 2 j) 1))
+      (Eq.trans
+        (Eq.trans (Bits.wofNat_val j (Nat.sub (Nat.pow 2 j) 1))
+          (Bits.low_of_lt j (Nat.sub (Nat.pow 2 j) 1) (Word.pow_pred_lt j)))
+        (Eq.symm (Nat.one_mul (Nat.sub (Nat.pow 2 j) 1))))
+      (Eq.symm e))
+
+-- the sign bit's word, and stage 1 (the barrel's `shift1` with a zero fill)
+def Rs.sign (x : BitVec 32) : BitVec 1 := BitVec.ofNat 1 (Nat.shiftRight x.toNat 31)
+
+def Rs.stage1 (F : BitVec 1) (x : BitVec 32) : BitVec 32 :=
+  BitVec.concat (Rs.fillW 1 F) (BitVec.ofNat 31 (Nat.shiftRight x.toNat 1))
+
+def Rs.barrel1_eq (F : BitVec 1) (x : BitVec 32) :
+    barrel (r := HwTy.El) (BitVec.ofNat 1 0) F (BitVec.ofNat 5 1) x = Rs.stage1 F x := rfl
+
+def Rs.stage1_toNat (F : BitVec 1) (x : BitVec 32) :
+    (Rs.stage1 F x).toNat
+      = Bits.low 32 (Nat.add (Nat.mul (Nat.mul F.toNat (Nat.sub (Nat.pow 2 1) 1)) (Nat.pow 2 31))
+          (Bits.low 31 (Bits.high 1 x.toNat))) :=
+  Eq.trans
+    (BitVec.shrStage_toNat 31 1 (Rs.fillW 1 F) x)
+    (Bits.congr (fun t => Bits.low 32 (Nat.add (Nat.mul t (Nat.pow 2 31))
+        (Bits.low 31 (Bits.high 1 x.toNat)))) (Rs.fillW_toNat 1 F))
+
+-- A zero-fill right shift by one: the stage chain ends at `lshr`. `F`/`hf` are
+-- parameters (a variable fill, so the zero steps are genuine equations, not the
+-- definitionally-`True` ones `Eq.trans` cannot chain through).
+def Rs.barrel1_lshr (F : BitVec 1) (hf : F.toNat = 0) (y : BitVec 32) :
+    barrel (r := HwTy.El) (BitVec.ofNat 1 0) F (BitVec.ofNat 5 1) y
+      = BitVec.lshr y 1 :=
+  let K := F.toNat;
+  let F1 := Nat.mul K (Nat.sub (Nat.pow 2 1) 1);
+  let L1 := Bits.low 31 (Bits.high 1 y.toNat);
+  let H1 := Bits.high 1 y.toNat;
+  let h31 : Nat.lt H1 (Nat.pow 2 31) = .true := Bits.high_lt 1 31 y.toNat (UIntN.toNat_lt y);
+  let h32 : Nat.lt H1 (Nat.pow 2 32) = .true := Bits.high_lt_pow 1 32 y.toNat (UIntN.toNat_lt y);
+  let hX : Nat.mul F1 (Nat.pow 2 31) = 0 :=
+    transp (fun t _ => Nat.mul (Nat.mul t (Nat.sub (Nat.pow 2 1) 1)) (Nat.pow 2 31) = 0)
+      rfl (Eq.symm hf);
+  let hY : Nat.add (Nat.mul F1 (Nat.pow 2 31)) (Bits.low 31 H1) = Bits.low 31 H1 :=
+    transp (fun t _ => Nat.add t (Bits.low 31 H1) = Bits.low 31 H1) rfl (Eq.symm hX);
+  UIntN.ext
+    (barrel (r := HwTy.El) (BitVec.ofNat 1 0) F (BitVec.ofNat 5 1) y)
+    (BitVec.lshr y 1)
+    (Eq.trans
+      (Bits.congr (fun w => w.toNat) (Rs.barrel1_eq F y))
+      (Eq.trans
+        (Rs.stage1_toNat F y)
+        (Eq.trans
+          (Bits.congr (fun t => Bits.low 32 t) hY)
+          (Eq.trans
+            (Bits.low_low_rev 31 32 H1 rfl)
+            (Eq.trans
+              (Bits.low_of_lt 31 H1 h31)
+              (Eq.symm (BitVec.lshr_toNat 32 1 y)))))))
+
+-- The negative branch of `IntN.shiftRight`, in the complement form the circuit
+-- computes: `2^32 - 1 - ((2^32 - 1 - x) >> 1)`. The mins are `below`'s and are
+-- discharged by `Bits.min_of_le` (no arithmetic on a full-width constant is
+-- unfolded).
+def Rs.ashr_neg_toNat (x : BitVec 32) (hneg : IntN.isNeg (UIntN.toIntN x) = .true) :
+    (BitVec.ashr x 1).toNat
+      = Nat.sub (Bits.dec (Nat.pow 2 32))
+          (Bits.high 1 (Nat.sub (Bits.dec (Nat.pow 2 32)) x.toNat)) :=
+  let M := Nat.pow 2 32;
+  let a := UIntN.toIntN x;
+  let n := IntN.not a;
+  let nv : n.toNat = Nat.sub (Nat.sub M 1) x.toNat :=
+    Bits.wnot_val (IntN.toUIntN a);
+  -- (`Bits.div_pow` at k = 1 is a definitional equality, hence a `True`-typed
+  -- equation; `min_of_le` on the shift itself is the genuine step.)
+  let inner : Word.min (Nat.shiftRight n.toNat 1) n.toNat = Bits.high 1 n.toNat :=
+    Bits.min_of_le (Nat.shiftRight n.toNat 1) n.toNat (Bits.high_le 1 n.toNat);
+  let e0 : (BitVec.ashr x 1).toNat = (IntN.shiftRightBody 32 1 .true a).toNat :=
+    transp (fun t _ => (IntN.shiftRightBody 32 1 t a).toNat
+        = (IntN.shiftRightBody 32 1 .true a).toNat) rfl (Eq.symm hneg);
+  -- `IntN.shiftRightBody_neg_toNat` is a `rfl` lemma, so its equation is
+  -- definitionally `True` and cannot be a named `Eq.trans` link; the body's `toNat`
+  -- *is* the `min` below, so conversion connects `e0` to the next step directly.
+  let e1 : (IntN.shiftRightBody 32 1 .true a).toNat
+      = Word.min (Nat.sub (Nat.sub M 1) (Bits.high 1 n.toNat)) (Nat.sub M 1) :=
+    Bits.congr (fun t => Word.min (Nat.sub (Nat.sub M 1) t) (Nat.sub M 1)) inner;
+  let outer : Word.min (Nat.sub (Nat.sub M 1) (Bits.high 1 n.toNat)) (Nat.sub M 1)
+      = Nat.sub (Nat.sub M 1) (Bits.high 1 n.toNat) :=
+    Bits.min_of_le (Nat.sub (Nat.sub M 1) (Bits.high 1 n.toNat)) (Nat.sub M 1)
+      (Bits.sub_le_self (Nat.sub M 1) (Bits.high 1 n.toNat));
+  Eq.trans
+    (Eq.trans e0 (Eq.trans e1 outer))
+    (Bits.congr (fun t => Nat.sub (Nat.sub M 1) (Bits.high 1 t)) nv)
+
+-- and the word identity: for a negative operand, `ashr` is the complement of the
+-- logical shift of the complement.
+def Rs.ashr_neg_eq (x : BitVec 32) (hneg : IntN.isNeg (UIntN.toIntN x) = .true) :
+    BitVec.ashr x 1 = BitVec.not (BitVec.lshr (BitVec.not x) 1) :=
+  UIntN.ext
+    (BitVec.ashr x 1)
+    (BitVec.not (BitVec.lshr (BitVec.not x) 1))
+    (Eq.trans
+      (Rs.ashr_neg_toNat x hneg)
+      (Eq.symm
+        (Eq.trans
+          (Eq.trans
+            (Bits.wnot_val (BitVec.lshr (BitVec.not x) 1))
+            (Bits.congr (fun t => Nat.sub (Bits.dec (Nat.pow 2 32)) t)
+              (Bits.wshr_val (BitVec.not x) 1)))
+          (Bits.congr (fun t => Nat.sub (Bits.dec (Nat.pow 2 32)) (Bits.high 1 t))
+            (Bits.wnot_val x)))))
+
+-- The clear-sign branch: `ashr` is the logical shift.
+def Rs.lshr_eq_ashr_pos (x : BitVec 32) (hpos : IntN.isNeg (UIntN.toIntN x) = .false) :
+    BitVec.lshr x 1 = BitVec.ashr x 1 :=
+  UIntN.ext
+    (BitVec.lshr x 1)
+    (BitVec.ashr x 1)
+    (Eq.trans
+      (Bits.wshr_val x 1)
+      (Eq.symm (IntN.shiftRight_pos_toNat 32 1 (UIntN.toIntN x) hpos)))
+
+-- The circuit's shift result, as `Core.wiz` builds it: the sign bit selects the
+-- complemented operand into the (zero-fill) barrel and complements the result.
+def Rs.srai_sh (x : BitVec 32) (sgn : BitVec 1) : BitVec 32 :=
+  let shIn : BitVec 32 := match BitVec.isTrue sgn with
+    | .true => BitVec.not x
+    | .false => x;
+  let shOut : BitVec 32 := barrel (r := HwTy.El) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)
+    (BitVec.ofNat 5 1) shIn;
+  match BitVec.isTrue sgn with
+  | .true => BitVec.not shOut
+  | .false => shOut
+
+def Rs.barrel1_srai (x : BitVec 32) :
+    Rs.srai_sh x (Rs.sign x) = BitVec.ashr x 1 :=
+  let sgn := Rs.sign x;
+  let hmod : sgn.toNat = Nat.mod (Nat.shiftRight x.toNat 31) 2 :=
+    BitVec.toNat_ofNat 1 (Nat.shiftRight x.toNat 31);
+  Or.elim (UIntN.cases1 sgn)
+    (fun e0 =>
+      let hpos : IntN.isNeg (UIntN.toIntN x) = .false :=
+        Bits.congr (fun t => Nat.beq t 1)
+          (Eq.trans (Eq.symm hmod) (Bits.congr (fun w => w.toNat) e0));
+      Eq.trans
+        (Eq.congrArg (fun s => Rs.srai_sh x s) e0)
+        (Eq.trans
+          (Rs.barrel1_lshr (BitVec.ofNat 1 0) rfl x)
+          (Rs.lshr_eq_ashr_pos x hpos)))
+    (fun e1 =>
+      let hneg : IntN.isNeg (UIntN.toIntN x) = .true :=
+        Bits.congr (fun t => Nat.beq t 1)
+          (Eq.trans (Eq.symm hmod) (Bits.congr (fun w => w.toNat) e1));
+      Eq.trans
+        (Eq.congrArg (fun s => Rs.srai_sh x s) e1)
+        (Eq.trans
+          (Eq.congrArg (fun z => BitVec.not z)
+            (Rs.barrel1_lshr (BitVec.ofNat 1 0) rfl (BitVec.not x)))
+          (Eq.symm (Rs.ashr_neg_eq x hneg))))
+
+def Rs.srai_pc (a : Arch) : BitVec 32 := BitVec.add a.pc (BitVec.ofNat 32 4)
+
+def Rs.srai1_G (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32)
+    (cnt srd : BitVec 5) (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) :
+    Pf.G a (Pf.w (A.srai 9 2 1)) 9 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio
+        (Pf.bytes (Pf.w (A.srai 9 2 1))) = Pf.spec a (Pf.w (A.srai 9 2 1)) 9 :=
+  Eq.congrArg (fun v => (Rs.srai_pc a, v)) (Rs.barrel1_srai (Pf.rf a (BitVec.ofNat 4 2)))
+
+def Rs.srai_ok : Pf.Claim (Pf.w (A.srai 9 2 1)) 9 :=
+  fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
+    Pf.ok a (Pf.w (A.srai 9 2 1)) 9 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio
+      (Rs.srai1_G a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio) h

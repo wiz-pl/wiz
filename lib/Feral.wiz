@@ -1,34 +1,46 @@
 import OpticDerive
--- Feral: a Rust-like language embedded in Wiz (docs/stages/22-numbers.md, 22j).
---
---   import FeralCore                 -- the runtime of lowered code (drafts/feral/lib, for now)
---   import Feral
---   feral
---     fn swap {'a 'b} (x : &'a mut U64) (y : &'b mut U64) : Unit := { let t := *x; *x := *y; *y := t }
---   end
---
--- `feral … end` is a command macro written in Wiz (this file): it type-checks the items
--- with a checker whose types carry regions, and lowers each to Wiz source, which the
--- elaborator and the kernel then check as usual. `#lower feral … end` also shows the
--- generated Wiz. The lowering rules are drafts/feral/LOWERING.md (L1 … L22; the comments
--- below cite them); the generated code uses lib/Region.wiz and lib/Optic.wiz.
---
--- Borrow errors (E0499, E0502, E0515, E0597, a missing `'a : 'b`) are reported at the Feral
--- source by this front end. They are also type errors of the lowered program:
--- `#unchecked feral … end` lowers without the front end's verdict, so that tests can see
--- the kernel reject the same programs. Mutable borrows lower to linear handles (`Uniq`,
--- `Mut`, `MutOpt` at quantity 1, cohesion M4b), so duplicating one (E0499) or keeping one
--- past its scope is a type error of the lowering too. What is *not* is reading the lender
--- under a renamed `Lent` token in hand-written Wiz (LOWERING.md, L21; the lender is an ω
--- value): that is ruled out by the shape of what this file emits.
---
--- Positions: runtime `Syntax` has none, so every function here carries the *path* of the
--- node it works on (child indices from the block), and errors are `Syntax.errorAt path`.
--- The generated text marks what comes from which node (`Fe.Out.at`), so that hovers, go
--- to definition and errors of the generated Wiz land on the Feral source.
+/-!
+# Feral: a Rust-like language embedded in Wiz
 
--- ## Grammar (LOWERING.md §1). The categories share the keyword scope `feral_kw` (13j):
--- `if`, `then`, `mut`, `fn` … are keywords inside them and ordinary Wiz identifiers elsewhere.
+Feral (docs/stages/22-numbers.md, 22j) is a small Rust inside Wiz:
+
+```
+import FeralCore                 -- the runtime of lowered code (drafts/feral/lib, for now)
+import Feral
+feral
+  fn swap {'a 'b} (x : &'a mut U64) (y : &'b mut U64) : Unit := { let t := *x; *x := *y; *y := t }
+end
+```
+
+The parts, in order: the grammar (`feral_ty`, `feral_expr`, …), small list and string
+utilities (`Fe.seq`, `Fe.split`, …), syntax access (`Fe.kids`, `Fe.sub`), the front end's
+types (`Fe.Ty`) with unification (`Fe.unify`), generated code (`Fe.Out`), the environment
+(`Fe.Var`) and monad (`Fe.M`), outlives evidence (`Fe.evidence`), borrow requests
+(`Fe.Req`), the lowering (`Fe.expr`, `Fe.scopeOne`, …), items (`Fe.sigOf`, `Fe.fnText`)
+and the macro (`Fe.macro`). Names are prefixed `Fe.`.
+
+`feral … end` is a command macro written in Wiz (this file): it type-checks the items
+with a checker whose types carry regions, and lowers each to Wiz source, which the
+elaborator and the kernel then check as usual. `#lower feral … end` also shows the
+generated Wiz. The lowering rules are drafts/feral/LOWERING.md (L1 … L22; the comments
+below cite them); the generated code uses lib/Region.wiz, lib/Optic.wiz and, for a
+`structure`'s field lenses, lib/OpticDerive.wiz.
+
+Borrow errors (E0499, E0502, E0515, E0597, a missing `'a : 'b`) are reported at the Feral
+source by this front end. They are also type errors of the lowered program:
+`#unchecked feral … end` lowers without the front end's verdict, so that tests can see
+the kernel reject the same programs. Mutable borrows lower to linear handles (`Uniq`,
+`Mut`, `MutOpt` at quantity 1, cohesion M4b), so duplicating one (E0499) or keeping one
+past its scope is a type error of the lowering too. What is *not* is reading the lender
+under a renamed `Lent` token in hand-written Wiz (LOWERING.md, L21; the lender is an ω
+value): that is ruled out by the shape of what this file emits.
+
+Positions: runtime `Syntax` has none, so every function here carries the *path* of the
+node it works on (child indices from the block), and errors are `Syntax.errorAt path`.
+The generated text marks what comes from which node (`Fe.Out.at`), so that hovers, go
+to definition and errors of the generated Wiz land on the Feral source.
+-/
+
 declare_syntax_cat feral_lt (keywords := feral_kw)
 declare_syntax_cat feral_ty (keywords := feral_kw)
 declare_syntax_cat feral_pat (keywords := feral_kw)
@@ -119,69 +131,87 @@ syntax (name := feralLower) "#lower" "feral" feral_item* "end" : command
 syntax (name := feralUnchecked) "#unchecked" "feral" feral_item* "end" : command
 -- ## Small utilities (the prelude has few; names are prefixed `Fe.`)
 local infixr:60 " +++ " => String.append
+/-- Whether two characters are equal (by their code points). -/
 def Fe.ceq (c d : Char) : Bool := Nat.beq (Char.code c) (Char.code d)
+/-- Whether two lists of characters are equal, character by character. -/
 def Fe.leq : List Char → List Char → Bool
   | .nil, .nil => .true
   | .cons a xs, .cons b ys => (match Fe.ceq a b with
     | .true => Fe.leq xs ys
     | .false => .false)
   | _, _ => .false
+/-- String equality, the one the front end uses everywhere (the prelude has none
+of its own): `Fe.seq "fn" "fn" = .true`. -/
 def Fe.seq : String → String → Bool
   | .mk xs, .mk ys => Fe.leq xs ys
--- is `p` a prefix of `s`?
+/-- is `p` a prefix of `s`? -/
 def Fe.lpre : List Char → List Char → Bool
   | .nil, _ => .true
   | .cons a xs, .cons b ys => (match Fe.ceq a b with
     | .true => Fe.lpre xs ys
     | .false => .false)
   | _, _ => .false
+/-- The characters of a string. -/
 def Fe.chars : String → List Char
   | .mk xs => xs
--- `x.f.g` ↦ (`x`, `f.g`); no dot: (`x`, "")
+/-- `x.f.g` ↦ (`x`, `f.g`); no dot: (`x`, "") -/
 def Fe.splitGo : List Char → List Char → String × String
   | acc, .nil => (String.mk acc, "")
   | acc, .cons c cs => (match Nat.beq (Char.code c) 46 with
     | .true => (String.mk acc, String.mk cs)
     | .false => Fe.splitGo (List.append acc (.cons c .nil)) cs)
+/-- A dotted name at its first dot: `Fe.split "x.f.g" = ("x", "f.g")`; without a dot,
+`Fe.split "x" = ("x", "")`. Field accesses and method calls arrive as one dotted identifier. -/
 def Fe.split (s : String) : String × String := Fe.splitGo .nil (Fe.chars s)
+/-- `List.map`, for the front end: `f` applied to every element. -/
 def Fe.map {A B : Type} (f : A → B) : List A → List B
   | .nil => .nil
   | .cons x xs => .cons (f x) (Fe.map f xs)
+/-- Does some element satisfy `f`? -/
 def Fe.any {A : Type} (f : A → Bool) : List A → Bool
   | .nil => .false
   | .cons x xs => (match f x with
     | .true => .true
     | .false => Fe.any f xs)
+/-- The elements that satisfy `f`, in order. -/
 def Fe.filter {A : Type} (f : A → Bool) : List A → List A
   | .nil => .nil
   | .cons x xs => (match f x with
     | .true => .cons x (Fe.filter f xs)
     | .false => Fe.filter f xs)
+/-- Is the string `x` in the list `xs`? -/
 def Fe.mem (x : String) (xs : List String) : Bool := Fe.any (Fe.seq x) xs
+/-- Reverses the first list onto the second: `Fe.rev xs .nil` is `xs` reversed. -/
 def Fe.rev {A : Type} : List A → List A → List A
   | .nil, acc => acc
   | .cons x xs, acc => Fe.rev xs (.cons x acc)
+/-- The element at index `n` (from 0), if the list is long enough. -/
 def Fe.nth {A : Type} : List A → Nat → Option A
   | .nil, _ => .none
   | .cons x xs, n => (match n with
     | .zero => .some x
     | .succ m => Fe.nth xs m)
+/-- The list without its first `n` elements. -/
 def Fe.drop {A : Type} : Nat → List A → List A
   | .zero, xs => xs
   | .succ n, .nil => .nil
   | .succ n, .cons _ xs => Fe.drop n xs
+/-- The first `n` elements of a list. -/
 def Fe.take {A : Type} : Nat → List A → List A
   | .zero, _ => .nil
   | .succ n, .nil => .nil
   | .succ n, .cons x xs => .cons x (Fe.take n xs)
+/-- Is the list empty? -/
 def Fe.isNil {A : Type} : List A → Bool
   | .nil => .true
   | _ => .false
+/-- The value at key `x` of an association list (the first match), if any. -/
 def Fe.lookup {A : Type} (x : String) : List (String × A) → Option A
   | .nil => .none
   | .cons p ps => (match Fe.seq x p.1 with
     | .true => .some p.2
     | .false => Fe.lookup x ps)
+/-- Is the number `n` in the list? -/
 def Fe.memNat (n : Nat) : List Nat → Bool
   | .nil => .false
   | .cons m ms => (match Nat.beq n m with
@@ -189,39 +219,49 @@ def Fe.memNat (n : Nat) : List Nat → Bool
     | .false => Fe.memNat n ms)
 
 -- ## Syntax access. A node's children are numbered; a path is the list of child indices
--- from the `feral` block down to a node (errors are reported there, `Syntax.errorAt`).
+/-- from the `feral` block down to a node (errors are reported there, `Syntax.errorAt`). -/
 def Fe.kind : Syntax → String
   | .node k _ => k
   | .atom _ => "atom"
   | .ident _ => "ident"
   | .missing => "missing"
+/-- Is `s` a node of kind `k`? -/
 def Fe.is (k : String) (s : Syntax) : Bool := Fe.seq k (Fe.kind s)
+/-- The `i`-th child of a node (`Syntax.getArg`). -/
 def Fe.arg (s : Syntax) (i : Nat) : Syntax := Syntax.getArg s i
+/-- The text of an identifier or an atom; `""` for anything else. -/
 def Fe.id : Syntax → String
   | .ident x => x
   | .atom x => x
   | _ => ""
+/-- Is this an atom (a keyword or a separator)? -/
 def Fe.isAtom : Syntax → Bool
   | .atom _ => .true
   | _ => .false
--- the children of a node with their indices, separators (atoms) dropped
+/-- the children of a node with their indices, separators (atoms) dropped -/
 def Fe.kidsGo : SyntaxF .false → Nat → List (Nat × Syntax)
   | .nil, _ => .nil
   | .cons x xs, i => (match Fe.isAtom x with
     | .true => Fe.kidsGo xs (Nat.succ i)
     | .false => .cons (i, x) (Fe.kidsGo xs (Nat.succ i)))
+/-- The children of a node with their indices, separators (atoms) dropped: the
+elements of a `sepBy` or a `*` repetition, ready to be walked with their paths. -/
 def Fe.kids : Syntax → List (Nat × Syntax)
   | .node _ args => Fe.kidsGo args 0
   | _ => .nil
+/-- The path of child `i` of the node at path `p`. Errors are reported at a path
+(`Syntax.errorAt`), since runtime `Syntax` carries no positions. -/
 def Fe.sub (p : List Nat) (i : Nat) : List Nat := List.append p (.cons i .nil)
 -- does the identifier `x` (or `x.f…`) occur in `s`?
 mutual
+/-- Does the identifier `x` (or a dotted `x.f…`) occur in `s`? -/
 def Fe.ment (x : String) : Syntax → Bool
   | .ident y => (match Fe.seq x y with
     | .true => .true
     | .false => Fe.lpre (Fe.chars (x +++ ".")) (Fe.chars y))
   | .node _ args => Fe.mentL x args
   | _ => .false
+/-- Does `x` occur in one of these syntax trees? (The list half of `Fe.ment`.) -/
 def Fe.mentL (x : String) : SyntaxF .false → Bool
   | .nil => .false
   | .cons a as => (match Fe.ment x a with
@@ -230,6 +270,7 @@ def Fe.mentL (x : String) : SyntaxF .false → Bool
 end
 -- does `s` contain a `return` or a `?` (an early exit of the function)?
 mutual
+/-- Does `s` contain a `return` or a `?`, that is, an early exit of the function? -/
 def Fe.early : Syntax → Bool
   | .node k args => (match Fe.seq k "feral_expr.ret" with
     | .true => .true
@@ -237,6 +278,7 @@ def Fe.early : Syntax → Bool
       | .true => .true
       | .false => Fe.earlyL args))
   | _ => .false
+/-- Does one of these syntax trees contain an early exit? (The list half of `Fe.early`.) -/
 def Fe.earlyL : SyntaxF .false → Bool
   | .nil => .false
   | .cons a as => (match Fe.early a with
@@ -245,7 +287,7 @@ def Fe.earlyL : SyntaxF .false → Bool
 end
 
 -- ## Types of the front end. Regions are types too (`rg`, or a variable), so that one
--- unifier infers both. `Box T` is `T`, `USize` is `U64`, `Result T E` is `Except E T`.
+/-- unifier infers both. `Box T` is `T`, `USize` is `U64`, `Result T E` is `Except E T`. -/
 inductive Fe.Ty where
   | con (n : String)                              -- `U64`, a struct, a type parameter
   | app (f : Fe.Ty) (a : Fe.Ty)                   -- `Vec U64`
@@ -257,21 +299,28 @@ inductive Fe.Ty where
   | rg (n : String)                               -- a region: `ρa`, `Region.static`
   | var (n : Nat)                                 -- to be inferred
 
+/-- The type `Unit`. -/
 def Fe.tUnit : Fe.Ty := .con "Unit"
+/-- The type `U64`. -/
 def Fe.tU64 : Fe.Ty := .con "U64"
+/-- The type `Bool`. -/
 def Fe.tBool : Fe.Ty := .con "Bool"
+/-- The region `Region.static` (Rust's `'static`). -/
 def Fe.tStatic : Fe.Ty := .rg "Region.static"
--- (some `&mut`: what `Fe.letH` needs to know)
+/-- (some `&mut`: what `Fe.letH` needs to know) -/
 def Fe.tRefMut : Fe.Ty := .ref .true (.rg "Region.static") (.con "Unit")
+/-- A type constructor applied to one argument: `Fe.tApp1 "Vec" Fe.tU64` is `Vec U64`. -/
 def Fe.tApp1 (f : String) (a : Fe.Ty) : Fe.Ty := .app (.con f) a
 
+/-- A substitution: what each inference variable (`Fe.Ty.var n`) has been solved to. -/
 def Fe.Subst : Type := List (Nat × Fe.Ty)
+/-- What a substitution maps variable `n` to, if anything. -/
 def Fe.sget (n : Nat) : Fe.Subst → Option Fe.Ty
   | .nil => .none
   | .cons p ps => (match Nat.beq n p.1 with
     | .true => .some p.2
     | .false => Fe.sget n ps)
--- apply a substitution all the way down
+/-- apply a substitution all the way down -/
 partial def Fe.zonk (s : Fe.Subst) : Fe.Ty → Fe.Ty
   | .con n => .con n
   | .app f a => .app (Fe.zonk s f) (Fe.zonk s a)
@@ -284,7 +333,7 @@ partial def Fe.zonk (s : Fe.Subst) : Fe.Ty → Fe.Ty
   | .var n => (match Fe.sget n s with
     | .some t => Fe.zonk s t
     | .none => .var n)
--- the region names of a (zonked) type
+/-- the region names of a (zonked) type -/
 def Fe.rgsOf : Fe.Ty → List String → List String
   | .con _, acc => acc
   | .app f a, acc => Fe.rgsOf f (Fe.rgsOf a acc)
@@ -297,9 +346,9 @@ def Fe.rgsOf : Fe.Ty → List String → List String
     | .true => acc
     | .false => .cons n acc)
   | .var _, acc => acc
--- does a (zonked) type mention one of these regions?
+/-- does a (zonked) type mention one of these regions? -/
 def Fe.tagged (rs : List String) (t : Fe.Ty) : Bool := Fe.any (fun (r : String) => Fe.mem r rs) (Fe.rgsOf t .nil)
--- replace names (type parameters, region parameters) by types: instantiating a signature
+/-- replace names (type parameters, region parameters) by types: instantiating a signature -/
 def Fe.inst (m : List (String × Fe.Ty)) : Fe.Ty → Fe.Ty
   | .con n => (match Fe.lookup n m with
     | .some t => t
@@ -315,7 +364,7 @@ def Fe.inst (m : List (String × Fe.Ty)) : Fe.Ty → Fe.Ty
     | .none => .rg n)
   | .var n => .var n
 
--- a type as Wiz source (the lowering of types: L1, L3, L4, L12, L20)
+/-- a type as Wiz source (the lowering of types: L1, L3, L4, L12, L20) -/
 partial def Fe.tyStr : Fe.Ty → String
   | .con n => n
   | .prod a b => "(" +++ Fe.tyStr a +++ " × " +++ Fe.tyStr b +++ ")"
@@ -334,6 +383,8 @@ partial def Fe.tyStr : Fe.Ty → String
   | .var _ => "_"
 
 -- ## Generated code: a rope of text with types to be printed once inference is done
+/-- Generated code: a rope of text with types in it, printed (`Fe.render`) once
+inference is done, so that a type can be written before its variables are solved. -/
 inductive Fe.Out where
   | s (x : String)
   | t (ty : Fe.Ty)
@@ -343,25 +394,31 @@ inductive Fe.Out where
   | rgs (ts : List Fe.Ty) (ex : List String)   -- `{ρ₁ ρ₂ : Region}`: the regions of `ts` except `ex`
   | at (p : List Nat) (o : Fe.Out)      -- `o` comes from the input node at path `p` (positions)
 local infixr:55 " ⊕ " => Fe.Out.cat
+/-- A piece of generated text: `Fe.o "let x := 1;"`. -/
 def Fe.o (x : String) : Fe.Out := .s x
+/-- `n` levels of indentation (two spaces each), in front of `acc`. -/
 def Fe.spaces : Nat → List Char → List Char
   | .zero, acc => acc
   | .succ n, acc => .cons (Char.mk 32) (.cons (Char.mk 32) (Fe.spaces n acc))
+/-- The region names of these types, zonked with `s`, added to `acc`. -/
 def Fe.rgsAll (s : Fe.Subst) : List Fe.Ty → List String → List String
   | .nil, acc => acc
   | .cons t ts, acc => Fe.rgsAll s ts (Fe.rgsOf (Fe.zonk s t) acc)
+/-- The strings, each followed by a space: `Fe.words ["a", "b"] = "a b "`. -/
 def Fe.words : List String → String
   | .nil => ""
   | .cons x xs => x +++ " " +++ Fe.words xs
--- Positions: `.at p o` renders `o` between markers (private-use characters) that name
--- the input node at `p`: U+E000, the path in decimal with `.` between indices, U+E001,
--- the text, U+E002. The command elaborator strips them from the generated source and
--- gives the syntax parsed from the text between them the range of that node (Elab/ProcMacro.lean,
--- `stripMarks`), so that hovers, go-to-definition and errors land on the Feral source.
+/-- Positions: `.at p o` renders `o` between markers (private-use characters) that name
+the input node at `p`: U+E000, the path in decimal with `.` between indices, U+E001,
+the text, U+E002. The command elaborator strips them from the generated source and
+gives the syntax parsed from the text between them the range of that node (Elab/ProcMacro.lean,
+`stripMarks`), so that hovers, go-to-definition and errors land on the Feral source. -/
 def Fe.pathChars : List Nat → List Char → List Char
   | .nil, acc => acc
   | .cons i .nil, acc => List.append (Fe.chars (Syntax.decimal i)) acc
   | .cons i is, acc => List.append (Fe.chars (Syntax.decimal i)) (.cons (Char.mk 46) (Fe.pathChars is acc))
+/-- Prints generated code: `sb` solves the types in it, `d` is the indentation
+depth, and the characters go in front of `acc`. -/
 def Fe.render (sb : Fe.Subst) : Fe.Out → Nat → List Char → List Char
   | .s x, _, acc => List.append (Fe.chars x) acc
   | .t ty, _, acc => List.append (Fe.chars (Fe.tyStr (Fe.zonk sb ty))) acc
@@ -374,18 +431,21 @@ def Fe.render (sb : Fe.Subst) : Fe.Out → Nat → List Char → List Char
     (match Fe.filter (fun (r : String) => Bool.not (Fe.mem r ex)) (Fe.rev (Fe.rgsAll sb ts .nil) .nil) with
     | .nil => acc
     | .cons r rs => List.append (Fe.chars ("{" +++ Fe.words (.cons r rs) +++ ": Region} ")) acc)
+/-- The text of a plain piece of generated code (a variable's name, say), if it is one. -/
 def Fe.outName : Fe.Out → Option String
   | .s x => .some x
   | .at _ o => Fe.outName o
   | _ => .none
 
 -- ## Variables
--- a cursor's child (L16): a field of the constructor the cursor points at
+/-- a cursor's child (L16): a field of the constructor the cursor points at -/
 structure Fe.Child where
   parent : String
   ctor : String
   fields : List String
   idx : Nat
+/-- A variable of the front end's environment: its type, and what the borrow checker
+knows about it (whether it is a handle, its lender, the borrows it gives back, …). -/
 structure Fe.Var where
   name : String
   ty : Fe.Ty
@@ -397,94 +457,127 @@ structure Fe.Var where
   gone : Bool             -- a handle moved into a returned borrow or a cursor
   child : Option Fe.Child
   unp : List (String × String)   -- a lender whose fields are out (L11): field ↦ variable
+/-- The environment: the variables in scope, innermost first. -/
 def Fe.Env : Type := List Fe.Var
+/-- A fresh variable entry: name, type and whether it is assignable; no borrow facts. -/
 def Fe.mkVar (name : String) (ty : Fe.Ty) (m : Bool) : Fe.Var :=
   Fe.Var.mk name ty m .false "" "" .nil .false .none .nil
+/-- The variable with another type. -/
 def Fe.Var.setTy (v : Fe.Var) (t : Fe.Ty) : Fe.Var := Fe.Var.mk v.name t v.mutable v.alias v.src v.tag v.rel v.gone v.child v.unp
+/-- The variable as a place alias (L11, L15), tied to the region `tag`. -/
 def Fe.Var.setAlias (v : Fe.Var) (tag : String) : Fe.Var := Fe.Var.mk v.name v.ty v.mutable .true v.src tag v.rel v.gone v.child v.unp
+/-- The variable as the handle of a borrow of `s`. -/
 def Fe.Var.setSrc (v : Fe.Var) (s : String) : Fe.Var := Fe.Var.mk v.name v.ty v.mutable v.alias s v.tag v.rel v.gone v.child v.unp
+/-- The variable as a returned borrow that gives the handles `r` back at its last use. -/
 def Fe.Var.setRel (v : Fe.Var) (r : List String) : Fe.Var := Fe.Var.mk v.name v.ty v.mutable v.alias v.src v.tag r v.gone v.child v.unp
+/-- The variable marked moved (`.true`) or available again (`.false`). -/
 def Fe.Var.setGone (v : Fe.Var) (g : Bool) : Fe.Var := Fe.Var.mk v.name v.ty v.mutable v.alias v.src v.tag v.rel g v.child v.unp
+/-- The variable as a child of a cursor (L16). -/
 def Fe.Var.setChild (v : Fe.Var) (c : Fe.Child) : Fe.Var := Fe.Var.mk v.name v.ty v.mutable v.alias v.src v.tag v.rel v.gone (.some c) v.unp
+/-- The variable with its fields out (L11): field ↦ the variable that holds it. -/
 def Fe.Var.setUnp (v : Fe.Var) (u : List (String × String)) : Fe.Var := Fe.Var.mk v.name v.ty v.mutable v.alias v.src v.tag v.rel v.gone v.child u
+/-- The innermost variable named `x`, if any. -/
 def Fe.find (x : String) : Fe.Env → Option Fe.Var
   | .nil => .none
   | .cons v vs => (match Fe.seq x v.name with
     | .true => .some v
     | .false => Fe.find x vs)
+/-- Is a variable named `x` in scope? -/
 def Fe.has (x : String) (e : Fe.Env) : Bool := match Fe.find x e with
   | .some _ => .true
   | .none => .false
--- the handle of an open borrow of `x`
+/-- the handle of an open borrow of `x` -/
 def Fe.handleOf (x : String) : Fe.Env → Option Fe.Var
   | .nil => .none
   | .cons v vs => (match Fe.seq x v.src with
     | .true => .some v
     | .false => Fe.handleOf x vs)
--- replace the innermost entry of that name
+/-- replace the innermost entry of that name -/
 def Fe.update (f : Fe.Var → Fe.Var) (x : String) : Fe.Env → Fe.Env
   | .nil => .nil
   | .cons v vs => (match Fe.seq x v.name with
     | .true => .cons (f v) vs
     | .false => .cons v (Fe.update f x vs))
+/-- Is this a `Lent` token, a lender while it is mutably borrowed (L20)? -/
 def Fe.isLent : Fe.Ty → Bool
   | .lent _ _ => .true
   | _ => .false
 
 -- ## The front end's monad: state (fresh names, the substitution, borrow errors, the
--- loop functions of the current `fn`) and failure at a path
+/-- loop functions of the current `fn`) and failure at a path -/
 structure Fe.St where
   next : Nat
   subst : Fe.Subst
   soft : List (List Nat × String)     -- borrow errors: reported, or (in `#unchecked`) left to the kernel
   aux : List Fe.Out                   -- loop functions (L8), innermost last
   cell : List (Nat × (Nat × List Fe.Var))   -- per scope: how many statements it left outside (L20),
-                                            -- and the variables declared inside that live on
+                                            /-- and the variables declared inside that live on -/
 inductive Fe.Res (A : Type) where
   | ok (a : A) (s : Fe.St)
   | err (p : List Nat) (msg : String)
+/-- The front end's monad: state (`Fe.St`) and failure at a path. Written with `do`,
+since it has a `Monad` instance. -/
 def Fe.M (A : Type) : Type := Fe.St → Fe.Res A
+/-- Returns a value without changing the state. -/
 def Fe.M.pure {A : Type} (a : A) : Fe.M A := fun s => Fe.Res.ok a s
+/-- Runs `x`, then `f` on its value; an error stops the computation. -/
 def Fe.M.bind {A B : Type} (x : Fe.M A) (f : A → Fe.M B) : Fe.M B := fun s => match x s with
   | .ok a s2 => f a s2
   | .err p m => .err p m
 instance : Monad Fe.M where
   pure := Fe.M.pure
   bind := Fe.M.bind
+/-- Fails with `msg` at the node at path `p`. -/
 def Fe.fail {A : Type} (p : List Nat) (msg : String) : Fe.M A := fun _ => Fe.Res.err p msg
+/-- A fresh number (for inference variables and generated names). -/
 def Fe.fresh : Fe.M Nat := fun s => Fe.Res.ok s.next (Fe.St.mk (Nat.succ s.next) s.subst s.soft s.aux s.cell)
+/-- A fresh inference variable. -/
 def Fe.freshVar : Fe.M Fe.Ty := do
   n ← Fe.fresh;
   Fe.M.pure (Fe.Ty.var n)
+/-- A fresh generated name: `base_7`, say. -/
 def Fe.freshName (base : String) : Fe.M String := do
   n ← Fe.fresh;
   Fe.M.pure (base +++ "_" +++ Syntax.decimal n)
+/-- The current substitution. -/
 def Fe.getSubst : Fe.M Fe.Subst := fun s => Fe.Res.ok s.subst s
+/-- Solves inference variable `n` to `t`. -/
 def Fe.bindVar (n : Nat) (t : Fe.Ty) : Fe.M Unit := fun s =>
   Fe.Res.ok () (Fe.St.mk s.next (.cons (n, t) s.subst) s.soft s.aux s.cell)
+/-- Records a borrow error at `p` without stopping: `feral` reports it,
+`#unchecked feral` leaves the verdict to the kernel. -/
 def Fe.softErr (p : List Nat) (msg : String) : Fe.M Unit := fun s =>
   Fe.Res.ok () (Fe.St.mk s.next s.subst (List.append s.soft (.cons (p, msg) .nil)) s.aux s.cell)
+/-- Adds a generated loop function (L8) to emit before the current `fn`. -/
 def Fe.addAux (o : Fe.Out) : Fe.M Unit := fun s =>
   Fe.Res.ok () (Fe.St.mk s.next s.subst s.soft (List.append s.aux (.cons o .nil)) s.cell)
+/-- Records, for scope `id`, how many statements it left outside and the variables that live on (L20). -/
 def Fe.setCell (id : Nat) (n : Nat) (vs : List Fe.Var) : Fe.M Unit := fun s =>
   Fe.Res.ok () (Fe.St.mk s.next s.subst s.soft s.aux (.cons (id, (n, vs)) s.cell))
+/-- What was recorded for scope `id` (`Fe.setCell`); `(0, [])` if nothing. -/
 def Fe.cellGo (id : Nat) : List (Nat × (Nat × List Fe.Var)) → Nat × List Fe.Var
   | .nil => (0, .nil)
   | .cons c cs => (match Nat.beq id c.1 with
     | .true => c.2
     | .false => Fe.cellGo id cs)
+/-- What was recorded for scope `id` (`Fe.setCell`). -/
 def Fe.getCell (id : Nat) : Fe.M (Nat × List Fe.Var) := fun s => Fe.Res.ok (Fe.cellGo id s.cell) s
+/-- The generated loop functions so far, and none left in the state. -/
 def Fe.takeAux : Fe.M (List Fe.Out) := fun s => Fe.Res.ok s.aux (Fe.St.mk s.next s.subst s.soft .nil s.cell)
+/-- A type with the current substitution applied. -/
 def Fe.zonkM (t : Fe.Ty) : Fe.M Fe.Ty := do
   s ← Fe.getSubst;
   Fe.M.pure (Fe.zonk s t)
 
 -- unification (first order; regions are constants)
 mutual
+/-- First-order unification of two types (regions are constants); `.false` if they
+don't unify. Solutions go into the state. -/
 def Fe.unify (a b : Fe.Ty) : Fe.M Bool := do
   a ← Fe.zonkM a;
   b ← Fe.zonkM b;
   Fe.unifyZ a b
+/-- `Fe.unify` on two zonked types. -/
 def Fe.unifyZ (a b : Fe.Ty) : Fe.M Bool :=
   match a, b with
   | .var n, .var m => (match Nat.beq n m with
@@ -506,11 +599,13 @@ def Fe.unifyZ (a b : Fe.Ty) : Fe.M Bool :=
   | .lent r l, t => Fe.unify l t
   | t, .lent r l => Fe.unify t l
   | _, _ => Fe.M.pure Bool.false
+/-- Unifies two pairs of types, `a` with `b` and then `c` with `d`. -/
 def Fe.unify2 (a b c d : Fe.Ty) : Fe.M Bool := do
   r ← Fe.unify a b;
   match r with
   | .true => Fe.unify c d
   | .false => Fe.M.pure Bool.false
+/-- Unifies three pairs of types. -/
 def Fe.unify3 (a b c d e f : Fe.Ty) : Fe.M Bool := do
   r ← Fe.unify2 a b c d;
   match r with
@@ -519,6 +614,9 @@ def Fe.unify3 (a b c d e f : Fe.Ty) : Fe.M Bool := do
 end
 
 -- ## Signatures, data declarations, the context
+/-- A function's signature as the front end sees it: region and type parameters, the
+bounds `'a : 'b`, the parameters and result, and which `&mut` parameters are lenders of
+a returned borrow (L4) or are handed back (L3). -/
 structure Fe.Sig where
   name : String                       -- the lowered function
   rgs : List String                   -- region parameters
@@ -529,18 +627,27 @@ structure Fe.Sig where
   fallible : Bool                     -- returns `Result (Ret × handed-back handles)` (L2, L3)
   lenders : List Nat                  -- the `&mut` parameters a returned borrow may come from (L4)
   handed : List Nat                   -- the `&mut` parameters handed back (L3)
+/-- An `enum` (or a library type like `Option`): its parameters and constructors with their fields. -/
 structure Fe.Enum where
   name : String
   params : List String
   ctors : List (String × List (String × Fe.Ty))
+/-- A `struct`: its fields and their types. -/
 structure Fe.Struct where
   name : String
   fields : List (String × Fe.Ty)
+/-- Everything declared: the signatures, enums and structs a `feral` block and the library provide. -/
 structure Fe.Glob where
   sigs : List Fe.Sig
   enums : List Fe.Enum
   structs : List Fe.Struct
+/-- A continuation: what to do with an expression's value (generated code), its type
+and the environment after it. The lowering is in continuation-passing style, since
+statements after a borrow live inside its scope (L20). -/
 def Fe.K : Type := Fe.Out → Fe.Ty → Fe.Env → Fe.M Fe.Out
+/-- The context of the lowering: the declarations, the current function, the innermost
+region, the outlives evidence in scope (L22), what `return` does here, and the borrows
+the current statement opened. -/
 structure Fe.Cx where
   g : Fe.Glob
   fname : String
@@ -552,58 +659,75 @@ structure Fe.Cx where
   fnTail : Bool                               -- the value of this block is the function's
   opened : List String                        -- the handles of the borrows the current statement opened
   errPack : String                            -- the handles an error hands back here (D8)
+/-- The context with the return value's continuation `r`. -/
 def Fe.Cx.setRet (c : Fe.Cx) (r : Fe.K) : Fe.Cx := Fe.Cx.mk c.g c.fname c.sigma c.ev c.locals r c.retTy c.fnTail c.opened c.errPack
+/-- The context with `fnTail`: whether what follows is the function's result. -/
 def Fe.Cx.setTail (c : Fe.Cx) (b : Bool) : Fe.Cx := Fe.Cx.mk c.g c.fname c.sigma c.ev c.locals c.ret c.retTy b c.opened c.errPack
+/-- The context whose error path releases the handles in the pack `ep`. -/
 def Fe.Cx.setErr (c : Fe.Cx) (ep : String) : Fe.Cx := Fe.Cx.mk c.g c.fname c.sigma c.ev c.locals c.ret c.retTy c.fnTail c.opened ep
--- a new statement: the borrows of the enclosing one are not its own
+/-- a new statement: the borrows of the enclosing one are not its own -/
 def Fe.Cx.fresh (c : Fe.Cx) : Fe.Cx := Fe.Cx.mk c.g c.fname c.sigma c.ev c.locals c.ret c.retTy c.fnTail .nil c.errPack
--- inside a scope of region `rho` that hands out `h : Outlives from rho` (L20, L22)
+/-- inside a scope of region `rho` that hands out `h : Outlives from rho` (L20, L22) -/
 def Fe.Cx.keepIf (b : Bool) (c : Fe.Cx) : Fe.Cx := match b with
   | .true => c
   | .false => Fe.Cx.fresh c
+/-- The context inside a scope of region `rho` that hands out evidence
+`h : Outlives from rho`, lends `lender` and opens the borrow `handle` (L20, L22). -/
 def Fe.Cx.scope (c : Fe.Cx) (rho h lender from handle : String) : Fe.Cx :=
   Fe.Cx.mk c.g c.fname rho (.cons (h, (from, rho)) c.ev) (.cons (rho, lender) c.locals) c.ret c.retTy c.fnTail (.cons handle c.opened) c.errPack
 
+/-- The signature of the function named `x`, if any. -/
 def Fe.findSig (x : String) : List Fe.Sig → Option Fe.Sig
   | .nil => .none
   | .cons s ss => (match Fe.seq x s.name with
     | .true => .some s
     | .false => Fe.findSig x ss)
+/-- The enum named `x`, if any. -/
 def Fe.findEnum (x : String) : List Fe.Enum → Option Fe.Enum
   | .nil => .none
   | .cons s ss => (match Fe.seq x s.name with
     | .true => .some s
     | .false => Fe.findEnum x ss)
+/-- The struct named `x`, if any. -/
 def Fe.findStruct (x : String) : List Fe.Struct → Option Fe.Struct
   | .nil => .none
   | .cons s ss => (match Fe.seq x s.name with
     | .true => .some s
     | .false => Fe.findStruct x ss)
--- the enums that have a constructor `c`
+/-- the enums that have a constructor `c` -/
 def Fe.enumsWith (c : String) : List Fe.Enum → List Fe.Enum
   | .nil => .nil
   | .cons e es => (match Fe.lookup c e.ctors with
     | .some _ => .cons e (Fe.enumsWith c es)
     | .none => Fe.enumsWith c es)
--- `T a b` ↦ (`T`, [a, b])
+/-- `T a b` ↦ (`T`, [a, b]) -/
 def Fe.headGo : Fe.Ty → List Fe.Ty → Option (String × List Fe.Ty)
   | .con n, acc => .some (n, acc)
   | .app f a, acc => Fe.headGo f (.cons a acc)
   | _, _ => .none
+/-- A type application's head and arguments: `T a b` ↦ `("T", [a, b])`. -/
 def Fe.head (t : Fe.Ty) : Option (String × List Fe.Ty) := Fe.headGo t .nil
+/-- Pairs up two lists (as long as the shorter). -/
 def Fe.zip {A B : Type} : List A → List B → List (A × B)
   | .cons a as, .cons b bs => .cons (a, b) (Fe.zip as bs)
   | _, _ => .nil
+/-- Applies a type to arguments, one at a time: `Fe.appN f [a, b]` is `f a b`. -/
 def Fe.appN : Fe.Ty → List Fe.Ty → Fe.Ty
   | f, .nil => f
   | f, .cons a as => Fe.appN (.app f a) as
 
--- the library (drafts/feral/lib/FeralCore.wiz): std names by Wiz's dot style
+/-- the library (drafts/feral/lib/FeralCore.wiz): std names by Wiz's dot style -/
 def Fe.rA : Fe.Ty := .rg "ρ"
+/-- The type parameter `A`, as used in the library's signatures. -/
 def Fe.cA : Fe.Ty := .con "A"
+/-- The type `Vec A`. -/
 def Fe.vecA : Fe.Ty := Fe.tApp1 "Vec" Fe.cA
+/-- The signature of a checked arithmetic operation `U64 → U64 → U64` (fallible: it may panic). -/
 def Fe.binop (n : String) : Fe.Sig :=
   Fe.Sig.mk n .nil .nil .nil (.cons ("a", Fe.tU64) (.cons ("b", Fe.tU64) .nil)) Fe.tU64 .true .nil .nil
+/-- The library's functions (drafts/feral/lib/FeralCore.wiz) by Wiz's dot style:
+`Vec.new`, `Vec.push`, `Vec.len`, `Vec.get_mut`, `U64.checkedAdd`, `Option.ok_or`, and
+the arithmetic operators. -/
 def Fe.libSigs : List Fe.Sig :=
   .cons (Fe.Sig.mk "Vec.new" .nil (.cons "A" .nil) .nil .nil Fe.vecA .false .nil .nil)
   (.cons (Fe.Sig.mk "Vec.push" (.cons "ρ" .nil) (.cons "A" .nil) .nil
@@ -618,33 +742,37 @@ def Fe.libSigs : List Fe.Sig :=
      (.cons ("o", Fe.tApp1 "Option" Fe.cA) (.cons ("e", .con "E") .nil)) (.app (Fe.tApp1 "Except" (.con "E")) Fe.cA) .false .nil .nil)
   (.cons (Fe.Sig.mk "U64.lt" .nil .nil .nil (.cons ("a", Fe.tU64) (.cons ("b", Fe.tU64) .nil)) Fe.tBool .false .nil .nil)
   (.cons (Fe.binop "U64.add") (.cons (Fe.binop "U64.sub") (.cons (Fe.binop "U64.mul") (.cons (Fe.binop "U64.div") .nil))))))))))
+/-- The library's methods: `v.push x` calls `Vec.push`, `a.checked_add b` calls `U64.checkedAdd`, …. -/
 def Fe.methods : List (String × String) :=
   .cons ("push", "Vec.push") (.cons ("len", "Vec.len") (.cons ("get_mut", "Vec.get_mut")
   (.cons ("checked_add", "U64.checkedAdd") (.cons ("ok_or", "Option.ok_or") .nil))))
+/-- The library's enums: `Option` and `Except` (Feral's `Result`). -/
 def Fe.libEnums : List Fe.Enum :=
   .cons (Fe.Enum.mk "Option" (.cons "T" .nil) (.cons ("none", .nil) (.cons ("some", .cons ("x", .con "T") .nil) .nil)))
   (.cons (Fe.Enum.mk "Except" (.cons "E" (.cons "T" .nil))
      (.cons ("error", .cons ("e", .con "E") .nil) (.cons ("ok", .cons ("a", .con "T") .nil) .nil))) .nil)
 
--- dispatch on a node kind
+/-- dispatch on a node kind -/
 def Fe.sw {A : Type} (k : String) : List (String × (Unit → A)) → (Unit → A) → A
   | .nil, d => d ()
   | .cons c cs, d => (match Fe.seq k c.1 with
     | .true => c.2 ()
     | .false => Fe.sw k cs d)
 local infixr:20 " ▸ " => List.cons
+/-- Does a node have children? (An optional `mut` or lifetime that is present.) -/
 def Fe.nonEmpty : Syntax → Bool
   | .node _ (.cons _ _) => .true
   | _ => .false
 
--- `'a` ↦ `ρa`; none: a variable
+/-- `'a` ↦ `ρa`; none: a variable -/
 def Fe.ltName (lt : Syntax) : String := match Fe.seq (Fe.id (Fe.arg lt 1)) "static" with
   | .true => "Region.static"
   | .false => "ρ" +++ Fe.id (Fe.arg lt 1)
+/-- The region of an optional lifetime: the one written, or a fresh variable if it is elided. -/
 def Fe.rgOf : List (Nat × Syntax) → Fe.M Fe.Ty
   | .nil => Fe.freshVar
   | .cons lt _ => Fe.M.pure (Fe.Ty.rg (Fe.ltName lt.2))
--- `Box T` is `T` (L13); `Result T E` is `Except E T` (L2)
+/-- `Box T` is `T` (L13); `Result T E` is `Except E T` (L2) -/
 def Fe.tyApp (f : Fe.Ty) (as : List Fe.Ty) : Fe.Ty := match f, as with
   | .con n, .cons a rest => (match Fe.seq n "Box", Fe.seq n "Result", rest with
     | .true, _, _ => a
@@ -654,6 +782,7 @@ def Fe.tyApp (f : Fe.Ty) (as : List Fe.Ty) : Fe.Ty := match f, as with
 
 -- ## Types from syntax (L1, L3, L13). An elided region is a variable.
 mutual
+/-- A Feral type, from syntax (L1, L3, L13). An elided region becomes an inference variable. -/
 def Fe.tyOf (p : List Nat) (s : Syntax) : Fe.M Fe.Ty :=
   Fe.sw (Fe.kind s) (
     ("feral_ty.name", fun _ => (match Fe.seq (Fe.id (Fe.arg s 0)) "USize" with
@@ -673,6 +802,7 @@ def Fe.tyOf (p : List Nat) (s : Syntax) : Fe.M Fe.Ty :=
       as ← Fe.tysOf (Fe.sub p 1) (Fe.kids (Fe.arg s 1));
       Fe.M.pure (Fe.tyApp f as)) ▸ .nil)
     (fun _ => Fe.fail p "not a type of the supported fragment")
+/-- Several Feral types, from syntax. -/
 def Fe.tysOf (p : List Nat) : List (Nat × Syntax) → Fe.M (List Fe.Ty)
   | .nil => Fe.M.pure List.nil
   | .cons a as => do
@@ -683,11 +813,15 @@ end
 
 -- ## Outlives evidence (L22)
 mutual
+/-- Evidence that region `a` outlives `b`, as Wiz source, from the bounds in scope:
+`Outlives.refl`, `Outlives.static`, or a chain of `Outlives.trans` (L22). `seen` stops
+cycles. -/
 def Fe.evFind (ev : List (String × (String × String))) (seen : List String) (a b : String) : Option String :=
   match Fe.seq a b, Fe.seq a "Region.static" with
   | .true, _ => .some ("(Outlives.refl " +++ a +++ ")")
   | _, .true => .some ("(Outlives.static " +++ b +++ ")")
   | _, _ => Fe.evStep ev ev (.cons a seen) a b
+/-- One step of `Fe.evFind`: try each piece of evidence in turn. -/
 def Fe.evStep (all : List (String × (String × String))) : List (String × (String × String)) → List String → String → String → Option String
   | .nil, _, _, _ => .none
   | .cons e es, seen, a, b => (match Bool.and (Fe.seq e.2.1 a) (Bool.not (Fe.mem e.2.2 seen)) with
@@ -698,11 +832,12 @@ def Fe.evStep (all : List (String × (String × String))) : List (String × (Str
         | .some h => .some ("(Outlives.trans " +++ a +++ " " +++ e.2.2 +++ " " +++ b +++ " " +++ e.1 +++ " " +++ h +++ ")")
         | .none => Fe.evStep all es seen a b)))
 end
+/-- A region as an error message names it: "the borrow of `x`" or `'a`. -/
 def Fe.rgShow (cx : Fe.Cx) (r : String) : String := match Fe.lookup r cx.locals with
   | .some x => "the borrow of `" +++ x +++ "`"
   | .none => "`'" +++ String.mk (Fe.drop 1 (Fe.chars r)) +++ "`"
--- evidence that `a` outlives `b`, or a borrow error: E0597 when `a` is a local borrow's
--- region, "lifetime may not live long enough" between parameters (L21)
+/-- evidence that `a` outlives `b`, or a borrow error: E0597 when `a` is a local borrow's
+region, "lifetime may not live long enough" between parameters (L21) -/
 def Fe.evidenceZ (cx : Fe.Cx) (p : List Nat) : Fe.Ty → Fe.Ty → Fe.M Fe.Out
   | .rg a, .rg b => (match Fe.evFind cx.ev .nil a b with
     | .some h => Fe.M.pure (Fe.o h)
@@ -714,23 +849,28 @@ def Fe.evidenceZ (cx : Fe.Cx) (p : List Nat) : Fe.Ty → Fe.Ty → Fe.M Fe.Out
   | a, b => do
     r ← Fe.unify a b;
     Fe.M.pure (Fe.Out.s "(Outlives.refl " ⊕ Fe.Out.t a ⊕ Fe.Out.s ")")
+/-- Evidence that `a` outlives `b`, or a borrow error (`Fe.evidenceZ` after zonking). -/
 def Fe.evidence (cx : Fe.Cx) (p : List Nat) (a b : Fe.Ty) : Fe.M Fe.Out := do
   a ← Fe.zonkM a;
   b ← Fe.zonkM b;
   Fe.evidenceZ cx p a b
 
--- a value of type `t` flowing to a place of type `exp`: a reference of a longer region is
--- weakened (L22); anything else must unify
+/-- a value of type `t` flowing to a place of type `exp`: a reference of a longer region is
+weakened (L22); anything else must unify -/
 def Fe.mismatch {A : Type} (p : List Nat) (t exp : Fe.Ty) : Fe.M A := do
   t ← Fe.zonkM t;
   exp ← Fe.zonkM exp;
   Fe.fail p ("type mismatch: expected " +++ Fe.tyStr exp +++ ", found " +++ Fe.tyStr t)
+/-- Are both types the same region? -/
 def Fe.sameRg : Fe.Ty → Fe.Ty → Bool
   | .rg a, .rg b => Fe.seq a b
   | _, _ => .false
+/-- Are both types regions? -/
 def Fe.bothRg : Fe.Ty → Fe.Ty → Bool
   | .rg a, .rg b => .true
   | _, _ => .false
+/-- A reference `v` of region `r1` used at region `r2`: wrapped in `f` (`Shr.weaken`
+or `Mut.weaken`) with the evidence, if they differ (L22); otherwise unified. -/
 def Fe.weaken (cx : Fe.Cx) (p : List Nat) (f : String) (v : Fe.Out) (r1 r2 : Fe.Ty) : Fe.M Fe.Out := do
   r1 ← Fe.zonkM r1;
   r2 ← Fe.zonkM r2;
@@ -741,6 +881,7 @@ def Fe.weaken (cx : Fe.Cx) (p : List Nat) (f : String) (v : Fe.Out) (r1 r2 : Fe.
   | .false => do
     u ← Fe.unify r1 r2;
     Fe.M.pure v
+/-- `Fe.flow` on zonked types. -/
 def Fe.flowZ (cx : Fe.Cx) (p : List Nat) (v : Fe.Out) : Fe.Ty → Fe.Ty → Fe.M Fe.Out
   | .ref .false r1 a1, .ref .false r2 a2 => do
     ok ← Fe.unify a1 a2;
@@ -757,69 +898,80 @@ def Fe.flowZ (cx : Fe.Cx) (p : List Nat) (v : Fe.Out) : Fe.Ty → Fe.Ty → Fe.M
     (match ok with
     | .true => Fe.M.pure v
     | .false => Fe.mismatch p t exp)
+/-- A value of type `t` flowing to a place of type `exp`: a reference of a longer
+region is weakened (L22); anything else must unify. -/
 def Fe.flow (cx : Fe.Cx) (p : List Nat) (v : Fe.Out) (t exp : Fe.Ty) : Fe.M Fe.Out := do
   t ← Fe.zonkM t;
   exp ← Fe.zonkM exp;
   Fe.flowZ cx p v t exp
 
 -- ## Tuples of a value and the variables that leave a join, a scope or a loop (L6, L7)
+/-- The names of these variables. -/
 def Fe.names (vs : List Fe.Var) : List String := Fe.map (fun (v : Fe.Var) => v.name) vs
+/-- A value and the variables that leave with it, as a nested pair: `(v, (x, y))` (L6, L7). -/
 def Fe.packV : Fe.Out → List String → Fe.Out
   | v, .nil => v
   | v, .cons x xs => Fe.Out.s "(" ⊕ v ⊕ Fe.Out.s ", " ⊕ Fe.packV (Fe.Out.s x) xs ⊕ Fe.Out.s ")"
+/-- The type of `Fe.packV`: the value's type paired with the variables' types. -/
 def Fe.packT : Fe.Ty → List Fe.Var → Fe.Ty
   | t, .nil => t
   | t, .cons x xs => Fe.Ty.prod t (Fe.packT x.ty xs)
--- `let (v, x₁) := src; let (x₁, x₂) := …` (binary lets: let-tuple-patterns)
+/-- `let (v, x₁) := src; let (x₁, x₂) := …` (binary lets: let-tuple-patterns) -/
 def Fe.unpack : String → String → List String → Nat → Fe.Out
   | src, v, .nil, _ => Fe.Out.s ("let " +++ v +++ " := " +++ src +++ ";") ⊕ Fe.Out.nl
   | src, v, .cons x .nil, _ => Fe.Out.s ("let (" +++ v +++ ", " +++ x +++ ") := " +++ src +++ ";") ⊕ Fe.Out.nl
   | src, v, .cons x xs, n =>
     let t := src +++ "_" +++ Syntax.decimal n;
     Fe.Out.s ("let (" +++ v +++ ", " +++ t +++ ") := " +++ src +++ ";") ⊕ Fe.Out.nl ⊕ Fe.unpack t x xs (Nat.succ n)
--- the distinct variables of an environment (innermost binding of each name)
+/-- the distinct variables of an environment (innermost binding of each name) -/
 def Fe.distinct : Fe.Env → List String → Fe.Env
   | .nil, _ => .nil
   | .cons v vs, seen => (match Fe.mem v.name seen with
     | .true => Fe.distinct vs seen
     | .false => .cons v (Fe.distinct vs (.cons v.name seen)))
+/-- Is this the type of a handle: `&mut T`, or a returned borrow? -/
 def Fe.isHandleTy : Fe.Ty → Bool
   | .ref .true _ _ => .true
   | .mutb _ _ _ => .true
   | .mopt _ _ _ => .true
   | _ => .false
+/-- A variable with its type zonked. -/
 def Fe.zonkVar (s : Fe.Subst) (v : Fe.Var) : Fe.Var := Fe.Var.setTy v (Fe.zonk s v.ty)
+/-- An environment with every type zonked. -/
 def Fe.zonkEnv (e : Fe.Env) : Fe.M Fe.Env := do
   s ← Fe.getSubst;
   Fe.M.pure (Fe.map (Fe.zonkVar s) e)
--- the variables of `pre` that a sub-computation mentioning them may change: mutable
--- locals and handles (their SSA versions leave it in a tuple)
+/-- the variables of `pre` that a sub-computation mentioning them may change: mutable
+locals and handles (their SSA versions leave it in a tuple) -/
 def Fe.exportable (ment : String → Bool) (v : Fe.Var) : Bool :=
   Bool.and (Bool.not (Bool.or v.gone (Fe.isLent v.ty)))
     (Bool.and (Bool.or v.mutable (Fe.isHandleTy v.ty))
       (Bool.or (ment v.name) (Bool.and (Bool.not (Fe.seq v.src "")) (ment v.src))))
+/-- The variables of `pre` that a sub-computation mentioning them may change (`Fe.exportable`). -/
 def Fe.exports (ment : String → Bool) (pre : Fe.Env) : Fe.M (List Fe.Var) := do
   e ← Fe.zonkEnv (Fe.distinct pre .nil);
   Fe.M.pure (Fe.filter (Fe.exportable ment) e)
--- (a scope's lender comes back through the scope itself)
+/-- (a scope's lender comes back through the scope itself) -/
 def Fe.exportsBut (x : String) (ment : String → Bool) (pre : Fe.Env) : Fe.M (List Fe.Var) := do
   vs ← Fe.exports ment pre;
   Fe.M.pure (Fe.filter (fun (v : Fe.Var) => Bool.not (Fe.seq v.name x)) vs)
--- every variable usable in a loop function: the ones it mentions
+/-- every variable usable in a loop function: the ones it mentions -/
 def Fe.visible (ment : String → Bool) (v : Fe.Var) : Bool :=
   Bool.and (Bool.not (Bool.or v.gone (Fe.isLent v.ty)))
     (Bool.or (ment v.name) (Bool.and (Bool.not (Fe.seq v.src "")) (ment v.src)))
 
--- the last use of returned borrows made since `pre` (L4, L17): `Mut.release` gives the
--- lender's handle back, `Mut.finish` several
+/-- the last use of returned borrows made since `pre` (L4, L17): `Mut.release` gives the
+lender's handle back, `Mut.finish` several -/
 def Fe.finishLets (m : String) : List String → Fe.Out
   | .nil => Fe.o ""
   | .cons h .nil => Fe.Out.s ("let 1 " +++ h +++ " := Mut.release " +++ m +++ ";") ⊕ Fe.Out.nl
   | .cons h1 (.cons h2 .nil) => Fe.Out.s ("let 1 (" +++ h1 +++ ", " +++ h2 +++ ") := Mut.finish " +++ m +++ ";") ⊕ Fe.Out.nl
   | .cons h1 hs => Fe.o "-- (more than two lenders: not supported)"
+/-- Marks these handles available again. -/
 def Fe.ungone : List String → Fe.Env → Fe.Env
   | .nil, e => e
   | .cons h rest, e => Fe.ungone rest (Fe.update (fun (v : Fe.Var) => Fe.Var.setGone v .false) h e)
+/-- The loop of `Fe.flush`. -/
 def Fe.flushGo (pre : Fe.Env) (keep : String) : List Fe.Var → Fe.Env → Fe.Out × Fe.Env
   | .nil, e => (Fe.o "", e)
   | .cons v vs, e => (match Bool.or (Bool.or (Fe.has v.name pre) v.gone) (Bool.or (Fe.isNil v.rel) (Fe.seq v.name keep)) with
@@ -828,36 +980,46 @@ def Fe.flushGo (pre : Fe.Env) (keep : String) : List Fe.Var → Fe.Env → Fe.Ou
       let e2 := Fe.ungone v.rel (Fe.update (fun (w : Fe.Var) => Fe.Var.setGone (Fe.Var.setRel w .nil) .true) v.name e);
       let r := Fe.flushGo pre keep vs e2;
       (Fe.finishLets v.name v.rel ⊕ r.1, r.2))
+/-- Ends the returned borrows made since `pre` (except `keep`): their `finishLets`, and
+the environment with their lenders' handles back. -/
 def Fe.flush (pre : Fe.Env) (keep : String) (e : Fe.Env) : Fe.Out × Fe.Env := Fe.flushGo pre keep (Fe.distinct e .nil) e
 
 -- ## Pieces of generated code
+/-- `Fe.M.pure`, with a shorter name. -/
 def Fe.pure {A : Type} (a : A) : Fe.M A := Fe.M.pure a
--- (a `match` bound in a `do` block needs its type from outside)
+/-- (a `match` bound in a `do` block needs its type from outside) -/
 def Fe.the (A : Type) (x : A) : A := x
+/-- Type ascription, for a `match` in a `do` block. -/
 def Fe.asOut (x : Fe.M Fe.Out) : Fe.M Fe.Out := x
+/-- Type ascription, for a `match` in a `do` block. -/
 def Fe.asUnit (x : Fe.M Unit) : Fe.M Unit := x
+/-- Type ascription, for a `match` in a `do` block. -/
 def Fe.asBool (x : Fe.M Bool) : Fe.M Bool := x
+/-- Type ascription, for a `match` in a `do` block. -/
 def Fe.asTy (x : Fe.M Fe.Ty) : Fe.M Fe.Ty := x
+/-- Type ascription, for a `match` in a `do` block. -/
 def Fe.asStr (x : Fe.M String) : Fe.M String := x
+/-- The generated statement `let x := v;` and a new line. -/
 def Fe.letO (x : String) (v : Fe.Out) : Fe.Out := Fe.Out.s ("let " +++ x +++ " := ") ⊕ v ⊕ Fe.Out.s ";" ⊕ Fe.Out.nl
--- a `let` of a name the user wrote at path `bp`
+/-- a `let` of a name the user wrote at path `bp` -/
 def Fe.letAtO (bp : List Nat) (x : String) (v : Fe.Out) : Fe.Out :=
   Fe.Out.s "let " ⊕ Fe.Out.at bp (Fe.Out.s x) ⊕ Fe.Out.s " := " ⊕ v ⊕ Fe.Out.s ";" ⊕ Fe.Out.nl
--- L5: a step that may panic is a direct match
--- (an error hands back the handles live here, D8)
+/-- L5: a step that may panic is a direct match
+(an error hands back the handles live here, D8) -/
 def Fe.isSep (c : Char) : Bool :=
   Fe.memNat (Char.code c) (.cons 40 (.cons 41 (.cons 44 (.cons 32 .nil))))
+/-- A word of `acc`'s characters in front of `rest` (an empty `acc` adds nothing). -/
 def Fe.word (acc : List Char) (rest : List String) : List String := match acc with
   | .nil => rest
   | _ => .cons (String.mk acc) rest
--- the names in a handle pack `(x, (y, z))`
+/-- the names in a handle pack `(x, (y, z))` -/
 def Fe.wordsOf : List Char → List Char → List String
   | acc, .nil => Fe.word acc .nil
   | acc, .cons c cs => (match Fe.isSep c with
     | .true => Fe.word acc (Fe.wordsOf .nil cs)
     | .false => Fe.wordsOf (List.append acc (.cons c .nil)) cs)
--- before an error hands back the handles `ns`, every live returned borrow
--- holding some of them (its lenders, `rel`) is released, which gives them back
+/-- before an error hands back the handles `ns`, every live returned borrow
+holding some of them (its lenders, `rel`) is released, which gives them back -/
 def Fe.releaseFor (ns : List String) : List Fe.Var → Fe.Out
   | .nil => Fe.o ""
   | .cons v vs => (match Bool.and (Bool.and (Bool.not v.gone) (Bool.not (Fe.isNil v.rel)))
@@ -868,23 +1030,27 @@ def Fe.releaseFor (ns : List String) : List Fe.Var → Fe.Out
         | _ => Fe.o "-- (an optional borrow with several lenders: not supported)")
       | _ => Fe.finishLets v.name v.rel) ⊕ Fe.releaseFor ns vs
     | .false => Fe.releaseFor ns vs)
+/-- The error path's exit: release the handles in the context's pack, then `.err e_`. -/
 def Fe.errExit (cx : Fe.Cx) (env : Fe.Env) : Fe.Out := match Bool.not (Fe.seq cx.errPack "") with
   | .true => Fe.releaseFor (Fe.wordsOf .nil (Fe.chars cx.errPack)) (Fe.distinct env .nil) ⊕ Fe.o (".err e_ " +++ cx.errPack)
   | .false => Fe.o ".err e_"
+/-- A match on a `Result`: `body` on `ok`, the error path (releasing the handles) on
+`err`. -/
 def Fe.okMatch (cx : Fe.Cx) (env : Fe.Env) (call : Fe.Out) (x : String) (body : Fe.Out) : Fe.Out :=
   Fe.Out.s "(match " ⊕ call ⊕ Fe.Out.s " with" ⊕ Fe.Out.nl ⊕ Fe.Out.s ("| .ok " +++ x +++ " =>") ⊕ Fe.Out.ind (Fe.Out.nl ⊕ body)
     ⊕ Fe.Out.nl ⊕ Fe.Out.s "| .err e_ =>" ⊕ Fe.Out.ind (Fe.Out.nl ⊕ Fe.errExit cx env) ⊕ Fe.Out.s ")"
 -- ## Linear handles (cohesion M4b): `&mut` is a `Uniq`, used once, handed back in `Result1`
--- the handles as a value, `x` or `(x, (y, …))`, and their type `(1 _ : T₁) × …`
+/-- the handles as a value, `x` or `(x, (y, …))`, and their type `(1 _ : T₁) × …` -/
 def Fe.packH : List String → String
   | .nil => "()"
   | .cons x .nil => x
   | .cons x xs => "(" +++ x +++ ", " +++ Fe.packH xs +++ ")"
+/-- The type of a handle pack: `Unit`, or `((1 _ : T) × …)`. -/
 def Fe.packHT : List Fe.Ty → Fe.Out
   | .nil => Fe.o "Unit"
   | .cons t .nil => Fe.Out.t t
   | .cons t ts => Fe.Out.s "((1 _ : " ⊕ Fe.Out.t t ⊕ Fe.Out.s ") × " ⊕ Fe.packHT ts ⊕ Fe.Out.s ")"
--- `let 1 (x, t) := src; let 1 (y, z) := t; …`
+/-- `let 1 (x, t) := src; let 1 (y, z) := t; …` -/
 def Fe.unpackH : String → List String → Nat → Fe.Out
   | src, .nil, _ => Fe.o ""
   | src, .cons x .nil, _ => Fe.Out.s ("let 1 " +++ x +++ " := " +++ src +++ ";") ⊕ Fe.Out.nl
@@ -892,52 +1058,61 @@ def Fe.unpackH : String → List String → Nat → Fe.Out
   | src, .cons x xs, n =>
     let t := src +++ "_h" +++ Syntax.decimal n;
     Fe.Out.s ("let 1 (" +++ x +++ ", " +++ t +++ ") := " +++ src +++ ";") ⊕ Fe.Out.nl ⊕ Fe.unpackH t xs (Nat.succ n)
--- `Result.ok b`, or with handles `Result1.ok b hs`
+/-- `Result.ok b`, or with handles `Result1.ok b hs` -/
 def Fe.okO (hns : List String) (b : Fe.Out) : Fe.Out := match hns with
   | .nil => Fe.Out.s "Result.ok " ⊕ b
   | _ => Fe.Out.s "Result1.ok " ⊕ b ⊕ Fe.Out.s (" " +++ Fe.packH hns)
--- the type `Result T`, or with handles `Result1 T H`
+/-- the type `Result T`, or with handles `Result1 T H` -/
 def Fe.resTy (hs : List Fe.Ty) (t : Fe.Ty) : Fe.Out := match hs with
   | .nil => Fe.Out.s "Result " ⊕ Fe.Out.t t
   | _ => Fe.Out.s "Result1 " ⊕ Fe.Out.t t ⊕ Fe.Out.s " " ⊕ Fe.packHT hs
--- a step whose result hands handles back, `Result1 v hs`: both alternatives rebind them
+/-- a step whose result hands handles back, `Result1 v hs`: both alternatives rebind them -/
 def Fe.okMatch1R (cx : Fe.Cx) (env : Fe.Env) (call : Fe.Out) (v hsv : String) (rebind : Fe.Out) (body : Fe.Out) : Fe.Out :=
   Fe.Out.s "(match " ⊕ call ⊕ Fe.Out.s " with" ⊕ Fe.Out.nl ⊕ Fe.Out.s ("| .ok " +++ v +++ " " +++ hsv +++ " =>")
     ⊕ Fe.Out.ind (Fe.Out.nl ⊕ rebind ⊕ body)
     ⊕ Fe.Out.nl ⊕ Fe.Out.s ("| .err e_ " +++ hsv +++ " =>") ⊕ Fe.Out.ind (Fe.Out.nl ⊕ rebind ⊕ Fe.errExit cx env)
     ⊕ Fe.Out.s ")"
+/-- A match on a `Borrowed`: `ok` hands over the borrow (and the other handles), `err`
+hands the lenders back (D8). -/
 def Fe.okMatch1 (cx : Fe.Cx) (env : Fe.Env) (call : Fe.Out) (v hsv : String) (hs : List String) (body : Fe.Out) : Fe.Out :=
   Fe.okMatch1R cx env call v hsv (Fe.unpackH hsv hs 0) body
--- a call that returns a borrow: `Borrowed.ok` hands over the borrow (and the
--- other handles), `Borrowed.err` hands the lenders back (D8)
+/-- a call that returns a borrow: `Borrowed.ok` hands over the borrow (and the
+other handles), `Borrowed.err` hands the lenders back (D8) -/
 def Fe.borrowedMatch (cx : Fe.Cx) (env : Fe.Env) (call : Fe.Out) (r : String) (oks errs : List String) (body : Fe.Out) : Fe.Out :=
   Fe.Out.s "(match " ⊕ call ⊕ Fe.Out.s " with" ⊕ Fe.Out.nl ⊕ Fe.Out.s ("| .ok " +++ r +++ "q =>")
     ⊕ Fe.Out.ind (Fe.Out.nl ⊕ Fe.unpackH (r +++ "q") oks 0 ⊕ body)
     ⊕ Fe.Out.nl ⊕ Fe.Out.s ("| .err e_ " +++ r +++ "e =>") ⊕ Fe.Out.ind (Fe.Out.nl ⊕ Fe.unpackH (r +++ "e") errs 0 ⊕ Fe.errExit cx env)
     ⊕ Fe.Out.s ")"
+/-- `let 1 (d, x) := Uniq.peek x;` — read a `&mut` handle, keeping it. -/
 def Fe.peekO (d x : String) : Fe.Out := Fe.Out.s ("let 1 (" +++ d +++ ", " +++ x +++ ") := Uniq.peek " +++ x +++ ";") ⊕ Fe.Out.nl
--- `*m` for a returned borrow `m`
+/-- `*m` for a returned borrow `m` -/
 def Fe.peekMO (d x : String) : Fe.Out := Fe.Out.s ("let 1 (" +++ d +++ ", " +++ x +++ ") := Mut.peek " +++ x +++ ";") ⊕ Fe.Out.nl
--- `let x := v`, at quantity 1 for a handle
+/-- `let x := v`, at quantity 1 for a handle -/
 def Fe.letH (t : Fe.Ty) (x : String) (v : Fe.Out) : Fe.Out := match Fe.isHandleTy t with
   | .true => Fe.Out.s ("let 1 " +++ x +++ " := ") ⊕ v ⊕ Fe.Out.s ";" ⊕ Fe.Out.nl
   | .false => Fe.letO x v
--- the same for a name the user wrote at path `bp`
+/-- the same for a name the user wrote at path `bp` -/
 def Fe.letHAt (t : Fe.Ty) (bp : List Nat) (x : String) (v : Fe.Out) : Fe.Out := match Fe.isHandleTy t with
   | .true => Fe.Out.s "let 1 " ⊕ Fe.Out.at bp (Fe.Out.s x) ⊕ Fe.Out.s " := " ⊕ v ⊕ Fe.Out.s ";" ⊕ Fe.Out.nl
   | .false => Fe.letAtO bp x v
+/-- A generated `match` alternative `| pat => body`. -/
 def Fe.alt (pat : String) (body : Fe.Out) : Fe.Out :=
   Fe.Out.nl ⊕ Fe.Out.s ("| " +++ pat +++ " =>") ⊕ Fe.Out.ind (Fe.Out.nl ⊕ body)
+/-- The type `Flow a b`: a loop body's result, going on or returning early. -/
 def Fe.tFlow (a b : Fe.Ty) : Fe.Ty := Fe.Ty.app (Fe.tApp1 "Flow" a) b
+/-- The strings, each preceded by a space. -/
 def Fe.unwords : List String → String
   | .nil => ""
   | .cons x xs => " " +++ x +++ Fe.unwords xs
+/-- The length of a list. -/
 def Fe.len {A : Type} : List A → Nat
   | .nil => 0
   | .cons _ xs => Nat.succ (Fe.len xs)
+/-- The syntax of the variable `x` (to treat a method's receiver as an argument). -/
 def Fe.varStx (x : String) : Syntax := Syntax.mkNode "feral_expr.var" (.cons (.ident x) .nil)
+/-- The syntax of the pattern `_`. -/
 def Fe.wildPat : Syntax := Syntax.mkNode "feral_pat.var" (.cons (.ident "_") .nil)
--- `(e)` ↦ `e`, `&e`/`&mut e` ↦ `e`: the variable an argument names, if it is one
+/-- `(e)` ↦ `e`, `&e`/`&mut e` ↦ `e`: the variable an argument names, if it is one -/
 partial def Fe.core (s : Syntax) : Syntax :=
   Fe.sw (Fe.kind s) (
     ("feral_expr.tuple", fun _ => (match Fe.kids (Fe.arg s 1) with
@@ -945,23 +1120,28 @@ partial def Fe.core (s : Syntax) : Syntax :=
       | _ => s)) ▸
     ("feral_expr.borrow", fun _ => Fe.core (Fe.arg s 2)) ▸ .nil)
     (fun _ => s)
+/-- Does the name contain a dot (a field or a method)? -/
 def Fe.hasDot (x : String) : Bool := Bool.not (Fe.seq (Fe.split x).2 "")
--- the plain variable `s` is, or ""
+/-- the plain variable `s` is, or "" -/
 def Fe.plainVar (s : Syntax) : String := match Fe.is "feral_expr.var" s with
   | .true => (match Fe.hasDot (Fe.id (Fe.arg s 0)) with
     | .true => ""
     | .false => Fe.id (Fe.arg s 0))
   | .false => ""
+/-- Is this `&mut T`? -/
 def Fe.isRefMut : Fe.Ty → Bool
   | .ref .true _ _ => .true
   | _ => .false
+/-- Is this `&T` or `&mut T`? -/
 def Fe.isRef : Fe.Ty → Bool
   | .ref _ _ _ => .true
   | _ => .false
+/-- What a reference (or a `Lent` token) points at; any other type itself. -/
 def Fe.pointee : Fe.Ty → Fe.Ty
   | .ref _ _ t => t
   | .lent _ t => t
   | t => t
+/-- The region of a reference or borrow; `Region.static` for anything else. -/
 def Fe.regionOf : Fe.Ty → Fe.Ty
   | .ref _ r _ => r
   | .lent r _ => r
@@ -970,29 +1150,35 @@ def Fe.regionOf : Fe.Ty → Fe.Ty
   | _ => Fe.tStatic
 
 -- ## Which borrows a statement opens (L20). A request is a scope around the statement:
--- 0 `Uniq.borrow` of a local, 1 `Shr.borrow`, 2 `Uniq.reborrow` of a handle (a call that
--- returns a borrow of it, L17), 3 `Uniq.share`, 4 a reborrow with the fields out (L11),
--- 5 `Uniq.zoom`, a field of a handle passed to a `&mut` parameter (`f (&mut s.f)`; `lender`
--- is `s`, `as` the place `s.f`), 9 the same local mutably borrowed twice in one call (E0499).
+/-- 0 `Uniq.borrow` of a local, 1 `Shr.borrow`, 2 `Uniq.reborrow` of a handle (a call that
+returns a borrow of it, L17), 3 `Uniq.share`, 4 a reborrow with the fields out (L11),
+5 `Uniq.zoom`, a field of a handle passed to a `&mut` parameter (`f (&mut s.f)`; `lender`
+is `s`, `as` the place `s.f`), 9 the same local mutably borrowed twice in one call (E0499). -/
 structure Fe.Req where
   kind : Nat
   lender : String
   as : String
   at : List Nat                         -- where `as` is written (`.nil`: nowhere)
+/-- Is there already a request for the lender `x`? -/
 def Fe.hasReq (x : String) : List Fe.Req → Bool
   | .nil => .false
   | .cons r rs => (match Fe.seq x r.lender with
     | .true => .true
     | .false => Fe.hasReq x rs)
+/-- Adds a request of `kind` for `x`, unless there is one; a second mutable borrow
+in the same call (`dup`) becomes request 9, the E0499 error. -/
 def Fe.addReq (dup : Bool) (kind : Nat) (x : String) (acc : List Fe.Req) : List Fe.Req :=
   match Fe.hasReq x acc with
   | .true => (match Bool.and dup (Nat.beq kind 0) with
     | .true => List.append acc (.cons (Fe.Req.mk 9 x "" .nil) .nil)
     | .false => acc)
   | .false => List.append acc (.cons (Fe.Req.mk kind x "" .nil) .nil)
--- the signature a call's head names: a function, or a method of the library
+/-- the signature a call's head names: a function, or a method of the library -/
 def Fe.isLibSig (n : String) : Bool := Fe.any (fun (s : Fe.Sig) => Fe.seq s.name n) Fe.libSigs
+/-- Whether a signature has a `&mut` parameter. -/
 def Fe.sigUsesMut (s : Fe.Sig) : Bool := Fe.any (fun (q : String × Fe.Ty) => Fe.isRefMut q.2) s.params
+/-- The signature a call's head names: a function, or a method of the library (then
+`.true`: the receiver is the first argument). -/
 def Fe.sigFor (cx : Fe.Cx) (env : Fe.Env) (f : String) : Option (Fe.Sig × Bool) :=
   let sp := Fe.split f;
   match Bool.and (Fe.has sp.1 env) (Fe.hasDot f) with
@@ -1004,12 +1190,14 @@ def Fe.sigFor (cx : Fe.Cx) (env : Fe.Env) (f : String) : Option (Fe.Sig × Bool)
   | .false => (match Fe.findSig f cx.g.sigs with
     | .some s => .some (s, Bool.false)
     | .none => .none)
--- a variable that has no open borrow yet
+/-- a variable that has no open borrow yet -/
 def Fe.findFree (opened : List String) (x : String) (env : Fe.Env) : Option Fe.Var := match Fe.handleOf x env with
   | .some h => (match Fe.mem h.name opened with
     | .true => .none
     | .false => Fe.find x env)
   | .none => Fe.find x env
+/-- The request an argument makes at a reference parameter, when a handle is already open
+(`op`): a reborrow of a `&mut` handle, or a share of it. -/
 def Fe.rqArg1 (op : List String) (s : Fe.Subst) (env : Fe.Env) (sig : Fe.Sig) (i : Nat) (arg : Syntax) (acc : List Fe.Req) : List Fe.Req :=
   match Fe.nth sig.params i with
   | .none => acc
@@ -1030,13 +1218,13 @@ def Fe.rqArg1 (op : List String) (s : Fe.Subst) (env : Fe.Env) (sig : Fe.Sig) (i
           | .false, .true => Fe.addReq .true 0 x acc
           | .false, .false => Fe.addReq .false 1 x acc)))
     | _ => acc)
--- `s.f` for a field place (a dotted variable), or ""
+/-- `s.f` for a field place (a dotted variable), or "" -/
 def Fe.placeOf (s : Syntax) : String := match Fe.is "feral_expr.var" s with
   | .true => (match Fe.hasDot (Fe.id (Fe.arg s 0)) with
     | .true => Fe.id (Fe.arg s 0)
     | .false => "")
   | .false => ""
--- `f (&mut s.f)`: a zoom on `s`'s handle (`s` a `&mut`), or on a borrow of the local `s`
+/-- `f (&mut s.f)`: a zoom on `s`'s handle (`s` a `&mut`), or on a borrow of the local `s` -/
 def Fe.rqField (s : Fe.Subst) (env : Fe.Env) (pl : String) (acc : List Fe.Req) : List Fe.Req :=
   let base := (Fe.split pl).1;
   let z := List.append acc (.cons (Fe.Req.mk 5 base pl .nil) .nil);
@@ -1050,7 +1238,7 @@ def Fe.rqField (s : Fe.Subst) (env : Fe.Env) (pl : String) (acc : List Fe.Req) :
     | _, _ => (match Fe.hasReq base acc with
       | .true => z
       | .false => List.append acc (.cons (Fe.Req.mk 0 base "" .nil) (.cons (Fe.Req.mk 5 base pl .nil) .nil))))
--- an argument at a reference parameter
+/-- an argument at a reference parameter -/
 def Fe.rqArg (op : List String) (s : Fe.Subst) (env : Fe.Env) (sig : Fe.Sig) (i : Nat) (arg : Syntax) (acc : List Fe.Req) : List Fe.Req :=
   match Fe.nth sig.params i with
   | .none => acc
@@ -1061,6 +1249,8 @@ def Fe.rqArg (op : List String) (s : Fe.Subst) (env : Fe.Env) (sig : Fe.Sig) (i 
     | .ref _ _ _ => Fe.rqArg1 op s env sig i arg acc
     | _ => acc)
 mutual
+/-- The borrows an expression takes, as requests added to `acc`. Blocks, branches and
+loops open their own scopes, so they add none. -/
 def Fe.rq (cx : Fe.Cx) (s : Fe.Subst) (env : Fe.Env) (stx : Syntax) (acc : List Fe.Req) : List Fe.Req :=
   Fe.sw (Fe.kind stx) (
     ("feral_expr.block", fun _ => acc) ▸ ("feral_expr.ifE", fun _ => acc) ▸ ("feral_expr.ifLet", fun _ => acc) ▸
@@ -1097,25 +1287,32 @@ def Fe.rq (cx : Fe.Cx) (s : Fe.Subst) (env : Fe.Env) (stx : Syntax) (acc : List 
         | .none => Fe.rqL cx s env args acc)
       | .none => Fe.rqL cx s env args acc)) ▸ .nil)
     (fun _ => Fe.rqL cx s env (Fe.map (fun (a : Nat × Syntax) => a.2) (Fe.kids stx)) acc)
+/-- The requests of several expressions. -/
 def Fe.rqL (cx : Fe.Cx) (s : Fe.Subst) (env : Fe.Env) : List Syntax → List Fe.Req → List Fe.Req
   | .nil, acc => acc
   | .cons a as, acc => Fe.rqL cx s env as (Fe.rq cx s env a acc)
+/-- The requests of a call's arguments, from parameter `i` on. -/
 def Fe.rqArgs (cx : Fe.Cx) (s : Fe.Subst) (env : Fe.Env) (sig : Fe.Sig) : Nat → List Syntax → List Fe.Req → List Fe.Req
   | _, .nil, acc => acc
   | i, .cons a as, acc => Fe.rqArgs cx s env sig (Nat.succ i) as (Fe.rqArg cx.opened s env sig i a acc)
 end
+/-- Type ascription, for a `match` in a `do` block. -/
 def Fe.asReqs (x : Fe.M (List Fe.Req)) : Fe.M (List Fe.Req) := x
--- the requests of a statement: `let r := &mut s` names its handle; `let h := &mut s.f`
--- takes the fields of `s` out (L11)
+/-- the requests of a statement: `let r := &mut s` names its handle; `let h := &mut s.f`
+takes the fields of `s` out (L11) -/
 def Fe.fieldBorrow (init : Syntax) : String × String :=
   match Bool.and (Fe.is "feral_expr.borrow" init) (Fe.is "feral_expr.var" (Fe.arg init 2)) with
   | .true => Fe.split (Fe.id (Fe.arg (Fe.arg init 2) 0))
   | .false => ("", "")
+/-- A single borrow request named after the variable `x` that `let x := &mut s` binds
+(`q`: where `x` is written). -/
 def Fe.nameReq (x : String) (q : List Nat) : List Fe.Req → List Fe.Req
   | .cons r .nil => (match Nat.beq r.kind 0, Nat.beq r.kind 2 with
     | .false, .false => .cons r .nil
     | _, _ => .cons (Fe.Req.mk r.kind r.lender x q) .nil)
   | rs => rs
+/-- The requests of a statement (`p`: its path): `let r := &mut s` names its handle, and
+`let h := &mut s.f` takes the fields of `s` out (L11). -/
 def Fe.stmtReqs (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (st : Syntax) : Fe.M (List Fe.Req) := do
   s ← Fe.getSubst;
   match Fe.is "feral_stmt.letS" st with
@@ -1132,48 +1329,60 @@ def Fe.stmtReqs (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (st : Syntax) : Fe.M 
       | _, _ => Fe.pure (Fe.rq cx s env init .nil)))
 
 -- ## The lowering (drafts/feral/LOWERING.md; rule numbers in comments)
+/-- A block's continuation: the number of statements left outside its scopes, then its
+value, type and environment (L20). -/
 def Fe.Fin : Type := Nat → Fe.Out → Fe.Ty → Fe.Env → Fe.M Fe.Out
+/-- A block's statements, with their child indices. -/
 def Fe.Stmts : Type := List (Nat × Syntax)
--- a `match` alternative: its pattern, and its body given the context, the environment
--- with the pattern's variables, whether it is in tail position, and the continuation
+/-- a `match` alternative: its pattern, and its body given the context, the environment
+with the pattern's variables, whether it is in tail position, and the continuation -/
 def Fe.Arm : Type := Syntax × (Fe.Cx → Fe.Env → Bool → Fe.K → Fe.M Fe.Out)
+/-- A fresh inference variable for each of these names. -/
 def Fe.instMapGo : List String → Fe.M (List (String × Fe.Ty))
   | .nil => Fe.pure List.nil
   | .cons x xs => do
     v ← Fe.freshVar;
     rest ← Fe.instMapGo xs;
     Fe.pure (List.cons (x, v) rest)
+/-- A fresh inference variable for each region and type parameter of a signature. -/
 def Fe.instMap (sig : Fe.Sig) : Fe.M (List (String × Fe.Ty)) := Fe.instMapGo (List.append sig.rgs sig.tys)
+/-- The pieces of code, each preceded by a space. -/
 def Fe.cat : List Fe.Out → Fe.Out
   | .nil => Fe.o ""
   | .cons x xs => Fe.Out.s " " ⊕ x ⊕ Fe.cat xs
+/-- The elements whose index is in `idx`. -/
 def Fe.pick {A : Type} (idx : List Nat) : List (Nat × A) → List A
   | .nil => .nil
   | .cons h hs => (match Fe.memNat h.1 idx with
     | .true => .cons h.2 (Fe.pick idx hs)
     | .false => Fe.pick idx hs)
+/-- Marks these variables moved. -/
 def Fe.goneAll : List String → Fe.Env → Fe.Env
   | .nil, e => e
   | .cons h rest, e => Fe.goneAll rest (Fe.update (fun (v : Fe.Var) => Fe.Var.setGone v .true) h e)
+/-- The outlives evidence a call needs for its signature's bounds, instantiated with `m`. -/
 def Fe.evs (cx : Fe.Cx) (p : List Nat) (m : List (String × Fe.Ty)) : List (String × String) → Fe.M Fe.Out
   | .nil => Fe.pure (Fe.o "")
   | .cons b bs => do
     h ← Fe.evidence cx p (Fe.inst m (.rg b.1)) (Fe.inst m (.rg b.2));
     rest ← Fe.evs cx p m bs;
     Fe.pure (Fe.Out.s " " ⊕ h ⊕ rest)
+/-- The first constructor without fields, if any. -/
 def Fe.firstNullary : List (String × List (String × Fe.Ty)) → Option String
   | .nil => .none
   | .cons c cs => (match c.2 with
     | .nil => .some c.1
     | _ => Fe.firstNullary cs)
+/-- The list with the element at index `n` replaced by `y`. -/
 def Fe.replaceAt : List String → Nat → String → List String
   | .nil, _, _ => .nil
   | .cons x xs, .zero, y => .cons y xs
   | .cons x xs, .succ n, y => .cons x (Fe.replaceAt xs n y)
+/-- Is this a returned borrow (`Mut`)? -/
 def Fe.isMutb : Fe.Ty → Bool
   | .mutb _ _ _ => .true
   | _ => .false
--- `cur := left` where `left` is a field of the node the cursor `cur` points at (L16)
+/-- `cur := left` where `left` is a field of the node the cursor `cur` points at (L16) -/
 def Fe.cursorMove (env : Fe.Env) (lhs rhs : Syntax) : Option (Fe.Var × Fe.Child) :=
   match Fe.find (Fe.plainVar lhs) env, Fe.find (Fe.plainVar rhs) env with
   | .some x, .some y => (match Fe.isMutb x.ty, y.child with
@@ -1182,79 +1391,97 @@ def Fe.cursorMove (env : Fe.Env) (lhs rhs : Syntax) : Option (Fe.Var × Fe.Child
       | .false => .none)
     | _, _ => .none)
   | _, _ => .none
+/-- Writing `v` to the place `x` (as in `Fe.readT`): a rebinding, `Uniq.set`, or `Mut.set`. -/
 def Fe.writeT (x : String) (v : Fe.Out) : Nat → Fe.Out
   | .zero => Fe.letO x v
   | .succ .zero => Fe.Out.s ("let 1 " +++ x +++ " := Uniq.write " +++ x +++ " ") ⊕ v ⊕ Fe.Out.s ";" ⊕ Fe.Out.nl
   | _ => Fe.Out.s ("let 1 " +++ x +++ " := Mut.set " +++ x +++ " ") ⊕ v ⊕ Fe.Out.s ";" ⊕ Fe.Out.nl
+/-- The children of child `i` of `s`, with their paths. -/
 def Fe.argPaths (p : List Nat) (i : Nat) (s : Syntax) : List (List Nat × Syntax) :=
   Fe.map (fun (a : Nat × Syntax) => (Fe.sub (Fe.sub p i) a.1, a.2)) (Fe.kids (Fe.arg s i))
+/-- The first option if it has a value, else the second. -/
 def Fe.orElse {A : Type} : Option A → Option A → Option A
   | .some a, _ => .some a
   | .none, b => b
+/-- The element of a one-element list. -/
 def Fe.single {A : Type} : List A → Option A
   | .cons a .nil => .some a
   | _ => .none
+/-- The code that reads through a reference or a returned borrow `v` of this type. -/
 def Fe.derefO (v : Fe.Out) : Fe.Ty → Fe.Out
   | .ref _ _ _ => v ⊕ Fe.Out.s ".val"
   | .mutb _ _ _ => Fe.Out.s "(Mut.store " ⊕ v ⊕ Fe.Out.s ").1"
   | _ => v
+/-- The type behind a reference or a returned borrow. -/
 def Fe.derefT : Fe.Ty → Fe.Ty
   | .ref _ _ t => t
   | .mutb _ a _ => a
   | t => t
+/-- Pieces of code separated by commas. -/
 def Fe.tupleO : List Fe.Out → Fe.Out
   | .nil => Fe.o ""
   | .cons x .nil => x
   | .cons x xs => x ⊕ Fe.Out.s ", " ⊕ Fe.tupleO xs
--- is something of the regions `rs` still needed by the statements `rest`? (NLL-lite, L20)
+/-- is something of the regions `rs` still needed by the statements `rest`? (NLL-lite, L20) -/
 def Fe.needs (rs : List String) (rest : List (Nat × Syntax)) (w : Fe.Var) : Bool :=
   Bool.and (Bool.not (Bool.or w.gone (Bool.or (Fe.isLent w.ty) (Fe.seq w.src w.name))))
     (Bool.and (Bool.or (Fe.tagged rs w.ty) (Fe.mem w.tag rs))
       (Fe.any (fun (st : Nat × Syntax) => Fe.ment w.name st.2) rest))
+/-- Is something of the regions `rs` still needed by the statements `rest`? Then the scope stays open (L20). -/
 def Fe.needMore (rs : List String) (e : Fe.Env) (rest : List (Nat × Syntax)) : Fe.M Bool := do
   e ← Fe.zonkEnv (Fe.distinct e .nil);
   Fe.pure (Fe.any (Fe.needs rs rest) e)
+/-- The struct a type names, if it is one. -/
 def Fe.structOf (cx : Fe.Cx) (t : Fe.Ty) : Option Fe.Struct := match Fe.head t with
   | .some (n, _) => Fe.findStruct n cx.g.structs
   | .none => .none
+/-- The enum a type names, with its arguments. -/
 def Fe.enumOf (cx : Fe.Cx) (t : Fe.Ty) : Option (Fe.Enum × List Fe.Ty) := match Fe.head t with
   | .some (n, as) => (match Fe.findEnum n cx.g.enums with
     | .some en => .some (en, as)
     | .none => .none)
   | .none => .none
+/-- The enum of type `t`, if it has a constructor `c`. -/
 def Fe.enumWith (cx : Fe.Cx) (t : Fe.Ty) (c : String) : Option Fe.Enum := match Fe.enumOf cx t with
   | .some q => (match Fe.lookup c q.1.ctors with
     | .some _ => .some q.1
     | .none => .none)
   | .none => .none
--- L4, L17: where a function returns a borrow of its own `&mut` argument, the argument's
--- handle moves into the result: no reborrow scope
+/-- L4, L17: where a function returns a borrow of its own `&mut` argument, the argument's
+handle moves into the result: no reborrow scope -/
 def Fe.isBorrowTy (t : Fe.Ty) : Bool := match t with
   | .ref .true _ _ => .true
   | .app (.con _) (.ref .true _ _) => .true
   | _ => .false
+/-- The requests of a function's last statement, without reborrows when it returns a borrow (`Fe.isBorrowTy`). -/
 def Fe.tailReqs (cx : Fe.Cx) (isLast : Bool) (reqs : List Fe.Req) : List Fe.Req :=
   match Bool.and (Bool.and isLast cx.fnTail) (Fe.isBorrowTy cx.retTy) with
   | .true => Fe.filter (fun (r : Fe.Req) => Bool.not (Nat.beq r.kind 2)) reqs
   | .false => reqs
+/-- The variables a constructor pattern `.c x y` binds. -/
 def Fe.patNames (pat : Syntax) : List String := Fe.map (fun (a : Nat × Syntax) => Fe.id (Fe.arg a.2 0)) (Fe.kids (Fe.arg pat 2))
+/-- Is this the name `_`? -/
 def Fe.isWild (x : String) : Bool := Fe.seq x "_"
+/-- The strings numbered from `n`. -/
 def Fe.indexFrom : List String → Nat → List (Nat × String)
   | .nil, _ => .nil
   | .cons x xs, n => .cons (n, x) (Fe.indexFrom xs (Nat.succ n))
+/-- The fields of `lender` as place aliases `lender_f` in region `rho` (L11). -/
 def Fe.fieldsEnv (rho lender : String) : List (String × Fe.Ty) → Fe.Env → Fe.Env
   | .nil, e => e
   | .cons f fs, e => Fe.fieldsEnv rho lender fs (.cons (Fe.Var.setAlias (Fe.mkVar (lender +++ "_" +++ f.1) f.2 .true) rho) e)
--- (the fields of the peeked value `d`)
+/-- (the fields of the peeked value `d`) -/
 def Fe.fieldsLets1 (d lender : String) : List (String × Fe.Ty) → Fe.Out
   | .nil => Fe.o ""
   | .cons f fs => Fe.letO (lender +++ "_" +++ f.1) (Fe.o (d +++ "." +++ f.1)) ⊕ Fe.fieldsLets1 d lender fs
 
 mutual
--- an expression: `k` gets its value (as text, marked as coming from `s`), its type, and
--- the environment after it
+/-- an expression: `k` gets its value (as text, marked as coming from `s`), its type, and
+the environment after it -/
 def Fe.expr (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (exp : Fe.Ty) (tail : Bool) (k : Fe.K) : Fe.M Fe.Out :=
   Fe.exprK cx env p s exp tail (fun v t e => k (Fe.Out.at p v) t e)
+/-- The lowering of an expression, dispatching on its kind (`Fe.expr` adds the position
+of the whole expression to the value `k` gets). -/
 def Fe.exprK (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (exp : Fe.Ty) (tail : Bool) (k : Fe.K) : Fe.M Fe.Out :=
   Fe.sw (Fe.kind s) (
     ("feral_expr.var", fun _ => Fe.varE cx env p (Fe.id (Fe.arg s 0)) exp k) ▸
@@ -1367,6 +1594,7 @@ def Fe.exprK (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (exp : Fe.T
     ("feral_expr.forE", fun _ => Fe.forE cx env p s k) ▸ .nil)
     (fun _ => Fe.fail p "not an expression of the supported fragment")
 
+/-- Several expressions, left to right, each flowing to its expected type; `kk` gets their values. -/
 def Fe.exprs (cx : Fe.Cx) (env : Fe.Env) (items : List ((List Nat × Syntax) × Fe.Ty)) (acc : List Fe.Out)
     (kk : List Fe.Out → Fe.Env → Fe.M Fe.Out) : Fe.M Fe.Out :=
   match items with
@@ -1375,8 +1603,8 @@ def Fe.exprs (cx : Fe.Cx) (env : Fe.Env) (items : List ((List Nat × Syntax) × 
     v ← Fe.flow cx it.1.1 v t it.2;
     Fe.exprs cx e rest (List.append acc (.cons v .nil)) kk)
 
--- an expression where a statement could stand (a branch, a loop body, a function body):
--- unless it is a block, it is a one-statement block, with the scopes of its borrows (L20)
+/-- an expression where a statement could stand (a branch, a loop body, a function body):
+unless it is a block, it is a one-statement block, with the scopes of its borrows (L20) -/
 def Fe.body (cx0 : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (exp : Fe.Ty) (tail : Bool) (k : Fe.K) : Fe.M Fe.Out := do
   let cx := Fe.Cx.fresh cx0;
   sb ← Fe.getSubst;
@@ -1386,7 +1614,7 @@ def Fe.body (cx0 : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (exp : Fe.T
     (fun cx2 e2 fin => Fe.expr cx2 e2 p s exp .false (fun v t e3 => fin 0 v t e3))
     (fun _ v t e => k v t e)
 
--- a name: a variable, a field or method of one, or a global
+/-- a name: a variable, a field or method of one, or a global -/
 def Fe.varE (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (x : String) (exp : Fe.Ty) (k : Fe.K) : Fe.M Fe.Out :=
   let sp := Fe.split x;
   match Fe.find sp.1 env with
@@ -1424,6 +1652,7 @@ def Fe.varE (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (x : String) (exp : Fe.Ty
             | .none => Fe.fail p "internal: method without a signature")
           | .none => Fe.fail p ("`" +++ v.name +++ "` has no field or method `" +++ sp.2 +++ "`")))))
 
+/-- The type of field `f` of the struct type `t`. -/
 def Fe.fieldTy (cx : Fe.Cx) (t : Fe.Ty) (f : String) : Option Fe.Ty :=
   match Fe.head t with
   | .some (n, _) => (match Fe.findStruct n cx.g.structs with
@@ -1431,6 +1660,8 @@ def Fe.fieldTy (cx : Fe.Cx) (t : Fe.Ty) (f : String) : Option Fe.Ty :=
     | .none => .none)
   | .none => .none
 
+/-- A global name applied to `args`: `true`, `false`, the `mem` functions, or a function
+call (`hp`: the node that names it). -/
 def Fe.globalE (cx : Fe.Cx) (env : Fe.Env) (p hp : List Nat) (x : String) (args : List (List Nat × Syntax)) (exp : Fe.Ty) (k : Fe.K) : Fe.M Fe.Out :=
   let sp := Fe.split x;
   match Fe.seq x "true", Fe.seq x "false", Fe.seq sp.1 "mem" with
@@ -1446,6 +1677,7 @@ def Fe.globalE (cx : Fe.Cx) (env : Fe.Env) (p hp : List Nat) (x : String) (args 
       | _, .some en => Fe.ctorApp cx env p sp.2 sp.1 args exp k
       | _, _ => Fe.fail p ("unknown identifier `" +++ x +++ "`")))
 
+/-- An application: a constructor, a method call, or a function call. -/
 def Fe.appE (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (exp : Fe.Ty) (k : Fe.K) : Fe.M Fe.Out :=
   let head := Fe.arg s 0;
   let args := Fe.argPaths p 1 s;
@@ -1463,7 +1695,7 @@ def Fe.appE (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (exp : Fe.Ty
     | .false => Fe.globalE cx env p (Fe.sub p 0) x args exp k)
   | _, _ => Fe.fail p "only functions, methods and constructors can be applied (no closures yet)"
 
--- L1, L13: a constructor of the expected enum (or of the only enum that has it)
+/-- L1, L13: a constructor of the expected enum (or of the only enum that has it) -/
 def Fe.ctorApp (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (c ename : String) (args : List (List Nat × Syntax)) (exp : Fe.Ty) (k : Fe.K) : Fe.M Fe.Out := do
   exp ← Fe.zonkM exp;
   let byName := Fe.findEnum ename cx.g.enums;
@@ -1484,7 +1716,7 @@ def Fe.ctorApp (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (c ename : String) (ar
           | .nil => k (Fe.o (en.name +++ "." +++ c)) ty e
           | _ => k (Fe.Out.s ("(" +++ en.name +++ "." +++ c) ⊕ Fe.cat vs ⊕ Fe.Out.s ")") ty e))))
 
--- L14: `mem.swap`, `mem.take`, `mem.replace` on argument borrows
+/-- L14: `mem.swap`, `mem.take`, `mem.replace` on argument borrows -/
 def Fe.memE (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (f : String) (args : List (List Nat × Syntax)) (k : Fe.K) : Fe.M Fe.Out :=
   match Fe.seq f "swap", Fe.seq f "take", Fe.seq f "replace", args with
   | .true, _, _, .cons a (.cons b .nil) => Fe.argRef cx env a.1 a.2 .true (fun x tx e => Fe.argRef cx e b.1 b.2 .true (fun y ty e2 => do
@@ -1513,8 +1745,8 @@ def Fe.memE (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (f : String) (args : List
       Fe.pure (Fe.peekO old x ⊕ Fe.writeT x v 1 ⊕ rest)))
   | _, _, _, _ => Fe.fail p ("`mem." +++ f +++ "`: not in the supported library, or wrong number of arguments")
 
--- an argument at a `&`/`&mut` parameter: the handle of the borrow its statement opened
--- (L20), or a handle variable moved in (L17)
+/-- an argument at a `&`/`&mut` parameter: the handle of the borrow its statement opened
+(L20), or a handle variable moved in (L17) -/
 def Fe.argRef (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (m : Bool) (kk : String → Fe.Ty → Fe.Env → Fe.M Fe.Out) : Fe.M Fe.Out :=
   -- (`&mut s.f`: the handle of the zoom its statement opened)
   match Fe.seq (Fe.placeOf (Fe.core s)) "", Fe.handleOf (Fe.placeOf (Fe.core s)) env with
@@ -1522,6 +1754,8 @@ def Fe.argRef (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (m : Bool)
     | .true => kk h.name h.ty env
     | .false => Fe.argRef0 cx env p s m kk)
   | _, _ => Fe.argRef0 cx env p s m kk
+/-- A `&`/`&mut` argument (`m`: mutable) as a value: the handle if one is open (E0499 if it
+was moved), the lender's name if it is lent (E0499/E0502), else the plain variable. -/
 def Fe.argRef0 (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (m : Bool) (kk : String → Fe.Ty → Fe.Env → Fe.M Fe.Out) : Fe.M Fe.Out :=
   let x := Fe.plainVar (Fe.core s);
   let usable := Fe.the (Option Fe.Var) (match Fe.handleOf x env with
@@ -1555,8 +1789,8 @@ def Fe.argRef0 (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (m : Bool
         rest ← kk n t ((Fe.mkVar n t .false) ▸ e);
         Fe.pure (Fe.letO n v ⊕ rest)))
 
--- L3, L17: a call. `&mut` arguments are handed back and rebound; a returned borrow keeps
--- the handles of its lenders until its last use. `hp`: the node that names the function.
+/-- L3, L17: a call. `&mut` arguments are handed back and rebound; a returned borrow keeps
+the handles of its lenders until its last use. `hp`: the node that names the function. -/
 def Fe.call (cx : Fe.Cx) (env : Fe.Env) (p hp : List Nat) (sig : Fe.Sig) (args : List (List Nat × Syntax)) (k : Fe.K) : Fe.M Fe.Out := do
   m ← Fe.instMap sig;
   match Nat.beq (Fe.len args) (Fe.len sig.params) with
@@ -1583,6 +1817,7 @@ def Fe.call (cx : Fe.Cx) (env : Fe.Env) (p hp : List Nat) (sig : Fe.Sig) (args :
       | .true, .false => Fe.pure (Fe.okMatch1 cx e callO v (r +++ "h") handed rest)
       | .true, .true => Fe.pure (Fe.okMatch cx e callO v rest)))
 
+/-- The arguments of a call, from parameter `i` on; `kk` gets their code and the handles to rebind. -/
 def Fe.args (cx : Fe.Cx) (env : Fe.Env) (sig : Fe.Sig) (m : List (String × Fe.Ty)) (i : Nat) (args : List (List Nat × Syntax))
     (accT : List Fe.Out) (accH : List (Nat × String)) (kk : List Fe.Out → List (Nat × String) → Fe.Env → Fe.M Fe.Out) : Fe.M Fe.Out :=
   match args, Fe.nth sig.params i with
@@ -1597,13 +1832,14 @@ def Fe.args (cx : Fe.Cx) (env : Fe.Env) (sig : Fe.Sig) (m : List (String × Fe.T
       Fe.args cx e sig m (Nat.succ i) rest (List.append accT (.cons v .nil)) accH kk))
   | _, _ => kk accT accH env
 
+/-- A binary operator: a call of its library function (`U64.add`, …). -/
 def Fe.binE (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (f : String) (k : Fe.K) : Fe.M Fe.Out :=
   match Fe.findSig f cx.g.sigs with
   | .some sig => Fe.call cx env p (Fe.sub p 1) sig (.cons (Fe.sub p 0, Fe.arg s 0) (.cons (Fe.sub p 2, Fe.arg s 2) .nil)) k
   | .none => Fe.fail p "internal: operator without a signature"
 
--- `&mut p` / `&p` as a value: the handle its statement opened; or a place behind a
--- handle, which is a returned borrow built from the place's lens (L4, L10)
+/-- `&mut p` / `&p` as a value: the handle its statement opened; or a place behind a
+handle, which is a returned borrow built from the place's lens (L4, L10) -/
 def Fe.borrowE (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (k : Fe.K) : Fe.M Fe.Out :=
   let inner := Fe.arg s 2;
   let mu := Fe.nonEmpty (Fe.arg s 1);
@@ -1638,7 +1874,7 @@ def Fe.borrowE (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (k : Fe.K
       | _, _, _, _ => Fe.fail p "this borrow of a place is not supported yet (a field of a `&mut` struct, or `&mut v[i]`)"))
   | _, _, _ => Fe.fail p "this borrow of a place is not supported yet (a field of a `&mut` struct, or `&mut v[i]`)"
 
--- L6: assignment rebinds (SSA); `*x := e` is `Uniq.write`/`Mut.set` (L3, L4); L16: a cursor moves
+/-- L6: assignment rebinds (SSA); `*x := e` is `Uniq.write`/`Mut.set` (L3, L4); L16: a cursor moves -/
 def Fe.assignE (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (isAdd : Bool) (k : Fe.K) : Fe.M Fe.Out :=
   match Fe.cursorMove env (Fe.arg s 0) (Fe.arg s 2), isAdd with
   | .some (x, ch), .false => do
@@ -1667,7 +1903,7 @@ def Fe.assignE (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (isAdd : 
           | .succ .zero => Fe.peekO d x
           | _ => Fe.peekMO d x) ⊕ Fe.okMatch cx e2 (Fe.Out.s ("U64.add " +++ d +++ " ") ⊕ v) n (Fe.writeT x (Fe.o n) mode ⊕ rest)))))
 
--- the place an assignment writes: a variable (0), through an argument borrow (1), through a returned borrow (2)
+/-- the place an assignment writes: a variable (0), through an argument borrow (1), through a returned borrow (2) -/
 def Fe.target (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (kk : String → Nat → Fe.Ty → Fe.Env → Fe.M Fe.Out) : Fe.M Fe.Out :=
   match Fe.is "feral_expr.deref" s with
   | .true =>
@@ -1708,7 +1944,7 @@ def Fe.target (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (kk : Stri
       | _, _, .true => kk x 0 t env
       | _, _, .false => Fe.fail p ("error[E0384]: cannot assign twice to immutable variable `" +++ x +++ "` (declare it `let mut`)")))
 
--- an expression evaluated in the scopes of the borrows it takes (a condition, a scrutinee)
+/-- an expression evaluated in the scopes of the borrows it takes (a condition, a scrutinee) -/
 def Fe.evalS (cx0 : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (exp : Fe.Ty) (k : Fe.K) : Fe.M Fe.Out := do
   let cx := Fe.Cx.fresh cx0;
   sb ← Fe.getSubst;
@@ -1718,8 +1954,8 @@ def Fe.evalS (cx0 : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (exp : Fe.
     (fun cx2 e2 fin => Fe.expr cx2 e2 p s exp .false (fun v t e3 => fin 0 v t e3))
     (fun _ v t e => k v t e)
 
--- L7: branches. In tail position the continuation goes into each branch; otherwise the
--- branches are joined: each returns its value and the variables it may have changed.
+/-- L7: branches. In tail position the continuation goes into each branch; otherwise the
+branches are joined: each returns its value and the variables it may have changed. -/
 def Fe.branch (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (tail : Bool)
     (mk : Fe.Cx → Bool → Fe.K → Fe.M Fe.Out) (k : Fe.K) : Fe.M Fe.Out :=
   match tail with
@@ -1771,9 +2007,9 @@ def Fe.branch (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (tail : Bo
       | .nil => Fe.pure (Fe.okMatch cx env call r after)
       | _ => Fe.pure (Fe.okMatch1 cx env call r (r +++ "h") hns after)))
 
--- `match`: on an owned value, through `&` (fields by value), through `&mut` (L15: a
--- reborrow scope; fields are place aliases, the constructor is rebuilt), on a cursor
--- (L16), on an `Option (&mut T)` (L12)
+/-- `match`: on an owned value, through `&` (fields by value), through `&mut` (L15: a
+reborrow scope; fields are place aliases, the constructor is rebuilt), on a cursor
+(L16), on an `Option (&mut T)` (L12) -/
 def Fe.matchG (cx0 : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (sp : List Nat) (scrut : Syntax)
     (arms : List Fe.Arm) (tail : Bool) (k : Fe.K) : Fe.M Fe.Out :=
   let cx := Fe.Cx.fresh cx0;
@@ -1814,17 +2050,19 @@ def Fe.matchG (cx0 : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (sp : Lis
         Fe.armsBy cx2 e3 p v t arms .true (fun v2 t2 e4 => fin 0 v2 t2 e4)))
       (fun _ v t e => k v t e))
 
+/-- The alternatives of a `match` on a value of type `t`, in the mode its type calls for. -/
 def Fe.armsBy (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (v : Fe.Out) (t : Fe.Ty) (arms : List Fe.Arm) (tl : Bool) (kk : Fe.K) : Fe.M Fe.Out :=
   match t, Fe.outName v with
   | .mopt _ _ _, .some n => Fe.arms cx env p 4 v t n arms tl kk
   | .mopt _ _ _, .none => Fe.fail p "internal: an optional borrow without a name"
   | _, _ => Fe.arms cx env p 0 v t "" arms tl kk
 
--- modes: 0 owned, 2 cursor (fields are its children), 3 through `&`, 4 `Option (&mut T)`
+/-- modes: 0 owned, 2 cursor (fields are its children), 3 through `&`, 4 `Option (&mut T)` -/
 def Fe.arms (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (mode : Nat) (st : Fe.Out) (sty : Fe.Ty) (parent : String)
     (arms : List Fe.Arm) (tl : Bool) (kk : Fe.K) : Fe.M Fe.Out := do
   alts ← Fe.armL cx env p mode sty parent arms tl kk;
   Fe.pure (Fe.Out.s "(match " ⊕ st ⊕ Fe.Out.s " with" ⊕ alts ⊕ Fe.Out.s ")")
+/-- The generated alternatives, one per arm. -/
 def Fe.armL (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (mode : Nat) (sty : Fe.Ty) (parent : String)
     (arms : List Fe.Arm) (tl : Bool) (kk : Fe.K) : Fe.M Fe.Out :=
   match arms with
@@ -1833,6 +2071,7 @@ def Fe.armL (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (mode : Nat) (sty : Fe.Ty
     one ← Fe.arm cx env p mode sty parent a tl kk;
     more ← Fe.armL cx env p mode sty parent rest tl kk;
     Fe.pure (one ⊕ more)
+/-- One generated alternative: its pattern, the variables it binds (as the mode says), its body. -/
 def Fe.arm (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (mode : Nat) (sty : Fe.Ty) (parent : String)
     (a : Fe.Arm) (tl : Bool) (kk : Fe.K) : Fe.M Fe.Out :=
   let pat := a.1;
@@ -1870,7 +2109,7 @@ def Fe.arm (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (mode : Nat) (sty : Fe.Ty)
         b ← a.2 cx (Fe.fieldVars mode parent (ef.1 +++ "." +++ c) ns (Fe.indexFrom ns 0) ef.2 env) tl kk;
         Fe.pure (Fe.alt ("." +++ c +++ Fe.unwords ns) b)))
 
--- the enum of a scrutinee's type and the field types of its constructor `c`
+/-- the enum of a scrutinee's type and the field types of its constructor `c` -/
 def Fe.ctorFields (cx : Fe.Cx) (p : List Nat) (sty : Fe.Ty) (c : String) : Fe.M (String × List Fe.Ty) := do
   sty ← Fe.zonkM sty;
   let en := Fe.orElse (Fe.enumWith cx sty c) (Fe.single (Fe.enumsWith c cx.g.enums));
@@ -1883,7 +2122,7 @@ def Fe.ctorFields (cx : Fe.Cx) (p : List Nat) (sty : Fe.Ty) (c : String) : Fe.M 
     | .true, .some fs => Fe.pure (en.name, Fe.map (fun (f : String × Fe.Ty) => Fe.inst m f.2) fs)
     | .false, _ => Fe.fail p ("the pattern `." +++ c +++ "` does not match a value of this type")
     | _, .none => Fe.fail p ("`" +++ en.name +++ "` has no constructor `" +++ c +++ "`"))
--- `_` fields get names when the constructor has to be rebuilt
+/-- `_` fields get names when the constructor has to be rebuilt -/
 def Fe.fieldNames (keepWild : Bool) (ns : List String) : Fe.M (List String) :=
   match ns with
   | .nil => Fe.pure List.nil
@@ -1893,6 +2132,7 @@ def Fe.fieldNames (keepWild : Bool) (ns : List String) : Fe.M (List String) :=
       | .false => Fe.pure n);
     rs ← Fe.fieldNames keepWild rest;
     Fe.pure (List.cons n2 rs)
+/-- The pattern's variables in the environment, as the mode makes them (owned, alias, cursor child, …). -/
 def Fe.fieldVars (mode : Nat) (parent ctor : String) (all : List String) (ns : List (Nat × String)) (ts : List Fe.Ty) (env : Fe.Env) : Fe.Env :=
   match ns, ts with
   | .cons n rest, .cons t ts2 =>
@@ -1907,9 +2147,9 @@ def Fe.fieldVars (mode : Nat) (parent ctor : String) (all : List String) (ns : L
     | .false => Fe.fieldVars mode parent ctor all rest ts2 (v ▸ env))
   | _, _ => env
 
--- L15: the alternatives of a match through `&mut`. `h` is the reborrow's handle; an
--- alternative that binds fields rebuilds the constructor before it hands `h` back, one
--- that binds nothing uses `x` as the borrow itself.
+/-- L15: the alternatives of a match through `&mut`. `h` is the reborrow's handle; an
+alternative that binds fields rebuilds the constructor before it hands `h` back, one
+that binds nothing uses `x` as the borrow itself. -/
 def Fe.bArms (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (x h : String) (sty : Fe.Ty) (arms : List Fe.Arm) (fin : Fe.K) : Fe.M Fe.Out :=
   match arms with
   | .nil => Fe.pure (Fe.o "")
@@ -1939,8 +2179,8 @@ def Fe.bArms (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (x h : String) (sty : Fe
     more ← Fe.bArms cx env p x h sty rest fin;
     Fe.pure (one ⊕ more)
 
--- L8: `while` / `while let` are a tail-recursive `partial def` over the variables the
--- loop mentions; the ones it may change come back (with `Flow` when the body can return)
+/-- L8: `while` / `while let` are a tail-recursive `partial def` over the variables the
+loop mentions; the ones it may change come back (with `Flow` when the body can return) -/
 def Fe.loop (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (kind : Nat) (k : Fe.K) : Fe.M Fe.Out := do
   vs0 ← Fe.zonkEnv (Fe.distinct env .nil);
   let ment := (fun (x : String) => Fe.ment x s);
@@ -1990,11 +2230,12 @@ def Fe.loop (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (kind : Nat)
     ⊕ Fe.paramsL ps ⊕ Fe.resultO rt hsL ⊕ Fe.Out.s " :=" ⊕ Fe.Out.ind (Fe.Out.nl ⊕ body));
   Fe.loopCallL cx env (Fe.o (callHead +++ Fe.unwords (Fe.names ps))) ons hns early k
 
--- the explicit erased arguments of a loop function: the innermost region and the evidence in scope
+/-- the explicit erased arguments of a loop function: the innermost region and the evidence in scope -/
 def Fe.loopFixed (cx : Fe.Cx) : String :=
   (match Fe.seq cx.sigma "Region.static" with
     | .true => ""
     | .false => " " +++ cx.sigma) +++ Fe.unwords (Fe.map (fun (e : String × (String × String)) => e.1) cx.ev)
+/-- The binders of a loop function: its regions, the erased region and evidence, and its result type. -/
 def Fe.loopBinders (cx : Fe.Cx) (ps : List Fe.Var) (early : Bool) : Fe.Out :=
   let evT := Fe.map (fun (e : String × (String × String)) => Fe.Ty.prod (Fe.Ty.rg e.2.1) (Fe.Ty.rg e.2.2)) cx.ev;
   let ts := List.append (Fe.map (fun (w : Fe.Var) => w.ty) ps) (List.append evT (match early with
@@ -2005,28 +2246,35 @@ def Fe.loopBinders (cx : Fe.Cx) (ps : List Fe.Var) (early : Bool) : Fe.Out :=
       | .true => ""
       | .false => "(0 " +++ cx.sigma +++ " : Region) ")
     ⊕ Fe.o (Fe.words (Fe.map (fun (e : String × (String × String)) => "(0 " +++ e.1 +++ " : Outlives " +++ e.2.1 +++ " " +++ e.2.2 +++ ")") cx.ev))
--- handle parameters at quantity 1
+/-- handle parameters at quantity 1 -/
 def Fe.paramsL (ps : List Fe.Var) : Fe.Out := match ps with
   | .nil => Fe.o ""
   | .cons w rest => (match Fe.isHandleTy w.ty with
     | .true => Fe.Out.s ("(1 " +++ w.name +++ " : ")
     | .false => Fe.Out.s ("(" +++ w.name +++ " : ")) ⊕ Fe.Out.t w.ty ⊕ Fe.Out.s ") " ⊕ Fe.paramsL rest
+/-- Generated binders `(x : T) ` for these variables. -/
 def Fe.paramsO (ps : List Fe.Var) : Fe.Out := match ps with
   | .nil => Fe.o ""
   | .cons w rest => Fe.Out.s ("(" +++ w.name +++ " : ") ⊕ Fe.Out.t w.ty ⊕ Fe.Out.s ") " ⊕ Fe.paramsO rest
--- a loop's handles (they leave through `Result1`'s handle field) and its other variables
+/-- a loop's handles (they leave through `Result1`'s handle field) and its other variables -/
 def Fe.linHs (cx : Fe.Cx) (vs : List Fe.Var) : List Fe.Var := Fe.filter (fun (w : Fe.Var) => Fe.isHandleTy w.ty) vs
+/-- The variables of `vs` that are not handles (the linear ones are not part of the ω
+environment). -/
 def Fe.linVs (cx : Fe.Cx) (vs : List Fe.Var) : List Fe.Var := Fe.filter (fun (w : Fe.Var) => Bool.not (Fe.isHandleTy w.ty)) vs
+/-- The context whose error path releases the handles `hns` (nothing when there are none). -/
 def Fe.linErr (cx : Fe.Cx) (hns : List String) : Fe.Cx := match hns with
   | .nil => cx
   | _ => Fe.Cx.setErr cx (Fe.packH hns)
--- `: Result T` or, with handles, `: Result1 T H`
+/-- `: Result T` or, with handles, `: Result1 T H` -/
 def Fe.resultO (rt : Fe.Ty) (hs : List Fe.Var) : Fe.Out := match hs with
   | .nil => Fe.Out.s ": Result " ⊕ Fe.Out.t rt
   | _ => Fe.Out.s ": Result1 " ⊕ Fe.Out.t rt ⊕ Fe.Out.s " " ⊕ Fe.packHT (Fe.map (fun (w : Fe.Var) => w.ty) hs)
+/-- `: Result T`, or `: Result1 T H` when the result carries handles `hs`. -/
 def Fe.resultArrow (rt : Fe.Ty) (hs : List Fe.Var) : Fe.Out := match hs with
   | .nil => Fe.Out.s "Result " ⊕ Fe.Out.t rt
   | _ => Fe.Out.s "Result1 " ⊕ Fe.Out.t rt ⊕ Fe.Out.s " " ⊕ Fe.packHT (Fe.map (fun (w : Fe.Var) => w.ty) hs)
+/-- A loop call whose result may hand back borrows (`hns`): its `Borrowed` is matched and
+the handles are unpacked before continuing. -/
 def Fe.loopCallL (cx : Fe.Cx) (env : Fe.Env) (callO : Fe.Out) (ons hns : List String) (early : Bool) (k : Fe.K) : Fe.M Fe.Out :=
   match hns, early with
   | .nil, _ => Fe.loopCall cx env callO ons early k
@@ -2044,6 +2292,7 @@ def Fe.loopCallL (cx : Fe.Cx) (env : Fe.Env) (callO : Fe.Out) (ons hns : List St
     Fe.pure (Fe.okMatch1 cx env callO r (r +++ "h") hns
       (Fe.Out.s ("(match " +++ r +++ " with") ⊕ Fe.alt (".brk " +++ r +++ "b") (Fe.unpack (r +++ "b") v ons 0 ⊕ rest)
         ⊕ Fe.alt (".ret " +++ r +++ "r") (Fe.unpack (r +++ "r") v2 ons 0 ⊕ ro) ⊕ Fe.Out.s ")"))
+/-- The call of a loop function and what follows it: the changed variables unpacked, or an early return. -/
 def Fe.loopCall (cx : Fe.Cx) (env : Fe.Env) (callO : Fe.Out) (ons : List String) (early : Bool) (k : Fe.K) : Fe.M Fe.Out := do
   r ← Fe.freshName "r";
   v ← Fe.freshName "u";
@@ -2057,7 +2306,7 @@ def Fe.loopCall (cx : Fe.Cx) (env : Fe.Env) (callO : Fe.Out) (ons : List String)
       (Fe.Out.s ("(match " +++ r +++ " with") ⊕ Fe.alt (".brk " +++ r +++ "b") (Fe.unpack (r +++ "b") v ons 0 ⊕ rest)
         ⊕ Fe.alt (".ret " +++ r +++ "r") (Fe.unpack (r +++ "r") v2 ons 0 ⊕ ro) ⊕ Fe.Out.s ")"))
 
--- L8: `for i in a..b` is structural recursion on the number of iterations left
+/-- L8: `for i in a..b` is structural recursion on the number of iterations left -/
 def Fe.forE (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (k : Fe.K) : Fe.M Fe.Out :=
   Fe.exprs (Fe.Cx.setTail cx .false) env
     (.cons ((Fe.sub p 3, Fe.arg s 3), Fe.tU64) (.cons ((Fe.sub p 5, Fe.arg s 5), Fe.tU64) .nil)) .nil (fun ab env1 => do
@@ -2104,15 +2353,16 @@ def Fe.forE (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (k : Fe.K) :
         ⊕ Fe.Out.nl ⊕ Fe.Out.s "| .succ fuel_, " ⊕ pats ⊕ Fe.Out.s " =>" ⊕ Fe.Out.ind (Fe.Out.nl ⊕ b)));
     call ← Fe.loopCallL cx env1 (Fe.o (callHead +++ " (Nat.sub " +++ hi +++ ".val " +++ lo +++ ".val) " +++ lo +++ Fe.unwords allOns)) ons hns early k;
     Fe.pure (Fe.letO lo (Fe.tupleO (Fe.take 1 ab)) ⊕ Fe.letO hi (Fe.tupleO (Fe.drop 1 ab)) ⊕ call))
+/-- The variables' types, each followed by an arrow: `T₁ → T₂ → `. -/
 def Fe.arrowsO (ps : List Fe.Var) : Fe.Out := match ps with
   | .nil => Fe.o ""
   | .cons w rest => (match Fe.isHandleTy w.ty with
     | .true => Fe.Out.s "(1 _ : " ⊕ Fe.Out.t w.ty ⊕ Fe.Out.s ") → "
     | .false => Fe.Out.t w.ty ⊕ Fe.Out.s " → ") ⊕ Fe.arrowsO rest
 
--- L5, L6, L20: the statements of a block. A statement that borrows opens scopes; they stay
--- open while a later statement mentions something tied to their regions (`stop`), and `k`
--- gets the number of statements left outside.
+/-- L5, L6, L20: the statements of a block. A statement that borrows opens scopes; they stay
+open while a later statement mentions something tied to their regions (`stop`), and `k`
+gets the number of statements left outside. -/
 def Fe.seqU (cx : Fe.Cx) (env : Fe.Env) (bp : List Nat) (stmts : Fe.Stmts) (exp : Fe.Ty) (tail : Bool) (opened : Bool)
     (stop : Fe.Env → Fe.Stmts → Fe.M Bool) (k : Fe.Fin) : Fe.M Fe.Out :=
   match stmts with
@@ -2145,6 +2395,7 @@ def Fe.seqU (cx : Fe.Cx) (env : Fe.Env) (bp : List Nat) (stmts : Fe.Stmts) (exp 
           | .nil => k 0 v t e
           | more => Fe.seqU cx e bp more exp tail .false stop k)))
 
+/-- One statement: a `let`, or an expression (the block's value if it is the last). -/
 def Fe.stmt (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (st : Syntax) (exp : Fe.Ty) (isLast : Bool) (tail : Bool) (k : Fe.K) : Fe.M Fe.Out :=
   match Fe.is "feral_stmt.letS" st, isLast with
   | .true, _ => Fe.letS cx env p st k
@@ -2153,8 +2404,8 @@ def Fe.stmt (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (st : Syntax) (exp : Fe.T
     tv ← Fe.freshVar;
     Fe.expr (Fe.Cx.setTail cx .false) env (Fe.sub p 0) (Fe.arg st 0) tv .false k
 
--- L6: `let` / `let mut` (SSA: both are `let`). L11: `let h := &mut s.f` names a place.
--- L16: `let cur := r` for a mutable borrow `r` makes a cursor (`Mut.whole`).
+/-- L6: `let` / `let mut` (SSA: both are `let`). L11: `let h := &mut s.f` names a place.
+L16: `let cur := r` for a mutable borrow `r` makes a cursor (`Mut.whole`). -/
 def Fe.letS (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (st : Syntax) (k : Fe.K) : Fe.M Fe.Out := do
   let x := Fe.id (Fe.arg st 2);
   let mt := Fe.nonEmpty (Fe.arg st 1);
@@ -2197,6 +2448,7 @@ def Fe.letS (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (st : Syntax) (k : Fe.K) 
     | _, _ => Fe.letG cx env p x mt init ann k)
   | _, _, _ => Fe.letG cx env p x mt init ann k
 
+/-- A `let` of `x` with initial value `init` at type `ann`; a returned borrow bound to a name keeps its lenders. -/
 def Fe.letG (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (x : String) (mt : Bool) (init : Syntax) (ann : Fe.Ty) (k : Fe.K) : Fe.M Fe.Out :=
   Fe.expr (Fe.Cx.setTail cx .false) env (Fe.sub p 5) init ann .false (fun v t e => do
     v ← Fe.flow cx (Fe.sub p 5) v t ann;
@@ -2214,16 +2466,17 @@ def Fe.letG (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (x : String) (mt : Bool) 
     rest ← k (Fe.o "()") Fe.tUnit ((Fe.Var.setRel (Fe.mkVar x ty mt) rel) ▸ e1);
     Fe.pure (Fe.letHAt ty (Fe.sub p 2) x v ⊕ rest))
 
+/-- Opens the scopes of the requests `reqs`, one inside the other, around `inside`. -/
 def Fe.scoped (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (reqs : List Fe.Req) (ment after : Nat → String → Bool) (early : Bool)
     (inside : Fe.Cx → Fe.Env → Fe.Fin → Fe.M Fe.Out) (k : Fe.Fin) : Fe.M Fe.Out :=
   match reqs with
   | .nil => inside cx env k
   | .cons r rs => Fe.scope1 cx env p r ment after early (fun cx2 e2 fin => Fe.scoped cx2 e2 p rs ment after early inside fin) k
 
--- L20: one borrow scope. Its body is polymorphic in a fresh region `ρ`; the lender's name
--- is rebound inside (to a `Lent` token, or to the shared borrow); what leaves is the
--- value, the outer variables the body may have changed, and the variables declared
--- inside that live on, none of which may mention `ρ` (L21: E0515, E0597).
+/-- L20: one borrow scope. Its body is polymorphic in a fresh region `ρ`; the lender's name
+is rebound inside (to a `Lent` token, or to the shared borrow); what leaves is the
+value, the outer variables the body may have changed, and the variables declared
+inside that live on, none of which may mention `ρ` (L21: E0515, E0597). -/
 def Fe.scope1 (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (rq : Fe.Req) (ment after : Nat → String → Bool) (early : Bool)
     (inside : Fe.Cx → Fe.Env → Fe.Fin → Fe.M Fe.Out) (k : Fe.Fin) : Fe.M Fe.Out :=
   -- a zoom on a field of a local: on the handle of the borrow of it opened just outside
@@ -2232,6 +2485,9 @@ def Fe.scope1 (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (rq : Fe.Req) (ment aft
     | .lent _ _ => Fe.scopeOne cx env p (Fe.Req.mk 5 h.name rq.as .nil) ment after early inside k
     | _ => Fe.scopeOne cx env p rq ment after early inside k)
   | _, _, _ => Fe.scopeOne cx env p rq ment after early inside k
+/-- One borrow scope around a statement: the lender is rebound to a `Lent` token (or, for a
+reborrow, a `Lent`/`Uniq` of the handle) and the body runs inside, with the E0499/E0502
+checks the request's kind needs. -/
 def Fe.scopeOne (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (rq : Fe.Req) (ment after : Nat → String → Bool) (early : Bool)
     (inside : Fe.Cx → Fe.Env → Fe.Fin → Fe.M Fe.Out) (k : Fe.Fin) : Fe.M Fe.Out :=
   match Nat.beq rq.kind 9, Fe.find rq.lender env with
@@ -2417,18 +2673,23 @@ def Fe.scopeOne (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (rq : Fe.Req) (ment a
 end
 
 -- ## Items (L1)
+/-- The `return` continuation outside a function: an internal error. -/
 def Fe.noRet : Fe.K := fun v t e => Fe.fail .nil "internal: `return` outside a function"
+/-- A function's binders, as they are read: regions, bounds, type parameters, value parameters. -/
 structure Fe.B where
   rgs : List String
   bounds : List (String × String)
   tys : List String
   params : List (String × Fe.Ty)
+/-- Appends `x` unless it is there already. -/
 def Fe.addNew (x : String) (xs : List String) : List String := match Fe.mem x xs with
   | .true => xs
   | .false => List.append xs (.cons x .nil)
+/-- Appends each of these that isn't there already. -/
 def Fe.addAll : List String → List String → List String
   | .nil, acc => acc
   | .cons x xs, acc => Fe.addAll xs (Fe.addNew x acc)
+/-- Reads a function's binders: `(x : T)`, `()`, `{'a 'b}`, `{'a : 'b}`, `{T : Type}`. -/
 def Fe.binders (p : List Nat) : List (Nat × Syntax) → Fe.B → Fe.M Fe.B
   | .nil, b => Fe.pure b
   | .cons x xs, b =>
@@ -2447,7 +2708,7 @@ def Fe.binders (p : List Nat) : List (Nat × Syntax) → Fe.B → Fe.M Fe.B
       ("feral_binder.types", fun _ => Fe.binders p xs (Fe.B.mk b.rgs b.bounds
         (Fe.addAll (Fe.map (fun (l : Nat × Syntax) => Fe.id l.2) (Fe.kids (Fe.arg s 1))) b.tys) b.params)) ▸ .nil)
       (fun _ => Fe.fail (Fe.sub p x.1) "not a binder of the supported fragment")
--- the variables (elided regions) of a type
+/-- the variables (elided regions) of a type -/
 def Fe.tyVars : Fe.Ty → List Nat → List Nat
   | .con _, acc => acc
   | .app f a, acc => Fe.tyVars f (Fe.tyVars a acc)
@@ -2460,30 +2721,35 @@ def Fe.tyVars : Fe.Ty → List Nat → List Nat
   | .var n, acc => (match Fe.memNat n acc with
     | .true => acc
     | .false => .cons n acc)
+/-- Names the elided regions of a signature `ρe0`, `ρe1`, … (solving their variables). -/
 def Fe.nameElided : List Nat → Fe.M (List String)
   | .nil => Fe.pure List.nil
   | .cons n ns => do
     Fe.bindVar n (Fe.Ty.rg ("ρe" +++ Syntax.decimal n));
     rest ← Fe.nameElided ns;
     Fe.pure (List.cons ("ρe" +++ Syntax.decimal n) rest)
+/-- Solves all these variables to `t`. -/
 def Fe.bindAll (t : Fe.Ty) : List Nat → Fe.M Unit
   | .nil => Fe.pure ()
   | .cons n ns => do
     Fe.bindVar n t;
     Fe.bindAll t ns
+/-- The inference variables of the parameters' types. -/
 def Fe.paramVars : List (String × Fe.Ty) → List Nat → List Nat
   | .nil, acc => acc
   | .cons q qs, acc => Fe.paramVars qs (Fe.tyVars q.2 acc)
+/-- The region of the first reference parameter, if any (Rust's elision rule for the result). -/
 def Fe.firstRef : List (String × Fe.Ty) → Option Fe.Ty
   | .nil => .none
   | .cons q qs => (match q.2 with
     | .ref _ r _ => .some r
     | _ => Fe.firstRef qs)
+/-- A region's name; `""` for anything else. -/
 def Fe.rgName : Fe.Ty → String
   | .rg n => n
   | _ => ""
--- L4: the `&mut` parameters a returned `&'r mut` may borrow from: those of region `'r`,
--- or of a region with a bound `'x : 'r`
+/-- L4: the `&mut` parameters a returned `&'r mut` may borrow from: those of region `'r`,
+or of a region with a bound `'x : 'r` -/
 def Fe.lendersOf (bounds : List (String × String)) (r : String) : List (String × Fe.Ty) → Nat → List (Nat × Fe.Ty)
   | .nil, _ => .nil
   | .cons q qs, i => (match q.2 with
@@ -2491,20 +2757,25 @@ def Fe.lendersOf (bounds : List (String × String)) (r : String) : List (String 
       | .true => .cons (i, q.2) (Fe.lendersOf bounds r qs (Nat.succ i))
       | .false => Fe.lendersOf bounds r qs (Nat.succ i))
     | _ => Fe.lendersOf bounds r qs (Nat.succ i))
+/-- The indices of the `&mut` parameters. -/
 def Fe.mutParams : List (String × Fe.Ty) → Nat → List Nat
   | .nil, _ => .nil
   | .cons q qs, i => (match Fe.isRefMut q.2 with
     | .true => .cons i (Fe.mutParams qs (Nat.succ i))
     | .false => Fe.mutParams qs (Nat.succ i))
+/-- The product of these types (`Unit` for none). -/
 def Fe.prodAll : List (Nat × Fe.Ty) → Fe.Ty
   | .nil => Fe.tUnit
   | .cons a .nil => a.2
   | .cons a as => Fe.Ty.app (Fe.Ty.app (Fe.Ty.con "Σ1") a.2) (Fe.prodAll as)
--- the returned borrow, if the result type is one: (optional?, region, pointee)
+/-- the returned borrow, if the result type is one: (optional?, region, pointee) -/
 def Fe.retBorrow : Fe.Ty → Option (Bool × (Fe.Ty × Fe.Ty))
   | .ref .true r a => .some (Bool.false, (r, a))
   | .app (.con o) (.ref .true r a) => .some (Bool.true, (r, a))
   | _ => .none
+/-- A function's signature, from its syntax: its binders, elided regions named,
+the result's elided regions taken from the first reference parameter (else E0106), and
+the lenders of a returned borrow (L4). -/
 def Fe.sigOf (p : List Nat) (it : Syntax) : Fe.M Fe.Sig := do
   b ← Fe.binders (Fe.sub p 2) (Fe.kids (Fe.arg it 2)) (Fe.B.mk .nil .nil .nil .nil);
   ret0 ← Fe.tyOf (Fe.sub p 4) (Fe.arg it 4);
@@ -2532,13 +2803,15 @@ def Fe.sigOf (p : List Nat) (it : Syntax) : Fe.M Fe.Sig := do
     | _, .false, _ => Fe.pure (Fe.Sig.mk name rgs b.tys b.bounds params (Fe.Ty.mutb rb.2.1 rb.2.2 (Fe.prodAll ls)) .true idx others)
     | _, .true, _ => Fe.fail (Fe.sub p 4) "not supported yet: an optional `&mut` from several lenders")
 
--- the type a `return` gives: a returned borrow is written `&'a mut T` in Feral
+/-- the type a `return` gives: a returned borrow is written `&'a mut T` in Feral -/
 def Fe.surfaceRet : Fe.Ty → Fe.Ty
   | .mutb r a _ => .ref .true r a
   | .mopt r a _ => .app (.con "Option") (.ref .true r a)
   | t => t
+/-- The names of the parameters at these indices. -/
 def Fe.paramNames (sig : Fe.Sig) (idx : List Nat) : List String :=
   Fe.pick idx (Fe.indexFrom (Fe.map (fun (q : String × Fe.Ty) => q.1) sig.params) 0)
+/-- Is one of these variables moved? -/
 def Fe.anyGone (e : Fe.Env) : List String → Bool
   | .nil => .false
   | .cons x xs => (match Fe.find x e with
@@ -2546,15 +2819,16 @@ def Fe.anyGone (e : Fe.Env) : List String → Bool
       | .true => .true
       | .false => Fe.anyGone e xs)
     | .none => Fe.anyGone e xs)
--- `Borrowed.ok b` or, with other handles handed back, `Borrowed.ok (b, hs)`
+/-- `Borrowed.ok b` or, with other handles handed back, `Borrowed.ok (b, hs)` -/
 def Fe.borrowedOk (b : Fe.Out) (hs : List String) : Fe.Out := match hs with
   | .nil => Fe.Out.s "Borrowed.ok " ⊕ b
   | _ => Fe.Out.s "Borrowed.ok (" ⊕ b ⊕ Fe.Out.s (", " +++ Fe.packH hs +++ ")")
+/-- The type of a signature's parameter `x`. -/
 def Fe.paramTy (sig : Fe.Sig) (x : String) : Fe.Ty := match Fe.lookup x sig.params with
   | .some t => t
   | .none => Fe.tUnit
--- a returned borrow is a `Mut` in `Borrowed.ok`; with two lenders, the one not returned
--- rides along in the backward function (`Mut.alongside`)
+/-- a returned borrow is a `Mut` in `Borrowed.ok`; with two lenders, the one not returned
+rides along in the backward function (`Mut.alongside`) -/
 def Fe.fnRetL (cx : Fe.Cx) (p : List Nat) (sig : Fe.Sig) (v : Fe.Out) (t0 : Fe.Ty) (e : Fe.Env) : Fe.M Fe.Out := do
   t ← Fe.zonkM t0;
   let hs := Fe.paramNames sig sig.handed;
@@ -2577,9 +2851,9 @@ def Fe.fnRetL (cx : Fe.Cx) (p : List Nat) (sig : Fe.Sig) (v : Fe.Out) (t0 : Fe.T
       | .some x => x
       | .none => "") e;
     Fe.pure (fl.1 ⊕ Fe.borrowedOk w hs)
--- the function's result (L3: the value, and the `&mut` arguments handed back in a
--- `Result1`; L4: a returned borrow as a `Mut` whose backward function gives the lenders
--- back, in a `Borrowed`)
+/-- the function's result (L3: the value, and the `&mut` arguments handed back in a
+`Result1`; L4: a returned borrow as a `Mut` whose backward function gives the lenders
+back, in a `Borrowed`) -/
 def Fe.fnRet (cx : Fe.Cx) (p : List Nat) (sig : Fe.Sig) : Fe.K := fun v t e =>
   match sig.lenders with
   | .nil => do
@@ -2592,35 +2866,39 @@ def Fe.fnRet (cx : Fe.Cx) (p : List Nat) (sig : Fe.Sig) : Fe.K := fun v t e =>
     | .false, .true => Fe.pure (fl.1 ⊕ Fe.Out.s "Result.ok " ⊕ v))
   | ls => Fe.fnRetL cx p sig v t e
 
+/-- Names the evidence of a signature's bounds: `hb_0`, `hb_1`, …. -/
 def Fe.boundsEv : List (String × String) → Nat → List (String × (String × String))
   | .nil, _ => .nil
   | .cons b bs, i => .cons ("hb_" +++ Syntax.decimal i, b) (Fe.boundsEv bs (Nat.succ i))
+/-- Prints several generated items, one per line. -/
 def Fe.renderAll (sb : Fe.Subst) : List Fe.Out → List Char → List Char
   | .nil, acc => acc
   | .cons o os, acc => Fe.render sb o 0 (.cons (Char.mk 10) (Fe.renderAll sb os acc))
--- the value parameters of an item's binders (at path `bp`) and the paths of their names
+/-- the value parameters of an item's binders (at path `bp`) and the paths of their names -/
 def Fe.binderPaths (bp : List Nat) : List (Nat × Syntax) → List (String × List Nat)
   | .nil => .nil
   | .cons b bs => (match Fe.is "feral_binder.val" b.2 with
     | .true => .cons (Fe.id (Fe.arg b.2 1), Fe.sub (Fe.sub bp b.1) 1) (Fe.binderPaths bp bs)
     | .false => Fe.binderPaths bp bs)
--- `(x : T) …`, each name marked with the binder it comes from
+/-- `(x : T) …`, each name marked with the binder it comes from -/
 def Fe.nameAtO (bs : List (String × List Nat)) (x : String) : Fe.Out := match Fe.lookup x bs with
   | .some q => Fe.Out.at q (Fe.Out.s x)
   | .none => Fe.Out.s x
+/-- The generated parameter list `(x : T) …`. -/
 def Fe.paramsAtO (bs : List (String × List Nat)) : List Fe.Var → Fe.Out
   | .nil => Fe.o ""
   | .cons w rest => Fe.Out.s "(" ⊕ Fe.nameAtO bs w.name ⊕ Fe.Out.s " : " ⊕ Fe.Out.t w.ty ⊕ Fe.Out.s ") " ⊕ Fe.paramsAtO bs rest
--- the same in linear mode (`(1 x : T)` for a handle): a parameter's hover works in a
--- block that lowers linearly too
+/-- the same in linear mode (`(1 x : T)` for a handle): a parameter's hover works in a
+block that lowers linearly too -/
 def Fe.paramsLatO (bs : List (String × List Nat)) : List Fe.Var → Fe.Out
   | .nil => Fe.o ""
   | .cons w rest => (match Fe.isHandleTy w.ty with
     | .true => Fe.Out.s "(1 "
     | .false => Fe.Out.s "(") ⊕ Fe.nameAtO bs w.name ⊕ Fe.Out.s " : " ⊕ Fe.Out.t w.ty ⊕ Fe.Out.s ") "
       ⊕ Fe.paramsLatO bs rest
--- L1: region parameters first, then the bounds as erased `Outlives` arguments, then type
--- parameters, then values; the result is always a `Result` (L2)
+/-- L1: region parameters first, then the bounds as erased `Outlives` arguments, then type
+parameters, then values; the result is a `Result` (L2), or a `Result1`/`Borrowed` when
+handles come back (D8, M4b: `Fe.resultArrow`, `Fe.fnRet`) -/
 def Fe.fnText (g : Fe.Glob) (p : List Nat) (it : Syntax) (sig : Fe.Sig) : Fe.M String := do
   let ev := Fe.boundsEv sig.bounds 0;
   let sigma := Fe.the String (match sig.rgs with
@@ -2665,25 +2943,28 @@ def Fe.fnText (g : Fe.Glob) (p : List Nat) (it : Syntax) (sig : Fe.Sig) : Fe.M S
   let txt := String.mk (Fe.renderAll sb (List.append aux (.cons head .nil)) .nil);
   Fe.pure txt
 
--- `struct S where f : T` ↦ `structure S`, with a lens per field, its laws, and the
--- independence of distinct fields (L10); `enum` ↦ `inductive`
+/-- `struct S where f : T` ↦ `structure S`, with a lens per field, its laws, and the
+independence of distinct fields (L10); `enum` ↦ `inductive` -/
 def Fe.fieldsOf (p : List Nat) : List (Nat × Syntax) → Fe.M (List (String × Fe.Ty))
   | .nil => Fe.pure List.nil
   | .cons f fs => do
     t ← Fe.tyOf (Fe.sub (Fe.sub p f.1) 2) (Fe.arg f.2 2);
     rest ← Fe.fieldsOf p fs;
     Fe.pure (List.cons (Fe.id (Fe.arg f.2 0), t) rest)
+/-- An enum's constructors and their fields, from syntax. -/
 def Fe.ctorsOf (p : List Nat) : List (Nat × Syntax) → Fe.M (List (String × List (String × Fe.Ty)))
   | .nil => Fe.pure List.nil
   | .cons c cs => do
     b ← Fe.binders (Fe.sub (Fe.sub p c.1) 2) (Fe.kids (Fe.arg c.2 2)) (Fe.B.mk .nil .nil .nil .nil);
     rest ← Fe.ctorsOf p cs;
     Fe.pure (List.cons (Fe.id (Fe.arg c.2 1), b.params) rest)
+/-- The generated field lines of a `structure`. -/
 def Fe.fieldLines : List (String × Fe.Ty) → String
   | .nil => ""
   | .cons f fs => "\n  " +++ f.1 +++ " : " +++ Fe.tyStr f.2 +++ Fe.fieldLines fs
--- field lenses, their laws and independence: `deriving Lens` (lib/OpticDerive.wiz), the
--- same names and statements (`S.fL`, `S.fL_lawful`, `S.f_g_indep`)
+-- (field lenses, their laws and independence: `deriving Lens`, lib/OpticDerive.wiz, the
+-- same names and statements as Feral's lowering: `S.fL`, `S.fL_lawful`, `S.f_g_indep`)
+/-- The generated constructor lines of an `inductive` (`enum` ↦ `inductive`). -/
 def Fe.ctorLines : List (String × List (String × Fe.Ty)) → String
   | .nil => ""
   | .cons c cs => "\n  | " +++ c.1 +++ Fe.unwords (Fe.map (fun (f : String × Fe.Ty) => "(" +++ f.1 +++ " : " +++ Fe.tyStr f.2 +++ ")") c.2) +++ Fe.ctorLines cs
@@ -2719,27 +3000,29 @@ def Fe.ctorLines : List (String × List (String × Fe.Ty)) → String
 -- arguments (the handle packs would need repacking).
 
 mutual
+/-- The tokens of a syntax tree, in order (the `spec` clauses are Wiz source). -/
 def Fe.toks : Syntax → List String
   | .ident x => .cons x .nil
   | .atom x => .cons x .nil
   | .node _ args => Fe.toksL args
   | .missing => .nil
+/-- `Fe.toks` of each syntax tree of a node's arguments. -/
 def Fe.toksL : SyntaxF .false → List String
   | .nil => .nil
   | .cons x xs => List.append (Fe.toks x) (Fe.toksL xs)
 end
--- an argument's value in a clause
+/-- an argument's value in a clause -/
 def Fe.valOf (ps : List (String × Fe.Ty)) (x : String) : String := match Fe.lookup x ps with
   | .some (.ref _ _ _) => "(" +++ x +++ ".val)"
   | _ => x
--- linear mode: a `&mut` argument's value is the argument itself (the spec takes the
--- value, not the handle); a handle has no `.val` (only `Uniq.peek` reads it)
+/-- linear mode: a `&mut` argument's value is the argument itself (the spec takes the
+value, not the handle); a handle has no `.val` (only `Uniq.peek` reads it) -/
 def Fe.valOfL (ps : List (String × Fe.Ty)) (hs : List String) (x : String) : String :=
   match Fe.mem x hs with
   | .true => x
   | .false => Fe.valOf ps x
--- the clause's tokens, with `result`, `final x`, `old x` and the arguments replaced
--- (`fi`/`ol`: the previous token was `final`/`old`)
+/-- the clause's tokens, with `result`, `final x`, `old x` and the arguments replaced
+(`fi`/`ol`: the previous token was `final`/`old`) -/
 def Fe.specGo (ps : List (String × Fe.Ty)) (hs : List String) (fin : List (String × String))
     (res : String) : Bool → Bool → List String → List String
   | _, _, .nil => .nil
@@ -2754,69 +3037,80 @@ def Fe.specGo (ps : List (String × Fe.Ty)) (hs : List String) (fin : List (Stri
     | _, _, _ => (match Fe.lpre (Fe.chars "result.") (Fe.chars t) with
       | .true => .cons (res +++ String.mk (Fe.drop 6 (Fe.chars t))) (Fe.specGo ps hs fin res .false .false rest)
       | .false => .cons (Fe.valOfL ps hs t) (Fe.specGo ps hs fin res .false .false rest)))
+/-- The tokens of a `spec` clause, with the parameters, the handles and the result in the
+environment. -/
 def Fe.specToks (ps : List (String × Fe.Ty)) (hs : List String) (fin : List (String × String))
     (res : String) (ts : List String) : List String :=
   Fe.specGo ps hs fin res .false .false ts
--- the projections of `r` that hold the value and each handed-back argument
--- (`Fe.packV`: `(v, (x₁, (x₂, …)))`)
+/-- the projections of `r` that hold the value and each handed-back argument
+(`Fe.packV`: `(v, (x₁, (x₂, …)))`) -/
 def Fe.handedProj : String → List String → List (String × String)
   | _, .nil => .nil
   | pre, .cons x .nil => .cons (x, "(" +++ pre +++ ".val)") .nil
   | pre, .cons x xs => .cons (x, "(" +++ pre +++ ".1.val)") (Fe.handedProj (pre +++ ".2") xs)
+/-- The type `(ret × (h₁ × … × hₙ))` of a packed result and its handed-back
+arguments (`Fe.packV` packs that way). -/
 def Fe.packTyStr : String → List String → String
   | ret, .nil => ret
   | ret, .cons h rest => "(" +++ ret +++ " × " +++ Fe.packTyStr h rest +++ ")"
--- a call's result: `Uniq.borrow` (and `borrowIn`) return the value with the
--- lender's final value, so with n handles it is nested, handle 1 outermost:
--- `((R × Aₙ) × …) × A₁`
+/-- a call's result: `Uniq.borrow` (and `borrowIn`) return the value with the
+lender's final value, so with n handles it is nested, handle 1 outermost:
+`((R × Aₙ) × …) × A₁` -/
 def Fe.dots1 : Nat → String
   | .zero => ""
   | .succ n => ".1" +++ Fe.dots1 n
+/-- The type of a nested pack: `(ret × (… × tₙ))`. -/
 def Fe.nestTy (ret : String) : List String → String
   | .nil => ret
   | .cons t .nil => "(" +++ ret +++ " × " +++ t +++ ")"
   | .cons t ts => "(" +++ Fe.nestTy ret ts +++ " × " +++ t +++ ")"
--- where the value and handle `i` (1-based) of `n`'s final value sit in the result
+/-- where the value and handle `i` (1-based) of `n`'s final value sit in the result -/
 def Fe.linRes (n : Nat) : String := "r" +++ Fe.dots1 n
+/-- The projection that takes the `i`-th of `n` handles out of a pack (`r1.2…`). -/
 def Fe.linFin (i n : Nat) : String := "r" +++ Fe.dots1 (Nat.sub i 1) +++ ".2"
+/-- The handle names and their projections out of the pack, in order. -/
 def Fe.linFins : Nat → Nat → List String → List (String × String)
   | _, _, .nil => .nil
   | i, n, .cons x xs => .cons (x, Fe.linFin i n) (Fe.linFins (Nat.succ i) n xs)
--- the regions of `ts` that are among `rs`, without duplicates
+/-- the regions of `ts` that are among `rs`, without duplicates -/
 def Fe.nubStr : List String → List String
   | .nil => .nil
   | .cons x xs => (match Fe.mem x xs with
     | .true => Fe.nubStr xs
     | .false => .cons x (Fe.nubStr xs))
+/-- The regions of `ts` that are among `rs`, without duplicates. -/
 def Fe.rgsUsed (rs : List String) : List Fe.Ty → List String
   | .nil => .nil
   | .cons t ts => List.append (Fe.filter (fun (r : String) => Fe.mem r rs) (Fe.rgsOf t .nil)) (Fe.rgsUsed rs ts)
--- the tokens as source: separated by spaces, except after a `.` (`.true`, `x.1`)
+/-- the tokens as source: separated by spaces, except after a `.` (`.true`, `x.1`) -/
 def Fe.joinToks : String → List String → String
   | _, .nil => ""
   | prev, .cons t ts => (match Bool.or (Fe.seq prev "") (Fe.seq prev ".") with
     | .true => t
     | .false => " " +++ t) +++ Fe.joinToks t ts
+/-- The clauses of a `spec`'s `requires` or `ensures` (`k` is the keyword). -/
 def Fe.clauses (ps : List (String × Fe.Ty)) (hs : List String) (fin : List (String × String))
     (res : String) (k : String) : List (Nat × Syntax) → List String
   | .nil => .nil
   | .cons c cs => (match Fe.is k c.2 with
     | .true => .cons ("(" +++ Fe.joinToks "" (Fe.specToks ps hs fin res (Fe.toks (Fe.arg c.2 2))) +++ ")") (Fe.clauses ps hs fin res k cs)
     | .false => Fe.clauses ps hs fin res k cs)
+/-- The strings joined with `sep` (`True` for an empty list: an empty clause list). -/
 def Fe.joinWith (sep : String) : List String → String
   | .nil => "True"
   | .cons x .nil => x
   | .cons x xs => x +++ sep +++ Fe.joinWith sep xs
+/-- `a₁ → … → aₙ → b`. -/
 def Fe.arrows : List String → String → String
   | .nil, b => b
   | .cons a xs, b => a +++ " → " +++ Fe.arrows xs b
--- the type of a parameter in a linear spec: a `&mut` argument is its value
+/-- the type of a parameter in a linear spec: a `&mut` argument is its value -/
 def Fe.paramTyL (hs : List String) (q : String × Fe.Ty) : Fe.Ty :=
   match Fe.mem q.1 hs with
   | .true => Fe.pointee q.2
   | .false => q.2
--- linear mode's spec text (see the section comment): the values in, the borrow scopes a
--- caller would open around the call, the lenders' final values out
+/-- linear mode's spec text (see the section comment): the values in, the borrow scopes a
+caller would open around the call, the lenders' final values out -/
 def Fe.specLin (sig : Fe.Sig) (hs : List String) (cls : List (Nat × Syntax))
     (ev : List (String × (String × String))) : Except String String :=
   match ev with
@@ -2855,6 +3149,7 @@ def Fe.specLin (sig : Fe.Sig) (hs : List String) (cls : List (Nat × Syntax))
         +++ ": Prop :=\n  " +++ Fe.arrows reqs
           ("Result.Holds (fun (r : " +++ Fe.nestTy (Fe.tyStr sig.ret) hts +++ ") => "
             +++ Fe.joinWith " × " enss +++ ") (\n    " +++ scope +++ ")")))
+/-- The `def f.Spec … : Prop` of a `spec f requires … ensures …` item. -/
 def Fe.specText (g : Fe.Glob) (p : List Nat) (it : Syntax) : Except String String :=
   let f := Fe.id (Fe.arg it 1);
   match Fe.findSig f g.sigs with
@@ -2892,13 +3187,15 @@ def Fe.specText (g : Fe.Glob) (p : List Nat) (it : Syntax) : Except String Strin
             +++ Fe.joinWith " × " enss +++ ") (" +++ call +++ ")")))
 
 -- ## The command macro
+/-- An item after the first pass: generated data declarations, a function to lower, or an error. -/
 inductive Fe.Item where
   | data (p : List Nat) (text : String)
   | func (p : List Nat) (it : Syntax)
   | spec (p : List Nat) (it : Syntax)
   | bad (p : List Nat) (msg : String)
+/-- Runs a front-end computation from the empty state. -/
 def Fe.run {A : Type} (m : Fe.M A) : Fe.Res A := m (Fe.St.mk 0 .nil .nil .nil .nil)
--- first pass: the declarations and the signatures (so that functions can call each other)
+/-- first pass: the declarations and the signatures (so that functions can call each other) -/
 def Fe.pass1 (bp : List Nat) : List (Nat × Syntax) → Fe.Glob → Fe.Glob × List Fe.Item
   | .nil, g => (g, .nil)
   | .cons x xs, g =>
@@ -2923,14 +3220,17 @@ def Fe.pass1 (bp : List Nat) : List (Nat × Syntax) → Fe.Glob → Fe.Glob × L
         | .err q m => let r := Fe.pass1 bp xs g; (r.1, .cons (Fe.Item.bad q m) r.2))) ▸
       ("feral_item.specI", fun _ => let r := Fe.pass1 bp xs g; (r.1, .cons (Fe.Item.spec p it) r.2)) ▸ .nil)
       (fun _ => let r := Fe.pass1 bp xs g; (r.1, .cons (Fe.Item.bad p "not an item of the supported fragment") r.2))
--- second pass: lower each function. The result: errors, and the generated items.
+/-- second pass: lower each function. The result: errors, and the generated items. -/
 structure Fe.Outp where
   errs : List Syntax
   notes : List Syntax
   srcs : List Syntax
+/-- The first element of a list, if any, as a list. -/
 def Fe.first {A : Type} : List A → List A
   | .nil => .nil
   | .cons a _ => .cons a .nil
+/-- The second pass: lowers each function. `mode` 0 is `feral`, 1 `#lower feral`
+(also shows the generated code), 2 `#unchecked feral` (borrow errors become notes). -/
 def Fe.pass2 (g : Fe.Glob) (mode : Nat) : List Fe.Item → Fe.Outp → Fe.Outp
   | .nil, o => o
   | .cons it rest, o => (match it with
@@ -2952,6 +3252,9 @@ def Fe.pass2 (g : Fe.Glob) (mode : Nat) : List Fe.Item → Fe.Outp → Fe.Outp
           | .true => Fe.pass2 g mode rest (Fe.Outp.mk o.errs (List.append o.notes softN) (List.append o.srcs (.cons (Syntax.sourceAt p text) .nil)))
           | .false => Fe.pass2 g mode rest (Fe.Outp.mk (List.append o.errs soft) (List.append o.notes (.cons (Syntax.infoAt p text) .nil))
               (List.append o.srcs (.cons (Syntax.sourceAt p text) .nil)))))))
+/-- The command macro behind `feral … end`, `#lower feral … end` and
+`#unchecked feral … end`: both passes, then the generated Wiz source (or the errors at
+their Feral source). -/
 def Fe.macro : CommandMacro := fun stx =>
   let mode : Nat := (match Fe.is "command.feral" stx, Fe.is "command.feralLower" stx with
     | .true, _ => Nat.zero

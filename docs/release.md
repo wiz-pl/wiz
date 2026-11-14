@@ -47,7 +47,7 @@ Each item says what must be true and how to check it.
 
 On a branch off the commit to tag, open one PR that:
 
-* sets the version to `X.Y.Z` in `Wiz/Version.lean`, `lakefile.toml`, `flake.nix`
+* sets the version to `X.Y.Z` in `Wiz/Version.lean`, `lakefile.lean`, `flake.nix`
   (`version = …`) and `tower/Tower/Cli.wiz` (`--version`);
 * renames CHANGELOG.md's section `[X.Y.Z] - unreleased (draft)` to
   `[X.Y.Z] - YYYY-MM-DD` and leaves an empty `[Unreleased]` above it;

@@ -47,9 +47,9 @@
               src = fs.toSource {
                 root = ./.;
                 fileset = fs.unions [
-                  ./lakefile.toml ./lake-manifest.json ./lean-toolchain
+                  ./lakefile.lean ./lake-manifest.json ./lean-toolchain
                   ./Main.lean ./Wiz.lean ./Wiz ./Grail.lean ./Grail
-                  ./runtime # wiz.c and WizRuntime.lean, which embeds it (include_str)
+                  ./runtime # the C runtime (wiz_rt.h, rt_*.inc) and WizRuntime.lean, which embeds it (include_str)
                   ./c # linked into the executables (moreLinkObjs)
                 ];
               };
@@ -107,26 +107,31 @@
               platforms = systems;
             };
           };
-          # tower, the toolchain manager (stage 26): its own small build (it doesn't
-          # import Wiz), wrapped with the programs it runs (git, tar, curl; `nix` and
-          # `lake` are the user's), and told its own path for the shims it writes.
+          # tower, the toolchain manager (stage 26): the Wiz implementation in `tower/`,
+          # built by grail (stage 26e/26h). It needs no Lean at build time; the binary
+          # links GMP (the flags below), so the closure grows by GMP and glibc only.
+          # Wrapped with the programs it runs (git, tar, curl; `nix` and `lake` are the
+          # user's), and told its own path for the shims it writes.
           tower-unwrapped = pkgs.stdenv.mkDerivation {
             pname = "tower-unwrapped";
             inherit (unwrapped) version;
             src = fs.toSource {
               root = ./.;
-              fileset = fs.unions [ ./lakefile.toml ./lake-manifest.json ./lean-toolchain ./Tower.lean ./Tower ./Wiz/Version.lean ];
+              fileset = fs.unions [ ./tower ./scripts/build-tower-wiz.sh ];
             };
-            nativeBuildInputs = [ lean ];
+            nativeBuildInputs = [ wiz ];
             buildPhase = ''
               runHook preBuild
-              export HOME=$TMPDIR LAKE_CACHE_DIR=$TMPDIR/lake-cache
-              lake build tower
+              export HOME=$TMPDIR
+              # only what tower uses: the C compiler, and GMP's headers and library (the
+              # generated C links no Boehm collector, so the closure stays GMP + glibc)
+              sh scripts/build-tower-wiz.sh tower-bin grail ${lib.escapeShellArgs [
+                "--cc" "${pkgs.stdenv.cc}/bin/cc" "--cflags" tc.cflags "--ldflags" tc.ldflags ]}
               runHook postBuild
             '';
             installPhase = ''
               runHook preInstall
-              install -Dm755 .lake/build/bin/tower $out/bin/tower
+              install -Dm755 tower-bin $out/bin/tower
               runHook postInstall
             '';
           };

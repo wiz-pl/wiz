@@ -74,8 +74,18 @@ grep -qx "git $gh_url" "$s/defaults" || bad "tower's default git is not $gh_url:
 grep -qx "releases $gh_url/releases/download" "$s/defaults" || bad "tower's default releases: $(grep '^releases ' "$s/defaults")"
 grep -qx "flake github:$repo" "$s/defaults" || bad "tower's default flake: $(grep '^flake ' "$s/defaults")"
 grep -qx "repo=$gh_url" "$here/tower-init.sh" || bad "tower-init.sh: repo is not $gh_url"
-# release.yml publishes dist/* (release-tarball.sh's name) to the release named the tag
-grep -q 'gh release create "${GITHUB_REF_NAME}" dist/\*' "$here/../.github/workflows/release.yml" ||
+# release.yml publishes dist/* (release-tarball.sh's name) to the release named the tag.
+# In a checkout `here` is <root>/scripts; release.yml runs a sparse copy at
+# <root>/.release-tools/scripts, so the workflow is one or two levels up.
+workflow=
+for d in "$here/.." "$here/../.."; do
+  if [ -f "$d/.github/workflows/release.yml" ]; then
+    workflow=$d/.github/workflows/release.yml
+    break
+  fi
+done
+[ -n "$workflow" ] || fail "release.yml not found from $here"
+grep -q 'gh release create "${GITHUB_REF_NAME}" dist/\*' "$workflow" ||
   fail "release.yml: the tag's release is not named after the tag, with dist/*"
 echo "a user's tower downloads $gh_url/releases/download/$tag/$name.tar.gz"
 

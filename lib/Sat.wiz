@@ -1,62 +1,82 @@
 import Logic
--- Certified SAT (`import Sat`): an LRAT proof checker proved sound, Boolean formulas with
--- a Tseitin translation proved sound, and the theorem that puts them together:
---
---     Sat.decide_sound : IsTrue (Sat.checkAll f nodes cert) → ∀ σ, BForm.eval σ f = .true
---
--- A SAT solver (CaDiCaL, untrusted) finds `cert`; the kernel runs the check (`refl`), so a
--- proof made this way trusts nothing new. The tactic that drives it is `sat_decide`
--- (lib/SatTactic.wiz). Design: wiz-notes/smt.md §4; docs/stages/28-solvers.md, 28b.
+/-!
+# Sat
 
--- ## Booleans
+Certified SAT (`import Sat`): an LRAT proof checker proved sound, Boolean formulas with
+a Tseitin translation proved sound, and the theorem that puts them together:
 
--- `b = .true` as a definition, so a tactic can state it (equations are opaque to `Expr`)
+    Sat.decide_sound : IsTrue (Sat.checkAll f nodes cert) → ∀ σ, BForm.eval σ f = .true
+
+and its dag version (28c: one node per distinct subterm, `Sat.Gate`/`Sat.GNode`, closed by
+`Sat.dag_sound`/`Sat.dag_eq`), which the tactic uses. A SAT solver (CaDiCaL, untrusted)
+finds `cert`; the kernel runs the check (`refl`), so a proof made this way trusts nothing
+new. The tactic that drives it is `sat_decide`
+(lib/SatTactic.wiz). Design: wiz-notes/smt.md §4; docs/stages/28-solvers.md, 28b.
+-/
+
+
+/-- `b = .true` as a definition, so a tactic can state it (equations are opaque to `Expr`) -/
 def Sat.IsTrue (b : Bool) : Prop := b = .true
+/-- `IsTrue .true`. -/
 def Sat.trivial : Sat.IsTrue .true := rfl
 
+/-- A Boolean is not both true and false. -/
 def Sat.contra : (a : Bool) → a = .true → a = .false → False
   | .true, _, h => absurd h.1
   | .false, h, _ => absurd h.1
+/-- A Boolean is true if being false is absurd (a case split on `Bool`). -/
 def Sat.byCases : (a : Bool) → (a = .false → False) → a = .true
   | .true, _ => rfl
   | .false, h => absurd (h rfl)
+/-- The left conjunct of a true `&&` is true. -/
 def Sat.and_left : (a b : Bool) → Bool.and a b = .true → a = .true
   | .true, _, _ => rfl
   | .false, _, h => absurd h.1
+/-- The right conjunct of a true `&&` is true. -/
 def Sat.and_right : (a b : Bool) → Bool.and a b = .true → b = .true
   | .true, _, h => h
   | .false, _, h => absurd h.1
+/-- `Bool.and a b` is true when `a` and `b` are. -/
 def Sat.and_intro : (a b : Bool) → a = .true → b = .true → Bool.and a b = .true
   | .true, _, _, h => h
   | .false, _, h, _ => absurd h.1
+/-- A true `||` has a true disjunct. -/
 def Sat.or_cases : (a b : Bool) → Bool.or a b = .true → Or (a = .true) (b = .true)
   | .true, _, _ => Or.inl rfl
   | .false, _, h => Or.inr h
+/-- `Bool.or a b` is true when `a` is. -/
 def Sat.or_left : (a b : Bool) → a = .true → Bool.or a b = .true
   | .true, _, _ => rfl
   | .false, _, h => absurd h.1
+/-- `Bool.or a b` is true when `b` is. -/
 def Sat.or_right : (a b : Bool) → b = .true → Bool.or a b = .true
   | .true, _, _ => rfl
   | .false, _, h => h
+/-- A false `||` has both disjuncts false (as `!(a || b)`). -/
 def Sat.or_false : (a b : Bool) → Bool.or a b = .false → Bool.and (Bool.not a) (Bool.not b) = .true
   | .true, _, h => absurd h.1
   | .false, .false, _ => rfl
   | .false, .true, h => absurd h.1
+/-- `Bool.or a .false = .true` gives `a`. -/
 def Sat.or_false_right : (a : Bool) → Bool.or a .false = .true → a = .true
   | .true, _ => rfl
   | .false, h => absurd h.1
+/-- `Bool.not a = .true` gives `a = .false`. -/
 def Sat.not_false : (a : Bool) → Bool.not a = .true → a = .false
   | .true, h => absurd h.1
   | .false, _ => rfl
 
+/-- `a ↔ b` as a Boolean (the `iff` operation). -/
 def Sat.boolEq : Bool → Bool → Bool
   | .true, b => b
   | .false, b => Bool.not b
+/-- `boolEq a b = .true` gives `a = b`. -/
 def Sat.boolEq_sound : (a b : Bool) → Sat.boolEq a b = .true → a = b
   | .true, .true, _ => rfl
   | .true, .false, h => absurd h.1
   | .false, .false, _ => rfl
   | .false, .true, h => absurd h.1
+/-- `Nat.beq m n = .true` gives `m = n`. -/
 def Sat.natBeq_sound : (m n : Nat) → Nat.beq m n = .true → m = n
   | .zero, .zero, _ => rfl
   | .zero, .succ _, h => absurd h.1
@@ -65,55 +85,66 @@ def Sat.natBeq_sound : (m n : Nat) → Nat.beq m n = .true → m = n
 
 -- ## Literals, clauses, formulas in CNF
 --
--- A literal is a variable (a number) and a polarity; an assignment is any `Nat → Bool`.
+/-- A literal is a variable (a number) and a polarity; an assignment is any `Nat → Bool`. -/
 inductive Sat.Lit where
   | mk (v : Nat) (pos : Bool)
+/-- A literal's value: `b` if positive, `Bool.not b` if negative. -/
 def Sat.polar (b : Bool) : Bool → Bool
   | .true => b
   | .false => Bool.not b
+/-- A literal's value under the assignment `τ`. -/
 def Sat.Lit.eval (τ : Nat → Bool) : Sat.Lit → Bool
   | .mk v p => Sat.polar (τ v) p
+/-- The negation of a literal (the same variable, the other polarity). -/
 def Sat.Lit.neg : Sat.Lit → Sat.Lit
   | .mk v p => .mk v (Bool.not p)
+/-- Whether two literals are the same variable with the same polarity. -/
 def Sat.Lit.beq : Sat.Lit → Sat.Lit → Bool
   | .mk v p, .mk w q => Bool.and (Nat.beq v w) (Sat.boolEq p q)
 
--- a clause holds if one of its literals does; a formula if all its clauses do
+/-- a clause holds if one of its literals does; a formula if all its clauses do -/
 def Sat.Clause.eval (τ : Nat → Bool) : List Sat.Lit → Bool
   | .nil => .false
   | .cons l ls => Bool.or (Sat.Lit.eval τ l) (Sat.Clause.eval τ ls)
+/-- A formula in CNF holds when all its clauses do. -/
 def Sat.Cnf.eval (τ : Nat → Bool) : List (List Sat.Lit) → Bool
   | .nil => .true
   | .cons c cs => Bool.and (Sat.Clause.eval τ c) (Sat.Cnf.eval τ cs)
--- a partial assignment: literals that are true
+/-- a partial assignment: literals that are true -/
 def Sat.holds (τ : Nat → Bool) : List Sat.Lit → Bool
   | .nil => .true
   | .cons l ls => Bool.and (Sat.Lit.eval τ l) (Sat.holds τ ls)
 
+/-- A negative literal that holds makes the positive one false. -/
 def Sat.polar_neg : (b p : Bool) → Sat.polar b (Bool.not p) = .true → Sat.polar b p = .false
   | .true, .true, h => absurd h.1
   | .true, .false, _ => rfl
   | .false, .true, _ => rfl
   | .false, .false, h => absurd h.1
+/-- A false positive literal makes the negative one true. -/
 def Sat.polar_neg' : (b p : Bool) → Sat.polar b p = .false → Sat.polar b (Bool.not p) = .true
   | .true, .true, h => absurd h.1
   | .true, .false, _ => rfl
   | .false, .true, _ => rfl
   | .false, .false, h => absurd h.1
+/-- A literal whose negation holds is false. -/
 def Sat.Lit.eval_neg (τ : Nat → Bool) : (l : Sat.Lit) → Sat.Lit.eval τ (Sat.Lit.neg l) = .true → Sat.Lit.eval τ l = .false
   | .mk v p, h => Sat.polar_neg (τ v) p h
+/-- A false literal's negation holds. -/
 def Sat.Lit.eval_neg' (τ : Nat → Bool) : (l : Sat.Lit) → Sat.Lit.eval τ l = .false → Sat.Lit.eval τ (Sat.Lit.neg l) = .true
   | .mk v p, h => Sat.polar_neg' (τ v) p h
+/-- Equal literals have the same value. -/
 def Sat.Lit.beq_eval (τ : Nat → Bool) : (l m : Sat.Lit) → Sat.Lit.beq l m = .true → Sat.Lit.eval τ l = Sat.Lit.eval τ m
   | .mk v p, .mk w q, h =>
     let ev : v = w := Sat.natBeq_sound v w (Sat.and_left (Nat.beq v w) (Sat.boolEq p q) h);
     let ep : p = q := Sat.boolEq_sound p q (Sat.and_right (Nat.beq v w) (Sat.boolEq p q) h);
     Eq.trans (Eq.congrArg (fun x => Sat.polar (τ x) p) ev) (Eq.congrArg (Sat.polar (τ w)) ep)
 
+/-- Whether a literal occurs in a list (a partial assignment). -/
 def Sat.mem (m : Sat.Lit) : List Sat.Lit → Bool
   | .nil => .false
   | .cons a as => Bool.or (Sat.Lit.beq m a) (Sat.mem m as)
--- a literal of a partial assignment that holds is true
+/-- a literal of a partial assignment that holds is true -/
 def Sat.holds_mem (τ : Nat → Bool) (m : Sat.Lit) : (α : List Sat.Lit) → Sat.holds τ α = .true → Sat.mem m α = .true → Sat.Lit.eval τ m = .true
   | .nil, _, h => absurd h.1
   | .cons a as, ha, hm =>
@@ -123,14 +154,16 @@ def Sat.holds_mem (τ : Nat → Bool) (m : Sat.Lit) : (α : List Sat.Lit) → Sa
 
 -- ## Reverse unit propagation
 --
--- The literals of `c` that the partial assignment `α` does not falsify.
+/-- The literals of `c` that the partial assignment `α` does not falsify. -/
 def Sat.keep (b : Bool) (l : Sat.Lit) (rest : List Sat.Lit) : List Sat.Lit := match b with
   | .true => rest
   | .false => .cons l rest
+/-- The literals of a clause that the partial assignment `α` does not falsify. -/
 def Sat.unfalsified (α : List Sat.Lit) : List Sat.Lit → List Sat.Lit
   | .nil => .nil
   | .cons l ls => Sat.keep (Sat.mem (Sat.Lit.neg l) α) l (Sat.unfalsified α ls)
 
+/-- `keep` keeps the clause true. -/
 def Sat.keep_ok (τ : Nat → Bool) (l : Sat.Lit) (ls rest : List Sat.Lit) : (b : Bool) →
     (b = .true → Sat.Lit.eval τ l = .false) →
     (Sat.Clause.eval τ ls = .true → Sat.Clause.eval τ rest = .true) →
@@ -145,7 +178,7 @@ def Sat.keep_ok (τ : Nat → Bool) (l : Sat.Lit) (ls rest : List Sat.Lit) : (b 
       (fun e => Sat.or_left (Sat.Lit.eval τ l) (Sat.Clause.eval τ rest) e)
       (fun e => Sat.or_right (Sat.Lit.eval τ l) (Sat.Clause.eval τ rest) (ih e))
 
--- if τ satisfies α and c, it satisfies what of c α leaves
+/-- if τ satisfies α and c, it satisfies what of c α leaves -/
 def Sat.unfalsified_ok (τ : Nat → Bool) (α : List Sat.Lit) (hα : Sat.holds τ α = .true) : (c : List Sat.Lit) →
     Sat.Clause.eval τ c = .true → Sat.Clause.eval τ (Sat.unfalsified α c) = .true
   | .nil, h => absurd h.1
@@ -155,62 +188,74 @@ def Sat.unfalsified_ok (τ : Nat → Bool) (α : List Sat.Lit) (hα : Sat.holds 
       (fun e => Sat.unfalsified_ok τ α hα ls e)
       h
 
--- what a hint clause says under α
+/-- what a hint clause says under α -/
 inductive Sat.Unit where
   | conflict
   | unit (l : Sat.Lit)
   | fail
+/-- What the rest of a hint clause says under `α`: a unit (`[l]`) or a failure. -/
 def Sat.classifyTail (l : Sat.Lit) : List Sat.Lit → Sat.Unit
   | .nil => .unit l
   | .cons _ _ => .fail
+/-- What a hint clause says under `α`: a conflict (empty), a unit, or a failure. -/
 def Sat.classify : List Sat.Lit → Sat.Unit
   | .nil => .conflict
   | .cons l rest => Sat.classifyTail l rest
+/-- Follow one hint's classification: a conflict ends it, a unit extends `α`. -/
 def Sat.rupNext (k : List Sat.Lit → Bool) (α : List Sat.Lit) : Sat.Unit → Bool
   | .conflict => .true
   | .unit l => k (.cons l α)
   | .fail => .false
 
--- The clause database: clauses with their ids (the newest first).
+/-- The clause database: clauses with their ids (the newest first). -/
 inductive Sat.Entry where
   | mk (id : Nat) (c : List Sat.Lit)
+/-- A clause database holds when all its clauses do. -/
 def Sat.Db.eval (τ : Nat → Bool) : List Sat.Entry → Bool
   | .nil => .true
   | .cons (.mk _ c) es => Bool.and (Sat.Clause.eval τ c) (Sat.Db.eval τ es)
+/-- `c` if `b`, else `rest`. -/
 def Sat.pick (b : Bool) (c : List Sat.Lit) (rest : Option (List Sat.Lit)) : Option (List Sat.Lit) := match b with
   | .true => .some c
   | .false => rest
+/-- The clause with id `h` in the database. -/
 def Sat.lookup (h : Nat) : List Sat.Entry → Option (List Sat.Lit)
   | .nil => .none
   | .cons (.mk i c) es => Sat.pick (Nat.beq h i) c (Sat.lookup h es)
+/-- An optional clause holds (`none` holds vacuously). -/
 def Sat.optEval (τ : Nat → Bool) : Option (List Sat.Lit) → Bool
   | .none => .true
   | .some c => Sat.Clause.eval τ c
+/-- `pick` keeps a clause true. -/
 def Sat.pick_ok (τ : Nat → Bool) (c : List Sat.Lit) (rest : Option (List Sat.Lit)) : (b : Bool) →
     Sat.Clause.eval τ c = .true → Sat.optEval τ rest = .true → Sat.optEval τ (Sat.pick b c rest) = .true
   | .true, hc, _ => hc
   | .false, _, hr => hr
+/-- A looked-up clause holds wherever the database does. -/
 def Sat.lookup_ok (τ : Nat → Bool) (h : Nat) : (db : List Sat.Entry) → Sat.Db.eval τ db = .true → Sat.optEval τ (Sat.lookup h db) = .true
   | .nil, _ => rfl
   | .cons (.mk i c) es, hdb =>
     Sat.pick_ok τ c (Sat.lookup h es) (Nat.beq h i)
       (Sat.and_left (Sat.Clause.eval τ c) (Sat.Db.eval τ es) hdb)
       (Sat.lookup_ok τ h es (Sat.and_right (Sat.Clause.eval τ c) (Sat.Db.eval τ es) hdb))
+/-- Apply `k` to the clause, if there is one. -/
 def Sat.withClause (k : List Sat.Lit → Bool) : Option (List Sat.Lit) → Bool
   | .none => .false
   | .some c => k c
+/-- `withClause` preserves a contradiction. -/
 def Sat.withClause_ok (τ : Nat → Bool) (k : List Sat.Lit → Bool) : (o : Option (List Sat.Lit)) →
     Sat.optEval τ o = .true → ((c : List Sat.Lit) → Sat.Clause.eval τ c = .true → k c = .true → False) →
     Sat.withClause k o = .true → False
   | .none, _, _, h => absurd h.1
   | .some c, ho, hk, h => hk c ho h
 
--- Follow the hints: each must be unit (its literal is added to α) or, the last, a conflict.
+/-- Follow the hints: each must be unit (its literal is added to α) or, the last, a conflict. -/
 def Sat.rupGo (db : List Sat.Entry) : List Nat → List Sat.Lit → Bool
   | .nil, _ => .false
   | .cons h hs, α =>
     Sat.withClause (fun c => Sat.rupNext (fun β => Sat.rupGo db hs β) α (Sat.classify (Sat.unfalsified α c))) (Sat.lookup h db)
 
+/-- A unit hint clause that holds makes the extended assignment fail the rest. -/
 def Sat.rupTail_ok (τ : Nat → Bool) (k : List Sat.Lit → Bool) (α : List Sat.Lit) (hα : Sat.holds τ α = .true)
     (hk : (β : List Sat.Lit) → Sat.holds τ β = .true → k β = .true → False) (l : Sat.Lit) : (rest : List Sat.Lit) →
     Sat.Clause.eval τ (.cons l rest) = .true → Sat.rupNext k α (Sat.classifyTail l rest) = .true → False
@@ -218,12 +263,15 @@ def Sat.rupTail_ok (τ : Nat → Bool) (k : List Sat.Lit → Bool) (α : List Sa
     let hl : Sat.Lit.eval τ l = .true := Sat.or_false_right (Sat.Lit.eval τ l) hr;
     hk (.cons l α) (Sat.and_intro (Sat.Lit.eval τ l) (Sat.holds τ α) hl hα) h
   | .cons _ _, _, h => absurd h.1
+/-- `rupNext` preserves a contradiction. -/
 def Sat.rupNext_ok (τ : Nat → Bool) (k : List Sat.Lit → Bool) (α : List Sat.Lit) (hα : Sat.holds τ α = .true)
     (hk : (β : List Sat.Lit) → Sat.holds τ β = .true → k β = .true → False) : (r : List Sat.Lit) →
     Sat.Clause.eval τ r = .true → Sat.rupNext k α (Sat.classify r) = .true → False
   | .nil, hr, _ => absurd hr.1
   | .cons l rest, hr, h => Sat.rupTail_ok τ k α hα hk l rest hr h
 
+/-- `rupGo` preserves a contradiction: a conflict cannot be reached from a true
+database. -/
 def Sat.rupGo_ok (τ : Nat → Bool) (db : List Sat.Entry) (hdb : Sat.Db.eval τ db = .true) : (hs : List Nat) → (α : List Sat.Lit) →
     Sat.holds τ α = .true → Sat.rupGo db hs α = .true → False
   | .nil, _, _, h => absurd h.1
@@ -235,12 +283,14 @@ def Sat.rupGo_ok (τ : Nat → Bool) (db : List Sat.Entry) (hdb : Sat.Db.eval τ
         (Sat.unfalsified α c) (Sat.unfalsified_ok τ α hα c hc) hn)
       hg
 
--- RUP: assuming every literal of `c` false, the hints propagate to a conflict
+/-- RUP: assuming every literal of `c` false, the hints propagate to a conflict -/
 def Sat.negAll : List Sat.Lit → List Sat.Lit
   | .nil => .nil
   | .cons l ls => .cons (Sat.Lit.neg l) (Sat.negAll ls)
+/-- RUP: assuming every literal of `c` false, the hints propagate to a conflict. -/
 def Sat.rup (db : List Sat.Entry) (c : List Sat.Lit) (hints : List Nat) : Bool := Sat.rupGo db hints (Sat.negAll c)
 
+/-- The negation of a false clause holds: every literal of the clause is false. -/
 def Sat.negAll_ok (τ : Nat → Bool) : (c : List Sat.Lit) → Sat.Clause.eval τ c = .false → Sat.holds τ (Sat.negAll c) = .true
   | .nil, _ => rfl
   | .cons l ls, h =>
@@ -249,32 +299,37 @@ def Sat.negAll_ok (τ : Nat → Bool) : (c : List Sat.Lit) → Sat.Clause.eval �
     let hls : Sat.Clause.eval τ ls = .false := Sat.not_false (Sat.Clause.eval τ ls) (Sat.and_right (Bool.not (Sat.Lit.eval τ l)) (Bool.not (Sat.Clause.eval τ ls)) both);
     Sat.and_intro (Sat.Lit.eval τ (Sat.Lit.neg l)) (Sat.holds τ (Sat.negAll ls)) (Sat.Lit.eval_neg' τ l hl) (Sat.negAll_ok τ ls hls)
 
--- a clause that passes the RUP check holds wherever the database does
+/-- a clause that passes the RUP check holds wherever the database does -/
 def Sat.rup_ok (τ : Nat → Bool) (db : List Sat.Entry) (c : List Sat.Lit) (hints : List Nat)
     (hdb : Sat.Db.eval τ db = .true) (h : Sat.rup db c hints = .true) : Sat.Clause.eval τ c = .true :=
   Sat.byCases (Sat.Clause.eval τ c) (fun e => Sat.rupGo_ok τ db hdb hints (Sat.negAll c) (Sat.negAll_ok τ c e) h)
 
 -- ## LRAT proofs
 --
--- `add id c hints`: clause `c`, checked by RUP along `hints`; `del ids` is accepted and
--- ignored (keeping a clause is always sound; it only makes lookups slower).
+/-- `add id c hints`: clause `c`, checked by RUP along `hints`; `del ids` is accepted and
+ignored (keeping a clause is always sound; it only makes lookups slower). -/
 inductive Sat.Step where
   | add (id : Nat) (c : List Sat.Lit) (hints : List Nat)
   | del (ids : List Nat)
+/-- Whether a clause is empty. -/
 def Sat.isNil : List Sat.Lit → Bool
   | .nil => .true
   | .cons _ _ => .false
+/-- One proof step: an addition checked by RUP (done when it is the empty clause), or
+a deletion, which is ignored. -/
 def Sat.stepCheck (k : List Sat.Entry → Bool) (db : List Sat.Entry) : Sat.Step → Bool
   | .add id c hints => Bool.and (Sat.rup db c hints) (Bool.or (Sat.isNil c) (k (.cons (.mk id c) db)))
   | .del _ => k db
--- the proof derives the empty clause from `db`
+/-- the proof derives the empty clause from `db` -/
 def Sat.check : List Sat.Step → List Sat.Entry → Bool
   | .nil, _ => .false
   | .cons s ss, db => Sat.stepCheck (fun db' => Sat.check ss db') db s
 
+/-- An empty clause cannot hold. -/
 def Sat.isNil_ok (τ : Nat → Bool) : (c : List Sat.Lit) → Sat.isNil c = .true → Sat.Clause.eval τ c = .true → False
   | .nil, _, h => absurd h.1
   | .cons _ _, h, _ => absurd h.1
+/-- A step that checks cannot be reached from a true database. -/
 def Sat.stepCheck_ok (τ : Nat → Bool) (k : List Sat.Entry → Bool) (db : List Sat.Entry) (hdb : Sat.Db.eval τ db = .true)
     (hk : (db' : List Sat.Entry) → Sat.Db.eval τ db' = .true → k db' = .true → False) : (s : Sat.Step) →
     Sat.stepCheck k db s = .true → False
@@ -285,16 +340,18 @@ def Sat.stepCheck_ok (τ : Nat → Bool) (k : List Sat.Entry → Bool) (db : Lis
       (fun e => Sat.isNil_ok τ c e hc)
       (fun e => hk (.cons (.mk id c) db) (Sat.and_intro (Sat.Clause.eval τ c) (Sat.Db.eval τ db) hc hdb) e)
   | .del _, h => hk db hdb h
+/-- A proof that checks derives a contradiction from a true database. -/
 def Sat.check_ok (τ : Nat → Bool) : (ps : List Sat.Step) → (db : List Sat.Entry) → Sat.Db.eval τ db = .true → Sat.check ps db = .true → False
   | .nil, _, _, h => absurd h.1
   | .cons s ss, db, hdb, h =>
     Sat.stepCheck_ok τ (fun db' => Sat.check ss db') db hdb (fun db' h' hc => Sat.check_ok τ ss db' h' hc) s h
 
--- the input clauses, numbered from `i` (DIMACS numbers them from 1, newest last; the
--- database keeps the newest first, so the list is reversed)
+/-- the input clauses, numbered from `i` (DIMACS numbers them from 1, newest last; the
+database keeps the newest first, so the list is reversed) -/
 def Sat.initDb : Nat → List (List Sat.Lit) → List Sat.Entry → List Sat.Entry
   | _, .nil, acc => acc
   | i, .cons c cs, acc => Sat.initDb (Nat.succ i) cs (.cons (.mk i c) acc)
+/-- The initial database holds wherever the CNF does. -/
 def Sat.initDb_ok (τ : Nat → Bool) : (i : Nat) → (cs : List (List Sat.Lit)) → (acc : List Sat.Entry) →
     Sat.Cnf.eval τ cs = .true → Sat.Db.eval τ acc = .true → Sat.Db.eval τ (Sat.initDb i cs acc) = .true
   | _, .nil, _, _, ha => ha
@@ -303,18 +360,19 @@ def Sat.initDb_ok (τ : Nat → Bool) : (i : Nat) → (cs : List (List Sat.Lit))
       (Sat.and_right (Sat.Clause.eval τ c) (Sat.Cnf.eval τ cs) h)
       (Sat.and_intro (Sat.Clause.eval τ c) (Sat.Db.eval τ acc) (Sat.and_left (Sat.Clause.eval τ c) (Sat.Cnf.eval τ cs) h) ha)
 
--- **The checker is sound**: a formula with an LRAT refutation has no model.
+/-- **The checker is sound**: a formula with an LRAT refutation has no model. -/
 def Sat.lratCheck (cnf : List (List Sat.Lit)) (proof : List Sat.Step) : Bool :=
   Sat.check proof (Sat.initDb 1 cnf .nil)
+/-- **The checker is sound**: a formula with an LRAT refutation has no model. -/
 def Sat.lratCheck_sound (cnf : List (List Sat.Lit)) (proof : List Sat.Step) (h : Sat.lratCheck cnf proof = .true)
     (τ : Nat → Bool) (hτ : Sat.Cnf.eval τ cnf = .true) : False :=
   Sat.check_ok τ proof (Sat.initDb 1 cnf .nil) (Sat.initDb_ok τ 1 cnf .nil hτ rfl) h
 
 -- ## Boolean formulas and the Tseitin translation
 --
--- `BForm` is a deep embedding of Bool expressions over variables `var j` (atoms of the
--- goal: variables, or any Bool term the tactic does not look into). A tactic reflects
--- `e = .true` as `BForm.eval σ f = .true`, which the kernel checks by conversion.
+/-- `BForm` is a deep embedding of Bool expressions over variables `var j` (atoms of the
+goal: variables, or any Bool term the tactic does not look into). A tactic reflects
+`e = .true` as `BForm.eval σ f = .true`, which the kernel checks by conversion. -/
 inductive Sat.BForm where
   | var (j : Nat)
   | const (b : Bool)
@@ -323,6 +381,7 @@ inductive Sat.BForm where
   | or (a b : Sat.BForm)
   | xor (a b : Sat.BForm)
   | iff (a b : Sat.BForm)
+/-- A formula's value under the assignment `σ`. -/
 def Sat.BForm.eval (σ : Nat → Bool) : Sat.BForm → Bool
   | .var j => σ j
   | .const b => b
@@ -331,6 +390,7 @@ def Sat.BForm.eval (σ : Nat → Bool) : Sat.BForm → Bool
   | .or a b => Bool.or (Sat.BForm.eval σ a) (Sat.BForm.eval σ b)
   | .xor a b => Bool.xor (Sat.BForm.eval σ a) (Sat.BForm.eval σ b)
   | .iff a b => Sat.boolEq (Sat.BForm.eval σ a) (Sat.BForm.eval σ b)
+/-- Whether two formulas are the same. -/
 def Sat.BForm.beq : Sat.BForm → Sat.BForm → Bool
   | .var i, .var j => Nat.beq i j
   | .const b, .const c => Sat.boolEq b c
@@ -341,8 +401,10 @@ def Sat.BForm.beq : Sat.BForm → Sat.BForm → Bool
   | .iff a b, .iff c d => Bool.and (Sat.BForm.beq a c) (Sat.BForm.beq b d)
   | _, _ => .false
 
+/-- Congruence for a two-argument operation. -/
 def Sat.congr2 (f : Bool → Bool → Bool) {a b c d : Bool} (e₁ : a = c) (e₂ : b = d) : f a b = f c d :=
   Eq.trans (Eq.congrArg (fun x => f x b) e₁) (Eq.congrArg (f c) e₂)
+/-- Equal formulas have the same value. -/
 def Sat.BForm.beq_eval (σ : Nat → Bool) : (f g : Sat.BForm) → Sat.BForm.beq f g = .true → Sat.BForm.eval σ f = Sat.BForm.eval σ g
   | .var i, .var j, h => Eq.congrArg σ (Sat.natBeq_sound i j h)
   | .const b, .const c, h => Sat.boolEq_sound b c h
@@ -361,22 +423,26 @@ def Sat.BForm.beq_eval (σ : Nat → Bool) : (f g : Sat.BForm) → Sat.BForm.beq
       (Sat.BForm.beq_eval σ b d (Sat.and_right (Sat.BForm.beq a c) (Sat.BForm.beq b d) h))
   | _, _, h => absurd h.1
 
--- A circuit: one node per distinct subformula, `mk id t a b` (`a`, `b`: the nodes of
--- `t`'s operands, when it has them). A node's variable stands for its subformula, so the
--- assignment that satisfies the clauses is just "evaluate the subformula" (no fresh-name
--- bookkeeping in the proof): `τ v := eval σ (findTree v nodes)`.
+/-- A circuit: one node per distinct subformula, `mk id t a b` (`a`, `b`: the nodes of
+`t`'s operands, when it has them). A node's variable stands for its subformula, so the
+assignment that satisfies the clauses is just "evaluate the subformula" (no fresh-name
+bookkeeping in the proof): `τ v := eval σ (findTree v nodes)`. -/
 inductive Sat.Node where
   | mk (id : Nat) (t : Sat.BForm) (a b : Nat)
+/-- `t` if `b`, else `rest`. -/
 def Sat.treeOr (b : Bool) (t : Sat.BForm) (rest : Sat.BForm) : Sat.BForm := match b with
   | .true => t
   | .false => rest
+/-- The subformula that node `v` stands for. -/
 def Sat.findTree (v : Nat) : List Sat.Node → Sat.BForm
   | .nil => .const .false
   | .cons (.mk i t _ _) ns => Sat.treeOr (Nat.beq v i) t (Sat.findTree v ns)
 
--- the clauses of one gate, `v ↔ op a b`
+/-- the clauses of one gate, `v ↔ op a b` -/
 def Sat.pos (v : Nat) : Sat.Lit := .mk v .true
+/-- The negative literal of a variable. -/
 def Sat.ngt (v : Nat) : Sat.Lit := .mk v .false
+/-- The clauses of one gate, `v ↔ op a b`. -/
 def Sat.gateCnf (v a b : Nat) : Sat.BForm → List (List Sat.Lit)
   | .var _ => []
   | .const c => [[Sat.Lit.mk v c]]
@@ -388,23 +454,27 @@ def Sat.gateCnf (v a b : Nat) : Sat.BForm → List (List Sat.Lit)
   | .iff _ _ => [[Sat.ngt v, Sat.ngt a, Sat.pos b], [Sat.ngt v, Sat.pos a, Sat.ngt b],
                  [Sat.pos v, Sat.pos a, Sat.pos b], [Sat.pos v, Sat.ngt a, Sat.ngt b]]
 
--- Each gate's clauses hold when the node's value is the operation on its operands':
--- truth tables, over a three-variable assignment (the kernel converts it to any other).
+/-- Each gate's clauses hold when the node's value is the operation on its operands':
+truth tables, over a three-variable assignment (the kernel converts it to any other). -/
 def Sat.env3 (z x y : Bool) : Nat → Bool
   | .zero => z
   | .succ .zero => x
   | .succ (.succ _) => y
+/-- The clauses of `t` at the values `z`, `x`, `y` of its variables (a truth table). -/
 def Sat.G (t : Sat.BForm) (z x y : Bool) : Bool := Sat.Cnf.eval (Sat.env3 z x y) (Sat.gateCnf 0 1 2 t)
+/-- The const gate's truth table. -/
 def Sat.gate_const : (c z : Bool) → z = c → Sat.G (.const c) z .false .false = .true
   | .true, .true, _ => rfl
   | .false, .false, _ => rfl
   | .true, .false, e => absurd e.1
   | .false, .true, e => absurd e.1
+/-- The not gate's truth table. -/
 def Sat.gate_not (A : Sat.BForm) : (z x : Bool) → z = Bool.not x → Sat.G (.not A) z x .false = .true
   | .true, .false, _ => rfl
   | .false, .true, _ => rfl
   | .true, .true, e => absurd e.1
   | .false, .false, e => absurd e.1
+/-- The and gate's truth table. -/
 def Sat.gate_and (A B : Sat.BForm) : (z x y : Bool) → z = Bool.and x y → Sat.G (.and A B) z x y = .true
   | .true, .true, .true, _ => rfl
   | .false, .true, .false, _ => rfl
@@ -414,6 +484,7 @@ def Sat.gate_and (A B : Sat.BForm) : (z x y : Bool) → z = Bool.and x y → Sat
   | .true, .true, .false, e => absurd e.1
   | .true, .false, .true, e => absurd e.1
   | .true, .false, .false, e => absurd e.1
+/-- The or gate's truth table. -/
 def Sat.gate_or (A B : Sat.BForm) : (z x y : Bool) → z = Bool.or x y → Sat.G (.or A B) z x y = .true
   | .true, .true, .true, _ => rfl
   | .true, .true, .false, _ => rfl
@@ -423,6 +494,7 @@ def Sat.gate_or (A B : Sat.BForm) : (z x y : Bool) → z = Bool.or x y → Sat.G
   | .false, .true, .false, e => absurd e.1
   | .false, .false, .true, e => absurd e.1
   | .true, .false, .false, e => absurd e.1
+/-- The xor gate's truth table. -/
 def Sat.gate_xor (A B : Sat.BForm) : (z x y : Bool) → z = Bool.xor x y → Sat.G (.xor A B) z x y = .true
   | .false, .true, .true, _ => rfl
   | .true, .true, .false, _ => rfl
@@ -432,6 +504,7 @@ def Sat.gate_xor (A B : Sat.BForm) : (z x y : Bool) → z = Bool.xor x y → Sat
   | .false, .true, .false, e => absurd e.1
   | .false, .false, .true, e => absurd e.1
   | .true, .false, .false, e => absurd e.1
+/-- The iff gate's truth table. -/
 def Sat.gate_iff (A B : Sat.BForm) : (z x y : Bool) → z = Sat.boolEq x y → Sat.G (.iff A B) z x y = .true
   | .true, .true, .true, _ => rfl
   | .false, .true, .false, _ => rfl
@@ -442,9 +515,10 @@ def Sat.gate_iff (A B : Sat.BForm) : (z x y : Bool) → z = Sat.boolEq x y → S
   | .true, .false, .true, e => absurd e.1
   | .false, .false, .false, e => absurd e.1
 
--- The well-formedness of a node, checked by evaluation: its id and its operands' ids
--- name the subformulas it says they do.
+/-- The well-formedness of a node, checked by evaluation: its id and its operands' ids
+name the subformulas it says they do. -/
 def Sat.same (nodes : List Sat.Node) (v : Nat) (t : Sat.BForm) : Bool := Sat.BForm.beq (Sat.findTree v nodes) t
+/-- Whether a node's operand ids name the operands of its subformula. -/
 def Sat.argsOk (nodes : List Sat.Node) (a b : Nat) : Sat.BForm → Bool
   | .var _ => .true
   | .const _ => .true
@@ -453,13 +527,16 @@ def Sat.argsOk (nodes : List Sat.Node) (a b : Nat) : Sat.BForm → Bool
   | .or x y => Bool.and (Sat.same nodes a x) (Sat.same nodes b y)
   | .xor x y => Bool.and (Sat.same nodes a x) (Sat.same nodes b y)
   | .iff x y => Bool.and (Sat.same nodes a x) (Sat.same nodes b y)
+/-- Whether every node's id names its subformula and its operands do. -/
 def Sat.nodesOk (nodes : List Sat.Node) : List Sat.Node → Bool
   | .nil => .true
   | .cons (.mk v t a b) ns => Bool.and (Bool.and (Sat.same nodes v t) (Sat.argsOk nodes a b t)) (Sat.nodesOk nodes ns)
+/-- The clauses of every node of the circuit. -/
 def Sat.circuitCnf : List Sat.Node → List (List Sat.Lit)
   | .nil => []
   | .cons (.mk v t a b) ns => List.append (Sat.gateCnf v a b t) (Sat.circuitCnf ns)
 
+/-- The clauses of a concatenation hold when both parts do. -/
 def Sat.Cnf.append_ok (τ : Nat → Bool) : (xs ys : List (List Sat.Lit)) →
     Sat.Cnf.eval τ xs = .true → Sat.Cnf.eval τ ys = .true → Sat.Cnf.eval τ (List.append xs ys) = .true
   | .nil, _, _, hy => hy
@@ -468,12 +545,14 @@ def Sat.Cnf.append_ok (τ : Nat → Bool) : (xs ys : List (List Sat.Lit)) →
       (Sat.and_left (Sat.Clause.eval τ c) (Sat.Cnf.eval τ cs) hx)
       (Sat.Cnf.append_ok τ cs ys (Sat.and_right (Sat.Clause.eval τ c) (Sat.Cnf.eval τ cs) hx) hy)
 
--- the value of node `v`
+/-- the value of node `v` -/
 def Sat.val (σ : Nat → Bool) (nodes : List Sat.Node) (v : Nat) : Bool := Sat.BForm.eval σ (Sat.findTree v nodes)
+/-- A node's value is its subformula's value. -/
 def Sat.same_ok (σ : Nat → Bool) (nodes : List Sat.Node) (v : Nat) (t : Sat.BForm) (h : Sat.same nodes v t = .true) :
     Sat.val σ nodes v = Sat.BForm.eval σ t :=
   Sat.BForm.beq_eval σ (Sat.findTree v nodes) t h
 
+/-- A gate's clauses hold under the circuit's assignment. -/
 def Sat.gate_ok (σ : Nat → Bool) (nodes : List Sat.Node) (v a b : Nat) : (t : Sat.BForm) →
     Sat.same nodes v t = .true → Sat.argsOk nodes a b t = .true →
     Sat.Cnf.eval (Sat.val σ nodes) (Sat.gateCnf v a b t) = .true
@@ -503,6 +582,7 @@ def Sat.gate_ok (σ : Nat → Bool) (nodes : List Sat.Node) (v a b : Nat) : (t :
         (Eq.symm (Sat.same_ok σ nodes a x (Sat.and_left (Sat.same nodes a x) (Sat.same nodes b y) ha)))
         (Eq.symm (Sat.same_ok σ nodes b y (Sat.and_right (Sat.same nodes a x) (Sat.same nodes b y) ha)))))
 
+/-- Every node's clauses hold under the circuit's assignment. -/
 def Sat.circuit_ok (σ : Nat → Bool) (nodes : List Sat.Node) : (ns : List Sat.Node) →
     Sat.nodesOk nodes ns = .true → Sat.Cnf.eval (Sat.val σ nodes) (Sat.circuitCnf ns) = .true
   | .nil, _ => rfl
@@ -516,16 +596,20 @@ def Sat.circuit_ok (σ : Nat → Bool) (nodes : List Sat.Node) : (ns : List Sat.
 
 -- ## Deciding a formula
 --
--- The CNF asserts the circuit and the *negation* of its output `out` (clause 1); an LRAT
--- refutation of it shows the output is true under every assignment.
+/-- The CNF asserts the circuit and the *negation* of its output `out` (clause 1); an LRAT
+refutation of it shows the output is true under every assignment. -/
 def Sat.fullCnf (nodes : List Sat.Node) (out : Nat) : List (List Sat.Lit) :=
   .cons [Sat.ngt out] (Sat.circuitCnf nodes)
+/-- The certificate: the circuit is well formed, its output is the formula, and the CNF
+with the negated output has an LRAT refutation. -/
 def Sat.checkAll (f : Sat.BForm) (nodes : List Sat.Node) (out : Nat) (proof : List Sat.Step) : Bool :=
   Bool.and (Bool.and (Sat.nodesOk nodes nodes) (Sat.same nodes out f)) (Sat.lratCheck (Sat.fullCnf nodes out) proof)
 
+/-- The clause `[¬out]` holds when `out` is false. -/
 def Sat.unitFalse : (z : Bool) → z = .false → Bool.and (Bool.or (Sat.polar z .false) .false) .true = .true
   | .false, _ => rfl
   | .true, e => absurd e.1
+/-- **The decision is sound**: a checked certificate makes `f` true under every assignment. -/
 def Sat.decide_sound (f : Sat.BForm) (nodes : List Sat.Node) (out : Nat) (proof : List Sat.Step)
     (h : Sat.IsTrue (Sat.checkAll f nodes out proof)) (σ : Nat → Bool) : Sat.BForm.eval σ f = .true :=
   let h₁ := Sat.and_left (Bool.and (Sat.nodesOk nodes nodes) (Sat.same nodes out f)) (Sat.lratCheck (Sat.fullCnf nodes out) proof) h;
@@ -540,12 +624,12 @@ def Sat.decide_sound (f : Sat.BForm) (nodes : List Sat.Node) (out : Nat) (proof 
       (Sat.and_intro (Bool.or (Sat.polar (τ out) .false) .false) (Sat.Cnf.eval τ (Sat.circuitCnf nodes))
         (Sat.and_left (Bool.or (Sat.polar (τ out) .false) .false) .true (Sat.unitFalse (τ out) hout)) hc))
 
--- An equation of Booleans, decided as `iff`.
+/-- An equation of Booleans, decided as `iff`. -/
 def Sat.decide_eq (a b : Sat.BForm) (nodes : List Sat.Node) (out : Nat) (proof : List Sat.Step)
     (h : Sat.IsTrue (Sat.checkAll (.iff a b) nodes out proof)) (σ : Nat → Bool) : Sat.BForm.eval σ a = Sat.BForm.eval σ b :=
   Sat.boolEq_sound (Sat.BForm.eval σ a) (Sat.BForm.eval σ b) (Sat.decide_sound (.iff a b) nodes out proof h σ)
 
--- the atoms of a goal, as an assignment
+/-- the atoms of a goal, as an assignment -/
 def Sat.envOf : List Bool → Nat → Bool
   | .nil, _ => .false
   | .cons b _, .zero => b
@@ -560,7 +644,9 @@ def Sat.envOf : List Bool → Nat → Bool
 -- checked by the kernel, node by node, by conversion (`Sat.allHold`, one `refl` each:
 -- the subterm and its operands are compared folded, so the check is linear in the size
 -- of the goal as written). The Tseitin clauses then hold under `σ` itself.
+/-- `Type`. -/
 def Sat.Env : Type := Nat → Bool
+/-- A gate of the dag: an input, a constant, or an operation on operand node numbers. -/
 inductive Sat.Gate where
   | inp
   | const (b : Bool)
@@ -569,9 +655,12 @@ inductive Sat.Gate where
   | or (a b : Nat)
   | xor (a b : Nat)
   | iff (a b : Nat)
+/-- A node of the dag: its number and its gate. -/
 inductive Sat.GNode where
   | mk (v : Nat) (g : Sat.Gate)
 
+/-- Whether a gate holds under `σ`: an input always does, a constant gate when its value is
+its constant, an operation when its operands' values give it. -/
 def Sat.gateHolds (σ : Nat → Bool) (v : Nat) : Sat.Gate → Prop
   | .inp => True
   | .const c => σ v = c
@@ -580,17 +669,23 @@ def Sat.gateHolds (σ : Nat → Bool) (v : Nat) : Sat.Gate → Prop
   | .or a b => σ v = Bool.or (σ a) (σ b)
   | .xor a b => σ v = Bool.xor (σ a) (σ b)
   | .iff a b => σ v = Sat.boolEq (σ a) (σ b)
+/-- Whether every gate of the nodes holds under `σ`. -/
 def Sat.allHold (σ : Nat → Bool) : List Sat.GNode → Prop
   | .nil => True
   | .cons (.mk v g) ns => And (Sat.gateHolds σ v g) (Sat.allHold σ ns)
 -- the proof, node by node (a tactic builds it)
+/-- `Sat.allHold σ .nil`. -/
 def Sat.holdsNil (σ : Nat → Bool) : Sat.allHold σ .nil := True.intro
+/-- `Sat.allHold σ (.cons (.mk v g) ns)`. -/
 def Sat.holdsCons (σ : Nat → Bool) (v : Nat) (g : Sat.Gate) (ns : List Sat.GNode)
     (h : Sat.gateHolds σ v g) (t : Sat.allHold σ ns) : Sat.allHold σ (.cons (.mk v g) ns) := (h, t)
+/-- `b = b`. -/
 def Sat.eqRefl (b : Bool) : b = b := rfl
 
 -- the clauses of a gate (those of the tree's gates, which have the same shape)
+/-- `Sat.BForm`. -/
 def Sat.K : Sat.BForm := .const .true
+/-- A gate's clauses (its truth table, for the dag's CNF). -/
 def Sat.gCnf (v : Nat) : Sat.Gate → List (List Sat.Lit)
   | .inp => []
   | .const c => Sat.gateCnf v 0 0 (.const c)
@@ -599,12 +694,16 @@ def Sat.gCnf (v : Nat) : Sat.Gate → List (List Sat.Lit)
   | .or a b => Sat.gateCnf v a b (.or Sat.K Sat.K)
   | .xor a b => Sat.gateCnf v a b (.xor Sat.K Sat.K)
   | .iff a b => Sat.gateCnf v a b (.iff Sat.K Sat.K)
+/-- The clauses of every node of the dag. -/
 def Sat.dagCnf : List Sat.GNode → List (List Sat.Lit)
   | .nil => []
   | .cons (.mk v g) ns => List.append (Sat.gCnf v g) (Sat.dagCnf ns)
+/-- `List (List Sat.Lit)`. -/
 def Sat.dagFull (nodes : List Sat.GNode) (out : Nat) : List (List Sat.Lit) :=
   .cons [Sat.ngt out] (Sat.dagCnf nodes)
 
+/-- `(g : Sat.Gate) → Sat.gateHolds σ v g → Sat.Cnf.eval σ (Sat.gCnf v g) = .true | .inp, _
+=> rfl`. -/
 def Sat.gNode_ok (σ : Nat → Bool) (v : Nat) : (g : Sat.Gate) → Sat.gateHolds σ v g → Sat.Cnf.eval σ (Sat.gCnf v g) = .true
   | .inp, _ => rfl
   | .const c, h => Sat.gate_const c (σ v) h
@@ -613,6 +712,8 @@ def Sat.gNode_ok (σ : Nat → Bool) (v : Nat) : (g : Sat.Gate) → Sat.gateHold
   | .or a b, h => Sat.gate_or Sat.K Sat.K (σ v) (σ a) (σ b) h
   | .xor a b, h => Sat.gate_xor Sat.K Sat.K (σ v) (σ a) (σ b) h
   | .iff a b, h => Sat.gate_iff Sat.K Sat.K (σ v) (σ a) (σ b) h
+/-- `(ns : List Sat.GNode) → Sat.allHold σ ns → Sat.Cnf.eval σ (Sat.dagCnf ns) = .true |
+.nil, _ => rfl`. -/
 def Sat.dag_ok (σ : Nat → Bool) : (ns : List Sat.GNode) → Sat.allHold σ ns → Sat.Cnf.eval σ (Sat.dagCnf ns) = .true
   | .nil, _ => rfl
   | .cons (.mk v g) ns, h =>
@@ -620,6 +721,7 @@ def Sat.dag_ok (σ : Nat → Bool) : (ns : List Sat.GNode) → Sat.allHold σ ns
 
 -- **Deciding a circuit**: an LRAT refutation of its clauses and of `¬ out` shows `σ out`
 -- for every `σ` under which the gates hold.
+/-- `σ out = .true`. -/
 def Sat.dag_sound (nodes : List Sat.GNode) (out : Nat) (proof : List Sat.Step)
     (h : Sat.IsTrue (Sat.lratCheck (Sat.dagFull nodes out) proof)) (σ : Sat.Env) (hn : Sat.allHold σ nodes) :
     σ out = .true :=
@@ -629,6 +731,7 @@ def Sat.dag_sound (nodes : List Sat.GNode) (out : Nat) (proof : List Sat.Step)
         (Sat.and_left (Bool.or (Sat.polar (σ out) .false) .false) .true (Sat.unitFalse (σ out) e))
         (Sat.dag_ok σ nodes hn)))
 -- an equation, as the node `out` that is its `iff`
+/-- `a = b`. -/
 def Sat.dag_eq (nodes : List Sat.GNode) (out : Nat) (proof : List Sat.Step)
     (h : Sat.IsTrue (Sat.lratCheck (Sat.dagFull nodes out) proof)) (σ : Sat.Env) (hn : Sat.allHold σ nodes)
     (a b : Bool) (e : σ out = Sat.boolEq a b) : a = b :=

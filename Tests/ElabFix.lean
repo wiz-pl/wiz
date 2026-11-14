@@ -133,6 +133,7 @@ def protoLike : String :=
 
 def group : Group where
   name := "elabfix"
+  parallel := true
   exercise := "elaborator bugs"
   cases := [
     { name := "x - 55296 with x stuck doesn't unfold the numeral (memory bound)", run := fun _ =>
@@ -762,8 +763,8 @@ def group : Group where
         let bad := "def bad : (List.nil : List Nat) = List.cons 0 List.nil := "
         for src in ["import BadMap\nimport M\n" ++ bad ++ "lem 0\n", "import BadMap\nimport N\n" ++ bad ++ "lem2 0\n",
                     "import N\nimport BadMap\n" ++ bad ++ "lem2 0\n", "import M\nimport BadMap\n" ++ bad ++ "lem 0\n"] do
-          let cold := (← Cache.elaborateCached cache src init 0).1
-          let warm := (← Cache.elaborateCached cache src init 0).1
+          let cold := (← Cache.elaborateCached (some cache) [] src init 0).1
+          let warm := (← Cache.elaborateCached (some cache) [] src init 0).1
           for (how, st) in [("cold cache", cold), ("warm cache", warm), ("no cache", ← Cache.elaborateUncached src init),
                             ("runFrontend", runFrontend src init)] do
             check (st.messages.any fun m => m.severity == .error && (m.text.splitOn "is declared by both").length > 1)

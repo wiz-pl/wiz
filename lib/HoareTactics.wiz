@@ -1,44 +1,76 @@
 import Hoare
--- Proof automation for separation logic (stage 24d), after SLF's `xsimpl`, `xpull` and
--- the `x`-tactics of chapter WPgen.
---
--- The design is *small reflection plus tactics*. The tactics (Wiz functions, see
--- lib/Prelude.wiz) read the goal, decide what to do, and build proof terms out of a
--- handful of lemmas proved once, below, about **star lists**: `starL [H₁, …, Hₙ]` is
--- `H₁ ⋆ (… ⋆ Hₙ)`, definitionally. Rearranging a `⋆` chain is then a matter of list
--- positions (`pick`, by induction on the position), and flattening an arbitrary tree of
--- `⋆` and `emp` is one lemma about a reflected tree (`HTree.flat_l/r`). The kernel
--- checks every step by computing the lists, so the tactics are not trusted.
+/-! # HoareTactics: proof automation for separation logic
+
+Stage 24d, after SLF's `xsimpl`, `xpull` and the `x`-tactics of chapter WPgen. With
+these, a triple of `Hoare` is usually proved by naming the steps rather than writing the
+proof term:
+
+* `xsimpl` simplifies an entailment `L ⊢ R`: it flattens both sides, pulls pure facts and
+  existentials on the left, instantiates existentials on the right, cancels matching
+  atoms and unfolds representation predicates; `xpull` only does the left side;
+* `xstep` takes one command of the program (read, write, allocate, free, return);
+  `xval`, `xseq`, `xwp` the other small steps;
+* `xapp t` uses a proved triple `t` for a call, framing the rest;
+* `xchange e` rewrites an atom of the precondition by an entailment, `xunfold` unfolds
+  the precondition's atoms;
+* `xgo` runs `xstep` until it can't, then `xsimpl`.
+
+The design is *small reflection plus tactics*. The tactics (Wiz functions, see
+lib/Prelude.wiz) read the goal, decide what to do, and build proof terms out of a
+handful of lemmas proved once, here, about **star lists**: `starL [H₁, …, Hₙ]` is
+`H₁ ⋆ (… ⋆ Hₙ)`, definitionally. Rearranging a `⋆` chain is then a matter of list
+positions (`starL.pick`, by induction on the position), and flattening an arbitrary tree
+of `⋆` and `emp` is one lemma about a reflected tree (`HTree.flat_eq`). The kernel checks
+every step by computing the lists, so the tactics are not trusted.
+
+```
+def Prog.incr (p : Nat) : Prog Nat Unit := .get p (fun n => .set p (Nat.succ n) (.ret ()))
+def Prog.incr_spec (p n : Nat) : Triple (p ↦ n) (Prog.incr p) (fun _ => p ↦ Nat.succ n) := by
+  xgo
+```
+
+More in `HoareExamples`. -/
 
 -- ## Star lists
 
--- `H ⋆ (H₁ ⋆ … ⋆ Hₙ)` without a trailing `emp`
+/-- `H ⋆ (H₁ ⋆ … ⋆ Hₙ)` without a trailing `emp`: the non-empty case of `starL`. -/
 def starC {V : Type} : HProp V → List (HProp V) → HProp V
   | H, .nil => H
   | H, .cons H' Hs => H ⋆ starC H' Hs
+/-- A star list: `starL [H₁, …, Hₙ]` is `H₁ ⋆ (… ⋆ Hₙ)` (and `starL [] = emp`). The tactics
+work on these, since list positions are easy to compute with. -/
 def starL {V : Type} : List (HProp V) → HProp V
   | .nil => emp
   | .cons H Hs => starC H Hs
 
--- two-way entailment
+/-- Two-way entailment of heap predicates. -/
 def HEquiv {V : Type} (H H' : HProp V) : Prop := (H ⊢ H') ∧ (H' ⊢ H)
+/-- `HEquiv` is reflexive. -/
 def HEquiv.refl {V : Type} (0 H : HProp V) : HEquiv H H := (Entails.refl H, Entails.refl H)
+/-- `HEquiv` is symmetric. -/
 def HEquiv.symm {V : Type} {0 H H' : HProp V} (e : HEquiv H H') : HEquiv H' H := (e.2, e.1)
+/-- `HEquiv` is transitive. -/
 def HEquiv.trans {V : Type} {0 H₁ H₂ H₃ : HProp V} (a : HEquiv H₁ H₂) (b : HEquiv H₂ H₃) : HEquiv H₁ H₃ :=
   (Entails.trans a.1 b.1, Entails.trans b.2 a.2)
+/-- `HEquiv` is a congruence for `⋆`. -/
 def HEquiv.star {V : Type} {0 H₁ H₁' H₂ H₂' : HProp V} (a : HEquiv H₁ H₁') (b : HEquiv H₂ H₂') :
     HEquiv (H₁ ⋆ H₂) (H₁' ⋆ H₂') := (star.mono a.1 b.1, star.mono a.2 b.2)
+/-- `⋆` is associative, up to `HEquiv`. -/
 def HEquiv.assoc {V : Type} (0 H₁ H₂ H₃ : HProp V) : HEquiv ((H₁ ⋆ H₂) ⋆ H₃) (H₁ ⋆ (H₂ ⋆ H₃)) :=
   (star.assoc_l H₁ H₂ H₃, star.assoc_r H₁ H₂ H₃)
+/-- `A ⋆ (B ⋆ C)` and `B ⋆ (A ⋆ C)` are equivalent. -/
 def HEquiv.swap {V : Type} (0 A B C : HProp V) : HEquiv (A ⋆ (B ⋆ C)) (B ⋆ (A ⋆ C)) :=
   (star.swap A B C, star.swap B A C)
+/-- `emp ⋆ H` is equivalent to `H`. -/
 def HEquiv.emp_l {V : Type} (0 H : HProp V) : HEquiv (emp ⋆ H) H := (star.emp_l_entails H, star.emp_l_intro H)
+/-- `H ⋆ emp` is equivalent to `H`. -/
 def HEquiv.emp_r {V : Type} (0 H : HProp V) : HEquiv (H ⋆ emp) H := (star.emp_r_entails H, star.emp_r_intro H)
 
--- `starL (H :: Hs)` is `H ⋆ starL Hs` (up to a trailing `emp`)
+/-- `starL (H :: Hs)` is `H ⋆ starL Hs` (up to a trailing `emp`). -/
 def starL.cons {V : Type} (0 H : HProp V) : (Hs : List (HProp V)) → HEquiv (starL (.cons H Hs)) (H ⋆ starL Hs)
   | .nil => HEquiv.symm (HEquiv.emp_r H)
   | .cons H' Hs => HEquiv.refl (H ⋆ starC H' Hs)
+/-- `starL (Ls ++ Rs)` is `starL Ls ⋆ starL Rs`. -/
 def starL.append {V : Type} : (Ls : List (HProp V)) → (Rs : List (HProp V)) →
     HEquiv (starL (List.append Ls Rs)) (starL Ls ⋆ starL Rs)
   | .nil, Rs => HEquiv.symm (HEquiv.emp_l (starL Rs))
@@ -47,17 +79,18 @@ def starL.append {V : Type} : (Ls : List (HProp V)) → (Rs : List (HProp V)) �
       (HEquiv.trans (HEquiv.symm (HEquiv.assoc H (starL Ls) (starL Rs)))
         (HEquiv.star (HEquiv.symm (starL.cons H Ls)) (HEquiv.refl (starL Rs)))))
 
--- the `n`th element (`emp` past the end) and the rest
+/-- The `n`th element of a star list (`emp` past the end). -/
 def starL.nth {V : Type} : Nat → List (HProp V) → HProp V
   | _, .nil => emp
   | .zero, .cons H _ => H
   | .succ n, .cons _ Hs => starL.nth n Hs
+/-- The star list without its `n`th element. -/
 def starL.drop {V : Type} : Nat → List (HProp V) → List (HProp V)
   | _, .nil => .nil
   | .zero, .cons _ Hs => Hs
   | .succ n, .cons H Hs => .cons H (starL.drop n Hs)
 
--- any element can be brought to the front
+/-- Any element can be brought to the front: `starL Hs` is `nth n Hs ⋆ starL (drop n Hs)`. -/
 def starL.pick {V : Type} : (n : Nat) → (Hs : List (HProp V)) →
     HEquiv (starL Hs) (starL.nth n Hs ⋆ starL (starL.drop n Hs))
   | _, .nil => HEquiv.symm (HEquiv.emp_l emp)
@@ -66,25 +99,30 @@ def starL.pick {V : Type} : (n : Nat) → (Hs : List (HProp V)) →
       (HEquiv.trans (HEquiv.star (HEquiv.refl H) (starL.pick n Hs))
       (HEquiv.trans (HEquiv.swap H (starL.nth n Hs) (starL (starL.drop n Hs)))
         (HEquiv.star (HEquiv.refl (starL.nth n Hs)) (HEquiv.symm (starL.cons H (starL.drop n Hs))))))
--- … as a list: `starL Hs` and `starL (nth n Hs :: drop n Hs)`
+/-- `starL.pick` as a list: `starL Hs` and `starL (nth n Hs :: drop n Hs)`. -/
 def starL.pickL {V : Type} (n : Nat) (Hs : List (HProp V)) :
     HEquiv (starL Hs) (starL (.cons (starL.nth n Hs) (starL.drop n Hs))) :=
   HEquiv.trans (starL.pick n Hs) (HEquiv.symm (starL.cons (starL.nth n Hs) (starL.drop n Hs)))
 
 -- ## Flattening a tree of `⋆` and `emp`
 
+/-- A reflected tree of `⋆` and `emp` over atoms, so that flattening is one lemma
+(`HTree.flat_eq`). -/
 inductive HTree (V : Type) where
   | atom (H : HProp V)
   | emp
   | star (a : HTree V) (b : HTree V)
+/-- The heap predicate a tree stands for. -/
 def HTree.den {V : Type} : HTree V → HProp V
   | .atom H => H
   | .emp => emp
   | .star a b => HTree.den a ⋆ HTree.den b
+/-- The atoms of a tree, in order, as a star list. -/
 def HTree.flat {V : Type} : HTree V → List (HProp V)
   | .atom H => .cons H .nil
   | .emp => .nil
   | .star a b => List.append (HTree.flat a) (HTree.flat b)
+/-- A tree is equivalent to its flattening. -/
 def HTree.flat_eq {V : Type} : (t : HTree V) → HEquiv (HTree.den t) (starL (HTree.flat t))
   | .atom H => HEquiv.refl H
   | .emp => HEquiv.refl emp
@@ -95,34 +133,36 @@ def HTree.flat_eq {V : Type} : (t : HTree V) → HEquiv (HTree.den t) (starL (HT
 --
 -- Each turns a goal `starL Ls ⊢ starL Rs` into simpler ones.
 
--- flatten both sides
+/-- The steps of `xsimpl`, on star lists (each turns a goal `starL Ls ⊢ starL Rs` into a
+simpler one): flatten both sides. -/
 def xs.flat {V : Type} (tl tr : HTree V) (k : starL (HTree.flat tl) ⊢ starL (HTree.flat tr)) :
     HTree.den tl ⊢ HTree.den tr :=
   Entails.trans (HTree.flat_eq tl).1 (Entails.trans k (HTree.flat_eq tr).2)
--- bring the `i`th left atom, or the `j`th right atom, to the front
+/-- Bring the `i`th left atom to the front. -/
 def xs.pickL {V : Type} (i : Nat) (Ls : List (HProp V)) {0 R : HProp V}
     (k : starL (.cons (starL.nth i Ls) (starL.drop i Ls)) ⊢ R) : starL Ls ⊢ R :=
   Entails.trans (starL.pickL i Ls).1 k
+/-- Bring the `j`th right atom to the front. -/
 def xs.pickR {V : Type} (j : Nat) (Rs : List (HProp V)) {0 L : HProp V}
     (k : L ⊢ starL (.cons (starL.nth j Rs) (starL.drop j Rs))) : L ⊢ starL Rs :=
   Entails.trans k (starL.pickL j Rs).2
--- cancel the two front atoms
+/-- Cancel the two front atoms. -/
 def xs.cancel {V : Type} (0 H : HProp V) (Ls Rs : List (HProp V)) (k : starL Ls ⊢ starL Rs) :
     starL (.cons H Ls) ⊢ starL (.cons H Rs) :=
   Entails.trans (starL.cons H Ls).1 (Entails.trans (star.mono_r H k) (starL.cons H Rs).2)
--- an existential on the right: a witness
+/-- An existential on the right: give a witness. -/
 def xs.exists_r {V A : Type} (0 J : A → HProp V) (a : A) (Rs : List (HProp V)) {0 L : HProp V}
     (k : L ⊢ starL (.cons (J a) Rs)) : L ⊢ starL (.cons (hexists J) Rs) :=
   Entails.trans k (Entails.trans (starL.cons (J a) Rs).1
     (Entails.trans (star.mono_l (starL Rs) (hexists.intro J a (Entails.refl (J a))))
       (starL.cons (hexists J) Rs).2))
--- a pure fact on the right: a side condition
+/-- A pure fact on the right: a side condition. -/
 def xs.pure_r {V : Type} {0 P : Prop} (p : P) (Rs : List (HProp V)) {0 L : HProp V}
     (k : L ⊢ starL Rs) : L ⊢ starL (.cons (hpure P) Rs) :=
   Entails.trans (hpure.intro_r p k) (starL.cons (hpure P) Rs).2
--- `htop` on the right takes whatever is left
+/-- `htop` on the right takes whatever is left. -/
 def xs.top_r {V : Type} (Ls : List (HProp V)) : starL Ls ⊢ @htop V := fun h _ => ()
--- a wand on the left, next to its premise: modus ponens
+/-- A wand on the left, next to its premise: modus ponens. -/
 def xs.wand_l {V : Type} (H₁ : HProp V) (0 H₂ : HProp V) (Ls : List (HProp V)) {0 R : HProp V}
     (k : starL (.cons H₂ Ls) ⊢ R) : starL (.cons (H₁ −∗ H₂) (.cons H₁ Ls)) ⊢ R :=
   Entails.trans (starL.cons (H₁ −∗ H₂) (.cons H₁ Ls)).1
@@ -130,20 +170,21 @@ def xs.wand_l {V : Type} (H₁ : HProp V) (0 H₂ : HProp V) (Ls : List (HProp V
     (Entails.trans (star.assoc_r (H₁ −∗ H₂) H₁ (starL Ls))
     (Entails.trans (star.mono_l (starL Ls) (Entails.trans (star.comm_entails (H₁ −∗ H₂) H₁) (wand.cancel H₁ H₂)))
     (Entails.trans (starL.cons H₂ Ls).2 k))))
--- a wand on the right: move its premise to the left
+/-- A wand on the right: move its premise to the left. -/
 def xs.wand_r {V : Type} {0 L H₁ H₂ : HProp V} (k : L ⋆ H₁ ⊢ H₂) : L ⊢ H₁ −∗ H₂ := wand.intro k
--- the left side's front atom is a pure fact, or an existential: a hypothesis, a variable
--- (the tactics read the premise back after introducing it: star lists are reflected as
--- lists, stage 6g)
+/-- The left side's front atom is a pure fact: a hypothesis. (The tactics read the premise
+back after introducing it: star lists are reflected as lists, stage 6g.) -/
 def xs.pure_l {V : Type} (0 P : Prop) (Ls : List (HProp V)) {0 R : HProp V} (k : P → (starL Ls ⊢ R)) :
     starL (.cons (hpure P) Ls) ⊢ R :=
   Entails.trans (starL.cons (hpure P) Ls).1 (hpure.elim_l k)
+/-- The left side's front atom is an existential: a variable. -/
 def xs.exists_l {V A : Type} (0 J : A → HProp V) (Ls : List (HProp V)) {0 R : HProp V}
     (k : (x : A) → (starL (.cons (J x) Ls) ⊢ R)) : starL (.cons (hexists J) Ls) ⊢ R :=
   Entails.trans (starL.cons (hexists J) Ls).1 (Entails.trans (star.exists_l_entails J (starL Ls))
     (hexists.elim (fun x => Entails.trans (starL.cons (J x) Ls).2 (k x))))
+/-- A universal on the right: introduce the variable. -/
 def xs.forall_r {V A : Type} (0 J : A → HProp V) (0 F : HProp V) (k : (x : A) → (F ⊢ J x)) : F ⊢ hforall J := hforall.intro k
--- replace an atom on the left by one it entails
+/-- Replace an atom on the left by one it entails. -/
 def xs.change_l {V : Type} (0 H₁ H₂ : HProp V) (e : H₁ ⊢ H₂) (Ls : List (HProp V)) {0 R : HProp V}
     (k : starL (.cons H₂ Ls) ⊢ R) : starL (.cons H₁ Ls) ⊢ R :=
   Entails.trans (starL.cons H₁ Ls).1 (Entails.trans (star.mono_l (starL Ls) e) (Entails.trans (starL.cons H₂ Ls).2 k))
@@ -152,26 +193,31 @@ def xs.change_l {V : Type} (0 H₁ H₂ : HProp V) (e : H₁ ⊢ H₂) (Ls : Lis
 --
 -- The precondition is a star list with the cell the command touches in front.
 
+/-- The steps of the `x`-tactics, in weakest-precondition form (SLF's `xapp` lemmas); the
+precondition is a star list with the cell the command touches in front. A read. -/
 def xw.get {V A : Type} (l : Nat) (v : V) (Ls : List (HProp V)) (k : V → Prog V A) (0 Q : A → HProp V)
     (m : starL (.cons (l ↦ v) Ls) ⊢ wp (k v) Q) : starL (.cons (l ↦ v) Ls) ⊢ wp (Prog.get l k) Q :=
   Entails.trans (starL.cons (l ↦ v) Ls).1
     (wp.get_intro l v (starL Ls) (fun (v' : V) => wp (k v') Q) (Entails.trans (starL.cons (l ↦ v) Ls).2 m))
+/-- A write, with the cell in front. -/
 def xw.set {V A : Type} (l : Nat) (w v : V) (Ls : List (HProp V)) (k : Prog V A) (0 Q : A → HProp V)
     (m : starL (.cons (l ↦ v) Ls) ⊢ wp k Q) : starL (.cons (l ↦ w) Ls) ⊢ wp (Prog.set l v k) Q :=
   Entails.trans (starL.cons (l ↦ w) Ls).1
     (wp.set_intro l w v (starL Ls) (wp k Q) (Entails.trans (starL.cons (l ↦ v) Ls).2 m))
+/-- An allocation: the new cell joins the precondition. -/
 def xw.alloc {V A : Type} (v : V) (0 F : HProp V) (k : Nat → Prog V A) (0 Q : A → HProp V)
     (m : (l : Nat) → ((l ↦ v) ⋆ F ⊢ wp (k l) Q)) : F ⊢ wp (Prog.alloc v k) Q :=
   wp.alloc_intro v F (fun (l : Nat) => wp (k l) Q) m
+/-- A free, with the cell in front. -/
 def xw.free {V A : Type} (l : Nat) (w : V) (Ls : List (HProp V)) (k : Prog V A) (0 Q : A → HProp V)
     (m : starL Ls ⊢ wp k Q) : starL (.cons (l ↦ w) Ls) ⊢ wp (Prog.free l k) Q :=
   Entails.trans (starL.cons (l ↦ w) Ls).1 (wp.free_intro l w (starL Ls) (wp k Q) m)
--- sequencing: the first program's postcondition is the rest's precondition
+/-- Sequencing: the first program's postcondition is the rest's precondition. -/
 def xw.bind {V A B : Type} (c : Prog V A) (f : A → Prog V B) (0 Q : B → HProp V) (0 L : HProp V)
     (m : L ⊢ wp c (fun (a : A) => wp (f a) Q)) : L ⊢ wp (Prog.bind c f) Q :=
   Entails.trans m (wp.bind_r c f Q)
--- a call to a specified program, with the frame and the rest left to `xsimpl`: SLF's
--- `xapp_lemma`, `H ⊢ P ⋆ (Q' −−∗ Q)`
+/-- A call to a specified program, with the frame and the rest left to `xsimpl`: SLF's
+`xapp_lemma`, `H ⊢ P ⋆ (Q' −−∗ Q)`. -/
 def xw.app {V A : Type} (c : Prog V A) (0 P : HProp V) (0 Q' : A → HProp V) (t : Triple P c Q')
     (0 L : HProp V) (0 Q : A → HProp V)
     (m : L ⊢ P ⋆ hforall (fun (r : A) => Q' r −∗ Q r)) : L ⊢ wp c Q :=
@@ -181,20 +227,23 @@ def xw.app {V A : Type} (c : Prog V A) (0 P : HProp V) (0 Q' : A → HProp V) (t
         Entails.trans (star.mono_r (Q' r) (hforall.elim (fun (r' : A) => Q' r' −∗ Q r') r))
           (wand.cancel (Q' r) (Q r))))))
 
--- The parts of a command, read off the program as it is written: when what a program
--- computes to can't be put in a proof term (see `XT.hasOpaque`), the x-tactics name its
--- parts through these, and conversion computes them.
+/-- The parts of a command, read off the program as it is written: when what a program
+computes to can't be put in a proof term (see `XT.hasOpaque`), the x-tactics name its
+parts through these, and conversion computes them. -/
 def Prog.loc {V A : Type} : Prog V A → Nat
   | .get l _ => l
   | .set l _ _ => l
   | .free l _ => l
   | _ => 0
+/-- A `get`'s continuation, applied to the value (or the program itself). -/
 def Prog.getK {V A : Type} : Prog V A → V → Prog V A
   | .get _ k, v => k v
   | c, _ => c
+/-- The value a `set` writes (or `d`). -/
 def Prog.setV {V A : Type} (d : V) : Prog V A → V
   | .set _ v _ => v
   | _ => d
+/-- The program after a `set` or a `free` (the rest, or the program itself). -/
 def Prog.next {V A : Type} : Prog V A → Prog V A
   | .set _ _ k => k
   | .free _ k => k
@@ -211,40 +260,45 @@ def Prog.next {V A : Type} : Prog V A → Prog V A
 
 local infixr:67 " ∷ " => List.cons
 
+/-- The constant `n`, as an `Expr`. -/
 def XT.c (n : String) : Expr := .const n
+/-- The constant `n` applied to `args`. -/
 def XT.mk (n : String) (args : List Expr) : Expr := Expr.mkApp (.const n) args
--- `e` is the constant `n` applied to exactly `k` arguments: the arguments
+/-- `e` is the constant `n` applied to exactly `k` arguments: the arguments. -/
 def XT.appN (n : String) (k : Nat) (e : Expr) : Option (List Expr) := match Expr.appOf n e with
   | .some xs => (match Nat.beq (List.length xs) k with
     | .true => .some xs
     | .false => .none)
   | .none => .none
 
--- list helpers
+/-- The `i`th element of a list, or `d`. -/
 def XT.nth {A : Type} (d : A) : Nat → List A → A
   | _, .nil => d
   | .zero, .cons x _ => x
   | .succ n, .cons _ xs => XT.nth d n xs
+/-- The `i`th expression of a list. -/
 def XT.nthE (i : Nat) (es : List Expr) : Expr := XT.nth (Expr.lit 0) i es
--- the list without its `n`th element
+/-- The list without its `n`th element. -/
 def XT.drop {A : Type} : Nat → List A → List A
   | _, .nil => .nil
   | .zero, .cons _ xs => xs
   | .succ n, .cons x xs => .cons x (XT.drop n xs)
--- the first index whose element passes the test
+/-- The first index (from `i`) whose element passes the test. -/
 def XT.findIx {A : Type} (p : A → Bool) : Nat → List A → Option Nat
   | _, .nil => .none
   | i, .cons x xs => match p x with
     | .true => .some i
     | .false => XT.findIx p (Nat.succ i) xs
+/-- `if b then x else y`, as a function. -/
 def XT.sel {A : Type} (b : Bool) (x y : A) : A := match b with
   | .true => x
   | .false => y
 
--- `List.cons`/`List.nil` literals, and reading them back
+/-- A `List.cons`/`List.nil` literal of elements of type `T`. -/
 def XT.lst (T : Expr) : List Expr → Expr
   | .nil => XT.mk "List.nil" (T ∷ .nil)
   | .cons e es => XT.mk "List.cons" (T ∷ e ∷ XT.lst T es ∷ .nil)
+/-- Read a list literal back (with fuel). -/
 def XT.unlstF : Nat → Expr → Option (List Expr)
   | .zero, _ => .none
   | .succ f, e => match XT.appN "List.cons" 3 e with
@@ -254,24 +308,30 @@ def XT.unlstF : Nat → Expr → Option (List Expr)
     | _ => (match XT.appN "List.nil" 1 e with
       | .some _ => .some .nil
       | .none => .none)
+/-- Read a list literal back. -/
 def XT.unlst (e : Expr) : Option (List Expr) := XT.unlstF 10000 e
 
--- building heap predicates
+/-- Building heap predicates: `HProp V`. -/
 def XT.hpropT (V : Expr) : Expr := .app (XT.c "HProp") V
+/-- `L ⊢ R`. -/
 def XT.ent (V L R : Expr) : Expr := XT.mk "Entails" (V ∷ L ∷ R ∷ .nil)
+/-- `a ⋆ b`. -/
 def XT.star (V a b : Expr) : Expr := XT.mk "star" (V ∷ a ∷ b ∷ .nil)
+/-- `emp`. -/
 def XT.emp (V : Expr) : Expr := .app (XT.c "emp") V
+/-- `l ↦ v`. -/
 def XT.pts (V l v : Expr) : Expr := XT.mk "pts" (V ∷ l ∷ v ∷ .nil)
--- `Triple P c Q` is `P ⊢ wp c Q`
+/-- `wp c Q` (`Triple P c Q` is `P ⊢ wp c Q`). -/
 def XT.wpOf (V A c Q : Expr) : Expr := XT.mk "wp" (V ∷ A ∷ c ∷ Q ∷ .nil)
--- `H₁ ⋆ (… ⋆ Hₙ)`, as a person would write it: convertible to `starL [H₁, …, Hₙ]`
+/-- `H₁ ⋆ (… ⋆ Hₙ)`, as a person would write it: convertible to `starL [H₁, …, Hₙ]`. -/
 def XT.sl (V : Expr) : List Expr → Expr
   | .nil => XT.emp V
   | .cons e .nil => e
   | .cons e es => XT.star V e (XT.sl V es)
+/-- A list literal of heap predicates. -/
 def XT.lstV (V : Expr) (l : List Expr) : Expr := XT.lst (XT.hpropT V) l
 
--- the shapes of heap predicates
+/-- The shapes of heap predicates, as the tactics see them. -/
 inductive XT.HV where
   | star (a b : Expr)
   | emp
@@ -284,10 +344,12 @@ inductive XT.HV where
   | pts (l v : Expr)
   | wp (A c Q : Expr)
   | other
+/-- A star list read back, with `pre` in front, or `other`. -/
 def XT.listOr (o : Option (List Expr)) (pre : List Expr) : XT.HV := match o with
   | .some l => .list (List.append pre l)
   | .none => .other
--- by the head constant and its arguments (the first is always `V`)
+/-- The shape of a heap predicate by its head constant and its arguments (the first is
+always `V`). -/
 def XT.viewC (n : String) : List Expr → XT.HV
   | .cons _ .nil => XT.sel (Expr.nameEq n "emp") .emp (XT.sel (Expr.nameEq n "htop") .top .other)
   | .cons _ (.cons x .nil) =>
@@ -301,16 +363,18 @@ def XT.viewC (n : String) : List Expr → XT.HV
     XT.sel (Expr.nameEq n "starC") (XT.listOr (XT.unlst b) (a ∷ .nil)) .other)))))
   | .cons _ (.cons A (.cons c (.cons Q .nil))) => XT.sel (Expr.nameEq n "wp") (.wp A c Q) .other
   | _ => .other
+/-- The shape of a heap predicate. -/
 def XT.view (e : Expr) : XT.HV := match Expr.view e with
   | .const n args => XT.viewC n args
   | _ => .other
+/-- `⋆`, `emp` or a star list: not an atom. -/
 def XT.isStructural (e : Expr) : Bool := match XT.view e with
   | .star _ _ => .true
   | .emp => .true
   | .list _ => .true
   | _ => .false
 
--- the atoms of a side (a worklist, with fuel)
+/-- The atoms of a side (a worklist, with fuel). -/
 def XT.atomsW : Nat → List Expr → List Expr
   | .zero, es => es
   | .succ f, .nil => .nil
@@ -319,8 +383,9 @@ def XT.atomsW : Nat → List Expr → List Expr
     | .emp => XT.atomsW f rest
     | .list l => XT.atomsW f (List.append l rest)
     | _ => .cons e (XT.atomsW f rest)
+/-- The atoms of a side, flattened. -/
 def XT.atoms (e : Expr) : List Expr := XT.atomsW 100000 (.cons e .nil)
--- the side as a reflected tree (`HTree.den` of it is convertible to `e`)
+/-- The side as a reflected tree (`HTree.den` of it is convertible to `e`). -/
 def XT.tree (V : Expr) : Nat → Expr → Expr
   | .zero, e => XT.mk "HTree.atom" (V ∷ e ∷ .nil)
   | .succ f, e => match XT.view e with
@@ -328,7 +393,7 @@ def XT.tree (V : Expr) : Nat → Expr → Expr
     | .emp => .app (XT.c "HTree.emp") V
     | .list l => XT.tree V f (XT.sl V l)
     | _ => XT.mk "HTree.atom" (V ∷ e ∷ .nil)
--- a side already flat: `H₁ ⋆ (… ⋆ Hₙ)` or `starL [H₁, …, Hₙ]` with every `Hᵢ` an atom
+/-- A side already flat: `H₁ ⋆ (… ⋆ Hₙ)` with every `Hᵢ` an atom (with fuel). -/
 def XT.chainF : Nat → Expr → Option (List Expr)
   | .zero, _ => .none
   | .succ f, e => match XT.view e with
@@ -340,9 +405,11 @@ def XT.chainF : Nat → Expr → Option (List Expr)
     | .emp => .none
     | .list _ => .none
     | _ => .some (e ∷ .nil)
+/-- Every element is an atom. -/
 def XT.allAtoms : List Expr → Bool
   | .nil => .true
   | .cons e es => Bool.and (Bool.not (XT.isStructural e)) (XT.allAtoms es)
+/-- A side already flat (a `⋆` chain or `starL` of atoms): its atoms. -/
 def XT.flatOf (e : Expr) : Option (List Expr) := match XT.view e with
   | .emp => .some .nil
   | .list l => XT.sel (XT.allAtoms l) (.some l) .none
@@ -350,21 +417,22 @@ def XT.flatOf (e : Expr) : Option (List Expr) := match XT.view e with
 
 -- ## Tactics: building proofs
 
--- fail, saying why and showing the goal
+/-- Tactics, building proofs: fail, saying why and showing the goal. -/
 def XT.failAt {A : Type} (g : Nat) (msg : String) : TacticM A := do
   s ← TacticM.ppGoal g;
   TacticM.fail (String.append msg (String.append "\n" s))
--- … and a term
+/-- Fail, saying why and showing the goal and a term. -/
 def XT.failWith {A : Type} (g : Nat) (msg : String) (e : Expr) : TacticM A := do
   s ← TacticM.ppExpr g e;
   XT.failAt g (String.append msg (String.append " " s))
 
--- an argument of a lemma: a term, a new goal of the binder's type, or a new goal of a
--- given (convertible) type
+/-- An argument of a lemma: a term, a new goal of the binder's type, or a new goal of a
+given (convertible) type. -/
 inductive XT.Arg where
   | val (e : Expr)
   | goal
   | goalAt (ty : Expr)
+/-- The worker of `XT.apply`: apply a lemma to its arguments one by one. -/
 def XT.applyC : Nat → Expr → Expr → List XT.Arg → TacticM (List Nat)
   | g, f, _, .nil => do TacticM.assign g f; TacticM.pure .nil
   | g, f, ty, .cons a rest => match ty with
@@ -385,24 +453,24 @@ def XT.applyC : Nat → Expr → Expr → List XT.Arg → TacticM (List Nat)
         gs ← XT.applyC g (.app f e) b rest;
         TacticM.pure (.cons ng gs))
     | _ => TacticM.fail "x-tactics: a lemma got too many arguments"
--- close goal `g` with the lemma `n` applied to `args`; the new goals, in order
+/-- Close goal `g` with the lemma `n` applied to `args`; the new goals, in order. -/
 def XT.apply (g : Nat) (n : String) (args : List XT.Arg) : TacticM (List Nat) := do
   ty ← TacticM.inferType g (XT.c n);
   XT.applyC g (XT.c n) ty args
--- the same, for a lemma that leaves exactly one goal
+/-- `XT.apply`, for a lemma that leaves exactly one goal. -/
 def XT.apply1 (g : Nat) (n : String) (args : List XT.Arg) : TacticM Nat := do
   gs ← XT.apply g n args;
   match gs with
   | .cons ng _ => TacticM.pure ng
   | .nil => TacticM.fail "x-tactics: expected a goal"
--- restate goal `g` as the convertible `L ⊢ R`
+/-- Restate goal `g` as the convertible `L ⊢ R`. -/
 def XT.restate (g : Nat) (V L R : Expr) : TacticM Nat := TacticM.change g (XT.ent V L R)
--- `f a`, β-reduced when `f` is a λ
+/-- `f a`, β-reduced when `f` is a λ. -/
 def XT.beta (g : Nat) (f a : Expr) : TacticM Expr := match f with
   | .lam _ b => TacticM.instantiate g b a
   | _ => TacticM.pure (.app f a)
--- `e` with the definition at its head unfolded once, if that changes it (a constructor or
--- an axiom at the head changes nothing)
+/-- `e` with the definition at its head unfolded once, if that changes it (a constructor or
+an axiom at the head changes nothing). -/
 def XT.unfoldHead (g : Nat) (e : Expr) : TacticM (Option Expr) := match Expr.headName e with
   | .some n => do
     e' ← TacticM.unfold g n e;
@@ -411,12 +479,13 @@ def XT.unfoldHead (g : Nat) (e : Expr) : TacticM (Option Expr) := match Expr.hea
     | .false => TacticM.pure (.some e')
   | .none => TacticM.pure .none
 
--- Introducing variables: under the next name given (`as x, y`), else under the binder's
--- name (`n` for the `∃ n` of `MList`), with a numeric suffix if it is taken. The name
--- introduced, the new goal and the names left.
+/-- Introducing variables: under the next name given (`as x, y`), else under the binder's
+name (`n` for the `∃ n` of `MList`), with a numeric suffix if it is taken. `XT.binder`
+is the binder's name of a λ, or `d`. -/
 def XT.binder (d : String) : Expr → String
   | .lam x _ => x
   | _ => d
+/-- Introduce a variable: the name introduced, the new goal and the names left. -/
 def XT.introAs (g : Nat) (hint : String) : List String → TacticM (String × (Nat × List String))
   | .cons x xs => do
     g' ← TacticM.intro g x;
@@ -425,10 +494,9 @@ def XT.introAs (g : Nat) (hint : String) : List String → TacticM (String × (N
     r ← TacticM.introFresh g hint;
     TacticM.pure (r.1, (r.2, .nil))
 
--- reflexivity, through unification (the term `rfl` is not checked against its expected
--- equation by the elaborator, only by the kernel: wishful elab-rfl-unchecked)
+/-- Reflexivity, through unification. -/
 def XT.refl {A : Type} (a : A) : a = a := refl a
--- run a tactic on goal `g` alone, catching its failure; did it close the goal?
+/-- Run a tactic on goal `g` alone, catching its failure; did it close the goal? -/
 def XT.tryOn (g : Nat) (t : Syntax) : TacticM Bool := do
   gs ← TacticM.getGoals;
   TacticM.setGoals (.cons g .nil);
@@ -438,14 +506,14 @@ def XT.tryOn (g : Nat) (t : Syntax) : TacticM Bool := do
   match left with
   | .nil => TacticM.pure .true
   | _ => TacticM.pure .false
--- try to close a side condition: reflexivity, an assumption, or a disequation of
--- constructors (`Not (succ n = 0)` is `succ n = 0 → False`, and `succ n = 0` computes to
--- `False`)
+/-- Try to close a side condition: reflexivity, an assumption, or a disequation of
+constructors (`Not (succ n = 0)` is `succ n = 0 → False`, and `succ n = 0` computes to
+`False`). -/
 def XT.trySide (g : Nat) : TacticM Unit := do
   ok ← XT.tryOn g `(tactic| first | exact XT.refl _ | (first | assumption | (first | exact (fun e => e) | exact ())));
   TacticM.pure ()
--- a contradictory hypothesis `h` closes the goal: an equation of different constructors
--- (`succ n = 0` computes to `False`), or `Not (a = a)` (`0 = 0` computes to `True`)
+/-- A contradictory hypothesis `h` closes the goal: an equation of different constructors
+(`succ n = 0` computes to `False`), or `Not (a = a)` (`0 = 0` computes to `True`). -/
 def XT.tryAbsurd (g : Nat) (h : String) : TacticM Bool :=
   let x := Syntax.mkVar h;
   XT.tryOn g `(tactic| first | exact absurd ($x).1 | (first | exact absurd ($x ()) | exact absurd ($x (XT.refl _))))
@@ -472,39 +540,47 @@ def XT.tryAbsurd (g : Nat) (h : String) : TacticM Bool :=
 --    applied to a constructor, `MList (x :: L) p`) is unfolded once (`TacticM.unfold`,
 --    which folds the recursive occurrences back), right atoms first.
 
--- a step: the next goal (with side goals) and the names left, or the goals to stop with
+/-- A step of `XT.simp`: the next goal (with side goals) and the names left, or the goals to
+stop with. -/
 inductive XT.Res where
   | next (g : Nat) (side : List Nat) (ns : List String)
   | stop (gs : List Nat) (ns : List String)
 
+/-- Bring the `i`th left atom to the front (`xs.pickL`). -/
 def XT.frontL (g : Nat) (V : Expr) (Ls : List Expr) (R : Expr) : Nat → TacticM Nat
   | .zero => TacticM.pure g
   | .succ j => XT.apply1 g "xs.pickL" (.val V ∷ .val (.lit (.succ j)) ∷ .val (XT.lstV V Ls) ∷ .val R ∷
       .goalAt (XT.ent V (XT.sl V (XT.nthE (.succ j) Ls ∷ XT.drop (.succ j) Ls)) R) ∷ .nil)
+/-- Bring the `j`th right atom to the front (`xs.pickR`). -/
 def XT.frontR (g : Nat) (V : Expr) (Rs : List Expr) (L : Expr) : Nat → TacticM Nat
   | .zero => TacticM.pure g
   | .succ j => XT.apply1 g "xs.pickR" (.val V ∷ .val (.lit (.succ j)) ∷ .val (XT.lstV V Rs) ∷ .val L ∷
       .goalAt (XT.ent V L (XT.sl V (XT.nthE (.succ j) Rs ∷ XT.drop (.succ j) Rs))) ∷ .nil)
 
+/-- A pure fact or an existential: something `xpull` takes out. -/
 def XT.isPull (e : Expr) : Bool := match XT.view e with
   | .pure _ => .true
   | .ex _ _ => .true
   | _ => .false
+/-- An existential. -/
 def XT.isEx (e : Expr) : Bool := match XT.view e with
   | .ex _ _ => .true
   | _ => .false
+/-- A pure fact. -/
 def XT.isPure (e : Expr) : Bool := match XT.view e with
   | .pure _ => .true
   | _ => .false
+/-- A `wp c Q`. -/
 def XT.isWp (e : Expr) : Bool := match XT.view e with
   | .wp _ _ _ => .true
   | _ => .false
 
+/-- Two expressions are syntactically equal or convertible. -/
 def XT.eqOrConv (g : Nat) (a b : Expr) : TacticM Bool := match Expr.beq a b with
   | .true => TacticM.pure .true
   | .false => TacticM.isDefEq g a b
--- pairwise conversion of argument lists (stopping at the first difference, so a
--- mismatch never unfolds the head)
+/-- Pairwise conversion of argument lists (stopping at the first difference, so a mismatch
+never unfolds the head). -/
 def XT.argsEq (g : Nat) : List Expr → List Expr → TacticM Bool
   | .nil, .nil => TacticM.pure .true
   | .cons a rs, .cons b bs => do
@@ -513,15 +589,17 @@ def XT.argsEq (g : Nat) : List Expr → List Expr → TacticM Bool
     | .true => XT.argsEq g rs bs
     | .false => TacticM.pure .false
   | _, _ => TacticM.pure .false
--- two atoms are the same: syntactically, or with the same head (a constant or a
--- variable) and convertible arguments
+/-- Two atoms are the same: syntactically, or with the same head (a constant or a variable)
+and convertible arguments. -/
 def XT.atomEq (g : Nat) (a b : Expr) : TacticM Bool := match Expr.beq a b with
   | .true => TacticM.pure .true
   | .false => match Expr.view a, Expr.view b with
     | .const m xs, .const n ys => XT.sel (Expr.nameEq m n) (XT.argsEq g xs ys) (TacticM.pure .false)
     | .var i xs, .var j ys => XT.sel (Nat.beq i j) (XT.argsEq g xs ys) (TacticM.pure .false)
     | _, _ => TacticM.pure .false
+/-- The position of an atom syntactically equal to `b`. -/
 def XT.findSyn (b : Expr) (Ls : List Expr) : Option Nat := XT.findIx (fun a => Expr.beq a b) 0 Ls
+/-- The position of an atom equal to `b` (`XT.atomEq`). -/
 def XT.findConv (g : Nat) (b : Expr) : Nat → List Expr → TacticM (Option Nat)
   | _, .nil => TacticM.pure .none
   | i, .cons a rs => do
@@ -529,13 +607,14 @@ def XT.findConv (g : Nat) (b : Expr) : Nat → List Expr → TacticM (Option Nat
     match ok with
     | .true => TacticM.pure (.some i)
     | .false => XT.findConv g b (Nat.succ i) rs
+/-- An atom that can be cancelled (not a pure fact, `htop` or an existential). -/
 def XT.cancellable (e : Expr) : Bool := match XT.view e with
   | .pure _ => .false
   | .top => .false
   | .ex _ _ => .false
   | _ => .true
--- a pair (left, right) to cancel: syntactic matches first, so that conversion is only
--- tried when needed
+/-- A pair (left, right) to cancel, syntactically equal; syntactic matches are tried first,
+so that conversion is only tried when needed. -/
 def XT.findCancelSyn (Ls : List Expr) : Nat → List Expr → Option (Nat × Nat)
   | _, .nil => .none
   | j, .cons b bs => match XT.cancellable b with
@@ -543,6 +622,7 @@ def XT.findCancelSyn (Ls : List Expr) : Nat → List Expr → Option (Nat × Nat
     | .true => match XT.findSyn b Ls with
       | .some i => .some (i, j)
       | .none => XT.findCancelSyn Ls (Nat.succ j) bs
+/-- A pair (left, right) to cancel, up to conversion. -/
 def XT.findCancelConv (g : Nat) (Ls : List Expr) : Nat → List Expr → TacticM (Option (Nat × Nat))
   | _, .nil => TacticM.pure .none
   | j, .cons b bs => match XT.cancellable b with
@@ -552,17 +632,18 @@ def XT.findCancelConv (g : Nat) (Ls : List Expr) : Nat → List Expr → TacticM
       match r with
       | .some i => TacticM.pure (.some (i, j))
       | .none => XT.findCancelConv g Ls (Nat.succ j) bs
+/-- A pair (left, right) to cancel: syntactic matches first, then up to conversion. -/
 def XT.findCancel (g : Nat) (Ls Rs : List Expr) : TacticM (Option (Nat × Nat)) :=
   match XT.findCancelSyn Ls 0 Rs with
   | .some p => TacticM.pure (.some p)
   | .none => XT.findCancelConv g Ls 0 Rs
 
--- unfolding: an atom that is not one of the logic's own, whose head is a definition that
--- computes
+/-- Unfolding: an atom that is not one of the logic's own, whose head is a definition that
+computes, unfolded once. -/
 def XT.unfold1 (g : Nat) (e : Expr) : TacticM (Option Expr) := match XT.view e with
   | .other => XT.unfoldHead g e
   | _ => TacticM.pure .none
--- the first atom of a list that unfolds: the list with it unfolded
+/-- The first atom of a list that unfolds: the list with it unfolded. -/
 def XT.unfoldList (g : Nat) : List Expr → TacticM (Option (List Expr))
   | .nil => TacticM.pure .none
   | .cons e es => do
@@ -575,7 +656,9 @@ def XT.unfoldList (g : Nat) : List Expr → TacticM (Option (List Expr))
       | .some l => TacticM.pure (.some (e ∷ l))
       | .none => TacticM.pure .none
 
--- the steps
+/-- The steps of `xsimpl`: pull the `i`th left atom (a pure fact becomes a hypothesis `hp`,
+closing the goal if it is contradictory; an existential a variable named after its
+binder). -/
 def XT.pull (g : Nat) (V : Expr) (Ls : List Expr) (R : Expr) (i : Nat) (ns : List String) : TacticM XT.Res := do
   g₁ ← XT.frontL g V Ls R i;
   let rest := XT.lstV V (XT.drop i Ls);
@@ -591,6 +674,7 @@ def XT.pull (g : Nat) (V : Expr) (Ls : List Expr) (R : Expr) (i : Nat) (ns : Lis
     TacticM.pure (.next r.2.1 .nil r.2.2)
   | _ => XT.failAt g "xpull: nothing to pull"
 
+/-- An existential on the right gets a metavariable as its witness (a side goal). -/
 def XT.exR (g : Nat) (V : Expr) (L : Expr) (Rs : List Expr) (j : Nat) (ns : List String) : TacticM XT.Res := do
   g₁ ← XT.frontR g V Rs L j;
   let rest := XT.drop j Rs;
@@ -604,6 +688,7 @@ def XT.exR (g : Nat) (V : Expr) (L : Expr) (Rs : List Expr) (j : Nat) (ns : List
     TacticM.pure (.next g₂ (wg ∷ .nil) ns)
   | _ => XT.failAt g "xsimpl: no existential"
 
+/-- Cancel the `i`th left atom against the `j`th right one. -/
 def XT.cancel (g : Nat) (V : Expr) (Ls Rs : List Expr) (R : Expr) (i j : Nat) (ns : List String) : TacticM XT.Res := do
   g₁ ← XT.frontL g V Ls R i;
   let a := XT.nthE i Ls;
@@ -614,6 +699,8 @@ def XT.cancel (g : Nat) (V : Expr) (Ls Rs : List Expr) (R : Expr) (i j : Nat) (n
     .goalAt (XT.ent V (XT.sl V restL) (XT.sl V restR)) ∷ .nil);
   TacticM.pure (.next g₃ .nil ns)
 
+/-- A pure fact on the right becomes a side goal (closed if `rfl`, an assumption or
+`fun e => e` proves it). -/
 def XT.pureR (g : Nat) (V : Expr) (L : Expr) (Rs : List Expr) (j : Nat) (ns : List String) : TacticM XT.Res := do
   g₁ ← XT.frontR g V Rs L j;
   let rest := XT.drop j Rs;
@@ -627,7 +714,7 @@ def XT.pureR (g : Nat) (V : Expr) (L : Expr) (Rs : List Expr) (j : Nat) (ns : Li
     TacticM.pure (.next g₂ (pg ∷ .nil) ns)
   | _ => XT.failAt g "xsimpl: no pure fact"
 
--- why `xsimpl` stops (a trace at the tactic, before the goal it leaves)
+/-- Why `xsimpl` stops (a trace at the tactic, before the goal it leaves). -/
 def XT.stuck (g : Nat) (Rs : List Expr) : TacticM Unit := match XT.findIx XT.cancellable 0 Rs with
   | .some j => do
     s ← TacticM.ppExpr g (XT.nthE j Rs);
@@ -635,7 +722,7 @@ def XT.stuck (g : Nat) (Rs : List Expr) : TacticM Unit := match XT.findIx XT.can
   | .none => (match Rs with
     | .nil => TacticM.trace "xsimpl: stuck: atoms are left on the left, and nothing on the right (`htop` would take them)"
     | _ => TacticM.trace "xsimpl: stuck")
--- unfold an atom that computes (right atoms first), or stop
+/-- Unfold an atom that computes (right atoms first), or stop. -/
 def XT.unfoldStep (g : Nat) (V : Expr) (Ls Rs : List Expr) (ns : List String) : TacticM XT.Res := do
   r ← XT.unfoldList g Rs;
   match r with
@@ -652,7 +739,8 @@ def XT.unfoldStep (g : Nat) (V : Expr) (Ls Rs : List Expr) (ns : List String) : 
       XT.stuck g Rs;
       TacticM.pure (.stop (g ∷ .nil) ns)
 
--- the end: close, introduce, unfold, or stop
+/-- The end of a simplification: close (`emp ⊢ emp`, `… ⊢ htop`), introduce (`∀`, `−∗` on
+the right), unfold, or stop. -/
 def XT.finish (g : Nat) (V : Expr) (L R : Expr) (Ls Rs : List Expr) (ns : List String) : TacticM XT.Res := match Ls, Rs with
   | .nil, .nil => do
     closed ← XT.apply g "Entails.refl" (.val V ∷ .val (XT.emp V) ∷ .nil);
@@ -671,6 +759,7 @@ def XT.finish (g : Nat) (V : Expr) (L R : Expr) (Ls Rs : List Expr) (ns : List S
     | _ => XT.unfoldStep g V Ls Rs ns)
   | _, _ => XT.unfoldStep g V Ls Rs ns
 
+/-- Cancel, else a pure fact on the right, else `XT.finish`. -/
 def XT.stepC (g : Nat) (V L R : Expr) (Ls Rs : List Expr) (ns : List String) : TacticM XT.Res := do
     c ← XT.findCancel g Ls Rs;
     match c with
@@ -678,7 +767,7 @@ def XT.stepC (g : Nat) (V L R : Expr) (Ls Rs : List Expr) (ns : List String) : T
     | .none => (match XT.findIx XT.isPure 0 Rs with
       | .some j => XT.pureR g V L Rs j ns
       | .none => XT.finish g V L R Ls Rs ns)
--- a wand on the left and, elsewhere on the left, its premise: (wand, premise)
+/-- A wand on the left and, elsewhere on the left, its premise: (wand, premise). -/
 def XT.findWandIn (g : Nat) (Ls : List Expr) : Nat → List Expr → TacticM (Option (Nat × Nat))
   | _, .nil => TacticM.pure .none
   | i, .cons w ws => match XT.view w with
@@ -690,6 +779,7 @@ def XT.findWandIn (g : Nat) (Ls : List Expr) : Nat → List Expr → TacticM (Op
         | .false => TacticM.pure (.some (i, j')))
       | .none => XT.findWandIn g Ls (Nat.succ i) ws
     | _ => XT.findWandIn g Ls (Nat.succ i) ws
+/-- Apply a wand on the left to its premise (`xs.wand_l`). -/
 def XT.wandL (g : Nat) (V : Expr) (Ls : List Expr) (R : Expr) (i j : Nat) (ns : List String) : TacticM XT.Res := do
   g₁ ← XT.frontL g V Ls R j;
   let p := XT.nthE j Ls;
@@ -703,6 +793,7 @@ def XT.wandL (g : Nat) (V : Expr) (Ls : List Expr) (R : Expr) (i j : Nat) (ns : 
       .goalAt (XT.ent V (XT.sl V (b ∷ others)) R) ∷ .nil);
     TacticM.pure (.next g₃ .nil ns)
   | _ => XT.failAt g "xsimpl: no wand"
+/-- The right-hand steps: an existential, a wand on the left, then `XT.stepC`. -/
 def XT.stepS (g : Nat) (V L R : Expr) (Ls Rs : List Expr) (ns : List String) : TacticM XT.Res :=
   match XT.findIx XT.isEx 0 Rs with
   | .some j => XT.exR g V L Rs j ns
@@ -711,7 +802,7 @@ def XT.stepS (g : Nat) (V L R : Expr) (Ls Rs : List Expr) (ns : List String) : T
     match wd with
     | .some ij => XT.wandL g V Ls R ij.1 ij.2 ns
     | .none => XT.stepC g V L R Ls Rs ns
--- pull (left), then stop (`xpull`, or a `wp` goal) or the rest
+/-- Pull (left), then stop (`xpull`, or a `wp` goal) or the rest. -/
 def XT.stepF (full : Bool) (g : Nat) (V L R : Expr) (Ls Rs : List Expr) (ns : List String) : TacticM XT.Res :=
   match XT.findIx XT.isPull 0 Ls with
   | .some i => XT.pull g V Ls R i ns
@@ -719,12 +810,14 @@ def XT.stepF (full : Bool) (g : Nat) (V L R : Expr) (Ls Rs : List Expr) (ns : Li
     | .false, _ => TacticM.pure (.stop (g ∷ .nil) ns)
     | .true, .cons r .nil => XT.sel (XT.isWp r) (TacticM.pure (XT.Res.stop (g ∷ .nil) ns)) (XT.stepS g V L R Ls Rs ns)
     | .true, _ => XT.stepS g V L R Ls Rs ns)
+/-- On flat sides `XT.stepF`; otherwise flatten them first (`xs.flat`). -/
 def XT.stepE (full : Bool) (g : Nat) (V L R : Expr) (ns : List String) : TacticM XT.Res := match XT.flatOf L, XT.flatOf R with
   | .some Ls, .some Rs => XT.stepF full g V L R Ls Rs ns
   | _, _ => do
     g' ← XT.apply1 g "xs.flat" (.val V ∷ .val (XT.tree V 100000 L) ∷ .val (XT.tree V 100000 R) ∷
       .goalAt (XT.ent V (XT.sl V (XT.atoms L)) (XT.sl V (XT.atoms R))) ∷ .nil);
     TacticM.pure (.next g' .nil ns)
+/-- One step of `XT.simp` on goal `g` (a triple is first restated as `P ⊢ wp c Q`). -/
 def XT.step (full : Bool) (g : Nat) (ns : List String) : TacticM XT.Res := do
   ty ← TacticM.goalType g;
   match XT.appN "Entails" 3 ty, XT.appN "Triple" 5 ty with
@@ -733,7 +826,26 @@ def XT.step (full : Bool) (g : Nat) (ns : List String) : TacticM XT.Res := do
     g' ← XT.restate g V P (XT.wpOf V A c Q);
     TacticM.pure (.next g' .nil ns)
   | _, _ => TacticM.pure (.stop (g ∷ .nil) ns)
--- the loop: the goals left (the main one first) and the names left
+/-- The loop of `xpull` and `xsimpl` (fuel, full?, goal, side goals, names): the goals left
+(the main one first) and the names left. A step reads the goal, and either replaces it by
+one new goal (with side goals: witnesses of existentials, pure side conditions) or stops.
+In order:
+
+1. flatten both sides into star lists (`xs.flat`);
+2. on the left, a pure fact becomes a hypothesis (`hp`; if it is contradictory, it
+   closes the goal), an existential a variable (named after its binder; names can be
+   given: `xpull as n, h`); `xpull` stops here;
+3. a goal `… ⊢ wp c Q` is left for the program tactics;
+4. an existential on the right gets a metavariable as its witness;
+5. a right atom equal (argument by argument, up to conversion, solving metavariables)
+   to a left atom is cancelled;
+6. a pure fact on the right becomes a side goal (closed if `rfl`, an assumption or
+   `fun e => e` proves it);
+7. `emp ⊢ emp` and `… ⊢ htop` are closed; `… ⊢ ∀x. J x` and `… ⊢ H₁ −∗ H₂` are
+   introduced;
+8. an atom whose head is a definition that computes (a representation predicate applied
+   to a constructor, `MList (x :: L) p`) is unfolded once (`TacticM.unfold`, which folds
+   the recursive occurrences back), right atoms first. -/
 def XT.simp : Nat → Bool → Nat → List Nat → List String → TacticM (List Nat × List String)
   | .zero, _, g, side, ns => TacticM.pure (g ∷ side, ns)
   | .succ f, full, g, side, ns => do
@@ -742,7 +854,7 @@ def XT.simp : Nat → Bool → Nat → List Nat → List String → TacticM (Lis
     | .next g' s ns' => XT.simp f full g' (List.append s side) ns'
     | .stop gs ns' => TacticM.pure (List.append gs side, ns')
 
--- the goals a tactic leaves, with star lists shown as `⋆` chains
+/-- A goal as a tactic leaves it, with star lists shown as `⋆` chains. -/
 def XT.tidy (g : Nat) : TacticM Nat := do
   ty ← TacticM.goalType g;
   match XT.appN "Entails" 3 ty with
@@ -752,12 +864,14 @@ def XT.tidy (g : Nat) : TacticM Nat := do
     | _, .list r => XT.restate g V L (XT.sl V r)
     | _, _ => TacticM.pure g)
   | _ => TacticM.pure g
+/-- Make the goals left the tactic's goals (tidied). -/
 def XT.leave (gs : List Nat) : TacticM Unit := match gs with
   | .cons g rest => do
     g' ← XT.tidy g;
     TacticM.replaceMainGoal (g' ∷ rest)
   | .nil => TacticM.replaceMainGoal .nil
 
+/-- Run `XT.simp` on the main goal: `xsimpl` (`full`) or `xpull`, with names to introduce. -/
 def XT.runSimp (full : Bool) (ns : List String) : TacticM Unit := do
   g ← TacticM.mainGoal;
   r ← XT.simp 1000 full g .nil ns;
@@ -765,20 +879,29 @@ def XT.runSimp (full : Bool) (ns : List String) : TacticM Unit := do
 
 -- `xsimpl`: simplify an entailment, cancelling what matches; what is left is a goal
 syntax (name := xsimpl) "xsimpl" : tactic
+/-- `xsimpl`: simplify an entailment, cancelling what matches; what is left is a goal.
+
+```
+def swapped (l v : Nat) (H : HProp Nat) : H ⋆ (l ↦ v) ⊢ (l ↦ v) ⋆ H := by xsimpl
+``` -/
 def Tactic.xsimpl : Tactic := fun _ => XT.runSimp .true .nil
 attribute [tactic tactic.xsimpl] Tactic.xsimpl
 syntax (name := xsimplAs) "xsimpl" "as" sepBy(ident, ",") : tactic
+/-- `xsimpl as x, h`: `xsimpl`, naming the variables and hypotheses it introduces. -/
 def Tactic.xsimplAs : Tactic := fun stx => XT.runSimp .true (Syntax.sepIdents (Syntax.getArg stx 2))
 attribute [tactic tactic.xsimplAs] Tactic.xsimplAs
 -- `xpull`: only flatten the left and introduce its pure facts and existentials
 syntax (name := xpull) "xpull" : tactic
+/-- `xpull`: only flatten the left and introduce its pure facts and existentials. -/
 def Tactic.xpull : Tactic := fun _ => XT.runSimp .false .nil
 attribute [tactic tactic.xpull] Tactic.xpull
 syntax (name := xpullAs) "xpull" "as" sepBy(ident, ",") : tactic
+/-- `xpull as x, h`: `xpull`, naming what it introduces. -/
 def Tactic.xpullAs : Tactic := fun stx => XT.runSimp .false (Syntax.sepIdents (Syntax.getArg stx 2))
 attribute [tactic tactic.xpullAs] Tactic.xpullAs
 -- `xwp`: a triple as `P ⊢ wp c Q`, with `P` pulled
 syntax (name := xwp) "xwp" : tactic
+/-- `xwp`: a triple as `P ⊢ wp c Q`, with `P` pulled. -/
 def Tactic.xwp : Tactic := fun _ => XT.runSimp .false .nil
 attribute [tactic tactic.xwp] Tactic.xwp
 
@@ -790,10 +913,15 @@ attribute [tactic tactic.xwp] Tactic.xwp
 -- to), or as a bind. Each takes `as x, y, …`: names for the variables and hypotheses it
 -- introduces, in order (by default they are named after their binders).
 
+/-- Program steps (`xstep`, `xapp`, `xseq`, `xval`, `xchange`, `xunfold`) work on a goal
+`H ⊢ wp c Q` (or `Triple H c Q`), after pulling `H`: this is such a goal taken apart
+(goal, `V`, the precondition and its atoms, `A`, `c`, `Q`), or `closed` when pulling
+found a contradiction. -/
 inductive XT.WpGoal where
   | mk (g : Nat) (V L : Expr) (Ls : List Expr) (A c Q : Expr)
   -- pulling the precondition found a contradiction: no goal left
   | closed
+/-- Pull the precondition of goal `g` and take the goal apart as an `XT.WpGoal`. -/
 def XT.wpGoal (g : Nat) (ns : List String) : TacticM (XT.WpGoal × List String) := do
   r ← XT.simp 1000 .false g .nil ns;
   match r.1 with
@@ -807,6 +935,9 @@ def XT.wpGoal (g : Nat) (ns : List String) : TacticM (XT.WpGoal × List String) 
       | _, _ => XT.failAt g' "x-tactics: the goal is not `H ⊢ wp c Q` (or a triple)")
     | _ => XT.failAt g' "x-tactics: the goal is not `H ⊢ wp c Q` (or a triple)"
 
+/-- The shape of a program: a constructor of `Prog`, a bind, or something else. The program
+is taken apart after computing its head (`TacticM.whnfCtorApp`: `Prog.swap p q` is read
+as the `Prog.get p …` it computes to). -/
 inductive XT.Shape where
   | ret (a : Expr)
   | get (l k : Expr)
@@ -816,11 +947,12 @@ inductive XT.Shape where
   | fail
   | bind (A c f : Expr)
   | other
--- `Prog.bind c f` (or `c >>= f`): the type of `c`'s result, `c` and `f`
+/-- `Prog.bind c f` (or `c >>= f`): the type of `c`'s result, `c` and `f`. -/
 def XT.bindOf (c : Expr) : Option (Expr × (Expr × Expr)) := match XT.appN "Prog.bind" 5 c, XT.appN "Monad.bind" 6 c with
   | .some xs, _ => .some (XT.nthE 1 xs, (XT.nthE 3 xs, XT.nthE 4 xs))
   | _, .some xs => .some (XT.nthE 2 xs, (XT.nthE 4 xs, XT.nthE 5 xs))
   | _, _ => .none
+/-- The shape of a constructor application, by the constructor's name. -/
 def XT.shapeCtor (n : String) (fs : List Expr) : XT.Shape :=
   let f := fun (i : Nat) => XT.nthE i fs;
   XT.sel (Expr.nameEq n "Prog.ret") (.ret (f 0)) (
@@ -829,6 +961,7 @@ def XT.shapeCtor (n : String) (fs : List Expr) : XT.Shape :=
   XT.sel (Expr.nameEq n "Prog.alloc") (.alloc (f 0) (f 1)) (
   XT.sel (Expr.nameEq n "Prog.free") (.free (f 0) (f 1)) (
   XT.sel (Expr.nameEq n "Prog.fail") .fail .other)))))
+/-- The shape of a program (a bind, or the constructor its head computes to). -/
 def XT.shape (g : Nat) (c : Expr) : TacticM XT.Shape := match XT.bindOf c with
   | .some b => TacticM.pure (.bind b.1 b.2.1 b.2.2)
   | .none => do
@@ -837,7 +970,7 @@ def XT.shape (g : Nat) (c : Expr) : TacticM XT.Shape := match XT.bindOf c with
     | .some p => TacticM.pure (XT.shapeCtor p.1 p.2)
     | .none => TacticM.pure .other
 
--- the cell `l ↦ v` among the atoms: its position and `v`
+/-- The cell `l ↦ v` among the atoms: its position and `v`. -/
 def XT.findPts (g : Nat) (l : Expr) : Nat → List Expr → TacticM (Option (Nat × Expr))
   | _, .nil => TacticM.pure .none
   | i, .cons a rs => match XT.view a with
@@ -848,17 +981,20 @@ def XT.findPts (g : Nat) (l : Expr) : Nat → List Expr → TacticM (Option (Nat
       | .false => XT.findPts g l (Nat.succ i) rs
     | _ => XT.findPts g l (Nat.succ i) rs
 
+/-- Split a bind off the program (`xw.bind`) and read the new goal. -/
 def XT.split (w : XT.WpGoal) (A₀ c₀ f₀ : Expr) (ns : List String) : TacticM (XT.WpGoal × List String) := match w with
   | .mk g V L Ls A c Q => do
     g₁ ← XT.apply1 g "xw.bind" (.val V ∷ .val A₀ ∷ .val A ∷ .val c₀ ∷ .val f₀ ∷ .val Q ∷ .val L ∷ .goal ∷ .nil);
     XT.wpGoal g₁ ns
   | .closed => TacticM.pure (.closed, ns)
 
--- a command that needs the cell `l`: bring it to the front and apply `k g v rest`, or
--- unfold the precondition (and the caller starts again)
+/-- The result of `XT.withCell`: done, with the new goals, or start again with the unfolded
+goal. -/
 inductive XT.CellRes where
   | done (gs : List Nat)
   | again (w : XT.WpGoal) (ns : List String)
+/-- A command that needs the cell `l`: bring it to the front and apply `k g v rest`, or
+unfold the precondition (and the caller starts again). -/
 def XT.withCell (w : XT.WpGoal) (l : Expr) (k : Nat → Expr → List Expr → TacticM (List Nat)) (ns : List String) :
     TacticM XT.CellRes := match w with
   | .closed => TacticM.pure (.done .nil)
@@ -885,23 +1021,24 @@ def XT.withCell (w : XT.WpGoal) (l : Expr) (k : Nat → Expr → List Expr → T
 -- (13b: "cannot infer a type for (a, fun phantom✝ fields✝ => ())"). So a part with a
 -- handle is named through the program as it is written (`Prog.loc c`, `Prog.getK c v`,
 -- `Prog.setV u c`, `Prog.next c`), and conversion computes it.
+/-- Whether an expression contains an opaque handle (see the note above). -/
 def XT.hasOpaque : Expr → Bool
   | .opaque _ => .true
   | .app f a => Bool.or (XT.hasOpaque f) (XT.hasOpaque a)
   | .lam _ b => XT.hasOpaque b
   | .pi _ _ q d b => Bool.or (XT.hasOpaque q) (Bool.or (XT.hasOpaque d) (XT.hasOpaque b))
   | _ => .false
--- `e` under one more binder
+/-- `e` with its free variables (those `≥ c`) shifted up by one. -/
 def XT.shift : Nat → Expr → Expr
   | c, .var i => XT.sel (Nat.lt i c) (Expr.var i) (Expr.var (Nat.succ i))
   | c, .app f a => .app (XT.shift c f) (XT.shift c a)
   | c, .lam x b => .lam x (XT.shift (Nat.succ c) b)
   | c, .pi x i q d b => .pi x i (XT.shift c q) (XT.shift c d) (XT.shift (Nat.succ c) b)
   | _, e => e
--- a part as computed, or (if it has a handle) named through the program
+/-- A part as computed, or (if it has an opaque handle) named through the program. -/
 def XT.orPart (e : Expr) (folded : Expr) : Expr := XT.sel (XT.hasOpaque e) folded e
 
--- one command; the new goals
+/-- One command (with fuel for nested binds and unfoldings); the new goals. -/
 def XT.step1 : Nat → XT.WpGoal → List String → TacticM (List Nat × List String)
   | .zero, _, _ => TacticM.fail "xstep: too many nested binds or unfoldings"
   | .succ f, .closed, ns => TacticM.pure (.nil, ns)
@@ -951,6 +1088,7 @@ def XT.step1 : Nat → XT.WpGoal → List String → TacticM (List Nat × List S
       | .fail => XT.failAt g "xstep: the program fails here (`Prog.fail`: out of fuel?)"
       | .other => XT.failWith g "xstep: not a primitive command (for a call, use `xapp spec`):" c
 
+/-- Run `XT.step1` on the main goal. -/
 def XT.runStep (ns : List String) : TacticM Unit := do
   g ← TacticM.mainGoal;
   w ← XT.wpGoal g ns;
@@ -958,14 +1096,18 @@ def XT.runStep (ns : List String) : TacticM Unit := do
   XT.leave r.1
 -- `xstep`: one command (read, write, allocate, free, return), through binds
 syntax (name := xstep) "xstep" : tactic
+/-- `xstep`: one command (read, write, allocate, free, return), through binds. `xstep as x, h`
+names what it introduces. -/
 def Tactic.xstep : Tactic := fun _ => XT.runStep .nil
 attribute [tactic tactic.xstep] Tactic.xstep
 syntax (name := xstepAs) "xstep" "as" sepBy(ident, ",") : tactic
+/-- `xstep as x, h`: `xstep`, naming what it introduces. -/
 def Tactic.xstepAs : Tactic := fun stx => XT.runStep (Syntax.sepIdents (Syntax.getArg stx 2))
 attribute [tactic tactic.xstepAs] Tactic.xstepAs
 
 -- `xval`: the program returns; the rest is `xsimpl`'s
 syntax (name := xval) "xval" : tactic
+/-- `xval`: the program returns; the rest is `xsimpl`'s. -/
 def Tactic.xval : Tactic := fun _ => do
   g ← TacticM.mainGoal;
   w ← XT.wpGoal g .nil;
@@ -984,6 +1126,7 @@ attribute [tactic tactic.xval] Tactic.xval
 
 -- `xseq`: split `c >>= f` into `c` with the postcondition `fun a => wp (f a) Q`
 syntax (name := xseq) "xseq" : tactic
+/-- `xseq`: split `c >>= f` into `c` with the postcondition `fun a => wp (f a) Q`. -/
 def Tactic.xseq : Tactic := fun _ => do
   g ← TacticM.mainGoal;
   w ← XT.wpGoal g .nil;
@@ -998,16 +1141,16 @@ def Tactic.xseq : Tactic := fun _ => do
     | .none => XT.failWith g₁ "xseq: the program is not a bind:" c)
 attribute [tactic tactic.xseq] Tactic.xseq
 
--- `xapp t` with `t : Triple P c' Q'` (or `P ⊢ wp c' Q'`): binds are split off the front
--- of the program (unfolding its head where needed) until it is `c'`; `xsimpl` finds `P`
--- in the precondition, and what is left is the frame; the goal goes on after the call,
--- with `Q' r` in the precondition
+/-- The precondition, program and postcondition of a specification `Triple P c Q` (or
+`P ⊢ wp c Q`). -/
 def XT.specParts (ety : Expr) : Option (Expr × (Expr × Expr)) := match XT.appN "Triple" 5 ety, XT.appN "Entails" 3 ety with
   | .some xs, _ => .some (XT.nthE 2 xs, (XT.nthE 3 xs, XT.nthE 4 xs))
   | _, .some xs => (match XT.view (XT.nthE 2 xs) with
     | .wp _ c Q => .some (XT.nthE 1 xs, (c, Q))
     | _ => .none)
   | _, _ => .none
+/-- Split binds off the front of the program (unfolding its head where needed) until it is
+the specified program `c'`. -/
 def XT.callGoal : Nat → XT.WpGoal → List String → Expr → TacticM (XT.WpGoal × List String)
   | .zero, w, ns, _ => TacticM.pure (w, ns)
   | .succ f, .closed, ns, _ => TacticM.pure (.closed, ns)
@@ -1029,6 +1172,7 @@ def XT.callGoal : Nat → XT.WpGoal → List String → Expr → TacticM (XT.WpG
           | .none => do
             s ← TacticM.ppExpr g c';
             XT.failWith g (String.append "xapp: the specification is about " (String.append s ", but the program is")) c)
+/-- Run `xapp` with a specification on the main goal. -/
 def XT.runApp (spec : Syntax) (ns : List String) : TacticM Unit := do
   g ← TacticM.mainGoal;
   w₀ ← XT.wpGoal g ns;
@@ -1048,14 +1192,24 @@ def XT.runApp (spec : Syntax) (ns : List String) : TacticM Unit := do
         r ← XT.simp 1000 .true g₂ .nil w.2;
         XT.leave r.1
 syntax (name := xapp) "xapp" term : tactic
+/-- `xapp t` with `t : Triple P c' Q'` (or `P ⊢ wp c' Q'`): binds are split off the front of
+the program (unfolding its head where needed) until it is `c'`; `xsimpl` finds `P` in
+the precondition, and what is left is the frame; the goal goes on after the call, with
+`Q' r` in the precondition.
+
+```
+xapp (Prog.incr_spec p m)
+``` -/
 def Tactic.xapp : Tactic := fun stx => XT.runApp (Syntax.getArg stx 1) .nil
 attribute [tactic tactic.xapp] Tactic.xapp
 syntax (name := xappAs) "xapp" "[" sepBy(ident, ",") "]" term : tactic
+/-- `xapp [x, h] t`: `xapp`, naming what it introduces. -/
 def Tactic.xappAs : Tactic := fun stx => XT.runApp (Syntax.getArg stx 4) (Syntax.sepIdents (Syntax.getArg stx 2))
 attribute [tactic tactic.xappAs] Tactic.xappAs
 
 -- `xchange e` with `e : H₁ ⊢ H₂`: replace the atom `H₁` of the precondition by `H₂`
 syntax (name := xchange) "xchange" term : tactic
+/-- `xchange e` with `e : H₁ ⊢ H₂`: replace the atom `H₁` of the precondition by `H₂`. -/
 def Tactic.xchange : Tactic := fun stx => do
   g₀ ← TacticM.mainGoal;
   r₀ ← XT.simp 1000 .false g₀ .nil .nil;
@@ -1081,7 +1235,7 @@ def Tactic.xchange : Tactic := fun stx => do
     | _, _ => XT.failAt g "xchange: expected an entailment goal and `e : H₁ ⊢ H₂`"
 attribute [tactic tactic.xchange] Tactic.xchange
 
--- `xunfold`: unfold every atom of the precondition that computes (one level), and pull
+/-- Unfold every atom of a list that computes (one level). -/
 def XT.unfoldEach (g : Nat) : List Expr → TacticM (List Expr)
   | .nil => TacticM.pure .nil
   | .cons e es => do
@@ -1090,6 +1244,7 @@ def XT.unfoldEach (g : Nat) : List Expr → TacticM (List Expr)
     match r with
     | .some e' => TacticM.pure (e' ∷ rest)
     | .none => TacticM.pure (e ∷ rest)
+/-- Run `xunfold` on the main goal. -/
 def XT.runUnfold (ns : List String) : TacticM Unit := do
   g₀ ← TacticM.mainGoal;
   r₀ ← XT.simp 1000 .false g₀ .nil .nil;
@@ -1107,9 +1262,11 @@ def XT.runUnfold (ns : List String) : TacticM Unit := do
         XT.leave r.1)
     | _ => XT.failAt g "xunfold: expected an entailment"
 syntax (name := xunfold) "xunfold" : tactic
+/-- `xunfold`: unfold every atom of the precondition that computes (one level), and pull. -/
 def Tactic.xunfold : Tactic := fun _ => XT.runUnfold .nil
 attribute [tactic tactic.xunfold] Tactic.xunfold
 syntax (name := xunfoldAs) "xunfold" "as" sepBy(ident, ",") : tactic
+/-- `xunfold as x, h`: `xunfold`, naming what it introduces. -/
 def Tactic.xunfoldAs : Tactic := fun stx => XT.runUnfold (Syntax.sepIdents (Syntax.getArg stx 2))
 attribute [tactic tactic.xunfoldAs] Tactic.xunfoldAs
 

@@ -10,6 +10,8 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
+  is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to
   `.gitignore`) overrides it with a spec or a path to a toolchain directory or built
   checkout; the shims, `which` and `show` honour it (26a, #281).

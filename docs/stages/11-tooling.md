@@ -22,6 +22,45 @@ too. Commands that change the grammar or the macros rerun (they are cheap).
 `Wiz/Cache.lean` serialises terms as S-expressions (quantities through the rig's
 literal syntax). Every example gives the same output from the cache as without it.
 
+The store is **layered**: one directory is read and written (`--cache DIR`), and any
+number of further directories are read-only (`--cache-ro DIR`, repeatable). A lookup
+tries the write cache first, then the read caches in the order given; a missing or
+unparsable entry falls through to the next, and only a full miss is a miss. `put` and
+the module marker (`markSeen`) write to the write cache alone; with no write cache the
+marker stays in memory for the run. `binaryId`'s memo (`bin/`) also belongs to the write
+cache: a `--cache-ro`-only run hashes the executable each time, so a read-only directory
+is never created or modified. `--no-cache` clears both lists; flags parse left to right,
+so a later `--cache`/`--cache-ro` adds one again. `grail` takes the same flags (and
+`cache-ro` as a build-file setting) and forwards them to its jobs.
+
+This is what a Nix package uses: its build ships a cache in `$out/share/wiz/cache`, and
+a run is `wiz check --cache-ro $out/share/wiz/cache FILE` (or with a writable
+`--cache ~/.cache/wiz` in front). For a run with *only* read caches, say
+`--no-cache --cache-ro DIR`: `wiz` and `grail` default to a writable cache, and
+`--no-cache` clears it (it clears both lists) before the later `--cache-ro` adds the
+read-only one back. The read-only cache is shared by every user of the store path and
+is never written.
+
+**Module regions (`--region-cache`, experimental).** A module's effects are also written
+as one `<cache>/<binary ⊕ module key>.wizr`, a `Lean.CompactedRegion` (the format of
+`.olean`: an mmap'able image of the terms, saved at a base address derived from the module
+name; `Wiz/Cache.lean`, "Module regions"). `--region-cache` serves a module's cached
+commands from that region instead of decoding its `.wizc` entries. The text entries stay
+the authority and the fallback: a missing, truncated or mistagged region is a miss, and the
+next run rewrites it. The command loop (keys, imports, duplicate checks) is unchanged — it
+still parses every command and only takes the effects from the region, so the result is
+the same as the text path's. The artifact holds only `Effect`s, which have no closures, so
+the loader applies them to the live state (`Effect.apply`): `loader`, `trustedModule`,
+`pp.run` and the `Budget` stay live. `--region-stats` prints what came from a region.
+
+**Regions and layers together.** Regions live in the same directory layers as the text
+entries: a lookup tries the write cache first, then the read-only caches in order (so a
+region shipped in `--cache-ro DIR` is used, and a run with only read caches reads
+regions), and a region is only ever written to the write cache. A `--region-cache` run
+with `--cache-ro` therefore reads both kinds of artifact from both kinds of layer, never
+modifies a read-only cache, and still falls back to the text entry of the same module
+(or a later layer) when a region is missing or mistagged.
+
 Next: finer dependencies (re-elaborate only what an edit affects, not everything
 after it).
 
@@ -367,7 +406,13 @@ package's `lib` targets with its module roots (dependencies included), into
   cache; Markdown; `wiz doc` on a small package with doc comments (kinds, docs, source
   links, instances, the index); every cross-link resolves; every declaration is in the
   search index; the pages without JS; `grail doc`; and the page model of the Wasm module
-  run natively on a page's JSON (hover, click, keys).
+  run natively on a page's JSON (hover, click, keys); and that the core library is
+  documented (every public declaration of `Prelude`, `Std`, `Vec` and `Word` has a doc
+  comment, and each has a module doc).
+* **The library's documentation.** Every module in `lib/` has a `/-! … -/` module doc
+  (what it is for, its main definitions, an example) and a `/-- … -/` doc comment on each
+  public declaration; `--` comments are left for implementation notes. `wiz doc --lib -o
+  OUT` builds the pages (CI's `wiz-docs` artifact).
 
 ## 11w: hovers in tactic arguments, the other infoviews, `local instance`, the browser infoview
 
@@ -449,6 +494,14 @@ text cut after it, with its open brackets closed. In Neovim 0.11, `<C-s>` in ins
 ```
 def b (xs : List Nat) : Nat := List.length ‸    -- List.length {A : Type} [(_ : List A)] : Nat
 ```
+
+### Doc comments in the editor (11s, 11t, 11u)
+
+The language server shows a declaration's doc comment (`/-- … -/`, `CommandState.docOf?`)
+as Markdown: in a hover under the type (`double : Nat → Nat`, a rule, then the doc), as
+a completion item's `documentation`, and as signature help's `documentation`. Locals have
+none; the library's declarations are documented (`lib/`), so `Nat.add` explains itself.
+
 ## 11v: the outline, workspace symbols and folding
 
 * **Document symbols** (`textDocument/documentSymbol`, `Wiz/Symbols.lean`): one symbol per

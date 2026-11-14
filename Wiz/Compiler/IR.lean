@@ -141,7 +141,7 @@ def Decl.toString (d : Decl) : String :=
 A top-level function without parameters (after erasure) is a *constant applicative form*,
 as in GHC and Lean: its body is the same value at every use. The native backends compute
 it on its first use and keep it for the rest of the run (immortal, never freed: see
-`wiz_caf_init` in `runtime/wiz.c`). Lazily, never at startup, so a definition that is never
+`wiz_caf_init` in `runtime/`). Lazily, never at startup, so a definition that is never
 used is never computed, even one that diverges or is huge. A value of type `IO A` is a
 function of the world: its body builds a closure (or is a function with a parameter), so
 caching it does not run it.

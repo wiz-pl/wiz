@@ -1,6 +1,11 @@
 import Hdl.Core
 import Text
--- the iCEstick demo's vocabulary (wiz-icestick-uart, src/Icestick/Gates.wiz, Oled.wiz)
+/-!
+# Hdl.Verified
+
+the iCEstick demo's vocabulary (wiz-icestick-uart, src/Icestick/Gates.wiz, Oled.wiz)
+-/
+
 def Bit : HwTy := HwTy.bits 1
 def D4 : HwTy := HwTy.bits 4
 def D5 : HwTy := HwTy.bits 5

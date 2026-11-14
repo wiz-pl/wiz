@@ -1,0 +1,738 @@
+# The Wiz trust ledger: the trusted base of lib/ (and the axiom-free examples).
+# One line per source of trust: module<TAB>declaration<TAB>item.  `item` is the wording
+# of `#print axioms` (`axiom X`, `native f := g` for implemented_by, `native T := mk/get`
+# for a repr registration, `native_refl X.native✝`, `smt X.smt✝…`, `builtin k := n`), or
+# `partial` for a partial definition (its body is compiled, not unfolded).
+# `builtin inline` (a compiler hint) and `builtin int` (how values print) are not
+# trust and are not listed. A new line fails the `native` group (and
+# scripts/trust-ledger.sh): review it, then regenerate this file with
+# `scripts/trust-ledger.sh --update`.
+BvDecide	BvD.cmps	partial
+BvDecide	BvD.cmpsL	partial
+BvDecide	BvD.subNodes	partial
+BvDecide	BvD.word	partial
+BvDecide	BvD.word2	partial
+BvDecide	BvD.word3	partial
+Feral	Fe.appE	partial
+Feral	Fe.argRef	partial
+Feral	Fe.argRef0	partial
+Feral	Fe.args	partial
+Feral	Fe.arm	partial
+Feral	Fe.armL	partial
+Feral	Fe.arms	partial
+Feral	Fe.armsBy	partial
+Feral	Fe.arrowsO	partial
+Feral	Fe.assignE	partial
+Feral	Fe.bArms	partial
+Feral	Fe.binE	partial
+Feral	Fe.body	partial
+Feral	Fe.borrowE	partial
+Feral	Fe.branch	partial
+Feral	Fe.call	partial
+Feral	Fe.core	partial
+Feral	Fe.ctorApp	partial
+Feral	Fe.ctorFields	partial
+Feral	Fe.early	partial
+Feral	Fe.earlyL	partial
+Feral	Fe.evFind	partial
+Feral	Fe.evStep	partial
+Feral	Fe.evalS	partial
+Feral	Fe.expr	partial
+Feral	Fe.exprK	partial
+Feral	Fe.exprs	partial
+Feral	Fe.fieldNames	partial
+Feral	Fe.fieldTy	partial
+Feral	Fe.fieldVars	partial
+Feral	Fe.forE	partial
+Feral	Fe.globalE	partial
+Feral	Fe.letG	partial
+Feral	Fe.letS	partial
+Feral	Fe.linErr	partial
+Feral	Fe.linHs	partial
+Feral	Fe.linVs	partial
+Feral	Fe.loop	partial
+Feral	Fe.loopBinders	partial
+Feral	Fe.loopCall	partial
+Feral	Fe.loopCallL	partial
+Feral	Fe.loopFixed	partial
+Feral	Fe.matchG	partial
+Feral	Fe.memE	partial
+Feral	Fe.ment	partial
+Feral	Fe.mentL	partial
+Feral	Fe.paramsL	partial
+Feral	Fe.paramsO	partial
+Feral	Fe.resultArrow	partial
+Feral	Fe.resultO	partial
+Feral	Fe.rq	partial
+Feral	Fe.rqArgs	partial
+Feral	Fe.rqL	partial
+Feral	Fe.scope1	partial
+Feral	Fe.scopeOne	partial
+Feral	Fe.scoped	partial
+Feral	Fe.seqU	partial
+Feral	Fe.stmt	partial
+Feral	Fe.target	partial
+Feral	Fe.toks	partial
+Feral	Fe.toksL	partial
+Feral	Fe.tyOf	partial
+Feral	Fe.tyStr	partial
+Feral	Fe.tysOf	partial
+Feral	Fe.unify	partial
+Feral	Fe.unify2	partial
+Feral	Fe.unify3	partial
+Feral	Fe.unifyZ	partial
+Feral	Fe.varE	partial
+Feral	Fe.zonk	partial
+Handle	Owned	axiom Owned
+Handle	_private.Handle._0.Owned.burn	axiom _private.Handle._0.Owned.burn
+Handle	_private.Handle._0.Owned.burn	builtin extern:wiz_handle_disown:eew:v:io:: := _private.Handle._0.Owned.burn
+Handle	_private.Handle._0.Owned.mint	axiom _private.Handle._0.Owned.mint
+Handle	_private.Handle._0.Owned.mint	builtin extern:wiz_handle_own:ee:w:io:: := _private.Handle._0.Owned.mint
+IO	Bytes	axiom Bytes
+IO	Bytes.append	axiom Bytes.append
+IO	Bytes.append	builtin extern:wiz_bytes_append:ww:w:pure:: := Bytes.append
+IO	Bytes.empty	axiom Bytes.empty
+IO	Bytes.empty	builtin extern:wiz_bytes_empty::w:pure:: := Bytes.empty
+IO	Bytes.eq	axiom Bytes.eq
+IO	Bytes.eq	builtin extern:wiz_bytes_eq:ww:b:pure:: := Bytes.eq
+IO	Bytes.get	axiom Bytes.get
+IO	Bytes.get	builtin extern:wiz_bytes_get:wn:n:pure:: := Bytes.get
+IO	Bytes.ofString	axiom Bytes.ofString
+IO	Bytes.ofString	builtin extern:wiz_bytes_of_string:s:w:pure:: := Bytes.ofString
+IO	Bytes.push	axiom Bytes.push
+IO	Bytes.push	builtin extern:wiz_bytes_push:wn:w:pure:: := Bytes.push
+IO	Bytes.size	axiom Bytes.size
+IO	Bytes.size	builtin extern:wiz_bytes_size:w:n:pure:: := Bytes.size
+IO	Bytes.slice	axiom Bytes.slice
+IO	Bytes.slice	builtin extern:wiz_bytes_slice:wnn:w:pure:: := Bytes.slice
+IO	Bytes.toString	axiom Bytes.toString
+IO	Bytes.toString	builtin extern:wiz_bytes_to_string:w:s:pure:: := Bytes.toString
+IO	Float64	axiom Float64
+IO	Float64.add	axiom Float64.add
+IO	Float64.add	builtin extern:wiz_f64_add:ff:f:pure:: := Float64.add
+IO	Float64.div	axiom Float64.div
+IO	Float64.div	builtin extern:wiz_f64_div:ff:f:pure:: := Float64.div
+IO	Float64.lt	axiom Float64.lt
+IO	Float64.lt	builtin extern:wiz_f64_lt:ff:b:pure:: := Float64.lt
+IO	Float64.mul	axiom Float64.mul
+IO	Float64.mul	builtin extern:wiz_f64_mul:ff:f:pure:: := Float64.mul
+IO	Float64.ofNat	axiom Float64.ofNat
+IO	Float64.ofNat	builtin extern:wiz_f64_of_nat:n:f:pure:: := Float64.ofNat
+IO	Float64.sub	axiom Float64.sub
+IO	Float64.sub	builtin extern:wiz_f64_sub:ff:f:pure:: := Float64.sub
+IO	Float64.toString	axiom Float64.toString
+IO	Float64.toString	builtin extern:wiz_f64_show:f:s:pure:: := Float64.toString
+IO	IO.arg	axiom IO.arg
+IO	IO.arg	builtin extern:wiz_io_arg:n:s:io:: := IO.arg
+IO	IO.argCount	axiom IO.argCount
+IO	IO.argCount	builtin extern:wiz_io_arg_count::n:io:: := IO.argCount
+IO	IO.print	axiom IO.print
+IO	IO.print	builtin extern:wiz_io_print:s:v:io:: := IO.print
+IO	IO.println	axiom IO.println
+IO	IO.println	builtin extern:wiz_io_println:s:v:io:: := IO.println
+IO	IO.readFile	axiom IO.readFile
+IO	IO.readFile	builtin extern:wiz_io_read_file:s:s:io:: := IO.readFile
+IO	Nat.toString	partial
+IO	Nat.toStringSmall	axiom Nat.toStringSmall
+IO	Nat.toStringSmall	builtin extern:wiz_nat_show:n:s:pure:: := Nat.toStringSmall
+IO	UInt64	axiom UInt64
+IO	UInt64.add	axiom UInt64.add
+IO	UInt64.add	builtin extern:wiz_u64_add:uu:u:pure:: := UInt64.add
+IO	UInt64.div	axiom UInt64.div
+IO	UInt64.div	builtin extern:wiz_u64_div:uu:u:pure:: := UInt64.div
+IO	UInt64.eq	axiom UInt64.eq
+IO	UInt64.eq	builtin extern:wiz_u64_eq:uu:b:pure:: := UInt64.eq
+IO	UInt64.lt	axiom UInt64.lt
+IO	UInt64.lt	builtin extern:wiz_u64_lt:uu:b:pure:: := UInt64.lt
+IO	UInt64.mod	axiom UInt64.mod
+IO	UInt64.mod	builtin extern:wiz_u64_mod:uu:u:pure:: := UInt64.mod
+IO	UInt64.mul	axiom UInt64.mul
+IO	UInt64.mul	builtin extern:wiz_u64_mul:uu:u:pure:: := UInt64.mul
+IO	UInt64.ofNat	axiom UInt64.ofNat
+IO	UInt64.ofNat	builtin extern:wiz_u64_id:n:u:pure:: := UInt64.ofNat
+IO	UInt64.sub	axiom UInt64.sub
+IO	UInt64.sub	builtin extern:wiz_u64_sub:uu:u:pure:: := UInt64.sub
+IO	UInt64.toNat	axiom UInt64.toNat
+IO	UInt64.toNat	builtin extern:wiz_u64_id:u:n:pure:: := UInt64.toNat
+IO	World	axiom World
+Infoview	Infoview.htmlItems	partial
+Infoview	Infoview.itemsLines	partial
+Infoview	Infoview.splitHeader	partial
+Infoview	Infoview.takeBytes	partial
+Infoview	Infoview.words	partial
+Infoview	Infoview.wrapWords	partial
+Infoview	Key.decode	partial
+Intern	InternTable.empty	native InternTable.empty := InternTable.emptyNative
+Intern	InternTable.emptyNative	axiom InternTable.emptyNative
+Intern	InternTable.emptyNative	builtin extern:wiz_itab_empty::w:pure:: := InternTable.emptyNative
+Intern	InternTable.find	native InternTable.find := InternTable.findNative
+Intern	InternTable.findNative	axiom InternTable.findNative
+Intern	InternTable.findNative	builtin extern:wiz_itab_find:ww:w:pure:: := InternTable.findNative
+Intern	InternTable.intern	native InternTable.intern := InternTable.internNative
+Intern	InternTable.internNative	axiom InternTable.internNative
+Intern	InternTable.internNative	builtin extern:wiz_itab_intern:ww:w:pure:: := InternTable.internNative
+Intern	InternTable.lookup	native InternTable.lookup := InternTable.lookupNative
+Intern	InternTable.lookupNative	axiom InternTable.lookupNative
+Intern	InternTable.lookupNative	builtin extern:wiz_itab_lookup:ww:w:pure:: := InternTable.lookupNative
+Intern	InternTable.mk	native InternTable := InternTable.ofListNative/InternTable.toListNative
+Intern	InternTable.ofListNative	axiom InternTable.ofListNative
+Intern	InternTable.ofListNative	builtin extern:wiz_itab_of_list:w:w:pure:: := InternTable.ofListNative
+Intern	InternTable.seal✝	axiom InternTable.seal✝
+Intern	InternTable.seal✝	builtin seal:InternTable := InternTable.seal✝
+Intern	InternTable.size	native InternTable.size := InternTable.sizeNative
+Intern	InternTable.sizeNative	axiom InternTable.sizeNative
+Intern	InternTable.sizeNative	builtin extern:wiz_itab_size:w:w:pure:: := InternTable.sizeNative
+Intern	InternTable.toList	native InternTable.toList := InternTable.toListNative
+Intern	InternTable.toListNative	axiom InternTable.toListNative
+Intern	InternTable.toListNative	builtin extern:wiz_itab_to_list:w:w:pure:: := InternTable.toListNative
+Json	Json.array	partial
+Json	Json.digits	partial
+Json	Json.divMod	partial
+Json	Json.emit	partial
+Json	Json.emitField	partial
+Json	Json.emitFields	partial
+Json	Json.emitRest	partial
+Json	Json.natChars	partial
+Json	Json.object	partial
+Json	Json.strBody	partial
+Json	Json.strEscape	partial
+Json	Json.sub	partial
+Json	Json.value	partial
+MVar	Lock	axiom Lock
+MVar	Lock.Guard	axiom Lock.Guard
+MVar	Lock.new	axiom Lock.new
+MVar	Lock.new	builtin extern:wiz_lock_new::w:io:: := Lock.new
+MVar	MVar	axiom MVar
+MVar	MVar.Hole	axiom MVar.Hole
+MVar	MVar.new	axiom MVar.new
+MVar	MVar.new	builtin extern:wiz_mvar_new:e:w:io:: := MVar.new
+MVar	MVar.newFull	axiom MVar.newFull
+MVar	MVar.newFull	builtin extern:wiz_mvar_new_full:ew:w:io:: := MVar.newFull
+MVar	MVar.put	axiom MVar.put
+MVar	MVar.put	builtin extern:wiz_mvar_put:eww:v:io:: := MVar.put
+MVar	MVar.read	axiom MVar.read
+MVar	MVar.read	builtin extern:wiz_mvar_read:ew:w:io:: := MVar.read
+MVar	MVar.take	axiom MVar.take
+MVar	MVar.take	builtin extern:wiz_mvar_take:ew:w:io:: := MVar.take
+MVar	_private.MVar._0.Lock.acquireRaw	axiom _private.MVar._0.Lock.acquireRaw
+MVar	_private.MVar._0.Lock.acquireRaw	builtin extern:wiz_lock_acquire:w:w:io:: := _private.MVar._0.Lock.acquireRaw
+MVar	_private.MVar._0.Lock.releaseRaw	axiom _private.MVar._0.Lock.releaseRaw
+MVar	_private.MVar._0.Lock.releaseRaw	builtin extern:wiz_lock_release:ww:v:io:: := _private.MVar._0.Lock.releaseRaw
+MVar	_private.MVar._0.MVar.fillRaw	axiom _private.MVar._0.MVar.fillRaw
+MVar	_private.MVar._0.MVar.fillRaw	builtin extern:wiz_mvar_fill:ewww:v:io:: := _private.MVar._0.MVar.fillRaw
+MVar	_private.MVar._0.MVar.takeHole	axiom _private.MVar._0.MVar.takeHole
+MVar	_private.MVar._0.MVar.takeHole	builtin extern:wiz_mvar_take_hole:ew:w:io:: := _private.MVar._0.MVar.takeHole
+Prelude	Nat	builtin nat := Nat
+Prelude	Nat.add	builtin nat.add := Nat.add
+Prelude	Nat.beq	builtin nat.beq := Nat.beq
+Prelude	Nat.div	builtin nat.div := Nat.div
+Prelude	Nat.land	builtin nat.land := Nat.land
+Prelude	Nat.log2	builtin nat.log2 := Nat.log2
+Prelude	Nat.lor	builtin nat.lor := Nat.lor
+Prelude	Nat.lt	builtin nat.blt := Nat.lt
+Prelude	Nat.mod	builtin nat.mod := Nat.mod
+Prelude	Nat.mul	builtin nat.mul := Nat.mul
+Prelude	Nat.pow	builtin nat.pow := Nat.pow
+Prelude	Nat.pred	builtin nat.pred := Nat.pred
+Prelude	Nat.shiftLeft	builtin nat.shiftLeft := Nat.shiftLeft
+Prelude	Nat.shiftRight	builtin nat.shiftRight := Nat.shiftRight
+Prelude	Nat.sub	builtin nat.sub := Nat.sub
+Prelude	Nat.succ	builtin nat.succ := Nat.succ
+Prelude	Nat.xor	builtin nat.xor := Nat.xor
+Prelude	Nat.zero	builtin nat.zero := Nat.zero
+Prelude	String	builtin string := String
+Prelude	Syntax.decDigit	partial
+Prelude	Syntax.decPowers	partial
+Prelude	castRefl	axiom castRefl
+Prelude	memo	builtin memo := memo
+Ref	Loc	axiom Loc
+Ref	Pts	axiom Pts
+Ref	_private.Ref._0.Ref.freeRaw	axiom _private.Ref._0.Ref.freeRaw
+Ref	_private.Ref._0.Ref.freeRaw	builtin extern:wiz_ref_free:ewew:v:io:: := _private.Ref._0.Ref.freeRaw
+Ref	_private.Ref._0.Ref.newRaw	axiom _private.Ref._0.Ref.newRaw
+Ref	_private.Ref._0.Ref.newRaw	builtin extern:wiz_ref_new:ew:w:io:: := _private.Ref._0.Ref.newRaw
+Ref	_private.Ref._0.Ref.readRaw	axiom _private.Ref._0.Ref.readRaw
+Ref	_private.Ref._0.Ref.readRaw	builtin extern:wiz_ref_read:ewew:w:io:: := _private.Ref._0.Ref.readRaw
+Ref	_private.Ref._0.Ref.writeRaw	axiom _private.Ref._0.Ref.writeRaw
+Ref	_private.Ref._0.Ref.writeRaw	builtin extern:wiz_ref_write:ewwew:w:io:: := _private.Ref._0.Ref.writeRaw
+Region	Outlives	axiom Outlives
+Region	Outlives.refl	axiom Outlives.refl
+Region	Outlives.static	axiom Outlives.static
+Region	Outlives.trans	axiom Outlives.trans
+Region	Region	axiom Region
+Region	Region.static	axiom Region.static
+Ring	Ring.Reify.bin	partial
+Ring	Ring.Reify.go	partial
+Ring	Ring.synEq	partial
+SatTactic	SatT.node	partial
+SatTactic	SatT.node2	partial
+SatTactic	SatT.nodeConst	partial
+SatTactic	SatT.nodeDef	partial
+SatTactic	SatT.reflect	partial
+SatTactic	SatT.reflect2	partial
+SatTactic	SatT.reflectConst	partial
+Serial	Pty.nameRaw	axiom Pty.nameRaw
+Serial	Pty.nameRaw	builtin extern:wizser_pty_name:n:s:io:: := Pty.nameRaw
+Serial	Pty.openRaw	axiom Pty.openRaw
+Serial	Pty.openRaw	builtin extern:wizser_pty_open::n:io:: := Pty.openRaw
+Serial	Serial.configureRaw	axiom Serial.configureRaw
+Serial	Serial.configureRaw	builtin extern:wizser_configure:nnnnnn:n:io:: := Serial.configureRaw
+Serial	Serial.drainRaw	axiom Serial.drainRaw
+Serial	Serial.drainRaw	builtin extern:wizser_drain:n:n:io:: := Serial.drainRaw
+Serial	Serial.flushRaw	axiom Serial.flushRaw
+Serial	Serial.flushRaw	builtin extern:wizser_flush:nn:n:io:: := Serial.flushRaw
+Serial	Serial.getRaw	axiom Serial.getRaw
+Serial	Serial.getRaw	builtin extern:wizser_get:n:n:io:: := Serial.getRaw
+Serial	Serial.isTtyRaw	axiom Serial.isTtyRaw
+Serial	Serial.isTtyRaw	builtin extern:wizser_isatty:n:n:io:: := Serial.isTtyRaw
+Session	Chan	axiom Chan
+Session	Proc.runLinked	native Proc.runLinked := Proc.runLinkedThreads
+Session	_private.Session._0.Chan.closeRaw	axiom _private.Session._0.Chan.closeRaw
+Session	_private.Session._0.Chan.closeRaw	builtin extern:wiz_chan_close:w:v:io:: := _private.Session._0.Chan.closeRaw
+Session	_private.Session._0.Chan.forkRaw	axiom _private.Session._0.Chan.forkRaw
+Session	_private.Session._0.Chan.forkRaw	builtin extern:wiz_chan_fork:ew:w:io:: := _private.Session._0.Chan.forkRaw
+Session	_private.Session._0.Chan.recvRaw	axiom _private.Session._0.Chan.recvRaw
+Session	_private.Session._0.Chan.recvRaw	builtin extern:wiz_chan_recv:eew:w:io:: := _private.Session._0.Chan.recvRaw
+Session	_private.Session._0.Chan.sendRaw	axiom _private.Session._0.Chan.sendRaw
+Session	_private.Session._0.Chan.sendRaw	builtin extern:wiz_chan_send:eeww:w:io:: := _private.Session._0.Chan.sendRaw
+Std	Array	axiom Array
+Std	Array.empty	axiom Array.empty
+Std	Array.empty	builtin extern:wiz_array_empty:e:w:pure:: := Array.empty
+Std	Array.getD	axiom Array.getD
+Std	Array.getD	builtin extern:wiz_array_get:ewnw:w:pure:: := Array.getD
+Std	Array.push	axiom Array.push
+Std	Array.push	builtin extern:wiz_array_push:eww:w:pure:: := Array.push
+Std	Array.set	axiom Array.set
+Std	Array.set	builtin extern:wiz_array_set:ewnw:w:pure:: := Array.set
+Std	Array.size	axiom Array.size
+Std	Array.size	builtin extern:wiz_array_size:ew:n:pure:: := Array.size
+Std	IO.writeFile	axiom IO.writeFile
+Std	IO.writeFile	builtin extern:wiz_io_write_file:ss:v:io:: := IO.writeFile
+Std	Str	axiom Str
+Std	Str.append	axiom Str.append
+Std	Str.append	builtin extern:wiz_str_append:ww:w:pure:: := Str.append
+Std	Str.byte	axiom Str.byte
+Std	Str.byte	builtin extern:wiz_str_byte:wn:n:pure:: := Str.byte
+Std	Str.eq	axiom Str.eq
+Std	Str.eq	builtin extern:wiz_str_eq:ww:b:pure:: := Str.eq
+Std	Str.lt	axiom Str.lt
+Std	Str.lt	builtin extern:wiz_str_lt:ww:b:pure:: := Str.lt
+Std	Str.ofString	axiom Str.ofString
+Std	Str.ofString	builtin extern:wiz_str_of_cstr:s:w:pure:: := Str.ofString
+Std	Str.size	axiom Str.size
+Std	Str.size	builtin extern:wiz_str_size:w:n:pure:: := Str.size
+Std	Str.slice	axiom Str.slice
+Std	Str.slice	builtin extern:wiz_str_slice:wnn:w:pure:: := Str.slice
+Std	Str.toString	axiom Str.toString
+Std	Str.toString	builtin extern:wiz_str_to_cstr:w:s:pure:: := Str.toString
+Std	StrMap	axiom StrMap
+Std	StrMap.empty	axiom StrMap.empty
+Std	StrMap.empty	builtin extern:wiz_map_empty:e:w:pure:: := StrMap.empty
+Std	StrMap.findD	axiom StrMap.findD
+Std	StrMap.findD	builtin extern:wiz_map_find:ewww:w:pure:: := StrMap.findD
+Std	StrMap.insert	axiom StrMap.insert
+Std	StrMap.insert	builtin extern:wiz_map_insert:ewww:w:pure:: := StrMap.insert
+Std	StrMap.size	axiom StrMap.size
+Std	StrMap.size	builtin extern:wiz_map_size:ew:n:pure:: := StrMap.size
+Sys	Child	axiom Child
+Sys	Child.closeStdinRaw	axiom Child.closeStdinRaw
+Sys	Child.closeStdinRaw	builtin extern:wiz_sys_child_close_stdin:p:n:io:: := Child.closeStdinRaw
+Sys	Child.communicateRaw	axiom Child.communicateRaw
+Sys	Child.communicateRaw	builtin extern:wiz_sys_child_communicate:ps:n:io:: := Child.communicateRaw
+Sys	Child.killGroupRaw	axiom Child.killGroupRaw
+Sys	Child.killGroupRaw	builtin extern:wiz_sys_child_kill_group:pn:n:io:: := Child.killGroupRaw
+Sys	Child.killRaw	axiom Child.killRaw
+Sys	Child.killRaw	builtin extern:wiz_sys_child_kill:pn:n:io:: := Child.killRaw
+Sys	Child.pid	axiom Child.pid
+Sys	Child.pid	builtin extern:wiz_sys_child_pid:p:n:io:: := Child.pid
+Sys	Child.readRaw	axiom Child.readRaw
+Sys	Child.readRaw	builtin extern:wiz_sys_child_read:pn:s:io:: := Child.readRaw
+Sys	Child.takeRaw	axiom Child.takeRaw
+Sys	Child.takeRaw	builtin extern:wiz_sys_child_take:pn:n:io:: := Child.takeRaw
+Sys	Child.tryWaitRaw	axiom Child.tryWaitRaw
+Sys	Child.tryWaitRaw	builtin extern:wiz_sys_child_try_wait:p:n:io:: := Child.tryWaitRaw
+Sys	Child.waitRaw	axiom Child.waitRaw
+Sys	Child.waitRaw	builtin extern:wiz_sys_child_wait:p:n:io:: := Child.waitRaw
+Sys	Child.writeRaw	axiom Child.writeRaw
+Sys	Child.writeRaw	builtin extern:wiz_sys_child_write:ps:n:io:: := Child.writeRaw
+Sys	Clock.nsRaw	axiom Clock.nsRaw
+Sys	Clock.nsRaw	builtin extern:wiz_sys_clock_ns:n:n:io:: := Clock.nsRaw
+Sys	Clock.sleepRaw	axiom Clock.sleepRaw
+Sys	Clock.sleepRaw	builtin extern:wiz_sys_sleep_ns:n:v:io:: := Clock.sleepRaw
+Sys	Env.getRaw	axiom Env.getRaw
+Sys	Env.getRaw	builtin extern:wiz_sys_getenv:s:s:io:: := Env.getRaw
+Sys	Env.listRaw	axiom Env.listRaw
+Sys	Env.listRaw	builtin extern:wiz_sys_environ::w:io:: := Env.listRaw
+Sys	Env.setRaw	axiom Env.setRaw
+Sys	Env.setRaw	builtin extern:wiz_sys_setenv:ss:n:io:: := Env.setRaw
+Sys	Env.unsetRaw	axiom Env.unsetRaw
+Sys	Env.unsetRaw	builtin extern:wiz_sys_unsetenv:s:n:io:: := Env.unsetRaw
+Sys	FS.chdirRaw	axiom FS.chdirRaw
+Sys	FS.chdirRaw	builtin extern:wiz_sys_chdir:s:n:io:: := FS.chdirRaw
+Sys	FS.chmodRaw	axiom FS.chmodRaw
+Sys	FS.chmodRaw	builtin extern:wiz_sys_chmod:sn:n:io:: := FS.chmodRaw
+Sys	FS.getcwdRaw	axiom FS.getcwdRaw
+Sys	FS.getcwdRaw	builtin extern:wiz_sys_getcwd::s:io:: := FS.getcwdRaw
+Sys	FS.listDirRaw	axiom FS.listDirRaw
+Sys	FS.listDirRaw	builtin extern:wiz_sys_list_dir:s:w:io:: := FS.listDirRaw
+Sys	FS.mkdirRaw	axiom FS.mkdirRaw
+Sys	FS.mkdirRaw	builtin extern:wiz_sys_mkdir:sn:n:io:: := FS.mkdirRaw
+Sys	FS.mkdtempRaw	axiom FS.mkdtempRaw
+Sys	FS.mkdtempRaw	builtin extern:wiz_sys_mkdtemp:s:s:io:: := FS.mkdtempRaw
+Sys	FS.readBytesRaw	axiom FS.readBytesRaw
+Sys	FS.readBytesRaw	builtin extern:wiz_sys_read_bytes:s:w:io:: := FS.readBytesRaw
+Sys	FS.readFileRaw	axiom FS.readFileRaw
+Sys	FS.readFileRaw	builtin extern:wiz_sys_read_file:s:s:io:: := FS.readFileRaw
+Sys	FS.readlinkRaw	axiom FS.readlinkRaw
+Sys	FS.readlinkRaw	builtin extern:wiz_sys_readlink:s:s:io:: := FS.readlinkRaw
+Sys	FS.realPathRaw	axiom FS.realPathRaw
+Sys	FS.realPathRaw	builtin extern:wiz_sys_realpath:s:s:io:: := FS.realPathRaw
+Sys	FS.removeAllRaw	axiom FS.removeAllRaw
+Sys	FS.removeAllRaw	builtin extern:wiz_sys_remove_all:s:n:io:: := FS.removeAllRaw
+Sys	FS.renameRaw	axiom FS.renameRaw
+Sys	FS.renameRaw	builtin extern:wiz_sys_rename:ss:n:io:: := FS.renameRaw
+Sys	FS.rmdirRaw	axiom FS.rmdirRaw
+Sys	FS.rmdirRaw	builtin extern:wiz_sys_rmdir:s:n:io:: := FS.rmdirRaw
+Sys	FS.statRaw	axiom FS.statRaw
+Sys	FS.statRaw	builtin extern:wiz_sys_stat:sb:w:io:: := FS.statRaw
+Sys	FS.symlinkRaw	axiom FS.symlinkRaw
+Sys	FS.symlinkRaw	builtin extern:wiz_sys_symlink:ss:n:io:: := FS.symlinkRaw
+Sys	FS.unlinkRaw	axiom FS.unlinkRaw
+Sys	FS.unlinkRaw	builtin extern:wiz_sys_unlink:s:n:io:: := FS.unlinkRaw
+Sys	FS.writeBytesRaw	axiom FS.writeBytesRaw
+Sys	FS.writeBytesRaw	builtin extern:wiz_sys_write_bytes:swb:n:io:: := FS.writeBytesRaw
+Sys	FS.writeFileRaw	axiom FS.writeFileRaw
+Sys	FS.writeFileRaw	builtin extern:wiz_sys_write_file:ssb:n:io:: := FS.writeFileRaw
+Sys	Fd	axiom Fd
+Sys	Fd.adopt	axiom Fd.adopt
+Sys	Fd.adopt	builtin extern:wiz_sys_fd_adopt:n:p:io::wiz_sys_fd_free := Fd.adopt
+Sys	Fd.closeRaw	axiom Fd.closeRaw
+Sys	Fd.closeRaw	builtin extern:wiz_sys_fd_close:p:n:io:: := Fd.closeRaw
+Sys	Fd.keep	axiom Fd.keep
+Sys	Fd.keep	builtin extern:wiz_sys_fd_keep:p:v:io:: := Fd.keep
+Sys	Fd.markPtyController	axiom Fd.markPtyController
+Sys	Fd.markPtyController	builtin extern:wiz_sys_fd_set_pty:p:v:io:: := Fd.markPtyController
+Sys	Fd.openRaw	axiom Fd.openRaw
+Sys	Fd.openRaw	builtin extern:wiz_sys_fd_open:snnn:p:io::wiz_sys_fd_free := Fd.openRaw
+Sys	Fd.pipeRaw	axiom Fd.pipeRaw
+Sys	Fd.pipeRaw	builtin extern:wiz_sys_pipe::n:io:: := Fd.pipeRaw
+Sys	Fd.pollRaw	axiom Fd.pollRaw
+Sys	Fd.pollRaw	builtin extern:wiz_sys_fd_poll:wwbn:w:io:: := Fd.pollRaw
+Sys	Fd.raw	axiom Fd.raw
+Sys	Fd.raw	builtin extern:wiz_sys_fd_raw:p:n:io:: := Fd.raw
+Sys	Fd.readExactRaw	axiom Fd.readExactRaw
+Sys	Fd.readExactRaw	builtin extern:wiz_sys_fd_read_exact:pnbn:w:io:: := Fd.readExactRaw
+Sys	Fd.readRaw	axiom Fd.readRaw
+Sys	Fd.readRaw	builtin extern:wiz_sys_fd_read:pnbn:w:io:: := Fd.readRaw
+Sys	Fd.seekRaw	axiom Fd.seekRaw
+Sys	Fd.seekRaw	builtin extern:wiz_sys_fd_seek:pnnb:n:io:: := Fd.seekRaw
+Sys	Fd.std	axiom Fd.std
+Sys	Fd.std	builtin extern:wiz_sys_fd_std:n:p:io::wiz_sys_fd_free := Fd.std
+Sys	Fd.waitRaw	axiom Fd.waitRaw
+Sys	Fd.waitRaw	builtin extern:wiz_sys_fd_wait:pnbn:n:io:: := Fd.waitRaw
+Sys	Fd.writeRaw	axiom Fd.writeRaw
+Sys	Fd.writeRaw	builtin extern:wiz_sys_fd_write:pw:n:io:: := Fd.writeRaw
+Sys	File	axiom File
+Sys	File.closeRaw	axiom File.closeRaw
+Sys	File.closeRaw	builtin extern:wiz_sys_file_close:p:n:io:: := File.closeRaw
+Sys	File.flushRaw	axiom File.flushRaw
+Sys	File.flushRaw	builtin extern:wiz_sys_file_flush:p:n:io:: := File.flushRaw
+Sys	File.openRaw	axiom File.openRaw
+Sys	File.openRaw	builtin extern:wiz_sys_file_open:ss:p:io::wiz_sys_file_free := File.openRaw
+Sys	File.readAllRaw	axiom File.readAllRaw
+Sys	File.readAllRaw	builtin extern:wiz_sys_file_read_all:p:s:io:: := File.readAllRaw
+Sys	File.readBytesRaw	axiom File.readBytesRaw
+Sys	File.readBytesRaw	builtin extern:wiz_sys_file_read_bytes:pn:w:io:: := File.readBytesRaw
+Sys	File.readLineRaw	axiom File.readLineRaw
+Sys	File.readLineRaw	builtin extern:wiz_sys_file_read_line:p:s:io:: := File.readLineRaw
+Sys	File.seekRaw	axiom File.seekRaw
+Sys	File.seekRaw	builtin extern:wiz_sys_file_seek:pnnb:n:io:: := File.seekRaw
+Sys	File.std	axiom File.std
+Sys	File.std	builtin extern:wiz_sys_file_std:n:p:io::wiz_sys_file_free := File.std
+Sys	File.writeBytesRaw	axiom File.writeBytesRaw
+Sys	File.writeBytesRaw	builtin extern:wiz_sys_file_write_bytes:pw:n:io:: := File.writeBytesRaw
+Sys	File.writeRaw	axiom File.writeRaw
+Sys	File.writeRaw	builtin extern:wiz_sys_file_write:ps:n:io:: := File.writeRaw
+Sys	IO.appPathRaw	axiom IO.appPathRaw
+Sys	IO.appPathRaw	builtin extern:wiz_sys_app_path::s:io:: := IO.appPathRaw
+Sys	Process.execRaw	axiom Process.execRaw
+Sys	Process.execRaw	builtin extern:wiz_sys_exec:sw:n:io:: := Process.execRaw
+Sys	Process.exit	axiom Process.exit
+Sys	Process.exit	builtin extern:wiz_sys_exit:n:v:io:: := Process.exit
+Sys	Process.id	axiom Process.id
+Sys	Process.id	builtin extern:wiz_sys_getpid::n:io:: := Process.id
+Sys	Process.spawnRaw	axiom Process.spawnRaw
+Sys	Process.spawnRaw	builtin extern:wiz_sys_spawn:swnnn:p:io::wiz_sys_child_free := Process.spawnRaw
+Sys	Process.spawnWithRaw	axiom Process.spawnWithRaw
+Sys	Process.spawnWithRaw	builtin extern:wiz_sys_spawn_with:swnnnswbn:p:io::wiz_sys_child_free := Process.spawnWithRaw
+Sys	Sys.errno	axiom Sys.errno
+Sys	Sys.errno	builtin extern:wiz_sys_errno::n:io:: := Sys.errno
+Sys	Sys.errorMessage	axiom Sys.errorMessage
+Sys	Sys.errorMessage	builtin extern:wiz_sys_strerror:n:s:pure:: := Sys.errorMessage
+Tagged	TT.flatten	partial
+Tagged	TT.flattenAll	partial
+Tagged	TT.html	partial
+Tagged	TT.htmlAll	partial
+Tagged	TT.ofJson	partial
+Tagged	TT.ofJsons	partial
+Text	Chars.replaceGo	partial
+Text	Chars.splitGo	partial
+Text	Nat.reprGo	partial
+Word	IntN.add	native IntN.add := IntN.addNative
+Word	IntN.addNative	axiom IntN.addNative
+Word	IntN.addNative	builtin extern:wiz_word_add:nww:w:pure:: := IntN.addNative
+Word	IntN.beq	native IntN.beq := IntN.beqNative
+Word	IntN.beqNative	axiom IntN.beqNative
+Word	IntN.beqNative	builtin extern:wiz_word_eq:eww:b:pure:: := IntN.beqNative
+Word	IntN.div	native IntN.div := IntN.divNative
+Word	IntN.divNative	axiom IntN.divNative
+Word	IntN.divNative	builtin extern:wiz_word_sdiv:nww:w:pure:: := IntN.divNative
+Word	IntN.isNeg	native IntN.isNeg := IntN.isNegNative
+Word	IntN.isNegNative	axiom IntN.isNegNative
+Word	IntN.isNegNative	builtin extern:wiz_word_msb:nw:b:pure:: := IntN.isNegNative
+Word	IntN.land	native IntN.land := IntN.landNative
+Word	IntN.landNative	axiom IntN.landNative
+Word	IntN.landNative	builtin extern:wiz_word_and:eww:w:pure:: := IntN.landNative
+Word	IntN.le	native IntN.le := IntN.leNative
+Word	IntN.leNative	axiom IntN.leNative
+Word	IntN.leNative	builtin extern:wiz_word_sle:nww:b:pure:: := IntN.leNative
+Word	IntN.lor	native IntN.lor := IntN.lorNative
+Word	IntN.lorNative	axiom IntN.lorNative
+Word	IntN.lorNative	builtin extern:wiz_word_or:eww:w:pure:: := IntN.lorNative
+Word	IntN.lt	native IntN.lt := IntN.ltNative
+Word	IntN.ltNative	axiom IntN.ltNative
+Word	IntN.ltNative	builtin extern:wiz_word_slt:nww:b:pure:: := IntN.ltNative
+Word	IntN.mk	native IntN := IntN.ofBits/IntN.toBits
+Word	IntN.mul	native IntN.mul := IntN.mulNative
+Word	IntN.mulNative	axiom IntN.mulNative
+Word	IntN.mulNative	builtin extern:wiz_word_mul:nww:w:pure:: := IntN.mulNative
+Word	IntN.not	native IntN.not := IntN.notNative
+Word	IntN.notNative	axiom IntN.notNative
+Word	IntN.notNative	builtin extern:wiz_word_not:nw:w:pure:: := IntN.notNative
+Word	IntN.ofBits	axiom IntN.ofBits
+Word	IntN.ofBits	builtin extern:wiz_word_of_bits:ewe:w:pure:: := IntN.ofBits
+Word	IntN.ofNat	native IntN.ofNat := IntN.ofNatNative
+Word	IntN.ofNatNative	axiom IntN.ofNatNative
+Word	IntN.ofNatNative	builtin extern:wiz_word_of_nat:nw:w:pure:: := IntN.ofNatNative
+Word	IntN.ofNeg	native IntN.ofNeg := IntN.ofNegNative
+Word	IntN.ofNegNative	axiom IntN.ofNegNative
+Word	IntN.ofNegNative	builtin extern:wiz_word_of_neg:nw:w:pure:: := IntN.ofNegNative
+Word	IntN.rem	native IntN.rem := IntN.remNative
+Word	IntN.remNative	axiom IntN.remNative
+Word	IntN.remNative	builtin extern:wiz_word_srem:nww:w:pure:: := IntN.remNative
+Word	IntN.resize	native IntN.resize := IntN.resizeNative
+Word	IntN.resizeNative	axiom IntN.resizeNative
+Word	IntN.resizeNative	builtin extern:wiz_word_sext:nnw:w:pure:: := IntN.resizeNative
+Word	IntN.seal✝	axiom IntN.seal✝
+Word	IntN.seal✝	builtin seal:IntN := IntN.seal✝
+Word	IntN.shiftLeft	native IntN.shiftLeft := IntN.shiftLeftNative
+Word	IntN.shiftLeftNative	axiom IntN.shiftLeftNative
+Word	IntN.shiftLeftNative	builtin extern:wiz_word_shl:nww:w:pure:: := IntN.shiftLeftNative
+Word	IntN.shiftRight	native IntN.shiftRight := IntN.shiftRightNative
+Word	IntN.shiftRightNative	axiom IntN.shiftRightNative
+Word	IntN.shiftRightNative	builtin extern:wiz_word_ashr:nww:w:pure:: := IntN.shiftRightNative
+Word	IntN.sub	native IntN.sub := IntN.subNative
+Word	IntN.subNative	axiom IntN.subNative
+Word	IntN.subNative	builtin extern:wiz_word_sub:nww:w:pure:: := IntN.subNative
+Word	IntN.toBits	axiom IntN.toBits
+Word	IntN.toBits	builtin extern:wiz_word_to_bits:ew:w:pure:: := IntN.toBits
+Word	IntN.toNat	native IntN.toNat := IntN.toBits
+Word	IntN.toUIntN	native IntN.toUIntN := IntN.toUIntNNative
+Word	IntN.toUIntNNative	axiom IntN.toUIntNNative
+Word	IntN.toUIntNNative	builtin extern:wiz_word_cast:ew:w:pure:: := IntN.toUIntNNative
+Word	IntN.xor	native IntN.xor := IntN.xorNative
+Word	IntN.xorNative	axiom IntN.xorNative
+Word	IntN.xorNative	builtin extern:wiz_word_xor:eww:w:pure:: := IntN.xorNative
+Word	UIntN.add	native UIntN.add := UIntN.addNative
+Word	UIntN.addNative	axiom UIntN.addNative
+Word	UIntN.addNative	builtin extern:wiz_word_add:nww:w:pure:: := UIntN.addNative
+Word	UIntN.beq	native UIntN.beq := UIntN.beqNative
+Word	UIntN.beqNative	axiom UIntN.beqNative
+Word	UIntN.beqNative	builtin extern:wiz_word_eq:eww:b:pure:: := UIntN.beqNative
+Word	UIntN.div	native UIntN.div := UIntN.divNative
+Word	UIntN.divNative	axiom UIntN.divNative
+Word	UIntN.divNative	builtin extern:wiz_word_udiv:nww:w:pure:: := UIntN.divNative
+Word	UIntN.land	native UIntN.land := UIntN.landNative
+Word	UIntN.landNative	axiom UIntN.landNative
+Word	UIntN.landNative	builtin extern:wiz_word_and:eww:w:pure:: := UIntN.landNative
+Word	UIntN.le	native UIntN.le := UIntN.leNative
+Word	UIntN.leNative	axiom UIntN.leNative
+Word	UIntN.leNative	builtin extern:wiz_word_ule:eww:b:pure:: := UIntN.leNative
+Word	UIntN.lor	native UIntN.lor := UIntN.lorNative
+Word	UIntN.lorNative	axiom UIntN.lorNative
+Word	UIntN.lorNative	builtin extern:wiz_word_or:eww:w:pure:: := UIntN.lorNative
+Word	UIntN.lt	native UIntN.lt := UIntN.ltNative
+Word	UIntN.ltNative	axiom UIntN.ltNative
+Word	UIntN.ltNative	builtin extern:wiz_word_ult:eww:b:pure:: := UIntN.ltNative
+Word	UIntN.mk	native UIntN := UIntN.ofBits/UIntN.toBits
+Word	UIntN.mod	native UIntN.mod := UIntN.modNative
+Word	UIntN.modNative	axiom UIntN.modNative
+Word	UIntN.modNative	builtin extern:wiz_word_umod:nww:w:pure:: := UIntN.modNative
+Word	UIntN.msb	native UIntN.msb := UIntN.msbNative
+Word	UIntN.msbNative	axiom UIntN.msbNative
+Word	UIntN.msbNative	builtin extern:wiz_word_msb:nw:b:pure:: := UIntN.msbNative
+Word	UIntN.mul	native UIntN.mul := UIntN.mulNative
+Word	UIntN.mulNative	axiom UIntN.mulNative
+Word	UIntN.mulNative	builtin extern:wiz_word_mul:nww:w:pure:: := UIntN.mulNative
+Word	UIntN.not	native UIntN.not := UIntN.notNative
+Word	UIntN.notNative	axiom UIntN.notNative
+Word	UIntN.notNative	builtin extern:wiz_word_not:nw:w:pure:: := UIntN.notNative
+Word	UIntN.ofBits	axiom UIntN.ofBits
+Word	UIntN.ofBits	builtin extern:wiz_word_of_bits:ewe:w:pure:: := UIntN.ofBits
+Word	UIntN.ofNat	native UIntN.ofNat := UIntN.ofNatNative
+Word	UIntN.ofNatNative	axiom UIntN.ofNatNative
+Word	UIntN.ofNatNative	builtin extern:wiz_word_of_nat:nw:w:pure:: := UIntN.ofNatNative
+Word	UIntN.resize	native UIntN.resize := UIntN.resizeNative
+Word	UIntN.resizeNative	axiom UIntN.resizeNative
+Word	UIntN.resizeNative	builtin extern:wiz_word_zext:enw:w:pure:: := UIntN.resizeNative
+Word	UIntN.seal✝	axiom UIntN.seal✝
+Word	UIntN.seal✝	builtin seal:UIntN := UIntN.seal✝
+Word	UIntN.shiftLeft	native UIntN.shiftLeft := UIntN.shiftLeftNative
+Word	UIntN.shiftLeftNative	axiom UIntN.shiftLeftNative
+Word	UIntN.shiftLeftNative	builtin extern:wiz_word_shl:nww:w:pure:: := UIntN.shiftLeftNative
+Word	UIntN.shiftRight	native UIntN.shiftRight := UIntN.shiftRightNative
+Word	UIntN.shiftRightNative	axiom UIntN.shiftRightNative
+Word	UIntN.shiftRightNative	builtin extern:wiz_word_lshr:eww:w:pure:: := UIntN.shiftRightNative
+Word	UIntN.sub	native UIntN.sub := UIntN.subNative
+Word	UIntN.subNative	axiom UIntN.subNative
+Word	UIntN.subNative	builtin extern:wiz_word_sub:nww:w:pure:: := UIntN.subNative
+Word	UIntN.testBit	native UIntN.testBit := UIntN.testBitNative
+Word	UIntN.testBitNative	axiom UIntN.testBitNative
+Word	UIntN.testBitNative	builtin extern:wiz_word_bit:eww:b:pure:: := UIntN.testBitNative
+Word	UIntN.toBits	axiom UIntN.toBits
+Word	UIntN.toBits	builtin extern:wiz_word_to_bits:ew:w:pure:: := UIntN.toBits
+Word	UIntN.toIntN	native UIntN.toIntN := UIntN.toIntNNative
+Word	UIntN.toIntNNative	axiom UIntN.toIntNNative
+Word	UIntN.toIntNNative	builtin extern:wiz_word_cast:ew:w:pure:: := UIntN.toIntNNative
+Word	UIntN.toNat	native UIntN.toNat := UIntN.toBits
+Word	UIntN.xor	native UIntN.xor := UIntN.xorNative
+Word	UIntN.xorNative	axiom UIntN.xorNative
+Word	UIntN.xorNative	builtin extern:wiz_word_xor:eww:w:pure:: := UIntN.xorNative
+WordArray	U32Array.append	native U32Array.append := U32Array.appendNative
+WordArray	U32Array.appendNative	axiom U32Array.appendNative
+WordArray	U32Array.appendNative	builtin extern:wiz_warray_append:ww:w:pure:: := U32Array.appendNative
+WordArray	U32Array.empty	native U32Array.empty := U32Array.emptyNative
+WordArray	U32Array.emptyNative	axiom U32Array.emptyNative
+WordArray	U32Array.emptyNative	builtin extern:wiz_u32array_empty::w:pure:: := U32Array.emptyNative
+WordArray	U32Array.getD	native U32Array.getD := U32Array.getDNative
+WordArray	U32Array.getDNative	axiom U32Array.getDNative
+WordArray	U32Array.getDNative	builtin extern:wiz_warray_get:www:w:pure:: := U32Array.getDNative
+WordArray	U32Array.mk	native U32Array := U32Array.ofListNative/U32Array.toListNative
+WordArray	U32Array.ofList	native U32Array.ofList := U32Array.ofListNative
+WordArray	U32Array.ofListNative	axiom U32Array.ofListNative
+WordArray	U32Array.ofListNative	builtin extern:wiz_u32array_of_list:w:w:pure:: := U32Array.ofListNative
+WordArray	U32Array.pop	native U32Array.pop := U32Array.popNative
+WordArray	U32Array.popNative	axiom U32Array.popNative
+WordArray	U32Array.popNative	builtin extern:wiz_warray_pop:w:w:pure:: := U32Array.popNative
+WordArray	U32Array.push	native U32Array.push := U32Array.pushNative
+WordArray	U32Array.pushNative	axiom U32Array.pushNative
+WordArray	U32Array.pushNative	builtin extern:wiz_warray_push:ww:w:pure:: := U32Array.pushNative
+WordArray	U32Array.seal✝	axiom U32Array.seal✝
+WordArray	U32Array.seal✝	builtin seal:U32Array := U32Array.seal✝
+WordArray	U32Array.set	native U32Array.set := U32Array.setNative
+WordArray	U32Array.setNative	axiom U32Array.setNative
+WordArray	U32Array.setNative	builtin extern:wiz_warray_set:www:w:pure:: := U32Array.setNative
+WordArray	U32Array.size	native U32Array.size := U32Array.sizeNative
+WordArray	U32Array.sizeNative	axiom U32Array.sizeNative
+WordArray	U32Array.sizeNative	builtin extern:wiz_warray_size:w:w:pure:: := U32Array.sizeNative
+WordArray	U32Array.slice	native U32Array.slice := U32Array.sliceNative
+WordArray	U32Array.sliceNative	axiom U32Array.sliceNative
+WordArray	U32Array.sliceNative	builtin extern:wiz_warray_slice:www:w:pure:: := U32Array.sliceNative
+WordArray	U32Array.toList	native U32Array.toList := U32Array.toListNative
+WordArray	U32Array.toListNative	axiom U32Array.toListNative
+WordArray	U32Array.toListNative	builtin extern:wiz_warray_to_list:w:w:pure:: := U32Array.toListNative
+WordArray	U64Array.append	native U64Array.append := U64Array.appendNative
+WordArray	U64Array.appendNative	axiom U64Array.appendNative
+WordArray	U64Array.appendNative	builtin extern:wiz_warray_append:ww:w:pure:: := U64Array.appendNative
+WordArray	U64Array.empty	native U64Array.empty := U64Array.emptyNative
+WordArray	U64Array.emptyNative	axiom U64Array.emptyNative
+WordArray	U64Array.emptyNative	builtin extern:wiz_u64array_empty::w:pure:: := U64Array.emptyNative
+WordArray	U64Array.getD	native U64Array.getD := U64Array.getDNative
+WordArray	U64Array.getDNative	axiom U64Array.getDNative
+WordArray	U64Array.getDNative	builtin extern:wiz_warray_get:www:w:pure:: := U64Array.getDNative
+WordArray	U64Array.mk	native U64Array := U64Array.ofListNative/U64Array.toListNative
+WordArray	U64Array.ofList	native U64Array.ofList := U64Array.ofListNative
+WordArray	U64Array.ofListNative	axiom U64Array.ofListNative
+WordArray	U64Array.ofListNative	builtin extern:wiz_u64array_of_list:w:w:pure:: := U64Array.ofListNative
+WordArray	U64Array.pop	native U64Array.pop := U64Array.popNative
+WordArray	U64Array.popNative	axiom U64Array.popNative
+WordArray	U64Array.popNative	builtin extern:wiz_warray_pop:w:w:pure:: := U64Array.popNative
+WordArray	U64Array.push	native U64Array.push := U64Array.pushNative
+WordArray	U64Array.pushNative	axiom U64Array.pushNative
+WordArray	U64Array.pushNative	builtin extern:wiz_warray_push:ww:w:pure:: := U64Array.pushNative
+WordArray	U64Array.seal✝	axiom U64Array.seal✝
+WordArray	U64Array.seal✝	builtin seal:U64Array := U64Array.seal✝
+WordArray	U64Array.set	native U64Array.set := U64Array.setNative
+WordArray	U64Array.setNative	axiom U64Array.setNative
+WordArray	U64Array.setNative	builtin extern:wiz_warray_set:www:w:pure:: := U64Array.setNative
+WordArray	U64Array.size	native U64Array.size := U64Array.sizeNative
+WordArray	U64Array.sizeNative	axiom U64Array.sizeNative
+WordArray	U64Array.sizeNative	builtin extern:wiz_warray_size:w:w:pure:: := U64Array.sizeNative
+WordArray	U64Array.slice	native U64Array.slice := U64Array.sliceNative
+WordArray	U64Array.sliceNative	axiom U64Array.sliceNative
+WordArray	U64Array.sliceNative	builtin extern:wiz_warray_slice:www:w:pure:: := U64Array.sliceNative
+WordArray	U64Array.toList	native U64Array.toList := U64Array.toListNative
+WordArray	U64Array.toListNative	axiom U64Array.toListNative
+WordArray	U64Array.toListNative	builtin extern:wiz_warray_to_list:w:w:pure:: := U64Array.toListNative
+WordArray	U8Array.append	native U8Array.append := U8Array.appendNative
+WordArray	U8Array.appendNative	axiom U8Array.appendNative
+WordArray	U8Array.appendNative	builtin extern:wiz_warray_append:ww:w:pure:: := U8Array.appendNative
+WordArray	U8Array.empty	native U8Array.empty := U8Array.emptyNative
+WordArray	U8Array.emptyNative	axiom U8Array.emptyNative
+WordArray	U8Array.emptyNative	builtin extern:wiz_u8array_empty::w:pure:: := U8Array.emptyNative
+WordArray	U8Array.getD	native U8Array.getD := U8Array.getDNative
+WordArray	U8Array.getDNative	axiom U8Array.getDNative
+WordArray	U8Array.getDNative	builtin extern:wiz_warray_get:www:w:pure:: := U8Array.getDNative
+WordArray	U8Array.mk	native U8Array := U8Array.ofListNative/U8Array.toListNative
+WordArray	U8Array.ofList	native U8Array.ofList := U8Array.ofListNative
+WordArray	U8Array.ofListNative	axiom U8Array.ofListNative
+WordArray	U8Array.ofListNative	builtin extern:wiz_u8array_of_list:w:w:pure:: := U8Array.ofListNative
+WordArray	U8Array.pop	native U8Array.pop := U8Array.popNative
+WordArray	U8Array.popNative	axiom U8Array.popNative
+WordArray	U8Array.popNative	builtin extern:wiz_warray_pop:w:w:pure:: := U8Array.popNative
+WordArray	U8Array.push	native U8Array.push := U8Array.pushNative
+WordArray	U8Array.pushNative	axiom U8Array.pushNative
+WordArray	U8Array.pushNative	builtin extern:wiz_warray_push:ww:w:pure:: := U8Array.pushNative
+WordArray	U8Array.seal✝	axiom U8Array.seal✝
+WordArray	U8Array.seal✝	builtin seal:U8Array := U8Array.seal✝
+WordArray	U8Array.set	native U8Array.set := U8Array.setNative
+WordArray	U8Array.setNative	axiom U8Array.setNative
+WordArray	U8Array.setNative	builtin extern:wiz_warray_set:www:w:pure:: := U8Array.setNative
+WordArray	U8Array.size	native U8Array.size := U8Array.sizeNative
+WordArray	U8Array.sizeNative	axiom U8Array.sizeNative
+WordArray	U8Array.sizeNative	builtin extern:wiz_warray_size:w:w:pure:: := U8Array.sizeNative
+WordArray	U8Array.slice	native U8Array.slice := U8Array.sliceNative
+WordArray	U8Array.sliceNative	axiom U8Array.sliceNative
+WordArray	U8Array.sliceNative	builtin extern:wiz_warray_slice:www:w:pure:: := U8Array.sliceNative
+WordArray	U8Array.toList	native U8Array.toList := U8Array.toListNative
+WordArray	U8Array.toListNative	axiom U8Array.toListNative
+WordArray	U8Array.toListNative	builtin extern:wiz_warray_to_list:w:w:pure:: := U8Array.toListNative
+WordMap	U64Map.contains	native U64Map.contains := U64Map.containsNative
+WordMap	U64Map.containsNative	axiom U64Map.containsNative
+WordMap	U64Map.containsNative	builtin extern:wiz_wmap_contains:eww:b:pure:: := U64Map.containsNative
+WordMap	U64Map.empty	native U64Map.empty := U64Map.emptyNative
+WordMap	U64Map.emptyNative	axiom U64Map.emptyNative
+WordMap	U64Map.emptyNative	builtin extern:wiz_wmap_empty:e:w:pure:: := U64Map.emptyNative
+WordMap	U64Map.erase	native U64Map.erase := U64Map.eraseNative
+WordMap	U64Map.eraseNative	axiom U64Map.eraseNative
+WordMap	U64Map.eraseNative	builtin extern:wiz_wmap_erase:eww:w:pure:: := U64Map.eraseNative
+WordMap	U64Map.find	native U64Map.find := U64Map.findNative
+WordMap	U64Map.findD	native U64Map.findD := U64Map.findDNative
+WordMap	U64Map.findDNative	axiom U64Map.findDNative
+WordMap	U64Map.findDNative	builtin extern:wiz_wmap_find_d:ewww:w:pure:: := U64Map.findDNative
+WordMap	U64Map.findNative	axiom U64Map.findNative
+WordMap	U64Map.findNative	builtin extern:wiz_wmap_find:eww:w:pure:: := U64Map.findNative
+WordMap	U64Map.insert	native U64Map.insert := U64Map.insertNative
+WordMap	U64Map.insertNative	axiom U64Map.insertNative
+WordMap	U64Map.insertNative	builtin extern:wiz_wmap_insert:ewww:w:pure:: := U64Map.insertNative
+WordMap	U64Map.mk	native U64Map := U64Map.ofListNative/U64Map.toListNative
+WordMap	U64Map.ofListNative	axiom U64Map.ofListNative
+WordMap	U64Map.ofListNative	builtin extern:wiz_wmap_of_list:ew:w:pure:: := U64Map.ofListNative
+WordMap	U64Map.seal✝	axiom U64Map.seal✝
+WordMap	U64Map.seal✝	builtin seal:U64Map := U64Map.seal✝
+WordMap	U64Map.size	native U64Map.size := U64Map.sizeNative
+WordMap	U64Map.sizeNative	axiom U64Map.sizeNative
+WordMap	U64Map.sizeNative	builtin extern:wiz_wmap_size:ew:w:pure:: := U64Map.sizeNative
+WordMap	U64Map.toList	native U64Map.toList := U64Map.toListNative
+WordMap	U64Map.toListNative	axiom U64Map.toListNative
+WordMap	U64Map.toListNative	builtin extern:wiz_wmap_to_list:ew:w:pure:: := U64Map.toListNative

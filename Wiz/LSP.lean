@@ -3,10 +3,10 @@ import Wiz.Query
 import Wiz.Rig.Instances
 import Wiz.Infoview
 import Wiz.Actions
-import Wiz.Signature
 import Wiz.Inlay
 import Wiz.Semantic
 import Wiz.Completion
+import Wiz.Signature
 import Wiz.Refs
 import Wiz.Symbols
 import Wiz.Socket
@@ -129,7 +129,11 @@ def completion (srv : Server) (doc : Doc) (off : Nat) : Json :=
                  ("filterText", Json.str i.label),
                  ("textEdit", Json.mkObj [("range", Json.mkObj [("start", toPos doc.text i.start), ("end", toPos doc.text off)]),
                                           ("newText", Json.str i.insert)])] ++
-                (if i.detail.isEmpty then [] else [("detail", Json.str i.detail)]))
+                (if i.detail.isEmpty then [] else [("detail", Json.str i.detail)]) ++
+                -- (11s) the global's doc comment
+                (match i.global.bind doc.state.docOf? with
+                 | some d => [("documentation", Json.mkObj [("kind", "markdown"), ("value", Json.str d)])]
+                 | none => []))
   Json.mkObj [("isIncomplete", r.incomplete), ("items", Json.arr items)]
 
 def diagnostic (srv : Server) (doc : Doc) (m : Msg) : Json :=
@@ -383,7 +387,7 @@ def infoItems (srv : Server) (uri : String) (doc : Doc) (off : Nat) :
 def subtermType (g : Globals ZeroOneMany) (sub : Subterm ZeroOneMany) : Option (Term ZeroOneMany) := do
   let tys ← sub.types.reverse.mapM id
   let ctx := (sub.names.reverse.zip tys).foldl (fun (ctx : Ctx ZeroOneMany) (x, ty) =>
-    ctx.bind x (QPoly.const QuantitySyntax.explicitDefault) (Wiz.eval g ctx.env ty)) { globals := g, erased := true, proof := true }
+    ctx.bind x (QPoly.const QuantitySyntax.explicitDefault) (Wiz.eval g ctx.env ty)) { globals := { g with sortHolesOk := true }, erased := true, proof := true }
   match Wiz.infer ctx sub.term with
   | .ok (ty, _) => some (quote g ctx.lvl ty)
   | .error _ => none
@@ -669,7 +673,10 @@ def handle (srv : Server) (msg : Json) : Server × Array Json := Id.run do
     match Signature.helpAt doc.state doc.text off (fun t => (elabText srv doc.engine t).1) with
     | some h =>
       let ps := h.params.map fun (a, b) => Json.mkObj [("label", Json.arr #[(a : Nat), (b : Nat)])]
-      (srv, #[reply (Json.mkObj [("signatures", Json.arr #[Json.mkObj [("label", Json.str h.label), ("parameters", Json.arr ps)]]),
+      let docs := match h.doc with
+        | some d => [("documentation", Json.mkObj [("kind", "markdown"), ("value", Json.str d)])]
+        | none => []
+      (srv, #[reply (Json.mkObj [("signatures", Json.arr #[Json.mkObj ([("label", Json.str h.label), ("parameters", Json.arr ps)] ++ docs)]),
                                  ("activeSignature", (0 : Nat)), ("activeParameter", h.active)])])
     | none => (srv, #[reply Json.null])
   | "textDocument/hover" | "textDocument/definition" | "textDocument/declaration" | "textDocument/completion" =>
@@ -679,7 +686,15 @@ def handle (srv : Server) (msg : Json) : Server × Array Json := Id.run do
     | "textDocument/hover" =>
       let md? := match syntaxHover srv uri doc (Query.syntaxAt doc.state off) with
         | some md => some md
-        | none => (Query.hoverAt doc.state off).map fun (n, ty) => s!"```wiz\n{identLabel doc off n} : {ty}\n```"
+        | none => (Query.hoverAt doc.state off).map fun (n, ty) =>
+            -- (11s) a global's doc comment, as Markdown under its type (a local has none)
+            let isLocal := match Query.identAt doc.state off with
+              | some (.ident _ _ true _ _) => true
+              | _ => false
+            let docs := if isLocal then "" else match doc.state.docOf? n with
+              | some d => s!"\n\n---\n\n{d}"
+              | none => ""
+            s!"```wiz\n{identLabel doc off n} : {ty}\n```{docs}"
       match md? with
       | some md => (srv, #[reply (Json.mkObj [("contents", Json.mkObj [("kind", "markdown"), ("value", md)])])])
       | none => (srv, #[reply Json.null])

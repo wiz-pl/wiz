@@ -1,14 +1,17 @@
 import Sat
 import Word
 import Ring
--- Bits of numbers and words, for bit-blasting (`import BitBlast`; stage 28d).
---
--- `Bits.bit n i` is bit `i` of `n` (structural: by halving), and each word operation's
--- bits are given by a lemma (`Bits.land_bit`, …) that the `bv_decide` tactic uses as the
--- proof of a circuit node (lib/SatTactic.wiz, 28c: a node's proof is anything that shows
--- `σ v = op (σ a) (σ b)`).
 
--- ## Halves and parities
+/-!
+# BitBlast
+
+Bits of numbers and words, for bit-blasting (`import BitBlast`; stage 28d).
+
+`Bits.bit n i` is bit `i` of `n` (structural: by halving), and each word operation's
+bits are given by a lemma (`Bits.land_bit`, …) that the `bv_decide` tactic uses as the
+proof of a circuit node (lib/SatTactic.wiz, 28c: a node's proof is anything that shows
+`σ v = op (σ a) (σ b)`).
+-/
 
 def Bits.odd : Nat → Bool
   | .zero => .false

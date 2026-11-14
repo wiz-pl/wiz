@@ -1,38 +1,40 @@
 import Hdl.Core
 import OpticDerive
--- Optics for HDL bundles (`import Hdl.Optic`). Design:
--- /workspace/wiz-notes/cohesion-hardware.md, 2.2; the optics are lib/Optic.wiz's.
---
--- A bundle `structure Tx (r : HwTy → Type) where …` derives `Lens` as any structure
--- does (`deriving Bundle, Lens`): `Tx.lineL : Lens (Tx r) (r Bit)`, one lens at every
--- representation, so a step can update one field (`Lens.over Tx.leftL dec s`) and a proof
--- that the other fields are unchanged is `Lens.Indep` (derived, by `rfl`) or `rfl` itself.
--- This module adds what is specific to hardware:
---
--- * `Hdl.zoom l g`: run a sub-step `g` on the part of the state that `l` selects; with
---   `Hdl.zoom_frame`, every place independent of `l` is unchanged (the frame rule).
--- * `Bundle.lens b`: a bundle's packed code and its structure, as a lens at values, and
---   `Bundle.Lawful b` (derived bundles: by `rfl`).
--- * `HwTy.fstL`/`sndL`: the components of a product code at values.
+/-!
+# Hdl.Optic
 
-------------------------------------------------------------------------------------
--- Zooming a step into a part of the state
+Optics for HDL bundles (`import Hdl.Optic`). Design:
+/workspace/wiz-notes/cohesion-hardware.md, 2.2; the optics are lib/Optic.wiz's.
 
--- `g` on the place `l` of `s`: its next value is put back, the output passed on
+A bundle `structure Tx (r : HwTy → Type) where …` derives `Lens` as any structure
+does (`deriving Bundle, Lens`): `Tx.lineL : Lens (Tx r) (r Bit)`, one lens at every
+representation, so a step can update one field (`Lens.over Tx.leftL dec s`) and a proof
+that the other fields are unchanged is `Lens.Indep` (derived, by `rfl`) or `rfl` itself.
+This module adds what is specific to hardware:
+
+* `Hdl.zoom l g`: run a sub-step `g` on the part of the state that `l` selects; with
+  `Hdl.zoom_frame`, every place independent of `l` is unchanged (the frame rule).
+* `Bundle.lens b`: a bundle's packed code and its structure, as a lens at values, and
+  `Bundle.Lawful b` (derived bundles: by `rfl`).
+* `HwTy.fstL`/`sndL`: the components of a product code at values.
+-/
+
+/-- `g` on the place `l` of `s`: its next value is put back, the output passed on. -/
 def Hdl.zoom {S T I O : Type} (l : Lens S T) (g : T → I → T × O) (s : S) (x : I) : S × O :=
   let r := g (Lens.get l s) x;
   (Lens.set l s r.1, r.2)
 
--- what the zoomed step does to the place itself
+/-- What the zoomed step does to the place itself. -/
 def Hdl.zoom_get {S T I O : Type} (l : Lens S T) (hl : Lens.Lawful l) (g : T → I → T × O) (s : S) (x : I) :
     Lens.get l (Hdl.zoom l g s x).1 = (g (Lens.get l s) x).1 :=
   hl.2.1 s (g (Lens.get l s) x).1
 
--- independence the other way round (derived lenses state it for fields in order)
+/-- Independence the other way round (derived lenses state it for fields in order). -/
 def Hdl.indep_symm {S A B : Type} (l : Lens S A) (m : Lens S B) (h : Lens.Indep l m) : Lens.Indep m l :=
   (h.2.1, h.1, fun (s : S) (b : B) (a : A) => Eq.symm (h.2.2 s a b))
 
--- The frame rule: a place `m` independent of `l` is unchanged by a step zoomed into `l`.
+/-- The frame rule: a place `m` independent of `l` is unchanged by a step zoomed into
+`l`. -/
 def Hdl.zoom_frame {S T U I O : Type} (l : Lens S T) (m : Lens S U) (h : Lens.Indep l m) (g : T → I → T × O) (s : S) (x : I) :
     Lens.get m (Hdl.zoom l g s x).1 = Lens.get m s :=
   h.1 s (g (Lens.get l s) x).1
@@ -41,24 +43,32 @@ def Hdl.zoom_frame {S T U I O : Type} (l : Lens S T) (m : Lens S U) (h : Lens.In
 -- Bundles as lenses at values
 
 -- the structure inside the packed value
+/-- The structure inside a bundle's packed value, as a lens at values. -/
 def Bundle.lens {F : (HwTy → Type) → Type} (b : Bundle F) : Lens (HwTy.El b.code) (F HwTy.El) :=
   fun (v : HwTy.El b.code) => (Bundle.ofEl b v, fun (s : F HwTy.El) => Bundle.toEl b s)
 
 -- packing and unpacking are inverse (`deriving Bundle` gives such bundles: `rfl`)
+/-- Packing and unpacking are inverse (`deriving Bundle` gives such bundles: by `rfl`). -/
 def Bundle.Lawful {F : (HwTy → Type) → Type} (b : Bundle F) : Prop :=
   ((v : HwTy.El b.code) → Bundle.toEl b (Bundle.ofEl b v) = v) × ((s : F HwTy.El) → Bundle.ofEl b (Bundle.toEl b s) = s)
 
+/-- `Bundle.lens b` is lawful when the bundle's packing is. -/
 def Bundle.lens_lawful {F : (HwTy → Type) → Type} (b : Bundle F) (h : Bundle.Lawful b) : Lens.Lawful (Bundle.lens b) :=
   (h.1, fun (v : HwTy.El b.code) (s : F HwTy.El) => h.2 s, fun (v : HwTy.El b.code) (s t : F HwTy.El) => rfl)
 
 ------------------------------------------------------------------------------------
 -- Product codes
 
+/-- The first component of a product code, at values. -/
 def HwTy.fstL {a b : HwTy} : Lens (HwTy.El (HwTy.prod a b)) (HwTy.El a) :=
   fun (p : HwTy.El (HwTy.prod a b)) => (p.1, fun (x : HwTy.El a) => (x, p.2))
+/-- The second component of a product code, at values. -/
 def HwTy.sndL {a b : HwTy} : Lens (HwTy.El (HwTy.prod a b)) (HwTy.El b) :=
   fun (p : HwTy.El (HwTy.prod a b)) => (p.2, fun (y : HwTy.El b) => (p.1, y))
+/-- `HwTy.fstL` is lawful (every law by `rfl`). -/
 def HwTy.fstL_lawful {a b : HwTy} : Lens.Lawful (@HwTy.fstL a b) := (fun s => rfl, fun s x => rfl, fun s x y => rfl)
+/-- `HwTy.sndL` is lawful (every law by `rfl`). -/
 def HwTy.sndL_lawful {a b : HwTy} : Lens.Lawful (@HwTy.sndL a b) := (fun s => rfl, fun s x => rfl, fun s x y => rfl)
+/-- The two components of a product code are independent. -/
 def HwTy.fst_snd_indep {a b : HwTy} : Lens.Indep (@HwTy.fstL a b) (@HwTy.sndL a b) :=
   (fun s x => rfl, fun s y => rfl, fun s x y => rfl)

@@ -79,7 +79,7 @@ def elabBasic (cache : Option System.FilePath := none) : IO (CommandState ZeroOn
   let init : CommandState ZeroOneMany := { loader, trustedModule := Tests.libModule }
   match cache with
   | none => pure (runFrontend basicSrc init)
-  | some dir => pure (← Cache.elaborateCached dir basicSrc init 0).1
+  | some dir => pure (← Cache.elaborateCached (some dir) [] basicSrc init 0).1
 
 def docOf (s : CommandState ZeroOneMany) (n : Name) : String :=
   match s.declDocs.get? n with
@@ -133,8 +133,40 @@ def makeSite (dir : System.FilePath) : IO System.FilePath := do
 def has (text frag : String) : Bool := (text.splitOn frag).length > 1
 def checkHas (text frag : String) : IO Unit := check (has text frag) s!"missing {frag}"
 
+/-- The core library modules whose every public declaration must have a doc comment. -/
+def coreModules : List String := ["Prelude", "Std", "Vec", "Word"]
+
+/-- The declarations on a module page (`wiz doc`'s HTML) without a doc comment of their
+own (constructors and fields are not counted). -/
+def undocumented (html : String) : Array String := Id.run do
+  let mut out := #[]
+  for part in (html.splitOn "<div class=\"decl\" id=\"").drop 1 do
+    let n := (part.splitOn "\"").headD ""
+    -- (the declaration's own part: before its constructors, fields and instances)
+    let own := (((part.splitOn "<div class=\"children\">").headD "").splitOn "<details class=\"instances\">").headD ""
+    unless has own "<div class=\"doc\">" do out := out.push n
+  out
+
+def libDocCase : Case :=
+  { name := "the core library is documented: a module doc and a doc comment on every public declaration (Prelude, Std, Vec, Word)", run := fun _ => do
+      let dir ← IO.FS.createTempDir
+      let out := dir / "site"
+      discard <| runOut (← wiz) (["doc"] ++ coreModules.map (s!"lib/{·}.wiz") ++
+        ["-o", out.toString, "--web", (dir / "no-web").toString])
+      let index ← IO.FS.readFile (out / "index.html")
+      let mut missing : Array String := #[]
+      for m in coreModules do
+        let src ← IO.FS.readFile s!"lib/{m}.wiz"
+        check (has src "/-!") s!"lib/{m}.wiz has no module doc"
+        checkHas index s!"href=\"{m}.html\""
+        let html ← IO.FS.readFile (out / s!"{m}.html")
+        check (has html "<div class=\"decl\"") s!"{m}: no declarations on its page"
+        missing := missing ++ (undocumented html).map (s!"{m}: {·}")
+      check missing.isEmpty s!"declarations without a doc comment: {missing}" }
+
 def docGroup : Group where
   name := "doc"
+  parallel := true
   exercise := "Stage 11s (docs/stages/11-tooling.md)"
   cases := [
     { name := "doc comments are stored on declarations: commands, constructors, fields, mutual, private", run := fun _ => do
@@ -264,7 +296,8 @@ def docGroup : Group where
         checkHas o.stdout "tt k-pi sel"
         -- the arrow key moves the selection to the next tag
         checkHas o.stdout "data-idx=\"1\" title=\"Shape\""
-        check (lines.any (fun l => has l "sel\" data-ref" && has l "data-idx=\"1\"")) o.stdout }
+        check (lines.any (fun l => has l "sel\" data-ref" && has l "data-idx=\"1\"")) o.stdout },
+    libDocCase
   ]
 
 def groups : List Group := [docGroup]

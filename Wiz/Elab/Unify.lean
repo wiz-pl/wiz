@@ -307,7 +307,7 @@ partial def rename (m : Nat) (p : PRen) (v : Val R) : ElabM R (Term R) := do
   | .mu l I D i s h => return .mu l (← rename m p I) (← rename m p D) (← rename m p i) (← rename m p s) (← renameHint h)
   | .nu l I D i s h => return .nu l (← rename m p I) (← rename m p D) (← rename m p i) (← rename m p s) (← renameHint h)
   | .con x => return .con (← rename m p x)
-  | .ulift l A => return .ulift l (← rename m p A)
+  | .ulift k l A => return .ulift k l (← rename m p A)
   | .up a => return .up (← rename m p a)
   | .natLit n => return .natLit n
   | .unfold n us sp _ => goSp (.const n us) sp
@@ -618,7 +618,7 @@ partial def unify (l : Lvl) (t u : Val R) : ElabM R Unit := do
   | .mu u I D i s _, .mu u' I' D' i' s' _ | .nu u I D i s _, .nu u' I' D' i' s' _ =>
     unifyLevel u u'; unify l I I'; unify l D D'; unify l i i'; unify l s s'
   | .con x, .con y => unify l x y
-  | .ulift u A, .ulift u' A' => unifyLevel u u'; unify l A A'
+  | .ulift _ u A, .ulift _ u' A' => unifyLevel u u'; unify l A A'
   | .up a, .up b => unify l a b
   | .up a, t'@(.neutral ..) => unify l a (vDown t')
   | t'@(.neutral ..), .up a => unify l (vDown t') a

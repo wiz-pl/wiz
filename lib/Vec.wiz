@@ -1,168 +1,228 @@
 import Nat
--- Bounded numbers and length-indexed vectors (`import Vec`). The length of a `Vec` is
--- an erased index (quantity 0): at runtime a vector is a list, and `Vec.length` counts
--- it (`Vec.length_eq` ties the count to the index).
 
--- (`congrArg`, `Nat.add_zero`, `Nat.add_succ` and `Nat.add_comm` are in lib/Nat.wiz)
+/-!
+# Vec
+
+Bounded numbers and length-indexed vectors (`import Vec`).
+
+`Fin n` is a number below `n`; `Vec A n` is a list of exactly `n` elements of `A`, so
+`Vec.head` only takes a non-empty vector and `Vec.get` only an index in range. The
+length of a `Vec` is an erased index (quantity 0): at runtime a vector is a list, and
+`Vec.length` counts it (`Vec.length_eq` ties the count to the index); a `Fin` is a
+`Nat`, its proof erased.
+
+Main definitions: `Fin` (`Fin.of`, `Fin.zero`, `Fin.succ`, `Fin.last`), `Vec` with
+`Vec.get`, `Vec.set`, `Vec.map`, `Vec.zipWith`, `Vec.foldr`, `Vec.append`,
+`Vec.reverse`, `Vec.splitAt`, conversions to and from `List`, and lemmas such as
+`Vec.get_set` and `Vec.map_map`. The `Nat` lemmas the indices need are in lib/Nat.wiz.
+
+```
+import Vec
+
+def v : Vec Nat 3 := Vec.fromList [1, 2, 3]
+#eval Vec.get v (Fin.of 3 1 rfl)          -- 2
+#eval Vec.toList (Vec.map Nat.succ v)     -- [2, 3, 4]
+```
+-/
+
+/-- (`congrArg`, `Nat.add_zero`, `Nat.add_succ` and `Nat.add_comm` are in lib/Nat.wiz) -/
 def Nat.lt_self : (n : Nat) → Nat.lt n (Nat.succ n) = .true
   | .zero => rfl
   | .succ n => Nat.lt_self n
+/-- If `i < n` then `i < n + 1`. -/
 def Nat.lt_succ : (i n : Nat) → Nat.lt i n = .true → Nat.lt i (Nat.succ n) = .true
   | .zero, .zero, h => absurd h.1
   | .zero, .succ _, _ => rfl
   | .succ _, .zero, h => absurd h.1
   | .succ i, .succ n, h => Nat.lt_succ i n h
 
--- `Fin n`: a number below `n`. The proof is erased, so at runtime a `Fin` is a `Nat`.
+/-- `Fin n`: a number below `n`. The proof is erased, so at runtime a `Fin` is a `Nat`. -/
 inductive Fin (n : Nat) where
+  /-- the number `val`, with an (erased) proof that it is below `n` -/
   | mk (val : Nat) (0 isLt : Nat.lt val n = .true)
 
+/-- The number, forgetting the bound. -/
 def Fin.val {0 n : Nat} : Fin n → Nat
   | .mk i _ => i
--- `Fin.of 5 3 rfl : Fin 5`
+/-- `Fin.of n i h`: the number `i` as a `Fin n`, given `i < n` (usually `rfl` on numerals):
+`Fin.of 5 3 rfl : Fin 5`. -/
 def Fin.of (n i : Nat) (0 h : Nat.lt i n = .true) : Fin n := Fin.mk i h
+/-- `0`, below every successor. -/
 def Fin.zero {0 n : Nat} : Fin (Nat.succ n) := @Fin.mk (Nat.succ n) 0 rfl
+/-- `i + 1`, one bound up: `Fin n → Fin (n + 1)`. -/
 def Fin.succ {0 n : Nat} : Fin n → Fin (Nat.succ n)
   | .mk i h => @Fin.mk (Nat.succ n) (Nat.succ i) h
--- `i : Fin n` as a `Fin (n + 1)`
+/-- `i : Fin n` as a `Fin (n + 1)`: the same number with a looser bound. -/
 def Fin.castSucc {0 n : Nat} : Fin n → Fin (Nat.succ n)
   | .mk i h => @Fin.mk (Nat.succ n) i (Nat.lt_succ i n h)
--- the largest `Fin (n + 1)`
+/-- The largest `Fin (n + 1)`, the number `n`. -/
 def Fin.last (n : Nat) : Fin (Nat.succ n) := Fin.mk n (Nat.lt_self n)
 
+/-- `Vec A n`: a list of exactly `n` elements of `A`. The length `n` is an index of the
+type: `nil : Vec A 0`, and `cons` adds one. -/
 inductive Vec (A : Type) : Nat → Type where
+  /-- the empty vector -/
   | nil : Vec A 0
+  /-- `x` in front of `xs` -/
   | cons {0 n : Nat} (x : A) (xs : Vec A n) : Vec A (Nat.succ n)
 
+/-- The first element of a non-empty vector (no `Option`: the type rules out `nil`). -/
 def Vec.head {A : Type} {0 n : Nat} : Vec A (Nat.succ n) → A
   | .cons x _ => x
+/-- Everything after the first element. -/
 def Vec.tail {A : Type} {0 n : Nat} : Vec A (Nat.succ n) → Vec A n
   | .cons _ xs => xs
 
--- The length, counted from the data; it is the index.
+/-- The length, counted from the data at runtime; `Vec.length_eq` proves it is the index. -/
 def Vec.length {A : Type} {0 n : Nat} : Vec A n → Nat
   | .nil => 0
   | .cons _ xs => Nat.succ (Vec.length xs)
+/-- `Vec.length v = n`: the counted length is the index. -/
 def Vec.length_eq {A : Type} {0 n : Nat} : (v : Vec A n) → Vec.length v = n
   | .nil => rfl
   | .cons _ xs => congrArg Nat.succ (Vec.length_eq xs)
 
+/-- The element at position `i`; `i : Fin n` is always in range. -/
 def Vec.get {A : Type} {0 n : Nat} : Vec A n → Fin n → A
   | .cons x _, .mk .zero _ => x
   | .cons _ xs, .mk (.succ i) h => Vec.get xs (@Fin.mk _ i h)
   | .nil, .mk .zero h => absurd h.1
   | .nil, .mk (.succ _) h => absurd h.1
 
+/-- `Vec.set v i x`: `v` with position `i` replaced by `x`. -/
 def Vec.set {A : Type} {0 n : Nat} : Vec A n → Fin n → A → Vec A n
   | .cons _ xs, .mk .zero _, y => .cons y xs
   | .cons x xs, .mk (.succ i) h, y => .cons x (Vec.set xs (@Fin.mk _ i h) y)
   | .nil, .mk .zero h, _ => absurd h.1
   | .nil, .mk (.succ _) h, _ => absurd h.1
 
+/-- `n` copies of `x`: `Vec.replicate 3 0` is `[0, 0, 0]`. -/
 def Vec.replicate {A : Type} : (n : Nat) → A → Vec A n
   | .zero, _ => .nil
   | .succ n, x => .cons x (Vec.replicate n x)
 
+/-- Apply `f` to every element; the length stays the same. -/
 def Vec.map {A B : Type} (f : A → B) {0 n : Nat} : Vec A n → Vec B n
   | .nil => .nil
   | .cons x xs => .cons (f x) (Vec.map f xs)
 
+/-- Combine two vectors of the same length element by element:
+`Vec.zipWith Nat.add [1, 2] [10, 20]` is `[11, 22]`. -/
 def Vec.zipWith {A B C : Type} (f : A → B → C) {0 n : Nat} : Vec A n → Vec B n → Vec C n
   | .nil, .nil => .nil
   | .cons a as, .cons b bs => .cons (f a b) (Vec.zipWith f as bs)
 
+/-- Pair up two vectors of the same length. -/
 def Vec.zip {A B : Type} {0 n : Nat} (as : Vec A n) (bs : Vec B n) : Vec (A × B) n :=
   Vec.zipWith (fun a b => (a, b)) as bs
 
+/-- Fold from the right: `Vec.foldr f z [a, b]` is `f a (f b z)`. -/
 def Vec.foldr {A B : Type} (f : A → B → B) (z : B) {0 n : Nat} : Vec A n → B
   | .nil => z
   | .cons x xs => f x (Vec.foldr f z xs)
 
+/-- Fold from the left: `Vec.foldl f z [a, b]` is `f (f z a) b`. -/
 def Vec.foldl {A B : Type} (f : B → A → B) {0 n : Nat} : B → Vec A n → B
   | z, .nil => z
   | z, .cons x xs => Vec.foldl f (f z x) xs
 
+/-- Concatenation: a `Vec A m` then a `Vec A n` make a `Vec A (m + n)`. -/
 def Vec.append {A : Type} {0 m n : Nat} : Vec A m → Vec A n → Vec A (m + n)
   | .nil, ws => ws
   | .cons x xs, ws => .cons x (Vec.append xs ws)
 
--- `xs` reversed onto `acc`; the index needs `m + (k + 1) = (m + k) + 1`.
+/-- Cast a vector along `m + (k + 1) = (m + k) + 1` (used by `Vec.revAppend`). -/
 def Vec.castAddSucc {A : Type} {0 m k : Nat} (v : Vec A (m + Nat.succ k)) : Vec A (Nat.succ m + k) :=
   cast (congrArg (Vec A) (Nat.add_succ m k)) v
+/-- Cast a vector along `m + 0 = m` (used by `Vec.reverse`). -/
 def Vec.castAddZero {A : Type} {0 m : Nat} (v : Vec A (m + 0)) : Vec A m :=
   cast (congrArg (Vec A) (Nat.add_zero m)) v
 
+/-- `xs` reversed onto `acc`; the index needs `m + (k + 1) = (m + k) + 1`, hence
+`Vec.castAddSucc`. -/
 def Vec.revAppend {A : Type} {0 m : Nat} : Vec A m → (0 k : Nat) → Vec A k → Vec A (m + k)
   | .nil, _, acc => acc
   | .cons x xs, k, acc => Vec.castAddSucc (Vec.revAppend xs (Nat.succ k) (.cons x acc))
 
+/-- The vector in reverse order. -/
 def Vec.reverse {A : Type} {0 n : Nat} (v : Vec A n) : Vec A n := Vec.castAddZero (Vec.revAppend v 0 .nil)
 
--- `v` with `x` at the end
+/-- `v` with `x` at the end. -/
 def Vec.snoc {A : Type} {0 n : Nat} : Vec A n → A → Vec A (Nat.succ n)
   | .nil, y => .cons y .nil
   | .cons x xs, y => .cons x (Vec.snoc xs y)
 
+/-- The last element of `x` followed by `v` (a helper for `Vec.last`). -/
 def Vec.lastFrom {A : Type} {0 n : Nat} : A → Vec A n → A
   | x, .nil => x
   | _, .cons y ys => Vec.lastFrom y ys
+/-- The last element of a non-empty vector. -/
 def Vec.last {A : Type} {0 n : Nat} : Vec A (Nat.succ n) → A
   | .cons x xs => Vec.lastFrom x xs
 
--- `x` then `v`, without the last element
+/-- `x` then `v`, without the last element (a helper for `Vec.init` and `Vec.shiftIn`). -/
 def Vec.initFrom {A : Type} {0 n : Nat} : A → Vec A n → Vec A n
   | _, .nil => .nil
   | x, .cons y ys => .cons x (Vec.initFrom y ys)
--- Everything but the last element.
+/-- Everything but the last element. -/
 def Vec.init {A : Type} {0 n : Nat} : Vec A (Nat.succ n) → Vec A n
   | .cons x xs => Vec.initFrom x xs
 
--- The first `m` elements and the rest.
+/-- The first `m` elements and the rest: `Vec.splitAt 1 [a, b, c]` is `([a], [b, c])`. -/
 def Vec.splitAt {A : Type} {0 k : Nat} : (m : Nat) → Vec A (m + k) → Vec A m × Vec A k
   | .zero, v => (.nil, v)
   | .succ m, .cons x xs => let p := Vec.splitAt m xs; (.cons x p.1, p.2)
 
+/-- The vector of `f 0`, …, `f (n - 1)`. -/
 def Vec.ofFn {A : Type} : (n : Nat) → (Fin n → A) → Vec A n
   | .zero, _ => .nil
   | .succ n, f => .cons (f Fin.zero) (Vec.ofFn n (fun i => f (Fin.succ i)))
 
--- Shift `x` in at the front, dropping the last element (a shift register).
+/-- Shift `x` in at the front, dropping the last element (a shift register). -/
 def Vec.shiftIn {A : Type} {0 n : Nat} (x : A) (v : Vec A n) : Vec A n := Vec.initFrom x v
 
+/-- The elements as a `List`, in order. -/
 def Vec.toList {A : Type} {0 n : Nat} : Vec A n → List A
   | .nil => .nil
   | .cons x xs => .cons x (Vec.toList xs)
 
+/-- A list as a vector of its length. -/
 def Vec.fromList {A : Type} : (l : List A) → Vec A (List.length l)
   | .nil => .nil
   | .cons x xs => .cons x (Vec.fromList xs)
 
 -- Theorems.
 
+/-- The list of a `Vec A n` has length `n`. -/
 def Vec.length_toList {A : Type} {0 n : Nat} : (v : Vec A n) → List.length (Vec.toList v) = n
   | .nil => rfl
   | .cons _ xs => congrArg Nat.succ (Vec.length_toList xs)
 
+/-- `Vec.fromList` then `Vec.toList` gives back the list. -/
 def Vec.toList_fromList {A : Type} : (l : List A) → Vec.toList (Vec.fromList l) = l
   | .nil => rfl
   | .cons x xs => congrArg (List.cons x) (Vec.toList_fromList xs)
 
--- Equations of `map`, `get` and `set` on `cons`. They hold only up to casts at the
--- element type (the recursor of an indexed family casts along the constructor's index
--- equation, and a cast at a type variable is stuck without regularity, D1), which
--- `castRefl` removes. (`set` casts its argument too, so it needs two.)
+/-- `Vec.get (x :: xs) 0 = x`. This and the other `cons` equations below hold only up to
+casts at the element type (the recursor of an indexed family casts along the
+constructor's index equation, and a cast at a type variable is stuck without regularity,
+D1), which `castRefl` removes. -/
 def Vec.get_cons_zero {A : Type} {0 n : Nat} (x : A) (xs : Vec A n) (0 h : Nat.lt 0 (Nat.succ n) = .true) :
     @Vec.get A (Nat.succ n) (@Vec.cons A n x xs) (@Fin.mk (Nat.succ n) 0 h) = x :=
   @castRefl A rfl x
+/-- `Vec.get (x :: xs) (i + 1) = Vec.get xs i`. -/
 def Vec.get_cons_succ {A : Type} {0 n : Nat} (x : A) (xs : Vec A n) (i : Nat) (0 h : Nat.lt (Nat.succ i) (Nat.succ n) = .true) :
     @Vec.get A (Nat.succ n) (@Vec.cons A n x xs) (@Fin.mk (Nat.succ n) (Nat.succ i) h) = @Vec.get A n xs (@Fin.mk n i h) :=
   @castRefl A rfl (@Vec.get A n xs (@Fin.mk n i h))
+/-- `Vec.set (x :: xs) 0 y = y :: xs` (`set` casts its argument too, so it needs two
+`castRefl`s). -/
 def Vec.set_cons_zero {A : Type} {0 n : Nat} (x : A) (xs : Vec A n) (0 h : Nat.lt 0 (Nat.succ n) = .true) (y : A) :
     @Vec.set A (Nat.succ n) (@Vec.cons A n x xs) (@Fin.mk (Nat.succ n) 0 h) y = @Vec.cons A n y xs :=
   @Eq.trans (Vec A (Nat.succ n)) (@Vec.set A (Nat.succ n) (@Vec.cons A n x xs) (@Fin.mk (Nat.succ n) 0 h) y)
     (@Vec.cons A n (cast (rfl : A = A) y : A) xs) (@Vec.cons A n y xs)
     (@castRefl (Vec A (Nat.succ n)) (refl (Vec A (Nat.succ n))) (@Vec.cons A n (cast (rfl : A = A) y : A) xs))
     (@congrArg A (Vec A (Nat.succ n)) (fun z => @Vec.cons A n z xs) (cast (rfl : A = A) y : A) y (@castRefl A rfl y))
+/-- `Vec.set (x :: xs) (i + 1) y = x :: Vec.set xs i y`. -/
 def Vec.set_cons_succ {A : Type} {0 n : Nat} (x : A) (xs : Vec A n) (i : Nat) (0 h : Nat.lt (Nat.succ i) (Nat.succ n) = .true) (y : A) :
     @Vec.set A (Nat.succ n) (@Vec.cons A n x xs) (@Fin.mk (Nat.succ n) (Nat.succ i) h) y =
       @Vec.cons A n x (@Vec.set A n xs (@Fin.mk n i h) y) :=
@@ -170,9 +230,11 @@ def Vec.set_cons_succ {A : Type} {0 n : Nat} (x : A) (xs : Vec A n) (i : Nat) (0
     (@Vec.cons A n x (@Vec.set A n xs (@Fin.mk n i h) (cast (rfl : A = A) y : A))) (@Vec.cons A n x (@Vec.set A n xs (@Fin.mk n i h) y))
     (@castRefl (Vec A (Nat.succ n)) (refl (Vec A (Nat.succ n))) (@Vec.cons A n x (@Vec.set A n xs (@Fin.mk n i h) (cast (rfl : A = A) y : A))))
     (@congrArg A (Vec A (Nat.succ n)) (fun z => @Vec.cons A n x (@Vec.set A n xs (@Fin.mk n i h) z)) (cast (rfl : A = A) y : A) y (@castRefl A rfl y))
+/-- `Vec.map f (x :: xs) = f x :: Vec.map f xs`. -/
 def Vec.map_cons {A B : Type} (f : A → B) {0 n : Nat} (x : A) (xs : Vec A n) :
     @Vec.map A B f (Nat.succ n) (@Vec.cons A n x xs) = @Vec.cons B n (f x) (@Vec.map A B f n xs) :=
   @castRefl (Vec B (Nat.succ n)) (refl (Vec B (Nat.succ n))) (@Vec.cons B n (f x) (@Vec.map A B f n xs))
+/-- The `cons` step of `Vec.map_map`, given the statement for the tail. -/
 def Vec.map_map_cons {A B C : Type} (f : B → C) (g : A → B) {0 n : Nat} (x : A) (xs : Vec A n)
     (ih : @Vec.map B C f n (@Vec.map A B g n xs) = @Vec.map A C (fun a => f (g a)) n xs) :
     @Vec.map B C f (Nat.succ n) (@Vec.map A B g (Nat.succ n) (@Vec.cons A n x xs)) =
@@ -191,10 +253,12 @@ def Vec.map_map_cons {A B C : Type} (f : B → C) (g : A → B) {0 n : Nat} (x :
       (@Eq.trans (Vec C (Nat.succ n)) L2 L3 L4
         (@congrArg (Vec C n) (Vec C (Nat.succ n)) (@Vec.cons C n (f (g x))) (@Vec.map B C f n mg) (@Vec.map A C h n xs) ih)
         (@Eq.symm (Vec C (Nat.succ n)) L4 L3 (Vec.map_cons h x xs))))
+/-- Mapping twice is mapping the composition: `map f (map g v) = map (f ∘ g) v`. -/
 def Vec.map_map {A B C : Type} (f : B → C) (g : A → B) {0 n : Nat} : (v : Vec A n) →
     Vec.map f (Vec.map g v) = Vec.map (fun a => f (g a)) v
   | .nil => rfl
   | .cons x xs => Vec.map_map_cons f g x xs (Vec.map_map f g xs)
+/-- The zero case of `Vec.get_set`. -/
 def Vec.get_set_zero {A : Type} {0 n : Nat} (x : A) (xs : Vec A n) (0 h : Nat.lt 0 (Nat.succ n) = .true) (y : A) :
     @Vec.get A (Nat.succ n) (@Vec.set A (Nat.succ n) (@Vec.cons A n x xs) (@Fin.mk (Nat.succ n) 0 h) y) (@Fin.mk (Nat.succ n) 0 h) = y :=
   let i0 := @Fin.mk (Nat.succ n) 0 h;
@@ -203,6 +267,7 @@ def Vec.get_set_zero {A : Type} {0 n : Nat} (x : A) (xs : Vec A n) (0 h : Nat.lt
     (@congrArg (Vec A (Nat.succ n)) A (fun v => @Vec.get A (Nat.succ n) v i0)
       (@Vec.set A (Nat.succ n) (@Vec.cons A n x xs) i0 y) (@Vec.cons A n y xs) (Vec.set_cons_zero x xs h y))
     (Vec.get_cons_zero y xs h)
+/-- The successor case of `Vec.get_set`, given the statement for the tail. -/
 def Vec.get_set_succ {A : Type} {0 n : Nat} (x : A) (xs : Vec A n) (i : Nat) (0 h : Nat.lt (Nat.succ i) (Nat.succ n) = .true) (y : A)
     (ih : @Vec.get A n (@Vec.set A n xs (@Fin.mk n i h) y) (@Fin.mk n i h) = y) :
     @Vec.get A (Nat.succ n) (@Vec.set A (Nat.succ n) (@Vec.cons A n x xs) (@Fin.mk (Nat.succ n) (Nat.succ i) h) y)
@@ -215,12 +280,15 @@ def Vec.get_set_succ {A : Type} {0 n : Nat} (x : A) (xs : Vec A n) (i : Nat) (0 
       (@Vec.set A (Nat.succ n) (@Vec.cons A n x xs) si y) (@Vec.cons A n x w) (Vec.set_cons_succ x xs i h y))
     (@Eq.trans A (@Vec.get A (Nat.succ n) (@Vec.cons A n x w) si) (@Vec.get A n w (@Fin.mk n i h)) y
       (Vec.get_cons_succ x w i h) ih)
+/-- Reading a position just written gives the value written:
+`Vec.get (Vec.set v i x) i = x`. -/
 def Vec.get_set {A : Type} {0 n : Nat} : (v : Vec A n) → (i : Fin n) → (x : A) → Vec.get (Vec.set v i x) i = x
   | .cons x xs, .mk .zero h, y => Vec.get_set_zero x xs h y
   | .cons x xs, .mk (.succ i) h, y => Vec.get_set_succ x xs i h y (Vec.get_set xs (@Fin.mk _ i h) y)
   | .nil, .mk .zero h, _ => absurd h.1
   | .nil, .mk (.succ _) h, _ => absurd h.1
 
+/-- The zero case of `Vec.get_map`. -/
 def Vec.get_map_zero {A B : Type} (f : A → B) {0 n : Nat} (x : A) (xs : Vec A n) (0 h : Nat.lt 0 (Nat.succ n) = .true) :
     @Vec.get B (Nat.succ n) (@Vec.map A B f (Nat.succ n) (@Vec.cons A n x xs)) (@Fin.mk (Nat.succ n) 0 h) =
       f (@Vec.get A (Nat.succ n) (@Vec.cons A n x xs) (@Fin.mk (Nat.succ n) 0 h)) :=
@@ -234,6 +302,7 @@ def Vec.get_map_zero {A B : Type} (f : A → B) {0 n : Nat} (x : A) (xs : Vec A 
       (Vec.get_cons_zero (f x) mxs h)
       (@Eq.symm B (f (@Vec.get A (Nat.succ n) (@Vec.cons A n x xs) i0)) (f x)
         (@congrArg A B f (@Vec.get A (Nat.succ n) (@Vec.cons A n x xs) i0) x (Vec.get_cons_zero x xs h))))
+/-- The successor case of `Vec.get_map`, given the statement for the tail. -/
 def Vec.get_map_succ {A B : Type} (f : A → B) {0 n : Nat} (x : A) (xs : Vec A n) (i : Nat) (0 h : Nat.lt (Nat.succ i) (Nat.succ n) = .true)
     (ih : @Vec.get B n (@Vec.map A B f n xs) (@Fin.mk n i h) = f (@Vec.get A n xs (@Fin.mk n i h))) :
     @Vec.get B (Nat.succ n) (@Vec.map A B f (Nat.succ n) (@Vec.cons A n x xs)) (@Fin.mk (Nat.succ n) (Nat.succ i) h) =
@@ -251,6 +320,7 @@ def Vec.get_map_succ {A B : Type} (f : A → B) {0 n : Nat} (x : A) (xs : Vec A 
       (@Eq.trans B (@Vec.get B n mxs ii) (f (@Vec.get A n xs ii)) rhs ih
         (@Eq.symm B rhs (f (@Vec.get A n xs ii))
           (@congrArg A B f (@Vec.get A (Nat.succ n) (@Vec.cons A n x xs) si) (@Vec.get A n xs ii) (Vec.get_cons_succ x xs i h)))))
+/-- Reading a mapped vector: `Vec.get (Vec.map f v) i = f (Vec.get v i)`. -/
 def Vec.get_map {A B : Type} (f : A → B) {0 n : Nat} : (v : Vec A n) → (i : Fin n) →
     Vec.get (Vec.map f v) i = f (Vec.get v i)
   | .cons x xs, .mk .zero h => Vec.get_map_zero f x xs h

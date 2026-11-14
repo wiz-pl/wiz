@@ -24,6 +24,8 @@ structure Help where
   params : Array (Nat × Nat)
   active : Nat
   name : Name
+  /-- (11s) the function's doc comment (Markdown), if it is a global with one -/
+  doc : Option String := none
   deriving Repr, Inhabited
 
 def opens (c : Char) : Bool := c == '(' || c == '[' || c == '⟨' || c == '{'
@@ -127,6 +129,7 @@ def helpAt (s : CommandState R) (text : String) (off : Nat)
     | none => (localType s).orElse fun _ => localType (elabText (closedPrefix chars (hstart + head.length)))
   let (label, params) := render head ty
   guard !params.isEmpty
-  pure { label, params, active := min given (params.size - 1), name := head }
+  let doc := if s.globals.contains head then s.docOf? head else none
+  pure { label, params, active := min given (params.size - 1), name := head, doc }
 
 end Wiz.Signature

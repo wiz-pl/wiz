@@ -1,29 +1,34 @@
 import Word
 import Text
 import Logic
--- Interned strings (`import Intern`): an `InternTable` gives each distinct string a
--- small id, a `U32`, so that strings compare and hash as words (equal ids, equal
--- strings, within one table). Ids are stable: a string keeps its id as more are
--- interned, and ids are handed out in order, 0, 1, 2, … A table is a functional value,
--- updated in place when it is unique (as `StrMap`); keep one per program or per
--- analysis, and key `U64Map`s (lib/WordMap.wiz) or index `U32Array`s by the ids.
---
--- The model. A table is the list of its strings, by id, all distinct
--- (`mk (strs : List String)`): `intern` gives a string's index, appending it if it is
--- new. The module keeps the strings distinct (the constructor is private). The kernel
--- computes with the definitions, and `#eval`/`#run` run them.
---
--- Compiled code runs natives instead (`runtime/wiz.c`, `wiz_itab_*`): the strings by
--- id (each `String` value kept as it is, so `lookup` copies nothing) and a hash index
--- from a string to its id, so `intern` and `find` take time proportional to the
--- string's length, and `lookup` constant time.
---
--- Trust. The natives are trusted to agree with the definitions (`#print axioms` lists
--- them, marked `native`, 22f). They abort when memory runs out or a table would hold
--- 2^32 - 1 strings (the model's ids wrap around there). The tests (group `natives`)
--- run the same programs under the interpreter and compiled, C and LLVM.
+/-!
+# Intern
 
--- the index of the first string equal to `s`
+Interned strings (`import Intern`): an `InternTable` gives each distinct string a
+small id, a `U32`, so that strings compare and hash as words (equal ids, equal
+strings, within one table). Ids are stable: a string keeps its id as more are
+interned, and ids are handed out in order, 0, 1, 2, … A table is a functional value,
+updated in place when it is unique (as `StrMap`); keep one per program or per
+analysis, and key `U64Map`s (lib/WordMap.wiz) or index `U32Array`s by the ids.
+
+The model. A table is the list of its strings, by id, all distinct
+(`mk (strs : List String)`): `intern` gives a string's index, appending it if it is
+new. The module keeps the strings distinct (the constructor is private). The kernel
+computes with the definitions, and `#eval`/`#run` run them.
+
+Compiled code runs natives instead (`runtime/`, `wiz_itab_*`): the strings by
+id (each `String` value kept as it is, so `lookup` copies nothing) and a hash index
+from a string to its id, so `intern` and `find` take time proportional to the
+string's length, and `lookup` constant time.
+
+Trust. The natives are trusted to agree with the definitions (`#print axioms` lists
+them, marked `native`, 22f). They abort when memory runs out or a table would hold
+2^32 - 1 strings (the model's ids wrap around there). The tests (group `natives`)
+run the same programs under the interpreter and compiled, C and LLVM.
+
+the index of the first string equal to `s`
+-/
+
 def InternTable.indexL (s : String) : List String → Nat → Option Nat
   | .nil, _ => .none
   | .cons t rest, i => match String.eq s t with

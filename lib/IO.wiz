@@ -1,40 +1,79 @@
 import Prelude
--- Effects through a linear world token (stage 9), and the C FFI.
+/-!
+# IO
 
--- The world: a token that `IO` actions take and give back exactly once (quantity 1), so
--- the kernel's usage checking orders them. At runtime it is a scalar.
+Effects through a linear world token (stage 9), and the C foreign function interface.
+
+An `IO A` is a function that takes the `World` exactly once and gives it back with an
+`A`. Because the world is a quantity-1 argument, the kernel's usage checking forces the
+actions into a single order: there is no way to run an action twice or to drop the
+world. At runtime the token is a scalar and an `IO` action is an ordinary function.
+
+Main definitions:
+
+* `IO`, `IO.pure`, `IO.bind` (and the `Monad IO` instance, for `do` blocks);
+* output and input: `IO.println`, `IO.print`, `IO.readFile`, `IO.args`;
+* machine numbers: `UInt64` and `Float64`, with numerals and `+ - * / %`;
+* byte buffers: `Bytes`, with UTF-8 (`Bytes.ofUtf8`, `Bytes.toUtf8`) and Latin-1
+  (`Bytes.ofLatin1`, `Bytes.toLatin1`) encodings;
+* `Callback`, for Wiz functions that C code keeps.
+
+Foreign functions run only in compiled code (`wiz run`), not under `#eval`.
+
+```
+import IO
+
+def main : IO Unit := do
+  args ← IO.args;
+  IO.println (String.append "hello, " (Nat.toString (List.length args)))
+```
+-/
+
+/-- The world: a token that `IO` actions take and give back exactly once (quantity 1), so
+the kernel's usage checking orders them. At runtime it is a scalar. -/
 axiom World : Type
+/-- An action with a result of type `A`: a function that consumes the `World` once and
+returns the result with the new world. -/
 def IO (A : Type) : Type := (1 w : World) → A × World
+/-- The action that does nothing and returns `a`. -/
 def IO.pure {A : Type} (a : A) : IO A := fun w => (a, w)
--- The action and the continuation are used once, so both are quantity-1 parameters
--- (L6): the continuation may capture linear resources, and an action that consumes one
--- may be sequenced. (Unrestricted arguments are fine too.)
+/-- Run `x`, then run `f` on its result.
+
+The action and the continuation are used once, so both are quantity-1 parameters
+(L6): the continuation may capture linear resources, and an action that consumes one
+may be sequenced. (Unrestricted arguments are fine too.) `do` blocks in `IO` come down
+to this. -/
 def IO.bind {A B : Type} (1 x : IO A) (1 f : A → IO B) : IO B := fun w =>
   let 1 (a, w') := x w; f a w'
--- run `x`, drop its result, then `y`
+/-- Run `x`, drop its result, then run `y`: `IO.then1 (IO.println "a") (IO.println "b")`. -/
 def IO.then1 {A B : Type} (1 x : IO A) (1 y : IO B) : IO B := fun w =>
   let 1 (a, w') := x w; y w'
+/-- `IO` is a monad, so `do` notation works for it. -/
 instance : Monad IO where
   pure := IO.pure
   bind := fun x f => fun w => let 1 (a, w') := x w; f a w'
+/-- `IO`'s bind with linear arguments (`IO.bind`), for `do` blocks that sequence actions
+which capture linear resources. -/
 instance : Monad1 IO where
   bind1 := IO.bind
 
--- `IO1 A`: an action whose result is used once (cohesion M6 part 2), for actions that hand
--- back a linear value (a token, a handle) in direct style instead of to a continuation.
--- `IO A`'s result is unrestricted, so a linear value can't come out of it; this one's can.
--- Additive: `IO` is unchanged, and unifying the two is a later design question
--- (/workspace/wiz-notes/cohesion-resources.md §10). In `do1`, `x ⇐ e;` binds the
--- result of an `IO1` action at quantity 1 and goes on in `IO` (`(x, y) ⇐ e;` takes a
--- pair apart).
+/-- `IO1 A`: an action whose result is used once (cohesion M6 part 2), for actions that hand
+back a linear value (a token, a handle) in direct style instead of to a continuation.
+`IO A`'s result is unrestricted, so a linear value can't come out of it; this one's can.
+Additive: `IO` is unchanged, and unifying the two is a later design question
+(/workspace/wiz-notes/cohesion-resources.md §10). In `do1`, `x ⇐ e;` binds the
+result of an `IO1` action at quantity 1 and goes on in `IO` (`(x, y) ⇐ e;` takes a
+pair apart). -/
 def IO1 (A : Type) : Type := (1 w : World) → (1 _ : A) × World
+/-- `pure` of `IO1`: the value, the world unchanged. -/
 def IO1.pure {A : Type} (1 a : A) : IO1 A := fun w => (a, w)
+/-- `bind` of `IO1`: linear in the action and in the continuation. -/
 def IO1.bind {A B : Type} (1 x : IO1 A) (1 f : (1 a : A) → IO1 B) : IO1 B := fun w =>
   let 1 (a, w') := x w; f a w'
--- run an `IO1` action and go on in `IO` with its (linear) result
+/-- run an `IO1` action and go on in `IO` with its (linear) result -/
 def IO1.bindIO {A B : Type} (1 x : IO1 A) (1 f : (1 a : A) → IO B) : IO B := fun w =>
   let 1 (a, w') := x w; f a w'
--- an `IO` action as an `IO1` one (its result is unrestricted, so it may be used once)
+/-- an `IO` action as an `IO1` one (its result is unrestricted, so it may be used once) -/
 def IO.toIO1 {A : Type} (1 x : IO A) : IO1 A := fun w =>
   let 1 (a, w') := x w; (a, w')
 syntax (name := bindL) ident "⇐" term ";" doSeq : doSeq
@@ -45,81 +84,140 @@ macro_rules
   | `(term| do1 ($x, $y) ⇐ $e; $rest) => `(term| IO1.bindIO $e (fun p1_ => let 1 ($x, $y) := p1_; do1 $rest))
 
 -- Machine types: opaque to the kernel, native at runtime (through the FFI).
+/-- Unsigned 64-bit machine integers: opaque to the kernel, native at runtime (through
+the FFI). Arithmetic wraps around modulo 2⁶⁴. -/
 axiom UInt64 : Type
+/-- The `UInt64` for a `Nat` (modulo 2⁶⁴). -/
 extern "wiz_u64_id" UInt64.ofNat : Nat → UInt64
+/-- The `Nat` of a `UInt64`. -/
 extern "wiz_u64_id" UInt64.toNat : UInt64 → Nat
+/-- Addition, wrapping around. -/
 extern "wiz_u64_add" UInt64.add : UInt64 → UInt64 → UInt64
+/-- Subtraction, wrapping around (`0 - 1` is 2⁶⁴ - 1). -/
 extern "wiz_u64_sub" UInt64.sub : UInt64 → UInt64 → UInt64
+/-- Multiplication, wrapping around. -/
 extern "wiz_u64_mul" UInt64.mul : UInt64 → UInt64 → UInt64
+/-- Division, rounding down. -/
 extern "wiz_u64_div" UInt64.div : UInt64 → UInt64 → UInt64
+/-- The remainder of division. -/
 extern "wiz_u64_mod" UInt64.mod : UInt64 → UInt64 → UInt64
+/-- `a < b`. -/
 extern "wiz_u64_lt" UInt64.lt : UInt64 → UInt64 → Bool
+/-- Equality. -/
 extern "wiz_u64_eq" UInt64.eq : UInt64 → UInt64 → Bool
 
+/-- Double-precision (IEEE 754) floating-point numbers: opaque to the kernel, native at
+runtime. -/
 axiom Float64 : Type
+/-- The `Float64` nearest a `Nat`. -/
 extern "wiz_f64_of_nat" Float64.ofNat : Nat → Float64
+/-- Addition. -/
 extern "wiz_f64_add" Float64.add : Float64 → Float64 → Float64
+/-- Subtraction. -/
 extern "wiz_f64_sub" Float64.sub : Float64 → Float64 → Float64
+/-- Multiplication. -/
 extern "wiz_f64_mul" Float64.mul : Float64 → Float64 → Float64
+/-- Division. -/
 extern "wiz_f64_div" Float64.div : Float64 → Float64 → Float64
+/-- `a < b`. -/
 extern "wiz_f64_lt" Float64.lt : Float64 → Float64 → Bool
+/-- The number as text, as C's `printf` shows it. -/
 extern "wiz_f64_show" Float64.toString : Float64 → String
 
 -- (7e) `+ - * / %` and numerals at the machine types (`UInt64` wraps around natively;
 -- the kernel knows nothing about these: they are foreign functions).
+/-- Numerals at `UInt64` (7e): `(42 : UInt64)`. The kernel knows nothing about these: they
+are foreign functions. -/
 instance {ω n : Nat} : OfNat UInt64 n := OfNat.mk (UInt64.ofNat n)
+/-- `+` on `UInt64`, wrapping around. -/
 instance : Add UInt64 := Add.mk UInt64.add
+/-- `-` on `UInt64`, wrapping around. -/
 instance : Sub UInt64 := Sub.mk UInt64.sub
+/-- `*` on `UInt64`, wrapping around. -/
 instance : Mul UInt64 := Mul.mk UInt64.mul
+/-- `/` on `UInt64`. -/
 instance : Div UInt64 := Div.mk UInt64.div
+/-- `%` on `UInt64`. -/
 instance : Mod UInt64 := Mod.mk UInt64.mod
+/-- Numerals at `Float64`: `(3 : Float64)`. -/
 instance {ω n : Nat} : OfNat Float64 n := OfNat.mk (Float64.ofNat n)
+/-- `+` on `Float64`. -/
 instance : Add Float64 := Add.mk Float64.add
+/-- `-` on `Float64`. -/
 instance : Sub Float64 := Sub.mk Float64.sub
+/-- `*` on `Float64`. -/
 instance : Mul Float64 := Mul.mk Float64.mul
+/-- `/` on `Float64`. -/
 instance : Div Float64 := Div.mk Float64.div
 
 -- (the foreign function takes a C integer: below 2^64)
+/-- A number in decimal, below `2^64` (natively; the kernel can't run it). -/
 extern "wiz_nat_show" Nat.toStringSmall : Nat → String
+/-- `k` zeros. -/
 def Nat.zeros : Nat → List Char
   | .zero => .nil
   | .succ k => .cons (Char.mk 48) (Nat.zeros k)
 -- `s` with zeros in front, to 18 digits
+/-- `s` with zeros in front, to 18 digits. -/
 def Nat.pad18 (s : String) : String := match s with
   | .mk cs => .mk (List.append (Nat.zeros (Nat.sub 18 (List.length cs))) cs)
 -- `n` in decimal, of any size: 18 digits at a time by the foreign function
+/-- A number in decimal, of any size: `Nat.toString 42 = "42"` (18 digits at a time by the
+foreign function; natively, the kernel can't run it). -/
 partial def Nat.toString (n : Nat) : String := match Nat.lt n 1000000000000000000 with
   | .true => Nat.toStringSmall n
   | .false => String.append (Nat.toString (Nat.div n 1000000000000000000))
       (Nat.pad18 (Nat.toStringSmall (Nat.mod n 1000000000000000000)))
 
--- Output.
+/-- Print a line (the text and a newline) on standard output. -/
 extern "wiz_io_println" IO.println : String → IO Unit
+/-- Print text on standard output, without a newline. -/
 extern "wiz_io_print" IO.print : String → IO Unit
+/-- The contents of a file, as text. (For errors as values, use `FS.readFile` in
+lib/Sys.wiz.) -/
 extern "wiz_io_read_file" IO.readFile : String → IO String
 
 -- The program's command-line arguments, without its name (stage 21k). (`#eval` and `#run`
 -- can't call C: run the compiled program.)
+/-- The number of command-line arguments, without the program's name (stage 21k).
+(`#eval` and `#run` can't call C: run the compiled program.) -/
 extern "wiz_io_arg_count" IO.argCount : IO Nat
+/-- The command-line argument at an index, counting from 0 (the program's name is not
+one). -/
 extern "wiz_io_arg" IO.arg : Nat → IO String
+/-- `IO.argsFrom k i`: the `k` arguments from index `i` on (a helper of `IO.args`). -/
 def IO.argsFrom : Nat → Nat → IO (List String)
   | .zero, _ => IO.pure .nil
   | .succ k, i => IO.bind (IO.arg i) (fun a => IO.bind (IO.argsFrom k (Nat.succ i)) (fun rest => IO.pure (List.cons a rest)))
+/-- The program's command-line arguments, without its name: for `prog a b`,
+`["a", "b"]`. -/
 def IO.args : IO (List String) := IO.bind IO.argCount (fun n => IO.argsFrom n 0)
 
--- A Wiz function that C keeps after the call it was passed to (stage 9g). A foreign
--- function's parameter `f : A → B` is a callback borrowed for the call; as
--- `f : Callback (A → B)`, the C side owns a reference to it and gives it back with
--- `wiz_release(ctx)`.
+/-- A Wiz function that C keeps after the call it was passed to (stage 9g).
+
+A foreign function's parameter `f : A → B` is a callback borrowed for the call; as
+`f : Callback (A → B)`, the C side owns a reference to it and gives it back with
+`wiz_release(ctx)`. To the kernel, `Callback T` is just `T`. -/
 def Callback (T : Type) : Type := T
 
--- Byte buffers: functional, but `push` updates in place when the buffer is unique.
+/-- Byte buffers: functional, but `push` updates in place when the buffer is unique.
+
+A byte is a `Nat` below 256. Text and bytes meet only through a named encoding:
+`Bytes.ofUtf8`/`Bytes.toUtf8` or `Bytes.ofLatin1`/`Bytes.toLatin1`. -/
 axiom Bytes : Type
+/-- The empty buffer. -/
 extern "wiz_bytes_empty" Bytes.empty : Bytes
+/-- The buffer with one more byte at the end (the number's low eight bits). -/
 extern "wiz_bytes_push" Bytes.push : Bytes → Nat → Bytes
+/-- The number of bytes. -/
 extern "wiz_bytes_size" Bytes.size : Bytes → Nat
+/-- The byte at an index, counting from 0; 0 past the end (see `Bytes.at`). -/
 extern "wiz_bytes_get" Bytes.get : Bytes → Nat → Nat
+/-- The bytes of a string, through a C string: it stops at a NUL byte. To encode all
+of a string, use `Bytes.ofUtf8`. -/
 extern "wiz_bytes_of_string" Bytes.ofString : String → Bytes
+/-- The bytes as a string, through a C string: it stops at a NUL byte. To decode with a
+check, use `Bytes.toUtf8`. -/
 extern "wiz_bytes_to_string" Bytes.toString : Bytes → String
 
 -- More on byte buffers (sys-bytes). A byte is a `Nat` below 256 (`push` keeps the low
@@ -127,42 +225,57 @@ extern "wiz_bytes_to_string" Bytes.toString : Bytes → String
 -- through a named encoding: `ofUtf8`/`toUtf8` (every string, and a check on the way
 -- back), `ofLatin1`/`toLatin1` (one byte per character, code points 0 … 255).
 -- (`Bytes.ofString`/`toString` above go through a C string: they stop at a NUL byte.)
+/-- `Bytes.slice b start len`: the bytes from `start`, at most `len` of them. -/
 extern "wiz_bytes_slice" Bytes.slice : Bytes → Nat → Nat → Bytes
+/-- The bytes of the first buffer, then the second's. -/
 extern "wiz_bytes_append" Bytes.append : Bytes → Bytes → Bytes
+/-- Whether two buffers have the same bytes. -/
 extern "wiz_bytes_eq" Bytes.eq : Bytes → Bytes → Bool
 
+/-- Whether there are no bytes. -/
 def Bytes.isEmpty (b : Bytes) : Bool := Nat.beq (Bytes.size b) 0
+/-- The byte at an index, or `none` past the end: `Bytes.at (Bytes.ofList [7]) 0 = some 7`. -/
 def Bytes.at (b : Bytes) (i : Nat) : Option Nat := match Nat.lt i (Bytes.size b) with
   | .true => .some (Bytes.get b i)
   | .false => .none
--- `slice b start len`: the bytes from `start`, at most `len` of them
+/-- The first `n` bytes (all of them if there are fewer). -/
 def Bytes.take (b : Bytes) (n : Nat) : Bytes := Bytes.slice b 0 n
+/-- All but the first `n` bytes. -/
 def Bytes.drop (b : Bytes) (n : Nat) : Bytes := Bytes.slice b n (Bytes.size b)
+/-- `Bytes.ofListAux l acc`: `acc` with the numbers of `l` pushed (a helper of `Bytes.ofList`). -/
 def Bytes.ofListAux : List Nat → Bytes → Bytes
   | .nil, acc => acc
   | .cons x xs, acc => Bytes.ofListAux xs (Bytes.push acc x)
--- each number mod 256
+/-- The buffer of a list of numbers, each mod 256: `Bytes.ofList [1, 2, 255]`. -/
 def Bytes.ofList (l : List Nat) : Bytes := Bytes.ofListAux l Bytes.empty
+/-- `Bytes.toListAux b k acc`: the first `k` bytes of `b`, in front of `acc` (a helper of
+`Bytes.toList`). -/
 def Bytes.toListAux (b : Bytes) : Nat → List Nat → List Nat
   | .zero, acc => acc
   | .succ k, acc => Bytes.toListAux b k (.cons (Bytes.get b k) acc)
+/-- The bytes as a list of numbers. -/
 def Bytes.toList (b : Bytes) : List Nat := Bytes.toListAux b (Bytes.size b) .nil
--- one byte
+/-- The buffer of one byte. -/
 def Bytes.singleton (x : Nat) : Bytes := Bytes.push Bytes.empty x
--- 0, 1, …, n - 1 (mod 256)
+/-- `Bytes.rangeAux k i acc`: `acc` with `i, i + 1, …` pushed, `k` of them (a helper of
+`Bytes.range`). -/
 def Bytes.rangeAux : Nat → Nat → Bytes → Bytes
   | .zero, _, acc => acc
   | .succ k, i, acc => Bytes.rangeAux k (Nat.succ i) (Bytes.push acc i)
+/-- The bytes 0, 1, …, n - 1 (mod 256): a test pattern. -/
 def Bytes.range (n : Nat) : Bytes := Bytes.rangeAux n 0 Bytes.empty
--- the numbers, as `[1, 2, 255]`
+/-- The numbers of a list after the opening bracket, with the closing one (a helper of
+`Bytes.show`). -/
 def Bytes.showAux : List Nat → String
   | .nil => "]"
   | .cons x .nil => String.append (Nat.toString x) "]"
   | .cons x xs => String.append (Nat.toString x) (String.append ", " (Bytes.showAux xs))
+/-- The bytes as numbers, as `[1, 2, 255]`. -/
 def Bytes.show (b : Bytes) : String := String.append "[" (Bytes.showAux (Bytes.toList b))
 
--- UTF-8 (every code point; a code point that is not a scalar value, above 0x10FFFF or a
--- surrogate, is written as U+FFFD)
+/-- `b` with the UTF-8 encoding of code point `c` appended (one to four bytes). A code
+point that is not a scalar value (above 0x10FFFF, or a surrogate) is written as
+U+FFFD. -/
 def Bytes.pushUtf8 (b : Bytes) (c : Nat) : Bytes :=
   match Nat.lt c 128 with
   | .true => Bytes.push b c
@@ -174,22 +287,27 @@ def Bytes.pushUtf8 (b : Bytes) (c : Nat) : Bytes :=
         | .true => Bytes.push (Bytes.push (Bytes.push b (224 + Nat.div c 4096)) (128 + Nat.mod (Nat.div c 64) 64)) (128 + Nat.mod c 64)
         | .false => Bytes.push (Bytes.push (Bytes.push (Bytes.push b (240 + Nat.div c 262144))
             (128 + Nat.mod (Nat.div c 4096) 64)) (128 + Nat.mod (Nat.div c 64) 64)) (128 + Nat.mod c 64)
+/-- `acc` with the characters encoded as UTF-8 (a helper of `Bytes.ofUtf8`). -/
 def Bytes.ofCharsUtf8 : List Char → Bytes → Bytes
   | .nil, acc => acc
   | .cons c cs, acc => Bytes.ofCharsUtf8 cs (Bytes.pushUtf8 acc (Char.code c))
+/-- A string encoded as UTF-8 (every character, NULs included). -/
 def Bytes.ofUtf8 (s : String) : Bytes := match s with
   | .mk cs => Bytes.ofCharsUtf8 cs Bytes.empty
 
+/-- `Bytes.revChars cs acc`: `cs` reversed, in front of `acc`. -/
 def Bytes.revChars : List Char → List Char → List Char
   | .nil, acc => acc
   | .cons c cs, acc => Bytes.revChars cs (.cons c acc)
--- the continuation byte at i: its low six bits
+/-- The continuation byte at `i` (`10xxxxxx`): its low six bits; `none` if the byte there
+is not one. -/
 def Bytes.cont (b : Bytes) (i : Nat) : Option Nat := match Bytes.at b i with
   | .some x => match Bool.and (Nat.lt 127 x) (Nat.lt x 192) with
     | .true => .some (Nat.sub x 128)
     | .false => .none
   | .none => .none
--- the code point that starts at i, and its length in bytes
+/-- The code point that starts at byte `i`, and its length in bytes; `none` if the bytes
+there are not valid UTF-8 (no overlong forms, no surrogates). -/
 def Bytes.utf8At (b : Bytes) (i : Nat) : Option (Nat × Nat) :=
   let x := Bytes.get b i;
   match Nat.lt x 128 with
@@ -216,7 +334,9 @@ def Bytes.utf8At (b : Bytes) (i : Nat) : Option (Nat × Nat) :=
             | .false => .some (c, 4))
           | _, _, _ => .none)
         | .false => .none
--- (fuel: the bytes left)
+/-- `Bytes.decodeUtf8 b fuel i acc`: decode from byte `i` on, the characters so far in
+`acc` (reversed); the error is the offset of the first invalid byte. (`fuel`: the bytes
+left, so that the recursion is structural.) -/
 def Bytes.decodeUtf8 (b : Bytes) : Nat → Nat → List Char → Except Nat String
   | .zero, _, acc => .ok (.mk (Bytes.revChars acc .nil))
   | .succ fuel, i, acc => match Nat.lt i (Bytes.size b) with
@@ -224,23 +344,30 @@ def Bytes.decodeUtf8 (b : Bytes) : Nat → Nat → List Char → Except Nat Stri
     | .true => match Bytes.utf8At b i with
       | .some (c, n) => Bytes.decodeUtf8 b fuel (i + n) (.cons (Char.mk c) acc)
       | .none => .error i
--- the text, or the error "invalid UTF-8 at byte k"
+/-- The bytes as UTF-8 text, or the error "invalid UTF-8 at byte k":
+`Bytes.toUtf8 (Bytes.ofUtf8 s) = .ok s`. -/
 def Bytes.toUtf8 (b : Bytes) : Except String String :=
   match Bytes.decodeUtf8 b (Bytes.size b) 0 .nil with
   | .ok s => .ok s
   | .error i => .error (String.append "invalid UTF-8 at byte " (Nat.toString i))
 
--- Latin-1: byte k is character k
+/-- Latin-1: byte k is character k. `Bytes.latin1Chars b k acc`: the first `k` bytes as
+characters, in front of `acc`. -/
 def Bytes.latin1Chars (b : Bytes) : Nat → List Char → List Char
   | .zero, acc => acc
   | .succ k, acc => Bytes.latin1Chars b k (.cons (Char.mk (Bytes.get b k)) acc)
+/-- The bytes as Latin-1 text: each byte is the character with that code point (never
+fails). -/
 def Bytes.toLatin1 (b : Bytes) : String := .mk (Bytes.latin1Chars b (Bytes.size b) .nil)
+/-- `acc` with the characters of the list as bytes from position `i` on, or an error for
+the first one above 255 (a helper of `Bytes.ofLatin1`). -/
 def Bytes.ofLatin1Aux : Nat → List Char → Bytes → Except String Bytes
   | _, .nil, acc => .ok acc
   | i, .cons c cs, acc => match Nat.lt (Char.code c) 256 with
     | .true => Bytes.ofLatin1Aux (Nat.succ i) cs (Bytes.push acc (Char.code c))
     | .false => .error (String.append "not Latin-1: character " (String.append (Nat.toString i)
         (String.append " is U+" (Nat.toString (Char.code c)))))
--- the string's characters as bytes, or an error naming the first one above 255
+/-- The string's characters as bytes, one each, or an error naming the first one above
+255: `Bytes.ofLatin1 "é"` is the single byte 233. -/
 def Bytes.ofLatin1 (s : String) : Except String Bytes := match s with
   | .mk cs => Bytes.ofLatin1Aux 0 cs Bytes.empty

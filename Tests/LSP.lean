@@ -87,6 +87,7 @@ def tacticSrc : String :=
 
 def group : Group where
   name := "lsp"
+  parallel := true
   exercise := "Stage 11 (infoview)"
   cases := [
     { name := "modules in isolation are elaborated once per process", run := fun _ => do
@@ -192,8 +193,8 @@ def group : Group where
         let init : St := { trustedModule := Tests.libModule, loader := fun m => if m == "Prelude" then some p else none, termInfo := true }
         let src := tacticSrc ++ "def f (n : Nat) : Nat := Nat.add n _\ndef h := Nat.add 1 2\n"
         let dir ← IO.FS.createTempDir
-        let (cold, _) ← Cache.elaborateCached dir src init 0
-        let (warm, hits) ← Cache.elaborateCached dir src init 0
+        let (cold, _) ← Cache.elaborateCached (some dir) [] src init 0
+        let (warm, hits) ← Cache.elaborateCached (some dir) [] src init 0
         check (hits > 0) "nothing came from the cache"
         checkEq cold.infos.size warm.infos.size
         for off in [offAfter src "intro A", offAfter src "intro x", offAfter src "n _" (-1), offAfter src "Nat.add 1"] do
@@ -467,6 +468,7 @@ def wsCase : IO Unit := do
 
 def serverGroup : Group where
   name := "lsp-server"
+  parallel := true
   exercise := "Stage 11 (infoview, code actions)"
   cases := [
     { name := "infoview methods are advertised", run := fun _ => do
@@ -766,23 +768,6 @@ def serverGroup : Group where
         let (_, r) := ask srv "wiz/interactiveInfo" src (offAfter src "2 *" (-1))
         checkEq ["HMul Nat Nat Nat"] ((item r "instance").map fun i => flatten (LSP.get? i ["type"]).get!)
         check ((item r "syntax").length == 1 && (item r "expansion").length == 1) s!"syntax items: {r.compress}" },
-    { name := "signature help: the binders of the function being applied (11u)", run := fun _ => do
-        let src := "import Prelude\ndef a : Nat := Nat.add 1 \ndef b (xs : List Nat) : Nat := List.length \n" ++
-          "def c (f : Nat → Bool → Nat) : Nat := Nat.succ (f 2 \n"
-        let (srv, _) ← openDoc src
-        let (srv, r) := ask srv "textDocument/signatureHelp" src (offAfter src "Nat.add 1 ")
-        checkEq "Nat.add (_ : Nat) (_ : Nat) : Nat" (LSP.getStr ((LSP.get? r ["signatures"]).get!.getArrVal? 0 |>.toOption.get!) ["label"])
-        checkEq (1 : Nat) (LSP.getNat r ["activeParameter"])
-        let (srv, r) := ask srv "textDocument/signatureHelp" src (offAfter src "List.length ")
-        let sig := (LSP.get? r ["signatures"]).get!.getArrVal? 0 |>.toOption.get!
-        checkEq "List.length {A : Type} (_ : List A) : Nat" (LSP.getStr sig ["label"])
-        let some (.arr ps) := LSP.get? sig ["parameters"] | throw (IO.userError s!"{sig.compress}")
-        checkEq 1 ps.size
-        checkEq (0 : Nat) (LSP.getNat r ["activeParameter"])
-        -- inside parentheses, a local function
-        let (_, r) := ask srv "textDocument/signatureHelp" src (offAfter src "(f 2 ")
-        check (has r "Bool") s!"f: {r.compress}"
-        checkEq (1 : Nat) (LSP.getNat r ["activeParameter"]) },
     { name := "inlay hints: the types of fun and let binders written without one", run := fun _ => do
         let src := "import Prelude\ndef f : Nat → Nat := fun x => Nat.succ x\ndef g : Nat := let n := 2\n  Nat.add n n\n" ++
           "def h : Nat → Bool → Nat := fun a b => a\ndef k : Nat → Nat := fun (y : Nat) => y\n"
@@ -894,6 +879,46 @@ def serverGroup : Group where
         let some (.arr ds) := LSP.get? out[0]! ["params", "diagnostics"] | throw (IO.userError "no diagnostics")
         for d in ds do
           check ((LSP.getStr d ["message"]).startsWith "could not infer") s!"diagnostic: {d.compress}" },
+    { name := "signature help: the binders of the function being applied (11u)", run := fun _ => do
+        let src := "import Prelude\ndef a : Nat := Nat.add 1 \ndef b (xs : List Nat) : Nat := List.length \n" ++
+          "def c (f : Nat → Bool → Nat) : Nat := Nat.succ (f 2 \n"
+        let (srv, _) ← openDoc src
+        let (srv, r) := ask srv "textDocument/signatureHelp" src (offAfter src "Nat.add 1 ")
+        checkEq "Nat.add (_ : Nat) (_ : Nat) : Nat" (LSP.getStr ((LSP.get? r ["signatures"]).get!.getArrVal? 0 |>.toOption.get!) ["label"])
+        checkEq (1 : Nat) (LSP.getNat r ["activeParameter"])
+        let (srv, r) := ask srv "textDocument/signatureHelp" src (offAfter src "List.length ")
+        let sig := (LSP.get? r ["signatures"]).get!.getArrVal? 0 |>.toOption.get!
+        checkEq "List.length {A : Type} (_ : List A) : Nat" (LSP.getStr sig ["label"])
+        let some (.arr ps) := LSP.get? sig ["parameters"] | throw (IO.userError s!"{sig.compress}")
+        checkEq 1 ps.size
+        checkEq (0 : Nat) (LSP.getNat r ["activeParameter"])
+        -- inside parentheses, a local function
+        let (_, r) := ask srv "textDocument/signatureHelp" src (offAfter src "(f 2 ")
+        check (has r "Bool") s!"f: {r.compress}"
+        checkEq (1 : Nat) (LSP.getNat r ["activeParameter"]) },
+    { name := "doc comments in hovers, completion items and signature help (11s)", run := fun _ => do
+        let src := "import Prelude\n/-- Twice `n`: `double 2 = 4`. -/\ndef double (n : Nat) : Nat := Nat.add n n\n" ++
+          "def four : Nat := double 2\ndef five : Nat := Nat.add 4 \ndef six : Nat := doub\n"
+        let (srv, _) ← openDoc src
+        -- hover: the type, then the doc as Markdown
+        let (srv, r) := ask srv "textDocument/hover" src (offAfter src ":= doub" (-1))
+        let md := LSP.getStr r ["contents", "value"]
+        checkEq "```wiz\ndouble : Nat → Nat\n```\n\n---\n\nTwice `n`: `double 2 = 4`." md
+        -- a local has none
+        let (srv, r) := ask srv "textDocument/hover" src (offAfter src "Nat.add n" (-1))
+        check (!(has r "---")) s!"local: {r.compress}"
+        -- the Prelude's (lib/ is documented)
+        let (srv, r) := ask srv "textDocument/hover" src (offAfter src "five : Nat := Nat.ad")
+        check (has r "Addition") s!"Nat.add: {r.compress}"
+        -- completion items
+        let (srv, r) := ask srv "textDocument/completion" src (offAfter src "six : Nat := doub")
+        let some (.arr is) := LSP.get? r ["items"] | throw (IO.userError s!"{r.compress}")
+        let some i := is.find? (LSP.getStr · ["label"] == "double") | throw (IO.userError s!"{r.compress}")
+        checkEq "Twice `n`: `double 2 = 4`." (LSP.getStr i ["documentation", "value"])
+        checkEq "markdown" (LSP.getStr i ["documentation", "kind"])
+        -- signature help
+        let (_, r) := ask srv "textDocument/signatureHelp" src (offAfter src "Nat.add 4 ")
+        check (has r "Addition") s!"signature: {r.compress}" },
     { name := "references, document highlights and rename, across the package's modules (11y)", run := fun _ => do
         let lib := "import Prelude\ndef helper (n : Nat) : Nat := Nat.succ n\ndef useHelper : Nat := helper 1\n"
         let src := "import Prelude\nimport Lib\ndef double (n : Nat) : Nat := Nat.add n n\ndef four : Nat := double 2\n" ++

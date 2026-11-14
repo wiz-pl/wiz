@@ -25,6 +25,13 @@ files, and its exercises. Section numbers (`4c`, `22e` …) are stable, and othe
 comments refer to them: section `NNx` is in `stages/NN-*.md`. The stages are grouped by
 topic below, so the numbers are not in order.
 
+**New sections are files of their own**: a new section of stage NN goes in
+`stages/NN-topic/<slug>.md` (the directory next to the stage's file; `# <title>` heading,
+no letter), and other docs refer to it by that path. Two branches adding sections then
+touch different files, and no section letter needs claiming. The lettered sections in
+the stage files stay as they are. A new stage is still a new `stages/NN-topic.md` and a
+line below.
+
 ### The kernel and the elaborator (in Lean)
 
 * [Stage 1: the core kernel](stages/01-kernel.md)
@@ -42,7 +49,7 @@ topic below, so the numbers are not in order.
 * [Stage 10: effects](stages/10-effects.md)
 * [Stage 25: concurrency](stages/25-concurrency.md)
 * [Stage 27: trusted evaluation (`native_refl`)](stages/27-trusted-evaluation.md)
-* [Stage 28: solvers (`smt`, `sat_decide`)](stages/28-solvers.md)
+* [Stage 28: solvers (`smt`, `sat_decide`, `sat_decide_native`, `bv_decide`)](stages/28-solvers.md)
 
 ### Self-hosting
 

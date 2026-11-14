@@ -1,26 +1,30 @@
 import Hdl.Xdc
--- The Digilent Arty A7 (Artix-7 in a CSG324 package): its resources as an XDC pin table
--- (`Hdl.Xdc`), and the two devices it comes with.
---
--- Pins from Digilent's master XDC files (github.com/Digilent/digilent-xdc,
--- Arty-A7-35-Master.xdc and Arty-A7-100-Master.xdc: the same pins on both boards), all
--- LVCMOS33. Port names as there, with the RGB LEDs as one bus and the UART by direction
--- as the FPGA sees it.
---
--- | port      | width | pins                                      | what                        |
--- |-----------|-------|-------------------------------------------|-----------------------------|
--- | `clk`     | 1     | E3                                        | 100 MHz oscillator          |
--- | `led`     | 4     | H5 J5 T9 T10                              | LD4 … LD7 (green), high: on |
--- | `rgb`     | 12    | G6 F6 E1, G3 J4 G4, J3 J2 H4, K1 H6 K2    | LD0 … LD3: r g b each       |
--- | `btn`     | 4     | D9 C9 B9 B8                               | BTN0 … BTN3, high: pressed  |
--- | `sw`      | 4     | A8 C11 C10 A10                            | SW0 … SW3                   |
--- | `uart_rx` | 1     | A9                                        | FT2232 channel B → FPGA     |
--- | `uart_tx` | 1     | D10                                       | FPGA → FT2232 channel B     |
--- | `ck_rst`  | 1     | C2                                        | RESET button, low: pressed  |
--- | `ja`…`jd` | 8     | see below                                 | Pmod headers, pins 1-4, 7-10 |
---
--- (Digilent's names for the UART are from the host's side: `uart_txd_in` is A9,
--- `uart_rxd_out` D10.) The RGB LEDs are bright: drive them at a low duty cycle.
+/-!
+# Hdl.Arty
+
+The Digilent Arty A7 (Artix-7 in a CSG324 package): its resources as an XDC pin table
+(`Hdl.Xdc`), and the two devices it comes with.
+
+Pins from Digilent's master XDC files (github.com/Digilent/digilent-xdc,
+Arty-A7-35-Master.xdc and Arty-A7-100-Master.xdc: the same pins on both boards), all
+LVCMOS33. Port names as there, with the RGB LEDs as one bus and the UART by direction
+as the FPGA sees it.
+
+| port      | width | pins                                      | what                        |
+|-----------|-------|-------------------------------------------|-----------------------------|
+| `clk`     | 1     | E3                                        | 100 MHz oscillator          |
+| `led`     | 4     | H5 J5 T9 T10                              | LD4 … LD7 (green), high: on |
+| `rgb`     | 12    | G6 F6 E1, G3 J4 G4, J3 J2 H4, K1 H6 K2    | LD0 … LD3: r g b each       |
+| `btn`     | 4     | D9 C9 B9 B8                               | BTN0 … BTN3, high: pressed  |
+| `sw`      | 4     | A8 C11 C10 A10                            | SW0 … SW3                   |
+| `uart_rx` | 1     | A9                                        | FT2232 channel B → FPGA     |
+| `uart_tx` | 1     | D10                                       | FPGA → FT2232 channel B     |
+| `ck_rst`  | 1     | C2                                        | RESET button, low: pressed  |
+| `ja`…`jd` | 8     | see below                                 | Pmod headers, pins 1-4, 7-10 |
+
+(Digilent's names for the UART are from the host's side: `uart_txd_in` is A9,
+`uart_rxd_out` D10.) The RGB LEDs are bright: drive them at a low duty cycle.
+-/
 
 def Arty.pins : List XPin :=
   .cons (XPin.bus "led" (.cons "H5" (.cons "J5" (.cons "T9" (.cons "T10" .nil)))))

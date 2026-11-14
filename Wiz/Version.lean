@@ -4,7 +4,7 @@ No imports: tower uses it without depending on the rest of Wiz. -/
 namespace Wiz
 
 /-- The release this tree is, or leads up to (`-dev` until the commit that is tagged).
-Keep it in step with `version` in lakefile.toml and flake.nix, and with the copy in
+Keep it in step with `version` in lakefile.lean and flake.nix, and with the copy in
 the self-hosted tower (`tower/Tower/Cli.wiz`, `--version`). -/
 def version : String := "0.1.0-dev"
 

@@ -134,11 +134,11 @@ What the server offers, and Neovim's keys for it:
 
 | | |
 |---|---|
-| signature help (`<C-s>` in insert mode) | the binders of the function being applied, the next explicit one highlighted |
 | inlay hints (`lsp.inlay_hints`, or `:lua vim.lsp.inlay_hint.enable()`) | `: T` after a `fun`/`let` binder written without a type |
 | semantic tokens (on by default) | the keywords of the file's own syntax and of keyword-scoped DSLs, as `@lsp.type.keyword` |
 | completion (`lsp.completion`: pops up after `.`, `<C-Space>` in insert mode; else `<C-x><C-o>` or your completion plugin) | after `x.`: the fields of `x`'s type and the functions of its namespace (`p.norm` for `Point.norm p`); after `Nat.`: the names in `Nat`; where a term goes: the locals (with their types), then the globals whose type ends in the expected one; tactic names inside `by`, command keywords in column 0, a keyword-scoped DSL's keywords inside it; module names after `import` |
 | code actions (`gra`) | did you mean (an unknown identifier), add missing cases, add a type ascription, fill a hole `_`/`?x` from its expected type (a constructor `(.c ?x ?y)`, an anonymous constructor `⟨?px, ?py⟩`, `fun x => ?body`) |
+| signature help (`<C-s>` in insert mode) | the binders of the function being applied, the next explicit one highlighted |
 | references (`grr`), rename (`grn`) | a global's uses in the open files and the package's modules; a local's in its declaration. Rename refuses the toolchain's library |
 | outline (`gO`), workspace symbols (`:lua vim.lsp.buf.workspace_symbol()`) | the file's declarations (fields and constructors as children); every declaration of the open files and their imports |
 | folding (`lsp.folding`) | commands, `by` blocks, `match`es, block comments |

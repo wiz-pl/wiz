@@ -82,6 +82,69 @@ def compileC (tc : Toolchain) (src : String) (exe : System.FilePath) (link : Lin
     if out.exitCode == 0 then pure (.ok ()) else pure (.error s!"{cc} failed:\n{out.stderr}")
   catch e => pure (.error s!"{cc}: {e}")
 
+/-- Run a C compiler; its output as an error when it fails. -/
+def runCC (cmd : String) (args : Array String) : IO (Except String Unit) := do
+  try
+    let out ← IO.Process.output { cmd, args }
+    pure (if out.exitCode == 0 then .ok () else .error s!"{cmd} failed:\n{out.stderr}")
+  catch e => pure (.error s!"{cmd}: {e}")
+
+/-- Compile the C of a program. One translation unit by default; with `--split N` a
+support unit (`-DWIZ_API=`: the runtime and glue are exported) and `N` units of generated
+functions are compiled by `cc -c` in parallel (stage 15k), then linked. `--lib` stays one
+object file. The split is opt-in: it makes the build faster but the C compiler cannot
+inline across unit boundaries, so the generated program runs slower (see 15k). -/
+def compileDecls (tc : Toolchain) (decls : Array IR.Decl) (io : Bool) (extra : String)
+    (unbox : Bool) (exports : List RVal.ExternSig) (link : Link) (lib noMain : Bool)
+    (out : System.FilePath) (split : Nat := 0) : IO (Except String Unit) := do
+  let src := C.program decls io extra unbox exports noMain
+  let n := split
+  if lib || n < 2 || decls.size < 2 then
+    return ← compileC tc src out link lib
+  let dir := (out.parent.getD ".") / ((out.fileName.getD "wiz") ++ ".split")
+  IO.FS.createDirAll dir
+  let header := "wiz_split.h"
+  let headerText := C.splitHeader decls exports
+  IO.FS.writeFile (dir / header) headerText
+  let parts := C.splitParts decls n
+  -- (deterministic inputs; a part whose text and flags are unchanged reuses its object)
+  let inputs : Array (String × String × Bool) :=
+    #[("support", C.splitSupport decls io extra unbox exports noMain, true)] ++
+    parts.zipIdx.map fun (p : String × Nat) => (s!"part{p.2}", C.splitPartText header p.1, false)
+  let cc := tc.cc
+  let cflags := tc.cflags.toArray
+  let keyOf (text : String) (api : Bool) : String :=
+    toString (mixHash (hash text) (hash s!"{cc} {" ".intercalate tc.cflags} -O2 -w {api}"))
+  let ccOne (file obj : String) (api : Bool) : IO (Except String Unit) :=
+    runCC cc (#["-O2", "-w", "-c", "-o", (dir / obj).toString, (dir / file).toString] ++
+      (if api then #["-DWIZ_API="] else #[]) ++ cflags)
+  let err ← IO.mkRef (none : Option String)
+  let mut todo : Array (String × Bool × String) := #[]
+  for (name, text, api) in inputs do
+    let stamp := keyOf text api
+    let hit ← if (← (dir / (name ++ ".stamp")).pathExists) && (← (dir / (name ++ ".o")).pathExists) then
+        pure ((← IO.FS.readFile (dir / (name ++ ".stamp"))).trimAscii.toString == stamp)
+      else pure false
+    unless hit do
+      IO.FS.writeFile (dir / (name ++ ".c")) text
+      todo := todo.push (name, api, stamp)
+  let tasks ← todo.mapM fun (name, api, stamp) =>
+    IO.asTask (prio := .dedicated) do
+      match ← ccOne (name ++ ".c") (name ++ ".o") api with
+      | .ok () => IO.FS.writeFile (dir / (name ++ ".stamp")) stamp; pure (.ok ())
+      | .error e => pure (.error e)
+  let collect (t : Task (Except IO.Error (Except String Unit))) : IO Unit := do
+    match t.get with
+    | .ok (.ok ()) => pure ()
+    | .ok (.error e) => if (← err.get).isNone then err.set (some e)
+    | .error e => if (← err.get).isNone then err.set (some (toString e))
+  for t in tasks do collect t
+  if let some e ← err.get then return .error e
+  let objs := inputs.map fun (name, _, _) => (dir / (name ++ ".o")).toString
+  let srcArgs := if link.sources.isEmpty then #[] else #["-O2", "-w"] ++ link.sources ++ cflags
+  runCC cc (#["-o", out.toString] ++ objs ++ srcArgs ++ tc.gmp.toArray ++ tc.ldflags.toArray ++
+    tc.libs.toArray ++ link.libFlags)
+
 /-- Compile an LLVM module to an executable: `llc` (the toolchain's) for the module, the C
 compiler for the runtime (exported with `-DWIZ_API=`), and the C compiler to link. -/
 def compileLLVM (tc : Toolchain) (ll : String) (exe : System.FilePath) (glue : String := "") (link : Link := {}) (lib : Bool := false) : IO (Except String Unit) := do
@@ -115,7 +178,7 @@ an object file, with a header `OUT.h` for them; with `noMain`, the exports linke
 a program but without a `main` (a Wasm module, a shared library: the toolchain's flags
 say which). -/
 def build (tc : Toolchain) (s : CommandState R) (n : Name) (out : System.FilePath) (llvm lib : Bool)
-    (noMain : Bool := false) : IO (Except String (Term R)) := do
+    (noMain : Bool := false) (split : Nat := 0) : IO (Except String (Term R)) := do
   let bare := lib || noMain
   match irProgram s n bare with
   | .error e => pure (.error e)
@@ -127,7 +190,7 @@ def build (tc : Toolchain) (s : CommandState R) (n : Name) (out : System.FilePat
     let r ← if llvm then
         compileLLVM tc (LLVM.program decls io bare) out
           (extraC s ++ "\n" ++ C.glue (C.externs decls) (extraC s) unbox ++ "\n" ++ C.exportWrappers ex true) (linkOf s) lib
-      else compileC tc (C.program decls io (extraC s) unbox ex bare) out (linkOf s) lib
+      else compileDecls tc decls io (extraC s) unbox ex (linkOf s) lib bare out split
     pure (r.map fun () => ty)
 
 /-- Parse the printed result: numbers, `(tag fields…)`, `<fn>`, `#bits`. -/
@@ -159,10 +222,10 @@ where
 with its type. With `timeout`, the program is stopped after that many seconds (by
 coreutils' `timeout`). -/
 def runGlobal (tc : Toolchain) (s : CommandState R) (n : Name) (dir : System.FilePath) (llvm : Bool := false)
-    (timeout : Option Nat := none) (args : Array String := #[]) :
+    (timeout : Option Nat := none) (args : Array String := #[]) (split : Nat := 0) :
     IO (Except String String) := do
   let exe := dir / "wiz_main"
-  match ← build tc s n exe llvm false with
+  match ← build tc s n exe llvm false (split := split) with
     | .error e => pure (.error e)
     | .ok ty =>
       let io := isIO ty

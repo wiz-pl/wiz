@@ -1,31 +1,33 @@
 import Word
 import Text
 import Logic
--- Maps from 64-bit words (`import WordMap`): `U64Map V`, a functional finite map with
--- `U64` keys, updated in place when it is unique (as `StrMap`). Keys of other word
--- types, typed ids (`NodeId k`, 22e) and interned strings (lib/Intern.wiz) go through
--- `U64` (`UIntN.resize`, or the id's bits).
---
--- The model. A map is its entries, `mk (entries : List (U64 × V))`, with the keys
--- strictly increasing: the module keeps that invariant (the constructor is private and
--- every operation here preserves it), so each map has exactly one model, and `toList`
--- and `foldl` see the entries by increasing key, in the kernel, the interpreters and
--- compiled code alike. The kernel computes with the definitions and proofs see them
--- (the laws at the end).
---
--- Compiled code runs natives instead (`runtime/wiz.c`, `wiz_wmap_*`): an open-addressing
--- hash table of `uint64_t` keys and Wiz values (linear probing, deletion by backward
--- shift, at most half full), so `insert`, `find`, `erase` and `contains` take expected
--- constant time, and only the values are Wiz objects. An update copies the table when it
--- is shared and changes it in place when it is unique. Reading the entries back
--- (`toList`, `foldl`, `keys`) sorts them: O(n log n).
---
--- Trust. The natives are trusted to agree with the definitions (`#print axioms` lists
--- them, marked `native`, 22f), and the natives' `toList` relies on the module invariant
--- (the model is the sorted list). They abort when memory runs out. The tests (group
--- `wordmap`) run the same programs under the interpreter and compiled, C and LLVM.
+/-!
+# WordMap
 
--- ## The model's operations, on a sorted list of entries
+Maps from 64-bit words (`import WordMap`): `U64Map V`, a functional finite map with
+`U64` keys, updated in place when it is unique (as `StrMap`). Keys of other word
+types, typed ids (`NodeId k`, 22e) and interned strings (lib/Intern.wiz) go through
+`U64` (`UIntN.resize`, or the id's bits).
+
+The model. A map is its entries, `mk (entries : List (U64 × V))`, with the keys
+strictly increasing: the module keeps that invariant (the constructor is private and
+every operation here preserves it), so each map has exactly one model, and `toList`
+and `foldl` see the entries by increasing key, in the kernel, the interpreters and
+compiled code alike. The kernel computes with the definitions and proofs see them
+(the laws at the end).
+
+Compiled code runs natives instead (`runtime/`, `wiz_wmap_*`): an open-addressing
+hash table of `uint64_t` keys and Wiz values (linear probing, deletion by backward
+shift, at most half full), so `insert`, `find`, `erase` and `contains` take expected
+constant time, and only the values are Wiz objects. An update copies the table when it
+is shared and changes it in place when it is unique. Reading the entries back
+(`toList`, `foldl`, `keys`) sorts them: O(n log n).
+
+Trust. The natives are trusted to agree with the definitions (`#print axioms` lists
+them, marked `native`, 22f), and the natives' `toList` relies on the module invariant
+(the model is the sorted list). They abort when memory runs out. The tests (group
+`wordmap`) run the same programs under the interpreter and compiled, C and LLVM.
+-/
 
 def U64Map.insertL {V : Type} (k : U64) (v : V) : List (U64 × V) → List (U64 × V)
   | .nil => .cons (k, v) .nil
