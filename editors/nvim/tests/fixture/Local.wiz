@@ -1,0 +1,3 @@
+import Prelude
+
+def id (x : Nat) : Nat := x

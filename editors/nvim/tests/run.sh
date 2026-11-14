@@ -21,7 +21,7 @@ fi
 export WIZ GRAIL WIZ_LIB="${WIZ_LIB:-$repo/lib}"
 cd "$here/.."
 # `-l` runs the script; it ends with cquit (status 1) when a test fails. Progress lines
-# end in \r: keep only the results.
+# end in \r: keep only the results. `○` is a gap (a missing feature), not a failure.
 status=0
 out=$("$nvim" --headless --clean -u tests/minimal_init.lua -l tests/run.lua 2>&1) || status=$?
 printf '%s\n' "$out" | tr '\r' '\n' | grep -v '^  … ' | sed 's/-- INSERT --//g'

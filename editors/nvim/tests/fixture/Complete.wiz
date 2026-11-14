@@ -1,0 +1,3 @@
+import Prelude
+
+def n : Nat := Nat.

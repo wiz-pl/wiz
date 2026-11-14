@@ -1,0 +1,6 @@
+import Prelude
+
+def m : Nat → Nat := by
+  intro n
+  trace_state
+  exact n

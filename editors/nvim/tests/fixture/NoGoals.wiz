@@ -1,0 +1,4 @@
+import Prelude
+
+def done : Nat := by
+  exact 1

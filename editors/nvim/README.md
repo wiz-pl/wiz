@@ -215,19 +215,44 @@ Lean leaves free are Wiz's Greek letters, after the Greek keyboard where it has 
 `\f` φ, `\h` η, `\j` ξ, `\k` κ, `\q` θ, `\s` σ, `\w` ω, `\y` υ, `\z` ζ. `\hat` and `\vec`
 are combining accents (`x\hat` → x̂).
 
-## Tests
+## Tests and feature parity
 
 ```sh
 editors/nvim/tests/run.sh          # or: lake test -- '=nvim'
 ```
 
-Headless Neovim with this plugin: abbreviations typed through insert mode (also one key
-at a time, in an embedded Neovim), a check that every non-ASCII character in `lib/*.wiz`
-has an abbreviation, and the infoview against the real `wiz lsp` on
-`tests/fixture/Goals.wiz` (the goal after `intro n`, an expected type, highlights by
-kind, `K` on a subterm, following an edit). `WIZ` picks the executable (default: this
-checkout's `.lake/build/bin/wiz`); without `nvim` on `PATH` it is skipped (the dev shell
-has one).
+Headless Neovim with this plugin and the real `wiz lsp` (`WIZ` and `GRAIL` pick the
+executables; the defaults are this checkout's `.lake/build/bin/{wiz,grail}`, then `wiz`
+and `grail` on `PATH`; `WIZ_LIB` is the standard library). Without `nvim` on `PATH` the
+script is skipped. A case may report a **gap** (`○`): a feature this toolchain or the
+plugin does not have yet. Gaps are listed in the output and do not fail the run. Use a
+`wiz` built from this checkout (or a matching toolchain): an old binary may panic while
+serving a newer `lib/`, which fails the installed-toolchain case.
+
+| feature | status | what the suite covers |
+|---|---|---|
+| LSP start and root detection | ✅ | `wiz lsp`, `grail lsp -C ROOT` in a package, an installed toolchain's own `wiz lsp`, one client per toolchain, `lsp.enable = false`, `lsp.toolchains = false`, the nearest root marker (`grail.wiz`, `wiz-toolchain`, `lakefile.toml`, `.git`) and the file's own directory |
+| diagnostics | ✅ | `textDocument/publishDiagnostics` (source, severity, range, message) and that an edit clears them |
+| hover | ✅ | a global's type and doc comment, and a local's type |
+| completion | ✅ | names after a namespace dot (`Nat.` → `Nat.add`), their kind, insertion and doc |
+| infoview: goals and expected type | ✅ | the tactic state after `intro n`, the expected type of an argument, the goal after an edit |
+| infoview: info sections | ✅ | syntax and its expansion, an import and its file, declarations, `trace_state` messages, “No goals” |
+| infoview: subterms | ✅ | tagged text highlighted by kind, `K` (`wiz/subtermInfo`), `gd` to a declaration or macro rule |
+| infoview: window | ✅ | autoopen, toggle, browser (`wiz/browserInfoview` plus the WebSocket handshake) |
+| term-aware requests | ✅ | `wiz/interactiveTermGoal` and `wiz/plainTermGoal` directly, `wiz/subtermInfo` through the infoview |
+| unicode input | ✅ | expansion through real insert mode (also one key at a time), longest prefix, punctuation, `<Tab>`/`<CR>`/insert-leave, `$CURSOR` abbreviations, combining accents, `abbreviations.extra`, a custom leader, `:WizAbbrev`, `:WizAbbrevList`, every non-ASCII symbol in `lib/*.wiz` |
+| hooks | ✅ | `lsp.on_attach(client, buf)`, `lsp.capabilities` merging, `wiz/elaborated` registration |
+| infoview: instances | ◐ | the server's `instance` info items are not in a fixture yet; the section is rendered by `infoview.lua` |
+| inlay hints, folding, completion autotrigger | ◐ | the options are documented; the suite checks the attach hook, not their visual effect |
+| tactic widgets (11af) | ✗ | this server sends no `widgets` in `wiz/interactiveGoals`, and the Neovim infoview reads only goals, messages and items |
+| term-aware extension hook (11ae follow-up) | ✗ | no `wiz/term*` method beyond the term-goal/subterm requests, and no editor hook for one |
+| `wiz fmt` | ✗ | this toolchain's CLI has no `fmt` subcommand (the formatter is 11aa on another branch) |
+| `wiz lint` | ✗ | this toolchain's CLI has no `lint` subcommand (ward/11ad is on another branch) |
+| fmt/lint editor commands | ✗ | no `:WizFmt`, `:WizLint` or format-on-save in the plugin |
+
+The gap rows are probed by the suite (they are reported with the reason and the usage
+text); when the server or CLI grows the feature, the probes exercise it and the matrix
+row can be updated.
 
 ## Credits
 

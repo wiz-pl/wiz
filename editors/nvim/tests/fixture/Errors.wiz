@@ -1,0 +1,3 @@
+import Prelude
+
+def bad : Nat := Bool.true
