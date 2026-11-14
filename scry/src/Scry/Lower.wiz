@@ -253,7 +253,7 @@ def Scry.freshBlock : Scry.LM Nat := do
 -- ## C types
 
 /-- The words of a type's spelling (`unsigned long` → `["unsigned", "long"]`). -/
-def Scry.words (s : String) : List String :=
+def Scry.lowerWords (s : String) : List String :=
   List.filter (fun w => Bool.not (String.isEmpty w)) (String.splitOn (String.trim s) " ")
 
 /-- Whether `w` occurs in `ws`. -/
@@ -265,7 +265,7 @@ def Scry.tyOfText (tys : List (String × Wil.Ty)) (text : String) : Option Wil.T
   match List.find (fun p => String.eq p.1 (String.trim text)) tys with
   | .some p => .some p.2
   | .none =>
-    let ws := Scry.words text;
+    let ws := Scry.lowerWords text;
     let uns := Scry.hasWord "unsigned" ws;
     let signed := Bool.not uns;
     match Scry.hasWord "char" ws, Scry.hasWord "short" ws,
@@ -368,7 +368,7 @@ def Scry.paramsOf (c : Scry.Cst) (s : Scry.LState) (fn : Nat) : List (String × 
           let base := Scry.typeOf c s tn;
           match Scry.childF c p "declarator" with
           | .some d => let di := Scry.declInfo c s d base; .cons (di.1, di.2.1) .nil
-          | .none => match Scry.hasWord "void" (Scry.words (c.textOf tn)) with
+          | .none => match Scry.hasWord "void" (Scry.lowerWords (c.textOf tn)) with
             | .true => .nil
             | .false => .cons ("", base) .nil
         | .none => .nil
@@ -1372,7 +1372,7 @@ def Scry.blockAtDone (done : List (Nat × Wil.Block)) (i : Nat) : Option Wil.Blo
 def Scry.assemble (n : Nat) (done : List (Nat × Wil.Block)) : List Wil.Block :=
   List.map (fun i => match Scry.blockAtDone done i with
     | .some b => b
-    | .none => Wil.Block.mk .nil (.unreachable Wil.noSpan)) (Scry.range n)
+    | .none => Wil.Block.mk .nil (.unreachable Wil.noSpan)) (Scry.schemaRange n)
 
 /-- The implicit fallthrough: `main` returns 0 (C's rule), any other function is
 `ret none` with a warning (its value is undefined in C). -/
@@ -1571,7 +1571,7 @@ partial def Scry.funcSites (base : Nat) : List Wil.Block → Nat
   | .cons b rest => Scry.funcSites (Nat.add base (Nat.succ (List.length b.stmts))) rest
 
 /-- The sites of one function at global base `base`. -/
-partial def Scry.sitesOfFunc (fid : Nat) (base : Nat) : List Wil.Block → List Scry.Site
+partial def Scry.lowerSitesOfFunc (fid : Nat) (base : Nat) : List Wil.Block → List Scry.Site
   | .nil => .nil
   | .cons b rest =>
     let here := List.map (fun p =>
@@ -1581,13 +1581,13 @@ partial def Scry.sitesOfFunc (fid : Nat) (base : Nat) : List Wil.Block → List 
     let termSite := Scry.Site.mk fid (Nat.add base (List.length b.stmts)) 0
       (List.length b.stmts) .none (.some b.term) (Wil.termOrigin b.term);
     List.append (List.append here (.cons termSite .nil))
-      (Scry.sitesOfFunc fid (Nat.add base (Nat.succ (List.length b.stmts))) rest)
+      (Scry.lowerSitesOfFunc fid (Nat.add base (Nat.succ (List.length b.stmts))) rest)
 
 /-- Every site of every function, in function then block then statement order. -/
 partial def Scry.allSitesGo : Nat → Nat → List Wil.Func → List Scry.Site
   | _, _, .nil => .nil
   | fid, base, .cons f rest =>
-    List.append (Scry.sitesOfFunc fid base f.blocks)
+    List.append (Scry.lowerSitesOfFunc fid base f.blocks)
       (Scry.allSitesGo (Nat.succ fid) (Scry.funcSites base f.blocks) rest)
 
 def Scry.allSites (funcs : List Wil.Func) : List Scry.Site := Scry.allSitesGo 0 0 funcs
@@ -1627,7 +1627,7 @@ def Scry.rhsCols (e : Wil.Rhs) : Nat × Nat × Nat :=
   | .havoc _ => (23, 0, 0)
 
 /-- The registers a right-hand side reads. -/
-def Scry.rhsUses (e : Wil.Rhs) : List Nat :=
+def Scry.lowerRhsUses (e : Wil.Rhs) : List Nat :=
   match e with
   | .use v => .cons v.index .nil
   | .cst _ => .nil
@@ -1639,26 +1639,26 @@ def Scry.rhsUses (e : Wil.Rhs) : List Nat :=
   | .havoc _ => .nil
 
 /-- The registers a condition reads. -/
-def Scry.condUses (k : Wil.Cond) : List Nat :=
+def Scry.lowerCondUses (k : Wil.Cond) : List Nat :=
   match k with
   | .const _ => .nil
   | .cmp _ a b => .cons a.index (.cons b.index .nil)
-  | .not c => Scry.condUses c
-  | .and a b => List.append (Scry.condUses a) (Scry.condUses b)
-  | .or a b => List.append (Scry.condUses a) (Scry.condUses b)
+  | .not c => Scry.lowerCondUses c
+  | .and a b => List.append (Scry.lowerCondUses a) (Scry.lowerCondUses b)
+  | .or a b => List.append (Scry.lowerCondUses a) (Scry.lowerCondUses b)
 
 /-- The registers a statement defines. -/
-def Scry.stmtDefs (s : Wil.Stmt) : List Nat :=
+def Scry.lowerStmtDefs (s : Wil.Stmt) : List Nat :=
   match s with
   | .assign x _ _ => .cons x.index .nil
   | .call (.some r) _ _ _ => .cons r.index .nil
   | _ => .nil
 
 /-- The registers a statement uses. -/
-def Scry.stmtUses (s : Wil.Stmt) : List Nat :=
+def Scry.lowerStmtUses (s : Wil.Stmt) : List Nat :=
   match s with
-  | .assign _ e _ => Scry.rhsUses e
-  | .assume k _ => Scry.condUses k
+  | .assign _ e _ => Scry.lowerRhsUses e
+  | .assume k _ => Scry.lowerCondUses k
   | .store p v _ => .cons p.index (.cons v.index .nil)
   | .free p _ => .cons p.index .nil
   | .call _ callee args _ =>
@@ -1709,10 +1709,10 @@ def Scry.edbOf (funcs : List Wil.Func) : Scry.Edb :=
       .cons (Scry.row5 s.site x.index cols.1 cols.2.1 cols.2.2) .nil
     | _ => .nil) sites);
   let defs : List (List Nat) := List.concat (List.map (fun s => match s.stmt with
-    | .some st => Scry.varRows s.site (Scry.stmtDefs st)
+    | .some st => Scry.varRows s.site (Scry.lowerStmtDefs st)
     | .none => .nil) sites);
   let uses : List (List Nat) := List.concat (List.map (fun s => match s.stmt with
-    | .some st => Scry.varRows s.site (Scry.stmtUses st)
+    | .some st => Scry.varRows s.site (Scry.lowerStmtUses st)
     | .none => .nil) sites);
   let calls : List (List Nat) := List.concat (List.map (fun s => match s.stmt with
     | .some (.call _ (.direct name) _ _) => match Scry.funcIndex funcs name with

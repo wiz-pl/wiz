@@ -176,11 +176,11 @@ def Scry.nodeId (n : Nat) : Scry.NodeId := Scry.Id.mk n
 /-- The edge id for `n` (unchecked: the loader checks bounds). -/
 def Scry.edgeId (n : Nat) : Scry.EdgeId := Scry.Id.mk n
 /-- `[0, 1, …, n-1]`, accumulated from `n - 1` down (`acc` is the list so far). -/
-def Scry.rangeFrom : Nat → List Nat → List Nat
+def Scry.schemaRangeFrom : Nat → List Nat → List Nat
   | .zero, acc => acc
-  | .succ n, acc => Scry.rangeFrom n (.cons n acc)
+  | .succ n, acc => Scry.schemaRangeFrom n (.cons n acc)
 /-- `[0, 1, …, n-1]`. -/
-def Scry.range (n : Nat) : List Nat := Scry.rangeFrom n .nil
+def Scry.schemaRange (n : Nat) : List Nat := Scry.schemaRangeFrom n .nil
 
 /-- The larger of the two (for `maxDepth`). -/
 def Scry.bumpMax (n m : Nat) : Nat := Nat.max n m
@@ -254,7 +254,7 @@ def Scry.adjRow (edges : List Scry.Edge) (bySource : Bool) (i : Nat) : List Scry
 /-- The CSR adjacency of `edges` over `n` nodes, grouping by source (`bySource`) or by
 target. The arcs of a node keep the edge order. -/
 def Scry.adjOf (n : Nat) (edges : List Scry.Edge) (bySource : Bool) : Scry.Adj :=
-  let rows := List.map (Scry.adjRow edges bySource) (Scry.range n);
+  let rows := List.map (Scry.adjRow edges bySource) (Scry.schemaRange n);
   let counts := List.map List.length rows;
   let arcs := List.concat rows;
   Scry.Adj.mk (Scry.offsetsOf counts 0)

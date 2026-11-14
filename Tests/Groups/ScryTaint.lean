@@ -36,7 +36,8 @@ open Wiz
 
 namespace Tests.ScryTaint
 
-/-- Every `lib/*.wiz` and `lib/D/*.wiz` (as `D.X`), by module name. -/
+/-- Every `lib/*.wiz`, `lib/D/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as
+`Scry.X`), by module name. The C-lowering pipeline case serves both roots. -/
 def libLoader : IO (Name → Option String) := do
   let mut m : List (Name × String) := []
   for e in ← System.FilePath.readDir "lib" do
@@ -46,10 +47,22 @@ def libLoader : IO (Name → Option String) := do
       for f in ← System.FilePath.readDir e.path do
         if f.path.extension == some "wiz" then
           m := (e.fileName ++ "." ++ f.path.fileStem.getD "", ← IO.FS.readFile f.path) :: m
+  for e in ← System.FilePath.readDir "scry/src/Scry" do
+    if e.path.extension == some "wiz" then
+      m := ("Scry." ++ e.path.fileStem.getD "", ← IO.FS.readFile e.path) :: m
   pure fun n => m.lookup n
 
 def prototypeImports : String :=
   "import Scry.Analysis\nimport Scry.Taint\nimport Scry.TaintExamples\nimport Text\n"
+
+/-- A Wiz string literal for `s` (the escapes the Wiz lexer reads). -/
+def wizStr (s : String) : String :=
+  "\"" ++ s.foldl (fun acc c => acc ++ match c with
+    | '"' => "\\\""
+    | '\\' => "\\\\"
+    | '\n' => "\\n"
+    | '\t' => "\\t"
+    | c => c.toString) "" ++ "\""
 
 def ruleImports : String :=
   "import Scry.Analysis\n" ++
@@ -63,6 +76,14 @@ def ruleImports : String :=
   "import Scry.RuleExamples\n" ++
   "import Json\n" ++
   "import Text\n"
+
+/-- The rule pack plus S2's lowering, for the CLI's pipeline (without tree-sitter: the
+case reads a checked-in `scry-cst` spill). -/
+def pipelineImports : String :=
+  ruleImports ++
+  "import Scry.Lower\n" ++
+  "import Scry.CstStore\n"
+
 
 /-- Run `body` with `imports` prepended and return the `#eval` message texts. -/
 def runProbe (imports body : String) : IO (List String) := do
@@ -328,7 +349,28 @@ def group : Group where
           "#eval jStr (firstResult sar) \"ruleId\"\n" ++
           "#eval jStr (firstResult sar) \"level\"\n" ++
           "#eval match Json.parse (Scry.renderSarif \"scry\" originMap Scry.demoRules (Scry.programFindings prI)) with | .ok j => Json.getStr j \"version\" | .error e => e")
-          ["\"2.1.0\"", "\"scry\"", "\"command-injection\"", "\"error\"", "\"2.1.0\""] }
+          ["\"2.1.0\"", "\"scry\"", "\"command-injection\"", "\"error\"", "\"2.1.0\""] },
+    { name := "pipeline: C to Wil to rule pack, the CLI's path on a checked-in CST",
+      run := fun _ => do
+        let csrc ← IO.FS.readFile "scry/tests/fixtures/taint-unsafe.c"
+        let cst ← IO.FS.readFile "scry/tests/fixtures/taint-unsafe.cst"
+        let body :=
+          s!"def source : String := {wizStr csrc}\n" ++
+          s!"def spill : String := {wizStr cst}\n" ++
+          "def cst : Option Scry.Cst := match Scry.CstStore.ofText spill with\n" ++
+          "  | .ok s => .some (Scry.Cst.ofStore source s)\n" ++
+          "  | .error _ => .none\n" ++
+          "def tu : Option Scry.TU := match cst with\n" ++
+          "  | .some c => .some (Scry.lowerTU \"taint-unsafe.c\" c)\n" ++
+          "  | .none => .none\n" ++
+          "#eval match tu with | .some t => List.length t.warnings | .none => 999\n" ++
+          "#eval match tu with | .some t => List.length (Scry.programFindings (Scry.analyze (Wil.program t.funcs) Scry.demoRules)) | .none => 999\n" ++
+          "#eval match tu with\n" ++
+          "  | .none => 999\n" ++
+          "  | .some t => match Scry.programFindings (Scry.analyze (Wil.program t.funcs) Scry.demoRules) with\n" ++
+          "    | .cons f _ => if String.eq f.rule \"command-injection\" then 1 else 0\n" ++
+          "    | .nil => 0\n"
+        checkEq ["0", "1", "1"] (← runProbe pipelineImports body) }
   ]
 
 builtin_initialize registerGroup group

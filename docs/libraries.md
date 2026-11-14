@@ -857,11 +857,17 @@ The S4 rule pack and interprocedural slice are separate modules:
   recorded but unknown. Findings carry their rule metadata and a stitched source -> sink
   path.
 * `import Scry.Sarif` — SARIF 2.1.0 JSON with rule metadata, primary and related
-  locations from an `OriginMap` (S2 supplies spans; until then the map is test-only).
+  locations from an `OriginMap` (S2's `Wil.Span` supplies the entries; a finding's
+  `properties.derivation` is `checked`/`unchecked`, and `Scry.boundaryResultJson` emits a
+  lowering-boundary warning).
 * `import Scry.Certify` — a finding as a `Scry.Derivation` checked by `Scry.Cert`
   against the function's EDB, reporting its axioms and the interprocedural assumptions
   the path walk supplies.
 
-`import Scry.RuleExamples` is the rule-pack/interprocedural corpus. There is still no
-tree-sitter, no C lowering and no memory/points-to model; `wiz-notes/scry-taint.md` has
-the design, the `.scry` format and the remaining gaps.
+`import Scry.RuleExamples` is the rule-pack/interprocedural corpus. The `scry` package's
+`scry taint` command wires the whole pipeline: S1's tree-sitter parse, S2's
+`Scry.Lower` (spans on every statement), these S4 modules with
+`lib/Scry/rules/default.scry`, and SARIF 2.1.0. The remaining gap is points-to and
+memory: `store`/`load`, aggregate fields, arrays and heap objects are not tracked
+precisely, so a flow through memory can be missed; the lowering warns (havoc) at that
+boundary. `wiz-notes/scry-taint.md` has the design, the `.scry` format and the gaps.

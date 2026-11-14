@@ -1,0 +1,40 @@
+unsafe: one finding: ok
+unsafe: checked: ok
+unsafe: rule command-injection: ok
+unsafe: sink function main: ok
+unsafe: sink span known: ok
+unsafe: no lowering-boundary warning: ok
+unsafe: no parse errors: ok
+safe: zero findings: ok
+safe: zero boundary warnings: ok
+chain: one finding: ok
+chain: checked: ok
+chain: rule command-injection: ok
+chain: sink function run: ok
+chain: sink span known: ok
+chain: path starts in main: ok
+chain: path ends in run: ok
+clean: zero findings: ok
+clean: zero boundary warnings: ok
+boundary: zero findings: ok
+boundary: two havoc warnings: ok
+boundary: warnings are unchecked: ok
+macro errors: refused without --allow-errors: ok
+macro errors: recovered with --allow-errors: ok
+sarif: version 2.1.0: ok
+sarif: one run: ok
+sarif: driver name: ok
+sarif: four rule descriptors: ok
+sarif: one result: ok
+sarif: rule id: ok
+sarif: derivation checked: ok
+sarif: one primary location: ok
+sarif: primary span line: ok
+sarif: related spans present: ok
+{"tool":"scry","file":"tests/fixtures/taint-unsafe.c","rules":4,"parseErrors":0,"findings":[{"rule":"command-injection","severity":"error","kind":"taint","message":"Attacker-controlled data reaches a command interpreter","function":"main","point":3,"callee":"system","argument":0,"derivation":"checked","location":{"uri":"tests/fixtures/taint-unsafe.c","startLine":7,"startColumn":3,"endLine":7,"endColumn":14},"path":[{"function":"main","point":1,"var":2,"kind":"source"},{"function":"main","point":2,"var":0,"kind":"flow"},{"function":"main","point":3,"var":0,"kind":"sink"}]}],"boundary":[],"counts":{"findings":1,"checked":1,"unchecked":0,"boundary":0}}
+cli --sarif: exit 0: ok
+cli --sarif: file parses: ok
+{"tool":"scry","file":"tests/fixtures/taint-unsafe.c","rules":4,"parseErrors":0,"findings":[{"rule":"command-injection","severity":"error","kind":"taint","message":"Attacker-controlled data reaches a command interpreter","function":"main","point":3,"callee":"system","argument":0,"derivation":"checked","location":{"uri":"tests/fixtures/taint-unsafe.c","startLine":7,"startColumn":3,"endLine":7,"endColumn":14},"path":[{"function":"main","point":1,"var":2,"kind":"source"},{"function":"main","point":2,"var":0,"kind":"flow"},{"function":"main","point":3,"var":0,"kind":"sink"}]}],"boundary":[],"counts":{"findings":1,"checked":1,"unchecked":0,"boundary":0}}
+cli --fail-on-finding: unsafe exits 1: ok
+{"tool":"scry","file":"tests/fixtures/taint-clean.c","rules":4,"parseErrors":0,"findings":[],"boundary":[],"counts":{"findings":0,"checked":0,"unchecked":0,"boundary":0}}
+cli --fail-on-finding: clean exits 0: ok

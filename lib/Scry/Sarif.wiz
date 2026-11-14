@@ -163,8 +163,15 @@ def Scry.relatedLocations (m : Scry.OriginMap) (path : List Scry.PathNode) : Lis
 def Scry.pathLengthJson (path : List Scry.PathNode) : Json :=
   Json.ofNat (List.length path)
 
-def Scry.resultJson (m : Scry.OriginMap) (pack : Scry.RulePack)
-    (f : Scry.RuleFinding) : Json :=
+/-- "checked" or "unchecked": whether the finding's derivation verified
+(`Scry.Certify.certifyFinding`). -/
+def Scry.derivationText (checked : Bool) : String :=
+  match checked with
+  | .true => "checked"
+  | .false => "unchecked"
+
+def Scry.resultJsonWith (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (f : Scry.RuleFinding) (checked : Bool) : Json :=
   Json.mkObj
     [ ("ruleId", Json.mkStr f.rule)
     , ("ruleIndex", Json.ofNat (Scry.ruleIndexOf pack f.rule))
@@ -178,25 +185,62 @@ def Scry.resultJson (m : Scry.OriginMap) (pack : Scry.RulePack)
         , ("sink", Json.ofNat f.sink)
         , ("callee", Json.mkStr f.name)
         , ("sinkArgument", Json.ofNat f.arg)
-        , ("pathLength", Scry.pathLengthJson f.path) ]) ]
+        , ("pathLength", Scry.pathLengthJson f.path)
+        , ("derivation", Json.mkStr (Scry.derivationText checked)) ]) ]
 
-/-- The SARIF log for these findings. `tool` names the driver ("scry"). -/
-def Scry.sarif (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
-    (findings : List Scry.RuleFinding) : Json :=
+/-- A finding without a status (the default of `Scry.sarif`). -/
+def Scry.resultJson (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (f : Scry.RuleFinding) : Json :=
+  Scry.resultJsonWith m pack f .false
+
+/-- A lowering-boundary result: what S2 could not model (a havoc/skipped construct).
+It is a warning without a rule descriptor; the location is the function definition's
+span (the lowering does not yet carry a per-warning span). -/
+def Scry.boundaryResultJson (origin : Option Scry.Origin) (func : String) (point : Nat)
+    (message : String) : Json :=
+  let loc := match origin with
+    | .some o => Scry.physicalLocationJson o
+    | .none => Scry.logicalLocationJson func point;
+  Json.mkObj
+    [ ("ruleId", Json.mkStr "lowering-boundary")
+    , ("level", Json.mkStr "warning")
+    , ("message", Json.mkObj [("text", Json.mkStr message)])
+    , ("locations", Json.mkArr [loc])
+    , ("properties", Json.mkObj
+        [ ("kind", Json.mkStr "boundary")
+        , ("function", Json.mkStr func)
+        , ("programPoint", Json.ofNat point)
+        , ("derivation", Json.mkStr "unchecked") ]) ]
+
+/-- The SARIF log for findings with their derivation status, plus extra results
+(boundary warnings). `tool` names the driver ("scry"). -/
+def Scry.sarifWith (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (findings : List (Scry.RuleFinding × Bool)) (extra : List Json) : Json :=
   let rules := Json.mkArr (List.map Scry.ruleJson pack.rules);
   let driver := Json.mkObj [ ("name", Json.mkStr tool)
     , ("version", Json.mkStr "0.1.0")
     , ("informationUri", Json.mkStr "https://github.com/wiz-pl/wiz")
     , ("rules", rules) ];
   let toolObj := Json.mkObj [("driver", driver)];
-  let results := Json.mkArr (List.map (Scry.resultJson m pack) findings);
+  let results := Json.mkArr (List.append
+    (List.map (fun p => Scry.resultJsonWith m pack p.1 p.2) findings) extra);
   let run := Json.mkObj [("tool", toolObj), ("results", results)];
   Json.mkObj
     [ ("$schema", Json.mkStr "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json")
     , ("version", Json.mkStr "2.1.0")
     , ("runs", Json.mkArr [run]) ]
 
+/-- The SARIF log for these findings. `tool` names the driver ("scry"). -/
+def Scry.sarif (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (findings : List Scry.RuleFinding) : Json :=
+  Scry.sarifWith tool m pack (List.map (fun f => (f, .false)) findings) .nil
+
 /-- The SARIF JSON as text (compact; SARIF does not require pretty-printing). -/
 def Scry.renderSarif (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
     (findings : List Scry.RuleFinding) : String :=
   Json.render (Scry.sarif tool m pack findings)
+
+/-- `Scry.renderSarif` with derivation statuses and boundary results. -/
+def Scry.renderSarifWith (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (findings : List (Scry.RuleFinding × Bool)) (extra : List Json) : String :=
+  Json.render (Scry.sarifWith tool m pack findings extra)

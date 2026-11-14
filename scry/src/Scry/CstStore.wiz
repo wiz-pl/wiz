@@ -206,7 +206,7 @@ structural recursion would have to pass the current element along, which Wiz's
 termination checker refuses). -/
 def Scry.rowPairs (row : List Nat) : List (Nat × Nat) :=
   List.map (fun j => (List.getD row j 0, List.getD row (Nat.succ j) 0))
-    (Scry.range (Nat.sub (List.length row) 1))
+    (Scry.schemaRange (Nat.sub (List.length row) 1))
 
 /-- The value for key `i` (0 when absent), with the +1 sentinel. -/
 def Scry.nextEntryOf (pairs : List (Nat × Nat)) (i : Nat) : Nat :=
@@ -229,7 +229,7 @@ def Scry.CstStore.ofFacts (f : Scry.Facts) : Scry.CstStore :=
   let edgeLabelIds := List.drop nodeCount fieldIds;
   let pairs := List.concat (List.map
     (fun i => Scry.rowPairs (List.map (fun p => p.1.n) (Scry.arcsAt f.out i)))
-    (Scry.range nodeCount));
+    (Scry.schemaRange nodeCount));
   let tupleCounts := List.map (fun r => List.length r.tuples) f.relations;
   let flatTuples := List.concat (List.map (fun r => List.concat r.tuples) f.relations);
   Scry.CstStore.mk
@@ -244,7 +244,7 @@ def Scry.CstStore.ofFacts (f : Scry.Facts) : Scry.CstStore :=
     (U64Array.ofList (List.map (fun n => Scry.packSpan n.span) f.nodes))
     (U32Array.replicate nodeCount (U32.ofNat 0))
     (U32Array.ofList (List.map (fun i => U32.ofNat (Scry.nextEntryOf pairs i))
-      (Scry.range nodeCount)))
+      (Scry.schemaRange nodeCount)))
     (U32Array.ofList (List.map U32.ofNat f.out.offsets))
     (U32Array.ofList (List.map (fun n => U32.ofNat n.n) f.out.targets))
     (U32Array.ofList (List.map (fun lab => match InternTable.find fieldP.1 lab with
@@ -266,7 +266,7 @@ def Scry.CstStore.nodesOf (s : Scry.CstStore) : List Scry.Node :=
   List.map (fun i => Scry.Node.mk (Scry.nodeId i) (Scry.CstStore.kindName s i)
     (Scry.CstStore.fieldName s i) (Scry.CstStore.parentOf s i) (Scry.CstStore.spanOf s i)
     (Scry.CstStore.namedOf s i) (Scry.CstStore.errorOf s i) (Scry.CstStore.missingOf s i))
-    (Scry.range (Scry.CstStore.nodeCount s))
+    (Scry.schemaRange (Scry.CstStore.nodeCount s))
 
 /-- The edges of `s`, in id order. -/
 def Scry.CstStore.edgesOf (s : Scry.CstStore) : List Scry.Edge :=
@@ -274,7 +274,7 @@ def Scry.CstStore.edgesOf (s : Scry.CstStore) : List Scry.Edge :=
     (Scry.nodeId (UIntN.toNat (U32Array.get s.edgeSrc i)))
     (Scry.nodeId (UIntN.toNat (U32Array.get s.edgeDst i)))
     (InternTable.lookup s.fields (U32Array.get s.edgeLabel i)))
-    (Scry.range (Scry.CstStore.edgeCount s))
+    (Scry.schemaRange (Scry.CstStore.edgeCount s))
 
 /-- The relations of `s`, in id order. -/
 def Scry.CstStore.relationsOf (s : Scry.CstStore) : List Scry.Relation :=
@@ -289,13 +289,13 @@ def Scry.CstStore.relationsOf (s : Scry.CstStore) : List Scry.Relation :=
     let row := fun (j : Nat) =>
       List.take arity (List.drop (Nat.add lo (Nat.mul j arity)) flat);
     Scry.Relation.mk (Scry.Id.mk i) (InternTable.lookup s.relNames (U32.ofNat i)) arity
-      (List.map row (Scry.range count)))
-    (Scry.range (Scry.CstStore.relationCount s))
+      (List.map row (Scry.schemaRange count)))
+    (Scry.schemaRange (Scry.CstStore.relationCount s))
 
 /-- The store's source files, in id order. -/
 def Scry.CstStore.filesOf (s : Scry.CstStore) : List Scry.SourceFile :=
   List.map (fun i => Scry.SourceFile.mk i (InternTable.lookup s.paths (U32.ofNat i))
-    (UIntN.toNat (U64Array.get s.bytes i))) (Scry.range (InternTable.size s.paths))
+    (UIntN.toNat (U64Array.get s.bytes i))) (Scry.schemaRange (InternTable.size s.paths))
 
 /-- The model view of the columns, checked by `Scry.Facts.finishFacts` (ids in order,
 endpoints and parents in range, spans ordered, tuple lengths = arity). -/
@@ -320,24 +320,24 @@ def Scry.depthAt (s : Scry.CstStore) : Nat → Nat → Nat
 def Scry.CstStore.maxDepth (s : Scry.CstStore) : Nat :=
   let fuel := Nat.succ (Scry.CstStore.nodeCount s);
   List.foldl (fun m i => Scry.bumpMax m (Scry.depthAt s fuel i)) 0
-    (Scry.range (Scry.CstStore.nodeCount s))
+    (Scry.schemaRange (Scry.CstStore.nodeCount s))
 
 /-- Nodes with no parent. -/
 def Scry.CstStore.rootCount (s : Scry.CstStore) : Nat :=
   List.length (List.filter (fun i => Nat.beq (Scry.parentIdx s i) 0)
-    (Scry.range (Scry.CstStore.nodeCount s)))
+    (Scry.schemaRange (Scry.CstStore.nodeCount s)))
 
 /-- `ERROR` or `MISSING` nodes. -/
 def Scry.CstStore.errorCount (s : Scry.CstStore) : Nat :=
   List.length (List.filter (fun i => Bool.or (Scry.CstStore.errorOf s i)
-    (Scry.CstStore.missingOf s i)) (Scry.range (Scry.CstStore.nodeCount s)))
+    (Scry.CstStore.missingOf s i)) (Scry.schemaRange (Scry.CstStore.nodeCount s)))
 
 /-- The stats block, from the columns (same shape as `Scry.statsOf` on the model). -/
 def Scry.CstStore.statsOf (s : Scry.CstStore) : Scry.Stats :=
   let n := Scry.CstStore.nodeCount s;
-  let kindNames := List.map (Scry.CstStore.kindName s) (Scry.range n);
+  let kindNames := List.map (Scry.CstStore.kindName s) (Scry.schemaRange n);
   let labelNames := List.map (fun i => InternTable.lookup s.fields
-    (U32Array.get s.edgeLabel i)) (Scry.range (Scry.CstStore.edgeCount s));
+    (U32Array.get s.edgeLabel i)) (Scry.schemaRange (Scry.CstStore.edgeCount s));
   Scry.Stats.mk (InternTable.size s.paths) n (Scry.CstStore.edgeCount s)
     (Scry.CstStore.relationCount s) (U32Array.size s.relTuples) (Scry.CstStore.rootCount s)
     (Scry.CstStore.maxDepth s) (Scry.CstStore.errorCount s)
@@ -394,7 +394,7 @@ def Scry.relRows (s : Scry.CstStore) (i : Nat) : List String :=
     | .zero => 0
     | .succ _ => Nat.div (Nat.sub hi lo) arity;
   let rows := List.map (fun j => List.take arity
-    (List.drop (Nat.add lo (Nat.mul j arity)) flat)) (Scry.range count);
+    (List.drop (Nat.add lo (Nat.mul j arity)) flat)) (Scry.schemaRange count);
   List.append
     [Scry.cstEnc (InternTable.lookup s.relNames (U32.ofNat i)) ++ "\t"
       ++ Nat.repr arity ++ "\t" ++ Nat.repr (List.length rows)]
@@ -402,7 +402,7 @@ def Scry.relRows (s : Scry.CstStore) (i : Nat) : List String :=
 
 /-- The names of an intern table, by id (for rendering the spill format). -/
 def Scry.tableNames (t : InternTable) : List String :=
-  List.map (fun i => InternTable.lookup t (U32.ofNat i)) (Scry.range (InternTable.size t))
+  List.map (fun i => InternTable.lookup t (U32.ofNat i)) (Scry.schemaRange (InternTable.size t))
 
 /-- The store as the `scry-cst 1` text format (see the module doc). -/
 def Scry.CstStore.render (s : Scry.CstStore) : String :=
@@ -413,10 +413,10 @@ def Scry.CstStore.render (s : Scry.CstStore) : String :=
   let fieldLines := List.map Scry.cstEnc (Scry.tableNames s.fields);
   let pathLines := List.map Scry.cstEnc (Scry.tableNames s.paths);
   let byteLines := List.map (fun i => Nat.repr (UIntN.toNat (U64Array.get s.bytes i)))
-    (Scry.range (U64Array.size s.bytes));
-  let nodeLines := List.map (Scry.nodeRow s) (Scry.range n);
-  let edgeLines := List.map (Scry.edgeRow s) (Scry.range m);
-  let relLines := List.concat (List.map (Scry.relRows s) (Scry.range r));
+    (Scry.schemaRange (U64Array.size s.bytes));
+  let nodeLines := List.map (Scry.nodeRow s) (Scry.schemaRange n);
+  let edgeLines := List.map (Scry.edgeRow s) (Scry.schemaRange m);
+  let relLines := List.concat (List.map (Scry.relRows s) (Scry.schemaRange r));
   let l0 := ["scry-cst 1",
     "language\t" ++ Scry.cstEnc s.language,
     "kinds\t" ++ Nat.repr (InternTable.size s.kinds)];
@@ -519,7 +519,7 @@ def Scry.rowAt (row : List Nat) (i : Nat) : Nat := List.getD row i 0
 order). -/
 def Scry.csrOfRows (n : Nat) (edgeRows : List (List Nat)) : List (List (List Nat)) :=
   List.map (fun i => List.filter (fun e => Nat.beq (Scry.rowAt e 0) i) edgeRows)
-    (Scry.range n)
+    (Scry.schemaRange n)
 
 /-- Build a store from parsed tables (the sections of `scry-cst 1`). The CSR and
 next-sibling columns are derived from the edge rows, so a spill file need not write
@@ -552,7 +552,7 @@ def Scry.CstStore.finish (language : String) (kindNames fieldNames paths : List 
               (Scry.Span.mk (Scry.rowAt r 5) (Scry.rowAt r 6))) nodeRows))
             (U32Array.ofList (List.map (fun r => U32.ofNat (Scry.rowAt r 4)) nodeRows))
             (U32Array.ofList (List.map (fun i => U32.ofNat (Scry.nextEntryOf pairs i))
-              (Scry.range n)))
+              (Scry.schemaRange n)))
             (U32Array.ofList (List.map U32.ofNat (Scry.offsetsOf
               (List.map List.length rows) 0)))
             (U32Array.ofList (List.concat (List.map (fun row =>
