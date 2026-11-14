@@ -11,8 +11,9 @@ import it with `-I`. Local commit only (no push, no PR).
 and **SUB** against the canonical multi-cycle core with one `Eq.congrArg` each, no
 `native_refl`, kernel-checked: `wiz --no-cache check -I /workspace/wiz-rv/src` is
 **77 s** (the eight existing claims re-check in the same run), under the 2 GB `light`
-cap. `SLT`/`SLTU` are the next instructions; the remaining lemma is the adder's
-*carry-out* bit (bit 33) and its comparison reading (below).
+cap. `SLTU`/`SLTIU` (the carry-out bit, bit 33) are in `Compare.wiz`; **`SLT`/`SLTI`**
+(the sign-XOR mux, §6) are in `Signed.wiz`, and §7 is the branch/JAL alignment decision
+(the `Nat.mod`/addition lemma and a `Pf.ClaimAligned` variant).
 
 ## 1. The library lemma (`lib/BitVecAdd.wiz`, `import BitVecAdd`)
 
@@ -118,7 +119,9 @@ not help), while the `rfl` from `Pf.G` to the `shiftRight`-shaped form took 84 s
 both claims. If a word-level lemma "should" be convertible but the check hangs, match
 the *syntactic* shape of the core's expression, not just its value.
 
-## 5. What remains: the signed forms, and the branch alignment decision
+## 5. The signed forms, and the branch alignment decision
+
+(This section is the plan as it stood after SLTU/SLTIU; §6 and §7 are what was done.)
 
 `SLT`/`SLTI` (funct3 = 2) write `zext32 slt` with
 `slt = mux (xor (bitOf 31 a) (bitOf 31 b)) (bitOf 31 a) (bitOf 31 sum)`, the spec writes
@@ -138,11 +141,99 @@ the *syntactic* shape of the core's expression, not just its value.
    `Nat.testBit A 31`, and `IntN.lt`'s definition splits on them: signs differ gives
    `bit 31 a` directly, signs agree gives item 3).
 
-**Branches/JAL/JALR: a statement decision, not a lemma.** Their `pc + imm` is already
-`BitVec.add` in the core, so the adder is free; the obstacle is the target's alignment
-trap. The core checks `bitOf 1 target`, the ISA checks `Nat.mod target 4 = 0`. With a
-symbolic PC those differ when PC is odd (the core ignores bit 0, the ISA does not), so
-the local claim needs a PC-alignment invariant — e.g.
-`Pf.Claim` with an extra `Nat.beq (Nat.mod a.pc 4) 0 = .true` hypothesis — and then
-`Nat.mod (pc + immJ) 4 = 0` from the two alignments (a `Nat.mod`/addition lemma the
-library does not have yet). The comparison claims above do not need it.
+**Branches/JAL/JALR: a statement decision, not a lemma.** Done in §7: the alignment
+hypothesis, the `Nat.mod`/addition lemma, and a `Pf.ClaimAligned` variant; the general
+claim is blocked by the core's *state* (see §7, "what is left").
+
+## 6. SLT/SLTI: the sign-XOR mux (`lib/BitVecSigned.wiz`, `Signed.wiz`)
+
+`SLT` writes `zext32 slt` with
+`slt = mux (xor (bitOf 31 a) (bitOf 31 b)) (bitOf 31 a) (bitOf 31 sum)` and
+`sum = adc 1 a b = sub a b`; the spec writes `one32 (BitVec.slt a b)`. The pieces, all
+in `lib/BitVecSigned.wiz` (`import BitVecSigned`):
+
+| lemma | statement |
+|---|---|
+| `Bits.testBit` | `Nat.testBit n i = Bits.bit n i` |
+| `Bits.bit_top` | `n < 2^(w+1) → Bits.bit n w = Nat.le (2^w) n` (the top bit) |
+| `Bits.bit_mod` | `Bits.bit n i = Nat.le (2^i) (Nat.mod n (2^(i+1)))` |
+| `Bits.bit_add_pow` | `l < 2^w → bit (2^w + l) w` is set (induction via `Bits.cons_add`) |
+| `Bits.bit31_diff` | same sign bits: `bit 31 (A + (2^32 - B)) = Nat.lt A B` |
+| `Bits.bit31Word`, `bit31Word_val` | the core's `bitOf 31 x = ofNat 1 (shiftRight x.toNat 31)` and its value |
+| `Bits.adc_bit31` | the difference word's bit 31 is `a < b` under equal signs |
+| `Bits.slt_char` | `BitVec.slt a b` as the sign pattern of the two top bits |
+| `Bits.sltMux` | **the bridge**: the core's mux (as a `BitVec 1`) is `Bits.bv (BitVec.slt a b)` |
+
+The order identity: both words are in the same half (`|A - B| < 2^31`), the difference
+of the adder is `2^32 - (B - A)` when `A < B` and `2^32 + (A - B)` otherwise
+(`Bits.sub_borrow`/`Bits.sub_noBorrow`, by cancelling `B` resp. `B - A` with
+`Nat.add_right_cancel`), so bit 31 of `low 32` of it is 1 exactly when `A < B`
+(`Bits.mod_of_lt`, `Bits.mod_add_self`). `Signed.wiz` then has `RvAdd.slt_val` (the
+core's `zext32` mux is `one32 (BitVec.slt a b)`, via `zext32_val`, `sltMux`,
+`one32_val`) and the `Pf.Claim`s `RvAdd.slt_ok` (`A.slt 9 2 3`) and `RvAdd.slti_ok`
+(`A.slti 7 7 1365`).
+
+Two `Nat` induction lessons (they cost most of the time):
+
+* `Nat.mul 2 (Nat.succ q)` is **stuck** (`2` is a numeral; `Nat.mul` recurses on its
+  first argument), so `2 (h+1)` and `2h+2` are not convertible and `Nat.le (2P)
+  (cons c h)` is not `Nat.le P h` by computation. The fix is to prove the comparison
+  from *both implications* (`Bool.cases` + `Nat.le_or_lt`) using `Bits.le2`/
+  `Bits.le_mul2_cons`, `Bits.mul2_succ`, and to keep every intermediate type as the
+  literal RHS of the previous lemma (`Eq.via b h1 h2`, `Eq.mp'`, `Eq.mpr'`).
+* `Eq.mp'`/`Eq.mpr'` take the motive first and are *not* interchangeable: `mp'` rewrites
+  a proof at the equation's left side to the right one, `mpr'` the reverse. `transp`'s
+  argument order is the surface form of `.transp` (`motive, proof, equation`) and is
+  easy to get backwards.
+
+## 7. Branch/JAL alignment (`drafts/rv-add/Align.wiz`)
+
+`Align.wiz` has the word `jal x1, l; l:` (target `pc + 4`) and:
+
+| lemma | statement |
+|---|---|
+| `Bits.mod_add_four` | `(a + 4) mod 4 = a mod 4` (the `Nat.mod`/addition lemma, via `Bits.split 2`, `Nat.mod_mq`, `nat_ring!`) |
+| `Bits.mod_low_32_4` | `(low 32 n) mod 4 = n mod 4` |
+| `Bits.bit1_of_mod4` | `n mod 4 = 0 → bit n 1 = .false` (the core's `bitOf 1` check) |
+| `RvBr.add4_val`, `mod4_target`, `bit1_target` | the target's value and both checks under `pc mod 4 = 0` |
+| `RvBr.aligned_target` | the ISA's `Nat.beq (mod t 4) 0` |
+| `Pf.ClaimAligned` | `Pf.Claim` + `Nat.beq (Nat.mod a.pc.toNat 4) 0 = .true` |
+
+`RvBr.jal_ok0` is a JAL claim for a **concrete** (all-zero) aligned state, kernel-checked
+by computation (`Pf.ok ... rfl`): the core writes `pc + 4` to `x1`, jumps to `pc + 4`,
+and does not trap, matching `Rv.spec`.
+
+**What is left, and why it is a core-state problem.** With a *symbolic* PC the core's
+trap check `bitOf 1 target` (a `BitVec 1` built by `ofNat 1 (shiftRight …)`) is stuck,
+so `code`, `trapE`, `goE`, `npc` and the write-enable are all stuck: the kernel cannot
+reduce `Pf.G` (`(Pf.step (Pf.setQ (Pf.step (Pf.at …)) q)).2.1`), and no `Eq.congrArg`
+can rewrite the stuck bit because it is not a subterm of the (opaque) `Pf.G` applied to
+the state. The spec's side is stuck on `Nat.beq (Nat.mod t 4) 0` for the same reason.
+So the general JAL/branch claim needs a transport of the *whole core state* along the
+two equations (equivalently: an unfolded `coreStep` pc/we lemma given `bit 1 target =
+0`), which is `coreStep`-sized work, not a lemma. `Pf.ClaimAligned` and the alignment
+lemmas above are the statement and the word-level half of it.
+
+## 8. What was run (signed comparison and alignment)
+
+```
+wiz --no-cache check lib/BitVecSigned.wiz                        # EXIT 0, 28 s
+wiz --no-cache check -I /workspace/wiz-rv/src drafts/rv-add/AddSub.wiz   # EXIT 0, 87 s
+wiz --no-cache check -I /workspace/wiz-rv/src drafts/rv-add/Compare.wiz  # EXIT 0, 89 s
+wiz --no-cache check -I /workspace/wiz-rv/src drafts/rv-add/Signed.wiz   # EXIT 0, 87 s
+wiz --no-cache check -I /workspace/wiz-rv/src drafts/rv-add/Align.wiz    # EXIT 0, 85 s
+heavy lake build wiz tests                                       # 415 jobs, OK
+heavy lake test -- '=vec'                                        # 25 passed, 0 failed
+```
+
+Logs: `/tmp/rv-slt/lib.log`, `/tmp/rv-slt/addsub-final.log`,
+`/tmp/rv-slt/compare-final.log`, `/tmp/rv-slt/signed-final.log`,
+`/tmp/rv-slt/align-final.log`, `/tmp/rv-slt/build2.log`, `/tmp/rv-slt/vec2.log`. All
+probes are under `light`'s 2 GB cap. The `vec` group has a `BitVecSigned` case
+(`Tests/Groups/Vec.lean`) applying the signed/alignment lemmas.
+
+**Next target.** The general JAL (and then BEQ/BNE) claim: unfold the E cycle's pc and
+write-enable given `bit 1 target = 0` (a `coreStep` state lemma), then the claim is
+`Eq.congrArg`-plus-`rfl` as in §2. After that: the remaining branch conditions
+(`RLT`/`RGE` need `Bits.slt_char` for their `taken`), and `JALR` (whose core target has
+bit 0 forced to 0, so its two alignment checks agree without a hypothesis).

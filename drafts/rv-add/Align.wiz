@@ -1,0 +1,60 @@
+import Rv.Proofs
+import BitVecSigned
+-- Alignment of a JAL's target: the core checks bit 1, the specification checks
+-- `Nat.mod t 4 = 0`. With `Nat.mod pc 4 = 0` and a JAL immediate of 4 both accept and
+-- the target is `pc + 4`.
+--
+-- Check: wiz check -I /workspace/wiz-rv/src drafts/rv-add/Align.wiz
+
+-- `jal x1, l; l:` — a JAL whose target is `pc + 4`.
+def RvBr.l : String := "l"
+def RvBr.prog : List Asm := .cons (A.jal 1 RvBr.l) (.cons (A.label RvBr.l) .nil)
+def RvBr.w : Nat := Rv.wordAt (Asm.assemble RvBr.prog) 0
+
+def RvBr.pc4 (a : Arch) : BitVec 32 := BitVec.add a.pc (BitVec.ofNat 32 4)
+
+-- the target's value is `low 32 (pc + 4)`
+def RvBr.add4_val (pc : BitVec 32) :
+    (BitVec.add pc (BitVec.ofNat 32 4)).toNat = Bits.low 32 (Nat.add pc.toNat 4) :=
+  Bits.wofNat_val 32 (Nat.add pc.toNat 4)
+
+-- `(pc + 4) mod 4 = 0` when `pc mod 4 = 0`: the specification's check passes
+def RvBr.mod4_target (pc : BitVec 32) (h : Nat.beq (Nat.mod pc.toNat 4) 0 = .true) :
+    Nat.mod (BitVec.add pc (BitVec.ofNat 32 4)).toNat 4 = 0 :=
+  Eq.trans
+    (Eq.congrArg (fun (t : Nat) => Nat.mod t 4) (RvBr.add4_val pc))
+    (Eq.trans
+      (Bits.mod_low_32_4 (Nat.add pc.toNat 4))
+      (Eq.trans (Bits.mod_add_four pc.toNat) (Nat.beq_eq (Nat.mod pc.toNat 4) 0 h)))
+
+-- bit 1 of the target is clear: the core's trap check passes
+def RvBr.bit1_target (pc : BitVec 32) (h : Nat.beq (Nat.mod pc.toNat 4) 0 = .true) :
+    Bits.bit (BitVec.add pc (BitVec.ofNat 32 4)).toNat 1 = .false :=
+  Bits.bit1_of_mod4 _ (RvBr.mod4_target pc h)
+
+-- the specification's check, as the `BitVec` test it makes
+def RvBr.aligned_target (pc : BitVec 32) (h : Nat.beq (Nat.mod pc.toNat 4) 0 = .true) :
+    Nat.beq (Nat.mod (BitVec.add pc (BitVec.ofNat 32 4)).toNat 4) 0 = .true :=
+  Eq.mpr' (fun (t : Nat) => Nat.beq t 0 = .true) (RvBr.mod4_target pc h) (refl Bool.true)
+
+-- A claim that carries the PC-alignment invariant (the core's bit-1 check is weaker
+-- than the ISA's `mod 4` without it).
+def Pf.ClaimAligned (w rd : Nat) : Prop :=
+  (a : Arch) → Nat.beq (Nat.mod a.pc.toNat 4) 0 = .true →
+  (m0 m1 m2 m3 : BitVec 9 → BitVec 8) → (x1 x2 acc dv rm : BitVec 32) → (cnt srd : BitVec 5) → (sf3 : BitVec 3) → (slo : BitVec 2) → (sio : BitVec 1) →
+  Pf.fetchQ a m0 m1 m2 m3 = Pf.bytes w →
+  Pf.core (Pf.step (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio))) rd = Pf.spec a w rd
+
+-- ## A JAL claim at a concrete (aligned) PC
+
+-- the all-zero state: PC 0 is aligned, so both checks pass and the JAL jumps to 4
+def RvBr.a0 : Arch :=
+  Arch.mk (BitVec.ofNat 32 0) (fun (j : BitVec 5) => BitVec.ofNat 32 0)
+    (fun (a : BitVec 32) => BitVec.ofNat 8 0) 0 .nil .nil
+
+def RvBr.jal_ok0 (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32)
+    (cnt srd : BitVec 5) (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1)
+    (h : Pf.fetchQ RvBr.a0 m0 m1 m2 m3 = Pf.bytes RvBr.w) :
+    Pf.core (Pf.step (Pf.step (Pf.at RvBr.a0 RvBr.w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio))) 1
+      = Pf.spec RvBr.a0 RvBr.w 1 :=
+  Pf.ok RvBr.a0 RvBr.w 1 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio rfl h

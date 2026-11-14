@@ -142,6 +142,22 @@ def vecGroup : Group where
           "#eval BitVec.toNat (BitVec.adc (BitVec.ofNat 1 0) (BitVec.ofNat 32 4294967295) (BitVec.ofNat 32 2))\n" ++
           "#eval BitVec.toNat (BitVec.adc (BitVec.ofNat 1 1) (BitVec.ofNat 32 3) (BitVec.ofNat 32 5))")
           ["1", "4294967294"] },
+    { name := "BitVecSigned: top bit, signed comparison, mod-4 alignment", run := fun _ =>
+        okLibs ("import BitVecSigned\n" ++
+          "def a (x : BitVec 32) : (Bits.bit31Word x).toNat = Bits.bv (Bits.bit x.toNat 31) := Bits.bit31Word_val x\n" ++
+          "def b (n i : Nat) : Nat.testBit n i = Bits.bit n i := Bits.testBit n i\n" ++
+          "def c (w n : Nat) (h : Nat.lt n (Nat.pow 2 (Nat.succ w)) = .true) : Bits.bit n w = Nat.le (Nat.pow 2 w) n := Bits.bit_top w n h\n" ++
+          "def d (n i : Nat) : Bits.bit n i = Nat.le (Nat.pow 2 i) (Nat.mod n (Nat.pow 2 (Nat.succ i))) := Bits.bit_mod n i\n" ++
+          "def e (A B P H : Nat) (hP : Nat.pow 2 32 = P) (hH : Nat.pow 2 31 = H) (hPadd : P = Nat.add H H) " ++
+          "(hA : Nat.lt A P = .true) (hB : Nat.lt B P = .true) (hs : Bits.bit A 31 = Bits.bit B 31) : " ++
+          "Bits.bit (Nat.add A (Nat.sub P B)) 31 = Nat.lt A B := Bits.bit31_diff A B P H hP hH hPadd hA hB hs\n" ++
+          "def f (x y : BitVec 32) : (BitVec.muxBit (BitVec.xor (Bits.bit31Word x) (Bits.bit31Word y)) (Bits.bit31Word x) (Bits.bit31Word (BitVec.adc (BitVec.ofNat 1 1) x y))).toNat = Bits.bv (BitVec.slt x y) := Bits.sltMux x y\n" ++
+          "def g (a : Nat) : Nat.mod (Nat.add a 4) 4 = Nat.mod a 4 := Bits.mod_add_four a\n" ++
+          "def h (n : Nat) (hm : Nat.mod n 4 = 0) : Bits.bit n 1 = .false := Bits.bit1_of_mod4 n hm\n" ++
+          "#eval Bits.bit 5 2\n#eval Bits.bit 255 7\n" ++
+          "#eval BitVec.slt (BitVec.ofNat 32 4294967295) (BitVec.ofNat 32 0)\n" ++
+          "#eval Bits.mod_add_four 7")
+          [".true", ".true", ".true", "()"] },
     { name := "bit vectors: widths and bits as a Vec", run := fun _ =>
         okLibs (bvPrelude ++ "#eval (BitVec.concat (BitVec.ofNat 4 10) (BitVec.ofNat 4 3)).toNat\n" ++
           "#eval (BitVec.extract 5 2 (b8 60)).toNat\n#eval (BitVec.zeroExtend 16 (b8 200)).toNat\n" ++

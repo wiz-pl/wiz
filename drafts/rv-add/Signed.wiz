@@ -1,0 +1,68 @@
+import Rv.Proofs
+import BitVecSigned
+-- SLT and SLTI against the canonical multi-cycle core (`wiz -I /workspace/wiz-rv/src`).
+--
+-- The core's `slt` (funct3 = 2) is the sign-XOR mux on the adder's bits: with `sub` = 1
+-- the ALU writes `zext32 (mux (xor (bitOf 31 a) (bitOf 31 b)) (bitOf 31 a) (bitOf 31 sum))`,
+-- `sum = slice 1 32 s34 = adc 1 a b = BitVec.sub a b`; the specification writes
+-- `Rv.one32 (BitVec.slt a b)` (`Rv.alu`). `lib/BitVecSigned.wiz` has the word-level
+-- bridge (`Bits.sltMux`): the two sign bits equal means the mux picks bit 31 of the
+-- difference, which is `a < b` (`Bits.bit31_diff`); otherwise it picks `bitOf 31 a`,
+-- which is `IntN.lt`'s answer. Here are the `zext32`/`one32` values and the claims.
+--
+-- Check: wiz check -I /workspace/wiz-rv/src drafts/rv-add/Signed.wiz
+
+-- the PC after the execute cycle (the comparisons do not jump)
+def RvSlt.pc4 (a : Arch) : BitVec 32 := BitVec.add a.pc (BitVec.ofNat 32 4)
+
+-- `zext32` keeps the value of a one-bit word
+def RvAdd.zext32_val (u : BitVec 1) : (zext32 (r := HwTy.El) u).toNat = u.toNat :=
+  let h : Nat.lt u.toNat (Nat.pow 2 32) = .true :=
+    Nat.lt_trans u.toNat 2 (Nat.pow 2 32) (UIntN.toNat_lt u) rfl;
+  Eq.trans (BitVec.catToNat (BitVec.ofNat 31 0) u) (Bits.low_of_lt 32 u.toNat h)
+
+-- `one32 b` is the bit `b` as a word
+def RvAdd.one32_val (b : Bool) : (Rv.one32 b).toNat = Bits.bv b :=
+  match b with
+  | .true => Bits.wofNat_val 32 1
+  | .false => Bits.wofNat_val 32 0
+
+-- **The signed comparison bridge**: the core's sign mux is `one32 (BitVec.slt a b)`.
+def RvAdd.slt_val (a b : BitVec 32) :
+    zext32 (r := HwTy.El) (BitVec.muxBit (BitVec.xor (Bits.bit31Word a) (Bits.bit31Word b))
+      (Bits.bit31Word a) (Bits.bit31Word (BitVec.adc (BitVec.ofNat 1 1) a b)))
+      = Rv.one32 (BitVec.slt a b) :=
+  UIntN.ext _ _
+    (Eq.trans
+      (Eq.trans (RvAdd.zext32_val (BitVec.muxBit (BitVec.xor (Bits.bit31Word a) (Bits.bit31Word b))
+          (Bits.bit31Word a) (Bits.bit31Word (BitVec.adc (BitVec.ofNat 1 1) a b))))
+        (Bits.sltMux a b))
+      (Eq.symm (RvAdd.one32_val (BitVec.slt a b))))
+
+-- ## The claims
+
+def RvAdd.slt_G (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32)
+    (cnt srd : BitVec 5) (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) :
+    Pf.G a (Pf.w (A.slt 9 2 3)) 9 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio
+        (Pf.bytes (Pf.w (A.slt 9 2 3))) = Pf.spec a (Pf.w (A.slt 9 2 3)) 9 :=
+  Eq.congrArg (fun v => (RvSlt.pc4 a, v))
+    (RvAdd.slt_val (Pf.rf a (BitVec.ofNat 4 2)) (Pf.rf a (BitVec.ofNat 4 3)))
+
+def RvAdd.slt_ok : Pf.Claim (Pf.w (A.slt 9 2 3)) 9 :=
+  fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
+    Pf.ok a (Pf.w (A.slt 9 2 3)) 9 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio
+      (RvAdd.slt_G a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio) h
+
+-- SLTI: the second operand is the (concrete) immediate.
+
+def RvAdd.slti_G (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32)
+    (cnt srd : BitVec 5) (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) :
+    Pf.G a (Pf.w (A.slti 7 7 1365)) 7 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio
+        (Pf.bytes (Pf.w (A.slti 7 7 1365))) = Pf.spec a (Pf.w (A.slti 7 7 1365)) 7 :=
+  Eq.congrArg (fun v => (RvSlt.pc4 a, v))
+    (RvAdd.slt_val (Pf.rf a (BitVec.ofNat 4 7)) (BitVec.ofNat 32 1365))
+
+def RvAdd.slti_ok : Pf.Claim (Pf.w (A.slti 7 7 1365)) 7 :=
+  fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
+    Pf.ok a (Pf.w (A.slti 7 7 1365)) 7 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio
+      (RvAdd.slti_G a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio) h

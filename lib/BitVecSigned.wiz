@@ -1,0 +1,607 @@
+import BitVecAdd
+/-!
+# BitVecSigned
+
+The signed comparison (`import BitVecSigned`): bit 31 of `A + (2^32 - B)` is `A < B` when
+the two sign bits agree, and the core's `slt` word (`mux (xor signA signB) signA
+(bitOf 31 sum)`) is `BitVec.slt`.
+
+The bridge to the core's `bitOf` is `Bits.testBit` (`Nat.testBit n i = Bits.bit n i`,
+`Nat.testBit` is `Nat.isOdd (Nat.shiftRight n i)`, `Bits.bit` is the structural `bitAt`) and
+the *top-bit* lemma `Bits.bit n w = Nat.le (2^w) n` for `n < 2^(w+1)` (`Bits.bit_top`, and
+`Bits.bit_mod`, its form as `n mod 2^(w+1) ≥ 2^w`). Two inductions: `Bits.bit_add_pow`
+(the bit above `l < 2^w` of `2^w + l` is set, via `Bits.cons_add`), and `Bits.bit_top`
+(on `w`, splitting `n < 2^w` / `2^w ≤ n` with `Bits.bit_ge` and `Bits.bit_add_pow`).
+
+For the order identity (`Bits.bit31_diff`) the two signs are equal, so both words are in
+the same half: the difference `A + (2^32 - B)` is `2^32 - (B - A)` when `A < B` and
+`2^32 + (A - B)` otherwise (`Bits.sub_borrow` / `Bits.sub_noBorrow`, by cancelling `B`
+resp. `B - A`), and `|A - B| < 2^31`. So bit 31 of the difference is `1` exactly when
+`A < B`.
+
+`Bits.slt_char` reads `IntN.lt` as the sign pattern of the two top bits, and
+`Bits.sltMux` assembles the core's mux against it (case splits on the two top bits; the
+words become `Bits.word1` values, which compute).
+
+The last section is the branch/JAL alignment: `Bits.mod_add_four` (`(a + 4) mod 4`),
+`Bits.mod_low_32_4` (truncation keeps the low two bits) and `Bits.bit1_of_mod4`
+(`n mod 4 = 0` clears bit 1, the core's `bitOf 1` trap check). Everything is
+kernel-checked, no `native_refl`.
+
+The `Nat` steps are explicit `Eq.trans`/`Eq.via`/`Eq.mp'`/`Eq.mpr'` chains: the kernel
+does not normalise `Nat` up to associativity/commutativity, and `Nat.mul 2 (succ n)` is
+*stuck* (`2` is a literal, the recursion is on its first argument), so the lemmas that
+move a `succ` out are `Nat.add_succ`/`Bits.mul2_succ`/`Bits.cons_ss`.
+-/
+
+-- `2^(w+1) = 2·2^w` (definitional, stated for rewriting)
+def Bits.pow_succ_mul (w : Nat) : Nat.pow 2 (Nat.succ w) = Nat.mul 2 (Nat.pow 2 w) := rfl
+
+-- `2^(w+1) = 2^w + 2^w`
+def Bits.pow_succ_add (w : Nat) : Nat.pow 2 (Nat.succ w) = Nat.add (Nat.pow 2 w) (Nat.pow 2 w) :=
+  Eq.trans (Bits.pow_succ_mul w) (Bits.mul2_add (Nat.pow 2 w))
+
+-- `i < i + 1`
+def Bits.lt_succ_diag : (i : Nat) → Nat.lt i (Nat.succ i) = .true
+  | .zero => rfl
+  | .succ i => Bits.lt_succ_diag i
+
+-- `half n < P` from `n < 2P`, with the core's `Nat.div n 2`
+def Bits.half_lt_div (n P : Nat) (h : Nat.lt n (Nat.mul 2 P) = .true) :
+    Nat.lt (Nat.div n 2) P = .true :=
+  Bits.lt_congr (Eq.symm (Bits.div2 n)) (refl P) (Bits.half_lt n P h)
+
+-- the top bit of `2^w + l` (with `l < 2^w`) is set
+def Bits.bit_add_pow : (w l : Nat) → Nat.lt l (Nat.pow 2 w) = .true →
+    Bits.bit (Nat.add (Nat.pow 2 w) l) w = .true
+  | .zero, l, h =>
+    Eq.mpr' (fun (t : Nat) => Bits.bit (Nat.add (Nat.pow 2 0) t) 0 = .true)
+      (Bits.lt_one l h) (refl (Bits.bit (Nat.add (Nat.pow 2 0) 0) 0))
+  | .succ w, l, h =>
+    let c := Nat.isOdd l;
+    let hh := Nat.div l 2;
+    let P := Nat.pow 2 w;
+    Eq.mpr' (fun (t : Nat) => Bits.bit (Nat.add t l) (Nat.succ w) = .true)
+      (Bits.pow_succ_mul w)
+      (Eq.mp' (fun (t : Nat) => Bits.bit (Nat.add (Nat.mul 2 P) t) (Nat.succ w) = .true)
+        (Bits.ndecomp l)
+        (Eq.mp' (fun (t : Nat) => Bits.bit t (Nat.succ w) = .true)
+          (Bits.cons_add c P hh)
+          (Eq.trans
+            (Bits.bit_consS c (Nat.add P hh) w)
+            (Bits.bit_add_pow w hh (Bits.half_lt_div l P h)))))
+
+-- the top bit: `bit w` of `n < 2^(w+1)` is whether `n ≥ 2^w`
+def Bits.bit_top (w n : Nat) (h : Nat.lt n (Nat.pow 2 (Nat.succ w)) = .true) :
+    Bits.bit n w = Nat.le (Nat.pow 2 w) n :=
+  let P := Nat.pow 2 w;
+  let h' : Nat.lt n (Nat.add P P) = .true :=
+    Eq.mp' (fun (t : Nat) => Nat.lt n t = .true) (Bits.pow_succ_add w) h;
+  Or.elim (Bool.cases (Nat.le P n))
+    (fun hn =>
+      let l := Nat.sub n P;
+      let he : Nat.add P l = n := Nat.add_sub_of_le P n hn;
+      let e1 : Nat.le (Nat.succ (Nat.add P l)) (Nat.add P P) = .true :=
+        Eq.mpr' (fun (t : Nat) => Nat.le (Nat.succ t) (Nat.add P P) = .true) he h';
+      let e2 : Nat.le (Nat.add P (Nat.succ l)) (Nat.add P P) = .true :=
+        Eq.mpr' (fun (t : Nat) => Nat.le t (Nat.add P P) = .true) (Nat.add_succ P l) e1;
+      let hb : Nat.lt l P = .true := Nat.le_of_add_le_add_left P (Nat.succ l) P e2;
+      Eq.trans
+        (Eq.mp' (fun (t : Nat) => Bits.bit t w = .true) he (Bits.bit_add_pow w l hb))
+        (Eq.symm hn))
+    (fun hn =>
+      Eq.trans (Bits.bit_ge w n w (Nat.not_le P n hn) (Nat.le_refl w)) (Eq.symm hn))
+
+-- ## The `Nat.testBit` / `Bits.bit` bridge
+
+def Bits.testBit : (n i : Nat) → Nat.testBit n i = Bits.bit n i
+  | n, .zero => Bits.congr Nat.isOdd (Bits.div_one n)
+  | n, .succ i =>
+    Eq.trans
+      (Bits.congr Nat.isOdd (Eq.symm (Bits.div_div 1 i n)))
+      (Bits.testBit (Nat.div n 2) i)
+
+-- the top bit, as the comparison of `n mod 2^(w+1)` with `2^w`
+def Bits.bit_mod (n i : Nat) :
+    Bits.bit n i = Nat.le (Nat.pow 2 i) (Nat.mod n (Nat.pow 2 (Nat.succ i))) :=
+  Eq.trans
+    (Eq.symm (Bits.low_bit (Nat.succ i) n i (Bits.lt_succ_diag i)))
+    (Eq.trans
+      (Bits.bit_top i (Bits.low (Nat.succ i) n) (Bits.low_lt (Nat.succ i) n))
+      (Bits.congr (fun t => Nat.le (Nat.pow 2 i) t) (Eq.symm (Bits.mod_pow (Nat.succ i) n))))
+
+-- ## `Nat` facts for the same-sign order identity
+
+-- `b ≤ a` gives `(a - b) + b = a`
+def Bits.sub_add_cancel (a b : Nat) (h : Nat.le b a = .true) : Nat.add (Nat.sub a b) b = a :=
+  Eq.trans (Nat.add_comm (Nat.sub a b) b) (Nat.add_sub_of_le b a h)
+
+-- `a + b ≤ c` gives `a ≤ c - b`
+def Bits.le_sub_of_add_le (a b c : Nat) (h : Nat.le (Nat.add a b) c = .true) :
+    Nat.le a (Nat.sub c b) = .true :=
+  let hbc : Nat.le b c = .true :=
+    Nat.le_trans b (Nat.add a b) c (Nat.le_add_left b a) h;
+  let h2 : Nat.le (Nat.add b a) c = .true :=
+    Eq.mp' (fun (t : Nat) => Nat.le t c = .true) (Nat.add_comm a b) h;
+  let h1 : Nat.le (Nat.add b a) (Nat.add b (Nat.sub c b)) = .true :=
+    Eq.mpr' (fun (t : Nat) => Nat.le (Nat.add b a) t = .true)
+      (Nat.add_sub_of_le b c hbc) h2;
+  Nat.le_of_add_le_add_left b a (Nat.sub c b) h1
+
+-- `a < b` gives `0 < b - a`
+def Bits.sub_pos : (a b : Nat) → Nat.lt a b = .true → Nat.lt 0 (Nat.sub b a) = .true
+  | .zero, b, h => h
+  | .succ a, .zero, h => absurd h.1
+  | .succ a, .succ b, h =>
+    Eq.mpr' (fun (t : Nat) => Nat.lt 0 t = .true) (Nat.succ_sub_succ b a) (Bits.sub_pos a b h)
+
+-- `H + X < H + H` gives `X < H`
+def Bits.lt_of_add_lt_self (H X : Nat)
+    (h : Nat.lt (Nat.add H X) (Nat.add H H) = .true) : Nat.lt X H = .true :=
+  let e1 : Nat.le (Nat.add H (Nat.succ X)) (Nat.add H H) = .true :=
+    Eq.mpr' (fun (t : Nat) => Nat.le t (Nat.add H H) = .true) (Nat.add_succ H X) h;
+  Nat.le_of_add_le_add_left H (Nat.succ X) H e1
+
+-- `n < 2^32` gives `n mod 2^32 = n`
+def Bits.mod_of_lt (n : Nat) (h : Nat.lt n (Nat.pow 2 32) = .true) :
+    Nat.mod n (Nat.pow 2 32) = n :=
+  Eq.trans (Bits.mod_pow 32 n) (Bits.low_of_lt 32 n h)
+
+
+-- `(P + X) mod P = X`
+def Bits.mod_add_self (P X : Nat) (hP : Nat.lt 0 P = .true) (hX : Nat.lt X P = .true) :
+    Nat.mod (Nat.add P X) P = X :=
+  let hr : Nat.lt X (Nat.succ (Bits.dec P)) = .true :=
+    Eq.mp' (fun (t : Nat) => Nat.lt X t = .true) (Bits.pos_succ P hP) hX;
+  let hm : Nat.mod (Nat.add (Nat.mul (Nat.succ (Bits.dec P)) 1) X) (Nat.succ (Bits.dec P)) = X :=
+    Bits.mod_mq (Bits.dec P) 1 X hr;
+  let h1 : Nat.mod (Nat.add (Nat.mul P 1) X) P = X :=
+    Eq.mpr' (fun (t : Nat) => Nat.mod (Nat.add (Nat.mul t 1) X) t = X) (Bits.pos_succ P hP) hm;
+  Eq.mp' (fun (t : Nat) => Nat.mod (Nat.add t X) P = X) (Bits.mul_one_r P) h1
+
+-- `Bool.not b = .false` gives `b = .true`
+def Bits.not_false_true (b : Bool) (h : Bool.not b = .false) : b = .true :=
+  Or.elim (Bool.cases b)
+    (fun hb => hb)
+    (fun hb => absurd (Bool.trueNeFalse (Eq.mp' (fun (t : Bool) => Bool.not t = .false) hb h)))
+
+-- `Bool.not b = .true` gives `b = .false`
+def Bits.not_true_false (b : Bool) (h : Bool.not b = .true) : b = .false :=
+  Or.elim (Bool.cases b)
+    (fun hb => absurd (Bool.trueNeFalse (Eq.symm (Eq.mp' (fun (t : Bool) => Bool.not t = .true) hb h))))
+    (fun hb => hb)
+
+-- the `Nat.Lt` proposition at the Boolean comparison
+def Bits.lt_of_Lt (a b : Nat) (h : Nat.Lt a b) : Nat.lt a b = .true := h
+
+-- `¬ (A < B)` gives `B ≤ A`
+def Bits.le_of_not_lt (A B : Nat) (h : Nat.lt A B = .false) : Nat.le B A = .true :=
+  Or.elim (Bool.cases (Nat.le B A))
+    (fun hle => hle)
+    (fun hf => absurd (Bool.trueNeFalse (Eq.mp' (fun (t : Bool) => t = .false) (Bits.lt_of_Lt A B (Nat.not_le B A hf)) h)))
+
+-- `X < H` gives `¬ (H ≤ X)`
+def Bits.not_le_of_lt (H X : Nat) (h : Nat.lt X H = .true) : Nat.le H X = .false :=
+  Or.elim (Bool.cases (Nat.le H X))
+    (fun hle => absurd (Nat.not_lt_of_le H X hle h))
+    (fun hf => hf)
+
+-- `X < H` gives `H + X < H + H`
+def Bits.add_lt_self (H X : Nat) (h : Nat.lt X H = .true) :
+    Nat.lt (Nat.add H X) (Nat.add H H) = .true :=
+  Eq.mp' (fun (t : Nat) => Nat.le t (Nat.add H H) = .true) (Nat.add_succ H X)
+    (Nat.add_le_add_left H (Nat.succ X) H h)
+
+-- `A < B`: `A + (P - B) = P - (B - A)`
+def Bits.sub_borrow (A B P : Nat) (hAB : Nat.le A B = .true) (hBP : Nat.le B P = .true) :
+    Nat.add A (Nat.sub P B) = Nat.sub P (Nat.sub B A) :=
+  let X := Nat.sub B A;
+  let hAP : Nat.le A P = .true := Nat.le_trans A B P hAB hBP;
+  let hXP : Nat.le X P = .true := Nat.le_trans X B P (Bits.sub_le_self B A) hBP;
+  let eAX : Nat.add A X = B := Nat.add_sub_of_le A B hAB;
+  let eXA : Nat.add X A = B := Eq.trans (Nat.add_comm X A) eAX;
+  let l1 : Nat.add (Nat.add (Nat.sub P B) X) A = P :=
+    Eq.trans
+      (Nat.add_assoc (Nat.sub P B) X A)
+      (Eq.trans
+        (Eq.congrArg (fun t => Nat.add (Nat.sub P B) t) eXA)
+        (Bits.sub_add_cancel P B hBP));
+  let r1 : Nat.add (Nat.sub P A) A = P := Bits.sub_add_cancel P A hAP;
+  let ePA : Nat.add (Nat.sub P B) X = Nat.sub P A :=
+    Nat.add_right_cancel (Eq.trans l1 (Eq.symm r1));
+  let l2 : Nat.add (Nat.add A (Nat.sub P B)) X = P :=
+    Eq.trans
+      (Nat.add_assoc A (Nat.sub P B) X)
+      (Eq.trans
+        (Eq.congrArg (fun t => Nat.add A t) ePA)
+        (Nat.add_sub_of_le A P hAP));
+  let r2 : Nat.add (Nat.sub P X) X = P := Bits.sub_add_cancel P X hXP;
+  Nat.add_right_cancel (Eq.trans l2 (Eq.symm r2))
+
+-- `B ≤ A`: `A + (P - B) = P + (A - B)`
+def Bits.sub_noBorrow (A B P : Nat) (hBA : Nat.le B A = .true) (hBP : Nat.le B P = .true) :
+    Nat.add A (Nat.sub P B) = Nat.add P (Nat.sub A B) :=
+  let X := Nat.sub A B;
+  let eXB : Nat.add X B = A := Bits.sub_add_cancel A B hBA;
+  let l1 : Nat.add (Nat.add A (Nat.sub P B)) B = Nat.add A P :=
+    Eq.trans
+      (Nat.add_assoc A (Nat.sub P B) B)
+      (Eq.congrArg (fun t => Nat.add A t) (Bits.sub_add_cancel P B hBP));
+  let l2 : Nat.add (Nat.add P X) B = Nat.add A P :=
+    Eq.trans
+      (Nat.add_assoc P X B)
+      (Eq.trans
+        (Eq.congrArg (fun t => Nat.add P t) eXB)
+        (Nat.add_comm P A));
+  Nat.add_right_cancel (Eq.trans l1 (Eq.symm l2))
+
+-- ## The same-sign order identity
+
+-- **bit 31 of `A + (2^32 - B)` is `A < B` when the sign bits agree**: `A` and `B` lie in
+-- the same half of the word, so the difference lies between `-2^31` and `2^31`.
+def Bits.bit31_diff (A B P H : Nat)
+    (hPpow : Nat.pow 2 32 = P) (hHpow : Nat.pow 2 31 = H) (hPadd : P = Nat.add H H)
+    (hA : Nat.lt A P = .true) (hB : Nat.lt B P = .true)
+    (hs : Bits.bit A 31 = Bits.bit B 31) :
+    Bits.bit (Nat.add A (Nat.sub P B)) 31 = Nat.lt A B :=
+  let Z := Nat.add A (Nat.sub P B);
+  let hA32 : Nat.lt A (Nat.pow 2 32) = .true :=
+    Eq.mpr' (fun (t : Nat) => Nat.lt A t = .true) hPpow hA;
+  let hB32 : Nat.lt B (Nat.pow 2 32) = .true :=
+    Eq.mpr' (fun (t : Nat) => Nat.lt B t = .true) hPpow hB;
+  let hHpos : Nat.lt 0 H = .true :=
+    Eq.mp' (fun (t : Nat) => Nat.lt 0 t = .true) hHpow (Word.pow_pos 31);
+  let hPpos : Nat.lt 0 P = .true :=
+    Eq.mp' (fun (t : Nat) => Nat.lt 0 t = .true) (Eq.symm hPadd) (Word.lt0_add H H hHpos);
+  let hsA : Bits.bit A 31 = Nat.le H A :=
+    Eq.mp' (fun (t : Nat) => Bits.bit A 31 = Nat.le t A) hHpow (Bits.bit_top 31 A hA32);
+  let hsB : Bits.bit B 31 = Nat.le H B :=
+    Eq.mp' (fun (t : Nat) => Bits.bit B 31 = Nat.le t B) hHpow (Bits.bit_top 31 B hB32);
+  let hsLe : Nat.le H A = Nat.le H B := Eq.trans (Eq.symm hsA) (Eq.trans hs hsB);
+  let hbit : Bits.bit Z 31 = Nat.le H (Nat.mod Z P) :=
+    Eq.mp' (fun (t : Nat) => Bits.bit Z 31 = Nat.le H (Nat.mod Z t)) hPpow
+      (Eq.mp' (fun (t : Nat) => Bits.bit Z 31 = Nat.le t (Nat.mod Z (Nat.pow 2 32))) hHpow
+        (Bits.bit_mod Z 31));
+  Or.elim (Bool.cases (Nat.lt A B))
+    (fun hlt =>
+      let hAB : Nat.le A B = .true := Nat.le_of_lt A B hlt;
+      let hBleP : Nat.le B P = .true := Nat.le_of_lt B P hB;
+      let X := Nat.sub B A;
+      let eZ : Z = Nat.sub P X := Bits.sub_borrow A B P hAB hBleP;
+      let hXpos : Nat.lt 0 X = .true := Bits.sub_pos A B hlt;
+      let hXH : Nat.lt X H = .true :=
+        Or.elim (Bool.cases (Nat.le H A))
+          (fun hHA =>
+            let eAX : Nat.add A X = B := Nat.add_sub_of_le A B hAB;
+            let hHX : Nat.le (Nat.add H X) B = .true :=
+              Eq.mp' (fun (t : Nat) => Nat.le (Nat.add H X) t = .true) eAX
+                (Nat.add_le_add_right X H A hHA);
+            let hltHX : Nat.lt (Nat.add H X) P = .true :=
+              Nat.lt_of_le_of_lt (Nat.add H X) B P hHX hB;
+            Bits.lt_of_add_lt_self H X
+              (Eq.mp' (fun (t : Nat) => Nat.lt (Nat.add H X) t = .true) hPadd hltHX))
+          (fun hHA =>
+            let hBH : Nat.lt B H = .true := Nat.not_le H B (Eq.trans (Eq.symm hsLe) hHA);
+            Nat.lt_of_le_of_lt X B H (Bits.sub_le_self B A) hBH);
+      let hHXle : Nat.le (Nat.add H X) P = .true :=
+        Or.elim (Bool.cases (Nat.le H A))
+          (fun hHA =>
+            Nat.le_of_lt (Nat.add H X) P
+              (Nat.lt_of_le_of_lt (Nat.add H X) B P
+                (Eq.mp' (fun (t : Nat) => Nat.le (Nat.add H X) t = .true)
+                  (Nat.add_sub_of_le A B hAB) (Nat.add_le_add_right X H A hHA)) hB))
+          (fun hHA =>
+            Eq.mpr' (fun (t : Nat) => Nat.le (Nat.add H X) t = .true) hPadd
+              (Nat.le_of_lt (Nat.add H X) (Nat.add H H)
+                (Bits.add_lt_self H X
+                  (Nat.lt_of_le_of_lt X B H (Bits.sub_le_self B A)
+                    (Nat.not_le H B (Eq.trans (Eq.symm hsLe) hHA))))));
+      let hZP : Nat.lt Z P = .true :=
+        let eZ' : Z = Nat.sub (Bits.dec P) (Bits.dec X) :=
+          Eq.trans eZ
+            (Eq.trans
+              (Eq.congrArg (fun (t : Nat) => Nat.sub t X) (Bits.pos_succ P hPpos))
+              (Eq.trans
+                (Eq.congrArg (fun (t : Nat) => Nat.sub (Nat.succ (Bits.dec P)) t)
+                  (Bits.pos_succ X hXpos))
+                (Nat.succ_sub_succ (Bits.dec P) (Bits.dec X))));
+        let hZle : Nat.le Z (Bits.dec P) = .true :=
+          Eq.mpr' (fun (t : Nat) => Nat.le t (Bits.dec P) = .true) eZ'
+            (Bits.sub_le_self (Bits.dec P) (Bits.dec X));
+        let hdec : Nat.lt (Bits.dec P) P = .true :=
+          Eq.mp' (fun (t : Nat) => Nat.lt t P = .true) (Bits.sub_one P) (Word.pred_lt P hPpos);
+        Nat.lt_of_le_of_lt Z (Bits.dec P) P hZle hdec;
+      let hHZ : Nat.le H Z = .true :=
+        Eq.mpr' (fun (t : Nat) => Nat.le H t = .true) eZ
+          (Bits.le_sub_of_add_le H X P hHXle);
+      let hbitZ : Bits.bit Z 31 = Nat.le H Z :=
+        Eq.mp' (fun (t : Nat) => Bits.bit Z 31 = Nat.le t Z) hHpow
+          (Bits.bit_top 31 Z (Eq.mpr' (fun (t : Nat) => Nat.lt Z t = .true) hPpow hZP));
+      Eq.trans (Eq.trans hbitZ hHZ) (Eq.symm hlt))
+    (fun hlt =>
+      let hBA : Nat.le B A = .true := Bits.le_of_not_lt A B hlt;
+      let hBleP : Nat.le B P = .true := Nat.le_of_lt B P hB;
+      let X := Nat.sub A B;
+      let eZ : Z = Nat.add P X := Bits.sub_noBorrow A B P hBA hBleP;
+      let hXP : Nat.lt X P = .true := Nat.lt_of_le_of_lt X A P (Bits.sub_le_self A B) hA;
+      let hXH : Nat.lt X H = .true :=
+        Or.elim (Bool.cases (Nat.le H A))
+          (fun hHA =>
+            let eBX : Nat.add B X = A := Nat.add_sub_of_le B A hBA;
+            let hHX : Nat.le (Nat.add H X) A = .true :=
+              Eq.mp' (fun (t : Nat) => Nat.le (Nat.add H X) t = .true) eBX
+                (Nat.add_le_add_right X H B (Eq.trans (Eq.symm hsLe) hHA));
+            let hltHX : Nat.lt (Nat.add H X) P = .true :=
+              Nat.lt_of_le_of_lt (Nat.add H X) A P hHX hA;
+            Bits.lt_of_add_lt_self H X
+              (Eq.mp' (fun (t : Nat) => Nat.lt (Nat.add H X) t = .true) hPadd hltHX))
+          (fun hHA =>
+            Nat.lt_of_le_of_lt X A H (Bits.sub_le_self A B) (Nat.not_le H A hHA));
+      let hmod : Nat.mod Z P = X :=
+        Eq.mpr' (fun (t : Nat) => Nat.mod t P = X) eZ (Bits.mod_add_self P X hPpos hXP);
+      Eq.trans
+        (Eq.trans hbit
+          (Eq.mpr' (fun (t : Nat) => Nat.le H t = .false) hmod (Bits.not_le_of_lt H X hXH)))
+        (Eq.symm hlt))
+
+-- ## The sign bit as a word (the core's `bitOf 31`)
+
+-- a bit as a word
+def Bits.word1 (b : Bool) : BitVec 1 := BitVec.ofNat 1 (Bits.bv b)
+
+def Bits.word1_val (b : Bool) : (Bits.word1 b).toNat = Bits.bv b :=
+  match b with
+  | .true => Bits.wofNat_val 1 1
+  | .false => Bits.wofNat_val 1 0
+
+-- `low 1 q` is the bit of `q` (for `q` a bit)
+def Bits.low1_bit (q : Nat) (h : Nat.lt q 2 = .true) : Bits.low 1 q = Bits.bv (Nat.isOdd q) :=
+  Or.elim (Bits.lt_succ_cases q 1 h)
+    (fun h0 => Eq.mpr' (fun (t : Nat) => Bits.low 1 t = Bits.bv (Nat.isOdd t))
+      (Bits.lt_one q h0) (refl (Bits.low 1 0)))
+    (fun e => Eq.mpr' (fun (t : Nat) => Bits.low 1 t = Bits.bv (Nat.isOdd t)) e (refl (Bits.low 1 1)))
+
+-- the core's `bitOf 31 x`: `ofNat 1 (shiftRight x.toNat 31)`
+def Bits.bit31Word (x : BitVec 32) : BitVec 1 :=
+  BitVec.ofNat 1 (Nat.shiftRight x.toNat 31)
+
+-- its value is bit 31 of `x`
+def Bits.bit31Word_val (x : BitVec 32) :
+    (Bits.bit31Word x).toNat = Bits.bv (Bits.bit x.toNat 31) :=
+  let X := x.toNat;
+  let H := Nat.pow 2 31;
+  let q := Bits.high 31 X;
+  let hq : Nat.lt q 2 = .true := Bits.high_lt 31 1 X (UIntN.toNat_lt x);
+  let e1 : (Bits.bit31Word x).toNat = Bits.low 1 (Nat.div X H) :=
+    Bits.wofNat_val 1 (Nat.div X H);
+  let e1' : (Bits.bit31Word x).toNat = Bits.low 1 q :=
+    Eq.mp' (fun (t : Nat) => (Bits.bit31Word x).toNat = Bits.low 1 t) (Bits.div_pow 31 X) e1;
+  let e2 : Bits.low 1 q = Bits.bv (Nat.isOdd q) := Bits.low1_bit q hq;
+  let e3 : Bits.bv (Nat.isOdd q) = Bits.bv (Bits.bit X 31) :=
+    Bits.congr Bits.bv (Eq.symm (Bits.high_bit 31 X 0));
+  Eq.trans e1' (Eq.trans e2 e3)
+
+def Bits.bit31Word_true (x : BitVec 32) (h : Bits.bit x.toNat 31 = .true) :
+    Bits.bit31Word x = Bits.word1 .true :=
+  UIntN.ext (Bits.bit31Word x) (Bits.word1 .true)
+    (Eq.trans (Bits.bit31Word_val x) (Bits.congr Bits.bv h))
+
+def Bits.bit31Word_false (x : BitVec 32) (h : Bits.bit x.toNat 31 = .false) :
+    Bits.bit31Word x = Bits.word1 .false :=
+  UIntN.ext (Bits.bit31Word x) (Bits.word1 .false)
+    (Eq.trans (Bits.bit31Word_val x) (Bits.congr Bits.bv h))
+
+-- bit 31 of the difference word (`adc 1 a b`) under equal sign bits is `a < b`
+def Bits.adc_bit31 (a b : BitVec 32) (hs : Bits.bit a.toNat 31 = Bits.bit b.toNat 31) :
+    Bits.bit (BitVec.adc (BitVec.ofNat 1 1) a b).toNat 31 = Nat.lt a.toNat b.toNat :=
+  let A := a.toNat;
+  let B := b.toNat;
+  let P := Nat.pow 2 32;
+  let H := Nat.pow 2 31;
+  let Z := Nat.add A (Nat.sub P B);
+  let hZ : (BitVec.adc (BitVec.ofNat 1 1) a b).toNat = Bits.low 32 Z :=
+    BitVec.adc_one_toNat a b;
+  let hbit : Bits.bit (Bits.low 32 Z) 31 = Bits.bit Z 31 :=
+    Bits.low_bit 32 Z 31 (Bits.lt_succ_diag 30);
+  Eq.trans
+    (Eq.mpr' (fun (t : Nat) => Bits.bit t 31 = Bits.bit (Bits.low 32 Z) 31) hZ
+      (refl (Bits.bit (Bits.low 32 Z) 31)))
+    (Eq.trans hbit
+      (Bits.bit31_diff A B P H (refl P) (refl H) (refl (Nat.add (Nat.pow 2 31) (Nat.pow 2 31)))
+        (UIntN.toNat_lt a) (UIntN.toNat_lt b) hs))
+
+-- the difference word's sign bit, as a word
+def Bits.adc_word1 (a b : BitVec 32) (hs : Bits.bit a.toNat 31 = Bits.bit b.toNat 31) :
+    Bits.bit31Word (BitVec.adc (BitVec.ofNat 1 1) a b)
+      = Bits.word1 (Nat.lt a.toNat b.toNat) :=
+  UIntN.ext (Bits.bit31Word (BitVec.adc (BitVec.ofNat 1 1) a b))
+    (Bits.word1 (Nat.lt a.toNat b.toNat))
+    (Eq.trans (Bits.bit31Word_val (BitVec.adc (BitVec.ofNat 1 1) a b))
+      (Eq.trans (Bits.congr Bits.bv (Bits.adc_bit31 a b hs))
+        (Eq.symm (Bits.word1_val (Nat.lt a.toNat b.toNat)))))
+
+-- ## The signed comparison as a function of the two sign bits
+
+-- the sign pattern of `IntN.lt`
+def Bits.sltPat (A B : Nat) : Bool → Bool → Bool
+  | .true, .false => .true
+  | .false, .true => .false
+  | _, _ => Nat.lt A B
+
+-- `IntN.lt` at `toIntN a`, `toIntN b` is the sign pattern of the two top bits
+def Bits.slt_char (a b : BitVec 32) :
+    BitVec.slt a b = Bits.sltPat a.toNat b.toNat (Bits.bit a.toNat 31) (Bits.bit b.toNat 31) :=
+  Eq.trans
+    (refl (Bits.sltPat a.toNat b.toNat (Nat.testBit a.toNat 31) (Nat.testBit b.toNat 31)))
+    (Bits.congr2 (Bits.sltPat a.toNat b.toNat) (Bits.testBit a.toNat 31) (Bits.testBit b.toNat 31))
+
+def Bits.slt_same_true (a b : BitVec 32) (hA : Bits.bit a.toNat 31 = .true)
+    (hB : Bits.bit b.toNat 31 = .true) : BitVec.slt a b = Nat.lt a.toNat b.toNat :=
+  Eq.trans (Bits.slt_char a b)
+    (Eq.trans (Bits.congr2 (Bits.sltPat a.toNat b.toNat) hA hB)
+      (refl (Nat.lt a.toNat b.toNat)))
+
+def Bits.slt_same_false (a b : BitVec 32) (hA : Bits.bit a.toNat 31 = .false)
+    (hB : Bits.bit b.toNat 31 = .false) : BitVec.slt a b = Nat.lt a.toNat b.toNat :=
+  Eq.trans (Bits.slt_char a b)
+    (Eq.trans (Bits.congr2 (Bits.sltPat a.toNat b.toNat) hA hB)
+      (refl (Nat.lt a.toNat b.toNat)))
+
+def Bits.slt_true_false (a b : BitVec 32) (hA : Bits.bit a.toNat 31 = .true)
+    (hB : Bits.bit b.toNat 31 = .false) : BitVec.slt a b = .true :=
+  Eq.trans (Bits.slt_char a b)
+    (Eq.trans (Bits.congr2 (Bits.sltPat a.toNat b.toNat) hA hB) rfl)
+
+def Bits.slt_false_true (a b : BitVec 32) (hA : Bits.bit a.toNat 31 = .false)
+    (hB : Bits.bit b.toNat 31 = .true) : BitVec.slt a b = .false :=
+  Eq.trans (Bits.slt_char a b)
+    (Eq.trans (Bits.congr2 (Bits.sltPat a.toNat b.toNat) hA hB) rfl)
+
+-- ## The core's `slt` word
+
+-- the mux with concrete sign words
+def Bits.mux1_tt (p : BitVec 1) :
+    (BitVec.muxBit (BitVec.xor (Bits.word1 .true) (Bits.word1 .true)) (Bits.word1 .true) p).toNat
+      = p.toNat := rfl
+def Bits.mux1_ff (p : BitVec 1) :
+    (BitVec.muxBit (BitVec.xor (Bits.word1 .false) (Bits.word1 .false)) (Bits.word1 .false) p).toNat
+      = p.toNat := rfl
+def Bits.mux1_tf (p : BitVec 1) :
+    (BitVec.muxBit (BitVec.xor (Bits.word1 .true) (Bits.word1 .false)) (Bits.word1 .true) p).toNat
+      = 1 := rfl
+def Bits.mux1_ft (p : BitVec 1) :
+    (BitVec.muxBit (BitVec.xor (Bits.word1 .false) (Bits.word1 .true)) (Bits.word1 .false) p).toNat
+      = 0 := rfl
+
+-- with both signs equal the mux picks the difference's top bit, which is `a < b`
+def Bits.sltMux_same (a b : BitVec 32) (hs : Bits.bit a.toNat 31 = Bits.bit b.toNat 31)
+    (hA : Bits.bit a.toNat 31 = .true) (hB : Bits.bit b.toNat 31 = .true) :
+    (BitVec.muxBit (BitVec.xor (Bits.bit31Word a) (Bits.bit31Word b))
+      (Bits.bit31Word a) (Bits.bit31Word (BitVec.adc (BitVec.ofNat 1 1) a b))).toNat
+      = Bits.bv (Nat.lt a.toNat b.toNat) :=
+  let pS := Bits.bit31Word (BitVec.adc (BitVec.ofNat 1 1) a b);
+  let s3 : (BitVec.muxBit (BitVec.xor (Bits.word1 .true) (Bits.word1 .true)) (Bits.word1 .true)
+      (Bits.word1 (Nat.lt a.toNat b.toNat))).toNat = Bits.bv (Nat.lt a.toNat b.toNat) :=
+    Eq.trans (Bits.mux1_tt (Bits.word1 (Nat.lt a.toNat b.toNat)))
+      (Bits.word1_val (Nat.lt a.toNat b.toNat));
+  let s2 : (BitVec.muxBit (BitVec.xor (Bits.word1 .true) (Bits.word1 .true)) (Bits.word1 .true)
+      pS).toNat = Bits.bv (Nat.lt a.toNat b.toNat) :=
+    Eq.mpr' (fun (t : BitVec 1) =>
+        (BitVec.muxBit (BitVec.xor (Bits.word1 .true) (Bits.word1 .true)) (Bits.word1 .true) t).toNat
+          = Bits.bv (Nat.lt a.toNat b.toNat))
+      (Bits.adc_word1 a b hs) s3;
+  let s1 : (BitVec.muxBit (BitVec.xor (Bits.word1 .true) (Bits.bit31Word b)) (Bits.word1 .true)
+      pS).toNat = Bits.bv (Nat.lt a.toNat b.toNat) :=
+    Eq.mpr' (fun (t : BitVec 1) =>
+        (BitVec.muxBit (BitVec.xor (Bits.word1 .true) t) (Bits.word1 .true) pS).toNat
+          = Bits.bv (Nat.lt a.toNat b.toNat))
+      (Bits.bit31Word_true b hB) s2;
+  Eq.mpr' (fun (t : BitVec 1) =>
+      (BitVec.muxBit (BitVec.xor t (Bits.bit31Word b)) t pS).toNat
+        = Bits.bv (Nat.lt a.toNat b.toNat))
+    (Bits.bit31Word_true a hA) s1
+
+def Bits.sltMux_same_false (a b : BitVec 32) (hs : Bits.bit a.toNat 31 = Bits.bit b.toNat 31)
+    (hA : Bits.bit a.toNat 31 = .false) (hB : Bits.bit b.toNat 31 = .false) :
+    (BitVec.muxBit (BitVec.xor (Bits.bit31Word a) (Bits.bit31Word b))
+      (Bits.bit31Word a) (Bits.bit31Word (BitVec.adc (BitVec.ofNat 1 1) a b))).toNat
+      = Bits.bv (Nat.lt a.toNat b.toNat) :=
+  let pS := Bits.bit31Word (BitVec.adc (BitVec.ofNat 1 1) a b);
+  let s3 : (BitVec.muxBit (BitVec.xor (Bits.word1 .false) (Bits.word1 .false)) (Bits.word1 .false)
+      (Bits.word1 (Nat.lt a.toNat b.toNat))).toNat = Bits.bv (Nat.lt a.toNat b.toNat) :=
+    Eq.trans (Bits.mux1_ff (Bits.word1 (Nat.lt a.toNat b.toNat)))
+      (Bits.word1_val (Nat.lt a.toNat b.toNat));
+  let s2 : (BitVec.muxBit (BitVec.xor (Bits.word1 .false) (Bits.word1 .false)) (Bits.word1 .false)
+      pS).toNat = Bits.bv (Nat.lt a.toNat b.toNat) :=
+    Eq.mpr' (fun (t : BitVec 1) =>
+        (BitVec.muxBit (BitVec.xor (Bits.word1 .false) (Bits.word1 .false)) (Bits.word1 .false) t).toNat
+          = Bits.bv (Nat.lt a.toNat b.toNat))
+      (Bits.adc_word1 a b hs) s3;
+  let s1 : (BitVec.muxBit (BitVec.xor (Bits.word1 .false) (Bits.bit31Word b)) (Bits.word1 .false)
+      pS).toNat = Bits.bv (Nat.lt a.toNat b.toNat) :=
+    Eq.mpr' (fun (t : BitVec 1) =>
+        (BitVec.muxBit (BitVec.xor (Bits.word1 .false) t) (Bits.word1 .false) pS).toNat
+          = Bits.bv (Nat.lt a.toNat b.toNat))
+      (Bits.bit31Word_false b hB) s2;
+  Eq.mpr' (fun (t : BitVec 1) =>
+      (BitVec.muxBit (BitVec.xor t (Bits.bit31Word b)) t pS).toNat
+        = Bits.bv (Nat.lt a.toNat b.toNat))
+    (Bits.bit31Word_false a hA) s1
+
+def Bits.sltMux_true_false (a b : BitVec 32) (hA : Bits.bit a.toNat 31 = .true)
+    (hB : Bits.bit b.toNat 31 = .false) :
+    (BitVec.muxBit (BitVec.xor (Bits.bit31Word a) (Bits.bit31Word b))
+      (Bits.bit31Word a) (Bits.bit31Word (BitVec.adc (BitVec.ofNat 1 1) a b))).toNat = 1 :=
+  let pS := Bits.bit31Word (BitVec.adc (BitVec.ofNat 1 1) a b);
+  let s1 : (BitVec.muxBit (BitVec.xor (Bits.word1 .true) (Bits.bit31Word b)) (Bits.word1 .true)
+      pS).toNat = 1 :=
+    Eq.mpr' (fun (t : BitVec 1) =>
+        (BitVec.muxBit (BitVec.xor (Bits.word1 .true) t) (Bits.word1 .true) pS).toNat = 1)
+      (Bits.bit31Word_false b hB) (Bits.mux1_tf pS);
+  Eq.mpr' (fun (t : BitVec 1) => (BitVec.muxBit (BitVec.xor t (Bits.bit31Word b)) t pS).toNat = 1)
+    (Bits.bit31Word_true a hA) s1
+
+def Bits.sltMux_false_true (a b : BitVec 32) (hA : Bits.bit a.toNat 31 = .false)
+    (hB : Bits.bit b.toNat 31 = .true) :
+    (BitVec.muxBit (BitVec.xor (Bits.bit31Word a) (Bits.bit31Word b))
+      (Bits.bit31Word a) (Bits.bit31Word (BitVec.adc (BitVec.ofNat 1 1) a b))).toNat = 0 :=
+  let pS := Bits.bit31Word (BitVec.adc (BitVec.ofNat 1 1) a b);
+  let s1 : (BitVec.muxBit (BitVec.xor (Bits.word1 .false) (Bits.bit31Word b)) (Bits.word1 .false)
+      pS).toNat = 0 :=
+    Eq.mpr' (fun (t : BitVec 1) =>
+        (BitVec.muxBit (BitVec.xor (Bits.word1 .false) t) (Bits.word1 .false) pS).toNat = 0)
+      (Bits.bit31Word_true b hB) (Bits.mux1_ft pS);
+  Eq.mpr' (fun (t : BitVec 1) => (BitVec.muxBit (BitVec.xor t (Bits.bit31Word b)) t pS).toNat = 0)
+    (Bits.bit31Word_false a hA) s1
+
+-- **The core's signed comparison**: the sign-XOR mux on bit 31 of the difference is
+-- `BitVec.slt` (as a bit).
+def Bits.sltMux (a b : BitVec 32) :
+    (BitVec.muxBit (BitVec.xor (Bits.bit31Word a) (Bits.bit31Word b))
+      (Bits.bit31Word a) (Bits.bit31Word (BitVec.adc (BitVec.ofNat 1 1) a b))).toNat
+      = Bits.bv (BitVec.slt a b) :=
+  Or.elim (Bool.cases (Bits.bit a.toNat 31))
+    (fun hA =>
+      Or.elim (Bool.cases (Bits.bit b.toNat 31))
+        (fun hB =>
+          Eq.trans (Bits.sltMux_same a b (Eq.trans hA (Eq.symm hB)) hA hB)
+            (Eq.symm (Eq.congrArg Bits.bv (Bits.slt_same_true a b hA hB))))
+        (fun hB =>
+          Eq.trans (Bits.sltMux_true_false a b hA hB)
+            (Eq.symm (Eq.congrArg Bits.bv (Bits.slt_true_false a b hA hB)))))
+    (fun hA =>
+      Or.elim (Bool.cases (Bits.bit b.toNat 31))
+        (fun hB =>
+          Eq.trans (Bits.sltMux_false_true a b hA hB)
+            (Eq.symm (Eq.congrArg Bits.bv (Bits.slt_false_true a b hA hB))))
+        (fun hB =>
+          Eq.trans (Bits.sltMux_same_false a b (Eq.trans hA (Eq.symm hB)) hA hB)
+            (Eq.symm (Eq.congrArg Bits.bv (Bits.slt_same_false a b hA hB)))))
+
+-- ## Alignment: `Nat.mod ... 4` and the `bit 1` trap check
+
+-- `(a + 4) mod 4 = a mod 4`
+def Bits.mod_add_four (a : Nat) : Nat.mod (Nat.add a 4) 4 = Nat.mod a 4 :=
+  let h := Bits.high 2 a;
+  let e : Nat.add a 4 = Nat.add (Nat.mul 4 (Nat.add h 1)) (Bits.low 2 a) :=
+    Eq.trans
+      (Eq.congrArg (fun (t : Nat) => Nat.add t 4) (Bits.split 2 a))
+      (nat_ring! 4 * h + Bits.low 2 a + 4 = 4 * (h + 1) + Bits.low 2 a);
+  let hm : Nat.mod (Nat.add (Nat.mul 4 (Nat.add h 1)) (Bits.low 2 a)) 4 = Bits.low 2 a :=
+    Bits.mod_mq 3 (Nat.add h 1) (Bits.low 2 a) (Bits.low_lt 2 a);
+  Eq.trans
+    (Eq.mpr' (fun (t : Nat) => Nat.mod t 4 = Bits.low 2 a) e hm)
+    (Eq.symm (Bits.mod_pow 2 a))
+
+-- `(low 32 n) mod 4 = n mod 4`: truncating a word keeps its low two bits
+def Bits.mod_low_32_4 (n : Nat) : Nat.mod (Bits.low 32 n) 4 = Nat.mod n 4 :=
+  Eq.trans
+    (Bits.mod_pow 2 (Bits.low 32 n))
+    (Eq.trans
+      (Bits.low_low 2 32 n (Bits.le_refl 2))
+      (Eq.symm (Bits.mod_pow 2 n)))
+
+-- bit 1 is clear when `n mod 4 = 0` (the core's alignment check)
+def Bits.bit1_of_mod4 (n : Nat) (h : Nat.mod n 4 = 0) : Bits.bit n 1 = .false :=
+  Eq.trans (Bits.bit_mod n 1)
+    (Eq.trans (Eq.congrArg (fun (t : Nat) => Nat.le 2 t) h) rfl)
