@@ -6,6 +6,8 @@
   programming
 * [stability.md](stability.md): what a release promises (0.1.z)
 * [release.md](release.md): making a release (checklist, tagging, smoke test)
+* [attestation.md](attestation.md): build manifests and TPM 2.0 quotes, and how to
+  verify them
 * [CHANGELOG.md](../CHANGELOG.md)
 * [building.md](building.md)
 * [ci-runner.md](ci-runner.md): a self-hosted runner for the heavy CI shards

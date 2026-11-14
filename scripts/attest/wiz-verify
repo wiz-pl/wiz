@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+"""Verify a Wiz build manifest, its artifacts and a TPM 2.0 quote.
+
+See `docs/attestation.md`.  Exit codes: 0 verified, 1 failed, 2 usage,
+3 incomplete (tpm2_checkquote missing or --skip-crypto).
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from wiz_attest import main_verify  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main_verify(sys.argv[1:]))
