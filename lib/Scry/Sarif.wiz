@@ -193,16 +193,17 @@ def Scry.resultJson (m : Scry.OriginMap) (pack : Scry.RulePack)
     (f : Scry.RuleFinding) : Json :=
   Scry.resultJsonWith m pack f .false
 
-/-- A lowering-boundary result: what S2 could not model (a havoc/skipped construct).
-It is a warning without a rule descriptor; the location is the function definition's
-span (the lowering does not yet carry a per-warning span). -/
-def Scry.boundaryResultJson (origin : Option Scry.Origin) (func : String) (point : Nat)
-    (message : String) : Json :=
+/-- A warning result with its own rule id: a lowering-boundary warning (what S2 could not
+model: a havoc'd or skipped construct) or a points-to memory warning (`unknown-memory`,
+`use-after-free`, `unknown-indirect`). It has no rule descriptor; the location is the
+offending statement's span, or a logical location when no origin is known. -/
+def Scry.boundaryResultJson (rule : String) (origin : Option Scry.Origin) (func : String)
+    (point : Nat) (message : String) : Json :=
   let loc := match origin with
     | .some o => Scry.physicalLocationJson o
     | .none => Scry.logicalLocationJson func point;
   Json.mkObj
-    [ ("ruleId", Json.mkStr "lowering-boundary")
+    [ ("ruleId", Json.mkStr rule)
     , ("level", Json.mkStr "warning")
     , ("message", Json.mkObj [("text", Json.mkStr message)])
     , ("locations", Json.mkArr [loc])

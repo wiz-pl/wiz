@@ -99,6 +99,10 @@ inductive Scry.PathKind where
   | returnSeed
   | returnValue
   | flow
+  /-- A store into a memory location (`store`): the path enters memory here. -/
+  | store
+  /-- A load from a memory location: the path leaves memory here. -/
+  | load
   | sink
   | recursion
   | assumed
@@ -110,6 +114,8 @@ def Scry.PathKind.show : Scry.PathKind → String
   | .returnSeed => "return"
   | .returnValue => "return-value"
   | .flow => "flow"
+  | .store => "store"
+  | .load => "load"
   | .sink => "sink"
   | .recursion => "recursion"
   | .assumed => "assumed"

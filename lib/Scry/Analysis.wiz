@@ -207,7 +207,11 @@ def Scry.rhsUses : Wil.Rhs → List Nat
   | .un _ a => .cons a.index .nil
   | .load p => .cons p.index .nil
   | .gep p _ => .cons p.index .nil
+  | .gepVar p i _ => .cons p.index (.cons i.index .nil)
   | .alloc _ => .nil
+  | .slot _ => .nil
+  | .globalRef _ => .nil
+  | .fnptr _ => .nil
   | .havoc _ => .nil
 
 def Scry.condUses : Wil.Cond → List Nat

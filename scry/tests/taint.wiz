@@ -62,6 +62,19 @@ def lastFunc : List Scry.PathNode → String
   | .cons p .nil => p.func
   | .cons _ ps => lastFunc ps
 
+def pathHasKind (path : List Scry.PathNode) (k : String) : Bool :=
+  List.any (fun p => String.eq (Scry.PathKind.show p.kind) k) path
+
+def findingPath (f : Scry.RuleFinding) : List Scry.PathNode := f.path
+
+/-- Does the points-to table contain a location of this kind? -/
+def hasLocKind (rep : Scry.TaintReport) (k : String) : Bool :=
+  List.any (fun i => String.eq (Scry.locKindAt rep.pointsTo i) k)
+    (Scry.range (Scry.locCount rep.pointsTo))
+
+def memKinds (rep : Scry.TaintReport) : List String :=
+  List.map (fun w => Scry.MemWarnKind.show w.kind) rep.memory
+
 def firstFinding (rep : Scry.TaintReport) : Option Scry.RuleFinding :=
   match rep.findings with
   | .cons f _ => .some f
@@ -117,6 +130,97 @@ def main : IO Unit := EIO.toIO (do
   check "boundary: two havoc warnings" (Nat.beq (List.length rep5.boundaries) 2);
   check "boundary: warnings are unchecked" (List.all (fun b => match b.origin with
     | .some _ => .true | .none => .false) rep5.boundaries);
+  check "boundary: spans are on the offending statements"
+    (match rep5.boundaries with
+      | .cons a (.cons b _) => match a.origin, b.origin with
+        | .some x, .some y => Bool.and (Nat.lt 0 x.line)
+            (Bool.and (Nat.lt 0 y.line) (Bool.not (Nat.beq x.line y.line)))
+        | _, _ => .false
+      | _ => .false);
+
+  -- memory: store then load through the same stack slot is a flow
+  oM1 ← opts ["tests/fixtures/mem-slot.c"];
+  repM1 ← Scry.analyzeFile oM1;
+  checkOne "mem-slot" repM1 "command-injection" "main";
+  check "mem-slot: no memory warnings" (Nat.beq (List.length repM1.memory) 0);
+  check "mem-slot: path goes through memory"
+    (List.all (fun b => b) (List.map (fun f =>
+      Bool.and (pathHasKind f.path "store") (pathHasKind f.path "load")) repM1.findings));
+  check "mem-slot: a stack slot is a location" (hasLocKind repM1 "stack");
+
+  -- memory: a different slot is a known no-alias
+  oM2 ← opts ["tests/fixtures/mem-distinct.c"];
+  repM2 ← Scry.analyzeFile oM2;
+  check "mem-distinct: zero findings" (Nat.beq (List.length repM2.findings) 0);
+  check "mem-distinct: zero memory warnings" (Nat.beq (List.length repM2.memory) 0);
+  check "mem-distinct: two stack slots, no unknown"
+    (Bool.and (Nat.beq (List.length (List.filter (fun i =>
+        String.eq (Scry.locKindAt repM2.pointsTo i) "stack")
+        (Scry.range (Scry.locCount repM2.pointsTo)))) 2)
+      (Bool.not (hasLocKind repM2 "unknown")));
+
+  -- memory: struct fields are separate cells; a global's field flows too
+  oM3 ← opts ["tests/fixtures/mem-struct.c"];
+  repM3 ← Scry.analyzeFile oM3;
+  check "mem-struct: two findings (s.x and g.x)"
+    (Nat.beq (List.length repM3.findings) 2);
+  check "mem-struct: no memory warnings" (Nat.beq (List.length repM3.memory) 0);
+  check "mem-struct: both sinks are in main"
+    (List.all (fun f => String.eq f.func "main") repM3.findings);
+  check "mem-struct: field and global locations"
+    (Bool.and (hasLocKind repM3 "field") (hasLocKind repM3 "global"));
+
+  -- memory: array elements are separate cells
+  oM4 ← opts ["tests/fixtures/mem-array.c"];
+  repM4 ← Scry.analyzeFile oM4;
+  check "mem-array: one finding" (Nat.beq (List.length repM4.findings) 1);
+  check "mem-array: no memory warnings" (Nat.beq (List.length repM4.memory) 0);
+
+  -- memory: a heap object carries the flow, and free after the last use is clean
+  oM5 ← opts ["tests/fixtures/mem-heap.c"];
+  repM5 ← Scry.analyzeFile oM5;
+  checkOne "mem-heap" repM5 "command-injection" "main";
+  check "mem-heap: no memory warnings" (Nat.beq (List.length repM5.memory) 0);
+  check "mem-heap: a heap location" (hasLocKind repM5 "heap");
+
+  -- memory: pointer-to-pointer
+  oM6 ← opts ["tests/fixtures/mem-ptrptr.c"];
+  repM6 ← Scry.analyzeFile oM6;
+  checkOne "mem-ptrptr" repM6 "command-injection" "main";
+  check "mem-ptrptr: no memory warnings" (Nat.beq (List.length repM6.memory) 0);
+
+  -- memory: aliased parameters (both refer to main's x)
+  oM7 ← opts ["tests/fixtures/mem-params.c"];
+  repM7 ← Scry.analyzeFile oM7;
+  checkOne "mem-params" repM7 "command-injection" "sink_q";
+  match firstFinding repM7 with
+  | .some f => check "mem-params: path starts in main" (String.eq (firstFunc f.path) "main")
+  | .none => check "mem-params: finding exists" .false;
+
+  -- memory: use after free is reported and the flow is still kept
+  oM8 ← opts ["tests/fixtures/mem-free.c"];
+  repM8 ← Scry.analyzeFile oM8;
+  checkOne "mem-free" repM8 "command-injection" "main";
+  check "mem-free: one use-after-free warning"
+    (List.all (fun s => String.eq s "use-after-free") (memKinds repM8));
+
+  -- memory: an indirect call with a known target propagates
+  oM9 ← opts ["tests/fixtures/mem-indirect.c"];
+  repM9 ← Scry.analyzeFile oM9;
+  checkOne "mem-indirect" repM9 "command-injection" "tainted_sink";
+  check "mem-indirect: no memory warnings" (Nat.beq (List.length repM9.memory) 0);
+  match firstFinding repM9 with
+  | .some f => check "mem-indirect: path starts in main"
+      (String.eq (firstFunc f.path) "main")
+  | .none => check "mem-indirect: finding exists" .false;
+
+  -- memory: an unresolved indirect call is unknown and warned, not silently dropped
+  oM10 ← opts ["tests/fixtures/mem-indirect-unknown.c"];
+  repM10 ← Scry.analyzeFile oM10;
+  check "mem-indirect-unknown: zero findings" (Nat.beq (List.length repM10.findings) 0);
+  check "mem-indirect-unknown: one unknown-indirect warning"
+    (List.all (fun s => String.eq s "unknown-indirect") (memKinds repM10));
+  check "mem-indirect-unknown: an unknown location" (hasLocKind repM10 "unknown");
 
   -- parse errors: refused by default, recovered with --allow-errors
   o6 ← opts ["tests/fixtures/taint-macro-errors.c"];

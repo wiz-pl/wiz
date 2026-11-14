@@ -201,37 +201,32 @@ def Scry.locationText (m : Scry.OriginMap) (func : String) (point : Nat) : Strin
 
 -- ## Lowering-boundary warnings
 
-/-- A havoc/skip warning from S2's lowering, with the function and its definition's
-origin. The lowering's warning text is `function: message`; the origin is the function
-definition (the slice has no per-warning span yet, which is the remaining S2 gap). -/
+/-- A non-finding diagnostic with a source location: a lowering-boundary warning (a
+construct S2 could not model; `rule` is `lowering-boundary`) or a memory warning from the
+points-to layer (`unknown-memory`, `use-after-free`, `unknown-indirect`). The location is
+the offending statement's `Wil.Span`, not the function definition. -/
 structure Scry.BoundaryFinding where
+  /-- The warning's rule id in the SARIF/JSON output. -/
+  rule : String
   message : String
   func : String
+  /-- The program point it belongs to (0 for a lowering warning). -/
+  point : Nat
   origin : Option Scry.Origin
 
-def Scry.warningFunc (msg : String) : String :=
-  match String.splitOn msg ": " with
-  | .cons f _ => f
-  | .nil => ""
-
-def Scry.warningText (msg : String) : String :=
-  let f := Scry.warningFunc msg;
-  String.drop (Nat.add (String.length f) 2) msg
-
-def Scry.findFuncNamed (funcs : List Wil.Func) (name : String) : Option Wil.Func :=
-  List.find (fun fn => Bool.or (String.eq fn.name name)
-    (String.eq fn.name ("static:" ++ name))) funcs
-
-def Scry.boundaryOfWarning (uri text : String) (funcs : List Wil.Func) (msg : String) :
-    Scry.BoundaryFinding :=
-  let f := Scry.warningFunc msg;
-  match Scry.findFuncNamed funcs f with
-  | .none => Scry.BoundaryFinding.mk (Scry.warningText msg) f .none
-  | .some fn => Scry.BoundaryFinding.mk (Scry.warningText msg) f
-      (.some (Scry.originOfSpan uri text fn.origin))
+def Scry.boundaryOfWarning (uri text : String) (w : Scry.Warning) : Scry.BoundaryFinding :=
+  Scry.BoundaryFinding.mk "lowering-boundary" w.message w.func 0
+    (.some (Scry.originOfSpan uri text w.span))
 
 def Scry.boundaryFindings (uri text : String) (tu : Scry.TU) : List Scry.BoundaryFinding :=
-  List.map (Scry.boundaryOfWarning uri text tu.funcs) tu.warnings
+  List.map (Scry.boundaryOfWarning uri text) tu.warnings
+
+/-- The points-to diagnostics as warning findings, located with the same origin map the
+findings use. -/
+def Scry.memoryFindings (origins : Scry.OriginMap) (ws : List Scry.MemWarning) :
+    List Scry.BoundaryFinding :=
+  List.map (fun w => Scry.BoundaryFinding.mk (Scry.MemWarnKind.show w.kind) w.detail
+    w.func w.point (Scry.originAt origins w.func w.point)) ws
 
 -- ## Derivation status
 
@@ -262,7 +257,7 @@ def Scry.renderBoundary (b : Scry.BoundaryFinding) : String :=
   let loc := match b.origin with
     | .some o => o.uri ++ ":" ++ Nat.repr o.line ++ ":" ++ Nat.repr o.column
     | .none => b.func;
-  loc ++ ": warning: lowering-boundary: " ++ b.message ++ " [" ++ b.func ++ "] (unchecked)"
+  loc ++ ": warning: " ++ b.rule ++ ": " ++ b.message ++ " [" ++ b.func ++ "] (unchecked)"
 
 def Scry.renderOriginEntry (e : Scry.OriginEntry) : String :=
   e.func ++ ":" ++ Nat.repr e.point ++ " -> " ++ e.origin.uri ++ ":"
@@ -311,14 +306,14 @@ def Scry.findingJson (m : Scry.OriginMap) (f : Scry.RuleFinding) (checked : Bool
 def Scry.boundaryJson (b : Scry.BoundaryFinding) : Json :=
   let loc := match b.origin with
     | .some o => Scry.originJson o
-    | .none => Json.mkObj [("function", Json.mkStr b.func), ("programPoint", Json.ofNat 0)];
+    | .none => Json.mkObj [("function", Json.mkStr b.func), ("programPoint", Json.ofNat b.point)];
   Json.mkObj
-    [ ("rule", Json.mkStr "lowering-boundary")
+    [ ("rule", Json.mkStr b.rule)
     , ("severity", Json.mkStr "warning")
     , ("kind", Json.mkStr "boundary")
     , ("message", Json.mkStr b.message)
     , ("function", Json.mkStr b.func)
-    , ("point", Json.ofNat 0)
+    , ("point", Json.ofNat b.point)
     , ("derivation", Json.mkStr "unchecked")
     , ("location", loc) ]
 
@@ -341,6 +336,11 @@ structure Scry.TaintReport where
   checks : List Bool
   origins : Scry.OriginMap
   boundaries : List Scry.BoundaryFinding
+  /-- Points-to diagnostics: unknown memory, use after free, unresolved indirect calls. -/
+  memory : List Scry.BoundaryFinding
+  /-- The points-to solution (locations and indirect targets), for `--origin-map`-style
+  inspection and the tests. -/
+  pointsTo : Scry.PtResult
 
 /-- The pipeline up to the report: parse, lower, analyse, certify-status, locate. -/
 def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do
@@ -360,8 +360,10 @@ def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do
     let findings := Scry.programFindings pr;
     let origins := Scry.originEntries o.file text tu.funcs;
     let boundaries := Scry.boundaryFindings o.file text tu;
+    let memory := Scry.memoryFindings origins pr.warnings;
     let checks := List.map (fun f => Scry.findingChecked pr f) findings;
-    EIO.pure (Scry.TaintReport.mk o.file errs pack tu findings checks origins boundaries)
+    EIO.pure (Scry.TaintReport.mk o.file errs pack tu findings checks origins boundaries
+      memory pr.pointsTo)
 
 /-- `(finding, checked)` pairs in the findings' order. -/
 def Scry.zipFindings (fs : List Scry.RuleFinding) (cs : List Bool) :
@@ -397,6 +399,7 @@ def Scry.runTaint (o : Scry.TaintOpts) : EIO Nat := do
   let checks := rep.checks;
   let origins := rep.origins;
   let boundaries := rep.boundaries;
+  let memory := rep.memory;
   let pack := rep.pack;
   let checked := Scry.checkedCount checks;
   let unchecked := Nat.sub (List.length findings) checked;
@@ -409,21 +412,24 @@ def Scry.runTaint (o : Scry.TaintOpts) : EIO Nat := do
       , ("findings", Json.mkArr (List.map (fun p => Scry.findingJson origins p.1 p.2)
           (Scry.zipFindings findings checks)))
       , ("boundary", Json.mkArr (List.map Scry.boundaryJson boundaries))
+      , ("memory", Json.mkArr (List.map Scry.boundaryJson memory))
       , ("counts", Json.mkObj
           [ ("findings", Json.ofNat (List.length findings))
           , ("checked", Json.ofNat checked)
           , ("unchecked", Json.ofNat unchecked)
-          , ("boundary", Json.ofNat (List.length boundaries)) ]) ])))
+          , ("boundary", Json.ofNat (List.length boundaries))
+          , ("memory", Json.ofNat (List.length memory)) ]) ])))
   | .false => do
     Scry.taintSay ("taint: " ++ o.file ++ " (" ++ Nat.repr (List.length pack.rules) ++ " rules)");
     unit2 ← (match errs with
       | .zero => Scry.taintSay "parse: ok"
       | _ => Scry.taintSay ("parse: " ++ Nat.repr errs ++ " ERROR/MISSING node(s) recovered (--allow-errors)"));
     Scry.printFindings origins findings checks;
-    Scry.printBoundaries boundaries;
+    Scry.printBoundaries (List.append boundaries memory);
     Scry.taintSay ("taint: " ++ Nat.repr (List.length findings) ++ " finding(s), "
       ++ Nat.repr checked ++ " checked, " ++ Nat.repr unchecked ++ " unchecked, "
-      ++ Nat.repr (List.length boundaries) ++ " boundary warning(s)");
+      ++ Nat.repr (List.length boundaries) ++ " boundary warning(s), "
+      ++ Nat.repr (List.length memory) ++ " memory warning(s)");
     unit3 ← (match o.showOriginMap with
       | .true => Scry.taintSay ("origin map:\n" ++ Scry.renderOriginMap origins)
       | .false => EIO.pure ());
@@ -432,14 +438,16 @@ def Scry.runTaint (o : Scry.TaintOpts) : EIO Nat := do
   | .some out => do
     let sarifText := Scry.renderSarifWith "scry" origins pack
       (Scry.zipFindings findings checks)
-      (List.map (fun b => Scry.boundaryResultJson b.origin b.func 0 b.message) boundaries);
+      (List.map (fun b => Scry.boundaryResultJson b.rule b.origin b.func b.point b.message)
+        (List.append boundaries memory));
     FS.writeFile out sarifText;
     EIO.lift (IO.ePrintln ("wrote SARIF 2.1.0: " ++ out ++ " ("
       ++ Nat.repr (List.length findings) ++ " result(s), "
       ++ Nat.repr (List.length boundaries) ++ " boundary)"))
   | .none => EIO.pure ());
   let failing := Bool.and o.failOnFinding
-    (Bool.or (Nat.lt 0 (List.length findings)) (Nat.lt 0 (List.length boundaries)));
+    (Bool.or (Nat.lt 0 (List.length findings))
+      (Bool.or (Nat.lt 0 (List.length boundaries)) (Nat.lt 0 (List.length memory))));
   match failing with
   | .true => EIO.pure 1
   | .false => EIO.pure 0

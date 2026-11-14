@@ -142,6 +142,7 @@ def rulePrelude : String := prelude ++
   "  match k with\n" ++
   "  | .source => 1 | .param => 2 | .call => 3 | .returnSeed => 4\n" ++
   "  | .returnValue => 5 | .flow => 6 | .sink => 7 | .recursion => 8 | .assumed => 9\n" ++
+  "  | .store => 10 | .load => 11\n" ++
   "def kindsCode : List Scry.PathNode → Nat\n" ++
   "  | .nil => 0\n" ++
   "  | .cons p ps => Nat.add (Nat.mul 10 (kindsCode ps)) (kindCode p.kind)\n" ++
@@ -314,6 +315,60 @@ def group : Group where
       run := fun _ => evalRuleNats
         ("#eval Nat.add (Nat.mul (List.length (Scry.programFindings (Scry.analyze Scry.indirectProgram Scry.demoRules))) 10)\n" ++
          "  (List.length (Scry.analyze Scry.indirectProgram Scry.demoRules).graph.indirect)") [2] },
+    { name := "memory: store then load is a flow (the prototype's documented false negative)",
+      run := fun _ => evalRuleNats (rulePrelude ++
+        "def memFindings : List Scry.RuleFinding :=\n" ++
+        "  Scry.programFindings (Scry.analyze Scry.taintFn Scry.demoRules)\n" ++
+        "def memPath : List Scry.PathNode :=\n" ++
+        "  match memFindings with\n" ++
+        "  | .cons f _ => f.path\n" ++
+        "  | .nil => []\n" ++
+        "#eval List.length memFindings\n" ++
+        "#eval List.length memPath\n" ++
+        "#eval kindsCode memPath\n" ++
+        "#eval lastPt memPath") [1, 4, 8201, 4] },
+    { name := "memory: a store into one object is not a flow from another (known no-alias)",
+      run := fun _ => evalRuleNats
+        ("#eval Nat.add (Nat.mul (List.length (Scry.programFindings (Scry.analyze Scry.taintDistinct Scry.demoRules))) 10)\n" ++
+         "  (List.length (Scry.analyze Scry.taintDistinct Scry.demoRules).warnings)") [0] },
+    { name := "memory: field sensitivity reaches cell 0 but not cell 1",
+      run := fun _ => evalRuleNats (rulePrelude ++
+        "def fieldFindings : List Scry.RuleFinding :=\n" ++
+        "  Scry.programFindings (Scry.analyze Scry.taintFields Scry.demoRules)\n" ++
+        "def fieldPath : List Scry.PathNode :=\n" ++
+        "  match fieldFindings with\n" ++
+        "  | .cons f _ => f.path\n" ++
+        "  | .nil => []\n" ++
+        "#eval List.length fieldFindings\n" ++
+        "#eval lastPt fieldPath\n" ++
+        "#eval firstPt fieldPath") [1, 8, 0] },
+    { name := "memory: an indirect call through a known function pointer propagates",
+      run := fun _ => evalRuleNats (rulePrelude ++
+        "def prK : Scry.ProgramResult := Scry.analyze Scry.indirectKnownProgram Scry.demoRules\n" ++
+        "def kf : List Scry.RuleFinding := Scry.programFindings prK\n" ++
+        "#eval List.length kf\n" ++
+        "#eval List.length prK.warnings\n" ++
+        "#eval List.length prK.graph.indirect\n" ++
+        "#eval match kf with\n" ++
+        "  | .cons f _ => Nat.add (if String.eq f.func \"knownSink\" then 10 else 0)\n" ++
+        "      (if String.eq (firstFn f.path) \"indirectKnown\" then 1 else 0)\n" ++
+        "  | .nil => 0") [1, 0, 1, 11] },
+    { name := "memory: an unresolved indirect call is unknown and warned",
+      run := fun _ => evalRuleNats
+        ("#eval Nat.add (Nat.mul (List.length (Scry.programFindings (Scry.analyze Scry.indirectProgram Scry.demoRules))) 10)\n" ++
+         "  (List.length (Scry.analyze Scry.indirectProgram Scry.demoRules).warnings)") [1] },
+    { name := "points-to: location kinds of a field-sensitive object",
+      run := fun _ => evalRuleTexts (rulePrelude ++
+        "def ptF := Scry.pointsTo Scry.fieldFn\n" ++
+        "#eval (Scry.locKindAt ptF 0) ++ \"/\" ++ (Scry.locKindAt ptF 1)\n" ++
+        "#eval Nat.repr (Nat.add (Nat.mul (Scry.locCount ptF) 10)\n" ++
+        "  (Scry.ptVarCount ptF))") ["heap/field", "23"] },
+    { name := "points-to: overlap is exact for constant offsets and wildcard for anyOff",
+      run := fun _ => evalRuleNats
+        ("def h := Scry.Loc.heap \"f\" 1\n" ++
+         "#eval Nat.add (if Scry.locOverlap (Scry.Loc.field h 0) h then 100 else 0)\n" ++
+         "  (Nat.add (if Scry.locOverlap (Scry.Loc.field h 0) (Scry.Loc.field h 1) then 10 else 0)\n" ++
+         "    (Nat.add (if Scry.locOverlap (Scry.Loc.field h 0) (Scry.Loc.anyOff h) then 1 else 0) 0))") [101] },
     { name := "certificates: the derivation checks, reports axioms, and a tampered one is rejected",
       run := fun _ => do
         evalRuleNats (rulePrelude ++

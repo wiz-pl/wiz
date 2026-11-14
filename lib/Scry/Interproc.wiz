@@ -1,14 +1,21 @@
 import Scry.RuleTaint
 import Scry.Analysis
+import Scry.PointsTo
 import Scry.Rules
 import Text
 /-!
 # Scry.Interproc
 
-**Interprocedural taint for direct calls** (`import Scry.Interproc`): a call graph from
-`Wil`, argument -> parameter taint, return-value summaries, and a summary fixpoint that
-handles recursion. Indirect calls are recorded but deliberately **unknown**: their
-arguments and result are neither propagated nor summarised.
+**Interprocedural taint for direct and resolved indirect calls** (`import Scry.Interproc`):
+a call graph from `Wil`, argument -> parameter taint, return-value summaries, and a
+summary fixpoint that handles recursion.
+
+An indirect call (`fp(x)`, `(*fp)(x)`) is resolved by `Scry.PointsTo` to the functions its
+function-pointer value may hold. Every resolved target becomes a call site (so argument
+taint reaches its parameter and its return value taints the result), and a call whose
+target set is empty or contains a non-function/unknown location is recorded as
+**unknown**: its arguments and result are not propagated, and `Scry.RuleTaint` reports an
+`unknown-indirect` warning rather than a silent false negative.
 
 ## The model
 
@@ -53,20 +60,26 @@ structure Scry.CallGraph where
   /-- `(caller, point)` of every call through a function value. -/
   indirect : List (String × Nat)
 
-def Scry.sitesOfFunc (fn : Wil.Func) : List Scry.CallSite :=
+def Scry.siteOfCall (fn : Wil.Func) (pt : Scry.PtResult) (n : Nat) (r : Option Wil.Var)
+    (args : List Wil.Var) (name : String) : Scry.CallSite :=
+  Scry.CallSite.mk fn.name n name
+    (List.map (fun v => v.index) args)
+    (match r with
+      | .some v => .some v.index
+      | .none => .none)
+
+/-- The direct and resolved-indirect call sites of a function. -/
+def Scry.sitesOfFunc (fn : Wil.Func) (pt : Scry.PtResult) : List Scry.CallSite :=
   let g := Scry.flatten fn;
   Scry.concatLists (fun n =>
     match Scry.nodeStmt g n with
     | .none => .nil
     | .some s => match s with
       | .call r callee args _ => match callee with
-        | .direct name =>
-          List.cons (Scry.CallSite.mk fn.name n name
-            (List.map (fun v => v.index) args)
-            (match r with
-              | .some v => .some v.index
-              | .none => .none)) .nil
-        | .indirect _ => .nil
+        | .direct name => List.cons (Scry.siteOfCall fn pt n r args name) .nil
+        | .indirect _ =>
+          List.map (fun name => Scry.siteOfCall fn pt n r args name)
+            (Scry.indirectAt pt fn.name n).names
       | _ => .nil) (Scry.range g.count)
 
 def Scry.indirectOfFunc (fn : Wil.Func) : List (String × Nat) :=
@@ -78,10 +91,11 @@ def Scry.indirectOfFunc (fn : Wil.Func) : List (String × Nat) :=
       | .call _ (.indirect _) _ _ => List.cons (fn.name, n) .nil
       | _ => .nil) (Scry.range g.count)
 
-/-- The direct-call graph of a program, plus the indirect calls it keeps unknown. -/
-def Scry.callGraph (p : Wil.Program) : Scry.CallGraph :=
+/-- The direct-call graph of a program plus every resolved indirect target; the unresolved
+indirect calls are listed in `indirect` (and warned about). -/
+def Scry.callGraph (p : Wil.Program) (pt : Scry.PtResult) : Scry.CallGraph :=
   Scry.CallGraph.mk
-    (Scry.concatLists Scry.sitesOfFunc p.funcs)
+    (Scry.concatLists (fun fn => Scry.sitesOfFunc fn pt) p.funcs)
     (Scry.concatLists Scry.indirectOfFunc p.funcs)
 
 def Scry.siteAt (g : Scry.CallGraph) (caller : String) (node : Nat) : Option Scry.CallSite :=
@@ -144,16 +158,16 @@ def Scry.retSeedsOf (graph : Scry.CallGraph) (sums : List Scry.Summary)
     else .nil) graph.sites
 
 def Scry.resultsWith (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
-    (sums : List Scry.Summary) : List Scry.FuncResult :=
+    (pt : Scry.PtResult) (sums : List Scry.Summary) : List Scry.FuncResult :=
   List.map (fun fn =>
-    Scry.evaluateFunc fn pack (Scry.summaryOf sums fn.name).params
+    Scry.evaluateFunc fn pack pt (Scry.summaryOf sums fn.name).params
       (Scry.retSeedsOf graph sums fn.name)) p.funcs
 
 /-- One summary round: evaluate every function under `prev`, then grow every summary
 with the argument-taint contributions the results expose and the return flags. -/
 def Scry.stepSummaries (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
-    (prev : List Scry.Summary) : List Scry.Summary :=
-  let results := Scry.resultsWith p pack graph prev;
+    (pt : Scry.PtResult) (prev : List Scry.Summary) : List Scry.Summary :=
+  let results := Scry.resultsWith p pack graph pt prev;
   List.map (fun fn =>
     let old := Scry.summaryOf prev fn.name;
     let contrib := Scry.paramContributions graph results fn.name;
@@ -164,14 +178,14 @@ def Scry.stepSummaries (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.Ca
       (Bool.or old.retTainted ret)) p.funcs
 
 partial def Scry.summaryLoop (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
-    (fuel : Nat) (sums : List Scry.Summary) : List Scry.Summary :=
+    (pt : Scry.PtResult) (fuel : Nat) (sums : List Scry.Summary) : List Scry.Summary :=
   match fuel with
   | .zero => sums
   | .succ k =>
-    let next := Scry.stepSummaries p pack graph sums;
+    let next := Scry.stepSummaries p pack graph pt sums;
     match Scry.summariesEq next sums with
     | .true => next
-    | .false => Scry.summaryLoop p pack graph k next
+    | .false => Scry.summaryLoop p pack graph pt k next
 
 -- ## The program result
 
@@ -179,18 +193,36 @@ structure Scry.ProgramResult where
   results : List Scry.FuncResult
   summaries : List Scry.Summary
   graph : Scry.CallGraph
+  /-- The points-to solution the memory rows came from. -/
+  pointsTo : Scry.PtResult
+  /-- Memory diagnostics (unknown target, use after free, unresolved indirect call). -/
+  warnings : List Scry.MemWarning
 
 def Scry.findResult (pr : Scry.ProgramResult) (name : String) : Option Scry.FuncResult :=
   List.find (fun r => String.eq r.fn.name name) pr.results
 
-/-- Analyse a program: fixpoint the summaries, then evaluate every function once with
-the stable summaries. -/
+/-- Deduplicate diagnostics (a function is evaluated once per summary round only in the
+final pass, but be defensive). -/
+def Scry.memWarnKey (w : Scry.MemWarning) : String :=
+  (Scry.MemWarnKind.show w.kind) ++ "|" ++ w.func ++ "|" ++ Nat.repr w.point ++ "|" ++ w.detail
+
+def Scry.dedupWarnings (ws : List Scry.MemWarning) : List Scry.MemWarning :=
+  List.foldl (fun acc w =>
+    match List.any (fun x => String.eq (Scry.memWarnKey x) (Scry.memWarnKey w)) acc with
+    | .true => acc
+    | .false => List.append acc (.cons w .nil)) .nil ws
+
+/-- Analyse a program: points-to first (the memory model every later stage uses), then the
+summary fixpoint, then one final evaluation per function. -/
 def Scry.analyze (p : Wil.Program) (pack : Scry.RulePack) : Scry.ProgramResult :=
-  let graph := Scry.callGraph p;
+  let pt := Scry.pointsTo p;
+  let graph := Scry.callGraph p pt;
   let sums0 := List.map (fun fn => Scry.Summary.mk fn.name .nil .false) p.funcs;
   let fuel := Nat.add 4 (Nat.add (List.length p.funcs) (Scry.totalParams p.funcs));
-  let sums := Scry.summaryLoop p pack graph fuel sums0;
-  Scry.ProgramResult.mk (Scry.resultsWith p pack graph sums) sums graph
+  let sums := Scry.summaryLoop p pack graph pt fuel sums0;
+  let results := Scry.resultsWith p pack graph pt sums;
+  let warnings := Scry.dedupWarnings (Scry.concatLists (fun r => r.plan.memWarnings) results);
+  Scry.ProgramResult.mk results sums graph pt warnings
 
 -- ## Stitching paths across calls
 
