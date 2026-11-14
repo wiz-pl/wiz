@@ -725,10 +725,11 @@ proposition: `term.prop`, `term.sort`, `term.eq`, `term.refl`, `term.rfl`, `term
 and `term.transp` had no handlers (the parser already produced them, the kernel already
 had the forms). `Frontend.wiz` now elaborates them:
 
-* `Prop` is the kernel's `.prop` (`Sort 0`); `Sort n` is `.sortL`, with the level read
-  from the level syntax: numerals, `max`, `imax` and `+ n`, closed. A level parameter
-  or hole is an error naming A15 (universe polymorphism is not in this frontend yet).
-  `Sort 0` and `Sort (max 1 2)` are the tests; `Type n` is unchanged.
+* `Prop` is the kernel's `.prop` (`Sort 0`); `Sort l` is `.sortL l`, with the level
+  from U1's level elaborator (`levelArg`/`elabLevel`): numerals, `max`, `imax`, `+ n`,
+  the declaration's universe parameters (`Sort u` in a `.{u}` definition) and `_` level
+  metavariables. `Sort 0`, `Sort (max 1 2)` and (with U1) `Sort u` are the tests; `Type`
+  keeps its handler, and a level that is not in scope is an error naming it.
 * `a = b` is `.eq A a b` (`A` the inferred type of `a`, the result in `Prop`).
 * `refl a` is `.tyRefl a` when `a` is a type and `.eqRefl A a` otherwise; `rfl` is
   checked against the expected equation (`.eqRefl`, `.tyRefl`, or the unit proof for an
@@ -739,15 +740,16 @@ had the forms). `Frontend.wiz` now elaborates them:
   `p : P a (refl A a)`.
 * `True` and `False` are built-in names for `.ptrue`/`.pfalse` (like `Unit`).
 
-Nothing in `Kernel.wiz` changed: the kernel infers/checks and marks the terms like every
-other declaration. Types still have no `Eq` name (only the `a = b` form), and `by`
-(tactics, A13), macros/notation (A12) and `deriving` (A11) remain the next surface
-pieces; `Sort` beyond closed levels needs A15.
+Nothing in `Kernel.wiz` changed for A16 (U1 changed it for levels): the kernel
+infers/checks and marks the terms like every other declaration. Types still have no
+`Eq` name (only the `a = b` form), and `by` (tactics, A13), macros/notation (A12) and
+`deriving` (A11) remain the next surface pieces.
 
 **Tests** (group `selfhost`): a file with `n = n` by `rfl`, a `Prop`-valued definition,
 `Prop`, `Sort 0`, `Sort (max 1 2)`, a `Sort`-typed definition, a polymorphic `cast`, a
 `transp` along an equality (its motive a proposition), `True`/`False`, four rejected
 proofs/types (a wrong equation by `rfl`, `Prop := Type`, `Sort 1 := Type 1`, `cast` on
-`False`) and the A15 level error; a differential case with the same 11 declarations
-accepted/rejected by the Lean frontend and the self-hosted one; `wiz check` of the
-generated self-hosted sources passes, and the self-hosted frontend still checks itself.
+`False`) and an unknown-level error; a differential case with the same 12 declarations
+accepted/rejected by the Lean frontend and the self-hosted one; U1's own cases cover
+`Sort u`, `Type u` and level inference. `wiz check` of the generated self-hosted sources
+passes, and the self-hosted frontend still checks itself.

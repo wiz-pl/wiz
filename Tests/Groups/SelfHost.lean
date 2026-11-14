@@ -1670,6 +1670,35 @@ def selfHostGroup : Group where
         | .ok _ => pure ()
         | .error e => throw (IO.userError s!"the Lean kernel with full regularity rejects it: {e}") },
     -- (A14) modules: `import M` loads `M.wiz` (a `-I` root, then the working directory)
+    { name := "the self-hosted frontend: universe levels, Sort and Prop, as in the Lean frontend (A15/U1)", run := fun _ =>
+        let header := "def id.{u} {A : Type u} (x : A) : A := x\n" ++
+          "def id2.{u, v} {A : Type u} {B : Type v} (x : A) (y : B) : A := x\n" ++
+          "def prodT.{u, v} (A : Type u) (B : Type v) : Type (max u v) := A × B\n" ++
+          "def imp.{u} (A : Type u) (P : Prop) : Prop := A → P\n" ++
+          "def p : Prop := (P : Prop) → P → P\n" ++
+          "def s.{u} : Sort (u + 1) := Sort u\n" ++
+          "def t : Type 1 := Type\n" ++
+          "def n : Nat := id.{0} 5\n" ++
+          "def m : Nat := id 5\n" ++
+          "def m2.{u} (A : Type u) (x : A) : A := id x\n"
+        selfhostAgrees header [
+          ("def n2 : Nat := id.{0} 5\n", true),
+          ("def m3 : Nat := id 5\n", true),
+          ("def m4.{u} (A : Type u) (x : A) : A := id x\n", true),
+          ("def t2 : Type 1 := Type\n", true),
+          ("def t3 : Sort 2 := Sort 1\n", true),
+          -- unknown level, a proposition that is a type, a universe mismatch, a wrong
+          -- number of levels, and an unsolved level metavariable: rejected by both
+          ("def bad.{u} : Type v := Nat\n", false),
+          ("def bad2 : Prop := Type\n", false),
+          ("def bad3.{u} : Sort u := Sort u\n", false),
+          ("def bad4.{u} : Type u := Type u\n", false),
+          ("def bad5 : Nat := id.{1, 2} 5\n", false),
+          ("axiom bad6 : Sort _\n", false)] },
+    { name := "the self-hosted frontend: universe levels are inferred at a constant's use (A15/U1)", run := fun _ =>
+        selfhostSameNats ("def id.{u} {A : Type u} (x : A) : A := x\n" ++
+          "def id2.{u, v} {A : Type u} {B : Type v} (x : A) (y : B) : A := x\n")
+          [("id.{0} 5", 5), ("id 5", 5), ("id2 5 7", 5), ("id2 3 4", 3)] },
     { name := "modules: an imported module's declarations are in scope", run := fun _ =>
         selfhostCheckModules
           [("B.wiz", "import Prelude\ndef one : Nat := 1\n"),
@@ -1725,6 +1754,7 @@ def selfHostGroup : Group where
           "#check Prop\n#check Sort 0\n#check Sort (max 1 2)\n" ++
           "def S2 : Sort (max 1 2) := Type\n#check S2\n" ++
           "def SProp : Sort 1 := Prop\n#check SProp\n" ++
+          "def SU.{u} : Sort (u + 1) := Sort u\n" ++
           "def castId {A B : Type} (e : A = B) (a : A) : B := cast e a\n#check castId\n" ++
           "def transEq {A : Type} {a b : A} (c : Nat) (e : a = b) (f : A → Nat) (h : f a = c) : f b = c :=\n" ++
           "  transp (fun b _ => f b = c) h e\n" ++
@@ -1734,7 +1764,7 @@ def selfHostGroup : Group where
           "def badCast (e : False) (n : Nat) : Nat := cast e n\n" ++
           "def badLevel : Sort u := Type\n"
         selfhostCheckFile file ("reflNat : (x0 : Nat) → Eq(Nat, x0, x0)\n" ++
-          "alwaysTrue : Prop\nProp\nU0\nU0\nU2\nS2 : U1\nU1\nSProp : U0\nU0\n" ++
+          "alwaysTrue : Prop\nProp\nU0\nU0\nU2\nS2 : U1\nU1\nSProp : U0\nU0\nSU : Sort((u)+1)\n" ++
           "castId : (x0 :0 U0) → (x1 :0 U0) → (x2 : Eq(U0, x0, x1)) → (x3 : x0) → x1\n" ++
           "(x0 :0 U0) → (x1 :0 U0) → (x2 : EqTy(x0, x1)) → (x3 : x0) → x1\n" ++
           "transEq : (x0 :0 U0) → (x1 :0 x0) → (x2 :0 x0) → (x3 : Nat) → (x4 : Eq(x0, x1, x2)) → " ++
@@ -1744,7 +1774,7 @@ def selfHostGroup : Group where
           "error: type mismatch: expected Prop, got U1\n" ++
           "error: type mismatch: expected U0, got U2\n" ++
           "error: cannot infer the type of this cast: its proof's type is an empty equation, so it no longer shows the target type; write `(cast e t : T)`\n" ++
-          "error: a Sort needs a closed level (a numeral, or max/imax/+ of closed levels): universe parameters and holes are not supported by the self-hosted frontend (A15)\n") },
+          "error: unknown universe level 'u'\n") },
     { name := "the proof surface: the Lean and self-hosted frontends agree (A16)", run := fun _ =>
         selfhostAgrees "" [
           ("def reflNat (n : Nat) : n = n := rfl\n", true),
@@ -1752,6 +1782,7 @@ def selfHostGroup : Group where
           ("def small : Prop := False → False\n", true),
           ("def S : Sort 1 := Prop\n", true),
           ("def S2 : Sort (max 1 2) := Type\n", true),
+          ("def SU.{u} : Sort (u + 1) := Sort u\n", true),
           ("def castId {A B : Type} (e : A = B) (a : A) : B := cast e a\n", true),
           ("def transEq {A : Type} {a b : A} (c : Nat) (e : a = b) (f : A → Nat) (h : f a = c) : f b = c :=\n" ++
             "  transp (fun b _ => f b = c) h e\n", true),
