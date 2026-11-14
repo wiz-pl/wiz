@@ -650,11 +650,11 @@ def group : Group where
     { name := "erasure believes a Π's sort, and the kernel rejects a wrong one wherever erasure could read it", run := fun _ => do
         -- `Type → Type` marked as a proposition: erasure would take its values for proofs
         let w : Val ZeroOneMany := .qlit QuantitySyntax.explicitDefault
-        let ty : Val ZeroOneMany := .pi "x" .default w (.sort 1) (.mk [] (.sort 1)) (some 0)
+        let ty : Val ZeroOneMany := .pi "x" .default w (.sort 1) (.mk [] (.sort 1)) ⟨2, 0⟩
         check (erasable { globals := {} } ty) "the annotation is read"
         -- so no declaration may carry it: not in its type, its value, or its implementation
-        let bad : Term ZeroOneMany := .pi "x" .default (.qlit QuantitySyntax.explicitDefault) (.sort 1) (.sort 1) (some 0)
-        let good : Term ZeroOneMany := .pi "x" .default (.qlit QuantitySyntax.explicitDefault) (.sort 1) (.sort 1) none
+        let bad : Term ZeroOneMany := .pi "x" .default (.qlit QuantitySyntax.explicitDefault) (.sort 1) (.sort 1) ⟨2, 0⟩
+        let good : Term ZeroOneMany := .pi "x" .default (.qlit QuantitySyntax.explicitDefault) (.sort 1) (.sort 1) ⟨2, 2⟩
         let d (type value : Term ZeroOneMany) (impl : Option (Term ZeroOneMany)) : Decl ZeroOneMany :=
           { name := "T", type, value := some value, impl }
         check ((addDecl {} (d (.sort 2) good none)) matches .ok _) "the unmarked type was rejected"
@@ -662,7 +662,7 @@ def group : Group where
         check ((addDecl {} (d (.sort 2) bad none)) matches .error _) "a wrong sort was accepted in a value"
         check ((addDecl {} (d (.sort 2) good (some bad))) matches .error _)
           "a wrong sort was accepted in an implementation (erasure would believe it)"
-        let idT (t : Term ZeroOneMany) : Term ZeroOneMany := .pi "f" .default (.qlit QuantitySyntax.explicitDefault) t (t.lift 1) none
+        let idT (t : Term ZeroOneMany) : Term ZeroOneMany := .pi "f" .default (.qlit QuantitySyntax.explicitDefault) t (t.lift 1) ⟨2, 2⟩
         check ((addDecl {} { name := "i", type := idT good, value := some (.lam "f" (.var 0)) }) matches .ok _)
           "the identity on Type → Type was rejected"
         check ((addDecl {} { name := "i", type := idT bad, value := some (.lam "f" (.var 0)) }) matches .error _)
@@ -739,13 +739,16 @@ def group : Group where
     -- that it is a proposition; the kernel still checks every sort note itself
     { name := "a wrong sort note on a Π into an equation is rejected by the kernel", run := fun _ => do
         let w : Term ZeroOneMany := .qlit QuantitySyntax.explicitDefault
-        let ty (s : Option Level) : Term ZeroOneMany := .pi "X" .default w (.sort 1) (.eqTy (.var 0) (.var 0)) s
-        let d (s : Option Level) : Decl ZeroOneMany :=
+        let ty (σ : BinderSorts) : Term ZeroOneMany := .pi "X" .default w (.sort 1) (.eqTy (.var 0) (.var 0)) σ
+        let d (σ : BinderSorts) : Decl ZeroOneMany :=
           -- (a `fun` at a proposition carries its proof marker, P2)
-          { name := "r", type := ty s, value := some (.prf .zero (.lam "X" (.reflTy (.var 0)))) }
-        check ((addDecl {} (d none)) matches .ok _) "the unmarked declaration was rejected"
-        check ((addDecl {} (d (some 0))) matches .ok _) "the right sort note was rejected"
-        check ((addDecl {} (d (some 1))) matches .error _) "a wrong sort note (Type for a proposition) was accepted" },
+          { name := "r", type := ty σ, value := some (.prf .zero (.lam "X" (.reflTy (.var 0)))) }
+        -- (mandatory sorts: a missing note is a hole, which the kernel rejects; the
+        -- domain is `Sort 1 : Sort 2`, the codomain an equation in `Sort 0`)
+        check ((addDecl {} (d .hole)) matches .error _) "a Π without its sorts was accepted"
+        check ((addDecl {} (d ⟨2, 0⟩)) matches .ok _) "the right sort note was rejected"
+        check ((addDecl {} (d ⟨1, 0⟩)) matches .error _) "a wrong sort note (the domain's sort for `Sort 1`) was accepted"
+        check ((addDecl {} (d ⟨2, 1⟩)) matches .error _) "a wrong sort note (Type for a proposition) was accepted" },
     { name := "one-pass reference counting agrees with the specification (insertRC)", run := fun _ => do
         let examples ← ["examples/std.wiz", "examples/io.wiz", "examples/effects.wiz"].mapM (fun (f : String) => IO.FS.readFile f)
         for p in examples ++ [literalProgram 300] do

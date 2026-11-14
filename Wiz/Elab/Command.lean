@@ -323,7 +323,7 @@ def solveSortConstraints : ElabM R Unit := do
   let typeOf (ctx : LocalCtx R) (t : Term R) : ElabM R (Option (VTy R)) := do
     let t ← zonk ctx.lvl t
     if !t.mvars.isEmpty then return none
-    let kctx : Ctx R := { globals := ← getGlobals, env := ctx.env, names := ctx.names,
+    let kctx : Ctx R := { globals := { (← getGlobals) with sortHolesOk := true }, env := ctx.env, names := ctx.names,
                           qtys := ctx.names.map fun _ => QPoly.const QuantitySyntax.explicitDefault,
                           types := ctx.types, lvl := ctx.lvl, proof := true }
     match Wiz.infer kctx t with
@@ -381,7 +381,7 @@ def elabDeclTerms (binders : Array Syntax) (typeStx : Option Syntax) (valStx : O
   -- the equation stays as written, as above.)
   let ty ← if (← get).pendingInsts.isEmpty then zonkInsts ctx.lvl ty else pure ty
   let val ← valStx.mapM fun s => do Elab.check ctx s (← evalIn ctx ty)
-  let ty := tele.foldr (fun (x, bi, q, a) b => Term.pi x bi q a b none) ty
+  let ty := tele.foldr (fun (x, bi, q, a) b => Term.pi x bi q a b .hole) ty
   let val := val.map fun v => tele.foldr (fun (x, _, _, _) b => Term.lam x b) v
   solveSortConstraints
   let ty ← zonk 0 ty
@@ -427,7 +427,7 @@ def elabSizedDef (name : Name) (cmd : Syntax) (ctx : LocalCtx R) (tele : Array (
   let some vlev := typeSort? g c1.types.reverse.toArray (← evalIn c1 B)
     | throwAt info "could not determine the universe of the result"
   -- F := fun s rec i x' => let f := …; fun rest => tree
-  let fty := sfixFunTy g l I D vP w
+  let fty := sfixFunTy g l vlev I D vP w
   let .pi _ _ _ _ c_s _ ← force fty | throwAt info "internal error"
   let ctxS := c1.bind "s" .size
   let sv := Val.var c1.lvl
@@ -456,7 +456,7 @@ def elabSizedDef (name : Name) (cmd : Syntax) (ctx : LocalCtx R) (tele : Array (
   let hintT := hint.map fun (n, us, as) => (n, us, as.map (quote g (L + 1)))
   let fTyTm : Term R := .pi "j" .implicit (.qlit 0) (.sizeLt sT)
     (.pi "y" .default (.qlit w) (.mu l (q ctxX I |>.lift 1) (q ctxX D |>.lift 1) (q ctxX idx |>.lift 1) (.var 0) hintT)
-      ((Term.app (Term.app ((P.lift (L - c1.lvl)).lift 2) ((q ctxX idx).lift 2)) (.var 0))) none) none
+      ((Term.app (Term.app ((P.lift (L - c1.lvl)).lift 2) ((q ctxX idx).lift 2)) (.var 0))) .hole) .hole
   -- β-reduce `P () y` (the kernel can't infer the type of an applied lambda)
   let fTyTm := quote g L (← evalIn ctxX fTyTm)
   let fValTm : Term R := .lam "j" (.lam "y" (.app (.app (.app (recT.lift 2) (.var 1)) ((q ctxX idx).lift 2)) (.var 0)))
@@ -483,7 +483,7 @@ def elabSizedDef (name : Name) (cmd : Syntax) (ctx : LocalCtx R) (tele : Array (
   let sfixT : Term R := .sfix l (q c1 I) (q c1 D) vlev P F sizeVarT (q c1 idx) (.var 0)
   solveSortConstraints
   let val := tele.foldr (fun (x, _, _, _) b => Term.lam x b) (.lam x0 sfixT)
-  let fullTy := tele.foldr (fun (x, bi, qq, a) b => Term.pi x bi qq a b none) (Term.pi x0 bi0 q0 A0 B s0)
+  let fullTy := tele.foldr (fun (x, bi, qq, a) b => Term.pi x bi qq a b .hole) (Term.pi x0 bi0 q0 A0 B s0)
   let val ← zonk 0 val
   ensureNoMVars val info
   let fullTy ← zonk 0 fullTy  -- (the telescope's holes, solved by now)
@@ -701,7 +701,7 @@ def elabDefEqns (name : Name) (cmd : Syntax) (isPartial : Bool := false) :
   let body ← compileMatch ctx' (perm vars) clauses tyv rc true
   solveSortConstraints
   let val := tele.foldr (fun (x, _, _, _) b => Term.lam x b) (names.foldr .lam body)
-  let fullTy := tele.foldr (fun (x, bi, q, a) b => Term.pi x bi q a b none) ty
+  let fullTy := tele.foldr (fun (x, bi, q, a) b => Term.pi x bi q a b .hole) ty
   let val ← zonk 0 val
   ensureNoMVars val info
   let fullTy ← zonk 0 fullTy  -- (the telescope's holes, solved by now)
@@ -840,7 +840,7 @@ def elabCopatternsCoit (name : Name) (cmd : Syntax) (obs : List (Name × Bool)) 
   let explicit := (tele.toList.zipIdx.filter fun ((_, bi, _, _), _) => bi == .default)
   let w : Term R := .qlit QuantitySyntax.explicitDefault
   let stateTy : Term R := explicit.zipIdx.foldr (fun (((x, _, _, _), k), j) acc =>
-    .sigma x w ((q ctx.lvl ctx.types[ctx.lvl - k - 1]!).lift j) acc none) (.unit (.succ l))
+    .sigma x w ((q ctx.lvl ctx.types[ctx.lvl - k - 1]!).lift j) acc .hole) (.unit (.succ l))
   let vS ← evalIn ctx stateTy
   -- the step function's context: i, s, then the explicit binders re-bound from s
   let mut sctx := (ctx.bind "i" I).bind "s" vS
@@ -906,7 +906,7 @@ def elabCopatternsCoit (name : Name) (cmd : Syntax) (obs : List (Name × Bool)) 
   let init : Term R := (explicit.map fun ((_, _, _, _), k) => (.var (ctx.lvl - k - 1) : Term R)).foldr .pair .tt
   let coit : Term R := .coit l (q ctx.lvl I) (q ctx.lvl D) Sfun step (q ctx.lvl i) init
   let val := tele.foldr (fun (x, _, _, _) b => Term.lam x b) coit
-  let fullTy := tele.foldr (fun (x, bi, qq, a) b => Term.pi x bi qq a b none) ty
+  let fullTy := tele.foldr (fun (x, bi, qq, a) b => Term.pi x bi qq a b .hole) ty
   -- (7e) the right-hand sides' instance problems (`nats (n + 1)`)
   finishInstances
   let val ← zonk 0 val
@@ -952,7 +952,7 @@ def elabCopatternsCocon (name : Name) (cmd : Syntax) (obs : List (Name × Bool))
     -- (Q4) a lifted field (`ULift A'`, made by the elaborator): check against the
     -- field's own type, and box it
     let (A, lifted) ← match isRec, ← force A with
-      | false, .ulift _ A' => pure (A', true)
+      | false, .ulift _ _ A' => pure (A', true)
       | _, _ => pure (A, false)
     let c ← Elab.check ctx rhs A
     let c := if lifted then .up c else c
@@ -964,7 +964,7 @@ def elabCopatternsCocon (name : Name) (cmd : Syntax) (obs : List (Name × Bool))
     | _ => pure (.refl (quote g ctx.lvl I) (quote g ctx.lvl i))
   let payload : Term R := comps.foldr .pair (.pair e .tt)
   let val := tele.foldr (fun (x, _, _, _) b => Term.lam x b) (Term.cocon payload)
-  let fullTy := tele.foldr (fun (x, bi, qq, a) b => Term.pi x bi qq a b none) ty
+  let fullTy := tele.foldr (fun (x, bi, qq, a) b => Term.pi x bi qq a b .hole) ty
   -- (7e) the right-hand sides' instance problems (`nats (n + 1)`)
   finishInstances
   let val ← zonk 0 val
@@ -1010,7 +1010,8 @@ def runElabS (g : Globals R) (x : ElabM R α) (levelParams : List Name := [])
     | .ok code => Elab.runProcMacro code f stx scope (macroEnv g)
     | .error e => (#[], .error e)
   -- (the elaborator's terms carry no proof markers yet: `proof`)
-  let kernelInfer (ctx : Ctx R) (t : Term R) := (Wiz.infer { ctx with proof := true } t).map (·.1) |>.mapError toString
+  -- (mandatory sorts: an elaboration-time type, where a sort may still be a hole)
+  let kernelInfer (ctx : Ctx R) (t : Term R) := (Wiz.infer { ctx with proof := true, globals := { ctx.globals with sortHolesOk := true } } t).map (·.1) |>.mapError toString
   -- (13b) structures with a constructor private to another module don't unfold here
   match x.run { globals := g.elabView, levelParams, macros, builtins, procMacros, runProcMacro, tactics, compileCode,
                 kernelInfer, classes, instances, termInfo, smt, smtDecl } with
@@ -1073,7 +1074,7 @@ def classMethods (sDecl : Decl R) (levelParams : List Name)
     let mut A' := A.lift 1 k
     for i in (List.range k).reverse do
       A' := A'.instantiateAt 0 (proj i (.var i))
-    let type := implicitΔ.foldr (fun (y, bi, q, B) acc => .pi y bi q B acc none) (.pi "self" selfBi w Capp A' none)
+    let type := implicitΔ.foldr (fun (y, bi, q, B) acc => .pi y bi q B acc .hole) (.pi "self" selfBi w Capp A' .hole)
     let value := Δ.foldr (fun (y, _, _, _) acc => .lam y acc) (.lam "self" (proj k (.var 0)))
     let d : Decl R := { name := C ++ "." ++ x, levelParams, type, value := some value }
     out := out ++ [d]
@@ -1684,7 +1685,7 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
                 modify fun s => { s with globals := g'.insert d }
                 report .warning nr.info s!"{name} is accepted on the strength of native evaluation (--trust-native, {v.steps} steps), not checked by the kernel: its proof is the axiom {ax}, which `#print axioms` lists for everything that uses {name}"
         | _ => report .error nr.info "native_refl proves an equation `a = b`; this type is not one"
-    else match runElabS (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) (smt := s.smt) (smtDecl := name) s.globals (elabDeclTerms binders typeStx valStx cmd.info (declName? := some (name, (cmd.getArg 1).info, declInsertAt cmd))) levelParams with
+    else match runElabS (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) (smt := { s.smt with trustNative := s.trustNative, nativeFuel := s.nativeFuel }) (smtDecl := name) s.globals (elabDeclTerms binders typeStx valStx cmd.info (declName? := some (name, (cmd.getArg 1).info, declInsertAt cmd))) levelParams with
       | (.ok ((ty, val), sides), hv) =>
         addInfos hv
         if sides.isEmpty then addDeclChecked name levelParams ty val
@@ -1695,6 +1696,18 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
           let mut g := s.globals
           let mut ok := true
           for d in sides do
+            -- (28e) an axiom `….native✝` a tactic asked for is decided here, by running it
+            if d.value.isNone && d.name.endsWith ".native✝" then
+              let eqn : Option (Term R × Term R × Term R) := match d.type with
+                | .eq A a b => some (A, a, b)
+                | .app (.const "Sat.IsTrue" _) e => some (.const "Bool" [], e, .const "Bool.true" [])
+                | _ => none
+              match eqn with
+              | some (A, a, b) =>
+                match Native.decideNative g s.builtins A a b s.nativeFuel with
+                | .ok _ => pure ()
+                | .error e => report .error cmd.info s!"{d.name}: native evaluation: {e}"; ok := false; break
+              | none => report .error cmd.info s!"{d.name}: not an equation"; ok := false; break
             let r : Except String (Globals R) := if d.value.isSome then
                 (addDeclSorted g d).mapError toString
               else
@@ -1788,7 +1801,7 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
       | (.ok v, hv) =>
         addInfos hv
         let v := match g.find? name with
-          | some d => Sorts.value g #[] [] v (eval g [] d.type)
+          | some d => if v.hasHole then Mark.check { globals := g, sortsOnly := true } v (eval g [] d.type) else v
           | none => v
         -- (the proof markers, if the kernel asks for them: `withMarksOnDemand`)
         let r := match addPartialImpl g name v with
@@ -2132,7 +2145,7 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
           "\n(native: an implementation that compiled code runs, trusted to agree with its definition)" else ""
         -- (27a) a `native_refl` axiom
         let note := note ++ if as.any (·.endsWith ".native✝") then
-          "\n(.native✝: an equation decided by running it (native_refl, --trust-native): trusted are erasure, the interpreter and the native implementations listed)" else ""
+          "\n(.native✝: a closed proposition decided by running it (native_refl, --trust-native, sat_decide_native): trusted are erasure, the interpreter and the native implementations listed)" else ""
         let note := note ++ if as.any (fun a => (a.splitOn ".smt✝").length > 1) then
           "\n(.smt✝N⟨solver⟩: a goal closed by an SMT solver (the smt tactic, --trust-smt): trusted are the solver named in the axiom, Wiz's translation to SMT-LIB (Wiz/Smt/Translate.lean) and the answer cache)" else ""
         report .info cmd.info s!"'{n}' depends on axioms: [{", ".intercalate as}]{note}"
@@ -2301,7 +2314,7 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
         let fin := match rn with
           | some n => (List.lookup n (st.foreignTypes : List (Name × String))).getD ""
           | none => ""
-        let ty := ks.toList.foldr (fun k acc => .pi "_" .default w (ty1 k) acc none) res
+        let ty := ks.toList.foldr (fun k acc => .pi "_" .default w (ty1 k) acc .hole) res
         let key : Name := s!"extern:{f.name}:{String.join (ks.toList.map (·.1.toKey))}:{rk.toKey}:{if isPure then "pure" else "io"}:{header}:{fin}"
         match addDeclSorted st.globals { name, type := ty, value := none } with
         | .ok g => modify fun s => { s with builtins := (key, name) :: s.builtins,
@@ -2794,6 +2807,8 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
     match r with
     | .error e => reportErr e
     | .ok t =>
+      -- (the sorts pass first: the kernel checks the term erasure is given)
+      let t := if t.hasHole then (Mark.infer { globals := s.globals, sortsOnly := true } t).1 else t
       let ctx : Ctx R := { globals := s.globals, proof := true }
       let result := do
         let (ty, _) ← Wiz.infer ctx t
@@ -2819,6 +2834,7 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
     match r with
     | .error e => reportErr e
     | .ok t =>
+      let t := if t.hasHole then (Mark.infer { globals := s.globals, sortsOnly := true } t).1 else t
       let ctx : Ctx R := { globals := s.globals, proof := true }
       let result : Except String (VTy R × RVal) := do
         let (ty, _) ← (Wiz.infer ctx t).mapError toString

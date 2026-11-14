@@ -59,7 +59,7 @@ def convG : Globals Unit :=
   [Raw.axiom "A" ty, Raw.axiom "f" (arr () "A" "A"), Raw.axiom "a" "A", Raw.axiom "b" "A"].foldl
     Globals.insert {}
   |>.insert { name := "u", type := .unit 1, value := none }
-  |>.insert { name := "p", type := .sigma "x" (.qlit ()) (.const "A" []) (.const "A" []) none, value := none }
+  |>.insert { name := "p", type := .sigma "x" (.qlit ()) (.const "A" []) (.const "A" []) ⟨1, 1⟩, value := none }
 
 /-- Are `x` and `y` convertible at type `t`? -/
 def isConv (t x y : Raw Unit) : Bool :=

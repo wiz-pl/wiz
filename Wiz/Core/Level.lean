@@ -31,6 +31,11 @@ inductive Level where
   | param (name : String)
   /-- level metavariable (elaborator only) -/
   | mvar (id : Nat)
+  /-- (mandatory sorts) a component sort of a `Π`/`Σ` (or a `ULift`'s content's sort)
+  that the elaborator has not written yet: the sorts pass (`Wiz/Elab/Mark.lean`) fills
+  every one before the kernel sees the declaration, and the kernel rejects one. The level
+  unifier never assigns it. -/
+  | hole
   deriving Repr, BEq, Inhabited, Hashable
 
 namespace Level
@@ -56,6 +61,7 @@ def instParams (ps : List String) (us : List Level) : Level → Level
   -- (the leaves by name, here and below: a new constructor must get its own case)
   | zero => zero
   | mvar m => mvar m
+  | .hole => .hole
 
 /-- Replace level metavariables using `f`. -/
 partial def instMVars (f : Nat → Option Level) : Level → Level
@@ -67,18 +73,26 @@ partial def instMVars (f : Nat → Option Level) : Level → Level
   | imax a b => imax (instMVars f a) (instMVars f b)
   | zero => zero
   | param n => param n
+  | .hole => .hole
 
 def params : Level → List String
   | param n => [n]
   | succ l => params l
   | max a b | imax a b => params a ++ params b
-  | zero | mvar _ => []
+  | zero | mvar _ | hole => []
 
 def hasMVar : Level → Bool
   | mvar _ => true
   | succ l => hasMVar l
   | max a b | imax a b => hasMVar a || hasMVar b
-  | zero | param _ => false
+  | zero | param _ | hole => false
+
+/-- Does the level contain a `hole` (a sort the sorts pass has not filled)? -/
+def hasHole : Level → Bool
+  | hole => true
+  | succ l => hasHole l
+  | max a b | imax a b => hasHole a || hasHole b
+  | zero | param _ | mvar _ => false
 
 /-! ## Normal forms
 
@@ -92,6 +106,8 @@ inductive Atom where
   | param (n : String)
   | mvar (m : Nat)
   | imax (a b : List (Atom × Nat))
+  /-- `Level.hole`: an opaque atom (the kernel rejects a hole before comparing levels) -/
+  | hole
   deriving BEq, Repr, Inhabited
 
 /-- A total order on atoms, so normal forms can be sorted. -/
@@ -105,6 +121,9 @@ partial def Atom.lt : Atom → Atom → Bool
   | .mvar a, .mvar b => a < b
   | .mvar _, _ => true
   | _, .mvar _ => false
+  | .hole, .hole => false
+  | .hole, _ => true
+  | _, .hole => false
   | .imax a b, .imax c d => toString (repr (a, b)) < toString (repr (c, d))
 
 abbrev NF := List (Atom × Nat)
@@ -141,6 +160,7 @@ partial def normalize : Level → NF
     else [(.imax (normalize a) nb, 0)]
   | param n => [(.param n, 0)]
   | mvar m => [(.mvar m, 0)]
+  | .hole => [(.hole, 0)]
 
 /-- Is the level nonzero under every instantiation of its parameters? -/
 def isNeverZero (l : Level) : Bool := (normalize l).any fun (_, k) => k > 0
@@ -210,6 +230,7 @@ partial def format : Level → String
       | (b, 0) => match b with
         | param n => n
         | mvar m => s!"?u{m}"
+        | hole => "_"
         | max a c => s!"max {formatArg a} {formatArg c}"
         | imax a c => s!"imax {formatArg a} {formatArg c}"
         | _ => "?"

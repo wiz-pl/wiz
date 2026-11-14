@@ -453,14 +453,15 @@ def evalIn (ctx : LocalCtx R) (t : Term R) : ElabM R (Val R) :=
 
 /-! ### Sorts of the `Π`/`Σ` types the elaborator builds
 
-A `Π`/`Σ` carries its sort so that type equality can tell propositions (compared by
-equivalence) from other types (compared by shape); without one, an equation between
-two such types stays stuck. Surface `Π`/`Σ` get theirs from `checkType`'s levels. The
-ones the elaborator builds itself (a definition's telescope, constructor types,
-recursors, match motives, …) get theirs here, from the kernel's `typeSort?` in the
-context where the type lives. A sort is only written when it is known: the kernel
-rejects a wrong one (`checkSortNote`), and an unknown one (a metavariable, or a
-variable whose type isn't known) leaves `none`. -/
+A `Π`/`Σ` carries its components' sorts (mandatory sorts, `BinderSorts`) so that type
+equality can tell propositions (compared by equivalence) from other types (compared by
+shape). Surface `Π`/`Σ` get theirs from `checkType`'s levels. The ones the elaborator
+builds itself (a definition's telescope, constructor types, recursors, match motives, …)
+are built with holes, and get theirs here, eagerly, from the kernel's `typeSort?` in the
+context where the type lives, so that elaboration-time evaluation sees them. This is
+only a first, partial filling: a hole it can't fill (a metavariable, or a variable whose
+type isn't known) stays, and the sorts pass (`Decl.withSorts`, `Mark.lean`) fills every
+remaining one before the kernel, which checks them all. -/
 namespace Sorts
 variable (g : Globals R)
 
@@ -468,16 +469,16 @@ mutual
 /-- `t` is a type in the context `tys`/`env` (types by level, values innermost
 first): fill in the missing sorts in it, and return its sort when it is known. -/
 partial def type (tys : Array (VTy R)) (env : Env R) : Term R → Term R × Option Level
-  | .pi x bi q A B s =>
+  | .pi x bi q A B σ =>
     let (A, lA) := type tys env A
     let (B, lB) := type (tys.push (eval g env A)) (Val.var tys.size :: env) B
-    let s := s.orElse fun _ => return .imax (← lA) (← lB)
-    (.pi x bi (term tys env q) A B s, s)
-  | .sigma x q A B s =>
+    let σ := σ.fill lA lB
+    (.pi x bi (term tys env q) A B σ, if σ.hasHole then none else some σ.piSort)
+  | .sigma x q A B σ =>
     let (A, lA) := type tys env A
     let (B, lB) := type (tys.push (eval g env A)) (Val.var tys.size :: env) B
-    let s := s.orElse fun _ => return .max (← lA) (← lB)
-    (.sigma x (term tys env q) A B s, s)
+    let σ := σ.fill lA lB
+    (.sigma x (term tys env q) A B σ, if σ.hasHole then none else some σ.sigmaSort)
   -- an equation is a proposition: no need to evaluate it (which computes its sides, the
   -- whole of a `refl` proof's computation; the kernel checks every sort note anyway)
   | t@(.eq ..) | t@(.eqTy ..) => (term tys env t, some 0)
@@ -514,24 +515,18 @@ end Sorts
 def LocalCtx.sortType (g : Globals R) (ctx : LocalCtx R) (t : Term R) : Term R :=
   (Sorts.type g ctx.types.reverse.toArray ctx.env t).1
 
-/-- A `Π`/`Σ` value in a local context with its sort filled in, when it is known. -/
+/-- A `Π`/`Σ` value in a local context with its components' sorts filled in, where known. -/
 def LocalCtx.sortVal (g : Globals R) (ctx : LocalCtx R) (v : Val R) : Val R :=
+  let tys := ctx.types.reverse.toArray
+  let fill (σ : BinderSorts) (A : Val R) (B : Closure R) : BinderSorts :=
+    if !σ.hasHole then σ else
+    let i := typeSort? g tys A
+    let j := typeSort? g (tys.push A) (Closure.inst g B (Val.var tys.size))
+    σ.fill i j
   match v with
-  | .pi x bi q A B none => .pi x bi q A B (typeSort? g ctx.types.reverse.toArray v)
-  | .sigma x q A B none => .sigma x q A B (typeSort? g ctx.types.reverse.toArray v)
+  | .pi x bi q A B σ => .pi x bi q A B (fill σ A B)
+  | .sigma x q A B σ => .sigma x q A B (fill σ A B)
   | v => v
-
-/-- A declaration with the sorts of its types filled in (`Sorts`). -/
-def Decl.withSorts (g : Globals R) (d : Decl R) : Decl R :=
-  let type := (Sorts.type g #[] [] d.type).1
-  -- (the type's value only directs `Sorts.value` under a term's leading `fun`s: it is
-  -- evaluated only for one, since evaluating an equation computes its sides)
-  let ty : Thunk (Val R) := Thunk.mk fun _ => eval g [] type
-  let value (t : Term R) : Term R := match t with
-    | .lam .. => Sorts.value g #[] [] t ty.get
-    | t => Sorts.term g #[] [] t
-  { d with type, value := d.value.map value, impl := d.impl.map value,
-           witness := d.witness.map value }
 
 def instM (c : Closure R) (v : Val R) : ElabM R (Val R) :=
   return Closure.inst (← getGlobals) c v
