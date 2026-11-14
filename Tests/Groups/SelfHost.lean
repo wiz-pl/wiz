@@ -727,6 +727,108 @@ def dupNamesExpected : String :=
   "error: 'loop' has already been declared\nerror: 'P.mk' has already been declared\nQ : U0\nQ.fst : (x0 : Q) → Nat\n" ++
   "error: 'Q.fst' has already been declared\nerror: 'ev' has already been declared\nfine : Nat\n"
 
+def cofProbes : String :=
+  "def showBool : Bool → String" ++ "\n" ++
+    "  | .true => \"true\"" ++ "\n" ++
+    "  | .false => \"false\"" ++ "\n" ++
+    "def showNat (n : Nat) : String := Nat.toString n" ++ "\n" ++
+    "def line (label : String) (b : Bool) : IO Unit :=" ++ "\n" ++
+    "  IO.println (String.append label (showBool b))" ++ "\n" ++
+    "def boolEq (a b : Bool) : Bool := match a, b with" ++ "\n" ++
+    "  | .true, .true => .true" ++ "\n" ++
+    "  | .false, .false => .true" ++ "\n" ++
+    "  | _, _ => .false" ++ "\n" ++
+    "def lineNat (label : String) (n : Nat) : IO Unit :=" ++ "\n" ++
+    "  IO.println (String.append label (showNat n))" ++ "\n" ++
+    "def llen : List CofCtx → Nat" ++ "\n" ++
+    "  | .nil => 0" ++ "\n" ++
+    "  | .cons _ rest => 1 + llen rest" ++ "\n" ++
+    "def isSomeExt : Option Ext → Bool" ++ "\n" ++
+    "  | .some _ => .true" ++ "\n" ++
+    "  | .none => .false" ++ "\n" ++
+    "def v0 : Dim := .dv 0" ++ "\n" ++
+    "def v1 : Dim := .dv 1" ++ "\n" ++
+    "def v2 : Dim := .dv 2" ++ "\n" ++
+    "def φ : Cof := eqD v0 .d0" ++ "\n" ++
+    "def ψ : Cof := eqD v1 .d1" ++ "\n" ++
+    "def χ : Cof := eqD v2 .d0" ++ "\n" ++
+    "def main : IO Unit := do" ++ "\n" ++
+    "  line \"T01 and-top: \" (cofEq (andCof φ topCof) φ);" ++ "\n" ++
+    "  line \"T02 and-bot: \" (cofEq (andCof φ botCof) botCof);" ++ "\n" ++
+    "  line \"T03 or-bot: \" (cofEq (orCof φ botCof) φ);" ++ "\n" ++
+    "  line \"T04 or-top: \" (cofEq (orCof φ topCof) topCof);" ++ "\n" ++
+    "  line \"T05 and-idem: \" (cofEq (andCof φ φ) φ);" ++ "\n" ++
+    "  line \"T06 or-idem: \" (cofEq (orCof φ φ) φ);" ++ "\n" ++
+    "  line \"T07 and-comm: \" (cofEq (andCof φ ψ) (andCof ψ φ));" ++ "\n" ++
+    "  line \"T08 or-comm: \" (cofEq (orCof φ ψ) (orCof ψ φ));" ++ "\n" ++
+    "  line \"T09 and-assoc: \" (cofEq (andCof (andCof φ ψ) χ) (andCof φ (andCof ψ χ)));" ++ "\n" ++
+    "  line \"T10 or-assoc: \" (cofEq (orCof (orCof φ ψ) χ) (orCof φ (orCof ψ χ)));" ++ "\n" ++
+    "  line \"T11 absorption: \" (cofEq (orCof φ (andCof φ ψ)) φ);" ++ "\n" ++
+    "  line \"T12 distributivity: \" (cofEq (andCof φ (orCof ψ χ)) (orCof (andCof φ ψ) (andCof φ χ)));" ++ "\n" ++
+    "  line \"T13 subsumption: \" (cofEq (orCof (andCof φ ψ) φ) φ);" ++ "\n" ++
+    "  line \"T14 contradiction: \" (cofEq (andCof (eqD v0 .d0) (eqD v0 .d1)) botCof);" ++ "\n" ++
+    "  line \"T15 disjoint: \" (cofEq (andCof (eqD v0 .d0) (eqD v1 .d1)) botCof);" ++ "\n" ++
+    "  line \"T16 orientation: \" (cofEq (eqD v0 v1) (eqD v1 v0));" ++ "\n" ++
+    "  line \"T17 chain: \" (cofEq (andCof (eqD v0 v1) (eqD v1 .d0)) (andCof (eqD v0 .d0) (eqD v1 .d0)));" ++ "\n" ++
+    "  line \"T18 transitivity: \" (cofEq (andCof (eqD v0 v1) (eqD v1 v2)) (andCof (eqD v1 v0) (eqD v2 v1)));" ++ "\n" ++
+    "  line \"T19 entails-face: \" (entails (assume (eqD v0 .d0) emptyCtx) (orCof (eqD v0 .d0) (eqD v0 .d1)));" ++ "\n" ++
+    "  line \"T20 not-entails: \" (entails (assume (eqD v0 .d0) emptyCtx) (eqD v0 .d1));" ++ "\n" ++
+    "  line \"T21 entails-top: \" (entails emptyCtx topCof);" ++ "\n" ++
+    "  line \"T22 entails-bot: \" (entails emptyCtx botCof);" ++ "\n" ++
+    "  line \"T23 no-entail: \" (entails emptyCtx (eqD v0 .d0));" ++ "\n" ++
+    "  line \"T24 consistent: \" (consistent emptyCtx (andCof (eqD v0 .d0) (eqD v1 .d1)));" ++ "\n" ++
+    "  line \"T25 inconsistent: \" (consistent emptyCtx (andCof (eqD v0 .d0) (eqD v0 .d1)));" ++ "\n" ++
+    "  line \"T26 refutes: \" (refutes emptyCtx (andCof (eqD v0 .d0) (eqD v0 .d1)));" ++ "\n" ++
+    "  line \"T27 false-ctx-entails: \" (entails (assume (andCof (eqD v0 .d0) (eqD v0 .d1)) emptyCtx) (eqD v2 .d0));" ++ "\n" ++
+    "  line \"T28 false-ctx-inconsistent: \" (consistent (assume (andCof (eqD v0 .d0) (eqD v0 .d1)) emptyCtx) topCof);" ++ "\n" ++
+    "  line \"T29 dim-eq-ctx: \" (dimEqCtx (assume (eqD v0 v1) emptyCtx) v0 v1);" ++ "\n" ++
+    "  line \"T30 dim-ne-ctx: \" (dimEqCtx (assume (eqD v0 .d0) emptyCtx) v0 v1);" ++ "\n" ++
+    "  lineNat \"T31 split-count: \" (llen (branches (assume (orCof (eqD v0 .d0) (eqD v0 .d1)) emptyCtx)));" ++ "\n" ++
+    "  line \"T32 split-entails: \" (entails (assume (orCof (eqD v0 .d0) (eqD v0 .d1)) emptyCtx) (orCof (eqD v0 .d0) (eqD v0 .d1)));" ++ "\n" ++
+    "  line \"T33 split-no-entail: \" (entails (assume (orCof (eqD v0 .d0) (eqD v0 .d1)) emptyCtx) (eqD v0 .d0));" ++ "\n" ++
+    "  lineNat \"T34 dead-branch: \" (llen (branches (assume (orCof (andCof (eqD v0 .d0) (eqD v0 .d1)) (eqD v1 .d0)) emptyCtx)));" ++ "\n" ++
+    "  line \"T35 subst: \" (cofEq (substCof 0 .d0 (eqD v0 v1)) (eqD v1 .d0));" ++ "\n" ++
+    "  line \"T36 subst-bot: \" (cofEq (substCof 0 .d1 (andCof (eqD v0 .d0) (eqD v1 .d1))) botCof);" ++ "\n" ++
+    "  line \"T37 subst-boundary: \" (cofEq (substCof 0 .d0 (orCof (eqD v0 .d0) (eqD v0 .d1))) topCof);" ++ "\n" ++
+    "  line \"T38 subst-var: \" (cofEq (substCof 0 v2 (eqD v0 .d0)) (eqD v2 .d0));" ++ "\n" ++
+    "  line \"T39 subst-other: \" (cofEq (substCof 1 .d0 (eqD v0 v1)) (eqD v0 .d0));" ++ "\n" ++
+    "  line \"T40 subst-agrees: \" (boolEq (entails (assume (eqD v0 .d0) emptyCtx) (orCof (eqD v0 .d0) (eqD v0 .d1))) (entails emptyCtx (substCof 0 .d0 (orCof (eqD v0 .d0) (eqD v0 .d1)))));" ++ "\n" ++
+    "  line \"T40b subst-agrees: \" (boolEq (entails (assume (eqD v0 .d0) emptyCtx) (eqD v0 .d1)) (entails emptyCtx (substCof 0 .d0 (eqD v0 .d1))));" ++ "\n" ++
+    "  line \"T41 within-1: \" (cofWithin 1 pathBoundary);" ++ "\n" ++
+    "  line \"T42 within-0: \" (cofWithin 0 pathBoundary);" ++ "\n" ++
+    "  line \"T43 within-2: \" (cofWithin 2 (eqD v1 .d0));" ++ "\n" ++
+    "  line \"T44 within-2-neq: \" (cofWithin 1 (eqD v1 .d0));" ++ "\n" ++
+    "  line \"T45 path-ext: \" (isSomeExt (pathExt \"a\" \"b\"));" ++ "\n" ++
+    "  line \"T46 bad-ext: \" (Bool.not (isSomeExt (mkExt 0 pathBoundary (.cons (.face 0 .d0 \"a\") .nil))));" ++ "\n" ++
+    "  line \"T47 path-at-0: \" (underDim emptyCtx 0 .d0 pathBoundary);" ++ "\n" ++
+    "  line \"T48 path-at-1: \" (underDim emptyCtx 0 .d1 pathBoundary);" ++ "\n" ++
+    "  line \"T49 path-at-neutral: \" (underDim emptyCtx 0 v2 pathBoundary);" ++ "\n" ++
+    "  line \"T50 face-active: \" (entails (assume (faceCof (.face 0 .d0 \"a\")) emptyCtx) pathBoundary);" ++ "\n" ++
+    "  line \"T51 other-face: \" (entails (assume (faceCof (.face 0 .d0 \"a\")) emptyCtx) (faceCof (.face 0 .d1 \"b\")));" ++ "\n" ++
+    "  line \"T52 faces-overlap: \" (consistent emptyCtx (andCof (faceCof (.face 0 .d0 \"a\")) (faceCof (.face 0 .d1 \"b\"))));" ++ "\n" ++
+    "  line \"T53 subst-path-0: \" (cofEq (substCof 0 .d0 pathBoundary) topCof);" ++ "\n" ++
+    "  line \"T54 subst-path-1: \" (cofEq (substCof 0 .d1 pathBoundary) topCof);" ++ "\n" ++
+    "  line \"T55 subst-path-free: \" (cofEq (substCof 1 .d0 pathBoundary) pathBoundary);" ++ "\n" ++
+    "  line \"T56 ext2-face: \" (entails (assume (andCof (eqD v0 .d0) (eqD v1 .d0)) emptyCtx) (extBoundary 2));" ++ "\n" ++
+    "  line \"T57 ext2-at-0: \" (cofEq (substCof 0 .d0 (extBoundary 2)) topCof);" ++ "\n" ++
+    "  line \"T58 ext0-bot: \" (cofEq (extBoundary 0) botCof);" ++ "\n" ++
+    "  line \"T59 ext1-path: \" (cofEq (extBoundary 1) pathBoundary);" ++ "\n" ++
+    "  line \"T60 subst-ctx: \" (dimEqCtx (substCtx 0 .d0 (assume (eqD v0 v1) emptyCtx)) v1 .d0);" ++ "\n" ++
+    "  line \"T61 boundary-cover: \" (entails (assume (eqD v0 .d0) emptyCtx) (extBoundary 2));" ++ "\n" ++
+    "  line \"T62 path-cover: \" (match pathExt \"a\" \"b\" with" ++ "\n" ++
+    "    | .some e => extFacesCover e" ++ "\n" ++
+    "    | .none => .false);" ++ "\n" ++
+    "  line \"T63 bad-cover: \" (match mkExt 1 (eqD v0 .d0) (.cons (.face 0 .d1 \"b\") .nil) with" ++ "\n" ++
+    "    | .some e => extFacesCover e" ++ "\n" ++
+    "    | .none => .false);" ++ "\n" ++
+    "  line \"T64 cof-equiv: \" (cofEquiv emptyCtx (eqD v0 .d0) (eqD v0 .d0));" ++ "\n" ++
+    "  line \"T65 cof-neq: \" (cofEquiv emptyCtx (orCof (eqD v0 .d0) (eqD v0 .d1)) topCof);" ++ "\n" ++
+    "  line \"T66 cof-eq-ctx: \" (cofEquiv (assume (eqD v0 .d0) emptyCtx) (orCof (eqD v0 .d0) (eqD v0 .d1)) topCof);" ++ "\n" ++
+    "  line \"T67 cof-bot: \" (cofEquiv emptyCtx botCof (eqD v0 .d0))"
+
+def cofProbesExpected : String :=
+  "T01 and-top: true\nT02 and-bot: true\nT03 or-bot: true\nT04 or-top: true\nT05 and-idem: true\nT06 or-idem: true\nT07 and-comm: true\nT08 or-comm: true\nT09 and-assoc: true\nT10 or-assoc: true\nT11 absorption: true\nT12 distributivity: true\nT13 subsumption: true\nT14 contradiction: true\nT15 disjoint: false\nT16 orientation: true\nT17 chain: true\nT18 transitivity: true\nT19 entails-face: true\nT20 not-entails: false\nT21 entails-top: true\nT22 entails-bot: false\nT23 no-entail: false\nT24 consistent: true\nT25 inconsistent: false\nT26 refutes: true\nT27 false-ctx-entails: true\nT28 false-ctx-inconsistent: false\nT29 dim-eq-ctx: true\nT30 dim-ne-ctx: false\nT31 split-count: 2\nT32 split-entails: true\nT33 split-no-entail: false\nT34 dead-branch: 1\nT35 subst: true\nT36 subst-bot: true\nT37 subst-boundary: true\nT38 subst-var: true\nT39 subst-other: true\nT40 subst-agrees: true\nT40b subst-agrees: true\nT41 within-1: true\nT42 within-0: false\nT43 within-2: true\nT44 within-2-neq: false\nT45 path-ext: true\nT46 bad-ext: true\nT47 path-at-0: true\nT48 path-at-1: true\nT49 path-at-neutral: false\nT50 face-active: true\nT51 other-face: false\nT52 faces-overlap: false\nT53 subst-path-0: true\nT54 subst-path-1: true\nT55 subst-path-free: true\nT56 ext2-face: true\nT57 ext2-at-0: true\nT58 ext0-bot: true\nT59 ext1-path: true\nT60 subst-ctx: true\nT61 boundary-cover: true\nT62 path-cover: true\nT63 bad-cover: false\nT64 cof-equiv: true\nT65 cof-neq: false\nT66 cof-eq-ctx: true\nT67 cof-bot: false\n"
+
 def selfHostGroup : Group where
   name := "selfhost"
   exercise := "Stages 12b–14q"
@@ -1684,7 +1786,16 @@ def selfHostGroup : Group where
           "private structure P where\n  x : Nat\n" ++
           "def useP (p : P) : Nat := p.x\n" ++
           "def main : IO Unit := do\n  IO.println (Nat.toString (secret + useS (S.mk 1) + useP (P.mk 1)))\n")
-          "42\n" }
+          "42\n" },
+    -- (cubical M1) `selfhost/Cof.wiz`: the shared interval/cofibration layer. The case
+    -- compiles the module with the Lean toolchain and again with the self-hosted
+    -- compiler and backend, and compares both programs' output.
+    { name := "the cofibration solver (cubical M1): DNF laws, entailment, substitution and Path boundaries", run := fun _ => do
+        let cof ← IO.FS.readFile "selfhost/Cof.wiz"
+        let body := "\n".intercalate ((cof.splitOn "\n").filter (!·.startsWith "import"))
+        let src := "import IO\n" ++ body ++ "\n" ++ cofProbes
+        ioRun src cofProbesExpected
+        selfhostCompileRun src cofProbesExpected }
   ]
 
 builtin_initialize registerGroup selfHostGroup
