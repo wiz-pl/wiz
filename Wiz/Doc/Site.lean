@@ -9,7 +9,8 @@ import Wiz.Parser.DocComment
 declaration with its kind, its signature (the infoview's tagged printer,
 `Term.prettyTagged`), its doc comment (Markdown), a link to its source, the instances of
 each class and for each type, cross-links on every constant of a signature, a search
-index (`search.js`) and an index page. See `wiz-notes/scroll.md` and
+index (`search.js`) and a grouped index page (the language, each library prefix and
+`Library`) with stable group anchors and breadcrumbs. See `wiz-notes/scroll.md` and
 `docs/stages/11-tooling.md`, 11s.
 
 Each page is complete HTML (readable without JS). It also carries its data as JSON: per
@@ -46,6 +47,39 @@ structure Options where
 
 /-- A page's file name. -/
 def pageOf (m : String) : String := s!"{m}.html"
+
+/-- The section of the index a module is listed under: the language's `Prelude` and `Std`
+alone, the first component of a dotted name (`Hdl`, `Scry`, …), and `Library` for the
+rest. -/
+def groupOf (m : String) : String :=
+  match m.splitOn "." with
+  | [one] => if one == "Prelude" || one == "Std" then one else "Library"
+  | g :: _ => g
+  | [] => "Library"
+
+/-- The index's group order: `Prelude`, `Std`, the libraries (by name), `Library`. -/
+def groupRank (g : String) : Nat × String :=
+  if g == "Prelude" then (0, "") else if g == "Std" then (1, "") else
+  if g == "Library" then (3, "") else (2, g)
+
+/-- A group's stable anchor on the index page. -/
+def groupAnchor (g : String) : String := s!"group-{g}"
+
+/-- The modules grouped for the index and the navigation, each group's modules sorted. -/
+def groupModules (ms : List String) : List (String × List String) :=
+  let groups := (ms.map groupOf).eraseDups.mergeSort (fun a b =>
+    let ra := groupRank a
+    let rb := groupRank b
+    ra.1 < rb.1 || (ra.1 == rb.1 && ra.2 ≤ rb.2))
+  groups.map fun g => (g, (ms.filter (groupOf · == g)).mergeSort (· ≤ ·))
+
+/-- The first paragraph of a module doc that is not a heading, as plain text. -/
+def summaryText (doc : Option String) : String :=
+  match doc with
+  | some d =>
+    let p := ((d.splitOn "\n\n").find? fun (p : String) => !p.startsWith "#").getD ""
+    (p.replace "\n" " ").take 160 |>.toString
+  | none => ""
 
 /-- What the elaborator makes for its own use, and private names: not documented. -/
 def hidden (n : Name) (d? : Option DeclDoc) : Bool :=
@@ -239,20 +273,32 @@ def head (o : Options) (title : String) (wasm : Bool) : String :=
   "<script src=\"search.js\" defer></script><script src=\"scroll-search.js\" defer></script>" ++
   (if wasm then "<script type=\"module\" src=\"scroll.js\"></script>" else "") ++
   s!"</head><body>\n<header><a class=\"site\" href=\"index.html\">{htmlEscape o.title}</a>" ++
-  "<input id=\"search\" type=\"search\" placeholder=\"Search declarations\" autocomplete=\"off\" aria-label=\"Search\">" ++
+  "<input id=\"search\" type=\"search\" placeholder=\"Search modules and declarations\" autocomplete=\"off\" aria-label=\"Search modules and declarations\">" ++
   "<div id=\"results\" hidden></div></header>\n"
 
 def nav (mods : List String) (current : String) : String :=
-  let items := mods.map fun m =>
-    let cls := if m == current then " class=\"current\"" else ""
-    s!"<li><a{cls} href=\"{htmlEscape (pageOf m)}\">{htmlEscape m}</a></li>"
-  s!"<nav><div class=\"nav-title\">Modules</div><ul>{String.join items}</ul></nav>\n"
+  let groups := groupModules mods
+  let body := groups.map fun (g, ms) =>
+    let items := ms.map fun m =>
+      let cls := if m == current then " class=\"current\"" else ""
+      s!"<li><a{cls} href=\"{htmlEscape (pageOf m)}\">{htmlEscape m}</a></li>"
+    s!"<div class=\"nav-group\"><a href=\"index.html#{htmlEscape (groupAnchor g)}\">{htmlEscape g}</a></div>" ++
+    s!"<ul>{String.join items}</ul>"
+  s!"<nav><div class=\"nav-title\">Modules</div>{String.join body}</nav>\n"
+
+/-- Where a module sits: the site, its group on the index, then the module. -/
+def crumbs (o : Options) (m : String) : String :=
+  let g := groupOf m
+  s!"<div class=\"crumbs\" role=\"navigation\" aria-label=\"Breadcrumb\">" ++
+  s!"<a href=\"index.html\">{htmlEscape o.title}</a><span class=\"sep\">/</span>" ++
+  s!"<a href=\"index.html#{htmlEscape (groupAnchor g)}\">{htmlEscape g}</a><span class=\"sep\">/</span>" ++
+  s!"<span aria-current=\"page\">{htmlEscape m}</span></div>\n"
 
 def modulePage (c : Ctx) (o : Options) (m : Module) (es : Array Entry) (wasm : Bool) : String :=
   let data := Json.mkObj [("module", m.name), ("decls", Json.arr (es.flatMap fun e => #[e.data] ++ e.children.map (·.data)))]
   let toc := es.toList.map fun e => s!"<li><a href=\"#{htmlEscape e.name}\">{htmlEscape e.name}</a></li>"
   head o s!"{m.name} — {o.title}" wasm ++ nav c.modules m.name ++
-  s!"<main><h1>{htmlEscape m.name}</h1>" ++ s!"<div class=\"module-src\">{sourceLink o m 1}</div>" ++
+  s!"<main>{crumbs o m.name}<h1>{htmlEscape m.name}</h1>" ++ s!"<div class=\"module-src\">{sourceLink o m 1}</div>" ++
   docHtml c (moduleDocOf m.src) ++
   (if es.isEmpty then "<p class=\"nothing\">No public declarations.</p>" else "") ++
   String.join (es.toList.map (entryHtml c o m)) ++
@@ -260,18 +306,44 @@ def modulePage (c : Ctx) (o : Options) (m : Module) (es : Array Entry) (wasm : B
   "<div id=\"info\" hidden></div>" ++
   s!"<script type=\"application/json\" id=\"wiz-doc-data\">{scriptJson data}</script>\n</body></html>\n"
 
-def indexPage (o : Options) (mods : List (String × Option String)) (wasm : Bool) : String :=
-  let items := mods.map fun (m, doc) =>
-    -- (the first paragraph that is not a heading)
-    let summary := match doc with
-      | some d => inline (fun _ => none) ((((d.splitOn "\n\n").find? fun (p : String) => !p.startsWith "#").getD "").replace "\n" " ")
-      | none => ""
-    s!"<li><a href=\"{htmlEscape (pageOf m)}\">{htmlEscape m}</a><div class=\"summary\">{summary}</div></li>"
-  head o o.title wasm ++ nav (mods.map (·.1)) "" ++
-  s!"<main><h1>{htmlEscape o.title}</h1><ul class=\"modules\">{String.join items}</ul></main>\n</body></html>\n"
+def indexPage (o : Options) (mods : List (String × Option String × Nat)) (wasm : Bool) : String :=
+  let names := mods.map (·.1)
+  let groups := groupModules names
+  let totalDecls := mods.foldl (fun acc (_, _, n) => acc + n) 0
+  let summaryOf (m : String) : String :=
+    match mods.find? (·.1 == m) with
+    | some (_, some d, _) =>
+      -- (the first paragraph that is not a heading)
+      inline (fun _ => none) ((((d.splitOn "\n\n").find? fun (p : String) => !p.startsWith "#").getD "").replace "\n" " ")
+    | _ => ""
+  let countOf (m : String) : Nat :=
+    match mods.find? (·.1 == m) with
+    | some (_, _, n) => n
+    | none => 0
+  let toc := groups.map fun (g, ms) =>
+    s!"<a href=\"#{htmlEscape (groupAnchor g)}\">{htmlEscape g} <span class=\"count\">{ms.length}</span></a>"
+  let sections := groups.map fun (g, ms) =>
+    let items := ms.map fun m =>
+      let n := countOf m
+      let plural := if n == 1 then "" else "s"
+      s!"<li><a class=\"module\" href=\"{htmlEscape (pageOf m)}\">{htmlEscape m}</a>" ++
+      s!"<span class=\"decl-count\">{n} declaration{plural}</span>" ++
+      s!"<div class=\"summary\">{summaryOf m}</div></li>"
+    s!"<section class=\"group\" id=\"{htmlEscape (groupAnchor g)}\">" ++
+    s!"<h2><a href=\"#{htmlEscape (groupAnchor g)}\">{htmlEscape g}</a>" ++
+    s!" <span class=\"count\">{ms.length} module{(if ms.length == 1 then "" else "s")}</span></h2>" ++
+    s!"<ul class=\"modules\">{String.join items}</ul></section>"
+  let plural := if names.length == 1 then "" else "s"
+  head o o.title wasm ++ nav names "" ++
+  s!"<main class=\"index\"><h1>{htmlEscape o.title}</h1>" ++
+  s!"<p class=\"lede\">{names.length} module{plural}, {totalDecls} declarations. " ++
+  s!"Search by name from the box above, or browse a group.</p>" ++
+  s!"<div class=\"group-nav\">{String.join toc}</div>" ++
+  String.join sections ++ "</main>\n</body></html>\n"
 
-/-- The search index: every documented declaration (name, module, kind, the first line
-of its doc), as a script (so that it loads from `file://` too). -/
+/-- The search index: every documented module and declaration (name, module, kind, the
+first line of its doc), as a script (so that it loads from `file://` too). A module row's
+`kind` is `module`, and `scroll-search.js` links it to its page rather than an anchor. -/
 def searchJs (rows : Array Json) : String :=
   s!"window.wizSearchIndex = {(Json.arr rows).compress};\n"
 
@@ -297,7 +369,7 @@ def run (elabMod : String → IO St) (mods : Array Module) (o : Options) : IO Na
     for f in ["scroll.css", "scroll.js", "tagged.js", "scroll-search.js"] do
       discard <| copyIf (a / f) (o.out / f)
   let mut rows : Array Json := #[]
-  let mut summaries : Array (String × Option String) := #[]
+  let mut summaries : Array (String × Option String × Nat) := #[]
   for m in mods do
     let st ← elabMod m.name
     for msg in st.messages do
@@ -307,7 +379,11 @@ def run (elabMod : String → IO St) (mods : Array Module) (o : Options) : IO Na
     IO.FS.writeFile (o.out / pageOf m.name) (modulePage c o m es wasm)
     IO.FS.writeFile (o.out / s!"{m.name}.json")
       (Json.mkObj [("module", m.name), ("decls", Json.arr (es.flatMap fun e => #[e.data] ++ e.children.map (·.data)))]).compress
-    summaries := summaries.push (m.name, moduleDocOf m.src)
+    let doc := moduleDocOf m.src
+    let decls := es.foldl (fun acc e => acc + 1 + e.children.size) 0
+    summaries := summaries.push (m.name, doc, decls)
+    -- (the module itself is searchable: its page, its summary)
+    rows := rows.push (Json.mkObj [("n", m.name), ("m", m.name), ("k", "module"), ("d", summaryText doc)])
     for e in es do
       for x in #[e] ++ e.children do
         let first := match x.doc with

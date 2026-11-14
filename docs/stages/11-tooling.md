@@ -370,16 +370,23 @@ package's `lib` targets with its module roots (dependencies included), into
   Doc comments are Markdown (`Wiz/Doc/Markdown.lean`: paragraphs, headings, fences,
   lists, quotes, `code`, emphasis, links; HTML is escaped), and a name in backticks links
   to its declaration.
-* **The site** (`Wiz/Doc/Site.lean`): `index.html` (the modules and their summaries),
-  one page per module (`A.B.html`): every public declaration (private and auxiliary ones
-  are left out) with its kind, its signature (the infoview's tagged printer,
+* **The site** (`Wiz/Doc/Site.lean`): `index.html` is the landing page: the modules
+  grouped by what they are (the language's `Prelude` and `Std`, then each library's
+  prefix — `Hdl`, `Scry`, … — and `Library` for the single-segment modules), with each
+  group's module and declaration counts, the modules' summaries and a group table of
+  contents. Groups have stable anchors (`#group-Hdl`), and every module appears under
+  its group in the navigation too. One page per module (`A.B.html`): a breadcrumb (site,
+  group, module), then every public declaration (private and auxiliary ones are left
+  out) with its kind, its signature (the infoview's tagged printer,
   `Term.prettyTagged`, so notation-aware printing applies when it does), its doc, a
   source link, its constructors or fields, and the instances of a class or for a type;
   every constant in a signature links to where it is documented (the definition sites
-  the language server's go to definition uses, `declSites`). `search.js` is the
-  client-side index of every declaration (name, module, kind, summary), searched by
-  `scroll-search.js` (`/` focuses the box). The pages are complete HTML: they read
-  without JS, and the search works from `file://`.
+  the language server's go to definition uses, `declSites`). A declaration's anchor is
+  its name (`#Hdl.Core.reg`), so links survive rebuilds (the `sig-N` ids are only for the
+  Wasm's updates). `search.js` is the client-side index of every module and declaration
+  (name, module, kind, summary), searched by `scroll-search.js` (`/` focuses the box); a
+  module hit opens its page, a declaration hit its anchor. The pages are complete HTML:
+  they read without JS, and the search works from `file://`.
 * **Interactive signatures, with the infoview's Wasm.** Each page carries its data as
   JSON (`<script id="wiz-doc-data">`, and `A.B.json`): per declaration the signature in
   the infoview protocol's tagged-text format and the table of its subterms, each a
@@ -405,10 +412,12 @@ package's `lib` targets with its module roots (dependencies included), into
 * **Tests**: the group `doc` (`Tests/Doc.lean`): doc comments stored and replayed by the
   cache; Markdown; `wiz doc` on a small package with doc comments (kinds, docs, source
   links, instances, the index); every cross-link resolves; every declaration is in the
-  search index; the pages without JS; `grail doc`; and the page model of the Wasm module
-  run natively on a page's JSON (hover, click, keys); and that the core library is
-  documented (every public declaration of `Prelude`, `Std`, `Vec` and `Word` has a doc
-  comment, and each has a module doc).
+  search index; the index's grouping and the search rows against golden files
+  (`Tests/data/doc-index.golden`, `Tests/data/doc-search.golden`), including stable
+  group anchors and breadcrumbs; the pages without JS; `grail doc`; and the page model
+  of the Wasm module run natively on a page's JSON (hover, click, keys); and that the
+  core library is documented (every public declaration of `Prelude`, `Std`, `Vec` and
+  `Word` has a doc comment, and each has a module doc).
 * **The library's documentation.** Every module in `lib/` has a `/-! … -/` module doc
   (what it is for, its main definitions, an example) and a `/-- … -/` doc comment on each
   public declaration; `--` comments are left for implementation notes. `wiz doc --lib -o

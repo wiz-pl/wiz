@@ -27,9 +27,12 @@
       if (s >= 0) hits.push([s, e]);
     }
     hits.sort((a, b) => a[0] - b[0] || a[1].n.length - b[1].n.length || a[1].n.localeCompare(b[1].n));
-    out.innerHTML = hits.slice(0, 50).map(([, e]) =>
-      `<a class="hit" href="${esc(e.m)}.html#${esc(e.n)}"><span class="kind">${esc(e.k)}</span> <code>${esc(e.n)}</code>` +
-      ` <span class="mod">${esc(e.m)}</span><div class="summary">${esc(e.d)}</div></a>`).join("") ||
+    out.innerHTML = hits.slice(0, 50).map(([, e]) => {
+      // a module is its own page; a declaration is an anchor on it
+      const href = e.k === "module" ? `${esc(e.m)}.html` : `${esc(e.m)}.html#${esc(e.n)}`;
+      return `<a class="hit" href="${href}"><span class="kind">${esc(e.k)}</span> <code>${esc(e.n)}</code>` +
+        ` <span class="mod">${esc(e.m)}</span><div class="summary">${esc(e.d)}</div></a>`;
+    }).join("") ||
       `<div class="nothing">No declarations match.</div>`;
     out.hidden = false;
   }

@@ -147,6 +147,30 @@ def undocumented (html : String) : Array String := Id.run do
     unless has own "<div class=\"doc\">" do out := out.push n
   out
 
+/-- The index's groups, their modules and their declaration counts, one per line
+(`group|module|count`): the landing page's golden shape. -/
+def indexShape (html : String) : String := Id.run do
+  let mut out := #[]
+  for part in (html.splitOn "<section class=\"group\" id=\"").drop 1 do
+    let id := (part.splitOn "\"").headD ""
+    let g := ((id.drop "group-".length).toString)
+    for item in (part.splitOn "<li><a class=\"module\" href=\"").drop 1 do
+      let m := ((item.splitOn "\">").drop 1).headD "" |>.splitOn "</a>" |>.headD "?"
+      let n := ((item.splitOn "<span class=\"decl-count\">").drop 1).headD "" |>.splitOn " " |>.headD "?"
+      out := out.push s!"{g}|{m}|{n}"
+  String.intercalate "\n" out.toList ++ "\n"
+
+/-- The search index's rows, one per line (`name|module|kind`): its golden shape. -/
+def searchShape? (js : String) : Option String := do
+  let some json := (js.splitOn "window.wizSearchIndex = ")[1]? | none
+  let .ok (.arr rows) := Lean.Json.parse ((json.trimAscii.dropEnd 1).toString) | none
+  let lines ← rows.mapM fun r => do
+    let n ← (r.getObjValAs? String "n").toOption
+    let m ← (r.getObjValAs? String "m").toOption
+    let k ← (r.getObjValAs? String "k").toOption
+    pure s!"{n}|{m}|{k}"
+  pure (String.intercalate "\n" lines.toList ++ "\n")
+
 def libDocCase : Case :=
   { name := "the core library is documented: a module doc and a doc comment on every public declaration (Prelude, Std, Vec, Word)", run := fun _ => do
       let dir ← IO.FS.createTempDir
@@ -239,6 +263,26 @@ def docGroup : Group where
           for part in (html.splitOn "<div class=\"decl\" id=\"").drop 1 do
             let n := (part.splitOn "\"").headD ""
             check (names.contains n) s!"{n} ({page}) is not in the index" },
+    { name := "wiz doc: the index groups modules (Prelude, Std, Hdl, …), with stable anchors and breadcrumbs", run := fun _ => do
+        checkEq "Prelude" (Doc.groupOf "Prelude")
+        checkEq "Std" (Doc.groupOf "Std")
+        checkEq "Hdl" (Doc.groupOf "Hdl.Core")
+        checkEq "Scry" (Doc.groupOf "Scry.Examples.Basic")
+        checkEq "Library" (Doc.groupOf "Nat")
+        let dir ← mkTree pkgFiles
+        let out ← makeSite dir
+        let index ← IO.FS.readFile (out / "index.html")
+        checkEq (← IO.FS.readFile "Tests/data/doc-index.golden") (indexShape index)
+        checkHas index "id=\"group-Shapes\""
+        checkHas index "<a href=\"#group-Shapes\">Shapes <span class=\"count\">2</span></a>"
+        let basic ← IO.FS.readFile (out / "Shapes.Basic.html")
+        checkHas basic "class=\"crumbs\""
+        checkHas basic "<a href=\"index.html#group-Shapes\">Shapes</a>"
+        checkHas basic "aria-current=\"page\">Shapes.Basic</span>"
+        let js ← IO.FS.readFile (out / "search.js")
+        let some shape := searchShape? js | throw (IO.userError "search.js is not the index")
+        checkEq (← IO.FS.readFile "Tests/data/doc-search.golden") shape
+        checkHas js "\"k\":\"module\",\"m\":\"Shapes.Basic\",\"n\":\"Shapes.Basic\"" },
     { name := "wiz doc: the pages are complete without JS (no module script without the Wasm); the data is there for it", run := fun _ => do
         let dir ← mkTree pkgFiles
         let out ← makeSite dir
