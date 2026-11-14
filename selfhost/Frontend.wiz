@@ -77,9 +77,6 @@ def dfltKinds : Nat → List BKind
 def isImplK : BKind → Bool
   | .impl => .true
   | _ => .false
-def isInstK : BKind → Bool
-  | .inst => .true
-  | _ => .false
 def binderNames (b : Syntax) : List String := match b with
   | .ident n => .cons n .nil
   | _ => match strEq (kindOf b) "term.hole" with
@@ -2475,9 +2472,6 @@ def descFn : Tm → Tm
 inductive Goal where
   | mk (cls : String) (args : List Val)
   | other
-def Goal.args : Goal → List Val
-  | .mk _ as => as
-  | .other => .nil
 -- (a solved metavariable at the head of a type, without unfolding a constant)
 partial def forceHead (es : ES) (v : Val) : Val := match v with
   | .vne (.haxiom n _) sp => match metaId n with
