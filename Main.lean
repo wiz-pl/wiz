@@ -24,6 +24,10 @@ def usage : String := "usage:
   wiz fmt [FILE|-] [--check] [--width N] [--explain]
                                    reprint a file from its syntax tree (stdin/stdout;
                                    --check: change nothing, exit 1 when it differs)
+  wiz cache prune [--days N] [--dry-run]
+                                    remove keyed cache files (.wizc/.wizm/.wizr) older than
+                                    N days (default 30) from the write cache; a pruned file is
+                                    just a miss, and --cache-ro layers are never touched
   wiz lsp                          a language server on stdin/stdout
   wiz lsp --infoview SOCK          … and for infoviews on the Unix socket SOCK
   wiz lsp --ws [ADDR:]PORT         … and on a WebSocket (127.0.0.1 unless ADDR is given;
@@ -33,7 +37,10 @@ def usage : String := "usage:
 options: --cache DIR (the elaboration cache, default ~/.cache/wiz; shared, since it is
 content-addressed), --cache-ro DIR (repeatable: a read-only cache, searched in order
 after the write cache and never written, as in a Nix package's share/wiz/cache),
---no-cache (both), -I DIR (another module root, after lib/)
+--no-cache (both), -I DIR (another module root, after lib/),
+--cache-prune DAYS (before the run: from the write cache only, remove keyed
+  .wizc/.wizm/.wizr files older than DAYS days; a pruned entry is just a miss, and
+  --cache-ro layers are never pruned)
   --region-cache (experimental: also serve cached modules from mmap'ed .wizr regions,
   read from the same caches and written to the write cache), --region-stats (print what
   the regions served, with --region-cache)
@@ -158,6 +165,23 @@ initialize regionStatsOpt : IO.Ref Bool ← IO.mkRef false
 
 /-- `--region-stats`' counters (per process). -/
 initialize regionStats : IO.Ref Cache.RegionCounts ← IO.mkRef {}
+
+/-- `--cache-prune DAYS`: remove keyed files older than DAYS days from the write cache
+before the run (never from `--cache-ro`; a pruned file is just a miss). -/
+initialize cachePruneOpt : IO.Ref (Option Nat) ← IO.mkRef none
+
+/-- Take `--cache-prune DAYS` out of the arguments (at least one day: a shorter age would
+delete the files this run is about to use). -/
+def takeCachePrune : List String → Except String (Option Nat × List String)
+  | "--cache-prune" :: n :: rest => do
+    let some k := n.toNat? | throw s!"--cache-prune needs a number of days, not {n}"
+    if k == 0 then throw "--cache-prune needs at least one day"
+    let (_, rest) ← takeCachePrune rest
+    return (some k, rest)
+  | a :: rest => do
+    let (k, rest) ← takeCachePrune rest
+    return (k, a :: rest)
+  | [] => return (none, [])
 
 /-- (15k) `--split N`: compile a large program as `N` C translation units in parallel
 (0: automatically, for a large program; 1: one unit). -/
@@ -365,6 +389,25 @@ def fmtCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   else
     IO.print r.text
     pure (if r.refused.isEmpty then 0 else 1)
+/-- `wiz cache prune [--days N] [--dry-run]`: remove keyed files older than N days (default
+30) from the write cache. Only the write cache: read-only layers are never touched. -/
+def cachePruneCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
+  let rec parse (days : Nat) (dry : Bool) : List String → Except String (Nat × Bool)
+    | [] => pure (days, dry)
+    | "--days" :: n :: rest => do
+      let some k := n.toNat? | throw s!"--days needs a number of days, not {n}"
+      if k == 0 then throw "--days must be at least 1"
+      parse k dry rest
+    | "--dry-run" :: rest => parse days true rest
+    | a :: _ => throw s!"cache prune: unknown argument {a}"
+  let (days, dry) ← match parse 30 false args with
+    | .ok r => pure r
+    | .error e => do IO.eprintln e; return 2
+  unless tc.readCaches.isEmpty do
+    IO.eprintln "cache prune: --cache-ro layers are read-only and never pruned"
+  match tc.cacheDir with
+  | none => do IO.eprintln "cache prune: no write cache (--cache DIR)"; pure 1
+  | some dir => do IO.println (← Cache.pruneSummary dir days dry); pure 0
 
 def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
   let input ← IO.FS.readFile path
@@ -424,14 +467,13 @@ def main (args : List String) : IO UInt32 := do
   -- (26f) a release toolchain's own C compiler, GMP and GC are the defaults
   let defaults ← ({ cacheDir := some (System.FilePath.mk home / ".cache" / "wiz") } : Toolchain).withBundled
   let (tc, args) := defaults.parseFlags args
+  regionCacheOpt.set tc.regionCache
   if args.contains "--strict-privacy" then strictPrivacyOpt.set true
   let args := args.filter (· != "--strict-privacy")
   if args.contains "--pp-all" then ppAllOpt.set true
   let args := args.filter (· != "--pp-all")
   if args.contains "--unbox-structs" then unboxOpt.set true
   let args := args.filter (· != "--unbox-structs")
-  regionCacheOpt.set (args.contains "--region-cache")
-  let args := args.filter (· != "--region-cache")
   regionStatsOpt.set (args.contains "--region-stats")
   let args := args.filter (· != "--region-stats")
   lazyProofsOpt.set (!args.contains "--eager-proofs")
@@ -451,12 +493,22 @@ def main (args : List String) : IO UInt32 := do
   let args ← match kernelOpt args with
     | .ok (r, p, a) => do kernelOpts.set (r, p); pure a
     | .error e => do IO.eprintln e; return 1
+  let args ← match takeCachePrune args with
+    | .ok (k, a) => do
+      if let some k := k then cachePruneOpt.set (some k)
+      pure a
+    | .error e => do IO.eprintln e; return 1
   -- a `panic!` (a kernel-internal failure) ends a batch command with status 1 instead of
   -- going on with a default value; the language server keeps running
   unless args.head? == some "lsp" do exitOnPanic
+  -- (`--cache-prune`: before the run, so this process has not mapped a region from the
+  -- files it deletes; a pruned entry is just a miss)
+  if let some days ← cachePruneOpt.get then
+    if let some dir := tc.cacheDir then IO.eprintln (← Cache.pruneSummary dir days)
   let split ← splitOpt.get
   match args with
   | ["parse", path] => parseCmd path
+  | "cache" :: "prune" :: rest => cachePruneCmd tc rest
   | ["check", path] => checkCmd tc path
   | ["build", path, "-o", out] => buildCmd tc path out false (split := split)
   | ["build", path, "-o", out, "--llvm"] => buildCmd tc path out true (split := split)

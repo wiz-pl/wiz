@@ -187,12 +187,10 @@ Intern	InternTable.toListNative	axiom InternTable.toListNative
 Intern	InternTable.toListNative	builtin extern:wiz_itab_to_list:w:w:pure:: := InternTable.toListNative
 Json	Json.array	partial
 Json	Json.digits	partial
-Json	Json.divMod	partial
 Json	Json.emit	partial
 Json	Json.emitField	partial
 Json	Json.emitFields	partial
 Json	Json.emitRest	partial
-Json	Json.natChars	partial
 Json	Json.object	partial
 Json	Json.strBody	partial
 Json	Json.strEscape	partial

@@ -45,6 +45,7 @@
     "=grail-jobs",
     "=hdl",
     "infoview",
+    "=json",
     "language",
     "lsp",
     "macros",
