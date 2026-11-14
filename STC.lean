@@ -11,9 +11,12 @@ import STC.F0.Sorting
 import STC.F0.Typing
 import STC.F0.TopSort
 import STC.F0.Sanity
+import STC.F1.Cof
+import STC.F1.Phase
+import STC.F1.Sanity
 
 /-!
-# STC: the F0 specification of the STC track
+# STC: the F0 specification and the F1 phase layer of the STC track
 
 M0.1 of the design note `/workspace/wiz-notes/stc-m0-spec.md`:
 
@@ -41,6 +44,32 @@ M0.1 of the design note `/workspace/wiz-notes/stc-m0-spec.md`:
   sorting lemma's supporting statements (`TyUnique`, `ConvInj*`);
 * `F0/Sanity`: small derivations that witness that the rules are inhabited.
 
-Not a default Lake target; nothing imports it yet. The implementation note is
+## F1 (the phase layer, first slice)
+
+`F1/` is the first piece of M4b beyond F0 — the cofibration/phase layer of
+`/workspace/wiz-notes/stc-plan.md` M4b and the STC requirements R1–R3 in
+`/workspace/wiz-notes/shared-cofib-layer.md`:
+
+* `F1/Cof`: cofibrations over abstract phase atoms (`⊥`, `⊤`, atom, `∧`, `∨`), their
+  valuation semantics, a **decidable entailment** `Cof.le` with soundness and
+  completeness (`Cof.le_iff`), the distributive-lattice laws, and the independence
+  sanity cases (distinct atoms are incomparable; no negation, so excluded middle
+  is not even formable);
+* `F1/Phase`: `[φ]` as an opaque proposition (`ph φ`), the phase rule set (`form`,
+  `intro` from `φ ⊢ ψ`, and the computations `[⊥] ⟶ Empty`, `[⊤] ⟶ Unit`,
+  `[φ ∧ ψ] ⟶ [φ] × [ψ]`), **renaming and substitution for `F1 := F0Base ∪ Phase`**
+  (`F1_rename`, `F1_weakening`, `F1_subst`, `F1_subst_eq`, `F1_subst_red`), the derived
+  rules (`⊤` intro, `⊥` elim, `∧` intro/elim, `∨` intro), and the open modality
+  `○_φ A = (z : [φ]) → A` with `circ_form`, `circ_intro`, `circ_elim` and the
+  restriction lemma **`circ_restrict`** (`φ ⊢ ψ ⟹ ○_ψ A ⟹ ○_φ A`);
+* `F1/Sanity`: compile-time witnesses and `#eval` checks of the decision procedure.
+
+`F1` is `F0Base ∪ Phase`: it does not include F0's two `Struct` rules, whose law closure
+remains the open `StructRenClosed`/`StructSubClosed` of `F0/Typing.lean`. The F1 *term*
+formers `Ext`, strict `Glue` and `●` are not in this slice. The implementation note is
+`/workspace/wiz-notes/agents/stc-f1.md`; the design paragraph is in
+`/workspace/wiz-notes/stc-m0-spec.md` §3 (2026-11-14, agent `stc-f1`).
+
+Not a default Lake target; nothing imports it yet. The F0 implementation note is
 `/workspace/wiz-notes/stc-m0-impl.md`.
 -/
