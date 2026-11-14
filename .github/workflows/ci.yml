@@ -209,7 +209,9 @@ jobs:
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
           cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          lean: false
+          # the tower group's "from source" case runs Lake, so that one shard needs the
+          # elan toolchain (the others run only the store's binaries)
+          lean: ${{ contains(toJSON(matrix.shard), 'tower') }}
       # The build job's store paths, substituted from Cachix (same os/arch). A fork pull
       # request has no push token, so its build job could not publish them and this
       # builds them again here.
