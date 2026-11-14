@@ -646,7 +646,49 @@ around the port.
 Examples (run by the test group `rune`): `examples/rune-uart.wiz`,
 `examples/rune-spi.wiz`, `examples/rune-ddr.wiz` (value simulation = `Netlist.simFast`,
 the loopback bytes, the SPI shift order and edges, the DDR handshake and masked write).
-What remains is in `/workspace/wiz-notes/rune.md`: SPI modes 1 … 3 and multiple slaves,
+
+### Synthesis and Icarus Verilog (`scripts/rune-synth.sh`)
+
+The value simulation is the reference; `scripts/rune-synth.sh` takes the same designs
+past it. `examples/rune-synth.wiz` prints each design's Verilog (`Verilog.emit`), a
+self-checking bench (`Testbench.verilog`) and its vector file (`Circuit.vectors`). The
+script writes them out, compiles every module with `iverilog -g2005`, replays every
+bench (which must print `PASS <name>: N cycles`), and synthesises the logic with yosys
+`synth_ice40 -top <name>`. Run it in the tools' environment:
+
+```
+nix shell nixpkgs#yosys nixpkgs#iverilog nixpkgs#gcc -c scripts/rune-synth.sh
+```
+
+The DDR model's 64K × 128 memory (8 Mbit) is simulation-only: it has no place on an
+iCE40 (4 kbit EBRs), and mapping its zero fill would create eight million flip-flops.
+The script therefore drops the memory initialisation and reports `proc; memory -nomap;
+opt` for `Ddr.modelC` instead: one `$mem_v2` cell (8,388,608 bits) plus the
+handshake/mask logic. This is the one non-synthesizable construct in the slice: a board
+design substitutes `Ddr3.Ctrl`, as the module header says. The test group `rune` runs
+the same flow and skips cleanly when yosys/iverilog are absent (the `=hdl` pattern).
+
+With yosys 0.70 and Icarus Verilog 13.0 (Nixpkgs), there are no warnings or errors:
+
+| design | cells | LUT4 | DFF | CARRY |
+|---|---:|---:|---:|---:|
+| `uart_baud` (`n = 8`) | 52 | 22 | 16 | 14 |
+| `uart_tx` (`n = 8`) | 84 | 39 | 29 | 16 |
+| `uart_rx` (`n = 8`) | 84 | 38 | 30 | 16 |
+| `uart_loopback` (`n = 8`) | 166 | 75 | 59 | 32 |
+| `spi_master` (`div = 3`) | 105 | 49 | 40 | 16 |
+| `spi_loop` (`div = 3`) | 105 | 49 | 40 | 16 |
+| `ddr_model` (pre-map) | 27 | — | 2 | — |
+
+`ddr_model`'s cells are one `$mem_v2`, 19 `$mux`, 3 `$and`, 2 `$not`, one `$dff` and
+one `$dffe`; the memory is the documented model, not a mapped block RAM. The UART and
+SPI logic is fully synthesizable (only LUTs, carry chains and DFFs). Icarus compiles all
+seven modules and the test benches pass for `uart_baud`, `uart_tx`, `uart_rx`,
+`uart_loopback`, `spi_master`, `spi_loop` and `ddr_model` (32, 82, 88, 384, 112, 112 and
+17 cycles), so the Verilog the emitter prints agrees with the value simulation cycle by
+cycle.
+
+What remains is in `wiz-notes/rune.md`: SPI modes 1 … 3 and multiple slaves,
 the real DDR controller's wrapper and timing, and clock-domain crossing for the ports.
 
 ## Logic, heap predicates and Hoare triples

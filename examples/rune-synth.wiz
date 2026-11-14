@@ -1,0 +1,137 @@
+-- The Rune synthesis/simulation harness. `scripts/rune-synth.sh` runs this file with
+-- `wiz run`; the `rune` test group runs `main` through the front end. It prints each
+-- artifact between `//@@file NAME` and `//@@end NAME` lines: the Verilog of the design,
+-- its self-checking test bench, and the vector file the bench replays. See
+-- docs/libraries.md (Rune) for the flow.
+import Hdl.Core
+import Hdl.Uart
+import Hdl.Spi
+import Hdl.Ddr
+import IO
+
+def Bit : HwTy := HwTy.bits 1
+
+/-- Print one artifact (its text already ends with a newline, as the emitters' do). -/
+def block (name text : String) : IO Unit :=
+  IO.print ("//@@file " <+> name <+> "\n" <+> text <+> "//@@end " <+> name <+> "\n")
+
+/-- Emit a circuit and, when `xs` is given, a self-checking test bench and its vectors. -/
+def emit {ω i o : HwTy} (name : String) (c : Circuit i o) (xs : List (HwTy.El i)) : IO Unit := do
+  let n := Circuit.netlist name c;
+  block (name <+> ".v") (Verilog.emit n);
+  block (name <+> ".tb.v") (Testbench.verilog n (name <+> ".vec") (List.length xs));
+  block (name <+> ".vec") (Hdl.concat (Circuit.vectors n c xs))
+
+------------------------------------------------------------------------------------
+-- UART: a baud generator, the transmitter, the receiver, and the loopback.
+
+def baudIns : List (HwTy.El Uart.Bit) :=
+  Hdl.map (fun (_ : Nat) => BitVec.ofNat 1 1) (Hdl.upto 32 0)
+
+def txIn (start data : Nat) : HwTy.El Uart.TxIn.code :=
+  Bundle.toEl Uart.TxIn.bundle
+    (Uart.TxIn.mk (BitVec.ofNat 1 start) (BitVec.ofNat 8 data))
+
+def txSeq (spacing : Nat) (datas : List Nat) : List (HwTy.El Uart.TxIn.code) :=
+  Hdl.map (fun (k : Nat) =>
+    match Nat.beq (Nat.mod k spacing) 0 with
+    | .true => txIn 1 (Hdl.nthD 0 datas (Nat.div k spacing))
+    | .false => txIn 0 0)
+    (Hdl.upto (Nat.mul (List.length datas) spacing) 0)
+
+def txOne : List (HwTy.El Uart.TxIn.code) :=
+  Hdl.map (fun (k : Nat) =>
+    match Nat.beq k 0 with
+    | .true => txIn 1 165
+    | .false => txIn 0 0)
+    (Hdl.upto 82 0)
+
+/-- One bit of a byte, least significant first (the UART's order). -/
+def bitOf (d k : Nat) : Nat := Nat.mod (Nat.shiftRight d k) 2
+
+/-- An 8N1 line for byte `d`: four idle cycles (to fill the synchroniser), the start
+bit, the eight data bits (LSB first), the stop bit and four idle cycles, `n` clocks
+per bit. -/
+def rxLine (n d : Nat) (k : Nat) : HwTy.El Uart.RxIn.code :=
+  let v := match Nat.lt k 4 with
+    | .true => 1
+    | .false => match Nat.lt k (4 + n) with
+      | .true => 0
+      | .false => match Nat.lt k (4 + n + 8 * n) with
+        | .true => bitOf d (Nat.div (k - 4 - n) n)
+        | .false => 1;
+  Bundle.toEl Uart.RxIn.bundle (Uart.RxIn.mk (BitVec.ofNat 1 v))
+
+def rxIns (n d : Nat) : List (HwTy.El Uart.RxIn.code) :=
+  Hdl.map (fun (k : Nat) => rxLine n d k) (Hdl.upto (4 + 10 * n + 4) 0)
+
+def uartDatas : List Nat := .cons 85 (.cons 165 (.cons 0 (.cons 255 .nil)))
+
+------------------------------------------------------------------------------------
+-- SPI: the master and its loopback (the byte comes back on `miso`).
+
+def spiCmd (start data : Nat) : HwTy.El Spi.Cmd.code :=
+  Bundle.toEl Spi.Cmd.bundle
+    (Spi.Cmd.mk (BitVec.ofNat 1 start) (BitVec.ofNat 8 data))
+
+def spiIn (miso start data : Nat) : HwTy.El Spi.In.code :=
+  Bundle.toEl Spi.In.bundle
+    (Spi.In.mk (BitVec.ofNat 1 miso) (BitVec.ofNat 1 start) (BitVec.ofNat 8 data))
+
+def spiIns (div : Nat) (datas : List Nat) : List (HwTy.El Spi.Cmd.code) :=
+  let spacing := 16 * div + 8;
+  Hdl.map (fun (k : Nat) =>
+    match Nat.beq (Nat.mod k spacing) 0 with
+    | .true => spiCmd 1 (Hdl.nthD 0 datas (Nat.div k spacing))
+    | .false => spiCmd 0 0)
+    (Hdl.upto (Nat.mul (List.length datas) spacing) 0)
+
+/-- The master's `miso` tied high (the loopback checks a real slave's data). -/
+def spiMasterIns (div : Nat) (datas : List Nat) : List (HwTy.El Spi.In.code) :=
+  let spacing := 16 * div + 8;
+  Hdl.map (fun (k : Nat) =>
+    match Nat.beq (Nat.mod k spacing) 0 with
+    | .true => spiIn 1 1 (Hdl.nthD 0 datas (Nat.div k spacing))
+    | .false => spiIn 1 0 0)
+    (Hdl.upto (Nat.mul (List.length datas) spacing) 0)
+
+------------------------------------------------------------------------------------
+-- DDR: the same request sequence as examples/rune-ddr.wiz (four writes, two masked
+-- writes to one address, five reads each followed by an idle cycle).
+
+def ddrReq (valid we addr wdata wmask : Nat) : HwTy.El Ddr.Req.code :=
+  Bundle.toEl Ddr.Req.bundle
+    (Ddr.Req.mk (BitVec.ofNat 1 valid) (BitVec.ofNat 1 we) (BitVec.ofNat 24 addr)
+      (BitVec.ofNat 128 wdata) (BitVec.ofNat 16 wmask))
+
+def word (k : Nat) : Nat := Nat.pow 2 128 - 1 - k
+
+def ddrIdle : HwTy.El Ddr.Req.code := ddrReq 0 0 0 0 0
+
+def ddrIns : List (HwTy.El Ddr.Req.code) :=
+  .cons (ddrReq 1 1 256 (word 1) 65535)
+  (.cons (ddrReq 1 1 257 (word 2) 65535)
+  (.cons (ddrReq 1 1 258 (word 3) 65535)
+  (.cons (ddrReq 1 1 259 (word 4) 65535)
+  (.cons (ddrReq 1 1 512 (word 0) 255)
+  (.cons (ddrReq 1 1 512 0 65280)
+  (.cons (ddrReq 1 0 256 0 0)
+  (.cons ddrIdle
+  (.cons (ddrReq 1 0 257 0 0)
+  (.cons ddrIdle
+  (.cons (ddrReq 1 0 258 0 0)
+  (.cons ddrIdle
+  (.cons (ddrReq 1 0 259 0 0)
+  (.cons ddrIdle
+  (.cons (ddrReq 1 0 512 0 0)
+  (.cons ddrIdle
+  (.cons ddrIdle .nil))))))))))))))))
+
+def main : IO Unit := do
+  emit "uart_baud" (Uart.baudC 8) baudIns;
+  emit "uart_tx" (Uart.txC 8) txOne;
+  emit "uart_rx" (Uart.rxC 8) (rxIns 8 165);
+  emit "uart_loopback" (Uart.loopbackC 8) (txSeq 96 uartDatas);
+  emit "spi_master" (Spi.masterC 3) (spiMasterIns 3 (.cons 165 (.cons 60 .nil)));
+  emit "spi_loop" (Spi.loopC 3) (spiIns 3 (.cons 165 (.cons 60 .nil)));
+  emit "ddr_model" Ddr.modelC ddrIns
