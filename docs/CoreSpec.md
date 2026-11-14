@@ -1122,7 +1122,7 @@ A cast between `L A` and `L B` along `e` computes to the list of the casts of it
 (`cast A B _ x`, stuck at type variables as always).
 
 **User-facing change.** A proof of `i = i'` no longer inhabits `μ D i ≡ μ D i'` directly:
-`Vec A n = Vec A m` is a Σ now. Build such proofs by congruence (`congrArg (Vec A) h`, or
+`Vec A n = Vec A m` is a Σ now. Build such proofs by congruence (`Eq.congrArg (Vec A) h`, or
 `transp` with `reflTy`, which is what the elaborator does for index equations and
 pattern matching). `refl (Vec A n)` proves `Vec A n = Vec A n`, and so does `rfl`. The
 computed equation has a part over the constructor tags, `(0 t : Enum ls) → cast e (E t) =

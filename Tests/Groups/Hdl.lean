@@ -343,7 +343,19 @@ def hdlGroup : Group where
            "memories: yes, 3000 cycles, well formed yes, checksum 380888474\n" ++
            "memories, raw out-of-range values: simFast = simulate: yes\n" ++
            "shifter: yes, 3000 cycles, well formed yes, checksum 331396695\n" ++
-           "not well formed: yes, simFast = simulate: yes\n") }
+           "not well formed: yes, simFast = simulate: yes\n") },
+    { name := "BEq for HwTy, PortKind and BitVec; RstEn names the reset/enable inputs", run := fun _ =>
+        okLibs ("import Hdl.Core\n" ++
+          "#eval BEq.beq (HwTy.bits 3) (HwTy.bits 3)\n" ++
+          "#eval BEq.beq (HwTy.bits 3) (HwTy.prod (HwTy.bits 1) (HwTy.bits 2))\n" ++
+          "#eval BEq.beq (BitVec.ofNat 8 5) (BitVec.ofNat 8 5)\n" ++
+          "#eval BEq.beq (BitVec.ofNat 8 5) (BitVec.ofNat 8 6)\n" ++
+          "#eval BEq.beq PortKind.data PortKind.pad\n" ++
+          "def same : RstEn (HwTy.bits 8) =\n" ++
+          "    HwTy.prod (HwTy.named \"rst\" HwTy.bit) (HwTy.prod (HwTy.named \"en\" HwTy.bit) (HwTy.bits 8)) := rfl\n" ++
+          "def reg : Circuit (RstEn (HwTy.bits 8)) (HwTy.bits 8) := Circuit.registerRE (HwTy.bits 8) (BitVec.ofNat 8 0)\n" ++
+          "#check RstEn")
+          [".true", ".false", ".true", ".false", ".false", "RstEn : HwTy → HwTy"] }
   ]
 
 builtin_initialize registerGroup hdlGroup

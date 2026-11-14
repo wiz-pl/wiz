@@ -460,11 +460,25 @@ def Level.occurs (m : Nat) : Level → Bool
   | .max a b | .imax a b => Level.occurs m a || Level.occurs m b
   | _ => false
 
+/-- Assign `?m := n - k` for a level `?m + k` against a closed `n`: whether that was
+possible. (`unifyLevel`'s `equiv` check compares normal forms without solving a
+metavariable, so `?u+1 =?= max 1 1` needs this: the closed side normalizes to `1` but is
+not syntactically a successor.) -/
+def solveClosedOffset (l : Level) (n : Nat) : ElabM R Bool := do
+  let (base, k) := l.toOffset
+  match base with
+  | .mvar m => do
+    if n < k then return false
+    modify fun s => { s with levelMetas := s.levelMetas.set! m (some (Level.ofNat (n - k))) }
+    return true
+  | _ => return false
+
 /-- **Exercise 4.1.** Unify two universe levels. Instantiate solved metas first
 (`instLevel`). Then:
 
 * if the levels are already equivalent (`Level.equiv`), succeed;
 * a lone metavariable `?u` against any level not containing it: assign it;
+* `?u + k =?= n` for a closed `n`: assign `?u := n - k` (`solveClosedOffset`);
 * `a+1 =?= b+1`: unify `a` and `b`;
 * otherwise fail with a "universe level mismatch" error.
 
@@ -482,7 +496,16 @@ partial def unifyLevel (a b : Level) : ElabM R Unit := do
     if Level.occurs m l then throwAt {} s!"universe level mismatch: {a} vs {b}"
     modify fun s => { s with levelMetas := s.levelMetas.set! m (some l) }
   | .succ a', .succ b' => unifyLevel a' b'
-  | _, _ => throwAt {} s!"universe level mismatch: {a} vs {b}"
+  | _, _ =>
+    -- an offset metavariable against a closed level, either way round
+    let solved ← match b.toNat? with
+      | some n => solveClosedOffset a n
+      | none => pure false
+    let solved ← if solved then pure true else match a.toNat? with
+      | some n => solveClosedOffset b n
+      | none => pure false
+    if solved then return
+    throwAt {} s!"universe level mismatch: {a} vs {b}"
   --|ex
   --| sorry
   --sol>

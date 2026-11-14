@@ -59,7 +59,7 @@ def alu : Circuit AluIn.code AluOut.code :=
     (Alu.mk (BitVec.ofNat 8 0) (BitVec.ofNat 70 1180591620717411303423) (BitVec.ofNat 1 0)) aluStep
 
 -- with a synchronous reset and a clock enable
-def aluRE : Circuit (HwTy.prod (HwTy.named "rst" HwTy.bit) (HwTy.prod (HwTy.named "en" HwTy.bit) AluIn.code)) AluOut.code :=
+def aluRE : Circuit (RstEn AluIn.code) AluOut.code :=
   Circuit.withReset (Circuit.withEnable alu)
 
 -- composition: a delay line after the ALU, a feedback loop around an adder

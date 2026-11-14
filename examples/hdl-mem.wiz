@@ -62,14 +62,14 @@ def ramR : List Nat × Bool := (ramOut, ramAgree)
 def romR : List Nat × Bool := (romOut, romAgree)
 -- under a clock enable a write happens only when enabled; a reset leaves the contents
 -- (the read register is reset): value and netlist simulations agree
-def ramE : Circuit (HwTy.prod (HwTy.named "rst" Bit) (HwTy.prod (HwTy.named "en" Bit) Port.code)) B8 :=
+def ramE : Circuit (RstEn Port.code) B8 :=
   Circuit.withReset (Circuit.withEnable ramC)
-def ctl (rst en : Nat) (p : HwTy.El Port.code) : HwTy.El (HwTy.prod (HwTy.named "rst" Bit) (HwTy.prod (HwTy.named "en" Bit) Port.code)) :=
+def ctl (rst en : Nat) (p : HwTy.El Port.code) : HwTy.El (RstEn Port.code) :=
   (BitVec.ofNat 1 rst, (BitVec.ofNat 1 en, p))
-def insE : List (HwTy.El (HwTy.prod (HwTy.named "rst" Bit) (HwTy.prod (HwTy.named "en" Bit) Port.code))) :=
+def insE : List (HwTy.El (RstEn Port.code)) :=
   .cons (ctl 0 1 (port 1 7 42 7)) (.cons (ctl 0 0 (port 1 7 55 7)) (.cons (ctl 1 1 (port 0 0 0 7)) (.cons (ctl 0 1 (port 0 0 0 7)) (.cons (ctl 0 1 (port 0 0 0 0)) .nil))))
 def ramEOut : List Nat := Hdl.map (HwTy.pack B8) (Circuit.run ramE insE)
-def ramEAgree : Bool := Hdl.natsEq ramEOut (Circuit.simNet .true ramE (Hdl.map (HwTy.pack (HwTy.prod (HwTy.named "rst" Bit) (HwTy.prod (HwTy.named "en" Bit) Port.code))) insE))
+def ramEAgree : Bool := Hdl.natsEq ramEOut (Circuit.simNet .true ramE (Hdl.map (HwTy.pack (RstEn Port.code)) insE))
 def ramER : List Nat × Bool := (ramEOut, ramEAgree)
 
 -- what a netlist cannot express is reported (and printed as `// error:` in the Verilog)

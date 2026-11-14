@@ -35,6 +35,13 @@ def levelGroup : Group where
           ["Pred : Type 1 → Type 2"] },
     { name := "level metavariables solved by unification", run := fun _ =>
         ok "def id.{u} {A : Sort u} (x : A) : A := x\ndef t (A : Type 3) (a : A) : A := id a" },
+    { name := "a level metavariable against a compound closed sort", run := fun _ =>
+        -- `B × B`'s sort is `max 1 1` and `B → B`'s is `imax 1 1`: neither is
+        -- syntactically a successor, so `?v+1 =?= max 1 1` needs the offset rule.
+        okLibs ("import Logic\n" ++
+          "def c {A B : Type} (g : A → B × B) {a b : A} (e : a = b) : g a = g b := Eq.congrArg g e\n" ++
+          "def f {A B : Type} (g : A → (B → B)) {a b : A} (e : a = b) : g a = g b := Eq.congrArg g e\n" ++
+          "def s {A : Type} {B : Type} (g : A → B) {a b : A} (e : a = b) : g a = g b := Eq.congrArg g e") },
     { name := "unknown level parameter", run := fun _ =>
         fails "def f (A : Type u) : Type u := A" "unknown universe level 'u'" },
     { name := "wrong number of explicit levels", run := fun _ =>

@@ -26,9 +26,10 @@ Tests: `lake test -- seplogic`.
 ∨ and ∃ are the impredicative Church encodings; their eliminators go into propositions
 only, as Lean's do. Since observational equality computes, `propext` (`Iff.toEq`) and
 `funext` are one-liners: an equation of propositions *is* a pair of implications and an
-equation of functions *is* pointwise. `Eq.symm/trans/congrArg/substProp` are J in its usual
-shapes (lib/Vec.wiz now imports Logic for them). The names are Lean's, so the library can
-move to native inductive propositions (plan D4) without renaming.
+equation of functions *is* pointwise. `Eq.symm/trans/congrArg/substProp` are J in its
+usual shapes, at any universe (`A : Type u`; lib/Vec.wiz now imports Logic for them). The
+names are Lean's, so the library can move to native inductive propositions (plan D4)
+without renaming.
 
 Two things about quantities that every proof here runs into:
 
@@ -41,7 +42,7 @@ Two things about quantities that every proof here runs into:
   `Eq.symm`.
 * Proofs are checked with usage like programs. Predicates are bound at 0 (they only occur
   in types), data at ω (pointwise lemmas match on it), and `transp` motives avoid using
-  their variable (so `Eq.substProp` goes through `congrArg`; the Prelude's `Eq.subst` is the linear transport into a `Type`). Wishful:
+  their variable (so `Eq.substProp` goes through `Eq.congrArg`; the Prelude's `Eq.subst` is the linear transport into a `Type`). Wishful:
   `erased-use-in-types`.
 
 ## 24b: heaps and heap predicates

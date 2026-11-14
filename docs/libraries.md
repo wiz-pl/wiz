@@ -31,7 +31,7 @@ Along the way the elaborator learned to:
   `0 h`);
 * prove an equation that has already computed with `rfl` (`Nat.succ a = Nat.succ a`
   is a Σ of `True`s and `a = a`), and recompute an equation stuck on a metavariable
-  once it is solved (`congrArg Nat.succ ih` against such a goal). The proof follows the
+  once it is solved (`Eq.congrArg Nat.succ ih` against such a goal). The proof follows the
   elaborator's computed form; where the kernel computes the equation to another shape
   (a numeral on one side, a constructor on the other), the kernel rejects it;
 * erase a `cast` against its source type (the solution rule casts a function, so
@@ -416,8 +416,9 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
 * **Reset and enable: the convention.** A design with a reset or a clock enable takes
   them as its first inputs, named `rst` and `en`, reset first: both synchronous and
   active high, and the reset wins over the enable, as
-  `always @(posedge clk) if (rst) r <= init; else if (en) r <= next;`. Three ways to get
-  it, all of which the netlist turns into the register's reset and enable (not
+  `always @(posedge clk) if (rst) r <= init; else if (en) r <= next;`. The input code is
+  `RstEn t`, the code `(rst, (en, t))` for a design's own inputs `t`. Three ways
+  to get it, all of which the netlist turns into the register's reset and enable (not
   multiplexers):
   * a whole circuit: `Circuit.withResetEnable c` (= `withReset (withEnable c)`; S1's
     `withReset`, `withEnable` alone);
@@ -574,7 +575,8 @@ with gates, proved equal to its multiplexer form and, once the opcode is known, 
 ## Logic, heap predicates and Hoare triples
 
 `lib/Logic.wiz` (`∧`, `∨`, `∃` with binder notation `∃ x : A, P`, `↔`, `¬`, ASCII
-`/\`, `\/`, `exists`, `<->`, equality lemmas, `funext`, `propext`; [13e](stages/13-language.md)),
+`/\`, `\/`, `exists`, `<->`, universe-polymorphic equality lemmas (`Eq.symm`, `Eq.trans`,
+`Eq.congrArg`, `Eq.substProp`), `funext`, `propext`; [13e](stages/13-language.md)),
 `lib/HProp.wiz` (model heaps, `emp`, `↦`, `⋆`, `−∗`, entailment and the separation-logic
 laws), `lib/Hoare.wiz` (`wp`, triples, the frame rule, adequacy for an interpreter),
 `lib/HoareTactics.wiz` (SLF-style automation: `xsimpl`, `xpull`, `xstep`, `xapp`, …) and
@@ -725,7 +727,7 @@ and doc comments; std's tests check one example of each.
 | module | contents |
 |--------|----------|
 | `lib/Order.wiz` | the classes `LE`, `LT`, `Equiv`: notation `a ≤ b`, `a < b`, `a ≈ b` (propositions) |
-| `lib/Nat.wiz` | `congrArg`, `congrArg2`, `Eq.mp'`, `Eq.via`; the commutative semiring laws of `Nat`, cancellation, truncated subtraction; `Nat.Le`/`Nat.Lt` (`Nat.le m n = .true`, so many facts are `rfl`) with `≤`/`<` instances; `Ordering`, `Nat.cmp` |
+| `lib/Nat.wiz` | `congrArg2`, `Eq.mp'`, `Eq.via`; the commutative semiring laws of `Nat`, cancellation, truncated subtraction; `Nat.Le`/`Nat.Lt` (`Nat.le m n = .true`, so many facts are `rfl`) with `≤`/`<` instances; `Ordering`, `Nat.cmp` |
 | `lib/Ring.wiz` | `nat_ring! lhs = rhs`: identities of commutative semirings at `Nat`, by reflection |
 | `lib/IntRing.wiz` | `int_ring! lhs = rhs` at `Int`; the ring laws `Int.add_comm` … `Int.neg_mul`; the pair representation `Int.ofPair a b = a - b` |
 | `lib/IntOrder.wiz` | `Int.Le`/`Int.Lt` (`b - a` not negative) with `≤`/`<`; monotonicity, cancellation, `Int.abs` and the triangle inequality |

@@ -448,7 +448,7 @@ compare by equivalence. What this costs, and why:
   regularity, which is off, 4c). For the same reason nothing is simplified, not even a
   `True` component: so the equations print with `True`s in them.
 * So a proof of `n = m` is not a proof of `Vec A n = Vec A m` any more. Use congruence
-  (`congrArg (Vec A) h`, or `transp` from `refl`), which is what the elaborator does for
+  (`Eq.congrArg (Vec A) h`, or `transp` from `refl`), which is what the elaborator does for
   index equations. `refl (Vec A n)` and `rfl` both prove `Vec A n = Vec A n`: the
   equation's part over the constructor tags, `(t : Enum ls) → …`, is stuck under its
   binder, so `rfl` proves it tag by tag (a case split, wrapped in a `transp` because the

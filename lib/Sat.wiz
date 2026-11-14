@@ -1,4 +1,5 @@
 import Logic
+import Deriving
 /-!
 # Sat
 
@@ -101,6 +102,8 @@ def Sat.Lit.neg : Sat.Lit → Sat.Lit
 /-- Whether two literals are the same variable with the same polarity. -/
 def Sat.Lit.beq : Sat.Lit → Sat.Lit → Bool
   | .mk v p, .mk w q => Bool.and (Nat.beq v w) (Sat.boolEq p q)
+/-- `Sat.Lit.beq`. -/
+instance : BEq Sat.Lit := BEq.mk Sat.Lit.beq
 
 /-- a clause holds if one of its literals does; a formula if all its clauses do -/
 def Sat.Clause.eval (τ : Nat → Bool) : List Sat.Lit → Bool
@@ -400,6 +403,8 @@ def Sat.BForm.beq : Sat.BForm → Sat.BForm → Bool
   | .xor a b, .xor c d => Bool.and (Sat.BForm.beq a c) (Sat.BForm.beq b d)
   | .iff a b, .iff c d => Bool.and (Sat.BForm.beq a c) (Sat.BForm.beq b d)
   | _, _ => .false
+/-- `Sat.BForm.beq`. -/
+instance : BEq Sat.BForm := BEq.mk Sat.BForm.beq
 
 /-- Congruence for a two-argument operation. -/
 def Sat.congr2 (f : Bool → Bool → Bool) {a b c d : Bool} (e₁ : a = c) (e₂ : b = d) : f a b = f c d :=

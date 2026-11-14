@@ -146,6 +146,7 @@ inductive HwTy where
   | prod (a b : HwTy)
   | named (s : String) (t : HwTy)
   | mem (aw dw : Nat)
+  deriving BEq
 
 /-- The values of a hardware type: `BitVec n` for `bits n`, pairs for `prod`. This is the
 representation used for simulation and proofs (`instance : Hw HwTy.El`). -/
@@ -573,6 +574,7 @@ inductive PortKind where
   | clock
   | pad
   | inout
+  deriving BEq
 
 /-- The runtime code of a port kind (the netlist's tables hold it). -/
 def PortKind.code : PortKind → Nat
@@ -1759,6 +1761,12 @@ def Circuit.withEnable {ω i o : HwTy} (c : Circuit i o) : Circuit (HwTy.prod (H
     let rc := c.step s (Hw.snd x);
     Hw.pair (Hw.hold (Hw.untag (Hw.fst x)) (Hw.fst rc) s) (Hw.snd rc))
 
+/-- The inputs of a design with a reset and a clock enable: `rst`, then `en`, then the
+design's own inputs `t` (the H14 S4 convention below; `Circuit.withResetEnable`,
+`Circuit.registerRE`). -/
+def RstEn (t : HwTy) : HwTy :=
+  HwTy.prod (HwTy.named "rst" HwTy.bit) (HwTy.prod (HwTy.named "en" HwTy.bit) t)
+
 /-- (H14 S4) The reset and enable convention. A design that has a reset or a clock enable
 takes them as its first inputs, named `rst` and `en`, reset first: `rst` wins over
 `en` (a held register is still reset), and both are synchronous and active high (as
@@ -1768,8 +1776,7 @@ takes them as its first inputs, named `rst` and `en`, reset first: `rst` wins ov
 cur next` (the next value of a register whose value is `cur`). Each of them becomes
 the register's reset and enable in the netlist, not a multiplexer. Every register still
 has its initial value (`initial` in Verilog: the iCE40 needs no reset). -/
-def Circuit.withResetEnable {ω i o : HwTy} (c : Circuit i o) :
-    Circuit (HwTy.prod (HwTy.named "rst" HwTy.bit) (HwTy.prod (HwTy.named "en" HwTy.bit) i)) o :=
+def Circuit.withResetEnable {ω i o : HwTy} (c : Circuit i o) : Circuit (RstEn i) o :=
   Circuit.withReset (Circuit.withEnable c)
 /-- a register (`Circuit.delay`) with a reset to its initial value, with an enable, with both -/
 def Circuit.registerR (ω t : HwTy) (init : HwTy.El t) : Circuit (HwTy.prod (HwTy.named "rst" HwTy.bit) t) t :=
@@ -1778,8 +1785,7 @@ def Circuit.registerR (ω t : HwTy) (init : HwTy.El t) : Circuit (HwTy.prod (HwT
 def Circuit.registerE (ω t : HwTy) (init : HwTy.El t) : Circuit (HwTy.prod (HwTy.named "en" HwTy.bit) t) t :=
   Circuit.withEnable (Circuit.delay t init)
 /-- A register with a reset and an enable. -/
-def Circuit.registerRE (ω t : HwTy) (init : HwTy.El t) :
-    Circuit (HwTy.prod (HwTy.named "rst" HwTy.bit) (HwTy.prod (HwTy.named "en" HwTy.bit) t)) t :=
+def Circuit.registerRE (ω t : HwTy) (init : HwTy.El t) : Circuit (RstEn t) t :=
   Circuit.withResetEnable (Circuit.delay t init)
 /-- inside a step function: `init` under `rst`, else `next` under `en`, else `cur` (for the
 netlist to see a reset, `init` must be the register's initial value; to see an enable,

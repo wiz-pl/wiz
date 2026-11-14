@@ -64,7 +64,7 @@ def two : Circuit CntIn.code CntOut.code :=
   Circuit.bundled Two.bundle CntIn.bundle CntOut.bundle (Two.mk cnt0 cnt0) twoStep
 
 -- reset and enable around the counter
-def counterRE : Circuit (HwTy.prod (HwTy.named "rst" HwTy.bit) (HwTy.prod (HwTy.named "en" HwTy.bit) CntIn.code)) CntOut.code :=
+def counterRE : Circuit (RstEn CntIn.code) CntOut.code :=
   Circuit.withReset (Circuit.withEnable counter)
 
 ------------------------------------------------------------------------------------
@@ -112,8 +112,8 @@ def vCounter : String := Verilog.emit (Circuit.netlist "counter" counterRE)
 def vTwo : String := Verilog.emit (Circuit.netlist "two" two)
 def vPipe : String := Verilog.emit (Circuit.netlist "pipe" sideBy)
 
-def reInputs : List (HwTy.El (HwTy.prod (HwTy.named "rst" HwTy.bit) (HwTy.prod (HwTy.named "en" HwTy.bit) CntIn.code))) :=
-  Hdl.map (HwTy.unpack (HwTy.prod (HwTy.named "rst" HwTy.bit) (HwTy.prod (HwTy.named "en" HwTy.bit) CntIn.code))) reTrace
+def reInputs : List (HwTy.El (RstEn CntIn.code)) :=
+  Hdl.map (HwTy.unpack (RstEn CntIn.code)) reTrace
 def tbCounter : String := Testbench.verilog (Circuit.netlist "counter" counterRE) "counter.vec" (List.length reTrace)
 def vecCounter : String := Hdl.concat (Circuit.vectors (Circuit.netlist "counter" counterRE) counterRE reInputs)
 

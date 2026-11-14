@@ -461,6 +461,20 @@ def languageGroup : Group where
           "def t7 : forall (n : Nat), n = n := fun n => rfl\n" ++
           "def t8 {P Q : Prop} (h : P <-> Q) (p : P) : (Q /\\ P) \\/ False := Or.inl (h.1 p, p)\n#check t5")
           ["t5 : ∃ n, ∃ m, n = m ∧ m = n"] },
+    { name := "13g: equality lemmas at any universe (Type 1, Sort 1)", run := fun _ =>
+        okLib ("import Logic\n" ++
+          "def s1 {A : Type 1} {a b : A} (e : a = b) : b = a := Eq.symm e\n" ++
+          "def t1 {A : Type 1} {a b c : A} (e : a = b) (e' : b = c) : a = c := Eq.trans e e'\n" ++
+          "def c1 {A : Type 1} {B : Type 2} (f : A → B) {a b : A} (e : a = b) : f a = f b := Eq.congrArg f e\n" ++
+          "def p1 {A : Type 1} (P : A → Prop) {a b : A} (e : a = b) (pa : P a) : P b := Eq.substProp P e pa\n" ++
+          "def f1 {A : Sort 0} {B : Type 2} {f g : A → B} (h : (x : A) → f x = g x) : f = g := funext h\n" ++
+          "def g1 {A : Type 1} {B : Type} {f g : A → B} (e : f = g) (x : A) : f x = g x := congrFun e x\n" ++
+          "def typeEq {A B : Type 1} (e : A = B) : B = A := @Eq.symm (Type 1) A B e\n" ++
+          "#check s1\n#check c1\n#check f1\n#check typeEq")
+          ["s1 : {A : Type 1} → {a : A} → {b : A} → a = b → b = a",
+           "c1 : {A : Type 1} → {B : Type 2} → (f : A → B) → {a : A} → {b : A} → a = b → f a = f b",
+           "f1 : {A : Prop} → {B : Type 2} → {f : A → B} → {g : A → B} → ((x : A) → f x = g x) → (0 x : A) → f x = g x",
+           "typeEq : {A : Type 1} → {B : Type 1} → A = B → B = A"] },
     { name := "13f: let with a tuple pattern of three or more names", run := fun _ =>
         okLib ("import Prelude\ndef f (p : Nat × Nat × Nat) : Nat := let (a, b, c) := p; a + b * c\n#eval f (1, 2, 3)\n" ++
           "def g (p : Nat × Bool × Nat × Nat) : Nat := let (a, b, c, d) := p; match b with\n  | .true => a + c + d\n  | .false => 0\n" ++
@@ -491,7 +505,9 @@ def languageGroup : Group where
           "#eval h ⟨[8], 0⟩\n#eval k [9]")
           ["0", "1", "2", "9", "6", "7", "8", ".cons 9 (.cons 9 .nil)"] },
     { name := "... numerals in a list literal are elaborated at the element type (7e)", run := fun _ => do
-        let lib ← preludeLoader
+        -- (`Int` is read from source, as the test means to check it; it imports
+        -- Deriving, so the other modules come from the library loader.)
+        let lib ← libLoader
         let int ← IO.FS.readFile "lib/Int.wiz"
         let input := "import Word\nimport Int\n#eval ([1, 2] : List U8)\n#eval ([1, 2] : List Int)\n" ++
           "def w : List U8 := [255, 1 + 2]\n#eval w"

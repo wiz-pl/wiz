@@ -139,7 +139,7 @@ def Ring.Key.prod_insertB (ρ : List Nat) (x y : Nat) (ys rec : List Nat)
     (ih : Ring.Key.prod ρ rec = NatExpr.get ρ x * Ring.Key.prod ρ ys) :
     (b : Bool) → Ring.Key.prod ρ (Ring.Key.insertB b x y ys rec) = NatExpr.get ρ x * (NatExpr.get ρ y * Ring.Key.prod ρ ys)
   | .true => rfl
-  | .false => Eq.trans (congrArg (fun z => NatExpr.get ρ y * z) ih)
+  | .false => Eq.trans (Eq.congrArg (fun z => NatExpr.get ρ y * z) ih)
                 (Nat.mul_left_comm (NatExpr.get ρ y) (NatExpr.get ρ x) (Ring.Key.prod ρ ys))
 /-- Inserting an atom multiplies the product by it. -/
 def Ring.Key.prod_insert (ρ : List Nat) (x : Nat) : (ys : List Nat) →
@@ -152,7 +152,7 @@ def Ring.Key.prod_merge (ρ : List Nat) : (xs ys : List Nat) →
   | .nil, ys => Eq.symm (Nat.add_zero (Ring.Key.prod ρ ys))
   | .cons x xs, ys =>
     Eq.trans (Ring.Key.prod_insert ρ x (Ring.Key.merge xs ys))
-      (Eq.trans (congrArg (fun z => NatExpr.get ρ x * z) (Ring.Key.prod_merge ρ xs ys))
+      (Eq.trans (Eq.congrArg (fun z => NatExpr.get ρ x * z) (Ring.Key.prod_merge ρ xs ys))
         (Eq.symm (Nat.mul_assoc (NatExpr.get ρ x) (Ring.Key.prod ρ xs) (Ring.Key.prod ρ ys))))
 
 /-- Soundness of `NatPoly.addMonoO`. -/
@@ -164,11 +164,11 @@ def NatPoly.eval_addMonoO (ρ : List Nat) (c : Nat) (xs : List Nat) (d : Nat) (y
   | .eq, h =>
     let e := Ring.Key.cmp_eq xs ys h;
     -- (c + d) * P xs + E = c * P xs + (d * P ys + E)
-    Eq.trans (congrArg (fun z => z + NatPoly.eval ρ p) (Nat.add_mul c d (Ring.Key.prod ρ xs)))
+    Eq.trans (Eq.congrArg (fun z => z + NatPoly.eval ρ p) (Nat.add_mul c d (Ring.Key.prod ρ xs)))
       (Eq.trans (Nat.add_assoc (c * Ring.Key.prod ρ xs) (d * Ring.Key.prod ρ xs) (NatPoly.eval ρ p))
-        (congrArg (fun (zs : List Nat) => c * Ring.Key.prod ρ xs + (d * Ring.Key.prod ρ zs + NatPoly.eval ρ p)) e))
+        (Eq.congrArg (fun (zs : List Nat) => c * Ring.Key.prod ρ xs + (d * Ring.Key.prod ρ zs + NatPoly.eval ρ p)) e))
   | .gt, _ =>
-    Eq.trans (congrArg (fun z => d * Ring.Key.prod ρ ys + z) ih)
+    Eq.trans (Eq.congrArg (fun z => d * Ring.Key.prod ρ ys + z) ih)
       (Nat.add_left_comm (d * Ring.Key.prod ρ ys) (c * Ring.Key.prod ρ xs) (NatPoly.eval ρ p))
 /-- Adding a monomial adds its value. -/
 def NatPoly.eval_addMono (ρ : List Nat) (c : Nat) (xs : List Nat) : (p : NatPoly) →
@@ -182,12 +182,12 @@ def NatPoly.eval_add (ρ : List Nat) : (p q : NatPoly) → NatPoly.eval ρ (NatP
   | .nil, _ => rfl
   | .cons m p, q =>
     Eq.trans (NatPoly.eval_addMono ρ m.1 m.2 (NatPoly.add p q))
-      (Eq.trans (congrArg (fun z => m.1 * Ring.Key.prod ρ m.2 + z) (NatPoly.eval_add ρ p q))
+      (Eq.trans (Eq.congrArg (fun z => m.1 * Ring.Key.prod ρ m.2 + z) (NatPoly.eval_add ρ p q))
         (Eq.symm (Nat.add_assoc (m.1 * Ring.Key.prod ρ m.2) (NatPoly.eval ρ p) (NatPoly.eval ρ q))))
 /-- `(a·c)·(b·d) = (a·b)·(c·d)`: coefficients and products of atoms rearranged. -/
 def NatPoly.mono_mul (a b c d : Nat) : a * c * (b * d) = a * b * (c * d) :=
   Eq.trans (Nat.mul_assoc a c (b * d))
-    (Eq.trans (congrArg (fun z => a * z) (Nat.mul_left_comm c b d))
+    (Eq.trans (Eq.congrArg (fun z => a * z) (Nat.mul_left_comm c b d))
       (Eq.symm (Nat.mul_assoc a b (c * d))))
 /-- Multiplying by a monomial multiplies by its value. -/
 def NatPoly.eval_mulMono (ρ : List Nat) (c : Nat) (xs : List Nat) : (q : NatPoly) →
@@ -197,7 +197,7 @@ def NatPoly.eval_mulMono (ρ : List Nat) (c : Nat) (xs : List Nat) : (q : NatPol
     Eq.trans (NatPoly.eval_addMono ρ (c * m.1) (Ring.Key.merge xs m.2) (NatPoly.mulMono c xs q))
       (Eq.trans
         (congrArg2 (fun y z => y + z)
-          (Eq.trans (congrArg (fun z => c * m.1 * z) (Ring.Key.prod_merge ρ xs m.2))
+          (Eq.trans (Eq.congrArg (fun z => c * m.1 * z) (Ring.Key.prod_merge ρ xs m.2))
             (NatPoly.mono_mul c (Ring.Key.prod ρ xs) m.1 (Ring.Key.prod ρ m.2)))
           (NatPoly.eval_mulMono ρ c xs q))
         (Eq.symm (Nat.mul_add (c * Ring.Key.prod ρ xs) (m.1 * Ring.Key.prod ρ m.2) (NatPoly.eval ρ q))))

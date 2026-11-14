@@ -25,6 +25,14 @@ def stdGroup : Group where
            "'Int.add_zero' does not depend on any axioms"] },
     { name := "integers: compiled (C)", run := fun _ =>
         cRunLibs "import Int\ndef main : Int := (-3 : Int) * 4 + 2" "-10" },
+    { name := "BEq for Int and Char (the hand-written equalities, as instances)", run := fun _ =>
+        okLibs ("import Int\nimport Text\n" ++
+          "#eval BEq.beq (3 : Int) 3\n#eval BEq.beq (3 : Int) (-3)\n" ++
+          "#eval BEq.beq (Char.mk 97) (Char.mk 97)\n#eval BEq.beq (Char.mk 97) (Char.mk 98)\n" ++
+          "def intBeq (a b : Int) : Bool := BEq.beq a b\ndef charBeq (a b : Char) : Bool := BEq.beq a b\n" ++
+          "def intBeqEq (a b : Int) : BEq.beq a b = Int.beq a b := rfl\n" ++
+          "def charBeqEq (a b : Char) : BEq.beq a b = Char.eq a b := rfl")
+          [".true", ".false", ".true", ".false"] },
     { name := "7f: x + 1 and 1 + x at words, Int and BitVec: the numeral takes the operand's type", run := fun _ =>
         okLibs ("import Word\nimport Int\nimport BitVec\ndef a (x : U8) : U8 := x + 1\ndef b (x : U8) : U8 := 1 + x\n" ++
           "def c (x : Int) : Int := 1 - x * 2\ndef d (x : BitVec 8) : BitVec 8 := x + 1\ndef e (x : U32) : U32 := x + (1 + 2) * 3\n" ++

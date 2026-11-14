@@ -1,6 +1,7 @@
 import Prelude
 import Vec
 import Word
+import Deriving
 /-!
 # BitVec
 
@@ -96,6 +97,8 @@ def BitVec.ashr {ω n : Nat} (a : BitVec n) (k : Nat) : BitVec n :=
 -- Comparisons.
 /-- Equality test. -/
 def BitVec.beq {0 n : Nat} (a b : BitVec n) : Bool := UIntN.beq a b
+/-- `BitVec.beq` (the same as `UIntN.beq`), so values of words have a `BEq`. -/
+instance {n : Nat} : BEq (BitVec n) := BEq.mk BitVec.beq
 /-- Unsigned `a < b`. -/
 def BitVec.ult {0 n : Nat} (a b : BitVec n) : Bool := UIntN.lt a b
 /-- Unsigned `a ≤ b`. -/
@@ -150,7 +153,7 @@ def BitVec.toNat_eq {0 n : Nat} (a : BitVec n) : BitVec.toNat a = UIntN.toNat (B
   refl (BitVec.toNat a)
 /-- Addition of bit vectors is commutative. -/
 def BitVec.add_comm {ω n : Nat} (a b : BitVec n) : BitVec.add a b = BitVec.add b a :=
-  congrArg (UIntN.ofNat n) (Nat.add_comm a.toNat b.toNat)
+  Eq.congrArg (UIntN.ofNat n) (Nat.add_comm a.toNat b.toNat)
 /-- A one-bit word is 0 or 1 (its bits are below 2: `UIntN.toNat_lt`). -/
 def BitVec.lt2_cases : (n : Nat) → Nat.lt n 2 = .true → (n = 0) ∨ (n = 1)
   | .zero, _ => Or.inl rfl

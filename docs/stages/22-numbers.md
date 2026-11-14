@@ -299,7 +299,7 @@ def w (x : U32) : BitVec 32 := BitVec.add x (BitVec.ofNat 32 1)   -- no conversi
   would need a second representation registration and conversions at every Feral/HDL
   boundary.
 * **Proofs** see the definitions, which unfold to Word's model, so the BitVec lemmas
-  are stated as before (`BitVec.add_comm` is `congrArg (UIntN.ofNat n)
+  are stated as before (`BitVec.add_comm` is `Eq.congrArg (UIntN.ofNat n)
   (Nat.add_comm …)`); `BitVec.add_eq : BitVec.add a b = UIntN.add a b` is `refl`.
   The literal tables (group `vec`) and the 34-operation and 64-bit word tables (group
   `word`) agree in the kernel, `#eval`, `#run`, C and LLVM.

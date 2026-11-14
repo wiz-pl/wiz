@@ -59,6 +59,17 @@ def group : Group where
         noErrors ms
         expect ms "info: 'Sat.lratCheck_sound' does not depend on any axioms"
         expect ms "info: 'Sat.decide_sound' does not depend on any axioms" },
+    { name := "BEq for Sat.Lit and Sat.BForm (the hand-written beq functions, as instances)", run := fun _ => do
+        let ms ← msgs ("import Sat\n" ++
+          "#eval BEq.beq (Sat.Lit.mk 1 .true) (Sat.Lit.mk 1 .true)\n" ++
+          "#eval BEq.beq (Sat.Lit.mk 1 .true) (Sat.Lit.mk 1 .false)\n" ++
+          "def f : Sat.BForm := .and (.var 1) (.not (.const .true))\n" ++
+          "#eval BEq.beq f f\n#eval BEq.beq f (.or (.var 1) (.const .true))\n" ++
+          "def litEq (a b : Sat.Lit) : BEq.beq a b = Sat.Lit.beq a b := rfl\n" ++
+          "def formEq (a b : Sat.BForm) : BEq.beq a b = Sat.BForm.beq a b := rfl\n")
+        noErrors ms
+        expect ms "info: .true"
+        expect ms "info: .false" },
     { name := "an LRAT proof is checked by the kernel; a wrong one is not accepted", run := fun _ => do
         let ms ← msgs (tinyCnf ++ "def ok : Sat.lratCheck cnf proof = .true := rfl\n" ++
           "def unsat (τ : Nat → Bool) (h : Sat.Cnf.eval τ cnf = .true) : False := Sat.lratCheck_sound cnf proof ok τ h\n")

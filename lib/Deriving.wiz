@@ -70,6 +70,8 @@ instance : BEq String := BEq.mk String.beq
 /-- The string in double quotes (no escaping). -/
 instance : Repr String := Repr.mk (fun s _ =>
   String.append (String.mk (.cons (Char.mk 34) .nil)) (String.append s (String.mk (.cons (Char.mk 34) .nil))))
+/-- `Char.eq` (lib/Text.wiz): two characters are equal when their code points are. -/
+instance : BEq Char := BEq.mk Char.eq
 
 -- ## Writing derivers
 -- Names a deriver introduces end in `✝` or contain it, so they can't capture the user's.
