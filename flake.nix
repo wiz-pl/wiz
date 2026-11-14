@@ -48,7 +48,8 @@
                 root = ./.;
                 fileset = fs.unions [
                   ./lakefile.lean ./lake-manifest.json ./lean-toolchain
-                  ./Main.lean ./Wiz.lean ./Wiz ./Grail.lean ./Grail
+                  ./Main.lean ./Wiz.lean ./Wiz ./WizMeta.lean ./WizMeta ./Grail.lean ./Grail
+                  ./Tests # the test driver (`packages.tests`)
                   ./runtime # the C runtime (wiz_rt.h, rt_*.inc) and WizRuntime.lean, which embeds it (include_str)
                   ./c # linked into the executables (moreLinkObjs)
                 ];
@@ -57,14 +58,15 @@
               buildPhase = ''
                 runHook preBuild
                 # no dependencies to fetch (lake-manifest.json); Lake's artifact cache in the sandbox
+                # (`tests` is the test driver: `packages.tests` installs it from here)
                 export HOME=$TMPDIR LAKE_CACHE_DIR=$TMPDIR/lake-cache
-                lake build wiz grail
+                lake build wiz grail tests
                 runHook postBuild
               '';
               installPhase = ''
                 runHook preInstall
                 mkdir -p $out/bin
-                install -m755 .lake/build/bin/wiz .lake/build/bin/grail $out/bin/
+                install -m755 .lake/build/bin/wiz .lake/build/bin/grail .lake/build/bin/tests $out/bin/
                 runHook postInstall
               '';
             };
@@ -92,18 +94,75 @@
               # the marker editors look for (editors/nvim: a library file is served by its toolchain's wiz)
               echo 'A Wiz toolchain: lib/ is its standard library, .lake/build/bin/ its binaries, ../../bin/ its commands (editors use this file to find them).' > $share/TOOLCHAIN
               cp ${unwrapped}/bin/wiz ${unwrapped}/bin/grail $share/.lake/build/bin/
+              # The packaged read-only elaboration cache: elaborate every module of the
+              # standard library once, with the binary the wrapper runs (the same bytes,
+              # and the same toolchain-library layout, so the keys match a user's run).
+              # Check a one-line `import M` rather than M's file: checking the file
+              # elaborates it as the main file, whose commands are keyed by the main
+              # text and never hit by an importer. `import M` stores M's effect under
+              # M's module key and writes its seen marker, which is what a user hits.
+              # Each check reads what earlier ones wrote, so this is one pass over lib/.
+              # A lib module that does not check is a real failure: stop at the first.
+              export HOME=$TMPDIR
+              cd $share
+              cache=$share/cache
+              mkdir -p "$cache"
+              while IFS= read -r f; do
+                m=''${f#lib/}; m=''${m%.wiz}; m=''${m//\//.}
+                printf 'import %s\n' "$m" > "$TMPDIR/lib-import.wiz"
+                .lake/build/bin/wiz --cache "$cache" -I "$share/lib" check "$TMPDIR/lib-import.wiz"
+              done < <(find lib -name '*.wiz' | LC_ALL=C sort)
+              # grail elaborates in-process under its *own* binary hash (the build file,
+              # Grail and Prelude, before every command, and each `check` job), so it
+              # hits none of the entries above: the two namespaces are disjoint by
+              # design (Cache.binaryId). Warm grail's too, with a minimal package: its
+              # `grail.wiz` elaborates Grail and Prelude, and the check target elaborates
+              # Std's closure, which is the fixed cost of a first `grail build` (measured:
+              # 437 entries, 3.3 MB, ~3 s here, against ~0 store hits without it). A
+              # module outside Std's closure is elaborated once into the user's cache.
+              # `grail build` reads the build file and runs the check job in one go; the
+              # binary needs no toolchain flags for either (lib/ imports no C headers).
+              warm=$TMPDIR/warm-pkg
+              mkdir -p "$warm"
+              printf '%s\n' 'import Grail' \
+                'def package : Package := Package.new "warm"' \
+                '  |> Package.check "std" "main.wiz"' > "$warm/grail.wiz"
+              printf 'import Std\n' > "$warm/main.wiz"
+              .lake/build/bin/grail -C "$warm" --cache "$cache" build
+              # The binary's memo names the build-time executable path in its stamp; it
+              # is for the write cache, so the store ships none.
+              rm -rf "$cache/bin"
+              chmod -R a-w "$cache"
               # wiz's module roots: ./lib (a checkout's), then the packaged standard library
               makeWrapper $share/.lake/build/bin/wiz $out/bin/wiz \
                 --prefix PATH : ${lib.makeBinPath [ pkgs.coreutils ]} \
-                --add-flags ${addFlags (tcFlags ++ [ "-I" "${placeholder "out"}/share/wiz/lib" ])}
+                --add-flags ${addFlags (tcFlags ++ [ "-I" "${placeholder "out"}/share/wiz/lib"
+                  "--cache-ro" "${placeholder "out"}/share/wiz/cache" ])}
               # grail: git fetches dependencies (stage 23h)
               makeWrapper $share/.lake/build/bin/grail $out/bin/grail \
                 --prefix PATH : ${lib.makeBinPath [ pkgs.coreutils pkgs.git ]} \
-                --add-flags ${addFlags tcFlags}
+                --add-flags ${addFlags (tcFlags ++ [ "--cache-ro" "${placeholder "out"}/share/wiz/cache" ])}
             '';
             meta = {
               description = "Wiz, a didactic dependently typed language, and grail, its build tool";
               mainProgram = "wiz";
+              platforms = systems;
+            };
+          };
+          # The test driver (`tests --list`, `tests --run GROUP INDEX`), from the same
+          # build as wiz and grail (so `nix build .#wiz` builds it too).
+          tests = pkgs.stdenv.mkDerivation {
+            pname = "wiz-tests";
+            inherit (unwrapped) version;
+            dontUnpack = true;
+            installPhase = ''
+              runHook preInstall
+              install -Dm755 ${unwrapped}/bin/tests $out/bin/tests
+              runHook postInstall
+            '';
+            meta = {
+              description = "The Wiz test driver";
+              mainProgram = "tests";
               platforms = systems;
             };
           };
@@ -204,7 +263,7 @@
                 platforms = systems;
               };
             };
-        in { inherit wiz unwrapped tower wiz-nvim nvim-wiz; default = wiz; };
+        in { inherit wiz unwrapped tower tests wiz-nvim nvim-wiz; default = wiz; };
     in {
       packages = forAll packagesFor;
 

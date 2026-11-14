@@ -1,0 +1,8 @@
+date	commit	label	seconds	maxRSS_KB	exit
+2026-11-01T10:00:00+02:00	2ebcfd1	stage1-selfcompile@fixture	18.20	218400	0
+2026-11-01T10:02:00+02:00	2ebcfd1	stage1-selfcompile@fixture	18.30	218600	0
+2026-11-01T10:04:00+02:00	2ebcfd1	selfcheck@fixture	12.10	136500	0
+2026-11-01T10:06:00+02:00	2ebcfd1	selfcheck@fixture	12.00	136400	0
+2026-11-01T11:00:00+02:00	2ebcfd1	stage1-selfcompile@fixture	17.90	218100	0
+2026-11-01T11:02:00+02:00	2ebcfd1	stage1-selfcompile@fixture	17.80	218000	0
+2026-11-01T11:04:00+02:00	2ebcfd1	stage1-selfcompile@fixture	99.00	220000	7

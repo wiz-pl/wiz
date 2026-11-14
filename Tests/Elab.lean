@@ -693,7 +693,7 @@ inductive MTm where
   | transp (A a P p b e : MTm)
   | desc (l : Nat) (I : MTm)
   | dret (i : MTm)
-  /-- (21w) a field's quantity, last (ω by default) -/
+  /-- (21x) a field's quantity, last (ω by default) -/
   | darg (S E : MTm) (q : ZeroOneMany := .many)
   | drec (j E : MTm) (q : ZeroOneMany := .many)
   | dhrec (H j E : MTm) (q : ZeroOneMany := .many)
@@ -992,7 +992,7 @@ partial def ofTerm : Term ZeroOneMany → Option MTm
   | .prf _ t => ofTerm t
   | _ => none
 
-/-- (21w) a description field's quantity, as `Kernel.wiz`'s `show` prints it: nothing at ω -/
+/-- (21x) a description field's quantity, as `Kernel.wiz`'s `show` prints it: nothing at ω -/
 def fieldQPre : ZeroOneMany → String
   | .zero => "0 "
   | .one => "1 "
@@ -1713,10 +1713,13 @@ def markerSamples : List (MTm × Bool) :=
       (pi pfalse (eq (univ 0) (app (exfalso (pi (enum 2) (univ 0)) (var 0)) (tag 2 0))
         (app (exfalso (pi (enum 2) (univ 0)) (prf z (letE pfalse (var 0) (var 0)))) (tag 2 0)))), true) ]
 
-/-- (P1) Regularity at inert types, decided by conversion (InReg_conv): the probes of
+/-- (P1, PF-C) Regularity at inert types, decided by conversion (InReg_conv): the probes of
 `wiz-notes/p1-stable.md` as core terms, for both kernels. `F i` is an inert family over
 `Enum 2` (one constructor, at index `#0`), so `F i` for a variable `i` has an open index.
-Each term is `fun … => refl k` at a type that states an equation; `true`: accepted. -/
+Each term is `fun … => refl k` at a type that states an equation; `true`: accepted. `t5`
+is no longer a control: PF-C applies Cast-Refl at every type while comparing an equation
+type, and `tv` is the control it does not cover (the same cast compared in a *type*
+position). -/
 def convSamples : List (String × MTm × Bool) :=
   let F (i : MTm) : MTm := mu 0 (enum 2) (dret (tag 2 0)) i
   -- a type computed by induction: `T i x : U0`, stuck on `x`
@@ -1746,9 +1749,22 @@ def convSamples : List (String × MTm × Bool) :=
     ("ne", ann (lams 2 (refl (F (tag 2 1)) (cast (F (tag 2 0)) (F (tag 2 1)) (var 0) (var 1))))
       (pi (F (tag 2 0)) (pi (eqTy (F (tag 2 0)) (F (tag 2 1)))
         (eq (F (tag 2 1)) (cast (F (tag 2 0)) (F (tag 2 1)) (var 0) (var 1)) (cast (F (tag 2 0)) (F (tag 2 1)) (var 0) (var 1))))), true),
-    -- t5, the control: no regularity at a type variable
+    -- t5: PF-C (Cast-Refl at every type *inside* a proposition): the equation's type is a
+    -- proposition, so while the checker compares its two sides the stuck cast at the type
+    -- variable `A` is its argument. Accepted by both kernels under PF-C (D1); no longer a
+    -- control.
     ("t5", ann (lams 3 (refl (var 2) (var 1)))
-      (pi (univ 0) (pi (var 0) (pi (eqTy (var 1) (var 1)) (eq (var 2) (cast (var 2) (var 2) (var 0) (var 1)) (var 1))))), false) ]
+      (pi (univ 0) (pi (var 0) (pi (eqTy (var 1) (var 1)) (eq (var 2) (cast (var 2) (var 2) (var 0) (var 1)) (var 1))))), true),
+    -- tv, the control PF-C does *not* cover: the same cast at a type variable, compared in a
+    -- *type* position (`F (cast A A e t)` against `F t`, as a λ's body type), not under a
+    -- proposition. `convTy` of two data types keeps the inert-only rule, and `A` is not
+    -- inert. (`castL` in `Tests/Groups/Ott.lean` is this cast as a term; its value equation
+    -- PF-C accepts, so the type-position comparison is what still controls the rule.)
+    ("tv", ann (lams 5 (var 0))
+      (pi (univ 0) (pi (var 0) (pi (eqTy (var 1) (var 1))
+        (pi (pi (var 1) (univ 0)) (pi (var 2)
+          (pi (app (var 1) (cast (var 3) (var 3) (var 2) (var 0)))
+            (app (var 2) (var 1)))))))), false) ]
 
 end MTm
 
