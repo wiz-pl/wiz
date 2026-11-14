@@ -87,7 +87,11 @@ def builtinGroup : Group where
           "def w : Nat.pow 2 5000 = Nat.pow 2 5000 := rfl\n" ++
           -- below it, the value is a native numeral (and is needed here)
           "def x : Nat.log2 (Nat.pow 2 400) = 400 := refl 400\n" ++
-          "def y : Nat.pow 2 64 = 18446744073709551616 := refl 18446744073709551616") },
+          "def y : Nat.pow 2 64 = 18446744073709551616 := refl 18446744073709551616\n" ++
+          -- kernel proofs only: nothing is assumed, and nothing is trusted to a native run
+          "#print axioms t\n#print axioms u\n#print axioms v")
+          ["'t' does not depend on any axioms", "'u' does not depend on any axioms",
+           "'v' does not depend on any axioms"] },
     { name := "different huge powers are not equal", run := fun _ =>
         -- the arguments are compared first; they differ, so equality fails (cleanly, and
         -- without claiming that any two glued applications are equal)
