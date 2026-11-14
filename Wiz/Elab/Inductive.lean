@@ -99,7 +99,7 @@ def phantomTail (ctxΔ : LocalCtx R) (Δ : Array (Name × BinderInfo × Term R �
       | .sort _ => some p
       | .qty | .size | .sizeLt _ => none
       | _ => if isProp g tys vP then none
-        else some (.sigma "x" (.qlit 0) P (.eq (P.lift 1) (.var 0) (p.lift 1)) none)
+        else some (.sigma "x" (.qlit 0) P (.eq (P.lift 1) (.var 0) (p.lift 1)) .hole)
     let some D := D? | continue
     let some u := typeSort? g tys (← evalIn ctxΔ D) | continue
     unless u.le lvl do continue
@@ -110,7 +110,7 @@ def phantomTail (ctxΔ : LocalCtx R) (Δ : Array (Name × BinderInfo × Term R �
   let mark := markTail
   if mark then doms := doms.push (structTailDom : Term R)
   let bname (i : Nat) : Name := if mark && i == nPh then structTailName else phantomName
-  let ty := (doms.toList.zipIdx).foldr (fun (D, i) acc => .pi (bname i) .default (.qlit 0) (D.lift i) acc none)
+  let ty := (doms.toList.zipIdx).foldr (fun (D, i) acc => .pi (bname i) .default (.qlit 0) (D.lift i) acc .hole)
     (Term.unit lvl : Term R)
   let val := (doms.toList.zipIdx).foldr (fun (_, i) acc => .lam (bname i) acc) (Term.tt : Term R)
   pure (ty, val, names)
@@ -215,10 +215,10 @@ def ctorDesc (nΔ : Nat) (fields : List (Name × Term R × Term R)) (target : Li
     | some k => !k.equiv (.succ l)
     | none => false
   let mkArg (k : Nat) (q F : Term R) (name : Name) (D : Term R) : Term R :=
-    if small (levels[k]?.bind (·.1)) then .darg q (.ulift (.succ l) F) (.lam name (downVar0 D))
+    if small (levels[k]?.bind (·.1)) then .darg q (.ulift ((levels[k]?.bind (·.1)).getD .hole) (.succ l) F) (.lam name (downVar0 D))
     else .darg q F (.lam name D)
   let mkHrec (k : Nat) (q H : Term R) (h : Name) (js D : Term R) : Term R :=
-    if small (levels[k]?.bind (·.2)) then .dhrec q (.ulift (.succ l) H) (.lam h (downVar0 js)) D
+    if small (levels[k]?.bind (·.2)) then .dhrec q (.ulift ((levels[k]?.bind (·.2)).getD .hole) (.succ l) H) (.lam h (downVar0 js)) D
     else .dhrec q H (.lam h js) D
   --<sol
   let n := fields.length
@@ -268,7 +268,7 @@ def peelSignature : Term R → Except String (List (Name × BinderInfo × Term R
   | _ => throw "the type of an inductive must be a sequence of arrows ending in Type u"
 
 private def pisTm (bs : List (Name × BinderInfo × Term R × Term R)) (b : Term R) : Term R :=
-  bs.foldr (fun (x, bi, q, A) acc => .pi x bi q A acc none) b
+  bs.foldr (fun (x, bi, q, A) acc => .pi x bi q A acc .hole) b
 
 /-- The variables of an `n`-binder telescope, outermost first, seen from `extra` binders deeper. -/
 private def telescopeVars (n extra : Nat) : List (Term R) :=
@@ -310,7 +310,7 @@ def elabInductive (cmd : Syntax) (levelParams : List Name) : ElabM R (List (Decl
     | .error e => fail (cmd.child "sig") e
   let nΞ := Ξ.length
   -- the index type: (ξ₁ : X₁) × … × Unit
-  let I : Term R := Ξ.foldr (fun (x, _, q, X) acc => .sigma x q X acc none) (.unit (.succ l))
+  let I : Term R := Ξ.foldr (fun (x, _, q, X) acc => .sigma x q X acc .hole) (.unit (.succ l))
   -- constructors, elaborated with `T` bound locally
   -- inside the declaration `T` takes the parameters too: `T : Δ → Ξ → Type l`
   let ctxT := ctxΔ.bind T (eval (← getGlobals) [] (pisTm Δ.toList sig))
@@ -356,7 +356,7 @@ def elabInductive (cmd : Syntax) (levelParams : List Name) : ElabM R (List (Decl
   let sealAx := if (← getGlobals).contains (sealName T) then some (sealName T) else none
   let (tailTy, tailV, _) ← phantomTail ctxΔ Δ (fun k => descs.any (·.hasVar k) || I.hasVar k) (.succ l)
     (sealAx := sealAx)
-  let I : Term R := Ξ.foldr (fun (x, _, q, X) acc => .sigma x q X acc none) (tailTy.lift nΞ)
+  let I : Term R := Ξ.foldr (fun (x, _, q, X) acc => .sigma x q X acc .hole) (tailTy.lift nΞ)
   if !(tailV matches .tt) then
     descs ← (ctorInfo.zip ctorLevels).mapM fun ((cname, fs, js), lvs) => match ctorDesc nΔ (fs.map fun (x, _, q, A) => (x, q, A)) js tailV l lvs with
       | .ok D => pure D
@@ -365,7 +365,7 @@ def elabInductive (cmd : Syntax) (levelParams : List Name) : ElabM R (List (Decl
   let w : Term R := .qlit QuantitySyntax.explicitDefault
   -- (Q4) the tag is in `Type`: lifted when the type is in a bigger universe
   let tagLifted := !(Level.succ l).equiv (Level.ofNat 1)
-  let desc : Term R := .darg w (if tagLifted then .ulift (.succ l) (.enum names) else .enum names)
+  let desc : Term R := .darg w (if tagLifted then .ulift 1 (.succ l) (.enum names) else .enum names)
     (.lam "t" (.ecase "z" ((Term.desc l I).lift 2) (if tagLifted then .down (.var 0) else .var 0)
       (descs.map (·.lift 1))))
   let ΔNames := Δ.toList.map (·.1)
@@ -478,7 +478,7 @@ def elabCoinductive (cmd : Syntax) (levelParams : List Name) :
     let proj : Term R := (lifts[k]?.getD .none).unwrap (.fst ((List.range k).foldl (fun t _ => .snd t) (.out (.var 0))))
     let d : Decl R :=
       { name := T ++ "." ++ x, levelParams := levelParams,
-        type := pisTm implicitΔ (.pi "x" .default (.qlit QuantitySyntax.explicitDefault) Tapp (F.lift 1) none),
+        type := pisTm implicitΔ (.pi "x" .default (.qlit QuantitySyntax.explicitDefault) Tapp (F.lift 1) .hole),
         value := some (lamsTm ΔNames (.lam "x" proj)), inline := true }
     decls := decls ++ [d]
     obs := obs ++ [(x, isRec)]
@@ -540,12 +540,12 @@ def elabStructure (cmd : Syntax) (levelParams : List Name) : ElabM R (List (Decl
     | .ok ([], l) => pure l
     | .ok _ => throwAt (cmd.child "sig").info "a structure has no indices"
     | .error e => throwAt (cmd.child "sig").info e
-  let body : Term R := fs'.toList.foldr (fun (x, _, q, A) acc => .sigma x q A acc none) (.unit (.succ l))
+  let body : Term R := fs'.toList.foldr (fun (x, _, q, A) acc => .sigma x q A acc .hole) (.unit (.succ l))
   -- phantom parameters (see `phantomTail`): the final `Unit` becomes the phantom tail
   -- (a structure with fields marks its tail, so that erasure unboxes the last field, 22i)
   let (tailTy, tailV, _) ← phantomTail ctxΔ Δ (fun k => body.hasVar k) (.succ l)
     (markTail := !fs'.isEmpty)
-  let body : Term R := fs'.toList.foldr (fun (x, _, q, A) acc => .sigma x q A acc none) (tailTy.lift fs'.size)
+  let body : Term R := fs'.toList.foldr (fun (x, _, q, A) acc => .sigma x q A acc .hole) (tailTy.lift fs'.size)
   let ΔNames := Δ.toList.map (·.1)
   let n := fs'.size
   let Sapp : Term R := (telescopeVars Δ.size n).foldl .app (.const S us)

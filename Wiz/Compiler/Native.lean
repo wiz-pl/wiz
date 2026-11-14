@@ -90,7 +90,7 @@ partial def nativeReadback (g : Globals R) (builtins : List (Name × Name)) (ty 
     unless t < ls.length do throw "a tag out of range"
     return .tag ls t
   | .unit _ => return .tt
-  | .ulift _ A => return .up (← rb A v fuel)
+  | .ulift _ _ A => return .up (← rb A v fuel)
   -- the last component of a constructor's payload: its index equation, a proof
   | .neutral (.eq A a b) #[] =>
     if conv g #[] A a b then return .refl (quote g 0 A) (quote g 0 a)
@@ -107,7 +107,7 @@ where
   irrelevant (A : VTy R) (fuel : Nat) : Bool :=
     match fuel, whnf A with
     | 0, _ => false
-    | fuel + 1, .ulift _ B => irrelevant B fuel
+    | fuel + 1, .ulift _ _ B => irrelevant B fuel
     | _, t => propSort? t == some true
   /-- A proof of a closed proposition that holds by computation (an index equation, a
   range proof `Nat.lt n m = .true`, …), which the kernel then checks with the rest. -/
@@ -115,7 +115,7 @@ where
     if fuel == 0 then throw "a proof too deep"
     match whnf A with
     | .unit _ => return .tt
-    | .ulift _ B => return .up (← proof B (fuel - 1))
+    | .ulift _ _ B => return .up (← proof B (fuel - 1))
     | .neutral (.eq X a b) #[] =>
       if conv g #[] X a b then return .refl (quote g 0 X) (quote g 0 a)
       throw "an index equation that does not hold"

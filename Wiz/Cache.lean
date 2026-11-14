@@ -90,6 +90,7 @@ partial def level : Level → Sx
   | .imax a b => node "imax" [level a, level b]
   | .param n => node "p" [str n]
   | .mvar m => node "m" [nat m]
+  | .hole => .a "_"
 
 def bi : BinderInfo → Sx
   | .default => .a "d" | .implicit => .a "i" | .instImplicit => .a "I"
@@ -98,13 +99,13 @@ partial def term : Term R → Sx
   | .var i => node "var" [nat i]
   | .const n us => node "const" [str n, list (us.map level)]
   | .sort l => node "sort" [level l]
-  | .pi x b q A B s => node "pi" [str x, bi b, term q, term A, term B, optLevel s]
+  | .pi x b q A B s => node "pi" [str x, bi b, term q, term A, term B, level s.dom, level s.cod]
   | .lam x b => node "lam" [str x, term b]
   | .app f a => node "app" [term f, term a]
   | .letE x q t v b => node "let" [str x, term q, term t, term v, term b]
   | .ann t ty => node "ann" [term t, term ty]
   | .mvar m => node "mvar" [nat m]
-  | .sigma x q a b s => node "sigma" [str x, term q, term a, term b, optLevel s]
+  | .sigma x q a b s => node "sigma" [str x, term q, term a, term b, level s.dom, level s.cod]
   | .pair a b => node "pair" [term a, term b]
   | .fst t => node "fst" [term t]
   | .snd t => node "snd" [term t]
@@ -147,14 +148,11 @@ partial def term : Term R → Sx
   | .coit l I D S st i s => node "coit" [level l, term I, term D, term S, term st, term i, term s]
   | .natLit n => node "nat" [nat n]
   | .natOp op as => node "natOp" [str op, list (as.toList.map term)]
-  | .ulift l A => node "ulift" [level l, term A]
+  | .ulift k l A => node "ulift" [level k, level l, term A]
   | .up a => node "up" [term a]
   | .down t => node "down" [term t]
   | .prf l t => node "prf" [level l, term t]
 where
-  optLevel : Option Level → Sx
-    | none => .a "none"
-    | some l => node "some" [level l]
   hint : Option (Name × List Level × List (Term R)) → Sx
     | none => .a "none"
     | some (n, us, as) => node "hint" [str n, list (us.map level), list (as.map term)]
@@ -175,6 +173,7 @@ partial def dlevel : Sx → Option Level
   | .l #[.a "imax", a, b] => return .imax (← dlevel a) (← dlevel b)
   | .l #[.a "p", .a n] => some (.param n)
   | .l #[.a "m", .a n] => n.toNat?.map .mvar
+  | .a "_" => some .hole
   | _ => none
 
 def dbi : Sx → Option BinderInfo
@@ -200,22 +199,18 @@ partial def dterm : Sx → Option (Term R)
       | .l #[.a "hint", .a nm, us, as] => do
         some (some (nm, ← (← items? us).toList.mapM dlevel, ← (← items? as).toList.mapM dterm))
       | _ => none
-    let olv (i : Nat) : Option (Option Level) :=
-      match x i with
-      | .a "none" => some none
-      | .l #[.a "some", l] => (dlevel l).map some
-      | _ => none
+    let sorts (i : Nat) : Option BinderSorts := return ⟨← lv i, ← lv (i + 1)⟩
     match tag with
     | "var" => return .var (← n 1)
     | "const" => return .const (← s 1) (← (← items? (x 2)).toList.mapM dlevel)
     | "sort" => return .sort (← lv 1)
-    | "pi" => return .pi (← s 1) (← dbi (x 2)) (← t 3) (← t 4) (← t 5) (← olv 6)
+    | "pi" => return .pi (← s 1) (← dbi (x 2)) (← t 3) (← t 4) (← t 5) (← sorts 6)
     | "lam" => return .lam (← s 1) (← t 2)
     | "app" => return .app (← t 1) (← t 2)
     | "let" => return .letE (← s 1) (← t 2) (← t 3) (← t 4) (← t 5)
     | "ann" => return .ann (← t 1) (← t 2)
     | "mvar" => return .mvar (← n 1)
-    | "sigma" => return .sigma (← s 1) (← t 2) (← t 3) (← t 4) (← olv 5)
+    | "sigma" => return .sigma (← s 1) (← t 2) (← t 3) (← t 4) (← sorts 5)
     | "pair" => return .pair (← t 1) (← t 2)
     | "fst" => return .fst (← t 1)
     | "snd" => return .snd (← t 1)
@@ -250,7 +245,7 @@ partial def dterm : Sx → Option (Term R)
     | "sfix" => return .sfix (← lv 1) (← t 2) (← t 3) (← lv 4) (← t 5) (← t 6) (← t 7) (← t 8) (← t 9)
     | "scase" => return .scase (← lv 1) (← t 2) (← t 3) (← t 4) (← lv 5) (← t 6) (← t 7) (← t 8) (← t 9) (← t 10)
     | "cocon" => return .cocon (← t 1)
-    | "ulift" => return .ulift (← lv 1) (← t 2)
+    | "ulift" => return .ulift (← lv 1) (← lv 2) (← t 3)
     | "up" => return .up (← t 1)
     | "down" => return .down (← t 1)
     | "prf" => return .prf (← lv 1) (← t 2)
@@ -520,7 +515,7 @@ def Effect.ofSx? (x : Sx) : Option (Effect R) := do
 /-- The cache's version: change it whenever the format or the elaborator's output changes.
 (The directory store also mixes in the binary's own hash, `binaryId`, so two builds of
 wiz never share entries; the salt is for invalidating by hand.) -/
-def salt : UInt64 := hash "wiz-cache-30-mutual-ctor-names-error-codes-scase-qty-letUnit"  -- 30: a mutual block's constructors are named per type, error codes, `Info.fix`, `scase` quantity (K1), `letUnit`; 20: proof markers (P2: declarations are stored marked); 15: doc comments and declaration kinds (11s); 14: a builtin key is registered once; 13: witnesses, assumed registrations, warnings; 12: private constructors, observations, fields (13b); 11: 22i, marked structure tails; 9: private names (13b); 8: Q4
+def salt : UInt64 := hash "wiz-cache-30-sorts-prf-mutual-ctor-names-error-codes-scase-qty-letUnit"  -- 30: mandatory component sorts (Π/Σ carry ⟨dom, cod⟩, ULift its content's sort), a mutual block's constructors named per type, error codes, `Info.fix`, `scase` quantity (K1), `letUnit`; 20: proof markers (P2: declarations are stored marked); 15: doc comments and declaration kinds (11s); 14: a builtin key is registered once; 13: witnesses, assumed registrations, warnings; 12: private constructors, observations, fields (13b); 11: 22i, marked structure tails; 9: private names (13b); 8: Q4
 
 /-! ## Keys and atomic writes (stage 23c)
 
