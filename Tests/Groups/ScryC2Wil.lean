@@ -13,10 +13,12 @@ build. For every differential case the test
 2. lowers the checked-in CST with `Scry.lowerTU`, runs `Wil.runFunction` on the result,
    and compares.
 
-`havoc.c` is the boundary case: a struct field access is not modelled, so the lowering
-records a warning and emits `havoc`; the test asserts that (and that the Wil value is
-*not* claimed to be the C value). The other cases cover the CFG, origins, the direct-call
-graph and the facts EDB. The design is `wiz-notes/scry-c2wil.md`.
+`havoc.c` used to be the boundary case (a struct field access was havoc + warning). Since
+`agent/scry-points-to` a struct local is a stack slot and a field access is a `gep` +
+`load`/`store`, so it is now a **differential** case like the others; the boundary fixture
+moved to `scry/tests/fixtures/taint-boundary.c` (the taint group's end-to-end test). The
+other cases cover the CFG, origins, the direct-call graph and the facts EDB. The design is
+`wiz-notes/scry-c2wil.md` (§13 for the memory lowering).
 -/
 
 open Wiz
@@ -132,14 +134,8 @@ def group : Group where
       run := fun _ => differential "arith" },
     { name := "differential: a for loop is desugared to a header/update/back edge",
       run := fun _ => differential "forloop" },
-    { name := "boundary: a struct field access is havoc with a warning, not a wrong value",
-      run := fun _ => do
-        let (src, cst) ← fixture "havoc"
-        let c ← ccResult "havoc"
-        let outs ← wizEval "havoc" src cst
-          "#eval mainResult\n#eval warnCount\n#eval havocCount\n"
-        checkEq ["1", "2", "2"] outs
-        check (c != 1) s!"the C result ({c}) must differ from the havoc'd Wil value" },
+    { name := "differential: a struct field access is a slot store/load, not havoc",
+      run := fun _ => differential "havoc" },
     { name := "CFG: valid targets, edges, back edge and reachability of the loop function",
       run := fun _ => do
         let (src, cst) ← fixture "branch"

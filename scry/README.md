@@ -35,7 +35,7 @@ throughput numbers.
 `scry taint` is the S2 + S4 pipeline end to end:
 
 ```sh
-grail run scry -- taint corpus/c2wil/taint-unsafe.c
+grail run scry -- taint tests/fixtures/taint-unsafe.c
 grail run scry -- taint FILE.c --rules ../lib/Scry/rules/default.scry --sarif out.sarif
 grail run scry -- taint FILE.c --json --allow-errors
 grail run scry -- taint FILE.c --fail-on-finding
@@ -60,13 +60,66 @@ a struct field, array/subscript, cast, `?:`, `sizeof`, string literal, global, s
 not modelled. `scry taint` prints those warnings as `lowering-boundary` findings and puts
 them in SARIF; they are `unchecked` (there is no derivation, and the value is unknown).
 
-The remaining gap is **points-to and memory**. Taint tracks registers through the
-def-use layer, but `store`/`load`, aggregate fields, arrays and heap objects are not
-modelled precisely, so a flow that goes through memory can be missed; the lowering's
-havoc warning is the visible boundary. Indirect calls are kept unknown (the call graph
-records them), and per-warning source spans are not yet attached (a boundary warning
-points at the function definition). A parser error is refused by default;
-`--allow-errors` analyses the recovered tree and reports the `ERROR`/`MISSING` count.
+## Points-to and memory
+
+`Scry.PointsTo` is a **flow-insensitive, field-sensitive** Andersen-style points-to
+analysis over the lowered Wil; the taint rules consume it, so a `store` propagates taint
+into the locations it may alias and a later `load` receives it.
+
+The location lattice is a set of
+
+| location | meaning |
+|---|---|
+| `Loc.stack f p` | a stack slot: an address-taken scalar, or a struct/array local |
+| `Loc.glob n` | a module-level global |
+| `Loc.heap f p` | a heap object (`malloc`/`calloc`) |
+| `Loc.fn n` | a function address (function pointers) |
+| `Loc.field b k` | cell `k` of `b` (a field, an array element, pointer arithmetic) |
+| `Loc.anyOff b` | *some* cell of `b` (a variable index) |
+| `Loc.unknown` | memory the analysis could not bound (one merged location) |
+
+Offset 0 is the identity, so `*p` and `p[0]` are the same cell; `anyOff b` overlaps `b`
+and every `field b k`, which is the array policy ("smash first, refine later"). The
+solution is a set of monotone inclusions (`x = y`, `x = p + k`, `x = *p`, `*p = y`,
+`free(p)`, parameter and return flow across resolved calls), a fixed point over the whole
+program: context-insensitive, field-sensitive, and cheap enough for the corpus.
+
+**No alias and unknown are different.** An empty location set means the pointer is null or
+a constant: it aliases nothing, so there is no flow and no warning. A set containing
+`Loc.unknown` means the analysis failed to bound the target (a havoc'd pointer, a
+function parameter with no caller, an unmodelled external's pointer result): the taint
+still propagates (a may analysis) **and** an `unknown-memory` warning is reported at the
+store/load. `free` is tracked too: a store/load of a freed location is a
+`use-after-free` warning (the finding is still reported). An indirect call is resolved
+through the function-pointer location set; when no target is known it is an
+`unknown-indirect` warning and nothing is propagated.
+
+Supported in memory: struct/union fields by constant offset, array elements by constant
+index, a variable index (widened to the base object), `&x`/`*p`/`**pp`, pointer arithmetic
+by a constant or a variable index, `malloc`/`calloc`/`free`, globals, function pointers
+(assigned, copied, passed as an argument, stored in memory), pointer returns
+(`p = f()`), aliased parameters, and the `strcpy`-family copy model. Not modelled:
+`realloc`, external calls' memory effects outside that table, heap shape (a linked list
+through two allocation sites is two sets, not a shape), context sensitivity, and
+offsets past one `anyOff` level.
+
+Fixtures and their expected results are in `tests/fixtures/mem-*.c` and asserted by
+`tests/taint.wiz`: same-slot store/load (1 finding, path through `store`/`load`),
+different slot (0), struct fields and a global field (2, and the sibling field 0), array
+elements (1, sibling elements/arrays 0), heap (1), pointer-to-pointer (1), aliased
+parameters (1 across two calls), `free` then use (1 finding + `use-after-free`), known
+indirect target (1), unknown indirect target (0 findings + `unknown-indirect`),
+returned pointer (1), and `strcpy` into one array (1, the other array 0).
+
+**Boundary warnings now carry spans.** `Scry.Warning` has a `Wil.Span`, so a
+`lowering-boundary` result points at the construct (a cast, `sizeof`, a skipped `goto`, …)
+instead of the function definition. SARIF rule ids are namespaced (`scry/c/<rule>`,
+`scry/lowering/boundary`, `scry/memory/<kind>`) and the run declares
+`columnKind: utf16CodeUnits` (the C slice is ASCII, where a byte column is a UTF-16
+column; a non-ASCII source would need an explicit conversion).
+
+A parser error is refused by default; `--allow-errors` analyses the recovered tree and
+reports the `ERROR`/`MISSING` count.
 
 `tests/native.wiz` checks the shim on `fixtures/hello.c`: 55 nodes, 54 edges, the root
 span `[0,95)`, parent/child/next-sibling links, and that `fixtures/broken.c` is refused

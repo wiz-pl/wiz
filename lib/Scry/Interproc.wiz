@@ -114,18 +114,31 @@ structure Scry.Summary where
   /-- Tainted parameter positions. -/
   params : List Nat
   retTainted : Bool
+  /-- Tainted memory locations and the stores that put the taint there. Memory is
+  program-wide: a store in one function must be visible to a load in another, so the
+  summary carries locations, not just parameters. -/
+  mems : List Scry.MemSeed
 
 def Scry.summaryOf (sums : List Scry.Summary) (name : String) : Scry.Summary :=
   match List.find (fun s => String.eq s.name name) sums with
   | .some s => s
-  | .none => Scry.Summary.mk name .nil .false
+  | .none => Scry.Summary.mk name .nil .false .nil
+
+def Scry.seedSetEq (a b : List Scry.MemSeed) : Bool :=
+  Bool.and (List.all (fun m => List.any (fun x =>
+      String.eq (Scry.memSeedKey x) (Scry.memSeedKey m)) b) a)
+    (List.all (fun m => List.any (fun x =>
+      String.eq (Scry.memSeedKey x) (Scry.memSeedKey m)) a) b)
 
 def Scry.summariesEq (a b : List Scry.Summary) : Bool :=
   List.foldr (fun s acc =>
     if acc then
       let t := Scry.summaryOf b s.name;
-      if Scry.setEq s.params t.params then Nat.beq (if s.retTainted then 1 else 0)
-        (if t.retTainted then 1 else 0) else .false
+      if Scry.setEq s.params t.params then
+        if Scry.seedSetEq s.mems t.mems then
+          Nat.beq (if s.retTainted then 1 else 0) (if t.retTainted then 1 else 0)
+        else .false
+      else .false
     else .false) .true a
 
 def Scry.totalParams (fs : List Wil.Func) : Nat :=
@@ -157,10 +170,21 @@ def Scry.retSeedsOf (graph : Scry.CallGraph) (sums : List Scry.Summary)
       | .none => .nil
     else .nil) graph.sites
 
+/-- Every location any summary knows to be tainted (deduplicated by location). -/
+def Scry.allMemSeeds (sums : List Scry.Summary) : List Scry.MemSeed :=
+  Scry.dedupSeeds (Scry.concatLists (fun s => s.mems) sums)
+
+/-- The seeds one function's evaluation starts from: every summary's tainted locations
+**except the ones this function produces itself** (those are re-derived by its own rules,
+which keeps the provenance — a fact seeded as EDB would shadow its derivation). -/
+def Scry.seedsFor (sums : List Scry.Summary) (func : String) : List Scry.MemSeed :=
+  List.filter (fun m => Bool.not (String.eq m.func func)) (Scry.allMemSeeds sums)
+
 def Scry.resultsWith (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
     (pt : Scry.PtResult) (sums : List Scry.Summary) : List Scry.FuncResult :=
   List.map (fun fn =>
-    Scry.evaluateFunc fn pack pt (Scry.summaryOf sums fn.name).params
+    Scry.evaluateFunc fn pack pt (Scry.seedsFor sums fn.name)
+      (Scry.summaryOf sums fn.name).params
       (Scry.retSeedsOf graph sums fn.name)) p.funcs
 
 /-- One summary round: evaluate every function under `prev`, then grow every summary
@@ -168,6 +192,7 @@ with the argument-taint contributions the results expose and the return flags. -
 def Scry.stepSummaries (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
     (pt : Scry.PtResult) (prev : List Scry.Summary) : List Scry.Summary :=
   let results := Scry.resultsWith p pack graph pt prev;
+  let mems := Scry.dedupSeeds (Scry.concatLists (fun r => Scry.resultMemSeeds r) results);
   List.map (fun fn =>
     let old := Scry.summaryOf prev fn.name;
     let contrib := Scry.paramContributions graph results fn.name;
@@ -175,7 +200,7 @@ def Scry.stepSummaries (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.Ca
       | .some r => Scry.returnsTainted r
       | .none => (.false : Bool);
     Scry.Summary.mk fn.name (Scry.unionNat old.params contrib)
-      (Bool.or old.retTainted ret)) p.funcs
+      (Bool.or old.retTainted ret) (Scry.dedupSeeds (List.append old.mems mems))) p.funcs
 
 partial def Scry.summaryLoop (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
     (pt : Scry.PtResult) (fuel : Nat) (sums : List Scry.Summary) : List Scry.Summary :=
@@ -217,8 +242,9 @@ summary fixpoint, then one final evaluation per function. -/
 def Scry.analyze (p : Wil.Program) (pack : Scry.RulePack) : Scry.ProgramResult :=
   let pt := Scry.pointsTo p;
   let graph := Scry.callGraph p pt;
-  let sums0 := List.map (fun fn => Scry.Summary.mk fn.name .nil .false) p.funcs;
-  let fuel := Nat.add 4 (Nat.add (List.length p.funcs) (Scry.totalParams p.funcs));
+  let sums0 := List.map (fun fn => Scry.Summary.mk fn.name .nil .false .nil) p.funcs;
+  let fuel := Nat.add 8 (Nat.add (Nat.add (List.length p.funcs) (Scry.totalParams p.funcs))
+    (Scry.ptLocCount pt));
   let sums := Scry.summaryLoop p pack graph pt fuel sums0;
   let results := Scry.resultsWith p pack graph pt sums;
   let warnings := Scry.dedupWarnings (Scry.concatLists (fun r => r.plan.memWarnings) results);
@@ -254,7 +280,7 @@ def Scry.returnChain (r : Scry.FuncResult) : List Scry.PathNode :=
     match Scry.defReaching r p.1 p.2 with
     | .none => .nil
     | .some d =>
-      List.append (Scry.chainToDef r.fn.name st d p.2)
+      List.append (Scry.chainToDef r.fn.name r.plan.seeds st d p.2)
         (List.cons (Scry.PathNode.mk r.fn.name p.1 p.2 Scry.PathKind.returnValue) .nil)
 
 /-- A caller path to the argument at `pos` of a call site, if one is tainted. -/
@@ -270,7 +296,7 @@ def Scry.argPath (r : Scry.FuncResult) (site : Scry.CallSite) (pos : Nat) :
       match Scry.defReaching r site.node v with
       | .none => .none
       | .some d =>
-        .some (List.append (Scry.chainToDef r.fn.name st d v)
+        .some (List.append (Scry.chainToDef r.fn.name r.plan.seeds st d v)
           (List.cons (Scry.PathNode.mk r.fn.name site.node v Scry.PathKind.call) .nil))
     else .none
 
@@ -335,6 +361,25 @@ partial def Scry.extendPath (pr : Scry.ProgramResult) (stack : List (String × N
               | chain =>
                 let chain := Scry.extendPath pr stack' k callee chain;
                 List.append chain path
+        | .store =>
+          /-- A memory seed produced by another function: expand it into that function's
+          chain for the value stored at its store point. -/
+          match Scry.findResult pr root.func with
+          | .none => path
+          | .some producer =>
+            if String.eq producer.fn.name fr.fn.name then path
+            else match List.find (fun m => Nat.beq m.node root.point) producer.plan.mstores with
+              | .none => path
+              | .some m =>
+                match Scry.defReaching producer root.point m.var with
+                | .none => path
+                | .some d =>
+                  let pst := match producer.state with
+                    | .none => Scry.State.empty
+                    | .some s2 => s2;
+                  let chain := Scry.chainToDef producer.fn.name producer.plan.seeds pst d m.var;
+                  let chain := Scry.extendPath pr stack' k producer chain;
+                  List.append chain path
         | _ => path
 
 -- ## Findings

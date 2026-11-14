@@ -214,6 +214,34 @@ def Scry.indirectKnownMain : Wil.Func :=
 def Scry.indirectKnownProgram : Wil.Program :=
   Wil.program [Scry.indirectKnownMain, Scry.indirectKnownCallee]
 
+/-- Memory across calls: `memWriter(p)` stores the source through its parameter,
+`memReader(q)` loads through its own and sinks it, and `memMain` passes the same object.
+The location taint is program-wide (a summary), so the reader's evaluation sees the
+writer's store. -/
+def Scry.memWriterFn : Wil.Func :=
+  let p := Wil.var 0 (.ptr Wil.i32);
+  let r := Scry.tv 1;
+  Wil.func "memWriter" [p] [r]
+    [ Wil.block [Wil.call (.some r) "getenv" [], Wil.store p r] (Wil.ret .none) ]
+
+def Scry.memReaderFn : Wil.Func :=
+  let q := Wil.var 0 (.ptr Wil.i32);
+  let x := Scry.tv 1;
+  Wil.func "memReader" [q] [x]
+    [ Wil.block [Wil.load x q, Wil.call .none "system" [x]] (Wil.ret .none) ]
+
+def Scry.memMainFn : Wil.Func :=
+  let p := Wil.var 0 (.ptr Wil.i32);
+  Wil.func "memMain" [] [p]
+    [ Wil.block
+        [ Wil.alloc p 1
+        , Wil.call .none "memWriter" [p]
+        , Wil.call .none "memReader" [p] ]
+        (Wil.ret .none) ]
+
+def Scry.memAcrossProgram : Wil.Program :=
+  Wil.program [Scry.memMainFn, Scry.memWriterFn, Scry.memReaderFn]
+
 /-- The demo spec used by the tests and the notes. -/
 def Scry.demoSpec : Scry.TaintSpec :=
   Scry.TaintSpec.mk ["getenv", "recv"]

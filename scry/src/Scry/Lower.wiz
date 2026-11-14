@@ -19,12 +19,23 @@ The boundary is deliberate. What lowers:
   unary `- ~ ! +`, `=`, `+= -= *= /= %= &= |= ^= <<= >>=`, `++`/`--`;
 * `if`/`else`, `while`, `for` (desugared to a header block, a body and an update block),
   `break`, `continue`, `return`, compound statements and declarations;
-* direct calls to functions defined (or prototyped) in the translation unit.
+* direct calls to functions defined (or prototyped) in the translation unit;
+* **memory**: a struct/union local or an array is a stack slot (`Wil.Rhs.slot`) with a
+  cell layout, so `p.x`, `a[0]`, `a[i]` and `*p` are `gep`/`gepVar` + `load`/`store`; an
+  address-taken scalar (`&x`) is a one-cell slot; `malloc`/`calloc` are `Wil.Rhs.alloc`,
+  `free` is `Wil.free`, a module global is `Wil.Rhs.globalRef`, a function used as a
+  value is `Wil.Rhs.fnptr`, and a call through a function pointer is
+  `Wil.Callee.indirect`;
+* `strcpy`/`strncpy`/`strcat`/`memcpy`/`memmove` are ordinary external calls; the taint
+  layer models their memory effect (`Scry.RuleTaint.copyModel`).
 
-Everything else is **havoc plus a warning**, never a silent wrong value: a struct field
-access, a cast, `?:`, `sizeof`, an array, a string literal, a global, `&&`/`||` as a
-value, an unknown identifier, a `switch`/`do`/`goto`, an unsupported declaration. A
-havoc'd value is the type's default (zero/null), and `Scry.TU.warnings` names it.
+Everything else is **havoc plus a warning**, never a silent wrong value: a cast, `?:`,
+`sizeof`, a string literal, `&&`/`||` as a value, an unknown identifier, an unmodelled
+aggregate initialiser, `realloc`, a `switch`/`do`/`goto`, an unsupported declaration. A
+havoc'd value is the type's default (zero/null). Each warning carries the offending
+statement's `Wil.Span`, so `Scry.TU.warnings` is a list of
+`Scry.Warning {func, message, span}` and `scry taint` places the diagnostic on the
+statement, not the function definition.
 
 `Wil.Stmt`/`Wil.Term` carry `origin : Wil.Span` (file, byte range, CST node id), so
 every lowered statement points at source; `Scry.edbOf` exports the §4.3 EDB:
@@ -154,6 +165,16 @@ structure Scry.Sym where
   /-- `static`: the symbol is translation-unit local. -/
   isStatic : Bool
 
+/-- A lowering diagnostic with its origin: the offending statement/expression, not the
+function definition. This is what `scry taint` turns into a `lowering-boundary` result. -/
+structure Scry.Warning where
+  /-- The function whose lowering produced it. -/
+  func : String
+  /-- What was not modelled. -/
+  message : String
+  /-- The origin of the offending statement or expression. -/
+  span : Wil.Span
+
 /-- The state threaded through the lowering. Blocks are collected in `done` (in
 completion order, with their ids) and assembled into index order at the end. -/
 structure Scry.LState where
@@ -239,9 +260,13 @@ def Scry.bindSlot (name : String) (v : Wil.Var) (ty : Wil.Ty) (agg : Option Scry
     Scry.LM Unit :=
   Scry.modify (fun s => { s with env := .cons (Scry.Bind.mk name v (.slot ty agg)) s.env })
 
+/-- The binding of `name` (the innermost binding wins). -/
+def Scry.lookupBind (s : Scry.LState) (name : String) : Option Scry.Bind :=
+  List.find (fun b => String.eq b.name name) s.env
+
 /-- The register bound to `name` (the innermost binding wins). -/
-def Scry.lookupBind (s : Scry.LState) (name : String) : Option Wil.Var :=
-  match List.find (fun b => String.eq b.name name) s.env with
+def Scry.lookupVar (s : Scry.LState) (name : String) : Option Wil.Var :=
+  match Scry.lookupBind s name with
   | .some b => .some b.var
   | .none => .none
 
@@ -375,7 +400,7 @@ after applying its pointers and (for functions) its function type. `declarator`,
 def Scry.declInfo (c : Scry.Cst) (s : Scry.LState) (n : Nat) (base : Wil.Ty) :
     String × Wil.Ty × Bool :=
   match c.kindOf n with
-  | k => match String.eq k "identifier" with
+  | k => match Bool.or (String.eq k "identifier") (String.eq k "field_identifier") with
     | .true => (c.textOf n, base, .false)
     | .false => match String.eq k "pointer_declarator" with
       | .true => match Scry.childF c n "declarator" with
@@ -435,99 +460,6 @@ def Scry.structFields (c : Scry.Cst) (s : Scry.LState) (body : Nat) :
       | .none => .nil
     | .false => .nil) (c.childrenOf body))
 end
-
--- ## The aggregate layout
-
-/-- The fields of the record with this id (`[]` when the id is not a known struct). -/
-def Scry.structAt (structs : List (String × List (String × Wil.Ty))) (id : Nat) :
-    List (String × Wil.Ty) :=
-  List.getD structs id .nil
-
-/-- Cells a type occupies in the analysis layout: one per scalar/pointer, the sum of the
-fields for a record, one for an unknown/dynamic type. Recursive records are cut off after
-`depth` levels (they can only be reached through pointers, which are one cell). -/
-def Scry.cellsOfGo (structs : List (String × List (String × Wil.Ty))) : Nat → Wil.Ty → Nat
-  | .zero, _ => 1
-  | .succ k, t => match t with
-    | .int _ _ => 1
-    | .ptr _ => 1
-    | .fn _ _ => 1
-    | .dyn => 1
-    | .unknown => 1
-    | .record id =>
-      List.foldr (fun f acc => Nat.add acc (Scry.cellsOfGo structs k f.2)) 0
-        (Scry.structAt structs id)
-
-def Scry.cellsOf (structs : List (String × List (String × Wil.Ty))) (t : Wil.Ty) : Nat :=
-  Scry.cellsOfGo structs 8 t
-
-/-- The cell offset and type of field `name` of record `id`. -/
-def Scry.fieldOffsetGo (structs : List (String × List (String × Wil.Ty))) (id : Nat)
-    (name : String) : Nat → List (String × Wil.Ty) → Option (Nat × Wil.Ty)
-  | _, .nil => .none
-  | off, .cons f rest => match String.eq f.1 name with
-    | .true => .some (off, f.2)
-    | .false => Scry.fieldOffsetGo structs id name (Nat.add off (Scry.cellsOf structs f.2)) rest
-
-def Scry.fieldOffset (structs : List (String × List (String × Wil.Ty))) (id : Nat)
-    (name : String) : Option (Nat × Wil.Ty) :=
-  Scry.fieldOffsetGo structs id name 0 (Scry.structAt structs id)
-
-/-- A constant integer expression the lowering can fold: a literal, a parenthesised
-constant, or `+ - * /` of constants. Array sizes and indices use it. -/
-def Scry.constInt (c : Scry.Cst) (n : Nat) : Option Nat :=
-  match Scry.ekindOf (c.kindOf n) with
-  | .number => match Scry.parseCInt (c.textOf n) with
-    | .some p => .some p.1
-    | .none => .none
-  | .paren => match Scry.exprKids c n with
-    | .cons e _ => Scry.constInt c e
-    | .nil => .none
-  | .unary => match Scry.childF c n "argument" with
-    | .none => .none
-    | .some a => match String.eq (Scry.tokenF c n "operator") "+" with
-      | .true => Scry.constInt c a
-      | .false => .none
-  | _ => .none
-
-/-- An array declarator (`int a[4]`, possibly under an `init_declarator`): its name, its
-element type, and its length (`0` when the size is not a constant the lowering folds). -/
-def Scry.arrayDecl (c : Scry.Cst) (s : Scry.LState) (n : Nat) (base : Wil.Ty) :
-    Option (String × Wil.Ty × Nat) :=
-  match String.eq (c.kindOf n) "init_declarator" with
-  | .true => match Scry.childF c n "declarator" with
-    | .some d => Scry.arrayDecl c s d base
-    | .none => none
-  | .false => match String.eq (c.kindOf n) "array_declarator" with
-    | .false => none
-    | .true =>
-      let di := match Scry.childF c n "declarator" with
-        | .some d => Scry.declInfo c s d base
-        | .none => ("", base, .true);
-      let len := match Scry.childF c n "size" with
-        | .some sz => match Scry.constInt c sz with
-          | .some v => v
-          | .none => 0
-        | .none => 0;
-      match String.isEmpty di.1 with
-      | .true => none
-      | .false => some (di.1, di.2.1, len)
-
-/-- Every identifier whose address is taken (`&x`) in a subtree: those declarations must
-become stack slots. `partial`: the recursion is over CST children, which Wiz does not see
-as structurally smaller. -/
-partial def Scry.addrTakenGo (c : Scry.Cst) (n : Nat) : List String :=
-  let here := match Scry.ekindOf (c.kindOf n) with
-    | .pointer => match Scry.tokenF c n "operator" with
-      | tok => match String.eq tok "&" with
-        | .false => .nil
-        | .true => match Scry.childF c n "argument" with
-          | .none => .nil
-          | .some a => match Scry.isK c a "identifier" with
-            | .false => .nil
-            | .true => .cons (c.textOf a) .nil
-    | _ => .nil;
-  List.append here (Scry.concatLists (fun j => Scry.addrTakenGo c j) (c.childrenOf n))
 
 -- ## Expression kinds, so the matches are exhaustive
 
@@ -854,61 +786,6 @@ def Scry.noteSym (c : Scry.Cst) (n : Nat) (di : String × Wil.Ty × Bool) : Scry
           (Scry.isStaticDecl c n)) .nil) })
   | _ => Scry.lret ()
 
-/-- Record the declarators of a top-level variable declaration as module globals (name,
-type, cells). Functions are left to `Scry.scanSyms`; arrays keep their length in the cell
-count. -/
-def Scry.noteGlobalDecls (c : Scry.Cst) (base : Wil.Ty) : List Nat → Scry.LM Unit
-  | .nil => Scry.lret ()
-  | .cons d rest => do
-    s ← Scry.get;
-    match Scry.arrayDecl c s d base with
-    | .some arr => do
-      let per := Scry.cellsOf s.structs arr.2.1;
-      let c0 := Nat.mul arr.2.2 per;
-      let cells := match Nat.beq c0 0 with
-        | .true => 1
-        | .false => c0;
-      Scry.modify (fun st => { st with globals := .cons (arr.1, arr.2.1, cells) st.globals });
-      Scry.noteGlobalDecls c base rest
-    | .none =>
-      let di := Scry.declInfo c s d base;
-      match String.isEmpty di.1 with
-      | .true => Scry.noteGlobalDecls c base rest
-      | .false => match di.2.1 with
-        | .fn _ _ => Scry.noteGlobalDecls c base rest
-        | t => do
-          Scry.modify (fun st => { st with globals := .cons (di.1, t, Scry.cellsOf s.structs t) st.globals });
-          Scry.noteGlobalDecls c base rest
-
-/-- First pass: typedefs and struct tags, in source order (later typedefs may use
-earlier structs; a typedef's own type is resolved once). Top-level variable declarations
-are recorded as globals; their initialisers are not modelled (analysis-only memory). -/
-def Scry.scanTypes (c : Scry.Cst) : List Nat → Scry.LM Unit
-  | .nil => Scry.lret ()
-  | .cons i rest =>
-    match Scry.isK c i "type_definition" with
-    | .true => do Scry.learnTypedef c i; Scry.scanTypes c rest
-    | .false => match Scry.isK c i "declaration" with
-      | .true => do
-        match Scry.childF c i "type" with
-        | .some tn => do
-          Scry.noteStruct c tn;
-          s2 ← Scry.get;
-          Scry.noteGlobalDecls c (Scry.typeOf c s2 tn) (Scry.childrenF c i "declarator")
-        | .none => Scry.lret ();
-        Scry.scanTypes c rest
-      | .false => match Scry.isK c i "function_definition" with
-        | .true => do
-          match Scry.childF c i "type" with
-          | .some tn => Scry.noteStruct c tn
-          | .none => Scry.lret ();
-          Scry.scanTypes c rest
-        | .false => match Scry.isK c i "struct_specifier" with
-          | .true => do Scry.noteStruct c i; Scry.scanTypes c rest
-          | .false => match Scry.isK c i "comment" with
-            | .true => Scry.scanTypes c rest
-            | .false => Scry.scanTypes c rest
-
 /-- Add symbols for a declaration's function declarators (prototypes); plain variables
 are translation-unit globals, which this slice does not model. -/
 def Scry.noteProtos (c : Scry.Cst) (n : Nat) (base : Wil.Ty) : List Nat → Scry.LM Unit
@@ -1013,7 +890,168 @@ expression kinds and drop out). -/
 def Scry.exprKids (c : Scry.Cst) (n : Nat) : List Nat :=
   List.filter (fun j => Scry.isExprK c j) (c.childrenOf n)
 
+-- ## The aggregate layout
+
+/-- The fields of the record with this id (`[]` when the id is not a known struct). -/
+def Scry.structAt (structs : List (String × List (String × Wil.Ty))) (id : Nat) :
+    List (String × Wil.Ty) :=
+  match Wil.listNth structs id with
+  | .some p => p.2
+  | .none => .nil
+
+/-- Cells a type occupies in the analysis layout: one per scalar/pointer, the sum of the
+fields for a record, one for an unknown/dynamic type. Recursive records are cut off after
+`depth` levels (they can only be reached through pointers, which are one cell). -/
+def Scry.cellsOfGo (structs : List (String × List (String × Wil.Ty))) : Nat → Wil.Ty → Nat
+  | .zero, _ => 1
+  | .succ k, t => match t with
+    | .int _ _ => 1
+    | .ptr _ => 1
+    | .fn _ _ => 1
+    | .dyn => 1
+    | .unknown => 1
+    | .record id =>
+      List.foldr (fun f acc => Nat.add acc (Scry.cellsOfGo structs k f.2)) 0
+        (Scry.structAt structs id)
+
+def Scry.cellsOf (structs : List (String × List (String × Wil.Ty))) (t : Wil.Ty) : Nat :=
+  Scry.cellsOfGo structs 8 t
+
+/-- The cell offset and type of field `name` of record `id`. -/
+def Scry.fieldOffsetGo (structs : List (String × List (String × Wil.Ty))) (id : Nat)
+    (name : String) : Nat → List (String × Wil.Ty) → Option (Nat × Wil.Ty)
+  | _, .nil => .none
+  | off, .cons f rest => match String.eq f.1 name with
+    | .true => .some (off, f.2)
+    | .false => Scry.fieldOffsetGo structs id name (Nat.add off (Scry.cellsOf structs f.2)) rest
+
+def Scry.fieldOffset (structs : List (String × List (String × Wil.Ty))) (id : Nat)
+    (name : String) : Option (Nat × Wil.Ty) :=
+  Scry.fieldOffsetGo structs id name 0 (Scry.structAt structs id)
+
+/-- A constant integer expression the lowering can fold: a literal, a parenthesised
+constant, or `+ - * /` of constants. Array sizes and indices use it. -/
+partial def Scry.constInt (c : Scry.Cst) (n : Nat) : Option Nat :=
+  match String.eq (c.kindOf n) "number_literal" with
+  | .true => match Scry.parseCInt (c.textOf n) with
+    | .some p => .some p.1
+    | .none => .none
+  | .false => match String.eq (c.kindOf n) "parenthesized_expression" with
+    | .true => match Scry.exprKids c n with
+      | .cons e _ => Scry.constInt c e
+      | .nil => .none
+    | .false => match String.eq (c.kindOf n) "unary_expression" with
+      | .false => .none
+      | .true => match Scry.childF c n "argument" with
+        | .none => .none
+        | .some a => match String.eq (Scry.tokenF c n "operator") "+" with
+          | .true => Scry.constInt c a
+          | .false => .none
+
+/-- The declared length of an array declarator (`0` when the size is not a constant the
+lowering folds). -/
+def Scry.arrayLen (c : Scry.Cst) (n : Nat) : Nat :=
+  match Scry.childF c n "size" with
+  | .none => 0
+  | .some sz => match Scry.constInt c sz with
+    | .some v => v
+    | .none => 0
+
+/-- The declarator part of an `array_declarator`: name, element type, length. -/
+def Scry.arrayDeclOf (c : Scry.Cst) (s : Scry.LState) (n : Nat) (base : Wil.Ty) :
+    Option (String × Wil.Ty × Nat) :=
+  let di : String × Wil.Ty × Bool := match Scry.childF c n "declarator" with
+    | .some d => Scry.declInfo c s d base
+    | .none => ("", base, .true);
+  match String.isEmpty di.1 with
+  | .true => .none
+  | .false => .some (di.1, di.2.1, Scry.arrayLen c n)
+
+/-- An array declarator (`int a[4]`, possibly under an `init_declarator`): its name, its
+element type, and its length (`0` when the size is not a constant the lowering folds). -/
+partial def Scry.arrayDecl (c : Scry.Cst) (s : Scry.LState) (n : Nat) (base : Wil.Ty) :
+    Option (String × Wil.Ty × Nat) :=
+  match String.eq (c.kindOf n) "init_declarator" with
+  | .true => match Scry.childF c n "declarator" with
+    | .some d => Scry.arrayDecl c s d base
+    | .none => .none
+  | .false => match String.eq (c.kindOf n) "array_declarator" with
+    | .false => .none
+    | .true => Scry.arrayDeclOf c s n base
+
+/-- Every identifier whose address is taken (`&x`) in a subtree: those declarations must
+become stack slots. `partial`: the recursion is over CST children, which Wiz does not see
+as structurally smaller. -/
+partial def Scry.addrTakenGo (c : Scry.Cst) (n : Nat) : List String :=
+  let here : List String := match String.eq (c.kindOf n) "pointer_expression" with
+    | .false => .nil
+    | .true => match Scry.tokenF c n "operator" with
+      | tok => match String.eq tok "&" with
+        | .false => .nil
+        | .true => match Scry.childF c n "argument" with
+          | .none => .nil
+          | .some a => match Scry.isK c a "identifier" with
+            | .false => .nil
+            | .true => .cons (c.textOf a) .nil;
+  List.append here (List.concat (List.map (fun j => Scry.addrTakenGo c j) (c.childrenOf n)))
+
+
 -- ## The lowering
+
+/-- Record the declarators of a top-level variable declaration as module globals (name,
+type, cells). Functions are left to `Scry.scanSyms`; arrays keep their length in the cell
+count. -/
+def Scry.noteGlobalDecls (c : Scry.Cst) (base : Wil.Ty) : List Nat → Scry.LM Unit
+  | .nil => Scry.lret ()
+  | .cons d rest => do
+    s ← Scry.get;
+    match Scry.arrayDecl c s d base with
+    | .some arr => do
+      let per := Scry.cellsOf s.structs arr.2.1;
+      let c0 := Nat.mul arr.2.2 per;
+      let cells := match Nat.beq c0 0 with
+        | .true => 1
+        | .false => c0;
+      Scry.modify (fun st => { st with globals := .cons (arr.1, arr.2.1, cells) st.globals });
+      Scry.noteGlobalDecls c base rest
+    | .none =>
+      let di := Scry.declInfo c s d base;
+      match String.isEmpty di.1 with
+      | .true => Scry.noteGlobalDecls c base rest
+      | .false => match di.2.1 with
+        | .fn _ _ => Scry.noteGlobalDecls c base rest
+        | t => do
+          Scry.modify (fun st => { st with globals := .cons (di.1, t, Scry.cellsOf s.structs t) st.globals });
+          Scry.noteGlobalDecls c base rest
+
+/-- First pass: typedefs and struct tags, in source order (later typedefs may use
+earlier structs; a typedef's own type is resolved once). Top-level variable declarations
+are recorded as globals; their initialisers are not modelled (analysis-only memory). -/
+def Scry.scanTypes (c : Scry.Cst) : List Nat → Scry.LM Unit
+  | .nil => Scry.lret ()
+  | .cons i rest =>
+    match Scry.isK c i "type_definition" with
+    | .true => do Scry.learnTypedef c i; Scry.scanTypes c rest
+    | .false => match Scry.isK c i "declaration" with
+      | .true => do
+        match Scry.childF c i "type" with
+        | .some tn => do
+          Scry.noteStruct c tn;
+          s2 ← Scry.get;
+          Scry.noteGlobalDecls c (Scry.typeOf c s2 tn) (Scry.childrenF c i "declarator")
+        | .none => Scry.lret ();
+        Scry.scanTypes c rest
+      | .false => match Scry.isK c i "function_definition" with
+        | .true => do
+          match Scry.childF c i "type" with
+          | .some tn => Scry.noteStruct c tn
+          | .none => Scry.lret ();
+          Scry.scanTypes c rest
+        | .false => match Scry.isK c i "struct_specifier" with
+          | .true => do Scry.noteStruct c i; Scry.scanTypes c rest
+          | .false => match Scry.isK c i "comment" with
+            | .true => Scry.scanTypes c rest
+            | .false => Scry.scanTypes c rest
 
 /-- Bind a module global to a fresh `globalRef` register on first use in a function: a
 scalar global becomes a slot (reads load, writes store), a struct global a slot with the
@@ -1513,28 +1551,32 @@ def Scry.lowerExpr (c : Scry.Cst) (n : Nat) : Scry.LM Wil.Var :=
   | .stringLit => Scry.havocAt c n (Wil.Ty.ptr Wil.i8) "string literal"
   | .castE => Scry.havocAt c n Wil.i32 "cast"
   | .conditional => Scry.havocAt c n Wil.i32 "conditional expression ?:"
-  | .field => match Scry.lowerAddr c n with
-    | .some ap => do
-      t ← Scry.fresh ap.2;
-      Scry.emitAt c n (Wil.load t ap.1);
+  | .field => do
+    ap ← Scry.lowerAddr c n;
+    match ap with
+    | .some p => do
+      t ← Scry.fresh p.2;
+      Scry.emitAt c n (Wil.load t p.1);
       Scry.lret t
     | .none => Scry.havocAt c n Wil.i32 "struct field access"
-  | .subscript => match Scry.lowerAddr c n with
-    | .some ap => do
-      t ← Scry.fresh ap.2;
-      Scry.emitAt c n (Wil.load t ap.1);
+  | .subscript => do
+    ap ← Scry.lowerAddr c n;
+    match ap with
+    | .some p => do
+      t ← Scry.fresh p.2;
+      Scry.emitAt c n (Wil.load t p.1);
       Scry.lret t
     | .none => Scry.havocAt c n Wil.i32 "subscript"
-  | .pointer => match String.eq (Scry.tokenF c n "operator") "&" with
-    | .true => match Scry.lowerAddr c n with
-      | .some ap => Scry.lret ap.1
-      | .none => Scry.havocAt c n (Wil.Ty.ptr Wil.Ty.unknown) "address-of"
-    | .false => match Scry.lowerAddr c n with
-      | .some ap => do
-        t ← Scry.fresh ap.2;
-        Scry.emitAt c n (Wil.load t ap.1);
+  | .pointer => do
+    ap ← Scry.lowerAddr c n;
+    match ap with
+    | .none => Scry.havocAt c n Wil.i32 "pointer expression"
+    | .some p => match String.eq (Scry.tokenF c n "operator") "&" with
+      | .true => Scry.lret p.1
+      | .false => do
+        t ← Scry.fresh p.2;
+        Scry.emitAt c n (Wil.load t p.1);
         Scry.lret t
-      | .none => Scry.havocAt c n Wil.i32 "dereference"
   | .sizeofE => Scry.havocAt c n Wil.u64 "sizeof"
   | .initList => Scry.havocAt c n Wil.i32 "initializer list"
   | .other => Scry.havocAt c n Wil.i32 ("expression " ++ c.kindOf n)
@@ -1671,8 +1713,10 @@ def Scry.lowerAssign (c : Scry.Cst) (n : Nat) : Scry.LM Wil.Var := do
   | .some ln, .some rn => do
     s ← Scry.get;
     match Scry.isK c ln "identifier" with
-    | .false => match Scry.lowerAddr c ln with
-      | .some sp => Scry.assignAddr c n tok sp rn
+    | .false => do
+      sp ← Scry.lowerAddr c ln;
+      match sp with
+      | .some p => Scry.assignAddr c n tok p rn
       | .none => do
         e ← Scry.lowerExpr c rn;
         Scry.warnAt c n ("assignment to " ++ c.kindOf ln ++ " not modelled");
@@ -1723,8 +1767,9 @@ def Scry.updateSlot (c : Scry.Cst) (n : Nat) (tok : String) (v : Wil.Var) (ty : 
   Scry.lret r
 
 /-- `++`/`--` through an lvalue address (`a[i]++`, `(*p)++`). -/
-def Scry.updateAddr (c : Scry.Cst) (n : Nat) (tok : String) (an : Nat) : Scry.LM Wil.Var :=
-  match Scry.lowerAddr c an with
+def Scry.updateAddr (c : Scry.Cst) (n : Nat) (tok : String) (an : Nat) : Scry.LM Wil.Var := do
+  ap ← Scry.lowerAddr c an;
+  match ap with
   | .none => Scry.havocAt c n Wil.i32 ("update of " ++ c.kindOf an)
   | .some sp => do
     t ← Scry.fresh sp.2;
@@ -1856,7 +1901,7 @@ def Scry.lowerCall (c : Scry.Cst) (n : Nat) : Scry.LM Wil.Var := do
     | .none => Scry.indirectCall c n fn argNodes
     | .some name => do
       s ← Scry.get;
-      let bound := match Scry.lookupBind s name with
+      let bound : Option Wil.Ty := match Scry.lookupBind s name with
         | .some b => match b.kind with
           | .reg => .some b.var.ty
           | .slot ty _ => .some ty
@@ -2042,7 +2087,7 @@ def Scry.lowerFunc (c : Scry.Cst) (s0 : Scry.LState) (n : Nat) : Scry.LState × 
     | .some d => Scry.paramsOf c s0 d
     | .none => .nil;
   let bodyN := Scry.childF c n "body";
-  let taken := match bodyN with
+  let taken : List String := match bodyN with
     | .some b => Scry.addrTakenGo c b
     | .none => .nil;
   let s1 := { s0 with nextVar := 0, nextBlock := 1, curBlock := 0, curStmts := .nil

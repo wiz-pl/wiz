@@ -23,6 +23,9 @@ The cases cover:
 * per-argument sources and an in-place sanitiser;
 * forbidden calls (`gets`, `strcpy`) and per-argument sinks (`fprintf`);
 * no false positives on the safe fixtures, and indirect calls stay unknown;
+* points-to and memory: same-slot store/load, a known no-alias pair, field sensitivity,
+  a location tainted in one function and read in another (the memory summary), known and
+  unknown indirect targets, the location lattice's kinds and `locOverlap`;
 * certificates: a finding's derivation checks, reports its axioms and assumptions, and a
   tampered derivation is rejected;
 * SARIF 2.1.0 shape, locations from an origin map, related locations, and the JSON
@@ -257,7 +260,7 @@ def group : Group where
           "#eval Nat.add (Nat.mul (List.length Scry.demoRules.rules) 10000) (Nat.add (Nat.mul (List.length (Scry.RulePack.taintRules Scry.demoRules)) 1000) (Nat.add (Nat.mul (List.length (Scry.RulePack.forbiddenRules Scry.demoRules)) 100) (Nat.add (Nat.mul (totalSinks (Scry.RulePack.taintRules Scry.demoRules)) 10) (totalSources (Scry.RulePack.taintRules Scry.demoRules)))))\n" ++
           "#eval if Scry.nameMatches \"mem*\" \"memcpy\" then 1 else 0\n" ++
           "#eval if Scry.nameMatches \"strcpy*\" \"astrcpy\" then 1 else 0\n" ++
-          "#eval match Scry.Program.check Scry.ruleTaintProgram with | .none => 999 | .some st => List.length st") [42245, 1, 0, 11]
+          "#eval match Scry.Program.check Scry.ruleTaintProgram with | .none => 999 | .some st => List.length st") [42245, 1, 0, 14]
         evalRuleTexts (rulePrelude ++
           "#eval ruleSev Scry.demoRules.rules \"gets-overflow\"\n" ++
           "#eval ruleKind Scry.demoRules.rules \"gets-overflow\"")
@@ -353,15 +356,29 @@ def group : Group where
         "  | .cons f _ => Nat.add (if String.eq f.func \"knownSink\" then 10 else 0)\n" ++
         "      (if String.eq (firstFn f.path) \"indirectKnown\" then 1 else 0)\n" ++
         "  | .nil => 0") [1, 0, 1, 11] },
-    { name := "memory: an unresolved indirect call is unknown and warned",
+    { name := "memory: unresolved indirect calls are unknown and warned",
       run := fun _ => evalRuleNats
         ("#eval Nat.add (Nat.mul (List.length (Scry.programFindings (Scry.analyze Scry.indirectProgram Scry.demoRules))) 10)\n" ++
-         "  (List.length (Scry.analyze Scry.indirectProgram Scry.demoRules).warnings)") [1] },
+         "  (List.length (Scry.analyze Scry.indirectProgram Scry.demoRules).warnings)") [2] },
+    { name := "memory: a location tainted in one function is read in another",
+      run := fun _ => evalRuleNats (rulePrelude ++
+        "def prM : Scry.ProgramResult := Scry.analyze Scry.memAcrossProgram Scry.demoRules\n" ++
+        "def mf : List Scry.RuleFinding := Scry.programFindings prM\n" ++
+        "def mp : List Scry.PathNode := match mf with\n" ++
+        "  | .cons f _ => f.path\n" ++
+        "  | .nil => []\n" ++
+        "#eval List.length mf\n" ++
+        "#eval List.length prM.warnings\n" ++
+        "#eval kindsCode mp\n" ++
+        "#eval match mf with\n" ++
+        "  | .cons f _ => Nat.add (if String.eq f.func \"memReader\" then 10 else 0)\n" ++
+        "      (if String.eq (firstFn f.path) \"memWriter\" then 1 else 0)\n" ++
+        "  | .nil => 0") [1, 0, 8201, 11] },
     { name := "points-to: location kinds of a field-sensitive object",
       run := fun _ => evalRuleTexts (rulePrelude ++
         "def ptF := Scry.pointsTo Scry.fieldFn\n" ++
         "#eval (Scry.locKindAt ptF 0) ++ \"/\" ++ (Scry.locKindAt ptF 1)\n" ++
-        "#eval Nat.repr (Nat.add (Nat.mul (Scry.locCount ptF) 10)\n" ++
+        "#eval Nat.repr (Nat.add (Nat.mul (Scry.ptLocCount ptF) 10)\n" ++
         "  (Scry.ptVarCount ptF))") ["heap/field", "23"] },
     { name := "points-to: overlap is exact for constant offsets and wildcard for anyOff",
       run := fun _ => evalRuleNats
@@ -404,7 +421,7 @@ def group : Group where
           "#eval jStr (firstResult sar) \"ruleId\"\n" ++
           "#eval jStr (firstResult sar) \"level\"\n" ++
           "#eval match Json.parse (Scry.renderSarif \"scry\" originMap Scry.demoRules (Scry.programFindings prI)) with | .ok j => Json.getStr j \"version\" | .error e => e")
-          ["\"2.1.0\"", "\"scry\"", "\"command-injection\"", "\"error\"", "\"2.1.0\""] },
+          ["\"2.1.0\"", "\"scry\"", "\"scry/c/command-injection\"", "\"error\"", "\"2.1.0\""] },
     { name := "pipeline: C to Wil to rule pack, the CLI's path on a checked-in CST",
       run := fun _ => do
         let csrc ← IO.FS.readFile "scry/tests/fixtures/taint-unsafe.c"

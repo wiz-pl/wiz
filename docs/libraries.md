@@ -852,14 +852,28 @@ The S4 rule pack and interprocedural slice are separate modules:
 * `import Scry.RuleTaint` — variable-indexed taint as Datalog over a rule pack; an
   argument source/sanitiser becomes an extra definition point, and a `gen` fact is the
   ordinary definition a statement's tainted input transfers to.
-* `import Scry.Interproc` — a direct-call graph, argument -> parameter taint,
-  return-value summaries and a summary fixpoint for recursion; indirect calls are
-  recorded but unknown. Findings carry their rule metadata and a stitched source -> sink
-  path.
+* `import Scry.PointsTo` — a flow-insensitive, field-sensitive points-to analysis over
+  the lowered Wil: the location lattice `Loc.stack/glob/heap/fn/field/anyOff/unknown`,
+  per-register location sets (`Scry.ptIds`), per-location pointer contents (`mem`, for
+  `**pp` and stored function pointers), `free` tracking, and indirect-call target
+  resolution. `Loc.unknown` is an explicit may-location (a warning at the access) and an
+  empty set is a *known* no-alias. `Scry.locOverlap`/`Scry.expandIds` decide whether two
+  accesses may meet (constant offsets exactly, a variable index as `anyOff`).
+* `import Scry.Interproc` — a direct- and resolved-indirect-call graph, argument ->
+  parameter taint, return-value summaries and a summary fixpoint for recursion; an
+  unresolved indirect call is recorded and warned about (`unknown-indirect`). Findings
+  carry their rule metadata and a stitched source -> sink path.
+* `import Scry.RuleTaint` also carries the memory rules: `mstore`/`mload`/`mtainted`
+  make a `store` taint the locations it may alias and a later `load` receive it, with
+  `store`/`load` path nodes. Diagnostics that are not findings (unknown memory, use after
+  free, unresolved indirect call) are `Scry.MemWarning`s with a function and program
+  point.
 * `import Scry.Sarif` — SARIF 2.1.0 JSON with rule metadata, primary and related
   locations from an `OriginMap` (S2's `Wil.Span` supplies the entries; a finding's
-  `properties.derivation` is `checked`/`unchecked`, and `Scry.boundaryResultJson` emits a
-  lowering-boundary warning).
+  `properties.derivation` is `checked`/`unchecked`), namespaced rule ids
+  (`scry/c/<rule>`, `scry/lowering/boundary`, `scry/memory/<kind>`) and
+  `columnKind: utf16CodeUnits`; `Scry.boundaryResultJson` emits a warning result whose
+  location is the offending statement's span.
 * `import Scry.Certify` — a finding as a `Scry.Derivation` checked by `Scry.Cert`
   against the function's EDB, reporting its axioms and the interprocedural assumptions
   the path walk supplies.
@@ -867,7 +881,11 @@ The S4 rule pack and interprocedural slice are separate modules:
 `import Scry.RuleExamples` is the rule-pack/interprocedural corpus. The `scry` package's
 `scry taint` command wires the whole pipeline: S1's tree-sitter parse, S2's
 `Scry.Lower` (spans on every statement), these S4 modules with
-`lib/Scry/rules/default.scry`, and SARIF 2.1.0. The remaining gap is points-to and
-memory: `store`/`load`, aggregate fields, arrays and heap objects are not tracked
-precisely, so a flow through memory can be missed; the lowering warns (havoc) at that
-boundary. `wiz-notes/scry-taint.md` has the design, the `.scry` format and the gaps.
+`lib/Scry/rules/default.scry`, and SARIF 2.1.0. Memory is modelled: structs, arrays,
+pointers, `&`/`*`, allocation and `free`, globals, function pointers and pointer returns
+are lowered to slots/heaps/`gep`/`load`/`store`, and points-to + the memory taint rules
+carry a flow through them. What remains outside the model is listed in
+`wiz-notes/scry-taint.md` (heap shape, `realloc`, external memory effects beyond the copy
+model, context sensitivity, non-ASCII columns); the lowering still warns (havoc) for the
+constructs it does not lower. `wiz-notes/scry-taint.md` has the design, the `.scry`
+format and the gaps.

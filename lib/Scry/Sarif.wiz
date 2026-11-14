@@ -102,6 +102,12 @@ def Scry.sanListJson (r : Scry.TaintRule) : Json :=
 def Scry.callListJson (r : Scry.ForbiddenRule) : Json :=
   Json.mkArr (List.map (fun c => Json.mkStr c) r.calls)
 
+/-- A stable, **namespaced** SARIF rule id: `scry/c/<pack rule id>`. The namespace keeps
+Scry's ids distinct from CodeQL's (`cpp/…`) and Semgrep's when results are aggregated in
+one dashboard, and the id does not encode an array index or a version. Findings keep the
+short pack id in `properties.packRuleId`, so the human line and the JSON stay readable. -/
+def Scry.sarifRuleId (id : String) : String := String.append "scry/c/" id
+
 /-- A rule's SARIF metadata (`reportingDescriptor`). -/
 def Scry.ruleJson (r : Scry.PackRule) : Json :=
   let props := match r with
@@ -116,7 +122,7 @@ def Scry.ruleJson (r : Scry.PackRule) : Json :=
         [ ("kind", Json.mkStr "forbidden")
         , ("calls", Scry.callListJson f) ];
   Json.mkObj
-    [ ("id", Json.mkStr (Scry.PackRule.id r))
+    [ ("id", Json.mkStr (Scry.sarifRuleId (Scry.PackRule.id r)))
     , ("name", Json.mkStr (Scry.PackRule.id r))
     , ("shortDescription", Json.mkObj [("text", Json.mkStr (Scry.PackRule.message r))])
     , ("defaultConfiguration", Json.mkObj
@@ -173,7 +179,7 @@ def Scry.derivationText (checked : Bool) : String :=
 def Scry.resultJsonWith (m : Scry.OriginMap) (pack : Scry.RulePack)
     (f : Scry.RuleFinding) (checked : Bool) : Json :=
   Json.mkObj
-    [ ("ruleId", Json.mkStr f.rule)
+    [ ("ruleId", Json.mkStr (Scry.sarifRuleId f.rule))
     , ("ruleIndex", Json.ofNat (Scry.ruleIndexOf pack f.rule))
     , ("level", Json.mkStr (Scry.Severity.sarif f.severity))
     , ("message", Json.mkObj [("text", Json.mkStr f.message)])
@@ -186,7 +192,8 @@ def Scry.resultJsonWith (m : Scry.OriginMap) (pack : Scry.RulePack)
         , ("callee", Json.mkStr f.name)
         , ("sinkArgument", Json.ofNat f.arg)
         , ("pathLength", Scry.pathLengthJson f.path)
-        , ("derivation", Json.mkStr (Scry.derivationText checked)) ]) ]
+        , ("derivation", Json.mkStr (Scry.derivationText checked))
+        , ("packRuleId", Json.mkStr f.rule) ]) ]
 
 /-- A finding without a status (the default of `Scry.sarif`). -/
 def Scry.resultJson (m : Scry.OriginMap) (pack : Scry.RulePack)
@@ -225,7 +232,14 @@ def Scry.sarifWith (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
   let toolObj := Json.mkObj [("driver", driver)];
   let results := Json.mkArr (List.append
     (List.map (fun p => Scry.resultJsonWith m pack p.1 p.2) findings) extra);
-  let run := Json.mkObj [("tool", toolObj), ("results", results)];
+  /-- SARIF regions are 1-based line/column pairs; the default `columnKind` is UTF-16 code
+  units. The C frontend's slice is ASCII (see `wiz-notes/scry-c2wil.md`), where a byte
+  column is a UTF-16 column, so the declaration is exact for the supported subset; a
+  non-ASCII source would need a byte -> UTF-16 conversion here (documented gap). -/
+  let run := Json.mkObj
+    [ ("tool", toolObj)
+    , ("columnKind", Json.mkStr "utf16CodeUnits")
+    , ("results", results) ];
   Json.mkObj
     [ ("$schema", Json.mkStr "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json")
     , ("version", Json.mkStr "2.1.0")

@@ -141,6 +141,9 @@ def Scry.locKind : Scry.Loc → String
   | .unknown => "unknown"
 
 /-- Is this the merged unknown location? -/
+/-- The singleton set of the unknown location (a may-location and a warning). -/
+def Scry.unknownLocs : List Scry.Loc := List.cons Scry.Loc.unknown List.nil
+
 def Scry.locUnknown : Scry.Loc → Bool
   | .unknown => .true
   | _ => .false
@@ -324,10 +327,10 @@ def Scry.rhsLocs (st : Scry.PtState) (func : String) (point : Nat) (x : Wil.Var)
   | .use v => Scry.ptGet st (Scry.vk func v.index)
   | .cst _ => .nil
   | .bin _ _ _ => match Scry.ptrLike x.ty with
-    | .true => .cons .unknown .nil
+    | .true => Scry.unknownLocs
     | .false => .nil
   | .un _ _ => match Scry.ptrLike x.ty with
-    | .true => .cons .unknown .nil
+    | .true => Scry.unknownLocs
     | .false => .nil
   | .load p => Scry.concatLists (fun l => Scry.memGet st l)
       (Scry.ptGet st (Scry.vk func p.index))
@@ -338,7 +341,7 @@ def Scry.rhsLocs (st : Scry.PtState) (func : String) (point : Nat) (x : Wil.Var)
   | .globalRef n => .cons (.glob n) .nil
   | .fnptr n => .cons (.fn n) .nil
   | .havoc _ => match Scry.ptrLike x.ty with
-    | .true => .cons .unknown .nil
+    | .true => Scry.unknownLocs
     | .false => .nil
 
 /-- One statement's contribution: register targets, memory contents, freed locations,
@@ -364,7 +367,14 @@ def Scry.callContrib (p : Wil.Program) (st : Scry.PtState) (func : String)
   let targets := Scry.callTargets p st func callee;
   let perTarget := Scry.concatLists (fun name =>
     match Wil.findFunc p name with
-    | .none => .nil
+    | .none =>
+      /-- A call to a function outside the unit: its result is **unknown** when it is a
+      pointer (the unit has no body to analyse), never "no alias". -/
+      match r with
+      | .none => .nil
+      | .some rv => match Scry.ptrLike rv.ty with
+        | .false => .nil
+        | .true => .cons (Scry.vk func rv.index, Scry.unknownLocs) .nil
     | .some fn =>
       let params := Scry.concatLists (fun i =>
         match Scry.fnParam fn i.1 with
@@ -375,7 +385,16 @@ def Scry.callContrib (p : Wil.Program) (st : Scry.PtState) (func : String)
         | .some rv => List.map (fun rvv => (Scry.vk func rv.index, Scry.ptGet st (Scry.vk name rvv)))
             (Scry.fnRetVars fn);
       List.append params rets) targets.names;
-  Scry.Contrib.mk perTarget .nil .nil
+  let unknownResult : List (Scry.VarKey × List Scry.Loc) := match callee with
+    | .direct _ => .nil
+    | .indirect _ => match targets.unknown with
+      | .false => .nil
+      | .true => match r with
+        | .none => .nil
+        | .some rv => match Scry.ptrLike rv.ty with
+          | .false => .nil
+          | .true => .cons (Scry.vk func rv.index, Scry.unknownLocs) .nil;
+  Scry.Contrib.mk (List.append perTarget unknownResult) .nil .nil
 
 /-- The constraints one call adds (see `Scry.callContrib`). -/
 def Scry.stmtContrib (p : Wil.Program) (st : Scry.PtState) (func : String) (point : Nat)
@@ -433,7 +452,7 @@ def Scry.seedUnknown (st : Scry.PtState) (func : String) (v : Wil.Var) : Scry.Pt
   | .false => st
   | .true => match List.isEmpty (Scry.ptGet st (Scry.vk func v.index)) with
     | .false => st
-    | .true => Scry.ptAdd st (Scry.vk func v.index) (.cons .unknown .nil)
+    | .true => Scry.ptAdd st (Scry.vk func v.index) (Scry.unknownLocs)
 
 /-- The locations the analysis **cannot** know, seeded once after the inclusion fixpoint:
 a pointer parameter no call site passes anything to (the function may be called from

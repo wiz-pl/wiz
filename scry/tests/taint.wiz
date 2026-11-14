@@ -70,10 +70,10 @@ def findingPath (f : Scry.RuleFinding) : List Scry.PathNode := f.path
 /-- Does the points-to table contain a location of this kind? -/
 def hasLocKind (rep : Scry.TaintReport) (k : String) : Bool :=
   List.any (fun i => String.eq (Scry.locKindAt rep.pointsTo i) k)
-    (Scry.range (Scry.locCount rep.pointsTo))
+    (Scry.range (Scry.ptLocCount rep.pointsTo))
 
 def memKinds (rep : Scry.TaintReport) : List String :=
-  List.map (fun w => Scry.MemWarnKind.show w.kind) rep.memory
+  List.map (fun b => b.rule) rep.memory
 
 def firstFinding (rep : Scry.TaintReport) : Option Scry.RuleFinding :=
   match rep.findings with
@@ -156,7 +156,7 @@ def main : IO Unit := EIO.toIO (do
   check "mem-distinct: two stack slots, no unknown"
     (Bool.and (Nat.beq (List.length (List.filter (fun i =>
         String.eq (Scry.locKindAt repM2.pointsTo i) "stack")
-        (Scry.range (Scry.locCount repM2.pointsTo)))) 2)
+        (Scry.range (Scry.ptLocCount repM2.pointsTo)))) 2)
       (Bool.not (hasLocKind repM2 "unknown")));
 
   -- memory: struct fields are separate cells; a global's field flows too
@@ -202,7 +202,7 @@ def main : IO Unit := EIO.toIO (do
   repM8 ← Scry.analyzeFile oM8;
   checkOne "mem-free" repM8 "command-injection" "main";
   check "mem-free: one use-after-free warning"
-    (List.all (fun s => String.eq s "use-after-free") (memKinds repM8));
+    (List.all (fun s => String.eq s "scry/memory/use-after-free") (memKinds repM8));
 
   -- memory: an indirect call with a known target propagates
   oM9 ← opts ["tests/fixtures/mem-indirect.c"];
@@ -214,12 +214,27 @@ def main : IO Unit := EIO.toIO (do
       (String.eq (firstFunc f.path) "main")
   | .none => check "mem-indirect: finding exists" .false;
 
+  -- memory: a returned pointer's summary carries the target across the call
+  oM11 ← opts ["tests/fixtures/mem-ret.c"];
+  repM11 ← Scry.analyzeFile oM11;
+  checkOne "mem-ret" repM11 "command-injection" "main";
+  check "mem-ret: no memory warnings" (Nat.beq (List.length repM11.memory) 0);
+  check "mem-ret: a global location" (hasLocKind repM11 "global");
+
+  -- memory: an external copy model (strcpy) taints the destination object only
+  oM12 ← opts ["tests/fixtures/mem-external.c"];
+  repM12 ← Scry.analyzeFile oM12;
+  check "mem-external: one finding" (Nat.beq (List.length repM12.findings) 1);
+  check "mem-external: no memory warnings" (Nat.beq (List.length repM12.memory) 0);
+  check "mem-external: no lowering-boundary warning"
+    (Nat.beq (List.length repM12.boundaries) 0);
+
   -- memory: an unresolved indirect call is unknown and warned, not silently dropped
   oM10 ← opts ["tests/fixtures/mem-indirect-unknown.c"];
   repM10 ← Scry.analyzeFile oM10;
   check "mem-indirect-unknown: zero findings" (Nat.beq (List.length repM10.findings) 0);
   check "mem-indirect-unknown: one unknown-indirect warning"
-    (List.all (fun s => String.eq s "unknown-indirect") (memKinds repM10));
+    (List.all (fun s => String.eq s "scry/memory/unknown-indirect") (memKinds repM10));
   check "mem-indirect-unknown: an unknown location" (hasLocKind repM10 "unknown");
 
   -- parse errors: refused by default, recovered with --allow-errors
@@ -234,7 +249,7 @@ def main : IO Unit := EIO.toIO (do
   -- SARIF 2.1.0 shape, derivation status, primary span and related spans
   let sarifText := Scry.renderSarifWith "scry" rep1.origins rep1.pack
     (Scry.zipFindings rep1.findings rep1.checks)
-    (List.map (fun b => Scry.boundaryResultJson b.origin b.func 0 b.message)
+    (List.map (fun b => Scry.boundaryResultJson b.rule b.origin b.func b.point b.message)
       rep1.boundaries);
   match Json.parse sarifText with
   | .error e => check ("sarif: parses (" ++ e ++ ")") .false
@@ -247,7 +262,12 @@ def main : IO Unit := EIO.toIO (do
       (Nat.beq (List.length (Json.getList (jAt run ["tool", "driver"]) "rules")) 4);
     check "sarif: one result" (Nat.beq (List.length (Json.getList run "results")) 1);
     let res := nthJ (Json.getList run "results") 0;
-    check "sarif: rule id" (String.eq (Json.getStr res "ruleId") "command-injection");
+    check "sarif: rule id" (String.eq (Json.getStr res "ruleId") "scry/c/command-injection");
+    check "sarif: namespaced rule descriptor"
+      (String.eq (jStr (nthJ (jList (jAt run ["tool", "driver"]) ["rules"]) 0) ["id"])
+        "scry/c/command-injection");
+    check "sarif: utf16 column kind"
+      (String.eq (Json.getStr run "columnKind") "utf16CodeUnits");
     check "sarif: derivation checked" (String.eq (jStr res ["properties", "derivation"]) "checked");
     let locs := jList res ["locations"];
     check "sarif: one primary location" (Nat.beq (List.length locs) 1);
@@ -269,4 +289,8 @@ def main : IO Unit := EIO.toIO (do
   rFail ← Scry.taintCmd ["tests/fixtures/taint-unsafe.c", "--json", "--fail-on-finding"];
   check "cli --fail-on-finding: unsafe exits 1" (Nat.beq rFail 1);
   rClean ← Scry.taintCmd ["tests/fixtures/taint-clean.c", "--json", "--fail-on-finding"];
-  check "cli --fail-on-finding: clean exits 0" (Nat.beq rClean 0))
+  check "cli --fail-on-finding: clean exits 0" (Nat.beq rClean 0);
+  -- the JSON golden for a memory finding: the path has store/load nodes, the warning is a
+  -- namespaced memory rule, and the counts include it
+  rMem ← Scry.taintCmd ["tests/fixtures/mem-free.c", "--json"];
+  check "cli --json memory: exit 0" (Nat.beq rMem 0))

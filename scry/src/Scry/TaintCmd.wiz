@@ -215,7 +215,7 @@ structure Scry.BoundaryFinding where
   origin : Option Scry.Origin
 
 def Scry.boundaryOfWarning (uri text : String) (w : Scry.Warning) : Scry.BoundaryFinding :=
-  Scry.BoundaryFinding.mk "lowering-boundary" w.message w.func 0
+  Scry.BoundaryFinding.mk "scry/lowering/boundary" w.message w.func 0
     (.some (Scry.originOfSpan uri text w.span))
 
 def Scry.boundaryFindings (uri text : String) (tu : Scry.TU) : List Scry.BoundaryFinding :=
@@ -225,7 +225,8 @@ def Scry.boundaryFindings (uri text : String) (tu : Scry.TU) : List Scry.Boundar
 findings use. -/
 def Scry.memoryFindings (origins : Scry.OriginMap) (ws : List Scry.MemWarning) :
     List Scry.BoundaryFinding :=
-  List.map (fun w => Scry.BoundaryFinding.mk (Scry.MemWarnKind.show w.kind) w.detail
+  List.map (fun w => Scry.BoundaryFinding.mk
+    (String.append "scry/memory/" (Scry.MemWarnKind.show w.kind)) w.detail
     w.func w.point (Scry.originAt origins w.func w.point)) ws
 
 -- ## Derivation status
