@@ -17,6 +17,10 @@ def usage : String := "usage:
   wiz build FILE -o OUT --no-main  … or the exported functions, linked without a `main`
                                    (say, a Wasm module: --cc emcc --ldflags --no-entry)
   wiz run FILE [--llvm]            build and run `main`, printing its value
+  wiz repl [--llvm]                read one command per line, keeping definitions (`:help`;
+                                   a pipe: one command per line, no prompt)
+  wiz test [GROUPS…] [--jobs N] [--list]
+                                   run the test driver (`.lake/build/bin/tests`, or WIZ_TESTS)
   wiz doc [MODULE|FILE|DIR…] -o OUT [--lib] [--source-url URL] [--title T] [--web DIR]
                                    documentation: a static site (one page per module,
                                    index, search); --lib: the toolchain's library;
@@ -184,36 +188,43 @@ def takeInertOpt : List String → Except String (Option InertReg × List String
     return (r, a :: rest)
   | [] => return (none, [])
 
-/-- Elaborate a file, through the toolchain's cache (if any). -/
-def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandState ZeroOneMany) := do
-  -- every module the file can reach (`import A.B` is `A/B.wiz` under a root), read up
-  -- front: the frontend is pure
-  let roots ← moduleRoots tc
-  let closure ← Module.loadClosure roots input
-  let lib : Std.HashMap Name String := closure.fold (fun m n (_, src) => m.insert n src) {}
-  -- the C headers of the file and of the modules it imports
-  let headers ← Build.preprocessHeaders tc (String.join (input :: lib.values))
-  -- (9f) the `link_c` files, each relative to its own file
-  let sources ← Module.cSourceTable ((System.FilePath.mk path).parent.getD ".") input closure
+/-- The state every elaboration starts from: the kernel and printing options, the
+`builtin` registrations trusted (the toolchain's own modules), and the hooks the pure
+frontend needs (the loader, the C headers, the `link_c` files). -/
+def initStateOf (tc : Toolchain) (lib : Std.HashMap Name String) (headers : Std.HashMap String String)
+    (cSources : Option (String → String → Option String)) (own : List Name)
+    (messages : Array Msg := #[]) : IO (CommandState ZeroOneMany) := do
   let (regularity, predicativeProp) ← kernelOpts.get
   let lazyProofs ← lazyProofsOpt.get
   let inertReg ← inertOpt.get
   let (proofSteps, traceProofSteps) ← proofStepsOpt.get
   let unboxStructs ← unboxOpt.get
-  -- `builtin` registrations are trusted only in the toolchain's own library
-  let own := Module.fromFirstRoot roots closure
-  -- a file that would replace one of them is ignored: say so (loudly: it may be meant
-  -- to stand in for the toolchain's module, `builtin`s and all)
-  let shadow := (← Module.shadowed roots closure).map fun (n, p) =>
-    ({ info := {}, severity := .warning,
-       text := s!"{p} is ignored: module {n} is the toolchain's own ({roots.head!}), which a module root cannot replace" } : Msg)
   let init : CommandState ZeroOneMany :=
-    { loader := (lib[·]?), cHeaders := (headers[·]?), cSources := some (Module.cSourceResolver sources),
-      messages := shadow.toArray,
+    { loader := (lib[·]?), cHeaders := (headers[·]?), cSources,
+      messages,
       globals := { regularity, predicativeProp, lazyProofs, inertReg, unboxStructs, proofSteps, traceProofSteps,
                    strictPrivacy := ← strictPrivacyOpt.get, pp := { useNotation := !(← ppAllOpt.get) } },
       trustedModule := own.contains, trustNative := tc.trustNative,
       nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := ← tc.smt.resolve }
+  pure init
+
+/-- Elaborate a file, through the toolchain's cache (if any). -/
+def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandState ZeroOneMany) := do
+  let roots ← moduleRoots tc
+  let closure ← Module.loadClosure roots input
+  let lib : Std.HashMap Name String := closure.fold (fun m n (_, src) => m.insert n src) {}
+  let headers ← Build.preprocessHeaders tc (String.join (input :: lib.values))
+  let sources ← Module.cSourceTable ((System.FilePath.mk path).parent.getD ".") input closure
+  let own := Module.fromFirstRoot roots closure
+  let shadow := (← Module.shadowed roots closure).map fun (n, p) =>
+    ({ info := {}, severity := .warning,
+       text := s!"{p} is ignored: module {n} is the toolchain's own ({roots.head!}), which a module root cannot replace" } : Msg)
+  let init ← initStateOf tc lib headers (some (Module.cSourceResolver sources)) own shadow.toArray
+  let (regularity, predicativeProp) ← kernelOpts.get
+  let lazyProofs ← lazyProofsOpt.get
+  let inertReg ← inertOpt.get
+  let (proofSteps, traceProofSteps) ← proofStepsOpt.get
+  let unboxStructs ← unboxOpt.get
   -- the cache doesn't know the experimental options
   let cacheOn := regularity == .off && !predicativeProp && lazyProofs && inertReg == .conv && !unboxStructs &&
       proofSteps == Budget.defaultSteps && !traceProofSteps && !(← strictPrivacyOpt.get) && !(← ppAllOpt.get)
@@ -332,6 +343,101 @@ def runCmd (tc : Toolchain) (path : String) (llvm : Bool) (split : Nat := 0) : I
   | .error e => IO.eprintln e; pure 1
   | .ok v => IO.print (if v.endsWith "\n" then v else v ++ "\n"); pure 0
 
+/-- The modules the REPL can import, and the hooks the frontend needs: every module under
+the roots (so a `:reset` need not read them again), its C headers and `link_c` files. -/
+def replInit (tc : Toolchain) : IO (CommandState ZeroOneMany) := do
+  let roots ← moduleRoots tc
+  let all ← Module.loadAll roots
+  let lib : Std.HashMap Name String := all.fold (fun m n (_, src) => m.insert n src) {}
+  let headers ← Build.preprocessHeaders tc (String.join (all.values.map (·.2)))
+  let sources ← Module.cSourceTable "." "" all
+  initStateOf tc lib headers (some (Module.cSourceResolver sources)) (Module.fromFirstRoot roots all)
+
+/-- `wiz repl [--llvm]`: read one command per line from stdin, elaborate it against the
+accumulated `CommandState` (definitions persist), print its messages and go on after an
+error. `:quit`/EOF exit, `:reset` forgets every definition, `:help` lists the commands.
+With `--llvm`, `:run NAME` builds through LLVM instead of C.
+
+The base state stays pristine, so an `import` is checked in isolation as in a file, then
+elaborated into the session's state. A pipe has one command per line and no prompt. -/
+def replCmd (tc : Toolchain) (llvm : Bool) : IO UInt32 := do
+  let base ← replInit tc
+  let stdin ← IO.getStdin
+  let stdout ← IO.getStdout
+  let stderr ← IO.getStderr
+  let tty ← stdin.isTty
+  -- a session starts with the Prelude, as a file's first line would import it
+  let preloaded := match base.loader "Prelude" with
+    | some _ => runFrontend.go "import Prelude" base "import Prelude".toList.toArray 0 base
+    | none => base
+  let help := "commands:\n" ++
+    "  LINE          elaborate a command (`def`, `#check`, `#eval`, `import`, …)\n" ++
+    "  :run NAME     build and run the definition NAME (" ++ (if llvm then "LLVM" else "C") ++ ")\n" ++
+    "  :reset        forget every definition\n" ++
+    "  :help         this list\n" ++
+    "  :quit         leave (EOF does too)\n" ++
+    "The Prelude is imported at the start; errors are reported and the session goes on."
+  let mut state := preloaded
+  let mut reading := true
+  while reading do
+    if tty then
+      stdout.putStr "wiz> "
+      stdout.flush
+    let raw ← stdin.getLine
+    if raw.isEmpty then
+      -- EOF (an empty line is "\n": `getLine` includes the newline)
+      if tty then IO.println ""
+      reading := false
+    else
+      let line := raw.trimAscii.toString
+      unless line.isEmpty do
+        match line with
+        | ":quit" | ":q" => reading := false
+        | ":help" | ":h" | ":?" => stdout.putStrLn help; stdout.flush
+        | ":reset" =>
+          state := preloaded
+          stdout.putStrLn "reset"; stdout.flush
+        | c =>
+          if c.startsWith ":" then
+            match c.splitOn " " with
+            | [":run", name] =>
+              let dir ← IO.FS.createTempDir
+              match ← Build.runGlobal tc state name dir llvm with
+              | .error e => stderr.putStrLn e
+              | .ok v => stdout.putStr (if v.endsWith "\n" then v else v ++ "\n")
+              stdout.flush
+            | _ => stderr.putStrLn s!"unknown command {c} (`:help`)"
+          else
+            -- the line is one command: elaborate it into the session, from the pristine base
+            let s' := runFrontend.go line base line.toList.toArray 0 state
+            for m in s'.messages do
+              let text := m.render line
+              if m.severity == .error then stderr.putStrLn text else stdout.putStrLn text
+            state := { s' with messages := #[] }
+            stdout.flush
+            stderr.flush
+  return 0
+
+/-- The test driver: beside this binary (a checkout's `.lake/build/bin/tests`), or
+`WIZ_TESTS`, else `.lake/build/bin/tests` under the current directory. -/
+def testDriver : IO (Option System.FilePath) := do
+  if let some p ← IO.getEnv "WIZ_TESTS" then
+    let p := System.FilePath.mk p
+    return (if (← p.pathExists) && !(← p.isDir) then some p else none)
+  let beside := (← IO.appPath).parent.getD "." / "tests"
+  if (← beside.pathExists) && !(← beside.isDir) then return some beside
+  let localPath : System.FilePath := ".lake/build/bin/tests"
+  return (if (← localPath.pathExists) && !(← localPath.isDir) then some localPath else none)
+
+/-- `wiz test [GROUPS…] [--jobs N] [--list]`: run the test driver with these arguments
+(`lake build wiz tests` builds it). A convenience wrapper: the driver is the runner. -/
+def testCmd (args : List String) : IO UInt32 := do
+  let some driver ← testDriver
+    | IO.eprintln "wiz test: no test driver: build it with `lake build wiz tests`, or set WIZ_TESTS to its path"
+      return 2
+  let child ← IO.Process.spawn { cmd := driver.toString, args := args.toArray }
+  child.wait
+
 /-- The experimental kernel options, taken out of the arguments. -/
 def kernelOpt : List String → Except String (Regularity × Bool × List String)
   | "--regularity" :: m :: rest => do
@@ -403,6 +509,9 @@ def main (args : List String) : IO UInt32 := do
   | "doc" :: rest => docCmd tc rest
   | ["run", path] => runCmd tc path false (split := split)
   | ["run", path, "--llvm"] => runCmd tc path true (split := split)
+  | ["repl"] => replCmd tc false
+  | ["repl", "--llvm"] => replCmd tc true
+  | "test" :: rest => testCmd rest
   | "lsp" :: opts => do
     match lspOptions opts with
     | none => IO.println usage; pure 2

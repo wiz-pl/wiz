@@ -556,6 +556,7 @@ Neovim shows them as `@lsp.type.keyword` (linked to `@keyword`) without configur
   toolchain's library and a new name that isn't one. A use through generalised field
   notation (`p.norm` for `Point.norm`) is not edited.
 
+<<<<<<< HEAD
 ## 11ab: a static playground
 
 `web/playground.html`: a Wiz playground that runs entirely in the page. A text area
@@ -603,3 +604,54 @@ page runs.
   language-server client: they can ask a server for goals and diagnostics but cannot
   evaluate a term. The playground's evaluator is the self-hosted checker, which is Wiz
   code; exporting it is the only missing piece, and it needs no server.
+
+## 11ac: `wiz repl`
+
+* **`wiz repl [--llvm]`** (`Main.lean`, `replCmd`): reads one command per line on stdin
+  and elaborates it with the ordinary frontend (`runFrontend.go`) against the session's
+  accumulated `CommandState`. Definitions (and `syntax`, `macro`, `instance`, an
+  `import`) last for the rest of the session, and `#check`, `#eval`, `#print` print as
+  they do in a file. An error is printed and the session goes on with the next line. The
+  Prelude is imported at the start; `:reset` forgets every definition (it returns to that
+  state), `:help` lists the commands and `:quit` (or EOF) leaves. The base state stays
+  pristine, so an `import` is first checked in isolation, exactly as in a file, and then
+  elaborated into the session. With no terminal on stdin there is no prompt, so a pipe is
+  a script: one command per line. `:run NAME` builds and runs the definition `NAME` (C,
+  or LLVM with `--llvm`); `--llvm` affects only that.
+
+  `:type EXPR` prints `EXPR`'s type (it is `#check EXPR` in the session), and
+  `:load FILE` elaborates a file's commands into the session, so its definitions stay in
+  scope; messages from the file carry its path and positions.
+
+* **Limits.** Input is one line per command (`IO.FS.Stream.getLine`): no continuation
+  for a definition that spans lines, no readline (history, line editing or completion),
+  and no goal display — that is `wiz lsp` and the infoview. The REPL is a frontend
+  session, not a separate evaluator: `#eval`/`:run` are the elaborator's interpreter and
+  IR. C headers and `link_c` files are resolved for the modules the REPL can import, but
+  the session itself has no package directory (the `:load` file's own `link_c` paths are
+  not resolved).
+
+* **`wiz test-driver [GROUPS…] [--jobs N] [--list]`** (`testCmd`): a thin wrapper that
+  runs the test driver with these arguments unchanged. It looks for the driver beside the
+  `wiz` binary (a checkout's `.lake/build/bin/tests`), then `WIZ_TESTS`, then
+  `.lake/build/bin/tests` in the current directory. Without a driver it says how to build
+  one (`lake build wiz tests`) and exits 2. It is not a second runner: selectors,
+  `--jobs`, `--list`, `--timings` and the summary are the driver's. (The single-file form
+  `wiz test FILE` is 11ah.)
+
+```
+$ wiz repl
+wiz> def answer : Nat := 41 + 1
+wiz> #eval answer
+1:1: info: 42
+wiz> :type answer
+1:1: info: answer : Nat
+wiz> :load session.wiz
+session.wiz:1:1: info: …
+wiz> :quit
+$ printf 'def x : Nat := 7\n#eval x\n' | wiz repl
+1:1: info: 7
+$ wiz test-driver =rig --jobs 4
+…
+8 passed, 0 failed
+```
