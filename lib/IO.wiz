@@ -188,10 +188,15 @@ extern "wiz_io_arg" IO.arg : Nat → IO String
 /-- `IO.argsFrom k i`: the `k` arguments from index `i` on (a helper of `IO.args`). -/
 def IO.argsFrom : Nat → Nat → IO (List String)
   | .zero, _ => IO.pure .nil
-  | .succ k, i => IO.bind (IO.arg i) (fun a => IO.bind (IO.argsFrom k (Nat.succ i)) (fun rest => IO.pure (List.cons a rest)))
+  | .succ k, i => do
+    a ← IO.arg i;
+    rest ← IO.argsFrom k (Nat.succ i);
+    IO.pure (List.cons a rest)
 /-- The program's command-line arguments, without its name: for `prog a b`,
 `["a", "b"]`. -/
-def IO.args : IO (List String) := IO.bind IO.argCount (fun n => IO.argsFrom n 0)
+def IO.args : IO (List String) := do
+  n ← IO.argCount;
+  IO.argsFrom n 0
 
 /-- A Wiz function that C keeps after the call it was passed to (stage 9g).
 

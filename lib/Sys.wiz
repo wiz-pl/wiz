@@ -51,13 +51,16 @@ def Sys.status (what : String) (e : Nat) : Except String Unit :=
   | .true => .ok ()
   | .false => .error (Sys.message what e)
 /-- Run a foreign call that returns an errno status, as a result (`Sys.status`). -/
-def Sys.lift (what : String) (x : IO Nat) : IO (Except String Unit) :=
-  IO.bind x (fun e => IO.pure (Sys.status what e))
+def Sys.lift (what : String) (x : IO Nat) : IO (Except String Unit) := do
+  e ← x;
+  IO.pure (Sys.status what e)
 /-- Run a foreign call that returns a value, and make it an error if the call set `Sys.errno`. -/
-def Sys.check {A : Type} (what : String) (x : IO A) : IO (Except String A) :=
-  IO.bind x (fun a => IO.bind Sys.errno (fun e => IO.pure (match Nat.beq e 0 with
+def Sys.check {A : Type} (what : String) (x : IO A) : IO (Except String A) := do
+  a ← x;
+  e ← Sys.errno;
+  IO.pure (match Nat.beq e 0 with
     | .true => .ok a
-    | .false => .error (Sys.message what e))))
+    | .false => .error (Sys.message what e))
 
 /-- IO that can fail, as a monad: an action whose result is `.ok a` or `.error message`.
 A `do` block in `EIO` stops at the first error. -/
@@ -91,10 +94,11 @@ extern "wiz_sys_unsetenv" Env.unsetRaw : String → IO Nat
 extern "wiz_sys_environ" Env.listRaw : IO (List String)
 
 /-- The value of an environment variable, or `none` if it is not set: `Env.get "HOME"`. -/
-def Env.get (k : String) : IO (Option String) :=
-  IO.bind (Sys.check k (Env.getRaw k)) (fun r => IO.pure (match r with
+def Env.get (k : String) : IO (Option String) := do
+  r ← Sys.check k (Env.getRaw k);
+  IO.pure (match r with
     | .ok v => .some v
-    | .error e => .none))
+    | .error e => .none)
 /-- Set an environment variable. (Not thread-safe in C: set variables before starting threads.) -/
 def Env.set (k v : String) : EIO Unit := Sys.lift (String.append "setenv " k) (Env.setRaw k v)
 /-- Remove an environment variable. (Not thread-safe in C, like `Env.set`.) -/
@@ -107,7 +111,9 @@ def Env.pairsFrom : List String → Option String → List (String × String)
 /-- A flat list name₁, value₁, name₂, … as pairs: `Env.pairs ["A", "1"] = [("A", "1")]`. -/
 def Env.pairs (l : List String) : List (String × String) := Env.pairsFrom l .none
 /-- Every environment variable with its value, sorted by name. -/
-def Env.list : IO (List (String × String)) := IO.bind Env.listRaw (fun l => IO.pure (Env.pairs l))
+def Env.list : IO (List (String × String)) := do
+  l ← Env.listRaw;
+  IO.pure (Env.pairs l)
 
 -- Paths.
 
@@ -204,33 +210,39 @@ def FS.statOf : List Nat → FileStat
     FileStat.mk (FileKind.ofNat k) s t ns m
   | _ => FileStat.mk .other 0 0 0 0
 /-- What a path names, following links (`stat`): kind, size, modification time, mode. -/
-def FS.stat (p : String) : EIO FileStat :=
-  EIO.bind (Sys.check p (FS.statRaw p .true)) (fun l => EIO.pure (FS.statOf l))
+def FS.stat (p : String) : EIO FileStat := do
+  l ← Sys.check p (FS.statRaw p .true);
+  EIO.pure (FS.statOf l)
 /-- What a path itself is, not following a link (`lstat`). -/
-def FS.linkStat (p : String) : EIO FileStat :=
-  EIO.bind (Sys.check p (FS.statRaw p .false)) (fun l => EIO.pure (FS.statOf l))
+def FS.linkStat (p : String) : EIO FileStat := do
+  l ← Sys.check p (FS.statRaw p .false);
+  EIO.pure (FS.statOf l)
 /-- Whether the path exists (following links: a dangling link does not). -/
-def FS.exists (p : String) : IO Bool :=
-  IO.bind (FS.stat p) (fun r => IO.pure (match r with
+def FS.exists (p : String) : IO Bool := do
+  r ← FS.stat p;
+  IO.pure (match r with
     | .ok s => .true
-    | .error e => .false))
+    | .error e => .false)
 /-- Whether the path names a file (`.file`) or a directory (`.dir`) (following links; other kinds are never matched). -/
-def FS.kindIs (k : FileKind) (p : String) : IO Bool :=
-  IO.bind (FS.stat p) (fun r => IO.pure (match r with
+def FS.kindIs (k : FileKind) (p : String) : IO Bool := do
+  r ← FS.stat p;
+  IO.pure (match r with
     | .ok s => match s.kind, k with
       | .file, .file => .true
       | .dir, .dir => .true
       | _, _ => .false
-    | .error e => .false))
+    | .error e => .false)
 /-- Whether the path is a directory. -/
 def FS.isDir (p : String) : IO Bool := FS.kindIs .dir p
 /-- Whether the path is a regular file. -/
 def FS.isFile (p : String) : IO Bool := FS.kindIs .file p
 
 /-- The directory for temporary files: `$TMPDIR`, or `/tmp`. -/
-def FS.tempRoot : IO String := IO.bind (Env.get "TMPDIR") (fun r => IO.pure (match r with
-  | .some d => d
-  | .none => "/tmp"))
+def FS.tempRoot : IO String := do
+  r ← Env.get "TMPDIR";
+  IO.pure (match r with
+    | .some d => d
+    | .none => "/tmp")
 /-- A new, empty directory under `FS.tempRoot`, named `wiz-…`; remove it with `FS.removeAll`. -/
 def FS.createTempDir : EIO String :=
   IO.bind FS.tempRoot (fun root => Sys.check root (FS.mkdtempRaw (Path.join root "wiz-")))
@@ -294,16 +306,22 @@ def File.flush (f : File) : EIO Unit := Sys.lift "flush" (File.flushRaw f)
 /-- Close the handle now; later operations on it are errors. -/
 def File.close (f : File) : EIO Unit := Sys.lift "close" (File.closeRaw f)
 /-- Print a line on standard error. -/
-def IO.ePrintln (s : String) : IO Unit :=
-  IO.bind File.stderr (fun f => IO.bind (File.write f (String.append s "\n")) (fun r => IO.pure ()))
+def IO.ePrintln (s : String) : IO Unit := do
+  f ← File.stderr;
+  File.write f (String.append s "\n");
+  IO.pure ()
 
 /-- End this program with an exit code (without the leak check). -/
 extern "wiz_sys_exit" Process.exit : Nat → IO Unit
 /-- Run an `EIO` action as a program's `main`: an error is printed on standard error and
 the program exits with code 1. `def main : IO Unit := EIO.toIO (do …)`. -/
-def EIO.toIO (x : EIO Unit) : IO Unit := IO.bind x (fun r => match r with
+def EIO.toIO (x : EIO Unit) : IO Unit := do
+  r ← x;
+  match r with
   | .ok u => IO.pure u
-  | .error e => IO.bind (IO.ePrintln e) (fun u => Process.exit 1))
+  | .error e => do
+    IO.ePrintln e;
+    Process.exit 1
 
 -- Processes.
 
@@ -377,8 +395,9 @@ def Child.readStderr (c : Child) : EIO String := Sys.check "read child stderr" (
 pipes fill up. -/
 def Child.communicate (c : Child) (input : String) : EIO Unit := Sys.lift "communicate" (Child.communicateRaw c input)
 /-- Wait for the child to end. -/
-def Child.wait (c : Child) : EIO ExitStatus :=
-  EIO.bind (Sys.check "wait" (Child.waitRaw c)) (fun n => EIO.pure (ExitStatus.ofNat n))
+def Child.wait (c : Child) : EIO ExitStatus := do
+  n ← Sys.check "wait" (Child.waitRaw c);
+  EIO.pure (ExitStatus.ofNat n)
 /-- Send the child a signal (15 is SIGTERM, 9 SIGKILL). -/
 def Child.kill (c : Child) (signal : Nat) : EIO Unit := Sys.lift "kill" (Child.killRaw c signal)
 
@@ -441,9 +460,13 @@ extern "wiz_sys_clock_ns" Clock.nsRaw : Nat → IO Nat
 /-- Raw sleep in nanoseconds; use `Clock.sleep`. -/
 extern "wiz_sys_sleep_ns" Clock.sleepRaw : Nat → IO Unit
 /-- The monotonic clock: since an unspecified start, never set back (for time limits and measuring). -/
-def Clock.monotonic : IO Duration := IO.bind (Clock.nsRaw 0) (fun n => IO.pure (Duration.mk n))
+def Clock.monotonic : IO Duration := do
+  n ← Clock.nsRaw 0;
+  IO.pure (Duration.mk n)
 /-- The wall clock: since 1970-01-01 00:00 UTC (can jump when the system clock is set). -/
-def Clock.wall : IO Duration := IO.bind (Clock.nsRaw 1) (fun n => IO.pure (Duration.mk n))
+def Clock.wall : IO Duration := do
+  n ← Clock.nsRaw 1;
+  IO.pure (Duration.mk n)
 /-- Wait for a while: `Clock.sleep (Duration.millis 10)`. -/
 def Clock.sleep (d : Duration) : IO Unit := Clock.sleepRaw d.ns
 
@@ -532,10 +555,11 @@ extern "wiz_sys_child_try_wait" Child.tryWaitRaw : Child → IO Nat
 /-- Raw signal to a process group; use `Child.killGroup`. -/
 extern "wiz_sys_child_kill_group" Child.killGroupRaw : Child → Nat → IO Nat
 /-- How the child ended, or `none` while it runs (does not block). -/
-def Child.tryWait (c : Child) : EIO (Option ExitStatus) :=
-  EIO.bind (Sys.check "wait" (Child.tryWaitRaw c)) (fun n => EIO.pure (match Nat.beq n 0x100000000 with
+def Child.tryWait (c : Child) : EIO (Option ExitStatus) := do
+  n ← Sys.check "wait" (Child.tryWaitRaw c);
+  EIO.pure (match Nat.beq n 0x100000000 with
     | .true => .none
-    | .false => .some (ExitStatus.ofNat n)))
+    | .false => .some (ExitStatus.ofNat n))
 /-- A signal to the whole process group the child leads (spawned with `.newGroup` or `.newSession`). -/
 def Child.killGroup (c : Child) (signal : Nat) : EIO Unit := Sys.lift "kill group" (Child.killGroupRaw c signal)
 
@@ -678,8 +702,11 @@ def Fd.close (f : Fd) : EIO Unit := Sys.lift "close" (Fd.closeRaw f)
 /-- Run `k` on the descriptor's number (for C code: `link_c` shims), keeping the handle
 open until `k` is done. (A handle is closed after its last use; a bare `Fd.raw` number
 outlives that.) -/
-def Fd.withRaw {A : Type} (f : Fd) (k : Nat → IO A) : IO A :=
-  IO.bind (Fd.raw f) (fun n => IO.bind (k n) (fun a => IO.bind (Fd.keep f) (fun u => IO.pure a)))
+def Fd.withRaw {A : Type} (f : Fd) (k : Nat → IO A) : IO A := do
+  n ← Fd.raw f;
+  a ← k n;
+  Fd.keep f;
+  IO.pure a
 /-- A pipe: the end to read from, the end to write to. -/
 def Fd.pipe : EIO (Fd × Fd) := do
   n ← Sys.check "pipe" Fd.pipeRaw;
@@ -739,11 +766,13 @@ def Fd.write (f : Fd) (b : Bytes) : EIO Unit := Sys.lift "write" (Fd.writeRaw f 
 /-- Write text, as UTF-8. -/
 def Fd.writeUtf8 (f : Fd) (s : String) : EIO Unit := Fd.write f (Bytes.ofUtf8 s)
 /-- Whether there is something to read (or the end of the file) within `d`. -/
-def Fd.readableWithin (f : Fd) (d : Duration) : EIO Bool :=
-  EIO.bind (Sys.check "poll" (Fd.waitRaw f 1 .true d.ns)) (fun n => EIO.pure (Nat.beq n 1))
+def Fd.readableWithin (f : Fd) (d : Duration) : EIO Bool := do
+  n ← Sys.check "poll" (Fd.waitRaw f 1 .true d.ns);
+  EIO.pure (Nat.beq n 1)
 /-- Whether a write would not block, within `d`. -/
-def Fd.writableWithin (f : Fd) (d : Duration) : EIO Bool :=
-  EIO.bind (Sys.check "poll" (Fd.waitRaw f 2 .true d.ns)) (fun n => EIO.pure (Nat.beq n 1))
+def Fd.writableWithin (f : Fd) (d : Duration) : EIO Bool := do
+  n ← Sys.check "poll" (Fd.waitRaw f 2 .true d.ns);
+  EIO.pure (Nat.beq n 1)
 /-- Move, and say where that is (from the start), as `File.seek`. -/
 def Fd.seek (f : Fd) (to : SeekFrom) : EIO Nat :=
   Sys.check "seek" (Fd.seekRaw f (SeekFrom.whence to) (SeekFrom.offset to) (SeekFrom.negative to))
@@ -785,10 +814,10 @@ def Fd.pollEvents : List (Fd × Interest) → List Nat
   | .cons (f, i) rest => .cons (Interest.toNat i) (Fd.pollEvents rest)
 /-- The descriptors that are ready, in order, waiting at most `d`: empty when the time ran out.
 `Fd.poll (.cons (a, .readable) (.cons (b, .readable) .nil)) (Duration.seconds 1)`. -/
-def Fd.poll (fs : List (Fd × Interest)) (d : Duration) : EIO (List Readiness) :=
-  EIO.bind (Sys.check "poll" (Fd.pollRaw (Fd.pollFds fs) (Fd.pollEvents fs) .true d.ns))
-    (fun l => EIO.pure (Readiness.decode l))
+def Fd.poll (fs : List (Fd × Interest)) (d : Duration) : EIO (List Readiness) := do
+  l ← Sys.check "poll" (Fd.pollRaw (Fd.pollFds fs) (Fd.pollEvents fs) .true d.ns);
+  EIO.pure (Readiness.decode l)
 /-- `Fd.poll` with no time limit. -/
-def Fd.pollForever (fs : List (Fd × Interest)) : EIO (List Readiness) :=
-  EIO.bind (Sys.check "poll" (Fd.pollRaw (Fd.pollFds fs) (Fd.pollEvents fs) .false 0))
-    (fun l => EIO.pure (Readiness.decode l))
+def Fd.pollForever (fs : List (Fd × Interest)) : EIO (List Readiness) := do
+  l ← Sys.check "poll" (Fd.pollRaw (Fd.pollFds fs) (Fd.pollEvents fs) .false 0);
+  EIO.pure (Readiness.decode l)
