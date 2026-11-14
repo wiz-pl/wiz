@@ -60,6 +60,35 @@ def rqHandle : String := rqPrelude ++
   "  ResultH.elim (fun n (1 u : Tok) => endTok u) (fun _ (1 u : Tok) => endTok u) (linBind t)\n" ++
   "#reduce linElim (.mk)\n"
 
+/-- `ResultH.mapHandle` transforms the handle on both branches and `ResultH.ofResult`
+carries one through a plain `Result`; `Result` is the `q = ω` instance of `ResultQ`. -/
+def rqHandlePlumbing : String := rqPrelude ++
+  "inductive Tok where | mk (n : Nat)\n" ++
+  "def Tok.use (1 t : Tok) : Nat := match t with | .mk n => n\n" ++
+  "def bump (1 t : Tok) : Tok := match t with | .mk n => .mk (Nat.succ n)\n" ++
+  -- q = ω: an ordinary (droppable) handle
+  "def w : ResultH ω Nat Nat := ResultH.mapHandle (fun (ω n : Nat) => Nat.add n 1) (.ok 1 2)\n" ++
+  "def wN : Nat := ResultH.elim (fun n (ω h : Nat) => Nat.add n h) (fun _ h => h) w\n" ++
+  -- q = 1: the handle transform is linear, the mapping function itself unrestricted
+  "def l (1 t : Tok) : ResultH 1 Nat Tok := ResultH.mapHandle (fun (1 u : Tok) => bump u) (.ok 7 t)\n" ++
+  "def lN (1 t : Tok) : Nat :=\n" ++
+  "  ResultH.elim (fun n (1 u : Tok) => Tok.use u) (fun _ (1 u : Tok) => Tok.use u) (l t)\n" ++
+  -- a plain Result with a handle attached, on both branches
+  "def s (1 t : Tok) : ResultH 1 Nat Tok := ResultH.ofResult t (.ok 3)\n" ++
+  "def sN (1 t : Tok) : Nat :=\n" ++
+  "  ResultH.elim (fun n (1 u : Tok) => Tok.use u) (fun _ (1 u : Tok) => Tok.use u) (s t)\n" ++
+  "def e (1 t : Tok) : ResultH 1 Nat Tok := ResultH.ofResult t (.err .overflow)\n" ++
+  "def eN (1 t : Tok) : Nat :=\n" ++
+  "  ResultH.elim (fun n (1 u : Tok) => Tok.use u) (fun _ (1 u : Tok) => Tok.use u) (e t)\n" ++
+  -- Result.bind/map/elim are the same functions at q = ω (definitionally)
+  "def sameBind (x : Result Nat) (f : Nat → Result Nat) : Result.bind x f = ResultQ.bind x f :=\n" ++
+  "  refl (Result.bind x f)\n" ++
+  "def b (x : Result Nat) : Result Nat := Result.bind x (fun n => .ok (Nat.succ n))\n" ++
+  "def m (x : Result Nat) : Result Nat := Result.map Nat.succ x\n" ++
+  "def el (x : Result Nat) : Nat := Result.elim (fun n => n) (fun _ => 0) x\n" ++
+  "#reduce wN\n#reduce lN (.mk 5)\n#reduce sN (.mk 4)\n#reduce eN (.mk 6)\n" ++
+  "#reduce b (.ok 4)\n#reduce b (.err .overflow)\n#reduce m (.ok 3)\n#reduce el (.ok 9)\n#reduce el (.err .divZero)\n"
+
 /-- The compiled program: `q = ω`, `q = 1`, `q = 0` and a `ResultH 1`. -/
 def rqRun : String := rqPrelude ++ "import IO\n" ++
   "inductive Tok where | mk\n" ++
@@ -98,6 +127,18 @@ def rqGroup : Group where
           "inductive Tok where | mk\n" ++
           "def endTok (1 t : Tok) : Nat := match t with | .mk => 0\n" ++
           "def bad (1 t : Tok) : Nat × Nat :=\n  match (.ok 1 t : ResultH 1 Nat Tok) with\n  | .ok _ u => (endTok u, endTok u)\n  | .err _ u => (endTok u, endTok u)\n")
+          "quantity" },
+    { name := "ResultH.mapHandle/ofResult transform a handle on both branches; Result is the ω instance of ResultQ", run := fun _ =>
+        okLibs rqHandlePlumbing ["4", "6", "4", "6", ".ok 5", ".err .overflow", ".ok 4", "9", "0"] },
+    { name := "a linear handle cannot be duplicated through ResultH.ofResult", run := fun _ =>
+        failsLibs (rqPrelude ++
+          "inductive Tok where | mk\n" ++
+          "def bad (1 t : Tok) : ResultH 1 Nat Tok × ResultH 1 Nat Tok :=\n  (ResultH.ofResult t (.ok 1), ResultH.ofResult t (.ok 2))\n")
+          "quantity" },
+    { name := "a mapHandle function cannot return a linear handle twice", run := fun _ =>
+        failsLibs (rqPrelude ++
+          "inductive Tok where | mk\n" ++
+          "def bad (1 t : Tok) : ResultH 1 Nat (Tok × Tok) :=\n  ResultH.mapHandle (fun (1 u : Tok) => (u, u)) (.ok 1 t)\n")
           "quantity" },
     { name := "compiled run: ResultQ at ω, 1, 0 and ResultH 1", run := fun _ =>
         cRunLibs rqRun "74\n" }
