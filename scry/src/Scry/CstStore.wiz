@@ -297,6 +297,10 @@ def Scry.CstStore.filesOf (s : Scry.CstStore) : List Scry.SourceFile :=
   List.map (fun i => Scry.SourceFile.mk i (InternTable.lookup s.paths (U32.ofNat i))
     (UIntN.toNat (U64Array.get s.bytes i))) (Scry.range (InternTable.size s.paths))
 
+/-- File `i`'s path (the interned path table; `""` when it is not there). -/
+def Scry.CstStore.pathName (s : Scry.CstStore) (i : Nat) : String :=
+  InternTable.lookup s.paths (U32.ofNat i)
+
 /-- The model view of the columns, checked by `Scry.Facts.finishFacts` (ids in order,
 endpoints and parents in range, spans ordered, tuple lengths = arity). -/
 def Scry.CstStore.toFacts (s : Scry.CstStore) : Except String Scry.Facts :=

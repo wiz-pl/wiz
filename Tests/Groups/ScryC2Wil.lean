@@ -15,8 +15,10 @@ build. For every differential case the test
 
 `havoc.c` is the boundary case: a struct field access is not modelled, so the lowering
 records a warning and emits `havoc`; the test asserts that (and that the Wil value is
-*not* claimed to be the C value). The other cases cover the CFG, origins, the direct-call
-graph and the facts EDB. The design is `wiz-notes/scry-c2wil.md`.
+*not* claimed to be the C value). The other cases cover the CFG, origins (including a
+`cc -E` unit whose macros, include and `#if` map back to `main.c`/`inc.h`, and a
+synthetic system-header marker), the direct-call graph and the facts EDB. The design is
+`wiz-notes/scry-c2wil.md`.
 -/
 
 open Wiz
@@ -55,23 +57,31 @@ def fixture (name : String) : IO (String × String) := do
   let cst ← IO.FS.readFile s!"scry/corpus/c2wil/{name}.cst"
   pure (c, cst)
 
-/-- The Wiz prelude every case shares: the source, the spill, the CST, the translated
-unit, its first function and a whole program. -/
-def prelude (name src cst : String) : String :=
-  "import Scry.Lower\nimport Scry.CstStore\nimport Text\n" ++
-  s!"def source : String := {wizStr src}\n" ++
-  s!"def spill : String := {wizStr cst}\n" ++
-  "def cst : Option Scry.Cst := match Scry.CstStore.ofText spill with\n" ++
-  "  | .ok s => .some (Scry.Cst.ofStore source s)\n" ++
-  "  | .error _ => .none\n" ++
+/-- The preprocessed fixture: `main.i` (the `cc -E` output), the two original files and
+the spill of the *blanked* preprocessed text. -/
+def preprocFixture : IO (String × String × String × String) := do
+  let i ← IO.FS.readFile "scry/corpus/c2wil/preproc/main.i"
+  let main ← IO.FS.readFile "scry/corpus/c2wil/preproc/main.c"
+  let inc ← IO.FS.readFile "scry/corpus/c2wil/preproc/inc.h"
+  let cst ← IO.FS.readFile "scry/corpus/c2wil/preproc/main.i.cst"
+  pure (i, main, inc, cst)
+
+/-- The definitions every prelude shares: the lowered unit, its functions by name, span
+lists, and `main`'s value with a fuel bound. -/
+def tuCommon : String :=
   s!"def tu : Option Scry.TU := match cst with\n" ++
-  s!"  | .some c => .some (Scry.lowerTU \"{name}.c\" c)\n" ++
+  "  | .some c => .some (Scry.lowerTU \"UNIT.c\" c)\n" ++
   "  | .none => .none\n" ++
   "def first : Option Wil.Func := match tu with\n" ++
   "  | .some t => match t.funcs with\n" ++
   "    | .cons f _ => .some f\n" ++
   "    | .nil => .none\n" ++
   "  | .none => .none\n" ++
+  "def fnNamed (t : Scry.TU) (name : String) : Option Wil.Func :=\n" ++
+  "  List.find (fun f => String.eq f.name name) t.funcs\n" ++
+  "def spansOf (f : Wil.Func) : List Wil.Span :=\n" ++
+  "  List.concat (List.map (fun b => List.append (List.map Wil.stmtOrigin b.stmts)\n" ++
+  "    (.cons (Wil.termOrigin b.term) .nil)) f.blocks)\n" ++
   "def warnCount : Nat := match tu with\n" ++
   "  | .some t => List.length t.warnings\n" ++
   "  | .none => 999\n" ++
@@ -88,15 +98,51 @@ def prelude (name src cst : String) : String :=
   "    | .outOfFuel => 901\n" ++
   "  | .none => 999\n"
 
-/-- Run `body` (which may use the prelude) and return its `#eval` texts. -/
-def wizEval (name src cst body : String) : IO (List String) := do
-  let full := prelude name src cst ++ body
+/-- The Wiz prelude every case shares: the source, the spill, the CST, the translated
+unit, its first function and a whole program. -/
+def prelude (name src cst : String) : String :=
+  "import Scry.Lower\nimport Scry.CstStore\nimport Text\n" ++
+  s!"def source : String := {wizStr src}\n" ++
+  s!"def spill : String := {wizStr cst}\n" ++
+  "def cst : Option Scry.Cst := match Scry.CstStore.ofText spill with\n" ++
+  "  | .ok s => .some (Scry.Cst.ofStore source s)\n" ++
+  "  | .error _ => .none\n" ++
+  tuCommon.replace "UNIT.c" (name ++ ".c")
+
+/-- The Wiz prelude of the preprocessed fixture: `main.i` through `Scry.preprocess` with
+the two original files, so the CST's spans are mapped to `main.c`/`inc.h`, then the
+usual definitions. -/
+def preprocPrelude (i main inc cst : String) : String :=
+  "import Scry.Lower\nimport Scry.CstStore\nimport Scry.Preproc\nimport Text\n" ++
+  s!"def ppText : String := {wizStr i}\n" ++
+  s!"def mainText : String := {wizStr main}\n" ++
+  s!"def incText : String := {wizStr inc}\n" ++
+  s!"def spill : String := {wizStr cst}\n" ++
+  "def pre : Scry.Preprocessed := Scry.preprocess \"corpus/c2wil/preproc/main.c\" ppText\n" ++
+  "  (.cons (\"corpus/c2wil/preproc/main.c\", mainText)\n" ++
+  "    (.cons (\"corpus/c2wil/preproc/inc.h\", incText) .nil))\n" ++
+  "def cst : Option Scry.Cst := match Scry.CstStore.ofText spill with\n" ++
+  "  | .ok s => .some (Scry.Cst.ofPreprocessed pre s)\n" ++
+  "  | .error _ => .none\n" ++
+  tuCommon.replace "UNIT.c" "main.c"
+
+/-- Run a full Wiz source and return its `#eval` texts (unexpected frontend errors are
+reported with the source). -/
+def wizEvalRaw (full : String) : IO (List String) := do
   let loader ← loader
   let s := runFrontend (R := ZeroOneMany) full { trustedModule := Tests.libModule, loader }
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render full
   unless errs.isEmpty do
     throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
   pure (s.messages.toList.map (·.text))
+
+/-- Run `body` (which may use the prelude) and return its `#eval` texts. -/
+def wizEval (name src cst body : String) : IO (List String) :=
+  wizEvalRaw (prelude name src cst ++ body)
+
+/-- Run `body` with the preprocessed fixture's prelude. -/
+def wizEvalPreproc (i main inc cst body : String) : IO (List String) :=
+  wizEvalRaw (preprocPrelude i main inc cst ++ body)
 
 /-- `main`'s exit status when `name.c` is compiled and run by the suite's `cc`. -/
 def ccResult (name : String) : IO Nat := do
@@ -132,6 +178,116 @@ def group : Group where
       run := fun _ => differential "arith" },
     { name := "differential: a for loop is desugared to a header/update/back edge",
       run := fun _ => differential "forloop" },
+    { name := "differential: switch lowers to a compare chain (cases, default, fallthrough)",
+      run := fun _ => differential "switch" },
+    { name := "switch CFG: valid, 11 blocks, 14 edges, all reachable",
+      run := fun _ => do
+        let (src, cst) ← fixture "switch"
+        let body :=
+          "#eval match tu with\n" ++
+          "  | .some t => match fnNamed t \"static:classify\" with\n" ++
+          "    | .some f => match Scry.cfgValid f with | .true => 1 | .false => 0\n" ++
+          "    | .none => 999\n" ++
+          "  | .none => 998\n" ++
+          "#eval match tu with\n" ++
+          "  | .some t => match fnNamed t \"static:classify\" with\n" ++
+          "    | .some f => List.length f.blocks\n" ++
+          "    | .none => 999\n" ++
+          "  | .none => 998\n" ++
+          "#eval match tu with\n" ++
+          "  | .some t => match fnNamed t \"static:classify\" with\n" ++
+          "    | .some f => List.length (Scry.cfgOf f)\n" ++
+          "    | .none => 999\n" ++
+          "  | .none => 998\n" ++
+          "#eval match tu with\n" ++
+          "  | .some t => match fnNamed t \"static:classify\" with\n" ++
+          "    | .some f => List.length (Scry.reachable f)\n" ++
+          "    | .none => 999\n" ++
+          "  | .none => 998\n"
+        let outs ← wizEval "switch" src cst body
+        checkEq ["1", "11", "14", "11"] outs },
+    { name := "preprocessing: include, macro and #if origins point at the original files",
+      run := fun _ => do
+        let (i, main, inc, cst) ← preprocFixture
+        let body :=
+          "#eval mainResult\n" ++
+          "#eval warnCount\n" ++
+          "#eval pre.markers\n" ++
+          "#eval pre.systemMarkers\n" ++
+          "#eval match tu with | .some t => List.length t.files | .none => 999\n" ++
+          "#eval match tu with\n" ++
+          "  | .some t => match fnNamed t \"main\", fnNamed t \"static:bump\" with\n" ++
+          "    | .some m, .some b =>\n" ++
+          "      match List.all (fun sp => Bool.or (Nat.beq sp.file 0) (Nat.beq sp.file 3))\n" ++
+          "        (List.append (spansOf m) (spansOf b)) with\n" ++
+          "      | .true => 1 | .false => 0\n" ++
+          "    | _, _ => 998\n" ++
+          "  | .none => 999\n" ++
+          "#eval match tu with\n" ++
+          "  | .some t => match fnNamed t \"main\" with\n" ++
+          "    | .some f => match List.find (fun sp =>\n" ++
+          "        String.eq (Scry.spanText t.files sp) \"int a = TWICE(3);\") (spansOf f) with\n" ++
+          "      | .some sp => Nat.add (Nat.mul sp.file 100) sp.line\n" ++
+          "      | .none => 999\n" ++
+          "    | .none => 998\n" ++
+          "  | .none => 997\n" ++
+          "#eval match tu with\n" ++
+          "  | .some t => match fnNamed t \"main\" with\n" ++
+          "    | .some f => match List.find (fun sp =>\n" ++
+          "        String.eq (Scry.spanText t.files sp) \"int b = a + OFFSET;\") (spansOf f) with\n" ++
+          "      | .some sp => Nat.add (Nat.mul sp.file 100) sp.line\n" ++
+          "      | .none => 999\n" ++
+          "    | .none => 998\n" ++
+          "  | .none => 997\n" ++
+          "#eval match tu with\n" ++
+          "  | .some t => match fnNamed t \"main\" with\n" ++
+          "    | .some f => match List.find (fun sp =>\n" ++
+          "        String.eq (Scry.spanText t.files sp) \"return bump(b);\") (spansOf f) with\n" ++
+          "      | .some sp => Nat.add (Nat.mul sp.file 100) sp.line\n" ++
+          "      | .none => 999\n" ++
+          "    | .none => 998\n" ++
+          "  | .none => 997\n" ++
+          "#eval match tu with\n" ++
+          "  | .some t => match fnNamed t \"static:bump\" with\n" ++
+          "    | .some f => match String.startsWith (Scry.spanText t.files f.origin)\n" ++
+          "        \"static int bump(int x) {\" with\n" ++
+          "      | .true => Nat.add (Nat.mul f.origin.file 100) f.origin.line\n" ++
+          "      | .false => 999\n" ++
+          "    | .none => 998\n" ++
+          "  | .none => 997\n" ++
+          "#eval match tu with\n" ++
+          "  | .some t => match fnNamed t \"main\" with\n" ++
+          "    | .some f => match List.any (fun sp =>\n" ++
+          "        String.contains (Scry.spanText t.files sp) \"((3)\") (spansOf f) with\n" ++
+          "      | .true => 0 | .false => 1\n" ++
+          "    | .none => 998\n" ++
+          "  | .none => 997\n"
+        let outs ← wizEvalPreproc i main inc cst body
+        checkEq ["12", "0", "6", "0", "4", "1", "6", "8", "12", "304", "1"] outs },
+    { name := "preprocessing: #line and a system-header marker map line and column",
+      run := fun _ => do
+        let (i, main, inc, cst) ← preprocFixture
+        let body :=
+          "#eval\n" ++
+          "  let lmText : String := \"# 1 \\\"a.c\\\"\\nint x;\\n# 1 \\\"/usr/include/stdio.h\\\" 3\\nint puts(const char *);\\n# 2 \\\"a.c\\\" 2\\nint y;\\n\";\n" ++
+          "  let aText : String := \"int x;\\nint y;\\n\";\n" ++
+          "  let hdr : String := \"int puts(const char *);\\n\";\n" ++
+          "  let lm := Scry.preprocess \"a.c\" lmText\n" ++
+          "    (.cons (\"a.c\", aText) (.cons (\"/usr/include/stdio.h\", hdr) .nil));\n" ++
+          "  let off := List.getD lm.lineStart 3 0;\n" ++
+          "  let sp := Scry.mapSpan lm 0 off (Nat.add off 8);\n" ++
+          "  let checks : List Bool := [\n" ++
+          "    Nat.beq (List.length lm.paths) 2,\n" ++
+          "    Nat.beq (List.getD lm.lineFile 3 9) 1,\n" ++
+          "    Nat.beq (List.getD lm.lineOrig 3 9) 1,\n" ++
+          "    Nat.beq (List.getD lm.lineFile 5 9) 0,\n" ++
+          "    Nat.beq (List.getD lm.lineOrig 5 9) 2,\n" ++
+          "    Nat.beq lm.systemMarkers 1,\n" ++
+          "    Bool.and (Nat.beq sp.file 1) (Bool.and (Nat.beq sp.line 1) (Nat.beq sp.col 1)),\n" ++
+          "    Nat.beq (String.length (String.trim (Scry.lineText lm.text lm.lineStart 0))) 0];\n" ++
+          "  List.length (List.filter (fun b => b) checks)\n"
+        let outs ← wizEvalPreproc i main inc cst body
+        checkEq ["8"] outs },
     { name := "boundary: a struct field access is havoc with a warning, not a wrong value",
       run := fun _ => do
         let (src, cst) ← fixture "havoc"

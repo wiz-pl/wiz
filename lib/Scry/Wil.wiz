@@ -63,9 +63,15 @@ def Wil.mkStmtId (n : Nat) : Wil.StmtId := Wil.Id.mk n
 -- ## Origins
 
 /-- Where a Wil statement or terminator comes from: the byte range `[start, stop)` in
-file `file` (an index into the translation unit's source files), and the CST node it was
-lowered from (`node`, 0 when unknown). Every statement and terminator carries one, so a
-finding names source (S4's SARIF) and Wil facts join back to CST facts. -/
+file `file` (an index into the translation unit's source files), the CST node it was
+lowered from (`node`, 0 when unknown), and the original source position of `start`
+(`line`, `col`, both 1-based; 0 when unknown or synthetic).
+
+The byte range and the line/column are in the *original* file even when the unit went
+through `cc -E`: the preprocessor's line markers (parsed by `scry/src/Scry/Preproc.wiz`)
+map a preprocessed offset back to its file, line and column, so a macro expansion still
+reports the call site. Every statement and terminator carries one, so a finding names
+source (S4's SARIF) and Wil facts join back to CST facts. -/
 structure Wil.Span where
   /-- The source file's index in the translation unit. -/
   file : Nat
@@ -75,12 +81,16 @@ structure Wil.Span where
   stop : Nat
   /-- The CST node the statement came from (0 when the origin is synthetic). -/
   node : Nat
+  /-- The 1-based line of `start` in the original file (0 when unknown). -/
+  line : Nat
+  /-- The 1-based column of `start` in the original file (0 when unknown). -/
+  col : Nat
 
 /-- No origin: what a hand-built (builder or test) statement carries. -/
-def Wil.noSpan : Wil.Span := Wil.Span.mk 0 0 0 0
+def Wil.noSpan : Wil.Span := Wil.Span.mk 0 0 0 0 0 0
 
-/-- A synthetic origin in file `f` spanning `[start, stop)`. -/
-def Wil.spanAt (f start stop : Nat) : Wil.Span := Wil.Span.mk f start stop 0
+/-- A synthetic origin in file `f` spanning `[start, stop)` (line and column unknown). -/
+def Wil.spanAt (f start stop : Nat) : Wil.Span := Wil.Span.mk f start stop 0 0 0
 
 -- ## Types and values
 

@@ -11,11 +11,18 @@ columns; no `TSNode` crosses the FFI. `src/Scry/Native.wiz` exposes the columns 
 `U32Array`/`U64Array` and builds the `Scry.CstStore` model. The JSON fact store and the
 `scry-cst 1` spill format remain for the synthetic corpus and for differential tests.
 
+S2's C→Wil lowering is `src/Scry/Lower.wiz` (see `wiz-notes/scry-c2wil.md`), and
+`src/Scry/Preproc.wiz` is its preprocessing entry point: `Scry.preprocess` parses
+`cc -E` line markers, blanks them (so tree-sitter never sees a directive and every
+offset is unchanged), and maps each node's preprocessed span back to the original
+file/line/column in `Wil.Span`. `scry-cst -E [-D…] [-I…] FILE` runs `cc -E` and spills
+the blanked text, which is how `corpus/c2wil/preproc/main.i.cst` was generated.
+
 ```sh
 cd scry
 cp ../grail.local.wiz .         # this machine's toolchain (not committed)
 grail build                     # check src/gen, build .grail/bin/scry, run the commands
-grail test                      # schema, cst, native shim, codegen, CLI, parse --stats
+grail test                      # schema, cst, native shim, preproc, codegen, CLI, parse --stats
 grail build schema              # regenerate gen/C/Schema.wiz from node-types.json
 grail build schema-check        # fail if the checked-in schema is stale
 grail run scry -- parse --stats fixtures/hello.c
@@ -26,8 +33,9 @@ grail run scry -- explain fixtures/demo.facts.json 4
 ```
 
 Commands: `facts`, `query --kind|--edge|--rel`, `explain`, `parse --stats` (a C source,
-a `scry-cst` spill, or a JSON store), and `cst` (JSON store → spill). `parse --stats`
-prints counts only; the perf agent owns throughput numbers.
+a `scry-cst` spill, or a JSON store), and `cst` (JSON store → spill). `scry-cst -E`
+preprocesses first (line markers, macros, includes) and spills the parsed text.
+`parse --stats` prints counts only; the perf agent owns throughput numbers.
 
 `tests/native.wiz` checks the shim on `fixtures/hello.c`: 55 nodes, 54 edges, the root
 span `[0,95)`, parent/child/next-sibling links, and that `fixtures/broken.c` is refused
