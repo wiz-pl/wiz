@@ -370,6 +370,17 @@ partial def convTy (g : Globals R) (tys : Array (VTy R)) (a b : VTy R) : Bool :=
   -- (given) Q4
   if let (.ulift l A, .ulift l' A') := (a, b) then l.equiv l' && convTy g tys A A' else
   --<sol
+  -- **Cast-Refl at every type, while deciding equality of two propositions.**
+  -- The two sides are propositions (truth values in the model): their truth values
+  -- are what matters, and the model validates `cast`-regularity at every type. Use the
+  -- evaluator's proposition test (`propSort?`), not `isProp`/`typeSort?`: the latter
+  -- recomputes a Π/Σ sort from its parts and misses an annotated proposition whose tail
+  -- is a Π over a data domain (`vEq`'s equation at a product is exactly that).
+  -- This is what lets two proofs whose propositional types differ only in a `cast`
+  -- (outside vs inside a projection, a `transp` motive) compare. An equation between two
+  -- data *types* still uses the inert-only rule; the flag does reach the equation's two
+  -- *sides*, i.e. Cast-Refl for equation proofs (wiz-notes/conv-proof-field.md §8).
+  let g := if propSort? a == some true && propSort? b == some true then { g with regularity := .full } else g
   let v := Val.var tys.size
   match a, b with
   | .sort u, .sort u' => u.equiv u'
