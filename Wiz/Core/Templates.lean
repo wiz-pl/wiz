@@ -31,27 +31,31 @@ variable {R : Type} [QRig R] [QuantitySyntax R]
 private def v (i : Nat) : Term R := .var i
 private def apps (f : Term R) (as : List (Term R)) : Term R := as.foldl .app f
 private def lams (xs : List Name) (b : Term R) : Term R := xs.foldr .lam b
-/-- Binders inside templates are unrestricted: the rig's default quantity. -/
-private def pi (x : Name) (a b : Term R) : Term R := .pi x .default (.qlit QuantitySyntax.explicitDefault) a b none
+/-- Binders inside templates are unrestricted: the rig's default quantity. A template's
+`Π` is written with its two component sorts (mandatory sorts): `pi x (a, i) (b, j)` is
+`(x : a) → b` for `a : Sort i` and `b : Sort j`, and comes with its own sort `imax i j`. -/
+private def pi (x : Name) (a b : Term R × Level) : Term R × Level :=
+  (.pi x .default (.qlit QuantitySyntax.explicitDefault) a.1 b.1 ⟨a.2, b.2⟩, .imax a.2 b.2)
 
 /-- `fun I D X i => ⟦D⟧ X i` for `D : Desc.{l} I`. -/
 def interpTm (l : Level) : Term R :=
-  let tyL : Term R := .sort (.succ l)
+  let l1 : Level := .succ l
+  let tyL : Term R × Level := (.sort l1, .succ l1)
   -- ctx: D0 I1
-  let P := .lam "_" (pi "X" (pi "_" (v 2) tyL) (pi "i" (v 3) tyL))
+  let P := .lam "_" (pi "X" (pi "_" (v 2, l1) tyL) (pi "i" (v 3, l1) tyL)).1
   -- i0 X1 j2 D3 I4
-  -- (the motive puts every method's result in `Sort (l+1)`: that is each `Σ`'s sort)
-  let mret := lams ["j", "X", "i"] (.sigma "_" (.qlit 0) (.eq (v 4) (v 2) (v 0)) (.unit (.succ l)) (some (.succ l)))
+  -- (the motive puts every method's result in `Sort (l+1)`; the components: an index
+  -- equation in `Sort 0`, the fields `S`, `X j`, `(h : H) → X (j h)` and the rest in
+  -- `Sort (l+1)`)
+  let mret := lams ["j", "X", "i"] (.sigma "_" (.qlit 0) (.eq (v 4) (v 2) (v 0)) (.unit l1) ⟨0, l1⟩)
   -- i0 X1 ih2 E3 S4 q5
-  let marg := lams ["q", "S", "E", "ih", "X", "i"] (.sigma "s" (v 5) (v 4) (apps (v 3) [v 0, v 2, v 1]) (some (.succ l)))
+  let marg := lams ["q", "S", "E", "ih", "X", "i"] (.sigma "s" (v 5) (v 4) (apps (v 3) [v 0, v 2, v 1]) ⟨l1, l1⟩)
   -- i0 X1 ih2 E3 j4 q5
-  let mrec := lams ["q", "j", "E", "ih", "X", "i"] (.sigma "_" (v 5) (.app (v 1) (v 4)) (apps (v 3) [v 2, v 1]) (some (.succ l)))
+  let mrec := lams ["q", "j", "E", "ih", "X", "i"] (.sigma "_" (v 5) (.app (v 1) (v 4)) (apps (v 3) [v 2, v 1]) ⟨l1, l1⟩)
   -- i0 X1 ih2 E3 j4 H5 q6
   let mhrec := lams ["q", "H", "j", "E", "ih", "X", "i"]
-    -- (the field `(h : H) → X (j h)` with its sort too, `H` and `X (j h)` being in
-    -- `Sort (l+1)`: a cast at a `Π` without one is stuck, U5b)
-    (.sigma "_" (v 6) (.pi "h" .default (.qlit QuantitySyntax.explicitDefault) (v 5) (.app (v 2) (.app (v 5) (v 0))) (some (.succ l)))
-      (apps (v 3) [v 2, v 1]) (some (.succ l)))
+    (.sigma "_" (v 6) (.pi "h" .default (.qlit QuantitySyntax.explicitDefault) (v 5) (.app (v 2) (.app (v 5) (v 0))) ⟨l1, l1⟩)
+      (apps (v 3) [v 2, v 1]) ⟨.imax l1 l1, l1⟩)
   lams ["I", "D"] (.delim (.succ (.succ l)) P mret marg mrec mhrec (v 0))
 
 private def interpApp (l : Level) (I E X i : Term R) : Term R := apps (interpTm l) [I, E, X, i]
@@ -59,26 +63,27 @@ private def interpApp (l : Level) (I E X i : Term R) : Term R := apps (interpTm 
 /-- `fun I D X P i xs => All D X P i xs`: one `P`-proof per recursive field. -/
 def allTm (l v' : Level) : Term R :=
   --<sol
-  let tyL : Term R := .sort (.succ l)
+  let l1 : Level := .succ l
+  let tyL : Term R × Level := (.sort l1, .succ l1)
+  let allL : Level := .max l1 v'
   -- E0 D1 I2, then X, P, i, xs
-  let P := .lam "E" (pi "X" (pi "_" (v 2) tyL)
-    (pi "P" (pi "i" (v 3) (pi "_" (.app (v 1) (v 0)) (.sort v')))
-      (pi "i" (v 4) (pi "xs" (interpApp l (v 5) (v 3) (v 2) (v 0)) (.sort (.max (.succ l) v'))))))
-  let mret := lams ["j", "X", "P", "i", "xs"] (.unit (.max (.succ l) v'))
+  let P := .lam "E" (pi "X" (pi "_" (v 2, l1) tyL)
+    (pi "P" (pi "i" (v 3, l1) (pi "_" (.app (v 1) (v 0), l1) (.sort v', .succ v')))
+      (pi "i" (v 4, l1) (pi "xs" (interpApp l (v 5) (v 3) (v 2) (v 0), l1) (.sort allL, .succ allL))))).1
+  let mret := lams ["j", "X", "P", "i", "xs"] (.unit allL)
   -- xs0 i1 P2 X3 ih4 E5 S6 q7
   let marg := lams ["q", "S", "E", "ih", "X", "P", "i", "xs"] (apps (v 4) [.fst (v 0), v 3, v 2, v 1, .snd (v 0)])
   -- xs0 i1 P2 X3 ih4 E5 j6 q7
   let mrec := lams ["q", "j", "E", "ih", "X", "P", "i", "xs"]
     (.sigma "_" (.qlit QuantitySyntax.explicitDefault) (apps (v 2) [v 6, .fst (v 0)]) (apps (v 5) [v 4, v 3, v 2, .snd (v 1)])
-      (some (.max (.succ l) v')))
+      ⟨v', allL⟩)
   -- xs0 i1 P2 X3 ih4 E5 j6 H7 q8
   let mhrec := lams ["q", "H", "j", "E", "ih", "X", "P", "i", "xs"]
     (.sigma "_" (.qlit QuantitySyntax.explicitDefault)
-      -- (with its sort, `H` being in `Sort (l+1)` and `P …` in `Sort v'`: a cast at a `Π`
-      -- without one is stuck, U5b)
+      -- (`H` is in `Sort (l+1)`, `P …` in `Sort v'`, the rest in `Sort (max (l+1) v')`)
       (.pi "h" .default (.qlit QuantitySyntax.explicitDefault) (v 7)
-        (apps (v 3) [.app (v 7) (v 0), .app (.fst (v 1)) (v 0)]) (some (.imax (.succ l) v')))
-      (apps (v 5) [v 4, v 3, v 2, .snd (v 1)]) (some (.max (.succ l) v')))
+        (apps (v 3) [.app (v 7) (v 0), .app (.fst (v 1)) (v 0)]) ⟨l1, v'⟩)
+      (apps (v 5) [v 4, v 3, v 2, .snd (v 1)]) ⟨.imax l1 v', allL⟩)
   lams ["I", "D"] (.delim (.max (.succ (.succ l)) (.succ v')) P mret marg mrec mhrec (v 0))
   --|ex
   --| sorry
@@ -86,13 +91,15 @@ def allTm (l v' : Level) : Term R :=
 
 /-- `fun I D X P f i xs => hyps …`: apply `f` to every recursive field. -/
 def hypsTm (l v' : Level) : Term R :=
-  let tyL : Term R := .sort (.succ l)
+  let l1 : Level := .succ l
+  let tyL : Term R × Level := (.sort l1, .succ l1)
+  let allL : Level := .max l1 v'
   let allApp (I E X P i xs : Term R) : Term R := apps (allTm l v') [I, E, X, P, i, xs]
   -- E0 D1 I2, then X, P, f, i, xs
-  let P := .lam "E" (pi "X" (pi "_" (v 2) tyL)
-    (pi "P" (pi "i" (v 3) (pi "_" (.app (v 1) (v 0)) (.sort v')))
-      (pi "f" (pi "i" (v 4) (pi "x" (.app (v 2) (v 0)) (apps (v 2) [v 1, v 0])))
-        (pi "i" (v 5) (pi "xs" (interpApp l (v 6) (v 4) (v 3) (v 0)) (allApp (v 7) (v 5) (v 4) (v 3) (v 1) (v 0)))))))
+  let P := .lam "E" (pi "X" (pi "_" (v 2, l1) tyL)
+    (pi "P" (pi "i" (v 3, l1) (pi "_" (.app (v 1) (v 0), l1) (.sort v', .succ v')))
+      (pi "f" (pi "i" (v 4, l1) (pi "x" (.app (v 2) (v 0), l1) (apps (v 2) [v 1, v 0], v')))
+        (pi "i" (v 5, l1) (pi "xs" (interpApp l (v 6) (v 4) (v 3) (v 0), l1) (allApp (v 7) (v 5) (v 4) (v 3) (v 1) (v 0), allL)))))).1
   let mret := lams ["j", "X", "P", "f", "i", "xs"] .tt
   -- xs0 i1 f2 P3 X4 ih5 E6 S7 q8
   let marg := lams ["q", "S", "E", "ih", "X", "P", "f", "i", "xs"] (apps (v 5) [.fst (v 0), v 4, v 3, v 2, v 1, .snd (v 0)])
@@ -106,11 +113,12 @@ def hypsTm (l v' : Level) : Term R :=
 
 /-- `fun I D X Y f i xs => map …`: apply `f` to every recursive field. -/
 def mapTm (l : Level) : Term R :=
-  let tyL : Term R := .sort (.succ l)
+  let l1 : Level := .succ l
+  let tyL : Term R × Level := (.sort l1, .succ l1)
   -- E0 D1 I2, then X, Y, f, i, xs
-  let P := .lam "E" (pi "X" (pi "_" (v 2) tyL) (pi "Y" (pi "_" (v 3) tyL)
-    (pi "f" (pi "i" (v 4) (pi "_" (.app (v 2) (v 0)) (.app (v 2) (v 1))))
-      (pi "i" (v 5) (pi "xs" (interpApp l (v 6) (v 4) (v 3) (v 0)) (interpApp l (v 7) (v 5) (v 3) (v 1)))))))
+  let P := .lam "E" (pi "X" (pi "_" (v 2, l1) tyL) (pi "Y" (pi "_" (v 3, l1) tyL)
+    (pi "f" (pi "i" (v 4, l1) (pi "_" (.app (v 2) (v 0), l1) (.app (v 2) (v 1), l1)))
+      (pi "i" (v 5, l1) (pi "xs" (interpApp l (v 6) (v 4) (v 3) (v 0), l1) (interpApp l (v 7) (v 5) (v 3) (v 1), l1)))))).1
   let mret := lams ["j", "X", "Y", "f", "i", "xs"] (v 0)
   -- xs0 i1 f2 Y3 X4 ih5 E6 S7 q8
   let marg := lams ["q", "S", "E", "ih", "X", "Y", "f", "i", "xs"]

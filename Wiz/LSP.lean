@@ -387,7 +387,7 @@ def infoItems (srv : Server) (uri : String) (doc : Doc) (off : Nat) :
 def subtermType (g : Globals ZeroOneMany) (sub : Subterm ZeroOneMany) : Option (Term ZeroOneMany) := do
   let tys ← sub.types.reverse.mapM id
   let ctx := (sub.names.reverse.zip tys).foldl (fun (ctx : Ctx ZeroOneMany) (x, ty) =>
-    ctx.bind x (QPoly.const QuantitySyntax.explicitDefault) (Wiz.eval g ctx.env ty)) { globals := g, erased := true, proof := true }
+    ctx.bind x (QPoly.const QuantitySyntax.explicitDefault) (Wiz.eval g ctx.env ty)) { globals := { g with sortHolesOk := true }, erased := true, proof := true }
   match Wiz.infer ctx sub.term with
   | .ok (ty, _) => some (quote g ctx.lvl ty)
   | .error _ => none

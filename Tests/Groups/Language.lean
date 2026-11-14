@@ -92,10 +92,10 @@ def languageGroup : Group where
         -- the Wiz kernel: `fun n => p n refl` at `(0 n : Unit) → n = n`, `p` a proof function
         let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
         let main := "def uPf : Tm := .lam (.lam (.var 0))\n" ++
-          "def uPTy : Tm := .pi (.unit 0) (.pi (.eq (.unit 0) (.var 0) (.var 0)) (.eq (.unit 0) (.var 1) (.var 1)))\n" ++
-          "def uQTy : Tm := .piq .qz (.unit 0) (.eq (.unit 0) (.var 0) (.var 0))\n" ++
+          "def uPTy : Tm := .pi .qw (ln 1) (ln 0) (.unit 0) (.pi .qw (ln 0) (ln 0) (.eq (.unit 0) (.var 0) (.var 0)) (.eq (.unit 0) (.var 1) (.var 1)))\n" ++
+          "def uQTy : Tm := .pi .qz (ln 1) (ln 0) (.unit 0) (.eq (.unit 0) (.var 0) (.var 0))\n" ++
           "def uQV : Tm := .lam (.app (.app (.ann uPf uPTy) (.var 0)) (.eqRefl (.unit 0) (.var 0)))\n" ++
-          "def uRelTy : Tm := .piq .qz (.unit 0) (.unit 0)\n" ++
+          "def uRelTy : Tm := .pi .qz (ln 1) (ln 1) (.unit 0) (.unit 0)\n" ++
           "def uOkD (ty v : Tm) : String := match checkDecl ty (.some (markClosed v ty)) with\n  | .ok _ _ => \"ok\"\n  | .err _ => \"error\"\n" ++
           "def main : IO Unit := do\n  IO.println (uOkD uQTy uQV);\n  IO.println (uOkD uRelTy (.lam (.var 0)))\n"
         ioRun (kernel ++ "\n" ++ main) "ok\nerror\n" },
@@ -108,8 +108,8 @@ def languageGroup : Group where
         failsLib "import Prelude\ndef drop (1 n : Nat) : Nat := 0" "quantity 1 but used 0"
         let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
         let main := "def lOk (ty v : Tm) : String := match checkDecl ty (.some (markClosed v ty)) with\n  | .ok _ _ => \"ok\"\n  | .err _ => \"error\"\n" ++
-          "def main : IO Unit := do\n  IO.println (lOk (.piq .qo .ptrue .ptrue) (.lam (.var 0)));\n" ++
-          "  IO.println (lOk (.piq .qo (.unit 0) (.unit 0)) (.lam .star))\n"
+          "def main : IO Unit := do\n  IO.println (lOk (.pi .qo (ln 0) (ln 0) .ptrue .ptrue) (.lam (.var 0)));\n" ++
+          "  IO.println (lOk (.pi .qo (ln 1) (ln 1) (.unit 0) (.unit 0)) (.lam .star))\n"
         ioRun (kernel ++ "\n" ++ main) "ok\nerror\n" },
     -- a proof that uses a 0-variable is erased by compilation: the cast along it computes on
     -- the types, and its `implemented_by` (a proof too) never runs

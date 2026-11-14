@@ -320,9 +320,8 @@ jobs:
   # (11s) The standard library's documentation (`wiz doc`, scroll), with the Wasm module
   # that makes its signatures interactive, as the artifact `wiz-docs`: on master only (a
   # push), kept 3 days (artifact storage). Not a required check (not in `result`);
-  # publishing it to GitHub Pages is a proposal (docs/stages/11-tooling.md, 11s). It uses
-  # the Nix `wiz` (a cache hit after `build`); `web/build.sh` needs emscripten, which it
-  # takes from nixpkgs.
+  # `deploy-docs` publishes it to GitHub Pages on the same push (docs/building.md,
+  # "Documentation site").
   docs:
     name: docs (wiz doc --lib)
     needs: build
@@ -356,6 +355,50 @@ jobs:
           name: wiz-docs
           path: doc-site
           retention-days: 3
+
+  # (11s) Publish the `wiz-docs` artifact to GitHub Pages, at the site root:
+  #   https://wiz-pl.github.io/wiz/                    the docs index (wiz doc's index.html)
+  #   https://wiz-pl.github.io/wiz/Prelude.html        one page per module, plus A.B.json
+  # A repository has ONE Pages site and every deployment replaces the whole tree, so this
+  # job is the only Pages publisher. The performance site (when it lands) goes under
+  # `/perf/` in the same artifact: build it into `doc-site/perf` in the `docs` job, or
+  # add it here with a checkout, rather than enabling a second deploy job (which would
+  # delete the docs). The repository's Pages source must be "GitHub Actions" once
+  # (Settings -> Pages; docs/building.md, "Documentation site"); until then this job
+  # fails and the site keeps its last published tree. It is not in `result`: a Pages
+  # outage does not fail the suite.
+  deploy-docs:
+    name: deploy docs to Pages
+    needs: docs
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    # deployments are serialised: `cancel-in-progress: false` lets an older deploy finish
+    # and the newer one replace it, so the site ends at the newest master commit
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: wiz-docs
+          path: doc-site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: doc-site
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
 
   # One check for branch protection, and the whole suite's summary.
   result:

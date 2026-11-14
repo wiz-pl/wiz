@@ -390,12 +390,13 @@ def group : Group where
           "rfl: the two sides are not definitionally equal"
         failsLib "import Prelude\ndef bad {A B : Type} (p q : A × B) : (p.1, q.2) = p := rfl"
           "rfl: the two sides are not definitionally equal"
-        -- a field equation written by hand with a cast at a type variable is not proved by
-        -- `rfl` (no axiom is added silently: write `castRefl`)
-        failsLib "import Prelude\ndef h {A B : Type} (s : A × B) : (0 e : s.1 = s.1) × ((cast (refl B) s.2 : B) = s.2) := rfl"
-          "rfl: the two sides are not definitionally equal"
-        failsLib "import Prelude\ndef h2 {B : Type} (b : B) : (cast (refl B) b : B) = b := rfl"
-          "rfl: the two sides are not definitionally equal" },
+        -- (PF-C) an equation is a proposition, so while the checker compares its two sides
+        -- Cast-Refl applies at every type: a hand-written cast at a type variable is its
+        -- argument. This is the breadth the D1 trade-off takes (wiz-notes/conv-proof-field.md
+        -- §8, the "scope probe"); the reference checker (Tests/Meta.lean, T0/T1) keeps the
+        -- inert-only rule, and no axiom is added.
+        okLib "import Prelude\ndef h {A B : Type} (s : A × B) : (0 e : s.1 = s.1) × ((cast (refl B) s.2 : B) = s.2) := rfl"
+        okLib "import Prelude\ndef h2 {B : Type} (b : B) : (cast (refl B) b : B) = b := rfl" },
     { name := "private constructors, observations and fields: the public API (13b)", run := fun _ => do
         okPriv privMod2 ("import Priv\n#eval Tok.value (Tok.num 3)\n#eval Tok.value (Tok.hide 4)\n#eval Tok.value (.num 5)\n" ++
           "#eval Sig.sample (Sig.next (Sig.const 3))\n#eval (Sig.const 2).name\n" ++

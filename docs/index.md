@@ -1,5 +1,9 @@
 # Wiz documentation
 
+The standard library's API documentation is published from `master` at
+<https://wiz-pl.github.io/wiz/> (one page per module, with interactive signatures;
+docs/building.md, "Documentation site").
+
 * [install.md](install.md): installing Wiz with tower or Nix, editor setup, a first
   grail package, troubleshooting
 * [tour.md](tour.md): a tour of the language for people who know a little functional
@@ -49,7 +53,7 @@ line below.
 * [Stage 10: effects](stages/10-effects.md)
 * [Stage 25: concurrency](stages/25-concurrency.md)
 * [Stage 27: trusted evaluation (`native_refl`)](stages/27-trusted-evaluation.md)
-* [Stage 28: solvers (`smt`, `sat_decide`)](stages/28-solvers.md)
+* [Stage 28: solvers (`smt`, `sat_decide`, `sat_decide_native`, `bv_decide`)](stages/28-solvers.md)
 
 ### Self-hosting
 

@@ -24,9 +24,10 @@ is the instruction's `sub` control signal) is `BitVec.sub a b` when `s` is 1 and
 `BitVec.add a b` when it is 0 (`BitVec.adc_eq`), so an ADD/ADDI/SUB proof is one
 `Eq.congrArg` on the register value.
 
-Nothing here uses `native_refl`: every lemma is kernel-checked, and the `Nat` steps are
-explicit `Eq.trans` chains (a `Nat` identity that the kernel's normalizer closes would
-be `True`, and cannot be a rewrite step — see `wiz-notes/rv-shift-lemmas.md` §4/§7).
+Nothing here uses the native-refl escape hatch: every lemma is kernel-checked, and the
+`Nat` steps are explicit `Eq.trans` chains (a `Nat` identity that the kernel's normalizer
+closes would be `True`, and cannot be a rewrite step — see
+`wiz-notes/rv-shift-lemmas.md` §4/§7).
 -/
 
 -- ## The circuit's expression
