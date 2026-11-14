@@ -1999,57 +1999,82 @@ end
 -- (P2) `pm` is the proof marker's mode: `0` relevant (a term whose sort may be `0` must be
 -- marked or neutral-shaped), `1` inside a proof (nothing is required), `2` the term is
 -- the one a marker wraps (exempt; relevant again below it)
+-- (PF-C) `reg`: regularity at every type is on for this comparison. Set by `convTy` when
+-- both sides are propositions (`TCtx.propGate`), and inherited by every comparison below
+-- it; `false` (the default) keeps the inert-only rule. (`g.regularity := .full` in
+-- `Conv.lean`; `stripCast` reads it.)
 inductive TCtx where
-  | mk (env : Env) (types : Env) (lvl : Nat) (erased : Bool) (pm : Nat)
+  | mk (env : Env) (types : Env) (lvl : Nat) (erased : Bool) (pm : Nat) (reg : Bool)
 def TCtx.lvl : TCtx → Nat
-  | .mk _ _ l _ _ => l
+  | .mk _ _ l _ _ _ => l
 def TCtx.env : TCtx → Env
-  | .mk e _ _ _ _ => e
+  | .mk e _ _ _ _ _ => e
 def TCtx.types : TCtx → Env
-  | .mk _ t _ _ _ => t
+  | .mk _ t _ _ _ _ => t
 def TCtx.erased : TCtx → Bool
-  | .mk _ _ _ x _ => x
+  | .mk _ _ _ x _ _ => x
 def TCtx.pm : TCtx → Nat
-  | .mk _ _ _ _ m => m
+  | .mk _ _ _ _ m _ => m
+def TCtx.reg : TCtx → Bool
+  | .mk _ _ _ _ _ r => r
 def TCtx.erase (c : TCtx) : TCtx := match c with
-  | .mk e t l _ m => .mk e t l .true m
+  | .mk e t l _ m r => .mk e t l .true m r
 -- (P2) inside a proof
 def TCtx.inProof (c : TCtx) : TCtx := match c with
-  | .mk e t l x m => match Nat.beq m 3 with
+  | .mk e t l x m r => match Nat.beq m 3 with
     | .true => c
     | .false => match Nat.lt 3 m with
       -- (the sorts pass, below the kernel: inside a proof, still placing no markers)
-      | .true => .mk e t l x 5
-      | .false => .mk e t l x 1
+      | .true => .mk e t l x 5 r
+      | .false => .mk e t l x 1 r
 -- (P2) is `c` inside a proof (`1`; `5` is the same in the sorts pass, which places no
 -- markers: `4` relevant, `5` inside a proof)?
 def inProofMode (c : TCtx) : Bool := match c with
-  | .mk _ _ _ _ m => Bool.or (Nat.beq m 1) (Nat.beq m 5)
+  | .mk _ _ _ _ m _ => Bool.or (Nat.beq m 1) (Nat.beq m 5)
 def sortsMode (c : TCtx) : Bool := match c with
-  | .mk _ _ _ _ m => Nat.lt 3 m
+  | .mk _ _ _ _ m _ => Nat.lt 3 m
 -- (tests only) no marker requirement anywhere below, and proofs evaluated: the
 -- well-typedness pre-check of the differential tests, so that a term which needs markers
 -- inside a proof reaches the marking passes (review F2; `lazyProofs := false` in Lean)
 def TCtx.noMarkers (c : TCtx) : TCtx := match c with
-  | .mk e t l x _ => .mk e t l x 3
+  | .mk e t l x _ r => .mk e t l x 3 r
 -- (P2) at the term a marker wraps, and below it
 def TCtx.atMarked (c : TCtx) : TCtx := match c with
-  | .mk e t l x m => match m with
-    | .zero => .mk e t l x 2
+  | .mk e t l x m r => match m with
+    | .zero => .mk e t l x 2 r
     | _ => c
 def TCtx.belowMarked (c : TCtx) : TCtx := match c with
-  | .mk e t l x m => match Nat.beq m 2 with
-    | .true => .mk e t l x 0
+  | .mk e t l x m r => match Nat.beq m 2 with
+    | .true => .mk e t l x 0 r
     | .false => c
 def erasedIf (q : Q) (c : TCtx) : TCtx := match q with
   | .qz => TCtx.erase c
   | _ => c
 -- a new variable of type `ty`
 def TCtx.bind (c : TCtx) (ty : Val) : TCtx := match c with
-  | .mk e t l x m => .mk (.cons (fresh l) e) (.cons ty t) (l + 1) x m
+  | .mk e t l x m r => .mk (.cons (fresh l) e) (.cons ty t) (l + 1) x m r
 -- a new variable defined as `v`
 def TCtx.define (c : TCtx) (v ty : Val) : TCtx := match c with
-  | .mk e t l x m => .mk (.cons v e) (.cons ty t) (l + 1) x m
+  | .mk e t l x m r => .mk (.cons v e) (.cons ty t) (l + 1) x m r
+-- (PF-C) the same context with regularity at every type on
+def TCtx.fullReg (c : TCtx) : TCtx := match c with
+  | .mk e t l x m _ => .mk e t l x m .true
+-- (PF-C, `Conv.convTy`) **Cast-Refl at every type while deciding equality of two
+-- propositions.** The two sides are truth values in the model, which validates Cast-Refl at
+-- every type; so while they are compared, a stuck cast is its argument at *any* type, not
+-- only at inert ones. The flag is taken from the evaluator's proposition test (`propSort`,
+-- `propSort?` in Lean; `isProp`/`typeSort?` would recompute a Π/Σ sort and miss an
+-- annotated proposition whose tail is a Π over a data domain — `vEq`'s equation at a
+-- product is that). Both tests see weak head normal forms (`convTy` whnf's first). It is
+-- off outside such a comparison: two data *types* are still compared by the inert-only
+-- rule.
+def TCtx.propGate (c : TCtx) (a b : Val) : TCtx := match propSort a with
+  | .some pa => match propSort b with
+    | .some pb => match Bool.and pa pb with
+      | .true => TCtx.fullReg c
+      | .false => c
+    | .none => c
+  | .none => c
 
 -- Usage (`Usage` in `Check.lean`): one quantity per variable, the innermost first.
 def qadd : Q → Q → Q
@@ -2545,7 +2570,7 @@ def conv : TCtx → Val → Val → Val → Bool
   --sol>
 def convTy (c : TCtx) (a b : Val) : Bool := match lazyDelta c a b with
   | .true => .true
-  | .false => convTyW c (whnf a) (whnf b)
+  | .false => let a := whnf a; let b := whnf b; convTyW (TCtx.propGate c a b) a b
 -- two glued values with the same head: compare the spines (else they get unfolded)
 def lazyDelta : TCtx → Val → Val → Bool
   | c, .vglued h sp _, .vglued h' sp' _ => convSpine c h h' sp sp'
@@ -2605,12 +2630,14 @@ def convNeW : TCtx → Val → Val → Bool
 -- the argument of a stuck cast with the neutral's eliminations applied, when the rule
 -- applies: the two types are convertible, and one of them is inert (`inertTy` reads a
 -- `Σ`'s sort annotation, which is optional, so of two convertible types one can be inert
--- and the other not) or regularity is on at every type (`kernelRegularity`). `convTy A B`
--- compares two components of the neutral, as the congruence rule for two casts does, and
--- each step removes one cast: it terminates. Every head is listed.
+-- and the other not) or regularity is on at every type. The latter is either the context's
+-- PF-C flag (`TCtx.reg`: this comparison is of two propositions, `convTy`'s prop gate) or
+-- the `kernelRegularity` experiment. `convTy A B` compares two components of the neutral,
+-- as the congruence rule for two casts does, and each step removes one cast: it
+-- terminates. Every head is listed.
 def stripCast : TCtx → Head → Spine → Option Val
-  | c, .hcast A B _ t, sp => match Bool.or kernelRegularity
-      (Bool.and kernelInertConv (Bool.or (inertTy 0 A) (inertTy 0 B))) with
+  | c, .hcast A B _ t, sp => match Bool.or (TCtx.reg c)
+      (Bool.or kernelRegularity (Bool.and kernelInertConv (Bool.or (inertTy 0 A) (inertTy 0 B)))) with
     | .false => .none
     | .true => match convTy c A B with
       | .true => .some (forceSp t sp)
@@ -2807,11 +2834,11 @@ def isProofTy (c : TCtx) (ty : Val) : Bool := match kernelLazyProofs with
     | .some l => lvlIsZero l
     | .none => .false
 def TCtx.relevant (c : TCtx) : TCtx := match c with
-  | .mk e t l x m => match Nat.beq m 3 with
+  | .mk e t l x m r => match Nat.beq m 3 with
     | .true => c
     | .false => match Nat.lt 3 m with
-      | .true => .mk e t l x 4
-      | .false => .mk e t l x 0
+      | .true => .mk e t l x 4 r
+      | .false => .mk e t l x 0 r
 def modeAt (c : TCtx) (ty : Val) : TCtx := match inProofMode c with
   | .false => c
   | .true => match sortOf c ty with
@@ -3486,7 +3513,7 @@ def qtyOk (c : TCtx) (q : Tm) : Option String := match check (TCtx.erase c) q .v
     | _ => .some "a quantity must be a literal or a variable"
 end
 
-def empty : TCtx := .mk .nil .nil 0 .false 0
+def empty : TCtx := .mk .nil .nil 0 .false 0 .false
 
 -- check a declaration (`addDecl` in `Check.lean`): its type is a type and its value, if
 -- it has one, has that type. Its level parameters stay symbolic, so this checks it at
@@ -3959,7 +3986,7 @@ def markClosed (v ty : Tm) : Tm := markCheck empty v (eval .nil ty)
 -- in a `Π`/`Σ`'s sorts from its components' levels, everywhere, inside proofs too. The
 -- frontend runs it on every type and value before the kernel; the kernel rejects a hole
 -- that is left (an ill-typed term) and checks every sort.
-def sortsCtx : TCtx := .mk .nil .nil 0 .false 4
+def sortsCtx : TCtx := .mk .nil .nil 0 .false 4 .false
 def sortsTy (t : Tm) : Tm := match tmHasHole t with
   | .false => t
   | .true => markTy sortsCtx t
@@ -3977,7 +4004,7 @@ def normalize (t : Tm) : String := show .nil 0 (quote 0 (eval .nil (sortsInfer t
 def sortsTyIn (c : TCtx) (t : Tm) : Tm := match tmHasHole t with
   | .false => t
   | .true => match c with
-    | .mk e ts l x _ => markTy (.mk e ts l x 4) t
+    | .mk e ts l x _ r => markTy (.mk e ts l x 4 r) t
 -- (`ty` already filled)
 def sortsClosed (v ty : Tm) : Tm := match tmHasHole v with
   | .false => v
