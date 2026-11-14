@@ -10,7 +10,9 @@
   `hoverAt`, `definitionAt` and `completionsAt`.
 * **`wiz lsp`** (`Wiz/LSP.lean`): the Language Server Protocol over stdio, with
   diagnostics as you type, hover types, go to definition (also into `lib/`), and
-  completion of global names. Each open document has its own query engine.
+  completion of global names. Each open document has its own query engine. A document's
+  `include_str` files are read from its own directory, as on the command line (see
+  [13-language/include-str.md](13-language/include-str.md), "Language server").
 
 ## 11c: a shared, content-addressed cache
 
