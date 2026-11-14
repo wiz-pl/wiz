@@ -202,7 +202,8 @@ def main : IO Unit := EIO.toIO (do
   repM8 ← Scry.analyzeFile oM8;
   checkOne "mem-free" repM8 "command-injection" "main";
   check "mem-free: one use-after-free warning"
-    (List.all (fun s => String.eq s "scry/memory/use-after-free") (memKinds repM8));
+    (Bool.and (Nat.beq (List.length repM8.memory) 1)
+      (List.all (fun s => String.eq s "scry/memory/use-after-free") (memKinds repM8)));
 
   -- memory: an indirect call with a known target propagates
   oM9 ← opts ["tests/fixtures/mem-indirect.c"];
@@ -229,12 +230,28 @@ def main : IO Unit := EIO.toIO (do
   check "mem-external: no lowering-boundary warning"
     (Nat.beq (List.length repM12.boundaries) 0);
 
+  -- memory: a variable index keeps the array base (a[i] flows, b[i] does not)
+  oM13 ← opts ["tests/fixtures/mem-array-var.c"];
+  repM13 ← Scry.analyzeFile oM13;
+  check "mem-array-var: one finding" (Nat.beq (List.length repM13.findings) 1);
+  check "mem-array-var: no memory warnings" (Nat.beq (List.length repM13.memory) 0);
+
+  -- memory: an unmodelled external's pointer is unknown: taint flows, both accesses warn
+  oM14 ← opts ["tests/fixtures/mem-unknown.c"];
+  repM14 ← Scry.analyzeFile oM14;
+  check "mem-unknown: one finding (the flow is kept)" (Nat.beq (List.length repM14.findings) 1);
+  check "mem-unknown: two unknown-memory warnings"
+    (Bool.and (Nat.beq (List.length repM14.memory) 2)
+      (List.all (fun s => String.eq s "scry/memory/unknown-memory") (memKinds repM14)));
+  check "mem-unknown: an unknown location" (hasLocKind repM14 "unknown");
+
   -- memory: an unresolved indirect call is unknown and warned, not silently dropped
   oM10 ← opts ["tests/fixtures/mem-indirect-unknown.c"];
   repM10 ← Scry.analyzeFile oM10;
   check "mem-indirect-unknown: zero findings" (Nat.beq (List.length repM10.findings) 0);
   check "mem-indirect-unknown: one unknown-indirect warning"
-    (List.all (fun s => String.eq s "scry/memory/unknown-indirect") (memKinds repM10));
+    (Bool.and (Nat.beq (List.length repM10.memory) 1)
+      (List.all (fun s => String.eq s "scry/memory/unknown-indirect") (memKinds repM10)));
   check "mem-indirect-unknown: an unknown location" (hasLocKind repM10 "unknown");
 
   -- parse errors: refused by default, recovered with --allow-errors

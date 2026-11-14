@@ -376,14 +376,14 @@ def group : Group where
         "  | .nil => 0") [1, 0, 8201, 11] },
     { name := "points-to: location kinds of a field-sensitive object",
       run := fun _ => evalRuleTexts (rulePrelude ++
-        "def ptF := Scry.pointsTo Scry.fieldFn\n" ++
+        "def ptF := Scry.pointsTo (Wil.program [Scry.fieldFn])\n" ++
         "#eval (Scry.locKindAt ptF 0) ++ \"/\" ++ (Scry.locKindAt ptF 1)\n" ++
         "#eval Nat.repr (Nat.add (Nat.mul (Scry.ptLocCount ptF) 10)\n" ++
-        "  (Scry.ptVarCount ptF))") ["heap/field", "23"] },
+        "  (Scry.ptVarCount ptF))") ["\"heap/field\"", "\"23\""] },
     { name := "points-to: overlap is exact for constant offsets and wildcard for anyOff",
       run := fun _ => evalRuleNats
         ("def h := Scry.Loc.heap \"f\" 1\n" ++
-         "#eval Nat.add (if Scry.locOverlap (Scry.Loc.field h 0) h then 100 else 0)\n" ++
+         "#eval Nat.add (if Scry.locEq (Scry.addOff h 0) h then 100 else 0)\n" ++
          "  (Nat.add (if Scry.locOverlap (Scry.Loc.field h 0) (Scry.Loc.field h 1) then 10 else 0)\n" ++
          "    (Nat.add (if Scry.locOverlap (Scry.Loc.field h 0) (Scry.Loc.anyOff h) then 1 else 0) 0))") [101] },
     { name := "certificates: the derivation checks, reports axioms, and a tampered one is rejected",

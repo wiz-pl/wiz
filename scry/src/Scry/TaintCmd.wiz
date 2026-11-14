@@ -308,10 +308,13 @@ def Scry.boundaryJson (b : Scry.BoundaryFinding) : Json :=
   let loc := match b.origin with
     | .some o => Scry.originJson o
     | .none => Json.mkObj [("function", Json.mkStr b.func), ("programPoint", Json.ofNat b.point)];
+  let kindText := match String.startsWith b.rule "scry/memory/" with
+    | .true => "memory"
+    | .false => "boundary";
   Json.mkObj
     [ ("rule", Json.mkStr b.rule)
     , ("severity", Json.mkStr "warning")
-    , ("kind", Json.mkStr "boundary")
+    , ("kind", Json.mkStr kindText)
     , ("message", Json.mkStr b.message)
     , ("function", Json.mkStr b.func)
     , ("point", Json.ofNat b.point)
