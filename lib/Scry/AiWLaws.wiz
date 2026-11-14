@@ -21,16 +21,14 @@ Proved here (no axioms):
   `WValue.gamma_join_sound`, `WValue.join_bot`;
 * `WEnv.gamma_join_sound` and `WEnv.gamma_mono` (the latter under `WEnv.keysSub`).
 
-## The signed-interval hypothesis
+## The signed intervals
 
-`SInterval`'s γ laws are *not* proved here: `lib/Int.wiz`'s Boolean order `Int.le` has
-no transitivity lemma (and `lib/IntOrder.wiz`'s `Int.Le` is a different predicate with
-no bridge), so `SInterval.contains_mono`/`contains_join` would need that order theory
-first. Every signed-`WValue` law is therefore a theorem conditional on `SIntObl`, whose
-three fields are exactly the unproved statements (`mono`, `join`, and the point
-reflexivity `contains (range z z) z = true` that the `known` normalisation needs). No
-`axiom` is used: the record is an explicit hypothesis, so the unsigned cases are
-unconditional and the signed ones are `SIntObl → …`.
+`SInterval`'s γ laws are proved here too (`SInterval.contains_mono`,
+`contains_join`, `contains_refl`), so the `WValue`/`WEnv` laws are unconditional. The
+order theory is `lib/Int.wiz`'s Boolean `Int.le`: `Int.le_transB` (transitivity, by case
+analysis on the two `Int` constructors, via `Int.lt_trans_false` and
+`Nat.le_of_not_lt`), `Int.le_reflB`, `Int.lt_asymm`, and the `AiInt.min`/`max` bounds.
+(`lib/IntOrder.wiz`'s `Int.Le` is a different predicate and is not used.)
 -/
 
 -- ## Option/WValue helpers
@@ -342,6 +340,173 @@ structure SIntObl where
     SInterval.contains b z = .true → SInterval.contains (SInterval.join a b) z = .true
   refl : (z : Int) → SInterval.contains (.range z z) z = .true
 
+def SInt.boolCases {0 P : Prop} (b : Bool) (ht : b = .true → P) (hf : b = .false → P) : P :=
+  Or.elim (Bool.cases b) ht hf
+
+def Bool.not_true (b : Bool) (h : Bool.not b = .true) : b = .false :=
+  match b, h with
+  | .true, h => absurd h.1
+  | .false, _ => rfl
+
+def Bool.not_false (b : Bool) (h : Bool.not b = .false) : b = .true :=
+  match b, h with
+  | .true, _ => rfl
+  | .false, h => absurd h.1
+
+def Nat.lt_false_of_le (a b : Nat) (h : Nat.Le a b) : Nat.lt b a = .false :=
+  SInt.boolCases (Nat.lt b a)
+    (fun hlt => absurd (Nat.not_lt_of_le a b h hlt))
+    (fun hf => hf)
+
+def Nat.le_of_not_lt : (a b : Nat) → Nat.lt a b = .false → Nat.Le b a
+  | .zero, .zero, _ => rfl
+  | .zero, .succ b, h => absurd h.1
+  | .succ a, .zero, _ => rfl
+  | .succ a, .succ b, h => Nat.le_of_not_lt a b h
+
+def Int.lt_ofNat (m n : Nat) : Int.lt (.ofNat m) (.ofNat n) = Nat.lt m n := rfl
+def Int.lt_negSucc (m n : Nat) : Int.lt (.negSucc m) (.negSucc n) = Nat.lt n m := rfl
+def Int.lt_ofNat_negSucc (m n : Nat) : Int.lt (.ofNat m) (.negSucc n) = .false := rfl
+def Int.lt_negSucc_ofNat (m n : Nat) : Int.lt (.negSucc m) (.ofNat n) = .true := rfl
+
+def Bool.falseOf (a b : Bool) (e : a = b) (h : a = .false) : b = .false :=
+  Eq.mp' (fun (r : Bool) => r = .false) e h
+
+def Int.ltTrueContra (a b : Int) (e : Int.lt a b = .true) (h : Int.lt a b = .false) : False :=
+  Bool.trueNeFalse (Bool.falseOf (Int.lt a b) Bool.true e h)
+
+def Int.lt_trans_false (a b c : Int)
+    (hba : Int.lt b a = .false) (hcb : Int.lt c b = .false) : Int.lt c a = .false :=
+  match a, b, c, hba, hcb with
+  | .ofNat x, .ofNat y, .ofNat z, hba, hcb =>
+      Nat.lt_false_of_le x z (Nat.le_trans x y z
+        (Nat.le_of_not_lt y x (Bool.falseOf (Int.lt (.ofNat y) (.ofNat x)) (Nat.lt y x)
+          (Int.lt_ofNat y x) hba))
+        (Nat.le_of_not_lt z y (Bool.falseOf (Int.lt (.ofNat z) (.ofNat y)) (Nat.lt z y)
+          (Int.lt_ofNat z y) hcb)))
+  | .ofNat x, .ofNat y, .negSucc z, hba, hcb =>
+      absurd (Int.ltTrueContra (.negSucc z) (.ofNat y) (Int.lt_negSucc_ofNat z y) hcb)
+  | .ofNat x, .negSucc y, .ofNat z, hba, hcb =>
+      absurd (Int.ltTrueContra (.negSucc y) (.ofNat x) (Int.lt_negSucc_ofNat y x) hba)
+  | .ofNat x, .negSucc y, .negSucc z, hba, hcb =>
+      absurd (Int.ltTrueContra (.negSucc y) (.ofNat x) (Int.lt_negSucc_ofNat y x) hba)
+  | .negSucc x, .ofNat y, .ofNat z, hba, hcb =>
+      Bool.falseOf (Int.lt (.ofNat z) (.negSucc x)) (.false)
+        (Int.lt_ofNat_negSucc z x) rfl
+  | .negSucc x, .ofNat y, .negSucc z, hba, hcb =>
+      absurd (Int.ltTrueContra (.negSucc z) (.ofNat y) (Int.lt_negSucc_ofNat z y) hcb)
+  | .negSucc x, .negSucc y, .ofNat z, hba, hcb =>
+      Bool.falseOf (Int.lt (.ofNat z) (.negSucc x)) (.false)
+        (Int.lt_ofNat_negSucc z x) rfl
+  | .negSucc x, .negSucc y, .negSucc z, hba, hcb =>
+      Nat.lt_false_of_le z x (Nat.le_trans z y x
+        (Nat.le_of_not_lt y z (Bool.falseOf (Int.lt (.negSucc z) (.negSucc y)) (Nat.lt y z)
+          (Int.lt_negSucc z y) hcb))
+        (Nat.le_of_not_lt x y (Bool.falseOf (Int.lt (.negSucc y) (.negSucc x)) (Nat.lt x y)
+          (Int.lt_negSucc y x) hba)))
+
+def Int.le_transB (a b c : Int) (h : Int.le a b = .true) (h' : Int.le b c = .true) :
+    Int.le a c = .true :=
+  let hba : Int.lt b a = .false := Bool.not_true (Int.lt b a) h;
+  let hcb : Int.lt c b = .false := Bool.not_true (Int.lt c b) h';
+  Eq.mpr' (fun (r : Bool) => Bool.not r = .true)
+    (Int.lt_trans_false a b c hba hcb) rfl
+
+def Int.le_reflB (a : Int) : Int.le a a = .true :=
+  Eq.mpr' (fun (r : Bool) => Bool.not r = .true) (Int.lt_irrefl a) rfl
+
+def Nat.lt_false_of (a b : Nat) (h : Nat.lt a b = .true) : Nat.lt b a = .false :=
+  SInt.boolCases (Nat.lt b a)
+    (fun hb => absurd (Nat.lt_irrefl a (Nat.lt_trans a b a h hb)))
+    (fun hf => hf)
+
+def Int.lt_asymm (a b : Int) (h : Int.lt a b = .true) : Int.lt b a = .false :=
+  match a, b, h with
+  | .ofNat x, .ofNat y, h => Nat.lt_false_of x y h
+  | .ofNat x, .negSucc y, h => absurd h.1
+  | .negSucc x, .ofNat y, h => rfl
+  | .negSucc x, .negSucc y, h => Nat.lt_false_of y x h
+
+def Int.le_of_not_le (a b : Int) (h : Int.le a b = .false) : Int.le b a = .true :=
+  Eq.mpr' (fun (r : Bool) => Bool.not r = .true)
+    (Int.lt_asymm b a (Bool.not_false (Int.lt b a) h)) rfl
+
+def AiInt.min_left (a b : Int) : Int.le (AiInt.min a b) a = .true :=
+  SInt.boolCases (Int.le a b)
+    (fun h => Eq.mpr' (fun (r : Bool) => Int.le (match r with | .true => a | .false => b) a = .true)
+      h (Int.le_reflB a))
+    (fun h => Eq.mpr' (fun (r : Bool) => Int.le (match r with | .true => a | .false => b) a = .true)
+      h (Int.le_of_not_le a b h))
+
+def AiInt.min_right (a b : Int) : Int.le (AiInt.min a b) b = .true :=
+  SInt.boolCases (Int.le a b)
+    (fun h => Eq.mpr' (fun (r : Bool) => Int.le (match r with | .true => a | .false => b) b = .true)
+      h h)
+    (fun h => Eq.mpr' (fun (r : Bool) => Int.le (match r with | .true => a | .false => b) b = .true)
+      h (Int.le_reflB b))
+
+def AiInt.max_left (a b : Int) : Int.le a (AiInt.max a b) = .true :=
+  SInt.boolCases (Int.le a b)
+    (fun h => Eq.mpr' (fun (r : Bool) => Int.le a (match r with | .true => b | .false => a) = .true)
+      h h)
+    (fun h => Eq.mpr' (fun (r : Bool) => Int.le a (match r with | .true => b | .false => a) = .true)
+      h (Int.le_reflB a))
+
+def AiInt.max_right (a b : Int) : Int.le b (AiInt.max a b) = .true :=
+  SInt.boolCases (Int.le a b)
+    (fun h => Eq.mpr' (fun (r : Bool) => Int.le b (match r with | .true => b | .false => a) = .true)
+      h (Int.le_reflB b))
+    (fun h => Eq.mpr' (fun (r : Bool) => Int.le b (match r with | .true => b | .false => a) = .true)
+      h (Int.le_of_not_le a b h))
+
+def SInterval.contains_mono (a b : SInterval) (z : Int)
+    (hle : SInterval.le a b = .true) (hc : SInterval.contains a z = .true) :
+    SInterval.contains b z = .true :=
+  match a, b, hle, hc with
+  | .bot, _, _, hc => absurd hc.1
+  | .top, .top, _, _ => rfl
+  | .top, .range _ _, hle, _ => absurd hle.1
+  | .top, .bot, hle, _ => absurd hle.1
+  | .range _ _, .bot, hle, _ => absurd hle.1
+  | .range _ _, .top, _, _ => rfl
+  | .range lo hi, .range lo' hi', hle, hc =>
+      Bool.and_intro (Int.le lo' z) (Int.le z hi')
+        (Int.le_transB lo' lo z (Bool.and_left (Int.le lo' lo) (Int.le hi hi') hle)
+          (Bool.and_left (Int.le lo z) (Int.le z hi) hc))
+        (Int.le_transB z hi hi' (Bool.and_right (Int.le lo z) (Int.le z hi) hc)
+          (Bool.and_right (Int.le lo' lo) (Int.le hi hi') hle))
+
+def SInterval.min_le_left (a b z : Int) (h : Int.le a z = .true) :
+    Int.le (AiInt.min a b) z = .true :=
+  Int.le_transB (AiInt.min a b) a z (AiInt.min_left a b) h
+
+def SInterval.le_max (a b z : Int) (h : Int.le z a = .true) :
+    Int.le z (AiInt.max a b) = .true :=
+  Int.le_transB z a (AiInt.max a b) h (AiInt.max_left a b)
+
+def SInterval.contains_join (a b : SInterval) (z : Int)
+    (ha : SInterval.contains a z = .true) (hb : SInterval.contains b z = .true) :
+    SInterval.contains (SInterval.join a b) z = .true :=
+  match a, b, ha, hb with
+  | .bot, _, _, hb => hb
+  | _, .bot, ha, _ => ha
+  | .top, .top, _, _ => rfl
+  | .top, .range _ _, _, _ => rfl
+  | .range _ _, .top, _, _ => rfl
+  | .range lo hi, .range lo' hi', ha, _ =>
+      Bool.and_intro (Int.le (AiInt.min lo lo') z) (Int.le z (AiInt.max hi hi'))
+        (SInterval.min_le_left lo lo' z (Bool.and_left (Int.le lo z) (Int.le z hi) ha))
+        (SInterval.le_max hi hi' z (Bool.and_right (Int.le lo z) (Int.le z hi) ha))
+
+def SInterval.contains_refl (z : Int) : SInterval.contains (.range z z) z = .true :=
+  Bool.and_intro (Int.le z z) (Int.le z z) (Int.le_reflB z) (Int.le_reflB z)
+
+
+/-- The signed-interval γ obligations hold (proved below), so the signed `WValue` laws
+are unconditional: `SIntObl.full` is the witness used by every theorem that needed one. -/
+def SIntObl.full : SIntObl :=
+  SIntObl.mk SInterval.contains_mono SInterval.contains_join SInterval.contains_refl
+
 -- ## NumV / WValue gamma laws
 
 def Int.beq_eq (a b : Int) (h : Int.beq a b = .true) : a = b :=
@@ -384,7 +549,7 @@ def SConst.gamma_join_sound (a b : SConst) (z : Int)
               | .true => SConst.known x
               | .false => SConst.unknown) z) h True.intro)
 
-def NumV.gamma_mono (hs : SIntObl) (a b : NumV) (v : Wil.Val)
+def NumV.gamma_mono (a b : NumV) (v : Wil.Val)
     (hle : NumV.le a b = .true) (hg : NumV.gamma a v) : NumV.gamma b v :=
   match a, b, v, hle, hg with
   | .bot, _, _, _, hg => absurd hg
@@ -404,7 +569,7 @@ def NumV.gamma_mono (hs : SIntObl) (a b : NumV) (v : Wil.Val)
   | .u _ _, .s _ _, v, hle, hg => absurd hle.1
   | .u _ _, .bot, v, hle, hg => absurd hle.1
   | .s i c, .s i' c', .int w .true bits, hle, hg =>
-      ( hs.mono i i' (Wil.Val.toInt (.int w .true bits))
+      ( SIntObl.full.mono i i' (Wil.Val.toInt (.int w .true bits))
           (Bool.and_left (SInterval.le i i') (SConst.le c c') hle) hg.1,
         SConst.gamma_mono c c' (Wil.Val.toInt (.int w .true bits))
           (Bool.and_right (SInterval.le i i') (SConst.le c c') hle) hg.2 )
@@ -424,7 +589,7 @@ def NumV.gamma_mono (hs : SIntObl) (a b : NumV) (v : Wil.Val)
   | .any, .any, .undef, hle, hg => absurd hg
   | .any, _, v, hle, hg => absurd hle.1
 
-def NumV.gamma_join_sound (hs : SIntObl) (a b : NumV) (v : Wil.Val)
+def NumV.gamma_join_sound (a b : NumV) (v : Wil.Val)
     (ha : NumV.gamma a v) (hb : NumV.gamma b v) : NumV.gamma (NumV.join a b) v :=
   match a, b, v, ha, hb with
   | .bot, _, _, ha, hb => hb
@@ -437,7 +602,7 @@ def NumV.gamma_join_sound (hs : SIntObl) (a b : NumV) (v : Wil.Val)
   | .u _ _, .u _ _, .nul, ha, hb => absurd ha
   | .u _ _, .u _ _, .undef, ha, hb => absurd ha
   | .s i c, .s i' c', .int w .true bits, ha, hb =>
-      ( hs.join i i' (Wil.Val.toInt (.int w .true bits)) ha.1 hb.1,
+      ( SIntObl.full.join i i' (Wil.Val.toInt (.int w .true bits)) ha.1 hb.1,
         SConst.gamma_join_sound c c' (Wil.Val.toInt (.int w .true bits)) ha.2 hb.2 )
   | .s _ _, .s _ _, .int w .false bits, ha, hb => absurd ha
   | .s _ _, .s _ _, .ptr bl off, ha, hb => absurd ha
@@ -483,7 +648,7 @@ def NumV.normU_gamma (i : Interval) (c : Const) (v : Wil.Val)
   | .nul, c, hg => absurd hg
   | .undef, c, hg => absurd hg
 
-def NumV.normS_gamma (hs : SIntObl) (i : SInterval) (c : SConst) (v : Wil.Val)
+def NumV.normS_gamma (i : SInterval) (c : SConst) (v : Wil.Val)
     (hg : NumV.gamma (.s i c) v) : NumV.gamma (NumV.normS i c) v :=
   match v, c, hg with
   | .int w .true bits, .cbot, hg => hg
@@ -491,37 +656,37 @@ def NumV.normS_gamma (hs : SIntObl) (i : SInterval) (c : SConst) (v : Wil.Val)
   | .int w .true bits, .known z, hg =>
       let hb : Wil.Val.toInt (.int w .true bits) = z := hg.2
       ( Eq.mpr' (fun (t : Int) => SInterval.contains (.range z z) t = .true) hb
-          (hs.refl z),
+          (SIntObl.full.refl z),
         hb )
   | .int w .false bits, c, hg => absurd hg
   | .ptr bl off, c, hg => absurd hg
   | .nul, c, hg => absurd hg
   | .undef, c, hg => absurd hg
 
-def WValue.normN_gamma (hs : SIntObl) (n : NumV) (v : Wil.Val)
+def WValue.normN_gamma (n : NumV) (v : Wil.Val)
     (hg : NumV.gamma n v) : NumV.gamma (NumV.normN n) v :=
   match n, hg with
   | .u i c, hg => NumV.normU_gamma i c v hg
-  | .s i c, hg => NumV.normS_gamma hs i c v hg
+  | .s i c, hg => NumV.normS_gamma i c v hg
   | .any, hg => hg
   | .bot, hg => absurd hg
 
-def WValue.gamma_norm (hs : SIntObl) (w : WValue) (v : Wil.Val)
+def WValue.gamma_norm (w : WValue) (v : Wil.Val)
     (h : WValue.gamma w v) : WValue.gamma (WValue.norm w) v :=
-  ( WValue.normN_gamma hs w.num v h.1, h.2 )
+  ( WValue.normN_gamma w.num v h.1, h.2 )
 
-def WValue.gamma_mono (hs : SIntObl) (a b : WValue) (v : Wil.Val)
+def WValue.gamma_mono (a b : WValue) (v : Wil.Val)
     (hle : WValue.le a b = .true) (h : WValue.gamma a v) : WValue.gamma b v :=
-  ( NumV.gamma_mono hs a.num b.num v
+  ( NumV.gamma_mono a.num b.num v
       (Bool.and_left (NumV.le a.num b.num) (Null.le a.nul b.nul) hle) h.1,
     Null.gamma_mono a.nul b.nul (Wil.Val.isNullV v)
       (Bool.and_right (NumV.le a.num b.num) (Null.le a.nul b.nul) hle) h.2 )
 
-def WValue.gamma_join_sound (hs : SIntObl) (a b : WValue) (v : Wil.Val)
+def WValue.gamma_join_sound (a b : WValue) (v : Wil.Val)
     (ha : WValue.gamma a v) (hb : WValue.gamma b v) :
     WValue.gamma (WValue.join a b) v :=
-  WValue.gamma_norm hs (WValue.mk (NumV.join a.num b.num) (Null.join a.nul b.nul)) v
-    ( NumV.gamma_join_sound hs a.num b.num v ha.1 hb.1,
+  WValue.gamma_norm (WValue.mk (NumV.join a.num b.num) (Null.join a.nul b.nul)) v
+    ( NumV.gamma_join_sound a.num b.num v ha.1 hb.1,
       Null.gamma_join_sound a.nul b.nul (Wil.Val.isNullV v) ha.2 hb.2 )
 
 def WValue.valueTrans (a b c : WValue) (h1 : a = b) (h2 : b = c) : a = c :=
@@ -540,9 +705,9 @@ def WValue.join_bot (w : WValue) : WValue.join w WValue.botV = WValue.norm w :=
       (congrArg (fun (n : Null) => WValue.norm (WValue.mk w.num n)) (Null.join_bot w.nul))
       rfl)
 
-def WValue.gamma_join_bot_right (hs : SIntObl) (w : WValue) (v : Wil.Val)
+def WValue.gamma_join_bot_right (w : WValue) (v : Wil.Val)
     (h : WValue.gamma w v) : WValue.gamma (WValue.join w WValue.botV) v :=
-  Eq.mpr' (fun (u : WValue) => WValue.gamma u v) (WValue.join_bot w) (WValue.gamma_norm hs w v h)
+  Eq.mpr' (fun (u : WValue) => WValue.gamma u v) (WValue.join_bot w) (WValue.gamma_norm w v h)
 
 -- ## WEnv: the pointwise product over `WConc`
 
@@ -557,7 +722,7 @@ def WEnv.getD_bot_of_absent (x : Nat) (e : WEnv) (h : WEnv.has x e = .false) :
       | .some w => w
       | .none => WValue.botV) = WValue.botV) (WEnv.lookup_none_of_has x e h) rfl
 
-def WEnv.gamma_join_sound (hs : SIntObl) (a b : WEnv) (c : WConc)
+def WEnv.gamma_join_sound (a b : WEnv) (c : WConc)
     (ha : WEnv.gamma a c) (hb : WEnv.gamma b c) : WEnv.gamma (WEnv.join a b) c :=
   fun x v hv =>
     Bool.casesElim (WEnv.has x a)
@@ -580,12 +745,12 @@ def WEnv.gamma_join_sound (hs : SIntObl) (a b : WEnv) (c : WConc)
               (WEnv.optSymm (WEnv.lookup x (WEnv.join a b)) (Option.some (WValue.join ga gb)) hlookupA) hv);
         let hg : WValue.gamma (WValue.join ga gb) (WConc.getD c x .undef) :=
           Bool.casesElim (WEnv.has x b)
-            (fun hhb => WValue.gamma_join_sound hs ga gb (WConc.getD c x .undef) hga
+            (fun hhb => WValue.gamma_join_sound ga gb (WConc.getD c x .undef) hga
               (WEnv.gamma_getD b c x hb hhb))
             (fun hhb =>
               Eq.mpr' (fun (w : WValue) => WValue.gamma (WValue.join ga w) (WConc.getD c x .undef))
                 (WEnv.getD_bot_of_absent x b hhb)
-                (WValue.gamma_join_bot_right hs ga (WConc.getD c x .undef) hga));
+                (WValue.gamma_join_bot_right ga (WConc.getD c x .undef) hga));
         Eq.mp' (fun (w : WValue) => WValue.gamma w (WConc.getD c x .undef)) heq hg)
       (fun hha =>
         let hla : WEnv.lookup x a = .none := WEnv.lookup_none_of_has x a hha;
@@ -609,7 +774,7 @@ def WEnv.gamma_join_sound (hs : SIntObl) (a b : WEnv) (c : WConc)
 
 def WEnv.keysSub (b a : WEnv) : Prop := (x : Nat) → WEnv.has x b = .true → WEnv.has x a = .true
 
-def WEnv.gamma_mono (hs : SIntObl) (a b : WEnv) (c : WConc) (hkeys : WEnv.keysSub b a)
+def WEnv.gamma_mono (a b : WEnv) (c : WConc) (hkeys : WEnv.keysSub b a)
     (hle : WEnv.le a b = .true) (h : WEnv.gamma a c) : WEnv.gamma b c :=
   fun x v hv =>
     let hhb : WEnv.has x b = .true := WEnv.has_of_lookup_some x b v hv;
@@ -618,7 +783,7 @@ def WEnv.gamma_mono (hs : SIntObl) (a b : WEnv) (c : WConc) (hkeys : WEnv.keysSu
     let hleV : WValue.le (WEnv.getD a x WValue.botV) (WEnv.getD b x WValue.botV) = .true :=
       WEnv.le_lookup a b x (WEnv.getD a x WValue.botV) hle hla;
     let hgb : WValue.gamma (WEnv.getD b x WValue.botV) (WConc.getD c x .undef) :=
-      WValue.gamma_mono hs (WEnv.getD a x WValue.botV) (WEnv.getD b x WValue.botV)
+      WValue.gamma_mono (WEnv.getD a x WValue.botV) (WEnv.getD b x WValue.botV)
         (WConc.getD c x .undef) hleV (WEnv.gamma_getD a c x h hha);
     Eq.mp' (fun (w : WValue) => WValue.gamma w (WConc.getD c x .undef))
       (WEnv.getD_some b x WValue.botV v hv) hgb

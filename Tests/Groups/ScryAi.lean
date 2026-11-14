@@ -178,10 +178,12 @@ def lawsSrc : String := "import Scry.AiLaws
 #print axioms Env.gamma_mono
 "
 
-/-- The Wil-facing γ laws (`Scry.AiWLaws`) are proved too; the signed-interval laws are
-an explicit `SIntObl` hypothesis of the `WValue`/`WEnv` theorems (no axiom). -/
+/-- The Wil-facing γ laws (`Scry.AiWLaws`) are proved too, including the signed
+intervals (the Boolean `Int.le` order theory), so all of them are unconditional. -/
 def wilLawsSrc : String := "import Scry.AiWLaws
 
+#print axioms SInterval.contains_mono
+#print axioms SInterval.contains_join
 #print axioms SConst.gamma_mono
 #print axioms SConst.gamma_join_sound
 #print axioms NumV.gamma_mono
@@ -264,8 +266,10 @@ def scryGroup : Group where
         "'Value.gamma_join_sound' does not depend on any axioms",
         "'Env.gamma_join_sound' does not depend on any axioms",
         "'Env.gamma_mono' does not depend on any axioms"] },
-    { name := "Wil gamma laws: SConst/NumV/WValue/WEnv laws are proved (signed laws conditional on SIntObl)",
+    { name := "Wil gamma laws: signed intervals, SConst/NumV/WValue/WEnv laws are proved",
       run := fun _ => okLibs wilLawsSrc [
+        "'SInterval.contains_mono' does not depend on any axioms",
+        "'SInterval.contains_join' does not depend on any axioms",
         "'SConst.gamma_mono' does not depend on any axioms",
         "'SConst.gamma_join_sound' does not depend on any axioms",
         "'NumV.gamma_mono' does not depend on any axioms",
