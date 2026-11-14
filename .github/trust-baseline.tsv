@@ -222,6 +222,8 @@ MVar	_private.MVar._0.MVar.fillRaw	axiom _private.MVar._0.MVar.fillRaw
 MVar	_private.MVar._0.MVar.fillRaw	builtin extern:wiz_mvar_fill:ewww:v:io:: := _private.MVar._0.MVar.fillRaw
 MVar	_private.MVar._0.MVar.takeHole	axiom _private.MVar._0.MVar.takeHole
 MVar	_private.MVar._0.MVar.takeHole	builtin extern:wiz_mvar_take_hole:ew:w:io:: := _private.MVar._0.MVar.takeHole
+PMap	PMap.seal✝	axiom PMap.seal✝
+PMap	PMap.seal✝	builtin seal:PMap := PMap.seal✝
 Prelude	Nat	builtin nat := Nat
 Prelude	Nat.add	builtin nat.add := Nat.add
 Prelude	Nat.beq	builtin nat.beq := Nat.beq
@@ -271,6 +273,30 @@ SatTactic	SatT.nodeDef	partial
 SatTactic	SatT.reflect	partial
 SatTactic	SatT.reflect2	partial
 SatTactic	SatT.reflectConst	partial
+Scry.AiFixpoint	solveGo	partial
+Scry.Analysis	Scry.domLoop	partial
+Scry.Analysis	Scry.rdLoop	partial
+Scry.Egraph	Scry.EGraph.addTerm	partial
+Scry.Egraph	Scry.EGraph.addTerms	partial
+Scry.Egraph	Scry.EGraph.buildArgs	partial
+Scry.Egraph	Scry.EGraph.buildTerm	partial
+Scry.Egraph	Scry.EGraph.instList	partial
+Scry.Egraph	Scry.EGraph.instantiate	partial
+Scry.Egraph	Scry.EGraph.matchBranches	partial
+Scry.Egraph	Scry.ETerm.size	partial
+Scry.Egraph	Scry.ETerm.toList	partial
+Scry.Egraph	Scry.ETerms.size	partial
+Scry.Egraph	Scry.ETerms.toList	partial
+Scry.Egraph	Scry.Pat.size	partial
+Scry.Egraph	Scry.Pats.size	partial
+Scry.Eval	Scry.evalFrom	partial
+Scry.Eval	Scry.evalStratumLoop	partial
+Scry.Eval	Scry.reachSteps	partial
+Scry.Store	Scry.LatRel.seal✝	axiom Scry.LatRel.seal✝
+Scry.Store	Scry.LatRel.seal✝	builtin seal:Scry.LatRel := Scry.LatRel.seal✝
+Scry.Store	Scry.TupleRel.seal✝	axiom Scry.TupleRel.seal✝
+Scry.Store	Scry.TupleRel.seal✝	builtin seal:Scry.TupleRel := Scry.TupleRel.seal✝
+Scry.Taint	Scry.taintChain	partial
 Serial	Pty.nameRaw	axiom Pty.nameRaw
 Serial	Pty.nameRaw	builtin extern:wizser_pty_name:n:s:io:: := Pty.nameRaw
 Serial	Pty.openRaw	axiom Pty.openRaw

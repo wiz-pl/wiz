@@ -9,7 +9,7 @@ import Scry.AiCfg
 
 Stage S5's untrusted fast path and its result checker.
 
-* `AState` is the invariant map `block → Env`.
+* `AState` is the invariant map `block → AiEnv`.
 * `solve` is a chaotic-iteration worklist: edges are queued when their source state
   grows, and a block that is reached again is widened. It is a `partial def`; nothing
   about termination is proved (widening makes it terminate for the finite-height
@@ -28,19 +28,19 @@ import Scry.AiFixpoint
 -/
 
 /-- The invariant map: a finite association list from block id to environment. -/
-def AState : Type := List (Nat × Env)
+def AState : Type := List (Nat × AiEnv)
 
 /-- Look a block's invariant up, with a default. -/
-def AState.lookupGo (p : Nat) (d : Env) : AState → Env
+def AState.lookupGo (p : Nat) (d : AiEnv) : AState → AiEnv
   | .nil => d
   | .cons (k, v) rest => match Nat.beq p k with
     | .true => v
     | .false => AState.lookupGo p d rest
 
-def AState.getD (st : AState) (p : Nat) (d : Env) : Env := AState.lookupGo p d st
+def AState.getD (st : AState) (p : Nat) (d : AiEnv) : AiEnv := AState.lookupGo p d st
 
 /-- Set a block's invariant. -/
-def AState.set (p : Nat) (v : Env) : AState → AState
+def AState.set (p : Nat) (v : AiEnv) : AState → AState
   | .nil => .cons (p, v) .nil
   | .cons (k, w) rest => match Nat.beq p k with
     | .true => .cons (k, v) rest
@@ -48,11 +48,11 @@ def AState.set (p : Nat) (v : Env) : AState → AState
 
 /-- The initial invariant map: every block bottom. -/
 def AState.bot (cfg : ACfg) : AState :=
-  List.map (fun q => (q.1, Env.botOf cfg.vars)) cfg.stmts
+  List.map (fun q => (q.1, AiEnv.botOf cfg.vars)) cfg.stmts
 
 /-- The state of a block, defaulting to bottom (all variables `Value.bot`). -/
-def AState.at (cfg : ACfg) (st : AState) (p : Nat) : Env :=
-  AState.getD st p (Env.botOf cfg.vars)
+def AState.at (cfg : ACfg) (st : AState) (p : Nat) : AiEnv :=
+  AState.getD st p (AiEnv.botOf cfg.vars)
 
 -- ## The worklist engine
 
@@ -71,12 +71,12 @@ partial def solveGo (m : AiMach) (cfg : ACfg) (st : AState) (queue : List AEdge)
       let blockOut := AStmt.transfer m src (ACfg.stmt cfg e.src)
       let new := AEdge.transfer m blockOut e
       let old := AState.at cfg st e.dst
-      match Env.le new old with
+      match AiEnv.le new old with
       | .true => solveGo m cfg st rest seen
       | .false =>
-          let joined := Env.join old new
+          let joined := AiEnv.join old new
           let step := match Ai.memNat e.dst seen with
-            | .true => Env.widen old joined
+            | .true => AiEnv.widen old joined
             | .false => joined
           let st' := AState.set e.dst step st
           let seen' : List Nat := match Ai.memNat e.dst seen with
@@ -88,11 +88,11 @@ partial def solveGo (m : AiMach) (cfg : ACfg) (st : AState) (queue : List AEdge)
 engine widens at every re-reached block (a simple WTO stand-in; a Bourdoncle order can
 replace it without changing the checker). -/
 def fixpoint (m : AiMach) (cfg : ACfg) : AState :=
-  let init := AState.set cfg.entry (Env.topOf cfg.vars) (AState.bot cfg)
+  let init := AState.set cfg.entry (AiEnv.topOf cfg.vars) (AState.bot cfg)
   solveGo m cfg init (ACfg.outEdges cfg cfg.entry) (([cfg.entry]) : List Nat)
 
 /-- The join of the transfers of all incoming edges of `q`. -/
-def incomingJoin (m : AiMach) (cfg : ACfg) (st : AState) (q : Nat) : Option Env :=
+def incomingJoin (m : AiMach) (cfg : ACfg) (st : AState) (q : Nat) : Option AiEnv :=
   let ins := List.filter (fun e => Nat.beq e.dst q) cfg.edges
   match ins with
   | .nil => .none
@@ -101,8 +101,8 @@ def incomingJoin (m : AiMach) (cfg : ACfg) (st : AState) (q : Nat) : Option Env 
         (fun acc e =>
           let src := AState.at cfg st e.src
           let out := AEdge.transfer m (AStmt.transfer m src (ACfg.stmt cfg e.src)) e
-          Env.join acc out)
-        (Env.botOf cfg.vars) ins
+          AiEnv.join acc out)
+        (AiEnv.botOf cfg.vars) ins
       .some joined
 
 /-- One narrowing pass: `inv q := inv q ▷ join(incoming transfers)`. It never widens
@@ -113,7 +113,7 @@ def narrowOnce (m : AiMach) (cfg : ACfg) (st : AState) : AState :=
     let q := p.1
     match incomingJoin m cfg st q with
     | .none => (q, AState.at cfg st q)
-    | .some j => (q, Env.narrow (AState.at cfg st q) j)) cfg.stmts
+    | .some j => (q, AiEnv.narrow (AState.at cfg st q) j)) cfg.stmts
 
 -- ## Alarms
 
@@ -142,7 +142,7 @@ def Interval.within (m : AiMach) : Interval → Bool
 /-- Alarm of an expression. An arithmetic operation alarms when its abstract result is
 `top` (the range may leave the machine word); a load alarms on a possibly-null array or
 a possibly-out-of-bounds index; a load of a `bot` index is unreachable and silent. -/
-def AExpr.alarms (m : AiMach) (at : Nat) (env : Env) : AExpr → List Alarm
+def AExpr.alarms (m : AiMach) (at : Nat) (env : AiEnv) : AExpr → List Alarm
   | .var _ => Alarm.none
   | .lit _ => Alarm.none
   | .null => Alarm.none
@@ -176,7 +176,7 @@ def AExpr.alarms (m : AiMach) (at : Nat) (env : Env) : AExpr → List Alarm
   | .alloc e => AExpr.alarms m at env e
   | .load arr idx len =>
       let iv := AExpr.eval m env idx
-      let av := Env.getD env arr Value.top
+      let av := AiEnv.getD env arr Value.top
       let nullAlarm : List Alarm := match Null.mayBeNull av.nul with
         | .true => List.cons (Alarm.nullDeref at) Alarm.none
         | .false => Alarm.none
@@ -191,7 +191,7 @@ def AExpr.alarms (m : AiMach) (at : Nat) (env : Env) : AExpr → List Alarm
         (List.append nullAlarm rangeAlarm)
 
 /-- Alarm of a guard's expression. -/
-def ACond.alarms (m : AiMach) (at : Nat) (env : Env) : ACond → List Alarm
+def ACond.alarms (m : AiMach) (at : Nat) (env : AiEnv) : ACond → List Alarm
   | .lt _ e => AExpr.alarms m at env e
   | .le _ e => AExpr.alarms m at env e
   | .gt _ e => AExpr.alarms m at env e
@@ -202,7 +202,7 @@ def ACond.alarms (m : AiMach) (at : Nat) (env : Env) : ACond → List Alarm
   | .notNull _ => Alarm.none
 
 /-- Alarm of a statement in an invariant state. -/
-def AStmt.alarms (m : AiMach) (at : Nat) (env : Env) : AStmt → List Alarm
+def AStmt.alarms (m : AiMach) (at : Nat) (env : AiEnv) : AStmt → List Alarm
   | .assign _ e => AExpr.alarms m at env e
   | .assume c => ACond.alarms m at env c
   | .skip => Alarm.none
@@ -215,7 +215,7 @@ def checkEdge (m : AiMach) (cfg : ACfg) (st : AState) (e : AEdge) : List Alarm :
   let src := AState.at cfg st e.src
   let dst := AState.at cfg st e.dst
   let out := AEdge.transfer m (AStmt.transfer m src (ACfg.stmt cfg e.src)) e
-  match Env.le out dst with
+  match AiEnv.le out dst with
   | .true => .nil
   | .false => .cons (Alarm.unsoundEdge e.src e.dst) .nil
 
@@ -225,7 +225,7 @@ def checkEdges (m : AiMach) (cfg : ACfg) (st : AState) : List Alarm :=
 
 /-- Check that the entry invariant covers the initial (all-unknown) state. -/
 def checkEntry (cfg : ACfg) (st : AState) : List Alarm :=
-  match Env.le (Env.topOf cfg.vars) (AState.at cfg st cfg.entry) with
+  match AiEnv.le (AiEnv.topOf cfg.vars) (AState.at cfg st cfg.entry) with
   | .true => .nil
   | .false => .cons Alarm.entryUncovered .nil
 

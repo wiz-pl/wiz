@@ -1,6 +1,7 @@
 import Prelude
 import Text
 import Scry.Ai
+import Scry.AiFixpoint
 /-!
 # Scry.AiExamples: the small programs S5's tests and docs run
 
@@ -85,8 +86,8 @@ def AiEx.ovfInv : AState := fixpoint AiEx.m8 AiEx.ovfCfg
 /-- An unsound alleged post-fixpoint: the constant program, but block 3 claims `z = 5`
 while its predecessor computes `z = 6`. -/
 def AiEx.constBadInv : AState :=
-  AState.set 3 (Env.set 2 (Value.ofNat 5) (Env.topOf AiEx.constCfg.vars)) AiEx.constInv
+  AState.set 3 (AiEnv.set 2 (Value.ofNat 5) (AiEnv.topOf AiEx.constCfg.vars)) AiEx.constInv
 
 /-- The value of variable `x` in block `p` of a post-fixpoint. -/
 def AiEx.valueAt (cfg : ACfg) (inv : AState) (p x : Nat) : Value :=
-  Env.getD (AState.at cfg inv p) x Value.top
+  AiEnv.getD (AState.at cfg inv p) x Value.top
