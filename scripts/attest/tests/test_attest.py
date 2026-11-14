@@ -21,6 +21,7 @@ cryptography.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -54,14 +55,15 @@ def tpm2b(data: bytes) -> bytes:
 
 
 def encode_quote(*, extra_data: bytes, indices: list[int], pcr_digest: bytes,
-                 magic: int = wa.ATTEST_MAGIC, stype: int = wa.ATTEST_QUOTE) -> bytes:
+                 magic: int = wa.ATTEST_MAGIC, stype: int = wa.ATTEST_QUOTE,
+                 qualified_signer: bytes = b"qualified-ak-name") -> bytes:
     """Encode a TPMS_ATTEST quote (the shape `tpm2_quote -m` writes)."""
     size = 3
     select = bytearray(size)
     for index in indices:
         select[index // 8] |= 1 << (index % 8)
     out = struct.pack(">IH", magic, stype)
-    out += tpm2b(b"qualified-ak-name")
+    out += tpm2b(qualified_signer)
     out += tpm2b(extra_data)
     out += struct.pack(">QIIB", 123456, 7, 3, 1)  # clockInfo
     out += b"\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11"  # firmwareVersion
@@ -75,13 +77,38 @@ def pcr_digest(values: list[bytes]) -> bytes:
     return hashlib.sha256(b"".join(values)).digest()
 
 
+def encode_ak_public(modulus: bytes = b"\x01\x02\x03",
+                     exponent: int = 65537,
+                     key_type: int = 0x0001) -> bytes:
+    """A tiny TPM2B_PUBLIC RSA AK, enough to test Name/DER SPKI parsing."""
+    public = struct.pack(">HH", key_type, wa.ALG_SHA256)
+    public += struct.pack(">I", 0x00040072)  # objectAttributes (unused)
+    public += struct.pack(">H", 0)           # authPolicy
+    public += struct.pack(">H", 0x0010)      # symmetric = NULL
+    public += struct.pack(">H", 0x0010)      # scheme = NULL
+    public += struct.pack(">H", 2048)        # keyBits
+    public += struct.pack(">I", exponent)
+    public += struct.pack(">H", len(modulus)) + modulus
+    return struct.pack(">H", len(public)) + public
+
+
+def make_key(directory: Path, name: str = "key") -> tuple[Path, Path]:
+    key = directory / name
+    subprocess.run(
+        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "test",
+         "-f", str(key)],
+        check=True, capture_output=True, text=True, timeout=60,
+    )
+    return key, Path(str(key) + ".pub")
+
+
 class Fixture:
     """A complete, valid manifest/quote/policy/artifact bundle in a temp dir."""
 
-    def __init__(self, *, indices=(7, 11), challenge="11" * 32):
+    def __init__(self, *, indices=(7, 11), nonce="11" * 32):
         self.dir = Path(tempfile.mkdtemp(prefix="wiz-attest-test-"))
         self.indices = list(indices)
-        self.challenge = challenge
+        self.nonce = nonce
         self.artifacts = {
             "prog": b"#!/bin/sh\necho hello\n",
             "prog.c": b"int main(void) { return 0; }\n",
@@ -112,7 +139,6 @@ class Fixture:
             tree_roots=["lib", "runtime"],
             target="x86_64-linux-gnu",
             pcr_indices=self.indices,
-            challenge=challenge,
         )
         self.write_manifest()
         self.write_quote()
@@ -123,6 +149,20 @@ class Fixture:
     def manifest_digest(self) -> str:
         return hashlib.sha256(wa.canonical_bytes(self.manifest)).hexdigest()
 
+    def statement_digest(self) -> str:
+        statement = wa.build_statement(self.manifest, self.manifest_digest())
+        return hashlib.sha256(wa.canonical_bytes(statement)).hexdigest()
+
+    def quote_extra(self, nonce: str | None = None,
+                    statement_digest: str | None = None) -> bytes:
+        nonce = nonce or self.nonce
+        digest = statement_digest or self.statement_digest()
+        return bytes.fromhex(wa.quote_extra_data(bytes.fromhex(nonce), digest))
+
+    def bind_quote_to_statement(self, statement_digest: str,
+                                nonce: str | None = None) -> None:
+        self.write_quote(extra_data=self.quote_extra(nonce, statement_digest))
+
     def write_policy(self, policy: dict | None = None) -> None:
         self.policy = policy or self.policy
         self._write_policy()
@@ -132,21 +172,28 @@ class Fixture:
 
     def write_quote(self, *, extra_data: bytes | None = None,
                     indices: list[int] | None = None,
-                    values: dict[int, bytes] | None = None) -> None:
+                    values: dict[int, bytes] | None = None,
+                    qualified_signer: bytes = b"qualified-ak-name") -> None:
         indices = list(indices if indices is not None else self.indices)
         values = values or self.values
         data = b"".join(values[i] for i in indices)
-        extra = extra_data if extra_data is not None else bytes.fromhex(self.manifest_digest())
+        extra = extra_data if extra_data is not None else self.quote_extra()
         (self.dir / "quote.msg").write_bytes(
             encode_quote(extra_data=extra, indices=indices,
-                         pcr_digest=pcr_digest([values[i] for i in indices])))
+                         pcr_digest=pcr_digest([values[i] for i in indices]),
+                         qualified_signer=qualified_signer))
         (self.dir / "quote.pcr").write_bytes(data)
 
-    def verify_args(self) -> list[str]:
-        return [
+    def verify_args(self, *, allow_unsigned: bool = True,
+                    nonce: str | None = None) -> list[str]:
+        args = [
             "--manifest", str(self.dir / "manifest.json"),
             "--policy", str(self.dir / "policy.json"),
+            "--nonce", self.nonce if nonce is None else nonce,
         ]
+        if allow_unsigned:
+            args.append("--allow-unsigned")
+        return args
 
     def cleanup(self) -> None:
         shutil.rmtree(self.dir, ignore_errors=True)
@@ -185,7 +232,6 @@ class FixtureTest(unittest.TestCase):
 
     def base_args(self) -> list[str]:
         return self.fx.verify_args() + [
-            "--challenge", self.fx.challenge,
             "--ak-sha256", hashlib.sha256(b"ak-public").hexdigest(),
         ]
 
@@ -312,7 +358,8 @@ class VerifyTests(FixtureTest):
             self.assertEqual(result["manifest_sha256"], self.fx.manifest_digest())
             args = (Path(tmp) / "checkquote.args").read_text().split()
             self.assertIn("-q", args)
-            self.assertEqual(args[args.index("-q") + 1], self.fx.manifest_digest())
+            self.assertEqual(args[args.index("-q") + 1],
+                             self.fx.quote_extra().hex())
             self.assertEqual(args[args.index("-l") + 1], "sha256:7,11")
 
     def test_manifest_digest_matches_file_bytes(self):
@@ -448,41 +495,47 @@ class VerifyTests(FixtureTest):
         code, _, _ = run_verify(self.base_args() + ["--skip-crypto"])
         self.assertEqual(code, wa.EXIT_FAIL)
 
-    def test_challenge_match(self):
-        code, _, err = run_verify(self.base_args() + ["--skip-crypto"])
+    def test_nonce_match(self):
+        code, out, err = run_verify(self.base_args() + ["--skip-crypto", "--json"])
         self.assertEqual(code, wa.EXIT_INCOMPLETE, err)
+        checks = {c["name"]: c for c in json.loads(out)["checks"]}
+        self.assertEqual(checks["nonce"]["status"], "pass")
+        self.assertEqual(checks["quote_extra_data"]["status"], "pass")
 
-    def test_challenge_mismatch(self):
-        code, out, _ = run_verify(self.base_args()[:-4] + [
-            "--challenge", "22" * 32,
+    def test_nonce_mismatch(self):
+        code, out, _ = run_verify(self.fx.verify_args(nonce="22" * 32) + [
             "--ak-sha256", hashlib.sha256(b"ak-public").hexdigest(),
             "--skip-crypto", "--json"])
         self.assertEqual(code, wa.EXIT_FAIL)
         checks = {c["name"]: c for c in json.loads(out)["checks"]}
-        self.assertEqual(checks["challenge"]["status"], "fail")
+        self.assertEqual(checks["quote_extra_data"]["status"], "fail")
 
-    def test_require_challenge_without_one(self):
-        self.fx.manifest.pop("challenge")
-        self.fx.write_manifest()
-        self.fx.write_quote()
-        code, out, _ = run_verify(self.fx.verify_args() + [
-            "--require-challenge",
+    def test_require_nonce_without_one(self):
+        args = [
+            "--manifest", str(self.fx.dir / "manifest.json"),
+            "--policy", str(self.fx.dir / "policy.json"),
+            "--allow-unsigned", "--require-nonce",
             "--ak-sha256", hashlib.sha256(b"ak-public").hexdigest(),
-            "--skip-crypto", "--json"])
+            "--skip-crypto", "--json",
+        ]
+        code, out, _ = run_verify(args)
         self.assertEqual(code, wa.EXIT_FAIL)
         checks = {c["name"]: c for c in json.loads(out)["checks"]}
-        self.assertEqual(checks["challenge"]["status"], "fail")
+        self.assertEqual(checks["nonce"]["status"], "fail")
 
-    def test_without_challenge_is_partial(self):
-        self.fx.manifest.pop("challenge")
-        self.fx.write_manifest()
-        self.fx.write_quote()
-        code, out, _ = run_verify(self.fx.verify_args() + [
+    def test_without_nonce_is_partial(self):
+        args = [
+            "--manifest", str(self.fx.dir / "manifest.json"),
+            "--policy", str(self.fx.dir / "policy.json"),
+            "--allow-unsigned",
             "--ak-sha256", hashlib.sha256(b"ak-public").hexdigest(),
-            "--skip-crypto", "--json"])
+            "--skip-crypto", "--json",
+        ]
+        code, out, _ = run_verify(args)
         self.assertEqual(code, wa.EXIT_INCOMPLETE)
         checks = {c["name"]: c for c in json.loads(out)["checks"]}
-        self.assertEqual(checks["challenge"]["status"], "skip")
+        self.assertEqual(checks["nonce"]["status"], "skip")
+        self.assertEqual(checks["quote_extra_data"]["status"], "skip")
 
     def test_expect_digest(self):
         code, _, _ = run_verify(self.base_args() + [
@@ -496,7 +549,6 @@ class VerifyTests(FixtureTest):
 
     def test_ak_pin_mismatch(self):
         code, out, _ = run_verify(self.fx.verify_args() + [
-            "--challenge", self.fx.challenge,
             "--ak-sha256", "00" * 32, "--skip-crypto", "--json"])
         self.assertEqual(code, wa.EXIT_FAIL)
         checks = {c["name"]: c for c in json.loads(out)["checks"]}
@@ -507,7 +559,7 @@ class VerifyTests(FixtureTest):
         policy.pop("ak_sha256")
         self.fx.write_policy(policy)
         code, out, _ = run_verify(self.fx.verify_args() + [
-            "--challenge", self.fx.challenge, "--skip-crypto", "--json"])
+            "--skip-crypto", "--json"])
         self.assertEqual(code, wa.EXIT_INCOMPLETE)
         checks = {c["name"]: c for c in json.loads(out)["checks"]}
         self.assertEqual(checks["ak_pin"]["status"], "skip")
@@ -517,7 +569,6 @@ class VerifyTests(FixtureTest):
         policy.pop("ak_sha256")
         self.fx.write_policy(policy)
         code, out, _ = run_verify(self.fx.verify_args() + [
-            "--challenge", self.fx.challenge,
             "--ak-sha256", hashlib.sha256(b"ak-public").hexdigest(),
             "--skip-crypto", "--json"])
         self.assertEqual(code, wa.EXIT_INCOMPLETE)
@@ -609,7 +660,7 @@ class ProducerTests(unittest.TestCase):
         digest2 = hashlib.sha256((self.tmp / "out/manifest.json").read_bytes()).hexdigest()
         self.assertEqual(digest1, digest2)
 
-    def test_challenge_goes_into_manifest(self):
+    def test_manifest_is_challenge_free(self):
         proc = run_attest([
             "--artifact", str(self.tmp / "prog"),
             "--out", str(self.tmp / "out"), "--no-quote",
@@ -617,11 +668,60 @@ class ProducerTests(unittest.TestCase):
             "--target", "x86_64-linux-gnu",
             "--source-entry", "examples/io.wiz",
             "--source-sha256", "22" * 32,
-            "--challenge", "AB" * 32,
+            "--nonce", "AB" * 32,
         ])
         self.assertEqual(proc.returncode, 0, proc.stderr)
         manifest = wa.load_json_strict((self.tmp / "out/manifest.json").read_bytes())
-        self.assertEqual(manifest["challenge"], "ab" * 32)
+        self.assertNotIn("challenge", manifest)
+        self.assertNotIn("nonce", manifest)
+        # The same inputs (with or without a nonce) produce the same manifest.
+        second = run_attest([
+            "--artifact", str(self.tmp / "prog"),
+            "--out", str(self.tmp / "out2"), "--no-quote",
+            "--wiz-version", "0.1.0-dev",
+            "--target", "x86_64-linux-gnu",
+            "--source-entry", "examples/io.wiz",
+            "--source-sha256", "22" * 32,
+        ])
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual((self.tmp / "out/manifest.json").read_bytes(),
+                         (self.tmp / "out2/manifest.json").read_bytes())
+
+    def test_no_quote_with_sign_key_writes_envelope(self):
+        key = self.tmp / "producer-key"
+        keygen = run_attest(["keygen", "--key", str(key)])
+        self.assertEqual(keygen.returncode, 0, keygen.stderr)
+        proc = run_attest([
+            "--artifact", str(self.tmp / "prog"),
+            "--out", str(self.tmp / "signed"), "--no-quote",
+            "--wiz-version", "0.1.0-dev",
+            "--target", "x86_64-linux-gnu",
+            "--source-entry", "examples/io.wiz",
+            "--source-sha256", "22" * 32,
+            "--nonce", "cd" * 32,
+            "--sign-key", str(key), "--json",
+        ])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        info = json.loads(proc.stdout)
+        self.assertTrue(info["signed"])
+        self.assertTrue(Path(info["envelope"]).is_file())
+        self.assertTrue(Path(info["detached_signature"]).is_file())
+        manifest = wa.load_json_strict(
+            (self.tmp / "signed/manifest.json").read_bytes())
+        self.assertNotIn("nonce", manifest)
+        self.assertNotIn("challenge", manifest)
+
+    def test_quote_without_signing_key_is_usage_error(self):
+        proc = run_attest([
+            "--artifact", str(self.tmp / "prog"),
+            "--out", str(self.tmp / "out"),
+            "--wiz-version", "0.1.0-dev",
+            "--target", "x86_64-linux-gnu",
+            "--source-entry", "examples/io.wiz",
+            "--source-sha256", "22" * 32,
+        ])
+        self.assertEqual(proc.returncode, wa.EXIT_USAGE)
+        self.assertIn("--sign-key", proc.stderr)
 
     def test_bad_pcr_list_is_usage_error(self):
         proc = run_attest([
@@ -644,6 +744,355 @@ class ProducerTests(unittest.TestCase):
             "--source-sha256", "22" * 32,
         ])
         self.assertEqual(proc.returncode, wa.EXIT_USAGE)
+
+
+# --------------------------------------------------------------------------
+# DSSE signing, key handling and statement binding
+
+
+class SigningTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fx = Fixture()
+        self.tmp = Path(tempfile.mkdtemp(prefix="wiz-sign-test-"))
+        self.key, self.pub = make_key(self.tmp, "a")
+        self.key2, self.pub2 = make_key(self.tmp, "b")
+        self.stub = write_stub(self.tmp)
+        self.envelope = self.fx.dir / wa.ENVELOPE_NAME
+        self.detached = Path(str(self.envelope) + wa.DETACHED_SUFFIX)
+        self.info = self.sign()
+        self.fx.bind_quote_to_statement(self.info["statement_sha256"])
+
+    def tearDown(self) -> None:
+        self.fx.cleanup()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def sign(self, *extra: str, key: Path | None = None,
+             out: Path | None = None) -> dict:
+        args = ["sign", "--manifest", str(self.fx.dir / "manifest.json"),
+                "--key", str(key or self.key), "--json", *extra]
+        if out is not None:
+            args += ["--out", str(out)]
+        proc = run_attest(args)
+        self.last_proc = proc
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout)
+
+    def verify_args(self, *, pub: Path | None = None,
+                    extras: tuple[str, ...] = (),
+                    allow_unsigned: bool = False,
+                    envelope: Path | None = None) -> list[str]:
+        args = [
+            "--manifest", str(self.fx.dir / "manifest.json"),
+            "--policy", str(self.fx.dir / "policy.json"),
+            "--nonce", self.fx.nonce,
+            "--ak-sha256", hashlib.sha256(b"ak-public").hexdigest(),
+        ]
+        if pub is not None:
+            args += ["--public-key", str(pub)]
+        if envelope is not None:
+            args += ["--envelope", str(envelope)]
+        if allow_unsigned:
+            args.append("--allow-unsigned")
+        return args + list(extras)
+
+    def verify(self, *, pub: Path | None = None,
+               extras: tuple[str, ...] = (),
+               allow_unsigned: bool = False,
+               envelope: Path | None = None,
+               stub: bool = False,
+               with_key: bool = True) -> tuple[int, dict, str]:
+        args = self.verify_args(pub=(pub or self.pub) if with_key else None,
+                                extras=extras, allow_unsigned=allow_unsigned,
+                                envelope=envelope)
+        if stub:
+            args += ["--tpm2-checkquote", str(self.stub)]
+        else:
+            args += ["--skip-crypto"]
+        code, out, err = run_verify(args + ["--json"])
+        try:
+            payload = json.loads(out)
+        except json.JSONDecodeError:
+            payload = {}
+        return code, payload, err
+
+    def envelope_data(self) -> dict:
+        return json.loads(self.envelope.read_bytes())
+
+    def write_envelope(self, envelope: dict) -> None:
+        self.envelope.write_bytes(wa.canonical_bytes(envelope))
+
+    def checks(self, payload: dict) -> dict[str, dict]:
+        return {check["name"]: check for check in payload.get("checks", [])}
+
+    def test_keygen_and_fingerprint(self):
+        key = self.tmp / "generated"
+        proc = run_attest(["keygen", "--key", str(key), "--json"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        info = json.loads(proc.stdout)
+        self.assertTrue(key.is_file())
+        self.assertTrue(Path(str(key) + ".pub").is_file())
+        self.assertEqual(stat.S_IMODE(key.stat().st_mode), 0o600)
+        self.assertTrue(info["fingerprint"].startswith("SHA256:"))
+        listed = subprocess.run(
+            ["ssh-keygen", "-lf", str(key) + ".pub", "-E", "sha256"],
+            capture_output=True, text=True, check=True,
+        ).stdout.split()
+        self.assertEqual(listed[1], info["fingerprint"])
+        self.assertNotIn("PRIVATE", proc.stdout)
+
+    def test_sign_verify_round_trip(self):
+        self.assertTrue(self.envelope.is_file())
+        self.assertTrue(self.detached.is_file())
+        envelope = self.envelope_data()
+        self.assertEqual(envelope["payloadType"], wa.DSSE_PAYLOAD_TYPE)
+        self.assertEqual(len(envelope["signatures"]), 1)
+        self.assertEqual(envelope["signatures"][0]["keyid"], self.info["keyid"])
+        code, payload, err = self.verify(stub=True)
+        self.assertEqual(code, wa.EXIT_OK, err)
+        self.assertEqual(payload["status"], "verified")
+        self.assertTrue(payload["signed"])
+        self.assertEqual(payload["statement_sha256"],
+                         self.info["statement_sha256"])
+        checks = self.checks(payload)
+        for name in ("dsse_envelope", "dsse_payload_type", "dsse_signature",
+                     "dsse_key", "dsse_statement"):
+            self.assertEqual(checks[name]["status"], "pass", name)
+
+    def test_wrong_key(self):
+        code, payload, _ = self.verify(pub=self.pub2, stub=True)
+        self.assertEqual(code, wa.EXIT_FAIL)
+        self.assertEqual(self.checks(payload)["dsse_signature"]["status"], "fail")
+
+    def test_tampered_payload(self):
+        envelope = self.envelope_data()
+        statement = json.loads(base64.b64decode(envelope["payload"]))
+        statement["subject"][0]["digest"]["sha256"] = "00" * 32
+        envelope["payload"] = base64.b64encode(
+            wa.canonical_bytes(statement)).decode()
+        self.write_envelope(envelope)
+        code, payload, _ = self.verify(stub=True)
+        self.assertEqual(code, wa.EXIT_FAIL)
+        checks = self.checks(payload)
+        self.assertEqual(checks["dsse_signature"]["status"], "fail")
+        self.assertEqual(checks["dsse_statement"]["status"], "fail")
+
+    def test_tampered_signature(self):
+        envelope = self.envelope_data()
+        signature = bytearray(base64.b64decode(envelope["signatures"][0]["sig"]))
+        signature[len(signature) // 2] ^= 0x01
+        envelope["signatures"][0]["sig"] = base64.b64encode(signature).decode()
+        self.write_envelope(envelope)
+        code, payload, _ = self.verify(stub=True)
+        self.assertEqual(code, wa.EXIT_FAIL)
+        self.assertEqual(self.checks(payload)["dsse_signature"]["status"], "fail")
+
+    def test_wrong_payload_type(self):
+        envelope = self.envelope_data()
+        envelope["payloadType"] = "application/json"
+        self.write_envelope(envelope)
+        code, payload, _ = self.verify(stub=True)
+        self.assertEqual(code, wa.EXIT_FAIL)
+        self.assertEqual(self.checks(payload)["dsse_payload_type"]["status"], "fail")
+
+    def test_unsigned_rejected_by_default(self):
+        self.envelope.unlink()
+        self.detached.unlink()
+        code, payload, _ = self.verify(stub=True)
+        self.assertEqual(code, wa.EXIT_FAIL)
+        self.assertEqual(self.checks(payload)["signature_policy"]["status"], "fail")
+
+    def test_unsigned_allowed_with_explicit_flag(self):
+        self.envelope.unlink()
+        self.detached.unlink()
+        code, payload, err = self.verify(stub=True, allow_unsigned=True)
+        self.assertEqual(code, wa.EXIT_OK, err)
+        self.assertEqual(payload["status"], "verified")
+        self.assertFalse(payload["signed"])
+        self.assertEqual(self.checks(payload)["signature_policy"]["status"], "pass")
+
+    def test_require_signature_rejects_unsigned(self):
+        self.envelope.unlink()
+        self.detached.unlink()
+        code, payload, _ = self.verify(
+            stub=True, extras=("--require-signature",))
+        self.assertEqual(code, wa.EXIT_FAIL)
+        self.assertEqual(self.checks(payload)["signature_policy"]["status"], "fail")
+
+    def test_key_fingerprint_mismatch(self):
+        other = wa.parse_public_key(self.pub2).fingerprint
+        code, payload, _ = self.verify(
+            stub=True, extras=("--key-fingerprint", other))
+        self.assertEqual(code, wa.EXIT_FAIL)
+        self.assertEqual(self.checks(payload)["dsse_key"]["status"], "fail")
+
+    def test_key_fingerprint_allowlist_accepts(self):
+        fingerprint = wa.parse_public_key(self.pub).fingerprint
+        code, payload, err = self.verify(
+            stub=True, extras=("--key-fingerprint", fingerprint))
+        self.assertEqual(code, wa.EXIT_OK, err)
+        self.assertEqual(self.checks(payload)["dsse_key"]["status"], "pass")
+
+    def test_deterministic_envelope_with_fixed_key(self):
+        first = self.tmp / "first.json"
+        second = self.tmp / "second.json"
+        info1 = self.sign(out=first)
+        info2 = self.sign(out=second)
+        self.assertEqual(first.read_bytes(), second.read_bytes())
+        self.assertEqual(Path(info1["detached_signature"]).read_bytes(),
+                         Path(info2["detached_signature"]).read_bytes())
+        self.assertEqual(info1["statement_sha256"], info2["statement_sha256"])
+
+    def test_tampered_manifest_fails_statement(self):
+        self.fx.manifest["artifacts"][0]["sha256"] = "00" * 32
+        self.fx.write_manifest()
+        code, payload, _ = self.verify(stub=True)
+        self.assertEqual(code, wa.EXIT_FAIL)
+        self.assertEqual(self.checks(payload)["dsse_statement"]["status"], "fail")
+
+    def test_statement_and_quote_binding_mismatch(self):
+        self.fx.write_quote(extra_data=b"\x00" * 32)
+        code, payload, _ = self.verify(stub=True)
+        self.assertEqual(code, wa.EXIT_FAIL)
+        self.assertEqual(self.checks(payload)["quote_extra_data"]["status"], "fail")
+
+    def test_detached_signature_verifies_and_tamper_fails(self):
+        code, payload, err = self.verify(
+            stub=True, extras=("--detached-signature", str(self.detached)))
+        self.assertEqual(code, wa.EXIT_OK, err)
+        self.assertEqual(
+            self.checks(payload)["dsse_detached_signature"]["status"], "pass")
+        signature = bytearray(self.detached.read_bytes())
+        signature[len(signature) // 2] ^= 0x01
+        self.detached.write_bytes(bytes(signature))
+        code, payload, _ = self.verify(
+            stub=True, extras=("--detached-signature", str(self.detached)))
+        self.assertEqual(code, wa.EXIT_FAIL)
+        self.assertEqual(
+            self.checks(payload)["dsse_detached_signature"]["status"], "fail")
+
+    def test_missing_trust_root_fails(self):
+        code, payload, _ = self.verify(with_key=False, stub=True)
+        self.assertEqual(code, wa.EXIT_FAIL)
+        self.assertEqual(self.checks(payload)["dsse_key"]["status"], "fail")
+
+    def test_valid_until_expiry(self):
+        self.sign("--valid-until", "2020-01-01T00:00:00Z")
+        payload = base64.b64decode(
+            json.loads(self.envelope.read_bytes())["payload"])
+        self.fx.bind_quote_to_statement(wa.sha256_bytes(payload))
+        code, result, _ = self.verify(
+            stub=True, extras=("--now", "2026-11-14T00:00:00Z"))
+        self.assertEqual(code, wa.EXIT_FAIL)
+        self.assertEqual(self.checks(result)["dsse_valid_until"]["status"], "fail")
+
+    def test_prev_chain_pin(self):
+        previous = "ab" * 32
+        self.sign("--prev", previous)
+        payload = base64.b64decode(
+            json.loads(self.envelope.read_bytes())["payload"])
+        self.fx.bind_quote_to_statement(wa.sha256_bytes(payload))
+        code, payload, _ = self.verify(stub=True)
+        self.assertEqual(code, wa.EXIT_INCOMPLETE)
+        self.assertEqual(self.checks(payload)["dsse_prev"]["status"], "skip")
+        code, payload, err = self.verify(
+            stub=True, extras=("--expect-prev", previous))
+        self.assertEqual(code, wa.EXIT_OK, err)
+        self.assertEqual(self.checks(payload)["dsse_prev"]["status"], "pass")
+
+    def test_no_secret_leakage(self):
+        secret = self.key.read_text(encoding="utf-8")
+        body = [line for line in secret.splitlines()
+                if line and not line.startswith("-----")][0]
+        self.assertNotIn("PRIVATE KEY", self.last_proc.stdout)
+        self.assertNotIn("PRIVATE KEY", self.last_proc.stderr)
+        self.assertNotIn(body, json.dumps(self.info))
+        for path in (self.envelope, self.detached):
+            data = path.read_bytes()
+            self.assertNotIn(b"PRIVATE KEY", data)
+            self.assertNotIn(body.encode(), data)
+
+    def test_sigstore_is_opt_in_and_stubbed(self):
+        cosign = self.tmp / "cosign"
+        log = self.tmp / "cosign.args"
+        cosign.write_text(
+            "#!/bin/sh\n"
+            f'printf \'%s\\n\' "$@" > "{log}"\n'
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        cosign.chmod(0o755)
+        out = self.tmp / "sigstore.json"
+        info = self.sign("--sigstore", "--cosign-bin", str(cosign), out=out)
+        self.assertTrue(info["sigstore"]["bundle"].endswith(
+            wa.SIGSTORE_BUNDLE_SUFFIX))
+        args = log.read_text().split()
+        self.assertIn("sign-blob", args)
+        self.assertIn("--bundle", args)
+        self.assertIn("--tlog-upload=false", args)
+        out2 = self.tmp / "sigstore-upload.json"
+        self.sign("--sigstore-upload", "--cosign-bin", str(cosign), out=out2)
+        args2 = log.read_text().split()
+        self.assertNotIn("--tlog-upload=false", args2)
+
+
+class AkInfoTests(unittest.TestCase):
+    def test_name_and_spki(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ak.pub"
+            path.write_bytes(encode_ak_public())
+            info = wa.ak_info(path)
+            public = encode_ak_public()[2:]
+            self.assertEqual(info.name, "000b" + hashlib.sha256(public).hexdigest())
+            self.assertEqual(
+                info.spki_sha256,
+                "736ff0ca86e0b1605694f0b0082f70ab173ba3b0dad4c942cc9cdb206530eaa2",
+            )
+            self.assertEqual(info.file_sha256,
+                             hashlib.sha256(encode_ak_public()).hexdigest())
+
+    def test_bad_size_and_non_rsa_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ak.pub"
+            path.write_bytes(b"\x00\x09" + b"short")
+            with self.assertRaises(wa.SchemaError):
+                wa.ak_info(path)
+            path.write_bytes(encode_ak_public(key_type=0x0023))  # ECC
+            with self.assertRaises(wa.SchemaError):
+                wa.ak_info(path)
+
+    def test_policy_pins_and_quote_qualified_signer(self):
+        fx = Fixture()
+        try:
+            (fx.dir / "ak.pub").write_bytes(encode_ak_public())
+            info = wa.ak_info(fx.dir / "ak.pub")
+            policy = {
+                "schema": wa.POLICY_SCHEMA,
+                "bank": "sha256",
+                "pcr": {str(i): fx.values[i].hex() for i in fx.indices},
+                "ak_spki_sha256": info.spki_sha256,
+                "ak_name": info.name,
+            }
+            fx.write_policy(policy)
+            fx.write_quote(qualified_signer=bytes.fromhex(info.name))
+            code, out, err = run_verify(fx.verify_args() + [
+                "--ak-spki-sha256", info.spki_sha256,
+                "--ak-name", info.name,
+                "--skip-crypto", "--json",
+            ])
+            self.assertEqual(code, wa.EXIT_INCOMPLETE, err)
+            checks = {c["name"]: c for c in json.loads(out)["checks"]}
+            self.assertEqual(checks["ak_name"]["status"], "pass")
+            self.assertEqual(checks["ak_name_pin"]["status"], "pass")
+            self.assertEqual(checks["ak_spki_pin"]["status"], "pass")
+            bad = "00" * 32
+            code, out, _ = run_verify(fx.verify_args() + [
+                "--ak-spki-sha256", bad, "--skip-crypto", "--json",
+            ])
+            self.assertEqual(code, wa.EXIT_FAIL)
+            checks = {c["name"]: c for c in json.loads(out)["checks"]}
+            self.assertEqual(checks["ak_spki_pin"]["status"], "fail")
+        finally:
+            fx.cleanup()
 
 
 # --------------------------------------------------------------------------
@@ -752,11 +1201,15 @@ class TpmIntegrationTests(unittest.TestCase):
     def test_real_quote_verifies_and_detects_tampering(self):
         artifact = self.tmp / "prog"
         artifact.write_bytes(b"tpm integration artifact\n")
-        challenge = os.urandom(32).hex()
+        nonce = os.urandom(32).hex()
         out = self.tmp / "out"
+        key = self.tmp / "signing-key"
+        keygen = run_attest(["keygen", "--key", str(key)])
+        self.assertEqual(keygen.returncode, 0, keygen.stderr)
         args = [
             "--artifact", str(artifact), "--out", str(out),
-            "--pcr-list", self.PCRS, "--challenge", challenge,
+            "--pcr-list", self.PCRS, "--nonce", nonce,
+            "--sign-key", str(key),
             "--wiz-version", "0.1.0-dev", "--target", "x86_64-linux-gnu",
             "--source-entry", "examples/io.wiz",
             "--source-sha256", "22" * 32,
@@ -767,15 +1220,19 @@ class TpmIntegrationTests(unittest.TestCase):
             args.append("--sudo")
         proc = run_attest(args)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        for name in ("manifest.json", "quote.msg", "quote.sig", "quote.pcr", "ak.pub"):
+        for name in ("manifest.json", "manifest.intoto.json",
+                     "manifest.intoto.json.sig", "quote.msg", "quote.sig",
+                     "quote.pcr", "ak.pub", "quote.nonce"):
             self.assertTrue((out / name).is_file(), name)
 
         pcrs = self._read_pcrs()
+        ak = wa.ak_info(out / "ak.pub")
         policy = {
             "schema": wa.POLICY_SCHEMA,
             "bank": "sha256",
             "pcr": pcrs,
-            "ak_sha256": wa.sha256_file(out / "ak.pub"),
+            "ak_spki_sha256": ak.spki_sha256,
+            "ak_name": ak.name,
         }
         policy_path = self.tmp / "policy.json"
         policy_path.write_text(json.dumps(policy), encoding="utf-8")
@@ -783,8 +1240,10 @@ class TpmIntegrationTests(unittest.TestCase):
         verify_args = [
             "--manifest", str(out / "manifest.json"),
             "--policy", str(policy_path),
-            "--challenge", challenge,
-            "--ak-sha256", policy["ak_sha256"],
+            "--nonce", nonce,
+            "--public-key", str(key) + ".pub",
+            "--ak-spki-sha256", ak.spki_sha256,
+            "--ak-name", ak.name,
             "--artifacts-dir", str(self.tmp),
         ]
         if self.tpm2_bin:
@@ -803,8 +1262,10 @@ class TpmIntegrationTests(unittest.TestCase):
         code, _, _ = run_verify([
             "--manifest", str(out / "manifest.json"),
             "--policy", str(policy_path),
-            "--challenge", challenge,
-            "--ak-sha256", policy["ak_sha256"],
+            "--nonce", nonce,
+            "--public-key", str(key) + ".pub",
+            "--ak-spki-sha256", ak.spki_sha256,
+            "--ak-name", ak.name,
             "--skip-crypto", "--json",
         ])
         self.assertEqual(code, wa.EXIT_FAIL)

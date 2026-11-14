@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Verify a Wiz build manifest, its artifacts and a TPM 2.0 quote.
+"""Verify a DSSE-signed statement, a Wiz manifest, its artifacts and a quote.
 
 See `docs/attestation.md`.  Exit codes: 0 verified, 1 failed, 2 usage,
-3 incomplete (tpm2_checkquote missing or --skip-crypto).
+3 incomplete (missing trust root, nonce, pin, tpm2_checkquote, or --skip-crypto).
 """
 
 import os

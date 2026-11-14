@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Build a Wiz program (or take --artifact) and emit a manifest plus a TPM quote.
+"""Generate keys, sign statements, and emit a manifest plus a TPM quote.
 
-See `docs/attestation.md`.  Exit codes: 0 produced, 1 failed, 2 usage,
-3 a required tool is missing.
+Subcommands: keygen, sign, ak-info; the default form builds a Wiz program (or
+takes --artifact).  See `docs/attestation.md`.  Exit codes: 0 produced, 1
+failed, 2 usage, 3 a required tool is missing.
 """
 
 import os
