@@ -16,7 +16,7 @@ The cases cover:
   same program without the sanitiser), no flow, a branch merge, a loop fixpoint, the
   false-positive/false-negative pair, the spec parser, the sink argument index, CFG
   edges, dominators, reaching definitions, PDG edges and stratification;
-* the `.scry` rule pack: eight rules across seven CWEs, per-argument sources/sinks,
+* the `.scry` rule pack: eight rules with eight CWE tags, per-argument sources/sinks,
   severities, kinds (including `memory`) and
   function-name matching;
 * interprocedural flow: argument -> parameter, return-value summaries, and a recursive
