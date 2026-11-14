@@ -104,6 +104,8 @@ def List.concat {A : Type} : List (List A) → List A
 
 /-- Equality of characters, by code point. -/
 def Char.eq (a b : Char) : Bool := Nat.beq (Char.code a) (Char.code b)
+/-- `Char.eq`: two characters are equal when their code points are. -/
+instance : BEq Char := BEq.mk Char.eq
 /-- ASCII white space: space, tab, newline, carriage return, form feed, vertical tab. -/
 def Char.isSpace (c : Char) : Bool := match Nat.beq (Char.code c) 32 with
   | .true => .true
@@ -195,6 +197,13 @@ def String.isEmpty (s : String) : Bool := List.isEmpty (String.chars s)
 def String.eq (a b : String) : Bool := Chars.eq (String.chars a) (String.chars b)
 /-- Equality of strings, the same as `String.eq`. -/
 def String.beq (a b : String) : Bool := String.eq a b
+/-- `String.beq`. -/
+instance : BEq String := BEq.mk String.beq
+/-- The empty string. -/
+instance : Inhabited String := Inhabited.mk ""
+/-- The string in double quotes (no escaping). -/
+instance : Repr String := Repr.mk (fun s _ =>
+  String.append (String.mk (.cons (Char.mk 34) .nil)) (String.append s (String.mk (.cons (Char.mk 34) .nil))))
 /-- `a < b`, lexicographically by code point. -/
 def String.lt (a b : String) : Bool := Chars.lt (String.chars a) (String.chars b)
 /-- `String.startsWith s p`: whether `s` starts with `p`. -/

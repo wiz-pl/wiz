@@ -1,7 +1,6 @@
 import Prelude
 import Vec
 import Word
-import Deriving
 /-!
 # BitVec
 

@@ -27,13 +27,16 @@ The prelude now elaborates about 6× faster.
 ## 7b: classes, instances, tabled resolution
 
 ```
-class Inhabited (A : Type) where
+class HasDefault (A : Type) where
   default : A
-instance : Inhabited Nat := Inhabited.mk 0
-instance {A : Type} [Inhabited A] : Inhabited (List A) where
-  default := List.cons Inhabited.default List.nil
-#eval (Inhabited.default : List Nat)       -- .cons 0 .nil
+instance : HasDefault Nat := HasDefault.mk 0
+instance {A : Type} [HasDefault A] : HasDefault (List A) where
+  default := List.cons HasDefault.default List.nil
+#eval (HasDefault.default : List Nat)       -- .cons 0 .nil
 ```
+
+(The Prelude's `Inhabited` — the class the `deriving` below uses — has exactly this
+shape; it is in `lib/Prelude.wiz`, not in `lib/Deriving.wiz`.)
 
 * `class` is `structure` plus a record of the class (its fields, and which
   parameters are `outParam`s). It generates methods `C.f : {Δ} → [self : C Δ] → F`.
@@ -91,8 +94,9 @@ deriving instance Repr for Shape             -- after the fact
 * **Deriving.** `inductive … deriving C₁, C₂` (also `structure`) and
   `deriving instance C₁, C₂ for T₁, T₂` run C's **deriver**, a Wiz function
   `Deriver := String → MacroM (List Syntax)` registered with `attribute [deriver C] f`.
-  `lib/Deriving.wiz` defines `Inhabited`, `BEq` and `Repr` (`reprPrec : A → Nat →
-  String`), their derivers, and instances for `Nat`, `String`, `Bool`, `Option`, `List`.
+  The Prelude defines the classes `Inhabited`, `BEq` and `Repr` (`reprPrec : A → Nat →
+  String`); `lib/Deriving.wiz` defines their derivers and instances for `Nat`, `Bool`,
+  `Option` and `List`, and `lib/Text.wiz` the `String`/`Char` instances.
   A derived instance has type `{A : Type} → [C A] → … → C (T A …)` (an instance argument
   for each `Type` parameter) and eliminates with `T.rec`, so recursion needs no
   termination check; a structure uses its projections.

@@ -661,8 +661,9 @@ pure (so `#eval` runs them) and linear in their input.
 
 * **Lists**: `List.reverse`, `revApp`, `map`, `filter`, `foldl`, `foldr`, `any`, `all`,
   `find`, `isEmpty`, `head`, `take`, `drop`, `concat`.
-* **Characters**: `Char.eq`, `isSpace` (ASCII), `isDigit`.
-* **Strings**: `chars`, `ofChars`, `singleton`, `length`, `isEmpty`, `eq` (also `beq`),
+* **Characters**: `Char.eq` (the `BEq Char` instance), `isSpace` (ASCII), `isDigit`.
+* **Strings**: `chars`, `ofChars`, `singleton`, `length`, `isEmpty`, `eq` (also `beq`,
+  the `BEq String` instance),
   `lt` (by code point), `startsWith`, `endsWith`, `stripPrefix`, `stripSuffix`
   (`Option`), `contains`, `containsChar`, `take`, `drop`, `dropEnd`, `splitOn`, `join`,
   `intercalate`, `trim`, `trimLeft`, `trimRight`, `replace`, `parseNat` (`Option Nat`),
@@ -690,6 +691,9 @@ numeric type. The operators themselves are the heterogeneous classes `HAdd A B C
 as in Lean), which default to the homogeneous ones (`instHAdd [Add A] : HAdd A A A`), so a
 library gives an `Add` instance and gets `+`; it may also give a mixed one (`HMul Nat V V`).
 `x ^ k` is `HPow`, with `Pow Nat Nat`. A numeral that meets no type is a `Nat`.
+The derivable classes `Inhabited`, `BEq` and `Repr` are in the Prelude too (their
+derivers are in `lib/Deriving.wiz`, [stage 7](stages/07-type-classes.md)), so a module
+that imports only the Prelude can give instances.
 
 | type | where | numerals | operators |
 |------|-------|----------|-----------|

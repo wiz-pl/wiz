@@ -12,7 +12,8 @@ It has:
 * transport along equations (`Eq.cast`, `Eq.subst`) and the regularity axiom
   `castRefl`;
 * the numeric classes `Add`, `Sub`, `Mul`, `Div`, `Mod`, `Neg` and `OfNat` behind
-  `+ - * / %` and numerals, and `Append` behind `++`;
+  `+ - * / %` and numerals, `Append` behind `++`, and the derivable classes
+  `Inhabited`, `BEq` and `Repr` (their derivers are in `lib/Deriving.wiz`);
 * notation: `if … then … else`, `&&`, `||`, `!`, `|>`, list literals `[a, b]`, and
   `do`/`do1` blocks over `Monad`/`Monad1`;
 * metaprogramming: reflected terms (`Expr`, `ExprView`), syntax trees (`Syntax`), the
@@ -436,6 +437,23 @@ infixl:75 " <<< " => HShiftLeft.hShiftLeft
 infixl:75 " >>> " => HShiftRight.hShiftRight
 notation:max "~~~" a:max => Complement.complement a
 -- (end of the numeric classes)
+
+-- Derivable classes (HD8). They are in the Prelude so that a module that imports only
+-- the Prelude (lib/Text.wiz, say) can give instances; their derivers are in
+-- lib/Deriving.wiz, and so are the instances for `Nat`, `Bool`, `Option` and `List`.
+/-- Types with a chosen value, `Inhabited.default`. Derivable: the first constructor
+without recursive or proof fields, at `default` values. -/
+class Inhabited.{u} (A : Type u) where
+  default : A
+/-- Boolean equality, `BEq.beq a b`. Derivable: the same constructor, and equal fields
+(proof fields are not compared). -/
+class BEq.{u} (A : Type u) where
+  beq : A → A → Bool
+/-- Showing values as Wiz source. `reprPrec a p` is `a` as Wiz source, in parentheses if
+it is an application and `p` is the precedence of an argument (1024). Derivable:
+`T.c a b` (in parentheses at argument position), `T.c` for a constant. -/
+class Repr.{u} (A : Type u) where
+  reprPrec : A → Nat → String
 
 /-- The result of a computation that can fail: an `error e` or a success `ok a`. Its
 `Monad` instance is in lib/Functor.wiz. -/

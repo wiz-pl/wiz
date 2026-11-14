@@ -14,9 +14,14 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `Eq.congrArg` and `Eq.substProp` take a type in any `Type u`, and `funext`/`congrFun`
   take their domain in any `Sort u` (equality itself is still only for terms of types
   in `Type u`). `Nat`'s duplicate `congrArg` is gone: use `Eq.congrArg`.
-* library: `BEq` instances for the types that hand-wrote equality (`Int`, `Char`,
-  `Sat.Lit`, `Sat.BForm`, `BitVec n`), and derived ones for `HwTy` and `PortKind`; the
-  HDL's reset-and-enable input code is named `RstEn t` (`(rst, (en, t))`).
+* library: the derivable classes `Inhabited`, `BEq` and `Repr` moved from
+  `lib/Deriving.wiz` to the Prelude (their derivers stay in `Deriving`); `lib/Text.wiz`
+  gives `BEq` for `String` and `Char` (and `Inhabited`/`Repr` for `String`), so a
+  module that imports only the Prelude can use them.
+* library: `BEq` instances for the types that hand-wrote equality (`Int`, `Sat.Lit`,
+  `Sat.BForm`, `BitVec n`), and derived ones for `HwTy` and `PortKind`; `Hdl.natsEq` is
+  `BEq (List Nat)`'s. The HDL's reset-and-enable input code is named `RstEn t`
+  (`(rst, (en, t))`).
 * elaborator: the level unifier solves an offset metavariable against a closed level
   (`?u+1 =?= max 1 1`, e.g. a product's or a function type's sort).
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`

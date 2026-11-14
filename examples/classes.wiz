@@ -1,8 +1,6 @@
 import Prelude
 -- Type classes: classes are structures, instances are found by tabled resolution.
-
-class Inhabited (A : Type) where
-  default : A
+-- (`Inhabited` itself is the Prelude's; this example gives it instances.)
 
 instance : Inhabited Nat := Inhabited.mk 0
 instance : Inhabited Bool where

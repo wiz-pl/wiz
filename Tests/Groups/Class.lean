@@ -34,7 +34,13 @@ def classGroup : Group where
   exercise := "Exercise 7.1"
   cases := [
     { name := "methods take the instance as an instance-implicit argument", run := fun _ =>
-        okLib (classPrelude ++ "#check Inhabited.default") ["Inhabited.default : {A : Type} → [self : Inhabited A] → A"] },
+        okLib (classPrelude ++ "#check Inhabited.default") ["Inhabited.default : {A : Type ?u0} → [self : Inhabited A] → A"] },
+    { name := "Inhabited, BEq and Repr are the Prelude's (a Prelude-only module can give instances)", run := fun _ =>
+        okLib ("import Prelude\ninductive P where\n  | mk (n : Nat)\ndef P.beq : P → P → Bool\n  | .mk m, .mk n => Nat.beq m n\n" ++
+          "instance : BEq P := BEq.mk P.beq\ninstance : Inhabited P := Inhabited.mk (.mk 0)\n" ++
+          "instance : Repr P := Repr.mk (fun _ _ => \"P.mk\")\n" ++
+          "#eval BEq.beq (P.mk 1) (P.mk 1)\n#eval (Inhabited.default : P)\n#eval Repr.reprPrec (P.mk 0) 0")
+          [".true", ".mk 0", "\"P.mk\""] },
     { name := "an instance is found", run := fun _ =>
         okLib (classPrelude ++ "#eval (Inhabited.default : Bool)") [".true"] },
     { name := "instances with instance arguments chain", run := fun _ =>

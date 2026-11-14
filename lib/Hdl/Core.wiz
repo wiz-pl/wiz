@@ -77,11 +77,9 @@ def Hdl.nthD {A : Type} (d : A) : List A → Nat → A
   | .cons x _, .zero => x
   | .cons _ xs, .succ k => Hdl.nthD d xs k
 
-/-- Whether two lists of numbers are equal (the hash-consing table compares keys with it). -/
-def Hdl.natsEq : List Nat → List Nat → Bool
-  | .nil, .nil => .true
-  | .cons a as, .cons b bs => Bool.and (Nat.beq a b) (Hdl.natsEq as bs)
-  | _, _ => .false
+/-- Whether two lists of numbers are equal (the hash-consing table compares keys with it;
+`BEq (List Nat)`'s). -/
+def Hdl.natsEq (a b : List Nat) : Bool := BEq.beq a b
 
 /-- The sum of a list of numbers. -/
 def Hdl.sum : List Nat → Nat

@@ -196,9 +196,9 @@ def msgsLib (input : String) : IO (List String) := do
   pure (s.messages.toList.map fun m =>
     s!"{match m.severity with | .error => "error" | .warning => "warning" | .info => "info"}: {m.text}")
 
+-- (`Inhabited` is the Prelude's; this source adds the instances the cases below use, so
+-- that `String` still has none.)
 def classPrelude : String := "import Prelude
-class Inhabited (A : Type) where
-  default : A
 instance : Inhabited Nat := Inhabited.mk 0
 instance : Inhabited Bool where
   default := Bool.true
