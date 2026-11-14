@@ -488,6 +488,52 @@ Not done: skipping nodes whose arguments did not change (event-driven simulation
 generated C for a netlist, a value simulation that keeps its meta-level work (caching
 closed top-level definitions in compiled code would remove the table rebuilding).
 
+### When `Netlist.simulate` is `Circuit.run` (`lib/Hdl/Netlist.wiz`)
+
+`lib/Hdl/Netlist.wiz` (`import Hdl.Netlist`) proves the scoped simulation theorem
+(HW-05's `Netlist.simulate = Circuit.run`). The two simulations are different programs —
+one runs the Mealy step at `HwTy.El` values, the other the synthesised nodes — so their
+agreement is a theorem. `Circuit.Simulates c n` is the smallest relation that says so,
+one state-step obligation at a time:
+
+* `oneClock : n.clocks = [ClockDomain.sys]` (one `always` block);
+* `memFree : n.mems = []` (no memory state);
+* `initOk : map NetReg.init n.regs = HwTy.leaves c.st c.init`;
+* `stepOk s x`: on register leaves equal to `s`'s leaves, `Netlist.cycle` gives the
+  output leaves and next-state leaves of `Circuit.stepEl c s x`.
+
+`Circuit.Simulates.runFrom` is the induction on the input list and
+`Circuit.Simulates.simulate_eq_run` is the theorem:
+
+```
+Netlist.simulate n (Hdl.map (HwTy.leaves i) xs) = Hdl.map (HwTy.leaves o) (Circuit.run c xs)
+```
+
+`Netlist.simulate_eq_runFrom`/`simulate_eq_run` also relate the netlist's own
+`simulate`/`run`/`runGo` for a memoryless netlist, and
+`Circuit.Simulates.trace_take` (in `Hdl.Temporal`) turns the theorem into a prefix law
+for the infinite `Circuit.trace`: every finite prefix of the value trace is what the
+netlist simulates.
+
+**The obligations are discharged for a synthesised design.**
+`examples/hdl-sim-theorem.wiz` builds a one-bit delay with `Circuit.netlist "delay"`,
+proves `Circuit.Simulates` for it by `rfl` (the kernel evaluates the netlist's nodes),
+and applies the theorem to a four-cycle trace. That is a proof about the actual
+`Circuit.netlist` output, not a hand-written netlist; the test case in the `hdl` group
+runs the example and compares the netlist and value traces.
+
+**Outside the theorem** (stated in the module header too): multi-clock `Multi`/`Cdc`
+designs (`Netlist.simulate` is single-rate and `Netlist.domainRefusals` refuses them);
+memories (`n.mems ≠ []`; their trie state is not in the relation); reset *domains* and
+asynchronous-reset crossing cells (a synchronous reset is part of the step, but async
+assertion/deassertion is not modelled); primitives without a behavioural `model`
+(`NetPrim.eval` falls back to a default); and `Netlist.simFast` (it computes
+`Netlist.simulate` for a `Netlist.wellFormed` netlist and falls back otherwise; that is
+the executable differential check in `examples/hdl-sim.wiz`, since `Hdl.Sim` uses
+`Array`, which the kernel does not reduce). The existing differential tests
+(`examples/hdl-sim.wiz`, `examples/hdl-bus.wiz`, `examples/hdl-crc.wiz`) remain the
+broader, executable check over operations, memories, primitives and `simFast`.
+
 ## H14 S4: the iCEstick gaps: shifts by a signal, signed operations, `&&`/`||`, BitPack, reset and enable
 
 What the iCEstick projects (`wiz-icestick-uart`, FINDINGS.md) still had to
