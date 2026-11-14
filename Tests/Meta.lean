@@ -468,7 +468,7 @@ def group : Group where
         -- between a proposition and a type that is not one: formed in the spec, and False
         rejects (eqTy ptrue (enum 2))
         accepts (ann (lam (var 0)) (sorted 0 0 (pi (eqTy ptrue (enum 2)) pfalse))) spec (some []) },
-    { name := "T0 against T1: a cast between convertible inert types is its argument only with InReg", run := fun _ => do
+    { name := "T0 against T1: InReg decides an inert cast in the spec; PF-C also lets the kernel use a cast at a type variable under a proposition", run := fun _ => do
         let nat := const "Nat"
         let t := ann (lam (lam (refl nat (var 0)))) (pi (eqTy nat nat) (pi nat (eq nat (cast nat nat (var 1) (var 0)) (var 0))))
         accepts t
@@ -477,7 +477,11 @@ def group : Group where
         -- a cast at a neutral type with its argument
         let v := ann (lam (lam (lam (refl (var 2) (var 0))))) (pi (univ 0) (pi (eqTy (var 0) (var 0)) (pi (var 1) (eq (var 2) (cast (var 2) (var 2) (var 1) (var 0)) (var 0)))))
         rejects v
-        check (!kernelAccepts v) "the kernel has regularity at a type variable" },
+        -- (PF-C) `cast A A e t = t` is an equation, hence a proposition: the kernel compares
+        -- its sides with Cast-Refl at every type and accepts this probe (t5 in Tests/Elab.lean).
+        -- The reference checker above keeps the inert-only rule. This is the D1 breadth
+        -- recorded in wiz-notes/conv-proof-field.md §8, not a bug.
+        check (kernelAccepts v) "the kernel rejects Cast-Refl at a type variable (PF-C expects it to accept)" },
     { name := "the level premise of ind (audit F3): the index type is in Sort (l+1)", run := fun _ => do
         -- `ind.{1}` at an index type in `Sort 1`; `D` and the scrutinee are checked against values
         -- the rule builds, so no former sees the level (the Lean kernel at a143052 accepts this)
