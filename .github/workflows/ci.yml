@@ -23,6 +23,10 @@ on:
         description: Also run the bootstrap fixpoint check (slow)
         type: boolean
         default: false
+      sanitizers:
+        description: Also run the C runtime and its corpus under ASAN, UBSAN and TSAN (opt-in)
+        type: boolean
+        default: false
 
 # A newer push supersedes an older run of the same ref (saves runners): on a pull
 # request, and on master too, where merges come in quick succession and every run
@@ -158,6 +162,10 @@ jobs:
         # cc -fsyntax-only -Wall -Wextra, with WIZ_API= (the object ABI) and WIZ_API=static
         # (a generated program); the header's prototypes are checked against the parts
         run: scripts/test-runtime.sh
+      - name: The runtime's corpus builds and runs
+        # the plain baseline of scripts/test-sanitizers.sh (runtime/corpus/): the same
+        # programs the opt-in `sanitizers` job runs under ASAN, UBSAN and TSAN
+        run: scripts/test-sanitizers.sh --plain-only
 
   test:
     name: test (${{ matrix.shard.name }})
@@ -304,6 +312,48 @@ jobs:
       - name: The trusted base matches the baseline
         run: scripts/trust-ledger.sh --check
 
+  # (opt-in) The C runtime under the sanitizers: the runtime built both ways
+  # (`-DWIZ_API=` and `-DWIZ_API=static`) with ASAN, UBSAN and TSAN, and the small
+  # corpus in runtime/corpus/ run in both. Each matrix entry is one sanitizer
+  # (scripts/test-sanitizers.sh); a sanitizer this runner cannot use is a `skip:`
+  # line and exit 3, which the step reports as a warning, not a failure. It is not
+  # part of `CI result` unless the manual run ticked `sanitizers`, so it costs
+  # nothing on pushes and pull requests. Run it locally with
+  # `scripts/test-sanitizers.sh` (docs/building.md, "Sanitizers").
+  sanitizers:
+    name: sanitizers (${{ matrix.sanitizer }})
+    needs: [changes]
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.sanitizers == 'true' &&
+      needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [asan, ubsan, tsan]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: The runtime and its corpus under ${{ matrix.sanitizer }}
+        env:
+          SAN: ${{ matrix.sanitizer }}
+        run: |
+          set +e
+          scripts/test-sanitizers.sh --sanitizer "$SAN"
+          rc=$?
+          set -e
+          case "$rc" in
+            0) echo "### Sanitizers: $SAN passed" >> "$GITHUB_STEP_SUMMARY" ;;
+            3) echo "::warning title=sanitizers ($SAN)::$SAN is not available on this runner; skipped"
+               echo "### Sanitizers: $SAN skipped (not available on this runner)" >> "$GITHUB_STEP_SUMMARY" ;;
+            *) exit "$rc" ;;
+          esac
+
   # The Nix package (flake.nix: wiz and grail, wrapped with the toolchain), pushed to
   # Cachix on master (and on a manual run), so that `nix run github:wiz-pl/wiz` downloads
   # it. It is a pure Nix build without Lake's artifact cache, so it rebuilds every module
@@ -425,7 +475,7 @@ jobs:
   # One check for branch protection, and the whole suite's summary.
   result:
     name: CI result
-    needs: [changes, docs_style, build, test, trust-ledger, package]
+    needs: [changes, docs_style, build, test, trust-ledger, sanitizers, package]
     if: always() && github.event_name != 'schedule'
     runs-on: ubuntu-latest
     permissions:
@@ -511,6 +561,7 @@ jobs:
           echo "changes: ${{ needs.changes.result }} (code: ${{ needs.changes.outputs.code }}, shards: ${{ needs.changes.outputs.shards }})"
           echo "docs style: ${{ needs.docs_style.result }}"
           echo "trust ledger: ${{ needs['trust-ledger'].result }}"
+          echo "sanitizers: ${{ needs.sanitizers.result }}"
           echo "build: ${{ needs.build.result }}, test: ${{ needs.test.result }}, package: ${{ needs.package.result }}"
           # the path filter must have run; a job it skipped is not a failure, but outside
           # pull requests (and whenever the filter wants them) every job must succeed
@@ -528,6 +579,9 @@ jobs:
           check "trust ledger" "${{ needs['trust-ledger'].result }}" "$code"
           check build "${{ needs.build.result }}" "$code"
           check test "${{ needs.test.result }}" "$want_tests"
+          # the sanitizer jobs run only on an opt-in manual run (and only for code)
+          want_sanitizers=$([ "${{ github.event_name }}" = workflow_dispatch ] && [ "${{ github.event.inputs.sanitizers }}" = true ] && [ "$code" = true ] && echo true || echo false)
+          check sanitizers "${{ needs.sanitizers.result }}" "$want_sanitizers"
           check package "${{ needs.package.result }}" "$want_package"
 
   # Stage-1 C of the toolchain = stage-2 C (scripts/fixpoint.sh). Scheduled runs use the

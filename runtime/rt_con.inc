@@ -57,6 +57,8 @@ static void *wiz_thread_main(void *p) {
   wiz_val args[2] = {a.arg, WIZ_BOX(0)};
   wiz_val r = wiz_apply(a.fn, 2, args);
   wiz_dec(r);
+  wiz_scratch_free();
+  wiz_sys_scratch_free();
   pthread_mutex_lock(&wiz_threads_mu);
   wiz_live_exited += wiz_live;
   wiz_threads_running--;
@@ -307,6 +309,8 @@ WIZ_API int wiz_finish_io(wiz_val main) {
   wiz_val r = wiz_apply(main, 1, &w);
   wiz_dec(r);
   int64_t live = wiz_live_total();
+  wiz_scratch_free();
+  wiz_sys_scratch_free();
   if (live != 0) { fprintf(stderr, "wiz: %ld objects leaked\n", (long)live); wiz_report_leaks(); return 2; }
   return 0;
 }
@@ -316,6 +320,8 @@ WIZ_API int wiz_finish(wiz_val r) {
   putchar('\n');
   wiz_dec(r);
   int64_t live = wiz_live_total();
+  wiz_scratch_free();
+  wiz_sys_scratch_free();
   if (live != 0) { fprintf(stderr, "wiz: %ld objects leaked\n", (long)live); wiz_report_leaks(); return 2; }
   return 0;
 }

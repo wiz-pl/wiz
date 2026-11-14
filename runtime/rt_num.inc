@@ -10,7 +10,11 @@ static wiz_val wiz_big_norm(mpz_t z) {
     return r;
   }
   wiz_big *b = (wiz_big *)wiz_alloc(sizeof(wiz_big), WIZ_TAG_BIG, 0);
-  memcpy(b->z, z, sizeof(mpz_t));
+  /* move the limbs into the object (a memcpy of mpz_t would leave the source's
+     allocation unreferenced: a leak ASAN's leak detector reports) */
+  mpz_init(b->z);
+  mpz_swap(b->z, z);
+  mpz_clear(z);
   return (wiz_val)b;
 }
 

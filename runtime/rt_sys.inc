@@ -29,6 +29,9 @@ static const char *wiz_sys_keep(char *s) {
   wiz_sys_scratch = s ? s : (char *)calloc(1, 1);
   return wiz_sys_scratch;
 }
+/* the per-thread result buffer above: freed when the program finishes
+   (`wiz_finish`, `wiz_finish_io`) or its worker thread ends (`wiz_thread_main`) */
+static void wiz_sys_scratch_free(void) { free(wiz_sys_scratch); wiz_sys_scratch = NULL; }
 static uint64_t wiz_sys_status(int r) { return r < 0 ? (uint64_t)errno : 0; }
 
 WIZ_API uint64_t wiz_sys_errno(void) { return (uint64_t)wiz_sys_err; }

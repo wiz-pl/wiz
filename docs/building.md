@@ -82,6 +82,35 @@ job), and `scripts/test-runtime.sh` compiles the runtime alone with `cc -fsyntax
 -Wall -Wextra`, with `WIZ_API=` and `WIZ_API=static` (the header's prototypes are checked
 against the parts).
 
+### Sanitizers
+
+`scripts/test-sanitizers.sh` builds the C runtime and a small corpus of C programs
+(`runtime/corpus/`: `values.c`, `numbers.c`, `text.c`, `sys.c` and `threads.c`) under
+AddressSanitizer, UndefinedBehaviorSanitizer (every error is fatal) and
+ThreadSanitizer, and runs every program. It builds the runtime the two ways generated
+code uses it — as an object (`-DWIZ_API=`, the LLVM backend's ABI) and inline
+(`-DWIZ_API=static`, as the C backend embeds it) — and runs each program in both, so
+the same five sources are exercised in ten builds per sanitizer. Each program checks
+its own results and drops every root, so both leak checks must stay quiet: the
+runtime's own object count (`wiz_finish`) and ASAN's LeakSanitizer.
+
+```sh
+scripts/test-sanitizers.sh                  # the plain baseline, then asan, ubsan, tsan
+scripts/test-sanitizers.sh --sanitizer asan # one sanitizer (repeatable)
+scripts/test-sanitizers.sh --plain-only     # only the uninstrumented baseline
+scripts/test-sanitizers.sh --list           # the corpus programs and sanitizer names
+```
+
+It reads `WIZ_CFLAGS` and `WIZ_LDFLAGS` like `scripts/test-runtime.sh` and links GMP,
+so run it under `nix develop`. A sanitizer the compiler or the machine cannot run is
+**skipped, not failed**: the script builds and runs a probe program first, prints
+`skip: …`, and stops treating that sanitizer as available; it exits 3 when every
+selected sanitizer was skipped (0 for a pass, 1 for a failure). The corpus is compiled
+with `-Wall -Wextra`, but warnings are not failures (unused runtime entry points in
+the inline build are expected). The build job runs the plain baseline
+(`--plain-only`) on every code change; the sanitizer builds are the opt-in
+`sanitizers` job below.
+
 ## Test layout
 
 Adding a test group touches no shared file:
@@ -190,6 +219,16 @@ cached between runs.
   `scripts/trust-ledger.sh --update`. The `native` and `hdl-verified` groups check the
   same ledger in the shards; this job runs the whole of it without a shard's path
   filter to skip it, and `CI result` requires it when code changed.
+* **Sanitizers** (the `sanitizers` job): opt-in — tick `sanitizers` in "Run workflow"
+  (`workflow_dispatch`). The job is a matrix of one entry per sanitizer (ASAN, UBSAN,
+  TSAN); each runs `scripts/test-sanitizers.sh --sanitizer NAME`, i.e. the plain
+  baseline, the runtime in both of its builds, and the five corpus programs in both,
+  under that sanitizer. A sanitizer this runner cannot use is a `skip:` line from the
+  script and exit 3, which the step reports as a warning and a one-line job summary:
+  the entry passes. Pushes and pull requests do not run the job, and `CI result`
+  requires it only when the manual run ticked the box, so it costs nothing until it is
+  asked for. The build job runs the corpus's plain baseline (`--plain-only`) on every
+  code change, and `scripts/test-runtime.sh` still syntax-checks the runtime.
 * **Split shards.** A shard with `"split": N` runs as N jobs `NAME-1` … `NAME-N`, each a
   list of `=GROUP#I,J,…` selectors. `scripts/ci.py` balances the parts with the case
   times in `.github/test-timings.json`: the cases that use the same shared program (the

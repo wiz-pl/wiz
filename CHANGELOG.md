@@ -10,6 +10,13 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* runtime: `scripts/test-sanitizers.sh` builds the runtime (the object ABI and the
+  inline form) and a five-program corpus in `runtime/corpus/` under AddressSanitizer,
+  UndefinedBehaviorSanitizer and ThreadSanitizer; the opt-in `sanitizers` CI job runs
+  one sanitizer per matrix entry and skips one this runner cannot use. The corpus's
+  plain baseline runs in the build job. It found (and this fixes) a NULL pointer passed
+  to `memcpy` for empty `Bytes`, GMP limb leaks when a big number was moved into its
+  object, and per-thread result buffers that were never freed.
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to
