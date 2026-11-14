@@ -161,6 +161,25 @@ is not a `perf-run` measurement, and the perf agent owns real numbers.
 missing-corpus skip, and that the corpus still matches `bench/baseline.json`. The corpus
 policy and the external-manifest hook are in `bench/corpus/README.md`.
 
+## Real C corpus
+
+`scripts/real-corpus.sh` runs `scry taint --json --allow-errors --sarif` over the C
+sources that are already on this machine (the Wiz C runtime/sockets/serial/infoview/
+self-hosted runtime, the `wiz-rv/sw` bare-metal programs, the vendored tree-sitter
+library, and two generated project files when present) and writes a per-file JSON,
+SARIF, runtime and warning summary. It skips missing external files, so it also runs on
+a bare checkout.
+
+```sh
+scry/scripts/real-corpus.sh                  # build/real-corpus/summary.{json,md}
+SCRY_LIMIT=300 SCRY_STRESS=1 scry/scripts/real-corpus.sh  # include the 3.8 MB parser
+```
+
+The checked-in result and the precision/false-positive follow-up list are in
+`bench/real-corpus.md` (raw machine record: `bench/real-corpus.json`). There are only
+two findings in 24 files and both are manually judged false positives; the report lists
+the parse-recovery, exec-sink, bounds, points-to-argument and warning-noise gaps.
+
 Limits: the shim is sequential (one parser, one tree, one file) and tree-sitter-c is the
 only grammar. Threads, a native store shared across files, and tree-sitter queries are
 the remaining S1 work.
