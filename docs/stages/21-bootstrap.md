@@ -717,3 +717,35 @@ checked once), a cycle, a missing module, a duplicate name across modules, a `-I
 and the cache key (stable for one graph, different when a module's text changes). `wiz
 check` of the generated self-hosted sources passes, and the self-hosted frontend still
 checks itself.
+
+## 21ab: named arguments (A9)
+
+`f a (x := e) b` now elaborates in the self-hosted frontend. The kernel's `Tm` and `Val`
+carry no binder names, so a `Global` keeps its parameters' names beside their implicit
+mask (`paramNames`, as `paramMask`; filled for definitions, axioms, `extern`s and
+partial definitions from their written binders). An application with `term.namedArg`
+arguments is split into named and positional lists, in source order. A duplicate name is
+`argument 'x' was already given`. The telescope is then walked: a binder whose name has
+a named argument takes it (explicit, implicit or instance), otherwise an implicit binder
+gets a metavariable and an explicit binder takes the next positional argument. The
+result is a positional argument list (with `_` for each implicit binder passed over), so
+the existing `appArgsT` still inserts implicits, postpones constructor arguments and
+applies the expected type. A named argument that would have to cross an explicit
+parameter with no argument is `named argument 'y' comes after the explicit parameter
+'x', which has no argument`; a name no binder has is `no parameter named 'y'`, and a
+named argument outside an application is `a named argument `(x := e)` is only allowed as
+an argument of an application`. `@f` still makes every binder positional (named
+arguments still match by name), and `f (b := 1) 5` gives `a` the `5`.
+
+Named arguments work for a global function whose parameters are written as binders.
+A constructor's fields and a local variable's Π type keep no names yet, so a named
+argument there is rejected (a clear error, not a silent mismatch); class/instance
+binders will use the same path once A10 stores their names. Implicit parameters written
+only in a declaration's type (rather than as binders before the `:`) are still not
+inserted (A3), so they are not named either.
+
+**Tests** (group `selfhost`): explicit, implicit, reordered and interleaved named
+arguments, a named implicit, `@f` with a named implicit and with a named explicit, and
+implicit insertion around named arguments, checked against the Lean frontend; unknown,
+duplicate, ordering and bare named-argument errors; and the self-hosted frontend still
+checks itself.
