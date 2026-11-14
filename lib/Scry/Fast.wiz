@@ -1,0 +1,842 @@
+import Prelude
+import Word
+import Text
+import WordArray
+import WordMap
+import Scry.Store
+import Scry.Datalog
+import Scry.Eval
+import Scry.Index
+/-!
+# Scry.Fast
+
+The **fast, untrusted evaluator** (`import Scry.Fast`): the same lattice-Datalog semantics
+as `Scry.Eval`, over the `U64Array`/`U32Array`/`U64Map` kernels of `Scry.Index`, with a
+semi-naive **worklist over strongly connected components** instead of the reference's
+round scan.
+
+* **Storage.** Each tuple relation is a flat `U64Array` of rows with a per-column
+  `U64Map U32Array` index; a lattice relation is a `U64Map` from a key hash to its
+  entries. A body atom with a bound column is matched through that column's index (one
+  map lookup plus a filter over the rows that share the value), not by scanning the
+  relation.
+* **Scheduling.** Strata are found by `Program.check` as usual. Inside a stratum the
+  relation dependency graph is split into SCCs (mutual reachability, ordered by
+  dependency depth); each SCC is evaluated in dependency order. An SCC's rules that do
+  not mention the SCC in their body run once; then a worklist starts from every fact of
+  the SCC and, whenever a relation gains new facts, runs only the rule variants that
+  can consume them, anchored on that delta. A round scan would re-run every rule; the
+  worklist also stops when a relation stops moving, so independent parts of a stratum
+  do not wake each other.
+* **Provenance.** Every derived fact records a `Scry.ProofStep` with the rule index and
+  the premise ids in body order, exactly the shape `Scry.Eval` produces, and ids grow
+  monotonically. `FastDb.toState` materialises a reference `Scry.State` with the same
+  heap, so `Scry.State.explainTuple` (and therefore `Scry.Derivation.check`) accepts a
+  fast-engine finding unchanged; `Fast.explainTuple` is that call.
+* **Trust.** Like the design's fast engine, this one is not proved: it is a `partial
+  def`, it trusts transfer-function monotonicity, and its answers are intended to be
+  checked by the certificate layer when they matter. The differential tests compare it
+  with `Scry.Eval` on every example (fact sets, lattice values, provenance rule indices
+  and witness well-formedness).
+-/
+
+-- ## The fast database
+
+/-- A fact's provenance heap and the fast relations, with the program's arities and
+lattice relation numbers (so a relation number alone suffices). -/
+structure Scry.FastDb (L : Type) where
+  arities : List Nat
+  latRels : List Nat
+  tuples : List (Nat × Scry.FRel)
+  lats : List (Nat × Scry.FLat L)
+  nodes : List (Scry.ProofStep L)
+  next : Nat
+
+def Scry.FastDb.ofProgram {L : Type} (p : Scry.Program L) : Scry.FastDb L :=
+  Scry.FastDb.mk p.arities p.latRels .nil .nil .nil 0
+
+def Scry.FastDb.arity {L : Type} (db : Scry.FastDb L) (r : Nat) : Nat :=
+  List.getD db.arities r 0
+def Scry.FastDb.isLat {L : Type} (db : Scry.FastDb L) (r : Nat) : Bool :=
+  Scry.natMem r db.latRels
+
+def Scry.FastDb.tupleAt {L : Type} (db : Scry.FastDb L) (r : Nat) : Scry.FRel :=
+  Scry.assocGet (Scry.FRel.empty (db.arity r)) r db.tuples
+def Scry.FastDb.latAt {L : Type} (db : Scry.FastDb L) (r : Nat) : Scry.FLat L :=
+  Scry.assocGet (Scry.FLat.empty) r db.lats
+
+/-- Take relation `r` out of the database (the empty relation if it had none), so an
+update owns it and the kernels mutate in place. `present` says whether it was there. -/
+def Scry.FastDb.takeTupleAt {L : Type} (db : Scry.FastDb L) (r : Nat) :
+    Scry.FastDb L × Scry.FRel × Bool :=
+  match Scry.assocTake r db.tuples with
+  | (rest, .some rel) => (Scry.FastDb.mk db.arities db.latRels rest db.lats db.nodes db.next, rel, .true)
+  | (rest, .none) =>
+    (Scry.FastDb.mk db.arities db.latRels rest db.lats db.nodes db.next,
+      Scry.FRel.empty (db.arity r), .false)
+
+def Scry.FastDb.takeLatAt {L : Type} (db : Scry.FastDb L) (r : Nat) :
+    Scry.FastDb L × Scry.FLat L :=
+  match Scry.assocTake r db.lats with
+  | (rest, .some rel) => (Scry.FastDb.mk db.arities db.latRels db.tuples rest db.nodes db.next, rel)
+  | (rest, .none) =>
+    (Scry.FastDb.mk db.arities db.latRels db.tuples rest db.nodes db.next, Scry.FLat.empty)
+
+def Scry.FastDb.setTupleAt {L : Type} (db : Scry.FastDb L) (r : Nat) (t : Scry.FRel) :
+    Scry.FastDb L :=
+  Scry.FastDb.mk db.arities db.latRels (Scry.assocSet r t db.tuples) db.lats db.nodes db.next
+def Scry.FastDb.setLatAt {L : Type} (db : Scry.FastDb L) (r : Nat) (t : Scry.FLat L) :
+    Scry.FastDb L :=
+  Scry.FastDb.mk db.arities db.latRels db.tuples (Scry.assocSet r t db.lats) db.nodes db.next
+
+/-- Record a proof step (the id is the step's own). -/
+def Scry.FastDb.addStep {L : Type} (db : Scry.FastDb L) (s : Scry.ProofStep L) :
+    Scry.FastDb L :=
+  Scry.FastDb.mk db.arities db.latRels db.tuples db.lats (.cons s db.nodes) (Nat.succ db.next)
+
+/-- Insert a row with a given step id, without recording a step (an import). The
+relation is taken out first, so the update owns its kernels; `.some i` is the new row's
+number. The database value is never read again after the take (that would keep the
+relation shared and make every kernel update copy). -/
+def Scry.FastDb.insertRow {L : Type} (db : Scry.FastDb L) (r : Nat) (row : List U64)
+    (sid : Nat) : Scry.FastDb L × Option Nat :=
+  match db.takeTupleAt r with
+  | (db1, rel, _) =>
+    let i := rel.count;
+    match rel.insert row sid with
+    | (rel', new) => (db1.setTupleAt r rel', if new then .some i else .none)
+
+/-- Add an EDB tuple and its provenance step. -/
+def Scry.FastDb.addTuple {L : Type} (db : Scry.FastDb L) (r : Nat) (row : List U64) :
+    Scry.FastDb L × Bool :=
+  let sid := db.next;
+  match db.insertRow r row sid with
+  | (db', .some _) =>
+    (db'.addStep (Scry.ProofStep.mk sid (Scry.PFact.mk r row .none) .none .nil), .true)
+  | (db', .none) => (db', .false)
+
+/-- A derived tuple; `.some i` is the new **row number** (the worklist's delta). -/
+def Scry.FastDb.addDerivedTuple {L : Type} (db : Scry.FastDb L) (ri : Nat)
+    (premises : List Nat) (r : Nat) (row : List U64) : Scry.FastDb L × Option Nat :=
+  let sid := db.next;
+  match db.insertRow r row sid with
+  | (db', .some i) =>
+    (db'.addStep (Scry.ProofStep.mk sid (Scry.PFact.mk r row .none) (.some ri) premises),
+      .some i)
+  | (db', .none) => (db', .none)
+
+/-- Join a lattice value in and record a step when the value moved; `.some id` is the new
+step's id. `rule` is `.none` for an EDB fact. -/
+def Scry.FastDb.addLat {L : Type} (db : Scry.FastDb L) (ops : Scry.LatOps L) (r : Nat)
+    (key : List U64) (v : L) (rule : Option Nat) (premises : List Nat) :
+    Scry.FastDb L × Option Nat :=
+  let sid := db.next;
+  match db.takeLatAt r with
+  | (db1, m) =>
+    let old := match m.find key with
+      | .none => ops.bot
+      | .some e => e.val;
+    let nv := ops.join old v;
+    if ops.eq nv old then (db1.setLatAt r m, .none)
+    else
+      let db' := (db1.setLatAt r (m.setVal key nv sid)).addStep
+        (Scry.ProofStep.mk sid (Scry.PFact.mk r key (.some nv)) rule premises);
+      (db', .some sid)
+
+/-- Import every fact of a reference state (its EDB steps are kept as they are). -/
+def Scry.FastDb.importTuples {L : Type} (ops : Scry.LatOps L)
+    (nodes : List (Scry.ProofStep L)) : Scry.FastDb L → List (Nat × Scry.TupleRel) →
+      Scry.FastDb L
+  | db, .nil => db
+  | db, .cons e rest =>
+    let db' := List.foldl (fun (d : Scry.FastDb L) (row : List U64) =>
+        let sid := match Scry.findStepL ops.eq (Scry.PFact.mk e.1 row .none) nodes with
+          | .some s => s.id
+          | .none => 0;
+        (d.insertRow e.1 row sid).1) db e.2.toList;
+    Scry.FastDb.importTuples ops nodes db' rest
+
+def Scry.FastDb.importLats {L : Type} (ops : Scry.LatOps L)
+    (nodes : List (Scry.ProofStep L)) : Scry.FastDb L → List (Nat × Scry.LatRel L) →
+      Scry.FastDb L
+  | db, .nil => db
+  | db, .cons e rest =>
+    let db' := List.foldl (fun (d : Scry.FastDb L) (kv : List U64 × L) =>
+        let sid := match Scry.findStepL ops.eq (Scry.PFact.mk e.1 kv.1 (.some kv.2)) nodes with
+          | .some s => s.id
+          | .none => 0;
+        match d.takeLatAt e.1 with
+        | (d1, m) => d1.setLatAt e.1 (m.setVal kv.1 kv.2 sid)) db e.2.toList;
+    Scry.FastDb.importLats ops nodes db' rest
+
+def Scry.FastDb.ofState {L : Type} (p : Scry.Program L) (st : Scry.State L) :
+    Scry.FastDb L :=
+  let db0 := Scry.FastDb.mk p.arities p.latRels .nil .nil st.nodes st.next;
+  let db1 := Scry.FastDb.importTuples p.ops st.nodes db0 st.db.tuples;
+  Scry.FastDb.importLats p.ops st.nodes db1 st.db.lats
+
+def Scry.FastDb.rowsInto {L : Type} (r : Nat) : Scry.Db L → List (List U64) → Scry.Db L
+  | db, .nil => db
+  | db, .cons row rest =>
+    Scry.FastDb.rowsInto r (Scry.Db.insertTuple db r row).1 rest
+
+def Scry.FastDb.tuplesInto {L : Type} : Scry.Db L → List (Nat × Scry.FRel) → Scry.Db L
+  | db, .nil => db
+  | db, .cons e rest =>
+    Scry.FastDb.tuplesInto (Scry.FastDb.rowsInto e.1 db e.2.toList) rest
+
+def Scry.FastDb.latsInto {L : Type} : Scry.Db L → List (Nat × Scry.FLat L) → Scry.Db L
+  | db, .nil => db
+  | db, .cons e rest =>
+    Scry.FastDb.latsInto (List.foldl (fun (d : Scry.Db L) (en : Scry.LatEntry L) =>
+        Scry.Db.setLat d e.1 en.key en.val) db e.2.toList) rest
+
+/-- Materialise a reference `Scry.State` with the same facts and the same provenance
+heap (the representation `Scry.Cert`'s `explainTuple` takes). -/
+def Scry.FastDb.toState {L : Type} (db : Scry.FastDb L) : Scry.State L :=
+  Scry.State.mk (Scry.FastDb.latsInto (Scry.FastDb.tuplesInto Scry.Db.empty db.tuples) db.lats)
+    db.nodes db.next
+
+/-- The step of a tuple fact. -/
+def Scry.FastDb.whyTuple {L : Type} (db : Scry.FastDb L) (r : Nat) (row : List U64) :
+    Option (Scry.ProofStep L) :=
+  match (db.tupleAt r).findId row with
+  | .none => .none
+  | .some sid => Scry.stepByIdL db.nodes sid
+
+/-- The step of the current value of a lattice key. -/
+def Scry.FastDb.whyLat {L : Type} (db : Scry.FastDb L) (r : Nat) (key : List U64) :
+    Option (Scry.ProofStep L) :=
+  match (db.latAt r).find key with
+  | .none => .none
+  | .some e => Scry.stepByIdL db.nodes e.sid
+
+def Scry.FastDb.expandWitness {L : Type} (db : Scry.FastDb L) (root : Scry.ProofStep L) :
+    Scry.Witness L :=
+  Scry.Witness.mk root (Scry.reachSteps db.nodes root.premises)
+
+/-- The default rule, used only when a rule index is out of range (which `Program.check`
+rejects first). -/
+def Scry.Fast.defaultRule {L : Type} : Scry.Rule L :=
+  Scry.Rule.mk (Scry.Head.tuple 0 List.nil) List.nil
+
+-- ## Terms, matches
+
+def Scry.termVal {L : Type} (env : Scry.Env L) : Scry.Term → Option U64
+  | .lit v => .some v
+  | .var n => Scry.envGet n env.vals
+
+def Scry.firstBoundFrom {L : Type} (env : Scry.Env L) : Nat → List Scry.Term → Option (Nat × U64)
+  | _, .nil => .none
+  | i, .cons t ts => match Scry.termVal env t with
+    | .some v => .some (i, v)
+    | .none => Scry.firstBoundFrom env (Nat.succ i) ts
+
+/-- Candidate row numbers for an atom: the rows whose first bound column has the bound
+value, or every row when no column is bound yet. -/
+def Scry.FRel.candidates {L : Type} (r : Scry.FRel) (args : List Scry.Term)
+    (env : Scry.Env L) : U32Array :=
+  match Scry.firstBoundFrom env 0 args with
+  | .some p => r.rowsWith p.1 p.2
+  | .none => U32Array.ofList (List.map U32.ofNat (Scry.iota r.count))
+
+/-- Match `args` against each row number in `ids`. -/
+def Scry.matchRowsF {L : Type} (ops : Scry.LatOps L) (r : Scry.FRel) (args : List Scry.Term) :
+    List Nat → Scry.Env L → List (Scry.Env L × List Nat)
+  | .nil, _ => .nil
+  | .cons i rest, env =>
+    match Scry.unifyTerms ops args (r.rowAt i) env with
+    | .none => Scry.matchRowsF ops r args rest env
+    | .some env' =>
+      .cons (env', .cons (r.idAt i) .nil) (Scry.matchRowsF ops r args rest env)
+
+/-- Match a lattice atom against entries. -/
+def Scry.matchLatEntriesF {L : Type} (ops : Scry.LatOps L) :
+    List Scry.Term → Nat → List (Scry.LatEntry L) → Scry.Env L →
+      List (Scry.Env L × List Nat)
+  | _, _, .nil, _ => .nil
+  | keyTerms, vvar, .cons e rest, env =>
+    match Scry.unifyTerms ops keyTerms e.key env with
+    | .none => Scry.matchLatEntriesF ops keyTerms vvar rest env
+    | .some env' => match env'.bindLat ops vvar e.val with
+      | .none => Scry.matchLatEntriesF ops keyTerms vvar rest env
+      | .some env'' =>
+        .cons (env'', .cons e.sid .nil) (Scry.matchLatEntriesF ops keyTerms vvar rest env)
+
+/-- Match a lattice atom against the keys in a flat delta key vector. The value is read
+from the full relation (it only moves up). -/
+def Scry.matchLatDelta {L : Type} (ops : Scry.LatOps L) (m : Scry.FLat L)
+    (keyTerms : List Scry.Term) (vvar : Nat) (arity : Nat) (flat : U64Array) :
+    Nat → Nat → Scry.Env L → List (Scry.Env L × List Nat)
+  | .zero, _, _ => .nil
+  | .succ k, i, env =>
+    let key := Scry.keyAt flat arity i;
+    match m.find key with
+    | .none => Scry.matchLatDelta ops m keyTerms vvar arity flat k (Nat.succ i) env
+    | .some e =>
+      match Scry.unifyTerms ops keyTerms e.key env with
+      | .none => Scry.matchLatDelta ops m keyTerms vvar arity flat k (Nat.succ i) env
+      | .some env' => match env'.bindLat ops vvar e.val with
+        | .none => Scry.matchLatDelta ops m keyTerms vvar arity flat k (Nat.succ i) env
+        | .some env'' =>
+          .cons (env'', .cons e.sid .nil)
+            (Scry.matchLatDelta ops m keyTerms vvar arity flat k (Nat.succ i) env)
+
+-- ## Body evaluation
+
+/-- A positive tuple atom against the full relation, through the column index. -/
+def Scry.Atom.matchesF {L : Type} (p : Scry.Program L) (db : Scry.FastDb L) (a : Scry.Atom)
+    (env : Scry.Env L) : List (Scry.Env L × List Nat) :=
+  match a with
+  | .pos rel args =>
+    let r := db.tupleAt rel;
+    Scry.matchRowsF p.ops r args (List.map (fun (j : U32) => j.toNat) (r.candidates args env).toList) env
+  | .neg rel args =>
+    let r := db.tupleAt rel;
+    match Scry.matchRowsF p.ops r args
+        (List.map (fun (j : U32) => j.toNat) (r.candidates args env).toList) env with
+    | .nil => .cons (env, .nil) .nil
+    | .cons _ _ => .nil
+  | .lat rel key vv =>
+    Scry.matchLatEntriesF p.ops key vv (db.latAt rel).toList env
+
+/-- A positive tuple atom against the delta; a lattice atom against the delta's keys; a
+negated atom always against the full (lower-stratum) relation. -/
+def Scry.Atom.matchesDeltaF {L : Type} (p : Scry.Program L) (db : Scry.FastDb L)
+    (dT : List (Nat × U32Array)) (dL : List Scry.KVec) (a : Scry.Atom)
+    (env : Scry.Env L) : List (Scry.Env L × List Nat) :=
+  match a with
+  | .pos rel args =>
+    let r := db.tupleAt rel;
+    Scry.matchRowsF p.ops r args
+      (List.map (fun (j : U32) => j.toNat) (Scry.dRows dT rel).toList) env
+  | .lat rel key vv =>
+    let m := db.latAt rel;
+    let kv := Scry.kvecAt dL rel;
+    Scry.matchLatDelta p.ops m key vv (db.arity rel) kv.keys kv.n 0 env
+  | .neg _ _ => Scry.Atom.matchesF p db a env
+
+/-- Every body match, with the premise ids it used, in body order. -/
+def Scry.evalAtomsFull {L : Type} (p : Scry.Program L) (db : Scry.FastDb L) :
+    List Scry.Atom → Scry.Env L → List (Scry.Env L × List Nat)
+  | .nil, env => .cons (env, .nil) .nil
+  | .cons a rest, env =>
+    Scry.concatMap (fun m =>
+      List.map (fun m' => (m'.1, List.append m.2 m'.2))
+        (Scry.evalAtomsFull p db rest m.1))
+      (Scry.Atom.matchesF p db a env)
+
+/-- `evalAtomsFull`, with the atom at index `anchor` matched against the delta. -/
+def Scry.evalAtomsFastD {L : Type} (p : Scry.Program L) (db : Scry.FastDb L)
+    (dT : List (Nat × U32Array)) (dL : List Scry.KVec) (anchor : Nat) :
+    List Scry.Atom → Nat → Scry.Env L → List (Scry.Env L × List Nat)
+  | .nil, _, env => .cons (env, .nil) .nil
+  | .cons a rest, i, env =>
+    Scry.concatMap (fun m =>
+      List.map (fun m' => (m'.1, List.append m.2 m'.2))
+        (Scry.evalAtomsFastD p db dT dL anchor rest (Nat.succ i) m.1))
+      (if Nat.beq i anchor then Scry.Atom.matchesDeltaF p db dT dL a env
+       else Scry.Atom.matchesF p db a env)
+
+-- ## Applying a rule
+
+/-- The result of applying one rule variant: the database and the new facts (as
+`(relation, step id)` for tuples and `(relation, key)` for lattice keys). -/
+structure Scry.FastOut (L : Type) where
+  db : Scry.FastDb L
+  tids : List (Nat × Nat)
+  lkeys : List (Nat × List U64)
+
+def Scry.FastOut.init {L : Type} (db : Scry.FastDb L) : Scry.FastOut L :=
+  Scry.FastOut.mk db .nil .nil
+
+def Scry.applyMatchesF {L : Type} (p : Scry.Program L) (ri : Nat) (rule : Scry.Rule L) :
+    List (Scry.Env L × List Nat) → Scry.FastOut L → Scry.FastOut L
+  | .nil, out => out
+  | .cons m ms, out =>
+    match out with
+    | .mk db tids lkeys =>
+      match rule.head with
+      | .tuple rel args =>
+        let row := List.map (fun t => Scry.Term.eval m.1.vals t) args;
+        match db.addDerivedTuple ri m.2 rel row with
+        | (db', .some i) =>
+          Scry.applyMatchesF p ri rule ms (Scry.FastOut.mk db' (.cons (rel, i) tids) lkeys)
+        | (db', .none) =>
+          Scry.applyMatchesF p ri rule ms (Scry.FastOut.mk db' tids lkeys)
+      | .lat rel key val =>
+        let k := List.map (fun t => Scry.Term.eval m.1.vals t) key;
+        let v := Scry.LExpr.eval p.ops p.funcs val m.1.lats;
+        match db.addLat p.ops rel k v (.some ri) m.2 with
+        | (db', .some _) =>
+          Scry.applyMatchesF p ri rule ms (Scry.FastOut.mk db' tids (.cons (rel, k) lkeys))
+        | (db', .none) =>
+          Scry.applyMatchesF p ri rule ms (Scry.FastOut.mk db' tids lkeys)
+
+-- ## Delta items and their grouping
+
+/-- One unit of work: new row numbers of a tuple relation, or the flat new keys of a
+lattice relation and their count. -/
+inductive Scry.DItem where
+  | tups (rel : Nat) (ids : U32Array)
+  | lats (rel : Nat) (keys : U64Array) (n : Nat)
+
+def Scry.groupAdd (d : List (Nat × List Nat)) (r id : Nat) : List (Nat × List Nat) :=
+  match d with
+  | .nil => .cons (r, .cons id .nil) .nil
+  | .cons e rest =>
+    if Nat.beq r e.1 then .cons (r, .cons id e.2) rest
+    else .cons e (Scry.groupAdd rest r id)
+
+def Scry.groupKeys (d : List (Nat × List (List U64))) (r : Nat) (k : List U64) :
+    List (Nat × List (List U64)) :=
+  match d with
+  | .nil => .cons (r, .cons k .nil) .nil
+  | .cons e rest =>
+    if Nat.beq r e.1 then .cons (r, .cons k e.2) rest
+    else .cons e (Scry.groupKeys rest r k)
+
+def Scry.groupIds (l : List (Nat × Nat)) : List (Nat × List Nat) :=
+  List.foldr (fun (e : Nat × Nat) (d : List (Nat × List Nat)) => Scry.groupAdd d e.1 e.2) .nil l
+
+def Scry.groupLKeys (l : List (Nat × List U64)) : List (Nat × List (List U64)) :=
+  List.foldr (fun (e : Nat × List U64) (d : List (Nat × List (List U64))) =>
+    Scry.groupKeys d e.1 e.2) .nil l
+
+def Scry.itemsOf {L : Type} (out : Scry.FastOut L) : List Scry.DItem :=
+  List.append
+    (List.map (fun (e : Nat × List Nat) =>
+      Scry.DItem.tups e.1 (U32Array.ofList (List.map U32.ofNat e.2))) (Scry.groupIds out.tids))
+    (List.map (fun (e : Nat × List (List U64)) =>
+      Scry.DItem.lats e.1 (Scry.flattenKeys e.2) (List.length e.2)) (Scry.groupLKeys out.lkeys))
+
+
+-- ## Which rule variants a relation can wake
+
+/-- A rule variant: rule index `ri`, body position `pos` to anchor on the delta. -/
+structure Scry.Use where
+  rule : Nat
+  pos : Nat
+
+def Scry.assocPrepend {A : Type} (d : List (Nat × List A)) (r : Nat) (x : A) :
+    List (Nat × List A) :=
+  match d with
+  | .nil => .cons (r, .cons x .nil) .nil
+  | .cons e rest =>
+    if Nat.beq r e.1 then .cons (r, .cons x e.2) rest
+    else .cons e (Scry.assocPrepend rest r x)
+
+/-- The `(relation, variants)` entries for one body: every positive or lattice atom
+position, with its rule index. A negation binds nothing and is never a delta anchor. -/
+def Scry.bodyUses (ri : Nat) : Nat → List Scry.Atom → List (Nat × List Scry.Use)
+  | _, .nil => .nil
+  | i, .cons a rest =>
+    let rest' := Scry.bodyUses ri (Nat.succ i) rest;
+    match a with
+    | .neg _ _ => rest'
+    | _ => Scry.assocPrepend rest' a.rel (Scry.Use.mk ri i)
+
+/-- Merge two `(relation, variants)` tables (a relation may gain variants from several
+rules; a plain append would leave shadowed duplicates). -/
+def Scry.usesMerge (a b : List (Nat × List Scry.Use)) : List (Nat × List Scry.Use) :=
+  List.foldl (fun (acc : List (Nat × List Scry.Use)) (e : Nat × List Scry.Use) =>
+      Scry.assocMerge List.append acc e.1 e.2) a b
+
+def Scry.buildUses {L : Type} : Nat → List (Scry.Rule L) → List (Nat × List Scry.Use)
+  | _, .nil => .nil
+  | ri, .cons r rest =>
+    Scry.usesMerge (Scry.bodyUses ri 0 r.body) (Scry.buildUses (Nat.succ ri) rest)
+
+def Scry.usesAt (uses : List (Nat × List Scry.Use)) (rel : Nat) : List Scry.Use :=
+  Scry.lookupVec uses rel .nil
+
+-- ## Dependency graph, reachability, SCCs
+
+def Scry.atomEdges (strat : List Nat) (s : Nat) (h : Nat) : List Scry.Atom → List (Nat × Nat)
+  | .nil => .nil
+  | .cons a rest =>
+    let rest' := Scry.atomEdges strat s h rest;
+    if Scry.inStratum strat s a.rel then .cons (h, a.rel) rest' else rest'
+
+def Scry.ruleEdges {L : Type} (strat : List Nat) (s : Nat) :
+    List (Scry.Rule L) → List (Nat × Nat)
+  | .nil => .nil
+  | .cons r rest =>
+    let rest' := Scry.ruleEdges strat s rest;
+    if Scry.inStratum strat s r.head.rel then
+      List.append (Scry.atomEdges strat s r.head.rel r.body) rest'
+    else rest'
+
+/-- `a` plus the elements of `b` not already in `a`. -/
+def Scry.natUnion (a b : List Nat) : List Nat :=
+  List.foldr (fun x acc => if Scry.natMem x acc then acc else .cons x acc) a b
+
+def Scry.reachPass (edges : List (Nat × Nat)) (reach : List (List Nat)) : List (List Nat) :=
+  List.foldl (fun (r : List (List Nat)) (e : Nat × Nat) =>
+      r.setAt e.1 (Scry.natUnion (List.getD r e.1 .nil) (List.getD r e.2 .nil))) reach edges
+
+def Scry.reachN (edges : List (Nat × Nat)) : Nat → List (List Nat) → List (List Nat)
+  | .zero, r => r
+  | .succ k, r => Scry.reachN edges k (Scry.reachPass edges r)
+
+/-- The transitive closure of the dependency edges (`head → body`), `n` nodes. -/
+def Scry.reach (n : Nat) (edges : List (Nat × Nat)) : List (List Nat) :=
+  Scry.reachN edges (Nat.succ n)
+    (List.map (fun i => .cons i .nil) (Scry.iota n))
+
+def Scry.filterRels (strat : List Nat) (s : Nat) : List Nat → List Nat
+  | .nil => .nil
+  | .cons i is =>
+    let rest := Scry.filterRels strat s is;
+    if Scry.inStratum strat s i then .cons i rest else rest
+
+def Scry.stratumRels (strat : List Nat) (s n : Nat) : List Nat :=
+  Scry.filterRels strat s (Scry.iota n)
+
+/-- One SCC: the relations mutually reachable from `u` (within `rels`). -/
+def Scry.sccOf (reach : List (List Nat)) (rels : List Nat) (u : Nat) : List Nat :=
+  List.foldr (fun (v : Nat) (acc : List Nat) =>
+    if Scry.natMem v (List.getD reach u .nil) then
+      if Scry.natMem u (List.getD reach v .nil) then .cons v acc else acc
+    else acc) .nil rels
+
+def Scry.sccsGo (reach : List (List Nat)) (rels : List Nat) :
+    List Nat → List Nat → List (List Nat)
+  | .nil, _ => .nil
+  | .cons u us, assigned =>
+    if Scry.natMem u assigned then Scry.sccsGo reach rels us assigned
+    else
+      let scc := Scry.sccOf reach rels u;
+      .cons scc (Scry.sccsGo reach rels us (List.append scc assigned))
+
+def Scry.sccsOf (reach : List (List Nat)) (rels : List Nat) : List (List Nat) :=
+  Scry.sccsGo reach rels rels .nil
+
+/-- Dependency depth of an SCC (the size of its representative's reachable set): a
+dependency has a strictly smaller set, so sorting ascending is a topological order. -/
+def Scry.sccKey (reach : List (List Nat)) (scc : List Nat) : Nat :=
+  match scc with
+  | .nil => 0
+  | .cons u _ => List.length (List.getD reach u .nil)
+
+def Scry.insertScc (reach : List (List Nat)) (x : List Nat) :
+    List (List Nat) → List (List Nat)
+  | .nil => .cons x .nil
+  | .cons y ys =>
+    if Nat.le (Scry.sccKey reach x) (Scry.sccKey reach y) then .cons x (.cons y ys)
+    else .cons y (Scry.insertScc reach x ys)
+
+def Scry.sortSccs (reach : List (List Nat)) : List (List Nat) → List (List Nat)
+  | .nil => .nil
+  | .cons x xs => Scry.insertScc reach x (Scry.sortSccs reach xs)
+
+-- ## The worklist
+
+def Scry.bodyInScc (scc : List Nat) : List Scry.Atom → Bool
+  | .nil => .false
+  | .cons a rest => if Scry.natMem a.rel scc then .true else Scry.bodyInScc scc rest
+
+/-- Rules whose head is in the SCC but whose body does not mention the SCC are run
+once, against the (complete) lower components. -/
+def Scry.evalOnceScc {L : Type} (p : Scry.Program L) (scc : List Nat) :
+    Nat → List (Scry.Rule L) → Scry.FastDb L → Scry.FastDb L
+  | _, .nil, db => db
+  | ri, .cons rule rest, db =>
+    let db' :=
+      if Scry.natMem rule.head.rel scc then
+        if Scry.bodyInScc scc rule.body then db
+        else (Scry.applyMatchesF p ri rule
+          (Scry.evalAtomsFull p db rule.body Scry.Env.empty) (Scry.FastOut.init db)).db
+      else db;
+    Scry.evalOnceScc p scc (Nat.succ ri) rest db'
+
+def Scry.keysOf {L : Type} (m : Scry.FLat L) : List (List U64) :=
+  List.map (fun (e : Scry.LatEntry L) => e.key) m.toList
+
+/-- Every fact currently in an SCC's relations is the component's initial worklist. -/
+def Scry.seedScc {L : Type} (db : Scry.FastDb L) (scc : List Nat) : List Scry.DItem :=
+  List.foldr (fun (r : Nat) (acc : List Scry.DItem) =>
+    if db.isLat r then
+      let m := db.latAt r;
+      if Nat.beq m.count 0 then acc
+      else .cons (Scry.DItem.lats r (Scry.flattenKeys (Scry.keysOf m)) m.count) acc
+    else
+      let rel := db.tupleAt r;
+      if Nat.beq rel.count 0 then acc
+      else .cons (Scry.DItem.tups r (U32Array.ofList (List.map U32.ofNat (Scry.iota rel.count)))) acc)
+    .nil scc
+
+/-- Run the rule variants whose head is in `scc` and that can consume `item`, then the
+variants for the facts they derived, until nothing is left. Every derived fact has its
+head relation in the component, so the worklist never leaves it. -/
+partial def Scry.work {L : Type} (p : Scry.Program L) (uses : List (Nat × List Scry.Use))
+    (scc : List Nat) : Scry.FastDb L → List Scry.DItem → Scry.FastDb L
+  | db, .nil => db
+  | db, .cons item rest =>
+    match item with
+    | .tups rel ids =>
+      let us := Scry.usesAt uses rel;
+      let out := List.foldr (fun (u : Scry.Use) (o : Scry.FastOut L) =>
+          let rule := List.getD p.rules u.rule Scry.Fast.defaultRule;
+          if Scry.natMem rule.head.rel scc then
+            Scry.applyMatchesF p u.rule rule
+              (Scry.evalAtomsFastD p o.db (.cons (rel, ids) .nil) .nil u.pos rule.body 0 Scry.Env.empty) o
+          else o)
+        (Scry.FastOut.init db) us;
+      Scry.work p uses scc out.db (List.append rest (Scry.itemsOf out))
+    | .lats rel keys n =>
+      let us := Scry.usesAt uses rel;
+      let kv := Scry.KVec.mk rel keys n;
+      let out := List.foldr (fun (u : Scry.Use) (o : Scry.FastOut L) =>
+          let rule := List.getD p.rules u.rule Scry.Fast.defaultRule;
+          if Scry.natMem rule.head.rel scc then
+            Scry.applyMatchesF p u.rule rule
+              (Scry.evalAtomsFastD p o.db .nil (.cons kv .nil) u.pos rule.body 0 Scry.Env.empty) o
+          else o)
+        (Scry.FastOut.init db) us;
+      Scry.work p uses scc out.db (List.append rest (Scry.itemsOf out))
+
+-- ## Strata and the fixpoint
+
+def Scry.evalStratumFast {L : Type} (p : Scry.Program L) (strat : List Nat) (s : Nat)
+    (uses : List (Nat × List Scry.Use)) (db : Scry.FastDb L) : Scry.FastDb L :=
+  let n := List.length p.arities;
+  let rels := Scry.stratumRels strat s n;
+  let reach := Scry.reach n (Scry.ruleEdges strat s p.rules);
+  let sccs := Scry.sortSccs reach (Scry.sccsOf reach rels);
+  List.foldl (fun (d : Scry.FastDb L) (scc : List Nat) =>
+      let d1 := Scry.evalOnceScc p scc 0 p.rules d;
+      Scry.work p uses scc d1 (Scry.seedScc d1 scc)) db sccs
+
+partial def Scry.evalFromFast {L : Type} (p : Scry.Program L) (strat : List Nat)
+    (uses : List (Nat × List Scry.Use)) : Nat → Nat → Scry.FastDb L → Scry.FastDb L
+  | s, max, db =>
+    if Nat.lt max s then db
+    else Scry.evalFromFast p strat uses (Nat.succ s) max (Scry.evalStratumFast p strat s uses db)
+
+/-- The fast least fixpoint of a program from an existing fast database (its EDB facts
+and their provenance steps). `.none` when `Program.check` rejects the program. -/
+def Scry.Fast.evalDb {L : Type} (p : Scry.Program L) (db : Scry.FastDb L) :
+    Option (Scry.FastDb L) :=
+  match p.check with
+  | .none => .none
+  | .some strat =>
+    .some (Scry.evalFromFast p strat (Scry.buildUses 0 p.rules) 0 (Scry.maxNat strat) db)
+
+/-- The fast fixpoint from a reference state (for the differential tests; `FastDb` from
+`List (relation, rows)` is cheaper for a large EDB). -/
+def Scry.Fast.eval {L : Type} (p : Scry.Program L) (st : Scry.State L) :
+    Option (Scry.FastDb L) :=
+  Scry.Fast.evalDb p (Scry.FastDb.ofState p st)
+
+/-- The fast fixpoint from a raw EDB: relations with their rows. Steps are numbered
+from zero for the EDB facts, as `Scry.State.addTuple` would. -/
+def Scry.Fast.evalEdb {L : Type} (p : Scry.Program L)
+    (edb : List (Nat × List (List U64))) : Option (Scry.FastDb L) :=
+  match p.check with
+  | .none => .none
+  | .some _ =>
+    let db := List.foldl (fun (d : Scry.FastDb L) (e : Nat × List (List U64)) =>
+        List.foldl (fun (d' : Scry.FastDb L) (row : List U64) => (d'.addTuple e.1 row).1)
+          d e.2) (Scry.FastDb.ofProgram p) edb;
+    Scry.Fast.evalDb p db
+
+-- ## Differential comparison with the reference evaluator
+
+def Scry.optNatEq : Option Nat → Option Nat → Bool
+  | .none, .none => .true
+  | .some a, .some b => Nat.beq a b
+  | _, _ => .false
+
+/-- One tuple relation: same count and the same rows on both sides (0 = agree). -/
+def Scry.agreeOneT {L : Type} (ref : Scry.State L) (fdb : Scry.FastDb L) (r : Nat) : Nat :=
+  let rr := Scry.Db.tupleAt ref.db r;
+  let fr := fdb.tupleAt r;
+  if Nat.beq rr.size fr.count then
+    if List.foldr (fun (row : List U64) (acc : Bool) =>
+        if fr.mem row then acc else Bool.false) Bool.true rr.toList then
+      if List.foldr (fun (row : List U64) (acc : Bool) =>
+          if rr.mem row then acc else Bool.false) Bool.true fr.toList then 0 else 3
+    else 2
+  else 1
+
+def Scry.agreeAllT {L : Type} (ref : Scry.State L) (fdb : Scry.FastDb L) : Nat → Nat
+  | .zero => 0
+  | .succ n =>
+    Nat.add (Scry.agreeOneT ref fdb n) (Scry.agreeAllT ref fdb n)
+
+/-- One lattice relation: same count and the same key/value map on both sides. -/
+def Scry.agreeOneL {L : Type} (ops : Scry.LatOps L) (ref : Scry.State L)
+    (fdb : Scry.FastDb L) (r : Nat) : Nat :=
+  let rl := (Scry.Db.latAt ref.db r).toList;
+  let fl := (fdb.latAt r).toList;
+  if Nat.beq (List.length rl) (List.length fl) then
+    if List.foldr (fun (kv : List U64 × L) (acc : Bool) =>
+        match (fdb.latAt r).find kv.1 with
+        | .some e => if ops.eq kv.2 e.val then acc else Bool.false
+        | .none => Bool.false) Bool.true rl then
+      if List.foldr (fun (e : Scry.LatEntry L) (acc : Bool) =>
+          match (Scry.Db.latAt ref.db r).find e.key with
+          | .some v => if ops.eq v e.val then acc else Bool.false
+          | .none => Bool.false) Bool.true fl then 0 else 3
+    else 2
+  else 1
+
+def Scry.agreeAllL {L : Type} (ops : Scry.LatOps L) (ref : Scry.State L)
+    (fdb : Scry.FastDb L) : Nat → Nat
+  | .zero => 0
+  | .succ n =>
+    Nat.add (Scry.agreeOneL ops ref fdb n) (Scry.agreeAllL ops ref fdb n)
+
+/-- Provenance of every tuple fact: the fast step has the same rule index as the
+reference step, and its witness is well formed. Counts disagreements. -/
+def Scry.agreeProvT {L : Type} (ops : Scry.LatOps L) (ref : Scry.State L)
+    (fdb : Scry.FastDb L) : List (Nat × Scry.TupleRel) → Nat
+  | .nil => 0
+  | .cons e rest =>
+    let restN := Scry.agreeProvT ops ref fdb rest;
+    List.foldr (fun (row : List U64) (acc : Nat) =>
+      match fdb.whyTuple e.1 row with
+      | .some fs =>
+        let ruleOk := match ref.findStep ops (Scry.PFact.mk e.1 row .none) with
+          | .some rs => Scry.optNatEq rs.rule fs.rule
+          | .none => Bool.false;
+        let wOk := (fdb.expandWitness fs).wellFormed;
+        if ruleOk then (if wOk then acc else Nat.succ acc) else Nat.succ acc
+      | .none => Nat.succ acc) restN e.2.toList
+
+/-- Provenance of every lattice value: the fast step exists and its witness is well
+formed. A lattice value may have several derivations (a join), so the rule index of the
+last step need not agree with the reference's; the fact's value and an acyclic witness
+are the compatibility condition that `Cert` needs. -/
+def Scry.agreeProvL {L : Type} (ops : Scry.LatOps L) (ref : Scry.State L)
+    (fdb : Scry.FastDb L) : List (Nat × Scry.LatRel L) → Nat
+  | .nil => 0
+  | .cons e rest =>
+    let restN := Scry.agreeProvL ops ref fdb rest;
+    List.foldr (fun (kv : List U64 × L) (acc : Nat) =>
+      match fdb.whyLat e.1 kv.1 with
+      | .some fs =>
+        let valueOk := match fs.fact.lat with
+          | .some v => ops.eq kv.2 v
+          | .none => Bool.false;
+        let wOk := (fdb.expandWitness fs).wellFormed;
+        if valueOk then (if wOk then acc else Nat.succ acc) else Nat.succ acc
+      | .none => Nat.succ acc) restN e.2.toList
+
+/-- **Differential check** against `Scry.Eval`: 0 iff both engines agree on acceptance,
+the fact sets of every tuple relation, every lattice key's value, and every fact's
+provenance rule (with well-formed fast witnesses). Any other number is a failure code
+(or a count of provenance disagreements). -/
+def Scry.Fast.agree {L : Type} (p : Scry.Program L) (st : Scry.State L) : Nat :=
+  match Scry.eval p st, Scry.Fast.eval p st with
+  | .none, .none => 0
+  | .some ref, .some fdb =>
+    Nat.add
+      (Nat.add (Scry.agreeAllT ref fdb (List.length p.arities))
+               (Scry.agreeAllL p.ops ref fdb (List.length p.arities)))
+      (Nat.add (Scry.agreeProvT p.ops ref fdb ref.db.tuples)
+               (Scry.agreeProvL p.ops ref fdb ref.db.lats))
+  | _, _ => 1000
+
+-- ## A round-scan driver over the same kernels (the scheduler A/B)
+
+/-- The relation an item is about. -/
+def Scry.DItem.rel : Scry.DItem → Nat
+  | .tups r _ => r
+  | .lats r _ _ => r
+
+/-- Every fact currently in a relation of stratum `s` (the round scan's initial delta). -/
+def Scry.stratumItemsGo {L : Type} (strat : List Nat) (s : Nat) (db : Scry.FastDb L) :
+    List Nat → List Scry.DItem
+  | .nil => .nil
+  | .cons r rs =>
+    let rest := Scry.stratumItemsGo strat s db rs;
+    if Scry.inStratum strat s r then
+      if db.isLat r then
+        let m := db.latAt r;
+        if Nat.beq m.count 0 then rest
+        else .cons (Scry.DItem.lats r (Scry.flattenKeys (Scry.keysOf m)) m.count) rest
+      else
+        let rel := db.tupleAt r;
+        if Nat.beq rel.count 0 then rest
+        else .cons (Scry.DItem.tups r (U32Array.ofList (List.map U32.ofNat (Scry.iota rel.count)))) rest
+    else rest
+
+def Scry.stratumItems {L : Type} (strat : List Nat) (s : Nat) (db : Scry.FastDb L) :
+    List Scry.DItem :=
+  Scry.stratumItemsGo strat s db (Scry.iota (List.length db.arities))
+
+/-- The variants for one delta item. -/
+def Scry.roundOneItem {L : Type} (p : Scry.Program L)
+    (uses : List (Nat × List Scry.Use)) (rels : List Nat) (it : Scry.DItem)
+    (o0 : Scry.FastOut L) : Scry.FastOut L :=
+  match o0 with
+  | .mk db tids lkeys =>
+    let us := Scry.usesAt uses it.rel;
+    List.foldl (fun (o : Scry.FastOut L) (u : Scry.Use) =>
+        let rule := List.getD p.rules u.rule Scry.Fast.defaultRule;
+        if Scry.natMem rule.head.rel rels then
+          match it with
+          | .tups rel ids =>
+            Scry.applyMatchesF p u.rule rule
+              (Scry.evalAtomsFastD p o.db (.cons (rel, ids) .nil) .nil u.pos rule.body 0 Scry.Env.empty) o
+          | .lats rel keys n =>
+            Scry.applyMatchesF p u.rule rule
+              (Scry.evalAtomsFastD p o.db .nil (.cons (Scry.KVec.mk rel keys n) .nil) u.pos rule.body 0 Scry.Env.empty) o
+        else o)
+      (Scry.FastOut.mk db tids lkeys) us
+
+/-- One round: every rule variant whose head is in the stratum, for every delta item. -/
+def Scry.roundItems {L : Type} (p : Scry.Program L)
+    (uses : List (Nat × List Scry.Use)) (rels : List Nat) (items : List Scry.DItem)
+    (out : Scry.FastOut L) : Scry.FastOut L :=
+  match items with
+  | .nil => out
+  | .cons it rest =>
+    match out with
+    | .mk db tids lkeys =>
+      let out' := Scry.roundOneItem p uses rels it (Scry.FastOut.mk db tids lkeys);
+      Scry.roundItems p uses rels rest out'
+
+
+partial def Scry.roundLoop {L : Type} (p : Scry.Program L)
+    (uses : List (Nat × List Scry.Use)) (rels : List Nat) (items : List Scry.DItem)
+    (db : Scry.FastDb L) : Scry.FastDb L :=
+  match items with
+  | .nil => db
+  | .cons _ _ =>
+    let out := Scry.roundItems p uses rels items (Scry.FastOut.init db);
+    Scry.roundLoop p uses rels (Scry.itemsOf out) out.db
+
+/-- The same fast kernels, scheduled by a naive round scan (for the measurement; the
+worklist is `Scry.Fast.evalDb`). -/
+def Scry.roundStratum {L : Type} (p : Scry.Program L) (strat : List Nat) (s : Nat)
+    (uses : List (Nat × List Scry.Use)) (db : Scry.FastDb L) : Scry.FastDb L :=
+  let rels := Scry.stratumRels strat s (List.length p.arities);
+  let db1 := Scry.evalOnceScc p rels 0 p.rules db;
+  Scry.roundLoop p uses rels (Scry.stratumItems strat s db1) db1
+
+partial def Scry.roundFrom {L : Type} (p : Scry.Program L) (strat : List Nat)
+    (uses : List (Nat × List Scry.Use)) : Nat → Nat → Scry.FastDb L → Scry.FastDb L
+  | s, max, db =>
+    if Nat.lt max s then db
+    else Scry.roundFrom p strat uses (Nat.succ s) max (Scry.roundStratum p strat s uses db)
+
+/-- The fast fixpoint computed by the round scan rather than the worklist. -/
+def Scry.Fast.evalDbRounds {L : Type} (p : Scry.Program L) (db : Scry.FastDb L) :
+    Option (Scry.FastDb L) :=
+  match p.check with
+  | .none => .none
+  | .some strat =>
+    .some (Scry.roundFrom p strat (Scry.buildUses 0 p.rules) 0 (Scry.maxNat strat) db)
+
+def Scry.Fast.evalEdbRounds {L : Type} (p : Scry.Program L)
+    (edb : List (Nat × List (List U64))) : Option (Scry.FastDb L) :=
+  match p.check with
+  | .none => .none
+  | .some _ =>
+    let db := List.foldl (fun (d : Scry.FastDb L) (e : Nat × List (List U64)) =>
+        List.foldl (fun (d' : Scry.FastDb L) (row : List U64) => (d'.addTuple e.1 row).1)
+          d e.2) (Scry.FastDb.ofProgram p) edb;
+    Scry.Fast.evalDbRounds p db

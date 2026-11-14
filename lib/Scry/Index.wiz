@@ -1,0 +1,291 @@
+import Prelude
+import Word
+import Text
+import WordArray
+import WordMap
+import Scry.Store
+/-!
+# Scry.Index
+
+The **native relation kernels** behind scry's fast Datalog engine (`import Scry.Index`):
+a row store with per-column indexes, a hashed lattice store, and the delta vectors the
+worklist moves. The model is a pure value, like `Scry.Store`'s list model, but every
+container is a machine-word structure from stage S0:
+
+* a tuple relation keeps its rows **flattened** in a `U64Array` (stride = arity), its
+  provenance step ids in a parallel `U64Array`, one `U64Map U32Array` per column (the
+  column's value → the rows that have it), and a `U64Map U32Array` from a row hash to the
+  candidate rows (deduplication);
+* a lattice relation keeps a `U64Map` from a key hash to the entries with that hash, each
+  entry a key, its joined value and the provenance step id of that value;
+* a delta is a `U32Array` of new row numbers per relation (tuple) or a flat `U64Array` of
+  new keys per relation (lattice).
+
+The hash is the usual FNV-style word mix (`U64` arithmetic, so it wraps); collisions are
+resolved by comparing the stored row or key, so a hash collision costs a scan, never
+correctness. Inserting a row updates the row array, every column index and the dedup map;
+looking a row up by one bound column is one `U64Map` lookup plus a filter over the rows
+that share that value (the join kernel the design asks for), not a scan of the relation.
+
+This module is the untrusted fast path: it does not prove anything about its answers.
+`Scry.Fast` drives it, and the differential tests compare it with the reference
+evaluator in `Scry.Eval`; provenance stays in the reference's `ProofStep` shape, so a
+derivation from either engine is checked by the same `Scry.Derivation.check`.
+-/
+
+/-- `0, 1, …, n-1`. -/
+def Scry.iotaFrom : Nat → Nat → List Nat
+  | i, .zero => .nil
+  | i, .succ n => .cons i (Scry.iotaFrom (Nat.succ i) n)
+def Scry.iota (n : Nat) : List Nat := Scry.iotaFrom 0 n
+
+/-- One FNV-style step: `h * 131 + x + 1`, wrapping in 64 bits. -/
+def Scry.hashStep (h x : U64) : U64 :=
+  UIntN.add (UIntN.add (UIntN.mul h (U64.ofNat 131)) x) (U64.ofNat 1)
+
+/-- A row's (or key's) hash. -/
+def Scry.hashRow (row : List U64) : U64 := List.foldl Scry.hashStep (U64.ofNat 17) row
+
+-- ## Tuple relations
+
+/-- A set-valued relation in the fast store. `rows` is `count * arity` words, `ids` the
+provenance step id of each row, `cols` one value-to-rows index per column, and `dedup`
+a row-hash-to-candidates map. -/
+structure Scry.FRel where
+  arity : Nat
+  rows : U64Array
+  ids : U64Array
+  cols : List (U64Map U32Array)
+  dedup : U64Map U32Array
+  count : Nat
+
+def Scry.FRel.empty (arity : Nat) : Scry.FRel :=
+  Scry.FRel.mk arity U64Array.empty U64Array.empty
+    (List.map (fun _ => U64Map.empty) (Scry.iota arity)) U64Map.empty 0
+
+/-- The word at (row `i`, column `c`). -/
+def Scry.FRel.at (r : Scry.FRel) (i c : Nat) : U64 :=
+  r.rows.getD (Nat.add (Nat.mul i r.arity) c) (U64.ofNat 0)
+
+/-- The row at position `i`. -/
+def Scry.FRel.rowAt (r : Scry.FRel) (i : Nat) : List U64 :=
+  List.map (fun c => r.at i c) (Scry.iota r.arity)
+
+/-- The provenance step id of the row at position `i`. -/
+def Scry.FRel.idAt (r : Scry.FRel) (i : Nat) : Nat :=
+  (r.ids.getD i (U64.ofNat 0)).toNat
+
+/-- The row numbers whose column `c` is `v` (empty if the column has no such value). -/
+def Scry.FRel.rowsWith (r : Scry.FRel) (c : Nat) (v : U64) : U32Array :=
+  (List.getD r.cols c U64Map.empty).findD v U32Array.empty
+
+/-- Whether one of `ids` (row numbers) is the row `row`, reading the flat row store
+directly (no temporary record, so the relation's kernels stay uniquely owned). -/
+def Scry.rowEqAtC (rows : U64Array) (i arity : Nat) : Nat → List U64 → Bool
+  | c, .nil => Nat.beq c arity
+  | c, .cons v vs =>
+    if Nat.lt c arity then
+      if Scry.eqU64 v (rows.getD (Nat.add (Nat.mul i arity) c) (U64.ofNat 0)) then
+        Scry.rowEqAtC rows i arity (Nat.succ c) vs
+      else Bool.false
+    else Bool.false
+
+def Scry.anyRowEqRows (rows : U64Array) (arity : Nat) (row : List U64)
+    (ids : U32Array) : Bool :=
+  List.foldr (fun (j : U32) (acc : Bool) =>
+    if Scry.rowEqAtC rows j.toNat arity 0 row then Bool.true else acc) Bool.false ids.toList
+
+/-- Whether one of `ids` (row numbers) is the row `row`. -/
+def Scry.FRel.anyRowEq (r : Scry.FRel) (row : List U64) (ids : U32Array) : Bool :=
+  Scry.anyRowEqRows r.rows r.arity row ids
+
+/-- Remove `k` from an association list, returning its value. Taking a relation out
+before updating it leaves the kernel's arrays and maps with a single reference, so the
+`U64Array`/`U64Map` natives update **in place** instead of copying (the fast path's
+whole point). -/
+def Scry.assocTake {A : Type} (k : Nat) : List (Nat × A) → List (Nat × A) × Option A
+  | .nil => (.nil, .none)
+  | .cons e rest =>
+    if Nat.beq k e.1 then (rest, .some e.2)
+    else match Scry.assocTake k rest with
+      | (rest', v) => (.cons e rest', v)
+
+/-- The first `some` of `f` over a list. -/
+def Scry.firstHit {A B : Type} (f : A → Option B) : List A → Option B
+  | .nil => .none
+  | .cons x xs => match f x with
+    | .some y => .some y
+    | .none => Scry.firstHit f xs
+
+/-- The position of `row`, if the relation has it. -/
+def Scry.FRel.findRow (r : Scry.FRel) (row : List U64) : Option Nat :=
+  let cand := r.dedup.findD (Scry.hashRow row) U32Array.empty;
+  Scry.firstHit (fun (j : U32) => if Scry.rowEq row (r.rowAt j.toNat) then .some j.toNat else (.none : Option Nat))
+    cand.toList
+
+def Scry.FRel.mem (r : Scry.FRel) (row : List U64) : Bool :=
+  match r.findRow row with
+  | .some _ => .true
+  | .none => .false
+
+/-- The step id stored for `row`, if the relation has it. -/
+def Scry.FRel.findId (r : Scry.FRel) (row : List U64) : Option Nat :=
+  match r.findRow row with
+  | .some i => .some (r.idAt i)
+  | .none => .none
+
+/-- Add the row number `i` to a per-column index, given the row. Each entry is taken
+out of its map before the append, so the array is unique and `push` mutates it. -/
+def Scry.indexAddL : List (U64Map U32Array) → List U64 → Nat → List (U64Map U32Array)
+  | .nil, _, _ => .nil
+  | .cons m ms, .nil, _ => .cons m ms
+  | .cons m ms, .cons v vs, i =>
+    let old := m.findD v U32Array.empty;
+    let m1 := m.erase v;
+    let arr := U32Array.push old (U32.ofNat i);
+    .cons (m1.insert v arr) (Scry.indexAddL ms vs i)
+
+/-- Add `i` to the dedup map's candidates for hash `h`; `cand` is that bucket, taken out
+first so the append is in place. -/
+def Scry.dedupAdd (m : U64Map U32Array) (h : U64) (cand : U32Array) (i : Nat) :
+    U64Map U32Array :=
+  let m1 := m.erase h;
+  m1.insert h (U32Array.push cand (U32.ofNat i))
+
+/-- Insert `row` with provenance step id `sid`; the flag says whether it was new. The
+relation is destructured so its arrays and maps are uniquely owned during the update. -/
+def Scry.FRel.insert (r : Scry.FRel) (row : List U64) (sid : Nat) : Scry.FRel × Bool :=
+  match r with
+  | .mk arity rows ids cols dedup count =>
+    let h := Scry.hashRow row;
+    let cand := dedup.findD h U32Array.empty;
+    if Scry.anyRowEqRows rows arity row cand then
+      (Scry.FRel.mk arity rows ids cols dedup count, .false)
+    else
+      let i := count;
+      let rows' := List.foldl (fun (a : U64Array) (v : U64) => U64Array.push a v) rows row;
+      let ids' := U64Array.push ids (U64.ofNat sid);
+      let cols' := Scry.indexAddL cols row i;
+      let dedup' := Scry.dedupAdd dedup h cand i;
+      (Scry.FRel.mk arity rows' ids' cols' dedup' (Nat.succ i), .true)
+
+/-- The rows, most recent first (for materialising a `Scry.Db` or a test). -/
+def Scry.FRel.rowsFrom (r : Scry.FRel) : Nat → List (List U64)
+  | .zero => .nil
+  | .succ n => .cons (r.rowAt n) (Scry.FRel.rowsFrom r n)
+def Scry.FRel.toList (r : Scry.FRel) : List (List U64) := r.rowsFrom r.count
+
+-- ## Lattice relations
+
+/-- One lattice entry: the key, its joined value and the step id of that value. -/
+structure Scry.LatEntry (L : Type) where
+  key : List U64
+  val : L
+  sid : Nat
+
+/-- A lattice-valued relation: a hash of the key to the entries with that hash. -/
+structure Scry.FLat (L : Type) where
+  entries : U64Map (List (Scry.LatEntry L))
+  count : Nat
+
+def Scry.FLat.empty {L : Type} : Scry.FLat L := Scry.FLat.mk U64Map.empty 0
+
+/-- Every entry (hash-grouped; the order is the map's key order). -/
+def Scry.FLat.toList {L : Type} (m : Scry.FLat L) : List (Scry.LatEntry L) :=
+  List.foldr (fun (e : U64 × List (Scry.LatEntry L)) (acc : List (Scry.LatEntry L)) =>
+    List.append e.2 acc) .nil m.entries.toList
+
+/-- The entries stored under a key's hash. -/
+def Scry.FLat.bucket {L : Type} (m : Scry.FLat L) (k : List U64) : List (Scry.LatEntry L) :=
+  m.entries.findD (Scry.hashRow k) .nil
+
+def Scry.FLat.findL {L : Type} (k : List U64) : List (Scry.LatEntry L) → Option (Scry.LatEntry L)
+  | .nil => .none
+  | .cons e es => if Scry.rowEq k e.key then .some e else Scry.FLat.findL k es
+
+def Scry.FLat.find {L : Type} (m : Scry.FLat L) (k : List U64) : Option (Scry.LatEntry L) :=
+  Scry.FLat.findL k (m.bucket k)
+
+def Scry.FLat.findValD {L : Type} (m : Scry.FLat L) (k : List U64) (d : L) : L :=
+  match m.find k with
+  | .some e => e.val
+  | .none => d
+
+/-- Replace the entry for `k` by `(v, sid)`, keeping the bucket's order. -/
+def Scry.latSetL {L : Type} (k : List U64) (v : L) (sid : Nat) :
+    List (Scry.LatEntry L) → List (Scry.LatEntry L)
+  | .nil => .cons (Scry.LatEntry.mk k v sid) .nil
+  | .cons e es =>
+    if Scry.rowEq k e.key then .cons (Scry.LatEntry.mk e.key v sid) es
+    else .cons e (Scry.latSetL k v sid es)
+
+/-- Set the value of `k` to `v` with step id `sid` (replacing a previous entry, or adding
+one and counting it). Destructured so the entries map is uniquely owned. -/
+def Scry.FLat.setVal {L : Type} (m : Scry.FLat L) (k : List U64) (v : L) (sid : Nat) :
+    Scry.FLat L :=
+  match m with
+  | .mk entries count =>
+    let h := Scry.hashRow k;
+    let bucket := entries.findD h .nil;
+    let present := match Scry.FLat.findL k bucket with
+      | .some _ => Bool.true
+      | .none => Bool.false;
+    let bucket' := Scry.latSetL k v sid bucket;
+    Scry.FLat.mk (entries.insert h bucket')
+      (if present then count else Nat.succ count)
+
+-- ## Deltas
+
+/-- Append `a` to `r`'s vector in an association list (adding the entry if absent). -/
+def Scry.assocMerge {A : Type} (app : A → A → A) (d : List (Nat × A)) (r : Nat) (a : A) :
+    List (Nat × A) :=
+  match d with
+  | .nil => .cons (r, a) .nil
+  | .cons e rest =>
+    if Nat.beq r e.1 then .cons (r, app e.2 a) rest
+    else .cons e (Scry.assocMerge app rest r a)
+
+/-- New row numbers per tuple relation (the delta of a semi-naive round). -/
+def Scry.deltaAddT (d : List (Nat × U32Array)) (r : Nat) (a : U32Array) : List (Nat × U32Array) :=
+  Scry.assocMerge U32Array.append d r a
+
+/-- A lattice delta: the relation, the flat keys and how many keys there are (a
+zero-arity lattice relation has no key words but still a count). -/
+structure Scry.KVec where
+  rel : Nat
+  keys : U64Array
+  n : Nat
+
+def Scry.KVec.empty (r : Nat) : Scry.KVec := Scry.KVec.mk r U64Array.empty 0
+
+/-- Append new keys (and their count) to `r`'s vector. -/
+def Scry.kvecAdd (d : List Scry.KVec) (r : Nat) (a : U64Array) (n : Nat) : List Scry.KVec :=
+  match d with
+  | .nil => .cons (Scry.KVec.mk r a n) .nil
+  | .cons e rest =>
+    if Nat.beq r e.rel then
+      .cons (Scry.KVec.mk r (U64Array.append e.keys a) (Nat.add e.n n)) rest
+    else .cons e (Scry.kvecAdd rest r a n)
+
+def Scry.kvecAt (d : List Scry.KVec) (r : Nat) : Scry.KVec :=
+  match d with
+  | .nil => Scry.KVec.empty r
+  | .cons e rest => if Nat.beq r e.rel then e else Scry.kvecAt rest r
+
+def Scry.lookupVec {A : Type} (d : List (Nat × A)) (r : Nat) (empty : A) : A :=
+  match d with
+  | .nil => empty
+  | .cons e rest => if Nat.beq r e.1 then e.2 else Scry.lookupVec rest r empty
+
+def Scry.dRows (d : List (Nat × U32Array)) (r : Nat) : U32Array :=
+  Scry.lookupVec d r U32Array.empty
+
+/-- The `i`th key in a flat key vector of the given arity. -/
+def Scry.keyAt (a : U64Array) (arity i : Nat) : List U64 :=
+  List.map (fun c => a.getD (Nat.add (Nat.mul i arity) c) (U64.ofNat 0)) (Scry.iota arity)
+
+/-- A list of keys flattened into one `U64Array`. -/
+def Scry.flattenKeyList (ks : List (List U64)) : List U64 :=
+  List.foldr (fun (k : List U64) (acc : List U64) => List.append k acc) .nil ks
+def Scry.flattenKeys (ks : List (List U64)) : U64Array :=
+  U64Array.ofList (Scry.flattenKeyList ks)

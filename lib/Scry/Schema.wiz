@@ -1,0 +1,227 @@
+import Prelude
+import Word
+import Text
+import WordArray
+import Scry.Store
+import Scry.Eval
+/-!
+# Scry.Schema
+
+A **typed relation schema** for scry's Datalog store (`import Scry.Schema`), the small
+piece of `Datalog.Program sch` that `wiz-notes/code-analysis-design.md` §4.5 needs for
+the EDB and that §4.3's Wil export needs in practice.
+
+Every stored column is still a `U64` (`Scry.Store`): node and variable ids are `U32`
+values, interned strings are `U32` ids (`lib/Intern.wiz`), and numbers are `U64`. A
+schema says which of those a column is, checks the arity, and **range-checks** a value
+against its column type before it enters the database:
+
+* `.u32` and `.str` — a value below `2^32` (an id, or an interned string's id);
+* `.u64` — any 64-bit word;
+* `.lat` — a lattice *value*: it occupies the last column of a declaration and is not
+  part of the key that `Db.insertTuple` stores (the value lives in `LatRel`).
+
+```wiz
+def assign : Scry.RelDecl := Scry.RelDecl.mk [.u32, .u32, .str]
+def val    : Scry.RelDecl := Scry.RelDecl.mk [.u32, .lat]
+def sch    : Scry.Schema   := Scry.Schema.mk [assign, val]
+```
+
+`Schema.checkTuple` and `Schema.checkLat` are the checks; `Db.insertTupleChecked` and
+`State.addTupleChecked` add a fact only if it passes, and `Schema.checkDb` validates a
+whole database. `Schema.arities`/`Schema.latRels` line a schema up with a `Program`, so
+a checked EDB and the evaluator agree on every relation number. The untyped API in
+`Scry.Store` (`insertTuple`, `memTuple`, …) is unchanged: the tests and the evaluator
+keep using it, and a schema is an optional well-formedness layer over it.
+-/
+
+/-- The type of one column. `lat` marks the lattice value of a lattice-valued relation:
+it is the last column of the declaration and is not stored in the tuple. -/
+inductive Scry.ColTy where
+  | u32
+  | u64
+  | str
+  | lat
+
+/-- The width of a word column, or `.none` for the lattice value (which is a Wiz value,
+not a word, and lives outside the tuple). -/
+def Scry.ColTy.width : Scry.ColTy → Option Nat
+  | .u32 => .some 32
+  | .u64 => .some 64
+  | .str => .some 32
+  | .lat => .none
+
+/-- `2^32`: the exclusive upper bound of a `u32` or interned-string id. -/
+def Scry.u32Bound : Nat := Nat.mul 65536 65536
+
+/-- Whether a word is a legal value of the column type: below `2^32` for `.u32` and
+`.str`, anything for `.u64`. `.lat` is not a word column. -/
+def Scry.ColTy.inRange (ty : Scry.ColTy) (v : U64) : Bool :=
+  match ty with
+  | .u32 => Nat.lt v.toNat Scry.u32Bound
+  | .str => Nat.lt v.toNat Scry.u32Bound
+  | .u64 => Bool.true
+  | .lat => Bool.false
+
+/-- Whether two column types are the same. -/
+def Scry.ColTy.beq (a b : Scry.ColTy) : Bool :=
+  match a, b with
+  | .u32, .u32 => .true
+  | .u64, .u64 => .true
+  | .str, .str => .true
+  | .lat, .lat => .true
+  | _, _ => .false
+
+/-- One relation declaration: its columns, last-first for a lattice relation. -/
+structure Scry.RelDecl where
+  cols : List Scry.ColTy
+
+/-- The last column of a declaration. -/
+def Scry.listLast {A : Type} : List A → Option A
+  | .nil => .none
+  | .cons x xs => match Scry.listLast xs with
+    | .none => .some x
+    | .some y => .some y
+
+/-- Whether this relation is lattice-valued: its last column is `.lat`. -/
+def Scry.RelDecl.isLat (d : Scry.RelDecl) : Bool :=
+  match Scry.listLast d.cols with
+  | .some .lat => .true
+  | _ => .false
+
+/-- The columns a tuple stores: all of them, or all but the trailing lattice value. -/
+def Scry.RelDecl.keyCols (d : Scry.RelDecl) : List Scry.ColTy :=
+  if d.isLat then List.dropLast d.cols else d.cols
+
+/-- The arity of the stored tuple (the key, for a lattice relation). -/
+def Scry.RelDecl.arity (d : Scry.RelDecl) : Nat := List.length d.keyCols
+def Scry.RelDecl.valueTy (d : Scry.RelDecl) : Option Scry.ColTy :=
+  if d.isLat then .some .lat else .none
+
+/-- `.lat` may appear only as the last column. -/
+def Scry.RelDecl.wellFormed (d : Scry.RelDecl) : Bool :=
+  List.foldr (fun (c : Scry.ColTy) (acc : Bool) =>
+    match c with
+    | .lat => .false
+    | _ => acc) Bool.true (List.dropLast d.cols)
+
+/-- Check one stored row against the key columns: right arity, every value in range. -/
+def Scry.checkCols (cols : List Scry.ColTy) (row : List U64) : Bool :=
+  match cols, row with
+  | .nil, .nil => .true
+  | .nil, .cons _ _ => .false
+  | .cons _ _, .nil => .false
+  | .cons c cs, .cons v vs => if c.inRange v then Scry.checkCols cs vs else .false
+
+/-- A schema: one declaration per relation number (`List.getD sch.rels r`). -/
+structure Scry.Schema where
+  rels : List Scry.RelDecl
+
+def Scry.Schema.empty : Scry.Schema := Scry.Schema.mk .nil
+
+/-- The `r`th element of a list, if any. -/
+def Scry.nthOpt {A : Type} : List A → Nat → Option A
+  | .nil, _ => .none
+  | .cons x xs, .zero => .some x
+  | .cons _ xs, .succ n => Scry.nthOpt xs n
+
+def Scry.Schema.relAt (sch : Scry.Schema) (r : Nat) : Option Scry.RelDecl :=
+  Scry.nthOpt sch.rels r
+def Scry.Schema.size (sch : Scry.Schema) : Nat := List.length sch.rels
+
+/-- Every declaration is well formed (`.lat` only last). -/
+def Scry.Schema.wellFormed (sch : Scry.Schema) : Bool :=
+  List.foldr (fun (d : Scry.RelDecl) (acc : Bool) =>
+    if d.wellFormed then acc else .false) Bool.true sch.rels
+
+/-- The arity of every relation, in relation-number order: the `Program.arities` list a
+`Program` using this schema must have. -/
+def Scry.Schema.arities (sch : Scry.Schema) : List Nat := List.map Scry.RelDecl.arity sch.rels
+
+/-- The lattice-valued relation numbers: the `Program.latRels` list a `Program` using
+this schema must have. -/
+def Scry.Schema.latRelsFrom (sch : Scry.Schema) : Nat → List Scry.RelDecl → List Nat
+  | _, .nil => .nil
+  | i, .cons d ds =>
+    if d.isLat then .cons i (Scry.Schema.latRelsFrom sch (Nat.succ i) ds)
+    else Scry.Schema.latRelsFrom sch (Nat.succ i) ds
+def Scry.Schema.latRels (sch : Scry.Schema) : List Nat := Scry.Schema.latRelsFrom sch 0 sch.rels
+
+/-- Check a tuple for relation `r`: the relation exists, is not lattice-valued, has this
+arity, and every column is in range. -/
+def Scry.Schema.checkTuple (sch : Scry.Schema) (r : Nat) (row : List U64) : Bool :=
+  match sch.relAt r with
+  | .none => .false
+  | .some d =>
+    if d.isLat then .false
+    else if Nat.beq (List.length row) d.arity then Scry.checkCols d.keyCols row else .false
+
+/-- Check a lattice key for relation `r`: the relation exists, is lattice-valued, and the
+key has the declared arity and every column is in range. -/
+def Scry.Schema.checkLat (sch : Scry.Schema) (r : Nat) (key : List U64) : Bool :=
+  match sch.relAt r with
+  | .none => .false
+  | .some d =>
+    if d.isLat then
+      if Nat.beq (List.length key) d.arity then Scry.checkCols d.keyCols key else .false
+    else .false
+
+/-- Every fact of a database is in range for its relation. -/
+def Scry.Schema.checkDbRows (sch : Scry.Schema) :
+    List (Nat × Scry.TupleRel) → Bool
+  | .nil => .true
+  | .cons e rest =>
+    if List.foldr (fun (row : List U64) (acc : Bool) =>
+        if sch.checkTuple e.1 row then acc else .false) Bool.true e.2.toList
+    then Scry.Schema.checkDbRows sch rest else .false
+def Scry.Schema.checkDbLats {L : Type} (sch : Scry.Schema) :
+    List (Nat × Scry.LatRel L) → Bool
+  | .nil => .true
+  | .cons e rest =>
+    if List.foldr (fun (kv : List U64 × L) (acc : Bool) =>
+        if sch.checkLat e.1 kv.1 then acc else .false) Bool.true e.2.toList
+    then Scry.Schema.checkDbLats sch rest else .false
+def Scry.Schema.checkDb {L : Type} (sch : Scry.Schema) (db : Scry.Db L) : Bool :=
+  if sch.wellFormed then
+    if Scry.Schema.checkDbRows sch db.tuples then Scry.Schema.checkDbLats sch db.lats
+    else .false
+  else .false
+
+/-- Add a tuple only if it passes the schema; the flag says whether it was new. `.none`
+means the schema rejected the fact. -/
+def Scry.Db.insertTupleChecked {L : Type} (sch : Scry.Schema) (db : Scry.Db L) (r : Nat)
+    (row : List U64) : Option (Scry.Db L × Bool) :=
+  if sch.checkTuple r row then .some (Scry.Db.insertTuple db r row) else .none
+
+/-- The same for a lattice key; the value is joined in as usual and is not range-checked
+(it is a Wiz value, outside the word columns). -/
+def Scry.Db.setLatChecked {L : Type} (sch : Scry.Schema) (db : Scry.Db L) (r : Nat)
+    (key : List U64) (v : L) : Option (Scry.Db L) :=
+  if sch.checkLat r key then .some (Scry.Db.setLat db r key v) else .none
+
+/-- Add a typed EDB tuple and record its provenance step, or reject it. -/
+def Scry.Schema.addTupleChecked {L : Type} (sch : Scry.Schema) (st : Scry.State L) (r : Nat)
+    (row : List U64) : Option (Scry.State L) :=
+  if sch.checkTuple r row then .some (Scry.State.addTuple st r row) else .none
+
+/-- Add a typed EDB lattice fact and record its provenance step, or reject it. -/
+def Scry.Schema.addLatChecked {L : Type} (sch : Scry.Schema) (ops : Scry.LatOps L)
+    (st : Scry.State L) (r : Nat) (key : List U64) (v : L) : Option (Scry.State L) :=
+  if sch.checkLat r key then .some (Scry.State.addLatFact st ops r key v) else .none
+
+/-- A program uses a schema: same number of relations, same arities and the same
+lattice-valued relations. (Range restriction and stratification are still
+`Program.check`'s job.) -/
+def Scry.natListEq : List Nat → List Nat → Bool
+  | .nil, .nil => .true
+  | .nil, .cons _ _ => .false
+  | .cons _ _, .nil => .false
+  | .cons x xs, .cons y ys => if Nat.beq x y then Scry.natListEq xs ys else .false
+
+def Scry.Schema.programOk {L : Type} (sch : Scry.Schema) (p : Scry.Program L) : Bool :=
+  if Nat.beq (List.length p.arities) (List.length sch.rels) then
+    if Scry.natListEq p.arities sch.arities then
+      if Scry.natSubset sch.latRels p.latRels then Scry.natSubset p.latRels sch.latRels
+      else .false
+    else .false
+  else .false

@@ -842,3 +842,26 @@ provenance. `import Scry.TaintExamples` is the hand-built corpus used by the
 `scry-taint` group. This is the S4 intraprocedural prototype: no tree-sitter, no C
 lowering, no SARIF, and no interprocedural or memory modelling yet;
 `wiz-notes/scry-taint.md` has the design, the spec format and the gaps.
+
+## Scry: typed relations and the fast Datalog engine (`lib/Scry/Schema.wiz`, `Scry/Index.wiz`, `Scry/Fast.wiz`)
+
+`import Scry.Schema` adds a typed relation schema to the list store: a column is
+`u32`, `u64`, an interned-string id (`str`) or a trailing lattice value (`lat`), and
+`Schema.checkTuple`/`checkLat` check the arity and the value range (a `u32`/`str`
+column must be below 2^32) before `Db.insertTupleChecked` or `State.addTupleChecked`
+lets a fact in. `Schema.arities`/`latRels` line the schema up with a `Program`
+(`Schema.programOk`).
+
+`import Scry.Index` is the native kernel layer: tuple relations in a flat `U64Array`
+with a per-column `U64Map U32Array` index and a deduplicating `U64Map`, lattice
+relations in a `U64Map` of entries (key, joined value, step id), and deltas as
+`U32Array`/`U64Array` vectors. `import Scry.Fast` is a second evaluator over those
+kernels: the same stratified, lattice-valued, provenance-recording semantics as
+`Scry.Eval`, with indexed joins and a **worklist over the SCCs** of each stratum
+instead of the reference's round scan. `FastDb.toState` materialises a reference state
+with the same provenance heap; `import Scry.FastCert` exposes `Fast.explainTuple`, so a
+finding from the fast engine is expanded and checked by `Scry.Cert`'s
+`Derivation.check` unchanged. `Scry.Fast.agree` is the differential check used by the
+`scry-datalog` group on every example, and `examples/scry-datalog-scale.wiz` is the
+generated 10^5-fact set. `wiz-notes/scry-datalog.md` §7 has the API, the measurements
+and the remaining work.

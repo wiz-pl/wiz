@@ -1,0 +1,55 @@
+import Scry.Fast
+-- A generated fact set for the fast engine (`scry-datalog-scale`): an EDB of `n` edges,
+-- `n` labels and a chain of `m` edges, and three rules: a non-recursive join
+-- `path(a, c) :- edge(a, b), label(b, c)` and a transitive closure over the chain.
+-- The sizes are chosen so that the closure stays quadratic in `m` while the join is
+-- linear in `n`; the group's case compiles this file and compares `main`.
+
+def u (n : Nat) : U64 := U64.ofNat n
+
+def pairRow (a b : Nat) : List U64 := .cons (u a) (.cons (u b) .nil)
+
+def rowsFrom (f : Nat → Nat × Nat) (n : Nat) : List (List U64) :=
+  List.map (fun i => match f i with | (a, b) => pairRow a b) (Scry.iota n)
+
+-- edge i → i+1 (mod n): n edges; label i → 7: n facts; chain i → i+1: m edges.
+def edgeRows (n : Nat) : List (List U64) :=
+  rowsFrom (fun i => (i, Nat.mod (Nat.add i 1) n)) n
+def labelRows (n : Nat) : List (List U64) :=
+  rowsFrom (fun i => (i, 7)) n
+def chainRows (m : Nat) : List (List U64) :=
+  rowsFrom (fun i => (i, Nat.add i 1)) m
+
+def scaleOps : Scry.LatOps Nat :=
+  Scry.LatOps.mk 0 (fun a b => if Nat.lt a b then b else a) Nat.beq
+
+-- 0 = edge (a, b), 1 = label (b, c), 2 = path (a, c), 3 = chain (a, b), 4 = col (a, b)
+def pathRule : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 2 [Scry.Term.var 0, Scry.Term.var 2])
+    [Scry.Atom.pos 0 [Scry.Term.var 0, Scry.Term.var 1],
+     Scry.Atom.pos 1 [Scry.Term.var 1, Scry.Term.var 2]]
+def colBase : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 4 [Scry.Term.var 0, Scry.Term.var 1])
+    [Scry.Atom.pos 3 [Scry.Term.var 0, Scry.Term.var 1]]
+def colStep : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 4 [Scry.Term.var 0, Scry.Term.var 2])
+    [Scry.Atom.pos 4 [Scry.Term.var 0, Scry.Term.var 1],
+     Scry.Atom.pos 3 [Scry.Term.var 1, Scry.Term.var 2]]
+
+def scaleProg : Scry.Program Nat :=
+  Scry.Program.mk scaleOps [2, 2, 2, 2, 2] [] [] [pathRule, colBase, colStep]
+
+def n : Nat := 50000
+def m : Nat := 400
+
+def scaleEdb : List (Nat × List (List U64)) :=
+  .cons (0, edgeRows n) (.cons (1, labelRows n) (.cons (3, chainRows m) .nil))
+
+def main : Nat :=
+  match Scry.Fast.evalEdb scaleProg scaleEdb with
+  | .none => 999
+  | .some f =>
+    let paths := (f.tupleAt 2).count;
+    let cols := (f.tupleAt 4).count;
+    let hit := if (f.tupleAt 4).mem [u 0, u m] then 1 else 0;
+    Nat.add (Nat.mul paths 1000000) (Nat.add (Nat.mul cols 10) hit)

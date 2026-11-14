@@ -1,0 +1,26 @@
+import Scry.Fast
+import Scry.Cert
+/-!
+# Scry.FastCert
+
+The bridge between the fast engine's provenance and the certificate checker
+(`import Scry.FastCert`).
+
+`Scry.Fast` records every derived fact as a reference `Scry.ProofStep` (rule index and
+premise ids in body order) and keeps the heap in `FastDb.nodes`; `FastDb.toState`
+materialises a reference `Scry.State` with exactly that heap. `Scry.Cert`'s
+`State.explainTuple` then rebuilds a `Derivation`, renumbers the premises in
+topological order and checks it against the EDB with `Derivation.check`. So a finding
+from the fast engine is certified by the same kernel-checked checker as one from the
+reference engine, with no translation step of its own.
+
+This module is separate from `Scry.Fast` so that the evaluator and its differential
+tests do not have to elaborate the certificate proofs; only callers that want a checked
+derivation import it.
+-/
+
+/-- **Explain a tuple finding from the fast engine's provenance**: the same checked
+certificate path as the reference engine (`Scry.State.explainTuple`), against the EDB. -/
+def Scry.Fast.explainTuple {L : Type} (p : Scry.Program L) (edb : Scry.Db L)
+    (db : Scry.FastDb L) (r : Nat) (row : List U64) : Option (Scry.Derivation L) :=
+  Scry.State.explainTuple p edb db.toState r row

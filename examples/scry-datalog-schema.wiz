@@ -1,0 +1,63 @@
+import Scry.Schema
+-- Typed relation columns for the EDB (`scry-datalog-schema`): the Wil export's facts
+-- `assign(stmt, var, op)`, `num(v)` and the lattice relation `val(node)`. The schema
+-- gives each column a type (`u32`, `u64`, an interned-string id, or a trailing lattice
+-- value) and checks the arity and every value's range before a fact enters the store.
+-- `main` is the test's digest: one bit per check below.
+
+def u (n : Nat) : U64 := U64.ofNat n
+
+-- assign(dst : u32, src : u32, op : str), num(v : u64), val(node : u32) : Nat
+def assignDecl : Scry.RelDecl :=
+  Scry.RelDecl.mk [Scry.ColTy.u32, Scry.ColTy.u32, Scry.ColTy.str]
+def numDecl : Scry.RelDecl := Scry.RelDecl.mk [Scry.ColTy.u64]
+def valDecl : Scry.RelDecl := Scry.RelDecl.mk [Scry.ColTy.u32, Scry.ColTy.lat]
+def sch : Scry.Schema := Scry.Schema.mk [assignDecl, numDecl, valDecl]
+
+def ops : Scry.LatOps Nat :=
+  Scry.LatOps.mk 0 (fun a b => if Nat.lt a b then b else a) Nat.beq
+
+-- A program that uses the schema: the same arities and lattice relations.
+def prog : Scry.Program Nat :=
+  Scry.Program.mk ops [3, 1, 1] [2] [] []
+
+-- 2^32: one past the largest u32.
+def tooBig : Nat := 4294967296
+
+def dig (acc x : Nat) : Nat := Nat.add (Nat.mul acc 10) x
+
+def main : Nat :=
+  -- 0: a well-typed tuple is accepted
+  let a := if sch.checkTuple 0 [u 1, u 2, u 7] then 1 else 0;
+  -- 1: a u32 column above 2^32 - 1 is rejected
+  let b := if sch.checkTuple 0 [u 1, u tooBig, u 7] then 0 else 1;
+  -- 2: a wrong arity is rejected
+  let c := if sch.checkTuple 0 [u 1, u 2] then 0 else 1;
+  -- 3: a lattice relation is not a tuple relation
+  let d := if sch.checkTuple 2 [u 1, u tooBig, u 3] then 0 else 1;
+  -- 4: a lattice key in range is accepted
+  let e := if sch.checkLat 2 [u 9] then 1 else 0;
+  -- 5: a latent key on a tuple relation is rejected
+  let f := if sch.checkLat 0 [u 9] then 0 else 1;
+  -- 6: a checked insert stores the tuple
+  let g := match Scry.Db.insertTupleChecked sch (Scry.Db.empty : Scry.Db Nat) 0 [u 1, u 2, u 7] with
+    | .some (db, .true) => if Nat.beq (Scry.Db.relSize db 0) 1 then 1 else 0
+    | _ => 0;
+  -- 7: a checked insert with an out-of-range column leaves the store unchanged
+  let h := match Scry.Db.insertTupleChecked sch (Scry.Db.empty : Scry.Db Nat) 0 [u 1, u tooBig, u 7] with
+    | .none => 1
+    | .some _ => 0;
+  -- 8: the schema is well formed and lines up with the program
+  let i := if sch.wellFormed then (if sch.programOk prog then 1 else 0) else 0;
+  -- 9: a typed EDB tuple and a typed lattice fact are recorded with provenance steps
+  let st0 : Scry.State Nat := match sch.addTupleChecked Scry.State.empty 0 [u 1, u 2, u 7] with
+    | .some s => s
+    | .none => Scry.State.empty;
+  let j := match sch.addLatChecked ops st0 2 [u 3] 5 with
+    | .some s => if Nat.beq (List.length s.nodes) 2 then 1 else 0
+    | .none => 0;
+  -- 10: a typed lattice fact with an out-of-range key is rejected
+  let k := match sch.addLatChecked ops st0 2 [u tooBig] 5 with
+    | .none => 1
+    | .some _ => 0;
+  dig (dig (dig (dig (dig (dig (dig (dig (dig (dig (dig 0 a) b) c) d) e) f) g) h) i) j) k
