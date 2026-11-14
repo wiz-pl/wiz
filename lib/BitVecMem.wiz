@@ -1,0 +1,304 @@
+import BitVec
+import BitVecShift
+import BitVecAdd
+/-!
+# BitVecMem
+
+Word/byte lemmas for memory proofs (`import BitVecMem`).
+
+`Rv.Core` keeps its memory as four byte lanes of `2^wb` bytes each, and a load rebuilds
+the word as `{q3, {q2, {q1, q0}}}` (the same normal form as `lib/BitVecShift.wiz` and
+`lib/BitVecAdd.wiz`: a `Nat` expression under a `Bits.low`). This file has the slicing
+lemmas for that shape:
+
+* `Bits.low_add_pow` / `Bits.high_small`: the low bits of a shifted sum ignore the
+  shifted part, and the high bits of a small number are 0;
+* `BitVec.cat4` and `BitVec.cat4_byte0 … cat4_byte3`: the four bytes of a 32-bit
+  concatenation, in the form `BitVec.ofNat 8 (Nat.shiftRight … (8k))` that `Hw.slice` has;
+* `BitVec.word_byte`: the same for a plain word (`Hw.slice (8k) 8 x` is byte `k`).
+
+The memory read-after-write laws are in `lib/Hdl/Core.wiz`
+(`HwTy.El.memRead_write_hit`/`_miss`/`_off`); this file is the word/byte half.
+-/
+
+-- ## Low and high bits of a shifted sum
+
+/-- `low w (A · 2^k + B) = low w B` for `w ≤ k`: the shifted part has no low bits. -/
+def Bits.low_add_pow (k A B : Nat) :
+    Bits.low k (Nat.add (Nat.mul A (Nat.pow 2 k)) B) = Bits.low k B :=
+  let P := Nat.pow 2 k;
+  let H := Bits.high k B;
+  let L := Bits.low k B;
+  let e := Bits.pos_succ P (Word.pow_pos k);
+  let hl : Nat.lt L (Nat.succ (Bits.dec P)) = .true :=
+    transp (fun t _ => Nat.lt L t = .true) (Bits.low_lt k B) e;
+  let r : Nat.mod (Nat.add (Nat.mul (Nat.succ (Bits.dec P)) (Nat.add A H)) L) (Nat.succ (Bits.dec P)) = L :=
+    Bits.mod_mq (Bits.dec P) (Nat.add A H) L hl;
+  let r2 : Nat.mod (Nat.add (Nat.mul P (Nat.add A H)) L) P = L :=
+    transp (fun t _ => Nat.mod (Nat.add (Nat.mul t (Nat.add A H)) L) t = L) r (Eq.symm e);
+  let r3 : Nat.mod (Nat.add (Nat.mul A P) (Nat.add (Nat.mul P H) L)) P = L :=
+    transp (fun t _ => Nat.mod t P = L) r2
+      (Eq.symm (nat_ring! A * P + (P * H + L) = P * (A + H) + L));
+  Eq.trans
+    (Eq.symm (Bits.mod_pow k (Nat.add (Nat.mul A P) B)))
+    (transp (fun t _ => Nat.mod (Nat.add (Nat.mul A P) t) P = L) r3
+      (Eq.symm (Bits.split k B)))
+
+/-- The high bits of a number below `2^k` are 0. -/
+def Bits.high_small (k B : Nat) (h : Nat.lt B (Nat.pow 2 k) = .true) :
+    Bits.high k B = 0 :=
+  Eq.trans (Eq.symm (Bits.div_pow k B)) (Bits.div_small B (Nat.pow 2 k) h)
+
+/-- The low form of `Bits.high_add_pow_l`: `low k (A · 2^(i+k) + B) = low k B`, with the
+exponent symbolic (so the instance is a genuine equation, not a normalizer `True`). -/
+def Bits.low_add_pow_l (i k A B : Nat) :
+    Bits.low k (Nat.add (Nat.mul A (Nat.pow 2 (Nat.add i k))) B) = Bits.low k B :=
+  transp (fun t _ => Bits.low k (Nat.add (Nat.mul A t) B) = Bits.low k B)
+    (Eq.trans
+      (Bits.congr (fun t => Bits.low k (Nat.add t B))
+        (nat_ring! A * (Nat.pow 2 i * Nat.pow 2 k) = A * Nat.pow 2 i * Nat.pow 2 k))
+      (Bits.low_add_pow k (Nat.mul A (Nat.pow 2 i)) B))
+    (Eq.symm (Bits.pow_add i k))
+
+-- ## A 32-bit word from four bytes
+
+/-- Four bytes as a word: `{a, {b, {c, d}}}` (the core's `{q3, {q2, {q1, q0}}}`). -/
+def BitVec.cat4 (a b c d : BitVec 8) : BitVec 32 :=
+  BitVec.concat a (BitVec.concat b (BitVec.concat c d))
+
+/-- `cat4`'s value, as nested lows (the shape `catToNat` gives). -/
+def BitVec.cat4N (A B C D : Nat) : Nat :=
+  Bits.low 32 (Nat.add (Nat.mul A (Nat.pow 2 24))
+    (Bits.low 24 (Nat.add (Nat.mul B (Nat.pow 2 16))
+      (Bits.low 16 (Nat.add (Nat.mul C (Nat.pow 2 8)) D)))))
+
+/-- The value of `cat4` is `cat4N` of the bytes' values. -/
+def BitVec.cat4_toNat (a b c d : BitVec 8) :
+    (BitVec.cat4 a b c d).toNat = BitVec.cat4N a.toNat b.toNat c.toNat d.toNat :=
+  let f := fun (z : Nat) => Bits.low 32 (Nat.add (Nat.mul a.toNat (Nat.pow 2 24)) z);
+  let g := fun (z : Nat) => Bits.low 24 (Nat.add (Nat.mul b.toNat (Nat.pow 2 16)) z);
+  Eq.trans (BitVec.catToNat a (BitVec.concat b (BitVec.concat c d)))
+    (Eq.trans (Eq.congrArg f (BitVec.catToNat b (BitVec.concat c d)))
+      (Eq.congrArg (fun z => f (g z)) (BitVec.catToNat c d)))
+
+-- ## The four bytes of `cat4`
+
+/-- The low byte of `cat4N` is its last byte. -/
+def Bits.low8_cat4N (A B C D : Nat) (hD : Nat.lt D (Nat.pow 2 8) = .true) :
+    Bits.low 8 (BitVec.cat4N A B C D) = D :=
+  let Y := Bits.low 24 (Nat.add (Nat.mul B (Nat.pow 2 16))
+    (Bits.low 16 (Nat.add (Nat.mul C (Nat.pow 2 8)) D)));
+  let Z := Nat.add (Nat.mul A (Nat.pow 2 24)) Y;
+  let W := Nat.add (Nat.mul B (Nat.pow 2 16))
+    (Bits.low 16 (Nat.add (Nat.mul C (Nat.pow 2 8)) D));
+  let V := Nat.add (Nat.mul C (Nat.pow 2 8)) D;
+Eq.trans (Bits.low_low 8 32 Z rfl)
+      (Eq.trans (Bits.low_add_pow_l 16 8 A Y)
+      (Eq.trans (Bits.low_low 8 24 W rfl)
+      (Eq.trans (Bits.low_add_pow_l 8 8 B (Bits.low 16 V))
+      (Eq.trans (Bits.low_low 8 16 V rfl)
+      (Eq.trans (Bits.low_add_pow 8 C D)
+      (Bits.low_of_lt 8 D hD))))))
+
+/-- `high 8` of `A · 2^24 + Y` is `A · 2^16 + high 8 Y`. -/
+def Bits.high8_mul24 (A Y : Nat) :
+    Bits.high 8 (Nat.add (Nat.mul A (Nat.pow 2 24)) Y)
+      = Nat.add (Nat.mul A (Nat.pow 2 16)) (Bits.high 8 Y) :=
+  Bits.high_add_pow_l 16 8 A Y
+
+/-- `high 8` of `A · 2^16 + Y` is `A · 2^8 + high 8 Y`. -/
+def Bits.high8_mul16 (A Y : Nat) :
+    Bits.high 8 (Nat.add (Nat.mul A (Nat.pow 2 16)) Y)
+      = Nat.add (Nat.mul A (Nat.pow 2 8)) (Bits.high 8 Y) :=
+  Bits.high_add_pow_l 8 8 A Y
+
+/-- The second byte of `cat4N`. -/
+def Bits.low8_high8_cat4N (A B C D : Nat)
+    (hC : Nat.lt C (Nat.pow 2 8) = .true) (hD : Nat.lt D (Nat.pow 2 8) = .true) :
+    Bits.low 8 (Bits.high 8 (BitVec.cat4N A B C D)) = C :=
+  let Y := Bits.low 24 (Nat.add (Nat.mul B (Nat.pow 2 16))
+    (Bits.low 16 (Nat.add (Nat.mul C (Nat.pow 2 8)) D)));
+  let Z := Nat.add (Nat.mul A (Nat.pow 2 24)) Y;
+  let W := Nat.add (Nat.mul B (Nat.pow 2 16))
+    (Bits.low 16 (Nat.add (Nat.mul C (Nat.pow 2 8)) D));
+  let V := Nat.add (Nat.mul C (Nat.pow 2 8)) D;
+Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Bits.high_low 8 24 Z))
+      (Eq.trans (Bits.low_low 8 24 (Bits.high 8 Z) rfl)
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Bits.high8_mul24 A Y))
+      (Eq.trans (Bits.low_add_pow_l 8 8 A (Bits.high 8 Y))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Bits.high_low 8 16 W))
+      (Eq.trans (Bits.low_low 8 16 (Bits.high 8 W) rfl)
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Bits.high8_mul16 B (Bits.low 16 V)))
+      (Eq.trans (Bits.low_add_pow 8 B (Bits.high 8 (Bits.low 16 V)))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Bits.high_low 8 8 V))
+      (Eq.trans (Bits.low_low 8 8 (Bits.high 8 V) rfl)
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Bits.high_add_pow 8 C D))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 (Nat.add C t)) (Bits.high_small 8 D hD))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Nat.add_zero C))
+      (Bits.low_of_lt 8 C hC)))))))))))))
+
+/-- The third byte of `cat4N`. -/
+def Bits.low8_high16_cat4N (A B C D : Nat)
+    (hB : Nat.lt B (Nat.pow 2 8) = .true) :
+    Bits.low 8 (Bits.high 16 (BitVec.cat4N A B C D)) = B :=
+  let Y := Bits.low 24 (Nat.add (Nat.mul B (Nat.pow 2 16))
+    (Bits.low 16 (Nat.add (Nat.mul C (Nat.pow 2 8)) D)));
+  let Z := Nat.add (Nat.mul A (Nat.pow 2 24)) Y;
+  let W := Nat.add (Nat.mul B (Nat.pow 2 16))
+    (Bits.low 16 (Nat.add (Nat.mul C (Nat.pow 2 8)) D));
+  let V := Nat.add (Nat.mul C (Nat.pow 2 8)) D;
+Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Bits.high_low 16 16 Z))
+      (Eq.trans (Bits.low_low 8 16 (Bits.high 16 Z) rfl)
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Bits.high_high 8 8 Z))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 (Bits.high 8 t)) (Bits.high8_mul24 A Y))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Bits.high8_mul16 A (Bits.high 8 Y)))
+      (Eq.trans (Bits.low_add_pow 8 A (Bits.high 8 (Bits.high 8 Y)))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Bits.high_high 8 8 Y))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Bits.high_low 16 8 W))
+      (Eq.trans (Bits.low_low 8 8 (Bits.high 16 W) rfl)
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Bits.high_high 8 8 W))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 (Bits.high 8 t)) (Bits.high8_mul16 B (Bits.low 16 V)))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Bits.high_add_pow 8 B (Bits.high 8 (Bits.low 16 V))))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 (Nat.add B t)) (Bits.high_high 8 8 (Bits.low 16 V)))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 (Nat.add B t)) (Bits.high_small 16 (Bits.low 16 V) (Bits.low_lt 16 V)))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Nat.add_zero B))
+      (Bits.low_of_lt 8 B hB)))))))))))))))
+
+/-- The fourth byte of `cat4N`. -/
+def Bits.low8_high24_cat4N (A B C D : Nat) (hA : Nat.lt A (Nat.pow 2 8) = .true) :
+    Bits.low 8 (Bits.high 24 (BitVec.cat4N A B C D)) = A :=
+  let Y := Bits.low 24 (Nat.add (Nat.mul B (Nat.pow 2 16))
+    (Bits.low 16 (Nat.add (Nat.mul C (Nat.pow 2 8)) D)));
+  let Z := Nat.add (Nat.mul A (Nat.pow 2 24)) Y;
+  let W := Nat.add (Nat.mul B (Nat.pow 2 16))
+    (Bits.low 16 (Nat.add (Nat.mul C (Nat.pow 2 8)) D));
+  let V := Nat.add (Nat.mul C (Nat.pow 2 8)) D;
+Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Bits.high_low 24 8 Z))
+      (Eq.trans (Bits.low_low 8 8 (Bits.high 24 Z) rfl)
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Eq.trans (Eq.symm (Bits.high_high 8 16 Z)) (Eq.symm (Eq.congrArg (fun t => Bits.high 8 t) (Bits.high_high 8 8 Z)))))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 (Bits.high 8 (Bits.high 8 t))) (Bits.high8_mul24 A Y))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 (Bits.high 8 t)) (Bits.high8_mul16 A (Bits.high 8 Y)))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Bits.high_add_pow 8 A (Bits.high 8 (Bits.high 8 Y))))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 (Nat.add A t)) (Eq.trans (Eq.congrArg (fun t => Bits.high 8 t) (Bits.high_high 8 8 Y)) (Bits.high_high 8 16 Y)))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 (Nat.add A t)) (Bits.high_small 24 Y (Bits.low_lt 24 W)))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Nat.add_zero A))
+      (Bits.low_of_lt 8 A hA)))))))))
+
+-- ## The slice forms (`Hw.slice`)
+
+/-- `cat4_byte0`: `Hw.slice 0 8` of `cat4` is its last byte. -/
+def BitVec.cat4_byte0 (a b c d : BitVec 8) :
+    BitVec.ofNat 8 (Nat.shiftRight (BitVec.cat4 a b c d).toNat 0) = d :=
+  UIntN.ext (BitVec.ofNat 8 (Nat.shiftRight (BitVec.cat4 a b c d).toNat 0)) d
+    (Eq.trans (Bits.wofNat_val 8 (Nat.shiftRight (BitVec.cat4 a b c d).toNat 0))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 (Nat.shiftRight t 0)) (BitVec.cat4_toNat a b c d))
+        (Eq.trans
+          (Eq.congrArg (fun t => Bits.low 8 t) (Bits.shiftRight_zero (BitVec.cat4N a.toNat b.toNat c.toNat d.toNat)))
+          (Bits.low8_cat4N a.toNat b.toNat c.toNat d.toNat (UIntN.toNat_lt d)))))
+
+/-- `cat4_byte1`: `Hw.slice 8 8` of `cat4` is its third byte. -/
+def BitVec.cat4_byte1 (a b c d : BitVec 8) :
+    BitVec.ofNat 8 (Nat.shiftRight (BitVec.cat4 a b c d).toNat 8) = c :=
+  UIntN.ext (BitVec.ofNat 8 (Nat.shiftRight (BitVec.cat4 a b c d).toNat 8)) c
+    (Eq.trans (Bits.wofNat_val 8 (Nat.shiftRight (BitVec.cat4 a b c d).toNat 8))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 (Nat.shiftRight t 8)) (BitVec.cat4_toNat a b c d))
+        (Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Bits.div_pow 8 (BitVec.cat4N a.toNat b.toNat c.toNat d.toNat)))
+          (Bits.low8_high8_cat4N a.toNat b.toNat c.toNat d.toNat (UIntN.toNat_lt c) (UIntN.toNat_lt d)))))
+
+/-- `cat4_byte2`: `Hw.slice 16 8` of `cat4` is its second byte. -/
+def BitVec.cat4_byte2 (a b c d : BitVec 8) :
+    BitVec.ofNat 8 (Nat.shiftRight (BitVec.cat4 a b c d).toNat 16) = b :=
+  UIntN.ext (BitVec.ofNat 8 (Nat.shiftRight (BitVec.cat4 a b c d).toNat 16)) b
+    (Eq.trans (Bits.wofNat_val 8 (Nat.shiftRight (BitVec.cat4 a b c d).toNat 16))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 (Nat.shiftRight t 16)) (BitVec.cat4_toNat a b c d))
+        (Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Bits.div_pow 16 (BitVec.cat4N a.toNat b.toNat c.toNat d.toNat)))
+          (Bits.low8_high16_cat4N a.toNat b.toNat c.toNat d.toNat (UIntN.toNat_lt b)))))
+
+/-- `cat4_byte3`: `Hw.slice 24 8` of `cat4` is its first byte. -/
+def BitVec.cat4_byte3 (a b c d : BitVec 8) :
+    BitVec.ofNat 8 (Nat.shiftRight (BitVec.cat4 a b c d).toNat 24) = a :=
+  UIntN.ext (BitVec.ofNat 8 (Nat.shiftRight (BitVec.cat4 a b c d).toNat 24)) a
+    (Eq.trans (Bits.wofNat_val 8 (Nat.shiftRight (BitVec.cat4 a b c d).toNat 24))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 (Nat.shiftRight t 24)) (BitVec.cat4_toNat a b c d))
+        (Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Bits.div_pow 24 (BitVec.cat4N a.toNat b.toNat c.toNat d.toNat)))
+          (Bits.low8_high24_cat4N a.toNat b.toNat c.toNat d.toNat (UIntN.toNat_lt a)))))
+
+-- ## A plain word's bytes
+
+/-- The value of `Hw.slice (8k) 8 x`: byte `k` of a word (its `toNat` is a `low` of a
+`high`, the form `Bits` already has). -/
+def BitVec.byte_toNat {ω n : Nat} (k : Nat) (x : BitVec n) :
+    (BitVec.ofNat 8 (Nat.shiftRight x.toNat (Nat.mul 8 k))).toNat
+      = Bits.low 8 (Bits.high (Nat.mul 8 k) x.toNat) :=
+  Eq.trans (Bits.wofNat_val 8 (Nat.shiftRight x.toNat (Nat.mul 8 k)))
+    (Eq.congrArg (fun t => Bits.low 8 t) (Bits.div_pow (Nat.mul 8 k) x.toNat))
+
+
+-- ## Bounds for the little-endian sum of four bytes
+
+def Bits.dec8 : Nat := Bits.dec (Nat.pow 2 8)
+def Bits.dec16 : Nat := Bits.dec (Nat.pow 2 16)
+def Bits.dec24 : Nat := Bits.dec (Nat.pow 2 24)
+
+def Bits.bound16 : Nat.lt (Nat.add (Nat.mul Bits.dec8 (Nat.pow 2 8)) Bits.dec8) (Nat.pow 2 16) = .true := rfl
+def Bits.bound24 : Nat.lt (Nat.add (Nat.mul Bits.dec8 (Nat.pow 2 16)) Bits.dec16) (Nat.pow 2 24) = .true := rfl
+def Bits.bound32 : Nat.lt (Nat.add (Nat.mul Bits.dec8 (Nat.pow 2 24)) Bits.dec24) (Nat.pow 2 32) = .true := rfl
+
+/-- `C · 2^8 + D < 2^16` for 8-bit `C`, `D`. -/
+def Bits.mul8_add_lt16 (C D : Nat) (hC : Nat.lt C (Nat.pow 2 8) = .true)
+    (hD : Nat.lt D (Nat.pow 2 8) = .true) :
+    Nat.lt (Nat.add (Nat.mul C (Nat.pow 2 8)) D) (Nat.pow 2 16) = .true :=
+  Nat.lt_of_le_of_lt (Nat.add (Nat.mul C (Nat.pow 2 8)) D)
+    (Nat.add (Nat.mul Bits.dec8 (Nat.pow 2 8)) Bits.dec8) (Nat.pow 2 16)
+    (Nat.add_le_add (Nat.mul C (Nat.pow 2 8)) (Nat.mul Bits.dec8 (Nat.pow 2 8)) D Bits.dec8
+      (Nat.mul_le_mul_right (Nat.pow 2 8) C Bits.dec8 (Bits.lt_le_pred C (Nat.pow 2 8) hC))
+      (Bits.lt_le_pred D (Nat.pow 2 8) hD))
+    Bits.bound16
+
+/-- `B · 2^16 + V < 2^24` for an 8-bit `B` and a 16-bit `V`. -/
+def Bits.mul16_add_lt24 (B V : Nat) (hB : Nat.lt B (Nat.pow 2 8) = .true)
+    (hV : Nat.lt V (Nat.pow 2 16) = .true) :
+    Nat.lt (Nat.add (Nat.mul B (Nat.pow 2 16)) V) (Nat.pow 2 24) = .true :=
+  Nat.lt_of_le_of_lt (Nat.add (Nat.mul B (Nat.pow 2 16)) V)
+    (Nat.add (Nat.mul Bits.dec8 (Nat.pow 2 16)) Bits.dec16) (Nat.pow 2 24)
+    (Nat.add_le_add (Nat.mul B (Nat.pow 2 16)) (Nat.mul Bits.dec8 (Nat.pow 2 16)) V Bits.dec16
+      (Nat.mul_le_mul_right (Nat.pow 2 16) B Bits.dec8 (Bits.lt_le_pred B (Nat.pow 2 8) hB))
+      (Bits.lt_le_pred V (Nat.pow 2 16) hV))
+    Bits.bound24
+
+/-- `A · 2^24 + W < 2^32` for an 8-bit `A` and a 24-bit `W`. -/
+def Bits.mul24_add_lt32 (A W : Nat) (hA : Nat.lt A (Nat.pow 2 8) = .true)
+    (hW : Nat.lt W (Nat.pow 2 24) = .true) :
+    Nat.lt (Nat.add (Nat.mul A (Nat.pow 2 24)) W) (Nat.pow 2 32) = .true :=
+  Nat.lt_of_le_of_lt (Nat.add (Nat.mul A (Nat.pow 2 24)) W)
+    (Nat.add (Nat.mul Bits.dec8 (Nat.pow 2 24)) Bits.dec24) (Nat.pow 2 32)
+    (Nat.add_le_add (Nat.mul A (Nat.pow 2 24)) (Nat.mul Bits.dec8 (Nat.pow 2 24)) W Bits.dec24
+      (Nat.mul_le_mul_right (Nat.pow 2 24) A Bits.dec8 (Bits.lt_le_pred A (Nat.pow 2 8) hA))
+      (Bits.lt_le_pred W (Nat.pow 2 24) hW))
+    Bits.bound32
+
+/-- `cat4N` of 8-bit bytes is the little-endian sum: no low remains. -/
+def BitVec.cat4N_val (A B C D : Nat) (hA : Nat.lt A (Nat.pow 2 8) = .true)
+    (hB : Nat.lt B (Nat.pow 2 8) = .true) (hC : Nat.lt C (Nat.pow 2 8) = .true)
+    (hD : Nat.lt D (Nat.pow 2 8) = .true) :
+    BitVec.cat4N A B C D
+      = Nat.add (Nat.mul A (Nat.pow 2 24))
+          (Nat.add (Nat.mul B (Nat.pow 2 16)) (Nat.add (Nat.mul C (Nat.pow 2 8)) D)) :=
+  let V := Nat.add (Nat.mul C (Nat.pow 2 8)) D;
+  let W := Nat.add (Nat.mul B (Nat.pow 2 16)) (Bits.low 16 V);
+  let Z := Nat.add (Nat.mul A (Nat.pow 2 24)) (Bits.low 24 W);
+  let hV := Bits.mul8_add_lt16 C D hC hD;
+  let hW := Bits.mul16_add_lt24 B (Bits.low 16 V) hB (Bits.low_lt 16 V);
+  let hZ := Bits.mul24_add_lt32 A (Bits.low 24 W) hA (Bits.low_lt 24 W);
+  Eq.trans (Bits.low_of_lt 32 Z hZ)
+    (Eq.trans
+      (Eq.congrArg (fun (t : Nat) => Nat.add (Nat.mul A (Nat.pow 2 24)) t) (Bits.low_of_lt 24 W hW))
+      (Eq.congrArg (fun (t : Nat) => Nat.add (Nat.mul A (Nat.pow 2 24)) (Nat.add (Nat.mul B (Nat.pow 2 16)) t)) (Bits.low_of_lt 16 V hV)))
+
+-- ## `Nat.beq` and `BitVec.beq` are reflexive
+
+def Bits.beq_refl : (n : Nat) → Nat.beq n n = .true
+  | .zero => rfl
+  | .succ n => Bits.beq_refl n
+
+def BitVec.beq_refl {0 n : Nat} (x : BitVec n) : BitVec.beq x x = .true := Bits.beq_refl x.toNat

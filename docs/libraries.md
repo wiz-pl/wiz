@@ -87,6 +87,23 @@ the lemma's own shape. It imports `BitVecShift` for the `Bits.low`/`low_low` lem
 it is a proof module too; the signed forms (SLT/SLTI) need the top-bit/order lemma
 written up in `drafts/rv-add/README.md` §4.
 
+`lib/BitVecMem.wiz` (`import BitVecMem`): the word/byte half of a memory proof, in the
+same `Bits.low`/`Bits.high` normal form (so it imports `BitVecAdd`). `Bits.low_add_pow`
+(`low w (A · 2^k + B) = low w B`), its symbolic-exponent form `Bits.low_add_pow_l`, and
+`Bits.high_small` (`high k B = 0` for `B < 2^k`) are the slicing steps;
+`BitVec.cat4` is the core's four-lane word `{a, {b, {c, d}}}` and
+`BitVec.cat4_byte0`…`cat4_byte3` read its bytes in the `BitVec.ofNat 8 (Nat.shiftRight
+… (8k))` form that `Hw.slice` has, while `BitVec.cat4N_val` evaluates the whole word as
+the little-endian sum `A · 2^24 + (B · 2^16 + (C · 2^8 + D))` of four 8-bit bytes (with
+the `Nat` bounds `Bits.mul8_add_lt16`/`mul16_add_lt24`/`mul24_add_lt32`, stated from
+named closed numerals so the conversion check does not loop). `BitVec.byte_toNat` is the
+plain-word version, and `Bits.beq_refl`/`BitVec.beq_refl` are the reflexive equality the
+lane write/read laws need. The read-after-write laws themselves are in
+`lib/Hdl/Core.wiz` (`HwTy.El.memRead_write_hit`/`_miss`/`_off`); `drafts/rv-add/Mem.wiz`
+combines them with the slicing to show that a store then a load at the same address
+returns the stored byte and other words are unchanged, and states the whole-state
+refinement map for the RV core's four lanes.
+
 ## H14 S0: hardware as tagless-final code, with sharing
 
 `lib/Hdl/Core.wiz` (`import Hdl.Core`) is the L2 layer of the HDL plan: combinational

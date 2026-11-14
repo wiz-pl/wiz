@@ -158,6 +158,18 @@ def vecGroup : Group where
           "#eval BitVec.slt (BitVec.ofNat 32 4294967295) (BitVec.ofNat 32 0)\n" ++
           "#eval Bits.mod_add_four 7")
           [".true", ".true", ".true", "()"] },
+    { name := "BitVecMem: word/byte slicing and the little-endian sum of four bytes", run := fun _ =>
+        okLibs ("import BitVecMem\n" ++
+          "def a (x : BitVec 8) : Bits.low 8 (Nat.add (Nat.mul x.toNat (Nat.pow 2 8)) 0) = Bits.low 8 0 := Bits.low_add_pow 8 x.toNat 0\n" ++
+          "def b (x : BitVec 8) : Nat.lt (Nat.add (Nat.mul x.toNat (Nat.pow 2 8)) x.toNat) (Nat.pow 2 16) = .true := Bits.mul8_add_lt16 x.toNat x.toNat (UIntN.toNat_lt x) (UIntN.toNat_lt x)\n" ++
+          "def c (a b c d : BitVec 8) : BitVec.ofNat 8 (Nat.shiftRight (BitVec.cat4 a b c d).toNat 0) = d := BitVec.cat4_byte0 a b c d\n" ++
+          "def d (a b c d : BitVec 8) : BitVec.ofNat 8 (Nat.shiftRight (BitVec.cat4 a b c d).toNat 8) = c := BitVec.cat4_byte1 a b c d\n" ++
+          "def e (a b c d : BitVec 8) : BitVec.ofNat 8 (Nat.shiftRight (BitVec.cat4 a b c d).toNat 16) = b := BitVec.cat4_byte2 a b c d\n" ++
+          "def f (a b c d : BitVec 8) : BitVec.ofNat 8 (Nat.shiftRight (BitVec.cat4 a b c d).toNat 24) = a := BitVec.cat4_byte3 a b c d\n" ++
+          "def g (x : BitVec 32) : BitVec.beq x x = .true := BitVec.beq_refl x\n" ++
+          "#eval (BitVec.cat4 (BitVec.ofNat 8 1) (BitVec.ofNat 8 2) (BitVec.ofNat 8 3) (BitVec.ofNat 8 4)).toNat\n" ++
+          "#eval BitVec.cat4N 1 2 3 4")
+          ["16909060", "16909060"] },
     { name := "bit vectors: widths and bits as a Vec", run := fun _ =>
         okLibs (bvPrelude ++ "#eval (BitVec.concat (BitVec.ofNat 4 10) (BitVec.ofNat 4 3)).toNat\n" ++
           "#eval (BitVec.extract 5 2 (b8 60)).toNat\n#eval (BitVec.zeroExtend 16 (b8 200)).toNat\n" ++

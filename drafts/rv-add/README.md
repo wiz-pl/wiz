@@ -237,3 +237,44 @@ write-enable given `bit 1 target = 0` (a `coreStep` state lemma), then the claim
 `Eq.congrArg`-plus-`rfl` as in §2. After that: the remaining branch conditions
 (`RLT`/`RGE` need `Bits.slt_char` for their `taken`), and `JALR` (whose core target has
 bit 0 forced to 0, so its two alignment checks agree without a hypothesis).
+
+## 9. Loads/stores and the memory bridge (agent `rv-mem`)
+
+Branch `agent/rv-mem`, off `agent/rv-slt` 4aa6d210. The word/byte lemmas are
+`lib/BitVecMem.wiz`; the RV side is `drafts/rv-add/Mem.wiz` (`wiz check -I
+/workspace/wiz-rv/src drafts/rv-add/Mem.wiz`, **20 s**, light 2 GB).
+
+**What the library has** (§1 of `docs/libraries.md`, `import BitVecMem`):
+`Bits.low_add_pow`/`low_add_pow_l` (`low w (A·2^k + B) = low w B`), `Bits.high_small`,
+`BitVec.cat4`/`cat4_byte0…3` (the core's four-lane word in the `ofNat 8 (shiftRight …
+(8k))` form `Hw.slice` produces) and `BitVec.cat4N_val` (that word's `toNat` is the
+little-endian sum `A·2^24 + (B·2^16 + (C·2^8 + D))`, with named closed bounds so the
+conversion check does not loop on a large numeral).
+
+**The bridge.** `RvMem.store_load0` is the same-address fact, in the lane form the core
+uses: after `Hw.memWrite m0 1 k d`, the load's rebuilt word has low byte `d`
+(`BitVec.cat4_byte0` + `HwTy.El.memRead_write_hit`); `RvMem.store_load_other` is
+"other words unchanged" (`memRead_write_miss`) and `RvMem.store_off` the disabled case.
+At the specification level, `RvMem.load_one_store` (`Rv.load 1` after `Rv.store 1` at the
+same address is `Nat.mod v 256`) and `RvMem.load_one_other` are the corresponding
+`Rv.storeB` laws.
+
+**The claims.** `RvMem.Claim`/`RvMem.LoadClaim` are `Pf.Claim` restated for the memory
+instructions: the decode phase holds the word in `q` (`RvMem.at0`, with the x0 = 0
+invariant `RvMem.rf0`), the execute cycle is entered with `Pf.setQ`, a store finishes
+there (2 steps) and a load's value is written in the memory cycle (3 steps).
+`RvMem.sb_ok` and `RvMem.sw_ok` are kernel-checked for `SB x5, 0(x0)` and `SW x5, 0(x0)`
+(PC + rd; **20 s** with the whole file). `RvMem.lw_rfa` reduces the LW result register to
+`BitVec.cat4` of the four lanes at word 0. `RvMem.agree`/`RvMem.ClaimMem` are the
+whole-state shape (PC, every architectural register read, and the four lanes as byte `i`
+of word `k`); the remaining work is the pointwise lane comparison against `Rv.store`/
+`Rv.load` for that shape: it needs the address equality `beq 0 k = beq (byteAddr k 0) 0`
+(word 0 and the store's `maddr`), which is a `Nat`-arithmetic step (`4k` vs `k`,
+`Nat.beq` false from inequality), plus the store-data byte equalities for SW. Those are
+the `seal-range`/H4 item, not new proof architecture.
+
+**The state-level conversion trap (repeated).** `Pf.ok`'s generic glue evaluates
+`Pf.G … q` at a *symbolic* `q`; for a store that is >180 s (the memory writes and
+`decode` of the symbolic word), while the same `Pf.G … (bytes w)` is 5 s. So the claims
+here take the decode state with the word already in `q` (no fetch hypothesis), which is
+the state `Pf.ok`'s hypothesis produces; the fetch half stays the existing `Pf.ok` job.

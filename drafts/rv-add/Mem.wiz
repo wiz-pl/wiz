@@ -1,0 +1,167 @@
+import Rv.Proofs
+import BitVecMem
+-- Loads, stores and the memory read-after-write bridge against the canonical multi-cycle
+-- core (`wiz -I /workspace/wiz-rv/src`).
+--
+-- The instruction word is in the decode phase's `q` (`RvMem.at0`); the execute cycle is
+-- entered with the word re-injected by `Pf.setQ`, exactly as `Pf.G`. A store completes in
+-- the execute cycle (2 steps from decode); a load's value is written in the memory cycle
+-- (3 steps).
+--
+-- The claims use the on-chip address 0 (`rs1 = x0`, immediate 0, and the x0 = 0 invariant
+-- `RvMem.rf0`), so the byte lanes and the byte select are concrete; the data, the
+-- registers and the memory functions are symbolic. The bridge lemmas below are general in
+-- the word and lane; the symbolic-address claims are the next step
+-- (`wiz-notes/rv-core-proofs.md` §11).
+--
+-- Check: wiz check -I /workspace/wiz-rv/src drafts/rv-add/Mem.wiz
+
+-- ## The architectural register file with x0 = 0
+
+def RvMem.rf0 (a : Arch) (i : BitVec 4) : BitVec 32 :=
+  if BitVec.beq i (BitVec.ofNat 4 0) then BitVec.ofNat 32 0 else a.regs (BitVec.ofNat 5 i.toNat)
+
+-- the low byte of a word, in the spec's `Nat.mod` form
+def RvMem.slice0_8 (x : BitVec 32) :
+    Hw.slice (r := HwTy.El) 0 8 x = BitVec.ofNat 8 (Nat.mod x.toNat 256) :=
+  UIntN.ext (Hw.slice (r := HwTy.El) 0 8 x) (BitVec.ofNat 8 (Nat.mod x.toNat 256))
+    (Eq.trans (Bits.wofNat_val 8 (Nat.div x.toNat 1))
+      (Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Bits.div_one x.toNat))
+        (Eq.trans (Eq.symm (Bits.mod_pow 8 x.toNat))
+          (Eq.trans
+            (Eq.symm (Bits.low_of_lt 8 (Nat.mod x.toNat 256)
+              (Eq.substProp (fun (t : Nat) => Nat.lt t (Nat.pow 2 8) = .true) (Eq.symm (Bits.mod_pow 8 x.toNat)) (Bits.low_lt 8 x.toNat))))
+            (Eq.symm (Bits.wofNat_val 8 (Nat.mod x.toNat 256)))))))
+
+-- the core in decode on `w`, with x0 = 0 in both register-file copies
+def RvMem.at0 (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32) (cnt srd : BitVec 5)
+    (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) : CoreSt 4 9 HwTy.El :=
+  CoreSt.mk (BitVec.ofNat 4 Ph.d) a.pc
+    (BitVec.ofNat 8 (Rv.bits w 0 8)) (BitVec.ofNat 8 (Rv.bits w 8 8)) (BitVec.ofNat 8 (Rv.bits w 16 8)) (BitVec.ofNat 8 (Rv.bits w 24 8))
+    m0 m1 m2 m3 (RvMem.rf0 a) (RvMem.rf0 a) x1 x2 acc dv rm cnt srd sf3 slo sio (BitVec.ofNat 3 0)
+    (BitVec.ofNat 32 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0)
+    (BitVec.ofNat 4 0) (BitVec.ofNat 4 0) (BitVec.ofNat 1 0)
+    (BitVec.ofNat 32 0) (BitVec.ofNat 128 0) (BitVec.ofNat (L1.tagW 9) 0)
+    (fun (a : BitVec (L1.bits 9)) => BitVec.ofNat 128 0) (fun (a : BitVec (L1.bits 9)) => BitVec.ofNat (L1.tagW 9) 0)
+    (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 2 0) (BitVec.ofNat 1 0) (BitVec.ofNat 128 0) (BitVec.ofNat 32 0) (BitVec.ofNat 1 0)
+
+-- the state after the execute cycle, from decode with the word in `q`
+def RvMem.E (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32) (cnt srd : BitVec 5)
+    (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) : CoreSt 4 9 HwTy.El :=
+  Pf.step (Pf.setQ (Pf.step (RvMem.at0 a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) (Pf.bytes w))
+
+-- ## The claim shapes
+
+-- a store: the execute cycle is the instruction's last architectural change
+def RvMem.Claim (w rd : Nat) : Prop :=
+  (a : Arch) → (m0 m1 m2 m3 : BitVec 9 → BitVec 8) → (x1 x2 acc dv rm : BitVec 32) → (cnt srd : BitVec 5) → (sf3 : BitVec 3) → (slo : BitVec 2) → (sio : BitVec 1) →
+  Pf.core (RvMem.E a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio) rd = Pf.spec a w rd
+
+-- a load: the memory cycle writes rd
+def RvMem.LoadClaim (w rd : Nat) : Prop :=
+  (a : Arch) → (m0 m1 m2 m3 : BitVec 9 → BitVec 8) → (x1 x2 acc dv rm : BitVec 32) → (cnt srd : BitVec 5) → (sf3 : BitVec 3) → (slo : BitVec 2) → (sio : BitVec 1) →
+  Pf.core (Pf.step (RvMem.E a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) rd = Pf.spec a w rd
+
+-- the whole-state agreement: PC, every architectural register read, and the four lanes as
+-- byte `i` of word `k` (the spec's byte-addressed memory, wrapping at 2 KB)
+def RvMem.byteAddr (k : BitVec 9) (i : Nat) : BitVec 32 :=
+  BitVec.ofNat 32 (Nat.add (Nat.mul 4 k.toNat) i)
+
+def RvMem.agree (s : CoreSt 4 9 HwTy.El) (b : Arch) : Prop :=
+  (s.pc = b.pc)
+  ∧ ((j : BitVec 4) → s.rfa j = Rv.reg b j.toNat)
+  ∧ ((k : BitVec 9) → s.m0 k = b.mem (RvMem.byteAddr k 0))
+  ∧ ((k : BitVec 9) → s.m1 k = b.mem (RvMem.byteAddr k 1))
+  ∧ ((k : BitVec 9) → s.m2 k = b.mem (RvMem.byteAddr k 2))
+  ∧ ((k : BitVec 9) → s.m3 k = b.mem (RvMem.byteAddr k 3))
+
+-- the whole-state claim (memory included): a load leaves the lanes alone, a store updates
+-- them; `agree` is the invariant `RvMem.ClaimMem` refines
+def RvMem.ClaimMem (w rd : Nat) : Prop :=
+  (a : Arch) → (m0 m1 m2 m3 : BitVec 9 → BitVec 8) → (x1 x2 acc dv rm : BitVec 32) → (cnt srd : BitVec 5) → (sf3 : BitVec 3) → (slo : BitVec 2) → (sio : BitVec 1) →
+  RvMem.agree (RvMem.at0 a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio) a →
+  RvMem.agree (RvMem.E a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio) (Rv.exec Pf.cfg a w)
+
+-- ## Stores (the execute cycle is the last architectural change)
+
+def RvMem.sb_ok : RvMem.Claim (Pf.w (A.sb 5 0 0)) 5 := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio => rfl
+def RvMem.sw_ok : RvMem.Claim (Pf.w (A.sw 5 0 0)) 5 := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio => rfl
+
+-- ## A load's value, before the specification (LW at address 0)
+
+-- after the memory cycle the loaded word is the four lanes at word 0, little-endian
+def RvMem.lw_rfa (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32) (cnt srd : BitVec 5)
+    (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) :
+    (Pf.step (RvMem.E a (Pf.w (A.lw 5 0 0)) m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)).rfa (BitVec.ofNat 4 5)
+      = BitVec.cat4 (m3 (BitVec.ofNat 9 0)) (m2 (BitVec.ofNat 9 0)) (m1 (BitVec.ofNat 9 0)) (m0 (BitVec.ofNat 9 0)) := rfl
+
+-- ## The memory bridge: a store then a load at the same address
+
+-- a memory written through lane `i` at word `k`: reading the word that the load rebuilds
+-- (its byte `i`) returns the stored byte (`HwTy.El.memRead_write_hit`), and reading any
+-- other word is the read before the store (`memRead_write_miss` / `memRead_write_off`).
+
+-- the word a load reconstructs from the four lanes at word `k`
+def RvMem.wordAt (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (k : BitVec 9) : BitVec 32 :=
+  BitVec.cat4 (Hw.memRead (r := HwTy.El) m3 k) (Hw.memRead (r := HwTy.El) m2 k)
+    (Hw.memRead (r := HwTy.El) m1 k) (Hw.memRead (r := HwTy.El) m0 k)
+
+-- **store then load, same address (byte lane 0)**
+def RvMem.store_load0 (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (k : BitVec 9) (d : BitVec 8) :
+    BitVec.ofNat 8 (Nat.shiftRight (RvMem.wordAt (Hw.memWrite (r := HwTy.El) m0 (BitVec.ofNat 1 1) k d) m1 m2 m3 k).toNat 0) = d :=
+  Eq.trans
+    (BitVec.cat4_byte0 (Hw.memRead (r := HwTy.El) m3 k) (Hw.memRead (r := HwTy.El) m2 k)
+      (Hw.memRead (r := HwTy.El) m1 k) (Hw.memRead (r := HwTy.El) (Hw.memWrite (r := HwTy.El) m0 (BitVec.ofNat 1 1) k d) k))
+    (HwTy.El.memRead_write_hit m0 k d k (BitVec.beq_refl k))
+
+-- **unaffected addresses**: a read of word `j` through the written lane is the old read
+def RvMem.store_load_other (m : BitVec 9 → BitVec 8) (k j : BitVec 9) (d : BitVec 8)
+    (h : BitVec.beq k j = .false) :
+    Hw.memRead (Hw.memWrite (r := HwTy.El) m (BitVec.ofNat 1 1) k d) j = Hw.memRead (r := HwTy.El) m j :=
+  HwTy.El.memRead_write_miss m (BitVec.ofNat 1 1) k d j h
+
+-- a disabled store leaves the word unchanged
+def RvMem.store_off (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (k : BitVec 9) (d : BitVec 8) :
+    RvMem.wordAt (Hw.memWrite (r := HwTy.El) m0 (BitVec.ofNat 1 0) k d) m1 m2 m3 k = RvMem.wordAt m0 m1 m2 m3 k := rfl
+
+-- ## The specification's own store/load byte law
+
+-- the same architectural state with another memory
+def RvMem.withMem (s : Arch) (m : BitVec 32 → BitVec 8) : Arch :=
+  Arch.mk s.pc s.regs m s.trap s.out s.inp
+
+-- the byte read from a one-byte store at the stored address is the stored byte
+def RvMem.store_one_read (s : Arch) (ad : BitVec 32) (v : Nat) :
+    (Rv.store 1 Pf.cfg s.mem ad v (Rv.maddr Pf.cfg ad)).toNat = Nat.mod v 256 :=
+  let e := Eq.substProp
+    (fun (hit : Bool) => (if hit then BitVec.ofNat 8 (Nat.mod v 256) else s.mem (Rv.maddr Pf.cfg ad)) = BitVec.ofNat 8 (Nat.mod v 256))
+    (Eq.symm (BitVec.beq_refl (Rv.maddr Pf.cfg ad))) rfl;
+  Eq.trans (Eq.congrArg (fun (x : BitVec 8) => x.toNat) e)
+    (Eq.trans (Bits.wofNat_val 8 (Nat.mod v 256))
+      (Eq.trans
+        (Bits.low_of_lt 8 (Nat.mod v 256)
+          (Eq.substProp (fun (t : Nat) => Nat.lt t (Nat.pow 2 8) = .true) (Eq.symm (Bits.mod_pow 8 v)) (Bits.low_lt 8 v)))
+        rfl))
+
+-- a byte read from a one-byte store elsewhere is the old byte
+def RvMem.store_one_other (s : Arch) (ad b : BitVec 32) (v : Nat)
+    (h : BitVec.beq (Rv.maddr Pf.cfg b) (Rv.maddr Pf.cfg ad) = .false) :
+    (Rv.store 1 Pf.cfg s.mem ad v (Rv.maddr Pf.cfg b)).toNat = (s.mem (Rv.maddr Pf.cfg b)).toNat :=
+  Eq.congrArg (fun (x : BitVec 8) => x.toNat)
+    (Eq.substProp
+      (fun (hit : Bool) => (if hit then BitVec.ofNat 8 (Nat.mod v 256) else s.mem (Rv.maddr Pf.cfg b)) = s.mem (Rv.maddr Pf.cfg b))
+      (Eq.symm h) rfl)
+
+-- **a store of one byte, then a load at the same address, gives the stored byte**
+def RvMem.load_one_store (s : Arch) (ad : BitVec 32) (v : Nat) :
+    Rv.load 1 Pf.cfg (RvMem.withMem s (Rv.store 1 Pf.cfg s.mem ad v)) ad = Nat.mod v 256 :=
+  Eq.trans (Nat.add_zero ((Rv.store 1 Pf.cfg s.mem ad v (Rv.maddr Pf.cfg ad)).toNat))
+    (RvMem.store_one_read s ad v)
+
+-- **unaffected addresses**: a load elsewhere after the store is the old load
+def RvMem.load_one_other (s : Arch) (ad b : BitVec 32) (v : Nat)
+    (h : BitVec.beq (Rv.maddr Pf.cfg b) (Rv.maddr Pf.cfg ad) = .false) :
+    Rv.load 1 Pf.cfg (RvMem.withMem s (Rv.store 1 Pf.cfg s.mem ad v)) b = Rv.load 1 Pf.cfg s b :=
+  Eq.trans (Nat.add_zero ((Rv.store 1 Pf.cfg s.mem ad v (Rv.maddr Pf.cfg b)).toNat))
+    (Eq.trans (RvMem.store_one_other s ad b v h)
+      (Eq.symm (Nat.add_zero ((s.mem (Rv.maddr Pf.cfg b)).toNat))))
