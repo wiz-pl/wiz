@@ -783,7 +783,23 @@ parameters and no memory map:
   (`last` remembers the master granted most recently), keeps the owner until its answer
   (`ready` or `rvalid`), and also releases the bus if the owner drops `valid` (a master
   that traps mid-request must not own it forever). The idle master sees a quiet
-  response.
+  response. The step is split into `Bus.arbStepAtBits`/`Bus.arbStepAt`, with the grant
+  `g` as an explicit input; `Bus.arbStep` is the definition that chooses
+  `g = Bus.pick s a.valid b.valid`. That indexed form is what the proofs fix and
+  case-split on.
+* `Bus.arbNStep n aw dw` is the N-master generalisation: a round-robin `Bus.pickN` over
+  a `last` index, the same hold-until-answered rule, and one response per master
+  (`Bus.respAt`/`Bus.respN`, the granted master gets the slave's answer and everyone
+  else a quiet one). It is the executable value model (`Bus.arbNMealy`), and the
+  reference the circuit below is checked against.
+* `Bus.arbNC n aw dw` is the same N-master arbiter as a synthesisable `Circuit`: its
+  state is the busy/owner/last index bundle (`Bus.ArbNS`), its input the nested request
+  product (`Bus.prodN`, one leaf per field) and the slave's response, and its output the
+  forwarded request, the grant index with `gntValid`, and the nested response vector.
+  `Bus.pickNHw` is `Bus.pickN` with signal indices (`Bus.firstGE`/`Bus.firstLE` scan the
+  round-robin order), and `Bus.respAtHw` is the one-hot response mux. It works for any
+  `n ≥ 1`; `Bus.arbNC 2` uses the same round-robin rule as `Bus.arbC`, whose two-master
+  API is unchanged.
 * `Bus.decode`/`Bus.addrIn` test a window `[base, base + size)`; `Bus.routeC aw dw base
   size` forwards a hit to the slave and answers a miss in the same cycle with `ready`
   (and `rvalid` for a read), zero data and `err` high (golem's wild-pointer rule).
@@ -799,12 +815,19 @@ payload while stalled), `AnsweredAfter` (a response answers a request `d` cycles
 earlier; 0 for the router, 2 for the RAM), `AtMostOneAck` (arbiter mutual exclusion),
 `NoStarvation` (progress under a fair sink), `RouteCorrect` (hit forwards unchanged, miss
 answers with `err`) and `ReadAfterWrite` (the RAM reads back a completed write, with byte
-strobes). The kernel checks the value-level memory read-after-write and no-alias lemmas
-(`Bus.Law.memWrite_read_same`, `Bus.Law.memWrite_read_miss`) and the
-`Bus.ReqW.ofReq`/`toReq` round trip; the rest are
-Boolean checks (`StableStep`, `RouteOk`, …) over exhaustively generated or long
-pseudo-random traces, compared against `Netlist.simulate` and `Circuit.simFast`:
-**tested, not proved**.
+strobes). The kernel-checked part now includes the arbiter: `arbStepAt_mutex` (one
+step never acknowledges both masters), `pick_busy` (`pick` grants to the owner while a
+request is in flight), `arbStepAt_ownerAck` (only the owner is answered),
+`arbStepAt_someAck`/`arbProgress` (every cycle in which the sink acknowledges answers
+at least one master), and `respAt_law` (the N-master response function has at most one
+acknowledgement and always answers the granted master). `arbNStep_resp_law` lifts that
+to the value model's response vector: every non-granted master is quiet and an
+acknowledging slave answers the master `Bus.arbNStep` grants. Also kernel-checked are the
+value-level memory read-after-write/no-alias lemmas (`memWrite_read_same`,
+`memWrite_read_miss`), the `Bus.ReqW.ofReq`/`toReq` round trip, and `Vec.get_ofFn`.
+The remaining laws (`StableStep`, `RouteOk`, per-master `NoStarvation`, …) are Boolean
+checks over exhaustively generated or long pseudo-random traces, compared against
+`Netlist.simulate` and `Circuit.simFast`: **tested, not proved**.
 
 `examples/hdl-bus.wiz` (test group `bus-crc`) writes and reads the RAM, checks the
 arbiter's grants alternate (and hold while the slave is not ready), and routes hits and
@@ -812,7 +835,18 @@ misses; every circuit's value simulation, `Netlist.simulate` and `Circuit.simFas
 cycle for cycle. `examples/hdl-bus-law.wiz` (test group `bus-law`) exhausts the router
 (4608 inputs), checks 256 generated arbiter cycles with a compliant source and a fair
 sink, and checks the RAM read-after-write and all 16-bit byte-strobe masks, again across
-the three simulations.
+the three simulations. It also exhausts the N-master selector for n = 1..4 (all valid
+masks, every `last`), checks the N response law for n = 3 over every busy/owner/last,
+request mask and sink acknowledgement (288 steps), and runs the N-master Mealy machine
+for 32 start cycles with all masters asking and an always-ready sink, checking that
+each master is answered within n = 3 cycles. `examples/hdl-arb-n.wiz` (also test group
+`bus-law`) drives `Bus.arbNC` for n = 2, 3 and 4 for 64 cycles each: the value
+simulation, `Netlist.simulate` and `Circuit.simFast` agree, the output equals the
+`Bus.arbNStep` model cycle for cycle, and the packed netlist output satisfies the
+ownership/progress law (at most one acknowledgement; a valid grant is answered) and the
+forwarded request is the granted one. The same example checks the circuit's fairness for
+n = 3, and the test case runs yosys `check -assert` and `synth_ice40` on the emitted
+Verilog when yosys is on PATH (skipped silently otherwise).
 
 ## CRC-8/SMBUS (`lib/Hdl/Crc.wiz`)
 
