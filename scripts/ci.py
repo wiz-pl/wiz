@@ -275,6 +275,9 @@ def check_shards(binary):
 # Path filters (`changes`). Files only people read: a change of only these runs no build
 # and no tests.
 DOCS = ["docs/*", "*.md", "LICENSE", "COPYING*"]
+# The attestation tooling is covered by the `attest` job's Python unit tests. It does not
+# feed the Lean build, so a change only under scripts/attest must not schedule a shard.
+SELF_TESTED = ["scripts/attest/*"]
 # Files every shard depends on: the Lean sources (compiler, tests, grail), the
 # build and its toolchain, the C runtime, CI itself. A change to any runs every shard.
 EVERYTHING = ["*.lean", "lakefile.*", "lean-toolchain", "lake-manifest.json", "flake.*",
@@ -304,12 +307,17 @@ def lib_closure(paths):
     return out
 
 
+def is_code_change(files):
+    """Whether `files` needs the Lean build; docs and self-tested scripts do not."""
+    return any(not matches(f, DOCS + SELF_TESTED) for f in files)
+
+
 def needed_shards(files):
     """The shards a change needs: all of them when a file of EVERYTHING changed; else a
     shard with "inputs" (globs; lib/ files among them bring the lib/ files they import)
     when one of its inputs changed, and a shard without "inputs" when anything but docs
-    changed. Nothing for a docs-only change."""
-    code = [f for f in files if not matches(f, DOCS)]
+    or scripts/attest changed. Nothing for a docs/attest-only change."""
+    code = [f for f in files if not matches(f, DOCS + SELF_TESTED)]
     ss = shards()
     if any(matches(f, EVERYTHING) for f in code):
         return [s["name"] for s in ss]
@@ -338,7 +346,7 @@ def changes(args):
                          text=True, check=True, cwd=ROOT).stdout
     files = [f for f in out.split("\n") if f]
     names = needed_shards(files)
-    code = any(not matches(f, DOCS) for f in files)
+    code = is_code_change(files)
     print(f"code={'true' if code else 'false'}")
     print(f"shards={json.dumps(names)}")
     print(f"{len(files)} files changed; code: {code}; shards: {', '.join(names) or 'none'}", file=sys.stderr)
