@@ -397,11 +397,16 @@ package's `lib` targets with its module roots (dependencies included), into
   copies the site's scripts and `scroll.css`; `wiz doc` takes them from `share/wiz/web`
   of a release, `web/out` of a checkout, or `--web DIR`. Without them the pages are
   plain HTML (and `wiz doc` says so).
-* **CI** builds the library's documentation on `master` with the Wasm module (the
-  `docs` job, on pushes only: `wiz doc --lib` with source links to the commit) and
-  uploads it as the artifact `wiz-docs` (kept 3 days). Proposed, not configured: publish it from `master` to GitHub Pages
-  (`actions/upload-pages-artifact` + `actions/deploy-pages` in that job, Pages set to
-  "GitHub Actions").
+* **CI** builds the library's documentation on `master` and publishes it: the `docs` job
+  runs `wiz doc --lib` on a push (never a pull request), with source links to the
+  commit and the Wasm module, and uploads it as the artifact `wiz-docs` (3 days, for
+  debugging); `deploy-docs` deploys that artifact to GitHub Pages at
+  <https://wiz-pl.github.io/wiz/>. The docs pages are the site root (`index.html`,
+  `A.B.html`, `A.B.json`, `search.js` and the Wasm files) and every link is relative.
+  A repository has one Pages site and each deployment replaces the whole tree, so a
+  future performance site shares this deployment under `/perf/` rather than deploying
+  separately. `docs/building.md`, "Documentation site", has the URL layout, the
+  one-time Pages setting and the single-site rule.
 * **Tests**: the group `doc` (`Tests/Doc.lean`): doc comments stored and replayed by the
   cache; Markdown; `wiz doc` on a small package with doc comments (kinds, docs, source
   links, instances, the index); every cross-link resolves; every declaration is in the
