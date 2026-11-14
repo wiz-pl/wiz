@@ -29,6 +29,10 @@ structure Toolchain where
   /-- (23c) read-only elaboration caches, searched in order after `cacheDir` and never
   written (a Nix store's `--cache-ro $out/share/wiz/cache`) -/
   readCaches : List System.FilePath := []
+  /-- (`--region-cache`) serve cached module effects from mmap'ed `.wizr` regions in the
+  same cache layers as the text entries; the text entries stay the authority and the
+  fallback -/
+  regionCache : Bool := false
   /-- module roots searched after the standard library -/
   searchPath : List System.FilePath := []
   /-- (27a) `--trust-native`: `native_refl` may decide equations by running them -/
@@ -69,6 +73,7 @@ def set (t : Toolchain) (key value : String) : Option Toolchain :=
   | "gc-ldflags" => some { t with gcLdflags := words value }
   | "cache" => some { t with cacheDir := some (System.FilePath.mk value) }
   | "cache-ro" => some { t with readCaches := t.readCaches ++ [System.FilePath.mk value] }
+  | "region-cache" => some { t with regionCache := value == "true" }
   | "root" => some { t with searchPath := t.searchPath ++ [System.FilePath.mk value] }
   | "native-fuel" => value.toNat?.map fun n => { t with nativeFuel := some n }
   | _ => none
@@ -76,12 +81,14 @@ def set (t : Toolchain) (key value : String) : Option Toolchain :=
 /-- Take the toolchain flags out of the arguments: `--cc X`, `--cflags "…"`,
 `--ldflags "…"`, `--libs "…"`, `--gmp "…"`, `--llc X`, `--gc-cflags "…"`,
 `--gc-ldflags "…"`, `--cache DIR` (the cache written to), `--cache-ro DIR` (repeatable:
-a read-only cache, searched in the order given), `--no-cache` (both: no write cache and no
-read caches; a later `--cache` or `--cache-ro` adds one again), `-I DIR`, (27a)
+a read-only cache, searched in the order given), `--region-cache` (serve module effects
+from `.wizr` regions in those layers; experimental), `--no-cache` (both: no write cache and
+no read caches; a later `--cache` or `--cache-ro` adds one again), `-I DIR`, (27a)
 `--trust-native`, `--native-fuel N`, (28b) `--sat-solver CMD`, `--solver-timeout MS`,
 (28a) `--trust-smt`, `--smt-solver CMD` (flags only, not settings of a grail file). -/
 partial def parseFlags (t : Toolchain) : List String → Toolchain × List String
   | "--no-cache" :: rest => parseFlags { t with cacheDir := none, readCaches := [] } rest
+  | "--region-cache" :: rest => parseFlags { t with regionCache := true } rest
   | "--trust-native" :: rest => parseFlags { t with trustNative := true } rest
   | "--sat-solver" :: cmd :: rest => parseFlags { t with satSolver := some cmd } rest
   | "--trust-smt" :: rest => parseFlags { t with trustSmt := true } rest
@@ -109,6 +116,7 @@ def toFlags (t : Toolchain) : List String :=
    match t.cacheDir with
    | some d => reads ++ ["--cache", d.toString]
    | none => if t.readCaches.isEmpty then ["--no-cache"] else "--no-cache" :: reads) ++
+  (if t.regionCache then ["--region-cache"] else []) ++
   t.searchPath.flatMap (fun d => ["-I", d.toString]) ++
   (if t.trustNative then ["--trust-native"] else []) ++
   (match t.nativeFuel with | some n => ["--native-fuel", toString n] | none => []) ++
@@ -145,7 +153,8 @@ def render (t : Toolchain) : String :=
   s!"cc {t.cc}\ncflags {" ".intercalate t.cflags}\nldflags {" ".intercalate t.ldflags}\nlibs {" ".intercalate t.libs}\ngmp {" ".intercalate t.gmp}\nllc {t.llc}\n" ++
   s!"gc-cflags {" ".intercalate t.gcCflags}\ngc-ldflags {" ".intercalate t.gcLdflags}\n" ++
   String.join (t.readCaches.map fun d => s!"cache-ro {d}\n") ++
-  s!"cache {(t.cacheDir.map toString).getD "(off)"}\nroots {" ".intercalate (t.searchPath.map toString)}\n"
+  s!"cache {(t.cacheDir.map toString).getD "(off)"}\nregion-cache {t.regionCache}\n" ++
+  s!"roots {" ".intercalate (t.searchPath.map toString)}\n"
 
 end Toolchain
 end Wiz
