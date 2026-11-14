@@ -68,14 +68,43 @@ def identNames : List Syntax → List String
   | .cons s rest => .cons (match s with
       | .ident n => n
       | _ => "_") (identNames rest)
+-- (A10) a binder's kind, as the Lean frontend's `BinderInfo`: explicit, implicit
+-- (`{x : A}`), or instance (`[i : C A]`, resolved by `resolveInstances`). The mask of a
+-- global is one kind per parameter, and an `inst` binder inserts a class problem.
+inductive BKind where
+  | dflt
+  | impl
+  | inst
+def instKinds : Nat → List BKind
+  | .zero => .nil
+  | .succ k => .cons .inst (instKinds k)
+def isInstB (b : Syntax) : Bool := strEq (kindOf b) "binder.inst"
+def implKinds : Nat → List BKind
+  | .zero => .nil
+  | .succ k => .cons .impl (implKinds k)
+def dfltKinds : Nat → List BKind
+  | .zero => .nil
+  | .succ k => .cons .dflt (dfltKinds k)
+def isImplK : BKind → Bool
+  | .impl => .true
+  | _ => .false
 def binderNames (b : Syntax) : List String := match b with
   | .ident n => .cons n .nil
   | _ => match strEq (kindOf b) "term.hole" with
     | .true => .cons "_" .nil
-    | .false => identNames (kids (kid b 2))
-def binderType (b : Syntax) : Option Syntax := match kids (kid b 3) with
-  | .cons _ (.cons t _) => .some t
-  | _ => .none
+    | .false => match isInstB b with
+      -- `[x : C A]` names `x`; `[C A]` gets a deterministic name (de Bruijn resolution
+      -- handles shadowing)
+      | .true => match kids (kid b 1) with
+        | .cons (.ident n) _ => .cons n .nil
+        | _ => .cons "inst✝" .nil
+      | .false => identNames (kids (kid b 2))
+-- (an instance binder's type is at 2, the other binders' after their `:`)
+def binderType (b : Syntax) : Option Syntax := match isInstB b with
+  | .true => .some (kid b 2)
+  | .false => match kids (kid b 3) with
+    | .cons _ (.cons t _) => .some t
+    | _ => .none
 
 -- Quantities (stage 21m), as `elabQuantity` in the Lean elaborator: a binder's written
 -- quantity (`(1 x : A)`, `{0 A : Type}`, `(ω f : …)`), or its default: ω on an explicit
@@ -315,11 +344,22 @@ def List.reverseOf {A : Type} : List A → List A → List A
   | .nil, acc => acc
   | .cons x xs, acc => List.reverseOf xs (.cons x acc)
 
+-- (A10) a class: its name and its methods, in field order. The class itself is an
+-- ordinary structure (an inductive with one constructor `mk`); a method `C.f` is the
+-- projection with an instance binder for its `self` argument.
+inductive ClassInfo where
+  | mk (methods : List String)
+-- (A10) an instance: the class it is for, its global's name, its priority (as
+-- `(priority := n)`, 1000 by default) and its declaration order (later first). Two
+-- instances may not have definitionally equal types (our duplicate check); so priority
+-- does not choose between overlapping candidates yet.
+inductive InstInfo where
+  | mk (cls : String) (name : String) (prio : Nat) (order : Nat)
 -- a global: its name, its universe-level parameters, type, and value as closed terms
--- (other globals are constants in them), and its value with every global inlined (for
--- `#reduce`, since `quote` doesn't unfold constants)
+-- (other globals are constants in them), its value with every global inlined (for
+-- `#reduce`, since `quote` doesn't unfold constants), and its parameters' binder kinds
 inductive Global where
-  | mk (name : String) (lparams : List String) (ty val inlined : Tm) (implicits : List Bool)
+  | mk (name : String) (lparams : List String) (ty val inlined : Tm) (implicits : List BKind)
 -- an inductive type (stage 16): its description (with constants, and inlined), and
 -- each constructor's fields: name, whether recursive, and type (over the fields before)
 inductive CField where
@@ -348,32 +388,59 @@ inductive Foreign where
   -- (stage 21t) `attribute [implemented_by g] f`: compiled code runs `g` for `f`
   | impl (name target : String)
 -- the globals so far: by position (the first is `0`), their names in scope, the
--- inductive types by name, and the foreign declarations
+-- inductive types by name, the foreign declarations, and (A10) the classes and the
+-- instances (the latest first)
 inductive Globals where
   | mk (all : Array Global) (scope : Scope) (inds : StrMap (Option IndInfo)) (ffi : List Foreign)
-def Globals.empty : Globals := .mk Array.empty Scope.empty StrMap.empty .nil
+       (classes : StrMap (Option ClassInfo)) (insts : List InstInfo)
+def Globals.empty : Globals := .mk Array.empty Scope.empty StrMap.empty .nil StrMap.empty .nil
 def Globals.scope : Globals → Scope
-  | .mk _ sc _ _ => sc
+  | .mk _ sc _ _ _ _ => sc
 def Globals.add (gs : Globals) (g : Global) : Globals := match gs with
-  | .mk all sc inds ffi => match g with
-    | .mk x _ _ _ _ _ => .mk (Array.push all g) (Scope.addGlobal sc x) inds ffi
+  | .mk all sc inds ffi cls ins => match g with
+    | .mk x _ _ _ _ _ => .mk (Array.push all g) (Scope.addGlobal sc x) inds ffi cls ins
 def Globals.addInd (gs : Globals) (T : String) (info : IndInfo) : Globals := match gs with
-  | .mk all sc inds ffi => .mk all sc (StrMap.insert inds (Str.ofString T) (.some info)) ffi
+  | .mk all sc inds ffi cls ins => .mk all sc (StrMap.insert inds (Str.ofString T) (.some info)) ffi cls ins
 def Globals.ind (gs : Globals) (T : String) : Option IndInfo := match gs with
-  | .mk _ _ inds _ => StrMap.findD inds (Str.ofString T) .none
+  | .mk _ _ inds _ _ _ => StrMap.findD inds (Str.ofString T) .none
 def Globals.ffi : Globals → List Foreign
-  | .mk _ _ _ ffi => ffi
+  | .mk _ _ _ ffi _ _ => ffi
 def Globals.addFFI (gs : Globals) (f : Foreign) : Globals := match gs with
-  | .mk all sc inds ffi => .mk all sc inds (.cons f ffi)
+  | .mk all sc inds ffi cls ins => .mk all sc inds (.cons f ffi) cls ins
+-- (A10) the classes by name
+def Globals.class (gs : Globals) (T : String) : Option ClassInfo := match gs with
+  | .mk _ _ _ _ cls _ => match StrMap.findD cls (Str.ofString T) .none with
+    | .some info => .some info
+    | .none => .none
+def Globals.addClass (gs : Globals) (T : String) (info : ClassInfo) : Globals := match gs with
+  | .mk all sc inds ffi cls ins => .mk all sc inds ffi (StrMap.insert cls (Str.ofString T) (.some info)) ins
+-- (A10) the instances, the latest first
+def Globals.insts : Globals → List InstInfo
+  | .mk _ _ _ _ _ ins => ins
+def Globals.addInst (gs : Globals) (i : InstInfo) : Globals := match gs with
+  | .mk all sc inds ffi cls ins => .mk all sc inds ffi cls (.cons i ins)
+-- (A10) a global's parameter kinds replaced (a class's type former inserts its
+-- instance parameters at every use, as in Lean)
+def Globals.setMask (gs : Globals) (n : String) (m : List BKind) : Globals := match gs with
+  | .mk all sc inds ffi cls ins => match Scope.lookup sc n with
+    | .none => gs
+    | .some i => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil) with
+      | .mk nm ps ty v iv _ => .mk (Array.set all (Array.size all - 1 - i) (.mk nm ps ty v iv m)) sc inds ffi cls ins
+-- the instances of class `C`, the latest first
+def instsOf : String → List InstInfo → List InstInfo
+  | _, .nil => .nil
+  | C, .cons (.mk cls n p o) rest => match strEq C cls with
+    | .true => .cons (.mk cls n p o) (instsOf C rest)
+    | .false => instsOf C rest
 -- the global at index `i` (the latest is `0`): a constant, or its value inlined
 def globalTm (inline : Bool) (gs : Globals) (i : Nat) : Tm := match gs with
-  | .mk all _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil) with
+  | .mk all _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil) with
     | .mk n _ ty v iv _ => match inline with
       | .true => iv
       | .false => .const n .nil .nil v ty
 -- the universe parameters a global declares (none at all before U1 for every definition)
 def globalParams (gs : Globals) (i : Nat) : List String := match gs with
-  | .mk all _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil) with
+  | .mk all _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil) with
     | .mk _ ps _ _ _ _ => ps
 -- a global's own parameters as levels (`fun u => .lparam u`, for a polymorphic global
 -- used where no level syntax is available)
@@ -412,7 +479,7 @@ inductive Step where
 -- added may be in scope before it, or twice among them. One exception: a partial
 -- definition's signature (an axiom) is followed, once, by its body under the same name.
 def Globals.all : Globals → Array Global
-  | .mk all _ _ _ => all
+  | .mk all _ _ _ _ _ => all
 inductive Seen where
   | mk (name : String) (axiomOnly : Bool)
 def isAxiomTm : Tm → Bool
@@ -452,20 +519,26 @@ def errStep (gs : Globals) (m : String) : Step := .mk (String.append "error: " m
 -- its type
 inductive Field where
   | mk (name : String) (q : Q) (impl : Bool) (ty : Syntax)
-def trues : Nat → List Bool
+-- the kinds of a constructor's parameters (all implicit), and a field's stated
+-- implicitness as a kind
+def impls : Nat → List BKind
   | .zero => .nil
-  | .succ k => .cons .true (trues k)
-def falses : Nat → List Bool
-  | .zero => .nil
-  | .succ k => .cons .false (falses k)
--- which parameters are implicit (`{x : A}`), one per name
-def paramMask : List Syntax → List Bool
+  | .succ k => .cons .impl (impls k)
+def fieldKinds : List Bool → List BKind
+  | .nil => .nil
+  | .cons b rest => .cons (match b with
+      | .true => .impl
+      | .false => .dflt) (fieldKinds rest)
+-- which parameters are implicit (`{x : A}`) or instance (`[i : C A]`), one per name
+def paramMask : List Syntax → List BKind
   | .nil => .nil
   | .cons b bs =>
     let n := List.length (binderNames b);
     List.append (match strEq (kindOf b) "binder.implicit" with
-      | .true => trues n
-      | .false => falses n) (paramMask bs)
+      | .true => implKinds n
+      | .false => match isInstB b with
+        | .true => instKinds n
+        | .false => dfltKinds n) (paramMask bs)
 
 def fieldsNamed (q : Q) (impl : Bool) (ty : Syntax) : List String → List Field
   | .nil => .nil
@@ -883,7 +956,7 @@ def addCtors (T : String) (ps : List String) (pts : Tms) (nidx : Nat) (I : Tm) (
         match check empty v (eval .nil ty) with
         | .err _ => .err
         | .ok _ _ => match addCtors T ps pts nidx I Tc TcI k strct (Globals.add gs (.mk (String.append (String.append T ".") (ctorName c)) .nil ty v v
-          (List.append (trues np) (fieldImpl (ctorFields c))))) (i + 1) cs with
+          (List.append (impls np) (fieldKinds (fieldImpl (ctorFields c)))))) (i + 1) cs with
         | .ok gs' rest => .ok gs' (.cons (.mk (ctorName c) fs (match ics with
           | .tcons ic _ => ic
           | .tnil => .star) (match strct with
@@ -1117,38 +1190,50 @@ inductive MetaInfo where
 -- a postponed argument: its syntax, type and context, and the metavariable standing for it
 inductive Pend where
   | mk (s : Syntax) (dom : Val) (m : Tm) (cx : Cx)
+-- (A10) a class problem: the metavariable standing for the instance, the class type
+-- `C a…` it must have (at the context `cx`), and that context (for local instances and
+-- error messages). Resolution (`resolveInstances`) solves them before a command ends.
+inductive PInst where
+  | mk (hole : Tm) (ty : Val) (cx : Cx)
 -- the elaborator's state: the term metavariables, the postponed arguments, the level
--- metavariables (U1: their solution, `none` while unsolved) and the current
--- declaration's universe parameters (`._ {u}` on it)
+-- metavariables (U1: their solution, `none` while unsolved), the current
+-- declaration's universe parameters (`._ {u}` on it), and (A10) the class problems
 inductive ES where
-  | mk (metas : Array MetaInfo) (pending : List Pend) (lmetas : Array (Option Lvl)) (lparams : List String)
-def ES.empty : ES := .mk Array.empty .nil Array.empty .nil
+  | mk (metas : Array MetaInfo) (pending : List Pend) (lmetas : Array (Option Lvl)) (lparams : List String) (insts : List PInst)
+def ES.empty : ES := .mk Array.empty .nil Array.empty .nil .nil
 def ES.get (es : ES) (i : Nat) : MetaInfo := match es with
-  | .mk ms _ _ _ => Array.getD ms i (.mk 0 .none .none)
+  | .mk ms _ _ _ _ => Array.getD ms i (.mk 0 .none .none)
 -- an implicit type argument's sort constraint (see `MetaInfo`)
 def metaSconstr (es : ES) (i : Nat) : Option Lvl := match ES.get es i with
   | .mk _ _ sc => sc
 def ES.pend (es : ES) (p : Pend) : ES := match es with
-  | .mk ms ps ls lps => .mk ms (.cons p ps) ls lps
+  | .mk ms ps ls lps ins => .mk ms (.cons p ps) ls lps ins
+-- (A10) a new class problem
+def ES.pinst (es : ES) (p : PInst) : ES := match es with
+  | .mk ms ps ls lps ins => .mk ms ps ls lps (.cons p ins)
+def ES.insts : ES → List PInst
+  | .mk _ _ _ _ ins => ins
+def ES.noInst : ES → ES
+  | .mk ms ps ls lps _ => .mk ms ps ls lps .nil
 -- a level metavariable's solution (`none` while unsolved)
 def ES.getLvl (es : ES) (i : Nat) : Option Lvl := match es with
-  | .mk _ _ ls _ => Array.getD ls i .none
+  | .mk _ _ ls _ _ => Array.getD ls i .none
 def ES.setLvl (es : ES) (i : Nat) (l : Lvl) : ES := match es with
-  | .mk ms ps ls lps => .mk ms ps (Array.set ls i (.some l)) lps
+  | .mk ms ps ls lps ins => .mk ms ps (Array.set ls i (.some l)) lps ins
 -- solving a level metavariable (a later `zonk` puts its solution in)
 def ES.solveLvl (es : ES) (i : Nat) (l : Lvl) : ES := ES.setLvl es i l
 -- the universe parameters of the declaration being elaborated (`.{u, v}`)
 def ES.params (es : ES) : List String := match es with
-  | .mk _ _ _ lps => lps
+  | .mk _ _ _ lps _ => lps
 def ES.withParams (es : ES) (ps : List String) : ES := match es with
-  | .mk ms pend ls _ => .mk ms pend ls ps
+  | .mk ms pend ls _ ins => .mk ms pend ls ps ins
 -- a fresh level metavariable
 inductive LvlR where
   | mk (l : Lvl) (es : ES)
 def newLvl (es : ES) : LvlR := match es with
-  | .mk ms ps ls lps =>
+  | .mk ms ps ls lps ins =>
     let id := Array.size ls;
-    .mk (.lmvar id) (.mk ms ps (Array.push ls .none) lps)
+    .mk (.lmvar id) (.mk ms ps (Array.push ls .none) lps ins)
 -- `n` fresh level metavariables
 inductive LvlsR where
   | mk (ls : List Lvl) (es : ES)
@@ -1226,11 +1311,11 @@ def teleOf : List (Unit → Tm) → Tms → Tms
 inductive MetaR where
   | mk (t : Tm) (es : ES)
 def newMetaS (es : ES) (cx : Cx) (A : Val) (sc : Option Lvl) : MetaR := match es with
-  | .mk ms ps ls lps =>
+  | .mk ms ps ls lps ins =>
     let d := Cx.lvl cx;
     let id := Array.size ms;
     let ty := piTele (teleOf (Cx.tele cx) .tnil) (quote d A);
-    .mk (tApps (.axiomC (metaName id) ty) (pvars d d)) (.mk (Array.push ms (.mk d .none sc)) ps ls lps)
+    .mk (tApps (.axiomC (metaName id) ty) (pvars d d)) (.mk (Array.push ms (.mk d .none sc)) ps ls lps ins)
 def newMeta (es : ES) (cx : Cx) (A : Val) : MetaR := newMetaS es cx A .none
 
 -- a spine's arguments, first first (`none` if it isn't only applications)
@@ -1378,11 +1463,11 @@ partial def pruneTm (k d : Nat) (es : ES) (t : Tm) : Pruned := match spineHead t
           | .some A => match lowerTm (kj - k) 0 A with
             | .some Ak => match piPrefix k ty Ak with
               | .some nty => match es with
-                | .mk ms ps ls lps =>
+                | .mk ms ps ls lps ins =>
                   let id := Array.size ms;
                   let fresh : Tm := .axiomC (metaName id) nty;
                   let ms1 := Array.push ms (.mk k .none .none);
-                  .mk (.mk (Array.set ms1 j (.mk kj (.some (tApps fresh (pvars k kj))) sc)) ps ls lps)
+                  .mk (.mk (Array.set ms1 j (.mk kj (.some (tApps fresh (pvars k kj))) sc)) ps ls lps ins)
                     (appsL fresh (takeL k (spineArgsTm t .nil)))
               | .none => .mk es t
             | .none => .mk es t
@@ -1416,9 +1501,9 @@ def solve (es0 : ES) (cx : Cx) (i k : Nat) (t : Val) : Option ES :=
       | .true => Option.some tm
       | .false => lowerTm (d - k) 0 tm) with
     | .some sol => match es with
-      | .mk ms ps ls lps =>
+      | .mk ms ps ls lps ins =>
         let sc := metaSconstr es i;
-        let es1 : ES := .mk (Array.set ms i (.mk k (.some sol) sc)) ps ls lps;
+        let es1 : ES := .mk (Array.set ms i (.mk k (.some sol) sc)) ps ls lps ins;
         -- (an implicit type argument's sort: the solution must be in it, which solves
         -- the universe level it mentions)
         match sc with
@@ -1655,7 +1740,7 @@ def zonkAll (es : ES) (d : Nat) : List Tm → Option (List Tm)
 end
 
 inductive HE where
-  | ok (t : Tm) (ty : Val) (es : ES) (mask : List Bool)
+  | ok (t : Tm) (ty : Val) (es : ES) (mask : List BKind)
   | err (msg : String)
 -- the arguments of `if`: before `then`, between `then` and `else`, after `else`
 inductive IfParts where
@@ -1898,7 +1983,7 @@ def sigmaSorted (q : Q) (es : ES) (a b : Tm) (la lb : Val) : Tm := match whnf (f
     | .vsort l2 => .sigma q l1 l2 a b
     | _ => sigmaTm q a b
   | _ => sigmaTm q a b
-def tailBools : List Bool → List Bool
+def tailKinds : List BKind → List BKind
   | .nil => .nil
   | .cons _ rest => rest
 def scopeNames : Scope → List String
@@ -1909,8 +1994,8 @@ inductive TE where
   | ok (t : Tm) (ty : Val) (es : ES)
   | err (msg : String)
 -- a global's implicit parameters (by its index from the latest)
-def globalMask (gs : Globals) (i : Nat) : List Bool := match gs with
-  | .mk all _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil) with
+def globalMask (gs : Globals) (i : Nat) : List BKind := match gs with
+  | .mk all _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil) with
     | .mk _ _ _ _ _ m => m
 -- Pattern matching in definitions (stages 16b, 16e): `def f (ps) : R := match x, y with
 -- | p₁, q₁ => rhs₁ …`, the scrutinees parameters and `R` not mentioning them, is
@@ -2074,19 +2159,20 @@ def isParamArg (params : List String) (binds : List Bind) (i : Nat) (a : Syntax)
 -- the arguments (the explicit parameters': implicit ones are left out, being the same)
 -- before the structural one are the parameters, the structural one a field with a
 -- hypothesis: that hypothesis (the later arguments are its arguments)
-def nthBool : List Bool → Nat → Bool
-  | .nil, _ => .false
+def nthKind : List BKind → Nat → BKind
+  | .nil, _ => .dflt
   | .cons b rest, i => match i with
     | .zero => b
-    | .succ j => nthBool rest j
-partial def recCallIH (params : List String) (mask : List Bool) (binds : List Bind) (p : Nat) (ihs : List IHName) : List Syntax → Nat → Option String
+    | .succ j => nthKind rest j
+partial def recCallIH (params : List String) (mask : List BKind) (binds : List Bind) (p : Nat) (ihs : List IHName) : List Syntax → Nat → Option String
   | args, i => match Nat.lt i (List.length params) with
     | .false => match args with
       | .nil => .some ""
       | .cons _ _ => .none
-    | .true => match nthBool mask i with
-      | .true => recCallIH params mask binds p ihs args (i + 1)
-      | .false => match args with
+    | .true => match nthKind mask i with
+      | .impl => recCallIH params mask binds p ihs args (i + 1)
+      | .inst => recCallIH params mask binds p ihs args (i + 1)
+      | .dflt => match args with
         | .nil => .none
         | .cons a rest => match recCallIH params mask binds p ihs rest (i + 1) with
           | .none => .none
@@ -2105,17 +2191,17 @@ def nthS' : List Syntax → Nat → Syntax
     | .zero => s
     | .succ j => nthS' rest j
 -- how many explicit parameters there are up to the `p`th
-def explicitUpTo : List Bool → Nat → Nat
+def explicitUpTo : List BKind → Nat → Nat
   | .nil, _ => 0
   | .cons b rest, p => (match b with
-      | .true => 0
-      | .false => 1) + (match p with
+      | .dflt => 1
+      | _ => 0) + (match p with
       | .zero => 0
       | .succ q => explicitUpTo rest q)
 -- what a match needs: the function's name, parameters and structural position, the
 -- result type `R` (over the `n` parameters), the motive's universe `v`
 inductive MatchCtx where
-  | mk (f : String) (params : List String) (p n v : Nat) (R RI : Tm) (pts ptsI : Tms) (mask : List Bool)
+  | mk (f : String) (params : List String) (p n v : Nat) (R RI : Tm) (pts ptsI : Tms) (mask : List BKind)
 mutual
 -- replace the recursive calls `f …` by hypotheses
 def rewriteRec (mc : MatchCtx) (binds : List Bind) (ihs : List IHName) (stx : Syntax) : Syntax :=
@@ -2392,9 +2478,15 @@ def noBE : BE := .ok .tnil ES.empty
 -- with a placeholder for each explicit argument (`appExpected`)
 inductive PreR where
   | mk (implicits : List Tm) (ty : Val) (es : ES)
-partial def preArgs (es : ES) (cx : Cx) (fty : Val) (m : List Bool) (args : List Syntax) : Option PreR :=
+partial def preArgs (es : ES) (cx : Cx) (fty : Val) (m : List BKind) (args : List Syntax) : Option PreR :=
   match m with
-  | .cons .true m' => match whnf (force es fty) with
+  | .cons .impl m' => match whnf (force es fty) with
+    | .vpi _ _ _ dom env cod => match newImplicit es cx dom with
+      | .mk mt es1 => match preArgs es1 cx (eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod) m' args with
+        | .some (.mk ims rty es2) => .some (.mk (.cons mt ims) rty es2)
+        | .none => .none
+    | _ => .none
+  | .cons .inst m' => match whnf (force es fty) with
     | .vpi _ _ _ dom env cod => match newImplicit es cx dom with
       | .mk mt es1 => match preArgs es1 cx (eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod) m' args with
         | .some (.mk ims rty es2) => .some (.mk (.cons mt ims) rty es2)
@@ -2404,7 +2496,7 @@ partial def preArgs (es : ES) (cx : Cx) (fty : Val) (m : List Bool) (args : List
     | .nil => .some (.mk .nil fty es)
     | .cons _ rest => match whnf (force es fty) with
       | .vpi _ _ _ dom env cod => match newImplicit es cx dom with
-        | .mk mt es1 => preArgs es1 cx (eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod) (tailBools m) rest
+        | .mk mt es1 => preArgs es1 cx (eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod) (tailKinds m) rest
       | _ => .none
 -- Literal patterns (13q; `compileLitTest` in the Lean elaborator). At `Nat` a numeral
 -- pattern is its constructors (`patOf`), up to 256; at another type `T` with a `T.beq`
@@ -2604,8 +2696,8 @@ def ctorHead (gs : Globals) (cx : Cx) (h : Syntax) : Bool := match strEq (kindOf
         | .none => .false
     | .none => .false
   | .false => .false
-def headImplicit : List Bool → Bool
-  | .cons b _ => b
+def headImplicit : List BKind → Bool
+  | .cons b _ => isImplK b
   | .nil => .false
 def descFn : Tm → Tm
   | .darg _ _ f => f
@@ -2614,7 +2706,7 @@ def descFn : Tm → Tm
 -- unification), or the explicitly written ones. The constant carries its level
 -- instantiation, and its type is evaluated with it.
 inductive GL where
-  | ok (t : Tm) (ty : Val) (es : ES) (m : List Bool)
+  | ok (t : Tm) (ty : Val) (es : ES) (m : List BKind)
   | err (msg : String)
 def globalUse (gs : Globals) (es : ES) (cx : Cx) (j : Nat) (explicit : List Syntax) : GL :=
   let ps := globalParams gs j;
@@ -2630,6 +2722,143 @@ def globalUse (gs : Globals) (es : ES) (cx : Cx) (j : Nat) (explicit : List Synt
         | .err msg => .err msg
         | .ok ls es' => .ok (.const nm ps ls v ty) (eval .nil (substIfAny ps ls ty)) es' m
   | t => .err "a global that isn't a constant"
+-- (A10) Instance resolution: dictionary passing, checked. A class is a structure (a
+-- `μ` with one constructor), an instance is a global whose type is a class application,
+-- a method is its projection with an instance `self` binder, and a dictionary is the
+-- structure value. A class problem is a metavariable of a class type, made when a
+-- method's (or a class parameter's) `inst` binder is inserted; `finishElab` solves the
+-- problems before a command ends.
+--
+-- The search is deterministic and bounded: a local hypothesis whose type is the class
+-- (innermost first), then the class's instances (priority descending, latest first); the
+-- first candidate whose conclusion unifies with the goal is committed to, and its own
+-- `inst` parameters become further problems (a subgoal). There is no tabling, so a
+-- cyclic instance (`instance [C A] : C A`) is caught by the step budget rather than
+-- shared, and there is no backtracking out of a committed candidate (with duplicate
+-- instances rejected, overlapping candidates cannot arise today). A problem whose class
+-- arguments are not all known at the end of the command is reported as stuck.
+--
+-- Boundary: no `outParam`, no default instances (`attribute [default_instance]`), no
+-- priorities in choosing between overlapping instances, no `binop`/`OfNat` (a numeral
+-- at a non-`Nat` type is still not a class problem). See `docs/stages/30-*`.
+
+-- a class application's head and arguments, without unfolding the class (`whnf` would
+-- turn it into its `μ`)
+inductive Goal where
+  | mk (cls : String) (args : List Val)
+  | other
+-- (a solved metavariable at the head of a type, without unfolding a constant)
+partial def forceHead (es : ES) (v : Val) : Val := match v with
+  | .vne (.haxiom n _) sp => match metaId n with
+    | .some i => match ES.get es i with
+      | .mk k (.some sol) _ => match spineArgs sp with
+        | .some as => forceHead es (applyAll (eval (envOf (takeL k as) .nil) sol) (dropL k as))
+        | .none => v
+      | _ => v
+    | .none => v
+  | _ => v
+def goalOf (es : ES) (ty : Val) : Goal := match forceHead es ty with
+  | .vglued (.hconst C _ _ _ _) sp _ => match spineArgs sp with
+    | .some as => .mk C as
+    | .none => .other
+  | _ => .other
+-- no unsolved metavariable in a type (its class arguments are known)
+def closedVal (es : ES) (d : Nat) (v : Val) : Bool := match zonk es d (quote d v) with
+  | .some _ => .true
+  | .none => .false
+def allClosed (es : ES) (d : Nat) : List Val → Bool
+  | .nil => .true
+  | .cons v rest => Bool.and (closedVal es d v) (allClosed es d rest)
+-- a candidate: the metavariables after applying it, and its term
+inductive InstCand where
+  | ok (es : ES) (t : Tm)
+  | no
+-- a global instance applied to fresh arguments: its explicit and implicit parameters
+-- become metavariables (the goal, or a later parameter, fixes them) and its instance
+-- parameters become subgoals; then its conclusion is unified with the goal
+partial def applyCand (gs : Globals) (es : ES) (cx : Cx) (t : Tm) (ty : Val) (m : List BKind) (goal : Val) : InstCand :=
+  match m with
+  | .cons .inst m' => match whnf (force es ty) with
+    | .vpi _ _ _ dom env cod => match newImplicit es cx dom with
+      | .mk mt es' => applyCand gs (ES.pinst es' (.mk mt dom cx)) cx (.app t mt)
+          (eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod) m' goal
+    | _ => .no
+  | .cons _ m' => match whnf (force es ty) with
+    | .vpi _ _ _ dom env cod => match newImplicit es cx dom with
+      | .mk mt es' => applyCand gs es' cx (.app t mt) (eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod) m' goal
+    | _ => .no
+  -- (the remaining type is the candidate's conclusion: unify it with the goal, not the
+  -- candidate's value)
+  | .nil => match unify es cx ty goal with
+    | .some es' => .ok es' t
+    | .none => .no
+-- the local hypotheses, innermost first
+partial def tryLocals (gs : Globals) (es : ES) (cx : Cx) (goal : Val) (i : Nat) : InstCand :=
+  match Nat.lt i (Cx.lvl cx) with
+  | .false => .no
+  | .true => match unify es cx (lookup (TCtx.types (Cx.c cx)) i) goal with
+    | .some es' => .ok es' (.var i)
+    | .none => tryLocals gs es cx goal (i + 1)
+def prioOf : InstInfo → Nat
+  | .mk _ _ p _ => p
+def nameOf : InstInfo → String
+  | .mk _ n _ _ => n
+-- priority descending, and (the list being latest first) latest first among equals
+def insertInst (i : InstInfo) : List InstInfo → List InstInfo
+  | .nil => .cons i .nil
+  | .cons j rest => match Nat.lt (prioOf j) (prioOf i) with
+    | .true => .cons i (.cons j rest)
+    | .false => .cons j (insertInst i rest)
+def sortInsts : List InstInfo → List InstInfo
+  | .nil => .nil
+  | .cons i rest => insertInst i (sortInsts rest)
+def instanceCand (gs : Globals) (es : ES) (cx : Cx) (goal : Val) (i : InstInfo) : InstCand :=
+  match Scope.lookup (Globals.scope gs) (nameOf i) with
+  | .none => .no
+  | .some k => match globalTm .false gs k with
+    | .const _ _ _ _ ty => applyCand gs es cx (globalTm .false gs k) (eval .nil ty) (globalMask gs k) goal
+    | _ => .no
+partial def tryGlobals (gs : Globals) (es : ES) (cx : Cx) (goal : Val) : List InstInfo → InstCand
+  | .nil => .no
+  | .cons i rest => match instanceCand gs es cx goal i with
+    | .ok es' t => .ok es' t
+    | .no => tryGlobals gs es cx goal rest
+-- the type of a problem, as the user sees it
+def goalShow : PInst → String
+  | .mk _ ty cx => show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) ty)
+inductive InstRes where
+  | ok (es : ES)
+  | err (msg : String)
+def stuckMsg (p : PInst) : String := String.append "type class problem is stuck: " (goalShow p)
+def missingMsg (p : PInst) : String := String.append "failed to synthesize an instance of " (goalShow p)
+-- one problem, with `es` already holding the other problems
+def resolveOne (gs : Globals) (es : ES) (p : PInst) : InstRes := match p with
+  | .mk hole ty cx =>
+    let d := Cx.lvl cx;
+    let env := TCtx.env (Cx.c cx);
+    let commit := fun (es1 : ES) (t : Tm) => match unify es1 cx (eval env hole) (eval env t) with
+      | .some es2 => InstRes.ok es2
+      | .none => InstRes.err (missingMsg p);
+    match goalOf es ty with
+    | .other => .err (stuckMsg p)
+    | .mk C args => match Globals.class gs C with
+      | .none => .err (String.append (String.append C " is not a class: ") (goalShow p))
+      | .some _ => match allClosed es d args with
+        | .false => .err (stuckMsg p)
+        | .true => match tryLocals gs es cx ty 0 with
+          | .ok es1 t => commit es1 t
+          | .no => match tryGlobals gs es cx ty (sortInsts (instsOf C (Globals.insts gs))) with
+            | .ok es1 t => commit es1 t
+            | .no => .err (missingMsg p)
+-- all the problems, each after the ones it creates (the step budget catches cycles)
+partial def resolveAll (gs : Globals) (es : ES) (fuel : Nat) : InstRes := match es with
+  | .mk ms ps ls lps (.cons p rest) => match fuel with
+    | .zero => .err (String.append "instance search did not finish in 100 steps (a cyclic instance?): " (goalShow p))
+    | .succ f => match resolveOne gs (.mk ms ps ls lps rest) p with
+      | .err m => .err m
+      | .ok es' => resolveAll gs es' f
+  | _ => .ok es
+
 mutual
 -- infer the type of `s` (an identifier's leading implicit arguments are inserted)
 def inferT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
@@ -2759,11 +2988,19 @@ def stringLit (gs : Globals) (es : ES) (cx : Cx) (v : String) : TE :=
     | .none => .err "strings need the Prelude"
   | .none => .err "strings need the Prelude"
 -- apply metavariables for the leading implicit parameters
-def insertImplicits (gs : Globals) (es : ES) (cx : Cx) (t : Tm) (ty : Val) (m : List Bool) : TE :=
+def insertImplicits (gs : Globals) (es : ES) (cx : Cx) (t : Tm) (ty : Val) (m : List BKind) : TE :=
   match m with
-  | .cons .true rest => match whnf ty with
+  | .cons .impl rest => match whnf ty with
     | .vpi _ _ _ dom env cod => match newImplicit es cx dom with
       | .mk mt es' => insertImplicits gs es' cx (.app t mt) (eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod) rest
+    | _ => .ok t ty es
+  -- (A10) an instance argument: a metavariable and a class problem, solved at the end
+  -- of the command (the class's arguments may not be known yet: `get` with its type
+  -- from the expected type)
+  | .cons .inst rest => match whnf ty with
+    | .vpi _ _ _ dom env cod => match newImplicit es cx dom with
+      | .mk mt es' => insertImplicits gs (ES.pinst es' (.mk mt dom cx)) cx (.app t mt)
+          (eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod) rest
     | _ => .ok t ty es
   | _ => .ok t ty es
 -- **The proof surface (A16)**. The kernel's forms for `Prop`, `Sort`, equality, `refl`,
@@ -3057,7 +3294,7 @@ def depPis (gs : Globals) (es : ES) (cx : Cx) (q : Q) (xs : List String) (aStx b
 -- the arguments of an application, inserting implicit ones by the mask. A `.c`
 -- argument whose type isn't known yet is postponed: a metavariable stands for it until
 -- the other arguments are done
-def appArgsT (gs : Globals) (es : ES) (cx : Cx) (f : Tm) (fty : Val) (m : List Bool) (args : List Syntax) (post : List Post)
+def appArgsT (gs : Globals) (es : ES) (cx : Cx) (f : Tm) (fty : Val) (m : List BKind) (args : List Syntax) (post : List Post)
     (expected : Option Val) (pre : List Tm) : TE :=
   match args with
   | .nil => match insertImplicits gs es cx f fty m with
@@ -3073,7 +3310,18 @@ def appArgsT (gs : Globals) (es : ES) (cx : Cx) (f : Tm) (fty : Val) (m : List B
       | .none => .err "could not elaborate a constructor argument"
     | e => e
   | .cons a rest => match m with
-    | .cons .true m' => match whnf fty with
+    | .cons .inst m' => match whnf fty with
+      -- (A10) the instance argument's metavariable, and its class problem
+      | .vpi _ _ _ dom env cod => match pre with
+        | .cons mt0 pre' =>
+          let mt := match zonk es (Cx.lvl cx) mt0 with
+            | .some z => z
+            | .none => mt0;
+          appArgsT gs (ES.pinst es (.mk mt dom cx)) cx (.app f mt) (eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod) m' args post expected pre'
+        | .nil => match newMeta es cx dom with
+          | .mk mt es' => appArgsT gs (ES.pinst es' (.mk mt dom cx)) cx (.app f mt) (eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod) m' args post expected .nil
+      | _ => .err "too many instance arguments"
+    | .cons .impl m' => match whnf fty with
       | .vpi _ _ _ dom env cod => match pre with
         -- (an implicit argument's metavariable made by `preArgs`, as its solution: a
         -- solved metavariable in a later argument's type would not compute there)
@@ -3088,10 +3336,10 @@ def appArgsT (gs : Globals) (es : ES) (cx : Cx) (f : Tm) (fty : Val) (m : List B
     | _ => match whnf (force es fty) with
       | .vpi _ _ _ dom env cod => match Bool.and (postponable a) (Bool.or (isMetaApp es dom) (funDomMeta es a dom)) with
         | .true => match newMeta es cx dom with
-          | .mk mt es1 => appArgsT gs es1 cx (.app f mt) (eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod) (tailBools m) rest
+          | .mk mt es1 => appArgsT gs es1 cx (.app f mt) (eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod) (tailKinds m) rest
               (.cons (.mk a dom mt) post) expected pre
         | .false => match checkT gs es cx a dom with
-          | .ok ta _ es1 => appArgsT gs es1 cx (.app f ta) (eval (.cons (eval (TCtx.env (Cx.c cx)) ta) env) cod) (tailBools m) rest post expected pre
+          | .ok ta _ es1 => appArgsT gs es1 cx (.app f ta) (eval (.cons (eval (TCtx.env (Cx.c cx)) ta) env) cod) (tailKinds m) rest post expected pre
           | e => e
       | ty => .err (String.append "not a function: its type is " (show .nil (Cx.lvl cx) (quote (Cx.lvl cx) ty)))
 -- (stage 21j) An application of a constructor with implicit parameters, checked
@@ -3102,7 +3350,7 @@ def appArgsT (gs : Globals) (es : ES) (cx : Cx) (f : Tm) (fty : Val) (m : List B
 -- `Nat.lt 3 5 = .true`). The placeholders are dropped: `appArgsT` checks the
 -- arguments, with the implicit metavariables made here. Without a solution, the
 -- arguments come first, as before.
-def appExpected (gs : Globals) (es : ES) (cx : Cx) (h : Syntax) (f : Tm) (fty : Val) (m : List Bool) (args : List Syntax) (ty : Val) : TE :=
+def appExpected (gs : Globals) (es : ES) (cx : Cx) (h : Syntax) (f : Tm) (fty : Val) (m : List BKind) (args : List Syntax) (ty : Val) : TE :=
   match Bool.and (ctorHead gs cx h) (headImplicit m) with
   | .false => appArgsT gs es cx f fty m args .nil (.some ty) .nil
   | .true => match preArgs es cx fty m args with
@@ -3136,13 +3384,14 @@ def drainList (gs : Globals) : ES → Bool → List Pend → DR
         | .none => .err
       | .err _ => .err
 def drain (gs : Globals) (es : ES) : Option ES := match es with
-  | .mk ms ps ls lps => match ps with
+  | .mk ms ps ls lps ins => match ps with
     | .nil => .some es
-    | .cons _ _ => match drainList gs (.mk ms .nil ls lps) .false ps with
+    | .cons _ _ => match drainList gs (.mk ms .nil ls lps ins) .false ps with
       | .ok es' pr => match pr with
         | .true => drain gs es'
         | .false => .none
       | .err => .none
+
 -- `let x : A := v; b`, inferred or checked
 -- (`let q x := v; b`, stage 21m: a `letq` unless `q` is ω: `letTm`)
 def letT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (expected : Option Val) : TE :=
@@ -3271,7 +3520,9 @@ def compileM (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val)
       | .err m => .err m
       | .ok b _ es0 => match drain gs es0 with
       | .none => .err "could not elaborate a constructor argument"
-      | .some es' => match zonk es' (Cx.lvl cx') b with
+      | .some es1 => match resolveAll gs es1 100 with
+      | .err m => .err m
+      | .ok es' => match zonk es' (Cx.lvl cx') b with
         | .none => .err "could not infer an implicit argument"
         | .some b' => .ok (bindLetsT b' cx binds') es'
     | .some k => match Bool.and (Bool.not top) (shareableLast cls) with
@@ -3288,7 +3539,9 @@ def compileM (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val)
           | .err m => .err m
           | .ok b _ es0 => match drain gs es0 with
             | .none => .err "could not elaborate a constructor argument"
-            | .some es1 => match zonk es1 (Cx.lvl cx') b with
+            | .some es0' => match resolveAll gs es0' 100 with
+            | .err m => .err m
+            | .ok es1 => match zonk es1 (Cx.lvl cx') b with
               | .none => .err "could not infer an implicit argument"
               | .some b' =>
                 let dv := bindLetsT b' cx binds';
@@ -3385,7 +3638,9 @@ def litTest (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val) 
               | .err m => .err m
               | .ok tt bty es1 => match drain gs es1 with
                 | .none => .err "could not elaborate a constructor argument"
-                | .some es2 => match zonk es2 (d + 1) tt with
+                | .some es1' => match resolveAll gs es1' 100 with
+                | .err m => .err m
+                | .ok es2 => match zonk es2 (d + 1) tt with
                   | .none => .err "could not infer an implicit argument"
                   | .some tt' =>
                     let B := quote (d + 1) (force es2 bty);
@@ -3621,6 +3876,19 @@ def branches (gs : Globals) (mc : MatchCtx) (es : ES) (cx3 : Cx) (expected : Val
                     | e => e
 end
 
+-- `drain` and instance resolution alternate: solving a problem can solve a postponed
+-- argument's type, and checking a postponed argument can make a problem ready
+partial def finishRounds (gs : Globals) (es : ES) : Nat → InstRes
+  | .zero => .err "could not finish the instance problems of a command"
+  | .succ k => match drain gs es with
+    | .none => .err "could not elaborate a constructor argument"
+    | .some es1 => match es1 with
+      | .mk _ _ _ _ .nil => .ok es1
+      | _ => match resolveAll gs es1 100 with
+        | .err m => .err m
+        | .ok es2 => finishRounds gs es2 k
+def finishElab (gs : Globals) (es : ES) : InstRes := finishRounds gs es 8
+
 -- a definition `(binders) : T := v`: its type and value (zonked later)
 inductive DefR where
   | ok (ty v : Tm) (es : ES)
@@ -3727,9 +3995,9 @@ def elabParams (gs : Globals) (us : List String) : Cx → List Field → PR
   | cx, .nil => .ok .tnil cx
   | cx, .cons (.mk x _ _ ty) rest => match inferType gs (ES.withParams ES.empty us) cx ty with
     | .err m => .err m
-    | .ok A0 _ es => match drain gs es with
-      | .none => .err "could not elaborate a constructor argument"
-      | .some es' => match zonk es' (Cx.lvl cx) A0 with
+    | .ok A0 _ es => match finishElab gs es with
+      | .err m => .err m
+      | .ok es' => match zonk es' (Cx.lvl cx) A0 with
         | .none => .err "could not infer an implicit argument"
         | .some A => match elabParams gs us (Cx.bind cx x (eval (TCtx.env (Cx.c cx)) A)) rest with
           | .ok tys cx' => .ok (.tcons A tys) cx'
@@ -3811,9 +4079,9 @@ def command (gs : Globals) (stx : Syntax) : Step :=
         let us := univParamsOf stx;
         match defT gs (ES.withParams ES.empty us) cx0 (kids (kid stx 3)) tyStx (kid stx 6) with
         | .err m => errStep gs m
-        | .ok ty0 v0 es0 => match drain gs es0 with
-        | .none => errStep gs "could not elaborate a constructor argument"
-        | .some es => match zonk es 0 ty0 with
+        | .ok ty0 v0 es0 => match finishElab gs es0 with
+        | .err m => errStep gs m
+        | .ok es => match zonk es 0 ty0 with
           | .none => errStep gs "could not infer an implicit argument"
           | .some tyZ => let tyT := sortTy tyZ; match zonk es 0 v0 with
             | .none => errStep gs "could not infer an implicit argument"
@@ -3834,9 +4102,9 @@ def command (gs : Globals) (stx : Syntax) : Step :=
       | .err m => TE.err m;
     match r with
     | .err m => errStep gs m
-    | .ok t0 _ es0 => match drain gs es0 with
-    | .none => errStep gs "could not elaborate a constructor argument"
-    | .some es => match zonk es 0 t0 with
+    | .ok t0 _ es0 => match finishElab gs es0 with
+    | .err m => errStep gs m
+    | .ok es => match zonk es 0 t0 with
       | .none => errStep gs "could not infer an implicit argument"
       | .some t0z => let t := MR.tm (markInfer empty t0z); match infer empty t with
         | .err m => errStep gs m
@@ -3964,7 +4232,7 @@ def addMCtors (members ps : List String) (pts : Tms) (m k : Nat) : Globals → N
         match check empty v (eval .nil ty) with
         | .err e => .err e
         | .ok _ _ => match addMCtors members ps pts m k (Globals.add gs (.mk (String.append (String.append T ".") (ctorName c)) .nil ty v v
-            (List.append (trues np) (fieldImpl fs0)))) (ci + 1) rest with
+            (List.append (impls np) (fieldKinds (fieldImpl fs0))))) (ci + 1) rest with
           | .ok gs' cs => .ok gs' (.cons (.mk (ctorName c) fs (.tag m j) (fieldQs fs0) (fieldImpl fs0)) cs)
           | e => e
 def addMemberInds (np : Nat) (I D DI : Tm) (cs : List Ctor) (fam : Tm) (m : Nat) : Globals → Nat → List String → Globals
@@ -4399,7 +4667,7 @@ partial def headIndex (all : Array Global) (i : Nat) (m : StrMap (List Nat)) : S
     | .none => m
     | .some h => StrMap.insert m (Str.ofString h) (.cons j (StrMap.findD m (Str.ofString h) .nil)))
 def WEnv.of (gs : Globals) : WEnv := match gs with
-  | .mk all _ _ _ => .mk all (headIndex all (Array.size all) StrMap.empty)
+  | .mk all _ _ _ _ _ => .mk all (headIndex all (Array.size all) StrMap.empty)
 def WEnv.global (we : WEnv) (i : Nat) : Global := match we with
   | .mk all _ => Array.getD all i (.mk "?" .nil .star .star .star .nil)
 def WEnv.cands (we : WEnv) (h : HeadArgs) : List Nat := match we with
@@ -4506,9 +4774,9 @@ def witnessOf (gs : Globals) (d : Syntax) (f : String) (ty : Tm) : PSigR := matc
     | .nil => findWit gs f ty
     | .cons _ _ => match checkT gs (ES.withParams ES.empty (univParamsOf (unwrapDef d))) (Cx.mk empty (Globals.scope gs) .nil) (kid (kid d 1) 3) (eval .nil ty) with
       | .err m => .err m
-      | .ok w0 _ es0 => match drain gs es0 with
-        | .none => .err "could not elaborate the witness"
-        | .some es => match zonk es 0 w0 with
+      | .ok w0 _ es0 => match finishElab gs es0 with
+        | .err m => .err m
+        | .ok es => match zonk es 0 w0 with
           | .none => .err "could not infer an implicit argument of the witness"
           | .some w => .ok f w
   | .false => findWit gs f ty
@@ -4739,8 +5007,8 @@ def externCmd (gs : Globals) (stx : Syntax) : Step :=
   match axiomCmd gs (mkNode "command.axiom" (.cons (.atom "axiom") (.cons (kid stx 3)
       (.cons (mkNull .nil) (.cons (mkNull .nil) (one (mkNull (.cons (.atom ":") (one (kid stx 5)))))))))) with
   | .mk line gs' => match gs' with
-    | .mk all _ _ _ => match Nat.beq (Array.size all) (match gs with
-      | .mk all0 _ _ _ => Array.size all0) with
+    | .mk all _ _ _ _ _ => match Nat.beq (Array.size all) (match gs with
+      | .mk all0 _ _ _ _ _ => Array.size all0) with
       | .true => .mk line gs'
       | .false => match Array.getD all (Array.size all - 1) (.mk "?" .nil .star .star .star .nil) with
         | .mk _ _ ty _ _ _ => match ffiSig (Globals.ffi gs) (isNativeC cname) ty with
@@ -4806,7 +5074,7 @@ def exportedAs (cname : String) : List Foreign → Bool
 def globalTyOf (gs : Globals) (f : String) : Option Tm := match Scope.lookup (Globals.scope gs) f with
   | .none => .none
   | .some i => match gs with
-    | .mk all _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil) with
+    | .mk all _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil) with
       | .mk _ _ ty _ _ _ => .some ty
 -- `export "c_name" f (: T)?` (stage 21o, as `command.export` in the Lean frontend)
 def exportCmd (gs : Globals) (stx : Syntax) : LinkR :=
@@ -4896,8 +5164,11 @@ def partialCmd (gs : Globals) (defs : List Syntax) : Step := match addPartials g
 -- field, by `match s with | .mk f₁ … => fᵢ` (all built as syntax, then checked as
 -- usual; a field's type may not mention an earlier field yet).
 def identStx (n : String) : Syntax := mkNode "term.ident" (one (.ident n))
-def binderStx (ob cb x : String) (A : Syntax) : Syntax :=
-  mkNode (match strEq ob "{" with
+-- (an instance binder is `[x : A]`, without the quantity slot the other binders have)
+def binderStx (ob cb x : String) (A : Syntax) : Syntax := match strEq ob "[" with
+  | .true => mkNode "binder.inst" (.cons (.atom "[")
+    (.cons (mkNull (.cons (.ident x) (.cons (.atom ":") .nil))) (.cons A (one (.atom "]")))))
+  | .false => mkNode (match strEq ob "{" with
     | .true => "binder.implicit"
     | .false => "binder.explicit") (.cons (.atom ob) (.cons (mkNull .nil)
     (.cons (mkNull (one (.ident x))) (.cons (mkNull (.cons (.atom ":") (one A))) (one (.atom cb))))))
@@ -4947,6 +5218,217 @@ def structCmd (gs : Globals) (stx : Syntax) : Step :=
   let pat := mkNode "term.app" (.cons (mkNode "term.dotIdent" (.cons (.atom ".") (one (.ident "mk")))) (one (mkNull (fieldIdents fs))));
   match defsSteps gs (.cons ind (projections T bs sTy pat fs)) with
   | .mk out gs' => .mk out (Globals.markStruct gs' T)
+
+-- (A10) Type classes. `class C (ps) where f₁ : A₁ …` is the structure `C (ps) where
+-- | mk (f₁ : A₁) …` (so a class value is a dictionary, `C.mk …`, and it compiles with no
+-- backend change), plus a method `C.fᵢ {ps} [self : C ps] : Aᵢ` for each field: the
+-- structure's projection with `self` an *instance* binder, so a use `C.fᵢ` inserts its
+-- class problem automatically (`insertImplicits`).
+--
+-- The class's parameters keep their written kinds in the type former `C` (a class with
+-- an instance parameter, `class Commute (e₁ e₂) (m) [i : Monad m] where …`, re-inserts
+-- that problem at each use of `C e₁ e₂ m`); the methods' parameters are implicit.
+--
+-- Not supported (errors): private fields, `outParam` (no rewrite of an output
+-- parameter's type), `attribute [default_instance]`/`[binop]`, universe-polymorphic
+-- classes, and `deriving` on a class.
+def classFieldNames : List Syntax → List String
+  | .nil => .nil
+  | .cons f rest => .cons (fieldName f) (classFieldNames rest)
+-- the parameter binders of a class's methods: implicit, except instance binders
+def classMethBinders : List Syntax → List Syntax
+  | .nil => .nil
+  | .cons b rest => List.append (match isInstB b with
+      | .true => List.cons b .nil
+      | .false => implicitBinders (List.cons b .nil)) (classMethBinders rest)
+-- the projections with an instance `self` (a class's methods)
+def instProjections (T : String) (bs : List Syntax) (sTy pat : Syntax) : List Syntax → List Syntax
+  | .nil => .nil
+  | .cons f rest => match erasedField f with
+  | .true => instProjections T bs sTy pat rest
+  | .false =>
+    let alt := mkNode "match.alt" (.cons (.atom "|") (.cons (mkNull (one pat)) (.cons (.atom "=>") (one (identStx (fieldName f))))));
+    let body := mkNode "term.match" (.cons (.atom "match") (.cons (mkNull (one (identStx "self✝")))
+      (.cons (.atom "with") (one (mkNull (one alt))))));
+    let d := mkNode "command.def" (.cons (.atom "def") (.cons (.ident (String.append (String.append T ".") (fieldName f)))
+      (.cons (mkNull .nil) (.cons (mkNull (List.append (classMethBinders bs) (one (binderStx "[" "]" "self✝" sTy))))
+        (.cons (mkNull (.cons (.atom ":") (one (kid f 4)))) (.cons (.atom ":=") (one body)))))));
+    .cons d (instProjections T bs sTy pat rest)
+-- (an optional wraps its item in a `null` node: `["private"]` is `null [atom "private"]`)
+partial def hasPrivate (s : Syntax) : Bool := match s with
+  | .atom a => strEq a "private"
+  | .node _ _ => match kids s with
+    | .cons x _ => hasPrivate x
+    | .nil => .false
+  | _ => .false
+def classFieldErr : List Syntax → Option String
+  | .nil => .none
+  | .cons f rest => match hasPrivate (kid f 0) with
+    | .true => .some (String.append (String.append "class field " (fieldName f))
+        " cannot be private: a class's fields are its methods, visible wherever the class is")
+    | .false => classFieldErr rest
+def classCmd (gs : Globals) (stx : Syntax) : Step :=
+  let T := identOf' (kid stx 1);
+  let bs := kids (kid stx 3);
+  let fs := kids (kid stx 6);
+  match classFieldErr fs with
+  | .some m => errStep gs m
+  | .none =>
+    let ps := fieldNames (fieldsOf bs);
+    let sTy := match ps with
+      | .nil => identStx T
+      | .cons _ _ => mkNode "term.app" (.cons (identStx T) (one (mkNull (strIdents ps))));
+    let ctor := mkNode "inductive.ctor" (.cons (.atom "|") (.cons (mkNull .nil) (.cons (.ident "mk") (.cons (mkNull (fieldBinders fs)) (one (mkNull .nil))))));
+    let ind := mkNode "command.inductive" (.cons (.atom "inductive") (.cons (kid stx 1) (.cons (kid stx 2) (.cons (kid stx 3)
+      (.cons (kid stx 4) (.cons (.atom "where") (.cons (mkNull (one ctor)) (one (.atom "structure")))))))));
+    let pat := mkNode "term.app" (.cons (mkNode "term.dotIdent" (.cons (.atom ".") (one (.ident "mk")))) (one (mkNull (fieldIdents fs))));
+    match defsSteps gs (.cons ind (instProjections T bs sTy pat fs)) with
+    -- (the class type former keeps its binders' kinds: an instance parameter of the
+    -- class is a class problem at every use, `MyCommute e₁ e₂ m`)
+    | .mk out gs' => .mk out (Globals.addClass (Globals.setMask (Globals.markStruct gs' T) T (paramMask bs))
+        T (.mk (classFieldNames fs)))
+
+-- (A10) Instances. `instance [priority] [name] {bs} : C a… := v` (or `where f := v …`) is
+-- an ordinary definition of the class type `C a…`: the dictionary. It is checked to be a
+-- class application, added as a global with its binders' kinds, and registered in
+-- `Globals.insts` for `resolveInstances`. A second instance of a definitionally equal
+-- class type is an error (there is no priority choice between overlapping instances).
+-- `where` builds `C.mk f₁ … fₙ` in the class's field order; a missing, duplicated or
+-- unknown field is an error.
+inductive Fld where
+  | mk (n : String) (v : Syntax)
+def fldCount : List Fld → String → Nat
+  | .nil, _ => 0
+  | .cons (.mk n _) rest, x => match strEq n x with
+    | .true => Nat.succ (fldCount rest x)
+    | .false => fldCount rest x
+def findFld : List Fld → String → Option Syntax
+  | .nil, _ => .none
+  | .cons (.mk n v) rest, x => match strEq n x with
+    | .true => .some v
+    | .false => findFld rest x
+def instFlds : List Syntax → List Fld
+  | .nil => .nil
+  | .cons f rest => .cons (.mk (identOf' (kid f 0)) (kid f 2)) (instFlds rest)
+inductive ArgsR where
+  | ok (args : List Syntax)
+  | err (msg : String)
+def fldErr (m : String) : ArgsR := .err m
+def fldIn : List String → String → Bool
+  | .nil, _ => .false
+  | .cons x xs, y => Bool.or (strEq x y) (fldIn xs y)
+def unknownFld (order : List String) : List Fld → Option String
+  | .nil => .none
+  | .cons (.mk n _) rest => match fldIn order n with
+    | .true => unknownFld order rest
+    | .false => .some n
+def instArgs (C : String) (given : List Fld) : List String → ArgsR
+  | .nil => .ok .nil
+  | .cons f rest => match fldCount given f with
+    | .zero => fldErr (String.append (String.append (String.append "missing field '" f) "' in the instance for class ") C)
+    | .succ (.succ _) => fldErr (String.append (String.append (String.append "field '" f) "' is given twice in the instance for class ") C)
+    | .succ _ => match findFld given f with
+      | .none => fldErr (String.append (String.append (String.append "missing field '" f) "' in the instance for class ") C)
+      | .some v => match instArgs C given rest with
+        | .ok vs => .ok (.cons v vs)
+        | .err m => .err m
+def mkAppS (C : String) (args : List Syntax) : Syntax := match args with
+  | .nil => identStx (String.append C ".mk")
+  | .cons _ _ => mkNode "term.app" (.cons (identStx (String.append C ".mk")) (one (mkNull args)))
+-- the head identifier of an application (the class of an instance's type)
+partial def headIdent (s : Syntax) : Option String :=
+  let k := kindOf s;
+  match strEq k "term.ident" with
+    | .true => .some (identOf s)
+    | .false => match strEq k "term.app" with
+      | .true => headIdent (kid s 0)
+      | .false => match strEq k "term.paren" with
+        | .true => headIdent (kid s 1)
+        | .false => .none
+partial def freshName (gs : Globals) (base : String) (k : Nat) : String :=
+  let nm := match k with
+    | .zero => base
+    | _ => String.append base (Nat.toString k);
+  match Scope.lookup (Globals.scope gs) nm with
+  | .none => nm
+  | .some _ => freshName gs base (k + 1)
+-- the priority in `instance (priority := n) …` (1000 by default)
+def numIn : List Syntax → Nat
+  | .nil => 1000
+  | .cons s rest => match s with
+    | .node k _ => match strEq k "num" with
+      | .true => numValue s
+      | .false => numIn rest
+    | _ => numIn rest
+def instPrio (s : Syntax) : Nat := numIn (kids s)
+-- an optional identifier (the parser's `optional` wraps its result in a `null` node,
+-- when the frontends' parsers differ about a single item it may be bare)
+def optIdent (s : Syntax) : Option String := match s with
+  | .ident n => .some n
+  | .node k _ => match strEq k "null" with
+    | .true => match kids s with
+      | .cons (.ident n) _ => .some n
+      | _ => .none
+    | .false => .none
+  | _ => .none
+-- an existing instance of `C` with the same type (a duplicate)
+def dupAmong (gs : Globals) (ty : Tm) : List InstInfo → Option InstInfo
+  | .nil => .none
+  | .cons i rest => match globalTyOf gs (nameOf i) with
+    | .none => dupAmong gs ty rest
+    | .some tyOld => match convTy empty (eval .nil ty) (eval .nil tyOld) with
+      | .true => .some i
+      | .false => dupAmong gs ty rest
+def instDuplicate (gs : Globals) (C : String) (ty : Tm) : Option InstInfo :=
+  dupAmong gs ty (instsOf C (Globals.insts gs))
+inductive SynR where
+  | ok (s : Syntax)
+  | err (msg : String)
+def instanceCmd (gs : Globals) (stx : Syntax) : Step :=
+  let bs := kids (kid stx 3);
+  let tyS := kid stx 5;
+  let prio := instPrio (kid stx 1);
+  match headIdent tyS with
+  | .none => errStep gs "an instance's type must be a class application (C a…)"
+  | .some C => match Globals.class gs C with
+    | .none => errStep gs (String.append C " is not a class: an instance needs a class declared with `class`")
+    | .some _ =>
+      let isWhere := match kid stx 6 with
+        | .atom w => strEq w "where"
+        | _ => Bool.false;
+      let vR : SynR := match isWhere with
+        | .true => match Globals.structFields gs C with
+          | .none => .err (String.append "internal error: no fields for class " C)
+          | .some fs => match unknownFld fs (instFlds (kids (kid stx 7))) with
+            | .some n => .err (String.append (String.append (String.append "unknown field '" n) "' for class ") C)
+            | .none => match instArgs C (instFlds (kids (kid stx 7))) fs with
+              | .err m => .err (String.append (String.append "instance for class " C) (String.append ": " m))
+              | .ok args => .ok (mkAppS C args)
+        | .false => .ok (kid stx 7);
+      match vR with
+      | .err m => errStep gs m
+      | .ok vS =>
+        let name := match optIdent (kid stx 2) with
+          | .some n => n
+          | .none => freshName gs (String.append "inst" C) 0;
+        match defT gs ES.empty (Cx.mk empty (Globals.scope gs) .nil) bs tyS vS with
+        | .err m => errStep gs m
+        | .ok ty0 v0 es0 => match finishElab gs es0 with
+          | .err m => errStep gs m
+          | .ok es => match zonk es 0 ty0 with
+            | .none => errStep gs "could not infer an implicit argument"
+            | .some tyZ => let tyT := sortTy tyZ; match zonk es 0 v0 with
+              | .none => errStep gs "could not infer an implicit argument"
+              | .some v0z => match inferUniv empty tyT with
+                | .err m => errStep gs m
+                | .ok _ _ => match instDuplicate gs C tyT with
+                  | .some i => errStep gs (String.append (String.append (String.append "duplicate instance: " (nameOf i))
+                      " already has the type of this one (") (String.append (show .nil 0 tyT) ")"))
+                  | .none => match checkMarking v0z tyT with
+                    | .bad m => errStep gs m
+                    | .good v => .mk (String.append name (String.append " : " (show .nil 0 tyT)))
+                        (Globals.addInst (Globals.add gs (.mk name .nil tyT v (inlineTm gs v) (paramMask bs)))
+                          (.mk C name prio (List.length (Globals.insts gs))))
 
 -- (stage 21r) `c_struct ["ctype"] [(header := "h")] T where fields` (`command.cStruct`):
 -- the structure `T` (`structCmd`), standing for the C struct `ctype` (by default
@@ -5231,7 +5713,11 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
             | .false => partialCmd gs (nonAtoms (kids (kid stx 1)))
           | .false => match strEq (kindOf stx) "command.structure" with
             | .true => structCmd gs stx
-            | .false => match strEq (kindOf stx) "command.axiom" with
+            | .false => match strEq (kindOf stx) "command.class" with
+              | .true => classCmd gs stx
+              | .false => match strEq (kindOf stx) "command.instance" with
+                | .true => instanceCmd gs stx
+                | .false => match strEq (kindOf stx) "command.axiom" with
               | .true => axiomCmd gs stx
               | .false => match strEq (kindOf stx) "command.extern" with
                 -- (to the checker, a foreign function is an axiom)

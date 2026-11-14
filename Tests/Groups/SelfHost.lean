@@ -779,6 +779,125 @@ def dupNamesExpected : String :=
   "error: 'loop' has already been declared\nerror: 'P.mk' has already been declared\nQ : U0\nQ.fst : (x0 : Q) → Nat\n" ++
   "error: 'Q.fst' has already been declared\nerror: 'ev' has already been declared\nfine : Nat\n"
 
+/-- (A10) Type classes. A `class C (ps) where f : A` is the structure `C.mk`, plus a
+method `C.f {ps} [self : C ps] : A`; an `instance` is a global of a class type (the
+dictionary); a method call inserts a class problem, solved by a local `[i : C A]` or a
+registered instance before the command ends. -/
+def classCore : String :=
+  "import Prelude\nclass Default (A : Type) where\n  d : A\n#check Default.d\n" ++
+  "instance instDefaultNat : Default Nat := Default.mk 7\n" ++
+  "instance instDefaultBool : Default Bool := Default.mk .true\n" ++
+  "def get {A : Type} [Default A] : A := Default.d\n#check get\ndef seven : Nat := get\ndef yes : Bool := get\n" ++
+  "#reduce Nat.beq seven 7\n#reduce yes\n"
+
+def classCoreExpected : String :=
+  "Default : (x0 : U0) → U0\n" ++
+  "Default.d : (x0 :0 U0) → (x1 : (Default x0)) → x0\n" ++
+  "(x0 :0 U0) → (x1 : (Default x0)) → x0\n" ++
+  "instDefaultNat : (Default Nat)\ninstDefaultBool : (Default Bool)\n" ++
+  "get : (x0 :0 U0) → (x1 : (Default x0)) → x0\n" ++
+  "(x0 :0 U0) → (x1 : (Default x0)) → x0\nseven : Nat\nyes : Bool\n" ++
+  "con((#1, (tt, tt)))\ncon((#1, (tt, tt)))\n"
+
+/-- (A10) A `where` instance, fields in any order; a two-method class and a generic
+function using both methods. -/
+def classWhere : String :=
+  "import Prelude\nclass Two (A : Type) where\n  one : A\n  two : A\n" ++
+  "instance instTwoNat : Two Nat where\n  two := 20\n  one := 10\n" ++
+  "def sum2 {A : Type} [Two A] (add : A → A → A) : A := add Two.one Two.two\n" ++
+  "#reduce Nat.beq (sum2 Nat.add : Nat) 30\n"
+
+def classWhereExpected : String :=
+  "Two : (x0 : U0) → U0\n" ++
+  "Two.one : (x0 :0 U0) → (x1 : (Two x0)) → x0\n" ++
+  "Two.two : (x0 :0 U0) → (x1 : (Two x0)) → x0\n" ++
+  "instTwoNat : (Two Nat)\n" ++
+  "sum2 : (x0 :0 U0) → (x1 : (Two x0)) → (x2 : (x2 : x0) → (x3 : x0) → x0) → x0\n" ++
+  "con((#1, (tt, tt)))\n"
+
+/-- (A10) An instance with a parameter and an instance parameter (nested resolution). -/
+def classNested : String :=
+  "import Prelude\nclass Default (A : Type) where\n  d : A\n" ++
+  "instance instDefaultNat : Default Nat := Default.mk 7\n" ++
+  "instance instDefaultList {A : Type} [Default A] : Default (List A) where\n" ++
+  "  d := List.cons Default.d List.nil\n" ++
+  "def get {A : Type} [Default A] : A := Default.d\n" ++
+  "#reduce List.length (get : List Nat)\n#reduce List.length (get : List (List Nat))\n"
+
+def classNestedExpected : String :=
+  "Default : (x0 : U0) → U0\n" ++
+  "Default.d : (x0 :0 U0) → (x1 : (Default x0)) → x0\n" ++
+  "instDefaultNat : (Default Nat)\n" ++
+  "instDefaultList : (x0 :0 U0) → (x1 : (Default x0)) → (Default (List x0))\n" ++
+  "get : (x0 :0 U0) → (x1 : (Default x0)) → x0\n" ++
+  "con((#1, (con((#0, (tt, tt))), (tt, tt))))\n" ++
+  "con((#1, (con((#0, (tt, tt))), (tt, tt))))\n"
+
+/-- (A10) A class with instance parameters in its telescope (the `Commute` shape): using
+the class type inserts those problems, and an instance for it resolves them. -/
+def classInstParam : String :=
+  "import Prelude\nclass MyMonad (m : Type → Type) where\n  ret : Nat\n" ++
+  "class MyHandler (e : Type) (m : Type → Type) where\n  h : Nat\n" ++
+  "instance instMyMonadOption : MyMonad Option := MyMonad.mk 0\n" ++
+  "instance instMyHandlerNatOption : MyHandler Nat Option := MyHandler.mk 1\n" ++
+  "class MyCommute (e₁ e₂ : Type) (m : Type → Type) [i : MyMonad m] [h₁ : MyHandler e₁ m] [h₂ : MyHandler e₂ m] where\n  comm : Nat\n" ++
+  "instance instMyCommute : MyCommute Nat Nat Option where\n  comm := 2\n" ++
+  "#reduce Nat.beq (@MyCommute.comm Nat Nat Option instMyMonadOption instMyHandlerNatOption instMyHandlerNatOption instMyCommute) 2\n"
+
+def classInstParamExpected : String :=
+  "MyMonad : (x0 : (x0 : U0) → U0) → U0\n" ++
+  "MyMonad.ret : (x0 :0 (x0 : U0) → U0) → (x1 : (MyMonad x0)) → Nat\n" ++
+  "MyHandler : (x0 : U0) → (x1 : (x1 : U0) → U0) → U0\n" ++
+  "MyHandler.h : (x0 :0 U0) → (x1 :0 (x1 : U0) → U0) → (x2 : ((MyHandler x0) x1)) → Nat\n" ++
+  "instMyMonadOption : (MyMonad Option)\n" ++
+  "instMyHandlerNatOption : ((MyHandler Nat) Option)\n" ++
+  "MyCommute : (x0 : U0) → (x1 : U0) → (x2 : (x2 : U0) → U0) → (x3 : (MyMonad x2)) → (x4 : ((MyHandler x0) x2)) → (x5 : ((MyHandler x1) x2)) → U0\n" ++
+  "MyCommute.comm : (x0 :0 U0) → (x1 :0 U0) → (x2 :0 (x2 : U0) → U0) → (x3 : (MyMonad x2)) → (x4 : ((MyHandler x0) x2)) → (x5 : ((MyHandler x1) x2)) → (x6 : ((((((MyCommute x0) x1) x2) x3) x4) x5)) → Nat\n" ++
+  "instMyCommute : ((((((MyCommute Nat) Nat) Option) instMyMonadOption) instMyHandlerNatOption) instMyHandlerNatOption)\n" ++
+  "con((#1, (tt, tt)))\n"
+
+/-- (A10) A method call with no instance for its class argument: an error. -/
+def classMissing : String :=
+  "import Prelude\nclass Default (A : Type) where\n  d : A\n" ++
+  "instance instDefaultNat : Default Nat := Default.mk 7\n" ++
+  "def get {A : Type} [Default A] : A := Default.d\n" ++
+  "#reduce Nat.beq (get : Nat) 7\ndef bad : Bool := get\n"
+
+def classMissingExpected : String :=
+  "Default : (x0 : U0) → U0\n" ++
+  "Default.d : (x0 :0 U0) → (x1 : (Default x0)) → x0\n" ++
+  "instDefaultNat : (Default Nat)\n" ++
+  "get : (x0 :0 U0) → (x1 : (Default x0)) → x0\n" ++
+  "con((#1, (tt, tt)))\n" ++
+  "error: failed to synthesize an instance of (Default ?m0)\n"
+
+/-- (A10) A second instance of the same class type is an error. -/
+def classDup : String :=
+  "import Prelude\nclass Default (A : Type) where\n  d : A\n" ++
+  "instance instDefaultNat : Default Nat := Default.mk 7\n" ++
+  "instance instDefaultNat2 : Default Nat := Default.mk 8\n"
+
+def classDupExpected : String :=
+  "Default : (x0 : U0) → U0\n" ++
+  "Default.d : (x0 :0 U0) → (x1 : (Default x0)) → x0\n" ++
+  "instDefaultNat : (Default Nat)\n" ++
+  "error: duplicate instance: instDefaultNat already has the type of this one ((Default Nat))\n"
+
+/-- (A10) The header for the verdict-parity cases (a class with a method each). -/
+def classAgreeHeader : String :=
+  "class Base (A : Type) where\n  b : A\n"
+
+/-- (A10) A class's dictionary passing compiles and runs: `get : Nat` is 7, and
+`get : List Nat` is a singleton list (from `instDefaultList`). -/
+def classProgram : String :=
+  "import Prelude\nclass Default (A : Type) where\n  d : A\n" ++
+  "instance instDefaultNat : Default Nat := Default.mk 7\n" ++
+  "instance instDefaultList {A : Type} [Default A] : Default (List A) where\n" ++
+  "  d := List.cons Default.d List.nil\n" ++
+  "def get {A : Type} [Default A] : A := Default.d\n" ++
+  "def main : IO Unit := do\n  IO.println (Nat.toString (get : Nat));\n" ++
+  "  IO.println (Nat.toString (List.length (get : List Nat)))\n"
+
 def selfHostGroup : Group where
   name := "selfhost"
   exercise := "Stages 12b–14q"
@@ -1755,6 +1874,37 @@ def selfHostGroup : Group where
         let some k2 ← selfhostModuleOutput files2 #["--key"] | return
         unless k1 == k1' do throw (IO.userError s!"the key is not stable: {k1} / {k1'}")
         if k1 == k2 then throw (IO.userError s!"the key ignores a module's text: {k1}") },
+    { name := "the self-hosted frontend: a class, instances for Nat and Bool, and a generic function (A10)", run := fun _ =>
+        selfhostCheckFile classCore classCoreExpected },
+    { name := "the self-hosted frontend: `where` instances, a multi-method class, and a class with instance parameters (A10)", run := fun _ => do
+        selfhostCheckFile classWhere classWhereExpected
+        selfhostCheckFile classNested classNestedExpected
+        selfhostCheckFile classInstParam classInstParamExpected },
+    { name := "the self-hosted frontend: a missing instance is an error naming the class (A10)", run := fun _ =>
+        selfhostCheckFile classMissing classMissingExpected },
+    { name := "the self-hosted frontend: a duplicate instance is an error (A10)", run := fun _ =>
+        selfhostCheckFile classDup classDupExpected },
+    { name := "type classes and instances agree with the Lean frontend (A10)", run := fun _ =>
+        selfhostAgrees classAgreeHeader [
+          ("class Default (A : Type) where\n  d : A\ninstance instDefaultNat : Default Nat := Default.mk 7\ndef get {A : Type} [Default A] : A := Default.d\ndef seven : Nat := get\n", true),
+          ("class Two (A : Type) where\n  one : A\n  two : A\ninstance instTwoNat : Two Nat where\n  two := 20\n  one := 10\ndef sum2 {A : Type} [Two A] (add : A → A → A) : A := add Two.one Two.two\n", true),
+          ("class MyMonad (m : Type → Type) where\n  ret : Nat\nclass MyHandler (e : Type) (m : Type → Type) where\n  h : Nat\ninstance instMyMonadOption : MyMonad Option := MyMonad.mk 0\ninstance instMyHandlerNatOption : MyHandler Nat Option := MyHandler.mk 1\nclass MyCommute (e₁ e₂ : Type) (m : Type → Type) [i : MyMonad m] [h₁ : MyHandler e₁ m] [h₂ : MyHandler e₂ m] where\n  comm : Nat\ninstance instMyCommute : MyCommute Nat Nat Option where\n  comm := 2\n#reduce Nat.beq (@MyCommute.comm Nat Nat Option instMyMonadOption instMyHandlerNatOption instMyHandlerNatOption instMyCommute) 2\n", true),
+          -- rejected by both: a private class field, a missing field, too many fields,
+          -- an instance for something that is not a class, and a missing instance
+          ("class Priv (A : Type) where\n  private d : A\n", false),
+          ("class Two (A : Type) where\n  one : A\n  two : A\ninstance instTwoNat : Two Nat := Two.mk 1\n", false),
+          ("class Two (A : Type) where\n  one : A\n  two : A\ninstance instTwoNat : Two Nat := Two.mk 1 2 3\n", false),
+          ("def Nat.f (n : Nat) : Nat := n\ninstance instNat : Nat.f := instNat\n", false),
+          ("class Default (A : Type) where\n  d : A\ndef get {A : Type} [Default A] : A := Default.d\ndef bad : Bool := get\n", false)] },
+    { name := "type class verdicts pinned against the Lean frontend (A10: duplicate instances, outParam)", run := fun _ =>
+        selfhostVerdicts "" [
+          -- (both instances are ordinary candidates in Lean; the self-hosted frontend
+          -- rejects two with definitionally equal types, since it has no priorities)
+          ("class Default (A : Type) where\n  d : A\ninstance instDefaultNat : Default Nat := Default.mk 7\ninstance instDefaultNat2 : Default Nat := Default.mk 8\n", true, false),
+          -- (an output parameter rewrites a class parameter's type; not implemented here)
+          ("class MyAdd (A B : Type) (C : outParam Type) where\n  add : A → B → C\ninstance instMyAdd : MyAdd Nat Nat Nat := MyAdd.mk Nat.add\ndef three : Nat := MyAdd.add 1 2\n", true, false)] },
+    { name := "the self-hosted backend: a class's dictionary passing compiles and runs (A10)", run := fun _ =>
+        selfhostCompileRun classProgram "7\n1\n" },
     { name := "the proof surface: Prop, Sort, equality, refl/rfl, cast and transp, as in the Lean frontend (A16)", run := fun _ => do
         let file := "import Prelude\n" ++
           "def reflNat (n : Nat) : n = n := rfl\n" ++
