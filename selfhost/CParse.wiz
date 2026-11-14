@@ -79,7 +79,7 @@ def cTakeWhile (p : Char → Bool) : List Char → List Char × List Char
   | .nil => (.nil, .nil)
   | .cons c cs => match p c with
     | .true =>
-      let r := cTakeWhile p cs
+      let r := cTakeWhile p cs;
       (.cons c r.1, r.2)
     | .false => (.nil, .cons c cs)
 
@@ -119,11 +119,11 @@ partial def cReadLit (quote : Char) : List Char → List Char × List Char
     | .false => match Nat.beq (Char.code c) 92 with
       | .true => match rest with
         | .cons d more =>
-          let r := cReadLit quote more
+          let r := cReadLit quote more;
           (.cons c (.cons d r.1), r.2)
         | .nil => (.cons c .nil, .nil)
       | .false =>
-        let r := cReadLit quote rest
+        let r := cReadLit quote rest;
         (.cons c r.1, r.2)
 
 def cAppendOne (acc : List String) (t : String) : List String := List.append acc (.cons t .nil)
@@ -209,28 +209,25 @@ partial def cStartsAt (p : String) (s : String) : Bool := match p, s with
 
 -- Skip a balanced group, starting at an opening bracket (the next token).
 partial def cpSkipGroupGo (o c : String) (q : CP) (depth : Nat) : CP :=
-  let t := cpPeek q;
-  if strEq t "" then q
-  else match strEq t c with
+  let t := cpPeek q; if strEq t "" then q
+  else (match strEq t c with
     | .true => match depth with
       | .zero => cpAdvance q
       | .succ k => cpSkipGroupGo o c (cpAdvance q) k
     | .false => if strEq t o then cpSkipGroupGo o c (cpAdvance q) (depth + 1)
-      else cpSkipGroupGo o c (cpAdvance q) depth
+      else cpSkipGroupGo o c (cpAdvance q) depth)
 partial def cpSkipGroup (p : CP) : CP :=
-  let o := cpPeek p;
-  if strEq o "" then p
-  else
-    let c := if strEq o "(" then ")" else if strEq o "[" then "]" else "}"
-    cpSkipGroupGo o c (cpAdvance p) 0
+  let o := cpPeek p; if strEq o "" then p
+  else (
+    let c := if strEq o "(" then ")" else if strEq o "[" then "]" else "}";
+    cpSkipGroupGo o c (cpAdvance p) 0)
 
 -- Skip GNU extensions: `__attribute__((…))`, `__asm__(…)`, `__declspec(…)`.
 partial def cpSkipExtensions (p : CP) : CP :=
-  let t := cpPeek p;
-  if Bool.or (strEq t "__attribute__") (Bool.or (strEq t "__asm__") (Bool.or (strEq t "__asm") (Bool.or (strEq t "asm") (strEq t "__declspec")))) then
-    let q := cpAdvance p
-    let q := if strEq (cpPeek q) "(" then cpSkipGroup q else q
-    cpSkipExtensions q
+  let t := cpPeek p; if Bool.or (strEq t "__attribute__") (Bool.or (strEq t "__asm__") (Bool.or (strEq t "__asm") (Bool.or (strEq t "asm") (strEq t "__declspec")))) then (
+    let q := cpAdvance p;
+    let q := if strEq (cpPeek q) "(" then cpSkipGroup q else q;
+    cpSkipExtensions q)
   else p
 
 structure SpecR where
@@ -280,41 +277,37 @@ def isFnPtr : CTy → Bool
 mutual
 
 partial def cpSpecGo (p : CP) (ints : List String) (base : Option CTy) (isTd : Bool) (isConst : Bool) : SpecR :=
-  let p := cpSkipExtensions p
-  let t := cpPeek p;
-  if strEq t "typedef" then cpSpecGo (cpAdvance p) ints base .true isConst
+  let p := cpSkipExtensions p;
+  let t := cpPeek p; if strEq t "typedef" then cpSpecGo (cpAdvance p) ints base .true isConst
   else if cElemStr t cWords then cpSpecGo (cpAdvance p) ints base isTd isConst
   else if cElemStr t cQuals then cpSpecGo (cpAdvance p) ints base isTd
     (Bool.or isConst (Bool.or (strEq t "const") (strEq t "__const")))
   else if cElemStr t cInts then cpSpecGo (cpAdvance p) (List.append ints (.cons t .nil)) base isTd isConst
   else cpSpecGo2 p ints base isTd isConst
 partial def cpSpecGo2 (p : CP) (ints : List String) (base : Option CTy) (isTd : Bool) (isConst : Bool) : SpecR :=
-  let p := cpSkipExtensions p
-  let t := cpPeek p
-  if cElemStr t cFloats then cpSpecGo (cpAdvance p) ints (.some (.cfloat t)) isTd isConst
+  let p := cpSkipExtensions p;
+  let t := cpPeek p; if cElemStr t cFloats then cpSpecGo (cpAdvance p) ints (.some (.cfloat t)) isTd isConst
   else if strEq t "void" then cpSpecGo (cpAdvance p) ints (.some .cvoid) isTd isConst
-  else if Bool.or (strEq t "struct") (Bool.or (strEq t "union") (strEq t "enum")) then
-    let p1 := cpSkipExtensions (cpAdvance p);
-    if strEq (cpPeek p1) "{" then
-      if strEq t "struct" then
-        let anon := p1.anon
-        let sp := "<anonymous " +++ Nat.toString anon +++ ">"
+  else if Bool.or (strEq t "struct") (Bool.or (strEq t "union") (strEq t "enum")) then (
+    let p1 := cpSkipExtensions (cpAdvance p); if strEq (cpPeek p1) "{" then
+      if strEq t "struct" then (
+        let anon := p1.anon;
+        let sp := "<anonymous " +++ Nat.toString anon +++ ">";
         let p2 : CP := match p1 with
           | .mk toks td st al _ => CP.mk toks td st al (anon + 1)
-        let fr := cpStructBody p2
-        let st := CSt.mk sp fr.fields .nil
+        let fr := cpStructBody p2;
+        let st := CSt.mk sp fr.fields .nil;
         let p4 : CP := match fr.p with
           | .mk toks td st0 al an => CP.mk toks td (.cons st st0) al an
-        cpSpecGo p4 ints (.some (.cstruct sp)) isTd isConst
-      else
-        let p2 := cpSkipGroup p1
-        cpSpecGo p2 ints (.some (.cother t)) isTd isConst
-    else
-      let tag := cpPeek p1
-      let p2 := cpAdvance p1;
-      if strEq t "enum" then cpSpecGo p2 ints (.some (.cint "enum")) isTd isConst
+        cpSpecGo p4 ints (.some (.cstruct sp)) isTd isConst)
+      else (
+        let p2 := cpSkipGroup p1;
+        cpSpecGo p2 ints (.some (.cother t)) isTd isConst)
+    else (
+      let tag := cpPeek p1;
+      let p2 := cpAdvance p1; if strEq t "enum" then cpSpecGo p2 ints (.some (.cint "enum")) isTd isConst
       else if strEq t "struct" then cpSpecGo p2 ints (.some (.cstruct ("struct " +++ tag))) isTd isConst
-      else cpSpecGo p2 ints (.some (.cother (t +++ " " +++ tag))) isTd isConst
+      else cpSpecGo p2 ints (.some (.cother (t +++ " " +++ tag))) isTd isConst))
   else if Bool.and (match base with | .none => .true | _ => .false) (match ints with | .nil => .true | _ => .false) then
     match cpLookup t (p.typedefs) with
     | .some ty => cpSpecGo (cpAdvance p) ints (.some ty) isTd isConst
@@ -322,15 +315,13 @@ partial def cpSpecGo2 (p : CP) (ints : List String) (base : Option CTy) (isTd : 
   else cpFinishSpec base ints isTd isConst p
 
 partial def cpPtrs (ty : CTy) (p : CP) : PtrR :=
-  let p := cpSkipExtensions p
-  let t := cpPeek p;
-  if strEq t "*" then cpPtrs (.cptr ty) (cpAdvance p)
+  let p := cpSkipExtensions p;
+  let t := cpPeek p; if strEq t "*" then cpPtrs (.cptr ty) (cpAdvance p)
   else if cElemStr t cQuals then cpPtrs ty (cpAdvance p)
   else PtrR.mk ty p
 
 partial def cpSuffixes (q : CP) : CP :=
-  let t := cpPeek q;
-  if strEq t "(" then cpSuffixes (cpSkipGroup q)
+  let t := cpPeek q; if strEq t "(" then cpSuffixes (cpSkipGroup q)
   else if strEq t "[" then cpSuffixes (cpSkipGroup q)
   else q
 
@@ -351,9 +342,9 @@ def cpArrayLen (p : CP) : Option Nat := match p.toks with
   | _ => .none
 
 partial def cpArraySuffixes (p : CP) (lens : List (Option Nat)) : ArrayR :=
-  if strEq (cpPeek p) "[" then
-    let len := cpArrayLen p
-    cpArraySuffixes (cpSkipGroup p) (List.append lens (.cons len .nil))
+  if strEq (cpPeek p) "[" then (
+    let len := cpArrayLen p;
+    cpArraySuffixes (cpSkipGroup p) (List.append lens (.cons len .nil)))
   else ArrayR.mk lens p
 
 partial def cpArrayTy (ty : CTy) : List (Option Nat) → CTy
@@ -361,87 +352,79 @@ partial def cpArrayTy (ty : CTy) : List (Option Nat) → CTy
   | .cons n rest => .carray (cpArrayTy ty rest) n
 
 partial def cpDeclarator (base : CTy) (p0 : CP) : DeclR :=
-  let r := cpPtrs base p0
-  let p := cpSkipExtensions r.p
-  let ty := r.ty;
-  if strEq (cpPeek p) "(" then
-    let q := cpSkipGroup p
-    let q := cpSkipExtensions q
-    let name : Option String := .some (cpPeek q)
-    let q := if cIdentStart (cHead (toChars (cpPeek q))) then cpAdvance q else q
+  let r := cpPtrs base p0;
+  let p := cpSkipExtensions r.p;
+  let ty := r.ty; if strEq (cpPeek p) "(" then (
+    let q := cpSkipGroup p;
+    let q := cpSkipExtensions q;
+    let name : Option String := .some (cpPeek q);
+    let q := if cIdentStart (cHead (toChars (cpPeek q))) then cpAdvance q else q;
     DeclR.mk (match cIdentStart (cHead (toChars (cpPeek q))) with | .true => name | .false => .none)
-      (.cother "function pointer") .none .false .nil (cpSuffixes (cpSkipExtensions q))
-  else
+      (.cother "function pointer") .none .false .nil (cpSuffixes (cpSkipExtensions q)))
+  else (
     let name : Option String := match cIdentStart (cHead (toChars (cpPeek p))) with
       | .true => .some (cpPeek p)
       | .false => .none
     let p : CP := match name with
       | .some _ => cpAdvance p
       | .none => p
-    let p := cpSkipExtensions p
+    let p := cpSkipExtensions p;
     let pr := if strEq (cpPeek p) "(" then cpParams (cpAdvance p) .nil .nil .false
       else ParamsR.mk .none .nil .false p
-    let ar := cpArraySuffixes pr.p .nil
-    DeclR.mk name (cpArrayTy ty ar.lens) pr.params pr.variadic pr.pnames ar.p
+    let ar := cpArraySuffixes pr.p .nil;
+    DeclR.mk name (cpArrayTy ty ar.lens) pr.params pr.variadic pr.pnames ar.p)
 
 partial def cpParams (p : CP) (ps : List CTy) (names : List String) (variadic : Bool) : ParamsR :=
-  let p := cpSkipExtensions p
-  let t := cpPeek p;
-  if strEq t ")" then
+  let p := cpSkipExtensions p;
+  let t := cpPeek p; if strEq t ")" then (
     let ps' : List CTy := match ps with
       | .cons .cvoid .nil => .nil
       | _ => ps
-    ParamsR.mk (.some ps') names variadic (cpAdvance p)
+    ParamsR.mk (.some ps') names variadic (cpAdvance p))
   else if strEq t "" then ParamsR.mk (.some ps) names variadic p
   else if strEq t "," then cpParams (cpAdvance p) ps names variadic
   else if strEq t "..." then cpParams (cpAdvance p) ps names .true
-  else
-    let sr := cpSpecGo p .nil .none .false .false
-    let dr := cpDeclarator sr.ty sr.p
-    let k : CTy := if isFnPtr dr.ty then .cother "function pointer" else dr.ty.decay
+  else (
+    let sr := cpSpecGo p .nil .none .false .false;
+    let dr := cpDeclarator sr.ty sr.p;
+    let k : CTy := if isFnPtr dr.ty then .cother "function pointer" else dr.ty.decay;
     cpParams dr.p (List.append ps (.cons k .nil))
-      (List.append names (.cons (match dr.name with | .some n => n | .none => "") .nil)) variadic
+      (List.append names (.cons (match dr.name with | .some n => n | .none => "") .nil)) variadic)
 
 partial def cpStructBody (p0 : CP) : FieldsR :=
   if strEq (cpPeek p0) "{" then cpStructGo (cpAdvance p0) .nil .true
   else FieldsR.mk .none p0
 partial def cpStructGo (p : CP) (fs : List CTyPair) (ok : Bool) : FieldsR :=
-  let t := cpPeek p;
-  if strEq t "" then FieldsR.mk (if ok then .some fs else .none) p
+  let t := cpPeek p; if strEq t "" then FieldsR.mk (if ok then .some fs else .none) p
   else if strEq t "}" then FieldsR.mk (if ok then .some fs else .none) (cpAdvance p)
   else if strEq t ";" then cpStructGo (cpAdvance p) fs ok
-  else
-    let sr := cpSpecGo p .nil .none .false .false
-    let fr := cpFieldDecls sr.p sr.ty fs ok
+  else (
+    let sr := cpSpecGo p .nil .none .false .false;
+    let fr := cpFieldDecls sr.p sr.ty fs ok;
     let p3 := if strEq (cpPeek fr.p) ";" then cpAdvance fr.p
       else if strEq (cpPeek fr.p) "}" then fr.p else cpSkipToSemi fr.p
     let fs2 : List CTyPair := match fr.fields with | .some fs1 => fs1 | .none => fs;
-    let ok2 : Bool := match fr.fields with | .some _ => ok | .none => .false;
-    if strEq (cpPeek p3) "}" then FieldsR.mk (if ok2 then .some fs2 else .none) (cpAdvance p3)
-    else cpStructGo p3 fs2 ok2
+    let ok2 : Bool := match fr.fields with | .some _ => ok | .none => .false; if strEq (cpPeek p3) "}" then FieldsR.mk (if ok2 then .some fs2 else .none) (cpAdvance p3)
+    else cpStructGo p3 fs2 ok2)
 partial def cpFieldDecls (p : CP) (base : CTy) (fs : List CTyPair) (ok : Bool) : FieldsR :=
-  let t := cpPeek p;
-  if strEq t ";" then FieldsR.mk (if ok then .some fs else .none) p
+  let t := cpPeek p; if strEq t ";" then FieldsR.mk (if ok then .some fs else .none) p
   else if strEq t "" then FieldsR.mk (if ok then .some fs else .none) p
-  else
-    let dr := cpDeclarator base p
-    let bit := strEq (cpPeek dr.p) ":"
+  else (
+    let dr := cpDeclarator base p;
+    let bit := strEq (cpPeek dr.p) ":";
     let fs2 : List CTyPair := match dr.name with
       | .some n => if bit then fs else List.append fs (.cons (CTyPair.mk n dr.ty) .nil)
       | .none => fs
     let ok2 : Bool := match dr.name with
       | .some _ => Bool.and ok (Bool.not bit)
       | .none => .false
-    let p2 := if bit then cpSkipBit (cpAdvance dr.p) else dr.p;
-    if strEq (cpPeek p2) "," then cpFieldDecls (cpAdvance p2) base fs2 ok2
-    else FieldsR.mk (if ok2 then .some fs2 else .none) p2
+    let p2 := if bit then cpSkipBit (cpAdvance dr.p) else dr.p; if strEq (cpPeek p2) "," then cpFieldDecls (cpAdvance p2) base fs2 ok2
+    else FieldsR.mk (if ok2 then .some fs2 else .none) p2)
 partial def cpSkipBit (p : CP) : CP :=
-  let t := cpPeek p;
-  if Bool.or (strEq t "") (Bool.or (strEq t ",") (Bool.or (strEq t ";") (strEq t "}"))) then p
+  let t := cpPeek p; if Bool.or (strEq t "") (Bool.or (strEq t ",") (Bool.or (strEq t ";") (strEq t "}"))) then p
   else cpSkipBit (cpAdvance p)
 partial def cpSkipToSemi (p : CP) : CP :=
-  let t := cpPeek p;
-  if Bool.or (strEq t "") (Bool.or (strEq t ";") (strEq t "}")) then p
+  let t := cpPeek p; if Bool.or (strEq t "") (Bool.or (strEq t ";") (strEq t "}")) then p
   else if Bool.or (strEq t "(") (Bool.or (strEq t "[") (strEq t "{")) then cpSkipToSemi (cpSkipGroup p)
   else cpSkipToSemi (cpAdvance p)
 
@@ -525,51 +508,48 @@ def cFindFn (n : String) : List CFn → Option CFn
 partial def cpDedupeFuncs : List CFn → List CFn
   | .nil => .nil
   | .cons f rest =>
-    let rest' := cpDedupeFuncs rest
+    let rest' := cpDedupeFuncs rest;
     match cFindFn f.name rest' with
     | .some _ => rest'
     | .none => .cons f rest'
 
 partial def cSkipInit (p : CP) : CP :=
-  let t := cpPeek p;
-  if Bool.or (strEq t "") (Bool.or (strEq t ",") (strEq t ";")) then p
+  let t := cpPeek p; if Bool.or (strEq t "") (Bool.or (strEq t ",") (strEq t ";")) then p
   else if Bool.or (strEq t "(") (Bool.or (strEq t "{") (strEq t "[")) then cSkipInit (cpSkipGroup p)
   else cSkipInit (cpAdvance p)
 
 partial def cSkipToSemiTop (p : CP) : CP :=
-  let t := cpPeek p;
-  if strEq t "" then p
+  let t := cpPeek p; if strEq t "" then p
   else if strEq t ";" then cpAdvance p
   else cSkipToSemiTop (cpAdvance p)
 
 mutual
 
 partial def cDeclList (base : CTy) (isTd : Bool) (p : CP) (acc : List CFn) : DeclsR :=
-  let dr := cpDeclarator base p
+  let dr := cpDeclarator base p;
   let acc2 : List CFn := match dr.name with
     | .some n => match dr.params with
       | .some pr => if isTd then acc else List.append acc (.cons (CFn.mk n dr.ty (match dr.params with | .some pp => pp | .none => .nil) dr.variadic dr.pnames) .nil)
       | .none => acc
     | .none => acc
   if strEq (cpPeek dr.p) "{" then DeclsR.mk acc2 (cpSkipGroup dr.p)
-  else if strEq (cpPeek dr.p) "=" then
-    let q2 := cSkipInit dr.p
+  else if strEq (cpPeek dr.p) "=" then (
+    let q2 := cSkipInit dr.p;
     let q3 : CP := match dr.name with
       | .some n => match dr.params with
         | .some _ => q2
         | .none => if isTd then cpBindTypedef n dr.ty q2 else q2
       | .none => q2
-    cDeclListEnd base isTd q3 acc2
-  else
+    cDeclListEnd base isTd q3 acc2)
+  else (
     let q2 : CP := match dr.name with
       | .some n => match dr.params with
         | .some _ => dr.p
         | .none => if isTd then cpBindTypedef n dr.ty dr.p else dr.p
       | .none => dr.p
-    cDeclListEnd base isTd q2 acc2
+    cDeclListEnd base isTd q2 acc2)
 partial def cDeclListEnd (base : CTy) (isTd : Bool) (q : CP) (acc : List CFn) : DeclsR :=
-  let t := cpPeek q;
-  if strEq t "," then cDeclList base isTd (cpAdvance q) acc
+  let t := cpPeek q; if strEq t "," then cDeclList base isTd (cpAdvance q) acc
   else if strEq t ";" then DeclsR.mk acc (cpAdvance q)
   else if strEq t "" then DeclsR.mk acc q
   else DeclsR.mk acc (cSkipToSemiTop q)
@@ -580,14 +560,13 @@ end
 partial def cParseDecls (p : CP) (acc : List CFn) (fuel : Nat) : DeclsR := match fuel with
   | .zero => DeclsR.mk acc p
   | .succ k =>
-    let p := cpSkipExtensions p;
-    if strEq (cpPeek p) "" then DeclsR.mk acc p
-    else
-      let sr := cpSpecGo p .nil .none .false .false
-      let r := cDeclList sr.ty sr.isTypedef sr.p acc
-      cParseDecls r.p r.funcs k
+    let p := cpSkipExtensions p; if strEq (cpPeek p) "" then DeclsR.mk acc p
+    else (
+      let sr := cpSpecGo p .nil .none .false .false;
+      let r := cDeclList sr.ty sr.isTypedef sr.p acc;
+      cParseDecls r.p r.funcs k)
 
 def cParseHeader (src : String) : Hdr :=
-  let p : CP := CP.mk (cTokenize src) .nil .nil .nil 0
-  let r := cParseDecls p .nil 1000000
+  let p : CP := CP.mk (cTokenize src) .nil .nil .nil 0;
+  let r := cParseDecls p .nil 1000000;
   Hdr.mk (cpDedupeFuncs r.funcs) (cpDedupeStructs (cpFinishStructs r.p))

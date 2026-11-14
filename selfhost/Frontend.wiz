@@ -4524,9 +4524,9 @@ def implementedByCmd (gs : Globals) (stx : Syntax) : LinkR :=
               -- `mk` must have the constructor's type, and `get` must end in `T`
               if Bool.not (convTy empty (eval .nil tyG) (eval .nil tyF)) then
                 err (g +++ " can't implement " +++ f +++ ": its type " +++ show .nil 0 tyG +++ " is not " +++ f +++ "'s type")
-              else
+              else (
                 let gs1 := Globals.addFFI gs (.impl f g);
-                LinkR.mk .none (Globals.addFFI gs1 (.repr T g get))
+                LinkR.mk .none (Globals.addFFI gs1 (.repr T g get)))
       | .nil => match Bool.or (externNamed f (Globals.ffi gs)) (elemStr f nativeNames) with
         | .true => err (String.append f " is a builtin or foreign function: it already has an implementation")
         | .false => match strEq f g with
@@ -4952,8 +4952,7 @@ def mapGlueParams : List KN → List NamedGTy
   | .cons e rest => .cons (NamedGTy.mk e.name (glueGtyOfKind e.kind)) (mapGlueParams rest)
 def glueParamDecls (gs : Globals) (names : List String) (ks : List String) : String := match names, ks with
   | .cons n ns, .cons k ks1 =>
-    let more := glueParamDecls gs ns ks1;
-    if strEq more "" then kindCType gs k +++ " " +++ n
+    let more := glueParamDecls gs ns ks1; if strEq more "" then kindCType gs k +++ " " +++ n
     else kindCType gs k +++ " " +++ n +++ ", " +++ more
   | _, _ => ""
 def mapGlueKinds : List String → List GTy
@@ -5408,11 +5407,10 @@ def modCheckRun (cats : List Cat) (tokens : List String) (tab : List ModSrc) (ro
 partial def modHeaderNamesAt : List Char → List String
   | .nil => .nil
   | .cons c rest =>
-    let cs : List Char := .cons c rest;
-    if cStarts (toChars "import_c \"") cs then
+    let cs : List Char := .cons c rest; if cStarts (toChars "import_c \"") cs then (
       let after := cDrop 10 cs
       let r := cTakeWhile (fun d => Bool.not (Nat.beq (Char.code d) 34)) after
-      .cons (String.mk r.1) (modHeaderNamesAt (cDrop 1 r.2))
+      .cons (String.mk r.1) (modHeaderNamesAt (cDrop 1 r.2)))
     else modHeaderNamesAt rest
 def modHeaderNames (text : String) : List String := match text with
   | .mk cs => modHeaderNamesAt cs

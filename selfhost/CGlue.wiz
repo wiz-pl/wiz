@@ -255,7 +255,7 @@ partial def gExprLoop (prec : Nat) (lhs : GTy) (p : GS) : GR :=
   match strEq t "?" with
   | .true => match prec with
     | .zero =>
-      let p1 := gAdvance p
+      let p1 := gAdvance p;
       match gExpr 0 p1 with
       | .gerr m => .gerr m
       | .gok a p2 =>
@@ -275,7 +275,7 @@ partial def gExprLoop (prec : Nat) (lhs : GTy) (p : GS) : GR :=
     | .none => .gok lhs p
     | .some lvl =>
       if Nat.lt lvl prec then .gok lhs p else
-      let p1 := gAdvance p
+      let p1 := gAdvance p;
       match gExpr (lvl + 1) p1 with
       | .gerr m => .gerr m
       | .gok rhs p2 =>
@@ -290,8 +290,7 @@ partial def gExprLoop (prec : Nat) (lhs : GTy) (p : GS) : GR :=
         gExprLoop prec r p2
 
 partial def gUnary (p : GS) : GR :=
-  let t := gPeek p;
-  if gContains t gForbidden then .gerr ("'" +++ t +++ "' is not allowed in glue code")
+  let t := gPeek p; if gContains t gForbidden then .gerr ("'" +++ t +++ "' is not allowed in glue code")
   else if strEq t "*" then .gerr "pointer dereference is not allowed in glue code"
   else if Bool.or (strEq t "-") (Bool.or (strEq t "!") (strEq t "~")) then
     match gUnary (gAdvance p) with
@@ -305,8 +304,7 @@ partial def gUnary (p : GS) : GR :=
 
 partial def gPrimary (p : GS) : GR :=
   let t := gPeek p;
-  let p1 := gAdvance p;
-  if strEq t "(" then
+  let p1 := gAdvance p; if strEq t "(" then (
     let nxt := gPeek p1;
     match gLocalMatch gLocalTypes (.cons nxt .nil) with
     | .some _ => .gerr "casts are not allowed in glue code"
@@ -314,16 +312,16 @@ partial def gPrimary (p : GS) : GR :=
       | .gerr m => .gerr m
       | .gok a p2 => match strEq (gPeek p2) ")" with
         | .false => .gerr ("expected ')', found '" +++ gPeek p2 +++ "'")
-        | .true => .gok a (gAdvance p2)
+        | .true => .gok a (gAdvance p2))
   else if gStartsWith "\"" t then .gok .gstr p1
   else if gStartsWith "'" t then .gok .gint p1
   else if gIsNumber t then .gok (match cContainsChar (toChars t) 46 with
     | .true => .gdbl
     | .false => .gint) p1
   else if Bool.not (gIsIdent t) then .gerr ("unexpected '" +++ t +++ "'")
-  else match strEq (gPeek p1) "(" with
+  else (match strEq (gPeek p1) "(" with
     | .true => gCall t (gAdvance p1)
-    | .false => gVar t p1
+    | .false => gVar t p1)
 partial def gCall (t : String) (p : GS) : GR :=
   match gLookupFunc t (match p with | .mk _ _ fs _ _ => fs) with
   | .none => .gerr ("unknown C function " +++ t +++ " (import its header with import_c)")
@@ -332,25 +330,24 @@ partial def gCall (t : String) (p : GS) : GR :=
     | .gok args p2 =>
       if Bool.not (Nat.beq (gLenT args) (gLenT ps)) then
         .gerr (t +++ " takes " +++ Nat.toString (gLenT ps) +++ " arguments, not " +++ Nat.toString (gLenT args))
-      else match gCheckArgs t args ps with
+      else (match gCheckArgs t args ps with
         | .some m => .gerr m
-        | .none => .gok r p2
+        | .none => .gok r p2)
 partial def gVar (t : String) (p : GS) : GR :=
   match gLookupVar t (match p with | .mk _ vs _ _ _ => vs) with
   | .some ty =>
-    let nxt := gPeek p;
-    if Bool.or (strEq nxt "[") (Bool.or (strEq nxt ".") (strEq nxt "->")) then
+    let nxt := gPeek p; if Bool.or (strEq nxt "[") (Bool.or (strEq nxt ".") (strEq nxt "->")) then
       .gerr ("'" +++ nxt +++ "' (indexing or member access) is not allowed in glue code")
-    else match gMembers ty p with
+    else (match gMembers ty p with
       | .gerr m => .gerr m
-      | .gok ty2 p2 => .gok ty2 p2
+      | .gok ty2 p2 => .gok ty2 p2)
   | .none => .gerr ("unknown variable " +++ t)
 -- Field accesses `.f` after a struct-valued variable.
 partial def gMembers (ty : GTy) (p : GS) : GR := match ty with
   | .gstruct sp =>
     if strNe (gPeek p) "." then .gok ty p else
-    let p1 := gAdvance p
-    let f := gPeek p1
+    let p1 := gAdvance p;
+    let f := gPeek p1;
     match gLookupStruct sp (match p with | .mk _ _ _ _ st => st) with
     | .none => .gerr ("the fields of " +++ sp +++ " are not known")
     | .some fs => match gLookupField f fs with
@@ -365,19 +362,18 @@ partial def gArgsMore (p : GS) (args : List GTy) : GArgs :=
 
 partial def gArgs (p : GS) (args : List GTy) : GArgs :=
   if strEq (gPeek p) ")" then .gok args (gAdvance p) else
-  if strEq (gPeek p) "&" then
-    let p1 := gAdvance p
-    let x := gPeek p1
+  if strEq (gPeek p) "&" then (
+    let p1 := gAdvance p;
+    let x := gPeek p1;
     match gLookupVar x (match p with | .mk _ vs _ _ _ => vs) with
     | .some (.gstruct sp) =>
-      let p2 := gAdvance p1;
-      if !(strEq (gPeek p2) "," || strEq (gPeek p2) ")") then
+      let p2 := gAdvance p1; if !(strEq (gPeek p2) "," || strEq (gPeek p2) ")") then
         .gerr "'&' only takes the address of a whole struct variable"
       else gArgsMore p2 (.cons (.gaddr sp) args)
-    | _ => .gerr "'&' is only allowed on a struct variable, as the argument of a C function"
-  else match gExpr 0 p with
+    | _ => .gerr "'&' is only allowed on a struct variable, as the argument of a C function")
+  else (match gExpr 0 p with
     | .gerr m => .gerr m
-    | .gok a p1 => gArgsMore p1 (.cons a args)
+    | .gok a p1 => gArgsMore p1 (.cons a args))
 
 def gCheckArgs (t : String) (args : List GTy) (ps : List GTy) : Option String := match args, ps with
   | .nil, .nil => .none
@@ -391,12 +387,10 @@ end
 mutual
 
 partial def gStmt (p : GS) : GSt :=
-  let t := gPeek p;
-  if gContains t gForbidden then .serr ("'" +++ t +++ "' is not allowed in glue code") else
+  let t := gPeek p; if gContains t gForbidden then .serr ("'" +++ t +++ "' is not allowed in glue code") else
   if strEq t "{" then gBlock (gAdvance p) (match p with | .mk _ vs _ _ _ => vs)
-  else if Bool.or (strEq t "if") (strEq t "while") then
-    let p1 := gAdvance p;
-    if strNe (gPeek p1) "(" then .serr ("expected '(', found '" +++ gPeek p1 +++ "'") else
+  else if Bool.or (strEq t "if") (strEq t "while") then (
+    let p1 := gAdvance p; if strNe (gPeek p1) "(" then .serr ("expected '(', found '" +++ gPeek p1 +++ "'") else
     match gExpr 0 (gAdvance p1) with
     | .gerr m => .serr m
     | .gok c p2 =>
@@ -405,17 +399,17 @@ partial def gStmt (p : GS) : GSt :=
       match gStmt (gAdvance p2) with
       | .serr m => .serr m
       | .sok p3 =>
-        if Bool.and (strEq t "if") (strEq (gPeek p3) "else") then gStmt (gAdvance p3) else .sok p3
-  else if strEq t "return" then
-    let p1 := gAdvance p
-    let r : GTy := match p with | .mk _ _ _ ret _ => ret
+        if Bool.and (strEq t "if") (strEq (gPeek p3) "else") then gStmt (gAdvance p3) else .sok p3)
+  else if strEq t "return" then (
+    let p1 := gAdvance p;
+    let r : GTy := match p with | .mk _ _ _ ret _ => ret;
     match r with
     | .gvoid => if strNe (gPeek p1) ";" then .serr ("expected ';', found '" +++ gPeek p1 +++ "'") else .sok (gAdvance p1)
     | _ => match gExpr 0 p1 with
       | .gerr m => .serr m
       | .gok a p2 =>
         if Bool.not (GTy.fits a r) then .serr ("return: expected " +++ r.show +++ ", got " +++ a.show) else
-        if strNe (gPeek p2) ";" then .serr ("expected ';', found '" +++ gPeek p2 +++ "'") else .sok (gAdvance p2)
+        if strNe (gPeek p2) ";" then .serr ("expected ';', found '" +++ gPeek p2 +++ "'") else .sok (gAdvance p2))
   else if Bool.or (strEq t "break") (strEq t "continue") then
     if strNe (gPeek (gAdvance p)) ";" then .serr "expected ';'" else .sok (gAdvance (gAdvance p))
   else gDecl p
@@ -423,21 +417,21 @@ partial def gStmt (p : GS) : GSt :=
 partial def gBlock (p : GS) (saved : List NamedGTy) : GSt :=
   if strEq (gPeek p) "}" then .sok (gSetVars (gAdvance p) saved)
   else if strEq (gPeek p) "" then .serr "missing '}'"
-  else match gStmt p with
+  else (match gStmt p with
     | .serr m => .serr m
-    | .sok p1 => gBlock p1 saved
+    | .sok p1 => gBlock p1 saved)
 
 partial def gDecl (p : GS) : GSt :=
-  let rest : List String := .cons (gPeek p) (.cons (gPeekAt p 1) (.cons (gPeekAt p 2) .nil))
-  let t0 := gPeek p
-  let t1 := gPeekAt p 1
-  let t2 := gPeekAt p 2
+  let rest : List String := .cons (gPeek p) (.cons (gPeekAt p 1) (.cons (gPeekAt p 2) .nil));
+  let t0 := gPeek p;
+  let t1 := gPeekAt p 1;
+  let t2 := gPeekAt p 2;
   let structLocal : Option GLocal :=
     if strEq t0 "struct" then
       match gLookupStruct ("struct " +++ t1) (match p with | .mk _ _ _ _ st => st) with
       | .some _ => .some (GLocal.mk (.cons "struct" (.cons t1 .nil)) (GTy.gstruct ("struct " +++ t1)))
       | .none => .none
-    else
+    else (
       let isStruct : Bool := match gLookupStruct t0 (match p with | .mk _ _ _ _ st => st) with
         | .some _ => .true
         | .none => .false
@@ -446,21 +440,20 @@ partial def gDecl (p : GS) : GSt :=
         | .none => .false
       if Bool.and (gIsIdent t2) (Bool.and isStruct (Bool.not isVar)) then
         .some (GLocal.mk (.cons t0 .nil) (GTy.gstruct t0))
-      else .none
+      else .none)
   match structLocal with
   | .some e => gDeclare p e.words e.ty
   | .none => match gLocalMatch gLocalTypes rest with
     | .some e => gDeclare p e.words e.ty
     | .none => if strEq (gPeek p) "struct" then
         .serr ("unknown struct " +++ gPeekAt p 1 +++ " (declare it with c_struct or import its header)")
-      else match gSimple p with
+      else (match gSimple p with
         | .serr m => .serr m
-        | .sok p1 => if strNe (gPeek p1) ";" then .serr ("expected ';', found '" +++ gPeek p1 +++ "'") else .sok (gAdvance p1)
+        | .sok p1 => if strNe (gPeek p1) ";" then .serr ("expected ';', found '" +++ gPeek p1 +++ "'") else .sok (gAdvance p1))
 
 partial def gDeclare (p : GS) (ws : List String) (ty : GTy) : GSt :=
-  let p1 := gAdvanceN p (gLenS ws)
-  let x := gPeek p1;
-  if Bool.not (gIsIdent x) then .serr ("expected a variable name, found '" +++ x +++ "'") else
+  let p1 := gAdvanceN p (gLenS ws);
+  let x := gPeek p1; if Bool.not (gIsIdent x) then .serr ("expected a variable name, found '" +++ x +++ "'") else
   let p2 := gAdvance p1;
   match strEq (gPeek p2) "=" with
   | .true => match gExpr 0 (gAdvance p2) with
@@ -484,28 +477,25 @@ partial def gDeclare (p : GS) (ws : List String) (ty : GTy) : GSt :=
       .sok (gFoldVars (gAdvance p2) x ty)
 
 partial def gSimple (p : GS) : GSt :=
-  let x := gPeek p;
-  if strEq (gPeekAt p 1) "." then
+  let x := gPeek p; if strEq (gPeekAt p 1) "." then
     match gLookupVar x (match p with | .mk _ vs _ _ _ => vs) with
     | .some ty => match ty with
       | .gstruct _ => match gMembers ty (gAdvance p) with
         | .gerr m => .serr m
         | .gok ty2 p1 =>
-          let op := gPeek p1;
-          if !(gContains op (.cons "=" (.cons "+=" (.cons "-=" (.cons "*=" (.cons "/=" (.cons "%=" .nil))))))) then
+          let op := gPeek p1; if !(gContains op (.cons "=" (.cons "+=" (.cons "-=" (.cons "*=" (.cons "/=" (.cons "%=" .nil))))))) then
             .serr ("expected an assignment, found '" +++ op +++ "'")
-          else match gExpr 0 (gAdvance p1) with
+          else (match gExpr 0 (gAdvance p1) with
             | .gerr m => .serr m
             | .gok a p2 =>
               if Bool.not (GTy.fits a ty2) then .serr (x +++ ": expected " +++ ty2.show +++ ", got " +++ a.show) else
               if Bool.and (Bool.not ty2.isNum) (strNe op "=") then .serr ("'" +++ op +++ "' needs numbers") else
-              .sok p2
+              .sok p2)
       | _ => .serr ("unknown variable " +++ x)
     | .none => .serr ("unknown variable " +++ x)
-  else
-    let op := gPeekAt p 1;
-    if gContains op (.cons "=" (.cons "+=" (.cons "-=" (.cons "*=" (.cons "/=" (.cons "%=" .nil)))))) then
-      let p1 := gAdvanceN p 2
+  else (
+    let op := gPeekAt p 1; if gContains op (.cons "=" (.cons "+=" (.cons "-=" (.cons "*=" (.cons "/=" (.cons "%=" .nil)))))) then (
+      let p1 := gAdvanceN p 2;
       match gLookupVar x (match p with | .mk _ vs _ _ _ => vs) with
       | .none => .serr ("unknown variable " +++ x)
       | .some ty => match gExpr 0 p1 with
@@ -513,15 +503,15 @@ partial def gSimple (p : GS) : GSt :=
         | .gok a p2 =>
           if Bool.not (GTy.fits a ty) then .serr (x +++ ": expected " +++ ty.show +++ ", got " +++ a.show) else
           if Bool.and (Bool.not ty.isNum) (strNe op "=") then .serr ("'" +++ op +++ "' needs numbers") else
-          .sok p2
-    else if Bool.or (strEq op "++") (strEq op "--") then
-      let p1 := gAdvanceN p 2
+          .sok p2)
+    else if Bool.or (strEq op "++") (strEq op "--") then (
+      let p1 := gAdvanceN p 2;
       match gLookupVar x (match p with | .mk _ vs _ _ _ => vs) with
       | .some .gint => .sok p1
-      | _ => .serr ("'" +++ op +++ "' needs an integer variable")
-    else match gExpr 0 p with
+      | _ => .serr ("'" +++ op +++ "' needs an integer variable"))
+    else (match gExpr 0 p with
       | .gerr m => .serr m
-      | .gok _ p1 => .sok p1
+      | .gok _ p1 => .sok p1))
 
 end
 
@@ -534,7 +524,7 @@ partial def gStmtLoop (p : GS) : GSt :=
   | .sok p1 => gStmtLoop p1
 def gCheckGlue (body : String) (params : List NamedGTy) (funcs : List Callable)
     (ret : GTy) (structs : List StructDef) : Option String :=
-  let p : GS := GS.mk (gJoinOps (cTokenize body)) params funcs ret structs
+  let p : GS := GS.mk (gJoinOps (cTokenize body)) params funcs ret structs;
   match gStmtLoop p with
   | .serr m => .some m
   | .sok _ => .none
