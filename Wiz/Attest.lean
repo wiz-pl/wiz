@@ -284,12 +284,16 @@ def byproductsOf (out : FilePath) (lib : Bool) (split : Nat) : IO (List (String 
 
 /-- Write a build attestation for `out` to `attestPath`. `source` is the path as the
 user gave it; the input manifest hashes that file, every module `wiz build` loaded
-(named by module, so the record is portable), and every `link_c` file. -/
+(named by module, so the record is portable), and every `link_c` file. `roots` is the
+module search path (default: the toolchain's; `grail` passes the package's roots). -/
 def emit (tc : Toolchain) (source : String) (out : FilePath)
-    (llvm lib noMain : Bool) (split : Nat) (attestPath : FilePath) : IO (Except String Unit) := do
+    (llvm lib noMain : Bool) (split : Nat) (attestPath : FilePath)
+    (roots? : Option (List FilePath) := none) : IO (Except String Unit) := do
   try
     let text ← IO.FS.readFile source
-    let roots ← Module.roots tc.searchPath
+    let roots ← match roots? with
+      | some r => pure r
+      | none => Module.roots tc.searchPath
     let closure ← Module.loadClosure roots text
     let dir := (FilePath.mk source).parent.getD "."
     -- the manifest: the root file, the modules it reaches, and the link_c files
