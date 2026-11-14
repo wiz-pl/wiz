@@ -166,6 +166,27 @@ single-provider authenticity, not provenance: it does not catch a compromised si
 wrong build, or a split view. See [cache-signing.md](../cache-signing.md) for the file
 format, key handling, and the rotation/revocation checklist.
 
+**A witnessed generation log (P4, anti-equivocation).** A signature authenticates one
+index; it cannot show a client that another client saw the same index. `wiz cache log
+append` appends the current signed index to `<cache>/log/entries/NNNNNNNN.sexpr`, signs
+the entry and a checkpoint in the `wiz-cache-transparency` namespace, and writes
+`<cache>/log/checkpoint.sexpr` (`size`, RFC 6962 `root`, last-entry `head`, latest
+`generation`). Every entry carries the SHA-256 of the previous entry's exact bytes in
+`prev`, its index, and the digests of `manifest.sexpr` and `manifest.sexpr.sig`. `append`
+refuses an index that is not newer than the logged generation or whose `prev` is not the
+logged root, so the log is extended, never rewritten.
+
+`wiz cache log verify --signers FILE` checks the entry order, the `prev` chain, every
+signature, the checkpoint, and that the layer's signed index is exactly the latest entry;
+`wiz cache log prove --index N` writes an RFC 6962 inclusion proof and `--proof FILE`
+verifies it. `wiz cache monitor --witness FILE` is an offline monitor: it compares the
+checkpoint with a local witness and refuses a shorter/lower-generation history
+(`rollback`), a rewritten prefix (`fork`), or any verification error (`tamper`), leaving
+the witness untouched on failure. The witness is a local file outside the cache; there is
+no public log and no quorum, so this is tamper evidence against a mirror that cannot
+rewrite the witness, not a transparency service. The design, formats, Sigsum/Rekor
+mapping and exact limits are in [cache-transparency.md](../cache-transparency.md).
+
 Next: finer dependencies (re-elaborate only what an edit affects, not everything
 after it).
 

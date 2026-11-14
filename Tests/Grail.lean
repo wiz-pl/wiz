@@ -1096,6 +1096,174 @@ def toolchainGroup : Group where
         let rollback ← run #["cache", "verify", "--cache", cache.toString, "--signers", allowed.toString, "--min-generation", toString current]
         checkEq 1 rollback.exitCode
         check ((rollback.stdout.splitOn "generation rollback").length > 1) s!"rollback: {rollback.stdout}" },
+    { name := "cache transparency log: append, inclusion proof, and tamper detection", run := fun _ => do
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 2\n"),
+                          ("main.wiz", "import M\n#eval x\n")]
+        let cache ← IO.FS.createTempDir
+        let wiz := (← IO.FS.realPath ".lake/build/bin/wiz").toString
+        let run (args : Array String) := IO.Process.output { cmd := wiz, args, cwd := some dir }
+        let base : Array String := #["check", "main.wiz", "-I", dir.toString]
+        checkEq 0 (← run (base ++ #["--cache", cache.toString])).exitCode
+        checkEq 0 (← run #["cache", "manifest", "--cache", cache.toString]).exitCode
+        let keyDir ← IO.FS.createTempDir
+        let key ← testKey keyDir "id"
+        let allowed := keyDir / "allowed"
+        writeSigners allowed "test-key" key
+        checkEq 0 (← run #["cache", "sign", "--cache", cache.toString, "--key", key.toString, "--key-id", "test-key"]).exitCode
+        let a1 ← run #["cache", "log", "append", "--cache", cache.toString, "--key", key.toString, "--key-id", "test-key", "--signers", allowed.toString]
+        checkEq 0 a1.exitCode
+        check ((a1.stdout.splitOn "entry 0, 1 entries").length > 1) s!"append: {a1.stdout}"
+        -- a second generation: reseal, sign, append
+        checkEq 0 (← run #["cache", "manifest", "--cache", cache.toString, "--valid-days", "1"]).exitCode
+        checkEq 0 (← run #["cache", "sign", "--cache", cache.toString, "--key", key.toString, "--key-id", "test-key"]).exitCode
+        let a2 ← run #["cache", "log", "append", "--cache", cache.toString, "--key", key.toString, "--key-id", "test-key"]
+        checkEq 0 a2.exitCode
+        check ((a2.stdout.splitOn "entry 1, 2 entries").length > 1) s!"append 2: {a2.stdout}"
+        -- (a generation that is already logged cannot be appended again)
+        checkEq 1 (← run #["cache", "log", "append", "--cache", cache.toString, "--key", key.toString]).exitCode
+        -- the log verifies offline and names both entries
+        let v ← run #["cache", "log", "verify", "--cache", cache.toString, "--signers", allowed.toString, "--key-id", "test-key"]
+        checkEq 0 v.exitCode
+        check ((v.stdout.splitOn "2 entries").length > 1) s!"verify: {v.stdout}"
+        -- an inclusion proof for each entry
+        for i in [0, 1] do
+          let proof := cache / s!"proof{i}.sexpr"
+          checkEq 0 (← run #["cache", "log", "prove", "--cache", cache.toString, "--index", toString i, "--out", proof.toString]).exitCode
+          checkEq 0 (← run #["cache", "log", "verify", "--cache", cache.toString, "--signers", allowed.toString, "--proof", proof.toString]).exitCode
+        -- a tampered proof leaf is rejected
+        let proof1 := cache / "proof1.sexpr"
+        let pt ← IO.FS.readFile proof1
+        IO.FS.writeFile proof1 (pt.replace "(leaf " "(leaf 00")
+        checkEq 1 (← run #["cache", "log", "verify", "--cache", cache.toString, "--signers", allowed.toString, "--proof", proof1.toString]).exitCode
+        -- a tampered entry breaks its signature and the checkpoint
+        let e1 := cache / "log" / "entries" / "00000001.sexpr"
+        let e1orig ← IO.FS.readBinFile e1
+        IO.FS.writeBinFile e1 (e1orig.push (0x0a : UInt8))
+        let bad ← run #["cache", "log", "verify", "--cache", cache.toString, "--signers", allowed.toString]
+        checkEq 1 bad.exitCode
+        check ((bad.stdout.splitOn "errors:").length > 1) s!"tamper: {bad.stdout}"
+        IO.FS.writeBinFile e1 e1orig
+        checkEq 0 (← run #["cache", "log", "verify", "--cache", cache.toString, "--signers", allowed.toString]).exitCode
+        -- the generation index must be signed; removing its signature is caught
+        IO.FS.removeFile (cache / "manifest.sexpr.sig")
+        let nosig ← run #["cache", "log", "verify", "--cache", cache.toString, "--signers", allowed.toString]
+        checkEq 1 nosig.exitCode
+        check ((nosig.stdout.splitOn "manifest.sexpr has no signature").length > 1) s!"no sig: {nosig.stdout}" },
+    { name := "cache transparency log: prev chain, witness rollback and the offline monitor", run := fun _ => do
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 2\n"),
+                          ("main.wiz", "import M\n#eval x\n")]
+        let cache ← IO.FS.createTempDir
+        let wiz := (← IO.FS.realPath ".lake/build/bin/wiz").toString
+        let run (args : Array String) := IO.Process.output { cmd := wiz, args, cwd := some dir }
+        let base : Array String := #["check", "main.wiz", "-I", dir.toString]
+        checkEq 0 (← run (base ++ #["--cache", cache.toString])).exitCode
+        checkEq 0 (← run #["cache", "manifest", "--cache", cache.toString]).exitCode
+        let keyDir ← IO.FS.createTempDir
+        let key ← testKey keyDir "id"
+        let allowed := keyDir / "allowed"
+        writeSigners allowed "test-key" key
+        let witness := keyDir / "witness.sexpr"
+        let signAndAppend (extra : Array String := #[]) := do
+          checkEq 0 (← run #["cache", "manifest", "--cache", cache.toString]).exitCode
+          checkEq 0 (← run #["cache", "sign", "--cache", cache.toString, "--key", key.toString, "--key-id", "test-key"]).exitCode
+          run (#["cache", "log", "append", "--cache", cache.toString, "--key", key.toString, "--key-id", "test-key"] ++ extra)
+        checkEq 0 (← signAndAppend).exitCode
+        -- save the first generation's index and log head
+        let gen1 := cache / "manifest.sexpr"
+        let sig1 := cache / "manifest.sexpr.sig"
+        let cp1 := cache / "log" / "checkpoint.sexpr"
+        let cps1 := cache / "log" / "checkpoint.sexpr.sig"
+        let gen1b ← IO.FS.readBinFile gen1
+        let sig1b ← IO.FS.readBinFile sig1
+        let cp1b ← IO.FS.readBinFile cp1
+        let cps1b ← IO.FS.readBinFile cps1
+        -- the first monitor run pins the witness
+        let m1 ← run #["cache", "monitor", "--cache", cache.toString, "--signers", allowed.toString, "--witness", witness.toString]
+        checkEq 0 m1.exitCode
+        check ((m1.stdout.splitOn "new").length > 1) s!"monitor 1: {m1.stdout}"
+        -- a second generation advances the witness
+        let _ ← Cache.sealLayer cache true 0
+        checkEq 0 (← run #["cache", "sign", "--cache", cache.toString, "--key", key.toString, "--key-id", "test-key"]).exitCode
+        checkEq 0 (← run #["cache", "log", "append", "--cache", cache.toString, "--key", key.toString, "--key-id", "test-key"]).exitCode
+        let m2 ← run #["cache", "monitor", "--cache", cache.toString, "--signers", allowed.toString, "--witness", witness.toString]
+        checkEq 0 m2.exitCode
+        check ((m2.stdout.splitOn "witness updated").length > 1) s!"monitor 2: {m2.stdout}"
+        -- the prev chain itself rejects a rewritten predecessor
+        let fs ← match ← Cache.readLogFiles cache with
+          | .ok fs => pure fs
+          | .error e => throw (IO.userError e)
+        let badEntry := fs.set! 1 { fs[1]! with entry := { fs[1]!.entry with prev := String.ofList (List.replicate 64 '0') } }
+        check (match Cache.checkChain badEntry with
+          | .error _ => true
+          | .ok _ => false) "the prev chain accepted a wrong predecessor"
+        -- restore a shorter, internally consistent history: the monitor reports a rollback
+        IO.FS.writeBinFile gen1 gen1b
+        IO.FS.writeBinFile sig1 sig1b
+        IO.FS.writeBinFile cp1 cp1b
+        IO.FS.writeBinFile cps1 cps1b
+        for f in [cache / "log" / "entries" / "00000001.sexpr",
+                  cache / "log" / "entries" / "00000001.sexpr.sig"] do
+          if ← f.pathExists then IO.FS.removeFile f
+        let rb ← run #["cache", "monitor", "--cache", cache.toString, "--signers", allowed.toString, "--witness", witness.toString]
+        checkEq 1 rb.exitCode
+        check ((rb.stderr.splitOn "rollback").length > 1) s!"rollback: {rb.stderr}"
+        -- (the failed monitor did not advance the witness)
+        match ← Cache.readWitness witness with
+        | .ok (some w) => checkEq 2 w.size
+        | .ok none => throw (IO.userError "the witness disappeared")
+        | .error e => throw (IO.userError e) },
+    { name := "cache transparency log: the witness detects a rewritten (forked) history", run := fun _ => do
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 2\n"),
+                          ("main.wiz", "import M\n#eval x\n")]
+        let cache ← IO.FS.createTempDir
+        let wiz := (← IO.FS.realPath ".lake/build/bin/wiz").toString
+        let run (args : Array String) := IO.Process.output { cmd := wiz, args, cwd := some dir }
+        let base : Array String := #["check", "main.wiz", "-I", dir.toString]
+        checkEq 0 (← run (base ++ #["--cache", cache.toString])).exitCode
+        checkEq 0 (← run #["cache", "manifest", "--cache", cache.toString]).exitCode
+        let keyDir ← IO.FS.createTempDir
+        let key ← testKey keyDir "id"
+        let allowed := keyDir / "allowed"
+        writeSigners allowed "test-key" key
+        let witness := keyDir / "witness.sexpr"
+        checkEq 0 (← run #["cache", "sign", "--cache", cache.toString, "--key", key.toString, "--key-id", "test-key"]).exitCode
+        checkEq 0 (← run #["cache", "log", "append", "--cache", cache.toString, "--key", key.toString, "--key-id", "test-key"]).exitCode
+        checkEq 0 (← run #["cache", "monitor", "--cache", cache.toString, "--signers", allowed.toString, "--witness", witness.toString]).exitCode
+        let _ ← Cache.sealLayer cache true 0
+        checkEq 0 (← run #["cache", "sign", "--cache", cache.toString, "--key", key.toString, "--key-id", "test-key"]).exitCode
+        checkEq 0 (← run #["cache", "log", "append", "--cache", cache.toString, "--key", key.toString, "--key-id", "test-key"]).exitCode
+        checkEq 0 (← run #["cache", "monitor", "--cache", cache.toString, "--signers", allowed.toString, "--witness", witness.toString]).exitCode
+        -- rewrite both entries with the same indices and generations, re-sign everything,
+        -- and recompute the checkpoint: a consistent but different history of the same size
+        let fs ← match ← Cache.readLogFiles cache with
+          | .ok fs => pure fs
+          | .error e => throw (IO.userError e)
+        let e0 : Cache.LogEntry := { fs[0]!.entry with timestamp := fs[0]!.entry.timestamp + 1 }
+        let ef0 := Cache.entryFile cache 0
+        IO.FS.writeFile ef0 e0.text
+        match ← Cache.signDetachedFile ef0 key Cache.transparencyNamespace with
+        | .ok _ => pure ()
+        | .error e => throw (IO.userError e)
+        let e1 : Cache.LogEntry := { fs[1]!.entry with
+          prev := Wiz.Smt.Sha256.hexBytes (Cache.LogEntry.bytes e0) }
+        let ef1 := Cache.entryFile cache 1
+        IO.FS.writeFile ef1 e1.text
+        match ← Cache.signDetachedFile ef1 key Cache.transparencyNamespace with
+        | .ok _ => pure ()
+        | .error e => throw (IO.userError e)
+        let fs' ← match ← Cache.readLogFiles cache with
+          | .ok fs => pure fs
+          | .error e => throw (IO.userError e)
+        let cp := Cache.Checkpoint.ofLog fs' (← Cache.unixNow)
+        IO.FS.writeFile (Cache.checkpointFile cache) (Cache.Checkpoint.text cp)
+        match ← Cache.signDetachedFile (Cache.checkpointFile cache) key Cache.transparencyNamespace with
+        | .ok _ => pure ()
+        | .error e => throw (IO.userError e)
+        -- (the rewritten log is internally valid, but it is not the witnessed history)
+        checkEq 0 (← run #["cache", "log", "verify", "--cache", cache.toString, "--signers", allowed.toString]).exitCode
+        let fk ← run #["cache", "monitor", "--cache", cache.toString, "--signers", allowed.toString, "--witness", witness.toString]
+        checkEq 1 fk.exitCode
+        check ((fk.stderr.splitOn "fork").length > 1) s!"fork: {fk.stderr}" },
     { name := "-I DIR adds a module root", run := fun _ => do
         let dir ← mkTree [("Pkg/Three.wiz", "import Prelude\ndef three : Nat := 3\n")]
         let (tc, _) := ({} : Toolchain).parseFlags ["check", "main.wiz", "-I", dir.toString]

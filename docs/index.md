@@ -13,6 +13,7 @@ docs/building.md, "Documentation site").
 * [CHANGELOG.md](../CHANGELOG.md)
 * [building.md](building.md)
 * [cache-signing.md](cache-signing.md): signing cache manifests, key ids, rotation and revocation
+* [cache-transparency.md](cache-transparency.md): the witnessed generation log, inclusion proofs and the offline monitor
 * [ci-runner.md](ci-runner.md): a self-hosted runner for the heavy CI shards
 * [exercises.md](exercises.md): generating the exercise tree from this one
 * [hardware.md](hardware.md): hardware in Wiz, from a circuit to a proved temporal property

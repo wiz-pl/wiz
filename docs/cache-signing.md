@@ -88,7 +88,9 @@ which keeps an ordinary write cache usable.
 
 `--min-generation N` rejects a generation index older than `N`. A signature alone cannot
 detect a rollback: an old signed index is still a valid signature. Pin the expected head
-(the generation, or the root, in release metadata) and pass it here. A generation index
+(the generation, or the root, in release metadata) and pass it here, or keep a witnessed
+log (`wiz cache monitor`, [cache-transparency.md](cache-transparency.md)), which pins the
+head across generations. A generation index
 whose `valid-until` has passed is rejected even if its signature verifies.
 
 The rest of `wiz cache verify` is unchanged: it also compares every manifested entry with
@@ -122,11 +124,12 @@ and not globally ordered:
 * a mirror can serve the old policy file together with an old signed generation;
 * short `valid-until` values and a pinned `--min-generation` bound that window.
 
-The durable fix is a witnessed append-only log (a later stage): a record signed by the
-replacement key says "old key revoked from generation G", and clients that have seen it
-reject old-key claims at or after that point. Until then, treat the cache signature as
-tamper evidence against a mirror that cannot rewrite the policy, not as a revocation
-service.
+The durable fix is the witnessed append-only log in
+[cache-transparency.md](cache-transparency.md): an entry signed by the replacement key says
+"old key revoked from generation G", clients that have seen it reject old-key claims at or
+after that point, and a monitor with a local witness refuses a rollback to the old
+generation. Until a monitor has seen that entry, treat the cache signature as tamper
+evidence against a mirror that cannot rewrite the policy, not as a revocation service.
 
 ## Limits
 
@@ -134,8 +137,9 @@ service.
   not the source-to-output relation.
 * A signed subset can omit entries; `strict`/`--require-signature` make omissions visible
   only for entries the manifest claims.
-* Two clients can be shown different signed generations (split view) without a log or
-  witnesses.
+* Two clients can be shown different signed generations (split view) without a log and
+  independent witnesses; the log is local and its witness is one file, so it detects this
+  only at a monitor that has seen both heads.
 * The same Unix user can rewrite the cache, the signature and the policy file; signing is
   not a defence against local malware.
 * `ssh-keygen` must be installed for signing and for signature verification. The cache
@@ -148,4 +152,5 @@ and covers: a valid signature, key-id and fingerprint allowlists, a wrong key, a
 generation index, an expired index, a missing signature under `--require-signature`,
 explicit `--allow-unsigned`, and a generation rollback rejected by `--min-generation`.
 The keys are created under the test's temporary directory; none is stored in the
-repository.
+repository. The same group's transparency cases exercise the append-only log, an inclusion
+proof, `prev`/rollback and a forked history; see [cache-transparency.md](cache-transparency.md).

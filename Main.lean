@@ -39,6 +39,17 @@ def usage : String := "usage:
                                     --signers (default: the key's SHA256 fingerprint)
   wiz cache manifest                 rebuild the write cache's manifest.sexpr generation
                                     index from its per-module manifests
+  wiz cache log append --cache DIR --key FILE [--key-id ID] [--signers FILE]
+                                    append the signed generation index to the layer's
+                                    append-only log and sign the new checkpoint
+  wiz cache log verify --cache DIR --signers FILE [--key-id ID] [--proof FILE]
+                                    verify the prev chain, entry/checkpoint signatures and
+                                    (with --proof) an inclusion proof; offline
+  wiz cache log prove --cache DIR --index N [--out FILE]
+                                    write the RFC 6962 inclusion proof of one log entry
+  wiz cache monitor --cache DIR --signers FILE --witness FILE
+                                    offline monitor: verify the log, compare it with a local
+                                    witness, refuse a rollback/fork, advance the witness
   wiz lsp                          a language server on stdin/stdout
   wiz lsp --infoview SOCK          … and for infoviews on the Unix socket SOCK
   wiz lsp --ws [ADDR:]PORT         … and on a WebSocket (127.0.0.1 unless ADDR is given;
@@ -486,6 +497,163 @@ def cacheManifestCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
     IO.println s!"cache manifest: {dir}: {mods} modules, {entries} entries ({what})"
   pure 0
 
+/-! ## The witnessed transparency log (P4) -/
+
+/-- The layers a log command could act on. A log belongs to one layer; proving or
+monitoring several layers needs one proof/witness each, so those commands accept exactly
+one (`--cache DIR`, or `--no-cache --cache-ro DIR`) and refuse to guess. -/
+def oneLogDir (tc : Toolchain) : List System.FilePath :=
+  tc.cacheDir.toList ++ tc.readCaches
+
+/-- `wiz cache log append`: append the layer's signed generation index to its log and sign
+the new entry and checkpoint. Refuses a generation that is not newer than the logged one or
+that does not chain to the logged root (a rollback/fork). Only the write cache is written. -/
+def cacheLogAppendCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
+  let rec parse (key id signers : Option String) :
+      List String → Except String (Option String × Option String × Option String)
+    | [] => pure (key, id, signers)
+    | "--key" :: k :: rest => parse (some k) id signers rest
+    | "--key-id" :: k :: rest => parse key (some k) signers rest
+    | "--signers" :: f :: rest => parse key id (some f) rest
+    | a :: _ => throw s!"cache log append: unknown argument {a}"
+  let (key?, id, signers?) ← match parse none none none args with
+    | .ok r => pure r
+    | .error e => do IO.eprintln e; return 2
+  let key ← match key? with
+    | some k => pure k
+    | none => do IO.eprintln "cache log append: --key FILE is required"; return 2
+  let dir ← match tc.cacheDir with
+    | some d => pure d
+    | none => do IO.eprintln "cache log append: no write cache (--cache DIR)"; return 1
+  let signers := signers?.map System.FilePath.mk
+  match ← Cache.appendEntry dir (System.FilePath.mk key) id signers with
+  | .ok r =>
+    IO.println (s!"cache log append: {dir}: entry {r.index}, {r.entries} entries, " ++
+      s!"generation {r.generation}, root {r.root}")
+    pure 0
+  | .error e => do IO.eprintln s!"cache log append: {dir}: {e}"; pure 1
+
+/-- Verify one inclusion proof against the layer's signed checkpoint. -/
+def verifyProofFile (dir : System.FilePath) (proofFile : System.FilePath) : IO (Except String String) := do
+  let text ← try pure (← IO.FS.readFile proofFile) catch e => return .error s!"{proofFile}: {e}"
+  let some p := Cache.parseInclusionProof text
+    | return .error s!"{proofFile}: not an inclusion proof"
+  let some cp ← Cache.readCheckpoint dir
+    | return .error s!"{dir}: no checkpoint"
+  match ← Cache.readLogFiles dir with
+  | .error e => pure (.error e)
+  | .ok fs =>
+    if p.index >= fs.size then
+      return .error s!"proof index {p.index} is outside the log ({fs.size} entries)"
+    match Cache.verifyInclusion p cp fs[p.index]!.bytes with
+    | .ok () => pure (.ok s!"entry {p.index} is included at checkpoint size {cp.size} (root {cp.root})")
+    | .error e => pure (.error e)
+
+/-- `wiz cache log verify`: verify the `prev` chain, every entry signature, the checkpoint
+and (when present) the current signed generation index. With `--proof FILE`, also check one
+inclusion proof against the checkpoint. Offline; exits 1 on any tamper, rollback or a log
+that is behind the generation index (unless `--allow-behind`). -/
+def cacheLogVerifyCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
+  let rec parse (signers id proof : Option String) (allowBehind : Bool) :
+      List String → Except String (Option String × Option String × Option String × Bool)
+    | [] => pure (signers, id, proof, allowBehind)
+    | "--signers" :: f :: rest => parse (some f) id proof allowBehind rest
+    | "--key-id" :: k :: rest => parse signers (some k) proof allowBehind rest
+    | "--proof" :: f :: rest => parse signers id (some f) allowBehind rest
+    | "--allow-behind" :: rest => parse signers id proof true rest
+    | a :: _ => throw s!"cache log verify: unknown argument {a}"
+  let (signers?, id, proof?, allowBehind) ← match parse none none none false args with
+    | .ok r => pure r
+    | .error e => do IO.eprintln e; return 2
+  let signers ← match signers? with
+    | some f => pure (System.FilePath.mk f)
+    | none => do IO.eprintln "cache log verify: --signers FILE is required"; return 2
+  let dirs := tc.cacheDir.toList ++ tc.readCaches
+  if dirs.isEmpty then
+    IO.eprintln "cache log verify: no cache (--cache DIR, --cache-ro DIR)"
+    return 2
+  if proof?.isSome && dirs.length != 1 then
+    IO.eprintln "cache log verify: --proof names one layer (--cache DIR or one --cache-ro)"
+    return 2
+  let mut bad := 0
+  for dir in dirs do
+    let c ← Cache.checkLog dir signers id
+    let detail :=
+      if c.errors.isEmpty then
+        "signatures valid" ++ (if c.checkpointKey == "" then "" else s!" ({c.checkpointKey})")
+      else
+        "errors: " ++ "; ".intercalate c.errors.toList
+    let behind := if c.behind then " (behind: run 'wiz cache log append')" else ""
+    IO.println (s!"cache log verify: {dir}: {c.entries} entries, generation {c.generation}, " ++
+      s!"root {c.root}: {detail}{behind}")
+    if !c.ok && !(allowBehind && c.errors.isEmpty && c.behind) then bad := bad + 1
+    if let some pf := proof? then
+      match ← verifyProofFile dir (System.FilePath.mk pf) with
+      | .ok msg => IO.println s!"cache log verify: {dir}: {msg}"
+      | .error e => do IO.eprintln s!"cache log verify: {dir}: {e}"; bad := bad + 1
+  pure (if bad == 0 then 0 else 1)
+
+/-- `wiz cache log prove`: write (or print) the RFC 6962 inclusion proof of one entry. -/
+def cacheLogProveCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
+  let rec parse (index out : Option String) :
+      List String → Except String (Option String × Option String)
+    | [] => pure (index, out)
+    | "--index" :: n :: rest => parse (some n) out rest
+    | "--out" :: f :: rest => parse index (some f) rest
+    | a :: _ => throw s!"cache log prove: unknown argument {a}"
+  let (index?, out?) ← match parse none none args with
+    | .ok r => pure r
+    | .error e => do IO.eprintln e; return 2
+  let index ← match index? with
+    | some n => match n.toNat? with
+      | some i => pure i
+      | none => do IO.eprintln s!"cache log prove: --index needs a number, not {n}"; return 2
+    | none => do IO.eprintln "cache log prove: --index N is required"; return 2
+  let dirs := oneLogDir tc
+  let dir ← match dirs with
+    | [d] => pure d
+    | [] => do IO.eprintln "cache log prove: no cache (--cache DIR, --cache-ro DIR)"; return 2
+    | _ => do IO.eprintln "cache log prove: name exactly one layer (--cache DIR or one --cache-ro)"; return 2
+  match ← Cache.proveLog dir index with
+  | .error e => do IO.eprintln s!"cache log prove: {e}"; pure 1
+  | .ok p =>
+    let text := (Cache.InclusionProof.toSx p).render ++ "\n"
+    match out? with
+    | some f => do IO.FS.writeFile (System.FilePath.mk f) text; IO.println s!"cache log prove: wrote {f}"; pure 0
+    | none => do IO.print text; pure 0
+
+/-- `wiz cache monitor`: the offline monitor. Verify the log, compare it with a local
+witness file, refuse rollback/fork/tamper, and advance the witness when the log extends it.
+No network and no public log are involved. -/
+def cacheMonitorCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
+  let rec parse (signers id witness : Option String) :
+      List String → Except String (Option String × Option String × Option String)
+    | [] => pure (signers, id, witness)
+    | "--signers" :: f :: rest => parse (some f) id witness rest
+    | "--key-id" :: k :: rest => parse signers (some k) witness rest
+    | "--witness" :: f :: rest => parse signers id (some f) rest
+    | a :: _ => throw s!"cache monitor: unknown argument {a}"
+  let (signers?, id, witness?) ← match parse none none none args with
+    | .ok r => pure r
+    | .error e => do IO.eprintln e; return 2
+  let signers ← match signers? with
+    | some f => pure (System.FilePath.mk f)
+    | none => do IO.eprintln "cache monitor: --signers FILE is required"; return 2
+  let witness ← match witness? with
+    | some f => pure (System.FilePath.mk f)
+    | none => do IO.eprintln "cache monitor: --witness FILE is required (keep it outside the cache)"; return 2
+  let dirs := oneLogDir tc
+  let dir ← match dirs with
+    | [d] => pure d
+    | [] => do IO.eprintln "cache monitor: no cache (--cache DIR, --cache-ro DIR)"; return 2
+    | _ => do IO.eprintln "cache monitor: name exactly one layer (--cache DIR or one --cache-ro)"; return 2
+  let r ← Cache.monitorLog dir signers witness id
+  let line := s!"cache monitor: {dir}: {r.status}, {r.entries} entries, generation {r.generation}, " ++
+    s!"root {r.root}" ++ (if r.updated then " (witness updated)" else "") ++
+    (if r.detail == "" then "" else s!" — {r.detail}")
+  if r.status == "ok" || r.status == "new" then IO.println line else IO.eprintln line
+  pure (if r.status == "ok" || r.status == "new" then 0 else 1)
+
 def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
   let input ← IO.FS.readFile path
   let s ← elaborate tc path input
@@ -599,6 +767,12 @@ def main (args : List String) : IO UInt32 := do
   | "cache" :: "verify" :: rest => cacheVerifyCmd tc rest
   | "cache" :: "sign" :: rest => cacheSignCmd tc rest
   | "cache" :: "manifest" :: rest => cacheManifestCmd tc rest
+  | "cache" :: "log" :: "append" :: rest => cacheLogAppendCmd tc rest
+  | "cache" :: "log" :: "verify" :: rest => cacheLogVerifyCmd tc rest
+  | "cache" :: "log" :: "prove" :: rest => cacheLogProveCmd tc rest
+  | "cache" :: "log" :: _ => do
+    IO.eprintln "cache log: expected append, verify or prove"; pure 2
+  | "cache" :: "monitor" :: rest => cacheMonitorCmd tc rest
   | ["check", path] => checkCmd tc path
   | ["build", path, "-o", out] => buildCmd tc path out false (split := split)
   | ["build", path, "-o", out, "--llvm"] => buildCmd tc path out true (split := split)
