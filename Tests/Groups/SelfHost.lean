@@ -1670,6 +1670,35 @@ def selfHostGroup : Group where
         | .ok _ => pure ()
         | .error e => throw (IO.userError s!"the Lean kernel with full regularity rejects it: {e}") },
     -- (A14) modules: `import M` loads `M.wiz` (a `-I` root, then the working directory)
+    { name := "the self-hosted frontend: universe levels, Sort and Prop, as in the Lean frontend (A15/U1)", run := fun _ =>
+        let header := "def id.{u} {A : Type u} (x : A) : A := x\n" ++
+          "def id2.{u, v} {A : Type u} {B : Type v} (x : A) (y : B) : A := x\n" ++
+          "def prodT.{u, v} (A : Type u) (B : Type v) : Type (max u v) := A × B\n" ++
+          "def imp.{u} (A : Type u) (P : Prop) : Prop := A → P\n" ++
+          "def p : Prop := (P : Prop) → P → P\n" ++
+          "def s.{u} : Sort (u + 1) := Sort u\n" ++
+          "def t : Type 1 := Type\n" ++
+          "def n : Nat := id.{0} 5\n" ++
+          "def m : Nat := id 5\n" ++
+          "def m2.{u} (A : Type u) (x : A) : A := id x\n"
+        selfhostAgrees header [
+          ("def n2 : Nat := id.{0} 5\n", true),
+          ("def m3 : Nat := id 5\n", true),
+          ("def m4.{u} (A : Type u) (x : A) : A := id x\n", true),
+          ("def t2 : Type 1 := Type\n", true),
+          ("def t3 : Sort 2 := Sort 1\n", true),
+          -- unknown level, a proposition that is a type, a universe mismatch, a wrong
+          -- number of levels, and an unsolved level metavariable: rejected by both
+          ("def bad.{u} : Type v := Nat\n", false),
+          ("def bad2 : Prop := Type\n", false),
+          ("def bad3.{u} : Sort u := Sort u\n", false),
+          ("def bad4.{u} : Type u := Type u\n", false),
+          ("def bad5 : Nat := id.{1, 2} 5\n", false),
+          ("axiom bad6 : Sort _\n", false)] },
+    { name := "the self-hosted frontend: universe levels are inferred at a constant's use (A15/U1)", run := fun _ =>
+        selfhostSameNats ("def id.{u} {A : Type u} (x : A) : A := x\n" ++
+          "def id2.{u, v} {A : Type u} {B : Type v} (x : A) (y : B) : A := x\n")
+          [("id.{0} 5", 5), ("id 5", 5), ("id2 5 7", 5), ("id2 3 4", 3)] },
     { name := "modules: an imported module's declarations are in scope", run := fun _ =>
         selfhostCheckModules
           [("B.wiz", "import Prelude\ndef one : Nat := 1\n"),
