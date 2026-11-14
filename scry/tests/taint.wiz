@@ -262,6 +262,45 @@ def main : IO Unit := EIO.toIO (do
   o6a ← opts ["tests/fixtures/taint-macro-errors.c", "--allow-errors"];
   rep6 ← Scry.analyzeFile o6a;
   check "macro errors: recovered with --allow-errors" (Nat.lt 0 rep6.parseErrors);
+  check "macro errors: not a silent empty unit"
+    (List.any (fun b => String.eq b.rule "scry/lowering/parse-recovery") rep6.boundaries);
+
+  -- parse recovery: tree-sitter puts every function after the syntax error into one
+  -- top-level ERROR. The lowering must unwrap it, keep the facts and report the
+  -- recovered strcpy calls instead of an empty unit with zero findings.
+  o7 ← opts ["tests/fixtures/taint-recovery-wizard.c", "--allow-errors"];
+  rep7 ← Scry.analyzeFile o7;
+  check "recovery wizard: parse errors" (Nat.lt 0 rep7.parseErrors);
+  check "recovery wizard: functions recovered"
+    (Nat.le 2 (List.length rep7.tu.funcs));
+  check "recovery wizard: two strcpy findings"
+    (Bool.and (Nat.beq (List.length rep7.findings) 2)
+      (List.all (fun f => Bool.and (String.eq f.rule "strcpy-overflow")
+        (String.eq f.name "strcpy")) rep7.findings));
+  check "recovery wizard: sink spans known"
+    (List.all (fun f => match Scry.originAt rep7.origins f.func f.sink with
+      | .some o => Nat.lt 0 o.line
+      | .none => .false) rep7.findings);
+  check "recovery wizard: parse-recovery warning"
+    (List.any (fun b => String.eq b.rule "scry/lowering/parse-recovery")
+      rep7.boundaries);
+
+  o8 ← opts ["tests/fixtures/taint-recovery-droste.c", "--allow-errors"];
+  rep8 ← Scry.analyzeFile o8;
+  check "recovery droste: parse errors" (Nat.lt 0 rep8.parseErrors);
+  check "recovery droste: functions recovered"
+    (Nat.le 2 (List.length rep8.tu.funcs));
+  check "recovery droste: two strcpy findings"
+    (Bool.and (Nat.beq (List.length rep8.findings) 2)
+      (List.all (fun f => Bool.and (String.eq f.rule "strcpy-overflow")
+        (String.eq f.name "strcpy")) rep8.findings));
+  check "recovery droste: sink spans known"
+    (List.all (fun f => match Scry.originAt rep8.origins f.func f.sink with
+      | .some o => Nat.lt 0 o.line
+      | .none => .false) rep8.findings);
+  check "recovery droste: parse-recovery warning"
+    (List.any (fun b => String.eq b.rule "scry/lowering/parse-recovery")
+      rep8.boundaries);
 
   -- SARIF 2.1.0 shape, derivation status, primary span and related spans
   let sarifText := Scry.renderSarifWith "scry" rep1.origins rep1.pack

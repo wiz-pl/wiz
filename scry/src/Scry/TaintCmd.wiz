@@ -22,7 +22,9 @@ scry taint FILE.c [--rules FILE] [--sarif OUT] [--json]
 
 * **parse.** `Scry.Native.parse`/`toCstStore` (S1). Tree-sitter recovers from syntax
   errors, so a file with `ERROR`/`MISSING` nodes is refused by default; `--allow-errors`
-  analyses the recovered tree and says how many error nodes it did.
+  analyses the recovered tree, says how many error nodes it did, and adds a
+  `scry/lowering/parse-recovery` warning. `Scry.lowerTU` unwraps recovery `ERROR` nodes,
+  so a single top-level `ERROR` cannot silently turn the whole unit into zero findings.
 * **lower.** `Scry.Lower.lowerTU` (S2). Every statement/terminator carries a `Wil.Span`;
   `Scry.originEntries` turns those into the `Scry.OriginMap` SARIF and the human output
   use. A construct the lowering cannot model is **havoc plus a warning**; those warnings
@@ -346,6 +348,29 @@ structure Scry.TaintReport where
   inspection and the tests. -/
   pointsTo : Scry.PtResult
 
+/-- The whole-file diagnostic for a recovered tree. Tree-sitter can wrap every
+declaration after a syntax error in one top-level `ERROR`; `Scry.lowerTU` unwraps those
+nodes and keeps their partial facts, but the analysis is still partial. This warning
+makes that explicit, so `--allow-errors` can never report a silent empty unit: when no
+function could be recovered it says so instead of returning 0 findings with no evidence.
+-/
+def Scry.parseRecoveryFindings (uri text : String) (cst : Scry.CstStore) (errs : Nat)
+    (funcs : Nat) : List Scry.BoundaryFinding :=
+  match Nat.beq errs 0 with
+  | .true => .nil
+  | .false =>
+    let message := match Nat.beq funcs 0 with
+      | .true => "parse recovery: " ++ Nat.repr errs
+          ++ " ERROR/MISSING node(s); no function definitions recovered (unit not analysed)"
+      | .false => "parse recovery: " ++ Nat.repr errs
+          ++ " ERROR/MISSING node(s); analysed " ++ Nat.repr funcs ++ " recovered function(s)"
+    let origin : Option Scry.Origin := match Scry.CstStore.firstError cst with
+      | .some i =>
+        let sp := Scry.CstStore.spanOf cst i;
+        .some (Scry.originOfSpan uri text (Wil.Span.mk 0 sp.start sp.stop i))
+      | .none => .none
+    .cons (Scry.BoundaryFinding.mk "scry/lowering/parse-recovery" message "<unit>" 0 origin) .nil
+
 /-- The pipeline up to the report: parse, lower, analyse, certify-status, locate. -/
 def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do
   text ← FS.readFile o.file;
@@ -363,7 +388,8 @@ def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do
     let pr := Scry.analyze prog pack;
     let findings := Scry.programFindings pr;
     let origins := Scry.originEntries o.file text tu.funcs;
-    let boundaries := Scry.boundaryFindings o.file text tu;
+    let boundaries := List.append (Scry.parseRecoveryFindings o.file text cst errs
+      (List.length tu.funcs)) (Scry.boundaryFindings o.file text tu);
     let memory := Scry.memoryFindings origins pr.warnings;
     let checks := List.map (fun f => Scry.findingChecked pr f) findings;
     EIO.pure (Scry.TaintReport.mk o.file errs pack tu findings checks origins boundaries
