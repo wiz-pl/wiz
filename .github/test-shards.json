@@ -1,5 +1,5 @@
 [
-  {"name": "selfhost", "split": 4, "heavy": true,
+  {"name": "selfhost", "split": 6, "heavy": true,
    "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz"],
    "select": [
     "=prop-kernels",
@@ -28,7 +28,7 @@
     "serial",
     "sys"
   ]},
-  {"name": "library", "split": 5, "jobs": 4, "default": true, "select": [
+  {"name": "library", "split": 6, "jobs": 4, "default": true, "select": [
     "builtins",
     "classes",
     "deriving",

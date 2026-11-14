@@ -1,7 +1,7 @@
 # A self-hosted CI runner
 
 CI runs on GitHub's `ubuntu-latest` runners. The heavy test shards (those with
-`"heavy": true` in `.github/test-shards.json`: `selfhost-1` … `selfhost-4` and
+`"heavy": true` in `.github/test-shards.json`: `selfhost-1` … `selfhost-6` and
 `grail-selfhost`) can run on a machine of our own instead. Nothing changes until the
 repository variable `WIZ_RUNNER_HEAVY` is set; unsetting it switches back.
 
