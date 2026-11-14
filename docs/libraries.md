@@ -625,6 +625,24 @@ File.withOwned p "w" (fun f o => do1
 `IO` is unchanged and so is lib/Sys.wiz's ω API; only the owned variants are `IO1`.
 Acquisition stays in continuation style until linear `match` lands (linear-case stage 2).
 
+## Quantity-polymorphic results (`lib/Result.wiz`, `lib/Region.wiz`)
+
+`ResultQ q A` is `Result` with its success value at quantity `q`: `ok` carries the value at
+`%q`, `err` only the `Error` (no payload). `ResultQ ω A` and `Result A` are the same type
+definitionally (`Result.toResultQ`/`ResultQ.toResult` are the identity), and at `q = 1`
+the success value is linear. `ResultQ.bind` threads the success value to its continuation
+at `q` and can change the result quantity; `ResultQ.map` and `ResultQ.elim` stay at `q`.
+At `q = 0` the value is erased: it cannot be used by a consumer, only ignored.
+
+`ResultH q B H` is the same generalization of `Result1`: the handle `H` is on both
+branches, at `%q`, and the value `B` is unrestricted. `ResultH 1 B H` and `Result1 B H`
+are definitionally equal (`Result1.toResultH`/`ResultH.toResult1` are the identity);
+`ResultH.bind` sequences handle-threading results and `ResultH.map` maps the value,
+keeping the handle. `Result1` stays the linear resource result: `ResultQ`'s error branch
+has no value, so a handle cannot be threaded through it, and `ResultH`'s only useful
+instance is `q = 1` (at `q = ω` the handle is droppable, at `q = 0` unusable).
+Details and the `q = 0` representation caveat: `wiz-notes/result-q.md`.
+
 ## Functors and Booleans
 
 `lib/Functor.wiz` (`import Functor`): `Functor`, `Applicative`, `<$>`, `<*>`; every `Monad`

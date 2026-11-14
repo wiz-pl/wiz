@@ -52,6 +52,7 @@
     "regions",
     "=linear-case",
     "repr",
+    "result-q",
     "seplogic",
     "=sat",
     "=smt",
