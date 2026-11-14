@@ -90,6 +90,7 @@
     "desceq",
     "elab",
     "eval",
+    "format",
     "inductive",
     "lexer",
     "lift",

@@ -513,3 +513,50 @@ Neovim shows them as `@lsp.type.keyword` (linked to `@keyword`) without configur
   that spells the whole name, in all those documents; it refuses a declaration of the
   toolchain's library and a new name that isn't one. A use through generalised field
   notation (`p.norm` for `Point.norm`) is not edited.
+
+## 11aa: `wiz fmt`, a formatter
+
+    wiz fmt [FILE|-] [--check] [--width N] [--explain]
+
+Reprints a file from its syntax tree: each command is parsed with the tables that are in
+effect at it (imported `syntax` and `notation` included), printed from the tree with the
+grammar of every node kind (`PPFormat`, the table 11r's printer walks, so declared
+spacing like `" + "` and `noWs` are honoured), and laid out by a small pretty-printing
+document (`Wiz/Format.lean`: `group`/`line`/`nest`, strictly pretty). `FILE` alone prints
+to stdout, `-` (the default) reads stdin, `--check` changes nothing and exits 1 when the
+file differs, `--width` is the column budget (default 100), `--explain` prints what a
+refused command would have become.
+
+* **Why reprint, not rewrite whitespace.** The parser is the single source of truth for
+  the tokens and for precedence, so a reprint cannot disagree with it about `a + b` or
+  `(fun x => b) c`; user-declared `syntax` formats from its own grammar; and the output
+  can be **checked**: every command's reprint is parsed again with the same tables and
+  must give the same tree (`toSExpr`), or the command keeps its original text and is
+  reported (`line N: left as written (…)`, exit status 1). A token/whitespace rewriter
+  keeps comments for free but can never reindent, join or split lines, or drop
+  parentheses, and it has to reimplement every declared spacing rule anyway.
+* **Comments.** The tree drops them (`Token.skipWs`), so they are recovered from the
+  source: every leaf keeps its byte range, and the text between two leaves is a run of
+  comments. One written after a token, on its line, stays there (`;  -- note`); the rest
+  go on their own line before the token they precede. A comment makes a `def` body start
+  on its own line (below).
+* **Layout and the parser's columns.** `colGt`/`colGe` compare against a remembered
+  position (`withPosition`), so the layout has to respect it: a `match`'s alternatives
+  and a `by`'s tactics align with their construct's line (at 2 when it is inline, at the
+  line's indent when it starts one, deeper for nested matches), and a `let` always starts
+  a line — `withPosition` in `term.let` stays in force for the terms after it, so a
+  `let` in the middle of a line would forbid its own body's continuation lines to its
+  left. That is why `def f := let …` breaks after `:=` while `def f := match …` may stay
+  on one line.
+* **What is refused.** A kind with no grammar in the tables, something between tokens
+  that is not a comment, or a reprint that does not parse back to the same tree. The
+  check is what makes a prototype safe: across the library files tested (Prelude, Logic,
+  BitBlast, Deriving, Eff, Vec, EffHeap, Word, Grail, Feral, HeapBorrow, OpticDerive,
+  Trace, Text, Sat, Hdl/Sim and two examples) the formatter changes no command it
+  accepts, is idempotent on every file (formatting twice gives the same text), and
+  refuses one command (`Fe.specLin` in `lib/Feral.wiz`: a `match` inside a `let` value,
+  see `wiz-notes/wiz-fmt.md`). 13 test cases in the `format` group.
+* **Not done.** Signatures never break (a long header stays long: wrapping binder lists
+  needs `fill`/alignment); a multi-line block comment keeps the indentation of its
+  continuation lines; the self-hosted frontend has no formatter; and the LSP does not
+  offer `textDocument/formatting` yet (`Wiz/Format.lean` is that plumbing's core).
