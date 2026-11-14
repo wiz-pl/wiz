@@ -35,12 +35,15 @@ def lvlSem (ρ : Nat × Nat) : Level → Nat
   | .imax a b => if lvlSem ρ b == 0 then 0 else Nat.max (lvlSem ρ a) (lvlSem ρ b)
   | .param n => if n == "u" then ρ.1 else ρ.2
   | .mvar _ => 0
+  -- (a hole is an opaque atom: it is never assigned, so any value will do)
+  | .hole => 0
 
 mutual
 partial def atomSem (ρ : Nat × Nat) : Level.Atom → Nat
   | .const => 0
   | .param n => if n == "u" then ρ.1 else ρ.2
   | .mvar _ => 0
+  | .hole => 0
   | .imax a b => if nfSem ρ b == 0 then 0 else Nat.max (nfSem ρ a) (nfSem ρ b)
 /-- The meaning of a normal form: the maximum of `atom + offset`. -/
 partial def nfSem (ρ : Nat × Nat) (n : Level.NF) : Nat :=
@@ -210,7 +213,7 @@ def argumentTypes (l v : Nat) (concrete : Bool) : IO Unit := do
   let dm := delimMotiveTy lv vv I w
   isType "delimMotiveTy" c1 dm
   let cP := c1.bind "P" q dm
-  let (ta, tb, tc, th) := delimMethodTys g lv I (Val.var 2) w
+  let (ta, tb, tc, th) := delimMethodTys g lv vv I (Val.var 2) w
   isType "delim mret" cP ta
   isType "delim marg" cP tb
   isType "delim mrec" cP tc
@@ -221,14 +224,14 @@ def argumentTypes (l v : Nat) (concrete : Bool) : IO Unit := do
   let c3 := c2.bind "P" q m
   let P : Val ZeroOneMany := Val.var 3
   isType "indMethodTy" c3 (indMethodTy g lv vv I D P w)
-  isType "sfixFunTy" c3 (sfixFunTy g lv I D P w)
+  isType "sfixFunTy" c3 (sfixFunTy g lv vv I D P w)
   let c4 := c3.bind "s" q .size
   -- `(xs : ⟦D⟧ (μ^j D) i) → P i (con xs)` puts `con xs` where a `μ^∞ D i` is expected: that
   -- needs `⟦D⟧ (μ^j D) i ≤ ⟦D⟧ (μ^∞ D) i`, which subtyping finds only once `⟦D⟧` computes.
   -- With a variable for `D` the kernel's own checker rejects this type (recorded in the
   -- audit note, T-scase); it holds for every concrete description
-  if concrete then isType "scaseMethodTy" c4 (scaseMethodTy g lv I D P (Val.var 4) (Val.qlit .many))
-  else match checkType c4 (quote g c4.lvl (scaseMethodTy g lv I D P (Val.var 4) (Val.qlit .many))) with
+  if concrete then isType "scaseMethodTy" c4 (scaseMethodTy g lv vv I D P (Val.var 4) (.qlit .many))
+  else match checkType c4 (quote g c4.lvl (scaseMethodTy g lv vv I D P (Val.var 4) (.qlit .many))) with
     | .ok _ => throw (IO.userError "scaseMethodTy now checks with a variable description: update the audit note (T-scase)")
     | .error _ => pure ()
   -- coit, scofix
@@ -530,12 +533,12 @@ partial def toM : GTy → MTm
   | unit => .unit 0
   | nat => MTm.natTy
   | glob => .const "Nat"
-  | pi q a b => .sorted 1 (if q == .many then .pi a.toM b.toM else .piq q a.toM b.toM)
-  | sigma q a b => .sorted 1 (if q == .many then .sigma a.toM b.toM else .sigmaq q a.toM b.toM)
-  | lift a => .ulift 1 a.toM
-  | liftEq k i j => .ulift 1 (.eq (.enum k) (.tag k i) (.tag k j))
-  | depPi k bs => .sorted 1 (.pi (.enum k) (.ecase (.univ 0) (.var 0) (bs.map toM)))
-  | depSigma k bs => .sorted 1 (.sigma (.enum k) (.ecase (.univ 0) (.var 0) (bs.map toM)))
+  | pi q a b => .sorted 1 1 (if q == .many then .pi a.toM b.toM else .piq q a.toM b.toM)
+  | sigma q a b => .sorted 1 1 (if q == .many then .sigma a.toM b.toM else .sigmaq q a.toM b.toM)
+  | lift a => .ulift 1 1 a.toM
+  | liftEq k i j => .ulift 0 1 (.eq (.enum k) (.tag k i) (.tag k j))
+  | depPi k bs => .sorted 1 1 (.pi (.enum k) (.ecase (.univ 0) (.var 0) (bs.map toM)))
+  | depSigma k bs => .sorted 1 1 (.sigma (.enum k) (.ecase (.univ 0) (.var 0) (bs.map toM)))
   | other => .unit 0
 
 def lcg (s : Nat) : Nat := (s * 1103515245 + 12345) % 2147483648
@@ -610,7 +613,7 @@ partial def term (s : Nat) (depth : Nat) (ctx : List GTy) (ty : GTy) : MTm × Na
       (if s / 3 % 2 == 0 then .fst (.ann (.pair x y) (.sigma T b.toM))
        else .snd (.ann (.pair y x) (if q == .many then .sigma b.toM T else .sigmaq q b.toM T)), s)
     | 7 => let (x, s) := term s d ctx ty; (.cast T T (.reflTy T) x, s)
-    | 8 => let (x, s) := term s d ctx ty; (.down (.ann (.up x) (.ulift 1 T)), s)
+    | 8 => let (x, s) := term s d ctx ty; (.down (.ann (.up x) (.ulift 1 1 T)), s)
     | 9 =>
       let k := s / 7 % 2 + 1
       let (brs, s) := (List.range k).foldl (fun (acc, s) _ => let (t, s) := term s d ctx ty; (acc ++ [t], s)) ([], s)
@@ -751,17 +754,18 @@ def hurkens (star : Nat → MTm) : MTm :=
 /-- Terms on which the kernels are known to differ or did differ (findings K1, K6), with
 what each kernel must answer: `(query, Lean, Wiz)`. -/
 def pinned : List (String × Query × String × String) :=
-  let propPi (q : ZeroOneMany) : MTm := .sorted 0 (.piq q .ptrue .ptrue)
-  [("Girard through ULift: Type lowered to Prop", (true, .ulift 0 (.univ 0)), "error", "error"),
-   ("… Type 1 lowered to Type", (true, .ulift 1 (.univ 1)), "error", "error"),
-   ("… a field of a small type over all small types", (true, .ann (.darg (.ulift 1 (.univ 0)) (.lam (.dret .star))) (.desc 0 (.unit 0))), "error", "error"),
-   ("ULift raises", (true, .ulift 2 (.univ 0)), "U1", "U1"),
+  let propPi (q : ZeroOneMany) : MTm := .sorted 0 0 (.piq q .ptrue .ptrue)
+  -- (`ULift.{k,l} A`: `k` the content's sort, `l` the lifted one; `Sort n : Sort (n+1)`)
+  [("Girard through ULift: Type lowered to Prop", (true, .ulift 2 0 (.univ 0)), "error", "error"),
+   ("… Type 1 lowered to Type", (true, .ulift 3 1 (.univ 1)), "error", "error"),
+   ("… a field of a small type over all small types", (true, .ann (.darg (.ulift 2 1 (.univ 0)) (.lam (.dret .star))) (.desc 0 (.unit 0))), "error", "error"),
+   ("ULift raises", (true, .ulift 2 2 (.univ 0)), "U1", "U1"),
    ("K6: a variable out of scope", (true, .var 0), "error", "error"),
    ("K6: … under a binder", (true, .ann (.lam (.var 3)) (.pi (.unit 0) .prop)), "error", "error"),
    ("K6: Hurkens with an out-of-scope variable as Prop : Prop", (true, hurkens fun d => .var d), "error", "error"),
    ("Hurkens with Prop for the universe", (true, hurkens fun _ => .prop), "error", "error"),
-   ("ULift against another former", (false, .eqTy (.ulift 1 (.enum 2)) MTm.natTy), "False", "False"),
-   ("… is refuted", (true, .ann (.lam (.var 0)) (.pi (.eqTy (.ulift 1 (.enum 2)) (.unit 0)) .pfalse)),
+   ("ULift against another former", (false, .eqTy (.ulift 1 1 (.enum 2)) MTm.natTy), "False", "False"),
+   ("… is refuted", (true, .ann (.lam (.var 0)) (.pi (.eqTy (.ulift 1 1 (.enum 2)) (.unit 0)) .pfalse)),
      "(x0 : False) → False", "(x0 : False) → False"),
    -- K1: the Lean kernel ignores quantities at a Π that is a proposition; the Wiz kernel compares them
    ("K1 (subtyping): a proof with an erased argument where an unrestricted one is expected: both accept",
@@ -784,6 +788,78 @@ def templatePairs : List (String × Term ZeroOneMany) :=
    ("hypsTm 0 0", Templates.hypsTm (L 0) (L 0)), ("hypsTm 0 2", Templates.hypsTm (L 0) (L 2)),
    ("mapTm 0", Templates.mapTm (L 0)), ("mapTm 1", Templates.mapTm (L 1))]
 
+/-- (21w) Drop the description fields' quantities and every `sigmaQ` to the `Σ` at ω, as
+the Lean side's `dropQty` does before `MTm.ofTerm`: the audit compares the kernels modulo
+quantities (the differential `MTm` can write a literal, and the templates at a method's
+quantity variable print as `%q` in Kernel.wiz and as `Σ` at ω after `dropQty`). -/
+def dropQSrc : String :=
+  "mutual\n" ++
+  "partial def dropQTm : Tm → Tm\n" ++
+  "  | .var i => .var i\n" ++
+  "  | .univ n => .univ n\n" ++
+  "  | .prop => .prop\n" ++
+  "  | .sortL l => .sortL l\n" ++
+  "  | .pi q i j a b => .pi q i j (dropQTm a) (dropQTm b)\n" ++
+  "  | .lam b => .lam (dropQTm b)\n" ++
+  "  | .app f a => .app (dropQTm f) (dropQTm a)\n" ++
+  "  | .letE ty v b => .letE (dropQTm ty) (dropQTm v) (dropQTm b)\n" ++
+  "  | .ann t ty => .ann (dropQTm t) (dropQTm ty)\n" ++
+  "  | .letq q ty v b => .letq q (dropQTm ty) (dropQTm v) (dropQTm b)\n" ++
+  "  | .sigma q i j a b => .sigma q i j (dropQTm a) (dropQTm b)\n" ++
+  "  | .sigmaQ _ i j a b => .sigma .qw i j (dropQTm a) (dropQTm b)\n" ++
+  "  | .pair a b => .pair (dropQTm a) (dropQTm b)\n" ++
+  "  | .fst p => .fst (dropQTm p)\n" ++
+  "  | .snd p => .snd (dropQTm p)\n" ++
+  "  | .unit n => .unit n\n" ++
+  "  | .star => .star\n" ++
+  "  | .empty n => .empty n\n" ++
+  "  | .ptrue => .ptrue\n" ++
+  "  | .pfalse => .pfalse\n" ++
+  "  | .exfalso m t => .exfalso (dropQTm m) (dropQTm t)\n" ++
+  "  | .letUnit u b => .letUnit (dropQTm u) (dropQTm b)\n" ++
+  "  | .enum k => .enum k\n" ++
+  "  | .tag k i => .tag k i\n" ++
+  "  | .ecase m s bs => .ecase (dropQTm m) (dropQTm s) (dropQTms bs)\n" ++
+  "  | .eq A a b => .eq (dropQTm A) (dropQTm a) (dropQTm b)\n" ++
+  "  | .eqTy A B => .eqTy (dropQTm A) (dropQTm B)\n" ++
+  "  | .eqRefl A a => .eqRefl (dropQTm A) (dropQTm a)\n" ++
+  "  | .tyRefl X => .tyRefl (dropQTm X)\n" ++
+  "  | .coe A B e t => .coe (dropQTm A) (dropQTm B) (dropQTm e) (dropQTm t)\n" ++
+  "  | .subst A a P p b e => .subst (dropQTm A) (dropQTm a) (dropQTm P) (dropQTm p) (dropQTm b) (dropQTm e)\n" ++
+  "  | .qty => .qty\n" ++
+  "  | .qlit q => .qlit q\n" ++
+  "  | .descr l I => .descr l (dropQTm I)\n" ++
+  "  | .dret i => .dret (dropQTm i)\n" ++
+  "  | .darg q S D => .darg (dropQTm q) (dropQTm S) (dropQTm D)\n" ++
+  "  | .drec q j D => .drec (dropQTm q) (dropQTm j) (dropQTm D)\n" ++
+  "  | .dhrec q H j D => .dhrec (dropQTm q) (dropQTm H) (dropQTm j) (dropQTm D)\n" ++
+  "  | .delim v P a b c h D => .delim v (dropQTm P) (dropQTm a) (dropQTm b) (dropQTm c) (dropQTm h) (dropQTm D)\n" ++
+  "  | .mu l I D i => .mu l (dropQTm I) (dropQTm D) (dropQTm i)\n" ++
+  "  | .con x => .con (dropQTm x)\n" ++
+  "  | .size => .size\n" ++
+  "  | .szInf => .szInf\n" ++
+  "  | .szSuc s => .szSuc (dropQTm s)\n" ++
+  "  | .sizeLt s => .sizeLt (dropQTm s)\n" ++
+  "  | .mus l I D i s => .mus l (dropQTm I) (dropQTm D) (dropQTm i) (dropQTm s)\n" ++
+  "  | .sfix l I D v P f s i x => .sfix l (dropQTm I) (dropQTm D) v (dropQTm P) (dropQTm f) (dropQTm s) (dropQTm i) (dropQTm x)\n" ++
+  "  | .scase l q I D v P m s i x => .scase l q (dropQTm I) (dropQTm D) v (dropQTm P) (dropQTm m) (dropQTm s) (dropQTm i) (dropQTm x)\n" ++
+  "  | .nu l I D i s => .nu l (dropQTm I) (dropQTm D) (dropQTm i) (dropQTm s)\n" ++
+  "  | .out x => .out (dropQTm x)\n" ++
+  "  | .cocon x => .cocon (dropQTm x)\n" ++
+  "  | .scofix l I D A f s i a => .scofix l (dropQTm I) (dropQTm D) (dropQTm A) (dropQTm f) (dropQTm s) (dropQTm i) (dropQTm a)\n" ++
+  "  | .coit l I D S st i s => .coit l (dropQTm I) (dropQTm D) (dropQTm S) (dropQTm st) (dropQTm i) (dropQTm s)\n" ++
+  "  | .ind l I D v P m i x => .ind l (dropQTm I) (dropQTm D) v (dropQTm P) (dropQTm m) (dropQTm i) (dropQTm x)\n" ++
+  "  | .const n ps ls v ty => .const n ps ls v ty\n" ++
+  "  | .axiomC n ty => .axiomC n ty\n" ++
+  "  | .ulift k l A => .ulift k l (dropQTm A)\n" ++
+  "  | .up a => .up (dropQTm a)\n" ++
+  "  | .down t => .down (dropQTm t)\n" ++
+  "  | .prf l t => .prf l (dropQTm t)\n" ++
+  "partial def dropQTms : Tms → Tms\n" ++
+  "  | .tnil => .tnil\n" ++
+  "  | .tcons t r => .tcons (dropQTm t) (dropQTms r)\n" ++
+  "end\n"
+
 def kernelProgram (queries : List Query) : IO String := do
   let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
   -- (P2) every query gets its proof markers first, with `Kernel.wiz`'s own pass, as the
@@ -792,15 +868,18 @@ def kernelProgram (queries : List Query) : IO String := do
   let verdict :=
     "def rawVerdict (t : Tm) : String := match infer empty t with\n  | .ok ty _ => show .nil 0 (quote 0 ty)\n  | .err _ => \"error\"\n" ++
     "def markedVerdict (t : Tm) : String := rawVerdict (MR.tm (markInfer (TCtx.relevant empty) t))\n" ++
-    "def verdict (t : Tm) : String := match infer (TCtx.noMarkers empty) t with\n  | .err _ => \"error\"\n  | .ok _ _ => markedVerdict t\n" ++
-    "def markedNormalize (t : Tm) : String := show .nil 0 (quote 0 (eval .nil (MR.tm (markInfer (TCtx.relevant empty) t))))\n"
+    -- (mandatory sorts: the queries are `MTm` terms, whose `Π`/`Σ` sorts are holes until
+    -- the sorts pass fills them; the kernel rejects a hole)
+    "def verdict (t : Tm) : String := let u := sortsInfer t; match infer (TCtx.noMarkers empty) u with\n  | .err _ => \"error\"\n  | .ok _ _ => markedVerdict u\n" ++
+    "def markedNormalize0 (t : Tm) : String := show .nil 0 (dropQTm (quote 0 (eval .nil (MR.tm (markInfer (TCtx.relevant empty) t)))))\n" ++
+    "def markedNormalize (t : Tm) : String := markedNormalize0 (sortsInfer t)\n"
   let printAll := "def printAll : List String → IO Unit\n  | .nil => IO.pure ()\n  | .cons s ss => do\n    IO.println s;\n    printAll ss\n"
   -- one definition per query: a single list of every term is slow to elaborate
   let defs := String.join ((List.range queries.length).zip queries |>.map fun (i, (isVerdict, t)) =>
     s!"def q{i} (u : Unit) : String := {if isVerdict then "verdict" else "markedNormalize"} {t.toWiz}\n")
   let calls := (List.range queries.length).map fun i => s!"(q{i} ())"
-  let tmpl := templatePairs.map fun (n, _) => s!"(show .nil 0 ({n}))"
-  pure (kernel ++ "\n" ++ verdict ++ printAll ++ defs ++
+  let tmpl := templatePairs.map fun (n, _) => s!"(show .nil 0 (dropQTm ({n})))"
+  pure (kernel ++ "\n" ++ dropQSrc ++ verdict ++ printAll ++ defs ++
     s!"def main : IO Unit := printAll {Elab.wizList (calls ++ tmpl)}\n")
 
 /-- Both kernels on the generated queries, the pinned ones and the templates. -/

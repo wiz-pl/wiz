@@ -548,6 +548,62 @@ take it.
 List, an indexed family, nested matches, `let 1`; dropping the variable in one branch, or
 using it twice or under an ω argument, rejected); a compiled program with additive matches.
 
+## 21w: constructor field quantities and implicit constructor fields, self-hosted
+
+The last two frontend differences of 21m. `Kernel.wiz`'s descriptions now carry each
+field's quantity as the Lean kernel's do (`Desc.arg q S D`, CoreSpec §9.1):
+
+* **Quantity terms.** `Tm.qty` (`Qty : U 0`) and `Tm.qlit q` (`vqty`, `vqlit`). Binder
+  quantities stay literals (`Q`); a `Qty` term is only a description field's quantity, or
+  the first argument of a `Desc.elim` method (`qTy`, which was `Unit`). `qtyOk` is
+  `checkQty`: checked erased, and its value must be a literal or a variable.
+* **Descriptions.** `darg q S D`, `drec q j D`, `dhrec q H j D` (and `vdarg q S E` …). The
+  methods receive `q` (`vDelim`; before, `tt`), and the method types say so.
+* **The template `⟦D⟧`** (`interpTm`) builds the field's `Σ` at the method's `q`, with the
+  new `sigmaQ l q A B`: a `vsigma` at a literal; at a stuck quantity (a description whose
+  field quantity is a variable) a neutral, `Spine.ssigq`, which quotes back to `sigmaQ`,
+  is a type in `U l` (`typeOfNe`, `propSort`) and is compared part by part (`convSpine`).
+  The Lean kernel builds a Σ at a polynomial quantity there; this kernel has no
+  quantity variables on binders, so such a Σ stays stuck, with the rules of a Σ at an
+  unknown quantity (at a bare variable only, as `qtyPoly` allows; `cast`, `eqTy` and `eq`
+  at it stay stuck, where the Lean kernel computes them): its projections in erased positions (`fst` at run time is rejected,
+  as `1 ≤ q` fails at `q = 0`), `snd` at ω, η in conversion, and a pair's first part
+  counted ω times. This is not hypothetical: the frontend's `match` hands the kernel
+  normal forms of `All`/`⟦D⟧` at a description stuck on a tag, whose `Desc.elim` methods
+  project such a Σ (in a type).
+* `vEqDesc` (equal quantities ↦ on, two different literals ↦ `False`, else stuck:
+  `qtySame`, as `sameQty`/`qtyApart`: the same variable is equal to itself), conversion (`conv` at `Qty`, and the quantities of
+  two descriptions), `castDesc`, `groundEqDesc`, `eqPayload`, `quote` and `show`
+  (`arg(0 Nat, …)`; nothing is printed at ω) follow the Lean kernel.
+
+`Frontend.wiz`: a field's quantity is read as `elabQuantity` reads it (ω explicit, 0
+implicit; `2` and `%t` are errors), kept in `Field` (now `mk name q impl ty`), and goes
+into the description (`ctorDesc`, `mctorDesc`) and the constructor's type (`ctorType`).
+An implicit field (`| cons {n : Nat} …`) is an implicit argument of the constructor
+(`Global.implicits`), so a call leaves it out, and patterns name only the explicit
+fields (`explicitPats`, as `explicitIdx`). A match binds each field at its quantity
+(`fieldCols`, `bindLetsT`: `letTm`; `Col` and `Ctor` carry the quantities), as
+`T.casesOn`'s method takes it: a field at 0 can't be used at run time, a linear one must
+be used once. A structure (a data type here, 18e) binds a linear field at ω (the Lean
+elaborator takes a structure apart by projections at ω), and a field at 0 has no
+projection function (`classMethods` makes none). `Backend.wiz` needed nothing new: a
+payload's field at 0 is the first part of a `Σ` at 0, erased already.
+
+A `match` on a structure that has a field at 0 was a difference until #217 (the Lean
+elaborator projected the erased field at ω); both now bind it at 0, so no difference is
+pinned any more and the 21m test of pinned differences is gone.
+
+**Shapes changed** (selfhost/*.wiz): `Tm.darg/drec/dhrec` and `Val.vdarg/vdrec/vdhrec` take
+the quantity first; new `Tm.qty`, `Tm.qlit`, `Tm.sigmaQ`, `Val.vqty`, `Val.vqlit`,
+`Spine.ssigq`. Frontend: `Field.mk` has 4 fields, `Ctor.mk` 5, `Col.mk` 4;
+`ctorType`, `fieldCols`, `specialize`, `addCtors` take one more argument.
+
+**Tests** (group `selfhost`): field quantities 0/1/ω and implicit fields, the same verdicts
+in both frontends (`fieldQtyDecls`); a program with them, compiled by the Lean compiler and
+by the self-hosted one (both collectors); the differential test's `MTm` descriptions carry
+a quantity (ω in the existing terms); two core terms from the review of this stage
+(`wiz-notes/fieldq-review.md, probes 7a and 15b) checked by Kernel.wiz with the
+Lean kernel's verdicts.
 ## 21x: modules and imports (A14, first milestone)
 
 `import M` was silently the embedded Prelude: the self-hosted frontend had one module,

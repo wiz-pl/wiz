@@ -91,7 +91,7 @@ partial def witness (ix : HeadIndex) (ctx : LocalCtx R) (ty : VTy R) (fuel : Nat
   | .qty => return some (.qlit QuantitySyntax.explicitDefault)
   | .size => return some .szInf
   | .enum ls => return if ls.isEmpty then none else some (.tag ls 0)
-  | .ulift _ A => attempt do
+  | .ulift _ _ A => attempt do
     let some a ← witness ix ctx A fuel | return none
     return some (.up a)
   | .sigma _ _ A B _ => attempt do
