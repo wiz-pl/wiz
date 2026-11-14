@@ -559,10 +559,24 @@ Neovim shows them as `@lsp.type.keyword` (linked to `@keyword`) without configur
 ## 11ab: a static playground
 
 `web/playground.html`: a Wiz playground that runs entirely in the page. A text area
-with a small program, a **Run** button (or Ctrl/⌘+Enter), one output line per command,
-and a status line (`loading` / `running` / `done in N ms`, with error lines in red).
-No server, no editor, no install: `web/build-playground.sh` compiles the program the
-page runs.
+with a small program, an **Examples** menu, a **Run** button (or Ctrl/⌘+Enter), one
+output line per command, and a status line (`loading` / `running` / `done in N ms`,
+with error lines in red). No server, no editor, no install: `web/build-playground.sh`
+compiles the program the page runs.
+
+* **The page around the engine.** The Examples menu holds six checked programs (basics,
+  arithmetic, inductive data, pattern matching, structures, lists). **Save .wiz**
+  downloads the program as `playground.wiz`, adding `import Prelude` when the editor has
+  none so the file checks on its own; **Share link** puts the program in the URL
+  fragment and copies the URL; **Reset** restores the default program; **Clear** empties
+  the output pane. The draft is also kept in `localStorage`, so a reload restores it.
+  The fragment is `#preset=basics` when the text is exactly an example and otherwise
+  `#code=<base64url of the UTF-8 text>` — one URL-safe parameter for any program,
+  including Unicode and `&`/`#`/`%`. The address bar follows edits after a short pause,
+  `Ctrl/⌘+S` saves, and the layout stacks the panes and wraps the controls on narrow
+  screens (the textarea is 16px on mobile, so iOS does not zoom on focus). Examples run
+  when selected; a restored custom program waits for **Run**, so reloading a
+  non-terminating draft cannot block the tab before it can be edited.
 
 * **The engine.** The self-hosted frontend and kernel (`selfhost/Lex.wiz`,
   `Parse.wiz`, `Kernel.wiz`, `Frontend.wiz`) are Wiz source, so the same pipeline as the
@@ -592,13 +606,22 @@ page runs.
   without nix. The script writes `web/out/playground.wiz` (the assembled engine source)
   beside the module. The page needs HTTP (an ES module and a `.wasm` fetch; `file://`
   will not do). `web/build.sh` and its infoview are unchanged and can share `web/out`.
-* **Tests.** `node web/playground_test.mjs web/out` loads the module under Node, runs a
-  definition, a `#check`, `#eval twice 21` (the value renders as `42`), a Bool and an
-  error. `web/test.sh` now builds both Wasm modules and runs this test beside the
-  infoview's Node and Chromium tests.
+* **Tests.** `node web/playground-state_test.mjs` checks the pure state module: every
+  example id, the canonical fragment for an example, `#code` round trips for ASCII,
+  Unicode and control characters, malformed fragments and drafts, and full share URLs.
+  `node web/playground_test.mjs web/out` loads the module under Node, runs a definition,
+  a `#check`, `#eval twice 21` (the value renders as `42`), a Bool and an error, then
+  runs **every example** through the engine and checks the list example renders
+  `[2, 4, 6]`. `web/test.sh` now builds both Wasm modules and runs both playground
+  tests beside the infoview's Node and Chromium tests.
 * **Limits.** The evaluator has no fuel: a non-terminating `#eval` blocks the tab (the
-  call into Wasm is synchronous). Only the embedded Prelude exists, not the library's
-  modules or `IO`/`#run`; the page is a checker, not a REPL with a filesystem.
+  call into Wasm is synchronous), and a very large normal form (a `Nat` in the thousands)
+  can exhaust the Wasm stack, so the examples stay small. Only the embedded Prelude
+  exists, not the library's modules or `IO`/`#run`; the page is a checker, not a REPL
+  with a filesystem. Shared programs live in the URL, so a very large program can exceed
+  a browser's URL length; the clipboard needs a secure context (the page falls back to
+  the address bar and a prompt), and `localStorage` can be unavailable in a private
+  window (the page then simply does not remember the draft).
 * **Why a second module.** The infoview's exports (`wiz_web_init`/`wiz_web_step`) are a
   language-server client: they can ask a server for goals and diagnostics but cannot
   evaluate a term. The playground's evaluator is the self-hosted checker, which is Wiz

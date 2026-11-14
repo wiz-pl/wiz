@@ -8,29 +8,41 @@
 </head>
 <body>
 <header>
-  <strong>Wiz playground</strong>
-  <span class="dim">the self-hosted checker, compiled to WebAssembly &mdash; no server</span>
-  <span id="status" class="status" role="status">loading the engine&hellip;</span>
+  <div class="brand">
+    <strong>Wiz playground</strong>
+    <span class="dim">the self-hosted checker, compiled to WebAssembly &mdash; no server</span>
+  </div>
+  <div class="toolbar" role="group" aria-label="Program actions">
+    <label class="select-label" for="preset">Example</label>
+    <select id="preset" aria-label="Load an example"></select>
+    <button id="share" type="button" title="Copy a link with this program in the URL">Share link</button>
+    <button id="save" type="button" title="Download this program as playground.wiz">Save .wiz</button>
+    <button id="reset" type="button" title="Restore the default program">Reset</button>
+  </div>
+  <div class="meta">
+    <span id="status" class="status" role="status">loading the engine&hellip;</span>
+    <span id="note" class="note" role="status" aria-live="polite"></span>
+  </div>
 </header>
 <main>
   <section class="pane">
-    <div class="pane-head"><label for="editor">Program</label><span class="hint">Ctrl/&#8984;+Enter runs</span></div>
-    <textarea id="editor" spellcheck="false">import Prelude
-
--- Everything here runs in the page: the self-hosted Wiz frontend and kernel
--- (selfhost/*.wiz, stage 11ab), compiled to WebAssembly by web/build-playground.sh.
-def twice (n : Nat) : Nat := n + n
-
-#check twice
-#eval twice 21
-</textarea>
+    <div class="pane-head">
+      <label for="editor">Program</label>
+      <span class="hint">Ctrl/&#8984;+Enter runs &middot; Ctrl/&#8984;+S saves</span>
+    </div>
+    <textarea id="editor" spellcheck="false" autocapitalize="off" autocorrect="off" aria-label="Wiz program"></textarea>
     <div class="actions">
-      <button id="run" type="button" disabled>Run</button>
+      <button id="run" class="primary" type="button" disabled>Run</button>
       <span id="count" class="dim"></span>
+      <span class="shortcut dim"><kbd>Ctrl</kbd>/<kbd>&#8984;</kbd> + <kbd>Enter</kbd></span>
     </div>
   </section>
   <section class="pane">
-    <div class="pane-head"><span>Output</span><span class="hint">one line per command; <code>#eval</code> is the kernel's normal form</span></div>
+    <div class="pane-head">
+      <span>Output</span>
+      <span class="hint">one line per command; <code>#eval</code> is the kernel's normal form</span>
+      <button id="clear" type="button" class="small" title="Clear the output pane">Clear</button>
+    </div>
     <div id="output" class="output" aria-live="polite"></div>
   </section>
 </main>
@@ -38,6 +50,7 @@ def twice (n : Nat) : Nat := n + n
   <span id="engine" class="dim">engine: loading</span>
   <span class="dim">A definition prints its signature, <code>#check</code> a type, <code>#eval</code> a value (shown raw if it is not a Nat, Bool or list).</span>
 </footer>
+<noscript>This playground needs JavaScript: the self-hosted checker runs in the page.</noscript>
 <script type="module" src="playground.js"></script>
 </body>
 </html>

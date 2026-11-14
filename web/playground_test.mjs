@@ -5,6 +5,8 @@
 //   usage: node web/playground_test.mjs OUT_DIR
 import { pathToFileURL } from "node:url";
 import { renderValue } from "./playground-values.js";
+import { findPreset, presets } from "./playground-presets.js";
+import { withPrelude } from "./playground-state.js";
 
 const outDir = process.argv[2] || new URL("./out/", import.meta.url).pathname;
 const createModule = (await import(pathToFileURL(outDir + "/wiz-playground.mjs").href)).default;
@@ -44,9 +46,21 @@ check("an error", out[4], "error: unknown identifier nope");
 
 // A source without an import is what the page sends (`withPrelude` prepends it); the
 // engine itself needs the import, so this is the page's contract, checked here once.
-const bare = run("import Prelude\ndef one : Nat := 1\n#eval one\n");
+const bare = run(withPrelude("def one : Nat := 1\n#eval one\n"));
 check("a bare definition's own output", bare[0], "one : Nat");
 check("a bare evaluation", renderValue(bare[1]), "1");
+
+// Every example is a program the page offers; each must check and evaluate without an
+// error line. This is the smoke test that keeps the Examples menu honest.
+for (const p of presets) {
+  const lines = run(withPrelude(p.code));
+  const bad = lines.find((l) => l.startsWith("error:") || l.startsWith("parse error"));
+  check(`example ${p.id} checks`, bad, undefined);
+  check(`example ${p.id} has output`, lines.length > 0, true);
+}
+
+const lists = run(withPrelude(findPreset("lists").code));
+check("the lists example renders", renderValue(lists[lists.length - 1]), "[2, 4, 6]");
 
 if (failed) process.exit(1);
 console.log("playground: all checks passed");
