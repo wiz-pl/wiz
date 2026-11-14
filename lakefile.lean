@@ -37,6 +37,11 @@ lean_lib Tests where
 lean_lib WizMeta where
   leanOptions := #[⟨`autoImplicit, false⟩, ⟨`relaxedAutoImplicit, false⟩]
 
+-- The F0 specification of the STC track (see /workspace/wiz-notes/stc-m0-spec.md).
+-- A separate library, not a default target: nothing else imports it yet.
+lean_lib STC where
+  leanOptions := #[⟨`autoImplicit, false⟩, ⟨`relaxedAutoImplicit, false⟩]
+
 lean_lib Grail
 
 -- the toolchain manager (stage 26): it doesn't import Wiz
