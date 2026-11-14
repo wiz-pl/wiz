@@ -26,6 +26,11 @@ generated Wiz. The lowering rules are drafts/feral/LOWERING.md (L1 … L22; the 
 below cite them); the generated code uses lib/Region.wiz, lib/Optic.wiz and, for a
 `structure`'s field lenses, lib/OpticDerive.wiz.
 
+A `struct` or `enum` can name Wiz classes to derive in an item of its own,
+`deriving S BEq, Repr, Inhabited` (the form `spec f …` has): the classes are Wiz's
+(HD8), so any class with a deriver works, and a struct's field lenses (with their laws
+and independence) are derived anyway. `S` must be declared earlier in the block.
+
 Borrow errors (E0499, E0502, E0515, E0597, a missing `'a : 'b`) are reported at the Feral
 source by this front end. They are also type errors of the lowered program:
 `#unchecked feral … end` lowers without the front end's verdict, so that tests can see
@@ -123,6 +128,10 @@ syntax (name := ens) "ensures" "(" term ")" : feral_clause
 syntax (name := specI) withPosition("spec" ident feral_clause*) : feral_item
 syntax (name := structI) withPosition("struct" ident "where" feral_field*) : feral_item
 syntax (name := enumI) withPosition("enum" ident "where" feral_ctor*) : feral_item
+-- `deriving S BEq, Repr`: the Wiz instances (HD8) to derive for the `struct` or `enum`
+-- `S`, declared earlier in the block. A struct's field lenses are derived anyway; the
+-- classes are Wiz class names, so any class with a deriver works.
+syntax (name := derivingI) withPosition("deriving" ident sepBy1(ident, ",")) : feral_item
 
 -- `feral … end`; `#lower feral … end` also shows the generated Wiz; `#unchecked feral … end`
 -- lowers without the front end's borrow errors (tests: the kernel's verdict on its own)
@@ -636,11 +645,14 @@ structure Fe.Enum where
 structure Fe.Struct where
   name : String
   fields : List (String × Fe.Ty)
-/-- Everything declared: the signatures, enums and structs a `feral` block and the library provide. -/
+/-- Everything declared: the signatures, enums and structs a `feral` block and the library provide,
+and the user classes of each type's `deriving` item (`S` ↦ the classes; a struct's field
+lenses are not listed here, they are derived by the lowering). -/
 structure Fe.Glob where
   sigs : List Fe.Sig
   enums : List Fe.Enum
   structs : List Fe.Struct
+  derivs : List (String × List String)
 /-- A continuation: what to do with an expression's value (generated code), its type
 and the environment after it. The lowering is in continuation-passing style, since
 statements after a borrow live inside its scope (L20). -/
@@ -3187,9 +3199,60 @@ def Fe.specText (g : Fe.Glob) (p : List Nat) (it : Syntax) : Except String Strin
             +++ Fe.joinWith " × " enss +++ ") (" +++ call +++ ")")))
 
 -- ## The command macro
+
+/-- The strings joined with `sep` (`""` for an empty list; `Fe.joinWith` is the spec's,
+whose empty clause list is `True`). -/
+def Fe.joinSep (sep : String) : List String → String
+  | .nil => ""
+  | .cons x .nil => x
+  | .cons x xs => x +++ sep +++ Fe.joinSep sep xs
+/-- The classes of a `deriving` item, in source order, checked: a class is listed once
+and `Lens` is not written (structures derive it). The paths are from the item's class
+list, so an error lands on the class it is about. -/
+def Fe.derivClasses (isStruct : Bool) (cp : List Nat) :
+    List (Nat × Syntax) → Except (List Nat × String) (List String)
+  | .nil => .ok .nil
+  | .cons c cs =>
+    let p := Fe.sub cp c.1;
+    let n := Fe.id c.2;
+    (match Fe.seq n "Lens", Fe.mem n (Fe.map (fun (q : Nat × Syntax) => Fe.id q.2) cs) with
+    | .true, _ => .error (p, (match isStruct with
+      | .true => "`Lens` is derived for every struct (each field's lens, its laws and their independence): drop it"
+      | .false => "`Lens` is derived for structs only"))
+    | _, .true => .error (p, "`" +++ n +++ "` is listed twice")
+    | _, _ => (match Fe.derivClasses isStruct cp cs with
+      | .ok rest => .ok (.cons n rest)
+      | .error e => .error e))
+/-- The type `n` with the classes of a `deriving` item, if that item is well formed: `n` is
+a `struct` or `enum` of this block, and has one `deriving` item. -/
+def Fe.addDeriv (g : Fe.Glob) (p : List Nat) (it : Syntax) : Except (List Nat × String) Fe.Glob :=
+  let n := Fe.id (Fe.arg it 1);
+  match Fe.lookup n g.derivs with
+  | .some _ => .error (Fe.sub p 1, "a second `deriving` item for `" +++ n +++ "` (list every class in one)")
+  | .none => (match Fe.findStruct n g.structs, Fe.findEnum n g.enums with
+    | .some _, _ => (match Fe.derivClasses .true (Fe.sub p 2) (Fe.kids (Fe.arg it 2)) with
+      | .ok cs => .ok (Fe.Glob.mk g.sigs g.enums g.structs (.cons (n, cs) g.derivs))
+      | .error e => .error e)
+    | _, .some _ => (match Fe.derivClasses .false (Fe.sub p 2) (Fe.kids (Fe.arg it 2)) with
+      | .ok cs => .ok (Fe.Glob.mk g.sigs g.enums g.structs (.cons (n, cs) g.derivs))
+      | .error e => .error e)
+    | _, _ => .error (Fe.sub p 1, "`deriving`: no struct or enum `" +++ n +++ "` declared earlier in this block"))
+/-- The `deriving` line of a data declaration: a struct's field lenses (always) and then
+the user's classes; `""` when there are none. -/
+def Fe.derivLine (g : Fe.Glob) (n : String) : String :=
+  let cls : List String := (match Fe.lookup n g.derivs with
+    | .some cs => cs
+    | .none => .nil);
+  let cs : List String := (match Fe.findStruct n g.structs with
+    | .some _ => .cons "Lens" cls
+    | .none => cls);
+  match cs with
+  | .nil => ""
+  | _ => "\n  deriving " +++ Fe.joinSep ", " cs
+
 /-- An item after the first pass: generated data declarations, a function to lower, or an error. -/
 inductive Fe.Item where
-  | data (p : List Nat) (text : String)
+  | data (p : List Nat) (name : String) (text : String)
   | func (p : List Nat) (it : Syntax)
   | spec (p : List Nat) (it : Syntax)
   | bad (p : List Nat) (msg : String)
@@ -3205,17 +3268,20 @@ def Fe.pass1 (bp : List Nat) : List (Nat × Syntax) → Fe.Glob → Fe.Glob × L
     Fe.sw (Fe.kind it) (
       ("feral_item.structI", fun _ => (match Fe.run (Fe.fieldsOf (Fe.sub p 3) (Fe.kids (Fe.arg it 3))) with
         | .ok fs _ =>
-          let r := Fe.pass1 bp xs (Fe.Glob.mk g.sigs g.enums (.cons (Fe.Struct.mk name fs) g.structs));
-          (r.1, .cons (Fe.Item.data p ("structure " +++ name +++ " where" +++ Fe.fieldLines fs +++ "\n  deriving Lens")) r.2)
+          let r := Fe.pass1 bp xs (Fe.Glob.mk g.sigs g.enums (.cons (Fe.Struct.mk name fs) g.structs) g.derivs);
+          (r.1, .cons (Fe.Item.data p name ("structure " +++ name +++ " where" +++ Fe.fieldLines fs)) r.2)
         | .err q m => let r := Fe.pass1 bp xs g; (r.1, .cons (Fe.Item.bad q m) r.2))) ▸
       ("feral_item.enumI", fun _ => (match Fe.run (Fe.ctorsOf (Fe.sub p 3) (Fe.kids (Fe.arg it 3))) with
         | .ok cs _ =>
-          let r := Fe.pass1 bp xs (Fe.Glob.mk g.sigs (.cons (Fe.Enum.mk name .nil cs) g.enums) g.structs);
-          (r.1, .cons (Fe.Item.data p ("inductive " +++ name +++ " where" +++ Fe.ctorLines cs)) r.2)
+          let r := Fe.pass1 bp xs (Fe.Glob.mk g.sigs (.cons (Fe.Enum.mk name .nil cs) g.enums) g.structs g.derivs);
+          (r.1, .cons (Fe.Item.data p name ("inductive " +++ name +++ " where" +++ Fe.ctorLines cs)) r.2)
         | .err q m => let r := Fe.pass1 bp xs g; (r.1, .cons (Fe.Item.bad q m) r.2))) ▸
+      ("feral_item.derivingI", fun _ => (match Fe.addDeriv g p it with
+        | .ok g' => Fe.pass1 bp xs g'
+        | .error e => let r := Fe.pass1 bp xs g; (r.1, .cons (Fe.Item.bad e.1 e.2) r.2))) ▸
       ("feral_item.fnI", fun _ => (match Fe.run (Fe.sigOf p it) with
         | .ok sig _ =>
-          let r := Fe.pass1 bp xs (Fe.Glob.mk (.cons sig g.sigs) g.enums g.structs);
+          let r := Fe.pass1 bp xs (Fe.Glob.mk (.cons sig g.sigs) g.enums g.structs g.derivs);
           (r.1, .cons (Fe.Item.func p it) r.2)
         | .err q m => let r := Fe.pass1 bp xs g; (r.1, .cons (Fe.Item.bad q m) r.2))) ▸
       ("feral_item.specI", fun _ => let r := Fe.pass1 bp xs g; (r.1, .cons (Fe.Item.spec p it) r.2)) ▸ .nil)
@@ -3235,7 +3301,8 @@ def Fe.pass2 (g : Fe.Glob) (mode : Nat) : List Fe.Item → Fe.Outp → Fe.Outp
   | .nil, o => o
   | .cons it rest, o => (match it with
     | .bad p m => Fe.pass2 g mode rest (Fe.Outp.mk (List.append o.errs (.cons (Syntax.errorAt p m) .nil)) o.notes o.srcs)
-    | .data p text => Fe.pass2 g mode rest (Fe.Outp.mk o.errs (List.append o.notes (.cons (Syntax.infoAt p text) .nil))
+    | .data p nm text => let text := text +++ Fe.derivLine g nm;
+        Fe.pass2 g mode rest (Fe.Outp.mk o.errs (List.append o.notes (.cons (Syntax.infoAt p text) .nil))
         (List.append o.srcs (.cons (Syntax.sourceAt p text) .nil)))
     | .spec p stx => (match Fe.specText g p stx with
       | .error m => Fe.pass2 g mode rest (Fe.Outp.mk (List.append o.errs (.cons (Syntax.errorAt p m) .nil)) o.notes o.srcs)
@@ -3263,7 +3330,7 @@ def Fe.macro : CommandMacro := fun stx =>
   let idx : Nat := (match mode with
     | .zero => Nat.succ Nat.zero
     | _ => Nat.succ (Nat.succ Nat.zero));
-  let r := Fe.pass1 (.cons idx .nil) (Fe.kids (Fe.arg stx idx)) (Fe.Glob.mk Fe.libSigs Fe.libEnums .nil);
+  let r := Fe.pass1 (.cons idx .nil) (Fe.kids (Fe.arg stx idx)) (Fe.Glob.mk Fe.libSigs Fe.libEnums .nil .nil);
   let o := Fe.pass2 r.1 mode r.2 (Fe.Outp.mk .nil .nil .nil);
   match o.errs, mode with
   | .nil, .zero => MacroM.pure o.srcs

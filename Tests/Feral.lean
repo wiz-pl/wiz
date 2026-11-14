@@ -38,6 +38,19 @@ def infosOf (s : CommandState ZeroOneMany) : List String :=
 
 def has (s frag : String) : Bool := (s.splitOn frag).length > 1
 
+/-- Compile a Feral program (with `FeralCore` importable) through C, run `main`, and
+compare the read-back value: end to end through the backend. -/
+def cRunFeral (src : String) (expected : String) : IO Unit := do
+  let s ← frontend src
+  let errs := errorsOf s src
+  unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs}")
+  let dir ← IO.FS.createTempDir
+  match ← Build.runGlobal (← toolchain) s "main" dir false with
+  | .ok v => checkEq expected v
+  | .error e =>
+    let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
+    if missing then skip "no toolchain" else throw (IO.userError e)
+
 /-- A surface program is accepted (the front end and then the kernel on what it lowers
 to), and every `#eval` of it is one of the results of the hand-lowered program. -/
 def accepted (name : String) : IO Unit := do
@@ -131,7 +144,7 @@ def posSrc : String := pre ++ "feral\n  fn double (n : U64) : U64 := n + n\n" ++
 
 def surfaceNames : List String :=
   ["01_swap", "02_push", "03_get_mut", "04_reverse", "05_bst", "06_count", "07_disjoint", "08_first_mut",
-   "09_bsearch", "10_regions", "11_list", "12_pick"]
+   "09_bsearch", "10_regions", "11_list", "12_pick", "13_derive"]
 
 def rejectedNames : List String :=
   ["E0499_two_mut", "E0502_use_while_mut", "E0515_return_local", "E0515_return_mut", "E0597_not_long_enough",
@@ -263,6 +276,46 @@ def group : Group where
         checkEq ("[def swap {ρa ρb : Region} (1 x : (Uniq ρa U64)) (1 y : (Uniq ρb U64)) : Result1 Unit ((1 _ : (Uniq ρa U64)) × (Uniq ρb U64)) :=\n" ++
           "  let 1 (d_2, x) := Uniq.peek x;\n  let t := d_2;\n  let 1 (d_5, y) := Uniq.peek y;\n  let 1 x := Uniq.write x d_5;\n" ++
           "  let 1 y := Uniq.write y t;\n  Result1.ok (()) (x, y)\n]") (toString (infosOf s)) },
+    { name := "deriving: Wiz classes (HD8) on a Feral struct or enum, in a separate item", run := fun _ => do
+        -- the lowering: the classes go on the emitted `structure`/`inductive`; a struct's
+        -- field lenses come first, as before
+        let src := pre ++ "#lower feral\n  enum Suit where\n    | hearts\n    | spades\n  deriving Suit BEq, Repr\n" ++
+          "  struct Score where\n    suit : Suit\n    points : U64\n  deriving Score BEq, Repr, Inhabited\nend\n"
+        let s ← frontend src
+        checkEq "[]" (toString (errorsOf s src))
+        let l := infosOf s
+        check (l.any (has · "structure Score where\n  suit : Suit\n  points : U64\n  deriving Lens, BEq, Repr, Inhabited")) s!"{l}"
+        check (l.any (has · "inductive Suit where\n  | hearts\n  | spades\n  deriving BEq, Repr")) s!"{l}"
+        -- a Feral type is a Wiz type: the instances are usable around the block
+        let u := pre ++ "feral\n  enum Suit where\n    | hearts\n    | spades\n  deriving Suit BEq, Repr, Inhabited\nend\n" ++
+          "#eval BEq.beq Suit.hearts Suit.spades\n#eval Repr.repr Suit.hearts\n" ++
+          "#eval Repr.repr (Inhabited.default : Suit)\n"
+        let v ← frontend u
+        checkEq "[]" (toString (errorsOf v u))
+        checkEq "[.false, \"Suit.hearts\", \"Suit.hearts\"]" (toString (infosOf v)) },
+    { name := "deriving: an undeclared type, a second item, a repeated class and `Lens` are front-end errors", run := fun _ => do
+        let e ← firstError (pre ++ "feral\n  deriving Nope BEq\nend\n")
+        check (has e "no struct or enum `Nope`") e
+        -- (a type declared later is not declared yet: one pass, in order)
+        let e ← firstError (pre ++ "feral\n  deriving S Repr\n  struct S where\n    a : U64\nend\n")
+        check (has e "no struct or enum `S`") e
+        let e ← firstError (pre ++ "feral\n  struct S where\n    a : U64\n  deriving S Repr\n  deriving S BEq\nend\n")
+        check (has e "a second `deriving` item for `S`") e
+        let e ← firstError (pre ++ "feral\n  enum E where\n    | a\n  deriving E Repr, Repr\nend\n")
+        check (has e "`Repr` is listed twice") e
+        let e ← firstError (pre ++ "feral\n  struct S where\n    a : U64\n  deriving S Lens\nend\n")
+        check (has e "`Lens` is derived for every struct") e
+        let e ← firstError (pre ++ "feral\n  enum E where\n    | a\n  deriving E Lens\nend\n")
+        check (has e "`Lens` is derived for structs only") e
+        -- an unknown class, or one with no deriver, is the kernel's to reject (at the item)
+        for cls in ["Nope", "Monad"] do
+          let bad := pre ++ "feral\n  enum E where\n    | a\n  deriving E " ++ cls ++ "\nend\n"
+          let b ← frontend bad
+          check ((errorsOf b bad).any (has · "the generated source was rejected")) s!"{cls}: {errorsOf b bad}" },
+    { name := "a Feral program with derived instances compiles to C and runs", run := fun _ => do
+        let src := pre ++ "feral\n  enum Shape where\n    | dot\n    | line (a : U64) (b : U64)\n  deriving Shape BEq, Repr\nend\n" ++
+          "def main : String := Repr.repr (Shape.line (U64.lit 1) (U64.lit 2))\n"
+        cRunFeral src "\"Shape.line (U64.mk 1) (U64.mk 2)\"" },
     { name := "errors point into the block: the line and column of the offending expression", run := fun _ => do
         let e ← firstError (pre ++ "feral\n  fn f (x : U64) : U64 := {\n    let y := x;\n    y := 3;\n    y\n  }\nend\n")
         check (e.startsWith "6:5: " && has e "E0384") e

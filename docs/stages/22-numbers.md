@@ -506,6 +506,15 @@ loops, `?`, `U64`, and functions that return borrows.
   the Feral expression it is about. Types are those of the lowering (`Uniq ρ (Vec U64)`,
   `Result U64`); a method call on a variable (`r.push`) is one identifier, so it shows the
   receiver.
+* **Derived instances.** `deriving S BEq, Repr, Inhabited` — an item of its own (like
+  `spec f`) naming a `struct` or `enum` declared earlier in the block — puts the classes
+  on the `structure`/`inductive` the lowering emits: Wiz's own `deriving` (7c, HD8), so
+  any class with a deriver works and the kernel is the judge. A struct's field lenses
+  (with their laws and independence, `deriving Lens`) are emitted first as always;
+  `Lens` may not be named, and a type has one `deriving` item. The instances are ordinary
+  Wiz instances, used by the code around the block (a Feral type is a Wiz type):
+  `drafts/feral/surface/13_derive.wiz` shows `Repr`, `BEq` and `Inhabited` on an enum and
+  a struct, and a test compiles the `Repr` of a derived value to C and runs it.
 
 Specifications: a `spec f requires (P) ensures (Q)` item states `f.Spec`, a Wiz
 proposition over the arguments' values, `result`, `old x` and `final x` (an `&mut`

@@ -1,0 +1,33 @@
+import FeralCore
+import Feral
+-- Derived instances on Feral data: `deriving S …` (an item naming the type, like `spec f`)
+-- takes Wiz class names (HD8) and the lowering passes them to the `structure`/`inductive`
+-- it emits. A struct also derives its field lenses, as always.
+-- Hand-lowered: drafts/feral/lowered/13_derive.wiz
+
+feral
+  enum Suit where
+    | hearts
+    | spades
+  deriving Suit BEq, Repr, Inhabited
+
+  struct Score where
+    suit : Suit
+    points : U64
+  deriving Score BEq, Repr, Inhabited
+
+  fn next_point (s : Score) : U64 := s.points + 1
+end
+
+def s3 : Score := Score.mk Suit.hearts (U64.lit 3)
+
+#eval Repr.repr s3
+#eval BEq.beq s3 (Score.mk Suit.hearts (U64.lit 3))
+#eval BEq.beq s3 (Score.mk Suit.spades (U64.lit 3))
+#eval Repr.repr (Inhabited.default : Score)
+#eval Result.map U64.toNat (next_point s3)
+-- "Score.mk Suit.hearts (U64.mk 3)"
+-- .true
+-- .false
+-- "Score.mk Suit.hearts (U64.mk 0)"
+-- .ok 4

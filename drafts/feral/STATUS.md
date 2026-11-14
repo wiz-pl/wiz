@@ -8,9 +8,11 @@ and `lake test -- regions`.
 ## The front end (22j, branch agent/feral-surface)
 
 `lib/Feral.wiz` (about 2400 lines of Wiz) implements `feral … end` for the fragment of
-LOWERING.md §1a. Test group `feral`: the twelve `surface/` programs lower, check and
+LOWERING.md §1a. Test group `feral`: the thirteen `surface/` programs lower, check and
 evaluate like `lowered/`; the nine `rejected/surface/` programs are rejected by the front
-end (error class and line) and by the kernel on their `#unchecked` lowering.
+end (error class and line) and by the kernel on their `#unchecked` lowering. A
+`struct`/`enum` also takes `deriving S C₁, C₂` (Wiz classes, HD8; `surface/13_derive`):
+the lowering puts them on the data declaration, after a struct's `Lens`.
 
 What Feral is and isn't: Feral is Rust's ownership discipline for a small first-order
 language, explained by translation — a Feral program *is* the Wiz program `#lower` shows,
@@ -54,6 +56,7 @@ after the block when the block is in tail position.
 | `…/10_regions.wiz` | `'a : 'b` bounds as erased `Outlives` arguments (`longest`, `remember` storing a `&'a` into a `&'b` slot), nested scopes handing out evidence | `.ok 8` |
 | `…/11_list.wiz` | a linked list through `&mut`: `incr_all` recursing on reborrows of the tails (`partial`, reborrow-recursion), `push_back` as a cursor | `.ok [2, 3, 7]` |
 | `…/12_pick.wiz` | returning one of two `&mut` (`Mut.ofUniq`, `Mut.weaken` with `'a : 'b`, `Mut.mapBack`, `Mut.finish`) | `.ok (10, 2)`, `.ok (1, 10)` |
+| `…/13_derive.wiz` | `deriving S BEq, Repr, Inhabited` on an enum and a struct: Wiz's `deriving` (HD8) on the emitted `inductive`/`structure`, after a struct's `Lens` | `#eval` of the derived `Repr`, `BEq` and `Inhabited` from the Wiz around the block; one case compiles and runs it with the C backend |
 | `drafts/feral/rejected/*.wiz` | E0515 (return a local's `&` / `&mut`), E0597 (borrow outlives its scope; short reference stored into a long slot), E0499 (two `&mut`), E0502 (lender used while borrowed), missing `'a : 'b` (for `&` and `&mut`), the bound pointing the wrong way at a call, a lengthened borrow; a forged handle (`forge_handle`: the handles' constructors are private to `lib/Region.wiz`, docs/stages/13-language.md, 13b) | each rejected with a type mismatch, the forgery as private (`check.sh`) |
 
 ## Doesn't check (wishful), and why

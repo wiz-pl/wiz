@@ -1,0 +1,30 @@
+import FeralCore
+import OpticDerive
+-- Hand-lowered counterpart of drafts/feral/surface/13_derive.wiz: the `structure` and
+-- `inductive` with the classes its `deriving` items name (a struct first derives Lens,
+-- whose deriver is lib/OpticDerive.wiz), and `next_point` as lib/Feral.wiz lowers it.
+
+inductive Suit where
+  | hearts
+  | spades
+  deriving BEq, Repr, Inhabited
+
+structure Score where
+  suit : Suit
+  points : U64
+  deriving Lens, BEq, Repr, Inhabited
+
+def next_point (s : Score) : Result U64 :=
+  (match U64.add s.points (U64.lit 1) with
+  | .ok v_1 =>
+    Result.ok v_1
+  | .err e_ =>
+    .err e_)
+
+def s3 : Score := Score.mk Suit.hearts (U64.lit 3)
+
+#eval Repr.repr s3
+#eval BEq.beq s3 (Score.mk Suit.hearts (U64.lit 3))
+#eval BEq.beq s3 (Score.mk Suit.spades (U64.lit 3))
+#eval Repr.repr (Inhabited.default : Score)
+#eval Result.map U64.toNat (next_point s3)

@@ -1,6 +1,7 @@
 import Optic
 import Region
 import Text
+import Deriving
 -- The runtime of lowered DSL code, beyond `lib/Optic.wiz` (which has `Result`, `Error`
 -- and the optics). This file CHECKS today, but it holds stand-ins for work owned by other
 -- tracks, so it lives in drafts/ until they land:
@@ -20,6 +21,7 @@ import Text
 -- `u64`/`usize`: invariant `val < 2^64`, kept by every operation.
 structure U64 where
   val : Nat
+  deriving Inhabited, BEq, Repr
 def U64.size : Nat := 18446744073709551616
 def USize : Type := U64
 

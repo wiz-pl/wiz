@@ -62,7 +62,7 @@ end
 
 | construct | surface | notes |
 |---|---|---|
-| items | `fn`, `struct … where`, `enum … where`, (later `impl`, `trait`) | inside `feral … end` (one command macro per block) |
+| items | `fn`, `struct … where`, `enum … where`, `deriving S C…` (later `impl`, `trait`) | inside `feral … end` (one command macro per block) |
 | binders | `(x : T)`, `{T : Type}`, `{'a 'b}`, `[Tr T]` | as Wiz; `'a` is a region (lifetime) |
 | types | `U64`, `USize`, `Bool`, `Vec T`, `Box T`, `Option T`, `Result T E`, `&'a T`, `&'a mut T`, `A × B` | Wiz-style application, not `Vec<T>`; `'a` may be elided |
 | statements | `let x := e`, `let mut x : T := e`, `p := e`, `p += e`, `e;` | places `p`: `x`, `*r`, `p.f`, `p[i]` |
@@ -86,7 +86,7 @@ feral                             -- `#lower feral … end` also shows the gener
 end
 ```
 * items: `fn f {'a 'b} {'a : 'b} {T : Type} (x : τ) … : τ := e`, `struct S where f : τ …`,
-  `enum E where | c (x : τ) …`;
+  `enum E where | c (x : τ) …`, `deriving S C₁, C₂` (Wiz classes to derive for `S`, HD8);
 * types: names, `Vec τ`, `Option τ`, `Result τ ε`, `Box τ`, `τ × τ`, `&'a τ`, `&'a mut τ`
   (the region may be elided: a fresh one per parameter; in a result, the first
   reference parameter's; in a local annotation, inferred), `USize` = `U64`;
@@ -113,7 +113,10 @@ so quantity 0, RD12), then outlives bounds `'a : 'b` as erased proof arguments
 `struct S where f : T` ↦ `structure S where f : ⟦T⟧` (fields at ω, RD2).
 `enum E where | c (x : T)` ↦ `inductive E where | c (x : ⟦T⟧)`. Names are unchanged
 (no `Rs.` namespace yet: Wiz has no namespaces, so a Feral type can't be called `List`:
-04 and 11 say `LList`). A recursive `fn` is a `partial def` (the recursive call is usually
+04 and 11 say `LList`). A `deriving S C₁, C₂` item adds the classes to `S`'s declaration:
+`structure S … deriving Lens, C₁, C₂` (the field lenses are always there) or
+`inductive E … deriving C₁, C₂` (a class name is Wiz's; any deriver works). A recursive
+`fn` is a `partial def` (the recursive call is usually
 inside a scope's lambda: reborrow-recursion). (01, 04, 05, 07)
 
 **L2. Results and panics (RD7).** Every lowered function returns `R _`, even when it
