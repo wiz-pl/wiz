@@ -178,6 +178,29 @@ def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (s
       | _ => none
     | _ => none
   let isRec (A : Term R) : Bool := (recView A).isSome
+  -- A literal field can be projected (0 is checked erased, 1 and ω are projectable); a
+  -- non-literal one cannot (`1 ≤ q` is not known) and must be split.
+  let isLit (q : Term R) : Bool := match q with | .qlit _ => true | _ => false
+  -- A split variable at quantity `q` may be ignored exactly when `0 ≤ q` (0 or ω; not 1,
+  -- which must be consumed once). When it can be ignored, the field keeps its projection
+  -- from the payload, which is what the kernel's induction hypothesis is about.
+  let droppable (q : Term R) : Bool := match q with | .qlit r => QRig.le (0 : R) r | _ => false
+  -- `withIH`: from the first non-literal field (it must be split), every later field is
+  -- split as well (the tail of a split at 1 is linear and must be used once), so a
+  -- *recursive* field there that is not droppable would need an induction hypothesis
+  -- about the split's variable. The kernel's hypothesis is about the field's projection
+  -- from the (neutral) payload; `split` cannot identify the two, so refuse with the
+  -- reason.
+  if withIH then
+    for (c, fields, _) in cinfo do
+      let k0 := (fields.zipIdx.find? fun ((_, _, q, _), _) => !isLit q).map (·.2) |>.getD fields.length
+      for ((x, _, q, A), j) in fields.zipIdx do
+        if j ≥ k0 && !droppable q && isRec A then
+          throw s!"{T}.{c}: the recursive field {x} cannot be split. Its quantity is not a \
+            literal at which it can be dropped (0 or ω), and the induction hypothesis the \
+            kernel provides is about the field's projection from the payload, which a \
+            `split` cannot identify with its variable when the payload is neutral. Declare \
+            a recursive field at ω"
   /- Bind Δ, motive, methods, ξ, x with `binder`, then finish with `k`. -/
   let rec bindTele (binder : Name → BinderInfo → B R → B R → (B R → B R) → B R)
       (bs : List (Name × BinderInfo × Term R × Term R)) (σ : Array (B R))
@@ -315,24 +338,66 @@ def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (s
             if nΞ == 0 || nondep then inner else
             fun d => .cast (A d) (goalWith ((rawFs ++ [e]).foldr pair (closed .tt)) d) (prf d) (inner d)
           -- A field at a quantity variable cannot be projected (`1 ≤ q` is not known):
-          -- take the payload apart with `split`s at 1, which give each field at its
-          -- declared quantity (split at 1 of a pair `(q a : A) × B` gives `a` at `q`).
-          -- Only a non-literal quantity takes this path; all-literal types keep the
-          -- projection-based recursor unchanged (so `Vec` and the library do not move).
-          -- (A *recursive* field in a q-variable type is not supported yet: the kernel's
-          -- hypothesis `h` is about `proj r k`, which `split` cannot identify with its
-          -- variable when `r` is neutral.)
+          -- take that field out with `split` at 1, which gives it at its declared
+          -- quantity (split at 1 of `(q a : A) × B` gives `a` at `q`). Fields before the
+          -- first non-literal one keep the projection path (a 0 field is checked erased,
+          -- a 1/ω field is projectable), so `Vec` and the library do not move.
+          --
+          -- From the first non-literal field, every later field is split too: the tail of
+          -- a split at 1 is a linear variable and only the next split (or the final
+          -- `let () := u`) consumes it exactly once. A field that *can* be dropped
+          -- (0/ω) keeps its projection from `rest`, which is what the kernel's hypotheses
+          -- (`proj h k`) are about: a recursive field's IH keeps the type
+          -- `motive (proj rest k)` and is handed to the method with that same projection,
+          -- so the IH binder is right. A field at 1 or at a quantity variable uses its
+          -- split variable instead (at 1 it must be consumed once), and the split's motive
+          -- rebuilds the goal from it.
+          --
+          -- (A *recursive* field that must be split is rejected in `mkRecursor`: its IH
+          -- would have to be about the split's variable, which the kernel cannot identify
+          -- with the projection of a neutral payload — hence the rejection for a
+          -- recursive field at a quantity other than a droppable literal.)
           let allLit := fields.all fun (_, _, q, _) => match q with | .qlit _ => true | _ => false
           if !linear then
             if allLit then bodyFor ((List.range n).map (proj r)) (proj r n)
             else
-              let rec chainV (k : Nat) (cur : B R) (acc : List (B R)) : B R :=
-                B.split (qlit 1) cur (fun z => goalWith (acc.foldr pair z)) fun f r' =>
-                  if k < n then chainV (k + 1) r' (acc ++ [f])
+              -- from the first non-literal field, every later field is split too: the
+              -- tail of a split at 1 is a linear variable, and only the next split (or
+              -- the final `let () := u`) consumes it exactly once
+              let k0 := (fields.zipIdx.find? fun ((_, _, q, _), _) => !isLit q).map (·.2) |>.getD n
+              let preVals : Array (B R) := ((List.range k0).map (proj r)).toArray
+              -- `goalWith` with the payload rebuilt. Fields before the split point are in
+              -- `vals` (projections and split variables); the field at `k` is the split's
+              -- variable when it is kept (`fst z`), otherwise its projection; a *later*
+              -- field that will be split is a projection of `z`'s tail (that is what the
+              -- next split's result type provides), and a later projected field stays a
+              -- projection of `rest` (which is what its method argument is).
+              let payloadAt (k : Nat) (vals : Array (B R)) (z : B R) : B R :=
+                let vj (j : Nat) : B R :=
+                  if j < k then vals[j]!
+                  else if j == k then
+                    (match fields[j]? with
+                      | some (_, _, q, _) => if droppable q then proj r j else B.fst z
+                      | none => B.fst z)
                   else
-                    let consume (body : B R) : B R := fun d => .letUnit (r' d) (body d)
-                    consume (bodyFor acc f)
-              chainV 0 r []
+                    match fields[j]? with
+                    | some (_, _, q, _) =>
+                      if droppable q then proj r j else proj (B.snd z) (j - k - 1)
+                    | none => proj r j
+                -- the equation (a proof, so convertible to the tail's `fst`) and `()`
+                (((List.range n).map vj) ++ [proj r n]).foldr pair (closed .tt)
+              let rec chainV (k : Nat) (vals : Array (B R)) (cur : B R)
+                  (todo : List (Name × BinderInfo × Term R × Term R)) : B R :=
+                match todo with
+                | [] =>
+                  -- `cur` is `(e, ())`: take it apart at 1 (a projection needs an
+                  -- unrestricted pair) and consume the unit
+                  B.split (qlit 1) cur (fun z => goalWith (vals.toList.foldr pair z)) fun e u =>
+                    fun d => .letUnit (u d) ((bodyFor vals.toList e) d)
+                | (_, _, q, _) :: todo' =>
+                  B.split (qlit 1) cur (fun z => goalWith (payloadAt k vals z)) fun v r' =>
+                    chainV (k + 1) (vals.push (if droppable q then proj r k else v)) r' todo'
+              chainV k0 preVals ((List.range k0).foldl (fun t _ => B.snd t) r) (fields.drop k0)
           else
           -- (casesOn1) `let 1 (f₁, r₁) := rest; …; let 1 (e, u) := rₙ; m 'c f…`: the
           -- `k`-th split's motive is the goal with the payload rebuilt from the fields so

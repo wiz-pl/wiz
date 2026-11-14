@@ -712,6 +712,16 @@ has no value, so a handle cannot be threaded through it, and `ResultH`'s only us
 instance is `q = 1` (at `q = ω` the handle is droppable, at `q = 0` unusable).
 Details and the `q = 0` representation caveat: `wiz-notes/result-q.md`.
 
+A field at a quantity variable is not limited to non-recursive types. A recursive
+inductive may put a field at `%q` (e.g. a `TreeQ (q : Qty) (A : Type)` with `leaf` and
+`node (%q x : A) (l r : TreeQ q A)`): the generated `TreeQ.rec` splits that
+field at 1 (so the method receives it at `q`) while keeping the recursive fields'
+induction hypotheses typed at their projections, which the method also receives. This
+works at every instance `q = ω`, `1`, `0`, and for mutual/linear elimination. Two limits
+remain: a *recursive* field's own quantity must be a droppable literal (0 or ω), not
+`%q` or `1`; and an indexed q-polymorphic type whose index is a later field still has
+the recursor's index equation rejected. `wiz-notes/result-q.md` §7 has the details.
+
 ## Functors and Booleans
 
 `lib/Functor.wiz` (`import Functor`): `Functor`, `Applicative`, `<$>`, `<*>`; every `Monad`
