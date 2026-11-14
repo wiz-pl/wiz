@@ -373,7 +373,10 @@ def Runner.prep (r : Runner) (update : Bool) (results : TestResults) (n : Node)
     for f in link.sources do
       contents := contents.push (← try pure (toString (hash (← IO.FS.readBinFile f))) catch _ => pure "missing")
     let srcArgs := if link.sources.isEmpty then #[] else #["-O2", "-w"] ++ link.sources ++ tc.cflags.toArray
-    let key := mixHash (hash "link") (hash (toString [toString o.key, tc.cc, " ".intercalate tc.ldflags, " ".intercalate tc.libs,
+    -- the output is `out/name`, so the name is part of what the job makes: two programs
+    -- with the same object and link files (a test's `test-…` beside the exe it mirrors)
+    -- must not share a directory and a key
+    let key := mixHash (hash "link") (hash (toString [name, toString bin, toString o.key, tc.cc, " ".intercalate tc.ldflags, " ".intercalate tc.libs,
       " ".intercalate tc.gmp, toString link.sources.toList, toString contents.toList, toString link.libs.toList,
       if link.sources.isEmpty then "" else " ".intercalate tc.cflags]))
     pure (.job {
