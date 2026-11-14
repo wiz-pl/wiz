@@ -530,6 +530,26 @@ def group : Group where
         accepts t stuck
         accepts t uniform
         check (kernelAccepts t) "the kernel rejects the Σ rule at a canonical field" },
+    { name := "O7 sanity: dropping the quantity side condition q ≡ q' changes the computed description equation (a differential case)", run := fun _ => do
+        let DU : MTm := desc 0 (unit 0)
+        let S : MTm := enum 1
+        let E : MTm := lam (dret star)
+        -- two different literal quantities: `eqQtyApart` makes the equation `False`, and `λ e. e` checks at `eq -> False`
+        accepts (erased (lam (var 0)) (pi (eq DU (darg S E .one) (darg S E .many)) pfalse))
+        -- the *same* literal quantity: the equation is the `arg` relation (a Σ), not `False`, so the same term is rejected
+        rejects (erased (lam (var 0)) (pi (eq DU (darg S E .one) (darg S E .one)) pfalse))
+        -- the reference checker computes both the same way as the kernel (no dropped premise)
+        check (refVerdict (erased (lam (var 0)) (pi (eq DU (darg S E .one) (darg S E .many)) pfalse)) == "ok")
+          "the reference checker rejects the qtyApart equation"
+        check (refVerdict (erased (lam (var 0)) (pi (eq DU (darg S E .one) (darg S E .one)) pfalse)) != "ok")
+          "the reference checker accepts the same-quantity equation as False"
+        -- `Sigma.eq`'s negative side condition: the reduct `eqSigma` at a proposition first component
+        -- forms `a.1 = b.1` at a proposition, which the spec's `Eq.eq` rule (with the kernels'
+        -- formation restriction) rejects. If the side condition were dropped, this would be formed.
+        check (match WizMeta.infer (Review.env kernelOpts) Review.F []
+            (Tm.eqSigma Tm.True' (.unit 0) (.pair .tt .tt) (.pair .tt .tt)) with
+          | .error (.fail m) => has m "may be a proposition"
+          | _ => false) "eqSigma at a proposition is formed: the ¬ i.IsZero side condition is not enforced" },
     { name := "T4: an equation between Π types with domains in different universes (accepted by the kernels' rule, stuck with the levelled one)", run := fun _ => do
         accepts crossLevel
         rejects crossLevel { kernelOpts with eqTyLevelled := true }
