@@ -1563,7 +1563,7 @@ def Scry.emitDispatch (c : Scry.Cst) (v : Wil.Var) (o : Wil.Span) (defaultB : Na
       cv ← Scry.lowerExpr c vn;
       match Scry.tyEq v.ty cv.ty with
       | .false => do
-        Scry.warn ("switch case " ++ c.textOf vn ++ " of type " ++ Scry.tyShow cv.ty
+        Scry.warnAt c vn ("switch case " ++ c.textOf vn ++ " of type " ++ Scry.tyShow cv.ty
           ++ " against " ++ Scry.tyShow v.ty ++ ": case not dispatched");
         Scry.emitDispatch c v o defaultB rest
       | .true => do
@@ -1611,7 +1611,7 @@ def Scry.lowerSwitch (c : Scry.Cst) (n : Nat) : Scry.LM Unit := do
     | .some b => b
     | .none => n;
   match Scry.casesOf c body with
-  | .nil => Scry.warn "switch with no case labels: statement skipped"
+  | .nil => Scry.warnAt c n "switch with no case labels: statement skipped"
   | .cons k ks => do
     let cases : List Scry.Case := .cons k ks;
     blocks ← Scry.newBlocks (List.length cases);
@@ -2333,8 +2333,8 @@ def Scry.lowerTU (path : String) (c : Scry.Cst) : Scry.TU :=
   let s1 := (Scry.runLM (Scry.scanTypes c top) Scry.emptyState).1;
   let s2 := (Scry.runLM (Scry.scanSyms c top) s1).1;
   let r := Scry.lowerFuncs c top s2 .nil;
-  let files := List.map (fun i => c.fileText i) (Scry.range c.fileCount);
-  let paths := List.map (fun i => c.filePath i) (Scry.range c.fileCount);
+  let files := List.map (fun i => c.fileText i) (Scry.schemaRange c.fileCount);
+  let paths := List.map (fun i => c.filePath i) (Scry.schemaRange c.fileCount);
   Scry.TU.mk path files paths r.2 r.1.warnings (Scry.externalOf r.2)
 
 -- ## The CFG
