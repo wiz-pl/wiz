@@ -265,6 +265,20 @@ def Uart.onlyThat_a5 :     -- the loopback reports byte 0xa5 and nothing else, f
   with `_spec`, `checkFrom_during`, `findFrom_within`: `refl Bool.true` (the kernel
   evaluates) becomes a temporal statement. For long checks, `native_refl` (stage 27a).
 
+* **Refinement and case-analysis tools** (lib/Trace.wiz, from H14 T2):
+  `Mealy.simulatesInv`/`simulatesInvOut` (refinement for the specification's reachable
+  states: the one-step premise only from states satisfying an invariant it preserves),
+  `Mealy.follows` (a run along a known path `F`: from `F 0` at `t`, every step `k < K`
+  taken on the inputs that come, gives `stateAt (k + t) = F k`), `Mealy.seq` with
+  `seq_stateAt`/`seq_outAt` (two machines in sequence, `Circuit.seq` on traces: the second
+  runs on the first's outputs), `Nat.All P n`/`Nat.all_spec` (a table of the cases
+  `P 0 … P (n-1)` gives `∀ k < n, P k`), `Bool.all`/`Bool.forall9` (a Boolean check of all
+  2^9 inputs, `refl Bool.true`, holds at every input), `Bool.indP` (Bool elimination into
+  `Prop`), and small Nat facts (`Nat.lt_succ_split`, `Nat.lt_to_succ`, `Nat.lt_self_succ`,
+  `Nat.eq_of_beq`). Word equality from numbers is `UIntN.ext` (lib/Word.wiz): since
+  words carry their range (stage 22k), a word is not definitionally `BitVec.mk` of its
+  number, so the H14 T2 proofs call `UIntN.ext` directly.
+
 The examples: the UART transmitter's line is high whenever it is idle, at every cycle;
 the loopback delivers the byte sent within 45 cycles and reports no other, for ever
 (per byte: 48 evaluated cycles and a fixed point); a valid/ready buffer refines a
@@ -356,14 +370,10 @@ counter (the counter lemmas `Rx.incs` are already per value).
   statements are therefore the refinement theorems (`Tx.refinesOut`, `Rx.refinesOut`,
   `Loop.refinesOut`) plus the specification-level properties; the transmitter's line
   (one field) composes fine (`Tx.frame`).
-* Missing in the library (written here, candidates for lib/Trace.wiz): `Mealy.simulatesInv`
-  (refinement under an invariant of the specification), `Mealy.follows` (a run along a
-  known path), `Mealy.seq` and `Mealy.seq_stateAt`/`seq_outAt` (`Circuit.seq` on traces),
-  `Nat.All`/`Nat.all_spec` (finite case tables), `Bool.all`/`Bool.forall9` (Boolean
-  enumeration by evaluation), `Bool.indP`. Word equality from numbers is `UIntN.ext`
-  (lib/Word.wiz): a word carries its range, so the four lemmas below call `UIntN.ext`
-  directly instead of the old `BitVec.eqOfNat` helper (whose `rfl` premises no longer
-  hold).
+* Missing in the library, now in lib/Trace.wiz (see H14 T): `Mealy.simulatesInv`,
+  `Mealy.follows`, `Mealy.seq`, `Nat.All`, `Bool.forall9`, `Bool.indP`. (Word equality
+  from numbers is `UIntN.ext`, lib/Word.wiz; the old `BitVec.eqOfNat` helper is gone:
+  its `rfl` premises do not hold once a word carries its range.)
 * The temporal vocabulary had no *rigid (local) variables* (SVA's `(go, v = data) |=> …`):
   `Tx.frameTL` quantifies the byte outside the formula. `TL.during` reads its formula at
   absolute times, so "bit m/4 at offset m" is written as an explicit `∀ m < 40`.
@@ -375,7 +385,6 @@ counter (the counter lemmas `Rx.incs` are already per value).
   `Loop.firstByte`); "nothing is reported that was not sent" (needs reasoning backwards
   from a report).
 
-## H14 C1: traces, the common semantics (`lib/Trace.wiz`)
 ## H14 C1: traces, the common semantics (`lib/Trace.wiz`)
 
 One semantics for everything that runs step by step (design:
@@ -846,9 +855,14 @@ reverse once); and each call into C converts the list to a C string and back. Sp
 200000 characters, joining and trimming them takes 0.1 s compiled (the `text` tests).
 `Std.Str` is the native alternative for indexing.
 
-`lib/Json.wiz`, `lib/Deriving.wiz` and `lib/Hoare.wiz` import `Text` and use its
-`String.eq`, `String.chars`, `String.beq`, `Nat.repr`, `List.revApp` and `List.reverse`
-instead of copies of their own (two modules declaring one name are an error at import).
+`lib/Json.wiz`, `lib/Deriving.wiz`, `lib/Hoare.wiz` and `lib/Feral.wiz` import `Text` and
+use its helpers (`String.eq`, `String.chars`, `String.beq`, `Nat.repr`, `Nat.reprGo`,
+`List.revApp`, `List.reverse`, `List.map`, `List.filter`, `List.any`, `List.take`,
+`List.drop`, `List.isEmpty`, `String.lookup`, `String.elem`, `Chars.eq`,
+`Chars.isPrefix`) instead of copies of their own (two modules declaring one name are an
+error at import). Feral keeps only what Text lacks (`Fe.split`, `Fe.nth`, `Fe.memNat`);
+`Fe.split` and `Fe.wordsOf` keep a reversed accumulator and reverse it once, so they run
+in linear time.
 
 ## Numbers: classes, integers, words
 
