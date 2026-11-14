@@ -1,0 +1,303 @@
+import Sys
+import Text
+import Functor
+import Scry.Project
+import Scry.Preproc
+import Scry.Native
+/-!
+# Scry.ProjectIO: build a project from `compile_commands.json` (or a directory)
+
+The IO half of S2's project front end (`Scry.Project` is the pure data model). For every
+translation unit it runs the toolchain's preprocessor with **that unit's own flags**
+(`cc -E -ffreestanding …`), blanks the line markers with `Scry.Preproc`, parses the
+blanked text with the S1 shim, maps every node back to the original file/line/column and
+lowers it with `Scry.lowerTU`. Then `Scry.projectOfUnits` resolves calls across units and
+builds the project EDB.
+
+Discovery:
+
+* `--compdb FILE`: read that `compile_commands.json`.
+* otherwise `<DIR>/compile_commands.json` when it exists.
+* otherwise walk `DIR` for `*.c` (recursively, `-I`/`-D` from the command line apply to
+  every unit).
+
+A unit whose preprocessed text still has `ERROR`/`MISSING` nodes is an error unless
+`--allow-errors`; with it the recovery tree is used and the unit records its error count,
+so the summary and the facts keep the boundary visible.
+
+The shim is sequential (one parser, one tree, one file), so units are built in order.
+-/
+
+/-- A path relative to `base`, unless it is absolute or `base` is empty. -/
+def Scry.ProjectIO.resolvePath (base p : String) : String :=
+  match String.isEmpty base with
+  | .true => p
+  | .false => match String.startsWith p "/" with
+    | .true => p
+    | .false => Path.join base p
+
+/-- The original texts of `paths`, read relative to `base`; a pseudo path (`<built-in>`)
+or an unreadable file gets `""` (its line map still works). -/
+def Scry.ProjectIO.loadTextsFrom (base : String) : List String → EIO (List (String × String))
+  | .nil => EIO.pure .nil
+  | .cons p rest => do
+    rest' ← Scry.ProjectIO.loadTextsFrom base rest;
+    match String.startsWith p "<" with
+    | .true => EIO.pure (List.cons (p, "") rest')
+    | .false => do
+      let full := Scry.ProjectIO.resolvePath base p;
+      there ← EIO.lift (FS.exists full);
+      match there with
+      | .false => EIO.pure (List.cons (p, "") rest')
+      | .true => do
+        t ← FS.readFile full;
+        EIO.pure (List.cons (p, t) rest')
+
+/-- Run the preprocessor on one source file: `cc -E -ffreestanding FLAGS FILE` in
+`cwd` (the compile command's directory, when it has one). -/
+def Scry.ProjectIO.preprocess (cc : String) (cwd : Option String) (flags : List String)
+    (file : String) : EIO String := do
+  let args := List.append ["-E", "-ffreestanding"] (List.append flags (List.cons file .nil));
+  let opts : SpawnOptions := match cwd with
+    | .some d => SpawnOptions.inDir d SpawnOptions.piped
+    | .none => SpawnOptions.piped;
+  out ← Process.outputWith cc args "" opts;
+  match out.status with
+  | .exited 0 => EIO.pure out.stdout
+  | _ => EIO.fail (String.append "cc -E failed for " (String.append file
+      (String.append ": " (String.append (ExitStatus.toString out.status)
+        (String.append "\n" out.stderr)))))
+
+/-- Build one translation unit: preprocess with `cmd.flags`, parse, line-map, lower. -/
+def Scry.ProjectIO.buildUnit (cc : String) (allowErrors : Bool)
+    (cmd : Scry.CompileCommand) : EIO Scry.ProjectUnit := do
+  let cwd : Option String := match String.isEmpty cmd.directory with
+    | .true => .none
+    | .false => .some cmd.directory;
+  raw ← Scry.ProjectIO.preprocess cc cwd cmd.flags cmd.file;
+  let paths := Scry.markerPaths cmd.file raw;
+  texts ← Scry.ProjectIO.loadTextsFrom cmd.directory paths;
+  let pre := Scry.preprocess cmd.file raw texts;
+  st ← Scry.Native.parse "c" pre.text;
+  let errors := Scry.Native.errorCount st;
+  match Bool.and (Nat.lt 0 errors) (Bool.not allowErrors) with
+  | .true => EIO.fail (cmd.file ++ ": " ++ Nat.repr errors
+      ++ " ERROR/MISSING node(s) in the preprocessed text (use --allow-errors)")
+  | .false => do
+    store ← EIO.lift (Scry.Native.toCstStore cmd.file st);
+    let cst := Scry.Cst.ofPreprocessed pre store;
+    EIO.pure (Scry.unitOfPre cmd.file pre cst errors)
+
+/-- Build every unit, in order. -/
+partial def Scry.ProjectIO.buildUnits (cc : String) (allowErrors : Bool) :
+    List Scry.CompileCommand → EIO (List Scry.ProjectUnit)
+  | .nil => EIO.pure .nil
+  | .cons cmd rest => do
+    u ← Scry.ProjectIO.buildUnit cc allowErrors cmd;
+    us ← Scry.ProjectIO.buildUnits cc allowErrors rest;
+    EIO.pure (List.cons u us)
+
+-- ## Discovery
+
+/-- Walk `dir` for `*.c`, recursively (hidden directories are skipped). -/
+mutual
+partial def Scry.ProjectIO.walkNames (dir : String) : List String → EIO (List String)
+  | .nil => EIO.pure .nil
+  | .cons name rest => do
+    let full := Path.join dir name;
+    st ← FS.stat full;
+    here ← match st.kind with
+      | .dir => match String.startsWith name "." with
+        | .true => EIO.pure (.nil : List String)
+        | .false => Scry.ProjectIO.walkGo full
+      | .file => match String.endsWith name ".c" with
+        | .true => EIO.pure (List.cons full .nil)
+        | .false => EIO.pure (.nil : List String)
+      | _ => EIO.pure (.nil : List String);
+    tail ← Scry.ProjectIO.walkNames dir rest;
+    EIO.pure (List.append here tail)
+
+partial def Scry.ProjectIO.walkGo (dir : String) : EIO (List String) := do
+  names ← FS.listDir dir;
+  Scry.ProjectIO.walkNames dir names
+end
+
+/-- Sort strings (insertion sort; a project's source list is small). -/
+def Scry.insertString (x : String) : List String → List String
+  | .nil => List.cons x .nil
+  | .cons y rest => match String.lt x y with
+    | .true => List.cons x (List.cons y rest)
+    | .false => List.cons y (Scry.insertString x rest)
+
+def Scry.sortStrings (l : List String) : List String :=
+  List.foldl (fun acc x => Scry.insertString x acc) .nil l
+
+/-- A compile-database entry's directory: its own, or the project directory. -/
+def Scry.ProjectIO.withDir (dir : String) (cmd : Scry.CompileCommand) : Scry.CompileCommand :=
+  match String.isEmpty cmd.directory with
+  | .true => Scry.CompileCommand.mk dir cmd.file cmd.flags
+  | .false => cmd
+
+/-- The compile commands of a project: a compile database, or every `*.c` under `dir`
+with the command-line flags. -/
+partial def Scry.ProjectIO.discover (dir : String) (compdb : Option String)
+    (flags : List String) : EIO (List Scry.CompileCommand) :=
+  match compdb with
+  | .some f => do
+    text ← FS.readFile f;
+    match Scry.parseCompdb text with
+    | .error e => EIO.fail e
+    | .ok cmds => EIO.pure (List.map (fun c =>
+        let c2 := Scry.ProjectIO.withDir dir c;
+        Scry.CompileCommand.mk c2.directory c2.file (List.append c2.flags flags)) cmds)
+  | .none => do
+    let p := Path.join dir "compile_commands.json";
+    there ← EIO.lift (FS.exists p);
+    match there with
+    | .true => Scry.ProjectIO.discover dir (.some p) flags
+    | .false => do
+      files ← Scry.ProjectIO.walkGo dir;
+      let files := Scry.sortStrings files;
+      EIO.pure (List.map (fun file =>
+        Scry.CompileCommand.mk "" file flags) files)
+
+/-- Build a whole project. `compdb` is `none` when the caller did not pass `--compdb`;
+`flags` are command-line `-I`/`-D` flags (appended to every unit's own flags). -/
+def Scry.ProjectIO.buildProject (dir : String) (compdb : Option String) (cc : String)
+    (allowErrors : Bool) (flags : List String) : EIO Scry.Project := do
+  cmds ← Scry.ProjectIO.discover dir compdb flags;
+  match cmds with
+  | .nil => EIO.fail ("no C translation units in " ++ dir)
+  | _ => do
+    units ← Scry.ProjectIO.buildUnits cc allowErrors cmds;
+    EIO.pure (Scry.projectOfUnits units)
+
+-- ## Command-line options
+
+/-- The options of `scry project` / `scry project query`. -/
+structure Scry.ProjectOpts where
+  /-- The project directory. -/
+  target : String
+  /-- `--compdb FILE`. -/
+  compdb : Option String
+  /-- `--cc CMD` (default `cc`). -/
+  cc : String
+  /-- `--allow-errors`. -/
+  allowErrors : Bool
+  /-- `--facts OUT`. -/
+  facts : Option String
+  /-- Command-line `-I`/`-D`/`-U`/… flags, in order. -/
+  flags : List String
+  /-- `query --rel NAME`. -/
+  rel : Option String
+  /-- `query --func NAME`. -/
+  func : Option String
+
+/-- The default project options. -/
+def Scry.ProjectOpts.default (target : String) : Scry.ProjectOpts :=
+  Scry.ProjectOpts.mk target .none "cc" .false .none .nil .none .none
+
+/-- Add a flag, keeping its original spelling and value. -/
+def Scry.ProjectIO.addFlag (opts : Scry.ProjectOpts) (flag value : String) : Scry.ProjectOpts :=
+  Scry.ProjectOpts.mk opts.target opts.compdb opts.cc opts.allowErrors opts.facts
+    (List.append opts.flags [flag, value]) opts.rel opts.func
+
+/-- Parse the arguments after `project` (or `project query`): one positional directory
+and the flags above. `-I dir`, `-Idir`, `-D X=1`, `-DX=1` are all accepted and kept for
+`cc -E`. -/
+partial def Scry.parseProjectArgs (target : Option String) (opts : Scry.ProjectOpts) :
+    List String → Except String (String × Scry.ProjectOpts)
+  | .nil => match target with
+    | .some t => .ok (t, opts)
+    | .none => .error "usage: scry project DIR [--compdb FILE] [--cc CMD] [--allow-errors] [--facts OUT]"
+  | .cons a rest => match a with
+    | "--compdb" => match rest with
+      | .cons v r => Scry.parseProjectArgs target
+          (Scry.ProjectOpts.mk opts.target (.some v) opts.cc opts.allowErrors opts.facts
+            opts.flags opts.rel opts.func) r
+      | .nil => .error "--compdb needs a FILE"
+    | "--cc" => match rest with
+      | .cons v r => Scry.parseProjectArgs target
+          (Scry.ProjectOpts.mk opts.target opts.compdb v opts.allowErrors opts.facts
+            opts.flags opts.rel opts.func) r
+      | .nil => .error "--cc needs a command"
+    | "--allow-errors" => Scry.parseProjectArgs target
+        (Scry.ProjectOpts.mk opts.target opts.compdb opts.cc .true opts.facts
+          opts.flags opts.rel opts.func) rest
+    | "--facts" => match rest with
+      | .cons v r => Scry.parseProjectArgs target
+          (Scry.ProjectOpts.mk opts.target opts.compdb opts.cc opts.allowErrors (.some v)
+            opts.flags opts.rel opts.func) r
+      | .nil => .error "--facts needs an OUT path"
+    | "--rel" => match rest with
+      | .cons v r => Scry.parseProjectArgs target
+          (Scry.ProjectOpts.mk opts.target opts.compdb opts.cc opts.allowErrors opts.facts
+            opts.flags (.some v) opts.func) r
+      | .nil => .error "--rel needs a relation name"
+    | "--func" => match rest with
+      | .cons v r => Scry.parseProjectArgs target
+          (Scry.ProjectOpts.mk opts.target opts.compdb opts.cc opts.allowErrors opts.facts
+            opts.flags opts.rel (.some v)) r
+      | .nil => .error "--func needs a function name"
+    | "-I" => match rest with
+      | .cons v r => Scry.parseProjectArgs target (Scry.ProjectIO.addFlag opts "-I" v) r
+      | .nil => .error "-I needs a directory"
+    | "-D" => match rest with
+      | .cons v r => Scry.parseProjectArgs target (Scry.ProjectIO.addFlag opts "-D" v) r
+      | .nil => .error "-D needs a value"
+    | "-U" => match rest with
+      | .cons v r => Scry.parseProjectArgs target (Scry.ProjectIO.addFlag opts "-U" v) r
+      | .nil => .error "-U needs a value"
+    | "-include" => match rest with
+      | .cons v r => Scry.parseProjectArgs target (Scry.ProjectIO.addFlag opts "-include" v) r
+      | .nil => .error "-include needs a file"
+    | _ => match Bool.and (String.startsWith a "-I") (Nat.lt 2 (String.length a)) with
+      | .true => Scry.parseProjectArgs target
+          (Scry.ProjectOpts.mk opts.target opts.compdb opts.cc opts.allowErrors opts.facts
+            (List.append opts.flags (List.cons a .nil)) opts.rel opts.func) rest
+      | .false => match Bool.and (String.startsWith a "-D") (Nat.lt 2 (String.length a)) with
+        | .true => Scry.parseProjectArgs target
+            (Scry.ProjectOpts.mk opts.target opts.compdb opts.cc opts.allowErrors opts.facts
+              (List.append opts.flags (List.cons a .nil)) opts.rel opts.func) rest
+        | .false => match Bool.and (String.startsWith a "-U") (Nat.lt 2 (String.length a)) with
+          | .true => Scry.parseProjectArgs target
+              (Scry.ProjectOpts.mk opts.target opts.compdb opts.cc opts.allowErrors opts.facts
+                (List.append opts.flags (List.cons a .nil)) opts.rel opts.func) rest
+          | .false => match String.startsWith a "-" with
+            | .true => .error ("unknown project option \"" ++ a ++ "\" (see scry help)")
+            | .false => match target with
+              | .none => Scry.parseProjectArgs (.some a) opts rest
+              | .some _ => .error "scry project takes one DIRECTORY"
+
+/-- `scry project`'s output line helper (kept local: `Scry.Cli` imports this module). -/
+def Scry.ProjectIO.say (s : String) : EIO Unit := EIO.lift (IO.println s)
+
+/-- Write the facts file, or print it when `out` is `-`. -/
+def Scry.ProjectIO.writeFacts (out : String) (p : Scry.Project) : EIO Unit := do
+  let text := Scry.renderProjectEdb p;
+  match String.eq out "-" with
+  | .true => EIO.lift (IO.print text)
+  | .false => FS.writeFile out text
+
+/-- Run `scry project` (or `query` when `query` is true): parse the options, build the
+project, print the summary or the requested relation, and write `--facts`. -/
+def Scry.ProjectIO.run (query : Bool) (args : List String) : EIO Nat := do
+  match Scry.parseProjectArgs .none (Scry.ProjectOpts.default "") args with
+  | .error e => EIO.fail e
+  | .ok pair => do
+    let opts := pair.2;
+    p ← Scry.ProjectIO.buildProject pair.1 opts.compdb opts.cc opts.allowErrors opts.flags;
+    match opts.facts with
+    | .some out => Scry.ProjectIO.writeFacts out p
+    | .none => EIO.pure ();
+    match query with
+    | .false => do Scry.ProjectIO.say (Scry.Project.summary p); EIO.pure 0
+    | .true => match opts.rel with
+      | .some rel => match opts.func with
+        | .some _ => EIO.fail "scry project query takes --rel or --func, not both"
+        | .none => match Scry.Project.relation p rel with
+          | .error e => EIO.fail e
+          | .ok s => do Scry.ProjectIO.say s; EIO.pure 0
+      | .none => match opts.func with
+        | .some name => do Scry.ProjectIO.say (Scry.Project.renderFuncs p name); EIO.pure 0
+        | .none => EIO.fail "usage: scry project query DIR --rel NAME | --func NAME"

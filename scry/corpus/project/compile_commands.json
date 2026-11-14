@@ -1,0 +1,8 @@
+[
+  {"directory": "scry/corpus/project",
+   "file": "math.c",
+   "arguments": ["cc", "-DFACTOR=2", "-I.", "-c", "math.c", "-o", "math.o"]},
+  {"directory": "scry/corpus/project",
+   "file": "main.c",
+   "command": "cc -DFACTOR=3 -I. -c main.c -o main.o"}
+]

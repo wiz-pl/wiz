@@ -2,6 +2,7 @@ import Sys
 import Scry.Query
 import Scry.Parse
 import Scry.CstStore
+import Scry.ProjectIO
 /-!
 # Scry.Cli: the `scry` command line
 
@@ -36,6 +37,10 @@ def Scry.usage : String :=
   ++ "  explain FILE NODE          one node: span, parent, children, arcs, relations\n"
   ++ "  parse FILE… --stats        stats of JSON or scry-cst stores (S1)\n"
   ++ "  cst FILE OUT               convert a JSON fact store to scry-cst\n"
+  ++ "  project DIR [--compdb FILE] [--cc CMD] [--allow-errors] [--facts OUT]\n"
+  ++ "                              preprocess and lower a multi-file C project\n"
+  ++ "  project query DIR --rel NAME | --func NAME\n"
+  ++ "                              a project relation or function table\n"
   ++ "  help, --help               this text\n"
   ++ "  --version                  the version\n"
 
@@ -151,6 +156,9 @@ def Scry.dispatch (args : List String) : EIO Nat := match args with
     | .cons file (.cons node .nil) => Scry.explainCmd file node
     | _ => EIO.fail "usage: scry explain FILE NODE"
   | .cons "parse" rest => Scry.parseCmd rest
+  | .cons "project" rest => match rest with
+    | .cons "query" more => Scry.ProjectIO.run .true more
+    | _ => Scry.ProjectIO.run .false rest
   | .cons "cst" rest => match rest with
     | .cons file (.cons out .nil) => Scry.cstCmd file out
     | _ => EIO.fail "usage: scry cst FILE OUT"
