@@ -440,11 +440,13 @@ package's `lib` targets with its module roots (dependencies included), into
   plain HTML (and `wiz doc` says so).
 * **CI** builds the library's documentation on `master` and publishes it: the `docs` job
   runs `wiz doc --lib` on a push (never a pull request), with source links to the
-  commit and the Wasm module, and uploads it as the artifact `wiz-docs` (3 days, for
-  debugging); `deploy-docs` deploys that artifact to GitHub Pages at
-  <https://wiz-pl.github.io/wiz/>. The docs pages are the site root (`index.html`,
-  `api.html`, `api.json`, `A.B.html`, `A.B.json`, `search.js` and the Wasm files) and
-  every link is relative.
+  commit and the Wasm module, into `doc-site/docs`, assembles the landing page at the
+  site root and the static playground (11ab) under `doc-site/playground`
+  (`web/build-site.sh`), checks the tree (`web/check-site.sh`), and uploads it as the
+  artifact `wiz-docs` (3 days, for debugging); `deploy-docs` deploys that artifact to
+  GitHub Pages. The URLs are `/` (the landing page), `/docs/` (the docs pages:
+  `index.html`, `api.html`, `api.json`, `A.B.html`, `A.B.json`, `search.js` and the Wasm
+  files) and `/playground/`; every link is relative.
   A repository has one Pages site and each deployment replaces the whole tree, so a
   future performance site shares this deployment under `/perf/` rather than deploying
   separately. `docs/building.md`, "Documentation site", has the URL layout, the
@@ -675,8 +677,14 @@ page runs.
   keeping the raw form in the line's tooltip. Anything else is shown as it comes.
 * **Build and serve** (from a checkout after `lake build wiz`):
 
-      web/build-playground.sh                  # → web/out/wiz-playground.mjs (+ the page)
-      python3 -m http.server -d web/out 8000   # then http://127.0.0.1:8000/playground.html
+      web/build-playground.sh web/out             # → web/out/wiz-playground.mjs (+ the page)
+      python3 -m http.server -d web/out 8000      # then http://127.0.0.1:8000/playground.html
+
+  The published site puts it at `/playground/`: `web/build-site.sh doc-site web/out`
+  copies the page (as `playground/index.html`), its scripts and the module there, beside
+  the landing page at `/` and the documentation at `/docs/` (11s; docs/building.md,
+  "Documentation site"). The page's own links to the rest of the site are relative, so
+  serving `doc-site` (`python3 -m http.server -d doc-site 8000`) shows the whole tree.
 
   `WIZ=...` picks another toolchain; `--gmp-src` is `web/build.sh`'s option for builds
   without nix. The script writes `web/out/playground.wiz` (the assembled engine source)

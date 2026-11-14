@@ -1,6 +1,6 @@
 # Libraries
 
-The generated [API index](https://wiz-pl.github.io/wiz/api.html) lists every library
+The generated [API index](https://wiz-pl.github.io/wiz/docs/api.html) lists every library
 module and declaration, with signatures and doc summaries, and searches names, doc
 comments and signatures.
 
