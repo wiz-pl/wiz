@@ -1,7 +1,11 @@
 -- The UART library (`import Hdl.Uart`): the baud generator, the transmitter and the
 -- receiver, and the loopback circuit (the line wired from the transmitter to the
--- receiver). Checked by the `rune` test group: the value simulation and the fast netlist
--- simulation (`Hdl.Sim`) agree, and every byte comes back through the loopback.
+-- receiver) at the three counter widths: the default 16 bits and the 7-bit (iCEstick) and
+-- 10-bit (Arty/OLED) configurations. Checked by the `rune` test group: the value
+-- simulation and the fast netlist simulation (`Hdl.Sim`) agree, every byte comes back
+-- through the loopback, `n = 1` and each width's maximum `n` tick and wrap correctly, and
+-- the receiver decodes a line whose phase is not aligned to the local clock while it is
+-- reset for the first cycles (`Circuit.withResetEnable`).
 import Hdl.Core
 import Hdl.Sim
 import Hdl.Uart
@@ -37,20 +41,46 @@ def bytes : List (List Nat) → List Nat
     | .true => List.cons (Hdl.nthD 0 o 2) (bytes os)
     | .false => bytes os
 
-------------------------------------------------------------------------------------
--- The baud generator on its own: with the clock enable high, four ticks in four periods.
+-- the byte received by the receiver alone: `valid` (leaf 0) high, `data` (leaf 1)
+def rxBytes : List (List Nat) → List Nat
+  | .nil => .nil
+  | .cons o os => match Nat.beq (Hdl.nthD 0 o 0) 1 with
+    | .true => List.cons (Hdl.nthD 0 o 1) (rxBytes os)
+    | .false => rxBytes os
 
-def baudReport (n : Nat) : String :=
+------------------------------------------------------------------------------------
+-- The baud generator on its own: with the clock enable high, four ticks in four periods,
+-- at the default width and at the 7-bit and 10-bit configurations (n = 1 is the minimum,
+-- each width's maximum n is also simulated).
+
+def baudReportW (label : String) (w n : Nat) : String :=
   let cycles := 4 * n;
   let ins := Hdl.map (fun (k : Nat) => BitVec.ofNat 1 1) (Hdl.upto cycles 0);
-  let c := Uart.baudC n;
+  let c := Uart.baudCw w n;
   let outs := Circuit.runLeaves c ins;
-  "baud n=" <+> Hdl.show n <+> ": sim " <+> yes (leavesEq outs (Circuit.simFast c ins))
+  label <+> " n=" <+> Hdl.show n <+> ": sim " <+> yes (leavesEq outs (Circuit.simFast c ins))
     <+> ", ticks " <+> Hdl.show (countOnes outs)
+
+def baudReport (n : Nat) : String := baudReportW "baud" Uart.cntW n
+
+-- one step of the baud generator from count `k`: the next count and the tick
+def baudStepAt (w n k : Nat) : Nat × Nat :=
+  let s : Uart.Baud w HwTy.El := Uart.Baud.mk (BitVec.ofNat w k);
+  let p := Uart.baudStep w n s (BitVec.ofNat 1 1);
+  let b : Uart.Baud w HwTy.El := Uart.Baud.unpack w (Hw.fst p);
+  (BitVec.toNat b.cnt, BitVec.toNat (Hw.snd p))
+
+-- the last count of a period of `n ≥ 2`: tick at n - 1 and wrap to 0
+def baudLast (label : String) (w n : Nat) : String :=
+  let p := baudStepAt w n (n - 1);
+  label <+> " n=" <+> Hdl.show n <+> ": tick at n-1 " <+> yes (Nat.beq p.2 1)
+    <+> ", wraps to 0 " <+> yes (Nat.beq p.1 0)
 
 ------------------------------------------------------------------------------------
 -- The loopback: start a byte every `12 * n` cycles (a frame is 10 * n), so the
--- transmitter is idle again well before the next start.
+-- transmitter is idle again well before the next start. The 7-bit configuration uses the
+-- iCEstick's 104 cycles per bit, the 10-bit one the Arty's 866, and the 16-bit default the
+-- minimum `n = 5` of the receiver.
 
 def txAt (spacing : Nat) (datas : List Nat) (k : Nat) : HwTy.El Uart.TxIn.code :=
   match Nat.beq (Nat.mod k spacing) 0 with
@@ -59,20 +89,84 @@ def txAt (spacing : Nat) (datas : List Nat) (k : Nat) : HwTy.El Uart.TxIn.code :
   | .false => Bundle.toEl Uart.TxIn.bundle
       (Uart.TxIn.mk (BitVec.ofNat 1 0) (BitVec.ofNat 8 0))
 
-def loopReport (n : Nat) (datas : List Nat) : String :=
+def loopReportW (label : String) (w n : Nat) (datas : List Nat) : String :=
   let spacing := 12 * n;
   let cycles := List.length datas * spacing;
   let ins := Hdl.map (fun (k : Nat) => txAt spacing datas k) (Hdl.upto cycles 0);
-  let c := Uart.loopbackC n;
+  let c := Uart.loopbackCw w n;
   let outs := Circuit.runLeaves c ins;
   let got := bytes outs;
-  "uart n=" <+> Hdl.show n <+> ": sim " <+> yes (leavesEq outs (Circuit.simFast c ins))
+  label <+> " n=" <+> Hdl.show n <+> ": sim " <+> yes (leavesEq outs (Circuit.simFast c ins))
     <+> ", sent " <+> shows datas <+> ", got " <+> shows got
     <+> ", ok " <+> yes (Hdl.natsEq got datas)
     <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "uart" c))
+
+def loopReport (n : Nat) (datas : List Nat) : String := loopReportW "uart" Uart.cntW n datas
+
+------------------------------------------------------------------------------------
+-- A reset/CDC-compatible instantiation: the receiver alone under `Circuit.withResetEnable`
+-- (a synchronous reset for the first two cycles, enable high), fed with the transmitter's
+-- line shifted by one cycle, so the line's phase is not aligned to the local clock (the
+-- receiver's two-flip-flop synchroniser and mid-bit sampling handle it).
+
+def dropN : Nat → List Nat → List Nat
+  | .zero, xs => xs
+  | .succ _, .nil => .nil
+  | .succ k, .cons _ xs => dropN k xs
+
+-- the line of a transmitter at `w`/`n`, one bit per cycle
+def txLine (w n : Nat) (datas : List Nat) : List Nat :=
+  let spacing := 12 * n;
+  let cycles := List.length datas * spacing;
+  let ins := Hdl.map (fun (k : Nat) => txAt spacing datas k) (Hdl.upto cycles 0);
+  let outs := Circuit.runLeaves (Uart.txCw w n) ins;
+  Hdl.map (fun (o : List Nat) => Hdl.nthD 0 o 0) outs
+
+-- the transmitter's line one cycle late, with idle (high) cycles at the end
+def shiftLine (xs : List Nat) : List Nat :=
+  List.append (dropN 1 xs) (Hdl.map (fun (k : Nat) => 1) (Hdl.upto 4 0))
+
+def rxRE (w n : Nat) :
+    Circuit (HwTy.prod (HwTy.named "rst" Uart.Bit)
+      (HwTy.prod (HwTy.named "en" Uart.Bit) Uart.RxIn.code)) Uart.RxOut.code :=
+  Circuit.withResetEnable (Uart.rxCw w n)
+
+-- reset for the first two cycles, enable high, then the line bit of the cycle
+def reAt (k line : Nat) : HwTy.El (HwTy.prod (HwTy.named "rst" Uart.Bit)
+    (HwTy.prod (HwTy.named "en" Uart.Bit) Uart.RxIn.code)) :=
+  let rst := match Nat.lt k 2 with
+    | .true => 1
+    | .false => 0;
+  (BitVec.ofNat 1 rst,
+    (BitVec.ofNat 1 1,
+      Bundle.toEl Uart.RxIn.bundle (Uart.RxIn.mk (BitVec.ofNat 1 line))))
+
+def rxReport (label : String) (w n : Nat) (datas : List Nat) : String :=
+  let lines := shiftLine (txLine w n datas);
+  let ins := Hdl.map (fun (k : Nat) => reAt k (Hdl.nthD 0 lines k))
+    (Hdl.upto (List.length lines) 0);
+  let c := rxRE w n;
+  let outs := Circuit.runLeaves c ins;
+  let got := rxBytes outs;
+  label <+> " n=" <+> Hdl.show n <+> ": sim " <+> yes (leavesEq outs (Circuit.simFast c ins))
+    <+> ", bytes " <+> shows got <+> ", ok " <+> yes (Hdl.natsEq got datas)
+    <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "uart-rx" c))
 
 def main : IO Unit := do
   IO.println (baudReport 8);
   IO.println (baudReport 16);
   IO.println (loopReport 8 (.cons 85 (.cons 165 (.cons 0 (.cons 255 .nil)))));
-  IO.println (loopReport 16 (.cons 85 (.cons 165 (.cons 0 (.cons 255 .nil)))))
+  IO.println (loopReport 16 (.cons 85 (.cons 165 (.cons 0 (.cons 255 .nil)))));
+  IO.println (baudReportW "baud 7-bit" Uart.cntW7 1);
+  IO.println (baudReportW "baud 7-bit" Uart.cntW7 128);
+  IO.println (baudReportW "baud 10-bit" Uart.cntW10 1);
+  IO.println (baudReportW "baud 10-bit" Uart.cntW10 1024);
+  IO.println (baudReportW "baud 16-bit" Uart.cntW 1);
+  IO.println (baudLast "baud 16-bit" Uart.cntW 65536);
+  IO.println (loopReportW "uart 7-bit" Uart.cntW7 104
+    (.cons 85 (.cons 165 (.cons 0 (.cons 255 .nil)))));
+  IO.println (loopReportW "uart 10-bit" Uart.cntW10 866
+    (.cons 85 (.cons 165 (.cons 0 (.cons 255 .nil)))));
+  IO.println (loopReportW "uart 16-bit" Uart.cntW 5
+    (.cons 85 (.cons 165 (.cons 0 (.cons 255 .nil)))));
+  IO.println (rxReport "reset/CDC rx 7-bit" Uart.cntW7 5 (.cons 85 (.cons 165 .nil)))

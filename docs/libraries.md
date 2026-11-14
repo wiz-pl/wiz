@@ -582,21 +582,29 @@ repository's controller are the origins, with the board-specific parts removed.
 
 | module | what | configuration |
 |---|---|---|
-| `Hdl.Uart` | `Uart.baudC n` (counter, `ce` in, `tick` out), `Uart.txC n` (8N1, `start`/`data` in, `line`/`busy` out), `Uart.rxC n` (`line` in, `valid`/`data`/`busy` out, two-flip-flop input synchroniser), `Uart.loopbackC n` (the line wired from TX to RX) | `n` clocks per bit, 1 … 65536 |
+| `Hdl.Uart` | `Uart.baudC n` (counter, `ce` in, `tick` out), `Uart.txC n` (8N1, `start`/`data` in, `line`/`busy` out), `Uart.rxC n` (`line` in, `valid`/`data`/`busy` out, two-flip-flop input synchroniser), `Uart.loopbackC n` (the line wired from TX to RX); the `…w` forms (`Uart.baudCw`, `Uart.txCw`, `Uart.rxCw`, `Uart.loopbackCw`, whose first argument is the counter width) and the named 7-bit (`Uart.tx7C`, …) and 10-bit (`Uart.tx10C`, …) configurations | `n` clocks per bit, 1 … 2^w; the default `Uart.cntW` is 16 bits (1 … 65536), `Uart.cntW7` is the iCEstick's 7 bits (1 … 128), `Uart.cntW10` is the Arty/OLED 10 bits (1 … 1024) |
 | `Hdl.Spi` | `Spi.masterC div` (mode 0, CPOL = 0, CPHA = 0: sample on the rising edge, shift on the falling edge), `Spi.loopC div` (`mosi` wired to `miso`) | `div` clocks per half period, 1 … 65536 |
 | `Hdl.Ddr` | the native port of a DDR3 controller (`Ddr.Req`: `valid`/`we`/`addr` 24/`wdata` 128/`wmask` 16; `Ddr.Resp`: `ready`/`rvalid`/`rdata` 128), and `Ddr.modelC`, a 64K-word model with the same valid/ready handshake and byte-masked writes | the real controller is `Ddr3.Ctrl` in wiz-ddr3 (see the module header for the field mapping) |
 
-The UART receiver samples in the middle of each bit after checking the start bit half a
-bit in; use `n ≥ 5` because its two synchroniser flip-flops delay the start edge. The SPI
-master's pins are registers (no glitches), and its first (most significant) bit is on
-`mosi` in the cycle `cs` goes low. The DDR module is a documented stub for the handshake:
-it has no timing parameters and no PHY, and a design on another clock needs a CDC wrapper
-around the port.
+The UART counter width is a meta-level parameter: only the clocks-per-bit counter (and
+the constants it is compared with) changes with `w`, so the 16-bit default, the iCEstick's
+7-bit counter and the 10-bit Arty/OLED counter run the same 8N1 logic. The receiver
+samples in the middle of each bit after checking the start bit half a bit in; use `n ≥ 5`
+because its two synchroniser flip-flops delay the start edge. Both UART parts are ordinary
+synchronous circuits with a plain state, so `Circuit.withReset`/`Circuit.withResetEnable`
+wrap an instantiation unchanged (the example runs the receiver under a reset with a line
+whose phase is not aligned to the clock). The SPI master's pins are registers (no
+glitches), and its first (most significant) bit is on `mosi` in the cycle `cs` goes low.
+The DDR module is a documented stub for the handshake: it has no timing parameters and no
+PHY, and a design on another clock needs a CDC wrapper around the port.
 
-Examples (run by the test group `rune`): `examples/rune-uart.wiz`,
-`examples/rune-spi.wiz`, `examples/rune-ddr.wiz` (value simulation = `Netlist.simFast`,
-the loopback bytes, the SPI shift order and edges, the DDR handshake and masked write).
-What remains is in `/workspace/wiz-notes/rune.md`: SPI modes 1 … 3 and multiple slaves,
+Examples (run by the test group `rune`): `examples/rune-uart.wiz` (the baud generator and
+the loopback at the 16-bit default and the 7-bit and 10-bit configurations, `n = 1` and
+each width's maximum `n`, and the reset/CDC receiver), `examples/rune-spi.wiz`,
+`examples/rune-ddr.wiz` — value simulation = `Netlist.simFast`, the loopback bytes, the
+SPI shift order and edges, the DDR handshake and masked write.
+
+What remains is in `wiz-notes/rune.md`: SPI modes 1 … 3 and multiple slaves,
 the real DDR controller's wrapper and timing, and clock-domain crossing for the ports.
 
 ## Logic, heap predicates and Hoare triples
