@@ -51,6 +51,7 @@
     "=native",
     "=natives",
     "=nvim",
+    "=react",
     "optic",
     "phantom",
     "regions",

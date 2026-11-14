@@ -859,6 +859,26 @@ reverse once); and each call into C converts the list to a C string and back. Sp
 `String.eq`, `String.chars`, `String.beq`, `Nat.repr`, `List.revApp` and `List.reverse`
 instead of copies of their own (two modules declaring one name are an error at import).
 
+## Web: a React-style UI framework (`lib/Web/React.wiz`)
+
+`import Web.React` (over `Json`, `Optic` and `Tagged`): components, local state,
+typed event handlers, keyed lists, a pure virtual DOM, deterministic server-side
+rendering and a keyed diff to DOM patches. Nodes are `React.VNode M` (`text`, `raw`,
+`el`, keyed `el`, `on`), built with `React.el`/`React.text`/`React.on`/`React.keyed`;
+`React.render` gives `{tree, html, handlers}` (`React.toHtml` is the SSR string) and
+`React.Rendered.diff` a `List React.Patch` (`replace`, `text`, `setAttr`,
+`removeAttr`, `insert`, `remove`, `move`) that `React.patchesJson` hands to
+`web/framework/runtime.js`. An app is `React.App S M` (`init`, `update`, `view`); a
+component is `React.Component P S M`. Local state is a lens into the app state
+(`React.useState`/`setState`/`useReducer` over `Optic`'s `Lens`, so disjoint slices
+commute), and a one-shot resource is `React.Owned S`, a quantity-1 token the kernel
+makes you use exactly once (`new`, `read`, `peek`, `update`, `set`, `end`). `raw` is
+the only trust boundary (and must be one element); all other text and attribute values
+are escaped by `Tagged.esc`. There is no hydration yet (SSR then a re-render/mount),
+no effects, and `value`/`checked` would need property patches. Tests: group `react`
+and `web/framework/test.sh` (Node DOM). Design, survey and migration analysis:
+`wiz-notes/react-framework.md`.
+
 ## Numbers: classes, integers, words
 
 (Stage doc: docs/stages/07-type-classes.md, 7e and 7f.) The Prelude's `Add`, `Sub`, `Mul`,
