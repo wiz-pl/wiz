@@ -102,6 +102,7 @@ def anonCtor : ParserDescr := seqs ["⟨", withoutPosition (sepBy term ","), "�
 |----------------------|------|----------|
 | `term.ident`         | max  | ident |
 | `term.num`, `term.str` | max | literal |
+| `term.includeStr`    | max  | "include_str" str (a file's contents, read by the driver: see `include-str`) |
 | `term.type`          | max  | "Type" [level] |
 | `term.sort`          | max  | "Sort" [level] |
 | `term.prop`          | max  | "Prop" |
@@ -158,6 +159,10 @@ def termLeading : List LeadingParser := [
   { kind := "term.num", prec := maxPrec, p := num },
   { kind := "term.omega", prec := maxPrec, p := "ω" },
   { kind := "term.str", prec := maxPrec, p := str },
+  -- (include-str) `include_str "path"`: the contents of a file next to the .wiz file, as
+  -- a `String`. The command line reads it (the frontend is pure); `Elab.Command` replaces
+  -- the node by a string literal before elaborating the command.
+  { kind := "term.includeStr", prec := maxPrec, p := seqs ["include_str", str] },
   -- the level must be right of the enclosing position: in a structure, `op : Type` and a
   -- field `ret` on the next line are two fields, not `Type ret`
   { kind := "term.type", prec := maxPrec, p := seqs ["Type", optional (seqs [checkPrec leadPrec, colGt, level maxPrec])] },

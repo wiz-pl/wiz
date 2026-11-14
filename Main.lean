@@ -161,6 +161,8 @@ def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandSta
   let headers ← Build.preprocessHeaders tc (String.join (input :: lib.values))
   -- (9f) the `link_c` files, each relative to its own file
   let sources ← Module.cSourceTable ((System.FilePath.mk path).parent.getD ".") input closure
+  -- (include-str) the `include_str` files, each relative to its own file
+  let includes ← Module.includeTable ((System.FilePath.mk path).parent.getD ".") input closure
   let (regularity, predicativeProp) ← kernelOpts.get
   let lazyProofs ← lazyProofsOpt.get
   let inertReg ← inertOpt.get
@@ -175,6 +177,7 @@ def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandSta
        text := s!"{p} is ignored: module {n} is the toolchain's own ({roots.head!}), which a module root cannot replace" } : Msg)
   let init : CommandState ZeroOneMany :=
     { loader := (lib[·]?), cHeaders := (headers[·]?), cSources := some (Module.cSourceResolver sources),
+      includes := some (Module.includeResolver includes),
       messages := shadow.toArray,
       globals := { regularity, predicativeProp, lazyProofs, inertReg, unboxStructs, proofSteps, traceProofSteps,
                    strictPrivacy := ← strictPrivacyOpt.get, pp := { useNotation := !(← ppAllOpt.get) } },

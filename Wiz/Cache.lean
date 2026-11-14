@@ -556,12 +556,15 @@ def binaryId (dir : Option System.FilePath) : IO UInt64 := do
 
 /-- The key of every module reachable from `ms` (see above). `headers` gives the
 preprocessed text of a C header. Import cycles get key 0 on the back edge (the frontend
-reports them). A module's trust (`CommandState.trustedModule`: its `builtin`
-registrations are axioms or not) is part of its key, and so of its importers' keys:
-an effect elaborated with one trust status (its messages, `#print axioms`) is never
-replayed under the other. -/
+reports them). A module's `include_str` files enter its key through `includes` (the
+resolver `CommandState.includes`; by default every include is an error, which the frontend
+reports), so editing an included file invalidates the module and its importers. A module's
+trust (`CommandState.trustedModule`: its `builtin` registrations are axioms or not) is part
+of its key, and so of its importers' keys: an effect elaborated with one trust status (its
+messages, `#print axioms`) is never replayed under the other. -/
 partial def moduleKeys (loader : Name → Option String) (headers : String → Option String) (toolchain : UInt64)
-    (ms : List Name) (memo : Std.HashMap Name UInt64 := {}) (trusted : Name → Bool := fun _ => false) :
+    (ms : List Name) (memo : Std.HashMap Name UInt64 := {}) (trusted : Name → Bool := fun _ => false)
+    (includes : String → String → Except String String := fun _ rel => .error s!"include_str: no file {rel}") :
     Std.HashMap Name UInt64 :=
   ms.foldl (fun memo m => (go [] m memo).2) memo
 where
@@ -578,6 +581,8 @@ where
         let k₀ := mixHash (mixHash (mixHash salt toolchain) (hash src)) (hash m)
         let k₀ := if trusted m then mixHash k₀ (hash "trusted") else k₀
         let k₀ := (Module.headersOf src).foldl (fun k h => mixHash k (hash ((headers h).getD ""))) k₀
+        -- (include-str) the contents of the files it includes
+        let k₀ := mixHash k₀ (Module.includesKey includes m src)
         let (k, memo) := (Module.importsOf src).foldl (fun (k, memo) n =>
           let (kn, memo) := go (m :: stack) n memo
           (mixHash k kn, memo)) (k₀, memo)
@@ -585,8 +590,9 @@ where
 
 /-- The key of one module. -/
 def moduleKey (loader : Name → Option String) (headers : String → Option String) (toolchain : UInt64) (m : Name)
-    (trusted : Name → Bool := fun _ => false) : UInt64 :=
-  ((moduleKeys loader headers toolchain [m] {} trusted).get? m).getD 0
+    (trusted : Name → Bool := fun _ => false)
+    (includes : String → String → Except String String := fun _ rel => .error s!"include_str: no file {rel}") : UInt64 :=
+  ((moduleKeys loader headers toolchain [m] {} trusted includes).get? m).getD 0
 
 /-- How a file's commands are being elaborated. -/
 inductive Mode where
@@ -649,6 +655,9 @@ partial def elaborateWith (store : Store R) (input : String) (init : CommandStat
   let salt' := if init.trustNative then mixHash salt' (nativeKey init) else salt'
   -- (28) and the solver settings (`--sat-solver`, `--solver-timeout`)
   let salt' := match smtKey init.smt with | some k => mixHash salt' k | none => salt'
+  -- (include-str) the main file's included files enter its chain before its first command
+  let includes := init.includes.getD (fun _ rel => .error s!"include_str: no file {rel}")
+  let key₀ := mixHash (Module.includesKey includes "" input) key₀
   go keys init [] input init (mixHash salt' (mixHash toolchain key₀)) .write
 where
   nativeKey (s : CommandState R) : UInt64 := mixHash (hash "trust-native") (hash s.nativeFuel)
@@ -657,7 +666,8 @@ where
     let tc := if init.termInfo then mixHash toolchain 1 else toolchain
     let tc := if init.trustNative then mixHash tc (nativeKey init) else tc
     let tc := match smtKey init.smt with | some k => mixHash tc k | none => tc
-    let memo := moduleKeys init.loader init.cHeaders tc [m] (← keys.get) init.trustedModule
+    let includes := init.includes.getD (fun _ rel => .error s!"include_str: no file {rel}")
+    let memo := moduleKeys init.loader init.cHeaders tc [m] (← keys.get) init.trustedModule includes
     keys.set memo
     pure ((memo.get? m).getD 0)
   /-- Bring module `m` into `s`: elaborate it in isolation first if the cache has not

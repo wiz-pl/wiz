@@ -708,3 +708,6 @@ token that can't be read is the parse error's message by itself (`ParseError.lex
 not "expected unknown escape sequence …". Strings print with Lean's escapes (`\x0d` for
 a carriage return). Tests: `language` ("string escapes …"); `selfhost` ("the lexer in
 Wiz agrees with the Lean lexer", whose input now has every escape and a bad one).
+
+Sections of this stage without a letter live in `13-language/`:
+[`include_str`: a file's text, as a string literal](13-language/include-str.md).

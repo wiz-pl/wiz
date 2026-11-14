@@ -43,15 +43,18 @@ def load (tc : Toolchain) (roots : List System.FilePath) (salt : UInt64) (src : 
   let headers ← preprocessHeaders tc (src :: lib.values)
   -- (9f) the `link_c` files, relative to their files (`dir` is the main file's)
   let sources ← Module.cSourceTable dir src closure
+  -- (include-str) the `include_str` files, relative to their files
+  let includes ← Module.includeTable dir src closure
   let loader : Name → Option String := (lib[·]?)
   -- `builtin` registrations are trusted only in the toolchain's library, the first root
   let own := Module.fromFirstRoot roots closure
   let init : CommandState ZeroOneMany :=
     { loader, cHeaders := (headers[·]?), cSources := some (Module.cSourceResolver sources),
+      includes := some (Module.includeResolver includes),
       trustedModule := own.contains, trustNative := tc.trustNative,
       nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := ← tc.smt.resolve }
   let key := Cache.moduleKey (fun n => if n == mainName then some src else loader n) (headers[·]?) salt mainName
-    own.contains
+    own.contains (Module.includeResolver includes)
   -- a `link_c` file that appears or disappears changes the check (its contents enter
   -- only the link's key)
   let key := mixHash key (hash (toString ((sources.toList.map fun (k, v) => k ++ "=" ++ v).toArray.qsort (· < ·))))
