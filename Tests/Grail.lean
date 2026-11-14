@@ -1709,7 +1709,141 @@ def grailDepsGroup : Group where
         checkEq "1.5.0" ((rs.find? (·.name == "a")).map (Grail.Version.render ·.version) |>.getD "?")
         checkEq "1.0.0" ((rs.find? (·.name == "b")).map (Grail.Version.render ·.version) |>.getD "?")
         check (!rs.any (·.name == "z")) "the retracted `a 2.0` dependency `z` is still in the selection" },
+    { name := "lock v3 round-trips: toolchain, size/tree/commands, flat deps, sorted", run := fun _ => do
+        let sha := String.ofList (List.replicate 64 'a')
+        let tree := String.ofList (List.replicate 64 'b')
+        let cmds := String.ofList (List.replicate 64 'c')
+        let lock : Grail.Lock :=
+          { format := 3, toolchain := "0.1.0-dev", revision := "abcdef",
+            indexUrl := "https://example.org/grail-index", indexCommit := "123456",
+            git := [
+              { name := "zeta", url := "https://example.org/z.git", rev := "v1", commit := "c1", content := "d1" },
+              { name := "alpha", url := "https://example.org/a.git", rev := "main", commit := "c2", content := "d2" } ],
+            pkgs := [
+              { name := "text", version := "1.0.0", source := "https://example.org/text.tgz",
+                sha256 := sha, size := some 123, tree := tree, commands := cmds,
+                deps := [{ name := "std", req := ">=0.1 <0.3" }, { name := "base", req := "~0.2" }] },
+              { name := "alpha", version := "0.2.0", source := "https://example.org/a.tgz", sha256 := sha } ],
+            overrides := [{ name := "local", path := "../local", hash := tree }] }
+        let text := Grail.Lock.render lock
+        -- the v3 header and fields are present, and dependencies are flat
+        check ((text.splitOn "(version 3)").length > 1) text
+        check ((text.splitOn "(toolchain 0.1.0-dev abcdef)").length > 1) text
+        check ((text.splitOn "(size 123)").length > 1) text
+        check ((text.splitOn s!"(tree {tree})").length > 1) text
+        check ((text.splitOn s!"(commands {cmds})").length > 1) text
+        check ((text.splitOn "(deps \"base ~0.2\" \"std >=0.1 <0.3\")").length > 1) text
+        check ((text.splitOn "(override local \"../local\"").length > 1) text
+        -- stable: the entries are sorted and a second render is byte-identical
+        let .ok parsed := Grail.Lock.parse text | throw (IO.userError s!"could not parse v3: {text}")
+        checkEq ["alpha", "text"] (parsed.pkgs.map (·.name))
+        checkEq ["alpha", "zeta"] (parsed.git.map (·.name))
+        checkEq ["local"] (parsed.overrides.map (·.name))
+        checkEq text (Grail.Lock.render parsed)
+        let some p := parsed.pkgs.find? (·.name == "text") | throw (IO.userError "no text package")
+        checkEq (some 123) p.size
+        checkEq tree p.tree
+        checkEq cmds p.commands
+        checkEq ["base ~0.2", "std >=0.1 <0.3"] (p.deps.map fun d => s!"{d.name} {d.req}")
+        checkEq "0.1.0-dev" parsed.toolchain
+        checkEq "abcdef" parsed.revision },
+    { name := "old locks: v1 and v2 parse; a newer format is refused", run := fun _ => do
+        let sha := String.ofList (List.replicate 64 'a')
+        let v1 := "(lock\n  (dep \"greet\" \"https://example.org/greet.git\" \"v1\" \"abc\" \"def\"))\n"
+        let .ok l1 := Grail.Lock.parse v1 | throw (IO.userError "v1 did not parse")
+        checkEq 1 l1.format
+        checkEq "greet" (l1.git.head!.name)
+        -- a git-only lock written by `grail update` is v3 too
+        let v1v3 := Grail.renderLock l1.git
+        check ((v1v3.splitOn "(version 3)").length > 1) v1v3
+        let .ok up := Grail.Lock.parse v1v3 | throw (IO.userError "the upgraded v1 lock did not parse")
+        checkEq 3 up.format
+        checkEq "greet" up.git.head!.name
+        let v2 := s!"(lock\n  (index \"https://example.org/i\" \"abc\")\n  (pkg \"text\" \"1.0.0\" \"https://example.org/t.tgz\" \"{sha}\" (deps (dep \"std\" \"^1\")))\n  (pkg \"std\" \"0.1.0\" \"https://example.org/s.tgz\" \"{sha}\" (deps)))\n"
+        let .ok l2 := Grail.Lock.parse v2 | throw (IO.userError "v2 did not parse")
+        checkEq 2 l2.format
+        checkEq "https://example.org/i" l2.indexUrl
+        checkEq "text" l2.pkgs.head!.name
+        checkEq "std ^1" (l2.pkgs.head!.deps.head!.name ++ " " ++ l2.pkgs.head!.deps.head!.req)
+        -- a v2 lock still renders without the v3 header (a build/update may keep it)
+        let v2Text := Grail.Lock.render l2
+        let header := "(version"
+        checkEq 1 (v2Text.splitOn header).length
+        -- a lock from a newer grail is refused, never partly understood
+        match Grail.Lock.parse "(lock (version 4) (dep \"x\" \"u\" \"r\" \"c\" \"h\"))" with
+        | .error e => check ((e.splitOn "newer").length > 1) e
+        | .ok _ => throw (IO.userError "a v4 lock was accepted") },
+    { name := "an old lock is upgraded to v3 by update, and --locked still reads it", run := fun _ => do
+        let fixture ← indexFixture
+        let cache ← IO.FS.createTempDir
+        let std ← IO.FS.realPath "lib"
+        let dir ← mkTree [
+          ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{fixture}\"\n  |> Package.require \"greet\" \"^1\"\n")]
+        let run (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir.toString, "--std", std.toString, "--cache", cache.toString] ++ args)
+        checkEq 0 (← run ["update"])
+        let text ← IO.FS.readFile (dir / "grail.lock")
+        check ((text.splitOn "(version 3)").length > 1) text
+        let .ok v3 := Grail.Lock.parse text | throw (IO.userError "the written lock did not parse")
+        checkEq Wiz.version v3.toolchain
+        let some greet := v3.pkgs.find? (·.name == "greet") | throw (IO.userError "no greet")
+        -- pretend the project committed a v2 lock (no version header, nested deps)
+        let v2 := s!"(lock\n  (index \"{v3.indexUrl}\" \"{v3.indexCommit}\")\n  (pkg \"greet\" \"{greet.version}\" \"{greet.source}\" \"{greet.sha256}\" (deps)))\n"
+        IO.FS.writeFile (dir / "grail.lock") v2
+        checkEq 0 (← run ["update", "--locked"])
+        checkEq v2 (← IO.FS.readFile (dir / "grail.lock"))
+        checkEq 0 (← run ["update"])
+        let upgraded ← IO.FS.readFile (dir / "grail.lock")
+        check (upgraded != v2) upgraded
+        check ((upgraded.splitOn "(version 3)").length > 1) upgraded
+        check ((upgraded.splitOn "(toolchain").length > 1) upgraded
+        let .ok again := Grail.Lock.parse upgraded | throw (IO.userError "the upgraded lock did not parse")
+        checkEq 3 again.format
+        checkEq "greet" (again.pkgs.head!.name)
+        -- (R20) a tree hash that does not match the archive is refused before the stamp
+        let zero := String.ofList (List.replicate 64 '0')
+        let badTree := { again with pkgs := again.pkgs.map fun p => { p with tree := zero } }
+        IO.FS.writeFile (dir / "grail.lock") (Grail.Lock.render badTree)
+        checkEq 1 (← run ["fetch", "--locked"])
+        check (!(← (dir / ".grail/packages/greet").pathExists)) "a bad tree hash unpacked a package" },
+    { name := "a grail.local.wiz override: the lock records it, --locked refuses it", run := fun _ => do
+        let (root, dir, _sha, tc) ← registryTree
+        let std ← IO.FS.realPath "lib"
+        let cache := root / "cache"
+        let localPkg ← mkTree [
+          ("grail.wiz", "import Grail\ndef package : Package := Package.new \"greet\"\n  |> Package.lib \"greet\" \"src\"\n"),
+          ("src/Greet/Hello.wiz", "import Prelude\ndef hello : Nat := 7\n")]
+        IO.FS.writeFile (dir / "grail.local.wiz")
+          s!"import Grail\ndef settings : Settings := Settings.empty\n  |> Package.override \"greet\" \"{localPkg}\"\n"
+        let run (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir.toString, "--std", std.toString, "--cache", cache.toString] ++ args)
+        checkEq 0 (← run ["update"])
+        let text ← IO.FS.readFile (dir / "grail.lock")
+        check ((text.splitOn "(override greet \"").length > 1) text
+        let .ok lock := Grail.Lock.parse text | throw (IO.userError "the override lock did not parse")
+        checkEq 0 lock.pkgs.length
+        checkEq 1 lock.overrides.length
+        checkEq localPkg.toString lock.overrides.head!.path
+        checkEq 64 lock.overrides.head!.hash.length
+        -- --locked refuses a machine-local override: it is not reproducible
+        checkEq 1 (← run ["update", "--locked"])
+        checkEq 1 (← run ["fetch", "--locked"])
+        -- a plain fetch checks the path and says nothing is downloaded
+        checkEq 0 (← run ["fetch"])
+        -- a build uses the path's roots and says so
+        let .ok (pkg, _) ← Grail.readConfig tc (← binId tc) "lib" dir | throw (IO.userError "bad manifest")
+        let note ← IO.mkRef ""
+        let .ok roots ← Grail.Registry.lockedRoots cache (readPkg tc) dir pkg (fun s => note.modify (· ++ s))
+          | throw (IO.userError "the override build did not resolve")
+        checkEq 1 roots.length
+        check (((← note.get).splitOn "using override greet from").length > 1) (← note.get)
+        -- an edited override no longer matches the lock
+        IO.FS.writeFile (localPkg / "src/Greet/Hello.wiz") "import Prelude\ndef hello : Nat := 8\n"
+        match ← Grail.Registry.lockedRoots cache (readPkg tc) dir pkg (fun _ => pure ()) with
+        | .error e => check ((e.splitOn "differs from").length > 1) e
+        | .ok _ => throw (IO.userError "an edited override passed the lock check") },
     { name := "the index decoder is tolerant; the lock decoder is strict", run := fun _ => do
+
         let sha := String.ofList (List.replicate 64 'a')
         -- a newer publisher's unknown fields (`license`, `size`, `maintainer`) must not
         -- make an older grail reject the whole package/index

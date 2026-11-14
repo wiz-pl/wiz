@@ -282,15 +282,16 @@ def cliMain (args : List String) : IO UInt32 := do
       if opts.locked then
         -- (R10) `--locked` is a *check*, not a re-resolution: it reads the lock only and
         -- never touches the index, so publishing a new version cannot make CI fail.
-        let noDeps := pkg.deps.isEmpty && pkg.requires.isEmpty
+        let noDeps := pkg.deps.isEmpty && pkg.requires.isEmpty && pkg.overrides.isEmpty
         match ← readLock with
         | .error e => if noDeps then pure 0 else IO.eprintln e; pure 1
         | .ok l =>
-          match Registry.checkLocked l pkg lockPin with
+          match Registry.checkLocked l pkg lockPin (strictOverride := true) with
           | .error e => IO.eprintln e; pure 1
           | .ok () =>
             for p in l.pkgs do IO.println s!"{p.name}\t{p.version}\t{p.source}"
             for g in l.git do IO.println s!"{g.name}\t{g.url} {g.rev}\t{g.commit}"
+            for o in l.overrides do IO.println s!"{o.name}\toverride {o.path}\t{o.hash}"
             pure 0
       else
         match ← Registry.resolveLock cache indexSpec opts.offline readPkg dir pkg opts.allowRewind with
@@ -298,18 +299,19 @@ def cliMain (args : List String) : IO UInt32 := do
         | .ok l =>
           let text := Lock.render l
           let old ← if ← (lockFile dir).pathExists then some <$> IO.FS.readFile (lockFile dir) else pure none
-          let empty := l.git.isEmpty && l.pkgs.isEmpty
+          let empty := l.git.isEmpty && l.pkgs.isEmpty && l.overrides.isEmpty
           if old != some text && (!empty || old.isSome) then Cache.writeAtomic (lockFile dir) text
           for p in l.pkgs do IO.println s!"{p.name}\t{p.version}\t{p.source}"
           for g in l.git do IO.println s!"{g.name}\t{g.url} {g.rev}\t{g.commit}"
+          for o in l.overrides do IO.println s!"{o.name}\toverride {o.path}\t{o.hash}"
           pure 0
     | "fetch" :: _ =>
       -- `--locked`: never write the lock, and fail if it is missing or out of date
-      let noDeps := pkg.deps.isEmpty && pkg.requires.isEmpty
+      let noDeps := pkg.deps.isEmpty && pkg.requires.isEmpty && pkg.overrides.isEmpty
       let getLock : IO (Except String Lock) := do
         match ← readLock with
         | .ok l =>
-          match Registry.checkLocked l pkg lockPin with
+          match Registry.checkLocked l pkg lockPin (strictOverride := opts.locked) with
           | .ok () => pure (.ok l)
           | .error e => pure (.error e)
         | .error e =>

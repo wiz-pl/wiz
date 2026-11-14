@@ -204,6 +204,20 @@ def Package.toolchain (req : String) : Package → Package
 def Package.require (name req : String) : Package → Package
   | .mk n ts s ds v tc rs => .mk n ts s ds v tc (List.append rs (.cons (Req.mk name req) .nil))
 
+-- ## Local overrides (lock v3, R37)
+/-- `Package.override NAME PATH`: in `grail.local.wiz` (uncommitted, this machine only),
+take `NAME` from the package at `PATH` instead of the registry. The lock records the
+override and its tree hash; `--locked` refuses it, and a plain build says which path it
+used. The argument is the local `Settings`, so it composes with `Settings.set`:
+
+```
+def settings : Settings := Settings.empty
+  |> Package.override "ddr3" "../wiz-ddr3"
+  |> Settings.set "cflags" "-I…"
+``` -/
+def Package.override (name path : String) : Settings → Settings
+  | .mk ps => .mk (List.append ps (.cons (Setting.mk (String.append "override " name) path) .nil))
+
 /-- `String.append`, shorter. (The rendering helpers below build the S-expression text.) -/
 def Grail.cat (a b : String) : String := String.append a b
 /-- Backslash-escapes `"` and `\` in a string's characters. -/

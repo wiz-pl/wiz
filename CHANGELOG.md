@@ -18,6 +18,14 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   over the index's git history (`--allow-rewind`), SHA-256-before-unpack fetching with a
   content-addressed archive cache, `grail publish`, and a hermetic `tests/fixtures/grail-index`
   fixture (`=grail-deps`). The index is not signed yet.
+* grail (23m): **lock v3**. `(version 3)` and the resolving `(toolchain …)`; package
+  `(size …)`, `(tree …)` (checked after every unpack) and `(commands …)` digests; flat,
+  sorted `(deps "NAME REQ" …)` entries; and `Package.override NAME PATH` in
+  `grail.local.wiz` (recorded as `(override NAME PATH HASH)`, refused by `--locked`, used
+  with a note by a plain build). v1/v2 locks still parse and render unchanged, and
+  `grail update` upgrades them. `grail publish` and the index schema record the size,
+  tree and command digest. Tests: the four new `=grail-deps` cases (round-trip, old
+  locks, upgrade, override).
 * grail (23m), the static index side: a `grail-index` repository layout (static
   `index/NAME.sexpr`, deterministic `packages/NAME-VERSION.tar.gz`, `index.wiz` as the
   index's Wiz manifest and generator templates), a complete `examples/grail-index/` with

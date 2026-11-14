@@ -1,6 +1,7 @@
 import Grail.Deps
 import Grail.Index
 import Wiz.Version
+import Wiz.Smt.Sha256
 
 /-!
 # The registry: index source, lock file, fetch (stage 23m, prototype)
@@ -23,67 +24,53 @@ before it is unpacked, and unpacks into `.grail/packages/<name>`.
 namespace Grail
 open Wiz Cache
 
-/-- One registry package, pinned: name, version, archive, hash, and its dependencies -/
-structure PkgLock where
-  name : String
-  version : String
-  source : String
-  sha256 : String
-  deps : List Req := []
-  deriving Repr, Inhabited, BEq
+/-- The SHA-256 of a byte array, as lowercase hex (the pure implementation in
+`Wiz/Smt/Sha256.lean`: no external `sha256sum` for a lock's tree or command digest). -/
+def sha256Bytes (b : ByteArray) : String := Wiz.Smt.Sha256.hexBytes b
 
-/-- `grail.lock`: registry packages and (23h) git dependencies -/
-structure Lock where
-  /-- (23m) where the versions came from, and the commit that was read -/
-  indexUrl : String := ""
-  indexCommit : String := ""
-  git : List Locked := []
-  pkgs : List PkgLock := []
-  deriving Repr, Inhabited
+/-- The SHA-256 of a string's UTF-8 bytes. -/
+def sha256String (s : String) : String := Wiz.Smt.Sha256.hex s
 
-namespace Lock
+/-- (R20) The SHA-256 of a package tree: sorted `path NUL sha256(content) LF` lines,
+hashed. The same construction is used for a published archive and for
+`.grail/packages/NAME`, so a hand-edited file inside a fetched package changes the hash
+and the lock refuses it (Go's `dirhash` is the model). -/
+def treeHash (root : System.FilePath) : IO (Except String String) := do
+  let nul := String.singleton (Char.ofNat 0)
+  try
+    let mut text := ""
+    for f in ← packageFiles root do
+      text := text ++ f ++ nul ++ sha256Bytes (← IO.FS.readBinFile (root / f)) ++ "\n"
+    pure (.ok (sha256String text))
+  catch e => pure (.error s!"{root}: {e}")
 
-def render (l : Lock) : String :=
-  let idx := if l.indexUrl.isEmpty then "" else
-    "\n  " ++ (node "index" [str l.indexUrl, str l.indexCommit]).render
-  let git := if l.git.isEmpty then "" else
-    "\n  " ++ "\n  ".intercalate (l.git.map fun d =>
-      (node "dep" [str d.name, str d.url, str d.rev, str d.commit, str d.content]).render)
-  let pkgs := if l.pkgs.isEmpty then "" else
-    "\n  " ++ "\n  ".intercalate (l.pkgs.map fun p =>
-      (node "pkg" [str p.name, str p.version, str p.source, str p.sha256,
-        node "deps" (p.deps.map fun d => node "dep" [str d.name, str d.req])]).render)
-  "(lock" ++ idx ++ git ++ pkgs ++ ")\n"
-
-/-- Parse `grail.lock`, v1 (`(lock (dep …) …)`) or v2 (with `(pkg …)` and `(index …)`). -/
-def parse (s : String) : Except String Lock := do
-  let some (.l xs) := Sx.parse s | throw "grail.lock: expected (lock …)"
-  match xs.toList with
-  | .a "lock" :: entries =>
-    let mut l : Lock := {}
-    for e in entries do
-      let .l ys := e | throw s!"grail.lock: unexpected entry {e.render}"
-      match ys.toList with
-      | .a "dep" :: .a name :: .a url :: .a rev :: .a commit :: .a content :: [] =>
-        l := { l with git := l.git ++ [{ name, url, rev, commit, content }] }
-      | .a "index" :: .a url :: .a commit :: [] =>
-        l := { l with indexUrl := url, indexCommit := commit }
-      | .a "pkg" :: .a name :: .a version :: .a source :: .a sha256 :: rest =>
-        let deps ← match rest with
-          | [] => pure []
-          | [.l ds] => ds.toList.drop 1 |>.mapM fun
-            | .l ys =>
-              match ys.toList with
-              | .a "dep" :: .a n :: .a r :: [] => pure { name := n, req := r : Req }
-              | _ => throw "grail.lock: bad dependency"
-            | x => throw s!"grail.lock: bad dependency {x.render}"
-          | _ => throw s!"grail.lock: bad package {e.render}"
-        l := { l with pkgs := l.pkgs ++ [{ name, version, source, sha256, deps }] }
-      | _ => throw s!"grail.lock: unexpected entry {e.render}"
-    pure l
-  | _ => throw "grail.lock: expected (lock …)"
-
-end Lock
+/-- (R36) The digest of a package's declared `Package.command` set. Empty when the package
+has no command targets. It covers every field of a command (tool, arguments, declared
+inputs/outputs, stdout, environment, working directory, used tools, phony/manual), so a
+version that silently gains or changes a build-time command is a visible lock change. -/
+def commandDigest (ts : List Target) : String :=
+  let tool (t : Tool) : Cache.Sx := match t with
+    | .path n => Cache.node "path" [Cache.str n]
+    | .exe n => Cache.node "exe" [Cache.str n]
+  let part (p : Part) : Cache.Sx := match p with
+    | .text s => Cache.node "text" [Cache.str s]
+    | .input f => Cache.node "in" [Cache.str f]
+    | .output f => Cache.node "out" [Cache.str f]
+  let command (c : Command) : Cache.Sx :=
+    Cache.node "command" [
+      Cache.str c.name, tool c.tool,
+      Cache.list (c.args.map fun ps => Cache.list (ps.map part)),
+      Cache.list (c.inputs.map Cache.str),
+      Cache.list (c.outputs.map fun (p, dir) => Cache.node (if dir then "dir" else "file") [Cache.str p]),
+      (match c.stdout with | some p => Cache.node "stdout" [Cache.str p] | none => .a "-"),
+      Cache.list (c.env.map fun (k, v) => Cache.node "env" [Cache.str k, Cache.str v]),
+      .a (if c.inOutDir then "1" else "0"),
+      Cache.list (c.uses.map tool),
+      .a (if c.phony then "1" else "0"),
+      .a (if c.manual then "1" else "0")]
+  let cmds := ts.filterMap fun | .command c => some c | _ => none
+  if cmds.isEmpty then "" else
+    sha256String ("\n".intercalate (cmds.map fun c => (command c).render))
 
 namespace Registry
 
@@ -131,6 +118,19 @@ def untar (tar : System.FilePath) (dest : System.FilePath) : IO (Except String U
     pure (if o.exitCode == 0 then .ok ()
       else .error s!"tar {tar}: {o.stderr.trimAscii}")
   catch e => pure (.error s!"tar: {e}")
+
+/-- The tree hash of an archive's contents: unpack into a temporary directory (the same
+`--strip-components=1` layout `fetch` uses) and hash the tree. -/
+def unpackTreeHash (tar : System.FilePath) : IO (Except String String) := do
+  let tmp ← IO.FS.createTempDir
+  let d := tmp / "tree"
+  IO.FS.createDirAll d
+  match ← untar tar d with
+  | .error e => IO.FS.removeDirAll tmp; return .error e
+  | .ok () =>
+    let r ← treeHash d
+    IO.FS.removeDirAll tmp
+    pure r
 
 /-- The cached archive for `sha256`, downloading and verifying it if needed. With
 `offline`, a missing or corrupt cache entry is an error: nothing is downloaded. -/
@@ -186,6 +186,14 @@ def ensurePkg (cache : System.FilePath) (packagesDir : System.FilePath) (p : Pkg
     match ← untar tar tmp with
     | .error e => IO.FS.removeDirAll tmp; return .error e
     | .ok () =>
+      -- (R20) the lock may carry a tree hash: check the unpacked bytes before the stamp
+      if !p.tree.isEmpty then
+        match ← treeHash tmp with
+        | .error e => IO.FS.removeDirAll tmp; return .error e
+        | .ok h =>
+          if h != p.tree then
+            IO.FS.removeDirAll tmp
+            return .error s!"{p.name} {p.version}: unpacked tree has sha256 {h}, the lock says {p.tree}"
       IO.FS.writeFile (stampFile tmp) (p.sha256 ++ "\n")
       if ← dir.pathExists then IO.FS.removeDirAll dir
       IO.FS.rename tmp dir
@@ -324,11 +332,35 @@ where
 
 /-! ## Update, fetch, and the build's roots -/
 
+/-- (R37) Resolve the manifest's local overrides: `NAME` is taken from `PATH` (relative to
+the package directory), and its tree hash is recorded in the lock. An override is
+machine-local (it lives in the uncommitted `grail.local.wiz`), so the hash is an accident
+detector for the checkout, not a registry guarantee. -/
+def resolveOverrides (dir : System.FilePath) (pkg : Package) :
+    IO (Except String (List LockOverride)) := do
+  let mut out := []
+  for (name, path) in pkg.overrides do
+    let p := if (System.FilePath.mk path).isAbsolute then System.FilePath.mk path else dir / path
+    unless ← p.pathExists do
+      return .error s!"override {name}: {p} does not exist (from grail.local.wiz)"
+    match ← treeHash p with
+    | .error e => return .error s!"override {name}: {e}"
+    | .ok h => out := out ++ [{ name, path, hash := h }]
+  pure (.ok out)
+
 /-- Resolve the manifest's registry requirements through the index (and its git
-dependencies), and return the lock they give. Writes nothing. -/
+dependencies), and return the lock they give. Writes nothing. A `Package.override` in
+`grail.local.wiz` takes its name out of the registry/git resolution: the lock records the
+path and tree hash instead (v3, R37). -/
 def resolveLock (cache : System.FilePath) (indexSpec : String) (offline : Bool)
     (readPkg : System.FilePath → IO (Except String Package)) (dir : System.FilePath)
     (pkg : Package) (allowRewind : Bool := false) : IO (Except String Lock) := do
+  let overridden := pkg.overrides.map (·.1)
+  let requires := pkg.requires.filter fun r => !overridden.contains r.name
+  let deps := pkg.deps.filter fun d => !overridden.contains d.name
+  let overrides ← match ← resolveOverrides dir pkg with
+    | .error e => return .error e
+    | .ok os => pure os
   -- the existing lock's index commit is the rollback baseline (R22); a directory or
   -- file index has no commit and is not checked
   let previous : String ←
@@ -338,23 +370,27 @@ def resolveLock (cache : System.FilePath) (indexSpec : String) (offline : Bool)
       | .error _ => pure ""
     else pure ""
   let src ←
-    if pkg.requires.isEmpty then pure (.ok { url := "", pkgs := {} })
+    if requires.isEmpty then pure (.ok { url := "", pkgs := {} })
     else if indexSpec.isEmpty then
       pure (.error s!"{pkg.name} requires packages from the registry: give one with --index URL (or `Package.set \"index\" \"URL\"`)")
     else loadIndex cache indexSpec offline previous allowRewind
   match src with
   | .error e => pure (.error e)
   | .ok src =>
-    match Resolve.resolve src.pkgs pkg.requires Wiz.version with
+    match Resolve.resolve src.pkgs requires Wiz.version with
     | .error e => pure (.error e)
     | .ok resolved =>
-      match ← resolveDeps readPkg dir pkg.deps [] offline with
+      match ← resolveDeps readPkg dir deps [] offline with
       | .error e => pure (.error e)
       | .ok git =>
         let pkgs : List PkgLock := resolved.map fun r =>
           ({ name := r.name, version := Version.render r.version, source := r.source,
-             sha256 := r.sha256, deps := r.deps } : PkgLock)
-        pure (.ok { indexUrl := src.url, indexCommit := src.commit, git := git, pkgs := pkgs })
+             sha256 := r.sha256, size := r.size, tree := r.tree, commands := r.commands,
+             deps := r.deps } : PkgLock)
+        pure (.ok { format := 3, toolchain := Wiz.version,
+                    revision := (← Wiz.revision?).getD "",
+                    indexUrl := src.url, indexCommit := src.commit, git := git,
+                    pkgs := pkgs, overrides := overrides })
 
 /-- 64 lowercase hex digits: the shape of a SHA-256 in the index and the lock. -/
 def isSha256 (s : String) : Bool :=
@@ -365,14 +401,25 @@ def isSha256 (s : String) : Bool :=
 dependency pinned, and is the lock's registry graph complete? A lock holds the transitive
 closure, so a `pkg` entry whose dependency is absent or not satisfied is a stale or
 hand-edited lock. With `indexCommit` (or `Package.set "index-commit"`), the lock must
-also have been resolved from that index commit. -/
-def checkLocked (lock : Lock) (pkg : Package) (indexCommit : String := "") : Except String Unit := do
+also have been resolved from that index commit. `strictOverride` is `--locked`: a lock
+that records a machine-local override is refused rather than silently built from a path
+(R37). -/
+def checkLocked (lock : Lock) (pkg : Package) (indexCommit : String := "")
+    (strictOverride : Bool := false) : Except String Unit := do
   let pin := if indexCommit.isEmpty then
     (pkg.settings.find? (·.1 == "index-commit")).map (·.2) |>.getD ""
   else indexCommit
   if pin != "" && !(lock.indexCommit.startsWith pin) then
     throw s!"grail.lock was resolved from index commit {lock.indexCommit}, but this package pins {pin}: run `grail update`"
+  if strictOverride && (!lock.overrides.isEmpty || !pkg.overrides.isEmpty) then
+    let os := if lock.overrides.isEmpty then
+        " ".intercalate (pkg.overrides.map fun (n, p) => s!"{n} ({p})")
+      else " ".intercalate (lock.overrides.map fun o => s!"{o.name} ({o.path})")
+    throw s!"a machine-local override is in effect ({os}), but --locked refuses overrides: remove it from grail.local.wiz or run without --locked"
+  let overridden := pkg.overrides.map (·.1)
+  let isOverride (n : String) : Bool := overridden.contains n
   for r in pkg.requires do
+    if isOverride r.name then continue
     match lock.pkgs.find? (·.name == r.name) with
     | none => throw s!"{r.name} is not in grail.lock: run `grail update`"
     | some p =>
@@ -381,21 +428,36 @@ def checkLocked (lock : Lock) (pkg : Package) (indexCommit : String := "") : Exc
       if !Requirement.satisfies req v then
         throw s!"grail.lock has {p.name} {p.version}, grail.wiz asks for {r.req}: run `grail update`"
   for d in pkg.deps do
+    if isOverride d.name then continue
     if !lock.git.any (·.name == d.name) then
       throw s!"{d.name} is not in grail.lock: run `grail update`"
+  -- (R37) an override is recorded in its own section, with the hash of the path
+  for o in lock.overrides do
+    if o.name.isEmpty then throw "grail.lock: an override has no name: run `grail update`"
+    if o.path.isEmpty then throw s!"grail.lock: override {o.name} has no path: run `grail update`"
+    if !isSha256 o.hash then
+      throw s!"grail.lock: override {o.name}: tree hash is not 64 lowercase hex digits: run `grail update`"
   let mut seen : List String := []
   for p in lock.pkgs do
     if seen.contains p.name then
       throw s!"grail.lock lists {p.name} twice: run `grail update`"
     seen := p.name :: seen
+    if lock.overrides.any (·.name == p.name) then
+      throw s!"grail.lock lists {p.name} both as a package and as an override: run `grail update`"
     if !isSha256 p.sha256 then
       throw s!"grail.lock: {p.name} {p.version}: sha256 is not 64 lowercase hex digits: run `grail update`"
     if p.source.isEmpty then
       throw s!"grail.lock: {p.name} {p.version}: no source: run `grail update`"
+    -- (R19/R20/R36) the v3 optional fields have the shape the format promises
+    if !p.tree.isEmpty && !isSha256 p.tree then
+      throw s!"grail.lock: {p.name} {p.version}: tree hash is not 64 lowercase hex digits: run `grail update`"
+    if !p.commands.isEmpty && !isSha256 p.commands then
+      throw s!"grail.lock: {p.name} {p.version}: command digest is not 64 lowercase hex digits: run `grail update`"
     let _ ← Version.parse p.version
     for d in p.deps do
       match lock.pkgs.find? (·.name == d.name) with
       | none =>
+        if lock.overrides.any (·.name == d.name) then continue
         throw s!"grail.lock is incomplete: {p.name} depends on {d.name}, which is not in it: run `grail update`"
       | some q =>
         let req ← Requirement.parse d.req
@@ -409,12 +471,15 @@ downloaded). -/
 def fetch (cache : System.FilePath) (dir : System.FilePath) (lock : Lock)
     (offline : Bool := false) : IO (Except String (List String)) := do
   let mut out := []
+  let overridden := lock.overrides.map (·.name)
   for p in lock.pkgs do
+    if overridden.contains p.name then continue
     match ← ensurePkg cache (dir / ".grail" / "packages") p offline with
     | .error e => return .error e
     | .ok fresh =>
       out := out ++ [s!"{p.name} {p.version}\t{p.sha256}\t{if fresh then "fetched" else "up to date"}"]
   for g in lock.git do
+    if overridden.contains g.name then continue
     let d := packageDir dir g.name
     if offline then
       if let .error e ← ensureCloneCached d g.url then return .error e
@@ -426,14 +491,27 @@ def fetch (cache : System.FilePath) (dir : System.FilePath) (lock : Lock)
     if content != g.content then
       return .error s!"{d} differs from grail.lock (content {content}, locked {g.content}): edited? remove it, or `grail update`"
     out := out ++ [s!"{g.name}\t{g.commit}\t{content}"]
+  -- (R37) an override is not fetched: check that the local path still has the locked tree
+  for o in lock.overrides do
+    let p := if (System.FilePath.mk o.path).isAbsolute then System.FilePath.mk o.path else dir / o.path
+    unless ← p.pathExists do
+      return .error s!"override {o.name}: {p} does not exist (grail.lock records it; run `grail update`)"
+    match ← treeHash p with
+    | .error e => return .error e
+    | .ok h =>
+      if h != o.hash then
+        return .error s!"override {o.name}: {p} differs from grail.lock (tree {h}, locked {o.hash}): run `grail update`"
+      out := out ++ [s!"{o.name}\toverride {o.path}\t{o.hash}"]
   pure (.ok out)
 
 /-- Build the index entry for one release from its manifest and archive: the checks a
 publisher (and the index's reviewer) can make locally. The archive layout must be the
 fixed one: one top-level `NAME-VERSION/` with the package's `grail.wiz` in it. `modules`
 are the package's module names (from `archiveModules`), recorded so the resolver can
-refuse two packages that would collide at `import` (R32). -/
-def publishEntry (pkg : Package) (source sha : String) (modules : List String := []) :
+refuse two packages that would collide at `import` (R32). `size`, `tree` and `commands`
+are the v3 integrity fields (R19/R20/R36). -/
+def publishEntry (pkg : Package) (source sha : String) (modules : List String := [])
+    (size : Option Nat := none) (tree : String := "") (commands : String := "") :
     Except String IxVersion := do
   if !validName pkg.name then throw s!"package name {pkg.name}: expected [a-z][a-z0-9-]* (at most 64)"
   if pkg.version.isEmpty then throw "grail.wiz has no Package.version: a published package needs one"
@@ -442,13 +520,17 @@ def publishEntry (pkg : Package) (source sha : String) (modules : List String :=
     throw s!"Package.version {pkg.version}: expected a normalised version like 1.2.3"
   if source.isEmpty then throw "no --source URL for the archive"
   if !isSha256 sha then throw s!"sha256 {sha}: expected 64 lowercase hex digits"
+  if !tree.isEmpty && !isSha256 tree then throw s!"tree {tree}: expected 64 lowercase hex digits"
+  if !commands.isEmpty && !isSha256 commands then
+    throw s!"command digest {commands}: expected 64 lowercase hex digits"
   if !pkg.toolchain.isEmpty then
     if let .error e := Requirement.parse pkg.toolchain then
       throw s!"Package.toolchain {pkg.toolchain}: {e}"
   for r in pkg.requires do
     if let .error e := Requirement.parse r.req then
       throw s!"Package.require {r.name} {r.req}: {e}"
-  pure { version := v, source, sha256 := sha, toolchain := pkg.toolchain, modules, deps := pkg.requires }
+  pure { version := v, source, sha256 := sha, toolchain := pkg.toolchain, modules,
+         size, tree, commands, deps := pkg.requires }
 
 /-- The members of a `.tar.gz` (`tar -tzf`), one path per line. -/
 def archiveMembers (archive : System.FilePath) : IO (Except String (List String)) := do
@@ -509,7 +591,12 @@ def publish (archive : Option System.FilePath) (source : String) (pkg : Package)
   match ← sha256File ar with
   | .error e => pure (.error e)
   | .ok sha =>
-    match publishEntry pkg source sha modules with
+    let size := some (← ar.metadata).byteSize.toNat
+    let tree ← match ← unpackTreeHash ar with
+      | .error e => return .error e
+      | .ok h => pure h
+    let commands := commandDigest pkg.targets
+    match publishEntry pkg source sha modules size tree commands with
     | .error e => pure (.error e)
     | .ok v => pure (.ok (Index.renderVersion v))
 
@@ -522,14 +609,20 @@ def lockedRoots (cache : System.FilePath) (readPkg : System.FilePath → IO (Exc
     IO (Except String (List System.FilePath)) := do
   let lock := lockFile dir
   if !(← lock.pathExists) then
-    return if pkg.deps.isEmpty && pkg.requires.isEmpty then .ok []
+    return if pkg.deps.isEmpty && pkg.requires.isEmpty && pkg.overrides.isEmpty then .ok []
       else .error s!"no {lock}: run `grail update`"
   let l ← match Lock.parse (← IO.FS.readFile lock) with
     | .ok l => pure l
     | .error e => return .error e
   if let .error e := checkLocked l pkg then
     return .error e
+  -- (R14) the lock remembers the toolchain it was solved for; a different one is a note,
+  -- not an error (a newer grail may still build an old lock)
+  if !l.toolchain.isEmpty && l.toolchain != Wiz.version then
+    note s!"note: {lock} was resolved by grail {l.toolchain}{if l.revision.isEmpty then "" else s!" ({l.revision})"}; this is {Wiz.version}\n"
+  let overridden := l.overrides.map (·.name)
   for d in pkg.deps do
+    if overridden.contains d.name then continue
     match l.git.find? (·.name == d.name) with
     | none => return .error s!"{d.name} is not in {lock}: run `grail update`"
     | some g =>
@@ -537,6 +630,7 @@ def lockedRoots (cache : System.FilePath) (readPkg : System.FilePath → IO (Exc
         note s!"note: {lock} has {d.name} at {g.commit} ({g.url} {g.rev}); grail.wiz asks for {d.url} {d.rev}: `grail update` moves it\n"
   let mut roots := #[]
   for p in l.pkgs do
+    if overridden.contains p.name then continue
     match ← ensurePkg cache (dir / ".grail" / "packages") p offline with
     | .error e => return .error e
     | .ok _ => pure ()
@@ -546,6 +640,7 @@ def lockedRoots (cache : System.FilePath) (readPkg : System.FilePath → IO (Exc
       | .error e => return .error s!"{p.name}: {e}"
       | .ok dp => roots := roots ++ (libRootsOf d dp.targets).toArray
   for g in l.git do
+    if overridden.contains g.name then continue
     let d := packageDir dir g.name
     if offline then
       if let .error e ← ensureCloneCached d g.url then return .error e
@@ -560,6 +655,30 @@ def lockedRoots (cache : System.FilePath) (readPkg : System.FilePath → IO (Exc
       match ← readPkg d with
       | .error e => return .error s!"{g.name}: {e}"
       | .ok dp => roots := roots ++ (libRootsOf d dp.targets).toArray
+  -- (R37) machine-local overrides: the lock and grail.local.wiz must agree, and the path
+  -- must still have the locked tree; a plain build says which path it used
+  for (name, path) in pkg.overrides do
+    match l.overrides.find? (·.name == name) with
+    | none => return .error s!"{lock} does not record override {name}: run `grail update`"
+    | some o =>
+      if o.path != path then
+        return .error s!"{lock} records override {name} from {o.path}, grail.local.wiz says {path}: run `grail update`"
+      let p := if (System.FilePath.mk path).isAbsolute then System.FilePath.mk path else dir / path
+      unless ← p.pathExists do
+        return .error s!"override {name}: {p} does not exist (grail.lock records it; run `grail update`)"
+      match ← treeHash p with
+      | .error e => return .error e
+      | .ok h =>
+        if h != o.hash then
+          return .error s!"override {name}: {p} differs from {lock} (tree {h}, locked {o.hash}): run `grail update`"
+      note s!"using override {name} from {path}\n"
+      if ← (p / "grail.wiz").pathExists then
+        match ← readPkg p with
+        | .error e => return .error s!"override {name}: {e}"
+        | .ok dp => roots := roots ++ (libRootsOf p dp.targets).toArray
+  for o in l.overrides do
+    unless pkg.overrides.any (·.1 == o.name) do
+      return .error s!"{lock} records override {o.name} from {o.path}, but grail.local.wiz has none: run `grail update`"
   pure (.ok roots.toList)
 
 end Registry

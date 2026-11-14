@@ -203,6 +203,12 @@ structure IxVersion where
   /-- (R32) module prefixes the package reserves for future modules (`Greet`). A prefix
   conflicts with any other package's module or prefix below it. -/
   prefixes : List String := []
+  /-- (R19) the archive's size in bytes, when the publisher recorded it -/
+  size : Option Nat := none
+  /-- (R20) SHA-256 of the unpacked tree (sorted paths and file hashes); optional -/
+  tree : String := ""
+  /-- (R36) SHA-256 of the package's declared `Package.command` set; optional -/
+  commands : String := ""
   /-- why it is yanked; `""` when it isn't -/
   yanked : String := ""
   deriving Repr, Inhabited, BEq
@@ -252,6 +258,9 @@ open Wiz.Cache
 def versionNode (v : IxVersion) : Sx :=
   let fields : List Sx :=
     [node "source" [str v.source], node "sha256" [str v.sha256]]
+      ++ (match v.size with | some n => [node "size" [nat n]] | none => [])
+      ++ (if v.tree.isEmpty then [] else [node "tree" [str v.tree]])
+      ++ (if v.commands.isEmpty then [] else [node "commands" [str v.commands]])
       ++ (if v.toolchain.isEmpty then [] else [node "toolchain" [str v.toolchain]])
       ++ (if v.modules.isEmpty then [] else [node "modules" (v.modules.map str)])
       ++ (v.prefixes.map fun p => node "prefix" [str p])
@@ -301,6 +310,11 @@ def decodeVersion (x : Sx) : Except String IxVersion := do
     match f with
     | .l #[.a "source", .a s] => out := { out with source := s }
     | .l #[.a "sha256", .a s] => out := { out with sha256 := s }
+    | .l #[.a "size", .a s] =>
+      -- (R19) a publisher records the archive's size; old entries have none
+      out := { out with size := s.toNat? }
+    | .l #[.a "tree", .a s] => out := { out with tree := s }
+    | .l #[.a "commands", .a s] => out := { out with commands := s }
     | .l #[.a "toolchain", .a s] => out := { out with toolchain := s }
     | .l ys =>
       match ys.toList with
@@ -370,6 +384,9 @@ structure Resolved where
   source : String
   sha256 : String
   toolchain : String := ""
+  size : Option Nat := none
+  tree : String := ""
+  commands : String := ""
   deps : List Req := []
   deriving Repr, Inhabited
 
@@ -468,7 +485,8 @@ def resolve (index : Std.HashMap String IxPackage) (roots : List Req) (toolchain
   moduleConflicts chosen
   pure (chosen.map fun (name, v) => {
     name := name, version := v.version, source := v.source, sha256 := v.sha256,
-    toolchain := v.toolchain, deps := v.deps })
+    toolchain := v.toolchain, size := v.size, tree := v.tree, commands := v.commands,
+    deps := v.deps })
 
 end Resolve
 

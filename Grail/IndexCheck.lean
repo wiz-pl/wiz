@@ -98,6 +98,11 @@ def checkVersion (r : CheckResult) (name : String) (v : IxVersion) (fetch : Bool
   let mut r := r
   if !Registry.isSha256 v.sha256 then
     r := addError r who s!"sha256 {v.sha256} is not 64 lowercase hex digits"
+  -- (R20/R36) the v3 optional integrity fields have the shape the lock will check
+  if !v.tree.isEmpty && !Registry.isSha256 v.tree then
+    r := addError r who s!"tree {v.tree} is not 64 lowercase hex digits"
+  if !v.commands.isEmpty && !Registry.isSha256 v.commands then
+    r := addError r who s!"command digest {v.commands} is not 64 lowercase hex digits"
   if !v.toolchain.isEmpty then
     match Requirement.parse v.toolchain with
     | .error e => r := addError r who s!"toolchain {v.toolchain}: {e}"
