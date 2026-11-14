@@ -125,8 +125,8 @@ Cache layout (under `--cache`, default `~/.cache/wiz`):
 | path | contents |
 |---|---|
 | `grail/downloads/<sha256>` | content-addressed release archives; re-hashed on every use, re-downloaded when corrupt |
+| `grail/packages/<sha256>/` | unpacked packages (23n), stamped `.grail-pkg`; `.grail/packages/<name>` links to one |
 | `grail/index/` | the cached clone of a URL index (one clone; a directory index is read in place) |
-| `<package>/.grail/packages/<name>/` | unpacked packages, with `.grail-pkg` = the archive's SHA-256 as stamp |
 
 Fetch verifies the SHA-256 **before** unpacking, into a temporary directory, and renames
 only after the hash matches, so a bad transfer leaves no partial tree. The archive layout
@@ -135,12 +135,28 @@ resolved against the index root (which is what makes the checked-in fixture usab
 offline). The index is not signed yet: SHA-256 and the lock give integrity, the index's
 git history and review give names, and building a package still runs its author's code.
 
+`grail vendor [DIR]` (23n) copies the lock's registry archives into `DIR` (default
+`vendor/`) as `<sha256>.tar.gz` and writes `DIR/index.sexpr`; the lock is unchanged, so
+the same lock works with or without it. `--vendor DIR` (or `Package.set "vendor" "DIR"`) makes
+`fetch`/`build`/`test`/`run`/`lsp`/`doc` look archives up by hash in that directory
+before the cache or the network. The hermetic CI prelude is:
+
+```sh
+grail fetch --locked --offline --vendor vendor   # after `grail vendor` once, committed
+grail build
+```
+
+`grail cache path|list|verify` inspects the shared cache; `verify` re-hashes every
+archive and checks every unpacked tree's stamp, and exits 1 on a corrupt entry.
+
 The hermetic fixture is `tests/fixtures/grail-index/` (`index/NAME.sexpr`,
 `packages/NAME-V.tar.gz`, `sources/` and `make.sh`); `=grail-deps` covers exact/range
 versions, the transitive closure, a missing package, a hash mismatch, stale locks,
 `fetch --locked` with cold/warm caches, scoped `index/@org/name.sexpr` files, and index
-rollback. Rebuild the archives with `cd tests/fixtures/grail-index && ./make.sh`. There
-is no network in these tests.
+rollback. `=grail-vendor` (five cases) covers vendoring, an offline `--locked` fetch
+from `vendor/` without a cache, the shared store and the cache commands. Rebuild the
+archives with `cd tests/fixtures/grail-index && ./make.sh`. There is no network in these
+tests.
 
 There is also a complete example **index repository** at `examples/grail-index/`
 (`index.wiz`, `registry.sexpr`, `index/`, `entries/`, `sources/`, `packages/`, `make.sh`)

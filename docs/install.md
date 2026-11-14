@@ -209,6 +209,12 @@ machine, run `grail fetch --locked` (or `grail fetch --locked --offline` when th
 archives are already cached); CI should run `grail update --locked` to catch a forgotten
 lock. Update a dependency with `grail update`, never by editing the lock.
 
+For a machine with no network at all, `grail vendor` copies the lock's registry archives
+into `vendor/` (content-addressed, with `vendor/index.sexpr`) without changing the lock;
+commit `vendor/` and use `grail fetch --locked --offline --vendor vendor` (or
+`Package.set "vendor" "vendor"`) and `grail build`. `grail cache path|list|verify`
+inspects the shared archive and package store.
+
 `Package.require` and `Package.dep` are deliberately different: `require` names a
 version range that the index resolves, `dep` names a git source (URL and revision) that
 `grail update` pins to a commit. A package may use both. The index itself is a static

@@ -10,6 +10,15 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* grail (23n): `grail vendor [DIR]` copies the lock's registry archives into a
+  content-addressed vendor directory (`<sha256>.tar.gz` plus `vendor/index.sexpr`) without
+  rewriting `grail.lock`; `--vendor DIR` (or `Package.set "vendor" "DIR"`) lets `fetch`, `build`,
+  `test`, `run`, `lsp` and `doc` resolve archives by SHA-256 before the cache or the
+  network, so `grail fetch --locked --offline --vendor vendor` is hermetic. Unpacked
+  registry packages now live in the shared, content-addressed store
+  `<cache>/grail/packages/<sha256>/`, linked from `.grail/packages/NAME`, so a second
+  project downloads and unpacks nothing; `grail cache path|list|verify` inspects the
+  store (`=grail-vendor`). The index and lock formats are unchanged.
 * grail (23m): a static package registry. `Package.version/toolchain/require`, an
   S-expression index (`index/NAME.sexpr`, scoped `index/@org/NAME.sexpr`), semver ranges
   (`^0`/`^0.0` included), a flat resolver that retracts constraints of replaced

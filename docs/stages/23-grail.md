@@ -470,9 +470,11 @@ lock:
 * Fetching a registry package (`Grail/Registry.lean`) is: if
   `.grail/packages/NAME/.grail-pkg` already equals the archive hash, done; otherwise
   find `<cache>/grail/downloads/SHA256`, verify it (re-download if corrupt), download
-  and verify the hash **before** unpacking, unpack into a temporary directory with
-  `tar -xzf --strip-components=1 --no-same-owner`, write the stamp, and rename into
-  place. A second fetch is a few stat calls.
+  and verify the hash **before** unpacking, unpack once into the shared store
+  `<cache>/grail/packages/SHA256` (a temporary directory and a rename), and link
+  `.grail/packages/NAME` to it. A second fetch is a few stat calls; a second project
+  reuses the unpacked tree (23n). `--vendor DIR` adds a first lookup by hash in a
+  vendored directory, which `grail fetch --locked --offline` can use with no cache.
 
 ### Publishing
 
@@ -504,15 +506,16 @@ archive from its tag and compares the SHA-256. Until then: SHA-256 gives integri
 authorship, and the index's own history is the audit log.
 
 **Cache layout.** `<cache>/grail/downloads/<sha256>` holds the archives
-(content-addressed, re-verified on every use); `<cache>/grail/index` the clone of a URL
-index; `.grail/packages/NAME/` the unpacked tree with a `.grail-pkg` stamp equal to the
-archive hash. `.grail/` is not committed; `grail.lock` is.
+(content-addressed, re-verified on every use); `<cache>/grail/packages/<sha256>/` the
+unpacked trees (23n), with `.grail/packages/NAME` linked to one; `<cache>/grail/index`
+the clone of a URL index. `.grail/` is not committed; `grail.lock` is; `grail cache
+path/list/verify` inspects the store.
 
 **Deferred:** a real `wiz-pl/grail-index` with CI naming rules and the first packages;
 signed index commits/tags and a signature in the lock (`--require-signature`);
 per-registry index caches and repeatable `--index` overlays; `grail update -p NAME` and
 `--minimal`; a tree hash for unpacked packages (lock v3) and a SHA-256 tree hash for git
-deps; private-index credential settings, `grail vendor`, binary artifacts, and automated
+deps; private-index credential settings, binary artifacts, and automated
 publish (a bot that verifies the artifact before merging). The reader understands the
 `index/@org/name.sexpr` layout, but scopes are not enforced in names or manifests yet.
 
@@ -522,3 +525,48 @@ generator), the `grail index check` validation (names, versions, semver ranges, 
 SHA-256s, module-prefix conflicts) and the hosting/signing plan (TUF stages, Sigsum; no
 transparency log yet) are in
 [index-repository.md](23-grail/index-repository.md).
+
+## 23n: `grail vendor`, a shared store, and `grail cache`
+
+Two projects that pin the same packages used to download and unpack each archive twice:
+the download cache was content-addressed, but the unpacked tree lived only in
+`.grail/packages/NAME`, per project. This section fixes both halves.
+
+**The shared store.** `<cache>/grail/downloads/<sha256>` is still the content-addressed
+archive cache (re-verified on every use). The unpacked tree now lives in
+`<cache>/grail/packages/<sha256>/` (with the `.grail-pkg` stamp), and
+`.grail/packages/NAME` is a symlink to it; where a symlink cannot be made it is a copy of
+the same tree. So one archive is downloaded once and unpacked once, for every project
+and every package name of a lock (a lock may mention the same bytes twice), and a warm
+project fetch is a stat call. `--cache` picks the store (the default is
+`~/.cache/wiz`); `--cache-ro` stays for the elaboration cache only.
+
+**`grail vendor [DIR]`** (default `vendor/`) copies the lock's registry archives into
+`DIR` as
+`<sha256>.tar.gz` (two packages with the same bytes share one file) and writes
+`DIR/index.sexpr`, with one `(archive NAME VERSION SHA256 FILE)` line for each package. It never
+rewrites `grail.lock`: the lock's `source` stays the published URL, so the same lock
+works on a machine with `vendor/` and on one without it. Missing archives are downloaded
+(through the cache) unless `--offline`; `--locked` never resolves or writes the lock (it
+is a check, as for `update` and `fetch`), so a CI step can only consume the committed
+lock.
+
+**Using a vendor directory.** `--vendor DIR` (or `Package.set "vendor" "DIR"` in
+`grail.wiz`, or in `grail.local.wiz`) makes `fetch`, `build`, `test`, `run`, `lsp` and
+`doc` look each archive up by SHA-256 in `DIR/index.sexpr` first, then in the cache, and
+download only if neither has it. The hash is the identity, so the source URL is never
+rewritten and the lock stays byte-identical across machines. The hermetic CI prelude is
+`grail vendor` once (and commit `vendor/`), then `grail fetch --locked --offline
+--vendor vendor` and `grail build`.
+
+**`grail cache [path|list|verify]`.** `path` prints the downloads, packages and index
+locations; `list` prints one line per archive (hash and size) and per unpacked tree (hash
+and stamp); `verify` re-hashes every archive and checks every stamp, exits 1 on a corrupt
+entry and does not repair it (the next fetch re-downloads a corrupt archive; a wrong
+stamp just causes an unpack). It needs no `grail.wiz`, so it works in an empty directory.
+
+The lock (v1/v2) and index formats are unchanged; `vendor/index.sexpr` is a separate,
+local file. Tests: group `grail-vendor` (five cases: content-addressed vendoring with a
+stable lock, an offline `--locked` fetch from the vendor directory through the shared
+store, one download and one unpack for two packages with the same archive, the cache
+commands with a corrupt entry, and the `vendor --locked`/`--offline` failures).

@@ -41,6 +41,52 @@ structure Lock where
   pkgs : List PkgLock := []
   deriving Repr, Inhabited
 
+/-- One archive of a vendor directory: a lock package and the file that holds its bytes. -/
+structure VendorEntry where
+  name : String
+  version : String
+  sha256 : String
+  file : String
+  deriving Repr, Inhabited, BEq
+
+/-- `vendor/index.sexpr`: which content-addressed file holds each `name@version` of the
+lock. The vendor directory is a *copy* of the lock's archives; it does not change the
+lock (whose `source` still names the published URL) and it is not an index for the
+resolver. Two packages with the same bytes share one file. -/
+structure VendorIndex where
+  entries : List VendorEntry := []
+  deriving Repr, Inhabited, BEq
+
+namespace VendorIndex
+
+def render (v : VendorIndex) : String :=
+  let es := (v.entries.toArray.qsort fun a b =>
+    a.name < b.name || (a.name == b.name && a.version < b.version)).toList
+  "(vendor\n  (format 1)" ++
+    (if es.isEmpty then "" else "\n  " ++ "\n  ".intercalate (es.map fun e =>
+      (node "archive" [str e.name, str e.version, str e.sha256, str e.file]).render)) ++
+    ")\n"
+
+/-- Parse `vendor/index.sexpr`; unknown fields are ignored (it is grail's own file, but a
+future grail may add one). -/
+def parse (s : String) : Except String VendorIndex := do
+  let some (.l xs) := Sx.parse s | throw "vendor/index.sexpr: expected (vendor …)"
+  match xs.toList with
+  | .a "vendor" :: fields =>
+    let mut out : VendorIndex := {}
+    for f in fields do
+      match f with
+      | .l #[.a "archive", .a name, .a version, .a sha256, .a file] =>
+        out := { out with entries := out.entries ++ [{ name, version, sha256, file }] }
+      | _ => pure ()
+    pure out
+  | _ => throw "vendor/index.sexpr: expected (vendor …)"
+
+def find (v : VendorIndex) (sha256 : String) : Option VendorEntry :=
+  v.entries.find? (·.sha256 == sha256)
+
+end VendorIndex
+
 namespace Lock
 
 def render (l : Lock) : String :=
@@ -101,6 +147,59 @@ def sha256File (f : System.FilePath) : IO (Except String String) := do
     catch _ => pure ()
   pure (.error s!"no sha256sum (or shasum) to hash {f}")
 
+/-- Copy a file's bytes (archives are binary; `Cache.writeAtomic` is for text). -/
+def copyBin (src dest : System.FilePath) : IO (Except String Unit) := do
+  try
+    IO.FS.writeBinFile dest (← IO.FS.readBinFile src)
+    pure (.ok ())
+  catch e => pure (.error s!"{src}: {e}")
+
+/-- Remove a file, a symlink or a directory tree (a stale `.grail/packages/NAME` may be
+any of them). `removeFile` first, so a symlink is unlinked rather than followed. -/
+def removePath (p : System.FilePath) : IO Unit := do
+  if ← p.pathExists then
+    try IO.FS.removeFile p
+    catch _ => IO.FS.removeDirAll p
+
+/-- A recursive copy, for a platform without `ln` (the shared store is linked when it
+can be, and copied when it cannot). -/
+def copyTree (src dest : System.FilePath) : IO (Except String Unit) := do
+  removePath dest
+  if let some parent := dest.parent then IO.FS.createDirAll parent
+  try
+    let o ← IO.Process.output { cmd := "cp", args := #["-a", src.toString, dest.toString] }
+    pure (if o.exitCode == 0 then .ok ()
+      else .error s!"cp {src} {dest}: {o.stderr.trimAscii}")
+  catch e => pure (.error s!"cp: {e}")
+
+/-- The extension an archive's file keeps in a vendor directory (all grail unpacks today
+is `.tar.gz`; the others are copied faithfully if a future fetcher learns them). -/
+def archiveExt (source : String) : String :=
+  let path := (source.splitOn "?").head!
+  match [".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".zip"].find? (path.endsWith ·) with
+  | some e => e
+  | none => ".tar.gz"
+
+/-- Find `sha256`'s archive in a vendor directory: `vendor/index.sexpr` first, then the
+content-addressed names (`<sha256>.tar.gz`, `<sha256>`, …). A lock's `source` is never
+rewritten; the hash is what identifies the bytes (so a vendor directory works with the
+same lock on every machine). -/
+def lookupVendor (dir : System.FilePath) (sha256 : String) : IO (Option System.FilePath) := do
+  if ← (dir / "index.sexpr").pathExists then
+    match VendorIndex.parse (← IO.FS.readFile (dir / "index.sexpr")) with
+    | .ok v =>
+      if let some e := v.find sha256 then
+        let f := dir / e.file
+        if ← f.pathExists then return some f
+    | .error _ => pure ()
+  for ext in ["", ".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".zip"] do
+    let f := dir / (sha256 ++ ext)
+    if ← f.pathExists then return some f
+  if ← dir.isDir then
+    for e in ← dir.readDir do
+      if e.fileName.startsWith (sha256 ++ ".") then return some e.path
+  pure none
+
 /-- Download `url` to `dest` (`curl` for http/https, a copy for a path or `file://`). -/
 def download (url : String) (dest : System.FilePath) : IO (Except String Unit) := do
   if url.startsWith "file://" then
@@ -132,9 +231,12 @@ def untar (tar : System.FilePath) (dest : System.FilePath) : IO (Except String U
       else .error s!"tar {tar}: {o.stderr.trimAscii}")
   catch e => pure (.error s!"tar: {e}")
 
-/-- The cached archive for `sha256`, downloading and verifying it if needed. With
-`offline`, a missing or corrupt cache entry is an error: nothing is downloaded. -/
-def archive (cache : System.FilePath) (p : PkgLock) (offline : Bool := false) :
+/-- The cached archive for `p`, downloading and verifying it if needed. A `vendor`
+directory is searched first (by hash, so the lock's source URL is not rewritten); a
+missing or corrupt cache entry is fetched again. With `offline`, a missing or corrupt
+entry (in the cache and in the vendor directory) is an error: nothing is downloaded. -/
+def archive (cache : System.FilePath) (p : PkgLock) (offline : Bool := false)
+    (vendor : Option System.FilePath := none) :
     IO (Except String System.FilePath) := do
   let dir := cache / "grail" / "downloads"
   IO.FS.createDirAll dir
@@ -145,6 +247,25 @@ def archive (cache : System.FilePath) (p : PkgLock) (offline : Bool := false) :
     | .error _ => pure ()
     -- a corrupt or wrongly named archive: fetch it again
     IO.FS.removeFile f
+  if let some vd := vendor then
+    match ← lookupVendor vd p.sha256 with
+    | some vf =>
+      match ← sha256File vf with
+      | .ok h =>
+        if h == p.sha256 then
+          -- offline can use the vendor file in place; online still fills the shared cache,
+          -- so a later fetch needs neither the vendor directory nor the network
+          if offline then return .ok vf
+          let tmp := dir / s!"{p.sha256}.tmp{← IO.Process.getPID}"
+          match ← copyBin vf tmp with
+          | .error e => return .error e
+          | .ok () =>
+            IO.FS.rename tmp f
+            return .ok f
+        else if offline then
+          return .error s!"--offline: the vendor archive {vf} is not {p.name} {p.version} (sha256 {h}, the lock says {p.sha256})"
+      | .error e => if offline then return .error e else pure ()
+    | none => pure ()
   if offline then
     return .error s!"--offline: {p.name} {p.version} is not in the archive cache ({f}); run `grail fetch` without --offline"
   let tmp := dir / s!"{p.sha256}.tmp{← IO.Process.getPID}"
@@ -172,24 +293,53 @@ def stamp (dir : System.FilePath) : IO (Option String) := do
   if !(← f.pathExists) then return none
   pure (some (← IO.FS.readFile f).trimAscii.toString)
 
-/-- Make `.grail/packages/NAME` the unpacked `p`; `false` when it already was. -/
+/-- The shared package store: one unpacked tree per archive hash, under the cache, so two
+projects (or two package names in one lock, if they share bytes) unpack it once. -/
+def storeDir (cache : System.FilePath) (sha256 : String) : System.FilePath :=
+  cache / "grail" / "packages" / sha256
+
+/-- Make `dir` point at `src`: a symlink when `ln` works, a copy otherwise. Both are
+content-addressed by the caller, so a copy is still one unpack and no second download. -/
+def linkTree (src dir : System.FilePath) : IO (Except String Unit) := do
+  if let some parent := dir.parent then IO.FS.createDirAll parent
+  removePath dir
+  let o ← IO.Process.output { cmd := "ln", args := #["-s", src.toString, dir.toString] }
+  if o.exitCode == 0 then return .ok ()
+  -- no `ln` here (or it failed): copy the shared tree into the project
+  copyTree src dir
+
+/-- Make `.grail/packages/NAME` be the unpacked `p`, through the shared store. `false`
+when the project already had it (no archive read, no unpack). -/
 def ensurePkg (cache : System.FilePath) (packagesDir : System.FilePath) (p : PkgLock)
-    (offline : Bool := false) : IO (Except String Bool) := do
+    (offline : Bool := false) (vendor : Option System.FilePath := none) :
+    IO (Except String Bool) := do
   let dir := packagesDir / p.name
   if (← stamp dir) == some p.sha256 then return .ok false
-  match ← archive cache p offline with
+  let shared := storeDir cache p.sha256
+  let fresh : Except String Bool ←
+    if (← stamp shared) == some p.sha256 then pure (.ok false)
+    else
+      match ← archive cache p offline vendor with
+      | .error e => pure (.error e)
+      | .ok tar =>
+        let parent := cache / "grail" / "packages"
+        IO.FS.createDirAll parent
+        let tmp := parent / s!"{p.sha256}.tmp{← IO.Process.getPID}"
+        removePath tmp
+        IO.FS.createDirAll tmp
+        match ← untar tar tmp with
+        | .error e => removePath tmp; pure (.error e)
+        | .ok () =>
+          IO.FS.writeFile (stampFile tmp) (p.sha256 ++ "\n")
+          removePath shared
+          IO.FS.rename tmp shared
+          pure (.ok true)
+  match fresh with
   | .error e => pure (.error e)
-  | .ok tar =>
-    let tmp := packagesDir / s!"{p.name}.tmp{← IO.Process.getPID}"
-    if ← tmp.pathExists then IO.FS.removeDirAll tmp
-    IO.FS.createDirAll tmp
-    match ← untar tar tmp with
-    | .error e => IO.FS.removeDirAll tmp; return .error e
-    | .ok () =>
-      IO.FS.writeFile (stampFile tmp) (p.sha256 ++ "\n")
-      if ← dir.pathExists then IO.FS.removeDirAll dir
-      IO.FS.rename tmp dir
-      pure (.ok true)
+  | .ok fresh =>
+    match ← linkTree shared dir with
+    | .error e => pure (.error e)
+    | .ok () => pure (.ok fresh)
 
 /-! ## Reading the index -/
 
@@ -407,10 +557,11 @@ def checkLocked (lock : Lock) (pkg : Package) (indexCommit : String := "") : Exc
 lines to print. With `offline`, a missing archive or clone is an error (nothing is
 downloaded). -/
 def fetch (cache : System.FilePath) (dir : System.FilePath) (lock : Lock)
-    (offline : Bool := false) : IO (Except String (List String)) := do
+    (offline : Bool := false) (vendor : Option System.FilePath := none) :
+    IO (Except String (List String)) := do
   let mut out := []
   for p in lock.pkgs do
-    match ← ensurePkg cache (dir / ".grail" / "packages") p offline with
+    match ← ensurePkg cache (dir / ".grail" / "packages") p offline vendor with
     | .error e => return .error e
     | .ok fresh =>
       out := out ++ [s!"{p.name} {p.version}\t{p.sha256}\t{if fresh then "fetched" else "up to date"}"]
@@ -427,6 +578,105 @@ def fetch (cache : System.FilePath) (dir : System.FilePath) (lock : Lock)
       return .error s!"{d} differs from grail.lock (content {content}, locked {g.content}): edited? remove it, or `grail update`"
     out := out ++ [s!"{g.name}\t{g.commit}\t{content}"]
   pure (.ok out)
+
+/-- `grail vendor [DIR]`: copy the lock's registry archives into `DIR` (default
+`vendor/`) as content-addressed files (`<sha256>.tar.gz`) and write `DIR/index.sexpr`
+(`name@version → file`). The lock is *not* rewritten: its `source` stays the published URL, so the same
+lock works with and without the vendor directory, and two packages with the same bytes
+share one file. `--offline` uses the archive cache (or an existing vendor file) only. -/
+def vendor (cache : System.FilePath) (vendorDir : System.FilePath) (lock : Lock)
+    (offline : Bool := false) : IO (Except String (List String)) := do
+  IO.FS.createDirAll vendorDir
+  let mut out := []
+  let mut entries : List VendorEntry := []
+  for p in lock.pkgs do
+    let file : String := match entries.find? (·.sha256 == p.sha256) with
+      | some e => e.file
+      | none => s!"{p.sha256}{archiveExt p.source}"
+    let dest := vendorDir / System.FilePath.mk file
+    let upToDate ←
+      if ← dest.pathExists then
+        match ← sha256File dest with
+        | .ok h => pure (h == p.sha256)
+        | .error _ => pure false
+      else pure false
+    if upToDate then
+      out := out ++ [s!"{p.name} {p.version}\t{p.sha256}\tup to date"]
+    else
+      match ← archive cache p offline none with
+      | .error e => return .error e
+      | .ok src =>
+        let tmp := vendorDir / s!"{file}.tmp{← IO.Process.getPID}"
+        match ← copyBin src tmp with
+        | .error e => return .error e
+        | .ok () =>
+          removePath dest
+          IO.FS.rename tmp dest
+          out := out ++ [s!"{p.name} {p.version}\t{p.sha256}\tvendored"]
+    entries := entries ++ [{ name := p.name, version := p.version, sha256 := p.sha256, file }]
+  Cache.writeAtomic (vendorDir / "index.sexpr") (VendorIndex.render { entries })
+  pure (.ok out)
+
+/-! ## The shared cache (`grail cache`) -/
+
+def cacheRoot (cache : System.FilePath) : System.FilePath := cache / "grail"
+def downloadsDir (cache : System.FilePath) : System.FilePath := cacheRoot cache / "downloads"
+def storeRoot (cache : System.FilePath) : System.FilePath := cacheRoot cache / "packages"
+def indexCloneDir (cache : System.FilePath) : System.FilePath := cacheRoot cache / "index"
+
+/-- `grail cache path`: where the shared cache keeps each kind of thing. -/
+def cachePathLines (cache : System.FilePath) : List String :=
+  [s!"downloads\t{downloadsDir cache}",
+   s!"packages\t{storeRoot cache}",
+   s!"index\t{indexCloneDir cache}"]
+
+/-- `grail cache list`: every archive (by hash) and every unpacked package tree. -/
+def cacheList (cache : System.FilePath) : IO (List String) := do
+  let mut out := []
+  let dl := downloadsDir cache
+  if ← dl.isDir then
+    for e in ← dl.readDir do
+      if e.fileName.contains ".tmp" then continue
+      let md ← e.path.metadata
+      out := out ++ [s!"archive\t{e.fileName}\t{md.byteSize}"]
+  let pk := storeRoot cache
+  if ← pk.isDir then
+    for e in ← pk.readDir do
+      if e.fileName.contains ".tmp" then continue
+      if ← e.path.isDir then
+        let st ← stamp e.path
+        out := out ++ [s!"package\t{e.fileName}\t{st.getD "no stamp"}"]
+  pure ((out.toArray.qsort (· < ·)).toList)
+
+/-- `grail cache verify`: re-hash every archive and check every unpacked tree's stamp
+against its content address. Errors are reported, not repaired: the next fetch repairs
+an archive, and a missing or wrong stamp just means the tree will be unpacked again. -/
+def cacheVerify (cache : System.FilePath) : IO (List String × Bool) := do
+  let mut errs : List String := []
+  let dl := downloadsDir cache
+  if ← dl.isDir then
+    for e in ← dl.readDir do
+      if e.fileName.contains ".tmp" then continue
+      if !isSha256 e.fileName then
+        errs := errs ++ [s!"archive {e.path}: the name is not a sha256"]
+      else
+        match ← sha256File e.path with
+        | .ok h => if h != e.fileName then
+            errs := errs ++ [s!"archive {e.path}: sha256 {h}, expected {e.fileName}"]
+        | .error err => errs := errs ++ [s!"archive {e.path}: {err}"]
+  let pk := storeRoot cache
+  if ← pk.isDir then
+    for e in ← pk.readDir do
+      if e.fileName.contains ".tmp" then continue
+      if ← e.path.isDir then
+        if !isSha256 e.fileName then
+          errs := errs ++ [s!"package {e.path}: the name is not a sha256"]
+        else
+          match ← stamp e.path with
+          | some s => if s != e.fileName then
+              errs := errs ++ [s!"package {e.path}: stamp {s}, expected {e.fileName}"]
+          | none => errs := errs ++ [s!"package {e.path}: no .grail-pkg stamp"]
+  pure (errs, errs.isEmpty)
 
 /-- Build the index entry for one release from its manifest and archive: the checks a
 publisher (and the index's reviewer) can make locally. The archive layout must be the
@@ -518,7 +768,8 @@ dependencies at their commits) and return the module roots they give (their `lib
 targets'). Notes (a `REV` changed since the lock) go to `note`. With `offline`, a
 missing archive or clone is an error instead of a download. -/
 def lockedRoots (cache : System.FilePath) (readPkg : System.FilePath → IO (Except String Package))
-    (dir : System.FilePath) (pkg : Package) (note : String → IO Unit) (offline : Bool := false) :
+    (dir : System.FilePath) (pkg : Package) (note : String → IO Unit) (offline : Bool := false)
+    (vendor : Option System.FilePath := none) :
     IO (Except String (List System.FilePath)) := do
   let lock := lockFile dir
   if !(← lock.pathExists) then
@@ -537,7 +788,7 @@ def lockedRoots (cache : System.FilePath) (readPkg : System.FilePath → IO (Exc
         note s!"note: {lock} has {d.name} at {g.commit} ({g.url} {g.rev}); grail.wiz asks for {d.url} {d.rev}: `grail update` moves it\n"
   let mut roots := #[]
   for p in l.pkgs do
-    match ← ensurePkg cache (dir / ".grail" / "packages") p offline with
+    match ← ensurePkg cache (dir / ".grail" / "packages") p offline vendor with
     | .error e => return .error e
     | .ok _ => pure ()
     let d := dir / ".grail" / "packages" / p.name

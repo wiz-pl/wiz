@@ -24,10 +24,18 @@ def usage : String := "usage:
   grail update [--locked] resolve the dependencies again and write grail.lock
                           (builds use the lock only); --locked fails if the lock
                           would change
-  grail fetch [--locked] [--offline]
+  grail fetch [--locked] [--offline] [--vendor DIR]
                           make every package of grail.lock present and verified,
                           without building; --locked never writes the lock,
-                          --offline uses the cache only
+                          --offline uses the cache only, --vendor DIR uses a
+                          vendored directory of content-addressed archives
+  grail vendor [DIR] [--locked] [--offline]
+                          copy grail.lock's registry archives into DIR (default vendor/),
+                          content-addressed, with DIR/index.sexpr; --locked never
+                          resolves or writes the lock
+  grail cache [path|list|verify]
+                          the shared cache: content-addressed archives and
+                          unpacked packages (and the index clone)
   grail index resolve [--index URL] [--offline]
                           print the versions `grail update` would pick
   grail index show NAME   print a package's index entry
@@ -64,6 +72,7 @@ options: -C DIR (the package directory), --std DIR (the standard library),
   --index URL (the package index: a directory, a file, or a git URL; default: the
   `index` setting of grail.wiz), --index-commit COMMIT (pin a git index),
   --allow-rewind (accept a rewritten index history), --offline (never touch the network),
+  --vendor DIR (a directory of vendored archives; default: the `vendor` setting),
   --source URL (grail publish: the archive's public URL),
   --trust-native (27a: allow `native_refl`, passed on to every check and to `wiz lsp`), --native-fuel N
 Machine settings (where GMP lives) go in an uncommitted grail.local.wiz:
@@ -94,6 +103,8 @@ structure Opts where
   offline : Bool := false
   /-- (23m) fail instead of writing grail.lock -/
   locked : Bool := false
+  /-- (23n) a directory of vendored, content-addressed archives -/
+  vendor : Option String := none
   /-- (23m) `grail publish`: the archive's public URL -/
   source : Option String := none
 
@@ -107,6 +118,7 @@ partial def grailOpts (o : Opts) : List String → Opts × List String
   | "--wiz" :: w :: rest => grailOpts { o with wiz := some w } rest
   | "--index" :: i :: rest => grailOpts { o with index := some i } rest
   | "--index-commit" :: c :: rest => grailOpts { o with indexCommit := some c } rest
+  | "--vendor" :: v :: rest => grailOpts { o with vendor := some v } rest
   | "--allow-rewind" :: rest => grailOpts { o with allowRewind := true } rest
   | "--source" :: s :: rest => grailOpts { o with source := some s } rest
   | "--fetch" :: rest => grailOpts { o with fetch := true } rest
@@ -125,6 +137,23 @@ def findStd (opt : Option String) : IO System.FilePath := do
   let guess := ((((exe.parent.bind (·.parent)).bind (·.parent)).bind (·.parent)).getD ".") / "lib"
   if ← (guess / "Prelude.wiz").pathExists then return guess
   pure "lib"
+
+/-- A path given on the command line, relative to the package directory (`grail -C P`
+makes `vendor` `P/vendor`). An absolute path is used as it is. -/
+def inPackage (dir : System.FilePath) (p : String) : System.FilePath :=
+  if p.startsWith "/" then System.FilePath.mk p else dir / p
+
+/-- Where this build's vendor directory is: `--vendor DIR` wins, then the `vendor`
+setting of `grail.wiz`/`grail.local.wiz` (a relative path is under the package). -/
+def vendorOf (dir : System.FilePath) (opt : Option String) (pkg : Package)
+    (localSettings : List (String × String)) : Option System.FilePath :=
+  let v : Option String := match opt with
+    | some v => some v
+    | none =>
+      let found := (pkg.settings ++ localSettings).reverse.find?
+        (fun kv : String × String => kv.1 == "vendor")
+      found.map (fun kv : String × String => kv.2)
+  v.map (inPackage dir)
 
 def cliMain (args : List String) : IO UInt32 := do
   -- (after the toolchain flags: tower's wrapper puts its flags before the user's arguments)
@@ -167,6 +196,23 @@ def cliMain (args : List String) : IO UInt32 := do
       for line in r.lines do IO.println line
       IO.println r.summary
       return (if r.hasErrors then 1 else 0)
+  -- (23n) the shared cache needs no grail.wiz
+  if let "cache" :: rest := args then
+    match rest with
+    | [] | ["path"] =>
+      for line in Registry.cachePathLines cache do IO.println line
+      return 0
+    | ["list"] =>
+      for line in ← Registry.cacheList cache do IO.println line
+      return 0
+    | ["verify"] =>
+      let (errs, ok) ← Registry.cacheVerify cache
+      for e in errs do IO.println e
+      IO.println (if ok then "cache ok" else s!"{errs.length} cache error(s)")
+      return (if ok then 0 else 1)
+    | _ =>
+      IO.eprintln "usage: grail cache [path|list|verify]"
+      return 2
   match args with
   | ["clean"] =>
     -- (23i) the outputs grail installed in the package, unless they were changed since
@@ -186,14 +232,15 @@ def cliMain (args : List String) : IO UInt32 := do
     | .ok (pkg, localSettings) =>
       let mut tc := defaults
       for (k, v) in pkg.settings ++ localSettings do
-        if k == "index" || k == "index-commit" then continue
+        if k == "index" || k == "index-commit" || k == "vendor" then continue
         match tc.set k v with
         | some t => tc := t
         | none => IO.eprintln s!"grail lsp: unknown setting {k} (ignored)"
       tc := (tc.parseFlags raw).1
       let readPkg (d : System.FilePath) : IO (Except String Package) := do
         pure ((← readConfig tc binId std d).map (·.1))
-      let deps ← match ← Registry.lockedRoots cache readPkg dir pkg IO.eprint opts.offline with
+      let deps ← match ← Registry.lockedRoots cache readPkg dir pkg IO.eprint opts.offline
+          (vendorOf dir opts.vendor pkg localSettings) with
         | .ok rs => rs.mapM absolute
         | .error e => do IO.eprintln s!"grail lsp: {e} (the dependencies' modules are not found)"; pure []
       runLsp wiz (lspArgs tc ([dirAbs] ++ libRootsOf dirAbs pkg.targets ++ deps) lspOpts) dirAbs
@@ -206,14 +253,15 @@ def cliMain (args : List String) : IO UInt32 := do
       | .error e => do IO.eprintln e; return 1
     let mut tc := defaults
     for (k, v) in pkg.settings ++ localSettings do
-      if k == "index" || k == "index-commit" then continue
+      if k == "index" || k == "index-commit" || k == "vendor" then continue
       match tc.set k v with
       | some t => tc := t
       | none => IO.eprintln s!"unknown setting {k}"; return 1
     tc := (tc.parseFlags raw).1
     let readPkg (d : System.FilePath) : IO (Except String Package) := do
       pure ((← readConfig tc binId std d).map (·.1))
-    let deps ← match ← Registry.lockedRoots cache readPkg dir pkg IO.eprint opts.offline with
+    let deps ← match ← Registry.lockedRoots cache readPkg dir pkg IO.eprint opts.offline
+        (vendorOf dir opts.vendor pkg localSettings) with
       | .ok rs => rs.mapM absolute
       | .error e => do IO.eprintln e; return 1
     -- TARGET… (lib targets) and wiz doc's own options
@@ -238,13 +286,13 @@ def cliMain (args : List String) : IO UInt32 := do
       catch e => IO.eprintln s!"grail doc: {wiz}: {e}"; return 127
     child.wait
   | "build" :: _ | "test" :: _ | ["targets"] | ["config"] | "update" :: _ | "fetch" :: _
-  | "index" :: _ | "publish" :: _ | ["run", _] =>
+  | "vendor" :: _ | "index" :: _ | "publish" :: _ | ["run", _] =>
     let (pkg, localSettings) ← match ← readConfig flagged binId std dir with
       | .ok r => pure r
       | .error e => do IO.eprintln e; return 1
     let mut tc := defaults
     for (k, v) in pkg.settings ++ localSettings do
-      if k == "index" || k == "index-commit" then continue
+      if k == "index" || k == "index-commit" || k == "vendor" then continue
       match tc.set k v with
       | some t => tc := t
       | none => IO.eprintln s!"unknown setting {k}"; return 1
@@ -268,14 +316,32 @@ def cliMain (args : List String) : IO UInt32 := do
     let lockPin : String :=
       if !indexPin.isEmpty then indexPin
       else match indexBase.splitOn "#" with | [_, p] => p | _ => ""
+    let vendorOpt : Option System.FilePath := vendorOf dir opts.vendor pkg localSettings
     let readLock : IO (Except String Lock) := do
       if ← (lockFile dir).pathExists then
         pure (Lock.parse (← IO.FS.readFile (lockFile dir)))
       else pure (.error s!"no {lockFile dir}: run `grail update`")
     let depRoots : IO (Option (List System.FilePath)) := do
-      match ← Registry.lockedRoots cache readPkg dir pkg IO.eprint opts.offline with
+      match ← Registry.lockedRoots cache readPkg dir pkg IO.eprint opts.offline vendorOpt with
       | .ok rs => pure (some rs)
       | .error e => IO.eprintln e; pure none
+    -- `fetch`/`vendor` share this: `--locked` never writes the lock, and fails if it is
+    -- missing or out of date; without it, a missing lock is resolved (and written)
+    let getLock : IO (Except String Lock) := do
+      let noDeps := pkg.deps.isEmpty && pkg.requires.isEmpty
+      match ← readLock with
+      | .ok l =>
+        match Registry.checkLocked l pkg lockPin with
+        | .ok () => pure (.ok l)
+        | .error e => pure (.error e)
+      | .error e =>
+        if noDeps then pure (.ok {})
+        else if opts.locked then pure (.error e) else
+          match ← Registry.resolveLock cache indexSpec opts.offline readPkg dir pkg opts.allowRewind with
+          | .error e => pure (.error e)
+          | .ok l =>
+            Cache.writeAtomic (lockFile dir) (Lock.render l)
+            pure (.ok l)
     match args with
     | ["config"] => IO.print tc.render; pure 0
     | "update" :: _ =>
@@ -304,26 +370,23 @@ def cliMain (args : List String) : IO UInt32 := do
           for g in l.git do IO.println s!"{g.name}\t{g.url} {g.rev}\t{g.commit}"
           pure 0
     | "fetch" :: _ =>
-      -- `--locked`: never write the lock, and fail if it is missing or out of date
-      let noDeps := pkg.deps.isEmpty && pkg.requires.isEmpty
-      let getLock : IO (Except String Lock) := do
-        match ← readLock with
-        | .ok l =>
-          match Registry.checkLocked l pkg lockPin with
-          | .ok () => pure (.ok l)
-          | .error e => pure (.error e)
-        | .error e =>
-          if noDeps then pure (.ok {})
-          else if opts.locked then pure (.error e) else
-            match ← Registry.resolveLock cache indexSpec opts.offline readPkg dir pkg opts.allowRewind with
-            | .error e => pure (.error e)
-            | .ok l =>
-              Cache.writeAtomic (lockFile dir) (Lock.render l)
-              pure (.ok l)
       match ← getLock with
       | .error e => IO.eprintln e; pure 1
       | .ok l =>
-        match ← Registry.fetch cache dir l opts.offline with
+        match ← Registry.fetch cache dir l opts.offline vendorOpt with
+        | .error e => IO.eprintln e; pure 1
+        | .ok lines =>
+          for line in lines do IO.println line
+          pure 0
+    | "vendor" :: rest =>
+      -- the archives of the lock, in DIR (default vendor/), content-addressed; the lock
+      -- itself is never rewritten (its `source` stays the published URL)
+      let vdir := rest.find? (fun a => !a.startsWith "-") |>.map (inPackage dir)
+        |>.getD (vendorOpt.getD (dir / "vendor"))
+      match ← getLock with
+      | .error e => IO.eprintln e; pure 1
+      | .ok l =>
+        match ← Registry.vendor cache vdir l opts.offline with
         | .error e => IO.eprintln e; pure 1
         | .ok lines =>
           for line in lines do IO.println line

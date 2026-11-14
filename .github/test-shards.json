@@ -40,6 +40,7 @@
     "=grail-hygiene",
     "=grail-index",
     "=grail-jobs",
+    "=grail-vendor",
     "=hdl",
     "infoview",
     "language",
