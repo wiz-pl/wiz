@@ -171,19 +171,27 @@ WIZ_API wiz_val wiz_reset(wiz_val x) {
    still needed. Unique: they move out (the others are dropped) and the cell is freed;
    shared: they get a reference each and `x` is decremented. */
 WIZ_API wiz_val wiz_drop_moved(wiz_val x, wiz_val mask) {
+  /* the mask is a literal Nat. On a 32-bit word a mask with a bit above 29 is a GMP
+     number (`WIZ_BOX` is checked), so read it and consume it here; on 64-bit it is
+     always a scalar in practice and the fast path is unchanged. */
+  uint64_t m;
+  if (WIZ_IS_SCALAR(mask)) m = WIZ_UNBOX(mask);
+  else {
+    m = wiz_is_big(mask) ? wiz_mpz_get_u64(((wiz_big *)mask)->z) : 0;
+    wiz_dec(mask);
+  }
   if (WIZ_IS_SCALAR(x)) return WIZ_BOX(0);
   wiz_hdr *h = (wiz_hdr *)x;
-  uint64_t m = WIZ_UNBOX(mask);
   if (h->tag >= WIZ_TAG_FIRST_SPECIAL) { wiz_dec(x); return WIZ_BOX(0); }
   wiz_val *fs = ((wiz_ctor *)x)->fields;
   if (WIZ_RC(h) == 1) {
     for (uint32_t i = 0; i < h->size; i++)
-      if (i >= 62 || !((m >> i) & 1)) wiz_dec(fs[i]);
+      if (i >= 64 || !((m >> i) & 1)) wiz_dec(fs[i]);
     wiz_live--;
     wiz_untrack(h);
     free(h);
   } else {
-    for (uint32_t i = 0; i < h->size && i < 62; i++)
+    for (uint32_t i = 0; i < h->size && i < 64; i++)
       if ((m >> i) & 1) wiz_inc(fs[i]);
     wiz_dec(x); /* shared, or immortal (no count), or shared between threads */
   }
@@ -246,14 +254,15 @@ WIZ_API wiz_val wiz_out_f64(double d) { uint64_t b; memcpy(&b, &d, 8); return wi
 WIZ_API uint64_t wiz_in_nat(wiz_val v) {
   if (WIZ_IS_SCALAR(v)) return WIZ_UNBOX(v);
   if (mpz_sizeinbase(((wiz_big *)v)->z, 2) > 64) wiz_panic("a number is too big for a C integer");
-  uint64_t r = mpz_get_ui(((wiz_big *)v)->z);
+  uint64_t r = wiz_mpz_get_u64(((wiz_big *)v)->z);
   wiz_dec(v);
   return r;
 }
 WIZ_API wiz_val wiz_out_nat(uint64_t n) {
   if (n <= WIZ_MAX_SMALL) return WIZ_BOX(n);
   mpz_t z;
-  mpz_init_set_ui(z, n);
+  mpz_init(z);
+  wiz_mpz_set_u64(z, n);
   return wiz_big_norm(z);
 }
 
@@ -262,8 +271,9 @@ WIZ_API wiz_val wiz_out_nat(uint64_t n) {
    `mk (toNat : Nat)` with the width a phantom parameter (stage 22e), so the model's
    object is `⟨0 bits⟩`: the bits as a number below 2^w (two's complement for `IntN`). Compiled code represents them natively
    (`attribute [implemented_by mk get] UIntN.mk`): a value is its bits b,
-     * a scalar if b < 2^63 (no allocation),
-     * a raw box (WIZ_TAG_RAW) if 2^63 <= b < 2^64,
+     * a scalar if b <= WIZ_WORD_SCALAR_MAX (b < 2^63 on a 64-bit word; the Nat range
+       on a 32-bit word, where WIZ_BOX is checked) (no allocation),
+     * a raw box (WIZ_TAG_RAW) if WIZ_WORD_SCALAR_MAX < b < 2^64,
      * a big number (GMP) if b >= 2^64 (widths above 64 only).
    The representation depends only on b, not on the width (generic code over `UIntN w`
    doesn't know w), so each value has exactly one. `wiz_word_of_bits`/`wiz_word_to_bits`
@@ -275,7 +285,14 @@ enum { WIZ_W_ADD, WIZ_W_SUB, WIZ_W_MUL, WIZ_W_UDIV, WIZ_W_UMOD, WIZ_W_NOT, WIZ_W
        WIZ_W_AND, WIZ_W_OR, WIZ_W_XOR, WIZ_W_LSHR, WIZ_W_EQ, WIZ_W_ULT, WIZ_W_ULE, WIZ_W_BIT };
 /* for operations whose result never exceeds their arguments: no width needed */
 #define WIZ_W_ANY (~(uint64_t)0)
+#if WIZ_WORD_BITS == 64
+/* a machine word is a scalar up to 2^63-1 (the full 63 bits a tagged 64-bit word can
+   hold); on a 32-bit word the scalar range is the Nat range, and larger words are raw
+   boxes (which still hold all 64 bits) */
 #define WIZ_WORD_SCALAR_MAX ((((uint64_t)1) << 63) - 1)
+#else
+#define WIZ_WORD_SCALAR_MAX ((uint64_t)WIZ_MAX_SMALL)
+#endif
 static inline wiz_val wiz_word_out(uint64_t b) { return b <= WIZ_WORD_SCALAR_MAX ? WIZ_BOX(b) : wiz_raw_box(b); }
 /* the bits of a word below 2^64 (without consuming it) */
 static inline int wiz_word_in(wiz_val v, uint64_t *b) {
@@ -285,21 +302,21 @@ static inline int wiz_word_in(wiz_val v, uint64_t *b) {
 }
 static void wiz_word_mpz(mpz_t z, wiz_val v) {
   uint64_t b;
-  if (wiz_word_in(v, &b)) mpz_init_set_ui(z, (unsigned long)b);
+  if (wiz_word_in(v, &b)) { mpz_init(z); wiz_mpz_set_u64(z, b); }
   else mpz_init_set(z, ((wiz_big *)v)->z);
 }
 /* a number >= 0 (cleared) as a word */
 static wiz_val wiz_word_of_mpz(mpz_t z) {
-  if (mpz_sizeinbase(z, 2) <= 64) { uint64_t b = mpz_get_ui(z); mpz_clear(z); return wiz_word_out(b); }
+  if (mpz_sizeinbase(z, 2) <= 64) { uint64_t b = wiz_mpz_get_u64(z); mpz_clear(z); return wiz_word_out(b); }
   wiz_big *o = (wiz_big *)wiz_alloc(sizeof(wiz_big), WIZ_TAG_BIG, 0);
   memcpy(o->z, z, sizeof(mpz_t));
   return (wiz_val)o;
 }
 /* the model's constructor: a number below 2^w (a Nat) as a word */
 WIZ_API wiz_val wiz_word_of_bits(wiz_val n) {
-  if (WIZ_IS_SCALAR(n)) return n;  /* below 2^62: the same scalar */
+  if (WIZ_IS_SCALAR(n)) return n;  /* below WIZ_MAX_SMALL: the same scalar */
   if (mpz_sizeinbase(((wiz_big *)n)->z, 2) > 64) return n;  /* at least 2^64: the same number */
-  uint64_t b = mpz_get_ui(((wiz_big *)n)->z);
+  uint64_t b = wiz_mpz_get_u64(((wiz_big *)n)->z);
   wiz_dec(n);
   return wiz_word_out(b);
 }

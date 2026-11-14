@@ -45,7 +45,7 @@ lean_lib Grail
 -- include_str). The runtime is the header's inline part plus six area files.
 lean_lib WizRuntime where
   srcDir := "runtime"
-  needs := #[`@/wizRuntimeHeader, `@/wizRuntimeCore, `@/wizRuntimeNum,
+  needs := #[`@/wizRuntimeAbi, `@/wizRuntimeHeader, `@/wizRuntimeCore, `@/wizRuntimeNum,
     `@/wizRuntimeWords, `@/wizRuntimeData, `@/wizRuntimeSys, `@/wizRuntimeCon]
 
 @[default_target] lean_exe wiz where
@@ -71,6 +71,10 @@ input_file proc where
 
 -- The runtime's files: `runtime/WizRuntime.lean` embeds them with `include_str`. Each is
 -- an `input_file` so that its content hash is part of WizRuntime's trace.
+input_file wizRuntimeAbi where
+  path := "runtime/wiz_abi.h"
+  text := true
+
 input_file wizRuntimeHeader where
   path := "runtime/wiz_rt.h"
   text := true

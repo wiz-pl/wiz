@@ -190,11 +190,15 @@ extern "on_tick" onTick : Callback (Nat → IO Unit) → IO Unit
   world (a scalar) and drops it after. The optional type must be the definition's.
   Universe-polymorphic definitions and erased parameters can't be exported, nor
   functions taking functions.
-* **Handles.** A Wiz value of a data type crosses as `wiz_val` (a word), and the C
+* **Handles.** A Wiz value of a data type crosses as `wiz_val` (a pointer-sized tagged
+  word: 64 bits on the supported platform, 32 on a 32-bit target, where the small-int
+  range is 30 bits — see [8b](08-backend.md)), and the C
   side **owns** the reference it gets: passing it back to an export hands that
   reference over (so `s = step(s, ev)` threads a state), `wiz_retain(v)` makes another
   one first (to keep `v` across a call), and `wiz_release(v)` gives one back. The
   runtime's `wiz_live_objects()` counts live objects, for leak checks in C tests.
+  A `wiz build --lib` header and the library object must be compiled for the same
+  pointer width: a 32-bit `wiz_val` is not interchangeable with a 64-bit one.
 * **Callbacks.** A foreign function's parameter of function type becomes two C
   arguments: a function pointer whose first parameter is the context, then the
   context (`void *`, the closure). The function is a *trampoline* generated per

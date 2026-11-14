@@ -1,11 +1,33 @@
 
 /* ---- numbers: small scalars, or GMP objects ---- */
 
+/* 64-bit values through GMP. `unsigned long` is 32 bits on a 32-bit target, where
+   `mpz_set_ui`/`mpz_get_ui` would truncate a value above 2^32-1; on 64-bit these are
+   the direct calls (and the generated program is unchanged). */
+static void wiz_mpz_set_u64(mpz_t z, uint64_t n) {
+#if ULONG_MAX >= UINT64_MAX
+  mpz_set_ui(z, (unsigned long)n);
+#else
+  mpz_import(z, 1, 1, sizeof n, 0, 0, &n);
+#endif
+}
+static uint64_t wiz_mpz_get_u64(const mpz_t z) {
+#if ULONG_MAX >= UINT64_MAX
+  return (uint64_t)mpz_get_ui(z);
+#else
+  uint64_t r = 0;
+  size_t n = mpz_size(z);
+  for (size_t i = 0; i < n && i * GMP_LIMB_BITS < 64; i++)
+    r |= (uint64_t)mpz_getlimbn(z, i) << (i * GMP_LIMB_BITS);
+  return r;
+#endif
+}
+
 static int wiz_is_big(wiz_val v) { return !WIZ_IS_SCALAR(v) && ((wiz_hdr *)v)->tag == WIZ_TAG_BIG; }
 
 static wiz_val wiz_big_norm(mpz_t z) {
-  if (mpz_cmp_ui(z, 0) >= 0 && mpz_sizeinbase(z, 2) <= 62) {
-    wiz_val r = WIZ_BOX(mpz_get_ui(z));
+  if (mpz_cmp_ui(z, 0) >= 0 && mpz_sizeinbase(z, 2) <= WIZ_SMALL_BITS) {
+    wiz_val r = WIZ_BOX(wiz_mpz_get_u64(z));
     mpz_clear(z);
     return r;
   }
@@ -15,7 +37,7 @@ static wiz_val wiz_big_norm(mpz_t z) {
 }
 
 static void wiz_to_mpz(mpz_t z, wiz_val v) {
-  if (WIZ_IS_SCALAR(v)) mpz_init_set_ui(z, (unsigned long)WIZ_UNBOX(v));
+  if (WIZ_IS_SCALAR(v)) { mpz_init(z); wiz_mpz_set_u64(z, WIZ_UNBOX(v)); }
   else mpz_init_set(z, ((wiz_big *)v)->z);
 }
 
@@ -126,7 +148,7 @@ WIZ_API wiz_val wiz_nat_shiftLeft(wiz_val a, wiz_val n) {
   if (WIZ_IS_SCALAR(a) && WIZ_UNBOX(a) == 0) { wiz_dec(n); return a; }
   if (!WIZ_IS_SCALAR(n)) wiz_panic("Nat.shiftLeft: the shift is too big");
   uintptr_t k = WIZ_UNBOX(n);
-  if (WIZ_IS_SCALAR(a) && k < 62 && WIZ_UNBOX(a) <= (WIZ_MAX_SMALL >> k)) return WIZ_BOX(WIZ_UNBOX(a) << k);
+  if (WIZ_IS_SCALAR(a) && k < WIZ_SMALL_BITS && WIZ_UNBOX(a) <= (WIZ_MAX_SMALL >> k)) return WIZ_BOX(WIZ_UNBOX(a) << k);
   mpz_t x;
   wiz_to_mpz(x, a);
   mpz_mul_2exp(x, x, (mp_bitcnt_t)k);
@@ -136,7 +158,7 @@ WIZ_API wiz_val wiz_nat_shiftLeft(wiz_val a, wiz_val n) {
 WIZ_API wiz_val wiz_nat_shiftRight(wiz_val a, wiz_val n) {
   if (!WIZ_IS_SCALAR(n)) { wiz_dec(a); wiz_dec(n); return WIZ_BOX(0); }
   uintptr_t k = WIZ_UNBOX(n);
-  if (WIZ_IS_SCALAR(a)) return WIZ_BOX(k >= 64 ? 0 : WIZ_UNBOX(a) >> k);
+  if (WIZ_IS_SCALAR(a)) return WIZ_BOX(k >= WIZ_WORD_BITS ? 0 : WIZ_UNBOX(a) >> k);
   mpz_t x;
   wiz_to_mpz(x, a);
   mpz_fdiv_q_2exp(x, x, (mp_bitcnt_t)k);
@@ -171,5 +193,8 @@ WIZ_API wiz_val wiz_nat_log2(wiz_val a) {
   }
   size_t bits = mpz_sizeinbase(((wiz_big *)a)->z, 2);
   wiz_dec(a);
+  /* the result can be above the small range (a GMP number of more than
+     `WIZ_SMALL_BITS` bits): `WIZ_BOX` is checked on a 32-bit word, so this is a Nat,
+     not a truncated scalar */
   return WIZ_BOX(bits - 1);
 }
