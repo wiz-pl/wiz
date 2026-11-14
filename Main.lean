@@ -9,6 +9,11 @@ def usage : String := "usage:
   wiz parse FILE          print the syntax tree of every command
   wiz check [-I DIR] FILE elaborate and type check (quantities: 0, 1, ω); -I DIR: another
                           module root (a package's src/), before or after FILE
+  wiz lint FILE|- [--json] [--deny] [--max-line N] [--no-style]
+                          style and hygiene warnings (stage 11ad): tabs, trailing
+                          whitespace, CRLF, long lines, sorry, axioms, shadowed binders,
+                          unused or duplicate imports; exit 0 unless an error, or
+                          --deny and a warning; `-` reads standard input
   wiz build FILE -o OUT [--llvm]   compile the definition `main` to an executable (via C or LLVM)
   wiz build FILE -o OUT [--split N]  compile the program as N C units in parallel
                                    (default 1: one unit; a split build is faster but the
@@ -184,8 +189,11 @@ def takeInertOpt : List String → Except String (Option InertReg × List String
     return (r, a :: rest)
   | [] => return (none, [])
 
-/-- Elaborate a file, through the toolchain's cache (if any). -/
-def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandState ZeroOneMany) := do
+/-- Elaborate a file, through the toolchain's cache (if any). `termInfo` also records the
+info tree's expected types and its syntax/import references (the language server's mode;
+`wiz lint` wants the references). -/
+def elaborate (tc : Toolchain) (path : String) (input : String)
+    (termInfo : Bool := false) : IO (CommandState ZeroOneMany) := do
   -- every module the file can reach (`import A.B` is `A/B.wiz` under a root), read up
   -- front: the frontend is pure
   let roots ← moduleRoots tc
@@ -213,6 +221,7 @@ def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandSta
       globals := { regularity, predicativeProp, lazyProofs, inertReg, unboxStructs, proofSteps, traceProofSteps,
                    strictPrivacy := ← strictPrivacyOpt.get, pp := { useNotation := !(← ppAllOpt.get) } },
       trustedModule := own.contains, trustNative := tc.trustNative,
+      termInfo := termInfo,
       nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := ← tc.smt.resolve }
   -- the cache doesn't know the experimental options
   let cacheOn := regularity == .off && !predicativeProp && lazyProofs && inertReg == .conv && !unboxStructs &&
@@ -311,6 +320,56 @@ def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
     IO.eprintln s!"region cache: {c.hits} modules from a region, {c.misses} without, {c.commands} commands"
   pure (if s.messages.any (·.severity == .error) then 1 else 0)
 
+/-- (11ad) `wiz lint`'s options. -/
+structure LintArgs where
+  file : Option String := none
+  json : Bool := false
+  deny : Bool := false
+  maxLine : Nat := 120
+  style : Bool := true
+
+def lintArgs (a : LintArgs) : List String → Except String LintArgs
+  | [] => pure a
+  | "--json" :: rest => lintArgs { a with json := true } rest
+  | "--deny" :: rest => lintArgs { a with deny := true } rest
+  | "--no-style" :: rest => lintArgs { a with style := false } rest
+  | "--max-line" :: n :: rest => do
+    let some k := n.toNat? | throw s!"wiz lint: --max-line needs a number, not {n}"
+    lintArgs { a with maxLine := k } rest
+  | x :: rest =>
+    if x.startsWith "-" && x != "-" then throw s!"wiz lint: unknown option {x}"
+    else match a.file with
+      | none => lintArgs { a with file := some x } rest
+      | some _ => throw "wiz lint: one file (or - for standard input)"
+
+/-- (11ad) `wiz lint FILE|-`: the style and hygiene warnings of `Wiz.Lint`, then the
+exit status: 1 for an error (as `wiz check`), or for a warning with `--deny`. -/
+def lintCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
+  let a ← match lintArgs {} args with
+    | .ok a => pure a
+    | .error e => do IO.eprintln e; return 2
+  let some file := a.file | do IO.eprintln "wiz lint: no file (or - for standard input)"; return 2
+  let (name, input) ←
+    if file == "-" then pure ("<stdin>", ← (← IO.getStdin).readToEnd)
+    else do pure (file, ← IO.FS.readFile file)
+  let s ← elaborate tc (if file == "-" then "<stdin>" else file) input (termInfo := true)
+  let diags := Lint.run { maxLine := a.maxLine, style := a.style } input s
+  let errors := diags.filter (·.severity == .error)
+  let warnings := diags.filter (·.severity == .warning)
+  if a.json then
+    let js := Lean.Json.mkObj [
+      ("file", Lean.Json.str name),
+      ("diagnostics", Lean.Json.arr (diags.map (Lint.Diag.toJson input))),
+      ("warnings", warnings.size), ("errors", errors.size)]
+    IO.println js.compress
+  else
+    for d in diags do
+      IO.println (d.render name input)
+    IO.eprintln s!"ward: {warnings.size} warning(s), {errors.size} error(s)"
+  if !errors.isEmpty then pure 1
+  else if a.deny && !warnings.isEmpty then pure 1
+  else pure 0
+
 def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOneMany)) := do
   let input ← IO.FS.readFile path
   let s ← elaborate tc path input
@@ -392,6 +451,7 @@ def main (args : List String) : IO UInt32 := do
   match args with
   | ["parse", path] => parseCmd path
   | ["check", path] => checkCmd tc path
+  | "lint" :: rest => lintCmd tc rest
   | ["build", path, "-o", out] => buildCmd tc path out false (split := split)
   | ["build", path, "-o", out, "--llvm"] => buildCmd tc path out true (split := split)
   | ["build", path, "-o", out, "--lib"] => buildCmd tc path out false true (split := split)

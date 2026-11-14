@@ -550,3 +550,63 @@ Neovim shows them as `@lsp.type.keyword` (linked to `@keyword`) without configur
   that spells the whole name, in all those documents; it refuses a declaration of the
   toolchain's library and a new name that isn't one. A use through generalised field
   notation (`p.norm` for `Point.norm`) is not edited.
+
+## 11ad: `ward`, a linter
+
+`wiz lint FILE|-` (`Wiz/Lint.lean`) reports what the elaborator accepts but a reader
+should know about. A warning never fails the file: the exit status is 0 unless there is
+an elaboration error, or `--deny` is given and there is a warning. Diagnostics print as
+`FILE:LINE:COL: warning: MESSAGE [RULE]`, as `wiz check` prints its own.
+
+| rule | what it reports |
+|------|-----------------|
+| `style.tabs` | a tab in indentation or alignment |
+| `style.trailing-whitespace` | spaces or tabs at the end of a line |
+| `style.crlf` | CRLF line endings (once per file) |
+| `style.line-length` | a line longer than `--max-line` (`0` turns it off) |
+| `sorry` | the identifier `sorry`/`admit`, outside comments and strings |
+| `axiom` | an `axiom` declared in this file |
+| `shadowed-binder` | a binder whose name is an enclosing binder's or a visible global's |
+| `unused-import` | an imported module nothing in this file uses |
+| `duplicate-import` | the same module imported twice |
+
+Options: `--json` (one document: `file`, `diagnostics`, `warnings`, `errors`; each
+diagnostic has `rule`, `severity`, `message`, `line`, `column`, `endLine`, `endColumn`,
+1-based), `--deny`, `--max-line N` (default 120), `--no-style`, and `-` for standard
+input.
+
+Each check is either textual (`style.*`; `sorry` skips comments and strings) or reads a
+fact the elaborator already records, so it adds no elaboration work:
+
+* **axioms**: the declaration table (`declDocs`, kinds `axiom` and `private axiom`),
+  kept to this file by `declSites`.
+* **shadowed binders**: `recordBinder` puts every binder in the info tree with the local
+  context *before* it, so a binder whose name is in that context shadows an enclosing
+  one. A global counts when it is visible where the binder is (another module's, or an
+  earlier command's of this file); the declaration's own command is the name being made,
+  not a shadow. The check ignores `match` alternatives on purpose: the elaborator's
+  branch context also holds the constructor's field names and the earlier alternatives'
+  pattern variables (the case tree binds them in one context), so `| .b n => …` cannot
+  tell the field `n` from a shadowed `n` there.
+* **unused imports**: identifiers, instances found by search, syntax references and
+  expansion handlers in the info tree are mapped to the module that declares them; so
+  are the identifiers of command arguments and quotations (`attribute [deriver C]`,
+  `deriving C`, `#print axioms f`, `builtin k := n`), which the info tree does not hold,
+  and a string literal that is exactly a declared global's name (a tactic that builds
+  the term by name). Wiz imports are transitive, so an import is needed when anything it
+  *brings* — itself or, transitively, one of its imports — is used or has effects on its
+  importers (`builtin`, syntax, notation, macros, attributes); it is reported when the
+  other imports already bring all of that (`import A` beside `import B`, where `B`
+  imports `A`, reports `A`). An import that is itself used or effectful stays explicit:
+  `import Prelude` is not reported just because another import would bring it. Nothing
+  is reported for a file with elaboration errors (a failed command may be the use).
+
+Not done here: `:= rfl` redundancy (needs the kernel's answer for a definition accepted
+by computation), unused private declarations, unused local binders, and the binders
+inside `match` alternatives (above). `#print axioms` and the trust ledger
+(`scripts/trust-ledger.sh`) answer the kernel-level questions; the linter stays at the
+source.
+
+Tests: the `ward` group (`Tests/Groups/Ward.lean`) has a fixture per rule, a clean file,
+a comment/string that says `sorry`, the CLI's exit status with and without `--deny`, its
+JSON document, and standard input.
