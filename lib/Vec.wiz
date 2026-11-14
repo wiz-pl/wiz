@@ -66,6 +66,21 @@ inductive Vec (A : Type) : Nat → Type where
   /-- `x` in front of `xs` -/
   | cons {0 n : Nat} (x : A) (xs : Vec A n) : Vec A (Nat.succ n)
 
+/-- `#v[a, b, c]` is `Vec.cons a (Vec.cons b (Vec.cons c Vec.nil))` and `#v[]` is
+`Vec.nil`, in terms and in patterns. The length index follows from the constructors. -/
+syntax (name := vecLit) "#v[" sepBy(term, ",") "]" : term
+/-- The term a vector literal stands for: the nested `Vec.cons` of the elements
+(skipping the `,` atoms), ending in `Vec.nil`. -/
+def VecLit.build {b : Bool} : SyntaxF b → Syntax
+  | .cons (.atom _) ts => VecLit.build ts
+  | .cons t ts => Syntax.mkApp (Syntax.mkVar "Vec.cons") (.cons t (.cons (VecLit.build ts) .nil))
+  | _ => Syntax.mkVar "Vec.nil"
+/-- The macro for vector literals: `#v[a, b]` expands to `Vec.cons a (Vec.cons b Vec.nil)`. -/
+def VecLit.expand : Macro := fun stx => match Syntax.getArg stx 1 with
+  | .node _ ts => MacroM.pure (VecLit.build ts)
+  | _ => MacroM.pure (Syntax.mkVar "Vec.nil")
+attribute [macro term.vecLit] VecLit.expand
+
 /-- The first element of a non-empty vector (no `Option`: the type rules out `nil`). -/
 def Vec.head {A : Type} {0 n : Nat} : Vec A (Nat.succ n) → A
   | .cons x _ => x

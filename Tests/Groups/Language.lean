@@ -504,6 +504,18 @@ def languageGroup : Group where
         okLib ("import Prelude\ndef f {m : Type → Type} [Monad m] : m Nat := Monad.pure 1\n" ++
           "def g : (m : Type → Type) → [Monad m] → m Nat := fun m => Monad.pure 2\n" ++
           "def h : [inst : Monad TacticM] → Nat := 3\ndef E : Type := Enum [a, b]") },
+    -- (13s) `#v[…]` vector literals: a Vec macro
+    { name := "13s: vector literals #v[a, b, c], #v[], nested, and in patterns", run := fun _ =>
+        okLibs ("import Vec\ndef v3 : Vec Nat 3 := #v[1, 2, 3]\ndef v0 : Vec String 0 := #v[]\n" ++
+          "def vv : Vec (Vec Nat 2) 2 := #v[#v[1, 2], #v[3, 4]]\n" ++
+          "def lenV : Vec Nat 2 → Nat\n  | #v[_, _] => 2\n  | _ => 0\n" ++
+          "#eval Vec.toList v3\n#eval Vec.toList v0\n#eval Vec.toList (Vec.map Vec.toList vv)\n" ++
+          "#eval lenV #v[7, 8]\n#eval Vec.length #v[1, 2, 3]")
+          [".cons 1 (.cons 2 (.cons 3 .nil))", ".nil",
+           ".cons (.cons 1 (.cons 2 .nil)) (.cons (.cons 3 (.cons 4 .nil)) .nil)", "2", "3"] },
+    { name := "13s: a vector literal's length is the index; a bad element is a type mismatch", run := fun _ => do
+        failsLibs "import Vec\ndef bad : Vec Nat 2 := #v[1, 2, 3]" "type mismatch"
+        failsLibs "import Vec\ndef bad : Vec Nat 2 := #v[1, \"x\"]" "string literals are for String" },
     -- (13l) `++` is a class method
     { name := "++ appends lists and strings (class Append)", run := fun _ =>
         okLib ("import Prelude\ndef a (ys : List Nat) : List Nat := .cons 1 .nil ++ ys ++ .nil\n" ++

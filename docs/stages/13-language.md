@@ -708,3 +708,23 @@ token that can't be read is the parse error's message by itself (`ParseError.lex
 not "expected unknown escape sequence …". Strings print with Lean's escapes (`\x0d` for
 a carriage return). Tests: `language` ("string escapes …"); `selfhost` ("the lexer in
 Wiz agrees with the Lean lexer", whose input now has every escape and a bad one).
+
+## 13s: vector literals `#v[a, b, c]`
+
+`#v[a, b, c]` is `Vec.cons a (Vec.cons b (Vec.cons c Vec.nil))` and `#v[]` is
+`Vec.nil`, in terms and in patterns (it is a macro in `lib/Vec.wiz`, so `import Vec`
+brings it; the length index follows from the constructors):
+
+```
+import Vec
+def v3 : Vec Nat 3 := #v[1, 2, 3]
+def len : Vec Nat 2 → Nat
+  | #v[_, _] => 2
+  | _ => 0
+```
+
+The elements are checked at the element type of the expected `Vec A n` (`Vec.cons` is
+an ordinary application with its implicit length), so numerals go through `OfNat` like
+any argument (7e), and a wrong length or element type is the ordinary type mismatch.
+Patterns use the same macro expansion as list literals (13k). Tests: `language`
+("13s: …").
