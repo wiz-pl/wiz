@@ -18,7 +18,7 @@ def runeGroup : Group where
   name := "rune"
   exercise := "rune: the HDL standard library (UART, SPI, DDR)"
   cases := [
-    { name := "UART: baud generator and TX/RX loopback at the 16-bit default, 7-bit (iCEstick) and 10-bit (Arty/OLED) widths, n=1 and max n, reset/CDC receiver; simFast = values, every byte back, well formed", run := fun _ => do
+    { name := "UART: baud generator and TX/RX loopback at the 16-bit default, 7-bit (iCEstick) and 10-bit (Arty/OLED) widths, n=1 and max n, reset/CDC receiver, and the board API at 7 and 10 bits = the library; simFast = values, every byte back, well formed", run := fun _ => do
         cRunLibs (← IO.FS.readFile "examples/rune-uart.wiz")
           "baud n=8: sim yes, ticks 4\n\
            baud n=16: sim yes, ticks 4\n\
@@ -33,7 +33,11 @@ def runeGroup : Group where
            uart 7-bit n=104: sim yes, sent 85 165 0 255 , got 85 165 0 255 , ok yes, well formed yes\n\
            uart 10-bit n=866: sim yes, sent 85 165 0 255 , got 85 165 0 255 , ok yes, well formed yes\n\
            uart 16-bit n=5: sim yes, sent 85 165 0 255 , got 85 165 0 255 , ok yes, well formed yes\n\
-           reset/CDC rx 7-bit n=5: sim yes, bytes 85 165 , ok yes, well formed yes\n" },
+           reset/CDC rx 7-bit n=5: sim yes, bytes 85 165 , ok yes, well formed yes\n\
+           board baud 7-bit n=104: sim yes, ticks 4\n\
+           board baud 10-bit n=866: sim yes, ticks 4\n\
+           board 7-bit n=104: sim yes, bytes 85 165 0 255 , library = board yes, well formed yes\n\
+           board 10-bit n=866: sim yes, bytes 85 165 0 255 , library = board yes, well formed yes\n" },
     { name := "SPI: mode 0 master loopback, divider 1 and 3; eight rising edges per byte, most significant first; simFast = values", run := fun _ => do
         cRunLibs (← IO.FS.readFile "examples/rune-spi.wiz")
           "spi div=1: sim yes, edges 16, shift yes, bytes 165 60 , ok yes, well formed yes\n\

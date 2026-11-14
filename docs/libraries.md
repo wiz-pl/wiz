@@ -762,6 +762,7 @@ repository's controller are the origins, with the board-specific parts removed.
 | module | what | configuration |
 |---|---|---|
 | `Hdl.Uart` | `Uart.baudC n` (counter, `ce` in, `tick` out), `Uart.txC n` (8N1, `start`/`data` in, `line`/`busy` out), `Uart.rxC n` (`line` in, `valid`/`data`/`busy` out, two-flip-flop input synchroniser), `Uart.loopbackC n` (the line wired from TX to RX); the `…w` forms (`Uart.baudCw`, `Uart.txCw`, `Uart.rxCw`, `Uart.loopbackCw`, whose first argument is the counter width) and the named 7-bit (`Uart.tx7C`, …) and 10-bit (`Uart.tx10C`, …) configurations | `n` clocks per bit, 1 … 2^w; the default `Uart.cntW` is 16 bits (1 … 65536), `Uart.cntW7` is the iCEstick's 7 bits (1 … 128), `Uart.cntW10` is the Arty/OLED 10 bits (1 … 1024) |
+| `Hdl.UartBoard` | the board API of the same implementation: `UartB.txCw`/`UartB.rxCw`/`UartB.syncC`/`UartB.loopback` with the receiver's synchroniser pulled out (`UartB.Rx` = `Uart.RxBits`, a separate `UartB.Sync`), a transmitter taking `start`/`data` as two arguments (`UartB.txStep`), a bare baud counter (`UartB.baudStep`, `UartB.baud`), and the `{valid, data}` receiver output (`UartB.Byte`) — the shapes the iCEstick, Arty and RV board designs instantiate | `w` is explicit as in `Hdl.Uart`; the three projects pass `Uart.cntW7` (iCEstick) or `Uart.cntW10` (Arty, RV) |
 | `Hdl.Spi` | `Spi.masterC div` (mode 0, CPOL = 0, CPHA = 0: sample on the rising edge, shift on the falling edge), `Spi.loopC div` (`mosi` wired to `miso`) | `div` clocks per half period, 1 … 65536 |
 | `Hdl.Ddr` | the native port of a DDR3 controller (`Ddr.Req`: `valid`/`we`/`addr` 24/`wdata` 128/`wmask` 16; `Ddr.Resp`: `ready`/`rvalid`/`rdata` 128), and `Ddr.modelC`, a 64K-word model with the same valid/ready handshake and byte-masked writes | the real controller is `Ddr3.Ctrl` in wiz-ddr3 (see the module header for the field mapping) |
 
@@ -779,9 +780,40 @@ PHY, and a design on another clock needs a CDC wrapper around the port.
 
 Examples (run by the test group `rune`): `examples/rune-uart.wiz` (the baud generator and
 the loopback at the 16-bit default and the 7-bit and 10-bit configurations, `n = 1` and
-each width's maximum `n`, and the reset/CDC receiver), `examples/rune-spi.wiz`,
+each width's maximum `n`, the reset/CDC receiver, and the board API's loopback at 7 and
+10 bits compared cycle for cycle with the library's), `examples/rune-spi.wiz`,
 `examples/rune-ddr.wiz` — value simulation = `Netlist.simFast`, the loopback bytes, the
 SPI shift order and edges, the DDR handshake and masked write.
+
+### The board API: the three board projects on the one UART
+
+The iCEstick (`wiz-icestick-uart`), Arty (`wiz-arty`) and RV (`wiz-rv`) projects had three
+copies of the same 8N1 UART (`src/Icestick/Uart.wiz`, `src/Arty/Uart.wiz`,
+`src/Rv/Uart.wiz`: the same step functions with a board's divider and counter width, and
+small differences in names and vocabulary). They now import `Hdl.UartBoard`; each
+project's `Uart.wiz` is the counter width, the bundles and the divider, and forwards every
+part to the shared implementation. The board's shapes are the reason for the second
+module rather than using `Hdl.Uart` directly:
+
+* the designs keep the input synchroniser in their own state (`Sync`) next to a receiver
+  without the two flip-flops, so `UartB.rxStep` is `Uart.rxBits` on the synchronised line
+  (`Uart.rxStep` folds the two flops into `Uart.Rx`, which is the same logic and the same
+  netlist after synthesis);
+* the designs' transmitter step takes `start` and `data` as two arguments, not a
+  `Uart.TxIn` bundle (`UartB.txStep` is `Uart.txStep` with the output's `busy` dropped);
+* the designs drive a bare baud counter (no clock enable) and their receiver reports
+  `valid`/`data` without `busy` (`UartB.baudStep`, `UartB.Byte`).
+
+The bundles are declared in each project rather than aliased because a Wiz `def` is not a
+structure: `deriving Bundle` of a design with a field of an aliased bundle could not see
+the nested `code`/`pack`/`unpack` (the kernel rejected `Icestick.Ir`'s `necRxC` when it
+tried). Structures are structural, so the declarations are the same type as `Uart.Tx w`,
+`Uart.RxBits w`, `Uart.Sync`, and the shared step functions take them without a
+conversion. Remaining differences the projects keep: the counter width (`Uart.cntW7` vs
+`Uart.cntW10`), the divider (`n = 104`, 866, or a test's small `n`), the pin names and
+polarities of their board bundles, and a synchronous active-high reset only where a design
+adds one (`Circuit.withReset`, not part of the UART, which has none). The migration and
+what was verified in each repository are in `wiz-notes/rune.md`.
 
 What remains is in `wiz-notes/rune.md`: SPI modes 1 … 3 and multiple slaves,
 the real DDR controller's wrapper and timing, and clock-domain crossing for the ports.

@@ -1,14 +1,17 @@
--- The UART library (`import Hdl.Uart`): the baud generator, the transmitter and the
--- receiver, and the loopback circuit (the line wired from the transmitter to the
--- receiver) at the three counter widths: the default 16 bits and the 7-bit (iCEstick) and
--- 10-bit (Arty/OLED) configurations. Checked by the `rune` test group: the value
--- simulation and the fast netlist simulation (`Hdl.Sim`) agree, every byte comes back
--- through the loopback, `n = 1` and each width's maximum `n` tick and wrap correctly, and
--- the receiver decodes a line whose phase is not aligned to the local clock while it is
--- reset for the first cycles (`Circuit.withResetEnable`).
+-- The UART library (`import Hdl.Uart`) and its board API (`Hdl.UartBoard`): the baud
+-- generator, the transmitter and the receiver, and the loopback circuit (the line wired
+-- from the transmitter to the receiver) at the three counter widths: the default 16 bits
+-- and the 7-bit (iCEstick) and 10-bit (Arty/OLED/RV) configurations. Checked by the
+-- `rune` test group: the value simulation and the fast netlist simulation (`Hdl.Sim`)
+-- agree, every byte comes back through the loopback, `n = 1` and each width's maximum `n`
+-- tick and wrap correctly, the receiver decodes a line whose phase is not aligned to the
+-- local clock while it is reset for the first cycles (`Circuit.withResetEnable`), and the
+-- board API's loopback at the 7-bit and 10-bit widths reports the same bytes in the same
+-- cycles as the library's.
 import Hdl.Core
 import Hdl.Sim
 import Hdl.Uart
+import Hdl.UartBoard
 import IO
 
 def Bit : HwTy := HwTy.bits 1
@@ -152,6 +155,40 @@ def rxReport (label : String) (w n : Nat) (datas : List Nat) : String :=
     <+> ", bytes " <+> shows got <+> ", ok " <+> yes (Hdl.natsEq got datas)
     <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "uart-rx" c))
 
+-- The board API (`Hdl.UartBoard`): the loopback the iCEstick/Arty/RV designs
+-- instantiate (`UartB.loopback`: the transmitter, a separate synchroniser and the
+-- receiver without its own) at the 7-bit and 10-bit widths. Its output is (valid, data);
+-- the library loopback's is (busy, valid, data), so the comparison drops `busy`. The two
+-- must report the same bytes in the same cycles: the board receiver samples `ff2`, as
+-- the library receiver does, and the separate synchroniser's flops are the library's.
+
+def bytes2 : List (List Nat) → List Nat
+  | .nil => .nil
+  | .cons o os => match Nat.beq (Hdl.nthD 0 o 0) 1 with
+    | .true => List.cons (Hdl.nthD 0 o 1) (bytes2 os)
+    | .false => bytes2 os
+
+def boardBaudReportW (label : String) (w n : Nat) : String :=
+  let cycles := 4 * n;
+  let ins := Hdl.map (fun (k : Nat) => BitVec.ofNat 0 0) (Hdl.upto cycles 0);
+  let c := UartB.baud w n;
+  let outs := Circuit.runLeaves c ins;
+  label <+> " n=" <+> Hdl.show n <+> ": sim " <+> yes (leavesEq outs (Circuit.simFast c ins))
+    <+> ", ticks " <+> Hdl.show (countOnes outs)
+
+def boardReportW (label : String) (w n : Nat) (datas : List Nat) : String :=
+  let spacing := 12 * n;
+  let cycles := List.length datas * spacing;
+  let ins := Hdl.map (fun (k : Nat) => txAt spacing datas k) (Hdl.upto cycles 0);
+  let c := UartB.loopback w n;
+  let outs := Circuit.runLeaves c ins;
+  let lib := Circuit.runLeaves (Uart.loopbackCw w n) ins;
+  let same := leavesEq outs (Hdl.map (fun (o : List Nat) => dropN 1 o) lib);
+  label <+> " n=" <+> Hdl.show n <+> ": sim " <+> yes (leavesEq outs (Circuit.simFast c ins))
+    <+> ", bytes " <+> shows (bytes2 outs)
+    <+> ", library = board " <+> yes same
+    <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "uart-board" c))
+
 def main : IO Unit := do
   IO.println (baudReport 8);
   IO.println (baudReport 16);
@@ -169,4 +206,10 @@ def main : IO Unit := do
     (.cons 85 (.cons 165 (.cons 0 (.cons 255 .nil)))));
   IO.println (loopReportW "uart 16-bit" Uart.cntW 5
     (.cons 85 (.cons 165 (.cons 0 (.cons 255 .nil)))));
-  IO.println (rxReport "reset/CDC rx 7-bit" Uart.cntW7 5 (.cons 85 (.cons 165 .nil)))
+  IO.println (rxReport "reset/CDC rx 7-bit" Uart.cntW7 5 (.cons 85 (.cons 165 .nil)));
+  IO.println (boardBaudReportW "board baud 7-bit" Uart.cntW7 104);
+  IO.println (boardBaudReportW "board baud 10-bit" Uart.cntW10 866);
+  IO.println (boardReportW "board 7-bit" Uart.cntW7 104
+    (.cons 85 (.cons 165 (.cons 0 (.cons 255 .nil)))));
+  IO.println (boardReportW "board 10-bit" Uart.cntW10 866
+    (.cons 85 (.cons 165 (.cons 0 (.cons 255 .nil)))))

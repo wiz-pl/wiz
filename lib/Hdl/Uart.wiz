@@ -52,13 +52,22 @@ The width families:
 The parts:
 
 * `Uart.baudCw w n`: a free-running baud generator (input `ce`, output `tick`) whose tick
-  is high one cycle in every `n`;
+  is high one cycle in every `n`; `Uart.baudBareStep w n` is the counter without a clock
+  enable (the board designs' shape, and what `Uart.txStep` uses);
 * `Uart.txCw w n`: input `start`/`data`, output `line`/`busy`, 8N1, `start` taken when
   idle;
 * `Uart.rxCw w n`: input `line`, output `valid`/`data`/`busy`; `valid` is high for one
-  cycle at the sample of a stop bit that is high, with the byte in `data`;
+  cycle at the sample of a stop bit that is high, with the byte in `data`; the input
+  synchroniser's two flip-flops are `ff1`/`ff2` in the state (`Uart.Sync` is the same
+  pair as a bundle, and `Uart.rxBits` is the receiver logic on an already synchronised
+  line, which is the board designs' shape);
 * `Uart.loopbackCw w n`: `txCw` and `rxCw` with the line wired from the transmitter to
   the receiver (the loopback example), input `start`/`data`, output `busy`/`valid`/`data`.
+
+`lib/Hdl/UartBoard.wiz` is the board API on top of this module (the shapes the iCEstick,
+Arty and RV designs instantiate: a separate synchroniser, a start pulse and a byte as two
+arguments, a bare counter, and a `valid`/`data` receiver output); see docs/libraries.md,
+"The board API".
 -/
 
 def Uart.Bit : HwTy := HwTy.bits 1
@@ -99,14 +108,21 @@ structure Uart.Baud (w : Nat) (r : HwTy → Type) where
 def Uart.Baud.init (w : Nat) : Uart.Baud w HwTy.El :=
   Uart.Baud.mk (BitVec.ofNat w 0)
 
+/-- One cycle of the baud counter with no clock enable: tick at `n - 1`, wrap to 0. The
+tick is named (`"tick"`), as it is on the boards. -/
+def Uart.baudBareStep (w n : Nat) {r : HwTy → Type} [Hw r] (s : Uart.Baud w r) :
+    r (HwTy.prod (Uart.Baud.code w) Uart.Bit) :=
+  let tick := Hw.label "tick" (s.cnt === Hw.ofNat (n - 1));
+  Hw.pair (Uart.Baud.pack w (Uart.Baud.mk (if tick then 0 else s.cnt + 1))) tick
+
 /-- One cycle of the baud generator: count while `ce`, tick at `n - 1`, wrap to 0, hold
-when `ce` is low. -/
+the counter and the tick when `ce` is low. -/
 def Uart.baudStep (w n : Nat) {r : HwTy → Type} [Hw r] (s : Uart.Baud w r) (ce : r Uart.Bit) :
     r (HwTy.prod (Uart.Baud.code w) Uart.Bit) :=
-  let last := s.cnt === Hw.ofNat (n - 1);
-  let tick := ce &&& last;
-  let next := if tick then 0 else if ce then s.cnt + 1 else s.cnt;
-  Hw.pair (Uart.Baud.pack w (Uart.Baud.mk next)) tick
+  let b := Uart.baudBareStep w n s;
+  let tick := ce &&& Hw.snd b;
+  let next := if ce then Hw.fst b else Uart.Baud.pack w s;
+  Hw.pair next tick
 
 /-- A baud generator as a circuit: input `ce`, output `tick`, with a `w`-bit counter. -/
 def Uart.baudCw (w n : Nat) : Circuit Uart.Bit Uart.Bit :=
@@ -152,7 +168,7 @@ def Uart.txStep (w n : Nat) {r : HwTy → Type} [Hw r] (s : Uart.Tx w r) (x : Ua
     r (HwTy.prod (Uart.Tx.code w) Uart.TxOut.code) :=
   let idle := s.left === 0;
   let go := idle &&& x.start;
-  let b := Uart.baudStep w n (Uart.Baud.mk s.cnt) (Hw.lit 1 1);
+  let b := Uart.baudBareStep w n (Uart.Baud.mk s.cnt);
   let nb := Uart.Baud.unpack w (Hw.fst b);
   let tick := ~~~idle &&& Hw.snd b;
   let line := if go then 0 else if tick then Hw.slice 0 1 s.sh else s.line;
@@ -205,22 +221,61 @@ structure Uart.RxOut (r : HwTy → Type) where
   busy : r Uart.Bit
   deriving Bundle
 
-/-- One cycle of the receiver. -/
-def Uart.rxStep (w n : Nat) {r : HwTy → Type} [Hw r] (s : Uart.Rx w r) (x : Uart.RxIn r) :
-    r (HwTy.prod (Uart.Rx.code w) Uart.RxOut.code) :=
+/-- A two-flip-flop synchroniser for an asynchronous input: `ff1` is the pin one cycle
+ago, `ff2` two; both idle high. A receiver in `Hdl.Uart` has the same two registers
+inside it; a board design that keeps them in its own state uses this bundle. -/
+structure Uart.Sync (r : HwTy → Type) where
+  ff1 : r Uart.Bit
+  ff2 : r Uart.Bit
+  deriving Bundle
+
+/-- The synchroniser at rest, idle high. -/
+def Uart.Sync.init : Uart.Sync HwTy.El :=
+  Uart.Sync.mk (BitVec.ofNat 1 1) (BitVec.ofNat 1 1)
+
+/-- One cycle of the synchroniser: the pin into `ff1`, `ff1` into `ff2`. -/
+def Uart.syncStep {r : HwTy → Type} [Hw r] (s : Uart.Sync r) (pin : r Uart.Bit) :
+    r Uart.Sync.code :=
+  Uart.Sync.pack (Uart.Sync.mk pin s.ff1)
+
+/-- The receiver's state without its input synchroniser: the phase, the baud counter and
+the shift register. A design that synchronises the pin itself (the board designs keep a
+`Uart.Sync` next to the receiver) feeds `Uart.rxBits` the synchronised line. -/
+structure Uart.RxBits (w : Nat) (r : HwTy → Type) where
+  ph : r Uart.B4
+  cnt : r (HwTy.bits w)
+  sh : r Uart.B8
+  deriving Bundle
+
+/-- The receiver's state at rest (no synchroniser). -/
+def Uart.RxBits.init (w : Nat) : Uart.RxBits w HwTy.El :=
+  Uart.RxBits.mk (BitVec.ofNat 4 0) (BitVec.ofNat w 0) (BitVec.ofNat 8 0)
+
+/-- One cycle of the receiver's logic on a line that is already synchronised (`rx` is
+what `ff2` would be): the next phase, counter and shift register, and the output. -/
+def Uart.rxBits (w n : Nat) {r : HwTy → Type} [Hw r] (s : Uart.RxBits w r) (rx : r Uart.Bit) :
+    r (HwTy.prod (Uart.RxBits.code w) Uart.RxOut.code) :=
   let idle := s.ph === 0;
   let inStart := s.ph === 10;
   let inStop := s.ph === 1;
-  let fall := idle &&& ~~~s.ff2;
+  let fall := idle &&& ~~~rx;
   let startTick := inStart &&& s.cnt === Hw.ofNat (Nat.div n 2 - 1);
   let tick := ~~~idle &&& (~~~inStart &&& s.cnt === Hw.ofNat (n - 1));
   let ph := if fall then 10
-    else if startTick then (if s.ff2 then 0 else 9)
+    else if startTick then (if rx then 0 else 9)
     else if tick then s.ph - 1 else s.ph;
   let cnt := if fall ||| (startTick ||| tick) then 0 else s.cnt + 1;
-  let sh := if tick &&& ~~~inStop then Uart.shiftIn8 s.sh s.ff2 else s.sh;
-  Hw.pair (Uart.Rx.pack w (Uart.Rx.mk ph cnt sh x.line s.ff1))
-    (Uart.RxOut.pack (Uart.RxOut.mk (tick &&& (inStop &&& s.ff2)) s.sh (Hw.not idle)))
+  let sh := if tick &&& ~~~inStop then Uart.shiftIn8 s.sh rx else s.sh;
+  Hw.pair (Uart.RxBits.pack w (Uart.RxBits.mk ph cnt sh))
+    (Uart.RxOut.pack (Uart.RxOut.mk (tick &&& (inStop &&& rx)) s.sh (Hw.not idle)))
+
+/-- One cycle of the receiver: its own logic on the synchronised line, with the input
+synchroniser's two flip-flops in its state. -/
+def Uart.rxStep (w n : Nat) {r : HwTy → Type} [Hw r] (s : Uart.Rx w r) (x : Uart.RxIn r) :
+    r (HwTy.prod (Uart.Rx.code w) Uart.RxOut.code) :=
+  let b := Uart.rxBits w n (Uart.RxBits.mk s.ph s.cnt s.sh) s.ff2;
+  let nb := Uart.RxBits.unpack w (Hw.fst b);
+  Hw.pair (Uart.Rx.pack w (Uart.Rx.mk nb.ph nb.cnt nb.sh x.line s.ff1)) (Hw.snd b)
 
 /-- A receiver as a circuit (8N1, `n` clocks per bit, `w`-bit counter, with a
 two-flip-flop input synchroniser). -/

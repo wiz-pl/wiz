@@ -1,0 +1,158 @@
+import Hdl.Uart
+/-!
+# Hdl.UartBoard
+
+The board API of the UART (`import Hdl.UartBoard`): the shapes the three board designs
+instantiate, on top of the one implementation in `Hdl.Uart`.
+
+`Hdl.Uart`'s receiver owns its two-flip-flop input synchroniser (`Uart.Rx` has `ff1`
+and `ff2` in its state), its transmitter takes a `Uart.TxIn` (`start` and `data`) and its
+baud generator has a clock enable. The boards (`wiz-icestick-uart`, `wiz-arty`,
+`wiz-rv`) instead keep the synchroniser in their own state next to a receiver without
+the flops, pass the transmitter a start pulse and a byte as two arguments, and drive the
+baud counter directly. This module is the shared adapter: it is the only place those
+shapes are written, and every part is the implementation of `Hdl.Uart` rather than a
+copy of it.
+
+* `UartB.Tx`/`UartB.Rx`/`UartB.Sync`/`UartB.Byte`/`UartB.Send`/`UartB.Line`: the
+  bundles. `UartB.Tx` and `UartB.Send` are `Uart.Tx` and `Uart.TxIn`; `UartB.Rx` is
+  `Uart.RxBits` (the receiver without its synchroniser) and `UartB.Sync` is
+  `Uart.Sync`; `UartB.Byte` is the receiver's output without the `busy` flag.
+* `UartB.baudStep`/`UartB.baud`: the baud counter with no clock enable (`Uart.baudBareStep`).
+* `UartB.txStep`, `UartB.txIdle`, `UartB.txC`: the transmitter (`Uart.txStep`,
+  `Uart.txCw`).
+* `UartB.rxStep`, `UartB.syncStep`, `UartB.rxC`, `UartB.syncC`: the receiver and the
+  separate synchroniser (`Uart.rxBits`, `Uart.syncStep`, `Uart.rxCw`).
+* `UartB.loopback`: `UartB.txC` then `UartB.syncC` then `UartB.rxC`.
+
+Every definition is width-parameterised (`w` first, as in `Hdl.Uart`): the iCEstick uses
+`Uart.cntW7` (7 bits, 1 … 128 cycles per bit), the Arty and the RV boards `Uart.cntW10`
+(10 bits, 1 … 1024). A project's `Uart.wiz` is then only the width: a page of `def`s that
+fix `w` and keep the names its designs and proofs use (see docs/libraries.md, "The board
+API"). Nothing here has a reset or a clock domain of its own: wrap a circuit with
+`Circuit.withReset`/`Circuit.withResetEnable` (synchronous, active high) as for any
+`Hdl.Uart` circuit.
+-/
+
+def UartB.Bit : HwTy := Uart.Bit
+def UartB.B4 : HwTy := Uart.B4
+def UartB.B8 : HwTy := Uart.B8
+def UartB.B9 : HwTy := Uart.B9
+
+------------------------------------------------------------------------------------
+-- The bundles. The transmitter and its input are `Hdl.Uart`'s; the receiver's state is
+-- its state without the synchroniser, which the design keeps itself (`UartB.Sync`).
+
+def UartB.Tx (w : Nat) (r : HwTy → Type) : Type := Uart.Tx w r
+def UartB.Tx.code (w : Nat) : HwTy := Uart.Tx.code w
+def UartB.Tx.bundle (w : Nat) : Bundle (Uart.Tx w) := Uart.Tx.bundle w
+def UartB.Tx.init (w : Nat) : Uart.Tx w HwTy.El := Uart.Tx.init w
+def UartB.Tx.pack (w : Nat) {r : HwTy → Type} [Hw r] (v : Uart.Tx w r) : r (Uart.Tx.code w) :=
+  Uart.Tx.pack w v
+def UartB.Tx.unpack (w : Nat) {r : HwTy → Type} [Hw r] (x : r (Uart.Tx.code w)) : Uart.Tx w r :=
+  Uart.Tx.unpack w x
+
+def UartB.Send : (HwTy → Type) → Type := Uart.TxIn
+def UartB.Send.code : HwTy := Uart.TxIn.code
+def UartB.Send.bundle : Bundle Uart.TxIn := Uart.TxIn.bundle
+def UartB.Send.pack {r : HwTy → Type} [Hw r] (v : Uart.TxIn r) : r Uart.TxIn.code :=
+  Uart.TxIn.pack v
+def UartB.Send.unpack {r : HwTy → Type} [Hw r] (x : r Uart.TxIn.code) : Uart.TxIn r :=
+  Uart.TxIn.unpack x
+
+def UartB.Rx (w : Nat) (r : HwTy → Type) : Type := Uart.RxBits w r
+def UartB.Rx.code (w : Nat) : HwTy := Uart.RxBits.code w
+def UartB.Rx.bundle (w : Nat) : Bundle (Uart.RxBits w) := Uart.RxBits.bundle w
+def UartB.Rx.init (w : Nat) : Uart.RxBits w HwTy.El := Uart.RxBits.init w
+def UartB.Rx.pack (w : Nat) {r : HwTy → Type} [Hw r] (v : Uart.RxBits w r) : r (Uart.RxBits.code w) :=
+  Uart.RxBits.pack w v
+def UartB.Rx.unpack (w : Nat) {r : HwTy → Type} [Hw r] (x : r (Uart.RxBits.code w)) : Uart.RxBits w r :=
+  Uart.RxBits.unpack w x
+
+def UartB.Sync : (HwTy → Type) → Type := Uart.Sync
+def UartB.Sync.code : HwTy := Uart.Sync.code
+def UartB.Sync.bundle : Bundle Uart.Sync := Uart.Sync.bundle
+def UartB.Sync.init : Uart.Sync HwTy.El := Uart.Sync.init
+def UartB.Sync.pack {r : HwTy → Type} [Hw r] (v : Uart.Sync r) : r Uart.Sync.code :=
+  Uart.Sync.pack v
+def UartB.Sync.unpack {r : HwTy → Type} [Hw r] (x : r Uart.Sync.code) : Uart.Sync r :=
+  Uart.Sync.unpack x
+
+/-- What the receiver reports: a one-cycle `valid` and the byte. -/
+structure UartB.Byte (r : HwTy → Type) where
+  valid : r Uart.Bit
+  data : r Uart.B8
+  deriving Bundle
+
+def UartB.Byte.init : UartB.Byte HwTy.El :=
+  UartB.Byte.mk (BitVec.ofNat 1 0) (BitVec.ofNat 8 0)
+
+def UartB.Line : (HwTy → Type) → Type := Uart.RxIn
+def UartB.Line.code : HwTy := Uart.RxIn.code
+def UartB.Line.bundle : Bundle Uart.RxIn := Uart.RxIn.bundle
+def UartB.Line.pack {r : HwTy → Type} [Hw r] (v : Uart.RxIn r) : r Uart.RxIn.code :=
+  Uart.RxIn.pack v
+def UartB.Line.unpack {r : HwTy → Type} [Hw r] (x : r Uart.RxIn.code) : Uart.RxIn r :=
+  Uart.RxIn.unpack x
+
+------------------------------------------------------------------------------------
+-- The baud generator: the counter with no clock enable, as the board designs drive it.
+
+/-- One cycle of the baud counter (`Uart.baudBareStep`), a bare counter in and out. -/
+def UartB.baudStep (w n : Nat) {r : HwTy → Type} [Hw r] (c : r (HwTy.bits w)) :
+    r (HwTy.prod (HwTy.bits w) Uart.Bit) :=
+  let b := Uart.baudBareStep w n (Uart.Baud.mk c);
+  Hw.pair (Uart.Baud.unpack w (Hw.fst b)).cnt (Hw.snd b)
+
+/-- The baud generator alone: no input, the tick as output. -/
+def UartB.baud (w n : Nat) : Circuit (HwTy.bits 0) Uart.Bit :=
+  Circuit.mk (HwTy.bits w) (BitVec.ofNat w 0) (fun s u => UartB.baudStep w n s)
+
+------------------------------------------------------------------------------------
+-- The transmitter: `Uart.txStep` with its start pulse and byte as two arguments.
+
+/-- Whether the transmitter is idle (a frame is not in progress). -/
+def UartB.txIdle (w : Nat) {r : HwTy → Type} [Hw r] (s : Uart.Tx w r) : r Uart.Bit :=
+  s.left === 0
+
+/-- One cycle of the transmitter: the next state only. -/
+def UartB.txStep (w n : Nat) {r : HwTy → Type} [Hw r] (s : Uart.Tx w r)
+    (start : r Uart.Bit) (d : r Uart.B8) : r (Uart.Tx.code w) :=
+  Hw.fst (Uart.txStep w n s (Uart.TxIn.mk start d))
+
+/-- The transmitter as a circuit: input `start`/`data`, output `line`. -/
+def UartB.txC (w n : Nat) : Circuit UartB.Send.code UartB.Line.code :=
+  Circuit.bundled (Uart.Tx.bundle w) UartB.Send.bundle UartB.Line.bundle (Uart.Tx.init w)
+    (fun s x => Hw.pair (UartB.txStep w n s x.start x.data)
+      (UartB.Line.pack (Uart.RxIn.mk s.line)))
+
+------------------------------------------------------------------------------------
+-- The receiver: `Uart.rxBits` on an already synchronised line, the next state without
+-- the synchroniser, and the output without `busy`.
+
+/-- One cycle of the receiver: the next state and the byte it reports. -/
+def UartB.rxStep (w n : Nat) {r : HwTy → Type} [Hw r] (s : Uart.RxBits w r) (rx : r Uart.Bit) :
+    r (HwTy.prod (Uart.RxBits.code w) UartB.Byte.code) :=
+  let b := Uart.rxBits w n s rx;
+  let ro := Uart.RxOut.unpack (Hw.snd b);
+  Hw.pair (Hw.fst b) (UartB.Byte.pack (UartB.Byte.mk ro.valid ro.data))
+
+/-- One cycle of the input synchroniser. -/
+def UartB.syncStep {r : HwTy → Type} [Hw r] (s : Uart.Sync r) (pin : r Uart.Bit) :
+    r Uart.Sync.code :=
+  Uart.syncStep s pin
+
+/-- The receiver as a circuit: input `line`, output `valid`/`data`. -/
+def UartB.rxC (w n : Nat) : Circuit UartB.Line.code UartB.Byte.code :=
+  Circuit.bundled (Uart.RxBits.bundle w) UartB.Line.bundle UartB.Byte.bundle (Uart.RxBits.init w)
+    (fun s x => UartB.rxStep w n s x.line)
+
+/-- The synchroniser as a circuit: input `line`, output the `ff2` line. -/
+def UartB.syncC : Circuit UartB.Line.code UartB.Line.code :=
+  Circuit.bundled Uart.Sync.bundle UartB.Line.bundle UartB.Line.bundle Uart.Sync.init
+    (fun s x => Hw.pair (Uart.syncStep s x.line) (UartB.Line.pack (Uart.RxIn.mk s.ff2)))
+
+/-- A transmitter wired to a receiver through the synchroniser: input `start`/`data`,
+-- output `valid`/`data`. -/
+def UartB.loopback (w n : Nat) : Circuit UartB.Send.code UartB.Byte.code :=
+  Circuit.seq (UartB.txC w n) (Circuit.seq UartB.syncC (UartB.rxC w n))
