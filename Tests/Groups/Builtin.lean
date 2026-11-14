@@ -73,6 +73,35 @@ def builtinGroup : Group where
           -- whole `Nat.divGo` recursion (200000 was 46 s before the fix)
           "def slow : Nat := Nat.divGo 20000 20000 1\n" ++
           "def w : Nat.mul 0 slow = Nat.mul 0 (Nat.add (Nat.mul 0 (Nat.pow 2 1)) slow) := rfl") },
+    { name := "a huge power is not evaluated when conversion does not need it", run := fun _ =>
+        -- `vNatOp` used to compute `Nat.pow` eagerly whenever the term was evaluated, even
+        -- in a comparison decided from the arguments, and Lean's `^` aborts the process
+        -- ("Nat.pow exponent is too big") at these sizes (`nat-pow-blowup.md`). A result
+        -- above `natExpansive?`'s bound stays glued until something forces its value.
+        okLib ("import Prelude\n" ++
+          "def t : Nat.pow 2 (Nat.pow 2 34) = Nat.pow 2 (Nat.pow 2 34) := rfl\n" ++
+          -- the product is 0 whatever the power is: it is never asked for
+          "def u : Nat.mul 0 (Nat.pow 2 (Nat.pow 2 34)) = 0 := rfl\n" ++
+          "def v : Nat.add 0 (Nat.pow 2 (Nat.pow 2 34)) = Nat.pow 2 (Nat.pow 2 34) := rfl\n" ++
+          -- just above the bound: still glued, still compared by its arguments
+          "def w : Nat.pow 2 5000 = Nat.pow 2 5000 := rfl\n" ++
+          -- below it, the value is a native numeral (and is needed here)
+          "def x : Nat.log2 (Nat.pow 2 400) = 400 := refl 400\n" ++
+          "def y : Nat.pow 2 64 = 18446744073709551616 := refl 18446744073709551616") },
+    { name := "different huge powers are not equal", run := fun _ =>
+        -- the arguments are compared first; they differ, so equality fails (cleanly, and
+        -- without claiming that any two glued applications are equal)
+        failsLib "import Prelude\ndef bad : Nat.pow 2 5000 = Nat.pow 2 5001 := rfl"
+          "Nat.pow 2 5001" },
+    { name := "a stuck subtraction with a huge power on the numeral side (numeral-sub-blowup)", run := fun _ =>
+        -- `stuckSub` forced *both* arguments to see whether the second is `n + 1`; on a
+        -- glued `Nat.pow` that forced its (astronomical) value and aborted the process.
+        okLib ("import Prelude\n" ++
+          "def t (h : Nat) : Nat.sub h (Nat.pow 2 (Nat.pow 2 34)) = Nat.sub h (Nat.pow 2 (Nat.pow 2 34)) := rfl\n" ++
+          -- the numeral-side check still applies once the value is at hand
+          "def u (h : Nat) : Nat.sub h (Nat.pow 2 64) = Nat.sub h 18446744073709551616 := rfl") },
+    { name := "stuck subtractions with different numeral sides are not equal", run := fun _ =>
+        failsLib "import Prelude\ndef bad (h : Nat) : Nat.sub h 1 = Nat.sub h 2 := rfl" "Nat.sub h 2" },
     { name := "implemented_by: compiled code runs the implementation, the kernel the model", run := fun _ => do
         -- the implementation is trusted: here it deliberately differs, to show which runs
         let src := "import Prelude\ndef model (n : Nat) : Nat := n\ndef impl (n : Nat) : Nat := n + 1\n" ++
