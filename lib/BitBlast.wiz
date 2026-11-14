@@ -211,10 +211,13 @@ def Bits.bitwise_bit (f : Bool → Bool → Bool) (hf : f .false .false = .false
     Bits.bit (Nat.bitwise f (Nat.add a b) a b) i = f (Bits.bit a i) (Bits.bit b i) :=
   Or.elim (Bits.ltCases i (Nat.add a b))
     (fun h => Bits.bw_lt f (Nat.add a b) i a b h)
-    (fun h => Eq.trans (Bits.bw_ge f (Nat.add a b) i a b h)
-      (Eq.symm (Eq.trans (Bits.congr2 f
-        (Bits.bit_small i a (Bits.le_trans a (Nat.add a b) i (Bits.le_add a b) h))
-        (Bits.bit_small i b (Bits.le_trans b (Nat.add a b) i (Bits.le_add_l a b) h))) hf)))
+    (fun h =>
+      calc Bits.bit (Nat.bitwise f (Nat.add a b) a b) i
+          = .false := Bits.bw_ge f (Nat.add a b) i a b h
+           _ = f (Bits.bit a i) (Bits.bit b i) :=
+              Eq.symm (Eq.trans (Bits.congr2 f
+                (Bits.bit_small i a (Bits.le_trans a (Nat.add a b) i (Bits.le_add a b) h))
+                (Bits.bit_small i b (Bits.le_trans b (Nat.add a b) i (Bits.le_add_l a b) h))) hf))
 def Bits.land_bit (a b i : Nat) : Bits.bit (Nat.land a b) i = Bool.and (Bits.bit a i) (Bits.bit b i) :=
   Bits.bitwise_bit Bool.and rfl a b i
 def Bits.lor_bit (a b i : Nat) : Bits.bit (Nat.lor a b) i = Bool.or (Bits.bit a i) (Bits.bit b i) :=
@@ -322,8 +325,15 @@ def Bits.nat_ext : (w a b : Nat) → Nat.lt a (Nat.pow 2 w) = .true → Nat.lt b
       Bits.nat_ext w (Bits.half a) (Bits.half b) (Bits.half_lt a (Nat.pow 2 w) ha) (Bits.half_lt b (Nat.pow 2 w) hb)
         (fun i hi => Eq.trans (Bits.congr (fun t => Bits.bit t i) (Eq.symm (Bits.div2 a)))
           (Eq.trans (h (Nat.succ i) hi) (Bits.congr (fun t => Bits.bit t i) (Bits.div2 b))));
-    let eo : Bits.odd a = Bits.odd b := Eq.trans (Eq.symm (Bits.isOdd a)) (Eq.trans (h 0 rfl) (Bits.isOdd b));
-    Eq.trans (Eq.symm (Bits.decomp a)) (Eq.trans (Bits.congr2 Bits.cons eo eh) (Bits.decomp b))
+    let eo : Bits.odd a = Bits.odd b :=
+      calc Bits.odd a
+          = Nat.isOdd a := Eq.symm (Bits.isOdd a)
+           _ = Nat.isOdd b := h 0 rfl
+           _ = Bits.odd b := Bits.isOdd b;
+    calc a
+        = Bits.cons (Bits.odd a) (Bits.half a) := Eq.symm (Bits.decomp a)
+         _ = Bits.cons (Bits.odd b) (Bits.half b) := Bits.congr2 Bits.cons eo eh
+         _ = b := Bits.decomp b
 -- **words are equal when their bits are** (what `bv_decide` proves, by SAT)
 def Bits.word_ext {ω w : Nat} (x y : UIntN w) (h : Bits.eqUpTo (UIntN.toNat x) (UIntN.toNat y) w = .true) : x = y :=
   UIntN.ext x y (Bits.nat_ext w (UIntN.toNat x) (UIntN.toNat y) (UIntN.toNat_lt x) (UIntN.toNat_lt y)
@@ -725,18 +735,14 @@ def Bits.ltc_lt_cons (k : Nat) (c a b : Bool) (A B : Nat)
     (ih : Bits.ltc (Bits.ltStep a b c) A B k = Bool.or (Nat.lt A B) (Bool.and (Nat.beq A B) (Bits.ltStep a b c))) :
     Bits.ltc c (Bits.cons a A) (Bits.cons b B) (Nat.succ k)
       = Bool.or (Nat.lt (Bits.cons a A) (Bits.cons b B)) (Bool.and (Nat.beq (Bits.cons a A) (Bits.cons b B)) c) :=
-  @Eq.trans Bool (Bits.ltc c (Bits.cons a A) (Bits.cons b B) (Nat.succ k)) (Bits.ltc (Bits.ltStep a b c) A B k)
-    (Bool.or (Nat.lt (Bits.cons a A) (Bits.cons b B)) (Bool.and (Nat.beq (Bits.cons a A) (Bits.cons b B)) c))
-    (Bits.ltc_cons c a b A B k)
-    (@Eq.trans Bool (Bits.ltc (Bits.ltStep a b c) A B k) (Bool.or (Nat.lt A B) (Bool.and (Nat.beq A B) (Bits.ltStep a b c)))
-      (Bool.or (Nat.lt (Bits.cons a A) (Bits.cons b B)) (Bool.and (Nat.beq (Bits.cons a A) (Bits.cons b B)) c))
-      ih
-      (Eq.symm (@Eq.trans Bool
-        (Bool.or (Nat.lt (Bits.cons a A) (Bits.cons b B)) (Bool.and (Nat.beq (Bits.cons a A) (Bits.cons b B)) c))
-        (Bool.or (Bool.or (Nat.lt A B) (Bool.and (Nat.beq A B) (Bool.and (Bool.not a) b))) (Bool.and (Bool.and (Nat.beq A B) (Sat.boolEq a b)) c))
-        (Bool.or (Nat.lt A B) (Bool.and (Nat.beq A B) (Bits.ltStep a b c)))
-        (Bits.congr2 (fun x y => Bool.or x (Bool.and y c)) (Bits.lt_cons A B a b) (Bits.beq_cons A B a b))
-        (Bits.ltId (Nat.lt A B) (Nat.beq A B) a b c))))
+  calc Bits.ltc c (Bits.cons a A) (Bits.cons b B) (Nat.succ k)
+      = Bits.ltc (Bits.ltStep a b c) A B k := Bits.ltc_cons c a b A B k
+       _ = Bool.or (Nat.lt A B) (Bool.and (Nat.beq A B) (Bits.ltStep a b c)) := ih
+       _ = Bool.or (Bool.or (Nat.lt A B) (Bool.and (Nat.beq A B) (Bool.and (Bool.not a) b)))
+            (Bool.and (Bool.and (Nat.beq A B) (Sat.boolEq a b)) c) :=
+          Eq.symm (Bits.ltId (Nat.lt A B) (Nat.beq A B) a b c)
+       _ = Bool.or (Nat.lt (Bits.cons a A) (Bits.cons b B)) (Bool.and (Nat.beq (Bits.cons a A) (Bits.cons b B)) c) :=
+          Eq.symm (Bits.congr2 (fun x y => Bool.or x (Bool.and y c)) (Bits.lt_cons A B a b) (Bits.beq_cons A B a b))
 -- **the comparison circuit is `<` (or `≤`) on numbers below `2^k`**
 def Bits.ltc_lt : (k : Nat) → (c : Bool) → (A B : Nat) → Nat.lt A (Nat.pow 2 k) = .true → Nat.lt B (Nat.pow 2 k) = .true →
     Bits.ltc c A B k = Bool.or (Nat.lt A B) (Bool.and (Nat.beq A B) c)

@@ -179,9 +179,13 @@ def QExpr.prove (ρ : List Q) (a b : QExpr)
   let hw := Bool.and_left _ _ h;
   let ha := QExpr.sound ρ a (Bool.and_left _ _ hw);
   let hb := QExpr.sound ρ b (Bool.and_right _ _ hw);
-  Eq.trans (congrArg2 (fun x y => x * y) ha.1 hb.2)
-    (Eq.trans (IntExpr.prove (QExpr.env ρ) (.mul (QExpr.toFrac a).1 (QExpr.toFrac b).2) (.mul (QExpr.toFrac b).1 (QExpr.toFrac a).2) (Bool.and_right _ _ h))
-      (Eq.symm (congrArg2 (fun x y => x * y) hb.1 ha.2)))
+  calc (QExpr.eval ρ a).num * (QExpr.eval ρ b).den
+      = IntExpr.eval (QExpr.env ρ) (QExpr.toFrac a).1 * IntExpr.eval (QExpr.env ρ) (QExpr.toFrac b).2 :=
+        congrArg2 (fun x y => x * y) ha.1 hb.2
+       _ = IntExpr.eval (QExpr.env ρ) (QExpr.toFrac b).1 * IntExpr.eval (QExpr.env ρ) (QExpr.toFrac a).2 :=
+        IntExpr.prove (QExpr.env ρ) (.mul (QExpr.toFrac a).1 (QExpr.toFrac b).2) (.mul (QExpr.toFrac b).1 (QExpr.toFrac a).2) (Bool.and_right _ _ h)
+       _ = (QExpr.eval ρ b).num * (QExpr.eval ρ a).den :=
+        Eq.symm (congrArg2 (fun x y => x * y) hb.1 ha.2)
 
 /-- `x ≈ y`, from expressions that evaluate to `x` and `y`. `q_ring!` expands to
 this. -/
@@ -206,11 +210,12 @@ def Q.symm {ω p q : Q} (h : p ≈ q) : q ≈ p := Eq.symm h
 def Q.trans {ω p q r : Q} (h1 : p ≈ q) (h2 : q ≈ r) : p ≈ r :=
   -- q.den * (p.num * r.den) = q.den * (r.num * p.den)
   Int.eq_of_mul_eq_mul_left q.den (p.num * r.den) (r.num * p.den) q.pos
-    (Eq.via (p.num * q.den * r.den) (int_ring! q.den * (p.num * r.den) = p.num * q.den * r.den)
-      (Eq.via (q.num * p.den * r.den) (congrArg (fun z => z * r.den) h1)
-        (Eq.via (p.den * (q.num * r.den)) (int_ring! q.num * p.den * r.den = p.den * (q.num * r.den))
-          (Eq.via (p.den * (r.num * q.den)) (congrArg (fun z => p.den * z) h2)
-            (int_ring! p.den * (r.num * q.den) = q.den * (r.num * p.den))))))
+    (calc q.den * (p.num * r.den)
+        = p.num * q.den * r.den := int_ring! q.den * (p.num * r.den) = p.num * q.den * r.den
+          _ = q.num * p.den * r.den := congrArg (fun z => z * r.den) h1
+          _ = p.den * (q.num * r.den) := int_ring! q.num * p.den * r.den = p.den * (q.num * r.den)
+          _ = p.den * (r.num * q.den) := congrArg (fun z => p.den * z) h2
+          _ = q.den * (r.num * p.den) := int_ring! p.den * (r.num * q.den) = q.den * (r.num * p.den))
 /-- Equal rationals are equivalent. -/
 def Q.ofEq {ω p q : Q} (e : p = q) : p ≈ q := Eq.mp' (fun (x : Q) => p ≈ x) e (Q.refl p)
 
@@ -432,8 +437,10 @@ def Q.abs (p : Q) : Q := Q.mk (Int.abs p.num) p.den p.pos
 
 /-- `Q.abs` respects `≈`. -/
 def Q.abs_congr {ω p q : Q} (e : p ≈ q) : Q.abs p ≈ Q.abs q :=
-  Eq.trans (Int.abs_mul_pos p.num q.den q.pos)
-    (Eq.trans (congrArg Int.abs e) (Eq.symm (Int.abs_mul_pos q.num p.den p.pos)))
+  calc Int.abs p.num * q.den
+      = Int.abs (p.num * q.den) := Int.abs_mul_pos p.num q.den q.pos
+       _ = Int.abs (q.num * p.den) := congrArg Int.abs e
+       _ = Int.abs q.num * p.den := Eq.symm (Int.abs_mul_pos q.num p.den p.pos)
 /-- `0 ≤ |p|`. -/
 def Q.abs_nonneg (p : Q) : 0 ≤ Q.abs p := @Q.le_of_nonneg (Q.abs p) (Int.abs_nonneg p.num)
 /-- `p ≤ |p|`. -/
@@ -515,6 +522,9 @@ def Q.ofNat (n : Nat) : Q := Q.ofInt (Int.ofNat n)
 def Q.ceil (p : Q) : Nat := Nat.succ (Int.natAbs p.num)
 /-- `Q.ceil p` is `|p.num| + 1`. -/
 def Q.ceil_num (p : Q) : Int.ofNat (Q.ceil p) = Int.abs p.num + 1 :=
+  -- Not a `calc` chain: `Int.ofNat` is a constructor, so this equation computes through
+  -- it to a `Nat` equation and the two steps' `Trans` instances are looked up at
+  -- different types.
   @Eq.trans Int (Int.ofNat (Q.ceil p)) (Int.ofNat (Int.natAbs p.num) + 1) (Int.abs p.num + 1)
     (Int.ofNat_succ (Int.natAbs p.num)) (congrArg (fun z => z + 1) (Int.ofNat_natAbs p.num))
 /-- The archimedean property: `p < Q.ceil p`. -/
