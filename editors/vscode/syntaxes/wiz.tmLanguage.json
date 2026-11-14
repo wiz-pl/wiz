@@ -1,0 +1,213 @@
+{
+  "name": "Wiz",
+  "scopeName": "source.wiz",
+  "fileTypes": ["wiz"],
+  "patterns": [
+    {"include": "#comments"},
+    {"include": "#strings"},
+    {"include": "#chars"},
+    {"include": "#attributes"},
+    {"include": "#numbers"},
+    {"include": "#declarations"},
+    {"include": "#commands"},
+    {"include": "#modifiers"},
+    {"include": "#sorts"},
+    {"include": "#booleans"},
+    {"include": "#keywords"},
+    {"include": "#tactics"},
+    {"include": "#constructors"},
+    {"include": "#types"},
+    {"include": "#holes"},
+    {"include": "#operators"}
+  ],
+  "repository": {
+    "todo": {
+      "match": "\\b(TODO|FIXME|XXX|NOTE)\\b",
+      "name": "keyword.todo.wiz"
+    },
+    "doc-comment": {
+      "begin": "/--",
+      "beginCaptures": {
+        "0": {"name": "punctuation.definition.comment.begin.wiz"}
+      },
+      "end": "-/",
+      "endCaptures": {
+        "0": {"name": "punctuation.definition.comment.end.wiz"}
+      },
+      "name": "comment.block.documentation.wiz",
+      "patterns": [
+        {"include": "#block-comment"},
+        {"include": "#todo"}
+      ]
+    },
+    "block-comment": {
+      "begin": "/-",
+      "beginCaptures": {
+        "0": {"name": "punctuation.definition.comment.begin.wiz"}
+      },
+      "end": "-/",
+      "endCaptures": {
+        "0": {"name": "punctuation.definition.comment.end.wiz"}
+      },
+      "name": "comment.block.wiz",
+      "patterns": [
+        {"include": "#block-comment"},
+        {"include": "#todo"}
+      ]
+    },
+    "comments": {
+      "patterns": [
+        {"include": "#doc-comment"},
+        {"include": "#block-comment"},
+        {
+          "match": "(--)(.*$)",
+          "name": "comment.line.double-dash.wiz",
+          "captures": {
+            "1": {"name": "punctuation.definition.comment.wiz"},
+            "2": {"patterns": [{"include": "#todo"}]}
+          }
+        }
+      ]
+    },
+    "raw-string-hashed": {
+      "begin": "\\br(#+)\"",
+      "beginCaptures": {
+        "0": {"name": "punctuation.definition.string.begin.wiz"}
+      },
+      "end": "\"\\1",
+      "endCaptures": {
+        "0": {"name": "punctuation.definition.string.end.wiz"}
+      },
+      "name": "string.quoted.raw.wiz"
+    },
+    "raw-string": {
+      "begin": "\\br\"",
+      "beginCaptures": {
+        "0": {"name": "punctuation.definition.string.begin.wiz"}
+      },
+      "end": "\"",
+      "endCaptures": {
+        "0": {"name": "punctuation.definition.string.end.wiz"}
+      },
+      "name": "string.quoted.raw.wiz"
+    },
+    "string-escape": {
+      "match": "\\\\(?:[nrt\\\\\"'0]|x[0-9a-fA-F]{2}|u\\{[0-9a-fA-F]+\\})",
+      "name": "constant.character.escape.wiz"
+    },
+    "string": {
+      "begin": "\"",
+      "beginCaptures": {
+        "0": {"name": "punctuation.definition.string.begin.wiz"}
+      },
+      "end": "\"",
+      "endCaptures": {
+        "0": {"name": "punctuation.definition.string.end.wiz"}
+      },
+      "name": "string.quoted.double.wiz",
+      "patterns": [
+        {"include": "#string-escape"}
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {"include": "#raw-string-hashed"},
+        {"include": "#raw-string"},
+        {"include": "#string"}
+      ]
+    },
+    "chars": {
+      "patterns": [
+        {
+          "match": "'(?:[^'\\\\]|\\\\.)'",
+          "name": "string.quoted.single.wiz",
+          "captures": {
+            "0": {"name": "constant.character.wiz"}
+          }
+        }
+      ]
+    },
+    "attributes": {
+      "begin": "@\\[",
+      "beginCaptures": {
+        "0": {"name": "punctuation.definition.annotation.begin.wiz"}
+      },
+      "end": "\\]",
+      "endCaptures": {
+        "0": {"name": "punctuation.definition.annotation.end.wiz"}
+      },
+      "name": "meta.annotation.wiz",
+      "patterns": [
+        {"include": "#strings"},
+        {"include": "#numbers"}
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {"match": "\\b0[xX][0-9a-fA-F]+\\b", "name": "constant.numeric.hex.wiz"},
+        {"match": "\\b\\d+(?:\\.\\d+)?\\b", "name": "constant.numeric.wiz"}
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(def|theorem|lemma|abbrev|axiom|inductive|coinductive|codata|structure|class|instance)\\s+([^\\s(:{\\[]+)",
+          "captures": {
+            "1": {"name": "keyword.other.command.wiz"},
+            "2": {"name": "entity.name.function.wiz"}
+          }
+        }
+      ]
+    },
+    "commands": {
+      "patterns": [
+        {
+          "match": "#(?:eval|check|reduce|print|run)\\b",
+          "name": "keyword.other.command.wiz"
+        },
+        {
+          "match": "\\b(?:def|theorem|lemma|abbrev|axiom|inductive|coinductive|codata|structure|class|instance|mutual|where|deriving|extends|import|open|namespace|section|end|variable|universe|syntax|macro_rules|macro|notation|infixl|infixr|infix|prefix|postfix|declare_syntax_cat|attribute|extern|export)\\b",
+          "name": "keyword.other.command.wiz"
+        }
+      ]
+    },
+    "modifiers": {
+      "match": "\\b(?:private|partial|unsafe|noncomputable|protected)\\b",
+      "name": "storage.modifier.wiz"
+    },
+    "sorts": {
+      "match": "\\b(?:Type|Prop|Sort)\\b",
+      "name": "storage.type.sort.wiz"
+    },
+    "booleans": {
+      "match": "\\b(?:true|false)\\b",
+      "name": "constant.language.boolean.wiz"
+    },
+    "keywords": {
+      "match": "\\b(?:fun|let|in|match|with|do|by|if|then|else|return|for|unless|mut|at|have|show|from|calc)\\b",
+      "name": "keyword.control.wiz"
+    },
+    "tactics": {
+      "match": "\\b(?:intro|intros|exact|apply|assumption|rfl|refl|rewrite|rw|cases|induction|simp|absurd|cast|transp|ecase|sorry)\\b",
+      "name": "keyword.other.tactic.wiz"
+    },
+    "constructors": {
+      "match": "(?<!\\.)\\.[A-Za-z_][A-Za-z0-9_'!?]*",
+      "name": "entity.name.function.constructor.wiz"
+    },
+    "types": {
+      "match": "\\b[A-Z][A-Za-z0-9_'!?]*(?:\\.[A-Z][A-Za-z0-9_'!?]*)*\\b",
+      "name": "entity.name.type.wiz"
+    },
+    "holes": {
+      "patterns": [
+        {"match": "\\?[A-Za-z_][A-Za-z0-9_']*", "name": "variable.other.hole.wiz"},
+        {"match": "\\b_\\b", "name": "variable.other.hole.wiz"}
+      ]
+    },
+    "operators": {
+      "match": "[→←↔⟶⇒×≡≠≤≥∀∃λΠΣ⊢⧺∘⟨⟩⟦⟧↦·▸¬∧∨∣:=<>+*/|&^%$@\\-]+",
+      "name": "keyword.operator.wiz"
+    }
+  }
+}

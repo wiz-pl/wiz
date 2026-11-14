@@ -1,0 +1,256 @@
+{
+  "$comment": "Shared parity cases for the VS Code and JetBrains clients. Both harnesses build every dirs/files entry under a temporary directory, chmod the paths in `executable`, and compare the launch spec with `expect`. `{base}` and `{root}` are substituted with absolute paths. `settings` are overrides of `defaults`. A case with `expect.warnings` must produce warnings containing those substrings.",
+  "defaults": {
+    "wizPath": "wiz",
+    "wizArgs": ["lsp"],
+    "grailPath": "grail",
+    "grailArgs": ["lsp"],
+    "grailEnabled": true,
+    "toolchains": true,
+    "rootMarkers": ["grail.wiz", "wiz-toolchain", "lakefile.toml", ".git"]
+  },
+  "cases": [
+    {
+      "name": "plain project: .git marker",
+      "dirs": ["proj/.git"],
+      "files": ["proj/a/b/F.wiz"],
+      "executables": ["wiz", "grail"],
+      "file": "proj/a/b/F.wiz",
+      "expect": {
+        "root": "proj",
+        "kind": "wiz",
+        "command": "wiz",
+        "args": ["lsp"],
+        "cwd": "proj",
+        "warnings": []
+      }
+    },
+    {
+      "name": "nearest marker wins: lakefile.toml below .git",
+      "dirs": ["proj/.git", "proj/pkg"],
+      "files": ["proj/pkg/lakefile.toml", "proj/pkg/src/F.wiz"],
+      "executables": ["wiz", "grail"],
+      "file": "proj/pkg/src/F.wiz",
+      "expect": {
+        "root": "proj/pkg",
+        "kind": "wiz",
+        "command": "wiz",
+        "args": ["lsp"],
+        "cwd": "proj/pkg",
+        "warnings": []
+      }
+    },
+    {
+      "name": "grail package: grail lsp -C root",
+      "dirs": ["pkg"],
+      "files": ["pkg/grail.wiz", "pkg/src/Main.wiz"],
+      "executables": ["wiz", "grail"],
+      "file": "pkg/src/Main.wiz",
+      "expect": {
+        "root": "pkg",
+        "kind": "grail",
+        "command": "grail",
+        "args": ["lsp", "-C", "{root}"],
+        "cwd": "pkg",
+        "warnings": []
+      }
+    },
+    {
+      "name": "grail disabled: wiz lsp",
+      "dirs": ["pkg"],
+      "files": ["pkg/grail.wiz", "pkg/src/Main.wiz"],
+      "executables": ["wiz", "grail"],
+      "file": "pkg/src/Main.wiz",
+      "settings": {"grailEnabled": false},
+      "expect": {
+        "root": "pkg",
+        "kind": "wiz",
+        "command": "wiz",
+        "args": ["lsp"],
+        "cwd": "pkg",
+        "warnings": []
+      }
+    },
+    {
+      "name": "grail package without grail on PATH: warn and fall back",
+      "dirs": ["pkg"],
+      "files": ["pkg/grail.wiz", "pkg/src/Main.wiz"],
+      "executables": ["wiz"],
+      "file": "pkg/src/Main.wiz",
+      "expect": {
+        "root": "pkg",
+        "kind": "wiz",
+        "command": "wiz",
+        "args": ["lsp"],
+        "cwd": "pkg",
+        "warnings": ["grail is not on PATH"]
+      }
+    },
+    {
+      "name": "installed toolchain: wrapper bin/wiz wins over the project's .git",
+      "dirs": [
+        "tool/.git",
+        "tool/share/wiz/lib",
+        "tool/share/wiz/.lake/build/bin",
+        "tool/bin"
+      ],
+      "files": [
+        "tool/share/wiz/TOOLCHAIN",
+        "tool/share/wiz/lib/Prelude.wiz",
+        "tool/share/wiz/.lake/build/bin/wiz",
+        "tool/bin/wiz",
+        "tool/share/wiz/lib/F.wiz"
+      ],
+      "executables": ["wiz", "grail", "tool/bin/wiz"],
+      "file": "tool/share/wiz/lib/F.wiz",
+      "expect": {
+        "root": "tool/share/wiz/lib",
+        "kind": "toolchain",
+        "command": "{base}/tool/bin/wiz",
+        "args": ["lsp"],
+        "cwd": "tool/share/wiz/lib",
+        "warnings": []
+      }
+    },
+    {
+      "name": "installed toolchain without wrapper: use its .lake/build/bin/wiz",
+      "dirs": ["tool/share/wiz/lib", "tool/share/wiz/.lake/build/bin"],
+      "files": [
+        "tool/share/wiz/TOOLCHAIN",
+        "tool/share/wiz/lib/Prelude.wiz",
+        "tool/share/wiz/.lake/build/bin/wiz",
+        "tool/share/wiz/lib/F.wiz"
+      ],
+      "executables": ["wiz", "grail", "tool/share/wiz/.lake/build/bin/wiz"],
+      "file": "tool/share/wiz/lib/F.wiz",
+      "expect": {
+        "root": "tool/share/wiz/lib",
+        "kind": "toolchain",
+        "command": "{base}/tool/share/wiz/.lake/build/bin/wiz",
+        "args": ["lsp"],
+        "cwd": "tool/share/wiz/lib",
+        "warnings": []
+      }
+    },
+    {
+      "name": "older installation: REVISION marker",
+      "dirs": ["tool/share/wiz/lib", "tool/share/wiz/.lake/build/bin", "tool/bin"],
+      "files": [
+        "tool/share/wiz/REVISION",
+        "tool/share/wiz/lib/Prelude.wiz",
+        "tool/share/wiz/.lake/build/bin/wiz",
+        "tool/bin/wiz",
+        "tool/share/wiz/lib/F.wiz"
+      ],
+      "executables": ["wiz", "grail", "tool/bin/wiz"],
+      "file": "tool/share/wiz/lib/F.wiz",
+      "expect": {
+        "root": "tool/share/wiz/lib",
+        "kind": "toolchain",
+        "command": "{base}/tool/bin/wiz",
+        "args": ["lsp"],
+        "cwd": "tool/share/wiz/lib",
+        "warnings": []
+      }
+    },
+    {
+      "name": "toolchains disabled: a library file is an ordinary project file",
+      "dirs": ["tool/share/wiz/lib", "tool/share/wiz/.lake/build/bin", "tool/bin"],
+      "files": [
+        "tool/share/wiz/TOOLCHAIN",
+        "tool/share/wiz/lib/.git/HEAD",
+        "tool/share/wiz/lib/Prelude.wiz",
+        "tool/share/wiz/.lake/build/bin/wiz",
+        "tool/bin/wiz",
+        "tool/share/wiz/lib/F.wiz"
+      ],
+      "executables": ["wiz", "grail", "tool/bin/wiz"],
+      "file": "tool/share/wiz/lib/F.wiz",
+      "settings": {"toolchains": false},
+      "expect": {
+        "root": "tool/share/wiz/lib",
+        "kind": "wiz",
+        "command": "wiz",
+        "args": ["lsp"],
+        "cwd": "tool/share/wiz/lib",
+        "warnings": []
+      }
+    },
+    {
+      "name": "no marker: the file's own directory",
+      "dirs": ["loose"],
+      "files": ["loose/F.wiz"],
+      "executables": ["wiz", "grail"],
+      "file": "loose/F.wiz",
+      "expect": {
+        "root": "loose",
+        "kind": "wiz",
+        "command": "wiz",
+        "args": ["lsp"],
+        "cwd": "loose",
+        "warnings": []
+      }
+    },
+    {
+      "name": "custom root markers: .git and lakefile.toml are ignored",
+      "dirs": ["proj/.git", "proj/pkg"],
+      "files": ["proj/pkg/lakefile.toml", "proj/pkg/src/F.wiz"],
+      "executables": ["wiz", "grail"],
+      "file": "proj/pkg/src/F.wiz",
+      "settings": {"rootMarkers": ["wiz-toolchain"]},
+      "expect": {
+        "root": "proj/pkg/src",
+        "kind": "wiz",
+        "command": "wiz",
+        "args": ["lsp"],
+        "cwd": "proj/pkg/src",
+        "warnings": []
+      }
+    },
+    {
+      "name": "wiz-toolchain marker",
+      "dirs": ["proj"],
+      "files": ["proj/wiz-toolchain", "proj/src/F.wiz"],
+      "executables": ["wiz", "grail"],
+      "file": "proj/src/F.wiz",
+      "expect": {
+        "root": "proj",
+        "kind": "wiz",
+        "command": "wiz",
+        "args": ["lsp"],
+        "cwd": "proj",
+        "warnings": []
+      }
+    },
+    {
+      "name": "nearest grail.wiz packages the file",
+      "dirs": ["proj/.git", "proj/p"],
+      "files": ["proj/p/grail.wiz", "proj/p/q/F.wiz"],
+      "executables": ["wiz", "grail"],
+      "file": "proj/p/q/F.wiz",
+      "expect": {
+        "root": "proj/p",
+        "kind": "grail",
+        "command": "grail",
+        "args": ["lsp", "-C", "{root}"],
+        "cwd": "proj/p",
+        "warnings": []
+      }
+    },
+    {
+      "name": "a closer .git root without grail.wiz is not a grail package",
+      "dirs": ["proj/.git", "proj/pkg"],
+      "files": ["proj/grail.wiz", "proj/pkg/.git/HEAD", "proj/pkg/F.wiz"],
+      "executables": ["wiz", "grail"],
+      "file": "proj/pkg/F.wiz",
+      "expect": {
+        "root": "proj/pkg",
+        "kind": "wiz",
+        "command": "wiz",
+        "args": ["lsp"],
+        "cwd": "proj/pkg",
+        "warnings": []
+      }
+    }
+  ]
+}

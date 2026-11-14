@@ -1,0 +1,42 @@
+<idea-plugin>
+    <id>dev.wiz.ide</id>
+    <name>Wiz</name>
+    <version>0.1.0</version>
+    <vendor url="https://github.com/wiz-pl/wiz">wiz-pl</vendor>
+
+    <description><![CDATA[
+        Wiz language support: the <code>wiz</code>/<code>grail</code> language server
+        (with the same launch and root rules as <code>editors/nvim</code>), syntax
+        highlighting, an infoview tool window, run configurations and commands.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <!-- The LSP API is optional: without it the syntax support still works. -->
+    <depends optional="true" config-file="lsp.xml">com.intellij.modules.lsp</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <language id="Wiz" implementationClass="dev.wiz.ide.WizLanguage"/>
+        <fileType name="Wiz" language="Wiz" extensions="wiz"
+                  implementationClass="dev.wiz.ide.WizLanguageFileType"/>
+        <lang.parserDefinition language="Wiz"
+                               implementationClass="dev.wiz.ide.WizParserDefinition"/>
+        <lang.syntaxHighlighterFactory language="Wiz"
+                                       implementationClass="dev.wiz.ide.WizSyntaxHighlighterFactory"/>
+
+        <configurationType implementation="dev.wiz.ide.run.WizRunConfigurationType"/>
+
+        <applicationService serviceImplementation="dev.wiz.ide.settings.WizSettings"/>
+    </extensions>
+
+    <actions>
+        <group id="Wiz.Main" text="Wiz" description="Wiz commands" popup="true">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+            <action id="Wiz.CheckFile" class="dev.wiz.ide.actions.WizCheckAction"
+                    text="Check File" description="Run wiz check on the current file"/>
+            <action id="Wiz.Build" class="dev.wiz.ide.actions.WizBuildAction"
+                    text="Build" description="Run grail build, or wiz build on the current file"/>
+            <action id="Wiz.Format" class="dev.wiz.ide.actions.WizFormatAction"
+                    text="Format File" description="Run the configured formatter"/>
+        </group>
+    </actions>
+</idea-plugin>

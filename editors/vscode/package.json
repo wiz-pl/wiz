@@ -1,0 +1,230 @@
+{
+  "name": "wiz",
+  "displayName": "Wiz",
+  "description": "Wiz language support: the wiz/grail language server, syntax highlighting, commands and an infoview.",
+  "version": "0.1.0",
+  "publisher": "wiz-pl",
+  "license": "GPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wiz-pl/wiz"
+  },
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "wiz",
+    "lean",
+    "dependent types",
+    "theorem prover"
+  ],
+  "activationEvents": [
+    "onLanguage:wiz"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "wiz",
+        "aliases": [
+          "Wiz",
+          "wiz"
+        ],
+        "extensions": [
+          ".wiz"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "wiz",
+        "scopeName": "source.wiz",
+        "path": "./syntaxes/wiz.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "wiz.restartServer",
+        "title": "Restart Language Server",
+        "category": "Wiz"
+      },
+      {
+        "command": "wiz.format",
+        "title": "Format File",
+        "category": "Wiz"
+      },
+      {
+        "command": "wiz.lint",
+        "title": "Check File",
+        "category": "Wiz"
+      },
+      {
+        "command": "wiz.build",
+        "title": "Build",
+        "category": "Wiz"
+      },
+      {
+        "command": "wiz.infoview.show",
+        "title": "Show Infoview",
+        "category": "Wiz"
+      },
+      {
+        "command": "wiz.infoview.refresh",
+        "title": "Refresh Infoview",
+        "category": "Wiz"
+      },
+      {
+        "command": "wiz.showServerLog",
+        "title": "Show Language Server Log",
+        "category": "Wiz"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "wiz.infoview.show",
+          "when": "editorLangId == wiz",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "wiz.format",
+          "when": "editorLangId == wiz"
+        },
+        {
+          "command": "wiz.lint",
+          "when": "editorLangId == wiz"
+        },
+        {
+          "command": "wiz.build",
+          "when": "editorLangId == wiz || resourceFilename == grail.wiz"
+        },
+        {
+          "command": "wiz.infoview.refresh",
+          "when": "wiz.infoviewVisible"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Wiz",
+      "properties": {
+        "wiz.server.path": {
+          "type": "string",
+          "default": "wiz",
+          "description": "The wiz executable (a path, or a name found on PATH)."
+        },
+        "wiz.server.args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "lsp"
+          ],
+          "description": "Arguments for wiz when starting the language server."
+        },
+        "wiz.grail.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "In a grail package (the root has a grail.wiz), start grail lsp instead of wiz lsp."
+        },
+        "wiz.grail.path": {
+          "type": "string",
+          "default": "grail",
+          "description": "The grail executable (a path, or a name found on PATH)."
+        },
+        "wiz.grail.args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "lsp"
+          ],
+          "description": "Arguments for grail when starting the language server. '-C <root>' is appended."
+        },
+        "wiz.toolchains.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Serve a file in an installed toolchain's share/wiz/lib with that toolchain's own wiz (one server per toolchain)."
+        },
+        "wiz.rootMarkers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "grail.wiz",
+            "wiz-toolchain",
+            "lakefile.toml",
+            ".git"
+          ],
+          "description": "Files or directories whose nearest ancestor directory is a project root."
+        },
+        "wiz.infoview.autoOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open the infoview the first time a Wiz file is opened."
+        },
+        "wiz.infoview.followCursor": {
+          "type": "boolean",
+          "default": true,
+          "description": "Update the infoview when the cursor moves."
+        },
+        "wiz.infoview.debounce": {
+          "type": "number",
+          "default": 150,
+          "minimum": 0,
+          "description": "Milliseconds to wait after the cursor stops before asking the server."
+        },
+        "wiz.format.command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "An external formatter command; {file} is replaced by the file path. Empty: ask the language server (textDocument/formatting)."
+        },
+        "wiz.check.extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra arguments for Wiz: Check File (wiz check)."
+        },
+        "wiz.build.target": {
+          "type": "string",
+          "default": "",
+          "description": "The grail target Wiz: Build runs (empty: every target)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "bundle": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node20",
+    "compile": "npm run typecheck && npm run bundle",
+    "build:test": "tsc -p tsconfig.json",
+    "test": "npm run build:test && node --test test/root.test.mjs test/grammar.test.mjs",
+    "package": "npm run compile && vsce package --no-dependencies --out wiz-0.1.0.vsix"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "@types/vscode": "^1.91.0",
+    "@vscode/vsce": "^4.1.1",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3",
+    "vscode-oniguruma": "^2.0.1",
+    "vscode-textmate": "^9.3.2"
+  }
+}

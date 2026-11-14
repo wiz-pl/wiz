@@ -1,0 +1,22 @@
+<idea-plugin>
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow id="Wiz Infoview" anchor="right" icon="/icons/wiz.svg"
+                    factoryClass="dev.wiz.ide.infoview.WizInfoviewToolWindowFactory"/>
+        <applicationConfigurable parentId="tools" instance="dev.wiz.ide.settings.WizConfigurable"
+                                 id="dev.wiz.ide.settings" displayName="Wiz"/>
+    </extensions>
+
+    <extensions defaultExtensionNs="com.intellij.platform.lsp">
+        <integrationProvider implementation="dev.wiz.ide.lsp.WizLspIntegrationProvider"/>
+    </extensions>
+
+    <actions>
+        <group id="Wiz.Lsp" text="Wiz (Language Server)" popup="true">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+            <action id="Wiz.ShowInfoview" class="dev.wiz.ide.actions.WizShowInfoviewAction"
+                    text="Show Infoview" description="Open the Wiz infoview"/>
+            <action id="Wiz.RestartServer" class="dev.wiz.ide.actions.WizRestartAction"
+                    text="Restart Language Server" description="Restart wiz lsp / grail lsp"/>
+        </group>
+    </actions>
+</idea-plugin>

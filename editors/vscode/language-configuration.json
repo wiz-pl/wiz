@@ -1,0 +1,35 @@
+{
+  "comments": {
+    "lineComment": "--",
+    "blockComment": ["/-", "-/"]
+  },
+  "brackets": [
+    ["{", "}"],
+    ["[", "]"],
+    ["(", ")"],
+    ["⟨", "⟩"],
+    ["⟦", "⟧"]
+  ],
+  "autoClosingPairs": [
+    {"open": "{", "close": "}"},
+    {"open": "[", "close": "]"},
+    {"open": "(", "close": ")"},
+    {"open": "⟨", "close": "⟩"},
+    {"open": "⟦", "close": "⟧"},
+    {"open": "\"", "close": "\"", "notIn": ["string", "comment"]},
+    {"open": "/-", "close": "-/", "notIn": ["string", "comment"]}
+  ],
+  "surroundingPairs": [
+    ["{", "}"],
+    ["[", "]"],
+    ["(", ")"],
+    ["⟨", "⟩"],
+    ["⟦", "⟧"],
+    ["\"", "\""]
+  ],
+  "wordPattern": "(-?\\d*\\.\\d\\w*)|([^\\`\\~\\!\\@\\#\\%\\^\\&\\*\\(\\)\\-\\=\\+\\[\\{\\]\\}\\\\\\|\\;\\:\\'\\\"\\,\\.\\<\\>\\/\\?\\s]+)",
+  "indentationRules": {
+    "increaseIndentPattern": "^\\s*(?:def|theorem|lemma|abbrev|axiom|inductive|coinductive|codata|structure|class|instance|mutual|namespace|section|syntax|macro|macro_rules|notation|where|do|by|match|if|then|else|let|fun)\\b.*(?:=|=>|:=|\\bwhere\\b|\\bdo\\b|\\bby\\b|\\bmatch\\b|\\bwith\\b|\\bthen\\b|\\belse\\b)\\s*$",
+    "decreaseIndentPattern": "^\\s*(?:\\}|\\]|\\)|⟩|⟧|end\\b|else\\b|in\\b|with\\b)"
+  }
+}
