@@ -15,6 +15,12 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to
   `.gitignore`) overrides it with a spec or a path to a toolchain directory or built
   checkout; the shims, `which` and `show` honour it (26a, #281).
+* An experimental WebAssembly target (8f): `wiz build FILE -o OUT --wasm` emits a binary
+  module directly from the IR, and `wiz run FILE --wasm` runs it under Node with
+  `web/wasm-host.mjs` (big integers as `BigInt`; values in linear memory). IO-less
+  `main`s over `Nat`/`Int`, constructors, closures, join points and `Array` work; C and
+  LLVM are unchanged. Limits and the `wasm` test group are in
+  `docs/stages/08-backend/wasm.md`.
 
 ## [0.1.0] - unreleased (draft)
 

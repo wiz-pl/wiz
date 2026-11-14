@@ -13,10 +13,12 @@ def usage : String := "usage:
   wiz build FILE -o OUT [--split N]  compile the program as N C units in parallel
                                    (default 1: one unit; a split build is faster but the
                                    generated program runs somewhat slower, stage 15k)
+  wiz build FILE -o OUT --wasm     … or a WebAssembly module (prototype, stage 8f: no IO,
+                                   Nat/Int, closures, arrays; run it with web/wasm-host.mjs)
   wiz build FILE -o OUT --lib      … or the exported functions to an object file, with OUT.h
   wiz build FILE -o OUT --no-main  … or the exported functions, linked without a `main`
                                    (say, a Wasm module: --cc emcc --ldflags --no-entry)
-  wiz run FILE [--llvm]            build and run `main`, printing its value
+  wiz run FILE [--llvm|--wasm]     build and run `main`, printing its value
   wiz doc [MODULE|FILE|DIR…] -o OUT [--lib] [--source-url URL] [--title T] [--web DIR]
                                    documentation: a static site (one page per module,
                                    index, search); --lib: the toolchain's library;
@@ -428,16 +430,18 @@ def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOne
   pure (if s.messages.any (·.severity == .error) then none else some s)
 
 def buildCmd (tc : Toolchain) (path out : String) (llvm : Bool) (lib : Bool := false) (noMain : Bool := false)
-    (split : Nat := 0) : IO UInt32 := do
+    (split : Nat := 0) (wasm : Bool := false) : IO UInt32 := do
   let some s ← elabFile tc path | pure 1
-  match ← Build.build tc s "main" out llvm lib noMain split with
+  match ← Build.build tc s "main" out llvm lib noMain split wasm with
   | .error e => IO.eprintln e; pure 1
   | .ok _ => pure 0
 
-def runCmd (tc : Toolchain) (path : String) (llvm : Bool) (split : Nat := 0) : IO UInt32 := do
+def runCmd (tc : Toolchain) (path : String) (llvm : Bool) (split : Nat := 0) (wasm : Bool := false) : IO UInt32 := do
   let some s ← elabFile tc path | pure 1
   let dir ← IO.FS.createTempDir
-  match ← Build.runGlobal tc s "main" dir llvm (split := split) with
+  let r ← if wasm then Build.runWasmGlobal s "main" dir
+    else Build.runGlobal tc s "main" dir llvm (split := split)
+  match r with
   | .error e => IO.eprintln e; pure 1
   | .ok v => IO.print (if v.endsWith "\n" then v else v ++ "\n"); pure 0
 
@@ -518,10 +522,12 @@ def main (args : List String) : IO UInt32 := do
   | ["build", path, "-o", out, "--no-main"] => buildCmd tc path out false false true (split := split)
   | ["build", path, "-o", out, "--no-main", "--llvm"] | ["build", path, "-o", out, "--llvm", "--no-main"] =>
     buildCmd tc path out true false true (split := split)
+  | ["build", path, "-o", out, "--wasm"] => buildCmd tc path out false (wasm := true)
   | "doc" :: rest => docCmd tc rest
   | "fmt" :: rest => fmtCmd tc rest
   | ["run", path] => runCmd tc path false (split := split)
   | ["run", path, "--llvm"] => runCmd tc path true (split := split)
+  | ["run", path, "--wasm"] => runCmd tc path false (wasm := true)
   | "lsp" :: opts => do
     match lspOptions opts with
     | none => IO.println usage; pure 2

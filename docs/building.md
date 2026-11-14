@@ -120,6 +120,14 @@ licence, in `share/wiz/cc/LICENSES/lean4-LICENSES` with Lean's third-party licen
 not bundled). A checkout uses `cc` and the system's GMP unless you pass
 `--cc`/`--cflags`/`--ldflags` (the Nix dev shell writes them to `grail.local.wiz`).
 
+`wiz build FILE -o OUT --wasm` is a third, experimental path (stage 8f,
+[08-backend/wasm.md](stages/08-backend/wasm.md)): it emits a binary WebAssembly module
+directly from the IR and does not invoke a C compiler, the C runtime or GMP. Values live
+in the module's linear memory; a small checked-in JS host (`web/wasm-host.mjs`) supplies
+big integers as `BigInt`s and prints the result. It runs IO-less `main`s over `Nat`/`Int`,
+closures, arrays and algebraic data; `wiz run FILE --wasm` builds and runs it under Node.
+It is a prototype with the limits listed in that section, not a replacement for C.
+
 **Licences of what is linked into your programs.** The Wiz Runtime Library Exception
 (COPYING.RUNTIME) lets you distribute programs compiled by Wiz under any terms, but it
 covers only Wiz's own runtime. Other libraries keep their licences:

@@ -120,3 +120,11 @@ description).
   `wiz_nat_beq`/`wiz_nat_blt` no longer decrement): a lookup in a tree counts neither
   the key nor the keys it compares it with.
 
+## 8f: WebAssembly (prototype)
+
+`wiz build FILE -o OUT --wasm` writes a binary WebAssembly module directly from the IR
+and `wiz run FILE --wasm` runs it under Node with a small JS host (big integers only;
+values live in linear memory). It is additive: C and LLVM are unchanged. Its supported
+subset, representation, limits and the 11-case `wasm` test group are in
+[08-backend/wasm.md](08-backend/wasm.md).
+
