@@ -1,0 +1,145 @@
+{
+  "schema": "wiz-release/v1",
+  "status": "draft",
+  "version": "0.1.0",
+  "tag": null,
+  "commit": "ed9cff34812d85a76faf935972d8eceb7460a357",
+  "sourceDateEpoch": 1794686671,
+  "generatedAt": null,
+  "releaseNotes": "docs/release/v0.1.md",
+  "knownLimitations": "docs/release/v0.1.md#known-limitations",
+  "filledBy": null,
+  "source": {
+    "tarball": {
+      "name": "wiz-0.1.0-src.tar.gz",
+      "sha256": null,
+      "size": null,
+      "manifestSha256": null,
+      "treeSha256": null,
+      "schema": "wiz-source-tarball/v1"
+    }
+  },
+  "artifacts": [
+    {
+      "name": "wiz-x86_64-linux.tar.gz",
+      "kind": "toolchain",
+      "system": "x86_64-linux",
+      "sha256": null,
+      "size": null,
+      "url": null
+    },
+    {
+      "name": "wiz-x86_64-linux.tar.gz.sha256",
+      "kind": "checksum",
+      "system": "x86_64-linux",
+      "sha256": null,
+      "size": null,
+      "url": null
+    },
+    {
+      "name": "wiz-0.1.0-src.tar.gz",
+      "kind": "source",
+      "system": "any",
+      "sha256": null,
+      "size": null,
+      "url": null
+    },
+    {
+      "name": "wiz-0.1.0-src.tar.gz.manifest.json",
+      "kind": "source-manifest",
+      "system": "any",
+      "sha256": null,
+      "size": null,
+      "url": null
+    },
+    {
+      "name": "wiz-0.1.0-src.tar.gz.sha256",
+      "kind": "checksum",
+      "system": "any",
+      "sha256": null,
+      "size": null,
+      "url": null
+    }
+  ],
+  "toolchain": {
+    "lean": "leanprover/lean4:v4.35.0",
+    "nixpkgs": "02c087f3fe673c9e317f206a627cb6b910336dbe",
+    "flakeLockSha256": null,
+    "bundledC": {
+      "clang": "Lean toolchain clang",
+      "glibc": "2.27",
+      "gmp": "6.3.0",
+      "boehmgc": "8.2.8",
+      "cadical": "Lean toolchain copy (LRAT)",
+      "z3": null
+    },
+    "platforms": {
+      "releaseTarball": [
+        "x86_64-linux"
+      ],
+      "nixPackages": [
+        "x86_64-linux",
+        "aarch64-linux"
+      ],
+      "glibcFloor": {
+        "run": "2.27",
+        "build": "2.30"
+      }
+    }
+  },
+  "checks": {
+    "ci": {
+      "workflow": ".github/workflows/ci.yml",
+      "runId": null,
+      "conclusion": null
+    },
+    "release": {
+      "workflow": ".github/workflows/release.yml",
+      "runId": null,
+      "conclusion": null
+    },
+    "selfhost": {
+      "selector": "=selfhost",
+      "passed": null,
+      "failed": null,
+      "skipped": null
+    },
+    "fixpoint": {
+      "green": null,
+      "runId": null
+    },
+    "trustLedger": {
+      "passed": null
+    },
+    "docsStyle": {
+      "passed": null
+    },
+    "nixBuildCheck": {
+      "x86_64-linux": null,
+      "aarch64-linux": null
+    },
+    "cachix": {
+      "name": "badlydrawnwizards",
+      "x86_64-linux": null,
+      "aarch64-linux": null
+    },
+    "testsNotInCI": {
+      "web": null,
+      "infoview": null,
+      "nvim": null
+    },
+    "installSmokeTest": {
+      "passed": null,
+      "tarball": null
+    }
+  },
+  "attestation": {
+    "kind": "none",
+    "statement": null,
+    "statementSha256": null,
+    "subjectSha256": null,
+    "extraData": null,
+    "verifier": null
+  },
+  "notes": null
+}
