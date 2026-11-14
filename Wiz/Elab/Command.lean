@@ -124,9 +124,10 @@ structure CommandState (R : Type) where
   cSources : Option (String → String → Option String) := none
   /-- (include-str) the contents of the `include_str "f"` files: by module (`""`: the main
   file) and the path as written, the file's contents or the error to report at the include.
-  The command line reads them, relative to each `.wiz` file (`Module.includeTable`): the
-  frontend is pure and macros stay pure. Without a resolver (the language server), an
-  `include_str` is an error. -/
+  The drivers read them, relative to each `.wiz` file (`Module.includeTable`): the
+  frontend is pure and macros stay pure. The command line reads them in
+  `Main.elaborate`; the language server from each document's URI (`LSP.includeTable`).
+  With no resolver at all, an `include_str` is an error. -/
   includes : Option (String → String → Except String String) := none
   /-- (9f) the C files to compile and link with the program, and the libraries (`link_lib`) -/
   linkC : Array String := #[]

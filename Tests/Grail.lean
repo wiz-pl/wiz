@@ -140,7 +140,7 @@ def modulesGroup : Group where
         check (sneaky s) s!"the language server's engine: {s.messages.toList.map (·.text)}"
         -- through the server: the diagnostic is at the import
         let srv : LSP.Server := { libs := ms.fold (fun m k (p, t) => m.insert k (p.toString, t)) {}, trusted := ["Prelude"] }
-        let (_, out) := LSP.handle srv (Lean.Json.mkObj [("jsonrpc", "2.0"), ("method", "textDocument/didOpen"),
+        let (_, out) ← LSP.handle srv (Lean.Json.mkObj [("jsonrpc", "2.0"), ("method", "textDocument/didOpen"),
           ("params", Lean.Json.mkObj [("textDocument", Lean.Json.mkObj [("uri", "file:///t.wiz"), ("text", src)])])])
         check ((out[0]!.compress.splitOn "module Sneaky has errors").length > 1) s!"diagnostics: {out[0]!.compress}"
         -- a module that imports what it uses is fine, and its declarations are seen

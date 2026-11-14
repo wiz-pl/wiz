@@ -33,9 +33,9 @@ drivers, which already read imports, C headers and `link_c` files:
 * `Elab.Command.resolveIncludes` runs at the top of `elabCommand`, looks each node up by
   `(module, path as written)` and substitutes the literal (or an empty literal plus an
   error at the include). This is the one hook in elaboration.
-
-A frontend with no include table (the language server today) reports "the file was not
-read" at each `include_str`; see "Language server" below.
+* The language server (`Wiz/LSP.lean`) builds the same table from the document's URI:
+  `includeTable` reads the document's own directory, so `include_str` works in an open
+  document exactly as on the command line (see "Language server" below).
 
 ## Path rules
 
@@ -76,11 +76,32 @@ and cheap; the content hash is already computed once per run.
 
 ## Language server
 
-`include_str` needs a resolver; without one it is an error. The LSP's `elabText` is pure
-and does not know the document's URI, so wiring it up means passing the document's
-directory (from the `textDocument/didOpen`/`didChange` URI) through `elabText` and
-building a table in IO, cached by the file's modification time. Until then an editor
-reports each include as unread; the command line is the supported path.
+The server elaborates a document with the same rules. The URI of
+`textDocument/didOpen`/`didChange` gives the document's path (`Wiz.LSP.uriPath` decodes
+a `file:` URI, `%20` included); `includeTable` reads the `include_str` files of the text
+and of the modules it imports, each relative to its own file, and `elabText` gets the
+table as `CommandState.includes`. `include_str` in an open document therefore reads its
+sibling file and reports exactly the command line's errors (a missing file, a `..` path,
+a non-UTF-8 file). In particular, the frontend's old "the file was not read" message is
+gone from the server.
+
+Choices where the server differs from `wiz check`:
+
+* **The text on disk is read**, not another open buffer's unsaved text: an included file
+  that is itself open with edits is read as last saved.
+* **There is no file watcher.** The table is rebuilt at each `didChange` (its contents
+  are in `key₀`, so the commands after the include are elaborated again); editing only
+  the included file shows up on the next change of the including document.
+* **The workspace bounds what is read.** When `initialize` names folders
+  (`workspaceFolders`, else `rootUri`, else `rootPath`), a document outside them gets an
+  error at each include rather than reading a file outside the workspace. (The server's
+  own libraries — the toolchain's `lib/` and a package's modules — are not bounded: they
+  are the code the server was started with.) A server started with no folders restricts
+  nothing: each document's directory is its own root, as on the command line. A document
+  with no file at all (`untitled:` buffers) reports that it has no path.
+
+The command line's own behaviour is unchanged: `wiz check file.wiz` reads includes
+relative to the file, whether or not anything is open in an editor.
 
 ## Tests
 
@@ -89,3 +110,8 @@ reports each include as unread; the command line is the supported path.
 missing file, a non-UTF-8 file, an absolute path and a `..` path are errors at the
 include; and editing the included file invalidates the cache (the `#eval` command is
 re-elaborated, the imported Prelude still hits).
+
+`lsp`: an open document reads its sibling file (the text arrives through `#eval`), a
+change re-reads it, a missing file and a `..` path give the command line's errors, a
+document outside the workspace folders is refused, and an `include_str` in an imported
+module resolves against that module's file.
