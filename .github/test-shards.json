@@ -7,6 +7,8 @@
     "=selfhost",
     "=audit-kernels"
   ]},
+  {"name": "third-checker", "inputs": ["tools/third-checker/*", "selfhost/Kernel.wiz"],
+   "select": ["=third-checker"]},
   {"name": "hdl-verified", "heavy": true, "select": [
     "=hdl-verified"
   ]},

@@ -1,0 +1,113 @@
+-- The third checker's proof-term dump format (tools/third-checker/README.md).
+--
+-- This file is appended to `selfhost/Kernel.wiz` by `driver.py`; it shares no code with
+-- the checker (a Python program) and only turns a kernel `Tm` into the compact
+-- s-expression the checker reads. The serializer is *not* trusted: the checker parses
+-- the result and re-checks the term from scratch.
+
+def joinS : List String -> String
+  | .nil => ""
+  | .cons x .nil => x
+  | .cons x rest => String.append x (String.append " " (joinS rest))
+def wrapS : List String -> String
+  | .nil => "()"
+  | .cons x .nil => String.append "(" (String.append x ")")
+  | .cons x xs => String.append "(" (String.append x (String.append " " (String.append (joinS xs) ")")))
+
+def serQ : Q -> String
+  | .qz => "0"
+  | .qo => "1"
+  | .qw => "w"
+
+-- levels: `nK` a numeral, `pNAME` a parameter, and `(s l)`, `(max l l')`, `(imax l l')`
+def serLvl : Lvl -> String
+  | .lnum n => String.append "n" (Nat.toString n)
+  | .lparam s => String.append "p" s
+  | .lsucc l => wrapS (.cons "s" (.cons (serLvl l) .nil))
+  | .lmax a b => wrapS (.cons "max" (.cons (serLvl a) (.cons (serLvl b) .nil)))
+  | .limax a b => wrapS (.cons "imax" (.cons (serLvl a) (.cons (serLvl b) .nil)))
+  | .lhole => "hole"
+
+def lvls : List Lvl -> List String
+  | .nil => .nil
+  | .cons l rest => .cons (serLvl l) (lvls rest)
+
+mutual
+def serTms : Tms -> List String
+  | .tnil => .nil
+  | .tcons t rest => .cons (ser t) (serTms rest)
+def ser : Tm -> String
+  | .var i => wrapS (.cons "v" (.cons (Nat.toString i) .nil))
+  | .univ n => wrapS (.cons "U" (.cons (Nat.toString n) .nil))
+  | .prop => "P"
+  | .sortL l => wrapS (.cons "L" (.cons (serLvl l) .nil))
+  | .pi q i j a b => wrapS (.cons "pi" (.cons (serQ q) (.cons (serLvl i) (.cons (serLvl j) (.cons (ser a) (.cons (ser b) .nil))))))
+  | .lam b => wrapS (.cons "lam" (.cons (ser b) .nil))
+  | .app f a => wrapS (.cons "app" (.cons (ser f) (.cons (ser a) .nil)))
+  | .letE ty v b => wrapS (.cons "letE" (.cons (ser ty) (.cons (ser v) (.cons (ser b) .nil))))
+  | .ann t ty => wrapS (.cons "ann" (.cons (ser t) (.cons (ser ty) .nil)))
+  | .letq q ty v b => wrapS (.cons "letq" (.cons (serQ q) (.cons (ser ty) (.cons (ser v) (.cons (ser b) .nil)))))
+  | .sigma q i j a b => wrapS (.cons "sigma" (.cons (serQ q) (.cons (serLvl i) (.cons (serLvl j) (.cons (ser a) (.cons (ser b) .nil))))))
+  | .pair a b => wrapS (.cons "pair" (.cons (ser a) (.cons (ser b) .nil)))
+  | .fst p => wrapS (.cons "fst" (.cons (ser p) .nil))
+  | .snd p => wrapS (.cons "snd" (.cons (ser p) .nil))
+  | .unit n => wrapS (.cons "unit" (.cons (Nat.toString n) .nil))
+  | .star => "tt"
+  | .empty n => wrapS (.cons "empty" (.cons (Nat.toString n) .nil))
+  | .ptrue => "True"
+  | .pfalse => "False"
+  | .exfalso m t => wrapS (.cons "exfalso" (.cons (ser m) (.cons (ser t) .nil)))
+  | .letUnit u b => wrapS (.cons "letUnit" (.cons (ser u) (.cons (ser b) .nil)))
+  | .enum k => wrapS (.cons "enum" (.cons (Nat.toString k) .nil))
+  | .tag k i => wrapS (.cons "tag" (.cons (Nat.toString k) (.cons (Nat.toString i) .nil)))
+  | .ecase m s bs => wrapS (.cons "ecase" (.cons (ser m) (.cons (ser s) (.cons (wrapS (.cons "ts" (serTms bs))) .nil))))
+  | .eq A a b => wrapS (.cons "eq" (.cons (ser A) (.cons (ser a) (.cons (ser b) .nil))))
+  | .eqTy A B => wrapS (.cons "eqTy" (.cons (ser A) (.cons (ser B) .nil)))
+  | .eqRefl A a => wrapS (.cons "refl" (.cons (ser A) (.cons (ser a) .nil)))
+  | .tyRefl A => wrapS (.cons "reflTy" (.cons (ser A) .nil))
+  | .coe A B e t => wrapS (.cons "cast" (.cons (ser A) (.cons (ser B) (.cons (ser e) (.cons (ser t) .nil)))))
+  | .subst A a P p b e => wrapS (.cons "transp" (.cons (ser A) (.cons (ser a) (.cons (ser P) (.cons (ser p) (.cons (ser b) (.cons (ser e) .nil)))))))
+  | .qty => "Qty"
+  | .qlit q => wrapS (.cons "qlit" (.cons (serQ q) .nil))
+  | .sigmaQ q i j a b => wrapS (.cons "sigmaQ" (.cons (ser q) (.cons (serLvl i) (.cons (serLvl j) (.cons (ser a) (.cons (ser b) .nil))))))
+  | .descr l I => wrapS (.cons "descr" (.cons (Nat.toString l) (.cons (ser I) .nil)))
+  | .dret i => wrapS (.cons "dret" (.cons (ser i) .nil))
+  | .darg q S D => wrapS (.cons "darg" (.cons (ser q) (.cons (ser S) (.cons (ser D) .nil))))
+  | .drec q j D => wrapS (.cons "drec" (.cons (ser q) (.cons (ser j) (.cons (ser D) .nil))))
+  | .dhrec q H j D => wrapS (.cons "dhrec" (.cons (ser q) (.cons (ser H) (.cons (ser j) (.cons (ser D) .nil)))))
+  | .delim v P a b d e D => wrapS (.cons "delim" (.cons (Nat.toString v) (.cons (ser P) (.cons (ser a) (.cons (ser b) (.cons (ser d) (.cons (ser e) (.cons (ser D) .nil))))))))
+  | .mu l I D i => wrapS (.cons "mu" (.cons (Nat.toString l) (.cons (ser I) (.cons (ser D) (.cons (ser i) .nil)))))
+  | .con x => wrapS (.cons "con" (.cons (ser x) .nil))
+  | .ind l I D v P m i x => wrapS (.cons "ind" (.cons (Nat.toString l) (.cons (ser I) (.cons (ser D) (.cons (Nat.toString v) (.cons (ser P) (.cons (ser m) (.cons (ser i) (.cons (ser x) .nil)))))))))
+  | .size => "Size"
+  | .szInf => "inf"
+  | .szSuc s => wrapS (.cons "suc" (.cons (ser s) .nil))
+  | .sizeLt s => wrapS (.cons "lt" (.cons (ser s) .nil))
+  | .mus l I D i s => wrapS (.cons "mus" (.cons (Nat.toString l) (.cons (ser I) (.cons (ser D) (.cons (ser i) (.cons (ser s) .nil))))))
+  | .sfix l I D v P f s i x => wrapS (.cons "sfix" (.cons (Nat.toString l) (.cons (ser I) (.cons (ser D) (.cons (Nat.toString v) (.cons (ser P) (.cons (ser f) (.cons (ser s) (.cons (ser i) (.cons (ser x) .nil))))))))))
+  | .scase l q I D v P m s i x => wrapS (.cons "scase" (.cons (Nat.toString l) (.cons (serQ q) (.cons (ser I) (.cons (ser D) (.cons (Nat.toString v) (.cons (ser P) (.cons (ser m) (.cons (ser s) (.cons (ser i) (.cons (ser x) .nil)))))))))))
+  | .nu l I D i s => wrapS (.cons "nu" (.cons (Nat.toString l) (.cons (ser I) (.cons (ser D) (.cons (ser i) (.cons (ser s) .nil))))))
+  | .out x => wrapS (.cons "out" (.cons (ser x) .nil))
+  | .cocon x => wrapS (.cons "cocon" (.cons (ser x) .nil))
+  | .scofix l I D A f s i a => wrapS (.cons "scofix" (.cons (Nat.toString l) (.cons (ser I) (.cons (ser D) (.cons (ser A) (.cons (ser f) (.cons (ser s) (.cons (ser i) (.cons (ser a) .nil)))))))))
+  | .coit l I D S st i s => wrapS (.cons "coit" (.cons (Nat.toString l) (.cons (ser I) (.cons (ser D) (.cons (ser S) (.cons (ser st) (.cons (ser i) (.cons (ser s) .nil))))))))
+  | .const n ps ls v ty => wrapS (.cons "const" (.cons n (.cons (wrapS (.cons "ls" (lvls ls))) (.cons (ser v) (.cons (ser ty) .nil)))))
+  | .axiomC n ty => wrapS (.cons "axiom" (.cons n (.cons (ser ty) .nil)))
+  | .ulift k l A => wrapS (.cons "ulift" (.cons (Nat.toString k) (.cons (Nat.toString l) (.cons (ser A) .nil))))
+  | .up a => wrapS (.cons "up" (.cons (ser a) .nil))
+  | .down t => wrapS (.cons "down" (.cons (ser t) .nil))
+  | .prf l t => wrapS (.cons "prf" (.cons (serLvl l) (.cons (ser t) .nil)))
+end
+
+def joinLines : List String -> String
+  | .nil => ""
+  | .cons x .nil => x
+  | .cons x rest => String.append x (String.append "\n" (joinLines rest))
+
+-- one corpus line: the kernel's verdict, the name, and the term it saw
+def dumpLine (name : String) (ty v : Tm) : String :=
+  match checkDecl ty (.some v) with
+  | .ok _ _ => match checkMarking v ty with
+    | .good v' => String.append "OK\t" (String.append name (String.append "\t" (String.append (ser ty) (String.append "\t" (ser v')))))
+    | .bad _ => String.append "ERR\t" (String.append name (String.append "\t" (String.append (ser ty) (String.append "\t" (ser v)))))
+  | .err _ => String.append "ERR\t" (String.append name (String.append "\t" (String.append (ser ty) (String.append "\t" (ser v)))))
