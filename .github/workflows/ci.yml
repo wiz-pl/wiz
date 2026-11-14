@@ -304,6 +304,46 @@ jobs:
       - name: The trusted base matches the baseline
         run: scripts/trust-ledger.sh --check
 
+  # (11ad) `wiz lint --format sarif`: the machine-readable form of the linter, uploaded
+  # for a code-scanning service. Report-only: without `--deny`, a warning exits 0, so the
+  # existing findings in lib/ do not fail the job (an elaboration error still does). Not
+  # part of `CI result`.
+  lint-sarif:
+    name: lint SARIF
+    needs: [changes, build]
+    if: github.event_name != 'schedule' && needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Restore the Lake build
+        id: lake-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .lake
+          key: lake-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ needs.build.outputs.lake-hash }}
+          restore-keys: lake-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-
+      - name: Build wiz (unless restored)
+        run: |
+          if [ "${{ steps.lake-cache.outputs.cache-hit }}" != true ]; then
+            echo "::warning title=Lake cache::no exact Lake build for this commit (evicted?): building wiz here"
+          fi
+          lake build wiz
+          [ -x .lake/build/bin/wiz ] || { echo "::error::.lake/build/bin/wiz is missing after lake build"; exit 1; }
+      - name: wiz lint --format sarif
+        run: .lake/build/bin/wiz lint --format sarif lib/Prelude.wiz > lint.sarif
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lint-sarif
+          path: lint.sarif
+          if-no-files-found: ignore
+          retention-days: 14
+
   # The Nix package (flake.nix: wiz and grail, wrapped with the toolchain), pushed to
   # Cachix on master (and on a manual run), so that `nix run github:wiz-pl/wiz` downloads
   # it. It is a pure Nix build without Lake's artifact cache, so it rebuilds every module

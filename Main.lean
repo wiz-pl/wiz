@@ -9,11 +9,12 @@ def usage : String := "usage:
   wiz parse FILE          print the syntax tree of every command
   wiz check [-I DIR] FILE elaborate and type check (quantities: 0, 1, ω); -I DIR: another
                           module root (a package's src/), before or after FILE
-  wiz lint FILE|- [--json] [--deny] [--max-line N] [--no-style]
+  wiz lint FILE|- [--format text|json|sarif] [--deny] [--max-line N] [--no-style]
                           style and hygiene warnings (stage 11ad): tabs, trailing
                           whitespace, CRLF, long lines, sorry, axioms, shadowed binders,
                           unused or duplicate imports; exit 0 unless an error, or
-                          --deny and a warning; `-` reads standard input
+                          --deny and a warning; --format sarif: SARIF 2.1.0 for code
+                          scanning (--json is --format json); `-` reads standard input
   wiz build FILE -o OUT [--llvm]   compile the definition `main` to an executable (via C or LLVM)
   wiz build FILE -o OUT [--split N]  compile the program as N C units in parallel
                                    (default 1: one unit; a split build is faster but the
@@ -323,6 +324,8 @@ def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
 /-- (11ad) `wiz lint`'s options. -/
 structure LintArgs where
   file : Option String := none
+  /-- `text` (default), `json` or `sarif`; `--json` is a shorthand for `json` -/
+  format : Option String := none
   json : Bool := false
   deny : Bool := false
   maxLine : Nat := 120
@@ -330,6 +333,11 @@ structure LintArgs where
 
 def lintArgs (a : LintArgs) : List String → Except String LintArgs
   | [] => pure a
+  | "--format" :: f :: rest =>
+    if f == "text" || f == "json" || f == "sarif" then
+      lintArgs { a with format := some f } rest
+    else throw s!"wiz lint: --format needs text, json or sarif, not {f}"
+  | ["--format"] => throw "wiz lint: --format needs text, json or sarif"
   | "--json" :: rest => lintArgs { a with json := true } rest
   | "--deny" :: rest => lintArgs { a with deny := true } rest
   | "--no-style" :: rest => lintArgs { a with style := false } rest
@@ -343,7 +351,9 @@ def lintArgs (a : LintArgs) : List String → Except String LintArgs
       | some _ => throw "wiz lint: one file (or - for standard input)"
 
 /-- (11ad) `wiz lint FILE|-`: the style and hygiene warnings of `Wiz.Lint`, then the
-exit status: 1 for an error (as `wiz check`), or for a warning with `--deny`. -/
+exit status: 1 for an error (as `wiz check`), or for a warning with `--deny`.
+`--format sarif` writes one SARIF 2.1.0 log and `--format json` one JSON summary; both
+are written even when the exit status is 1. -/
 def lintCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   let a ← match lintArgs {} args with
     | .ok a => pure a
@@ -356,11 +366,15 @@ def lintCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   let diags := Lint.run { maxLine := a.maxLine, style := a.style } input s
   let errors := diags.filter (·.severity == .error)
   let warnings := diags.filter (·.severity == .warning)
-  if a.json then
+  let format := a.format.getD (if a.json then "json" else "text")
+  if format == "sarif" then
+    IO.println (Wiz.Sarif.render (← Wiz.Sarif.artifactUri file) input diags)
+  else if format == "json" then
     let js := Lean.Json.mkObj [
       ("file", Lean.Json.str name),
       ("diagnostics", Lean.Json.arr (diags.map (Lint.Diag.toJson input))),
-      ("warnings", warnings.size), ("errors", errors.size)]
+      ("warnings", Lean.Json.num (Lean.JsonNumber.fromNat warnings.size)),
+      ("errors", Lean.Json.num (Lean.JsonNumber.fromNat errors.size))]
     IO.println js.compress
   else
     for d in diags do

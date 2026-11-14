@@ -42,6 +42,7 @@
     "=hdl",
     "infoview",
     "language",
+    "=lint-sarif",
     "lsp",
     "macros",
     "modules",

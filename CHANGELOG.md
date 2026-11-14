@@ -10,6 +10,13 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* lint: `wiz lint --format sarif` writes one SARIF 2.1.0 log with namespaced rule ids
+  (`wizlint/<category>/<rule>`), `error`/`warning`/`note` levels, artifact URIs relative
+  to the invocation (`%SRCROOT%`), `artifacts`, UTF-16 columns, regions, and
+  `primaryLocationLineHash` plus a `wizlint/v1` composite fingerprint, so a code-scanning
+  service or a CI job can consume the findings; `--format json` writes the compact
+  summary and `--format text` stays the default. A CI job uploads the log, without
+  failing on the existing findings (11ad).
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to

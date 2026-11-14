@@ -558,22 +558,56 @@ should know about. A warning never fails the file: the exit status is 0 unless t
 an elaboration error, or `--deny` is given and there is a warning. Diagnostics print as
 `FILE:LINE:COL: warning: MESSAGE [RULE]`, as `wiz check` prints its own.
 
-| rule | what it reports |
-|------|-----------------|
-| `style.tabs` | a tab in indentation or alignment |
-| `style.trailing-whitespace` | spaces or tabs at the end of a line |
-| `style.crlf` | CRLF line endings (once per file) |
-| `style.line-length` | a line longer than `--max-line` (`0` turns it off) |
-| `sorry` | the identifier `sorry`/`admit`, outside comments and strings |
-| `axiom` | an `axiom` declared in this file |
-| `shadowed-binder` | a binder whose name is an enclosing binder's or a visible global's |
-| `unused-import` | an imported module nothing in this file uses |
-| `duplicate-import` | the same module imported twice |
+| rule | SARIF `ruleId` | what it reports |
+|------|-----------------|-----------------|
+| `style.tabs` | `wizlint/style/tabs` | a tab in indentation or alignment |
+| `style.trailing-whitespace` | `wizlint/style/trailing-whitespace` | spaces or tabs at the end of a line |
+| `style.crlf` | `wizlint/style/crlf` | CRLF line endings (once per file) |
+| `style.line-length` | `wizlint/style/line-length` | a line longer than `--max-line` (`0` turns it off) |
+| `sorry` | `wizlint/hygiene/sorry` | the identifier `sorry`/`admit`, outside comments and strings |
+| `axiom` | `wizlint/hygiene/axiom` | an `axiom` declared in this file |
+| `shadowed-binder` | `wizlint/hygiene/shadowed-binder` | a binder whose name is an enclosing binder's or a visible global's |
+| `unused-import` | `wizlint/imports/unused-import` | an imported module nothing in this file uses |
+| `duplicate-import` | `wizlint/imports/duplicate-import` | the same module imported twice |
 
-Options: `--json` (one document: `file`, `diagnostics`, `warnings`, `errors`; each
-diagnostic has `rule`, `severity`, `message`, `line`, `column`, `endLine`, `endColumn`,
-1-based), `--deny`, `--max-line N` (default 120), `--no-style`, and `-` for standard
-input.
+The text output prints the short rule name; SARIF uses the namespaced id, so lint
+results can share a dashboard with scry, CodeQL or Semgrep without collisions.
+
+Options: `--format text|json|sarif` (`text` is the default), `--deny`, `--max-line N`
+(default 120), `--no-style`, and `-` for standard input. `--format json` writes one
+document: `file`, `diagnostics`, `warnings`, `errors`; each diagnostic has `rule`,
+`severity`, `message` and its 1-based `span` (`startLine`, `startColumn`, `endLine`,
+`endColumn`, end exclusive). The flat `line`, `column`, `endLine` and `endColumn` fields
+are still written for readers of the older document. `--json` is the older spelling of
+`--format json`.
+
+`--format sarif` writes one [SARIF 2.1.0] log for a code-scanning service or a CI job
+(`Wiz/Sarif.lean`; the renderer is host-side and does not depend on the scry package,
+whose `Scry.Sarif` has the same shape). The log has `$schema` (the OASIS 2.1.0 schema
+URL), `version: "2.1.0"` and one entry in `runs`: its `tool.driver` names the tool
+(`wiz`, `Wiz.version`, `informationUri` `https://github.com/wiz-pl/wiz`) and lists one
+reporting descriptor per rule, in a fixed order, and `results` holds one result per
+finding.
+
+| SARIF field | value |
+|---|---|
+| `ruleId` | the namespaced id in the table above; an elaboration error uses `wizlint/elaborator/<code>` (`unknown-identifier`, `parse-error`, …) or `wizlint/elaborator/other`, and gets a descriptor after the fixed table |
+| `level` | `error`, `warning` or `note` (Wiz's `info`) |
+| `message.text` | the finding's message |
+| `locations[0].physicalLocation.artifactLocation` | `uri`: the file relative to the working directory (an absolute path under it is shortened; standard input is `-`); `uriBaseId`: `%SRCROOT%` |
+| `artifacts[0].location` | the same `uri` and `uriBaseId` as the result's location |
+| `columnKind` | `utf16CodeUnits`: the region's columns count UTF-16 code units, not code points |
+| `locations[0].physicalLocation.region` | `startLine`, `startColumn`, `endLine`, `endColumn`, 1-based, end exclusive; a position-only finding gets a one-character region when it is not at the end of its line |
+| `partialFingerprints["primaryLocationLineHash"]` | FNV-1a over the rule id and the normalized primary line (whitespace stripped and collapsed, no line number): GitHub code scanning's key, so a line move keeps the alert |
+| `partialFingerprints["wizlint/v1"]` | the composite fingerprint: FNV-1a over the rule id, the normalized relative path and the normalized primary line |
+
+The SARIF log is written before the exit status is decided, so `--deny` (exit 1) and a
+file with an elaboration error still produce a complete document. SARIF fields not
+emitted: `helpUri` on a rule, `invocations`, `fixes`, `codeFlows`, `relatedLocations`,
+`properties`, `baselineState` and `originalUriBaseIds` (there is no baseline file;
+`--deny` is the gate, and `%SRCROOT%` is GitHub's base id).
+
+[SARIF 2.1.0]: https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html
 
 Each check is either textual (`style.*`; `sorry` skips comments and strings) or reads a
 fact the elaborator already records, so it adds no elaboration work:
@@ -609,4 +643,7 @@ source.
 
 Tests: the `ward` group (`Tests/Groups/Ward.lean`) has a fixture per rule, a clean file,
 a comment/string that says `sorry`, the CLI's exit status with and without `--deny`, its
-JSON document, and standard input.
+JSON document, and standard input. The `lint-sarif` group (`Tests/Groups/LintSarif.lean`)
+checks the SARIF document's required keys, several rules and severities, the relative
+artifact URIs, a file that does not parse, the exit status with `--deny`, a golden
+document, and that `--format text` is unchanged.

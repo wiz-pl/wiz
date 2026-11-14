@@ -183,6 +183,12 @@ cached between runs.
   `scripts/trust-ledger.sh --update`. The `native` and `hdl-verified` groups check the
   same ledger in the shards; this job runs the whole of it without a shard's path
   filter to skip it, and `CI result` requires it when code changed.
+* **Lint SARIF** (the `lint-sarif` job): `wiz lint --format sarif lib/Prelude.wiz >
+  lint.sarif`, uploaded as the `lint-sarif` artifact for a code-scanning service. The
+  job is report-only: without `--deny` a lint warning exits 0, so the existing findings
+  do not fail it (an elaboration error still does). The format and its rule mapping are
+  in [stages/11-tooling.md](stages/11-tooling.md), 11ad. This job is not part of
+  `CI result`.
 * **Split shards.** A shard with `"split": N` runs as N jobs `NAME-1` … `NAME-N`, each a
   list of `=GROUP#I,J,…` selectors. `scripts/ci.py` balances the parts with the case
   times in `.github/test-timings.json`: the cases that use the same shared program (the

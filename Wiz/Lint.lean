@@ -73,18 +73,26 @@ def Diag.render (path text : String) (d : Diag) : String :=
   let (l, c) := lineCol text d.info.start
   s!"{path}:{l + 1}:{c + 1}: {severityName d.severity}: {d.message} [{d.rule}]"
 
-/-- A diagnostic as JSON (1-based `line`/`column`, end exclusive). -/
+/-- A diagnostic as JSON: `rule`, `severity`, `message`, and its span. The span is both
+the `span` object (1-based, end exclusive) and, for readers of the older document, the
+flat `line`/`column`/`endLine`/`endColumn` fields. -/
 def Diag.toJson (text : String) (d : Diag) : Lean.Json :=
   let (l, c) := lineCol text d.info.start
   let (l₂, c₂) := lineCol text (max d.info.stop d.info.start)
+  let num (n : Nat) : Lean.Json := Lean.Json.num (Lean.JsonNumber.fromNat n)
   Lean.Json.mkObj [
     ("rule", Lean.Json.str d.rule),
     ("severity", Lean.Json.str (severityName d.severity)),
     ("message", Lean.Json.str d.message),
-    ("line", Lean.Json.num (Lean.JsonNumber.fromNat (l + 1))),
-    ("column", Lean.Json.num (Lean.JsonNumber.fromNat (c + 1))),
-    ("endLine", Lean.Json.num (Lean.JsonNumber.fromNat (l₂ + 1))),
-    ("endColumn", Lean.Json.num (Lean.JsonNumber.fromNat (c₂ + 1)))]
+    ("span", Lean.Json.mkObj [
+      ("startLine", num (l + 1)),
+      ("startColumn", num (c + 1)),
+      ("endLine", num (l₂ + 1)),
+      ("endColumn", num (c₂ + 1))]),
+    ("line", num (l + 1)),
+    ("column", num (c + 1)),
+    ("endLine", num (l₂ + 1)),
+    ("endColumn", num (c₂ + 1))]
 
 /-! ## Style, from the text -/
 
