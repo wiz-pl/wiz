@@ -170,6 +170,108 @@ def negLatOkDeriv : Scry.Derivation Nat :=
 def negLatBadDeriv : Scry.Derivation Nat :=
   Scry.Derivation.mk [lnode 0 9 1 (Scry.Env.mk [] []) []] 0
 
+-- ## Lattice provenance: `explainLat` rebuilds the join chain
+
+-- `val(0) = 3` when edge `(0,3)` holds, `val(0) = 1` when `(0,1)` holds, joined into a
+-- seed value of 100 under the min lattice: the engine stores 100, then 3, then 1, and
+-- `explainLat` rebuilds the two joins from the steps' contributions and previous-value
+-- links.
+def val3 : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.lat 1 [Scry.Term.lit (u 0)] (Scry.LExpr.lit 3))
+    [Scry.Atom.pos 0 [Scry.Term.lit (u 0), Scry.Term.lit (u 3)]]
+
+def val1 : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.lat 1 [Scry.Term.lit (u 0)] (Scry.LExpr.lit 1))
+    [Scry.Atom.pos 0 [Scry.Term.lit (u 0), Scry.Term.lit (u 1)]]
+
+def chainProg : Scry.Program Nat :=
+  Scry.Program.mk minOps [2, 1] [1] [] [val3, val1]
+
+def chainState : Scry.State Nat :=
+  Scry.State.addLatFact
+    (Scry.State.addTuple
+      (Scry.State.addTuple Scry.State.empty 0 [u 0, u 1]) 0 [u 0, u 3])
+    minOps 1 [u 0] 100
+
+def chainEdb : Scry.Db Nat := chainState.db
+
+/-- The lattice value of a derivation's conclusion (0 for a tuple fact). -/
+def conclLat (d : Scry.Derivation Nat) : Nat :=
+  match Scry.Derivation.concl d with
+  | .none => 0
+  | .some f => match f.lat with
+    | .none => 0
+    | .some v => v
+
+def chainExplained : Scry.Derivation Nat :=
+  match Scry.eval chainProg chainState with
+  | .none => Scry.Derivation.mk [] 0
+  | .some st =>
+    match Scry.State.explainLat chainProg chainEdb st 1 [u 0] with
+    | .none => Scry.Derivation.mk [] 0
+    | .some d => d
+
+/-- 1 when the rebuilt chain checks and concludes exactly the stored value. -/
+def chainOk : Nat :=
+  if Scry.Derivation.check chainProg chainEdb chainExplained then
+    if Nat.beq (conclLat chainExplained) 1 then 1 else 2
+  else 0
+
+-- A second contribution for the same key that is already above the stored value does not
+-- move it, so no join node is recorded for it: `chainNodes` counts the rebuilt nodes.
+def chainNodes : Nat := Scry.Derivation.size chainExplained
+
+-- ## Absence certificates and the stratified frozen set
+
+-- `Program.check` on the negation program: `node` (0) and `edge` (2) are stratum 0, `bad`
+-- (1) is stratum 1, so the digest of the stratum list is 10.
+def stratDigest : Nat :=
+  match Scry.Program.check negProg with
+  | .none => 0
+  | .some strat =>
+    List.getD strat 0 9 * 100 + List.getD strat 1 9 * 10 + List.getD strat 2 9
+
+-- With the stratum-1 frozen set (relations below 1: `node` and `edge`), `negRule`'s
+-- negated atom is frozen; with the empty set it is not.
+def frozenOk : Bool := Scry.bodyNegRelsOk (Scry.belowStratum [0, 1, 0] 1) negRule.body
+
+def frozenMiss : Bool := Scry.bodyNegRelsOk (fun rel => Bool.false) negRule.body
+
+-- ## Absence certificates: `edge(2,2)` is absent from the completed lower model
+
+-- The candidate model is the completed fixpoint (it contains the EDB and is closed); the
+-- absent tuple is checked against it. For a `neg` finding at a stratum it is enough to
+-- supply the lower strata's completion.
+def absModel : List (Scry.PFact Nat) :=
+  match Scry.eval negProg negState with
+  | .none => Scry.dbFacts negEdb
+  | .some st => Scry.dbFacts st.db
+
+def absGood : Scry.Absence Nat := Scry.Absence.mk absModel 2 [u 2, u 2]
+def absBad : Scry.Absence Nat := Scry.Absence.mk absModel 2 [u 1, u 2]
+
+/-- 1 when the absent-tuple certificate passes all three checks, 2/3 for the two side
+conditions, 0 for the absence check itself. -/
+def absGoodOk : Nat :=
+  if Scry.Absence.check negProg absGood then
+    if Scry.Absence.edbInModel negProg negEdb absGood then
+      if Scry.Absence.closedB negProg absGood then 1 else 2
+    else 3
+  else 0
+
+def absBadOk : Nat := if Scry.Absence.check negProg absBad then 1 else 0
+
+-- The counterexample from the soundness notes: adding the negated tuple gives a closed
+-- database that still contains the EDB but not `bad(2)`, so an EDB-only check cannot
+-- claim `inLfp` for `bad(2)`. The absence certificate for `edge(2,2)` is what rules that
+-- database out.
+def closedExt : Scry.Db Nat := (Scry.Db.insertTuple negEdb 2 [u 2, u 2]).1
+
+def counterexample : Nat :=
+  if Scry.Absence.check negProg absGood then
+    if Scry.Db.memTuple closedExt 1 [u 2] then 0 else 1
+  else 0
+
 def bit (b : Bool) : Nat := if b then 1 else 0
 
 def explained : Nat :=

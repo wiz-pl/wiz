@@ -38,12 +38,21 @@ structure Scry.PFact (L : Type) where
 
 /-- One node of the provenance: `id`, the fact, the rule that derived it (`.none` for
 EDB), and the ids of the premises. Flat, so the mutual positivity checker is happy and
-the heap is a DAG; `expandWitness` turns a node into a tree. -/
+the heap is a DAG; `expandWitness` turns a node into a tree.
+
+`contrib` and `prev` make a *lattice* step reconstructible as a `join`: `contrib` is the
+value the rule instance contributed (before joining), and `prev` is the id of the step
+that established the key's previous value. The step's `fact` is the accumulated
+(`old ⊔ contrib`) value, so a certificate can pair a rule node concluding `contrib` with a
+join node against the `prev` step's node, and get the stored value. Tuple steps have
+`contrib = .none` and `prev = .none`. -/
 structure Scry.ProofStep (L : Type) where
   id : Nat
   fact : Scry.PFact L
   rule : Option Nat
   premises : List Nat
+  contrib : Option L
+  prev : Option Nat
 
 /-- A derivation: a root step plus the steps reachable from it (a tree with sharing). -/
 structure Scry.Witness (L : Type) where
@@ -102,12 +111,24 @@ def Scry.State.addTuple {L : Type} (st : Scry.State L) (rel : Nat) (row : List U
   match st.db.insertTuple rel row with
   | (db', .true) =>
     Scry.State.mk db'
-      (.cons (Scry.ProofStep.mk st.next (Scry.PFact.mk rel row .none) .none .nil) st.nodes)
+      (.cons (Scry.ProofStep.mk st.next (Scry.PFact.mk rel row .none) .none .nil
+        (Option.none : Option L) (Option.none : Option Nat)) st.nodes)
       (Nat.succ st.next)
   | (db', .false) => Scry.State.mk db' st.nodes st.next
 
+/-- The provenance step that established a key's current value, if the key is present. -/
+def Scry.State.valueStep {L : Type} (st : Scry.State L) (ops : Scry.LatOps L)
+    (rel : Nat) (key : List U64) : Option Nat :=
+  match Scry.Db.findLat st.db rel key with
+  | .none => Option.none
+  | .some old =>
+    match st.findStep ops (Scry.PFact.mk rel key (.some old)) with
+    | .none => Option.none
+    | .some s => Option.some s.id
+
 /-- Add an EDB lattice fact (no rule): join its value in and record a step when the value
-moves. -/
+moves. The step records the contribution and the previous value's step, so a certificate
+can rebuild the join. -/
 def Scry.State.addLatFact {L : Type} (st : Scry.State L) (ops : Scry.LatOps L)
     (rel : Nat) (key : List U64) (v : L) : Scry.State L :=
   let old := match Scry.Db.findLat st.db rel key with
@@ -118,7 +139,8 @@ def Scry.State.addLatFact {L : Type} (st : Scry.State L) (ops : Scry.LatOps L)
   else
     let db' := Scry.Db.setLat st.db rel key nv;
     Scry.State.mk db'
-      (.cons (Scry.ProofStep.mk st.next (Scry.PFact.mk rel key (.some nv)) .none .nil) st.nodes)
+      (.cons (Scry.ProofStep.mk st.next (Scry.PFact.mk rel key (.some nv)) .none .nil
+        (Option.some v) (st.valueStep ops rel key)) st.nodes)
       (Nat.succ st.next)
 
 /-- A derived tuple. The flag says whether it was new. -/
@@ -127,11 +149,13 @@ def Scry.State.addDerivedTuple {L : Type} (st : Scry.State L) (rule : Nat) (prem
   match st.db.insertTuple rel row with
   | (db', .true) =>
     (Scry.State.mk db'
-      (.cons (Scry.ProofStep.mk st.next (Scry.PFact.mk rel row .none) (.some rule) premises) st.nodes)
+      (.cons (Scry.ProofStep.mk st.next (Scry.PFact.mk rel row .none) (.some rule) premises
+        (Option.none : Option L) (Option.none : Option Nat)) st.nodes)
       (Nat.succ st.next), .true)
   | (db', .false) => (Scry.State.mk db' st.nodes st.next, .false)
 
-/-- A derived lattice value: join it in and record a step if the value moved. -/
+/-- A derived lattice value: join it in and record a step if the value moved. As for an
+EDB lattice fact, the step records the contribution and the previous value's step. -/
 def Scry.State.addDerivedLat {L : Type} (st : Scry.State L) (ops : Scry.LatOps L)
     (rule : Nat) (premises : List Nat) (rel : Nat) (key : List U64) (v : L) : Scry.State L × Bool :=
   let old := match Scry.Db.findLat st.db rel key with
@@ -142,7 +166,8 @@ def Scry.State.addDerivedLat {L : Type} (st : Scry.State L) (ops : Scry.LatOps L
   else
     let db' := Scry.Db.setLat st.db rel key nv;
     (Scry.State.mk db'
-      (.cons (Scry.ProofStep.mk st.next (Scry.PFact.mk rel key (.some nv)) (.some rule) premises) st.nodes)
+      (.cons (Scry.ProofStep.mk st.next (Scry.PFact.mk rel key (.some nv)) (.some rule) premises
+        (Option.some v) (st.valueStep ops rel key)) st.nodes)
       (Nat.succ st.next), .true)
 
 -- ## Environments

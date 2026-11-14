@@ -227,6 +227,7 @@ def Scry.defaultNode {L : Type} : Scry.ProofNode L :=
 /-- The default provenance step, for an out-of-range lookup while explaining. -/
 def Scry.defaultStep {L : Type} : Scry.ProofStep L :=
   Scry.ProofStep.mk 0 (Scry.PFact.mk 0 List.nil .none) .none List.nil
+    (Option.none : Option L) (Option.none : Option Nat)
 
 /-- A head fact under an environment. -/
 def Scry.headFactOf {L : Type} (p : Scry.Program L) (head : Scry.Head L)
@@ -920,6 +921,93 @@ def Scry.State.explainTuple {L : Type} (p : Scry.Program L) (edb : Scry.Db L)
       let d : Scry.Derivation L := Scry.Derivation.mk nodes rootPos;
       if Scry.Derivation.check p edb d then .some d else .none
     | .none => .none
+
+/-- Every step reachable from a list of ids through premises *and* lattice links (a
+lattice step's `prev`). -/
+partial def Scry.stepsFrom {L : Type} (nodes : List (Scry.ProofStep L)) :
+    List Nat → List (Scry.ProofStep L) → List (Scry.ProofStep L)
+  | .nil, acc => acc
+  | .cons id rest, acc =>
+    match Scry.stepByIdL nodes id with
+    | .none => Scry.stepsFrom nodes rest acc
+    | .some s =>
+      Scry.stepsFrom nodes
+        (List.append (List.append s.premises
+          (match s.prev with | .none => List.nil | .some p => List.cons p List.nil)) rest)
+        (List.cons s acc)
+
+/-- A step id's position in an association list (the first match). -/
+def Scry.posOf (id : Nat) : List (Nat × Nat) → Option Nat
+  | .nil => Option.none
+  | .cons e rest => if Nat.beq id e.1 then Option.some e.2 else Scry.posOf id rest
+
+/-- The fact a provenance step contributes as a *node*: the recorded fact, except for a
+lattice step that joined onto a previous value, whose node concludes the contribution. -/
+def Scry.nodeFactOf {L : Type} (s : Scry.ProofStep L) : Scry.PFact L :=
+  match s.prev with
+  | .none => s.fact
+  | .some _ => Scry.PFact.mk s.fact.rel s.fact.args s.contrib
+
+/-- A provenance step as a node, with a lattice step's `contrib` as the fact (the join
+node that follows it concludes the stored value). -/
+def Scry.nodeOfStepL {L : Type} (p : Scry.Program L) (steps : List (Scry.ProofStep L))
+    (s : Scry.ProofStep L) : Option (Scry.ProofNode L) :=
+  match s.rule with
+  | .none => Option.some (Scry.ProofNode.mk (Scry.nodeFactOf s) .edb)
+  | .some ri =>
+    if Nat.lt ri (List.length p.rules) then
+      let rule : Scry.Rule L := List.getD p.rules ri Scry.defaultRule;
+      let pids : List Nat := Scry.renumberPids steps s.premises;
+      match Scry.envOfAtoms p steps rule.body pids Scry.Env.empty with
+      | .some env => Option.some (Scry.ProofNode.mk (Scry.nodeFactOf s) (.rule ri env pids))
+      | .none => Option.none
+    else Option.none
+
+/-- Build the node list for a sorted list of steps, one rule/EDB node each plus a `join`
+node for every lattice step with a previous value. The association list maps a step id to
+the position of the node that concludes that step's recorded fact. -/
+def Scry.nodesOfStepsL {L : Type} (p : Scry.Program L) (steps : List (Scry.ProofStep L)) :
+    List (Scry.ProofStep L) → List (Scry.ProofNode L) → List (Nat × Nat) →
+      Option (List (Scry.ProofNode L) × List (Nat × Nat))
+  | .nil, done, pos => Option.some (done, pos)
+  | .cons s rest, done, pos =>
+    match Scry.nodeOfStepL p steps s with
+    | .none => Option.none
+    | .some n =>
+      let done1 : List (Scry.ProofNode L) := Scry.appendAll done (List.cons n List.nil);
+      let own : Nat := List.length done;
+      match s.prev with
+      | .none => Scry.nodesOfStepsL p steps rest done1 (List.cons (s.id, own) pos)
+      | .some pid =>
+        match Scry.posOf pid pos with
+        | .none => Option.none
+        | .some ppos =>
+          let jn : Scry.ProofNode L := Scry.ProofNode.mk s.fact (.join ppos own);
+          let done2 : List (Scry.ProofNode L) := Scry.appendAll done1 (List.cons jn List.nil);
+          Scry.nodesOfStepsL p steps rest done2 (List.cons (s.id, List.length done1) pos)
+
+/-- **Explain a lattice finding from the evaluator's provenance.** A lattice step records
+its rule contribution and the step that established the previous value, so the chain
+(`bot → c₀ → c₀ ⊔ c₁ → …`) is rebuilt as alternating rule and `join` nodes; each node's
+fact is the accumulated value, so the certificate concludes exactly the value the engine
+stored. `.none` means the provenance did not produce a valid certificate (for example when
+the lattice's `bot` is not the identity, so the first contribution differs from the stored
+value and no join node can absorb it). -/
+def Scry.State.explainLat {L : Type} (p : Scry.Program L) (edb : Scry.Db L)
+    (st : Scry.State L) (rel : Nat) (key : List U64) : Option (Scry.Derivation L) :=
+  match st.whyLat p.ops rel key with
+  | .none => Option.none
+  | .some root =>
+    let steps : List (Scry.ProofStep L) :=
+      Scry.sortSteps (Scry.stepsFrom st.nodes (List.cons root.id List.nil) List.nil);
+    match Scry.nodesOfStepsL p steps steps List.nil List.nil with
+    | .none => Option.none
+    | .some (nodes, pos) =>
+      match Scry.posOf root.id pos with
+      | .none => Option.none
+      | .some rootPos =>
+        let d : Scry.Derivation L := Scry.Derivation.mk nodes rootPos;
+        if Scry.Derivation.check p edb d then Option.some d else Option.none
 
 -- ## Lattice laws and the full proof (all node kinds)
 
@@ -1788,3 +1876,568 @@ def Scry.checkSoundStmt {L : Type} (p : Scry.Program L) : Prop :=
 def Scry.check_sound {L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops) :
     Scry.checkSoundStmt p :=
   fun frozen hok => Scry.check_sound_neg p laws frozen hok
+
+-- ## Stratification: instantiating `frozen` from `Program.check`
+--
+-- The frozen set is no longer an arbitrary parameter: for a stratified program it is the
+-- set of relations *below* the finding's stratum. `Program.check` returns the stratum map,
+-- and the strata are a fixpoint of the relaxation pass, so every rule's head stratum
+-- covers the requirement of every body atom — in particular a negated atom's relation lies
+-- strictly below the head. That is exactly `bodyNegRelsOk (belowStratum strat s)`.
+--
+-- `Scry.check_sound_stratified` is the resulting theorem: a checked derivation for a fact
+-- at stratum `s`, in a program whose negating rules all live at strata `≤ s`, holds in
+-- every database that contains `db` (the **completed lower-stratum model**: the EDB plus
+-- the facts the lower strata derived), is closed under the rules, and adds no absent tuple
+-- of a lower-stratum relation.
+
+/-- The relations strictly below stratum `s`: the frozen set of a finding at stratum `s`.
+A stratified program evaluates the strata in order, so when stratum `s` runs the relations
+below it are complete. -/
+def Scry.belowStratum (strat : List Nat) (s : Nat) : Nat -> Bool :=
+  fun rel => Nat.lt (List.getD strat rel 0) s
+
+/-- One relaxation step of `Program.stratPass`, as a named function (so the proofs below
+can unfold it: `stratPass` itself is a `List.foldr` over an inline lambda). -/
+def Scry.stratStep {L : Type} (r : Scry.Rule L) (acc : List Nat × Bool) : List Nat × Bool :=
+  let need := Scry.Rule.stratumReq acc.1 r;
+  let hs := List.getD acc.1 r.head.rel 0;
+  if Nat.lt hs need then ((List.setAt acc.1 r.head.rel need, Bool.true) : List Nat × Bool) else acc
+
+/-- The same step with its test passed explicitly (a proof can case on the `Bool`). -/
+def Scry.stratStepB (c : Bool) (strata : List Nat) (rel need : Nat)
+    (acc : List Nat × Bool) : List Nat × Bool :=
+  if c then ((List.setAt strata rel need, Bool.true) : List Nat × Bool) else acc
+
+/-- `stratStep` through `stratStepB` (definitionally). -/
+def Scry.stratStep_eq {L : Type} (r : Scry.Rule L) (acc : List Nat × Bool) :
+    Scry.stratStep r acc =
+      Scry.stratStepB (Nat.lt (List.getD acc.1 r.head.rel 0) (Scry.Rule.stratumReq acc.1 r))
+        acc.1 r.head.rel (Scry.Rule.stratumReq acc.1 r) acc := rfl
+
+/-- The first component of a step: the raised strata when the test succeeds, the input
+otherwise. -/
+def Scry.stratStepBFst : (c : Bool) → (strata : List Nat) → (rel need : Nat) →
+    (acc : List Nat × Bool) →
+    (Scry.stratStepB c strata rel need acc).1 =
+      (if c then List.setAt strata rel need else acc.1)
+  | .true, _, _, _ => rfl
+  | .false, _, _, _ => rfl
+
+/-- The second component of a step: `true` when the test succeeds. -/
+def Scry.stratStepBSnd : (c : Bool) → (strata : List Nat) → (rel need : Nat) →
+    (acc : List Nat × Bool) →
+    (Scry.stratStepB c strata rel need acc).2 = (if c then Bool.true else acc.2)
+  | .true, _, _, _ => rfl
+  | .false, _, _, _ => rfl
+
+/-- `Program.stratPass` as a recursion from the right (definitionally the same function:
+`List.foldr` folds from the right). -/
+def Scry.stratPassR {L : Type} : List Nat → List (Scry.Rule L) → List Nat × Bool
+  | strata, .nil => ((strata, Bool.false) : List Nat × Bool)
+  | strata, .cons r rest => Scry.stratStep r (Scry.stratPassR strata rest)
+
+def Scry.foldr_stratStep {L : Type} : (rules : List (Scry.Rule L)) → (strata : List Nat) →
+    List.foldr Scry.stratStep (strata, Bool.false) rules = Scry.stratPassR strata rules
+  | .nil, _ => rfl
+  | .cons r rest, strata =>
+    Eq.congrArg (Scry.stratStep r) (Scry.foldr_stratStep rest strata)
+
+/-- `Program.stratPass` is the structural recursion `stratPassR`. -/
+def Scry.stratPass_eq {L : Type} (p : Scry.Program L) (strata : List Nat) :
+    Scry.Program.stratPass p strata = Scry.stratPassR strata p.rules :=
+  Scry.foldr_stratStep p.rules strata
+
+/-- Case analysis on a `Nat`, with the predicate passed explicitly (so the two branches see
+`0` and `succ k`). -/
+def Scry.natCases (P : Nat → Prop) : (n : Nat) → P 0 → ((k : Nat) → P (Nat.succ k)) → P n
+  | .zero, h0, _ => h0
+  | .succ k, _, hs => hs k
+
+/-- The first component of `stratStep`: the raised strata, or the accumulator's. -/
+def Scry.stratStepFst {L : Type} (r : Scry.Rule L) (acc : List Nat × Bool) :
+    (Scry.stratStep r acc).1 =
+      (if Nat.lt (List.getD acc.1 r.head.rel 0) (Scry.Rule.stratumReq acc.1 r)
+       then List.setAt acc.1 r.head.rel (Scry.Rule.stratumReq acc.1 r) else acc.1) :=
+  Eq.trans
+    (Eq.congrArg (fun (q : List Nat × Bool) => q.1) (Scry.stratStep_eq r acc))
+    (Scry.stratStepBFst (Nat.lt (List.getD acc.1 r.head.rel 0) (Scry.Rule.stratumReq acc.1 r))
+      acc.1 r.head.rel (Scry.Rule.stratumReq acc.1 r) acc)
+
+/-- The second component of `stratStep`: `true` when it moved something. -/
+def Scry.stratStepSnd {L : Type} (r : Scry.Rule L) (acc : List Nat × Bool) :
+    (Scry.stratStep r acc).2 =
+      (if Nat.lt (List.getD acc.1 r.head.rel 0) (Scry.Rule.stratumReq acc.1 r)
+       then Bool.true else acc.2) :=
+  Eq.trans
+    (Eq.congrArg (fun (q : List Nat × Bool) => q.2) (Scry.stratStep_eq r acc))
+    (Scry.stratStepBSnd (Nat.lt (List.getD acc.1 r.head.rel 0) (Scry.Rule.stratumReq acc.1 r))
+      acc.1 r.head.rel (Scry.Rule.stratumReq acc.1 r) acc)
+
+/-- An `if` on a `Bool` condition with `Prop` conclusion: if `(if c then true else u)` is
+`false`, then `c` is `false` and so is `u`. -/
+def Scry.ifFalseProp (c : Bool) (u : Bool) (h : (if c then Bool.true else u) = Bool.false) :
+    c = Bool.false ∧ u = Bool.false :=
+  Or.elim (Bool.cases c)
+    (fun hc => absurd (Bool.trueNeFalse
+      (Eq.mp' (fun (b : Bool) => (if b then Bool.true else u) = Bool.false) hc h)))
+    (fun hc => (hc, Eq.mp' (fun (b : Bool) => (if b then Bool.true else u) = Bool.false) hc h))
+
+/-- **A pass that changes nothing is a fixpoint, rule by rule.** It leaves the strata
+unchanged and every rule's head stratum covers its body's requirement (in particular
+`stratumReq` of a negated atom, which is one more than its relation's stratum). -/
+def Scry.stratPassR_ok {L : Type} :
+    (rules : List (Scry.Rule L)) → (strata strata' : List Nat) → (flag : Bool) →
+    (Scry.stratPassR strata rules).1 = strata' →
+    (Scry.stratPassR strata rules).2 = flag →
+    flag = Bool.false →
+    strata' = strata ∧
+      ((ri : Nat) → Nat.lt ri (List.length rules) = Bool.true →
+        Nat.lt (List.getD strata' (List.getD rules ri Scry.defaultRule).head.rel 0)
+          (Scry.Rule.stratumReq strata' (List.getD rules ri Scry.defaultRule)) = Bool.false)
+  | .nil, strata, strata', flag, h1, _, _ =>
+    And.intro (Eq.symm h1) (fun ri hi => absurd (Scry.notLtZero ri hi))
+  | .cons r rest, strata, strata', flag, h1, h2, hf =>
+    let acc : List Nat × Bool := Scry.stratPassR strata rest;
+    let need : Nat := Scry.Rule.stratumReq acc.1 r;
+    let hif1 : (if Nat.lt (List.getD acc.1 r.head.rel 0) need
+        then List.setAt acc.1 r.head.rel need else acc.1) = strata' :=
+      Eq.trans (Eq.symm (Scry.stratStepFst r acc)) h1;
+    let hif2 : (if Nat.lt (List.getD acc.1 r.head.rel 0) need then Bool.true else acc.2) = flag :=
+      Eq.trans (Eq.symm (Scry.stratStepSnd r acc)) h2;
+    let hflag : Nat.lt (List.getD acc.1 r.head.rel 0) need = Bool.false :=
+      (Scry.ifFalseProp (Nat.lt (List.getD acc.1 r.head.rel 0) need) acc.2
+        (Eq.trans hif2 hf)).1;
+    let hacc : strata' = acc.1 :=
+      Eq.symm (Eq.mp' (fun (b : Bool) =>
+        (if b then List.setAt acc.1 r.head.rel need else acc.1) = strata') hflag hif1);
+    let hfa : acc.2 = Bool.false :=
+      (Scry.ifFalseProp (Nat.lt (List.getD acc.1 r.head.rel 0) need) acc.2
+        (Eq.trans hif2 hf)).2;
+    let ih := Scry.stratPassR_ok rest strata acc.1 acc.2 rfl rfl hfa;
+    And.intro
+      (Eq.trans hacc ih.1)
+      (fun ri hi =>
+        Scry.natCases
+          (fun n => Nat.lt n (List.length (List.cons r rest)) = Bool.true →
+            Nat.lt (List.getD strata' (List.getD (List.cons r rest) n Scry.defaultRule).head.rel 0)
+              (Scry.Rule.stratumReq strata'
+                (List.getD (List.cons r rest) n Scry.defaultRule)) = Bool.false)
+          ri
+          (fun _ =>
+            Eq.mpr' (fun (s : List Nat) => Nat.lt (List.getD s r.head.rel 0)
+                (Scry.Rule.stratumReq s r) = Bool.false) hacc hflag)
+          (fun j hj =>
+            Eq.mpr' (fun (s : List Nat) =>
+                Nat.lt (List.getD s (List.getD rest j Scry.defaultRule).head.rel 0)
+                  (Scry.Rule.stratumReq s (List.getD rest j Scry.defaultRule)) = Bool.false)
+              hacc (ih.2 j hj))
+          hi)
+
+/-- `Program.stratPasses` as a structural recursion (definitionally the same function). -/
+def Scry.stratPassesR {L : Type} (p : Scry.Program L) : Nat → List Nat → List Nat × Bool
+  | .zero, strata => Scry.stratPassR strata p.rules
+  | .succ n, strata => Scry.stratPassesR p n (Scry.stratPassR strata p.rules).1
+
+/-- The two spellings of `Program.stratPasses` agree. -/
+def Scry.stratPasses_eq {L : Type} (p : Scry.Program L) :
+    (n : Nat) → (strata : List Nat) →
+      Scry.Program.stratPasses p n strata = Scry.stratPassesR p n strata
+  | .zero, strata => Scry.stratPass_eq p strata
+  | .succ n, strata =>
+    Eq.trans
+      (Eq.congrArg
+        (fun (x : List Nat × Bool) => match x with | (s', _) => Scry.Program.stratPasses p n s')
+        (Scry.stratPass_eq p strata))
+      (Scry.stratPasses_eq p n (Scry.stratPassR strata p.rules).1)
+
+/-- A `stratPasses` run whose last pass moves nothing is at a fixpoint of `stratPass`. -/
+def Scry.stratPassesR_fix {L : Type} (p : Scry.Program L) :
+    (n : Nat) → (strata final : List Nat) → (flag : Bool) →
+    (Scry.stratPassesR p n strata).1 = final →
+    (Scry.stratPassesR p n strata).2 = flag →
+    flag = Bool.false →
+    (Scry.Program.stratPass p final).1 = final ∧
+      (Scry.Program.stratPass p final).2 = Bool.false
+  | .zero, strata, final, flag, h1, h2, hf =>
+    let hok := Scry.stratPassR_ok p.rules strata final flag h1 h2 hf;
+    let hp1 : (Scry.stratPassR final p.rules).1 = final :=
+      Eq.mpr' (fun (s : List Nat) => (Scry.stratPassR s p.rules).1 = final) hok.1 h1;
+    let hp2 : (Scry.stratPassR final p.rules).2 = Bool.false :=
+      Eq.mpr' (fun (s : List Nat) => (Scry.stratPassR s p.rules).2 = Bool.false) hok.1
+        (Eq.trans h2 hf);
+    And.intro
+      (Eq.trans (Eq.congrArg (fun (q : List Nat × Bool) => q.1) (Scry.stratPass_eq p final)) hp1)
+      (Eq.trans (Eq.congrArg (fun (q : List Nat × Bool) => q.2) (Scry.stratPass_eq p final)) hp2)
+  | .succ n, strata, final, flag, h1, h2, hf =>
+    Scry.stratPassesR_fix p n (Scry.stratPassR strata p.rules).1 final flag h1 h2 hf
+
+/-- The same for `Program.stratPasses`. -/
+def Scry.stratPasses_fix {L : Type} (p : Scry.Program L) :
+    (n : Nat) → (strata final : List Nat) → (flag : Bool) →
+    (Scry.Program.stratPasses p n strata).1 = final →
+    (Scry.Program.stratPasses p n strata).2 = flag →
+    flag = Bool.false →
+    (Scry.Program.stratPass p final).1 = final ∧
+      (Scry.Program.stratPass p final).2 = Bool.false :=
+  fun n strata final flag h1 h2 hf =>
+    Scry.stratPassesR_fix p n strata final flag
+      (Eq.mp' (fun (q : List Nat × Bool) => q.1 = final) (Scry.stratPasses_eq p n strata) h1)
+      (Eq.mp' (fun (q : List Nat × Bool) => q.2 = flag) (Scry.stratPasses_eq p n strata) h2)
+      hf
+
+-- ### Reading `Program.stratify`'s result
+
+/-- The `match` in `Program.stratify`, as a function of the pair's components. -/
+def Scry.stratMatchB (f : List Nat) (b : Bool) : Option (List Nat) :=
+  match b with
+  | .true => Option.none
+  | .false => Option.some f
+
+/-- `Program.stratify` through `stratMatchB` (definitionally). -/
+def Scry.stratify_eq {L : Type} (p : Scry.Program L) :
+    Scry.Program.stratify p =
+      Scry.stratMatchB
+        (Scry.Program.stratPasses p (Nat.succ (List.length p.arities))
+          (Scry.zeros (List.length p.arities))).1
+        (Scry.Program.stratPasses p (Nat.succ (List.length p.arities))
+          (Scry.zeros (List.length p.arities))).2 := rfl
+
+/-- `some a = some b` gives `a = b` (equality of an inductive's constructor is the
+constructor's arguments' equality). -/
+def Scry.someInj {A : Type} {a b : A} (e : Option.some a = Option.some b) : a = b := e.1
+
+/-- `stratMatchB` returns a `some` only for the `false` flag, and then with its first
+argument. -/
+def Scry.stratMatchB_some : (f strat : List Nat) → (b : Bool) →
+    Scry.stratMatchB f b = Option.some strat → (b = Bool.false ∧ f = strat)
+  | _, _, .false, h => (rfl, Scry.someInj h)
+  | _, _, .true, h => absurd h.1
+
+/-- A successful `Program.stratify` names the last pass's strata, with its flag `false`. -/
+def Scry.stratify_some {L : Type} (p : Scry.Program L) (strat : List Nat)
+    (h : Scry.Program.stratify p = Option.some strat) :
+    (Scry.Program.stratPasses p (Nat.succ (List.length p.arities))
+      (Scry.zeros (List.length p.arities))).1 = strat ∧
+    (Scry.Program.stratPasses p (Nat.succ (List.length p.arities))
+      (Scry.zeros (List.length p.arities))).2 = Bool.false :=
+  let q : List Nat × Bool :=
+    Scry.Program.stratPasses p (Nat.succ (List.length p.arities))
+      (Scry.zeros (List.length p.arities));
+  let hb : q.2 = Bool.false ∧ q.1 = strat :=
+    Scry.stratMatchB_some q.1 strat q.2
+      (Eq.mp' (fun (x : Option (List Nat)) => x = Option.some strat) (Scry.stratify_eq p) h);
+  (hb.2, hb.1)
+
+/-- A conditional whose `then` branch is a `some` is `true`, and the branch is the
+result. -/
+def Scry.ifSome {A : Type} : (c : Bool) → (t : Option A) → (a : A) →
+    (if c then t else (Option.none : Option A)) = Option.some a → c = Bool.true ∧ t = Option.some a
+  | .true, _, _, h => (rfl, h)
+  | .false, _, _, h => absurd h.1
+
+/-- **The stratification invariant.** When `Program.check` accepts a program, its stratum
+map is a fixpoint of the relaxation pass: every rule's head stratum covers its body's
+requirement. (The requirement of a negated atom is one more than its relation's stratum,
+so a negated relation is strictly below the head.) -/
+def Scry.check_strata_ok {L : Type} (p : Scry.Program L) (strat : List Nat)
+    (hcheck : Scry.Program.check p = Option.some strat) :
+    (ri : Nat) → Nat.lt ri (List.length p.rules) = Bool.true →
+      Nat.lt (List.getD strat (List.getD p.rules ri Scry.defaultRule).head.rel 0)
+        (Scry.Rule.stratumReq strat (List.getD p.rules ri Scry.defaultRule)) = Bool.false :=
+  let hsome := Scry.ifSome (Scry.Program.wellFormed p) (Scry.Program.stratify p) strat hcheck;
+  let hpass := Scry.stratify_some p strat hsome.2;
+  let hfix := Scry.stratPasses_fix p (Nat.succ (List.length p.arities))
+    (Scry.zeros (List.length p.arities)) strat Bool.false hpass.1 hpass.2 rfl;
+  let hp1 : (Scry.stratPassR strat p.rules).1 = strat :=
+    Eq.trans (Eq.symm (Eq.congrArg (fun (q : List Nat × Bool) => q.1)
+      (Scry.stratPass_eq p strat))) hfix.1;
+  let hp2 : (Scry.stratPassR strat p.rules).2 = Bool.false :=
+    Eq.trans (Eq.symm (Eq.congrArg (fun (q : List Nat × Bool) => q.2)
+      (Scry.stratPass_eq p strat))) hfix.2;
+  (Scry.stratPassR_ok p.rules strat strat Bool.false hp1 hp2 rfl).2
+
+-- ### The `bodyNegRelsOk` side condition from stratification
+
+/-- `Nat.lt a b = false` gives `b ≤ a` (the `Nat.not_le` instance at `succ a`). -/
+def Scry.not_lt_le (a b : Nat) (h : Nat.lt a b = Bool.false) : Nat.Le b a :=
+  Nat.not_le (Nat.succ a) b h
+
+/-- A fold maximum dominates its entries. -/
+def Scry.listMaxFrom {A : Type} (f : A → Nat) : List A → Nat
+  | .nil => 0
+  | .cons a rest =>
+    if Nat.lt (Scry.listMaxFrom f rest) (f a) then f a else Scry.listMaxFrom f rest
+
+/-- The fold maximum dominates every entry. -/
+def Scry.listMaxFrom_ge {A : Type} (f : A → Nat) (d : A) :
+    (l : List A) → (i : Nat) → Nat.lt i (List.length l) = Bool.true →
+      Nat.Le (f (List.getD l i d)) (Scry.listMaxFrom f l)
+  | .nil, i, hi => absurd (Scry.notLtZero i hi)
+  | .cons a rest, .zero, _ =>
+    Or.elim (Bool.cases (Nat.lt (Scry.listMaxFrom f rest) (f a)))
+      (fun ht =>
+        Eq.mpr' (fun (b : Bool) => Nat.Le (f a) (if b then f a else Scry.listMaxFrom f rest)) ht
+          (Nat.le_refl (f a)))
+      (fun hf =>
+        Eq.mpr' (fun (b : Bool) => Nat.Le (f a) (if b then f a else Scry.listMaxFrom f rest)) hf
+          (Scry.not_lt_le (Scry.listMaxFrom f rest) (f a) hf))
+  | .cons a rest, .succ j, hj =>
+    let ih := Scry.listMaxFrom_ge f d rest j hj;
+    Or.elim (Bool.cases (Nat.lt (Scry.listMaxFrom f rest) (f a)))
+      (fun ht =>
+        Eq.mpr' (fun (b : Bool) => Nat.Le (f (List.getD rest j d))
+            (if b then f a else Scry.listMaxFrom f rest)) ht
+          (Nat.le_trans (f (List.getD rest j d)) (Scry.listMaxFrom f rest) (f a)
+            ih (Nat.le_of_lt (Scry.listMaxFrom f rest) (f a) ht)))
+      (fun hf =>
+        Eq.mpr' (fun (b : Bool) => Nat.Le (f (List.getD rest j d))
+            (if b then f a else Scry.listMaxFrom f rest)) hf ih)
+
+/-- The default atom, the result of an out-of-range body lookup. -/
+def Scry.defaultAtom : Scry.Atom := Scry.Atom.pos 0 List.nil
+
+/-- `Rule.stratumReq` is the fold maximum of the body atoms' requirements (definitionally). -/
+def Scry.stratumReq_eq {L : Type} (strata : List Nat) (r : Scry.Rule L) :
+    Scry.Rule.stratumReq strata r =
+      Scry.listMaxFrom (Scry.Atom.stratumReq strata) r.body := rfl
+
+/-- Every body atom's requirement is below its rule's. -/
+def Scry.stratumReq_atom {L : Type} (strata : List Nat) (r : Scry.Rule L) (i : Nat)
+    (hi : Nat.lt i (List.length r.body) = Bool.true) :
+    Nat.Le (Scry.Atom.stratumReq strata (List.getD r.body i Scry.defaultAtom))
+      (Scry.Rule.stratumReq strata r) :=
+  Eq.mpr' (fun (x : Nat) => Nat.Le (Scry.Atom.stratumReq strata (List.getD r.body i Scry.defaultAtom)) x)
+    (Scry.stratumReq_eq strata r)
+    (Scry.listMaxFrom_ge (Scry.Atom.stratumReq strata) Scry.defaultAtom r.body i hi)
+
+/-- The atom at a position inside the body is a negation only if the body contains one. -/
+def Scry.bodyHasNeg_getD : (body : List Scry.Atom) → (i : Nat) →
+    Nat.lt i (List.length body) = Bool.true → (rel : Nat) → (args : List Scry.Term) →
+    List.getD body i Scry.defaultAtom = Scry.Atom.neg rel args →
+    Scry.bodyHasNeg body = Bool.true
+  | .nil, i, hi, _, _, _ => absurd (Scry.notLtZero i hi)
+  | .cons a rest, .zero, _, rel, args, he =>
+    Eq.mpr' (fun (x : Scry.Atom) => Scry.bodyHasNeg (List.cons x rest) = Bool.true) he
+      (Scry.bodyHasNeg_neg rel args rest)
+  | .cons (.pos rel args) rest, .succ j, hj, rel', args', he =>
+    Eq.mp' (fun (b : Bool) => b = Bool.true)
+      (Scry.bodyHasNeg_pos rel args rest)
+      (Scry.bodyHasNeg_getD rest j hj rel' args' he)
+  | .cons (.lat rel key vv) rest, .succ j, hj, rel', args', he =>
+    Eq.mp' (fun (b : Bool) => b = Bool.true)
+      (Scry.bodyHasNeg_lat rel key vv rest)
+      (Scry.bodyHasNeg_getD rest j hj rel' args' he)
+  | .cons (.neg rel args) rest, .succ j, hj, rel', args', he =>
+    Scry.bodyHasNeg_neg rel args rest
+
+/-- An `if` whose condition is true is its `then` branch. -/
+def Scry.if_true_eq : (c : Bool) → (t : Bool) → c = Bool.true →
+    (if c then t else Bool.false) = t
+  | .true, _, _ => rfl
+  | .false, _, h => absurd h.1
+
+/-- A body whose negated atoms all name relations in `frozen` passes `bodyNegRelsOk`. -/
+def Scry.bodyNegRelsOk_getD (frozen : Nat → Bool) :
+    (body : List Scry.Atom) →
+    ((i : Nat) → Nat.lt i (List.length body) = Bool.true → (rel : Nat) → (args : List Scry.Term) →
+      List.getD body i Scry.defaultAtom = Scry.Atom.neg rel args →
+      frozen rel = Bool.true) →
+    Scry.bodyNegRelsOk frozen body = Bool.true
+  | .nil, _ => rfl
+  | .cons (.pos rel args) rest, hok =>
+    Eq.trans (Scry.bodyNegRelsOk_pos frozen rel args rest)
+      (Scry.bodyNegRelsOk_getD frozen rest
+        (fun i hi r a he => hok (Nat.succ i) hi r a he))
+  | .cons (.lat rel key vv) rest, hok =>
+    Eq.trans (Scry.bodyNegRelsOk_lat frozen rel key vv rest)
+      (Scry.bodyNegRelsOk_getD frozen rest
+        (fun i hi r a he => hok (Nat.succ i) hi r a he))
+  | .cons (.neg rel args) rest, hok =>
+    let hthis : frozen rel = Bool.true :=
+      hok 0 rfl rel args rfl;
+    let hrest : Scry.bodyNegRelsOk frozen rest = Bool.true :=
+      Scry.bodyNegRelsOk_getD frozen rest
+        (fun i hi r a he => hok (Nat.succ i) hi r a he);
+    Eq.trans (Scry.if_true_eq (frozen rel) (Scry.bodyNegRelsOk frozen rest) hthis) hrest
+
+/-- **A stratified program satisfies the frozen side condition at every stratum above its
+negating rules**: every negated relation of a rule whose head is at stratum `≤ s` lies
+below `s`. -/
+def Scry.bodyNegRelsOk_belowStratum {L : Type} (p : Scry.Program L) (strat : List Nat)
+    (hcheck : Scry.Program.check p = Option.some strat) (s : Nat)
+    (hs : (ri : Nat) → (Nat.lt ri (List.length p.rules) = Bool.true) →
+      (Scry.bodyHasNeg (List.getD p.rules ri Scry.defaultRule).body = Bool.true) →
+      (Nat.Le (List.getD strat (List.getD p.rules ri Scry.defaultRule).head.rel 0) s))
+    (ri : Nat) (hri : Nat.lt ri (List.length p.rules) = Bool.true) :
+    Scry.bodyNegRelsOk (Scry.belowStratum strat s)
+      (List.getD p.rules ri Scry.defaultRule).body = Bool.true :=
+  let rule : Scry.Rule L := List.getD p.rules ri Scry.defaultRule;
+  let hok := Scry.check_strata_ok p strat hcheck ri hri;
+  Scry.bodyNegRelsOk_getD (Scry.belowStratum strat s) rule.body
+    (fun i hi rel args he =>
+      let hle := Scry.stratumReq_atom strat rule i hi;
+      let hrel : Nat.Le (Nat.succ (List.getD strat rel 0)) (Scry.Rule.stratumReq strat rule) :=
+        Eq.mp' (fun (x : Scry.Atom) => Nat.Le (Scry.Atom.stratumReq strat x) (Scry.Rule.stratumReq strat rule))
+          he hle;
+      let hhead : Nat.Le (Scry.Rule.stratumReq strat rule) (List.getD strat rule.head.rel 0) :=
+        Scry.not_lt_le (List.getD strat rule.head.rel 0) (Scry.Rule.stratumReq strat rule) hok;
+      let hneg := Scry.bodyHasNeg_getD rule.body i hi rel args he;
+      Nat.le_trans (Nat.succ (List.getD strat rel 0)) (List.getD strat rule.head.rel 0) s
+        (Nat.le_trans (Nat.succ (List.getD strat rel 0)) (Scry.Rule.stratumReq strat rule)
+          (List.getD strat rule.head.rel 0) hrel hhead)
+        (hs ri hri hneg))
+
+/-- The stratified soundness statement: a checked derivation for a fact at stratum `s`,
+in a stratified program whose negating rules live at strata `≤ s`, holds in every database
+that contains `db` (the completed lower-stratum model), is closed under the rules, and adds
+no absent tuple of a relation below `s`. -/
+def Scry.checkSoundStratifiedStmt {L : Type} (p : Scry.Program L) (strat : List Nat)
+    (s : Nat) : Prop :=
+  (db : Scry.Db L) → (d : Scry.Derivation L) → (f : Scry.PFact L) →
+    Scry.Derivation.concl d = Option.some f →
+    Scry.Derivation.check p db d = Bool.true →
+    Scry.inLfpNeg p (Scry.belowStratum strat s) db f
+
+/-- **`Derivation.check` is sound for a stratified program, with the frozen set read off
+`Program.check`'s stratum map.** `s` is the stratum of the finding; every rule that
+negates must have its head at a stratum `≤ s` (for a finding at the top stratum this is
+automatic; a lower-stratum finding is checked against the sub-program of strata `≤ s`).
+`db` is the completed lower-stratum model, and the conclusion holds in every database
+containing it, closed under the rules, that adds no absent tuple of a relation below `s`.
+This is `Scry.check_sound` with `frozen = Scry.belowStratum strat s`. -/
+def Scry.check_sound_stratified {L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops)
+    (strat : List Nat) (hcheck : Scry.Program.check p = Option.some strat) (s : Nat)
+    (hs : (ri : Nat) → (Nat.lt ri (List.length p.rules) = Bool.true) →
+      (Scry.bodyHasNeg (List.getD p.rules ri Scry.defaultRule).body = Bool.true) →
+      (Nat.Le (List.getD strat (List.getD p.rules ri Scry.defaultRule).head.rel 0) s)) :
+    Scry.checkSoundStratifiedStmt p strat s :=
+  Scry.check_sound_neg p laws (Scry.belowStratum strat s)
+    (fun ri hri => Scry.bodyNegRelsOk_belowStratum p strat hcheck s hs ri hri)
+
+/-- The stratified theorem with no per-rule side condition: `s` at or above every rule's
+head stratum (the program's top stratum, for a top-level finding). -/
+def Scry.check_sound_stratified_all {L : Type} (p : Scry.Program L)
+    (laws : Scry.LatLaws p.ops) (strat : List Nat)
+    (hcheck : Scry.Program.check p = Option.some strat) (s : Nat)
+    (hall : (ri : Nat) → (Nat.lt ri (List.length p.rules) = Bool.true) →
+      (Nat.Le (List.getD strat (List.getD p.rules ri Scry.defaultRule).head.rel 0) s)) :
+    Scry.checkSoundStratifiedStmt p strat s :=
+  Scry.check_sound_stratified p laws strat hcheck s (fun ri hri _ => hall ri hri)
+
+-- ## Absence certificates
+
+-- A derivation certificate proves that a fact holds. A **negated** atom needs the
+-- opposite: that the tuple is absent from the lower stratum, which the derivation checker
+-- can only read off the EDB it is given. An absence certificate makes that assumption
+-- checkable: it carries the **candidate model of the lower strata** — a flat list of
+-- facts, any order — and the tuple claimed absent. If the model contains the EDB and is
+-- closed under the rules then, being a closed superset of the EDB, it contains the least
+-- fixpoint; so a tuple absent from the model is absent from the least fixpoint. That is
+-- `Scry.absence_check_sound` below.
+--
+-- The model is the "completeness claim"; `Absence.edbInModel` and `Absence.closedB` check
+-- the two side conditions syntactically (`closedB` enumerates the rule instances with the
+-- evaluator's matcher, so its soundness additionally needs the matcher's *completeness*:
+-- that every instance the check must see appears among the matches — see the notes).
+
+/-- An absence certificate: the candidate model of the lower strata and the tuple claimed
+absent from it. -/
+structure Scry.Absence (L : Type) where
+  model : List (Scry.PFact L)
+  rel : Nat
+  row : List U64
+
+/-- The certificate's model as a database. -/
+def Scry.dbOfFacts {L : Type} : List (Scry.PFact L) → Scry.Db L
+  | .nil => Scry.Db.empty
+  | .cons f rest =>
+    match f.lat with
+    | .none => (Scry.Db.insertTuple (Scry.dbOfFacts rest) f.rel f.args).1
+    | .some v => Scry.Db.setLat (Scry.dbOfFacts rest) f.rel f.args v
+
+def Scry.Absence.db {L : Type} (a : Scry.Absence L) : Scry.Db L := Scry.dbOfFacts a.model
+
+/-- **The check**: the claimed tuple is absent from the certificate's model. This is the
+part `Scry.absence_check_sound` turns into absence from the least fixpoint; the model's
+two semantic side conditions are `edbInModel` and `closedB`. -/
+def Scry.Absence.check {L : Type} (p : Scry.Program L) (a : Scry.Absence L) : Bool :=
+  Bool.not (Scry.factHoldsB p.ops a.db (Scry.PFact.mk a.rel a.row .none))
+
+/-- The tuple facts of a relation, as a flat list. -/
+def Scry.tupleRelFacts {L : Type} (rel : Nat) (t : Scry.TupleRel) : List (Scry.PFact L) :=
+  List.map (fun row => Scry.PFact.mk rel row (Option.none : Option L)) t.toList
+
+def Scry.tuplesFacts {L : Type} : List (Nat × Scry.TupleRel) → List (Scry.PFact L)
+  | .nil => List.nil
+  | .cons e rest =>
+    List.append (Scry.tupleRelFacts e.1 e.2) (Scry.tuplesFacts rest)
+
+/-- The lattice facts of a relation, as a flat list. -/
+def Scry.latRelFacts {L : Type} (rel : Nat) (t : Scry.LatRel L) : List (Scry.PFact L) :=
+  List.map (fun kv => Scry.PFact.mk rel kv.1 (Option.some kv.2)) t.toList
+
+def Scry.latsFacts {L : Type} : List (Nat × Scry.LatRel L) → List (Scry.PFact L)
+  | .nil => List.nil
+  | .cons e rest =>
+    List.append (Scry.latRelFacts e.1 e.2) (Scry.latsFacts rest)
+
+/-- Every fact of a database, as a flat list (in the certificate's `model` format). -/
+def Scry.dbFacts {L : Type} (db : Scry.Db L) : List (Scry.PFact L) :=
+  List.append (Scry.tuplesFacts db.tuples) (Scry.latsFacts db.lats)
+
+/-- The first side condition, syntactically: every fact of the EDB holds in the model. -/
+def Scry.Absence.edbInModel {L : Type} (p : Scry.Program L) (edb : Scry.Db L)
+    (a : Scry.Absence L) : Bool :=
+  List.foldr (fun f acc => if Scry.factHoldsB p.ops a.db f then acc else Bool.false)
+    Bool.true (Scry.dbFacts edb)
+
+/-- The second side condition, syntactically: for every rule and every body match the
+evaluator finds in the model, the instance's head holds in the model. (The matcher's
+completeness makes this cover every instance; see the notes.) -/
+def Scry.Absence.closedB {L : Type} (p : Scry.Program L) (a : Scry.Absence L) : Bool :=
+  List.foldr (fun r acc =>
+    if List.foldr (fun m acc' =>
+        if Scry.factHoldsB p.ops a.db (Scry.headFact p r m.1) then acc' else Bool.false)
+        Bool.true (Scry.evalAtoms p.ops (Scry.State.mk a.db List.nil 0) r.body Scry.Env.empty)
+      then acc else Bool.false) Bool.true p.rules
+
+/-- The full checker: the tuple is absent from the model, the model contains the EDB, and
+the model is closed. -/
+def Scry.Absence.checkFull {L : Type} (p : Scry.Program L) (edb : Scry.Db L)
+    (a : Scry.Absence L) : Bool :=
+  if Scry.Absence.check p a then
+    if Scry.Absence.edbInModel p edb a then Scry.Absence.closedB p a else Bool.false
+  else Bool.false
+
+/-- **The soundness statement.** A certificate that passes `check`, whose model contains
+`edb` and is closed under the rules, proves the tuple absent from the least fixpoint — so
+a `neg` finding can cite it instead of trusting the EDB. -/
+def Scry.absenceSoundStmt {L : Type} (p : Scry.Program L) (edb : Scry.Db L)
+    (a : Scry.Absence L) : Prop :=
+  Scry.Absence.check p a = Bool.true →
+  Scry.dbIncl p.ops edb a.db →
+  Scry.closed p a.db →
+  ¬ Scry.inLfp p edb (Scry.PFact.mk a.rel a.row (Option.none : Option L))
+
+/-- **Absence certificates are sound**: the core of the statement is proved here from the
+checker, the EDB inclusion and closure (the two `Absence.edbInModel`/`closedB` side
+conditions are the syntactic form of the last two hypotheses). -/
+def Scry.absence_check_sound {L : Type} (p : Scry.Program L) (edb : Scry.Db L)
+    (a : Scry.Absence L) : Scry.absenceSoundStmt p edb a :=
+  fun hcheck hincl hclosed hlfp =>
+    let hfalse : Scry.factHoldsB p.ops a.db
+        (Scry.PFact.mk a.rel a.row (Option.none : Option L)) = Bool.false :=
+      Scry.not_true_false _ hcheck;
+    let hholds : Scry.factHolds p.ops a.db
+        (Scry.PFact.mk a.rel a.row (Option.none : Option L)) :=
+      hlfp a.db hincl hclosed;
+    absurd (Bool.trueNeFalse (Eq.trans (Eq.symm hholds) hfalse))
+
+/-- The `closedB` side of the certificate, as a statement: if the syntactic closure check
+passes, the model is semantically closed. Its proof needs the matcher's completeness
+(every rule instance is among `evalAtoms`' matches); it is recorded here as the remaining
+obligation (see `wiz-notes/scry-derivation.md`). -/
+def Scry.absence_closedB_soundStmt {L : Type} (p : Scry.Program L) (a : Scry.Absence L) :
+    Prop :=
+  Scry.Absence.closedB p a = Bool.true → Scry.closed p a.db
