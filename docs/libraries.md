@@ -848,6 +848,57 @@ forwarded request is the granted one. The same example checks the circuit's fair
 n = 3, and the test case runs yosys `check -assert` and `synth_ice40` on the emitted
 Verilog when yosys is on PATH (skipped silently otherwise).
 
+## APB, Wishbone and AXI4-Lite (`lib/Hdl/Apb.wiz`, `lib/Hdl/Wishbone.wiz`, `lib/Hdl/AxiLite.wiz`)
+
+`Bus` is the single-outstanding, AXI4-Lite-shaped core; these three modules put the
+standard names on it rather than inventing another on-chip protocol.
+
+* `lib/Hdl/Apb.wiz` (`import Hdl.Apb`): the AMBA APB4 subset (one transfer, `PSTRB`,
+  `PSLVERR`). `Apb.busToApbC aw dw` is the full two-phase bridge: it captures a
+  `Bus.ReqW` at IDLE -> SETUP, drives `PSEL` in SETUP and `PSEL`/`PENABLE` in ACCESS until
+  `PREADY`, then answers the bus in that cycle (`ready` for both, `rvalid` for a read).
+  `PADDR`/`PWDATA`/`PWRITE`/`PSTRB` come from the bus request (`PSTRB` is zero on a read,
+  as APB requires) and `PRDATA`/`PSLVERR` become `rdata`/`err`. It returns to IDLE for at
+  least one cycle between transfers. `Apb.apbToBusC aw dw` is the reverse, combinational
+  direction: APB ACCESS (`PSEL && PENABLE`) is the bus `valid`, `PWRITE`/`PADDR`/`PWDATA`/
+  `PSTRB` the payload, and `PREADY`/`PRDATA`/`PSLVERR` the bus answer; SETUP is not a bus
+  request.
+* `lib/Hdl/Wishbone.wiz` (`import Hdl.Wishbone`): classic Wishbone B4 (`CYC`/`STB`/`ACK`/
+  `ERR`, no pipelining). `Wishbone.busToWbC aw dw` maps `valid` to `CYC`/`STB`, `we` to
+  `WE`, `addr`/`wdata`/`wstrb` to `ADR`/`DAT_W`/`SEL`, and `ACK`/`ERR`/`RTY` to the bus
+  answer (`RTY` becomes `err`: the bus has no retry). `Wishbone.wbToBusC aw dw` is the
+  reverse combinational mapping (`CYC && STB` is `valid`, `RTY`/`STALL` are low).
+* `lib/Hdl/AxiLite.wiz` (`import Hdl.AxiLite`): the ARM AXI4-Lite channel bundles
+  (`Aw`/`W`/`B`/`Ar`/`R`, and `SlaveIn`/`SlaveOut`/`MasterIn`/`MasterOut` with the
+  `*READY` directions). `AxiLite.writeOf`/`readOf` give the `Bus.ReqW` view of the
+  single-outstanding subset (`AWVALID && WVALID` is `valid`; no bursts, IDs, attributes
+  or separate `AW`/`W` arrival), and `AxiLite.errOf` turns a non-`OKAY` response into
+  `err`. A full AXI4-Lite slave still needs the `AW`/`W` queue that this subset does not
+  claim.
+
+`lib/Hdl/ProtocolLaw.wiz` (`import Hdl.ProtocolLaw`) is the bridge obligation set:
+`Bus.Law.ReqWStable` and its components (a `Bus.ReqW` source holds `valid`, `we`, `addr`,
+`wdata` and `wstrb` while stalled); `Apb.Law.Stable` (`PSEL`, `PADDR`, `PWDATA`,
+`PWRITE`, `PSTRB` held while `PSEL && !PREADY`; `PENABLE` may rise at SETUP -> ACCESS);
+`Apb.Law.AccessResp`/`Wishbone.Law.AckReq` (a response only in an access/request phase);
+`Apb.Law.ResponseMatches`/`Wishbone.Law.ResponseMatches` (the answer belongs to the
+request offered in that cycle); and the four strobe laws (`StrobeToApb`, `StrobeToBus`
+for APB; `StrobeToWb`, `StrobeToBus` for Wishbone). Since the bridges are single
+outstanding, response order is the order of the offered requests. The kernel checks the
+definitional mapping lemmas (`Apb.toBusReq_valid`, `Apb.respOfBus_pready`,
+`Wishbone.toBusReq_valid`, `Wishbone.respOfBus_ack`, `AxiLite.writeOf_valid`); the rest
+are Boolean checks over generated traces: **tested, not proved**.
+
+`examples/hdl-protocols.wiz` (test group `bus-protocol`) drives the bus-to-APB bridge for
+96 cycles (32 transfers, APB stalling every third cycle), the APB-to-bus direction for
+100 cycles through `Bus.ramWC` (12 transfers: a full write, a masked write and a read at
+each of the four 16-bit masks, read back as `43690 43616 21930 21878`), the bus-to-
+Wishbone bridge for 64 cycles and Wishbone-to-bus for 100 cycles with the same script and
+read-back, and round-trips the AXI4-Lite bundles. Every circuit is checked for stability,
+response/request matching, response order and strobe preservation, its value simulation,
+`Netlist.simulate` and `Circuit.simFast` agree cycle for cycle, and the four bridge
+netlists are `Netlist.wellFormed`.
+
 ## CRC-8/SMBUS (`lib/Hdl/Crc.wiz`)
 
 `lib/Hdl/Crc.wiz` (`import Hdl.Crc`) is the iCEstick CRC
