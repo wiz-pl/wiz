@@ -1,0 +1,48 @@
+-- Verified circuit optimisation (docs/libraries.md, H14 V1): the OLED demo's arithmetic
+-- units (wiz-icestick-uart, oled-demo: Sphere.wiz, Blobs.wiz), copied into
+-- lib/Hdl/Verified.wiz, proved against their plain Nat definitions by the kernel, with
+-- nothing trusted: each property is decided for every input of the unit's domain by
+-- evaluation (`rfl`), and `allBelow_sound` turns the decision into a `∀`.
+-- The full-width checks that are out of the kernel's reach (2^20 inputs) are in
+-- examples/hdl-verified-native.wiz, behind --trust-native.
+import Hdl.Verified
+
+-- ## Structure: each unit is its pieces, by definition
+
+-- the smooth minimum is min(d₁, d₂) − c(|d₂ − d₁|) − 1, c from the table
+def sminK_eq (d1 d2 : BitVec 12) :
+    @sminK HwTy.El _ d1 d2 = BitVec.sub (BitVec.sub (@smin12 HwTy.El _ d1 d2)
+      (@zext HwTy.El _ 5 7 (@sminCorr HwTy.El _ (@abs12 HwTy.El _ (BitVec.sub d2 d1))))) (BitVec.ofNat 12 1) := rfl
+-- the length estimate is max(max(a, c), t(a + c)), t the 11/16 by shifts
+def norm2_eq (a c : BitVec 12) :
+    @norm2 HwTy.El _ a c = @max12 HwTy.El _ (@max12 HwTy.El _ a c) (@elevenOf HwTy.El _ (BitVec.add a c)) := rfl
+
+-- ## The shift-and-add squarers (Sphere): five cycles give ax² + ay², for all 5-bit inputs
+
+def squares_all : allBelow Hv.sqOk 1024 = .true := rfl
+
+-- ## The bit-serial square root (Sphere): five cycles give ⌊√n⌋ for n ≤ 400 = R², the
+-- inputs it gets (R² − r² on a hit); examples/hdl-verified-native.wiz has every n < 1024
+
+def root_all : allBelow Hv.rtOk 401 = .true := rfl
+def root (n : Nat) (h : Nat.lt n 401 = .true) :
+    Hv.isqrtOk (rtRun (BitVec.ofNat 11 n)).toNat n = .true :=
+  allBelow_sound Hv.rtOk 401 n root_all h
+
+-- ## The quadratic smooth minimum (Blobs)
+
+-- the 17-entry table is (4 i)² / 256, and 0 beyond
+def table_all : allBelow Hv.romOk 32 = .true := rfl
+-- the correction by e = |d₂ − d₁|, for e < 64 (where it is not 0; every 12-bit e in
+-- examples/hdl-verified-native.wiz): g = 64 − e and c ≤ g²/256 < c + 2, so
+-- smin(a, b) = min(a, b) − g²/(4k) is computed less 1 to 3 units
+def corr_all : allBelow Hv.corrOk 64 = .true := rfl
+
+-- ## The octagonal length bound (Blobs)
+
+-- 11/16 by shifts, for s = a + c < 2048 (a, c < 1024; every 12-bit s in
+-- examples/hdl-verified-native.wiz): 16 t ≤ 11 s < 16 t + 38
+def eleven_all : allBelow Hv.octOk 2048 = .true := rfl
+
+-- a use: the root of 400 is 20, and of 399 is 19
+#eval (((rtRun (BitVec.ofNat 11 400)).toNat, (rtRun (BitVec.ofNat 11 399)).toNat) : Nat × Nat)

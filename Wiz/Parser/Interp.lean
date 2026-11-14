@@ -133,6 +133,11 @@ partial def runDescr : ParserDescr → P (Array Syntax)
         setPos t'.stop
         pure #[.node { start := t.start, stop := t'.stop } "antiquot" #[tokSyntax t, tokSyntax t']]
       | _ => failAt i "identifier"
+    -- a word that a `term`/`command` rule reserved: say so (`ParseError.explainKeywords`
+    -- names the rule when the error is reported, 13o)
+    | some { tok := .atom v, .. } =>
+      if v != "" && isIdStart v.front && v.all isIdRest then failAt i s!"identifier ('{v}' is a keyword)"
+      else failAt i "identifier"
     | _ => failAt i "identifier"
   | .num => do
     let i ← nextPos

@@ -1,125 +1,188 @@
 import IO
--- Algebraic effects as a library (stage 10).
---
--- An effect is a set of operations, each with the type of its answer. A computation
--- `Eff r A` is a tree of operations from the row `r`, with continuations (a free monad).
--- Handlers interpret the first effect of the row and leave the rest. Rows can be
--- reordered only where the effects provably commute (`Commute`).
+/-!
+# Eff
 
+Algebraic effects as a library (stage 10).
+
+An effect is a set of operations, each with the type of its answer. A computation
+`Eff r A` is a tree of operations from the row `r`, with continuations (a free monad).
+Handlers interpret the first effect of the row and leave the rest. Rows can be
+reordered only where the effects provably commute (`Commute`).
+
+The pieces:
+
+* `Effect`, `Row`, `Eff` (the free monad over a row), `send` (perform an operation),
+  `Member` (an effect is in a row), `Eff.run` (no effects left).
+* Effects with their handlers: `State` (`get`, `put`, `runState`), `Reader` (`ask`,
+  `runReader`), `Exn` (`throw`, `runExn`), `Console` (`println`, `runConsole`).
+* Lowering a whole row to one monad: `Handler`, `Handlers`, `interpret`; reordering a
+  row: `Commute`, `reorder`.
+* Fusion (10b): `MonadState`, `MonadReader`, `MonadConsole` let a program run either as
+  a tree (`Eff r`) or directly in `StateT`/`ReaderT`/`IO`, with no tree built.
+* One-shot effects (CS4–6): `Eff1`, whose handlers resume exactly once, so continuations
+  may capture linear resources.
+
+```
+import Eff
+
+def tick {r : Row} [Member (State Nat) r] : Eff r Unit := do
+  n ← get;
+  put (Nat.succ n)
+def twice : Eff (Row.cons (State Nat) Row.nil) Nat := do
+  tick;
+  tick;
+  get
+#eval Eff.run (runState twice 0)   -- (2, 2)
+```
+-/
+
+/-- An effect: a type of operations `op`, and for each operation the type of its answer
+`ret o`. `State S` has `get` (answered by an `S`) and `put s` (answered by `Unit`). -/
 structure Effect where
   op : Type
   ret : op → Type
 
+/-- A row of effects, a list: the first one is handled first (`runState`, `runExn`, …). -/
 inductive Row : Type 1 where
   | nil
   | cons (e : Effect) (r : Row)
 
+/-- `A` or `B` (the operations of a row are a nest of these). -/
 inductive Sum (A B : Type) where
   | inl (a : A)
   | inr (b : B)
 
--- The operations of a row, and their answer types.
+/-- The operations of a row: a `Sum` of the effects' operation types (`Empty` for the empty row). -/
 def Union : Row → Type
   | .nil => Empty
   | .cons e r => Sum e.op (Union r)
+/-- The answer type of an operation of a row. -/
 def RetU : (r : Row) → Union r → Type
   | .nil, o => absurd o
   | .cons e r, .inl o => e.ret o
   | .cons e r, .inr o => RetU r o
 
+/-- A computation with effects from `r` and result `A`: either done (`pure a`), or an
+operation `o` of the row with its continuation `k`, which takes the operation's
+answer (a free monad). Build them with `do`, `send` and the operations below. -/
 inductive Eff (r : Row) (A : Type) where
   | pure (a : A)
   | op (o : Union r) (k : RetU r o → Eff r A)
 
+/-- Sequence two computations: run the first, then `f` of its result (grafting `f` onto
+the leaves of the tree). -/
 def Eff.bind {r : Row} {A B : Type} : Eff r A → (A → Eff r B) → Eff r B
   | .pure a, f => f a
   | .op o k, f => .op o (fun x => Eff.bind (k x) f)
+/-- `Eff r` is a monad, so it has `do` notation. -/
 instance {r : Row} : Monad (Eff r) where
   pure := fun a => Eff.pure a
   bind := Eff.bind
 
--- `e` is in the row `r`: how to inject its operations, and read their answers back.
+/-- `e` is in the row `r`: how to inject its operations, and read their answers back.
+The instances find `e` at the head of the row or further down. -/
 class Member (e : Effect) (r : Row) where
   inj : e.op → Union r
   prj : (o : e.op) → RetU r (inj o) → e.ret o
+/-- An effect is in a row that starts with it. -/
 instance {e : Effect} {r : Row} : Member e (Row.cons e r) where
   inj := fun o => Sum.inl o
   prj := fun o x => x
+/-- An effect is in a row whose tail it is in. -/
 instance {e e' : Effect} {r : Row} [i : Member e r] : Member e (Row.cons e' r) :=
   Member.mk (fun o => @Sum.inr e'.op (Union r) (@Member.inj e r i o)) (fun o x => @Member.prj e r i o x)
 
--- Perform an operation of an effect in the row.
+/-- Perform an operation of an effect in the row: `send (State Nat) StateOp.get`. -/
 def send (0 e : Effect) {r : Row} [i : Member e r] (o : e.op) : Eff r (e.ret o) :=
   @Eff.op r (e.ret o) (@Member.inj e r i o) (fun x => Eff.pure (@Member.prj e r i o x))
 
--- A computation with no effects left.
+/-- The result of a computation with no effects left (all handled). -/
 def Eff.run {A : Type} : Eff Row.nil A → A
   | .pure a => a
   | .op o k => absurd o
 
--- State.
+/-- The operations of `State S`: read the state (`get`) or replace it (`put s`). -/
 inductive StateOp (S : Type) where
   | get
   | put (s : S)
+/-- The state effect: `get` is answered by the state, `put` by `()`. -/
 def State (S : Type) : Effect := Effect.mk (StateOp S) (fun o => match o with
   | .get => S
   | .put _ => Unit)
+/-- Read the state. -/
 def get {S : Type} {r : Row} [Member (State S) r] : Eff r S := send (State S) StateOp.get
+/-- Replace the state. -/
 def put {S : Type} {r : Row} [Member (State S) r] (s : S) : Eff r Unit := send (State S) (StateOp.put s)
+/-- Handle the first effect of the row, `State S`, starting from state `s`: the result and
+the final state. `Eff.run (runState (do put 3; get) 0) = (3, 3)`. -/
 def runState {S : Type} {r : Row} {A : Type} : Eff (Row.cons (State S) r) A → S → Eff r (A × S)
   | .pure a, s => Eff.pure (a, s)
   | .op (.inl .get) k, s => runState (k s) s
   | .op (.inl (.put s')) k, s => runState (k ()) s'
   | .op (.inr o) k, s => Eff.op o (fun x => runState (k x) s)
 
--- Reading an environment.
+/-- The operation of `Reader E`: read the environment. -/
 inductive ReaderOp where
   | ask
+/-- The reader effect: `ask` is answered by the environment `E`. -/
 def Reader (E : Type) : Effect := Effect.mk ReaderOp (fun _ => E)
+/-- Read the environment. -/
 def ask {E : Type} {r : Row} [Member (Reader E) r] : Eff r E := send (Reader E) ReaderOp.ask
+/-- Handle the first effect of the row, `Reader E`, with the environment `env`. -/
 def runReader {E : Type} {r : Row} {A : Type} : Eff (Row.cons (Reader E) r) A → E → Eff r A
   | .pure a, _ => Eff.pure a
   | .op (.inl .ask) k, env => runReader (k env) env
   | .op (.inr o) k, env => Eff.op o (fun x => runReader (k x) env)
 
--- Exceptions: the handler stops at the first one.
+/-- The operation of `Exn X`: raise `x`. The handler stops at the first one. -/
 inductive ExnOp (X : Type) where
   | throw (x : X)
+/-- The exception effect. `throw` has no answer (`Empty`): nothing comes after it. -/
 def Exn (X : Type) : Effect := Effect.mk (ExnOp X) (fun _ => Empty)
+/-- Raise an exception; it has any result type, since it never returns. -/
 def throw {X A : Type} {r : Row} [Member (Exn X) r] (x : X) : Eff r A :=
   Eff.bind (send (Exn X) (ExnOp.throw x)) (fun e => absurd e)
+/-- Handle the first effect of the row, `Exn X`: `Except.error x` at the first `throw x`,
+`Except.ok a` otherwise. -/
 def runExn {X : Type} {r : Row} {A : Type} : Eff (Row.cons (Exn X) r) A → Eff r (Except X A)
   | .pure a => Eff.pure (Except.ok a)
   | .op (.inl (.throw x)) _ => Eff.pure (Except.error x)
   | .op (.inr o) k => Eff.op o (fun x => runExn (k x))
 
--- Output, handled by `IO` at the bottom of the row.
+/-- The operation of `Console`: print a line. It is handled by `IO` at the bottom of the row. -/
 inductive ConsoleOp where
   | println (s : String)
+/-- The console effect: `println` is answered by `()`. -/
 def Console : Effect := Effect.mk ConsoleOp (fun _ => Unit)
+/-- Print a line (an operation of `Console`). -/
 def println {r : Row} [Member Console r] (s : String) : Eff r Unit := send Console (ConsoleOp.println s)
+/-- Run a computation whose only effect is `Console` in `IO`. -/
 def runConsole {A : Type} : Eff (Row.cons Console Row.nil) A → IO A
   | .pure a => IO.pure a
   | .op (.inl (.println s)) k => Monad.bind (IO.println s) (fun u => runConsole (k u))
   | .op (.inr o) _ => absurd o
 
--- Lowering to a monad: every effect of the row is handled in the same monad `m`.
+/-- Lowering to a monad: `Handler e m` interprets each operation of `e` in the monad `m`. -/
 class Handler (e : Effect) (m : Type → Type) where
   handle : (o : e.op) → m (e.ret o)
+/-- A handler in `m` for every effect of the row (from the `Handler` instances). -/
 class Handlers (r : Row) (m : Type → Type) where
   handleU : (o : Union r) → m (RetU r o)
+/-- The empty row has no operations to handle. -/
 instance {m : Type → Type} : Handlers Row.nil m where
   handleU := fun o => absurd o
+/-- Handlers for `e` and for the rest of the row handle `Row.cons e r`. -/
 instance {e : Effect} {r : Row} {m : Type → Type} [h : Handler e m] [hs : Handlers r m] : Handlers (Row.cons e r) m :=
   Handlers.mk (fun o => match o with
     | .inl o' => @Handler.handle e m h o'
     | .inr o' => @Handlers.handleU r m hs o')
+/-- Run a computation in the monad `m`, every effect of the row handled there (`Handlers`). -/
 def interpret {r : Row} {m : Type → Type} [i : Monad m] [hs : Handlers r m] {A : Type} : Eff r A → m A
   | .pure a => @Monad.pure m i A a
   | .op o k => @Monad.bind m i (RetU r o) A (@Handlers.handleU r m hs o) (fun x => interpret (k x))
 
--- Two effects commute in `m` when their operations can be swapped: a proof obligation,
--- checked by the kernel. Only then may a row be reordered.
+/-- Two effects commute in `m` when their operations can be swapped: a proof obligation,
+checked by the kernel. Only then may a row be reordered (`reorder`). -/
 class Commute (e₁ e₂ : Effect) (m : Type → Type) [i : Monad m] [h₁ : Handler e₁ m] [h₂ : Handler e₂ m] where
   comm : (o₁ : e₁.op) → (o₂ : e₂.op) → (B : Type) → (f : e₁.ret o₁ → e₂.ret o₂ → m B) →
     @Monad.bind m i (e₁.ret o₁) B (@Handler.handle e₁ m h₁ o₁)
@@ -127,11 +190,12 @@ class Commute (e₁ e₂ : Effect) (m : Type → Type) [i : Monad m] [h₁ : Han
     @Monad.bind m i (e₂.ret o₂) B (@Handler.handle e₂ m h₂ o₂)
       (fun b => @Monad.bind m i (e₁.ret o₁) B (@Handler.handle e₁ m h₁ o₁) (fun a => f a b))
 
--- Swap the first two effects of a row (the meaning in `m` is unchanged, by `comm`).
+/-- Swap the first two effects of a row, on operations. -/
 def Eff.swapU {e₁ e₂ : Effect} {r : Row} : Union (Row.cons e₁ (Row.cons e₂ r)) → Union (Row.cons e₂ (Row.cons e₁ r))
   | .inl o => .inr (.inl o)
   | .inr (.inl o) => .inl o
   | .inr (.inr o) => .inr (.inr o)
+/-- Swap the first two effects of a row (the meaning in `m` is unchanged, by `Commute.comm`). -/
 def reorder {e₁ e₂ : Effect} {r : Row} {m : Type → Type} [i : Monad m] [h₁ : Handler e₁ m] [h₂ : Handler e₂ m]
     [c : @Commute e₁ e₂ m i h₁ h₂] {A : Type} : Eff (Row.cons e₁ (Row.cons e₂ r)) A → Eff (Row.cons e₂ (Row.cons e₁ r)) A
   | .pure a => Eff.pure a
@@ -143,79 +207,102 @@ def reorder {e₁ e₂ : Effect} {r : Row} {m : Type → Type} [i : Monad m] [h�
 -- operations (the `Eff r` instances, with handlers) or directly in a monad (the
 -- `StateT`/`ReaderT`/`IO` instances), where each operation is a plain call and no tree
 -- is built: the handlers are fused into the program.
+/-- Monads with a state `S` (fusion, 10b): `Eff r` with `State S` in the row, or `StateT S m`. -/
 class MonadState (S : Type) (m : Type → Type) where
   getS : m S
   putS : S → m Unit
+/-- Monads with an environment `E`: `Eff r` with `Reader E` in the row, or `ReaderT E m`. -/
 class MonadReader (E : Type) (m : Type → Type) where
   askR : m E
+/-- Monads that can print a line: `Eff r` with `Console` in the row, `IO`, and transformers over them. -/
 class MonadConsole (m : Type → Type) where
   printLn : String → m Unit
 
 -- trees of operations
+/-- A tree of operations: `get` and `put`. -/
 instance {S : Type} {r : Row} [i : Member (State S) r] : MonadState S (Eff r) :=
   MonadState.mk (@get S r i) (@put S r i)
+/-- A tree of operations: `ask`. -/
 instance {E : Type} {r : Row} [i : Member (Reader E) r] : MonadReader E (Eff r) :=
   MonadReader.mk (@ask E r i)
+/-- A tree of operations: `println`. -/
 instance {r : Row} [i : Member Console r] : MonadConsole (Eff r) :=
   MonadConsole.mk (@println r i)
 
 -- direct: monad transformers over IO
+/-- The state monad transformer: a function from the state to a result and the new state
+in `m`. Running a `MonadState` program in it builds no tree. -/
 def StateT (S : Type) (m : Type → Type) (A : Type) : Type := S → m (A × S)
+/-- `StateT S m` is a monad: the state is threaded through `bind`. -/
 instance {S : Type} {m : Type → Type} [i : Monad m] : Monad (StateT S m) :=
   Monad.mk (fun a => fun s => @Monad.pure m i _ (a, s))
     (fun x f => fun s => @Monad.bind m i _ _ (x s) (fun p => f p.1 p.2))
+/-- Reading and writing the state directly. -/
 instance {S : Type} {m : Type → Type} [i : Monad m] : MonadState S (StateT S m) :=
   MonadState.mk (fun s => @Monad.pure m i _ (s, s)) (fun s' => fun _ => @Monad.pure m i _ ((), s'))
+/-- Printing in `StateT S m` prints in `m`, leaving the state alone. -/
 instance {S : Type} {m : Type → Type} [i : Monad m] [c : MonadConsole m] : MonadConsole (StateT S m) :=
   MonadConsole.mk (fun str => fun s => @Monad.bind m i _ _ (@MonadConsole.printLn m c str) (fun u => @Monad.pure m i _ (u, s)))
 
+/-- The reader monad transformer: a function from the environment to `m A`. -/
 def ReaderT (E : Type) (m : Type → Type) (A : Type) : Type := E → m A
+/-- `ReaderT E m` is a monad: the environment is passed to both sides of `bind`. -/
 instance {E : Type} {m : Type → Type} [i : Monad m] : Monad (ReaderT E m) :=
   Monad.mk (fun a => fun _ => @Monad.pure m i _ a) (fun x f => fun env => @Monad.bind m i _ _ (x env) (fun a => f a env))
+/-- Reading the environment directly. -/
 instance {E : Type} {m : Type → Type} [i : Monad m] : MonadReader E (ReaderT E m) :=
   MonadReader.mk (fun env => @Monad.pure m i _ env)
+/-- Printing in `ReaderT E m` prints in `m`. -/
 instance {E : Type} {m : Type → Type} [c : MonadConsole m] : MonadConsole (ReaderT E m) :=
   MonadConsole.mk (fun str => fun _ => @MonadConsole.printLn m c str)
 
+/-- Printing in `IO` is `IO.println`. -/
 instance : MonadConsole IO := MonadConsole.mk IO.println
 
--- One-shot effects (CS4–6). The continuations of `Eff` are ω fields, so a computation
--- can't keep a linear resource (a channel endpoint, a token) in one: the resource would
--- be used any number of times. `Eff1 q r R A` is the same computations, Church-encoded
--- over an answer type `R`, whose handler gets each continuation at quantity 1: it must
--- resume exactly once (one-shot, as in OCaml 5), and in exchange a continuation may
--- capture linear resources. The result is used `q` times: `ω` for ordinary results,
--- `1` for a computation that hands back a linear resource. Handlers that resume twice
--- (backtracking) or never (exceptions) need `Eff`. (Church-encoded rather than a tree:
--- a linear field can't be matched back out of data yet, plan L2.) The effects, rows and
--- `Member` are those of `Eff`.
+/-- One-shot effects (CS4–6). The continuations of `Eff` are ω fields, so a computation
+can't keep a linear resource (a channel endpoint, a token) in one: the resource would
+be used any number of times. `Eff1 q r R A` is the same computations, Church-encoded
+over an answer type `R`, whose handler gets each continuation at quantity 1: it must
+resume exactly once (one-shot, as in OCaml 5), and in exchange a continuation may
+capture linear resources. The result is used `q` times: `ω` for ordinary results,
+`1` for a computation that hands back a linear resource. Handlers that resume twice
+(backtracking) or never (exceptions) need `Eff`. (Church-encoded rather than a tree:
+a linear field can't be matched back out of data yet, plan L2.) The effects, rows and
+`Member` are those of `Eff`. -/
 def Eff1 (q : Qty) (r : Row) (R A : Type) : Type :=
   (1 ret : (%q a : A) → R) → (h : (o : Union r) → (1 k : RetU r o → R) → R) → R
+/-- A one-shot computation that is done, with result `a` (used `q` times). -/
 def Eff1.pure {q : Qty} {r : Row} {R A : Type} (%q a : A) : Eff1 q r R A := fun ret h => ret a
--- the continuation is used once; its argument as often as the first result allows
+/-- Sequence two one-shot computations: the continuation is used once; its argument as
+often as the first result allows. -/
 def Eff1.bind {q p : Qty} {r : Row} {R A B : Type} (1 x : Eff1 q r R A) (1 f : (%q a : A) → Eff1 p r R B) : Eff1 p r R B :=
   fun ret h => x (fun a => f a ret h) h
--- perform an operation of the row, then continue (once) with `k`
+/-- Perform an operation of the row, then continue (once) with `k`. -/
 def Eff1.op {q : Qty} {r : Row} {R A : Type} (o : Union r) (1 k : RetU r o → Eff1 q r R A) : Eff1 q r R A :=
   fun ret h => h o (fun x => k x ret h)
+/-- `Eff1 ω r R` is a monad, so it has `do` notation. -/
 instance {r : Row} {R : Type} : Monad (Eff1 ω r R) where
   pure := fun a => Eff1.pure a
   bind := fun x f => Eff1.bind x f
+/-- `Eff1 ω r R`'s bind takes its continuation at quantity 1 (`do1`). -/
 instance {r : Row} {R : Type} : Monad1 (Eff1 ω r R) where
   bind1 := fun x f => Eff1.bind x f
+/-- Perform an operation of an effect in the row, one-shot (`send` for `Eff1`). -/
 def send1 (0 e : Effect) {r : Row} {R : Type} [i : Member e r] (o : e.op) : Eff1 ω r R (e.ret o) :=
   fun ret h => h (@Member.inj e r i o) (fun x => ret (@Member.prj e r i o x))
--- A computation with no effects left (the continuation of an impossible operation is
--- still used once: `k (absurd o)`), with an unrestricted or a linear result.
+/-- A computation with no effects left (the continuation of an impossible operation is
+still used once: `k (absurd o)`), with an unrestricted result. -/
 def Eff1.run {A : Type} (1 m : Eff1 ω Row.nil A A) : A := m (fun a => a) (fun o k => k (absurd o))
+/-- `Eff1.run` for a computation whose result is linear. -/
 def Eff1.run1 {A : Type} (1 m : Eff1 1 Row.nil A A) : A := m (fun a => a) (fun o k => k (absurd o))
--- Every multi-shot computation is a one-shot one (it captures no linear resource).
+/-- Every multi-shot computation is a one-shot one (it captures no linear resource). -/
 def Eff.toEff1 {r : Row} {R A : Type} : Eff r A → Eff1 ω r R A
   | .pure a => Eff1.pure a
   | .op o k => Eff1.op o (fun x => Eff.toEff1 (k x))
 
--- A one-shot handler of the first effect of the row: `ret` for the result, `h` for each
--- operation, given the rest of the computation (`k`) to run exactly once.
+/-- A one-shot handler of the first effect of the row: `ret` for the result, `h` for each
+operation, given the rest of the computation (`k`) to run exactly once. Operations of
+the rest of the row are passed on. -/
 def Eff1.handle {q p : Qty} {e : Effect} {r : Row} {R A B : Type} (1 ret : (%q a : A) → Eff1 p r R B)
     (h : (o : e.op) → (1 k : e.ret o → Eff1 p r R B) → Eff1 p r R B)
     (1 m : Eff1 q (Row.cons e r) (Eff1 p r R B) A) : Eff1 p r R B :=
@@ -223,24 +310,26 @@ def Eff1.handle {q p : Qty} {e : Effect} {r : Row} {R A B : Type} (1 ret : (%q a
     | .inl o' => fun k => h o' k
     | .inr o' => fun k => @Eff1.op p r R B o' k)
 
--- State, one-shot: the handler threads the state through the continuation.
+/-- Read the state, one-shot: the handler (`runState1`) threads the state through the continuation. -/
 def get1 {S : Type} {r : Row} {R : Type} [Member (State S) r] : Eff1 ω r R S := send1 (State S) StateOp.get
+/-- Replace the state, one-shot. -/
 def put1 {S : Type} {r : Row} {R : Type} [Member (State S) r] (s : S) : Eff1 ω r R Unit := send1 (State S) (StateOp.put s)
--- the result and the final state
+/-- Handle `State S`, one-shot: the result and the final state. -/
 def runState1 {S : Type} {r : Row} {R A : Type} (1 m : Eff1 ω (Row.cons (State S) r) (S → Eff1 ω r R (A × S)) A) : S → Eff1 ω r R (A × S) :=
   m (fun a s => Eff1.pure (a, s)) (fun o => match o with
     | .inl .get => fun k s => k s s
     | .inl (.put s') => fun k _ => k () s'
     | .inr o' => fun k s => @Eff1.op ω r R (A × S) o' (fun x => k x s))
--- the result only, which may be linear
+/-- Handle `State S`, one-shot: the result only, which may be linear. -/
 def evalState1 {q : Qty} {S : Type} {r : Row} {R A : Type} (1 m : Eff1 q (Row.cons (State S) r) (S → Eff1 q r R A) A) : S → Eff1 q r R A :=
   m (fun a _ => Eff1.pure a) (fun o => match o with
     | .inl .get => fun k s => k s s
     | .inl (.put s') => fun k _ => k () s'
     | .inr o' => fun k s => @Eff1.op q r R A o' (fun x => k x s))
 
--- Output, handled by `IO` (whose bind takes its continuation at quantity 1).
+/-- Print a line, one-shot; handled by `IO` (whose bind takes its continuation at quantity 1). -/
 def println1 {r : Row} {R : Type} [Member Console r] (s : String) : Eff1 ω r R Unit := send1 Console (ConsoleOp.println s)
+/-- Run a one-shot computation whose only effect is `Console` in `IO`. -/
 def runConsole1 {A : Type} (1 m : Eff1 ω (Row.cons Console Row.nil) (IO A) A) : IO A :=
   m IO.pure (fun o => match o with
     | .inl (.println s) => fun k => IO.bind (IO.println s) k

@@ -1,0 +1,164 @@
+import Hdl.Core
+import Hdl.Prim
+import Hdl.Cdc
+import Hdl.Xilinx7
+import Hdl.Xdc
+/-!
+# Clock-domain crossings (C3)
+
+A `Circuit` has one clock domain: all its registers tick together, and `Circuit.run` is
+one Mealy step per input. A design with two clocks is a composition of single-clock
+circuits, each clocked by its own `ClockDomain`, wired at the top. Data that crosses
+from one domain into another must go through a synchroniser; `Cdc.sync2` is two flops
+in the destination domain (a `Prim.declSync`).
+
+`Netlist.domainErrors` is the check: data crossing a boundary with no synchroniser, a
+synchroniser clocked by the domain it samples, a domain the netlist does not declare, a
+memory written from another domain. `Netlist.kindErrors` still catches clock-as-data.
+
+The raw netlists below (`accepted`, `rejected`, `sameDomain`, …) pin down the C2 checks.
+(C3's `Multi` writes the same accepted design from two single-clock parts and a top-level
+wire: `MultiWire.link` is a rename (the checker sees the crossing), `Cdc.wire` puts the
+two-flop synchroniser between them. `Clocking.domains` says where each domain's core
+clock comes from (a PLL output through a BUFG, or an input pin), and `Xdc`/`Pcf` create
+a clock with the period from `ClockDomain.periodPs` for every domain.
+
+Run with `wiz check examples/hdl-cdc.wiz`; the `#eval`s are the (group `hdl`) test.
+-/
+
+/-- The second clock domain of the design (`clk` is `ClockDomain.sys`), 400 MHz. -/
+def d2 : ClockDomain := ClockDomain.mk "clk2" 2500
+/-- The implicit clock domain. -/
+def clk : ClockDomain := ClockDomain.sys
+/-- A register node (register `r`). -/
+def regN (r : Nat) : NetNode := NetNode.mk (NetOp.reg r) 1 List.nil
+/-- A clock-net node of domain `d`. -/
+def clockN (d : ClockDomain) : NetNode := NetNode.mk (NetOp.clock d.name) 1 List.nil
+/-- A `wiz_sync2` instance node on nodes `c` (its clock) and `a` (its data). -/
+def syncN (c a : Nat) : NetNode := NetNode.mk (NetOp.inst (Prim.erase Cdc.sync2P)) 0 (.cons c (.cons a .nil))
+/-- Output leaf 0 of the instance at node `k`. -/
+def outN (k : Nat) : NetNode := NetNode.mk (NetOp.instOut 0 0) 1 (.cons k .nil)
+/-- A one-bit register named `name`, loading node `next`, on domain `dom`. -/
+def reg (name : String) (next : Nat) (dom : String) : NetReg := NetReg.mk name 1 0 next .none .none dom
+/-- A one-bit output port `y` showing node `k`. -/
+def outY (k : Nat) : NetPort := NetPort.mk "y" 1 k "clk2"
+
+/-- `r` (clk) → two-flop synchroniser (clk2) → `s` (clk2): the crossing is synchronised,
+so the netlist has no domain errors. -/
+def accepted : Netlist :=
+  Netlist.mk "cross"
+    (.cons (regN 0) (.cons (clockN d2) (.cons (syncN 1 0) (.cons (outN 2) (.cons (regN 1) .nil)))))
+    (.cons (reg "r" 0 "clk") (.cons (reg "s" 3 "clk2") .nil))
+    List.nil (.cons (outY 4) .nil) List.nil List.nil (.cons clk (.cons d2 .nil)) List.nil
+
+/-- The same top without the synchroniser: `s` (clk2) samples `r` (clk) directly. -/
+def rejected : Netlist :=
+  Netlist.mk "cross"
+    (.cons (regN 0) (.cons (regN 1) .nil))
+    (.cons (reg "r" 0 "clk") (.cons (reg "s" 0 "clk2") .nil))
+    List.nil (.cons (outY 1) .nil) List.nil List.nil (.cons clk (.cons d2 .nil)) List.nil
+
+/-- A synchroniser clocked by the domain its data is already in: the cell crosses
+nothing, and `s` then samples its (clk) output from clk2. -/
+def sameDomain : Netlist :=
+  Netlist.mk "cross"
+    (.cons (regN 0) (.cons (clockN clk) (.cons (syncN 1 0) (.cons (outN 2) (.cons (regN 1) .nil)))))
+    (.cons (reg "r" 0 "clk") (.cons (reg "s" 3 "clk2") .nil))
+    List.nil (.cons (outY 4) .nil) List.nil List.nil (.cons clk (.cons d2 .nil)) List.nil
+
+/-- An input port of kind clock (the second clock of a design) used as data. -/
+def clockData : Netlist :=
+  Netlist.mk "clockData"
+    (.cons (NetNode.mk (NetOp.input 0) 1 List.nil) (.cons (regN 0) .nil))
+    (.cons (reg "r" 0 "clk") .nil)
+    (.cons (NetPort.mk "ck" 1 0 "clk") .nil) (.cons (NetPort.mk "y" 1 1 "clk") .nil)
+    List.nil List.nil (.cons clk .nil) List.nil
+
+/-- A one-domain circuit: its netlist has no domain errors and its Verilog is unchanged. -/
+def counter : Circuit (HwTy.bits 0) (HwTy.bits 8) :=
+  Circuit.mk (HwTy.bits 8) (BitVec.ofNat 8 0) (fun s _ => Hw.pair (Hw.add s (Hw.lit 8 1)) s)
+
+/-- A circuit cannot declare a second register domain: all its registers are on its own
+domain (`clk` here), so a `clk2` synchroniser feeding one is a crossing, and `clk2` is a
+domain the netlist does not declare. -/
+def smuggled : Circuit (HwTy.bits 0) HwTy.bit :=
+  Circuit.mk HwTy.bit (BitVec.ofNat 1 0) (fun s _ => Hw.pair (Cdc.sync2 (Hw.clockOf d2) s) s)
+
+-- the synchronised crossing: no errors, and the emitted Verilog has both clocks
+#eval Netlist.domainErrors accepted
+#eval Verilog.emit accepted
+-- the unsynchronised crossing: rejected where `s` samples `r`
+#eval Netlist.domainErrors rejected
+#eval (Netlist.withErrors rejected (Netlist.domainErrors rejected)).errors
+-- a synchroniser whose data is already in its clock's domain
+#eval Netlist.domainErrors sameDomain
+-- clock-as-data is still a kind error (and no domain error)
+#eval Netlist.kindErrors clockData (.cons PortKind.clock .nil) (.cons PortKind.data .nil)
+#eval Netlist.domainErrors clockData
+-- one domain: no domain errors, the same Verilog as before C1/C2
+#eval (Circuit.netlist "counter" counter).errors
+#eval Verilog.emit (Circuit.netlist "counter" counter)
+-- a circuit cannot smuggle a second register domain in
+#eval (Circuit.netlist "smuggle" smuggled).errors
+-- the checked runners refuse a multi-domain netlist (and an unmodelled cell)
+#eval Netlist.simulateModelled accepted List.nil
+
+--------------------------------------------------------------------------------
+-- (C3) The same design written as a `Multi`: two single-clock circuits (parts), a
+-- top-level wire through `Cdc.sync2`, the wrapper (`Clocking.domains`), and constraints.
+
+/-- A one-bit circuit: its state follows the input, its output is the state. -/
+def follow : Circuit HwTy.bit HwTy.bit :=
+  Circuit.mk HwTy.bit (BitVec.ofNat 1 0) (fun s x => Hw.pair x s)
+/-- The producer, on `clk` (the first domain). -/
+def txPart : MultiPart := MultiPart.circuit "tx" ClockDomain.sys follow (.cons "go" .nil) (.cons "tick" .nil)
+/-- The consumer, on `clk2`. -/
+def rxPart : MultiPart := MultiPart.circuit "rx" d2 follow (.cons "din" .nil) (.cons "q" .nil)
+/-- `tick` (clk) wired straight into `din` (clk2): the crossing the checker rejects. -/
+def linked : Multi :=
+  Multi.mk "cross" (.cons clk (.cons d2 .nil)) (.cons txPart (.cons rxPart .nil))
+    (.cons (MultiWire.link "tick" "din") .nil)
+/-- The same top through `Cdc.wire d2`: two flops in `clk2` between the parts. -/
+def design : Multi :=
+  Multi.mk "cross" (.cons clk (.cons d2 .nil)) (.cons txPart (.cons rxPart .nil))
+    (.cons (Cdc.wire d2 "tick" "din") .nil)
+
+-- the unwired top is rejected, the wired one accepted; its Verilog
+#eval (Multi.netlist linked).errors
+#eval (Multi.netlist design).errors
+#eval Multi.verilog design
+-- the wrapper: CLKOUT0 drives `clk`, CLKOUT1 (through a BUFG) `clk2`
+def pll : Clocking := X7.pll "10.0" 8 1 8 (.cons ("clk2", (1, (2, "0.0"))) .nil) .nil
+#eval Verilog.emitTop (Multi.netlist design) pll
+-- a second clock from an input pin: the wrapper declares it and drives `clk2` from it
+def pinClocking : Clocking :=
+  Clocking.mk "PLLE2_BASE" .nil "CLKIN1" .nil (.cons ("CLKFBOUT", "CLKFBIN") .nil) "CLKOUT0"
+    (.cons ("clk2", ClockSource.pin "clk2") .nil) .nil
+#eval Verilog.emitTop (Multi.netlist design) pinClocking
+-- constraints: a create_clock for each domain, with the period from `ClockDomain`; a
+-- second clock from a pin gets its package pin too
+def board : XBoard := XBoard.mk "E3" 10000 "LVCMOS33"
+  (.cons (XPin.one "clk" "E3") (.cons (XPin.one "clk2" "F3")
+    (.cons (XPin.one "go" "D9") (.cons (XPin.one "q" "D10") .nil))))
+#eval Xdc.emit (Multi.netlist design) board
+#eval Xdc.check (Multi.netlist design) board
+-- PCF: a set_frequency for each clock domain with a known period
+#eval Pcf.emit (Multi.netlist design) 21 (.cons (Pin.one "go" 1) (.cons (Pin.one "q" 2) .nil))
+-- a BUFG's output has its domain (`Prim.withOutDom`): a synchroniser clocked by it is in
+-- `clk2` (the error says its data is already there, rather than "no clock net")
+def bufgSync : Circuit HwTy.bit HwTy.bit :=
+  Circuit.mk HwTy.bit (BitVec.ofNat 1 0) (fun s x => Hw.pair (Cdc.sync2 (X7.bufgIn d2) x) s)
+#eval (Circuit.netlistIn d2 "bufgSync" bufgSync).errors
+-- a BUFG output as a top-level wire's clock: the BUFG cell names its output domain
+-- (`outDom`), so the synchroniser behind it is clocked by `clk2`, not "no clock net"
+def bufgWire : MultiWire :=
+  MultiWire.through (Prim.erase (Prim.withOutDom X7.bufgP d2.name)) (.cons "clk2" .nil) (.cons "bufgclk" .nil)
+def syncWire : MultiWire :=
+  MultiWire.through (Prim.erase Cdc.sync2P) (.cons "bufgclk" (.cons "tick" .nil)) (.cons "din" .nil)
+def designBufg : Multi :=
+  Multi.mk "cross" (.cons clk (.cons d2 .nil)) (.cons txPart (.cons rxPart .nil))
+    (.cons bufgWire (.cons syncWire .nil))
+#eval (Multi.netlist designBufg).errors
+#eval Multi.verilog designBufg
+-- simulation of the multi-clock design is refused (an event schedule is not implemented)
+#eval Netlist.simulateModelled (Multi.netlist design) List.nil

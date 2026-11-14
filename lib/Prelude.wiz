@@ -1,86 +1,148 @@
--- The Wiz prelude: `import Prelude`.
+/-!
+# Prelude
 
--- Propositional regularity: a cast along a proof of `A = A` is the identity, up to
--- equality. An axiom (it doesn't compute), consistent in the setoid model. Wiz has no
--- definitional regularity (D1: with an impredicative `Prop` it makes checking loop), so
--- a cast at a type variable stays stuck; this axiom is how proofs get rid of one
--- (`Vec.map_cons` in lib/Vec.wiz).
+The Wiz prelude (`import Prelude`): the basic types, notation, classes and
+metaprogramming that every other library module builds on.
+
+It has:
+
+* the basic data types: `Bool`, `Nat` (unary to the kernel, native at runtime),
+  `List`, `Option`, `Except`, `Char` and `String`, with their basic functions
+  (`Nat.add`, `Nat.div`, `Nat.land`, `List.append`, …);
+* transport along equations (`Eq.cast`, `Eq.subst`) and the regularity axiom
+  `castRefl`;
+* the numeric classes `Add`, `Sub`, `Mul`, `Div`, `Mod`, `Neg` and `OfNat` behind
+  `+ - * / %` and numerals, and `Append` behind `++`;
+* notation: `if … then … else`, `&&`, `||`, `!`, `|>`, list literals `[a, b]`, and
+  `do`/`do1` blocks over `Monad`/`Monad1`;
+* metaprogramming: reflected terms (`Expr`, `ExprView`), syntax trees (`Syntax`), the
+  monads `TacticM` and `MacroM`, reflection of inductive types (`IndView`), and the
+  basic tactics `intro`, `exact`, `rfl`, `assumption`, `apply`, `try`, `first`,
+  `repeat`, `intros`, `rename_i`, `unfold`, `whnf`, `change` and `rw`.
+
+```
+def sumTo : Nat → Nat
+  | .zero => 0
+  | .succ n => Nat.succ n + sumTo n
+
+def sumTo_three : sumTo 3 = 6 := by rfl
+```
+-/
+
+/-- Propositional regularity: a cast along a proof of `A = A` is the identity, up to
+equality. An axiom (it doesn't compute), consistent in the setoid model. Wiz has no
+definitional regularity (D1: with an impredicative `Prop` it makes checking loop), so
+a cast at a type variable stays stuck; this axiom is how proofs get rid of one
+(`Vec.map_cons` in lib/Vec.wiz). -/
 axiom castRefl.{u} {0 A : Type u} (0 e : A = A) (0 a : A) : (cast e a : A) = a
 
--- Transport along an equation, for linear values too (L4). The transported value is a
--- quantity-1 parameter: a linear value (a channel endpoint, a token) can be passed,
--- and so can an unrestricted one (an ω variable may be used once). `cast` itself passes
--- its argument's usage through; these just state it in their types.
+/-- Transport along an equation, for linear values too (L4). The transported value is a
+quantity-1 parameter: a linear value (a channel endpoint, a token) can be passed,
+and so can an unrestricted one (an ω variable may be used once). `cast` itself passes
+its argument's usage through; these just state it in their types.
+
+`Eq.cast e a` turns `a : A` into a `B`, given `e : A = B`. -/
 def Eq.cast.{u} {A B : Type u} (0 e : A = B) (1 a : A) : B := cast e a
+/-- Substitution: from `e : a = b` and `pa : P a`, a `P b` (the transported value is
+linear, as in `Eq.cast`).
+
+```
+Eq.subst (fun n => Vec A n) e v : Vec A m   -- for v : Vec A n, e : n = m
+``` -/
 def Eq.subst.{u, v} {A : Type u} (0 P : A → Type v) {0 a b : A} (0 e : a = b) (1 pa : P a) : P b :=
   cast (transp (fun b _ => P a = P b) (refl (P a)) e) pa
--- ... and backwards, without `Eq.symm`
+/-- Substitution backwards, without `Eq.symm`: from `e : a = b` and `pb : P b`, a `P a`. -/
 def Eq.substBack.{u, v} {A : Type u} (0 P : A → Type v) {0 a b : A} (0 e : a = b) (1 pb : P b) : P a :=
   cast (transp (fun b _ => P b = P a) (refl (P a)) e) pb
 
+/-- The Booleans, `false` and `true` (in that order: `Bool.casesOn` takes the `false`
+branch first). `if`, `&&`, `||` and `!` are notation over them (stage 13c). -/
 inductive Bool where
   | false
   | true
 
+/-- The natural numbers, in unary: `zero` and `succ n`. The kernel computes with these
+definitions; at runtime (and on numerals in the kernel) numbers are native
+(`builtin nat`), so `1000000 * 1000000` is fast. A numeral at `Nat` is a native literal that
+computes like `Nat.succ (Nat.succ (Nat.succ Nat.zero))` (for `3`). -/
 inductive Nat where
   | zero
   | succ (n : Nat)
 
+/-- Addition, recursing on the first argument: `Nat.add 2 3 = 5`. Written `m + n`. -/
 def Nat.add : Nat → Nat → Nat
   | .zero, n => n
   | .succ m, n => .succ (Nat.add m n)
 
+/-- Multiplication, recursing on the first argument: `Nat.mul 2 3 = 6`. Written `m * n`. -/
 def Nat.mul : Nat → Nat → Nat
   | .zero, _ => .zero
   | .succ m, n => Nat.add n (Nat.mul m n)
 
+/-- The predecessor, with `Nat.pred 0 = 0`. -/
 def Nat.pred : Nat → Nat
   | .zero => .zero
   | .succ n => n
 
--- `n - m`, recursing on `m` (structural recursion is on the first argument)
+/-- `Nat.subFrom m n` is `n - m`, recursing on `m` (structural recursion is on the first
+argument). `Nat.sub` is the usual order. -/
 def Nat.subFrom : Nat → Nat → Nat
   | .zero, n => n
   | .succ m, n => Nat.pred (Nat.subFrom m n)
 
+/-- Truncated subtraction: `Nat.sub 5 2 = 3`, `Nat.sub 2 5 = 0`. Written `n - m`. -/
 def Nat.sub (n m : Nat) : Nat := Nat.subFrom m n
 
+/-- Whether two numbers are equal, as a `Bool`: `Nat.beq 2 2 = .true`. -/
 def Nat.beq : Nat → Nat → Bool
   | .zero, .zero => .true
   | .succ m, .succ n => Nat.beq m n
   | _, _ => .false
 
 
+/-- Finite lists: `nil`, or an element `head` in front of a list `tail`. `[a, b, c]` is
+notation for `List.cons a (List.cons b (List.cons c List.nil))` and `a ++ b` appends
+(see `Append`). -/
 inductive List (A : Type) where
   | nil
   | cons (head : A) (tail : List A)
 
+/-- The elements of the first list, then those of the second:
+`List.append [1, 2] [3] = [1, 2, 3]`. Written `xs ++ ys`. -/
 def List.append {A : Type} : List A → List A → List A
   | .nil, ys => ys
   | .cons x xs, ys => .cons x (List.append xs ys)
 
+/-- The number of elements: `List.length [a, b] = 2`. -/
 def List.length {A : Type} : List A → Nat
   | .nil => .zero
   | .cons _ xs => .succ (List.length xs)
 
+/-- An optional value: `none`, or `some val`. Its `Monad` instance is in lib/Functor.wiz. -/
 inductive Option (A : Type) where
   | none
   | some (val : A)
 
--- Characters are code points; strings are lists of characters. Both are wrapped in
--- their own types so that `#eval` can print them as literals.
+/-- A character: a Unicode code point, wrapped in its own type so that `#eval` can print
+it as a literal: `Char.mk 97` is `a`. -/
 inductive Char where
   | mk (val : Nat)
+/-- Text, as a list of characters, wrapped so that `#eval` prints it as a literal; at
+runtime a string is native (`builtin string`). For text with native byte-level
+operations, see `Str` in lib/Std.wiz. -/
 inductive String where
   | mk (data : List Char)
+/-- The two strings one after the other: `String.append "ab" "c" = "abc"`. Written `a ++ b`. -/
 def String.append : String → String → String
   | .mk xs, .mk ys => .mk (List.append xs ys)
--- `x |> f` is `f x` (stage 13)
-def pipe {A B : Type} (a : A) (f : A → B) : B := f a
+/-- `x |> f` is `f x` (stage 13): a pipeline reads left to right,
+`xs |> List.length |> Nat.succ`. At any universe, so proofs too: `h |> Eq.symm`. -/
+def pipe.{u, v} {A : Sort u} {B : Sort v} (a : A) (f : A → B) : B := f a
 infixl:10 " |> " => pipe
 
--- Syntax trees, as one indexed family (descriptions have no nested inductives yet):
--- index `true` is a tree, `false` a list of trees.
+/-- Syntax trees, as one indexed family (descriptions have no nested inductives yet):
+index `true` is a tree, `false` a list of trees. A tree is `missing`, an `atom` (a
+token), an `ident` or a `node` with its kind (`"term.app"`) and its children. -/
 inductive SyntaxF : Bool → Type where
   | missing : SyntaxF .true
   | atom (val : String) : SyntaxF .true
@@ -89,6 +151,8 @@ inductive SyntaxF : Bool → Type where
   | nil : SyntaxF .false
   | cons (head : SyntaxF .true) (tail : SyntaxF .false) : SyntaxF .false
 
+/-- A syntax tree, as macros and tactics see it: `SyntaxF .true`. Build one with
+`Syntax.mkNode`, `Syntax.mkVar`, …; take one apart with `Syntax.getArg`. -/
 def Syntax : Type := SyntaxF .true
 
 -- Fast numbers at runtime (the kernel keeps the unary definitions above).
@@ -101,29 +165,36 @@ builtin nat.sub := Nat.sub
 builtin nat.mul := Nat.mul
 builtin nat.beq := Nat.beq
 -- (stage 14) comparisons and Boolean connectives; `Nat.lt` runs natively
+/-- Whether `m < n`, as a `Bool` (stage 14). Native at runtime: `Nat.lt 2 3 = .true`. -/
 def Nat.lt : Nat → Nat → Bool
   | .zero, .zero => .false
   | .zero, .succ _ => .true
   | .succ _, .zero => .false
   | .succ m, .succ n => Nat.lt m n
 builtin nat.blt := Nat.lt
--- (stage 15) a memoised suspension: to the kernel it is `f`; compiled code runs `f ()`
--- at most once and keeps the result
+/-- A memoised suspension (stage 15): to the kernel `memo f` is `f`; compiled code runs
+`f ()` at most once and keeps the result. -/
 def memo {A : Type} (f : Unit → A) : Unit → A := f
 builtin memo := memo
+/-- Whether `m ≤ n`, as a `Bool`: `Nat.le 3 3 = .true`. -/
 def Nat.le (m n : Nat) : Bool := Nat.lt m (Nat.succ n)
+/-- The larger of two numbers: `Nat.max 2 5 = 5`. -/
 def Nat.max (m n : Nat) : Nat := match Nat.lt m n with
   | .true => n
   | .false => m
+/-- Boolean conjunction (strict in both arguments; `a && b` short-circuits). -/
 def Bool.and : Bool → Bool → Bool
   | .true, b => b
   | .false, _ => .false
+/-- Boolean disjunction (strict in both arguments; `a || b` short-circuits). -/
 def Bool.or : Bool → Bool → Bool
   | .true, _ => .true
   | .false, b => b
+/-- Boolean negation. Written `!b`. -/
 def Bool.not : Bool → Bool
   | .true => .false
   | .false => .true
+/-- A character's code point: `Char.code (Char.mk 97) = 97`. -/
 def Char.code : Char → Nat
   | .mk n => n
 builtin string := String
@@ -132,25 +203,34 @@ builtin string := String
 -- these definitions (structural recursion on a fuel argument that bounds the number
 -- of steps); on numerals it computes natively, as compiled code does. As in Lean,
 -- `n / 0 = 0`, `Nat.mod n 0 = n` and `Nat.log2 0 = 0`.
+/-- `Nat.div`'s loop: how many times `m` can be subtracted from `n`, with `fuel` bounding
+the number of steps (structural recursion on the fuel). -/
 def Nat.divGo : Nat → Nat → Nat → Nat
   | .zero, _, _ => .zero
   | .succ fuel, n, m => match Nat.lt n m with
     | .true => .zero
     | .false => .succ (Nat.divGo fuel (Nat.sub n m) m)
+/-- Division, rounding down, with `n / 0 = 0` (as in Lean): `Nat.div 7 2 = 3`. Native on
+numerals. Written `n / m`. -/
 def Nat.div (n m : Nat) : Nat := match m with
   | .zero => .zero
   | .succ _ => Nat.divGo n n m
+/-- The remainder of `Nat.div`, with `Nat.mod n 0 = n`: `Nat.mod 7 2 = 1`. Written `n % m`. -/
 def Nat.mod (n m : Nat) : Nat := Nat.sub n (Nat.mul m (Nat.div n m))
--- `b ^ e`, recursing on `e`
+/-- `Nat.powFrom e b` is `b ^ e`, recursing on `e`; `Nat.pow` is the usual order. -/
 def Nat.powFrom : Nat → Nat → Nat
   | .zero, _ => .succ .zero
   | .succ e, b => Nat.mul b (Nat.powFrom e b)
+/-- Powers: `Nat.pow b e` is `b ^ e`, so `Nat.pow 2 10 = 1024`. -/
 def Nat.pow (b e : Nat) : Nat := Nat.powFrom e b
+/-- Exclusive or: `.true` when exactly one argument is. -/
 def Bool.xor : Bool → Bool → Bool
   | .true, b => Bool.not b
   | .false, b => b
--- a bitwise operation, bit by bit from the lowest (`fuel` bounds the number of bits)
+/-- Whether `n` is odd (its lowest bit): `Nat.isOdd 5 = .true`. -/
 def Nat.isOdd (n : Nat) : Bool := Nat.beq (Nat.mod n 2) 1
+/-- A bitwise operation, bit by bit from the lowest: `Nat.bitwise f fuel a b` combines
+the bits of `a` and `b` with `f`; `fuel` bounds the number of bits. -/
 def Nat.bitwise (f : Bool → Bool → Bool) : Nat → Nat → Nat → Nat
   | .zero, _, _ => .zero
   | .succ fuel, a, b =>
@@ -158,16 +238,24 @@ def Nat.bitwise (f : Bool → Bool → Bool) : Nat → Nat → Nat → Nat
     match f (Nat.isOdd a) (Nat.isOdd b) with
     | .true => .succ rest
     | .false => rest
+/-- Bitwise and: `Nat.land 12 10 = 8`. -/
 def Nat.land (a b : Nat) : Nat := Nat.bitwise Bool.and (Nat.add a b) a b
+/-- Bitwise or: `Nat.lor 12 10 = 14`. -/
 def Nat.lor (a b : Nat) : Nat := Nat.bitwise Bool.or (Nat.add a b) a b
+/-- Bitwise exclusive or: `Nat.xor 12 10 = 6`. -/
 def Nat.xor (a b : Nat) : Nat := Nat.bitwise Bool.xor (Nat.add a b) a b
+/-- `Nat.shiftLeft a n` is `a * 2 ^ n`: `Nat.shiftLeft 3 2 = 12`. -/
 def Nat.shiftLeft (a n : Nat) : Nat := Nat.mul a (Nat.pow 2 n)
+/-- `Nat.shiftRight a n` is `a / 2 ^ n`: `Nat.shiftRight 12 2 = 3`. -/
 def Nat.shiftRight (a n : Nat) : Nat := Nat.div a (Nat.pow 2 n)
+/-- `Nat.log2`'s loop, with `fuel` bounding the number of halvings. -/
 def Nat.log2Go : Nat → Nat → Nat
   | .zero, _ => .zero
   | .succ fuel, n => match Nat.lt n 2 with
     | .true => .zero
     | .false => .succ (Nat.log2Go fuel (Nat.div n 2))
+/-- The base-2 logarithm, rounding down, with `Nat.log2 0 = 0`: `Nat.log2 8 = 3`,
+`Nat.log2 9 = 3`. -/
 def Nat.log2 (n : Nat) : Nat := Nat.log2Go n n
 builtin nat.div := Nat.div
 builtin nat.mod := Nat.mod
@@ -178,7 +266,7 @@ builtin nat.xor := Nat.xor
 builtin nat.shiftLeft := Nat.shiftLeft
 builtin nat.shiftRight := Nat.shiftRight
 builtin nat.log2 := Nat.log2
--- bit `i` of `n`
+/-- Bit `i` of `n` (bit 0 the lowest): `Nat.testBit 4 2 = .true`. -/
 def Nat.testBit (n i : Nat) : Bool := Nat.isOdd (Nat.shiftRight n i)
 
 -- Numeric classes (HD9). `+ - * / %` and prefix `-` are the methods of these classes,
@@ -188,26 +276,43 @@ def Nat.testBit (n i : Nat) : Bool := Nat.isOdd (Nat.shiftRight n i)
 -- literal and the instances are the natively computed functions above: `a + b` is
 -- `Add.add a b`, which unfolds to `Nat.add a b`, so `2 + 3` computes and `rfl : 2 + 3 =
 -- 5` holds by evaluation; compiled code inlines the dictionary away.
+/-- Types with addition, written `a + b`. `Nat`'s instance is `Nat.add`. -/
 class Add (A : Type) where
   add : A → A → A
+/-- Types with subtraction, written `a - b`. `Nat`'s instance is `Nat.sub` (truncated). -/
 class Sub (A : Type) where
   sub : A → A → A
+/-- Types with multiplication, written `a * b`. -/
 class Mul (A : Type) where
   mul : A → A → A
+/-- Types with division, written `a / b`. -/
 class Div (A : Type) where
   div : A → A → A
+/-- Types with a remainder, written `a % b`. -/
 class Mod (A : Type) where
   mod : A → A → A
+/-- Types with negation, written `-a` (prefix). -/
 class Neg (A : Type) where
   neg : A → A
+/-- Types with numerals: a numeral `n` at a type `A` other than `Nat` is
+`OfNat.ofNat n` at `A`. The literal is an index of the class (as in Lean), so an
+instance can look at it, for example to reject a numeral out of range. -/
 class OfNat (A : Type) (n : Nat) where
   ofNat : A
+/-- `m + n` at `Nat` is `Nat.add m n`. -/
 instance : Add Nat := Add.mk Nat.add
+/-- `m - n` at `Nat` is `Nat.sub m n`. -/
 instance : Sub Nat := Sub.mk Nat.sub
+/-- `m * n` at `Nat` is `Nat.mul m n`. -/
 instance : Mul Nat := Mul.mk Nat.mul
+/-- `m / n` at `Nat` is `Nat.div m n`. -/
 instance : Div Nat := Div.mk Nat.div
+/-- `m % n` at `Nat` is `Nat.mod m n`. -/
 instance : Mod Nat := Mod.mk Nat.mod
+/-- A numeral at `Nat` is itself (the default instance, at priority 100, so that a
+homogeneous operator's instance decides first). -/
 instance instOfNatNat {ω n : Nat} : OfNat Nat n := OfNat.mk n
+
 -- Heterogeneous operators (7f), as in Lean: `a + b` is `HAdd.hAdd a b` at an instance
 -- `HAdd A B C` (the result type `C` is an output), and the default instance `instHAdd`
 -- makes it `Add.add` when nothing else decides (`x + 1`: `HAdd A A A`). A numeral's type is
@@ -217,27 +322,44 @@ instance instOfNatNat {ω n : Nat} : OfNat Nat n := OfNat.mk n
 -- `x : U8`) or of the result, without waiting for a default. `^` is not one: `x ^ 2` has a
 -- `Nat` exponent (`Pow A Nat`). At `Nat`, `a + b` unfolds to `Add.add a b` and on to
 -- `Nat.add a b`, so it computes natively, and compiled code is the native `nat.add`.
+
+/-- Marks a class parameter that instance resolution determines from the others (type
+classes, stage 7). As a function it is the identity. -/
 def outParam.{u} (A : Sort u) : Sort u := A
+/-- Heterogeneous addition, written `a + b`: `C` (an output) is the result type. -/
 class HAdd (A B : Type) (C : outParam Type) where
   hAdd : A → B → C
+/-- Heterogeneous subtraction, written `a - b`. -/
 class HSub (A B : Type) (C : outParam Type) where
   hSub : A → B → C
+/-- Heterogeneous multiplication, written `a * b`. -/
 class HMul (A B : Type) (C : outParam Type) where
   hMul : A → B → C
+/-- Heterogeneous division, written `a / b`. -/
 class HDiv (A B : Type) (C : outParam Type) where
   hDiv : A → B → C
+/-- Heterogeneous remainder, written `a % b`. -/
 class HMod (A B : Type) (C : outParam Type) where
   hMod : A → B → C
+/-- Heterogeneous exponentiation, written `a ^ b`. -/
 class HPow (A B : Type) (C : outParam Type) where
   hPow : A → B → C
+/-- Types with exponentiation, written `a ^ b` (at `^` the exponent is a `Nat`). -/
 class Pow (A B : Type) where
   pow : A → B → A
+/-- `a + b` at a type with `Add` is `Add.add` (the default instance). -/
 instance instHAdd {A : Type} [Add A] : HAdd A A A := HAdd.mk Add.add
+/-- `a - b` at a type with `Sub` is `Sub.sub`. -/
 instance instHSub {A : Type} [Sub A] : HSub A A A := HSub.mk Sub.sub
+/-- `a * b` at a type with `Mul` is `Mul.mul`. -/
 instance instHMul {A : Type} [Mul A] : HMul A A A := HMul.mk Mul.mul
+/-- `a / b` at a type with `Div` is `Div.div`. -/
 instance instHDiv {A : Type} [Div A] : HDiv A A A := HDiv.mk Div.div
+/-- `a % b` at a type with `Mod` is `Mod.mod`. -/
 instance instHMod {A : Type} [Mod A] : HMod A A A := HMod.mk Mod.mod
+/-- `a ^ b` at a type with `Pow` is `Pow.pow`. -/
 instance instHPow {A B : Type} [Pow A B] : HPow A B A := HPow.mk Pow.pow
+/-- `a ^ b` at `Nat` is `Nat.pow`. -/
 instance instPowNat : Pow Nat Nat := Pow.mk Nat.pow
 attribute [default_instance] instHAdd
 attribute [default_instance] instHSub
@@ -261,47 +383,62 @@ infixr:75 " ^ " => HPow.hPow
 syntax:75 (name := neg) "-" term:75 : term
 macro_rules
   | `(term| - $x) => `(term| Neg.neg $x)
--- Bitwise classes (H14 S2), as in Lean: `a &&& b`, `a ||| b`, `a ^^^ b`, `~~~a`, and the
--- shifts `a <<< k`, `a >>> k` by a number of places `k : Nat` (Lean's take it at the
--- operand's type; a fixed amount is what hardware shifts by wiring). Precedences as in
--- Lean: `|||` 55, `^^^` 58, `&&&` 60 (below `+`), shifts 75, `~~~` max. Instances: `Nat`
--- here, words in lib/Word.wiz, HDL signals in lib/Hdl/Core.wiz.
+/-- Bitwise classes (H14 S2), as in Lean: `a &&& b`, `a ||| b`, `a ^^^ b`, `~~~a`, and the
+shifts `a <<< k`, `a >>> k` by a number of places `k : Nat` (Lean's take it at the
+operand's type; a fixed amount is what hardware shifts by wiring). Precedences as in
+Lean: `|||` 55, `^^^` 58, `&&&` 60 (below `+`), shifts 75, `~~~` max. Instances: `Nat`
+here, words in lib/Word.wiz, HDL signals in lib/Hdl/Core.wiz. -/
 class AndOp (A : Type) where
   and : A → A → A
+/-- Types with bitwise or, written `a ||| b`. -/
 class OrOp (A : Type) where
   or : A → A → A
+/-- Types with bitwise exclusive or, written `a ^^^ b`. -/
 class XorOp (A : Type) where
   xor : A → A → A
+/-- Types with bitwise complement, written `~~~a`. -/
 class Complement (A : Type) where
   complement : A → A
+/-- Types with a left shift by a number of places, written `a <<< k`. -/
 class ShiftLeft (A : Type) where
   shiftLeft : A → Nat → A
+/-- Types with a right shift by a number of places, written `a >>> k`. -/
 class ShiftRight (A : Type) where
   shiftRight : A → Nat → A
+/-- `a &&& b` at `Nat` is `Nat.land`. -/
 instance : AndOp Nat := AndOp.mk Nat.land
+/-- `a ||| b` at `Nat` is `Nat.lor`. -/
 instance : OrOp Nat := OrOp.mk Nat.lor
+/-- `a ^^^ b` at `Nat` is `Nat.xor`. -/
 instance : XorOp Nat := XorOp.mk Nat.xor
+/-- `a <<< k` at `Nat` is `Nat.shiftLeft`. -/
 instance : ShiftLeft Nat := ShiftLeft.mk Nat.shiftLeft
+/-- `a >>> k` at `Nat` is `Nat.shiftRight`. -/
 instance : ShiftRight Nat := ShiftRight.mk Nat.shiftRight
 infixl:55 " ||| " => OrOp.or
 infixl:58 " ^^^ " => XorOp.xor
 infixl:60 " &&& " => AndOp.and
--- The notation takes the amount at any type `B` (Lean's `HShiftLeft A B C`, the result
--- type `C` an output): `ShiftLeft A` gives `HShiftLeft A Nat A`, and
--- an HDL signal also shifts by a signal (H14 S4). A numeral amount is a `Nat` (the
--- default type of a numeral).
+/-- The notation takes the amount at any type `B` (Lean's `HShiftLeft A B C`, the result
+type `C` an output): `ShiftLeft A` gives `HShiftLeft A Nat A`, and
+an HDL signal also shifts by a signal (H14 S4). A numeral amount is a `Nat` (the
+default type of a numeral). -/
 class HShiftLeft (A B : Type) (C : outParam Type) where
   hShiftLeft : A → B → C
+/-- Heterogeneous right shift (as `HShiftLeft`): `a >>> b` at `HShiftRight A B C`, the
+result type `C` an output. -/
 class HShiftRight (A B : Type) (C : outParam Type) where
   hShiftRight : A → B → C
+/-- `a <<< k` at a type with `ShiftLeft` is `ShiftLeft.shiftLeft` (the default instance). -/
 instance {A : Type} [ShiftLeft A] : HShiftLeft A Nat A := HShiftLeft.mk ShiftLeft.shiftLeft
+/-- `a >>> k` at a type with `ShiftRight` is `ShiftRight.shiftRight` (the default instance). -/
 instance {A : Type} [ShiftRight A] : HShiftRight A Nat A := HShiftRight.mk ShiftRight.shiftRight
 infixl:75 " <<< " => HShiftLeft.hShiftLeft
 infixl:75 " >>> " => HShiftRight.hShiftRight
 notation:max "~~~" a:max => Complement.complement a
 -- (end of the numeric classes)
 
--- Errors.
+/-- The result of a computation that can fail: an `error e` or a success `ok a`. Its
+`Monad` instance is in lib/Functor.wiz. -/
 inductive Except (E A : Type) where
   | error (e : E)
   | ok (a : A)
@@ -328,19 +465,23 @@ app_unexpander Bool.casesOn
   | `(term| $f $m Bool.false $b $a) => `(term| $a && $b)
   | `(term| $f $m $b Bool.true $a) => `(term| $a || $b)
   | `(term| $f $m $e $t $c) => `(term| if $c then $t else $e)
--- A condition that is a signal (H14 S2): when the type `C` of `c` is not a data type and
--- has an instance `Mux C C` (an HDL signal, lib/Hdl/Core.wiz), `if c then a else b` is
--- `Mux.mux c a b`, a multiplexer, at an instance `Mux C A` for the branches' type `A`.
--- Any other condition is the `match` above (and its messages).
+/-- A condition that is a signal (H14 S2): when the type `C` of `c` is not a data type and
+has an instance `Mux C C` (an HDL signal, lib/Hdl/Core.wiz), `if c then a else b` is
+`Mux.mux c a b`, a multiplexer, at an instance `Mux C A` for the branches' type `A`.
+Any other condition is the `match` above (and its messages). -/
 class Mux (C A : Type) where
   mux : C → A → A → A
 app_unexpander Mux.mux
   | `(term| $f $c $t $e) => `(term| if $c then $t else $e)
 -- (end of the Boolean section)
 
--- Reflected terms, for tactics. Variables are de Bruijn indices, relative to the goal's
--- context. Kernel forms with no constructor here (μ, descriptions, equality, sizes, …)
--- are `opaque` handles, held by the elaborator.
+/-- Reflected terms, for tactics. Variables are de Bruijn indices, relative to the goal's
+context. Kernel forms with no constructor here (μ, descriptions, equality, sizes, …)
+are `opaque` handles, held by the elaborator.
+
+```
+Expr.app (Expr.const "Nat.succ") (Expr.lit 0)   -- Nat.succ 0
+``` -/
 inductive Expr where
   | var (i : Nat)
   | const (n : String)
@@ -354,36 +495,46 @@ inductive Expr where
 -- Reflection (HD8): a declared inductive type or structure as command macros see it.
 -- Types are syntax, written with the names of the binders in scope (the parameters,
 -- then the earlier fields), not de Bruijn indices.
+/-- How a parameter or field is bound: explicit `(x : A)`, implicit `{x : A}` or
+instance-implicit `[x : C A]`. -/
 inductive BinderKind where
   | default
   | implicit
   | instImplicit
+/-- A parameter or index of an inductive type, as `MacroM.getInductive` shows it: its
+name, binder kind and type (as syntax). -/
 inductive ParamView where
   | mk (name : String) (kind : BinderKind) (type : Syntax)
--- a constructor field; `recursive` if its type is the inductive type itself, `proof` if
--- its type is a proposition
+/-- A constructor field: its name, binder kind and type; `recursive` if its type is the
+inductive type itself, `proof` if its type is a proposition. -/
 inductive FieldView where
   | mk (name : String) (kind : BinderKind) (type : Syntax) (recursive : Bool) (proof : Bool)
--- a constructor (short name, `cons`), its fields after the parameters, and the indices
--- of its result type
+/-- A constructor: its short name (`cons`), its fields after the parameters, and the
+indices of its result type. -/
 inductive CtorView where
   | mk (name : String) (fields : List FieldView) (indices : List Syntax)
+/-- Reflection (HD8): a declared inductive type or structure as command macros see it
+(`MacroM.getInductive`): its name, universe level parameters, parameters, indices,
+constructors and whether it is a `structure`. Types are syntax, written with the names
+of the binders in scope (the parameters, then the earlier fields), not de Bruijn
+indices. Derivers (lib/Deriving.wiz) are written against it. -/
 inductive IndView where
   | mk (name : String) (levelParams : List String) (params : List ParamView)
        (indices : List ParamView) (ctors : List CtorView) (isStructure : Bool)
 
--- (stage 28b) What the SAT solver said about a CNF (`Tac.satSolve`): a refutation as
--- LRAT steps `(id, clause, hints)` (deletions dropped), a model (the literals that are
--- true), or why there is no answer. Literals are numbers: `2 v` is variable `v`, `2 v + 1`
--- its negation. Untrusted: `sat_decide` checks the refutation in the kernel.
+/-- (stage 28b) What the SAT solver said about a CNF (`Tac.satSolve`): a refutation as
+LRAT steps `(id, clause, hints)` (deletions dropped), a model (the literals that are
+true), or why there is no answer. Literals are numbers: `2 v` is variable `v`, `2 v + 1`
+its negation. Untrusted: `sat_decide` checks the refutation in the kernel. -/
 inductive SatAnswer where
   | unsat (proof : List (Nat × List Nat × List Nat))
   | sat (model : List Nat)
   | error (msg : String)
 
--- Requests to the elaborator, each with what to do with the answer: a free monad (its
--- continuations are infinitary fields). The elaborator interprets them; the order of
--- the constructors is fixed (`Elab/Tactic.lean`).
+/-- Requests to the elaborator, each with what to do with the answer: a free monad (its
+continuations are infinitary fields). The elaborator interprets them; the order of
+the constructors is fixed (`Elab/Tactic.lean`), and new requests are appended.
+Programs use `TacticM`, which builds these. -/
 inductive Tac where
   | done
   | result (stx : Syntax)
@@ -428,154 +579,264 @@ inductive Tac where
   | isDefinition (n : String) (k : Option Bool → Tac)
   -- solvers (stage 28b): ask the SAT solver about a CNF over variables `0 … nvars-1`
   -- (untrusted: `sat_decide` checks the proof); look inside an equation (an opaque handle
-  -- `a = b` at `A`: `(A, a, b)`)
+  -- `a = b` at `A`: `(A, a, b)`); (28a) close goal `g` on an SMT solver's word (trusted:
+  -- --trust-smt; it fails with a counterexample otherwise)
   | satSolve (nvars : Nat) (clauses : List (List Nat)) (k : SatAnswer → Tac)
   | eqView (g : Nat) (e : Expr) (k : Option (Expr × Expr × Expr) → Tac)
+  | smt (g : Nat) (next : Tac)
+  -- (28c) a definition `val : ty` in goal `g`'s context, added before the definition being
+  -- elaborated (checked by the kernel; not an axiom), and the term that uses it: a big
+  -- value a proof mentions many times is then one constant
+  | define (g : Nat) (ty : Expr) (val : Expr) (k : Expr → Tac)
+  -- (28c) `assign`, without the kernel's check of the term now: for a term that is only
+  -- checked by the kernel anyway, with the declaration (a big proof checked twice costs
+  -- twice). Errors in it then show at the end of the declaration.
+  | assignLate (g : Nat) (e : Expr) (next : Tac)
+  -- (28e) decide the closed `e = .true` by running it (the trusted evaluator of 27a:
+  -- --trust-native); the axiom that says so
+  | nativeDecide (g : Nat) (e : Expr) (k : Expr → Tac)
 
--- The metaprogramming monad: requests in continuation-passing style, so `bind` is just
--- composition. Macros and tactics both use it.
+/-- The metaprogramming monad: requests to the elaborator (`Tac`) in
+continuation-passing style, so `bind` is just composition. Macros (`MacroM`) and
+tactics (`Tactic`) both use it.
+
+```
+def Tactic.myExact : Tactic := fun stx => do
+  g ← TacticM.mainGoal;
+  TacticM.exact g (Syntax.getArg stx 1);
+  TacticM.replaceMainGoal .nil
+``` -/
 def TacticM (A : Type) : Type := (A → Tac) → Tac
+/-- Return `a` without asking the elaborator anything. -/
 def TacticM.pure {A : Type} (a : A) : TacticM A := fun k => k a
+/-- Run `x`, then `f` on its result. -/
 def TacticM.bind {A B : Type} (x : TacticM A) (f : A → TacticM B) : TacticM B := fun k => x (fun a => f a k)
+/-- The requests of a tactic, ending with `Tac.done`: what the elaborator interprets. -/
 def TacticM.run (t : TacticM Unit) : Tac := t (fun _ => Tac.done)
+/-- Fail with the error message `msg` (caught by `TacticM.tryCatch`, `try`, `first`). -/
 def TacticM.fail {A : Type} (msg : String) : TacticM A := fun _ => Tac.fail msg
+/-- Show `msg` as an info message at the tactic. -/
 def TacticM.trace (msg : String) : TacticM Unit := fun k => Tac.trace msg (k ())
+/-- A fresh number, different from every earlier one (for fresh names in macros). -/
 def TacticM.fresh : TacticM Nat := fun k => Tac.fresh k
+/-- The open goals, the main goal first. Goals are numbers, handles held by the
+elaborator. -/
 def TacticM.getGoals : TacticM (List Nat) := fun k => Tac.getGoals k
+/-- Replace the list of open goals. -/
 def TacticM.setGoals (gs : List Nat) : TacticM Unit := fun k => Tac.setGoals gs (k ())
+/-- The type of goal `g` (what is to be proved), reflected. -/
 def TacticM.goalType (g : Nat) : TacticM Expr := fun k => Tac.goalType g k
+/-- Goal `g` as a term (its metavariable), to use in a larger term. -/
 def TacticM.goalExpr (g : Nat) : TacticM Expr := fun k => Tac.goalExpr g k
+/-- The hypotheses of goal `g`, innermost first (the `i`th is `Expr.var i`): names and
+types. -/
 def TacticM.goalHyps (g : Nat) : TacticM (List (String × Expr)) := fun k => Tac.goalHyps g k
+/-- Introduce the goal's outermost binder (a `∀` or `→`) as the hypothesis `x`: the new
+goal. -/
 def TacticM.intro (g : Nat) (x : String) : TacticM Nat := fun k => Tac.intro g x k
+/-- Close goal `g` with the term `stx` (elaborated against the goal's type). -/
 def TacticM.exact (g : Nat) (stx : Syntax) : TacticM Unit := fun k => Tac.exact g stx (k ())
+/-- Elaborate `stx` in goal `g`'s context, inferring its type: the term and its type. -/
 def TacticM.elabInfer (g : Nat) (stx : Syntax) : TacticM (Expr × Expr) := fun k => Tac.elabInfer g stx k
+/-- Close goal `g` with the reflected term `e` (checked against the goal's type). -/
 def TacticM.assign (g : Nat) (e : Expr) : TacticM Unit := fun k => Tac.assign g e (k ())
+/-- A new goal of type `ty`, in goal `g`'s context. -/
 def TacticM.newGoal (g : Nat) (ty : Expr) : TacticM Nat := fun k => Tac.newGoal g ty k
+/-- `e`, in goal `g`'s context, computed to normal form. -/
 def TacticM.normalize (g : Nat) (e : Expr) : TacticM Expr := fun k => Tac.normalize g e k
--- `body` (under one more binder than goal `g`'s context) with `arg` for its variable 0
+/-- `body` (under one more binder than goal `g`'s context) with `arg` for its variable 0. -/
 def TacticM.instantiate (g : Nat) (body arg : Expr) : TacticM Expr := fun k => Tac.instantiate g body arg k
+/-- Whether `a` and `b` are definitionally equal in goal `g`'s context (unifying
+metavariables on the way). -/
 def TacticM.isDefEq (g : Nat) (a b : Expr) : TacticM Bool := fun k => Tac.isDefEq g a b k
+/-- The type of `e` in goal `g`'s context. -/
 def TacticM.inferType (g : Nat) (e : Expr) : TacticM Expr := fun k => Tac.inferType g e k
+/-- Run the tactic written as `stx` (its registered implementation) on the open goals. -/
 def TacticM.evalTactic (stx : Syntax) : TacticM Unit := fun k => Tac.evalTactic stx (k ())
--- goal `g` as the elaborator shows it (hypotheses, then `⊢ type`), and a term in goal
--- `g`'s context: for `trace` and for error messages
+/-- Goal `g` as the elaborator shows it (hypotheses, then `⊢ type`): for `trace` and
+for error messages. -/
 def TacticM.ppGoal (g : Nat) : TacticM String := fun k => Tac.ppGoal g k
+/-- A term in goal `g`'s context, printed. -/
 def TacticM.ppExpr (g : Nat) (e : Expr) : TacticM String := fun k => Tac.ppExpr g e k
--- Introduce a variable under a fresh name, and return the name with the new goal. The
--- name is `hint`, or (if `hint` is "") the binder's, or `h` (a proof) or `x`; if it is
--- taken it gets the first free numeric suffix (`n`, `n1`, `n2`, …).
+/-- Introduce a variable under a fresh name, and return the name with the new goal. The
+name is `hint`, or (if `hint` is "") the binder's, or `h` (a proof) or `x`; if it is
+taken it gets the first free numeric suffix (`n`, `n1`, `n2`, …). -/
 def TacticM.introFresh (g : Nat) (hint : String) : TacticM (String × Nat) :=
   fun k => Tac.introFresh g hint .false k
--- … under an inaccessible name (`n✝`): the user cannot write it, so no proof depends on
--- it; `rename_i` (or `TacticM.rename`) names it.
+/-- `TacticM.introFresh` under an inaccessible name (`n✝`): the user cannot write it, so
+no proof depends on it; `rename_i` (or `TacticM.rename`) names it. -/
 def TacticM.introInaccessible (g : Nat) (hint : String) : TacticM (String × Nat) :=
   fun k => Tac.introFresh g hint .true k
--- goal `g` with its hypothesis `i` (the variable `Expr.var i`) renamed: a new goal
+/-- Goal `g` with its hypothesis `i` (the variable `Expr.var i`) renamed to `x`: a new goal. -/
 def TacticM.rename (g : Nat) (i : Nat) (x : String) : TacticM Nat := fun k => Tac.rename g i x k
--- Goal `g` restated as `ty`, which must be convertible with its type: the new goal.
+/-- Goal `g` restated as `ty`, which must be convertible with its type: the new goal. -/
 def TacticM.change (g : Nat) (ty : Expr) : TacticM Nat := fun k => Tac.change g ty k
--- `e` with its head unfolded until it is not a definition (a constructor, a binder, a
--- variable): weak head normal form. Recursive calls are folded back where possible.
+/-- `e` with its head unfolded until it is not a definition (a constructor, a binder, a
+variable): weak head normal form. Recursive calls are folded back where possible. -/
 def TacticM.whnf (g : Nat) (e : Expr) : TacticM Expr := fun k => Tac.whnf g e k
--- `e` with every application of the definition `n` unfolded once (the `match` on its
--- arguments computed, the definitions in its body still folded, recursive calls folded
--- back): `MList (x :: L) p` becomes `∃ n, (p ↦ (x, n)) ⋆ MList L n`.
+/-- `e` with every application of the definition `n` unfolded once (the `match` on its
+arguments computed, the definitions in its body still folded, recursive calls folded
+back): `MList (x :: L) p` becomes `∃ n, (p ↦ (x, n)) ⋆ MList L n`. A name that is not
+a definition, or has nothing to unfold, leaves `e` unchanged. -/
 def TacticM.unfold (g : Nat) (n : String) (e : Expr) : TacticM Expr := fun k => Tac.unfold g n e k
--- Rewrite goal `g` with `h : a = b` (a complete term): every `a` in it becomes `b` (or
--- every `b` becomes `a`, if `rtl`). The new goal.
+/-- Rewrite goal `g` with `h : a = b` (a complete term): every `a` in it becomes `b` (or
+every `b` becomes `a`, if `rtl`). The new goal. -/
 def TacticM.rewrite (g : Nat) (h : Expr) (rtl : Bool) : TacticM Nat := fun k => Tac.rewrite g h rtl k
--- Is the constant `n` a constructor of an inductive type? Then the type's name, its
--- number of parameters and the constructor's number of fields: `List.cons` is
--- `("List", 1, 2)`, and `List.cons A x L` has the fields `x` and `L` after one parameter.
+/-- Is the constant `n` a constructor of an inductive type? Then the type's name, its
+number of parameters and the constructor's number of fields: `List.cons` is
+`("List", 1, 2)`, and `List.cons A x L` has the fields `x` and `L` after one parameter. -/
 def TacticM.ctorInfo (n : String) : TacticM (Option (String × Nat × Nat)) := fun k => Tac.ctorInfo n k
--- Is the constant `n` a definition, which `TacticM.unfold` can unfold (not a constructor
--- or an axiom: for those `unfold` returns the term unchanged)? `none` if there is no
--- constant `n`.
+/-- Is the constant `n` a definition, which `TacticM.unfold` can unfold (not a constructor
+or an axiom: for those `unfold` returns the term unchanged)? `none` if there is no
+constant `n`. -/
 def TacticM.isDefinition (n : String) : TacticM (Option Bool) := fun k => Tac.isDefinition n k
+/-- Close goal `g` on an SMT solver's word (trusted: only with `--trust-smt`; the proof
+is an axiom, and a refuted goal fails with a counterexample). -/
+def TacticM.smt (g : Nat) : TacticM Unit := fun k => Tac.smt g (k ())
+/-- Ask the SAT solver about a CNF over variables `0 … nvars-1` (untrusted: `sat_decide`
+checks the proof). -/
 def TacticM.satSolve (nvars : Nat) (clauses : List (List Nat)) : TacticM SatAnswer := fun k => Tac.satSolve nvars clauses k
+/-- Look inside an equation (an opaque handle `a = b` at `A`): `(A, a, b)`. -/
 def TacticM.eqView (g : Nat) (e : Expr) : TacticM (Option (Expr × Expr × Expr)) := fun k => Tac.eqView g e k
+/-- Add the definition `val : ty` to goal `g`'s context (before the declaration being
+elaborated; checked by the kernel, not an axiom) and return the term that uses it. -/
+def TacticM.define (g : Nat) (ty val : Expr) : TacticM Expr := fun k => Tac.define g ty val k
+/-- `TacticM.assign` without the kernel's check of the term now: for a term the declaration
+checks anyway (a big proof otherwise checked twice); its errors show at the end of the
+declaration. -/
+def TacticM.assignLate (g : Nat) (e : Expr) : TacticM Unit := fun k => Tac.assignLate g e (k ())
+/-- `Tac.nativeDecide`: decide the closed `e = .true` with the trusted evaluator (only
+with `--trust-native`) and return the axiom's proof. -/
+def TacticM.nativeDecide (g : Nat) (e : Expr) : TacticM Expr := fun k => Tac.nativeDecide g e k
+/-- Run `t`; if it fails, undo it and run `h` on the error message instead. -/
 def TacticM.tryCatch (t : TacticM Unit) (h : String → TacticM Unit) : TacticM Unit :=
   fun k => Tac.catch (TacticM.run t) (fun e => TacticM.run (h e)) (k ())
 
 -- Type classes (stage 7). `outParam` (defined with the numeric classes, above) marks a
 -- class parameter that instance resolution determines (it is the identity).
 
+/-- Monads: `pure` and `bind`, which `do` notation is written with (`do x ← e; rest` is
+`Monad.bind e (fun x => do rest)`).
+
+```
+def twice : IO Unit := do
+  IO.println "a";
+  IO.println "b"
+``` -/
 class Monad (m : Type → Type) where
   pure : {A : Type} → A → m A
   bind : {A B : Type} → m A → (A → m B) → m B
--- A bind that takes the action and the continuation at quantity 1 (L6), so the
--- continuation may capture linear resources; `do1` is `do` notation over it.
+/-- A bind that takes the action and the continuation at quantity 1 (L6), so the
+continuation may capture linear resources; `do1` is `do` notation over it. -/
 class Monad1 (m : Type → Type) where
   bind1 : {A B : Type} → (1 x : m A) → (1 f : A → m B) → m B
 
+/-- `TacticM` is a monad, so tactics are written with `do`. -/
 instance : Monad TacticM where
   pure := TacticM.pure
   bind := TacticM.bind
 
--- Macros: `MacroM` is the same monad (it only uses `fresh` and `fail`).
+/-- The monad of macros: the same as `TacticM` (macros only use `fresh` and `fail`, and
+the reflection requests `MacroM.getInductive` and `MacroM.getType`). -/
 def MacroM (A : Type) : Type := TacticM A
+/-- Return `a`. -/
 def MacroM.pure {A : Type} (a : A) : MacroM A := TacticM.pure a
+/-- Fail with the error message `e`, reported at the macro's use. -/
 def MacroM.throw {A : Type} (e : String) : MacroM A := TacticM.fail e
+/-- A fresh number (for hygienic names). -/
 def MacroM.fresh : MacroM Nat := TacticM.fresh
--- A procedural macro, registered with `attribute [macro kind] f`.
+/-- A procedural macro, registered with `attribute [macro kind] f`: it rewrites a syntax
+node of that kind into another.
+
+```
+def ListLit.expand : Macro := fun stx => …
+attribute [macro term.listLit] ListLit.expand
+``` -/
 def Macro : Type := Syntax → MacroM Syntax
+/-- The requests of a macro, ending with its result. -/
 def Macro.run (m : MacroM Syntax) : Tac := m (fun s => Tac.result s)
--- (HD8) Read the environment: a declared inductive type or structure, and the type of
--- any declaration, as syntax.
+/-- (HD8) Read the environment: the declared inductive type or structure `n`, as an
+`IndView` (`none` if there is none). -/
 def MacroM.getInductive (n : String) : MacroM (Option IndView) := fun k => Tac.getInductive n k
+/-- (HD8) The type of the declaration `n`, as syntax (`none` if there is none). -/
 def MacroM.getType (n : String) : MacroM (Option Syntax) := fun k => Tac.getType n k
+/-- The parameter's name. -/
 def ParamView.name : ParamView → String
   | .mk n _ _ => n
+/-- How the parameter is bound. -/
 def ParamView.kind : ParamView → BinderKind
   | .mk _ k _ => k
+/-- The parameter's type, as syntax. -/
 def ParamView.type : ParamView → Syntax
   | .mk _ _ t => t
+/-- The field's name. -/
 def FieldView.name : FieldView → String
   | .mk n _ _ _ _ => n
+/-- How the field is bound. -/
 def FieldView.kind : FieldView → BinderKind
   | .mk _ k _ _ _ => k
+/-- The field's type, as syntax. -/
 def FieldView.type : FieldView → Syntax
   | .mk _ _ t _ _ => t
+/-- Whether the field's type is the inductive type itself. -/
 def FieldView.recursive : FieldView → Bool
   | .mk _ _ _ r _ => r
+/-- Whether the field's type is a proposition. -/
 def FieldView.proof : FieldView → Bool
   | .mk _ _ _ _ p => p
+/-- The constructor's short name (`cons`). -/
 def CtorView.name : CtorView → String
   | .mk n _ _ => n
+/-- The constructor's fields, after the parameters. -/
 def CtorView.fields : CtorView → List FieldView
   | .mk _ fs _ => fs
+/-- The indices of the constructor's result type. -/
 def CtorView.indices : CtorView → List Syntax
   | .mk _ _ is => is
+/-- The type's name. -/
 def IndView.name : IndView → String
   | .mk n _ _ _ _ _ => n
+/-- The type's universe level parameters. -/
 def IndView.levelParams : IndView → List String
   | .mk _ us _ _ _ _ => us
+/-- The type's parameters. -/
 def IndView.params : IndView → List ParamView
   | .mk _ _ ps _ _ _ => ps
+/-- The type's indices. -/
 def IndView.indices : IndView → List ParamView
   | .mk _ _ _ is _ _ => is
+/-- The type's constructors, in order. -/
 def IndView.ctors : IndView → List CtorView
   | .mk _ _ _ _ cs _ => cs
+/-- Whether the type was declared with `structure`. -/
 def IndView.isStructure : IndView → Bool
   | .mk _ _ _ _ _ b => b
--- Building syntax: a node, an identifier (`x`, and the term `x`), literals, applications.
+/-- A list of trees as the `SyntaxF .false` that a node's children are. (Building syntax:
+a node, an identifier, literals, applications.) -/
 def SyntaxF.ofList : List Syntax → SyntaxF .false
   | .nil => .nil
   | .cons x xs => .cons x (SyntaxF.ofList xs)
+/-- A node of kind `kind` with the children `args`: `Syntax.mkNode "term.app" [f, args]`. -/
 def Syntax.mkNode (kind : String) (args : List Syntax) : Syntax := .node kind (SyntaxF.ofList args)
+/-- The identifier `x`, as a token (where the grammar expects an `ident`). -/
 def Syntax.mkIdent (x : String) : Syntax := .ident x
+/-- The term `x`: a variable or constant named `x`. -/
 def Syntax.mkVar (x : String) : Syntax := Syntax.mkNode "term.ident" (.cons (.ident x) .nil)
+/-- The string literal `s`, as a term. -/
 def Syntax.mkStr (s : String) : Syntax :=
   Syntax.mkNode "term.str" (.cons (Syntax.mkNode "str" (.cons (.atom s) .nil)) .nil)
+/-- `f` applied to the arguments: `Syntax.mkApp (Syntax.mkVar "Nat.succ") [x]` is the term
+`Nat.succ x` (and `f` itself if there are none). -/
 def Syntax.mkApp (f : Syntax) : List Syntax → Syntax
   | .nil => f
   | .cons a rest => Syntax.mkNode "term.app" (.cons f (.cons (Syntax.mkNode "null" (.cons a rest)) .nil))
--- A command macro, registered with `attribute [macro command.k] f`: it expands one
--- command into any number of commands.
+/-- A command macro, registered with `attribute [macro command.k] f`: it expands one
+command into any number of commands. -/
 def CommandMacro : Type := Syntax → MacroM (List Syntax)
+/-- The requests of a command macro, ending with its commands (as a `null` node). -/
 def CommandMacro.run (m : MacroM (List Syntax)) : Tac := m (fun cs => Tac.result (Syntax.mkNode "null" cs))
--- A deriver, registered with `attribute [deriver C] f`: given the name of an inductive
--- type, the commands that make it an instance of `C` (`deriving C`).
+/-- A deriver, registered with `attribute [deriver C] f`: given the name of an inductive
+type, the commands that make it an instance of `C` (`deriving C`). See lib/Deriving.wiz. -/
 def Deriver : Type := String → MacroM (List Syntax)
 
 -- `do` notation for any `Monad`, written as macros: `do x ← e; rest`, `do e; rest`, `do e`.
@@ -624,37 +885,49 @@ macro_rules
 macro_rules
   | `(term| do1 let ($x, $y) := $e; $rest) => `(term| let ($x, $y) := $e; do1 $rest)
 
--- Taking syntax apart.
+/-- The `n`th tree of a list (from 0), or `missing`. (Taking syntax apart.) -/
 def SyntaxF.nth {b : Bool} : SyntaxF b → Nat → Syntax
   | .cons x t, n => match n with
     | .zero => x
     | .succ m => SyntaxF.nth t m
   | _, _ => .missing
+/-- The `i`th child of a node (from 0), or `missing`: for `exact t`, `Syntax.getArg stx 1`
+is `t`. -/
 def Syntax.getArg (stx : Syntax) (i : Nat) : Syntax := match stx with
   | .node _ args => SyntaxF.nth args i
   | _ => .missing
 
--- Tactics: a tactic is a Wiz function from its syntax to `TacticM Unit`, registered
--- with `attribute [tactic kind] f`. `by tac₁; tac₂ …` runs them on the goal.
+/-- A tactic: a Wiz function from its syntax to `TacticM Unit`, registered with
+`attribute [tactic kind] f`. `by tac₁; tac₂ …` runs them on the goal.
+
+```
+syntax (name := exact) "exact" term : tactic
+def Tactic.exact : Tactic := fun stx => …
+attribute [tactic tactic.exact] Tactic.exact
+``` -/
 def Tactic : Type := Syntax → TacticM Unit
 
+/-- The main goal (the first open one); fails if there are none. -/
 def TacticM.mainGoal : TacticM Nat := do
   gs ← TacticM.getGoals;
   match gs with
   | .nil => TacticM.fail "no goals"
   | .cons g _ => TacticM.pure g
 
+/-- Replace the main goal by the goals `new` (none, when it was closed). -/
 def TacticM.replaceMainGoal (new : List Nat) : TacticM Unit := do
   gs ← TacticM.getGoals;
   match gs with
   | .nil => TacticM.setGoals new
   | .cons _ rest => TacticM.setGoals (List.append new rest)
 
+/-- The name of an identifier; fails on anything else. -/
 def Syntax.identName (stx : Syntax) : TacticM String := match stx with
   | .ident s => TacticM.pure s
   | _ => TacticM.fail "expected an identifier"
 
 syntax (name := intro) "intro" ident : tactic
+/-- `intro x`: introduce the goal's outermost binder as `x`. -/
 def Tactic.intro : Tactic := fun stx => do
   g ← TacticM.mainGoal;
   x ← Syntax.identName (Syntax.getArg stx 1);
@@ -663,6 +936,7 @@ def Tactic.intro : Tactic := fun stx => do
 attribute [tactic tactic.intro] Tactic.intro
 
 syntax (name := exact) "exact" term : tactic
+/-- `exact t`: close the goal with the term `t`. -/
 def Tactic.exact : Tactic := fun stx => do
   g ← TacticM.mainGoal;
   TacticM.exact g (Syntax.getArg stx 1);
@@ -673,7 +947,8 @@ syntax (name := rflTac) "rfl" : tactic
 macro_rules
   | `(tactic| rfl) => `(tactic| exact rfl)
 
--- `assumption`: close the goal with a hypothesis of a definitionally equal type.
+/-- `assumption`'s search: close goal `g` with the first hypothesis whose type is
+definitionally equal to `ty` (the `i`th is `Expr.var i`). -/
 def TacticM.findHyp : List (String × Expr) → Nat → Nat → Expr → TacticM Unit
   --<sol
   | .nil, _, _, _ => TacticM.fail "assumption: no hypothesis matches the goal"
@@ -688,6 +963,7 @@ def TacticM.findHyp : List (String × Expr) → Nat → Nat → Expr → TacticM
   --| | _, _, _, _ => TacticM.fail "assumption: not implemented yet"
   --sol>
 syntax (name := assumption) "assumption" : tactic
+/-- `assumption`: close the goal with a hypothesis of a definitionally equal type. -/
 def Tactic.assumption : Tactic := fun _ => do
   g ← TacticM.mainGoal;
   ty ← TacticM.goalType g;
@@ -696,8 +972,9 @@ def Tactic.assumption : Tactic := fun _ => do
   TacticM.replaceMainGoal .nil
 attribute [tactic tactic.assumption] Tactic.assumption
 
--- `apply f`: a new goal for each argument of `f`, then unify `f`'s result type with the
--- goal. Arguments that unification determines are dropped from the goals.
+/-- `apply`'s loop: a new goal for each argument of `e : ty`, then unify the result type
+with the goal; the goals that unification determined are dropped. `fuel` bounds the
+number of arguments. -/
 def TacticM.applyLoop : Nat → Nat → Expr → Expr → List Nat → TacticM (List Nat)
   | .zero, _, _, _, _ => TacticM.fail "apply: too many arguments"
   | .succ fuel, g, e, ty, acc => match ty with
@@ -713,6 +990,8 @@ def TacticM.applyLoop : Nat → Nat → Expr → Expr → List Nat → TacticM (
       | .true => do TacticM.assign g e; TacticM.pure acc
       | .false => TacticM.fail "apply: the result type does not match the goal"
 syntax (name := apply) "apply" term : tactic
+/-- `apply f`: a new goal for each argument of `f`, then unify `f`'s result type with the
+goal. Arguments that unification determines are dropped from the goals. -/
 def Tactic.apply : Tactic := fun stx => do
   g ← TacticM.mainGoal;
   p ← TacticM.elabInfer g (Syntax.getArg stx 1);
@@ -721,40 +1000,59 @@ def Tactic.apply : Tactic := fun stx => do
 attribute [tactic tactic.apply] Tactic.apply
 
 syntax (name := try) "try" tactic : tactic
+/-- `try tac`: run `tac`, and do nothing if it fails. -/
 def Tactic.try : Tactic := fun stx =>
   TacticM.tryCatch (TacticM.evalTactic (Syntax.getArg stx 1)) (fun _ => TacticM.pure ())
 attribute [tactic tactic.try] Tactic.try
 
 syntax (name := first) "first" "|" tactic "|" tactic : tactic
+/-- `first | tac₁ | tac₂`: run `tac₁`, or `tac₂` if it fails. -/
 def Tactic.first : Tactic := fun stx =>
   TacticM.tryCatch (TacticM.evalTactic (Syntax.getArg stx 2)) (fun _ => TacticM.evalTactic (Syntax.getArg stx 4))
 attribute [tactic tactic.first] Tactic.first
 
--- `(tac₁; tac₂; …)` runs a sequence.
+/-- Run each tactic of a list in turn: `(tac₁; tac₂; …)`. -/
 def TacticM.evalSeq {b : Bool} : SyntaxF b → TacticM Unit
   | .cons t ts => do TacticM.evalTactic t; TacticM.evalSeq ts
   | _ => TacticM.pure ()
 syntax (name := paren) "(" sepBy(tactic, ";") ")" : tactic
+/-- `(tac₁; tac₂; …)`: run a sequence of tactics. -/
 def Tactic.paren : Tactic := fun stx => match Syntax.getArg stx 1 with
   | .node _ ts => TacticM.evalSeq ts
   | _ => TacticM.pure ()
 attribute [tactic tactic.paren] Tactic.paren
 
--- `repeat tac`: run `tac` until it fails (at most 64 times).
+/-- Run `t` until it fails, at most `n` times. -/
 def TacticM.repeatN : Nat → Syntax → TacticM Unit
   | .zero, _ => TacticM.pure ()
   | .succ n, t => TacticM.tryCatch (do TacticM.evalTactic t; TacticM.repeatN n t) (fun _ => TacticM.pure ())
 syntax (name := repeat) "repeat" tactic : tactic
+/-- `repeat tac`: run `tac` until it fails (at most 64 times). -/
 def Tactic.repeat : Tactic := fun stx => TacticM.repeatN 64 (Syntax.getArg stx 1)
 attribute [tactic tactic.repeat] Tactic.repeat
 
 syntax (name := trace) "trace" str : tactic
+/-- `trace "msg"`: show `msg` as an info message. -/
 def Tactic.trace : Tactic := fun stx => match Syntax.getArg (Syntax.getArg stx 1) 0 with
   | .atom s => TacticM.trace s
   | _ => TacticM.pure ()
 attribute [tactic tactic.trace] Tactic.trace
 
+-- `smt` (stage 28a): close the goal by an SMT solver, trusted: only with --trust-smt,
+-- and the proof is an axiom `X.smt✝N` (the goal over its context) that `#print axioms`
+-- lists. A goal the solver refutes fails with the counterexample. lib/ never uses it.
+syntax (name := smt) "smt" : tactic
+/-- `smt` (stage 28a): close the goal by an SMT solver. Trusted: only with `--trust-smt`,
+and the proof is an axiom (`#print axioms` lists it); a refuted goal fails with the
+counterexample. lib/ never uses it. -/
+def Tactic.smt : Tactic := fun _ => do
+  g ← TacticM.mainGoal;
+  TacticM.smt g;
+  TacticM.replaceMainGoal .nil
+attribute [tactic tactic.smt] Tactic.smt
+
 -- `trace_state`: the open goals, as an info message (as `trace`, at the tactic)
+/-- The goals, printed one after the other (for `trace_state`). -/
 def TacticM.ppGoals : List Nat → TacticM String
   | .nil => TacticM.pure "no goals"
   | .cons g .nil => TacticM.ppGoal g
@@ -763,6 +1061,7 @@ def TacticM.ppGoals : List Nat → TacticM String
     rest ← TacticM.ppGoals gs;
     TacticM.pure (String.append a (String.append "\n\n" rest))
 syntax (name := traceState) "trace_state" : tactic
+/-- `trace_state`: the open goals, as an info message (as `trace`, at the tactic). -/
 def Tactic.traceState : Tactic := fun _ => do
   gs ← TacticM.getGoals;
   s ← TacticM.ppGoals gs;
@@ -773,7 +1072,8 @@ attribute [tactic tactic.traceState] Tactic.traceState
 --
 -- `intros` takes the binders' names, as inaccessible names (`n✝`);
 -- `rename_i a, b` names the last inaccessible hypotheses (`b` the most recent).
--- introduce while the goal is (syntactically) a function type; the names, in order
+/-- `intros`' loop: introduce while the goal is (syntactically) a function type; the
+names, in order, and the last goal. `fuel` bounds the number of binders. -/
 def TacticM.introsLoop : Nat → Nat → TacticM (List String × Nat)
   | .zero, g => TacticM.pure (.nil, g)
   | .succ fuel, g => do
@@ -784,47 +1084,58 @@ def TacticM.introsLoop : Nat → Nat → TacticM (List String × Nat)
       r ← TacticM.introsLoop fuel p.2;
       TacticM.pure (.cons p.1 r.1, r.2)
     | _ => TacticM.pure (.nil, g)
+/-- Introduce every binder of goal `g`, under inaccessible names: the names and the new
+goal. -/
 def TacticM.intros (g : Nat) : TacticM (List String × Nat) := TacticM.introsLoop 4096 g
 syntax (name := intros) "intros" : tactic
+/-- `intros`: introduce every binder of the goal, as inaccessible names (`n✝`). -/
 def Tactic.intros : Tactic := fun _ => do
   g ← TacticM.mainGoal;
   r ← TacticM.intros g;
   TacticM.replaceMainGoal (.cons r.2 .nil)
 attribute [tactic tactic.intros] Tactic.intros
 
--- does a name carry the inaccessible mark `✝` (code point 10013)?
+/-- Does a name carry the inaccessible mark `✝` (code point 10013)? -/
 def List.hasDagger : List Char → Bool
   | .nil => .false
   | .cons c cs => match Nat.beq (Char.code c) 10013 with
     | .true => .true
     | .false => List.hasDagger cs
+/-- Whether a hypothesis name is inaccessible (`n✝`). -/
 def String.isInaccessible : String → Bool
   | .mk cs => List.hasDagger cs
 
--- the indices of the inaccessible hypotheses, innermost first
+/-- The indices of the inaccessible hypotheses, innermost first (counting from `i`). -/
 def TacticM.inaccessibleFrom : Nat → List (String × Expr) → List Nat
   | _, .nil => .nil
   | i, .cons h hs => match String.isInaccessible h.1 with
     | .true => .cons i (TacticM.inaccessibleFrom (Nat.succ i) hs)
     | .false => TacticM.inaccessibleFrom (Nat.succ i) hs
+/-- The first list reversed, in front of the second:
+`List.revOnto [1, 2] [3] = [2, 1, 3]`. -/
 def List.revOnto {A : Type} : List A → List A → List A
   | .nil, acc => acc
   | .cons x xs, acc => List.revOnto xs (.cons x acc)
--- `names` are given innermost first, like the indices
+/-- Name the hypotheses at the indices with `names`; `names` are given innermost first,
+like the indices. -/
 def TacticM.renameAll : Nat → List Nat → List String → TacticM Nat
   | g, _, .nil => TacticM.pure g
   | _, .nil, .cons _ _ => TacticM.fail "rename_i: more names than inaccessible hypotheses"
   | g, .cons i ixs, .cons x xs => do
     g' ← TacticM.rename g i x;
     TacticM.renameAll g' ixs xs
+/-- The names of the identifiers in a list of trees (other trees, such as separators,
+skipped). -/
 def Syntax.identNames {b : Bool} : SyntaxF b → List String
   | .cons (.ident x) rest => .cons x (Syntax.identNames rest)
   | .cons _ rest => Syntax.identNames rest
   | _ => .nil
+/-- The identifiers of a separated list (`a, b, c`). -/
 def Syntax.sepIdents (stx : Syntax) : List String := match stx with
   | .node _ xs => Syntax.identNames xs
   | _ => .nil
 syntax (name := renameI) "rename_i" sepBy1(ident, ",") : tactic
+/-- `rename_i a, b`: name the last inaccessible hypotheses (`b` the most recent). -/
 def Tactic.renameI : Tactic := fun stx => do
   g ← TacticM.mainGoal;
   hyps ← TacticM.goalHyps g;
@@ -837,41 +1148,50 @@ attribute [tactic tactic.renameI] Tactic.renameI
 -- A reflected term is an application spine: a head (a constant, a variable, …) and its
 -- arguments. Constructor applications are reflected by name (`List.cons A x L`,
 -- `Nat.succ n`), so data in a goal is read like any other application.
+/-- Whether two lists of characters are equal (for comparing names). -/
 def Expr.charsEq : List Char → List Char → Bool
   | .nil, .nil => .true
   | .cons a xs, .cons b ys => match Nat.beq (Char.code a) (Char.code b) with
     | .true => Expr.charsEq xs ys
     | .false => .false
   | _, _ => .false
+/-- Whether two names (strings) are equal: `Expr.nameEq "List.cons" "List.cons" = .true`. -/
 def Expr.nameEq : String → String → Bool
   | .mk a, .mk b => Expr.charsEq a b
--- the head of an application and its arguments, in order (in front of `acc`)
+/-- The head of an application and its arguments, in order (in front of `acc`). -/
 def Expr.spineOnto : Expr → List Expr → Expr × List Expr
   | .app f a, acc => Expr.spineOnto f (.cons a acc)
   | e, acc => (e, acc)
+/-- The head of an application: `Expr.getAppFn (f a b) = f`. -/
 def Expr.getAppFn (e : Expr) : Expr := (Expr.spineOnto e .nil).1
+/-- The arguments of an application, in order: `Expr.getAppArgs (f a b) = [a, b]`. -/
 def Expr.getAppArgs (e : Expr) : List Expr := (Expr.spineOnto e .nil).2
+/-- `f` applied to the arguments, in order: `Expr.mkApp f [a, b]` is `f a b`. -/
 def Expr.mkApp : Expr → List Expr → Expr
   | f, .nil => f
   | f, .cons a rest => Expr.mkApp (.app f a) rest
--- the name of the constant at the head, and the arguments
+/-- The name of the constant at the head, and the arguments (`none` if the head is not a
+constant). -/
 def Expr.constApp (e : Expr) : Option (String × List Expr) := match Expr.spineOnto e .nil with
   | (.const n, args) => .some (n, args)
   | _ => .none
+/-- The name of the constant at the head of an application, if it is one. -/
 def Expr.headName (e : Expr) : Option String := match Expr.getAppFn e with
   | .const n => .some n
   | _ => .none
--- the arguments of `e`, if it is the constant `n` applied to some
+/-- The arguments of `e`, if it is the constant `n` applied to some:
+`Expr.appOf "Nat.succ" (Nat.succ x) = .some [x]`. -/
 def Expr.appOf (n : String) (e : Expr) : Option (List Expr) := match Expr.spineOnto e .nil with
   | (.const m, args) => (match Expr.nameEq m n with
     | .true => .some args
     | .false => .none)
   | _ => .none
+/-- Whether `e` is the constant `n` applied to some arguments. -/
 def Expr.isAppOf (n : String) (e : Expr) : Bool := match Expr.appOf n e with
   | .some _ => .true
   | .none => .false
--- Syntactic equality (binder names don't matter; an opaque handle only equals itself).
--- Constructor applications are compared like any application.
+/-- Syntactic equality (binder names don't matter; an opaque handle only equals itself).
+Constructor applications are compared like any application. -/
 def Expr.beq : Expr → Expr → Bool
   | .var i, .var j => Nat.beq i j
   | .const a, .const b => Expr.nameEq a b
@@ -882,8 +1202,9 @@ def Expr.beq : Expr → Expr → Bool
   | .lit n, .lit m => Nat.beq n m
   | .opaque i, .opaque j => Nat.beq i j
   | _, _ => .false
--- One level of a term, as a tactic wants to match on it: the head with all its
--- arguments (after Ltac2's `Constr.Unsafe.kind` and Lean's `getAppFn`/`getAppArgs`).
+/-- One level of a term, as a tactic wants to match on it: the head with all its
+arguments (after Ltac2's `Constr.Unsafe.kind` and Lean's `getAppFn`/`getAppArgs`).
+See `Expr.view`. -/
 inductive ExprView where
   | const (name : String) (args : List Expr)
   | var (i : Nat) (args : List Expr)
@@ -893,6 +1214,13 @@ inductive ExprView where
   | lam (x : String) (body : Expr)
   -- an opaque head (a kernel form with no `Expr` constructor), or a redex
   | other (head : Expr) (args : List Expr)
+/-- A term's head and arguments, as an `ExprView`:
+
+```
+match Expr.view ty with
+| .const n args => …   -- the constant `n` applied to `args`
+| _ => …
+``` -/
 def Expr.view (e : Expr) : ExprView := match Expr.spineOnto e .nil with
   | (.const n, args) => .const n args
   | (.var i, args) => .var i args
@@ -901,12 +1229,13 @@ def Expr.view (e : Expr) : ExprView := match Expr.spineOnto e .nil with
   | (.pi x i q d b, .nil) => .pi x i q d b
   | (.lam x b, .nil) => .lam x b
   | (h, args) => .other h args
+/-- The list without its first `n` elements: `List.dropN 1 [a, b] = [b]`. -/
 def List.dropN {A : Type} : Nat → List A → List A
   | .zero, xs => xs
   | .succ n, .nil => .nil
   | .succ n, .cons _ xs => List.dropN n xs
--- `e` as a constructor application: the constructor's name and its fields (the
--- arguments after the type's parameters). `List.cons A x L` is `("List.cons", [x, L])`.
+/-- `e` as a constructor application: the constructor's name and its fields (the
+arguments after the type's parameters). `List.cons A x L` is `("List.cons", [x, L])`. -/
 def TacticM.ctorApp (e : Expr) : TacticM (Option (String × List Expr)) := match Expr.constApp e with
   | .none => TacticM.pure .none
   | .some p => do
@@ -914,8 +1243,8 @@ def TacticM.ctorApp (e : Expr) : TacticM (Option (String × List Expr)) := match
     match i with
     | .none => TacticM.pure .none
     | .some info => TacticM.pure (.some (p.1, List.dropN info.2.1 p.2))
--- … after computing `e`'s head (`Prog.swap p q` is read as the `Prog.get p …` it
--- computes to)
+/-- `TacticM.ctorApp` after computing `e`'s head (`Prog.swap p q` is read as the
+`Prog.get p …` it computes to). -/
 def TacticM.whnfCtorApp (g : Nat) (e : Expr) : TacticM (Option (String × List Expr)) := do
   e' ← TacticM.whnf g e;
   TacticM.ctorApp e'
@@ -926,9 +1255,9 @@ def TacticM.whnfCtorApp (g : Nat) (e : Expr) : TacticM (Option (String × List E
 -- if one of them changes nothing);
 -- `whnf` computes the goal's head; `change t` restates the goal as the convertible
 -- `t`; `rw h` and `rw ← h` rewrite it with the equation `h`.
--- (the `unfold` tactic fails, as Lean's does, when a name is not a definition or changes
--- nothing; the request `TacticM.unfold` just returns the term unchanged in both cases, for
--- tactics that try)
+/-- Unfold each definition `n` of the list in `e`, once each, failing (as Lean's `unfold`
+does) when a name is not a definition or changes nothing; the request `TacticM.unfold`
+itself just returns the term unchanged in both cases, for tactics that try. -/
 def TacticM.unfoldAll (g : Nat) : List String → Expr → TacticM Expr
   | .nil, e => TacticM.pure e
   | .cons n ns, e => do
@@ -942,6 +1271,8 @@ def TacticM.unfoldAll (g : Nat) : List String → Expr → TacticM Expr
       | .true => TacticM.fail (String.append "unfold: nothing to unfold: the goal has no application of " (String.append n " that computes"))
       | .false => TacticM.unfoldAll g ns e'
 syntax (name := unfold) "unfold" sepBy1(ident, ",") : tactic
+/-- `unfold f, g`: unfold the definitions `f` and `g` in the goal, once each (and fail if
+one of them changes nothing). -/
 def Tactic.unfold : Tactic := fun stx => do
   g ← TacticM.mainGoal;
   ty ← TacticM.goalType g;
@@ -951,6 +1282,7 @@ def Tactic.unfold : Tactic := fun stx => do
 attribute [tactic tactic.unfold] Tactic.unfold
 
 syntax (name := whnf) "whnf" : tactic
+/-- `whnf`: compute the goal's head (weak head normal form). -/
 def Tactic.whnf : Tactic := fun _ => do
   g ← TacticM.mainGoal;
   ty ← TacticM.goalType g;
@@ -960,6 +1292,7 @@ def Tactic.whnf : Tactic := fun _ => do
 attribute [tactic tactic.whnf] Tactic.whnf
 
 syntax (name := change) "change" term : tactic
+/-- `change t`: restate the goal as the convertible `t`. -/
 def Tactic.change : Tactic := fun stx => do
   g ← TacticM.mainGoal;
   p ← TacticM.elabInfer g (Syntax.getArg stx 1);
@@ -968,6 +1301,7 @@ def Tactic.change : Tactic := fun stx => do
 attribute [tactic tactic.change] Tactic.change
 
 syntax (name := rw) "rw" term : tactic
+/-- `rw h`: rewrite the goal with the equation `h : a = b`, every `a` becoming `b`. -/
 def Tactic.rw : Tactic := fun stx => do
   g ← TacticM.mainGoal;
   p ← TacticM.elabInfer g (Syntax.getArg stx 1);
@@ -975,6 +1309,7 @@ def Tactic.rw : Tactic := fun stx => do
   TacticM.replaceMainGoal (.cons g' .nil)
 attribute [tactic tactic.rw] Tactic.rw
 syntax (name := rwBack) "rw" "←" term : tactic
+/-- `rw ← h`: rewrite the goal with `h : a = b` right to left, every `b` becoming `a`. -/
 def Tactic.rwBack : Tactic := fun stx => do
   g ← TacticM.mainGoal;
   p ← TacticM.elabInfer g (Syntax.getArg stx 2);
@@ -984,15 +1319,23 @@ attribute [tactic tactic.rwBack] Tactic.rwBack
 
 -- ## Notation: `++` and list literals (agent/notation)
 --
--- `a ++ b` appends lists and strings: it is the method of a class, like the numeric
--- operators (HD9, homogeneous), so other libraries can give it more instances.
+/-- `a ++ b` appends lists and strings: it is the method of a class, like the numeric
+operators (HD9, homogeneous), so other libraries can give it more instances.
+
+```
+[1, 2] ++ [3] = [1, 2, 3]
+"ab" ++ "c" = "abc"
+``` -/
 class Append (A : Type) where
   append : A → A → A
+/-- `xs ++ ys` on lists is `List.append`. -/
 instance {A : Type} : Append (List A) := Append.mk List.append
+/-- `a ++ b` on strings is `String.append`. -/
 instance : Append String := Append.mk String.append
--- heterogeneous, as the numeric operators (7f): `HAppend A B C`, `HAppend A A A` by default
+/-- heterogeneous, as the numeric operators (7f): `HAppend A B C`, `HAppend A A A` by default -/
 class HAppend (A B : Type) (C : outParam Type) where
   hAppend : A → B → C
+/-- `a ++ b` at a type with `Append` is `Append.append` (the default instance). -/
 instance instHAppend {A : Type} [Append A] : HAppend A A A := HAppend.mk Append.append
 attribute [default_instance] instHAppend
 attribute [binop] HAppend.hAppend
@@ -1001,21 +1344,28 @@ infixr:67 " ++ " => HAppend.hAppend
 -- `List.nil`, in terms and in patterns. Instance binders (`[Monad m] → …`) still parse:
 -- a dependent arrow is longer than a list literal followed by an arrow.
 syntax (name := listLit) "[" sepBy(term, ",") "]" : term
+/-- The term a list literal stands for: the nested `List.cons` of the literal's elements
+(skipping the `,` atoms), ending in `List.nil`. -/
 def ListLit.build {b : Bool} : SyntaxF b → Syntax
   | .cons (.atom _) ts => ListLit.build ts
   | .cons t ts => Syntax.mkApp (Syntax.mkVar "List.cons") (.cons t (.cons (ListLit.build ts) .nil))
   | _ => Syntax.mkVar "List.nil"
+/-- The macro for list literals: `[a, b]` expands to `List.cons a (List.cons b List.nil)`. -/
 def ListLit.expand : Macro := fun stx => match Syntax.getArg stx 1 with
   | .node _ ts => MacroM.pure (ListLit.build ts)
   | _ => MacroM.pure (Syntax.mkVar "List.nil")
 attribute [macro term.listLit] ListLit.expand
--- Printing them (11r): `List.nil` prints as `[]` and `List.cons x [ys,*]` as `[x, ys,*]`,
--- so a list prints as a literal from its last cell up, as Lean's unexpander does. An
--- unexpander gets the application with its explicit arguments, as syntax, and fails when
--- it doesn't apply (`List.cons x xs` with a variable `xs` stays as it is).
+/-- A list literal node with the elements `es` (with their `,` separators). Printing
+(11r): `List.nil` prints as `[]` and `List.cons x [ys,*]` as `[x, ys,*]`, so a list
+prints as a literal from its last cell up, as Lean's unexpander does. An unexpander
+gets the application with its explicit arguments, as syntax, and fails when it
+doesn't apply (`List.cons x xs` with a variable `xs` stays as it is). -/
 def ListLit.mk (es : SyntaxF .false) : Syntax :=
   .node "term.listLit" (.cons (.atom "[") (.cons (.node "null" es) (.cons (.atom "]") .nil)))
+/-- Print `List.nil` as `[]`. -/
 def ListLit.unexpandNil : Macro := fun _ => MacroM.pure (ListLit.mk .nil)
+/-- Print `List.cons x [ys,*]` as `[x, ys,*]` (and fail, leaving it as an application,
+when the tail is not a list literal). -/
 def ListLit.unexpandCons : Macro := fun stx =>
   let args := Syntax.getArg stx 1;
   let x := Syntax.getArg args 0;
@@ -1032,33 +1382,51 @@ attribute [app_unexpander List.nil] ListLit.unexpandNil
 attribute [app_unexpander List.cons] ListLit.unexpandCons
 -- (end of the notation section)
 
--- A decimal numeral as text, for macros (`Nat.toString` is an extern: it only runs compiled).
+/-- The powers of ten up to `n`, largest first (in front of `acc`), for
+`Syntax.decimal`: a decimal numeral as text, for macros (`Nat.toString` is an extern:
+it only runs compiled). -/
 partial def Syntax.decPowers (n p : Nat) (acc : List Nat) : List Nat := match Nat.lt n p with
   | .true => acc
   | .false => Syntax.decPowers n (p * 10) (.cons p acc)
+/-- The decimal digit of `n` at the power `p` (counting from `d`). -/
 partial def Syntax.decDigit (n p d : Nat) : Nat := match Nat.lt n p with
   | .true => d
   | .false => Syntax.decDigit (n - p) p (d + 1)
+/-- The digits of `n` at the powers `ps`, as characters. -/
 def Syntax.decDigits : List Nat → Nat → List Char
   | .nil, _ => .nil
   | .cons p ps, n => .cons (Char.mk (Syntax.decDigit n p 0 + 48)) (Syntax.decDigits ps (n - Syntax.decDigit n p 0 * p))
+/-- A number as a decimal numeral: `Syntax.decimal 42 = "42"`. For macros, which can't
+call the extern `Nat.toString` (it only runs compiled). -/
 def Syntax.decimal (n : Nat) : String := match Syntax.decPowers n 1 .nil with
   | .nil => "0"
   | .cons p ps => String.mk (Syntax.decDigits (.cons p ps) n)
 
 -- ## Located output of command macros
--- Runtime `Syntax` has no positions. A command macro names a node of its input by its
--- *path*: the child indices from the macro's input node down to it. Its output may
--- contain these pseudo-commands, which the command elaborator interprets
--- (Elab/ProcMacro.lean): an error or an info message at the node at `path`, and Wiz
--- source text, parsed as commands and positioned at that node.
+/-- Located output of command macros. Runtime `Syntax` has no positions. A command macro
+names a node of its input by its *path*: the child indices from the macro's input node
+down to it. Its output may contain the pseudo-commands `Syntax.errorAt`,
+`Syntax.infoAt` and `Syntax.sourceAt`, which the command elaborator interprets
+(Elab/ProcMacro.lean).
+
+This is a path's indices as atoms. -/
 def Syntax.pathAtoms : List Nat → SyntaxF .false
   | .nil => .nil
   | .cons i is => .cons (.atom (Syntax.decimal i)) (Syntax.pathAtoms is)
+/-- A path (child indices from the macro's input node) as a node. -/
 def Syntax.pathNode (path : List Nat) : Syntax := .node "null" (Syntax.pathAtoms path)
+/-- A pseudo-command for a command macro's output: an error `msg` at the node at `path`
+of the macro's input.
+
+```
+MacroM.pure [Syntax.errorAt [1, 0] "expected a structure"]
+``` -/
 def Syntax.errorAt (path : List Nat) (msg : String) : Syntax :=
   Syntax.mkNode "macro.error" (.cons (Syntax.pathNode path) (.cons (.atom msg) .nil))
+/-- A pseudo-command: an info message `msg` at the node at `path`. -/
 def Syntax.infoAt (path : List Nat) (msg : String) : Syntax :=
   Syntax.mkNode "macro.info" (.cons (Syntax.pathNode path) (.cons (.atom msg) .nil))
+/-- A pseudo-command: Wiz source text `src`, parsed as commands and positioned at the node
+at `path` (so errors in it point there). -/
 def Syntax.sourceAt (path : List Nat) (src : String) : Syntax :=
   Syntax.mkNode "macro.source" (.cons (Syntax.pathNode path) (.cons (.atom src) .nil))

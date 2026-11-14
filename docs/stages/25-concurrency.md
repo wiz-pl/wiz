@@ -6,9 +6,9 @@ MVars and locks (`lib/MVar.wiz`), which are more flexible and give weaker guaran
 Plan and survey: `concurrency-seplogic-plan.md` (stages C0, C2–C3, C8 there); runtime
 design: `concurrency.md`. Tests: group `conc`.
 
-## 25a: a thread-safe runtime ✅
+## 25a: a thread-safe runtime
 
-`runtime/wiz.c` (C and LLVM backends) can run Wiz code on several threads at once. Wiz has
+`runtime/` (C and LLVM backends) can run Wiz code on several threads at once. Wiz has
 no user-visible mutation, so only the runtime's own state needs care: reference counts,
 in-place updates of unique objects, memoised thunks and lazy cells, hoisted constants,
 and a few globals. The scheme is Lean 4's:
@@ -50,7 +50,7 @@ An `extern` bound to a runtime native (a C name starting `wiz_`) now takes and r
 Wiz value as it is (an opaque type's, a closure, a Σ pair), so the natives below are
 typed precisely in Wiz.
 
-## 25b: session types ✅
+## 25b: session types
 
 ```
 import Session
@@ -68,7 +68,7 @@ receiving a Π), and `link p a b : A × B` runs a process against one following 
 `link` is total, by structural recursion on `p` (cut elimination as a program: one
 channel can't get stuck). `#eval (link sumProto (client 100) server).1` gives `5050`.
 
-## 25c: linear channels, deadlock-free by construction ✅
+## 25c: linear channels, deadlock-free by construction
 
 `Chan p` is one end of a channel whose remaining protocol is `p`, an opaque type (an
 axiom: no constructor, nothing makes one at ω). The API is in continuation-passing style
@@ -142,7 +142,7 @@ is an involution only propositionally; `Eq.cast` at quantity 1 (9e) can move an 
 along a proof. Direct style (`send : (1 c) → A → IO (Chan (k a))`) waits for linear Σ
 fields (plan L3).
 
-## 25d: MVars and locks ✅
+## 25d: MVars and locks
 
 ```
 import MVar

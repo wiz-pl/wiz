@@ -1,85 +1,99 @@
 import Hdl.Core
 import Trace
--- Temporal logic for circuits (`import Hdl.Temporal`): properties over unbounded time, in
--- the style of LTL, SVA and TLA+, with the proof rules to establish them. Design notes:
--- docs/libraries.md ("H14 T") and /workspace/wiz-notes/hdl-temporal.md.
---
--- * A trace is a function `Nat → A` (not a ν-stream: equality at ν is stuck, while
---   equality of functions is pointwise). A formula `TL A` is a proposition about a trace
---   at a time: `φ σ t` says that `φ` holds of `σ` at cycle `t` (the anchored semantics).
---   `□φ` at `t` is "φ at `k + t` for every k", `◇φ` "for some k".
--- * Two layers: cycle-level operators (○, `##n`, bounded `◇`/`□`, `|->`, `|=>`) for
---   properties of one circuit, and actions with stuttering (`TL.stut`, TLA's `□[N]_v`)
---   for refinement of an abstract specification.
--- * The semantic object is a Mealy machine `S → I → S × O`; `Circuit.stepEl c` is one.
---   `Mealy.stateAt`/`Mealy.outAt` run it along an input trace, and
---   `Mealy.runFrom_take` says that the finite simulation `Circuit.runFrom` is a prefix.
---
--- Proof rules: invariance (`Mealy.invariant`), induction on time (`TL.always_ind`),
--- bounded checks by evaluation (`Mealy.checkFrom_spec`, `Mealy.findFrom_spec`), a
--- transient phase followed by an invariant (`TL.splitAt`), refinement by a
--- representation map (`Mealy.simulates`) and with stuttering (`Mealy.refinesStut`),
--- liveness from fairness (`TL.fairStep`) and from a ranking function (`TL.rank`).
+/-!
+# Hdl.Temporal
 
-------------------------------------------------------------------------------------
--- Traces, Mealy machines, `stateAt`/`outAt`, `obs`, `invariant`, `simulates` and
--- `Mealy.runFrom_take` come from lib/Trace.wiz and lib/Hdl/Core.wiz (H14 C1).
+Temporal logic for circuits (`import Hdl.Temporal`): properties over unbounded time, in
+the style of LTL, SVA and TLA+, with the proof rules to establish them. Design notes:
+docs/libraries.md ("H14 T") and /workspace/wiz-notes/hdl-temporal.md.
 
-------------------------------------------------------------------------------------
--- Formulas
+* A trace is a function `Nat → A` (not a ν-stream: equality at ν is stuck, while
+  equality of functions is pointwise). A formula `TL A` is a proposition about a trace
+  at a time: `φ σ t` says that `φ` holds of `σ` at cycle `t` (the anchored semantics).
+  `□φ` at `t` is "φ at `k + t` for every k", `◇φ` "for some k".
+* Two layers: cycle-level operators (○, `##n`, bounded `◇`/`□`, `|->`, `|=>`) for
+  properties of one circuit, and actions with stuttering (`TL.stut`, TLA's `□[N]_v`)
+  for refinement of an abstract specification.
+* The semantic object is a Mealy machine `S → I → S × O`; `Circuit.stepEl c` is one.
+  `Mealy.stateAt`/`Mealy.outAt` run it along an input trace, and
+  `Mealy.runFrom_take` says that the finite simulation `Circuit.runFrom` is a prefix.
 
+Proof rules: invariance (`Mealy.invariant`), induction on time (`TL.always_ind`),
+bounded checks by evaluation (`Mealy.checkFrom_spec`, `Mealy.findFrom_spec`), a
+transient phase followed by an invariant (`TL.splitAt`), refinement by a
+representation map (`Mealy.simulates`) and with stuttering (`Mealy.refinesStut`),
+liveness from fairness (`TL.fairStep`) and from a ranking function (`TL.rank`).
+-/
+
+/-- A temporal formula: a proposition about a trace at a time (`φ σ t` is "`φ` holds of `σ`
+at cycle `t`"). -/
 def TL (A : Type) : Type := Trace A → Nat → Prop
 
--- a state predicate, and a Boolean one (a checkable atom)
+/-- a state predicate, and a Boolean one (a checkable atom) -/
 def TL.now {A : Type} (p : A → Prop) : TL A := fun σ t => p (σ t)
+/-- A Boolean state predicate, as a formula (a checkable atom). -/
 def TL.nowB {A : Type} (p : A → Bool) : TL A := fun σ t => p (σ t) = .true
 
+/-- `φ ∧ ψ` at the same time. -/
 def TL.and {A : Type} (φ ψ : TL A) : TL A := fun σ t => φ σ t ∧ ψ σ t
+/-- `φ ∨ ψ` at the same time. -/
 def TL.or {A : Type} (φ ψ : TL A) : TL A := fun σ t => φ σ t ∨ ψ σ t
+/-- `φ → ψ` at the same time. -/
 def TL.imp {A : Type} (φ ψ : TL A) : TL A := fun σ t => φ σ t → ψ σ t
+/-- `¬ φ` at the same time. -/
 def TL.not {A : Type} (φ : TL A) : TL A := fun σ t => ¬ φ σ t
 
--- ○ (LTL X, SVA `##1`) and `##n`
+/-- ○ (LTL X, SVA `##1`) and `##n` -/
 def TL.next {A : Type} (φ : TL A) : TL A := fun σ t => φ σ (Nat.succ t)
+/-- `##n φ`: `φ` in `n` cycles. -/
 def TL.nexts {A : Type} (n : Nat) (φ : TL A) : TL A := fun σ t => φ σ (Nat.add n t)
 
--- □ and ◇
+/-- □ and ◇ -/
 def TL.always {A : Type} (φ : TL A) : TL A := fun σ t => (k : Nat) → φ σ (Nat.add k t)
+/-- `◇ φ`: `φ` at some cycle from now on. -/
 def TL.eventually {A : Type} (φ : TL A) : TL A := fun σ t => ∃ k, φ σ (Nat.add k t)
 
--- bounded: within the next `n` cycles (strong: it must happen), and throughout them
+/-- bounded: within the next `n` cycles (strong: it must happen), and throughout them -/
 def TL.within {A : Type} (n : Nat) (φ : TL A) : TL A :=
   fun σ t => ∃ k, Nat.lt k n = .true ∧ φ σ (Nat.add k t)
+/-- `φ` throughout the next `n` cycles (bounded `□`). -/
 def TL.during {A : Type} (n : Nat) (φ : TL A) : TL A :=
   fun σ t => (k : Nat) → Nat.lt k n = .true → φ σ (Nat.add k t)
--- SVA `##[m:n] φ`: φ at some cycle from `t + m` to `t + n`
+/-- SVA `##[m:n] φ`: φ at some cycle from `t + m` to `t + n` -/
 def TL.delayRange {A : Type} (m n : Nat) (φ : TL A) : TL A := TL.nexts m (TL.within (Nat.succ (n - m)) φ)
 
--- φ until ψ (strong: ψ comes)
+/-- φ until ψ (strong: ψ comes) -/
 def TL.until {A : Type} (φ ψ : TL A) : TL A :=
   fun σ t => ∃ k, ψ σ (Nat.add k t) ∧ ((j : Nat) → Nat.lt j k = .true → φ σ (Nat.add j t))
 
--- SVA implications for a Boolean antecedent: `a |-> φ` and `a |=> φ`
+/-- SVA implications for a Boolean antecedent: `a |-> φ` and `a |=> φ` -/
 def TL.implies {A : Type} (a φ : TL A) : TL A := TL.always (TL.imp a φ)
+/-- SVA `a |=> φ`: always, if `a` then `φ` in the next cycle. -/
 def TL.impliesNext {A : Type} (a φ : TL A) : TL A := TL.always (TL.imp a (TL.next φ))
 
--- TLA: leads-to, fairness
+/-- TLA: leads-to, fairness -/
 def TL.leadsTo {A : Type} (φ ψ : TL A) : TL A := TL.always (TL.imp φ (TL.eventually ψ))
+/-- `□◇ φ`: `φ` infinitely often (TLA's `<>[]`). -/
 def TL.infOften {A : Type} (φ : TL A) : TL A := TL.always (TL.eventually φ)
+/-- TLA weak fairness: if `enabled` is eventually always true then `taken` happens infinitely
+often. -/
 def TL.WF {A : Type} (enabled taken : TL A) : TL A := TL.imp (TL.eventually (TL.always enabled)) (TL.infOften taken)
+/-- TLA strong fairness: if `enabled` is infinitely often true then `taken` is. -/
 def TL.SF {A : Type} (enabled taken : TL A) : TL A := TL.imp (TL.infOften enabled) (TL.infOften taken)
 
--- TLA actions: a relation between consecutive elements, and the same up to stuttering
--- (`[R]_v` with `v` the whole element)
+/-- TLA actions: a relation between consecutive elements, and the same up to stuttering
+(`[R]_v` with `v` the whole element) -/
 def TL.act {A : Type} (R : A → A → Prop) : TL A := fun σ t => R (σ t) (σ (Nat.succ t))
+/-- An action up to stuttering (`[R]_v` with `v` the whole element). -/
 def TL.stut {A : Type} (R : A → A → Prop) : TL A := TL.act (fun a b => R a b ∨ a = b)
 
--- SVA `$past(x, n)`: `p` of the element `n` cycles ago (vacuous before time `n`)
+/-- SVA `$past(x, n)`: `p` of the element `n` cycles ago (vacuous before time `n`) -/
 def TL.past {A : Type} (n : Nat) (p : A → Prop) : TL A :=
   fun σ t => Nat.lt t n = .false → p (σ (t - n))
 
--- a trace satisfies φ (at time 0); φ is valid
+/-- a trace satisfies φ (at time 0); φ is valid -/
 def TL.sat {A : Type} (σ : Trace A) (φ : TL A) : Prop := φ σ 0
+/-- `φ` holds of every trace at time 0. -/
 def TL.valid {A : Type} (φ : TL A) : Prop := (σ : Trace A) → φ σ 0
 
 -- Notation (docs/dsls.md, 13o): `□ φ`, `◇ φ`, `○ φ` (prefix, like `¬`), `p ~> q`, and
@@ -94,49 +108,54 @@ infixr:25 " |=> " => TL.impliesNext
 ------------------------------------------------------------------------------------
 -- Laws
 
--- □ φ ⇒ φ, □ φ ⇒ ○ □ φ
+/-- □ φ ⇒ φ, □ φ ⇒ ○ □ φ -/
 def TL.always_now {A : Type} (φ : TL A) (σ : Trace A) (t : Nat) (h : TL.always φ σ t) : φ σ t := h 0
+/-- `□ φ` at the next cycle. -/
 def TL.always_next {A : Type} (φ : TL A) (σ : Trace A) (t : Nat) (h : TL.always φ σ t) : TL.always φ σ (Nat.succ t) :=
   fun (k : Nat) => Eq.substProp (φ σ) (Eq.symm (Nat.add_succ k t)) (h (Nat.succ k))
--- φ everywhere gives □ φ at any time
+/-- φ everywhere gives □ φ at any time -/
 def TL.always_of {A : Type} (φ : TL A) (σ : Trace A) (h : (u : Nat) → φ σ u) (t : Nat) : TL.always φ σ t :=
   fun (k : Nat) => h (Nat.add k t)
--- φ now and □ φ from the next cycle
+/-- φ now and □ φ from the next cycle -/
 def TL.always_cons {A : Type} (φ : TL A) (σ : Trace A) (t : Nat) (h0 : φ σ t) (h : TL.always φ σ (Nat.succ t)) :
     (k : Nat) → φ σ (Nat.add k t)
   | .zero => h0
   | .succ j => Eq.substProp (φ σ) (Nat.add_succ j t) (h j)
--- induction on time (TLA INV1)
+/-- induction on time (TLA INV1) -/
 def TL.always_ind {A : Type} (φ : TL A) (σ : Trace A) (t : Nat) (h0 : φ σ t)
     (hs : (k : Nat) → φ σ (Nat.add k t) → φ σ (Nat.succ (Nat.add k t))) : (k : Nat) → φ σ (Nat.add k t)
   | .zero => h0
   | .succ k => hs k (TL.always_ind φ σ t h0 hs k)
--- monotone, and conjunctive
+/-- monotone, and conjunctive -/
 def TL.always_mono {A : Type} (φ ψ : TL A) (σ : Trace A) (t : Nat) (f : (u : Nat) → φ σ u → ψ σ u)
     (h : TL.always φ σ t) : TL.always ψ σ t := fun (k : Nat) => f (Nat.add k t) (h k)
+/-- `□ (φ ∧ ψ)` from `□ φ` and `□ ψ`. -/
 def TL.always_and {A : Type} (φ ψ : TL A) (σ : Trace A) (t : Nat) (h1 : TL.always φ σ t) (h2 : TL.always ψ σ t) :
     TL.always (TL.and φ ψ) σ t := fun (k : Nat) => And.intro (h1 k) (h2 k)
--- φ ⇒ ◇ φ, bounded ◇ ⇒ ◇, □ ⇒ bounded □
+/-- φ ⇒ ◇ φ, bounded ◇ ⇒ ◇, □ ⇒ bounded □ -/
 def TL.eventually_now {A : Type} (φ : TL A) (σ : Trace A) (t : Nat) (h : φ σ t) : TL.eventually φ σ t :=
   Ex.intro (fun (k : Nat) => φ σ (Nat.add k t)) 0 h
+/-- A bounded `◇` gives `◇`. -/
 def TL.within_eventually {A : Type} (n : Nat) (φ : TL A) (σ : Trace A) (t : Nat) (h : TL.within n φ σ t) :
     TL.eventually φ σ t := Ex.imp (fun (k : Nat) (p : Nat.lt k n = .true ∧ φ σ (Nat.add k t)) => p.2) h
+/-- `□ φ` gives `φ` throughout the next `n` cycles. -/
 def TL.always_during {A : Type} (n : Nat) (φ : TL A) (σ : Trace A) (t : Nat) (h : TL.always φ σ t) : TL.during n φ σ t :=
   fun (k : Nat) (hk : Nat.lt k n = .true) => h k
--- ◇ ○ φ ⇒ ◇ φ (later is still eventually)
+/-- ◇ ○ φ ⇒ ◇ φ (later is still eventually) -/
 def TL.eventually_next {A : Type} (φ : TL A) (σ : Trace A) (t : Nat) (h : TL.eventually φ σ (Nat.succ t)) :
     TL.eventually φ σ t :=
   Ex.elim h (fun (k : Nat) (p : φ σ (Nat.add k (Nat.succ t))) =>
     Ex.intro (fun (j : Nat) => φ σ (Nat.add j t)) (Nat.succ k) (Eq.substProp (φ σ) (Nat.add_succ k t) p))
--- ◇ is monotone
+/-- ◇ is monotone -/
 def TL.eventually_mono {A : Type} (φ ψ : TL A) (σ : Trace A) (t : Nat) (f : (u : Nat) → φ σ u → ψ σ u)
     (h : TL.eventually φ σ t) : TL.eventually ψ σ t :=
   Ex.imp (fun (k : Nat) (p : φ σ (Nat.add k t)) => f (Nat.add k t) p) h
 
--- Arithmetic for splitting time: every `t` is below `F` or `j + F`.
+/-- Arithmetic for splitting time: every `t` is below `F` or `j + F`. -/
 def Nat.not_lt_zero : (k : Nat) → Nat.lt k 0 = .true → False
   | .zero, h => absurd h.1
   | .succ k, h => absurd h.1
+/-- Every `t` is below `F` or is `j + F`: splitting time at `F`. -/
 def TL.splitTime : (F t : Nat) → Nat.lt t F = .true ∨ (∃ j, t = Nat.add j F)
   | .zero, t => Or.inr (Ex.intro (fun (j : Nat) => t = Nat.add j 0) t (Eq.symm (Nat.add_zero t)))
   | .succ F, .zero => Or.inl rfl
@@ -145,17 +164,17 @@ def TL.splitTime : (F t : Nat) → Nat.lt t F = .true ∨ (∃ j, t = Nat.add j 
         Eq.trans (Eq.congrArg Nat.succ e) (Eq.symm (Nat.add_succ j F))) h)
       (TL.splitTime F t)
 
--- A transient phase and what comes after: φ for the first `F` cycles (typically by
--- evaluation) and from `F` on (typically by an invariant) is φ always.
+/-- A transient phase and what comes after: φ for the first `F` cycles (typically by
+evaluation) and from `F` on (typically by an invariant) is φ always. -/
 def TL.splitAt {A : Type} (φ : TL A) (σ : Trace A) (F : Nat)
     (early : (k : Nat) → Nat.lt k F = .true → φ σ k) (late : (j : Nat) → φ σ (Nat.add j F)) : (t : Nat) → φ σ t :=
   fun (t : Nat) => Or.elim (TL.splitTime F t) (early t)
     (fun (h : ∃ j, t = Nat.add j F) => Ex.elim h (fun (j : Nat) (e : t = Nat.add j F) =>
       Eq.substProp (φ σ) (Eq.symm e) (late j)))
 
--- Liveness from fairness: while `p` holds and the fair event `h` (a Boolean, e.g. a
--- consumer's `ready`) is absent, `p` persists; when `h` comes, `q` happens; `h` comes
--- infinitely often. Then `p` leads to `q`. (TLA's WF1 for a deterministic step.)
+/-- Liveness from fairness: while `p` holds and the fair event `h` (a Boolean, e.g. a
+consumer's `ready`) is absent, `p` persists; when `h` comes, `q` happens; `h` comes
+infinitely often. Then `p` leads to `q`. (TLA's WF1 for a deterministic step.) -/
 def TL.fairStepAux {A : Type} (p q : TL A) (h : Nat → Bool) (σ : Trace A) (v : Nat)
     (hold : (u : Nat) → p σ u → h u = .false → p σ (Nat.succ u))
     (fire : (u : Nat) → p σ u → h u = .true → q σ u) (pv : p σ v) :
@@ -167,6 +186,8 @@ def TL.fairStepAux {A : Type} (p q : TL A) (h : Nat → Bool) (σ : Trace A) (v 
         (fun (e : h (Nat.add j v) = .false) => Or.inl (hold (Nat.add j v) pj e)))
       (fun (d : TL.eventually q σ v) => Or.inr d)
 
+/-- Liveness from fairness: while `p` holds and the fair event `h` is absent, `p` persists;
+when `h` comes, `q` happens; `h` comes infinitely often. Then `p` leads to `q`. -/
 def TL.fairStep {A : Type} (p q : TL A) (h : Nat → Bool) (σ : Trace A)
     (hold : (u : Nat) → p σ u → h u = .false → p σ (Nat.succ u))
     (fire : (u : Nat) → p σ u → h u = .true → q σ u)
@@ -177,9 +198,9 @@ def TL.fairStep {A : Type} (p q : TL A) (h : Nat → Bool) (σ : Trace A)
       (fun (pk : p σ (Nat.add k v)) => Ex.intro (fun (j : Nat) => q σ (Nat.add j v)) k (fire (Nat.add k v) pk hk))
       (fun (d : TL.eventually q σ v) => d))
 
--- Liveness from a ranking function: while `p` holds and `q` has not happened, the rank
--- goes down by one per cycle; at rank 0 `q` happens. Then `q` happens within `r + 1`
--- cycles of a time where `p` holds with rank `r` (a bound as well as liveness).
+/-- Liveness from a ranking function: while `p` holds and `q` has not happened, the rank
+goes down by one per cycle; at rank 0 `q` happens. Then `q` happens within `r + 1`
+cycles of a time where `p` holds with rank `r` (a bound as well as liveness). -/
 def TL.rank {A : Type} (p q : TL A) (rk : Nat → Nat) (σ : Trace A)
     (down : (u r : Nat) → p σ u → rk u = Nat.succ r → q σ u ∨ (p σ (Nat.succ u) ∧ rk (Nat.succ u) = r))
     (base : (u : Nat) → p σ u → rk u = 0 → q σ u) :
@@ -196,9 +217,9 @@ def TL.rank {A : Type} (p q : TL A) (rk : Nat → Nat) (σ : Trace A)
 ------------------------------------------------------------------------------------
 -- Refinement up to stuttering
 
--- Refinement with stuttering (TLA): if, on the states the run can reach (`inv`), every
--- step is a step of the abstract relation `next` or leaves the abstraction `f`
--- unchanged, the abstract trace satisfies `□[next]_f`.
+/-- Refinement with stuttering (TLA): if, on the states the run can reach (`inv`), every
+step is a step of the abstract relation `next` or leaves the abstraction `f`
+unchanged, the abstract trace satisfies `□[next]_f`. -/
 def Mealy.refinesStut {S I O T : Type} (m : Mealy S I O) (s0 : S) (xs : Trace I) (f : S → T) (next : T → T → Prop)
     (inv : S → Prop) (hinv : (t : Nat) → inv (Mealy.stateAt m s0 xs t))
     (h : (s : S) → (x : I) → inv s → next (f s) (f (m s x).1) ∨ f s = f (m s x).1) :
@@ -210,24 +231,30 @@ def Mealy.refinesStut {S I O T : Type} (m : Mealy S I O) (s0 : S) (xs : Trace I)
 -- `stateAt k` for each k); the `_spec` lemmas turn a `.true` (by `refl`, or by trusted
 -- compiled evaluation, stage 27a, when it is long) into a statement about the trace.
 
+/-- Whether `p` holds of the state and input at every cycle below `n` (one walk of the
+run). -/
 def Mealy.checkFrom {S I O : Type} (m : Mealy S I O) (p : S → I → Bool) : Nat → S → Trace I → Bool
   | .zero, s, xs => .true
   | .succ n, s, xs => Bool.and (p s (xs 0)) (Mealy.checkFrom m p n (m s (xs 0)).1 (Trace.tail xs))
--- some cycle below `n` satisfies `p`
+/-- some cycle below `n` satisfies `p` -/
 def Mealy.findFrom {S I O : Type} (m : Mealy S I O) (p : S → I → Bool) : Nat → S → Trace I → Bool
   | .zero, s, xs => .false
   | .succ n, s, xs => Bool.or (p s (xs 0)) (Mealy.findFrom m p n (m s (xs 0)).1 (Trace.tail xs))
 
+/-- The left conjunct of a true `&&` is true. -/
 def Bool.and_true_left : (a b : Bool) → Bool.and a b = .true → a = .true
   | .true, b, h => rfl
   | .false, b, h => absurd h.1
+/-- The right conjunct of a true `&&` is true. -/
 def Bool.and_true_right : (a b : Bool) → Bool.and a b = .true → b = .true
   | .true, b, h => h
   | .false, b, h => absurd h.1
+/-- One of the disjuncts of a true `||` is true. -/
 def Bool.or_true : (a b : Bool) → Bool.or a b = .true → a = .true ∨ b = .true
   | .true, b, h => Or.inl rfl
   | .false, b, h => Or.inr h
 
+/-- A `checkFrom` that returned `true` says `p` of every cycle below `n`. -/
 def Mealy.checkFrom_spec {S I O : Type} (m : Mealy S I O) (p : S → I → Bool) :
     (n : Nat) → (s : S) → (xs : Trace I) → Mealy.checkFrom m p n s xs = .true →
     (k : Nat) → Nat.lt k n = .true → p (Mealy.stateAt m s xs k) (xs k) = .true
@@ -238,6 +265,7 @@ def Mealy.checkFrom_spec {S I O : Type} (m : Mealy S I O) (p : S → I → Bool)
       (Mealy.checkFrom_spec m p n (m s (xs 0)).1 (Trace.tail xs)
         (Bool.and_true_right (p s (xs 0)) (Mealy.checkFrom m p n (m s (xs 0)).1 (Trace.tail xs)) h) k hk)
 
+/-- A `findFrom` that returned `true` gives a cycle below `n` where `p` holds. -/
 def Mealy.findFrom_spec {S I O : Type} (m : Mealy S I O) (p : S → I → Bool) :
     (n : Nat) → (s : S) → (xs : Trace I) → Mealy.findFrom m p n s xs = .true →
     ∃ k, Nat.lt k n = .true ∧ p (Mealy.stateAt m s xs k) (xs k) = .true
@@ -251,10 +279,12 @@ def Mealy.findFrom_spec {S I O : Type} (m : Mealy S I O) (p : S → I → Bool) 
             Ex.intro (fun (j : Nat) => Nat.lt j (Nat.succ n) = .true ∧ p (Mealy.stateAt m s xs j) (xs j) = .true) (Nat.succ k)
               (And.intro w.1 (Eq.substProp (fun (u : S) => p u (xs (Nat.succ k)) = .true) (Eq.symm (Mealy.stateAt_succ m s xs k)) w.2))))
 
+/-- A bounded check on the observations gives `φ` throughout the next `n` cycles. -/
 def Mealy.checkFrom_during {S I O : Type} (m : Mealy S I O) (p : S × I → Bool) (n : Nat) (s : S) (xs : Trace I)
     (h : Mealy.checkFrom m (fun (a : S) (x : I) => p (a, x)) n s xs = .true) :
     (k : Nat) → Nat.lt k n = .true → TL.nowB p (Mealy.obs m s xs) k :=
   Mealy.checkFrom_spec m (fun (a : S) (x : I) => p (a, x)) n s xs h
+/-- A bounded search on the observations gives `◇` within `n` cycles. -/
 def Mealy.findFrom_within {S I O : Type} (m : Mealy S I O) (p : S × I → Bool) (n : Nat) (s : S) (xs : Trace I)
     (h : Mealy.findFrom m (fun (a : S) (x : I) => p (a, x)) n s xs = .true) :
     TL.within n (TL.nowB p) (Mealy.obs m s xs) 0 :=
@@ -262,14 +292,16 @@ def Mealy.findFrom_within {S I O : Type} (m : Mealy S I O) (p : S × I → Bool)
       And.intro w.1 (Eq.substProp (fun (u : Nat) => p (Mealy.stateAt m s xs u, xs u) = .true) (Eq.symm (Nat.add_zero k)) w.2))
     (Mealy.findFrom_spec m (fun (a : S) (x : I) => p (a, x)) n s xs h)
 
--- A transient phase, then rest: if the run is in state `c` at cycle `F` and `c` is fixed
--- under the inputs from then on, it stays in `c`; a property checked for the first `F`
--- cycles and true of `c` (with those inputs) then holds at every cycle.
+/-- A transient phase, then rest: if the run is in state `c` at cycle `F` and `c` is fixed
+under the inputs from then on, it stays in `c`; a property checked for the first `F`
+cycles and true of `c` (with those inputs) then holds at every cycle. -/
 def Mealy.settles {S I O : Type} (m : Mealy S I O) (s0 : S) (xs : Trace I) (F : Nat) (c : S)
     (hF : Mealy.stateAt m s0 xs F = c) (fixed : (j : Nat) → (m c (xs (Nat.add j F))).1 = c) :
     (j : Nat) → Mealy.stateAt m s0 xs (Nat.add j F) = c
   | .zero => hF
   | .succ j => Eq.trans (Eq.congrArg (fun (s : S) => (m s (xs (Nat.add j F))).1) (Mealy.settles m s0 xs F c hF fixed j)) (fixed j)
+/-- A transient phase, then rest: a property checked for the first `F` cycles and true of
+the settled state holds at every cycle. -/
 def Mealy.always_settled {S I O : Type} (m : Mealy S I O) (p : S → I → Bool) (s0 : S) (xs : Trace I) (F : Nat) (c : S)
     (early : Mealy.checkFrom m p F s0 xs = .true)
     (hF : Mealy.stateAt m s0 xs F = c) (fixed : (j : Nat) → (m c (xs (Nat.add j F))).1 = c)
@@ -281,21 +313,25 @@ def Mealy.always_settled {S I O : Type} (m : Mealy S I O) (p : S → I → Bool)
       (fun (j : Nat) => Eq.substProp (fun (u : S) => p u (xs (Nat.add j F)) = .true)
         (Eq.symm (Mealy.settles m s0 xs F c hF fixed j)) (late j))) 0
 
--- inputs after a single event
+/-- inputs after a single event -/
 def Trace.once_late {A : Type} (x y : A) (j F : Nat) : Trace.once x y (Nat.add j (Nat.succ F)) = y :=
   Eq.congrArg (Trace.once x y) (Nat.add_succ j F)
--- The same when the inputs from cycle `F` on are all `y` (e.g. after a single event,
--- `Trace.once_from`): the settled state is fixed under `y`, and `p` holds there with `y`.
--- The facts are wrapped in definitions (`Mealy.Reaches`, `Mealy.Fixed`, `Trace.From`) so
--- that a caller's concrete instances are matched by name: an equation between states is a
--- product equation, and the elaborator would otherwise compute it (slowly) to compare.
+/-- The same when the inputs from cycle `F` on are all `y` (e.g. after a single event,
+`Trace.once_from`): the settled state is fixed under `y`, and `p` holds there with `y`.
+The facts are wrapped in definitions (`Mealy.Reaches`, `Mealy.Fixed`, `Trace.From`) so
+that a caller's concrete instances are matched by name: an equation between states is a
+product equation, and the elaborator would otherwise compute it (slowly) to compare. -/
 def Mealy.Reaches {S I O : Type} (m : Mealy S I O) (s0 : S) (xs : Trace I) (F : Nat) (c : S) : Prop :=
   Mealy.stateAt m s0 xs F = c
+/-- The state `c` is fixed under the input `y`. -/
 def Mealy.Fixed {S I O : Type} (m : Mealy S I O) (c : S) (y : I) : Prop := (m c y).1 = c
+/-- The trace is `y` from cycle `F` on. -/
 def Trace.From {A : Type} (xs : Trace A) (F : Nat) (y : A) : Prop := (j : Nat) → xs (Nat.add j F) = y
+/-- After the event of `Trace.once`, the trace is `y`. -/
 def Trace.once_from {A : Type} (x y : A) (F : Nat) : Trace.From (Trace.once x y) (Nat.succ F) y :=
   fun (j : Nat) => Trace.once_late x y j F
 
+/-- The settled form when the inputs from cycle `F` on are all `y`. -/
 def Mealy.always_settled_const {S I O : Type} (m : Mealy S I O) (p : S → I → Bool) (s0 : S) (xs : Trace I) (y : I) (F : Nat) (c : S)
     (rest : Trace.From xs F y) (early : Mealy.checkFrom m p F s0 xs = .true)
     (hF : Mealy.Reaches m s0 xs F c) (fixed : Mealy.Fixed m c y) (late : p c y = .true) :

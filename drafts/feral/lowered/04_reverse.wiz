@@ -29,14 +29,13 @@ def reverse (l : LList) : Result LList :=
   | .err e => .err e
 
 -- fn reverse_in_place {'a} (l : &'a mut List) : Unit := { let old := mem.take l; *l := reverse old }
-def reverse_in_place {ρ : Region} (l : Uniq ρ LList) : Result (Unit × Uniq ρ LList) :=
-  let old := l.val;          -- mem.take l: move the value out ...
-  let l := Uniq.set l LList.nil;   -- ... leaving the default behind
+def reverse_in_place {ρ : Region} (1 l : Uniq ρ LList) : Result1 Unit (Uniq ρ LList) :=
+  let 1 (old, l) := Uniq.peek l;   -- mem.take l: move the value out ...
+  let 1 l := Uniq.write l LList.nil;   -- ... leaving the default behind
   match reverse old with
   | .ok r =>
-    let l := Uniq.set l r;   -- *l := reverse old
-    .ok ((), l)
-  | .err e => .err e
+    .ok () (Uniq.write l r)  -- *l := reverse old
+  | .err e => .err e l
 
 def LList.toNats : LList → List Nat
   | .nil => .nil

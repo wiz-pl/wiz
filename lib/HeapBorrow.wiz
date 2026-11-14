@@ -1,50 +1,55 @@
 import HoareTactics
 import Optic
--- Feral's borrows on heap cells: the bridge between the functional model of owned data
--- (lib/Region.wiz, lib/Optic.wiz: a `&mut A` is a value handed in and handed back) and the
--- model heap of separation logic (lib/HProp.wiz, lib/Hoare.wiz: an owned cell is `l ↦ v`).
--- docs/resources.md tells the whole story; /workspace/wiz-notes/cohesion-resources.md has
--- the design.
---
--- A Feral function taking `&mut A` lowers to a function of the value, `A → Result (B × A)`
--- (the borrow's final value comes back with the result; `Uniq.borrow` wraps exactly this
--- shape around a call). On a heap whose cell `l` holds the lender, the same call is: read
--- `l`, run the function, write the final value back — a fault if the function panicked.
--- That is `Prog.borrowMut`. Its specification comes from the function's *functional*
--- specification (decision CS9: safe Feral code is verified in the functional model, as in
--- Aeneas): if `f a` succeeds with `(b, a')` satisfying `Q`, then
---
---   {l ↦ a} Prog.borrowMut l f {b. ∃a'. \[Q b a'] ⋆ l ↦ a'}
---
--- and the frame rule (`Triple.frame`, or `xapp`'s inferred frame) adds every other cell:
--- the cells a Feral function is not given are the ones it can't touch. `Result.Holds`
--- (total correctness: an `err` satisfies nothing) is the reading that lines up with
--- `Triple`, where a fault (`Prog.fail`) satisfies nothing either.
+/-!
+# HeapBorrow
 
--- ## One `&mut` borrow
+Feral's borrows on heap cells: the bridge between the functional model of owned data
+(lib/Region.wiz, lib/Optic.wiz: a `&mut A` is a value handed in and handed back) and the
+model heap of separation logic (lib/HProp.wiz, lib/Hoare.wiz: an owned cell is `l ↦ v`).
+docs/resources.md tells the whole story; /workspace/wiz-notes/cohesion-resources.md has
+the design.
 
--- after the value-level function ran: hand the final value back to the cell, or fault
+A Feral function taking `&mut A` lowers to a function of the value, `A → Result (B × A)`
+(the borrow's final value comes back with the result; `Uniq.borrow` wraps exactly this
+shape around a call). On a heap whose cell `l` holds the lender, the same call is: read
+`l`, run the function, write the final value back — a fault if the function panicked.
+That is `Prog.borrowMut`. Its specification comes from the function's *functional*
+specification (decision CS9: safe Feral code is verified in the functional model, as in
+Aeneas): if `f a` succeeds with `(b, a')` satisfying `Q`, then
+
+  {l ↦ a} Prog.borrowMut l f {b. ∃a'. \[Q b a'] ⋆ l ↦ a'}
+
+and the frame rule (`Triple.frame`, or `xapp`'s inferred frame) adds every other cell:
+the cells a Feral function is not given are the ones it can't touch. `Result.Holds`
+(total correctness: an `err` satisfies nothing) is the reading that lines up with
+`Triple`, where a fault (`Prog.fail`) satisfies nothing either.
+-/
+
+
+/-- after the value-level function ran: hand the final value back to the cell, or fault -/
 def Prog.handBack {V B : Type} (l : Nat) : Result (B × V) → Prog V B
   | .ok r => .set l r.2 (.ret r.1)
   | .err e => .fail
 
--- `f (&mut *l)`: the cell's value is lent to `f` and its final value written back
+/-- `f (&mut *l)`: the cell's value is lent to `f` and its final value written back -/
 def Prog.borrowMut {V B : Type} (l : Nat) (f : V → Result (B × V)) : Prog V B :=
   .get l (fun a => Prog.handBack l (f a))
 
+/-- After the value-level function ran: the cell holds the final value (or the program
+faulted, and nothing holds). -/
 def Prog.handBack_spec {V B : Type} (l : Nat) (a : V) (Q : B → V → Prop) :
     (r : Result (B × V)) → Result.Holds (fun (p : B × V) => Q p.1 p.2) r →
     Triple (l ↦ a) (Prog.handBack l r) (fun b => hexists (fun (v : V) => hpure (Q b v) ⋆ (l ↦ v)))
   | .ok r, h => by xgo
   | .err e, h => absurd h
 
--- a call whose result is known (`f a` computes to it, or a lemma says so): the cell
--- holds the final value
+/-- a call whose result is known (`f a` computes to it, or a lemma says so): the cell
+holds the final value -/
 def Prog.handBack_ok {V B : Type} (l : Nat) (a : V) (b : B) (a' : V) :
     Triple (l ↦ a) (Prog.handBack l (Result.ok (b, a'))) (fun r => hpure (r = b) ⋆ (l ↦ a')) := by
   xgo
 
--- the functional specification of `f` gives the triple of the call on a heap cell
+/-- the functional specification of `f` gives the triple of the call on a heap cell -/
 def Prog.borrowMut_spec {V B : Type} (l : Nat) (a : V) (f : V → Result (B × V)) (Q : B → V → Prop)
     (h : Result.Holds (fun (p : B × V) => Q p.1 p.2) (f a)) :
     Triple (l ↦ a) (Prog.borrowMut l f) (fun b => hexists (fun (v : V) => hpure (Q b v) ⋆ (l ↦ v))) := by
@@ -53,14 +58,16 @@ def Prog.borrowMut_spec {V B : Type} (l : Nat) (a : V) (f : V → Result (B × V
 
 -- ## Two `&mut` borrows at once (two distinct cells: `⋆` says they are distinct)
 
+/-- After a two-borrow function ran: hand the final values back to the cells, or fault. -/
 def Prog.handBack2 {V B : Type} (p q : Nat) : Result (B × (V × V)) → Prog V B
   | .ok r => .set p r.2.1 (.set q r.2.2 (.ret r.1))
   | .err e => .fail
 
--- `f (&mut *p) (&mut *q)`
+/-- `f (&mut *p) (&mut *q)` -/
 def Prog.borrowMut2 {V B : Type} (p q : Nat) (f : V → V → Result (B × (V × V))) : Prog V B :=
   .get p (fun a => .get q (fun b => Prog.handBack2 p q (f a b)))
 
+/-- The two cells hold the final values after `Prog.handBack2`. -/
 def Prog.handBack2_spec {V B : Type} (p q : Nat) (a b : V) (Q : B → V → V → Prop) :
     (r : Result (B × (V × V))) → Result.Holds (fun (x : B × (V × V)) => Q x.1 x.2.1 x.2.2) r →
     Triple ((p ↦ a) ⋆ (q ↦ b)) (Prog.handBack2 p q r)
@@ -68,11 +75,13 @@ def Prog.handBack2_spec {V B : Type} (p q : Nat) (a b : V) (Q : B → V → V �
   | .ok r, h => by xgo
   | .err e, h => absurd h
 
+/-- A two-borrow call whose result is known: both cells hold their final values. -/
 def Prog.handBack2_ok {V B : Type} (p q : Nat) (a b : V) (c : B) (v w : V) :
     Triple ((p ↦ a) ⋆ (q ↦ b)) (Prog.handBack2 p q (Result.ok (c, (v, w))))
       (fun r => hpure (r = c) ⋆ ((p ↦ v) ⋆ (q ↦ w))) := by
   xgo
 
+/-- The functional specification of `f` gives the triple of `f (&mut *p) (&mut *q)`. -/
 def Prog.borrowMut2_spec {V B : Type} (p q : Nat) (a b : V) (f : V → V → Result (B × (V × V)))
     (Q : B → V → V → Prop) (h : Result.Holds (fun (x : B × (V × V)) => Q x.1 x.2.1 x.2.2) (f a b)) :
     Triple ((p ↦ a) ⋆ (q ↦ b)) (Prog.borrowMut2 p q f)
@@ -82,19 +91,24 @@ def Prog.borrowMut2_spec {V B : Type} (p q : Nat) (a b : V) (f : V → V → Res
 
 -- ## A shared `&` borrow: the cell is read, and keeps its value
 
+/-- After a shared-borrow function ran: return its result (the cell is unchanged), or
+fault. -/
 def Prog.handBackShr {V B : Type} : Result B → Prog V B
   | .ok r => .ret r
   | .err e => .fail
 
--- `f (&*l)`
+/-- `f (&*l)` -/
 def Prog.borrowShr {V B : Type} (l : Nat) (f : V → Result B) : Prog V B :=
   .get l (fun a => Prog.handBackShr (f a))
 
+/-- The hypothesis `H` is untouched by `Prog.handBackShr`. -/
 def Prog.handBackShr_spec {V B : Type} (H : HProp V) (Q : B → Prop) :
     (r : Result B) → Result.Holds Q r → Triple H (Prog.handBackShr r) (fun b => hpure (Q b) ⋆ H)
   | .ok r, h => by xgo
   | .err e, h => absurd h
 
+/-- The functional specification of `f` gives the triple of `f (&*l)`: the cell keeps its
+value. -/
 def Prog.borrowShr_spec {V B : Type} (l : Nat) (a : V) (f : V → Result B) (Q : B → Prop)
     (h : Result.Holds Q (f a)) :
     Triple (l ↦ a) (Prog.borrowShr l f) (fun b => hpure (Q b) ⋆ (l ↦ a)) := by

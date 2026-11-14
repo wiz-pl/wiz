@@ -1,6 +1,6 @@
 # Stage 6: macros
 
-## 6a: macros by example ✅
+## 6a: macros by example
 
 ```
 infixl:65 " + " => add
@@ -23,7 +23,7 @@ macro_rules
 |-----|--------------------|-------------------------------------------|
 | 6.1 | `Elab/Macro.lean`  | `matchPattern`, `instantiate` (hygiene)   |
 
-## 6b: the prelude, literals and procedural macros ✅
+## 6b: the prelude, literals and procedural macros
 
 ```
 import Prelude
@@ -68,7 +68,7 @@ attribute [macro term.twice] twiceMacro
 | 6.2 | `Elab/Term.lean`       | `elabQuote`: a quotation as a term building `Syntax` |
 | 6.3 | `Elab/ProcMacro.lean`  | `decodeSyntax`: a runtime value back to `Syntax`  |
 
-## 6c: tactics in Wiz ✅
+## 6c: tactics in Wiz
 
 **Infinitary inductives.** Descriptions gain `Desc.hrec q H j D`, a field
 `(h : H) → μ D (j h)`: one subtree per `h`, as in W-types. `Desc.elim` takes a fifth
@@ -122,7 +122,7 @@ without quoting.
 
 Next: typeclasses with tabled resolution (stage 7), which also make `do` generic.
 
-## 6d: `trace` and `trace_state` ✅
+## 6d: `trace` and `trace_state`
 
 ```
 def k : Nat → Bool → Nat := by
@@ -159,7 +159,7 @@ def k : Nat → Bool → Nat := by
   traces (`withTraces`). A macro's traces come back with its result (`runMacroTac`
   returns them also when the macro fails).
 
-## 6e: names for introduced variables ✅
+## 6e: names for introduced variables
 
 A tactic that introduces variables must call them something. Coq's answer (generated
 `H0`, `x1` that proofs then mention) makes proofs break under unrelated edits; Lean's is
@@ -193,7 +193,7 @@ def k : (n : Nat) → (b : Bool) → Nat → Nat := by
   `ap0 (fun k => List Nat) g0`, not `ap0 (fun x0 => List Nat) g0`. Names are not part of
   conversion, so nothing else changes.
 
-## 6f: `unfold`, `whnf`, `change`, `rw` ✅
+## 6f: `unfold`, `whnf`, `change`, `rw`
 
 ```
 def MList : List Nat → Nat → Pred
@@ -243,7 +243,7 @@ None of this is trusted: the unfolded or rewritten type is a candidate that `cha
 checks by conversion, and the kernel checks the finished term (it does not evaluate the
 `transp` proof: nothing here depends on proofs computing).
 
-## 6g: reflection of constructors, and reading terms ✅
+## 6g: reflection of constructors, and reading terms
 
 ```
 -- the goal  P (x :: Nat.succ x :: L)  as a tactic reads it (TacticM.goalType):

@@ -1,0 +1,82 @@
+import Hdl.Xdc
+/-!
+# Hdl.Arty
+
+The Digilent Arty A7 (Artix-7 in a CSG324 package): its resources as an XDC pin table
+(`Hdl.Xdc`), and the two devices it comes with.
+
+Pins from Digilent's master XDC files (github.com/Digilent/digilent-xdc,
+Arty-A7-35-Master.xdc and Arty-A7-100-Master.xdc: the same pins on both boards), all
+LVCMOS33. Port names as there, with the RGB LEDs as one bus and the UART by direction
+as the FPGA sees it.
+
+| port      | width | pins                                      | what                        |
+|-----------|-------|-------------------------------------------|-----------------------------|
+| `clk`     | 1     | E3                                        | 100 MHz oscillator          |
+| `led`     | 4     | H5 J5 T9 T10                              | LD4 … LD7 (green), high: on |
+| `rgb`     | 12    | G6 F6 E1, G3 J4 G4, J3 J2 H4, K1 H6 K2    | LD0 … LD3: r g b each       |
+| `btn`     | 4     | D9 C9 B9 B8                               | BTN0 … BTN3, high: pressed  |
+| `sw`      | 4     | A8 C11 C10 A10                            | SW0 … SW3                   |
+| `uart_rx` | 1     | A9                                        | FT2232 channel B → FPGA     |
+| `uart_tx` | 1     | D10                                       | FPGA → FT2232 channel B     |
+| `ck_rst`  | 1     | C2                                        | RESET button, low: pressed  |
+| `ja`…`jd` | 8     | see below                                 | Pmod headers, pins 1-4, 7-10 |
+
+(Digilent's names for the UART are from the host's side: `uart_txd_in` is A9,
+`uart_rxd_out` D10.) The RGB LEDs are bright: drive them at a low duty cycle.
+-/
+
+def Arty.pins : List XPin :=
+  .cons (XPin.bus "led" (.cons "H5" (.cons "J5" (.cons "T9" (.cons "T10" .nil)))))
+  (.cons (XPin.bus "rgb" (.cons "G6" (.cons "F6" (.cons "E1" (.cons "G3" (.cons "J4" (.cons "G4"
+    (.cons "J3" (.cons "J2" (.cons "H4" (.cons "K1" (.cons "H6" (.cons "K2" .nil)))))))))))))
+  (.cons (XPin.bus "btn" (.cons "D9" (.cons "C9" (.cons "B9" (.cons "B8" .nil)))))
+  (.cons (XPin.bus "sw" (.cons "A8" (.cons "C11" (.cons "C10" (.cons "A10" .nil)))))
+  (.cons (XPin.one "uart_rx" "A9")
+  (.cons (XPin.one "uart_tx" "D10")
+  (.cons (XPin.one "ck_rst" "C2")
+  (.cons (XPin.bus "ja" (.cons "G13" (.cons "B11" (.cons "A11" (.cons "D12" (.cons "D13" (.cons "B18" (.cons "A18" (.cons "K16" .nil)))))))))
+  (.cons (XPin.bus "jb" (.cons "E15" (.cons "E16" (.cons "D15" (.cons "C15" (.cons "J17" (.cons "J18" (.cons "K15" (.cons "J15" .nil)))))))))
+  (.cons (XPin.bus "jc" (.cons "U12" (.cons "V12" (.cons "V10" (.cons "V11" (.cons "U14" (.cons "V14" (.cons "T13" (.cons "U13" .nil)))))))))
+  (.cons (XPin.bus "jd" (.cons "D4" (.cons "D3" (.cons "F4" (.cons "F3" (.cons "E2" (.cons "D2" (.cons "H2" (.cons "G2" .nil)))))))))
+  .nil))))))))))
+
+-- the board with its 100 MHz clock (10 ns)
+def Arty.board : XBoard := XBoard.mk "E3" 10000 "LVCMOS33" Arty.pins
+-- the clock in Hz (for baud dividers and the like)
+def Arty.clockHz : Nat := 100000000
+
+------------------------------------------------------------------------------------
+-- The devices: an Arty A7-35 carries an XC7A35T (speed grade -1L), an Arty A7-100 an
+-- XC7A100T (-1). Both in CSG324, both pinned as above.
+--
+-- `part` is Vivado's name. For the open flow (yosys, nextpnr-xilinx, Project X-Ray) the
+-- XC7A35TI…-1L is an XC7A35T…-1: the same die and bitstream (prjxray-db has
+-- xc7a35tcsg324-1), and nextpnr uses its xc7a50t database for the xc7a35t (the same
+-- silicon, with part of it fenced off).
+
+inductive Arty.Device where
+  | a35t
+  | a100t
+
+def Arty.Device.name : Arty.Device → String
+  | .a35t => "a35t"
+  | .a100t => "a100t"
+def Arty.Device.part : Arty.Device → String
+  | .a35t => "xc7a35ticsg324-1L"
+  | .a100t => "xc7a100tcsg324-1"
+-- Project X-Ray's part (fasm2frames, xc7frames2bit)
+def Arty.Device.xrayPart : Arty.Device → String
+  | .a35t => "xc7a35tcsg324-1"
+  | .a100t => "xc7a100tcsg324-1"
+-- the name of nextpnr's chip database (openXC7: one per part, speed grade dropped)
+def Arty.Device.chipdb : Arty.Device → String
+  | .a35t => "xc7a35tcsg324"
+  | .a100t => "xc7a100tcsg324"
+def Arty.Device.ofName (s : String) : Option Arty.Device := match Hdl.strEq s "a35t", Hdl.strEq s "a100t" with
+  | .true, _ => .some .a35t
+  | _, .true => .some .a100t
+  | _, _ => .none
+-- the board the user has: an Arty A7-35T
+def Arty.Device.default : Arty.Device := .a35t
+def Arty.devices : List Arty.Device := .cons .a35t (.cons .a100t .nil)

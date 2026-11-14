@@ -5,16 +5,17 @@ import FeralCore
 -- fn bad (v : &mut Vec U64) : Unit := { let m := get_mut v 0; v.push 5; *m += 1 }
 -- `get_mut` returns a borrow of `*v`, so the call is in a reborrow scope where `v` is a
 -- `Lent` token until `m`'s last use: `v.push` gets a `Lent ρ' (Vec U64)`.
-def get_mut {ρ : Region} (v : Uniq ρ (Vec U64)) (i : U64) : Result (Mut ρ U64 (Vec U64)) :=
+def get_mut {ρ : Region} (1 v : Uniq ρ (Vec U64)) (i : U64) : Borrowed (Mut ρ U64 (Vec U64)) (Uniq ρ (Vec U64)) :=
   Mut.ofPLens v (Vec.indexMut i)
-def bad {ρ : Region} (v : Uniq ρ (Vec U64)) : Result (Unit × Uniq ρ (Vec U64)) :=
+def bad {ρ : Region} (1 v : Uniq ρ (Vec U64)) : Result1 Unit (Uniq ρ (Vec U64)) :=
   Uniq.reborrow v (fun ρ' h v r =>
     match get_mut r (U64.lit 0) with                        -- let m := get_mut v 0
     | .ok m =>
       (match Vec.push v (U64.lit 5) with                    -- v.push 5
-      | .ok q =>
-        (match U64.add (Mut.get m) (U64.lit 1) with         -- *m += 1
-        | .ok x => .ok ((), Mut.close m x)
-        | .err e => .err e)
-      | .err e => .err e)
-    | .err e => .err e)
+      | .ok u v =>
+        let 1 (a, m) := Mut.peek m;
+        (match U64.add a (U64.lit 1) with                   -- *m += 1
+        | .ok x => .ok () (Mut.close m x)
+        | .err e => .err e (Mut.release m))
+      | .err e v => .err e (Mut.release m))
+    | .err e r => .err e r)

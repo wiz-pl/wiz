@@ -1,84 +1,125 @@
 import Sys
--- Serial ports and pseudo-terminals (sys-bytes): termios through `serial.c`.
---
--- A port is an `Fd` (lib/Sys): `Serial.open` opens and configures one, and every `Fd`
--- operation works on it (`Fd.write`, `Fd.readWithin`, `Fd.readExactlyWithin`, …).
--- Configuration is always raw: bytes go through untouched (no echo, no line editing,
--- no CR/LF translation, no signals), and a read waits for at least one byte; time
--- limits are the `…Within` reads'.
+/-!
+# Serial
+
+Serial ports and pseudo-terminals (sys-bytes): termios through `serial.c`.
+
+A port is an `Fd` (lib/Sys): `Serial.open` opens and configures one, and every `Fd`
+operation works on it (`Fd.write`, `Fd.readWithin`, `Fd.readExactlyWithin`, …).
+Configuration is always raw: bytes go through untouched (no echo, no line editing,
+no CR/LF translation, no signals), and a read waits for at least one byte; time
+limits are the `…Within` reads'.
+
+Main definitions: `Serial.open`/`Serial.withPort` (open and configure a port),
+`SerialConfig` (rate, data bits, parity, stop bits, flow control; `SerialConfig.raw8N1`
+for the usual 8N1), `Serial.settings` (read back what a terminal is set to), and `Pty`
+(a pseudo-terminal, to play a device in tests). This is host code: it runs on the
+machine the device is plugged into.
+
+```
+import Serial
+
+def main : IO Unit := EIO.toIO (Serial.withPort "/dev/ttyUSB1" (SerialConfig.raw8N1 .b115200)
+  (fun f => Fd.writeUtf8 f "hello"))
+```
+-/
 
 link_c "serial.c"
+/-- The native `cfmakeraw` + settings call on a raw descriptor (see `Serial.configure`). -/
 extern "wizser_configure" Serial.configureRaw : Nat → Nat → Nat → Nat → Nat → Nat → IO Nat
+/-- The native read-back of a terminal's settings, packed into a number (see `SerialSettings.ofNat`). -/
 extern "wizser_get" Serial.getRaw : Nat → IO Nat
+/-- The native `tcflush` (see `Serial.discard`). -/
 extern "wizser_flush" Serial.flushRaw : Nat → Nat → IO Nat
+/-- The native `tcdrain` (see `Serial.drain`). -/
 extern "wizser_drain" Serial.drainRaw : Nat → IO Nat
+/-- The native `isatty` (see `Serial.isTty`). -/
 extern "wizser_isatty" Serial.isTtyRaw : Nat → IO Nat
+/-- The native `posix_openpt` + `grantpt` + `unlockpt` (see `Pty.open`). -/
 extern "wizser_pty_open" Pty.openRaw : IO Nat
+/-- The native `ptsname`: the terminal side's path (see `Pty.open`). -/
 extern "wizser_pty_name" Pty.nameRaw : Nat → IO String
 
--- The standard rates (termios has no others portably).
+/-- The standard rates (termios has no others portably): `.b9600`, `.b115200`, … -/
 inductive Baud where
   | b1200 | b2400 | b4800 | b9600 | b19200 | b38400 | b57600 | b115200 | b230400
   | b460800 | b921600 | b1000000 | b2000000 | b3000000
+/-- A rate's position in `Baud.all` (how `serial.c` names it). -/
 def Baud.toIndex : Baud → Nat
   | .b1200 => 0 | .b2400 => 1 | .b4800 => 2 | .b9600 => 3 | .b19200 => 4 | .b38400 => 5
   | .b57600 => 6 | .b115200 => 7 | .b230400 => 8 | .b460800 => 9 | .b921600 => 10
   | .b1000000 => 11 | .b2000000 => 12 | .b3000000 => 13
+/-- Every rate, slowest first. -/
 def Baud.all : List Baud := .cons .b1200 (.cons .b2400 (.cons .b4800 (.cons .b9600 (.cons .b19200
   (.cons .b38400 (.cons .b57600 (.cons .b115200 (.cons .b230400 (.cons .b460800 (.cons .b921600
   (.cons .b1000000 (.cons .b2000000 (.cons .b3000000 .nil)))))))))))))
+/-- The rate at position `i` of a list of rates, if there is one. -/
 def Baud.ofIndexIn : List Baud → Nat → Option Baud
   | .nil, _ => .none
   | .cons b _, .zero => .some b
   | .cons _ bs, .succ k => Baud.ofIndexIn bs k
+/-- The inverse of `Baud.toIndex`: `Baud.ofIndex 7 = .some .b115200`. -/
 def Baud.ofIndex (i : Nat) : Option Baud := Baud.ofIndexIn Baud.all i
--- bits per second
+/-- A rate in bits per second: `Baud.bitsPerSecond .b9600 = 9600`. -/
 def Baud.bitsPerSecond : Baud → Nat
   | .b1200 => 1200 | .b2400 => 2400 | .b4800 => 4800 | .b9600 => 9600 | .b19200 => 19200
   | .b38400 => 38400 | .b57600 => 57600 | .b115200 => 115200 | .b230400 => 230400
   | .b460800 => 460800 | .b921600 => 921600 | .b1000000 => 1000000 | .b2000000 => 2000000
   | .b3000000 => 3000000
--- the rate with this number of bits per second, if it is a standard one
+/-- The rate of a list with this number of bits per second, if there is one. -/
 def Baud.ofBitsPerSecondIn (n : Nat) : List Baud → Option Baud
   | .nil => .none
   | .cons b bs => match Nat.beq (Baud.bitsPerSecond b) n with
     | .true => .some b
     | .false => Baud.ofBitsPerSecondIn n bs
+/-- The standard rate with this number of bits per second, if it is one:
+`Baud.ofBitsPerSecond 115200 = .some .b115200`, `Baud.ofBitsPerSecond 1000 = .none`. -/
 def Baud.ofBitsPerSecond (n : Nat) : Option Baud := Baud.ofBitsPerSecondIn n Baud.all
 
+/-- Bits per character: five to eight (almost always eight). -/
 inductive DataBits where
   | five | six | seven | eight
+/-- The parity bit: none, even or odd. -/
 inductive Parity where
   | none | even | odd
+/-- One or two stop bits. -/
 inductive StopBits where
   | one | two
+/-- How the two ends pause each other: not at all, by the RTS/CTS lines, or by XON/XOFF bytes. -/
 inductive FlowControl where
   | none
-  -- hardware: RTS/CTS lines
+  /-- hardware: RTS/CTS lines -/
   | rtsCts
-  -- software: XON/XOFF bytes (17, 19) in the data
+  /-- software: XON/XOFF bytes (17, 19) in the data -/
   | xonXoff
+/-- The number of data bits. -/
 def DataBits.toNat : DataBits → Nat
   | .five => 5 | .six => 6 | .seven => 7 | .eight => 8
+/-- A parity as `serial.c` codes it: 0 none, 1 even, 2 odd. -/
 def Parity.toNat : Parity → Nat
   | .none => 0 | .even => 1 | .odd => 2
+/-- The number of stop bits. -/
 def StopBits.toNat : StopBits → Nat
   | .one => 1 | .two => 2
+/-- A flow control as `serial.c` codes it: 0 none, 1 RTS/CTS, 2 XON/XOFF. -/
 def FlowControl.toNat : FlowControl → Nat
   | .none => 0 | .rtsCts => 1 | .xonXoff => 2
 
+/-- How to configure a port (`Serial.configure`, `Serial.open`): rate, data bits,
+parity, stop bits and flow control. The mode is always raw. -/
 structure SerialConfig where
   baud : Baud
   dataBits : DataBits
   parity : Parity
   stopBits : StopBits
   flow : FlowControl
--- 8N1, no flow control: what almost every device speaks
+/-- 8N1, no flow control: what almost every device speaks.
+`SerialConfig.raw8N1 .b115200`. -/
 def SerialConfig.raw8N1 (b : Baud) : SerialConfig := SerialConfig.mk b .eight .none .one .none
 
--- What a terminal is set to, as read back (`Serial.settings`). `baud` is `none` for a
--- rate outside `Baud`; `raw` says nothing is translated or edited; `minBytes` and
--- `timeTenths` are VMIN and VTIME.
+/-- What a terminal is set to, as read back (`Serial.settings`). `baud` is `none` for a
+rate outside `Baud`; `raw` says nothing is translated or edited; `minBytes` and
+`timeTenths` are VMIN and VTIME. -/
 structure SerialSettings where
   baud : Option Baud
   dataBits : Nat
@@ -89,25 +130,31 @@ structure SerialSettings where
   raw : Bool
   minBytes : Nat
   timeTenths : Nat
+/-- Bits `k` to `k + w - 1` of `n` (to unpack `Serial.getRaw`'s answer). -/
 def Serial.bitsAt (n k w : Nat) : Nat := Nat.mod (Nat.div n (Nat.pow 2 k)) (Nat.pow 2 w)
+/-- The inverse of `Parity.toNat` (anything above 1 is odd). -/
 def Parity.ofNat (n : Nat) : Parity := match Nat.beq n 0, Nat.beq n 1 with
   | .true, _ => .none
   | _, .true => .even
   | _, _ => .odd
+/-- Whether the settings have this flow control. -/
 def SerialSettings.flowIs (s : SerialSettings) : FlowControl → Bool
   | .none => Bool.and (Bool.not s.rtsCts) (Bool.not s.xonXoff)
   | .rtsCts => Bool.and s.rtsCts (Bool.not s.xonXoff)
   | .xonXoff => Bool.and (Bool.not s.rtsCts) s.xonXoff
+/-- Whether the settings have this rate. -/
 def SerialSettings.baudIs (s : SerialSettings) (b : Baud) : Bool := match s.baud with
   | .some x => Nat.beq (Baud.toIndex x) (Baud.toIndex b)
   | .none => .false
+/-- Unpack `Serial.getRaw`'s answer: rate index in bits 0–7, data bits 8–11, parity
+12–15, stop bits 16–19, flow control 20–23, raw 24, VMIN 32–39, VTIME 40–47. -/
 def SerialSettings.ofNat (n : Nat) : SerialSettings :=
   let f := Serial.bitsAt n 20 4;
   SerialSettings.mk (Baud.ofIndex (Serial.bitsAt n 0 8)) (Serial.bitsAt n 8 4)
     (Parity.ofNat (Serial.bitsAt n 12 4))
     (Serial.bitsAt n 16 4) (Nat.isOdd f) (Nat.isOdd (Nat.div f 2)) (Nat.beq (Serial.bitsAt n 24 1) 1)
     (Serial.bitsAt n 32 8) (Serial.bitsAt n 40 8)
--- does it match the configuration?
+/-- Do the settings match the configuration (and is the terminal raw)? -/
 def SerialSettings.matches (s : SerialSettings) (c : SerialConfig) : Bool :=
   Bool.and (SerialSettings.baudIs s c.baud)
   (Bool.and (SerialSettings.flowIs s c.flow)
@@ -115,62 +162,72 @@ def SerialSettings.matches (s : SerialSettings) (c : SerialConfig) : Bool :=
   (Bool.and (Nat.beq (Parity.toNat s.parity) (Parity.toNat c.parity))
   (Bool.and (Nat.beq s.stopBits (StopBits.toNat c.stopBits)) s.raw))))
 
--- a result with bit 63 for an error
+/-- A native result with bit 63 for an error: the value, or the error's message
+(`Sys.message`) for the operation `what`. -/
 def Serial.checkHigh (what : String) (x : IO Nat) : EIO Nat :=
   IO.bind x (fun n => IO.pure (match Nat.lt n 0x8000000000000000 with
     | .true => .ok n
     | .false => .error (Sys.message what (Nat.sub n 0x8000000000000000))))
 
--- set a terminal to raw mode with this configuration (read back: an error if the device
--- did not keep it)
+/-- Set a terminal to raw mode with this configuration. The settings are read back: an
+error if the device did not keep them (a pseudo-terminal is always 8 data bits without
+parity). -/
 def Serial.configure (f : Fd) (c : SerialConfig) : EIO Unit := do
   e ← EIO.lift (Fd.withRaw f (fun n => Serial.configureRaw n (Baud.toIndex c.baud) (DataBits.toNat c.dataBits)
     (Parity.toNat c.parity) (StopBits.toNat c.stopBits) (FlowControl.toNat c.flow)));
   match Nat.beq e 100002 with
   | .true => EIO.fail "configure terminal: the device did not keep these settings (a pseudo-terminal is always 8 data bits without parity)"
   | .false => IO.pure (Sys.status "configure terminal" e)
+/-- What a terminal is set to now. -/
 def Serial.settings (f : Fd) : EIO SerialSettings := do
   s ← Serial.checkHigh "terminal settings" (Fd.withRaw f Serial.getRaw);
   EIO.pure (SerialSettings.ofNat s)
+/-- Is the descriptor a terminal? -/
 def Serial.isTty (f : Fd) : IO Bool :=
   IO.bind (Fd.withRaw f Serial.isTtyRaw) (fun r => IO.pure (Nat.beq r 1))
 
+/-- A terminal's queues, for `Serial.discard`. -/
 inductive Queue where
-  -- received, not read yet
+  /-- received, not read yet -/
   | input
-  -- written, not sent yet
+  /-- written, not sent yet -/
   | output
   | both
--- throw away what is waiting
+/-- Throw away what is waiting in a queue (`tcflush`). -/
 def Serial.discard (f : Fd) (q : Queue) : EIO Unit := do
   Sys.lift "flush terminal" (Fd.withRaw f (fun n => Serial.flushRaw n (match q with | .input => 0 | .output => 1 | .both => 2)))
--- wait until everything written has gone out on the line
+/-- Wait until everything written has gone out on the line (`tcdrain`). -/
 def Serial.drain (f : Fd) : EIO Unit := do
   Sys.lift "drain terminal" (Fd.withRaw f Serial.drainRaw)
 
--- Open a serial port (or any terminal) for reading and writing, configure it, and throw
--- away whatever was waiting in its queues. It does not become the controlling
--- terminal, and opening does not wait for a carrier.
+/-- Open a serial port (or any terminal) for reading and writing, configure it, and throw
+away whatever was waiting in its queues. It does not become the controlling
+terminal, and opening does not wait for a carrier.
+
+```
+f ← Serial.open "/dev/ttyUSB1" (SerialConfig.raw8N1 .b115200);
+``` -/
 def Serial.open (path : String) (c : SerialConfig) : EIO Fd := do
   f ← Fd.open path .readWrite OpenFlags.device;
   Serial.configure f c;
   Serial.discard f .both;
   EIO.pure f
--- open, run, close (also when `body` fails)
+/-- Open a port, run `body` on it, close it (also when `body` fails). -/
 def Serial.withPort {A : Type} (path : String) (c : SerialConfig) (body : Fd → EIO A) : EIO A := do
   f ← Serial.open path c;
   r ← EIO.lift (body f);
   Fd.close f;
   IO.pure r
 
--- A pseudo-terminal: `controller` is the side a program plays the device on, `path`
--- names the terminal side (`/dev/pts/N`), which another program opens like a serial
--- port. The terminal side starts in the usual cooked mode: configure it (or the
--- controller) with `Serial.configure` before sending binary data. When nothing has the
--- terminal side open any more, reading the controller gives the end of the file.
+/-- A pseudo-terminal: `controller` is the side a program plays the device on, `path`
+names the terminal side (`/dev/pts/N`), which another program opens like a serial
+port. The terminal side starts in the usual cooked mode: configure it (or the
+controller) with `Serial.configure` before sending binary data. When nothing has the
+terminal side open any more, reading the controller gives the end of the file. -/
 structure Pty where
   controller : Fd
   path : String
+/-- Make a new pseudo-terminal (`posix_openpt`). -/
 def Pty.open : EIO Pty := do
   m ← Serial.checkHigh "posix_openpt" Pty.openRaw;
   f ← EIO.lift (Fd.adopt m);

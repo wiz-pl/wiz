@@ -1,0 +1,90 @@
+import Word
+import Text
+import Logic
+/-!
+# Intern
+
+Interned strings (`import Intern`): an `InternTable` gives each distinct string a
+small id, a `U32`, so that strings compare and hash as words (equal ids, equal
+strings, within one table). Ids are stable: a string keeps its id as more are
+interned, and ids are handed out in order, 0, 1, 2, … A table is a functional value,
+updated in place when it is unique (as `StrMap`); keep one per program or per
+analysis, and key `U64Map`s (lib/WordMap.wiz) or index `U32Array`s by the ids.
+
+The model. A table is the list of its strings, by id, all distinct
+(`mk (strs : List String)`): `intern` gives a string's index, appending it if it is
+new. The module keeps the strings distinct (the constructor is private). The kernel
+computes with the definitions, and `#eval`/`#run` run them.
+
+Compiled code runs natives instead (`runtime/`, `wiz_itab_*`): the strings by
+id (each `String` value kept as it is, so `lookup` copies nothing) and a hash index
+from a string to its id, so `intern` and `find` take time proportional to the
+string's length, and `lookup` constant time.
+
+Trust. The natives are trusted to agree with the definitions (`#print axioms` lists
+them, marked `native`, 22f). They abort when memory runs out or a table would hold
+2^32 - 1 strings (the model's ids wrap around there). The tests (group `natives`)
+run the same programs under the interpreter and compiled, C and LLVM.
+
+the index of the first string equal to `s`
+-/
+
+def InternTable.indexL (s : String) : List String → Nat → Option Nat
+  | .nil, _ => .none
+  | .cons t rest, i => match String.eq s t with
+    | .true => .some i
+    | .false => InternTable.indexL s rest (Nat.succ i)
+
+sealed inductive InternTable where
+  | private mk (strs : List String)
+
+-- the strings, by id
+def InternTable.toList : InternTable → List String
+  | .mk l => l
+def InternTable.empty : InternTable := .mk .nil
+def InternTable.size (t : InternTable) : Nat := List.length t.toList
+-- `s`'s id, if it has one
+def InternTable.find (t : InternTable) (s : String) : Option U32 := match InternTable.indexL s t.toList 0 with
+  | .none => .none
+  | .some i => .some (U32.ofNat i)
+-- the table with `s`, and `s`'s id (a new one, `size t`, if `s` is new)
+def InternTable.intern (t : InternTable) (s : String) : InternTable × U32 := match InternTable.indexL s t.toList 0 with
+  | .none => (.mk (List.append t.toList (.cons s .nil)), U32.ofNat (List.length t.toList))
+  | .some i => (t, U32.ofNat i)
+-- the string with id `i`, or ""
+def InternTable.lookupL : List String → Nat → String
+  | .nil, _ => ""
+  | .cons s _, .zero => s
+  | .cons _ rest, .succ i => InternTable.lookupL rest i
+def InternTable.lookup (t : InternTable) (i : U32) : String := InternTable.lookupL t.toList i.toNat
+-- (Wiz functions over the operations above)
+-- the ids of a list of strings, interning each
+def InternTable.internAll : InternTable → List String → InternTable × List U32
+  | t, .nil => (t, .nil)
+  | t, .cons s rest =>
+    let p := InternTable.intern t s;
+    let q := InternTable.internAll p.1 rest;
+    (q.1, .cons p.2 q.2)
+
+-- a `String` passed to C as the Wiz value itself (as `NatObj`), not as a C string
+def StringObj : Type := String
+extern "wiz_itab_of_list" InternTable.ofListNative : List String → InternTable
+extern "wiz_itab_to_list" InternTable.toListNative : InternTable → List String
+attribute [implemented_by InternTable.ofListNative InternTable.toListNative] InternTable.mk
+attribute [implemented_by InternTable.toListNative] InternTable.toList
+extern "wiz_itab_empty" InternTable.emptyNative : InternTable
+extern "wiz_itab_size" InternTable.sizeNative : InternTable → NatObj
+extern "wiz_itab_find" InternTable.findNative : InternTable → StringObj → Option U32
+extern "wiz_itab_intern" InternTable.internNative : InternTable → StringObj → InternTable × U32
+extern "wiz_itab_lookup" InternTable.lookupNative : InternTable → U32 → StringObj
+attribute [implemented_by InternTable.emptyNative] InternTable.empty
+attribute [implemented_by InternTable.sizeNative] InternTable.size
+attribute [implemented_by InternTable.findNative] InternTable.find
+attribute [implemented_by InternTable.internNative] InternTable.intern
+attribute [implemented_by InternTable.lookupNative] InternTable.lookup
+
+-- ## Laws (on the model). That `lookup` gives back an interned string needs `String.eq`
+-- to be equality (true, not proved in lib/Text.wiz yet) and fewer than 2^32 strings;
+-- it is tested, not proved, here.
+def InternTable.size_empty : InternTable.size InternTable.empty = 0 := rfl
+def InternTable.find_empty (s : String) : InternTable.find InternTable.empty s = .none := rfl

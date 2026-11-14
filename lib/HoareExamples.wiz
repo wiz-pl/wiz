@@ -1,14 +1,28 @@
 import HoareTactics
--- Verified programs over the model heap (stages 24c–24d), proved with the `x`-tactics of
--- lib/HoareTactics.wiz. Every specification is a `Triple`, so `adequacy` (lib/Hoare.wiz)
--- applies to it: the program runs without a fault on any heap satisfying the
--- precondition.
+/-! # HoareExamples: verified programs over the model heap
+
+Stages 24c–24d. Small heap programs (`Prog`, lib/Hoare.wiz) with their specifications,
+proved with the `x`-tactics of `HoareTactics`: swapping two cells, a counter, and loops
+over mutable lists (`MList`): in-place reversal, length, incrementing every element,
+freeing. Every specification is a `Triple`, so `adequacy` applies to it: the program
+runs without a fault on any heap satisfying the precondition. `Prog.show` runs a program
+on a concrete heap.
+
+```
+def Prog.swap_spec (p q a b : Nat) :
+    Triple ((p ↦ a) ⋆ (q ↦ b)) (Prog.swap p q) (fun _ => (p ↦ b) ⋆ (q ↦ a)) := by
+  xgo
+-- [1, 2] at 0 and 1, swapped: some ((), [some 2, some 1])
+#eval Prog.show (Prog.swap 0 1) (Heap.ofList [1, 2] 0) 2 2
+``` -/
 
 -- ## Swapping two cells
 
+/-- Swap the contents of the cells `p` and `q`. -/
 def Prog.swap (p q : Nat) : Prog Nat Unit :=
   .get p (fun a => .get q (fun b => .set p b (.set q a (.ret ()))))
 
+/-- `Prog.swap` swaps: `{p ↦ a ⋆ q ↦ b} swap p q {p ↦ b ⋆ q ↦ a}`, by `xgo`. -/
 def Prog.swap_spec (p q a b : Nat) : Triple ((p ↦ a) ⋆ (q ↦ b)) (Prog.swap p q) (fun _ => (p ↦ b) ⋆ (q ↦ a)) := by
   xgo
 
@@ -17,6 +31,9 @@ def Prog.swap_spec (p q a b : Nat) : Triple ((p ↦ a) ⋆ (q ↦ b)) (Prog.swap
 -- A list cell at `p` is two cells: the value at `p`, the next pointer at `p + 1`; `0` is
 -- the null pointer. `MList L p`: the cells from `p` hold `L` (SLF, Repr: `MList`).
 
+/-- A mutable list: `MList L p` says the cells from `p` hold the list `L` (SLF, Repr:
+`MList`). A list cell at `p` is two cells, the value at `p` and the next pointer at
+`p + 1`; `0` is the null pointer. -/
 def MList : List Nat → Nat → HProp Nat
   | .nil, p => hpure (p = 0)
   | .cons x L, p => hexists (fun (n : Nat) =>
@@ -30,17 +47,21 @@ def MList : List Nat → Nat → HProp Nat
 -- Programs are total, so the loop takes fuel; the specification asks for more fuel than
 -- cells, and since `wp fail = \[False]`, a proved triple also proves the fuel suffices.
 
+/-- The in-place reversal loop: `q` is the reversed prefix, `p` the rest; each step turns
+one pointer round. The first argument is fuel (programs are total); running out fails. -/
 def Prog.revLoop : Nat → Nat → Nat → Prog Nat Nat
   | .zero, p, q => .fail
   | .succ f, .zero, q => .ret q
   | .succ f, .succ p, q =>
       .get (Nat.succ (Nat.succ p)) (fun n => .set (Nat.succ (Nat.succ p)) q (Prog.revLoop f n (Nat.succ p)))
+/-- Reverse the mutable list at `p` in place, returning its new head (with `fuel` steps). -/
 def Prog.reverse (fuel p : Nat) : Prog Nat Nat := Prog.revLoop fuel p 0
 
--- the invariant: with more fuel than cells, `MList L p ⋆ MList L₂ q` becomes `MList (revApp L L₂)`.
--- Where the precondition is contradictory (`MList [] (p + 1)` is `\[p + 1 = 0]`), `xunfold`
--- pulls the fact and that closes the goal; `xstep` names the next pointer `n` after the
--- binder of `MList`'s `∃`, and the fact it pulls `hp`.
+/-- The loop invariant of `Prog.revLoop`: with more fuel than cells,
+`MList L p ⋆ MList L₂ q` becomes `MList (revApp L L₂)`. Where the precondition is
+contradictory (`MList [] (p + 1)` is `\[p + 1 = 0]`), `xunfold` pulls the fact and that
+closes the goal; `xstep` names the next pointer `n` after the binder of `MList`'s `∃`,
+and the fact it pulls `hp`. -/
 def Prog.revLoop.spec : (L : List Nat) → (f : Nat) → Nat.lt (List.length L) f = .true → (p q : Nat) → (L₂ : List Nat) →
     Triple (MList L p ⋆ MList L₂ q) (Prog.revLoop f p q) (fun r => MList (List.revApp L L₂) r)
   | .nil, .zero, h, p, q, L₂ => absurd h.1
@@ -52,31 +73,38 @@ def Prog.revLoop.spec : (L : List Nat) → (f : Nat) → Nat.lt (List.length L) 
       xstep; xstep
       xapp (Prog.revLoop.spec L f h n (Nat.succ p) (.cons x L₂))
 
+/-- `Prog.reverse` reverses the list, given more fuel than cells. -/
 def Prog.reverse_spec (L : List Nat) (fuel p : Nat) (h : Nat.lt (List.length L) fuel = .true) :
     Triple (MList L p) (Prog.reverse fuel p) (fun r => MList (List.reverse L) r) := by
   xapp (Prog.revLoop.spec L fuel h p 0 .nil)
 
 -- ## A counter: increment, calls with a frame, allocation
 
+/-- Increment the counter at `p`. -/
 def Prog.incr (p : Nat) : Prog Nat Unit := .get p (fun n => .set p (Nat.succ n) (.ret ()))
 
+/-- `{p ↦ n} incr p {p ↦ n + 1}`. -/
 def Prog.incr_spec (p n : Nat) : Triple (p ↦ n) (Prog.incr p) (fun _ => p ↦ Nat.succ n) := by
   xgo
 
--- three calls; each finds its cell in the precondition and frames the other
+/-- Three calls of `Prog.incr`, on two cells; each finds its cell in the precondition and
+frames the other. -/
 def Prog.incr3 (p q : Nat) : Prog Nat Unit :=
   Prog.bind (Prog.incr p) (fun _ => Prog.bind (Prog.incr q) (fun _ => Prog.incr p))
 
+/-- `Prog.incr3` adds two to `p` and one to `q`, proved by applying `Prog.incr_spec` three
+times (`xapp`), each with a frame. -/
 def Prog.incr3_spec (p q m n : Nat) :
     Triple ((p ↦ m) ⋆ (q ↦ n)) (Prog.incr3 p q) (fun _ => (q ↦ Nat.succ n) ⋆ (p ↦ Nat.succ (Nat.succ m))) := by
   xapp (Prog.incr_spec p m)
   xapp (Prog.incr_spec q n)
   xapp (Prog.incr_spec p (Nat.succ m))
 
--- a fresh counter, incremented and read
+/-- A fresh counter, incremented and read. -/
 def Prog.counter : Prog Nat Nat :=
   Prog.bind (Prog.ref 0) (fun c => Prog.bind (Prog.incr c) (fun _ => Prog.read c))
 
+/-- `Prog.counter` returns 1, leaving its cell allocated. -/
 def Prog.counter_spec : Triple emp Prog.counter (fun r => hexists (fun (c : Nat) => hpure (r = 1) ⋆ (c ↦ 1))) := by
   xstep
   xapp (Prog.incr_spec l 0)
@@ -84,27 +112,33 @@ def Prog.counter_spec : Triple emp Prog.counter (fun r => hexists (fun (c : Nat)
 
 -- ## The length of a mutable list (read-only traversal)
 
--- the length, counted onto an accumulator (as the loop counts)
+/-- The length, counted onto an accumulator (as the loop `Prog.lenLoop` counts). -/
 def List.lenAcc {A : Type} : List A → Nat → Nat
   | .nil, acc => acc
   | .cons _ xs, acc => List.lenAcc xs (Nat.succ acc)
+/-- Moving a `succ` out of the accumulator. -/
 def List.lenAcc_succ {A : Type} : (L : List A) → (acc : Nat) → List.lenAcc L (Nat.succ acc) = Nat.succ (List.lenAcc L acc)
   | .nil, acc => rfl
   | .cons _ xs, acc => List.lenAcc_succ xs (Nat.succ acc)
--- (`succ b = succ c` computes to `b = c`)
+/-- Chain `a = succ b` and `b = c` (`succ b = succ c` computes to `b = c`). -/
 def Nat.succ_eq_of {a b c : Nat} (e₁ : a = Nat.succ b) (e₂ : b = c) : a = Nat.succ c :=
   @Eq.trans Nat a (Nat.succ b) (Nat.succ c) e₁ e₂
+/-- Counting from 0 is `List.length`. -/
 def List.lenAcc_zero {A : Type} : (L : List A) → List.lenAcc L 0 = List.length L
   | .nil => rfl
   | .cons _ xs =>
       Nat.succ_eq_of (List.lenAcc_succ xs 0) (List.lenAcc_zero xs)
 
+/-- The read-only traversal behind `Prog.length` (fuel, pointer, accumulator). -/
 def Prog.lenLoop : Nat → Nat → Nat → Prog Nat Nat
   | .zero, p, acc => .fail
   | .succ f, .zero, acc => .ret acc
   | .succ f, .succ p, acc => .get (Nat.succ (Nat.succ p)) (fun n => Prog.lenLoop f n (Nat.succ acc))
+/-- The length of the mutable list at `p` (with `fuel` steps). -/
 def Prog.length (fuel p : Nat) : Prog Nat Nat := Prog.lenLoop fuel p 0
 
+/-- The loop invariant of `Prog.lenLoop`: the list is unchanged and the answer is
+`List.lenAcc L acc`. -/
 def Prog.lenLoop.spec : (L : List Nat) → (f : Nat) → Nat.lt (List.length L) f = .true → (p acc : Nat) →
     Triple (MList L p) (Prog.lenLoop f p acc) (fun r => hpure (r = List.lenAcc L acc) ⋆ MList L p)
   | .nil, .zero, h, p, acc => absurd h.1
@@ -116,6 +150,7 @@ def Prog.lenLoop.spec : (L : List Nat) → (f : Nat) → Nat.lt (List.length L) 
       xstep
       xapp (Prog.lenLoop.spec L f h n (Nat.succ acc))
 
+/-- `Prog.length` returns `List.length L` and leaves the list as it was. -/
 def Prog.length_spec (L : List Nat) (fuel p : Nat) (h : Nat.lt (List.length L) fuel = .true) :
     Triple (MList L p) (Prog.length fuel p) (fun r => hpure (r = List.length L) ⋆ MList L p) := by
   xapp (Prog.lenLoop.spec L fuel h p 0)
@@ -123,10 +158,12 @@ def Prog.length_spec (L : List Nat) (fuel p : Nat) (h : Nat.lt (List.length L) f
 
 -- ## Adding one to every element in place
 
+/-- Add one to every element of a list (the model of `Prog.incrAll`). -/
 def List.incr : List Nat → List Nat
   | .nil => .nil
   | .cons x xs => .cons (Nat.succ x) (List.incr xs)
 
+/-- Add one to every element of the mutable list at `p`, in place. -/
 def Prog.incrAll : Nat → Nat → Prog Nat Unit
   | .zero, p => .fail
   | .succ f, .zero => .ret ()
@@ -134,6 +171,7 @@ def Prog.incrAll : Nat → Nat → Prog Nat Unit
       .get (Nat.succ p) (fun x => .set (Nat.succ p) (Nat.succ x)
         (.get (Nat.succ (Nat.succ p)) (fun n => Prog.incrAll f n)))
 
+/-- `Prog.incrAll` turns `MList L p` into `MList (List.incr L) p`. -/
 def Prog.incrAll.spec : (L : List Nat) → (f : Nat) → Nat.lt (List.length L) f = .true → (p : Nat) →
     Triple (MList L p) (Prog.incrAll f p) (fun _ => MList (List.incr L) p)
   | .nil, .zero, h, p => absurd h.1
@@ -147,12 +185,14 @@ def Prog.incrAll.spec : (L : List Nat) → (f : Nat) → Nat.lt (List.length L) 
 
 -- ## Freeing a mutable list
 
+/-- Free every cell of the mutable list at `p`. -/
 def Prog.freeAll : Nat → Nat → Prog Nat Unit
   | .zero, p => .fail
   | .succ f, .zero => .ret ()
   | .succ f, .succ p =>
       .get (Nat.succ (Nat.succ p)) (fun n => .free (Nat.succ p) (.free (Nat.succ (Nat.succ p)) (Prog.freeAll f n)))
 
+/-- `Prog.freeAll` leaves the empty heap: every cell of the list is freed. -/
 def Prog.freeAll.spec : (L : List Nat) → (f : Nat) → Nat.lt (List.length L) f = .true → (p : Nat) →
     Triple (MList L p) (Prog.freeAll f p) (fun _ => emp)
   | .nil, .zero, h, p => absurd h.1
@@ -166,14 +206,15 @@ def Prog.freeAll.spec : (L : List Nat) → (f : Nat) → Nat.lt (List.length L) 
 
 -- ## Running programs on concrete heaps
 
--- the heap holding `vs` from location `l` on
+/-- The heap holding `vs` from location `l` on. -/
 def Heap.ofList {V : Type} : List V → Nat → Heap V
   | .nil, l => Heap.empty
   | .cons v vs, l => Heap.union (Heap.single l v) (Heap.ofList vs (Nat.succ l))
--- the cells `l … l + k - 1`
+/-- The cells `l … l + k - 1` of a heap. -/
 def Heap.toList {V : Type} (h : Heap V) : Nat → Nat → List (Option V)
   | .zero, l => .nil
   | .succ k, l => .cons (h l) (Heap.toList h k (Nat.succ l))
--- run, and show the result and the first `k` cells
+/-- Run a program on a concrete heap (bound `n`) and show its result and the first `k`
+cells; `none` if it faults. -/
 def Prog.show {V A : Type} (c : Prog V A) (h : Heap V) (n k : Nat) : Option (A × List (Option V)) :=
   Option.caseOf (Prog.run c h n) .none (fun r => .some (r.1, Heap.toList r.2.1 k 0))

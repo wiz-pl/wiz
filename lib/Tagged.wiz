@@ -1,22 +1,44 @@
 import Json
--- Tagged text (stage 11m; a library of its own since 11s): a pretty-printed term whose
--- subterms are tagged, as the language server sends it (`infoview-protocol.md` §2), and
--- what both its browser front ends do with it: flatten it, number and navigate its tags,
--- render it as HTML with hoverable subterms, and describe a subterm (`wiz/subtermInfo`).
--- The infoview (`lib/Infoview.wiz`: the terminal and the web infoview, `web/Web.wiz`)
--- and the documentation's pages (`wiz doc`, `DocPage` below, run by the same Wasm
--- module) share it. Pure functions; the programs do the input and output.
+/-!
+# Tagged
+
+Tagged text (stage 11m; a library of its own since 11s): a pretty-printed term whose
+subterms are tagged, as the language server sends it (`infoview-protocol.md` §2), and
+what both its browser front ends do with it: flatten it, number and navigate its tags,
+render it as HTML with hoverable subterms, and describe a subterm (`wiz/subtermInfo`).
+
+The infoview (lib/Infoview.wiz: the terminal and the web infoview, web/Web.wiz) and
+the documentation's pages (`wiz doc`, `DocPage.step`, run by the same Wasm module)
+share it. Pure functions; the programs do the input and output.
+
+* `TT`: tagged text, read from the protocol's JSON with `TT.ofJson`.
+* `TT.toString`, `TT.toHtml`, `TT.tags`: its plain text, its HTML, its tags.
+* `Tagged.navigate`: moving a selection between tags (`Nav`).
+* `Tagged.infoHtml`: the box describing a subterm.
+* `DocSt`, `DocPage.step`: the model of a documentation page.
+
+```
+-- `Nat → Nat`, with the whole type and the first `Nat` tagged
+def t : TT := .tag 0 "pi" "" (.append (.cons (.tag 1 "const" "Nat" (.text "Nat"))
+  (.cons (.text " → Nat") .nil)))
+#eval TT.toString t   -- "Nat → Nat"
+#eval TT.toHtml 2 t   -- the `Nat` span carries the class `sel`
+```
+-/
 
 -- ## Tagged text
 
--- A pretty-printed term in which subterms are tagged (`infoview-protocol.md` §2) with a
--- reference into the server's per-session table (`wiz/subtermInfo` takes it), a kind
--- (`var`, `const`, `sort`, `app`, …) and, for variables and constants, a name.
 mutual
+/-- Tagged text: a pretty-printed term in which subterms are tagged
+(`infoview-protocol.md` §2) with a reference into the server's per-session table
+(`wiz/subtermInfo` takes it), a kind (`var`, `const`, `sort`, `app`, …) and, for
+variables and constants, a name. `TT` and `TTs` (a list of them) are mutual, as Wiz
+has no nested inductive types. -/
 inductive TT where
   | text (s : String)
   | tag (ref : Nat) (kind : String) (name : String) (body : TT)
   | append (xs : TTs)
+/-- A list of `TT`s, the pieces of an `append`. -/
 inductive TTs where
   | nil
   | cons (head : TT) (tail : TTs)
@@ -24,8 +46,9 @@ end
 
 -- From JSON (the protocol's format)
 
--- `{"text": s}`, `{"append": [tt…]}`, `{"tag": [{"ref": n, "kind": k, "name"?: x}, tt]}`
 mutual
+/-- Tagged text from the protocol's JSON: `{"text": s}`, `{"append": [tt…]}` or
+`{"tag": [{"ref": n, "kind": k, "name"?: x}, tt]}` (a bare string is text too). -/
 def TT.ofJson (j : Json) : TT := match Json.get j "text" with
   | .some (.str s) => .text s
   | _ => match Json.get j "append" with
@@ -36,6 +59,7 @@ def TT.ofJson (j : Json) : TT := match Json.get j "text" with
       | _ => match j with
         | .str s => .text s
         | _ => .text ""
+/-- `TT.ofJson` on each element. -/
 def TT.ofJsons (xs : Jsons) : TTs := match xs with
   | .nil => .nil
   | .cons x rest => .cons (TT.ofJson x) (TT.ofJsons rest)
@@ -43,25 +67,29 @@ end
 
 -- ## Pieces: text with a style, and the tags around it
 
--- `tags`: the indices of the enclosing tags, innermost first. Tags are numbered in
--- the order they open, across the whole view, from 0.
+/-- A run of text with its style: the `kind` of the innermost tag around it, and `tags`,
+the indices of the enclosing tags, innermost first. Tags are numbered in the order
+they open, across the whole view, from 0. -/
 inductive Piece where
   | mk (chars : List Char) (kind : String) (tags : List Nat)
 
--- A tag of the view: its reference, kind, name and parent (`parent + 1`, or 0 at top
--- level).
+/-- A tag of the view: its reference, kind, name and parent (the parent's index + 1, or 0
+at top level). -/
 inductive TagInfo where
   | mk (ref : Nat) (kind : String) (name : String) (parent : Nat)
 
--- Flattening: the pieces, reversed, in front of `acc`; tags are numbered from `next`,
--- and their infos pushed onto `infos` (reversed).
+/-- The state of flattening: the pieces so far (reversed), the number of the next tag, and
+the tags' infos (reversed). -/
 inductive Flat where
   | mk (pieces : List Piece) (next : Nat) (infos : List TagInfo)
 
+/-- The `parent` field for a tag inside `tags`: the innermost one's index + 1, or 0. -/
 def Tagged.parentOf : List Nat → Nat
   | .nil => 0
   | .cons t _ => t + 1
 mutual
+/-- Flattens tagged text into `Piece`s and `TagInfo`s, onto `st`; `kind` and `tags` are
+the style and the tags around `t`. -/
 def TT.flatten (t : TT) (kind : String) (tags : List Nat) (st : Flat) : Flat := match t with
   | .text s => match st with
     | .mk ps n is => .mk (.cons (.mk (String.chars s) kind tags) ps) n is
@@ -69,36 +97,43 @@ def TT.flatten (t : TT) (kind : String) (tags : List Nat) (st : Flat) : Flat := 
     | .mk ps n is => TT.flatten body k (.cons n tags)
         (.mk ps (n + 1) (.cons (.mk ref k x (Tagged.parentOf tags)) is))
   | .append xs => TT.flattenAll xs kind tags st
+/-- `TT.flatten` on each element, left to right. -/
 def TT.flattenAll (xs : TTs) (kind : String) (tags : List Nat) (st : Flat) : Flat := match xs with
   | .nil => st
   | .cons x rest => TT.flattenAll rest kind tags (TT.flatten x kind tags st)
 end
 
--- the plain text of tagged text
+/-- The plain text of (reversed) pieces, in front of `acc`. -/
 def Tagged.piecesText : List Piece → List Char → List Char
   | .nil, acc => acc
   | .cons (.mk cs _ _) ps, acc => Tagged.piecesText ps (List.append cs acc)
+/-- The plain text of tagged text, without its tags. -/
 def TT.toString (t : TT) : String := match TT.flatten t "" .nil (.mk .nil 0 .nil) with
   | .mk ps _ _ => .mk (Tagged.piecesText ps .nil)
 
 -- ## Selection and navigation
 
--- The selection is a tag index plus one (0: nothing selected).
+/-- The tag with index `n`, if there is one. (A selection is a tag index plus one, 0 for
+nothing selected.) -/
 def Tagged.nthTag : List TagInfo → Nat → Option TagInfo
   | .nil, _ => .none
   | .cons t _, .zero => .some t
   | .cons _ ts, .succ n => Tagged.nthTag ts n
+/-- The parent's index + 1, or 0 at top level. -/
 def TagInfo.parent : TagInfo → Nat
   | .mk _ _ _ p => p
+/-- The tag's reference into the server's subterm table. -/
 def TagInfo.ref : TagInfo → Nat
   | .mk r _ _ _ => r
+/-- The tag's kind (`var`, `const`, `app`, …). -/
 def TagInfo.kind : TagInfo → String
   | .mk _ k _ _ => k
+/-- The tag's name, for variables and constants (else empty). -/
 def TagInfo.name : TagInfo → String
   | .mk _ _ x _ => x
 
--- Navigation keys: next/previous tag (in reading order), out to the enclosing tag, in
--- to the first tag inside. All wrap or stay put at the ends.
+/-- Navigation keys: next/previous tag (in reading order), out to the enclosing tag, in to
+the first tag inside, and clearing the selection. All wrap or stay put at the ends. -/
 inductive Nav where
   | next
   | prev
@@ -106,6 +141,12 @@ inductive Nav where
   | into
   | clear
 
+/-- The selection after a `Nav` key: `sel` and the result are a tag's index + 1 (0: none).
+
+```
+Tagged.navigate tags 0 .next   -- 1, the first tag
+Tagged.navigate tags 1 .prev   -- the last tag (it wraps)
+``` -/
 def Tagged.navigate (tags : List TagInfo) (sel : Nat) (nav : Nav) : Nat :=
   let n := List.length tags;
   match Nat.beq n 0 with
@@ -133,7 +174,7 @@ def Tagged.navigate (tags : List TagInfo) (sel : Nat) (nav : Nav) : Nat :=
 
 -- ## HTML
 
--- text with `& < > " '` escaped, in front of `tail`
+/-- The characters with `& < > " '` escaped for HTML, in front of `tail`. -/
 def Tagged.htmlEsc : List Char → List Char → List Char
   | .nil, tail => tail
   | .cons c cs, tail =>
@@ -150,18 +191,22 @@ def Tagged.htmlEsc : List Char → List Char → List Char
           | .false => match Nat.beq n 39 with
             | .true => Json.lit "&#39;" rest
             | .false => .cons c rest
+/-- A string escaped for HTML, in front of `tail`. -/
 def Tagged.htmlText (s : String) (tail : List Char) : List Char := Tagged.htmlEsc (String.chars s) tail
 
--- Tagged text as nested spans: `<span class="tt k-KIND" data-ref="R" data-idx="I"
--- title="NAME">…</span>`; `idx` numbers the tags in order like the terminal view,
--- `sel` (index + 1) marks one with the class `sel`. The output is built reversed, in
--- `acc`, since the numbering goes left to right.
+/-- HTML being built: the output so far, reversed (in `acc`), and the index of the next tag
+(the numbering goes left to right). -/
 inductive Html where
   | mk (acc : List Char) (next : Nat)
+/-- Adds characters to the output. -/
 def Html.add (s : List Char) : Html → Html
   | .mk acc n => .mk (Json.revOnto s acc) n
+/-- Adds a string to the output. -/
 def Html.lit (s : String) (h : Html) : Html := Html.add (String.chars s) h
 mutual
+/-- Tagged text as nested spans, `<span class="tt k-KIND" data-ref="R" data-idx="I"
+title="NAME">…</span>`; `data-idx` numbers the tags in order like the terminal view,
+and the tag whose index + 1 is `sel` also gets the class `sel`. -/
 def TT.html (sel : Nat) (t : TT) (h : Html) : Html := match t with
   | .text s => Html.add (Tagged.htmlText s .nil) h
   | .append xs => TT.htmlAll sel xs h
@@ -178,30 +223,35 @@ def TT.html (sel : Nat) (t : TT) (h : Html) : Html := match t with
           (Json.natChars ref (List.append (String.chars "\" data-idx=\"") (Json.natChars n
             (.cons (Json.chr 34) (List.append title (String.chars ">")))))))));
       Html.lit "</span>" (TT.html sel body (.mk (Json.revOnto opener acc) (n + 1)))
+/-- `TT.html` on each element. -/
 def TT.htmlAll (sel : Nat) (xs : TTs) (h : Html) : Html := match xs with
   | .nil => h
   | .cons x rest => TT.htmlAll sel rest (TT.html sel x h)
 end
 
--- tagged text as HTML (`sel`: the selected tag's index + 1, or 0)
+/-- Tagged text as HTML (`sel`: the selected tag's index + 1, or 0). See `TT.html`. -/
 def TT.toHtml (sel : Nat) (t : TT) : String := match TT.html sel t (.mk .nil 0) with
   | .mk acc _ => .mk (Json.revOnto acc .nil)
 
+/-- The infos reversed onto `acc`. -/
 def Tagged.revInfos : List TagInfo → List TagInfo → List TagInfo
   | .nil, acc => acc
   | .cons t ts, acc => Tagged.revInfos ts (.cons t acc)
--- the tags of tagged text, in the order they open (their `data-idx`)
+/-- The tags of tagged text, in the order they open (their `data-idx`). -/
 def TT.tags (t : TT) : List TagInfo := match TT.flatten t "" .nil (.mk .nil 0 .nil) with
   | .mk _ _ infos => Tagged.revInfos infos .nil
 
+/-- A string escaped for HTML. -/
 def Tagged.esc (s : String) : String := .mk (Tagged.htmlText s .nil)
+/-- Whether a string is empty. -/
 def Tagged.isEmpty (s : String) : Bool := Nat.beq (List.length (String.chars s)) 0
 
 -- ## What a subterm is, as HTML
 
--- `r` is a `wiz/subtermInfo` answer: `kind`, `name` or `text`, `type` (tagged text, or
--- (`wiz doc`) plain text), `definition` (a location `{uri, range}`, or (`wiz doc`) a
--- link `{href, uri}`).
+/-- The box describing a subterm, as HTML: its kind, its name (or text), its type and where
+it is defined. `r` is a `wiz/subtermInfo` answer: `kind`, `name` or `text`, `type`
+(tagged text, or (`wiz doc`) plain text), `definition` (a location `{uri, range}`, or
+(`wiz doc`) a link `{href, uri}`). -/
 def Tagged.infoHtml (r : Json) : String :=
   let name := Json.getStr r "name";
   let what : String := match Tagged.isEmpty name with
@@ -228,67 +278,74 @@ def Tagged.infoHtml (r : Json) : String :=
 
 -- ## A documentation page (`wiz doc`, stage 11s)
 
--- A declaration's signature on the page: the id of its element, the tagged text, its
--- tags, and its subterms (`subs[ref]`, `wiz/subtermInfo` answers that `wiz doc`
--- computed).
+/-- A declaration's signature on a documentation page: the id of its element, the tagged
+text, its tags, and its subterms (`subs[ref]`, the `wiz/subtermInfo` answers that
+`wiz doc` computed, since there is no server). -/
 inductive DocDecl where
   | mk (id : String) (sig : TT) (tags : List TagInfo) (subs : List Json)
 
+/-- The id of the signature's element. -/
 def DocDecl.id : DocDecl → String
   | .mk i _ _ _ => i
 
+/-- A declaration from `wiz doc`'s JSON (`{"id", "sig", "subs"}`). -/
 def DocDecl.ofJson (j : Json) : DocDecl :=
   let sig := TT.ofJson (match Json.get j "sig" with
     | .some s => s
     | .none => Json.mkNull);
   .mk (Json.getStr j "id") sig (TT.tags sig) (Json.getList j "subs")
 
--- The page: the declarations rendered so far, and the selection (a declaration's id and
--- a tag's index + 1; 0: none).
+/-- The state of a documentation page: the declarations rendered so far, and the selection
+(a declaration's id and a tag's index + 1; 0: none). -/
 inductive DocSt where
   | mk (decls : List DocDecl) (cur : String) (sel : Nat)
 
+/-- A page with nothing rendered and nothing selected. -/
 def DocSt.empty : DocSt := .mk .nil "" 0
 
--- What the page does: set an element's HTML, show (or, with "", hide) the subterm box,
--- go to a URL.
+/-- What the page does in answer to an event: set an element's HTML, show (or, with "",
+hide) the subterm box, or go to a URL. -/
 inductive DocAct where
   | html (id : String) (html : String)
   | info (html : String)
   | go (url : String)
 
+/-- The declaration with this id, if it has been rendered. -/
 def Tagged.findDecl : List DocDecl → String → Option DocDecl
   | .nil, _ => .none
   | .cons d ds, id => match String.eq (DocDecl.id d) id with
     | .true => .some d
     | .false => Tagged.findDecl ds id
 
+/-- The `n`th element of a list, if there is one. -/
 def Tagged.nthJson : List Json → Nat → Option Json
   | .nil, _ => .none
   | .cons j _, .zero => .some j
   | .cons _ js, .succ n => Tagged.nthJson js n
 
--- the subterm of tag `idx` of a declaration
+/-- The subterm (a `wiz/subtermInfo` answer) of the tag with index `idx`. -/
 def DocDecl.sub (d : DocDecl) (idx : Nat) : Option Json := match d with
   | .mk _ _ tags subs => match Tagged.nthTag tags idx with
     | .some t => Tagged.nthJson subs (TagInfo.ref t)
     | .none => .none
 
+/-- The declaration's signature as HTML, with tag `sel` (index + 1) selected. -/
 def DocDecl.render (d : DocDecl) (sel : Nat) : DocAct := match d with
   | .mk id sig _ _ => .html id (TT.toHtml sel sig)
 
--- the definition a tag links to, if any
+/-- The definition the tag with index `idx` links to, if any. -/
 def DocDecl.href (d : DocDecl) (idx : Nat) : Option String := match DocDecl.sub d idx with
   | .some r => match Json.getPath r (.cons "definition" (.cons "href" .nil)) with
     | .some (.str h) => .some h
     | _ => .none
   | .none => .none
 
+/-- Shows the box for the tag with index `idx` (or hides it if there is none). -/
 def DocDecl.infoAct (d : DocDecl) (idx : Nat) : DocAct := match DocDecl.sub d idx with
   | .some r => .info (Tagged.infoHtml r)
   | .none => .info ""
 
--- the selection's box, or nothing
+/-- The selection's box, or nothing. -/
 def DocSt.selInfo (s : DocSt) : DocAct := match s with
   | .mk ds cur sel => match Tagged.findDecl ds cur with
     | .some d => match Nat.beq sel 0 with
@@ -296,8 +353,8 @@ def DocSt.selInfo (s : DocSt) : DocAct := match s with
       | .false => DocDecl.infoAct d (sel - 1)
     | .none => .info ""
 
--- select tag `sel` (index + 1) of declaration `id`: render it, and the one that had the
--- selection
+/-- Selects tag `sel` (index + 1) of declaration `id`: renders it, and re-renders the
+declaration that had the selection before. -/
 def DocSt.select (s : DocSt) (id : String) (sel : Nat) : DocSt × List DocAct := match s with
   | .mk ds cur _ =>
     let s1 : DocSt := .mk ds id sel;
@@ -310,20 +367,25 @@ def DocSt.select (s : DocSt) (id : String) (sel : Nat) : DocSt × List DocAct :=
     | .some d => (s1, List.append old (.cons (DocDecl.render d sel) (.cons (DocSt.selInfo s1) .nil)))
     | .none => (s1, old)
 
--- an event's words: `KIND\nA B` → (KIND, A, B)
+/-- Splits at the first character with code `sep`: the text before it and the characters
+after (used on an event's words: `KIND\nA B` gives KIND, A and B). -/
 def Tagged.splitAt (sep : Nat) : List Char → List Char → String × List Char
   | .nil, acc => (String.mk (Json.revOnto acc .nil), List.nil)
   | .cons c cs, acc => match Nat.beq (Char.code c) sep with
     | .true => (String.mk (Json.revOnto acc .nil), cs)
     | .false => Tagged.splitAt sep cs (.cons c acc)
+/-- The number at the start of a string (0 if none). -/
 def Tagged.nat (s : String) : Nat := (Json.digits (String.chars s) 0 0 .nil).1
 
--- One event of a documentation page:
---   `decl\nJSON`      a declaration's signature (`wiz doc`'s JSON): render it
---   `hover\nID IDX`   the mouse is on tag IDX of declaration ID: what it is
---   `leave\n`         the mouse left the signatures: the selection's box, or none
---   `click\nID IDX`   a constant: go to its definition; anything else: select it
---   `key\nKEY`        arrows move the selection (as in the infoview), Escape clears it
+/-- One event of a documentation page, and the new state with what to do. The events
+(the kind, a newline, the arguments):
+
+* `decl\nJSON`: a declaration's signature (`wiz doc`'s JSON): render it;
+* `hover\nID IDX`: the mouse is on tag IDX of declaration ID: what it is;
+* `leave\n`: the mouse left the signatures: the selection's box, or none;
+* `click\nID IDX`: a constant: go to its definition; anything else: select it;
+* `key\nKEY`: the arrows move the selection (as in the infoview), anything else (Escape)
+  clears it. -/
 def DocPage.step (s : DocSt) (ev : String) : DocSt × List DocAct :=
   let p := Tagged.splitAt 10 (String.chars ev) .nil;
   let kind := p.1;

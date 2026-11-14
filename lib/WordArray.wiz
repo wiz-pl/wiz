@@ -1,0 +1,282 @@
+import Word
+import Text
+import Logic
+/-!
+# WordArray
+
+Unboxed arrays of machine words (`import WordArray`): `U8Array`, `U32Array` and
+`U64Array`, functional values updated in place when they are unique (as `Array`).
+
+The model. Each is a list of words (`mk (toList : List U32)`), and every operation
+below is defined on that list: the kernel computes with the definitions, proofs see
+them (the laws at the end), and `#eval`/`#run` run them.
+
+Compiled code runs natives instead (`runtime/`, `wiz_warray_*`), by
+`implemented_by`. An array is then a header and one C array of `uint8_t`, `uint32_t`
+or `uint64_t` with its length: no element is a Wiz object, so a 1M-element `U32Array`
+is 4 MB with nothing for reference counting to visit (an `Array U32` is 8 MB of
+`wiz_val`s; a `List U32` 24 MB of cells). An update copies the array when it is
+shared and changes it in place when it is unique. C code given an array (`link_c`,
+`glue`) reads it with `wiz_warray_data`/`wiz_warray_len`.
+
+Trust. The natives are trusted to agree with the definitions (`#print axioms` lists
+them, marked `native`, 22f); the module keeps no invariant beyond the words' own (each
+element is below 2^w). Out-of-range indices: `getD` gives the default, `set` changes
+nothing, as in the model. Where they part: the natives abort when memory runs out.
+The tests (group `natives`) run the same programs under the interpreter (the model)
+and compiled (the natives), C and LLVM.
+
+Not here: arrays of other widths (`U16`, `I32`; add one the same way), in-place
+slices that share storage (a slice copies, unless it is a unique prefix), sorting.
+-/
+
+def List.getD {A : Type} : List A → Nat → A → A
+  | .nil, _, d => d
+  | .cons x _, .zero, _ => x
+  | .cons _ xs, .succ i, d => List.getD xs i d
+-- `y` at `i` (the same list when `i` is out of range)
+def List.setAt {A : Type} : List A → Nat → A → List A
+  | .nil, _, _ => .nil
+  | .cons _ xs, .zero, y => .cons y xs
+  | .cons x xs, .succ i, y => .cons x (List.setAt xs i y)
+def List.dropLast {A : Type} : List A → List A
+  | .nil => .nil
+  | .cons x xs => match xs with
+    | .nil => .nil
+    | .cons _ _ => .cons x (List.dropLast xs)
+
+-- Laws (the arrays' laws below follow from these)
+
+def List.length_snoc {A : Type} (x : A) : (l : List A) →
+    List.length (List.append l (.cons x .nil)) = Nat.succ (List.length l)
+  | .nil => rfl
+  | .cons _ xs => Eq.congrArg Nat.succ (List.length_snoc x xs)
+def List.getD_snoc {A : Type} (x d : A) : (l : List A) →
+    List.getD (List.append l (.cons x .nil)) (List.length l) d = x
+  | .nil => rfl
+  | .cons _ xs => List.getD_snoc x d xs
+def List.length_setAt {A : Type} (y : A) : (l : List A) → (i : Nat) →
+    List.length (List.setAt l i y) = List.length l
+  | .nil, _ => rfl
+  | .cons _ _, .zero => rfl
+  | .cons _ xs, .succ i => Eq.congrArg Nat.succ (List.length_setAt y xs i)
+def List.getD_setAt {A : Type} (y d : A) : (l : List A) → (i : Nat) →
+    Nat.lt i (List.length l) = .true → List.getD (List.setAt l i y) i d = y
+  | .nil, .zero, h => absurd h.1
+  | .nil, .succ _, h => absurd h.1
+  | .cons _ _, .zero, _ => rfl
+  | .cons _ xs, .succ i, h => List.getD_setAt y d xs i h
+def List.length_append {A : Type} : (l m : List A) →
+    List.length (List.append l m) = Nat.add (List.length l) (List.length m)
+  | .nil, _ => rfl
+  | .cons _ xs, m => Eq.congrArg Nat.succ (List.length_append xs m)
+
+-- ## U8Array
+
+sealed inductive U8Array where
+  | private mk (toList : List U8)
+
+def U8Array.toList : U8Array → List U8
+  | .mk l => l
+def U8Array.ofList (l : List U8) : U8Array := .mk l
+def U8Array.empty : U8Array := .mk .nil
+def U8Array.size (a : U8Array) : Nat := List.length a.toList
+-- the element at `i`, or `d` (`get`: or 0)
+def U8Array.getD (a : U8Array) (i : Nat) (d : U8) : U8 := List.getD a.toList i d
+def U8Array.get (a : U8Array) (i : Nat) : U8 := U8Array.getD a i (U8.ofNat 0)
+-- `x` at `i` (nothing changes when `i ≥ size a`)
+def U8Array.set (a : U8Array) (i : Nat) (x : U8) : U8Array := .mk (List.setAt a.toList i x)
+def U8Array.push (a : U8Array) (x : U8) : U8Array := .mk (List.append a.toList (.cons x .nil))
+-- without the last element
+def U8Array.pop (a : U8Array) : U8Array := .mk (List.dropLast a.toList)
+-- the elements `[start, start + n)`, cut at the end
+def U8Array.slice (a : U8Array) (start n : Nat) : U8Array := .mk (List.take n (List.drop start a.toList))
+def U8Array.append (a b : U8Array) : U8Array := .mk (List.append a.toList b.toList)
+-- (Wiz loops over the operations above, so natives too when compiled)
+def U8Array.pushN (x : U8) : Nat → U8Array → U8Array
+  | .zero, a => a
+  | .succ n, a => U8Array.pushN x n (U8Array.push a x)
+def U8Array.replicate (n : Nat) (x : U8) : U8Array := U8Array.pushN x n U8Array.empty
+def U8Array.foldlFrom {B : Type} (a : U8Array) (f : B → U8 → B) : Nat → Nat → B → B
+  | .zero, _, b => b
+  | .succ k, i, b => U8Array.foldlFrom a f k (Nat.succ i) (f b (U8Array.get a i))
+-- `f (… (f b a[0]) …) a[n-1]`, by index
+def U8Array.foldl {B : Type} (f : B → U8 → B) (b : B) (a : U8Array) : B :=
+  U8Array.foldlFrom a f (U8Array.size a) 0 b
+
+extern "wiz_u8array_of_list" U8Array.ofListNative : List U8 → U8Array
+extern "wiz_warray_to_list" U8Array.toListNative : U8Array → List U8
+attribute [implemented_by U8Array.ofListNative U8Array.toListNative] U8Array.mk
+attribute [implemented_by U8Array.toListNative] U8Array.toList
+attribute [implemented_by U8Array.ofListNative] U8Array.ofList
+extern "wiz_u8array_empty" U8Array.emptyNative : U8Array
+extern "wiz_warray_size" U8Array.sizeNative : U8Array → NatObj
+extern "wiz_warray_get" U8Array.getDNative : U8Array → NatObj → U8 → U8
+extern "wiz_warray_set" U8Array.setNative : U8Array → NatObj → U8 → U8Array
+extern "wiz_warray_push" U8Array.pushNative : U8Array → U8 → U8Array
+extern "wiz_warray_pop" U8Array.popNative : U8Array → U8Array
+extern "wiz_warray_slice" U8Array.sliceNative : U8Array → NatObj → NatObj → U8Array
+extern "wiz_warray_append" U8Array.appendNative : U8Array → U8Array → U8Array
+attribute [implemented_by U8Array.emptyNative] U8Array.empty
+attribute [implemented_by U8Array.sizeNative] U8Array.size
+attribute [implemented_by U8Array.getDNative] U8Array.getD
+attribute [implemented_by U8Array.setNative] U8Array.set
+attribute [implemented_by U8Array.pushNative] U8Array.push
+attribute [implemented_by U8Array.popNative] U8Array.pop
+attribute [implemented_by U8Array.sliceNative] U8Array.slice
+attribute [implemented_by U8Array.appendNative] U8Array.append
+-- laws (on the model; the natives are trusted to keep them)
+def U8Array.size_empty : U8Array.size U8Array.empty = 0 := rfl
+def U8Array.size_push (a : U8Array) (x : U8) : U8Array.size (U8Array.push a x) = Nat.succ (U8Array.size a) :=
+  List.length_snoc x a.toList
+def U8Array.getD_push (a : U8Array) (x d : U8) : U8Array.getD (U8Array.push a x) (U8Array.size a) d = x :=
+  List.getD_snoc x d a.toList
+def U8Array.size_set (a : U8Array) (i : Nat) (x : U8) : U8Array.size (U8Array.set a i x) = U8Array.size a :=
+  List.length_setAt x a.toList i
+def U8Array.getD_set (a : U8Array) (i : Nat) (x d : U8) (h : Nat.lt i (U8Array.size a) = .true) :
+    U8Array.getD (U8Array.set a i x) i d = x :=
+  List.getD_setAt x d a.toList i h
+def U8Array.size_append (a b : U8Array) : U8Array.size (U8Array.append a b) = Nat.add (U8Array.size a) (U8Array.size b) :=
+  List.length_append a.toList b.toList
+def U8Array.ofList_toList : (a : U8Array) → U8Array.ofList a.toList = a
+  | .mk _ => rfl
+
+-- ## U32Array
+
+sealed inductive U32Array where
+  | private mk (toList : List U32)
+
+def U32Array.toList : U32Array → List U32
+  | .mk l => l
+def U32Array.ofList (l : List U32) : U32Array := .mk l
+def U32Array.empty : U32Array := .mk .nil
+def U32Array.size (a : U32Array) : Nat := List.length a.toList
+-- the element at `i`, or `d` (`get`: or 0)
+def U32Array.getD (a : U32Array) (i : Nat) (d : U32) : U32 := List.getD a.toList i d
+def U32Array.get (a : U32Array) (i : Nat) : U32 := U32Array.getD a i (U32.ofNat 0)
+-- `x` at `i` (nothing changes when `i ≥ size a`)
+def U32Array.set (a : U32Array) (i : Nat) (x : U32) : U32Array := .mk (List.setAt a.toList i x)
+def U32Array.push (a : U32Array) (x : U32) : U32Array := .mk (List.append a.toList (.cons x .nil))
+-- without the last element
+def U32Array.pop (a : U32Array) : U32Array := .mk (List.dropLast a.toList)
+-- the elements `[start, start + n)`, cut at the end
+def U32Array.slice (a : U32Array) (start n : Nat) : U32Array := .mk (List.take n (List.drop start a.toList))
+def U32Array.append (a b : U32Array) : U32Array := .mk (List.append a.toList b.toList)
+-- (Wiz loops over the operations above, so natives too when compiled)
+def U32Array.pushN (x : U32) : Nat → U32Array → U32Array
+  | .zero, a => a
+  | .succ n, a => U32Array.pushN x n (U32Array.push a x)
+def U32Array.replicate (n : Nat) (x : U32) : U32Array := U32Array.pushN x n U32Array.empty
+def U32Array.foldlFrom {B : Type} (a : U32Array) (f : B → U32 → B) : Nat → Nat → B → B
+  | .zero, _, b => b
+  | .succ k, i, b => U32Array.foldlFrom a f k (Nat.succ i) (f b (U32Array.get a i))
+-- `f (… (f b a[0]) …) a[n-1]`, by index
+def U32Array.foldl {B : Type} (f : B → U32 → B) (b : B) (a : U32Array) : B :=
+  U32Array.foldlFrom a f (U32Array.size a) 0 b
+
+extern "wiz_u32array_of_list" U32Array.ofListNative : List U32 → U32Array
+extern "wiz_warray_to_list" U32Array.toListNative : U32Array → List U32
+attribute [implemented_by U32Array.ofListNative U32Array.toListNative] U32Array.mk
+attribute [implemented_by U32Array.toListNative] U32Array.toList
+attribute [implemented_by U32Array.ofListNative] U32Array.ofList
+extern "wiz_u32array_empty" U32Array.emptyNative : U32Array
+extern "wiz_warray_size" U32Array.sizeNative : U32Array → NatObj
+extern "wiz_warray_get" U32Array.getDNative : U32Array → NatObj → U32 → U32
+extern "wiz_warray_set" U32Array.setNative : U32Array → NatObj → U32 → U32Array
+extern "wiz_warray_push" U32Array.pushNative : U32Array → U32 → U32Array
+extern "wiz_warray_pop" U32Array.popNative : U32Array → U32Array
+extern "wiz_warray_slice" U32Array.sliceNative : U32Array → NatObj → NatObj → U32Array
+extern "wiz_warray_append" U32Array.appendNative : U32Array → U32Array → U32Array
+attribute [implemented_by U32Array.emptyNative] U32Array.empty
+attribute [implemented_by U32Array.sizeNative] U32Array.size
+attribute [implemented_by U32Array.getDNative] U32Array.getD
+attribute [implemented_by U32Array.setNative] U32Array.set
+attribute [implemented_by U32Array.pushNative] U32Array.push
+attribute [implemented_by U32Array.popNative] U32Array.pop
+attribute [implemented_by U32Array.sliceNative] U32Array.slice
+attribute [implemented_by U32Array.appendNative] U32Array.append
+-- laws (on the model; the natives are trusted to keep them)
+def U32Array.size_empty : U32Array.size U32Array.empty = 0 := rfl
+def U32Array.size_push (a : U32Array) (x : U32) : U32Array.size (U32Array.push a x) = Nat.succ (U32Array.size a) :=
+  List.length_snoc x a.toList
+def U32Array.getD_push (a : U32Array) (x d : U32) : U32Array.getD (U32Array.push a x) (U32Array.size a) d = x :=
+  List.getD_snoc x d a.toList
+def U32Array.size_set (a : U32Array) (i : Nat) (x : U32) : U32Array.size (U32Array.set a i x) = U32Array.size a :=
+  List.length_setAt x a.toList i
+def U32Array.getD_set (a : U32Array) (i : Nat) (x d : U32) (h : Nat.lt i (U32Array.size a) = .true) :
+    U32Array.getD (U32Array.set a i x) i d = x :=
+  List.getD_setAt x d a.toList i h
+def U32Array.size_append (a b : U32Array) : U32Array.size (U32Array.append a b) = Nat.add (U32Array.size a) (U32Array.size b) :=
+  List.length_append a.toList b.toList
+def U32Array.ofList_toList : (a : U32Array) → U32Array.ofList a.toList = a
+  | .mk _ => rfl
+
+-- ## U64Array
+
+sealed inductive U64Array where
+  | private mk (toList : List U64)
+
+def U64Array.toList : U64Array → List U64
+  | .mk l => l
+def U64Array.ofList (l : List U64) : U64Array := .mk l
+def U64Array.empty : U64Array := .mk .nil
+def U64Array.size (a : U64Array) : Nat := List.length a.toList
+-- the element at `i`, or `d` (`get`: or 0)
+def U64Array.getD (a : U64Array) (i : Nat) (d : U64) : U64 := List.getD a.toList i d
+def U64Array.get (a : U64Array) (i : Nat) : U64 := U64Array.getD a i (U64.ofNat 0)
+-- `x` at `i` (nothing changes when `i ≥ size a`)
+def U64Array.set (a : U64Array) (i : Nat) (x : U64) : U64Array := .mk (List.setAt a.toList i x)
+def U64Array.push (a : U64Array) (x : U64) : U64Array := .mk (List.append a.toList (.cons x .nil))
+-- without the last element
+def U64Array.pop (a : U64Array) : U64Array := .mk (List.dropLast a.toList)
+-- the elements `[start, start + n)`, cut at the end
+def U64Array.slice (a : U64Array) (start n : Nat) : U64Array := .mk (List.take n (List.drop start a.toList))
+def U64Array.append (a b : U64Array) : U64Array := .mk (List.append a.toList b.toList)
+-- (Wiz loops over the operations above, so natives too when compiled)
+def U64Array.pushN (x : U64) : Nat → U64Array → U64Array
+  | .zero, a => a
+  | .succ n, a => U64Array.pushN x n (U64Array.push a x)
+def U64Array.replicate (n : Nat) (x : U64) : U64Array := U64Array.pushN x n U64Array.empty
+def U64Array.foldlFrom {B : Type} (a : U64Array) (f : B → U64 → B) : Nat → Nat → B → B
+  | .zero, _, b => b
+  | .succ k, i, b => U64Array.foldlFrom a f k (Nat.succ i) (f b (U64Array.get a i))
+-- `f (… (f b a[0]) …) a[n-1]`, by index
+def U64Array.foldl {B : Type} (f : B → U64 → B) (b : B) (a : U64Array) : B :=
+  U64Array.foldlFrom a f (U64Array.size a) 0 b
+
+extern "wiz_u64array_of_list" U64Array.ofListNative : List U64 → U64Array
+extern "wiz_warray_to_list" U64Array.toListNative : U64Array → List U64
+attribute [implemented_by U64Array.ofListNative U64Array.toListNative] U64Array.mk
+attribute [implemented_by U64Array.toListNative] U64Array.toList
+attribute [implemented_by U64Array.ofListNative] U64Array.ofList
+extern "wiz_u64array_empty" U64Array.emptyNative : U64Array
+extern "wiz_warray_size" U64Array.sizeNative : U64Array → NatObj
+extern "wiz_warray_get" U64Array.getDNative : U64Array → NatObj → U64 → U64
+extern "wiz_warray_set" U64Array.setNative : U64Array → NatObj → U64 → U64Array
+extern "wiz_warray_push" U64Array.pushNative : U64Array → U64 → U64Array
+extern "wiz_warray_pop" U64Array.popNative : U64Array → U64Array
+extern "wiz_warray_slice" U64Array.sliceNative : U64Array → NatObj → NatObj → U64Array
+extern "wiz_warray_append" U64Array.appendNative : U64Array → U64Array → U64Array
+attribute [implemented_by U64Array.emptyNative] U64Array.empty
+attribute [implemented_by U64Array.sizeNative] U64Array.size
+attribute [implemented_by U64Array.getDNative] U64Array.getD
+attribute [implemented_by U64Array.setNative] U64Array.set
+attribute [implemented_by U64Array.pushNative] U64Array.push
+attribute [implemented_by U64Array.popNative] U64Array.pop
+attribute [implemented_by U64Array.sliceNative] U64Array.slice
+attribute [implemented_by U64Array.appendNative] U64Array.append
+-- laws (on the model; the natives are trusted to keep them)
+def U64Array.size_empty : U64Array.size U64Array.empty = 0 := rfl
+def U64Array.size_push (a : U64Array) (x : U64) : U64Array.size (U64Array.push a x) = Nat.succ (U64Array.size a) :=
+  List.length_snoc x a.toList
+def U64Array.getD_push (a : U64Array) (x d : U64) : U64Array.getD (U64Array.push a x) (U64Array.size a) d = x :=
+  List.getD_snoc x d a.toList
+def U64Array.size_set (a : U64Array) (i : Nat) (x : U64) : U64Array.size (U64Array.set a i x) = U64Array.size a :=
+  List.length_setAt x a.toList i
+def U64Array.getD_set (a : U64Array) (i : Nat) (x d : U64) (h : Nat.lt i (U64Array.size a) = .true) :
+    U64Array.getD (U64Array.set a i x) i d = x :=
+  List.getD_setAt x d a.toList i h
+def U64Array.size_append (a b : U64Array) : U64Array.size (U64Array.append a b) = Nat.add (U64Array.size a) (U64Array.size b) :=
+  List.length_append a.toList b.toList
+def U64Array.ofList_toList : (a : U64Array) → U64Array.ofList a.toList = a
+  | .mk _ => rfl

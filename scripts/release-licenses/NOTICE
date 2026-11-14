@@ -13,7 +13,7 @@ Third-party software in this toolchain
 The licence texts are in LICENSES/ (and, for the bundled C toolchain, in
 cc/LICENSES/).
 
-Linked into the binaries wiz, grail and tower (built with Lean 4):
+Linked into the binaries wiz and grail (built with Lean 4):
 
 * The Lean 4 runtime and standard library (Init, Std, Lean): Apache License 2.0.
   LICENSES/lean4-LICENSE.
@@ -28,6 +28,9 @@ Linked into the binaries wiz, grail and tower (built with Lean 4):
   https://github.com/wiz-pl/wiz, you can relink them with a modified
   GMP by rebuilding them.
 * glibc, dynamically (libc, libm, libpthread, libdl, librt): GNU LGPL v2.1 or later.
+
+tower (built by grail from `tower/`, with the Wiz runtime) links GMP and glibc from that
+list, not Lean's runtime.
 
 The bundled C toolchain (cc/, when present; docs/stages/26-tower.md, 26f): clang,
 ld.lld and compiler-rt (Apache 2.0 with LLVM Exceptions; their libraries: libc++,

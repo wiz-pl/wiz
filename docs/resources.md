@@ -5,7 +5,7 @@ locks, effects), built at different stages. This page shows what they have in co
 how they fit together, using **one running example**: swapping two numbers through two
 mutable borrows. The example is `examples/resources.wiz` (checked by the test group
 `feral`). The design behind this page, with the plan for what comes next, is in
-`/workspace/wiz-notes/cohesion-resources.md`.
+`wiz-notes/cohesion-resources.md`.
 
 | layer | what it says | where |
 |---|---|---|
@@ -58,20 +58,23 @@ in the lowered program, by the kernel ([22j](stages/22-numbers.md)).
 
 ### 2. Regions and the functional model
 
-`#lower` shows what `swap` is: a function of two borrow handles that hands both back.
+`#lower` shows what `swap` is: a function of two linear borrow handles (`Uniq1`: used
+once, handed back on every path, `Result1`) that hands both back.
 
 ```
-def swap {ρa ρb : Region} (x : (Uniq ρa U64)) (y : (Uniq ρb U64)) : Result (Unit × ((Uniq ρa U64) × (Uniq ρb U64))) :=
-  let t := x.val;
-  let x := (Uniq.set x y.val);
-  let y := (Uniq.set y t);
-  Result.ok ((), (x, y))
+def swap {ρa ρb : Region} (1 x : (Uniq1 ρa U64)) (1 y : (Uniq1 ρb U64)) : Result1 Unit ((1 _ : (Uniq1 ρa U64)) × (Uniq1 ρb U64)) :=
+  let 1 (d_2, x) := Uniq1.peek x;
+  let t := d_2;
+  let 1 (d_5, y) := Uniq1.peek y;
+  let 1 x := Uniq1.write x d_5;
+  let 1 y := Uniq1.write y t;
+  Result1.ok (()) (x, y)
 ```
 
-`swap_vals` opens a `Uniq.borrow` scope for each local; the scope's region `ρ` is fresh,
+`swap_vals` opens a `Uniq1.borrow` scope for each local; the scope's region `ρ` is fresh,
 so no handle outlives it. There is no heap here: a `&mut` is a value passed in and passed
-back (the Aeneas reading), so the specification of `swap_vals` is about values, and is
-proved by computation:
+back (the Aeneas reading), so the specification is about values, and is proved by
+computation:
 
 ```
 feral
@@ -79,18 +82,24 @@ feral
   spec swap ensures (final x = old y) ensures (final y = old x)
   spec swap_vals ensures (result = (b, a))
 end
-def swap_ok {ρa ρb : Region} (x : Uniq ρa U64) (y : Uniq ρb U64) : swap.Spec x y := (rfl, rfl)
+def swap_ok (a b : U64) : swap.Spec a b := (rfl, rfl)
 def swap_vals_spec (a b : U64) : swap_vals.Spec a b := rfl
 ```
 
 A `spec` item states a function's specification as a Wiz proposition, `f.Spec`, which
 is then proved in Wiz. In a clause an argument stands for its value, `result` for the
 returned value, and `old x`/`final x` for an `&mut` argument's value on entry and when
-the borrow ends. `final x` is the handed-back handle, so no prophecy is needed.
-`swap.Spec x y` is
+the borrow ends. A linear handle can't be read in a proposition (its value is only
+reachable by consuming it with `Uniq1.peek`/`end`), so `Spec` takes the `&mut` arguments'
+*values*, lends them to the call in the borrow scopes a caller would open, and states the
+clauses on the values the scopes hand back (`final x` is the lender's final value, so no
+prophecy is needed). `swap.Spec a b` is
 
 ```
-Result.Holds (fun (r : Unit × (Uniq ρa U64 × Uniq ρb U64)) => (r.2.1.val = y.val) × (r.2.2.val = x.val)) (swap x y)
+def swap.Spec (x : U64) (y : U64) : Prop :=
+  Result.Holds (fun (r : ((Unit × U64) × U64)) => (r.2 = y) × (r.1.2 = x)) (
+    Uniq1.borrow Region.static x (fun ρ1 h1 l1 x =>
+      Uniq1.borrowIn ρ1 y x (fun ρ2 h2 l2 x y => swap x y)))
 ```
 
 `Result.Holds P r` is total correctness (the call doesn't panic and `P` holds of its

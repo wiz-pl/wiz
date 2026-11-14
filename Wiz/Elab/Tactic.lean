@@ -74,6 +74,10 @@ def isDefinition := 32
 -- (stage 28) solvers
 def satSolve := 33
 def eqView := 34
+def smt := 35
+def define := 36
+def assignLate := 37
+def nativeDecide := 38
 end TacTag
 
 structure Goal (R : Type) where
@@ -175,7 +179,7 @@ partial def reify (handles : Array (Term R × Nat)) (v : RVal) (depth : Nat) : E
   | some 3 =>
     let bi : BinderInfo := if decodeBool (v.conField 1) == some true then .implicit else .default
     return .pi (← str (v.conField 0)) bi (← reify handles (v.conField 2) depth)
-      (← reify handles (v.conField 3) depth) (← reify handles (v.conField 4) (depth + 1)) none
+      (← reify handles (v.conField 3) depth) (← reify handles (v.conField 4) (depth + 1)) .hole
   | some 4 => return .lam (← str (v.conField 0)) (← reify handles (v.conField 1) (depth + 1))
   | some 5 => return .app (← reify handles (v.conField 0) depth) (← reify handles (v.conField 1) depth)
   | some 6 => return .natLit (← nat (v.conField 0))
@@ -314,6 +318,40 @@ def RCtx.typeOf? (rc : RCtx R) (t : Term R) : ElabM R (Option (VTy R)) := do
     | _ => return none
   pure ty?
 
+/-- `typeOf?`, unifying each argument's type (when it has one this way) with the
+function's domain on the way. Reflected constants come back with fresh universe levels
+(`reify`), and this is what solves them: `F.map_comp f g` reified is `Fun.map_comp.{?a, …}
+F f g`, and only the types of `F`, `f` and `g` fix `?a`, … (wiz-cats B6). A mismatch is
+left for the kernel to report. -/
+partial def RCtx.typeOfUnifying? (rc : RCtx R) (t : Term R) : ElabM R (Option (VTy R)) := do
+  let g ← getGlobals
+  let (h, args) := Term.spine t
+  -- (a field of a structure: the type of what is projected, projected)
+  let mut ty? ← match h with
+    | .fst p => do
+      let some pty ← rc.typeOfUnifying? p | pure none
+      match ← force pty with
+      | .sigma _ _ A _ _ => pure (some A)
+      | _ => pure none
+    | .snd p => do
+      let some pty ← rc.typeOfUnifying? p | pure none
+      match ← force pty with
+      | .sigma _ _ _ B _ => pure (some (← instM B (vFst (eval g rc.env p))))
+      | _ => pure none
+    | h => pure (rc.headType? g h)
+  for a in args do
+    -- (the arguments' own constants, whatever this application's type)
+    let aty ← rc.typeOfUnifying? a
+    let some ty := ty? | continue
+    match ← force ty with
+    | .pi _ _ _ dom cod _ =>
+      if let some aty := aty then
+        let s ← get
+        try unify rc.lvl dom aty catch _ => set s
+      ty? := some (rc.instArg g cod a)
+    | _ => ty? := none
+  pure ty?
+
 mutual
 
 /-- Reflect `t` of type `ty?` (when it is known). As `reflect`, but type-directed. -/
@@ -385,7 +423,7 @@ partial def reflectCtor (rc : RCtx R) (tag rest : Term R) (ty? : Option (VTy R))
     | _ => return none
   let some c := ls[i]? | return none
   let g ← globalsR
-  let cname := T ++ "." ++ c
+  let cname := ctorConst T c
   let some d := g.find? cname | return none
   let some sh := ctorShape? d | return none
   let parts := tupleParts rest
@@ -463,8 +501,8 @@ def Goal.show (gl : Goal R) : ElabM R String := do
     let sub : LocalCtx R :=
       { ctx with env := ctx.env.drop k, names := ctx.names.drop k, types := ctx.types.drop k,
                  bound := ctx.bound.drop k, lvl := ctx.lvl - k }
-    lines := lines.push s!"{ctx.names[j]!} : {showTerm sub (← zonk sub.lvl (quote (← getGlobals) sub.lvl ctx.types[j]!))}"
-  lines := lines.push s!"⊢ {showTerm ctx (← zonk ctx.lvl (quote (← getGlobals) ctx.lvl gl.ty))}"
+    lines := lines.push s!"{ctx.names[j]!} : {← showTermM sub (← zonk sub.lvl (quote (← getGlobals) sub.lvl ctx.types[j]!))}"
+  lines := lines.push s!"⊢ {goalTarget (← showTermM ctx (← zonk ctx.lvl (quote (← getGlobals) ctx.lvl gl.ty)))}"
   pure ("\n".intercalate lines.toList)
 
 /-! ## Unfolding (stage 6f)

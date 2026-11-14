@@ -1,21 +1,37 @@
 import Prelude
 import Text
--- Functors and applicative functors (stage 13d): `import Functor`.
---
--- `f <$> a` maps `f` over `a`; `f <$> a <*> b` applies `f` to two results. Every `Monad`
--- is an `Applicative` and every `Applicative` a `Functor` (the two generic instances
--- below), so `<$>` and `<*>` work for `IO`, `Eff r`, `StateT`, `TacticM` and any other
--- monad without more declarations. A type with a better `map` or `seq` (or one that is
--- not a monad, such as a signal) declares its own instance: a later instance wins over
--- the generic ones (stage 7b).
---
--- `Monad` (in the Prelude) doesn't extend `Applicative`: classes have no `extends` yet,
--- so its `pure` is its own field and `do` notation is unchanged. This module is separate
--- from the Prelude because the names `Functor`, `List.map` and the instances for
--- `Option` are already used by programs that import only the Prelude.
+/-!
+# Functor
 
+Functors and applicative functors (stage 13d): `import Functor`.
+
+`f <$> a` maps `f` over `a`; `f <$> a <*> b` applies `f` to two results. Every `Monad`
+is an `Applicative` and every `Applicative` a `Functor` (the two generic instances
+below), so `<$>` and `<*>` work for `IO`, `Eff r`, `StateT`, `TacticM` and any other
+monad without more declarations. A type with a better `map` or `seq` (or one that is
+not a monad, such as a signal) declares its own instance: a later instance wins over
+the generic ones (stage 7b).
+
+`Monad` (in the Prelude) doesn't extend `Applicative`: classes have no `extends` yet,
+so its `pure` is its own field and `do` notation is unchanged. This module is separate
+from the Prelude because the names `Functor`, `List.map` and the instances for
+`Option` are already used by programs that import only the Prelude.
+
+Besides the classes, the module gives `Option`, `Except` and `List` their `Monad` and
+`Functor` instances.
+
+```
+Nat.succ <$> Option.some 1 = Option.some 2
+(fun a b => a + b) <$> [1, 2] <*> [10, 20] = [11, 21, 12, 22]
+```
+-/
+
+/-- Type constructors you can map over: `map f` turns an `f A` into an `f B` by
+applying `f : A → B` to what is inside. Written `f <$> x`. -/
 class Functor (f : Type → Type) where
   map : {A B : Type} → (A → B) → f A → f B
+/-- Functors with `pure` (a value with no effect) and `seq` (apply a function that is
+itself a result, written `mf <*> ma`). Every `Monad` is one. -/
 class Applicative (f : Type → Type) where
   pure : {A : Type} → A → f A
   seq : {A B : Type} → f (A → B) → f A → f B
@@ -24,48 +40,62 @@ infixr:100 " <$> " => Functor.map
 infixl:60 " <*> " => Applicative.seq
 
 -- The generic instances (`@`: a method at a variable monad needs its instance spelled out).
+/-- Every monad is an applicative functor: `mf <*> ma` runs `mf`, then `ma`, and applies. -/
 instance {m : Type → Type} [i : Monad m] : Applicative m :=
   Applicative.mk (fun a => @Monad.pure m i _ a)
     (fun mf ma => @Monad.bind m i _ _ mf (fun g => @Monad.bind m i _ _ ma (fun a => @Monad.pure m i _ (g a))))
+/-- Every applicative functor is a functor: `map g x = pure g <*> x`. -/
 instance {f : Type → Type} [i : Applicative f] : Functor f :=
   Functor.mk (fun g x => @Applicative.seq f i _ _ (@Applicative.pure f i _ g) x)
 
 -- ## Option
 
+/-- Apply `f` to the value, if there is one: `Option.map f (.some a) = .some (f a)`. -/
 def Option.map {A B : Type} (f : A → B) : Option A → Option B
   | .none => .none
   | .some a => .some (f a)
+/-- Continue with `f` if there is a value; `none` stays `none`. -/
 def Option.bind {A B : Type} : Option A → (A → Option B) → Option B
   | .none, _ => .none
   | .some a, f => f a
+/-- `Option` as a monad: a computation that may fail with no reason given. -/
 instance : Monad Option where
   pure := fun a => Option.some a
   bind := Option.bind
+/-- `Option.map` as the functor map (a better one than the generic instance's). -/
 instance : Functor Option where
   map := Option.map
 
 -- ## Except
 
+/-- Apply `f` to a success; an error passes through unchanged. -/
 def Except.map {E A B : Type} (f : A → B) : Except E A → Except E B
   | .error e => .error e
   | .ok a => .ok (f a)
+/-- Continue with `f` after a success; the first error stops the computation. -/
 def Except.bind {E A B : Type} : Except E A → (A → Except E B) → Except E B
   | .error e, _ => .error e
   | .ok a, f => f a
+/-- `Except E` as a monad: a computation that may fail with an error of type `E`. -/
 instance {E : Type} : Monad (Except E) where
   pure := fun a => Except.ok a
   bind := Except.bind
+/-- `Except.map` as the functor map. -/
 instance {E : Type} : Functor (Except E) where
   map := Except.map
 
 -- ## List (the monad of nondeterminism: `<*>` takes every combination)
 
 -- (`List.map` is lib/Text.wiz's)
+/-- Apply `f` to every element and concatenate the lists it returns:
+`List.flatMap [1, 2] (fun x => [x, x]) = [1, 1, 2, 2]`. -/
 def List.flatMap {A B : Type} : List A → (A → List B) → List B
   | .nil, _ => .nil
   | .cons x xs, f => List.append (f x) (List.flatMap xs f)
+/-- `List` as the monad of nondeterminism: `bind` tries every element. -/
 instance : Monad List where
   pure := fun a => List.cons a List.nil
   bind := List.flatMap
+/-- `List.map` as the functor map. -/
 instance : Functor List where
   map := List.map

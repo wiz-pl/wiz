@@ -1,0 +1,67 @@
+import Rv.Proofs
+import BitVecShift
+-- SLLI probe: the barrel shifter's left stages as `BitVec.shl`, for `SLLI x9, x2, 5`.
+--
+-- `barrel` (Rv.Core) is `shift16 (shift8 (shift4 (shift2 (shift1 x))))`; a left shift's
+-- stage is `concat (slice 0 (32-j) x) 0…0`, i.e. `BitVec.shlStage (32-j) j x`
+-- (lib/BitVecShift.wiz). `Rs.slli5Stages` is the two stages `shamt = 5` turns on (1 and
+-- 4); the rest are the identity. `Bits.low_shift`/`Bits.low_low` turn the composition
+-- into `low 32 (x * 2^5)`, which is `BitVec.shl`'s normal form.
+--
+-- Check: wiz check -I /workspace/wt/wiz-rv-rtl/src drafts/rv-shift/SLLI.wiz
+
+def Rs.stage1 (x : BitVec 32) : BitVec 32 := BitVec.shlStage 31 1 x
+def Rs.stage2 (x : BitVec 32) : BitVec 32 := BitVec.shlStage 30 2 x
+def Rs.stage4 (x : BitVec 32) : BitVec 32 := BitVec.shlStage 28 4 x
+def Rs.stage8 (x : BitVec 32) : BitVec 32 := BitVec.shlStage 24 8 x
+def Rs.stage16 (x : BitVec 32) : BitVec 32 := BitVec.shlStage 16 16 x
+
+-- the stage chain of `shamt = 5` (stage 1, stage 4; stage 2/8/16 are off)
+def Rs.slli5Stages (x : BitVec 32) : BitVec 32 := Rs.stage4 (Rs.stage1 x)
+
+def Rs.slli5Stages_toNat (x : BitVec 32) :
+    (Rs.slli5Stages x).toNat = Bits.low 32 (Nat.mul x.toNat 32) :=
+  let X := Nat.mul x.toNat (Nat.pow 2 1);
+  Eq.trans
+    (BitVec.shlStage_toNat 28 4 (Rs.stage1 x))
+    (Eq.trans
+      (Bits.congr (fun t => Bits.low 32 (Nat.mul t (Nat.pow 2 4))) (BitVec.shlStage_toNat 31 1 x))
+      (Eq.trans
+        (Bits.low_shift 28 4 (Bits.low 32 X))
+        (Eq.trans
+          (Bits.congr (fun t => Nat.mul t (Nat.pow 2 4))
+            (Bits.low_low 28 32 X rfl))
+          (Eq.trans
+            (Bits.congr (fun t => Nat.mul t (Nat.pow 2 4)) (Bits.low_shift 27 1 x.toNat))
+            (Eq.trans
+              (nat_ring! (Bits.low 27 x.toNat * 2) * 16 = Bits.low 27 x.toNat * 32)
+              (Eq.symm (Bits.low_shift 27 5 x.toNat)))))))
+
+-- the same, with the barrel's own expression: `shamt = 5` turns stages 1 and 4 on, the
+-- other three muxes reduce to `x` (`fill` is unused on a left shift, so any value will do)
+def Rs.barrel5_toNat (fill : BitVec 1) (x : BitVec 32) :
+    (barrel (r := HwTy.El) (BitVec.ofNat 1 1) fill (BitVec.ofNat 5 5) x).toNat = Bits.low 32 (Nat.mul x.toNat 32) :=
+  Rs.slli5Stages_toNat x
+
+def Rs.barrel5 (fill : BitVec 1) (x : BitVec 32) :
+    barrel (r := HwTy.El) (BitVec.ofNat 1 1) fill (BitVec.ofNat 5 5) x = BitVec.shl x 5 :=
+  UIntN.ext (barrel (r := HwTy.El) (BitVec.ofNat 1 1) fill (BitVec.ofNat 5 5) x) (BitVec.shl x 5)
+    (Eq.trans (Rs.barrel5_toNat fill x) (Eq.symm (BitVec.shl_toNat 32 5 x)))
+
+-- The execute cycle, as `Pf.ok` needs it: the word is in `q`, the rest of the decode
+-- state is symbolic. The PC is `a.pc + 4`; the register value is the barrel's result,
+-- which `Rs.barrel5` turns into the specification's `BitVec.shl`.
+def Rs.slli_pc (a : Arch) : BitVec 32 := BitVec.add a.pc (BitVec.ofNat 32 4)
+
+def Rs.slli5_G (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32)
+    (cnt srd : BitVec 5) (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) :
+    Pf.G a (Pf.w (A.slli 9 2 5)) 9 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio
+        (Pf.bytes (Pf.w (A.slli 9 2 5))) = Pf.spec a (Pf.w (A.slli 9 2 5)) 9 :=
+  Eq.congrArg (fun v => (Rs.slli_pc a, v))
+    (Rs.barrel5 (BitVec.ofNat 1 0) (Pf.rf a (BitVec.ofNat 4 2)))
+
+def Rs.slli_ok : Pf.Claim (Pf.w (A.slli 9 2 5)) 9 :=
+  fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
+    Pf.ok a (Pf.w (A.slli 9 2 5)) 9 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio
+      (Rs.slli5_G a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio) h
+

@@ -415,7 +415,8 @@ else
     local row, col
     for i, l in ipairs(lines) do
       local k = l:find(': Nat', 1, true)
-      if k and l:find('^def ') then
+      -- (a declaration, not an example in the module's doc comment)
+      if k and l:find('^def Nat%.add ') then
         row, col = i, k + 2 -- (0-based: the `a` of Nat)
         break
       end

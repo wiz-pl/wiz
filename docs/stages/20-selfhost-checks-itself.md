@@ -1,6 +1,6 @@
 # Stage 20: the frontend checks itself, and gets faster
 
-## 20a: towards `Frontend.wiz` ✅
+## 20a: towards `Frontend.wiz`
 
 * A `match` or `fun` argument whose expected type is still a metavariable waits, like
   a `.c` one (`.cons (match s with …) rest`), and a postponed argument's metavariable
@@ -14,7 +14,7 @@
   `let`s) solves that one by a new metavariable at depth `k`.
 * The structural parameter can be moved first past grouped binders (`(Tc TcI : Tm)`).
 
-## 20b: the frontend checks `Frontend.wiz` ✅
+## 20b: the frontend checks `Frontend.wiz`
 
 The rest was performance, found by profiling the checker (flat `perf` profiles, and
 stacks sampled by interrupting it under `gdb`):
@@ -35,7 +35,7 @@ functions become axioms, the self-hosted frontend checks all 650 declarations of
 `Frontend.wiz` without an error, in about a quarter of an hour. So every file of the
 self-hosted frontend is accepted by the self-hosted frontend.
 
-## 20c: the self-check in the test suite ✅
+## 20c: the self-check in the test suite
 
 Two more quadratic costs, both found by sampling stacks: the kernel's rule for an
 application evaluated the argument to instantiate the codomain even when the codomain
@@ -44,7 +44,7 @@ level: `usesVar`), and string literals' codes were unary. The whole self-hosted
 frontend (`Lex`, `Parse`, `Kernel` and `Frontend.wiz`, 651 declarations) now checks
 itself, unstubbed, in about 40 s; the test suite runs it.
 
-## 20d: a faster kernel ✅
+## 20d: a faster kernel
 
 Profiling the self-check by call counts (`gprof`; the work runs on a second thread, so
 its timings are useless but its counts are exact) pointed at universe levels: every
@@ -56,7 +56,7 @@ comparison of the bodies or components asks again). The self-check went from 40 
 20 s. What remains is mostly allocation: comparing stuck `ecase`s (the payload types of
 big data types) branch by branch.
 
-## 20e: dead code in the backend ✅
+## 20e: dead code in the backend
 
 The generated C showed allocations nobody used: `whnf` built a pair of erased values on
 every call, and branches read fields their pattern variables never mentioned (an
@@ -67,7 +67,7 @@ branches over structurally equal environments (checked within a budget of nodes,
 allocating: `valSame`) are equal without comparing the branches. The self-check: 20 s to
 13 s.
 
-## 20f: sparse usages, shared constants ✅
+## 20f: sparse usages, shared constants
 
 * The kernel's usage lists (how often each variable is used, for quantities) may stop
   early, the variables after the end unused: no usage is the empty list, instead of a

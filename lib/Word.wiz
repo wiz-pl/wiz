@@ -1,49 +1,63 @@
 import Prelude
--- Machine integers: `import Word`.
---
--- `UIntN w` is a w-bit unsigned integer and `IntN w` a w-bit two's-complement integer.
--- Both are a number of bits, below `2^w` (normalised by construction: every operation
--- here reduces mod `2^w`, so arithmetic wraps around). The kernel computes with these
--- definitions (fast on numerals: `Nat.mod`, `Nat.pow`, … are native), proofs see them,
--- and compiled code runs native implementations instead (`implemented_by`, at the end).
--- One width-indexed type serves the HDL's bit vectors (`BitVec n := UIntN n`,
--- lib/BitVec.wiz; any width: 1, 5, 65, …) and Rust's `u32` (`U32 := UIntN 32`). Division by zero follows Lean: `a / 0 = 0` and
--- `a % 0 = a` (Rust panics; a Rust front end checks first).
 
--- No field mentions the width, but it is part of the type all the same (a phantom
--- parameter, stage 22e): `UIntN 8` and `UIntN 16` are different types, and `w` is
--- inferred from an argument. At runtime a word is `⟨0 bits⟩` in the model (or just its
--- bits, compiled: see the end).
---
--- Both are sealed (22k): `UIntN w` and `IntN w` have the same shape but are different
--- types (`toIntN`/`toUIntN` convert, for free), and no look-alike is either. A word
--- carries the proof that its bits are below `2^w` (22l: an erased field, so at runtime a
--- word is still just its bits), which the natives rely on: the kernel's definitions and
--- compiled code agree on every word there is. The constructors are private, so outside
--- this module a word is built with `ofNat` and read with `toNat` (`toNat_lt` gives the
--- range).
---
+/-!
+# Word
+
+Machine integers (`import Word`).
+
+`UIntN w` is a `w`-bit unsigned integer and `IntN w` a `w`-bit two's-complement integer.
+Both are a number of bits, below `2^w` (normalised by construction: every operation here
+reduces mod `2^w`, so arithmetic wraps around). The kernel computes with these
+definitions (fast on numerals: `Nat.mod`, `Nat.pow`, … are native), proofs see them, and
+compiled code runs native implementations instead (`implemented_by`, at the end of the
+module).
+
+One width-indexed type serves the HDL's bit vectors (`BitVec n := UIntN n`,
+lib/BitVec.wiz; any width: 1, 5, 65, …) and Rust's `u32` (`U32 := UIntN 32`). Division
+by zero follows Lean: `a / 0 = 0` and `a % 0 = a` (Rust panics; a Rust front end checks
+first).
+
+Main definitions: `UIntN` and `IntN`, built with `UIntN.ofNat`/`IntN.ofNat`/`IntN.ofNeg`
+and read with `UIntN.toNat`; wrapping arithmetic, comparisons, bitwise operations and
+shifts; `UIntN.resize`/`IntN.resize` between widths; the operator instances (`+`, `*`,
+`/`, numerals, …); Rust's fixed widths `U8` … `I64`; and the natives compiled code uses.
+
+```
+import Word
+
+#eval UIntN.toNat (UIntN.add (U8.ofNat 250) (U8.ofNat 10))       -- 4, it wraps
+#eval IntN.toNat (IntN.div (I8.ofNeg 7) (I8.ofNat 2))            -- 253, the bits of -3
+```
+-/
+
 -- The range lemmas first (about `Nat`; `lib/Vec.wiz` has some of them under `Nat.`, but
 -- this module imports only the Prelude).
+
+/-- `Nat.succ a = Nat.succ b` from `a = b`. -/
 def Word.congrSucc {a b : Nat} (e : a = b) : Nat.succ a = Nat.succ b :=
   transp (fun t _ => Nat.succ a = Nat.succ t) (refl (Nat.succ a)) e
+/-- `b = a` from `a = b`. -/
 def Word.symm {a b : Nat} (e : a = b) : b = a := transp (fun t _ => t = a) (refl a) e
+/-- `m + succ n = succ (m + n)` (the form `Nat.lt` reduces on). -/
 def Word.add_succ : (m n : Nat) → Nat.add m (Nat.succ n) = Nat.succ (Nat.add m n)
   | .zero, _ => rfl
   | .succ m, n => Word.congrSucc (Word.add_succ m n)
+/-- `n < n + 1`. -/
 def Word.lt_self : (n : Nat) → Nat.lt n (Nat.succ n) = .true
   | .zero => rfl
   | .succ n => Word.lt_self n
+/-- `i < n + 1` from `i < n`. -/
 def Word.lt_succ : (i n : Nat) → Nat.lt i n = .true → Nat.lt i (Nat.succ n) = .true
   | .zero, .zero, h => absurd h.1
   | .zero, .succ _, _ => rfl
   | .succ _, .zero, h => absurd h.1
   | .succ i, .succ n, h => Word.lt_succ i n h
+/-- `a < b` from `a + 1 < b`. -/
 def Word.lt_of_succ_lt : (a b : Nat) → Nat.lt (Nat.succ a) b = .true → Nat.lt a b = .true
   | _, .zero, h => absurd h.1
   | .zero, .succ _, _ => rfl
   | .succ a, .succ b, h => Word.lt_of_succ_lt a b h
--- `a ≤ b < c` gives `a < c`
+/-- `a < c` from `a ≤ b < c`. -/
 def Word.lt_of_le_lt : (a b c : Nat) → Nat.lt a (Nat.succ b) = .true → Nat.lt b c = .true → Nat.lt a c = .true
   | _, .zero, .zero, _, h => absurd h.1
   | _, .succ _, .zero, _, h => absurd h.1
@@ -51,30 +65,36 @@ def Word.lt_of_le_lt : (a b c : Nat) → Nat.lt a (Nat.succ b) = .true → Nat.l
   | .succ .zero, .zero, .succ _, h, _ => absurd h.1
   | .succ (.succ _), .zero, .succ _, h, _ => absurd h.1
   | .succ a, .succ b, .succ c, h1, h2 => Word.lt_of_le_lt a b c h1 h2
--- `2^w` is positive, and `2^w - 1` below it
+/-- `0 < x + y` from `0 < x`. -/
 def Word.lt0_add : (x y : Nat) → Nat.lt 0 x = .true → Nat.lt 0 (Nat.add x y) = .true
   | .zero, _, h => absurd h.1
   | .succ _, _, _ => rfl
+/-- `2^w` is positive. -/
 def Word.pow_pos : (w : Nat) → Nat.lt 0 (Nat.pow 2 w) = .true
   | .zero => rfl
   | .succ w => Word.lt0_add (Nat.pow 2 w) (Nat.mul 1 (Nat.pow 2 w)) (Word.pow_pos w)
+/-- `m - 1 < m` for a positive `m`. -/
 def Word.pred_lt : (m : Nat) → Nat.lt 0 m = .true → Nat.lt (Nat.sub m 1) m = .true
   | .zero, h => absurd h.1
   | .succ m, _ => Word.lt_self m
+/-- `2^w - 1 < 2^w`. -/
 def Word.pow_pred_lt (w : Nat) : Nat.lt (Nat.sub (Nat.pow 2 w) 1) (Nat.pow 2 w) = .true :=
   Word.pred_lt (Nat.pow 2 w) (Word.pow_pos w)
--- the smaller of two numbers (`Nat.lt` runs natively, so this is cheap on numerals)
+/-- `x` or `y`, by a `Bool` (the smaller of two numbers is computed with it; `Nat.lt` runs
+natively, so this is cheap on numerals). -/
 def Word.pick : Bool → Nat → Nat → Nat
   | .true, x, _ => x
   | .false, _, y => y
+/-- The smaller of two numbers. -/
 def Word.min (x y : Nat) : Nat := Word.pick (Nat.lt x y) x y
+/-- `Word.pick` of two numbers below `y + 1` is below `y + 1`. -/
 def Word.pick_lt (x y : Nat) : (b : Bool) → Nat.lt x y = b → Nat.lt (Word.pick b x y) (Nat.succ y) = .true
   | .true, h => Word.lt_succ x y h
   | .false, _ => Word.lt_self y
+/-- `Word.min` of two numbers below `c` is below `c`. -/
 def Word.min_lt (x b c : Nat) (h : Nat.lt b c = .true) : Nat.lt (Word.min x b) c = .true :=
   Word.lt_of_le_lt (Word.min x b) b c (Word.pick_lt x b (Nat.lt x b) (refl (Nat.lt x b))) h
--- bitwise or and xor of two numbers below `2^k` are below `2^k` (`Nat.bitwise` goes
--- through the bits from the lowest, halving both)
+/-- `2 r + 1 < 2 M` from `r < M` (a bit below the top one). -/
 def Word.lt_2x1 : (r M : Nat) → Nat.lt r M = .true → Nat.lt (Nat.succ (Nat.mul 2 r)) (Nat.mul 2 M) = .true
   | .zero, .zero, h => absurd h.1
   | .succ _, .zero, h => absurd h.1
@@ -90,12 +110,15 @@ def Word.lt_2x1 : (r M : Nat) → Nat.lt r M = .true → Nat.lt (Nat.succ (Nat.m
         (Word.symm (Word.add_succ M (Nat.add M 0)));
     transp (fun t _ => Nat.lt (Nat.succ t) (Nat.add M (Nat.succ (Nat.add M 0))) = .true) step
       (Word.symm (Word.add_succ r (Nat.add r 0)))
+/-- `2 r < 2 M` from `r < M`. -/
 def Word.lt_2x (r M : Nat) (h : Nat.lt r M = .true) : Nat.lt (Nat.mul 2 r) (Nat.mul 2 M) = .true :=
   Word.lt_of_succ_lt (Nat.mul 2 r) (Nat.mul 2 M) (Word.lt_2x1 r M h)
+/-- `0 < M` from `a < 2 M`. -/
 def Word.pos_of_lt2 : (a M : Nat) → Nat.lt a (Nat.mul 2 M) = .true → Nat.lt 0 M = .true
   | .zero, .zero, h => absurd h.1
   | .succ _, .zero, h => absurd h.1
   | _, .succ _, _ => rfl
+/-- `runDiv a 2` (with fuel) is below `M` when `a` is below `2 M`. -/
 def Word.divGo2_lt : (fuel a M : Nat) → Nat.lt a (Nat.mul 2 M) = .true → Nat.lt (Nat.divGo fuel a 2) M = .true
   | .zero, a, M, h => Word.pos_of_lt2 a M h
   | .succ _, .zero, M, h => Word.pos_of_lt2 0 M h
@@ -106,21 +129,25 @@ def Word.divGo2_lt : (fuel a M : Nat) → Nat.lt a (Nat.mul 2 M) = .true → Nat
     Word.divGo2_lt f 0 M (transp (fun t _ => Nat.lt 1 t = .true) h (Word.add_succ M (Nat.add M 0)))
   | .succ f, .succ (.succ (.succ a)), .succ M, h =>
     Word.divGo2_lt f (Nat.succ a) M (transp (fun t _ => Nat.lt (Nat.succ (Nat.succ a)) t = .true) h (Word.add_succ M (Nat.add M 0)))
+/-- `a / 2 < M` when `a < 2 M`. -/
 def Word.div2_lt (a M : Nat) (h : Nat.lt a (Nat.mul 2 M) = .true) : Nat.lt (Nat.div a 2) M = .true :=
   Word.divGo2_lt a a M h
--- a bit chosen by `c`, on top of `2 r`
+/-- A bit chosen by `c`, on top of `2 r`, is below `2 M` when `r < M`. -/
 def Word.bit_lt : (c : Bool) → (r M : Nat) → Nat.lt r M = .true →
     Nat.lt (match c with
       | .true => Nat.succ (Nat.mul 2 r)
       | .false => Nat.mul 2 r) (Nat.mul 2 M) = .true
   | .true, r, M, h => Word.lt_2x1 r M h
   | .false, r, M, h => Word.lt_2x r M h
+/-- Bitwise or of `0` and `0` (with fuel) is `0`. -/
 def Word.bitwise_or_zero : (fuel : Nat) → Nat.bitwise Bool.or fuel 0 0 = 0
   | .zero => rfl
   | .succ f => transp (fun t _ => Nat.mul 2 t = 0) (refl 0) (Word.symm (Word.bitwise_or_zero f))
+/-- Bitwise exclusive or of `0` and `0` (with fuel) is `0`. -/
 def Word.bitwise_xor_zero : (fuel : Nat) → Nat.bitwise Bool.xor fuel 0 0 = 0
   | .zero => rfl
   | .succ f => transp (fun t _ => Nat.mul 2 t = 0) (refl 0) (Word.symm (Word.bitwise_xor_zero f))
+/-- The bitwise or of two numbers below `2^k` is below `2^k`. -/
 def Word.lor_lt : (fuel k a b : Nat) → Nat.lt a (Nat.pow 2 k) = .true → Nat.lt b (Nat.pow 2 k) = .true →
     Nat.lt (Nat.bitwise Bool.or fuel a b) (Nat.pow 2 k) = .true
   | .zero, k, _, _, _, _ => Word.pow_pos k
@@ -133,6 +160,7 @@ def Word.lor_lt : (fuel k a b : Nat) → Nat.lt a (Nat.pow 2 k) = .true → Nat.
   | .succ f, .succ k, a, b, ha, hb =>
     Word.bit_lt (Bool.or (Nat.isOdd a) (Nat.isOdd b)) (Nat.bitwise Bool.or f (Nat.div a 2) (Nat.div b 2)) (Nat.pow 2 k)
       (Word.lor_lt f k (Nat.div a 2) (Nat.div b 2) (Word.div2_lt a (Nat.pow 2 k) ha) (Word.div2_lt b (Nat.pow 2 k) hb))
+/-- The bitwise exclusive or of two numbers below `2^k` is below `2^k`. -/
 def Word.xor_lt : (fuel k a b : Nat) → Nat.lt a (Nat.pow 2 k) = .true → Nat.lt b (Nat.pow 2 k) = .true →
     Nat.lt (Nat.bitwise Bool.xor fuel a b) (Nat.pow 2 k) = .true
   | .zero, k, _, _, _, _ => Word.pow_pos k
@@ -146,31 +174,52 @@ def Word.xor_lt : (fuel k a b : Nat) → Nat.lt a (Nat.pow 2 k) = .true → Nat.
     Word.bit_lt (Bool.xor (Nat.isOdd a) (Nat.isOdd b)) (Nat.bitwise Bool.xor f (Nat.div a 2) (Nat.div b 2)) (Nat.pow 2 k)
       (Word.xor_lt f k (Nat.div a 2) (Nat.div b 2) (Word.div2_lt a (Nat.pow 2 k) ha) (Word.div2_lt b (Nat.pow 2 k) hb))
 
+/-- `UIntN w`: a `w`-bit unsigned integer, a number below `2^w`.
+
+No field mentions the width, but it is part of the type all the same (a phantom
+parameter, stage 22e): `UIntN 8` and `UIntN 16` are different types, and `w` is inferred
+from an argument. At runtime a word is `⟨0 bits⟩` in the model (or just its bits,
+compiled: see the end of the module).
+
+Both `UIntN` and `IntN` are sealed (22k): they have the same shape but are different
+types (`UIntN.toIntN`/`IntN.toUIntN` convert, for free), and no look-alike is either. A
+word carries the proof that its bits are below `2^w` (22l: an erased field, so at
+runtime it is still just its bits), which the natives rely on: the kernel's definitions
+and compiled code agree on every word there is. The constructors are private: this
+module keeps the invariant `toNat < 2^w` (every function here returns an in-range word
+if its arguments are), so outside it a word is built with `UIntN.ofNat` and read with
+`UIntN.toNat` (`UIntN.toNat_lt` gives the range). -/
 sealed inductive UIntN (w : Nat) where
   | private mk (toNat : Nat) (0 isLt : Nat.lt toNat (Nat.pow 2 w) = .true)
+/-- `IntN w`: a `w`-bit two's-complement integer, stored as its bits (a number below `2^w`;
+`-1` is `2^w - 1`). Sealed, with a private constructor, like `UIntN`. -/
 sealed inductive IntN (w : Nat) where
   | private mk (toNat : Nat) (0 isLt : Nat.lt toNat (Nat.pow 2 w) = .true)
 
--- the bits as a number (for `IntN`, the two's-complement bits: `-1` is `2^w - 1`), and
--- their range
+/-- The bits as a number. -/
 def UIntN.toNat {w : Nat} : UIntN w → Nat
   | .mk n _ => n
+/-- The two's-complement bits as a number: `-1` is `2^w - 1`. -/
 def IntN.toNat {w : Nat} : IntN w → Nat
   | .mk n _ => n
 -- (the field is erased: it is used only as the equation `transp` rewrites along)
+/-- The range: `a.toNat < 2^w`. -/
 def UIntN.toNat_lt {0 w : Nat} : (a : UIntN w) → Nat.lt a.toNat (Nat.pow 2 w) = .true
   | .mk n h => transp (fun t _ => Nat.lt n (Nat.pow 2 w) = t) (refl (Nat.lt n (Nat.pow 2 w))) h
+/-- The range: `a.toNat < 2^w` (a signed word is stored as its bits). -/
 def IntN.toNat_lt {0 w : Nat} : (a : IntN w) → Nat.lt a.toNat (Nat.pow 2 w) = .true
   | .mk n h => transp (fun t _ => Nat.lt n (Nat.pow 2 w) = t) (refl (Nat.lt n (Nat.pow 2 w))) h
--- two words with the same bits are equal (the proofs don't count)
+/-- Two words with the same bits are equal (the proofs don't count). -/
 def UIntN.ext {0 w : Nat} : (a b : UIntN w) → a.toNat = b.toNat → a = b
   | .mk _ _, .mk _ _, e => (e, (), (), ())
 -- Every word is built with `mkR`, whose proof is `Word.canon`'s: for closed numbers it
 -- computes to `refl`, so two closed words with the same bits are convertible however
 -- their range was proved (the kernel compares erased fields too).
+/-- `Word.canonAux`: a `Bool` case split on `Nat.lt x M`, with the `true` case given. -/
 def Word.canonAux (x M : Nat) : (b : Bool) → Nat.lt x M = b → b = .true → Nat.lt x M = .true
   | .true, e, _ => e
   | .false, _, h => absurd h.1
+/-- The range proof every word is built with (see the note above). -/
 def Word.canon (x M : Nat) (h : Nat.lt x M = .true) : Nat.lt x M = .true :=
   Word.canonAux x M (Nat.lt x M) (refl (Nat.lt x M)) h
 private def UIntN.mkR {0 w : Nat} (x : Nat) (0 h : Nat.lt x (Nat.pow 2 w) = .true) : UIntN w :=
@@ -184,73 +233,115 @@ private def UIntN.below {0 w : Nat} (x b : Nat) (0 h : Nat.lt b (Nat.pow 2 w) = 
 private def IntN.below {0 w : Nat} (x b : Nat) (0 h : Nat.lt b (Nat.pow 2 w) = .true) : IntN w :=
   IntN.mkR (Word.min x b) (Word.min_lt x b (Nat.pow 2 w) h)
 
+/-- `IntN.below`'s bits: `min x b`, which is how `IntN.shiftRight`'s value is read (the
+constructor is private, so this is where its `toNat` is stated). -/
+def IntN.below_toNat {0 w : Nat} (x b : Nat) (h : Nat.lt b (Nat.pow 2 w) = .true) :
+    (IntN.below x b h).toNat = Word.min x b := rfl
+
+/-- `n` mod `2^w` as a word: `UIntN.ofNat 8 300` is `44`. -/
 def UIntN.ofNat (w n : Nat) : UIntN w :=
   UIntN.below (Nat.mod n (Nat.pow 2 w)) (Nat.sub (Nat.pow 2 w) 1) (Word.pow_pred_lt w)
+/-- Zero. -/
 def UIntN.zero (w : Nat) : UIntN w := UIntN.mkR 0 (Word.pow_pos w)
+/-- The largest word, `2^w - 1` (all bits set). -/
 def UIntN.max (w : Nat) : UIntN w := UIntN.mkR (Nat.sub (Nat.pow 2 w) 1) (Word.pow_pred_lt w)
 
 -- Wrapping arithmetic.
+/-- `a + b` mod `2^w`. -/
 def UIntN.add {ω w : Nat} (a b : UIntN w) : UIntN w := UIntN.ofNat w (a.toNat + b.toNat)
+/-- `a - b` mod `2^w`. -/
 def UIntN.sub {ω w : Nat} (a b : UIntN w) : UIntN w := UIntN.ofNat w (a.toNat + (Nat.pow 2 w - b.toNat))
+/-- `a * b` mod `2^w`. -/
 def UIntN.mul {ω w : Nat} (a b : UIntN w) : UIntN w := UIntN.ofNat w (a.toNat * b.toNat)
+/-- `-a` mod `2^w`. -/
 def UIntN.neg {ω w : Nat} (a : UIntN w) : UIntN w := UIntN.sub (UIntN.zero w) a
+/-- Unsigned division; `a / 0 = 0`. -/
 def UIntN.div {ω w : Nat} (a b : UIntN w) : UIntN w := UIntN.below (Nat.div a.toNat b.toNat) a.toNat a.toNat_lt
+/-- Unsigned remainder; `a % 0 = a`. -/
 def UIntN.mod {ω w : Nat} (a b : UIntN w) : UIntN w := UIntN.below (Nat.mod a.toNat b.toNat) a.toNat a.toNat_lt
 
 -- Comparisons.
+/-- Equality test. -/
 def UIntN.beq {w : Nat} (a b : UIntN w) : Bool := Nat.beq a.toNat b.toNat
+/-- Unsigned `a < b`. -/
 def UIntN.lt {w : Nat} (a b : UIntN w) : Bool := Nat.lt a.toNat b.toNat
+/-- Unsigned `a ≤ b`. -/
 def UIntN.le {w : Nat} (a b : UIntN w) : Bool := Nat.le a.toNat b.toNat
 
 -- Bits. Shifts by `k ≥ w` give `0` (as Lean's `BitVec`; Rust's `<<` panics there and
 -- `wrapping_shl` shifts by `k % w`).
+/-- Bitwise and. -/
 def UIntN.land {w : Nat} (a b : UIntN w) : UIntN w := UIntN.below (Nat.land a.toNat b.toNat) a.toNat a.toNat_lt
+/-- Bitwise or. -/
 def UIntN.lor {w : Nat} (a b : UIntN w) : UIntN w :=
   UIntN.mkR (Nat.lor a.toNat b.toNat) (Word.lor_lt (Nat.add a.toNat b.toNat) w a.toNat b.toNat a.toNat_lt b.toNat_lt)
+/-- Bitwise exclusive or. -/
 def UIntN.xor {w : Nat} (a b : UIntN w) : UIntN w :=
   UIntN.mkR (Nat.xor a.toNat b.toNat) (Word.xor_lt (Nat.add a.toNat b.toNat) w a.toNat b.toNat a.toNat_lt b.toNat_lt)
+/-- Bitwise complement. -/
 def UIntN.not {ω w : Nat} (a : UIntN w) : UIntN w :=
   UIntN.below (Nat.pow 2 w - 1 - a.toNat) (Nat.sub (Nat.pow 2 w) 1) (Word.pow_pred_lt w)
+/-- Shift left by `k` places, wrapping (bits shifted out at the top are lost). -/
 def UIntN.shiftLeft {ω w : Nat} (a : UIntN w) (k : Nat) : UIntN w := UIntN.ofNat w (Nat.shiftLeft a.toNat k)
+/-- Logical shift right by `k` places. -/
 def UIntN.shiftRight {w : Nat} (a : UIntN w) (k : Nat) : UIntN w := UIntN.below (Nat.shiftRight a.toNat k) a.toNat a.toNat_lt
+/-- Bit `i` (bit 0 is the least significant). -/
 def UIntN.testBit {w : Nat} (a : UIntN w) (i : Nat) : Bool := Nat.testBit a.toNat i
+/-- The most significant bit, bit `w - 1`. -/
 def UIntN.msb {ω w : Nat} (a : UIntN w) : Bool := Nat.testBit a.toNat (w - 1)
 
 -- Conversions: to another width (zero-extending or truncating), and the same bits as
 -- a signed number (Rust's `as`).
+/-- To width `v`, zero-extending or truncating: `UIntN.resize 4 (U8.ofNat 255)` is `15`. -/
 def UIntN.resize {w : Nat} (ω v : Nat) (a : UIntN w) : UIntN v := UIntN.ofNat v a.toNat
+/-- The same bits as a signed number (Rust's `as`): free. -/
 def UIntN.toIntN {w : Nat} (a : UIntN w) : IntN w := IntN.mkR a.toNat a.toNat_lt
+/-- The same bits as an unsigned number (Rust's `as`): free. -/
 def IntN.toUIntN {w : Nat} (a : IntN w) : UIntN w := UIntN.mkR a.toNat a.toNat_lt
 
 -- Signed numbers: `n` and `-n`, the sign, and the magnitude.
+/-- `n` mod `2^w` as a signed word. -/
 def IntN.ofNat (w n : Nat) : IntN w :=
   IntN.below (Nat.mod n (Nat.pow 2 w)) (Nat.sub (Nat.pow 2 w) 1) (Word.pow_pred_lt w)
+/-- `-n` as a signed word (mod `2^w`): `IntN.ofNeg 8 1` is `-1`, bits `255`. -/
 def IntN.ofNeg (w n : Nat) : IntN w := IntN.ofNat w (Nat.pow 2 w - Nat.mod n (Nat.pow 2 w))
+/-- Whether the number is negative: its top bit. -/
 def IntN.isNeg {ω w : Nat} (a : IntN w) : Bool := Nat.testBit a.toNat (w - 1)
+/-- The magnitude `|a|` (for `IntN.min`, `2^(w-1)`). -/
 def IntN.natAbs {ω w : Nat} (a : IntN w) : Nat := match IntN.isNeg a with
   | .true => Nat.pow 2 w - a.toNat
   | .false => a.toNat
--- the smallest and largest values: `-2^(w-1)` and `2^(w-1) - 1`
--- (at width 0 both are 0)
+/-- The smallest value, `-2^(w-1)` (at width 0 both bounds are 0). -/
 def IntN.min (w : Nat) : IntN w := IntN.ofNat w (Nat.pow 2 (w - 1))
+/-- The largest value, `2^(w-1) - 1` (at width 0 both bounds are 0). -/
 def IntN.max (w : Nat) : IntN w := IntN.ofNat w (Nat.pow 2 (w - 1) - 1)
 
 -- The same bits as unsigned arithmetic: wrapping `+ - *`, bits, left shifts.
+/-- Wrapping `a + b` (the same bits as unsigned addition). -/
 def IntN.add {ω w : Nat} (a b : IntN w) : IntN w := (UIntN.add a.toUIntN b.toUIntN).toIntN
+/-- Wrapping `a - b`. -/
 def IntN.sub {ω w : Nat} (a b : IntN w) : IntN w := (UIntN.sub a.toUIntN b.toUIntN).toIntN
+/-- Wrapping `a * b`. -/
 def IntN.mul {ω w : Nat} (a b : IntN w) : IntN w := (UIntN.mul a.toUIntN b.toUIntN).toIntN
+/-- Wrapping `-a` (`-IntN.min` is `IntN.min`). -/
 def IntN.neg {ω w : Nat} (a : IntN w) : IntN w := (UIntN.neg a.toUIntN).toIntN
+/-- Equality test. -/
 def IntN.beq {w : Nat} (a b : IntN w) : Bool := Nat.beq a.toNat b.toNat
+/-- Bitwise and. -/
 def IntN.land {w : Nat} (a b : IntN w) : IntN w := IntN.below (Nat.land a.toNat b.toNat) a.toNat a.toNat_lt
+/-- Bitwise or. -/
 def IntN.lor {w : Nat} (a b : IntN w) : IntN w :=
   IntN.mkR (Nat.lor a.toNat b.toNat) (Word.lor_lt (Nat.add a.toNat b.toNat) w a.toNat b.toNat a.toNat_lt b.toNat_lt)
+/-- Bitwise exclusive or. -/
 def IntN.xor {w : Nat} (a b : IntN w) : IntN w :=
   IntN.mkR (Nat.xor a.toNat b.toNat) (Word.xor_lt (Nat.add a.toNat b.toNat) w a.toNat b.toNat a.toNat_lt b.toNat_lt)
+/-- Bitwise complement. -/
 def IntN.not {ω w : Nat} (a : IntN w) : IntN w := (UIntN.not a.toUIntN).toIntN
+/-- Shift left by `k` places, wrapping. -/
 def IntN.shiftLeft {ω w : Nat} (a : IntN w) (k : Nat) : IntN w := (UIntN.shiftLeft a.toUIntN k).toIntN
 
--- Division truncates towards zero and the remainder takes the dividend's sign, as in
--- Rust: `-7 / 2 = -3`, `-7 % 2 = -1`; `min / -1` wraps to `min` (`wrapping_div`).
+/-- Signed division, truncating towards zero as in Rust: `-7 / 2 = -3`; `a / 0 = 0`;
+`min / -1` wraps to `min` (`wrapping_div`). -/
 def IntN.div {ω w : Nat} (a b : IntN w) : IntN w := match Nat.beq b.toNat 0 with
   | .true => IntN.mkR 0 (Word.pow_pos w)
   | .false =>
@@ -258,6 +349,7 @@ def IntN.div {ω w : Nat} (a b : IntN w) : IntN w := match Nat.beq b.toNat 0 wit
     match Bool.xor (IntN.isNeg a) (IntN.isNeg b) with
     | .true => IntN.ofNeg w q
     | .false => IntN.ofNat w q
+/-- The remainder of `IntN.div`: it takes the dividend's sign, `-7 % 2 = -1`; `a % 0 = a`. -/
 def IntN.rem {ω w : Nat} (a b : IntN w) : IntN w := match Nat.beq b.toNat 0 with
   | .true => a
   | .false =>
@@ -265,73 +357,128 @@ def IntN.rem {ω w : Nat} (a b : IntN w) : IntN w := match Nat.beq b.toNat 0 wit
     match IntN.isNeg a with
     | .true => IntN.ofNeg w r
     | .false => IntN.ofNat w r
+/-- Signed `a < b`. -/
 def IntN.lt {ω w : Nat} (a b : IntN w) : Bool := match IntN.isNeg a, IntN.isNeg b with
   | .true, .false => .true
   | .false, .true => .false
   | _, _ => Nat.lt a.toNat b.toNat
+/-- Signed `a ≤ b`. -/
 def IntN.le {ω w : Nat} (a b : IntN w) : Bool := Bool.not (IntN.lt b a)
--- arithmetic shift: copies of the sign bit come in
-def IntN.shiftRight {ω w : Nat} (a : IntN w) (k : Nat) : IntN w := match IntN.isNeg a with
+/-- The body of `IntN.shiftRight`, by the sign (so proofs can split on it). -/
+def IntN.shiftRightBody (w k : Nat) (b : Bool) (a : IntN w) : IntN w := match b with
   | .true =>
     let n := IntN.not a;
     IntN.not (IntN.below (Nat.shiftRight n.toNat k) n.toNat n.toNat_lt)
   | .false => IntN.below (Nat.shiftRight a.toNat k) a.toNat a.toNat_lt
--- to another width: sign-extending or truncating
+/-- Arithmetic shift right: copies of the sign bit come in. -/
+def IntN.shiftRight {ω w : Nat} (a : IntN w) (k : Nat) : IntN w := IntN.shiftRightBody w k (IntN.isNeg a) a
+/-- `IntN.not`'s bits: `2^w - 1 - a` (the min is `Word.below`'s). -/
+def IntN.not_toNat {0 w : Nat} (a : IntN w) :
+    (IntN.not a).toNat = Word.min (Nat.sub (Nat.sub (Nat.pow 2 w) 1) a.toNat) (Nat.sub (Nat.pow 2 w) 1) := rfl
+/-- `IntN.shiftRightBody`'s value when the sign is clear: `a >> k` (the min is `below`'s). -/
+def IntN.shiftRightBody_pos_toNat (w k : Nat) (a : IntN w) :
+    (IntN.shiftRightBody w k .false a).toNat = Word.min (Nat.shiftRight a.toNat k) a.toNat := rfl
+/-- `IntN.shiftRightBody`'s value when the sign is set: `2^w - 1 - (n >> k)` with
+`n = ~a` (all three mins are `below`'s). -/
+def IntN.shiftRightBody_neg_toNat (w k : Nat) (a : IntN w) :
+    (IntN.shiftRightBody w k .true a).toNat
+      = Word.min (Nat.sub (Nat.sub (Nat.pow 2 w) 1)
+          (Word.min (Nat.shiftRight (IntN.not a).toNat k) (IntN.not a).toNat))
+        (Nat.sub (Nat.pow 2 w) 1) := rfl
+/-- To width `v`: sign-extending or truncating. -/
 def IntN.resize {ω w : Nat} (ω v : Nat) (a : IntN w) : IntN v := match IntN.isNeg a with
   | .true => IntN.ofNeg v (IntN.natAbs a)
   | .false => IntN.ofNat v a.toNat
 
--- Numeric classes (7e): `a + b`, `a * b`, `-a`, `a / b`, `a % b` and numerals at every
--- width. A numeral wraps around (`(300 : U8) = 44`), as `UIntN.ofNat` does. `IntN`'s
--- `/` and `%` are signed (truncating, as Rust's), `UIntN`'s unsigned. (`UIntN w` and
--- `IntN w` are different types, 22k: each has its own instances.)
+/-- Numerals at every width; a numeral wraps around (`(300 : U8) = 44`). -/
 instance {ω w n : Nat} : OfNat (UIntN w) n := OfNat.mk (UIntN.ofNat w n)
+/-- `a + b` on `UIntN w`. -/
 instance {ω w : Nat} : Add (UIntN w) := Add.mk UIntN.add
+/-- `a - b` on `UIntN w`. -/
 instance {ω w : Nat} : Sub (UIntN w) := Sub.mk UIntN.sub
+/-- `a * b` on `UIntN w`. -/
 instance {ω w : Nat} : Mul (UIntN w) := Mul.mk UIntN.mul
+/-- `-a` on `UIntN w`. -/
 instance {ω w : Nat} : Neg (UIntN w) := Neg.mk UIntN.neg
+/-- `a / b` on `UIntN w` (unsigned). -/
 instance {ω w : Nat} : Div (UIntN w) := Div.mk UIntN.div
+/-- `a % b` on `UIntN w` (unsigned). -/
 instance {ω w : Nat} : Mod (UIntN w) := Mod.mk UIntN.mod
+/-- Numerals for signed words; a numeral wraps around. -/
 instance {ω w n : Nat} : OfNat (IntN w) n := OfNat.mk (IntN.ofNat w n)
+/-- `a + b` on `IntN w`. -/
 instance {ω w : Nat} : Add (IntN w) := Add.mk IntN.add
+/-- `a - b` on `IntN w`. -/
 instance {ω w : Nat} : Sub (IntN w) := Sub.mk IntN.sub
+/-- `a * b` on `IntN w`. -/
 instance {ω w : Nat} : Mul (IntN w) := Mul.mk IntN.mul
+/-- `-a` on `IntN w`. -/
 instance {ω w : Nat} : Neg (IntN w) := Neg.mk IntN.neg
+/-- `a / b` on `IntN w` (signed, truncating, as Rust's). -/
 instance {ω w : Nat} : Div (IntN w) := Div.mk IntN.div
+/-- `a % b` on `IntN w` (signed: `IntN.rem`). -/
 instance {ω w : Nat} : Mod (IntN w) := Mod.mk IntN.rem
 -- bitwise (H14 S2): `&&& ||| ^^^ ~~~ <<< >>>` on unsigned words
+/-- `a &&& b` on words is `UIntN.land`. -/
 instance {ω w : Nat} : AndOp (UIntN w) := AndOp.mk UIntN.land
+/-- `a ||| b` on words is `UIntN.lor`. -/
 instance {ω w : Nat} : OrOp (UIntN w) := OrOp.mk UIntN.lor
+/-- `a ^^^ b` on words is `UIntN.xor`. -/
 instance {ω w : Nat} : XorOp (UIntN w) := XorOp.mk UIntN.xor
+/-- `~~~a` on words is `UIntN.not`. -/
 instance {ω w : Nat} : Complement (UIntN w) := Complement.mk UIntN.not
+/-- `a <<< k` on words is `UIntN.shiftLeft`. -/
 instance {ω w : Nat} : ShiftLeft (UIntN w) := ShiftLeft.mk UIntN.shiftLeft
+/-- `a >>> k` on words is `UIntN.shiftRight`. -/
 instance {ω w : Nat} : ShiftRight (UIntN w) := ShiftRight.mk UIntN.shiftRight
 
 -- Rust's fixed widths. Operations come from the width-indexed types (`x.add y`).
+/-- Rust's `u8`: an 8-bit unsigned integer, `UIntN 8`. -/
 def U8 : Type := UIntN 8
+/-- Rust's `u16`: a 16-bit unsigned integer, `UIntN 16`. -/
 def U16 : Type := UIntN 16
+/-- Rust's `u32`: a 32-bit unsigned integer, `UIntN 32`. -/
 def U32 : Type := UIntN 32
+/-- Rust's `u64`: a 64-bit unsigned integer, `UIntN 64`. -/
 def U64 : Type := UIntN 64
+/-- Rust's `usize`: a 64-bit unsigned integer, `UIntN 64`. -/
 def USize : Type := UIntN 64
+/-- Rust's `i8`: an 8-bit signed integer, `IntN 8`. -/
 def I8 : Type := IntN 8
+/-- Rust's `i16`: a 16-bit signed integer, `IntN 16`. -/
 def I16 : Type := IntN 16
+/-- Rust's `i32`: a 32-bit signed integer, `IntN 32`. -/
 def I32 : Type := IntN 32
+/-- Rust's `i64`: a 64-bit signed integer, `IntN 64`. -/
 def I64 : Type := IntN 64
+/-- `n` mod `2^8` as a `U8`. -/
 def U8.ofNat (n : Nat) : U8 := UIntN.ofNat 8 n
+/-- `n` mod `2^16` as a `U16`. -/
 def U16.ofNat (n : Nat) : U16 := UIntN.ofNat 16 n
+/-- `n` mod `2^32` as a `U32`. -/
 def U32.ofNat (n : Nat) : U32 := UIntN.ofNat 32 n
+/-- `n` mod `2^64` as a `U64`. -/
 def U64.ofNat (n : Nat) : U64 := UIntN.ofNat 64 n
+/-- `n` mod `2^64` as a `USize`. -/
 def USize.ofNat (n : Nat) : USize := UIntN.ofNat 64 n
+/-- `n` mod `2^8` as a `I8`. -/
 def I8.ofNat (n : Nat) : I8 := IntN.ofNat 8 n
+/-- `n` mod `2^16` as a `I16`. -/
 def I16.ofNat (n : Nat) : I16 := IntN.ofNat 16 n
+/-- `n` mod `2^32` as a `I32`. -/
 def I32.ofNat (n : Nat) : I32 := IntN.ofNat 32 n
+/-- `n` mod `2^64` as a `I64`. -/
 def I64.ofNat (n : Nat) : I64 := IntN.ofNat 64 n
+/-- `-n` as an `I8` (mod `2^8`): `I8.ofNeg 1` is `-1`. -/
 def I8.ofNeg (n : Nat) : I8 := IntN.ofNeg 8 n
+/-- `-n` as an `I16` (mod `2^16`): `I16.ofNeg 1` is `-1`. -/
 def I16.ofNeg (n : Nat) : I16 := IntN.ofNeg 16 n
+/-- `-n` as an `I32` (mod `2^32`): `I32.ofNeg 1` is `-1`. -/
 def I32.ofNeg (n : Nat) : I32 := IntN.ofNeg 32 n
+/-- `-n` as an `I64` (mod `2^64`): `I64.ofNeg 1` is `-1`. -/
 def I64.ofNeg (n : Nat) : I64 := IntN.ofNeg 64 n
 
--- Native implementations for compiled code (runtime/wiz.c). `#eval` and `#run` run the
+-- Native implementations for compiled code (runtime/). `#eval` and `#run` run the
 -- definitions above; the word group's tables check that both agree.
 --
 -- The representation (stage 22d): compiled code doesn't build the model's object
@@ -340,37 +487,62 @@ def I64.ofNeg (n : Nat) : I64 := IntN.ofNeg 64 n
 -- `ofBits` is the constructor and `toBits` its field; matching on a word reads the
 -- field with `toBits`. Every operation below works on that representation directly.
 
--- a `Nat` passed to C as the runtime number itself (it may be big), not as a uint64_t
+/-- A `Nat` passed to C as the runtime number itself (it may be big), not as a `uint64_t`. -/
 def NatObj : Type := Nat
 
+/-- Native constructor (compiled code): a word *is* its bits, so this builds nothing (it
+takes the range proof, erased, like `UIntN.mk`). -/
 extern "wiz_word_of_bits" UIntN.ofBits : {0 w : Nat} → (n : NatObj) → (0 h : Nat.lt n (Nat.pow 2 w) = .true) → UIntN w
+/-- Native field access: the bits of a word. -/
 extern "wiz_word_to_bits" UIntN.toBits : {0 w : Nat} → UIntN w → NatObj
+/-- Native constructor of `IntN` (compiled code): its bits. -/
 extern "wiz_word_of_bits" IntN.ofBits : {0 w : Nat} → (n : NatObj) → (0 h : Nat.lt n (Nat.pow 2 w) = .true) → IntN w
+/-- Native field access: the bits of a signed word. -/
 extern "wiz_word_to_bits" IntN.toBits : {0 w : Nat} → IntN w → NatObj
 attribute [implemented_by UIntN.ofBits UIntN.toBits] UIntN.mk
 attribute [implemented_by IntN.ofBits IntN.toBits] IntN.mk
 attribute [implemented_by UIntN.toBits] UIntN.toNat
 attribute [implemented_by IntN.toBits] IntN.toNat
 
+/-- The native `UIntN.ofNat` for compiled code (`wiz_word_of_nat`, runtime/). -/
 extern "wiz_word_of_nat" UIntN.ofNatNative : (w : Nat) → NatObj → UIntN w
+/-- The native `UIntN.add` for compiled code (`wiz_word_add`, runtime/). -/
 extern "wiz_word_add" UIntN.addNative : {ω w : Nat} → UIntN w → UIntN w → UIntN w
+/-- The native `UIntN.sub` for compiled code (`wiz_word_sub`, runtime/). -/
 extern "wiz_word_sub" UIntN.subNative : {ω w : Nat} → UIntN w → UIntN w → UIntN w
+/-- The native `UIntN.mul` for compiled code (`wiz_word_mul`, runtime/). -/
 extern "wiz_word_mul" UIntN.mulNative : {ω w : Nat} → UIntN w → UIntN w → UIntN w
+/-- The native `UIntN.div` for compiled code (`wiz_word_udiv`, runtime/). -/
 extern "wiz_word_udiv" UIntN.divNative : {ω w : Nat} → UIntN w → UIntN w → UIntN w
+/-- The native `UIntN.mod` for compiled code (`wiz_word_umod`, runtime/). -/
 extern "wiz_word_umod" UIntN.modNative : {ω w : Nat} → UIntN w → UIntN w → UIntN w
+/-- The native `UIntN.beq` for compiled code (`wiz_word_eq`, runtime/). -/
 extern "wiz_word_eq" UIntN.beqNative : {w : Nat} → UIntN w → UIntN w → Bool
+/-- The native `UIntN.lt` for compiled code (`wiz_word_ult`, runtime/). -/
 extern "wiz_word_ult" UIntN.ltNative : {w : Nat} → UIntN w → UIntN w → Bool
+/-- The native `UIntN.le` for compiled code (`wiz_word_ule`, runtime/). -/
 extern "wiz_word_ule" UIntN.leNative : {w : Nat} → UIntN w → UIntN w → Bool
+/-- The native `UIntN.land` for compiled code (`wiz_word_and`, runtime/). -/
 extern "wiz_word_and" UIntN.landNative : {w : Nat} → UIntN w → UIntN w → UIntN w
+/-- The native `UIntN.lor` for compiled code (`wiz_word_or`, runtime/). -/
 extern "wiz_word_or" UIntN.lorNative : {w : Nat} → UIntN w → UIntN w → UIntN w
+/-- The native `UIntN.xor` for compiled code (`wiz_word_xor`, runtime/). -/
 extern "wiz_word_xor" UIntN.xorNative : {w : Nat} → UIntN w → UIntN w → UIntN w
+/-- The native `UIntN.not` for compiled code (`wiz_word_not`, runtime/). -/
 extern "wiz_word_not" UIntN.notNative : {ω w : Nat} → UIntN w → UIntN w
+/-- The native `UIntN.shiftLeft` for compiled code (`wiz_word_shl`, runtime/). -/
 extern "wiz_word_shl" UIntN.shiftLeftNative : {ω w : Nat} → UIntN w → NatObj → UIntN w
+/-- The native `UIntN.shiftRight` for compiled code (`wiz_word_lshr`, runtime/). -/
 extern "wiz_word_lshr" UIntN.shiftRightNative : {w : Nat} → UIntN w → NatObj → UIntN w
+/-- The native `UIntN.testBit` for compiled code (`wiz_word_bit`, runtime/). -/
 extern "wiz_word_bit" UIntN.testBitNative : {w : Nat} → UIntN w → NatObj → Bool
+/-- The native `UIntN.msb` for compiled code (`wiz_word_msb`, runtime/). -/
 extern "wiz_word_msb" UIntN.msbNative : {ω w : Nat} → UIntN w → Bool
+/-- The native `UIntN.resize` for compiled code (`wiz_word_zext`, runtime/). -/
 extern "wiz_word_zext" UIntN.resizeNative : {w : Nat} → (ω v : Nat) → UIntN w → UIntN v
+/-- The native `UIntN.toIntN` for compiled code (`wiz_word_cast`, runtime/). -/
 extern "wiz_word_cast" UIntN.toIntNNative : {w : Nat} → UIntN w → IntN w
+/-- The native `IntN.toUIntN` for compiled code (`wiz_word_cast`, runtime/). -/
 extern "wiz_word_cast" IntN.toUIntNNative : {w : Nat} → IntN w → UIntN w
 attribute [implemented_by UIntN.ofNatNative] UIntN.ofNat
 attribute [implemented_by UIntN.addNative] UIntN.add
@@ -393,23 +565,41 @@ attribute [implemented_by UIntN.resizeNative] UIntN.resize
 attribute [implemented_by UIntN.toIntNNative] UIntN.toIntN
 attribute [implemented_by IntN.toUIntNNative] IntN.toUIntN
 
+/-- The native `IntN.ofNat` for compiled code (`wiz_word_of_nat`, runtime/). -/
 extern "wiz_word_of_nat" IntN.ofNatNative : (w : Nat) → NatObj → IntN w
+/-- The native `IntN.ofNeg` for compiled code (`wiz_word_of_neg`, runtime/). -/
 extern "wiz_word_of_neg" IntN.ofNegNative : (w : Nat) → NatObj → IntN w
+/-- The native `IntN.add` for compiled code (`wiz_word_add`, runtime/). -/
 extern "wiz_word_add" IntN.addNative : {ω w : Nat} → IntN w → IntN w → IntN w
+/-- The native `IntN.sub` for compiled code (`wiz_word_sub`, runtime/). -/
 extern "wiz_word_sub" IntN.subNative : {ω w : Nat} → IntN w → IntN w → IntN w
+/-- The native `IntN.mul` for compiled code (`wiz_word_mul`, runtime/). -/
 extern "wiz_word_mul" IntN.mulNative : {ω w : Nat} → IntN w → IntN w → IntN w
+/-- The native `IntN.div` for compiled code (`wiz_word_sdiv`, runtime/). -/
 extern "wiz_word_sdiv" IntN.divNative : {ω w : Nat} → IntN w → IntN w → IntN w
+/-- The native `IntN.rem` for compiled code (`wiz_word_srem`, runtime/). -/
 extern "wiz_word_srem" IntN.remNative : {ω w : Nat} → IntN w → IntN w → IntN w
+/-- The native `IntN.beq` for compiled code (`wiz_word_eq`, runtime/). -/
 extern "wiz_word_eq" IntN.beqNative : {w : Nat} → IntN w → IntN w → Bool
+/-- The native `IntN.land` for compiled code (`wiz_word_and`, runtime/). -/
 extern "wiz_word_and" IntN.landNative : {w : Nat} → IntN w → IntN w → IntN w
+/-- The native `IntN.lor` for compiled code (`wiz_word_or`, runtime/). -/
 extern "wiz_word_or" IntN.lorNative : {w : Nat} → IntN w → IntN w → IntN w
+/-- The native `IntN.xor` for compiled code (`wiz_word_xor`, runtime/). -/
 extern "wiz_word_xor" IntN.xorNative : {w : Nat} → IntN w → IntN w → IntN w
+/-- The native `IntN.not` for compiled code (`wiz_word_not`, runtime/). -/
 extern "wiz_word_not" IntN.notNative : {ω w : Nat} → IntN w → IntN w
+/-- The native `IntN.shiftLeft` for compiled code (`wiz_word_shl`, runtime/). -/
 extern "wiz_word_shl" IntN.shiftLeftNative : {ω w : Nat} → IntN w → NatObj → IntN w
+/-- The native `IntN.shiftRight` for compiled code (`wiz_word_ashr`, runtime/). -/
 extern "wiz_word_ashr" IntN.shiftRightNative : {ω w : Nat} → IntN w → NatObj → IntN w
+/-- The native `IntN.lt` for compiled code (`wiz_word_slt`, runtime/). -/
 extern "wiz_word_slt" IntN.ltNative : {ω w : Nat} → IntN w → IntN w → Bool
+/-- The native `IntN.le` for compiled code (`wiz_word_sle`, runtime/). -/
 extern "wiz_word_sle" IntN.leNative : {ω w : Nat} → IntN w → IntN w → Bool
+/-- The native `IntN.isNeg` for compiled code (`wiz_word_msb`, runtime/). -/
 extern "wiz_word_msb" IntN.isNegNative : {ω w : Nat} → IntN w → Bool
+/-- The native `IntN.resize` for compiled code (`wiz_word_sext`, runtime/). -/
 extern "wiz_word_sext" IntN.resizeNative : {ω w : Nat} → (ω v : Nat) → IntN w → IntN v
 attribute [implemented_by IntN.ofNatNative] IntN.ofNat
 attribute [implemented_by IntN.ofNegNative] IntN.ofNeg

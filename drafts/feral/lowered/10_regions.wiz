@@ -12,9 +12,9 @@ def longest {ρa ρb : Region} (0 h : Outlives ρa ρb) (x : Shr ρa U64) (y : S
   | .false => .ok (Shr.weaken h x)                -- 'a : 'b
 
 -- fn remember {'a 'b 'm} {'a : 'b} (slot : &'m mut Option (&'b U64)) (x : &'a U64) : Unit
-def remember {ρa ρb ρm : Region} (0 h : Outlives ρa ρb) (slot : Uniq ρm (Option (Shr ρb U64))) (x : Shr ρa U64) :
-    Result (Unit × Uniq ρm (Option (Shr ρb U64))) :=
-  .ok ((), Uniq.set slot (Option.some (Shr.weaken h x)))   -- *slot := .some x   ('a : 'b)
+def remember {ρa ρb ρm : Region} (0 h : Outlives ρa ρb) (1 slot : Uniq ρm (Option (Shr ρb U64))) (x : Shr ρa U64) :
+    Result1 Unit (Uniq ρm (Option (Shr ρb U64))) :=
+  .ok () (Uniq.write slot (Option.some (Shr.weaken h x)))  -- *slot := .some x   ('a : 'b)
 
 -- fn main () : U64
 -- `ra := &a` is a scope at ρa (in main's body: Region.static); `rb := &b` is a scope at

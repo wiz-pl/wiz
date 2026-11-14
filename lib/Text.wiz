@@ -1,90 +1,126 @@
 import Prelude
--- Text and lists (stage 9j): the string and list functions every program needs, in one
--- module, pure (so `#eval` runs them) and linear in the length of their input.
---
--- Cost model. A `String` is `String.mk` around a `List Char`, in the kernel and at
--- runtime alike (`builtin string` only changes how values print), so:
--- * walking a string front to back, `String.chars`, `String.mk`, a prefix test, taking
---   or dropping a prefix are cheap (proportional to what is walked);
--- * `String.append a b` copies `a` (not `b`): appending in a loop from the left is
---   quadratic. Build from the right (`String.join`, `String.intercalate` do), or keep a
---   reversed `List Char` and reverse it once;
--- * the end of a string is far: `endsWith`, `dropEnd`, `trimRight` reverse it once;
--- * every call into C converts the list to a C string and back (linear each time).
--- `Std.Str` is the native alternative when a program does a lot of indexing.
+/-!
+# Text
+
+Text and lists (stage 9j): the string and list functions every program needs, in one
+module, pure (so `#eval` runs them) and linear in the length of their input.
+
+**Cost model.** A `String` is `String.mk` around a `List Char`, in the kernel and at
+runtime alike (`builtin string` only changes how values print), so:
+
+* walking a string front to back, `String.chars`, `String.mk`, a prefix test, taking
+  or dropping a prefix are cheap (proportional to what is walked);
+* `String.append a b` copies `a` (not `b`): appending in a loop from the left is
+  quadratic. Build from the right (`String.join`, `String.intercalate` do), or keep a
+  reversed `List Char` and reverse it once;
+* the end of a string is far: `String.endsWith`, `String.dropEnd`, `String.trimRight`
+  reverse it once;
+* every call into C converts the list to a C string and back (linear each time).
+
+`Std.Str` is the native alternative when a program does a lot of indexing.
+
+Main definitions: list functions (`List.map`, `List.filter`, `List.foldr`,
+`List.find`, …), character tests (`Char.isSpace`, `Char.isDigit`), and strings:
+`String.splitOn`, `String.intercalate`, `String.trim`, `String.replace`,
+`String.parseNat`, `String.startsWith`, `Nat.repr`.
+
+```
+import Text
+
+#eval String.splitOn "a,b,,c" ","                   -- ["a", "b", "", "c"]
+#eval String.intercalate ", " ["x", "y", "z"]        -- "x, y, z"
+#eval String.parseNat (String.trim "  42 ")          -- some 42
+```
+-/
 
 -- ## Lists
 
+/-- `xs` reversed onto `acc`: `List.revApp [1, 2] [3]` is `[2, 1, 3]`. -/
 def List.revApp {A : Type} : List A → List A → List A
   | .nil, acc => acc
   | .cons x xs, acc => List.revApp xs (.cons x acc)
+/-- The list in reverse order (linear, through `List.revApp`). -/
 def List.reverse {A : Type} (l : List A) : List A := List.revApp l .nil
+/-- Apply `f` to every element. -/
 def List.map {A B : Type} (f : A → B) : List A → List B
   | .nil => .nil
   | .cons x xs => .cons (f x) (List.map f xs)
+/-- The elements that satisfy `p`, in order. -/
 def List.filter {A : Type} (p : A → Bool) : List A → List A
   | .nil => .nil
   | .cons x xs => match p x with
     | .true => .cons x (List.filter p xs)
     | .false => List.filter p xs
+/-- Fold from the left: `List.foldl f b [x, y]` is `f (f b x) y`. -/
 def List.foldl {A B : Type} (f : B → A → B) : B → List A → B
   | b, .nil => b
   | b, .cons x xs => List.foldl f (f b x) xs
+/-- Fold from the right: `List.foldr f b [x, y]` is `f x (f y b)`. -/
 def List.foldr {A B : Type} (f : A → B → B) (b : B) : List A → B
   | .nil => b
   | .cons x xs => f x (List.foldr f b xs)
+/-- Whether some element satisfies `p` (stops at the first). -/
 def List.any {A : Type} (p : A → Bool) : List A → Bool
   | .nil => .false
   | .cons x xs => match p x with
     | .true => .true
     | .false => List.any p xs
+/-- Whether every element satisfies `p` (stops at the first that doesn't). -/
 def List.all {A : Type} (p : A → Bool) : List A → Bool
   | .nil => .true
   | .cons x xs => match p x with
     | .true => List.all p xs
     | .false => .false
--- the first element that satisfies `p`
+/-- The first element that satisfies `p`, if any. -/
 def List.find {A : Type} (p : A → Bool) : List A → Option A
   | .nil => .none
   | .cons x xs => match p x with
     | .true => .some x
     | .false => List.find p xs
+/-- Whether the list is empty. -/
 def List.isEmpty {A : Type} : List A → Bool
   | .nil => .true
   | .cons _ _ => .false
+/-- The first element, if any. -/
 def List.head {A : Type} : List A → Option A
   | .nil => .none
   | .cons x _ => .some x
+/-- The first `n` elements (all of them if there are fewer). -/
 def List.take {A : Type} : Nat → List A → List A
   | .zero, _ => .nil
   | .succ _, .nil => .nil
   | .succ n, .cons x xs => .cons x (List.take n xs)
+/-- Without the first `n` elements. -/
 def List.drop {A : Type} : Nat → List A → List A
   | .zero, xs => xs
   | .succ _, .nil => .nil
   | .succ n, .cons _ xs => List.drop n xs
+/-- The lists one after the other: `List.concat [[1], [2, 3]]` is `[1, 2, 3]`. -/
 def List.concat {A : Type} : List (List A) → List A
   | .nil => .nil
   | .cons x xs => List.append x (List.concat xs)
 
 -- ## Characters
 
+/-- Equality of characters, by code point. -/
 def Char.eq (a b : Char) : Bool := Nat.beq (Char.code a) (Char.code b)
--- ASCII white space: space, tab, newline, carriage return, form feed, vertical tab
+/-- ASCII white space: space, tab, newline, carriage return, form feed, vertical tab. -/
 def Char.isSpace (c : Char) : Bool := match Nat.beq (Char.code c) 32 with
   | .true => .true
   | .false => Bool.and (Nat.le 9 (Char.code c)) (Nat.le (Char.code c) 13)
+/-- An ASCII decimal digit, `'0'` to `'9'`. -/
 def Char.isDigit (c : Char) : Bool := Bool.and (Nat.le 48 (Char.code c)) (Nat.le (Char.code c) 57)
 
 -- ## Character lists
 
+/-- Equality of character lists. -/
 def Chars.eq : List Char → List Char → Bool
   | .nil, .nil => .true
   | .cons a as, .cons b bs => match Char.eq a b with
     | .true => Chars.eq as bs
     | .false => .false
   | _, _ => .false
--- lexicographic by code point
+/-- `a < b`, lexicographically by code point (a proper prefix is smaller). -/
 def Chars.lt : List Char → List Char → Bool
   | .nil, .nil => .false
   | .nil, .cons _ _ => .true
@@ -94,43 +130,48 @@ def Chars.lt : List Char → List Char → Bool
     | .false => match Char.eq a b with
       | .true => Chars.lt as bs
       | .false => .false
--- `s` without the prefix `p`, if it starts with it
+/-- `Chars.stripPrefix p s`: `s` without the prefix `p`, if it starts with it. -/
 def Chars.stripPrefix : List Char → List Char → Option (List Char)
   | .nil, s => .some s
   | .cons _ _, .nil => .none
   | .cons p ps, .cons c cs => match Char.eq p c with
     | .true => Chars.stripPrefix ps cs
     | .false => .none
+/-- Whether `p` is a prefix of `s`. -/
 def Chars.isPrefix (p s : List Char) : Bool := match Chars.stripPrefix p s with
   | .some _ => .true
   | .none => .false
+/-- Whether `needle` occurs in the list. -/
 def Chars.contains (needle : List Char) : List Char → Bool
   | .nil => Chars.isPrefix needle .nil
   | .cons c cs => match Chars.isPrefix needle (.cons c cs) with
     | .true => .true
     | .false => Chars.contains needle cs
+/-- Without the leading white space (`Char.isSpace`). -/
 def Chars.dropSpace : List Char → List Char
   | .nil => .nil
   | .cons c cs => match Char.isSpace c with
     | .true => Chars.dropSpace cs
     | .false => .cons c cs
--- the pieces between occurrences of `sep` (not empty); `cur` is the current piece, reversed
--- (partial: after a separator it goes on with a suffix, which Wiz can't see is smaller)
+/-- The pieces between occurrences of `sep` (not empty); `cur` is the current piece,
+reversed. A helper for `Chars.splitOn`. -/
 partial def Chars.splitGo (sep : List Char) : List Char → List Char → List (List Char)
   | .nil, cur => .cons (List.reverse cur) .nil
   | .cons c cs, cur => match Chars.stripPrefix sep (.cons c cs) with
     | .some rest => .cons (List.reverse cur) (Chars.splitGo sep rest .nil)
     | .none => Chars.splitGo sep cs (.cons c cur)
+/-- The pieces between the occurrences of `sep`; an empty `sep` gives the list alone. -/
 def Chars.splitOn (sep s : List Char) : List (List Char) := match sep with
   | .nil => .cons s .nil
   | .cons _ _ => Chars.splitGo sep s .nil
--- every occurrence of `pat` (not empty) replaced by `rep`, in front of `tail`
+/-- Every occurrence of `pat` (not empty) replaced by `rep`. A helper for `String.replace`. -/
 partial def Chars.replaceGo (pat rep : List Char) : List Char → List Char
   | .nil => .nil
   | .cons c cs => match Chars.stripPrefix pat (.cons c cs) with
     | .some rest => List.append rep (Chars.replaceGo pat rep rest)
     | .none => .cons c (Chars.replaceGo pat rep cs)
--- digits as a number; `none` if empty or not all digits
+/-- `Chars.natGo n cs`: the digits `cs` read after `n` (`n * 10 + …`); `none` if some
+character is not a digit. A helper for `String.parseNat`. -/
 def Chars.natGo : Nat → List Char → Option Nat
   | n, .nil => .some n
   | n, .cons c cs => match Char.isDigit c with
@@ -139,73 +180,96 @@ def Chars.natGo : Nat → List Char → Option Nat
 
 -- ## Strings
 
+/-- The characters of a string (free: a string is its list). -/
 def String.chars : String → List Char
   | .mk cs => cs
+/-- The string of a list of characters (free). -/
 def String.ofChars (cs : List Char) : String := .mk cs
+/-- The one-character string. -/
 def String.singleton (c : Char) : String := .mk (.cons c .nil)
+/-- The number of characters. -/
 def String.length (s : String) : Nat := List.length (String.chars s)
+/-- Whether the string is empty. -/
 def String.isEmpty (s : String) : Bool := List.isEmpty (String.chars s)
+/-- Equality of strings. -/
 def String.eq (a b : String) : Bool := Chars.eq (String.chars a) (String.chars b)
+/-- Equality of strings, the same as `String.eq`. -/
 def String.beq (a b : String) : Bool := String.eq a b
+/-- `a < b`, lexicographically by code point. -/
 def String.lt (a b : String) : Bool := Chars.lt (String.chars a) (String.chars b)
+/-- `String.startsWith s p`: whether `s` starts with `p`. -/
 def String.startsWith (s p : String) : Bool := Chars.isPrefix (String.chars p) (String.chars s)
+/-- `String.endsWith s p`: whether `s` ends with `p` (reverses both once). -/
 def String.endsWith (s p : String) : Bool :=
   Chars.isPrefix (List.reverse (String.chars p)) (List.reverse (String.chars s))
--- `s` without the prefix `p`, if it has it
+/-- `String.stripPrefix s p`: `s` without the prefix `p`, if it has it:
+`String.stripPrefix "wiz.c" "wiz"` is `some ".c"`. -/
 def String.stripPrefix (s p : String) : Option String :=
   match Chars.stripPrefix (String.chars p) (String.chars s) with
   | .some r => .some (.mk r)
   | .none => .none
--- `s` without the suffix `p`, if it has it
+/-- `String.stripSuffix s p`: `s` without the suffix `p`, if it has it. -/
 def String.stripSuffix (s p : String) : Option String :=
   match Chars.stripPrefix (List.reverse (String.chars p)) (List.reverse (String.chars s)) with
   | .some r => .some (.mk (List.reverse r))
   | .none => .none
+/-- `String.contains s needle`: whether `needle` occurs in `s`. -/
 def String.contains (s needle : String) : Bool := Chars.contains (String.chars needle) (String.chars s)
+/-- Whether the character occurs in the string. -/
 def String.containsChar (s : String) (c : Char) : Bool := List.any (Char.eq c) (String.chars s)
+/-- The first `n` characters. -/
 def String.take (n : Nat) (s : String) : String := .mk (List.take n (String.chars s))
+/-- Without the first `n` characters. -/
 def String.drop (n : Nat) (s : String) : String := .mk (List.drop n (String.chars s))
--- without the last `n` characters
+/-- Without the last `n` characters. -/
 def String.dropEnd (n : Nat) (s : String) : String :=
   .mk (List.reverse (List.drop n (List.reverse (String.chars s))))
--- the pieces between the occurrences of `sep` (`"a,b,,c"` by `","` is `a`, `b`, ``, `c`;
--- an empty `sep` gives `s` alone)
+/-- The pieces between the occurrences of `sep`: `"a,b,,c"` split on `","` is
+`["a", "b", "", "c"]`; an empty `sep` gives `[s]`. -/
 def String.splitOn (s sep : String) : List String :=
   List.map String.ofChars (Chars.splitOn (String.chars sep) (String.chars s))
--- the strings one after the other (linear: built from the right)
+/-- The strings one after the other (linear: built from the right). -/
 def String.join (ss : List String) : String := List.foldr String.append "" ss
+/-- `sep` before each string (a helper for `String.intercalate`). -/
 def String.intercalateGo (sep : String) : List String → String
   | .nil => ""
   | .cons s rest => String.append sep (String.append s (String.intercalateGo sep rest))
--- the strings with `sep` between them
+/-- The strings with `sep` between them: `String.intercalate ", " ["a", "b"]` is `"a, b"`. -/
 def String.intercalate (sep : String) : List String → String
   | .nil => ""
   | .cons s rest => String.append s (String.intercalateGo sep rest)
+/-- Without white space (ASCII) at the start. -/
 def String.trimLeft (s : String) : String := .mk (Chars.dropSpace (String.chars s))
+/-- Without white space (ASCII) at the end. -/
 def String.trimRight (s : String) : String := .mk (List.reverse (Chars.dropSpace (List.reverse (String.chars s))))
--- without white space (ASCII) at either end
+/-- Without white space (ASCII) at either end. -/
 def String.trim (s : String) : String := String.trimRight (String.trimLeft s)
--- every occurrence of `pat` replaced by `rep` (an empty `pat` changes nothing)
+/-- `String.replace s pat rep`: every occurrence of `pat` replaced by `rep` (an empty `pat`
+changes nothing). -/
 def String.replace (s pat rep : String) : String := match String.chars pat with
   | .nil => s
   | .cons _ _ => .mk (Chars.replaceGo (String.chars pat) (String.chars rep) (String.chars s))
--- a decimal number (digits only, at least one)
+/-- A decimal number (digits only, at least one): `String.parseNat "42"` is `some 42`,
+`String.parseNat "4x"` is `none`. -/
 def String.parseNat (s : String) : Option Nat := match String.chars s with
   | .nil => .none
   | .cons c cs => Chars.natGo 0 (.cons c cs)
--- the lookup of a key in a list of pairs (the first one)
+/-- The value of key `k` in a list of pairs (the first one), if any. -/
 def String.lookup {A : Type} (k : String) : List (String × A) → Option A
   | .nil => .none
   | .cons p rest => match String.eq p.1 k with
     | .true => .some p.2
     | .false => String.lookup k rest
+/-- Whether `s` is in the list. -/
 def String.elem (s : String) (l : List String) : Bool := List.any (String.eq s) l
 
 -- ## Numbers
 
--- decimal digits of `n` in front of `tail` (`Nat.div`/`Nat.mod` run natively on numerals)
+/-- The decimal digits of `n` in front of `tail` (`Nat.div`/`Nat.mod` run natively on
+numerals). A helper for `Nat.repr`. -/
 partial def Nat.reprGo (n : Nat) (tail : List Char) : List Char := match Nat.lt n 10 with
   | .true => .cons (Char.mk (48 + n)) tail
   | .false => Nat.reprGo (Nat.div n 10) (.cons (Char.mk (48 + Nat.mod n 10)) tail)
--- `n` in decimal (pure; `Nat.toString` is the same as a foreign function)
+/-- `n` in decimal: `Nat.repr 42` is `"42"` (pure; `Nat.toString` is the same as a foreign
+function). -/
 def Nat.repr (n : Nat) : String := .mk (Nat.reprGo n .nil)

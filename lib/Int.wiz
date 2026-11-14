@@ -1,101 +1,144 @@
 import Prelude
--- Integers (`import Int`): a natural number or the negative of a successor, as in Lean.
--- Arithmetic is defined by cases on the natively computed `Nat` operations, so the
--- kernel computes it on numerals (`rfl : (-3 : Int) * 4 + 2 = -10`) and compiled code
--- runs `Nat`'s natives on the magnitudes. `#eval` prints `-5`, not `.negSucc 4`
--- (`builtin int`).
+/-!
+# Int
+
+Integers (`import Int`): a natural number or the negative of a successor, as in Lean.
+
+Arithmetic is defined by cases on the natively computed `Nat` operations, so the kernel
+computes it on numerals and compiled code runs `Nat`'s natives on the magnitudes.
+`#eval` prints `-5`, not `.negSucc 4` (`builtin int`).
+
+Main definitions: the type `Int`, its arithmetic (`Int.add`, `Int.mul`, `Int.div`,
+`Int.mod`, …) with the usual operator instances, comparisons (`Int.lt`, `Int.le`,
+`Int.beq`) and a few lemmas (`Int.neg_neg`, `Int.add_zero`, …).
+
+```
+import Int
+
+def ex : (-3 : Int) * 4 + 2 = -10 := rfl   -- the kernel computes it
+#eval Int.div (-7) 2   -- -3
+```
+-/
+/-- An integer: `ofNat n` is `n`, `negSucc n` is `-(n + 1)`. Every integer has exactly
+one representation (there is no negative zero). -/
 inductive Int where
+  /-- the natural number `n` -/
   | ofNat (n : Nat)
+  /-- `-(n + 1)` -/
   | negSucc (n : Nat)
 builtin int := Int
 
--- `-n` for a natural number `n`
+/-- `-n` for a natural number `n`: `Int.negOfNat 3 = -3`, `Int.negOfNat 0 = 0`. -/
 def Int.negOfNat : Nat → Int
   | .zero => .ofNat 0
   | .succ m => .negSucc m
--- `m - n` as an integer
+/-- `m - n` as an integer, for natural numbers: `Int.subNatNat 2 5 = -3`. -/
 def Int.subNatNat (m n : Nat) : Int := match n - m with
   | .zero => .ofNat (m - n)
   | .succ k => .negSucc k
 
+/-- Negation, `-a`. -/
 def Int.neg : Int → Int
   | .ofNat n => Int.negOfNat n
   | .negSucc n => .ofNat (.succ n)
+/-- Addition, `a + b`. -/
 def Int.add : Int → Int → Int
   | .ofNat m, .ofNat n => .ofNat (m + n)
   | .ofNat m, .negSucc n => Int.subNatNat m (.succ n)
   | .negSucc m, .ofNat n => Int.subNatNat n (.succ m)
   | .negSucc m, .negSucc n => .negSucc (.succ (m + n))
+/-- Subtraction, `a - b`: adding the negation. -/
 def Int.sub (a b : Int) : Int := Int.add a (Int.neg b)
+/-- Multiplication, `a * b`: the magnitudes multiply, the signs combine. -/
 def Int.mul : Int → Int → Int
   | .ofNat m, .ofNat n => .ofNat (m * n)
   | .ofNat m, .negSucc n => Int.negOfNat (m * .succ n)
   | .negSucc m, .ofNat n => Int.negOfNat (.succ m * n)
   | .negSucc m, .negSucc n => .ofNat (.succ m * .succ n)
 
--- The magnitude, the sign, and the conversion to `Nat` that maps negatives to 0.
+/-- The magnitude `|a|`, as a natural number: `Int.natAbs (-5) = 5`. -/
 def Int.natAbs : Int → Nat
   | .ofNat n => n
   | .negSucc n => .succ n
+/-- Whether the integer is negative. -/
 def Int.isNeg : Int → Bool
   | .ofNat _ => .false
   | .negSucc _ => .true
+/-- The conversion to `Nat` that maps negatives to 0: `Int.toNat (-2) = 0`. -/
 def Int.toNat : Int → Nat
   | .ofNat n => n
   | .negSucc _ => 0
 
--- Division truncates towards zero and the remainder takes the dividend's sign (C, Rust,
--- and `IntN` in lib/Word.wiz): `-7 / 2 = -3`, `-7 % 2 = -1`; `a / 0 = 0`, `a % 0 = a`.
+/-- `n` with a sign: `-n` when `neg`, `n` otherwise. -/
 def Int.ofSign (neg : Bool) (n : Nat) : Int := match neg with
   | .true => Int.negOfNat n
   | .false => .ofNat n
+/-- Division, truncating towards zero (as in C, Rust and `IntN` in lib/Word.wiz):
+`-7 / 2 = -3`; `a / 0 = 0`. -/
 def Int.div (a b : Int) : Int :=
   Int.ofSign (Bool.xor (Int.isNeg a) (Int.isNeg b)) (Nat.div (Int.natAbs a) (Int.natAbs b))
+/-- The remainder of `Int.div`: it takes the dividend's sign, `-7 % 2 = -1`; `a % 0 = a`. -/
 def Int.mod (a b : Int) : Int := Int.ofSign (Int.isNeg a) (Nat.mod (Int.natAbs a) (Int.natAbs b))
 
--- Comparisons.
+/-- Equality test. -/
 def Int.beq : Int → Int → Bool
   | .ofNat m, .ofNat n => Nat.beq m n
   | .negSucc m, .negSucc n => Nat.beq m n
   | _, _ => .false
+/-- `a < b`. -/
 def Int.lt : Int → Int → Bool
   | .ofNat m, .ofNat n => Nat.lt m n
   | .ofNat _, .negSucc _ => .false
   | .negSucc _, .ofNat _ => .true
   | .negSucc m, .negSucc n => Nat.lt n m
+/-- `a ≤ b`. -/
 def Int.le (a b : Int) : Bool := Bool.not (Int.lt b a)
 
+/-- Numerals: a literal `n : Int` is `Int.ofNat n`. -/
 instance {ω n : Nat} : OfNat Int n := OfNat.mk (.ofNat n)
+/-- `-a` on integers (`Int.neg`). -/
 instance : Neg Int := Neg.mk Int.neg
+/-- `a + b` on integers (`Int.add`). -/
 instance : Add Int := Add.mk Int.add
+/-- `a - b` on integers (`Int.sub`). -/
 instance : Sub Int := Sub.mk Int.sub
+/-- `a * b` on integers (`Int.mul`). -/
 instance : Mul Int := Mul.mk Int.mul
+/-- `a / b` on integers (`Int.div`, truncating). -/
 instance : Div Int := Div.mk Int.div
+/-- `a % b` on integers (`Int.mod`). -/
 instance : Mod Int := Mod.mk Int.mod
 
--- Lemmas (by cases; each holds by computation once the constructors are known).
+/-- `congrArg`, kept local to this module: equal arguments give equal results. -/
 def Int.congrArg {A B : Type} (f : A → B) {a b : A} (e : a = b) : f a = f b :=
   transp (fun b _ => f a = f b) (refl (f a)) e
+/-- `n + 0 = n` for natural numbers (a helper for `Int.add_zero`). -/
 def Int.natAdd_zero : (n : Nat) → n + 0 = n
   | .zero => rfl
   | .succ n => Int.congrArg Nat.succ (Int.natAdd_zero n)
+/-- Negation is an involution: `-(-a) = a`. -/
 def Int.neg_neg : (a : Int) → -(-a) = a
   | .ofNat .zero => rfl
   | .ofNat (.succ _) => rfl
   | .negSucc _ => rfl
+/-- Zero is a right identity: `a + 0 = a`. -/
 def Int.add_zero : (a : Int) → a + 0 = a
   | .ofNat n => Int.congrArg Int.ofNat (Int.natAdd_zero n)
   | .negSucc _ => rfl
+/-- Zero is a left identity: `0 + a = a`. -/
 def Int.zero_add : (a : Int) → 0 + a = a
   | .ofNat _ => rfl
   | .negSucc _ => rfl
+/-- Negation keeps the magnitude: `|-a| = |a|`. -/
 def Int.natAbs_neg : (a : Int) → Int.natAbs (-a) = Int.natAbs a
   | .ofNat .zero => rfl
   | .ofNat (.succ _) => rfl
   | .negSucc _ => rfl
+/-- `Nat.lt n n` is false (a helper for `Int.lt_irrefl`). -/
 def Int.natLt_irrefl : (n : Nat) → Nat.lt n n = .false
   | .zero => rfl
   | .succ n => Int.natLt_irrefl n
+/-- `<` on integers is irreflexive. -/
 def Int.lt_irrefl : (a : Int) → Int.lt a a = .false
   | .ofNat n => Int.natLt_irrefl n
   | .negSucc n => Int.natLt_irrefl n

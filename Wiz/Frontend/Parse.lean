@@ -27,6 +27,59 @@ def Message.render (input : String) (m : Message) : String :=
   let (l, c) := lineCol input m.pos
   s!"{l + 1}:{c + 1}: {m.msg}"
 
+/-- (13o) Which rule reserved the keyword `v`: the first `term` or `command` rule (not a
+built-in one) whose grammar mentions it. -/
+def ParserTables.reservedBy? (tables : ParserTables) (v : String) : Option (Name × ParserDescr) := Id.run do
+  if Builtin.tables.tokens.contains v then return none
+  for c in ["command", "term"] do
+    let some cat := tables.cats[(c : Name)]? | continue
+    for p in cat.leading do
+      if p.p.tokens.contains v then return some (p.kind, p.p)
+    for p in cat.trailing do
+      if p.p.tokens.contains v then return some (p.kind, .seq #[.cat c 0, p.p])
+  return none
+
+/-- (13o) A rule's grammar as the user reads it: its atoms, `…` for what is in between
+(`exists …, …`, `feral … end`); optional parts are left out. -/
+partial def ParserDescr.sketch (d : ParserDescr) : String :=
+  let parts := go d
+  parts.foldl (fun acc p => if acc.isEmpty then p
+    else if p == "," || p == ")" || p == "]" || acc.endsWith "(" || acc.endsWith "[" then acc ++ p
+    else if acc.endsWith "…" && p == "…" then acc
+    else acc ++ " " ++ p) ""
+where
+  go : ParserDescr → List String
+    | .atom t | .nonReserved t => [t.trimAscii.toString]
+    | .seq ps => ps.toList.flatMap go
+    | .optional _ => []
+    | .many _ | .many1 _ | .sepBy .. | .sepBy1 .. => ["…"]
+    | .node _ p | .withPosition p | .withoutPosition p => go p
+    | .orelse p _ => go p
+    | _ => ["…"]
+
+/-- (13o) An identifier was expected where a word reserved by some notation stands (`def
+exists := 1` after `import Logic`): say which notation, and (`site`, the declaring module
+of a syntax kind) where it comes from. Done once, when the error is reported, not on
+every failed alternative. -/
+def ParseError.explainKeywords (tables : ParserTables) (site : Name → Option String := fun _ => none)
+    (e : ParseError) : ParseError :=
+  let pre := "identifier ('"
+  let post := "' is a keyword)"
+  -- (the message renders `shown`, not `expected`: both are explained)
+  let explain (x : String) : String :=
+    if x.startsWith pre && x.endsWith post then
+      let v := ((x.drop pre.length).dropEnd post.length).toString
+      match tables.reservedBy? v with
+      | some (k, d) =>
+        let from_ := match site k with
+          | some "" => " of this file"
+          | some m => s!" of module {m}"
+          | none => ""
+        s!"identifier ('{v}' is a keyword: the notation `{d.sketch}`{from_})"
+      | none => x
+    else x
+  { e with expected := e.expected.map explain, shown := e.shown.map explain }
+
 /-- Parse the command starting at (or after whitespace following) `pos`. -/
 def parseCommand (chars : Array Char) (tables : ParserTables) (pos : Nat) :
     Except ParseError (Syntax × Nat) :=
@@ -83,7 +136,7 @@ where
           commands := acc.commands.push cmd
           messages := acc.messages.push { pos := cmd.info.start, msg } }
     | .error e =>
-      let msg := (e.render input).splitOn ": " |>.drop 1 |> ": ".intercalate
+      let msg := ((e.explainKeywords acc.tables).render input).splitOn ": " |>.drop 1 |> ": ".intercalate
       go chars (recoverPos chars (skipWs chars pos)) { acc with messages := acc.messages.push { pos := e.pos, msg } }
 
 end Wiz

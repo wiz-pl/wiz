@@ -133,4 +133,4 @@ about it is pointwise (`HwTy.El.memRead_write_miss`).
   loopback delivers every byte, a valid/ready buffer is stable and live.
 * The iCEstick project (UART, toy CPU) uses all of the above; its findings drove them.
 
-Design notes: `/workspace/wiz-notes/cohesion-hardware.md`.
+Design notes: `wiz-notes/cohesion-hardware.md`.

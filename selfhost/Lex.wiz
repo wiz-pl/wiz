@@ -84,29 +84,73 @@ def reverse : List Char → List Char → List Char
   | .nil, acc => acc
   | .cons c cs, acc => reverse cs (.cons c acc)
 
--- a string literal's contents after the opening quote: decoded, and the offset after it
+-- a string literal's contents after the opening quote: decoded, and the offset after it;
+-- or what is wrong, and where (a bad escape's backslash; an unterminated literal: `0`, the
+-- caller reports the literal's start). The escapes and messages are `readEscape`'s in
+-- `Wiz/Parser/Token.lean`.
 inductive StrLit where
   | ok (s : List Char) (stop : Nat)
-  | err (msg : String)
+  | err (msg : String) (pos : Nat)
+def hexVal (c : Nat) : Option Nat := match between c 48 57 with
+  | .true => .some (Nat.sub c 48)
+  | .false => match between c 97 102 with
+    | .true => .some (Nat.sub c 87)
+    | .false => match between c 65 70 with
+      | .true => .some (Nat.sub c 55)
+      | .false => .none
+def uBad : String := "the escape \\u is written \\u{H}, with one to six hexadecimal digits (as in \\u{3bb})"
+-- the digits of `\u{H}` from offset `k`: `count` read so far, worth `n`; the code point and
+-- the offset after `}`, or a message at `j`, the backslash
+partial def readU (input : Array Nat) (j k n count : Nat) : StrLit :=
+  let c := at input k;
+  match Nat.beq c 125 with
+  | .true => match Nat.beq count 0 with
+    | .true => .err uBad j
+    | .false => match Bool.or (Nat.lt 1114111 n) (between n 55296 57343) with
+      | .true => .err "the escape \\u{H} is not a Unicode scalar value (at most 10FFFF, and not D800 to DFFF)" j
+      | .false => .ok (.cons (Char.mk n) .nil) (k + 1)
+  | .false => match hexVal c, Nat.lt count 6 with
+    | .some d, .true => readU input j (k + 1) (Nat.add (Nat.mul n 16) d) (Nat.succ count)
+    | _, _ => .err uBad j
+-- the escape whose backslash is at `j`: its character (as a one-element list) and the
+-- offset after it, or a message at `j` (`0`: the literal is unterminated)
+def readEscape (input : Array Nat) (j : Nat) : StrLit :=
+  let e := at input (j + 1);
+  let one := fun (c : Nat) => StrLit.ok (.cons (Char.mk c) .nil) (j + 2);
+  match Nat.beq e 110 with
+  | .true => one 10
+  | .false => match Nat.beq e 116 with
+    | .true => one 9
+    | .false => match Nat.beq e 114 with
+      | .true => one 13
+      | .false => match Nat.beq e 48 with
+        | .true => one 0
+        | .false => match Bool.or (Bool.or (Nat.beq e 92) (Nat.beq e 34)) (Nat.beq e 39) with
+          | .true => one e
+          | .false => match Nat.beq e 120 with
+            | .true => match hexVal (at input (j + 2)), hexVal (at input (j + 3)) with
+              | .some a, .some b => .ok (.cons (Char.mk (Nat.add (Nat.mul a 16) b)) .nil) (j + 4)
+              | _, _ => .err "the escape \\x needs two hexadecimal digits (as in \\x41)" j
+            | .false => match Nat.beq e 117 with
+              | .true => match Nat.beq (at input (j + 2)) 123 with
+                | .true => readU input j (j + 3) 0 0
+                | .false => .err uBad j
+              | .false => match Nat.beq e 0 with
+                | .true => .err "unterminated string literal" 0
+                | .false => .err (String.append "unknown escape sequence \\" (String.mk (.cons (Char.mk e) .nil))) j
 partial def readStr (input : Array Nat) (j : Nat) (acc : List Char) : StrLit :=
     let c := at input j;
     match Nat.beq c 0 with
-    | .true => .err "unterminated string literal"
+    | .true => .err "unterminated string literal" 0
     | .false => match Nat.beq c 34 with
       | .true => .ok (reverse acc .nil) (j + 1)
       | .false => match Nat.beq c 92 with
         | .false => readStr input (j + 1) (.cons (Char.mk c) acc)
-        | .true =>
-          let e := at input (j + 1);
-          match Nat.beq e 110 with
-          | .true => readStr input (j + 2) (.cons (Char.mk 10) acc)
-          | .false => match Nat.beq e 116 with
-            | .true => readStr input (j + 2) (.cons (Char.mk 9) acc)
-            | .false => match Bool.or (Nat.beq e 92) (Nat.beq e 34) with
-              | .true => readStr input (j + 2) (.cons (Char.mk e) acc)
-              | .false => match Nat.beq e 0 with
-                | .true => .err "unterminated string literal"
-                | .false => .err (String.append "unknown escape sequence \\" (String.mk (.cons (Char.mk e) .nil)))
+        | .true => match readEscape input j with
+          | .ok cs k => match cs with
+            | .cons ch _ => readStr input k (.cons ch acc)
+            | .nil => readStr input k acc
+          | .err m p => .err m p
 
 def len : List Char → Nat
   | .nil => 0
@@ -203,7 +247,10 @@ def readToken (tokens : List String) (input : Array Nat) (i : Nat) : TokInfo :=
     | .false => match Nat.beq c 34 with
       | .true => match readStr input (i + 1) .nil with
         | .ok s j => TokInfo.mk (Tok.str (String.mk s)) i j
-        | .err m => TokInfo.mk (Tok.error m) i i
+        -- (a bad escape is reported at its backslash, an unterminated literal at its start)
+        | .err m p => match Nat.beq p 0 with
+          | .true => TokInfo.mk (Tok.error m) i i
+          | .false => TokInfo.mk (Tok.error m) p p
       | .false => match sym with
         | .nil => TokInfo.mk (Tok.error (String.append "unexpected character '"
             (String.append (String.mk (.cons (Char.mk c) .nil)) "'"))) i i

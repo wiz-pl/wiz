@@ -1,0 +1,54 @@
+-- Vendor primitives in the HDL (lib/Hdl/Prim.wiz, lib/Hdl/Xilinx7.wiz), checked by the
+-- `hdl` test group: a Xilinx 7-series output path (an OSERDESE2 into an IOBUF, a clock
+-- forwarded by an ODDR through an OBUF) under a PLL wrapper, its Verilog and what yosys's
+-- synth_xilinx makes of it; a buffer with a model, simulated; the refusal to simulate
+-- unmodelled cells; and the kind errors of clocks and pads used wrongly.
+import Hdl.Xilinx7
+
+def Bit : HwTy := HwTy.bits 1
+
+-- a byte serialised 8:1 on a 4x clock onto a bidirectional pin, a forwarded clock, and a
+-- register's output through an OBUF
+structure In (r : HwTy → Type) where
+  sys4x : r HwTy.clock
+  d : r (HwTy.bits 8)
+  deriving Bundle
+structure Out (r : HwTy → Type) where
+  ck : r (HwTy.pad 1)
+  q : r (HwTy.pad 1)
+  dq : r (HwTy.inout 1)
+  back : r Bit
+  deriving Bundle
+def step {r : HwTy → Type} [Hw r] (s : r Bit) (x : In r) : r (HwTy.prod Bit Out.code) :=
+  let ser := X7.oserdes x.sys4x Hw.clock (Hw.lit 1 0) x.d s;
+  let io := X7.iobufT (Hw.fst ser) (Hw.snd ser);
+  Hw.pair (Hw.not s) (Out.pack (Out.mk (X7.obuf (X7.oddr Hw.clock (Hw.lit 1 1) (Hw.lit 1 0))) (X7.obuf s) (Hw.snd io) (Hw.fst io)))
+def serial : Circuit In.code Out.code := Circuit.mk Bit (BitVec.ofNat 1 0) (fun s x => step s (In.unpack x))
+-- 100 MHz in, VCO 800 MHz: the circuit at 100 MHz, sys4x at 400 MHz
+def clocking : Clocking := X7.pll "10.0" 8 1 8 (.cons ("sys4x", (1, (2, "0.0"))) .nil) .nil
+
+-- a toggling register through an OBUF and back through an IOBUF: buffers have models
+structure Pins (r : HwTy → Type) where
+  led : r (HwTy.pad 1)
+  pin : r (HwTy.inout 1)
+  seen : r Bit
+  deriving Bundle
+def blinkStep {r : HwTy → Type} [Hw r] (s oe : r Bit) : r (HwTy.prod Bit Pins.code) :=
+  let io := X7.iobuf s oe;
+  Hw.pair (Hw.not s) (Pins.pack (Pins.mk (X7.obuf s) (Hw.snd io) (Hw.fst io)))
+def blink : Circuit Bit Pins.code := Circuit.mk Bit (BitVec.ofNat 1 0) (fun s oe => blinkStep s oe)
+def bits (ks : List Nat) : List (HwTy.El Bit) := Hdl.map (fun (k : Nat) => BitVec.ofNat 1 k) ks
+
+-- kinds used wrongly: a clock input read as data, data into ODDR's clock, a data output
+-- given a pad
+def bad : Circuit In.code (HwTy.prod Bit Bit) := Circuit.mk Bit (BitVec.ofNat 1 0)
+  (fun s x => Hw.pair (Hw.untag (In.unpack x).sys4x)
+    (Hw.pair (X7.oddr (Hw.tag "@clock" s) s s) (Hw.untag (X7.obuf s))))
+
+#eval Verilog.emitTop (Circuit.netlist "serial" serial) clocking
+#eval Circuit.unmodelled serial
+#eval Circuit.runModelled serial (.nil)
+#eval (Circuit.netlist "serial" serial).errors
+#eval Verilog.emit (Circuit.netlist "blink" blink)
+#eval Circuit.runModelled blink (bits (.cons 1 (.cons 0 (.cons 0 (.cons 1 .nil)))))
+#eval (Circuit.netlist "bad" bad).errors

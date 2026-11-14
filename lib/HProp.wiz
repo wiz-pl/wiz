@@ -1,22 +1,38 @@
 import Logic
--- A shallow separation logic over a model heap (stage 24b), after Charguéraud's
--- *Separation Logic Foundations* (Software Foundations vol. 6, "SLF"), chapters
--- Hprop and Himpl.
---
--- A heap predicate is a predicate on heaps, `HProp V := Heap V → Prop`. Two things make
--- this cheaper in Wiz than in Coq:
---
--- * Observational equality is extensional. An equation of heaps computes to pointwise
---   equality (`h₁ = h₂` *is* `(0 l : Nat) → h₁ l = h₂ l`), and an equation of heap
---   predicates computes to pointwise `↔`. SLF's `himpl_antisym` needs the propext and
---   funext axioms in Coq; here it is a pair of lambdas, and every law below that is an
---   equation of heap predicates (`⋆` is commutative, associative, …) is proved without
---   an axiom.
--- * Heaps are total functions `Nat → Option V` (SLF uses finite maps). Nothing in this
---   file needs finiteness; the program logic (lib/Hoare.wiz) gets fresh locations from a
---   bound kept with the heap instead.
---
--- No law here needs an axiom.
+/-! # HProp: heap predicates and separation logic
+
+A shallow separation logic over a model heap (stage 24b), after Charguéraud's
+*Separation Logic Foundations* (Software Foundations vol. 6, "SLF"), chapters Hprop and
+Himpl. The program logic built on it is in `Hoare` (lib/Hoare.wiz).
+
+A heap is a total function from locations to optional values, `Heap V := Nat → Option V`,
+and a heap predicate is a predicate on heaps, `HProp V := Heap V → Prop`. The main
+definitions:
+
+* `emp` (the empty heap), `l ↦ v` (`pts`, exactly one cell), `hpure P` (a pure fact,
+  SLF's `\[P]`), `htop`, `hexists`, `hforall`;
+* the separating conjunction `H₁ ⋆ H₂` (`star`: the heap splits into two disjoint parts)
+  and the magic wand `H₁ −∗ H₂` (`wand`);
+* entailment `H ⊢ H'` (`Entails`), a partial order;
+* the laws: `star.comm`, `star.assoc`, `star.emp_l`, the frame property `star.mono`,
+  `wand.adjoint`, `pts.same_loc`, ….
+
+Two things make this cheaper in Wiz than in Coq:
+
+* Observational equality is extensional. An equation of heaps computes to pointwise
+  equality (`h₁ = h₂` *is* `(0 l : Nat) → h₁ l = h₂ l`), and an equation of heap
+  predicates computes to pointwise `↔`. SLF's `himpl_antisym` needs the propext and
+  funext axioms in Coq; here it is a pair of lambdas (`Entails.antisym`), and every law
+  that is an equation of heap predicates is proved without an axiom.
+* Heaps are total functions (SLF uses finite maps). Nothing here needs finiteness; the
+  program logic gets fresh locations from a bound kept with the heap instead.
+
+No law here needs an axiom. For example, `⋆` is commutative as an *equation*:
+
+```
+def swapCells (l m : Nat) (v w : Nat) : (l ↦ v) ⋆ (m ↦ w) = (m ↦ w) ⋆ (l ↦ v) :=
+  star.comm (l ↦ v) (m ↦ w)
+``` -/
 
 -- ## Quantities in proofs
 --
@@ -28,87 +44,112 @@ import Logic
 
 -- ## Options, pointwise
 
+/-- Whether an option is `none`. -/
 def Option.isNone {A : Type} : Option A → Bool
   | .none => .true
   | .some _ => .false
--- left-biased choice: the union of two heaps, at one location
+/-- Left-biased choice: the first option if it is `some`, else the second. Pointwise, this
+is the union of two heaps at one location (`Heap.union`). -/
 def Option.orElse {A : Type} : Option A → Option A → Option A
   | .some v, _ => .some v
   | .none, o => o
--- `o` is `none`, as a proposition
+/-- `o` is `none`, as a proposition: the location is free. -/
 def Option.Free {A : Type} (o : Option A) : Prop := Option.isNone o = .true
 
+/-- `none` is a right unit of `Option.orElse` (it is a left unit by computation). -/
 def Option.orElse_none {A : Type} : (o : Option A) → Option.orElse o .none = o
   | .none => rfl
   | .some v => rfl
+/-- `Option.orElse` is associative. -/
 def Option.orElse_assoc {A : Type} : (a b c : Option A) →
     Option.orElse (Option.orElse a b) c = Option.orElse a (Option.orElse b c)
   | .none, b, c => rfl
   | .some v, b, c => rfl
+/-- `Option.orElse` is commutative when at least one side is free (disjointness, at one
+location). -/
 def Option.orElse_comm {A : Type} : (a b : Option A) → Option.Free a ∨ Option.Free b →
     Option.orElse a b = Option.orElse b a
   | .none, b, d => Eq.symm (Option.orElse_none b)
   | .some v, .none, d => rfl
   | .some v, .some w, d => d (Option.some v = Option.some w) (fun e => absurd e.1) (fun e => absurd e.1)
--- the union is free exactly where both sides are
+/-- The union is free exactly where both sides are. -/
 def Option.free_orElse {A : Type} : (a b : Option A) →
     (Option.Free (Option.orElse a b) ↔ Option.Free a ∧ Option.Free b)
   | .none, b => (fun f => (rfl, f), fun f => f.2)
   | .some v, b => (fun f => absurd f.1, fun f => absurd f.1.1)
 
+/-- `Nat.beq n n` computes to `true`, for every `n`. -/
 def Nat.beq_refl : (n : Nat) → Nat.beq n n = .true
   | .zero => rfl
   | .succ n => Nat.beq_refl n
--- `some v` where the test holds
+/-- `some v` where the test holds, `none` otherwise: `Option.when .true 3 = .some 3`. -/
 def Option.when {A : Type} (b : Bool) (v : A) : Option A := match b with
   | .true => .some v
   | .false => .none
 
 -- ## Heaps
 
+/-- A model heap: a total map from locations (`Nat`) to optional values; `none` means the
+location is free. -/
 def Heap (V : Type) : Type := Nat → Option V
+/-- The empty heap: every location is free. -/
 def Heap.empty {V : Type} : Heap V := fun _ => .none
+/-- The heap with exactly one cell, `v` at location `l`. -/
 def Heap.single {V : Type} (l : Nat) (v : V) : Heap V := fun l' => Option.when (Nat.beq l l') v
+/-- The union of two heaps, left-biased where both have a cell (for disjoint heaps, the
+bias never matters: `Heap.union_comm`). -/
 def Heap.union {V : Type} (h₁ h₂ : Heap V) : Heap V := fun l => Option.orElse (h₁ l) (h₂ l)
--- disjoint: every location is free in at least one of the two
+/-- Two heaps are disjoint: every location is free in at least one of them. -/
 def Heap.Disj {V : Type} (h₁ h₂ : Heap V) : Prop :=
   (l : Nat) → Option.Free (h₁ l) ∨ Option.Free (h₂ l)
 
--- an equation of heaps is pointwise (it computes to `(0 l : Nat) → h₁ l = h₂ l`)
+/-- Heap extensionality: an equation of heaps is pointwise. It needs no axiom, since the
+equation *computes* to `(0 l : Nat) → h₁ l = h₂ l`; this lemma takes the unerased form. -/
 def Heap.ext {V : Type} {h₁ h₂ : Heap V} (p : (l : Nat) → h₁ l = h₂ l) : h₁ = h₂ := p
+/-- `Eq.symm` at the type of heaps. -/
 def Heap.symm {V : Type} {h₁ h₂ : Heap V} (e : h₁ = h₂) : h₂ = h₁ := @Eq.symm (Heap V) h₁ h₂ e
+/-- `Eq.trans` at the type of heaps. -/
 def Heap.trans {V : Type} {h₁ h₂ h₃ : Heap V} (e₁ : h₁ = h₂) (e₂ : h₂ = h₃) : h₁ = h₃ :=
   @Eq.trans (Heap V) h₁ h₂ h₃ e₁ e₂
+/-- Transport a property of heaps along an equation of heaps. -/
 def Heap.subst {V : Type} (0 P : Heap V → Prop) {h₁ h₂ : Heap V} (e : h₁ = h₂) (p : P h₁) : P h₂ :=
   @Eq.substProp (Heap V) P h₁ h₂ e p
+/-- Rewrite the left operand of a `Heap.union`. -/
 def Heap.congrUnionL {V : Type} {h₁ h₁' : Heap V} (h₂ : Heap V) (e : h₁ = h₁') :
     Heap.union h₁ h₂ = Heap.union h₁' h₂ :=
   @Eq.congrArg (Heap V) (Heap V) (fun (x : Heap V) => Heap.union x h₂) h₁ h₁' e
 
+/-- `Heap.single l v` holds `v` at `l`. -/
 def Heap.single_at {V : Type} (l : Nat) (v : V) : Heap.single l v l = Option.some v :=
   transp (fun b _ => Option.when b v = Option.some v) rfl (@Eq.symm Bool (Nat.beq l l) Bool.true (Nat.beq_refl l))
 
--- the union laws
+/-- The union laws: `Heap.empty` is a left unit of `Heap.union`. -/
 def Heap.union_empty_l {V : Type} (h : Heap V) : Heap.union Heap.empty h = h := Heap.ext (fun l => rfl)
+/-- `Heap.empty` is a right unit of `Heap.union`. -/
 def Heap.union_empty_r {V : Type} (h : Heap V) : Heap.union h Heap.empty = h :=
   Heap.ext (fun l => Option.orElse_none (h l))
+/-- `Heap.union` is associative. -/
 def Heap.union_assoc {V : Type} (h₁ h₂ h₃ : Heap V) :
     Heap.union (Heap.union h₁ h₂) h₃ = Heap.union h₁ (Heap.union h₂ h₃) :=
   Heap.ext (fun l => Option.orElse_assoc (h₁ l) (h₂ l) (h₃ l))
+/-- The union of disjoint heaps is commutative. -/
 def Heap.union_comm {V : Type} (h₁ h₂ : Heap V) (d : Heap.Disj h₁ h₂) :
     Heap.union h₁ h₂ = Heap.union h₂ h₁ :=
   Heap.ext (fun l => Option.orElse_comm (h₁ l) (h₂ l) (d l))
 
--- the disjointness laws
+/-- The disjointness laws: `Heap.Disj` is symmetric. -/
 def Heap.disj_symm {V : Type} {h₁ h₂ : Heap V} (d : Heap.Disj h₁ h₂) : Heap.Disj h₂ h₁ :=
   fun l => Or.symm (d l)
+/-- The empty heap is disjoint from every heap (on the left). -/
 def Heap.disj_empty_l {V : Type} (h : Heap V) : Heap.Disj Heap.empty h := fun l => Or.inl rfl
+/-- Every heap is disjoint from the empty heap (on the right). -/
 def Heap.disj_empty_r {V : Type} (h : Heap V) : Heap.Disj h Heap.empty := fun l => Or.inr rfl
--- `h₁ ⊎ h₂` is disjoint from `h₃` iff both parts are
+/-- `h₁ ⊎ h₂` is disjoint from `h₃` only if both parts are. -/
 def Heap.disj_union_l {V : Type} (h₁ h₂ : Heap V) {h₃ : Heap V} (d : Heap.Disj (Heap.union h₁ h₂) h₃) :
     Heap.Disj h₁ h₃ ∧ Heap.Disj h₂ h₃ :=
   (fun l => Or.imp (fun f => ((Option.free_orElse (h₁ l) (h₂ l)).1 f).1) (fun f => f) (d l),
    fun l => Or.imp (fun f => ((Option.free_orElse (h₁ l) (h₂ l)).1 f).2) (fun f => f) (d l))
+/-- `h₁ ⊎ h₂` is disjoint from `h₃` if both parts are. -/
 def Heap.disj_union_l_intro {V : Type} (h₁ h₂ : Heap V) {h₃ : Heap V} (d₁ : Heap.Disj h₁ h₃) (d₂ : Heap.Disj h₂ h₃) :
     Heap.Disj (Heap.union h₁ h₂) h₃ := fun l =>
   Or.elim (d₁ l)
@@ -116,19 +157,22 @@ def Heap.disj_union_l_intro {V : Type} (h₁ h₂ : Heap V) {h₃ : Heap V} (d�
       (fun f₂ => Or.inl ((Option.free_orElse (h₁ l) (h₂ l)).2 (f₁, f₂)))
       (fun f₃ => Or.inr f₃))
     (fun f₃ => Or.inr f₃)
+/-- `h₁` is disjoint from `h₂ ⊎ h₃` only if it is disjoint from both. -/
 def Heap.disj_union_r {V : Type} {h₁ : Heap V} (h₂ h₃ : Heap V) (d : Heap.Disj h₁ (Heap.union h₂ h₃)) :
     Heap.Disj h₁ h₂ ∧ Heap.Disj h₁ h₃ :=
   And.imp (fun d' => Heap.disj_symm d') (fun d' => Heap.disj_symm d')
     (Heap.disj_union_l h₂ h₃ (Heap.disj_symm d))
+/-- `h₁` is disjoint from `h₂ ⊎ h₃` if it is disjoint from both. -/
 def Heap.disj_union_r_intro {V : Type} {h₁ : Heap V} (h₂ h₃ : Heap V) (d₁ : Heap.Disj h₁ h₂) (d₂ : Heap.Disj h₁ h₃) :
     Heap.Disj h₁ (Heap.union h₂ h₃) :=
   Heap.disj_symm (Heap.disj_union_l_intro h₂ h₃ (Heap.disj_symm d₁) (Heap.disj_symm d₂))
--- rewriting a disjointness along an equation of heaps
+/-- Rewrite the left heap of a disjointness along an equation of heaps. -/
 def Heap.disj_eq_l {V : Type} {h h' : Heap V} (h₂ : Heap V) (e : h = h') (d : Heap.Disj h h₂) : Heap.Disj h' h₂ :=
   @Heap.subst V (fun (x : Heap V) => Heap.Disj x h₂) h h' e d
+/-- Rewrite the right heap of a disjointness along an equation of heaps. -/
 def Heap.disj_eq_r {V : Type} (h₁ : Heap V) {h h' : Heap V} (e : h = h') (d : Heap.Disj h₁ h) : Heap.Disj h₁ h' :=
   @Heap.subst V (fun (x : Heap V) => Heap.Disj h₁ x) h h' e d
--- two singletons at one location overlap
+/-- Two singletons at one location overlap: they are never disjoint. -/
 def Heap.disj_single {V : Type} (l : Nat) (v w : V) : ¬ Heap.Disj (Heap.single l v) (Heap.single l w) :=
   fun d => Or.elim (d l)
     (fun f => absurd (@Eq.substProp (Option V) (fun (o : Option V) => Option.Free o) (Heap.single l v l) (Option.some v) (Heap.single_at l v) f).1)
@@ -136,63 +180,94 @@ def Heap.disj_single {V : Type} (l : Nat) (v w : V) : ¬ Heap.Disj (Heap.single 
 
 -- ## Heap predicates
 
+/-- A heap predicate: a proposition about a heap. `emp`, `l ↦ v` and `H₁ ⋆ H₂` are heap
+predicates. -/
 def HProp (V : Type) : Type := Heap V → Prop
 
--- entailment `H ⊢ H'`
+/-- Entailment `H ⊢ H'`: every heap satisfying `H` satisfies `H'`. -/
 def Entails {V : Type} (H H' : HProp V) : Prop := (h : Heap V) → H h → H' h
 infix:15 " ⊢ " => Entails
 
+/-- The empty heap predicate: the heap has no cells. -/
 def emp {V : Type} : HProp V := fun h => h = Heap.empty
--- `l ↦ v`: the heap is exactly the one cell
+/-- Points-to, `l ↦ v`: the heap is exactly the one cell `l` holding `v`. -/
 def pts {V : Type} (l : Nat) (v : V) : HProp V := fun h => h = Heap.single l v
 infix:60 " ↦ " => pts
--- a pure fact, owning no cells (SLF's `\[P]`)
+/-- A pure fact that owns no cells (SLF's `\[P]`): `P` holds and the heap is empty. -/
 def hpure {V : Type} (P : Prop) : HProp V := fun h => P ∧ h = Heap.empty
--- anything at all (SLF's `\GC`, the garbage collector's predicate)
+/-- Anything at all (SLF's `\GC`, the garbage collector's predicate). -/
 def htop {V : Type} : HProp V := fun h => True
+/-- The existential over heap predicates: some `a` with `J a`. -/
 def hexists {V A : Type} (J : A → HProp V) : HProp V := fun h => ∃ a : A, J a h
+-- Notation (13o): `⌜P⌝` is `hpure P` (SLF's `\[P]`, Iris's `⌜P⌝`), `∃ʰ x, H` and
+-- `∃ʰ (x : A), H` are `hexists (fun x => H)` (SLF's `\exists`); both print that way.
+notation:max "⌜" P "⌝" => hpure P
+syntax:lead (name := hex) "∃ʰ " ident "," term : term
+syntax:lead (name := hexTyped) "∃ʰ " "(" ident ":" term ")" "," term : term
+macro_rules
+  | `(term| ∃ʰ $x, $b) => `(term| hexists (fun $x => $b))
+macro_rules
+  | `(term| ∃ʰ ($x : $A), $b) => `(term| hexists (fun ($x : $A) => $b))
+app_unexpander hexists
+  | `(term| $f (fun $x => $b)) => `(term| ∃ʰ $x, $b)
+/-- The universal over heap predicates: `J a` for every `a`. -/
 def hforall {V A : Type} (J : A → HProp V) : HProp V := fun h => (a : A) → J a h
--- the separating conjunction: the heap splits into two disjoint parts
+/-- `h` splits into the disjoint parts `h₁` (satisfying `H₁`) and `h₂` (satisfying `H₂`):
+the body of `star`, with the split named. -/
 def StarAt {V : Type} (H₁ H₂ : HProp V) (h h₁ h₂ : Heap V) : Prop :=
   Heap.Disj h₁ h₂ ∧ h = Heap.union h₁ h₂ ∧ H₁ h₁ ∧ H₂ h₂
+/-- The separating conjunction `H₁ ⋆ H₂`: the heap splits into two disjoint parts, one
+satisfying `H₁` and the other `H₂`. `(l ↦ v) ⋆ (m ↦ w)` implies `l ≠ m`
+(`pts.same_loc`). -/
 def star {V : Type} (H₁ H₂ : HProp V) : HProp V := fun h =>
   ∃ h₁ h₂ : Heap V, StarAt H₁ H₂ h h₁ h₂
 infixr:55 " ⋆ " => star
--- the magic wand: whatever disjoint heap satisfies `H₁`, adding it gives `H₂`
+/-- The magic wand `H₁ −∗ H₂`: whatever disjoint heap satisfies `H₁`, adding it gives `H₂`.
+It is the right adjoint of `⋆` (`wand.adjoint`). -/
 def wand {V : Type} (H₁ H₂ : HProp V) : HProp V := fun h =>
   (h' : Heap V) → Heap.Disj h h' → H₁ h' → H₂ (Heap.union h h')
 infixr:52 " −∗ " => wand
 
--- introducing and eliminating `⋆` (the two `Ex` are the only awkward part)
+/-- Introduce `⋆` from a named split (`StarAt`). Introducing and eliminating the two
+existentials is the only awkward part of `⋆`. -/
 def star.intro {V : Type} (0 H₁ H₂ : HProp V) (h h₁ h₂ : Heap V) (s : StarAt H₁ H₂ h h₁ h₂) : star H₁ H₂ h :=
   Ex.intro (fun (a : Heap V) => ∃ b : Heap V, StarAt H₁ H₂ h a b) h₁
     (Ex.intro (fun (b : Heap V) => StarAt H₁ H₂ h h₁ b) h₂ s)
+/-- Eliminate `⋆`: to prove `R` from `(H₁ ⋆ H₂) h`, prove it for every split of `h`. -/
 def star.elim {V : Type} {0 H₁ H₂ : HProp V} {h : Heap V} (s : star H₁ H₂ h) (0 R : Prop)
     (k : (h₁ h₂ : Heap V) → StarAt H₁ H₂ h h₁ h₂ → R) : R :=
   s R (fun h₁ s₁ => s₁ R (fun h₂ s₂ => k h₁ h₂ s₂))
 
 -- ## Entailment is a partial order
 
+/-- Entailment is reflexive. -/
 def Entails.refl {V : Type} (0 H : HProp V) : H ⊢ H := fun h p => p
+/-- Entailment is transitive. -/
 def Entails.trans {V : Type} {0 H₁ H₂ H₃ : HProp V} (a : H₁ ⊢ H₂) (b : H₂ ⊢ H₃) : H₁ ⊢ H₃ :=
   fun h p => b h (a h p)
--- an equation of heap predicates is pointwise `↔` (it computes to
--- `(0 h : Heap V) → (0 _ : (0 _ : H h) → H' h) × ((0 _ : H' h) → H h)`)
+/-- Extensionality for heap predicates: an equation of heap predicates is pointwise `↔` (it
+computes to `(0 h : Heap V) → (0 _ : (0 _ : H h) → H' h) × ((0 _ : H' h) → H h)`), so
+this needs no axiom. -/
 def HProp.ext {V : Type} {0 H H' : HProp V} (p : (h : Heap V) → H h = H' h) : H = H' := p
+/-- Entailment is antisymmetric: mutual entailment is equality (SLF's `himpl_antisym`, here
+without propext). -/
 def Entails.antisym {V : Type} {0 H H' : HProp V} (a : H ⊢ H') (b : H' ⊢ H) : H = H' :=
   HProp.ext (fun h => Iff.toEq (a h, b h))
+/-- Equal heap predicates entail each other. -/
 def Entails.ofEq {V : Type} {0 H H' : HProp V} (e : H = H') : H ⊢ H' :=
   fun h p => (@Eq.symm (HProp V) H H' e h).2 p
 
 -- ## The laws of `⋆` (SLF, Hprop: star_comm, star_assoc, star_hempty_l/r)
 
+/-- `H₁ ⋆ H₂ ⊢ H₂ ⋆ H₁` (one half of `star.comm`). -/
 def star.comm_entails {V : Type} (0 H₁ H₂ : HProp V) : H₁ ⋆ H₂ ⊢ H₂ ⋆ H₁ := fun h s =>
   star.elim s (star H₂ H₁ h) (fun h₁ h₂ a => star.intro H₂ H₁ h h₂ h₁
     (Heap.disj_symm a.1, (Heap.trans a.2.1 (Heap.union_comm h₁ h₂ a.1), (a.2.2.2, a.2.2.1))))
+/-- `⋆` is commutative (SLF, Hprop: `star_comm`), as an equation. -/
 def star.comm {V : Type} (0 H₁ H₂ : HProp V) : H₁ ⋆ H₂ = H₂ ⋆ H₁ :=
   Entails.antisym (star.comm_entails H₁ H₂) (star.comm_entails H₂ H₁)
 
--- `(H₁ ⋆ H₂) ⋆ H₃ ⊢ H₁ ⋆ (H₂ ⋆ H₃)`: re-associate the heaps
+/-- The heart of `star.assoc_l`: re-associate the heaps of a nested split. -/
 def star.assoc_build {V : Type} (0 H₁ H₂ H₃ : HProp V) (h h₁₂ h₁ h₂ h₃ : Heap V)
     (a : StarAt (H₁ ⋆ H₂) H₃ h h₁₂ h₃) (b : StarAt H₁ H₂ h₁₂ h₁ h₂) : (H₁ ⋆ (H₂ ⋆ H₃)) h :=
   let d := Heap.disj_union_l h₁ h₂ (Heap.disj_eq_l h₃ b.2.1 a.1);
@@ -200,102 +275,123 @@ def star.assoc_build {V : Type} (0 H₁ H₂ H₃ : HProp V) (h h₁₂ h₁ h�
     (Heap.disj_union_r_intro h₂ h₃ b.1 d.1,
      (Heap.trans a.2.1 (Heap.trans (Heap.congrUnionL h₃ b.2.1) (Heap.union_assoc h₁ h₂ h₃)),
       (b.2.2.1, star.intro H₂ H₃ (Heap.union h₂ h₃) h₂ h₃ (d.2, (rfl, (b.2.2.2, a.2.2.2))))))
+/-- `(H₁ ⋆ H₂) ⋆ H₃ ⊢ H₁ ⋆ (H₂ ⋆ H₃)`. -/
 def star.assoc_l {V : Type} (0 H₁ H₂ H₃ : HProp V) : (H₁ ⋆ H₂) ⋆ H₃ ⊢ H₁ ⋆ (H₂ ⋆ H₃) := fun h s =>
   star.elim s (star H₁ (H₂ ⋆ H₃) h) (fun h₁₂ h₃ a => star.elim a.2.2.1 (star H₁ (H₂ ⋆ H₃) h) (fun h₁ h₂ b =>
     star.assoc_build H₁ H₂ H₃ h h₁₂ h₁ h₂ h₃ a b))
--- the other direction from commutativity
+/-- `H₁ ⋆ (H₂ ⋆ H₃) ⊢ (H₁ ⋆ H₂) ⋆ H₃`, derived from `star.assoc_l` and commutativity. -/
 def star.assoc_r {V : Type} (0 H₁ H₂ H₃ : HProp V) : H₁ ⋆ (H₂ ⋆ H₃) ⊢ (H₁ ⋆ H₂) ⋆ H₃ :=
   Entails.trans (star.comm_entails H₁ (H₂ ⋆ H₃))
   (Entails.trans (star.assoc_l H₂ H₃ H₁)
   (Entails.trans (star.comm_entails H₂ (H₃ ⋆ H₁))
   (Entails.trans (star.assoc_l H₃ H₁ H₂)
                  (star.comm_entails H₃ (H₁ ⋆ H₂)))))
+/-- `⋆` is associative (SLF, Hprop: `star_assoc`), as an equation. -/
 def star.assoc {V : Type} (0 H₁ H₂ H₃ : HProp V) : (H₁ ⋆ H₂) ⋆ H₃ = H₁ ⋆ (H₂ ⋆ H₃) :=
   Entails.antisym (star.assoc_l H₁ H₂ H₃) (star.assoc_r H₁ H₂ H₃)
 
+/-- `emp ⋆ H ⊢ H`. -/
 def star.emp_l_entails {V : Type} (0 H : HProp V) : emp ⋆ H ⊢ H := fun h s =>
   star.elim s (H h) (fun h₁ h₂ a =>
     Heap.subst H (Heap.symm (Heap.trans a.2.1 (Heap.trans (Heap.congrUnionL h₂ a.2.2.1) (Heap.union_empty_l h₂))))
       a.2.2.2)
+/-- `H ⊢ emp ⋆ H`. -/
 def star.emp_l_intro {V : Type} (0 H : HProp V) : H ⊢ emp ⋆ H := fun h p =>
   star.intro emp H h Heap.empty h (Heap.disj_empty_l h, (Heap.symm (Heap.union_empty_l h), (rfl, p)))
+/-- `emp` is a left unit of `⋆` (SLF: `star_hempty_l`). -/
 def star.emp_l {V : Type} (0 H : HProp V) : emp ⋆ H = H :=
   Entails.antisym (star.emp_l_entails H) (star.emp_l_intro H)
+/-- `H ⊢ H ⋆ emp`. -/
 def star.emp_r_intro {V : Type} (0 H : HProp V) : H ⊢ H ⋆ emp :=
   Entails.trans (star.emp_l_intro H) (star.comm_entails emp H)
+/-- `H ⋆ emp ⊢ H`. -/
 def star.emp_r_entails {V : Type} (0 H : HProp V) : H ⋆ emp ⊢ H :=
   Entails.trans (star.comm_entails H emp) (star.emp_l_entails H)
+/-- `emp` is a right unit of `⋆` (SLF: `star_hempty_r`). -/
 def star.emp_r {V : Type} (0 H : HProp V) : H ⋆ emp = H :=
   @Eq.trans (HProp V) (star H (@emp V)) (star (@emp V) H) H (star.comm H (@emp V)) (star.emp_l H)
 
 -- ## The frame property: `⋆` is monotone (SLF, Himpl: himpl_frame_l/r)
 
+/-- The frame property, on the left (SLF, Himpl: `himpl_frame_l`): `H₁ ⊢ H₁'` gives
+`H₁ ⋆ H₂ ⊢ H₁' ⋆ H₂`. -/
 def star.mono_l {V : Type} {0 H₁ H₁' : HProp V} (0 H₂ : HProp V) (m : H₁ ⊢ H₁') : H₁ ⋆ H₂ ⊢ H₁' ⋆ H₂ :=
   fun h s => star.elim s (star H₁' H₂ h) (fun h₁ h₂ a =>
     star.intro H₁' H₂ h h₁ h₂ (a.1, (a.2.1, (m h₁ a.2.2.1, a.2.2.2))))
+/-- The frame property, on the right: `H₂ ⊢ H₂'` gives `H₁ ⋆ H₂ ⊢ H₁ ⋆ H₂'`. -/
 def star.mono_r {V : Type} (0 H₁ : HProp V) {0 H₂ H₂' : HProp V} (m : H₂ ⊢ H₂') : H₁ ⋆ H₂ ⊢ H₁ ⋆ H₂' :=
   fun h s => star.elim s (star H₁ H₂' h) (fun h₁ h₂ a =>
     star.intro H₁ H₂' h h₁ h₂ (a.1, (a.2.1, (a.2.2.1, m h₂ a.2.2.2))))
+/-- `⋆` is monotone in both arguments. -/
 def star.mono {V : Type} {0 H₁ H₁' H₂ H₂' : HProp V} (m₁ : H₁ ⊢ H₁') (m₂ : H₂ ⊢ H₂') : H₁ ⋆ H₂ ⊢ H₁' ⋆ H₂' :=
   Entails.trans (star.mono_l H₂ m₁) (star.mono_r H₁' m₂)
 
 -- ## Pure facts and quantifiers (SLF, Hprop: hstar_hpure_l, hstar_hexists)
 
--- `\[P] ⋆ H` holds of `h` iff `P` does and `H h`
+/-- `\[P] ⋆ H` holds of `h` iff `P` does and `H h` (SLF, Hprop: `hstar_hpure_l`). -/
 def star.pure_l {V : Type} (0 P : Prop) (0 H : HProp V) (h : Heap V) : ((hpure P ⋆ H) h ↔ P ∧ H h) :=
   (fun s => star.elim s (P ∧ H h) (fun h₁ h₂ a =>
      (a.2.2.1.1, Heap.subst H (Heap.symm (Heap.trans a.2.1
         (Heap.trans (Heap.congrUnionL h₂ a.2.2.1.2) (Heap.union_empty_l h₂)))) a.2.2.2)),
    fun p => star.intro (hpure P) H h Heap.empty h
      (Heap.disj_empty_l h, (Heap.symm (Heap.union_empty_l h), ((p.1, rfl), p.2))))
+/-- `\[P]` holds of the empty heap, given a proof of `P`. -/
 def hpure.intro {V : Type} {P : Prop} (p : P) : @hpure V P Heap.empty := (p, rfl)
--- to prove something from `\[P] ⋆ H`, assume `P`
+/-- To prove something from `\[P] ⋆ H`, assume `P`. -/
 def hpure.elim_l {V : Type} {P : Prop} {0 H H' : HProp V} (k : P → (H ⊢ H')) : hpure P ⋆ H ⊢ H' :=
   fun h s => let r := (star.pure_l P H h).1 s; k r.1 h r.2
+/-- Prove `\[P] ⋆ H'` from a proof of `P` and `H ⊢ H'`. -/
 def hpure.intro_r {V : Type} {P : Prop} {0 H H' : HProp V} (p : P) (m : H ⊢ H') : H ⊢ hpure P ⋆ H' :=
   fun h q => (star.pure_l P H' h).2 (p, m h q)
--- `\[False]` entails anything
+/-- `\[False]` entails anything. -/
 def hpure.false_l {V : Type} (0 H : HProp V) : hpure False ⊢ H := fun h p => absurd p.1
 
+/-- Introduce `hexists` with a witness `a`. -/
 def hexists.intro {V A : Type} (0 J : A → HProp V) (a : A) {0 H : HProp V} (m : H ⊢ J a) : H ⊢ hexists J :=
   fun h q => Ex.intro (fun (x : A) => J x h) a (m h q)
+/-- Eliminate `hexists` on the left of `⊢`: prove the entailment for every witness. -/
 def hexists.elim {V A : Type} {0 J : A → HProp V} {0 H : HProp V} (k : (a : A) → (J a ⊢ H)) : hexists J ⊢ H :=
   fun h q => q (H h) (fun a p => k a h p)
--- `(∃ x, J x) ⋆ H = ∃ x, (J x ⋆ H)`
+/-- `(∃ x, J x) ⋆ H ⊢ ∃ x, (J x ⋆ H)` (one half of `star.exists_l`). -/
 def star.exists_l_entails {V A : Type} (0 J : A → HProp V) (0 H : HProp V) :
     hexists J ⋆ H ⊢ hexists (fun (a : A) => J a ⋆ H) := fun h s =>
   star.elim s (hexists (fun (a : A) => J a ⋆ H) h) (fun h₁ h₂ a =>
     a.2.2.1 (hexists (fun (x : A) => J x ⋆ H) h) (fun x j =>
       Ex.intro (fun (y : A) => star (J y) H h) x (star.intro (J x) H h h₁ h₂ (a.1, (a.2.1, (j, a.2.2.2))))))
+/-- `(∃ x, J x) ⋆ H = ∃ x, (J x ⋆ H)` (SLF, Hprop: `hstar_hexists`). -/
 def star.exists_l {V A : Type} (0 J : A → HProp V) (0 H : HProp V) :
     hexists J ⋆ H = hexists (fun (a : A) => J a ⋆ H) := Entails.antisym
   (star.exists_l_entails J H)
   (hexists.elim (fun x => star.mono_l H (hexists.intro J x (Entails.refl (J x)))))
--- `(∀ x, J x) ⋆ H ⊢ ∀ x, (J x ⋆ H)` (only this direction holds)
+/-- `(∀ x, J x) ⋆ H ⊢ ∀ x, (J x ⋆ H)` (only this direction holds). -/
 def star.forall_l {V A : Type} (0 J : A → HProp V) (0 H : HProp V) :
     hforall J ⋆ H ⊢ hforall (fun (a : A) => J a ⋆ H) := fun h s x =>
   star.elim s (star (J x) H h) (fun h₁ h₂ a => star.intro (J x) H h h₁ h₂ (a.1, (a.2.1, (a.2.2.1 x, a.2.2.2))))
+/-- Introduce `hforall` on the right of `⊢`. -/
 def hforall.intro {V A : Type} {0 J : A → HProp V} {0 H : HProp V} (k : (a : A) → (H ⊢ J a)) : H ⊢ hforall J :=
   fun h q a => k a h q
+/-- Instantiate `hforall` at `a`. -/
 def hforall.elim {V A : Type} (0 J : A → HProp V) (a : A) : hforall J ⊢ J a := fun h q => q a
 
 -- ## The magic wand (SLF, Himpl: hwand_equiv)
 
--- `H₁ ⋆ H₂ ⊢ H₃` iff `H₁ ⊢ H₂ −∗ H₃`
+/-- Currying: `H₁ ⋆ H₂ ⊢ H₃` gives `H₁ ⊢ H₂ −∗ H₃`. -/
 def wand.intro {V : Type} {0 H₁ H₂ H₃ : HProp V} (m : H₁ ⋆ H₂ ⊢ H₃) : H₁ ⊢ H₂ −∗ H₃ :=
   fun h p h' d q => m (Heap.union h h') (star.intro H₁ H₂ (Heap.union h h') h h' (d, (rfl, (p, q))))
+/-- Uncurrying: `H₁ ⊢ H₂ −∗ H₃` gives `H₁ ⋆ H₂ ⊢ H₃`. -/
 def wand.elim {V : Type} {0 H₁ H₂ H₃ : HProp V} (m : H₁ ⊢ H₂ −∗ H₃) : H₁ ⋆ H₂ ⊢ H₃ :=
   fun h s => star.elim s (H₃ h) (fun h₁ h₂ a =>
     Heap.subst H₃ (Heap.symm a.2.1) (m h₁ a.2.2.1 h₂ a.1 a.2.2.2))
+/-- `H₁ ⋆ H₂ ⊢ H₃` iff `H₁ ⊢ H₂ −∗ H₃` (SLF, Himpl: `hwand_equiv`). -/
 def wand.adjoint {V : Type} (0 H₁ H₂ H₃ : HProp V) : ((H₁ ⋆ H₂ ⊢ H₃) ↔ (H₁ ⊢ H₂ −∗ H₃)) :=
   (fun m => wand.intro m, fun m => wand.elim m)
--- modus ponens: `H₁ ⋆ (H₁ −∗ H₂) ⊢ H₂`
+/-- Modus ponens for the wand: `H₁ ⋆ (H₁ −∗ H₂) ⊢ H₂`. -/
 def wand.cancel {V : Type} (0 H₁ H₂ : HProp V) : H₁ ⋆ (H₁ −∗ H₂) ⊢ H₂ :=
   Entails.trans (star.comm_entails H₁ (H₁ −∗ H₂)) (wand.elim (Entails.refl (H₁ −∗ H₂)))
--- the wand is antitone on the left and monotone on the right
+/-- The wand is antitone on the left and monotone on the right. -/
 def wand.mono {V : Type} {0 H₁ H₁' H₂ H₂' : HProp V} (m₁ : H₁' ⊢ H₁) (m₂ : H₂ ⊢ H₂') : (H₁ −∗ H₂) ⊢ (H₁' −∗ H₂') :=
   fun h w h' d q => m₂ (Heap.union h h') (w h' d (m₁ h' q))
--- a frame outside a wand moves in: `(H₁ −∗ H₂) ⋆ H ⊢ H₁ −∗ (H₂ ⋆ H)`
+/-- A frame outside a wand moves in: `(H₁ −∗ H₂) ⋆ H ⊢ H₁ −∗ (H₂ ⋆ H)`. -/
 def wand.frame {V : Type} (0 H₁ H₂ H : HProp V) : (H₁ −∗ H₂) ⋆ H ⊢ H₁ −∗ (H₂ ⋆ H) :=
   wand.intro
     (Entails.trans (star.assoc_l (H₁ −∗ H₂) H H₁)
@@ -305,7 +401,8 @@ def wand.frame {V : Type} (0 H₁ H₂ H : HProp V) : (H₁ −∗ H₂) ⋆ H �
 
 -- ## Points-to
 
--- a cell can't be owned twice (SLF, Hprop: hstar_hsingle_same_loc)
+/-- A cell can't be owned twice: `(l ↦ v) ⋆ (l ↦ w) ⊢ \[False]` (SLF, Hprop:
+`hstar_hsingle_same_loc`). -/
 def pts.same_loc {V : Type} (l : Nat) (v w : V) : (l ↦ v) ⋆ (l ↦ w) ⊢ hpure False :=
   fun h s => star.elim s (hpure False h) (fun h₁ h₂ a =>
     absurd (Heap.disj_single l v w

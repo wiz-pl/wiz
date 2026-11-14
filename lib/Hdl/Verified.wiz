@@ -1,0 +1,260 @@
+import Hdl.Core
+import Text
+/-!
+# Hdl.Verified
+
+the iCEstick demo's vocabulary (wiz-icestick-uart, src/Icestick/Gates.wiz, Oled.wiz)
+-/
+
+def Bit : HwTy := HwTy.bits 1
+def D4 : HwTy := HwTy.bits 4
+def D5 : HwTy := HwTy.bits 5
+def D8 : HwTy := HwTy.bits 8
+def D9 : HwTy := HwTy.bits 9
+def D10 : HwTy := HwTy.bits 10
+def D11w : HwTy := HwTy.bits 11
+def D12 : HwTy := HwTy.bits 12
+def D13 : HwTy := HwTy.bits 13
+def D14 : HwTy := HwTy.bits 14
+def hi {r : HwTy → Type} [Hw r] : r Bit := Hw.lit 1 1
+def lo {r : HwTy → Type} [Hw r] : r Bit := Hw.lit 1 0
+def zext {r : HwTy → Type} [Hw r] {ω n : Nat} (m : Nat) (x : r (HwTy.bits n)) : r (HwTy.bits (Nat.add m n)) :=
+  Hw.cat (Hw.lit m 0) x
+
+-- Sphere's squarers (Sphere.wiz, traceStep, while `squaring`): a multiplier shifts a
+-- bit out of `mx` and the multiplicand `sx` up each cycle; the accumulator adds both
+structure Sq (r : HwTy → Type) where
+  mx : r D5
+  my : r D5
+  sx : r D10
+  sy : r D10
+  acc : r D11w
+def pick10 {r : HwTy → Type} [Hw r] (b : r Bit) (v : r D10) : r D11w :=
+  Hw.mux b (zext 1 v) (Hw.lit 11 0)
+def sqStep {r : HwTy → Type} [Hw r] (m : Sq r) : Sq r :=
+  let xs := pick10 (Hw.slice 0 1 m.mx) m.sx;
+  let shl := fun (v : r D10) => Hw.cat (Hw.slice 0 9 v) lo;
+  let shr := fun (v : r D5) => Hw.cat lo (Hw.slice 1 4 v);
+  Sq.mk (shr m.mx) (shr m.my) (shl m.sx) (shl m.sy)
+    (Hw.add m.acc (Hw.add xs (pick10 (Hw.slice 0 1 m.my) m.sy)))
+-- `start`: the magnitudes in, the accumulator cleared
+def sqLoad (ax ay : BitVec 5) : Sq HwTy.El :=
+  Sq.mk ax ay (@zext HwTy.El _ 5 5 ax) (@zext HwTy.El _ 5 5 ay) (BitVec.ofNat 11 0)
+def sqRun (ax ay : BitVec 5) : BitVec 11 :=
+  (sqStep (sqStep (sqStep (sqStep (sqStep (sqLoad ax ay)))))).acc
+
+def allBelow (p : Nat → Bool) : Nat → Bool
+  | .zero => .true
+  | .succ k => Bool.and (p k) (allBelow p k)
+def sqOk (k : Nat) : Bool :=
+  let x := Nat.div k 32;
+  let y := Nat.mod k 32;
+  Nat.beq (sqRun (BitVec.ofNat 5 x) (BitVec.ofNat 5 y)).toNat (x * x + y * y)
+
+-- Sphere's square root (traceStep, while `rooting`): h², h·2^(b+1) (h at the end), 4^b
+structure Rt (r : HwTy → Type) where
+  h2 : r D11w
+  dd : r D11w
+  ee : r D9
+def rtStep {r : HwTy → Type} [Hw r] (acc : r D11w) (q : Rt r) : Rt r :=
+  let trial := Hw.add q.h2 (Hw.add q.dd (zext 2 q.ee));
+  let fits := Hw.not (Hw.ult acc trial);
+  Rt.mk (Hw.mux fits trial q.h2)
+    (Hw.add (Hw.cat lo (Hw.slice 1 10 q.dd)) (Hw.mux fits (zext 2 q.ee) (Hw.lit 11 0)))
+    (Hw.cat (Hw.lit 2 0) (Hw.slice 2 7 q.ee))
+-- cycle `six`: h² = 0, h = 0, 4^b = 256
+def rtLoad : Rt HwTy.El := Rt.mk (BitVec.ofNat 11 0) (BitVec.ofNat 11 0) (BitVec.ofNat 9 256)
+def rtRun (n : BitVec 11) : BitVec 11 :=
+  (rtStep n (rtStep n (rtStep n (rtStep n (rtStep n rtLoad))))).dd
+def rtOk (n : Nat) : Bool :=
+  let h := (rtRun (BitVec.ofNat 11 n)).toNat;
+  Bool.and (Nat.le (h * h) n) (Nat.lt n ((h + 1) * (h + 1)))
+
+-- the octagon's 11/16 (Blobs.wiz, norm2): s/2 + s/8 + s/16
+def shr1 {r : HwTy → Type} [Hw r] (a : r D12) : r D12 := zext 1 (Hw.slice 1 11 a)
+def shr3 {r : HwTy → Type} [Hw r] (a : r D12) : r D12 := zext 3 (Hw.slice 3 9 a)
+def shr4 {r : HwTy → Type} [Hw r] (a : r D12) : r D12 := zext 4 (Hw.slice 4 8 a)
+def elevenOf {r : HwTy → Type} [Hw r] (s : r D12) : r D12 := Hw.add (shr1 s) (Hw.add (shr3 s) (shr4 s))
+def octOk (s : Nat) : Bool :=
+  let t := (@elevenOf HwTy.El _ (BitVec.ofNat 12 s)).toNat;
+  Bool.and (Nat.le (16 * t) (11 * s)) (Nat.lt (11 * s) (16 * t + 38))
+
+-- the length of (a, c), a, c ≥ 0, from below: max(a, c, 11/16 (a + c))
+def max12 {r : HwTy → Type} [Hw r] (a b : r D12) : r D12 := Hw.mux (Hw.ult a b) b a
+def norm2 {r : HwTy → Type} [Hw r] (a c : r D12) : r D12 :=
+  let s := Hw.add a c;
+  max12 (max12 a c) (Hw.add (shr1 s) (Hw.add (shr3 s) (shr4 s)))
+
+------------------------------------------------------------------------------------
+-- The smooth minimum (Blobs.wiz, sminK, Bl.corrT; Oled.wiz, Rom)
+
+def Hv.rep {A : Type} : Nat → A → List A → List A
+  | .zero, _, acc => acc
+  | .succ k, v, acc => Hv.rep k v (List.cons v acc)
+def Rom.allEq (v : Nat) : List Nat → Bool
+  | .nil => .true
+  | .cons x xs => Bool.and (Nat.beq x v) (Rom.allEq v xs)
+inductive RomT where
+  | leaf (v : Nat)
+  | node (k : Nat) (hi lo : RomT)
+def RomT.go : Nat → List Nat → RomT
+  | .zero, es => RomT.leaf (Hdl.nthD 0 es 0)
+  | .succ k, es => match Rom.allEq (Hdl.nthD 0 es 0) (List.take (Nat.pow 2 (Nat.succ k)) es) with
+    | .true => RomT.leaf (Hdl.nthD 0 es 0)
+    | .false => RomT.node k (RomT.go k (List.drop (Nat.pow 2 k) es)) (RomT.go k (List.take (Nat.pow 2 k) es))
+def RomT.build (k : Nat) (es : List Nat) : RomT := RomT.go k (List.append es (Hv.rep (Nat.pow 2 k) 0 .nil))
+def Rom.at {r : HwTy → Type} [Hw r] (w : Nat) {ω n : Nat} (a : r (HwTy.bits n)) : RomT → r (HwTy.bits w)
+  | .leaf v => Hw.lit w v
+  | .node k hi lo => Hw.mux (Hw.slice k 1 a) (Rom.at w a hi) (Rom.at w a lo)
+
+def neg12 {r : HwTy → Type} [Hw r] (a : r D12) : r Bit := Hw.slice 11 1 a
+def abs12 {r : HwTy → Type} [Hw r] (a : r D12) : r D12 := Hw.mux (neg12 a) (Hw.sub (Hw.lit 12 0) a) a
+def slt12 {r : HwTy → Type} [Hw r] (a b : r D12) : r Bit :=
+  Hw.ult (Hw.xor a (Hw.lit 12 2048)) (Hw.xor b (Hw.lit 12 2048))
+def smin12 {r : HwTy → Type} [Hw r] (a b : r D12) : r D12 := Hw.mux (slt12 a b) a b
+-- max(k − |a − b|, 0)² / (4k), k = 64 units, by g = k − |a − b| quartered (0 … 16)
+def Bl.corrGo : Nat → Nat → List Nat
+  | .zero, g => .nil
+  | .succ n, g => .cons (Nat.div (16 * g * g) 256) (Bl.corrGo n (g + 1))
+def Bl.corrT : RomT := RomT.build 5 (Bl.corrGo 17 0)
+def sminK {r : HwTy → Type} [Hw r] (d1 d2 : r D12) : r D12 :=
+  let e := abs12 (Hw.sub d2 d1);
+  let g := Hw.mux (Hw.ult e (Hw.lit 12 64)) (Hw.sub (Hw.lit 12 64) e) (Hw.lit 12 0);
+  Hw.sub (Hw.sub (smin12 d1 d2) (zext 7 (Rom.at 5 (Hw.slice 2 5 g) Bl.corrT))) (Hw.lit 12 1)
+
+-- the smooth minimum's pieces, so that `sminK` is them by definition (`sminK_eq`)
+def sminG {r : HwTy → Type} [Hw r] (e : r D12) : r D12 :=
+  Hw.mux (Hw.ult e (Hw.lit 12 64)) (Hw.sub (Hw.lit 12 64) e) (Hw.lit 12 0)
+def sminCorr {r : HwTy → Type} [Hw r] (e : r D12) : r D5 := Rom.at 5 (Hw.slice 2 5 (sminG e)) Bl.corrT
+
+------------------------------------------------------------------------------------
+-- Blobs' stage A (stageAStep): two squarers into a 13-bit accumulator, × 4, and a
+-- seven-step root in 14 bits; ρ = 2 √(4 r²) in quarter pixels
+structure ASq (r : HwTy → Type) where
+  mx : r D5
+  my : r D5
+  sx : r D10
+  sy : r D10
+  acc : r D13
+def aSqStep {r : HwTy → Type} [Hw r] (q : ASq r) : ASq r :=
+  let pick := fun (b : r Bit) (v : r D10) => Hw.mux b (zext 3 v) (Hw.lit 13 0);
+  let shl := fun (v : r D10) => Hw.cat (Hw.slice 0 9 v) lo;
+  let shr := fun (v : r D5) => Hw.cat lo (Hw.slice 1 4 v);
+  ASq.mk (shr q.mx) (shr q.my) (shl q.sx) (shl q.sy)
+    (Hw.add q.acc (Hw.add (pick (Hw.slice 0 1 q.mx) q.sx) (pick (Hw.slice 0 1 q.my) q.sy)))
+structure ARt (r : HwTy → Type) where
+  h2 : r D14
+  dd : r D14
+  ee : r D14
+def aRtStep {r : HwTy → Type} [Hw r] (acc : r D13) (rt : ARt r) : ARt r :=
+  let trial := Hw.add rt.h2 (Hw.add rt.dd rt.ee);
+  let fits := Hw.not (Hw.ult (zext 1 acc) trial);
+  ARt.mk (Hw.mux fits trial rt.h2)
+    (Hw.add (Hw.cat lo (Hw.slice 1 13 rt.dd)) (Hw.mux fits rt.ee (Hw.lit 14 0)))
+    (Hw.cat (Hw.lit 2 0) (Hw.slice 2 12 rt.ee))
+def aLoad (ax ay : BitVec 5) : ASq HwTy.El :=
+  ASq.mk ax ay (@zext HwTy.El _ 5 5 ax) (@zext HwTy.El _ 5 5 ay) (BitVec.ofNat 13 0)
+-- cycle 6: × 4, and the root's start
+def aTimes4 (acc : BitVec 13) : BitVec 13 := @Hw.cat HwTy.El _ 11 2 (@Hw.slice HwTy.El _ 0 11 13 acc) (BitVec.ofNat 2 0)
+def aRtLoad : ARt HwTy.El := ARt.mk (BitVec.ofNat 14 0) (BitVec.ofNat 14 0) (BitVec.ofNat 14 4096)
+def aRoot (m : BitVec 13) : BitVec 14 :=
+  (aRtStep m (aRtStep m (aRtStep m (aRtStep m (aRtStep m (aRtStep m (aRtStep m aRtLoad))))))).dd
+def aRho (ax ay : BitVec 5) : BitVec 8 :=
+  let acc := (aSqStep (aSqStep (aSqStep (aSqStep (aSqStep (aLoad ax ay)))))).acc;
+  @Hw.cat HwTy.El _ 7 1 (@Hw.slice HwTy.El _ 0 7 14 (aRoot (aTimes4 acc))) lo
+
+------------------------------------------------------------------------------------
+-- Checks: a property of every number below a bound, and why that suffices
+
+def Hv.andL : (a b : Bool) → Bool.and a b = .true → a = .true
+  | .true, _, h => rfl
+  | .false, _, h => absurd h.1
+def Hv.andR : (a b : Bool) → Bool.and a b = .true → b = .true
+  | .true, _, h => h
+  | .false, _, h => absurd h.1
+def Hv.notLt0 : (k : Nat) → Nat.lt k 0 = .true → False
+  | .zero, h => absurd h.1
+  | .succ _, h => absurd h.1
+def Hv.ltSucc : (k n : Nat) → Nat.lt k (Nat.succ n) = .true → (Nat.lt k n = .true) ∨ (k = n)
+  | .zero, .zero, _ => Or.inr rfl
+  | .zero, .succ _, _ => Or.inl rfl
+  | .succ k, .zero, h => absurd (Hv.notLt0 k h)
+  | .succ k, .succ n, h => Or.imp (fun x => x) (fun e => congrArg Nat.succ e) (Hv.ltSucc k n h)
+def allBelow_sound (p : Nat → Bool) : (n k : Nat) → allBelow p n = .true → Nat.lt k n = .true → p k = .true
+  | .zero, .zero, _, hk => absurd hk.1
+  | .zero, .succ _, _, hk => absurd hk.1
+  | .succ n, k, h, hk => Or.elim (Hv.ltSucc k n hk)
+    (fun l => allBelow_sound p n k (Hv.andR (p n) (allBelow p n) h) l)
+    (fun e => Eq.substProp (fun (j : Nat) => p j = .true) (Eq.symm e) (Hv.andL (p n) (allBelow p n) h))
+
+-- ## The properties, one input at a time (decided for every input below a bound by `rfl`
+-- in examples/hdl-verified.wiz, or by trusted evaluation in examples/hdl-verified-native.wiz)
+
+def Hv.isqrtOk (h m : Nat) : Bool := Bool.and (Nat.le (h * h) m) (Nat.lt m ((h + 1) * (h + 1)))
+def Hv.minN (a b : Nat) : Nat := match Nat.lt a b with
+  | .true => a
+  | .false => b
+def Hv.dist (a b : Nat) : Nat := match Nat.lt a b with
+  | .true => b - a
+  | .false => a - b
+
+-- the squarers: `acc = ax² + ay²` after five cycles (k = 32 ax + ay)
+def Hv.sqOk (k : Nat) : Bool :=
+  let x := Nat.div k 32;
+  let y := Nat.mod k 32;
+  Nat.beq (sqRun (BitVec.ofNat 5 x) (BitVec.ofNat 5 y)).toNat (x * x + y * y)
+-- the 5-step root: h = ⌊√n⌋
+def Hv.rtOk (n : Nat) : Bool := Hv.isqrtOk (rtRun (BitVec.ofNat 11 n)).toNat n
+-- 11/16, from below and at most 37/16 short: 16 t ≤ 11 s < 16 t + 38
+def Hv.octOk (s : Nat) : Bool :=
+  let t := (@elevenOf HwTy.El _ (BitVec.ofNat 12 s)).toNat;
+  Bool.and (Nat.le (16 * t) (11 * s)) (Nat.lt (11 * s) (16 * t + 38))
+-- the table: entry i is (4 i)² / 256 for i ≤ 16, 0 above
+def Hv.romOk (i : Nat) : Bool :=
+  Nat.beq (@Rom.at HwTy.El _ 5 5 (BitVec.ofNat 5 i) Bl.corrT).toNat
+    (match Nat.le i 16 with
+     | .true => Nat.div (i * i) 16
+     | .false => 0)
+-- the correction, by e = |d₂ − d₁|: g = max(64 − e, 0), and the table's c is g²/256
+-- rounded down by less than 2 (g quartered): 256 c ≤ g² < 256 (c + 2)
+def Hv.corrOk (e : Nat) : Bool :=
+  let w := BitVec.ofNat 12 e;
+  let g := match Nat.lt e 64 with
+    | .true => 64 - e
+    | .false => 0;
+  let c := (@sminCorr HwTy.El _ w).toNat;
+  Bool.and (Nat.beq (@sminG HwTy.El _ w).toNat g)
+    (Bool.and (Nat.le (256 * c) (g * g)) (Nat.lt (g * g) (256 * (c + 2))))
+
+-- the whole smooth minimum, for distances d₁, d₂ in [-64, w − 64) (w = 1024 covers the
+-- march's: a ball's distance is at least −R = −48 and at most about 770 units; 12-bit
+-- two's complement, here as D = d + 2048, k = w (D₁ − 1984) + (D₂ − 1984)): the result,
+-- as O = out + 2048, is min(D₁, D₂) − c − 1 with c as in `corrOk`
+def Hv.sminOk (w k : Nat) : Bool :=
+  let D1 := Nat.div k w + 1984;
+  let D2 := Nat.mod k w + 1984;
+  let out := @sminK HwTy.El _ (BitVec.ofNat 12 (D1 + 2048)) (BitVec.ofNat 12 (D2 + 2048));
+  let O := Nat.mod (out.toNat + 2048) 4096;
+  let m := Hv.minN D1 D2;
+  let e := Hv.dist D1 D2;
+  let g := match Nat.lt e 64 with
+    | .true => 64 - e
+    | .false => 0;
+  let c := m - 1 - O;
+  Bool.and (Nat.lt O m) (Bool.and (Nat.le (256 * c) (g * g)) (Nat.lt (g * g) (256 * (c + 2))))
+-- the length estimate, for a, c < w ≤ 1024 (k = w a + c): from below, n² ≤ a² + c², and
+-- |(a, c)| ≤ 1.1 (n + 2)
+def Hv.normOk (w k : Nat) : Bool :=
+  let a := Nat.div k w;
+  let c := Nat.mod k w;
+  let n := (@norm2 HwTy.El _ (BitVec.ofNat 12 a) (BitVec.ofNat 12 c)).toNat;
+  let l := a * a + c * c;
+  Bool.and (Nat.le (n * n) l) (Nat.le (100 * l) (121 * ((n + 2) * (n + 2))))
+-- Blobs' 7-step root on its 13-bit input
+def Hv.aRootOk (m : Nat) : Bool := Hv.isqrtOk (aRoot (BitVec.ofNat 13 m)).toNat m
+-- Blobs' stage A end to end: ρ = 2 ⌊√(4 (ax² + ay²))⌋ (k = 32 ax + ay)
+def Hv.rhoOk (k : Nat) : Bool :=
+  let x := Nat.div k 32;
+  let y := Nat.mod k 32;
+  let rho := (aRho (BitVec.ofNat 5 x) (BitVec.ofNat 5 y)).toNat;
+  Bool.and (Nat.beq (Nat.mod rho 2) 0) (Hv.isqrtOk (Nat.div rho 2) (4 * (x * x + y * y)))

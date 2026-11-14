@@ -12,8 +12,8 @@ import Text
 
 -- ## Regions (RD12): lib/Region.wiz
 --
--- `Region`, `Outlives`, the handles `Shr`/`Uniq`/`Mut`/`MutOpt`/`Lent` (structures, so the
--- region is part of their type) and the borrow scopes live in the library.
+-- `Region`, `Outlives`, the handles `Shr`/`Uniq`/`Mut`/`MutOpt`/`Lent` (the region is part
+-- of their type; `Uniq`, `Mut`, `MutOpt` are linear) and the borrow scopes live in the library.
 
 -- ## Machine integers (stand-in for RD9)
 
@@ -62,8 +62,9 @@ def List.snoc {A : Type} : List A → A → List A
   | .nil, x => .cons x .nil
   | .cons y ys, x => .cons y (List.snoc ys x)
 -- `v.push(x)`: `&mut self` is handed back. (Natively: in place when unique.)
-def Vec.push {ρ : Region} {A : Type} (v : Uniq ρ (Vec A)) (x : A) : Result (Unit × Uniq ρ (Vec A)) :=
-  .ok ((), Uniq.set v (Vec.mk (List.snoc v.val.items x)))
+def Vec.push {ρ : Region} {A : Type} (1 v : Uniq ρ (Vec A)) (x : A) : Result1 Unit (Uniq ρ (Vec A)) :=
+  let 1 (w, v) := Uniq.peek v;
+  .ok () (Uniq.write v (Vec.mk (List.snoc w.items x)))
 def List.getOpt {A : Type} : Nat → List A → Option A
   | _, .nil => .none
   | .zero, .cons x _ => .some x
@@ -90,10 +91,10 @@ def Vec.indexMut_lawful {A : Type} (i : U64) : PLens.Lawful (@Vec.indexMut A i) 
    fun v => Store.underR_pp Vec.mkL (List.atL i.val) (Vec.indexMut i) (fun x => rfl)
      (List.atL i.val v.items) (List.atL_pp i.val v.items))
 -- `v.get_mut(i)`: `Option<&mut A>`, a borrow of the element or the vector back
-def Vec.getMut {ρ : Region} {A : Type} (i : U64) (v : Uniq ρ (Vec A)) : MutOpt ρ A (Vec A) :=
+def Vec.getMut {ρ : Region} {A : Type} (i : U64) (1 v : Uniq ρ (Vec A)) : MutOpt ρ A (Vec A) :=
   match Mut.ofPLens v (Vec.indexMut i) with
   | .ok m => .some m
-  | .err _ => .none v
+  | .err _ v => .none v
 -- (`List.map` is lib/Text.wiz's, so that Feral code can import the sep-logic libraries)
 def Vec.ofList {A : Type} (xs : List A) : Vec A := Vec.mk xs
 
@@ -124,7 +125,7 @@ def U64.div (a b : U64) : Result U64 := match Nat.beq b.val 0 with
   | .true => .err .divZero
   | .false => .ok (U64.mk (Nat.div a.val b.val))
 -- `v.get_mut i` with the receiver first
-def Vec.get_mut {ρ : Region} {A : Type} (v : Uniq ρ (Vec A)) (i : U64) : MutOpt ρ A (Vec A) := Vec.getMut i v
+def Vec.get_mut {ρ : Region} {A : Type} (1 v : Uniq ρ (Vec A)) (i : U64) : MutOpt ρ A (Vec A) := Vec.getMut i v
 -- `o.ok_or e`: a Feral `Result T E` is `Except E T` (L2)
 def Option.ok_or {A E : Type} (o : Option A) (e : E) : Except E A := match o with
   | .some a => .ok a

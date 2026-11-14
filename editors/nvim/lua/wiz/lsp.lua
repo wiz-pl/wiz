@@ -87,8 +87,14 @@ end
 
 --- Turn on Neovim's built-in completion for the client (`lsp.completion`), and
 --- `lsp.folding`: fold with the server's ranges in the current window.
+--- `lsp.inlay_hints`: show the server's inlay hints in the buffer.
 function M.on_attach(client, buf)
   local cfg = config.get().lsp
+  if cfg.folding and vim.lsp.foldexpr and vim.api.nvim_get_current_buf() == buf then
+    vim.wo.foldmethod = 'expr'
+    vim.wo.foldexpr = 'v:lua.vim.lsp.foldexpr()'
+    vim.wo.foldlevel = 99
+  end
   local want = cfg.completion
   if want == 'auto' then
     want = not (package.loaded['cmp'] or package.loaded['blink.cmp'])
@@ -100,10 +106,8 @@ function M.on_attach(client, buf)
         { buffer = buf, desc = 'wiz.nvim: complete (the language server)' })
     end
   end
-  if cfg.folding and vim.lsp.foldexpr and vim.api.nvim_get_current_buf() == buf then
-    vim.wo.foldmethod = 'expr'
-    vim.wo.foldexpr = 'v:lua.vim.lsp.foldexpr()'
-    vim.wo.foldlevel = 99
+  if cfg.inlay_hints and vim.lsp.inlay_hint then
+    vim.lsp.inlay_hint.enable(true, { bufnr = buf })
   end
   if cfg.on_attach then
     cfg.on_attach(client, buf)

@@ -69,16 +69,16 @@ partial def erasable (c : TCtx) (ty : Val) : Bool := match whnf ty with
   | .vsort _ => .true
   | .vsize => .true
   | .vsizeLt _ => .true
-  | .vulift _ A => erasable c A
+  | .vulift _ _ A => erasable c A
   | t => isProp c t
 
 -- Is this `μ` shaped like the natural numbers? Its values are numbers at runtime.
 def isNatDesc (D : Val) : Bool := match whnf D with
-  | .vdarg S F => match whnf S with
+  | .vdarg _ S F => match whnf S with
     | .venum k => match Nat.beq k 2 with
       | .true => match whnf (vapp F (.vtag 2 0)) with
         | .vdret _ => match whnf (vapp F (.vtag 2 1)) with
-          | .vdrec _ E => match whnf E with
+          | .vdrec _ _ E => match whnf E with
             | .vdret _ => .true
             | _ => .false
           | _ => .false
@@ -105,19 +105,19 @@ partial def quickType (c : TCtx) (t : Tm) : Option Val := match t with
   | .app f a => match quickType c f with
     | .some fty => match whnf fty with
       -- (the argument evaluated only if the codomain mentions it, as in the kernel)
-      | .vpi _ _ env cod _ => .some (eval (.cons (match usesVar 0 cod with
+      | .vpi _ _ _ _ env cod => .some (eval (.cons (match usesVar 0 cod with
           | .true => eval (TCtx.env c) a
           | .false => .vtt) env) cod)
       | _ => inferTy c t
     | .none => .none
   | .fst p => match quickType c p with
     | .some pty => match whnf pty with
-      | .vsigma _ A _ _ _ => .some A
+      | .vsigma _ _ _ A _ _ => .some A
       | _ => inferTy c t
     | .none => .none
   | .snd p => match quickType c p with
     | .some pty => match whnf pty with
-      | .vsigma _ _ env B _ => .some (eval (.cons (vfst (eval (TCtx.env c) p)) env) B)
+      | .vsigma _ _ _ _ env B => .some (eval (.cons (vfst (eval (TCtx.env c) p)) env) B)
       | _ => inferTy c t
     | .none => .none
   | .ann _ ty => .some (eval (TCtx.env c) ty)
@@ -125,16 +125,17 @@ partial def quickType (c : TCtx) (t : Tm) : Option Val := match t with
   | .ind _ _ _ _ P _ i x => .some (vapp (vapp (eval (TCtx.env c) P) (eval (TCtx.env c) i)) (eval (TCtx.env c) x))
   -- (the forms a match leaves: without these, erasing a match inferred the whole match
   -- again at every nested split)
-  | .scase _ _ _ _ P _ _ i x => .some (vapp (vapp (eval (TCtx.env c) P) (eval (TCtx.env c) i)) (eval (TCtx.env c) x))
+  | .scase _ _ _ _ _ P _ _ i x => .some (vapp (vapp (eval (TCtx.env c) P) (eval (TCtx.env c) i)) (eval (TCtx.env c) x))
   | .exfalso m _ => .some (eval (TCtx.env c) m)
   | .coe _ B _ _ => .some (eval (TCtx.env c) B)
   | .tag k _ => .some (.venum k)
   | .star => .some (.vunit 1)
   | .letE A v b => quickType (TCtx.define c (eval (TCtx.env c) v) (eval (TCtx.env c) A)) b
   | .letq _ A v b => quickType (TCtx.define c (eval (TCtx.env c) v) (eval (TCtx.env c) A)) b
+  | .letUnit _ b => quickType c b
   | .down x => match quickType c x with
     | .some xty => match whnf xty with
-      | .vulift _ A => .some A
+      | .vulift _ _ A => .some A
       | _ => inferTy c t
     | .none => .none
   | _ => inferTy c t
@@ -183,12 +184,12 @@ def eraseCheck (c : TCtx) (t : Tm) (ty : Val) : ER := match erasable c ty with
   --<sol
   match t with
   | .lam b => match whnf ty with
-    | .vpi _ dom env cod _ => match eraseCheck (TCtx.bind c dom) b (eval (.cons (fresh (TCtx.lvl c)) env) cod) with
+    | .vpi _ _ _ dom env cod => match eraseCheck (TCtx.bind c dom) b (eval (.cons (fresh (TCtx.lvl c)) env) cod) with
       | .ok b' => .ok (.lam b')
       | e => e
     | _ => eraseInfer c t
   | .pair a b => match whnf ty with
-    | .vsigma q A env B _ =>
+    | .vsigma q _ _ A env B =>
       let ar : ER := match q with
         | .qz => .ok .erased
         | _ => eraseCheck c a A;
@@ -210,20 +211,20 @@ def eraseCheck (c : TCtx) (t : Tm) (ty : Val) : ER := match erasable c ty with
       | .ok i' => .ok (.obj 0 (etms1 i'))
       | e => e
     | _ => eraseInfer c t
-  | .darg S D => match whnf ty with
-    | .vdesc l I => match eraseCheck c D (.vpi .qw (eval (TCtx.env c) S) (.cons I .nil) (.descr l (.var 1)) .none) with
+  | .darg _ S D => match whnf ty with
+    | .vdesc l I => match eraseCheck c D (.vpi .qw (ln (l + 1)) (ln (l + 2)) (eval (TCtx.env c) S) (.cons I .nil) (.descr l (.var 1))) with
       | .ok D' => .ok (.obj 1 (etms2 .erased D'))
       | e => e
     | _ => eraseInfer c t
-  | .drec j D => match whnf ty with
+  | .drec _ j D => match whnf ty with
     | .vdesc _ I => match eraseCheck c j I with
       | .ok j' => match eraseCheck c D ty with
         | .ok D' => .ok (.obj 2 (etms2 j' D'))
         | e => e
       | e => e
     | _ => eraseInfer c t
-  | .dhrec H j D => match whnf ty with
-    | .vdesc _ I => match eraseCheck c j (.vpi .qw (eval (TCtx.env c) H) (.cons I .nil) (.var 1) .none) with
+  | .dhrec _ H j D => match whnf ty with
+    | .vdesc l I => match eraseCheck c j (.vpi .qw (ln (l + 1)) (ln (l + 1)) (eval (TCtx.env c) H) (.cons I .nil) (.var 1)) with
       | .ok j' => match eraseCheck c D ty with
         | .ok D' => .ok (.obj 3 (.cons .erased (etms2 j' D')))
         | e => e
@@ -236,7 +237,7 @@ def eraseCheck (c : TCtx) (t : Tm) (ty : Val) : ER := match erasable c ty with
     | .false => eraseCheck c x ty
   -- (Q4) `ULift` has no runtime content
   | .up a => match whnf ty with
-    | .vulift _ A => eraseCheck c a A
+    | .vulift _ _ A => eraseCheck c a A
     | _ => eraseInfer c t
   | .letE A v b =>
     let vA := eval (TCtx.env c) A;
@@ -258,6 +259,10 @@ def eraseCheck (c : TCtx) (t : Tm) (ty : Val) : ER := match erasable c ty with
       | .ok b' => .ok (.letE v' b')
       | e => e
     | e => e
+  -- (linear-case stage 2) `let () := u; b` must evaluate `u` before `b`, and this
+  -- backend's `let`s are lazy (a `let` whose variable is unused is dropped): refuse it
+  -- rather than skip `u`. The self-hosted frontend never produces it.
+  | .letUnit _ _ => .err "erasure: `let () := u` (the unit eliminator) is not supported by the self-hosted backend"
   | _ => eraseInfer c t
   --|ex
   --| .err "not implemented"
@@ -274,6 +279,7 @@ def eraseInfer (c : TCtx) (t : Tm) : ER := match quickType c t with
       | .ann x A => eraseCheck c x (eval (TCtx.env c) A)
       | .letE _ _ _ => eraseCheck c t ty
       | .letq _ _ _ _ => eraseCheck c t ty
+      | .letUnit _ _ => eraseCheck c t ty
       | .fst p => match eraseInfer c p with
         | .ok p' => .ok (.proj 0 p')
         | e => e
@@ -307,15 +313,17 @@ def eraseInfer (c : TCtx) (t : Tm) : ER := match quickType c t with
             | e => e
           | e => e
         | e => e
-      | .scase l I D v P m sz i x =>
-        -- `m ◾ i payload`
+      | .scase l q I D v P m sz i x =>
+        -- `m ◾ i payload` (K1: a case at 0 has an erased scrutinee, whose payload is ◾)
         let vI := eval (TCtx.env c) I;
         let vD := eval (TCtx.env c) D;
-        match eraseCheck c m (scaseMethodTy l vI vD (eval (TCtx.env c) P) (eval (TCtx.env c) sz)) with
+        match eraseCheck c m (scaseMethodTy l v q vI vD (eval (TCtx.env c) P) (eval (TCtx.env c) sz)) with
         | .ok m' => match eraseCheck c i vI with
-          | .ok i' => match eraseInfer c x with
-            | .ok x' => .ok (eapps m' (.cons .erased (etms2 i' (payloadOf (.vmu l vI vD (eval (TCtx.env c) i) .vszInf) x'))))
-            | e => e
+          | .ok i' => match q with
+            | .qz => .ok (eapps m' (.cons .erased (etms2 i' .erased)))
+            | _ => match eraseInfer c x with
+              | .ok x' => .ok (eapps m' (.cons .erased (etms2 i' (payloadOf (.vmu l vI vD (eval (TCtx.env c) i) .vszInf) x'))))
+              | e => e
           | e => e
         | e => e
       | _ => .err "erasure: unsupported term"
@@ -337,7 +345,7 @@ def eraseApp (c : TCtx) (t : Tm) : ER := match quickType c (spineHead t) with
 def eraseArgs (c : TCtx) (f : ETm) (fty : Val) : List Tm → ER
   | .nil => .ok f
   | .cons a rest => match whnf fty with
-    | .vpi q dom env cod _ =>
+    | .vpi q _ _ dom env cod =>
       let ar : ER := match q with
         | .qz => .ok .erased
         | _ => eraseCheck c a dom;

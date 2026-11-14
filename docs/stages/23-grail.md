@@ -1,6 +1,6 @@
 # Stage 23: grail, a build tool
 
-## 23b: modules by path ✅
+## 23b: modules by path
 
 `import A.B` reads `A/B.wiz` under the first **module root** that has it; `lib/` is a
 root, so `import Prelude` is `lib/Prelude.wiz` as before. The frontend stays pure: the
@@ -30,7 +30,7 @@ fields, recursors, description and instances' names are all under it, and in the
 `Repr` shows `T.c`. The kernel's `addDecl` refuses a name that is already declared, behind all
 of this.
 
-## 23c: a key per module, atomic writes ✅
+## 23c: a key per module, atomic writes
 
 A module's key is computed from text alone, before anything is elaborated:
 
@@ -48,7 +48,7 @@ still the initial one and the isolated result serves as it is. So the editor rej
 what `wiz check` rejects. Cache files are
 written to a temporary name and renamed, so concurrent runs never see half a file.
 
-## 23d: grail v0 ✅
+## 23d: grail v0
 
 A package is a directory with a `grail.wiz`, written in Wiz against `lib/Grail.wiz`:
 
@@ -76,7 +76,7 @@ of the files that import what changed, and an edit that leaves the C alone stops
 The key also covers the grail binary itself, so a new elaborator rebuilds everything.
 
 There are no environment variables: the C compiler and its flags come from flags
-(`--cc`, `--cflags`, `--ldflags`, `--llc`, `-I DIR`, `--cache DIR`, `--no-cache`) or from
+(`--cc`, `--cflags`, `--ldflags`, `--llc`, `-I DIR`, `--cache DIR`, `--cache-ro DIR`, `--no-cache`) or from
 an uncommitted `grail.local.wiz` with this machine's paths (`nix develop` writes it from
 `flake.nix`):
 
@@ -87,15 +87,15 @@ def settings : Settings := Settings.empty
   |> Settings.set "ldflags" "-L/nix/store/…-gmp-…/lib -Wl,-rpath,/nix/store/…-gmp-…/lib"
 ```
 
-## 23a: the toolchain as flags ✅
+## 23a: the toolchain as flags
 
 `wiz` reads no environment variables: the toolchain record (`Wiz/Toolchain.lean`: C
 compiler and flags, `llc`, the collector's flags, the cache, module roots) comes from
-`--cc`, `--cflags`, `--ldflags`, `--libs`, `--llc`, `--cache DIR`/`--no-cache` and
+`--cc`, `--cflags`, `--ldflags`, `--libs`, `--llc`, `--cache DIR`/`--cache-ro DIR`/`--no-cache` and
 `-I DIR` (which replaces `$WIZ_PATH`), and is passed explicitly to everything that
 compiles. Its compiler fields are its `id`, which enters grail's keys.
 
-## 23e: the self-hosted toolchain as targets ✅
+## 23e: the self-hosted toolchain as targets
 
 `Package.selfhost NAME ROLE` builds the self-hosted programs from `selfhost/*.wiz`
 (`Wiz/Selfhost.lean` generates their sources, parser tables included, for grail and the
@@ -105,7 +105,7 @@ tests alike): `checker`, `compiler`, and `bootstrap`, the fixpoint check of
 nothing unless a source, `rt.c`, the toolchain or grail changed. `grail build` alone
 leaves it out.
 
-## 23f: a test runner ✅
+## 23f: a test runner
 
 `Package.tests NAME DIR` makes every `.wiz` file under `DIR` a test, with its expected
 output beside it in `.expected`. The first line gives the kind: `-- test: check` (the
@@ -116,11 +116,14 @@ nothing; `grail test FILTER` runs the tests whose path contains it, and
 `grail test --update` writes the actual output. Every example is a test
 (`examples/*.expected`). The Lean tests stay in `lake test`.
 
-## 23g: parallel jobs ✅
+## 23g: parallel jobs
 
-The jobs form an explicit graph (`Grail/Graph.lean`): `ir F` depends on `check F`, …,
-`link E` on `obj F`, a check on the checks of the package modules it imports, a `run` test
-on its executable, the bootstrap steps on each other. A node's key is computed when its
+The jobs form an explicit graph (`Grail/Graph.lean`): `obj F` depends on `build F`
+(which checks `F` and writes its IR and C in one job: as `check F`, `ir F` and `c F`
+it elaborated the same source three times), …, `link E` on `obj F`, a check on the
+checks of the package modules it imports, a `run` test on its executable, the bootstrap
+steps on each other. A file that is already checked as a package module keeps its
+`check F` job and its C comes from `ir F`. A node's key is computed when its
 dependencies are done (an object's key hashes the C its `c` node wrote); a node whose
 output exists is up to date, the rest are jobs in a ready queue. `grail build -j N`
 (default: the cores, at most 4) runs up to `N` jobs at a time, each as a separate process
@@ -131,7 +134,7 @@ on it are skipped; the others still run. Each job's output is buffered and print
 graph's order, so `-j 1` and `-j 8` print the same report, and a second build still runs
 no jobs.
 
-## 23h: git dependencies and a lock file ✅
+## 23h: git dependencies and a lock file
 
 `Package.dep NAME URL REV` depends on the package at a git URL (a path, `file://`,
 `https://`) and revision (tag, branch or commit). `grail update` resolves each
@@ -151,7 +154,7 @@ targets become module roots, so `import Greet.Hello` finds
 `.grail/packages/greet/src/Greet/Hello.wiz`; module keys already hash module texts.
 Two different commits of one dependency name are refused (no version resolution yet).
 
-## 23i: command targets ✅
+## 23i: command targets
 
 A **command** runs a program with declared inputs and outputs, as a job of the build
 graph like any other: it waits for what makes its inputs, runs under `-j N` and the time
@@ -238,7 +241,7 @@ with `Command.needs` or `Command.uses`). Environment variables other than those 
 `Command.env` are inherited and not in the key. This is make's and ninja's contract, not
 Nix's; what grail adds is that what *is* declared is handled exactly.
 
-## 23j: `grail run` ✅
+## 23j: `grail run`
 
 `grail run TARGET [-- ARGS…]` builds what TARGET needs and runs it with ARGS appended,
 in the package directory, with grail's own stdin, stdout and stderr, and exits with its
@@ -252,7 +255,7 @@ grail's process group, so Ctrl-C reaches it.
 grail run icestick -- test /dev/ttyUSB1 3000
 ```
 
-## 23k: job processes don't outlive grail ✅
+## 23k: job processes don't outlive grail
 
 Each job's process (a `--grail-job`, the C compiler, a command) runs under a
 **supervisor**, `grail --grail-exec MS [--cwd DIR] [--env K=V]… -- CMD ARGS…`
@@ -271,7 +274,7 @@ its memory cap) used to be reported with an empty message; now it is `killed by 
 printed. Tests: groups `grail-commands` and `grail-hygiene` (grail itself, as
 `tests --grail …`, killed with `SIGKILL` and `SIGTERM` while a job's grandchild sleeps).
 
-## 23l: `grail lsp` ✅
+## 23l: `grail lsp`
 
 `wiz lsp` finds modules under the toolchain's library, `./lib` and its `-I` directories,
 so in a grail package (`Package.lib "lib" "src"`) an editor reported `import
@@ -302,3 +305,35 @@ workspace root.
 The server reads the package's modules when it starts, as before: an edit to a module
 is seen by the files that import it after a restart (`:WizLspRestart`), and so is an
 edit to `grail.wiz`.
+
+## 23o: `grail new`
+
+`grail new NAME [--dir DIR]` writes the smallest package that builds, runs and tests:
+
+```
+grail.wiz        Package.new "NAME"
+                   |> Package.lib "NAME-lib" "src"
+                   |> Package.exe "NAME" "src/Main.wiz"
+                   |> Package.tests "tests" "tests"
+src/Main.wiz     import Std; def main : IO Unit := IO.println "hello from NAME"
+tests/hello.wiz  a `-- test: run` golden test, with hello.expected
+README.md        how to build, run and test it
+.gitignore       .grail/
+```
+
+It goes into `DIR` — `./NAME` by default, `DIR/NAME` with `-C DIR` — and an existing
+non-empty directory is refused, so `new` never overwrites work. The name must be a
+letter followed by letters, digits, `_` or `-` (at most 64 characters); it is the
+package's name, its targets' names and the greeting. Inside the new directory
+`grail build`, `grail run NAME` and `grail test` work as they do here; the second build
+runs nothing.
+
+`grail new` found a link-key bug: a link job's key did not include the name of the
+binary it makes, so a test whose program compiles to the same C as an `exe` (the
+generated test and `src/Main.wiz` print the same line) was "up to date" from the exe's
+link directory and the test ran a binary that was not there. The key now includes the
+output's name (and whether it is installed in `.grail/bin`), so two programs with the
+same object and link files no longer share a directory.
+
+Tests: `grail-commands`, "new: the generated package builds, runs and tests; a
+non-empty directory is refused" (also covers the refusal and the name check).

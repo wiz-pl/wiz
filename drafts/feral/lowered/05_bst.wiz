@@ -17,58 +17,58 @@ inductive Tree where
 -- (so Perceus reuses the cell).
 -- `partial`: the recursive call is on the handle of a field, made inside a scope's
 -- lambda, which structural recursion doesn't see through (wishful: reborrow-recursion).
-partial def insert {ρ : Region} (t : Uniq ρ Tree) (k : U64) : Result (Unit × Uniq ρ Tree) :=
+partial def insert {ρ : Region} (1 t : Uniq ρ Tree) (k : U64) : Result1 Unit (Uniq ρ Tree) :=
   Uniq.reborrow t (fun ρ' h t r =>
-    match r.val with
-    | .leaf => .ok ((), Uniq.set r (Tree.node k .leaf .leaf))   -- *t := .node k .leaf .leaf
+    let 1 (v, r) := Uniq.peek r;
+    match v with
+    | .leaf => .ok () (Uniq.write r (Tree.node k .leaf .leaf))   -- *t := .node k .leaf .leaf
     | .node key left right => match U64.lt k key with
       | .true => (match Uniq.borrow ρ' left (fun ρl hl left rl => insert rl k) with   -- insert left k
         | .ok q =>
           let (u, left) := q;
-          .ok ((), Uniq.set r (Tree.node key left right))
-        | .err e => .err e)
+          .ok () (Uniq.write r (Tree.node key left right))
+        | .err e => .err e r)
       | .false => match U64.lt key k with
         | .true => (match Uniq.borrow ρ' right (fun ρr hr right rr => insert rr k) with   -- insert right k
           | .ok q =>
             let (u, right) := q;
-            .ok ((), Uniq.set r (Tree.node key left right))
-          | .err e => .err e)
-        | .false => .ok ((), Uniq.set r (Tree.node key left right)))
+            .ok () (Uniq.write r (Tree.node key left right))
+          | .err e => .err e r)
+        | .false => .ok () r)
 
 -- fn insert_loop {'a} (t : &'a mut Tree) (k : U64) : Unit := {
 --   let mut cur := t;                                        -- cur : &'a mut Tree
 --   while let .node key left right := cur do {
 --     if k < *key then cur := left else if *key < k then cur := right else return () };
 --   *cur := .node k .leaf .leaf }
--- `cur` is a borrow of the whole tree (`Mut ρ Tree Tree`, starting as `Mut.whole t`); each
+-- `cur` is a borrow of the whole tree (`Mut ρ Tree Tree`, starting as `Mut.whole t`), used
+-- once per step and handed back by the loop (`Result1`, with a `Flow` for the `return`); each
 -- step composes it with a borrow of a child, whose backward function rebuilds the node.
 -- The region stays `ρ`: `t` is moved into the cursor, and the cursor's release gives it back.
-partial def insert_loop.loop0 {ρ : Region} (k : U64) (cur : Mut ρ Tree Tree) :
-    Result (Flow (Mut ρ Tree Tree) (Unit × Uniq ρ Tree)) :=
-  match Mut.get cur with
+partial def insert_loop.loop0 {ρ : Region} (k : U64) (1 cur : Mut ρ Tree Tree) :
+    Result1 (Flow Unit Unit) (Mut ρ Tree Tree) :=
+  let 1 (v, cur) := Mut.peek cur;
+  match v with
   | .node key left right => (match U64.lt k key with
     | .true =>
-      let cur := Mut.comp cur (fun (_ : Tree) => (left, fun (l : Tree) => Tree.node key l right));
+      let 1 cur := Mut.comp cur (fun (_ : Tree) => (left, fun (l : Tree) => Tree.node key l right));
       insert_loop.loop0 k cur
     | .false => match U64.lt key k with
       | .true =>
-        let cur := Mut.comp cur (fun (_ : Tree) => (right, fun (r : Tree) => Tree.node key left r));
+        let 1 cur := Mut.comp cur (fun (_ : Tree) => (right, fun (r : Tree) => Tree.node key left r));
         insert_loop.loop0 k cur
-      | .false =>
-        let t := Mut.release cur;              -- return (): every borrow ends unchanged
-        .ok (.ret ((), t)))
-  | .leaf => .ok (.brk cur)
+      | .false => .ok (.ret ()) cur)        -- return (): the cursor goes back, unchanged
+  | .leaf => .ok (.brk ()) cur
 
-def insert_loop {ρ : Region} (t : Uniq ρ Tree) (k : U64) : Result (Unit × Uniq ρ Tree) :=
-  let cur := Mut.whole t;
+def insert_loop {ρ : Region} (1 t : Uniq ρ Tree) (k : U64) : Result1 Unit (Uniq ρ Tree) :=
+  let 1 cur := Mut.whole t;
   match insert_loop.loop0 k cur with
-  | .ok fl => (match fl with
-    | .brk cur =>
-      let cur := Mut.set cur (Tree.node k .leaf .leaf);    -- *cur := .node k .leaf .leaf
-      let t := Mut.release cur;                            -- the borrow of t ends
-      .ok ((), t)
-    | .ret r => .ok r)
-  | .err e => .err e
+  | .ok fl cur => (match fl with
+    | .brk u =>
+      let 1 cur := Mut.set cur (Tree.node k .leaf .leaf);  -- *cur := .node k .leaf .leaf
+      .ok () (Mut.release cur)                           -- the borrow of t ends
+    | .ret u => .ok () (Mut.release cur))                -- every borrow ends unchanged
+  | .err e cur => .err e (Mut.release cur)
 
 -- The same loop with the chain of backward closures defunctionalised: a frame per
 -- step (the node with a hole), `plug` is the backward function. Every frame reuses
@@ -92,18 +92,19 @@ partial def insert_zip.loop0 (k : U64) (cur : Tree) (path : Path) : Result (Flow
       | .false => .ok (.ret ((), Path.plug path (Tree.node key left right))))
   | .leaf => .ok (.brk (cur, path))
 
-def insert_zip {ρ : Region} (t : Uniq ρ Tree) (k : U64) : Result (Unit × Uniq ρ Tree) :=
-  match insert_zip.loop0 k t.val Path.top with
+def insert_zip {ρ : Region} (1 t : Uniq ρ Tree) (k : U64) : Result1 Unit (Uniq ρ Tree) :=
+  let 1 (v, t) := Uniq.peek t;
+  match insert_zip.loop0 k v Path.top with
   | .ok fl => (match fl with
-    | .brk cp => let (cur, path) := cp; .ok ((), Uniq.set t (Path.plug path (Tree.node k .leaf .leaf)))
-    | .ret r => let (u, t2) := r; .ok ((), Uniq.set t t2))
-  | .err e => .err e
+    | .brk cp => let (cur, path) := cp; .ok () (Uniq.write t (Path.plug path (Tree.node k .leaf .leaf)))
+    | .ret r => let (u, t2) := r; .ok () (Uniq.write t t2))
+  | .err e => .err e t
 
 -- running them
 def Tree.toNats : Tree → List Nat
   | .leaf => .nil
   | .node k l r => List.append (Tree.toNats l) (.cons k.val (Tree.toNats r))
-def build (ins : (0 ρ : Region) → Uniq ρ Tree → U64 → Result (Unit × Uniq ρ Tree)) : List Nat → Tree → Result Tree
+def build (ins : (0 ρ : Region) → (1 t : Uniq ρ Tree) → U64 → Result1 Unit (Uniq ρ Tree)) : List Nat → Tree → Result Tree
   | .nil, t => .ok t
   | .cons k ks, t => match Uniq.borrow Region.static t (fun ρ h t r => ins ρ r (U64.mk k)) with
     | .ok r => let (u, t) := r; build ins ks t

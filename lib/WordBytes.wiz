@@ -1,12 +1,29 @@
 import IO
 import Word
--- `Bytes` as lists of `U8` (sys-bytes, 9k). A module of its own: IO and Sys count bytes
--- as `Nat`s below 256 and don't import Word.
+/-!
+# WordBytes
+
+`Bytes` as lists of `U8` (sys-bytes, stage 9k). A module of its own: IO and Sys count
+bytes as `Nat`s below 256 and don't import Word, so the conversions between the byte
+buffer and fixed-width words live here.
+
+* `Bytes.ofU8s`: a list of bytes as a `Bytes` buffer;
+* `Bytes.toU8s`: a buffer's bytes as a list.
+
+```
+Bytes.toU8s (Bytes.ofU8s l) = l
+```
+-/
+/-- `Bytes.ofU8s`'s loop: push each byte of the list onto the accumulator `acc`. -/
 def Bytes.ofU8sAux : List U8 → Bytes → Bytes
   | .nil, acc => acc
   | .cons x xs, acc => Bytes.ofU8sAux xs (Bytes.push acc (UIntN.toNat x))
+/-- The bytes of the list `l`, in order, as a `Bytes` buffer. -/
 def Bytes.ofU8s (l : List U8) : Bytes := Bytes.ofU8sAux l Bytes.empty
+/-- `Bytes.toU8s`'s loop: the first `k` bytes of `b` in front of `acc` (built from the
+end, so no reversing). -/
 def Bytes.toU8sAux (b : Bytes) : Nat → List U8 → List U8
   | .zero, acc => acc
   | .succ k, acc => Bytes.toU8sAux b k (.cons (U8.ofNat (Bytes.get b k)) acc)
+/-- The bytes of `b` as a list of `U8`, first byte first. -/
 def Bytes.toU8s (b : Bytes) : List U8 := Bytes.toU8sAux b (Bytes.size b) .nil

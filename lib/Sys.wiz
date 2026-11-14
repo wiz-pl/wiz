@@ -1,145 +1,220 @@
 import IO
--- System interfaces (stage 9h): the environment, files and directories, processes.
---
--- Everything here is POSIX underneath (`runtime/wiz.c`, section "system interfaces").
--- An operation that can fail returns `IO (Except String A)`: the error is the C
--- library's message for `errno`, after what was being done (`"/x: No such file or
--- directory"`). `EIO A` is that type as a monad, for `do` blocks that stop at the first
--- error. Like every foreign function, these only run in compiled code (`wiz run`).
+/-!
+# Sys
+
+System interfaces (stage 9h): the environment, files and directories, processes, clocks
+and file descriptors.
+
+Everything here is POSIX underneath (`runtime/`, section "system interfaces"). An
+operation that can fail returns `IO (Except String A)`: the error is the C library's
+message for `errno`, after what was being done (`"/x: No such file or directory"`).
+`EIO A` is that type as a monad, for `do` blocks that stop at the first error, and
+`EIO.toIO` runs one as a program (printing the error and exiting with code 1). Like
+every foreign function, these only run in compiled code (`wiz run`).
+
+Main definitions:
+
+* errors: `EIO`, `Sys.check`, `Sys.lift`;
+* the environment: `Env.get`, `Env.set`, `Env.list`;
+* files and directories: `FS.readFile`, `FS.writeFile`, `FS.listDir`, `FS.stat`,
+  `FS.createTempDir`, `FS.removeAll`, and buffered handles `File`;
+* processes: `Process.output`, `Process.run`, `Process.spawn` (a `Child`), and
+  `Process.spawnWith` with `SpawnOptions`;
+* time: `Duration`, `Clock.monotonic`, `Clock.sleep`;
+* unbuffered descriptors with time limits: `Fd`, `Fd.readWithin`, `Fd.poll`.
+
+```
+import Sys
+
+def main : IO Unit := EIO.toIO (do
+  dir ← FS.createTempDir;
+  FS.writeFile (Path.join dir "a.txt") "hello\n";
+  out ← Process.output "cat" (.cons (Path.join dir "a.txt") .nil) "";
+  EIO.lift (IO.print out.stdout);
+  FS.removeAll dir)
+```
+-/
 
 -- Errors.
 
--- The error of the last value-returning call on this thread (0: none), and its message.
+/-- The error of the last value-returning call on this thread (0: none), C's `errno`. -/
 extern "wiz_sys_errno" Sys.errno : IO Nat
+/-- The C library's message for an error number (`strerror`): `Sys.errorMessage 2` is "No such file or directory". -/
 extern "wiz_sys_strerror" Sys.errorMessage : Nat → String
 
+/-- `Sys.message what e`: the message for error `e`, after what was being done: `"/x: No such file or directory"`. -/
 def Sys.message (what : String) (e : Nat) : String :=
   String.append what (String.append ": " (Sys.errorMessage e))
--- an errno status (0 is success) as a result
+/-- An errno status (0 is success) as a result: `.ok ()`, or the error's `Sys.message`. -/
 def Sys.status (what : String) (e : Nat) : Except String Unit :=
   match Nat.beq e 0 with
   | .true => .ok ()
   | .false => .error (Sys.message what e)
+/-- Run a foreign call that returns an errno status, as a result (`Sys.status`). -/
 def Sys.lift (what : String) (x : IO Nat) : IO (Except String Unit) :=
   IO.bind x (fun e => IO.pure (Sys.status what e))
--- a value, unless the call that made it set an error
+/-- Run a foreign call that returns a value, and make it an error if the call set `Sys.errno`. -/
 def Sys.check {A : Type} (what : String) (x : IO A) : IO (Except String A) :=
   IO.bind x (fun a => IO.bind Sys.errno (fun e => IO.pure (match Nat.beq e 0 with
     | .true => .ok a
     | .false => .error (Sys.message what e))))
 
--- IO that can fail, as a monad.
+/-- IO that can fail, as a monad: an action whose result is `.ok a` or `.error message`.
+A `do` block in `EIO` stops at the first error. -/
 def EIO (A : Type) : Type := IO (Except String A)
+/-- Succeed with `a`. -/
 def EIO.pure {A : Type} (a : A) : EIO A := IO.pure (.ok a)
+/-- Run `x`; if it succeeded, run `f` on its result; otherwise stop with its error. -/
 def EIO.bind {A B : Type} (x : EIO A) (f : A → EIO B) : EIO B :=
   IO.bind x (fun r => match r with
     | .error e => IO.pure (.error e)
     | .ok a => f a)
+/-- `EIO` is a monad, so `do` notation works for it. -/
 instance : Monad EIO where
   pure := EIO.pure
   bind := EIO.bind
+/-- Fail with a message: `EIO.fail "no input"`. -/
 def EIO.fail {A : Type} (e : String) : EIO A := IO.pure (.error e)
+/-- An `IO` action that can't fail, as an `EIO` one (to use `IO.println` inside an `EIO` `do` block). -/
 def EIO.lift {A : Type} (x : IO A) : EIO A := IO.bind x (fun a => IO.pure (.ok a))
 
 -- Environment variables. (Setting them is not thread-safe in C: set them before
 -- starting threads.)
 
+/-- Raw `getenv` (sets `Sys.errno` when the variable is not set); use `Env.get`. -/
 extern "wiz_sys_getenv" Env.getRaw : String → IO String
+/-- Raw `setenv`, returning an errno status; use `Env.set`. -/
 extern "wiz_sys_setenv" Env.setRaw : String → String → IO Nat
+/-- Raw `unsetenv`, returning an errno status; use `Env.unset`. -/
 extern "wiz_sys_unsetenv" Env.unsetRaw : String → IO Nat
+/-- Raw `environ`, as a flat list name₁, value₁, name₂, …; use `Env.list`. -/
 extern "wiz_sys_environ" Env.listRaw : IO (List String)
 
+/-- The value of an environment variable, or `none` if it is not set: `Env.get "HOME"`. -/
 def Env.get (k : String) : IO (Option String) :=
   IO.bind (Sys.check k (Env.getRaw k)) (fun r => IO.pure (match r with
     | .ok v => .some v
     | .error e => .none))
+/-- Set an environment variable. (Not thread-safe in C: set variables before starting threads.) -/
 def Env.set (k v : String) : EIO Unit := Sys.lift (String.append "setenv " k) (Env.setRaw k v)
+/-- Remove an environment variable. (Not thread-safe in C, like `Env.set`.) -/
 def Env.unset (k : String) : EIO Unit := Sys.lift (String.append "unsetenv " k) (Env.unsetRaw k)
--- a flat list name₁, value₁, name₂, … as pairs
+/-- A flat list name₁, value₁, name₂, … as pairs; the second argument is a name waiting for its value. -/
 def Env.pairsFrom : List String → Option String → List (String × String)
   | .nil, _ => .nil
   | .cons x rest, .none => Env.pairsFrom rest (.some x)
   | .cons x rest, .some k => .cons (k, x) (Env.pairsFrom rest .none)
+/-- A flat list name₁, value₁, name₂, … as pairs: `Env.pairs ["A", "1"] = [("A", "1")]`. -/
 def Env.pairs (l : List String) : List (String × String) := Env.pairsFrom l .none
--- every variable, sorted by name
+/-- Every environment variable with its value, sorted by name. -/
 def Env.list : IO (List (String × String)) := IO.bind Env.listRaw (fun l => IO.pure (Env.pairs l))
 
 -- Paths.
 
+/-- Two paths joined with a `/`: `Path.join "/tmp" "a.txt" = "/tmp/a.txt"`. -/
 def Path.join (a b : String) : String := String.append a (String.append "/" b)
 
 -- Files and directories.
 
+/-- What a path names: a regular file, a directory, a symbolic link, or something else (a device, a pipe, a socket). -/
 inductive FileKind where
   | file
   | dir
   | symlink
   | other
 
+/-- What `FS.stat` says about a path. -/
 structure FileStat where
   kind : FileKind
   size : Nat
-  -- modification time: seconds since the epoch, and nanoseconds
+  /-- modification time: seconds since the epoch (`mtimeNs` adds the nanoseconds) -/
   mtime : Nat
   mtimeNs : Nat
-  -- permission bits (`0o755` is 493)
+  /-- permission bits (`0o755` is 493) -/
   mode : Nat
 
+/-- The `FileKind` for the runtime's code (0 file, 1 directory, 2 link, else other). -/
 def FileKind.ofNat : Nat → FileKind
   | 0 => .file
   | 1 => .dir
   | 2 => .symlink
   | _ => .other
 
+/-- Raw `getcwd`; use `FS.currentDir`. -/
 extern "wiz_sys_getcwd" FS.getcwdRaw : IO String
+/-- Raw `chdir`, returning an errno status; use `FS.setCurrentDir`. -/
 extern "wiz_sys_chdir" FS.chdirRaw : String → IO Nat
+/-- Raw `mkdir` with a mode; use `FS.createDir`. -/
 extern "wiz_sys_mkdir" FS.mkdirRaw : String → Nat → IO Nat
+/-- Raw `rmdir`; use `FS.removeDir`. -/
 extern "wiz_sys_rmdir" FS.rmdirRaw : String → IO Nat
+/-- Raw `unlink`; use `FS.removeFile`. -/
 extern "wiz_sys_unlink" FS.unlinkRaw : String → IO Nat
+/-- Remove a file or a whole tree; use `FS.removeAll`. -/
 extern "wiz_sys_remove_all" FS.removeAllRaw : String → IO Nat
+/-- Raw `rename`; use `FS.rename`. -/
 extern "wiz_sys_rename" FS.renameRaw : String → String → IO Nat
+/-- Raw `symlink`; use `FS.symlink`. -/
 extern "wiz_sys_symlink" FS.symlinkRaw : String → String → IO Nat
+/-- Raw `chmod`; use `FS.setMode`. -/
 extern "wiz_sys_chmod" FS.chmodRaw : String → Nat → IO Nat
+/-- Raw `readlink`; use `FS.readLink`. -/
 extern "wiz_sys_readlink" FS.readlinkRaw : String → IO String
+/-- Raw `mkdtemp` (a template ending in `XXXXXX` is added); use `FS.createTempDir`. -/
 extern "wiz_sys_mkdtemp" FS.mkdtempRaw : String → IO String
+/-- Raw `stat` (`.true`) or `lstat` (`.false`), as numbers: kind, size, mtime, nanoseconds, mode; use `FS.stat`. -/
 extern "wiz_sys_stat" FS.statRaw : String → Bool → IO (List Nat)
+/-- Raw directory listing; use `FS.listDir`. -/
 extern "wiz_sys_list_dir" FS.listDirRaw : String → IO (List String)
+/-- Raw whole-file read; use `FS.readFile`. -/
 extern "wiz_sys_read_file" FS.readFileRaw : String → IO String
+/-- Raw whole-file write (`.true`: append); use `FS.writeFile` or `FS.appendFile`. -/
 extern "wiz_sys_write_file" FS.writeFileRaw : String → String → Bool → IO Nat
+/-- Raw whole-file read as bytes; use `FS.readBytes`. -/
 extern "wiz_sys_read_bytes" FS.readBytesRaw : String → IO Bytes
+/-- Raw whole-file write of bytes (`.true`: append); use `FS.writeBytes`. -/
 extern "wiz_sys_write_bytes" FS.writeBytesRaw : String → Bytes → Bool → IO Nat
 
+/-- The current working directory. -/
 def FS.currentDir : EIO String := Sys.check "getcwd" FS.getcwdRaw
+/-- Change the current working directory. -/
 def FS.setCurrentDir (p : String) : EIO Unit := Sys.lift p (FS.chdirRaw p)
--- a directory, with permissions `0o755` (less the umask)
+/-- Create a directory, with permissions `0o755` (less the umask). Its parent must exist. -/
 def FS.createDir (p : String) : EIO Unit := Sys.lift p (FS.mkdirRaw p 493)
--- an empty directory
+/-- Remove an empty directory. -/
 def FS.removeDir (p : String) : EIO Unit := Sys.lift p (FS.rmdirRaw p)
--- a file or a link
+/-- Remove a file or a link. -/
 def FS.removeFile (p : String) : EIO Unit := Sys.lift p (FS.unlinkRaw p)
--- a file, or a directory with everything in it (links are removed, not followed)
+/-- Remove a file, or a directory with everything in it (links are removed, not followed). Use with care. -/
 def FS.removeAll (p : String) : EIO Unit := Sys.lift p (FS.removeAllRaw p)
+/-- `FS.rename src dst`: move or rename a file or directory (replacing `dst` if it is a file). -/
 def FS.rename (src dst : String) : EIO Unit := Sys.lift src (FS.renameRaw src dst)
--- `FS.symlink target link` makes `link` point to `target`
+/-- `FS.symlink target link` makes `link` point to `target`. -/
 def FS.symlink (target link : String) : EIO Unit := Sys.lift link (FS.symlinkRaw target link)
+/-- Where a symbolic link points (its contents, not resolved). -/
 def FS.readLink (p : String) : EIO String := Sys.check p (FS.readlinkRaw p)
+/-- Set a path's permission bits: `FS.setMode p 493` is `chmod 755 p`. -/
 def FS.setMode (p : String) (mode : Nat) : EIO Unit := Sys.lift p (FS.chmodRaw p mode)
--- the names in a directory, sorted, without `.` and `..`
+/-- The names in a directory, sorted, without `.` and `..`. -/
 def FS.listDir (p : String) : EIO (List String) := Sys.check p (FS.listDirRaw p)
 
+/-- A `FileStat` from the numbers of `FS.statRaw`. -/
 def FS.statOf : List Nat → FileStat
   | .cons k (.cons s (.cons t (.cons ns (.cons m _)))) =>
     FileStat.mk (FileKind.ofNat k) s t ns m
   | _ => FileStat.mk .other 0 0 0 0
--- what a path names (following links), and the path itself (`lstat`)
+/-- What a path names, following links (`stat`): kind, size, modification time, mode. -/
 def FS.stat (p : String) : EIO FileStat :=
   EIO.bind (Sys.check p (FS.statRaw p .true)) (fun l => EIO.pure (FS.statOf l))
+/-- What a path itself is, not following a link (`lstat`). -/
 def FS.linkStat (p : String) : EIO FileStat :=
   EIO.bind (Sys.check p (FS.statRaw p .false)) (fun l => EIO.pure (FS.statOf l))
+/-- Whether the path exists (following links: a dangling link does not). -/
 def FS.exists (p : String) : IO Bool :=
   IO.bind (FS.stat p) (fun r => IO.pure (match r with
     | .ok s => .true
     | .error e => .false))
+/-- Whether the path names a file (`.file`) or a directory (`.dir`) (following links; other kinds are never matched). -/
 def FS.kindIs (k : FileKind) (p : String) : IO Bool :=
   IO.bind (FS.stat p) (fun r => IO.pure (match r with
     | .ok s => match s.kind, k with
@@ -147,125 +222,174 @@ def FS.kindIs (k : FileKind) (p : String) : IO Bool :=
       | .dir, .dir => .true
       | _, _ => .false
     | .error e => .false))
+/-- Whether the path is a directory. -/
 def FS.isDir (p : String) : IO Bool := FS.kindIs .dir p
+/-- Whether the path is a regular file. -/
 def FS.isFile (p : String) : IO Bool := FS.kindIs .file p
 
--- the directory for temporary files: `$TMPDIR`, or `/tmp`
+/-- The directory for temporary files: `$TMPDIR`, or `/tmp`. -/
 def FS.tempRoot : IO String := IO.bind (Env.get "TMPDIR") (fun r => IO.pure (match r with
   | .some d => d
   | .none => "/tmp"))
--- a new, empty directory under `FS.tempRoot` (remove it with `FS.removeAll`)
+/-- A new, empty directory under `FS.tempRoot`, named `wiz-…`; remove it with `FS.removeAll`. -/
 def FS.createTempDir : EIO String :=
   IO.bind FS.tempRoot (fun root => Sys.check root (FS.mkdtempRaw (Path.join root "wiz-")))
 
 -- Whole files. (Text stops at a NUL byte: use `Bytes` for binary data.)
+/-- The contents of a file, as text (it stops at a NUL byte: use `FS.readBytes` for binary data). -/
 def FS.readFile (p : String) : EIO String := Sys.check p (FS.readFileRaw p)
+/-- `FS.writeFile p text`: replace the file's contents with `text` (creating it). -/
 def FS.writeFile (p text : String) : EIO Unit := Sys.lift p (FS.writeFileRaw p text .false)
+/-- `FS.appendFile p text`: add `text` at the end of the file (creating it). -/
 def FS.appendFile (p text : String) : EIO Unit := Sys.lift p (FS.writeFileRaw p text .true)
+/-- The contents of a file, as bytes. -/
 def FS.readBytes (p : String) : EIO Bytes := Sys.check p (FS.readBytesRaw p)
+/-- Replace the file's contents with the bytes (creating it). -/
 def FS.writeBytes (p : String) (b : Bytes) : EIO Unit := Sys.lift p (FS.writeBytesRaw p b .false)
 
--- File handles, closed when the last reference goes (or by `File.close`).
+/-- A buffered file handle (C's `FILE *`), closed when the last reference goes (or by `File.close`). -/
 foreign_type File (finalizer := "wiz_sys_file_free")
+/-- Raw `fopen`; use `File.open`. -/
 extern "wiz_sys_file_open" File.openRaw : String → String → IO File
+/-- The standard stream 0, 1 or 2; use `File.stdin`, `File.stdout`, `File.stderr`. -/
 extern "wiz_sys_file_std" File.std : Nat → IO File
+/-- Raw line read (end of file is errno 100000); use `File.readLine`. -/
 extern "wiz_sys_file_read_line" File.readLineRaw : File → IO String
+/-- Raw read to the end; use `File.readAll`. -/
 extern "wiz_sys_file_read_all" File.readAllRaw : File → IO String
+/-- Raw write; use `File.write`. -/
 extern "wiz_sys_file_write" File.writeRaw : File → String → IO Nat
+/-- Raw `fflush`; use `File.flush`. -/
 extern "wiz_sys_file_flush" File.flushRaw : File → IO Nat
+/-- Raw `fclose`; use `File.close`. -/
 extern "wiz_sys_file_close" File.closeRaw : File → IO Nat
 
--- `mode` as for `fopen`: "r", "w", "a", "r+", …
+/-- Open a file; `mode` as for `fopen`: "r", "w", "a", "r+", … -/
 def File.open (p mode : String) : EIO File := Sys.check p (File.openRaw p mode)
+/-- Standard input. -/
 def File.stdin : IO File := File.std 0
+/-- Standard output. -/
 def File.stdout : IO File := File.std 1
+/-- Standard error. -/
 def File.stderr : IO File := File.std 2
--- the next line, without its newline; `none` at the end of the file
+/-- The next line, without its newline; `none` at the end of the file.
+
+```
+loop f = do
+  l ← File.readLine f;
+  match l with | .some s => … | .none => …
+``` -/
 def File.readLine (f : File) : EIO (Option String) :=
   IO.bind (File.readLineRaw f) (fun l => IO.bind Sys.errno (fun e => IO.pure (match Nat.beq e 0 with
     | .true => .ok (.some l)
     | .false => match Nat.beq e 100000 with
       | .true => .ok .none
       | .false => .error (Sys.message "readLine" e))))
+/-- The rest of the file, as text. -/
 def File.readAll (f : File) : EIO String := Sys.check "read" (File.readAllRaw f)
+/-- Write text (UTF-8, up to the first NUL). -/
 def File.write (f : File) (s : String) : EIO Unit := Sys.lift "write" (File.writeRaw f s)
+/-- Write out what is buffered. -/
 def File.flush (f : File) : EIO Unit := Sys.lift "flush" (File.flushRaw f)
+/-- Close the handle now; later operations on it are errors. -/
 def File.close (f : File) : EIO Unit := Sys.lift "close" (File.closeRaw f)
--- a line on standard error
+/-- Print a line on standard error. -/
 def IO.ePrintln (s : String) : IO Unit :=
   IO.bind File.stderr (fun f => IO.bind (File.write f (String.append s "\n")) (fun r => IO.pure ()))
 
--- end this program with an exit code (without the leak check)
+/-- End this program with an exit code (without the leak check). -/
 extern "wiz_sys_exit" Process.exit : Nat → IO Unit
--- run it, printing an error to stderr (with exit code 1)
+/-- Run an `EIO` action as a program's `main`: an error is printed on standard error and
+the program exits with code 1. `def main : IO Unit := EIO.toIO (do …)`. -/
 def EIO.toIO (x : EIO Unit) : IO Unit := IO.bind x (fun r => match r with
   | .ok u => IO.pure u
   | .error e => IO.bind (IO.ePrintln e) (fun u => Process.exit 1))
 
 -- Processes.
 
--- What a child's standard stream is connected to.
+/-- What a child's standard stream is connected to: this program's own stream (`inherit`), a pipe to this program (`piped`), or `/dev/null` (`null`). -/
 inductive Stdio where
   | inherit
   | piped
   | null
+/-- The runtime's code for a `Stdio`. -/
 def Stdio.toNat : Stdio → Nat
   | .inherit => 0
   | .piped => 1
   | .null => 2
 
--- How a process ended: its exit code, or the signal that stopped it.
+/-- How a process ended: its exit code, or the signal that stopped it. -/
 inductive ExitStatus where
   | exited (code : Nat)
   | signaled (signal : Nat)
+/-- The `ExitStatus` from the runtime's code (below 256 an exit code, else 256 + the signal). -/
 def ExitStatus.ofNat (n : Nat) : ExitStatus :=
   match Nat.lt n 256 with
   | .true => .exited n
   | .false => .signaled (n - 256)
+/-- Whether the process exited with code 0. -/
 def ExitStatus.success : ExitStatus → Bool
   | .exited c => Nat.beq c 0
   | .signaled s => .false
+/-- As text: "exit code 1", "signal 9". -/
 def ExitStatus.toString : ExitStatus → String
   | .exited c => String.append "exit code " (Nat.toString c)
   | .signaled s => String.append "signal " (Nat.toString s)
 
--- A running (or finished) child process. Its pipes close when the last reference goes.
+/-- A running (or finished) child process. Its pipes close when the last reference goes. -/
 foreign_type Child (finalizer := "wiz_sys_child_free")
+/-- Raw spawn; use `Process.spawn`. -/
 extern "wiz_sys_spawn" Process.spawnRaw : String → List String → Nat → Nat → Nat → IO Child
+/-- The child's process id. -/
 extern "wiz_sys_child_pid" Child.pid : Child → IO Nat
+/-- Raw write to the child's stdin; use `Child.write`. -/
 extern "wiz_sys_child_write" Child.writeRaw : Child → String → IO Nat
+/-- Raw close of the child's stdin; use `Child.closeStdin`. -/
 extern "wiz_sys_child_close_stdin" Child.closeStdinRaw : Child → IO Nat
+/-- Raw read of the child's stdout (1) or stderr (2) to the end; use `Child.readStdout`. -/
 extern "wiz_sys_child_read" Child.readRaw : Child → Nat → IO String
+/-- Raw communicate; use `Child.communicate`. -/
 extern "wiz_sys_child_communicate" Child.communicateRaw : Child → String → IO Nat
+/-- Raw `waitpid`; use `Child.wait`. -/
 extern "wiz_sys_child_wait" Child.waitRaw : Child → IO Nat
+/-- Raw `kill`; use `Child.kill`. -/
 extern "wiz_sys_child_kill" Child.killRaw : Child → Nat → IO Nat
+/-- Raw `execvp`; use `Process.exec`. -/
 extern "wiz_sys_exec" Process.execRaw : String → List String → IO Nat
+/-- This program's process id. -/
 extern "wiz_sys_getpid" Process.id : IO Nat
 
--- Start `cmd` (looked up in `PATH`) with arguments, and its streams connected as given.
+/-- `Process.spawn cmd args stdin stdout stderr`: start `cmd` (looked up in `PATH`) with
+arguments, and its streams connected as given:
+`Process.spawn "sort" .nil .piped .piped .inherit`. -/
 def Process.spawn (cmd : String) (args : List String) (stdin stdout stderr : Stdio) : EIO Child :=
   Sys.check cmd (Process.spawnRaw cmd args (Stdio.toNat stdin) (Stdio.toNat stdout) (Stdio.toNat stderr))
--- write to its stdin (a pipe)
+/-- Write to the child's stdin (which must be `.piped`). -/
 def Child.write (c : Child) (s : String) : EIO Unit := Sys.lift "write to child" (Child.writeRaw c s)
--- close its stdin, so it sees the end of its input
+/-- Close the child's stdin, so it sees the end of its input. -/
 def Child.closeStdin (c : Child) : EIO Unit := Sys.lift "close child stdin" (Child.closeStdinRaw c)
--- the rest of its stdout or stderr (pipes), to the end
+/-- The rest of the child's stdout (a pipe), to the end. -/
 def Child.readStdout (c : Child) : EIO String := Sys.check "read child stdout" (Child.readRaw c 1)
+/-- The rest of the child's stderr (a pipe), to the end. -/
 def Child.readStderr (c : Child) : EIO String := Sys.check "read child stderr" (Child.readRaw c 2)
--- give it `input` on stdin while collecting stdout and stderr (`readStdout` and
--- `readStderr` then return them): no deadlock when the pipes fill up
+/-- Give the child `input` on stdin while collecting its stdout and stderr
+(`Child.readStdout` and `Child.readStderr` then return them): no deadlock when the
+pipes fill up. -/
 def Child.communicate (c : Child) (input : String) : EIO Unit := Sys.lift "communicate" (Child.communicateRaw c input)
+/-- Wait for the child to end. -/
 def Child.wait (c : Child) : EIO ExitStatus :=
   EIO.bind (Sys.check "wait" (Child.waitRaw c)) (fun n => EIO.pure (ExitStatus.ofNat n))
--- send a signal (15 is SIGTERM, 9 SIGKILL)
+/-- Send the child a signal (15 is SIGTERM, 9 SIGKILL). -/
 def Child.kill (c : Child) (signal : Nat) : EIO Unit := Sys.lift "kill" (Child.killRaw c signal)
 
+/-- What a finished process gave: how it ended, and everything it wrote. -/
 structure Output where
   status : ExitStatus
   stdout : String
   stderr : String
 
--- Run `cmd` to the end with `input` on stdin, collecting its stdout and stderr.
+/-- Run `cmd` to the end with `input` on stdin, collecting its stdout and stderr:
+`Process.output "echo" (.cons "hi" .nil) ""` has `stdout` "hi\n". -/
 def Process.output (cmd : String) (args : List String) (input : String) : EIO Output := do
   c ← Process.spawn cmd args .piped .piped .piped;
   Child.communicate c input;
@@ -273,96 +397,124 @@ def Process.output (cmd : String) (args : List String) (input : String) : EIO Ou
   err ← Child.readStderr c;
   st ← Child.wait c;
   EIO.pure (Output.mk st out err)
--- Run `cmd` to the end, with this program's streams.
+/-- Run `cmd` to the end, with this program's streams; how it ended. -/
 def Process.run (cmd : String) (args : List String) : EIO ExitStatus := do
   c ← Process.spawn cmd args .inherit .inherit .inherit;
   Child.wait c
--- Replace this program by `cmd` (returns only if that fails).
+/-- Replace this program by `cmd` (returns only if that fails). -/
 def Process.exec (cmd : String) (args : List String) : EIO Unit := Sys.lift cmd (Process.execRaw cmd args)
 
 ------------------------------------------------------------------------------------
 -- Additions (sys-bytes): paths, time, spawn options, process groups, bytes on handles,
 -- descriptors with time limits. Nothing above changed.
 
--- an absolute path without `.`, `..` or links (`realpath`; the file must exist)
+/-- Raw `realpath`; use `FS.realPath`. -/
 extern "wiz_sys_realpath" FS.realPathRaw : String → IO String
+/-- An absolute path without `.`, `..` or links (`realpath`; the file must exist). -/
 def FS.realPath (p : String) : EIO String := Sys.check p (FS.realPathRaw p)
--- the running program's file (Linux: `/proc/self/exe`; macOS: `_NSGetExecutablePath`;
--- elsewhere an error)
+/-- Raw program path; use `IO.appPath`. -/
 extern "wiz_sys_app_path" IO.appPathRaw : IO String
+/-- The running program's file (Linux: `/proc/self/exe`; macOS: `_NSGetExecutablePath`; elsewhere an error). -/
 def IO.appPath : EIO String := Sys.check "the program's path" IO.appPathRaw
 
--- Time. A `Duration` is a number of nanoseconds; the clocks give one since their start.
+/-- A length of time, as a number of nanoseconds; the clocks give one since their start. `Duration.millis 250`. -/
 structure Duration where
   ns : Nat
+/-- `n` nanoseconds. -/
 def Duration.nanos (n : Nat) : Duration := Duration.mk n
+/-- `n` microseconds. -/
 def Duration.micros (n : Nat) : Duration := Duration.mk (n * 1000)
+/-- `n` milliseconds. -/
 def Duration.millis (n : Nat) : Duration := Duration.mk (n * 1000000)
+/-- `n` seconds. -/
 def Duration.seconds (n : Nat) : Duration := Duration.mk (n * 1000000000)
+/-- The duration in whole milliseconds (rounded down). -/
 def Duration.toMillis (d : Duration) : Nat := Nat.div d.ns 1000000
+/-- The sum of two durations. -/
 def Duration.add (a b : Duration) : Duration := Duration.mk (a.ns + b.ns)
--- `a - b`, or zero
+/-- `a - b`, or zero. -/
 def Duration.sub (a b : Duration) : Duration := Duration.mk (Nat.sub a.ns b.ns)
+/-- Whether `a` is shorter than `b`. -/
 def Duration.lt (a b : Duration) : Bool := Nat.lt a.ns b.ns
+/-- Raw clock read (0 monotonic, 1 wall); use `Clock.monotonic` or `Clock.wall`. -/
 extern "wiz_sys_clock_ns" Clock.nsRaw : Nat → IO Nat
+/-- Raw sleep in nanoseconds; use `Clock.sleep`. -/
 extern "wiz_sys_sleep_ns" Clock.sleepRaw : Nat → IO Unit
--- the monotonic clock: since an unspecified start, never set back (for time limits)
+/-- The monotonic clock: since an unspecified start, never set back (for time limits and measuring). -/
 def Clock.monotonic : IO Duration := IO.bind (Clock.nsRaw 0) (fun n => IO.pure (Duration.mk n))
--- the wall clock: since 1970-01-01 00:00 UTC (can jump when the system clock is set)
+/-- The wall clock: since 1970-01-01 00:00 UTC (can jump when the system clock is set). -/
 def Clock.wall : IO Duration := IO.bind (Clock.nsRaw 1) (fun n => IO.pure (Duration.mk n))
+/-- Wait for a while: `Clock.sleep (Duration.millis 10)`. -/
 def Clock.sleep (d : Duration) : IO Unit := Clock.sleepRaw d.ns
 
 -- Spawn options. `Process.spawn` and friends are `spawnWith SpawnOptions.default`.
+/-- A change to a child's environment: set a variable, or remove it. -/
 inductive EnvChange where
   | set (name value : String)
   | unset (name : String)
+/-- Which process group a child joins. -/
 inductive ProcessGroup where
-  -- this program's (the default)
+  /-- this program's process group (the default) -/
   | inherit
-  -- a new process group, led by the child (`Child.killGroup` reaches its descendants)
+  /-- a new process group, led by the child (`Child.killGroup` reaches its descendants) -/
   | newGroup
-  -- a new session (`setsid`): no controlling terminal, and a new group
+  /-- a new session (`setsid`): no controlling terminal, and a new group -/
   | newSession
+/-- The runtime's code for a `ProcessGroup`. -/
 def ProcessGroup.toNat : ProcessGroup → Nat
   | .inherit => 0
   | .newGroup => 1
   | .newSession => 2
+/-- How to start a process: its streams, working directory, environment and process group.
+`Process.spawn` and friends are `Process.spawnWith` with `SpawnOptions.default`. Build
+options pipeline-style:
+`SpawnOptions.default |> SpawnOptions.inDir d |> SpawnOptions.setEnv k v`. -/
 structure SpawnOptions where
   stdin : Stdio
   stdout : Stdio
   stderr : Stdio
-  -- the working directory (`none`: this program's)
+  /-- the working directory (`none`: this program's) -/
   cwd : Option String
-  -- start from an empty environment instead of this program's
+  /-- start from an empty environment instead of this program's -/
   clearEnv : Bool
-  -- then these changes, in order
+  /-- then these changes, in order -/
   env : List EnvChange
   group : ProcessGroup
+/-- This program's streams, directory and environment; the same process group. -/
 def SpawnOptions.default : SpawnOptions := SpawnOptions.mk .inherit .inherit .inherit .none .false .nil .inherit
+/-- Like `SpawnOptions.default`, with all three streams piped. -/
 def SpawnOptions.piped : SpawnOptions := SpawnOptions.mk .piped .piped .piped .none .false .nil .inherit
--- (pipeline-style: `SpawnOptions.default |> SpawnOptions.inDir d |> SpawnOptions.setEnv k v`)
+/-- Run in directory `d`. -/
 def SpawnOptions.inDir (d : String) (o : SpawnOptions) : SpawnOptions :=
   { o with cwd := .some d }
+/-- Add a change to the environment (after the ones already there). -/
 def SpawnOptions.change (c : EnvChange) (o : SpawnOptions) : SpawnOptions :=
   { o with env := List.append o.env (.cons c .nil) }
+/-- Set an environment variable in the child. -/
 def SpawnOptions.setEnv (k v : String) (o : SpawnOptions) : SpawnOptions := SpawnOptions.change (.set k v) o
+/-- Remove an environment variable in the child. -/
 def SpawnOptions.unsetEnv (k : String) (o : SpawnOptions) : SpawnOptions := SpawnOptions.change (.unset k) o
+/-- Start the child from an empty environment (the changes then apply to it). -/
 def SpawnOptions.emptyEnv (o : SpawnOptions) : SpawnOptions :=
   { o with clearEnv := .true }
+/-- Put the child in a `ProcessGroup`. -/
 def SpawnOptions.withGroup (g : ProcessGroup) (o : SpawnOptions) : SpawnOptions :=
   { o with group := g }
+/-- Connect the child's stdin, stdout and stderr as given. -/
 def SpawnOptions.withStdio (i out err : Stdio) (o : SpawnOptions) : SpawnOptions :=
   { o with stdin := i, stdout := out, stderr := err }
+/-- The changes as the runtime reads them: `+NAME=value` or `-NAME`. -/
 def EnvChange.encode : List EnvChange → List String
   | .nil => .nil
   | .cons (.set k v) rest => .cons (String.append "+" (String.append k (String.append "=" v))) (EnvChange.encode rest)
   | .cons (.unset k) rest => .cons (String.append "-" k) (EnvChange.encode rest)
+/-- Raw spawn with options; use `Process.spawnWith`. -/
 extern "wiz_sys_spawn_with" Process.spawnWithRaw : String → List String → Nat → Nat → Nat → String → List String → Bool → Nat → IO Child
--- Start `cmd` (looked up in this program's `PATH`) with these options.
+/-- Start `cmd` (looked up in this program's `PATH`) with these options. -/
 def Process.spawnWith (cmd : String) (args : List String) (o : SpawnOptions) : EIO Child :=
   Sys.check cmd (Process.spawnWithRaw cmd args (Stdio.toNat o.stdin) (Stdio.toNat o.stdout) (Stdio.toNat o.stderr)
     (match o.cwd with | .some d => d | .none => "") (EnvChange.encode o.env) o.clearEnv (ProcessGroup.toNat o.group))
--- `Process.output` and `Process.run` with options (`output` pipes all three streams)
+/-- `Process.output` with options (all three streams are piped whatever the options say). -/
 def Process.outputWith (cmd : String) (args : List String) (input : String) (o : SpawnOptions) : EIO Output := do
   c ← Process.spawnWith cmd args (SpawnOptions.withStdio .piped .piped .piped o);
   Child.communicate c input;
@@ -370,18 +522,21 @@ def Process.outputWith (cmd : String) (args : List String) (input : String) (o :
   err ← Child.readStderr c;
   st ← Child.wait c;
   EIO.pure (Output.mk st out err)
+/-- `Process.run` with options. -/
 def Process.runWith (cmd : String) (args : List String) (o : SpawnOptions) : EIO ExitStatus := do
   c ← Process.spawnWith cmd args o;
   Child.wait c
 
+/-- Raw non-blocking wait (2³² while it runs); use `Child.tryWait`. -/
 extern "wiz_sys_child_try_wait" Child.tryWaitRaw : Child → IO Nat
+/-- Raw signal to a process group; use `Child.killGroup`. -/
 extern "wiz_sys_child_kill_group" Child.killGroupRaw : Child → Nat → IO Nat
--- how it ended, or `none` while it runs (does not block)
+/-- How the child ended, or `none` while it runs (does not block). -/
 def Child.tryWait (c : Child) : EIO (Option ExitStatus) :=
   EIO.bind (Sys.check "wait" (Child.tryWaitRaw c)) (fun n => EIO.pure (match Nat.beq n 0x100000000 with
     | .true => .none
     | .false => .some (ExitStatus.ofNat n)))
--- a signal to the whole process group it leads (spawned with `.newGroup`/`.newSession`)
+/-- A signal to the whole process group the child leads (spawned with `.newGroup` or `.newSession`). -/
 def Child.killGroup (c : Child) (signal : Nat) : EIO Unit := Sys.lift "kill group" (Child.killGroupRaw c signal)
 
 -- Bytes on a `File` (stdio, buffered: mixes with `readLine` and `write`).
@@ -391,138 +546,169 @@ def Child.killGroup (c : Child) (signal : Nat) : EIO Unit := Sys.lift "kill grou
 -- `readAll` and the other `String` results decode UTF-8 without checking (bytes that
 -- are not UTF-8 come out as wrong characters, not as an error) and end at a NUL byte.
 -- For binary data, or to check the encoding, read `Bytes` and use `Bytes.toUtf8`.
+/-- Raw byte read; use `File.readBytes`. -/
 extern "wiz_sys_file_read_bytes" File.readBytesRaw : File → Nat → IO Bytes
+/-- Raw byte write; use `File.writeBytes`. -/
 extern "wiz_sys_file_write_bytes" File.writeBytesRaw : File → Bytes → IO Nat
+/-- Raw `fseek`; use `File.seek`. -/
 extern "wiz_sys_file_seek" File.seekRaw : File → Nat → Nat → Bool → IO Nat
--- `Sys.check`, with the end of the file as `none`
+/-- `Sys.check`, with the end of the file (errno 100000) as `none`. -/
 def Sys.checkEof {A : Type} (what : String) (x : IO A) : EIO (Option A) :=
   IO.bind x (fun a => IO.bind Sys.errno (fun e => IO.pure (match Nat.beq e 0 with
     | .true => .ok (.some a)
     | .false => match Nat.beq e 100000 with
       | .true => .ok .none
       | .false => .error (Sys.message what e))))
--- up to `n` bytes (fewer only at the end of the file); `none` at the end
+/-- Up to `n` bytes (fewer only at the end of the file); `none` at the end. -/
 def File.readBytes (f : File) (n : Nat) : EIO (Option Bytes) := Sys.checkEof "read" (File.readBytesRaw f n)
+/-- Write the bytes. -/
 def File.writeBytes (f : File) (b : Bytes) : EIO Unit := Sys.lift "write" (File.writeBytesRaw f b)
 
--- Where `seek` goes: an offset from the start, forwards or back from here, or back
--- from the end.
+/-- Where `seek` goes: an offset from the start, forwards or back from here, or back from the end. -/
 inductive SeekFrom where
   | start (offset : Nat)
   | forward (offset : Nat)
   | back (offset : Nat)
   | fromEnd (back : Nat)
+/-- The `whence` of `lseek`/`fseek`: 0 from the start, 1 from here, 2 from the end. -/
 def SeekFrom.whence : SeekFrom → Nat
   | .start _ => 0
   | .forward _ => 1
   | .back _ => 1
   | .fromEnd _ => 2
+/-- The distance of a `SeekFrom`. -/
 def SeekFrom.offset : SeekFrom → Nat
   | .start n => n
   | .forward n => n
   | .back n => n
   | .fromEnd n => n
+/-- Whether a `SeekFrom` goes backwards. -/
 def SeekFrom.negative : SeekFrom → Bool
   | .back _ => .true
   | .fromEnd n => .true
   | _ => .false
--- move, and say where that is (from the start); `seek f (.forward 0)` is the position
+/-- Move, and say where that is (from the start); `File.seek f (.forward 0)` is the position. -/
 def File.seek (f : File) (to : SeekFrom) : EIO Nat :=
   Sys.check "seek" (File.seekRaw f (SeekFrom.whence to) (SeekFrom.offset to) (SeekFrom.negative to))
 
--- Descriptors: unbuffered POSIX file descriptors, for terminals, pipes and devices,
--- with time limits. Like `File` and `Child` it is a reference-counted handle (not
--- linear): it is closed when the last reference goes, or by `Fd.close`; after that
--- (and on a second `close`) every operation is an error "Bad file descriptor", never
--- an operation on a number that has since been reused.
+/-- An unbuffered POSIX file descriptor, for terminals, pipes and devices, with time limits.
+
+Like `File` and `Child` it is a reference-counted handle (not linear): it is closed when
+the last reference goes, or by `Fd.close`; after that (and on a second `close`) every
+operation is an error "Bad file descriptor", never an operation on a number that has
+since been reused. -/
 foreign_type Fd (finalizer := "wiz_sys_fd_free")
+/-- Raw `open`; use `Fd.open`. -/
 extern "wiz_sys_fd_open" Fd.openRaw : String → Nat → Nat → Nat → IO Fd
+/-- The descriptor 0, 1 or 2; use `Fd.stdin`, `Fd.stdout`, `Fd.stderr`. -/
 extern "wiz_sys_fd_std" Fd.std : Nat → IO Fd
+/-- Take ownership of a descriptor number (it is closed with the handle). -/
 extern "wiz_sys_fd_adopt" Fd.adopt : Nat → IO Fd
+/-- The descriptor's number; see `Fd.withRaw` to keep it valid while it is used. -/
 extern "wiz_sys_fd_raw" Fd.raw : Fd → IO Nat
+/-- Raw `close`; use `Fd.close`. -/
 extern "wiz_sys_fd_close" Fd.closeRaw : Fd → IO Nat
+/-- Keep the handle alive up to this point (used by `Fd.withRaw`). -/
 extern "wiz_sys_fd_keep" Fd.keep : Fd → IO Unit
--- (lib/Serial) a pseudo-terminal controller: its EIO, once the terminal side is closed, is the end of the file
+/-- (lib/Serial.wiz) Mark a pseudo-terminal controller: its EIO, once the terminal side is closed, is the end of the file. -/
 extern "wiz_sys_fd_set_pty" Fd.markPtyController : Fd → IO Unit
+/-- Raw `pipe`, both ends in one number; use `Fd.pipe`. -/
 extern "wiz_sys_pipe" Fd.pipeRaw : IO Nat
+/-- Raw read with an optional time limit; use `Fd.read` or `Fd.readWithin`. -/
 extern "wiz_sys_fd_read" Fd.readRaw : Fd → Nat → Bool → Nat → IO Bytes
+/-- Raw exact read with an optional time limit; use `Fd.readExactly`. -/
 extern "wiz_sys_fd_read_exact" Fd.readExactRaw : Fd → Nat → Bool → Nat → IO Bytes
+/-- Raw write; use `Fd.write`. -/
 extern "wiz_sys_fd_write" Fd.writeRaw : Fd → Bytes → IO Nat
+/-- Raw wait for readable (1) or writable (2); use `Fd.readableWithin`. -/
 extern "wiz_sys_fd_wait" Fd.waitRaw : Fd → Nat → Bool → Nat → IO Nat
+/-- Raw `lseek`; use `Fd.seek`. -/
 extern "wiz_sys_fd_seek" Fd.seekRaw : Fd → Nat → Nat → Bool → IO Nat
+/-- Raw `poll`; use `Fd.poll`. -/
 extern "wiz_sys_fd_poll" Fd.pollRaw : List Fd → List Nat → Bool → Nat → IO (List Nat)
+/-- Raw pipe hand-over; use `Child.takePipe`. -/
 extern "wiz_sys_child_take" Child.takeRaw : Child → Nat → IO Nat
 
+/-- How a descriptor is opened: for reading, writing, or both. -/
 inductive Access where
   | read
   | write
   | readWrite
+/-- The runtime's code for an `Access`. -/
 def Access.toNat : Access → Nat
   | .read => 0
   | .write => 1
   | .readWrite => 2
+/-- Flags for `Fd.open` (`O_CREAT`, `O_TRUNC`, …). -/
 structure OpenFlags where
   create : Bool
   truncate : Bool
   append : Bool
-  -- with `create`: fail if it exists
+  /-- with `create`: fail if it exists -/
   exclusive : Bool
-  -- a terminal does not become this program's controlling terminal
+  /-- a terminal does not become this program's controlling terminal -/
   noControllingTty : Bool
-  -- don't wait in `open` (a serial port waiting for carrier); reads and writes block
-  -- as usual afterwards
+  /-- don't wait in `open` (a serial port waiting for carrier); reads and writes block as usual afterwards -/
   nonBlockingOpen : Bool
+/-- No flags: open what exists. -/
 def OpenFlags.none : OpenFlags := OpenFlags.mk .false .false .false .false .false .false
+/-- Create the file if it doesn't exist, and empty it. -/
 def OpenFlags.createNew : OpenFlags := OpenFlags.mk .true .true .false .false .false .false
--- for terminals and devices: no controlling terminal, don't wait for a carrier
+/-- For terminals and devices: no controlling terminal, don't wait for a carrier. -/
 def OpenFlags.device : OpenFlags := OpenFlags.mk .false .false .false .false .true .true
+/-- `Bool.bit b k`: `k` if `b`, else 0 (for flag words). -/
 def Bool.bit (b : Bool) (k : Nat) : Nat := match b with
   | .true => k
   | .false => 0
+/-- The runtime's flag word for `OpenFlags`. -/
 def OpenFlags.toNat (f : OpenFlags) : Nat :=
   Bool.bit f.create 1 + Bool.bit f.truncate 2 + Bool.bit f.append 4 + Bool.bit f.exclusive 8 +
   Bool.bit f.noControllingTty 16 + Bool.bit f.nonBlockingOpen 32
 
--- open a path (new files get mode `0o666` less the umask); close-on-exec
+/-- Open a path (new files get mode `0o666` less the umask); close-on-exec: `Fd.open "/dev/ttyUSB1" .readWrite OpenFlags.device`. -/
 def Fd.open (p : String) (a : Access) (f : OpenFlags) : EIO Fd := Sys.check p (Fd.openRaw p (Access.toNat a) (OpenFlags.toNat f) 438)
+/-- Standard input. -/
 def Fd.stdin : IO Fd := Fd.std 0
+/-- Standard output. -/
 def Fd.stdout : IO Fd := Fd.std 1
+/-- Standard error. -/
 def Fd.stderr : IO Fd := Fd.std 2
+/-- Close the descriptor now; later operations on it are errors. -/
 def Fd.close (f : Fd) : EIO Unit := Sys.lift "close" (Fd.closeRaw f)
--- Run `k` on the descriptor's number (for C code: `link_c` shims), keeping the handle
--- open until `k` is done. (A handle is closed after its last use; a bare `Fd.raw`
--- number outlives that.)
+/-- Run `k` on the descriptor's number (for C code: `link_c` shims), keeping the handle
+open until `k` is done. (A handle is closed after its last use; a bare `Fd.raw` number
+outlives that.) -/
 def Fd.withRaw {A : Type} (f : Fd) (k : Nat → IO A) : IO A :=
   IO.bind (Fd.raw f) (fun n => IO.bind (k n) (fun a => IO.bind (Fd.keep f) (fun u => IO.pure a)))
--- a pipe: the end to read from, the end to write to
+/-- A pipe: the end to read from, the end to write to. -/
 def Fd.pipe : EIO (Fd × Fd) := do
   n ← Sys.check "pipe" Fd.pipeRaw;
   r ← EIO.lift (Fd.adopt (Nat.mod n 0x100000000));
   w ← EIO.lift (Fd.adopt (Nat.div n 0x100000000));
   EIO.pure (r, w)
--- the child's end of its stdin (0), stdout (1) or stderr (2) pipe, to read or write
--- with time limits and `Fd.poll`; the `Child` no longer reads or closes it
+/-- The child's end of its stdin (0), stdout (1) or stderr (2) pipe, to read or write with
+time limits and `Fd.poll`; the `Child` no longer reads or closes it. -/
 def Child.takePipe (c : Child) (i : Nat) : EIO Fd := do
   n ← Sys.check "take pipe" (Child.takeRaw c i);
   EIO.lift (Fd.adopt n)
 
--- A result that may come too late.
+/-- A result that may come too late: `ready a`, or `timedOut`. -/
 inductive Timed (A : Type) where
   | ready (a : A)
   | timedOut
--- What a read of an exact number of bytes got: all of them, or what came before the end
--- of the file or (only when `timed`) before the time ran out.
+/-- What a read of an exact number of bytes got: all of them, or what came before the end
+of the file or (only when `timed`) before the time ran out. -/
 inductive Got : Bool → Type where
   | all {timed : Bool} (b : Bytes) : Got timed
   | eof {timed : Bool} (b : Bytes) : Got timed
   | timeout (b : Bytes) : Got .true
--- the bytes, however the read ended
+/-- The bytes, however the read ended. -/
 def Got.bytes {timed : Bool} (g : Got timed) : Bytes := match g with
   | .all b => b
   | .eof b => b
   | .timeout b => b
 
--- errno-or-sentinel results: 100000 the end of the file, 100001 the time ran out
+/-- A read's result from its errno-or-sentinel status: 100000 the end of the file, 100001 the time ran out. -/
 def Sys.readResult (what : String) (e : Nat) (b : Bytes) : Except String (Timed (Option Bytes)) :=
   match Nat.beq e 0, Nat.beq e 100000, Nat.beq e 100001 with
   | .true, _, _ => .ok (.ready (.some b))
@@ -530,70 +716,79 @@ def Sys.readResult (what : String) (e : Nat) (b : Bytes) : Except String (Timed 
   | _, _, .true => .ok .timedOut
   | _, _, _ => .error (Sys.message what e)
 
--- One read: up to `n` bytes, as many as are there (at least one, waiting for it);
--- `none` at the end of the file.
+/-- One read: up to `n` bytes, as many as are there (at least one, waiting for it); `none` at the end of the file. -/
 def Fd.read (f : Fd) (n : Nat) : EIO (Option Bytes) := Sys.checkEof "read" (Fd.readRaw f n .false 0)
--- the same, giving up when nothing has come within `d`
+/-- One read like `Fd.read`, giving up when nothing has come within `d`. -/
 def Fd.readWithin (f : Fd) (n : Nat) (d : Duration) : EIO (Timed (Option Bytes)) :=
   IO.bind (Fd.readRaw f n .true d.ns) (fun b => IO.bind Sys.errno (fun e => IO.pure (Sys.readResult "read" e b)))
--- exactly `n` bytes, unless the end of the file comes first
+/-- Exactly `n` bytes, unless the end of the file comes first. -/
 def Fd.readExactly (f : Fd) (n : Nat) : EIO (Got .false) :=
   IO.bind (Fd.readExactRaw f n .false 0) (fun b => IO.bind Sys.errno (fun e => IO.pure (match Nat.beq e 0, Nat.beq e 100000 with
     | .true, _ => .ok (.all b)
     | _, .true => .ok (.eof b)
     | _, _ => .error (Sys.message "read" e))))
--- exactly `n` bytes within `d` in all
+/-- Exactly `n` bytes within `d` in all (or what came: `.eof`, `.timeout`). -/
 def Fd.readExactlyWithin (f : Fd) (n : Nat) (d : Duration) : EIO (Got .true) :=
   IO.bind (Fd.readExactRaw f n .true d.ns) (fun b => IO.bind Sys.errno (fun e => IO.pure (match Nat.beq e 0, Nat.beq e 100000, Nat.beq e 100001 with
     | .true, _, _ => .ok (.all b)
     | _, .true, _ => .ok (.eof b)
     | _, _, .true => .ok (.timeout b)
     | _, _, _ => .error (Sys.message "read" e))))
--- all of it
+/-- Write all of the bytes. -/
 def Fd.write (f : Fd) (b : Bytes) : EIO Unit := Sys.lift "write" (Fd.writeRaw f b)
--- text, as UTF-8
+/-- Write text, as UTF-8. -/
 def Fd.writeUtf8 (f : Fd) (s : String) : EIO Unit := Fd.write f (Bytes.ofUtf8 s)
--- whether there is something to read (or the end of the file) within `d`
+/-- Whether there is something to read (or the end of the file) within `d`. -/
 def Fd.readableWithin (f : Fd) (d : Duration) : EIO Bool :=
   EIO.bind (Sys.check "poll" (Fd.waitRaw f 1 .true d.ns)) (fun n => EIO.pure (Nat.beq n 1))
+/-- Whether a write would not block, within `d`. -/
 def Fd.writableWithin (f : Fd) (d : Duration) : EIO Bool :=
   EIO.bind (Sys.check "poll" (Fd.waitRaw f 2 .true d.ns)) (fun n => EIO.pure (Nat.beq n 1))
+/-- Move, and say where that is (from the start), as `File.seek`. -/
 def Fd.seek (f : Fd) (to : SeekFrom) : EIO Nat :=
   Sys.check "seek" (Fd.seekRaw f (SeekFrom.whence to) (SeekFrom.offset to) (SeekFrom.negative to))
 
 -- Waiting on several descriptors.
+/-- What `Fd.poll` waits for on a descriptor. -/
 inductive Interest where
   | readable
   | writable
   | both
+/-- The runtime's code for an `Interest`. -/
 def Interest.toNat : Interest → Nat
   | .readable => 1
   | .writable => 2
   | .both => 3
+/-- What `Fd.poll` found about one descriptor. -/
 structure Readiness where
-  -- the position in the list given to `Fd.poll`
+  /-- the position in the list given to `Fd.poll` -/
   index : Nat
   readable : Bool
   writable : Bool
-  -- the other end hung up, or an error is waiting (the next read or write says which)
+  /-- the other end hung up, or an error is waiting (the next read or write says which) -/
   hangup : Bool
+/-- A `Readiness` from the runtime's code (index × 8 + flags). -/
 def Readiness.ofNat (n : Nat) : Readiness :=
   let w := Nat.mod n 8;
   Readiness.mk (Nat.div n 8) (Nat.isOdd w) (Nat.isOdd (Nat.div w 2)) (Nat.isOdd (Nat.div w 4))
+/-- Decode `Fd.poll`'s results. -/
 def Readiness.decode : List Nat → List Readiness
   | .nil => .nil
   | .cons n rest => .cons (Readiness.ofNat n) (Readiness.decode rest)
+/-- The descriptors of a poll list. -/
 def Fd.pollFds : List (Fd × Interest) → List Fd
   | .nil => .nil
   | .cons (f, i) rest => .cons f (Fd.pollFds rest)
+/-- The interests of a poll list, as codes. -/
 def Fd.pollEvents : List (Fd × Interest) → List Nat
   | .nil => .nil
   | .cons (f, i) rest => .cons (Interest.toNat i) (Fd.pollEvents rest)
--- the ones that are ready, in order, waiting at most `d`: empty when the time ran out
+/-- The descriptors that are ready, in order, waiting at most `d`: empty when the time ran out.
+`Fd.poll (.cons (a, .readable) (.cons (b, .readable) .nil)) (Duration.seconds 1)`. -/
 def Fd.poll (fs : List (Fd × Interest)) (d : Duration) : EIO (List Readiness) :=
   EIO.bind (Sys.check "poll" (Fd.pollRaw (Fd.pollFds fs) (Fd.pollEvents fs) .true d.ns))
     (fun l => EIO.pure (Readiness.decode l))
--- the same, with no time limit
+/-- `Fd.poll` with no time limit. -/
 def Fd.pollForever (fs : List (Fd × Interest)) : EIO (List Readiness) :=
   EIO.bind (Sys.check "poll" (Fd.pollRaw (Fd.pollFds fs) (Fd.pollEvents fs) .false 0))
     (fun l => EIO.pure (Readiness.decode l))

@@ -1,0 +1,31 @@
+import Intern
+-- Interned strings (lib/Intern.wiz): ids by first occurrence, lookups, the same under
+-- the interpreter (the model: a list) and compiled (the natives: a hash index). Group
+-- `natives`.
+
+def next (x : Nat) : Nat := Nat.mod (x * 1103515245 + 12345) 2147483648
+-- words from a small vocabulary, some sharing prefixes, some not ASCII
+def word (y : Nat) : String :=
+  let k := Nat.mod (Nat.div y 16) 120;
+  String.append (if Nat.beq (Nat.mod k 5) 0 then "ünï" else "w") (Nat.repr k)
+
+def steps : Nat → Nat → InternTable → Nat → InternTable × Nat
+  | .zero, _, t, acc => (t, acc)
+  | .succ n, x, t, acc =>
+    let y := next x;
+    let p := InternTable.intern t (word y);
+    let probe := match InternTable.find p.1 (word (next y)) with
+      | .none => 1
+      | .some i => i.toNat + 2;
+    steps n y p.1 (Nat.mod (acc * 31 + p.2.toNat * 7 + probe) 1000000007)
+
+def strsum (s : String) : Nat := List.foldl (fun a c => Nat.mod (a * 131 + Char.code c) 1000000007) 0 (String.chars s)
+
+def main : Nat :=
+  let r := steps 800 5 InternTable.empty 0;
+  let t := r.1;
+  -- persistence: `t` is shared, so `u` is a copy
+  let u := (InternTable.intern t "new").1;
+  r.2 + 3 * InternTable.size t + 5 * InternTable.size u +
+    7 * List.foldl (fun a s => Nat.mod (a * 17 + strsum s) 1000000007) 0 (InternTable.toList t) +
+    11 * strsum (InternTable.lookup t (U32.ofNat 3)) + 13 * strsum (InternTable.lookup u (U32.ofNat 999))

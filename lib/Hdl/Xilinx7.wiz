@@ -1,0 +1,182 @@
+import Hdl.Prim
+/-!
+# Hdl.Xilinx7
+
+Xilinx 7-series primitives (UG953, "7 Series FPGA Libraries Guide"), as `Prim`
+declarations and typed functions over them. These are the cells a DDR3 PHY on an
+Artix-7 needs (I/O buffers, ODDR, OSERDESE2, ISERDESE2, IDELAYE2, IDELAYCTRL, BUFG) and
+PLLE2_BASE as a `Clocking`. openXC7 (yosys synth_xilinx, nextpnr-xilinx, Project X-Ray)
+supports all of them.
+
+Port lists name only the ports the functions use; the others are left unconnected,
+which takes their defaults (UG953). Models: the buffers have one (a buffer is its
+input; a bidirectional one reads back what it drives, and 0 while it is in
+tristate); IDELAYCTRL is ready at once. The clocked cells (ODDR, the SERDES, IDELAYE2)
+have none: their outputs change faster than the circuit's clock, so the checked
+simulations refuse a circuit with one (`Circuit.runModelled`).
+-/
+
+def X7.B1 : HwTy := HwTy.bits 1
+
+-- `n + 1` one-bit leaves, first leaf first, and a bus spread over them / gathered from
+-- them (bit 0 is the first leaf)
+def X7.bitsT : Nat → HwTy
+  | .zero => X7.B1
+  | .succ n => HwTy.prod X7.B1 (X7.bitsT n)
+def X7.spread {r : HwTy → Type} [Hw r] {ω w : Nat} (x : r (HwTy.bits w)) : (ω k n : Nat) → r (X7.bitsT n)
+  | k, .zero => Hw.slice k 1 x
+  | k, .succ n => Hw.pair (Hw.slice k 1 x) (X7.spread x (Nat.succ k) n)
+def X7.gather {r : HwTy → Type} [Hw r] : (ω n : Nat) → r (X7.bitsT n) → r (HwTy.bits (Nat.succ n))
+  | .zero, x => Hw.slice 0 1 x
+  | .succ n, x => Hw.slice 0 (Nat.succ (Nat.succ n)) (Hw.cat (X7.gather n (Hw.snd x)) (Hw.fst x))
+def X7.names (pre : String) : Nat → Nat → List String
+  | _, .zero => .nil
+  | k, .succ n => .cons (pre <+> Hdl.show k) (X7.names pre (Nat.succ k) n)
+
+------------------------------------------------------------------------------------
+-- Buffers and clock buffers
+
+def X7.obufP : Prim X7.B1 (HwTy.pad 1) :=
+  Prim.decl "OBUF" .nil (.cons "I" .nil) (.cons "O" .nil) (Option.some (fun (x : HwTy.El X7.B1) => x))
+def X7.ibufP : Prim (HwTy.pad 1) X7.B1 :=
+  Prim.decl "IBUF" .nil (.cons "I" .nil) (.cons "O" .nil) (Option.some (fun (x : HwTy.El (HwTy.pad 1)) => x))
+-- IOBUF: (I, T) ↦ (O, IO); T high is tristate
+def X7.iobufModel (x : HwTy.El (HwTy.prod X7.B1 X7.B1)) : HwTy.El (HwTy.prod X7.B1 (HwTy.inout 1)) :=
+  (@HwTy.El.mux X7.B1 x.2 (BitVec.ofNat 1 0) x.1, x.1)
+def X7.iobufP : Prim (HwTy.prod X7.B1 X7.B1) (HwTy.prod X7.B1 (HwTy.inout 1)) :=
+  Prim.decl "IOBUF" .nil (.cons "I" (.cons "T" .nil)) (.cons "O" (.cons "IO" .nil)) (Option.some X7.iobufModel)
+-- OBUFDS: I ↦ (O, OB)
+def X7.obufdsModel (x : HwTy.El X7.B1) : HwTy.El (HwTy.prod (HwTy.pad 1) (HwTy.pad 1)) := (x, BitVec.not x)
+def X7.obufdsP : Prim X7.B1 (HwTy.prod (HwTy.pad 1) (HwTy.pad 1)) :=
+  Prim.decl "OBUFDS" .nil (.cons "I" .nil) (.cons "O" (.cons "OB" .nil)) (Option.some X7.obufdsModel)
+-- IOBUFDS: (I, T) ↦ (O, IO, IOB)
+def X7.iobufdsModel (x : HwTy.El (HwTy.prod X7.B1 X7.B1)) : HwTy.El (HwTy.prod X7.B1 (HwTy.prod (HwTy.inout 1) (HwTy.inout 1))) :=
+  (@HwTy.El.mux X7.B1 x.2 (BitVec.ofNat 1 0) x.1, (x.1, BitVec.not x.1))
+def X7.iobufdsP : Prim (HwTy.prod X7.B1 X7.B1) (HwTy.prod X7.B1 (HwTy.prod (HwTy.inout 1) (HwTy.inout 1))) :=
+  Prim.decl "IOBUFDS" .nil (.cons "I" (.cons "T" .nil)) (.cons "O" (.cons "IO" (.cons "IOB" .nil))) (Option.some X7.iobufdsModel)
+def X7.bufgP : Prim HwTy.clock HwTy.clock :=
+  Prim.decl "BUFG" .nil (.cons "I" .nil) (.cons "O" .nil) (Option.some (fun (x : HwTy.El HwTy.clock) => x))
+
+def X7.obuf {r : HwTy → Type} [Hw r] (x : r X7.B1) : r (HwTy.pad 1) := Hw.prim X7.obufP x
+def X7.ibuf {r : HwTy → Type} [Hw r] (x : r (HwTy.pad 1)) : r X7.B1 := Hw.prim X7.ibufP x
+-- a bidirectional pin: drives `o` while `oe`, reads back on the first component
+def X7.iobuf {r : HwTy → Type} [Hw r] (o oe : r X7.B1) : r (HwTy.prod X7.B1 (HwTy.inout 1)) :=
+  Hw.prim X7.iobufP (Hw.pair o (Hw.not oe))
+-- the same with the buffer's own T (high: tristate), e.g. an OSERDESE2's TQ
+def X7.iobufT {r : HwTy → Type} [Hw r] (o t : r X7.B1) : r (HwTy.prod X7.B1 (HwTy.inout 1)) :=
+  Hw.prim X7.iobufP (Hw.pair o t)
+def X7.iobufdsT {r : HwTy → Type} [Hw r] (o t : r X7.B1) : r (HwTy.prod X7.B1 (HwTy.prod (HwTy.inout 1) (HwTy.inout 1))) :=
+  Hw.prim X7.iobufdsP (Hw.pair o t)
+def X7.obufds {r : HwTy → Type} [Hw r] (x : r X7.B1) : r (HwTy.prod (HwTy.pad 1) (HwTy.pad 1)) := Hw.prim X7.obufdsP x
+def X7.iobufds {r : HwTy → Type} [Hw r] (o oe : r X7.B1) : r (HwTy.prod X7.B1 (HwTy.prod (HwTy.inout 1) (HwTy.inout 1))) :=
+  Hw.prim X7.iobufdsP (Hw.pair o (Hw.not oe))
+def X7.bufg {r : HwTy → Type} [Hw r] (c : r HwTy.clock) : r HwTy.clock := Hw.prim X7.bufgP c
+/-- A BUFG on domain `d`'s clock net whose output is that same domain (`outDom`), so a
+synchroniser can be clocked by `X7.bufgIn d` rather than by `Hw.clockOf d`. The emitted
+cell is the same `BUFG`; the domain marker is what the checker reads. -/
+def X7.bufgIn {r : HwTy → Type} [Hw r] (d : ClockDomain) : r HwTy.clock :=
+  Hw.prim (Prim.withOutDom X7.bufgP d.name) (Hw.clockOf d)
+
+------------------------------------------------------------------------------------
+-- ODDR: D1 on the rising edge, D2 on the falling edge (SAME_EDGE: both sampled at the
+-- rising edge). Inputs C, CE, D1, D2, R, S; output Q.
+
+def X7.oddrIn : HwTy := HwTy.prod HwTy.clock (X7.bitsT 4)
+def X7.oddrP : Prim X7.oddrIn X7.B1 :=
+  Prim.decl "ODDR" (.cons ("DDR_CLK_EDGE", PrimParam.str "SAME_EDGE") (.cons ("INIT", PrimParam.bits 1 0)
+      (.cons ("SRTYPE", PrimParam.str "SYNC") .nil)))
+    (.cons "C" (.cons "CE" (.cons "D1" (.cons "D2" (.cons "R" (.cons "S" .nil)))))) (.cons "Q" .nil) Option.none
+def X7.oddr {r : HwTy → Type} [Hw r] (c : r HwTy.clock) (d1 d2 : r X7.B1) : r X7.B1 :=
+  Hw.prim X7.oddrP (Hw.pair c (Hw.pair (Hw.lit 1 1) (Hw.pair d1 (Hw.pair d2 (Hw.pair (Hw.lit 1 0) (Hw.lit 1 0))))))
+
+------------------------------------------------------------------------------------
+-- OSERDESE2, 8:1 DDR, master: D1 … D8 (bit 0 … 7 of `d`; D1 is sent first) leave on OQ
+-- over one CLKDIV cycle at CLK = 4 × CLKDIV; T1 (tristate, high: off) on TQ, one bit per
+-- CLKDIV cycle (TRISTATE_WIDTH 1, DATA_RATE_TQ BUF). Inputs CLK, CLKDIV, D1 … D8, OCE,
+-- RST, T1, TCE; outputs OQ, TQ.
+
+def X7.oserdesIn : HwTy := HwTy.prod HwTy.clock (HwTy.prod HwTy.clock (HwTy.prod (X7.bitsT 7) (X7.bitsT 3)))
+def X7.oserdesP : Prim X7.oserdesIn (HwTy.prod X7.B1 X7.B1) :=
+  Prim.decl "OSERDESE2" (.cons ("DATA_RATE_OQ", PrimParam.str "DDR") (.cons ("DATA_RATE_TQ", PrimParam.str "BUF")
+      (.cons ("DATA_WIDTH", PrimParam.int 8) (.cons ("TRISTATE_WIDTH", PrimParam.int 1)
+      (.cons ("SERDES_MODE", PrimParam.str "MASTER") .nil)))))
+    (.cons "CLK" (.cons "CLKDIV" (List.append (X7.names "D" 1 8) (.cons "OCE" (.cons "RST" (.cons "T1" (.cons "TCE" .nil)))))))
+    (.cons "OQ" (.cons "TQ" .nil)) Option.none
+-- (OQ, TQ)
+def X7.oserdes {r : HwTy → Type} [Hw r] (clk clkdiv : r HwTy.clock) (rst : r X7.B1) (d : r (HwTy.bits 8)) (t : r X7.B1) :
+    r (HwTy.prod X7.B1 X7.B1) :=
+  -- leaves D1 … D8 (bits 0 … 7 of `d`), then OCE = 1, RST, T1, TCE = 1, each its own leaf
+  -- (a bus `cat`ed together once put them in the wrong order and held RST high)
+  Hw.prim X7.oserdesP (Hw.pair clk (Hw.pair clkdiv (Hw.pair (X7.spread d 0 7)
+    (Hw.pair (Hw.lit 1 1) (Hw.pair rst (Hw.pair t (Hw.lit 1 1)))))))
+
+------------------------------------------------------------------------------------
+-- ISERDESE2, NETWORKING, 8:1 DDR, master, from the IDELAYE2 (IOBDELAY IFD: DDLY): Q1 …
+-- Q8 (bit 0 … 7 of the result; Q8 is the earliest bit) every CLKDIV cycle, CLK = 4 ×
+-- CLKDIV. CLKB is CLK inverted, written as CLK with IS_CLKB_INVERTED (what yosys and
+-- nextpnr fold an inverter into). Inputs CLK, CLKB, CLKDIV, DDLY, CE1, RST, BITSLIP;
+-- outputs Q1 … Q8.
+
+def X7.iserdesIn : HwTy := HwTy.prod HwTy.clock (HwTy.prod HwTy.clock (HwTy.prod HwTy.clock (X7.bitsT 3)))
+def X7.iserdesP : Prim X7.iserdesIn (X7.bitsT 7) :=
+  Prim.decl "ISERDESE2" (.cons ("INTERFACE_TYPE", PrimParam.str "NETWORKING") (.cons ("DATA_RATE", PrimParam.str "DDR")
+      (.cons ("DATA_WIDTH", PrimParam.int 8) (.cons ("NUM_CE", PrimParam.int 1) (.cons ("IOBDELAY", PrimParam.str "IFD")
+      (.cons ("SERDES_MODE", PrimParam.str "MASTER") (.cons ("IS_CLKB_INVERTED", PrimParam.bits 1 1) .nil)))))))
+    (.cons "CLK" (.cons "CLKB" (.cons "CLKDIV" (.cons "DDLY" (.cons "CE1" (.cons "RST" (.cons "BITSLIP" .nil)))))))
+    (X7.names "Q" 1 8) Option.none
+-- (the instance is let-bound, so that it is one instance: `X7.gather` reads it eight
+-- times, and an argument is a computation that would build the cell each time)
+def X7.iserdes {r : HwTy → Type} [Hw r] (clk clkdiv : r HwTy.clock) (rst : r X7.B1) (ddly : r X7.B1) : r (HwTy.bits 8) :=
+  let q := Hw.prim X7.iserdesP (Hw.pair clk (Hw.pair clk (Hw.pair clkdiv
+    (Hw.pair ddly (Hw.pair (Hw.lit 1 1) (Hw.pair rst (Hw.lit 1 0)))))));
+  X7.gather 7 q
+
+------------------------------------------------------------------------------------
+-- IDELAYE2 on an input pad's data (DELAY_SRC IDATAIN), 32 taps of 1/(64 × 200 MHz) =
+-- 78 ps with a 200 MHz IDELAYCTRL reference. VAR_LOAD: CE with INC steps the tap, LD
+-- loads CNTVALUEIN. Inputs C, CE, INC, LD, CNTVALUEIN, IDATAIN; outputs DATAOUT,
+-- CNTVALUEOUT.
+
+def X7.idelayIn : HwTy := HwTy.prod HwTy.clock (HwTy.prod X7.B1 (HwTy.prod X7.B1 (HwTy.prod X7.B1 (HwTy.prod (HwTy.bits 5) X7.B1))))
+def X7.idelayP : Prim X7.idelayIn (HwTy.prod X7.B1 (HwTy.bits 5)) :=
+  Prim.decl "IDELAYE2" (.cons ("IDELAY_TYPE", PrimParam.str "VAR_LOAD") (.cons ("DELAY_SRC", PrimParam.str "IDATAIN")
+      (.cons ("IDELAY_VALUE", PrimParam.int 0) (.cons ("HIGH_PERFORMANCE_MODE", PrimParam.str "TRUE")
+      (.cons ("SIGNAL_PATTERN", PrimParam.str "DATA") (.cons ("REFCLK_FREQUENCY", PrimParam.real "200.0")
+      (.cons ("CINVCTRL_SEL", PrimParam.str "FALSE") (.cons ("PIPE_SEL", PrimParam.str "FALSE") .nil))))))))
+    (.cons "C" (.cons "CE" (.cons "INC" (.cons "LD" (.cons "CNTVALUEIN" (.cons "IDATAIN" .nil))))))
+    (.cons "DATAOUT" (.cons "CNTVALUEOUT" .nil)) Option.none
+-- (DATAOUT, CNTVALUEOUT); on the implicit clock
+def X7.idelay {r : HwTy → Type} [Hw r] (ce inc ld : r X7.B1) (value : r (HwTy.bits 5)) (x : r X7.B1) :
+    r (HwTy.prod X7.B1 (HwTy.bits 5)) :=
+  Hw.prim X7.idelayP (Hw.pair Hw.clock (Hw.pair ce (Hw.pair inc (Hw.pair ld (Hw.pair value x)))))
+
+-- IDELAYCTRL: calibrates the delay taps of its region from REFCLK (200 MHz); RDY high once
+-- it has. nextpnr places one copy per clock region of IDELAYE2s.
+def X7.idelayctrlP : Prim (HwTy.prod HwTy.clock X7.B1) X7.B1 :=
+  Prim.decl "IDELAYCTRL" .nil (.cons "REFCLK" (.cons "RST" .nil)) (.cons "RDY" .nil)
+    (Option.some (fun (x : HwTy.El (HwTy.prod HwTy.clock X7.B1)) => BitVec.ofNat 1 1))
+def X7.idelayctrl {r : HwTy → Type} [Hw r] (refclk : r HwTy.clock) (rst : r X7.B1) : r X7.B1 :=
+  Hw.prim X7.idelayctrlP (Hw.pair refclk rst)
+
+------------------------------------------------------------------------------------
+-- PLLE2_BASE as a top-level `Clocking`: CLKIN1 from the board's clock (period in ns as
+-- text, "10.0"), VCO = CLKIN × mult / div (800 to 1600 MHz on a -1 part), CLKOUTk = VCO /
+-- divide_k at phase_k degrees (text, "90.0"). Feedback internal (CLKFBOUT to CLKFBIN).
+-- `outs`: (circuit's clock input, k, divide, phase); `sysDiv` is CLKOUT0's (the
+-- circuit's own clock); LOCKED to `locked` when it names an input.
+
+def X7.pllOut (k : Nat) : String := "CLKOUT" <+> Hdl.show k
+def X7.pllOutParams : List (String × (Nat × (Nat × String))) → List (String × PrimParam)
+  | .nil => .nil
+  | .cons q qs => .cons (X7.pllOut q.2.1 <+> "_DIVIDE", PrimParam.int q.2.2.1)
+      (.cons (X7.pllOut q.2.1 <+> "_PHASE", PrimParam.real q.2.2.2) (X7.pllOutParams qs))
+def X7.pllClocks : List (String × (Nat × (Nat × String))) → List (String × ClockSource)
+  | .nil => .nil
+  | .cons q qs => .cons (q.1, ClockSource.pll (X7.pllOut q.2.1)) (X7.pllClocks qs)
+def X7.pll (period : String) (mult div sysDiv : Nat) (outs : List (String × (Nat × (Nat × String)))) (locked : List String) : Clocking :=
+  Clocking.mk "PLLE2_BASE"
+    (.cons ("CLKIN1_PERIOD", PrimParam.real period) (.cons ("CLKFBOUT_MULT", PrimParam.int mult)
+      (.cons ("DIVCLK_DIVIDE", PrimParam.int div) (.cons ("CLKOUT0_DIVIDE", PrimParam.int sysDiv)
+      (.cons ("CLKOUT0_PHASE", PrimParam.real "0.0") (X7.pllOutParams outs))))))
+    "CLKIN1" (.cons ("RST", "1'b0") (.cons ("PWRDWN", "1'b0") .nil)) (.cons ("CLKFBOUT", "CLKFBIN") .nil)
+    "CLKOUT0" (X7.pllClocks outs) (Hdl.map (fun (s : String) => (s, "LOCKED")) locked)

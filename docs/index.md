@@ -1,5 +1,9 @@
 # Wiz documentation
 
+The standard library's API documentation is published from `master` at
+<https://wiz-pl.github.io/wiz/> (one page per module, with interactive signatures;
+docs/building.md, "Documentation site").
+
 * [install.md](install.md): installing Wiz with tower or Nix, editor setup, a first
   grail package, troubleshooting
 * [tour.md](tour.md): a tour of the language for people who know a little functional
@@ -13,6 +17,8 @@
 * [hardware.md](hardware.md): hardware in Wiz, from a circuit to a proved temporal property
 * [CoreSpec.md](CoreSpec.md)
 * [Status.md](Status.md)
+* [dsls.md](dsls.md): the embedded languages (DSLs) in Wiz, and the conventions they follow
+* [error-codes.md](error-codes.md): the error codes and their quick fixes
 * [resources.md](resources.md): resources in Wiz: quantities, regions, optics, Feral and separation logic, with one running example
 * [ROADMAP.md](../ROADMAP.md)
 
@@ -22,6 +28,13 @@ The implementation is built in stages; each stage's doc describes what it added,
 files, and its exercises. Section numbers (`4c`, `22e` …) are stable, and other docs and
 comments refer to them: section `NNx` is in `stages/NN-*.md`. The stages are grouped by
 topic below, so the numbers are not in order.
+
+**New sections are files of their own**: a new section of stage NN goes in
+`stages/NN-topic/<slug>.md` (the directory next to the stage's file; `# <title>` heading,
+no letter), and other docs refer to it by that path. Two branches adding sections then
+touch different files, and no section letter needs claiming. The lettered sections in
+the stage files stay as they are. A new stage is still a new `stages/NN-topic.md` and a
+line below.
 
 ### The kernel and the elaborator (in Lean)
 
@@ -40,7 +53,7 @@ topic below, so the numbers are not in order.
 * [Stage 10: effects](stages/10-effects.md)
 * [Stage 25: concurrency](stages/25-concurrency.md)
 * [Stage 27: trusted evaluation (`native_refl`)](stages/27-trusted-evaluation.md)
-* [Stage 28: solvers (`smt`, `sat_decide`)](stages/28-solvers.md)
+* [Stage 28: solvers (`smt`, `sat_decide`, `sat_decide_native`, `bv_decide`)](stages/28-solvers.md)
 
 ### Self-hosting
 
@@ -64,6 +77,7 @@ topic below, so the numbers are not in order.
 ### Numbers and libraries
 
 * [Stage 22: numbers for hardware and systems code](stages/22-numbers.md)
+* [Stage 29: native data structures](stages/29-natives.md): word arrays, word maps, interned strings
 * [Libraries](libraries.md)
 
 ### Verification

@@ -15,18 +15,14 @@ end (error class and line) and by the kernel on their `#unchecked` lowering.
 What Feral is and isn't: Feral is Rust's ownership discipline for a small first-order
 language, explained by translation — a Feral program *is* the Wiz program `#lower` shows,
 and the borrow errors are that program's type errors, reported early and in Rust's terms
-by a front-end checker with the same region-carrying types. It is not a borrow checker
-in the kernel: aliasing (one live `&mut`, no use of a lender while it is lent) is enforced
-by the *shape* of the lowering — every borrow is a scope that rebinds the lender's name to
-a `Lent` token, and the front end never emits a handle twice — not by linearity. Handles
-are ordinary ω values, so hand-written Wiz against lib/Region.wiz can duplicate one (the
-KNOWN GAP cases of `regions` and `feral`). The surface never mentions handles, scopes,
-tokens or handed-back tuples, and the generated code already destructures (never
-projects) tuples that carry a handle and uses each handle once; when handles become
-linear (/workspace/wiz-notes/linear-case-design.md, stage 2; D8: error alternatives must
-hand the handle back) what changes is the text emitted for scopes and for `match` on
-`Result` (L5, L20) and the types of lib/Region.wiz's scopes, not the grammar or the
-checker's rules.
+by a front-end checker with the same region-carrying types. Since cohesion M4 the
+mutable handles (`Uniq`, `Mut`, `MutOpt`) are linear (linear-case stage 2): the kernel
+rejects using a `&mut` twice (E0499) and keeping one past its scope, and every error
+alternative hands the handles back (D8). Reading a lender while it is lent (E0502) is
+still enforced by the *shape* of the lowering — every borrow is a scope that rebinds the
+lender's name to a `Lent` token — not by types: the lender is an ω value (a pinned
+known gap of `regions`). The surface never mentions handles, scopes, tokens or
+handed-back tuples.
 
 Not in the fragment (each is an error "not supported yet", never a silent miscompile):
 inline spec clauses on `fn` (use a `spec f requires (P) ensures (Q)` item), loop invariants, `loop`/`break`/`continue`, `impl`/`trait`, closures, struct literals with
@@ -44,7 +40,7 @@ after the block when the block is in tail position.
 |---|---|---|
 | `lib/Result.wiz`, `lib/Optic.wiz` | `Error`, `Result` (+ `bind`, `map`, `Monad`, `All`, `Holds`; lib/Result.wiz); `Store` (`comp`, `compP`, `underR`, `extract`, `put`); `Lens`, `PLens`, `ALens`; `Lens.comp`, `PLens.comp`, `Lens.toP`; `zoom`, `zoomP`; `Affine` (`comp`, `over`, `extract`); `TraverseMut` + `List` instance; laws `GetPut`/`PutGet`/`PutPut`/`Lawful` (total and partial), `Lens.Indep`, `Lens.pair` | `lake test -- optic` (4 cases) |
 | | **proofs:** structure-field lenses lawful and independent (`rfl`); head of a list (`List.headL`) and **index of a list (`List.atL i`) lawful partial lenses** (all three laws, by induction on the index through generic `Store.underR_*` lemmas); **composition of lawful lenses is lawful** (`Lens.comp_lawful`); `Lens.pair_getPut`; `Store.final` (the `final(r)` desugaring equation) | kernel-checked; a negative test shows an unlawful lens's GetPut is rejected |
-| `lib/Region.wiz` | `Region`, `Outlives` (opaque; `refl`/`trans`/`static`); handles as structures `Shr`, `Uniq`, `Mut`, `MutOpt`, `Lent` (the region is part of the type and inferred; constructors private to the module, so handles can't be forged); borrow scopes `Region.scope`, `Shr.borrow`, `Uniq.borrow`, `Uniq.reborrow`, `Uniq.share`, `Uniq.zoom`, `Uniq.both`; `Shr.weaken`, `Mut.weaken`; `Mut.ofLens`/`ofPLens`/`ofUniq`/`whole`/`get`/`set`/`close`/`release`/`comp`/`mapBack`/`finish` | `lake test -- regions` (15 cases: distinct regions, inference, scopes run, outlives, E0515 ×2, E0597, E0499/E0502, forging, swap, list traversal, pick with its bound, lengthening, a KNOWN GAP case) |
+| `lib/Region.wiz` | `Region`, `Outlives` (opaque; `refl`/`trans`/`static`); handles `Shr`, `Lent` (structures) and the linear `Uniq`, `Mut`, `MutOpt` (one-constructor inductives used at quantity 1; the region is part of the type and inferred; constructors private to the module, so handles can't be forged); `Result1`, `Borrowed` (the error alternative hands the handles back, D8); borrow scopes `Region.scope`, `Shr.borrow(In)`, `Uniq.borrow(In)`, `Uniq.reborrow(In)`, `Uniq.share(In)`, `Uniq.zoom(In)`, `Uniq.both`; `Uniq.peek`/`write`/`read`/`end`; `Shr.weaken`, `Mut.weaken`; `Mut.ofLens`/`ofPLens`/`ofUniq`/`whole`/`peek`/`set`/`close`/`release`/`comp`/`alongside`/`mapBack`/`finish`, `MutOpt.ofAffine`/`over`/`release`; spec readers `Uniq.get`, `Mut.store`, `Borrowed.All` | `lake test -- regions` (distinct regions, inference, scopes run, outlives, E0515 ×2, E0597, E0499/E0502, forging, swap, list traversal, pick with its bound, lengthening, linearity: E0499 by passing a handle twice and escapes rejected, E0502 under a renamed token pinned as a known gap) |
 | `drafts/feral/lib/FeralCore.wiz` | `Flow`; Nat-backed `U64` (checked `add`/`sub`/`mul`, `checkedAdd`, `midpoint`); List-backed `Vec` (`push` on a `Uniq`, `len` on a `Shr`, `index`, `indexMut` as a lawful `PLens` with proof, `getMut` as `MutOpt`) | `check.sh` |
 | `drafts/feral/lowered/01_swap.wiz` | `swap` through two `&mut` (`Uniq ρ₁`, `Uniq ρ₂`), `mem.swap`; nested borrow scopes at the call site | `#eval` .ok (2, 1) |
 | `…/02_push.wiz` | `push_twice (v : &mut Vec U64)`, `for` loop as structural recursion | 10 elements |
@@ -67,7 +63,7 @@ after the block when the block is in tail position.
 | spec clauses in `drafts/feral/surface/*.wiz` (now comments) | `requires`/`ensures`/`invariant`/`decreases` in the grammar and their lowering | `spec-clauses`, `final-specs`, `decreases-loops` |
 | positions inside macro-generated code, state across `feral` blocks, calling Wiz functions from Feral | positions in runtime `Syntax`, a macro environment, `getType` used for interop | `command-proc-macros` (located output by path is done, 22j) |
 | `let (u, ra, rb) := r` (L6) | `let` tuple patterns of more than two components (nested binary lets today) | `let-tuple-patterns` |
-| E0499/E0502 and no escape through `(0 r : Region) × Uniq r A`, enforced by the type checker (today: by the lowering's shape, `Lent` rebinding; handles are ω; drafts/feral/linear/) | a `match` whose alternatives use a captured linear variable once, linear constructor fields (R9a) | `linear-case` |
+| E0502 enforced by the type checker (today: by the lowering's shape, `Lent` rebinding; the lender is ω). E0499 and escapes are type errors since cohesion M4 | linear lenders, and a Copy notion to read `*x` out of one (K3) | `linear-case` |
 | structural recursion through a field reborrow (05 `insert`, 11 `incr_all` are `partial`) | the termination checker seeing a recursive call on a scope's handle of a pattern variable | `reborrow-recursion` |
 | `invariant`, `decreases`, `final result` | loop specs, returned-borrow specs (`requires`/`ensures` are `spec` items since M7) | `spec-clauses` |
 | `final(x)`, `old(x)` | desugaring over the backward function | `final-specs` |

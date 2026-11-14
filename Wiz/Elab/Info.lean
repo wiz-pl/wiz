@@ -54,7 +54,7 @@ def GoalView.show (g : GoalView R) (env : Option (Globals R) := none) : String :
       | none => ""
     lines := lines.push s!"{x} : {ty.pretty names env}{val}"
     names := x :: names
-  lines := lines.push s!"⊢ {g.target.pretty names env}"
+  lines := lines.push s!"⊢ {goalTarget (g.target.pretty names env)}"
   "\n".intercalate lines.toList
 
 end Wiz

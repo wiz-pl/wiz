@@ -1,21 +1,25 @@
 import Optic
 import Deriving
--- `deriving Lens` (`import OpticDerive`): a lens per field of a structure, its laws, and
--- the independence of every two distinct fields. For `structure S Δ where f₁ : T₁ … fₙ : Tₙ`
--- it defines, with the parameters Δ implicit,
---
---     S.fL         : Lens (S Δ) T                       get `s.f`, put by rebuilding `S.mk …`
---     S.fL_lawful  : Lens.Lawful S.fL                    by `rfl`
---     S.f_g_indep  : Lens.Indep S.fL S.gL                for f before g, by `rfl`
---
--- the same names and statements as Feral's lowering of `struct` (lib/Feral.wiz,
--- `Fe.lensDefs`), so lowered code can use the deriver. The lenses are ordinary values:
--- for an HDL bundle (`structure Tx (r : HwTy → Type)`) `Tx.lineL : Lens (Tx r) (r Bit)` is
--- one lens at every representation, on values (proofs) and on wires (synthesis); see
--- lib/Hdl/Optic.wiz. Fields whose types depend on earlier fields are not supported (a
--- put would have to change the type). Design: /workspace/wiz-notes/cohesion-hardware.md 2.2.
+/-!
+# OpticDerive
 
--- `{0 x : T} → rest` for the parameters (erased: a field's get and put never need them)
+`deriving Lens` (`import OpticDerive`): a lens per field of a structure, its laws, and
+the independence of every two distinct fields. For `structure S Δ where f₁ : T₁ … fₙ : Tₙ`
+it defines, with the parameters Δ implicit,
+
+    S.fL         : Lens (S Δ) T                       get `s.f`, put by rebuilding `S.mk …`
+    S.fL_lawful  : Lens.Lawful S.fL                    by `rfl`
+    S.f_g_indep  : Lens.Indep S.fL S.gL                for f before g, by `rfl`
+
+the same names and statements as Feral's lowering of `struct` (lib/Feral.wiz,
+`Fe.lensDefs`), so lowered code can use the deriver. The lenses are ordinary values:
+for an HDL bundle (`structure Tx (r : HwTy → Type)`) `Tx.lineL : Lens (Tx r) (r Bit)` is
+one lens at every representation, on values (proofs) and on wires (synthesis); see
+lib/Hdl/Optic.wiz. Fields whose types depend on earlier fields are not supported (a
+put would have to change the type). Design: /workspace/wiz-notes/cohesion-hardware.md 2.2.
+-/
+
+/-- `{0 x : T} → rest` for the parameters (erased: a field's get and put never need them) -/
 def OpticDerive.pis : List ParamView → Syntax → Syntax
   | .nil, rest => rest
   | .cons p ps, rest =>
@@ -24,18 +28,19 @@ def OpticDerive.pis : List ParamView → Syntax → Syntax
     let b := OpticDerive.pis ps rest;
     `(term| {0 $x : $t} → $b)
 
--- the constructor's arguments, with `x` for field `target` and `s.g` for the others
+/-- the constructor's arguments, with `x` for field `target` and `s.g` for the others -/
 def OpticDerive.mkArgs (s x : Syntax) (target : String) : List FieldView → List Syntax
   | .nil => .nil
   | .cons f fs => .cons (match String.beq (FieldView.name f) target with
       | .true => x
       | .false => Derive.proj s (FieldView.name f)) (OpticDerive.mkArgs s x target fs)
 
--- `@S.fL Δ`
+/-- `@S.fL Δ` -/
 def OpticDerive.lensRef (n : String) (delta : List Syntax) (f : String) : Syntax :=
   Syntax.mkApp (Syntax.mkNode "term.explicit" (.cons (.atom "@")
     (.cons (Syntax.mkIdent (String.append n (String.append "." (String.append f "L")))) .nil))) delta
 
+/-- `S.f_g_indep : Lens.Indep S.fL S.gL` for each field `g` after `f` (by `rfl`). -/
 def OpticDerive.indeps (n : String) (delta : List Syntax) (ps : List ParamView) (tyS : Syntax) (f : FieldView) :
     List FieldView → List Syntax
   | .nil => .nil
@@ -50,10 +55,12 @@ def OpticDerive.indeps (n : String) (delta : List Syntax) (ps : List ParamView) 
     .cons `(command| def $nm : $ty := (fun s a => rfl, fun s b => rfl, fun s a b => rfl))
       (OpticDerive.indeps n delta ps tyS f gs)
 
+/-- The independence of every two distinct fields. -/
 def OpticDerive.allIndeps (n : String) (delta : List Syntax) (ps : List ParamView) (tyS : Syntax) : List FieldView → List Syntax
   | .nil => .nil
   | .cons f fs => List.append (OpticDerive.indeps n delta ps tyS f fs) (OpticDerive.allIndeps n delta ps tyS fs)
 
+/-- `S.fL : Lens (S Δ) T` and `S.fL_lawful : Lens.Lawful S.fL` for each field. -/
 def OpticDerive.lenses (n ctor : String) (delta : List Syntax) (ps : List ParamView) (tyS : Syntax) (all : List FieldView) :
     List FieldView → List Syntax
   | .nil => .nil
@@ -76,6 +83,8 @@ def OpticDerive.lenses (n ctor : String) (delta : List Syntax) (ps : List ParamV
       (.cons `(command| def $lawN : $lawTy := (fun s => rfl, fun s a => rfl, fun s a b => rfl))
         (OpticDerive.lenses n ctor delta ps tyS all fs))
 
+/-- `deriving Lens` for a structure: a lens per field, its laws, and the independence of
+every two distinct fields. -/
 def deriveLens : Deriver := fun n => do
   v ← Derive.lookup "Lens" n;
   Derive.noIndices "Lens" v;

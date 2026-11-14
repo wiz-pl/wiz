@@ -1,14 +1,21 @@
 import Prelude
--- `Result`: the result monad of Feral's lowered code, shared by lib/Optic.wiz and
--- lib/Region.wiz.
---
--- Two readings of a specification over a `Result`: `Result.All` (partial correctness: a
--- failure satisfies everything) and `Result.Holds` (total correctness: a failure satisfies
--- nothing). `Result.Holds` is the one that lines up with separation logic's `Triple`,
--- where a fault (`Prog.fail`) satisfies nothing either.
+
+/-!
+# Result
+
+The result monad of Feral's lowered code (RD7), shared by lib/Optic.wiz and
+lib/Region.wiz: a value (`ok a`) or a panic (`err e`).
+
+Two readings of a specification over a `Result`: `Result.All` (partial correctness: a
+failure satisfies everything) and `Result.Holds` (total correctness: a failure satisfies
+nothing). `Result.Holds` is the one that lines up with separation logic's `Triple`,
+where a fault (`Prog.fail`) satisfies nothing either.
+-/
 
 -- The result monad of lowered code (RD7): every panic (`panic!`, `unwrap` on `none`,
 -- overflow, an index out of bounds, division by zero) is an `err`.
+/-- Why lowered code failed (RD7): every panic (`panic!`, `unwrap` on `none`, overflow, an
+index out of bounds, division by zero) is an `Error`, carried by `Result.err`. -/
 inductive Error where
   | panic (msg : String)
   | overflow
@@ -16,27 +23,32 @@ inductive Error where
   | unwrapNone
   | divZero
 
+/-- The result monad of lowered code: a value (`ok a`) or a panic (`err e`). -/
 inductive Result (A : Type) where
   | ok (a : A)
   | err (e : Error)
 
--- Lowered code matches on results directly (no closures around owners); `bind` and the
--- monad instance are for hand-written specs and Wiz code calling lowered code (RD16).
+/-- Sequence two results, stopping at the first error. Lowered code matches on results
+directly (no closures around owners); `bind` and the monad instance are for
+hand-written specs and Wiz code calling lowered code (RD16). -/
 def Result.bind {A B : Type} (x : Result A) (f : A → Result B) : Result B := match x with
   | .ok a => f a
   | .err e => .err e
+/-- Apply `f` to the value, if there is one. -/
 def Result.map {A B : Type} (f : A → B) (x : Result A) : Result B := match x with
   | .ok a => .ok (f a)
   | .err e => .err e
+/-- `Result` is a monad, so it has `do` notation. -/
 instance : Monad Result where
   pure := fun a => Result.ok a
   bind := Result.bind
 
--- `P` holds of the value, if there is one (a failure satisfies everything).
+/-- `P` holds of the value, if there is one (a failure satisfies everything): "if it
+succeeds, then `P`". -/
 def Result.All {A : Type} (P : A → Prop) : Result A → Prop
   | .ok a => P a
   | .err _ => True
--- there is a value, and `P` holds of it (an `∃` without `∃`)
+/-- There is a value, and `P` holds of it (an `∃` without `∃`): "it succeeds, and `P`". -/
 def Result.Holds {A : Type} (P : A → Prop) : Result A → Prop
   | .ok a => P a
   | .err _ => False

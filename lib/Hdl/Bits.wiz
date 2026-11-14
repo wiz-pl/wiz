@@ -1,40 +1,48 @@
 import Hdl.Core
--- Bit-level reasoning for circuits (`import Hdl.Bits`): the laws of one-bit signals at
--- values, so that a proof does not dictate how control logic is written (finding C2 of
--- the iCEstick toy CPU: `rfl` reduces a multiplexer on a known select, but not
--- `Hw.and (Hw.lit 1 0) x` on a symbolic `x`). Design:
--- /workspace/wiz-notes/cohesion-hardware.md, 2.3.
---
--- * `Bit.ind`: a property of every bit is a property of 0 and of 1. With it, every
---   law of one-bit logic is two (or four, eight) closed evaluations: `Bit.ind` and `rfl`.
---   It rests on the words' range (stage 22l: a `UIntN 1` is 0 or 1, `UIntN.cases1`).
--- * The laws as named lemmas (`Bit.and_zero`, `Bit.or_one`, `Bit.not_not`, …), and the
---   multiplexer normal form: `Bit.and_mux` (`a & b = a ? b : 0`), `Bit.or_mux`,
---   `Bit.not_mux`, so a proof can turn gate-level control logic into the multiplexers
---   that `rfl` reduces, or the other way round; `HwTy.El.mux_same` at any type.
--- * The bridge to Booleans: `Bit.toBool` is a homomorphism (`Bit.toBool_and` …) and
---   `Bit.eq_of_toBool` turns an equation of bits into one of Booleans, the goals that
---   `sat_decide` (stage 28b) decides with a kernel-checked certificate.
+/-!
+# Hdl.Bits
 
+Bit-level reasoning for circuits (`import Hdl.Bits`): the laws of one-bit signals at
+values, so that a proof does not dictate how control logic is written (finding C2 of
+the iCEstick toy CPU: `rfl` reduces a multiplexer on a known select, but not
+`Hw.and (Hw.lit 1 0) x` on a symbolic `x`). Design:
+/workspace/wiz-notes/cohesion-hardware.md, 2.3.
+
+* `Bit.ind`: a property of every bit is a property of 0 and of 1. With it, every
+  law of one-bit logic is two (or four, eight) closed evaluations: `Bit.ind` and `rfl`.
+  It rests on the words' range (stage 22l: a `UIntN 1` is 0 or 1, `UIntN.cases1`).
+* The laws as named lemmas (`Bit.and_zero`, `Bit.or_one`, `Bit.not_not`, …), and the
+  multiplexer normal form: `Bit.and_mux` (`a & b = a ? b : 0`), `Bit.or_mux`,
+  `Bit.not_mux`, so a proof can turn gate-level control logic into the multiplexers
+  that `rfl` reduces, or the other way round; `HwTy.El.mux_same` at any type.
+* The bridge to Booleans: `Bit.toBool` is a homomorphism (`Bit.toBool_and` …) and
+  `Bit.eq_of_toBool` turns an equation of bits into one of Booleans, the goals that
+  `sat_decide` (stage 28b) decides with a kernel-checked certificate.
+-/
+
+/-- The bit 0. -/
 def Bit.zero : BitVec 1 := BitVec.ofNat 1 0
+/-- The bit 1. -/
 def Bit.one : BitVec 1 := BitVec.ofNat 1 1
 
--- two bits are equal when their numbers are (a closed equation of bits: `Bit.eqv _ _ rfl`;
--- plain `rfl` can fail where two equal words were built with different range proofs)
+/-- two bits are equal when their numbers are (a closed equation of bits: `Bit.eqv _ _ rfl`;
+plain `rfl` can fail where two equal words were built with different range proofs) -/
 def Bit.eqv (x y : BitVec 1) (h : BitVec.toNat x = BitVec.toNat y) : x = y := UIntN.ext x y h
 
--- the case split
+/-- the case split -/
 def Bit.cases (x : BitVec 1) : x = Bit.zero ∨ x = Bit.one := UIntN.cases1 x
+/-- A property of every bit holds when it does of 0 and of 1 (the case split). -/
 def Bit.ind (0 P : BitVec 1 → Prop) (h0 : P Bit.zero) (h1 : P Bit.one) (x : BitVec 1) : P x :=
   Or.elim (Bit.cases x)
     (fun (e : x = Bit.zero) => Eq.substProp P (Eq.symm e) h0)
     (fun (e : x = Bit.one) => Eq.substProp P (Eq.symm e) h1)
--- two and three bits at once
+/-- two and three bits at once -/
 def Bit.ind2 (0 P : BitVec 1 → BitVec 1 → Prop) (h00 : P Bit.zero Bit.zero) (h01 : P Bit.zero Bit.one)
     (h10 : P Bit.one Bit.zero) (h11 : P Bit.one Bit.one) (x y : BitVec 1) : P x y :=
   Bit.ind (fun (a : BitVec 1) => P a y)
     (Bit.ind (fun (b : BitVec 1) => P Bit.zero b) h00 h01 y)
     (Bit.ind (fun (b : BitVec 1) => P Bit.one b) h10 h11 y) x
+/-- A property of every three bits holds when it does of all eight triples. -/
 def Bit.ind3 (0 P : BitVec 1 → BitVec 1 → BitVec 1 → Prop)
     (h000 : P Bit.zero Bit.zero Bit.zero) (h001 : P Bit.zero Bit.zero Bit.one)
     (h010 : P Bit.zero Bit.one Bit.zero) (h011 : P Bit.zero Bit.one Bit.one)
@@ -47,104 +55,143 @@ def Bit.ind3 (0 P : BitVec 1 → BitVec 1 → BitVec 1 → Prop)
 ------------------------------------------------------------------------------------
 -- Gates with a constant
 
+/-- `0 &&& x = 0`. -/
 def Bit.and_zero (x : BitVec 1) : Bit.zero &&& x = Bit.zero :=
   Bit.ind (fun (a : BitVec 1) => Bit.zero &&& a = Bit.zero) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x
+/-- `x &&& 0 = 0`. -/
 def Bit.and_zero_r (x : BitVec 1) : x &&& Bit.zero = Bit.zero :=
   Bit.ind (fun (a : BitVec 1) => a &&& Bit.zero = Bit.zero) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x
+/-- `1 &&& x = x`. -/
 def Bit.and_one (x : BitVec 1) : Bit.one &&& x = x :=
   Bit.ind (fun (a : BitVec 1) => Bit.one &&& a = a) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x
+/-- `x &&& 1 = x`. -/
 def Bit.and_one_r (x : BitVec 1) : x &&& Bit.one = x :=
   Bit.ind (fun (a : BitVec 1) => a &&& Bit.one = a) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x
+/-- `1 ||| x = 1`. -/
 def Bit.or_one (x : BitVec 1) : Bit.one ||| x = Bit.one :=
   Bit.ind (fun (a : BitVec 1) => Bit.one ||| a = Bit.one) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x
+/-- `x ||| 1 = 1`. -/
 def Bit.or_one_r (x : BitVec 1) : x ||| Bit.one = Bit.one :=
   Bit.ind (fun (a : BitVec 1) => a ||| Bit.one = Bit.one) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x
+/-- `0 ||| x = x`. -/
 def Bit.or_zero (x : BitVec 1) : Bit.zero ||| x = x :=
   Bit.ind (fun (a : BitVec 1) => Bit.zero ||| a = a) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x
+/-- `x ||| 0 = x`. -/
 def Bit.or_zero_r (x : BitVec 1) : x ||| Bit.zero = x :=
   Bit.ind (fun (a : BitVec 1) => a ||| Bit.zero = a) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x
+/-- `0 ^^^ x = x`. -/
 def Bit.xor_zero (x : BitVec 1) : Bit.zero ^^^ x = x :=
   Bit.ind (fun (a : BitVec 1) => Bit.zero ^^^ a = a) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x
+/-- `1 ^^^ x = ~~~x`. -/
 def Bit.xor_one (x : BitVec 1) : Bit.one ^^^ x = ~~~x :=
   Bit.ind (fun (a : BitVec 1) => Bit.one ^^^ a = ~~~a) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x
 
 ------------------------------------------------------------------------------------
 -- Gates on variables
 
+/-- `~~~(~~~x) = x`. -/
 def Bit.not_not (x : BitVec 1) : ~~~(~~~x) = x :=
   Bit.ind (fun (a : BitVec 1) => ~~~(~~~a) = a) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x
+/-- `x &&& x = x`. -/
 def Bit.and_self (x : BitVec 1) : x &&& x = x :=
   Bit.ind (fun (a : BitVec 1) => a &&& a = a) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x
+/-- `x ||| x = x`. -/
 def Bit.or_self (x : BitVec 1) : x ||| x = x :=
   Bit.ind (fun (a : BitVec 1) => a ||| a = a) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x
+/-- `x &&& ~~~x = 0`. -/
 def Bit.and_not_self (x : BitVec 1) : x &&& ~~~x = Bit.zero :=
   Bit.ind (fun (a : BitVec 1) => a &&& ~~~a = Bit.zero) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x
+/-- `x ||| ~~~x = 1`. -/
 def Bit.or_not_self (x : BitVec 1) : x ||| ~~~x = Bit.one :=
   Bit.ind (fun (a : BitVec 1) => a ||| ~~~a = Bit.one) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x
+/-- `&&&` is commutative. -/
 def Bit.and_comm (x y : BitVec 1) : x &&& y = y &&& x :=
   Bit.ind2 (fun (a b : BitVec 1) => a &&& b = b &&& a) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x y
+/-- `|||` is commutative. -/
 def Bit.or_comm (x y : BitVec 1) : x ||| y = y ||| x :=
   Bit.ind2 (fun (a b : BitVec 1) => a ||| b = b ||| a) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x y
+/-- `^^^` is commutative. -/
 def Bit.xor_comm (x y : BitVec 1) : x ^^^ y = y ^^^ x :=
   Bit.ind2 (fun (a b : BitVec 1) => a ^^^ b = b ^^^ a) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x y
+/-- `~~~(x &&& y) = ~~~x ||| ~~~y` (De Morgan). -/
 def Bit.not_and (x y : BitVec 1) : ~~~(x &&& y) = ~~~x ||| ~~~y :=
   Bit.ind2 (fun (a b : BitVec 1) => ~~~(a &&& b) = ~~~a ||| ~~~b) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x y
+/-- `~~~(x ||| y) = ~~~x &&& ~~~y` (De Morgan). -/
 def Bit.not_or (x y : BitVec 1) : ~~~(x ||| y) = ~~~x &&& ~~~y :=
   Bit.ind2 (fun (a b : BitVec 1) => ~~~(a ||| b) = ~~~a &&& ~~~b) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x y
+/-- `&&&` is associative. -/
 def Bit.and_assoc (x y z : BitVec 1) : (x &&& y) &&& z = x &&& (y &&& z) :=
   Bit.ind3 (fun (a b c : BitVec 1) => (a &&& b) &&& c = a &&& (b &&& c)) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x y z
+/-- `|||` is associative. -/
 def Bit.or_assoc (x y z : BitVec 1) : (x ||| y) ||| z = x ||| (y ||| z) :=
   Bit.ind3 (fun (a b c : BitVec 1) => (a ||| b) ||| c = a ||| (b ||| c)) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x y z
+/-- `x &&& (y ||| z) = (x &&& y) ||| (x &&& z)` (distributivity). -/
 def Bit.and_or (x y z : BitVec 1) : x &&& (y ||| z) = (x &&& y) ||| (x &&& z) :=
   Bit.ind3 (fun (a b c : BitVec 1) => a &&& (b ||| c) = (a &&& b) ||| (a &&& c)) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x y z
 
 ------------------------------------------------------------------------------------
 -- Multiplexers: the normal form `rfl` reduces
 
--- at any type, without the range: the select is a Boolean
+/-- at any type, without the range: the select is a Boolean -/
 def Hdl.boolSame {A : Type} : (c : Bool) → (x : A) → (match c with | .true => x | .false => x) = x
   | .true, x => rfl
   | .false, x => rfl
+/-- `mux c x x = x`. -/
 def HwTy.El.mux_same {t : HwTy} (c : BitVec 1) (x : HwTy.El t) : @HwTy.El.mux t c x x = x :=
   Hdl.boolSame (BitVec.isTrue c) x
+/-- `mux 1 x y = x`. -/
 def HwTy.El.mux_one {t : HwTy} (x y : HwTy.El t) : @HwTy.El.mux t Bit.one x y = x := rfl
+/-- `mux 0 x y = y`. -/
 def HwTy.El.mux_zero {t : HwTy} (x y : HwTy.El t) : @HwTy.El.mux t Bit.zero x y = y := rfl
+/-- `mux (~~~c) x y = mux c y x`. -/
 def HwTy.El.mux_not {t : HwTy} (c : BitVec 1) (x y : HwTy.El t) : @HwTy.El.mux t ~~~c x y = @HwTy.El.mux t c y x :=
   Bit.ind (fun (a : BitVec 1) => @HwTy.El.mux t ~~~a x y = @HwTy.El.mux t a y x) rfl rfl c
 
--- gates as multiplexers
+/-- gates as multiplexers -/
 def Bit.and_mux (x y : BitVec 1) : x &&& y = @HwTy.El.mux HwTy.bit x y Bit.zero :=
   Bit.ind2 (fun (a b : BitVec 1) => a &&& b = @HwTy.El.mux HwTy.bit a b Bit.zero) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x y
+/-- `x ||| y = mux x 1 y`. -/
 def Bit.or_mux (x y : BitVec 1) : x ||| y = @HwTy.El.mux HwTy.bit x Bit.one y :=
   Bit.ind2 (fun (a b : BitVec 1) => a ||| b = @HwTy.El.mux HwTy.bit a Bit.one b) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x y
+/-- `~~~x = mux x 0 1`. -/
 def Bit.not_mux (x : BitVec 1) : ~~~x = @HwTy.El.mux HwTy.bit x Bit.zero Bit.one :=
   Bit.ind (fun (a : BitVec 1) => ~~~a = @HwTy.El.mux HwTy.bit a Bit.zero Bit.one) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x
+/-- `x ^^^ y = mux x ~~~y y`. -/
 def Bit.xor_mux (x y : BitVec 1) : x ^^^ y = @HwTy.El.mux HwTy.bit x ~~~y y :=
   Bit.ind2 (fun (a b : BitVec 1) => a ^^^ b = @HwTy.El.mux HwTy.bit a ~~~b b) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x y
 
 ------------------------------------------------------------------------------------
 -- Booleans: the bridge to `sat_decide`
 
+/-- A bit as a Boolean (0 is false). -/
 def Bit.toBool (x : BitVec 1) : Bool := BitVec.isTrue x
+/-- A Boolean as a bit (`Bool.toBits`). -/
 def Bit.ofBool (b : Bool) : BitVec 1 := Bool.toBits b
 
+/-- `toBool` and `ofBool` are inverse on Booleans. -/
 def Bit.toBool_ofBool : (b : Bool) → Bit.toBool (Bit.ofBool b) = b
   | .true => rfl
   | .false => rfl
+/-- `toBool` and `ofBool` are inverse on bits. -/
 def Bit.ofBool_toBool (x : BitVec 1) : Bit.ofBool (Bit.toBool x) = x :=
   Bit.ind (fun (a : BitVec 1) => Bit.ofBool (Bit.toBool a) = a) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) x
--- an equation of bits is an equation of their Booleans
+/-- an equation of bits is an equation of their Booleans -/
 def Bit.eq_of_toBool (x y : BitVec 1) (h : Bit.toBool x = Bit.toBool y) : x = y :=
   Eq.trans (Eq.symm (Bit.ofBool_toBool x)) (Eq.trans (Eq.congrArg Bit.ofBool h) (Bit.ofBool_toBool y))
 
+/-- `toBool` is a homomorphism for `&&&`. -/
 def Bit.toBool_and (x y : BitVec 1) : Bit.toBool (x &&& y) = Bool.and (Bit.toBool x) (Bit.toBool y) :=
   Bit.ind2 (fun (a b : BitVec 1) => Bit.toBool (a &&& b) = Bool.and (Bit.toBool a) (Bit.toBool b)) rfl rfl rfl rfl x y
+/-- `toBool` is a homomorphism for `|||`. -/
 def Bit.toBool_or (x y : BitVec 1) : Bit.toBool (x ||| y) = Bool.or (Bit.toBool x) (Bit.toBool y) :=
   Bit.ind2 (fun (a b : BitVec 1) => Bit.toBool (a ||| b) = Bool.or (Bit.toBool a) (Bit.toBool b)) rfl rfl rfl rfl x y
+/-- `toBool` is a homomorphism for `^^^`. -/
 def Bit.toBool_xor (x y : BitVec 1) : Bit.toBool (x ^^^ y) = Bool.xor (Bit.toBool x) (Bit.toBool y) :=
   Bit.ind2 (fun (a b : BitVec 1) => Bit.toBool (a ^^^ b) = Bool.xor (Bit.toBool a) (Bit.toBool b)) rfl rfl rfl rfl x y
+/-- `toBool` is a homomorphism for `~~~`. -/
 def Bit.toBool_not (x : BitVec 1) : Bit.toBool ~~~x = Bool.not (Bit.toBool x) :=
   Bit.ind (fun (a : BitVec 1) => Bit.toBool ~~~a = Bool.not (Bit.toBool a)) rfl rfl x
+/-- `toBool` takes `mux` to the Boolean if-then-else. -/
 def Bit.toBool_mux (c x y : BitVec 1) :
     Bit.toBool (@HwTy.El.mux HwTy.bit c x y) = Bool.or (Bool.and (Bit.toBool c) (Bit.toBool x)) (Bool.and (Bool.not (Bit.toBool c)) (Bit.toBool y)) :=
   Bit.ind3 (fun (a b d : BitVec 1) => Bit.toBool (@HwTy.El.mux HwTy.bit a b d) =

@@ -16,13 +16,15 @@ def Stats.hits_misses_indep : Lens.Indep Stats.hitsL Stats.missesL :=
   (fun s a => rfl, fun s b => rfl, fun s a b => rfl)
 
 -- fn bump2 {'a 'b} (a : &'a mut U64) (b : &'b mut U64) : Unit := { *a += 1; *b += 2 }
-def bump2 {ρ₁ ρ₂ : Region} (a : Uniq ρ₁ U64) (b : Uniq ρ₂ U64) : Result (Unit × Uniq ρ₁ U64 × Uniq ρ₂ U64) :=
-  match U64.add a.val (U64.lit 1) with
+def bump2 {ρ₁ ρ₂ : Region} (1 a : Uniq ρ₁ U64) (1 b : Uniq ρ₂ U64) : Result1 Unit ((1 _ : Uniq ρ₁ U64) × Uniq ρ₂ U64) :=
+  let 1 (va, a) := Uniq.peek a;
+  match U64.add va (U64.lit 1) with
   | .ok x =>
-    (match U64.add b.val (U64.lit 2) with
-    | .ok y => .ok ((), Uniq.set a x, Uniq.set b y)
-    | .err e => .err e)
-  | .err e => .err e
+    let 1 (vb, b) := Uniq.peek b;
+    (match U64.add vb (U64.lit 2) with
+    | .ok y => .ok () (Uniq.write a x, Uniq.write b y)
+    | .err e => .err e (a, b))
+  | .err e => .err e (a, b)
 
 -- fn record {'a} (s : &'a mut Stats) : Unit := {
 --   let h := &mut s.hits; let m := &mut s.misses;   -- disjoint: both live
@@ -33,37 +35,37 @@ def bump2 {ρ₁ ρ₂ : Region} (a : Uniq ρ₁ U64) (b : Uniq ρ₂ U64) : Res
 -- token while its fields are out), the struct is unpacked once, the fields are updated
 -- as local variables, and the struct is rebuilt when the borrows end (in one block, so
 -- the cell is reused). Passing the aliases to `bump2` borrows the two locals, each in a
--- fresh region.
-def record {ρ : Region} (s : Uniq ρ Stats) : Result (Unit × Uniq ρ Stats) :=
+-- fresh region; the outer one is threaded through the inner scope (`Uniq.borrowIn`).
+def record {ρ : Region} (1 s : Uniq ρ Stats) : Result1 Unit (Uniq ρ Stats) :=
   Uniq.reborrow s (fun ρ' hs s r =>
-    match r.val with
-    | (h, m, _) =>                                  -- unpack before computing (§5.1)
+    let 1 (v, r) := Uniq.peek r;
+    match v with
+    | .mk h m =>                                    -- unpack before computing (§5.1)
       match U64.add h (U64.lit 10) with             -- *h += 10
       | .ok h =>
         (match Uniq.borrow ρ' h (fun ρh hh h rh =>  -- bump2 h m (reborrows of the aliases)
-          match Uniq.borrow ρh m (fun ρm hm m rm =>
-            match bump2 rh rm with
-            | .ok q => let (u, rhrm) := q; let (rh, rm) := rhrm; .ok (rh, rm)
-            | .err e => .err e) with
-          | .ok q => let (rh, m) := q; .ok (m, rh)
-          | .err e => .err e) with
+          match Uniq.borrowIn ρh m rh (fun ρm hm m rh rm => bump2 rh rm) with
+          | .ok q rh => let (u, m) := q; .ok m rh
+          | .err e rh => .err e rh) with
         | .ok q =>
           let (m, h) := q;
-          .ok ((), Uniq.set r (Stats.mk h m))      -- the borrows end: rebuild
-        | .err e => .err e)
-      | .err e => .err e)
+          .ok () (Uniq.write r (Stats.mk h m))     -- the borrows end: rebuild
+        | .err e => .err e r)
+      | .err e => .err e r)
 
 -- (2) The same through the optics library: a borrow of one field through its lens
 -- (`Uniq.zoom`), then one borrow of both places (`Lens.pair`, lawful because the
 -- fields are independent) split into two live borrows (`Uniq.both`).
-def record_optic {ρ : Region} (s : Uniq ρ Stats) : Result (Unit × Uniq ρ Stats) :=
+def record_optic {ρ : Region} (1 s : Uniq ρ Stats) : Result1 Unit (Uniq ρ Stats) :=
   match Uniq.zoom Stats.hitsL s (fun ρ' h s x =>
-    Result.map (fun (y : U64) => ((), Uniq.set x y)) (U64.add x.val (U64.lit 10))) with
-  | .ok r =>
-    let (u, s) := r;
+    let 1 (v, x) := Uniq.peek x;
+    match U64.add v (U64.lit 10) with
+    | .ok y => .ok () (Uniq.write x y)
+    | .err e => .err e x) with
+  | .ok u s =>
     Uniq.zoom (Lens.pair Stats.hitsL Stats.missesL) s (fun ρ' h s hm =>
       Uniq.both hm (fun ρ'' h' a b => bump2 a b))
-  | .err e => .err e
+  | .err e s => .err e s
 
 def show (r : Result (Unit × Stats)) : Result (Nat × Nat) := Result.map (fun (r : Unit × Stats) => (r.2.hits.val, r.2.misses.val)) r
 def s12 : Stats := Stats.mk (U64.lit 1) (U64.lit 2)

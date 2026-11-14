@@ -1,0 +1,37 @@
+import WordMap
+-- Maps from 64-bit words (lib/WordMap.wiz): random inserts, erasures and lookups, the
+-- same under the interpreter (the model: a sorted list) and compiled (the natives: a
+-- hash table, which also grows and deletes by backward shift here). Group `natives`.
+
+def next (x : Nat) : Nat := Nat.mod (x * 1103515245 + 12345) 2147483648
+-- keys from a small range (so erasures hit), some of them above 2^63
+def key (y : Nat) : U64 :=
+  let k := Nat.mod (Nat.div y 8) 300;
+  if Nat.beq (Nat.mod k 3) 0 then UIntN.not (U64.ofNat k) else U64.ofNat (k * 1000003)
+
+def code : Option Nat → Nat
+  | .none => 1
+  | .some v => v + 2
+
+def steps : Nat → Nat → U64Map Nat → Nat → U64Map Nat × Nat
+  | .zero, _, m, acc => (m, acc)
+  | .succ n, x, m, acc =>
+    let y := next x;
+    let k := key y;
+    let op := Nat.mod y 8;
+    if Nat.lt op 3 then steps n y (U64Map.insert m k y) acc
+    else if Nat.lt op 5 then steps n y (U64Map.erase m k) acc
+    else if Nat.beq op 5 then steps n y m (Nat.mod (acc * 7 + code (U64Map.find m k)) 1000000007)
+    else if Nat.beq op 6 then steps n y m (Nat.mod (acc * 5 + U64Map.findD m k 3) 1000000007)
+    else steps n y m (acc * 2 + (if U64Map.contains m k then 1 else 0))
+
+def digest (m : U64Map Nat) : Nat :=
+  U64Map.foldl (fun acc k v => Nat.mod (acc * 31 + Nat.mod k.toNat 1000000 + v) 1000000007) 0 m
+
+def main : Nat :=
+  let r := steps 1500 3 U64Map.empty 0;
+  -- persistence: `r.1` is shared, so `m2` is a copy
+  let m2 := U64Map.insert (U64Map.erase r.1 (key 8)) (U64.ofNat 42) 7;
+  let m3 := U64Map.ofList [(U64.ofNat 5, 50), (U64.ofNat 1, 10), (U64.ofNat 5, 55)];
+  digest r.1 + 3 * digest m2 + 5 * Nat.mod r.2 1000000007 + 7 * U64Map.size r.1 + 11 * U64Map.size m2 +
+    13 * digest m3 + 17 * List.length (U64Map.keys r.1)

@@ -1,0 +1,119 @@
+import IO
+import Std
+import Text
+import WordArray
+import WordMap
+import Intern
+-- A benchmark of the native structures of stage 29 against what programs used before:
+-- `U32Array` vs `Array U32` and `Array Nat`, `U64Map` vs `StrMap` with the keys as text,
+-- `InternTable` vs a `StrMap` from text to ids. Each mode does the same work and prints
+-- a checksum (equal within a group of modes).
+--   wiz build examples/natives-bench.wiz -o nb && ./nb MODE N
+-- modes: arr-u32 arr-boxed arr-nat (N pushes, then 10 passes of N reads and writes),
+-- map-u64 map-str (N inserts, N lookups, N/2 erasures (StrMap: none, it has no erase),
+-- keys pseudo-random below 4N), intern-tab intern-str (N strings from a vocabulary of
+-- N/8). (Bench script: /workspace/wiz-tools/bench/natives.)
+
+def next (x : Nat) : Nat := Nat.mod (x * 1103515245 + 12345) 2147483648
+
+-- ## arrays
+
+def a32Fill : Nat → U32Array → U32Array
+  | .zero, a => a
+  | .succ n, a => a32Fill n (U32Array.push a (U32.ofNat n))
+def a32Pass (n : Nat) : Nat → U32Array → Nat → U32Array × Nat
+  | .zero, a, acc => (a, acc)
+  | .succ i, a, acc =>
+    let j := Nat.mod (i * 7919) n;
+    let x := U32Array.get a j;
+    a32Pass n i (U32Array.set a i (UIntN.add x (U32.ofNat 1))) (Nat.mod (acc + x.toNat) 1000000007)
+def a32Passes (n : Nat) : Nat → U32Array → Nat → Nat
+  | .zero, _, acc => acc
+  | .succ k, a, acc => let r := a32Pass n n a acc; a32Passes n k r.1 r.2
+
+def abFill : Nat → Array U32 → Array U32
+  | .zero, a => a
+  | .succ n, a => abFill n (Array.push a (U32.ofNat n))
+def abPass (n : Nat) : Nat → Array U32 → Nat → Array U32 × Nat
+  | .zero, a, acc => (a, acc)
+  | .succ i, a, acc =>
+    let j := Nat.mod (i * 7919) n;
+    let x := Array.getD a j (U32.ofNat 0);
+    abPass n i (Array.set a i (UIntN.add x (U32.ofNat 1))) (Nat.mod (acc + x.toNat) 1000000007)
+def abPasses (n : Nat) : Nat → Array U32 → Nat → Nat
+  | .zero, _, acc => acc
+  | .succ k, a, acc => let r := abPass n n a acc; abPasses n k r.1 r.2
+
+def anFill : Nat → Array Nat → Array Nat
+  | .zero, a => a
+  | .succ n, a => anFill n (Array.push a n)
+def anPass (n : Nat) : Nat → Array Nat → Nat → Array Nat × Nat
+  | .zero, a, acc => (a, acc)
+  | .succ i, a, acc =>
+    let j := Nat.mod (i * 7919) n;
+    let x := Array.getD a j 0;
+    anPass n i (Array.set a i (Nat.mod (x + 1) 4294967296)) (Nat.mod (acc + x) 1000000007)
+def anPasses (n : Nat) : Nat → Array Nat → Nat → Nat
+  | .zero, _, acc => acc
+  | .succ k, a, acc => let r := anPass n n a acc; anPasses n k r.1 r.2
+
+-- ## maps
+
+def mU64Ins (n : Nat) : Nat → Nat → U64Map Nat → U64Map Nat
+  | .zero, _, m => m
+  | .succ i, x, m => let y := next x; mU64Ins n i y (U64Map.insert m (U64.ofNat (Nat.mod y (4 * n))) i)
+def mU64Find (n : Nat) (m : U64Map Nat) : Nat → Nat → Nat → Nat
+  | .zero, _, acc => acc
+  | .succ i, x, acc => let y := next x; mU64Find n m i y (Nat.mod (acc + U64Map.findD m (U64.ofNat (Nat.mod y (4 * n))) 1) 1000000007)
+def mU64Erase (n : Nat) : Nat → Nat → U64Map Nat → U64Map Nat
+  | .zero, _, m => m
+  | .succ i, x, m => let y := next x; mU64Erase n i y (U64Map.erase m (U64.ofNat (Nat.mod y (4 * n))))
+
+def skey (k : Nat) : Str := Str.ofString (Nat.toString k)
+def mStrIns (n : Nat) : Nat → Nat → StrMap Nat → StrMap Nat
+  | .zero, _, m => m
+  | .succ i, x, m => let y := next x; mStrIns n i y (StrMap.insert m (skey (Nat.mod y (4 * n))) i)
+def mStrFind (n : Nat) (m : StrMap Nat) : Nat → Nat → Nat → Nat
+  | .zero, _, acc => acc
+  | .succ i, x, acc => let y := next x; mStrFind n m i y (Nat.mod (acc + StrMap.findD m (skey (Nat.mod y (4 * n))) 1) 1000000007)
+
+-- ## interning
+
+def word (v y : Nat) : String := String.append "ident_" (Nat.toString (Nat.mod y v))
+def iTab (v : Nat) : Nat → Nat → InternTable → Nat → Nat
+  | .zero, _, _, acc => acc
+  | .succ i, x, t, acc => let y := next x; let r := InternTable.intern t (word v y); iTab v i y r.1 (Nat.mod (acc * 31 + r.2.toNat) 1000000007)
+-- the same with a StrMap from the text to its id (and the size as the next id)
+def iStr (v : Nat) : Nat → Nat → StrMap Nat → Nat → Nat → Nat
+  | .zero, _, _, _, acc => acc
+  | .succ i, x, m, size, acc =>
+    let y := next x;
+    let k := Str.ofString (word v y);
+    let id := StrMap.findD m k size;
+    match Nat.beq id size with
+    | .true => iStr v i y (StrMap.insert m k id) (size + 1) (Nat.mod (acc * 31 + id) 1000000007)
+    | .false => iStr v i y m size (Nat.mod (acc * 31 + id) 1000000007)
+
+def run (mode : String) (n : Nat) : Nat :=
+  if String.eq mode "arr-u32" then a32Passes n 10 (a32Fill n U32Array.empty) 0
+  else if String.eq mode "arr-boxed" then abPasses n 10 (abFill n Array.empty) 0
+  else if String.eq mode "arr-nat" then anPasses n 10 (anFill n Array.empty) 0
+  else if String.eq mode "map-u64" then
+    let m := mU64Ins n n 1 U64Map.empty;
+    let f := mU64Find n m n 2 0;
+    f + 1000000007 * U64Map.size (mU64Erase n (Nat.div n 2) 3 m) * 0
+  else if String.eq mode "map-str" then mStrFind n (mStrIns n n 1 StrMap.empty) n 2 0
+  else if String.eq mode "intern-tab" then iTab (Nat.div n 8 + 1) n 4 InternTable.empty 0
+  else if String.eq mode "intern-str" then iStr (Nat.div n 8 + 1) n 4 StrMap.empty 0 0
+  else 0
+
+def argN : List String → Nat
+  | .cons _ (.cons s _) => match String.parseNat s with
+    | .some n => n
+    | .none => 100000
+  | _ => 100000
+def argMode : List String → String
+  | .cons m _ => m
+  | .nil => "arr-u32"
+
+def main : IO Unit := IO.bind IO.args (fun as => IO.println (Nat.toString (run (argMode as) (argN as))))

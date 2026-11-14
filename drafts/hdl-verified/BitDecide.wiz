@@ -1,0 +1,152 @@
+-- DRAFT (agent/hdl-verified-opt, not tested by CI): `bit_decide`, `sat_decide` (28c) with a
+-- reflection that computes. 28c unfolds a definition only at its head, instantiated at
+-- variables, so a bit-level circuit written with recursion on the bit index
+-- (`carry f g c 3`, `addS f g c 3`) or with a vector of inputs is all atoms, and the
+-- solver finds a bogus counterexample. Here a non-connective head is unfolded with
+-- `TacticM.unfold` (its `match` computed on the numeral; needs PR #224, `.lazyInd`
+-- forced) until the head is a connective, and a recursive call that `unfold` leaves as a
+-- raw eliminator (its fold-back fails when the argument is a numeral) is refolded by
+-- trying `f a₁ … (j)` for j below the caller's index (`TacticM.isDefEq`).
+-- Checked on 4- to 16-bit ripple adders and comparators over `Nat → Bool` streams.
+-- Why it is a draft: the certificate check, not the reflection, is the cost (finding F5,
+-- docs/libraries.md H14 V1): ~0.3 s per LRAT step, so 6 bits take 36 s; and the word
+-- bridge (Hw at Bool streams, with lemmas tying each operation to `HwTy.El`) is not
+-- written. Also tried: symbolic bits as data (`Bx`, evaluation stops at a gate): a
+-- computed constructor reaches a tactic as an opaque `Expr` (whnfCtorApp can't read it),
+-- and reading it through projections loses the syntactic sharing the kernel's gate checks
+-- rely on, so the check goes exponential.
+import SatTactic
+-- `bit_decide`: `sat_decide` whose reflection computes: a subterm whose head is a
+-- definition other than a connective is unfolded (`TacticM.unfold`, its `match` computed
+-- on the arguments) until its head is a connective or nothing changes.
+
+-- `n` applied to `pre` and the numeral `j`, for `j` from `m - 1` down: the first that is
+-- convertible with `raw` (a recursive call `unfold` left as a raw eliminator)
+def BitD.refold (g : Nat) (n : String) (pre : List Expr) (raw : Expr) : Nat → TacticM Expr
+  | .zero => TacticM.pure raw
+  | .succ j => do
+    let cand := Expr.mkApp (.const n) (List.append pre (.cons (.lit j) .nil));
+    ok ← TacticM.isDefEq g raw cand;
+    match ok with
+    | .true => TacticM.pure cand
+    | .false => BitD.refold g n pre raw j
+def BitD.isOpaqueHead (e : Expr) : Bool := match Expr.getAppFn e with
+  | .opaque _ => .true
+  | _ => .false
+def BitD.repair (g : Nat) (n : String) (pre : List Expr) (m : Nat) : Expr → TacticM Expr
+  | .app f a => match BitD.isOpaqueHead (.app f a) with
+    | .true => BitD.refold g n pre (.app f a) m
+    | .false => do
+      f' ← BitD.repair g n pre m f;
+      a' ← BitD.repair g n pre m a;
+      TacticM.pure (.app f' a')
+  | .opaque i => BitD.refold g n pre (.opaque i) m
+  | e => TacticM.pure e
+def BitD.lastLit : List Expr → Option (List Expr × Nat)
+  | .nil => .none
+  | .cons (.lit m) .nil => .some (.nil, m)
+  | .cons _ .nil => .none
+  | .cons a as => match BitD.lastLit as with
+    | .some p => .some (.cons a p.1, p.2)
+    | .none => .none
+def BitD.unfoldRepair (g : Nat) (n : String) (e : Expr) : TacticM Expr := do
+  u ← TacticM.unfold g n e;
+  match BitD.lastLit (Expr.getAppArgs e) with
+  | .some p => BitD.repair g n p.1 p.2 u
+  | .none => TacticM.pure u
+
+mutual
+def BitD.node (g : Nat) (fuel : Nat) (e : Expr) (st : SatT.St) : TacticM (Nat × SatT.St) :=
+  match SatT.St.find e st with
+  | .some i => TacticM.pure (i, st)
+  | .none => match Expr.view e with
+    | .const n args => BitD.nodeConst g fuel e n args st
+    | _ => BitD.nodeOther g fuel e st
+def BitD.node2 (g : Nat) (fuel : Nat) (e : Expr) (mk : Nat → Nat → Sat.Gate) (a b : Expr) (st : SatT.St) : TacticM (Nat × SatT.St) := do
+  ra ← BitD.node g fuel a st;
+  rb ← BitD.node g fuel b ra.2;
+  TacticM.pure (SatT.St.add e (mk ra.1 rb.1) rb.2)
+def BitD.nodeConst (g : Nat) (fuel : Nat) (e : Expr) (n : String) (args : List Expr) (st : SatT.St) : TacticM (Nat × SatT.St) :=
+  match args with
+  | .nil => match Expr.nameEq n "Bool.true" with
+    | .true => TacticM.pure (SatT.St.add e (.const .true) st)
+    | .false => match Expr.nameEq n "Bool.false" with
+      | .true => TacticM.pure (SatT.St.add e (.const .false) st)
+      | .false => BitD.nodeDef g fuel e n st
+  | .cons a .nil => match Expr.nameEq n "Bool.not" with
+    | .true => do
+      ra ← BitD.node g fuel a st;
+      TacticM.pure (SatT.St.add e (.not ra.1) ra.2)
+    | .false => BitD.nodeDef g fuel e n st
+  | .cons a (.cons b .nil) =>
+    match Expr.nameEq n "Bool.and" with
+    | .true => BitD.node2 g fuel e Sat.Gate.and a b st
+    | .false => match Expr.nameEq n "Bool.or" with
+      | .true => BitD.node2 g fuel e Sat.Gate.or a b st
+      | .false => match Expr.nameEq n "Bool.xor" with
+        | .true => BitD.node2 g fuel e Sat.Gate.xor a b st
+        | .false => match Expr.nameEq n "Sat.boolEq" with
+          | .true => BitD.node2 g fuel e Sat.Gate.iff a b st
+          | .false => BitD.nodeDef g fuel e n st
+  | _ => BitD.nodeDef g fuel e n st
+-- another constant at the head: unfold it once and look again (the value is the same
+-- subterm, so the node is remembered under both)
+def BitD.nodeDef (g : Nat) (fuel : Nat) (e : Expr) (n : String) (st : SatT.St) : TacticM (Nat × SatT.St) :=
+  match fuel with
+  | .zero => TacticM.pure (SatT.St.add e .inp st)
+  | .succ fuel' => do
+    d ← TacticM.isDefinition n;
+    match d with
+    | .some .true => do
+      u ← BitD.unfoldRepair g n e;
+      match Expr.beq u e with
+      | .true => BitD.nodeOther g fuel' e st
+      | .false => do
+        r ← BitD.node g fuel' u st;
+        TacticM.pure (r.1, SatT.St.remember e r.1 r.2)
+    | _ => BitD.nodeOther g fuel' e st
+-- an application of something else (a variable, a `fun`): its weak head normal form, if
+-- that differs
+def BitD.nodeOther (g : Nat) (fuel : Nat) (e : Expr) (st : SatT.St) : TacticM (Nat × SatT.St) :=
+  match fuel with
+  | .zero => TacticM.pure (SatT.St.add e .inp st)
+  | .succ fuel' => match Expr.view e with
+    | .const _ _ => TacticM.pure (SatT.St.add e .inp st)
+    | _ => do
+      u ← TacticM.whnf g e;
+      match Expr.beq u e with
+      | .true => TacticM.pure (SatT.St.add e .inp st)
+      | .false => do
+        r ← BitD.node g fuel' u st;
+        TacticM.pure (r.1, SatT.St.remember e r.1 r.2)
+end
+
+def BitD.decideDag (g : Nat) (lhs rhs : Expr) : TacticM Unit := match SatT.isConst "Bool.true" rhs with
+  | .true => do
+    r ← BitD.node g 100000 lhs (.mk .nil .nil .nil 0);
+    SatT.solveDag g r.1 r.2 (fun nodesE proofE σ holdsE =>
+      Expr.mkApp (.const "Sat.dag_sound") (.cons nodesE (.cons (.lit r.1) (.cons proofE (.cons (.const "Sat.trivial")
+        (.cons σ (.cons holdsE .nil)))))))
+  | .false => do
+    ra ← BitD.node g 100000 lhs (.mk .nil .nil .nil 0);
+    rb ← BitD.node g 100000 rhs ra.2;
+    let iffE := Expr.mkApp (.const "Sat.boolEq") (.cons lhs (.cons rhs .nil));
+    let ro := SatT.St.add iffE (.iff ra.1 rb.1) rb.2;
+    SatT.solveDag g ro.1 ro.2 (fun nodesE proofE σ holdsE =>
+      Expr.mkApp (.const "Sat.dag_eq") (.cons nodesE (.cons (.lit ro.1) (.cons proofE (.cons (.const "Sat.trivial")
+        (.cons σ (.cons holdsE (.cons lhs (.cons rhs (.cons (.app (.const "Sat.eqRefl") iffE) .nil))))))))))
+
+syntax (name := bitDecide) "bit_decide" : tactic
+def Tactic.bitDecide : Tactic := fun _ => do
+  g0 ← TacticM.mainGoal;
+  g ← SatT.introAll 1000 g0;
+  ty ← TacticM.goalType g;
+  eqn ← TacticM.eqView g ty;
+  match eqn with
+  | .none => TacticM.fail "bit_decide: the goal is not an equation of booleans"
+  | .some eq => match SatT.isConst "Bool" eq.1 with
+    | .true => do
+      BitD.decideDag g eq.2.1 eq.2.2;
+      TacticM.replaceMainGoal .nil
+    | .false => TacticM.fail "bit_decide: the goal is an equation, but not of booleans"
+attribute [tactic tactic.bitDecide] Tactic.bitDecide

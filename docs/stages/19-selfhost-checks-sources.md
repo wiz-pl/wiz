@@ -1,6 +1,6 @@
 # Stage 19: the frontend checks the self-hosted sources
 
-## 19a: a Prelude, `if`, strings ✅
+## 19a: a Prelude, `if`, strings
 
 `import Prelude` checks a small Prelude (written in the subset itself, kept as a string
 in `Frontend.wiz`) before the file: `Nat`, `Bool`, `List`, `Option`, `Prod`, `Char`
@@ -15,7 +15,7 @@ analysis (the kernel's `scase` at `∞`, whose method sees the payload at `μ^j 
 size `j`). Computing induction hypotheses nobody uses made nested matches exponential:
 `Nat.beq 14 14` took 0.7 s, `Nat.beq 65 65` now takes 0.17 s.
 
-## 19b: infix operators ✅
+## 19b: infix operators
 
 `infixl:65 " + " => Nat.add` (and `infixr`, `infix`) extends the self-hosted parser
 while it runs: a trailing `term` parser `a + b` at the declared precedence, and the
@@ -24,7 +24,7 @@ token `+`. Each later command is expanded before it is elaborated, `a + b` stand
 in a pattern, `n + 2` is `.succ (.succ n)`. **Exercise 19.1** is `infixCmd`, the new
 parser entry and notation.
 
-## 19c: axioms, `IO`, `do` — the frontend checks `Lex.wiz` ✅
+## 19c: axioms, `IO`, `do` — the frontend checks `Lex.wiz`
 
 `axiom f (bs) : T` and `extern "c_name" f : T` (a foreign function is an axiom to the
 checker) declare constants. `Unit` and `()` are built in. The Prelude declares `Array`
@@ -37,7 +37,7 @@ may now leave out its type (the value's inferred type is used).
 With these, the self-hosted frontend checks the first file of its own source,
 `selfhost/Lex.wiz` (every declaration, no errors; about 18 s).
 
-## 19d: `Syntax`, `StrMap` — the frontend checks `Parse.wiz` ✅
+## 19d: `Syntax`, `StrMap` — the frontend checks `Parse.wiz`
 
 The Prelude adds the syntax trees (`SyntaxF : Bool → Type` and `Syntax := SyntaxF
 .true`, with `getArg`), `Nat.toString`, and `Str`/`StrMap` as axioms. Three gaps
@@ -56,7 +56,7 @@ closed on the way:
 The self-hosted frontend now checks `Lex.wiz` and `Parse.wiz` together (96
 declarations, about 20 s).
 
-## 19e: towards `Kernel.wiz` ✅
+## 19e: towards `Kernel.wiz`
 
 * A field `(v : Unit → Val)` of a mutual type is higher-order recursive: `dhrec H (fun _
   => tag j) D` in the description.
@@ -70,7 +70,7 @@ declarations, about 20 s).
   so `| t => t` has the right type.
 * `Unit` in constructor fields, `fun _ => …`, and `Nat.max` in the Prelude.
 
-## 19f: the frontend checks `Kernel.wiz` ✅
+## 19f: the frontend checks `Kernel.wiz`
 
 * **Big numerals**: a numeral is `Nat.succ` applied `n` times, so `quote 100000 A` in
   the kernel was a term 100000 deep. With `Nat.mul` around, a numeral of 16 or more is

@@ -25,6 +25,7 @@ def axiomsG : Globals Unit :=
 
 def evalGroup : Group where
   name := "eval/quote"
+  parallel := true
   exercise := "Exercises 1.1–1.3"
   cases := [
     { name := "Type normalises to itself", run := fun _ => checkEq "Type" (nf' (.sort 0)) },
@@ -58,7 +59,7 @@ def convG : Globals Unit :=
   [Raw.axiom "A" ty, Raw.axiom "f" (arr () "A" "A"), Raw.axiom "a" "A", Raw.axiom "b" "A"].foldl
     Globals.insert {}
   |>.insert { name := "u", type := .unit 1, value := none }
-  |>.insert { name := "p", type := .sigma "x" (.qlit ()) (.const "A" []) (.const "A" []) none, value := none }
+  |>.insert { name := "p", type := .sigma "x" (.qlit ()) (.const "A" []) (.const "A" []) ⟨1, 1⟩, value := none }
 
 /-- Are `x` and `y` convertible at type `t`? -/
 def isConv (t x y : Raw Unit) : Bool :=
@@ -73,6 +74,7 @@ def aa : Raw Unit := arr () "A" "A"
 
 def convGroup : Group where
   name := "conv"
+  parallel := true
   exercise := "Exercise 1.4"
   cases := [
     { name := "Type ≡ Type", run := fun _ => check (isConvTy ty ty) "" },
@@ -93,6 +95,7 @@ def convGroup : Group where
 
 def structGroup : Group where
   name := "conv: structural types"
+  parallel := true
   exercise := "Exercises 4.3–4.6"
   cases := [
     { name := "β for pairs: (a, b).1 ≡ a", run := fun _ =>

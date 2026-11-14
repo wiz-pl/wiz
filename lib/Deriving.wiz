@@ -1,64 +1,106 @@
 import Prelude
 import Text
--- Deriving (HD8). `inductive T … deriving C` and `deriving instance C for T` run C's
--- *deriver*: a Wiz function `Deriver := String → MacroM (List Syntax)`, registered with
--- `attribute [deriver C] f`. It looks the type up (`MacroM.getInductive`) and returns
--- the commands that make the instance. This module defines three classes, their
--- derivers, and instances for the prelude's types.
+/-!
+# Deriving
 
+Deriving (HD8). `inductive T … deriving C` and `deriving instance C for T` run C's
+*deriver*: a Wiz function `Deriver := String → MacroM (List Syntax)`, registered with
+`attribute [deriver C] f`. It looks the type up (`MacroM.getInductive`) and returns
+the commands that make the instance. This module defines three classes, their
+derivers, and instances for the prelude's types.
+
+The classes are `Inhabited` (a `default` value), `BEq` (boolean equality) and `Repr`
+(a value as Wiz source); their derivers are `deriveInhabited`, `deriveBEq` and
+`deriveRepr`. The `Derive.*` functions are the toolkit for writing a deriver of your own
+(see docs/stages/07-type-classes.md, exercise 7.2).
+
+```
+import Deriving
+
+inductive Color where
+  | red | green | blue
+  deriving Inhabited, BEq, Repr
+
+#eval Repr.repr (Inhabited.default : Color)   -- "Color.red"
+#eval BEq.beq Color.red Color.blue            -- .false
+```
+-/
+
+/-- Types with a chosen value, `Inhabited.default`. Derivable: the first constructor
+without recursive or proof fields, at `default` values. -/
 class Inhabited.{u} (A : Type u) where
   default : A
+/-- Boolean equality, `BEq.beq a b`. Derivable: the same constructor, and equal fields
+(proof fields are not compared). -/
 class BEq.{u} (A : Type u) where
   beq : A → A → Bool
--- `reprPrec a p`: `a` as Wiz source, in parentheses if it is an application and `p` is
--- the precedence of an argument (1024)
+/-- Showing values as Wiz source. `reprPrec a p` is `a` as Wiz source, in parentheses if
+it is an application and `p` is the precedence of an argument (1024). Derivable:
+`T.c a b` (in parentheses at argument position), `T.c` for a constant. -/
 class Repr.{u} (A : Type u) where
   reprPrec : A → Nat → String
 
+/-- A value as Wiz source, at the top level (no parentheses): `Repr.repr (Option.some 1)`
+is `"Option.some 1"`. -/
 def Repr.repr.{u} {A : Type u} [Repr A] (a : A) : String := Repr.reprPrec a 0
+/-- Put an application in parentheses when it is shown at argument position (`p` ≥ 1024). -/
 def Repr.addAppParen (s : String) (p : Nat) : String := match Nat.lt p 1024 with
   | .true => s
   | .false => String.append "(" (String.append s ")")
 
 -- Decimal numerals (for `Repr Nat`): `Nat.repr`, lib/Text.wiz's (pure, so `#eval` runs it).
 
+/-- Equality of lists, by an equality of elements. -/
 def List.beqBy {A : Type} (eq : A → A → Bool) : List A → List A → Bool
   | .nil, .nil => .true
   | .cons a xs, .cons b ys => Bool.and (eq a b) (List.beqBy eq xs ys)
   | _, _ => .false
 -- (`String.beq` is lib/Text.wiz's)
 
+/-- `0`. -/
 instance : Inhabited Nat := Inhabited.mk 0
+/-- `Nat.beq`. -/
 instance : BEq Nat := BEq.mk Nat.beq
+/-- A decimal numeral (`Nat.repr`). -/
 instance : Repr Nat := Repr.mk (fun n _ => Nat.repr n)
+/-- The empty string. -/
 instance : Inhabited String := Inhabited.mk ""
+/-- `String.beq`. -/
 instance : BEq String := BEq.mk String.beq
+/-- The string in double quotes (no escaping). -/
 instance : Repr String := Repr.mk (fun s _ =>
   String.append (String.mk (.cons (Char.mk 34) .nil)) (String.append s (String.mk (.cons (Char.mk 34) .nil))))
 
 -- ## Writing derivers
 -- Names a deriver introduces end in `✝` or contain it, so they can't capture the user's.
 
+/-- A numbered name for a deriver's variables: `Derive.name "f✝" 2` is `f✝2`. Names a
+deriver introduces end in `✝` or contain it, so they can't capture the user's. -/
 def Derive.name (base : String) (i : Nat) : String := String.append base (Nat.repr i)
+/-- The variable `Derive.name base i`, as a term. -/
 def Derive.var (base : String) (i : Nat) : Syntax := Syntax.mkVar (Derive.name base i)
 
--- `Type` or `Type u` (any level): the classes take a type in any universe
+/-- Is the term `Type` or `Type u` (any level)? The classes take a type in any universe,
+so such a parameter gets an instance argument. -/
 def Derive.isType (t : Syntax) : Bool := match t with
   | .node k _ => String.beq k "term.type"
   | _ => .false
 
+/-- The inductive type or structure named `n` (`MacroM.getInductive`), or an error for
+the deriver of `cls`. -/
 def Derive.lookup (cls n : String) : MacroM IndView := do
   r ← MacroM.getInductive n;
   match r with
   | .none => MacroM.throw (String.append "not an inductive type or structure: " n)
   | .some v => MacroM.pure v
 
+/-- Fail unless the type has no indices (for derivers that don't support indexed families). -/
 def Derive.noIndices (cls : String) (v : IndView) : MacroM Unit := match IndView.indices v with
   | .nil => MacroM.pure ()
   | _ => MacroM.throw "indexed families are not supported"
 
--- `{x : T} → [C x] → …` for the parameters (an instance argument for each `Type`
--- or `Type u` parameter), then `{ξ : I} → …` for the indices, then `concl`.
+/-- `{x : T} → [C x] → rest` for a parameter that is a type (an instance argument for each
+`Type` or `Type u` parameter), `{x : T} → rest` for another one. -/
 def Derive.instBinder (cls : String) (p : ParamView) (rest : Syntax) : Syntax :=
     let x := Syntax.mkIdent (ParamView.name p);
     let t := ParamView.type p;
@@ -67,9 +109,11 @@ def Derive.instBinder (cls : String) (p : ParamView) (rest : Syntax) : Syntax :=
       let c := Syntax.mkApp (Syntax.mkVar cls) (.cons (Syntax.mkVar (ParamView.name p)) .nil);
       `(term| {$x : $t} → [$c] → $rest)
     | .false => `(term| {$x : $t} → $rest)
+/-- The parameters as binders (`Derive.instBinder`) in front of `concl`. -/
 def Derive.instType (cls : String) (concl : Syntax) : List ParamView → Syntax
   | .nil => concl
   | .cons p ps => Derive.instBinder cls p (Derive.instType cls concl ps)
+/-- `{ξ : I} → …` for the indices, in front of `concl`. -/
 def Derive.indexBinders (concl : Syntax) : List ParamView → Syntax
   | .nil => concl
   | .cons p ps =>
@@ -78,69 +122,79 @@ def Derive.indexBinders (concl : Syntax) : List ParamView → Syntax
     let rest := Derive.indexBinders concl ps;
     `(term| {$x : $t} → $rest)
 
+/-- The parameters (or indices) as variables. -/
 def Derive.paramVars : List ParamView → List Syntax
   | .nil => .nil
   | .cons p ps => .cons (Syntax.mkVar (ParamView.name p)) (Derive.paramVars ps)
--- `T Δ ξ`
+/-- `T Δ ξ`: the type applied to its parameters and indices. -/
 def Derive.typeApp (v : IndView) : Syntax :=
   Syntax.mkApp (Syntax.mkVar (IndView.name v)) (List.append (Derive.paramVars (IndView.params v)) (Derive.paramVars (IndView.indices v)))
--- the type of the instance of `cls` for `v`
+/-- The type of the instance of `cls` for `v`:
+`{Δ} → [cls A]… → {ξ} → cls (T Δ ξ)`. -/
 def Derive.instanceType (cls : String) (v : IndView) : Syntax :=
   Derive.instType cls (Derive.indexBinders (Syntax.mkApp (Syntax.mkVar cls) (.cons (Derive.typeApp v) .nil)) (IndView.indices v)) (IndView.params v)
--- `instance : ty := val`
+/-- The command `instance : ty := val`. -/
 def Derive.instance (ty val : Syntax) : Syntax := `(command| instance : $ty := $val)
 
--- `fun x => b` or `fun {x} => b`
+/-- `fun x => b` or `fun {x} => b`, by the binder kind. -/
 def Derive.lam (k : BinderKind) (x : String) (b : Syntax) : Syntax :=
   let i := Syntax.mkIdent x;
   match k with
   | .default => `(term| fun $i => $b)
   | _ => `(term| fun {$i} => $b)
--- `fun _ … _ => b` (n binders)
+/-- `fun _ … _ => b` (n binders). -/
 def Derive.constLams : Nat → Syntax → Syntax
   | .zero, b => b
   | .succ n, b => let r := Derive.constLams n b; `(term| fun _ => $r)
--- the fields of a constructor's recursor method: `f✝0 f✝1 …`, then `ih✝i` for each
--- recursive field `i`
+/-- The fields of a constructor's recursor method as binders: `f✝0 f✝1 …` (then
+`Derive.ihLams` binds `ih✝i` for each recursive field `i`). -/
 def Derive.fieldLams : Nat → List FieldView → Syntax → Syntax
   | _, .nil, b => b
   | i, .cons f fs, b => Derive.lam (FieldView.kind f) (Derive.name "f✝" i) (Derive.fieldLams (i + 1) fs b)
+/-- The induction hypotheses of a recursor method as binders: `ih✝i` for each recursive field `i`. -/
 def Derive.ihLams : Nat → List FieldView → Syntax → Syntax
   | _, .nil, b => b
   | i, .cons f fs, b => match FieldView.recursive f with
     | .true => Derive.lam .default (Derive.name "ih✝" i) (Derive.ihLams (i + 1) fs b)
     | .false => Derive.ihLams (i + 1) fs b
+/-- A recursor method: the fields, then the induction hypotheses, then `b`. -/
 def Derive.method (fs : List FieldView) (b : Syntax) : Syntax := Derive.fieldLams 0 fs (Derive.ihLams 0 fs b)
--- the explicit fields as variables with base name `base`
--- a field that `Repr` shows and `BEq` compares: explicit, and not a proof (proofs of a
--- proposition are all equal, and have no `Repr`)
+/-- A field that `Repr` shows and `BEq` compares: explicit, and not a proof (proofs of a
+proposition are all equal, and have no `Repr`). -/
 def Derive.isData (f : FieldView) : Bool := match FieldView.kind f with
   | .default => Bool.not (FieldView.proof f)
   | _ => .false
+/-- The explicit fields as variables with base name `base` (numbered by their position
+among all the fields). -/
 def Derive.explicitVars (base : String) : Nat → List FieldView → List Syntax
   | _, .nil => .nil
   | i, .cons f fs => match FieldView.kind f with
     | .default => .cons (Derive.var base i) (Derive.explicitVars base (i + 1) fs)
     | _ => Derive.explicitVars base (i + 1) fs
-def Derive.ctorName (v : IndView) (c : CtorView) : String :=
-  String.append (IndView.name v) (String.append "." (CtorView.name c))
--- (13b) A private type of a module has the kernel name `_private.M._0.T`; it is shown as `T`.
+/-- The full name of a constructor: `T.c` (a `mutual` block's constructor is named by
+its member, `Ev.s`, which its tag already is). -/
+def Derive.ctorName (v : IndView) (c : CtorView) : String := match String.splitOn (CtorView.name c) "." with
+  | .cons _ (.cons _ _) => CtorView.name c
+  | _ => String.append (IndView.name v) (String.append "." (CtorView.name c))
+/-- (13b) A private type of a module has the kernel name `_private.M._0.T`; this is the
+part shown, `T`, from the name split at `._0.`. -/
 def Derive.afterPrivate : List String → String → String
   | .cons _ (.cons r rs), _ => String.intercalate "._0." (.cons r rs)
   | _, n => n
+/-- A name as the source spells it: a private name without its `_private.M._0.` prefix. -/
 def Derive.sourceName (n : String) : String := match String.startsWith n "_private." with
   | .true => Derive.afterPrivate (String.splitOn n "._0.") n
   | .false => n
--- Eliminate `x : T Δ ξ` into `motive`: `m c` is the result for constructor `c`, with
--- its fields bound as `f✝i` and the recursive results as `ih✝i`. That is `T.rec` for an
--- inductive type (each method binds them), and the projections `x.f` for a structure.
+/-- Eliminate `x : T Δ ξ` into `motive`: `m c` is the result for constructor `c`, with
+its fields bound as `f✝i` and the recursive results as `ih✝i`. This one makes the
+recursor methods for `T.rec`, one per constructor (see `Derive.elim`). -/
 def Derive.methods (v : IndView) (m : CtorView → Syntax) : List CtorView → List Syntax
   | .nil => .nil
   | .cons c cs => .cons (Derive.method (CtorView.fields c) (m c)) (Derive.methods v m cs)
--- `x.f`
+/-- The projection `x.f`. -/
 def Derive.proj (x : Syntax) (f : String) : Syntax :=
   Syntax.mkNode "term.field" (.cons x (.cons (.atom ".") (.cons (Syntax.mkIdent f) .nil)))
--- `let f✝i := x.fᵢ; …; b` for the fields of a structure (`base` is `f✝` here)
+/-- `let f✝i := x.fᵢ; …; b` for the fields of a structure (`base` is `f✝` here). -/
 def Derive.lets (base : String) (x : Syntax) : Nat → List FieldView → Syntax → Syntax
   | _, .nil, b => b
   | i, .cons f fs, b =>
@@ -148,6 +202,9 @@ def Derive.lets (base : String) (x : Syntax) : Nat → List FieldView → Syntax
     let e := Derive.proj x (FieldView.name f);
     let rest := Derive.lets base x (i + 1) fs b;
     `(term| let $y := $e; $rest)
+/-- Eliminate `x : T Δ ξ` into `motive`: `m c` is the result for constructor `c`, with
+its fields bound as `f✝i` and the recursive results as `ih✝i`. That is `T.rec` for an
+inductive type (each method binds them), and the projections `x.f` for a structure. -/
 def Derive.elim (v : IndView) (motive : Syntax) (m : CtorView → Syntax) (x : Syntax) : Syntax :=
   match IndView.isStructure v with
   | .false =>
@@ -159,12 +216,14 @@ def Derive.elim (v : IndView) (motive : Syntax) (m : CtorView → Syntax) (x : S
 
 -- ## Inhabited: the first constructor without recursive fields, at `default` values
 
--- no recursive fields and no proof fields (there is no `default` proof)
+/-- No recursive fields and no proof fields (there is no `default` proof). -/
 def Derive.allPlain : List FieldView → Bool
   | .nil => .true
   | .cons f fs => match Bool.or (FieldView.recursive f) (FieldView.proof f) with
     | .true => .false
     | .false => Derive.allPlain fs
+/-- The first constructor none of whose fields is recursive or a proof
+(`Derive.allPlain`), so that `default` doesn't need the instance being defined. -/
 def Derive.firstPlain : List CtorView → Option CtorView
   --<sol
   | .nil => .none
@@ -177,10 +236,13 @@ def Derive.firstPlain : List CtorView → Option CtorView
   --| | .nil => .none
   --| | .cons c _ => .some c
   --sol>
+/-- `Inhabited.default` for each of the given fields. -/
 def Derive.defaults : List Syntax → List Syntax
   | .nil => .nil
   | .cons _ xs => .cons `(term| Inhabited.default) (Derive.defaults xs)
 
+/-- The deriver of `Inhabited`: the first constructor without recursive or proof fields
+(`Derive.firstPlain`), applied to `Inhabited.default` for each field. -/
 def deriveInhabited : Deriver := fun n => do
   v ← Derive.lookup "Inhabited" n;
   Derive.noIndices "Inhabited" v;
@@ -194,9 +256,12 @@ attribute [deriver Inhabited] deriveInhabited
 
 -- ## Repr: `T.c a b` (in parentheses at argument position), `T.c` for a constant
 
+/-- How field `i` is shown: by the induction hypothesis if it is recursive, by
+`Repr.reprPrec` at argument precedence otherwise. -/
 def Derive.reprShow (i : Nat) (r : Bool) : Syntax := match r with
   | .true => let ih := Derive.var "ih✝" i; `(term| $ih 1024)
   | .false => let x := Derive.var "f✝" i; `(term| Repr.reprPrec $x 1024)
+/-- A field shown, then the rest: data fields as values, explicit proofs as `_`. -/
 def Derive.reprField (i : Nat) (f : FieldView) (rest : Syntax) : Syntax := match Derive.isData f with
   | .true =>
     let shown := Derive.reprShow i (FieldView.recursive f);
@@ -204,9 +269,12 @@ def Derive.reprField (i : Nat) (f : FieldView) (rest : Syntax) : Syntax := match
   | .false => match FieldView.kind f with
     | .default => `(term| String.append " _" $rest)
     | _ => rest
+/-- A constructor's fields as shown after its name. -/
 def Derive.reprArgs : Nat → List FieldView → Syntax
   | _, .nil => `(term| "")
   | i, .cons f fs => Derive.reprField i f (Derive.reprArgs (i + 1) fs)
+/-- The `Repr` method for constructor `c`: `T.c` for a constant, `T.c a b` (in
+parentheses at argument position) otherwise. -/
 def Derive.reprMethod (v : IndView) (c : CtorView) : Syntax :=
   let name := Syntax.mkStr (Derive.sourceName (Derive.ctorName v c));
   let p := Syntax.mkIdent "p✝";
@@ -217,6 +285,7 @@ def Derive.reprMethod (v : IndView) (c : CtorView) : Syntax :=
     let args := Derive.reprArgs 0 (CtorView.fields c);
     `(term| fun $p => Repr.addAppParen (String.append $name $args) $pv)
 
+/-- The deriver of `Repr`, by `Derive.elim` with `Derive.reprMethod`. -/
 def deriveRepr : Deriver := fun n => do
   v ← Derive.lookup "Repr" n;
   let x := Syntax.mkIdent "x✝";
@@ -229,19 +298,25 @@ attribute [deriver Repr] deriveRepr
 
 -- ## BEq: the same constructor, and equal fields
 
+/-- How field `i` (`f✝i` against `g✝i`) is compared: by the induction hypothesis if it is
+recursive, by `BEq.beq` otherwise. -/
 def Derive.beqCmp (i : Nat) (r : Bool) : Syntax :=
   let y := Derive.var "g✝" i;
   match r with
   | .true => let ih := Derive.var "ih✝" i; `(term| $ih $y)
   | .false => let x := Derive.var "f✝" i; `(term| BEq.beq $x $y)
+/-- Field `i` compared, and the rest: only data fields are compared. -/
 def Derive.beqField (i : Nat) (f : FieldView) (rest : Syntax) : Syntax := match Derive.isData f with
   | .true =>
     let here := Derive.beqCmp i (FieldView.recursive f);
     `(term| Bool.and $here $rest)
   | .false => rest
+/-- All of a constructor's fields compared (`Bool.true` when there are none). -/
 def Derive.beqFields : Nat → List FieldView → Syntax
   | _, .nil => `(term| Bool.true)
   | i, .cons f fs => Derive.beqField i f (Derive.beqFields (i + 1) fs)
+/-- The `BEq` method for constructor `c`: `y` has the same constructor, and equal fields
+(through `y`'s projections for a structure). -/
 def Derive.beqMethod (v : IndView) (c : CtorView) : Syntax :=
   let y := Syntax.mkIdent "y✝";
   let yv := Syntax.mkVar "y✝";
@@ -256,6 +331,7 @@ def Derive.beqMethod (v : IndView) (c : CtorView) : Syntax :=
     | .cons _ .nil => `(term| fun $y => match $yv with | $pat => $same)
     | _ => `(term| fun $y => match $yv with | $pat => $same | _ => Bool.false)
 
+/-- The deriver of `BEq`, by `Derive.elim` with `Derive.beqMethod`. -/
 def deriveBEq : Deriver := fun n => do
   v ← Derive.lookup "BEq" n;
   Derive.noIndices "BEq" v;

@@ -1,26 +1,32 @@
 import Sat
--- `sat_decide` (stage 28b): decide a Boolean goal with a SAT solver, **without trusting
--- it**. `import SatTactic`.
---
---     def demorgan (a b : Bool) : Bool.not (Bool.and a b) = Bool.or (Bool.not a) (Bool.not b) := by sat_decide
---
--- The goal (after introducing its `∀`s) is `e = .true` or `e₁ = e₂` at `Bool`, where `e`
--- is built from `Bool.and/or/not/xor` and `.true/.false`; every other Bool subterm is an
--- atom (a variable of the formula). The tactic
--- 1. reflects `e` as a formula `f : Sat.BForm` and the atoms as `σ := Sat.envOf [t₀, …]`;
--- 2. builds a circuit (one node per distinct subformula) and its CNF, with the output
---    negated (`Sat.fullCnf`);
--- 3. asks the SAT solver (CaDiCaL, `--sat-solver`) for an LRAT refutation
---    (`TacticM.satSolve`; a model is shown as a counterexample);
--- 4. closes the goal with `Sat.decide_sound f nodes out proof Sat.trivial σ`. The kernel
---    checks `Sat.trivial : IsTrue (Sat.checkAll f nodes out proof)` by running the checker
---    and `BForm.eval σ f = .true` against the goal by conversion.
--- Neither the solver, nor this tactic, nor the host's DIMACS/LRAT plumbing is trusted.
--- The kernel runs the checker (slow for big proofs; kernel evaluation, wiz-notes/smt.md).
+/-!
+# SatTactic
 
--- ## Reflection: Bool expressions as formulas, with their atoms
+`sat_decide` (stage 28b): decide a Boolean goal with a SAT solver, **without trusting
+it**. `import SatTactic`.
 
--- the index of `e` among the atoms (added at the end if it is new)
+    def demorgan (a b : Bool) : Bool.not (Bool.and a b) = Bool.or (Bool.not a) (Bool.not b) := by sat_decide
+
+The goal (after introducing its `∀`s) is `e = .true` or `e₁ = e₂` at `Bool`, where `e`
+is built from `Bool.and/or/not/xor`, `Sat.boolEq` and `.true`/`.false`; every other Bool
+subterm is an atom (a variable of the formula), and an application of a definition that
+unfolds to one of those is unfolded at its head. The tactic
+1. reflects `e` into a dag of `Sat.Gate`s, one node per distinct subterm (28c: the
+   subterms are shared, so a big formula is checked once per node), with the atoms as
+   `σ := Sat.envOf [t₀, …]`;
+2. builds the dag's CNF, with the output negated (`Sat.dagFull`);
+3. asks the SAT solver (CaDiCaL, `--sat-solver`) for an LRAT refutation
+   (`TacticM.satSolve`; a model is shown as a counterexample, its inputs printed);
+4. closes the goal with `Sat.dag_sound` (or `Sat.dag_eq` for an equation): it defines
+   `σ` and the node list, passes `Sat.trivial : IsTrue (Sat.checkAll …)` and a proof that
+   every gate holds (`SatT.holdsE`: `refl` at each node's own subterm, or a lemma, as in
+   lib/BitBlast.wiz, 28d), and the kernel checks both by conversion.
+Neither the solver, nor this tactic, nor the host's DIMACS/LRAT plumbing is trusted.
+The kernel runs the checker (slow for big proofs; kernel evaluation, wiz-notes/smt.md).
+-/
+
+
+/-- the index of `e` among the atoms (added at the end if it is new) -/
 def SatT.atomIndex (e : Expr) : List Expr → Nat → Nat × List Expr
   | .nil, i => (i, .cons e .nil)
   | .cons a as, i => match Expr.beq a e with
@@ -28,19 +34,23 @@ def SatT.atomIndex (e : Expr) : List Expr → Nat → Nat × List Expr
     | .false => match SatT.atomIndex e as (Nat.succ i) with
       | (j, as') => (j, .cons a as')
 
--- `e` as a formula, given the atoms so far
+/-- `e` as a formula, given the atoms so far -/
 def SatT.atom (e : Expr) (atoms : List Expr) : Sat.BForm × List Expr :=
   match SatT.atomIndex e atoms 0 with
   | (j, atoms1) => (.var j, atoms1)
 mutual
+/-- `e` as a formula: `Bool.and`, `or`, `xor`, `not`, `Sat.boolEq` and `.true`/`.false` are
+looked into, every other Bool subterm is an atom. -/
 def SatT.reflect (e : Expr) (atoms : List Expr) : Sat.BForm × List Expr :=
   match Expr.view e with
   | .const n args => SatT.reflectConst e n args atoms
   | _ => SatT.atom e atoms
+/-- A two-argument operation applied to the reflections of `a` and `b`. -/
 def SatT.reflect2 (mk : Sat.BForm → Sat.BForm → Sat.BForm) (a b : Expr) (atoms : List Expr) : Sat.BForm × List Expr :=
   match SatT.reflect a atoms with
   | (fa, atoms1) => match SatT.reflect b atoms1 with
     | (fb, atoms2) => (mk fa fb, atoms2)
+/-- A constant application: the Boolean operations, or an atom. -/
 def SatT.reflectConst (e : Expr) (n : String) (args : List Expr) (atoms : List Expr) : Sat.BForm × List Expr :=
   match args with
   | .nil => match Expr.nameEq n "Bool.true" with
@@ -67,18 +77,20 @@ end
 
 -- ## The circuit: one node per distinct subformula
 
+/-- The node of a subformula already in the circuit, if it is there. -/
 def SatT.findNode (t : Sat.BForm) : List Sat.Node → Option Nat
   | .nil => .none
   | .cons (.mk i u _ _) ns => match Sat.BForm.beq u t with
     | .true => .some i
     | .false => SatT.findNode t ns
 
+/-- The node of `t` (added if it is new). -/
 def SatT.addNode (t : Sat.BForm) (a b : Nat) (st : List Sat.Node × Nat) : Nat × (List Sat.Node × Nat) :=
   match SatT.findNode t st.1 with
   | .some i => (i, st)
   | .none => (st.2, (.cons (.mk st.2 t a b) st.1, Nat.succ st.2))
 
--- the node of `t` (its operands' nodes first)
+/-- the node of `t` (its operands' nodes first) -/
 def SatT.intern : Sat.BForm → List Sat.Node × Nat → Nat × (List Sat.Node × Nat)
   | .var j, st => SatT.addNode (.var j) 0 0 st
   | .const c, st => SatT.addNode (.const c) 0 0 st
@@ -99,21 +111,26 @@ def SatT.intern : Sat.BForm → List Sat.Node × Nat → Nat × (List Sat.Node �
 
 -- ## Data as `Expr`s, for the proof term
 
+/-- `Bool.true` or `Bool.false`, as an `Expr`. -/
 def SatT.boolE : Bool → Expr
   | .true => .const "Bool.true"
   | .false => .const "Bool.false"
+/-- The syntax of a list of numbers (each as `f`). -/
 def SatT.listE (ty : Expr) (f : Nat → Expr) : List Nat → Expr
   | .nil => .app (.const "List.nil") ty
   | .cons x xs => Expr.mkApp (.const "List.cons") (.cons ty (.cons (f x) (.cons (SatT.listE ty f xs) .nil)))
+/-- The syntax of a list of expressions at type `ty`. -/
 def SatT.exprsE (ty : Expr) : List Expr → Expr
   | .nil => .app (.const "List.nil") ty
   | .cons x xs => Expr.mkApp (.const "List.cons") (.cons ty (.cons x (.cons (SatT.exprsE ty xs) .nil)))
--- a literal's code: `2 v` positive, `2 v + 1` negative
+/-- a literal's code: `2 v` positive, `2 v + 1` negative -/
 def SatT.litCode : Sat.Lit → Nat
   | .mk v .true => v + v
   | .mk v .false => Nat.succ (v + v)
+/-- A literal's code as an `Expr` (`2 v` positive, `2 v + 1` negative). -/
 def SatT.litE (code : Nat) : Expr :=
   Expr.mkApp (.const "Sat.Lit.mk") (.cons (.lit (Nat.div code 2)) (.cons (SatT.boolE (Nat.beq (Nat.mod code 2) 0)) .nil))
+/-- A formula as an `Expr`, for the proof term. -/
 def SatT.formE : Sat.BForm → Expr
   | .var j => Expr.mkApp (.const "Sat.BForm.var") (.cons (.lit j) .nil)
   | .const c => Expr.mkApp (.const "Sat.BForm.const") (.cons (SatT.boolE c) .nil)
@@ -122,11 +139,13 @@ def SatT.formE : Sat.BForm → Expr
   | .or a b => Expr.mkApp (.const "Sat.BForm.or") (.cons (SatT.formE a) (.cons (SatT.formE b) .nil))
   | .xor a b => Expr.mkApp (.const "Sat.BForm.xor") (.cons (SatT.formE a) (.cons (SatT.formE b) .nil))
   | .iff a b => Expr.mkApp (.const "Sat.BForm.iff") (.cons (SatT.formE a) (.cons (SatT.formE b) .nil))
+/-- A circuit as an `Expr`, for the proof term. -/
 def SatT.nodesE : List Sat.Node → Expr
   | .nil => .app (.const "List.nil") (.const "Sat.Node")
   | .cons (.mk i t a b) ns => Expr.mkApp (.const "List.cons") (.cons (.const "Sat.Node")
       (.cons (Expr.mkApp (.const "Sat.Node.mk") (.cons (.lit i) (.cons (SatT.formE t) (.cons (.lit a) (.cons (.lit b) .nil)))))
       (.cons (SatT.nodesE ns) .nil)))
+/-- An LRAT proof as an `Expr` (the steps of `Sat.Step.add`), for the proof term. -/
 def SatT.stepsE : List (Nat × List Nat × List Nat) → Expr
   | .nil => .app (.const "List.nil") (.const "Sat.Step")
   | .cons s ss => Expr.mkApp (.const "List.cons") (.cons (.const "Sat.Step")
@@ -135,29 +154,34 @@ def SatT.stepsE : List (Nat × List Nat × List Nat) → Expr
         (.cons (SatT.listE (.const "Nat") (fun n => .lit n) s.2.2) .nil))))
       (.cons (SatT.stepsE ss) .nil)))
 
+/-- A clause's literals as codes (`SatT.litCode`). -/
 def SatT.clauseCodes : List Sat.Lit → List Nat
   | .nil => .nil
   | .cons l ls => .cons (SatT.litCode l) (SatT.clauseCodes ls)
+/-- A CNF as number lists (what the solver is given). -/
 def SatT.cnfCodes : List (List Sat.Lit) → List (List Nat)
   | .nil => .nil
   | .cons c cs => .cons (SatT.clauseCodes c) (SatT.cnfCodes cs)
 
 -- ## Counterexamples
 
--- the node of atom `j`
+/-- the node of atom `j` -/
 def SatT.atomNode (j : Nat) : List Sat.Node → Option Nat
   | .nil => .none
   | .cons (.mk i (.var k) _ _) ns => match Nat.beq j k with
     | .true => .some i
     | .false => SatT.atomNode j ns
   | .cons _ ns => SatT.atomNode j ns
+/-- Whether a number occurs in a list. -/
 def SatT.memNat (n : Nat) : List Nat → Bool
   | .nil => .false
   | .cons m ms => Bool.or (Nat.beq n m) (SatT.memNat n ms)
+/-- An atom's value in the solver's model, as text (`true` or `false`). -/
 def SatT.atomValue (j : Nat) (nodes : List Sat.Node) (model : List Nat) : String :=
   match SatT.atomNode j nodes with
   | .some i => (match SatT.memNat (i + i) model with | .true => "true" | .false => "false")
   | .none => "false"
+/-- The counterexample: each atom and its value, as text. -/
 def SatT.showModel (g : Nat) (nodes : List Sat.Node) (model : List Nat) : List Expr → Nat → TacticM String
   | .nil, _ => TacticM.pure ""
   | .cons a as, j => do
@@ -167,6 +191,7 @@ def SatT.showModel (g : Nat) (nodes : List Sat.Node) (model : List Nat) : List E
 
 -- ## The tactic
 
+/-- Introduce the goal's `∀`s (up to `fuel`), and return the goal left. -/
 def SatT.introAll : Nat → Nat → TacticM Nat
   | .zero, g => TacticM.pure g
   | .succ fuel, g => do
@@ -177,15 +202,19 @@ def SatT.introAll : Nat → Nat → TacticM Nat
       SatT.introAll fuel r.2
     | _ => TacticM.pure g
 
--- the proof of `f`'s goal, given the circuit and the refutation
+/-- the proof of `f`'s goal, given the circuit and the refutation -/
 def SatT.proofOne (f : Sat.BForm) (σ : Expr) (nodes : List Sat.Node) (out : Nat) (proof : List (Nat × List Nat × List Nat)) : Expr :=
   Expr.mkApp (.const "Sat.decide_sound") (.cons (SatT.formE f) (.cons (SatT.nodesE nodes) (.cons (.lit out)
     (.cons (SatT.stepsE proof) (.cons (.const "Sat.trivial") (.cons σ .nil))))))
+/-- The proof of `a = b`'s goal (as `iff`), given the circuit and the refutation. -/
 def SatT.proofEq (a b : Sat.BForm) (σ : Expr) (nodes : List Sat.Node) (out : Nat) (proof : List (Nat × List Nat × List Nat)) : Expr :=
   Expr.mkApp (.const "Sat.decide_eq") (.cons (SatT.formE a) (.cons (SatT.formE b) (.cons (SatT.nodesE nodes) (.cons (.lit out)
     (.cons (SatT.stepsE proof) (.cons (.const "Sat.trivial") (.cons σ .nil)))))))
+/-- The atoms as the assignment `Sat.envOf [a₀, …]`. -/
 def SatT.env (atoms : List Expr) : Expr := Expr.app (.const "Sat.envOf") (SatT.exprsE (.const "Bool") atoms)
 
+/-- Ask the solver about the CNF with the negated output: an unsat answer closes the goal
+with `close`, a model is shown as a counterexample. -/
 def SatT.solve (g : Nat) (atoms : List Expr) (nodes : List Sat.Node) (out : Nat) (nvars : Nat)
     (close : List Sat.Node → Nat → List (Nat × List Nat × List Nat) → Expr) : TacticM Unit := do
   ans ← TacticM.satSolve nvars (SatT.cnfCodes (Sat.fullCnf nodes out));
@@ -196,16 +225,18 @@ def SatT.solve (g : Nat) (atoms : List Expr) (nodes : List Sat.Node) (out : Nat)
     TacticM.fail (String.append "sat_decide: the goal is false; a counterexample:" m)
   | .unsat proof => TacticM.assign g (close nodes out proof)
 
+/-- Decide `f`: build its circuit and CNF, then `SatT.solve`. -/
 def SatT.decide (g : Nat) (f : Sat.BForm) (atoms : List Expr)
     (close : List Sat.Node → Nat → List (Nat × List Nat × List Nat) → Expr) : TacticM Unit :=
   match SatT.intern f (.nil, 0) with
   | (out, st) => SatT.solve g atoms st.1 out st.2 close
 
+/-- Whether `e` is the constant `n` applied to nothing. -/
 def SatT.isConst (n : String) (e : Expr) : Bool := match Expr.view e with
   | .const m .nil => Expr.nameEq m n
   | _ => .false
 
--- `lhs = rhs` at `Bool`
+/-- `lhs = rhs` at `Bool`: decide `lhs` (or `lhs ↔ rhs` when `rhs` is not `Bool.true`). -/
 def SatT.decideEq (g : Nat) (lhs rhs : Expr) : TacticM Unit :=
   match SatT.reflect lhs .nil with
   | (fa, atoms1) => match SatT.isConst "Bool.true" rhs with
@@ -213,8 +244,269 @@ def SatT.decideEq (g : Nat) (lhs rhs : Expr) : TacticM Unit :=
     | .false => match SatT.reflect rhs atoms1 with
       | (fb, atoms2) => SatT.decide g (.iff fa fb) atoms2 (SatT.proofEq fa fb (SatT.env atoms2))
 
-syntax (name := satDecide) "sat_decide" : tactic
-def Tactic.satDecide : Tactic := fun _ => do
+-- ## Reflection with sharing (28c)
+--
+-- The goal's Bool subterms become nodes, each once (`Expr.beq`); a node's value `σ v` is
+-- its subterm, so the kernel checks each gate `σ v = op (σ a) (σ b)` by conversion. An
+-- application of a definition (`maj a b c`) is unfolded at its head only, with its
+-- arguments kept as they are (they are nodes already): the definition is instantiated at
+-- variables, unfolded, and the arguments put back.
+
+/-- The state of the reflection: the memo (subterm ↦ node), the nodes (newest first), the
+subterms (in the same order), the next node number, and each node's proof of its gate
+(when it is not `refl`). -/
+inductive SatT.St where
+  | mk (memo : List (Expr × Nat)) (nodes : List Sat.GNode) (vals : List Expr) (next : Nat)
+       -- (28d) each node's proof that its gate holds, when it is not `refl` (a lemma)
+       (pfs : List (Option Expr))
+
+/-- The node number `e` got, if it is already in the memo. -/
+def SatT.memoFind (e : Expr) : List (Expr × Nat) → Option Nat
+  | .nil => .none
+  | .cons p ps => match Expr.beq p.1 e with
+    | .true => .some p.2
+    | .false => SatT.memoFind e ps
+
+/-- The node number of `e` in this state, if it is there. -/
+def SatT.St.find (e : Expr) : SatT.St → Option Nat
+  | .mk memo _ _ _ _ => SatT.memoFind e memo
+/-- Record that `e` is node `i` (an application unfolded at its head). -/
+def SatT.St.remember (e : Expr) (i : Nat) : SatT.St → SatT.St
+  | .mk memo nodes vals next pfs => .mk (.cons (e, i) memo) nodes vals next pfs
+-- a new node `gate` whose value is `e`
+/-- A new node `gate` whose value is `e`: its number and the new state. -/
+def SatT.St.add (e : Expr) (gate : Sat.Gate) : SatT.St → Nat × SatT.St
+  | .mk memo nodes vals next pfs => (next, .mk (.cons (e, next) memo) (.cons (.mk next gate) nodes) (.cons e vals) (Nat.succ next) (.cons .none pfs))
+-- … with `pf` as the proof of its gate (28d: a bit of a word operation, by a lemma)
+/-- A new node `gate` whose value is `e`, with `pf` as the proof of its gate (a lemma, not
+`refl`). -/
+def SatT.St.addP (e : Expr) (gate : Sat.Gate) (pf : Expr) : SatT.St → Nat × SatT.St
+  | .mk memo nodes vals next pfs => (next, .mk (.cons (e, next) memo) (.cons (.mk next gate) nodes) (.cons e vals) (Nat.succ next) (.cons (.some pf) pfs))
+/-- The empty state: no nodes. -/
+def SatT.St.empty : SatT.St := .mk .nil .nil .nil 0 .nil
+
+-- `f` applied to variables `k-1 … 0`, under `k` binders
+/-- The variables `k-1 … 0`, for a term under `k` binders. -/
+def SatT.varsFrom : Nat → List Expr
+  | .zero => .nil
+  | .succ k => .cons (.var k) (SatT.varsFrom k)
+/-- `k` lambdas around `e`. -/
+def SatT.lams : Nat → Expr → Expr
+  | .zero, e => e
+  | .succ k, e => .lam "x" (SatT.lams k e)
+-- put the arguments back for the binders, outermost first
+/-- Instantiate the binders of `e` with the arguments, outermost first; `none` if `e` is
+not a lambda. -/
+def SatT.instAll (g : Nat) : Expr → List Expr → TacticM (Option Expr)
+  | e, .nil => TacticM.pure (.some e)
+  | e, .cons a as => match e with
+    | .lam _ body => do
+      e' ← TacticM.instantiate g body a;
+      SatT.instAll g e' as
+    | _ => TacticM.pure .none
+
+/-- Whether `m` is a Boolean connective (or `Bool.true`/`Bool.false`): what a node's gate
+can be. -/
+def SatT.isConnective (m : String) : Bool :=
+  Bool.or (Bool.or (Expr.nameEq m "Bool.and") (Expr.nameEq m "Bool.or"))
+    (Bool.or (Bool.or (Expr.nameEq m "Bool.not") (Expr.nameEq m "Bool.xor"))
+      (Bool.or (Expr.nameEq m "Sat.boolEq") (Bool.or (Expr.nameEq m "Bool.true") (Expr.nameEq m "Bool.false"))))
+
+-- `n args` unfolded at its head, if that gives a Bool connective
+/-- `n args` unfolded at its head, if that gives a Boolean connective: the unfolded term
+(with the arguments put back), else `none`. -/
+def SatT.unfoldHead (g : Nat) (n : String) (args : List Expr) : TacticM (Option Expr) := do
+  d ← TacticM.isDefinition n;
+  match d with
+  | .some .true => do
+    let k := List.length args;
+    let pat := SatT.lams k (Expr.mkApp (.const n) (SatT.varsFrom k));
+    u ← TacticM.unfold g n pat;
+    match Expr.beq u pat with
+    | .true => TacticM.pure .none
+    | .false => do
+      r ← SatT.instAll g u args;
+      match r with
+      | .some e' => match Expr.view e' with
+        | .const m _ => TacticM.pure (match SatT.isConnective m with | .true => .some e' | .false => .none)
+        | _ => TacticM.pure .none
+      | .none => TacticM.pure .none
+  | _ => TacticM.pure .none
+
+mutual
+-- the node of `e` (fuel: how many definitions may still be unfolded on this path)
+/-- The node of `e` (added if it is new): its number and the new state. -/
+def SatT.node (g : Nat) (fuel : Nat) (e : Expr) (st : SatT.St) : TacticM (Nat × SatT.St) :=
+  match SatT.St.find e st with
+  | .some i => TacticM.pure (i, st)
+  | .none => match Expr.view e with
+    | .const n args => SatT.nodeConst g fuel e n args st
+    | _ => TacticM.pure (SatT.St.add e .inp st)
+/-- A two-operand node of `e`, with its operands' nodes first. -/
+def SatT.node2 (g : Nat) (fuel : Nat) (e : Expr) (mk : Nat → Nat → Sat.Gate) (a b : Expr) (st : SatT.St) : TacticM (Nat × SatT.St) := do
+  ra ← SatT.node g fuel a st;
+  rb ← SatT.node g fuel b ra.2;
+  TacticM.pure (SatT.St.add e (mk ra.1 rb.1) rb.2)
+/-- A node of the constant application `n args`: the Boolean operations and `true`/`false`
+directly, other applications through `SatT.nodeDef`. -/
+def SatT.nodeConst (g : Nat) (fuel : Nat) (e : Expr) (n : String) (args : List Expr) (st : SatT.St) : TacticM (Nat × SatT.St) :=
+  match args with
+  | .nil => match Expr.nameEq n "Bool.true" with
+    | .true => TacticM.pure (SatT.St.add e (.const .true) st)
+    | .false => match Expr.nameEq n "Bool.false" with
+      | .true => TacticM.pure (SatT.St.add e (.const .false) st)
+      | .false => SatT.nodeDef g fuel e n args st
+  | .cons a .nil => match Expr.nameEq n "Bool.not" with
+    | .true => do
+      ra ← SatT.node g fuel a st;
+      TacticM.pure (SatT.St.add e (.not ra.1) ra.2)
+    | .false => SatT.nodeDef g fuel e n args st
+  | .cons a (.cons b .nil) =>
+    match Expr.nameEq n "Bool.and" with
+    | .true => SatT.node2 g fuel e Sat.Gate.and a b st
+    | .false => match Expr.nameEq n "Bool.or" with
+      | .true => SatT.node2 g fuel e Sat.Gate.or a b st
+      | .false => match Expr.nameEq n "Bool.xor" with
+        | .true => SatT.node2 g fuel e Sat.Gate.xor a b st
+        | .false => match Expr.nameEq n "Sat.boolEq" with
+          | .true => SatT.node2 g fuel e Sat.Gate.iff a b st
+          | .false => SatT.nodeDef g fuel e n args st
+  | _ => SatT.nodeDef g fuel e n args st
+-- an application of another constant: unfolded at its head if it is a definition that
+-- gives a connective; otherwise an input
+/-- A node of an application of a constant: unfolded at its head while that gives a
+connective (up to `fuel`), else an input. -/
+def SatT.nodeDef (g : Nat) (fuel : Nat) (e : Expr) (n : String) (args : List Expr) (st : SatT.St) : TacticM (Nat × SatT.St) :=
+  match fuel with
+  | .zero => TacticM.pure (SatT.St.add e .inp st)
+  | .succ fuel' => do
+    u ← SatT.unfoldHead g n args;
+    match u with
+    | .none => TacticM.pure (SatT.St.add e .inp st)
+    | .some e' => do
+      r ← SatT.node g fuel' e' st;
+      TacticM.pure (r.1, SatT.St.remember e r.1 r.2)
+end
+
+-- ## Data as `Expr`s (circuits)
+
+/-- A gate as an `Expr`, for the proof term. -/
+def SatT.gateE : Sat.Gate → Expr
+  | .inp => .const "Sat.Gate.inp"
+  | .const b => Expr.mkApp (.const "Sat.Gate.const") (.cons (SatT.boolE b) .nil)
+  | .not a => Expr.mkApp (.const "Sat.Gate.not") (.cons (.lit a) .nil)
+  | .and a b => Expr.mkApp (.const "Sat.Gate.and") (.cons (.lit a) (.cons (.lit b) .nil))
+  | .or a b => Expr.mkApp (.const "Sat.Gate.or") (.cons (.lit a) (.cons (.lit b) .nil))
+  | .xor a b => Expr.mkApp (.const "Sat.Gate.xor") (.cons (.lit a) (.cons (.lit b) .nil))
+  | .iff a b => Expr.mkApp (.const "Sat.Gate.iff") (.cons (.lit a) (.cons (.lit b) .nil))
+/-- The node list as an `Expr`, for the proof term. -/
+def SatT.gnodesE : List Sat.GNode → Expr
+  | .nil => .app (.const "List.nil") (.const "Sat.GNode")
+  | .cons (.mk v g) ns => Expr.mkApp (.const "List.cons") (.cons (.const "Sat.GNode")
+      (.cons (Expr.mkApp (.const "Sat.GNode.mk") (.cons (.lit v) (.cons (SatT.gateE g) .nil)))
+      (.cons (SatT.gnodesE ns) .nil)))
+/-- The proof that a gate holds of the node's subterm: `True.intro` for an input,
+`Sat.eqRefl` otherwise. -/
+def SatT.gateProofE : Sat.Gate → Expr → Expr
+  | .inp, _ => .const "True.intro"
+  | _, e => .app (.const "Sat.eqRefl") e
+-- the proof that every gate holds under `σ` (each by `refl` at the node's own subterm);
+-- `nodesC` is the node list (a constant), and the tail after node `i` is `List.dropN i nodesC`
+/-- The node's proof of its gate, or the default one (`SatT.gateProofE`). -/
+def SatT.pfOr (gt : Sat.Gate) (e : Expr) : Option Expr → Expr
+  | .some p => p
+  | .none => SatT.gateProofE gt e
+/-- The proof that every gate holds under `σ` (`Sat.holdsNil` for no nodes, else
+`Sat.holdsCons`). -/
+def SatT.holdsE (σ nodesC : Expr) : Nat → List Sat.GNode → List Expr → List (Option Expr) → Expr
+  | _, .nil, _, _ => .app (.const "Sat.holdsNil") σ
+  | i, .cons (.mk v gt) ns, .cons e es, .cons p ps =>
+    let tl := Expr.mkApp (.const "List.dropN") (.cons (.const "Sat.GNode") (.cons (.lit (Nat.succ i)) (.cons nodesC .nil)));
+    Expr.mkApp (.const "Sat.holdsCons") (.cons σ (.cons (.lit v) (.cons (SatT.gateE gt)
+      (.cons tl (.cons (SatT.pfOr gt e p) (.cons (SatT.holdsE σ nodesC (Nat.succ i) ns es ps) .nil))))))
+  | _, _, _, _ => .const "Sat.holdsNil"
+
+-- the nodes, newest first, with their values in the same order
+/-- The nodes, newest first. -/
+def SatT.St.nodes : SatT.St → List Sat.GNode
+  | .mk _ nodes _ _ _ => nodes
+/-- The nodes' subterms, in the same order. -/
+def SatT.St.vals : SatT.St → List Expr
+  | .mk _ _ vals _ _ => vals
+/-- The next node number. -/
+def SatT.St.next : SatT.St → Nat
+  | .mk _ _ _ next _ => next
+/-- Each node's proof of its gate, when it is not `refl`. -/
+def SatT.St.pfs : SatT.St → List (Option Expr)
+  | .mk _ _ _ _ pfs => pfs
+-- the values by node number (oldest first)
+/-- `acc` with the list's elements in front, reversed. -/
+def SatT.revE : List Expr → List Expr → List Expr
+  | .nil, acc => acc
+  | .cons x xs, acc => SatT.revE xs (.cons x acc)
+
+-- the inputs' values, for a counterexample
+/-- The inputs of a counterexample, each and its value, as text. -/
+def SatT.showInputs (g : Nat) (model : List Nat) : List Sat.GNode → List Expr → TacticM String
+  | .cons (.mk v .inp) ns, .cons e es => do
+    s ← TacticM.ppExpr g e;
+    rest ← SatT.showInputs g model ns es;
+    TacticM.pure (String.append "\n  " (String.append s (String.append " := "
+      (String.append (match SatT.memNat (v + v) model with | .true => "true" | .false => "false") rest))))
+  | .cons _ ns, .cons _ es => SatT.showInputs g model ns es
+  | _, _ => TacticM.pure ""
+
+-- decide node `out` of `st`, closing goal `g` with `close nodes proof σ holds`
+/-- The proof that the LRAT check passes: by the kernel's evaluation (`Sat.trivial`), or
+(28e, `native`) by running the checker compiled, an axiom (trusted: --trust-native)
+(`nodesC`, the node list, is a closed definition: the native axiom's statement is then
+exactly the type the proof expects, compared by its arguments, never run). -/
+def SatT.checkProof (g : Nat) (native : Bool) (nodesC : Expr) (out : Nat) (proofE : Expr) : TacticM Expr :=
+  match native with
+  | .false => TacticM.pure (.const "Sat.trivial")
+  | .true => TacticM.nativeDecide g (Expr.mkApp (.const "Sat.lratCheck")
+      (.cons (Expr.mkApp (.const "Sat.dagFull") (.cons nodesC (.cons (.lit out) .nil))) (.cons proofE .nil)))
+
+/-- `TacticM Unit`. -/
+def SatT.solveDag (g : Nat) (native : Bool) (out : Nat) (st : SatT.St) (close : Expr → Expr → Expr → Expr → Expr → Expr) : TacticM Unit := do
+  let nodes := SatT.St.nodes st;
+  ans ← TacticM.satSolve (SatT.St.next st) (SatT.cnfCodes (Sat.dagFull nodes out));
+  match ans with
+  | .error msg => TacticM.fail (String.append "sat_decide: " msg)
+  | .sat model => do
+    m ← SatT.showInputs g model nodes (SatT.St.vals st);
+    TacticM.fail (String.append "sat_decide: the goal is false; a counterexample:" m)
+  | .unsat proof => do
+    let proofE := SatT.stepsE proof;
+    -- σ and the node list, once each: definitions the proof mentions by name
+    σ ← TacticM.define g (.const "Sat.Env") (.app (.const "Sat.envOf") (SatT.exprsE (.const "Bool") (SatT.revE (SatT.St.vals st) .nil)));
+    nodesC ← TacticM.define g (.app (.const "List") (.const "Sat.GNode")) (SatT.gnodesE nodes);
+    hE ← SatT.checkProof g native nodesC out proofE;
+    -- (not checked now: the kernel checks the declaration, which is where it costs)
+    TacticM.assignLate g (close nodesC proofE hE σ (SatT.holdsE σ nodesC 0 nodes (SatT.St.vals st) (SatT.St.pfs st)))
+
+-- (from `st0`: nodes another tactic has already made, e.g. `bv_decide`'s comparisons)
+/-- Decide `lhs = rhs` from the state `st0` (whose nodes another tactic has already made,
+as `bv_decide`'s comparisons are), closing the goal with the certificate. -/
+def SatT.decideDagFrom (g : Nat) (native : Bool) (st0 : SatT.St) (lhs rhs : Expr) : TacticM Unit := match SatT.isConst "Bool.true" rhs with
+  | .true => do
+    r ← SatT.node g 1000 lhs st0;
+    SatT.solveDag g native r.1 r.2 (fun nodesE proofE hE σ holdsE =>
+      Expr.mkApp (.const "Sat.dag_sound") (.cons nodesE (.cons (.lit r.1) (.cons proofE (.cons hE
+        (.cons σ (.cons holdsE .nil)))))))
+  | .false => do
+    ra ← SatT.node g 1000 lhs st0;
+    rb ← SatT.node g 1000 rhs ra.2;
+    let iffE := Expr.mkApp (.const "Sat.boolEq") (.cons lhs (.cons rhs .nil));
+    let ro := SatT.St.add iffE (.iff ra.1 rb.1) rb.2;
+    SatT.solveDag g native ro.1 ro.2 (fun nodesE proofE hE σ holdsE =>
+      Expr.mkApp (.const "Sat.dag_eq") (.cons nodesE (.cons (.lit ro.1) (.cons proofE (.cons hE
+        (.cons σ (.cons holdsE (.cons lhs (.cons rhs (.cons (.app (.const "Sat.eqRefl") iffE) .nil))))))))))
+
+/-- Decide `lhs = rhs` from an empty state, closing the goal with the certificate. -/
+def SatT.decideDag (g : Nat) (native : Bool) (lhs rhs : Expr) : TacticM Unit := SatT.decideDagFrom g native SatT.St.empty lhs rhs
+
+def SatT.run (native : Bool) : TacticM Unit := do
   g0 ← TacticM.mainGoal;
   g ← SatT.introAll 1000 g0;
   ty ← TacticM.goalType g;
@@ -223,7 +515,17 @@ def Tactic.satDecide : Tactic := fun _ => do
   | .none => TacticM.fail "sat_decide: the goal is not an equation of booleans"
   | .some eq => match SatT.isConst "Bool" eq.1 with
     | .true => do
-      SatT.decideEq g eq.2.1 eq.2.2;
+      SatT.decideDag g native eq.2.1 eq.2.2;
       TacticM.replaceMainGoal .nil
     | .false => TacticM.fail "sat_decide: the goal is an equation, but not of booleans"
+
+syntax (name := satDecide) "sat_decide" : tactic
+/-- `sat_decide`: decide a goal at `Bool` (`e = .true` or `e₁ = e₂`) with a SAT solver,
+and close it with the kernel-checked certificate. -/
+def Tactic.satDecide : Tactic := fun _ => SatT.run .false
 attribute [tactic tactic.satDecide] Tactic.satDecide
+-- (28e) the same, with the LRAT check run compiled instead of by the kernel: an axiom
+-- `X.satK.native✝` (trusted: erasure and the interpreter, as the 27a evaluator; not the solver)
+syntax (name := satDecideNative) "sat_decide_native" : tactic
+def Tactic.satDecideNative : Tactic := fun _ => SatT.run .true
+attribute [tactic tactic.satDecideNative] Tactic.satDecideNative

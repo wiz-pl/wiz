@@ -217,6 +217,80 @@ def within {α : Type} (secs mb : Nat) (act : Unit → IO α) : IO α := do
     throw (IO.userError s!"took {ms} ms and {peak} MB (bounds: {secs} s, {mb} MB)")
   pure a
 
+/-! ### IR bodies from files (Tests/data/reuse/*.ir)
+
+Function bodies as the backend saw them, written in a prefix form, one token per item
+(`Decl`: name, number of parameters, parameters, body):
+`V x e` binding, `C x n alts…` case, `R x` return, `J j n ps… body k` join point, `M j n args…`
+jump, `D x` dup, `P x` drop, `U` unreachable; expressions `E` ◾, `L n`, `K tag n args…`,
+`Q i x` projection, `F f n args…`, `A f n args…` (pap), `X f n args…` (ap), `O op n args…`,
+`S x` reset, `Z tok tag n args…` reuse. They come from wiz-rv's core (`St.pack`,
+`coreStep`'s lambdas, …), lowered, constants hoisted and dead code removed. -/
+/-- The number of instructions of an IR body. -/
+partial def irSize : IR.Body → Nat
+  | .vdecl _ _ b | .dup _ b | .drop _ b => irSize b + 1
+  | .case _ alts => alts.foldl (fun n a => n + irSize a) 1
+  | .jdecl _ _ body k => irSize body + irSize k + 1
+  | _ => 1
+
+namespace IRText
+
+abbrev P := StateT (List String) (Except String)
+
+def tok : P String := do
+  match ← get with
+  | t :: ts => set ts; pure t
+  | [] => throw "unexpected end"
+def num : P Nat := do
+  let t ← tok
+  match t.toNat? with
+  | some n => pure n
+  | none => throw s!"expected a number, got {t}"
+def nums : P (Array Nat) := do
+  let n ← num
+  let mut xs := #[]
+  for _ in [0:n] do xs := xs.push (← num)
+  pure xs
+
+def expr : P IR.Expr := do
+  match ← tok with
+  | "E" => pure .erased
+  | "L" => return .lit (← num)
+  | "K" => let t ← num; return .ctor t (← nums)
+  | "Q" => let i ← num; return .proj i (← num)
+  | "F" => let f ← tok; return .fap f (← nums)
+  | "A" => let f ← tok; return .pap f (← nums)
+  | "X" => let f ← num; return .ap f (← nums)
+  | "O" => let f ← tok; return .prim f (← nums)
+  | "S" => return .reset (← num)
+  | "Z" => let t ← num; let g ← num; return .reuse t g (← nums)
+  | t => throw s!"bad expression {t}"
+
+partial def body : P IR.Body := do
+  match ← tok with
+  | "V" => let x ← num; let e ← expr; return .vdecl x e (← body)
+  | "C" =>
+    let x ← num; let n ← num
+    let mut alts := #[]
+    for _ in [0:n] do alts := alts.push (← body)
+    return .case x alts
+  | "R" => return .ret (← num)
+  | "J" => let j ← num; let ps ← nums; let b ← body; return .jdecl j ps b (← body)
+  | "M" => let j ← num; return .jmp j (← nums)
+  | "D" => let x ← num; return .dup x (← body)
+  | "P" => let x ← num; return .drop x (← body)
+  | "U" => pure .unreachable
+  | t => throw s!"bad body {t}"
+
+def decl (text : String) : Except String IR.Decl := do
+  let toks := ((text.replace "\n" " ").splitOn " ").filter (· ≠ "")
+  let (d, _) ← (do
+    let name ← tok
+    let params ← nums
+    return ({ name, params, body := ← body } : IR.Decl)).run toks
+  pure d
+
+end IRText
 /-- A structure of `n` numbers and a function adding every field (`s.f0 + … + s.f(n-1)`). -/
 def wideSum (n : Nat) : String :=
   s!"structure W{n} where\n" ++ String.join ((List.range n).map (s!"  f{·} : Nat\n")) ++
@@ -437,6 +511,23 @@ def r : Nat := last (Circuit.run ram (Rep.go 50000 List.nil))
 #eval r
 "
 
+/-- hdl-temporal-uart's record-eq-eta repro (`wiz-notes/perf-repros/record-eq-eta`): a Mealy
+machine whose state is a record of 10 fields, and the one-line lemma about its next state. -/
+def recordEqEta : String :=
+  "import Prelude\ndef Trace (A : Type) : Type := Nat → A\ndef Mealy (S I O : Type) : Type := S → I → S × O\n" ++
+  "def Mealy.stateAt {S I O : Type} (m : Mealy S I O) (s0 : S) (xs : Trace I) : Nat → S\n  | .zero => s0\n" ++
+  "  | .succ t => (m (Mealy.stateAt m s0 xs t) (xs t)).1\n" ++
+  "structure Bits8 where\n  b0 : Bool\n  b1 : Bool\n  b2 : Bool\n  b3 : Bool\n  b4 : Bool\n  b5 : Bool\n  b6 : Bool\n  b7 : Bool\n" ++
+  "def Bits8.zero : Bits8 := Bits8.mk .false .false .false .false .false .false .false .false\n" ++
+  "def S : Type := Nat × (Nat × Bits8)\n" ++
+  "def spec (s : S) (x : Bool × Bits8) : S × Bool :=\n  (match Nat.beq s.1 0 with\n    | .true => (match x.1 with\n" ++
+  "      | .true => (10, (0, x.2))\n      | .false => (match Nat.beq s.2.1 3 with\n        | .true => (0, (0, s.2.2))\n" ++
+  "        | .false => (0, (Nat.succ s.2.1, s.2.2))))\n    | .false => (match Nat.beq s.2.1 3 with\n" ++
+  "      | .true => (Nat.sub s.1 1, (0, s.2.2))\n      | .false => (s.1, (Nat.succ s.2.1, s.2.2))),\n   s.2.2.b0)\n" ++
+  "def s0 : S := (0, (0, Bits8.zero))\n" ++
+  "def tSlow (xs : Trace (Bool × Bits8)) (t : Nat) :\n" ++
+  "    Mealy.stateAt spec s0 xs (Nat.succ t) = (spec (Mealy.stateAt spec s0 xs t) (xs t)).1 := rfl\n"
+
 def group : Group where
   name := "scaling"
   exercise := "super-linear time and memory"
@@ -472,6 +563,16 @@ def group : Group where
     -- exponential in the number of fields. The iCEstick IR blaster's 19-field state
     -- (`#ir blasterStep` took over 5 min); here 16 leaves took 9 s, 20 leaves 115 s. The IR
     -- of all three now takes well under a second: the bound is mostly elaboration.
+    -- wiz-rv's core (Tests/data/reuse: St.pack, St.unpack, decode, two coreStep lambdas):
+    -- built with a toolchain without the fix above, `wiz build` spent 840 s per pass in
+    -- `reuseAcross` (St.pack 368 s at 822 instructions); with it, about 0.1 s in all
+    { name := "reuse across case on wiz-rv's core bodies (were minutes each without the remembered failed drops)", run := fun _ => do
+        let files := ["St.pack", "St.unpack", "decode", "coreStep.lam1464", "coreStep.lam7502"]
+        let ds ← files.mapM fun f => do
+          match IRText.decl (← IO.FS.readFile s!"Tests/data/reuse/{f}.ir") with
+          | .ok d => pure d
+          | .error e => throw (IO.userError s!"{f}: {e}")
+        let _ ← within 20 1000 fun _ => pure (ds.map (·.optimize)) },
     { name := "reuse across case along a 200-step projection chain with nothing to reuse (was exponential)", run := fun _ => do
         let d ← within 10 1000 fun _ => pure (projChain 200).optimize
         -- the chain's 200 cells are dropped, none reset (there is nothing to reuse them for)
@@ -549,11 +650,11 @@ def group : Group where
     { name := "erasure believes a Π's sort, and the kernel rejects a wrong one wherever erasure could read it", run := fun _ => do
         -- `Type → Type` marked as a proposition: erasure would take its values for proofs
         let w : Val ZeroOneMany := .qlit QuantitySyntax.explicitDefault
-        let ty : Val ZeroOneMany := .pi "x" .default w (.sort 1) (.mk [] (.sort 1)) (some 0)
+        let ty : Val ZeroOneMany := .pi "x" .default w (.sort 1) (.mk [] (.sort 1)) ⟨2, 0⟩
         check (erasable { globals := {} } ty) "the annotation is read"
         -- so no declaration may carry it: not in its type, its value, or its implementation
-        let bad : Term ZeroOneMany := .pi "x" .default (.qlit QuantitySyntax.explicitDefault) (.sort 1) (.sort 1) (some 0)
-        let good : Term ZeroOneMany := .pi "x" .default (.qlit QuantitySyntax.explicitDefault) (.sort 1) (.sort 1) none
+        let bad : Term ZeroOneMany := .pi "x" .default (.qlit QuantitySyntax.explicitDefault) (.sort 1) (.sort 1) ⟨2, 0⟩
+        let good : Term ZeroOneMany := .pi "x" .default (.qlit QuantitySyntax.explicitDefault) (.sort 1) (.sort 1) ⟨2, 2⟩
         let d (type value : Term ZeroOneMany) (impl : Option (Term ZeroOneMany)) : Decl ZeroOneMany :=
           { name := "T", type, value := some value, impl }
         check ((addDecl {} (d (.sort 2) good none)) matches .ok _) "the unmarked type was rejected"
@@ -561,7 +662,7 @@ def group : Group where
         check ((addDecl {} (d (.sort 2) bad none)) matches .error _) "a wrong sort was accepted in a value"
         check ((addDecl {} (d (.sort 2) good (some bad))) matches .error _)
           "a wrong sort was accepted in an implementation (erasure would believe it)"
-        let idT (t : Term ZeroOneMany) : Term ZeroOneMany := .pi "f" .default (.qlit QuantitySyntax.explicitDefault) t (t.lift 1) none
+        let idT (t : Term ZeroOneMany) : Term ZeroOneMany := .pi "f" .default (.qlit QuantitySyntax.explicitDefault) t (t.lift 1) ⟨2, 2⟩
         check ((addDecl {} { name := "i", type := idT good, value := some (.lam "f" (.var 0)) }) matches .ok _)
           "the identity on Type → Type was rejected"
         check ((addDecl {} { name := "i", type := idT bad, value := some (.lam "f" (.var 0)) }) matches .error _)
@@ -638,13 +739,16 @@ def group : Group where
     -- that it is a proposition; the kernel still checks every sort note itself
     { name := "a wrong sort note on a Π into an equation is rejected by the kernel", run := fun _ => do
         let w : Term ZeroOneMany := .qlit QuantitySyntax.explicitDefault
-        let ty (s : Option Level) : Term ZeroOneMany := .pi "X" .default w (.sort 1) (.eqTy (.var 0) (.var 0)) s
-        let d (s : Option Level) : Decl ZeroOneMany :=
+        let ty (σ : BinderSorts) : Term ZeroOneMany := .pi "X" .default w (.sort 1) (.eqTy (.var 0) (.var 0)) σ
+        let d (σ : BinderSorts) : Decl ZeroOneMany :=
           -- (a `fun` at a proposition carries its proof marker, P2)
-          { name := "r", type := ty s, value := some (.prf .zero (.lam "X" (.reflTy (.var 0)))) }
-        check ((addDecl {} (d none)) matches .ok _) "the unmarked declaration was rejected"
-        check ((addDecl {} (d (some 0))) matches .ok _) "the right sort note was rejected"
-        check ((addDecl {} (d (some 1))) matches .error _) "a wrong sort note (Type for a proposition) was accepted" },
+          { name := "r", type := ty σ, value := some (.prf .zero (.lam "X" (.reflTy (.var 0)))) }
+        -- (mandatory sorts: a missing note is a hole, which the kernel rejects; the
+        -- domain is `Sort 1 : Sort 2`, the codomain an equation in `Sort 0`)
+        check ((addDecl {} (d .hole)) matches .error _) "a Π without its sorts was accepted"
+        check ((addDecl {} (d ⟨2, 0⟩)) matches .ok _) "the right sort note was rejected"
+        check ((addDecl {} (d ⟨1, 0⟩)) matches .error _) "a wrong sort note (the domain's sort for `Sort 1`) was accepted"
+        check ((addDecl {} (d ⟨2, 1⟩)) matches .error _) "a wrong sort note (Type for a proposition) was accepted" },
     { name := "one-pass reference counting agrees with the specification (insertRC)", run := fun _ => do
         let examples ← ["examples/std.wiz", "examples/io.wiz", "examples/effects.wiz"].mapM (fun (f : String) => IO.FS.readFile f)
         for p in examples ++ [literalProgram 300] do
@@ -660,7 +764,24 @@ def group : Group where
     -- a disabled memory write is the memory itself at values (`off` by `rfl`), so a RAM's
     -- value simulation is linear in cycles: 50000 cycles of reads after one write
     { name := "the HDL's value simulation of a memory is linear in cycles (a disabled write adds nothing)", run := fun _ =>
-        within 120 1500 fun _ => Tests.Elab.okLibs hdlMemScaleSrc ["42"] }]
+        within 120 1500 fun _ => Tests.Elab.okLibs hdlMemScaleSrc ["42"] },
+    -- (wiz-notes/wishful/conv-sigma-eta-neutral.md, hdl-temporal-uart's record-eq-eta) two
+    -- stuck values of a record type were η-split into their fields, each of which compared
+    -- the whole stuck value again (a Mealy machine with a 10-field state: 101 s before)
+    { name := "two stuck values of a record type are compared once, not field by field (record-eq-eta)", run := fun _ => do
+        let _ ← within 8 1000 fun _ => elabOk recordEqEta
+        pure () },
+    -- ... and η still decides when the neutral comparison fails: stuck values whose fields
+    -- are equal by η at `Unit`, a pair against a neutral, and an inequality
+    { name := "η at Σ and Π still applies when two neutrals differ", run := fun _ => do
+        let _ ← elabOk ("import Prelude\n" ++
+          "def u (h : Nat → Unit × Unit) (k : Unit × Unit → Type) (x : k (h 0)) : k (h 1) := x\n" ++
+          "def f (h : Nat → Nat → Unit) (k : (Nat → Unit) → Type) (x : k (h 0)) : k (h 1) := x\n" ++
+          "def p (q : Nat × Bool) (k : Nat × Bool → Type) (x : k q) : k (q.1, q.2) := x\n")
+        let loader ← Tests.Elab.preludeLoader
+        let st := runFrontend (R := ZeroOneMany)
+          "import Prelude\ndef w (h : Nat → Nat × Nat) (k : Nat × Nat → Type) (x : k (h 0)) : k (h 1) := x\n" { loader }
+        check (st.messages.any (·.severity == .error)) "two different stuck pairs were taken as equal" }]
 
 
 /-! ### A probe (`tests --probe-checker [unbox] [rc]`): where building the self-hosted checker spends
@@ -700,6 +821,25 @@ def probeChecker (opts : List String := []) : IO Unit := do
   if opts.contains "rc" then
     let bad ← rcMismatches st "main"
     say s!"reference counting: one pass and specification differ on {bad.length} declarations {bad.take 10}"
+
+/-- `tests --probe-reuse-ir FILE…`: the time of each of `Decl.optimize`'s stages on each
+body, with every parameter owned (as `inferBorrow` runs it). -/
+def probeReuseIR (files : List String) : IO UInt32 := do
+  for f in files do
+    let d ← match IRText.decl (← IO.FS.readFile f) with
+      | .ok d => pure d
+      | .error e => throw (IO.userError s!"{f}: {e}")
+    let t0 ← IO.monoMsNow
+    let b1 ← IO.lazyPure fun _ => (IR.elimDead d.body).1
+    let d2 ← IO.lazyPure fun _ => ({ d with body := b1 } : IR.Decl).insertRC {}
+    let b3 ← IO.lazyPure fun _ => IR.dropScalars d2.body
+    let t1 ← IO.monoMsNow
+    let b4 ← IO.lazyPure fun _ => IR.reuseAcross {} {} b3
+    let t2 ← IO.monoMsNow
+    let b5 ← IO.lazyPure fun _ => IR.insertReuse b4
+    let t3 ← IO.monoMsNow
+    IO.println s!"{d.name}: size {irSize d.body} → {irSize b5}; elimDead+RC {t1 - t0} ms, reuseAcross {t2 - t1} ms, insertReuse {t3 - t2} ms"
+  pure 0
 
 /-- A probe (`tests --probe-reuse`): `reuseAcross` agrees with its specification on the IR
 of every definition of each `lib/` module, and of the self-hosted checker and compiler. -/

@@ -7,15 +7,14 @@ import FeralCore
 def bad : Result (Vec U64) :=
   let v := (Vec.new : Vec U64);
   match Uniq.borrow Region.static v (fun ρ1 h1 v r1 =>      -- let r1 := &mut v
-    match Uniq.borrow ρ1 v (fun ρ2 h2 v r2 =>               -- let r2 := &mut v
+    match Uniq.borrowIn ρ1 v r1 (fun ρ2 h2 v r1 r2 =>       -- let r2 := &mut v
       match Vec.push r1 (U64.lit 1) with                     -- r1.push 1
-      | .ok q =>
-        let (u, r1) := q;
+      | .ok u r1 =>
         (match Vec.push r2 (U64.lit 2) with                  -- r2.push 2
-        | .ok q2 => let (u2, r2) := q2; .ok (r1, r2)
-        | .err e => .err e)
-      | .err e => .err e) with
-    | .ok q => let (r1, v) := q; .ok ((), r1)
-    | .err e => .err e) with
+        | .ok u2 r2 => .ok () (r1, r2)
+        | .err e r2 => .err e (r1, r2))
+      | .err e r1 => .err e (r1, r2)) with
+    | .ok q r1 => let (u, v) := q; .ok () r1
+    | .err e r1 => .err e r1) with
   | .ok p => let (u, v) := p; .ok v
   | .err e => .err e

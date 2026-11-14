@@ -1,30 +1,29 @@
 import FeralCore
 -- Lowering of drafts/feral/surface/12_pick.wiz (rules: drafts/feral/LOWERING.md, L4, L22).
 -- A returned `&'b mut` that may be either argument: both `&mut` arguments move into the
--- result, a `Mut ρb U64 (Uniq ρa U64 × Uniq ρb U64)` whose backward function gives both
--- handles back. `x` is used at ρb through `Mut.weaken h` (the bound `'a : 'b`); without
--- `h` it is a type error (drafts/feral/rejected/lifetime_bound_missing_mut.wiz).
+-- result, a `Mut ρb U64 ((1 _ : Uniq ρa U64) × Uniq ρb U64)` whose backward function gives
+-- both handles back. The handle not returned rides along in the backward function
+-- (`Mut.alongside`: a linear handle can't be captured by an ordinary closure). `x` is used
+-- at ρb through `Mut.weaken h` (the bound `'a : 'b`); without `h` it is a type error
+-- (drafts/feral/rejected/lifetime_bound_missing_mut.wiz).
 
 -- fn pick {'a 'b} {'a : 'b} (c : Bool) (x : &'a mut U64) (y : &'b mut U64) : &'b mut U64
-def pick {ρa ρb : Region} (0 h : Outlives ρa ρb) (c : Bool) (x : Uniq ρa U64) (y : Uniq ρb U64) :
-    Result (Mut ρb U64 (Uniq ρa U64 × Uniq ρb U64)) :=
+def pick {ρa ρb : Region} (0 h : Outlives ρa ρb) (c : Bool) (1 x : Uniq ρa U64) (1 y : Uniq ρb U64) :
+    Borrowed (Mut ρb U64 ((1 _ : Uniq ρa U64) × Uniq ρb U64)) ((1 _ : Uniq ρa U64) × Uniq ρb U64) :=
   match c with
-  | .true => .ok (Mut.mapBack (Mut.weaken h (Mut.ofUniq x)) (fun (x : Uniq ρa U64) => (x, y)))
-  | .false => .ok (Mut.mapBack (Mut.ofUniq y) (fun (y : Uniq ρb U64) => (x, y)))
+  | .true => .ok (Mut.alongside (Mut.weaken h (Mut.ofUniq x)) y (fun (x : Uniq ρa U64) (y : Uniq ρb U64) => (x, y)))
+  | .false => .ok (Mut.alongside (Mut.ofUniq y) x (fun (y : Uniq ρb U64) (x : Uniq ρa U64) => (x, y)))
 
--- `&mut a` at ρa, then `&mut b` at ρb nested in it, which hands out `hb : Outlives ρa ρb`:
--- the evidence `pick` needs. The returned borrow's last use (`Mut.finish`) gives both
--- handles back, and each scope then hands its own back.
 def main (c : Bool) : Result (U64 × U64) :=
   let a := U64.lit 1;
   let b := U64.lit 2;
   match Uniq.borrow Region.static a (fun ρa ha a ra =>       -- &mut a
-    match Uniq.borrow ρa b (fun ρb hb b rb =>                -- &mut b
+    match Uniq.borrowIn ρa b ra (fun ρb hb b ra rb =>        -- &mut b
       match pick hb c ra rb with                             -- pick {ρa ρb} hb c ra rb
-      | .ok m => .ok (Mut.finish (Mut.set m (U64.lit 10)))   -- *… := 10; the borrows end
-      | .err e => .err e) with
-    | .ok q => let (ra, b) := q; .ok (b, ra)
-    | .err e => .err e) with
+      | .ok m => .ok () (Mut.finish (Mut.set m (U64.lit 10)))  -- *… := 10; the borrows end
+      | .err e rab => .err e rab) with
+    | .ok q ra => let (u, b) := q; .ok b ra
+    | .err e ra => .err e ra) with
   | .ok p => let (b, a) := p; .ok (a, b)
   | .err e => .err e
 

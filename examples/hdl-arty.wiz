@@ -1,0 +1,63 @@
+-- The Xilinx 7-series side of the HDL library, checked by the `hdl` test group: pin
+-- constraints (XDC) for the Digilent Arty A7 (lib/Hdl/Arty.wiz, lib/Hdl/Xdc.wiz), and
+-- Verilog that yosys's synth_xilinx maps to block RAM (RAMB18E1, RAMB36E1) and to a
+-- DSP slice (DSP48E1): a RAM of 1024 and one of 2048 16-bit words, both with a
+-- registered read, a 1024-byte ROM (which asks for block RAM, `rom_style`), and a
+-- registered 16 x 16 multiply.
+import Hdl.Arty
+
+def Bit : HwTy := HwTy.bits 1
+def B4 : HwTy := HwTy.bits 4
+def B16 : HwTy := HwTy.bits 16
+
+-- pin constraints: a counter on the LEDs, added to by the buttons, the UART looped back
+structure In (r : HwTy → Type) where
+  btn : r B4
+  uart_rx : r Bit
+  deriving Bundle
+structure Out (r : HwTy → Type) where
+  led : r B4
+  uart_tx : r Bit
+  deriving Bundle
+structure St (r : HwTy → Type) where
+  cnt : r B4
+  deriving Bundle
+def leds : Circuit In.code Out.code := Circuit.bundled St.bundle In.bundle Out.bundle (St.mk (BitVec.ofNat 4 0))
+  (fun s x => Hw.pair (St.pack (St.mk (Hw.add s.cnt x.btn))) (Out.pack (Out.mk s.cnt x.uart_rx)))
+def ledsNet : Netlist := Circuit.netlist "leds" leds
+-- a board of two LEDs and nothing else: what does not fit
+def small : XBoard := XBoard.mk "E3" 10000 "LVCMOS33" (.cons (XPin.take 2 (XPin.rename "led" (XPin.bus "ld" (.cons "H5" (.cons "J5" (.cons "T9" .nil)))))) .nil)
+
+-- RAMs: one write port, one read port whose data is registered
+structure Port (a : Nat) (r : HwTy → Type) where
+  we : r Bit
+  waddr : r (HwTy.bits a)
+  wdata : r B16
+  raddr : r (HwTy.bits a)
+  deriving Bundle
+structure RamS (a : Nat) (r : HwTy → Type) where
+  cells : r (HwTy.mem a 16)
+  q : r B16
+  deriving Bundle
+def ramStep {r : HwTy → Type} [Hw r] (a : Nat) (s : RamS a r) (p : Port a r) : r (HwTy.prod (RamS.code a) B16) :=
+  Hw.pair (RamS.pack a (RamS.mk (Hw.memWrite s.cells p.we p.waddr p.wdata) (Hw.memRead s.cells p.raddr))) s.q
+def ram (a : Nat) : Circuit (Port.code a) B16 :=
+  Circuit.mk (RamS.code a) (Bundle.toEl (RamS.bundle a) (RamS.mk (fun (x : BitVec a) => BitVec.ofNat 16 0) (BitVec.ofNat 16 0)))
+    (fun s x => ramStep a (RamS.unpack a s) (Port.unpack a x))
+
+-- a ROM of 1024 bytes that are no simple function of the address
+def table : HwTy.El (HwTy.mem 10 8) := fun (a : BitVec 10) => BitVec.ofNat 8 (Nat.mod (Nat.mul (Nat.mul a.toNat a.toNat) 2654435761) 251)
+def romC : Circuit (HwTy.bits 10) (HwTy.bits 8) := Circuit.mk (HwTy.bits 8) (BitVec.ofNat 8 0)
+  (fun s a => Hw.pair (Hw.memRead (Hw.const (HwTy.mem 10 8) table) a) s)
+
+def mulC : Circuit (HwTy.prod B16 B16) B16 := Circuit.mk B16 (BitVec.ofNat 16 0)
+  (fun s x => Hw.pair (Hw.mul (Hw.fst x) (Hw.snd x)) s)
+
+#eval Xdc.emit ledsNet Arty.board
+#eval Xdc.check ledsNet Arty.board
+#eval Xdc.check ledsNet small
+#eval Hdl.map (fun (d : Arty.Device) => (Arty.Device.part d, Arty.Device.xrayPart d)) Arty.devices
+#eval Verilog.emit (Circuit.netlist "ram18" (ram 10))
+#eval Verilog.emit (Circuit.netlist "ram36" (ram 11))
+#eval Verilog.emit (Circuit.netlist "rom" romC)
+#eval Verilog.emit (Circuit.netlist "mul" mulC)

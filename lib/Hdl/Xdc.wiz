@@ -1,0 +1,127 @@
+import Hdl.Core
+/-!
+# Hdl.Xdc
+
+Pin constraints for Xilinx 7-series FPGAs (the XDC of Vivado, read also by
+nextpnr-xilinx): a package pin and an I/O standard for every port, by the port's name
+in the netlist, and the clock's period.
+
+A board is its clock and a table of resources (`XPin`: a port name and its package
+pins, bit 0 first). A design's ports are looked up in the table by name, so the table
+can list the whole board and a design uses part of it (`Xdc.check` reports ports
+without a resource and widths that differ; unused resources are fine).
+
+Port names as `Verilog.emit` declares them: a one-bit port is `[0:0]` there, and
+nextpnr names its pin by the bare port name (`uart_tx`), wider ones by bit
+(`led[0]`), as `Pcf.emit` does for nextpnr-ice40.
+-/
+
+inductive XPin where
+  | one (port : String) (pin : String)
+  | bus (port : String) (pins : List String)
+
+def XPin.port : XPin → String
+  | .one p _ => p
+  | .bus p _ => p
+def XPin.width : XPin → Nat
+  | .one _ _ => 1
+  | .bus _ ps => List.length ps
+def XPin.find (name : String) : List XPin → Option XPin
+  | .nil => .none
+  | .cons p ps => match Hdl.strEq (XPin.port p) name with
+    | .true => .some p
+    | .false => XPin.find name ps
+
+-- A board: the clock's package pin and period (in picoseconds), the I/O standard of its
+-- pins, and its resources.
+structure XBoard where
+  clk : String
+  periodPs : Nat
+  iostd : String
+  pins : List XPin
+
+def Xdc.pad3 (k : Nat) : String := match Nat.lt k 10, Nat.lt k 100 with
+  | .true, _ => "00" <+> Hdl.show k
+  | _, .true => "0" <+> Hdl.show k
+  | _, _ => Hdl.show k
+-- picoseconds as nanoseconds with three decimals: 10000 ↦ "10.000"
+def Xdc.ns (ps : Nat) : String := Hdl.show (Nat.div ps 1000) <+> "." <+> Xdc.pad3 (Nat.mod ps 1000)
+
+-- `{led[0]}` without spaces: nextpnr-xilinx's parser takes `{ led[0] }` (Digilent's
+-- spelling) apart at the spaces and fails on the lone brace.
+def Xdc.line (iostd pin port : String) : String :=
+  "set_property -dict { PACKAGE_PIN " <+> pin <+> " IOSTANDARD " <+> iostd <+> " } [get_ports {" <+> port <+> "}]\n"
+def Xdc.busLines (iostd id : String) : Nat → List String → String
+  | _, .nil => ""
+  | k, .cons pin pins => Xdc.line iostd pin (id <+> "[" <+> Hdl.show k <+> "]") <+> Xdc.busLines iostd id (Nat.succ k) pins
+def Xdc.port (b : XBoard) (id : String) (p : NetPort) : String := match XPin.find p.name b.pins with
+  | .none => ""
+  | .some (.one _ pin) => Xdc.line b.iostd pin id
+  | .some (.bus _ ps) => Xdc.busLines b.iostd id 0 ps
+def Xdc.ports (b : XBoard) : List String → List NetPort → String
+  | .cons id ids, .cons p ps => (match Hdl.nonZero p with
+    | .true => Xdc.port b id p
+    | .false => "") <+> Xdc.ports b ids ps
+  | _, _ => ""
+
+-- The constraints of a netlist on a board: the clock (pin and period), then the ports
+-- (with the identifiers `Verilog.emit` uses). Each clock domain's net gets a
+-- `create_clock`; a second clock also gets its package pin when the board's table has
+-- one (a generated clock has none). A domain's period is its `periodPs` (`0`: unknown;
+-- the first domain falls back to the board's period).
+def Xdc.clockLine (name : String) (ps : Nat) : String :=
+  "create_clock -period " <+> Xdc.ns ps <+> " [get_ports {" <+> name <+> "}]\n"
+def Xdc.clockLinesTail : List ClockDomain → String
+  | .nil => ""
+  | .cons d ds => (match d.periodPs with
+    | 0 => ""
+    | ps => Xdc.clockLine d.name ps) <+> Xdc.clockLinesTail ds
+def Xdc.clockLines (n : Netlist) (b : XBoard) : String :=
+  match n.clocks with
+  | .nil => ""
+  | .cons d ds => Xdc.clockLine d.name (match d.periodPs with
+      | 0 => b.periodPs
+      | ps => ps) <+> Xdc.clockLinesTail ds
+def Xdc.clockPin (b : XBoard) (d : ClockDomain) : String := match XPin.find d.name b.pins with
+  | .none => ""
+  | .some (.one _ pin) => Xdc.line b.iostd pin d.name
+  | .some (.bus _ ps) => Xdc.busLines b.iostd d.name 0 ps
+def Xdc.clockPinsTail (b : XBoard) : List ClockDomain → String
+  | .nil => ""
+  | .cons d ds => Xdc.clockPin b d <+> Xdc.clockPinsTail b ds
+def Xdc.clockPins (n : Netlist) (b : XBoard) : String :=
+  match n.clocks with
+  | .nil => ""
+  | .cons _ ds => Xdc.clockPinsTail b ds
+def Xdc.emit (n : Netlist) (b : XBoard) : String :=
+  let ω vn := Verilog.portIdents n;
+  Xdc.line b.iostd b.clk "clk"
+  <+> Xdc.clockLines n b
+  <+> Xdc.clockPins n b
+  <+> Xdc.ports b vn.ins n.inputs <+> Xdc.ports b vn.outs n.outputs
+
+-- What does not fit: ports without a resource, ports whose width is not the resource's.
+def Xdc.portProblem (pins : List XPin) (p : NetPort) : List String := match Hdl.nonZero p with
+  | .false => .nil
+  | .true => match XPin.find p.name pins with
+    | .none => .cons ("no pin for port " <+> p.name) .nil
+    | .some x => match Nat.beq p.width (XPin.width x) with
+      | .true => .nil
+      | .false => .cons ("port " <+> p.name <+> " has " <+> Hdl.show p.width <+> " bits, the board's "
+          <+> p.name <+> " " <+> Hdl.show (XPin.width x)) .nil
+def Xdc.portProblems (pins : List XPin) : List NetPort → List String
+  | .nil => .nil
+  | .cons p ps => List.append (Xdc.portProblem pins p) (Xdc.portProblems pins ps)
+def Xdc.check (n : Netlist) (b : XBoard) : List String :=
+  List.append (Xdc.portProblems b.pins (List.append n.inputs n.outputs)) (Netlist.clockProblems n b.periodPs)
+
+-- Resources under other names, or part of a bus: `XPin.rename "leds" p`, and
+-- `XPin.take k p` for its first `k` bits (a one-bit result is a `one`).
+def XPin.rename (name : String) : XPin → XPin
+  | .one _ pin => .one name pin
+  | .bus _ ps => .bus name ps
+def XPin.take (k : Nat) : XPin → XPin
+  | .one p pin => .one p pin
+  | .bus p ps => match List.take k ps with
+    | .cons pin .nil => .one p pin
+    | qs => .bus p qs

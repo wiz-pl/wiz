@@ -2,8 +2,8 @@ import FeralCore
 -- REJECTED (Rust: "lifetime may not live long enough"; returning a `&'a mut` as a `&'b mut`
 -- without `'a : 'b`). check.sh expects a type error.
 -- fn pick {'a 'b} (c : Bool) (x : &'a mut U64) (y : &'b mut U64) : &'b mut U64 := if c then x else y
-def pick {ρa ρb : Region} (c : Bool) (x : Uniq ρa U64) (y : Uniq ρb U64) :
-    Result (Mut ρb U64 (Uniq ρa U64 × Uniq ρb U64)) :=
+def pick {ρa ρb : Region} (c : Bool) (1 x : Uniq ρa U64) (1 y : Uniq ρb U64) :
+    Borrowed (Mut ρb U64 ((1 _ : Uniq ρa U64) × Uniq ρb U64)) ((1 _ : Uniq ρa U64) × Uniq ρb U64) :=
   match c with
-  | .true => .ok (Mut.mapBack (Mut.ofUniq x) (fun (x : Uniq ρa U64) => (x, y)))
-  | .false => .ok (Mut.mapBack (Mut.ofUniq y) (fun (y : Uniq ρb U64) => (x, y)))
+  | .true => .ok (Mut.alongside (Mut.ofUniq x) y (fun (x : Uniq ρa U64) (y : Uniq ρb U64) => (x, y)))
+  | .false => .ok (Mut.alongside (Mut.ofUniq y) x (fun (y : Uniq ρb U64) (x : Uniq ρa U64) => (x, y)))
