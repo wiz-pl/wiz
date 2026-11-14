@@ -1,5 +1,9 @@
 # Wiz documentation
 
+The standard library's API documentation is published from `master` at
+<https://wiz-pl.github.io/wiz/> (one page per module, with interactive signatures;
+docs/building.md, "Documentation site").
+
 * [install.md](install.md): installing Wiz with tower or Nix, editor setup, a first
   grail package, troubleshooting
 * [tour.md](tour.md): a tour of the language for people who know a little functional
