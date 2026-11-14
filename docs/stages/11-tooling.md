@@ -51,7 +51,15 @@ next run rewrites it. The command loop (keys, imports, duplicate checks) is unch
 still parses every command and only takes the effects from the region, so the result is
 the same as the text path's. The artifact holds only `Effect`s, which have no closures, so
 the loader applies them to the live state (`Effect.apply`): `loader`, `trustedModule`,
-`pp.run` and the `Budget` stay live. `--region-stats` prints what came from a region.
+`pp.run` and the `Budget` stay live. `--region-stats` (a `wiz` flag) prints what came from
+a region.
+
+`grail` takes the same flag, as `--region-cache` or as the `region-cache` setting of
+`grail.wiz`/`grail.local.wiz` (`Toolchain.regionCache`). It is part of the toolchain record,
+so `grail config` shows it and `Toolchain.toFlags` passes it to every job: a job's
+in-process elaboration reads and writes regions in the same layers as its `.wizc` entries,
+and a warm `grail build --region-cache` takes the package modules' effects from `.wizr`
+instead of decoding the text.
 
 **Regions and layers together.** Regions live in the same directory layers as the text
 entries: a lookup tries the write cache first, then the read-only caches in order (so a

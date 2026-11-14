@@ -358,14 +358,13 @@ def main (args : List String) : IO UInt32 := do
   -- (26f) a release toolchain's own C compiler, GMP and GC are the defaults
   let defaults ← ({ cacheDir := some (System.FilePath.mk home / ".cache" / "wiz") } : Toolchain).withBundled
   let (tc, args) := defaults.parseFlags args
+  regionCacheOpt.set tc.regionCache
   if args.contains "--strict-privacy" then strictPrivacyOpt.set true
   let args := args.filter (· != "--strict-privacy")
   if args.contains "--pp-all" then ppAllOpt.set true
   let args := args.filter (· != "--pp-all")
   if args.contains "--unbox-structs" then unboxOpt.set true
   let args := args.filter (· != "--unbox-structs")
-  regionCacheOpt.set (args.contains "--region-cache")
-  let args := args.filter (· != "--region-cache")
   regionStatsOpt.set (args.contains "--region-stats")
   let args := args.filter (· != "--region-stats")
   lazyProofsOpt.set (!args.contains "--eager-proofs")

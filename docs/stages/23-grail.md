@@ -134,6 +134,14 @@ on it are skipped; the others still run. Each job's output is buffered and print
 graph's order, so `-j 1` and `-j 8` print the same report, and a second build still runs
 no jobs.
 
+`--region-cache` (11c) is part of the toolchain record (`Toolchain.regionCache`, or the
+`region-cache` setting of `grail.wiz`), so `grail config` shows it and every job gets it
+through `Toolchain.toFlags`. A job then serves its imported modules' cached effects from
+the `.wizr` regions in the same cache layers as the `.wizc` entries: the write cache is
+searched first, then the `--cache-ro` caches (which are never written), and a missing,
+truncated or mistagged region falls back to the text entries. Since job keys are unchanged,
+a warm region build and a text build produce the same outputs.
+
 ## 23h: git dependencies and a lock file
 
 `Package.dep NAME URL REV` depends on the package at a git URL (a path, `file://`,

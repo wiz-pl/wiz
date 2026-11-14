@@ -653,6 +653,18 @@ def build (dir : System.FilePath) (tc : Toolchain) (only : List String := []) (j
   let (s, ok, _) ← buildLog dir tc only jobs
   pure (s, ok)
 
+/-- Run `grail build app` in a package directory through this driver's grail (a child
+process, so its jobs are separate processes too). -/
+def grailBuild (dir : System.FilePath) (flags : List String) : IO IO.Process.Output := do
+  let self ← IO.appPath
+  let args := #["--grail", "-C", dir.toString] ++ flags.toArray ++ #["build", "app"]
+  IO.Process.output { cmd := self.toString, args }
+
+/-- The names in a package's `.grail/build`, sorted. -/
+def buildDirs (dir : System.FilePath) : IO (List String) := do
+  let entries ← (dir / ".grail" / "build").readDir
+  pure (entries.map (·.fileName)).toList.mergeSort
+
 /-- Every `.lean` file under a directory. -/
 partial def leanFiles (dir : System.FilePath) : IO (Array System.FilePath) := do
   let mut out := #[]
@@ -728,6 +740,26 @@ def toolchainGroup : Group where
         -- render: one line per read cache, in order, then the write cache
         check ((full.render.splitOn "cache-ro /a\ncache-ro /b\ncache /w\n").length > 1) full.render
         check ((roOnly.render.splitOn "cache-ro /a\ncache-ro /b\ncache (off)\n").length > 1) roOnly.render },
+    { name := "--region-cache is a toolchain flag and a build-file setting", run := fun _ => do
+        let parse (args : List String) := ({} : Toolchain).parseFlags args
+        let (tc, rest) := parse ["--region-cache", "check", "x.wiz"]
+        checkEq ["check", "x.wiz"] rest
+        check tc.regionCache "the flag did not set region-cache"
+        check (!({} : Toolchain).regionCache) "region-cache is on by default"
+        -- (the build-file setting: `(set "region-cache" "true")`)
+        checkEq (some "true") ((({} : Toolchain).set "region-cache" "true").map fun t => toString t.regionCache)
+        checkEq (some "false") ((({} : Toolchain).set "region-cache" "false").map fun t => toString t.regionCache)
+        -- (forwarded to every job, beside the layered cache flags)
+        let full : Toolchain := { cacheDir := some "/w", readCaches := ["/a"], regionCache := true }
+        check (full.toFlags.contains "--region-cache") "toFlags drops region-cache"
+        checkEq ["--cache-ro", "/a", "--cache", "/w", "--region-cache"]
+          ((full.toFlags).dropWhile (· != "--cache-ro") |>.take 5)
+        let (back, rest) := parse full.toFlags
+        checkEq [] rest
+        checkEq (repr full).pretty (repr back).pretty
+        -- render, for `grail config`
+        check ((full.render.splitOn "cache /w\nregion-cache true\n").length > 1) full.render
+        check ((({} : Toolchain).render.splitOn "region-cache false\n").length > 1) ({} : Toolchain).render },
     { name := "-I DIR adds a module root", run := fun _ => do
         let dir ← mkTree [("Pkg/Three.wiz", "import Prelude\ndef three : Nat := 3\n")]
         let (tc, _) := ({} : Toolchain).parseFlags ["check", "main.wiz", "-I", dir.toString]
@@ -905,6 +937,53 @@ def grailGroup : Group where
         let out ← IO.Process.output { cmd := self.toString, args := buildArgs }
         checkEq 0 out.exitCode
         check ((out.stdout.splitOn "jobs run").length > 1) s!"{out.stdout}{out.stderr}" },
+    { name := "grail build --region-cache: jobs write regions, and a warm build matches the text cache", run := fun _ => do
+        let cache ← IO.FS.createTempDir
+        -- the text-only reference, in its own package tree
+        let text ← mkTree pkgFiles
+        let o0 ← grailBuild text ["--cache", cache.toString]
+        checkEq 0 o0.exitCode
+        checkEq 0 (← regionFiles cache).size
+        -- a first region build: each package module's effects become one .wizr
+        let cold ← mkTree pkgFiles
+        let o1 ← grailBuild cold ["--cache", cache.toString, "--region-cache"]
+        checkEq 0 o1.exitCode
+        check ((← regionFiles cache).size > 0) "the region build wrote no .wizr"
+        -- a warm region build in a fresh tree: the same report and job keys as the text build
+        let warm ← mkTree pkgFiles
+        let o2 ← grailBuild warm ["--cache", cache.toString, "--region-cache"]
+        checkEq 0 o2.exitCode
+        checkEq o0.stdout o2.stdout
+        checkEq (← buildDirs text) (← buildDirs warm) },
+    { name := "grail build --region-cache: a corrupt region falls back, and a read-only layer serves regions", run := fun _ => do
+        let cache ← IO.FS.createTempDir
+        let dir ← mkTree pkgFiles
+        let o0 ← grailBuild dir ["--cache", cache.toString, "--region-cache"]
+        checkEq 0 o0.exitCode
+        let regs ← regionFiles cache
+        check (regs.size > 0) "no regions were written"
+        -- corrupt every region: the text entries answer and the region is rewritten
+        for f in regs do IO.FS.writeFile f ""
+        let dir2 ← mkTree pkgFiles
+        let o1 ← grailBuild dir2 ["--cache", cache.toString, "--region-cache"]
+        checkEq 0 o1.exitCode
+        checkEq o0.stdout o1.stdout
+        for f in ← regionFiles cache do
+          check ((← f.metadata).byteSize > 0) s!"{f} was not rewritten"
+        -- a read-only cache serves regions: the fresh write cache gets none, and `ro` is untouched
+        let ro ← IO.FS.createTempDir
+        let roPkg ← mkTree pkgFiles
+        let o2 ← grailBuild roPkg ["--cache", ro.toString, "--region-cache"]
+        checkEq 0 o2.exitCode
+        check ((← regionFiles ro).size > 0) "no region was written to the read-only source"
+        let before ← snapshot ro
+        let write ← IO.FS.createTempDir
+        let pkg ← mkTree pkgFiles
+        let o3 ← grailBuild pkg ["--cache-ro", ro.toString, "--cache", write.toString, "--region-cache"]
+        checkEq 0 o3.exitCode
+        checkEq o0.stdout o3.stdout
+        checkEq before (← snapshot ro)
+        checkEq 0 (← regionFiles write).size },
     { name := "an edit reruns the checks that depend on it", run := fun _ => do
         let dir ← mkTree pkgFiles
         let tc : Toolchain := { cacheDir := some (← IO.FS.createTempDir) }
@@ -956,11 +1035,6 @@ def diamondFiles : List (String × String) :=
    ("src/C.wiz", "import A\ndef c : Nat := a + 2\n"),
    ("src/D.wiz", "import B\nimport C\ndef d : Nat := b + c\n"),
    ("app.wiz", "import D\n#eval d\n")]
-
-/-- The names in a package's `.grail/build`, sorted. -/
-def buildDirs (dir : System.FilePath) : IO (List String) := do
-  let entries ← (dir / ".grail" / "build").readDir
-  pure (entries.map (·.fileName)).toList.mergeSort
 
 def grailJobsGroup : Group where
   name := "grail-jobs"

@@ -43,6 +43,8 @@ options: -C DIR (the package directory), --std DIR (the standard library),
   --cc X --cflags \"…\" --ldflags \"…\" --libs \"…\" --llc X --gc-cflags \"…\" --gc-ldflags \"…\" -I DIR,
   --cache DIR (the elaboration cache, default ~/.cache/wiz), --cache-ro DIR (repeatable:
   a read-only cache, searched in order after the write cache), --no-cache (both),
+  --region-cache (experimental: serve module effects from mmap'ed .wizr regions in the
+  same cache layers; the text entries remain the authority and the fallback),
   --trust-native (27a: allow `native_refl`, passed on to every check and to `wiz lsp`), --native-fuel N
 Machine settings (where GMP lives) go in an uncommitted grail.local.wiz:
   import Grail
