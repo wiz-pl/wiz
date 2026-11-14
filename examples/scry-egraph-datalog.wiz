@@ -1,0 +1,63 @@
+import Scry.Eval
+import Scry.Egraph
+-- Datalog feeding the e-graph (`scry-egraph-datalog`): a recursive Datalog program
+-- derives equality facts `eq` from two edges, and one `mergeFacts` call unions them in
+-- the e-graph; congruence then equates `f a`, `f b` and `f c`. This is the shape a
+-- lattice or tuple relation uses after its joins collect equality pairs. `main` is the
+-- digest.
+
+-- Datalog: 0 = edge, 1 = eq.
+def ops : Scry.LatOps Nat :=
+  Scry.LatOps.mk 0 (fun a b => if Nat.lt a b then b else a) Nat.beq
+def base : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 1 [Scry.Term.var 0, Scry.Term.var 1])
+    [Scry.Atom.pos 0 [Scry.Term.var 0, Scry.Term.var 1]]
+def sym : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 1 [Scry.Term.var 1, Scry.Term.var 0])
+    [Scry.Atom.pos 1 [Scry.Term.var 0, Scry.Term.var 1]]
+def trans : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 1 [Scry.Term.var 0, Scry.Term.var 2])
+    [Scry.Atom.pos 1 [Scry.Term.var 0, Scry.Term.var 1],
+     Scry.Atom.pos 1 [Scry.Term.var 1, Scry.Term.var 2]]
+def prog : Scry.Program Nat :=
+  Scry.Program.mk ops [2, 2] [] [] [base, sym, trans]
+
+def u (n : Nat) : U64 := U64.ofNat n
+
+def ed (st : Scry.State Nat) (a b : Nat) : Scry.State Nat :=
+  Scry.State.addTuple st 0 [u a, u b]
+
+def db : Scry.State Nat := ed (ed Scry.State.empty 0 1) 1 2
+
+-- ops: 0..2 = leaves a, b, c; 3 = f (unary)
+def ga : Scry.EGraph :=
+  let e := Scry.EGraph.empty;
+  let a := Scry.EGraph.add e (Scry.ENode.leaf 0);
+  let b := Scry.EGraph.add a.1 (Scry.ENode.leaf 1);
+  let c := Scry.EGraph.add b.1 (Scry.ENode.leaf 2);
+  let fa := Scry.EGraph.add c.1 (Scry.ENode.mk 3 [a.2]);
+  let fb := Scry.EGraph.add fa.1 (Scry.ENode.mk 3 [b.2]);
+  let fc := Scry.EGraph.add fb.1 (Scry.ENode.mk 3 [c.2]);
+  fc.1
+
+def classOfD (g : Scry.EGraph) (n : Scry.ENode) (d : Nat) : Nat :=
+  match Scry.EGraph.classOf g n with
+  | .none => d
+  | .some c => c
+
+def main : Nat :=
+  match Scry.eval prog db with
+  | .none => 900
+  | .some st =>
+    let rows := (Scry.Db.tupleAt st.db 1).toList;
+    let m := Scry.EGraph.mergeFacts ga rows;
+    let cfa := classOfD m.1 (Scry.ENode.mk 3 [0]) 901;
+    let cfb := classOfD m.1 (Scry.ENode.mk 3 [1]) 902;
+    let cfc := classOfD m.1 (Scry.ENode.mk 3 [2]) 903;
+    Scry.EGraph.numClasses m.1 * 1000 +
+    Scry.Db.relSize st.db 1 * 100 +
+    (if Scry.EGraph.sameClass m.1 cfa cfb then 10 else 0) +
+    (if Scry.EGraph.sameClass m.1 cfb cfc then 1 else 0) +
+    (if Scry.EGraph.canonical m.1 then 100 else 0) +
+    (if m.2 then 10 else 0) +
+    (if Nat.beq (Scry.Db.relSize st.db 1) 9 then 1000 else 0)

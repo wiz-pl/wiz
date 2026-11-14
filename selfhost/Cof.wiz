@@ -1,0 +1,498 @@
+import Prelude
+-- The shared interval/cofibration layer for the cubical fragment Cub-F1 (M1), in Wiz.
+--
+-- Cub-F1 is Cartesian and two-level: dimensions are `0`, `1` and de Bruijn *indices*
+-- (the same numbering as `Kernel.wiz`'s `Tm.var`); there is no dimension reversal, no
+-- connection and no function into the interval, so a dimension is never neutral. A
+-- cofibration is built from `r ≐ s`, `⊤`, `⊥`, `∧` and `∨`.
+--
+-- A `Cof` is in disjunctive normal form: a list of conjunctions, where `[]` is `⊥` and
+-- `[[]]` is `⊤`. A conjunction is a set of equations `x ≐ r` (written `Lit`) with `x` a
+-- variable and `r` a constant or a variable, normalised by a tiny union-find:
+--
+--   * a variable whose representative is a constant is written `x ≐ 0` / `x ≐ 1`;
+--   * two variables are written `max ≐ min`, so the orientation is canonical;
+--   * the conjunction `x ≐ 0 ∧ x ≐ 1` is `⊥`.
+--
+-- Everything is pure and total: `cofFind` carries explicit fuel (the chains it follows
+-- strictly decrease), DNF and splitting recurse structurally on lists, and no helper is
+-- `partial`. The module is deliberately self-contained (only `Prelude`): `Kernel.wiz`
+-- will concatenate it before its own definitions and call these functions from `conv`,
+-- `check` and `force`.
+--
+-- Design note: `wiz-notes/cubical-selfhost.md` (encoding, Cub-F1 mapping, kernel needs).
+
+-- ## Dimensions
+
+inductive Dim where
+  | d0
+  | d1
+  | dv (i : Nat)
+
+def dimEq : Dim → Dim → Bool
+  | .d0, .d0 => .true
+  | .d1, .d1 => .true
+  | .dv i, .dv j => Nat.beq i j
+  | _, _ => .false
+
+-- a total order: constants before variables, and `0 < 1 < var i`
+def dimLt : Dim → Dim → Bool
+  | .d0, .d0 => .false
+  | .d0, _ => .true
+  | .d1, .d0 => .false
+  | .d1, .d1 => .false
+  | .d1, .dv _ => .true
+  | .dv _, .d0 => .false
+  | .dv _, .d1 => .false
+  | .dv i, .dv j => Nat.lt i j
+
+-- ## Conjunctions and DNF
+
+-- `x ≐ r`, oriented: `x` is a variable index; `r` is a constant, or a variable whose
+-- index was smaller when the equation was inserted (see `cofAddLit`).
+inductive Lit where
+  | lit (x : Nat) (r : Dim)
+
+def Conj : Type := List Lit
+def Cof : Type := List Conj
+
+def litEq : Lit → Lit → Bool
+  | .lit x r, .lit y s => Bool.and (Nat.beq x y) (dimEq r s)
+
+def litLt : Lit → Lit → Bool
+  | .lit x r, .lit y s => match Nat.beq x y with
+    | .true => dimLt r s
+    | .false => Nat.lt x y
+
+-- structural equality of canonical conjunctions and DNFs (used by the tests)
+def conjEq : Conj → Conj → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons b bs => match litEq a b with
+    | .true => conjEq as bs
+    | .false => .false
+  | _, _ => .false
+
+def cofEq : Cof → Cof → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons b bs => match conjEq a b with
+    | .true => cofEq as bs
+    | .false => .false
+  | _, _ => .false
+
+-- A total order on canonical DNFs (lexicographic), so that `canonDnf` is deterministic
+-- and `cofEq` is set equality.
+def conjLt : Conj → Conj → Bool
+  | .nil, .nil => .false
+  | .nil, .cons _ _ => .true
+  | .cons _ _, .nil => .false
+  | .cons a as, .cons b bs => match litEq a b with
+    | .true => conjLt as bs
+    | .false => litLt a b
+
+def insertConj (c : Conj) : Cof → Cof
+  | .nil => .cons c .nil
+  | .cons d rest => match conjEq c d with
+    | .true => .cons d rest
+    | .false => match conjLt c d with
+      | .true => .cons c (.cons d rest)
+      | .false => .cons d (insertConj c rest)
+
+def sortCof : Cof → Cof
+  | .nil => .nil
+  | .cons c rest => insertConj c (sortCof rest)
+
+-- ## The little union-find over one conjunction
+
+-- `cofLookup x bs`: the representative stored for `x` (`none` if `x` is a root).
+def cofLookup (x : Nat) : Conj → Option Dim
+  | .nil => .none
+  | .cons (.lit y r) rest => match Nat.beq x y with
+    | .true => .some r
+    | .false => cofLookup x rest
+
+-- Follow the chain `x → r → …`, fuel-bounded. Each stored target is a constant or a
+-- strictly smaller variable index, so `x + 1` steps always suffice; the fuel makes the
+-- termination obvious to Wiz and to the kernel's termination checker.
+def cofFind (fuel : Nat) (x : Nat) (bs : Conj) : Dim :=
+  match fuel with
+  | 0 => .dv x
+  | .succ k => match cofLookup x bs with
+    | .none => .dv x
+    | .some r => match r with
+      | .dv j => cofFind k j bs
+      | c => c
+
+def cofResolve (bs : Conj) : Dim → Dim
+  | .dv j => cofFind (j + 1) j bs
+  | c => c
+
+-- Insert one equation, merging representatives. `none` means the conjunction became
+-- `0 ≐ 1`, that is `⊥`.
+def cofAddLit (l : Lit) (bs : Conj) : Option Conj :=
+  match l with
+  | .lit x r =>
+    let xr := cofFind (x + 1) x bs;
+    let rr := cofResolve bs r;
+    match xr with
+    | .d0 => match rr with
+      | .d0 => .some bs
+      | .d1 => .none
+      | .dv j => .some (.cons (.lit j .d0) bs)
+    | .d1 => match rr with
+      | .d0 => .none
+      | .d1 => .some bs
+      | .dv j => .some (.cons (.lit j .d1) bs)
+    | .dv i => match rr with
+      | .d0 => .some (.cons (.lit i .d0) bs)
+      | .d1 => .some (.cons (.lit i .d1) bs)
+      | .dv j => match Nat.beq i j with
+        | .true => .some bs
+        | .false => match Nat.lt i j with
+          | .true => .some (.cons (.lit j (.dv i)) bs)
+          | .false => .some (.cons (.lit i (.dv j)) bs)
+
+def cofAddLits : List Lit → Conj → Option Conj
+  | .nil, bs => .some bs
+  | .cons l rest, bs => match cofAddLit l bs with
+    | .none => .none
+    | .some bs' => cofAddLits rest bs'
+
+-- A sorted, duplicate-free list of variables.
+def insertNat (x : Nat) : List Nat → List Nat
+  | .nil => .cons x .nil
+  | .cons y ys => match Nat.beq x y with
+    | .true => .cons y ys
+    | .false => match Nat.lt x y with
+      | .true => .cons x (.cons y ys)
+      | .false => .cons y (insertNat x ys)
+
+def varsAdd : List Nat → List Nat → List Nat
+  | .nil, acc => acc
+  | .cons x xs, acc => varsAdd xs (insertNat x acc)
+
+def litVars : Lit → List Nat
+  | .lit x r => match r with
+    | .dv j => insertNat x (insertNat j .nil)
+    | _ => insertNat x .nil
+
+def conjVars : Conj → List Nat
+  | .nil => .nil
+  | .cons l rest => varsAdd (litVars l) (conjVars rest)
+
+-- The canonical conjunction: for every variable mentioned, its representative (chains
+-- collapsed); roots are dropped, so `i1 ≐ i0` has one entry and `i0 ≐ 0` keeps its
+-- constant. Constants appear only on the right of a variable.
+def conjRepsGo : List Nat → Conj → Conj
+  | .nil, _ => .nil
+  | .cons x xs, bs =>
+    let r := cofFind (x + 1) x bs;
+    match r with
+    | .dv j => match Nat.beq x j with
+      | .true => conjRepsGo xs bs
+      | .false => .cons (.lit x r) (conjRepsGo xs bs)
+    | c => .cons (.lit x c) (conjRepsGo xs bs)
+
+def conjReps (bs : Conj) : Conj := conjRepsGo (conjVars bs) bs
+
+def conjNormOpt (c : Conj) : Option Conj :=
+  match cofAddLits c .nil with
+  | .none => .none
+  | .some bs => .some (conjReps bs)
+
+-- ## DNF laws
+
+-- Does the conjunction `bs` entail every equation of `d`? Both are canonical.
+def cofLitHolds (bs : Conj) : Lit → Bool
+  | .lit x r => dimEq (cofFind (x + 1) x bs) (cofResolve bs r)
+
+def conjEntails (bs : Conj) : Conj → Bool
+  | .nil => .true
+  | .cons l rest => match cofLitHolds bs l with
+    | .true => conjEntails bs rest
+    | .false => .false
+
+-- Add a canonical disjunct to an antichain, dropping the one that the other entails.
+def addConj (d : Conj) (acc : Cof) : Cof :=
+  match acc with
+  | .nil => .cons d .nil
+  | .cons c rest => match conjEntails c d with
+    | .true => addConj d rest
+    | .false => match conjEntails d c with
+      | .true => acc
+      | .false => .cons c (addConj d rest)
+
+def addNormalized (c : Conj) (acc : Cof) : Cof :=
+  match conjNormOpt c with
+  | .none => acc
+  | .some c' => addConj c' acc
+
+def canonSet : Cof → Cof
+  | .nil => .nil
+  | .cons c rest => addNormalized c (canonSet rest)
+
+def canonDnf (φ : Cof) : Cof := sortCof (canonSet φ)
+
+def topCof : Cof := .cons .nil .nil
+def botCof : Cof := .nil
+
+-- `r ≐ s`, oriented and normalised. Equal constants are `⊤`, `0 ≐ 1` is `⊥`.
+def eqD : Dim → Dim → Cof
+  | .d0, .d0 => topCof
+  | .d1, .d1 => topCof
+  | .d0, .d1 => botCof
+  | .d1, .d0 => botCof
+  | .dv i, .dv j => match Nat.beq i j with
+    | .true => topCof
+    | .false => match Nat.lt i j with
+      | .true => .cons (.cons (.lit j (.dv i)) .nil) .nil
+      | .false => .cons (.cons (.lit i (.dv j)) .nil) .nil
+  | .dv i, .d0 => .cons (.cons (.lit i .d0) .nil) .nil
+  | .dv i, .d1 => .cons (.cons (.lit i .d1) .nil) .nil
+  | .d0, .dv j => .cons (.cons (.lit j .d0) .nil) .nil
+  | .d1, .dv j => .cons (.cons (.lit j .d1) .nil) .nil
+
+def conjAndInto (c : Conj) : Cof → Cof
+  | .nil => .nil
+  | .cons d rest => List.append (addNormalized (List.append c d) .nil) (conjAndInto c rest)
+
+def andDnf : Cof → Cof → Cof
+  | .nil, _ => .nil
+  | .cons c rest, b => List.append (conjAndInto c b) (andDnf rest b)
+
+def andCof (a b : Cof) : Cof := canonDnf (andDnf (canonDnf a) (canonDnf b))
+
+def orCof (a b : Cof) : Cof := canonDnf (List.append (canonDnf a) (canonDnf b))
+
+-- ## The cofibration context
+
+-- `dims`: assumed equations (a canonical conjunction).
+-- `pending`: disjunctions not split yet; `branches` splits them.
+-- `bot`: an assumed contradiction. Only cofibrations set it (not `Empty` hypotheses).
+inductive CofCtx where
+  | mk (dims : Conj) (pending : List Cof) (bot : Bool)
+
+def emptyCtx : CofCtx := .mk .nil .nil .false
+
+def assumeConj (c : Conj) (ctx : CofCtx) : CofCtx :=
+  match ctx with
+  | .mk dims pending b => match b with
+    | .true => ctx
+    | .false => match conjNormOpt c with
+      | .none => .mk dims pending .true
+      | .some c' => match cofAddLits c' dims with
+        | .none => .mk dims pending .true
+        | .some dims' => .mk (conjReps dims') pending .false
+
+-- Assume a cofibration. A conjunction is merged into `dims`; a proper disjunction waits
+-- in `pending`, for `branches` (the kernel splits before conversion).
+def assume (φ : Cof) (ctx : CofCtx) : CofCtx :=
+  match ctx with
+  | .mk dims pending b => match b with
+    | .true => ctx
+    | .false => match canonDnf φ with
+      | .nil => .mk dims pending .true
+      | .cons c .nil => assumeConj c ctx
+      | φ' => .mk dims (.cons φ' pending) .false
+
+def dnfEntailed (bs : Conj) : Cof → Bool
+  | .nil => .false
+  | .cons c rest => match conjEntails bs c with
+    | .true => .true
+    | .false => dnfEntailed bs rest
+
+def entailsConj (ctx : CofCtx) (φ : Cof) : Bool :=
+  match ctx with
+  | .mk dims _ b => match b with
+    | .true => .true
+    | .false => dnfEntailed dims (canonDnf φ)
+
+def keepCtx : CofCtx → List CofCtx
+  | .mk _ _ .true => .nil
+  | c => .cons c .nil
+
+def expandCtx (ctx : CofCtx) : Cof → List CofCtx
+  | .nil => .nil
+  | .cons c rest => List.append (keepCtx (assumeConj c ctx)) (expandCtx ctx rest)
+
+def workStep (d : Cof) : List CofCtx → List CofCtx
+  | .nil => .nil
+  | .cons ctx rest => List.append (expandCtx ctx d) (workStep d rest)
+
+def splitAll : List Cof → List CofCtx → List CofCtx
+  | .nil, work => work
+  | .cons d rest, work => splitAll rest (workStep d work)
+
+-- Split every pending disjunction; contradictory branches are dropped. A false context
+-- stays as the singleton `[ctx]` (callers test `bot`), so "no branches" means "the
+-- pending disjunctions are all contradictory".
+def branches (ctx : CofCtx) : List CofCtx :=
+  match ctx with
+  | .mk dims pending b => match b with
+    | .true => .cons ctx .nil
+    | .false => splitAll pending (.cons (.mk dims .nil .false) .nil)
+
+def allCtx (f : CofCtx → Bool) : List CofCtx → Bool
+  | .nil => .true
+  | .cons c rest => match f c with
+    | .true => allCtx f rest
+    | .false => .false
+
+def anyNotBot : List CofCtx → Bool
+  | .nil => .false
+  | .cons (.mk _ _ .false) _ => .true
+  | .cons _ rest => anyNotBot rest
+
+-- Complete for the Horn theory of dimension equations: split the pending disjunctions,
+-- then check one disjunct per branch (a consistent conjunction entails a disjunction
+-- only if it entails one of its disjuncts).
+def entails (ctx : CofCtx) (φ : Cof) : Bool :=
+  match ctx with
+  | .mk _ _ .true => .true
+  | _ => allCtx (fun b => entailsConj b φ) (branches ctx)
+
+-- Is `ctx ∧ φ` consistent in some branch?
+def consistent (ctx : CofCtx) (φ : Cof) : Bool :=
+  match assume φ ctx with
+  | .mk _ _ .true => .false
+  | c => anyNotBot (branches c)
+
+def refutes (ctx : CofCtx) (φ : Cof) : Bool := Bool.not (consistent ctx φ)
+
+def dimEqCtx (ctx : CofCtx) (a b : Dim) : Bool := entails ctx (eqD a b)
+
+-- Equivalence of two cofibrations in a context: each entails the other. This is the
+-- `conv` rule at `𝔽` (the cofibrations are propositions, so logical equivalence is the
+-- right notion; no proof terms are compared).
+def cofEquiv (ctx : CofCtx) (a b : Cof) : Bool :=
+  Bool.and (entails (assume a ctx) b) (entails (assume b ctx) a)
+
+-- ## Substitution of a dimension
+
+-- Replace variable `i` by `r`. Contexts are not shortened (the binder remains, unused),
+-- so no index shifting is needed; callers that remove a binder pass the adjusted index.
+def substDim (i : Nat) (r : Dim) : Dim → Dim
+  | .dv j => match Nat.beq i j with
+    | .true => r
+    | .false => .dv j
+  | c => c
+
+def litKey : Lit → Nat
+  | .lit x _ => x
+
+def litVal : Lit → Dim
+  | .lit _ r => r
+
+def substConj (i : Nat) (r : Dim) : Conj → Cof
+  | .nil => topCof
+  | .cons l rest =>
+    andCof (eqD (substDim i r (.dv (litKey l))) (substDim i r (litVal l))) (substConj i r rest)
+
+def substCof (i : Nat) (r : Dim) : Cof → Cof
+  | .nil => .nil
+  | .cons c rest => orCof (substConj i r c) (substCof i r rest)
+
+def substPendings (i : Nat) (r : Dim) : List Cof → List Cof
+  | .nil => .nil
+  | .cons c rest => .cons (substCof i r c) (substPendings i r rest)
+
+def substCtx (i : Nat) (r : Dim) (ctx : CofCtx) : CofCtx :=
+  match ctx with
+  | .mk dims pending b =>
+    match assume (substConj i r dims) (.mk .nil .nil b) with
+    | .mk dims' pending' b' =>
+      .mk dims' (List.append (substPendings i r pending) pending') b'
+
+-- ## Boundary faces, `Ext` and `Path`
+
+-- Does a cofibration mention only variables below `n`? Under `n` binders, the bound
+-- dimensions are exactly the indices `0 … n-1`; this is the fibrancy side condition of
+-- `Ext n A φ a` (and the reason `Path 𝕀 0 1` will be rejected at the term level).
+def dimWithin (n : Nat) : Dim → Bool
+  | .dv j => Nat.lt j n
+  | _ => .true
+
+def litWithin (n : Nat) (l : Lit) : Bool :=
+  Bool.and (Nat.lt (litKey l) n) (dimWithin n (litVal l))
+
+def conjWithin (n : Nat) : Conj → Bool
+  | .nil => .true
+  | .cons l rest => match litWithin n l with
+    | .true => conjWithin n rest
+    | .false => .false
+
+def cofWithin (n : Nat) : Cof → Bool
+  | .nil => .true
+  | .cons c rest => match conjWithin n c with
+    | .true => cofWithin n rest
+    | .false => .false
+
+-- The boundary of `n` bound dimensions: `∂ = ⋁_{k<n} (i_k ≐ 0 ∨ i_k ≐ 1)`.
+def extBoundaryFrom : Nat → Nat → Cof
+  | 0, _ => .nil
+  | .succ m, k =>
+    orCof (orCof (eqD (.dv k) .d0) (eqD (.dv k) .d1)) (extBoundaryFrom m (k + 1))
+
+def extBoundary (n : Nat) : Cof := extBoundaryFrom n 0
+
+-- One face of an extension type: `[i_k ≐ r ↦ term]` (`term` is an opaque name here;
+-- the term-level boundary check belongs to the kernel).
+inductive Face where
+  | face (k : Nat) (r : Dim) (term : String)
+
+def faceCof : Face → Cof
+  | .face k r _ => eqD (.dv k) r
+
+def facesOr : List Face → Cof
+  | .nil => .nil
+  | .cons f rest => orCof (faceCof f) (facesOr rest)
+
+-- Every point of `φ` lies on one of the listed faces (`φ ⊨ ⋁ faceCof`). The term-level
+-- condition "the branches agree on overlaps" stays in the kernel (`conv` under the
+-- overlap cofibration, which is `andCof` of two `faceCof`s).
+def faceCover (phi : Cof) (faces : List Face) : Bool :=
+  entails (assume phi emptyCtx) (facesOr faces)
+
+def faceWithin (n : Nat) : Face → Bool
+  | .face k r _ => match Nat.lt k n with
+    | .true => match r with
+      | .dv j => Nat.lt j n
+      | _ => .true
+    | .false => .false
+
+def facesWithin (n : Nat) : List Face → Bool
+  | .nil => .true
+  | .cons f rest => match faceWithin n f with
+    | .true => facesWithin n rest
+    | .false => .false
+
+-- `Ext n A φ a`: the module keeps the cofibration shape (`n`, `φ`, faces); `A` and `a`
+-- are the kernel's business.
+inductive Ext where
+  | ext (n : Nat) (phi : Cof) (faces : List Face)
+
+def extWf : Ext → Bool
+  | .ext n phi faces => Bool.and (cofWithin n phi) (facesWithin n faces)
+
+def mkExt (n : Nat) (phi : Cof) (faces : List Face) : Option Ext :=
+  match extWf (.ext n phi faces) with
+  | .true => .some (.ext n phi faces)
+  | .false => .none
+
+def extFacesCover : Ext → Bool
+  | .ext _ phi faces => faceCover phi faces
+
+-- `Path A a b` is `Ext 1 (λ_. A) ∂ [i≐0 ↦ a, i≐1 ↦ b]`: one bound dimension, the
+-- two-point boundary, and the two faces.
+def pathBoundary : Cof := extBoundary 1
+
+def pathExt (a b : String) : Option Ext :=
+  match mkExt 1 pathBoundary (.cons (.face 0 .d0 a) (.cons (.face 0 .d1 b) .nil)) with
+  | .some e => match extFacesCover e with
+    | .true => .some e
+    | .false => .none
+  | .none => .none
+
+-- The cofibration that becomes true when the bound dimension `i` is the value `r`;
+-- `underDim` decides `φ` in that restricted context (the Path endpoint rule).
+def underDim (ctx : CofCtx) (i : Nat) (r : Dim) (φ : Cof) : Bool :=
+  entails (assume (eqD (.dv i) r) ctx) φ

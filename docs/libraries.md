@@ -265,6 +265,20 @@ def Uart.onlyThat_a5 :     -- the loopback reports byte 0xa5 and nothing else, f
   with `_spec`, `checkFrom_during`, `findFrom_within`: `refl Bool.true` (the kernel
   evaluates) becomes a temporal statement. For long checks, `native_refl` (stage 27a).
 
+* **Refinement and case-analysis tools** (lib/Trace.wiz, from H14 T2):
+  `Mealy.simulatesInv`/`simulatesInvOut` (refinement for the specification's reachable
+  states: the one-step premise only from states satisfying an invariant it preserves),
+  `Mealy.follows` (a run along a known path `F`: from `F 0` at `t`, every step `k < K`
+  taken on the inputs that come, gives `stateAt (k + t) = F k`), `Mealy.seq` with
+  `seq_stateAt`/`seq_outAt` (two machines in sequence, `Circuit.seq` on traces: the second
+  runs on the first's outputs), `Nat.All P n`/`Nat.all_spec` (a table of the cases
+  `P 0 … P (n-1)` gives `∀ k < n, P k`), `Bool.all`/`Bool.forall9` (a Boolean check of all
+  2^9 inputs, `refl Bool.true`, holds at every input), `Bool.indP` (Bool elimination into
+  `Prop`), and small Nat facts (`Nat.lt_succ_split`, `Nat.lt_to_succ`, `Nat.lt_self_succ`,
+  `Nat.eq_of_beq`). Word equality from numbers is `UIntN.ext` (lib/Word.wiz): since
+  words carry their range (stage 22k), a word is not definitionally `BitVec.mk` of its
+  number, so the H14 T2 proofs call `UIntN.ext` directly.
+
 The examples: the UART transmitter's line is high whenever it is idle, at every cycle;
 the loopback delivers the byte sent within 45 cycles and reports no other, for ever
 (per byte: 48 evaluated cycles and a fixed point); a valid/ready buffer refines a
@@ -356,14 +370,10 @@ counter (the counter lemmas `Rx.incs` are already per value).
   statements are therefore the refinement theorems (`Tx.refinesOut`, `Rx.refinesOut`,
   `Loop.refinesOut`) plus the specification-level properties; the transmitter's line
   (one field) composes fine (`Tx.frame`).
-* Missing in the library (written here, candidates for lib/Trace.wiz): `Mealy.simulatesInv`
-  (refinement under an invariant of the specification), `Mealy.follows` (a run along a
-  known path), `Mealy.seq` and `Mealy.seq_stateAt`/`seq_outAt` (`Circuit.seq` on traces),
-  `Nat.All`/`Nat.all_spec` (finite case tables), `Bool.all`/`Bool.forall9` (Boolean
-  enumeration by evaluation), `Bool.indP`. Word equality from numbers is `UIntN.ext`
-  (lib/Word.wiz): a word carries its range, so the four lemmas below call `UIntN.ext`
-  directly instead of the old `BitVec.eqOfNat` helper (whose `rfl` premises no longer
-  hold).
+* Missing in the library, now in lib/Trace.wiz (see H14 T): `Mealy.simulatesInv`,
+  `Mealy.follows`, `Mealy.seq`, `Nat.All`, `Bool.forall9`, `Bool.indP`. (Word equality
+  from numbers is `UIntN.ext`, lib/Word.wiz; the old `BitVec.eqOfNat` helper is gone:
+  its `rfl` premises do not hold once a word carries its range.)
 * The temporal vocabulary had no *rigid (local) variables* (SVA's `(go, v = data) |=> …`):
   `Tx.frameTL` quantifies the byte outside the formula. `TL.during` reads its formula at
   absolute times, so "bit m/4 at offset m" is written as an explicit `∀ m < 40`.
@@ -375,7 +385,6 @@ counter (the counter lemmas `Rx.incs` are already per value).
   `Loop.firstByte`); "nothing is reported that was not sent" (needs reasoning backwards
   from a report).
 
-## H14 C1: traces, the common semantics (`lib/Trace.wiz`)
 ## H14 C1: traces, the common semantics (`lib/Trace.wiz`)
 
 One semantics for everything that runs step by step (design:
@@ -814,6 +823,24 @@ File.withOwned p "w" (fun f o => do1
 `IO` is unchanged and so is lib/Sys.wiz's ω API; only the owned variants are `IO1`.
 Acquisition stays in continuation style until linear `match` lands (linear-case stage 2).
 
+## Quantity-polymorphic results (`lib/Result.wiz`, `lib/Region.wiz`)
+
+`ResultQ q A` is `Result` with its success value at quantity `q`: `ok` carries the value at
+`%q`, `err` only the `Error` (no payload). `ResultQ ω A` and `Result A` are the same type
+definitionally (`Result.toResultQ`/`ResultQ.toResult` are the identity), and at `q = 1`
+the success value is linear. `ResultQ.bind` threads the success value to its continuation
+at `q` and can change the result quantity; `ResultQ.map` and `ResultQ.elim` stay at `q`.
+At `q = 0` the value is erased: it cannot be used by a consumer, only ignored.
+
+`ResultH q B H` is the same generalization of `Result1`: the handle `H` is on both
+branches, at `%q`, and the value `B` is unrestricted. `ResultH 1 B H` and `Result1 B H`
+are definitionally equal (`Result1.toResultH`/`ResultH.toResult1` are the identity);
+`ResultH.bind` sequences handle-threading results and `ResultH.map` maps the value,
+keeping the handle. `Result1` stays the linear resource result: `ResultQ`'s error branch
+has no value, so a handle cannot be threaded through it, and `ResultH`'s only useful
+instance is `q = 1` (at `q = ω` the handle is droppable, at `q = 0` unusable).
+Details and the `q = 0` representation caveat: `wiz-notes/result-q.md`.
+
 ## Functors and Booleans
 
 `lib/Functor.wiz` (`import Functor`): `Functor`, `Applicative`, `<$>`, `<*>`; every `Monad`
@@ -846,9 +873,14 @@ reverse once); and each call into C converts the list to a C string and back. Sp
 200000 characters, joining and trimming them takes 0.1 s compiled (the `text` tests).
 `Std.Str` is the native alternative for indexing.
 
-`lib/Json.wiz`, `lib/Deriving.wiz` and `lib/Hoare.wiz` import `Text` and use its
-`String.eq`, `String.chars`, `String.beq`, `Nat.repr`, `List.revApp` and `List.reverse`
-instead of copies of their own (two modules declaring one name are an error at import).
+`lib/Json.wiz`, `lib/Deriving.wiz`, `lib/Hoare.wiz` and `lib/Feral.wiz` import `Text` and
+use its helpers (`String.eq`, `String.chars`, `String.beq`, `Nat.repr`, `Nat.reprGo`,
+`List.revApp`, `List.reverse`, `List.map`, `List.filter`, `List.any`, `List.take`,
+`List.drop`, `List.isEmpty`, `String.lookup`, `String.elem`, `Chars.eq`,
+`Chars.isPrefix`) instead of copies of their own (two modules declaring one name are an
+error at import). Feral keeps only what Text lacks (`Fe.split`, `Fe.nth`, `Fe.memNat`);
+`Fe.split` and `Fe.wordsOf` keep a reversed accumulator and reverse it once, so they run
+in linear time.
 
 ## Numbers: classes, integers, words
 
@@ -943,3 +975,54 @@ def v (p q : Q) : (p + q) * (p + q) ≈ p * p + 2 * p * q + q * q :=
 `lib/WordArray.wiz` (`U8Array`, `U32Array`, `U64Array`), `lib/WordMap.wiz` (`U64Map V`)
 and `lib/Intern.wiz` (`InternTable`, ids as `U32`): list models with laws, run natively
 in compiled code, updated in place when unique. See `docs/stages/29-natives.md`.
+
+## Persistent data structures: maps and sets
+
+`lib/PMap.wiz` (`import PMap`): `PMap K V` and `PSet K` (a `PMap K Unit`), immutable and
+structurally shared. A map is a size-balanced (weight-balanced, Adams scheme) binary
+search tree; every update returns a new map and leaves the old one valid, copying only
+the O(log n) nodes on the path to the change (plus O(1) for a rebalancing rotation).
+`empty`, `insert`, `erase`, `find`/`findD`, `contains`, `size`, `toList`, `keys`,
+`fromList`/`ofList`, `foldl` and `height`; sets have `empty`, `insert`, `erase`,
+`contains`, `size`, `toList`, `fromList` and `foldl`. `toList` and `foldl` go in
+increasing key order, and `fromList` accepts entries in any order (a later duplicate
+wins).
+
+Keys are ordered by a `Compare` instance (`compare : K → K → Ordering`), with instances
+for `Nat` (through the native `Nat.lt`/`Nat.beq`) and `U64` (`U64.cmp`, unsigned);
+define one instance to use any other key type. `PSet` and the map
+algorithms are key-generic, unlike `U64Map`. `size` and the balance checks are O(1) (the
+subtree size is stored in each node), so `insert`, `erase`, `find` and `contains` are
+O(log n) worst case, `toList`, `keys` and `foldl` are O(n), and `fromList` is
+O(n log n) for a list in arbitrary order.
+
+Only `find_empty` and `size_empty` are proved on the definitions; `find_insert`,
+`find_erase` and `size_insert` (and the sortedness and balance invariants across
+rotations) are checked by the tests rather than proved. Examples: `examples/persistent.wiz`
+(the checks, group `persistent`) and `examples/persistent-bench.wiz`. The representation,
+complexity, persistence guarantees, benchmark plan and the migration path for replacing
+`U64Map` with a pure model plus a native backend are in
+`wiz-notes/persistent-data.md`.
+
+## Scry: Wil, the analysis IR (`lib/Scry/Wil.wiz`)
+
+`import Scry.Wil` is the small three-address IR of the `scry` analyser
+(`wiz-notes/code-analysis-design.md` §4.3): typed variables and ids, `Rhs`/`Stmt`/
+`Term`, basic blocks and functions over a CompCert-style block memory, and a concrete,
+fuel-bounded small-step semantics (`Wil.step`, `Wil.Step`, `Wil.run`). `import
+Scry.WilExamples` is the hand-built golden corpus (`Scry.arith`, `Scry.sumTo`,
+`Scry.facLoop`, …) used by the `scry-wil` test group. There is no parser or C lowering
+in this stage; `wiz-notes/scry-wil.md` has the grammar, the rules, the corpus and what
+S2 still needs.
+
+## Scry: CFG, reaching definitions and taint (`lib/Scry/Analysis.wiz`, `lib/Scry/Taint.wiz`)
+
+`import Scry.Analysis` numbers a Wil function's statements and terminators as program
+points and computes the CFG, dominators, reaching definitions and the PDG's def-use
+(flow-dependence) edges. `import Scry.Taint` feeds those edges to the Datalog engine
+(`lib/Scry/Datalog.wiz`, `lib/Scry/Eval.wiz`) with a `TaintSpec` of source, sanitiser
+and sink calls; the source -> sink path of each finding comes from the engine's
+provenance. `import Scry.TaintExamples` is the hand-built corpus used by the
+`scry-taint` group. This is the S4 intraprocedural prototype: no tree-sitter, no C
+lowering, no SARIF, and no interprocedural or memory modelling yet;
+`wiz-notes/scry-taint.md` has the design, the spec format and the gaps.

@@ -43,15 +43,18 @@ def load (tc : Toolchain) (roots : List System.FilePath) (salt : UInt64) (src : 
   let headers ← preprocessHeaders tc (src :: lib.values)
   -- (9f) the `link_c` files, relative to their files (`dir` is the main file's)
   let sources ← Module.cSourceTable dir src closure
+  -- (include-str) the `include_str` files, relative to their files
+  let includes ← Module.includeTable dir src closure
   let loader : Name → Option String := (lib[·]?)
   -- `builtin` registrations are trusted only in the toolchain's library, the first root
   let own := Module.fromFirstRoot roots closure
   let init : CommandState ZeroOneMany :=
     { loader, cHeaders := (headers[·]?), cSources := some (Module.cSourceResolver sources),
+      includes := some (Module.includeResolver includes),
       trustedModule := own.contains, trustNative := tc.trustNative,
       nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := ← tc.smt.resolve }
   let key := Cache.moduleKey (fun n => if n == mainName then some src else loader n) (headers[·]?) salt mainName
-    own.contains
+    own.contains (Module.includeResolver includes)
   -- a `link_c` file that appears or disappears changes the check (its contents enter
   -- only the link's key)
   let key := mixHash key (hash (toString ((sources.toList.map fun (k, v) => k ++ "=" ++ v).toArray.qsort (· < ·))))
@@ -62,11 +65,17 @@ def load (tc : Toolchain) (roots : List System.FilePath) (salt : UInt64) (src : 
   pure { src, init, key }
 
 /-- Elaborate a loaded file (through the cache when there is one: a write directory and
-any read-only ones). -/
+any read-only ones). With `--region-cache` (`tc.regionCache`), module effects are also
+read from and written to `.wizr` regions in the same layers as the `.wizc` entries; the
+text entries stay the authority, and a missing or corrupt region is a miss. -/
 def elaborate (tc : Toolchain) (salt : UInt64) (l : Loaded) : IO (CommandState ZeroOneMany) := do
   match tc.cacheDir, tc.readCaches with
   | none, [] => Cache.elaborateUncached l.src l.init salt
-  | write, reads => pure (← Cache.elaborateCached write reads l.src l.init l.key salt).1
+  | write, reads =>
+    let region := if tc.regionCache then
+        some ({ rig := RigTag.tag (R := ZeroOneMany) } : Cache.RegionOptions)
+      else none
+    pure (← Cache.elaborateCached write reads l.src l.init l.key salt (region := region)).1
 
 /-- The messages of a state, rendered `path:line:col: severity: text`. -/
 def render (path : String) (l : Loaded) (s : CommandState ZeroOneMany) : String :=

@@ -1,0 +1,63 @@
+import Scry.Eval
+-- Stratified negation (`scry-datalog-negation`): `unreach` is the complement of
+-- `reach` over the nodes, and the negative atom reads a relation in a lower stratum.
+-- The same file also holds a non-stratified program (`p` depends on `not q`, `q` on
+-- `not p`), which `Program.check` must reject; `main` reports both.
+
+def negOps : Scry.LatOps Nat :=
+  Scry.LatOps.mk 0 (fun a b => if Nat.lt a b then b else a) Nat.beq
+
+-- 0 = node (n), 1 = edge (a, b), 2 = reach (n), 3 = unreach (n)
+def reachBase : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 2 [Scry.Term.lit (U64.ofNat 1)]) []
+def reachEdge : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 2 [Scry.Term.var 0])
+    [Scry.Atom.pos 1 [Scry.Term.lit (U64.ofNat 1), Scry.Term.var 0]]
+def reachStep : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 2 [Scry.Term.var 1])
+    [Scry.Atom.pos 2 [Scry.Term.var 0],
+     Scry.Atom.pos 1 [Scry.Term.var 0, Scry.Term.var 1]]
+def unreach : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 3 [Scry.Term.var 0])
+    [Scry.Atom.pos 0 [Scry.Term.var 0], Scry.Atom.neg 2 [Scry.Term.var 0]]
+def good : Scry.Program Nat :=
+  Scry.Program.mk negOps [1, 2, 1, 1] [] [] [reachBase, reachEdge, reachStep, unreach]
+
+-- 4 = seed (n), 5 = p (n), 6 = q (n): p(x) :- seed(x), not q(x); q(x) :- seed(x), not p(x)
+def pRule : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 5 [Scry.Term.var 0])
+    [Scry.Atom.pos 4 [Scry.Term.var 0], Scry.Atom.neg 6 [Scry.Term.var 0]]
+def qRule : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 6 [Scry.Term.var 0])
+    [Scry.Atom.pos 4 [Scry.Term.var 0], Scry.Atom.neg 5 [Scry.Term.var 0]]
+def bad : Scry.Program Nat :=
+  Scry.Program.mk negOps [1, 1, 1, 1, 1, 1, 1] [] [] [pRule, qRule]
+
+def u (n : Nat) : U64 := U64.ofNat n
+def node (st : Scry.State Nat) (n : Nat) : Scry.State Nat :=
+  Scry.State.addTuple st 0 [u n]
+def edge (st : Scry.State Nat) (a b : Nat) : Scry.State Nat :=
+  Scry.State.addTuple st 1 [u a, u b]
+
+def db : Scry.State Nat :=
+  edge (edge (node (node (node (node Scry.State.empty 1) 2) 3) 4) 1 2) 2 3
+
+def goodDigest (st : Scry.State Nat) : Nat :=
+  let unreachable := Scry.Db.relSize st.db 3;
+  let four := if Scry.Db.memTuple st.db 3 [u 4] then 100 else 0;
+  let one := if Scry.Db.memTuple st.db 3 [u 1] then 10 else 0;
+  unreachable * 10000 + four + one + Scry.Db.relSize st.db 2
+
+def main : Nat :=
+  let g := match Scry.eval good db with
+    | .none => 999
+    | .some st => goodDigest st;
+  let rejected := if Scry.Program.wellFormed bad then
+    match Scry.Program.check bad with
+    | .none => 1
+    | .some _ => 0
+  else 0;
+  let evalNone := match Scry.eval bad db with
+    | .none => 1
+    | .some _ => 0;
+  g * 10 + rejected + evalNone
