@@ -717,3 +717,30 @@ checked once), a cycle, a missing module, a duplicate name across modules, a `-I
 and the cache key (stable for one graph, different when a module's text changes). `wiz
 check` of the generated self-hosted sources passes, and the self-hosted frontend still
 checks itself.
+
+## 21aa: `import_c`, `glue` and native representations, self-hosted
+
+The self-hosted frontend now reads C headers (`selfhost/CParse.wiz`) and checks the C
+glue subset (`selfhost/CGlue.wiz`). The driver reads each `import_c "h"` header from the
+file system (the frontend is pure) and passes the texts in `Globals.headers`; there is
+no C preprocessor, so a header must be self-contained. `CParse` parses prototypes,
+typedefs and struct definitions. `import_c` binds the scalar prototypes it can marshal
+(`Nat`, `UInt64`, `Float64`, `String`, `Bool`, `Unit`, foreign pointers and declared
+`c_struct`s) as `C.name`, emits an implicit `#include`, and records the functions for
+`glue`; `(pure)`, `(no_auto)` and `(skip := "…")` are read as in the Lean frontend.
+`glue` checks numbers, strings, calls, assignments, `if`/`while` and struct field
+access, then emits a static C wrapper called by the backend's normal foreign path.
+
+`attribute [implemented_by mk get] T.mk` is accepted on a sealed constructor; the
+constructor's implementation is registered (`mk`), as is the representation. A type
+whose operations are all `implemented_by` runtime natives (the `U32Array`/`U64Map`
+pattern) therefore compiles to its natives. Direct pattern matching on a native value
+still needs `get` in erasure.
+
+**Not done.** No preprocessor, no automatic struct/pointer mapping from a header (declare
+a `c_struct`/`foreign_type`), no `Bytes`/buffer parameters, no `for` loops, struct locals
+or `&struct` in self-hosted glue, no rewriting of matches through `get`.
+
+**Tests** (group `selfhost`): an `import_c` header whose functions are called from Wiz
+and from `glue`, and a native representation on a sealed constructor that runs through
+`wiz_u32array_*`, in GC and RC modes.

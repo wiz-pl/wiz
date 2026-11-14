@@ -538,7 +538,7 @@ def selfhostLinkRun (files : List (String × String)) (expected : String) (flags
     let cs := lines.filterMap fun l => (l.dropPrefix? "// wiz-link-c: ").map (·.toString)
     let libs := lines.filterMap fun l => (l.dropPrefix? "// wiz-link-lib: ").map (s!"-l{·}")
     let rt := (← IO.currentDir) / "selfhost"
-    let args := #["-O2", "-w", s!"-I{rt}"] ++ tc.gcCflags.toArray ++ #["out.c"] ++ cs.toArray ++ #["-o", "prog"] ++
+    let args := #["-O2", "-w", s!"-I{rt}", "-I."] ++ tc.gcCflags.toArray ++ #["out.c"] ++ cs.toArray ++ #["-o", "prog"] ++
       tc.gcLdflags.toArray ++ libs.toArray
     let cc ← IO.Process.output { cmd := tc.cc, args, cwd := dir }
     unless cc.exitCode == 0 do throw (IO.userError s!"cc failed: {cc.stderr.take 2000}")
@@ -874,7 +874,7 @@ def selfHostGroup : Group where
         -- `(True → Unit) = ((True → True) → Unit)` computes to the domains' equivalence: with
         -- the sorts `sortTy` fills in, and (mandatory sorts) with those the sorts pass fills
         -- in where none were written (`normalize` runs it), so both are the same
-        let src ← ["selfhost/Lex.wiz", "selfhost/Parse.wiz", "selfhost/Kernel.wiz", "selfhost/Frontend.wiz"].mapM (fun (f : String) => IO.FS.readFile f)
+        let src ← Selfhost.checkerFiles.mapM (fun (f : String) => IO.FS.readFile f)
         let body := "\n".intercalate (src.map fun f => "\n".intercalate ((f.splitOn "\n").filter (!·.startsWith "import")))
         let prog := "import IO\nimport Std\n" ++ body ++ "\n" ++
           "def gTy (X : Tm) : Tm := piH X (.unit 0)\n" ++
@@ -890,7 +890,7 @@ def selfHostGroup : Group where
     { name := "a name is declared once: a second declaration is an error (it proved an empty type inhabited)", run := fun _ =>
         selfhostCheckFile dupNames dupNamesExpected },
     { name := "text to checked term, all in Wiz", run := fun _ => do
-        let src ← ["selfhost/Lex.wiz", "selfhost/Parse.wiz", "selfhost/Kernel.wiz", "selfhost/Frontend.wiz"].mapM (fun (f : String) => IO.FS.readFile f)
+        let src ← Selfhost.checkerFiles.mapM (fun (f : String) => IO.FS.readFile f)
         let body := "\n".intercalate (src.map fun f => "\n".intercalate ((f.splitOn "\n").filter (!·.startsWith "import")))
         let t := Builtin.tables
         let bad := "(fun (x : Type) => x"
@@ -1166,6 +1166,31 @@ def selfHostGroup : Group where
         ffiAgrees implProgram "4\n42\n" },
     { name := "the self-hosted frontend: implemented_by is checked as in the Lean frontend (21t)", run := fun _ =>
         selfhostAgreesIO implHeader implDecls },
+    { name := "import_c binds a header's functions and glue calls them (stage 30)", run := fun _ => do
+        let header := "static inline unsigned long hdr_add(unsigned long a, unsigned long b) { return a + b; }\n" ++
+          "static inline unsigned long hdr_mul(unsigned long a, unsigned long b) { return a * b; }\n"
+        let prog := "import IO\nimport_c \"h.h\" (pure)\n" ++
+          "glue twice (n : Nat) : Nat := \"return hdr_add(n, n);\"\n" ++
+          "glue square (n : Nat) : Nat := \"return hdr_mul(n, n);\"\n" ++
+          "def main : IO Unit := do\n  IO.println (Nat.toString (C.hdr_add 20 22));\n" ++
+          "  IO.println (Nat.toString (twice 21));\n  IO.println (Nat.toString (square 7))"
+        selfhostLinkRun [("main.wiz", prog), ("h.h", header)] "42\n42\n49\n"
+        selfhostLinkRun [("main.wiz", prog), ("h.h", header)] "42\n42\n49\n" (flags := #["--rc"]) },
+    { name := "native representation: implemented_by mk/get on a sealed constructor (stage 30)", run := fun _ => do
+        let prog := "import IO\n" ++
+          "sealed inductive WA where\n  | private mk (xs : List Nat)\n" ++
+          "def WA.mkImpl (xs : List Nat) : WA := .mk xs\n" ++
+          "def WA.getImpl (a : WA) : List Nat := match a with\n  | .mk xs => xs\n" ++
+          "attribute [implemented_by WA.mkImpl WA.getImpl] WA.mk\n" ++
+          "def WA.ofList (xs : List Nat) : WA := .mk xs\n" ++
+          "def WA.toList (a : WA) : List Nat := WA.getImpl a\n" ++
+          "extern \"wiz_u32array_of_list\" WA.ofListNative : List Nat → WA\n" ++
+          "extern \"wiz_warray_to_list\" WA.toListNative : WA → List Nat\n" ++
+          "attribute [implemented_by WA.ofListNative] WA.ofList\n" ++
+          "attribute [implemented_by WA.toListNative] WA.toList\n" ++
+          "def main : IO Unit := IO.println (Nat.toString (List.length (WA.toList (WA.ofList (List.cons 1 (List.cons 2 (List.cons 3 .nil)))))))"
+        selfhostCompileRun prog "3\n"
+        selfhostCompileRun prog "3\n" (flags := #["--rc"]) },
     { name := "a link_c file that does not exist is an error, in both toolchains (21t)", run := fun _ => do
         let prog := "import IO\nlink_c \"c/nope.c\"\ndef main : IO Unit := IO.println \"hi\"\n"
         let (s, src, _) ← elabTree [("main.wiz", prog)]
@@ -1252,9 +1277,9 @@ def selfHostGroup : Group where
         -- `getS D'` is a type (it computes to `ULift True`), and a boxed proof unboxes to `True`
         unless vs[5]? == some "U0" && vs[9]? == some "True" do
           throw (IO.userError s!"unexpected types {vs}") },
-    { name := "the self-hosted frontend checks itself (Lex, Parse, Kernel and Frontend.wiz)", run := fun _ => do
-        let src := (← IO.FS.readFile "selfhost/Lex.wiz") ++ "\n" ++ (← IO.FS.readFile "selfhost/Parse.wiz") ++ "\n" ++
-          (← IO.FS.readFile "selfhost/Kernel.wiz") ++ "\n" ++ (← IO.FS.readFile "selfhost/Frontend.wiz")
+    { name := "the self-hosted frontend checks itself (Lex, Parse, Kernel, CParse, CGlue and Frontend.wiz)", run := fun _ => do
+        let srcs ← Selfhost.checkerFiles.mapM (fun (f : String) => IO.FS.readFile f)
+        let src := "\n".intercalate srcs
         let body := "\n".intercalate ((src.splitOn "\n").filter (!·.startsWith "import"))
         -- every declaration is reported, none with an error
         let decls := (src.splitOn "\n").filter fun l =>
