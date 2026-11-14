@@ -907,6 +907,33 @@ attribute [tactic tactic.exact] Tactic.exact
 ``` -/
 def Tactic : Type := Syntax → TacticM Unit
 
+/-- The monad of term elaborators: the same requests as `TacticM` (`TermElabM` is an
+alias, so `do` notation and every `TacticM.*` request work unchanged). A term elaborator
+written in Wiz runs where the host elaborates a term of a registered syntax kind, with a
+hole of the expected type as its only goal. -/
+def TermElabM (A : Type) : Type := TacticM A
+
+/-- A term elaborator, registered with `attribute [elab kind] f`: the Wiz function that
+elaborates a term of the syntax kind `kind` (a syntax kind declared by `syntax`, such as
+`term.twice`). The host makes a hole at the expected type and runs `f` on the syntax with
+that hole as the only goal; whichever term `f` assigns is accepted if the goal is closed,
+elaborated and checked as usual, and rejected (with `f`'s name) if it fails or leaves the
+goal open.
+
+```
+syntax "twice" term : term
+def twiceElab : TermElab := fun stx => do
+  g ← TacticM.mainGoal;
+  TacticM.exact g (Syntax.mkApp (Syntax.mkVar "Nat.add")
+    [Syntax.getArg stx 1, Syntax.getArg stx 1])
+attribute [elab term.twice] twiceElab
+def k : Nat := twice 21     -- 42
+```
+
+A term elaborator is not a tactic: it is looked up for a term's kind, not for a tactic (a
+`by` block or after `;`). The two registries are separate. -/
+def TermElab : Type := Syntax → TermElabM Unit
+
 /-- The main goal (the first open one); fails if there are none. -/
 def TacticM.mainGoal : TacticM Nat := do
   gs ← TacticM.getGoals;

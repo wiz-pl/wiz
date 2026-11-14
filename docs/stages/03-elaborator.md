@@ -40,3 +40,8 @@ pretty printer prints surface syntax.
 * **3.13** Postponement: when a check is stuck on an unsolved meta, such as a lambda
   checked against `?m`, postpone it and retry at the end of the declaration.
 * **3.14** Universe level metavariables, so `checkType` always knows the level.
+* **3.15** User-defined term elaborators: `attribute [elab k] f` hands a term of the
+  syntax kind `k` to the Wiz function `f : Syntax → TacticM Unit` with a hole of the
+  expected type, and accepts what it assigns if the goal is closed. The dispatch is in
+  `check`/`infer`, after macro expansion (`Elab/Term.lean`, `userElab?`) — see
+  [6h](06-macros.md).

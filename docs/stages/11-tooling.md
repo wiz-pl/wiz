@@ -242,8 +242,8 @@ def four : Nat := twice two
   kinds (`syntax`, `notation`, `infix…`; also in the patterns of `macro_rules`) and for
   the names of declared categories (`syntax … : c`, `c:prec`, `` `(c| …) ``); the
   elaborator records what expanded each node it met (the macro rule, a procedural macro
-  `attribute [macro k] f`, a command macro, or the tactic function `attribute [tactic k]
-  f`) and what it expanded to. **Go to definition** goes to what expanded it, **go to
+  `attribute [macro k] f`, a command macro, the tactic function `attribute [tactic k] f`,
+  or the term elaborator `attribute [elab k] f`) and what it expanded to. **Go to definition** goes to what expanded it, **go to
   declaration** (`textDocument/declaration`, now advertised) to the `syntax` command;
   for `notation` and `infix…` both are the same command. Prelude notation (`+`, `do`,
   …) jumps into the toolchain's `lib/Prelude.wiz`. The hover shows the source with its

@@ -132,7 +132,7 @@ inductive SyntaxRef where
 
 /-- (11q) What handled a piece of syntax: a macro rule (`macro_rules`, `notation`,
 `infix…`: the command that declared it and its module, `""` for this file), or a Wiz
-function (`what` is `macro`, `command macro` or `tactic`). -/
+function (`what` is `macro`, `command macro`, `tactic` or `elab`). -/
 inductive SyntaxHandler where
   | rule (site : SourceInfo) (module : String)
   | fn (what : String) (f : Name)
@@ -249,6 +249,10 @@ structure ElabState (R : Type) where
     fun _ _ _ => (#[], .error "procedural macros can't run here")
   /-- tactics: node kind and the Wiz function that runs it, latest first -/
   tactics : List (Name × Name) := []
+  /-- term elaborators (`attribute [elab k] f`): node kind and the Wiz function that
+  elaborates it, latest first. A registry of its own, separate from the tactics' (a
+  term elaborator runs at a term of its kind, a tactic after `by` or `;`) -/
+  elabs : List (Name × Name) := []
   /-- erase what is reachable from these globals, for the interpreter (supplied by the
   command elaborator) -/
   compileCode : List Name → Except String Code := fun _ => .error "tactics can't run here"

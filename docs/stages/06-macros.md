@@ -291,3 +291,57 @@ different handles.
   constructor (its type, number of parameters and of fields), `TacticM.ctorApp e` gives
   a constructor application's name and fields, and `TacticM.whnfCtorApp g e` computes
   first: `Prog.swap p q` is read as the `Prog.get p …` it computes to, in one request.
+
+## 6h: term elaborators written in Wiz
+
+```
+syntax (name := twice) "twice" term : term
+def twiceElab : TermElab := fun stx => do
+  g ← TacticM.mainGoal;
+  TacticM.exact g (Syntax.mkApp (Syntax.mkVar "Nat.mul")
+    [twoSyntax, Syntax.getArg stx 1])       -- 2 * t, as syntax
+attribute [elab term.twice] twiceElab
+def k : Nat := twice 21                     -- 42
+```
+
+* `attribute [elab k] f` (command `command.attrElab`, `Elab/Command.lean`) registers the
+  Wiz function `f` for the syntax kind `k`. The function's type is checked to be
+  `TermElab`, the prelude's `Syntax → TacticM Unit` (`TermElabM A` is `TacticM A`, so all
+  the `TacticM.*` requests and `do` notation apply). The registry is kept apart from the
+  tactics' (`ElabState.elabs` vs `tactics`; `CommandState.elabs` vs `tactics`).
+* **Running one** (`Elab/Term.lean`, `userElab?`). `check`/`infer` dispatch on the node
+  kind; the host makes a hole of the expected type, runs `f` on the syntax with that hole
+  as the only goal (`runTac`), and accepts the term only if `f` closed the goal. If `f`
+  fails, the error is "the term elaborator `f` (for `k`) failed: …"; if it leaves the
+  goal open, "… did not close the goal:" with the goal. The assigned term is then
+  elaborated and unified with the expected type like any other term, and the kernel
+  checks the finished declaration: nothing here is trusted (`#print axioms` is clean).
+* **When it runs.** The dispatch is **after macro expansion**: `check`/`infer` call
+  `expand?` first, then `userElab?`. A kind with both a `macro_rules` rule and an `elab`
+  entry is expanded by the macro, and the output is elaborated again (it may itself hit
+  an elaborator of that kind). So an elaborator is reached only for a kind no macro
+  rewrites. Other syntax kinds are untouched, so the ordinary elaborator and macros
+  still handle them.
+* **Inferring position.** `infer` does not know the expected type, so the host makes a
+  metavariable for it and that is the goal's type; `f` may solve it (for instance with
+  `TacticM.exact`), and the solved type is returned. A term that only makes sense at a
+  known type (one that inspects `TacticM.goalType`, like the tests' `boolOf`) is used
+  where the expected type is written.
+* **Limits.** `f` can do only what `TacticM` exposes: it cannot create a metavariable
+  itself (only `newGoal`/`elabInfer`/holes in the syntax it builds can), it sees the
+  expected type only as a reflected `Expr` (`goalType`), and `TermElabM` is an alias, not
+  a new request set (a dedicated request, such as "the expected type as syntax", would be
+  one more `Tac` constructor). The attribute is an ordinary command in the grammar, so
+  `wiz fmt` and the syntax reprinters print it as written.
+
+| #   | Where                | What                                                     |
+|-----|----------------------|----------------------------------------------------------|
+| 6.7 | `Elab/Basic.lean`    | `ElabState.elabs`: the term-elaborator registry          |
+| 6.8 | `Elab/Command.lean`  | `command.attrElab`: parsing, the `TermElab` type check, the registry |
+| 6.9 | `Elab/Term.lean`     | `userElab?`: the hole, `runTac`, the solved/unsolved check |
+
+Tests: group `elab-ext` (12 cases): `twice` builds `2 * x`, a dependent `List.nil` at
+the expected element type, `boolOf` reading `goalType` (and its rejection), a failing
+elaborator, one that leaves the goal open, a kind with no elaborator (macro
+fall-through), macro-before-elab order, the two registries being separate both ways, and
+`attribute [elab]` rejecting a wrong type.

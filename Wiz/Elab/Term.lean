@@ -1130,6 +1130,9 @@ partial def check (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : ElabM R
   let ctx := ctx.withInfo stx
   recordExpected ctx stx expected
   if let some stx' ← expand? stx then return ← check ctx stx' expected
+  -- a term elaborator written in Wiz (`attribute [elab k] f`): after macro expansion,
+  -- with a hole of the expected type that `f` must close
+  if let some (t, _) ← userElab? ctx stx (some expected) then return t
   if let some t ← checkData? ctx stx expected then return t
   -- a variable or application whose type is the expected type's own definition
   -- (`f : Comb i o` against `Comb ?i ?o`, `def Comb … := {r} → [Hw r] → …`): unify the
@@ -3135,6 +3138,8 @@ partial def elabQuote (ctx : LocalCtx R) (syntaxTy : VTy R) (parent : Name) (stx
 partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) := do
   let ctx := ctx.withInfo stx
   if let some stx' ← expand? stx then return ← infer ctx stx'
+  -- (a term elaborator written in Wiz: the expected type is a metavariable here)
+  if let some r ← userElab? ctx stx none then return r
   match stx.kind with
   | "term.ident" | "term.explicit" | "term.identUniv" =>
     let x := (stx.getArg (if stx.isOfKind "term.explicit" then 1 else 0)).getId?.getD "_"
@@ -3805,10 +3810,59 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
   --| sorry
   --sol>
 
+/-- **Term elaborators written in Wiz** (`attribute [elab k] f`).
+
+A term of a syntax kind `k` registered this way is elaborated by a Wiz function
+`f : TermElab` (the prelude's `Syntax → TacticM Unit`, the same shape as a `Tactic`).
+The host makes a hole of the expected type, runs `f` on the syntax with that hole as the
+only goal, and accepts the term only if `f` closes the goal: whatever it assigned is
+elaborated and unified with the expected type as usual, so the kernel checks it like any
+other term (nothing here is trusted). A function that fails, or leaves the goal open, is
+an error at the term, naming `f`.
+
+The dispatch is **after macro expansion** (`check`/`infer` expand `stx` first, as for
+tactics): a kind with both a `macro_rules` rule and an `elab` entry is expanded by the
+macro, whose output is elaborated again (and may then reach the elaborator, if it has
+that kind). An elaborator is therefore only reached by a syntax kind no macro rewrites.
+
+`expected` is `none` in inferring position (`f (twice x)`): a metavariable is made for
+the expected type, so the Wiz function sees a goal whose type is that hole; the type it
+assigned is returned. -/
+partial def userElab? (ctx : LocalCtx R) (stx : Syntax) (expected : Option (VTy R)) :
+    ElabM R (Option (Term R × VTy R)) := do
+  let some f := (← get).elabs.lookup stx.kind | return none
+  -- (11q) what handled the syntax, for hovers and go to definition
+  if stx.info.stop > 0 then pushInfo (.done (.expansion stx.info stx.kind (.fn "elab" f) none))
+  let s ← get
+  let code ← match s.compileCode ("TacticM.run" :: (s.tactics ++ s.elabs).map (·.2)) with
+    | .ok c => pure c
+    | .error e => throwAt stx.info e
+  let (ty, tyMeta?) ← match expected with
+    | some ty => pure (ty, none)
+    | none => do
+      let a ← freshMeta ctx "the type of this term"
+      pure (← evalIn ctx a, some a)
+  let m ← freshMeta ctx s!"elab {f}"
+  let st : TacState R := { goals := #[{ ctx, ty, tm := m }], «open» := [0] }
+  let prog := apply code (run code [] (.global "TacticM.run"))
+    (apply code (run code [] (.global f)) (encodeSyntax stx))
+  let st ← try runTac code stx.info st prog
+    catch e =>
+      -- say which elaborator failed, at the term the user wrote
+      throw { e with msg := s!"the term elaborator {f} (for {stx.kind}) failed: {e.msg}",
+                     info := if e.info.stop == 0 then (ctx.withInfo stx).info else e.info }
+  let some gl := st.goals[0]? | throwAt ctx.info s!"the term elaborator {f} lost its goal"
+  if ← gl.isOpen then
+    throwAt ctx.info s!"the term elaborator {f} (for {stx.kind}) did not close the goal:\n{← gl.show}" "elaborator-incomplete"
+  let ty ← match tyMeta? with
+    | some a => evalIn ctx a
+    | none => pure ty
+  return some (m, ty)
+
 /-- `by tac₁; tac₂ …`: a hole of the expected type, filled by running the tactics. -/
 partial def elabBy (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : ElabM R (Term R) := do
   let s ← get
-  let code ← match s.compileCode ("TacticM.run" :: s.tactics.map (·.2)) with
+  let code ← match s.compileCode ("TacticM.run" :: (s.tactics ++ s.elabs).map (·.2)) with
     | .ok c => pure c
     | .error e => throwAt ctx.info e
   let m ← freshMeta ctx "by"
