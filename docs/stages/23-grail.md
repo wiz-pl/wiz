@@ -367,8 +367,15 @@ already uses for `grail.lock`):
 * `yanked` stops new resolutions from choosing a version; a lock that already pins it
   keeps working, because `grail fetch` never reads the index.
 * Names are global and lowercase (`[a-z][a-z0-9-]{0,63}`); `name@version` is immutable.
-  A corrected release gets a new version. Namespaces (`@org/name`) are deferred, with
-  room in the file layout (`index/@org/name.sexpr`).
+  A corrected release gets a new version. Namespaces are deferred, but the reader already
+  accepts the scoped layout: `index/@org/name.sexpr` is the package `@org/name` (the
+  file name is the resolver key; one duplicate per registry is an error).
+* A `source` that is a relative path is resolved against the index root, so a local
+  mirror or a checked-out index is self-contained (the test fixture relies on it); a
+  published index uses `https://` URLs. Unknown fields in an index entry are ignored, so
+  a newer publisher can add `(license …)`, `(size …)` or `(mirror_urls …)` without
+  breaking older grails; the **lock** decoder stays strict (a lock is a local trust
+  anchor, so an unknown entry is an error).
 
 **The archive is deterministic.** The publisher makes it from the release tag with
 
@@ -401,15 +408,19 @@ index state.
 
 ### Resolution
 
-Requirements: `1.2.3` (exact), `^1.2.3` (`>=1.2.3 <2.0.0`; `^0.2.3` is `<0.3.0`),
-`~1.2.3` (`>=1.2.3 <1.3.0`; `~1` is `<2.0.0`), `>=1.2 <2`, `>`, `<=`, `<`, and `*`.
+Requirements: `1.2.3` (exact), `^1.2.3` (`>=1.2.3 <2.0.0`; `^0.2.3` is `<0.3.0`; a
+one-component `^0` is `<1.0.0` and `^0.0` is `<0.1.0`), `~1.2.3` (`>=1.2.3 <1.3.0`;
+`~1` is `<2.0.0`), `>=1.2 <2`, `>`, `<=`, `<`, and `*`.
 The resolver is flat and greedy: it picks the **highest** version of each name that
 satisfies *every* requirement on it (one version per name; Wiz has one global name
-space), adds that version's index `deps`, and repeats until the requirement set is
-stable. A conflict names both requesters; there is no backtracking. A version whose
-`toolchain` range does not admit the running toolchain is filtered out (so `>=0.1.0`
-admits the `0.1.0-dev` nightly), which is a compatibility signal, not a security
-boundary. Prereleases only match a requirement that names one.
+space), adds that version's index `deps`, and repeats until the *selection* is stable.
+Each round rebuilds the requirement map from the roots plus the dependencies of the
+**current** selection, so when a version is replaced the requirements that only it
+introduced are retracted (otherwise a constraint from an abandoned version could linger
+and make a satisfiable graph fail). A conflict names both requesters; there is no
+backtracking. A version whose `toolchain` range does not admit the running toolchain is
+filtered out (so `>=0.1.0` admits the `0.1.0-dev` nightly), which is a compatibility
+signal, not a security boundary. Prereleases only match a requirement that names one.
 
 `grail index resolve` prints the same choice without writing the lock;
 `grail index show NAME` prints a package's versions.
@@ -430,16 +441,28 @@ lock:
   (pkg "text" "1.2.0" "https://…/text-1.2.0.tar.gz" "<sha256>" (deps)))
 ```
 
-* `grail update [--locked] [--offline]`: resolve and rewrite the lock. `--locked` never
-  writes and fails with `grail.lock is out of date` when the result differs (the CI check
-  that a PR committed its lock); `--offline` uses the cached index and existing git
-  clones. With no dependencies at all it succeeds and does nothing.
+* `grail update [--locked] [--offline]`: resolve and rewrite the lock. `--locked` is a
+  **check, not a resolution**: it reads the existing lock, verifies that every
+  requirement is pinned and satisfied, and never reads the index or touches the network,
+  so publishing a new version upstream cannot make CI fail (`grail index resolve` is the
+  view of what a fresh update would choose). `--offline` uses the cached index and
+  existing git clones. With no dependencies at all it succeeds and does nothing.
 * `grail fetch [--locked] [--offline]`: materialise the lock without building. A missing
   lock is created unless `--locked`; `--locked` never writes and fails when a
   requirement is not pinned or is pinned to a version that does not satisfy it.
   `--offline` downloads nothing: the index, archives and git clones must be cached,
   otherwise it is an error. With no dependencies it succeeds and does nothing.
-* `grail build/test/run/lsp/doc` read the lock only. A missing lock with require/dep
+  `fetch --locked --offline` is the hermetic CI prelude (checked archives, no network).
+* **Pinning the index.** A URL index is `--index URL`, `Package.set "index" "URL"`, or
+  `--index URL#COMMIT` / `Package.set "index-commit" "COMMIT"` for a binding pin; the
+  lock records the URL and commit that produced it either way. Without a pin the commit
+  is audit metadata; with one, `update` resolves from that commit and `checkLocked`
+  refuses a lock from another one. A URL index must **fast-forward** from the lock's
+  commit: if the index's history was rewritten or force-pushed, `update` fails with
+  `the index history was rewritten (locked at A, now at B)` unless `--allow-rewind` is
+  passed (TUF's rollback protection at git's own DAG cost).
+* `grail build/test/run/lsp/doc` read the lock only, and `--offline` makes a missing
+  archive or git clone an error instead of a download. A missing lock with require/dep
   lines says `no grail.lock: run grail update`.
 * The lock holds the **transitive closure** (each `pkg` has its deps), so a build knows
   the graph offline. `checkLocked` also refuses a lock whose `pkg` dependency is absent
@@ -472,8 +495,23 @@ and building it is running its author's code. There is no sandbox. Git `dep` ent
 v1's 64-bit content hash (accident detection, not cryptographic); registry entries are
 the strong path.
 
+**Not signed yet.** Index commits and tags are not signed; authenticity comes from the
+git URL, its history (and the rollback check above) and review of the index repository.
+A force-push is refused only when a lock records an older commit; a first-time user has
+no such baseline. Signing index tags and recording a signature in the lock
+(`--require-signature`) is the next step, together with an index CI that rebuilds each
+archive from its tag and compares the SHA-256. Until then: SHA-256 gives integrity, not
+authorship, and the index's own history is the audit log.
+
+**Cache layout.** `<cache>/grail/downloads/<sha256>` holds the archives
+(content-addressed, re-verified on every use); `<cache>/grail/index` the clone of a URL
+index; `.grail/packages/NAME/` the unpacked tree with a `.grail-pkg` stamp equal to the
+archive hash. `.grail/` is not committed; `grail.lock` is.
+
 **Deferred:** a real `wiz-pl/grail-index` with CI naming rules and the first packages;
-signed index commits and a signature in the lock (`--require-signature`); `grail update
--p NAME`; a tree hash for unpacked packages (lock v3) and a SHA-256 tree hash for git
-deps; namespaces, private-index credential settings, `grail vendor`, binary artifacts,
-and automated publish (a bot that verifies the artifact before merging).
+signed index commits/tags and a signature in the lock (`--require-signature`);
+per-registry index caches and repeatable `--index` overlays; `grail update -p NAME` and
+`--minimal`; a tree hash for unpacked packages (lock v3) and a SHA-256 tree hash for git
+deps; private-index credential settings, `grail vendor`, binary artifacts, and automated
+publish (a bot that verifies the artifact before merging). The reader understands the
+`index/@org/name.sexpr` layout, but scopes are not enforced in names or manifests yet.

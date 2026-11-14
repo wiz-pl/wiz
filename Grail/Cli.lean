@@ -56,7 +56,8 @@ options: -C DIR (the package directory), --std DIR (the standard library),
   --cache DIR (the elaboration cache, default ~/.cache/wiz), --cache-ro DIR (repeatable:
   a read-only cache, searched in order after the write cache), --no-cache (both),
   --index URL (the package index: a directory, a file, or a git URL; default: the
-  `index` setting of grail.wiz), --offline (never touch the network),
+  `index` setting of grail.wiz), --index-commit COMMIT (pin a git index),
+  --allow-rewind (accept a rewritten index history), --offline (never touch the network),
   --source URL (grail publish: the archive's public URL),
   --trust-native (27a: allow `native_refl`, passed on to every check and to `wiz lsp`), --native-fuel N
 Machine settings (where GMP lives) go in an uncommitted grail.local.wiz:
@@ -77,6 +78,10 @@ structure Opts where
   wiz : Option String := none
   /-- (23m) the package index: a directory, a file, or a git URL -/
   index : Option String := none
+  /-- (23m) pin a git index to one commit -/
+  indexCommit : Option String := none
+  /-- (23m) accept a rewritten index history (R22) -/
+  allowRewind : Bool := false
   /-- (23m) never touch the network -/
   offline : Bool := false
   /-- (23m) fail instead of writing grail.lock -/
@@ -93,6 +98,8 @@ partial def grailOpts (o : Opts) : List String → Opts × List String
   | "--test-timeout" :: n :: rest => grailOpts { o with testTimeout := n.toNat? } rest
   | "--wiz" :: w :: rest => grailOpts { o with wiz := some w } rest
   | "--index" :: i :: rest => grailOpts { o with index := some i } rest
+  | "--index-commit" :: c :: rest => grailOpts { o with indexCommit := some c } rest
+  | "--allow-rewind" :: rest => grailOpts { o with allowRewind := true } rest
   | "--source" :: s :: rest => grailOpts { o with source := some s } rest
   | "--offline" :: rest => grailOpts { o with offline := true } rest
   | "--locked" :: rest => grailOpts { o with locked := true } rest
@@ -160,13 +167,14 @@ def cliMain (args : List String) : IO UInt32 := do
     | .ok (pkg, localSettings) =>
       let mut tc := defaults
       for (k, v) in pkg.settings ++ localSettings do
+        if k == "index" || k == "index-commit" then continue
         match tc.set k v with
         | some t => tc := t
         | none => IO.eprintln s!"grail lsp: unknown setting {k} (ignored)"
       tc := (tc.parseFlags raw).1
       let readPkg (d : System.FilePath) : IO (Except String Package) := do
         pure ((← readConfig tc binId std d).map (·.1))
-      let deps ← match ← Registry.lockedRoots cache readPkg dir pkg IO.eprint with
+      let deps ← match ← Registry.lockedRoots cache readPkg dir pkg IO.eprint opts.offline with
         | .ok rs => rs.mapM absolute
         | .error e => do IO.eprintln s!"grail lsp: {e} (the dependencies' modules are not found)"; pure []
       runLsp wiz (lspArgs tc ([dirAbs] ++ libRootsOf dirAbs pkg.targets ++ deps) lspOpts) dirAbs
@@ -179,14 +187,14 @@ def cliMain (args : List String) : IO UInt32 := do
       | .error e => do IO.eprintln e; return 1
     let mut tc := defaults
     for (k, v) in pkg.settings ++ localSettings do
-      if k == "index" then continue
+      if k == "index" || k == "index-commit" then continue
       match tc.set k v with
       | some t => tc := t
       | none => IO.eprintln s!"unknown setting {k}"; return 1
     tc := (tc.parseFlags raw).1
     let readPkg (d : System.FilePath) : IO (Except String Package) := do
       pure ((← readConfig tc binId std d).map (·.1))
-    let deps ← match ← Registry.lockedRoots cache readPkg dir pkg IO.eprint with
+    let deps ← match ← Registry.lockedRoots cache readPkg dir pkg IO.eprint opts.offline with
       | .ok rs => rs.mapM absolute
       | .error e => do IO.eprintln e; return 1
     -- TARGET… (lib targets) and wiz doc's own options
@@ -217,7 +225,7 @@ def cliMain (args : List String) : IO UInt32 := do
       | .error e => do IO.eprintln e; return 1
     let mut tc := defaults
     for (k, v) in pkg.settings ++ localSettings do
-      if k == "index" then continue
+      if k == "index" || k == "index-commit" then continue
       match tc.set k v with
       | some t => tc := t
       | none => IO.eprintln s!"unknown setting {k}"; return 1
@@ -226,32 +234,52 @@ def cliMain (args : List String) : IO UInt32 := do
     -- a dependency's build file
     let readPkg (d : System.FilePath) : IO (Except String Package) := do
       pure ((← readConfig tc binId std d).map (·.1))
-    -- (23m) the index: --index wins, then the `index` setting of grail.wiz/grail.local.wiz
-    let indexSpec : String :=
+    -- (23m) the index: --index wins, then the `index` setting of grail.wiz/grail.local.wiz;
+    -- --index-commit (or the `index-commit` setting) appends `#COMMIT` to pin a git index
+    let indexBase : String :=
       match opts.index with
       | some i => i
       | none => ((pkg.settings ++ localSettings).reverse.find? (·.1 == "index")).map (·.2) |>.getD ""
+    let indexPin : String :=
+      match opts.indexCommit with
+      | some c => c
+      | none => ((pkg.settings ++ localSettings).reverse.find? (·.1 == "index-commit")).map (·.2) |>.getD ""
+    let indexSpec : String :=
+      if indexPin.isEmpty || indexBase.contains "#" then indexBase else indexBase ++ "#" ++ indexPin
+    let lockPin : String :=
+      if !indexPin.isEmpty then indexPin
+      else match indexBase.splitOn "#" with | [_, p] => p | _ => ""
     let readLock : IO (Except String Lock) := do
       if ← (lockFile dir).pathExists then
         pure (Lock.parse (← IO.FS.readFile (lockFile dir)))
       else pure (.error s!"no {lockFile dir}: run `grail update`")
     let depRoots : IO (Option (List System.FilePath)) := do
-      match ← Registry.lockedRoots cache readPkg dir pkg IO.eprint with
+      match ← Registry.lockedRoots cache readPkg dir pkg IO.eprint opts.offline with
       | .ok rs => pure (some rs)
       | .error e => IO.eprintln e; pure none
     match args with
     | ["config"] => IO.print tc.render; pure 0
     | "update" :: _ =>
-      match ← Registry.resolveLock cache indexSpec opts.offline readPkg dir pkg with
-      | .error e => IO.eprintln e; pure 1
-      | .ok l =>
-        let text := Lock.render l
-        let old ← if ← (lockFile dir).pathExists then some <$> IO.FS.readFile (lockFile dir) else pure none
-        let empty := l.git.isEmpty && l.pkgs.isEmpty
-        if opts.locked && old != some text && !(empty && old.isNone) then
-          IO.eprintln "grail.lock is out of date: run `grail update` without --locked"
-          pure 1
-        else
+      if opts.locked then
+        -- (R10) `--locked` is a *check*, not a re-resolution: it reads the lock only and
+        -- never touches the index, so publishing a new version cannot make CI fail.
+        let noDeps := pkg.deps.isEmpty && pkg.requires.isEmpty
+        match ← readLock with
+        | .error e => if noDeps then pure 0 else IO.eprintln e; pure 1
+        | .ok l =>
+          match Registry.checkLocked l pkg lockPin with
+          | .error e => IO.eprintln e; pure 1
+          | .ok () =>
+            for p in l.pkgs do IO.println s!"{p.name}\t{p.version}\t{p.source}"
+            for g in l.git do IO.println s!"{g.name}\t{g.url} {g.rev}\t{g.commit}"
+            pure 0
+      else
+        match ← Registry.resolveLock cache indexSpec opts.offline readPkg dir pkg opts.allowRewind with
+        | .error e => IO.eprintln e; pure 1
+        | .ok l =>
+          let text := Lock.render l
+          let old ← if ← (lockFile dir).pathExists then some <$> IO.FS.readFile (lockFile dir) else pure none
+          let empty := l.git.isEmpty && l.pkgs.isEmpty
           if old != some text && (!empty || old.isSome) then Cache.writeAtomic (lockFile dir) text
           for p in l.pkgs do IO.println s!"{p.name}\t{p.version}\t{p.source}"
           for g in l.git do IO.println s!"{g.name}\t{g.url} {g.rev}\t{g.commit}"
@@ -262,13 +290,13 @@ def cliMain (args : List String) : IO UInt32 := do
       let getLock : IO (Except String Lock) := do
         match ← readLock with
         | .ok l =>
-          match Registry.checkLocked l pkg with
+          match Registry.checkLocked l pkg lockPin with
           | .ok () => pure (.ok l)
           | .error e => pure (.error e)
         | .error e =>
           if noDeps then pure (.ok {})
           else if opts.locked then pure (.error e) else
-            match ← Registry.resolveLock cache indexSpec opts.offline readPkg dir pkg with
+            match ← Registry.resolveLock cache indexSpec opts.offline readPkg dir pkg opts.allowRewind with
             | .error e => pure (.error e)
             | .ok l =>
               Cache.writeAtomic (lockFile dir) (Lock.render l)

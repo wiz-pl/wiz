@@ -106,6 +106,42 @@ Adding a test group touches no shared file:
   deterministically; a branch that still edits the old file replays its changes with it
   (AGENTS.md, "Test layout").
 
+## The grail package registry (23m)
+
+`grail update` resolves `Package.require` lines through a **static index** (a directory,
+one S-expression file, or a git repository) and writes `grail.lock`; `grail fetch
+--locked` materialises that lock and `grail build/test/run/lsp/doc` read only the lock.
+`grail update --locked` is a check, not a resolution: it reads the lock, verifies that
+the manifest's requirements are pinned, and never reads the index (so a new publication
+cannot break CI). `--offline` makes `update`, `fetch` and builds use cached index clones
+and archives only; a missing item is an error, never a download. `--index URL#COMMIT`
+(or `Package.set "index-commit"`) pins the index revision; the lock also records the
+index URL and commit that produced it. A URL index must fast-forward from the lock's
+commit: a force-pushed/rewritten history is refused unless `--allow-rewind` (TUF's
+rollback protection over git's DAG).
+
+Cache layout (under `--cache`, default `~/.cache/wiz`):
+
+| path | contents |
+|---|---|
+| `grail/downloads/<sha256>` | content-addressed release archives; re-hashed on every use, re-downloaded when corrupt |
+| `grail/index/` | the cached clone of a URL index (one clone; a directory index is read in place) |
+| `<package>/.grail/packages/<name>/` | unpacked packages, with `.grail-pkg` = the archive's SHA-256 as stamp |
+
+Fetch verifies the SHA-256 **before** unpacking, into a temporary directory, and renames
+only after the hash matches, so a bad transfer leaves no partial tree. The archive layout
+is one `NAME-VERSION/` with `grail.wiz`; relative `source` paths in a local index are
+resolved against the index root (which is what makes the checked-in fixture usable
+offline). The index is not signed yet: SHA-256 and the lock give integrity, the index's
+git history and review give names, and building a package still runs its author's code.
+
+The hermetic fixture is `tests/fixtures/grail-index/` (`index/NAME.sexpr`,
+`packages/NAME-V.tar.gz`, `sources/` and `make.sh`); `=grail-deps` covers exact/range
+versions, the transitive closure, a missing package, a hash mismatch, stale locks,
+`fetch --locked` with cold/warm caches, scoped `index/@org/name.sexpr` files, and index
+rollback. Rebuild the archives with `cd tests/fixtures/grail-index && ./make.sh`. There
+is no network in these tests.
+
 ## What `wiz build` links
 
 `wiz build` turns a program into C (or LLVM IR) and hands it to a C compiler with the

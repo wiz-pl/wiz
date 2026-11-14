@@ -135,12 +135,19 @@ def parse (s : String) : Except String Requirement := do
   let toks := (s.splitOn " ").filter (!·.isEmpty)
   toks.mapM parseOne
 
-/-- The exclusive upper bound a `^` or `~` clause implies. -/
+/-- The exclusive upper bound a `^` or `~` clause implies. `^` follows Cargo/npm: the
+leftmost non-zero component decides, and a one-component `^0`/`^1` means "< the next
+major" (`^0` is `<1.0.0`, `^0.0` is `<0.1.0`, `^0.2.3` is `<0.3.0`, `^0.0.3` is
+`<0.0.4`). `~` keeps the documented npm semantics (`~1` is `<2.0.0`, `~1.2` is
+`<1.3.0`). -/
 def upper (c : Clause) : Version :=
   let v := c.v
   match c.op with
   | .caret =>
-    if v.major != 0 then { v with major := v.major + 1, minor := 0, patch := 0, pre := "" }
+    if c.components <= 1 then { v with major := v.major + 1, minor := 0, patch := 0, pre := "" }
+    else if c.components == 2 && v.major == 0 then
+      { v with minor := v.minor + 1, patch := 0, pre := "" }
+    else if v.major != 0 then { v with major := v.major + 1, minor := 0, patch := 0, pre := "" }
     else if v.minor != 0 then { v with minor := v.minor + 1, patch := 0, pre := "" }
     else { v with patch := v.patch + 1, pre := "" }
   | .tilde =>
@@ -190,7 +197,7 @@ structure IxVersion where
   deps : List Req := []
   /-- why it is yanked; `""` when it isn't -/
   yanked : String := ""
-  deriving Repr, Inhabited
+  deriving Repr, Inhabited, BEq
 
 /-- A package's index entry -/
 structure IxPackage where
@@ -268,8 +275,11 @@ def decodeVersion (x : Sx) : Except String IxVersion := do
     | .l ys =>
       match ys.toList with
       | .a "deps" :: rest => out := { out with deps := ← rest.mapM decodeReq }
-      | _ => throw s!"version {v}: unknown field {f.render}"
-    | x => throw s!"version {v}: unknown field {x.render}"
+      -- (R3) the index is a shared, long-lived artifact: an unknown field added by a
+      -- newer publisher is ignored here (the *lock* decoder stays strict), so an old
+      -- grail can still read a package whose entry gained `(license …)`, `(size …)`, …
+      | _ => pure ()
+    | _ => pure ()
   if out.source.isEmpty then throw s!"version {v}: no source"
   if out.sha256.length != 64 then throw s!"version {v}: sha256 must be 64 hex digits"
   pure out
@@ -290,8 +300,9 @@ def decodePackage (x : Sx) : Except String IxPackage := do
     | .l ys =>
       match ys.toList with
       | .a "version" :: _ => out := { out with versions := out.versions ++ [← decodeVersion f] }
-      | _ => throw s!"package {name}: unknown field {f.render}"
-    | x => throw s!"package {name}: unknown field {x.render}"
+      -- (R3) forward compatibility: ignore fields this grail does not know
+      | _ => pure ()
+    | _ => pure ()
   for (v, why) in yanked do
     let isIt (iv : IxVersion) : Bool := Version.render iv.version == v
     if out.versions.any isIt then
@@ -357,34 +368,50 @@ def sortedAsks (m : Std.HashMap String (List Ask)) : List (String × List Ask) :
   (m.toList.toArray.qsort (fun a b => a.1 < b.1)).toList.map fun (n, a) =>
     (n, (a.toArray.qsort (fun x y => x.1 < y.1)).toList)
 
-/-- The fixpoint: choose a version per name, add the requirements of what was chosen, and
-repeat until the requirement set is stable. (One version per name, so a change can only
-appear when a newly-reachable package asks for something stricter.) -/
+/-- The constraints implied by the roots and by the *current* selection: every root
+requirement, plus every dependency of every chosen version. Rebuilding this map each round
+(rather than only appending) is R9 in `wiz-notes/prior-art/registries-build-systems.md`:
+when a chosen version is replaced, the requirements that only the old version introduced
+are retracted instead of lingering. -/
+def constraintsOf (roots : List Req) (selection : List (String × IxVersion)) :
+    Std.HashMap String (List Ask) := Id.run do
+  let mut cons : Std.HashMap String (List Ask) := {}
+  for r in roots do
+    let cur := cons.getD r.name []
+    unless cur.contains (r.req, "this package") do
+      cons := cons.insert r.name (cur ++ [(r.req, "this package")])
+  for (name, v) in selection do
+    for d in v.deps do
+      let cur := cons.getD d.name []
+      unless cur.contains (d.req, name) do
+        cons := cons.insert d.name (cur ++ [(d.req, name)])
+  return cons
+
+/-- The fixpoint: choose a version per name from the constraints of the roots and the
+current selection, then rebuild the constraints from that selection and repeat until the
+selection is unchanged. (One version per name, so a change can only appear when a
+newly-reachable package asks for something stricter, or when replacing a version retracts
+a requirement it alone introduced.) -/
 partial def step (index : Std.HashMap String IxPackage) (toolchain : String)
-    (fuel : Nat) (cons : Std.HashMap String (List Ask)) :
+    (fuel : Nat) (roots : List Req) (selection : List (String × IxVersion)) :
     Except String (List (String × IxVersion)) := do
   if fuel == 0 then throw "dependency resolution does not settle (a cycle whose requirements change?)"
+  let cons := constraintsOf roots selection
   let mut chosen : List (String × IxVersion) := []
-  let mut cons2 := cons
   for (name, asks) in sortedAsks cons do
     let some p := index[name]? | throw s!"no package {name} in the index (asked for by {asks.head!.2})"
     let v ← pick p asks toolchain
     chosen := chosen ++ [(name, v)]
-    for d in v.deps do
-      let cur := cons2.getD d.name []
-      if !cur.contains (d.req, name) then
-        cons2 := cons2.insert d.name (cur ++ [(d.req, name)])
-  if sortedAsks cons2 == sortedAsks cons then pure chosen else step index toolchain (fuel - 1) cons2
+  if chosen == selection then pure chosen
+  else step index toolchain (fuel - 1) roots chosen
 
 /-- Resolve `roots` against `index`: the highest version of each reachable name that
 satisfies every requirement on it. Flat: one version per name (Wiz has one global name
 space, and grail refuses two commits of one dependency name). -/
 def resolve (index : Std.HashMap String IxPackage) (roots : List Req) (toolchain : String) :
     Except String (List Resolved) := do
-  let mut cons : Std.HashMap String (List Ask) := {}
-  for r in roots do
-    cons := cons.insert r.name ((cons.getD r.name []).cons (r.req, "this package"))
-  let chosen ← step index toolchain 64 cons
+  let rootAsks : List Req := roots
+  let chosen ← step index toolchain 64 rootAsks []
   pure (chosen.map fun (name, v) => {
     name := name, version := v.version, source := v.source, sha256 := v.sha256,
     toolchain := v.toolchain, deps := v.deps })

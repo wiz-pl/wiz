@@ -10,6 +10,14 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* grail (23m): a static package registry. `Package.version/toolchain/require`, an
+  S-expression index (`index/NAME.sexpr`, scoped `index/@org/NAME.sexpr`), semver ranges
+  (`^0`/`^0.0` included), a flat resolver that retracts constraints of replaced
+  versions, lock v2 (index URL+commit and `pkg` entries), `grail update/fetch
+  [--locked] [--offline]`, `--index URL#COMMIT`/`index-commit` pins, rollback protection
+  over the index's git history (`--allow-rewind`), SHA-256-before-unpack fetching with a
+  content-addressed archive cache, `grail publish`, and a hermetic `tests/fixtures/grail-index`
+  fixture (`=grail-deps`). The index is not signed yet.
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to

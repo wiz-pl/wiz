@@ -149,10 +149,14 @@ def archive (cache : System.FilePath) (p : PkgLock) (offline : Bool := false) :
     return .error s!"--offline: {p.name} {p.version} is not in the archive cache ({f}); run `grail fetch` without --offline"
   let tmp := dir / s!"{p.sha256}.tmp{← IO.Process.getPID}"
   match ← download p.source tmp with
-  | .error e => IO.FS.removeFile tmp; return .error s!"{p.name} {p.version}: {e}"
+  | .error e =>
+    if ← tmp.pathExists then IO.FS.removeFile tmp
+    return .error s!"{p.name} {p.version}: {e}"
   | .ok () =>
     match ← sha256File tmp with
-    | .error e => IO.FS.removeFile tmp; return .error s!"{p.name} {p.version}: {e}"
+    | .error e =>
+      if ← tmp.pathExists then IO.FS.removeFile tmp
+      return .error s!"{p.name} {p.version}: {e}"
     | .ok h =>
       if h != p.sha256 then
         IO.FS.removeFile tmp
@@ -189,19 +193,48 @@ def ensurePkg (cache : System.FilePath) (packagesDir : System.FilePath) (p : Pkg
 
 /-! ## Reading the index -/
 
-/-- Read every `*.sexpr` of an index directory (`index/` under it, if there is one). -/
+/-- A `source` is either an absolute URL/path or a path relative to the index it was read
+from. Relative paths make a local mirror or a checked-out index self-contained (the test
+fixture uses them); a published index should use absolute `https://` URLs. -/
+def resolveSource (base : System.FilePath) (s : String) : String :=
+  if s.isEmpty || s.contains "://" || s.startsWith "/" then s
+  else (base / s).toString
+
+def IxPackage.resolveSources (base : System.FilePath) (p : IxPackage) : IxPackage :=
+  { p with versions := p.versions.map fun v => { v with source := resolveSource base v.source } }
+
+/-- Read every `*.sexpr` of an index directory (`index/` under it, if there is one),
+including one level of scoped subdirectories: `index/@org/name.sexpr` is the package
+`@org/name` (R5 in `wiz-notes/prior-art/registries-build-systems.md`). The file name wins
+over the `(package NAME …)` node inside, so the path and the resolver key cannot disagree;
+a duplicate key within one registry is still an error. -/
 def readIndexDir (dir : System.FilePath) : IO (Except String (Std.HashMap String IxPackage)) := do
+  let root := dir
   let dir := if ← (dir / "index").isDir then dir / "index" else dir
-  let mut m : Std.HashMap String IxPackage := {}
-  for e in ← dir.readDir do
-    if !e.fileName.endsWith ".sexpr" then continue
-    match Index.parse (← IO.FS.readFile e.path) with
-    | .error err => return .error s!"{e.path}: {err}"
-    | .ok ps =>
-      for p in ps do
-        if m.contains p.name then return .error s!"{e.path}: two entries for {p.name}"
-        m := m.insert p.name p
-  pure (.ok m)
+  let m ← IO.mkRef ({} : Std.HashMap String IxPackage)
+  let rec visit (dir : System.FilePath) (scope : String) (depth : Nat) : IO (Except String Unit) := do
+    for e in ← dir.readDir do
+      if e.fileName == "registry.sexpr" then continue
+      if e.fileName.endsWith ".sexpr" then
+        match Index.parse (← IO.FS.readFile e.path) with
+        | .error err => return .error s!"{e.path}: {err}"
+        | .ok ps =>
+          let base := e.fileName.replace ".sexpr" ""
+          let key := if scope.isEmpty then base else s!"{scope}/{base}"
+          for p in ps do
+            let name := if scope.isEmpty then p.name else key
+            if scope.isEmpty && p.name != base then
+              return .error s!"{e.path}: contains package {p.name}, expected {base} (one file, one package)"
+            let cur ← m.get
+            if cur.contains name then return .error s!"{e.path}: two entries for {name}"
+            m.set (cur.insert name ({ IxPackage.resolveSources root p with name } : IxPackage))
+      else if depth < 1 then
+        if ← e.path.isDir then
+          if let .error err ← visit e.path e.fileName (depth + 1) then return .error err
+    return .ok ()
+  match ← visit dir "" 0 with
+  | .error e => pure (.error e)
+  | .ok () => pure (.ok (← m.get))
 
 /-- Where the index came from (for the lock) and the packages it lists. -/
 structure Source where
@@ -209,36 +242,78 @@ structure Source where
   commit : String := ""
   pkgs : Std.HashMap String IxPackage
 
-/-- Load the index from a directory, a file, or a git URL (cloned to the cache). -/
-def loadIndex (cache : System.FilePath) (spec : String) (offline : Bool) :
+/-- Load the index from a directory, a file, or a git URL (cloned to the cache). A
+`URL#COMMIT` spec pins the index to one commit (the lock records it, so a project can
+commit both `grail.lock` and the pin); a plain directory or file has no commit.
+`previous` is the index commit the existing lock recorded: a URL index must move forward
+from it (a rewritten history is refused unless `allowRewind`, R22). -/
+def loadIndex (cache : System.FilePath) (spec : String) (offline : Bool)
+    (previous : String := "") (allowRewind : Bool := false) :
     IO (Except String Source) := do
+  let (spec, pin) := match spec.splitOn "#" with
+    | [u, c] => (u, c)
+    | _ => (spec, "")
   let p : System.FilePath := spec
   if ← p.isDir then
     -- a bare git repository is a URL-like index (clone it); an ordinary directory is
     -- read in place (index/*.sexpr or *.sexpr)
     let bare := (← (p / "HEAD").pathExists) && (← (p / "objects").isDir)
-    unless bare do return (← readDir p spec)
+    unless bare do
+      if pin != "" then
+        return .error s!"--index-commit: {spec} is a directory index, not a git URL to pin"
+      return (← readDir p spec)
   else
     if ← p.pathExists then
+      if pin != "" then
+        return .error s!"--index-commit: {spec} is a file index, not a git URL to pin"
       match Index.parse (← IO.FS.readFile p) with
       | .error e => return .error s!"{spec}: {e}"
-      | .ok ps => return .ok { url := spec, pkgs := ps.foldl (fun m p => m.insert p.name p) {} }
-  -- a URL: a git index cloned into the cache, at the tip of its default branch
+      | .ok ps =>
+        let base := p.parent.getD "."
+        return .ok { url := spec
+                     pkgs := ps.foldl (fun m p => m.insert p.name (IxPackage.resolveSources base p)) {} }
+  -- a URL: a git index cloned into the cache, at the tip of its default branch (or at
+  -- the pinned commit)
   let dir := cache / "grail" / "index"
   if offline then
     unless ← dir.pathExists do
       return .error s!"--offline: no index at {dir} (load {spec} once without --offline)"
     unless (← git #["remote", "get-url", "origin"] (some dir)).toOption == some spec do
       return .error s!"--offline: {dir} is a clone of another index (run without --offline to switch to {spec})"
+    if pin != "" then
+      if let .error e ← checkoutCached dir pin then return .error e
   else
     if let .error e ← ensureClone dir spec then return .error e
     if let .error e ← git #["fetch", "--quiet", "--tags", "--force", "origin"] (some dir) then
       return .error e
-    if let .error e ← git #["reset", "--hard", "--quiet", "FETCH_HEAD"] (some dir) then
-      return .error e
+    if pin != "" then
+      if let .error e ← checkoutPin dir pin then return .error e
+    else
+      if let .error e ← git #["reset", "--hard", "--quiet", "FETCH_HEAD"] (some dir) then
+        return .error e
   let commit := (← git #["rev-parse", "HEAD"] (some dir)).toOption.getD ""
+  if let .error e ← checkRewind dir previous commit allowRewind then return .error e
   return (← readDir dir spec).map fun m => { m with commit }
 where
+  /-- TUF's rollback protection over git's Merkle DAG: a lock's index commit must be an
+  ancestor of the commit `grail update` would now read (fast-forward). A force-push that
+  drops or rewrites a published entry is refused until the caller passes `--allow-rewind`
+  (R22). -/
+  checkRewind (dir : System.FilePath) (previous current : String) (allow : Bool) :
+      IO (Except String Unit) := do
+    if previous.isEmpty || previous == current || allow then return .ok ()
+    match ← git #["merge-base", "--is-ancestor", previous, current] (some dir) with
+    | .ok _ => pure (.ok ())
+    | .error _ =>
+      pure (.error s!"the index history was rewritten (locked at {previous}, now at {current}); pass --allow-rewind to accept")
+  /-- Check out `pin` from the fetched clone, fetching that commit explicitly if it is
+  not reachable from the default refs (a commit on a release tag is normally fetched by
+  `--tags`). -/
+  checkoutPin (dir : System.FilePath) (pin : String) : IO (Except String Unit) := do
+    if (← git #["cat-file", "-e", s!"{pin}^\{commit}"] (some dir)).toOption.isSome then
+      return (← git #["checkout", "--quiet", "--force", "--detach", pin] (some dir)).map fun _ => ()
+    if let .error e ← git #["fetch", "--quiet", "origin", pin] (some dir) then return .error e
+    return (← git #["checkout", "--quiet", "--force", "--detach", pin] (some dir)).map fun _ => ()
   readDir (dir : System.FilePath) (what : String) : IO (Except String Source) := do
     match ← readIndexDir dir with
     | .error e => pure (.error e)
@@ -253,12 +328,20 @@ where
 dependencies), and return the lock they give. Writes nothing. -/
 def resolveLock (cache : System.FilePath) (indexSpec : String) (offline : Bool)
     (readPkg : System.FilePath → IO (Except String Package)) (dir : System.FilePath)
-    (pkg : Package) : IO (Except String Lock) := do
+    (pkg : Package) (allowRewind : Bool := false) : IO (Except String Lock) := do
+  -- the existing lock's index commit is the rollback baseline (R22); a directory or
+  -- file index has no commit and is not checked
+  let previous : String ←
+    if ← (lockFile dir).pathExists then
+      match Lock.parse (← IO.FS.readFile (lockFile dir)) with
+      | .ok l => pure l.indexCommit
+      | .error _ => pure ""
+    else pure ""
   let src ←
     if pkg.requires.isEmpty then pure (.ok { url := "", pkgs := {} })
     else if indexSpec.isEmpty then
       pure (.error s!"{pkg.name} requires packages from the registry: give one with --index URL (or `Package.set \"index\" \"URL\"`)")
-    else loadIndex cache indexSpec offline
+    else loadIndex cache indexSpec offline previous allowRewind
   match src with
   | .error e => pure (.error e)
   | .ok src =>
@@ -281,8 +364,14 @@ def isSha256 (s : String) : Bool :=
 /-- Is every requirement of the manifest pinned in `lock` (and satisfied), is every git
 dependency pinned, and is the lock's registry graph complete? A lock holds the transitive
 closure, so a `pkg` entry whose dependency is absent or not satisfied is a stale or
-hand-edited lock. -/
-def checkLocked (lock : Lock) (pkg : Package) : Except String Unit := do
+hand-edited lock. With `indexCommit` (or `Package.set "index-commit"`), the lock must
+also have been resolved from that index commit. -/
+def checkLocked (lock : Lock) (pkg : Package) (indexCommit : String := "") : Except String Unit := do
+  let pin := if indexCommit.isEmpty then
+    (pkg.settings.find? (·.1 == "index-commit")).map (·.2) |>.getD ""
+  else indexCommit
+  if pin != "" && !(lock.indexCommit.startsWith pin) then
+    throw s!"grail.lock was resolved from index commit {lock.indexCommit}, but this package pins {pin}: run `grail update`"
   for r in pkg.requires do
     match lock.pkgs.find? (·.name == r.name) with
     | none => throw s!"{r.name} is not in grail.lock: run `grail update`"
@@ -390,9 +479,10 @@ def publish (archive : Option System.FilePath) (source : String) (pkg : Package)
 
 /-- Before a build: check the lock out (registry packages unpacked and verified, git
 dependencies at their commits) and return the module roots they give (their `lib`
-targets'). Notes (a `REV` changed since the lock) go to `note`. -/
+targets'). Notes (a `REV` changed since the lock) go to `note`. With `offline`, a
+missing archive or clone is an error instead of a download. -/
 def lockedRoots (cache : System.FilePath) (readPkg : System.FilePath → IO (Except String Package))
-    (dir : System.FilePath) (pkg : Package) (note : String → IO Unit) :
+    (dir : System.FilePath) (pkg : Package) (note : String → IO Unit) (offline : Bool := false) :
     IO (Except String (List System.FilePath)) := do
   let lock := lockFile dir
   if !(← lock.pathExists) then
@@ -411,7 +501,7 @@ def lockedRoots (cache : System.FilePath) (readPkg : System.FilePath → IO (Exc
         note s!"note: {lock} has {d.name} at {g.commit} ({g.url} {g.rev}); grail.wiz asks for {d.url} {d.rev}: `grail update` moves it\n"
   let mut roots := #[]
   for p in l.pkgs do
-    match ← ensurePkg cache (dir / ".grail" / "packages") p with
+    match ← ensurePkg cache (dir / ".grail" / "packages") p offline with
     | .error e => return .error e
     | .ok _ => pure ()
     let d := dir / ".grail" / "packages" / p.name
@@ -421,8 +511,12 @@ def lockedRoots (cache : System.FilePath) (readPkg : System.FilePath → IO (Exc
       | .ok dp => roots := roots ++ (libRootsOf d dp.targets).toArray
   for g in l.git do
     let d := packageDir dir g.name
-    if let .error e ← ensureClone d g.url then return .error e
-    if let .error e ← checkout d g.commit then return .error e
+    if offline then
+      if let .error e ← ensureCloneCached d g.url then return .error e
+      if let .error e ← checkoutCached d g.commit then return .error e
+    else
+      if let .error e ← ensureClone d g.url then return .error e
+      if let .error e ← checkout d g.commit then return .error e
     let content ← contentHash d
     if content != g.content then
       return .error s!"{d} differs from {lock} (content {content}, locked {g.content}): edited? remove it, or `grail update`"
