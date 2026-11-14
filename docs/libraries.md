@@ -492,12 +492,32 @@ data fed to a clock port, a pad on a data output.
 Registers stay on the one implicit clock. For more clocks a `Clocking` (`Hdl.Prim`)
 describes a top-level wrapper: `Verilog.emitTop n ck` prints the circuit as `NAME_core`
 and a module `NAME` whose clock primitive (a PLL, `X7.pll`) takes the board's `clk`, and
-drives the core's `clk` and its clock inputs through BUFGs. Logic in several clock
-domains (CDC) is not supported.
+drives the core's first clock through a BUFG and each other domain from a PLL output
+(through a BUFG) or an input pin (`Clocking.domains`).
+
+Clock domains (`ClockDomain`: the Verilog net and its period; `ClockDomain.sys` is `clk`)
+name a design's clocks without giving a circuit a second one: a circuit's registers and
+memories are all on the domain `Circuit.netlistIn d` builds it for, and
+`Circuit.netlist` is the `sys` case. A design with two clocks is a composition of such
+circuits wired at the top; data crossing from one domain into another must pass a
+synchroniser (`Hdl.Cdc`'s `Cdc.sync2 dst d`: two flops in the destination domain,
+declared with `Prim.declSync`). `Netlist.domainErrors` (appended to `Netlist.errors` next
+to `Netlist.kindErrors`) infers each node's domain (`Net.domOf`: an input from its
+port's, a register or memory read from its own, a synchroniser's output from its clock's,
+anything else the union of its arguments') and rejects a combinational path that mixes
+domains, a register or memory write sampling another domain, a synchroniser clocked by
+the domain it samples, and a domain the netlist does not declare. `Cdc.verilog` is the
+Verilog module `wiz_sync2` that the emitted instances refer to, with `async_reg`. A
+clock used as data, and data fed to a clock port, stay kind errors. A primitive clock
+output can name its domain (`Prim.withOutDom`; `X7.bufgIn d` is a BUFG on `d`'s output),
+so a synchroniser clocked by a BUFG output is in that domain.
 
 Simulation: a primitive without a model is 0 at values and in `Netlist.simulate`.
 `Netlist.unmodelled`/`Circuit.unmodelled` name such instances, and
-`Circuit.runModelled`/`Netlist.simulateModelled` refuse to run a circuit with one.
+`Circuit.runModelled`/`Netlist.simulateModelled` refuse to run a circuit with one. They
+also refuse a netlist with more than one clock domain (`Netlist.domainRefusals`): its
+registers tick at different rates, which the one-tick-per-input simulation cannot
+express (a merged event schedule is not implemented).
 
 `Hdl.Xilinx7` (`X7.*`) declares the 7-series cells of a DDR3 PHY: OBUF, IBUF, IOBUF,
 OBUFDS, IOBUFDS, BUFG (with models), ODDR, OSERDESE2 (8:1 DDR with tristate),
@@ -505,6 +525,36 @@ ISERDESE2 (NETWORKING 8:1 DDR, from an IDELAYE2), IDELAYE2 (VAR_LOAD, 200 MHz re
 IDELAYCTRL, and PLLE2_BASE as a `Clocking`. Tests (group `hdl`, examples/hdl-prim.wiz):
 the Verilog, refusal, buffer models and kind errors, and yosys synth_xilinx keeping every
 cell.
+
+## H14 P2: several clock domains at the top: `Multi`, `Clocking.domains`, constraints
+
+`Multi` (`Hdl.Core`) composes single-clock `Circuit`s into one design. A `MultiPart` is a
+circuit, its `ClockDomain` and the top-level name of each input and output leaf
+(`MultiPart.circuit`); a `MultiWire` is either `link src dst`, which renames the
+destination input to the source node (no hardware, and the domain checker sees the
+crossing), or `through cell ins outs`, one primitive instance between named nets
+(`Cdc.wire dst src dstName` is `Cdc.sync2` as a top-level wire). `Multi.netlist` replays
+the parts into one netlist, prefixing registers and memories with the part's name,
+creates one top-level input/output for every unconnected port, shares one clock net per
+domain, and runs `Netlist.kindErrors`/`Netlist.domainErrors` on the result;
+`Multi.verilog` emits it. Wires must read names built earlier (parts are flattened in
+order), so a wire's source is a previous part's output or a clock domain.
+
+`Clocking.domains` maps each clock port/domain of the core to a `ClockSource`: `.pll out`
+(a PLL output, through a BUFG) or `.pin port` (an input pin, connected directly).
+`Verilog.emitTop` connects every clock port of the core (the first through `sys`'s BUFG)
+and declares the pin ports; `Clocking.problems` reports a domain with no source.
+
+`Xdc.emit` writes a `create_clock` for every clock domain (`ClockDomain.periodPs`; the
+first falls back to the board's period) and a package pin for a second clock the board's
+table names; `Xdc.check` also compares the first domain's period with the board's and
+asks every later domain for a period (`Netlist.clockProblems`). `Pcf.emit` writes a
+`set_frequency` for each domain with a known period, and `Pcf.check` reports a missing
+one. The example/tests (group `hdl`, examples/hdl-cdc.wiz) are a `link` crossing
+(rejected) and a `Cdc.wire` crossing (accepted) between two parts, their core and wrapper
+Verilog, the XDC/PCF text, a BUFG output as a synchroniser's clock (`Prim.withOutDom`),
+and the multi-clock simulation refusal.
+
 ## H14 V1: verified circuit optimisation (`lib/Hdl/Verified.wiz`)
 
 The OLED demo's arithmetic units (wiz-icestick-uart, branch oled-demo: `Sphere.wiz`,

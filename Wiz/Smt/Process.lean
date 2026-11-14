@@ -33,6 +33,10 @@ structure Config where
   command and module cache keys include: an acceptance is not replayed for another version -/
   solver : String := "z3"
   solverId : String := ""
+  /-- (28e) `--trust-native` and `--native-fuel`, as the command has them: `sat_decide_native`
+  runs the LRAT check compiled (native_refl's evaluator) -/
+  trustNative : Bool := false
+  nativeFuel : Nat := 20000000000
   /-- the SAT solver (CaDiCaL's command line: `cadical IN OUT --lrat --no-binary`) -/
   satSolver : String := "cadical"
   /-- milliseconds per query -/

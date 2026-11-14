@@ -176,7 +176,7 @@ def FastSim.node (lay : List FastMem) (i : Nat) (n : SimNode) (acc : FastProg) :
   -- formed here, so `simFast` falls back to `Netlist.simulate`)
   | .inst _ => FastProg.mk acc.code acc.ins acc.regIns acc.regs acc.outs (.cons 0 acc.init) acc.writes
   | .instOut _ _ => FastProg.mk acc.code acc.ins acc.regIns acc.regs acc.outs (.cons 0 acc.init) acc.writes
-  | .clock => FastProg.mk acc.code acc.ins acc.regIns acc.regs acc.outs (.cons 0 acc.init) acc.writes
+  | .clock _ => FastProg.mk acc.code acc.ins acc.regIns acc.regs acc.outs (.cons 0 acc.init) acc.writes
 
 /-- Sort the nodes into the program, in order. -/
 def FastSim.nodes (lay : List FastMem) : Nat → List SimNode → FastProg → FastProg
@@ -207,7 +207,7 @@ def FastSim.nodesOk (nregs nmems : Nat) : Nat → List NetNode → Bool
       | .memRead m => Nat.lt m nmems
       | .inst _ => .false
       | .instOut _ _ => .false
-      | .clock => .false
+      | .clock _ => .false
       | _ => .true)) (FastSim.nodesOk nregs nmems (Nat.succ k) ns)
 
 /-- Whether every memory write reads earlier nodes. -/

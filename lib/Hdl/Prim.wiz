@@ -31,10 +31,15 @@ reads it several times (each read would build another instance).
 Simulation: a primitive without a model is 0 at values and in `Netlist.simulate`;
 `Netlist.unmodelled` names such instances and the checked runners
 (`Circuit.runModelled`, `Netlist.simulateModelled`) refuse to run a circuit with one.
+A netlist with more than one clock domain is refused too (`Netlist.domainRefusals`):
+its registers tick at two rates, which the single-tick simulation cannot express.
 
 Clocks: a circuit's registers stay on its one implicit clock. `Clocking` describes a
 generated top-level wrapper whose clock primitive (a PLL) turns the board's clock into
-that implicit clock (through a BUFG) and into the circuit's clock inputs.
+that implicit clock (through a BUFG) and into the circuit's clock inputs. Data that
+crosses from one clock domain into another goes through a synchroniser
+(`Prim.declSync`; `Cdc.sync2` in `Hdl.Cdc`), and `Netlist.domainErrors` rejects every
+other crossing.
 
 A parameter's value, printed as Verilog.
 -/
@@ -57,13 +62,31 @@ def PrimParam.pairs : List (String × PrimParam) → List (String × String)
 
 -- a declaration with typed parameters, the same with other parameters (an instance's
 -- own settings), and with a model
+/-- A primitive declaration: its module, parameters, port names and model. -/
 def Prim.decl {ω i o : HwTy} (name : String) (ps : List (String × PrimParam)) (ins outs : List String)
     (model : Option (HwTy.El i → HwTy.El o)) : Prim i o :=
-  Prim.mk name (PrimParam.pairs ps) ins outs model
+  Prim.mk name (PrimParam.pairs ps) ins outs model .false .nil
+/-- A synchroniser declaration (`Prim.decl` marked as a crossing): its output is in its
+clock input's domain and its data may come from one other domain (`Netlist.domainErrors`).
+Its clock input must be the only clock leaf of `i`; `Cdc.sync2` (`Hdl.Cdc`) is the
+two-flop one. A model, if any, is not a two-flop delay (a model is one total function
+from inputs to outputs), so the checked runners still refuse a multi-domain netlist
+(`Netlist.domainRefusals`). -/
+def Prim.declSync {ω i o : HwTy} (name : String) (ps : List (String × PrimParam)) (ins outs : List String)
+    (model : Option (HwTy.El i → HwTy.El o)) : Prim i o :=
+  Prim.mk name (PrimParam.pairs ps) ins outs model .true .nil
 def Prim.withParams {ω i o : HwTy} (p : Prim i o) (ps : List (String × PrimParam)) : Prim i o :=
-  Prim.mk p.name (PrimParam.pairs ps) p.ins p.outs p.model
+  Prim.mk p.name (PrimParam.pairs ps) p.ins p.outs p.model p.sync p.outDom
 def Prim.withModel {ω i o : HwTy} (p : Prim i o) (f : HwTy.El i → HwTy.El o) : Prim i o :=
-  Prim.mk p.name p.params p.ins p.outs (Option.some f)
+  Prim.mk p.name p.params p.ins p.outs (Option.some f) p.sync p.outDom
+/-- Give output leaf `j` the clock domain `d` (`outDom`): a BUFG or PLL output that clocks
+a domain. A primitive's other output leaves are in the domain their inputs are in. -/
+def Prim.withOutDomAt {ω i o : HwTy} (p : Prim i o) (j : Nat) (d : String) : Prim i o :=
+  Prim.mk p.name p.params p.ins p.outs p.model p.sync
+    (Hdl.setNthPad (Option.none : Option String) (Option.some d) p.outDom j)
+/-- The clock domain of a primitive's first output leaf (`Prim.withOutDomAt` at 0). -/
+def Prim.withOutDom {ω i o : HwTy} (p : Prim i o) (d : String) : Prim i o :=
+  Prim.withOutDomAt p 0 d
 
 ------------------------------------------------------------------------------------
 -- Simulation without models: who has none, and runners that refuse.
@@ -80,15 +103,18 @@ def Netlist.unmodelled (n : Netlist) : List String := Netlist.unmodelledAux 0 n.
 def Prim.refusal (es : List String) : String :=
   "simulation refused: " <+> Hdl.sepBy "; " es
 
+def Netlist.simulationRefusals (n : Netlist) : List String :=
+  List.append (Netlist.domainRefusals n) (Netlist.unmodelled n)
+
 def Netlist.simulateModelled (n : Netlist) (inputs : List (List Nat)) : Except String (List (List Nat)) :=
-  match Netlist.unmodelled n with
+  match Netlist.simulationRefusals n with
   | .nil => Except.ok (Netlist.simulate n inputs)
   | es => Except.error (Prim.refusal es)
 
 def Circuit.unmodelled {ω i o : HwTy} (c : Circuit i o) : List String := Netlist.unmodelled (Circuit.netlist "c" c)
 
 def Circuit.runModelled {ω i o : HwTy} (c : Circuit i o) (xs : List (HwTy.El i)) : Except String (List (HwTy.El o)) :=
-  match Circuit.unmodelled c with
+  match Netlist.simulationRefusals (Circuit.netlist "c" c) with
   | .nil => Except.ok (Circuit.run c xs)
   | es => Except.error (Prim.refusal es)
 
@@ -96,8 +122,23 @@ def Circuit.runModelled {ω i o : HwTy} (c : Circuit i o) (xs : List (HwTy.El i)
 -- A top-level wrapper with a clock primitive. The circuit becomes module `NAME_core`; the
 -- wrapper `NAME` has the board's clock `clk` and the circuit's other ports, and contains
 -- the clock primitive (a PLL), a BUFG per clock it hands on, and the circuit, whose
--- implicit clock is `sys` (through a BUFG), whose clock inputs `clocks` name (each
--- through a BUFG), and whose data inputs `signals` name (a PLL's LOCKED, directly).
+-- first clock domain is `sys` (through a BUFG), whose other clock domains come from a PLL
+-- output (`ClockSource.pll`, through a BUFG) or from an input pin (`ClockSource.pin`),
+-- and whose data inputs `signals` name (a PLL's LOCKED, directly).
+
+/-- Where a clock domain's net comes from in a `Clocking` wrapper: a PLL output (through a
+BUFG) or a top-level input pin. -/
+inductive ClockSource where
+  | pll (out : String)
+  | pin (port : String)
+/-- The PLL output of a `ClockSource.pll`. -/
+def ClockSource.out : ClockSource → Option String
+  | .pll out => .some out
+  | .pin _ => .none
+/-- The input pin of a `ClockSource.pin`. -/
+def ClockSource.port : ClockSource → Option String
+  | .pll _ => .none
+  | .pin port => .some port
 
 structure Clocking where
   name : String
@@ -105,8 +146,8 @@ structure Clocking where
   input : String                    -- the primitive's port the board's clock feeds
   ties : List (String × String)     -- other inputs: port, Verilog value (`1'b0`)
   loops : List (String × String)    -- (output, input) wired together (CLKFBOUT, CLKFBIN)
-  sys : String                      -- the output that becomes the circuit's clock
-  clocks : List (String × String)   -- (circuit's clock input port, output)
+  sys : String                      -- the output that becomes the circuit's first clock
+  domains : List (String × ClockSource) -- (clock port or domain, where its net comes from)
   signals : List (String × String)  -- (circuit's data input port, output)
 
 def Hdl.lookup (k : String) : List (String × String) → Option String
@@ -114,6 +155,14 @@ def Hdl.lookup (k : String) : List (String × String) → Option String
   | .cons p ps => match Hdl.strEq p.1 k with
     | .true => .some p.2
     | .false => Hdl.lookup k ps
+/-- The source of a clock port or domain in a `Clocking`. -/
+def Clocking.sourceAux (k : String) : List (String × ClockSource) → Option ClockSource
+  | .nil => .none
+  | .cons q qs => match Hdl.strEq q.1 k with
+    | .true => .some q.2
+    | .false => Clocking.sourceAux k qs
+def Clocking.source (ck : Clocking) (k : String) : Option ClockSource :=
+  Clocking.sourceAux k ck.domains
 
 def Clocking.net (out : String) : String := "ck_" <+> out
 def Clocking.bufd (out : String) : String := "ck_" <+> out <+> "_g"
@@ -121,60 +170,107 @@ def Clocking.bufg (out : String) : String :=
   "  wire " <+> Clocking.bufd out <+> ";\n  BUFG bufg_" <+> out <+> " (.I(" <+> Clocking.net out <+> "), .O(" <+> Clocking.bufd out <+> "));\n"
 def Clocking.wire (out : String) : String := "  wire " <+> Clocking.net out <+> ";\n"
 
+/-- The PLL outputs a `Clocking` hands to the circuit (through BUFGs). -/
+def Clocking.pllOuts (ck : Clocking) : List String :=
+  Hdl.concatLists (Hdl.map (fun (q : String × ClockSource) => match q.2 with
+    | .pll out => .cons out .nil
+    | .pin _ => .nil) ck.domains)
+/-- The input pins a `Clocking` uses for clock domains. -/
+def Clocking.pinPorts (ck : Clocking) : List String :=
+  Hdl.concatLists (Hdl.map (fun (q : String × ClockSource) => match q.2 with
+    | .pll _ => .nil
+    | .pin port => .cons port .nil) ck.domains)
+
 -- the board-side ports (the circuit's, less the ones the clock primitive drives)
 def Clocking.inDecls (ck : Clocking) : List String → List NetPort → String
-  | .cons nm nms, .cons p ps => (match p.width, Hdl.lookup nm ck.clocks, Hdl.lookup nm ck.signals with
+  | .cons nm nms, .cons p ps => (match p.width, Clocking.source ck nm, Hdl.lookup nm ck.signals with
     | .zero, _, _ => ""
     | _, .none, .none => ", input " <+> Verilog.range p.width <+> nm
     | _, _, _ => "") <+> Clocking.inDecls ck nms ps
   | _, _ => ""
+/-- The input pins a `Clocking` adds for clock domains that come from a pin: each once, and
+not the board's `clk` or a port already declared above. -/
+def Clocking.extraInDecls (declared : List String) : List String → String
+  | .nil => ""
+  | .cons p ps => (match Hdl.strEq p "clk", Hdl.member p declared with
+    | .true, _ => ""
+    | _, .true => ""
+    | _, .false => ", input " <+> p) <+> Clocking.extraInDecls declared ps
 def Clocking.coreConns (ck : Clocking) : List String → List NetPort → List String
   | .cons nm nms, .cons p ps => (match p.width with
     | .zero => Clocking.coreConns ck nms ps
-    | .succ _ => .cons (match Hdl.lookup nm ck.clocks, Hdl.lookup nm ck.signals with
-        | .some out, _ => Verilog.conn nm (Clocking.bufd out)
+    | .succ _ => .cons (match Clocking.source ck nm, Hdl.lookup nm ck.signals with
+        | .some (.pll out), _ => Verilog.conn nm (Clocking.bufd out)
+        | .some (.pin port), _ => Verilog.conn nm port
         | _, .some out => Verilog.conn nm (Clocking.net out)
         | _, _ => Verilog.conn nm nm) (Clocking.coreConns ck nms ps))
   | _, _ => .nil
 def Clocking.outs (ck : Clocking) : List String :=
   Hdl.map (fun (q : String × String) => q.1) ck.loops
-  ++ (.cons ck.sys (List.append (Hdl.map (fun (q : String × String) => q.2) ck.clocks)
+  ++ (.cons ck.sys (List.append (Clocking.pllOuts ck)
     (Hdl.map (fun (q : String × String) => q.2) ck.signals)))
 def Clocking.primConns (ck : Clocking) : List String :=
   .cons (Verilog.conn ck.input "clk")
     (List.append (Hdl.map (fun (q : String × String) => Verilog.conn q.1 q.2) ck.ties)
       (List.append (Hdl.map (fun (q : String × String) => Verilog.conn q.1 (Clocking.net q.1) <+> ", " <+> Verilog.conn q.2 (Clocking.net q.1)) ck.loops)
         (Hdl.map (fun (o : String) => Verilog.conn o (Clocking.net o))
-          (.cons ck.sys (List.append (Hdl.map (fun (q : String × String) => q.2) ck.clocks)
+          (.cons ck.sys (List.append (Clocking.pllOuts ck)
             (Hdl.map (fun (q : String × String) => q.2) ck.signals))))))
 def Hdl.concatMap {A : Type} (f : A → String) : List A → String
   | .nil => ""
   | .cons x xs => f x <+> Hdl.concatMap f xs
 
 def Netlist.renamed (n : Netlist) (name : String) : Netlist :=
-  Netlist.mk name n.nodes n.regs n.inputs n.outputs n.hints n.mems n.errors
+  Netlist.mk name n.nodes n.regs n.inputs n.outputs n.hints n.mems n.clocks n.errors
+/-- The netlist's clock domain names (`clk`, `clk2`, …). -/
+def Netlist.clockNames (n : Netlist) : List String :=
+  Hdl.map (fun (d : ClockDomain) => d.name) n.clocks
 
--- The ports of `clocks`/`signals` must be inputs of the circuit.
-def Clocking.missing (ins : List String) : List (String × String) → List String
+-- The ports of the domain and signal tables must be inputs (or, for a domain, a clock).
+def Clocking.missing (ports : List String) : List String → List String
   | .nil => .nil
-  | .cons q qs => match Hdl.member q.1 ins with
-    | .true => Clocking.missing ins qs
-    | .false => .cons ("Clocking: no input " <+> q.1 <+> " to drive") (Clocking.missing ins qs)
+  | .cons k ks => match Hdl.member k ports with
+    | .true => Clocking.missing ports ks
+    | .false => .cons ("Clocking: no input " <+> k <+> " to drive") (Clocking.missing ports ks)
+/-- Clock domains of the netlist (`n.clocks`, past the first) that the `Clocking` does not
+name a source for. -/
 def Clocking.problems (n : Netlist) (ck : Clocking) : List String :=
-  Clocking.missing (Verilog.portIdents n).ins (List.append ck.clocks ck.signals)
+  let ω ports := List.append (Hdl.map (fun (p : NetPort) => p.name) n.inputs) (Netlist.clockNames n);
+  let ω keys := Hdl.map (fun (q : String × ClockSource) => q.1) ck.domains;
+  let ω sigs := Hdl.map (fun (q : String × String) => q.1) ck.signals;
+  let ω rest := match n.clocks with
+    | .nil => List.nil
+    | .cons _ ds => ds;
+  List.append (Clocking.missing ports (List.append keys sigs))
+    (Hdl.concatLists (Hdl.map (fun (d : ClockDomain) => match Clocking.source ck d.name with
+      | .some _ => List.nil
+      | .none => .cons ("Clocking: no source for clock domain " <+> d.name) List.nil) rest))
+
+/-- The connection of each of the netlist's clock ports: the first through `sys`'s BUFG,
+each other through its domain's source (a PLL output's BUFG or an input pin). -/
+def Clocking.clockConns (n : Netlist) (ck : Clocking) : List String :=
+  match n.clocks with
+  | .nil => .nil
+  | .cons d ds => .cons (Verilog.conn d.name (Clocking.bufd ck.sys))
+    (Hdl.map (fun (e : ClockDomain) => match Clocking.source ck e.name with
+      | .some (.pll out) => Verilog.conn e.name (Clocking.bufd out)
+      | .some (.pin port) => Verilog.conn e.name port
+      | .none => Verilog.conn e.name e.name) ds)
 
 def Verilog.emitTop (n : Netlist) (ck : Clocking) : String :=
   let ω core := Netlist.renamed n (n.name <+> "_core");
   let ω vn := Verilog.portIdents n;
   let ω cx := Verilog.ctx n vn;
+  let ω declared := Hdl.map (fun (p : NetPort) => p.name) n.inputs;
   Verilog.emit core
   <+> "module " <+> Verilog.ident n.name <+> "(input clk" <+> Clocking.inDecls ck vn.ins n.inputs
+  <+> Clocking.extraInDecls declared (Clocking.pinPorts ck)
   <+> Verilog.outDecls cx vn.outs n.outputs <+> ");\n"
   <+> Verilog.errors (Clocking.problems n ck)
   <+> Hdl.concatMap Clocking.wire (Clocking.outs ck)
   <+> "  " <+> ck.name <+> Verilog.params (PrimParam.pairs ck.params) <+> " clocking (" <+> Hdl.sepBy ", " (Clocking.primConns ck) <+> ");\n"
   <+> Clocking.bufg ck.sys
-  <+> Hdl.concatMap (fun (q : String × String) => Clocking.bufg q.2) ck.clocks
-  <+> "  " <+> Verilog.ident core.name <+> " core (" <+> Hdl.sepBy ", " (.cons (Verilog.conn "clk" (Clocking.bufd ck.sys))
+  <+> Hdl.concatMap (fun (o : String) => Clocking.bufg o) (Clocking.pllOuts ck)
+  <+> "  " <+> Verilog.ident core.name <+> " core (" <+> Hdl.sepBy ", " (List.append (Clocking.clockConns n ck)
     (List.append (Clocking.coreConns ck vn.ins n.inputs) (Clocking.coreConns ck vn.outs n.outputs))) <+> ");\n"
   <+> "endmodule\n"

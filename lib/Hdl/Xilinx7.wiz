@@ -71,6 +71,11 @@ def X7.obufds {r : HwTy → Type} [Hw r] (x : r X7.B1) : r (HwTy.prod (HwTy.pad 
 def X7.iobufds {r : HwTy → Type} [Hw r] (o oe : r X7.B1) : r (HwTy.prod X7.B1 (HwTy.prod (HwTy.inout 1) (HwTy.inout 1))) :=
   Hw.prim X7.iobufdsP (Hw.pair o (Hw.not oe))
 def X7.bufg {r : HwTy → Type} [Hw r] (c : r HwTy.clock) : r HwTy.clock := Hw.prim X7.bufgP c
+/-- A BUFG on domain `d`'s clock net whose output is that same domain (`outDom`), so a
+synchroniser can be clocked by `X7.bufgIn d` rather than by `Hw.clockOf d`. The emitted
+cell is the same `BUFG`; the domain marker is what the checker reads. -/
+def X7.bufgIn {r : HwTy → Type} [Hw r] (d : ClockDomain) : r HwTy.clock :=
+  Hw.prim (Prim.withOutDom X7.bufgP d.name) (Hw.clockOf d)
 
 ------------------------------------------------------------------------------------
 -- ODDR: D1 on the rising edge, D2 on the falling edge (SAME_EDGE: both sampled at the
@@ -165,9 +170,9 @@ def X7.pllOutParams : List (String × (Nat × (Nat × String))) → List (String
   | .nil => .nil
   | .cons q qs => .cons (X7.pllOut q.2.1 <+> "_DIVIDE", PrimParam.int q.2.2.1)
       (.cons (X7.pllOut q.2.1 <+> "_PHASE", PrimParam.real q.2.2.2) (X7.pllOutParams qs))
-def X7.pllClocks : List (String × (Nat × (Nat × String))) → List (String × String)
+def X7.pllClocks : List (String × (Nat × (Nat × String))) → List (String × ClockSource)
   | .nil => .nil
-  | .cons q qs => .cons (q.1, X7.pllOut q.2.1) (X7.pllClocks qs)
+  | .cons q qs => .cons (q.1, ClockSource.pll (X7.pllOut q.2.1)) (X7.pllClocks qs)
 def X7.pll (period : String) (mult div sysDiv : Nat) (outs : List (String × (Nat × (Nat × String)))) (locked : List String) : Clocking :=
   Clocking.mk "PLLE2_BASE"
     (.cons ("CLKIN1_PERIOD", PrimParam.real period) (.cons ("CLKFBOUT_MULT", PrimParam.int mult)

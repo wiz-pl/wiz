@@ -505,6 +505,121 @@ take it.
 List, an indexed family, nested matches, `let 1`; dropping the variable in one branch, or
 using it twice or under an ω argument, rejected); a compiled program with additive matches.
 
+## 21w: one value representation for the two runtimes
+
+The Lean toolchain's C/LLVM runtimes (`runtime/wiz.c`) and the self-hosted backend's
+runtime (`selfhost/rt.c`) had grown two different value representations: 62-bit scalars
+with GMP numbers against 63-bit wrapping ones, different special-tag numbers, an 8-/16-byte
+header against `wiz_hdr`'s fixed 16 bytes, a two-argument closure calling convention
+against `wiz_apply`'s argument array, and a treap/offset-chain layout against flat
+constructors. That is the obstacle in front of moving runtime leaves into Wiz
+(`wiz-notes/runtime-in-wiz.md`, decision D5): a Wiz module would have to be written twice
+or know which runtime it is running on. This section records the first step: `rt.c` now
+uses `wiz.c`'s representation for everything the self-hosted backend needs. (The Lean
+runtime's file was split into `runtime/wiz_rt.h` and the `runtime/rt_*.inc` area files
+after this section was written; "`wiz.c`" below means that runtime, whose header is now
+`wiz_rt.h`.)
+
+**What now agrees** (checked by `_Static_assert`s in `rt.c`):
+
+* **Scalars and tags.** `BOX`/`UNBOX`/`ISBOX` are `wiz.c`'s, and the special tags are its
+  numbers: `T_CLO = 0xFFFF0000`, `T_RAW = …0002`, `T_EXT = …0003`, `T_ARR = …0005`,
+  `T_STR = …0006`, `T_MAP = …0007`, `T_THUNK = …0008` (the unused `T_BIG`, `T_BYTES`,
+  `T_WARRAY`, `T_WMAP`, `T_ITAB` keep their `wiz.c` numbers too).
+* **The header.** Every object starts with `wiz_hdr`: `int64_t rc`, `uint32_t tag`,
+  `uint32_t size` (16 bytes). `size` means fields for constructors, captured arguments for
+  closures, 0 for text/arrays/maps/foreign pointers.
+* **Layouts.** Constructors (`wiz_ctor`), closures (`wiz_clo`: `fn`, `arity`, captured
+  arguments), thunks (`wiz_thunk`: `fn`/`val`), foreign pointers (`wiz_ext`), text
+  (`wiz_str`: `len`, inline UTF-8), arrays (`wiz_array`: `len`, `cap`, `data`) and text
+  maps (`wiz_map`: open addressing, `count`, `cap`, `keys`, `vals`) are the same structs,
+  field for field. (How a *constructor value* is encoded still differs; see below.)
+* **Closure ABI.** A closure's `fn` now takes the whole argument array (`V *a`), captured
+  arguments first, exactly like `wiz_boxed_fn`; `arity` counts captured and applied
+  arguments. The generated functions (`static V lamN(V *a)`) were already of that shape,
+  so `Backend.wiz` did not change. The runtime's own suspensions (`ind`'s hypotheses) were
+  rewritten from `fn(env, arg)` to the same array convention.
+* **Suspensions.** `memo` and the backend's suspended `let`s are `T_THUNK` objects with
+  `wiz.c`'s force protocol (`fn` cleared after the first force, `val` kept), instead of
+  closures with a mutable environment.
+* **Count rules.** `inc`/`dec` implement `wiz.c`'s rules: `rc > 0` owned by one thread,
+  `rc < 0` shared (atomic), `rc == 0` immortal (the static `(k, ◾)` values are now
+  `rc == 0`, not a large count). Reuse and drop specialisation use the same `rc == 1`
+  tests.
+* **Data structures.** Under reference counting, arrays are `wiz_array` (updated in place
+  when unique, else copied) and `StrMap` is `wiz_map` (open addressing, linear probing),
+  not the Baker array and treap. Text is `wiz_str` in both.
+
+**What is still self-hosted only** (and why it can wait):
+
+* **The constructor payload encoding.** `wiz.c` has flat constructors: an object's tag
+  is the constructor index, `size` its number of fields, and a nullary constructor is the
+  scalar `BOX(k)`. The self-hosted backend erases a value of `μ D i` to its *payload*
+  `(tag, fields…)`: a tag-0 object whose first field is the constructor tag, the rest the
+  fields (flattened as a chain), and a match switches on `tagof(fld(x, 0))`. The `Obj`
+  struct and the special tag numbers agree, but a constructor value is not interpretable
+  by the other runtime until this encoding goes. It goes with the offset chains (below).
+* **Offset chains.** A flat pair chain `(e₀, (e₁, … t))` is one tag-0 object, and a tail is
+  the same pointer with an index in bits 1–3. `wiz.c` has flat constructors only. Removing
+  the chains changes `Backend.wiz`'s object generation and projection code (and costs
+  memory and allocations), so it is the next representation step, not this one.
+* **63-bit `Nat`.** `rt.c`'s numbers are 63-bit words with wrapping arithmetic; `wiz.c`
+  has 62-bit scalars and `T_BIG` GMP objects. The self-hosted tests rely on `2^63 - 1`
+  (`=selfhost` case 36), so this cannot change without either GMP in every self-hosted
+  program or a deliberate smaller `Nat`.
+* **`T_HYP = 0xFFFF000C`.** `ind`'s lazily computed hypotheses have no `wiz.c` counterpart
+  (it computes them in compiled Wiz, `PrimCode.lean`). It is the next free special tag;
+  it must be added to the shared header before a value can cross runtimes.
+* **Boehm mode.** With `WIZ_RC` off, `rt.c` still uses the collector and its persistent
+  Baker arrays and treap map. The RC mode is the converged one; retiring Boehm removes
+  this branch.
+* **Allocation strategy.** `rt.c` allocates small objects from 16-byte size-class free
+  lists carved from 1 MB blocks; `wiz.c` calls `malloc` per object. This is not part of
+  the ABI, and the self-hosted compiler's measurements depend on it.
+* **Data structures missing in `rt.c`.** `Bytes`, `WordArray`, `WordMap`, `Intern` and
+  GMP numbers exist only in `wiz.c`; the self-hosted frontend's native list does not name
+  them. Adding them is where the first shared Wiz leaves will land.
+* **FFI marshalling.** The generated wrappers call `rt_in_nat`/`rt_out_nat`,
+  `rt_in_str`/`rt_out_str`, `rt_in_bool`, `rt_in_u64`/`rt_out_u64` and so on; `wiz.c`'s
+  ABI names are `wiz_in_nat`, `wiz_out_nat`, `wiz_in_string`, `wiz_out_string`,
+  `wiz_in_bool`, `wiz_in_u64`, … The raw `UInt64`/`Float64` boxes and foreign pointers
+  already agree; `Nat` is 63-bit here, and a `Bool` result is the constructor payload
+  above, not `wiz.c`'s scalar constructor.
+* **`lib/Sys` marshalling and threads.** `wiz.c` exports the `wiz_sys_*`, channel, MVar,
+  lock and ref entry points; `rt.c` has only the `rt_*` FFI marshalling that `Backend.wiz`
+  emits, no POSIX layer and no thread library (the `rc < 0` rule is implemented but never
+  used). `wiz_live` and the proof budget are globals, not `__thread`.
+* **Leak check exit code.** `wiz.c` reports leaks with exit code 2; the self-hosted
+  runtime exits 4 (and only in RC mode), which the `=selfhost` cases test.
+
+**Path to one runtime.**
+
+1. **Land the `runtime/wiz_rt.h` split** (header + area files) so the shared definitions
+   have one home. Then replace the top of `selfhost/rt.c` with `#include "wiz_rt.h"` (the
+   inline part only) and keep the self-hosted extensions in a small `selfhost/rt_ext.h`.
+   The `_Static_assert`s above are the acceptance test.
+2. **Flatten constructors.** In `Backend.wiz` and `rt.c`, drop the payload encoding
+   (`mkobj(k, fields…)`, match on `tagof(x)`) and the offset chains, then delete
+   `OBJ`/`OFF`. This is the last layout difference; after it a constructor value built by
+   either backend is the same object.
+3. **Retire Boehm** (D2): make `WIZ_RC` unconditional in the self-hosted backend, delete
+   the Baker array and treap map, and move the GC cases in `=selfhost` to RC.
+4. **Share the leaf layer.** Implement the library-facing `wiz_*` ABI (`wiz_in_string`,
+   `wiz_map_*`, `wiz_array_*`, `wiz_str_*`, `wiz_bytes_*`, `wiz_itab_*`, `wiz_sys_*`) in
+   `rt.c`, and move the marshalling leaves (`Text`, `Sys`, `Print`, `Intern`) into
+   `lib/Runtime/*.wiz` once, compiled by both toolchains (`wiz-notes/runtime-in-wiz.md`,
+   option (a)). The self-hosted backend's own `mkobj`/`mkclo`/`apn` can stay: they are the
+   backend ABI, not the shared value ABI.
+5. **Decide the number story** (D7's sibling): either give the self-hosted runtime GMP
+   `T_BIG` objects (one `Nat` representation at last, at a cost), or accept 63-bit `Nat`
+   in the self-hosted backend and keep `T_BIG` a Lean-runtime detail. The closure of this
+   choice is what lets a *single* runtime object serve both compilers.
+6. **Threads last.** Port `wiz_mark_mt`, thunk locking and the channel/MVar/lock/ref
+   entry points to `rt.c` (or move the Wiz-side `Session`/`Conc` layer to the shared
+   runtime); the `rc < 0` rules are already in place.
+7. **Then the runtime is one object**: `wiz_rt.h` + `wiz_rt.c`, `-DWIZ_API=` for the
+   object build, embedded inline for the default; the self-hosted compiler links the same
+   object, and the fixpoint test checks that both compilers' C output is identical.
 ## 21x: modules and imports (A14, first milestone)
 
 `import M` was silently the embedded Prelude: the self-hosted frontend had one module,

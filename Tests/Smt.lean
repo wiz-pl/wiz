@@ -19,10 +19,12 @@ def render (s : CommandState ZeroOneMany) : List String :=
   s.messages.toList.map fun m =>
     s!"{match m.severity with | .error => "error" | .warning => "warning" | .info => "info"}: {m.text}"
 
-/-- Every message of `input`, with all of `lib/` importable. -/
-def msgs (input : String) (cfg : Smt.Config := {}) : IO (List String) := do
+/-- Every message of `input`, with all of `lib/` importable, and `--trust-native` if
+`trust`. -/
+def msgs (input : String) (cfg : Smt.Config := {}) (trust : Bool := false) : IO (List String) := do
   let loader ← Elab.libLoader
-  pure (render (runFrontend (R := ZeroOneMany) input { loader, trustedModule := Tests.libModule, smt := cfg }))
+  pure (render (runFrontend (R := ZeroOneMany) input
+    { loader, trustedModule := Tests.libModule, smt := cfg, trustNative := trust }))
 
 def has (ms : List String) (fragment : String) : Bool := ms.any fun m => (m.splitOn fragment).length > 1
 
@@ -99,6 +101,35 @@ def group : Group where
         noErrors ms
         expect ms "info: 'eq4' does not depend on any axioms"
         expect ms "info: 'Sat.dag_sound' does not depend on any axioms" },
+    { name := "sat_decide_native (28e): refused without --trust-native", run := fun _ => do
+        let ms ← msgs ("import SatTactic\n" ++
+          "def demorgan (a b : Bool) : Bool.not (Bool.and a b) = Bool.or (Bool.not a) (Bool.not b) := by sat_decide_native\n")
+        expect ms "error: native evaluation is not enabled"
+        expect ms "--trust-native" },
+    { name := "sat_decide_native (28e): the check run compiled, an axiom per check that #print axioms lists", run := fun _ => needs "cadical" do
+        let ms ← msgs ("import SatTactic\n" ++
+          "def demorgan (a b : Bool) : Bool.not (Bool.and a b) = Bool.or (Bool.not a) (Bool.not b) := by sat_decide_native\n" ++
+          "def use (a b : Bool) : Bool.not (Bool.and a b) = Bool.or (Bool.not a) (Bool.not b) := demorgan a b\n" ++
+          "#print axioms demorgan\n#print axioms use\n#print axioms Sat.dag_sound\n") (trust := true)
+        noErrors ms
+        expect ms "not checked by the kernel"
+        expect ms "info: 'demorgan' depends on axioms: [demorgan.sat3.native✝]"
+        expect ms "info: 'use' depends on axioms: [demorgan.sat3.native✝]"
+        expect ms "info: 'Sat.dag_sound' does not depend on any axioms" },
+    { name := "sat_decide_native (28e): the same fragment (a 4-bit carry chain); a false goal is the solver's", run := fun _ => needs "cadical" do
+        let maj := "def maj (a b c : Bool) : Bool := Bool.or (Bool.or (Bool.and a b) (Bool.and a c)) (Bool.and b c)\n"
+        let carry := "def carry (a b c : Bool) : Bool := Bool.or (Bool.and a b) (Bool.and c (Bool.xor a b))\n"
+        let c1 := "(carry a2 b2 (carry a1 b1 (carry a0 b0 Bool.false)))"
+        let c2 := "(maj b2 a2 (maj b1 a1 (maj b0 a0 Bool.false)))"
+        let ms ← msgs ("import SatTactic\n" ++ maj ++ carry ++
+          s!"def eq4 (a0 b0 a1 b1 a2 b2 a3 b3 : Bool) : Bool.xor (Bool.xor a3 b3) {c1} = Bool.xor (Bool.xor b3 a3) {c2} := by sat_decide_native\n" ++
+          "#print axioms eq4\n") (trust := true)
+        noErrors ms
+        expect ms "info: 'eq4' depends on axioms: [eq4.sat3.native✝]"
+        let ms ← msgs ("import SatTactic\ndef wrong (a b : Bool) : Bool.and a b = Bool.or a b := by sat_decide_native\n") (trust := true)
+        expect ms "sat_decide: the goal is false; a counterexample:"
+        let ms ← msgs ("import SatTactic\ndef notEq (a : Bool) : Bool := by sat_decide_native\n") (trust := true)
+        expect ms "sat_decide: the goal is not an equation of booleans" },
     { name := "bv_decide (28d): word equations by bit-blasting, checked by the kernel", run := fun _ => needs "cadical" do
         let ms ← msgs ("import BvDecide\nimport BitVec\n" ++
           "def t1 (x y : UIntN 4) : UIntN.land x (UIntN.lor x y) = x := by bv_decide\n" ++

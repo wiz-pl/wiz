@@ -252,6 +252,57 @@ def hdlGroup : Group where
     { name := "Verilog: declarations before use (regs, wires, then the updates), sized initial values", run := fun _ =>
         okLibs (hdlVerilogSrc ++ "#eval v1\n")
           ["\"module counter(input clk, input [0:0] x, output [7:0] y);\\n  reg [7:0] r; initial r = 8'd250;\\n  wire [7:0] n3 = r + 8'd1;\\n  always @(posedge clk) r <= n3;\\n  assign y = r;\\nendmodule\\n\""] },
+    { name := "C1: clock domains: a clk2 circuit emits input clk2 and posedge clk2; Hw.clockOf drives a primitive", run := fun _ => do
+        -- `n2.clocks` is the named domain; its Verilog names the port and the always block
+        -- after it; an ODDR clocked by `Hw.clockOf d2` connects `.C(clk2)`.
+        okLibs ("import Hdl.Core\nimport Hdl.Prim\n" ++
+          "def u8 : HwTy := HwTy.bits 8\n" ++
+          "def c1 : Circuit (HwTy.bits 1) u8 := Circuit.mk u8 (BitVec.ofNat 8 250) (fun s u => Hw.pair (Hw.add s (Hw.lit 8 1)) s)\n" ++
+          "def d2 : ClockDomain := ClockDomain.named \"clk2\"\n" ++
+          "def n2 : Netlist := Circuit.netlistIn d2 \"dom2\" c1\n" ++
+          "#eval Hdl.map (fun (d : ClockDomain) => (d.name, d.periodPs)) n2.clocks\n" ++
+          "#eval Verilog.emit n2\n" ++
+          "def oddrP : Prim (HwTy.prod HwTy.clock (HwTy.prod HwTy.bit HwTy.bit)) HwTy.bit :=\n" ++
+          "  Prim.decl \"ODDR\" .nil (.cons \"C\" (.cons \"D1\" (.cons \"D2\" .nil))) (.cons \"Q\" .nil) .none\n" ++
+          "def primC : Circuit (HwTy.bits 8) HwTy.bit :=\n" ++
+          "  Circuit.mk (HwTy.bits 8) (BitVec.ofNat 8 0)\n" ++
+          "    (fun s x => Hw.pair s (Hw.prim oddrP (Hw.pair (Hw.clockOf d2) (Hw.pair (Hw.lit 1 0) (Hw.lit 1 1)))))\n" ++
+          "#eval Verilog.emit (Circuit.netlistIn d2 \"dom3\" primC)\n")
+          [".cons (\"clk2\", 0) .nil",
+           "\"module dom2(input clk2, input [0:0] x, output [7:0] y);\\n  reg [7:0] r; initial r = 8'd250;\\n  wire [7:0] n3 = r + 8'd1;\\n  always @(posedge clk2) r <= n3;\\n  assign y = r;\\nendmodule\\n\"",
+           "\"module dom3(input clk2, input [7:0] x, output [0:0] y);\\n  reg [7:0] r; initial r = 8'd0;\\n  wire [0:0] n6;\\n  ODDR u5 (.C(clk2), .D1(1'd0), .D2(1'd1), .Q(n6));\\n  always @(posedge clk2) r <= r;\\n  assign y = n6;\\nendmodule\\n\""] },
+    { name := "C2/C3: clock domains: a synchronised crossing accepted, an unsynchronised one rejected; Multi parts and wires; Clocking.domains; XDC/PCF periods; BUFG output domain; runners refuse two clocks", run := fun _ => do
+        -- examples/hdl-cdc.wiz: the C2 raw-netlist checks (a two-domain top with and without
+        -- Cdc.sync2, the sync clocked by its own source domain, a clock input used as data,
+        -- a one-domain circuit, a circuit that tries to smuggle a second domain in), then
+        -- C3: the same design as two Multi parts with a link (rejected) and Cdc.wire
+        -- (accepted), its core and PLL-wrapper Verilog, a pin-sourced second clock, XDC and
+        -- PCF constraints from ClockDomain.periodPs, a BUFG output as a synchroniser's
+        -- clock (Prim.withOutDom), and the multi-clock simulation refusal
+        okLibs (← IO.FS.readFile "examples/hdl-cdc.wiz")
+          [".nil",
+           "\"module cross(input clk, input clk2, output [0:0] y);\\n  reg [0:0] r; initial r = 1'd0;\\n  reg [0:0] s; initial s = 1'd0;\\n  wire [0:0] n3;\\n  wiz_sync2 u2 (.clk(clk2), .d(r), .q(n3));\\n  always @(posedge clk) r <= r;\\n  always @(posedge clk2) s <= n3;\\n  assign y = s;\\nendmodule\\n\"",
+           ".cons \"a clk signal (register r) is used by clk2 logic (register s): no synchroniser\" .nil",
+           ".cons \"a clk signal (register r) is used by clk2 logic (register s): no synchroniser\" .nil",
+           ".cons \"synchroniser wiz_sync2 (node 2): its data is in its clock's own domain clk, not another one\" (.cons \"a clk signal (wiz_sync2.q) is used by clk2 logic (register s): no synchroniser\" .nil)",
+           ".cons \"a clock (input ck) is used as data by register r\" .nil",
+           ".nil",
+           ".nil",
+           "\"module counter(input clk, output [7:0] y);\\n  reg [7:0] r; initial r = 8'd0;\\n  wire [7:0] n3 = r + 8'd1;\\n  always @(posedge clk) r <= n3;\\n  assign y = r;\\nendmodule\\n\"",
+           ".cons \"a clk2 signal (wiz_sync2.q) is used by clk logic (register r): no synchroniser\" (.cons \"the clock net at node 2 is on clock domain clk2, which the netlist does not declare (clk)\" .nil)",
+           ".error \"simulation refused: 2 clock domains (clk, clk2): multi-clock simulation needs an event schedule; wiz_sync2 (node 2) has no behavioural model\"",
+           ".cons \"a clk signal (register tx_r) is used by clk2 logic (register rx_r): no synchroniser\" .nil",
+           ".nil",
+           "\"module cross(input clk, input clk2, input [0:0] go, output [0:0] q);\\n  reg [0:0] tx_r; initial tx_r = 1'd0;\\n  reg [0:0] rx_r; initial rx_r = 1'd0;\\n  wire [0:0] n4;\\n  wiz_sync2 u3 (.clk(clk2), .d(tx_r), .q(n4));\\n  always @(posedge clk) tx_r <= go;\\n  always @(posedge clk2) rx_r <= n4;\\n  assign q = rx_r;\\nendmodule\\n\"",
+           "\"module cross_core(input clk, input clk2, input [0:0] go, output [0:0] q);\\n  reg [0:0] tx_r; initial tx_r = 1'd0;\\n  reg [0:0] rx_r; initial rx_r = 1'd0;\\n  wire [0:0] n4;\\n  wiz_sync2 u3 (.clk(clk2), .d(tx_r), .q(n4));\\n  always @(posedge clk) tx_r <= go;\\n  always @(posedge clk2) rx_r <= n4;\\n  assign q = rx_r;\\nendmodule\\nmodule cross(input clk, input [0:0] go, output [0:0] q);\\n  wire ck_CLKFBOUT;\\n  wire ck_CLKOUT0;\\n  wire ck_CLKOUT1;\\n  PLLE2_BASE #(.CLKIN1_PERIOD(10.0), .CLKFBOUT_MULT(8), .DIVCLK_DIVIDE(1), .CLKOUT0_DIVIDE(8), .CLKOUT0_PHASE(0.0), .CLKOUT1_DIVIDE(2), .CLKOUT1_PHASE(0.0)) clocking (.CLKIN1(clk), .RST(1'b0), .PWRDWN(1'b0), .CLKFBOUT(ck_CLKFBOUT), .CLKFBIN(ck_CLKFBOUT), .CLKOUT0(ck_CLKOUT0), .CLKOUT1(ck_CLKOUT1));\\n  wire ck_CLKOUT0_g;\\n  BUFG bufg_CLKOUT0 (.I(ck_CLKOUT0), .O(ck_CLKOUT0_g));\\n  wire ck_CLKOUT1_g;\\n  BUFG bufg_CLKOUT1 (.I(ck_CLKOUT1), .O(ck_CLKOUT1_g));\\n  cross_core core (.clk(ck_CLKOUT0_g), .clk2(ck_CLKOUT1_g), .go(go), .q(q));\\nendmodule\\n\"",
+           "\"module cross_core(input clk, input clk2, input [0:0] go, output [0:0] q);\\n  reg [0:0] tx_r; initial tx_r = 1'd0;\\n  reg [0:0] rx_r; initial rx_r = 1'd0;\\n  wire [0:0] n4;\\n  wiz_sync2 u3 (.clk(clk2), .d(tx_r), .q(n4));\\n  always @(posedge clk) tx_r <= go;\\n  always @(posedge clk2) rx_r <= n4;\\n  assign q = rx_r;\\nendmodule\\nmodule cross(input clk, input [0:0] go, input clk2, output [0:0] q);\\n  wire ck_CLKFBOUT;\\n  wire ck_CLKOUT0;\\n  PLLE2_BASE clocking (.CLKIN1(clk), .CLKFBOUT(ck_CLKFBOUT), .CLKFBIN(ck_CLKFBOUT), .CLKOUT0(ck_CLKOUT0));\\n  wire ck_CLKOUT0_g;\\n  BUFG bufg_CLKOUT0 (.I(ck_CLKOUT0), .O(ck_CLKOUT0_g));\\n  cross_core core (.clk(ck_CLKOUT0_g), .clk2(clk2), .go(go), .q(q));\\nendmodule\\n\"",
+           "\"set_property -dict { PACKAGE_PIN E3 IOSTANDARD LVCMOS33 } [get_ports {clk}]\\ncreate_clock -period 10.000 [get_ports {clk}]\\ncreate_clock -period 2.500 [get_ports {clk2}]\\nset_property -dict { PACKAGE_PIN F3 IOSTANDARD LVCMOS33 } [get_ports {clk2}]\\nset_property -dict { PACKAGE_PIN D9 IOSTANDARD LVCMOS33 } [get_ports {go}]\\nset_property -dict { PACKAGE_PIN D10 IOSTANDARD LVCMOS33 } [get_ports {q}]\\n\"",
+           ".nil",
+           "\"set_io clk 21\\nset_io go 1\\nset_io q 2\\nset_frequency clk 100\\nset_frequency clk2 400\\n\"",
+           ".cons \"synchroniser wiz_sync2 (node 5): its data is in its clock's own domain clk2, not another one\" .nil",
+           ".nil",
+           "\"module cross(input clk, input clk2, input [0:0] go, output [0:0] q);\\n  reg [0:0] tx_r; initial tx_r = 1'd0;\\n  reg [0:0] rx_r; initial rx_r = 1'd0;\\n  wire [0:0] n4;\\n  wire [0:0] n6;\\n  BUFG u3 (.I(clk2), .O(n4));\\n  wiz_sync2 u5 (.clk(n4), .d(tx_r), .q(n6));\\n  always @(posedge clk) tx_r <= go;\\n  always @(posedge clk2) rx_r <= n6;\\n  assign q = rx_r;\\nendmodule\\n\"",
+           ".error \"simulation refused: 2 clock domains (clk, clk2): multi-clock simulation needs an event schedule; wiz_sync2 (node 3) has no behavioural model\""] },
     { name := "S1: bundles, composition, reset and enable at random cycles; netlist simulation = values; names, test bench, PCF, VCD", run := fun _ => do
         -- t1–t6: (agreement of the netlist simulations with `Circuit.run`, the netlist size
         -- and the outputs) for the bundled counter, a delay chain, `par`, a feedback loop,
@@ -266,7 +317,7 @@ def hdlGroup : Group where
            "(.true, .cons 29 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 .nil)))))))))))))))))))))))))))))))))))))))))",
            "(.true, .cons 19 (.cons 0 (.cons 0 (.cons 0 (.cons 2 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 2 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 2 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 2 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 2 (.cons 2 (.cons 0 (.cons 0 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 .nil)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))",
            "\"module counter(input clk, input [0:0] rst, input [0:0] en, input [0:0] go, output [3:0] leds, output [0:0] top);\\n  reg [3:0] count; initial count = 4'd0;\\n  reg [0:0] up; initial up = 1'd1;\\n  wire [3:0] n6 = count + 4'd1;\\n  wire [3:0] n7 = count - 4'd1;\\n  wire [3:0] n8 = up ? n6 : n7;\\n  wire [3:0] next = go ? n8 : count;\\n  wire [0:0] n11 = next == 4'd9;\\n  wire [0:0] n13 = next == 4'd0;\\n  wire [0:0] n16 = n13 ? 1'd1 : up;\\n  wire [0:0] n17 = n11 ? 1'd0 : n16;\\n  wire [0:0] n18 = count == 4'd9;\\n  always @(posedge clk) if (rst) count <= 4'd0; else if (en) count <= next;\\n  always @(posedge clk) if (rst) up <= 1'd1; else if (en) up <= n17;\\n  assign leds = count;\\n  assign top = n18;\\nendmodule\\n\"",
-           "\"set_io clk 21\\nset_io rst 1\\nset_io en 2\\nset_io go 3\\nset_io leds[0] 99\\nset_io leds[1] 98\\nset_io leds[2] 97\\nset_io leds[3] 96\\nset_io top 95\\n\"",
+           "\"set_io clk 21\\nset_io rst 1\\nset_io en 2\\nset_io go 3\\nset_io leds[0] 99\\nset_io leds[1] 98\\nset_io leds[2] 97\\nset_io leds[3] 96\\nset_io top 95\\nset_frequency clk 100\\n\"",
            ".cons \"no pin for port rst\" (.cons \"no pin for port en\" (.cons \"port leds has 4 bits, one pin given\" (.cons \"no pin for port top\" (.cons \"pin for no port: led\" .nil))))",
            "\"$timescale 1ns $end\\n$scope module counter $end\\n$var wire 1 ! clk $end\\n$var wire 1 \\\" go $end\\n$var wire 4 # leds $end\\n$var wire 1 $ top $end\\n$var wire 4 % count $end\\n$var wire 1 & up $end\\n$upscope $end\\n$enddefinitions $end\\n#0\\n0!\\n0\\\"\\nb0000 #\\n0$\\nb0000 %\\n1&\\n#1\\n1!\\n#2\\n0!\\n#3\\n1!\\n#4\\n0!\\n#5\\n1!\\n#6\\n0!\\n1\\\"\\n#7\\n1!\\n#8\\n\"",
            ".cons 17 (.cons 5 (.cons 4 .nil))"] },

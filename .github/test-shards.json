@@ -3,6 +3,7 @@
    "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz"],
    "select": [
     "=prop-kernels",
+    "=false-fuzz",
     "=selfhost",
     "=audit-kernels"
   ]},

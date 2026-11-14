@@ -1,15 +1,17 @@
 # Stage 28: solvers
 
 Automated solvers decide goals that are tedious to prove by hand: linear arithmetic side
-conditions, Boolean identities, bit-vector facts. Wiz uses them in two ways, which differ
-in what is trusted (design and survey: `wiz-notes/smt.md`):
+conditions, Boolean identities, bit-vector facts. Wiz uses them in three ways, which
+differ in what is trusted (design and survey: `wiz-notes/smt.md`):
 
 * **`smt`** (28a) asks an SMT solver (Z3) and believes it: an axiom per
   use, behind a flag, as `native_refl` (stage 27) does for compiled evaluation;
 * **`sat_decide`** (28b) asks a SAT solver (CaDiCaL) for a *proof*, an LRAT certificate,
   which a checker written in Wiz and proved sound checks in the kernel: nothing new is
   trusted, as with Lean's `bv_decide` (which runs its checker compiled, trusting the
-  compiler) or Coq's SMTCoq.
+  compiler) or Coq's SMTCoq;
+* **`sat_decide_native`** (28e) is `sat_decide` with that check run compiled instead of
+  by the kernel: an axiom per check, behind `--trust-native`, as 27a and 28a do.
 
 ## 28a: `smt` and `--trust-smt`
 
@@ -106,8 +108,7 @@ it). Z3 is not shipped (tens of MB, and `smt` is opt-in): `--smt-solver` finds i
 
 **Trusted**: nothing new. The solver, the tactic, the DIMACS/LRAT plumbing can only make
 `sat_decide` fail. The kernel runs the checker, which is slow for big proofs (kernel
-evaluation); `native_refl` could run the same check compiled (bv_decide's trust), not
-done yet.
+evaluation); 28e runs the same check compiled, for a trust extension.
 
 **Limits of the prototype.** Reflection follows the goal as a tree, so a circuit with
 fan-out written as nested calls (`maj` uses the carry twice) grows exponentially once
@@ -148,10 +149,11 @@ clauses hold under `σ` itself). No axioms.
   ill-typed term is still refused, at the declaration.
 * **Where the time goes** (probes, not measurements): of the remaining check, about half
   is the gates (`allHold`: each `refl` compared by conversion) and half the LRAT check run
-  by the kernel's evaluator over association lists. Running the check compiled
-  (`native_refl`'s evaluator) did not help: comparing the stated certificate with the
-  expected type costs as much as the check. Faster: a checker for the kernel's evaluator
-  (arrays or maps for the clause database).
+  by the kernel's evaluator over association lists. Running the check compiled and then
+  *stating* its result costs as much as the check (the kernel compares the stated
+  certificate with the expected type, evaluating both); 28e avoids that by stating it as
+  an axiom, at the price of trusting the run. Faster for `sat_decide`: a checker for the
+  kernel's evaluator (arrays or maps for the clause database).
 
 ## 28d: `bv_decide`: words, bit-blasted (a fragment: bitwise, `+ -`, shifts, `<ᵤ ≤ᵤ`)
 
@@ -217,3 +219,57 @@ It grows faster than the circuit (3w inputs, ~5w gates): each kernel step costs
 ~0.1–1 ms (wiz-notes/smt.md §10), so wide words are slow until the evaluator is faster.
 Arithmetic and comparisons add gates per bit (a carry or comparison chain), so the same
 width costs more than a bitwise goal.
+
+## 28e: `sat_decide_native`: the check run compiled, on trust
+
+    import SatTactic
+    def demorgan (a b : Bool) : Bool.not (Bool.and a b) = Bool.or (Bool.not a) (Bool.not b) := by sat_decide_native
+
+With `--trust-native`, `#print axioms demorgan` lists `[demorgan.sat3.native✝]`; without
+it the tactic refuses with the 27a message ("native evaluation is not enabled … run with
+`--trust-native`"). `sat_decide_native` is `sat_decide` with one difference: the premise
+that the LRAT check passes.
+
+`sat_decide` closes with `Sat.dag_sound nodes out proof Sat.trivial σ …`; `Sat.trivial :
+IsTrue .true` is checked against `IsTrue (lratCheck (dagFull nodes out) proof)` by the
+kernel running the checker (`SatT.solveDag`'s `h`). `sat_decide_native` instead has the
+tactic add an axiom for that premise, after running the check compiled (the evaluator of
+27a, `Native.decideNative`), and the command decides the axiom by running it before it is
+added:
+
+    X.satK.native✝ : Sat.IsTrue (Sat.lratCheck (Sat.dagFull nodes out) proof)
+
+`K` numbers the declaration's side declarations: the proof's `σ` and node list are two
+definitions, so the first check's axiom is normally `sat3.native✝`.
+
+* **An axiom per check, listed by `#print axioms`.** The definition and everything that
+  uses it depend on it, and `#print axioms` names it with the note about `.native✝`
+  ("a closed proposition decided by running it … trusted are erasure, the interpreter and
+  the native implementations listed"). The solver, the translation and the DIMACS/LRAT
+  plumbing are still not trusted: they can only make the tactic fail. `lib/` never uses
+  `sat_decide_native` (group *native*).
+* **Stated as `IsTrue e`, not `e = .true`.** An equation type computes both sides when
+  the kernel evaluates it (`wiz-notes/kernel-eval.md`, F5), so every use of the axiom
+  would run the check again. `IsTrue e` is a definition too, but the use's expected type
+  is the same term, so the constant rule compares its arguments, not the check. An
+  axiom's type is checked as a type, not against a value, so adding it does not run the
+  check either.
+* **The node list is a closed definition.** The nodes are the circuit's structure (ids
+  and gates); the goal's variables appear only in `σ`'s *values*. `TacticM.define` now
+  defines a closed value as it is (not as a function over the goal's context), so the
+  axiom's `nodes` is the same closed constant `Sat.dag_sound` is instantiated with. A
+  value that does mention variables (such as `σ`) is still defined over the context.
+* **The flag.** `--trust-native` (27a), only in a `def`'s body (the axiom is named after
+  it), a flag and not a grail setting. The command and module cache keys include it, so
+  an acceptance is never replayed for a run without it. The tactic itself is
+  `SatT.run .true` (`SatT.checkProof` picks the axiom; `.false` is `sat_decide`).
+* **The fragment is `sat_decide`'s.** The same reflection, circuit, sharing, solver and
+  limits (28b–28c); only the check's premise differs. Parameters are fine (their values
+  are in `σ`, not in the check's closed term); a false goal is still the solver's
+  counterexample, and a goal that is not an equation of booleans is refused before the
+  solver.
+
+**Tests.** The group *sat* keeps the cases: refused without the flag; accepted with it,
+with the axiom that `#print axioms` lists (for the definition and for a use); a 4-bit
+carry chain over definitions (the same goal as 28c, with the check run compiled instead
+of by the kernel); and a false goal, still the solver's counterexample.

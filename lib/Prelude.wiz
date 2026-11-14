@@ -592,6 +592,9 @@ inductive Tac where
   -- checked by the kernel anyway, with the declaration (a big proof checked twice costs
   -- twice). Errors in it then show at the end of the declaration.
   | assignLate (g : Nat) (e : Expr) (next : Tac)
+  -- (28e) decide the closed `e = .true` by running it (the trusted evaluator of 27a:
+  -- --trust-native); the axiom that says so
+  | nativeDecide (g : Nat) (e : Expr) (k : Expr → Tac)
 
 /-- The metaprogramming monad: requests to the elaborator (`Tac`) in
 continuation-passing style, so `bind` is just composition. Macros (`MacroM`) and
@@ -702,6 +705,9 @@ def TacticM.define (g : Nat) (ty val : Expr) : TacticM Expr := fun k => Tac.defi
 checks anyway (a big proof otherwise checked twice); its errors show at the end of the
 declaration. -/
 def TacticM.assignLate (g : Nat) (e : Expr) : TacticM Unit := fun k => Tac.assignLate g e (k ())
+/-- `Tac.nativeDecide`: decide the closed `e = .true` with the trusted evaluator (only
+with `--trust-native`) and return the axiom's proof. -/
+def TacticM.nativeDecide (g : Nat) (e : Expr) : TacticM Expr := fun k => Tac.nativeDecide g e k
 /-- Run `t`; if it fails, undo it and run `h` on the error message instead. -/
 def TacticM.tryCatch (t : TacticM Unit) (h : String → TacticM Unit) : TacticM Unit :=
   fun k => Tac.catch (TacticM.run t) (fun e => TacticM.run (h e)) (k ())
