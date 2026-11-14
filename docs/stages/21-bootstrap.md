@@ -722,8 +722,9 @@ checks itself.
 
 `f a (x := e) b` now elaborates in the self-hosted frontend. The kernel's `Tm` and `Val`
 carry no binder names, so a `Global` keeps its parameters' names beside their implicit
-mask (`paramNames`, as `paramMask`; filled for definitions, axioms, `extern`s and
-partial definitions from their written binders). An application with `term.namedArg`
+mask (`paramNames`, as `paramMask`; filled for definitions, axioms and partial
+definitions from their written binders; an `extern` writes no binders). An application
+with `term.namedArg`
 arguments is split into named and positional lists, in source order. A duplicate name is
 `argument 'x' was already given`. The telescope is then walked: a binder whose name has
 a named argument takes it (explicit, implicit or instance), otherwise an implicit binder
