@@ -63,6 +63,7 @@ line below.
 * [Stage 19: the frontend checks the self-hosted sources](stages/19-selfhost-checks-sources.md)
 * [Stage 20: the frontend checks itself, and gets faster](stages/20-selfhost-checks-itself.md)
 * [Stage 21: bootstrap](stages/21-bootstrap.md)
+* [Stage 30: type classes in the self-hosted toolchain](stages/30-selfhost-typeclasses.md)
 
 ### Tooling
 
