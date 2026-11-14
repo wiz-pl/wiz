@@ -1,0 +1,476 @@
+import Vec
+import Logic
+import Optic
+import Region
+
+/-!
+# OpticDep: dependent optics and linear optics
+
+`lib/Optic.wiz`'s `Lens S A` is a *simple* optic: the focus type `A` is fixed. A
+**dependent optic** lets the focus type depend on the source: `A : S → Type`, and the
+lens is a "dependent store"
+
+    DepLens S A = (s : S) → A s × ((a : A s) → S)
+
+(`lib/Optic.wiz`'s `Store A S = A × (A → S)` with `A` replaced by the family `A s`).
+The interesting examples are types built with `Σ`: a length-indexed `Vec`, a record
+whose later fields mention earlier ones, `(n : Nat) × Vec A n`.
+
+This file is additive: it imports `Vec`, `Logic`, `Optic` and `Region` and defines
+nothing that shadows them. The design, prior art, laws, runtime analysis and open
+questions are in `/workspace/wiz-notes/dependent-optics.md`.
+
+```
+import OpticDep
+
+def p : (n : Nat) × Vec Nat n := (3, Vec.fromList [10, 20, 30])
+#eval DepLens.get tabL p (Fin.of 3 1 rfl)                          -- 20
+#eval Vec.toList (DepLens.set tabL p (fun _ => 7)).2               -- [7, 7, 7]
+#eval PreCoend.toLens (PreCoend.ofLens Pair2.fstL) (Pair2.mk 1 2)  -- (1, <function>)
+```
+-/
+
+-- ## 1. The dependent store, and the dependent lens
+
+/-- The value borrowed out of `s` (of type `A s`) and how to put it back. The
+non-dependent `Store A S` is the body of `DepLens (fun _ => A)` at a point. -/
+def DepLens (S : Type) (A : S → Type) : Type := (s : S) → A s × ((a : A s) → S)
+
+/-- Read the focus. The type of the result is the family at the source: `A s`. -/
+def DepLens.get {S : Type} {A : S → Type} (l : DepLens S A) (s : S) : A s := (l s).1
+
+/-- Write the focus; the source is rebuilt. -/
+def DepLens.set {S : Type} {A : S → Type} (l : DepLens S A) (s : S) (a : A s) : S :=
+  (l s).2 a
+
+/-- Update the focus with `f`. -/
+def DepLens.over {S : Type} {A : S → Type} (l : DepLens S A) (f : (s : S) → A s → A s)
+    (s : S) : S :=
+  (l s).2 (f s (l s).1)
+
+/-- The whole source as the focus (the family is `fun s => S`). -/
+def DepLens.id {S : Type} : DepLens S (fun _ => S) := fun s => (s, fun s' => s')
+
+/-- A focus in a focus. The result's family is still over `s`, so this is a
+*dependent* composition: the inner lens sees the outer focus type `A s`. -/
+def DepLens.comp {S : Type} {A : S → Type} {B : (s : S) → A s → Type}
+    (l : DepLens S A) (m : (s : S) → DepLens (A s) (B s)) : DepLens S (fun s => B s (l s).1) :=
+  fun s =>
+    let st := l s;
+    let inner := m s st.1;
+    (inner.1, fun b => st.2 (inner.2 b))
+
+/-- A simple lens is a dependent one at a constant family. -/
+def DepLens.ofLens {S A : Type} (l : Lens S A) : DepLens S (fun _ => A) := l
+
+-- ## 2. The laws
+
+/-- GetPut: a focus that is never written leaves the source unchanged. This is the one
+law whose two sides are both `S`, so it is statable for every family. -/
+def DepLens.GetPut {S : Type} {A : S → Type} (l : DepLens S A) : Prop :=
+  (s : S) → (l s).2 (l s).1 = s
+
+/-- PutGet, transported. The new focus has type `A ((l s).2 a)` and `a` has type
+`A s`; `Eq.subst` moves it along the equation `(l s).2 a = s`. Statable for every
+family, provable only when that equation is definitional (`Eq.subst` does not compute
+along a stuck proof; `wiz-notes/dependent-optics.md`, "laws"). -/
+def DepLens.PutGetAt {S : Type} {A : S → Type} (l : DepLens S A) (s : S) (a : A s)
+    (e : (l s).2 a = s) : Prop :=
+  Eq.subst A e ((l ((l s).2 a)).1) = a
+
+/-- PutGet: writing `a` and reading it back gives `a` (up to the transport above). -/
+def DepLens.PutGet {S : Type} {A : S → Type} (l : DepLens S A) : Prop :=
+  (s : S) → (a : A s) → (e : (l s).2 a = s) → DepLens.PutGetAt l s a e
+
+/-- PutPut, transported: the second write's value `b` moves along the same equation. -/
+def DepLens.PutPutAt {S : Type} {A : S → Type} (l : DepLens S A) (s : S) (a : A s)
+    (e : (l s).2 a = s) (b : A s) : Prop :=
+  (l ((l s).2 a)).2 (Eq.substBack A e b) = (l s).2 b
+
+/-- PutPut: a second write of the same place rebuilds the source the same way. -/
+def DepLens.PutPut {S : Type} {A : S → Type} (l : DepLens S A) : Prop :=
+  (s : S) → (a : A s) → (e : (l s).2 a = s) → (b : A s) → DepLens.PutPutAt l s a e b
+
+/-- A lawful dependent lens, in the transported form. -/
+def DepLens.Lawful {S : Type} {A : S → Type} (l : DepLens S A) : Prop :=
+  DepLens.GetPut l × DepLens.PutGet l × DepLens.PutPut l
+
+/-- The law set instances actually prove: GetPut, and PutGet/PutPut *at the fibre*,
+supplied by the caller because `get (set s a) = a` is only well-typed when the family
+is constant on the put's image. -/
+def DepLens.LawfulFibre {S : Type} {A : S → Type} (l : DepLens S A)
+    (PG : (s : S) → (a : A s) → Prop) (PP : (s : S) → (a : A s) → (b : A s) → Prop) : Prop :=
+  DepLens.GetPut l × ((s : S) → (a : A s) → PG s a) × ((s : S) → (a : A s) → (b : A s) → PP s a b)
+
+-- ## 3. The tabulation lens on a length-indexed vector
+
+/-- A vector is its tabulation: `Vec A n ≅ (Fin n → A)`. The focus type `Fin p.1 → A`
+depends on the source `p`. -/
+def Tab (A : Type) (p : (n : Nat) × Vec A n) : Type := Fin p.1 → A
+
+/-- The dependent lens `Vec A n ≅ (Fin n → A)`, indexed by the length. Its put keeps
+the index: `(tabL p f).1` reduces to `p.1`, so `Tab A (tabL p f)` and `Tab A p` are
+convertible and the laws need no transport. -/
+def tabL {A : Type} : DepLens ((n : Nat) × Vec A n) (Tab A) := fun p =>
+  (fun i => Vec.get p.2 i, fun f => (p.1, Vec.ofFn p.1 f))
+
+/-- Reading a tabulation at `i` is the function's value. -/
+def Tab.get_ofFn {A : Type} : (n : Nat) → (f : Fin n → A) → (i : Fin n) →
+    Vec.get (Vec.ofFn n f) i = f i
+  | .zero, _, .mk .zero h => absurd h.1
+  | .zero, _, .mk (.succ k) h => absurd h.1
+  | .succ n, f, .mk .zero h => Vec.get_cons_zero (f Fin.zero) (Vec.ofFn n (fun i => f (Fin.succ i))) h
+  | .succ n, f, .mk (.succ k) h =>
+    Eq.trans (Vec.get_cons_succ (f Fin.zero) (Vec.ofFn n (fun i => f (Fin.succ i))) k h)
+      (Tab.get_ofFn n (fun i => f (Fin.succ i)) (Fin.mk k h))
+
+/-- `Vec.ofFn` respects pointwise equality of its function (needed because an equation of
+functions is pointwise in OTT, so `Eq.congrArg` cannot rewrite under `Vec.ofFn`). -/
+def Tab.ofFn_congr {A : Type} : (n : Nat) → {f g : Fin n → A} → ((i : Fin n) → f i = g i) →
+    Vec.ofFn n f = Vec.ofFn n g
+  | .zero, _, _, _ => rfl
+  | .succ n, f, g, h =>
+    @Eq.trans (Vec A (Nat.succ n))
+      (Vec.ofFn (Nat.succ n) f) (Vec.cons (f Fin.zero) (Vec.ofFn n (fun i => f (Fin.succ i))))
+      (Vec.ofFn (Nat.succ n) g)
+      rfl
+      (@Eq.trans (Vec A (Nat.succ n))
+        (Vec.cons (f Fin.zero) (Vec.ofFn n (fun i => f (Fin.succ i))))
+        (Vec.cons (g Fin.zero) (Vec.ofFn n (fun i => g (Fin.succ i))))
+        (Vec.ofFn (Nat.succ n) g)
+        (@Eq.trans (Vec A (Nat.succ n))
+          (Vec.cons (f Fin.zero) (Vec.ofFn n (fun i => f (Fin.succ i))))
+          (Vec.cons (g Fin.zero) (Vec.ofFn n (fun i => f (Fin.succ i))))
+          (Vec.cons (g Fin.zero) (Vec.ofFn n (fun i => g (Fin.succ i))))
+          (Eq.congrArg (fun y => Vec.cons y (Vec.ofFn n (fun i => f (Fin.succ i)))) (h Fin.zero))
+          (Eq.congrArg (Vec.cons (g Fin.zero)) (Tab.ofFn_congr n (fun i => h (Fin.succ i)))))
+        rfl)
+
+/-- Tabulating a vector's own elements gives the vector back (`tabulate ∘ index = id`).
+The proof is pointwise: function equality is definitional (OTT's `funext`,
+`lib/Logic.wiz`), so rewriting under `Vec.ofFn` goes through `Tab.ofFn_congr`. -/
+def Tab.ofFn_get {A : Type} {0 n : Nat} : (v : Vec A n) →
+    Vec.ofFn n (fun i => Vec.get v i) = v
+  | .nil => rfl
+  | .cons x xs =>
+    let c := Vec.get (Vec.cons x xs) Fin.zero;
+    let L1 := Vec.cons c (Vec.ofFn _ (fun i => Vec.get (Vec.cons x xs) (Fin.succ i)));
+    let L2 := Vec.cons c (Vec.ofFn _ (fun i => Vec.get xs i));
+    let L3 := Vec.cons c xs;
+    let L4 := Vec.cons x xs;
+    @Eq.trans (Vec A (Nat.succ _)) L1 L2 L4
+      (Eq.congrArg (fun w => Vec.cons c w)
+        (Tab.ofFn_congr _ (f := fun i => Vec.get (Vec.cons x xs) (Fin.succ i))
+          (g := fun i => Vec.get xs i) (fun i => match i with
+            | .mk k h => Vec.get_cons_succ x xs k h)))
+      (@Eq.trans (Vec A (Nat.succ _)) L2 L3 L4
+        (Eq.congrArg (fun w => Vec.cons c w) (Tab.ofFn_get xs))
+        (Eq.congrArg (fun y => Vec.cons y xs) (Vec.get_cons_zero x xs rfl)))
+
+/-- The tabulation lens is GetPut: tabulating the reads gives the vector back. -/
+def tabL_getPut {A : Type} : DepLens.GetPut (@tabL A) := fun p =>
+  Eq.trans
+    (Eq.congrArg (fun (v : Vec A p.1) => ((p.1, v) : (n : Nat) × Vec A n)) (Tab.ofFn_get p.2))
+    rfl
+
+/-- The tabulation lens is PutGet: reading a tabulation at `i` gives `f i`. -/
+def tabL_putGet {A : Type} : (p : (n : Nat) × Vec A n) → (f : Tab A p) →
+    DepLens.get tabL (DepLens.set tabL p f) = f := fun p f =>
+  funext (fun i => Tab.get_ofFn p.1 f i)
+
+/-- The tabulation lens is PutPut. -/
+def tabL_putPut {A : Type} : (p : (n : Nat) × Vec A n) → (f g : Tab A p) →
+    DepLens.set tabL (DepLens.set tabL p f) g = DepLens.set tabL p g :=
+  fun p f g => rfl
+
+/-- The tabulation lens is lawful, in the fibre form (the transported `DepLens.Lawful`
+is not provable for it: see the note). -/
+def tabL_lawful {A : Type} :
+    DepLens.LawfulFibre (@tabL A)
+      (fun p f => DepLens.get tabL (DepLens.set tabL p f) = f)
+      (fun p f g => DepLens.set tabL (DepLens.set tabL p f) g = DepLens.set tabL p g) :=
+  (tabL_getPut, tabL_putGet, tabL_putPut)
+
+-- ## 5. The general dependent lens: a map of polynomials
+
+-- `DepLens`'s laws are awkward because `put` may move the source's index, and the
+-- transported law then needs a `cast` that does not compute. The literature's general
+-- notion (Niu–Spivak, "Polynomial Functors") avoids the problem: a dependent lens is a
+-- map of polynomials, with the *forward* map on positions and the *backward* map on
+-- directions, and the backward map already lands in the source's fibre, so nothing is
+-- transported.
+
+/-- A dependent lens between two polynomials `S ◁ A` and `T ◁ B`: a forward map on
+positions and a backward map from the target's directions to the source's. -/
+structure DPoly (S : Type) (A : S → Type) (T : Type) (B : T → Type) where
+  fwd : S → T
+  bwd : (s : S) → B (fwd s) → A s
+
+/-- The identity dependent lens. -/
+def DPoly.id {S : Type} {A : S → Type} : DPoly S A S A :=
+  @DPoly.mk S A S A (fun s => s) (fun s a => a)
+
+/-- Composition of dependent lenses (the optic's `comp`, with no transport). -/
+def DPoly.comp {S : Type} {A : S → Type} {T : Type} {B : T → Type} {U : Type} {C : U → Type}
+    (m : DPoly S A T B) (n : DPoly T B U C) : DPoly S A U C :=
+  DPoly.mk (fun s => n.fwd (m.fwd s)) (fun s c => m.bwd s (n.bwd (m.fwd s) c))
+
+/-- `DPoly.id` is a left unit (by `rfl`). -/
+def DPoly.id_comp {S : Type} {A : S → Type} {T : Type} {B : T → Type} (m : DPoly S A T B) :
+    DPoly.comp DPoly.id m = m := rfl
+
+/-- `DPoly.id` is a right unit (by `rfl`). -/
+def DPoly.comp_id {S : Type} {A : S → Type} {T : Type} {B : T → Type} (m : DPoly S A T B) :
+    DPoly.comp m DPoly.id = m := rfl
+
+/-- Composition is associative (by `rfl`). -/
+def DPoly.comp_assoc {S : Type} {A : S → Type} {T : Type} {B : T → Type}
+    {U : Type} {C : U → Type} {V : Type} {D : V → Type}
+    (m : DPoly S A T B) (n : DPoly T B U C) (o : DPoly U C V D) :
+    DPoly.comp (DPoly.comp m n) o = DPoly.comp m (DPoly.comp n o) := rfl
+
+-- (`DepLens` and `DPoly` are *different* generalisations and neither contains the
+-- other: `DepLens` is a costate coalgebra (a lawful get/put optic), `DPoly` is a map of
+-- polynomials (the "dependent lens" of Niu–Spivak, which composes without transport but
+-- has no get). A simple `Lens` is a `DepLens` at a constant family; it is not a `DPoly`
+-- either, because its put returns a source, not a focus.)
+
+-- ## 6. Optics as coends
+
+-- A simple optic is the coend (Riley, "Categories of Optics")
+--
+--     Optic S A = ∫^{M : Type} (S → M × A) × (M × A → S)
+--
+-- over the residual `M`. Wiz has no coends (no quotients), so we can write the
+-- *coproduct* `∐_M ...` (`PreCoend`), the normal form (`Lens S A`), and the retraction
+-- between them. The other direction (that every pre-coend element is the normal form of
+-- its own optic) is the coend's identification, and it needs the quotient.
+
+/-- One representation of a lens with residual `M`. -/
+def Rep (S A M : Type) : Type := (S → M × A) × (M × A → S)
+
+/-- The coproduct `∐_{M} Rep S A M` — the pre-coend, before the identification. -/
+def PreCoend (S A : Type) : Type 1 := (0 M : Type) × Rep S A M
+
+/-- The normal form: a residual-`M` representation is a simple lens. -/
+def PreCoend.toLens {S A : Type} (p : PreCoend S A) : Lens S A := fun s =>
+  let r := p.2;
+  let ma := r.1 s;
+  (ma.2, fun a => r.2 (ma.1, a))
+
+/-- Every simple lens is a representation with residual `S` (the Yoneda-in-`M` step:
+`M := S` represents the coend). -/
+def PreCoend.ofLens {S A : Type} (l : Lens S A) : PreCoend S A :=
+  (S, (fun s => (s, (l s).1), fun ma => (l ma.1).2 ma.2))
+
+/-- The normal form of `ofLens l` is `l` (`rfl`): the residual-`S` representation *is*
+the lens (this is the Yoneda step, and it is definitional). -/
+def PreCoend.toLens_ofLens {S A : Type} (l : Lens S A) :
+    PreCoend.toLens (PreCoend.ofLens l) = l := rfl
+
+/-- Applying `toLens` and re-representing is the identity on the optic: the retraction
+that the coend quotient would make an isomorphism. -/
+def PreCoend.normal {S A : Type} (p : PreCoend S A) :
+    PreCoend.toLens (PreCoend.ofLens (PreCoend.toLens p)) = PreCoend.toLens p := rfl
+
+/-- A cocone/wedge for the coend: a family over residuals, natural in `M`. -/
+def Wedge (S A X : Type) : Type 1 := (0 M : Type) → Rep S A M → X
+
+/-- The eliminator of the *pre*-coend: a wedge is enough to map out of the coproduct. -/
+def PreCoend.fold {S A X : Type} (h : Wedge S A X) (p : PreCoend S A) : X := h p.1 p.2
+
+/-- The eliminator on the normal form: a lens is a pre-coend element with residual `S`,
+and `fold` applies the wedge there (definitional). The coend's universal property says
+`(Optic S A → X) ≅ Wedge S A X`; `fold` is the map from wedges to the *coproduct*, and
+the missing half (a wedge is determined by its values on normal forms, i.e. `p` and
+`ofLens (toLens p)` are identified) is the coend quotient, which Wiz cannot state. -/
+def PreCoend.fold_ofLens {S A X : Type} (h : Wedge S A X) (l : Lens S A) :
+    PreCoend.fold h (PreCoend.ofLens l) = h S (PreCoend.ofLens l).2 := rfl
+
+-- The dependent coend. The residual is now a *family* over the source, which is the
+-- polynomial `S ◁ M`, and the coend is taken over the Grothendieck construction `∫ M`
+-- (the category of elements); the normal form is again `M := S`.
+
+/-- One representation of a dependent lens with residual family `M : S → Type`. -/
+def DepRep (S : Type) (A : S → Type) (M : S → Type) : Type :=
+  ((s : S) → M s × A s) × ((s : S) → M s × A s → S)
+
+/-- The dependent pre-coend: a residual family and a representation. -/
+def DepPreCoend (S : Type) (A : S → Type) : Type 1 := (0 M : S → Type) × DepRep S A M
+
+/-- The normal form of a dependent representation: a dependent lens. -/
+def DepPreCoend.toDepLens {S : Type} {A : S → Type} (p : DepPreCoend S A) : DepLens S A :=
+  fun s =>
+    let r := p.2;
+    let ma := r.1 s;
+    (ma.2, fun a => r.2 s (ma.1, a))
+
+/-- Every dependent lens is a representation with residual `M s := S`. -/
+def DepPreCoend.ofDepLens {S : Type} {A : S → Type} (l : DepLens S A) : DepPreCoend S A :=
+  (fun _ => S, (fun s => (s, (l s).1), fun s ma => (l s).2 ma.2))
+
+/-- The normal form of `ofDepLens l` is `l` (definitional). -/
+def DepPreCoend.toDepLens_ofDepLens {S : Type} {A : S → Type} (l : DepLens S A) :
+    DepPreCoend.toDepLens (DepPreCoend.ofDepLens l) = l := rfl
+
+-- ## 7. Dependent traversals
+
+/-- A dependent traversal: a list of foci (each of its own type `A s`) and how to put a
+list back. `S` is the source; a put may change it (a resizing traversal changes the
+length index). -/
+def DepTraverse (S : Type) (A : S → Type) : Type :=
+  (s : S) → List (A s) × (List (A s) → S)
+
+/-- The foci. -/
+def DepTraverse.get {S : Type} {A : S → Type} (t : DepTraverse S A) (s : S) : List (A s) :=
+  (t s).1
+
+/-- Put a list of foci back. -/
+def DepTraverse.put {S : Type} {A : S → Type} (t : DepTraverse S A) (s : S)
+    (xs : List (A s)) : S := (t s).2 xs
+
+/-- `List.map`, locally (the library's is in `lib/Text.wiz`). -/
+def DepTraverse.mapList {A B : Type} (f : A → B) : List A → List B
+  | .nil => .nil
+  | .cons x xs => .cons (f x) (DepTraverse.mapList f xs)
+
+/-- Run `f` on every focus (in order) and put them back. -/
+def DepTraverse.over {S : Type} {A : S → Type} (t : DepTraverse S A)
+    (f : (s : S) → A s → A s) (s : S) : S :=
+  (t s).2 (DepTraverse.mapList (f s) (t s).1)
+
+/-- GetPut: putting the foci back changes nothing. -/
+def DepTraverse.GetPut {S : Type} {A : S → Type} (t : DepTraverse S A) : Prop :=
+  (s : S) → (t s).2 (t s).1 = s
+
+/-- PutGet: what you put in is what you get back. Stated for a constant focus type, the
+case in which the source may still change (a resizing traversal): a dependent focus would
+need the transport that `DepLens.PutGet` uses. -/
+def DepTraverse.PutGet {S A : Type} (t : DepTraverse S (fun _ => A)) : Prop :=
+  (s : S) → (xs : List A) → (t ((t s).2 xs)).1 = xs
+
+/-- PutPut: a second put wins. -/
+def DepTraverse.PutPut {S A : Type} (t : DepTraverse S (fun _ => A)) : Prop :=
+  (s : S) → (xs ys : List A) → (t ((t s).2 xs)).2 ys = (t s).2 ys
+
+/-- A lawful traversal (constant focus type). -/
+def DepTraverse.Lawful {S A : Type} (t : DepTraverse S (fun _ => A)) : Prop :=
+  DepTraverse.GetPut t × DepTraverse.PutGet t × DepTraverse.PutPut t
+
+/-- The list traversal (the focus type is constant, so the laws are `rfl`). -/
+def listTrav {A : Type} : DepTraverse (List A) (fun _ => A) := fun s => (s, fun l => l)
+
+/-- The list traversal is lawful (every law by `rfl`). -/
+def listTrav_lawful {A : Type} : DepTraverse.Lawful (@listTrav A) :=
+  (fun s => rfl, fun s xs => rfl, fun s xs ys => rfl)
+
+/-- A *resizing* traversal: the foci are a vector's elements, and the put may change the
+length index. -/
+def vecResize {A : Type} : DepTraverse ((n : Nat) × Vec A n) (fun _ => A) := fun p =>
+  (Vec.toList p.2, fun l => (List.length l, Vec.fromList l))
+
+/-- The resizing traversal's PutGet (`toList ∘ fromList = id`). -/
+def vecResize_putGet {A : Type} : DepTraverse.PutGet (@vecResize A) :=
+  fun p l => Vec.toList_fromList l
+
+/-- The resizing traversal's PutPut. -/
+def vecResize_putPut {A : Type} : DepTraverse.PutPut (@vecResize A) :=
+  fun p l m => rfl
+
+-- Its GetPut (`put p (get p) = p`) is `Vec.fromList_toList`, which needs `Eq.subst` on
+-- the *index* of the inductive family `Vec`; that does not compute in the current
+-- kernel (regularity is off, D1), so the law is stated in the note, not proved here.
+
+-- ## 8. Quantities: the linear store and the linear lens
+
+/-- The store with a linear focus and a linear backward function (`Store A S` is at
+quantity ω in both). `Store1 A S` is `A ⊗ (A ⊸ S)`. -/
+def Store1 (A S : Type) : Type := (1 _ : A) × ((1 _ : A) → S)
+
+/-- A linear lens: the source is consumed once, the store is linear. -/
+def Lens1 (S A : Type) : Type := (1 _ : S) → Store1 A S
+
+/-- The identity linear lens. -/
+def Lens1.id {S : Type} : Lens1 S S := fun (1 s : S) => (s, fun (1 s' : S) => s')
+
+/-- Update a linear focus: the old focus is consumed by `f`, so this is linear. -/
+def Lens1.over {S A : Type} (l : Lens1 S A) (1 f : (1 _ : A) → A) (1 s : S) : S :=
+  let 1 st := l s;
+  let 1 (a, k) := st;
+  k (f a)
+
+/-- A linear focus in a linear focus. -/
+def Lens1.comp {S A B : Type} (l : Lens1 S A) (m : Lens1 A B) : Lens1 S B := fun (1 s : S) =>
+  let 1 st := l s;
+  let 1 (a, k) := st;
+  let 1 inner := m a;
+  let 1 (b, j) := inner;
+  (b, fun (1 b' : B) => k (j b'))
+
+/-- Run a linear state transformer on a linear focus: borrow, run, put back. -/
+def zoom1 {S X B : Type} (l : Lens1 S X) (1 m : (1 _ : X) → B × X) (1 s : S) : B × S :=
+  let 1 st := l s;
+  let 1 (x, k) := st;
+  let 1 r := m x;
+  let 1 (b, x') := r;
+  (b, k x')
+
+/-- The dependent linear store: a linear source and a linear focus whose type depends on
+it. (`DepLens` at quantity ω.) -/
+def DepLens1 (S : Type) (A : S → Type) : Type :=
+  (1 s : S) → (1 _ : A s) × ((1 _ : A s) → S)
+
+/-- Update a dependent linear focus. The source index may appear in `f`'s *type* (an
+erased position) but not be passed to `f` as a value: a linear source is used once. -/
+def DepLens1.over {S : Type} {A : S → Type} (l : DepLens1 S A) (1 s : S)
+    (1 f : (1 _ : A s) → A s) : S :=
+  let 1 st := l s;
+  let 1 (a, k) := st;
+  k (f a)
+
+-- ## 9. A whole-fibre lens on a dependent pair
+
+/-- A lens that focuses the *whole fibre* of a dependent pair (`Vec Nat p.1` under
+`p : (n : Nat) × Vec Nat n`). Its put keeps the index by construction, so every law is
+`rfl`; it is the "identity" dependent lens, useful as the base case of `DepLens.comp`. -/
+def sigL : DepLens ((n : Nat) × Vec Nat n) (fun p => Vec Nat p.1) := fun p =>
+  (p.2, fun v => (p.1, v))
+
+/-- `sigL` is GetPut (by `rfl`). -/
+def sigL_getPut : DepLens.GetPut sigL := fun p => rfl
+/-- `sigL` is PutGet (by `rfl`). -/
+def sigL_putGet : (p : (n : Nat) × Vec Nat n) → (v : Vec Nat p.1) →
+    DepLens.get sigL (DepLens.set sigL p v) = v := fun p v => rfl
+/-- `sigL` is PutPut (by `rfl`). -/
+def sigL_putPut : (p : (n : Nat) × Vec Nat n) → (v w : Vec Nat p.1) →
+    DepLens.set sigL (DepLens.set sigL p v) w = DepLens.set sigL p w := fun p v w => rfl
+/-- `sigL` is lawful. -/
+def sigL_lawful : DepLens.LawfulFibre sigL
+    (fun p v => DepLens.get sigL (DepLens.set sigL p v) = v)
+    (fun p v w => DepLens.set sigL (DepLens.set sigL p v) w = DepLens.set sigL p w) :=
+  (sigL_getPut, sigL_putGet, sigL_putPut)
+
+
+-- ## 10. Interaction with regions and linear handles (`ResultH`)
+
+-- A dependent focus under a `Uniq` handle. `Uniq.zoom` (lib/Region.wiz) has the body
+-- `(1 x : Uniq ρ' X) → Result1 B (Uniq ρ' X)` with `X` fixed: the family `A s` depends
+-- on the *value* `s` inside the handle, so `X` would have to be `A s`. The index is
+-- available (`Uniq.read`/`Uniq.peek` expose the payload at ω), so a dependent zoom is
+-- expressible — but only **inside** `lib/Region.wiz`, because it has to build a
+-- `Uniq ρ (A s)` with the private `Uniq.mk`. Adding it here would need that constructor
+-- (or a new `Region` operation); see the note, "open questions".
+
+-- What *is* additive: a partial dependent optic that threads a linear handle. The
+-- success and error branches each carry the handle (`ResultH 1`), and the store's type
+-- is the family at the current source.
+/-- A partial dependent optic that threads a linear handle (`ResultH 1`): the success
+branch carries the store and the handle, the error branch the handle. -/
+def PDepLensH (S : Type) (A : S → Type) (H : Type) : Type :=
+  (s : S) → ResultH 1 (A s × ((a : A s) → S)) H
+
+/-- A partial dependent optic whose success value is at quantity `q` (`ResultQ q`): at
+`q = ω` this is the ordinary partial dependent optic, at `q = 1` the successful focus is
+linear (and the error branch has no value, so a linear *resource* would need `ResultH`). -/
+def PDepLensQ (q : Qty) (S : Type) (A : S → Type) : Type :=
+  (s : S) → ResultQ q (A s × ((a : A s) → S))

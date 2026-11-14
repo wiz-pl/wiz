@@ -1021,3 +1021,19 @@ provenance. `import Scry.TaintExamples` is the hand-built corpus used by the
 `scry-taint` group. This is the S4 intraprocedural prototype: no tree-sitter, no C
 lowering, no SARIF, and no interprocedural or memory modelling yet;
 `wiz-notes/scry-taint.md` has the design, the spec format and the gaps.
+
+## H14 C3: dependent optics and linear optics (`lib/OpticDep.wiz`)
+
+`DepLens S A`, a lens whose focus type is a *family* over the source:
+`(s : S) → A s × ((a : A s) → S)` (lib/Optic.wiz's `Store A S` with `A` replaced by `A
+s`). The example is the tabulation lens `tabL` (`Vec A n ≅ (Fin n → A)`, indexed by the
+length), proved lawful; `GetPut` is generic, `PutGet`/`PutPut` are stated with an
+`Eq.subst` along `put s a = s` and proved at the fibre when the put preserves the index.
+The file also has the transport-free polynomial-map form (`DPoly`, Niu–Spivak's dependent
+lens), the coend encoding as a coproduct of residual representations plus its normal form
+(`Rep`/`PreCoend`/`toLens`, with `toLens ∘ ofLens = id` by `rfl`), a dependent traversal
+(`DepTraverse`, including a resizing traversal of a vector), and the linear store
+`Store1 A S = (1 _ : A) × ((1 _ : A) → S)` with `Lens1`, `Lens1.over`, `Lens1.comp` and
+`zoom1`: a linear optic moves a 1-quantity focus but has no `get`/`set`. Tests: `optic`.
+Design, laws, runtime (allocation counts) and open questions:
+`/workspace/wiz-notes/dependent-optics.md`.
