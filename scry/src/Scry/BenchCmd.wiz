@@ -1,0 +1,154 @@
+import Sys
+import Json
+import Scry.Bench
+/-!
+# Scry.BenchCmd: the `scry bench` command
+
+```
+scry bench [--corpus DIR] [--baseline FILE] [--extra DIR]...
+           [--json OUT] [--markdown OUT] [--update-baseline FILE]
+           [--no-timing] [--quiet] [--fail-on-regression]
+```
+
+Defaults are relative to `scry/` (`bench/corpus`, `bench/baseline.json`,
+`build/bench.json`, `build/bench.md`); when run from the repository root the same
+relative paths are tried under `scry/`. A missing corpus is a clean skip (exit 0); a
+malformed manifest is an error. `--fail-on-regression` makes a baseline mismatch exit 1.
+-/
+
+def Scry.benchUsage : String :=
+  "usage: scry bench [--corpus DIR] [--baseline FILE] [--extra DIR]...\n"
+  ++ "                 [--json OUT] [--markdown OUT] [--update-baseline FILE]\n"
+  ++ "                 [--no-timing] [--quiet] [--fail-on-regression]\n"
+
+def Scry.benchDefaultOpts : Scry.BenchOpts :=
+  Scry.BenchOpts.mk "bench/corpus" (.some "bench/baseline.json") .nil .none .none .none
+    .false .false .false
+
+partial def Scry.benchArgsGo (o : Scry.BenchOpts) : List String → Except String Scry.BenchOpts
+  | .nil => .ok o
+  | .cons a rest => match a with
+    | "--corpus" => match rest with
+      | .cons p more => Scry.benchArgsGo { o with corpus := p } more
+      | .nil => .error "--corpus needs a directory"
+    | "--baseline" => match rest with
+      | .cons p more => Scry.benchArgsGo { o with baseline := .some p } more
+      | .nil => .error "--baseline needs a file"
+    | "--extra" => match rest with
+      | .cons p more => Scry.benchArgsGo { o with extras := List.append o.extras (.cons p .nil) } more
+      | .nil => .error "--extra needs a directory"
+    | "--json" => match rest with
+      | .cons p more => Scry.benchArgsGo { o with jsonOut := .some p } more
+      | .nil => .error "--json needs an output file (or -)"
+    | "--markdown" => match rest with
+      | .cons p more => Scry.benchArgsGo { o with markdownOut := .some p } more
+      | .nil => .error "--markdown needs an output file (or -)"
+    | "--update-baseline" => match rest with
+      | .cons p more => Scry.benchArgsGo { o with updateBaseline := .some p } more
+      | .nil => .error "--update-baseline needs a file"
+    | "--no-timing" => Scry.benchArgsGo { o with noTiming := .true } rest
+    | "--quiet" => Scry.benchArgsGo { o with quiet := .true } rest
+    | "--fail-on-regression" => Scry.benchArgsGo { o with failOnRegression := .true } rest
+    | "--no-baseline" => Scry.benchArgsGo { o with baseline := .none } rest
+    | "--help" => .error Scry.benchUsage
+    | _ => match String.startsWith a "--" with
+      | .true => .error ("unknown flag " ++ a ++ "\n" ++ Scry.benchUsage)
+      | .false => .error ("unexpected argument " ++ a ++ "\n" ++ Scry.benchUsage)
+
+def Scry.benchArgs (args : List String) : Except String Scry.BenchOpts :=
+  Scry.benchArgsGo Scry.benchDefaultOpts args
+
+/-- Try a default path as given, then under `scry/` when run from the repository root. -/
+def Scry.benchResolve (p : String) : IO String := do
+  ok ← FS.exists p;
+  match ok with
+  | .true => IO.pure p
+  | .false => do
+    ok2 ← FS.exists (String.append "scry/" p);
+    IO.pure (match ok2 with
+      | .true => String.append "scry/" p
+      | .false => p)
+
+def Scry.benchEnsureDir (p : String) : EIO Unit := do
+  ok ← EIO.lift (FS.exists p);
+  match ok with
+  | .true => EIO.pure ()
+  | .false => FS.createDir p
+
+def Scry.benchWrite (path text : String) : EIO Unit := do
+  match String.eq path "-" with
+  | .true => EIO.lift (IO.print text)
+  | .false => do
+    let parent := match String.splitOn path "/" with
+      | .cons d rest => match rest with
+        | .nil => ""
+        | _ => d
+      | .nil => "";
+    match String.eq parent "" with
+    | .true => EIO.pure ()
+    | .false => Scry.benchEnsureDir parent;
+    FS.writeFile path text
+
+def Scry.benchSummaryLine (run : Scry.BenchRun) : String :=
+  let o := run.summary.overall.metrics;
+  let pathFrac := Scry.benchRatio run.summary.validPaths run.summary.findings;
+  let certFrac := Scry.benchRatio run.summary.checked run.summary.findings;
+  "bench: " ++ Nat.repr (List.length run.cases) ++ " cases, TP " ++ Nat.repr o.counts.tp
+    ++ " FP " ++ Nat.repr o.counts.fp ++ " TN " ++ Nat.repr o.counts.tn
+    ++ " FN " ++ Nat.repr o.counts.fn ++ " unknown " ++ Nat.repr o.counts.unknown
+    ++ ", TPR " ++ Scry.benchPct o.tpr ++ ", FPR " ++ Scry.benchPct o.fpr
+    ++ ", J " ++ Scry.benchPctSigned o.youden
+    ++ ", paths " ++ Scry.benchPct pathFrac
+    ++ ", checked " ++ Scry.benchPct certFrac
+    ++ ", " ++ Nat.repr run.totalMs ++ " ms (informational)"
+
+def Scry.benchResolveBaseline (b : Option String) : EIO (Option String) :=
+  match b with
+  | .none => EIO.pure .none
+  | .some p => do
+    q ← EIO.lift (Scry.benchResolve p);
+    EIO.pure (.some q)
+
+def Scry.benchWriteReport (out : Option String) (defaultPath text : String) : EIO Unit :=
+  match out with
+  | .some p => Scry.benchWrite p text
+  | .none => do
+    Scry.benchEnsureDir "build";
+    FS.writeFile defaultPath text
+
+def Scry.benchMaybeUpdateBaseline (out : Option String) (text : String) : EIO Unit :=
+  match out with
+  | .some p => FS.writeFile p text
+  | .none => EIO.pure ()
+
+def Scry.benchMaybePrint (show : Bool) (run : Scry.BenchRun) : EIO Unit :=
+  match show with
+  | .true => EIO.lift (IO.println (Scry.benchSummaryLine run))
+  | .false => EIO.pure ()
+
+def Scry.benchCmd (args : List String) : EIO Nat :=
+  match Scry.benchArgs args with
+  | .error e => EIO.fail e
+  | .ok o => do
+    corpus ← EIO.lift (Scry.benchResolve o.corpus);
+    baseline ← Scry.benchResolveBaseline o.baseline;
+    let opts := { o with corpus := corpus, baseline := baseline };
+    run ← Scry.benchRun opts;
+    let jsonPath := match o.jsonOut with | .some p => p | .none => "build/bench.json";
+    let mdPath := match o.markdownOut with | .some p => p | .none => "build/bench.md";
+    let jsonText := Json.render (Scry.benchReportJson run);
+    let mdText := Scry.benchMarkdown run;
+    Scry.benchWriteReport o.jsonOut jsonPath jsonText;
+    Scry.benchWriteReport o.markdownOut mdPath mdText;
+    Scry.benchMaybeUpdateBaseline o.updateBaseline
+      (String.append (Scry.benchBaselineText run) "\n");
+    let show := Bool.and (Bool.not o.quiet)
+      (Bool.and (Bool.not (String.eq jsonPath "-")) (Bool.not (String.eq mdPath "-")));
+    Scry.benchMaybePrint show run;
+    let failed : Bool := match o.failOnRegression with
+      | .true => Bool.and (String.eq run.status "ok")
+          (Bool.and (String.eq run.baseline.status "compared")
+            (Bool.not run.baseline.matches))
+      | .false => .false;
+    if failed then EIO.pure 1 else EIO.pure 0
+

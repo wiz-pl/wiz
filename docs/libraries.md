@@ -960,3 +960,27 @@ carry a flow through them. What remains outside the model is listed in
 model, context sensitivity, non-ASCII columns); the lowering still warns (havoc) for the
 constructs it does not lower. `wiz-notes/scry-taint.md` has the design, the `.scry`
 format and the gaps.
+
+## Scry: the taint benchmark and metrics (`scry/src/Scry/Bench.wiz`)
+
+`import Scry.Bench` is the measurement layer around the taint pipeline, not another
+analysis. `Scry.benchRun` runs `Scry.analyzeFile` (the same function `scry taint` uses)
+over a manifest of C cases, matches the findings one-to-one against the manifest's
+expected `(rule, function, callee, argument)` tuples, and computes:
+
+* per-CWE, per-suite and overall case-level TPR/FPR/Youden/precision/F1, with macro
+  averages over CWEs (integer basis points, so the baseline is stable);
+* path validity: a reported path must end at the sink; a taint path must also start at
+  a source, and the optional `sinkLine`/`sourceLine` must match the origins;
+* certificate coverage (`derivation = checked` over reported findings) and lowering
+  boundary counts, split into advisory and blocking warnings;
+* wall-clock runtime, marked informational (not a `perf-run` measurement).
+
+`Scry.benchReportJson` and `Scry.benchMarkdown` are the stable outputs;
+`Scry.benchBaselineJson` is the checked-in regression baseline, and
+`Scry.benchLoadBaseline` compares a run against it. The command is `scry bench`
+(`scry/src/Scry/BenchCmd.wiz`); the S0/S2 corpus and its manifest are in
+`scry/bench/corpus/`, and the policy is in `scry/bench/corpus/README.md`.
+`wiz-notes/scry-bench.md` records the baseline, the corpus size and the limitations.
+
+
