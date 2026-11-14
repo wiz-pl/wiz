@@ -1,0 +1,500 @@
+import Scry.Analysis
+import Scry.Eval
+import Scry.Rules
+import Text
+import Word
+/-!
+# Scry.RuleTaint
+
+**Variable-indexed taint over a rule pack** (`import Scry.RuleTaint`): the intraprocedural
+engine S4's rule pack needs, where a fact is `tainted (point, register)` instead of the
+prototype's one bit per statement. `Scry.Taint` keeps the statement-indexed Datalog
+program and its golden tests; this module is the engine for the general rule pack, and
+`Scry.Interproc` adds summaries and a call graph on top.
+
+## Why a register column
+
+A call can write more than one thing: its result, and (in the models of
+`Scry.Rules`) an argument `source read arg 1` fills. A sanitiser can clean an argument in
+place. The prototype's `tainted (statement)` cannot tell those apart, so this engine
+carries the register:
+
+| # | relation | arity | kind |
+|---|---|---|---|
+| 0 | `flow (def, use, var)` | 3 | EDB, def-use edges |
+| 1 | `src (point, var)` | 2 | EDB |
+| 2 | `sink (point, arg, var)` | 3 | EDB |
+| 3 | `san (point, var)` | 2 | EDB |
+| 4 | `tainted (point, var)` | 2 | IDB |
+| 5 | `alert (sink, arg)` | 2 | IDB |
+| 6 | `param (entry, var)` | 2 | EDB: a tainted parameter seed |
+| 7 | `retsrc (call, var)` | 2 | EDB: a call result tainted by a callee's return |
+| 8 | `badcall (point)` | 1 | EDB: a forbidden call |
+| 9 | `badalert (point)` | 1 | IDB |
+| 10 | `gen (point, var)` | 2 | EDB: the ordinary definition at a point |
+
+Rules:
+
+```
+tainted n v   :- src n v.
+tainted n v   :- param n v.
+tainted n v   :- retsrc n v.
+tainted n w   :- tainted d v, flow d n v, gen n w, !san n w.
+alert n a     :- tainted d v, flow d n v, sink n a v.
+badalert n    :- badcall n.
+```
+
+`flow` is the def-use relation from `Scry.Analysis`: a definition of `v` reaching a
+*use* of `v`. `gen` is the variable a point *defines* (`assign x e` defines `x`, a call
+defines its result), so an assignment or a call transfers taint from any tainted input to
+its output. An argument a source writes (or a sanitiser cleans) is an **extra**
+definition, not a `gen`: it is seeded by `src` or killed by `san` and is not derived from
+the call's inputs. The kill is per register, and `flow` gives the alert's sink use, so a
+call that writes an argument is handled by the same rules. The self-edge for a parameter
+used by the entry statement is added in `Scry.prepareFunc`.
+
+Every point here is a program point of the analysed function; the function name is not
+in the fact. `Scry.Interproc` keys results by function name.
+-/
+
+-- ## Relation numbers
+
+def Scry.rtFlow : Nat := 0
+def Scry.rtSrc : Nat := 1
+def Scry.rtSink : Nat := 2
+def Scry.rtSan : Nat := 3
+def Scry.rtTainted : Nat := 4
+def Scry.rtAlert : Nat := 5
+def Scry.rtParam : Nat := 6
+def Scry.rtRetSrc : Nat := 7
+def Scry.rtBadCall : Nat := 8
+def Scry.rtBadAlert : Nat := 9
+def Scry.rtGen : Nat := 10
+
+-- ## The plan for one function
+
+/-- A sink occurrence with the rule that owns it: `node` is the call point, `arg` the
+checked argument, `var` the register passed there. -/
+structure Scry.RuleSinkFact where
+  node : Nat
+  arg : Nat
+  var : Nat
+  name : String
+  rule : String
+  severity : Scry.Severity
+  message : String
+
+/-- A forbidden call occurrence. -/
+structure Scry.BadCall where
+  node : Nat
+  name : String
+  rule : String
+  severity : Scry.Severity
+  message : String
+
+/-- Everything the rule pack says about one function, before the assignment of tainted
+parameters: the definitions (with extra definition points), the source/sanitiser/sink
+facts, the return points, and the parameter layout. -/
+structure Scry.FuncPlan where
+  info : Scry.FnInfo
+  entry : Nat
+  /-- `(position, register index)` for every parameter. -/
+  params : List (Nat × Nat)
+  /-- `(terminator point, returned register)` for every `ret x`. -/
+  rets : List (Nat × Nat)
+  sources : List (Nat × Nat)
+  sans : List (Nat × Nat)
+  sinks : List Scry.RuleSinkFact
+  badCalls : List Scry.BadCall
+
+def Scry.paramMap : Nat → List Wil.Var → List (Nat × Nat)
+  | _, .nil => .nil
+  | i, .cons v vs => List.cons (i, v.index) (Scry.paramMap (Nat.succ i) vs)
+
+/-- The parameter register at position `i`. -/
+def Scry.paramVarAt (m : List (Nat × Nat)) (i : Nat) : Option Nat :=
+  match List.find (fun p => Nat.beq p.1 i) m with
+  | .none => .none
+  | .some p => .some p.2
+
+/-- The return points of a function (every `ret (some v)` terminator). -/
+def Scry.retPoints (g : Scry.Fn) : List (Nat × Nat) :=
+  Scry.concatLists (fun n =>
+    match Scry.nodeTerm g n with
+    | .none => .nil
+    | .some t => match t with
+      | .ret (.some v) => List.cons (n, v.index) .nil
+      | _ => .nil) (Scry.range g.count)
+
+/-- Match one taint rule's sources and sanitisers against a call, collecting the
+`(point, register)` facts and the extra definitions a written argument needs. -/
+def Scry.matchRuleParts (n : Nat) (name : String) (args : List Wil.Var) (r : Scry.TaintRule) :
+    List (Nat × Nat) × List (Nat × Nat) :=
+  let sources := Scry.rulePackConcat (fun p =>
+    if Scry.nameMatches p.1 name then
+      match p.2 with
+      | .result => .nil
+      | .arg k => match Wil.listNth args k with
+        | .none => .nil
+        | .some v => List.cons (n, v.index) .nil
+    else .nil) r.sources;
+  let sans := Scry.rulePackConcat (fun p =>
+    if Scry.nameMatches p.1 name then
+      match p.2 with
+      | .result => .nil
+      | .arg k => match Wil.listNth args k with
+        | .none => .nil
+        | .some v => List.cons (n, v.index) .nil
+    else .nil) r.sanitisers;
+  (sources, sans)
+
+/-- Source facts of a call, including its result when a rule names the result. -/
+def Scry.ruleSourcesAt (n : Nat) (callResult : Option Nat) (name : String)
+    (args : List Wil.Var) (rules : List Scry.TaintRule) : List (Nat × Nat) :=
+  Scry.rulePackConcat (fun r =>
+    let direct := Scry.rulePackConcat (fun p =>
+      if Scry.nameMatches p.1 name then
+        match p.2 with
+        | .result => match callResult with
+          | .some rv => List.cons (n, rv) .nil
+          | .none => .nil
+        | .arg _ => .nil
+      else .nil) r.sources;
+    let dropped := Scry.matchRuleParts n name args r;
+    List.append direct dropped.1) rules
+
+/-- Sanitiser facts of a call, including its result. -/
+def Scry.ruleSansAt (n : Nat) (callResult : Option Nat) (name : String)
+    (args : List Wil.Var) (rules : List Scry.TaintRule) : List (Nat × Nat) :=
+  Scry.rulePackConcat (fun r =>
+    let direct := Scry.rulePackConcat (fun p =>
+      if Scry.nameMatches p.1 name then
+        match p.2 with
+        | .result => match callResult with
+          | .some rv => List.cons (n, rv) .nil
+          | .none => .nil
+        | .arg _ => .nil
+      else .nil) r.sanitisers;
+    let dropped := Scry.matchRuleParts n name args r;
+    List.append direct dropped.2) rules
+
+/-- The extra definitions a rule pack adds at a call: every argument a source writes or
+a sanitiser cleans in place. The result is already an ordinary definition. -/
+def Scry.ruleExtraDefsAt (n : Nat) (name : String) (args : List Wil.Var)
+    (rules : List Scry.TaintRule) : List (Nat × Nat) :=
+  Scry.rulePackConcat (fun r =>
+    let parts := Scry.matchRuleParts n name args r;
+    List.append parts.1 parts.2) rules
+
+def Scry.ruleSinksAt (n : Nat) (name : String) (args : List Wil.Var)
+    (rules : List Scry.TaintRule) : List Scry.RuleSinkFact :=
+  Scry.rulePackConcat (fun r =>
+    Scry.rulePackConcat (fun s =>
+      if Scry.nameMatches s.name name then
+        match Wil.listNth args s.arg with
+        | .none => .nil
+        | .some v => List.cons (Scry.RuleSinkFact.mk n s.arg v.index name r.id r.severity r.message) .nil
+      else .nil) r.sinks) rules
+
+def Scry.ruleBadCallsAt (n : Nat) (name : String) (rules : List Scry.ForbiddenRule) :
+    List Scry.BadCall :=
+  Scry.rulePackConcat (fun r =>
+    if List.any (fun pat => Scry.nameMatches pat name) r.calls then
+      List.cons (Scry.BadCall.mk n name r.id r.severity r.message) .nil
+    else .nil) rules
+
+/-- One call's rule facts, collected while preparing a function. -/
+structure Scry.CallScan where
+  node : Nat
+  name : String
+  result : Option Nat
+  args : List Wil.Var
+  defs : List (Nat × Nat)
+  sources : List (Nat × Nat)
+  sans : List (Nat × Nat)
+  sinks : List Scry.RuleSinkFact
+  bads : List Scry.BadCall
+
+/-- Build a function's plan for a rule pack. Extra definitions are the tainted-parameter
+definitions at entry and the arguments a source/sanitiser writes, so the def-use layer
+already connects them. -/
+def Scry.prepareFunc (fn : Wil.Func) (pack : Scry.RulePack) : Scry.FuncPlan :=
+  let g := Scry.flatten fn;
+  let taintRules := Scry.RulePack.taintRules pack;
+  let forbidden := Scry.RulePack.forbiddenRules pack;
+  let paramDefs := List.map (fun p => (Scry.entryNode g, p.2)) (Scry.paramMap 0 fn.params);
+  let scan := Scry.concatLists (fun n =>
+    match Scry.nodeStmt g n with
+    | .none => .nil
+    | .some s => match s with
+      | .call r callee args => match callee with
+        | .direct name =>
+          let rv := match r with
+            | .some v => .some v.index
+            | .none => (.none : Option Nat);
+          List.cons (Scry.CallScan.mk n name rv args
+            (Scry.ruleExtraDefsAt n name args taintRules)
+            (Scry.ruleSourcesAt n rv name args taintRules)
+            (Scry.ruleSansAt n rv name args taintRules)
+            (Scry.ruleSinksAt n name args taintRules)
+            (Scry.ruleBadCallsAt n name forbidden)) .nil
+        | .indirect _ => .nil
+      | _ => .nil) (Scry.range g.count);
+  let extraDefs := Scry.rulePackConcat (fun p => p.defs) scan;
+  let baseInfo := Scry.fnInfoWith fn (List.append paramDefs extraDefs);
+  /-- A parameter's definition sits at the entry *statement point*; if that first
+  statement reads the parameter (a sink at the top of a function is common), the entry
+  definition must reach a use at its own point. Ordinary reaching definitions have no
+  self edge, so add one for that case only. -/
+  let entryUsed := Scry.usesAt g (Scry.entryNode g);
+  let selfDeps := List.map (fun p => Scry.DataDep.mk (Scry.entryNode g) (Scry.entryNode g) p.2)
+    (List.filter (fun p => Scry.memNat p.2 entryUsed) paramDefs);
+  let info : Scry.FnInfo := { baseInfo with deps := List.append selfDeps baseInfo.deps };
+  let sources := Scry.rulePackConcat (fun p => p.sources) scan;
+  let sans := Scry.rulePackConcat (fun p => p.sans) scan;
+  let sinks := Scry.rulePackConcat (fun p => p.sinks) scan;
+  let bads := Scry.rulePackConcat (fun p => p.bads) scan;
+  Scry.FuncPlan.mk info (Scry.entryNode g) (Scry.paramMap 0 fn.params)
+    (Scry.retPoints g) sources sans sinks bads
+
+-- ## The Datalog program
+
+def Scry.rtOps : Scry.LatOps Nat :=
+  Scry.LatOps.mk 0 (fun a b => if Nat.lt a b then b else a) Nat.beq
+
+def Scry.rtRuleSrc : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 4 [Scry.Term.var 0, Scry.Term.var 1])
+    [Scry.Atom.pos 1 [Scry.Term.var 0, Scry.Term.var 1]]
+
+def Scry.rtRuleParam : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 4 [Scry.Term.var 0, Scry.Term.var 1])
+    [Scry.Atom.pos 6 [Scry.Term.var 0, Scry.Term.var 1]]
+
+def Scry.rtRuleRetSrc : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 4 [Scry.Term.var 0, Scry.Term.var 1])
+    [Scry.Atom.pos 7 [Scry.Term.var 0, Scry.Term.var 1]]
+
+/-- Taint transfer: a tainted definition reaching a use at `n` taints every ordinary
+definition `w` at `n` (an assignment's target, or a call's result). An argument source
+or an in-place sanitiser is an *extra* definition, not an ordinary one: a source seeds it
+and a sanitiser kills it, so it is not derived from its inputs here. -/
+def Scry.rtRuleProp : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 4 [Scry.Term.var 2, Scry.Term.var 3])
+    [ Scry.Atom.pos 4 [Scry.Term.var 0, Scry.Term.var 1]
+    , Scry.Atom.pos 0 [Scry.Term.var 0, Scry.Term.var 2, Scry.Term.var 1]
+    , Scry.Atom.pos 10 [Scry.Term.var 2, Scry.Term.var 3]
+    , Scry.Atom.neg 3 [Scry.Term.var 2, Scry.Term.var 3] ]
+
+def Scry.rtRuleAlert : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 5 [Scry.Term.var 1, Scry.Term.var 2])
+    [ Scry.Atom.pos 4 [Scry.Term.var 0, Scry.Term.var 3]
+    , Scry.Atom.pos 0 [Scry.Term.var 0, Scry.Term.var 1, Scry.Term.var 3]
+    , Scry.Atom.pos 2 [Scry.Term.var 1, Scry.Term.var 2, Scry.Term.var 3] ]
+
+def Scry.rtRuleBad : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 9 [Scry.Term.var 0])
+    [Scry.Atom.pos 8 [Scry.Term.var 0]]
+
+/-- Arity 3 `flow`, then the rule-pack relations; see the module header. -/
+def Scry.ruleTaintProgram : Scry.Program Nat :=
+  Scry.Program.mk Scry.rtOps [3, 2, 3, 2, 2, 2, 2, 2, 1, 1, 2] [] []
+    [ Scry.rtRuleSrc
+    , Scry.rtRuleParam
+    , Scry.rtRuleRetSrc
+    , Scry.rtRuleProp
+    , Scry.rtRuleAlert
+    , Scry.rtRuleBad ]
+
+-- ## EDB construction
+
+def Scry.rtU (n : Nat) : U64 := U64.ofNat n
+
+def Scry.rtAddTuples (rel : Nat) (rows : List (List Nat)) (st : Scry.State Nat) :
+    Scry.State Nat :=
+  List.foldr (fun row acc => Scry.State.addTuple acc rel (List.map Scry.rtU row)) st rows
+
+def Scry.rtPairs (xs : List (Nat × Nat)) : List (List Nat) :=
+  List.map (fun p => List.cons p.1 (List.cons p.2 .nil)) xs
+
+def Scry.rtTriples (xs : List Scry.DataDep) : List (List Nat) :=
+  List.map (fun d => List.cons d.from (List.cons d.to (List.cons d.var .nil))) xs
+
+/-- The EDB of one function's evaluation: def-use, the rule facts, and the seeds that
+come from outside (tainted parameters and callee-returned taint). -/
+def Scry.planInput (plan : Scry.FuncPlan) (paramTaint : List Nat)
+    (retSeeds : List (Nat × Nat)) : Scry.State Nat :=
+  let st0 := Scry.State.empty;
+  let st1 := Scry.rtAddTuples Scry.rtFlow (Scry.rtTriples plan.info.deps) st0;
+  let st1b := Scry.rtAddTuples Scry.rtGen (Scry.rtPairs (Scry.defsOf plan.info.g)) st1;
+  let st2 := Scry.rtAddTuples Scry.rtSrc (Scry.rtPairs plan.sources) st1b;
+  let sinkRows := List.map (fun s => List.cons s.node (List.cons s.arg (List.cons s.var .nil)))
+    plan.sinks;
+  let st3 := Scry.rtAddTuples Scry.rtSink sinkRows st2;
+  let st4 := Scry.rtAddTuples Scry.rtSan (Scry.rtPairs plan.sans) st3;
+  let paramRows := Scry.rulePackConcat (fun i =>
+    match Scry.paramVarAt plan.params i with
+    | .some v => List.cons (List.cons plan.entry (List.cons v .nil)) .nil
+    | .none => .nil) paramTaint;
+  let st5 := Scry.rtAddTuples Scry.rtParam paramRows st4;
+  let st6 := Scry.rtAddTuples Scry.rtRetSrc (Scry.rtPairs retSeeds) st5;
+  let badRows := List.map (fun b => List.cons b.node .nil) plan.badCalls;
+  Scry.rtAddTuples Scry.rtBadCall badRows st6
+
+-- ## Reading a result
+
+def Scry.rtRows (st : Scry.State Nat) (rel : Nat) : List (List U64) :=
+  (Scry.Db.tupleAt st.db rel).toList
+
+def Scry.rtRowNat (row : List U64) (i : Nat) : Nat :=
+  UIntN.toNat (Scry.nthD (U64.ofNat 0) row i)
+
+def Scry.rtNats (row : List U64) : List Nat := List.map (fun x => UIntN.toNat x) row
+
+def Scry.taintRows (st : Scry.State Nat) : List (Nat × Nat) :=
+  List.map (fun row => (Scry.rtRowNat row 0, Scry.rtRowNat row 1)) (Scry.rtRows st Scry.rtTainted)
+
+def Scry.alertRows (st : Scry.State Nat) : List (Nat × Nat) :=
+  List.map (fun row => (Scry.rtRowNat row 0, Scry.rtRowNat row 1)) (Scry.rtRows st Scry.rtAlert)
+
+def Scry.badAlertRows (st : Scry.State Nat) : List Nat :=
+  List.map (fun row => Scry.rtRowNat row 0) (Scry.rtRows st Scry.rtBadAlert)
+
+def Scry.flowHasVar (info : Scry.FnInfo) (d u v : Nat) : Bool :=
+  List.any (fun dep => Bool.and (Nat.beq dep.from d)
+    (Bool.and (Nat.beq dep.to u) (Nat.beq dep.var v))) info.deps
+
+/-- Whether register `v` is tainted at use point `u` (a definition reaching `u` is
+tainted). This is the query parameter taint, return summaries and call arguments use. -/
+def Scry.taintAtUse (info : Scry.FnInfo) (rows : List (Nat × Nat)) (u v : Nat) : Bool :=
+  List.any (fun p => Bool.and (Nat.beq p.2 v) (Scry.flowHasVar info p.1 u v)) rows
+
+-- ## Provenance to paths
+
+def Scry.rtPremiseOfRel {L : Type} (st : Scry.State L) (step : Scry.ProofStep L)
+    (rel : Nat) : Option Nat :=
+  List.find (fun id => match Scry.stepByIdL st.nodes id with
+    | .none => .false
+    | .some s => Nat.beq s.fact.rel rel) step.premises
+
+/-- Walk a `tainted` derivation back to its seed, collecting `(point, register)` from
+the seed to the queried definition. -/
+partial def Scry.rtTaintChain {L : Type} (st : Scry.State L) (id : Nat) : List (Nat × Nat) :=
+  match Scry.stepByIdL st.nodes id with
+  | .none => .nil
+  | .some step =>
+    let here := (Scry.rtRowNat step.fact.args 0, Scry.rtRowNat step.fact.args 1);
+    match Scry.rtPremiseOfRel st step Scry.rtTainted with
+    | .some pid => List.append (Scry.rtTaintChain st pid) (List.cons here .nil)
+    | .none => List.cons here .nil
+
+/-- The seed kind of a tainted fact, read from the rule that introduced it. -/
+def Scry.rtSeedKind (st : Scry.State Nat) (n v : Nat) : Scry.PathKind :=
+  match Scry.State.whyTuple st (Scry.rtOps) Scry.rtTainted
+      [U64.ofNat n, U64.ofNat v] with
+  | .none => .assumed
+  | .some step =>
+    match Scry.rtPremiseOfRel st step Scry.rtSrc with
+    | .some _ => .source
+    | .none => match Scry.rtPremiseOfRel st step Scry.rtParam with
+      | .some _ => .param
+      | .none => match Scry.rtPremiseOfRel st step Scry.rtRetSrc with
+        | .some _ => .returnSeed
+        | .none => .assumed
+
+def Scry.rtChainNodes (func : String) (st : Scry.State Nat) :
+    Nat → List (Nat × Nat) → List Scry.PathNode
+  | _, .nil => .nil
+  | i, .cons p rest =>
+    let kind := if Nat.beq i 0 then Scry.rtSeedKind st p.1 p.2 else Scry.PathKind.flow;
+    List.cons (Scry.PathNode.mk func p.1 p.2 kind) (Scry.rtChainNodes func st (Nat.succ i) rest)
+
+/-- The path from the taint seed to the definition `(n, v)` in this function, using the
+engine's provenance. The last node is `(n, v)`; an untainted query gives `[]`. -/
+def Scry.chainToDef (func : String) (st : Scry.State Nat) (n v : Nat) : List Scry.PathNode :=
+  match Scry.State.whyTuple st Scry.rtOps Scry.rtTainted [U64.ofNat n, U64.ofNat v] with
+  | .none => .nil
+  | .some step =>
+    Scry.rtChainNodes func st 0 (Scry.rtTaintChain st step.id)
+
+/-- The tainted definition reaching a sink argument, from the alert's provenance. -/
+def Scry.alertDef (st : Scry.State Nat) (sink arg : Nat) : Option (Nat × Nat) :=
+  match Scry.State.whyTuple st Scry.rtOps Scry.rtAlert [U64.ofNat sink, U64.ofNat arg] with
+  | .none => .none
+  | .some step =>
+    match Scry.rtPremiseOfRel st step Scry.rtTainted with
+    | .none => .none
+    | .some pid => match Scry.stepByIdL st.nodes pid with
+      | .none => .none
+      | .some s => .some (Scry.rtRowNat s.fact.args 0, Scry.rtRowNat s.fact.args 1)
+
+-- ## Evaluating one function
+
+structure Scry.FuncResult where
+  fn : Wil.Func
+  plan : Scry.FuncPlan
+  edb : Scry.State Nat
+  state : Option (Scry.State Nat)
+
+def Scry.evaluateFunc (fn : Wil.Func) (pack : Scry.RulePack) (paramTaint : List Nat)
+    (retSeeds : List (Nat × Nat)) : Scry.FuncResult :=
+  let plan := Scry.prepareFunc fn pack;
+  let edb := Scry.planInput plan paramTaint retSeeds;
+  Scry.FuncResult.mk fn plan edb (Scry.eval Scry.ruleTaintProgram edb)
+
+def Scry.resultTaint (r : Scry.FuncResult) : List (Nat × Nat) :=
+  match r.state with
+  | .none => .nil
+  | .some st => Scry.taintRows st
+
+def Scry.resultAlerts (r : Scry.FuncResult) : List (Nat × Nat) :=
+  match r.state with
+  | .none => .nil
+  | .some st => Scry.alertRows st
+
+def Scry.resultBadAlerts (r : Scry.FuncResult) : List Nat :=
+  match r.state with
+  | .none => .nil
+  | .some st => Scry.badAlertRows st
+
+/-- Whether the function's return value may be tainted: some `ret x` uses a tainted
+`x`. This is the return-value summary. -/
+def Scry.returnsTainted (r : Scry.FuncResult) : Bool :=
+  let rows := Scry.resultTaint r;
+  List.any (fun p => Scry.taintAtUse r.plan.info rows p.1 p.2) r.plan.rets
+
+/-- Whether the value passed as `var` at call point `node` is tainted (argument ->
+parameter flow). -/
+def Scry.argTainted (r : Scry.FuncResult) (node var : Nat) : Bool :=
+  Scry.taintAtUse r.plan.info (Scry.resultTaint r) node var
+
+-- ## Findings
+
+def Scry.resultTaintFindings (r : Scry.FuncResult) : List Scry.RuleFinding :=
+  let st := match r.state with
+    | .none => Scry.State.empty
+    | .some s => s;
+  let alerts := Scry.resultAlerts r;
+  Scry.rulePackConcat (fun p =>
+    let sink := p.1;
+    let arg := p.2;
+    let facts := List.filter (fun f => Bool.and (Nat.beq f.node sink) (Nat.beq f.arg arg))
+      r.plan.sinks;
+    let path := match Scry.alertDef st sink arg with
+      | .some d => List.append (Scry.chainToDef r.fn.name st d.1 d.2)
+          (List.cons (Scry.PathNode.mk r.fn.name sink d.2 Scry.PathKind.sink) .nil)
+      | .none => List.cons (Scry.PathNode.mk r.fn.name sink 0 Scry.PathKind.sink) .nil;
+    List.map (fun f => Scry.RuleFinding.mk f.rule f.severity f.message Scry.FindingKind.taint
+      r.fn.name sink f.name f.arg path) facts) alerts
+
+def Scry.resultForbiddenFindings (r : Scry.FuncResult) : List Scry.RuleFinding :=
+  let bad := Scry.resultBadAlerts r;
+  List.map (fun node =>
+    match List.find (fun b => Nat.beq b.node node) r.plan.badCalls with
+    | .some b => Scry.RuleFinding.mk b.rule b.severity b.message Scry.FindingKind.forbidden
+        r.fn.name node b.name 0
+        (List.cons (Scry.PathNode.mk r.fn.name node 0 Scry.PathKind.sink) .nil)
+    | .none => Scry.RuleFinding.mk "" .note "" Scry.FindingKind.forbidden r.fn.name node "" 0
+        (List.cons (Scry.PathNode.mk r.fn.name node 0 Scry.PathKind.sink) .nil)) bad
+
+def Scry.resultFindings (r : Scry.FuncResult) : List Scry.RuleFinding :=
+  List.append (Scry.resultTaintFindings r) (Scry.resultForbiddenFindings r)

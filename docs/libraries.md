@@ -835,10 +835,33 @@ S2 still needs.
 
 `import Scry.Analysis` numbers a Wil function's statements and terminators as program
 points and computes the CFG, dominators, reaching definitions and the PDG's def-use
-(flow-dependence) edges. `import Scry.Taint` feeds those edges to the Datalog engine
-(`lib/Scry/Datalog.wiz`, `lib/Scry/Eval.wiz`) with a `TaintSpec` of source, sanitiser
-and sink calls; the source -> sink path of each finding comes from the engine's
-provenance. `import Scry.TaintExamples` is the hand-built corpus used by the
-`scry-taint` group. This is the S4 intraprocedural prototype: no tree-sitter, no C
-lowering, no SARIF, and no interprocedural or memory modelling yet;
-`wiz-notes/scry-taint.md` has the design, the spec format and the gaps.
+(flow-dependence) edges; `Scry.fnInfoWith` adds caller-supplied definitions (a tainted
+parameter at entry, an argument a call writes) and terminator uses (`ret`/`br`) join the
+data edges, so return values are modelled. `import Scry.Taint` feeds those edges to the
+Datalog engine (`lib/Scry/Datalog.wiz`, `lib/Scry/Eval.wiz`) with a `TaintSpec` of
+source, sanitiser and sink calls; the source -> sink path of each finding comes from the
+engine's provenance. `import Scry.TaintExamples` is the hand-built corpus used by the
+`scry-taint` group.
+
+The S4 rule pack and interprocedural slice are separate modules:
+
+* `import Scry.Rules` — named rules with an id, severity and message, sources/sinks/
+  sanitisers **per argument** (`source read arg 1`, `sanitise sanitize arg 0`), a textual
+  `.scry` block format (`Scry.parseRulePack`) and `*` function-name matching.
+  `lib/Scry/rules/default.scry` is the demo pack as a real spec file.
+* `import Scry.RuleTaint` — variable-indexed taint as Datalog over a rule pack; an
+  argument source/sanitiser becomes an extra definition point, and a `gen` fact is the
+  ordinary definition a statement's tainted input transfers to.
+* `import Scry.Interproc` — a direct-call graph, argument -> parameter taint,
+  return-value summaries and a summary fixpoint for recursion; indirect calls are
+  recorded but unknown. Findings carry their rule metadata and a stitched source -> sink
+  path.
+* `import Scry.Sarif` — SARIF 2.1.0 JSON with rule metadata, primary and related
+  locations from an `OriginMap` (S2 supplies spans; until then the map is test-only).
+* `import Scry.Certify` — a finding as a `Scry.Derivation` checked by `Scry.Cert`
+  against the function's EDB, reporting its axioms and the interprocedural assumptions
+  the path walk supplies.
+
+`import Scry.RuleExamples` is the rule-pack/interprocedural corpus. There is still no
+tree-sitter, no C lowering and no memory/points-to model; `wiz-notes/scry-taint.md` has
+the design, the `.scry` format and the remaining gaps.

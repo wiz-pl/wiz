@@ -1,0 +1,309 @@
+import Scry.Interproc
+import Scry.RuleTaint
+import Scry.Rules
+/-!
+# A rule-pack corpus
+
+Hand-built Wil programs for the S4 rule pack and interprocedural engine
+(`Scry.RuleTaint`, `Scry.Interproc`). Each program isolates one feature:
+
+* `interprocProgram` — taint crosses a direct call: `main` passes `getenv()` to
+  `callee`, whose parameter reaches `system`;
+* `returnProgram` — a callee returns `getenv()`; the caller's result of the call reaches
+  `system` (return-value summary);
+* `recursionProgram` — `rec(n, x)` sinks `x` and calls itself; `main` passes the source as
+  the *second* parameter, so only the parameter fixpoint finds the sink;
+* `formatProgram` — the format-string rule fires on `printf`'s argument 0;
+* `fprintfProgram` — the same rule's `fprintf` sink on argument 1, with a clean stream;
+* `getsProgram` — the forbidden-call rule fires without any taint;
+* `argSourceProgram` — `read(0, buf, n)` writes argument 1, which reaches `system`
+  (a per-argument source);
+* `argSanProgram` — `sanitize(buf)` cleans argument 0 in place, so the sink is silent;
+* `safePrograms` — the false-positive controls: a result sanitiser, a clean format
+  argument, and the in-place sanitiser all yield no finding;
+* `indirectProgram` — a call through a function value: the graph records it as unknown,
+  so neither its argument nor its result carries taint.
+
+Point numbering follows `Scry.Analysis` (statements then a terminator per block); the
+comments name the interesting ones.
+
+The rule pack is `Scry.demoPackText` / `Scry.demoRules`: command injection, format
+strings, `gets` and `strcpy`. `lib/Scry/rules/default.scry` is the same pack as a real
+spec file; `Scry.demoPackText` mirrors it so the tests exercise the parser without file
+IO.
+-/
+
+def Scry.rtv (n : Nat) : Wil.Var := Wil.var n Wil.i32
+
+-- ## The rule pack
+
+def Scry.demoPackText : String :=
+  "rule command-injection\n" ++
+  "  kind taint\n" ++
+  "  severity error\n" ++
+  "  message Attacker-controlled data reaches a command interpreter\n" ++
+  "  source getenv result\n" ++
+  "  source recv result\n" ++
+  "  source read arg 1\n" ++
+  "  sanitise escape_shell result\n" ++
+  "  sanitise sanitize arg 0\n" ++
+  "  sink system arg 0\n" ++
+  "  sink popen arg 0\n" ++
+  "end\n" ++
+  "rule format-string\n" ++
+  "  kind taint\n" ++
+  "  severity warning\n" ++
+  "  message Attacker-controlled data is used as a format string\n" ++
+  "  source getenv result\n" ++
+  "  source recv result\n" ++
+  "  sanitise escape_shell result\n" ++
+  "  sink printf arg 0\n" ++
+  "  sink fprintf arg 1\n" ++
+  "end\n" ++
+  "rule gets-overflow\n" ++
+  "  kind forbidden\n" ++
+  "  severity error\n" ++
+  "  message gets cannot bound its write; use fgets with a size\n" ++
+  "  call gets\n" ++
+  "end\n" ++
+  "rule strcpy-overflow\n" ++
+  "  kind forbidden\n" ++
+  "  severity warning\n" ++
+  "  message strcpy does not bound the copy; use strlcpy or a checked length\n" ++
+  "  call strcpy\n" ++
+  "  call strcat\n" ++
+  "end\n"
+
+def Scry.demoRules : Scry.RulePack := Scry.parseRulePack Scry.demoPackText
+
+/-- The same pack without the in-place sanitiser: the kill is spec-driven. -/
+def Scry.demoPackNoSanText : String :=
+  "rule command-injection\n" ++
+  "  severity error\n" ++
+  "  message Attacker-controlled data reaches a command interpreter\n" ++
+  "  source getenv result\n" ++
+  "  sink system arg 0\n" ++
+  "end\n"
+
+def Scry.demoRulesNoSan : Scry.RulePack := Scry.parseRulePack Scry.demoPackNoSanText
+
+-- ## Direct-call argument -> parameter
+
+/-- `callee(x) { system(x) }`. Points: 0 sink, 1 return. -/
+def Scry.calleeFn : Wil.Func :=
+  let x := Scry.rtv 0;
+  Wil.func "callee" [x] []
+    [ Wil.block [Wil.call .none "system" [x]] (Wil.ret .none) ]
+
+/-- `main() { r = getenv(); callee(r) }`. Points: 0 source, 1 call, 2 return. -/
+def Scry.interprocMain : Wil.Func :=
+  let r := Scry.rtv 0;
+  Wil.func "main" [] [r]
+    [ Wil.block
+        [ Wil.call (.some r) "getenv" []
+        , Wil.call .none "callee" [r] ]
+        (Wil.ret .none) ]
+
+def Scry.interprocProgram : Wil.Program := Wil.program [Scry.interprocMain, Scry.calleeFn]
+
+-- ## Return values
+
+/-- `retCallee() { r = getenv(); return r }`. Points: 0 source, 1 return. -/
+def Scry.retCalleeFn : Wil.Func :=
+  let r := Scry.rtv 0;
+  Wil.func "retCallee" [] [r]
+    [ Wil.block
+        [ Wil.call (.some r) "getenv" [] ]
+        (Wil.retV r) ]
+
+/-- `retMain() { x = retCallee(); system(x) }`. Points: 0 call, 1 sink, 2 return. -/
+def Scry.retMainFn : Wil.Func :=
+  let x := Scry.rtv 0;
+  Wil.func "retMain" [] [x]
+    [ Wil.block
+        [ Wil.call (.some x) "retCallee" []
+        , Wil.call .none "system" [x] ]
+        (Wil.ret .none) ]
+
+def Scry.returnProgram : Wil.Program := Wil.program [Scry.retMainFn, Scry.retCalleeFn]
+
+-- ## Recursion
+
+/-- `rec(n, x) { system(x); if (n > 0) { rec(n - 1, x) }`.
+Points: block 0 has 0 (one = 1), 1 (sink) and terminator 2;
+block 1 has 3 (n-1), 4 (call rec) and terminator 5;
+block 2 has terminator 6. -/
+def Scry.recFn : Wil.Func :=
+  let n := Scry.rtv 0;
+  let x := Scry.rtv 1;
+  let n2 := Scry.rtv 2;
+  let one := Scry.rtv 3;
+  Wil.func "rec" [n, x] [n2, one]
+    [ Wil.block
+        [ Wil.num one 1
+        , Wil.call .none "system" [x] ]
+        (Wil.branch (Wil.condLt (Wil.var 3 Wil.i32) n) (Wil.mkBlockId 1) (Wil.mkBlockId 2))
+    , Wil.block
+        [ Wil.binop n2 .sub n one
+        , Wil.call .none "rec" [n2, x] ]
+        (Wil.ret .none)
+    , Wil.block [] (Wil.ret .none) ]
+
+/-- `main() { r = getenv(); n = 2; one = 1; rec(n, r) }`.
+Points: 0 source, 1 const, 2 const, 3 call, 4 return. -/
+def Scry.recMainFn : Wil.Func :=
+  let r := Scry.rtv 0;
+  let n := Scry.rtv 1;
+  let one := Scry.rtv 2;
+  Wil.func "main" [] [r, n, one]
+    [ Wil.block
+        [ Wil.call (.some r) "getenv" []
+        , Wil.num n 2
+        , Wil.num one 1
+        , Wil.call .none "rec" [n, r] ]
+        (Wil.ret .none) ]
+
+def Scry.recursionProgram : Wil.Program := Wil.program [Scry.recMainFn, Scry.recFn]
+
+-- ## Format strings and forbidden calls
+
+/-- `fmt() { r = getenv(); printf(r) }`. Points: 0 source, 1 sink, 2 return. -/
+def Scry.formatFn : Wil.Func :=
+  let r := Scry.rtv 0;
+  Wil.func "fmt" [] [r]
+    [ Wil.block
+        [ Wil.call (.some r) "getenv" []
+        , Wil.call .none "printf" [r] ]
+        (Wil.ret .none) ]
+
+def Scry.formatProgram : Wil.Program := Wil.program [Scry.formatFn]
+
+/-- `fprintfFn() { stream = 2; g = getenv(); fprintf(stream, g) }`.
+The format is argument 1; argument 0 is a clean constant. Points: 0 const stream,
+1 source, 2 sink, 3 return. -/
+def Scry.fprintfFn : Wil.Func :=
+  let stream := Scry.rtv 0;
+  let g := Scry.rtv 1;
+  Wil.func "fprintfFn" [] [stream, g]
+    [ Wil.block
+        [ Wil.num stream 2
+        , Wil.call (.some g) "getenv" []
+        , Wil.call .none "fprintf" [stream, g] ]
+        (Wil.ret .none) ]
+
+def Scry.fprintfProgram : Wil.Program := Wil.program [Scry.fprintfFn]
+
+/-- `getsFn() { p = alloc 16; gets(p) }`. Points: 0 alloc, 1 forbidden call, 2 return. -/
+def Scry.getsFn : Wil.Func :=
+  let p := Wil.var 0 (.ptr Wil.i32);
+  Wil.func "getsFn" [] [p]
+    [ Wil.block
+        [ Wil.alloc p 16
+        , Wil.call .none "gets" [p] ]
+        (Wil.ret .none) ]
+
+def Scry.getsProgram : Wil.Program := Wil.program [Scry.getsFn]
+
+/-- `strcpyFn() { dst = alloc 8; src = alloc 8; strcpy(dst, src) }`.
+Points: 0 alloc, 1 alloc, 2 forbidden call, 3 return. -/
+def Scry.strcpyFn : Wil.Func :=
+  let dst := Wil.var 0 (.ptr Wil.i32);
+  let src := Wil.var 1 (.ptr Wil.i32);
+  Wil.func "strcpyFn" [] [dst, src]
+    [ Wil.block
+        [ Wil.alloc dst 8
+        , Wil.alloc src 8
+        , Wil.call .none "strcpy" [dst, src] ]
+        (Wil.ret .none) ]
+
+def Scry.strcpyProgram : Wil.Program := Wil.program [Scry.strcpyFn]
+
+-- ## Per-argument sources and sanitisers
+
+/-- `argSource() { p = alloc 4; fd = 0; n = 4; read(fd, p, n); system(p) }`.
+Points: 0 alloc, 1 const, 2 const, 3 source call (argument 1), 4 sink, 5 return. -/
+def Scry.argSourceFn : Wil.Func :=
+  let p := Wil.var 0 (.ptr Wil.i32);
+  let fd := Scry.rtv 1;
+  let n := Scry.rtv 2;
+  Wil.func "argSource" [] [p, fd, n]
+    [ Wil.block
+        [ Wil.alloc p 4
+        , Wil.num fd 0
+        , Wil.num n 4
+        , Wil.call .none "read" [fd, p, n]
+        , Wil.call .none "system" [p] ]
+        (Wil.ret .none) ]
+
+def Scry.argSourceProgram : Wil.Program := Wil.program [Scry.argSourceFn]
+
+/-- `argSan() { r = getenv(); p = r; sanitize(p); system(p) }`.
+Points: 0 source, 1 copy, 2 in-place sanitiser, 3 sink, 4 return. -/
+def Scry.argSanFn : Wil.Func :=
+  let r := Scry.rtv 0;
+  let p := Scry.rtv 1;
+  Wil.func "argSan" [] [r, p]
+    [ Wil.block
+        [ Wil.call (.some r) "getenv" []
+        , Wil.copy p r
+        , Wil.call .none "sanitize" [p]
+        , Wil.call .none "system" [p] ]
+        (Wil.ret .none) ]
+
+def Scry.argSanProgram : Wil.Program := Wil.program [Scry.argSanFn]
+
+-- ## Safe fixtures (no false positives)
+
+/-- `safeCompile() { r = getenv(); s = escape_shell(r); system(s) }`. -/
+def Scry.safeCompileFn : Wil.Func :=
+  let r := Scry.rtv 0;
+  let s := Scry.rtv 1;
+  Wil.func "safeCompile" [] [r, s]
+    [ Wil.block
+        [ Wil.call (.some r) "getenv" []
+        , Wil.call (.some s) "escape_shell" [r]
+        , Wil.call .none "system" [s] ]
+        (Wil.ret .none) ]
+
+/-- `safeFormat() { zero = 0; g = getenv(); printf(zero, g) }`: the format argument (0)
+is clean, the tainted value is a later argument. -/
+def Scry.safeFormatFn : Wil.Func :=
+  let zero := Scry.rtv 0;
+  let g := Scry.rtv 1;
+  Wil.func "safeFormat" [] [zero, g]
+    [ Wil.block
+        [ Wil.num zero 0
+        , Wil.call (.some g) "getenv" []
+        , Wil.call .none "printf" [zero, g] ]
+        (Wil.ret .none) ]
+
+def Scry.safePrograms : List Wil.Program :=
+  [ Wil.program [Scry.safeCompileFn]
+  , Wil.program [Scry.safeFormatFn]
+  , Scry.argSanProgram ]
+
+-- ## Indirect calls stay unknown
+
+/-- `indirectCallee(x) { system(x) }`. -/
+def Scry.indirectCalleeFn : Wil.Func :=
+  let x := Scry.rtv 0;
+  Wil.func "indirectCallee" [x] []
+    [ Wil.block [Wil.call .none "system" [x]] (Wil.ret .none) ]
+
+/-- `indirectMain() { r = getenv(); f(r); x = f(); system(x) }`, where `f` is a function
+value: both the argument and the result are unknown. Points: 0 source, 1 indirect call,
+2 indirect call, 3 sink, 4 return. -/
+def Scry.indirectMainFn : Wil.Func :=
+  let f := Wil.var 0 (.fn 0 Wil.i32);
+  let r := Scry.rtv 1;
+  let x := Scry.rtv 2;
+  Wil.func "indirectMain" [] [f, r, x]
+    [ Wil.block
+        [ Wil.call (.some r) "getenv" []
+        , Wil.callIndirect .none f [r]
+        , Wil.callIndirect (.some x) f []
+        , Wil.call .none "system" [x] ]
+        (Wil.ret .none) ]
+
+def Scry.indirectProgram : Wil.Program :=
+  Wil.program [Scry.indirectMainFn, Scry.indirectCalleeFn]
