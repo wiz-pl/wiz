@@ -582,10 +582,33 @@ forbids scripts, and `Wiz.sanitizeWidgetHtml` (`Wiz/Infoview.lean`) removes `<sc
 `<style>`, frames and other active elements, event-handler attributes and
 `javascript:`-style URLs before the server sends HTML; the title is plain text
 (`widgetEscape` is there for a client that puts it in HTML). That is defence in depth,
-not a sandbox: a client must render widget HTML as untrusted (an iframe with a content
-security policy). The bundled terminal and web infoviews do not draw widgets yet; the
-JSON is the interface, and the self-hosted frontend (no tactics or infoview) is
-unaffected. Details: `wiz-notes/infotree-widgets.md`.
+not a sandbox: a client must render widget HTML as untrusted.
+
+The bundled clients consume the JSON as it is (`TacView.ofJson` reads `widgets`; the raw
+protocol does not change) and draw a `Widgets` section after the goals and messages:
+
+* **Terminal** (`lib/Infoview.wiz`, used by `infoview/Tui.wiz`): each widget's title is a
+  heading, its HTML is shown as plain text (tags dropped, the server's entities decoded)
+  and its goal snapshot follows. The terminal never interprets the HTML. Widgets stay in
+  emission order and are separated by a blank line; an absent or empty `widgets` array
+  adds nothing.
+* **Web** (`lib/Infoview.wiz`, used by `web/Web.wiz`): the title and goals are escaped,
+  and the body goes in `<iframe class="widget-body" sandbox srcdoc="…">` with a
+  `default-src 'none'` content security policy. Scripts cannot run, event handlers cannot
+  fire, `javascript:`/`data:text/html` links cannot execute, and the body cannot reach the
+  infoview's own DOM. The client trusts neither field, even though the server sanitised
+  `html`.
+* **Minimal fixture** (`web/widgets.html`, `web/widgets.mjs`): a standalone client for the
+  `widgets` array that sanitises the body again (active elements, event handlers,
+  `javascript:`/`vbscript:`/`data:text/html`) and renders it in the same kind of sandboxed
+  iframe. `node web/widgets_test.mjs` (run by `web/test.sh`) checks the sanitiser, the
+  sandbox and the emission order.
+
+The self-hosted frontend (`selfhost/`) has no tactic engine or infoview, so there is
+nothing to render there; `wiz/plainGoal` (the plain-text result) still carries no widgets.
+The Neovim infoview (`editors/nvim/lua/wiz/infoview.lua`) also reads only `goals`,
+`messages` and `items` (a separate client change). Details:
+`wiz-notes/infotree-widgets.md`.
 
 ## 11ab: a static playground
 

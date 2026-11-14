@@ -70,12 +70,28 @@ def Infoview.goals : List Json → List Goal
 /-- The goals of a `wiz/interactiveGoals` result, `{"goals": [goal…], "range", "session"}`.
 A goal's `userName` may be `null`, which reads as `""`. -/
 def Goals.ofJson (j : Json) : List Goal := Infoview.goals (Json.getList j "goals")
-/-- The tactic state at the cursor: the goals, and the info messages (`trace`,
-`trace_state`) of the tactic it belongs to (the result's `messages`). -/
+/-- A tactic's widget (`wiz/interactiveGoals`'s `widgets`): its title (plain text), its
+static HTML (sanitised by the server), and the goals open when it was emitted (plain
+goal text, a snapshot, not the current state). -/
+inductive Widget where
+  | mk (title : String) (html : String) (goals : List String)
+/-- A widget from the protocol's JSON (`{"title", "html", "goals"}`). -/
+def Widget.ofJson (j : Json) : Widget :=
+  .mk (Json.getStr j "title") (Json.getStr j "html") (Infoview.strings (Json.getList j "goals"))
+/-- `Widget.ofJson` on each element. -/
+def Infoview.widgets : List Json → List Widget
+  | .nil => .nil
+  | .cons j js => .cons (Widget.ofJson j) (Infoview.widgets js)
+/-- The widgets of a `wiz/interactiveGoals` result (`widgets`; missing means none). -/
+def Infoview.widgetList (j : Json) : List Widget := Infoview.widgets (Json.getList j "widgets")
+/-- The tactic state at the cursor: the goals, the info messages (`trace`, `trace_state`)
+of the tactic it belongs to (the result's `messages`), and the widgets its tactics emitted
+(the result's `widgets`, in emission order). -/
 inductive TacView where
-  | mk (goals : List Goal) (messages : List String)
+  | mk (goals : List Goal) (messages : List String) (widgets : List Widget)
 /-- The tactic state from a `wiz/interactiveGoals` result. -/
-def TacView.ofJson (j : Json) : TacView := .mk (Goals.ofJson j) (Infoview.strings (Json.getList j "messages"))
+def TacView.ofJson (j : Json) : TacView :=
+  .mk (Goals.ofJson j) (Infoview.strings (Json.getList j "messages")) (Infoview.widgetList j)
 
 -- ## Width
 
@@ -338,6 +354,61 @@ def Infoview.msgLines (width : Nat) : List String → List (List Piece)
   | .nil => .nil
   | .cons m .nil => Infoview.wrapLines width (Infoview.textLines (String.chars m) .nil)
   | .cons m ms => List.append (Infoview.wrapLines width (Infoview.textLines (String.chars m) .nil)) (.cons .nil (Infoview.msgLines width ms))
+/-- Whether `cs` starts with the characters of `p`; if so, what follows. -/
+def Infoview.prefix : List Char → List Char → Option (List Char)
+  | .nil, s => .some s
+  | .cons p ps, .cons c cs => match Nat.beq (Char.code p) (Char.code c) with
+    | .true => Infoview.prefix ps cs
+    | .false => .none
+  | .cons _ _, .nil => .none
+/-- Skips a tag (up to `>`). -/
+def Infoview.afterTag : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => match Nat.beq (Char.code c) 62 with
+    | .true => cs
+    | .false => Infoview.afterTag cs
+/-- Decodes one HTML entity (`lt;`, `gt;`, `amp;`, `quot;`, `#39;` after the `&`), or
+`none` (keep the `&`). -/
+def Infoview.entity (cs : List Char) : Option (Char × List Char) :=
+  match Infoview.prefix (String.chars "lt;") cs with
+  | .some rest => .some (Json.chr 60, rest)
+  | .none => match Infoview.prefix (String.chars "gt;") cs with
+    | .some rest => .some (Json.chr 62, rest)
+    | .none => match Infoview.prefix (String.chars "amp;") cs with
+      | .some rest => .some (Json.chr 38, rest)
+      | .none => match Infoview.prefix (String.chars "quot;") cs with
+        | .some rest => .some (Json.chr 34, rest)
+        | .none => match Infoview.prefix (String.chars "#39;") cs with
+          | .some rest => .some (Json.chr 39, rest)
+          | .none => .none
+/-- The characters of a widget's static HTML as terminal text, reversed onto `acc`: tags
+are dropped and the entities the server's escaping writes are decoded. The terminal never
+interprets the HTML (the web client sandboxes it instead). -/
+partial def Infoview.htmlScan : List Char → List Char → List Char
+  | .nil, acc => acc
+  | .cons c cs, acc => match Nat.beq (Char.code c) 60 with
+    | .true => Infoview.htmlScan (Infoview.afterTag cs) acc
+    | .false => match Nat.beq (Char.code c) 38 with
+      | .true => match Infoview.entity cs with
+        | .some p => Infoview.htmlScan p.2 (.cons p.1 acc)
+        | .none => Infoview.htmlScan cs (.cons c acc)
+      | .false => Infoview.htmlScan cs (.cons c acc)
+/-- A widget's static HTML as terminal text. -/
+def Infoview.htmlText (s : String) : String := .mk (Json.revOnto (Infoview.htmlScan (String.chars s) .nil) .nil)
+/-- One widget's lines for the terminal: its title, its HTML as text and its goals
+snapshot. -/
+def Infoview.widgetLines (width : Nat) (w : Widget) : List (List Piece) := match w with
+  | .mk title html goals =>
+    let text := Infoview.htmlText html;
+    let body : List (List Piece) := match Infoview.isEmptyStr text with
+      | .true => .nil
+      | .false => Infoview.wrapLines width (Infoview.textLines (String.chars text) .nil);
+    List.append (.cons (Infoview.header title) .nil) (List.append body (Infoview.msgLines width goals))
+/-- Each widget's lines, a blank line between widgets. -/
+def Infoview.widgetsLines (width : Nat) : List Widget → List (List Piece)
+  | .nil => .nil
+  | .cons w .nil => Infoview.widgetLines width w
+  | .cons w ws => List.append (Infoview.widgetLines width w) (.cons .nil (Infoview.widgetsLines width ws))
 /-- Lines indented by two spaces. -/
 def Infoview.indented : List (List Char) → List (List Char)
   | .nil => .nil
@@ -371,21 +442,26 @@ def Infoview.dropBlank : List (List Piece) → List (List Piece)
   | .cons .nil ls => ls
   | ls => ls
 /-- The whole infoview at a width: the tactic state (if the cursor is in a `by` block) and
-its messages, the expected type (if there is a term) and the other items, tags numbered
-across all of them. With nothing to show, one line saying so. -/
+its messages, its widgets, the expected type (if there is a term) and the other items,
+tags numbered across all of them. With nothing to show, one line saying so. -/
 def View.ofInfo (width : Nat) (st : Option TacView) (term : Option Goal) (items : List InfoItem) : View :=
   let tac0 : List (List Piece) × Flat := match st with
     | .none => (List.nil, Flat.mk List.nil 0 List.nil)
-    | .some (.mk gs _) => match gs with
+    | .some (.mk gs _ _) => match gs with
       | .nil => (.cons (Infoview.header "Tactic state") (.cons (.cons (Infoview.str "No goals" "done") .nil) .nil), .mk .nil 0 .nil)
       | .cons _ _ =>
         let r := Infoview.goalsLines width gs (.mk .nil 0 .nil);
         (.cons (Infoview.header "Tactic state") r.1, r.2);
   let tac : List (List Piece) × Flat := match st with
     | .none => tac0
-    | .some (.mk _ msgs) => match msgs with
+    | .some (.mk _ msgs _) => match msgs with
       | .nil => tac0
       | .cons _ _ => (List.append tac0.1 (.cons .nil (.cons (Infoview.header "Messages") (Infoview.msgLines width msgs))), tac0.2);
+  let tac : List (List Piece) × Flat := match st with
+    | .none => tac
+    | .some (.mk _ _ ws) => match ws with
+      | .nil => tac
+      | .cons _ _ => (List.append tac.1 (.cons .nil (.cons (Infoview.header "Widgets") (Infoview.widgetsLines width ws))), tac.2);
   let all : List (List Piece) × Flat := match term with
     | .none => tac
     | .some g =>
@@ -405,11 +481,11 @@ def View.ofInfo (width : Nat) (st : Option TacView) (term : Option Goal) (items 
 /-- `View.ofInfo` without the other items. -/
 def View.ofTacState (width : Nat) (st : Option TacView) (term : Option Goal) : View :=
   View.ofInfo width st term .nil
-/-- `View.ofTacState` without messages: just goals and the expected type. -/
+/-- `View.ofTacState` without messages or widgets: just goals and the expected type. -/
 def View.ofState (width : Nat) (goals : Option (List Goal)) (term : Option Goal) : View :=
   View.ofTacState width (match goals with
     | .none => .none
-    | .some gs => .some (.mk gs .nil)) term
+    | .some gs => .some (.mk gs .nil .nil)) term
 
 /-- The innermost tag (index + 1) at column `col` (from 0) of a line, or 0: what a mouse
 click selects. -/
@@ -715,6 +791,29 @@ partial def Key.decode (s : List Char) : List Key := match s with
 def Infoview.htmlMsgs : List String → Html → Html
   | .nil, h => h
   | .cons m ms, h => Infoview.htmlMsgs ms (Html.lit "</pre>" (Html.add (Tagged.htmlText m .nil) (Html.lit "<pre class=\"message\">" h)))
+/-- A widget's goals snapshot as HTML (each goal in a `<pre class="widget-goal">`). -/
+def Infoview.htmlWidgetGoals : List String → String
+  | .nil => ""
+  | .cons g gs => String.append "<pre class=\"widget-goal\">" (String.append (Tagged.esc g)
+      (String.append "</pre>" (Infoview.htmlWidgetGoals gs)))
+/-- A widget's body, sandboxed: a `srcdoc` iframe with `sandbox` (so no script runs) and a
+`default-src 'none'` content security policy. The server sanitises widget HTML, but the
+client treats it as untrusted anyway (docs/stages/11-tooling.md, 11af). -/
+def Infoview.widgetBody (html : String) : String :=
+  let doc := String.append "<!doctype html><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'\">" html;
+  String.append "<iframe class=\"widget-body\" sandbox srcdoc=\"" (String.append (Tagged.esc doc) "\"></iframe>")
+/-- One widget as HTML: its title (escaped), its body in a sandboxed iframe and its
+goals snapshot. -/
+def Infoview.htmlWidget (w : Widget) : String := match w with
+  | .mk title html goals =>
+    String.append "<div class=\"widget\"><div class=\"widget-title\">"
+      (String.append (Tagged.esc title)
+        (String.append "</div>" (String.append (Infoview.widgetBody html)
+          (String.append (Infoview.htmlWidgetGoals goals) "</div>"))))
+/-- Each widget as HTML, in emission order. -/
+def Infoview.htmlWidgets : List Widget → String
+  | .nil => ""
+  | .cons w ws => String.append (Infoview.htmlWidget w) (Infoview.htmlWidgets ws)
 /-- One item as HTML. -/
 def Infoview.htmlItem (sel : Nat) (i : InfoItem) (h : Html) : Html := match i with
   | .mk _ title text ty => match ty with
@@ -735,22 +834,27 @@ partial def Infoview.htmlItems (sel : Nat) (sec : String) : List InfoItem → Ht
       | .false => Html.lit "</h3>" (Html.add (Tagged.htmlText s .nil) (Html.lit "<h3>" h));
     Infoview.htmlItems sel s is (Infoview.htmlItem sel i h1)
 /-- The whole infoview as HTML, numbered like `View.ofInfo` (so selections agree): the
-tactic state, its messages, the expected type and the other items. -/
+tactic state, its messages, its widgets, the expected type and the other items. -/
 def Infoview.htmlInfo (sel : Nat) (st : Option TacView) (term : Option Goal) (items : List InfoItem) : String :=
   let h0 : Html := .mk .nil 0;
   let h1 : Html := match st with
     | .none => h0
-    | .some (.mk gs _) => match gs with
+    | .some (.mk gs _ _) => match gs with
       | .nil => Html.lit "<h3>Tactic state</h3><div class=\"no-goals\">No goals</div>" h0
       | .cons _ _ => Infoview.htmlGoals sel gs (Html.lit "<h3>Tactic state</h3>" h0);
   let hm : Html := match st with
     | .none => h1
-    | .some (.mk _ msgs) => match msgs with
+    | .some (.mk _ msgs _) => match msgs with
       | .nil => h1
       | .cons _ _ => Infoview.htmlMsgs msgs (Html.lit "<h3>Messages</h3>" h1);
-  let h2 : Html := match term with
+  let hw : Html := match st with
     | .none => hm
-    | .some g => Infoview.htmlGoal sel g (Html.lit "<h3>Expected type</h3>" hm);
+    | .some (.mk _ _ ws) => match ws with
+      | .nil => hm
+      | .cons _ _ => Html.lit (String.append "<h3>Widgets</h3>" (Infoview.htmlWidgets ws)) hm;
+  let h2 : Html := match term with
+    | .none => hw
+    | .some g => Infoview.htmlGoal sel g (Html.lit "<h3>Expected type</h3>" hw);
   let h2 := Infoview.htmlItems sel "" items h2;
   match h2 with
   | .mk acc _ => match acc with
@@ -763,4 +867,4 @@ def Infoview.htmlTacState (sel : Nat) (st : Option TacView) (term : Option Goal)
 def Infoview.htmlState (sel : Nat) (goals : Option (List Goal)) (term : Option Goal) : String :=
   Infoview.htmlTacState sel (match goals with
     | .none => .none
-    | .some gs => .some (.mk gs .nil)) term
+    | .some gs => .some (.mk gs .nil .nil)) term

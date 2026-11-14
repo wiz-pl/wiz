@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wiz widgets fixture</title>
+<style>
+  body { margin: 24px; font: 15px/1.5 system-ui, sans-serif; max-width: 60em; }
+  .widget { border: 1px solid #ddd; border-radius: 6px; margin: 12px 0; overflow: hidden; }
+  .widget-title { font-weight: 600; padding: 4px 10px; background: #eee; }
+  .widget-body { display: block; width: 100%; min-height: 1.5em; border: 0; }
+  .widget-goal { margin: 0; padding: 3px 10px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<p>This page consumes the <code>widgets</code> array of a
+<code>wiz/interactiveGoals</code> result. Widget HTML is untrusted: it is sanitised here
+and rendered in a <code>sandbox</code>ed iframe with a <code>default-src 'none'</code>
+content security policy, so no script, event handler, <code>javascript:</code> or
+<code>data:text/html</code> link can run, and the body cannot reach this page's DOM.</p>
+<main id="widgets"></main>
+<script type="module" src="widgets.mjs"></script>
+</body>
+</html>

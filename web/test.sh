@@ -1,6 +1,7 @@
 #!/bin/sh
-# Smoke tests of the web infoview and the playground: build the pages (web/build.sh,
-# web/build-playground.sh); run the infoview's Wasm module under Node with
+# Smoke tests of the web infoview, the widget fixture and the playground: build the pages
+# (web/build.sh, web/build-playground.sh); run the minimal widget client under Node
+# (web/widgets_test.mjs); run the infoview's Wasm module under Node with
 # infoview/stub_server.py (canned goals) as the server (web/node_test.mjs), and the
 # playground's under Node (web/playground_test.mjs); then serve the infoview with
 # web/bridge.sh in front of the real server (`wiz lsp --ws`, .lake/build/bin/wiz), load
@@ -16,6 +17,9 @@ trap 'if [ -n "$BRIDGE" ]; then pkill -P "$BRIDGE" 2>/dev/null || true; kill "$B
 WIZ=${WIZ:-$ROOT/.lake/build/bin/wiz}
 "$ROOT/web/build.sh" "$OUT" >/dev/null
 "$ROOT/web/build-playground.sh" "$OUT" >/dev/null
+# (11af) the minimal widget client: sanitisation, sandboxed rendering, emission order
+node "$ROOT/web/widgets_test.mjs" > "$OUT/widgets.txt"
+if grep -qF 'widgets: all checks passed' "$OUT/widgets.txt"; then echo "ok (widgets, node)"; else echo "FAIL (widgets, node)"; cat "$OUT/widgets.txt"; exit 1; fi
 node "$ROOT/web/node_test.mjs" "$OUT" python3 "$ROOT/infoview/stub_server.py" --stdio > "$OUT/node.txt"
 for want in 'class="names">A</span>' 'data-ref="5"' 'info: <span class="kind">const</span> <code>Nat : Type</code>'; do
   if grep -qF "$want" "$OUT/node.txt"; then echo "ok (node): $want"; else echo "FAIL (node): missing $want"; cat "$OUT/node.txt"; exit 1; fi

@@ -563,7 +563,10 @@ def serverGroup : Group where
         checkEq "[\"n : Nat\\n⊢ Nat\"]" (LSP.get? js[0]! ["goals"]).get!.compress
         checkEq "Danger" (LSP.getStr js[1]! ["title"])
         checkEq "<b>ok</b>" (LSP.getStr js[1]! ["html"])
-        checkEq "&lt;b&gt;" (widgetEscape "<b>") },
+        checkEq "&lt;b&gt;" (widgetEscape "<b>")
+        -- a state without widgets: the result still carries the (empty) array
+        let (_, r') := ask srv "wiz/interactiveGoals" src (offAfter src "exact n")
+        checkEq "[]" (LSP.get? r' ["widgets"]).get!.compress },
     { name := "code action: did you mean", run := fun _ => do
         let src := "import Prelude\ndef double (n : Nat) : Nat := n + n\ndef four : Nat := doubel 2\n"
         let (srv, out) ← openDoc src

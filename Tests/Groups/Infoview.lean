@@ -80,20 +80,52 @@ def infoviewGroup : Group where
           [r#".cons "Tactic state" (.cons "A : Type" (.cons "f : Nat → Nat → Nat → Nat" (.cons "⊢ Nat → A" .nil)))"#,
            r#".cons "Tactic state" (.cons "A : Type" (.cons "f : Nat → Nat →" (.cons "    Nat → Nat" (.cons "⊢ Nat → A" (.cons "" (.cons "Expected type" (.cons "⊢ Nat" .nil)))))))"#] },
     { name := "the messages of the tactic at the cursor (trace, trace_state), under the goals", run := fun _ =>
-        okInfoview (goalPrelude ++ "#eval Infoview.plainLines (View.lines (View.ofTacState 30 (.some (.mk (.cons g .nil) (.cons \"hello\" (.cons \"n : Nat\\n⊢ Nat\" .nil)))) .none))\n" ++
-          "#eval Infoview.htmlTacState 0 (.some (.mk .nil (.cons \"a<b\" .nil))) .none\n" ++
-          "def msgsOf : TacView → List String\n  | .mk _ ms => ms\n" ++
+        okInfoview (goalPrelude ++ "#eval Infoview.plainLines (View.lines (View.ofTacState 30 (.some (.mk (.cons g .nil) (.cons \"hello\" (.cons \"n : Nat\\n⊢ Nat\" .nil)) .nil)) .none))\n" ++
+          "#eval Infoview.htmlTacState 0 (.some (.mk .nil (.cons \"a<b\" .nil) .nil)) .none\n" ++
+          "def msgsOf : TacView → List String\n  | .mk _ ms _ => ms\n" ++
           "#eval match Json.parse \"{\\\"goals\\\": [], \\\"messages\\\": [\\\"one\\\", \\\"two\\\"]}\" with\n  | .ok j => msgsOf (TacView.ofJson j)\n  | .error e => List.cons e List.nil")
           [r#".cons "Tactic state" (.cons "A : Type" (.cons "f : Nat → Nat → Nat → Nat" (.cons "⊢ Nat → A" (.cons "" (.cons "Messages" (.cons "hello" (.cons "" (.cons "n : Nat" (.cons "⊢ Nat" .nil)))))))))"#,
            r#""<h3>Tactic state</h3><div class=\"no-goals\">No goals</div><h3>Messages</h3><pre class=\"message\">a&lt;b</pre>""#,
            r#".cons "one" (.cons "two" .nil)"#] },
+    { name := "11af: a widget renders in the terminal model (title, HTML text, goal snapshot)", run := fun _ =>
+        okInfoview (goalPrelude ++ r#"
+def viewOf (js : String) : List String := match Json.parse js with
+  | .ok j => Infoview.plainLines (View.lines (View.ofTacState 40 (.some (TacView.ofJson j)) .none))
+  | .error e => .cons e .nil
+#eval viewOf "{\"goals\": [], \"messages\": [], \"widgets\": [{\"title\": \"Panel\", \"html\": \"<b>n + 0 = n</b>\", \"goals\": [\"n : Nat\\n⊢ Nat\"]}]}""#)
+          [r#".cons "Tactic state" (.cons "No goals" (.cons "" (.cons "Widgets" (.cons "Panel" (.cons "n + 0 = n" (.cons "n : Nat" (.cons "⊢ Nat" .nil)))))))"#] },
+    { name := "11af: two widgets keep emission order; an empty widget list adds nothing", run := fun _ =>
+        okInfoview (goalPrelude ++ r#"
+def viewOf (js : String) : List String := match Json.parse js with
+  | .ok j => Infoview.plainLines (View.lines (View.ofTacState 40 (.some (TacView.ofJson j)) .none))
+  | .error e => .cons e .nil
+#eval viewOf "{\"goals\": [], \"messages\": [], \"widgets\": [{\"title\": \"First\", \"html\": \"<b>one</b>\", \"goals\": []}, {\"title\": \"Second\", \"html\": \"<i>two</i>\", \"goals\": [\"⊢ X\"]}]}"
+#eval viewOf "{\"goals\": [], \"messages\": []}"
+#eval viewOf "{\"goals\": [], \"messages\": [], \"widgets\": []}""#)
+          [r#".cons "Tactic state" (.cons "No goals" (.cons "" (.cons "Widgets" (.cons "First" (.cons "one" (.cons "" (.cons "Second" (.cons "two" (.cons "⊢ X" .nil)))))))))"#,
+           r#".cons "Tactic state" (.cons "No goals" .nil)"#,
+           r#".cons "Tactic state" (.cons "No goals" .nil)"#] },
+    { name := "11af: widget HTML is sandboxed, its title and goal snapshot escaped", run := fun _ =>
+        okInfoview (goalPrelude ++ r#"
+def htmlOf (js : String) : String := match Json.parse js with
+  | .ok j => Infoview.htmlInfo 0 (.some (TacView.ofJson j)) .none .nil
+  | .error e => e
+def h := htmlOf "{\"goals\": [], \"widgets\": [{\"title\": \"<b>T</b>\", \"html\": \"<b onclick='x()'>ok</b><script>alert(1)</script><a href=\\\"javascript:evil()\\\">l</a>\", \"goals\": [\"a<b\"]}]}"
+#eval String.contains h "<script>"
+#eval String.contains h "&lt;script&gt;"
+#eval String.contains h "<b onclick"
+#eval String.contains h "&lt;b&gt;T&lt;/b&gt;"
+#eval String.contains h "a&lt;b"
+#eval String.contains h "sandbox"
+#eval String.contains h "Content-Security-Policy""#)
+          [".false", ".true", ".false", ".true", ".true", ".true", ".true"] },
     { name := "11w: what else is at the cursor (wiz/interactiveInfo): sections, as text and HTML", run := fun _ =>
         okInfoview (goalPrelude ++ r#"def items : List InfoItem := .cons (.mk "syntax" "syntax term.twice" "syntax \"twice\" term : term" .none)
   (.cons (.mk "expansion" "expanded by macro rule" "Nat.add a\nb" .none)
   (.cons (.mk "instance" "instance i" "i" (.some (nat 1)))
   (.cons (.mk "declaration" "four" "" (.some (nat 2))) .nil)))
 #eval Infoview.plainLines (View.lines (View.ofInfo 40 .none .none items))
-#eval Infoview.plainLines (View.lines (View.ofInfo 40 (.some (.mk .nil .nil)) .none (.cons (.mk "message" "info" "3" .none) .nil)))
+#eval Infoview.plainLines (View.lines (View.ofInfo 40 (.some (.mk .nil .nil .nil)) .none (.cons (.mk "message" "info" "3" .none) .nil)))
 #eval Infoview.htmlInfo 0 .none .none (.cons (.mk "declaration" "x<y" "" (.some (nat 1))) .nil)
 #eval match Json.parse "{\"items\": [{\"kind\": \"import\", \"title\": \"import M\", \"text\": \"lib/M.wiz\", \"type\": null}], \"session\": 1}" with
   | .ok j => List.length (Items.ofJson j)
