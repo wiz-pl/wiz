@@ -181,6 +181,14 @@ cached between runs.
   `wiz-docs` (3 days, for debugging). `deploy-docs` then publishes that artifact to
   GitHub Pages. Neither job is a required check, so a Pages outage does not fail the
   suite. See "Documentation site" below.
+* **Signed commits and tags** (the `signatures` workflow): a push to `master` may
+  introduce a signed commit, or an unsigned commit covered by a signed merge commit in
+  the same range; a direct push of unsigned commits fails. Tags `v*` must be annotated
+  and signed. Pull requests run in warning mode, and the check is `signed commits` in
+  `.github/workflows/signatures.yml`. Public trust material lives in
+  `.github/allowed_signers` and `.github/gpg/*.asc`; private keys never enter the
+  repository or CI. See [signing.md](signing.md), including the fallback that lets
+  automation worktrees commit unsigned behind a signed merge.
 * **Trust ledger** (the `trust-ledger` job): `scripts/trust-ledger.sh --check` runs the
   `--trust-ledger` mode of the test driver (`Tests/Native.lean`) over `lib/` and the
   axiom-free examples, and compares the sources of trust it finds with

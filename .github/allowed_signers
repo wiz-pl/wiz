@@ -1,0 +1,16 @@
+# Public keys trusted to sign commits and tags in this repository.
+#
+# SSH signatures are verified with this file (ssh-keygen's allowed-signers
+# format).  GPG public keys live in .github/gpg/*.asc instead.  Never put a
+# private key here: scripts/check-signatures.py refuses such a file before it
+# verifies anything.
+#
+# One line per person or bot:
+#
+#   <email>[,<email>...] [namespaces="git"] [valid-after="YYYYMMDD"] [valid-before="YYYYMMDD"] <key type> <base64 key>
+#
+# Add your public key in the same PR that starts using it, and keep the old
+# line with valid-before when rotating (docs/signing.md).
+#
+# Example (public material only; replace the placeholder with a real key):
+# reuben.steenekamp@gmail.com namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...

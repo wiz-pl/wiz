@@ -1,0 +1,90 @@
+# Commit and tag signatures for the protected branches.
+#
+# A push to master may introduce a signed commit, or a signed merge commit that
+# covers the commits it brings in.  An unsigned commit that no signed merge commit
+# covers fails the job.  Pull requests run in warning mode because they are not
+# protected: their commits normally land through a signed merge.  Tags v* must be
+# annotated and signed.
+#
+# The policy and key handling are in docs/signing.md.  Mark this workflow's
+# "signed commits" job as a required check on master (branch protection) to make
+# it a gate; the script also runs locally.
+name: signatures
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      range:
+        description: "revision range to check (default: HEAD~1..HEAD)"
+        required: false
+        default: ""
+
+# A newer push supersedes an older check of the same ref.
+concurrency:
+  group: signatures-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  signed-commits:
+    name: signed commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The range needs the commits before and after the push, and a
+          # pull request's test merge needs both of its parents.
+          fetch-depth: 0
+
+      - name: Checker self-test (throwaway keys, no network)
+        run: python3 scripts/test-check-signatures.py
+
+      - name: GitHub's web-flow public key
+        # GitHub signs the merge commits it creates.  Fetch the key live rather
+        # than pinning a copy: the current key rotates (the old one expires).
+        run: curl -sSfL --retry 3 https://github.com/web-flow.gpg -o "$RUNNER_TEMP/web-flow.gpg"
+
+      - name: Verify the pushed commits and tags
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          INPUT_RANGE: ${{ inputs.range }}
+        run: |
+          args=(--gpg-key "$RUNNER_TEMP/web-flow.gpg")
+          case "$EVENT" in
+            push)
+              if [ "$REF_TYPE" = tag ]; then
+                args+=(--tag "$REF_NAME")
+              elif [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+                args+=(--rev "$AFTER")
+              else
+                args+=(--range "$BEFORE..$AFTER")
+              fi
+              ;;
+            pull_request)
+              # HEAD is GitHub's test merge: its second parent is the pull
+              # request head.  Warn, do not fail: the signed merge that lands on
+              # master is the boundary this policy checks.
+              args+=(--range "$PR_BASE..HEAD^2" --warn)
+              ;;
+            workflow_dispatch)
+              args+=(--range "${INPUT_RANGE:-HEAD~1..HEAD}")
+              ;;
+          esac
+          python3 scripts/check-signatures.py "${args[@]}"
