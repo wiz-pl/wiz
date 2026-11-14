@@ -122,6 +122,12 @@ structure CommandState (R : Type) where
   resolves them, relative to each module's file: the frontend is pure). Without a
   resolver (the language server), paths are kept as written and not checked. -/
   cSources : Option (String → String → Option String) := none
+  /-- (include-str) the contents of the `include_str "f"` files: by module (`""`: the main
+  file) and the path as written, the file's contents or the error to report at the include.
+  The command line reads them, relative to each `.wiz` file (`Module.includeTable`): the
+  frontend is pure and macros stay pure. Without a resolver (the language server), an
+  `include_str` is an error. -/
+  includes : Option (String → String → Except String String) := none
   /-- (9f) the C files to compile and link with the program, and the libraries (`link_lib`) -/
   linkC : Array String := #[]
   linkLibs : Array String := #[]
@@ -1359,11 +1365,50 @@ def CommandState.endModule (inner outer : CommandState R) : CommandState R :=
     ppUser := keep (·.head) inner.ppUser pps }
   s'.refreshPP
 
+/-- (include-str) Replace every `include_str "rel"` in `cmd` by the string literal of the
+file's contents (`s.includes`, filled by the command line), so that elaboration never
+reads a file and macros stay pure. A file that can't be used becomes an empty literal and
+an error at the include, in the command's messages. A path a macro makes during
+elaboration is not found here: only paths written literally in the source (at a command
+boundary) are resolved. -/
+partial def resolveIncludes (s : CommandState R) (cmd : Syntax) : Syntax × Array Msg :=
+  go cmd #[]
+where
+  go (stx : Syntax) (msgs : Array Msg) : Syntax × Array Msg :=
+    if stx.isOfKind "term.includeStr" then
+      let pathStx := stx.getArg 1
+      let rel := (pathStx.getStr?).getD ""
+      let lit (text : String) : Syntax :=
+        Syntax.node stx.info "term.str" #[Syntax.node pathStx.info "str" #[Syntax.atom pathStx.info text]]
+      match s.includes with
+      | none =>
+        let msg : Msg := { info := pathStx.info, severity := .error,
+                           text := "include_str: the file was not read (this frontend has no include table; the wiz command line reads it relative to the .wiz file)" }
+        (lit "", msgs.push msg)
+      | some resolve =>
+        match resolve s.module rel with
+        | .ok text => (lit text, msgs)
+        | .error e =>
+          let msg : Msg := { info := pathStx.info, severity := .error, text := e }
+          (lit "", msgs.push msg)
+    else match stx with
+      | .node info k args =>
+        let (args', msgs) := args.foldl (init := (#[], msgs)) fun (acc : Array Syntax × Array Msg) a =>
+          let (a', msgs) := go a acc.2
+          (acc.1.push a', msgs)
+        (.node info k args', msgs)
+      | stx => (stx, msgs)
+
 /-- Elaborate one command, updating the state and adding messages. -/
 partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
   -- (13b) privacy is per module: the globals know which one is being elaborated
   modify fun s => if s.globals.module == s.module then s else { s with globals := { s.globals with module := s.module } }
   let s ← get
+  -- (include-str) the driver read the `include_str` files: substitute their contents here,
+  -- at the command boundary, so that no elaborator or macro ever reads a file
+  let (cmd, includeMsgs) := resolveIncludes s cmd
+  unless includeMsgs.isEmpty do
+    modify fun s => { s with messages := s.messages ++ includeMsgs }
   let report (sev : Severity) (info : SourceInfo) (text : String) : StateM (CommandState R) Unit :=
     modify fun s => { s with messages := s.messages.push { info, severity := sev, text } }
   -- an error with a code (`ErrorCode`)
