@@ -1,0 +1,6 @@
+{"shard": "a", "group": "check", "index": 0, "case": "a module is checked", "seconds": 1.000, "ok": true, "notes": [], "date": "2026-11-12T09:00:00+00:00", "commit": "2ebcfd13"}
+{"shard": "a", "group": "check", "index": 1, "case": "another module is checked", "seconds": 1.500, "ok": true, "notes": []}
+{"shard": "a", "group": "grail-commands", "index": 0, "case": "commands chain through their outputs", "seconds": 2.000, "ok": true, "notes": []}
+{"shard": "b", "group": "grail-commands", "index": 1, "case": "an edit reruns", "seconds": 0.750, "ok": true, "notes": []}
+{"shard": "b", "group": "tour", "index": 0, "case": "examples/tour/00-hello.wiz", "seconds": 3.250, "ok": true, "notes": []}
+{"shard": "b", "group": "tour", "index": 1, "case": "examples/tour/01-basics.wiz", "seconds": 2.500, "ok": true, "notes": []}
