@@ -1,0 +1,624 @@
+import Prelude
+import Logic
+import Nat
+import Text
+import Scry.AiDomain
+import Scry.AiCfg
+import Scry.AiWil
+import Scry.AiLaws
+/-!
+# Scry.AiWLaws: gamma laws for the Wil-facing S5 domains
+
+The `Scry.AiWil` counterparts of `Scry.AiLaws`: the argument-list lemmas are shared in
+shape with `Env`, and the product laws are proved for `NumV`/`WValue` and `WEnv`.
+
+Proved here (no axioms):
+
+* `Const`/`Null` are reused from `Scry.AiLaws`; `SConst.gamma_mono`,
+  `SConst.gamma_join_sound` (signed constants, with `Int.beq_eq`);
+* `NumV.gamma_mono`, `NumV.gamma_join_sound`, `WValue.normN_gamma` (via
+  `NumV.normU_gamma`/`normS_gamma`), `WValue.gamma_norm`, `WValue.gamma_mono`,
+  `WValue.gamma_join_sound`, `WValue.join_bot`;
+* `WEnv.gamma_join_sound` and `WEnv.gamma_mono` (the latter under `WEnv.keysSub`).
+
+## The signed-interval hypothesis
+
+`SInterval`'s γ laws are *not* proved here: `lib/Int.wiz`'s Boolean order `Int.le` has
+no transitivity lemma (and `lib/IntOrder.wiz`'s `Int.Le` is a different predicate with
+no bridge), so `SInterval.contains_mono`/`contains_join` would need that order theory
+first. Every signed-`WValue` law is therefore a theorem conditional on `SIntObl`, whose
+three fields are exactly the unproved statements (`mono`, `join`, and the point
+reflexivity `contains (range z z) z = true` that the `known` normalisation needs). No
+`axiom` is used: the record is an explicit hypothesis, so the unsigned cases are
+unconditional and the signed ones are `SIntObl → …`.
+
+-- ## Option/WValue helpers
+def WEnv.optSymm (a b : Option WValue) (h : a = b) : b = a := Eq.symm h
+def WEnv.optTrans (a b c : Option WValue) (h1 : a = b) (h2 : b = c) : a = c := Eq.trans h1 h2
+def WEnv.someInj (a b : WValue) (h : Option.some a = Option.some b) : a = b := h.1
+def WEnv.valueSymm (a b : WValue) (h : a = b) : b = a :=
+  Eq.mpr' (fun (t : WValue) => b = t) h rfl
+def WEnv.someNeNone (v : WValue) (h : Option.some v = Option.none) : False := h.1
+def WEnv.has_cons_true (x : Nat) (p : Nat × WValue) (rest : WEnv)
+    (h : Nat.beq x p.1 = .true) : WEnv.has x (.cons p rest) = .true :=
+  Eq.mpr' (fun (r : Bool) => (match r with
+      | .true => .true
+      | .false => WEnv.has x rest) = .true) h rfl
+def WEnv.has_cons_false (x : Nat) (p : Nat × WValue) (rest : WEnv)
+    (h : Nat.beq x p.1 = .false) : WEnv.has x (.cons p rest) = WEnv.has x rest :=
+  Eq.mpr' (fun (r : Bool) => (match r with
+      | .true => .true
+      | .false => WEnv.has x rest) = WEnv.has x rest) h rfl
+def WEnv.envSymm (a b : WEnv) (h : a = b) : b = a :=
+  Eq.mpr' (fun (t : WEnv) => b = t) h rfl
+def WEnv.getD_key (b : WEnv) (x y : Nat) (d : WValue) (e : x = y) :
+    WEnv.getD b x d = WEnv.getD b y d :=
+  Eq.mp' (fun (t : Nat) => WEnv.getD b x d = WEnv.getD b t d) e rfl
+
+def WEnv.lookup_cons_true (x : Nat) (p : Nat × WValue) (rest : WEnv)
+    (h : Nat.beq x p.1 = .true) : WEnv.lookup x (.cons p rest) = .some p.2 :=
+  Eq.mpr' (fun (r : Bool) => (match r with
+      | .true => Option.some p.2
+      | .false => WEnv.lookup x rest) = .some p.2) h rfl
+
+def WEnv.lookup_cons_false (x : Nat) (p : Nat × WValue) (rest : WEnv)
+    (h : Nat.beq x p.1 = .false) : WEnv.lookup x (.cons p rest) = WEnv.lookup x rest :=
+  Eq.mpr' (fun (r : Bool) => (match r with
+      | .true => Option.some p.2
+      | .false => WEnv.lookup x rest) = WEnv.lookup x rest) h rfl
+
+def WEnv.getD_cons_true (x : Nat) (p : Nat × WValue) (d : WValue) (rest : WEnv)
+    (h : Nat.beq x p.1 = .true) : WEnv.getD (.cons p rest) x d = p.2 :=
+  Eq.mpr' (fun (o : Option WValue) => (match o with
+      | .some w => w
+      | .none => d) = p.2) (WEnv.lookup_cons_true x p rest h) rfl
+
+def WEnv.getD_cons_false (x : Nat) (p : Nat × WValue) (d : WValue) (rest : WEnv)
+    (h : Nat.beq x p.1 = .false) : WEnv.getD (.cons p rest) x d = WEnv.getD rest x d :=
+  Eq.mpr' (fun (o : Option WValue) => (match o with
+      | .some w => w
+      | .none => d) = WEnv.getD rest x d) (WEnv.lookup_cons_false x p rest h) rfl
+
+def WEnv.lookup_append_some (x : Nat) : (l1 l2 : WEnv) → (v : WValue) →
+    WEnv.lookup x l1 = .some v → WEnv.lookup x (List.append l1 l2) = .some v
+  | .nil, l2, v, h => absurd h.1
+  | .cons p rest, l2, v, h =>
+      Bool.casesElim (Nat.beq x p.1)
+        (fun hb =>
+          let hv := WEnv.lookup_cons_true x p rest hb;
+          Eq.mpr' (fun (t : WValue) => WEnv.lookup x (List.append (.cons p rest) l2) = .some t)
+            (WEnv.someInj v p.2
+              (WEnv.optSymm (Option.some p.2) (Option.some v)
+                (WEnv.optTrans (Option.some p.2) (WEnv.lookup x (.cons p rest)) (Option.some v)
+                  (WEnv.optSymm (WEnv.lookup x (.cons p rest)) (Option.some p.2) hv) h)))
+            (WEnv.lookup_cons_true x p (List.append rest l2) hb))
+        (fun hb =>
+          Eq.mpr' (fun (o : Option WValue) => o = .some v)
+            (WEnv.lookup_cons_false x p (List.append rest l2) hb)
+            (WEnv.lookup_append_some x rest l2 v
+              (Eq.mp' (fun (o : Option WValue) => o = .some v) (WEnv.lookup_cons_false x p rest hb) h)))
+
+def WEnv.lookup_append_none (x : Nat) : (l1 l2 : WEnv) →
+    WEnv.lookup x l1 = .none →
+      WEnv.lookup x (List.append l1 l2) = WEnv.lookup x l2
+  | .nil, l2, _ => rfl
+  | .cons p rest, l2, h =>
+      Bool.casesElim (Nat.beq x p.1)
+        (fun hb => absurd (WEnv.someNeNone p.2
+            (WEnv.optTrans (Option.some p.2) (WEnv.lookup x (.cons p rest)) Option.none
+              (WEnv.optSymm (WEnv.lookup x (.cons p rest)) (Option.some p.2)
+                (WEnv.lookup_cons_true x p rest hb)) h)))
+        (fun hb =>
+          let rec : WEnv.lookup x (List.append rest l2) = WEnv.lookup x l2 :=
+            WEnv.lookup_append_none x rest l2
+              (Eq.mp' (fun (o : Option WValue) => o = .none) (WEnv.lookup_cons_false x p rest hb) h);
+          WEnv.optTrans (WEnv.lookup x (List.append (.cons p rest) l2))
+            (WEnv.lookup x (List.append rest l2)) (WEnv.lookup x l2)
+            (WEnv.lookup_cons_false x p (List.append rest l2) hb) rec)
+
+
+def WEnv.filter_cons_true (pred : Nat × WValue → Bool) (p : Nat × WValue) (rest : WEnv)
+    (h : pred p = .true) :
+    List.filter pred (.cons p rest) = .cons p (List.filter pred rest) :=
+  Eq.mpr' (fun (r : Bool) => (match r with
+      | .true => List.cons p (List.filter pred rest)
+      | .false => List.filter pred rest) = List.cons p (List.filter pred rest)) h rfl
+
+def WEnv.filter_cons_false (pred : Nat × WValue → Bool) (p : Nat × WValue) (rest : WEnv)
+    (h : pred p = .false) :
+    List.filter pred (.cons p rest) = List.filter pred rest :=
+  Eq.mpr' (fun (r : Bool) => (match r with
+      | .true => List.cons p (List.filter pred rest)
+      | .false => List.filter pred rest) = List.filter pred rest) h rfl
+
+def WEnv.lookup_filter_cons_false (x : Nat) (pred : Nat × WValue → Bool)
+    (p : Nat × WValue) (rest : WEnv) (h : Nat.beq x p.1 = .false) :
+    WEnv.lookup x (List.filter pred (.cons p rest)) = WEnv.lookup x (List.filter pred rest) :=
+  Bool.casesElim (pred p)
+    (fun hp =>
+      Eq.mpr' (fun (l : WEnv) => WEnv.lookup x l = WEnv.lookup x (List.filter pred rest))
+        (WEnv.filter_cons_true pred p rest hp)
+        (WEnv.lookup_cons_false x p (List.filter pred rest) h))
+    (fun hp =>
+      Eq.mpr' (fun (l : WEnv) => WEnv.lookup x l = WEnv.lookup x (List.filter pred rest))
+        (WEnv.filter_cons_false pred p rest hp) rfl)
+
+def WEnv.lookup_filter_has (x : Nat) (a : WEnv) : (b : WEnv) →
+    WEnv.has x a = .false →
+    WEnv.lookup x (List.filter (fun (q : Nat × WValue) => Bool.not (WEnv.has q.1 a)) b) =
+      WEnv.lookup x b
+  | .nil, _ => rfl
+  | .cons p rest, h =>
+      Bool.casesElim (Nat.beq x p.1)
+        (fun hb =>
+          let hpx : p.1 = x := Env.valueSymmNat x p.1 (Nat.beq_eq x p.1 hb);
+          let hha : WEnv.has p.1 a = .false :=
+            Eq.mpr' (fun (t : Nat) => WEnv.has t a = .false) hpx h;
+          let hp : Bool.not (WEnv.has p.1 a) = .true :=
+            Eq.mpr' (fun (b : Bool) => Bool.not b = .true) hha rfl;
+          WEnv.optTrans (WEnv.lookup x (List.filter
+                (fun (q : Nat × WValue) => Bool.not (WEnv.has q.1 a)) (.cons p rest)))
+            (WEnv.lookup x (.cons p (List.filter (fun (q : Nat × WValue) => Bool.not (WEnv.has q.1 a)) rest)))
+            (WEnv.lookup x (.cons p rest))
+            (Eq.mpr' (fun (l : WEnv) => WEnv.lookup x (List.filter
+                  (fun (q : Nat × WValue) => Bool.not (WEnv.has q.1 a)) (.cons p rest)) = WEnv.lookup x l)
+              (WEnv.envSymm (List.filter (fun (q : Nat × WValue) => Bool.not (WEnv.has q.1 a)) (.cons p rest))
+                (.cons p (List.filter (fun (q : Nat × WValue) => Bool.not (WEnv.has q.1 a)) rest))
+                (WEnv.filter_cons_true (fun (q : Nat × WValue) => Bool.not (WEnv.has q.1 a)) p rest hp)) rfl)
+            (WEnv.optTrans
+              (WEnv.lookup x (.cons p (List.filter (fun (q : Nat × WValue) => Bool.not (WEnv.has q.1 a)) rest)))
+              (Option.some p.2)
+              (WEnv.lookup x (.cons p rest))
+              (WEnv.lookup_cons_true x p (List.filter (fun (q : Nat × WValue) => Bool.not (WEnv.has q.1 a)) rest) hb)
+              (WEnv.optSymm (WEnv.lookup x (.cons p rest)) (Option.some p.2)
+                (WEnv.lookup_cons_true x p rest hb))))
+        (fun hb =>
+          WEnv.optTrans (WEnv.lookup x (List.filter
+                (fun (q : Nat × WValue) => Bool.not (WEnv.has q.1 a)) (.cons p rest)))
+            (WEnv.lookup x (List.filter (fun (q : Nat × WValue) => Bool.not (WEnv.has q.1 a)) rest))
+            (WEnv.lookup x (.cons p rest))
+            (WEnv.lookup_filter_cons_false x (fun (q : Nat × WValue) => Bool.not (WEnv.has q.1 a)) p rest hb)
+            (WEnv.optTrans
+              (WEnv.lookup x (List.filter (fun (q : Nat × WValue) => Bool.not (WEnv.has q.1 a)) rest))
+              (WEnv.lookup x rest) (WEnv.lookup x (.cons p rest))
+              (WEnv.lookup_filter_has x a rest h)
+              (WEnv.optSymm (WEnv.lookup x (.cons p rest)) (WEnv.lookup x rest)
+                (WEnv.lookup_cons_false x p rest hb))))
+
+/-- The mapped part of `join` finds `x` exactly when `a` has it. -/
+def WEnv.join_step (b : WEnv) (p : Nat × WValue) : Nat × WValue :=
+  (p.1, WValue.join p.2 (WEnv.getD b p.1 WValue.botV))
+
+def WEnv.lookup_join_map (x : Nat) (b : WEnv) : (a : WEnv) →
+    (va : WValue) → WEnv.lookup x a = .some va →
+      WEnv.lookup x (List.map (WEnv.join_step b) a) =
+        .some (WValue.join va (WEnv.getD b x WValue.botV))
+  | .nil, va, h => absurd h.1
+  | .cons p rest, va, h =>
+      Bool.casesElim (Nat.beq x p.1)
+        (fun hb =>
+          let hv := WEnv.lookup_cons_true x p rest hb;
+          let e1 : va = p.2 :=
+            WEnv.valueSymm p.2 va
+              (WEnv.someInj p.2 va
+                (WEnv.optTrans (Option.some p.2) (WEnv.lookup x (.cons p rest)) (Option.some va)
+                  (WEnv.optSymm (WEnv.lookup x (.cons p rest)) (Option.some p.2) hv) h));
+          let hd : WEnv.getD b x WValue.botV = WEnv.getD b p.1 WValue.botV :=
+            WEnv.getD_key b x p.1 WValue.botV (Nat.beq_eq x p.1 hb);
+          Eq.mpr' (fun (t : WValue) =>
+              WEnv.lookup x (List.map (WEnv.join_step b) (.cons p rest)) = .some t)
+            (congrArg2 (fun (u g : WValue) => WValue.join u g) e1 hd)
+            (WEnv.lookup_cons_true x (WEnv.join_step b p) (List.map (WEnv.join_step b) rest) hb))
+        (fun hb =>
+          Eq.mpr' (fun (o : Option WValue) => o = .some (WValue.join va (WEnv.getD b x WValue.botV)))
+            (WEnv.lookup_cons_false x (WEnv.join_step b p) (List.map (WEnv.join_step b) rest) hb)
+            (WEnv.lookup_join_map x b rest va
+              (Eq.mp' (fun (o : Option WValue) => o = .some va) (WEnv.lookup_cons_false x p rest hb) h)))
+
+def WEnv.lookup_map_join_none (x : Nat) (b : WEnv) : (a : WEnv) →
+    WEnv.lookup x a = .none → WEnv.lookup x (List.map (WEnv.join_step b) a) = .none
+  | .nil, _ => rfl
+  | .cons p rest, h =>
+      Bool.casesElim (Nat.beq x p.1)
+        (fun hb => absurd (WEnv.someNeNone p.2
+            (WEnv.optTrans (Option.some p.2) (WEnv.lookup x (.cons p rest)) Option.none
+              (WEnv.optSymm (WEnv.lookup x (.cons p rest)) (Option.some p.2)
+                (WEnv.lookup_cons_true x p rest hb)) h)))
+        (fun hb =>
+          Eq.mpr' (fun (o : Option WValue) => o = Option.none)
+            (WEnv.lookup_cons_false x (WEnv.join_step b p) (List.map (WEnv.join_step b) rest) hb)
+            (WEnv.lookup_map_join_none x b rest
+              (Eq.mp' (fun (o : Option WValue) => o = .none) (WEnv.lookup_cons_false x p rest hb) h)))
+
+
+def WEnv.lookup_some_of_has (x : Nat) : (e : WEnv) → WEnv.has x e = .true →
+    WEnv.lookup x e = .some (WEnv.getD e x WValue.botV)
+  | .nil, h => absurd h.1
+  | .cons p rest, h =>
+      Bool.casesElim (Nat.beq x p.1)
+        (fun hb =>
+          WEnv.optTrans (WEnv.lookup x (.cons p rest)) (Option.some p.2)
+            (Option.some (WEnv.getD (.cons p rest) x WValue.botV))
+            (WEnv.lookup_cons_true x p rest hb)
+            (Eq.mpr' (fun (t : WValue) => Option.some p.2 = Option.some t)
+              (WEnv.getD_cons_true x p WValue.botV rest hb) rfl))
+        (fun hb =>
+          WEnv.optTrans (WEnv.lookup x (.cons p rest)) (WEnv.lookup x rest)
+            (Option.some (WEnv.getD (.cons p rest) x WValue.botV))
+            (WEnv.lookup_cons_false x p rest hb)
+            (Eq.mpr' (fun (t : WValue) => WEnv.lookup x rest = .some t)
+              (WEnv.getD_cons_false x p WValue.botV rest hb)
+              (WEnv.lookup_some_of_has x rest
+                (Eq.mp' (fun (b : Bool) => b = .true) (WEnv.has_cons_false x p rest hb) h))))
+
+def WEnv.lookup_none_of_has (x : Nat) : (e : WEnv) → WEnv.has x e = .false →
+    WEnv.lookup x e = .none
+  | .nil, _ => rfl
+  | .cons p rest, h =>
+      Bool.casesElim (Nat.beq x p.1)
+        (fun hb => absurd (Bool.contra (WEnv.has_cons_true x p rest hb) h))
+        (fun hb =>
+          WEnv.optTrans (WEnv.lookup x (.cons p rest)) (WEnv.lookup x rest) Option.none
+            (WEnv.lookup_cons_false x p rest hb)
+            (WEnv.lookup_none_of_has x rest
+              (Eq.mp' (fun (b : Bool) => b = .false) (WEnv.has_cons_false x p rest hb) h)))
+
+
+def WEnv.getD_some (e : WEnv) (x : Nat) (d v : WValue)
+    (h : WEnv.lookup x e = .some v) : WEnv.getD e x d = v :=
+  Eq.mpr' (fun (o : Option WValue) => (match o with
+      | .some w => w
+      | .none => d) = v) h rfl
+
+def WEnv.has_of_lookup_some (x : Nat) : (e : WEnv) → (v : WValue) →
+    WEnv.lookup x e = .some v → WEnv.has x e = .true
+  | .nil, v, h => absurd h.1
+  | .cons p rest, v, h =>
+      Bool.casesElim (Nat.beq x p.1)
+        (fun hb => WEnv.has_cons_true x p rest hb)
+        (fun hb =>
+          Bool.transEq (WEnv.has x (.cons p rest)) (WEnv.has x rest) Bool.true
+            (WEnv.has_cons_false x p rest hb)
+            (WEnv.has_of_lookup_some x rest v
+              (Eq.mp' (fun (o : Option WValue) => o = .some v) (WEnv.lookup_cons_false x p rest hb) h)))
+
+def WEnv.all_cons_false (pred : Nat × WValue → Bool) (p : Nat × WValue) (rest : WEnv)
+    (h : pred p = .false) : List.all pred (.cons p rest) = .false :=
+  Eq.mpr' (fun (r : Bool) => (match r with
+      | .true => List.all pred rest
+      | .false => Bool.false) = Bool.false) h rfl
+
+def WEnv.all_cons_true (pred : Nat × WValue → Bool) (p : Nat × WValue) (rest : WEnv)
+    (h : List.all pred (.cons p rest) = .true) : List.all pred rest = .true :=
+  Bool.casesElim (pred p)
+    (fun hp => Eq.mp' (fun (r : Bool) => (match r with
+        | .true => List.all pred rest
+        | .false => Bool.false) = Bool.true) hp h)
+    (fun hp => absurd (Bool.contra h (WEnv.all_cons_false pred p rest hp)))
+
+def WEnv.le_lookup (a b : WEnv) (x : Nat) (v : WValue)
+    (hle : WEnv.le a b = .true) (hv : WEnv.lookup x a = .some v) :
+    WValue.le v (WEnv.getD b x WValue.botV) = .true :=
+  match a, hle, hv with
+  | .nil, _, hv => absurd hv.1
+  | .cons p rest, hle, hv =>
+      Bool.casesElim (Nat.beq x p.1)
+        (fun hb =>
+          let e1 : p.2 = v :=
+            WEnv.someInj p.2 v
+              (WEnv.optTrans (Option.some p.2) (WEnv.lookup x (.cons p rest)) (Option.some v)
+                (WEnv.optSymm (WEnv.lookup x (.cons p rest)) (Option.some p.2)
+                  (WEnv.lookup_cons_true x p rest hb)) hv);
+          let hx1 : p.1 = x := Env.valueSymmNat x p.1 (Nat.beq_eq x p.1 hb);
+          let hgd : WEnv.getD b p.1 WValue.botV = WEnv.getD b x WValue.botV :=
+            WEnv.getD_key b p.1 x WValue.botV hx1;
+          Bool.casesElim (WValue.le p.2 (WEnv.getD b p.1 WValue.botV))
+            (fun hp =>
+              Eq.mpr' (fun (w : WValue) => WValue.le w (WEnv.getD b x WValue.botV) = .true)
+                (WEnv.valueSymm p.2 v e1)
+                (Eq.mp' (fun (w : WValue) => WValue.le p.2 w = .true) hgd hp))
+            (fun hp => absurd (Bool.contra hle
+              (WEnv.all_cons_false (fun (q : Nat × WValue) => WValue.le q.2 (WEnv.getD b q.1 WValue.botV)) p rest hp))))
+        (fun hb =>
+          WEnv.le_lookup rest b x v
+            (WEnv.all_cons_true (fun (q : Nat × WValue) => WValue.le q.2 (WEnv.getD b q.1 WValue.botV)) p rest hle)
+            (Eq.mp' (fun (o : Option WValue) => o = .some v) (WEnv.lookup_cons_false x p rest hb) hv))
+
+/-- `b`'s key set is contained in `a`'s (the engine keeps every block's environment
+over the same `cfg.vars`, so this holds for every pair the checker compares). -/
+
+-- ## The signed-interval obligations (stated, not assumed: they are the hypothesis)
+
+/-- The signed-interval γ laws still to be proved. `SInterval` is over `Int`, whose
+Boolean order (`Int.le`) has no transitivity lemma in `lib/Int.wiz` yet; the interval
+proofs need `Int.le_trans` for the Boolean order (or the `Int.Le` bridge that
+`lib/IntOrder.wiz` does not state). The WValue laws below are conditional on this record,
+so nothing is assumed: `Scry.AiWLaws` is a theorem `SIntObl → …`. -/
+structure SIntObl where
+  mono : (a b : SInterval) → (z : Int) → SInterval.le a b = .true →
+    SInterval.contains a z = .true → SInterval.contains b z = .true
+  join : (a b : SInterval) → (z : Int) → SInterval.contains a z = .true →
+    SInterval.contains b z = .true → SInterval.contains (SInterval.join a b) z = .true
+  refl : (z : Int) → SInterval.contains (.range z z) z = .true
+
+-- ## NumV / WValue gamma laws
+
+def Int.beq_eq (a b : Int) (h : Int.beq a b = .true) : a = b :=
+  match a, b, h with
+  | .ofNat m, .ofNat n, h => congrArg Int.ofNat (Nat.beq_eq m n h)
+  | .negSucc m, .negSucc n, h => congrArg Int.negSucc (Nat.beq_eq m n h)
+  | .ofNat _, .negSucc _, h => absurd h.1
+  | .negSucc _, .ofNat _, h => absurd h.1
+
+def Int.transEq (a b c : Int) (h1 : a = b) (h2 : b = c) : a = c :=
+  Eq.mp' (fun (t : Int) => a = t) h2 h1
+
+def SConst.gamma_mono (a b : SConst) (z : Int)
+    (hle : SConst.le a b = .true) (hg : SConst.gamma a z) : SConst.gamma b z :=
+  match a, b, hle, hg with
+  | .cbot, _, _, hg => absurd hg
+  | .known x, .known y, hle, hg => Int.transEq z x y hg (Int.beq_eq x y hle)
+  | .known _, .unknown, _, _ => True.intro
+  | .known _, .cbot, hle, _ => absurd hle.1
+  | .unknown, .unknown, _, _ => True.intro
+  | .unknown, .known _, hle, _ => absurd hle.1
+  | .unknown, .cbot, hle, _ => absurd hle.1
+
+def SConst.gamma_join_sound (a b : SConst) (z : Int)
+    (ha : SConst.gamma a z) (hb : SConst.gamma b z) :
+    SConst.gamma (SConst.join a b) z :=
+  match a, b, ha, hb with
+  | .cbot, _, _, hb => hb
+  | _, .cbot, ha, _ => ha
+  | .unknown, _, _, _ => True.intro
+  | _, .unknown, _, _ => True.intro
+  | .known x, .known y, ha, _ =>
+      Bool.casesElim (Int.beq x y)
+        (fun h => Eq.mpr'
+          (fun (r : Bool) => SConst.gamma (match r with
+              | .true => SConst.known x
+              | .false => SConst.unknown) z) h ha)
+        (fun h => Eq.mpr'
+          (fun (r : Bool) => SConst.gamma (match r with
+              | .true => SConst.known x
+              | .false => SConst.unknown) z) h True.intro)
+
+def NumV.gamma_mono (hs : SIntObl) (a b : NumV) (v : Wil.Val)
+    (hle : NumV.le a b = .true) (hg : NumV.gamma a v) : NumV.gamma b v :=
+  match a, b, v, hle, hg with
+  | .bot, _, _, _, hg => absurd hg
+  | .u i c, .u i' c', .int w .false bits, hle, hg =>
+      ( Interval.contains_mono i i' bits
+          (Bool.and_left (Interval.le i i') (Const.le c c') hle) hg.1,
+        Const.gamma_mono c c' bits
+          (Bool.and_right (Interval.le i i') (Const.le c c') hle) hg.2 )
+  | .u _ _, .u _ _, .int w .true bits, hle, hg => absurd hg
+  | .u _ _, .u _ _, .ptr bl off, hle, hg => absurd hg
+  | .u _ _, .u _ _, .nul, hle, hg => absurd hg
+  | .u _ _, .u _ _, .undef, hle, hg => absurd hg
+  | .u _ _, .any, .int w s bits, hle, hg => True.intro
+  | .u _ _, .any, .ptr bl off, hle, hg => absurd hg
+  | .u _ _, .any, .nul, hle, hg => absurd hg
+  | .u _ _, .any, .undef, hle, hg => absurd hg
+  | .u _ _, .s _ _, v, hle, hg => absurd hle.1
+  | .u _ _, .bot, v, hle, hg => absurd hle.1
+  | .s i c, .s i' c', .int w .true bits, hle, hg =>
+      ( hs.mono i i' (Wil.Val.toInt (.int w .true bits))
+          (Bool.and_left (SInterval.le i i') (SConst.le c c') hle) hg.1,
+        SConst.gamma_mono c c' (Wil.Val.toInt (.int w .true bits))
+          (Bool.and_right (SInterval.le i i') (SConst.le c c') hle) hg.2 )
+  | .s _ _, .s _ _, .int w .false bits, hle, hg => absurd hg
+  | .s _ _, .s _ _, .ptr bl off, hle, hg => absurd hg
+  | .s _ _, .s _ _, .nul, hle, hg => absurd hg
+  | .s _ _, .s _ _, .undef, hle, hg => absurd hg
+  | .s _ _, .any, .int w s bits, hle, hg => True.intro
+  | .s _ _, .any, .ptr bl off, hle, hg => absurd hg
+  | .s _ _, .any, .nul, hle, hg => absurd hg
+  | .s _ _, .any, .undef, hle, hg => absurd hg
+  | .s _ _, .u _ _, v, hle, hg => absurd hle.1
+  | .s _ _, .bot, v, hle, hg => absurd hle.1
+  | .any, .any, .int w s bits, hle, hg => True.intro
+  | .any, .any, .ptr bl off, hle, hg => absurd hg
+  | .any, .any, .nul, hle, hg => absurd hg
+  | .any, .any, .undef, hle, hg => absurd hg
+  | .any, _, v, hle, hg => absurd hle.1
+
+def NumV.gamma_join_sound (hs : SIntObl) (a b : NumV) (v : Wil.Val)
+    (ha : NumV.gamma a v) (hb : NumV.gamma b v) : NumV.gamma (NumV.join a b) v :=
+  match a, b, v, ha, hb with
+  | .bot, _, _, ha, hb => hb
+  | _, .bot, _, ha, hb => ha
+  | .u i c, .u i' c', .int w .false bits, ha, hb =>
+      ( Interval.contains_join i i' bits ha.1 hb.1,
+        Const.gamma_join_sound c c' bits ha.2 hb.2 )
+  | .u _ _, .u _ _, .int w .true bits, ha, hb => absurd ha
+  | .u _ _, .u _ _, .ptr bl off, ha, hb => absurd ha
+  | .u _ _, .u _ _, .nul, ha, hb => absurd ha
+  | .u _ _, .u _ _, .undef, ha, hb => absurd ha
+  | .s i c, .s i' c', .int w .true bits, ha, hb =>
+      ( hs.join i i' (Wil.Val.toInt (.int w .true bits)) ha.1 hb.1,
+        SConst.gamma_join_sound c c' (Wil.Val.toInt (.int w .true bits)) ha.2 hb.2 )
+  | .s _ _, .s _ _, .int w .false bits, ha, hb => absurd ha
+  | .s _ _, .s _ _, .ptr bl off, ha, hb => absurd ha
+  | .s _ _, .s _ _, .nul, ha, hb => absurd ha
+  | .s _ _, .s _ _, .undef, ha, hb => absurd ha
+  | .u _ _, .s _ _, .int w s bits, ha, hb => True.intro
+  | .u _ _, .s _ _, .ptr bl off, ha, hb => absurd ha
+  | .u _ _, .s _ _, .nul, ha, hb => absurd ha
+  | .u _ _, .s _ _, .undef, ha, hb => absurd ha
+  | .s _ _, .u _ _, .int w s bits, ha, hb => True.intro
+  | .s _ _, .u _ _, .ptr bl off, ha, hb => absurd ha
+  | .s _ _, .u _ _, .nul, ha, hb => absurd ha
+  | .s _ _, .u _ _, .undef, ha, hb => absurd ha
+  | .any, _, .int w s bits, ha, hb => True.intro
+  | .any, _, .ptr bl off, ha, hb => absurd ha
+  | .any, _, .nul, ha, hb => absurd ha
+  | .any, _, .undef, ha, hb => absurd ha
+  | _, .any, .int w s bits, ha, hb => True.intro
+  | _, .any, .ptr bl off, ha, hb => absurd hb
+  | _, .any, .nul, ha, hb => absurd hb
+  | _, .any, .undef, ha, hb => absurd hb
+
+def NumV.join_bot (n : NumV) : NumV.join n NumV.botV = n :=
+  match n with
+  | .bot => rfl
+  | .u i c => rfl
+  | .s i c => rfl
+  | .any => rfl
+
+def NumV.normU_gamma (i : Interval) (c : Const) (v : Wil.Val)
+    (hg : NumV.gamma (.u i c) v) : NumV.gamma (NumV.normU i c) v :=
+  match v, c, hg with
+  | .int w .false bits, .cbot, hg => hg
+  | .int w .false bits, .unknown, hg => hg
+  | .int w .false bits, .known k, hg =>
+      let hb : bits = k := hg.2
+      ( Bool.and_intro (Nat.le k bits) (Nat.le bits k)
+          (Eq.mpr' (fun (t : Nat) => Nat.le k t = .true) hb (Nat.le_refl k))
+          (Eq.mpr' (fun (t : Nat) => Nat.le t k = .true) hb (Nat.le_refl k)),
+        hb )
+  | .int w .true bits, c, hg => absurd hg
+  | .ptr bl off, c, hg => absurd hg
+  | .nul, c, hg => absurd hg
+  | .undef, c, hg => absurd hg
+
+def NumV.normS_gamma (hs : SIntObl) (i : SInterval) (c : SConst) (v : Wil.Val)
+    (hg : NumV.gamma (.s i c) v) : NumV.gamma (NumV.normS i c) v :=
+  match v, c, hg with
+  | .int w .true bits, .cbot, hg => hg
+  | .int w .true bits, .unknown, hg => hg
+  | .int w .true bits, .known z, hg =>
+      let hb : Wil.Val.toInt (.int w .true bits) = z := hg.2
+      ( Eq.mpr' (fun (t : Int) => SInterval.contains (.range z z) t = .true) hb
+          (hs.refl z),
+        hb )
+  | .int w .false bits, c, hg => absurd hg
+  | .ptr bl off, c, hg => absurd hg
+  | .nul, c, hg => absurd hg
+  | .undef, c, hg => absurd hg
+
+def WValue.normN_gamma (hs : SIntObl) (n : NumV) (v : Wil.Val)
+    (hg : NumV.gamma n v) : NumV.gamma (NumV.normN n) v :=
+  match n, hg with
+  | .u i c, hg => NumV.normU_gamma i c v hg
+  | .s i c, hg => NumV.normS_gamma hs i c v hg
+  | .any, hg => hg
+  | .bot, hg => absurd hg
+
+def WValue.gamma_norm (hs : SIntObl) (w : WValue) (v : Wil.Val)
+    (h : WValue.gamma w v) : WValue.gamma (WValue.norm w) v :=
+  ( WValue.normN_gamma hs w.num v h.1, h.2 )
+
+def WValue.gamma_mono (hs : SIntObl) (a b : WValue) (v : Wil.Val)
+    (hle : WValue.le a b = .true) (h : WValue.gamma a v) : WValue.gamma b v :=
+  ( NumV.gamma_mono hs a.num b.num v
+      (Bool.and_left (NumV.le a.num b.num) (Null.le a.nul b.nul) hle) h.1,
+    Null.gamma_mono a.nul b.nul (Wil.Val.isNullV v)
+      (Bool.and_right (NumV.le a.num b.num) (Null.le a.nul b.nul) hle) h.2 )
+
+def WValue.gamma_join_sound (hs : SIntObl) (a b : WValue) (v : Wil.Val)
+    (ha : WValue.gamma a v) (hb : WValue.gamma b v) :
+    WValue.gamma (WValue.join a b) v :=
+  WValue.gamma_norm hs (WValue.mk (NumV.join a.num b.num) (Null.join a.nul b.nul)) v
+    ( NumV.gamma_join_sound hs a.num b.num v ha.1 hb.1,
+      Null.gamma_join_sound a.nul b.nul (Wil.Val.isNullV v) ha.2 hb.2 )
+
+def WValue.valueTrans (a b c : WValue) (h1 : a = b) (h2 : b = c) : a = c :=
+  Eq.mp' (fun (t : WValue) => a = t) h2 h1
+
+def WValue.join_bot (w : WValue) : WValue.join w WValue.botV = WValue.norm w :=
+  WValue.valueTrans (WValue.join w WValue.botV)
+    (WValue.norm (WValue.mk w.num (Null.join w.nul Null.nbot)))
+    (WValue.norm w)
+    (congrArg (fun (n : NumV) => WValue.norm (WValue.mk n (Null.join w.nul Null.nbot)))
+      (NumV.join_bot w.num))
+    (WValue.valueTrans
+      (WValue.norm (WValue.mk w.num (Null.join w.nul Null.nbot)))
+      (WValue.norm (WValue.mk w.num w.nul))
+      (WValue.norm w)
+      (congrArg (fun (n : Null) => WValue.norm (WValue.mk w.num n)) (Null.join_bot w.nul))
+      rfl)
+
+def WValue.gamma_join_bot_right (hs : SIntObl) (w : WValue) (v : Wil.Val)
+    (h : WValue.gamma w v) : WValue.gamma (WValue.join w WValue.botV) v :=
+  Eq.mpr' (fun (u : WValue) => WValue.gamma u v) (WValue.join_bot w) (WValue.gamma_norm hs w v h)
+
+-- ## WEnv: the pointwise product over `WConc`
+
+def WEnv.gamma_getD (e : WEnv) (c : WConc) (x : Nat)
+    (h : WEnv.gamma e c) (hh : WEnv.has x e = .true) :
+    WValue.gamma (WEnv.getD e x WValue.botV) (WConc.getD c x .undef) :=
+  h x (WEnv.getD e x WValue.botV) (WEnv.lookup_some_of_has x e hh)
+
+def WEnv.getD_bot_of_absent (x : Nat) (e : WEnv) (h : WEnv.has x e = .false) :
+    WEnv.getD e x WValue.botV = WValue.botV :=
+  Eq.mpr' (fun (o : Option WValue) => (match o with
+      | .some w => w
+      | .none => WValue.botV) = WValue.botV) (WEnv.lookup_none_of_has x e h) rfl
+
+def WEnv.gamma_join_sound (hs : SIntObl) (a b : WEnv) (c : WConc)
+    (ha : WEnv.gamma a c) (hb : WEnv.gamma b c) : WEnv.gamma (WEnv.join a b) c :=
+  fun x v hv =>
+    Bool.casesElim (WEnv.has x a)
+      (fun hha =>
+        let ga := WEnv.getD a x WValue.botV;
+        let gb := WEnv.getD b x WValue.botV;
+        let hga : WValue.gamma ga (WConc.getD c x .undef) := WEnv.gamma_getD a c x ha hha;
+        let hlookupA : WEnv.lookup x (WEnv.join a b) = .some (WValue.join ga gb) :=
+          WEnv.optTrans (WEnv.lookup x (WEnv.join a b))
+            (WEnv.lookup x (List.append (List.map (WEnv.join_step b) a)
+              (List.filter (fun (q : Nat × WValue) => Bool.not (WEnv.has q.1 a)) b)))
+            (Option.some (WValue.join ga gb)) rfl
+            (WEnv.lookup_append_some x (List.map (WEnv.join_step b) a)
+              (List.filter (fun (q : Nat × WValue) => Bool.not (WEnv.has q.1 a)) b)
+              (WValue.join ga gb)
+              (WEnv.lookup_join_map x b a ga (WEnv.lookup_some_of_has x a hha)));
+        let heq : WValue.join ga gb = v :=
+          WEnv.someInj (WValue.join ga gb) v
+            (WEnv.optTrans (Option.some (WValue.join ga gb)) (WEnv.lookup x (WEnv.join a b)) (Option.some v)
+              (WEnv.optSymm (WEnv.lookup x (WEnv.join a b)) (Option.some (WValue.join ga gb)) hlookupA) hv);
+        let hg : WValue.gamma (WValue.join ga gb) (WConc.getD c x .undef) :=
+          Bool.casesElim (WEnv.has x b)
+            (fun hhb => WValue.gamma_join_sound hs ga gb (WConc.getD c x .undef) hga
+              (WEnv.gamma_getD b c x hb hhb))
+            (fun hhb =>
+              Eq.mpr' (fun (w : WValue) => WValue.gamma (WValue.join ga w) (WConc.getD c x .undef))
+                (WEnv.getD_bot_of_absent x b hhb)
+                (WValue.gamma_join_bot_right hs ga (WConc.getD c x .undef) hga));
+        Eq.mp' (fun (w : WValue) => WValue.gamma w (WConc.getD c x .undef)) heq hg)
+      (fun hha =>
+        let hla : WEnv.lookup x a = .none := WEnv.lookup_none_of_has x a hha;
+        let hmap : WEnv.lookup x (List.map (WEnv.join_step b) a) = .none :=
+          WEnv.lookup_map_join_none x b a hla;
+        let hfilter : WEnv.lookup x (List.filter (fun (q : Nat × WValue) => Bool.not (WEnv.has q.1 a)) b)
+            = WEnv.lookup x b := WEnv.lookup_filter_has x a b hha;
+        let hjoin : WEnv.lookup x (WEnv.join a b) = WEnv.lookup x b :=
+          WEnv.optTrans (WEnv.lookup x (WEnv.join a b))
+            (WEnv.lookup x (List.append (List.map (WEnv.join_step b) a)
+              (List.filter (fun (q : Nat × WValue) => Bool.not (WEnv.has q.1 a)) b)))
+            (WEnv.lookup x b) rfl
+            (WEnv.optTrans (WEnv.lookup x (List.append (List.map (WEnv.join_step b) a)
+                (List.filter (fun (q : Nat × WValue) => Bool.not (WEnv.has q.1 a)) b)))
+              (WEnv.lookup x (List.filter (fun (q : Nat × WValue) => Bool.not (WEnv.has q.1 a)) b))
+              (WEnv.lookup x b)
+              (WEnv.lookup_append_none x (List.map (WEnv.join_step b) a)
+                (List.filter (fun (q : Nat × WValue) => Bool.not (WEnv.has q.1 a)) b) hmap)
+              hfilter);
+        hb x v (Eq.mp' (fun (o : Option WValue) => o = .some v) hjoin hv))
+
+def WEnv.keysSub (b a : WEnv) : Prop := (x : Nat) → WEnv.has x b = .true → WEnv.has x a = .true
+
+def WEnv.gamma_mono (hs : SIntObl) (a b : WEnv) (c : WConc) (hkeys : WEnv.keysSub b a)
+    (hle : WEnv.le a b = .true) (h : WEnv.gamma a c) : WEnv.gamma b c :=
+  fun x v hv =>
+    let hhb : WEnv.has x b = .true := WEnv.has_of_lookup_some x b v hv;
+    let hha : WEnv.has x a = .true := hkeys x hhb;
+    let hla : WEnv.lookup x a = .some (WEnv.getD a x WValue.botV) := WEnv.lookup_some_of_has x a hha;
+    let hleV : WValue.le (WEnv.getD a x WValue.botV) (WEnv.getD b x WValue.botV) = .true :=
+      WEnv.le_lookup a b x (WEnv.getD a x WValue.botV) hle hla;
+    let hgb : WValue.gamma (WEnv.getD b x WValue.botV) (WConc.getD c x .undef) :=
+      WValue.gamma_mono hs (WEnv.getD a x WValue.botV) (WEnv.getD b x WValue.botV)
+        (WConc.getD c x .undef) hleV (WEnv.gamma_getD a c x h hha);
+    Eq.mp' (fun (w : WValue) => WValue.gamma w (WConc.getD c x .undef))
+      (WEnv.getD_some b x WValue.botV v hv) hgb
+

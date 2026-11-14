@@ -382,10 +382,15 @@ structure Value where
   nul : Null
   deriving Inhabited, BEq, Repr
 
+/-- Tighten an interval by a known constant, as a function of the three components (the
+`itv` parameter is only needed when the constant is not known; naming it makes the
+normalisation reduce under a case split on `cst`, which the proof in `Scry.AiLaws` uses). -/
+def Value.normAt (itv : Interval) (cst : Const) (nul : Null) : Value := match cst with
+  | .known n => Value.mk (.range n n) (.known n) nul
+  | _ => Value.mk itv cst nul
+
 /-- Tighten an interval by a known constant. -/
-def Value.norm (v : Value) : Value := match v.cst with
-  | .known n => { v with itv := .range n n }
-  | _ => v
+def Value.norm (v : Value) : Value := Value.normAt v.itv v.cst v.nul
 
 /-- The least element. -/
 def Value.bot : Value := Value.mk .bot .cbot .nbot

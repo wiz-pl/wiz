@@ -1,0 +1,683 @@
+import Prelude
+import Logic
+import Nat
+import Text
+import Scry.AiDomain
+/-!
+# Scry.AiLaws: gamma laws for the S5 domains
+
+The soundness laws of `Scry.AiDomain`, proved (no axioms, no `native_refl`):
+
+* `Interval.contains_mono`, `Interval.contains_join` (and `Interval.join_sound`), the
+  min/max bounds they need;
+* `Const.gamma_mono`, `Const.gamma_join_sound`, `Null.gamma_mono`,
+  `Null.gamma_join_sound`;
+* the reduced product: `Value.gamma_norm` (the `norm` case), `Value.gamma_mono`,
+  `Value.gamma_join_sound` (with `Value.join_bot` for the environment join's missing
+  keys), `Value.gamma_bot_sound`;
+* the environment (the pointwise product over the association list):
+  `Env.gamma_join_sound` and `Env.gamma_mono` (the latter under `Env.keysSub`: the engine
+  keeps every block's key set equal to `cfg.vars`, so the hypothesis holds for all pairs
+  the checker compares; without it `Env.le` ignores keys that only the right-hand
+  environment has, and `gamma_mono` is false). The empty environment imposes no
+  constraint (`Env.gamma_empty`), so `AbsDomain.bot_sound_stmt` is not the right law for
+  `Env`; `bot` is a lattice bottom only for environments over a fixed key set.
+
+`WValue`/`WEnv` (the Wil-facing product) repeat these laws over `Scry.AiWil`'s types with
+`Scry.AiWLaws`.
+
+```
+import Scry.AiLaws
+
+#print axioms Env.gamma_join_sound
+```
+-/
+
+
+def Bool.and_intro (a b : Bool) (ha : a = .true) (hb : b = .true) : Bool.and a b = .true :=
+  match a, b, ha, hb with
+  | .true, .true, _, _ => rfl
+  | .true, .false, _, hb => absurd hb.1
+  | .false, _, ha, _ => absurd ha.1
+
+def Bool.contra {b : Bool} (h1 : b = .true) (h2 : b = .false) : False :=
+  match b, h1, h2 with
+  | .true, _, h2 => h2.1
+  | .false, h1, _ => h1.1
+
+
+
+-- ## Boolean helper
+
+-- ## min / max bounds (the scrutinee is transported by its equation, so the
+-- definitional `match` in `Ai.min`/`Ai.max` can be rewritten)
+
+def Ai.min_eq (a b : Nat) (h : Nat.le a b = .true) : Ai.min a b = a :=
+  Eq.mpr' (fun (r : Bool) => (match r with | .true => a | .false => b) = a) h rfl
+
+def Ai.min_left (a b : Nat) : Nat.le (Ai.min a b) a = .true :=
+  Or.elim (Bool.cases (Nat.le a b))
+    (fun h => Eq.mpr' (fun (r : Bool) => Nat.le (match r with | .true => a | .false => b) a = .true)
+      h (Nat.le_refl a))
+    (fun h => Eq.mpr' (fun (r : Bool) => Nat.le (match r with | .true => a | .false => b) a = .true)
+      h (Nat.le_of_lt b a (Nat.not_le a b h)))
+
+def Ai.min_right (a b : Nat) : Nat.le (Ai.min a b) b = .true :=
+  Or.elim (Bool.cases (Nat.le a b))
+    (fun h => Eq.mpr' (fun (r : Bool) => Nat.le (match r with | .true => a | .false => b) b = .true)
+      h h)
+    (fun h => Eq.mpr' (fun (r : Bool) => Nat.le (match r with | .true => a | .false => b) b = .true)
+      h (Nat.le_refl b))
+
+def Ai.max_left (a b : Nat) : Nat.le a (Ai.max a b) = .true :=
+  Or.elim (Bool.cases (Nat.le a b))
+    (fun h => Eq.mpr' (fun (r : Bool) => Nat.le a (match r with | .true => b | .false => a) = .true)
+      h h)
+    (fun h => Eq.mpr' (fun (r : Bool) => Nat.le a (match r with | .true => b | .false => a) = .true)
+      h (Nat.le_refl a))
+
+def Ai.max_right (a b : Nat) : Nat.le b (Ai.max a b) = .true :=
+  Or.elim (Bool.cases (Nat.le a b))
+    (fun h => Eq.mpr' (fun (r : Bool) => Nat.le b (match r with | .true => b | .false => a) = .true)
+      h (Nat.le_refl b))
+    (fun h => Eq.mpr' (fun (r : Bool) => Nat.le b (match r with | .true => b | .false => a) = .true)
+      h (Nat.le_trans b a a (Nat.le_of_lt b a (Nat.not_le a b h)) (Nat.le_refl a)))
+
+-- ## Interval: gamma laws
+
+def Interval.contains_mono (a b : Interval) (n : Nat)
+    (hle : Interval.le a b = .true) (hc : Interval.contains a n = .true) :
+    Interval.contains b n = .true :=
+  match a, b, hle, hc with
+  | .bot, _, _, hc => absurd hc.1
+  | .top, .top, _, _ => rfl
+  | .top, .range _ _, hle, _ => absurd hle.1
+  | .top, .bot, hle, _ => absurd hle.1
+  | .range _ _, .bot, hle, _ => absurd hle.1
+  | .range _ _, .top, _, _ => rfl
+  | .range lo hi, .range lo' hi', hle, hc =>
+      Bool.and_intro (Nat.le lo' n) (Nat.le n hi')
+        (Nat.le_trans lo' lo n (Bool.and_left (Nat.le lo' lo) (Nat.le hi hi') hle)
+          (Bool.and_left (Nat.le lo n) (Nat.le n hi) hc))
+        (Nat.le_trans n hi hi' (Bool.and_right (Nat.le lo n) (Nat.le n hi) hc)
+          (Bool.and_right (Nat.le lo' lo) (Nat.le hi hi') hle))
+
+def Interval.min_le_left (a b n : Nat) (h : Nat.le a n = .true) : Nat.le (Ai.min a b) n = .true :=
+  Nat.le_trans (Ai.min a b) a n (Ai.min_left a b) h
+
+def Interval.max_le_max (a b n : Nat) (h : Nat.le n a = .true) : Nat.le n (Ai.max a b) = .true :=
+  Nat.le_trans n a (Ai.max a b) h (Ai.max_left a b)
+
+def Interval.contains_join (a b : Interval) (n : Nat)
+    (ha : Interval.contains a n = .true) (hb : Interval.contains b n = .true) :
+    Interval.contains (Interval.join a b) n = .true :=
+  match a, b, ha, hb with
+  | .bot, _, _, hb => hb
+  | _, .bot, ha, _ => ha
+  | .top, .top, _, _ => rfl
+  | .top, .range _ _, _, _ => rfl
+  | .range _ _, .top, _, _ => rfl
+  | .range lo hi, .range lo' hi', ha, _ =>
+      Bool.and_intro (Nat.le (Ai.min lo lo') n) (Nat.le n (Ai.max hi hi'))
+        (Interval.min_le_left lo lo' n (Bool.and_left (Nat.le lo n) (Nat.le n hi) ha))
+        (Interval.max_le_max hi hi' n (Bool.and_right (Nat.le lo n) (Nat.le n hi) ha))
+
+def Interval.join_sound (a b : Interval) (n : Nat)
+    (ha : Interval.contains a n = .true) (hb : Interval.contains b n = .true) :
+    Interval.contains (Interval.join a b) n = .true :=
+  Interval.contains_join a b n ha hb
+
+-- ## Const: gamma laws
+
+def Const.gamma_mono (a b : Const) (n : Nat)
+    (hle : Const.le a b = .true) (hg : Const.gamma a n) : Const.gamma b n :=
+  match a, b, hle, hg with
+  | .cbot, _, _, hg => absurd hg
+  | .known x, .known y, hle, hg => Eq.trans hg (Nat.beq_eq x y hle)
+  | .known _, .unknown, _, _ => True.intro
+  | .known _, .cbot, hle, _ => absurd hle.1
+  | .unknown, .unknown, _, _ => True.intro
+  | .unknown, .known _, hle, _ => absurd hle.1
+  | .unknown, .cbot, hle, _ => absurd hle.1
+
+def Const.gamma_join_sound (a b : Const) (n : Nat)
+    (ha : Const.gamma a n) (hb : Const.gamma b n) :
+    Const.gamma (Const.join a b) n :=
+  match a, b, ha, hb with
+  | .cbot, _, _, hb => hb
+  | _, .cbot, ha, _ => ha
+  | .unknown, _, _, _ => True.intro
+  | _, .unknown, _, _ => True.intro
+  | .known x, .known y, ha, _ =>
+      Or.elim (Bool.cases (Nat.beq x y))
+        (fun h => Eq.mpr'
+          (fun (r : Bool) => Const.gamma (match r with | .true => Const.known x | .false => Const.unknown) n)
+          h ha)
+        (fun h => Eq.mpr'
+          (fun (r : Bool) => Const.gamma (match r with | .true => Const.known x | .false => Const.unknown) n)
+          h True.intro)
+
+def Const.gamma_bot_sound (n : Nat) (h : Const.gamma Const.cbot n) : False := h
+
+-- ## Null: gamma laws
+
+def Null.gamma_mono (a b : Null) (x : Bool)
+    (hle : Null.le a b = .true) (hg : Null.gamma a x) : Null.gamma b x :=
+  match a, b, hle, hg with
+  | .nbot, _, _, hg => absurd hg
+  | .nul, .nbot, hle, _ => absurd hle.1
+  | .nul, .nul, _, hg => hg
+  | .nul, .maybe, _, _ => True.intro
+  | .nul, .nonNull, hle, _ => absurd hle.1
+  | .nonNull, .nbot, hle, _ => absurd hle.1
+  | .nonNull, .nonNull, _, hg => hg
+  | .nonNull, .maybe, _, _ => True.intro
+  | .nonNull, .nul, hle, _ => absurd hle.1
+  | .maybe, .nbot, hle, _ => absurd hle.1
+  | .maybe, .maybe, _, _ => True.intro
+  | .maybe, .nul, hle, _ => absurd hle.1
+  | .maybe, .nonNull, hle, _ => absurd hle.1
+
+def Null.notBothNulNonNull (x : Bool) (ha : Null.gamma .nul x) (hb : Null.gamma .nonNull x) : False :=
+  match x, ha, hb with
+  | .true, _, hb => hb.1
+  | .false, ha, _ => ha.1
+
+def Null.gamma_join_sound (a b : Null) (x : Bool)
+    (ha : Null.gamma a x) (hb : Null.gamma b x) :
+    Null.gamma (Null.join a b) x :=
+  match a, b, ha, hb with
+  | .nbot, _, _, hb => hb
+  | .nul, .nbot, ha, _ => ha
+  | .nul, .nul, ha, _ => ha
+  | .nul, .nonNull, _, _ => True.intro
+  | .nul, .maybe, _, _ => True.intro
+  | .nonNull, .nbot, ha, _ => ha
+  | .nonNull, .nul, _, _ => True.intro
+  | .nonNull, .nonNull, ha, _ => ha
+  | .nonNull, .maybe, _, _ => True.intro
+  | .maybe, .nbot, ha, _ => ha
+  | .maybe, .nul, _, _ => True.intro
+  | .maybe, .nonNull, _, _ => True.intro
+  | .maybe, .nbot, hle, _ => absurd hle.1
+  | .maybe, .maybe, _, _ => True.intro
+
+def Null.gamma_bot_sound (x : Bool) (h : Null.gamma Null.nbot x) : False := h
+
+-- ## Value: gamma laws
+
+def Value.normAt_gamma (itv : Interval) (cst : Const) (nul : Null) (c : VState)
+    (h : Value.gamma (Value.mk itv cst nul) c) :
+    Value.gamma (Value.normAt itv cst nul) c :=
+  match cst, h with
+  | .cbot, h => h
+  | .unknown, h => h
+  | .known k, h =>
+      let hb : c.bits = k := h.2.1
+      let hc : Null.gamma nul c.null := h.2.2
+      ( Bool.and_intro (Nat.le k c.bits) (Nat.le c.bits k)
+          (Eq.mpr' (fun (t : Nat) => Nat.le k t = .true) hb (Nat.le_refl k))
+          (Eq.mpr' (fun (t : Nat) => Nat.le t k = .true) hb (Nat.le_refl k)),
+        ( hb, hc ) )
+
+def Value.gamma_norm (v : Value) (c : VState) (h : Value.gamma v c) :
+    Value.gamma (Value.norm v) c :=
+  Value.normAt_gamma v.itv v.cst v.nul c h
+
+def Value.valueTrans (a b c : Value) (h1 : a = b) (h2 : b = c) : a = c :=
+  Eq.mp' (fun (t : Value) => a = t) h2 h1
+
+def Value.gamma_mono (a b : Value) (c : VState)
+    (hle : Value.le a b = .true) (h : Value.gamma a c) : Value.gamma b c :=
+  let hleR := Bool.and_right (Interval.le a.itv b.itv)
+    (Bool.and (Const.le a.cst b.cst) (Null.le a.nul b.nul)) hle;
+  ( Interval.contains_mono a.itv b.itv c.bits
+      (Bool.and_left (Interval.le a.itv b.itv)
+        (Bool.and (Const.le a.cst b.cst) (Null.le a.nul b.nul)) hle) h.1,
+    ( Const.gamma_mono a.cst b.cst c.bits
+        (Bool.and_left (Const.le a.cst b.cst) (Null.le a.nul b.nul) hleR) h.2.1,
+      Null.gamma_mono a.nul b.nul c.null
+        (Bool.and_right (Const.le a.cst b.cst) (Null.le a.nul b.nul) hleR) h.2.2 ) )
+
+def Value.gamma_join_sound (a b : Value) (c : VState)
+    (ha : Value.gamma a c) (hb : Value.gamma b c) :
+    Value.gamma (Value.join a b) c :=
+  Value.gamma_norm (Value.mk (Interval.join a.itv b.itv) (Const.join a.cst b.cst) (Null.join a.nul b.nul)) c
+    ( Interval.contains_join a.itv b.itv c.bits ha.1 hb.1,
+      ( Const.gamma_join_sound a.cst b.cst c.bits ha.2.1 hb.2.1,
+        Null.gamma_join_sound a.nul b.nul c.null ha.2.2 hb.2.2 ) )
+
+def Value.gamma_bot_sound (c : VState) (h : Value.gamma Value.bot c) : False :=
+  absurd h.1.1
+
+def Bool.casesElim {0 P : Prop} (b : Bool) (ht : b = .true → P) (hf : b = .false → P) : P :=
+  Or.elim (Bool.cases b) ht hf
+
+def Env.optSymm (a b : Option Value) (h : a = b) : b = a := Eq.symm h
+def Env.optTrans (a b c : Option Value) (h1 : a = b) (h2 : b = c) : a = c := Eq.trans h1 h2
+def Env.someInj (a b : Value) (h : Option.some a = Option.some b) : a = b := h.1
+def Env.valueSymm (a b : Value) (h : a = b) : b = a :=
+  Eq.mpr' (fun (t : Value) => b = t) h rfl
+def Env.someNeNone (v : Value) (h : Option.some v = Option.none) : False := h.1
+
+def Env.has_cons_true (x : Nat) (p : Nat × Value) (rest : Env)
+    (h : Nat.beq x p.1 = .true) : Env.has x (.cons p rest) = .true :=
+  Eq.mpr' (fun (r : Bool) => (match r with
+      | .true => .true
+      | .false => Env.has x rest) = .true) h rfl
+
+def Env.has_cons_false (x : Nat) (p : Nat × Value) (rest : Env)
+    (h : Nat.beq x p.1 = .false) : Env.has x (.cons p rest) = Env.has x rest :=
+  Eq.mpr' (fun (r : Bool) => (match r with
+      | .true => .true
+      | .false => Env.has x rest) = Env.has x rest) h rfl
+
+def Env.envSymm (a b : Env) (h : a = b) : b = a :=
+  Eq.mpr' (fun (t : Env) => b = t) h rfl
+
+def Env.valueSymmNat (a b : Nat) (h : a = b) : b = a :=
+  Eq.mpr' (fun (t : Nat) => b = t) h rfl
+
+def Env.getD_key (b : Env) (x y : Nat) (d : Value) (e : x = y) :
+    Env.getD b x d = Env.getD b y d :=
+  Eq.mp' (fun (t : Nat) => Env.getD b x d = Env.getD b t d) e rfl
+
+def Env.lookup_cons_true (x : Nat) (p : Nat × Value) (rest : Env)
+    (h : Nat.beq x p.1 = .true) : Env.lookup x (.cons p rest) = .some p.2 :=
+  Eq.mpr' (fun (r : Bool) => (match r with
+      | .true => Option.some p.2
+      | .false => Env.lookup x rest) = .some p.2) h rfl
+
+def Env.lookup_cons_false (x : Nat) (p : Nat × Value) (rest : Env)
+    (h : Nat.beq x p.1 = .false) : Env.lookup x (.cons p rest) = Env.lookup x rest :=
+  Eq.mpr' (fun (r : Bool) => (match r with
+      | .true => Option.some p.2
+      | .false => Env.lookup x rest) = Env.lookup x rest) h rfl
+
+def Env.getD_cons_true (x : Nat) (p : Nat × Value) (d : Value) (rest : Env)
+    (h : Nat.beq x p.1 = .true) : Env.getD (.cons p rest) x d = p.2 :=
+  Eq.mpr' (fun (o : Option Value) => (match o with
+      | .some w => w
+      | .none => d) = p.2) (Env.lookup_cons_true x p rest h) rfl
+
+def Env.getD_cons_false (x : Nat) (p : Nat × Value) (d : Value) (rest : Env)
+    (h : Nat.beq x p.1 = .false) : Env.getD (.cons p rest) x d = Env.getD rest x d :=
+  Eq.mpr' (fun (o : Option Value) => (match o with
+      | .some w => w
+      | .none => d) = Env.getD rest x d) (Env.lookup_cons_false x p rest h) rfl
+
+def Env.lookup_append_some (x : Nat) : (l1 l2 : Env) → (v : Value) →
+    Env.lookup x l1 = .some v → Env.lookup x (List.append l1 l2) = .some v
+  | .nil, l2, v, h => absurd h.1
+  | .cons p rest, l2, v, h =>
+      Bool.casesElim (Nat.beq x p.1)
+        (fun hb =>
+          let hv := Env.lookup_cons_true x p rest hb;
+          Eq.mpr' (fun (t : Value) => Env.lookup x (List.append (.cons p rest) l2) = .some t)
+            (Env.someInj v p.2
+              (Env.optSymm (Option.some p.2) (Option.some v)
+                (Env.optTrans (Option.some p.2) (Env.lookup x (.cons p rest)) (Option.some v)
+                  (Env.optSymm (Env.lookup x (.cons p rest)) (Option.some p.2) hv) h)))
+            (Env.lookup_cons_true x p (List.append rest l2) hb))
+        (fun hb =>
+          Eq.mpr' (fun (o : Option Value) => o = .some v)
+            (Env.lookup_cons_false x p (List.append rest l2) hb)
+            (Env.lookup_append_some x rest l2 v
+              (Eq.mp' (fun (o : Option Value) => o = .some v) (Env.lookup_cons_false x p rest hb) h)))
+
+def Env.lookup_append_none (x : Nat) : (l1 l2 : Env) →
+    Env.lookup x l1 = .none →
+      Env.lookup x (List.append l1 l2) = Env.lookup x l2
+  | .nil, l2, _ => rfl
+  | .cons p rest, l2, h =>
+      Bool.casesElim (Nat.beq x p.1)
+        (fun hb => absurd (Env.someNeNone p.2
+            (Env.optTrans (Option.some p.2) (Env.lookup x (.cons p rest)) Option.none
+              (Env.optSymm (Env.lookup x (.cons p rest)) (Option.some p.2)
+                (Env.lookup_cons_true x p rest hb)) h)))
+        (fun hb =>
+          let rec : Env.lookup x (List.append rest l2) = Env.lookup x l2 :=
+            Env.lookup_append_none x rest l2
+              (Eq.mp' (fun (o : Option Value) => o = .none) (Env.lookup_cons_false x p rest hb) h);
+          Env.optTrans (Env.lookup x (List.append (.cons p rest) l2))
+            (Env.lookup x (List.append rest l2)) (Env.lookup x l2)
+            (Env.lookup_cons_false x p (List.append rest l2) hb) rec)
+
+
+def Env.filter_cons_true (pred : Nat × Value → Bool) (p : Nat × Value) (rest : Env)
+    (h : pred p = .true) :
+    List.filter pred (.cons p rest) = .cons p (List.filter pred rest) :=
+  Eq.mpr' (fun (r : Bool) => (match r with
+      | .true => List.cons p (List.filter pred rest)
+      | .false => List.filter pred rest) = List.cons p (List.filter pred rest)) h rfl
+
+def Env.filter_cons_false (pred : Nat × Value → Bool) (p : Nat × Value) (rest : Env)
+    (h : pred p = .false) :
+    List.filter pred (.cons p rest) = List.filter pred rest :=
+  Eq.mpr' (fun (r : Bool) => (match r with
+      | .true => List.cons p (List.filter pred rest)
+      | .false => List.filter pred rest) = List.filter pred rest) h rfl
+
+def Env.lookup_filter_cons_false (x : Nat) (pred : Nat × Value → Bool)
+    (p : Nat × Value) (rest : Env) (h : Nat.beq x p.1 = .false) :
+    Env.lookup x (List.filter pred (.cons p rest)) = Env.lookup x (List.filter pred rest) :=
+  Bool.casesElim (pred p)
+    (fun hp =>
+      Eq.mpr' (fun (l : Env) => Env.lookup x l = Env.lookup x (List.filter pred rest))
+        (Env.filter_cons_true pred p rest hp)
+        (Env.lookup_cons_false x p (List.filter pred rest) h))
+    (fun hp =>
+      Eq.mpr' (fun (l : Env) => Env.lookup x l = Env.lookup x (List.filter pred rest))
+        (Env.filter_cons_false pred p rest hp) rfl)
+
+def Env.lookup_filter_has (x : Nat) (a : Env) : (b : Env) →
+    Env.has x a = .false →
+    Env.lookup x (List.filter (fun (q : Nat × Value) => Bool.not (Env.has q.1 a)) b) =
+      Env.lookup x b
+  | .nil, _ => rfl
+  | .cons p rest, h =>
+      Bool.casesElim (Nat.beq x p.1)
+        (fun hb =>
+          let hpx : p.1 = x := Env.valueSymmNat x p.1 (Nat.beq_eq x p.1 hb);
+          let hha : Env.has p.1 a = .false :=
+            Eq.mpr' (fun (t : Nat) => Env.has t a = .false) hpx h;
+          let hp : Bool.not (Env.has p.1 a) = .true :=
+            Eq.mpr' (fun (b : Bool) => Bool.not b = .true) hha rfl;
+          Env.optTrans (Env.lookup x (List.filter
+                (fun (q : Nat × Value) => Bool.not (Env.has q.1 a)) (.cons p rest)))
+            (Env.lookup x (.cons p (List.filter (fun (q : Nat × Value) => Bool.not (Env.has q.1 a)) rest)))
+            (Env.lookup x (.cons p rest))
+            (Eq.mpr' (fun (l : Env) => Env.lookup x (List.filter
+                  (fun (q : Nat × Value) => Bool.not (Env.has q.1 a)) (.cons p rest)) = Env.lookup x l)
+              (Env.envSymm (List.filter (fun (q : Nat × Value) => Bool.not (Env.has q.1 a)) (.cons p rest))
+                (.cons p (List.filter (fun (q : Nat × Value) => Bool.not (Env.has q.1 a)) rest))
+                (Env.filter_cons_true (fun (q : Nat × Value) => Bool.not (Env.has q.1 a)) p rest hp)) rfl)
+            (Env.optTrans
+              (Env.lookup x (.cons p (List.filter (fun (q : Nat × Value) => Bool.not (Env.has q.1 a)) rest)))
+              (Option.some p.2)
+              (Env.lookup x (.cons p rest))
+              (Env.lookup_cons_true x p (List.filter (fun (q : Nat × Value) => Bool.not (Env.has q.1 a)) rest) hb)
+              (Env.optSymm (Env.lookup x (.cons p rest)) (Option.some p.2)
+                (Env.lookup_cons_true x p rest hb))))
+        (fun hb =>
+          Env.optTrans (Env.lookup x (List.filter
+                (fun (q : Nat × Value) => Bool.not (Env.has q.1 a)) (.cons p rest)))
+            (Env.lookup x (List.filter (fun (q : Nat × Value) => Bool.not (Env.has q.1 a)) rest))
+            (Env.lookup x (.cons p rest))
+            (Env.lookup_filter_cons_false x (fun (q : Nat × Value) => Bool.not (Env.has q.1 a)) p rest hb)
+            (Env.optTrans
+              (Env.lookup x (List.filter (fun (q : Nat × Value) => Bool.not (Env.has q.1 a)) rest))
+              (Env.lookup x rest) (Env.lookup x (.cons p rest))
+              (Env.lookup_filter_has x a rest h)
+              (Env.optSymm (Env.lookup x (.cons p rest)) (Env.lookup x rest)
+                (Env.lookup_cons_false x p rest hb))))
+
+/-- The mapped part of `join` finds `x` exactly when `a` has it. -/
+def Env.join_step (b : Env) (p : Nat × Value) : Nat × Value :=
+  (p.1, Value.join p.2 (Env.getD b p.1 Value.bot))
+
+def Env.lookup_join_map (x : Nat) (b : Env) : (a : Env) →
+    (va : Value) → Env.lookup x a = .some va →
+      Env.lookup x (List.map (Env.join_step b) a) =
+        .some (Value.join va (Env.getD b x Value.bot))
+  | .nil, va, h => absurd h.1
+  | .cons p rest, va, h =>
+      Bool.casesElim (Nat.beq x p.1)
+        (fun hb =>
+          let hv := Env.lookup_cons_true x p rest hb;
+          let e1 : va = p.2 :=
+            Env.valueSymm p.2 va
+              (Env.someInj p.2 va
+                (Env.optTrans (Option.some p.2) (Env.lookup x (.cons p rest)) (Option.some va)
+                  (Env.optSymm (Env.lookup x (.cons p rest)) (Option.some p.2) hv) h));
+          let hd : Env.getD b x Value.bot = Env.getD b p.1 Value.bot :=
+            Env.getD_key b x p.1 Value.bot (Nat.beq_eq x p.1 hb);
+          Eq.mpr' (fun (t : Value) =>
+              Env.lookup x (List.map (Env.join_step b) (.cons p rest)) = .some t)
+            (congrArg2 (fun (u g : Value) => Value.join u g) e1 hd)
+            (Env.lookup_cons_true x (Env.join_step b p) (List.map (Env.join_step b) rest) hb))
+        (fun hb =>
+          Eq.mpr' (fun (o : Option Value) => o = .some (Value.join va (Env.getD b x Value.bot)))
+            (Env.lookup_cons_false x (Env.join_step b p) (List.map (Env.join_step b) rest) hb)
+            (Env.lookup_join_map x b rest va
+              (Eq.mp' (fun (o : Option Value) => o = .some va) (Env.lookup_cons_false x p rest hb) h)))
+
+def Env.lookup_map_join_none (x : Nat) (b : Env) : (a : Env) →
+    Env.lookup x a = .none → Env.lookup x (List.map (Env.join_step b) a) = .none
+  | .nil, _ => rfl
+  | .cons p rest, h =>
+      Bool.casesElim (Nat.beq x p.1)
+        (fun hb => absurd (Env.someNeNone p.2
+            (Env.optTrans (Option.some p.2) (Env.lookup x (.cons p rest)) Option.none
+              (Env.optSymm (Env.lookup x (.cons p rest)) (Option.some p.2)
+                (Env.lookup_cons_true x p rest hb)) h)))
+        (fun hb =>
+          Eq.mpr' (fun (o : Option Value) => o = Option.none)
+            (Env.lookup_cons_false x (Env.join_step b p) (List.map (Env.join_step b) rest) hb)
+            (Env.lookup_map_join_none x b rest
+              (Eq.mp' (fun (o : Option Value) => o = .none) (Env.lookup_cons_false x p rest hb) h)))
+
+
+def Env.lookup_some_of_has (x : Nat) : (e : Env) → Env.has x e = .true →
+    Env.lookup x e = .some (Env.getD e x Value.bot)
+  | .nil, h => absurd h.1
+  | .cons p rest, h =>
+      Bool.casesElim (Nat.beq x p.1)
+        (fun hb =>
+          Env.optTrans (Env.lookup x (.cons p rest)) (Option.some p.2)
+            (Option.some (Env.getD (.cons p rest) x Value.bot))
+            (Env.lookup_cons_true x p rest hb)
+            (Eq.mpr' (fun (t : Value) => Option.some p.2 = Option.some t)
+              (Env.getD_cons_true x p Value.bot rest hb) rfl))
+        (fun hb =>
+          Env.optTrans (Env.lookup x (.cons p rest)) (Env.lookup x rest)
+            (Option.some (Env.getD (.cons p rest) x Value.bot))
+            (Env.lookup_cons_false x p rest hb)
+            (Eq.mpr' (fun (t : Value) => Env.lookup x rest = .some t)
+              (Env.getD_cons_false x p Value.bot rest hb)
+              (Env.lookup_some_of_has x rest
+                (Eq.mp' (fun (b : Bool) => b = .true) (Env.has_cons_false x p rest hb) h))))
+
+def Env.lookup_none_of_has (x : Nat) : (e : Env) → Env.has x e = .false →
+    Env.lookup x e = .none
+  | .nil, _ => rfl
+  | .cons p rest, h =>
+      Bool.casesElim (Nat.beq x p.1)
+        (fun hb => absurd (Bool.contra (Env.has_cons_true x p rest hb) h))
+        (fun hb =>
+          Env.optTrans (Env.lookup x (.cons p rest)) (Env.lookup x rest) Option.none
+            (Env.lookup_cons_false x p rest hb)
+            (Env.lookup_none_of_has x rest
+              (Eq.mp' (fun (b : Bool) => b = .false) (Env.has_cons_false x p rest hb) h)))
+
+def Env.gamma_getD (e : Env) (c : Nat → VState) (x : Nat)
+    (h : Env.gamma e c) (hh : Env.has x e = .true) : Value.gamma (Env.getD e x Value.bot) (c x) :=
+  h x (Env.getD e x Value.bot) (Env.lookup_some_of_has x e hh)
+
+def Interval.containsBot (n : Nat) (h : Interval.contains Interval.bot n = .true) : False := h.1
+
+def Interval.join_bot (i : Interval) : Interval.join i Interval.bot = i :=
+  match i with
+  | .bot => rfl
+  | .top => rfl
+  | .range lo hi => rfl
+
+def Const.join_bot (c : Const) : Const.join c Const.cbot = c :=
+  match c with
+  | .cbot => rfl
+  | .known n => rfl
+  | .unknown => rfl
+
+def Null.join_bot (n : Null) : Null.join n Null.nbot = n :=
+  match n with
+  | .nbot => rfl
+  | .nul => rfl
+  | .nonNull => rfl
+  | .maybe => rfl
+
+def Value.join_bot (v : Value) : Value.join v Value.bot = Value.norm v :=
+  Value.valueTrans (Value.join v Value.bot)
+    (Value.norm (Value.mk v.itv (Const.join v.cst Const.cbot) (Null.join v.nul Null.nbot)))
+    (Value.norm v)
+    (congrArg (fun (i : Interval) =>
+        Value.norm (Value.mk i (Const.join v.cst Const.cbot) (Null.join v.nul Null.nbot)))
+      (Interval.join_bot v.itv))
+    (Value.valueTrans
+      (Value.norm (Value.mk v.itv (Const.join v.cst Const.cbot) (Null.join v.nul Null.nbot)))
+      (Value.norm (Value.mk v.itv v.cst (Null.join v.nul Null.nbot)))
+      (Value.norm v)
+      (congrArg (fun (c : Const) => Value.norm (Value.mk v.itv c (Null.join v.nul Null.nbot)))
+        (Const.join_bot v.cst))
+      (Value.valueTrans
+        (Value.norm (Value.mk v.itv v.cst (Null.join v.nul Null.nbot)))
+        (Value.norm (Value.mk v.itv v.cst v.nul))
+        (Value.norm v)
+        (congrArg (fun (n : Null) => Value.norm (Value.mk v.itv v.cst n)) (Null.join_bot v.nul))
+        rfl))
+
+def Value.gamma_join_bot_right (v : Value) (c : VState) (h : Value.gamma v c) :
+    Value.gamma (Value.join v Value.bot) c :=
+  Eq.mpr' (fun (w : Value) => Value.gamma w c) (Value.join_bot v) (Value.gamma_norm v c h)
+
+def Env.getD_bot_of_absent (x : Nat) (e : Env) (h : Env.has x e = .false) :
+    Env.getD e x Value.bot = Value.bot :=
+  Eq.mpr' (fun (o : Option Value) => (match o with
+      | .some w => w
+      | .none => Value.bot) = Value.bot) (Env.lookup_none_of_has x e h) rfl
+
+def Env.gamma_join_sound (a b : Env) (c : Nat → VState)
+    (ha : Env.gamma a c) (hb : Env.gamma b c) : Env.gamma (Env.join a b) c :=
+  fun x v hv =>
+    Bool.casesElim (Env.has x a)
+      (fun hha =>
+        let ga := Env.getD a x Value.bot;
+        let gb := Env.getD b x Value.bot;
+        let hga : Value.gamma ga (c x) := Env.gamma_getD a c x ha hha;
+        let hlookupA : Env.lookup x (Env.join a b) = .some (Value.join ga gb) :=
+          Env.optTrans (Env.lookup x (Env.join a b))
+            (Env.lookup x (List.append (List.map (Env.join_step b) a)
+              (List.filter (fun (q : Nat × Value) => Bool.not (Env.has q.1 a)) b)))
+            (Option.some (Value.join ga gb)) rfl
+            (Env.lookup_append_some x (List.map (Env.join_step b) a)
+              (List.filter (fun (q : Nat × Value) => Bool.not (Env.has q.1 a)) b)
+              (Value.join ga gb)
+              (Env.lookup_join_map x b a ga (Env.lookup_some_of_has x a hha)));
+        let heq : Value.join ga gb = v :=
+          Env.someInj (Value.join ga gb) v
+            (Env.optTrans (Option.some (Value.join ga gb)) (Env.lookup x (Env.join a b)) (Option.some v)
+              (Env.optSymm (Env.lookup x (Env.join a b)) (Option.some (Value.join ga gb)) hlookupA) hv);
+        let hg : Value.gamma (Value.join ga gb) (c x) :=
+          Bool.casesElim (Env.has x b)
+            (fun hhb => Value.gamma_join_sound ga gb (c x) hga (Env.gamma_getD b c x hb hhb))
+            (fun hhb =>
+              Eq.mpr' (fun (w : Value) => Value.gamma (Value.join ga w) (c x))
+                (Env.getD_bot_of_absent x b hhb)
+                (Value.gamma_join_bot_right ga (c x) hga));
+        Eq.mp' (fun (w : Value) => Value.gamma w (c x)) heq hg)
+      (fun hha =>
+        let hla : Env.lookup x a = .none := Env.lookup_none_of_has x a hha;
+        let hmap : Env.lookup x (List.map (Env.join_step b) a) = .none :=
+          Env.lookup_map_join_none x b a hla;
+        let hfilter : Env.lookup x (List.filter (fun (q : Nat × Value) => Bool.not (Env.has q.1 a)) b)
+            = Env.lookup x b := Env.lookup_filter_has x a b hha;
+        let hjoin : Env.lookup x (Env.join a b) = Env.lookup x b :=
+          Env.optTrans (Env.lookup x (Env.join a b))
+            (Env.lookup x (List.append (List.map (Env.join_step b) a)
+              (List.filter (fun (q : Nat × Value) => Bool.not (Env.has q.1 a)) b)))
+            (Env.lookup x b) rfl
+            (Env.optTrans (Env.lookup x (List.append (List.map (Env.join_step b) a)
+                (List.filter (fun (q : Nat × Value) => Bool.not (Env.has q.1 a)) b)))
+              (Env.lookup x (List.filter (fun (q : Nat × Value) => Bool.not (Env.has q.1 a)) b))
+              (Env.lookup x b)
+              (Env.lookup_append_none x (List.map (Env.join_step b) a)
+                (List.filter (fun (q : Nat × Value) => Bool.not (Env.has q.1 a)) b) hmap)
+              hfilter);
+        hb x v (Eq.mp' (fun (o : Option Value) => o = .some v) hjoin hv))
+
+/-- The empty environment imposes no constraint: it is the *initial join seed*, and its
+gamma is the vacuous truth. (So `AbsDomain.bot_sound_stmt` is not the right law for `Env`;
+the engine keeps every block's key set equal to `cfg.vars`, where `bot` is a real bottom.) -/
+def Env.gamma_empty (c : Nat → VState) : Env.gamma ([] : Env) c :=
+  fun x v h => absurd h.1
+
+def Env.getD_some (e : Env) (x : Nat) (d v : Value)
+    (h : Env.lookup x e = .some v) : Env.getD e x d = v :=
+  Eq.mpr' (fun (o : Option Value) => (match o with
+      | .some w => w
+      | .none => d) = v) h rfl
+
+def Bool.transEq (a b c : Bool) (h1 : a = b) (h2 : b = c) : a = c :=
+  Eq.mp' (fun (t : Bool) => a = t) h2 h1
+
+def Env.has_of_lookup_some (x : Nat) : (e : Env) → (v : Value) →
+    Env.lookup x e = .some v → Env.has x e = .true
+  | .nil, v, h => absurd h.1
+  | .cons p rest, v, h =>
+      Bool.casesElim (Nat.beq x p.1)
+        (fun hb => Env.has_cons_true x p rest hb)
+        (fun hb =>
+          Bool.transEq (Env.has x (.cons p rest)) (Env.has x rest) Bool.true
+            (Env.has_cons_false x p rest hb)
+            (Env.has_of_lookup_some x rest v
+              (Eq.mp' (fun (o : Option Value) => o = .some v) (Env.lookup_cons_false x p rest hb) h)))
+
+def Env.all_cons_false (pred : Nat × Value → Bool) (p : Nat × Value) (rest : Env)
+    (h : pred p = .false) : List.all pred (.cons p rest) = .false :=
+  Eq.mpr' (fun (r : Bool) => (match r with
+      | .true => List.all pred rest
+      | .false => Bool.false) = Bool.false) h rfl
+
+def Env.all_cons_true (pred : Nat × Value → Bool) (p : Nat × Value) (rest : Env)
+    (h : List.all pred (.cons p rest) = .true) : List.all pred rest = .true :=
+  Bool.casesElim (pred p)
+    (fun hp => Eq.mp' (fun (r : Bool) => (match r with
+        | .true => List.all pred rest
+        | .false => Bool.false) = Bool.true) hp h)
+    (fun hp => absurd (Bool.contra h (Env.all_cons_false pred p rest hp)))
+
+def Env.le_lookup (a b : Env) (x : Nat) (v : Value)
+    (hle : Env.le a b = .true) (hv : Env.lookup x a = .some v) :
+    Value.le v (Env.getD b x Value.bot) = .true :=
+  match a, hle, hv with
+  | .nil, _, hv => absurd hv.1
+  | .cons p rest, hle, hv =>
+      Bool.casesElim (Nat.beq x p.1)
+        (fun hb =>
+          let e1 : p.2 = v :=
+            Env.someInj p.2 v
+              (Env.optTrans (Option.some p.2) (Env.lookup x (.cons p rest)) (Option.some v)
+                (Env.optSymm (Env.lookup x (.cons p rest)) (Option.some p.2)
+                  (Env.lookup_cons_true x p rest hb)) hv);
+          let hx1 : p.1 = x := Env.valueSymmNat x p.1 (Nat.beq_eq x p.1 hb);
+          let hgd : Env.getD b p.1 Value.bot = Env.getD b x Value.bot :=
+            Env.getD_key b p.1 x Value.bot hx1;
+          Bool.casesElim (Value.le p.2 (Env.getD b p.1 Value.bot))
+            (fun hp =>
+              Eq.mpr' (fun (w : Value) => Value.le w (Env.getD b x Value.bot) = .true)
+                (Env.valueSymm p.2 v e1)
+                (Eq.mp' (fun (w : Value) => Value.le p.2 w = .true) hgd hp))
+            (fun hp => absurd (Bool.contra hle
+              (Env.all_cons_false (fun (q : Nat × Value) => Value.le q.2 (Env.getD b q.1 Value.bot)) p rest hp))))
+        (fun hb =>
+          Env.le_lookup rest b x v
+            (Env.all_cons_true (fun (q : Nat × Value) => Value.le q.2 (Env.getD b q.1 Value.bot)) p rest hle)
+            (Eq.mp' (fun (o : Option Value) => o = .some v) (Env.lookup_cons_false x p rest hb) hv))
+
+/-- `b`'s key set is contained in `a`'s (the engine keeps every block's environment
+over the same `cfg.vars`, so this holds for every pair the checker compares). -/
+def Env.keysSub (b a : Env) : Prop := (x : Nat) → Env.has x b = .true → Env.has x a = .true
+
+def Env.gamma_mono (a b : Env) (c : Nat → VState) (hkeys : Env.keysSub b a)
+    (hle : Env.le a b = .true) (h : Env.gamma a c) : Env.gamma b c :=
+  fun x v hv =>
+    let hhb : Env.has x b = .true := Env.has_of_lookup_some x b v hv;
+    let hha : Env.has x a = .true := hkeys x hhb;
+    let hla : Env.lookup x a = .some (Env.getD a x Value.bot) := Env.lookup_some_of_has x a hha;
+    let hleV : Value.le (Env.getD a x Value.bot) (Env.getD b x Value.bot) = .true :=
+      Env.le_lookup a b x (Env.getD a x Value.bot) hle hla;
+    let hgb : Value.gamma (Env.getD b x Value.bot) (c x) :=
+      Value.gamma_mono (Env.getD a x Value.bot) (Env.getD b x Value.bot) (c x) hleV
+        (Env.gamma_getD a c x h hha);
+    Eq.mp' (fun (w : Value) => Value.gamma w (c x))
+      (Env.getD_some b x Value.bot v hv) hgb
+

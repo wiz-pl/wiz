@@ -161,6 +161,38 @@ def gammaReflSrc : String := "import Scry.AiWilExamples
 #eval Nat.beq (WState.at AiWEx.litCfg AiWEx.litInv 1).length 2
 "
 
+/-- The γ laws of `Scry.AiLaws` are proved: their `#print axioms` is clean (no
+`castRefl`, no `native_refl`, no `sorry`). -/
+def lawsSrc : String := "import Scry.AiLaws
+
+#print axioms Interval.contains_mono
+#print axioms Interval.contains_join
+#print axioms Const.gamma_mono
+#print axioms Const.gamma_join_sound
+#print axioms Null.gamma_mono
+#print axioms Null.gamma_join_sound
+#print axioms Value.gamma_norm
+#print axioms Value.gamma_mono
+#print axioms Value.gamma_join_sound
+#print axioms Env.gamma_join_sound
+#print axioms Env.gamma_mono
+"
+
+/-- The Wil-facing γ laws (`Scry.AiWLaws`) are proved too; the signed-interval laws are
+an explicit `SIntObl` hypothesis of the `WValue`/`WEnv` theorems (no axiom). -/
+def wilLawsSrc : String := "import Scry.AiWLaws
+
+#print axioms SConst.gamma_mono
+#print axioms SConst.gamma_join_sound
+#print axioms NumV.gamma_mono
+#print axioms NumV.gamma_join_sound
+#print axioms WValue.gamma_norm
+#print axioms WValue.gamma_mono
+#print axioms WValue.gamma_join_sound
+#print axioms WEnv.gamma_join_sound
+#print axioms WEnv.gamma_mono
+"
+
 /-- `cRunLibs`, but a missing C compiler is a skip (this host has no `cc`; CI does). -/
 def compiledOrSkip (src expected : String) (llvm : Bool) : IO Unit := do
   try
@@ -212,6 +244,30 @@ def scryGroup : Group where
       run := fun _ => okLibs signedSrc [".some -2", ".some 12", ".true", ".true", ".true"] },
     { name := "gamma/refl: the product gamma and a kernel-checked certificate on a small Wil CFG",
       run := fun _ => okLibs gammaReflSrc ["()", ".true", ".true"] },
+    { name := "gamma laws: interval/const/null/value/env monotonicity and joins are proved (no axioms)",
+      run := fun _ => okLibs lawsSrc [
+        "'Interval.contains_mono' does not depend on any axioms",
+        "'Interval.contains_join' does not depend on any axioms",
+        "'Const.gamma_mono' does not depend on any axioms",
+        "'Const.gamma_join_sound' does not depend on any axioms",
+        "'Null.gamma_mono' does not depend on any axioms",
+        "'Null.gamma_join_sound' does not depend on any axioms",
+        "'Value.gamma_norm' does not depend on any axioms",
+        "'Value.gamma_mono' does not depend on any axioms",
+        "'Value.gamma_join_sound' does not depend on any axioms",
+        "'Env.gamma_join_sound' does not depend on any axioms",
+        "'Env.gamma_mono' does not depend on any axioms"] },
+    { name := "Wil gamma laws: SConst/NumV/WValue/WEnv laws are proved (signed laws conditional on SIntObl)",
+      run := fun _ => okLibs wilLawsSrc [
+        "'SConst.gamma_mono' does not depend on any axioms",
+        "'SConst.gamma_join_sound' does not depend on any axioms",
+        "'NumV.gamma_mono' does not depend on any axioms",
+        "'NumV.gamma_join_sound' does not depend on any axioms",
+        "'WValue.gamma_norm' does not depend on any axioms",
+        "'WValue.gamma_mono' does not depend on any axioms",
+        "'WValue.gamma_join_sound' does not depend on any axioms",
+        "'WEnv.gamma_join_sound' does not depend on any axioms",
+        "'WEnv.gamma_mono' does not depend on any axioms"] },
     { name := "the Wil checker compiled to C and LLVM (digest 111111)",
       run := fun _ => wilCompiled }
   ]

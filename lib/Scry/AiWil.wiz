@@ -98,15 +98,22 @@ structure WValue where
 
 def WValue.botV : WValue := WValue.mk .bot .nbot
 
-def WValue.norm (v : WValue) : WValue :=
-  match v.num with
-  | .u i c => match c with
-    | .known n => { v with num := .u (.range n n) c }
-    | _ => v
-  | .s i c => match c with
-    | .known z => { v with num := .s (.range z z) c }
-    | _ => v
-  | _ => v
+def NumV.normU (i : Interval) (c : Const) : NumV :=
+  match c with
+  | .known n => .u (.range n n) (.known n)
+  | _ => .u i c
+
+def NumV.normS (i : SInterval) (c : SConst) : NumV :=
+  match c with
+  | .known z => .s (.range z z) (.known z)
+  | _ => .s i c
+
+def NumV.normN : NumV → NumV
+  | .u i c => NumV.normU i c
+  | .s i c => NumV.normS i c
+  | x => x
+
+def WValue.norm (v : WValue) : WValue := WValue.mk (NumV.normN v.num) v.nul
 
 def WValue.le (a b : WValue) : Bool :=
   Bool.and (NumV.le a.num b.num) (Null.le a.nul b.nul)
