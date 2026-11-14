@@ -88,7 +88,7 @@ inductive Tm where
   | tyRefl (X : Tm)
   | coe (A B e t : Tm)
   | subst (A a P p b e : Tm)
-  -- (21w) quantity terms: the type `Qty : U 0` and its literals. A binder's quantity is
+  -- (21x) quantity terms: the type `Qty : U 0` and its literals. A binder's quantity is
   -- still a literal `Q`; a `Qty` term is a description field's quantity, and the
   -- template `⟦D⟧` makes the field's `Σ` from it with `sigmaQ`, with its components'
   -- sorts (`fst : Sort i`, `snd : Sort j`, as `sigma`)
@@ -98,7 +98,7 @@ inductive Tm where
   -- descriptions of indexed data (`descr l I` is `Desc.{l} I`, stage 4d; `desc` would
   -- clash with the family's own description), their eliminator (with the
   -- motive's universe `v`), the data type `μ D i`, and its constructor. Each field
-  -- carries its quantity `q : Qty` (21w), as `Desc.arg q S D` in the Lean kernel.
+  -- carries its quantity `q : Qty` (21x), as `Desc.arg q S D` in the Lean kernel.
   | descr (l : Nat) (I : Tm)
   | dret (i : Tm)
   | darg (q S D : Tm)
@@ -170,7 +170,7 @@ inductive Val where
   | vdarg (q S E : Val)
   | vdrec (q j E : Val)
   | vdhrec (q H j E : Val)
-  -- (21w) `Qty` and a quantity literal
+  -- (21x) `Qty` and a quantity literal
   | vqty
   | vqlit (q : Q)
   | vmu (l : Nat) (I D i sz : Val)
@@ -210,7 +210,7 @@ inductive Spine where
   | sscase (sp : Spine) (l : Nat) (q : Q) (I D : Val) (v : Nat) (P m s i : Val)
   | sout (sp : Spine)
   | sdown (sp : Spine)
-  -- (21w) `(q x : A) × B` at a stuck quantity `q` (`sigmaQ`): the template `⟦D⟧` at a
+  -- (21x) `(q x : A) × B` at a stuck quantity `q` (`sigmaQ`): the template `⟦D⟧` at a
   -- description whose field quantity is a variable; the components' sorts as `vsigma`
   | ssigq (sp : Spine) (i j : Lvl) (A : Val) (env : Env) (B : Tm)
 -- what a neutral is stuck on: a variable (by level), or an equality, cast or proof
@@ -655,7 +655,7 @@ def canonical : Val → Bool
   | .vnu _ _ _ _ _ => .true
   | .vulift _ _ _ => .true
   | _ => .false
--- (21w) two quantity values: equal or not when both are literals, equal when they are
+-- (21x) two quantity values: equal or not when both are literals, equal when they are
 -- the same variable (`sameQty` in `Eval.lean`, on polynomials), `.none` otherwise (a
 -- substitution could make them either); `qtyIs a b r`: they are known to be equal
 -- (`r = .true`) or different
@@ -753,7 +753,7 @@ def tmsEq : Tms → Tms → Bool
 end
 
 -- The templates of `Templates.lean`, as terms (the same de Bruijn layout; quantity
--- binders stay; a field's quantity is the methods' first argument, of type `Qty`, 21w).
+-- binders stay; a field's quantity is the methods' first argument, of type `Qty`, 21x).
 def tLams : Nat → Tm → Tm
   | .zero, b => b
   | .succ n, b => .lam (tLams n b)
@@ -1117,7 +1117,7 @@ def forceSp : Val → Spine → Val
   | v, .sind sp l I D k P m i => vInd l I D k P m i (forceSp v sp)
   | v, .ssfix sp l I D k P f sz i => vSfix l I D k P f sz i (forceSp v sp)
   | v, .sscase sp l q I D k P m sz i => vScase l q I D k P m sz i (forceSp v sp)
-  -- (21w) a `Σ` at a stuck quantity: a type, stuck on the same head
+  -- (21x) a `Σ` at a stuck quantity: a type, stuck on the same head
   | v, .ssigq sp i j A env B => match whnf (forceSp v sp) with
     | .vne h sp' => .vne h (.ssigq sp' i j A env B)
     | w => w
@@ -1202,7 +1202,7 @@ def vdown : Val → Val
 def upIf (lifted : Bool) (v : Val) : Val := match lifted with
   | .true => .vup v
   | .false => v
--- (21w) `(q x : A) × B` for a quantity value `q`: a `Σ` at a literal, stuck at a neutral
+-- (21x) `(q x : A) × B` for a quantity value `q`: a `Σ` at a literal, stuck at a neutral
 def vSigmaQ (i j : Lvl) (q A : Val) (env : Env) (B : Tm) : Val := match whnf q with
   | .vqlit k => .vsigma k i j A env B
   | .vne h sp => .vne h (.ssigq sp i j A env B)
@@ -1626,7 +1626,7 @@ def sizeEqTrue (s s' : Val) : Bool := match Bool.and (szIsInf s) (szIsInf s') wi
 -- (4g) equality of description codes, by the constructors (`vEqDesc` in `Eval.lean`):
 -- `ret j = ret j'` is `j = j'`; `arg S E = arg S' E'` is
 -- `(e : S = S') × ((s : S) → E s = E' (cast e s))`; `rec`, `hrec` likewise with the rests
--- `E = E'`; different constructors `False`; a neutral stuck. The quantities first (21w):
+-- `E = E'`; different constructors `False`; a neutral stuck. The quantities first (21x):
 -- equal ↦ go on, two different literals ↦ `False`, a stuck one ↦ stuck
 def vEqDesc (l : Nat) (I D D' : Val) : Val := vEqDescW l I (whnf D) (whnf D')
 def isDescCon : Val → Bool
@@ -1635,7 +1635,7 @@ def isDescCon : Val → Bool
   | .vdrec _ _ _ => .true
   | .vdhrec _ _ _ _ => .true
   | _ => .false
--- (21w) go on when the quantities are equal (`qty` in `vEqDesc`)
+-- (21x) go on when the quantities are equal (`qty` in `vEqDesc`)
 def eqQtys (l : Nat) (I D D' q q' : Val) (k : Unit → Val) : Val := match qtySame q q' with
   | .some r => match r with
     | .true => k ()
@@ -1985,7 +1985,7 @@ def show (names : List String) : Nat → Tm → String
 def showBranches (names : List String) : Nat → Tms → String
   | _, .tnil => ""
   | l, .tcons b rest => String.append (String.append ", " (show names l b)) (showBranches names l rest)
--- (21w) a description field's quantity, before the field: nothing at ω, else `0 `, `1 `
+-- (21x) a description field's quantity, before the field: nothing at ω, else `0 `, `1 `
 def showFieldQ (names : List String) (l : Nat) (q : Tm) : String := match q with
   | .qlit k => match k with
     | .qw => ""
@@ -2263,7 +2263,7 @@ def isPropW : TCtx → Val → Bool
     | .none => .false
 end
 
--- the quantity binders of the method types: `Qty` (21w; `Unit` before)
+-- the quantity binders of the method types: `Qty` (21x; `Unit` before)
 def qTy : Tm := .qty
 -- `P : Desc I → Sort v`
 def delimMotiveTy (l v : Nat) (I : Val) : Val := .vpi .qw (ln (l + 2)) (ln (v + 1)) (.vdesc l I) .nil (sortTm v)
@@ -2491,7 +2491,7 @@ def conv : TCtx → Val → Val → Val → Bool
         | .true => .true
         | .false =>
           Bool.and (conv c ta (vfst a) (vfst b)) (conv c (eval (.cons (vfst a) env) tb) (vsnd a) (vsnd b))
-      -- (21w) a `Σ` at a stuck quantity: η as for any `Σ`
+      -- (21x) a `Σ` at a stuck quantity: η as for any `Σ`
       | .vne _ (.ssigq _ _ _ ta env tb) => match neutralsAgree c a b with
         | .true => .true
         | .false =>
@@ -2517,7 +2517,7 @@ def conv : TCtx → Val → Val → Val → Bool
               (Bool.and (conv c (.vpi .qw (ln (l + 1)) (ln (l + 1)) H (.cons I .nil) (.var 1)) j j') (conv c (.vdesc l I) E E')))
           | _ => convNe c a b
         | _ => convNe c a b
-      -- (21w) quantities: literals by their value, else as neutrals
+      -- (21x) quantities: literals by their value, else as neutrals
       | .vqty => match qtySame a b with
         | .some r => r
         | .none => convNe c a b
@@ -2665,7 +2665,7 @@ def convSpineW : TCtx → Head → Head → Spine → Spine → Bool
   | c, x, y, .ssnd r, .ssnd r' => convSpine c x y r r'
   | c, x, y, .sout r, .sout r' => convSpine c x y r r'
   | c, x, y, .sdown r, .sdown r' => convSpine c x y r r'
-  -- (21w) a `Σ` at the same stuck quantity
+  -- (21x) a `Σ` at the same stuck quantity
   | c, x, y, .ssigq r i j A e B, .ssigq r' i' j' A' e' B' => Bool.and (Bool.and (sameSorts i j i' j') (convSpine c x y r r'))
       (Bool.and (convTy c A A') (convTy (TCtx.bind c A) (eval (.cons (fresh (TCtx.lvl c)) e) B) (eval (.cons (fresh (TCtx.lvl c)) e') B')))
   | c, x, y, .secase r e m bs, .secase r' e' m' bs' => Bool.and (convSpine c x y r r')
@@ -2857,7 +2857,7 @@ def inferW : TCtx → Tm → TyRes
   | c, .sortL l => .ok (.vsort (.lsucc l)) (uZeros (TCtx.lvl c))
   | c, .pi _ i j a b => former c i j a b .true
   | c, .sigma _ i j a b => former c i j a b .false
-  -- (21w) `Qty : U 0`, `0 1 ω : Qty`; a `Σ` at a quantity term needs a literal here
+  -- (21x) `Qty : U 0`, `0 1 ω : Qty`; a `Σ` at a quantity term needs a literal here
   -- (binder quantities are literals in this kernel; the templates' `Σ` is never checked)
   | c, .qty => .ok (.vsort (.lnum 1)) (uZeros (TCtx.lvl c))
   | c, .qlit _ => .ok .vqty (uZeros (TCtx.lvl c))
@@ -2900,7 +2900,7 @@ def inferW : TCtx → Tm → TyRes
         | .false => match qle .qo q with
           | .true => .ok a (uScale .qw u)
           | .false => .err "cannot project an erased field"
-      -- (21w) at a stuck quantity (a template's `Σ` under `Desc.elim`): erased positions
+      -- (21x) at a stuck quantity (a template's `Σ` under `Desc.elim`): erased positions
       -- only (`1 ≤ q` fails at `q = 0`, as for the Lean kernel's polynomials)
       | .vne (.hvar _) (.ssigq .snil _ _ a _ _) => match TCtx.erased c with
         | .true => .ok a u
@@ -3368,7 +3368,7 @@ def checkW : TCtx → Tm → Val → TyRes
       | .ok _ ub => .ok (.vsigma q i j ta env tb) (uAdd (uScale q ua) ub)
       | r => r
     | r => r
-  -- (21w) at a quantity variable: the first part's usage counts ω times (at least as much
+  -- (21x) at a quantity variable: the first part's usage counts ω times (at least as much
   -- as at any value of the quantity). Only a variable, as the Lean kernel's `qtyPoly`
   -- allows (a quantity that is another stuck term is rejected there)
   | c, .pair a b, .vne (.hvar x) (.ssigq .snil i j ta env tb) => match check c a ta with
@@ -3475,7 +3475,7 @@ def inferUniv : TCtx → Tm → TyRes
       | .vsort l => .ok (.vsort l) (uZeros (TCtx.lvl c))
       | ty => .err (String.append "not a type: its type is " (showVal c ty))
     | r => r
--- (21w) a quantity (`checkQty` in `Check.lean`): a term of type `Qty`, checked erased
+-- (21x) a quantity (`checkQty` in `Check.lean`): a term of type `Qty`, checked erased
 -- (its usage is discarded), whose value is a literal or a variable (a polynomial in the
 -- Lean kernel; any other stuck computation is rejected). `.none` when it is one.
 def qtyOk (c : TCtx) (q : Tm) : Option String := match check (TCtx.erase c) q .vqty with
@@ -3749,7 +3749,7 @@ def markInferW : TCtx → Tm → MR
   | _, .sortL l => .mk (.sortL l) (.some (.vsort (.lsucc l)))
   | c, .pi q i j a b => markFormer c i j a b .true (fun i' j' a' b' => .pi q i' j' a' b')
   | c, .sigma q i j a b => markFormer c i j a b .false (fun i' j' a' b' => .sigma q i' j' a' b')
-  -- (21w) quantity terms: `Qty` and its literals; a field's `Σ` at a quantity term has
+  -- (21x) quantity terms: `Qty` and its literals; a field's `Σ` at a quantity term has
   -- its components' sorts (`sigmaQ q i j a b` is in `Sort (max i j)`)
   | _, .qty => .mk .qty (.some (.vsort (.lnum 1)))
   | _, .qlit q => .mk (.qlit q) (.some .vqty)

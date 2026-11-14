@@ -77,6 +77,7 @@ def eqView := 34
 def smt := 35
 def define := 36
 def assignLate := 37
+def nativeDecide := 38
 end TacTag
 
 structure Goal (R : Type) where
