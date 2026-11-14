@@ -93,7 +93,9 @@ abbrev ConvChecker := Nat → Ctx → Tm → Tm → Tm → M Bool
 
 /-- **`DecConv`**: conversion is decided by a typed, whnf-interleaved algorithm (proof
 irrelevance at `Prop` first; η at Π/Σ/Unit/ULift; tags; neutral spines), sound and
-complete. -/
+complete. `F0/DecConv.lean` refines it to the canonical-head relation `CanonConv` and its
+completeness statement `CanonConvComplete` (= `DecConvCanon`), and proves that a complete
+and decidable `CanonConv` yields this checker (`decConv_of_canonConvComplete`). -/
 def DecConv (sg : Sig) : Prop :=
   ∃ conv : ConvChecker,
     (∀ n Γ t u A, conv n Γ t u A = .ok true → Derivable (F0 sg) (Γ ⊢ t ≡ u ∶ A)) ∧
@@ -136,7 +138,11 @@ The reduction-based route through `ConvJoin` is closed (`F0/ConvJoin.lean` refut
 statement); the remaining proof is read off the algorithmic conversion `DecConv`, which
 never relates distinct closed sorts because no conversion rule does (`refl` needs the same
 sort, `irrel` needs a proposition type, the `cong`s have a former head, and no reduction
-starts at a sort). -/
+starts at a sort). `F0/DecConv.lean` defines that algorithm as the canonical-head relation
+`CanonConv`, **proves its sort case unconditionally** — a term it relates to `Sort u`
+reduces to `Sort u` (`canonConv_sort_left`/`canonConv_sort_right`), hence
+`canonConv_sort_inj` — and reduces this statement to completeness of the algorithm
+(`convInjSort_of_canonConvComplete`). -/
 def ConvInjSort (sg : Sig) : Prop :=
   ∀ Γ u v C, Derivable (F0 sg) (Γ ⊢ .sort u ≡ .sort v ∶ C) → u = v
 

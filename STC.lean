@@ -12,6 +12,7 @@ import STC.F0.Typing
 import STC.F0.TopSort
 import STC.F0.Context
 import STC.F0.ConvJoin
+import STC.F0.DecConv
 import STC.F0.Sanity
 
 /-!
@@ -46,6 +47,11 @@ M0.1 of the design note `/workspace/wiz-notes/stc-m0-spec.md`:
   conversions, not reductions: two `λ`-proofs of `(x : Unit prop) → Unit prop` are
   `irrel`-convertible and have no reduct), so the canonical-head obligation is the
   algorithmic `DecConv`, not reduction joinability;
+* `F0/DecConv`: the algorithmic conversion: the `RedStar` algebra and the sound half of
+  joinability, the canonical-head relation `CanonConv` (sound, trans-free, with the η/irrel
+  guards), the checked sort case (`canonConv_sort_left`/`_right`/`_inj`: a term related to
+  `Sort u` reduces to it), and the exact remaining gaps (`CanonConvComplete`,
+  `SortNotProof`) with `ConvInjSort`/`SortUniqueAt`/`WhRed` reduced to them;
 * `F0/Obligations`: `Sound(F0)`, `Con(F0)`, `WHN`, `DecConv`, `DecTC` as `Prop`s, and the
   sorting lemma's supporting statements (`TyUnique`, `ConvInj*`);
 * `F0/Sanity`: small derivations that witness that the rules are inhabited.
