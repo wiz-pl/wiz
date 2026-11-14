@@ -2074,8 +2074,8 @@ Each item says what the code does; the code is what the kernel checks.
 
 | topic | Lean kernel | Kernel.wiz |
 |---|---|---|
-| quantities | any `QRig`, quantity variables, `Qty` | binder quantities are literals `0, 1, ω` only (`Q`, `Kernel.wiz:19`). Since 21w there is `Qty : U 0` with its literals (`qty`, `qlit`), for description fields; a `Qty` variable (a `Desc.elim` method's `q`) is a neutral, and a `Σ` at one (`sigmaQ`, the template `⟦D⟧` at such a field) stays stuck (`ssigq`) where the Lean kernel builds a Σ at a polynomial quantity; it has the rules of a Σ at an unknown quantity (projections erased only, except `snd` at ω; η; a pair's first part counted ω times), only at a bare variable (as `qtyPoly`: a quantity that is another stuck term is rejected). Unlike the Lean kernel's Σ at a polynomial, it is not canonical: `cast`, `eqTy` and `eq` at it stay stuck (incomplete, never unsound) |
-| description fields | carry a quantity | the same (21w): `darg q S D`, `drec q j D`, `dhrec q H j D` with `q : Qty` checked as `checkQty` does (a literal or a variable), the methods receive `q`, and `⟦D⟧` puts it on the field's Σ; `vEqDesc`, conversion, cast, `groundEqDesc` compare it as `sameQty`/`qtyApart` do (`qtySame`: two literals by value, the same variable equal, anything else unknown) |
+| quantities | any `QRig`, quantity variables, `Qty` | binder quantities are literals `0, 1, ω` only (`Q`, `Kernel.wiz:19`). Since 21x there is `Qty : U 0` with its literals (`qty`, `qlit`), for description fields; a `Qty` variable (a `Desc.elim` method's `q`) is a neutral, and a `Σ` at one (`sigmaQ`, the template `⟦D⟧` at such a field) stays stuck (`ssigq`) where the Lean kernel builds a Σ at a polynomial quantity; it has the rules of a Σ at an unknown quantity (projections erased only, except `snd` at ω; η; a pair's first part counted ω times), only at a bare variable (as `qtyPoly`: a quantity that is another stuck term is rejected). Unlike the Lean kernel's Σ at a polynomial, it is not canonical: `cast`, `eqTy` and `eq` at it stay stuck (incomplete, never unsound) |
+| description fields | carry a quantity | the same (21x): `darg q S D`, `drec q j D`, `dhrec q H j D` with `q : Qty` checked as `checkQty` does (a literal or a variable), the methods receive `q`, and `⟦D⟧` puts it on the field's Σ; `vEqDesc`, conversion, cast, `groundEqDesc` compare it as `sameQty`/`qtyApart` do (`qtySame`: two literals by value, the same variable equal, anything else unknown) |
 | `scase` at a quantity (K1) | `q` a quantity term | `q` a literal (`Tm.scase l q …`, `Spine.sscase`); the same rule, `U_m + q·U_x`, payload at `q` |
 | the unit eliminator `let () := u; b` | `Term.letUnit`, `checkUnit`; erasure evaluates `u` | `Tm.letUnit`, `checkUnit`, the same rule; `Backend.wiz` refuses it (lazy `let`s), the frontend never produces it |
 | `split` (`let (x, y)`) | yes | **no**. Projections need an unrestricted pair in both kernels (§7.1, R1), so a pair held at quantity 1 cannot be consumed in Kernel.wiz's fragment, nor at all in the self-hosted language (no `let (x, y)`; its `IO` and `Prod` are at ω): every term that projects one is rejected by both kernels, and terms with `split` are outside the fragment (the differential test's term type `MTm` has no `split`) |
@@ -2099,7 +2099,7 @@ Each item says what the code does; the code is what the kernel checks.
 | `app` | evaluates the argument | only if the codomain may mention it (`usesVar`) |
 | conversion fast path | none | `valSame`: bounded structural equality (`Kernel.wiz:1461`) |
 | μ/ν size argument | unchecked | unchecked (`Kernel.wiz:1918, 1967`) |
-| equality of descriptions, `μ ≡ μ` (4g, §8.4b) | `vEqDesc`, `vEqType`, `famPayloadEq?` | the same rules (`vEqDesc`, `famEqTy`, `famPayload`; field quantities since 21w); levels are numerals |
+| equality of descriptions, `μ ≡ μ` (4g, §8.4b) | `vEqDesc`, `vEqType`, `famPayloadEq?` | the same rules (`vEqDesc`, `famEqTy`, `famPayload`; field quantities since 21x); levels are numerals |
 
 **The self-hosted frontend's quantities** (`Frontend.wiz`, stage 21m; finding K10 of audit 2,
 now closed). The frontend reads written quantities (`0`, `1`, `ω`) on binders, `fun`
@@ -2107,7 +2107,7 @@ binders and `let`, with the Lean elaborator's defaults (ω explicit, 0 implicit;
 constructor's parameters at 0), and the kernel checks usage. What still differs is below. A linear
 variable used once in each branch of a `match` was a difference until stage 21v: the Lean
 frontend now compiles such a match to the additive `T.casesOnA`, and both accept it.
-Constructor field quantities and implicit constructor fields were differences until 21w:
+Constructor field quantities and implicit constructor fields were differences until 21x:
 a field `(q x : A)` is `darg q A …` here too (an implicit field `{n : A}` at 0, inserted at
 the call and not named by patterns), a match binds each field at its quantity (`T.casesOn`'s
 method does), and a structure's field at 0 has no projection.
