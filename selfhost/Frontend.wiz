@@ -2439,7 +2439,7 @@ def convNArgs (names : List String) (m : List Bool) (named : List NArg) (pos : L
           | .nil => .ok (List.reverseOf acc .nil)
           | .cons (.mk y _) _ => match firstUnknown named xs with
             | .some z => .err (String.append (String.append "no parameter named '" z) "'")
-            | .none => .err ("named argument '" +++ y +++ " comes after the explicit parameter '" +++ x +++ "', which has no argument")
+            | .none => .err ("named argument '" +++ y +++ "' comes after the explicit parameter '" +++ x +++ "', which has no argument")
 -- the parameter names of the head of an application, when it is a global (`@f` too)
 def nameNamesAt (gs : Globals) (cx : Cx) (n : String) : List String :=
   match Scope.lookup (Cx.sc cx) n with
