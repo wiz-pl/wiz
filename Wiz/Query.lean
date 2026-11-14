@@ -119,6 +119,14 @@ def goalsAt (s : CommandState R) (off : Nat) : Option (Nat × SourceInfo × Arra
     let k := (s.infos.findIdx? fun i => i.info == blk && i matches .tactic _ true ..).getD 0
     pure (k + s.infos.size, blk, before₀)
 
+/-- The widgets attached to the tactic state whose range is `info` (the range `goalsAt`
+returns): every widget a tactic at that range emitted, in the order emitted. A widget's
+own goals are the ones open when it was emitted (11af). -/
+def widgetsAt (s : CommandState R) (info : SourceInfo) : Array (Info R) :=
+  s.infos.filter fun i => match i with
+    | .widget r .. => r.start == info.start && r.stop == info.stop
+    | _ => false
+
 /-- The expected type at a character offset: the innermost checked term (or hole) around
 it, else the innermost identifier (its type, without hypotheses). -/
 def termGoalAt (s : CommandState R) (off : Nat) : Option (SourceInfo × GoalView R) :=

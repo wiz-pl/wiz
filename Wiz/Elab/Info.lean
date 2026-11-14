@@ -31,6 +31,8 @@ def RawInfo.finish : RawInfo R → ElabM R (Info R)
   | .tactic i blk before after => do
     let views (gs : Array (LocalCtx R × VTy R)) := gs.mapM fun (c, t) => goalView c t
     pure (.tactic i blk (← views before) (← views after))
+  | .widget i title html gs => do
+    pure (.widget i title html (← gs.mapM fun (c, t) => goalView c t))
   | .decl i n ctx ty ann at_ => do pure (.decl i n ctx.names (← zonk ctx.lvl ty) ann at_)
   | .inst i ctx ty t => do
     pure (.inst i ctx.names (← zonk ctx.lvl (quote (← getGlobals) ctx.lvl ty)) (← zonk ctx.lvl t))

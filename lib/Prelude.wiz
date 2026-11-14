@@ -595,6 +595,10 @@ inductive Tac where
   -- (28e) decide the closed `e = .true` by running it (the trusted evaluator of 27a:
   -- --trust-native); the axiom that says so
   | nativeDecide (g : Nat) (e : Expr) (k : Expr → Tac)
+  -- (11af) a widget: static HTML a tactic shows in the infoview, at the tactic's range,
+  -- with the goals open at this point. The content is the user's: the protocol forbids
+  -- scripts and the server strips the dangerous parts (Wiz/Infoview.lean)
+  | widget (title : String) (html : String) (next : Tac)
 
 /-- The metaprogramming monad: requests to the elaborator (`Tac`) in
 continuation-passing style, so `bind` is just composition. Macros (`MacroM`) and
@@ -708,6 +712,12 @@ def TacticM.assignLate (g : Nat) (e : Expr) : TacticM Unit := fun k => Tac.assig
 /-- `Tac.nativeDecide`: decide the closed `e = .true` with the trusted evaluator (only
 with `--trust-native`) and return the axiom's proof. -/
 def TacticM.nativeDecide (g : Nat) (e : Expr) : TacticM Expr := fun k => Tac.nativeDecide g e k
+/-- (11af) Show a widget in the infoview while the cursor is on this tactic: `title` is
+plain text, `html` is static HTML (no scripts or event handlers: the server sanitises it).
+The widget carries the open goals at this point as its context, so a widget emitted in a
+`by` block appears at that tactic's range and goal. Several calls make several widgets,
+in order. User code controls the content: treat widgets as untrusted. -/
+def TacticM.widget (title : String) (html : String) : TacticM Unit := fun k => Tac.widget title html (k ())
 /-- Run `t`; if it fails, undo it and run `h` on the error message instead. -/
 def TacticM.tryCatch (t : TacticM Unit) (h : String → TacticM Unit) : TacticM Unit :=
   fun k => Tac.catch (TacticM.run t) (fun e => TacticM.run (h e)) (k ())

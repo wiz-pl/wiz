@@ -406,6 +406,16 @@ def getNat (j : Json) (path : List String) : Nat :=
   | some j => (j.getNat?.toOption).getD 0
   | none => 0
 
+/-- A tactic's widget as the infoview's JSON (11af): a plain-text title, static sanitized
+HTML, its range and the goals open when it was emitted (plain goal text, as in
+`wiz/plainGoal`). -/
+def widgetJson (doc : Doc) (st : St) (w : Info ZeroOneMany) : Json :=
+  match w with
+  | .widget r title html gs =>
+    Json.mkObj [("title", title), ("html", sanitizeWidgetHtml html), ("range", range doc.text r),
+      ("goals", Json.arr (gs.map fun g => Json.str (g.show (some st.globals))))]
+  | _ => Json.null
+
 /-- Answer an infoview request on an open document. -/
 def infoview (srv : Server) (uri : String) (doc : Doc) (method : String) (msg : Json) :
     Except (Int × String) (Doc × Json) := do
@@ -430,7 +440,8 @@ def infoview (srv : Server) (uri : String) (doc : Doc) (method : String) (msg : 
     | some (key, info, gs) =>
       let k (tgs : Array TaggedGoal) (tj : TT → Json) : Json :=
         Json.mkObj [("goals", Json.arr (tgs.map (goalJson · tj))), ("range", range doc.text info),
-                    ("session", doc.session), ("messages", Json.arr ((tracesAt st info).map Json.str))]
+                    ("session", doc.session), ("messages", Json.arr ((tracesAt st info).map Json.str)),
+                    ("widgets", Json.arr ((Query.widgetsAt st info).map (widgetJson doc st)))]
       pure (memo s!"goals {key}" (withTable doc (gs.mapM (·.tagged (some st.globals))) k))
   | "wiz/interactiveTermGoal" =>
     match Query.termGoalAt st off with

@@ -3483,6 +3483,11 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
   if tag == TacTag.trace then
     pushTrace info (((fld 0).toString?).getD "")
     return ← runTac code info st (fld 1)
+  if tag == TacTag.widget then
+    -- (11af) the goals are the widget's context; `info` is the emitting tactic's range
+    pushInfo (.widget info (((fld 0).toString?).getD "") (((fld 1).toString?).getD "")
+      (← openGoals st))
+    return ← runTac code info st (fld 2)
   if tag == TacTag.fresh then
     let n := (← get).nextScope
     modify fun s => { s with nextScope := n + 1 }

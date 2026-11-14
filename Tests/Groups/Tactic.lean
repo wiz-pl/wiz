@@ -229,7 +229,26 @@ def tacticGroup : Group where
         checkEq [3] (ds.map fun d => LSP.getNat d ["range", "start", "line"])
         let (_, r) := LSP.handle srv ((Lean.Json.parse "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"wiz/plainGoal\",\"params\":{\"textDocument\":{\"uri\":\"file:///t.wiz\"},\"position\":{\"line\":3,\"character\":5}}}").toOption.get!)
         checkEq "```wiz\nn : Nat\n⊢ Nat\n```\n\nn : Nat\n⊢ Nat" (LSP.getStr r[0]! ["result", "rendered"])
-        checkEq "[\"n : Nat\\n⊢ Nat\"]" (((LSP.get? r[0]! ["result", "messages"]).map (·.compress)).getD "") }
+        checkEq "[\"n : Nat\\n⊢ Nat\"]" (((LSP.get? r[0]! ["result", "messages"]).map (·.compress)).getD "") },
+    -- widgets (docs/stages/11-tooling.md, 11af)
+    { name := "a tactic's widget is in the info tree, at its range, with its goals", run := fun _ => do
+        let src := "import Prelude\nsyntax (name := panel) \"panel\" : tactic\n" ++
+          "def panelTac : Tactic := fun _ => do\n  TacticM.widget \"Panel\" \"<b>hello</b>\"\n" ++
+          "attribute [tactic tactic.panel] panelTac\n" ++
+          "def k : Nat → Nat := by\n  intro n\n  panel\n  exact n\n"
+        let loader ← preludeLoader
+        let s := runFrontend (R := ZeroOneMany) src { loader, trustedModule := Tests.libModule }
+        let ws := s.infos.filterMap fun i => match i with
+          | .widget r t h gs => some (r, t, h, gs)
+          | _ => none
+        checkEq 1 ws.size
+        let some (r, t, h, gs) := ws[0]? | throw (IO.userError "no widget in the info tree")
+        checkEq "Panel" t
+        checkEq "<b>hello</b>" h
+        checkEq "panel" (String.ofList ((src.toList.drop r.start).take (r.stop - r.start)))
+        checkEq 1 gs.size
+        let some g := gs[0]? | throw (IO.userError "the widget has no goal")
+        checkEq "n : Nat\n⊢ Nat" g.show }
   ]
 
 builtin_initialize registerGroup tacticGroup

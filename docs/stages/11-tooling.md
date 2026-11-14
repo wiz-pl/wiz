@@ -550,3 +550,35 @@ Neovim shows them as `@lsp.type.keyword` (linked to `@keyword`) without configur
   that spells the whole name, in all those documents; it refuses a declaration of the
   toolchain's library and a new name that isn't one. A use through generalised field
   notation (`p.norm` for `Point.norm`) is not edited.
+
+## 11af: tactic widgets in the infoview
+
+A tactic can show a widget: static HTML with a title, attached to its own range and to
+the goals open at that point. The API is `TacticM.widget` (the request `Tac.widget`,
+appended to the Prelude's `Tac` after every existing constructor), and the node is
+`Info.widget` in the info tree. `Query.widgetsAt` finds the widgets of the tactic state
+the cursor is in, and `wiz/interactiveGoals` returns them:
+
+```json
+"widgets": [{"title": "Panel", "html": "<b>n + 0 = n</b>",
+             "range": {"start": {"line": 3, "character": 2},
+                       "end": {"line": 3, "character": 7}},
+             "goals": ["n : Nat\n⊢ Nat"]}]
+```
+
+`goals` is the widget's context at emission, not the current state: a widget made before
+a tactic closes a goal still carries that goal. A tactic may emit several widgets; they
+stay in order at the same range, and they belong to that tactic's state (also in the
+between-tactics state the infoview attributes to the last tactic). `trace` and `ppGoal`
+are unchanged.
+
+The **trust boundary is the widget**: Wiz code chooses `title` and `html`. The protocol
+forbids scripts, and `Wiz.sanitizeWidgetHtml` (`Wiz/Infoview.lean`) removes `<script>`,
+`<style>`, frames and other active elements, event-handler attributes and
+`javascript:`-style URLs before the server sends HTML; the title is plain text
+(`widgetEscape` is there for a client that puts it in HTML). That is defence in depth,
+not a sandbox: a client must render widget HTML as untrusted (an iframe with a content
+security policy). The bundled terminal and web infoviews do not draw widgets yet; the
+JSON is the interface, and the self-hosted frontend (no tactics or infoview) is
+unaffected. Details: `wiz-notes/infotree-widgets.md`.
+

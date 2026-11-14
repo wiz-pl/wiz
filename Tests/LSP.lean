@@ -531,6 +531,39 @@ def serverGroup : Group where
         checkEq "\"x\"" (LSP.get? r ["goal", "userName"]).get!.compress
         let (_, out) ← openDoc src
         check (!(out.any (has · "wiz/elaborated"))) "unasked wiz/elaborated" },
+    { name := "11af: tactic widgets in the info tree and wiz/interactiveGoals (sanitized)", run := fun _ => do
+        let src := "import Prelude\nsyntax (name := panel) \"panel\" : tactic\n" ++
+          "def panelTac : Tactic := fun _ => do\n" ++
+          "  TacticM.widget \"Panel\" \"<b>hello</b>\";\n" ++
+          "  TacticM.widget \"Danger\" \"<script>alert(1)</script><b onclick='x()'>ok</b>\"\n" ++
+          "attribute [tactic tactic.panel] panelTac\n" ++
+          "def k : Nat → Nat := by\n  intro n\n  panel\n  exact n\n"
+        -- the info tree: both widgets, the emitting tactic's range, the goals at emission
+        let st ← elabSrc src
+        let ws := st.infos.filterMap fun i => match i with
+          | .widget r t h gs => some (r, t, h, gs)
+          | _ => none
+        checkEq 2 ws.size
+        let some (r₀, t₀, h₀, gs₀) := ws[0]? | throw (IO.userError "no widget in the info tree")
+        checkEq "Panel" t₀
+        checkEq "<b>hello</b>" h₀
+        checkEq "panel" (String.ofList ((src.toList.drop r₀.start).take (r₀.stop - r₀.start)))
+        checkEq 1 gs₀.size
+        let some g₀ := gs₀[0]? | throw (IO.userError "the widget has no goal")
+        checkEq "n : Nat\n⊢ Nat" g₀.show
+        let some w₁ := ws[1]? | throw (IO.userError "the second widget is missing")
+        checkEq "Danger" w₁.2.1
+        -- the infoview's JSON: same nodes, with dangerous HTML removed
+        let (srv, _) ← openDoc src
+        let (_, r) := ask srv "wiz/interactiveGoals" src (offAfter src "\n  panel" (-1))
+        let some (.arr js) := LSP.get? r ["widgets"] | throw (IO.userError s!"no widgets: {r.compress}")
+        checkEq 2 js.size
+        checkEq "Panel" (LSP.getStr js[0]! ["title"])
+        checkEq "<b>hello</b>" (LSP.getStr js[0]! ["html"])
+        checkEq "[\"n : Nat\\n⊢ Nat\"]" (LSP.get? js[0]! ["goals"]).get!.compress
+        checkEq "Danger" (LSP.getStr js[1]! ["title"])
+        checkEq "<b>ok</b>" (LSP.getStr js[1]! ["html"])
+        checkEq "&lt;b&gt;" (widgetEscape "<b>") },
     { name := "code action: did you mean", run := fun _ => do
         let src := "import Prelude\ndef double (n : Nat) : Nat := n + n\ndef four : Nat := doubel 2\n"
         let (srv, out) ← openDoc src
