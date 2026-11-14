@@ -3742,6 +3742,55 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     unifyGoal gl (.cast newT goalT pf m)
     let (st, id) := addGoal st { ctx := gl.ctx, ty := ← evalIn gl.ctx newT, tm := m }
     return ← runTac code info st (apply code (fld 3) (.nat id))
+  if tag == TacTag.rewriteAt then
+    -- (6h) match a rule's `∀` telescope and rewrite an occurrence of its left side
+    let h ← zonk lvl (← reify st.handles (fld 1) lvl)
+    let rtl := decodeBool (fld 2) == some true
+    let all := decodeBool (fld 3) == some true
+    let ans (r : RVal) := apply code (fld 4) r
+    -- (the rule's type as written when its head is a constant: its equation may compute)
+    let (body, happ, pairs) ← match ← ruleType? gl.ctx g h with
+      | some p => pure p
+      | none => do
+        let hty ← match (← get).kernelInfer (gl.kernelCtx g) h with
+          | .ok ty => pure ty
+          | .error e =>
+            match (← get).kernelInfer { gl.kernelCtx g with types := (← zonkedTypes gl.ctx).toList.reverse } h with
+            | .ok ty => pure ty
+            | .error _ => throwAt info s!"simp: {e}" ErrorCode.tacticFailed
+        let htyT ← zonk lvl (quote g lvl hty)
+        let (b, ms) ← stripRule gl.ctx 64 htyT
+        pure (b, ms.foldl (fun f m => .app f m) h, [])
+    let .eq A lhs rhs := body | return ← runTac code info st (ans (mkCon 2 [encodeString "not an equation"]))
+    -- the universe levels of its constants (fresh after reflection), from the arguments' types
+    let happ ← if happ.hasLevelMVar then do
+        let _ ← (RCtx.ofLocal gl.ctx).typeOfUnifying? happ
+        zonk lvl happ
+      else pure happ
+    let goalT ← zonk lvl (quote g lvl gl.ty)
+    -- (`← h` matches the equation's right side and puts the left one back)
+    let pat := if rtl then rhs else lhs
+    match ← matchRule gl g A pat lhs rhs happ pairs with
+    | none => return ← runTac code info st (ans (mkCon 0 []))
+    | some (A', a', b', app, cand) => do
+      let repl := if rtl then a' else b'
+      -- abstract the subterm the goal really has (the rule's side may only match it up
+      -- to conversion: `List.append x []` is written `x ++ []` in the lemma)
+      let (abstr, (found, _)) :=
+        (abstractOccAt cand goalT (if all then none else some 0)).run (false, 0)
+      if !found then return ← runTac code info st (ans (mkCon 0 []))
+      let newT := abstr.instantiateAt 0 repl
+      -- for `← h` the abstraction puts back the *replacement*, as `rewrite` does
+      let Ga := abstr.instantiateAt 0 (if rtl then repl else cand)
+      -- `P x := G[x] = G[a]` (or `G[a] = G[x]`, right to left), as `rewrite`
+      let P : Term R := .lam "x" (.lam "_"
+        (if rtl then .eqTy (Ga.lift 2) (abstr.lift 1) else .eqTy (abstr.lift 1) (Ga.lift 2)))
+      let pf : Term R := .transp A' a' P (.reflTy Ga) b' app
+      let m ← freshMeta gl.ctx "goal"
+      unifyGoal gl (.cast newT goalT pf m)
+      let (st, id) := addGoal st { ctx := gl.ctx, ty := ← evalIn gl.ctx newT, tm := m }
+      let (r, st) ← refl st gl newT
+      return ← runTac code info st (ans (mkCon 1 [.nat id, r]))
   if tag == TacTag.exact then
     let stx ← stxOf (fld 1)
     let t ← check (gl.ctx.withInfo stx) stx gl.ty

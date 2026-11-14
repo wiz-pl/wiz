@@ -191,6 +191,49 @@ def tacticGroup : Group where
            "r2 : (a : Nat) → (b : Nat) → a = b → (P : Nat → Type) → P a → P b"]
         failsLib "import Prelude\ndef r (a b c : Nat) (h : a = b) (P : Nat → Prop) (pc : P c) : P c := by\n  rw h\n  exact pc" "rewrite: the goal does not mention a"
         failsLib "import Prelude\ndef r (a : Nat) (P : Nat → Prop) (pa : P a) : P a := by\n  rw pa\n  exact pa" "rewrite: not an equation" },
+    -- simp (stage 6h; wiz-notes/simp-design.md §8.1)
+    { name := "simp: a local equation rewrites under a context; a quantified lemma is matched", run := fun _ =>
+        okLib ("import Prelude\n" ++
+          "def s1a (a b : Nat) (h : a = b) (P : Nat → Prop) (pb : P b) : P a := by\n  simp [h]\n  trace_state\n  exact pb\n" ++
+          "def s1b (a : Nat) (h : (n : Nat) → n + 0 = n) : a + 0 = a := by\n  simp [h]\n  trace_state\n  rfl\n" ++
+          "def s1nat (a b : Nat) (h : a = b) : a + 0 = b + 0 := by\n  simp [h]\n  rfl\n" ++
+          "def s1bool (a b : Bool) (h : a = b) : (a && Bool.true) = (b && Bool.true) := by\n  simp [h]\n  rfl")
+          ["a : Nat\nb : Nat\nh : a = b\nP : Nat → Prop\npb : P b\n⊢ P b",
+           "a : Nat\nh : (n : Nat) → n + 0 = n\n⊢ a = a"] },
+    { name := "simp: an unsolved goal is reported after it", run := fun _ =>
+        failsLib "import Prelude\ndef s1bad2 (a b : Nat) (h : a = a) : b = b := by\n  simp [h]"
+          "unsolved goals" },
+    { name := "simp only: list order, chaining, and restricting the set", run := fun _ =>
+        okLib ("import Prelude\n" ++
+          "def s1c (a b c : Nat) (h1 : a = b) (h2 : b = c) (P : Nat → Prop) (pc : P c) : P a := by\n  simp only [h1, h2]\n  trace_state\n  exact pc\n" ++
+          "def s1c' (a b c : Nat) (h1 : a = b) (h2 : b = c) (P : Nat → Prop) (pb : P b) : P a := by\n  simp only [h1]\n  trace_state\n  exact pb")
+          ["a : Nat\nb : Nat\nc : Nat\nh1 : a = b\nh2 : b = c\nP : Nat → Prop\npc : P c\n⊢ P c",
+           "a : Nat\nb : Nat\nc : Nat\nh1 : a = b\nh2 : b = c\nP : Nat → Prop\npb : P b\n⊢ P b"] },
+    { name := "simp: no match is not an error; simp only [] is the identity", run := fun _ =>
+        okLib ("import Prelude\n" ++
+          "def s1d (a b : Nat) (h : a = a) : b = b := by\n  simp [h]\n  trace_state\n  rfl\n" ++
+          "def s1g (a : Nat) (P : Nat → Prop) (p : P a) : P a := by\n  simp only []\n  trace_state\n  exact p")
+          ["a : Nat\nb : Nat\nh : a = a\n⊢ b = b", "a : Nat\nP : Nat → Prop\np : P a\n⊢ P a"] },
+    { name := "simp: a growing rule hits the step bound (it never hangs)", run := fun _ =>
+        failsLib ("import Prelude\ndef s1f (n : Nat) : Nat := n\ndef s1_loop (n : Nat) : s1f n = s1f (s1f n) := rfl\n" ++
+          "def s1e (a : Nat) : s1f a = a := by\n  simp [s1_loop]")
+          "simp: maximum steps" },
+    { name := "simp: a non-equation argument is an error", run := fun _ =>
+        failsLib "import Prelude\ndef s1bad (P : Prop) (h : P) : P := by\n  simp [h]"
+          "simp: expected an equation" },
+    { name := "simp: no axioms in the proof", run := fun _ =>
+        okLib ("import Prelude\ndef s1h (a b : Nat) (h : a = b) (P : Nat → Prop) (pb : P b) : P a := by\n  simp [h]\n  exact pb\n#print axioms s1h")
+          ["'s1h' does not depend on any axioms"] },
+    { name := "simp composes with rw and with a computed-away lemma set", run := fun _ => do
+        okLib ("import Prelude\n" ++
+          "def s1rw (a b c : Nat) (h1 : a = b) (h2 : b = c) (P : Nat → Prop) (pc : P c) : P a := by\n  rw h1\n  simp only [h2]\n  trace_state\n  exact pc\n" ++
+          "def s1back (a b : Nat) (h : a = b) (P : Nat → Prop) (pa : P a) : P b := by\n  simp [← h]\n  trace_state\n  exact pa")
+          ["a : Nat\nb : Nat\nc : Nat\nh1 : a = b\nh2 : b = c\nP : Nat → Prop\npc : P c\n⊢ P c",
+           "a : Nat\nb : Nat\nh : a = b\nP : Nat → Prop\npa : P a\n⊢ P a"]
+        okLibs ("import SimpLemmas\n" ++
+          "def sl1 (b : Bool) : (b && Bool.true) = b := by\n  simp [Bool.and_true]\n  rfl\n" ++
+          "def sl2 {A : Type} (xs : List A) : List.append xs List.nil = xs := by\n  simp [List.append_nil]\n  rfl")
+          [] },
     -- typed reflection (docs/stages/06-macros.md, 6g)
     { name := "constructor applications are reflected by name, with the type's parameters", run := fun _ =>
         okLib (reflectPrelude ++

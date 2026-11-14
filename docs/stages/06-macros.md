@@ -291,3 +291,11 @@ different handles.
   constructor (its type, number of parameters and of fields), `TacticM.ctorApp e` gives
   a constructor application's name and fields, and `TacticM.whnfCtorApp g e` computes
   first: `Prog.swap p q` is read as the `Prog.get p …` it computes to, in one request.
+
+## 6h: `simp`
+
+`simp [h₁, …]` / `simp only [h₁, …]` rewrite the goal with a rule list until no rule
+applies: the algorithm is Wiz (`lib/Prelude.wiz`), the host adds one request,
+`Tac.rewriteAt`, which matches a rule's `∀` telescope against a subterm and builds the
+transport. There is no automatic closer and (until S2) no default set; fuel bounds the
+rewrites. Full section: [`06-macros/simp.md`](06-macros/simp.md).
