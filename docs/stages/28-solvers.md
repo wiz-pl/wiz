@@ -11,7 +11,9 @@ differ in what is trusted (design and survey: `wiz-notes/smt.md`):
   trusted, as with Lean's `bv_decide` (which runs its checker compiled, trusting the
   compiler) or Coq's SMTCoq;
 * **`sat_decide_native`** (28e) is `sat_decide` with that check run compiled instead of
-  by the kernel: an axiom per check, behind `--trust-native`, as 27a and 28a do.
+  by the kernel: an axiom per check, behind `--trust-native`, as 27a and 28a do;
+* **`bit_decide`** (28f) decides a *closed* goal (no variables) by computing both sides
+  in the kernel, and `bv_decide` (28d) sends closed goals there: no solver, no axiom.
 
 ## 28a: `smt` and `--trust-smt`
 
@@ -196,17 +198,21 @@ comparisons become nodes first, and `sat_decide`'s reflection of the connectives
 
 **Fragment**: `land/lor/xor/not/add/sub/neg`, `shiftLeft/shiftRight` by numerals,
 `lt/le`, under their `BitVec` names too, and closed words. Not yet: `*`, `/`, `%`, signed
-comparisons, shifts by a word. This is the whole claim: outside it an operation the tactic
-does not know is an uninterpreted word (or, in a Boolean goal, an atom), so the goal is
-proved only if it holds for every value of that word, and the counterexample shown names
-that reading (it need not be a real one). A numeral shift amount `k` may be any numeral,
-including `k ≥ w` (all bits `false`).
+comparisons, shifts by a word. (A *closed* goal with any of those is decided by
+`bit_decide`, 28f: `bv_decide` sends closed goals there, so `*` and signed comparisons
+work when every word in them is a numeral.) This is the whole claim: outside it an
+operation the tactic does not know is an uninterpreted word (or, in a Boolean goal, an
+atom), so the goal is proved only if it holds for every value of that word, and the
+counterexample shown names that reading (it need not be a real one). A numeral shift
+amount `k` may be any numeral, including `k ≥ w` (all bits `false`).
 
 **Only Boolean goals with a word variable.** A closed *Boolean* goal is not supported: a
 true one is already `True` when the tactic sees it (`rfl` closes it), and a false one's
 closed `Bool` values are constructor payloads (`('true, refl (), ())`), not `Bool.true`, so
-there is no equation of `Bool` to bit-blast. A closed *word* equation is fine (its
-numerals are bits, computed by `refl`).
+there is no equation of `Bool` to bit-blast. (That case, and every other closed goal, is
+`bit_decide`'s: 28f. `bv_decide` sends a goal with no hypotheses and no `∀` there instead
+of bit-blasting it.) A closed *word* equation is fine (its numerals are bits, computed by
+`refl`).
 
 **Tests.** The group *smt* keeps the cases: bitwise goals, arithmetic and shifts at widths
 1, 3 and 4 (both the `UIntN` and the `BitVec` names, and the shift boundaries `k = 0`
@@ -273,3 +279,55 @@ definitions, so the first check's axiom is normally `sat3.native✝`.
 with the axiom that `#print axioms` lists (for the definition and for a use); a 4-bit
 carry chain over definitions (the same goal as 28c, with the check run compiled instead
 of by the kernel); and a false goal, still the solver's counterexample.
+
+## 28f: `bit_decide`: closed word goals by kernel computation
+
+    import BitDecide
+    import BitVec
+    def add : BitVec.add (BitVec.ofNat 8 3) (BitVec.ofNat 8 5) = BitVec.ofNat 8 8 := by bit_decide
+    def cmp : UIntN.lt (UIntN.ofNat 4 3) (UIntN.ofNat 4 5) = .true := by bit_decide
+
+`bit_decide` decides a **closed** goal: no hypotheses and no `∀`, so no free variables.
+The goal is an equation `lhs = rhs` (at `BitVec n`, `UIntN n`, `Nat`, `Bool`, …), or a
+closed proposition.
+
+* **An equation, by conversion.** The tactic closes `lhs = rhs` with `BitD.refl lhs : lhs =
+  lhs`, which the kernel checks against the goal: it computes `lhs` and `rhs` and compares
+  the values. The equation holds exactly when the normal forms agree — no search, no
+  certificate, no solver. For the error message the tactic `whnf`s each side (a word's
+  `toNat`) and shows the two numbers ("the two sides compute to 8 and 9").
+* **A closed Boolean comparison is already `True`.** The elaborator normalises a closed
+  `Bool` goal before any tactic runs: `UIntN.lt (ofNat 4 3) (ofNat 4 5) = .true` is `True`
+  when `bit_decide` sees it. (That is exactly why `bv_decide`, which starts from an
+  equation of `Bool` *payloads*, could not do the false case.) `bit_decide` proves
+  `True.intro` against the goal by conversion; a closed false `Bool` goal is a
+  non-convertible equation of payloads and fails with "the goal is false".
+* **A symbolic goal is refused, not decided.** A goal with a variable (a hypothesis, or a
+  `∀`) fails with "the goal has a variable, so it is not closed … use `bv_decide`". An
+  accepted goal has been fully evaluated and checked by the kernel; the tactic never
+  guesses.
+* **`bv_decide` uses it for closed goals.** `bv_decide` sends a goal with no hypotheses
+  and no `∀` to `bit_decide` and only bit-blasts symbolic goals (28d). A closed goal of
+  any width in the closed fragment — including `*`, `/`, `%`, `~~~`, signed comparisons and
+  closed Boolean goals — is therefore decided without a solver (and without CaDiCaL).
+
+**Trusted: nothing new.** The proof is a term the kernel checks by conversion; the
+kernel's evaluator and conversion checker are the whole trusted base, as for `rfl`. No
+`native_decide`/`--trust-native`, no SAT solver, no DIMACS/LRAT plumbing, no axiom. On a
+`BitVec`/`UIntN` goal, `#print axioms` lists `UIntN`'s seal and the natives of the
+operations named (the same list any use of a word has, stage 22h); a `Bool` goal lists
+nothing.
+
+**Limits.** Closed goals only (a symbolic goal is refused), and each side is computed in
+full, so the cost is the kernel's on wide words: the tactic is for small closed words and
+for goals outside 28d's bit-blasting fragment. It is not a general `decide`: a closed
+proposition is decided only when it reduces to `True` (or `False`); a closed `¬ P`, `P ∧ Q`
+or `P ∨ Q` is refused.
+
+**Tests.** The group *sat* keeps the cases: add, sub, neg, both shifts, arithmetic shift,
+and/or/xor, unsigned and signed comparisons and `beq`, at widths 4 and 8 and under the
+`BitVec`/`UIntN` names; a closed `Bool` goal; a false word goal (with its two values), a
+false closed Boolean goal and `False`; a true symbolic goal and a `∀` goal refused; and
+`#print axioms` (a `Bool` result depends on no axiom, a word result only on Word's seal and
+the named natives). The `bv_decide` closed dispatch has its own case (closed `mul`,
+`ashr`, a Boolean comparison, and a false one), runnable with no solver on PATH.

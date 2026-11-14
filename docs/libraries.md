@@ -894,6 +894,11 @@ library gives an `Add` instance and gets `+`; it may also give a mixed one (`HMu
   `UIntN.toNat_lt` for the range (`UIntN.ext`: same bits, same word; `UIntN.cases1`, in
   `lib/BitVec.wiz`: a one-bit word is 0 or 1). Compiled, `a + b : U32` is the native `wiz_word_add` (the dictionary is
   inlined away), as `UIntN.add a b` was.
+* **Deciding word goals.** `lib/BitDecide.wiz` adds `by bit_decide`: a *closed* equation
+  (or Boolean comparison) of words and booleans is decided by computing both sides in the
+  kernel and comparing them, with no axiom and no solver; a goal with a variable is
+  refused. `lib/BvDecide.wiz`'s `by bv_decide` bit-blasts a *symbolic* word goal into
+  `sat_decide`'s circuits (stage 28d), and sends closed goals to `bit_decide` (28f).
 
 ## Arithmetic: laws, orders and ring normalisers
 

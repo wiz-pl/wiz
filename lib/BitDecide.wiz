@@ -1,0 +1,157 @@
+import Prelude
+import Logic
+/-!
+# BitDecide
+
+`bit_decide`: decide a **closed** equation of words, booleans, … by kernel computation
+(`import BitDecide`).
+
+```
+import BitDecide
+import BitVec
+
+def add : BitVec.add (BitVec.ofNat 8 3) (BitVec.ofNat 8 5) = BitVec.ofNat 8 8 := by bit_decide
+def cmp : UIntN.lt (UIntN.ofNat 4 3) (UIntN.ofNat 4 5) = .true := by bit_decide
+```
+
+The goal is an equation `lhs = rhs` (at `BitVec n`, `UIntN n`, `Bool`, …) with **no free
+variables**, or a closed proposition that computes to `True`. `bit_decide` closes an
+equation with `BitD.refl lhs`, which the kernel checks against the goal by conversion: it
+computes `lhs` and `rhs` and compares the values; a closed proposition is closed with
+`True.intro`. Nothing is decided by search: the two sides are normalised, so an equation
+holds exactly when the normalisations agree.
+
+A goal with a variable is **refused** (not decided): deciding `∀ x, p x = q x` needs a
+bit-blaster and a SAT solver (`bv_decide`, stage 28d) or a proof, and `bit_decide` must
+not guess. This is the closed-goal companion of `bv_decide`: it fills the case `bv_decide`
+documents as out of its fragment, a *closed* Boolean goal (whose `Bool` value is a
+constructor payload, not `Bool.true`, when the tactic sees it), and decides small closed
+word equations without invoking a solver at all. `bit_decide` also takes goals whose true
+form the elaborator has already reduced to `True` (a closed Boolean comparison): those are
+the ones `bv_decide` never sees. Any operation is fine in a closed goal — the kernel
+computes it — so `*`, `/`, `%`, `ashr` and signed comparisons work where `bv_decide`'s
+bit-blasting fragment stops.
+
+Trust: the kernel's conversion checker and nothing else. No `native_decide`, no SAT
+solver, no axiom. `#print axioms` on a `bit_decide` theorem lists only `UIntN`'s seal and
+the natives any use of a word rests on (`lib/Word.wiz`, stage 22h); a `Bool` goal lists
+nothing.
+
+Limits: closed goals only (a free variable is refused), and the cost is the kernel's: each
+side is computed in full, so wide words are slow. The procedure is exhaustive normalisation
+of the two sides, not a certificate from a bit-blaster; its trusted base is correspondingly
+smaller.
+-/
+
+/-- `a = a`: `bit_decide`'s certificate for an equation. The kernel checks it against the
+goal by conversion, computing both sides. -/
+def BitD.refl {A : Type} (a : A) : a = a := refl a
+/-- `True`, as a named proposition (the kernel's `True` has no constant name to reflect):
+the target of `bit_decide`'s conversion check for a closed true proposition. -/
+def BitD.trueType : Prop := True
+/-- `False`, as a named proposition (see `BitD.trueType`): the target for a closed false
+proposition. -/
+def BitD.falseType : Prop := False
+
+-- ## Reading a goal
+
+/-- Is `e` closed: a constant, a numeral, a sort, or an application of closed terms? A
+variable (a hypothesis, or a bound variable), a lambda, a Π, or an `opaque` handle (a
+kernel form the reflection does not model, which may be open) is not closed, and
+`bit_decide` refuses it. -/
+def BitD.closed : Expr → Bool
+  | .var _ => .false
+  | .opaque _ => .false
+  | .app f a => Bool.and (BitD.closed f) (BitD.closed a)
+  | .lam _ _ => .false
+  | .pi _ _ _ _ _ => .false
+  | _ => .true
+
+/-- The width of a word type `UIntN w` or `BitVec w`, if `A` is one. -/
+def BitD.width (A : Expr) : Option Nat := match Expr.view A with
+  | .const n (.cons (.lit w) .nil) =>
+    match Bool.or (Expr.nameEq n "UIntN") (Expr.nameEq n "BitVec") with
+    | .true => .some w
+    | .false => .none
+  | _ => .none
+
+/-- `e` as a number, when its type is a word: what a message shows (`toNat` computes the
+bits; a word's private constructor prints badly). -/
+def BitD.valueE (A e : Expr) : Expr := match BitD.width A with
+  | .some w => Expr.mkApp (.const "UIntN.toNat") (.cons (.lit w) (.cons e .nil))
+  | .none => e
+
+-- ## Closing a goal
+
+/-- The false case: for a word, say what the two sides compute to. (`whnf` is the
+kernel's reduction, which computes a word's `toNat`; `normalize` stops at the seal of
+`UIntN`.) A non-word equation is not printed: a closed `Bool` equality's sides are
+constructor payloads (`('false, refl (), ())`), which say nothing useful. -/
+def BitD.reportFalse (g : Nat) (A lhs rhs : Expr) : TacticM Unit := match BitD.width A with
+  | .none => TacticM.fail "bit_decide: the goal is false"
+  | .some _ => do
+    lv ← TacticM.whnf g (BitD.valueE A lhs);
+    rv ← TacticM.whnf g (BitD.valueE A rhs);
+    sl ← TacticM.ppExpr g lv;
+    sr ← TacticM.ppExpr g rv;
+    TacticM.fail (String.append "bit_decide: the goal is false: the two sides compute to "
+      (String.append sl (String.append " and " sr)))
+
+/-- Close `g : lhs = rhs` at `A` with `BitD.refl lhs`, which the kernel checks by
+computing both sides. If conversion refuses it, report what they compute to. (The
+`isDefEq` pre-check only picks the message; `assign` is the authority.) -/
+def BitD.closeEq (g : Nat) (A lhs rhs : Expr) : TacticM Unit := do
+  let pf := Expr.mkApp (.const "BitD.refl") (.cons A (.cons lhs .nil));
+  ok ← TacticM.isDefEq g lhs rhs;
+  match ok with
+  | .true => TacticM.assign g pf
+  | .false => TacticM.tryCatch (TacticM.assign g pf) (fun _ => BitD.reportFalse g A lhs rhs)
+
+/-- Close `g` when its type computes to `True`; report a goal that computes to `False`. -/
+def BitD.closeProp (g : Nat) (ty : Expr) : TacticM Unit := do
+  t ← TacticM.isDefEq g ty (.const "BitD.trueType");
+  match t with
+  | .true => TacticM.assign g (.const "True.intro")
+  | .false => do
+    f ← TacticM.isDefEq g ty (.const "BitD.falseType");
+    match f with
+    | .true => TacticM.fail "bit_decide: the goal is false"
+    | .false => TacticM.fail "bit_decide: the goal is not an equation (nor a closed proposition that computes to True or False); state a word proposition as an equation, e.g. `UIntN.lt a b = .true`"
+
+/-- The error for an equation whose sides are not closed: a symbolic goal. -/
+def BitD.notClosed : TacticM Unit :=
+  TacticM.fail "bit_decide: the goal has a variable, so it is not closed: bit_decide evaluates closed goals only; for a symbolic word goal use bv_decide (or prove it)"
+
+-- ## The decision
+
+/-- Decide goal `g` if it is closed: an equation of closed terms by `BitD.refl` (the
+kernel computes both sides), a closed proposition that computes to `True` by
+`True.intro`. Fails — with the reason — for a symbolic goal, a false one, or anything
+else. Does not change the goal list (the callers do). -/
+def BitD.decideGoal (g : Nat) : TacticM Unit := do
+  ty ← TacticM.goalType g;
+  hyps ← TacticM.goalHyps g;
+  match Expr.view ty with
+  | .pi _ _ _ _ _ => TacticM.fail "bit_decide: the goal has a binder, so it is not closed: bit_decide evaluates closed goals only; for a symbolic word goal use bv_decide"
+  | _ => do
+    eqn ← TacticM.eqView g ty;
+    match eqn with
+    | .some eq => match hyps with
+      -- no hypotheses: the goal is closed, so conversion over the two sides decides it
+      | .nil => BitD.closeEq g eq.1 eq.2.1 eq.2.2
+      | .cons _ _ => match BitD.closed eq.2.1, BitD.closed eq.2.2 with
+        | .true, .true => BitD.closeEq g eq.1 eq.2.1 eq.2.2
+        | _, _ => BitD.notClosed
+    | .none => BitD.closeProp g ty
+
+-- ## The tactic
+
+syntax (name := bitDecide) "bit_decide" : tactic
+/-- `bit_decide`: decide a closed equation of words (`BitVec`/`UIntN`), booleans, … by
+computing both sides in the kernel. A goal with a variable is refused; a false one fails
+with the two values. -/
+def Tactic.bitDecide : Tactic := fun _ => do
+  g ← TacticM.mainGoal;
+  BitD.decideGoal g;
+  TacticM.replaceMainGoal .nil
+attribute [tactic tactic.bitDecide] Tactic.bitDecide

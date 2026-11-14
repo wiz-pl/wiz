@@ -184,6 +184,64 @@ def group : Group where
         check (!(has ms "smt✝") && !(has ms "native✝") && !(has ms "sorry")) s!"bv_decide used an axiom: {ms}"
         let ms ← msgs ("import BvDecide\ndef bad (x y : UIntN 4) : UIntN.lt x (UIntN.add x y) = .true := by bv_decide\n")
         expect ms "the goal is false; a counterexample" },
+    { name := "bit_decide (28f): closed word goals by kernel computation (add, sub, shifts, and/or/xor, comparisons), no axioms", run := fun _ => do
+        let ms ← msgs ("import BitDecide\nimport BitVec\n" ++
+          "def badd : UIntN.add (UIntN.ofNat 4 3) (UIntN.ofNat 4 5) = UIntN.ofNat 4 8 := by bit_decide\n" ++
+          "def bsub : BitVec.sub (BitVec.ofNat 8 3) (BitVec.ofNat 8 5) = BitVec.ofNat 8 254 := by bit_decide\n" ++
+          "def bshl : BitVec.shl (BitVec.ofNat 8 3) 2 = BitVec.ofNat 8 12 := by bit_decide\n" ++
+          "def blshr : UIntN.shiftRight (UIntN.ofNat 8 12) 2 = UIntN.ofNat 8 3 := by bit_decide\n" ++
+          "def band : BitVec.and (BitVec.ofNat 4 12) (BitVec.ofNat 4 10) = BitVec.ofNat 4 8 := by bit_decide\n" ++
+          "def bor : BitVec.or (BitVec.ofNat 4 12) (BitVec.ofNat 4 10) = BitVec.ofNat 4 14 := by bit_decide\n" ++
+          "def bxor : UIntN.xor (UIntN.ofNat 8 12) (UIntN.ofNat 8 10) = UIntN.ofNat 8 6 := by bit_decide\n" ++
+          "def blt : UIntN.lt (UIntN.ofNat 4 3) (UIntN.ofNat 4 5) = .true := by bit_decide\n" ++
+          "def bult : BitVec.ult (BitVec.ofNat 4 9) (BitVec.ofNat 4 5) = .false := by bit_decide\n" ++
+          "def ble : BitVec.ule (BitVec.ofNat 4 3) (BitVec.ofNat 4 3) = .true := by bit_decide\n" ++
+          "def bslt : BitVec.slt (BitVec.ofNat 8 255) (BitVec.ofNat 8 1) = .true := by bit_decide\n" ++
+          "def bsle : BitVec.sle (BitVec.ofNat 8 1) (BitVec.ofNat 8 255) = .false := by bit_decide\n" ++
+          "def bbeq : BitVec.beq (BitVec.ofNat 4 7) (BitVec.ofNat 4 7) = .true := by bit_decide\n" ++
+          "def bashr : BitVec.ashr (BitVec.ofNat 8 128) 1 = BitVec.ofNat 8 192 := by bit_decide\n" ++
+          "def bneg : BitVec.neg (BitVec.ofNat 4 3) = BitVec.ofNat 4 13 := by bit_decide\n" ++
+          "def bbool : Bool.and Bool.true Bool.false = Bool.false := by bit_decide\n" ++
+          "#print axioms bbool\n#print axioms badd\n#print axioms blt\n")
+        noErrors ms
+        -- (the closed Boolean goal is `True` when the tactic sees it: it proves `True.intro`)
+        expect ms "info: 'bbool' does not depend on any axioms"
+        -- a word goal rests only on Word's seal and the natives of the operations it names
+        expect ms "info: 'badd' depends on axioms:"
+        check (has ms "native UIntN.add := UIntN.addNative") s!"badd's proof does not rest on UIntN.add: {ms}"
+        expect ms "info: 'blt' depends on axioms:"
+        check (has ms "native UIntN.lt := UIntN.ltNative") s!"blt's proof does not rest on UIntN.lt: {ms}"
+        check (!(has ms "smt✝") && !(has ms "native✝") && !(has ms "sorry")) s!"bit_decide used an axiom: {ms}" },
+    { name := "bit_decide (28f): a false goal fails with its values; a symbolic goal is refused (not decided)", run := fun _ => do
+        let ms ← msgs ("import BitDecide\nimport BitVec\n" ++
+          "def bad : UIntN.add (UIntN.ofNat 4 3) (UIntN.ofNat 4 5) = UIntN.ofNat 4 9 := by bit_decide\n")
+        expect ms "bit_decide: the goal is false: the two sides compute to 8 and 9"
+        let ms ← msgs ("import BitDecide\nimport BitVec\n" ++
+          "def bad : BitVec.ult (BitVec.ofNat 4 5) (BitVec.ofNat 4 3) = .true := by bit_decide\n")
+        expect ms "bit_decide: the goal is false"
+        let ms ← msgs ("import BitDecide\ndef bad : False := by bit_decide\n")
+        expect ms "bit_decide: the goal is false"
+        -- a true symbolic goal is refused too: `bit_decide` must not guess
+        let ms ← msgs ("import BitDecide\nimport BitVec\n" ++
+          "def bad (x y : UIntN 4) : UIntN.land x y = UIntN.land y x := by bit_decide\n")
+        expect ms "bit_decide: the goal has a variable, so it is not closed"
+        let ms ← msgs ("import BitDecide\nimport BitVec\n" ++
+          "def bad : (x : UIntN 4) → UIntN.land x x = x := by bit_decide\n")
+        expect ms "bit_decide: the goal has a binder, so it is not closed" },
+    { name := "bv_decide (28f): a closed goal is decided by computation, not the solver (mul, ashr, a closed Boolean comparison)", run := fun _ => do
+        -- (no cadical needed: the closed path never asks the solver)
+        let ms ← msgs ("import BvDecide\nimport BitVec\n" ++
+          "def m : UIntN.mul (UIntN.ofNat 4 3) (UIntN.ofNat 4 5) = UIntN.ofNat 4 15 := by bv_decide\n" ++
+          "def a : BitVec.ashr (BitVec.ofNat 8 128) 1 = BitVec.ofNat 8 192 := by bv_decide\n" ++
+          "def c : UIntN.lt (UIntN.ofNat 4 3) (UIntN.ofNat 4 5) = .true := by bv_decide\n" ++
+          "#print axioms m\n")
+        noErrors ms
+        expect ms "info: 'm' depends on axioms:"
+        check (has ms "native UIntN.mul := UIntN.mulNative") s!"m's proof does not rest on UIntN.mul: {ms}"
+        check (!(has ms "smt✝") && !(has ms "native✝") && !(has ms "sorry")) s!"bv_decide's closed path used an axiom: {ms}"
+        let ms ← msgs ("import BvDecide\nimport BitVec\n" ++
+          "def bad : UIntN.mul (UIntN.ofNat 4 3) (UIntN.ofNat 4 5) = UIntN.ofNat 4 14 := by bv_decide\n")
+        expect ms "bit_decide: the goal is false" },
     { name := "sat_decide: a false goal fails with a counterexample", run := fun _ => needs "cadical" do
         let ms ← msgs ("import SatTactic\ndef wrong (a b : Bool) : Bool.and a b = Bool.or a b := by sat_decide\n")
         expect ms "sat_decide: the goal is false; a counterexample:" },

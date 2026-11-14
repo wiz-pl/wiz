@@ -1,5 +1,6 @@
 import SatTactic
 import BitBlast
+import BitDecide
 /-!
 # BvDecide
 
@@ -20,6 +21,13 @@ The fragment: `UIntN.land/lor/xor/not/add/sub/neg` and shifts by numerals
 (`shiftLeft`, `shiftRight`), the same under `BitVec`'s names, and closed words
 (numerals, `UIntN.ofNat 8 13`: their bits are computed). Boolean goals may compare
 words (`UIntN.lt/le`, `BitVec.ult/ule`) under the connectives `sat_decide` reads.
+
+A **closed** goal (no hypotheses and no `∀`, so no free variables) is not bit-blasted:
+it is decided by kernel computation (`bit_decide`, stage 28f), which needs no solver and
+also covers closed `*`, `/`, `%`, signed comparisons, and closed Boolean goals (whose
+true form the elaborator has already reduced to `True` before any tactic runs).
+`bv_decide` therefore decides `∀`-free goals in that larger closed fragment, and
+symbolic goals in the bit-blasting fragment above.
 -/
 
 def BvD.toNatE (w : Nat) (e : Expr) : Expr := Expr.mkApp (.const "UIntN.toNat") (.cons (.lit w) (.cons e .nil))
@@ -285,8 +293,8 @@ def BvD.cmpsL (g : Nat) (es : List Expr) (st : SatT.St) : TacticM SatT.St := mat
 end
 
 syntax (name := bvDecide) "bv_decide" : tactic
-def Tactic.bvDecide : Tactic := fun _ => do
-  g0 ← TacticM.mainGoal;
+/-- `bv_decide` proper: bit-blast the symbolic goal `g0` (stage 28d). -/
+def BvD.symbolic (g0 : Nat) : TacticM Unit := do
   g ← SatT.introAll 1000 g0;
   ty ← TacticM.goalType g;
   eqn ← TacticM.eqView g ty;
@@ -302,5 +310,20 @@ def Tactic.bvDecide : Tactic := fun _ => do
         st2 ← BvD.cmps g eq.2.2 st1;
         SatT.decideDagFrom g .false st2 eq.2.1 eq.2.2;
         TacticM.replaceMainGoal .nil
-      | .false => TacticM.fail "bv_decide: the goal is an equation, but not of words UIntN w or BitVec w with a numeral width, nor of booleans"
+      | .false => TacticM.fail "bv_decide: the goal is an equation, but not of words UIntN w or BitVec w with a numeral width, nor of booleans (for a closed goal try bit_decide)"
+/-- `bv_decide`: decide a goal about words. A closed one (no hypotheses, no `∀`) by kernel
+computation (`bit_decide`, stage 28f); a symbolic one by bit-blasting into `sat_decide`'s
+circuits (stage 28d). Neither the solver nor the tactic is trusted. -/
+def Tactic.bvDecide : Tactic := fun _ => do
+  g0 ← TacticM.mainGoal;
+  ty0 ← TacticM.goalType g0;
+  hyps0 ← TacticM.goalHyps g0;
+  match hyps0 with
+  | .cons _ _ => BvD.symbolic g0
+  | .nil => match Expr.view ty0 with
+    | .pi _ _ _ _ _ => BvD.symbolic g0
+    | _ => do
+      -- closed: no solver, and no bit-blasting (the kernel computes both sides)
+      BitD.decideGoal g0;
+      TacticM.replaceMainGoal .nil
 attribute [tactic tactic.bvDecide] Tactic.bvDecide
