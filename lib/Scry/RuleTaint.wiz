@@ -311,22 +311,52 @@ def Scry.memInter (xs ys : List Nat) : List Nat :=
 def Scry.memWarning (k : Scry.MemWarnKind) (func : String) (point : Nat) (detail : String) :
     Scry.MemWarning := Scry.MemWarning.mk k func point detail
 
-/-- The location closure of a pointer register, its diagnostics, and whether it touches
-unknown memory or a freed location. -/
+/-- The location closure of a pointer register and its unknown-memory diagnostic. -/
 def Scry.ptrAccess (pt : Scry.PtResult) (func : String) (point : Nat) (var : Nat)
     (what : String) : List Nat × List Scry.MemWarning :=
   let locs := Scry.ptClosure pt func var;
   let unknown := Scry.memInter locs (Scry.unknownId pt);
-  let freed := Scry.memInter locs (Scry.freedIds pt);
   let w1 : List Scry.MemWarning := match unknown with
     | .nil => .nil
     | _ => .cons (Scry.memWarning Scry.MemWarnKind.unknownMemory func point
         (what ++ " through a pointer with an unknown target")) .nil;
-  let w2 : List Scry.MemWarning := match freed with
-    | .nil => .nil
-    | _ => .cons (Scry.memWarning Scry.MemWarnKind.useAfterFree func point
-        (what ++ " to a location freed by free")) .nil;
-  (locs, List.append w1 w2)
+  (locs, w1)
+
+/-- Does the CFG of `g` have a path from `a` to `b`? A may-analysis question: a `free` on
+a path that reaches the access is a use-after-free even if the free is later in program
+order (a back edge). A simple path is at most `count` points, which bounds the worklist. -/
+partial def Scry.cfgReachGo (g : Scry.Fn) (fuel : Nat) (work : List Nat) (target : Nat) :
+    Bool :=
+  match fuel with
+  | .zero => .false
+  | .succ k => match work with
+    | .nil => .false
+    | .cons x xs => match Nat.beq x target with
+      | .true => .true
+      | .false =>
+        let fresh := List.filter (fun s => Bool.not (Scry.memNat s xs)) (Scry.succs g x);
+        Scry.cfgReachGo g k (List.append xs fresh) target
+
+def Scry.cfgReaches (g : Scry.Fn) (a b : Nat) : Bool :=
+  Scry.cfgReachGo g (Nat.succ g.count) (.cons a .nil) b
+
+/-- The `free` points of a function and the locations each may free. -/
+def Scry.fnFrees (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn) : List (Nat × List Nat) :=
+  List.foldr (fun n acc =>
+    match Scry.nodeStmt g n with
+    | .some (.free p _) => .cons (n, Scry.ptClosure pt fn.name p.index) acc
+    | _ => acc) .nil (Scry.range g.count)
+
+/-- The free points that reach `n` and may free one of `locs` (an empty list: no
+use-after-free on any path to this access). -/
+def Scry.freedHit (g : Scry.Fn) (frees : List (Nat × List Nat)) (n : Nat) (locs : List Nat) :
+    List Nat :=
+  Scry.ptFilterMap (fun f =>
+    match Scry.memInter f.2 locs with
+    | .nil => .none
+    | _ => match Scry.cfgReaches g f.1 n with
+      | .true => .some f.1
+      | .false => .none) frees
 
 /-- The `(destination, source)` argument positions of an external call whose **memory
 effect** the analysis models: a byte copy writes the source's contents into the
@@ -345,7 +375,17 @@ def Scry.copyModel (name : String) : Option (Nat × Nat) :=
           | .true => .some (0, 1)
           | .false => .none
 
+/-- One access's freed-location diagnostic: a free that reaches the access and may free
+one of its locations. -/
+def Scry.freedWarning (g : Scry.Fn) (frees : List (Nat × List Nat)) (func : String)
+    (n : Nat) (locs : List Nat) (what : String) : List Scry.MemWarning :=
+  match Scry.freedHit g frees n locs with
+  | .nil => .nil
+  | .cons h _ => .cons (Scry.memWarning Scry.MemWarnKind.useAfterFree func n
+      (what ++ " to a location freed by free at point " ++ Nat.repr h)) .nil
+
 def Scry.memScan (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn) : Scry.MemScan :=
+  let frees := Scry.fnFrees pt fn g;
   List.foldr (fun n acc =>
     match Scry.nodeStmt g n with
     | .none => acc
@@ -356,14 +396,16 @@ def Scry.memScan (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn) : Scry.MemSc
           | .nil => .nil
           | locs => .cons (Scry.MemOp.mk n v.index locs) .nil;
         Scry.MemScan.mk (List.append op acc.stores) acc.loads
-          (List.append r.2 acc.warnings)
+          (List.append (List.append r.2
+            (Scry.freedWarning g frees fn.name n r.1 "store")) acc.warnings)
       | .assign x (.load p) _ =>
         let r := Scry.ptrAccess pt fn.name n p.index "load";
         let op : List Scry.MemOp := match r.1 with
           | .nil => .nil
           | locs => .cons (Scry.MemOp.mk n x.index locs) .nil;
         Scry.MemScan.mk acc.stores (List.append op acc.loads)
-          (List.append r.2 acc.warnings)
+          (List.append (List.append r.2
+            (Scry.freedWarning g frees fn.name n r.1 "load")) acc.warnings)
       | .call _ (.direct name) args _ => match Scry.copyModel name with
         | .none => acc
         | .some pos => match Wil.listNth args pos.1, Wil.listNth args pos.2 with
@@ -373,7 +415,8 @@ def Scry.memScan (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn) : Scry.MemSc
               | .nil => .nil
               | locs => .cons (Scry.MemOp.mk n src.index locs) .nil;
             Scry.MemScan.mk (List.append op acc.stores) acc.loads
-              (List.append r.2 acc.warnings)
+              (List.append (List.append r.2
+                (Scry.freedWarning g frees fn.name n r.1 ("external " ++ name))) acc.warnings)
           | _, _ => acc
       | .call _ (.indirect fv) _ _ =>
         let t := Scry.indirectAt pt fn.name n;

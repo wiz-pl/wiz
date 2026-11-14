@@ -1,9 +1,10 @@
-/* a struct field is not modelled: havoc plus a lowering-boundary warning */
-struct P { int x; int y; };
+/* two constructs the lowering does not model: sizeof and a cast. Each is havoc plus a
+   lowering-boundary warning, and each warning points at its own statement. */
+struct P { int x; };
 
 int main(void) {
   struct P p;
-  p.x = 7;
-  int y = p.x + 1;
-  return y;
+  int n = sizeof(struct P);
+  int m = (int)n;
+  return n + m;
 }

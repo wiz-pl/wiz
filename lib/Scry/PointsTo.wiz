@@ -365,16 +365,20 @@ def Scry.storeMems (st : Scry.PtState) (func : String) (p v : Wil.Var) :
 def Scry.callContrib (p : Wil.Program) (st : Scry.PtState) (func : String)
     (r : Option Wil.Var) (callee : Wil.Callee) (args : List Wil.Var) : Scry.Contrib :=
   let targets := Scry.callTargets p st func callee;
+  /-- A **direct** call to a function outside the unit: its result is `unknown` when it is
+  a pointer (the unit has no body to analyse), never "no alias". -/
+  let externalResult : List (Scry.VarKey × List Scry.Loc) := match callee with
+    | .indirect _ => .nil
+    | .direct name => match Wil.findFunc p name with
+      | .some _ => .nil
+      | .none => match r with
+        | .none => .nil
+        | .some rv => match Scry.ptrLike rv.ty with
+          | .false => .nil
+          | .true => .cons (Scry.vk func rv.index, Scry.unknownLocs) .nil;
   let perTarget := Scry.concatLists (fun name =>
     match Wil.findFunc p name with
-    | .none =>
-      /-- A call to a function outside the unit: its result is **unknown** when it is a
-      pointer (the unit has no body to analyse), never "no alias". -/
-      match r with
-      | .none => .nil
-      | .some rv => match Scry.ptrLike rv.ty with
-        | .false => .nil
-        | .true => .cons (Scry.vk func rv.index, Scry.unknownLocs) .nil
+    | .none => .nil
     | .some fn =>
       let params := Scry.concatLists (fun i =>
         match Scry.fnParam fn i.1 with
@@ -394,7 +398,8 @@ def Scry.callContrib (p : Wil.Program) (st : Scry.PtState) (func : String)
         | .some rv => match Scry.ptrLike rv.ty with
           | .false => .nil
           | .true => .cons (Scry.vk func rv.index, Scry.unknownLocs) .nil;
-  Scry.Contrib.mk (List.append perTarget unknownResult) .nil .nil
+  Scry.Contrib.mk (List.append externalResult (List.append perTarget unknownResult))
+    .nil .nil
 
 /-- The constraints one call adds (see `Scry.callContrib`). -/
 def Scry.stmtContrib (p : Wil.Program) (st : Scry.PtState) (func : String) (point : Nat)

@@ -386,6 +386,22 @@ def Scry.typeOf (c : Scry.Cst) (s : Scry.LState) (n : Nat) : Wil.Ty :=
           | .some t => t
           | .none => Wil.Ty.unknown
 
+/-- Is this node kind a declarator (so a parenthesised declarator's punctuation can be
+skipped)? -/
+def Scry.isDeclaratorK (k : String) : Bool :=
+  Bool.or (String.eq k "identifier")
+    (Bool.or (String.eq k "field_identifier")
+      (Bool.or (String.eq k "pointer_declarator")
+        (Bool.or (String.eq k "array_declarator")
+          (Bool.or (String.eq k "function_declarator")
+            (Bool.or (String.eq k "parenthesized_declarator")
+              (Bool.or (String.eq k "init_declarator")
+                (String.eq k "attributed_declarator")))))))
+
+/-- The declarator children of `n` (a parenthesised declarator also has `(`/`)` tokens). -/
+def Scry.declKids (c : Scry.Cst) (n : Nat) : List Nat :=
+  List.filter (fun j => Scry.isDeclaratorK (c.kindOf j)) (c.childrenOf n)
+
 /-- Wrap a type in as many pointers as the declarator's `pointer_declarator` nodes. -/
 def Scry.pointeeOf (base : Wil.Ty) (levels : Nat) : Wil.Ty :=
   match levels with
@@ -413,7 +429,7 @@ def Scry.declInfo (c : Scry.Cst) (s : Scry.LState) (n : Nat) (base : Wil.Ty) :
         | .false => match String.eq k "function_declarator" with
           | .true => Scry.fnDeclInfo c s n base
           | .false => match String.eq k "parenthesized_declarator" with
-            | .true => match Scry.kids c n with
+            | .true => match Scry.declKids c n with
               | .cons d _ => Scry.declInfo c s d base
               | .nil => ("", base, .true)
             | .false => match Scry.tyOfText s.tys (c.textOf n) with

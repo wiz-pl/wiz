@@ -106,10 +106,12 @@ offsets past one `anyOff` level.
 Fixtures and their expected results are in `tests/fixtures/mem-*.c` and asserted by
 `tests/taint.wiz`: same-slot store/load (1 finding, path through `store`/`load`),
 different slot (0), struct fields and a global field (2, and the sibling field 0), array
-elements (1, sibling elements/arrays 0), heap (1), pointer-to-pointer (1), aliased
+elements (1, sibling elements/arrays 0), a variable index (`a[i]` keeps the array, so 1
+finding and no false positive on `b[i]`), heap (1), pointer-to-pointer (1), aliased
 parameters (1 across two calls), `free` then use (1 finding + `use-after-free`), known
 indirect target (1), unknown indirect target (0 findings + `unknown-indirect`),
-returned pointer (1), and `strcpy` into one array (1, the other array 0).
+returned pointer (1), `strcpy` into one array (1, the other array 0), and an unmodelled
+external's pointer (1 finding + two `unknown-memory` warnings).
 
 **Boundary warnings now carry spans.** `Scry.Warning` has a `Wil.Span`, so a
 `lowering-boundary` result points at the construct (a cast, `sizeof`, a skipped `goto`, …)
