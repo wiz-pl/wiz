@@ -291,3 +291,64 @@ different handles.
   constructor (its type, number of parameters and of fields), `TacticM.ctorApp e` gives
   a constructor application's name and fields, and `TacticM.whnfCtorApp g e` computes
   first: `Prog.swap p q` is read as the `Prog.get p …` it computes to, in one request.
+
+## 6j: a registry for attributes and options
+
+Attributes and options used to be one parser rule and one match arm per name
+(`command.attrMacro`, `command.attrInline`, …, and a `match opt` in `set_option`). They
+are now entries in two typed tables in the command state; the command elaborator looks a
+name up, parses its payload by the entry's type, and reports an unknown name or a
+malformed payload once, for every attribute and option.
+
+```
+register_attribute tag          -- a user no-op, payload: flag
+def f : Nat := 1
+attribute [tag] f               -- validated, recorded in CommandState.attrUses
+
+register_option answer : Nat := 42
+set_option answer 7             -- CommandState.optValues["answer"] = 7
+```
+
+The registry lives in `Wiz/Elab/Registry.lean`:
+
+| type | meaning |
+|------|---------|
+| `AttrPayload` | `flag`, `name`, `nameOptName`, `nameOptNat`: what may follow the attribute name in `[...]` |
+| `AttrAction` | `noop`, `macro`, `tactic`, `implementedBy`, `inline`, `defaultInstance`, `binop`, `deriver`, `unexpander` |
+| `OptKind` / `OptValue` | `boolean`, `natural`, `string`, `name` / a typed value |
+| `OptAction` | `none`, `ppNotation`, `ppAll` (effects beyond storing the value) |
+
+`builtinAttributes` and `builtinOptions` are the default tables (`CommandState.attrDecls`
+and `optDecls`). `[inline]` is migrated completely: its dedicated parser and match arm
+are gone, and the generic `attribute [foo args] x` form dispatches to the registry.
+`pp.notation` and `pp.all` are migrated as options; they keep their effect on
+`Globals.pp.useNotation` (including `pp.all`'s inversion) and now also record their typed
+value. `[macro]`, `[tactic]`, `[implemented_by]`, `[default_instance]`, `[binop]`,
+`[deriver]` and `[app_unexpander]` keep their dedicated parser forms (they carry
+structural payloads and callbacks) but are registered, so a duplicate registration and an
+unknown name are diagnosed consistently.
+
+* **User no-ops.** `register_attribute name` adds a flag-payload no-op, and
+  `register_option name : Bool|Nat|String|Name := value` adds a typed option with a
+  default. A no-op attribute application is recorded as `(attribute, target, arguments)`
+  in `attrUses`; the state, not a callback, is the extension. `register_option` supports
+  an inclusive range on a `Nat` option through `OptDecl.range` (the command syntax uses
+  the default range; host code can set one).
+* **`local` and modules.** `local attribute [tag] x`, `local register_attribute`,
+  `local register_option` and `local set_option` are accepted. A local registration and
+  the applications of it end with the module (`CommandState.endModule`), and options are
+  module-scoped: a module's `set_option` values are restored when its import ends. A
+  semantic attribute (`[inline]`, `[macro]`, …) cannot be `local`, because its effect in
+  `Globals`/`builtins` is not undone; the error says so.
+* **Cache.** All of these commands are deliberately **not** in `Cache.cacheable`, like
+  `syntax` and `macro_rules`: a cached import replays them by re-elaborating the command,
+  so their state needs no `Effect` field and the cache salt is unchanged. The tests
+  exercise both a warm file cache and a warm import cache.
+* **Errors.** Unknown names say `unknown attribute 'foo'` / `unknown option 'foo'` and
+  list the registered names; a wrong payload says e.g. `attribute '[inline]' takes no
+  arguments`, `attribute '[macro]' takes one name argument`, or
+  ``option 'pp.notation' expects `true` or `false` ``; duplicate registrations say
+  `already registered`.
+
+The tests are the `elab-ext` group (`Tests/Groups/ElabExt.lean`): registration, a user
+extension, duplicate/unknown/malformed input, `local` isolation, and cache replay.

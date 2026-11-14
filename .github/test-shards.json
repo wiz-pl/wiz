@@ -90,6 +90,7 @@
     "data",
     "desceq",
     "elab",
+    "elab-ext",
     "eval",
     "inductive",
     "lexer",

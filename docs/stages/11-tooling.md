@@ -603,3 +603,36 @@ page runs.
   language-server client: they can ask a server for goals and diagnostics but cannot
   evaluate a term. The playground's evaluator is the self-hosted checker, which is Wiz
   code; exporting it is the only missing piece, and it needs no server.
+
+## 11ag: the attribute/option registry in the toolchain
+
+The command frontend now keeps two small registries (`Wiz/Elab/Registry.lean`), so a
+tool can ask what a name is instead of matching the fixed set:
+
+```lean
+s.attrDecl? "inline"       -- some { name := "inline", payload := .flag, action := .inline }
+s.optDecl? "pp.notation"   -- some { name := "pp.notation", kind := .boolean, default := .bool true, … }
+s.optValue? "pp.notation"  -- the module's value, or the declared default
+```
+
+* `CommandState.attrDecls` / `optDecls` are the registries (built-ins plus user
+  registrations, latest first); `attrUses` records no-op applications as
+  `(attribute, target, arguments)`, and `optValues` holds the options set in the module.
+  `register_attribute` / `register_option` are ordinary commands, so their effect is in
+  the per-command content-hash chain (`Wiz/Query.lean`) and the language server sees the
+  same state as the batch frontend.
+* **Diagnostics.** One path produces `unknown attribute 'foo' (registered: …)`,
+  `unknown option 'foo' (registered: …)`, `attribute '[inline]' takes no arguments`,
+  ``option 'pp.notation' expects `true` or `false` `` and `… is already registered`, instead
+  of a parse failure per attribute. A user attribute with an unknown target is
+  `unknown declaration 'x'`.
+* **Cache and modules.** `attribute`, `set_option`, `register_attribute` and
+  `register_option` stay out of `Cache.cacheable` (like `syntax`/`macro_rules`), so an
+  import replays them; no `Effect` field or cache-salt bump is needed. `local`
+  registrations and no-op applications are removed by `CommandState.endModule`, and a
+  module's options are restored when its import ends. The isolation cache key includes
+  the starting registries and option values (`Frontend.isoKey`), so a custom initial
+  state cannot reuse a module elaborated under another one.
+* The registry is the place `[simp]`, `[term_elab]` and per-deriver options can land
+  without a new parser rule or a new match arm; user code today gets no-op
+  attributes/options as data.

@@ -12,6 +12,7 @@ import Wiz.Elab.Reflect
 import Wiz.Frontend.Parse
 import Wiz.Elab.Witness
 import Wiz.Elab.Info
+import Wiz.Elab.Registry
 
 /-!
 # Elaborating commands
@@ -174,6 +175,24 @@ structure CommandState (R : Type) where
   /-- (11w) `local instance`s: their positions in `instances` (numbered from the oldest) -/
   localInsts : List Nat := []
 
+  /-- the attribute registry, latest first: the built-in names and user no-ops
+  (`register_attribute`). `[inline]` and every no-op application are looked up here. -/
+  attrDecls : List AttributeDecl := builtinAttributes
+  /-- the option registry, latest first (`pp.notation`, `pp.all`, and user no-ops from
+  `register_option`). -/
+  optDecls : List OptDecl := builtinOptions
+  /-- the options explicitly set in this module; an option not here has its declared
+  default (`CommandState.optValue?`). A module's options end with its import. -/
+  optValues : Std.HashMap Name OptValue := {}
+  /-- no-op attribute applications `(attribute, target, arguments)`, latest first -/
+  attrUses : List (Name × Name × Array String) := []
+  /-- (local) the positions of no-op applications that end with the module -/
+  localAttrUses : List Nat := []
+  /-- (local) the positions of attributes registered by `local register_attribute` -/
+  localAttrDecls : List Nat := []
+  /-- (local) the positions of options registered by `local register_option` -/
+  localOptDecls : List Nat := []
+
   /-- (11r) unexpanders declared with `app_unexpander c` and `attribute [app_unexpander c] f`,
   latest first, and which of them are `local` (numbered from the oldest) -/
   ppUser : List UnexpanderEntry := []
@@ -204,6 +223,29 @@ def withMarksOnDemand (g : Globals R) (d : Decl R) (k : Decl R → TCM (Globals 
 /-- (11s) The doc comment of a declaration, if it has one. -/
 def CommandState.docOf? (s : CommandState R) (n : Name) : Option String :=
   (s.declDocs.get? n).bind (·.doc)
+
+/-- The registry entry for an attribute, if `n` is registered. -/
+def CommandState.attrDecl? (s : CommandState R) (n : Name) : Option AttributeDecl :=
+  s.attrDecls.find? (·.name == n)
+
+/-- The registry entry for an option, if `n` is registered. -/
+def CommandState.optDecl? (s : CommandState R) (n : Name) : Option OptDecl :=
+  s.optDecls.find? (·.name == n)
+
+/-- The value of an option in this state: what was set, or its declared default. -/
+def CommandState.optValue? (s : CommandState R) (n : Name) : Option OptValue :=
+  match s.optValues.get? n with
+  | some v => some v
+  | none => (s.optDecl? n).map (·.default)
+
+/-- Set an option's value in the state, and apply its action (`pp.notation`/`pp.all`
+update the pretty printer's `useNotation`). -/
+def CommandState.setOptValue (s : CommandState R) (d : OptDecl) (v : OptValue) : CommandState R :=
+  let s := { s with optValues := s.optValues.insert d.name v }
+  match d.action, v with
+  | .ppNotation, .bool b => { s with globals := { s.globals with pp := { s.globals.pp with useNotation := b } } }
+  | .ppAll, .bool b => { s with globals := { s.globals with pp := { s.globals.pp with useNotation := !b } } }
+  | _, _ => s
 
 /-- "'n' has already been declared", naming the module that declared it if that is not
 the one being elaborated (two modules, or a module and the file importing it). -/
@@ -1330,15 +1372,33 @@ def CommandState.endModule (inner outer : CommandState R) : CommandState R :=
   let procs := inner.localProcs.take (inner.localProcs.length - outer.localProcs.length)
   let insts := inner.localInsts.take (inner.localInsts.length - outer.localInsts.length)
   let pps := inner.localPP.take (inner.localPP.length - outer.localPP.length)
-  -- (11r) `set_option pp.…` is the module's own
+  let useIxs := inner.localAttrUses.take (inner.localAttrUses.length - outer.localAttrUses.length)
+  let regAttrs := inner.localAttrDecls.take (inner.localAttrDecls.length - outer.localAttrDecls.length)
+  let regOpts := inner.localOptDecls.take (inner.localOptDecls.length - outer.localOptDecls.length)
+  -- (positions are numbered from the oldest, as `local` recorded them)
+  let atFromOldest {α : Type} (xs : List α) (i : Nat) : Option α := (xs.reverse.drop i).head?
+  let dropAt {α : Type} (xs : List α) (dropped : List Nat) : List α :=
+    let n := xs.length
+    (xs.zipIdx.filter fun (_, i) => !dropped.contains (n - 1 - i)).map (·.1)
+  -- (an application of a locally registered attribute ends with the registration)
+  let localAttrNames := regAttrs.filterMap fun i => (atFromOldest inner.attrDecls i).map (·.name)
+  -- (11r) `set_option` is the module's own; so is anything `local` registered
   let reset := { inner with localKinds := outer.localKinds, localCats := outer.localCats,
                             localRules := outer.localRules, localProcs := outer.localProcs,
                             localInsts := outer.localInsts, localPP := outer.localPP,
+                            localAttrUses := outer.localAttrUses, localAttrDecls := outer.localAttrDecls,
+                            localOptDecls := outer.localOptDecls,
+                            attrDecls := dropAt inner.attrDecls regAttrs,
+                            optDecls := dropAt inner.optDecls regOpts,
+                            attrUses := (dropAt inner.attrUses useIxs).filter
+                              fun (a, _, _) => !localAttrNames.contains a,
+                            optValues := outer.optValues,
                             globals := { inner.globals with pp := { inner.globals.pp with useNotation := outer.globals.pp.useNotation } } }
   -- (11w) a `local instance` is found only in its module (its definition stays: a name)
   let reset := if insts.isEmpty then reset else
     { reset with instances := (reset.instances.zipIdx.filter fun (_, i) => !insts.contains i).map (·.1) }
-  if kinds.isEmpty && cats.isEmpty && rules.isEmpty && procs.isEmpty && pps.isEmpty then reset else
+  if kinds.isEmpty && cats.isEmpty && rules.isEmpty && procs.isEmpty && pps.isEmpty &&
+      useIxs.isEmpty && regAttrs.isEmpty && regOpts.isEmpty then reset else
   let t := inner.tables
   let cats' := t.cats.fold (init := ({} : Std.HashMap Name Category)) fun acc c cat =>
     if cats.contains c then acc else
@@ -1564,9 +1624,20 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
     -- (13m) grammar that stays in this module: remember what the command adds
     let inner := cmd.getArg 1
     unless ["command.syntax", "command.declareSyntaxCat", "command.notation", "command.infix",
-            "command.macroRules", "command.attrMacro", "command.instance", "command.appUnexpander", "command.attrUnexpander"].contains inner.kind do
-      report .error cmd.info "only `syntax`, `declare_syntax_cat`, `notation`, `infixl`/`infixr`/`infix`, `macro_rules`, `attribute [macro …]`, `instance` and unexpanders can be `local`"
+            "command.macroRules", "command.attrMacro", "command.attr", "command.instance",
+            "command.appUnexpander", "command.attrUnexpander",
+            "command.registerAttribute", "command.registerOption", "command.setOption"].contains inner.kind do
+      report .error cmd.info "only `syntax`, `declare_syntax_cat`, `notation`, `infixl`/`infixr`/`infix`, `macro_rules`, a no-op `attribute`, `register_attribute`/`register_option`, `set_option`, `instance` and unexpanders can be `local`"
       return
+    -- (TT-04) a semantic attribute (`[inline]`, `[macro]`, …) cannot be undone by
+    -- `endModule`; only a no-op registration records data that can be dropped
+    if inner.isOfKind "command.attr" then
+      match s.attrDecl? ((inner.getArg 2).getId?.getD "_") with
+      | some d =>
+        unless d.action == .noop do
+          report .error inner.info s!"only a no-op attribute can be `local`; '{d.name}' has an effect that outlives its module"
+          return
+      | none => pure ()
     let before ← get
     elabCommand inner
     modify fun s =>
@@ -1576,7 +1647,10 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
                localRules := (List.range' before.macros.length (s.macros.length - before.macros.length)).reverse ++ s.localRules
                localProcs := (List.range' before.procMacros.length (s.procMacros.length - before.procMacros.length)).reverse ++ s.localProcs
                localInsts := (List.range' before.instances.size (s.instances.size - before.instances.size)).reverse ++ s.localInsts
-               localPP := (List.range' before.ppUser.length (s.ppUser.length - before.ppUser.length)).reverse ++ s.localPP }
+               localPP := (List.range' before.ppUser.length (s.ppUser.length - before.ppUser.length)).reverse ++ s.localPP
+               localAttrUses := (List.range' before.attrUses.length (s.attrUses.length - before.attrUses.length)).reverse ++ s.localAttrUses
+               localAttrDecls := (List.range' before.attrDecls.length (s.attrDecls.length - before.attrDecls.length)).reverse ++ s.localAttrDecls
+               localOptDecls := (List.range' before.optDecls.length (s.optDecls.length - before.optDecls.length)).reverse ++ s.localOptDecls }
   | "command.def" | "command.axiom" =>
     let name := ((cmd.getArg 1).getId?).getD "_"
     let levelParams := ((cmd.getArg 2).getArg 1).args.toList.filterMap Syntax.getId?
@@ -2571,19 +2645,142 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
         return
       modify fun s => CommandState.refreshPP { s with ppUser := { head := c, arity := 0, how := .fn f } :: s.ppUser }
   | "command.setOption" =>
-    -- (11r) `set_option pp.notation false` (`pp.all true`: the same)
-    let opt := ((cmd.getArg 1).getId?).getD ""
-    let v : Option Bool := match cmd.getArg 2 with
-      | .ident _ "true" => some true
-      | .ident _ "false" => some false
+    -- (11r, TT-04) every option is looked up in the registry (`optDecls`) and parsed by
+    -- its declared type; `pp.notation`/`pp.all` keep their effect on the pretty printer
+    let optStx := cmd.getArg 1
+    let opt := (optStx.getId?).getD ""
+    let valueOf (kind : OptKind) (stx : Syntax) : Except String OptValue :=
+      match kind with
+      | .boolean => match stx with
+        | .ident _ "true" => .ok (.bool true)
+        | .ident _ "false" => .ok (.bool false)
+        | _ => .error kind.expects
+      | .natural => match stx.getNat? with
+        | some n => .ok (.nat n)
+        | none => .error kind.expects
+      | .string => match stx.getStr? with
+        | some s => .ok (.str s)
+        | none => .error kind.expects
+      | .name => match stx.getId? with
+        | some n => .ok (.name n)
+        | none => .error kind.expects
+    match s.optDecl? opt with
+    | none =>
+      report .error optStx.info
+        s!"unknown option '{opt}' (registered: {", ".intercalate (s.optDecls.map (·.name))})"
+    | some d =>
+      match valueOf d.kind (cmd.getArg 2) with
+      | .error e => report .error (cmd.getArg 2).info s!"option '{opt}' {e}"
+      | .ok v =>
+        match d.validate v with
+        | .error e => report .error (cmd.getArg 2).info s!"option '{opt}' {e}"
+        | .ok () => modify fun s => s.setOptValue d v
+  | "command.registerAttribute" =>
+    -- (TT-04) a user attribute: a no-op with a flag payload. Its applications are data
+    -- in the state, so `local` can drop them with the module.
+    let nameStx := cmd.getArg 1
+    let n := (nameStx.getId?).getD "_"
+    if n == "_" || n.isEmpty then
+      report .error nameStx.info "register_attribute needs a name"
+    else if let some d := s.attrDecl? n then
+      report .error nameStx.info s!"attribute '{d.name}' is already registered"
+    else
+      modify fun s => { s with attrDecls := { name := n, payload := .flag, action := .noop } :: s.attrDecls }
+  | "command.registerOption" =>
+    -- (TT-04) a user option: typed (Bool/Nat/String/Name) and a no-op unless it is one
+    -- of the printing options above.
+    let nameStx := cmd.getArg 1
+    let n := (nameStx.getId?).getD "_"
+    let kindStx := cmd.getArg 3
+    let kindName := (kindStx.getId?).getD ""
+    let kind? : Option OptKind := match kindName with
+      | "Bool" => some .boolean
+      | "Nat" => some .natural
+      | "String" => some .string
+      | "Name" => some .name
       | _ => none
-    let set (b : Bool) : StateM (CommandState R) Unit :=
-      modify fun s => { s with globals := { s.globals with pp := { s.globals.pp with useNotation := b } } }
-    match opt, v with
-    | "pp.notation", some b => set b
-    | "pp.all", some b => set !b
-    | "pp.notation", none | "pp.all", none => report .error (cmd.getArg 2).info "expected `true` or `false`"
-    | o, _ => report .error (cmd.getArg 1).info s!"unknown option {o} (there are pp.notation and pp.all)"
+    match kind? with
+    | none => report .error kindStx.info s!"unknown option type '{kindName}' (use Bool, Nat, String or Name)"
+    | some kind =>
+      let valueOf (stx : Syntax) : Except String OptValue :=
+        match kind with
+        | .boolean => match stx with
+          | .ident _ "true" => .ok (.bool true)
+          | .ident _ "false" => .ok (.bool false)
+          | _ => .error kind.expects
+        | .natural => match stx.getNat? with
+          | some m => .ok (.nat m)
+          | none => .error kind.expects
+        | .string => match stx.getStr? with
+          | some str => .ok (.str str)
+          | none => .error kind.expects
+        | .name => match stx.getId? with
+          | some name => .ok (.name name)
+          | none => .error kind.expects
+      match valueOf (cmd.getArg 5) with
+      | .error e => report .error (cmd.getArg 5).info s!"option '{n}' {e}"
+      | .ok v =>
+        if n == "_" || n.isEmpty then report .error nameStx.info "register_option needs a name"
+        else if let some d := s.optDecl? n then
+          report .error nameStx.info s!"option '{d.name}' is already registered"
+        else modify fun s => { s with optDecls := { name := n, kind, default := v } :: s.optDecls }
+  | "command.attr" =>
+    -- (TT-04) `attribute [foo args] x`: the registry says what `foo` takes and does
+    let aStx := cmd.getArg 2
+    let a := (aStx.getId?).getD "_"
+    let targetStx := cmd.getArg 5
+    let args := (cmd.getArg 3).args
+    let argText (x : Syntax) : String := match x with
+      | .ident _ n => n
+      | .atom _ v => v
+      | .node _ _ #[a] => match a.getStr? with
+        | some s => s
+        | none => (a.getNat?.map toString).getD (toString (repr x))
+      | _ => toString (repr x)
+    match s.attrDecl? a with
+    | none =>
+      report .error aStx.info
+        s!"unknown attribute '{a}' (registered: {", ".intercalate (s.attrDecls.map (·.name))})"
+    | some d =>
+      let parsed : Except String (Array Syntax) := match d.payload with
+        | .flag => if args.isEmpty then .ok #[] else .error s!"attribute '[{d.name}]' {d.payload.expects}"
+        | .name =>
+          if args.size == 1 && args[0]!.getId?.isSome then .ok args
+          else .error s!"attribute '[{d.name}]' {d.payload.expects}"
+        | .nameOptName =>
+          if args.size ≤ 2 && args.all (fun x => x.getId?.isSome) then .ok args
+          else .error s!"attribute '[{d.name}]' {d.payload.expects}"
+        | .nameOptNat =>
+          if args.isEmpty then .ok #[] else
+          if args.size == 1 && args[0]!.getNat?.isSome then .ok args
+          else .error s!"attribute '[{d.name}]' {d.payload.expects}"
+      match parsed with
+      | .error e => report .error cmd.info e
+      | .ok args =>
+        match d.action with
+        | .noop =>
+          let f := s.globals.resolve ((targetStx.getId?).getD "_")
+          match s.globals.find? f with
+          | none => reportC targetStx.info s!"unknown declaration '{f}'" ErrorCode.unknownDeclaration
+          | some _ =>
+            modify fun s => { s with attrUses := (d.name, f, args.map argText) :: s.attrUses }
+        | .inline =>
+          -- `attribute [inline] f` (22i): compiled code substitutes `f`'s body where `f`
+          -- is applied to all its arguments. Registered as the builtin key `inline`; the
+          -- kernel doesn't see it.
+          let f := s.globals.resolve ((targetStx.getId?).getD "_")
+          match s.globals.find? f with
+          | none => reportC targetStx.info s!"unknown declaration '{f}'" ErrorCode.unknownDeclaration
+          | some decl =>
+            if decl.value.isNone then report .error targetStx.info s!"{f} has no definition to inline"
+            else if s.builtins.any (fun (k, x) => x == f && !k.startsWith RVal.exportPrefix) then
+              report .error targetStx.info s!"{f} is a builtin, foreign or inline function already"
+            else
+              modify fun s => { s with builtins := s.builtins ++ [(inlineKey, f)],
+                                       globals := { s.globals with builtins := s.globals.builtins ++ [(inlineKey, f)] } }
+        | _ =>
+          report .error cmd.info s!"attribute '[{d.name}]' has no generic form"
+
   | "command.attrTactic" =>
     let k := ((cmd.getArg 3).getId?).getD "_"
     let f := ((cmd.getArg 5).getId?).getD "_"
@@ -2692,21 +2889,6 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
           match setImpl s.globals f (.const impl us) with
           | .ok g' => modify fun s => { s with globals := g' }
           | .error e => report .error (cmd.getArg 3).info s!"kernel rejected {impl} as the implementation of {f}: {e}"
-  | "command.attrInline" =>
-    -- `attribute [inline] f` (22i): compiled code substitutes `f`'s body where `f` is
-    -- applied to all its arguments, so a lambda argument is applied directly (no
-    -- closure). Registered as the builtin key `inline`; the kernel doesn't see it.
-    let fStx := cmd.getArg 4
-    let f := (fStx.getId?).getD "_"
-    match s.globals.find? f with
-    | none => reportC fStx.info s!"unknown declaration '{f}'" ErrorCode.unknownDeclaration
-    | some d =>
-      if d.value.isNone then report .error fStx.info s!"{f} has no definition to inline"
-      else if s.builtins.any (fun (k, x) => x == f && !k.startsWith RVal.exportPrefix) then
-        report .error fStx.info s!"{f} is a builtin, foreign or inline function already"
-      else
-        modify fun s => { s with builtins := s.builtins ++ [(inlineKey, f)],
-                                 globals := { s.globals with builtins := s.globals.builtins ++ [(inlineKey, f)] } }
   | "command.attrDefaultInstance" =>
     -- (7f) `attribute [default_instance p] i`: when instance problems are stuck, the
     -- instance `i` is tried on those of its class, highest `p` (default 1000) first

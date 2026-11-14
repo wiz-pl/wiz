@@ -277,7 +277,12 @@ structure Effect (R : Type) where
   privates : Array (Name × String) := #[]
   opaques : Array (Name × String) := #[]
 
-/-- The command kinds whose effect is just the fields of `Effect`. -/
+/-- The command kinds whose effect is just the fields of `Effect`.
+
+`attribute`, `set_option`, `register_attribute`, `register_option` and `local` are
+deliberately absent (like `syntax` and `macro_rules`): an imported module's cached
+commands are replayed by re-elaborating these commands, so their state lives in
+`CommandState` and not in `Effect`; the cache salt does not change. -/
 def cacheable : List Name :=
   ["command.def", "command.axiom", "command.defEqns", "command.inductive", "command.structure",
    "command.class", "command.instance", "command.coinductive", "command.builtin", "command.extern",

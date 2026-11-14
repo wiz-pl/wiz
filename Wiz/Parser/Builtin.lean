@@ -273,9 +273,11 @@ continue onto a line starting at the command's column.
 | `command.local`              | "local" command (13m: a `syntax`, `notation`, `infix…`, `macro_rules` or `attribute [macro …]` whose syntax stays in the module; 11w: an `instance` found only in the module) |
 | `command.deriving`           | "deriving" "instance" C,+ "for" T,+ |
 | `command.attrDeriver`        | "attribute" "[" "deriver" ident "]" ident |
-| `command.attrInline`         | "attribute" "[" "inline" "]" ident |
+| `command.attr`               | "attribute" "[" ident [ident/num/str]* "]" ident (TT-04: a registered attribute) |
 | `command.attrDefaultInstance`| "attribute" "[" "default_instance" [num] "]" ident (7f) |
 | `command.attrBinop`          | "attribute" "[" "binop" "]" ident (7f) |
+| `command.registerAttribute`  | "register_attribute" ident (TT-04: a user no-op attribute) |
+| `command.registerOption`     | "register_option" ident ":" ident ":=" ident/num/str (TT-04: a user option) |
 | `command.coinductive`        | like `structure`; the fields are observations |
 | `command.defEqns`            | "def" ident [".{" us "}"] [binders] ":" T [alts] |
 | `command.partial`            | "partial" ["(" "default" ":=" w ")"] command (a `def`) |
@@ -288,6 +290,11 @@ A constructor is `inductive.ctor`: "|" ["private"] ident [binders] [":" T]. A fi
 makes the constructor, or the field's projection or observation, private to the module).
 -/
 def commandLeading : List LeadingParser := [
+  -- TT-04: the generic attribute form. It is declared first so that every dedicated
+  -- attribute rule below has a higher index and wins a tie; it still parses an unknown
+  -- name, or a malformed use of a known one, for the registry to report.
+  { kind := "command.attr", prec := maxPrec,
+    p := seqs ["attribute", "[", ident, many (orelse ident (orelse num str)), "]", ident] },
   { kind := "command.def", prec := maxPrec,
     p := seqs ["def", ident, univParams, many (bracketedBinder false), typeSpec false, ":=", term] },
   { kind := "command.defEqns", prec := maxPrec,
@@ -348,8 +355,7 @@ def commandLeading : List LeadingParser := [
   { kind := "command.attrImplementedBy", prec := maxPrec,
     p := seqs ["attribute", "[", nonReserved "implemented_by", ident, optional ident, "]", ident] },
   -- 22i: compiled code inlines the definition where it is applied (to all its arguments)
-  { kind := "command.attrInline", prec := maxPrec,
-    p := seqs ["attribute", "[", nonReserved "inline", "]", ident] },
+  -- (TT-04: `[inline]` is a registered attribute, written in the generic form below)
   -- 7f: a default instance (with a priority), and an operator whose numeral operands take
   -- the type of the others (Lean's `binop%`)
   { kind := "command.attrDefaultInstance", prec := maxPrec,
@@ -359,6 +365,10 @@ def commandLeading : List LeadingParser := [
   -- HD8: `deriving`
   { kind := "command.attrDeriver", prec := maxPrec,
     p := seqs ["attribute", "[", nonReserved "deriver", ident, "]", ident] },
+  -- TT-04: register a user attribute (a no-op, flag payload) or a typed option
+  { kind := "command.registerAttribute", prec := maxPrec, p := seqs ["register_attribute", ident] },
+  { kind := "command.registerOption", prec := maxPrec,
+    p := seqs ["register_option", ident, ":", ident, ":=", orelse ident (orelse num str)] },
   { kind := "command.deriving", prec := maxPrec,
     p := seqs ["deriving", "instance", sepBy1 ident ",", nonReserved "for", sepBy1 ident ","] },
   { kind := "command.declareSyntaxCat", prec := maxPrec, p := seqs ["declare_syntax_cat", ident, optional (seqs ["(", nonReserved "keywords", ":=", ident, ")"])] },
@@ -462,7 +472,7 @@ def macroCommands : List LeadingParser := [
   { kind := "command.appUnexpander", prec := maxPrec, p := seqs ["app_unexpander", ident, many1 matchAlt] },
   { kind := "command.attrUnexpander", prec := maxPrec,
     p := seqs ["attribute", "[", nonReserved "app_unexpander", ident, "]", ident] },
-  { kind := "command.setOption", prec := maxPrec, p := seqs ["set_option", ident, orelse ident num] }
+  { kind := "command.setOption", prec := maxPrec, p := seqs ["set_option", ident, orelse ident (orelse num str)] }
 ]
 
 def tables : ParserTables :=
