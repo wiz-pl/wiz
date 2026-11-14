@@ -174,6 +174,13 @@ cached between runs.
   script's fixtures (`--self-test`) and then the check, on every push and pull request
   (including docs-only ones), and `CI result` requires it. No code block is exempt; a
   reviewed exception goes in the script's `ALLOW` list with a reason.
+* **The documentation site** (the `docs` and `deploy-docs` jobs): on a push to `master`
+  only (not a pull request, the weekly run or a manual run), `docs` builds the
+  standard library's pages with `wiz doc --lib` (source links to the commit) and the Wasm
+  module that makes their signatures interactive, and uploads them as the artifact
+  `wiz-docs` (3 days, for debugging). `deploy-docs` then publishes that artifact to
+  GitHub Pages. Neither job is a required check, so a Pages outage does not fail the
+  suite. See "Documentation site" below.
 * **Trust ledger** (the `trust-ledger` job): `scripts/trust-ledger.sh --check` runs the
   `--trust-ledger` mode of the test driver (`Tests/Native.lean`) over `lib/` and the
   axiom-free examples, and compares the sources of trust it finds with
@@ -332,6 +339,53 @@ cached between runs.
   queue run that fails drops that PR from the queue and rebuilds the ones behind it
   without it. Without a queue (a user-owned repository), `--auto` waits for the required
   check and merges, and "require branches to be up to date" serialises merges instead.
+
+### Documentation site
+
+A push to `master` publishes the standard library's documentation from the `docs` job to
+GitHub Pages, at <https://wiz-pl.github.io/wiz/>. The tree is `wiz doc --lib`'s output
+plus the Wasm module (`web/build.sh`), exactly as the `wiz-docs` artifact holds it:
+
+| path | what it is |
+|---|---|
+| `index.html` | the landing page: the documented modules and their summaries |
+| `A.B.html` | one page per module (its declarations, signatures, docs, source links) |
+| `A.B.json` | the same page's data, for the interactive signatures |
+| `search.js`, `scroll.css`, `scroll.js`, `tagged.js`, `scroll-search.js` | the site's scripts and styles |
+| `wiz-infoview.mjs`, `wiz-infoview.wasm` | the infoview's Wasm module, when `web/build.sh` built it |
+
+All links in the pages are relative, so the `/wiz/` prefix of a project site works.
+`docs` and `deploy-docs` run only on `push` (`workflow_dispatch` runs do not publish).
+The artifact stays for 3 days for debugging; the site keeps the newest deployed tree
+until the next successful deployment, and `deploy-docs` serialises deployments
+(`concurrency: pages`, `cancel-in-progress: false`) so the site ends at the newest commit.
+
+**One-time repository setting.** Settings → Pages → Build and deployment → Source =
+"GitHub Actions". Without it `actions/configure-pages` has no site to configure and
+`deploy-docs` fails (the rest of CI is unaffected). An administrator can create or
+update the site from the command line instead of the web UI:
+
+```sh
+# create it (404 until then) with Actions as the source:
+gh api --method POST repos/wiz-pl/wiz/pages -f build_type=workflow
+# or, if the site already exists, switch its source:
+gh api --method PUT repos/wiz-pl/wiz/pages -f build_type=workflow
+# check:
+gh api repos/wiz-pl/wiz/pages --jq '{html_url, build_type, status}'
+```
+
+Both need repository admin rights; they are settings changes, not part of a normal
+development run.
+
+**One site, one tree.** A repository has one Pages site and every deployment replaces
+the entire tree, so `deploy-docs` must stay the only Pages publisher. The performance
+site (the `perf-site.yml` workflow when it lands) is designed to publish a
+self-contained dashboard; when it lands, it belongs *under* this deployment as
+`/perf/` — built into `doc-site/perf` before `upload-pages-artifact` — not in a second
+deploy job, which would replace the docs tree. Until then its own `deploy` job stays
+off (`PERF_SITE_DEPLOY` unset). Once `perf/` is there, link it from the site root (a
+step after `wiz doc` can add the link to its `index.html`, which is regenerated on every
+deploy).
 
 To run Wiz without a checkout or a Lean toolchain, with the binaries from Cachix:
 
