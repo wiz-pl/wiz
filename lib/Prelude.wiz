@@ -810,6 +810,16 @@ a node, an identifier, literals, applications.) -/
 def SyntaxF.ofList : List Syntax → SyntaxF .false
   | .nil => .nil
   | .cons x xs => .cons x (SyntaxF.ofList xs)
+/-- Two child lists one after the other (a quotation splices a `$xs*` into the node). -/
+def SyntaxF.concat : SyntaxF .false → SyntaxF .false → SyntaxF .false
+  | .nil, ys => ys
+  | .cons x xs, ys => .cons x (SyntaxF.concat xs ys)
+/-- A `sepBy` splice: the elements of `xs` with `sep` between them (`$xs,*`, 13t). -/
+def SyntaxF.ofListSep (sep : String) : List Syntax → SyntaxF .false
+  | .nil => .nil
+  | .cons x xs => match xs with
+    | .nil => .cons x .nil
+    | .cons _ _ => .cons x (.cons (.atom sep) (SyntaxF.ofListSep sep xs))
 /-- A node of kind `kind` with the children `args`: `Syntax.mkNode "term.app" [f, args]`. -/
 def Syntax.mkNode (kind : String) (args : List Syntax) : Syntax := .node kind (SyntaxF.ofList args)
 /-- The identifier `x`, as a token (where the grammar expects an `ident`). -/

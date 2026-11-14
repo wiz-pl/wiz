@@ -728,3 +728,25 @@ an ordinary application with its implicit length), so numerals go through `OfNat
 any argument (7e), and a wrong length or element type is the ordinary type mismatch.
 Patterns use the same macro expansion as list literals (13k). Tests: `language`
 ("13s: …").
+
+## 13t: quotation splices `$xs*` and `$xs,*`
+
+In a quotation, `$xs*` at a position whose grammar is `many`/`many1` splices the elements
+of `xs : List Syntax` into that node, and `$xs,*` does the same for a `sepBy`, putting its
+separator (here `","`) between the elements:
+
+```
+def mkApp (f : Syntax) (args : List Syntax) : Syntax := `(term| $f $args*)
+def mkList (xs : List Syntax) : Syntax := `(term| [$xs,*])
+macro_rules
+  | `(term| mylist[$xs,*]) => `(term| [$xs,*])
+```
+
+A splice may be the whole child list or have siblings before and after it (at most one
+splice per node); in a `macro_rules` pattern it binds the matched children as a `null`
+node of elements, and the template splices them back. `$xs*` does not know about
+separators, so a `sepBy` list uses `$xs,*` (with `$xs*` the `,` atoms are part of the
+list). The parser rule is `antiquot.splice`/`antiquot.spliceSep` (longer than `$xs`),
+the quote builder uses `SyntaxF.ofList`/`SyntaxF.ofListSep`/`SyntaxF.concat`
+(`lib/Prelude.wiz`). A splice needs a `List Syntax` (a `Syntax` is a type mismatch) and
+only means something inside a node's children. Tests: `elab` ("13t: …").

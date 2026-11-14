@@ -428,12 +428,21 @@ quotation `` `(c| …) `` as a term.
 An antiquotation wins ties against the category's other rules (a user rule like
 `syntax term : doSeq` would otherwise also read `$x` as a `doSeq`). To mean the
 other reading, annotate the category: in a `doSeq`, `$x:term` is a term, because
-it consumes more input than the `doSeq` antiquotation `$x`. -/
+it consumes more input than the `doSeq` antiquotation `$x`.
+
+A splice `$xs*` (or `$xs,*`, for a `sepBy`) stands for the elements of a list at a
+position where the grammar has `many`/`many1`/`sepBy`; see `elabQuote` (13t). -/
 def addMetaParsers (t : ParserTables) (c : Name) : ParserTables :=
   let plain := seqs ["$", noWs, ident]
   let annotated := seqs ["$", noWs, ident, noWs, ":", noWs, nonReserved c]
+  -- (13t) `$xs,*` (a `sepBy` splice) and `$xs*` (a `many` splice): longer than `$xs`,
+  -- and the comma form wins over the plain splice
+  let spliceSep := seqs ["$", noWs, ident, noWs, ",", noWs, "*"]
+  let splice := seqs ["$", noWs, ident, noWs, "*"]
   let t := t.addLeading c { kind := "antiquot", prec := maxPrec, priority := 1000, p := plain }
   let t := t.addLeading c { kind := "antiquot", prec := maxPrec, priority := 1000, p := annotated }
+  let t := t.addLeading c { kind := "antiquot.splice", prec := maxPrec, priority := 1001, p := splice }
+  let t := t.addLeading c { kind := "antiquot.spliceSep", prec := maxPrec, priority := 1002, p := spliceSep }
   let q : LeadingParser :=
     { kind := "quote." ++ c, prec := maxPrec,
       p := seqs ["`(", nonReserved c, "|", withoutPosition (cat c 0), ")"] }

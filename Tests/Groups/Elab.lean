@@ -71,6 +71,28 @@ def group : Group where
         check ((msgs[1]!.splitOn "b : Type 1").length > 1) s!"{msgs}" },
     { name := "user syntax without an elaborator is reported", run := fun _ =>
         fails "syntax \"magic\" : term\ndef x : Type := magic" "the syntax term.magic has no meaning" },
+    -- (13t) quotation splices `$xs*` / `$xs,*`
+    { name := "13t: a quotation splices a list into a node's children", run := fun _ =>
+        okLib ("import Prelude\ndef mkApp (f : Syntax) (args : List Syntax) : Syntax := `(term| $f $args*)\n" ++
+          "def mkList2 (xs : List Syntax) : Syntax := `(term| [$xs,*])\n" ++
+          "#eval mkApp (Syntax.mkVar \"f\") [Syntax.mkVar \"a\", Syntax.mkVar \"b\"]\n" ++
+          "#eval mkList2 [Syntax.mkVar \"a\", Syntax.mkVar \"b\"]")
+          [".node \"term.app\" (.cons (.node \"term.ident\" (.cons (.ident \"f\") .nil)) (.cons (.node \"null\" (.cons (.node \"term.ident\" (.cons (.ident \"a\") .nil)) (.cons (.node \"term.ident\" (.cons (.ident \"b\") .nil)) .nil))) .nil))",
+           ".node \"term.listLit\" (.cons (.atom \"[\") (.cons (.node \"null\" (.cons (.node \"term.ident\" (.cons (.ident \"a\") .nil)) (.cons (.atom \",\") (.cons (.node \"term.ident\" (.cons (.ident \"b\") .nil)) .nil)))) (.cons (.atom \"]\") .nil)))"] },
+    { name := "13t: macro rules match and rebuild `$args*` and `$xs,*`", run := fun _ =>
+        okLib ("import Prelude\n" ++
+          "macro_rules\n  | `(term| pack $f $args*) => `(term| $f $args*)\n" ++
+          "#eval pack (fun (x : Nat) => x) 7\n" ++
+          "#eval pack (fun (x y : Nat) => Nat.add x y) 8 9\n" ++
+          "syntax (name := mylist) \"mylist[\" sepBy(term, \",\") \"]\" : term\n" ++
+          "macro_rules\n  | `(term| mylist[$xs,*]) => `(term| [$xs,*])\n" ++
+          "#eval mylist[1, 2, 3]\n" ++
+          "macro_rules\n  | `(term| mylist[$x, $rest,*]) => `(term| [$rest,*])\n" ++
+          "#eval mylist[4, 5, 6]")
+          ["7", "17", ".cons 1 (.cons 2 (.cons 3 .nil))", ".cons 5 (.cons 6 .nil)"] },
+    { name := "13t: a splice needs a `List Syntax`, and must be inside a node", run := fun _ => do
+        failsLib "import Prelude\ndef q (x : Syntax) : Syntax := `(term| f $x*)" "type mismatch"
+        failsLib "import Prelude\ndef q (xs : List Syntax) : Syntax := `(term| $xs*)" "only allowed where a node's children" },
     { name := "duplicate definition", run := fun _ =>
         fails "def a : Type 1 := Type\ndef a : Type 1 := Type" "already been declared" }
   ]

@@ -3099,13 +3099,18 @@ Wiz `Syntax` value: `SyntaxF.missing`, `SyntaxF.atom "v"`, `SyntaxF.node "k" arg
 `args` a chain of `SyntaxF.cons`/`SyntaxF.nil`, and `SyntaxF.ident "x✝"`: an
 identifier gets the `✝` mark (its scope is chosen when the macro runs) unless it is
 dotted or under one of the `unscopedParents`, as in `instantiate`. An antiquotation
-`$x` is the local `x`, checked against `Syntax`. `mkStringLit` builds strings. -/
+`$x` is the local `x`, checked against `Syntax`; a splice `$xs*` is the local
+`xs : List Syntax` (`SyntaxF.ofList`, or `ofListSep` for `$xs,*`, 13t).
+`mkStringLit` builds strings. -/
 partial def elabQuote (ctx : LocalCtx R) (syntaxTy : VTy R) (parent : Name) (stx : Syntax) :
     ElabM R (Term R) := do
   --<sol
   let c (n : Name) : Term R := .const ("SyntaxF." ++ n) []
   if let some x := antiquotName? stx then
     return ← check ctx (.node stx.info "term.ident" #[.ident stx.info x]) syntaxTy
+  -- (13t) a splice outside a node: there is no list to splice into
+  if let some _ := antiquotSplice? stx then
+    throwAt stx.info "a splice `$xs*` is only allowed where a node's children are"
   match stx with
   | .missing => pure (c "missing")
   | .atom _ v => pure (.app (c "atom") (← mkStringLit v))
@@ -3115,7 +3120,18 @@ partial def elabQuote (ctx : LocalCtx R) (syntaxTy : VTy R) (parent : Name) (stx
   | .node _ k args =>
     let mut list := c "nil"
     for a in args.reverse do
-      list := .app (.app (c "cons") (← elabQuote ctx syntaxTy k a)) list
+      match antiquotSplice? a with
+      | some (x, sep) =>
+        -- (13t) `$xs*` is the `List Syntax` the splice binds: `SyntaxF.ofList xs`;
+        -- `$xs,*` puts the separator between the elements (`SyntaxF.ofListSep`)
+        let listTy ← evalIn ctx (.app (.const "List" []) (.const "Syntax" []))
+        let xs ← check ctx (.node a.info "term.ident" #[.ident a.info x]) listTy
+        let hd : Term R ← match sep with
+          | some s => pure (.app (.app (.const "SyntaxF.ofListSep" []) (← mkStringLit s)) xs)
+          | none => pure (.app (.const "SyntaxF.ofList" []) xs)
+        list := .app (.app (.const "SyntaxF.concat" []) hd) list
+      | none =>
+        list := .app (.app (c "cons") (← elabQuote ctx syntaxTy k a)) list
     pure (.app (.app (c "node") (← mkStringLit k)) list)
   --|ex
   --| sorry
