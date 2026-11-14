@@ -52,37 +52,17 @@ inductive JFields where
   | fcons (key : String) (val : Json) (tail : JFields)
 end
 
-/-- `(n / d, n % d)` for `d > 0`, by long division in binary. (Arithmetic the prelude
-doesn't have; pure, so `#eval` runs it.) -/
-partial def Json.divMod (n d : Nat) : Nat × Nat := match Nat.lt n d with
-  | .true => (0, n)
-  | .false =>
-    let p := Json.divMod n (d + d);
-    match Nat.lt p.2 d with
-    | .true => (p.1 + p.1, p.2)
-    | .false => (p.1 + p.1 + 1, p.2 - d)
-
 /-- Whether `lo ≤ c ≤ hi`. -/
 def Json.between (c lo hi : Nat) : Bool := Bool.and (Nat.le lo c) (Nat.le c hi)
 /-- The character with code point `n`. -/
 def Json.chr (n : Nat) : Char := Char.mk n
-/-- Whether two lists of characters are equal. -/
-def Json.charsEq : List Char → List Char → Bool
-  | .nil, .nil => .true
-  | .cons a as, .cons b bs => Bool.and (Nat.beq (Char.code a) (Char.code b)) (Json.charsEq as bs)
-  | _, _ => .false
-/-- The first list reversed in front of the second. (`String.eq`, `String.chars` and
-`Nat.repr` are lib/Text.wiz's.) -/
-def Json.revOnto : List Char → List Char → List Char
-  | .nil, acc => acc
-  | .cons c cs, acc => Json.revOnto cs (.cons c acc)
+/-- Whether two lists of characters are equal (`Chars.eq` in lib/Text.wiz). -/
+def Json.charsEq : List Char → List Char → Bool := Chars.eq
+/-- The first list reversed in front of the second (`List.revApp` in lib/Text.wiz). -/
+def Json.revOnto : List Char → List Char → List Char := List.revApp
 
-/-- The decimal digits of `n`, in front of `tail`. -/
-partial def Json.natChars (n : Nat) (tail : List Char) : List Char := match Nat.lt n 10 with
-  | .true => .cons (Json.chr (48 + n)) tail
-  | .false =>
-    let p := Json.divMod n 10;
-    Json.natChars p.1 (.cons (Json.chr (48 + p.2)) tail)
+/-- The decimal digits of `n`, in front of `tail` (`Nat.reprGo` in lib/Text.wiz). -/
+def Json.natChars (n : Nat) (tail : List Char) : List Char := Nat.reprGo n tail
 
 -- ## Printing
 
@@ -92,11 +72,10 @@ def Json.hexDigit (d : Nat) : Char := match Nat.lt d 10 with
   | .false => Json.chr (87 + d)
 /-- `\uXXXX` (lower-case hex) for `n < 0x10000`, in front of `tail`. -/
 def Json.u4 (n : Nat) (tail : List Char) : List Char :=
-  let a := Json.divMod n 4096;
-  let b := Json.divMod a.2 256;
-  let c := Json.divMod b.2 16;
-  .cons (Json.chr 92) (.cons (Json.chr 117) (.cons (Json.hexDigit a.1) (.cons (Json.hexDigit b.1)
-    (.cons (Json.hexDigit c.1) (.cons (Json.hexDigit c.2) tail)))))
+  .cons (Json.chr 92) (.cons (Json.chr 117) (.cons (Json.hexDigit (Nat.div n 4096))
+    (.cons (Json.hexDigit (Nat.div (Nat.mod n 4096) 256))
+    (.cons (Json.hexDigit (Nat.div (Nat.mod n 256) 16))
+    (.cons (Json.hexDigit (Nat.mod n 16)) tail)))))
 /-- A backslash and the character `c`, in front of `tail`. -/
 def Json.esc (c : Nat) (tail : List Char) : List Char := .cons (Json.chr 92) (.cons (Json.chr c) tail)
 
@@ -125,8 +104,8 @@ def Json.escapeChar (ascii : Bool) (c : Nat) (tail : List Char) : List Char :=
         | .true => match Nat.lt c 0x10000 with
           | .true => Json.u4 c tail
           | .false =>
-            let v := Json.divMod (c - 0x10000) 1024;
-            Json.u4 (0xD800 + v.1) (Json.u4 (0xDC00 + v.2) tail)
+            let d := c - 0x10000;
+            Json.u4 (0xD800 + Nat.div d 1024) (Json.u4 (0xDC00 + Nat.mod d 1024) tail)
 /-- `Json.escapeChar` on each character. -/
 def Json.escapeChars (ascii : Bool) : List Char → List Char → List Char
   | .nil, tail => tail
