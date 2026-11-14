@@ -86,6 +86,39 @@ def stdGroup : Group where
         failsLibs "import RingTactic\ndef bad (a b : Int) : a - b = b - a := by ring" "ring: not an identity of commutative rings" },
     { name := "ring: a goal that is not an equation of a ring", run := fun _ =>
         failsLibs "import RingTactic\ndef bad (x : Bool) : x = x := by ring" "ring: the goal is an equation, but not at Nat or Int" },
+    -- #255: the list lemma module (lib/List.wiz, lib/Text.wiz's list functions)
+    { name := "list lemmas: append, map, filter, all, any, membership (import List)", run := fun _ =>
+        okLibs ("import List\n" ++
+          "def a {A : Type} (l : List A) : List.append l .nil = l := List.append_nil l\n" ++
+          "def b {A : Type} (l m k : List A) : List.append (List.append l m) k = List.append l (List.append m k) := List.append_assoc l m k\n" ++
+          "def c {A B : Type} (f : A → B) (l k : List A) : List.map f (List.append l k) = List.append (List.map f l) (List.map f k) := List.map_append f l k\n" ++
+          "def d {A B C : Type} (g : B → C) (f : A → B) (l : List A) : List.map g (List.map f l) = List.map (fun x => g (f x)) l := List.map_map g f l\n" ++
+          "def e {A : Type} (p : A → Bool) (l k : List A) : List.filter p (List.append l k) = List.append (List.filter p l) (List.filter p k) := List.filter_append p l k\n" ++
+          "def f {A : Type} (p : A → Bool) (l k : List A) : List.all p (List.append l k) = Bool.and (List.all p l) (List.all p k) := List.all_append p l k\n" ++
+          "def g {A : Type} (p : A → Bool) (l k : List A) : List.any p (List.append l k) = Bool.or (List.any p l) (List.any p k) := List.any_append p l k\n" ++
+          "def h (x : Nat) (l k : List Nat) (m : List.Mem x l) : List.Mem x (List.append l k) := List.mem_append_left x l k m\n" ++
+          "def i (x : Nat) (l k : List Nat) (m : List.Mem x k) : List.Mem x (List.append l k) := List.mem_append_right x l k m\n" ++
+          "def j (x : Nat) (l k : List Nat) (m : List.Mem x (List.append l k)) : List.Mem x l ∨ List.Mem x k := List.mem_append_elim x l k m\n" ++
+          "def k {A : Type} (x y : A) (xs ys : List A) (m : @List.cons A x xs = @List.cons A y ys) : x = y := List.cons.inj m\n" ++
+          "def k2 {A : Type} (x y : A) (xs ys : List A) (m : @List.cons A x xs = @List.cons A y ys) : xs = ys := List.cons.inj_tail m\n" ++
+          "def k3 {A : Type} (x y : A) (xs ys : List A) (m : @List.cons A x xs = @List.cons A y ys) : (x = y ∧ xs = ys) := (List.cons.injEq x y xs ys).1 m\n" ++
+          "#eval List.length (List.filter (fun n => Nat.beq n 0) [0, 1, 0, 2])\n" ++
+          "#eval List.all (fun n => Nat.beq n 0) [0, 0]\n#eval List.any (fun n => Nat.beq n 0) [1, 2, 0]\n" ++
+          "#print axioms e\n#print axioms k\n#print axioms k2\n#print axioms List.cons.injEq")
+          ["2", ".true", ".true", "'e' does not depend on any axioms", "'k' does not depend on any axioms",
+           "'k2' does not depend on any axioms", "'List.cons.injEq' does not depend on any axioms"] },
+    -- #255: the Boolean algebra and Int.eq_of_beq
+    { name := "Boolean algebra and Int.eq_of_beq (import Logic, Int)", run := fun _ =>
+        okLibs ("import Logic\nimport Int\n" ++
+          "def a (b : Bool) : Bool.and b .true = b := Bool.and_true b\n" ++
+          "def b2 (b : Bool) : Bool.or b .false = b := Bool.or_false b\n" ++
+          "def c (a b : Bool) (h : Bool.or a b = .false) : a = .false := Bool.or_left a b h\n" ++
+          "def d (a b : Bool) (h : Bool.or (Bool.not a) b = .true) (ha : a = .true) : b = .true := Bool.implies a b h ha\n" ++
+          "def e (a b : Int) (h : Int.beq a b = .true) : a = b := Int.eq_of_beq a b h\n" ++
+          "#print axioms Bool.and_true\n#print axioms Bool.implies\n#print axioms Int.eq_of_beq\n" ++
+          "#eval Bool.and .true .false")
+          ["'Bool.and_true' does not depend on any axioms", "'Bool.implies' does not depend on any axioms",
+           "'Int.eq_of_beq' does not depend on any axioms", ".false"] },
     { name := "machine types: operators at UInt64 and Float64", run := fun _ =>
         okLibs "import IO\ndef f (a b : UInt64) : UInt64 := a * b + 1\ndef g (x : Float64) : Float64 := x * x - 2 / 3" },
     { name := "arrays, updated in place", run := fun _ =>

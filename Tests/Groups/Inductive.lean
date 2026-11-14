@@ -41,6 +41,12 @@ def inductiveGroup : Group where
             "#reduce len two") [".succ (.succ .zero)"] },
     { name := "casesOn: predecessor", run := fun _ =>
         ok (indPrelude ++ "def pred (n : Nat) : Nat := Nat.casesOn (fun _ => Nat) .zero (fun m => m) n\n#reduce pred (.succ (.succ .zero))") [".succ .zero"] },
+    { name := "an equation of constructors projects its fields (#265)", run := fun _ =>
+        ok (indPrelude ++
+          "def px (a a' b b' : Nat) (h : Point.mk a b = Point.mk a' b') : a = a' := h.1\n" ++
+          "def py (a a' b b' : Nat) (h : Point.mk a b = Point.mk a' b') : b = b' := h.2.1\n" ++
+          "#print axioms px\n#print axioms py")
+          ["'px' does not depend on any axioms", "'py' does not depend on any axioms"] },
     { name := "unknown constructor via dot", run := fun _ =>
         fails (indPrelude ++ "def bad : Nat := .three") "no constructor three" }
   ]

@@ -25,7 +25,8 @@ later (plan D4) without renaming.
 
 What is here: `Not` (`¬`), `And` (`∧`), `Or` (`∨`), `Iff` (`↔`), `Ex` (`∃`, with binder
 notation), the equality lemmas `Eq.symm`, `Eq.trans`, `Eq.congrArg`, `Eq.substProp`,
-and the definitional `propext` and `funext`.
+the definitional `propext` and `funext`, the Boolean algebra (`Bool.and_true`,
+`Bool.and_left`, `Bool.or_left`, `Bool.implies`, …), and `Option.some.inj`/`injEq`.
 
 ```
 import Logic
@@ -246,3 +247,57 @@ def Bool.and_left : (a b : Bool) → Bool.and a b = .true → a = .true
 def Bool.and_right : (a b : Bool) → Bool.and a b = .true → b = .true
   | .true, _, h => h
   | .false, _, h => absurd h.1
+/-- `b && true = b`. -/
+def Bool.and_true : (b : Bool) → Bool.and b .true = b
+  | .true => rfl
+  | .false => rfl
+/-- `b && false = false`. -/
+def Bool.and_false : (b : Bool) → Bool.and b .false = .false
+  | .true => rfl
+  | .false => rfl
+/-- `true && b = b`. -/
+def Bool.true_and (b : Bool) : Bool.and .true b = b := rfl
+/-- `false && b = false`. -/
+def Bool.false_and (b : Bool) : Bool.and .false b = .false := rfl
+/-- `b || true = true`. -/
+def Bool.or_true : (b : Bool) → Bool.or b .true = .true
+  | .true => rfl
+  | .false => rfl
+/-- `b || false = b`. -/
+def Bool.or_false : (b : Bool) → Bool.or b .false = b
+  | .true => rfl
+  | .false => rfl
+/-- `true || b = true`. -/
+def Bool.true_or (b : Bool) : Bool.or .true b = .true := rfl
+/-- `false || b = b`. -/
+def Bool.false_or (b : Bool) : Bool.or .false b = b := rfl
+/-- The left disjunct of a false `Bool.or`. -/
+def Bool.or_left : (a b : Bool) → Bool.or a b = .false → a = .false
+  | .true, _, h => absurd h.1
+  | .false, _, _ => rfl
+/-- The right disjunct of a false `Bool.or`. -/
+def Bool.or_right : (a b : Bool) → Bool.or a b = .false → b = .false
+  | .true, _, h => absurd h.1
+  | .false, _, h => h
+/-- A passed guard `!b || c`, at `b`: `b` holds and so does `c`. -/
+def Bool.implies : (b c : Bool) → Bool.or (Bool.not b) c = .true → b = .true → c = .true
+  | .true, _, h, _ => h
+  | .false, _, _, e => absurd e.1
+
+-- ## Options
+
+/-- `some` is injective: an equation of `some`s gives one of their values. (The kernel
+accepts the projection here: the equation's first field is the values' equation.) -/
+def Option.some.inj {A : Type} {v w : A}
+    (h : @Option.some A v = @Option.some A w) : v = w := h.1
+/-- `some v = some w` exactly when `v = w` (the `injEq` of `Option.some`). -/
+def Option.some.injEq {A : Type} (v w : A) :
+    (@Option.some A v = @Option.some A w) ↔ (v = w) :=
+  Iff.intro (fun h => h.1) (fun h => Eq.congrArg (@Option.some A) h)
+/-- `some` is not `none`. (`A` and `v` are explicit: they occur only in the hypothesis,
+which the elaborator does not use to solve them.) -/
+def Option.some_ne_none (A : Type) (v : A)
+    (h : @Option.some A v = @Option.none A) : False := h.1
+/-- `none` is not `some`. -/
+def Option.none_ne_some (A : Type) (v : A)
+    (h : @Option.none A = @Option.some A v) : False := h.1

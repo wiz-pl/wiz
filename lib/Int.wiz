@@ -112,6 +112,21 @@ instance : Mod Int := Mod.mk Int.mod
 /-- `congrArg`, kept local to this module: equal arguments give equal results. -/
 def Int.congrArg {A B : Type} (f : A → B) {a b : A} (e : a = b) : f a = f b :=
   transp (fun b _ => f a = f b) (refl (f a)) e
+/-- `Nat.beq` decides equality, kept local so that `Int` needs only the Prelude (the
+tests load `lib/Int.wiz` on its own; lib/Nat.wiz has the same lemma as `Nat.beq_eq`). -/
+def Int.natBeq_eq : (m n : Nat) → Nat.beq m n = .true → m = n
+  | .zero, .zero, _ => rfl
+  | .zero, .succ _, h => absurd h.1
+  | .succ _, .zero, h => absurd h.1
+  | .succ m, .succ n, h => Int.congrArg Nat.succ (Int.natBeq_eq m n h)
+/-- `Int.beq` decides equality: `Int.beq a b = .true` gives `a = b`. (The similarly
+named `Int.beq_eq` of lib/IntRing.wiz is the same fact for the reflection code; this one
+comes with `import Int`.) -/
+def Int.eq_of_beq : (a b : Int) → Int.beq a b = .true → a = b
+  | .ofNat m, .ofNat n, h => Int.congrArg Int.ofNat (Int.natBeq_eq m n h)
+  | .negSucc m, .negSucc n, h => Int.congrArg Int.negSucc (Int.natBeq_eq m n h)
+  | .ofNat _, .negSucc _, h => absurd h.1
+  | .negSucc _, .ofNat _, h => absurd h.1
 /-- `n + 0 = n` for natural numbers (a helper for `Int.add_zero`). -/
 def Int.natAdd_zero : (n : Nat) → n + 0 = n
   | .zero => rfl

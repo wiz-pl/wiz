@@ -624,7 +624,9 @@ with gates, proved equal to its multiplexer form and, once the opcode is known, 
 ## Logic, heap predicates and Hoare triples
 
 `lib/Logic.wiz` (`∧`, `∨`, `∃` with binder notation `∃ x : A, P`, `↔`, `¬`, ASCII
-`/\`, `\/`, `exists`, `<->`, equality lemmas, `funext`, `propext`; [13e](stages/13-language.md)),
+`/\`, `\/`, `exists`, `<->`, equality lemmas, `funext`, `propext`, the Boolean algebra
+`Bool.and_true`/`and_false`/`and_left`/`and_right`/`or_left`/`or_right`/`implies`, and
+`Option.some.inj`/`some.injEq`; [13e](stages/13-language.md)),
 `lib/HProp.wiz` (model heaps, `emp`, `↦`, `⋆`, `−∗`, entailment and the separation-logic
 laws), `lib/Hoare.wiz` (`wp`, triples, the frame rule, adequacy for an interpreter),
 `lib/HoareTactics.wiz` (SLF-style automation: `xsimpl`, `xpull`, `xstep`, `xapp`, …) and
@@ -726,6 +728,17 @@ reverse once); and each call into C converts the list to a C string and back. Sp
 200000 characters, joining and trimming them takes 0.1 s compiled (the `text` tests).
 `Std.Str` is the native alternative for indexing.
 
+`lib/List.wiz` (`import List`, which imports `Text`) is the list lemma module:
+`List.append_nil`, `append_assoc`, `map_append`, `map_map`, `length_map`,
+`filter_append`, `all_append`, `any_append`; membership is the proposition `List.Mem`
+(`x = y ∨ List.Mem x ys`) with `mem_append_left`/`mem_append_right`/`mem_append_elim`
+and `not_mem_nil`, and `List.cons.inj`/`inj_tail`/`injEq` project an equation of `cons`
+cells (the raw `h.2.1` for the tail comes out as a `cast` around an `Enum` proof, so
+`inj_tail` goes through `List.drop 1` with `Eq.congrArg`'s type arguments spelled out; see
+issue #265). `filter`, `all` and `any` are defined
+through step helpers (`List.filterStep`, `List.allStep`, `List.anyStep`) so their proofs
+can match on the test's value rather than on a computed `p x`.
+
 `lib/Json.wiz`, `lib/Deriving.wiz` and `lib/Hoare.wiz` import `Text` and use its
 `String.eq`, `String.chars`, `String.beq`, `Nat.repr`, `List.revApp` and `List.reverse`
 instead of copies of their own (two modules declaring one name are an error at import).
@@ -755,7 +768,7 @@ library gives an `Add` instance and gets `+`; it may also give a mixed one (`HMu
   instead of `.negSucc 9` (a printing hint, not an axiom: `#print axioms` lists nothing
   for it). Division truncates (`-7 / 2 = -3`, `-7 % 2 = -1`), like `IntN` and C. Also
   `Int.natAbs`, `Int.toNat` (negatives to 0), `Int.lt`/`le`/`beq`, and lemmas
-  `Int.neg_neg`, `Int.add_zero`, `Int.zero_add`, `Int.natAbs_neg`, `Int.lt_irrefl`, `Int.abs` with `Int.abs_mul`, `Int.abs_neg`. The ring laws, `int_ring!` and the order
+  `Int.neg_neg`, `Int.add_zero`, `Int.zero_add`, `Int.natAbs_neg`, `Int.lt_irrefl`, `Int.eq_of_beq` (from `Int.beq a b = .true`, `a = b`), `Int.abs` with `Int.abs_mul`, `Int.abs_neg`. `Int` imports only the Prelude: its `Int.beq` injectivity helper is local (`Int.natBeq_eq`), so loading `lib/Int.wiz` on its own still works. The ring laws, `int_ring!` and the order
   are in lib/IntRing.wiz and lib/IntOrder.wiz ("Arithmetic", below).
 * **Words.** One set of instances at `UIntN w` serves `U8 … U64` and `BitVec n` (aliases
   are seen through). `UIntN w` and `IntN w` have the same shape but are sealed, different
