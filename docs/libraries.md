@@ -576,6 +576,48 @@ one. The example/tests (group `hdl`, examples/hdl-cdc.wiz) are a `link` crossing
 Verilog, the XDC/PCF text, a BUFG output as a synchroniser's clock (`Prim.withOutDom`),
 and the multi-clock simulation refusal.
 
+## H14 P3: the CDC obligations C1–C8 (`lib/Hdl/Cdc.wiz`)
+
+The CDC rules of H14 P1/P2 are written down as data. `Cdc.Id` is C1–C8, `Cdc.Obligation`
+records each one's title, status and the code that discharges it, and
+`Cdc.obligations` is the table in order. A status is `checked` (a netlist rule rejects a
+design that breaks it), `proved`, `tested`, `assumed` (a physical/board assumption) or
+`gap`; `Cdc.statusCount` counts them. `Cdc.checkAll n` runs the netlist-checkable ones
+on a design and `Cdc.failures n` keeps the reports that found something (`Cdc.ok` is the
+boolean form). `Cdc.check` reports C1 (`Netlist.domainErrors`, which now includes the
+single-bit rule `Netlist.syncWidthErrors`) and C3 separately; C8 is discharged by the
+refusal itself, so it never reports a failure.
+
+| # | obligation | status | discharged by |
+|---|---|---|---|
+| C1 | one domain per net, crossings only through declared cells | checked | `Netlist.domainErrors` |
+| C2 | the source holds a value for the synchroniser's window | tested | `Cdc.stable n σ` (a predicate; `Cdc.stable_const` is proved), `Cdc.pulse` |
+| C3 | a synchroniser crosses one bit | checked | `Netlist.syncWidthErrors` |
+| C4 | asynchronous assert, synchronous deassert | tested | `Cdc.resetBridge` (the cell; no reset tree into `NetReg` yet) |
+| C5 | the handshake preserves items and makes progress | tested | `Cdc.hsTx`/`Cdc.hsRx` values, `Cdc.handshakeReqMulti` passes the checks |
+| C6 | P&R is told the clocks are asynchronous | checked | `Xdc.emit` writes `set_clock_groups -asynchronous` |
+| C7 | the synchroniser's MTBF meets the product target | assumed | `Cdc.Mtbf.problems` (the 3τ rule; the number needs `T_0`) |
+| C8 | a multi-clock design is never simulated as single-rate | checked | `Netlist.domainRefusals` |
+
+The cells: `Cdc.sync2` (two destination flops, one bit), `Cdc.pulse` (two flops and an
+edge detector: a level held for two destination edges becomes one destination-cycle
+pulse), `Cdc.resetBridge` (two flops with `arst` asynchronous, so assert is immediate and
+deassert is two edges later), and the four-phase handshake pair `Cdc.hsTx`/`Cdc.hsRx`.
+`Cdc.allVerilog` is the three Verilog modules the cells instantiate
+(`wiz_sync2`, `wiz_cdc_pulse`, `wiz_reset_sync`, all with `async_reg`); append it to the
+emitted design. `Cdc.handshakeReqMulti name src dst` builds the request direction as two
+single-clock parts and one `Cdc.wire`; the `ack` return is the same wire with the domains
+swapped, kept separate because a `Multi` cannot flatten a cyclic wire graph.
+
+Tests (group `hdl`, examples/hdl-cdc-law.wiz): the status table and counts, the
+stability predicate, a four-bit synchroniser and a four-bit unsynchronised crossing
+rejected (the negative test for C1/C3), the pulse/reset netlists clean, the handshake
+values and its `Multi`, the `set_clock_groups` line, the MTBF rule, and the exact module
+text; a second case runs the modules through Icarus and yosys `synth_ice40` (skipped
+without the tools). Not checked: reconvergence of two synchronised paths, a driver's data
+stability, the reset distribution tree, and an MTBF number. The design note is
+`wiz-notes/hdl-cdc.md`.
+
 ## H14 V1: verified circuit optimisation (`lib/Hdl/Verified.wiz`)
 
 The OLED demo's arithmetic units (wiz-icestick-uart, branch oled-demo: `Sphere.wiz`,

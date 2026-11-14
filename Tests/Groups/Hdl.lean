@@ -156,6 +156,31 @@ def hdlPrimTools : IO Unit := do
         unless (st.splitOn cell).length > 1 do throw (IO.userError s!"no {cell} in serial:\n{st}")
       if (o.stderr.splitOn "has no driver").length > 1 then throw (IO.userError s!"undriven wire:\n{o.stderr}")
 
+/-- The three CDC Verilog modules (`Cdc.allVerilog`): Icarus parses them and yosys maps
+each as its own `synth_ice40` top, when the tools are on PATH. -/
+def hdlCdcTools : IO Unit := do
+    let has (c : String) : IO Bool := (do let o ← IO.Process.output { cmd := c, args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
+    let iv ← has "iverilog"
+    let ys ← has "yosys"
+    unless iv || ys do skip "no iverilog, no yosys"; return
+    let s := runFrontend (R := ZeroOneMany) "import Hdl.Cdc\n#eval Cdc.allVerilog\n"
+      { trustedModule := Tests.libModule, loader := ← libLoader }
+    let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render ""
+    unless errs.isEmpty do throw (IO.userError s!"unexpected errors: {errs}")
+    let text := match s.messages.toList.map (·.text) with
+      | t :: _ => hdlUnq t
+      | [] => ""
+    IO.FS.withTempDir fun dir => do
+      let f := dir / "cdc.v"
+      IO.FS.writeFile f text
+      if iv then
+        let o ← IO.Process.output { cmd := "iverilog", args := #["-g2005", "-o", (dir / "cdc.vvp").toString, f.toString] }
+        unless o.exitCode == 0 do throw (IO.userError s!"iverilog rejects the CDC modules:\n{o.stderr}")
+      if ys then
+        for top in ["wiz_sync2", "wiz_cdc_pulse", "wiz_reset_sync"] do
+          let o ← IO.Process.output { cmd := "yosys", args := #["-q", "-p", s!"read_verilog cdc.v; synth_ice40 -top {top}; tee -o {top}.stat stat"], cwd := dir }
+          unless o.exitCode == 0 do throw (IO.userError s!"yosys fails on {top}:\n{o.stderr}")
+
 def hdlGroup : Group where
   name := "hdl"
   exercise := "HDL stage S0 (hdl-plan H14)"
@@ -296,13 +321,52 @@ def hdlGroup : Group where
            "\"module cross(input clk, input clk2, input [0:0] go, output [0:0] q);\\n  reg [0:0] tx_r; initial tx_r = 1'd0;\\n  reg [0:0] rx_r; initial rx_r = 1'd0;\\n  wire [0:0] n4;\\n  wiz_sync2 u3 (.clk(clk2), .d(tx_r), .q(n4));\\n  always @(posedge clk) tx_r <= go;\\n  always @(posedge clk2) rx_r <= n4;\\n  assign q = rx_r;\\nendmodule\\n\"",
            "\"module cross_core(input clk, input clk2, input [0:0] go, output [0:0] q);\\n  reg [0:0] tx_r; initial tx_r = 1'd0;\\n  reg [0:0] rx_r; initial rx_r = 1'd0;\\n  wire [0:0] n4;\\n  wiz_sync2 u3 (.clk(clk2), .d(tx_r), .q(n4));\\n  always @(posedge clk) tx_r <= go;\\n  always @(posedge clk2) rx_r <= n4;\\n  assign q = rx_r;\\nendmodule\\nmodule cross(input clk, input [0:0] go, output [0:0] q);\\n  wire ck_CLKFBOUT;\\n  wire ck_CLKOUT0;\\n  wire ck_CLKOUT1;\\n  PLLE2_BASE #(.CLKIN1_PERIOD(10.0), .CLKFBOUT_MULT(8), .DIVCLK_DIVIDE(1), .CLKOUT0_DIVIDE(8), .CLKOUT0_PHASE(0.0), .CLKOUT1_DIVIDE(2), .CLKOUT1_PHASE(0.0)) clocking (.CLKIN1(clk), .RST(1'b0), .PWRDWN(1'b0), .CLKFBOUT(ck_CLKFBOUT), .CLKFBIN(ck_CLKFBOUT), .CLKOUT0(ck_CLKOUT0), .CLKOUT1(ck_CLKOUT1));\\n  wire ck_CLKOUT0_g;\\n  BUFG bufg_CLKOUT0 (.I(ck_CLKOUT0), .O(ck_CLKOUT0_g));\\n  wire ck_CLKOUT1_g;\\n  BUFG bufg_CLKOUT1 (.I(ck_CLKOUT1), .O(ck_CLKOUT1_g));\\n  cross_core core (.clk(ck_CLKOUT0_g), .clk2(ck_CLKOUT1_g), .go(go), .q(q));\\nendmodule\\n\"",
            "\"module cross_core(input clk, input clk2, input [0:0] go, output [0:0] q);\\n  reg [0:0] tx_r; initial tx_r = 1'd0;\\n  reg [0:0] rx_r; initial rx_r = 1'd0;\\n  wire [0:0] n4;\\n  wiz_sync2 u3 (.clk(clk2), .d(tx_r), .q(n4));\\n  always @(posedge clk) tx_r <= go;\\n  always @(posedge clk2) rx_r <= n4;\\n  assign q = rx_r;\\nendmodule\\nmodule cross(input clk, input [0:0] go, input clk2, output [0:0] q);\\n  wire ck_CLKFBOUT;\\n  wire ck_CLKOUT0;\\n  PLLE2_BASE clocking (.CLKIN1(clk), .CLKFBOUT(ck_CLKFBOUT), .CLKFBIN(ck_CLKFBOUT), .CLKOUT0(ck_CLKOUT0));\\n  wire ck_CLKOUT0_g;\\n  BUFG bufg_CLKOUT0 (.I(ck_CLKOUT0), .O(ck_CLKOUT0_g));\\n  cross_core core (.clk(ck_CLKOUT0_g), .clk2(clk2), .go(go), .q(q));\\nendmodule\\n\"",
-           "\"set_property -dict { PACKAGE_PIN E3 IOSTANDARD LVCMOS33 } [get_ports {clk}]\\ncreate_clock -period 10.000 [get_ports {clk}]\\ncreate_clock -period 2.500 [get_ports {clk2}]\\nset_property -dict { PACKAGE_PIN F3 IOSTANDARD LVCMOS33 } [get_ports {clk2}]\\nset_property -dict { PACKAGE_PIN D9 IOSTANDARD LVCMOS33 } [get_ports {go}]\\nset_property -dict { PACKAGE_PIN D10 IOSTANDARD LVCMOS33 } [get_ports {q}]\\n\"",
+           "\"set_property -dict { PACKAGE_PIN E3 IOSTANDARD LVCMOS33 } [get_ports {clk}]\\ncreate_clock -period 10.000 [get_ports {clk}]\\ncreate_clock -period 2.500 [get_ports {clk2}]\\nset_property -dict { PACKAGE_PIN F3 IOSTANDARD LVCMOS33 } [get_ports {clk2}]\\nset_clock_groups -asynchronous -group [get_clocks {clk}] -group [get_clocks {clk2}]\\nset_property -dict { PACKAGE_PIN D9 IOSTANDARD LVCMOS33 } [get_ports {go}]\\nset_property -dict { PACKAGE_PIN D10 IOSTANDARD LVCMOS33 } [get_ports {q}]\\n\"",
            ".nil",
            "\"set_io clk 21\\nset_io go 1\\nset_io q 2\\nset_frequency clk 100\\nset_frequency clk2 400\\n\"",
            ".cons \"synchroniser wiz_sync2 (node 5): its data is in its clock's own domain clk2, not another one\" .nil",
            ".nil",
            "\"module cross(input clk, input clk2, input [0:0] go, output [0:0] q);\\n  reg [0:0] tx_r; initial tx_r = 1'd0;\\n  reg [0:0] rx_r; initial rx_r = 1'd0;\\n  wire [0:0] n4;\\n  wire [0:0] n6;\\n  BUFG u3 (.I(clk2), .O(n4));\\n  wiz_sync2 u5 (.clk(n4), .d(tx_r), .q(n6));\\n  always @(posedge clk) tx_r <= go;\\n  always @(posedge clk2) rx_r <= n6;\\n  assign q = rx_r;\\nendmodule\\n\"",
            ".error \"simulation refused: 2 clock domains (clk, clk2): multi-clock simulation needs an event schedule; wiz_sync2 (node 3) has no behavioural model\""] },
+    { name := "C1–C8: CDC obligations (Cdc.Obligation/checkAll), pulse/reset/handshake cells, single-bit rule, multi-bit negatives, asynchronous clock groups", run := fun _ => do
+        -- examples/hdl-cdc-law.wiz: the eight obligations and their status counts, the
+        -- stability predicate, a four-bit synchroniser (C3) and a four-bit unsynchronised
+        -- crossing (C1) rejected, the pulse/reset cells' netlists clean, handshake values,
+        -- the composed Multi, the XDC clock groups, MTBF assumptions, the modules' text
+        okLibs (← IO.FS.readFile "examples/hdl-cdc-law.wiz")
+          [
+            ".cons (\"C1\", \"checked\") (.cons (\"C2\", \"tested\") (.cons (\"C3\", \"checked\") (.cons (\"C4\", \"tested\") (.cons (\"C5\", \"tested\") (.cons (\"C6\", \"checked\") (.cons (\"C7\", \"assumed\") (.cons (\"C8\", \"checked\") .nil)))))))",
+            "4",
+            "0",
+            "3",
+            "1",
+            "0",
+            ".true",
+            ".false",
+            ".cons \"synchroniser wiz_sync2 (node 2): a data input is 4 bits wide; a synchroniser crosses one bit (use a handshake or a FIFO for a bus)\" .nil",
+            ".cons (\"C1\", .cons \"synchroniser wiz_sync2 (node 2): a data input is 4 bits wide; a synchroniser crosses one bit (use a handshake or a FIFO for a bus)\" .nil) (.cons (\"C3\", .cons \"synchroniser wiz_sync2 (node 2): a data input is 4 bits wide; a synchroniser crosses one bit (use a handshake or a FIFO for a bus)\" .nil) .nil)",
+            ".nil",
+            ".cons (\"C1\", .cons \"a clk signal (register r) is used by clk2 logic (register s): no synchroniser\" .nil) .nil",
+            ".false",
+            ".nil",
+            ".nil",
+            ".nil",
+            ".true",
+            ".true",
+            ".true",
+            ".true",
+            ".cons \"wiz_sync2\" (.cons \"wiz_cdc_pulse\" (.cons \"wiz_reset_sync\" .nil))",
+            ".cons (1, 0) (.cons (1, 0) (.cons (0, 0) (.cons (0, 0) (.cons (0, 1) .nil))))",
+            ".cons (1, 1) (.cons (1, 0) (.cons (0, 0) (.cons (0, 0) (.cons (1, 1) .nil))))",
+            ".nil",
+            ".true",
+            ".error \"simulation refused: 2 clock domains (clk, clk2): multi-clock simulation needs an event schedule; wiz_sync2 (node 24) has no behavioural model\"",
+            "\"set_property -dict { PACKAGE_PIN E3 IOSTANDARD LVCMOS33 } [get_ports {clk}]\\ncreate_clock -period 10.000 [get_ports {clk}]\\ncreate_clock -period 2.500 [get_ports {clk2}]\\nset_property -dict { PACKAGE_PIN F3 IOSTANDARD LVCMOS33 } [get_ports {clk2}]\\nset_clock_groups -asynchronous -group [get_clocks {clk}] -group [get_clocks {clk2}]\\nset_property -dict { PACKAGE_PIN D9 IOSTANDARD LVCMOS33 } [get_ports {go}]\\nset_property -dict { PACKAGE_PIN B9 IOSTANDARD LVCMOS33 } [get_ports {ack_in}]\\nset_property -dict { PACKAGE_PIN D10 IOSTANDARD LVCMOS33 } [get_ports {tick}]\\nset_property -dict { PACKAGE_PIN A9 IOSTANDARD LVCMOS33 } [get_ports {ack}]\\nset_property -dict { PACKAGE_PIN C9 IOSTANDARD LVCMOS33 } [get_ports {done}]\\n\"",
+            "\"\"",
+            ".nil",
+            ".cons \"MTBF: the settling window 600 ps is below 3τ = 900 ps\" .nil",
+            "\"module wiz_sync2(input clk, input d, output q);\\n  (* async_reg = \\\"true\\\" *) reg q1;\\n  (* async_reg = \\\"true\\\" *) reg q2;\\n  always @(posedge clk) begin\\n    q1 <= d;\\n    q2 <= q1;\\n  end\\n  assign q = q2;\\nendmodule\\nmodule wiz_cdc_pulse(input clk, input d, output q);\\n  (* async_reg = \\\"true\\\" *) reg q0;\\n  (* async_reg = \\\"true\\\" *) reg q1;\\n  always @(posedge clk) begin\\n    q0 <= d;\\n    q1 <= q0;\\n  end\\n  assign q = q0 ^ q1;\\nendmodule\\nmodule wiz_reset_sync(input clk, input arst, output rst);\\n  (* async_reg = \\\"true\\\" *) reg r1;\\n  (* async_reg = \\\"true\\\" *) reg r2;\\n  always @(posedge clk or posedge arst) begin\\n    if (arst) begin r1 <= 1'b1; r2 <= 1'b1; end\\n    else begin r1 <= 1'b0; r2 <= r1; end\\n  end\\n  assign rst = r2;\\nendmodule\\n\"",] },
+    { name := "CDC modules: Icarus parses and yosys synth_ice40 maps wiz_sync2, wiz_cdc_pulse, wiz_reset_sync (skipped without the tools)", run := fun _ => hdlCdcTools },
     { name := "S1: bundles, composition, reset and enable at random cycles; netlist simulation = values; names, test bench, PCF, VCD", run := fun _ => do
         -- t1–t6: (agreement of the netlist simulations with `Circuit.run`, the netlist size
         -- and the outputs) for the bundled counter, a delay chain, `par`, a feedback loop,

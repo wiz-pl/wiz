@@ -1,0 +1,179 @@
+import Hdl.Core
+import Hdl.Prim
+import Hdl.Cdc
+import Hdl.Xdc
+/-!
+# The CDC obligations C1–C8 (the law layer of `Hdl.Cdc`)
+
+`Cdc.Obligation` writes down the eight obligations of the CDC design note, each with a
+status: checked by a netlist rule, proved, tested, assumed, or a gap. `Cdc.checkAll` runs
+the netlist-checkable ones (C1 structure, C3 single-bit, C8 simulation honesty) on a
+design and `Cdc.failures` keeps what found something.
+
+The cells: `Cdc.sync2` (two destination flops, one bit), `Cdc.pulse` (a level held for
+two destination edges becomes one pulse), `Cdc.resetBridge` (asynchronous assert,
+synchronous deassert) and the four-phase handshake pair `Cdc.hsTx`/`Cdc.hsRx` composed by
+`Cdc.handshakeMulti`. `Cdc.stable` states C2's data-stability requirement; `Cdc.Mtbf`
+records C7's timing assumptions. `Xdc.emit` writes the C6 `set_clock_groups
+-asynchronous` constraint. Multi-clock simulation stays refused (C8).
+
+Run with `wiz check examples/hdl-cdc-law.wiz`; the `#eval`s are the (group `hdl`) test.
+-/
+
+/-- The second clock domain of the design (`clk` is `ClockDomain.sys`), 400 MHz. -/
+def d2 : ClockDomain := ClockDomain.mk "clk2" 2500
+/-- The implicit clock domain. -/
+def clk : ClockDomain := ClockDomain.sys
+
+--------------------------------------------------------------------------------
+-- C1–C8: the table and its status counts.
+
+-- (C1, checked) (C2, tested) (C3, checked) (C4, tested) (C5, tested)
+-- (C6, checked) (C7, assumed) (C8, checked)
+#eval Hdl.map (fun (o : Cdc.Obligation) => (o.id.name, o.status.name)) Cdc.obligations
+#eval Cdc.statusCount .checked
+#eval Cdc.statusCount .proved
+#eval Cdc.statusCount .tested
+#eval Cdc.statusCount .assumed
+#eval Cdc.statusCount .gap
+
+--------------------------------------------------------------------------------
+-- C2: data stability. A constant trace is stable (a proved base case); the bounded
+-- checker sees a changing trace.
+
+def stableConst : Cdc.stable 2 (Trace.const 7) := Cdc.stable_const 2 7
+#eval Cdc.stableUpTo 4 (Trace.const 7)
+#eval Cdc.stableUpTo 4 (Trace.once 0 1)
+
+--------------------------------------------------------------------------------
+-- Raw netlists for the C1/C3 negative tests.
+
+/-- A `w`-bit register node (register `r`). -/
+def regN (r w : Nat) : NetNode := NetNode.mk (NetOp.reg r) w List.nil
+/-- A clock-net node of domain `d`. -/
+def clockN (d : ClockDomain) : NetNode := NetNode.mk (NetOp.clock d.name) 1 List.nil
+/-- A `wiz_sync2` instance node on nodes `c` (its clock) and `a` (its data). -/
+def syncN (c a : Nat) : NetNode := NetNode.mk (NetOp.inst (Prim.erase Cdc.sync2P)) 0 (.cons c (.cons a .nil))
+/-- A `wiz_cdc_pulse` instance node. -/
+def pulseN (c a : Nat) : NetNode := NetNode.mk (NetOp.inst (Prim.erase Cdc.pulseP)) 0 (.cons c (.cons a .nil))
+/-- A `wiz_reset_sync` instance node. -/
+def resetN (c a : Nat) : NetNode := NetNode.mk (NetOp.inst (Prim.erase Cdc.resetBridgeP)) 0 (.cons c (.cons a .nil))
+/-- Output leaf 0 of the instance at node `k`, `w` bits wide. -/
+def outN (k w : Nat) : NetNode := NetNode.mk (NetOp.instOut 0 0) w (.cons k .nil)
+/-- A `w`-bit register named `name`, loading node `next`, on domain `dom`. -/
+def reg (name dom : String) (next w : Nat) : NetReg := NetReg.mk name w 0 next .none .none dom
+/-- A `w`-bit output port `y` showing node `k`. -/
+def outY (k w : Nat) : NetPort := NetPort.mk "y" w k "clk2"
+
+/-- A synchroniser declared with four bits of data: the single-bit rule (C3) rejects it,
+even though its clock and data domains are otherwise a legal crossing. -/
+def wideSyncP : Prim (HwTy.prod HwTy.clock (HwTy.bits 4)) (HwTy.bits 4) :=
+  Prim.declSync "wiz_sync2" .nil (.cons "clk" (.cons "d" .nil)) (.cons "q" .nil) .none
+
+/-- `r` (clk, 4 bits) through a four-bit "synchroniser" into `s` (clk2). -/
+def wideSync : Netlist :=
+  Netlist.mk "wideSync"
+    (.cons (regN 0 4) (.cons (clockN d2) (.cons (syncN 1 0) (.cons (outN 2 4) (.cons (regN 1 4) .nil)))))
+    (.cons (reg "r" "clk" 0 4) (.cons (reg "s" "clk2" 3 4) .nil))
+    List.nil (.cons (outY 4 4) .nil) List.nil List.nil (.cons clk (.cons d2 .nil)) List.nil
+
+/-- The negative test: a four-bit bus crosses from clk into clk2 with no synchroniser at
+all. The C1 structure rule rejects the sampling register, at any width. -/
+def wideUnsync : Netlist :=
+  Netlist.mk "wideUnsync"
+    (.cons (regN 0 4) (.cons (regN 1 4) .nil))
+    (.cons (reg "r" "clk" 0 4) (.cons (reg "s" "clk2" 0 4) .nil))
+    List.nil (.cons (outY 1 4) .nil) List.nil List.nil (.cons clk (.cons d2 .nil)) List.nil
+
+-- the single-bit rule: the declared four-bit synchroniser is rejected
+#eval Netlist.syncWidthErrors wideSync
+#eval Hdl.map (fun (r : Cdc.Report) => (r.id.name, r.errors)) (Cdc.failures wideSync)
+-- the multi-bit unsynchronised crossing: C1 rejects it (C3 is silent: no sync cell)
+#eval Netlist.syncWidthErrors wideUnsync
+#eval Hdl.map (fun (r : Cdc.Report) => (r.id.name, r.errors)) (Cdc.failures wideUnsync)
+#eval Cdc.ok wideUnsync
+
+--------------------------------------------------------------------------------
+-- C1/C2/C3/C4: the one-bit cells pass the structure and single-bit rules.
+
+/-- `r` (clk) through `sync2` into `s` (clk2): a legal one-bit crossing. -/
+def syncNet : Netlist :=
+  Netlist.mk "syncNet"
+    (.cons (regN 0 1) (.cons (clockN d2) (.cons (syncN 1 0) (.cons (outN 2 1) (.cons (regN 1 1) .nil)))))
+    (.cons (reg "r" "clk" 0 1) (.cons (reg "s" "clk2" 3 1) .nil))
+    List.nil (.cons (outY 4 1) .nil) List.nil List.nil (.cons clk (.cons d2 .nil)) List.nil
+
+/-- `level` (clk) through `Cdc.pulse` into `s` (clk2): a one-cycle pulse in clk2. -/
+def pulseNet : Netlist :=
+  Netlist.mk "pulseNet"
+    (.cons (regN 0 1) (.cons (clockN d2) (.cons (pulseN 1 0) (.cons (outN 2 1) (.cons (regN 1 1) .nil)))))
+    (.cons (reg "level" "clk" 0 1) (.cons (reg "s" "clk2" 3 1) .nil))
+    List.nil (.cons (outY 4 1) .nil) List.nil List.nil (.cons clk (.cons d2 .nil)) List.nil
+
+/-- `arst` (clk) through `Cdc.resetBridge` into `r` (clk2). -/
+def resetNet : Netlist :=
+  Netlist.mk "resetNet"
+    (.cons (regN 0 1) (.cons (clockN d2) (.cons (resetN 1 0) (.cons (outN 2 1) (.cons (regN 1 1) .nil)))))
+    (.cons (reg "arst" "clk" 0 1) (.cons (reg "r" "clk2" 3 1) .nil))
+    List.nil (.cons (outY 4 1) .nil) List.nil List.nil (.cons clk (.cons d2 .nil)) List.nil
+
+-- all three legal one-bit crossings: no failures of the netlist-checkable obligations
+#eval Cdc.failures syncNet
+#eval Cdc.failures pulseNet
+#eval Cdc.failures resetNet
+#eval Cdc.ok syncNet
+-- the cell declarations are crossings, and their Verilog is included in `Cdc.allVerilog`
+#eval Cdc.sync2P.sync
+#eval Cdc.pulseP.sync
+#eval Cdc.resetBridgeP.sync
+#eval Hdl.map (fun (p : Prim (HwTy.prod HwTy.clock HwTy.bit) HwTy.bit) => p.name)
+  (.cons Cdc.sync2P (.cons Cdc.pulseP (.cons Cdc.resetBridgeP .nil)))
+
+--------------------------------------------------------------------------------
+-- C5: the four-phase handshake. Two single-clock circuits, two synchronised wires.
+
+-- values: tx (req, done) after go, then ack high, then ack low
+#eval Hdl.map (fun (o : HwTy.El Cdc.hsTxOut) => (o.1.toNat, o.2.toNat))
+  (Circuit.run Cdc.hsTx (.cons (BitVec.ofNat 1 1, BitVec.ofNat 1 0)
+    (.cons (BitVec.ofNat 1 0, BitVec.ofNat 1 0)
+    (.cons (BitVec.ofNat 1 0, BitVec.ofNat 1 1)
+    (.cons (BitVec.ofNat 1 0, BitVec.ofNat 1 1)
+    (.cons (BitVec.ofNat 1 0, BitVec.ofNat 1 0) .nil))))))
+-- values: rx (ack, done) around two requests
+#eval Hdl.map (fun (o : HwTy.El Cdc.hsRxOut) => (o.1.toNat, o.2.toNat))
+  (Circuit.run Cdc.hsRx (.cons (BitVec.ofNat 1 1) (.cons (BitVec.ofNat 1 1)
+    (.cons (BitVec.ofNat 1 0) (.cons (BitVec.ofNat 1 0) (.cons (BitVec.ofNat 1 1) .nil))))))
+-- the composed request direction: one synchronised wire, no netlist failures
+def hsDesign : Multi := Cdc.handshakeReqMulti "hs" ClockDomain.sys d2
+#eval (Multi.netlist hsDesign).errors
+#eval Cdc.ok (Multi.netlist hsDesign)
+-- still refused: no multi-clock simulation (C8)
+#eval Netlist.simulateModelled (Multi.netlist hsDesign) List.nil
+
+--------------------------------------------------------------------------------
+-- C6: the asynchronous clock-group constraint. One group per domain.
+
+def board : XBoard := XBoard.mk "E3" 10000 "LVCMOS33"
+  (.cons (XPin.one "clk" "E3") (.cons (XPin.one "clk2" "F3")
+    (.cons (XPin.one "go" "D9") (.cons (XPin.one "ack_in" "B9")
+      (.cons (XPin.one "tick" "D10") (.cons (XPin.one "ack" "A9")
+        (.cons (XPin.one "done" "C9") .nil)))))))
+#eval Xdc.emit (Multi.netlist hsDesign) board
+-- one domain: no clock-group line (single-clock output unchanged)
+def counter : Circuit (HwTy.bits 1) (HwTy.bits 8) :=
+  Circuit.mk (HwTy.bits 8) (BitVec.ofNat 8 0) (fun s _ => Hw.pair (Hw.add s (Hw.lit 8 1)) s)
+#eval Xdc.clockGroupLine (Circuit.netlist "counter" counter)
+
+--------------------------------------------------------------------------------
+-- C7: MTBF assumptions. The 3τ rule of thumb, not the number.
+
+def goodMtbf : Cdc.Mtbf := Cdc.Mtbf.mk 10000 40000 1200 300
+def badMtbf : Cdc.Mtbf := Cdc.Mtbf.mk 10000 40000 600 300
+#eval Cdc.Mtbf.problems goodMtbf
+#eval Cdc.Mtbf.problems badMtbf
+
+--------------------------------------------------------------------------------
+-- The Verilog of the three cells (appended to the emitted module; compiled by the
+-- group's Icarus/yosys case).
+
+#eval Cdc.allVerilog

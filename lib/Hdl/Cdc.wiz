@@ -3,7 +3,7 @@ import Hdl.Prim
 /-!
 # Hdl.Cdc
 
-Clock-domain crossings (`import Hdl.Cdc`).
+Clock-domain crossings (`import Hdl.Cdc`), and the CDC obligations they discharge.
 
 A `Circuit` has one clock domain: all its registers tick together and `Circuit.run` is
 one step per input. A design with two clocks is a composition of such circuits, each
@@ -16,6 +16,9 @@ asynchronous data `d`; it is a `Prim` declared with `Prim.declSync`, so
 `Netlist.domainErrors` lets its data come from exactly one other domain, puts its output
 in `dst`'s domain, and rejects every other crossing (a register sampling another domain,
 a combinational path that mixes domains, a memory written from another domain, ...).
+`Netlist.syncWidthErrors` (part of `domainErrors`) additionally rejects a synchroniser
+whose data is wider than one bit: a bus needs a handshake or a FIFO, not a bank of
+two-flop synchronisers.
 
 ```
 def d2 : ClockDomain := ClockDomain.named "clk2"
@@ -28,8 +31,36 @@ The cell has no behavioural model (a model is one total function of its inputs, 
 two-flop delay can only be written as the identity), and the checked runners refuse a
 multi-domain netlist anyway (`Netlist.domainRefusals`): a two-clock design needs an
 event schedule, which `Netlist.simulate` does not have. `Cdc.verilog` is the Verilog
-module the emitted instance refers to; append its text to the module's file (the
-`async_reg` attributes keep the two flops together in synthesis).
+module the emitted instance refers to; append `Cdc.allVerilog` to the module's file (the
+`async_reg` attributes keep the flops together in synthesis).
+
+## Obligations C1–C8
+
+`Cdc.Obligation` writes down the eight obligations of the CDC design note
+(`wiz-notes/hdl-cdc.md`), each with its status: `checked` (a netlist check rejects a
+design that breaks it), `proved` (a theorem), `tested` (a test exercises it), `assumed`
+(a physical or board assumption the design must meet) or `gap` (not implemented).
+`Cdc.checkAll` runs the netlist-checkable ones on a design; `Cdc.failures` keeps the
+reports that found something. The other cells here are the cheap crossings that make the
+obligations usable:
+
+* `Cdc.sync2` — a single bit, two destination flops (C1, C3);
+* `Cdc.pulse` — a level held for two destination edges becomes one destination-cycle
+  pulse (a two-flop synchroniser and an edge detector; C2, C3);
+* `Cdc.resetBridge` — asynchronous assert, synchronous deassert, two destination flops
+  (C4; the reset tree itself is not emitted yet);
+* `Cdc.handshakeReqMulti` — a four-phase request/acknowledge pair of single-clock
+  circuits (`Cdc.hsTx`, `Cdc.hsRx`) with the `req` wire (C5; a bus may cross beside it
+  while `req` is held). Its `Multi` passes `Netlist.domainErrors`; the protocol is
+  tested, not proved. The return `ack` crossing is the same `Cdc.wire` with the domains
+  swapped; a `Multi` cannot flatten the cyclic wire graph of the full round trip in one
+  pass.
+
+`Xdc.emit` writes `set_clock_groups -asynchronous`, one group per clock domain, so a
+synthesis flow does not try to time paths between unrelated clocks (C6). `Cdc.Mtbf`
+records the synchroniser's timing assumptions and rejects a settling window below the
+usual `3τ` rule of thumb (C7; the MTBF itself needs board constants and is not
+computed). `Netlist.domainRefusals` keeps multi-clock simulation refused (C8).
 -/
 
 /-- The two-flop synchroniser's input: the destination clock and the asynchronous data. -/
@@ -52,3 +83,315 @@ def Cdc.verilog : String :=
   <+> "  (* async_reg = \"true\" *) reg q2;\n"
   <+> "  always @(posedge clk) begin\n    q1 <= d;\n    q2 <= q1;\n  end\n"
   <+> "  assign q = q2;\nendmodule\n"
+
+--------------------------------------------------------------------------------
+-- Pulse crossing (a level, held for two destination edges, becomes one pulse).
+
+/-- The pulse cell's input: the destination clock and the level to detect. -/
+def Cdc.pulseIn : HwTy := HwTy.prod HwTy.clock HwTy.bit
+/-- `wiz_cdc_pulse` (`Prim.declSync`): two destination flops and an edge detector. -/
+def Cdc.pulseP : Prim Cdc.pulseIn HwTy.bit :=
+  Prim.declSync "wiz_cdc_pulse" .nil (.cons "clk" (.cons "d" .nil)) (.cons "q" .nil) .none
+/-- `Cdc.pulse dst d`: one `dst`-cycle pulse for each rising edge of `d`, provided `d` is
+held at its new level for at least two `dst` edges (`Cdc.stable 2`). -/
+def Cdc.pulse {r : HwTy → Type} [Hw r] (dst : r HwTy.clock) (d : r HwTy.bit) : r HwTy.bit :=
+  Hw.prim Cdc.pulseP (Hw.pair dst d)
+/-- A top-level `Multi` wire through `Cdc.pulse`. -/
+def Cdc.pulseWire (dst : ClockDomain) (src dstName : String) : MultiWire :=
+  MultiWire.through (Prim.erase Cdc.pulseP) (.cons dst.name (.cons src .nil)) (.cons dstName .nil)
+/-- The Verilog module `wiz_cdc_pulse`. -/
+def Cdc.pulseVerilog : String :=
+  "module wiz_cdc_pulse(input clk, input d, output q);\n"
+  <+> "  (* async_reg = \"true\" *) reg q0;\n"
+  <+> "  (* async_reg = \"true\" *) reg q1;\n"
+  <+> "  always @(posedge clk) begin\n    q0 <= d;\n    q1 <= q0;\n  end\n"
+  <+> "  assign q = q0 ^ q1;\nendmodule\n"
+
+--------------------------------------------------------------------------------
+-- Reset bridge (asynchronous assert, synchronous deassert).
+
+/-- The reset bridge's input: the destination clock and the asynchronous reset. -/
+def Cdc.resetBridgeIn : HwTy := HwTy.prod HwTy.clock HwTy.bit
+/-- `wiz_reset_sync` (`Prim.declSync`): two destination flops with `arst` asynchronous. -/
+def Cdc.resetBridgeP : Prim Cdc.resetBridgeIn HwTy.bit :=
+  Prim.declSync "wiz_reset_sync" .nil (.cons "clk" (.cons "arst" .nil)) (.cons "rst" .nil) .none
+/-- `Cdc.resetBridge dst arst`: an asynchronous reset asserted at once, deasserted two
+`dst` edges later. The reset tree that distributes `rst` to the registers is not emitted
+yet (`NetReg` has no asynchronous reset form), so this is the cell, not the whole of C4. -/
+def Cdc.resetBridge {r : HwTy → Type} [Hw r] (dst : r HwTy.clock) (arst : r HwTy.bit) : r HwTy.bit :=
+  Hw.prim Cdc.resetBridgeP (Hw.pair dst arst)
+/-- A top-level `Multi` wire through `Cdc.resetBridge`. -/
+def Cdc.resetWire (dst : ClockDomain) (src dstName : String) : MultiWire :=
+  MultiWire.through (Prim.erase Cdc.resetBridgeP) (.cons dst.name (.cons src .nil)) (.cons dstName .nil)
+/-- The Verilog module `wiz_reset_sync`. -/
+def Cdc.resetVerilog : String :=
+  "module wiz_reset_sync(input clk, input arst, output rst);\n"
+  <+> "  (* async_reg = \"true\" *) reg r1;\n"
+  <+> "  (* async_reg = \"true\" *) reg r2;\n"
+  <+> "  always @(posedge clk or posedge arst) begin\n"
+  <+> "    if (arst) begin r1 <= 1'b1; r2 <= 1'b1; end\n"
+  <+> "    else begin r1 <= 1'b0; r2 <= r1; end\n"
+  <+> "  end\n"
+  <+> "  assign rst = r2;\nendmodule\n"
+
+/-- Every Verilog module the CDC cells instantiate: append this to the emitted design. -/
+def Cdc.allVerilog : String := Cdc.verilog <+> Cdc.pulseVerilog <+> Cdc.resetVerilog
+
+--------------------------------------------------------------------------------
+-- Four-phase handshake (two single-clock circuits and two synchronised wires).
+
+/-- The transmitter's input: `(go, ack)` (`ack` is the synchronised acknowledge). -/
+def Cdc.hsTxIn : HwTy := HwTy.prod HwTy.bit HwTy.bit
+/-- The transmitter's output: `(req, done)` (`done` is a one-cycle pulse). -/
+def Cdc.hsTxOut : HwTy := HwTy.prod HwTy.bit HwTy.bit
+/-- The transmitter's state: `(req, phase)` with phase 0 idle, 1 waiting for `ack` high,
+2 waiting for `ack` low. -/
+def Cdc.hsTxSt : HwTy := HwTy.prod HwTy.bit (HwTy.bits 2)
+/-- `Cdc.hsTx`: a four-phase request. `go` in the idle phase raises `req`; `ack` high
+drops it; `ack` low returns to idle and pulses `done`. A new `go` is ignored until then. -/
+def Cdc.hsTx : Circuit Cdc.hsTxIn Cdc.hsTxOut :=
+  Circuit.mk Cdc.hsTxSt (BitVec.ofNat 1 0, BitVec.ofNat 2 0)
+    (fun s x =>
+      let req := Hw.fst s
+      let ph := Hw.snd s
+      let go := Hw.fst x
+      let ack := Hw.snd x
+      let idle := Hw.eq ph (Hw.lit 2 0)
+      let waitHi := Hw.eq ph (Hw.lit 2 1)
+      let waitLo := Hw.eq ph (Hw.lit 2 2)
+      let req' := Hw.mux idle (Hw.mux go (Hw.lit 1 1) (Hw.lit 1 0))
+        (Hw.mux waitHi (Hw.mux ack (Hw.lit 1 0) (Hw.lit 1 1)) (Hw.lit 1 0))
+      let ph' := Hw.mux idle (Hw.mux go (Hw.lit 2 1) (Hw.lit 2 0))
+        (Hw.mux waitHi (Hw.mux ack (Hw.lit 2 2) (Hw.lit 2 1))
+          (Hw.mux ack (Hw.lit 2 2) (Hw.lit 2 0)))
+      let done := Hw.and waitLo (Hw.not ack)
+      Hw.pair (Hw.pair req' ph') (Hw.pair req' done))
+
+/-- The receiver's input: the synchronised request. -/
+def Cdc.hsRxIn : HwTy := HwTy.bit
+/-- The receiver's output: `(ack, done)`. -/
+def Cdc.hsRxOut : HwTy := HwTy.prod HwTy.bit HwTy.bit
+/-- `Cdc.hsRx`: acknowledge a request, hold `ack` while `req` is high, and pulse `done`
+on the cycle `req` first rises. `ack = req` (a level), with one state bit remembering the
+previous request for the edge detector. -/
+def Cdc.hsRx : Circuit Cdc.hsRxIn Cdc.hsRxOut :=
+  Circuit.mk HwTy.bit (BitVec.ofNat 1 0)
+    (fun s req =>
+      let done := Hw.and req (Hw.not s)
+      Hw.pair req (Hw.pair req done))
+
+/-- `Cdc.handshakeReqMulti name src dst`: the two handshake circuits on `src` and `dst`,
+with `req` synchronised into `dst` (`Cdc.wire dst "req" "req"`). `ack` is a top-level
+input to the transmitter: the return direction is the same wire with the domains swapped
+(`Cdc.wire src "ack" "ack"`), which a `Multi` cannot flatten in the same pass because the
+wire graph would be cyclic. Ports: `go`, `ack_in` (inputs), `tick` (the transmitter's
+`done`), `ack` (the receiver's acknowledge, a top output in this direction) and `done`
+(the receiver's). A bus can cross beside the request in the
+destination domain while `req` is high; the receive side captures it on `done`. -/
+def Cdc.handshakeReqMulti (name : String) (src dst : ClockDomain) : Multi :=
+  Multi.mk name (.cons src (.cons dst .nil))
+    (.cons (MultiPart.circuit "tx" src Cdc.hsTx
+              (.cons "go" (.cons "ack_in" .nil)) (.cons "req" (.cons "tick" .nil)))
+      (.cons (MultiPart.circuit "rx" dst Cdc.hsRx
+                (.cons "req" .nil) (.cons "ack" (.cons "done" .nil))) .nil))
+    (.cons (Cdc.wire dst "req" "req") .nil)
+
+--------------------------------------------------------------------------------
+-- Data stability (C2).
+
+/-- `Cdc.stable n σ`: the trace `σ` holds each value for at least `n` cycles: from every
+`t`, the next `n` cycles have the same value. A `sync2` (and a `pulse` edge) needs the
+source held for two destination edges; state it about the source signal's trace. -/
+def Cdc.stable (n : Nat) (σ : Trace Nat) : Prop :=
+  (t k : Nat) → Nat.le k n = .true → σ t = σ (Nat.add t k)
+
+/-- A constant trace is stable for any window (the base case of C2). -/
+def Cdc.stable_const (n v : Nat) : Cdc.stable n (Trace.const v) := fun t k h => rfl
+
+/-- Bounded, executable version of `Cdc.stable`: the first `n` steps do not change. -/
+def Cdc.stableStep (σ : Trace Nat) : Nat → Bool
+  | .zero => .true
+  | .succ j => Bool.and (Nat.beq (σ j) (σ (Nat.succ j))) (Cdc.stableStep σ j)
+def Cdc.stableUpTo (n : Nat) (σ : Trace Nat) : Bool := Cdc.stableStep σ n
+
+--------------------------------------------------------------------------------
+-- MTBF assumptions (C7).
+
+/-- The timing parameters of a two-flop synchroniser: the destination clock period, the
+source data period (mean time between changes), the settling window `t_r` and the flop's
+regeneration time constant `τ`, all in picoseconds. The standard MTBF is
+`exp (t_r / τ) / (T_0 · f_clk · f_data)`; it needs board constants (`T_0`), so this
+record's check is the usual rule of thumb, not the number. -/
+structure Cdc.Mtbf where
+  clkPs : Nat
+  dataPs : Nat
+  settlePs : Nat
+  tauPs : Nat
+
+/-- The problems of an MTBF assumption: zero periods, or a settling window below `3τ`
+(the rule of thumb below which the exponent gives no useful MTBF). -/
+def Cdc.Mtbf.problems (m : Cdc.Mtbf) : List String :=
+  List.append (match Nat.beq m.clkPs 0 with
+    | .true => .cons "MTBF: the destination clock period is 0" .nil
+    | .false => .nil)
+    (List.append (match Nat.beq m.dataPs 0 with
+      | .true => .cons "MTBF: the data period is 0" .nil
+      | .false => .nil)
+      (List.append (match Nat.beq m.tauPs 0 with
+        | .true => .cons "MTBF: τ is 0" .nil
+        | .false => .nil)
+        (match Nat.le (Nat.mul 3 m.tauPs) m.settlePs with
+        | .true => .nil
+        | .false => .cons ("MTBF: the settling window " <+> Hdl.show m.settlePs
+            <+> " ps is below 3τ = " <+> Hdl.show (Nat.mul 3 m.tauPs) <+> " ps") .nil)))
+
+--------------------------------------------------------------------------------
+-- The obligations C1–C8.
+
+/-- The eight CDC obligations (the numbering of `wiz-notes/hdl-cdc.md`, §C1–C8). -/
+inductive Cdc.Id where
+  | structural    -- C1
+  | stability    -- C2
+  | singleBit    -- C3
+  | reset        -- C4
+  | protocol     -- C5
+  | constraints  -- C6
+  | mtbf         -- C7
+  | simulation   -- C8
+
+/-- `C1` … `C8`. -/
+def Cdc.Id.name : Cdc.Id → String
+  | .structural => "C1"
+  | .stability => "C2"
+  | .singleBit => "C3"
+  | .reset => "C4"
+  | .protocol => "C5"
+  | .constraints => "C6"
+  | .mtbf => "C7"
+  | .simulation => "C8"
+
+/-- All eight, in order. -/
+def Cdc.ids : List Cdc.Id :=
+  .cons .structural (.cons .stability (.cons .singleBit (.cons .reset
+    (.cons .protocol (.cons .constraints (.cons .mtbf (.cons .simulation .nil)))))))
+
+/-- How an obligation is discharged. -/
+inductive Cdc.Status where
+  | checked      -- a netlist check rejects a design that breaks it
+  | proved       -- a theorem about the model
+  | tested       -- a test exercises it; no theorem
+  | assumed      -- a physical/board assumption the design must meet
+  | gap          -- identified, not implemented
+
+def Cdc.Status.name : Cdc.Status → String
+  | .checked => "checked"
+  | .proved => "proved"
+  | .tested => "tested"
+  | .assumed => "assumed"
+  | .gap => "gap"
+
+/-- Whether two statuses are the same. -/
+def Cdc.Status.same : Cdc.Status → Cdc.Status → Bool
+  | .checked, .checked => .true
+  | .proved, .proved => .true
+  | .tested, .tested => .true
+  | .assumed, .assumed => .true
+  | .gap, .gap => .true
+  | _, _ => .false
+
+/-- One CDC obligation: its id, a short title, how it is discharged, where, and what
+remains. -/
+structure Cdc.Obligation where
+  id : Cdc.Id
+  title : String
+  status : Cdc.Status
+  site : String
+  detail : String
+
+/-- The obligation table. `site` names the code that discharges it; `detail` says what
+the status means and what is still missing. -/
+def Cdc.obligation : Cdc.Id → Cdc.Obligation
+  | .structural => Cdc.Obligation.mk .structural "structure: one domain per net, crossings only through declared cells" .checked
+      "Netlist.domainErrors"
+      "every node's domain is the union of its arguments', a register or memory load must be in its own domain, and a synchroniser's clock is its output's; reconvergence of two synchronised paths is not checked"
+  | .stability => Cdc.Obligation.mk .stability "data stability: the source holds a value for the synchroniser's settling window" .tested
+      "Cdc.stable; Cdc.pulse"
+      "Cdc.stable n σ is the predicate (a constant trace is proved stable) and the pulse cell's contract needs two destination edges; nothing checks a driver's trace, so this is review plus the documented cell contract"
+  | .singleBit => Cdc.Obligation.mk .singleBit "single bit: a synchroniser crosses one bit; a bus needs a handshake or a FIFO" .checked
+      "Netlist.syncWidthErrors"
+      "rejects a sync cell whose data leaf is wider than one bit; the handshake pair is the bus crossing (C5)"
+  | .reset => Cdc.Obligation.mk .reset "reset: asynchronous assert, synchronous deassert, never used as data" .tested
+      "Cdc.resetBridge"
+      "the cell's Verilog is async-assert/sync-deassert; the reset tree into NetReg is not emitted and reset domains are not separate on this branch (the hdl-d5 ResetDomain rules are the full C4)"
+  | .protocol => Cdc.Obligation.mk .protocol "protocol: a handshake/FIFO preserves order, never duplicates or loses an item" .tested
+      "Cdc.hsTx, Cdc.hsRx, Cdc.handshakeMulti"
+      "the four-phase pair is exercised by value traces and its Multi passes the netlist checks; there is no refinement theorem against a queue spec"
+  | .constraints => Cdc.Obligation.mk .constraints "constraints: tell P&R the clocks are asynchronous" .checked
+      "Xdc.emit"
+      "emits set_clock_groups -asynchronous (one group per domain) and a create_clock per domain; set_max_delay -datapath_only on a handshake bus is still the designer's job"
+  | .mtbf => Cdc.Obligation.mk .mtbf "MTBF: the synchroniser and clock rates meet the product target" .assumed
+      "Cdc.Mtbf.problems"
+      "the timing parameters and the 3τ rule of thumb are checkable; the MTBF number needs board constants (T_0) and is not computed"
+  | .simulation => Cdc.Obligation.mk .simulation "simulation honesty: a multi-clock design is never simulated as single-rate" .checked
+      "Netlist.domainRefusals"
+      "checked runners refuse a netlist with more than one clock domain, and a sync cell has no behavioural model"
+
+/-- The obligation table in C1–C8 order. -/
+def Cdc.obligations : List Cdc.Obligation := Hdl.map Cdc.obligation Cdc.ids
+
+/-- `Cdc.byStatus` over a list. -/
+def Cdc.byStatusAux (s : Cdc.Status) : List Cdc.Obligation → List Cdc.Obligation
+  | .nil => .nil
+  | .cons o os => match Cdc.Status.same o.status s with
+    | .true => .cons o (Cdc.byStatusAux s os)
+    | .false => Cdc.byStatusAux s os
+/-- The obligations with a given status. -/
+def Cdc.byStatus (s : Cdc.Status) : List Cdc.Obligation := Cdc.byStatusAux s Cdc.obligations
+
+/-- How many obligations have a given status. -/
+def Cdc.statusCount (s : Cdc.Status) : Nat := List.length (Cdc.byStatus s)
+
+/-- The result of checking one obligation on a netlist: `errors` is empty when the
+obligation is discharged for that design. -/
+structure Cdc.Report where
+  id : Cdc.Id
+  errors : List String
+
+/-- Whether a report found nothing. -/
+def Cdc.Report.ok (r : Cdc.Report) : Bool := match r.errors with
+  | .nil => .true
+  | _ => .false
+
+/-- Run the netlist-checkable obligations on `n`. C1 is `Netlist.domainErrors` (which
+includes the single-bit rule); C3 is reported separately for a precise message. C2, C4,
+C5 and C7 are not decidable from a netlist alone; C6 is a constraint text (`Xdc.emit`),
+not a netlist property. C8 is discharged by the refusal itself (`Netlist.domainRefusals`):
+a multi-domain netlist that the checked runner will not simulate is honest, so there is
+nothing to report; the example checks the refusal directly. -/
+def Cdc.check (n : Netlist) (i : Cdc.Id) : Cdc.Report :=
+  Cdc.Report.mk i (match i with
+    | .structural => Netlist.domainErrors n
+    | .singleBit => Netlist.syncWidthErrors n
+    | .stability => List.nil
+    | .reset => List.nil
+    | .protocol => List.nil
+    | .constraints => List.nil
+    | .mtbf => List.nil
+    | .simulation => List.nil)
+
+/-- Every obligation's report on `n`, in C1–C8 order. -/
+def Cdc.checkAll (n : Netlist) : List Cdc.Report := Hdl.map (Cdc.check n) Cdc.ids
+
+/-- The reports that found something, from a list. -/
+def Cdc.failuresAux : List Cdc.Report → List Cdc.Report
+  | .nil => .nil
+  | .cons r rs => match Cdc.Report.ok r with
+    | .true => Cdc.failuresAux rs
+    | .false => .cons r (Cdc.failuresAux rs)
+/-- The reports that found something. -/
+def Cdc.failures (n : Netlist) : List Cdc.Report := Cdc.failuresAux (Cdc.checkAll n)
+
+/-- Whether every netlist-checkable obligation is discharged for `n`. -/
+def Cdc.ok (n : Netlist) : Bool := match Cdc.failures n with
+  | .nil => .true
+  | _ => .false

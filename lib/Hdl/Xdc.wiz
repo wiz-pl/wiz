@@ -11,6 +11,12 @@ pins, bit 0 first). A design's ports are looked up in the table by name, so the 
 can list the whole board and a design uses part of it (`Xdc.check` reports ports
 without a resource and widths that differ; unused resources are fine).
 
+A design with more than one clock domain also gets one
+`set_clock_groups -asynchronous` line, one group per domain (CDC obligation C6): timing
+analysis does not try to close the paths between clocks that are not phase-related, so
+the synchroniser flops need no max-delay constraint. A handshake bus still needs
+`set_max_delay -datapath_only` from the designer (the bus is sampled only after `req`).
+
 Port names as `Verilog.emit` declares them: a one-bit port is `[0:0]` there, and
 nextpnr names its pin by the bare port name (`uart_tx`), wider ones by bit
 (`led[0]`), as `Pcf.emit` does for nextpnr-ice40.
@@ -93,11 +99,22 @@ def Xdc.clockPins (n : Netlist) (b : XBoard) : String :=
   match n.clocks with
   | .nil => ""
   | .cons _ ds => Xdc.clockPinsTail b ds
+
+-- Clock groups (C6): clocks that are not phase-related are asynchronous. One group per
+-- domain tells timing analysis not to close the paths between them; the synchroniser
+-- flops are then free of a max-delay requirement. A single domain has nothing to
+-- separate, so no line is written (and the single-clock output is unchanged).
+def Xdc.clockGroup (d : ClockDomain) : String := "-group [get_clocks {" <+> d.name <+> "}]"
+def Xdc.clockGroupLine (n : Netlist) : String :=
+  match n.clocks with
+  | .cons _ (.cons _ _) => "set_clock_groups -asynchronous " <+> Hdl.sepBy " " (Hdl.map Xdc.clockGroup n.clocks) <+> "\n"
+  | _ => ""
 def Xdc.emit (n : Netlist) (b : XBoard) : String :=
   let ω vn := Verilog.portIdents n;
   Xdc.line b.iostd b.clk "clk"
   <+> Xdc.clockLines n b
   <+> Xdc.clockPins n b
+  <+> Xdc.clockGroupLine n
   <+> Xdc.ports b vn.ins n.inputs <+> Xdc.ports b vn.outs n.outputs
 
 -- What does not fit: ports without a resource, ports whose width is not the resource's.

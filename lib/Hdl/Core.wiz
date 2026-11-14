@@ -34,7 +34,8 @@ whose step is such code; its state is the registers.
   (`Circuit.netlistIn d`; `Circuit.netlist` is `ClockDomain.sys`). A design with two
   clocks is a wiring of single-clock circuits; data crossing from one domain into
   another must pass a synchroniser (`Prim.declSync`, `Hdl.Cdc`'s `Cdc.sync2`), and
-  `Netlist.domainErrors` rejects every other crossing.
+  `Netlist.domainErrors` rejects every other crossing. A synchroniser's data is one bit
+  (`Netlist.syncWidthErrors`, part of `domainErrors`): a bus needs a handshake or a FIFO.
 * **Bundles**: structures of signals (`structure Tx (r : HwTy → Type) where line : r Bit …`)
   are `Bundle`s: `deriving Bundle` gives their code and the conversions, and field access
   is the ordinary `s.line`.
@@ -2423,9 +2424,38 @@ def Net.domPrimOuts (n : Netlist) : Nat → List NetNode → List String
           <+> Hdl.show k <+> ")") x) p.outDom)
     | _ => List.nil) (Net.domPrimOuts n (Nat.succ k) ns)
 
+/-- The widths of a synchroniser's data leaves (its clock leaves skipped), in order. -/
+def Net.syncDataWidths (nodes : Hdl.Vec NetNode) : List PortKind → List Nat → List Nat
+  | .cons k ks, .cons a as => match k with
+    | .clock => Net.syncDataWidths nodes ks as
+    | _ => .cons (Hdl.Vec.get NetNode.none nodes a).width (Net.syncDataWidths nodes ks as)
+  | _, _ => List.nil
+/-- The single-bit rule's errors for one synchroniser: a data leaf wider than one bit.
+A bus needs a handshake or a FIFO, not a bank of two-flop synchronisers (C3). -/
+def Net.wideData (name : String) (k : Nat) : List Nat → List String
+  | .nil => List.nil
+  | .cons w ws => List.append (match Nat.beq w 1 with
+    | .true => List.nil
+    | .false => List.cons ("synchroniser " <+> name <+> " (node " <+> Hdl.show k <+> "): a data input is "
+        <+> Hdl.show w <+> " bits wide; a synchroniser crosses one bit (use a handshake or a FIFO for a bus)")
+        List.nil) (Net.wideData name k ws)
+/-- The single-bit rule over the nodes, in order. -/
+def Net.syncWidthNodes (cx : Net.DomCx) : Nat → List NetNode → List String
+  | _, .nil => List.nil
+  | k, .cons nd ns => List.append (match nd.op with
+      | .inst p => match p.sync with
+        | .true => Net.wideData p.name k (Net.syncDataWidths cx.nodes p.inKinds nd.args)
+        | .false => List.nil
+      | _ => List.nil) (Net.syncWidthNodes cx (Nat.succ k) ns)
+/-- The single-bit rule: every declared synchroniser's data is one bit wide (C3). A
+handshake or a FIFO carries a bus; a two-flop synchroniser carries one bit. -/
+def Netlist.syncWidthErrors (n : Netlist) : List String :=
+  Net.syncWidthNodes (Net.domCx n) 0 n.nodes
+
 /-- What is wrong with a netlist's clock domains: data crossing a domain boundary without
-a synchroniser, a synchroniser in the wrong domain, a clock used as data (that one is
-`Netlist.kindErrors`), and a domain the netlist does not declare. -/
+a synchroniser, a synchroniser in the wrong domain, a synchroniser carrying more than one
+bit (`Netlist.syncWidthErrors`), a clock used as data (that one is `Netlist.kindErrors`),
+and a domain the netlist does not declare. -/
 def Netlist.domainErrors (n : Netlist) : List String :=
   let ω cx := Net.domCx n;
   let ω ds := Net.domOf n;
@@ -2433,7 +2463,7 @@ def Netlist.domainErrors (n : Netlist) : List String :=
     (List.append (Net.domRegs cx ds n.regs)
       (List.append (Net.domMems cx ds n.mems)
         (List.append (Net.domDeclared n) (List.append (Net.domClockNets n 0 n.nodes)
-          (Net.domPrimOuts n 0 n.nodes)))))
+          (List.append (Net.domPrimOuts n 0 n.nodes) (Netlist.syncWidthErrors n))))))
 
 /-- What makes the checked runners refuse a netlist: more than one clock domain. The
 single-tick simulation (`Netlist.simulate`, `Circuit.run`) has one clock; a design whose
