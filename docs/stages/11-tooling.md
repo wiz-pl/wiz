@@ -46,12 +46,20 @@ as one `<cache>/<binary ⊕ module key>.wizr`, a `Lean.CompactedRegion` (the for
 `.olean`: an mmap'able image of the terms, saved at a base address derived from the module
 name; `Wiz/Cache.lean`, "Module regions"). `--region-cache` serves a module's cached
 commands from that region instead of decoding its `.wizc` entries. The text entries stay
-the authority and the fallback: a missing, truncated or mistagged region is a miss, and the
-next run rewrites it. The command loop (keys, imports, duplicate checks) is unchanged — it
+the authority and the fallback: a missing, truncated, corrupt (bad checksum) or mistagged
+region is a miss, and the next run rewrites it. The command loop (keys, imports, duplicate checks) is unchanged — it
 still parses every command and only takes the effects from the region, so the result is
 the same as the text path's. The artifact holds only `Effect`s, which have no closures, so
 the loader applies them to the live state (`Effect.apply`): `loader`, `trustedModule`,
-`pp.run` and the `Budget` stay live. `--region-stats` prints what came from a region.
+`pp.run` and the `Budget` stay live. `--region-stats` (a `wiz` flag) prints what came from
+a region.
+
+`grail` takes the same flag, as `--region-cache` or as the `region-cache` setting of
+`grail.wiz`/`grail.local.wiz` (`Toolchain.regionCache`). It is part of the toolchain record,
+so `grail config` shows it and `Toolchain.toFlags` passes it to every job: a job's
+in-process elaboration reads and writes regions in the same layers as its `.wizc` entries,
+and a warm `grail build --region-cache` takes the package modules' effects from `.wizr`
+instead of decoding the text.
 
 **Regions and layers together.** Regions live in the same directory layers as the text
 entries: a lookup tries the write cache first, then the read-only caches in order (so a
@@ -60,6 +68,32 @@ regions), and a region is only ever written to the write cache. A `--region-cach
 with `--cache-ro` therefore reads both kinds of artifact from both kinds of layer, never
 modifies a read-only cache, and still falls back to the text entry of the same module
 (or a later layer) when a region is missing or mistagged.
+
+**Checksums (`regionFormat` 2).** A `.wizr` file comes with a sidecar, `<region>.wizs`: the
+8-byte little-endian 64-bit hash of the `.wizr`'s bytes (`Wiz/Cache.lean`, `checksumFile`:
+one read of the image and the runtime's `ByteArray.hash`). It is
+checked *before* the image is mapped, so a same-size bit flip — even one in a pointer the
+type-erased reader would follow — is an ordinary miss: the text entry answers, the write
+cache rewrites the region, and a read-only layer is left alone. Truncation, and a region
+whose sidecar is missing or the wrong size, are misses too. (Not a trailer: Lean's compacted
+reader walks the image backwards from its end, so appended bytes shift the root and the read
+fails; the sidecar keeps the image byte-identical and lets the raw bytes be hashed first.)
+The cost is one sequential read (the pages are then mapped anyway) and a hash pass, not a
+decode: a few milliseconds on a multi-megabyte region. The region format is disposable and
+never migrated: a file of the wrong `format`/`magic` is a miss, and the writer always
+produces the current one (`regionFormat` is bumped when `Effect`, `Decl`, `Term` or `Info`
+change shape, or the framing does).
+
+**Pruning.** `wiz cache prune [--days N] [--dry-run]` (default 30 days) and
+`--cache-prune DAYS` on a run remove keyed files (`.wizc`, `.wizm`, `.wizr`, `.wizs`) whose
+modification time is older than N days, recursively, **in the write cache only**:
+`--cache-ro` layers are never passed to the pruner, and nothing but those four extensions
+is touched (the `bin/` memo, a package's files and symlinks stay). `--cache-prune` runs
+before the command, so this process has not mapped a region it deletes; `--dry-run` only
+counts and prints (`cache prune: would remove 12 files (… .wizc, … .wizm, … .wizr,
+… .wizs), 3 GiB older than 7 days in …`). A pruned entry is just a miss: the next run elaborates and rewrites it. N must
+be at least 1, and a read-only layer cannot be pruned even if it is passed with `--cache-ro`
+(the command says so).
 
 Next: finer dependencies (re-elaborate only what an edit affects, not everything
 after it).
