@@ -58,9 +58,9 @@ def digestNatPairs : List (Nat × Nat) → Nat
       (Nat.mul (digestNatPairs rest) 131)) 1000000007
 
 -- The tree invariant: the stored size, the weight balance and strict in-order keys.
-def balanceOk (l r : Tree Nat Nat) : Bool :=
-  let sl := Tree.size l;
-  let sr := Tree.size r;
+def balanceOk (l r : PMap.Tree Nat Nat) : Bool :=
+  let sl := PMap.Tree.size l;
+  let sr := PMap.Tree.size r;
   Bool.or (Nat.lt (Nat.add sl sr) 2)
     (Bool.and (Nat.lt sl (Nat.succ (Nat.mul 3 sr))) (Nat.lt sr (Nat.succ (Nat.mul 3 sl))))
 def above : Option Nat → Nat → Bool
@@ -69,14 +69,14 @@ def above : Option Nat → Nat → Bool
 def below : Option Nat → Nat → Bool
   | .none, _ => .true
   | .some hi, k => Nat.lt k hi
-def treeOkFrom : Tree Nat Nat → Option Nat → Option Nat → Bool
+def treeOkFrom : PMap.Tree Nat Nat → Option Nat → Option Nat → Bool
   | .leaf, _, _ => .true
   | .node l k _ r n, lo, hi =>
-    Bool.and (Nat.beq n (Nat.succ (Nat.add (Tree.size l) (Tree.size r))))
+    Bool.and (Nat.beq n (Nat.succ (Nat.add (PMap.Tree.size l) (PMap.Tree.size r))))
       (Bool.and (balanceOk l r)
         (Bool.and (above lo k) (Bool.and (below hi k)
           (Bool.and (treeOkFrom l lo (Option.some k)) (treeOkFrom r (Option.some k) hi)))))
-def treeOk (t : Tree Nat Nat) : Bool := treeOkFrom t .none .none
+def treeOk (t : PMap.Tree Nat Nat) : Bool := treeOkFrom t .none .none
 
 def log2Fuel : Nat → Nat → Nat
   | .zero, _ => Nat.zero

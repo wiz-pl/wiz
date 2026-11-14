@@ -885,7 +885,9 @@ O(n log n) for a list in arbitrary order.
 
 Only `find_empty` and `size_empty` are proved on the definitions; `find_insert`,
 `find_erase` and `size_insert` (and the sortedness and balance invariants across
-rotations) are checked by the tests rather than proved. Examples: `examples/persistent.wiz`
+rotations) are checked by the tests rather than proved. The internal tree is namespaced
+`PMap.Tree`, so `import PMap` adds no top-level `Tree`: a file may declare its own
+`Tree` and still import `PMap`/`PSet`. Examples: `examples/persistent.wiz`
 (the checks, group `persistent`) and `examples/persistent-bench.wiz`. The representation,
 complexity, persistence guarantees, benchmark plan and the migration path for replacing
 `U64Map` with a pure model plus a native backend are in
