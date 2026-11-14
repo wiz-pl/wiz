@@ -26,6 +26,8 @@ on:
     branches: [master]
     paths:
       - scripts/release-tarball.sh
+      - scripts/source-tarball.py
+      - scripts/test-source-tarball.sh
       - scripts/bundle-cc.sh
       - web/**
       - scripts/bundle-cc.sources
@@ -232,6 +234,26 @@ jobs:
           web=; [ "$BUNDLE_WEB" = yes ] && web="web-out"
           [ -z "$cc" ] && [ -n "$web" ] && { echo "a web dir needs the cc argument before it"; exit 1; }
           .release-tools/scripts/release-tarball.sh dist/wiz-x86_64-linux.tar.gz .lake/build/bin "$(git rev-parse HEAD)" $cc $web
+          ls -l dist
+      - name: The source tarball and its manifest (reproducible)
+        # docs/building.md, "Reproducible source tarball": from the tagged commit, twice,
+        # in different directories; a mismatch publishes nothing.
+        shell: bash
+        run: |
+          if [ ! -f .release-tools/scripts/source-tarball.py ]; then
+            echo "commit $GITHUB_SHA predates the source tarball script; not building one"
+            exit 0
+          fi
+          root=$(git rev-parse --show-toplevel)
+          rev=$(git rev-parse HEAD)
+          epoch=$(git log -1 --format=%ct)
+          python3 .release-tools/scripts/source-tarball.py --root "$root" --mode git \
+            --out dist --revision "$rev" --epoch "$epoch"
+          (cd "$RUNNER_TEMP" && python3 "$GITHUB_WORKSPACE/.release-tools/scripts/source-tarball.py" \
+             --root "$root" --mode git --out "$RUNNER_TEMP/src-check" \
+             --revision "$rev" --epoch "$epoch")
+          cmp dist/wiz-*-src.tar.gz "$RUNNER_TEMP"/src-check/*.tar.gz
+          cmp dist/wiz-*-src.tar.gz.manifest.json "$RUNNER_TEMP"/src-check/*.manifest.json
           ls -l dist
       - name: The tarball builds programs with no C compiler or GMP installed (plain Ubuntu containers)
         # the acceptance test of 26f: the images have no gcc, cc, clang, libgmp or libc

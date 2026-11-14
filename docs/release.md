@@ -63,8 +63,10 @@ git push origin vX.Y.Z
 
 The tag push runs release.yml. Its `exercises` job builds the exercise tree. Then
 `tarball` builds and tests the tarball, runs the install smoke test with the tag's name,
-and publishes the release `vX.Y.Z` with `wiz-x86_64-linux.tar.gz` and its `.sha256`.
-The release notes are CHANGELOG.md's section `[X.Y.Z]` plus the install line; the step
+and publishes the release `vX.Y.Z` with `wiz-x86_64-linux.tar.gz` and its `.sha256`,
+plus the reproducible source tarball `wiz-<version>-src.tar.gz` with its
+`.manifest.json` and `.sha256` ([building.md](building.md), "Reproducible source
+tarball"). The release notes are CHANGELOG.md's section `[X.Y.Z]` plus the install line; the step
 fails if the section is missing. If the release already exists (a re-run), the step
 fails rather than replace its assets. Delete a half-made draft release by hand before
 re-running. The release is not a pre-release.
@@ -75,10 +77,27 @@ Snapshot pruning keeps every snapshot that a `v*` tag points at.
 
 1. `sh scripts/test-release-install.sh --online wiz-x86_64-linux.tar.gz vX.Y.Z`, with the
    tarball downloaded from the release, checks the published URLs too.
-2. On a clean machine (`docker run --rm -it ubuntu:24.04`):
+2. The source tarball reproduces from the tag. Check out the tag and build it twice,
+   then compare with each other and with the published asset:
+
+   ```sh
+   root=$(git rev-parse --show-toplevel)
+   python3 "$root/scripts/source-tarball.py" --root "$root" --out /tmp/src-a --mode git
+   (cd /tmp && python3 "$root/scripts/source-tarball.py" --root "$root" \
+      --out /tmp/src-b --mode git)
+   cmp /tmp/src-a/*.tar.gz /tmp/src-b/*.tar.gz
+   sha256sum /tmp/src-a/*.tar.gz
+   ```
+
+   The SHA-256 must equal the published `.sha256` file and the manifest's
+   `tarball.sha256`, and both manifests' `tree.sha256` must match. A mismatch means the
+   tag was not built from the source it claims (the epoch is the commit's, so it does
+   not depend on the machine).
+
+3. On a clean machine (`docker run --rm -it ubuntu:24.04`):
    `curl -sSfL https://raw.githubusercontent.com/wiz-pl/wiz/vX.Y.Z/scripts/tower-init.sh | sh -s -- vX.Y.Z`.
    Then check that `wiz --version` prints `wiz X.Y.Z (<sha of the tag>)` and that
    `tower default stable` resolves to `vX.Y.Z`. Also run once with Nix:
    `nix run github:wiz-pl/wiz/vX.Y.Z#wiz -- --version`.
-3. Open a PR that sets the version to the next `-dev` (`0.2.0-dev`) in the four places
+4. Open a PR that sets the version to the next `-dev` (`0.2.0-dev`) in the four places
    above.
