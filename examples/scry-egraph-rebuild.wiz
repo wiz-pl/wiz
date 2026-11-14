@@ -1,0 +1,49 @@
+import Scry.Egraph
+-- Rebuild and repair (`scry-egraph-rebuild`): a batch of equality facts unions four
+-- leaves; one rebuild must canonicalise every stored class and child, and congruence
+-- must carry the equalities through `f` and `g` at every level. `main` is the digest.
+
+-- ops: 0..3 = leaves a, b, c, d; 4 = f (unary), 5 = g (unary)
+def ga : Scry.EGraph :=
+  let e := Scry.EGraph.empty;
+  let a := Scry.EGraph.add e (Scry.ENode.leaf 0);
+  let b := Scry.EGraph.add a.1 (Scry.ENode.leaf 1);
+  let c := Scry.EGraph.add b.1 (Scry.ENode.leaf 2);
+  let d := Scry.EGraph.add c.1 (Scry.ENode.leaf 3);
+  let fa := Scry.EGraph.add d.1 (Scry.ENode.mk 4 [a.2]);
+  let fb := Scry.EGraph.add fa.1 (Scry.ENode.mk 4 [b.2]);
+  let fc := Scry.EGraph.add fb.1 (Scry.ENode.mk 4 [c.2]);
+  let fd := Scry.EGraph.add fc.1 (Scry.ENode.mk 4 [d.2]);
+  let ga' := Scry.EGraph.add fd.1 (Scry.ENode.mk 5 [fa.2]);
+  let gb := Scry.EGraph.add ga'.1 (Scry.ENode.mk 5 [fb.2]);
+  let gc := Scry.EGraph.add gb.1 (Scry.ENode.mk 5 [fc.2]);
+  let gd := Scry.EGraph.add gc.1 (Scry.ENode.mk 5 [fd.2]);
+  gd.1
+
+def u (n : Nat) : U64 := U64.ofNat n
+
+def classOfD (g : Scry.EGraph) (n : Scry.ENode) (d : Nat) : Nat :=
+  match Scry.EGraph.classOf g n with
+  | .none => d
+  | .some c => c
+
+def main : Nat :=
+  let rows : List (List U64) := [[u 0, u 1], [u 1, u 2], [u 2, u 3]];
+  let before := Scry.EGraph.numClasses ga;
+  let m := Scry.EGraph.mergeFacts ga rows;
+  let cfa := classOfD m.1 (Scry.ENode.mk 4 [0]) 900;
+  let cfb := classOfD m.1 (Scry.ENode.mk 4 [1]) 901;
+  let cfc := classOfD m.1 (Scry.ENode.mk 4 [2]) 902;
+  let cfd := classOfD m.1 (Scry.ENode.mk 4 [3]) 903;
+  let cga := classOfD m.1 (Scry.ENode.mk 5 [cfa]) 904;
+  let cgb := classOfD m.1 (Scry.ENode.mk 5 [cfb]) 905;
+  let cgc := classOfD m.1 (Scry.ENode.mk 5 [cfc]) 906;
+  let cgd := classOfD m.1 (Scry.ENode.mk 5 [cfd]) 907;
+  let allF := Scry.EGraph.sameClass m.1 cfa cfb;
+  let allG := Scry.EGraph.sameClass m.1 cga cgd;
+  (if m.2 then 10000 else 0) +
+  Scry.EGraph.numClasses m.1 * 1000 +
+  (if Nat.beq before 12 then 100 else 0) +
+  (if allF then 10 else 0) +
+  (if allG then 1 else 0) +
+  (if Scry.EGraph.canonical m.1 then 1000 else 0)

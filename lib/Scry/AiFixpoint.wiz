@@ -1,0 +1,250 @@
+import Prelude
+import Text
+import Deriving
+import Logic
+import Scry.AiDomain
+import Scry.AiCfg
+/-!
+# Scry.AiFixpoint: worklist engine, narrowing, alarms and the post-fixpoint checker
+
+Stage S5's untrusted fast path and its result checker.
+
+* `AState` is the invariant map `block → Env`.
+* `solve` is a chaotic-iteration worklist: edges are queued when their source state
+  grows, and a block that is reached again is widened. It is a `partial def`; nothing
+  about termination is proved (widening makes it terminate for the finite-height
+  domains here, but the engine is outside the trusted base).
+* `narrowOnce` improves a widened post-fixpoint once, as §4.6 describes.
+* `check` is the §5.3 certificate checker: every edge must satisfy
+  `transfer (inv p) ⊑ inv q`, the entry must be covered, and every statement's alarm
+  condition must be discharged by the invariant. It reports `Alarm`s; an empty list is
+  acceptance. The checker never trusts the engine.
+
+```
+import Scry.AiFixpoint
+
+#eval check (AiMach.mk 8) exampleCfg (fixpoint (AiMach.mk 8) exampleCfg)  -- []
+```
+-/
+
+/-- The invariant map: a finite association list from block id to environment. -/
+def AState : Type := List (Nat × Env)
+
+/-- Look a block's invariant up, with a default. -/
+def AState.lookupGo (p : Nat) (d : Env) : AState → Env
+  | .nil => d
+  | .cons (k, v) rest => match Nat.beq p k with
+    | .true => v
+    | .false => AState.lookupGo p d rest
+
+def AState.getD (st : AState) (p : Nat) (d : Env) : Env := AState.lookupGo p d st
+
+/-- Set a block's invariant. -/
+def AState.set (p : Nat) (v : Env) : AState → AState
+  | .nil => .cons (p, v) .nil
+  | .cons (k, w) rest => match Nat.beq p k with
+    | .true => .cons (k, v) rest
+    | .false => .cons (k, w) (AState.set p v rest)
+
+/-- The initial invariant map: every block bottom. -/
+def AState.bot (cfg : ACfg) : AState :=
+  List.map (fun q => (q.1, Env.botOf cfg.vars)) cfg.stmts
+
+/-- The state of a block, defaulting to bottom (all variables `Value.bot`). -/
+def AState.at (cfg : ACfg) (st : AState) (p : Nat) : Env :=
+  AState.getD st p (Env.botOf cfg.vars)
+
+-- ## The worklist engine
+
+/-- Queue the outgoing edges of a block. -/
+def ACfg.enqueue (cfg : ACfg) (rest : List AEdge) (p : Nat) : List AEdge :=
+  List.append rest (ACfg.outEdges cfg p)
+
+/-- One worklist iteration. The auxiliary recursion carries `st`, the queue and the set
+of blocks already reached (the widening points). -/
+partial def solveGo (m : AiMach) (cfg : ACfg) (st : AState) (queue : List AEdge)
+    (seen : List Nat) : AState :=
+  match queue with
+  | .nil => st
+  | .cons e rest =>
+      let src := AState.at cfg st e.src
+      let blockOut := AStmt.transfer m src (ACfg.stmt cfg e.src)
+      let new := AEdge.transfer m blockOut e
+      let old := AState.at cfg st e.dst
+      match Env.le new old with
+      | .true => solveGo m cfg st rest seen
+      | .false =>
+          let joined := Env.join old new
+          let step := match Ai.memNat e.dst seen with
+            | .true => Env.widen old joined
+            | .false => joined
+          let st' := AState.set e.dst step st
+          let seen' : List Nat := match Ai.memNat e.dst seen with
+            | .true => seen
+            | .false => List.cons e.dst seen
+          solveGo m cfg st' (ACfg.enqueue cfg rest e.dst) seen'
+
+/-- The least fixed point above the initial state, starting from the entry block. The
+engine widens at every re-reached block (a simple WTO stand-in; a Bourdoncle order can
+replace it without changing the checker). -/
+def fixpoint (m : AiMach) (cfg : ACfg) : AState :=
+  let init := AState.set cfg.entry (Env.topOf cfg.vars) (AState.bot cfg)
+  solveGo m cfg init (ACfg.outEdges cfg cfg.entry) (([cfg.entry]) : List Nat)
+
+/-- The join of the transfers of all incoming edges of `q`. -/
+def incomingJoin (m : AiMach) (cfg : ACfg) (st : AState) (q : Nat) : Option Env :=
+  let ins := List.filter (fun e => Nat.beq e.dst q) cfg.edges
+  match ins with
+  | .nil => .none
+  | .cons _ _ =>
+      let joined := List.foldl
+        (fun acc e =>
+          let src := AState.at cfg st e.src
+          let out := AEdge.transfer m (AStmt.transfer m src (ACfg.stmt cfg e.src)) e
+          Env.join acc out)
+        (Env.botOf cfg.vars) ins
+      .some joined
+
+/-- One narrowing pass: `inv q := inv q ▷ join(incoming transfers)`. It never widens
+and never changes which states are reachable; it only removes noise introduced by
+widening. -/
+def narrowOnce (m : AiMach) (cfg : ACfg) (st : AState) : AState :=
+  List.map (fun (p : Nat × AStmt) =>
+    let q := p.1
+    match incomingJoin m cfg st q with
+    | .none => (q, AState.at cfg st q)
+    | .some j => (q, Env.narrow (AState.at cfg st q) j)) cfg.stmts
+
+-- ## Alarms
+
+/-- A report. `unsoundEdge` is the checker rejecting an alleged post-fixpoint; the
+others are the S5 alarm classes (overflow/underflow, out-of-bounds, null dereference). -/
+inductive Alarm where
+  | overflow (at : Nat) (op : String)
+  /-- the entry state is not covered by the invariant -/
+  | entryUncovered
+  /-- edge `src → dst` does not satisfy the post-fixpoint condition -/
+  | unsoundEdge (src dst : Nat)
+  | outOfBounds (at : Nat) (index len : Nat)
+  | nullDeref (at : Nat)
+  deriving BEq, Repr
+
+/-- The empty alarm list (an explicit type helps overloaded `.nil`). -/
+def Alarm.none : List Alarm := .nil
+
+/-- Does an interval already prove "no overflow"? A nonempty range whose upper bound is
+below the modulus does; `bot` is unreachable; `top` is an alarm. -/
+def Interval.within (m : AiMach) : Interval → Bool
+  | .bot => .true
+  | .range _ hi => Nat.lt hi (AiMach.modulus m)
+  | .top => .false
+
+/-- Alarm of an expression. An arithmetic operation alarms when its abstract result is
+`top` (the range may leave the machine word); a load alarms on a possibly-null array or
+a possibly-out-of-bounds index; a load of a `bot` index is unreachable and silent. -/
+def AExpr.alarms (m : AiMach) (at : Nat) (env : Env) : AExpr → List Alarm
+  | .var _ => Alarm.none
+  | .lit _ => Alarm.none
+  | .null => Alarm.none
+  | .add a b =>
+      let av := AExpr.eval m env a
+      let bv := AExpr.eval m env b
+      let r := Interval.add m av.itv bv.itv
+      List.append (AExpr.alarms m at env a)
+        (List.append (AExpr.alarms m at env b)
+          (match Interval.within m r with
+           | .true => Alarm.none
+           | .false => List.cons (Alarm.overflow at "add") Alarm.none))
+  | .sub a b =>
+      let av := AExpr.eval m env a
+      let bv := AExpr.eval m env b
+      let r := Interval.sub m av.itv bv.itv
+      List.append (AExpr.alarms m at env a)
+        (List.append (AExpr.alarms m at env b)
+          (match Interval.within m r with
+           | .true => Alarm.none
+           | .false => List.cons (Alarm.overflow at "sub") Alarm.none))
+  | .mul a b =>
+      let av := AExpr.eval m env a
+      let bv := AExpr.eval m env b
+      let r := Interval.mul m av.itv bv.itv
+      List.append (AExpr.alarms m at env a)
+        (List.append (AExpr.alarms m at env b)
+          (match Interval.within m r with
+           | .true => Alarm.none
+           | .false => List.cons (Alarm.overflow at "mul") Alarm.none))
+  | .alloc e => AExpr.alarms m at env e
+  | .load arr idx len =>
+      let iv := AExpr.eval m env idx
+      let av := Env.getD env arr Value.top
+      let nullAlarm : List Alarm := match Null.mayBeNull av.nul with
+        | .true => List.cons (Alarm.nullDeref at) Alarm.none
+        | .false => Alarm.none
+      let rangeAlarm : List Alarm := match iv.itv with
+        | .bot => Alarm.none
+        | .top => List.cons (Alarm.outOfBounds at 0 len) Alarm.none
+        | .range _ hi =>
+            match Nat.lt hi len with
+            | .true => Alarm.none
+            | .false => List.cons (Alarm.outOfBounds at hi len) Alarm.none
+      List.append (AExpr.alarms m at env idx)
+        (List.append nullAlarm rangeAlarm)
+
+/-- Alarm of a guard's expression. -/
+def ACond.alarms (m : AiMach) (at : Nat) (env : Env) : ACond → List Alarm
+  | .lt _ e => AExpr.alarms m at env e
+  | .le _ e => AExpr.alarms m at env e
+  | .gt _ e => AExpr.alarms m at env e
+  | .ge _ e => AExpr.alarms m at env e
+  | .eq _ e => AExpr.alarms m at env e
+  | .ne _ e => AExpr.alarms m at env e
+  | .isNull _ => Alarm.none
+  | .notNull _ => Alarm.none
+
+/-- Alarm of a statement in an invariant state. -/
+def AStmt.alarms (m : AiMach) (at : Nat) (env : Env) : AStmt → List Alarm
+  | .assign _ e => AExpr.alarms m at env e
+  | .assume c => ACond.alarms m at env c
+  | .skip => Alarm.none
+
+-- ## The checker
+
+/-- Check one edge: the transfer of the source invariant along its guard must be below
+the destination invariant. -/
+def checkEdge (m : AiMach) (cfg : ACfg) (st : AState) (e : AEdge) : List Alarm :=
+  let src := AState.at cfg st e.src
+  let dst := AState.at cfg st e.dst
+  let out := AEdge.transfer m (AStmt.transfer m src (ACfg.stmt cfg e.src)) e
+  match Env.le out dst with
+  | .true => .nil
+  | .false => .cons (Alarm.unsoundEdge e.src e.dst) .nil
+
+/-- Check every edge of the CFG. -/
+def checkEdges (m : AiMach) (cfg : ACfg) (st : AState) : List Alarm :=
+  List.concat (List.map (fun e => checkEdge m cfg st e) cfg.edges)
+
+/-- Check that the entry invariant covers the initial (all-unknown) state. -/
+def checkEntry (cfg : ACfg) (st : AState) : List Alarm :=
+  match Env.le (Env.topOf cfg.vars) (AState.at cfg st cfg.entry) with
+  | .true => .nil
+  | .false => .cons Alarm.entryUncovered .nil
+
+/-- Check the alarms of every block under its own invariant. -/
+def checkAlarms (m : AiMach) (cfg : ACfg) (st : AState) : List Alarm :=
+  List.concat (List.map (fun p => AStmt.alarms m p.1 (AState.at cfg st p.1) p.2) cfg.stmts)
+
+/-- The post-fixpoint certificate check: edges, entry, alarms. -/
+def check (m : AiMach) (cfg : ACfg) (st : AState) : List Alarm :=
+  List.append (checkEntry cfg st)
+    (List.append (checkEdges m cfg st) (checkAlarms m cfg st))
+
+/-- Did the checker accept? -/
+def accepts (m : AiMach) (cfg : ACfg) (st : AState) : Bool :=
+  List.isEmpty (check m cfg st)
+
+/-- The number of alarms. -/
+def alarmCount (as : List Alarm) : Nat := List.length as
+
+/-- Is this alarm in the report? -/
+def Alarm.has (a : Alarm) (as : List Alarm) : Bool :=
+  List.any (fun b => BEq.beq a b) as

@@ -1,0 +1,92 @@
+import Prelude
+import Text
+import Scry.Ai
+/-!
+# Scry.AiExamples: the small programs S5's tests and docs run
+
+Hand-built CFGs, so that the engine and the checker can be exercised without a parser or
+a Wil frontend. `Tests/Scry.lean` evaluates the functions below; `wiz-notes/scry-ai.md`
+reproduces the same programs.
+
+* `loopCfg`: a counter loop that needs widening (16-bit, bound 1000).
+* `constCfg`: `x := 2; y := 3; z := x * y`, an interval/constant proof.
+* `nullCfg`: dereference a null pointer, a nullness alarm.
+* `safeArrayCfg`: an in-bounds load from a fresh array, no alarm.
+* `oobCfg`: `load p 8 4` on a fresh array of length 4, an out-of-bounds alarm.
+* `ovfCfg`: `x := x + 1` with `x` unknown at 8 bits, an overflow alarm.
+-/
+
+/-- 8-bit unsigned machine. -/
+def AiEx.m8 : AiMach := AiMach.mk 8
+/-- 16-bit unsigned machine (the loop's bound does not fit in 8 bits). -/
+def AiEx.m16 : AiMach := AiMach.mk 16
+
+/-- A counter loop: `i := 0; while (i < 1000) { i := i + 1 }`. -/
+def AiEx.loopCfg : ACfg := ACfg.mk 0 [0]
+  [(0, AStmt.assign 0 (AExpr.lit 0)),
+   (1, AStmt.skip),
+   (2, AStmt.assign 0 (AExpr.add (AExpr.var 0) (AExpr.lit 1))),
+   (3, AStmt.skip)]
+  [AEdge.mk 0 1 .none,
+   AEdge.mk 1 2 (Option.some (ACond.lt 0 (AExpr.lit 1000))),
+   AEdge.mk 2 1 .none,
+   AEdge.mk 1 3 (Option.some (ACond.ge 0 (AExpr.lit 1000)))]
+
+/-- `x := 2; y := 3; z := x * y`. -/
+def AiEx.constCfg : ACfg := ACfg.mk 0 [0, 1, 2]
+  [(0, AStmt.assign 0 (AExpr.lit 2)),
+   (1, AStmt.assign 1 (AExpr.lit 3)),
+   (2, AStmt.assign 2 (AExpr.mul (AExpr.var 0) (AExpr.var 1))),
+   (3, AStmt.skip)]
+  [AEdge.mk 0 1 .none, AEdge.mk 1 2 .none, AEdge.mk 2 3 .none]
+
+/-- `p := null; x := p[0]` (length 4). -/
+def AiEx.nullCfg : ACfg := ACfg.mk 0 [0, 1]
+  [(0, AStmt.assign 0 AExpr.null),
+   (1, AStmt.assign 1 (AExpr.load 0 (AExpr.lit 0) 4)),
+   (2, AStmt.skip)]
+  [AEdge.mk 0 1 .none, AEdge.mk 1 2 .none]
+
+/-- `p := alloc 4; x := p[2]`, in bounds. -/
+def AiEx.safeArrayCfg : ACfg := ACfg.mk 0 [0, 1]
+  [(0, AStmt.assign 0 (AExpr.alloc (AExpr.lit 4))),
+   (1, AStmt.assign 1 (AExpr.load 0 (AExpr.lit 2) 4)),
+   (2, AStmt.skip)]
+  [AEdge.mk 0 1 .none, AEdge.mk 1 2 .none]
+
+/-- `p := alloc 4; x := p[8]`, out of bounds. -/
+def AiEx.oobCfg : ACfg := ACfg.mk 0 [0, 1]
+  [(0, AStmt.assign 0 (AExpr.alloc (AExpr.lit 4))),
+   (1, AStmt.assign 1 (AExpr.load 0 (AExpr.lit 8) 4)),
+   (2, AStmt.skip)]
+  [AEdge.mk 0 1 .none, AEdge.mk 1 2 .none]
+
+/-- `x := x + 1` with `x` unknown: an overflow alarm at 8 bits. -/
+def AiEx.ovfCfg : ACfg := ACfg.mk 0 [0]
+  [(0, AStmt.assign 0 (AExpr.add (AExpr.var 0) (AExpr.lit 1))),
+   (1, AStmt.skip)]
+  [AEdge.mk 0 1 .none]
+
+/-- The widened post-fixpoint of the loop. -/
+def AiEx.loopInv : AState := fixpoint AiEx.m16 AiEx.loopCfg
+/-- The same post-fixpoint after one narrowing pass; the checker accepts this one. -/
+def AiEx.loopInvNarrow : AState := narrowOnce AiEx.m16 AiEx.loopCfg AiEx.loopInv
+/-- The constant program's post-fixpoint. -/
+def AiEx.constInv : AState := fixpoint AiEx.m8 AiEx.constCfg
+/-- The null program's post-fixpoint. -/
+def AiEx.nullInv : AState := fixpoint AiEx.m8 AiEx.nullCfg
+/-- The safe array program's post-fixpoint. -/
+def AiEx.safeArrayInv : AState := fixpoint AiEx.m8 AiEx.safeArrayCfg
+/-- The out-of-bounds program's post-fixpoint. -/
+def AiEx.oobInv : AState := fixpoint AiEx.m8 AiEx.oobCfg
+/-- The overflow program's post-fixpoint. -/
+def AiEx.ovfInv : AState := fixpoint AiEx.m8 AiEx.ovfCfg
+
+/-- An unsound alleged post-fixpoint: the constant program, but block 3 claims `z = 5`
+while its predecessor computes `z = 6`. -/
+def AiEx.constBadInv : AState :=
+  AState.set 3 (Env.set 2 (Value.ofNat 5) (Env.topOf AiEx.constCfg.vars)) AiEx.constInv
+
+/-- The value of variable `x` in block `p` of a post-fixpoint. -/
+def AiEx.valueAt (cfg : ACfg) (inv : AState) (p x : Nat) : Value :=
+  Env.getD (AState.at cfg inv p) x Value.top

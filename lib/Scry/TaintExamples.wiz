@@ -1,0 +1,156 @@
+import Scry.Taint
+/-!
+# A hand-built taint corpus
+
+The programs here are written with `Scry.Wil`'s builder, not lowered from C. They are the
+golden corpus for the `scry-taint` test group (`Tests/ScryTaint.lean`) and exercise one
+feature of the prototype each:
+
+* `directFn` — taint through copies and arithmetic (`getenv` -> `copy` -> `add` ->
+  `system`);
+* `sanitisedFn` — a sanitiser kills the flow (no finding, although a source reaches the
+  sink along the CFG);
+* `cleanFn` — a source and a sink with no data path between them (no finding);
+* `branchFn` — a branch merge: one arm copies the source, the other assigns a constant;
+  the merge is tainted through the source arm;
+* `loopFn` — the only path to the sink goes around the back edge (the sink is at the loop
+  head, before the source in program order), so reaching definitions and taint need a
+  fixpoint;
+* `fpFn` / `fnFn` — the false-positive / false-negative pair: the first is the
+  sanitiser case (a naive "source reaches sink" analysis would flag it), the second
+  stores the source through a pointer and reloads it (this prototype's memory blind
+  spot, so it misses it);
+* `directFn` again is the positive control for the pair: the same shape without a
+  sanitiser or memory is reported.
+
+The comments give each statement's program point (`Scry.Analysis` numbers statements and
+terminators per block), so the expected paths in the tests can be read off by hand.
+-/
+
+def Scry.tv (n : Nat) : Wil.Var := Wil.var n Wil.i32
+
+/-- `r = getenv(); x = r; one = 1; y = x + one; system(y)`.
+Points: 0 source, 1 copy, 2 const, 3 add, 4 sink, 5 return. -/
+def Scry.directFn : Wil.Func :=
+  let r := Scry.tv 0;
+  let x := Scry.tv 1;
+  let one := Scry.tv 2;
+  let y := Scry.tv 3;
+  Wil.func "direct" [] [r, x, one, y]
+    [ Wil.block
+        [ Wil.call (.some r) "getenv" []
+        , Wil.copy x r
+        , Wil.num one 1
+        , Wil.binop y .add x one
+        , Wil.call .none "system" [y] ]
+        (Wil.ret .none) ]
+
+def Scry.taintDirect : Wil.Program := Wil.program [Scry.directFn]
+
+/-- `r = getenv(); s = sanitize(r); system(s)`.
+Points: 0 source, 1 sanitiser, 2 sink, 3 return. -/
+def Scry.sanitisedFn : Wil.Func :=
+  let r := Scry.tv 0;
+  let s := Scry.tv 1;
+  Wil.func "sanitised" [] [r, s]
+    [ Wil.block
+        [ Wil.call (.some r) "getenv" []
+        , Wil.call (.some s) "sanitize" [r]
+        , Wil.call .none "system" [s] ]
+        (Wil.ret .none) ]
+
+def Scry.taintSanitised : Wil.Program := Wil.program [Scry.sanitisedFn]
+
+/-- `r = getenv(); x = 5; system(x)`.
+Points: 0 source, 1 const, 2 sink, 3 return. -/
+def Scry.cleanFn : Wil.Func :=
+  let r := Scry.tv 0;
+  let x := Scry.tv 1;
+  Wil.func "clean" [] [r, x]
+    [ Wil.block
+        [ Wil.call (.some r) "getenv" []
+        , Wil.num x 5
+        , Wil.call .none "system" [x] ]
+        (Wil.ret .none) ]
+
+def Scry.taintClean : Wil.Program := Wil.program [Scry.cleanFn]
+
+/-- A branch merge.
+Points: block 0 has 0..2 (source, const, const) and terminator 3;
+block 1 has 4 (tainted copy) and terminator 5;
+block 2 has 6 (clean constant) and terminator 7;
+block 3 has 8 (sink) and terminator 9. -/
+def Scry.branchFn : Wil.Func :=
+  let r := Scry.tv 0;
+  let c := Scry.tv 1;
+  let zero := Scry.tv 2;
+  let x := Scry.tv 3;
+  Wil.func "branch" [] [r, c, zero, x]
+    [ Wil.block
+        [ Wil.call (.some r) "getenv" []
+        , Wil.num c 1
+        , Wil.num zero 0 ]
+        (Wil.branch (Wil.condLt zero c) (Wil.mkBlockId 1) (Wil.mkBlockId 2))
+    , Wil.block [Wil.copy x r] (Wil.jump (Wil.mkBlockId 3))
+    , Wil.block [Wil.num x 42] (Wil.jump (Wil.mkBlockId 3))
+    , Wil.block [Wil.call .none "system" [x]] (Wil.ret .none) ]
+
+def Scry.taintBranch : Wil.Program := Wil.program [Scry.branchFn]
+
+/-- A loop whose only tainted path reaches the sink through the back edge.
+Points: block 0 has 0,1 and terminator 2;
+block 1 (head) has 3 (sink) and terminator 4;
+block 2 (body) has 5 (source) and 6 (copy) and terminator 7;
+block 3 has terminator 8. -/
+def Scry.loopFn : Wil.Func :=
+  let zero := Scry.tv 0;
+  let c := Scry.tv 1;
+  let x := Scry.tv 2;
+  let r := Scry.tv 3;
+  Wil.func "loop" [] [zero, c, x, r]
+    [ Wil.block
+        [ Wil.num zero 0
+        , Wil.num c 1 ]
+        (Wil.jump (Wil.mkBlockId 1))
+    , Wil.block
+        [ Wil.call .none "system" [x] ]
+        (Wil.branch (Wil.condLt zero c) (Wil.mkBlockId 2) (Wil.mkBlockId 3))
+    , Wil.block
+        [ Wil.call (.some r) "getenv" []
+        , Wil.copy x r ]
+        (Wil.jump (Wil.mkBlockId 1))
+    , Wil.block [] (Wil.ret .none) ]
+
+def Scry.taintLoop : Wil.Program := Wil.program [Scry.loopFn]
+
+/-- The false-positive side of the pair: the sanitiser case (`fpFn = sanitisedFn`). -/
+def Scry.fpFn : Wil.Func := Scry.sanitisedFn
+
+def Scry.taintFp : Wil.Program := Wil.program [Scry.fpFn]
+
+/-- The false-negative side: the source goes through memory.
+Points: 0 source, 1 alloc, 2 store, 3 load, 4 sink, 5 return. -/
+def Scry.fnFn : Wil.Func :=
+  let r := Scry.tv 0;
+  let p := Wil.var 1 (.ptr Wil.i32);
+  let x := Scry.tv 2;
+  Wil.func "throughMemory" [] [r, p, x]
+    [ Wil.block
+        [ Wil.call (.some r) "getenv" []
+        , Wil.alloc p 1
+        , Wil.store p r
+        , Wil.load x p
+        , Wil.call .none "system" [x] ]
+        (Wil.ret .none) ]
+
+def Scry.taintFn : Wil.Program := Wil.program [Scry.fnFn]
+
+/-- The demo spec used by the tests and the notes. -/
+def Scry.demoSpec : Scry.TaintSpec :=
+  Scry.TaintSpec.mk ["getenv", "recv"]
+    ["sanitize", "escape_shell"]
+    [("system", 0), ("printf", 0)]
+
+/-- The same spec in the line format, to exercise the parser. -/
+def Scry.demoSpecText : String :=
+  "source getenv\nsource recv\nsanitise sanitize\nsanitise escape_shell\nsink system 0\nsink printf 0\n"

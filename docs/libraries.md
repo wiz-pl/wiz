@@ -800,3 +800,26 @@ rotations) are checked by the tests rather than proved. Examples: `examples/pers
 complexity, persistence guarantees, benchmark plan and the migration path for replacing
 `U64Map` with a pure model plus a native backend are in
 `wiz-notes/persistent-data.md`.
+
+## Scry: Wil, the analysis IR (`lib/Scry/Wil.wiz`)
+
+`import Scry.Wil` is the small three-address IR of the `scry` analyser
+(`wiz-notes/code-analysis-design.md` §4.3): typed variables and ids, `Rhs`/`Stmt`/
+`Term`, basic blocks and functions over a CompCert-style block memory, and a concrete,
+fuel-bounded small-step semantics (`Wil.step`, `Wil.Step`, `Wil.run`). `import
+Scry.WilExamples` is the hand-built golden corpus (`Scry.arith`, `Scry.sumTo`,
+`Scry.facLoop`, …) used by the `scry-wil` test group. There is no parser or C lowering
+in this stage; `wiz-notes/scry-wil.md` has the grammar, the rules, the corpus and what
+S2 still needs.
+
+## Scry: CFG, reaching definitions and taint (`lib/Scry/Analysis.wiz`, `lib/Scry/Taint.wiz`)
+
+`import Scry.Analysis` numbers a Wil function's statements and terminators as program
+points and computes the CFG, dominators, reaching definitions and the PDG's def-use
+(flow-dependence) edges. `import Scry.Taint` feeds those edges to the Datalog engine
+(`lib/Scry/Datalog.wiz`, `lib/Scry/Eval.wiz`) with a `TaintSpec` of source, sanitiser
+and sink calls; the source -> sink path of each finding comes from the engine's
+provenance. `import Scry.TaintExamples` is the hand-built corpus used by the
+`scry-taint` group. This is the S4 intraprocedural prototype: no tree-sitter, no C
+lowering, no SARIF, and no interprocedural or memory modelling yet;
+`wiz-notes/scry-taint.md` has the design, the spec format and the gaps.
