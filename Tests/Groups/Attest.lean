@@ -142,7 +142,7 @@ def group : Group where
         check (!text.contains "s3cr3t-value") "the statement copied an environment variable" },
     { name := "a tampered artifact fails verification", run := fun _ => do
         let (dir, tc, cache) ← project
-        let (_, err, code) ← build dir tc cache
+        let (_, _, code) ← build dir tc cache
         if code != 0 then skip "no toolchain"; return
         let p := dir / "prog"
         IO.FS.writeBinFile p ((← IO.FS.readBinFile p) ++ "x".toUTF8)
@@ -151,7 +151,7 @@ def group : Group where
         check ((verr.splitOn "artifact mismatch").length > 1) verr },
     { name := "an identical rebuild produces a byte-identical envelope", run := fun _ => do
         let (dir, tc, cache) ← project
-        let (_, err, code) ← build dir tc cache
+        let (_, _, code) ← build dir tc cache
         if code != 0 then skip "no toolchain"; return
         let first ← IO.FS.readFile (dir / "prog.attest.json")
         let (_, err, code) ← build dir tc cache
@@ -161,7 +161,7 @@ def group : Group where
         check (!first.contains "\"startedOn\"" && !first.contains "\"finishedOn\"") "a timestamp is in the envelope" },
     { name := "a cflags change changes the predicate, not inputsRoot", run := fun _ => do
         let (dir, tc, cache) ← project
-        let (_, err, code) ← build dir tc cache "a.json"
+        let (_, _, code) ← build dir tc cache "a.json"
         if code != 0 then skip "no toolchain"; return
         let (_, err, code) ← build dir tc cache "b.json" "-DWIZ_ATTEST_EXTRA=1"
         check (code == 0) err
@@ -172,7 +172,7 @@ def group : Group where
         checkEq (some (← shaOf (dir / "prog"))) (Wiz.Attest.strField? (output b) "sha256") },
     { name := "an edit to a tracked input is dirty and changes the source hash", run := fun _ => do
         let (dir, tc, cache) ← project
-        let (_, err, code) ← build dir tc cache "before.json"
+        let (_, _, code) ← build dir tc cache "before.json"
         if code != 0 then skip "no toolchain"; return
         let before ← statement dir "before.json"
         checkEq (some false) (gitDirty before)
@@ -187,7 +187,7 @@ def group : Group where
         check (oldSha != (Wiz.Attest.strField? (source after) "sha256").getD "") "the source hash did not change" },
     { name := "--artifact-only verifies without the inputs; the default needs them", run := fun _ => do
         let (dir, tc, cache) ← project
-        let (_, err, code) ← build dir tc cache
+        let (_, _, code) ← build dir tc cache
         if code != 0 then skip "no toolchain"; return
         let other ← IO.FS.createTempDir
         IO.FS.writeBinFile (other / "prog") (← IO.FS.readBinFile (dir / "prog"))
@@ -200,7 +200,7 @@ def group : Group where
         check ((out.splitOn "artifact only").length > 1) out },
     { name := "the envelope is explicitly unsigned; a forged signature is refused", run := fun _ => do
         let (dir, tc, cache) ← project
-        let (_, err, code) ← build dir tc cache
+        let (_, _, code) ← build dir tc cache
         if code != 0 then skip "no toolchain"; return
         let file := dir / "prog.attest.json"
         let env ← match Json.parse (← IO.FS.readFile file) with

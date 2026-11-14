@@ -144,6 +144,31 @@ A release toolchain's `share/wiz/NOTICE` says the same, and also lists the third
 code linked into `wiz`, `grail` and `tower` themselves; the licence texts are in
 `share/wiz/LICENSES/` and `share/wiz/cc/LICENSES/`.
 
+## Build attestations
+
+`wiz build --attest [FILE]` writes an unsigned in-toto statement (a DSSE-style envelope
+with an empty `signatures` array) about the build: the source file and Git commit/dirty
+flag, the SHA-256 of every input (the file, imported modules by name, `link_c` files), the
+`wiz`/`cc`/`llc` identities, the compiler flags, and the output binary's and generated
+C's hashes. The default path is `OUT.attest.json`.
+
+```sh
+wiz build hello.wiz -o hello --attest
+wiz verify hello                    # reads hello.attest.json; 0 = match
+wiz verify --attest hello.attest.json hello
+wiz verify --artifact-only hello    # artifact only: the sources need not be present
+```
+
+`wiz verify` re-hashes the artifact, the recorded inputs (pass the same `-I` roots; a
+module is looked up by name) and the manifest root, and exits 1 on any mismatch. It does
+not check a signature: a non-empty `signatures` array is an error, so an unsigned
+verifier never accepts a "signed" claim it cannot check. An unsigned statement proves
+integrity relative to the statement, not that its author was honest — signing and
+independent rebuilds are the next steps (`wiz-notes/build-attest.md`). Absolute paths
+appear for toolchain binaries and for inputs outside the invocation directory; no
+environment variables or timestamps are recorded. `grail build --attest DIR` writes one
+statement per executable.
+
 ## Continuous integration
 
 `nix develop` gives the toolchain the tests need besides Lean (see `flake.nix`): GMP and
