@@ -62,6 +62,10 @@ def simpleBinder : ParserDescr := orelse (bracketedBinder false) binderIdent
 def matchAlt : ParserDescr :=
   node "match.alt" (seqs ["|", sepBy1 (cat "term" 0) ",", "=>", cat "term" 0])
 
+/-- A `calc` step: a relation `a ≤ b` and its proof. The relation may start with `_`,
+the previous step's right endpoint. -/
+def calcStep : ParserDescr := node "calc.step" (seqs [term, ":=", term])
+
 def precedence : ParserDescr := node "prec" (orelse num ident)
 
 def level (prec : Nat := 0) : ParserDescr := cat "level" prec
@@ -139,6 +143,7 @@ def anonCtor : ParserDescr := seqs ["⟨", withoutPosition (sepBy term ","), "�
 | `term.ecase`         | lead | "ecase" term "[" [terms] "]" |
 | `term.dotIdent`      | max  | "." ident (a constructor of the expected type) |
 | `term.match`         | lead | "match" [terms] "with" [alts] |
+| `term.calc`          | lead | "calc" [`calc.step`: term ":=" term, aligned] |
 | `term.szInf`, `term.szSuc`, `term.sizeLt` | | "∞", "↑" s, "Size<" s |
 | `term.sized` (trailing) | max | T "^" s: an inductive or coinductive type at size `s` |
 | `term.asPat` (trailing) | max | x "@" p, without spaces: an as-pattern (13g; patterns only) |
@@ -224,6 +229,10 @@ def termLeading : List LeadingParser := [
   -- tactics line up (or are separated by `;`); the tactics themselves come from the prelude
   { kind := "term.by", prec := leadPrec,
     p := seqs ["by", withPosition (many1 (seqs [colGe, cat "tactic" 0, optional ";"]))] },
+  -- a chain of relations (`calc a ≤ b := h₁  _ < c := h₂`): the steps line up with the
+  -- first one, as `match`'s alternatives do
+  { kind := "term.calc", prec := leadPrec,
+    p := seqs [nonReserved "calc", withPosition (many1 (seqs [colGe, calcStep]))] },
   { kind := "term.ecase", prec := leadPrec,
     p := seqs [nonReserved "ecase", term maxPrec, "[", withoutPosition (sepBy term ","), "]"] }
 ]
