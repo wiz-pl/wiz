@@ -144,15 +144,15 @@ is the zero vector, `𝟙ₓ` is "x used once" (`Usage.single`), `U + V` is poin
 `p·U` is pointwise scaling. The rules below write `⊣ 0` for `⊣ 0ₙ`.
 
 **Erased mode** `Γ⁰` is a light version of Atkey's σ = 0 (§5.4). It is switched on for
-type positions, proofs and sizes, and for every position whose usage is scaled by a
-constant 0 (`Ctx.erasedAt`): an argument to a `0`-quantity binder, the value of a `let` at
-0, the first part of a pair checked at a 0 field, the scrutinee of a `split` at 0. Such a
-position is never computed (erasure replaces it by `◾`, `Erase.lean`); the kernel and
-erasure decide "constant 0" with one predicate, `QPoly.isErased`, because a term in such a
-position may be valid *only* erased. Its effect is on
-projections only (§7.1): in `Γ⁰` any field of any pair may be read, erased fields
-included, and a projection counts its pair's usage unscaled (which the position then
-multiplies by 0, or discards).
+type positions, proofs and sizes, for the term argument of `refl` (§8.1), and for every
+position whose usage is scaled by a constant 0 (`Ctx.erasedAt`): an argument to a
+`0`-quantity binder, the value of a `let` at 0, the first part of a pair checked at a 0
+field, the scrutinee of a `split` at 0. Such a position is never computed (erasure
+replaces it by `◾`, `Erase.lean`); the kernel and erasure decide "constant 0" with one
+predicate, `QPoly.isErased`, because a term in such a position may be valid *only* erased.
+Its effect is on projections only (§7.1): in `Γ⁰` any field of any pair may be read,
+erased fields included, and a projection counts its pair's usage unscaled (which the
+position then multiplies by 0, or discards).
 
 ---
 
@@ -323,8 +323,10 @@ The judgments output usage vectors with these operations [std: Atkey18; McBride1
   is a rule of `check` and `infer` (both kernels): a term whose type is a proposition (its
   sort computed and `0`) is checked in an erased position and its usage is `0`, at every
   level of the proof. So a variable at `0` may appear in a proof, and a linear one must
-  still be used in relevant code. (Proofs are erased by compilation and never run.) For
-  the same reason a **binder whose type is a proposition takes any usage** (`popUsageAt`):
+  still be used in relevant code. (Proofs are erased by compilation and never run.) The
+  term argument of `refl` is checked in `Γ⁰` too: it is data only for the equation's
+  indices, and the proof that mentions it is erased (§8.1). For the same reason a
+  **binder whose type is a proposition takes any usage** (`popUsageAt`):
   a linear proof may be used once, never or twice, and `let 1 (a, h) := p` at
   `(1 x : A) × P x` is fine.
 * **branches** of an `ecase` combine by the **join** `⊔` (least upper bound in `≤`) of
@@ -590,7 +592,7 @@ Stage 4c. This section follows Pujet and Tabareau's TTobs [PT22] and the earlier
      ──────────────────────────────────────── eqTy                                  Check.lean:443–447
      Γ ⊢ A ≡ B ⇒ Prop ⊣ 0
 
-     Γ ⊢ A type@l    isNeverZero l    Γ ⊢ a ⇐ A                Γ ⊢ X type@_
+     Γ ⊢ A type@l    isNeverZero l    Γ⁰ ⊢ a ⇐ A                Γ ⊢ X type@_
      ───────────────────────────────────── refl                 ─────────────────────────── reflTy
      Γ ⊢ refl A a ⇒ (a =_A a) ⊣ 0                               Γ ⊢ reflTy X ⇒ (X ≡ X) ⊣ 0
                                                                        Check.lean:448–457
@@ -608,6 +610,11 @@ Stage 4c. This section follows Pujet and Tabareau's TTobs [PT22] and the earlier
 
 * `a = b` is only formed at a type whose sort is **never** `Prop` (`isNeverZero`).
   Equality of proofs is not expressible, which is consistent with proof irrelevance.
+* `refl`'s term argument is checked in `Γ⁰` (B2): it is data only for the equation's
+  indices, and the proof that mentions it is erased, so a projection of a `0`-quantity
+  value (or of an erased field) is fine there, exactly as in an argument to a `0` binder.
+  Its usage is discarded as for any proof; usage checking is otherwise unchanged, so a
+  genuinely duplicated linear value in relevant code is still rejected.
 * `transp` has the same premise (since the F9 fix; found by the second audit). Its rule
   builds the motive's type `(b :0 A) → (_ :0 a =_A b) → Prop` and the type `a =_A b` of `e`
   as values, without the `eq` rule, so with only `Γ ⊢ A type@_` it was accepted at a

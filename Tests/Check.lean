@@ -195,7 +195,21 @@ def qttGroup : Group where
         (lams ["A", "x"] (.letE "B" zero ty "A" (.ann "x" "B")))] },
     { name := "Nat rig: a method may use an erased variable", run := fun _ => accepts (natRigCoit 0 "good") },
     { name := "Nat rig: a method may not use a linear variable, it runs any number of times (Q2)", run := fun _ =>
-        rejects (natRigCoit 1 "bad") (fun | .other .. => true | _ => false) "a method usage error" }
+        rejects (natRigCoit 1 "bad") (fun | .other .. => true | _ => false) "a method usage error" },
+    -- (B2) `refl`'s argument is data only for the equation's indices and the proof is
+    -- erased, so it is checked in an erased position (as an argument to a 0 binder is).
+    { name := "refl checks its argument erased: a projection of a 0-quantity pair is fine (B2)", run := fun _ => do
+        let base : Ctx Q := { globals := {} }
+        -- `p :0 ((many a : Unit_1) × Unit_1)`, and `refl Unit_1 p.2 : p.2 = p.2`
+        let P : Term Q := Term.sigma "a" (Term.qlit many) (Term.unit 1) (Term.unit 1) ⟨1, 1⟩
+        let ctx := base.bind "p" (QPoly.const zero) (base.eval P)
+        match infer ctx (Term.refl (Term.unit 1) (Term.snd (Term.var 0))) with
+        | .ok _ => pure ()
+        | .error e => throw (IO.userError s!"refl of a projection of an erased pair was rejected: {e}") },
+    -- (the control: the erasure of `refl`'s argument must not excuse a relevant duplicate)
+    { name := "refl does not excuse a duplicated linear value (B2 control)", run := fun _ =>
+        rejects [Raw.defn "dup" (forallA (arr one "A" (.sigma "_" many "A" "A")))
+          (lams ["A", "x"] (.pair "x" "x"))] isQty "a quantity error" }
   ]
 
 /-! ## Structural types -/
