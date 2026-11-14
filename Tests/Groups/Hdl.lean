@@ -404,6 +404,14 @@ def hdlGroup : Group where
             let r ← IO.Process.output { cmd := "vvp", args := #["-n", (dir / "t.vvp").toString], cwd := dir }
             unless (r.stdout.splitOn pass).length > 1 do
               throw (IO.userError s!"test bench {m}: {r.stdout}{r.stderr}") },
+    { name := "Netlist simulation theorem (Hdl.Netlist): a synthesised one-bit delay satisfies Circuit.Simulates by rfl; Netlist.simulate = Circuit.run", run := fun _ => do
+        -- examples/hdl-sim-theorem.wiz: a one-bit delay built with Circuit.netlist; the
+        -- relation's oneClock/memFree/initOk/stepOk are discharged by kernel evaluation,
+        -- the theorem is applied to a four-cycle trace, and both simulations agree
+        okLibs (← IO.FS.readFile "examples/hdl-sim-theorem.wiz")
+          [".cons (.cons 0 .nil) (.cons (.cons 1 .nil) (.cons (.cons 0 .nil) (.cons (.cons 1 .nil) .nil)))",
+           ".cons (.cons 0 .nil) (.cons (.cons 1 .nil) (.cons (.cons 0 .nil) (.cons (.cons 1 .nil) .nil)))",
+           ".true"] },
     { name := "fast netlist simulation (Hdl.Sim, compiled): = Netlist.simulate = Circuit.run, cycle for cycle; not well formed falls back", run := fun _ => do
         -- examples/hdl-sim.wiz: every netlist operation (shifts by a signal too), 70-bit widths, reset and enable, a
         -- table tree, composition, memories (two write ports, read-during-write, a ROM,
