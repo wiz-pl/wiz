@@ -26,7 +26,15 @@ def ofLevel (ps : List String) : Level → Option Lvl
   | .max a b => do pure (.max (← ofLevel ps a) (← ofLevel ps b))
   | .imax a b => do pure (.imax (← ofLevel ps a) (← ofLevel ps b))
   | .param n => (ps.idxOf? n).map .param
-  | .mvar _ => none
+  | .mvar _ | .hole => none
+
+/-- (mandatory sorts) A kernel `Π`/`Σ`'s component sorts as the spec's one sort: `imax`
+(resp. `max`) of the two, as the spec's rules relate them (`s ≡ imax i j`). A hole (only
+before the elaborator's sorts pass) is no sort. -/
+def ofSorts (ps : List String) (σ : Wiz.BinderSorts) (pi : Bool) : Option (Option Lvl) :=
+  if σ.hasHole then some none else do
+    let s := if pi then σ.piSort else σ.sigmaSort
+    pure (some (← ofLevel ps s))
 
 def ofQty : Term ZeroOneMany → Option Q
   | .qlit .zero => some .zero
@@ -39,19 +47,15 @@ def ofTerm (ps : List String) : Term ZeroOneMany → Option Tm
   | .var i => some (.var i)
   | .const c us => do pure (.const c (← us.mapM (ofLevel ps)))
   | .sort l => do pure (.sort (← ofLevel ps l))
-  | .pi _ _ q A B s => do
-    let s ← match s with
-      | some s => (ofLevel ps s).map some
-      | none => pure none
+  | .pi _ _ q A B σ => do
+    let s ← ofSorts ps σ true
     pure (.pi (← ofQty q) s (← ofTerm ps A) (← ofTerm ps B))
   | .lam _ b => do pure (.lam (← ofTerm ps b))
   | .app f a => do pure (.app (← ofTerm ps f) (← ofTerm ps a))
   | .letE _ q A v b => do pure (.letE (← ofQty q) (← ofTerm ps A) (← ofTerm ps v) (← ofTerm ps b))
   | .ann t A => do pure (.ann (← ofTerm ps t) (← ofTerm ps A))
-  | .sigma _ q A B s => do
-    let s ← match s with
-      | some s => (ofLevel ps s).map some
-      | none => pure none
+  | .sigma _ q A B σ => do
+    let s ← ofSorts ps σ false
     pure (.sigma (← ofQty q) s (← ofTerm ps A) (← ofTerm ps B))
   | .pair a b => do pure (.pair (← ofTerm ps a) (← ofTerm ps b))
   | .fst p => do pure (.fst (← ofTerm ps p))
@@ -70,7 +74,8 @@ def ofTerm (ps : List String) : Term ZeroOneMany → Option Tm
   | .cast A B e t => do pure (.cast (← ofTerm ps A) (← ofTerm ps B) (← ofTerm ps e) (← ofTerm ps t))
   | .transp A a P p b e => do
     pure (.transp (← ofTerm ps A) (← ofTerm ps a) (← ofTerm ps P) (← ofTerm ps p) (← ofTerm ps b) (← ofTerm ps e))
-  | .ulift l A => do pure (.ulift (← ofLevel ps l) (← ofTerm ps A))
+  -- (the content's sort `k` is dropped: the spec's rule infers it)
+  | .ulift _ l A => do pure (.ulift (← ofLevel ps l) (← ofTerm ps A))
   | .up a => do pure (.up (← ofTerm ps a))
   | .down t => do pure (.down (← ofTerm ps t))
   | .qty => some .qty
