@@ -350,9 +350,11 @@ plus the Wasm module (`web/build.sh`), exactly as the `wiz-docs` artifact holds 
 | path | what it is |
 |---|---|
 | `index.html` | the landing page: the documented modules and their summaries |
+| `api.html` | the API/library index: every module and declaration, with signatures and doc summaries |
+| `api.json` | the same index as data, for tools |
 | `A.B.html` | one page per module (its declarations, signatures, docs, source links) |
 | `A.B.json` | the same page's data, for the interactive signatures |
-| `search.js`, `scroll.css`, `scroll.js`, `tagged.js`, `scroll-search.js` | the site's scripts and styles |
+| `search.js`, `scroll.css`, `scroll.js`, `tagged.js`, `scroll-search.js` | the site's scripts and styles (search covers names, doc comments and signatures) |
 | `wiz-infoview.mjs`, `wiz-infoview.wasm` | the infoview's Wasm module, when `web/build.sh` built it |
 
 All links in the pages are relative, so the `/wiz/` prefix of a project site works.

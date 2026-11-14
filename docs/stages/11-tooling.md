@@ -376,10 +376,15 @@ package's `lib` targets with its module roots (dependencies included), into
   `Term.prettyTagged`, so notation-aware printing applies when it does), its doc, a
   source link, its constructors or fields, and the instances of a class or for a type;
   every constant in a signature links to where it is documented (the definition sites
-  the language server's go to definition uses, `declSites`). `search.js` is the
-  client-side index of every declaration (name, module, kind, summary), searched by
-  `scroll-search.js` (`/` focuses the box). The pages are complete HTML: they read
-  without JS, and the search works from `file://`.
+  the language server's go to definition uses, `declSites`). `api.html` is the
+  API/library index: every module with all its declarations, their kinds, signatures
+  (with the same cross-links) and doc summaries, each linking to its anchor on the
+  module page; `api.json` is the same index for tools. The header of every page links to
+  it. `search.js` is the client-side index of every module and declaration (name,
+  module, kind, doc summary, signature text and target), searched by `scroll-search.js`
+  (`/` focuses the box): names first, then doc comments, then signatures, and a hit
+  says which matched. The pages are complete HTML: they read without JS, and the
+  search works from `file://`.
 * **Interactive signatures, with the infoview's Wasm.** Each page carries its data as
   JSON (`<script id="wiz-doc-data">`, and `A.B.json`): per declaration the signature in
   the infoview protocol's tagged-text format and the table of its subterms, each a
@@ -402,7 +407,8 @@ package's `lib` targets with its module roots (dependencies included), into
   commit and the Wasm module, and uploads it as the artifact `wiz-docs` (3 days, for
   debugging); `deploy-docs` deploys that artifact to GitHub Pages at
   <https://wiz-pl.github.io/wiz/>. The docs pages are the site root (`index.html`,
-  `A.B.html`, `A.B.json`, `search.js` and the Wasm files) and every link is relative.
+  `api.html`, `api.json`, `A.B.html`, `A.B.json`, `search.js` and the Wasm files) and
+  every link is relative.
   A repository has one Pages site and each deployment replaces the whole tree, so a
   future performance site shares this deployment under `/perf/` rather than deploying
   separately. `docs/building.md`, "Documentation site", has the URL layout, the
@@ -410,10 +416,12 @@ package's `lib` targets with its module roots (dependencies included), into
 * **Tests**: the group `doc` (`Tests/Doc.lean`): doc comments stored and replayed by the
   cache; Markdown; `wiz doc` on a small package with doc comments (kinds, docs, source
   links, instances, the index); every cross-link resolves; every declaration is in the
-  search index; the pages without JS; `grail doc`; and the page model of the Wasm module
+  search index, with its doc summary and signature; the API index and `api.json` list
+  every module and declaration; the pages without JS; `grail doc`; and the page model of the Wasm module
   run natively on a page's JSON (hover, click, keys); and that the core library is
   documented (every public declaration of `Prelude`, `Std`, `Vec` and `Word` has a doc
-  comment, and each has a module doc).
+  comment, and each has a module doc). The search box's ranking and result rendering
+  have a browser-free test, `web/scroll-search_test.mjs`, run by `web/test.sh`.
 * **The library's documentation.** Every module in `lib/` has a `/-! … -/` module doc
   (what it is for, its main definitions, an example) and a `/-- … -/` doc comment on each
   public declaration; `--` comments are left for implementation notes. `wiz doc --lib -o
