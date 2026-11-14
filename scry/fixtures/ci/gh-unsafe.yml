@@ -1,0 +1,18 @@
+name: ci
+on:
+  issue_comment:
+  pull_request_target:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: greet
+        run: echo "title: ${{ github.event.issue.title }}"
+      - uses: some-org/some-action@v1
+      - name: checkout head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}

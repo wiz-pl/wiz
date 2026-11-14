@@ -1,0 +1,200 @@
+import Prelude
+import Text
+import Scry.Ci
+/-!
+# Scry.CiExamples: the CI frontend's fixture corpus
+
+`import Scry.CiExamples`. Small GitHub Actions and Azure Pipelines files with their
+expected analysis results (`wiz-notes/scry-ci.md`). The tests in
+`Tests/Groups/ScryCi.lean` evaluate these with `#eval`, so no C toolchain is needed.
+
+The corpus is paired:
+
+* `ciGhUnsafe` / `ciGhSafe` — script injection, unpinned actions, untrusted checkout of
+  a `pull_request_target` PR head;
+* `ciAzUnsafe` / `ciAzSafe` — `System.AccessToken` in a script, a floating task
+  version, parameter interpolation into a script and a template path.
+
+Each unsafe file has exactly the findings the note lists; each safe file has none. The
+safe GitHub file keeps `github.event.issue.title` in `env:` and uses `$TITLE` in the
+script (the standard fix), pins actions to 40-hex commits or local/Docker-digest
+references, and checks out the base branch of `pull_request_target`.
+-/
+
+-- ## GitHub Actions
+
+/-- Unsafe: event text into `run`, three floating action refs, and a
+`pull_request_target` workflow that checks out the PR head. -/
+def Scry.ciGhUnsafe : String :=
+  "name: ci\n" ++
+  "on:\n" ++
+  "  issue_comment:\n" ++
+  "  pull_request_target:\n" ++
+  "permissions:\n" ++
+  "  contents: read\n" ++
+  "jobs:\n" ++
+  "  build:\n" ++
+  "    runs-on: ubuntu-latest\n" ++
+  "    steps:\n" ++
+  "      - uses: actions/checkout@v4\n" ++
+  "      - name: greet\n" ++
+  "        run: echo \"title: ${{ github.event.issue.title }}\"\n" ++
+  "      - uses: some-org/some-action@v1\n" ++
+  "      - name: checkout head\n" ++
+  "        uses: actions/checkout@v4\n" ++
+  "        with:\n" ++
+  "          ref: ${{ github.event.pull_request.head.sha }}\n"
+
+/-- Safe: the same event field through `env`, pinned/local/digest action references, and
+a `pull_request_target` checkout of the base branch. -/
+def Scry.ciGhSafe : String :=
+  "name: ci\n" ++
+  "on:\n" ++
+  "  pull_request_target:\n" ++
+  "permissions:\n" ++
+  "  contents: read\n" ++
+  "jobs:\n" ++
+  "  build:\n" ++
+  "    runs-on: ubuntu-latest\n" ++
+  "    steps:\n" ++
+  "      - uses: actions/checkout@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5\n" ++
+  "      - name: greet\n" ++
+  "        env:\n" ++
+  "          TITLE: ${{ github.event.issue.title }}\n" ++
+  "        run: echo \"title: $TITLE\"\n" ++
+  "      - uses: ./local-action\n" ++
+  "      - uses: docker://alpine@sha256:0123456789abcdef\n"
+
+/-- The safe workflow with a plain `pull_request` trigger instead: the same checkout is
+not the privileged `pull_request_target` case. -/
+def Scry.ciGhPullRequest : String :=
+  "on: pull_request\n" ++
+  "jobs:\n" ++
+  "  build:\n" ++
+  "    runs-on: ubuntu-latest\n" ++
+  "    steps:\n" ++
+  "      - uses: actions/checkout@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5\n" ++
+  "        with:\n" ++
+  "          ref: ${{ github.event.pull_request.head.sha }}\n"
+
+/-- Trusted contexts only: `github.sha`, `env.X`, and a matrix value in a script. -/
+def Scry.ciGhTrusted : String :=
+  "on: push\n" ++
+  "jobs:\n" ++
+  "  build:\n" ++
+  "    runs-on: ubuntu-latest\n" ++
+  "    strategy:\n" ++
+  "      matrix:\n" ++
+  "        os: [ubuntu-latest, macos-latest]\n" ++
+  "    steps:\n" ++
+  "      - run: echo \"${{ github.sha }} ${{ env.FOO }} ${{ matrix.os }}\"\n"
+
+/-- The trigger forms: a scalar, a sequence, and a mapping. -/
+def Scry.ciGhOnScalar : String := "on: push\njobs: {}\n"
+def Scry.ciGhOnSeq : String := "on: [push, pull_request]\njobs: {}\n"
+def Scry.ciGhOnMap : String := "on:\n  push: {}\n  workflow_dispatch:\njobs: {}\n"
+
+-- ## Azure Pipelines
+
+/-- Unsafe: `System.AccessToken` in a script, a floating task version, and template
+parameters in a script and in a template path. -/
+def Scry.ciAzUnsafe : String :=
+  "trigger:\n" ++
+  "- main\n" ++
+  "variables:\n" ++
+  "- group: prod-secrets\n" ++
+  "stages:\n" ++
+  "- stage: build\n" ++
+  "  jobs:\n" ++
+  "  - job: b1\n" ++
+  "    steps:\n" ++
+  "    - task: PublishBuildArtifacts@1\n" ++
+  "    - script: echo $(System.AccessToken)\n" ++
+  "    - bash: echo ${{ parameters.name }}\n" ++
+  "    - template: ${{ parameters.jobTemplate }}\n" ++
+  "    - checkout: self\n"
+
+/-- Safe: the token through `env` (`$SYSTEM_ACCESSTOKEN`), a fully versioned task, a
+non-secret variable, and a static template path. -/
+def Scry.ciAzSafe : String :=
+  "trigger: none\n" ++
+  "pool:\n" ++
+  "  vmImage: ubuntu-latest\n" ++
+  "variables:\n" ++
+  "- name: greeting\n" ++
+  "  value: hello\n" ++
+  "jobs:\n" ++
+  "- job: build\n" ++
+  "  steps:\n" ++
+  "  - task: PublishBuildArtifacts@1.2.3\n" ++
+  "  - script: echo $(greeting)\n" ++
+  "  - script: echo $SYSTEM_ACCESSTOKEN\n" ++
+  "    env:\n" ++
+  "      SYSTEM_ACCESSTOKEN: $(System.AccessToken)\n" ++
+  "  - template: templates/safe.yml\n"
+
+/-- A pipeline with resources and an extends template, for the graph's `includes` and
+`resource` nodes. -/
+def Scry.ciAzResourceFile : String :=
+  "resources:\n" ++
+  "  repositories:\n" ++
+  "  - repository: shared\n" ++
+  "    ref: refs/heads/main\n" ++
+  "  containers:\n" ++
+  "  - container: build\n" ++
+  "    image: alpine\n" ++
+  "    tag: '3.20'\n" ++
+  "extends:\n" ++
+  "  template: templates/root.yml\n" ++
+  "  parameters:\n" ++
+  "    env: prod\n" ++
+  "steps:\n" ++
+  "- script: echo hi\n"
+
+-- ## Models
+
+/-- One unsafe GitHub workflow. -/
+def Scry.ciModelGhUnsafe : Scry.CiModel :=
+  match Scry.ciParseModel ".github/workflows/unsafe.yml" Scry.ciGhUnsafe with
+  | .ok m => m
+  | .error _ => Scry.ciEmptyModel
+
+/-- One safe GitHub workflow. -/
+def Scry.ciModelGhSafe : Scry.CiModel :=
+  match Scry.ciParseModel ".github/workflows/safe.yml" Scry.ciGhSafe with
+  | .ok m => m
+  | .error _ => Scry.ciEmptyModel
+
+/-- One unsafe Azure pipeline. -/
+def Scry.ciModelAzUnsafe : Scry.CiModel :=
+  match Scry.ciParseModel "azure-pipelines.yml" Scry.ciAzUnsafe with
+  | .ok m => m
+  | .error _ => Scry.ciEmptyModel
+
+/-- One safe Azure pipeline. -/
+def Scry.ciModelAzSafe : Scry.CiModel :=
+  match Scry.ciParseModel "azure-pipelines.yml" Scry.ciAzSafe with
+  | .ok m => m
+  | .error _ => Scry.ciEmptyModel
+
+/-- The first workflow of a one-workflow model (the tests' convenience). -/
+def Scry.ciWorkflowFirst (m : Scry.CiModel) : Scry.CiWorkflow :=
+  match m.workflows with
+  | .cons wf _ => wf
+  | .nil => Scry.CiWorkflow.mk .github "" "" .nil .nil .nil .nil .nil .nil .nil .nil 1
+
+/-- Both safe files in one model (the no-false-positive corpus). -/
+def Scry.ciModelSafe : Scry.CiModel :=
+  match Scry.ciParseModel ".github/workflows/safe.yml" Scry.ciGhSafe with
+  | .error _ => Scry.ciEmptyModel
+  | .ok gh => match Scry.ciParseModel "azure-pipelines.yml" Scry.ciAzSafe with
+    | .error _ => gh
+    | .ok az => Scry.ciAddWorkflow gh (Scry.ciWorkflowFirst az)
+
+/-- Both unsafe files in one model (the cross-platform corpus). -/
+def Scry.ciModelAll : Scry.CiModel :=
+  match Scry.ciParseModel ".github/workflows/unsafe.yml" Scry.ciGhUnsafe with
+  | .error _ => Scry.ciEmptyModel
+  | .ok gh => match Scry.ciParseModel "azure-pipelines.yml" Scry.ciAzUnsafe with
+    | .error _ => gh
+    | .ok az => Scry.ciAddWorkflow gh (Scry.ciWorkflowFirst az)

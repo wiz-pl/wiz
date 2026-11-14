@@ -1,0 +1,15 @@
+trigger: none
+pool:
+  vmImage: ubuntu-latest
+variables:
+- name: greeting
+  value: hello
+jobs:
+- job: build
+  steps:
+  - task: PublishBuildArtifacts@1.2.3
+  - script: echo $(greeting)
+  - script: echo $SYSTEM_ACCESSTOKEN
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+  - template: templates/safe.yml

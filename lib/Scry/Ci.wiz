@@ -1,0 +1,1362 @@
+import Prelude
+import Text
+import Scry.CiYaml
+import Scry.Store
+import Scry.Datalog
+import Scry.Eval
+import Scry.Cert
+/-!
+# Scry.Ci: a unified CI model, facts and analyses
+
+`import Scry.Ci` (`wiz-notes/scry-ci.md`). One small IR for **GitHub Actions** and
+**Azure Pipelines**, an extractor from `Scry.Yaml`, a fact graph in the shape of the scry
+store, and Datalog rules for the first slice's findings.
+
+## The IR
+
+* `CiWorkflow` — one file's pipeline: platform, path, name, triggers, environment and
+  variables, permissions, resources, included templates, jobs, and (Azure) top-level
+  steps.
+* `CiJob` — name, kind (`job`, `deployment`, `reusable`), `needs`/`dependsOn`, steps,
+  environment, variables, permissions, matrix.
+* `CiStep` — `kind` (`run`, `uses`, `task`, `script`, `bash`, `pwsh`, `checkout`,
+  `publish`, `download`, `template`), the action (`uses`) or task (`task`) reference,
+  the script text, `with`/`inputs`, `env`, and every interpolated expression with the
+  **site** it occurs at (`run`, `script`, `with.ref`, `env.TITLE`, `template`, …).
+* `CiExpr` — the text between the delimiters, its syntax (`gh`, `az-compile`,
+  `az-runtime`, `az-macro`), the site, and a line number.
+* `CiVar` — name, value, `secret`, source (`env`, `variables`, `with`, `inputs`,
+  `matrix`, `group`, `permission`).
+
+## The graph and facts
+
+`ciLower : CiModel → CiGraph` assigns preorder node ids to every file, workflow,
+trigger, job, step, script, expression, action, task, template, variable, permission,
+resource and artifact, then emits the labelled edges (`contains`, `depends-on`, `uses`,
+`includes`, `reads`, `writes`, `flows-to`), named relations, and the **Datalog EDB**
+(`CiFact`). Expression nodes and the script they are interpolated into get both a
+`contains` edge and a `flows-to` edge; an expression in an `env:` value flows into the
+step but is *not* `exprIn(script, e)`, which is what makes the env-indirection fix a
+true negative rather than a special case.
+
+## The first slice's rules
+
+| # | rule | body (relation numbers in `ciArity`) |
+|---|---|---|
+| 1 | `gh-script-injection` | `script(step,s), exprIn(s,e), untrusted(e)` |
+| 2 | `gh-unpinned-action` | `uses(step,a), unpinned(a)` |
+| 3 | `gh-untrusted-checkout` | `prTarget(wf), inWorkflow(step,wf), prHead(step)` |
+| 4 | `az-token-in-script` | `script(step,s), exprIn(s,e), token(e)` |
+| 5 | `az-unpinned-task` | `task(step,t), unpinnedTask(t)` |
+| 6 | `az-template-injection` | `inWorkflow(step,wf), templateInj(step,e)` |
+
+The program is positive (no negation), so `Program.check` accepts it and every alert
+has a derivation from the EDB. `ciReport` runs the semi-naive engine with provenance and
+asks `Scry.State.explainTuple` for a **checked certificate** per finding; a report is
+`ciCheckCerts`-clean when every finding carries one.
+
+Policies (untrusted contexts, pinned refs, secret names) are EDB predicates computed by
+the extractor, not Datalog rules: they are configuration, and putting them in the
+extractor keeps the rules purely structural. `wiz-notes/scry-ci.md` lists the choices and
+the open questions.
+-/
+
+-- ## The IR
+
+/-- The CI dialect. -/
+inductive Scry.CiPlatform where
+  | github
+  | azure
+
+/-- A trigger/event, with the raw detail (filters, `types`, …) when the file gave one. -/
+structure Scry.CiTrigger where
+  name : String
+  detail : String
+  line : Nat
+
+/-- A variable-like binding: `env`, an Azure variable or variable group, a job matrix
+entry, an action/task input, or a permission. `secret` marks values the platform may
+treat as secret (variable groups, `System.AccessToken`). -/
+structure Scry.CiVar where
+  name : String
+  value : String
+  secret : Bool
+  source : String
+  line : Nat
+
+/-- An interpolated expression: the text between the delimiters, its syntax, the site it
+occurs at, and a line. -/
+structure Scry.CiExpr where
+  raw : String
+  form : String
+  site : String
+  line : Nat
+
+/-- One step or task. `uses` is a GitHub `uses:` reference (or an Azure task when
+`kind = task`), `task` is an Azure `task:` reference, `script` the script text, `site`
+the key it came from, `withs` the `with:`/`inputs:` map, and `artifact` the artifact a
+publish/upload/download step touches. -/
+structure Scry.CiStep where
+  index : Nat
+  name : String
+  kind : String
+  uses : String
+  ref : String
+  task : String
+  taskVersion : String
+  script : String
+  site : String
+  withs : List Scry.CiVar
+  env : List Scry.CiVar
+  exprs : List Scry.CiExpr
+  artifact : String
+  line : Nat
+
+/-- A job: its name, kind, dependencies, steps, environment, variables, permissions and
+matrix. `uses` is set for a reusable-workflow job. -/
+structure Scry.CiJob where
+  name : String
+  kind : String
+  needs : List String
+  steps : List Scry.CiStep
+  env : List Scry.CiVar
+  vars : List Scry.CiVar
+  permissions : List Scry.CiVar
+  matrix : List Scry.CiVar
+  uses : String
+  line : Nat
+
+/-- An Azure `resources:` entry (repository, pipeline, container). -/
+structure Scry.CiResource where
+  kind : String
+  name : String
+  ref : String
+  line : Nat
+
+/-- An included template: `template:` (step/job/stage/variable) or `extends:`. -/
+structure Scry.CiInclude where
+  kind : String
+  path : String
+  line : Nat
+
+/-- One CI file's pipeline. -/
+structure Scry.CiWorkflow where
+  platform : Scry.CiPlatform
+  path : String
+  name : String
+  triggers : List Scry.CiTrigger
+  env : List Scry.CiVar
+  vars : List Scry.CiVar
+  permissions : List Scry.CiVar
+  resources : List Scry.CiResource
+  includes : List Scry.CiInclude
+  jobs : List Scry.CiJob
+  steps : List Scry.CiStep
+  line : Nat
+
+/-- A set of CI files. -/
+structure Scry.CiModel where
+  workflows : List Scry.CiWorkflow
+
+/-- An empty model (the fold's base). -/
+def Scry.ciEmptyModel : Scry.CiModel := Scry.CiModel.mk .nil
+
+-- ## Small extraction helpers
+
+/-- `true` when the platform is GitHub. -/
+def Scry.ciIsGithub : Scry.CiPlatform → Bool
+  | .github => .true
+  | .azure => .false
+
+/-- `List` concatenation of a function's results (`List.concat` of `List.map`). -/
+def Scry.concatMapList {A B : Type} (f : A → List B) : List A → List B
+  | .nil => .nil
+  | .cons x xs => List.append (f x) (Scry.concatMapList f xs)
+
+/-- Whether an `Option` is present. -/
+def Scry.ciIsSome {A : Type} : Option A → Bool
+  | .some _ => .true
+  | .none => .false
+
+/-- Number a list from 0. -/
+def Scry.ciIndexedGo {A : Type} : Nat → List A → List (Nat × A)
+  | _, .nil => .nil
+  | n, .cons x xs => .cons (n, x) (Scry.ciIndexedGo (Nat.succ n) xs)
+
+/-- A list with each element's index, from 0. -/
+def Scry.ciIndexed {A : Type} (xs : List A) : List (Nat × A) := Scry.ciIndexedGo 0 xs
+
+/-- The last path component. -/
+def Scry.ciBaseName (path : String) : String :=
+  match List.reverse (String.splitOn path "/") with
+  | .cons last _ => last
+  | .nil => path
+
+/-- The value of `key` as text, or `d`. -/
+def Scry.ciGet (d : String) (key : String) (y : Scry.Yaml) : String :=
+  match Scry.Yaml.lookup key y with
+  | .some v => Scry.Yaml.asText v
+  | .none => d
+
+/-- The value at `key`, or an empty scalar (for functions that want a `Yaml`). -/
+def Scry.ciNode (key : String) (y : Scry.Yaml) : Scry.Yaml :=
+  match Scry.Yaml.lookup key y with
+  | .some v => v
+  | .none => .scalar "" 0 0
+
+/-- The first of `keys` whose value is a non-empty scalar, or `""`. -/
+def Scry.ciFirstKey (keys : List String) (y : Scry.Yaml) : String :=
+  match keys with
+  | .nil => ""
+  | .cons k ks =>
+    if String.isEmpty (String.trim (Scry.ciGet "" k y)) then Scry.ciFirstKey ks y else k
+
+/-- The first of `keys` present and non-empty, or `d`. -/
+def Scry.ciFirst (d : String) (keys : List String) (y : Scry.Yaml) : String :=
+  match keys with
+  | .nil => d
+  | .cons k ks =>
+    let v := Scry.ciGet "" k y;
+    if String.isEmpty (String.trim v) then Scry.ciFirst d ks y else String.trim v
+
+/-- A scalar or a sequence of scalars, as a list of trimmed strings. -/
+def Scry.ciStrings (y : Scry.Yaml) : List String :=
+  match Scry.Yaml.strip y with
+  | .sequence _ _ _ => List.filter (fun s => Bool.not (String.isEmpty s))
+      (List.map (fun v => String.trim (Scry.Yaml.asText v)) (Scry.Yaml.asSeq y))
+  | _ => let t := String.trim (Scry.Yaml.asText y);
+    if String.isEmpty t then .nil else .cons t .nil
+
+/-- Whether `s` is all ASCII decimal digits. -/
+def Scry.ciAllDigits : List Char → Bool
+  | .nil => .true
+  | .cons c cs => if Char.isDigit c then Scry.ciAllDigits cs else .false
+
+/-- Split at the first `@`: `owner/repo@ref` gives `(owner/repo, ref)` and a reference
+without `@` gives `(s, "")`. -/
+def Scry.ciSplitAt (s : String) : String × String :=
+  match String.splitOn s "@" with
+  | .cons a (.cons b _) => (a, b)
+  | .cons a .nil => (a, "")
+  | .nil => ("", "")
+
+/-- Whether `s` is 40 lowercase or uppercase hex digits (a commit SHA-1). -/
+def Scry.ciSha40 (s : String) : Bool :=
+  let t := String.trim s;
+  if Nat.beq (String.length t) 40 then
+    List.all (fun c => Bool.or (Char.isDigit c)
+      (Bool.or (Bool.and (Nat.le 97 (Char.code c)) (Nat.le (Char.code c) 102))
+               (Bool.and (Nat.le 65 (Char.code c)) (Nat.le (Char.code c) 70))))
+      (String.chars t)
+  else .false
+
+/-- Whether a GitHub `uses:` reference is pinned: a local action (`./x`), a Docker image
+by digest (`@sha256:`), or a remote action at a 40-hex commit. A tag, branch or partial
+SHA is not pinned. -/
+def Scry.ciPinned (uses : String) : Bool :=
+  let u := String.trim uses;
+  if String.startsWith u "./" then .true
+  else if String.startsWith u "../" then .true
+  else if String.startsWith u "docker://" then String.contains u "@sha256:"
+  else Scry.ciSha40 (Scry.ciSplitAt u).2
+
+/-- Whether an Azure task version pins all three components (`1.2.3`; `1`, `1.2` and
+`""` float to the newest matching release). -/
+def Scry.ciTaskVersionPinned (v : String) : Bool :=
+  match String.splitOn v "." with
+  | .cons a (.cons b (.cons c .nil)) =>
+    Bool.and (Bool.not (String.isEmpty a))
+      (Bool.and (Bool.not (String.isEmpty b))
+        (Bool.and (Bool.not (String.isEmpty c))
+          (Bool.and (Scry.ciAllDigits (String.chars a))
+            (Bool.and (Scry.ciAllDigits (String.chars b)) (Scry.ciAllDigits (String.chars c))))))
+  | _ => .false
+
+/-- Lowercase ASCII letters (enough for expression-context comparison). -/
+def Scry.ciLowerStr (s : String) : String :=
+  String.ofChars (List.map (fun c =>
+    if Bool.and (Nat.le 65 (Char.code c)) (Nat.le (Char.code c) 90)
+    then Char.mk (Nat.add (Char.code c) 32) else c) (String.chars s))
+
+/-- Split `s` on `.` after trimming and stripping one leading `!`. -/
+def Scry.ciSegs (s : String) : List String :=
+  let t := String.trim s;
+  let t := match String.chars t with
+    | .cons c rest => if Nat.beq (Char.code c) 33 then String.trim (String.ofChars rest) else t
+    | .nil => t;
+  String.splitOn t "."
+
+/-- Whether `pre` is a prefix of `xs`. -/
+def Scry.ciPrefixOf : List String → List String → Bool
+  | .nil, _ => .true
+  | .cons _ _, .nil => .false
+  | .cons p ps, .cons x xs => if String.eq p x then Scry.ciPrefixOf ps xs else .false
+
+/-- Whether `needle` occurs in `xs` as a contiguous subsequence. -/
+def Scry.ciContainsSeq (needle xs : List String) : Bool :=
+  match xs with
+  | .nil => List.isEmpty needle
+  | .cons _ rest =>
+    if Scry.ciPrefixOf needle xs then Bool.true else Scry.ciContainsSeq needle rest
+
+-- ## Expressions
+
+/-- Count newlines. -/
+def Scry.ciCountNewlines : List Char → Nat
+  | .nil => 0
+  | .cons c cs => if Nat.beq (Char.code c) 10 then Nat.succ (Scry.ciCountNewlines cs)
+    else Scry.ciCountNewlines cs
+
+/-- Take characters up to the `close` delimiter (exclusive), or `none`. -/
+partial def Scry.ciTakeUntil (close : List Char) (acc : List Char) :
+    List Char → Option (List Char × List Char)
+  | .nil => .none
+  | .cons c rest =>
+    match Chars.stripPrefix close (.cons c rest) with
+    | .some after => .some (List.reverse acc, after)
+    | .none => Scry.ciTakeUntil close (.cons c acc) rest
+
+/-- The interpolation delimiters of a platform: `(open, close, syntax)`. -/
+def Scry.ciDelims : Scry.CiPlatform → List (String × String × String)
+  | .github => [("${{", "}}", "gh")]
+  | .azure =>
+    [ ("${{", "}}", "az-compile")
+    , ("$[", "]", "az-runtime")
+    , ("$(", ")", "az-macro") ]
+
+/-- Scan `text` for `${{ … }}` (GitHub) or `${{ … }}`, `$[ … ]`, `$( … )` (Azure) and
+return one `CiExpr` per occurrence, with the line it starts on. -/
+partial def Scry.ciScanGo (delims : List (String × String × String)) (site : String)
+    (cs : List Char) (line : Nat) (acc : List Scry.CiExpr) : List Scry.CiExpr :=
+  match List.find (fun p => Chars.isPrefix (String.chars p.1) cs) delims with
+  | .some p =>
+    let afterOpen := List.drop (String.length p.1) cs;
+    match Scry.ciTakeUntil (String.chars p.2.1) .nil afterOpen with
+    | .none => List.reverse acc
+    | .some (body, after) =>
+      let consumed := Nat.sub (List.length cs) (List.length after);
+      let moved := Scry.ciCountNewlines (List.take consumed cs);
+      let e := Scry.CiExpr.mk (String.trim (String.ofChars body)) p.2.2 site line;
+      Scry.ciScanGo delims site after (Nat.add line moved) (.cons e acc)
+  | .none =>
+    match cs with
+    | .nil => List.reverse acc
+    | .cons c rest =>
+      let line' := if Nat.beq (Char.code c) 10 then Nat.succ line else line;
+      Scry.ciScanGo delims site rest line' acc
+
+/-- Every expression in `text`, at `site`, starting at `line`. -/
+def Scry.ciExprsIn (p : Scry.CiPlatform) (site : String) (line : Nat) (text : String) :
+    List Scry.CiExpr :=
+  if String.isEmpty text then .nil
+  else Scry.ciScanGo (Scry.ciDelims p) site (String.chars text) line .nil
+
+/-- A GitHub expression's context is untrusted when it is an event field, the PR head
+ref, or a workflow input. This is the slice's source policy (documented in the note):
+`github.event.*` is treated as attacker-controlled as a class. -/
+def Scry.ciGhUntrusted (raw : String) : Bool :=
+  match Scry.ciSegs raw with
+  | .cons "github" (.cons "event" _) => .true
+  | .cons "github" (.cons "head_ref" _) => .true
+  | .cons "inputs" _ => .true
+  | _ => .false
+
+/-- Whether a GitHub expression reads the head of a pull request (the code under
+review): `github.event.pull_request.head.*`, `merge_commit_sha`, or `github.head_ref`. -/
+def Scry.ciGhPrHead (raw : String) : Bool :=
+  let segs := Scry.ciSegs raw;
+  Bool.or (Scry.ciContainsSeq ["github", "event", "pull_request", "head"] segs)
+    (Bool.or (Scry.ciContainsSeq ["github", "event", "pull_request", "merge_commit_sha"] segs)
+      (Scry.ciContainsSeq ["github", "head_ref"] segs))
+
+/-- The name an Azure macro or runtime expression reads: `variables['x']`, `variables.x`,
+or the expression itself. -/
+def Scry.ciAzVarName (raw : String) : String :=
+  let t := String.trim raw;
+  if String.startsWith t "variables[" then
+    let inner := String.drop 10 t;
+    let inner := match String.stripSuffix inner "]" with
+      | .some s => s
+      | .none => inner;
+    Scry.yUnquote inner
+  else if String.startsWith t "variables." then String.drop 10 t
+  else t
+
+/-- Whether an Azure expression reads `System.AccessToken` or a declared secret. -/
+def Scry.ciAzToken (secrets : List String) (raw : String) : Bool :=
+  let name := Scry.ciLowerStr (Scry.ciAzVarName raw);
+  if String.eq name "system.accesstoken" then .true
+  else List.any (fun s => String.eq (Scry.ciLowerStr s) name) secrets
+
+/-- Whether an Azure compile-time expression reads a template parameter (the
+template-injection source). -/
+def Scry.ciAzParam (raw : String) : Bool :=
+  let t := String.trim raw;
+  Bool.or (String.startsWith t "parameters.") (String.startsWith t "parameters[")
+
+-- ## Variable extraction
+
+/-- A mapping of `name: value` plus the special key `secret` (boolean), as variables.
+`System.AccessToken` is secret by convention; `source = "group"` marks a variable
+group, whose values the file does not show and which may hold secrets. -/
+def Scry.ciVarMap (source : String) (y : Scry.Yaml) : List Scry.CiVar :=
+  List.map (fun p =>
+    let value := match Scry.Yaml.strip p.2 with
+      | .mapping _ _ _ => Scry.ciGet "" "value" p.2
+      | _ => Scry.Yaml.asText p.2;
+    let secret := Bool.or (String.eq p.1 "System.AccessToken")
+      (Bool.or (String.eq source "group")
+        (List.any (fun q => Bool.and (String.eq q.1 "secret") (String.eq (Scry.ciLowerStr (Scry.Yaml.asText q.2)) "true"))
+          (Scry.Yaml.asMap p.2)));
+    Scry.CiVar.mk p.1 value secret source (Scry.Yaml.lineOf p.2))
+    (Scry.Yaml.asMap y)
+
+/-- Permissions: a mapping `contents: read` gives one variable per scope, a scalar
+(`read-all`, `write-all`) one `all` entry. -/
+def Scry.ciPermissions (y : Scry.Yaml) : List Scry.CiVar :=
+  match Scry.Yaml.strip y with
+  | .mapping _ _ _ => Scry.ciVarMap "permission" y
+  | .scalar t l _ => if String.isEmpty (String.trim t) then .nil
+    else .cons (Scry.CiVar.mk "all" (String.trim t) .false "permission" l) .nil
+  | _ => .nil
+
+/-- Azure `variables:`: a mapping, or a sequence of `{name, value}`, `{group: g}` and
+`- template: vars.yml` entries (the last are returned through `ciAzVarIncludes`). -/
+def Scry.ciAzVars (y : Scry.Yaml) : List Scry.CiVar :=
+  match Scry.Yaml.strip y with
+  | .mapping _ _ _ => Scry.ciVarMap "variables" y
+  | .sequence _ _ _ =>
+    Scry.concatMapList (fun item =>
+      match Scry.Yaml.strip item with
+      | .mapping _ _ _ =>
+        match Scry.Yaml.lookup "group" item with
+        | .some g => .cons (Scry.CiVar.mk (String.append "group:" (Scry.Yaml.asText g))
+            "" .true "group" (Scry.Yaml.lineOf item)) .nil
+        | .none =>
+          let name := Scry.ciGet "" "name" item;
+          if String.isEmpty name then .nil
+          else .cons (Scry.CiVar.mk name (Scry.ciGet "" "value" item)
+            (String.eq name "System.AccessToken") "variables" (Scry.Yaml.lineOf item)) .nil
+      | _ => .nil) (Scry.Yaml.asSeq y)
+  | _ => .nil
+
+/-- The `- template:` entries of an Azure `variables:` list. -/
+def Scry.ciAzVarIncludes (y : Scry.Yaml) : List Scry.CiInclude :=
+  Scry.concatMapList (fun item =>
+    match Scry.Yaml.lookup "template" item with
+    | .some t => .cons (Scry.CiInclude.mk "variable-template" (Scry.Yaml.asText t)
+        (Scry.Yaml.lineOf item)) .nil
+    | .none => .nil) (Scry.Yaml.asSeq y)
+
+-- ## GitHub Actions
+
+def Scry.ciGhTriggerDetail : Option Scry.Yaml → String
+  | .none => ""
+  | .some v => String.intercalate "," (Scry.ciStrings v)
+
+/-- GitHub triggers: `on` may be a scalar, a sequence or a mapping of event names. -/
+def Scry.ciGhTriggers (root : Scry.Yaml) : List Scry.CiTrigger :=
+  match Scry.Yaml.lookup "on" root with
+  | .none => .nil
+  | .some y => match Scry.Yaml.strip y with
+    | .scalar t l _ =>
+      let t := String.trim t;
+      if String.isEmpty t then .nil else .cons (Scry.CiTrigger.mk t "" l) .nil
+    | .sequence _ _ _ =>
+      List.map (fun item =>
+        let name := String.trim (Scry.Yaml.asText item);
+        Scry.CiTrigger.mk name (Scry.ciGhTriggerDetail (Scry.Yaml.lookup "types" item))
+          (Scry.Yaml.lineOf item)) (Scry.Yaml.asSeq y)
+    | .mapping _ _ _ =>
+      List.map (fun p =>
+        Scry.CiTrigger.mk p.1 (Scry.ciGhTriggerDetail (Scry.Yaml.lookup "types" p.2))
+          (Scry.Yaml.lineOf p.2)) (Scry.Yaml.asMap y)
+    | _ => .nil
+
+/-- One GitHub step. -/
+def Scry.ciGhStep (index : Nat) (sv : Scry.Yaml) : Scry.CiStep :=
+  let uses := String.trim (Scry.ciGet "" "uses" sv);
+  let script := Scry.ciGet "" "run" sv;
+  let site := if String.isEmpty (String.trim script) then "" else "run";
+  let env := Scry.ciVarMap "env" (Scry.ciNode "env" sv);
+  let withs := Scry.ciVarMap "with" (Scry.ciNode "with" sv);
+  let line := Scry.Yaml.lineOf sv;
+  let name := let n := Scry.ciGet "" "name" sv;
+    if Bool.not (String.isEmpty (String.trim n)) then String.trim n
+    else if Bool.not (String.isEmpty uses) then uses
+    else if Bool.not (String.isEmpty (String.trim script)) then "run"
+    else "step";
+  let exprs := List.concat
+    [ Scry.ciExprsIn .github "run" line script
+    , List.concat (List.map (fun v => Scry.ciExprsIn .github (String.append "with." v.name) v.line v.value) withs)
+    , List.concat (List.map (fun v => Scry.ciExprsIn .github (String.append "env." v.name) v.line v.value) env)
+    , Scry.ciExprsIn .github "uses" line uses
+    , Scry.ciExprsIn .github "if" line (Scry.ciGet "" "if" sv) ];
+  let artifact :=
+    if String.contains uses "upload-artifact" then
+      let n := Scry.ciGet "" "name" (Scry.ciNode "with" sv);
+      if String.isEmpty (String.trim n) then "artifact" else String.trim n
+    else if String.contains uses "download-artifact" then
+      let n := Scry.ciGet "" "name" (Scry.ciNode "with" sv);
+      if String.isEmpty (String.trim n) then "artifact" else String.trim n
+    else "";
+  let kind := if Bool.not (String.isEmpty uses) then "uses"
+    else if Bool.not (String.isEmpty (String.trim script)) then "run" else "step";
+  Scry.CiStep.mk index name kind uses (Scry.ciSplitAt uses).2 "" "" script site withs env
+    exprs artifact line
+
+/-- One GitHub job. -/
+def Scry.ciGhJob (name : String) (jv : Scry.Yaml) : Scry.CiJob :=
+  let steps := List.map (fun p => Scry.ciGhStep p.1 p.2)
+    (Scry.ciIndexed (Scry.Yaml.asSeq (Scry.ciNode "steps" jv)));
+  let uses := String.trim (Scry.ciGet "" "uses" jv);
+  let matrix : List Scry.CiVar := match Scry.Yaml.lookupPath ["strategy", "matrix"] jv with
+    | .some m => Scry.ciVarMap "matrix" m
+    | .none => List.nil;
+  Scry.CiJob.mk name (if String.isEmpty uses then "job" else "reusable")
+    (Scry.ciStrings (Scry.ciNode "needs" jv)) steps
+    (Scry.ciVarMap "env" (Scry.ciNode "env" jv))
+    .nil
+    (Scry.ciPermissions (Scry.ciNode "permissions" jv))
+    matrix uses (Scry.Yaml.lineOf jv)
+
+/-- One GitHub workflow file. -/
+def Scry.ciGhWorkflow (path : String) (root : Scry.Yaml) : Scry.CiWorkflow :=
+  let name := let n := Scry.ciGet "" "name" root;
+    if String.isEmpty (String.trim n) then Scry.ciBaseName path else String.trim n;
+  let jobs := List.map (fun p => Scry.ciGhJob p.1 p.2) (Scry.Yaml.asMap (Scry.ciNode "jobs" root));
+  Scry.CiWorkflow.mk .github path name (Scry.ciGhTriggers root)
+    (Scry.ciVarMap "env" (Scry.ciNode "env" root)) .nil
+    (Scry.ciPermissions (Scry.ciNode "permissions" root)) .nil .nil jobs .nil 1
+
+-- ## Azure Pipelines
+
+/-- Azure triggers: `trigger:` and `pr:` become one trigger each, with the branch paths
+as detail; `trigger: none` (or an empty value) is no trigger. -/
+def Scry.ciAzDetail (y : Scry.Yaml) : String :=
+  String.intercalate "," (Scry.ciStrings y)
+
+def Scry.ciAzTriggerOne (key : String) (root : Scry.Yaml) : List Scry.CiTrigger :=
+  match Scry.Yaml.lookup key root with
+  | .none => .nil
+  | .some y =>
+    let text := String.trim (Scry.Yaml.asText y);
+    if Bool.or (String.isEmpty text) (String.eq (Scry.ciLowerStr text) "none") then .nil
+    else .cons (Scry.CiTrigger.mk key (Scry.ciAzDetail y) (Scry.Yaml.lineOf y)) .nil
+
+def Scry.ciAzTriggers (root : Scry.Yaml) : List Scry.CiTrigger :=
+  List.concat [Scry.ciAzTriggerOne "trigger" root, Scry.ciAzTriggerOne "pr" root]
+
+/-- Azure resources: `repositories`, `pipelines`, `containers`. -/
+def Scry.ciAzResources (root : Scry.Yaml) : List Scry.CiResource :=
+  let res := Scry.ciNode "resources" root;
+  let repos := Scry.concatMapList (fun item =>
+    let n := Scry.ciFirst "" ["repository", "name"] item;
+    if String.isEmpty n then .nil
+    else .cons (Scry.CiResource.mk "repository" n (Scry.ciGet "" "ref" item)
+      (Scry.Yaml.lineOf item)) .nil) (Scry.Yaml.asSeq (Scry.ciNode "repositories" res));
+  let pipes := Scry.concatMapList (fun item =>
+    let n := Scry.ciFirst "" ["pipeline", "source", "name"] item;
+    if String.isEmpty n then .nil
+    else .cons (Scry.CiResource.mk "pipeline" n (Scry.ciGet "" "ref" item)
+      (Scry.Yaml.lineOf item)) .nil) (Scry.Yaml.asSeq (Scry.ciNode "pipelines" res));
+  let containers := Scry.concatMapList (fun item =>
+    let n := Scry.ciFirst "" ["container", "image", "name"] item;
+    if String.isEmpty n then .nil
+    else .cons (Scry.CiResource.mk "container" n (Scry.ciGet "" "tag" item)
+      (Scry.Yaml.lineOf item)) .nil) (Scry.Yaml.asSeq (Scry.ciNode "containers" res));
+  List.concat [repos, pipes, containers]
+
+/-- The workflow-level includes: `extends:` and variable templates. -/
+def Scry.ciAzIncludes (root : Scry.Yaml) : List Scry.CiInclude :=
+  let ext : List Scry.CiInclude := match Scry.Yaml.lookup "extends" root with
+    | .none => .nil
+    | .some y =>
+      let p := match Scry.Yaml.strip y with
+        | .mapping _ _ _ => Scry.ciGet "" "template" y
+        | _ => Scry.Yaml.asText y;
+      if String.isEmpty (String.trim p) then List.nil
+      else List.cons (Scry.CiInclude.mk "extends" (String.trim p) (Scry.Yaml.lineOf y)) List.nil;
+  List.append ext (Scry.ciAzVarIncludes (Scry.ciNode "variables" root))
+
+/-- The secret variable names visible to a step: workflow and job variables marked
+secret, plus `System.AccessToken`. -/
+def Scry.ciSecretNames (wfVars jobVars : List Scry.CiVar) : List String :=
+  let names := List.map (fun v => v.name)
+    (List.filter (fun v => v.secret) (List.append wfVars jobVars));
+  List.append names (List.cons "System.AccessToken" List.nil)
+
+/-- One Azure step. -/
+def Scry.ciAzStep (secrets : List String) (index : Nat) (sv : Scry.Yaml) : Scry.CiStep :=
+  let task := String.trim (Scry.ciGet "" "task" sv);
+  let taskParts := Scry.ciSplitAt task;
+  let siteKey := Scry.ciFirstKey ["script", "bash", "pwsh", "powershell"] sv;
+  let script := if String.isEmpty siteKey then "" else Scry.ciGet "" siteKey sv;
+  let env := Scry.ciVarMap "env" (Scry.ciNode "env" sv);
+  let withs := Scry.ciVarMap "inputs" (Scry.ciNode "inputs" sv);
+  let line := Scry.Yaml.lineOf sv;
+  let checkout := Scry.ciGet "" "checkout" sv;
+  let publish := Scry.ciGet "" "publish" sv;
+  let download := Scry.ciGet "" "download" sv;
+  let template := Scry.ciGet "" "template" sv;
+  let name := let n := Scry.ciGet "" "displayName" sv;
+    if Bool.not (String.isEmpty (String.trim n)) then String.trim n
+    else if Bool.not (String.isEmpty task) then task
+    else if Bool.not (String.isEmpty template) then String.trim template
+    else if Bool.not (String.isEmpty siteKey) then siteKey
+    else "step";
+  let exprs := List.concat
+    [ Scry.ciExprsIn .azure siteKey line script
+    , List.concat (List.map (fun v => Scry.ciExprsIn .azure (String.append "inputs." v.name) v.line v.value) withs)
+    , List.concat (List.map (fun v => Scry.ciExprsIn .azure (String.append "env." v.name) v.line v.value) env)
+    , Scry.ciExprsIn .azure "template" line template ];
+  let artifact :=
+    if Bool.not (String.isEmpty (String.trim publish)) then
+      Scry.ciFirst "artifact" ["artifact", "artifactName"] sv
+    else if Bool.not (String.isEmpty (String.trim download)) then
+      Scry.ciFirst "current" ["artifact", "artifactName"] sv
+    else "";
+  let kind := if Bool.not (String.isEmpty task) then "task"
+    else if Bool.not (String.isEmpty siteKey) then siteKey
+    else if Bool.not (String.isEmpty checkout) then "checkout"
+    else if Bool.not (String.isEmpty publish) then "publish"
+    else if Bool.not (String.isEmpty download) then "download"
+    else if Bool.not (String.isEmpty template) then "template"
+    else "step";
+  Scry.CiStep.mk index name kind "" "" task taskParts.2 script siteKey withs env exprs
+    artifact line
+
+/-- One Azure job (`job:` or `deployment:`). -/
+def Scry.ciAzJob (secrets : List String) (name : String) (jv : Scry.Yaml) : Scry.CiJob :=
+  let steps := List.map (fun p => Scry.ciAzStep secrets p.1 p.2)
+    (Scry.ciIndexed (Scry.Yaml.asSeq (Scry.ciNode "steps" jv)));
+  let deployment := String.trim (Scry.ciGet "" "deployment" jv);
+  let kind := if String.isEmpty deployment then "job" else "deployment";
+  Scry.CiJob.mk name kind (Scry.ciStrings (Scry.ciNode "dependsOn" jv)) steps
+    (Scry.ciVarMap "env" (Scry.ciNode "env" jv))
+    (Scry.ciAzVars (Scry.ciNode "variables" jv))
+    .nil .nil "" (Scry.Yaml.lineOf jv)
+
+/-- A job-include (`- template: jobs/build.yml`) as an include. -/
+def Scry.ciAzTemplateInclude (kind : String) (item : Scry.Yaml) : List Scry.CiInclude :=
+  match Scry.Yaml.lookup "template" item with
+  | .some t =>
+    let p := String.trim (Scry.Yaml.asText t);
+    if String.isEmpty p then .nil
+    else .cons (Scry.CiInclude.mk kind p (Scry.Yaml.lineOf item)) .nil
+  | .none => .nil
+
+def Scry.ciAzJobListGo :
+    List String → List Scry.Yaml → List Scry.CiJob → List Scry.CiInclude →
+      List Scry.CiJob × List Scry.CiInclude
+  | _, .nil, js, is => (List.reverse js, List.reverse is)
+  | secrets, .cons item rest, js, is =>
+    let inc := Scry.ciAzTemplateInclude "job-template" item;
+    let name := Scry.ciFirst "" ["job", "deployment"] item;
+    if String.isEmpty name then Scry.ciAzJobListGo secrets rest js (List.append is inc)
+    else Scry.ciAzJobListGo secrets rest (.cons (Scry.ciAzJob secrets name item) js)
+      (List.append is inc)
+
+/-- Jobs from a `jobs:` list: job mappings, deployment mappings, and `template:`
+includes. -/
+def Scry.ciAzJobList (secrets : List String) (items : List Scry.Yaml) :
+    List Scry.CiJob × List Scry.CiInclude :=
+  Scry.ciAzJobListGo secrets items .nil .nil
+
+def Scry.ciAzFromStagesGo :
+    List String → List Scry.Yaml → List Scry.CiJob → List Scry.CiInclude →
+      List Scry.CiJob × List Scry.CiInclude
+  | _, .nil, js, is => (List.reverse js, List.reverse is)
+  | secrets, .cons st rest, js, is =>
+    let sub := Scry.ciAzJobList secrets (Scry.Yaml.asSeq (Scry.ciNode "jobs" st));
+    let inc := Scry.ciAzTemplateInclude "stage-template" st;
+    Scry.ciAzFromStagesGo secrets rest (List.append js sub.1)
+      (List.append is (List.append sub.2 inc))
+
+def Scry.ciAzFromStages (secrets : List String) (stages : List Scry.Yaml) :
+    List Scry.CiJob × List Scry.CiInclude :=
+  Scry.ciAzFromStagesGo secrets stages .nil .nil
+
+/-- Jobs from a `jobs:` sequence (skipping `- template:` includes, which are returned
+separately), or from a `stages:` sequence of stage mappings. -/
+def Scry.ciAzJobs (secrets : List String) (root : Scry.Yaml) :
+    List Scry.CiJob × List Scry.CiInclude :=
+  let stages := Scry.Yaml.asSeq (Scry.ciNode "stages" root);
+  if Bool.not (List.isEmpty stages) then
+    Scry.ciAzFromStages secrets stages
+  else
+    Scry.ciAzJobList secrets (Scry.Yaml.asSeq (Scry.ciNode "jobs" root))
+
+/-- One Azure pipeline file. -/
+def Scry.ciAzWorkflow (path : String) (root : Scry.Yaml) : Scry.CiWorkflow :=
+  let wfVars := Scry.ciAzVars (Scry.ciNode "variables" root);
+  let secrets := Scry.ciSecretNames wfVars .nil;
+  let jobs := Scry.ciAzJobs secrets root;
+  let topSteps := List.map (fun p => Scry.ciAzStep secrets p.1 p.2)
+    (Scry.ciIndexed (Scry.Yaml.asSeq (Scry.ciNode "steps" root)));
+  let name := let n := Scry.ciGet "" "name" root;
+    if String.isEmpty (String.trim n) then Scry.ciBaseName path else String.trim n;
+  Scry.CiWorkflow.mk .azure path name (Scry.ciAzTriggers root) .nil wfVars .nil
+    (Scry.ciAzResources root) (List.append (Scry.ciAzIncludes root) jobs.2) jobs.1 topSteps 1
+
+-- ## Detecting the platform and parsing
+
+/-- Which dialect a file is: the path, then the top-level keys, then the shape of
+`jobs:` (GitHub jobs have `runs-on`, Azure jobs have `job:`). -/
+def Scry.ciDetect (path : String) (root : Scry.Yaml) : Scry.CiPlatform :=
+  if String.contains path ".github" then .github
+  else if String.startsWith (Scry.ciBaseName path) "azure" then .azure
+  else match Scry.Yaml.lookup "on" root with
+    | .some _ => .github
+    | .none =>
+      if Bool.or (Scry.ciIsSome (Scry.Yaml.lookup "trigger" root))
+        (Bool.or (Scry.ciIsSome (Scry.Yaml.lookup "pr" root))
+          (Bool.or (Scry.ciIsSome (Scry.Yaml.lookup "stages" root))
+            (Bool.or (Scry.ciIsSome (Scry.Yaml.lookup "variables" root))
+              (Bool.or (Scry.ciIsSome (Scry.Yaml.lookup "resources" root))
+                (Scry.ciIsSome (Scry.Yaml.lookup "extends" root)))))) then .azure
+      else
+        let jobs := Scry.Yaml.asMap (Scry.ciNode "jobs" root);
+        if List.any (fun p => Scry.ciIsSome (Scry.Yaml.lookup "runs-on" p.2)) jobs then .github
+        else .azure
+
+/-- Parse one CI file's text into a workflow, choosing the dialect with `ciDetect`. -/
+def Scry.ciParseWorkflow (path : String) (text : String) : Except String Scry.CiWorkflow :=
+  match Scry.parseYaml text with
+  | .error e => .error e
+  | .ok root =>
+    let p := Scry.ciDetect path root;
+    match p with
+    | .github => .ok (Scry.ciGhWorkflow path root)
+    | .azure => .ok (Scry.ciAzWorkflow path root)
+
+/-- Parse a file with an explicit platform (the CLI's `--github`/`--azure`). -/
+def Scry.ciParseWorkflowAs (p : Scry.CiPlatform) (path : String) (text : String) :
+    Except String Scry.CiWorkflow :=
+  match Scry.parseYaml text with
+  | .error e => .error e
+  | .ok root => match p with
+    | .github => .ok (Scry.ciGhWorkflow path root)
+    | .azure => .ok (Scry.ciAzWorkflow path root)
+
+/-- Add a workflow to a model. -/
+def Scry.ciAddWorkflow (m : Scry.CiModel) (wf : Scry.CiWorkflow) : Scry.CiModel :=
+  Scry.CiModel.mk (List.append m.workflows (.cons wf .nil))
+
+-- ## The graph: nodes, edges, relations, Datalog facts
+
+/-- A node kind in the CI graph. -/
+inductive Scry.CiKind where
+  | file
+  | workflow
+  | pipeline
+  | trigger
+  | job
+  | step
+  | action
+  | task
+  | template
+  | script
+  | expression
+  | variable
+  | secret
+  | permission
+  | resource
+  | artifact
+
+/-- A numeric tag for a node kind (the store's kind column). -/
+def Scry.CiKind.tag : Scry.CiKind → Nat
+  | .file => 0
+  | .workflow => 1
+  | .pipeline => 2
+  | .trigger => 3
+  | .job => 4
+  | .step => 5
+  | .action => 6
+  | .task => 7
+  | .template => 8
+  | .script => 9
+  | .expression => 10
+  | .variable => 11
+  | .secret => 12
+  | .permission => 13
+  | .resource => 14
+  | .artifact => 15
+
+/-- Kind equality by tag. -/
+def Scry.CiKind.beq (a b : Scry.CiKind) : Bool := Nat.beq a.tag b.tag
+
+
+/-- The store's name for a node kind. -/
+def Scry.CiKind.label : Scry.CiKind → String
+  | .file => "file"
+  | .workflow => "workflow"
+  | .pipeline => "pipeline"
+  | .trigger => "trigger"
+  | .job => "job"
+  | .step => "step"
+  | .action => "action"
+  | .task => "task"
+  | .template => "template"
+  | .script => "script"
+  | .expression => "expression"
+  | .variable => "variable"
+  | .secret => "secret"
+  | .permission => "permission"
+  | .resource => "resource"
+  | .artifact => "artifact"
+
+/-- An edge label. -/
+inductive Scry.CiEdgeLabel where
+  | contains
+  | dependsOn
+  | uses
+  | includes
+  | reads
+  | writes
+  | flowsTo
+
+/-- The store's name for an edge label. -/
+def Scry.CiEdgeLabel.label : Scry.CiEdgeLabel → String
+  | .contains => "contains"
+  | .dependsOn => "depends-on"
+  | .uses => "uses"
+  | .includes => "includes"
+  | .reads => "reads"
+  | .writes => "writes"
+  | .flowsTo => "flows-to"
+
+/-- One graph node: id, kind, display name, source line. -/
+structure Scry.CiNode where
+  id : Nat
+  kind : Scry.CiKind
+  name : String
+  line : Nat
+
+/-- One graph edge. -/
+structure Scry.CiEdge where
+  src : Nat
+  dst : Nat
+  label : Scry.CiEdgeLabel
+
+/-- A named relation over node ids (the graph-level view of the facts). -/
+structure Scry.CiRel where
+  name : String
+  tuples : List (List Nat)
+
+/-- The relation's arity (0 for an empty relation). -/
+def Scry.CiRel.arity (r : Scry.CiRel) : Nat :=
+  match r.tuples with
+  | .cons t _ => List.length t
+  | .nil => 0
+
+/-- One Datalog EDB fact: relation number and columns (store node ids). -/
+structure Scry.CiFact where
+  rel : Nat
+  row : List Nat
+
+/-- The lowered graph. `facts` is the Datalog EDB; `rels` the same data under
+readable names, plus containment relations the rules do not need. -/
+structure Scry.CiGraph where
+  nodes : List Scry.CiNode
+  edges : List Scry.CiEdge
+  rels : List Scry.CiRel
+  facts : List Scry.CiFact
+
+/-- The builder state: ids are preorder; lists are kept reversed. -/
+structure Scry.CiBuild where
+  next : Nat
+  nodes : List Scry.CiNode
+  edges : List Scry.CiEdge
+  rels : List (String × List (List Nat))
+  facts : List Scry.CiFact
+
+/-- The empty builder. -/
+def Scry.ciBEmpty : Scry.CiBuild := Scry.CiBuild.mk 0 .nil .nil .nil .nil
+
+/-- Add a node; its id is the builder's `next` before the call. -/
+def Scry.ciAddNode (k : Scry.CiKind) (name : String) (line : Nat) (b : Scry.CiBuild) :
+    Scry.CiBuild :=
+  Scry.CiBuild.mk (Nat.succ b.next)
+    (List.cons (Scry.CiNode.mk b.next k name line) b.nodes)
+    b.edges b.rels b.facts
+
+/-- Add an edge. -/
+def Scry.ciAddEdge (src dst : Nat) (label : Scry.CiEdgeLabel) (b : Scry.CiBuild) :
+    Scry.CiBuild :=
+  Scry.CiBuild.mk b.next b.nodes (List.cons (Scry.CiEdge.mk src dst label) b.edges)
+    b.rels b.facts
+
+/-- Add a tuple to a named relation. -/
+def Scry.ciRelAdd (name : String) (row : List Nat) :
+    List (String × List (List Nat)) → List (String × List (List Nat))
+  | .nil => List.cons (name, List.cons row List.nil) List.nil
+  | .cons (k, rows) rest =>
+    if String.eq k name then List.cons (k, List.cons row rows) rest
+    else List.cons (k, rows) (Scry.ciRelAdd name row rest)
+
+/-- Add a relation tuple. -/
+def Scry.ciAddRel (name : String) (row : List Nat) (b : Scry.CiBuild) : Scry.CiBuild :=
+  Scry.CiBuild.mk b.next b.nodes b.edges (Scry.ciRelAdd name row b.rels) b.facts
+
+/-- Add a Datalog fact. -/
+def Scry.ciAddFact (rel : Nat) (row : List Nat) (b : Scry.CiBuild) : Scry.CiBuild :=
+  Scry.CiBuild.mk b.next b.nodes b.edges b.rels (List.cons (Scry.CiFact.mk rel row) b.facts)
+
+/-- Finish a builder: restore file order and reverse relation tuples. -/
+def Scry.ciFinish (b : Scry.CiBuild) : Scry.CiGraph :=
+  Scry.CiGraph.mk (List.reverse b.nodes) (List.reverse b.edges)
+    (List.map (fun p => Scry.CiRel.mk p.1 (List.reverse p.2)) (List.reverse b.rels))
+    (List.reverse b.facts)
+
+-- ## Lowering the IR to the graph
+
+/-- Whether any expression at a checkout site reads the PR head. -/
+def Scry.ciStepPrHead (st : Scry.CiStep) : Bool :=
+  List.any (fun e =>
+    Bool.and (Scry.ciGhPrHead e.raw)
+      (Bool.or (String.eq e.site "run") (String.eq e.site "with.ref"))) st.exprs
+
+/-- The secret names of a job: its own secret variables plus the workflow's. -/
+def Scry.ciJobSecrets (wfSecrets : List String) (j : Scry.CiJob) : List String :=
+  List.append wfSecrets
+    (List.map (fun v => v.name) (List.filter (fun v => v.secret) j.vars))
+
+/-- Lower one expression occurrence: an expression node, containment and `flows-to`
+edges, the `exprIn` fact when it is interpolated into a script or template sink, and
+the policy/source facts (`untrusted`, `token`, `templateInj`). -/
+def Scry.ciLowerExpr (p : Scry.CiPlatform) (secrets : List String) (stepId flowId : Nat)
+    (scriptSite : String) (e : Scry.CiExpr) (b0 : Scry.CiBuild) : Scry.CiBuild :=
+  let inScript := String.eq e.site scriptSite;
+  let eid := b0.next;
+  let b1 := Scry.ciAddNode .expression e.raw e.line b0;
+  let b2 := Scry.ciAddEdge flowId eid .contains b1;
+  let b3 := Scry.ciAddEdge eid flowId .flowsTo b2;
+  let b4 := Scry.ciAddRel "exprIn" [flowId, eid] b3;
+  let b5 := if inScript then Scry.ciAddFact 1 [flowId, eid] b4 else b4;
+  match p with
+  | .github =>
+    if Scry.ciGhUntrusted e.raw then Scry.ciAddFact 2 [eid] b5 else b5
+  | .azure =>
+    let b6 := if Scry.ciAzToken secrets e.raw then Scry.ciAddFact 8 [eid] b5 else b5;
+    if Bool.and (Scry.ciAzParam e.raw)
+      (Bool.or inScript (String.eq e.site "template"))
+    then Scry.ciAddFact 11 [stepId, eid] b6
+    else b6
+
+/-- Lower one step: the step node, its script, expressions, actions/tasks, artifact and
+template include. -/
+def Scry.ciLowerStep (p : Scry.CiPlatform) (wfId parentId : Nat) (secrets : List String)
+    (st : Scry.CiStep) (b0 : Scry.CiBuild) : Scry.CiBuild :=
+  let stepId := b0.next;
+  let b1 := Scry.ciAddNode .step st.name st.line b0;
+  let b2 := Scry.ciAddEdge parentId stepId .contains b1;
+  let b3 := Scry.ciAddRel "stepOf" [parentId, stepId] b2;
+  let b4 := Scry.ciAddFact 5 [stepId, wfId] b3;
+  let hasScript := Bool.not (String.isEmpty (String.trim st.script));
+  let scriptId := b4.next;
+  let b5 := if hasScript
+    then Scry.ciAddNode .script (if String.isEmpty st.site then "run" else st.site) st.line b4
+    else b4;
+  let b6 := if hasScript then Scry.ciAddEdge stepId scriptId .contains b5 else b5;
+  let b7 := if hasScript then Scry.ciAddRel "scriptOf" [stepId, scriptId] b6 else b6;
+  let b8 := if hasScript then Scry.ciAddFact 0 [stepId, scriptId] b7 else b7;
+  let flowId := if hasScript then scriptId else stepId;
+  let scriptSite := if hasScript then (if String.isEmpty st.site then "run" else st.site) else "-";
+  let b9 := List.foldl (fun b e => Scry.ciLowerExpr p secrets stepId flowId scriptSite e b)
+    b8 st.exprs;
+  let b10 := if Bool.and (Scry.ciIsGithub p) (Scry.ciStepPrHead st)
+    then Scry.ciAddFact 7 [stepId] b9 else b9;
+  -- a GitHub action / Azure task reference
+  let hasUses := Bool.not (String.isEmpty (String.trim st.uses));
+  let usesId := b10.next;
+  let b11 := if hasUses then Scry.ciAddNode .action st.uses st.line b10 else b10;
+  let b12 := if hasUses then Scry.ciAddEdge stepId usesId .uses b11 else b11;
+  let b13 := if hasUses then Scry.ciAddRel "uses" [stepId, usesId] b12 else b12;
+  let b14 := if hasUses then Scry.ciAddFact 3 [stepId, usesId] b13 else b13;
+  let b15 := if Bool.and hasUses (Bool.not (Scry.ciPinned st.uses))
+    then Scry.ciAddFact 4 [usesId] b14 else b14;
+  let hasTask := Bool.not (String.isEmpty (String.trim st.task));
+  let taskId := b15.next;
+  let b16 := if hasTask then Scry.ciAddNode .task st.task st.line b15 else b15;
+  let b17 := if hasTask then Scry.ciAddEdge stepId taskId .uses b16 else b16;
+  let b18 := if hasTask then Scry.ciAddRel "taskOf" [stepId, taskId] b17 else b17;
+  let b19 := if hasTask then Scry.ciAddFact 9 [stepId, taskId] b18 else b18;
+  let b20 := if Bool.and hasTask (Bool.not (Scry.ciTaskVersionPinned st.taskVersion))
+    then Scry.ciAddFact 10 [taskId] b19 else b19;
+  -- artifacts (upload/publish writes, download reads)
+  let hasArt := Bool.not (String.isEmpty st.artifact);
+  let artId := b20.next;
+  let b21 := if hasArt then Scry.ciAddNode .artifact st.artifact st.line b20 else b20;
+  let b22 := if hasArt then Scry.ciAddEdge stepId artId
+    (if String.eq st.kind "download" then .reads else .writes) b21 else b21;
+  let b23 := if hasArt then Scry.ciAddRel "artifactOf" [stepId, artId] b22 else b22;
+  -- a step template include
+  let hasTpl := String.eq st.kind "template";
+  let tplId := b23.next;
+  let b24 := if hasTpl then Scry.ciAddNode .template st.name st.line b23 else b23;
+  let b25 := if hasTpl then Scry.ciAddEdge stepId tplId .includes b24 else b24;
+  if hasTpl then Scry.ciAddRel "templateOf" [stepId, tplId] b25 else b25
+
+/-- Lower one job: the job node, its steps, and the job's secret names into the steps. -/
+def Scry.ciLowerJob (p : Scry.CiPlatform) (wfId : Nat) (wfSecrets : List String)
+    (j : Scry.CiJob) (b0 : Scry.CiBuild) : Scry.CiBuild × Nat :=
+  let jid := b0.next;
+  let b1 := Scry.ciAddNode .job j.name j.line b0;
+  let b2 := Scry.ciAddEdge wfId jid .contains b1;
+  let b3 := Scry.ciAddRel "jobOf" [wfId, jid] b2;
+  let secrets := Scry.ciJobSecrets wfSecrets j;
+  let hasUses := Bool.not (String.isEmpty (String.trim j.uses));
+  let usesId := b3.next;
+  let b4 := if hasUses then Scry.ciAddNode .action j.uses j.line b3 else b3;
+  let b5 := if hasUses then Scry.ciAddEdge jid usesId .uses b4 else b4;
+  let b6 := if hasUses then Scry.ciAddRel "uses" [jid, usesId] b5 else b5;
+  let b7 := if hasUses then Scry.ciAddFact 3 [jid, usesId] b6 else b6;
+  let b8 := if Bool.and hasUses (Bool.not (Scry.ciPinned j.uses))
+    then Scry.ciAddFact 4 [usesId] b7 else b7;
+  let b9 := List.foldl (fun b st => Scry.ciLowerStep p wfId jid secrets st b) b8 j.steps;
+  (b9, jid)
+
+/-- Look up a job id by name. -/
+def Scry.ciFindId (name : String) (ids : List (String × Nat)) : Option Nat :=
+  match List.find (fun p => String.eq p.1 name) ids with
+  | .some p => .some p.2
+  | .none => .none
+
+/-- Add `depends-on` edges and `needs` relation tuples for a job list. -/
+def Scry.ciNeedsEdges (jobs : List Scry.CiJob) (ids : List (String × Nat))
+    (b0 : Scry.CiBuild) : Scry.CiBuild :=
+  List.foldl (fun b j =>
+    match Scry.ciFindId j.name ids with
+    | .none => b
+    | .some jid =>
+      List.foldl (fun b n =>
+        match Scry.ciFindId n ids with
+        | .none => b
+        | .some nid =>
+          let b1 := Scry.ciAddEdge jid nid .dependsOn b;
+          Scry.ciAddRel "needs" [jid, nid] b1) b j.needs) b0 jobs
+
+/-- Lower a job list, collecting `(name, id)` pairs for `needs`. -/
+def Scry.ciLowerJobs : Scry.CiPlatform → Nat → List String → List Scry.CiJob →
+    Scry.CiBuild → List (String × Nat) → Scry.CiBuild × List (String × Nat)
+  | _, _, _, .nil, b, ids => (b, ids)
+  | p, wfId, secrets, .cons j js, b, ids =>
+    match Scry.ciLowerJob p wfId secrets j b with
+    | (b1, jid) => Scry.ciLowerJobs p wfId secrets js b1 (List.cons (j.name, jid) ids)
+
+/-- Lower one workflow file: file → workflow/pipeline, triggers, permissions, variables,
+templates, resources, jobs, and top-level steps. -/
+def Scry.ciLowerWorkflow (wf : Scry.CiWorkflow) (b0 : Scry.CiBuild) : Scry.CiBuild :=
+  let fileId := b0.next;
+  let b1 := Scry.ciAddNode .file wf.path 1 b0;
+  let wfId := b1.next;
+  let wk := match wf.platform with
+    | .github => Scry.CiKind.workflow
+    | .azure => Scry.CiKind.pipeline;
+  let b2 := Scry.ciAddNode wk wf.name wf.line b1;
+  let b3 := Scry.ciAddEdge fileId wfId .contains b2;
+  let b4 := Scry.ciAddRel "workflowInFile" [fileId, wfId] b3;
+  let b5 := List.foldl (fun b t =>
+    let tid := b.next;
+    let b1 := Scry.ciAddNode .trigger t.name t.line b;
+    let b2 := Scry.ciAddEdge wfId tid .contains b1;
+    let b3 := Scry.ciAddRel "triggerOf" [wfId, tid] b2;
+    if String.eq t.name "pull_request_target" then Scry.ciAddFact 6 [wfId] b3 else b3)
+    b4 wf.triggers;
+  let wfSecrets := Scry.ciSecretNames (List.append wf.vars wf.env) .nil;
+  let b6 := List.foldl (fun b v =>
+    let pid := b.next;
+    let b1 := Scry.ciAddNode .permission
+      (String.append v.name (String.append ":" v.value)) v.line b;
+    let b2 := Scry.ciAddEdge wfId pid
+      (if String.eq (Scry.ciLowerStr v.value) "write" then .writes else .reads) b1;
+    Scry.ciAddRel "permissionOf" [wfId, pid] b2) b5 wf.permissions;
+  let b7 := List.foldl (fun b v =>
+    let vid := b.next;
+    let b1 := Scry.ciAddNode (if v.secret then .secret else .variable) v.name v.line b;
+    let b2 := Scry.ciAddEdge wfId vid .writes b1;
+    let b3 := Scry.ciAddRel "varOf" [wfId, vid] b2;
+    let exprs := Scry.ciExprsIn wf.platform (String.append "value." v.source) v.line v.value;
+    List.foldl (fun b e => Scry.ciLowerExpr wf.platform wfSecrets vid vid "-" e b)
+      b3 exprs) b6 (List.append wf.vars wf.env);
+  let b8 := List.foldl (fun b inc =>
+    let tid := b.next;
+    let b1 := Scry.ciAddNode .template inc.path inc.line b;
+    let b2 := Scry.ciAddEdge wfId tid .includes b1;
+    Scry.ciAddRel "includeOf" [wfId, tid] b2) b7 wf.includes;
+  let b9 := List.foldl (fun b r =>
+    let rid := b.next;
+    let b1 := Scry.ciAddNode .resource
+      (String.append r.kind (String.append ":" (String.append r.name
+        (if String.isEmpty r.ref then "" else String.append "@" r.ref)))) r.line b;
+    let b2 := Scry.ciAddEdge wfId rid .contains b1;
+    Scry.ciAddRel "resourceOf" [wfId, rid] b2) b8 wf.resources;
+  let jobs := Scry.ciLowerJobs wf.platform wfId wfSecrets wf.jobs b9 .nil;
+  let b10 := Scry.ciNeedsEdges wf.jobs jobs.2 jobs.1;
+  List.foldl (fun b st => Scry.ciLowerStep wf.platform wfId wfId wfSecrets st b)
+    b10 wf.steps
+
+/-- Lower a model. -/
+def Scry.ciLower (m : Scry.CiModel) : Scry.CiGraph :=
+  Scry.ciFinish (List.foldl (fun b wf => Scry.ciLowerWorkflow wf b) Scry.ciBEmpty m.workflows)
+
+-- ## The Datalog program
+
+/-- The relation arities: `script/2`, `exprIn/2`, `untrusted/1`, `uses/2`, `unpinned/1`,
+`inWorkflow/2`, `prTarget/1`, `prHead/1`, `token/1`, `task/2`, `unpinnedTask/1`,
+`templateInj/2`, `alert/3`. -/
+def Scry.ciArity : List Nat := [2, 2, 1, 2, 1, 2, 1, 1, 1, 2, 1, 2, 3]
+
+/-- The alert relation's number. -/
+def Scry.ciAlertRel : Nat := 12
+
+/-- Variables for a body/head. -/
+def Scry.ciVars (ns : List Nat) : List Scry.Term := List.map Scry.Term.var ns
+
+/-- A literal column value. -/
+def Scry.ciLit (n : Nat) : Scry.Term := Scry.Term.lit (U64.ofNat n)
+
+/-- A variable term. -/
+def Scry.ciVar (n : Nat) : Scry.Term := Scry.Term.var n
+
+/-- A rule `alert(rule, node, detail) :- body`. -/
+def Scry.ciRule (rule : Nat) (node detail : Scry.Term) (body : List Scry.Atom) : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple Scry.ciAlertRel [Scry.ciLit rule, node, detail]) body
+
+/-- Rule 1: `script(step,s), exprIn(s,e), untrusted(e)`. -/
+def Scry.ciRule1 : Scry.Rule Nat :=
+  Scry.ciRule 1 (Scry.ciVar 0) (Scry.ciVar 2)
+    [ Scry.Atom.pos 0 [Scry.ciVar 0, Scry.ciVar 1]
+    , Scry.Atom.pos 1 [Scry.ciVar 1, Scry.ciVar 2]
+    , Scry.Atom.pos 2 [Scry.ciVar 2] ]
+
+/-- Rule 2: `uses(step,a), unpinned(a)`. -/
+def Scry.ciRule2 : Scry.Rule Nat :=
+  Scry.ciRule 2 (Scry.ciVar 0) (Scry.ciVar 1)
+    [ Scry.Atom.pos 3 [Scry.ciVar 0, Scry.ciVar 1]
+    , Scry.Atom.pos 4 [Scry.ciVar 1] ]
+
+/-- Rule 3: `prTarget(wf), inWorkflow(step,wf), prHead(step)`. -/
+def Scry.ciRule3 : Scry.Rule Nat :=
+  Scry.ciRule 3 (Scry.ciVar 1) (Scry.ciVar 0)
+    [ Scry.Atom.pos 6 [Scry.ciVar 0]
+    , Scry.Atom.pos 5 [Scry.ciVar 1, Scry.ciVar 0]
+    , Scry.Atom.pos 7 [Scry.ciVar 1] ]
+
+/-- Rule 4: `script(step,s), exprIn(s,e), token(e)`. -/
+def Scry.ciRule4 : Scry.Rule Nat :=
+  Scry.ciRule 4 (Scry.ciVar 0) (Scry.ciVar 2)
+    [ Scry.Atom.pos 0 [Scry.ciVar 0, Scry.ciVar 1]
+    , Scry.Atom.pos 1 [Scry.ciVar 1, Scry.ciVar 2]
+    , Scry.Atom.pos 8 [Scry.ciVar 2] ]
+
+/-- Rule 5: `task(step,t), unpinnedTask(t)`. -/
+def Scry.ciRule5 : Scry.Rule Nat :=
+  Scry.ciRule 5 (Scry.ciVar 0) (Scry.ciVar 1)
+    [ Scry.Atom.pos 9 [Scry.ciVar 0, Scry.ciVar 1]
+    , Scry.Atom.pos 10 [Scry.ciVar 1] ]
+
+/-- Rule 6: `inWorkflow(step,wf), templateInj(step,e)`. -/
+def Scry.ciRule6 : Scry.Rule Nat :=
+  Scry.ciRule 6 (Scry.ciVar 1) (Scry.ciVar 2)
+    [ Scry.Atom.pos 5 [Scry.ciVar 1, Scry.ciVar 0]
+    , Scry.Atom.pos 11 [Scry.ciVar 1, Scry.ciVar 2] ]
+
+/-- The lattice operations for the CI program (no lattice relation is used; the
+`Nat` lattice is the same two-point carrier as taint's). -/
+def Scry.ciOps : Scry.LatOps Nat :=
+  Scry.LatOps.mk 0 (fun a b => if Nat.lt a b then b else a) Nat.beq
+
+/-- The CI analysis program: six positive rules over the EDB. -/
+def Scry.ciProgram : Scry.Program Nat :=
+  Scry.Program.mk Scry.ciOps Scry.ciArity [] []
+    [Scry.ciRule1, Scry.ciRule2, Scry.ciRule3, Scry.ciRule4, Scry.ciRule5, Scry.ciRule6]
+
+/-- The EDB of a lowered graph. -/
+def Scry.ciEdb (g : Scry.CiGraph) : Scry.Db Nat :=
+  List.foldl (fun db f =>
+    match Scry.Db.insertTuple db f.rel (List.map U64.ofNat f.row) with
+    | (db', _) => db') Scry.Db.empty g.facts
+
+/-- The engine state with every EDB fact loaded (and a provenance step for each). -/
+def Scry.ciState (g : Scry.CiGraph) : Scry.State Nat :=
+  List.foldl (fun st f => Scry.State.addTuple st f.rel (List.map U64.ofNat f.row))
+    Scry.State.empty g.facts
+
+-- ## Findings and certificates
+
+/-- One finding: rule number, the node to report, a detail node (expression, action,
+task, or workflow), source line, display names, and the checked derivation when the
+provenance produced one. -/
+structure Scry.CiFinding where
+  rule : Nat
+  node : Nat
+  detail : Nat
+  line : Nat
+  name : String
+  detailName : String
+  cert : Option (Scry.Derivation Nat)
+
+/-- An analysis run: the graph, the findings, the program's strata, the EDB and the
+engine state (for witnesses the CLI may want to expand). -/
+structure Scry.CiReport where
+  graph : Scry.CiGraph
+  findings : List Scry.CiFinding
+  strata : List Nat
+  edb : Scry.Db Nat
+  state : Scry.State Nat
+
+/-- The node with id `id`, if any. -/
+def Scry.ciNodeById (g : Scry.CiGraph) (id : Nat) : Option Scry.CiNode :=
+  List.find (fun n => Nat.beq n.id id) g.nodes
+
+/-- A node's display name (`""` when the id is unknown). -/
+def Scry.ciNodeName (g : Scry.CiGraph) (id : Nat) : String :=
+  match Scry.ciNodeById g id with
+  | .some n => n.name
+  | .none => ""
+
+/-- A node's source line (1 when unknown). -/
+def Scry.ciNodeLine (g : Scry.CiGraph) (id : Nat) : Nat :=
+  match Scry.ciNodeById g id with
+  | .some n => n.line
+  | .none => 1
+
+/-- Whether finding `a` sorts before `b`: rule, then line, then node, then detail. -/
+def Scry.ciFindingLe (a b : Scry.CiFinding) : Bool :=
+  if Nat.beq a.rule b.rule then
+    if Nat.beq a.line b.line then
+      if Nat.beq a.node b.node then Nat.le a.detail b.detail
+      else Nat.lt a.node b.node
+    else Nat.lt a.line b.line
+  else Nat.lt a.rule b.rule
+
+/-- Insert a finding into a sorted list. -/
+def Scry.ciInsertFinding (f : Scry.CiFinding) : List Scry.CiFinding → List Scry.CiFinding
+  | .nil => List.cons f List.nil
+  | .cons x xs =>
+    if Scry.ciFindingLe f x then List.cons f (List.cons x xs)
+    else List.cons x (Scry.ciInsertFinding f xs)
+
+/-- Sort findings (insertion sort; the lists are tiny). -/
+def Scry.ciSortFindings (fs : List Scry.CiFinding) : List Scry.CiFinding :=
+  List.foldr (fun f acc => Scry.ciInsertFinding f acc) List.nil fs
+
+/-- Build one finding from an `alert` row, using the engine's provenance for the
+checked certificate. -/
+def Scry.ciFindingOf (g : Scry.CiGraph) (p : Scry.Program Nat) (edb : Scry.Db Nat)
+    (st : Scry.State Nat) (row : List U64) : Scry.CiFinding :=
+  let rule := UIntN.toNat (List.getD row 0 (U64.ofNat 0));
+  let node := UIntN.toNat (List.getD row 1 (U64.ofNat 0));
+  let detail := UIntN.toNat (List.getD row 2 (U64.ofNat 0));
+  Scry.CiFinding.mk rule node detail (Scry.ciNodeLine g node)
+    (Scry.ciNodeName g node) (Scry.ciNodeName g detail)
+    (Scry.State.explainTuple p edb st Scry.ciAlertRel row)
+
+/-- Run the analysis: lower, evaluate with provenance, and turn every `alert` tuple into
+a finding with a certificate. -/
+def Scry.ciAnalyze (m : Scry.CiModel) : Scry.CiReport :=
+  let g := Scry.ciLower m;
+  let edb := Scry.ciEdb g;
+  let st0 := Scry.ciState g;
+  match Scry.eval Scry.ciProgram st0 with
+  | .none => Scry.CiReport.mk g List.nil List.nil edb (Scry.State.empty)
+  | .some st =>
+    let rows := (Scry.Db.tupleAt st.db Scry.ciAlertRel).toList;
+    let findings := Scry.ciSortFindings
+      (List.map (fun row => Scry.ciFindingOf g Scry.ciProgram edb st row) rows);
+    Scry.CiReport.mk g findings
+      (match Scry.Program.check Scry.ciProgram with
+       | .some strata => strata
+       | .none => List.nil) edb st
+
+/-- Every finding carries a derivation that checks against the EDB. -/
+def Scry.ciCheckCerts (r : Scry.CiReport) : Bool :=
+  List.all (fun f => match f.cert with
+    | .some d => Scry.Derivation.check Scry.ciProgram r.edb d
+    | .none => Bool.false) r.findings
+
+/-- The number of findings. -/
+def Scry.ciFindingCount (r : Scry.CiReport) : Nat := List.length r.findings
+
+/-- Findings of one rule. -/
+def Scry.ciFindingsOfRule (r : Scry.CiReport) (rule : Nat) : List Scry.CiFinding :=
+  List.filter (fun f => Nat.beq f.rule rule) r.findings
+
+-- ## Rendering
+
+/-- The rule name by number (`"unknown"` outside 1–6). -/
+def Scry.ciRuleName : Nat → String
+  | 1 => "gh-script-injection"
+  | 2 => "gh-unpinned-action"
+  | 3 => "gh-untrusted-checkout"
+  | 4 => "az-token-in-script"
+  | 5 => "az-unpinned-task"
+  | 6 => "az-template-injection"
+  | _ => "unknown"
+
+/-- The certificate size (0 without one). -/
+def Scry.ciCertSize (f : Scry.CiFinding) : Nat :=
+  match f.cert with
+  | .some d => Scry.Derivation.size d
+  | .none => 0
+
+/-- Render one finding: rule, `node kind "name" at line`, detail, certificate size. -/
+def Scry.ciRenderFinding (g : Scry.CiGraph) (f : Scry.CiFinding) : String :=
+  let kind := match Scry.ciNodeById g f.node with
+    | .some n => n.kind.label
+    | .none => "?";
+  String.append "  " (String.append (Scry.ciRuleName f.rule)
+    (String.append "  " (String.append kind
+      (String.append " \"" (String.append f.name
+        (String.append "\" line " (String.append (Nat.repr f.line)
+          (String.append " detail \"" (String.append f.detailName
+            (String.append "\" cert " (Nat.repr (Scry.ciCertSize f))))))))))))
+
+/-- Render a report: the finding count and one line per finding. -/
+def Scry.ciRenderReport (r : Scry.CiReport) : String :=
+  String.intercalate "\n"
+    (List.append
+      [String.append "findings: " (Nat.repr (Scry.ciFindingCount r))]
+      (List.map (fun f => Scry.ciRenderFinding r.graph f) r.findings))
+
+/-- Node-kind counts, in kind order. -/
+def Scry.ciKindCounts (g : Scry.CiGraph) : List (String × Nat) :=
+  let kinds : List Scry.CiKind :=
+    [Scry.CiKind.file, .workflow, .pipeline, .trigger, .job, .step, .action, .task,
+     .template, .script, .expression, .variable, .secret, .permission, .resource,
+     .artifact];
+  List.map (fun k => (k.label,
+    List.length (List.filter (fun n => Scry.CiKind.beq n.kind k) g.nodes))) kinds
+
+/-- Render the graph: counts and the non-empty kind counts. -/
+def Scry.ciRenderStore (g : Scry.CiGraph) : String :=
+  let kinds := List.filter (fun p => Bool.not (Nat.beq p.2 0)) (Scry.ciKindCounts g);
+  String.intercalate "\n"
+    (List.append
+      [ String.append "nodes: " (Nat.repr (List.length g.nodes))
+      , String.append "edges: " (Nat.repr (List.length g.edges))
+      , String.append "relations: " (Nat.repr (List.length g.rels))
+      , "kinds:" ]
+      (List.map (fun p => String.append "  " (String.append p.1
+        (String.append " " (Nat.repr p.2)))) kinds))
+
+/-- Render a derivation for a finding (for `scry ci --explain`). -/
+def Scry.ciRenderCert (f : Scry.CiFinding) : String :=
+  match f.cert with
+  | .none => "(no certificate)"
+  | .some d => Scry.Derivation.render (fun n => Nat.repr n) d
+
+/-- Parse one file into a one-workflow model (the CLI's per-file entry point). -/
+def Scry.ciParseModel (path : String) (text : String) : Except String Scry.CiModel :=
+  match Scry.ciParseWorkflow path text with
+  | .error e => .error e
+  | .ok wf => .ok (Scry.ciAddWorkflow Scry.ciEmptyModel wf)
+
+/-- Parse one file with an explicit platform into a one-workflow model. -/
+def Scry.ciParseModelAs (p : Scry.CiPlatform) (path : String) (text : String) :
+    Except String Scry.CiModel :=
+  match Scry.ciParseWorkflowAs p path text with
+  | .error e => .error e
+  | .ok wf => .ok (Scry.ciAddWorkflow Scry.ciEmptyModel wf)

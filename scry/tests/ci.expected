@@ -1,0 +1,24 @@
+findings: 9
+  gh-script-injection  step "greet" line 12 detail "github.event.issue.title" cert 4
+  gh-unpinned-action  step "actions/checkout@v4" line 11 detail "actions/checkout@v4" cert 3
+  gh-unpinned-action  step "some-org/some-action@v1" line 14 detail "some-org/some-action@v1" cert 3
+  gh-unpinned-action  step "checkout head" line 15 detail "actions/checkout@v4" cert 3
+  gh-untrusted-checkout  step "checkout head" line 15 detail "ci" cert 4
+  az-token-in-script  step "script" line 11 detail "System.AccessToken" cert 4
+  az-unpinned-task  step "PublishBuildArtifacts@1" line 10 detail "PublishBuildArtifacts@1" cert 3
+  az-template-injection  step "bash" line 12 detail "parameters.name" cert 3
+  az-template-injection  step "${{ parameters.jobTemplate }}" line 13 detail "parameters.jobTemplate" cert 3
+certificates: checked
+nodes: 14
+edges: 14
+relations: 8
+kinds:
+  file 1
+  workflow 1
+  trigger 1
+  job 1
+  step 4
+  action 3
+  script 1
+  expression 1
+  permission 1

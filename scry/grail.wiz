@@ -56,3 +56,14 @@ def package : Package := Package.new "scry"
        |> Command.arg "--check"
        |> Command.input "gen/C/Schema.wiz"
        |> Command.input "grammars/tree-sitter-c/node-types.json")
+  -- The CI frontend (wiz-notes/scry-ci.md): both unsafe fixtures together (one
+  -- cross-platform report), and the graph summary of the safe GitHub file.
+  |> Package.command (Command.new "ci" (Tool.exe "scry")
+       |> Command.arg "ci"
+       |> Command.input "fixtures/ci/gh-unsafe.yml"
+       |> Command.input "fixtures/ci/azure-unsafe.yml"
+       |> Command.stdout "build/ci.txt")
+  |> Package.command (Command.new "ci-store" (Tool.exe "scry")
+       |> Command.arg "ci-store"
+       |> Command.input "fixtures/ci/gh-safe.yml"
+       |> Command.stdout "build/ci-store.txt")

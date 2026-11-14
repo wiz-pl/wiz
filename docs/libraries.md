@@ -842,3 +842,20 @@ provenance. `import Scry.TaintExamples` is the hand-built corpus used by the
 `scry-taint` group. This is the S4 intraprocedural prototype: no tree-sitter, no C
 lowering, no SARIF, and no interprocedural or memory modelling yet;
 `wiz-notes/scry-taint.md` has the design, the spec format and the gaps.
+
+## Scry: CI files — YAML, GitHub Actions and Azure Pipelines (`lib/Scry/CiYaml.wiz`, `lib/Scry/Ci.wiz`)
+
+`import Scry.CiYaml` is a pure reader for the YAML subset CI files use: block and flow
+mappings/sequences, quoted and plain scalars, comments, literal/folded block scalars,
+anchors/aliases and multi-document input, with a line number on every value.
+`import Scry.Ci` lowers GitHub Actions workflows and Azure Pipelines files (detected from
+the path/top-level keys, or with `ciParseWorkflowAs`) into one IR — workflow/pipeline →
+jobs → steps, with triggers, env/variables, permissions, resources, templates and every
+interpolated expression tagged with its site — then into a node/edge/relation graph and a
+Datalog EDB. Six positive rules report script injection, unpinned actions, a
+`pull_request_target` checkout of the PR head, `System.AccessToken`/secrets in scripts,
+floating Azure task versions and template-parameter injection. Findings carry
+certificates (`State.explainTuple`) that `Derivation.check` accepts against the EDB.
+`import Scry.CiExamples` is the paired unsafe/safe corpus used by the `scry-ci` group;
+`wiz-notes/scry-ci.md` has the IR, the fact schema, the parsing decision and the gaps.
+The package's `scry ci` / `scry ci-store` commands run the same analysis on files.

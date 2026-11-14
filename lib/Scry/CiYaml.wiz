@@ -1,0 +1,829 @@
+import Prelude
+import Text
+/-!
+# Scry.CiYaml: a YAML subset for CI files
+
+`import Scry.CiYaml`. A small, pure YAML reader for the two CI dialects scry models
+(`wiz-notes/scry-ci.md`): GitHub Actions workflows and Azure Pipelines files. It is a
+**subset** of YAML 1.2, chosen to cover what CI files use, with line numbers on every
+value so findings can point into the source:
+
+* block mappings and block sequences, with nesting by indentation;
+* a sequence entry that starts a mapping on the dash line (`- uses: …`, `- task: …`);
+* a block sequence at the same indentation as its key (`steps:` then `- run: …`);
+* flow sequences and mappings (`[push, pull_request]`, `{ref: main}`), nested;
+* plain, single-quoted and double-quoted scalars (single-quote `''` escape and the
+  common double-quote escapes), and comments (`#` outside quotes, after whitespace);
+* literal (`|`) and folded (`>`) block scalars with the `-`/`+` chomping indicators
+  (the folded form folds line breaks to spaces; exact YAML folding rules are not
+  implemented);
+* anchors (`&name`) and aliases (`*name`) are parsed and kept in the tree;
+  `Scry.Yaml.resolve` substitutes aliases (with fuel) when a consumer wants it;
+* multiple documents (`---` / `...` markers at column 0).
+
+Deliberately **not** supported (see the note): explicit tags (`!!str`), complex keys
+(`? key`), multi-line plain/quoted scalars, flow values spanning lines, `<<` merge keys,
+and the full YAML 1.1/1.2 scalar-type resolution (every scalar stays text; the CI
+extractor parses booleans and numbers it cares about). The reason for a Wiz parser rather
+than tree-sitter-yaml is in `wiz-notes/scry-ci.md` §3: the grammar's external scanner is
+C++ and the vendored grammar is not on disk, while a CI file is small and the subset is
+enough for facts with line numbers.
+
+Everything is pure, so `#eval` runs it, and the whole thing is O(bytes) apart from
+`String.append`'s left-copy behaviour (the parser builds lists and joins once).
+-/
+
+-- ## The value tree
+
+mutual
+/-- A YAML value in the subset. `line`/`col` are 1-based; `col` is the indentation
+column for block values and 0 for flow values (line-level spans). -/
+inductive Scry.Yaml where
+  | scalar (text : String) (line col : Nat)
+  | mapping (entries : Scry.YEntries) (line col : Nat)
+  | sequence (items : Scry.YItems) (line col : Nat)
+  | alias (name : String) (line col : Nat)
+  | anchored (name : String) (value : Scry.Yaml) (line col : Nat)
+/-- Mapping entries, in file order. -/
+inductive Scry.YEntries where
+  | ynil
+  | ycons (key : String) (value : Scry.Yaml) (rest : Scry.YEntries)
+/-- Sequence items, in file order. -/
+inductive Scry.YItems where
+  | inil
+  | icons (item : Scry.Yaml) (rest : Scry.YItems)
+end
+
+/-- The entries of a mapping as a list. -/
+def Scry.YEntries.toList : Scry.YEntries → List (String × Scry.Yaml)
+  | .ynil => .nil
+  | .ycons k v rest => .cons (k, v) (Scry.YEntries.toList rest)
+
+/-- Mapping entries in order. -/
+def Scry.YEntries.ofList : List (String × Scry.Yaml) → Scry.YEntries
+  | .nil => .ynil
+  | .cons (k, v) rest => .ycons k v (Scry.YEntries.ofList rest)
+
+/-- The items of a sequence as a list. -/
+def Scry.YItems.toList : Scry.YItems → List Scry.Yaml
+  | .inil => .nil
+  | .icons y rest => .cons y (Scry.YItems.toList rest)
+
+/-- Sequence items in order. -/
+def Scry.YItems.ofList : List Scry.Yaml → Scry.YItems
+  | .nil => .inil
+  | .cons y rest => .icons y (Scry.YItems.ofList rest)
+
+/-- The line a value starts on. -/
+def Scry.Yaml.lineOf : Scry.Yaml → Nat
+  | .scalar _ l _ => l
+  | .mapping _ l _ => l
+  | .sequence _ l _ => l
+  | .alias _ l _ => l
+  | .anchored _ _ l _ => l
+
+/-- The indentation column a value starts at (0 for flow values). -/
+def Scry.Yaml.colOf : Scry.Yaml → Nat
+  | .scalar _ _ c => c
+  | .mapping _ _ c => c
+  | .sequence _ _ c => c
+  | .alias _ _ c => c
+  | .anchored _ _ _ c => c
+
+/-- Strip an anchor wrapper. -/
+def Scry.Yaml.strip : Scry.Yaml → Scry.Yaml
+  | .anchored _ v _ _ => Scry.Yaml.strip v
+  | y => y
+
+/-- A mapping's entries (`[]` for any other value). -/
+def Scry.Yaml.asMap (y : Scry.Yaml) : List (String × Scry.Yaml) :=
+  match Scry.Yaml.strip y with
+  | .mapping es _ _ => Scry.YEntries.toList es
+  | _ => .nil
+
+/-- A sequence's items (`[]` for any other value). -/
+def Scry.Yaml.asSeq (y : Scry.Yaml) : List Scry.Yaml :=
+  match Scry.Yaml.strip y with
+  | .sequence is _ _ => Scry.YItems.toList is
+  | _ => .nil
+
+/-- A scalar's text (`""` for any other value, including an unresolved alias). -/
+def Scry.Yaml.asText (y : Scry.Yaml) : String :=
+  match Scry.Yaml.strip y with
+  | .scalar t _ _ => t
+  | _ => ""
+
+/-- Whether the value is an empty scalar (YAML null-ish or absent). -/
+def Scry.Yaml.isNull (y : Scry.Yaml) : Bool :=
+  String.isEmpty (String.trim (Scry.Yaml.asText y))
+
+/-- The value of `key` in a mapping, if present (first occurrence). -/
+def Scry.Yaml.lookup (key : String) (y : Scry.Yaml) : Option Scry.Yaml :=
+  match List.find (fun p => String.eq p.1 key) (Scry.Yaml.asMap y) with
+  | .some p => .some p.2
+  | .none => .none
+
+/-- A path of keys through nested mappings. -/
+def Scry.Yaml.lookupPath : List String → Scry.Yaml → Option Scry.Yaml
+  | .nil, y => .some y
+  | .cons k ks, y => match Scry.Yaml.lookup k y with
+    | .none => .none
+    | .some v => Scry.Yaml.lookupPath ks v
+
+/-- The anchors of a tree: each `&name value` pair, the value stripped. -/
+mutual
+partial def Scry.Yaml.anchorsOf (y : Scry.Yaml) : List (String × Scry.Yaml) :=
+  let self : List (String × Scry.Yaml) := match y with
+    | .anchored n _ _ _ => List.cons (n, Scry.Yaml.strip y) List.nil
+    | _ => List.nil;
+  List.append self
+    (match y with
+     | .mapping es _ _ => Scry.Yaml.anchorsOfEntries (Scry.YEntries.toList es)
+     | .sequence is _ _ => Scry.Yaml.anchorsOfItems (Scry.YItems.toList is)
+     | .anchored _ v _ _ => Scry.Yaml.anchorsOf v
+     | _ => List.nil)
+
+partial def Scry.Yaml.anchorsOfEntries :
+    List (String × Scry.Yaml) → List (String × Scry.Yaml)
+  | .nil => .nil
+  | .cons (_, v) rest => List.append (Scry.Yaml.anchorsOf v) (Scry.Yaml.anchorsOfEntries rest)
+
+partial def Scry.Yaml.anchorsOfItems : List Scry.Yaml → List (String × Scry.Yaml)
+  | .nil => .nil
+  | .cons v rest => List.append (Scry.Yaml.anchorsOf v) (Scry.Yaml.anchorsOfItems rest)
+end
+
+/-- Resolve aliases against `anchors`; a negative fuel is not possible, so `fuel = 0`
+leaves the alias alone. -/
+mutual
+partial def Scry.Yaml.resolveWith (anchors : List (String × Scry.Yaml)) :
+    Nat → Scry.Yaml → Scry.Yaml
+  | .zero, y => y
+  | .succ fuel, y =>
+    match y with
+    | .alias n _ _ => match List.find (fun p => String.eq p.1 n) anchors with
+      | .some p => Scry.Yaml.resolveWith anchors fuel p.2
+      | .none => y
+    | .anchored n v l c => .anchored n (Scry.Yaml.resolveWith anchors fuel v) l c
+    | .mapping es l c =>
+      .mapping (Scry.Yaml.resolveEntries anchors fuel (Scry.YEntries.toList es)) l c
+    | .sequence is l c =>
+      .sequence (Scry.Yaml.resolveItems anchors fuel (Scry.YItems.toList is)) l c
+    | .scalar _ _ _ => y
+
+partial def Scry.Yaml.resolveEntries (anchors : List (String × Scry.Yaml)) (fuel : Nat) :
+    List (String × Scry.Yaml) → Scry.YEntries
+  | .nil => .ynil
+  | .cons (k, v) rest =>
+    .ycons k (Scry.Yaml.resolveWith anchors fuel v)
+      (Scry.Yaml.resolveEntries anchors fuel rest)
+
+partial def Scry.Yaml.resolveItems (anchors : List (String × Scry.Yaml)) (fuel : Nat) :
+    List Scry.Yaml → Scry.YItems
+  | .nil => .inil
+  | .cons v rest =>
+    .icons (Scry.Yaml.resolveWith anchors fuel v) (Scry.Yaml.resolveItems anchors fuel rest)
+end
+
+/-- Resolve aliases in a document (fuel proportional to the tree's size is the caller's
+job; 64 is enough for CI files and stops a cycle). -/
+def Scry.Yaml.resolve (y : Scry.Yaml) : Scry.Yaml :=
+  Scry.Yaml.resolveWith (Scry.Yaml.anchorsOf y) 64 y
+
+-- ## Rendering (for tests and diagnostics)
+
+/-- Escape a scalar for the one-line rendering: quote, and escape backslash, quote,
+newline and tab. -/
+def Scry.yEscape (s : String) : String :=
+  String.replace
+    (String.replace
+      (String.replace
+        (String.replace s "\\" "\\\\") "\"" "\\\"") "\n" "\\n") "\t" "\\t"
+
+mutual
+/-- Render a value on one line: `{k: v}`, `[v, …]`, `"text"`, `*alias`, `&a value`. -/
+def Scry.Yaml.render : Scry.Yaml → String
+  | .scalar t _ _ => String.append "\"" (String.append (Scry.yEscape t) "\"")
+  | .mapping es _ _ =>
+    String.append "{" (String.append (Scry.yRenderEntries (Scry.YEntries.toList es)) "}")
+  | .sequence is _ _ =>
+    String.append "[" (String.append (Scry.yRenderItems (Scry.YItems.toList is)) "]")
+  | .alias n _ _ => String.append "*" n
+  | .anchored n v _ _ => String.append "&" (String.append n (String.append " " (Scry.Yaml.render v)))
+/-- The entries of a mapping for `Yaml.render`. -/
+def Scry.yRenderEntries : List (String × Scry.Yaml) → String
+  | .nil => ""
+  | .cons (k, v) .nil => String.append k (String.append ": " (Scry.Yaml.render v))
+  | .cons (k, v) rest =>
+    String.append k (String.append ": " (String.append (Scry.Yaml.render v)
+      (String.append ", " (Scry.yRenderEntries rest))))
+/-- The items of a sequence for `Yaml.render`. -/
+def Scry.yRenderItems : List Scry.Yaml → String
+  | .nil => ""
+  | .cons v .nil => Scry.Yaml.render v
+  | .cons v rest => String.append (Scry.Yaml.render v) (String.append ", " (Scry.yRenderItems rest))
+end
+
+-- ## Lines
+
+/-- One source line: its number, raw text, indentation, comment-stripped content, and
+whether it is blank/comment-only or a document marker. -/
+structure Scry.YLine where
+  num : Nat
+  raw : String
+  indent : Nat
+  text : String
+  blank : Bool
+  marker : Bool
+
+/-- ASCII space or tab. -/
+def Scry.yIsSpace (c : Char) : Bool :=
+  Bool.or (Nat.beq (Char.code c) 32) (Nat.beq (Char.code c) 9)
+
+/-- The number of leading spaces. -/
+def Scry.yIndentOf : List Char → Nat
+  | .nil => 0
+  | .cons c cs => if Nat.beq (Char.code c) 32 then Nat.succ (Scry.yIndentOf cs) else 0
+
+/-- Remove a `#` comment: a `#` outside quotes and at the start of the content or after
+whitespace. `prevSpace` starts Bool.true. Single quotes treat `''` as an escaped quote;
+double quotes honour backslash escapes. -/
+partial def Scry.yStripCommentGo (single double esc prevSpace : Bool) : List Char → List Char
+  | .nil => .nil
+  | .cons c rest =>
+    if double then
+      if esc then .cons c (Scry.yStripCommentGo single double Bool.false Bool.false rest)
+      else if Nat.beq (Char.code c) 92 then .cons c (Scry.yStripCommentGo single double Bool.true Bool.false rest)
+      else if Nat.beq (Char.code c) 34 then .cons c (Scry.yStripCommentGo single Bool.false Bool.false Bool.false rest)
+      else .cons c (Scry.yStripCommentGo single double Bool.false Bool.false rest)
+    else if single then
+      if Nat.beq (Char.code c) 39 then
+        match rest with
+        | .cons c2 rest2 =>
+          if Nat.beq (Char.code c2) 39 then
+            .cons c (.cons c2 (Scry.yStripCommentGo Bool.true Bool.false Bool.false Bool.true rest2))
+          else .cons c (Scry.yStripCommentGo Bool.false Bool.false Bool.false Bool.false rest)
+        | .nil => .cons c .nil
+      else .cons c (Scry.yStripCommentGo Bool.true Bool.false Bool.false Bool.false rest)
+    else if Bool.and (Nat.beq (Char.code c) 35) prevSpace then .nil
+    else if Nat.beq (Char.code c) 39 then .cons c (Scry.yStripCommentGo Bool.true Bool.false Bool.false Bool.false rest)
+    else if Nat.beq (Char.code c) 34 then .cons c (Scry.yStripCommentGo Bool.false Bool.true Bool.false Bool.false rest)
+    else .cons c (Scry.yStripCommentGo Bool.false Bool.false Bool.false (Scry.yIsSpace c) rest)
+
+/-- Strip a YAML comment from `cs`. -/
+def Scry.yStripComment (cs : List Char) : List Char :=
+  Scry.yStripCommentGo Bool.false Bool.false Bool.false Bool.true cs
+
+/-- Whether a raw line is a document marker (`---` or `...`, trimmed). -/
+def Scry.yIsMarker (raw : String) : Bool :=
+  let t := String.trim raw;
+  Bool.or (String.eq t "---") (String.eq t "...")
+
+/-- One raw line as a `YLine`; `num` is 1-based. -/
+def Scry.yLineOf (num : Nat) (raw0 : String) : Scry.YLine :=
+  let raw := match String.stripSuffix raw0 "\r" with
+    | .some s => s
+    | .none => raw0;
+  let cs := String.chars raw;
+  let indent := Scry.yIndentOf cs;
+  let rest := List.drop indent cs;
+  let text := String.trim (String.ofChars (Scry.yStripComment rest));
+  Scry.YLine.mk num raw indent text (String.isEmpty text) (Bool.and (Nat.beq indent 0) (Scry.yIsMarker raw))
+
+/-- The lines of `text`, numbered from 1. -/
+def Scry.yLinesGo : Nat → List String → List Scry.YLine
+  | _, .nil => .nil
+  | n, .cons s ss => .cons (Scry.yLineOf (Nat.succ n) s) (Scry.yLinesGo (Nat.succ n) ss)
+
+/-- The lines of a document. -/
+def Scry.yLines (text : String) : List Scry.YLine := Scry.yLinesGo 0 (String.splitOn text "\n")
+
+/-- Drop blank and marker lines from the front. -/
+def Scry.ySkipBlank : List Scry.YLine → List Scry.YLine
+  | .nil => .nil
+  | .cons l ls => if l.blank then Scry.ySkipBlank ls else .cons l ls
+
+-- ## Scalars
+
+/-- The value of one hex digit (either case), or 16. -/
+def Scry.yHexVal (c : Char) : Nat :=
+  let n := Char.code c;
+  if Bool.and (Nat.le 48 n) (Nat.le n 57) then n - 48
+  else if Bool.and (Nat.le 97 n) (Nat.le n 102) then n - 87
+  else if Bool.and (Nat.le 65 n) (Nat.le n 70) then n - 55
+  else 16
+
+/-- Decode the body of a double-quoted scalar (escapes `\\ \" \/ \n \t \r \0 \uXXXX`). -/
+partial def Scry.yDecodeDouble (acc : List Char) : List Char → List Char
+  | .nil => List.reverse acc
+  | .cons c rest =>
+    if Nat.beq (Char.code c) 92 then
+      match rest with
+      | .nil => List.reverse (.cons c acc)
+      | .cons c2 rest2 =>
+        if Nat.beq (Char.code c2) 110 then Scry.yDecodeDouble (.cons (Char.mk 10) acc) rest2
+        else if Nat.beq (Char.code c2) 116 then Scry.yDecodeDouble (.cons (Char.mk 9) acc) rest2
+        else if Nat.beq (Char.code c2) 114 then Scry.yDecodeDouble (.cons (Char.mk 13) acc) rest2
+        else if Nat.beq (Char.code c2) 48 then Scry.yDecodeDouble (.cons (Char.mk 0) acc) rest2
+        else if Nat.beq (Char.code c2) 117 then
+          match rest2 with
+          | .cons a (.cons b (.cons d (.cons e rest4))) =>
+            let v := Nat.add (Nat.mul (Scry.yHexVal a) 4096)
+              (Nat.add (Nat.mul (Scry.yHexVal b) 256)
+                (Nat.add (Nat.mul (Scry.yHexVal d) 16) (Scry.yHexVal e)));
+            if Nat.lt v 16 then Scry.yDecodeDouble (.cons (Char.mk v) acc) rest4
+            else Scry.yDecodeDouble (.cons (Char.mk v) acc) rest4
+          | _ => List.reverse acc
+        else Scry.yDecodeDouble (.cons c2 acc) rest2
+    else Scry.yDecodeDouble (.cons c acc) rest
+
+/-- Unquote a scalar: `'…'` (with `''`), `"…"` (escapes), or a trimmed plain scalar. -/
+def Scry.yUnquote (s : String) : String :=
+  let t := String.trim s;
+  let cs := String.chars t;
+  match cs with
+  | .cons q rest =>
+    if Nat.beq (Char.code q) 39 then
+      match String.stripSuffix t "'" with
+      | .some inner => String.replace (String.drop 1 inner) "''" "'"
+      | .none => t
+    else if Nat.beq (Char.code q) 34 then
+      match String.stripSuffix t "\"" with
+      | .some inner => String.ofChars (Scry.yDecodeDouble .nil (String.chars (String.drop 1 inner)))
+      | .none => t
+    else t
+  | .nil => t
+
+-- ## Keys
+
+/-- Split `key: value` at the first `:` that is outside quotes, at flow depth 0, and
+followed by whitespace or end of line. -/
+partial def Scry.ySplitKeyGo (single double esc : Bool) (depth : Nat) (keyRev : List Char) (s : List Char) :
+    Option (String × String) :=
+  match s with
+  | .nil => .none
+  | .cons c rest =>
+    if double then
+      if esc then Scry.ySplitKeyGo single double Bool.false depth (.cons c keyRev) rest
+      else if Nat.beq (Char.code c) 92 then Scry.ySplitKeyGo single double Bool.true depth (.cons c keyRev) rest
+      else if Nat.beq (Char.code c) 34 then Scry.ySplitKeyGo single Bool.false Bool.false depth (.cons c keyRev) rest
+      else Scry.ySplitKeyGo single double Bool.false depth (.cons c keyRev) rest
+    else if single then
+      if Nat.beq (Char.code c) 39 then Scry.ySplitKeyGo Bool.false Bool.false Bool.false depth (.cons c keyRev) rest
+      else Scry.ySplitKeyGo Bool.true Bool.false Bool.false depth (.cons c keyRev) rest
+    else if Nat.beq (Char.code c) 39 then Scry.ySplitKeyGo Bool.true Bool.false Bool.false depth (.cons c keyRev) rest
+    else if Nat.beq (Char.code c) 34 then Scry.ySplitKeyGo Bool.false Bool.true Bool.false depth (.cons c keyRev) rest
+    else if Bool.or (Nat.beq (Char.code c) 91) (Nat.beq (Char.code c) 123) then
+      Scry.ySplitKeyGo Bool.false Bool.false Bool.false (Nat.succ depth) (.cons c keyRev) rest
+    else if Bool.or (Nat.beq (Char.code c) 93) (Nat.beq (Char.code c) 125) then
+      Scry.ySplitKeyGo Bool.false Bool.false Bool.false (Nat.sub depth 1) (.cons c keyRev) rest
+    else if Bool.and (Nat.beq (Char.code c) 58) (Nat.beq depth 0) then
+      match rest with
+      | .nil => .some (Scry.yUnquote (String.ofChars (List.reverse keyRev)), "")
+      | .cons c2 rest2 =>
+        if Bool.or (Nat.beq (Char.code c2) 32) (Nat.beq (Char.code c2) 9) then
+          .some (Scry.yUnquote (String.ofChars (List.reverse keyRev)),
+                 String.trim (String.ofChars rest2))
+        else Scry.ySplitKeyGo Bool.false Bool.false Bool.false depth (.cons c keyRev) rest
+    else Scry.ySplitKeyGo Bool.false Bool.false Bool.false depth (.cons c keyRev) rest
+
+/-- Split a block mapping entry, or `none` if the line is not `key: …`. -/
+def Scry.ySplitKey (t : String) : Option (String × String) :=
+  Scry.ySplitKeyGo Bool.false Bool.false Bool.false 0 .nil (String.chars (String.trim t))
+
+-- ## Block scalars
+
+/-- Without leading blank lines. -/
+def Scry.yDropLeadingBlank : List Scry.YLine → List Scry.YLine
+  | .nil => .nil
+  | .cons l ls => if l.blank then Scry.yDropLeadingBlank ls else .cons l ls
+
+/-- Without trailing blank lines (YAML's clip chomping). -/
+def Scry.yDropTrailingBlank (ls : List Scry.YLine) : List Scry.YLine :=
+  List.reverse (Scry.yDropLeadingBlank (List.reverse ls))
+
+/-- Consume the lines of a block scalar: blank lines and lines indented deeper than
+`parentIndent`. -/
+partial def Scry.yBlockConsume (parentIndent : Nat) (acc : List Scry.YLine) :
+    List Scry.YLine → List Scry.YLine × List Scry.YLine
+  | .nil => (List.reverse acc, .nil)
+  | .cons l rest =>
+    if Bool.or l.blank (Nat.lt parentIndent l.indent) then
+      Scry.yBlockConsume parentIndent (.cons l acc) rest
+    else (List.reverse acc, .cons l rest)
+
+/-- The content lines of a block scalar, with `contentIndent` spaces removed. -/
+def Scry.yBlockLines (contentIndent : Nat) : List Scry.YLine → List String
+  | .nil => .nil
+  | .cons l rest =>
+    let text := if l.blank then "" else String.trimRight (String.drop contentIndent l.raw);
+    .cons text (Scry.yBlockLines contentIndent rest)
+
+/-- Join block scalar lines: literal keeps newlines; folded turns a single break into a
+space and a blank line into a newline. -/
+partial def Scry.yBlockJoin (folded : Bool) : List String → String
+  | .nil => ""
+  | .cons x .nil => x
+  | .cons x (.cons y rest) =>
+    let sep := if folded then (if Bool.or (String.isEmpty x) (String.isEmpty y) then "\n" else " ") else "\n";
+    String.append x (String.append sep (Scry.yBlockJoin folded (.cons y rest)))
+
+/-- Build a block scalar from its indicator (`|`, `>`, with `-`/`+`) and the lines after
+the key line. -/
+def Scry.yBlockScalar (indicator : String) (parent : Scry.YLine) (rest : List Scry.YLine) :
+    String × List Scry.YLine :=
+  let cs := String.chars indicator;
+  let folded := match cs with
+    | .cons c _ => Nat.beq (Char.code c) 62
+    | .nil => Bool.false;
+  let strip := String.contains indicator "-";
+  let keep := String.contains indicator "+";
+  let consumed := Scry.yBlockConsume parent.indent .nil rest;
+  let lines := if keep then consumed.1 else Scry.yDropTrailingBlank consumed.1;
+  let contentIndent := match List.find (fun l => Bool.not l.blank) lines with
+    | .some l => l.indent
+    | .none => Nat.succ parent.indent;
+  let body := Scry.yBlockJoin folded (Scry.yBlockLines contentIndent lines);
+  let text := if strip then body else String.append body "\n";
+  (text, consumed.2)
+
+-- ## Flow values
+
+/-- Skip spaces and tabs. -/
+def Scry.yFlowSkip : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => if Scry.yIsSpace c then Scry.yFlowSkip cs else .cons c cs
+
+/-- Scan until the closing single quote; `''` stays in the text. -/
+partial def Scry.yScanSingle (acc : List Char) : List Char → Option (List Char × List Char)
+  | .nil => .none
+  | .cons c rest =>
+    if Nat.beq (Char.code c) 39 then
+      match rest with
+      | .cons c2 rest2 =>
+        if Nat.beq (Char.code c2) 39 then
+          Scry.yScanSingle (.cons (Char.mk 39) (.cons (Char.mk 39) acc)) rest2
+        else .some (List.reverse acc, rest)
+      | .nil => .some (List.reverse acc, .nil)
+    else Scry.yScanSingle (.cons c acc) rest
+
+/-- Scan until the closing double quote, honouring backslash escapes. -/
+partial def Scry.yScanDouble (esc : Bool) (acc : List Char) :
+    List Char → Option (List Char × List Char)
+  | .nil => .none
+  | .cons c rest =>
+    if esc then Scry.yScanDouble Bool.false (.cons c acc) rest
+    else if Nat.beq (Char.code c) 92 then Scry.yScanDouble Bool.true (.cons c acc) rest
+    else if Nat.beq (Char.code c) 34 then .some (List.reverse acc, rest)
+    else Scry.yScanDouble Bool.false (.cons c acc) rest
+
+/-- A quoted flow scalar: the value and the rest after the closing quote. -/
+def Scry.yFlowQuoted (cs : List Char) : Option (String × List Char) :=
+  match cs with
+  | .cons q rest =>
+    if Nat.beq (Char.code q) 39 then
+      match Scry.yScanSingle .nil rest with
+      | .some (inside, after) => .some (String.replace (String.ofChars inside) "''" "'", after)
+      | .none => .none
+    else if Nat.beq (Char.code q) 34 then
+      match Scry.yScanDouble Bool.false .nil rest with
+      | .some (inside, after) => .some (String.ofChars (Scry.yDecodeDouble .nil inside), after)
+      | .none => .none
+    else .none
+  | .nil => .none
+
+/-- Take characters up to one of `,`, `]`, `}` (the flow separators at this level). -/
+partial def Scry.yFlowPlainGo (acc : List Char) : List Char → List Char × List Char
+  | .nil => (List.reverse acc, .nil)
+  | .cons c rest =>
+    if Bool.or (Nat.beq (Char.code c) 44)
+      (Bool.or (Nat.beq (Char.code c) 93) (Nat.beq (Char.code c) 125)) then
+      (List.reverse acc, .cons c rest)
+    else Scry.yFlowPlainGo (.cons c acc) rest
+
+/-- Take characters up to `:` or a flow separator (a flow mapping key). -/
+partial def Scry.yFlowKeyGo (acc : List Char) : List Char → List Char × List Char
+  | .nil => (List.reverse acc, .nil)
+  | .cons c rest =>
+    if Bool.or (Nat.beq (Char.code c) 58)
+      (Bool.or (Nat.beq (Char.code c) 44)
+        (Bool.or (Nat.beq (Char.code c) 93) (Nat.beq (Char.code c) 125))) then
+      (List.reverse acc, .cons c rest)
+    else Scry.yFlowKeyGo (.cons c acc) rest
+
+/-- A name after `&`/`*`: letters, digits, `-`, `_`, `.` until a space/separator. -/
+partial def Scry.yFlowNameGo (acc : List Char) : List Char → String × List Char
+  | .nil => (String.ofChars (List.reverse acc), .nil)
+  | .cons c rest =>
+    if Bool.or (Scry.yIsSpace c)
+      (Bool.or (Nat.beq (Char.code c) 44)
+        (Bool.or (Nat.beq (Char.code c) 93) (Nat.beq (Char.code c) 125))) then
+      (String.ofChars (List.reverse acc), .cons c rest)
+    else Scry.yFlowNameGo (.cons c acc) rest
+
+mutual
+/-- A flow value: sequence, mapping, quoted scalar, alias/anchor, or plain scalar. -/
+partial def Scry.yFlowValue (cs : List Char) : Except String (Scry.Yaml × List Char) :=
+  match Scry.yFlowSkip cs with
+  | .nil => .error "unexpected end of flow value"
+  | .cons c rest =>
+    if Nat.beq (Char.code c) 91 then Scry.yFlowSeq rest .nil
+    else if Nat.beq (Char.code c) 123 then Scry.yFlowMap rest .nil
+    else if Bool.or (Nat.beq (Char.code c) 39) (Nat.beq (Char.code c) 34) then
+      match Scry.yFlowQuoted (.cons c rest) with
+      | .some (t, after) => .ok (.scalar t 0 0, after)
+      | .none => .error "unterminated quoted flow scalar"
+    else if Nat.beq (Char.code c) 42 then
+      let p := Scry.yFlowNameGo .nil rest;
+      .ok (.alias p.1 0 0, p.2)
+    else if Nat.beq (Char.code c) 38 then
+      let p := Scry.yFlowNameGo .nil rest;
+      match Scry.yFlowValue p.2 with
+      | .error e => .error e
+      | .ok (v, after) => .ok (.anchored p.1 v 0 0, after)
+    else
+      let p := Scry.yFlowPlainGo (.cons c .nil) rest;
+      .ok (.scalar (String.trim (String.ofChars p.1)) 0 0, p.2)
+
+/-- Flow sequence items until `]`. -/
+partial def Scry.yFlowSeq : List Char → List Scry.Yaml → Except String (Scry.Yaml × List Char)
+  | cs, acc =>
+    match Scry.yFlowSkip cs with
+    | .nil => .error "unterminated flow sequence"
+    | .cons c rest =>
+      if Nat.beq (Char.code c) 93 then
+        .ok (.sequence (Scry.YItems.ofList (List.reverse acc)) 0 0, rest)
+      else if Nat.beq (Char.code c) 44 then Scry.yFlowSeq rest acc
+      else match Scry.yFlowValue (.cons c rest) with
+        | .error e => .error e
+        | .ok (v, after) => match Scry.yFlowSkip after with
+          | .cons c2 rest2 =>
+            if Nat.beq (Char.code c2) 44 then Scry.yFlowSeq rest2 (.cons v acc)
+            else if Nat.beq (Char.code c2) 93 then
+              .ok (.sequence (Scry.YItems.ofList (List.reverse (.cons v acc))) 0 0, rest2)
+            else .error "expected ',' or ']' in flow sequence"
+          | .nil => .error "unterminated flow sequence"
+
+/-- A flow mapping key up to `:`. -/
+def Scry.yFlowKey (cs : List Char) : Except String (String × List Char) :=
+  match Scry.yFlowSkip cs with
+  | .nil => .error "unterminated flow mapping"
+  | .cons c rest =>
+    if Bool.or (Nat.beq (Char.code c) 39) (Nat.beq (Char.code c) 34) then
+      match Scry.yFlowQuoted (.cons c rest) with
+      | .some (k, after) => match Scry.yFlowSkip after with
+        | .cons c2 rest2 =>
+          if Nat.beq (Char.code c2) 58 then .ok (k, rest2)
+          else .error "expected ':' after flow mapping key"
+        | .nil => .error "unterminated flow mapping"
+      | .none => .error "unterminated quoted flow key"
+    else
+      let p := Scry.yFlowKeyGo .nil (List.cons c rest);
+      match p.2 with
+      | .cons c2 rest2 =>
+        if Nat.beq (Char.code c2) 58 then .ok (Scry.yUnquote (String.ofChars p.1), rest2)
+        else .error "expected ':' in flow mapping"
+      | .nil => .error "unterminated flow mapping"
+
+/-- Flow mapping entries until `}`. -/
+partial def Scry.yFlowMap : List Char → List (String × Scry.Yaml) → Except String (Scry.Yaml × List Char)
+  | cs, acc =>
+    match Scry.yFlowSkip cs with
+    | .nil => .error "unterminated flow mapping"
+    | .cons c rest =>
+      if Nat.beq (Char.code c) 125 then
+        .ok (.mapping (Scry.YEntries.ofList (List.reverse acc)) 0 0, rest)
+      else if Nat.beq (Char.code c) 44 then Scry.yFlowMap rest acc
+      else match Scry.yFlowKey (.cons c rest) with
+        | .error e => .error e
+        | .ok (k, afterKey) => match Scry.yFlowValue afterKey with
+          | .error e => .error e
+          | .ok (v, after) => match Scry.yFlowSkip after with
+            | .cons c2 rest2 =>
+              if Nat.beq (Char.code c2) 44 then Scry.yFlowMap rest2 (.cons (k, v) acc)
+              else if Nat.beq (Char.code c2) 125 then
+                .ok (.mapping (Scry.YEntries.ofList (List.reverse (.cons (k, v) acc))) 0 0, rest2)
+              else .error "expected ',' or '}' in flow mapping"
+            | .nil => .error "unterminated flow mapping"
+end
+
+/-- A whole inline value on one line (`[…]`, `{…}`, quoted scalar, plain scalar). -/
+partial def Scry.yInline (s : String) (line : Nat) : Except String Scry.Yaml :=
+  let t := String.trim s;
+  match String.chars t with
+  | .nil => .ok (.scalar "" line 0)
+  | .cons c rest =>
+    if Bool.or (Nat.beq (Char.code c) 91) (Nat.beq (Char.code c) 123) then
+      match Scry.yFlowValue (.cons c rest) with
+      | .error e => .error e
+      | .ok (v, after) => match Scry.yFlowSkip after with
+        | .nil => .ok v
+        | .cons c2 _ => .error ("trailing characters after flow value at line " ++ Nat.repr line
+            ++ " (near '" ++ String.singleton c2 ++ "')")
+    else if Bool.or (Nat.beq (Char.code c) 39) (Nat.beq (Char.code c) 34) then
+      match Scry.yFlowQuoted (.cons c rest) with
+      | .some (v, after) => match Scry.yFlowSkip after with
+        | .nil => .ok (.scalar v line 0)
+        | .cons c2 _ => .error ("trailing characters after quoted scalar at line " ++ Nat.repr line
+            ++ " (near '" ++ String.singleton c2 ++ "')")
+      | .none => .error ("unterminated quoted scalar at line " ++ Nat.repr line)
+    else if Nat.beq (Char.code c) 38 then
+      let p := Scry.yFlowNameGo .nil rest;
+      match Scry.yInline (String.ofChars p.2) line with
+      | .error e => .error e
+      | .ok v => .ok (.anchored p.1 v line 0)
+    else if Nat.beq (Char.code c) 42 then
+      let p := Scry.yFlowNameGo .nil rest;
+      .ok (.alias p.1 line 0)
+    else .ok (.scalar t line 0)
+
+-- ## Block structure
+
+/-- Whether a line starts a block sequence item (`-` at end of line or followed by
+whitespace). -/
+def Scry.yIsSeqLine (l : Scry.YLine) : Bool :=
+  match String.chars l.text with
+  | .nil => .false
+  | .cons c rest =>
+    if Nat.beq (Char.code c) 45 then
+      match rest with
+      | .nil => .true
+      | .cons c2 _ => Scry.yIsSpace c2
+    else .false
+
+/-- The text after a sequence dash (`- x` gives `x`, `-` gives `""`). -/
+def Scry.yDashRest (t : String) : String :=
+  match String.chars t with
+  | .nil => ""
+  | .cons _ rest => String.trimLeft (String.ofChars rest)
+
+mutual
+/-- Parse one mapping entry `key: value` starting at line `l`, returning the key, the
+value and the lines after the entry. -/
+partial def Scry.yEntry (l : Scry.YLine) (rest : List Scry.YLine) :
+    Except String (String × Scry.Yaml × List Scry.YLine) :=
+  match Scry.ySplitKey l.text with
+  | .none => .error ("expected 'key: value' at line " ++ Nat.repr l.num)
+  | .some (k, v0) =>
+    let key := Scry.yUnquote k;
+    let v := String.trim v0;
+    if String.isEmpty v then
+      match Scry.ySkipBlank rest with
+      | .cons n ns =>
+        if Bool.or (Nat.lt l.indent n.indent) (Bool.and (Nat.beq l.indent n.indent) (Scry.yIsSeqLine n)) then
+          match Scry.yParseBlock n.indent (.cons n ns) with
+          | .error e => .error e
+          | .ok (v, rest2) => .ok (key, v, rest2)
+        else .ok (key, .scalar "" l.num l.indent, rest)
+      | .nil => .ok (key, .scalar "" l.num l.indent, rest)
+    else if String.startsWith v "|" then
+      let p := Scry.yBlockScalar v l rest;
+      .ok (key, .scalar p.1 l.num l.indent, p.2)
+    else if String.startsWith v ">" then
+      let p := Scry.yBlockScalar v l rest;
+      .ok (key, .scalar p.1 l.num l.indent, p.2)
+    else if String.startsWith v "&" then
+      let p := Scry.yFlowNameGo .nil (String.chars (String.drop 1 v));
+      let name := p.1;
+      let tail := String.trim (String.ofChars p.2);
+      if String.isEmpty tail then
+        match Scry.ySkipBlank rest with
+        | .cons n ns =>
+          if Bool.or (Nat.lt l.indent n.indent) (Bool.and (Nat.beq l.indent n.indent) (Scry.yIsSeqLine n)) then
+            match Scry.yParseBlock n.indent (.cons n ns) with
+            | .error e => .error e
+            | .ok (v2, rest2) => .ok (key, .anchored name v2 l.num l.indent, rest2)
+          else .ok (key, .anchored name (.scalar "" l.num l.indent) l.num l.indent, rest)
+        | .nil => .ok (key, .anchored name (.scalar "" l.num l.indent) l.num l.indent, rest)
+      else
+        match Scry.yInline tail l.num with
+        | .error e => .error e
+        | .ok v2 => .ok (key, .anchored name v2 l.num l.indent, rest)
+    else
+      match Scry.yInline v l.num with
+      | .error e => .error e
+      | .ok v2 => .ok (key, v2, rest)
+
+/-- A mapping whose first entry is given separately (the `- key: value` case). -/
+partial def Scry.yMapFirst (indent : Nat) (num : Nat) (text : String) (rest : List Scry.YLine) :
+    Except String (Scry.Yaml × List Scry.YLine) :=
+  match Scry.yEntry (Scry.YLine.mk num text indent text Bool.false Bool.false) rest with
+  | .error e => .error e
+  | .ok (k, v, rest2) => Scry.yMapFrom indent num (.cons (k, v) .nil) rest2
+
+/-- Continue a block mapping at `indent` with the entries already read. -/
+partial def Scry.yMapFrom (indent : Nat) (startLine : Nat) (acc : List (String × Scry.Yaml))
+    (lines : List Scry.YLine) : Except String (Scry.Yaml × List Scry.YLine) :=
+  match Scry.ySkipBlank lines with
+  | .nil => .ok (.mapping (Scry.YEntries.ofList (List.reverse acc)) startLine indent, .nil)
+  | .cons l rest =>
+    if Nat.lt l.indent indent then
+      .ok (.mapping (Scry.YEntries.ofList (List.reverse acc)) startLine indent, .cons l rest)
+    else if Nat.lt indent l.indent then
+      .error ("unexpected indentation at line " ++ Nat.repr l.num)
+    else if Scry.yIsSeqLine l then
+      .error ("expected a mapping entry at line " ++ Nat.repr l.num ++ " (found a sequence item)")
+    else match Scry.yEntry l rest with
+      | .error e => .error e
+      | .ok (k, v, rest2) => Scry.yMapFrom indent startLine (.cons (k, v) acc) rest2
+
+/-- A block sequence at `indent`. -/
+partial def Scry.ySeqFrom (indent : Nat) (startLine : Nat) (acc : List Scry.Yaml)
+    (lines : List Scry.YLine) : Except String (Scry.Yaml × List Scry.YLine) :=
+  match Scry.ySkipBlank lines with
+  | .nil => .ok (.sequence (Scry.YItems.ofList (List.reverse acc)) startLine indent, .nil)
+  | .cons l rest =>
+    if Nat.lt l.indent indent then
+      .ok (.sequence (Scry.YItems.ofList (List.reverse acc)) startLine indent, .cons l rest)
+    else if Nat.lt indent l.indent then
+      .error ("unexpected indentation at line " ++ Nat.repr l.num)
+    else if Bool.not (Scry.yIsSeqLine l) then
+      .ok (.sequence (Scry.YItems.ofList (List.reverse acc)) startLine indent, .cons l rest)
+    else
+      let r := Scry.yDashRest l.text;
+      if String.isEmpty r then
+        match Scry.ySkipBlank rest with
+        | .cons n ns =>
+          if Nat.lt indent n.indent then
+            match Scry.yParseBlock n.indent (.cons n ns) with
+            | .error e => .error e
+            | .ok (v, rest2) => Scry.ySeqFrom indent startLine (.cons v acc) rest2
+          else Scry.ySeqFrom indent startLine (.cons (.scalar "" l.num l.indent) acc) rest
+        | .nil => Scry.ySeqFrom indent startLine (.cons (.scalar "" l.num l.indent) acc) .nil
+      else if String.startsWith r "-" then
+        .error ("nested inline sequences are not supported at line " ++ Nat.repr l.num)
+      else if Bool.or (String.startsWith r "[") (String.startsWith r "{") then
+        match Scry.yInline r l.num with
+        | .error e => .error e
+        | .ok v => Scry.ySeqFrom indent startLine (.cons v acc) rest
+      else match Scry.ySplitKey r with
+        | .some _ =>
+          let off := Nat.sub (String.length l.text) (String.length r);
+          match Scry.yMapFirst (Nat.add indent off) l.num r rest with
+          | .error e => .error e
+          | .ok (v, rest2) => Scry.ySeqFrom indent startLine (.cons v acc) rest2
+        | .none =>
+          match Scry.yInline r l.num with
+          | .error e => .error e
+          | .ok v => Scry.ySeqFrom indent startLine (.cons v acc) rest
+
+/-- Parse a block value whose first line is at exactly `indent`. -/
+partial def Scry.yParseBlock (indent : Nat) (lines : List Scry.YLine) :
+    Except String (Scry.Yaml × List Scry.YLine) :=
+  match Scry.ySkipBlank lines with
+  | .nil => .error "unexpected end of input"
+  | .cons l rest =>
+    if Nat.lt l.indent indent then
+      .error ("bad indentation at line " ++ Nat.repr l.num)
+    else if Nat.lt indent l.indent then
+      .error ("unexpected indentation at line " ++ Nat.repr l.num)
+    else if Scry.yIsSeqLine l then
+      Scry.ySeqFrom indent l.num .nil (.cons l rest)
+    else Scry.yMapFrom indent l.num .nil (.cons l rest)
+end
+
+-- ## Documents
+
+/-- Split lines into documents at `---`/`...` markers. -/
+partial def Scry.ySplitDocsGo (cur : List Scry.YLine) (docs : List (List Scry.YLine)) :
+    List Scry.YLine → List (List Scry.YLine)
+  | .nil => List.reverse (.cons (List.reverse cur) docs)
+  | .cons l ls =>
+    if l.marker then Scry.ySplitDocsGo .nil (.cons (List.reverse cur) docs) ls
+    else Scry.ySplitDocsGo (.cons l cur) docs ls
+
+/-- Whether a document line list has any non-blank line. -/
+def Scry.yDocHasContent : List Scry.YLine → Bool
+  | .nil => .false
+  | .cons l ls => if l.blank then Scry.yDocHasContent ls else .true
+
+/-- Parse one document and require that it consumes every line. -/
+def Scry.yParseDoc (lines : List Scry.YLine) : Except String Scry.Yaml :=
+  match Scry.yParseBlock 0 lines with
+  | .error e => .error e
+  | .ok (y, rest) => match Scry.ySkipBlank rest with
+    | .nil => .ok y
+    | .cons l _ => .error ("unexpected content at line " ++ Nat.repr l.num)
+
+/-- Parse every document of a list, in order. -/
+def Scry.yParseDocs : List (List Scry.YLine) → List Scry.Yaml → Except String (List Scry.Yaml)
+  | .nil, acc => .ok (List.reverse acc)
+  | .cons d ds, acc => match Scry.yParseDoc d with
+    | .error e => .error e
+    | .ok y => Scry.yParseDocs ds (.cons y acc)
+
+/-- Parse every document in `text` (blank/comment-only documents are dropped). -/
+def Scry.parseYamlDocs (text : String) : Except String (List Scry.Yaml) :=
+  let docs := List.filter Scry.yDocHasContent
+    (Scry.ySplitDocsGo .nil .nil (Scry.yLines text));
+  match docs with
+  | .nil => .error "empty document"
+  | _ => Scry.yParseDocs docs .nil
+
+/-- Parse the first document of `text`; a file with several documents returns the first
+(CI files have one, and the CLI reports the count). -/
+def Scry.parseYaml (text : String) : Except String Scry.Yaml :=
+  match Scry.parseYamlDocs text with
+  | .error e => .error e
+  | .ok .nil => .error "empty document"
+  | .ok (.cons y _) => .ok y

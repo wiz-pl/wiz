@@ -1,0 +1,87 @@
+import Sys
+import Scry.Ci
+import Scry.CiYaml
+/-!
+# Scry.CiCli: the `scry ci` commands
+
+`import Scry.CiCli`. The package's CI frontend:
+
+```
+scry ci FILE… [--github|--azure] [--explain]   parse and analyse CI files
+scry ci-store FILE… [--github|--azure]        print the lowered CI graph
+```
+
+`ci` prints one line per finding (`rule  kind "name" line N detail "…" cert K`) plus a
+`findings: N` header per file; `--explain` adds the checked derivation for each finding.
+`ci-store` prints node/edge/relation counts and the non-empty node-kind counts.
+
+Exit status: 0 success, 1 an error (a parse or file error, message on stderr), 2 usage.
+-/
+
+/-- The CI subcommand usage. -/
+def Scry.ciUsage : String :=
+  "usage: scry ci FILE… [--github|--azure] [--explain]\n"
+  ++ "       scry ci-store FILE… [--github|--azure]"
+
+/-- The platform flag (`none` means detect from the path/content). -/
+def Scry.ciPlatformFlag (args : List String) : Option Scry.CiPlatform :=
+  if List.any (String.eq "--github") args then .some .github
+  else if List.any (String.eq "--azure") args then .some .azure
+  else .none
+
+/-- `true` for `--explain`. -/
+def Scry.ciExplainFlag (args : List String) : Bool := List.any (String.eq "--explain") args
+
+/-- The file arguments: everything that is not a flag. -/
+def Scry.ciFiles (args : List String) : List String :=
+  List.filter (fun a => Bool.and (Bool.not (String.startsWith a "--"))
+    (Bool.not (String.isEmpty a))) args
+
+/-- Parse one file, with the explicit platform when there is one. -/
+def Scry.ciParseOne (p : Option Scry.CiPlatform) (path : String) : EIO Scry.CiModel := do
+  text ← FS.readFile path;
+  match p with
+  | .some plat => match Scry.ciParseModelAs plat path text with
+    | .ok m => EIO.pure m
+    | .error e => EIO.fail (path ++ ": " ++ e)
+  | .none => match Scry.ciParseModel path text with
+    | .ok m => EIO.pure m
+    | .error e => EIO.fail (path ++ ": " ++ e)
+
+/-- Parse every file into one model. -/
+def Scry.ciParseAll (p : Option Scry.CiPlatform) : List String → EIO Scry.CiModel
+  | .nil => EIO.pure Scry.ciEmptyModel
+  | .cons f fs => do
+    m ← Scry.ciParseOne p f;
+    rest ← Scry.ciParseAll p fs;
+    EIO.pure (Scry.CiModel.mk (List.append m.workflows rest.workflows))
+
+/-- `scry ci FILE…`: one report block per model, then a certificate block with
+`--explain`. -/
+def Scry.ciCmd (args : List String) : EIO Nat := do
+  let files := Scry.ciFiles args;
+  match files with
+  | .nil => EIO.fail Scry.ciUsage
+  | _ => do
+    m ← Scry.ciParseAll (Scry.ciPlatformFlag args) files;
+    let r := Scry.ciAnalyze m;
+    EIO.lift (IO.println (Scry.ciRenderReport r));
+    EIO.lift (IO.println (String.append "certificates: "
+      (if Scry.ciCheckCerts r then "checked" else "MISSING")));
+    match Scry.ciExplainFlag args with
+    | .true => EIO.lift (IO.println (String.intercalate "\n\n"
+        (List.map (fun f => String.append (Scry.ciRuleName f.rule)
+          (String.append "\n" (Scry.ciRenderCert f))) r.findings)))
+    | .false => EIO.pure ();
+    EIO.pure 0
+
+/-- `scry ci-store FILE…`: the graph summary of the parsed model. -/
+def Scry.ciStoreCmd (args : List String) : EIO Nat := do
+  let files := Scry.ciFiles args;
+  match files with
+  | .nil => EIO.fail Scry.ciUsage
+  | _ => do
+    m ← Scry.ciParseAll (Scry.ciPlatformFlag args) files;
+    let g := Scry.ciLower m;
+    EIO.lift (IO.println (Scry.ciRenderStore g));
+    EIO.pure 0

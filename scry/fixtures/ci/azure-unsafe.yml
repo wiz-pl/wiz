@@ -1,0 +1,14 @@
+trigger:
+- main
+variables:
+- group: prod-secrets
+stages:
+- stage: build
+  jobs:
+  - job: b1
+    steps:
+    - task: PublishBuildArtifacts@1
+    - script: echo $(System.AccessToken)
+    - bash: echo ${{ parameters.name }}
+    - template: ${{ parameters.jobTemplate }}
+    - checkout: self

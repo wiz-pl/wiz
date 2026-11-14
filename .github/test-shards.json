@@ -55,6 +55,7 @@
     "=scry-wil",
     "=scry-ai",
     "=scry-taint",
+    "=scry-ci",
     "=linear-case",
     "repr",
     "result-q",
