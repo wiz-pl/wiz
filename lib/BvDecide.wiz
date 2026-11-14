@@ -1,0 +1,306 @@
+import SatTactic
+import BitBlast
+/-!
+# BvDecide
+
+`bv_decide` (stage 28d): an equation of words decided by SAT, with no new trust.
+`import BvDecide`.
+
+    def t (x y : UIntN 8) : UIntN.land x (UIntN.lor x y) = x := by bv_decide
+
+The goal `lhs = rhs` at `UIntN w` (or `BitVec w`), `w` a numeral, is bit-blasted into
+28c's circuit: bit `i` of a word expression `e` is the node whose value is
+`Bits.bit (UIntN.toNat e) i`; an operation's bit is a gate over its operands' bits, and
+the node's proof is the operation's lemma (`Bits.wland_bit`, …), checked by the kernel
+like any other gate. Words the tactic does not look into are inputs (their bits are
+variables of the formula). The output is `Bits.eqUpTo (toNat lhs) (toNat rhs) w`, and
+`Bits.word_ext` turns it into `lhs = rhs`.
+
+The fragment: `UIntN.land/lor/xor/not/add/sub/neg` and shifts by numerals
+(`shiftLeft`, `shiftRight`), the same under `BitVec`'s names, and closed words
+(numerals, `UIntN.ofNat 8 13`: their bits are computed). Boolean goals may compare
+words (`UIntN.lt/le`, `BitVec.ult/ule`) under the connectives `sat_decide` reads.
+-/
+
+def BvD.toNatE (w : Nat) (e : Expr) : Expr := Expr.mkApp (.const "UIntN.toNat") (.cons (.lit w) (.cons e .nil))
+def BvD.bitE (w : Nat) (e : Expr) (i : Nat) : Expr := Expr.mkApp (.const "Bits.bit") (.cons (BvD.toNatE w e) (.cons (.lit i) .nil))
+
+-- the bitwise operation `e` is an application of (its gate and its lemma), if any
+def BvD.bitwise (n : String) : Option ((Nat → Nat → Sat.Gate) × String) :=
+  match Bool.or (Expr.nameEq n "UIntN.land") (Expr.nameEq n "BitVec.and") with
+  | .true => .some (Sat.Gate.and, "Bits.wland_bit")
+  | .false => match Bool.or (Expr.nameEq n "UIntN.lor") (Expr.nameEq n "BitVec.or") with
+    | .true => .some (Sat.Gate.or, "Bits.wlor_bit")
+    | .false => match Bool.or (Expr.nameEq n "UIntN.xor") (Expr.nameEq n "BitVec.xor") with
+      | .true => .some (Sat.Gate.xor, "Bits.wxor_bit")
+      | .false => .none
+
+-- bits `i … w-1` of `e`, as nodes (inputs, or gates over `as`/`bs` with the lemma `lem`)
+def BvD.inputs (w : Nat) (e : Expr) : Nat → Nat → SatT.St → List Nat × SatT.St
+  | .zero, _, st => (.nil, st)
+  | .succ k, i, st => match SatT.St.find (BvD.bitE w e i) st with
+    | .some v => match BvD.inputs w e k (Nat.succ i) st with
+      | (vs, st1) => (.cons v vs, st1)
+    | .none => match SatT.St.add (BvD.bitE w e i) .inp st with
+      | (v, st1) => match BvD.inputs w e k (Nat.succ i) st1 with
+        | (vs, st2) => (.cons v vs, st2)
+def BvD.gates (w : Nat) (e a b : Expr) (mk : Nat → Nat → Sat.Gate) (lem : String) :
+    Nat → List Nat → List Nat → SatT.St → List Nat × SatT.St
+  | i, .cons x xs, .cons y ys, st =>
+    let pf := Expr.mkApp (.const lem) (.cons (.lit w) (.cons a (.cons b (.cons (.lit i) .nil))));
+    match SatT.St.addP (BvD.bitE w e i) (mk x y) pf st with
+    | (v, st1) => match BvD.gates w e a b mk lem (Nat.succ i) xs ys st1 with
+      | (vs, st2) => (.cons v vs, st2)
+  | _, _, _, st => (.nil, st)
+
+-- is `e` closed (no variables of the goal)? Then its bits are computed
+def BvD.closed : Expr → Bool
+  | .var _ => .false
+  | .opaque _ => .false
+  | .app f a => Bool.and (BvD.closed f) (BvD.closed a)
+  | .lam _ b => BvD.closed b
+  | .pi _ _ q d b => Bool.and (BvD.closed q) (Bool.and (BvD.closed d) (BvD.closed b))
+  | _ => .true
+-- the bits of a closed word: constants, each checked by the kernel's evaluation (`refl`)
+def BvD.consts (g : Nat) (w : Nat) (e : Expr) : Nat → Nat → SatT.St → TacticM (List Nat × SatT.St)
+  | .zero, _, st => TacticM.pure (.nil, st)
+  | .succ k, i, st => do
+    b ← TacticM.whnf g (BvD.bitE w e i);
+    let r := SatT.St.add (BvD.bitE w e i) (.const (SatT.isConst "Bool.true" b)) st;
+    rest ← BvD.consts g w e k (Nat.succ i) r.2;
+    TacticM.pure (.cons r.1 rest.1, rest.2)
+
+-- Arithmetic (part 2): the nodes of `~~~`, `+`, `-`, negation and shifts, each bit's
+-- node proved by its lemma (lib/BitBlast.wiz) with `Sat.trivial` for the side
+-- conditions on numerals (`i < w`), which the kernel computes.
+def BvD.lemE (lem : String) (args : List Expr) : Expr := Expr.mkApp (.const lem) args
+def BvD.tt : Expr := .const "Sat.trivial"
+def BvD.boolE (n : String) (a b : Expr) : Expr := Expr.mkApp (.const n) (.cons a (.cons b .nil))
+def BvD.bitN (A : Expr) (i : Nat) : Expr := Expr.mkApp (.const "Bits.bit") (.cons A (.cons (.lit i) .nil))
+def BvD.carryE (i : Nat) (c : Bool) (A B : Expr) : Expr :=
+  Expr.mkApp (.const "Bits.carry") (.cons (.lit i) (.cons (SatT.boolE c) (.cons A (.cons B .nil))))
+-- `~~~`: not of each bit
+def BvD.nots (w : Nat) (e a : Expr) : Nat → List Nat → SatT.St → List Nat × SatT.St
+  | i, .cons x xs, st => match SatT.St.addP (BvD.bitE w e i) (.not x) (BvD.lemE "Bits.wnot_bit" (.cons (.lit w) (.cons a (.cons (.lit i) (.cons BvD.tt .nil))))) st with
+    | (v, st1) => match BvD.nots w e a (Nat.succ i) xs st1 with
+      | (vs, st2) => (.cons v vs, st2)
+  | _, _, st => (.nil, st)
+-- the complement of `b`'s bits as a number (`Bits.ncompl w B`), for `-`
+def BvD.ncomplE (w : Nat) (B : Expr) : Expr := Expr.mkApp (.const "Bits.ncompl") (.cons (.lit w) (.cons B .nil))
+def BvD.compls (w : Nat) (b : Expr) : Nat → List Nat → SatT.St → List Nat × SatT.St
+  | i, .cons x xs, st =>
+    match SatT.St.addP (BvD.bitN (BvD.ncomplE w (BvD.toNatE w b)) i) (.not x)
+        (BvD.lemE "Bits.compl_bit" (.cons (.lit w) (.cons b (.cons (.lit i) (.cons BvD.tt .nil))))) st with
+    | (v, st1) => match BvD.compls w b (Nat.succ i) xs st1 with
+      | (vs, st2) => (.cons v vs, st2)
+  | _, _, st => (.nil, st)
+-- a ripple-carry adder over the bits `xs` of `A` and `ys` of `B` with carry-in `c`; the sum
+-- bits are the nodes of `e`, each proved by `sumLem i`
+def BvD.adder (w : Nat) (e A B : Expr) (c : Bool) (sumLem : Nat → Expr) : Nat → Nat → List Nat → List Nat → SatT.St → List Nat × SatT.St
+  | i, ci, .cons x xs, .cons y ys, st =>
+    let ai := BvD.bitN A i;
+    let bi := BvD.bitN B i;
+    let cE := BvD.carryE i c A B;
+    match SatT.St.add (BvD.boolE "Bool.xor" ai bi) (.xor x y) st with
+    | (u, st1) => match SatT.St.addP (BvD.bitE w e i) (.xor u ci) (sumLem i) st1 with
+      | (s, st2) => match SatT.St.add (BvD.boolE "Bool.and" ai bi) (.and x y) st2 with
+        | (t1, st3) => match SatT.St.add (BvD.boolE "Bool.or" ai bi) (.or x y) st3 with
+          | (t2, st4) => match SatT.St.add (BvD.boolE "Bool.and" cE (BvD.boolE "Bool.or" ai bi)) (.and ci t2) st4 with
+            | (t3, st5) => match SatT.St.addP (BvD.carryE (Nat.succ i) c A B) (.or t1 t3)
+                  (BvD.lemE "Bits.carry_step" (.cons (.lit i) (.cons (SatT.boolE c) (.cons A (.cons B .nil))))) st5 with
+              | (cn, st6) => match BvD.adder w e A B c sumLem (Nat.succ i) cn xs ys st6 with
+                | (ss, st7) => (.cons s ss, st7)
+  | _, _, _, _, st => (.nil, st)
+def BvD.nth : List Nat → Nat → Nat
+  | .nil, _ => 0
+  | .cons x _, .zero => x
+  | .cons _ xs, .succ n => BvD.nth xs n
+-- shifts by `k`: bit `i` of `x <<< k` is bit `i - k` of `x` (zero below `k`); of `x >>> k`,
+-- bit `i + k` (zero from `w - k` on). An equal bit is an `and` of it with itself.
+def BvD.shl (w : Nat) (e a : Expr) (k : Nat) (xs : List Nat) : Nat → Nat → SatT.St → List Nat × SatT.St
+  | .zero, _, st => (.nil, st)
+  | .succ m, i, st =>
+    let r := match Nat.lt i k with
+      | .true => SatT.St.addP (BvD.bitE w e i) (.const .false)
+          (BvD.lemE "Bits.wshl_lo" (.cons (.lit w) (.cons a (.cons (.lit k) (.cons (.lit i) (.cons BvD.tt (.cons BvD.tt .nil)))))))
+          st
+      | .false => SatT.St.addP (BvD.bitE w e i) (.and (BvD.nth xs (Nat.sub i k)) (BvD.nth xs (Nat.sub i k)))
+          (BvD.lemE "Bits.wshl_hi" (.cons (.lit w) (.cons a (.cons (.lit k) (.cons (.lit (Nat.sub i k)) (.cons BvD.tt .nil)))))) st;
+    match BvD.shl w e a k xs m (Nat.succ i) r.2 with
+    | (vs, st2) => (.cons r.1 vs, st2)
+def BvD.shr (w : Nat) (e a : Expr) (k : Nat) (xs : List Nat) : Nat → Nat → SatT.St → List Nat × SatT.St
+  | .zero, _, st => (.nil, st)
+  | .succ m, j, st =>
+    let r := match Nat.lt (Nat.add k j) w with
+      | .true => SatT.St.addP (BvD.bitE w e j) (.and (BvD.nth xs (Nat.add k j)) (BvD.nth xs (Nat.add k j)))
+          (BvD.lemE "Bits.wshr_in" (.cons (.lit w) (.cons a (.cons (.lit k) (.cons (.lit j) .nil))))) st
+      | .false => SatT.St.addP (BvD.bitE w e j) (.const .false)
+          (BvD.lemE "Bits.wshr_out" (.cons (.lit w) (.cons a (.cons (.lit k) (.cons (.lit j) (.cons BvD.tt .nil)))))) st;
+    match BvD.shr w e a k xs m (Nat.succ j) r.2 with
+    | (vs, st2) => (.cons r.1 vs, st2)
+def BvD.isAny (n : String) (a b : String) : Bool := Bool.or (Expr.nameEq n a) (Expr.nameEq n b)
+def BvD.zeroE (w : Nat) : Expr := Expr.mkApp (.const "UIntN.zero") (.cons (.lit w) .nil)
+
+-- the bit nodes of the word expression `e` (memo: the words seen, with their bits)
+mutual
+def BvD.word (g : Nat) (w : Nat) : Nat → Expr → SatT.St → TacticM (List Nat × SatT.St)
+  | .zero, e, st => TacticM.pure (BvD.inputs w e w 0 st)
+  | .succ fuel, e, st => match SatT.St.find (BvD.bitE w e 0) st with
+    | .some _ => TacticM.pure (BvD.inputs w e w 0 st)
+    | .none => match BvD.closed e with
+      | .true => BvD.consts g w e w 0 st
+      | .false => match Expr.view e with
+        | .const n (.cons _ (.cons a (.cons b .nil))) => match BvD.bitwise n with
+          | .some op => do
+            r1 ← BvD.word g w fuel a st;
+            r2 ← BvD.word g w fuel b r1.2;
+            TacticM.pure (BvD.gates w e a b op.1 op.2 0 r1.1 r2.1 r2.2)
+          | .none => BvD.word3 g w fuel e n a b st
+        | .const n (.cons _ (.cons a .nil)) => BvD.word2 g w fuel e n a st
+        | _ => TacticM.pure (BvD.inputs w e w 0 st)
+-- `op a b` with two word operands, or a word and a numeral (shifts)
+def BvD.word3 (g : Nat) (w : Nat) (fuel : Nat) (e : Expr) (n : String) (a b : Expr) (st : SatT.St) : TacticM (List Nat × SatT.St) :=
+  match BvD.isAny n "UIntN.add" "BitVec.add" with
+  | .true => do
+    r1 ← BvD.word g w fuel a st;
+    r2 ← BvD.word g w fuel b r1.2;
+    let A := BvD.toNatE w a;
+    let B := BvD.toNatE w b;
+    match SatT.St.add (BvD.carryE 0 .false A B) (.const .false) r2.2 with
+    | (c0, st3) => TacticM.pure (BvD.adder w e A B .false
+        (fun i => BvD.lemE "Bits.wadd_bit" (.cons (.lit w) (.cons a (.cons b (.cons (.lit i) (.cons BvD.tt .nil)))))) 0 c0 r1.1 r2.1 st3)
+  | .false => match BvD.isAny n "UIntN.sub" "BitVec.sub" with
+    | .true => BvD.subNodes g w fuel e a b st
+    | .false => match Expr.view b with
+      | .lit k => match BvD.isAny n "UIntN.shiftLeft" "BitVec.shl" with
+        | .true => do
+          r1 ← BvD.word g w fuel a st;
+          TacticM.pure (BvD.shl w e a k r1.1 w 0 r1.2)
+        | .false => match BvD.isAny n "UIntN.shiftRight" "BitVec.lshr" with
+          | .true => do
+            r1 ← BvD.word g w fuel a st;
+            TacticM.pure (BvD.shr w e a k r1.1 w 0 r1.2)
+          | .false => TacticM.pure (BvD.inputs w e w 0 st)
+      | _ => TacticM.pure (BvD.inputs w e w 0 st)
+-- `a - b`: `a + ~~~b + 1` (also `-a`, as `0 - a`)
+def BvD.subNodes (g : Nat) (w : Nat) (fuel : Nat) (e a b : Expr) (st : SatT.St) : TacticM (List Nat × SatT.St) := do
+  r1 ← BvD.word g w fuel a st;
+  r2 ← BvD.word g w fuel b r1.2;
+  let A := BvD.toNatE w a;
+  let B := BvD.toNatE w b;
+  let NB := BvD.ncomplE w B;
+  match BvD.compls w b 0 r2.1 r2.2 with
+  | (nbs, st3) => match SatT.St.add (BvD.carryE 0 .true A NB) (.const .true) st3 with
+    | (c0, st4) => TacticM.pure (BvD.adder w e A NB .true
+        (fun i => BvD.lemE "Bits.wsub_bit" (.cons (.lit w) (.cons a (.cons b (.cons (.lit i) (.cons BvD.tt .nil)))))) 0 c0 r1.1 nbs st4)
+-- `op a` with one word operand
+def BvD.word2 (g : Nat) (w : Nat) (fuel : Nat) (e : Expr) (n : String) (a : Expr) (st : SatT.St) : TacticM (List Nat × SatT.St) :=
+  match BvD.isAny n "UIntN.not" "BitVec.not" with
+  | .true => do
+    r1 ← BvD.word g w fuel a st;
+    TacticM.pure (BvD.nots w e a 0 r1.1 r1.2)
+  | .false => match BvD.isAny n "UIntN.neg" "BitVec.neg" with
+    | .true => BvD.subNodes g w fuel e (BvD.zeroE w) a st
+    | .false => TacticM.pure (BvD.inputs w e w 0 st)
+
+end
+
+-- `Bits.eqUpTo A B k` for `k` up to `w`, from the bit nodes (low first)
+def BvD.eqE (A B : Expr) (k : Nat) : Expr := Expr.mkApp (.const "Bits.eqUpTo") (.cons A (.cons B (.cons (.lit k) .nil)))
+def BvD.chain (A B : Expr) : Nat → Nat → List Nat → List Nat → SatT.St → Nat × SatT.St
+  | prev, k, .cons x xs, .cons y ys, st =>
+    let q := Expr.mkApp (.const "Sat.boolEq") (.cons (Expr.mkApp (.const "Bits.bit") (.cons A (.cons (.lit k) .nil)))
+      (.cons (Expr.mkApp (.const "Bits.bit") (.cons B (.cons (.lit k) .nil))) .nil));
+    match SatT.St.add q (.iff x y) st with
+    | (qv, st1) => match SatT.St.add (BvD.eqE A B (Nat.succ k)) (.and qv prev) st1 with
+      | (ev, st2) => BvD.chain A B ev (Nat.succ k) xs ys st2
+  | prev, _, _, _, st => (prev, st)
+
+-- the width of `UIntN w` or `BitVec w`
+def BvD.width (A : Expr) : Option Nat := match Expr.view A with
+  | .const n (.cons (.lit w) .nil) => match Bool.or (Expr.nameEq n "UIntN") (Expr.nameEq n "BitVec") with
+    | .true => .some w
+    | .false => .none
+  | _ => .none
+
+def BvD.decide (g : Nat) (w : Nat) (lhs rhs : Expr) : TacticM Unit := do
+  r1 ← BvD.word g w 1000 lhs SatT.St.empty;
+  r2 ← BvD.word g w 1000 rhs r1.2;
+  match (r1.1, r2) with
+  | (ls, (rs, st2)) =>
+      let A := BvD.toNatE w lhs;
+      let B := BvD.toNatE w rhs;
+      match SatT.St.add (BvD.eqE A B 0) (.const .true) st2 with
+      | (e0, st3) => match BvD.chain A B e0 0 ls rs st3 with
+        | (out, st4) => SatT.solveDag g .false out st4 (fun nodesE proofE hE σ holdsE =>
+            Expr.mkApp (.const "Bits.word_ext") (.cons (.lit w) (.cons lhs (.cons rhs
+              (.cons (Expr.mkApp (.const "Sat.dag_sound") (.cons nodesE (.cons (.lit out) (.cons proofE
+                (.cons hE (.cons σ (.cons holdsE .nil))))))) .nil)))))
+
+-- ## Comparisons (`<ᵤ`, `≤ᵤ`) in boolean goals
+def BvD.ltcE (c : Bool) (A B : Expr) (k : Nat) : Expr :=
+  Expr.mkApp (.const "Bits.ltc") (.cons (SatT.boolE c) (.cons A (.cons B (.cons (.lit k) .nil))))
+-- `Bits.ltc c A B k` for `k` up to `w`, from the bit nodes (low first)
+def BvD.ltChain (c : Bool) (A B : Expr) : Nat → Nat → List Nat → List Nat → SatT.St → Nat × SatT.St
+  | prev, k, .cons x xs, .cons y ys, st =>
+    let ai := BvD.bitN A k;
+    let bi := BvD.bitN B k;
+    let nai := Expr.app (.const "Bool.not") ai;
+    let q := BvD.boolE "Sat.boolEq" ai bi;
+    match SatT.St.add nai (.not x) st with
+    | (na, st1) => match SatT.St.add (BvD.boolE "Bool.and" nai bi) (.and na y) st1 with
+      | (t1, st2) => match SatT.St.add q (.iff x y) st2 with
+        | (qv, st3) => match SatT.St.add (BvD.boolE "Bool.and" q (BvD.ltcE c A B k)) (.and qv prev) st3 with
+          | (t2, st4) => match SatT.St.add (BvD.ltcE c A B (Nat.succ k)) (.or t1 t2) st4 with
+            | (v, st5) => BvD.ltChain c A B v (Nat.succ k) xs ys st5
+  | prev, _, _, _, st => (prev, st)
+-- the node of the comparison `e` of `x` and `y` (`c`: `≤` rather than `<`)
+def BvD.cmpNode (g : Nat) (w : Nat) (e x y : Expr) (c : Bool) (lem : String) (st : SatT.St) : TacticM SatT.St := do
+  r1 ← BvD.word g w 1000 x st;
+  r2 ← BvD.word g w 1000 y r1.2;
+  let A := BvD.toNatE w x;
+  let B := BvD.toNatE w y;
+  match SatT.St.add (BvD.ltcE c A B 0) (.const c) r2.2 with
+  | (c0, st3) => match BvD.ltChain c A B c0 0 r1.1 r2.1 st3 with
+    | (out, st4) => TacticM.pure (SatT.St.addP e (.and out out) (BvD.lemE lem (.cons (.lit w) (.cons x (.cons y .nil)))) st4).2
+-- the comparisons in a boolean expression, as nodes (which `sat_decide`'s reflection
+-- then finds as it meets them)
+mutual
+def BvD.cmps (g : Nat) (e : Expr) (st : SatT.St) : TacticM SatT.St := match Expr.view e with
+  | .const n args => match args with
+    | .cons (.lit w) (.cons x (.cons y .nil)) => match SatT.St.find e st with
+      | .some _ => TacticM.pure st
+      | .none => match BvD.isAny n "UIntN.lt" "BitVec.ult" with
+        | .true => BvD.cmpNode g w e x y .false "Bits.wlt_bits" st
+        | .false => match BvD.isAny n "UIntN.le" "BitVec.ule" with
+          | .true => BvD.cmpNode g w e x y .true "Bits.wle_bits" st
+          | .false => BvD.cmpsL g args st
+    | _ => BvD.cmpsL g args st
+  | _ => TacticM.pure st
+def BvD.cmpsL (g : Nat) (es : List Expr) (st : SatT.St) : TacticM SatT.St := match es with
+  | .nil => TacticM.pure st
+  | .cons e es' => do
+    st1 ← BvD.cmps g e st;
+    BvD.cmpsL g es' st1
+end
+
+syntax (name := bvDecide) "bv_decide" : tactic
+def Tactic.bvDecide : Tactic := fun _ => do
+  g0 ← TacticM.mainGoal;
+  g ← SatT.introAll 1000 g0;
+  ty ← TacticM.goalType g;
+  eqn ← TacticM.eqView g ty;
+  match eqn with
+  | .none => TacticM.fail "bv_decide: the goal is not an equation of words or of booleans"
+  | .some eq => match BvD.width eq.1 with
+    | .some w => do
+      BvD.decide g w eq.2.1 eq.2.2;
+      TacticM.replaceMainGoal .nil
+    | .none => match SatT.isConst "Bool" eq.1 with
+      | .true => do
+        st1 ← BvD.cmps g eq.2.1 SatT.St.empty;
+        st2 ← BvD.cmps g eq.2.2 st1;
+        SatT.decideDagFrom g .false st2 eq.2.1 eq.2.2;
+        TacticM.replaceMainGoal .nil
+      | .false => TacticM.fail "bv_decide: the goal is an equation, but not of words UIntN w or BitVec w with a numeral width, nor of booleans"
+attribute [tactic tactic.bvDecide] Tactic.bvDecide

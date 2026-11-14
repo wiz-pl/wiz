@@ -1,6 +1,6 @@
 # Stage 17: elaboration in the self-hosted frontend
 
-## 17a–b: implicit arguments ✅
+## 17a–b: implicit arguments
 
 The self-hosted frontend now elaborates with types (`inferT`/`checkT` in
 `Frontend.wiz`), so `{A : Type}` binders work: `List.cons x xs`, `id Nat.zero`,
@@ -20,7 +20,7 @@ later parameters are bound again). Recursive calls leave out the implicit parame
 Typed elaboration produces constants, so for `#reduce` the definitions are inlined
 afterwards (`inlineTm`) instead of being compiled twice.
 
-## 17c: `.c` and `@f` ✅
+## 17c: `.c` and `@f`
 
 A constructor can be written `.c` (or `.c a b`) where the expected type is `T …`: it is
 `T.c`. An argument written so whose type is still an unsolved metavariable (the `.zero`
@@ -28,7 +28,7 @@ in `.cons .zero xs`, before `xs` fixes the list's type) is postponed: a metavari
 stands for it until the other arguments are elaborated, then it is checked and unified
 with that metavariable. `@f` inserts no implicit arguments.
 
-## 17d: `partial` and `mutual` ✅
+## 17d: `partial` and `mutual`
 
 `partial def` and `mutual … end` blocks of definitions: each function is first an axiom
 of its type (`addPartials`, justified by a witness the kernel checks, 22f), so that the

@@ -46,6 +46,8 @@ structure Item where
   /-- the text replacing `[start, cursor)` -/
   insert : String := label
   start : Nat
+  /-- the global it stands for, whose doc comment the item shows -/
+  global : Option Name := none
   deriving Repr, Inhabited, BEq
 
 structure Result where
@@ -108,7 +110,7 @@ def globalItem (g : Globals R) (n : Name) (start : Nat) (insert : String) (expec
       let matches_ := expected.isSome && resultHead d.type == expected
       (d.type.pretty [], if matches_ then "2" else "3", kindFunction)
     | none => ("", "3", kindFunction)
-  { label := n, kind, detail, sortText := sort, insert, start }
+  { label := n, kind, detail, sortText := sort, insert, start, global := some n }
 
 /-- What the language server needs from its document for completion. -/
 structure Input (R : Type) where
@@ -200,7 +202,8 @@ def complete (inp : Input R) : Result := Id.run do
     match Query.innermost s (ws + q.length - 1) (fun | .ident r .. => r.stop == ws + q.length | _ => false) (endIn := true) with
     | some (.ident _ _ _ _ ty) =>
       for (f, fty) in Actions.fieldTypes g ty do
-        items := items.push { label := q ++ "." ++ f, kind := kindField, detail := fty, start := qstart, sortText := "0", insert := q ++ "." ++ f }
+        items := items.push { label := q ++ "." ++ f, kind := kindField, detail := fty, start := qstart, sortText := "0", insert := q ++ "." ++ f,
+                              global := (typeHead ty).map (· ++ "." ++ f) }
       if let some T := typeHead ty then
         for n in g.order do
           if n.startsWith (T ++ ".") && !hidden n && !(dropS n (T.length + 1)).contains '.' && takesFirst g n T then

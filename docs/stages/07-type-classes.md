@@ -1,6 +1,6 @@
 # Stage 7: type classes
 
-## 7a: glued evaluation ✅
+## 7a: glued evaluation
 
 Type classes need to see names: the class in `Add Nat`, the nominal head in
 `Monad TacticM`. Evaluation used to unfold every definition eagerly, so those names
@@ -24,7 +24,7 @@ disappeared. Now a defined constant evaluates to a **glued** value
 
 The prelude now elaborates about 6× faster.
 
-## 7b: classes, instances, tabled resolution ✅
+## 7b: classes, instances, tabled resolution
 
 ```
 class Inhabited (A : Type) where
@@ -63,7 +63,7 @@ Known limitations: no auto-bound implicits (write `{A : Type}`); instance proble
 must have no holes left in their arguments by the end of the command; answers must be
 complete terms; no default instances or coercions yet.
 
-## 7c: command macros, reflection, `deriving` ✅
+## 7c: command macros, reflection, `deriving`
 
 ```
 import Deriving
@@ -111,7 +111,7 @@ splice lists (`$xs*`), so derivers fold one-element quotations and use
 `Syntax.mkApp`; the self-hosted frontend has no macros yet. `Repr String` doesn't
 escape.
 
-## 7d: deriving with proof fields and in any universe ✅
+## 7d: deriving with proof fields and in any universe
 
 ```
 import Deriving
@@ -142,7 +142,7 @@ inductive Box.{u} (A : Type u) where          -- Box : Type u → Type u (inferr
   sees `Nat`, not `ULift Nat` (tested on a type in `Type 1` with a `Nat` field and a
   proof field).
 
-## 7e: numeric classes ✅
+## 7e: numeric classes
 
 ```
 class Add (A : Type) where
@@ -209,7 +209,7 @@ Heterogeneous `HAdd A B C` (Lean's) came next, with default instances: 7f.
 Types are structural (two declarations of the same shape are one type), so an instance
 for a look-alike type applies too; numerals as patterns: see 13q (`docs/stages/13-language.md`).
 
-## 7f: heterogeneous operators, default instances ✅
+## 7f: heterogeneous operators, default instances
 
 ```
 class HAdd (A B : Type) (C : outParam Type) where

@@ -94,10 +94,65 @@ where
     | none => (acc, j)
   --sol>
 
+def hexVal? (c : Char) : Option Nat :=
+  if c.isDigit then some (c.toNat - '0'.toNat)
+  else if 'a' ≤ c && c ≤ 'f' then some (c.toNat - 'a'.toNat + 10)
+  else if 'A' ≤ c && c ≤ 'F' then some (c.toNat - 'A'.toNat + 10) else none
+
+/-- The escape sequence whose backslash is at `input[j]`: the character it stands for and
+the offset after it, or why it is not one. `\n`, `\t`, `\r`, `\0`, `\\`, `\"`, `\'`,
+`\xHH` (two hex digits) and `\u{H}` (one to six hex digits, a Unicode scalar value). The
+self-hosted lexer (`selfhost/Lex.wiz`, `readStr`) reads the same escapes, with the same
+messages. -/
+def readEscape (input : Array Char) (j : Nat) : Except String (Char × Nat) :=
+  match input[j + 1]? with
+  | some 'n' => .ok ('\n', j + 2)
+  | some 't' => .ok ('\t', j + 2)
+  | some 'r' => .ok ('\r', j + 2)
+  | some '0' => .ok (Char.ofNat 0, j + 2)
+  | some '\\' => .ok ('\\', j + 2)
+  | some '"' => .ok ('"', j + 2)
+  | some '\'' => .ok ('\'', j + 2)
+  | some 'x' => match (input[j + 2]?.bind hexVal?), (input[j + 3]?.bind hexVal?) with
+    | some a, some b => .ok (Char.ofNat (a * 16 + b), j + 4)
+    | _, _ => .error "the escape \\x needs two hexadecimal digits (as in \\x41)"
+  | some 'u' =>
+    let bad : Except String (Char × Nat) :=
+      .error "the escape \\u is written \\u{H}, with one to six hexadecimal digits (as in \\u{3bb})"
+    -- the digits from `input[k]`: `count` read so far, worth `n`
+    let rec digits (k n count : Nat) (fuel : Nat) : Except String (Char × Nat) :=
+      match fuel with
+      | 0 => bad
+      | f + 1 => match input[k]? with
+      | none => bad
+      | some c =>
+        if c == '}' then
+          if count == 0 then bad
+          else if n > 0x10FFFF || (0xD800 ≤ n && n ≤ 0xDFFF) then
+            .error "the escape \\u{H} is not a Unicode scalar value (at most 10FFFF, and not D800 to DFFF)"
+          else .ok (Char.ofNat n, k + 1)
+        else match hexVal? c with
+          | some d => if count < 6 then digits (k + 1) (n * 16 + d) (count + 1) f else bad
+          | none => bad
+    if input[j + 2]? != some '{' then bad else digits (j + 3) 0 0 8
+  | some c => .error s!"unknown escape sequence \\{c}"
+  | none => .error "unterminated string literal"
+
+/-- Where a string literal starting at `input[i]` goes wrong: the backslash of its first
+bad escape, else its start (an unterminated literal). For error positions. -/
+partial def strErrorPos (input : Array Char) (i : Nat) : Nat := go (i + 1)
+where
+  go (j : Nat) : Nat := match input[j]? with
+    | none | some '"' => i
+    | some '\\' => match readEscape input j with
+      | .ok (_, k) => go k
+      | .error _ => j
+    | some _ => go (j + 1)
+
 /-- **Exercise 2.2b.** Read a string literal; `input[i]` is the opening `"`.
-Support the escapes `\n`, `\t`, `\\` and `\"`. Returns the *decoded* string and the
-offset after the closing quote, or an error message for an unterminated literal or an
-unknown escape. -/
+Support the escapes `\n`, `\t`, `\\` and `\"` (the solution reads all of `readEscape`'s).
+Returns the *decoded* string and the offset after the closing quote, or an error message
+for an unterminated literal or an unknown escape. -/
 partial def readStr (input : Array Char) (i : Nat) : Except String (String × Nat) :=
   --<sol
   go (i + 1) ""
@@ -106,13 +161,9 @@ where
     match input[j]? with
     | none => .error "unterminated string literal"
     | some '"' => .ok (acc, j + 1)
-    | some '\\' => match input[j + 1]? with
-      | some 'n' => go (j + 2) (acc.push '\n')
-      | some 't' => go (j + 2) (acc.push '\t')
-      | some '\\' => go (j + 2) (acc.push '\\')
-      | some '"' => go (j + 2) (acc.push '"')
-      | some c => .error s!"unknown escape sequence \\{c}"
-      | none => .error "unterminated string literal"
+    | some '\\' => match readEscape input j with
+      | .ok (c, k) => go k (acc.push c)
+      | .error e => .error e
     | some c => go (j + 1) (acc.push c)
   --sol>
 

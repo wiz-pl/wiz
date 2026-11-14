@@ -33,20 +33,84 @@ printing the case's name and result, a failure's output, and a last line
 `GROUP #INDEX: passed|FAILED|SKIPPED`. Build the driver first (`lake build wiz tests`):
 plain `lake build` does not, and a stale driver runs whichever case had that index.
 
+**The trust ledger.** `scripts/trust-ledger.sh` walks every declaration of `lib/` (and
+`examples/hdl-verified.wiz`, which must stay axiom-free), runs `#print axioms`, and
+compares the trusted base it finds with the checked-in `.github/trust-baseline.tsv`: a
+new `axiom`, `sorry`, `native_refl` or SMT axiom, `implemented_by`/`repr:`
+implementation, `builtin` registration or `partial` definition fails until the baseline
+is updated after review. The `native` group runs the `lib/` part in CI, the
+`hdl-verified` group the example's; `scripts/trust-ledger.sh --update` regenerates the
+baseline (build the driver first). `--print` shows the recorded sources; the baseline's
+header explains the format.
+
+### Running cases in parallel (`--jobs`)
+
+`lake test -- --jobs N` (default 1) runs the cases of a group that opted in N at a time, in
+a bounded pool of child processes; a group that did not opt in still runs one case at a
+time, and groups themselves run one after another. Output and `--timings` lines stay in
+the group's case order (each case's output is buffered until the cases before it are
+printed), so a parallel log is a sequential log but for the times; a case's `seconds` is
+its own process's time, not the time it waited in the pool; the totals and the exit code
+are the same as a sequential run, and a failing case does not stop the others. An
+exception kills the cases still running, and the cases stay in the driver's process
+group, so Ctrl-C reaches them as it did sequentially.
+
+The opt-in is `parallel := true` on a `Group` (`Tests/Harness.lean`). Enable it only for a
+group whose cases share no mutable state: every case's files must be its own (its own temp
+directory, or a fixed path that no other case touches), and a group has no build
+directory in the work tree, no port, no environment variable of the driver and no cached
+program another case builds; no case
+may assert on wall time or on the machine's load (a `scaling`-style bound). A case that
+needs a shared program the first case builds (the self-hosted checker, the Wiz `tower` in
+`.lake/build/tower-wiz`) is not parallel-safe: N processes would build it N times.
+`--jobs-all` also parallelizes the
+groups that did not opt in, for auditing one group's isolation — not for CI. On a 4-core
+runner `--jobs 4` is the useful setting; more jobs only add memory pressure (a case that
+compiles C can peak at a few hundred MB).
+
 **Embedded files.** Lake does not track files a module reads with `include_str`, so each
 embedded file gets a library of its own whose `needs` names the file as an
-`input_file` (`lakefile.toml`): Lake mixes the file's content hash into that library's
+`input_file` (`lakefile.lean`): Lake mixes the file's content hash into that library's
 module traces, so editing the file rebuilds the embedding module and its importers, and
-the artifact cache never serves a stale one. The only one today is the C runtime:
-`runtime/wiz.c`, embedded by `runtime/WizRuntime.lean` (library `WizRuntime`, imported by
-`Wiz/Compiler/C.lean`). A new `include_str` goes in such a library too, not in `Wiz`
-(a `needs` on `Wiz` would rebuild all of it); `scripts/test-embed.sh` checks the setup (CI runs it in the build job).
+the artifact cache never serves a stale one. The only one today is the C runtime,
+`runtime/wiz_rt.h` plus `runtime/rt_{core,num,words,data,sys,con}.inc`, embedded by
+`runtime/WizRuntime.lean` (library `WizRuntime`, imported by `Wiz/Compiler/C.lean`); the
+parts are concatenated in the order of the old single file, so generated C is unchanged.
+A new `include_str` goes in such a library too, not in `Wiz` (a `needs` on `Wiz` would
+rebuild all of it); `scripts/test-embed.sh` checks the setup (CI runs it in the build
+job), and `scripts/test-runtime.sh` compiles the runtime alone with `cc -fsyntax-only
+-Wall -Wextra`, with `WIZ_API=` and `WIZ_API=static` (the header's prototypes are checked
+against the parts).
+
+## Test layout
+
+Adding a test group touches no shared file:
+
+* **A new group is a new module** `Tests/Groups/<Name>.lean` that ends with
+  `builtin_initialize registerGroup myGroup` (`Tests/Harness.lean`). Lake generates
+  `Tests/Groups.lean` (an import of every file in `Tests/Groups/`; not committed, see the
+  `testGroups` target in `lakefile.lean`) and `Tests/Main.lean` imports it, so the group
+  is in the suite as soon as its file exists. Copy a small one (e.g.
+  `Tests/Groups/Struct.lean`) to start. Set `shard := "backends"` in the group to run it
+  in a shard other than the default (`library`), or add a selector to
+  `.github/test-shards.json`.
+* **New cases of an existing group** go in its module: the group `elab: structural
+  types` is `structGroup` in `Tests/Groups/Struct.lean` (`grep -l 'name := "…"'
+  Tests/Groups/*.lean` finds a group by name). A helper only one group uses lives in
+  that group's module; `Tests/Elab.lean` holds the helpers several groups use (`ok`,
+  `fails`, the library loaders, the self-hosted programs, …).
+* The older modules (`Tests/Grail.lean`, `Tests/Lint.lean`, …) still list their groups
+  (`groups` at their end, concatenated by `Tests/Main.lean`); a new group goes in
+  `Tests/Groups/` all the same.
+* `scripts/migrate-tests.py` made this layout from the old single `Tests/Elab.lean`,
+  deterministically; a branch that still edits the old file replays its changes with it
+  (AGENTS.md, "Test layout").
 
 ## What `wiz build` links
 
 `wiz build` turns a program into C (or LLVM IR) and hands it to a C compiler with the
-runtime (`runtime/wiz.c`), which needs GMP; programs from the self-hosted compiler also
-need the Boehm GC. The release toolchains (what tower installs) bring all of that in
+runtime (`runtime/wiz_rt.h` and `runtime/rt_*.inc`), which needs GMP; programs from the
+self-hosted compiler also need the Boehm GC. The release toolchains (what tower installs) bring all of that in
 `share/wiz/cc` (docs/stages/26-tower.md, 26f): clang, a glibc 2.27 sysroot, and GMP and the
 GC as static libraries (the bundled clang needs glibc 2.30 or later; programs it builds
 need glibc 2.27 or later and nothing else), and CaDiCaL, the SAT solver of `sat_decide`
@@ -95,26 +159,58 @@ one is configured); the elan toolchain and `.lake` (including Lake's artifact ca
 cached between runs.
 
 * **The test suite** runs in parallel shards, one job per entry of `.github/test-shards.json` (each entry
-  is a list of `lake test` selectors). The build job checks that every group of
-  `Tests/Main.lean` is in exactly one shard (`scripts/ci.py check-shards`, which checks
-  every case after splitting), so **a new test group must be added to
-  `.github/test-shards.json`** (one selector per line, sorted within its shard) and to
-  the `groups` list at the end of its test module (`Tests/*.lean`, one group per line,
-  sorted; `Tests/Main.lean` only concatenates the modules' lists). Both are laid out so
-  that branches adding different groups don't touch the same lines. Each shard's job summary has a table of every case's time
+  is a list of `lake test` selectors). A group that no shard's selectors pick runs in
+  the shard its `Group.shard` names, else in the shard marked `"default": true`
+  (`library`), so **a new group needs no edit there**; the build job checks that every
+  case is in exactly one shard (`scripts/ci.py check-shards`, after splitting). See
+  "Test layout" below for where a new group goes. Each shard's job summary has a table of every case's time
   (three decimals), group subtotals and the shard's total; the `CI result` job sums the
   shards up (a table of shard totals and the grand total, and the 15 slowest cases) and
   uploads every case's time as the `test-timings` artifact.
+* **Documentation style** (the `docs_style` job): `scripts/check-docs-style.py` fails on
+  absolute paths from an agent's scratch tree, internal `agent/...` branch names and AI
+  worker roles, U+2705 status checkmarks, and decision/step phrases attributed to
+  "the user" in `README.md`, `ROADMAP.md`, `CHANGELOG.md` and `docs/**/*.md`. It runs the
+  script's fixtures (`--self-test`) and then the check, on every push and pull request
+  (including docs-only ones), and `CI result` requires it. No code block is exempt; a
+  reviewed exception goes in the script's `ALLOW` list with a reason.
+* **The documentation site** (the `docs` and `deploy-docs` jobs): on a push to `master`
+  only (not a pull request, the weekly run or a manual run), `docs` builds the
+  standard library's pages with `wiz doc --lib` (source links to the commit) and the Wasm
+  module that makes their signatures interactive, and uploads them as the artifact
+  `wiz-docs` (3 days, for debugging). `deploy-docs` then publishes that artifact to
+  GitHub Pages. Neither job is a required check, so a Pages outage does not fail the
+  suite. See "Documentation site" below.
+* **Trust ledger** (the `trust-ledger` job): `scripts/trust-ledger.sh --check` runs the
+  `--trust-ledger` mode of the test driver (`Tests/Native.lean`) over `lib/` and the
+  axiom-free examples, and compares the sources of trust it finds with
+  `.github/trust-baseline.tsv`: a new `axiom`, `sorry`, `native_refl` or SMT axiom,
+  `implemented_by`/`repr:` implementation, `builtin` registration or `partial`
+  definition fails until it is reviewed and the baseline regenerated with
+  `scripts/trust-ledger.sh --update`. The `native` and `hdl-verified` groups check the
+  same ledger in the shards; this job runs the whole of it without a shard's path
+  filter to skip it, and `CI result` requires it when code changed.
 * **Split shards.** A shard with `"split": N` runs as N jobs `NAME-1` … `NAME-N`, each a
   list of `=GROUP#I,J,…` selectors. `scripts/ci.py` balances the parts with the case
   times in `.github/test-timings.json`: the cases that use the same shared program (the
   self-hosted checker or compiler, which the first case that needs it builds) stay in
   one part, so each program is built once, and the other cases fill the parts up. A new
   case counts as its group's median, with the programs most of its group uses. The
-  baseline holds only the split shards' cases, one per line (`selfhost` and `library`).
+  baseline holds only the split shards' cases, one per line (`selfhost`, `library` and
+  `scaling`; the last is a sweep over `lib/` and `examples/`, split 2 with its long case
+  in one part).
   `scripts/ci.py plan` shows the parts and their
-  estimates. To refresh the baseline from a CI run:
+  estimates. The heavy groups have dedicated shards of their own (`hdl-verified`,
+  `hdl-uart-temporal`, `prop`, `audit`), so adding a slow case there does not unbalance
+  `core`.
+  To refresh the baseline from a CI run:
   `gh run download RUN -n test-timings && scripts/ci.py baseline timings.jsonl > .github/test-timings.json`.
+* **`"jobs"`.** A shard may say `"jobs": N` to give `lake test` `--jobs N` (above): its
+  opted-in groups run N cases at a time. Only set it on a shard whose groups were
+  verified (and opted in) to be safe in parallel; `core`, `library` and `backends` use
+  4 on the 4-core hosted runner. A shard of one long case (`grail-selfhost`,
+  `hdl-verified`) and the shards that build a shared program (`selfhost`) keep 1. A
+  case's `seconds` stays its own process's time, so shard balance is unaffected.
 * **Shard balance.** CI's wall time is its longest job, so the invariant is that **no
   test shard's test time is over 1.5× the median shard's**. Every split shard's cases
   have an entry in `.github/test-timings.json`, and no shared program is built by two
@@ -139,7 +235,9 @@ cached between runs.
 
   If a shard stays over the limit after the refresh, raise its `"split"` or make it a
   split shard. `scripts/ci.py plan` shows the predicted parts. One case longer than the
-  limit cannot be split: `grail-selfhost` is one case of about 3.5 min.
+  limit cannot be split: `grail-selfhost` is one case of several minutes, and
+  `scaling`'s sweep over `lib/` and `examples/` is one case of about 14 min (the
+  `scaling` shard's other part holds its 26 shorter cases).
 * **The exercise tree** is checked only for a release tag: the `exercise tree` job of
   `release.yml` generates it with `scripts/mkexercises.py` into a temporary directory
   and builds it (`lake build wiz grail tests`), and the tarball job (which publishes)
@@ -157,7 +255,40 @@ cached between runs.
   win) and, for `wiz`, the packaged standard library as a module root after `./lib`. CI
   pushes it to the public Cachix cache `badlydrawnwizards` on pushes and on pull
   requests from this repository (which have the token). The tests still use Lake, whose
-  artifact cache rebuilds only what changed.
+  artifact cache rebuilds only what changed. `packages.tests` is the test driver
+  (`nix run .#tests -- --list`), from the same build, so building `wiz` builds it too.
+* **The packaged read-only elaboration cache.** The `wiz` package prewarms the
+  elaboration cache during its build and installs it at `$out/share/wiz/cache`: the
+  `.wizc` effects and the `.wizm` seen markers, with no `bin/` memo and `a-w`
+  permissions. Both wrappers (`wiz` and `grail`) add
+  `--cache-ro $out/share/wiz/cache` after their toolchain flags, so a packaged run
+  replays the standard library instead of elaborating it; a user's `--cache` (the
+  default `~/.cache/wiz`) is still written, so the store cache is only ever read.
+  There are two sets of entries in that one directory, because `wiz` and `grail` are
+  different executables and the cache mixes the running binary's hash into every key
+  (`Cache.binaryId`; an entry written by one is never read by the other):
+  * **wiz**: every module of `lib/` (all 61 `.wiz` files today, in sorted order: one
+    `wiz check` of a one-line `import M` for each module `M`), about 4,200 entries and
+    50 MB. Checking a module's own file would key its commands by the main text, which
+    an importer never looks up, so the warm run imports it instead.
+  * **grail**: a minimal package in `$TMPDIR` whose `grail.wiz` imports `Grail` and
+    whose check target imports `Std` (about 440 entries, 3.3 MB, about 3 s). grail
+    elaborates in-process, so even a `grail build` of a one-target package would
+    elaborate its build file (Grail and Prelude) and Std's closure itself, under
+    grail's hash; without this set the store cache is never hit by grail (0 reads in a
+    clean-`HOME` probe) and the run writes those entries to the user's cache. With it,
+    the build file's and Std's elaboration replay for any package; a module outside
+    Std's closure is elaborated once, into the user cache. Warming *every* `lib` module
+    in grail's namespace would add another ~4,100 entries and ~50 MB for about 3
+    minutes of build time, which is not worth it for the uncommon imports.
+  Flags parse left to right: a later `--no-cache` turns both the packaged cache and the
+  write cache off, and a user's `--cache-ro DIR` appends another read-only layer
+  (`--cache-ro` is repeatable and searched in the order given). The entries are keyed
+  by the packaged binary's hash (its bytes) and by `lib`'s text and module names, so
+  the Nix build invalidates them automatically; there is no manual invalidation and a
+  stale store path is never reused (a new build gets new keys). The cache is
+  read-only in the store, so a miss (a user's own module) is elaborated and written to
+  the write cache as usual.
 * **The Wiz build caches.** Each test shard keeps what the suite builds from Wiz
   programs between runs: the elaboration cache (`lake test -- --cache ~/.cache/wiz …`),
   `.grail`, and the self-hosted checker and compiler that the tests compile
@@ -165,6 +296,11 @@ cached between runs.
   is made of (the `.lean` files, Lean, `flake.lock`), and partial hits only come from the
   same compiler (the elaboration cache's own keys include the wiz binary's hash, but the
   test driver's grail runs use a fixed binary id and the `/tmp` programs a timestamp).
+  The elaboration cache may also have read-only layers (`--cache-ro DIR`, repeatable,
+  searched in order after the written `--cache DIR`, never written). The Nix package
+  can ship one in `$out/share/wiz/cache` for `--cache-ro $out/share/wiz/cache`, so CI and
+  users share a warm cache without a writable store path; a run with no write cache
+  hashes the wiz executable each time instead of remembering it under `bin/`.
 * **Storage.** The repository's Actions cache holds 10 GB and evicts the least recently
   used entries, so pull requests don't keep big entries: the elan toolchain (~770 MB) is
   saved only by `master` (pull requests restore master's), and a pull request's (or merge
@@ -178,12 +314,13 @@ cached between runs.
   `gh cache list -R wiz-pl/wiz -S size_in_bytes`.
 
 * **Path filters.** On a pull request the `changes` job (`scripts/ci.py changes`) reads
-  the files the PR changes and decides what runs: nothing but `changes` and `CI result`
-  for a docs-only PR (`docs/`, `*.md`, LICENSE); every shard when a Lean file, the build,
-  the runtime, `scripts/` or `.github/` changed; otherwise each shard with `"inputs"` in
-  `.github/test-shards.json` only when one of its inputs changed (a `lib/X.wiz` input
-  brings the lib files it imports), and the shards without `"inputs"` (backends,
-  library) for any non-docs change. So a PR touching only, say, `lib/Json.wiz` skips
+  the files the PR changes and decides what runs: nothing but `changes`, `docs_style`
+  and `CI result` for a docs-only PR (`docs/`, `*.md`, LICENSE); `trust-ledger` runs
+  whenever any code did; every shard when a Lean
+  file, the build, the runtime, `scripts/` or `.github/` changed; otherwise each shard
+  with `"inputs"` in `.github/test-shards.json` only when one of its inputs changed
+  (a `lib/X.wiz` input brings the lib files it imports), and the shards without
+  `"inputs"` (backends, library) for any non-docs change. So a PR touching only, say, `lib/Json.wiz` skips
   `core` and the selfhost shards. `CI result` counts a job the filter skipped as fine
   and a job it wanted only if it succeeded. Pushes to `master`, the merge queue and
   manual runs always run everything, so a missing input shows up there at the latest.
@@ -203,6 +340,53 @@ cached between runs.
   queue run that fails drops that PR from the queue and rebuilds the ones behind it
   without it. Without a queue (a user-owned repository), `--auto` waits for the required
   check and merges, and "require branches to be up to date" serialises merges instead.
+
+### Documentation site
+
+A push to `master` publishes the standard library's documentation from the `docs` job to
+GitHub Pages, at <https://wiz-pl.github.io/wiz/>. The tree is `wiz doc --lib`'s output
+plus the Wasm module (`web/build.sh`), exactly as the `wiz-docs` artifact holds it:
+
+| path | what it is |
+|---|---|
+| `index.html` | the landing page: the documented modules and their summaries |
+| `A.B.html` | one page per module (its declarations, signatures, docs, source links) |
+| `A.B.json` | the same page's data, for the interactive signatures |
+| `search.js`, `scroll.css`, `scroll.js`, `tagged.js`, `scroll-search.js` | the site's scripts and styles |
+| `wiz-infoview.mjs`, `wiz-infoview.wasm` | the infoview's Wasm module, when `web/build.sh` built it |
+
+All links in the pages are relative, so the `/wiz/` prefix of a project site works.
+`docs` and `deploy-docs` run only on `push` (`workflow_dispatch` runs do not publish).
+The artifact stays for 3 days for debugging; the site keeps the newest deployed tree
+until the next successful deployment, and `deploy-docs` serialises deployments
+(`concurrency: pages`, `cancel-in-progress: false`) so the site ends at the newest commit.
+
+**One-time repository setting.** Settings → Pages → Build and deployment → Source =
+"GitHub Actions". Without it `actions/configure-pages` has no site to configure and
+`deploy-docs` fails (the rest of CI is unaffected). An administrator can create or
+update the site from the command line instead of the web UI:
+
+```sh
+# create it (404 until then) with Actions as the source:
+gh api --method POST repos/wiz-pl/wiz/pages -f build_type=workflow
+# or, if the site already exists, switch its source:
+gh api --method PUT repos/wiz-pl/wiz/pages -f build_type=workflow
+# check:
+gh api repos/wiz-pl/wiz/pages --jq '{html_url, build_type, status}'
+```
+
+Both need repository admin rights; they are settings changes, not part of a normal
+development run.
+
+**One site, one tree.** A repository has one Pages site and every deployment replaces
+the entire tree, so `deploy-docs` must stay the only Pages publisher. The performance
+site (the `perf-site.yml` workflow when it lands) is designed to publish a
+self-contained dashboard; when it lands, it belongs *under* this deployment as
+`/perf/` — built into `doc-site/perf` before `upload-pages-artifact` — not in a second
+deploy job, which would replace the docs tree. Until then its own `deploy` job stays
+off (`PERF_SITE_DEPLOY` unset). Once `perf/` is there, link it from the site root (a
+step after `wiz doc` can add the link to its `index.html`, which is regenerated on every
+deploy).
 
 To run Wiz without a checkout or a Lean toolchain, with the binaries from Cachix:
 

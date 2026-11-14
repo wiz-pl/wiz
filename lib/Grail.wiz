@@ -1,24 +1,48 @@
 import Prelude
--- grail's build files (stage 23d): `grail.wiz` defines `package`, the uncommitted
--- `grail.local.wiz` defines `local` (this machine's settings). grail evaluates them and
--- reads the result as an S-expression (`Package.render`, `Settings.render`).
+/-!
+# Grail
 
--- What to build: a library (every module under a directory, named by its path), one
--- file to check, an executable (a file's `main`, compiled through C), or tests (every
--- `.wiz` file under a directory, with its expected output in `.expected` beside it;
--- `grail test`).
--- (23i) Commands: an external program, or an `exe` target of this package, run with
--- declared inputs and outputs (paths relative to the package). An input that another
--- command outputs is an edge of the build graph. See docs/stages/23-grail.md, 23i.
+The vocabulary of grail's build files (stage 23d; docs/stages/23-grail.md). A package's
+`grail.wiz` defines `package : Package`, and the uncommitted `grail.local.wiz` defines
+`local : Settings` (this machine's settings: the toolchain, extra module roots). grail
+evaluates them and reads the result as an S-expression (`Package.render`,
+`Settings.render`), so a build file is an ordinary Wiz program built from the
+functions here.
+
+* `Package.new` starts a package; `Package.lib`, `Package.check`, `Package.exe`,
+  `Package.tests`, `Package.selfhost` and `Package.command` add `Target`s.
+* `Package.dep` depends on another package from git (`Dep`).
+* `Command.new` and its builders (`Command.input`, `Command.output`, …) describe an
+  external step of the build graph (23i).
+* `Settings.set` and `Package.set` set `key value` pairs.
+
+```
+import Grail
+def package : Package :=
+  Package.new "shapes"
+    |> Package.lib "shapes" "src"
+    |> Package.tests "golden" "tests"
+```
+-/
+
+/-- The program a `Command` runs (23i): an external program found on the `PATH`
+(`Tool.path "icepack"`), or an `exe` target of this package (`Tool.exe "gen"`), which
+grail builds first. -/
 inductive Tool where
   | path (name : String)
   | exe (target : String)
--- a piece of an argument: text, an input path, an output path
+/-- A piece of one argument: plain text, a path the command reads (`input`), or a path it
+writes (`output`). Paths are relative to the package; declaring them is what makes the
+edges of the build graph. -/
 inductive Part where
   | text (s : String)
   | input (path : String)
   | output (path : String)
--- one step of a command's description, in order
+/-- One step of a command's description, in order: an argument (`arg`), an input or output
+that is not an argument, an output directory (`dir`), where stdout goes, an environment
+variable, running in the output directory (`inOutDir`), another program it uses, and
+the flags `phony` (always runs, never recorded) and `manual` (built only when named).
+Built with the `Command.*` functions rather than by hand. -/
 inductive Step where
   | arg (parts : List Part)
   | input (path : String)
@@ -30,9 +54,16 @@ inductive Step where
   | uses (tool : Tool)
   | phony
   | manual
+/-- An external command of the build (23i): its name (the target's name), the `Tool` it
+runs and its `Step`s. Start with `Command.new`, add to it with `|>`, then add it to a
+package with `Package.command`. -/
 inductive Command where
   | mk (name : String) (tool : Tool) (steps : List Step)
 
+/-- What to build: a library (every module under a directory, named by its path), one
+file to check, an executable (a file's `main`, compiled through C), tests (every
+`.wiz` file under a directory, with its expected output in a `.expected` file beside
+it; `grail test`), the self-hosted toolchain, or a `Command`. -/
 inductive Target where
   | lib (name : String) (root : String)
   | check (name : String) (file : String)
@@ -41,108 +72,157 @@ inductive Target where
   | selfhost (name : String) (role : String)
   | command (c : Command)
 
--- Settings: `key value` pairs, later ones win. Keys: `cc`, `cflags`, `ldflags`, `llc`,
--- `gc-cflags`, `gc-ldflags` (the toolchain), `root` (another module root).
+/-- One setting: a `key value` pair. Keys: `cc`, `cflags`, `ldflags`, `llc`, `gc-cflags`,
+`gc-ldflags` (the toolchain) and `root` (another module root). -/
 inductive Setting where
   | mk (key : String) (value : String)
+/-- A list of `Setting`s; later ones win. `grail.local.wiz` defines `local : Settings`.
+
+```
+def local : Settings := Settings.empty |> Settings.set "cc" "clang"
+``` -/
 inductive Settings where
   | mk (pairs : List Setting)
 
--- A package from git: its name (`.grail/packages/NAME`), URL, and revision (a tag, a
--- branch or a commit); `grail update` pins it in `grail.lock`.
+/-- A package from git: its name (it lives in `.grail/packages/NAME`), its URL, and a
+revision (a tag, a branch or a commit); `grail update` pins it in `grail.lock`. -/
 inductive Dep where
   | mk (name : String) (url : String) (rev : String)
 
+/-- A package: its name, its targets, its settings and its dependencies. Built with
+`Package.new` and the `Package.*` functions, in a pipeline. -/
 inductive Package where
   | mk (name : String) (targets : List Target) (settings : Settings) (deps : List Dep)
 
+/-- No settings. -/
 def Settings.empty : Settings := .mk .nil
+/-- `Settings.set key value s`: `s` with `key` set to `value` (appended, so it wins over an
+earlier setting of the same key). -/
 def Settings.set (key value : String) : Settings → Settings
   | .mk ps => .mk (List.append ps (.cons (Setting.mk key value) .nil))
 
+/-- A package with this name and nothing in it yet: `Package.new "shapes"`. -/
 def Package.new (name : String) : Package := .mk name .nil Settings.empty .nil
+/-- Adds a target at the end of the package's targets. The `Package.lib`, `Package.exe`, …
+shorthands use it. -/
 def Package.add (t : Target) : Package → Package
   | .mk n ts s ds => .mk n (List.append ts (.cons t .nil)) s ds
+/-- `Package.lib name root`: a library target, every module under the directory `root`
+(the module `A.B` is `root/A/B.wiz`). -/
 def Package.lib (name root : String) (p : Package) : Package := Package.add (.lib name root) p
+/-- `Package.check name file`: a target that only checks one file. -/
 def Package.check (name file : String) (p : Package) : Package := Package.add (.check name file) p
+/-- `Package.exe name file`: an executable, the `main` of `file` compiled through C. -/
 def Package.exe (name file : String) (p : Package) : Package := Package.add (.exe name file) p
+/-- `Package.tests name root`: golden tests, every `.wiz` file under `root` run and
+compared with the `.expected` file beside it (`grail test`). -/
 def Package.tests (name root : String) (p : Package) : Package := Package.add (.tests name root) p
--- the self-hosted toolchain (from selfhost/): role `checker`, `compiler` or `bootstrap`
+/-- `Package.selfhost name role`: the self-hosted toolchain (from selfhost/); `role` is
+`checker`, `compiler` or `bootstrap`. -/
 def Package.selfhost (name role : String) (p : Package) : Package := Package.add (.selfhost name role) p
 
 -- ## Commands (23i)
--- `Command.new "bit-proto" (Tool.path "icepack") |> Command.input "build/proto.asc"
---    |> Command.output "build/proto.bin"`, then `Package.command`.
+/-- A command with this name that runs `tool`, with no steps yet. For example
+
+```
+Command.new "bit-proto" (Tool.path "icepack")
+  |> Command.input "build/proto.asc"
+  |> Command.output "build/proto.bin"
+```
+
+and then `Package.command` adds it to the package. -/
 def Command.new (name : String) (tool : Tool) : Command := .mk name tool .nil
+/-- Adds a step at the end of the command's steps; the other `Command.*` builders use it. -/
 def Command.add (s : Step) : Command → Command
   | .mk n t ss => .mk n t (List.append ss (.cons s .nil))
+/-- The one-part list `[p]`. -/
 def Grail.one (p : Part) : List Part := .cons p .nil
--- an argument: text
+/-- An argument: plain text, e.g. `Command.arg "-v"`. -/
 def Command.arg (s : String) (c : Command) : Command := Command.add (.arg (Grail.one (.text s))) c
--- an argument that is an input path / an output path (declared as such)
+/-- An argument that is an input path (declared as such, so a command that outputs it
+runs first). -/
 def Command.input (path : String) (c : Command) : Command := Command.add (.arg (Grail.one (.input path))) c
+/-- An argument that is an output path (declared as such). -/
 def Command.output (path : String) (c : Command) : Command := Command.add (.arg (Grail.one (.output path))) c
--- `--flag=PATH` as one argument
+/-- `Command.argIn "--flag=" path`: one argument, the text followed by an input path. -/
 def Command.argIn (pre path : String) (c : Command) : Command :=
   Command.add (.arg (.cons (.text pre) (Grail.one (.input path)))) c
+/-- `Command.argOut "--out=" path`: one argument, the text followed by an output path. -/
 def Command.argOut (pre path : String) (c : Command) : Command :=
   Command.add (.arg (.cons (.text pre) (Grail.one (.output path)))) c
--- an argument made of several parts
+/-- An argument made of several `Part`s. -/
 def Command.parts (ps : List Part) (c : Command) : Command := Command.add (.arg ps) c
--- declared without being an argument: an input, an output file, an output directory
+/-- An input that is not an argument (the program finds it by itself). -/
 def Command.needs (path : String) (c : Command) : Command := Command.add (.input path) c
+/-- An output file that is not an argument. -/
 def Command.makes (path : String) (c : Command) : Command := Command.add (.output path) c
+/-- An output directory that is not an argument. -/
 def Command.makesDir (path : String) (c : Command) : Command := Command.add (.dir path) c
--- an output directory that is also an argument
+/-- An output directory that is also an argument. -/
 def Command.outDir (path : String) (c : Command) : Command :=
   Command.add (.arg (Grail.one (.output path))) (Command.add (.dir path) c)
--- the command's stdout is this output file
+/-- The command's stdout is this output file. -/
 def Command.stdout (path : String) (c : Command) : Command := Command.add (.stdout path) c
--- an environment variable (part of the key)
+/-- Sets an environment variable for the command (it is part of the command's key, so
+changing it reruns the command). -/
 def Command.env (key value : String) (c : Command) : Command := Command.add (.env key value) c
--- run in the job's output directory instead of the package directory
+/-- Runs the command in its job's output directory instead of the package directory. -/
 def Command.inOutDir (c : Command) : Command := Command.add .inOutDir c
--- another program the command runs by itself: its identity enters the key
+/-- Another program the command runs by itself: its identity enters the command's key, so
+a new version of it reruns the command. -/
 def Command.uses (t : Tool) (c : Command) : Command := Command.add (.uses t) c
--- built only when named (`grail build NAME`), not by `grail build`
+/-- Built only when named (`grail build NAME`), not by a plain `grail build`. -/
 def Command.manual (c : Command) : Command := Command.add .manual c
+/-- Adds a `Command` to the package as a target. -/
 def Package.command (c : Command) (p : Package) : Package := Package.add (.command c) p
--- a command that always runs when named and is never recorded (flash, test on hardware)
+/-- Adds a command that always runs when named and is never recorded (flashing a board, a
+test on hardware). -/
 def Package.phony (c : Command) (p : Package) : Package := Package.add (.command (Command.add .phony c)) p
 
+/-- `Package.set key value`: sets one of the package's own settings (see `Setting`). -/
 def Package.set (key value : String) : Package → Package
   | .mk n ts s ds => .mk n ts (Settings.set key value s) ds
--- depend on the package at a git URL and revision
+/-- `Package.dep name url rev`: depends on the package at a git URL and revision. -/
 def Package.dep (name url rev : String) : Package → Package
   | .mk n ts s ds => .mk n ts s (List.append ds (.cons (Dep.mk name url rev) .nil))
 
--- ## Rendering, as S-expressions
+/-- `String.append`, shorter. (The rendering helpers below build the S-expression text.) -/
 def Grail.cat (a b : String) : String := String.append a b
+/-- Backslash-escapes `"` and `\` in a string's characters. -/
 def Grail.escape : List Char → List Char
   | .nil => .nil
   | .cons c cs => match Bool.or (Nat.beq (Char.code c) 34) (Nat.beq (Char.code c) 92) with
     | .true => .cons (Char.mk 92) (.cons c (Grail.escape cs))
     | .false => .cons c (Grail.escape cs)
+/-- A string as a quoted S-expression literal: `Grail.quote "a\"b"` is `"a\"b"` with the
+quote escaped. -/
 def Grail.quote : String → String
   | .mk cs => .mk (.cons (Char.mk 34) (List.append (Grail.escape cs) (.cons (Char.mk 34) .nil)))
+/-- The arguments, each preceded by a space. -/
 def Grail.args : List String → String
   | .nil => ""
   | .cons a as => Grail.cat " " (Grail.cat a (Grail.args as))
+/-- `Grail.node "lib" ["\"a\"", "\"src\""]` is `(lib "a" "src")`. -/
 def Grail.node (tag : String) (args : List String) : String :=
   Grail.cat "(" (Grail.cat tag (Grail.cat (Grail.args args) ")"))
+/-- `(list x y …)`. -/
 def Grail.list : List String → String
   | xs => Grail.node "list" xs
 
+/-- A `Tool` as an S-expression: `(path "icepack")` or `(exe "gen")`. -/
 def Tool.render : Tool → String
   | .path n => Grail.node "path" (.cons (Grail.quote n) .nil)
   | .exe n => Grail.node "exe" (.cons (Grail.quote n) .nil)
+/-- A `Part` as an S-expression: `(text …)`, `(in …)` or `(out …)`. -/
 def Part.render : Part → String
   | .text s => Grail.node "text" (.cons (Grail.quote s) .nil)
   | .input p => Grail.node "in" (.cons (Grail.quote p) .nil)
   | .output p => Grail.node "out" (.cons (Grail.quote p) .nil)
+/-- Each part rendered. -/
 def Grail.renderParts : List Part → List String
   | .nil => .nil
   | .cons p ps => .cons (Part.render p) (Grail.renderParts ps)
+/-- A `Step` as an S-expression. -/
 def Step.render : Step → String
   | .arg ps => Grail.node "arg" (.cons (Grail.list (Grail.renderParts ps)) .nil)
   | .input p => Grail.node "input" (.cons (Grail.quote p) .nil)
@@ -154,12 +234,15 @@ def Step.render : Step → String
   | .uses t => Grail.node "uses" (.cons (Tool.render t) .nil)
   | .phony => Grail.node "phony" .nil
   | .manual => Grail.node "manual" .nil
+/-- Each step rendered. -/
 def Grail.renderSteps : List Step → List String
   | .nil => .nil
   | .cons s ss => .cons (Step.render s) (Grail.renderSteps ss)
+/-- A `Command` as `(command NAME TOOL (list STEP …))`. -/
 def Command.render : Command → String
   | .mk n t ss => Grail.node "command" (.cons (Grail.quote n) (.cons (Tool.render t) (.cons (Grail.list (Grail.renderSteps ss)) .nil)))
 
+/-- A `Target` as an S-expression, e.g. `(lib "shapes" "src")`. -/
 def Target.render : Target → String
   | .lib n r => Grail.node "lib" (.cons (Grail.quote n) (.cons (Grail.quote r) .nil))
   | .check n f => Grail.node "check" (.cons (Grail.quote n) (.cons (Grail.quote f) .nil))
@@ -167,17 +250,23 @@ def Target.render : Target → String
   | .tests n r => Grail.node "tests" (.cons (Grail.quote n) (.cons (Grail.quote r) .nil))
   | .selfhost n r => Grail.node "selfhost" (.cons (Grail.quote n) (.cons (Grail.quote r) .nil))
   | .command c => Command.render c
+/-- Each target rendered. -/
 def Grail.renderTargets : List Target → List String
   | .nil => .nil
   | .cons t ts => .cons (Target.render t) (Grail.renderTargets ts)
+/-- Each setting as `(set KEY VALUE)`. -/
 def Grail.renderPairs : List Setting → List String
   | .nil => .nil
   | .cons (.mk k v) ps => .cons (Grail.node "set" (.cons (Grail.quote k) (.cons (Grail.quote v) .nil))) (Grail.renderPairs ps)
+/-- `Settings` as `(list (set KEY VALUE) …)`: what grail reads from `grail.local.wiz`. -/
 def Settings.render : Settings → String
   | .mk ps => Grail.list (Grail.renderPairs ps)
+/-- Each dependency as `(dep NAME URL REV)`. -/
 def Grail.renderDeps : List Dep → List String
   | .nil => .nil
   | .cons (.mk n u r) ds => .cons (Grail.node "dep" (.cons (Grail.quote n) (.cons (Grail.quote u) (.cons (Grail.quote r) .nil)))) (Grail.renderDeps ds)
+/-- A `Package` as `(package NAME (list TARGET …) SETTINGS (list DEP …))`: what grail reads
+from `grail.wiz`. -/
 def Package.render : Package → String
   | .mk n ts s ds => Grail.node "package" (.cons (Grail.quote n) (.cons (Grail.list (Grail.renderTargets ts))
       (.cons (Settings.render s) (.cons (Grail.list (Grail.renderDeps ds)) .nil))))

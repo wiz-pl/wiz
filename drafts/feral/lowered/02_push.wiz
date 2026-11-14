@@ -3,17 +3,12 @@ import FeralCore
 
 -- fn push_twice {'a} (v : &'a mut Vec U64) (x : U64) : Unit
 -- (a call that only hands `&mut` arguments back moves the handle in and rebinds it,
--- L17: no reborrow scope is needed)
-def push_twice {ρ : Region} (v : Uniq ρ (Vec U64)) (x : U64) : Result (Unit × Uniq ρ (Vec U64)) :=
+-- L17: no reborrow scope is needed; an error hands it back too)
+def push_twice {ρ : Region} (1 v : Uniq ρ (Vec U64)) (x : U64) : Result1 Unit (Uniq ρ (Vec U64)) :=
   match Vec.push v x with             -- v.push x   (the handle goes in and comes back)
-  | .ok r =>
-    let (u, v) := r;
-    match Vec.push v x with           -- v.push x
-    | .ok r =>
-      let (u, v) := r;
-      .ok ((), v)
-    | .err e => .err e
-  | .err e => .err e
+  | .ok u v =>
+    Vec.push v x                      -- v.push x
+  | .err e v => .err e v
 
 -- the `for i in 0..n` loop of `fill` (L8: a range loop is structural recursion on the
 -- number of iterations left; the live mutable variable `v` is threaded)

@@ -31,12 +31,15 @@ end
 
 -- ## 2. The functional model: a `&mut` is a value handed in and handed back
 --
--- `swap` lowered takes `Uniq ρa U64` and `Uniq ρb U64` and returns them with its result;
--- `swap_vals` opens two borrow scopes (`Uniq.borrow`) around the call. Its specification
--- is a statement about values, proved by computation (no heap in sight).
+-- `swap` lowered takes `Uniq ρa U64` and `Uniq ρb U64` (linear handles: used once,
+-- handed back in a `Result1`) and gives them back with its result; `swap_vals` opens two
+-- borrow scopes (`Uniq.borrow`) around the call and returns a plain `Result`. A
+-- specification is a statement about values, proved by computation (no heap in sight):
+-- a linear handle can't be read in a proposition, so the spec of `swap` takes its
+-- arguments' values and lends them in scopes, and the clauses talk about the values.
 
 -- `spec` generated `swap.Spec` and `swap_vals.Spec`; both hold by computation
-def swap_ok {ρa ρb : Region} (x : Uniq ρa U64) (y : Uniq ρb U64) : swap.Spec x y := (rfl, rfl)
+def swap_ok (a b : U64) : swap.Spec a b := (rfl, rfl)
 def swap_vals_spec (a b : U64) : swap_vals.Spec a b := rfl
 
 #eval Result.map (fun (p : U64 × U64) => (p.1.val, p.2.val)) (swap_vals (U64.lit 1) (U64.lit 2))

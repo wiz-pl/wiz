@@ -1,11 +1,13 @@
 import FeralCore
 -- Lowering of drafts/feral/surface/03_get_mut.wiz (rules: drafts/feral/LOWERING.md).
 -- A function returning `&'a mut` (L4): its result is a `Mut ρ A S`, a borrowed value and
--- the backward function to the lender, in the lender's region `ρ` (inferred from `v`). Its body is a place expression, so it is a place
--- function (L10): the front end also emits its lens laws and its spec.
+-- the backward function to the lender, in the lender's region `ρ` (inferred from `v`),
+-- inside a `Borrowed`: an error (here: out of bounds) hands the lender back (D8). Its body
+-- is a place expression, so it is a place function (L10): the front end also emits its
+-- lens laws and its spec.
 
 -- fn get_mut {'a} (v : &'a mut Vec U64) (i : USize) : &'a mut U64 := &mut v[i]
-def get_mut {ρ : Region} (v : Uniq ρ (Vec U64)) (i : U64) : Result (Mut ρ U64 (Vec U64)) :=
+def get_mut {ρ : Region} (1 v : Uniq ρ (Vec U64)) (i : U64) : Borrowed (Mut ρ U64 (Vec U64)) (Uniq ρ (Vec U64)) :=
   Mut.ofPLens v (Vec.indexMut i)
 
 -- generated: `get_mut` borrows through a place (L10), a lawful partial lens, at quantity 0
@@ -17,28 +19,34 @@ def get_mut.lawful (i : U64) : PLens.Lawful (get_mut.place i) :=
 
 -- the spec, `ensures *result = old(v)[i] ∧ final(v) = old(v).set i final(result)`:
 -- `final(v)` desugars to the backward function applied to `final(result)`, a variable
--- `fin` (no prophecy axiom). `Vec.index`/`set` are the model's.
+-- `fin` (no prophecy axiom). `Vec.index`/`set` are the model's. A spec reads handles at
+-- quantity ω (`Uniq.get`, `Mut.store`): it is about the lowered term, not a use of it.
 def List.set {A : Type} : Nat → List A → A → List A
   | _, .nil, _ => .nil
   | .zero, .cons _ xs, y => .cons y xs
   | .succ i, .cons x xs, y => .cons x (List.set i xs y)
+-- (stated on the place's store: `get_mut v i` is `Mut.ofPLens v (get_mut.place i)`, whose
+-- borrow is that store, `Mut.ofR`, so `*result` is `st.1` and `final(v)` is `st.2 fin`)
 def get_mut.spec {ρ : Region} (v : Uniq ρ (Vec U64)) (i : U64) : Prop :=
-  Result.All (fun (r : Mut ρ U64 (Vec U64)) =>
-    (Vec.index v.val i = .ok (Mut.get r)) × ((fin : U64) → (Mut.close r fin).val.items = List.set i.val v.val.items fin))
-    (get_mut v i)
+  Result.All (fun (st : Store U64 (Vec U64)) =>
+    (Vec.index (Uniq.get v) i = .ok st.1) × ((fin : U64) → (st.2 fin).items = List.set i.val (Uniq.get v).items fin))
+    (get_mut.place i (Uniq.get v))
 
 -- fn bump (v : &mut Vec U64) : Unit := { *get_mut (&mut v) 1 += 10 }
 -- The call returns a borrow of `*v`, so it runs in a reborrow scope (L17): inside, `v`
 -- is a `Lent` token (v is frozen while `m` lives: using it is a type error, see
 -- drafts/feral/rejected/E0502_use_while_mut.wiz), and `m`'s last use gives the lender back.
-def bump {ρ : Region} (v : Uniq ρ (Vec U64)) : Result (Unit × Uniq ρ (Vec U64)) :=
+-- Every error exit hands the reborrow's handle back: an overflow while `m` lives first
+-- releases `m` (D8: the error alternative is built from what is live there).
+def bump {ρ : Region} (1 v : Uniq ρ (Vec U64)) : Result1 Unit (Uniq ρ (Vec U64)) :=
   Uniq.reborrow v (fun ρ' h v r =>                  -- &mut *v, at ρ' (ρ : ρ')
     match get_mut r (U64.lit 1) with                -- the borrow `m` of *r
     | .ok m =>
-      (match U64.add (Mut.get m) (U64.lit 10) with  -- *m + 10 (may overflow)
-      | .ok x => .ok ((), Mut.close m x)            -- the borrow ends: put the final value
-      | .err e => .err e)                           -- a panic drops `m` (and its hole)
-    | .err e => .err e)
+      let 1 (a, m) := Mut.peek m;                   -- *m
+      (match U64.add a (U64.lit 10) with            -- *m + 10 (may overflow)
+      | .ok x => .ok () (Mut.close m x)             -- the borrow ends: put the final value
+      | .err e => .err e (Mut.release m))           -- a panic: the borrow ends, the handle goes back
+    | .err e r => .err e r)                         -- out of bounds: the handle came back
 
 def run (xs : List Nat) : Result (List Nat) :=
   match Uniq.borrow Region.static (Vec.ofList (List.map U64.mk xs)) (fun ρ h v r => bump r) with
@@ -74,16 +82,18 @@ def List.atL_get {A : Type} : (i : Nat) → (s : List A) →
   | .zero, .cons x xs => refl (Option.some x)
   | .succ i, .cons x xs => List.atL_get_under x (List.getOpt i xs) (List.atL i xs) (List.atL_get i xs)
 
-def get_mut.spec_under {ρ : Region} (v : Uniq ρ (Vec U64)) (i : U64) : (r : Result (Store U64 (List U64))) →
-    Result.All (fun (st : Store U64 (List U64)) => List.getOpt i.val v.val.items = Option.some st.1) r →
-    Result.All (fun (st : Store U64 (List U64)) => (fin : U64) → st.2 fin = List.set i.val v.val.items fin) r →
-    Result.All (fun (r : Mut ρ U64 (Vec U64)) =>
-      (Vec.index v.val i = .ok (Mut.get r)) × ((fin : U64) → (Mut.close r fin).val.items = List.set i.val v.val.items fin))
-      (@Mut.ofR ρ (Vec U64) U64 (Store.underR Vec.mkL r))
+-- the spec at the value level: what `v[i]`'s place gives, under `Vec`'s `items` lens
+def get_mut.spec_place (s : Vec U64) (i : U64) : (r : Result (Store U64 (List U64))) →
+    Result.All (fun (st : Store U64 (List U64)) => List.getOpt i.val s.items = Option.some st.1) r →
+    Result.All (fun (st : Store U64 (List U64)) => (fin : U64) → st.2 fin = List.set i.val s.items fin) r →
+    Result.All (fun (st : Store U64 (Vec U64)) =>
+      (Vec.index s i = .ok st.1) × ((fin : U64) → (st.2 fin).items = List.set i.val s.items fin))
+      (Store.underR Vec.mkL r)
   | .ok st, hg, hs =>
     (@Eq.substProp (Option U64) (fun (o : Option U64) => Option.okOr .outOfBounds o = Result.ok st.1)
-       (Option.some st.1) (List.getOpt i.val v.val.items) (Eq.symm hg) (refl (Result.ok st.1)),
+       (Option.some st.1) (List.getOpt i.val s.items) (Eq.symm hg) (refl (Result.ok st.1)),
      hs)
   | .err e, hg, hs => ()
 def get_mut.spec_holds {ρ : Region} (v : Uniq ρ (Vec U64)) (i : U64) : get_mut.spec v i :=
-  get_mut.spec_under v i (@List.atL U64 i.val v.val.items) (@List.atL_get U64 i.val v.val.items) (@List.atL_set U64 i.val v.val.items)
+  get_mut.spec_place (Uniq.get v) i (@List.atL U64 i.val (Uniq.get v).items)
+    (@List.atL_get U64 i.val (Uniq.get v).items) (@List.atL_set U64 i.val (Uniq.get v).items)

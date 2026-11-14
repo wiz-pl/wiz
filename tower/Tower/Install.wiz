@@ -1,5 +1,6 @@
 import Tower.Basic
--- Installing toolchains (stage 26b; the Lean original is Tower/Install.lean).
+-- Installing toolchains (stage 26b; ported from the Lean reference implementation,
+-- `Tower/Install.lean`, removed in 26h).
 --
 -- A spec resolves to a commit with `git ls-remote` on the `git` setting, then one source
 -- realises it: `nix` (`nix build FLAKE/COMMIT#wiz`, linked as a GC root), `release` (the

@@ -36,8 +36,10 @@ information is coming. `ElabState.approx` (`Approx`) says which guesses are allo
 | variables, one repeated | `?m Γ i' =?= r i'` (`i'` in `Γ`) | solve without the repeated variable if the right side doesn't use it (pruning); else the first-order guess from the repeated variable on (`.default`) | not a pattern (`isDefEqPattern` wants distinct variables): first-order approximation, else postponed |
 | flex-rigid, not a pattern | `?m ?A =?= M Nat` (`do`) | first-order guess (`.default`) | `isDefEq` with `foApprox` (the elaborator's configuration): the same guess |
 | the same, in the "expected type first" pass of an application whose result type mentions placeholders of its explicit arguments | `?p ?k =?= ok (base + k)`, `?p`, `?k` the arguments `p`, `k` | no guess (`.none`): the speculative pass fails and is undone, the arguments decide, the result type is unified after them | the expected type is not propagated when the result type depends on explicit arguments (`propagateExpectedType`) |
+| flex-flex, both holes over variables applied to the same number of other arguments without holes | `?r Γ (.bits 1) =?= ?r' Γ' x (.bits 1)` (`let x := if c then Hw.lit 1 1 else Hw.lit 1 0`) | the other arguments pairwise, then `?r Γ =?= ?r' Γ' x` (`.default`) | first-order (`isDefEqApp`) |
 | flex-flex, both not patterns, different holes | `?r (.bits ?m) =?= ?r' (.bits 1)` (`Hw.cat (Hw.lit 1 1) d`) | postponed: the argument waits behind a placeholder for the other arguments (`inferApp`); still stuck after them, the first-order guess `?r := ?r'` as the last resort (`.last`) | postponed; postponed problems are retried at the end, with approximations |
 | flex-flex, one side a pattern | `?a (f y) =?= ?b x` | solve the pattern side (either orientation) | the same |
+| a structure-valued hole under projections, applied | `(?C).2.2.1 ?f ?g =?= C.2.2.1 f g` (`C.comp`) | `?C =?= C`, then the eliminations pairwise (`.default`; a guess: another structure with an equal field would do too) | `Category.comp ?C ?f ?g` is a constant applied: first-order (`isDefEqApp`) |
 | the same hole on both sides | `?m a =?= ?m b` | unify the arguments (a guess too: `?m` may ignore them) | first-order (`isDefEqApp`), else postponed |
 
 Wiz has no global queue of postponed problems: postponement is per application (an
@@ -58,8 +60,14 @@ def elimsChecked (m : Nat) (sol : Val R) (sp : Array (Elim R)) : ElabM R (Val R)
   let g ← getGlobals
   let mut v := sol
   for e in sp do
+    -- (a glued value fits as what it unfolds to: `S T.El`, a structure type, applied to
+    -- something is ill-typed, and the evaluator would panic on it)
+    let shape ← match v, e with
+      | .unfold .., .app _ | .unfold .., .fst | .unfold .., .snd
+      | .lazyInd .., .app _ | .lazyInd .., .fst | .lazyInd .., .snd => pure (whnf v)
+      | _, _ => pure v
     -- (on a constructor, `ind` is lazy for speed alone: what it computes must fit)
-    let fits : Bool := match unlazyCon v, e with
+    let fits : Bool := match unlazyCon shape, e with
       | .neutral .., _ | .unfold .., _ | .lazyInd .., _ => true
       | .lam .., .app _ => true
       | .pair .., .fst | .pair .., .snd => true
@@ -207,8 +215,8 @@ partial def rename (m : Nat) (p : PRen) (v : Val R) : ElabM R (Term R) := do
         return .ind l (← rename m p I) (← rename m p D) v (← rename m p P) (← rename m p mt) (← rename m p i) acc
       | .out => pure (.out acc)
       | .down => pure (.down acc)
-      | .scase l I D v P mt s i =>
-        return .scase l (← rename m p I) (← rename m p D) v (← rename m p P) (← rename m p mt) (← rename m p s) (← rename m p i) acc
+      | .scase l q I D v P mt s i =>
+        return .scase l (← rename m p q) (← rename m p I) (← rename m p D) v (← rename m p P) (← rename m p mt) (← rename m p s) (← rename m p i) acc
       | .sfix l I D v P f s i =>
         return .sfix l (← rename m p I) (← rename m p D) v (← rename m p P) (← rename m p f) (← rename m p s) (← rename m p i) acc
   match ← force v with
@@ -260,8 +268,10 @@ partial def rename (m : Nat) (p : PRen) (v : Val R) : ElabM R (Term R) := do
       match ← pruneArgs? p sp with
       | some keep =>
         let m'' := (← get).metas.size
-        let info := (← lookupMeta m').info
-        modify fun s => { s with metas := s.metas.push { info, desc := "a pruned hole", arity := keep.size } }
+        let e' ← lookupMeta m'
+        -- (its arity: the kept arguments among the ones for the context's variables)
+        let arity := (keep.filter (· < e'.arity)).size
+        modify fun s => { s with metas := s.metas.push { info := e'.info, desc := "a pruned hole", arity } }
         let n := sp.size
         let body : Term R := keep.foldl (fun t i => .app t (.var (n - i - 1))) (.mvar m'')
         let sol := (List.range n).foldl (fun t i => Term.lam s!"x{n - i - 1}" t) body
@@ -297,7 +307,7 @@ partial def rename (m : Nat) (p : PRen) (v : Val R) : ElabM R (Term R) := do
   | .mu l I D i s h => return .mu l (← rename m p I) (← rename m p D) (← rename m p i) (← rename m p s) (← renameHint h)
   | .nu l I D i s h => return .nu l (← rename m p I) (← rename m p D) (← rename m p i) (← rename m p s) (← renameHint h)
   | .con x => return .con (← rename m p x)
-  | .ulift l A => return .ulift l (← rename m p A)
+  | .ulift k l A => return .ulift k l (← rename m p A)
   | .up a => return .up (← rename m p a)
   | .natLit n => return .natLit n
   | .unfold n us sp _ => goSp (.const n us) sp
@@ -305,18 +315,22 @@ partial def rename (m : Nat) (p : PRen) (v : Val R) : ElabM R (Term R) := do
   | .coit l I D S st i s =>
     return .coit l (← rename m p I) (← rename m p D) (← rename m p S) (← rename m p st) (← rename m p i) (← rename m p s)
 where
-  /-- For a spine of distinct variables of which some are out of `p`'s scope: the
-  positions of those in scope. `none` if nothing is to be pruned (or it isn't such a
-  spine). -/
+  /-- For a spine of applications whose variable arguments are distinct, some of them out
+  of `p`'s scope: the positions of the other arguments. `none` if nothing is to be pruned
+  (or it isn't such a spine). -/
   pruneArgs? (p : PRen) (sp : Array (Elim R)) : ElabM R (Option (Array Nat)) := do
     let mut keep : Array Nat := #[]
     let mut seen : Std.HashSet Lvl := {}
     for e in sp, i in [0:sp.size] do
       let .app a := e | return none
-      let .neutral (.local x) #[] ← force a | return none
-      if seen.contains x then return none
-      seen := seen.insert x
-      if p.ren.contains x || p.downs.contains x then keep := keep.push i
+      match ← force a with
+      | .neutral (.local x) #[] =>
+        if seen.contains x then return none
+        seen := seen.insert x
+        if p.ren.contains x || p.downs.contains x then keep := keep.push i
+      -- another argument stays (renaming checks it; `?r Γ x (.bits 1)`, the implicit
+      -- signal type of `Hw.lit 1 0` in a branch, loses the branch's `x`)
+      | _ => keep := keep.push i
     if keep.size == sp.size then return none
     return some keep
   renameHint : Option (Name × List Level × List (Val R)) → ElabM R (Option (Name × List Level × List (Term R)))
@@ -604,7 +618,7 @@ partial def unify (l : Lvl) (t u : Val R) : ElabM R Unit := do
   | .mu u I D i s _, .mu u' I' D' i' s' _ | .nu u I D i s _, .nu u' I' D' i' s' _ =>
     unifyLevel u u'; unify l I I'; unify l D D'; unify l i i'; unify l s s'
   | .con x, .con y => unify l x y
-  | .ulift u A, .ulift u' A' => unifyLevel u u'; unify l A A'
+  | .ulift _ u A, .ulift _ u' A' => unifyLevel u u'; unify l A A'
   | .up a, .up b => unify l a b
   | .up a, t'@(.neutral ..) => unify l a (vDown t')
   | t'@(.neutral ..), .up a => unify l (vDown t') a
@@ -622,7 +636,40 @@ partial def unify (l : Lvl) (t u : Val R) : ElabM R Unit := do
     -- (if the left spine isn't a pattern, the right one may be)
     tryCatch (solve l m sp (.neutral (.mvar m') sp')) fun e => do
       if e.code != "non-pattern" then throw e
-      solve l m' sp' (.neutral (.mvar m) sp)
+      tryCatch (solve l m' sp' (.neutral (.mvar m) sp)) fun e' => do
+        if e'.code != "non-pattern" then throw e'
+        -- neither is a pattern: two holes over variables, applied to the same number of
+        -- other arguments (`?r Γ (.bits 1) =?= ?r' Γ' x (.bits 1)`, a family of types at an
+        -- index): those pairwise, and the holes over the variables (a guess, as Lean's
+        -- first-order approximation; not in the speculative pass)
+        if (← get).approx == .none then throw e'
+        let varPrefix (sp : Array (Elim R)) : ElabM R Nat := do
+          let mut k := 0
+          for el in sp do
+            match el with
+            | .app a => match ← forceMeta a with
+              | .neutral (.local _) #[] => k := k + 1
+              | _ => break
+            | _ => break
+          pure k
+        let k ← varPrefix sp
+        let k' ← varPrefix sp'
+        let rest := sp.extract k sp.size
+        let rest' := sp'.extract k' sp'.size
+        unless !rest.isEmpty && rest.size == rest'.size && rest.all (· matches .app _) && rest'.all (· matches .app _) do
+          throw e'
+        -- (before the last resort, only at indices without holes: `?r (.bits ?m) =?= ?r' (.bits 1)`
+        -- waits for the other arguments, which may fix `?r`; see "When unification approximates")
+        let g ← getGlobals
+        let closed (sp : Array (Elim R)) : ElabM R Bool := sp.allM fun el => match el with
+          | .app a => return (← (quote g l a).instSolved).isSome
+          | _ => pure false
+        unless (← get).approx == .last || ((← closed rest) && (← closed rest')) do throw e'
+        let s ← get
+        try
+          unifySpine l rest rest'
+          unify l (.neutral (.mvar m) (sp.extract 0 k)) (.neutral (.mvar m') (sp'.extract 0 k'))
+        catch _ => set s; throw e'
   | .neutral (.mvar m) sp, t' =>
     if ← etaProjected m sp then unify l t u else solve l m sp t'
   | t', .neutral (.mvar m) sp =>
@@ -719,11 +766,23 @@ partial def unifyGlued (l : Lvl) (t u : Val R) : ElabM R Bool := do
     if ← isVarSpine sp then
       if ← attempt (solve l m sp v) then return true
     if (← get).approx == .none then return false
-    match sp.back?, sp'.back? with
-    | some .fst, some .fst | some .snd, some .snd =>
-      attempt (unify l (.neutral (.mvar m) sp.pop) (.neutral h' sp'.pop))
-    | _, _ =>
-      if sp.all (· matches .app _) && sp'.all (· matches .app _) && !sp'.isEmpty then
+    -- the same eliminations after the hole's own arguments, projections among them
+    -- (`(?C).2.2.2.1 ?f ?g =?= C.2.2.2.1 f g`, a field of a structure-valued hole applied
+    -- to arguments): unify what is projected, `?C =?= C`, and then the eliminations
+    match sp.findIdx? (!· matches .app _) with
+    | some k =>
+      let rest := sp.extract k sp.size
+      if rest.size > sp'.size then return false
+      let rest' := sp'.extract (sp'.size - rest.size) sp'.size
+      let sameKind : Elim R × Elim R → Bool
+        | (.app _, .app _) | (.fst, .fst) | (.snd, .snd) => true
+        | _ => false
+      unless (rest.zip rest').all sameKind do return false
+      attempt do
+        unify l (.neutral (.mvar m) (sp.extract 0 k)) (.neutral h' (sp'.extract 0 (sp'.size - rest.size)))
+        unifySpine l rest rest'
+    | none =>
+      if !sp'.isEmpty && sp'.all (· matches .app _) then
         unifyFirstOrder l m sp v
       else pure false
   | _, _ => pure false
@@ -847,9 +906,9 @@ partial def unifySpine (l : Lvl) (sp sp' : Array (Elim R)) : ElabM R Unit := do
       unifyLevel u u'; unifyLevel v v'
       for (x, y) in [(I, I'), (D, D'), (P, P'), (mt, mt'), (i, i')] do unify l x y
     | .out, .out | .down, .down => pure ()
-    | .scase u I D v P f s i, .scase u' I' D' v' P' f' s' i' =>
+    | .scase u q I D v P f s i, .scase u' q' I' D' v' P' f' s' i' =>
       unifyLevel u u'; unifyLevel v v'
-      for (x, y) in [(I, I'), (D, D'), (P, P'), (f, f'), (s, s'), (i, i')] do unify l x y
+      for (x, y) in [(q, q'), (I, I'), (D, D'), (P, P'), (f, f'), (s, s'), (i, i')] do unify l x y
     | .sfix u I D v P f s i, .sfix u' I' D' v' P' f' s' i' =>
       unifyLevel u u'; unifyLevel v v'
       for (x, y) in [(I, I'), (D, D'), (P, P'), (f, f'), (s, s'), (i, i')] do unify l x y

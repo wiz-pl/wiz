@@ -1,6 +1,6 @@
 # Stage 16: data in the self-hosted frontend
 
-## 16a: inductive types ✅
+## 16a: inductive types
 
 `selfhost/Frontend.wiz` reads `inductive T where | c (x : A) (y : T) …` (no parameters
 or indices yet, in `Type`): `T` becomes the constant `μ D tt` for the description
@@ -16,7 +16,7 @@ Wiz kernel checks all of them.
 |------|-------------------------|------------------------------------------|
 | 16.1 | `selfhost/Frontend.wiz` | `ctorDesc`: a constructor's description  |
 
-## 16b: pattern matching and structural recursion ✅
+## 16b: pattern matching and structural recursion
 
 `def f (ps) : R := match x with | .c a b => rhs …`, for a parameter `x` of an inductive
 type (and `R` not mentioning `x`), becomes induction with the motive `fun i y => R` and
@@ -35,7 +35,7 @@ frontend normalises first (`nfAt`: the kernel can't infer the type of an applied
 |------|-------------------------|------------------------------------------|
 | 16.2 | `selfhost/Frontend.wiz` | `branchTm` (16e: `specialize`)           |
 
-## 16c: parameters ✅
+## 16c: parameters
 
 `inductive List (A : Type) where | nil | cons (head : A) (tail : List A)`: the
 description lives under the parameters (`List` is `fun A => μ D[A] tt`), a field of type
@@ -45,13 +45,13 @@ the parameters first (the self-hosted frontend has no implicit arguments yet:
 field types with the scrutinee type's arguments, again by normalising
 (`(fun ps => D) args`) rather than substituting.
 
-## 16d: equations ✅
+## 16d: equations
 
 `def f (ps) : A → R | p => rhs …` (one pattern per alternative) is read as
 `def f (ps) (x✝ : A) : R := match x✝ with | p => rhs …` (`eqnsToMatch`, on the syntax
 tree; `(x : A) → R` names the parameter).
 
-## 16e: several scrutinees and nested patterns ✅
+## 16e: several scrutinees and nested patterns
 
 The match compiler now works column by column, as `compileMatch` in `Term.lean`: split on
 the first column where the first clause has a constructor pattern (an `ind` with the

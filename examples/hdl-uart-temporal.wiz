@@ -1,6 +1,7 @@
 -- Temporal properties of a real design: the iCEstick UART (transmitter, synchroniser,
 -- receiver) of wiz-icestick-uart (src/Icestick/Uart.wiz, copied below unchanged), with
--- 4 clock cycles per bit. Checked by the `hdl` test group. Doc:
+-- 4 clock cycles per bit. Checked by the `hdl-uart-temporal` test group (a heavy
+-- shard: about three minutes cold). Doc:
 -- docs/libraries.md, "H14 T2: the iCEstick UART, temporal properties".
 --
 -- What is proved (kernel-checked, for every input trace and every byte):
@@ -185,6 +186,10 @@ def Bits8.zero : Bits8 := Bits8.mk .false .false .false .false .false .false .fa
 
 -- the frame in the transmitter's shift register: the data, the stop bit on top
 def Reg9.frame (d : Bits8) : Reg9 := Reg9.mk d.b0 d.b1 d.b2 d.b3 d.b4 d.b5 d.b6 d.b7 .true
+-- the same frame bit with the stop bit as a variable: `frame_byte` is the case `b = true`;
+-- the variable keeps `toNat`'s normal form small (no `2^8` tower), so the 2^9-case check goes
+-- through the unifier without expanding it (see `Uart.frameQb`).
+def Reg9.frameBit (d : Bits8) (b : Bool) : Reg9 := Reg9.mk d.b0 d.b1 d.b2 d.b3 d.b4 d.b5 d.b6 d.b7 b
 -- one shift right, a one coming in at the top (`shiftIn9 x hi`)
 def Reg9.shift (r : Reg9) : Reg9 := Reg9.mk r.r1 r.r2 r.r3 r.r4 r.r5 r.r6 r.r7 r.r8 .true
 def Reg9.shifts : Nat → Reg9 → Reg9
@@ -209,17 +214,41 @@ def Uart.shift8Q (a b c d e f g i j : Bool) : Bool :=
 def Uart.shiftQ_all : Bool.all9 Uart.shiftQ = .true := refl Bool.true
 def Uart.bit0Q_all : Bool.all9 Uart.bit0Q = .true := refl Bool.true
 def Uart.frameQ_all : Bool.all9 Uart.frameQ = .true := refl Bool.true
+-- `frameQ` with the stop bit as a variable (`a`), and the same check for every value of it.
+def Uart.frameQb (a b c d e f g i j : Bool) : Bool :=
+  Nat.beq (BitVec.toNat (@Hw.cat HwTy.El _ 1 8 (Bool.toBits a) (byte (Bits8.mk b c d e f g i j))))
+          (BitVec.toNat (reg9 (Reg9.frameBit (Bits8.mk b c d e f g i j) a)))
+def Uart.frameQb_all : Bool.all9 Uart.frameQb = .true := refl Bool.true
 def Uart.shift8Q_all : Bool.all9 Uart.shift8Q = .true := refl Bool.true
 
+-- The same generalisation as `Uart.frame_bit`, for the shift register: the incoming top
+-- bit is a variable in the check, so `toNat` is not forced through the literal `1`'s
+-- `2^8` tower; `shift9` (which shifts in `hi`) is the case `b = true`.
+def Bool.all10 (q : Bool → Bool → Bool → Bool → Bool → Bool → Bool → Bool → Bool → Bool → Bool) : Bool :=
+  Bool.all (fun a => Bool.all9 (q a))
+def Bool.forall10 (q : Bool → Bool → Bool → Bool → Bool → Bool → Bool → Bool → Bool → Bool → Bool)
+    (h : Bool.all10 q = .true) (a b c d e f g i j k : Bool) : q a b c d e f g i j k = .true :=
+  Bool.forall9 (q a) (Bool.all_spec (fun a => Bool.all9 (q a)) h a) b c d e f g i j k
+def Reg9.shiftBit (r : Reg9) (b : Bool) : Reg9 := Reg9.mk r.r1 r.r2 r.r3 r.r4 r.r5 r.r6 r.r7 r.r8 b
+def Uart.shiftQb (a b c d e f g i j k : Bool) : Bool :=
+  Nat.beq (BitVec.toNat (@Hw.cat HwTy.El _ 1 8 (Bool.toBits a) (@Hw.slice HwTy.El _ 1 8 9 (reg9 (Reg9.mk b c d e f g i j k)))))
+          (BitVec.toNat (reg9 (Reg9.shiftBit (Reg9.mk b c d e f g i j k) a)))
+def Uart.shiftQb_all : Bool.all10 Uart.shiftQb = .true := refl Bool.true
+def Uart.shift_reg9_gen (r : Reg9) (b : Bool) :
+    @Hw.cat HwTy.El _ 1 8 (Bool.toBits b) (@Hw.slice HwTy.El _ 1 8 9 (reg9 r)) = reg9 (Reg9.shiftBit r b) :=
+  UIntN.ext (@Hw.cat HwTy.El _ 1 8 (Bool.toBits b) (@Hw.slice HwTy.El _ 1 8 9 (reg9 r))) (reg9 (Reg9.shiftBit r b))
+    (Nat.eq_of_beq _ _ (Bool.forall10 Uart.shiftQb Uart.shiftQb_all b r.r0 r.r1 r.r2 r.r3 r.r4 r.r5 r.r6 r.r7 r.r8))
 def Uart.shift_reg9 (r : Reg9) : shift9 (reg9 r) = reg9 (Reg9.shift r) :=
-  UIntN.ext (shift9 (reg9 r)) (reg9 (Reg9.shift r))
-    (Nat.eq_of_beq _ _ (Bool.forall9 Uart.shiftQ Uart.shiftQ_all r.r0 r.r1 r.r2 r.r3 r.r4 r.r5 r.r6 r.r7 r.r8))
+  Uart.shift_reg9_gen r .true
 def Uart.bit0_reg9 (r : Reg9) : bit0 (reg9 r) = Bool.toBits r.r0 :=
   UIntN.ext (bit0 (reg9 r)) (Bool.toBits r.r0)
     (Nat.eq_of_beq _ _ (Bool.forall9 Uart.bit0Q Uart.bit0Q_all r.r0 r.r1 r.r2 r.r3 r.r4 r.r5 r.r6 r.r7 r.r8))
+def Uart.frame_bit (d : Bits8) (b : Bool) :
+    @Hw.cat HwTy.El _ 1 8 (Bool.toBits b) (byte d) = reg9 (Reg9.frameBit d b) :=
+  UIntN.ext (@Hw.cat HwTy.El _ 1 8 (Bool.toBits b) (byte d)) (reg9 (Reg9.frameBit d b))
+    (Nat.eq_of_beq _ _ (Bool.forall9 Uart.frameQb Uart.frameQb_all b d.b0 d.b1 d.b2 d.b3 d.b4 d.b5 d.b6 d.b7))
 def Uart.frame_byte (d : Bits8) : @frame9 HwTy.El _ (byte d) = reg9 (Reg9.frame d) :=
-  UIntN.ext (@frame9 HwTy.El _ (byte d)) (reg9 (Reg9.frame d))
-    (Nat.eq_of_beq _ _ (Bool.forall9 Uart.frameQ Uart.frameQ_all d.b0 d.b1 d.b2 d.b3 d.b4 d.b5 d.b6 d.b7 .false))
+  Uart.frame_bit d .true
 def Uart.shift8_byte (d : Bits8) (b : Bool) : shift8 (byte d) (Bool.toBits b) = byte (Bits8.shiftIn d b) :=
   UIntN.ext (shift8 (byte d) (Bool.toBits b)) (byte (Bits8.shiftIn d b))
     (Nat.eq_of_beq _ _ (Bool.forall9 Uart.shift8Q Uart.shift8Q_all d.b0 d.b1 d.b2 d.b3 d.b4 d.b5 d.b6 d.b7 b))
@@ -305,7 +334,7 @@ def Tx.CaseL (l : Nat) : Prop := (c : Nat) → Nat.lt c 4 = .true → Tx.CaseLC 
 
 -- BEGIN GENERATED tx (scripts/gen-uart-temporal.py)
 def Tx.o_0_0_t (d e : Bits8) : Tx.GOK (TxS.mk 0 0 d) (.true, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 0) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 0) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 0 0 d)) (Bool.toBits .true) (byte e)) (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, @frame9 HwTy.El _ (byte e)))) (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, reg9 (Reg9.frame e)))) (refl (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, @frame9 HwTy.El _ (byte e))))) (Eq.congrArg (fun (z : BitVec 9) => (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, z)))) (Uart.frame_byte e))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 0) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 0) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 0 0 d)) (Bool.toBits .true) (byte e) = (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, z)))) (Uart.frame_byte e) (refl (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, @frame9 HwTy.El _ (byte e)))))
 def Tx.v_0_0_t (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 0 0 d) (.true, e)).1 := And.intro rfl rfl
 def Tx.c_0_0_t (d e : Bits8) : Tx.Case (TxS.mk 0 0 d) (.true, e) := And.intro (Tx.o_0_0_t d e) (Tx.v_0_0_t d e)
 def Tx.o_0_0_f (d e : Bits8) : Tx.GOK (TxS.mk 0 0 d) (.false, e) :=
@@ -313,7 +342,7 @@ def Tx.o_0_0_f (d e : Bits8) : Tx.GOK (TxS.mk 0 0 d) (.false, e) :=
 def Tx.v_0_0_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 0 0 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_0_0_f (d e : Bits8) : Tx.Case (TxS.mk 0 0 d) (.false, e) := And.intro (Tx.o_0_0_f d e) (Tx.v_0_0_f d e)
 def Tx.o_0_1_t (d e : Bits8) : Tx.GOK (TxS.mk 0 1 d) (.true, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 0) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 1) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 0 1 d)) (Bool.toBits .true) (byte e)) (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, @frame9 HwTy.El _ (byte e)))) (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, reg9 (Reg9.frame e)))) (refl (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, @frame9 HwTy.El _ (byte e))))) (Eq.congrArg (fun (z : BitVec 9) => (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, z)))) (Uart.frame_byte e))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 0) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 1) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 0 1 d)) (Bool.toBits .true) (byte e) = (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, z)))) (Uart.frame_byte e) (refl (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, @frame9 HwTy.El _ (byte e)))))
 def Tx.v_0_1_t (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 0 1 d) (.true, e)).1 := And.intro rfl rfl
 def Tx.c_0_1_t (d e : Bits8) : Tx.Case (TxS.mk 0 1 d) (.true, e) := And.intro (Tx.o_0_1_t d e) (Tx.v_0_1_t d e)
 def Tx.o_0_1_f (d e : Bits8) : Tx.GOK (TxS.mk 0 1 d) (.false, e) :=
@@ -321,7 +350,7 @@ def Tx.o_0_1_f (d e : Bits8) : Tx.GOK (TxS.mk 0 1 d) (.false, e) :=
 def Tx.v_0_1_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 0 1 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_0_1_f (d e : Bits8) : Tx.Case (TxS.mk 0 1 d) (.false, e) := And.intro (Tx.o_0_1_f d e) (Tx.v_0_1_f d e)
 def Tx.o_0_2_t (d e : Bits8) : Tx.GOK (TxS.mk 0 2 d) (.true, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 0) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 2) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 0 2 d)) (Bool.toBits .true) (byte e)) (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, @frame9 HwTy.El _ (byte e)))) (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, reg9 (Reg9.frame e)))) (refl (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, @frame9 HwTy.El _ (byte e))))) (Eq.congrArg (fun (z : BitVec 9) => (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, z)))) (Uart.frame_byte e))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 0) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 2) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 0 2 d)) (Bool.toBits .true) (byte e) = (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, z)))) (Uart.frame_byte e) (refl (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, @frame9 HwTy.El _ (byte e)))))
 def Tx.v_0_2_t (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 0 2 d) (.true, e)).1 := And.intro rfl rfl
 def Tx.c_0_2_t (d e : Bits8) : Tx.Case (TxS.mk 0 2 d) (.true, e) := And.intro (Tx.o_0_2_t d e) (Tx.v_0_2_t d e)
 def Tx.o_0_2_f (d e : Bits8) : Tx.GOK (TxS.mk 0 2 d) (.false, e) :=
@@ -329,7 +358,7 @@ def Tx.o_0_2_f (d e : Bits8) : Tx.GOK (TxS.mk 0 2 d) (.false, e) :=
 def Tx.v_0_2_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 0 2 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_0_2_f (d e : Bits8) : Tx.Case (TxS.mk 0 2 d) (.false, e) := And.intro (Tx.o_0_2_f d e) (Tx.v_0_2_f d e)
 def Tx.o_0_3_t (d e : Bits8) : Tx.GOK (TxS.mk 0 3 d) (.true, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 0) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 0 3 d)) (Bool.toBits .true) (byte e)) (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, @frame9 HwTy.El _ (byte e)))) (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, reg9 (Reg9.frame e)))) (refl (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, @frame9 HwTy.El _ (byte e))))) (Eq.congrArg (fun (z : BitVec 9) => (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, z)))) (Uart.frame_byte e))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 0) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 0 3 d)) (Bool.toBits .true) (byte e) = (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, z)))) (Uart.frame_byte e) (refl (BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, @frame9 HwTy.El _ (byte e)))))
 def Tx.v_0_3_t (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 0 3 d) (.true, e)).1 := And.intro rfl rfl
 def Tx.c_0_3_t (d e : Bits8) : Tx.Case (TxS.mk 0 3 d) (.true, e) := And.intro (Tx.o_0_3_t d e) (Tx.v_0_3_t d e)
 def Tx.o_0_3_f (d e : Bits8) : Tx.GOK (TxS.mk 0 3 d) (.false, e) :=
@@ -367,11 +396,13 @@ def Tx.o_1_2_f (d e : Bits8) : Tx.GOK (TxS.mk 1 2 d) (.false, e) :=
 def Tx.v_1_2_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 1 2 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_1_2_f (d e : Bits8) : Tx.Case (TxS.mk 1 2 d) (.false, e) := And.intro (Tx.o_1_2_f d e) (Tx.v_1_2_f d e)
 def Tx.o_1_3_t (d e : Bits8) : Tx.GOK (TxS.mk 1 3 d) (.true, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 1) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 1 3 d)) (Bool.toBits .true) (byte e)) (Bool.toBits (Tx.reg d 1).r0, (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 1))))) (Bool.toBits (Tx.reg d 1).r0, (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, reg9 (Reg9.shift (Tx.reg d 1))))) (@Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 1) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 1 3 d)) (Bool.toBits .true) (byte e)) (bit0 (reg9 (Tx.reg d 1)), (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 1))))) (Bool.toBits (Tx.reg d 1).r0, (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 1))))) (refl (bit0 (reg9 (Tx.reg d 1)), (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 1)))))) (Eq.congrArg (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 1)))))) (Uart.bit0_reg9 (Tx.reg d 1)))) (Eq.congrArg (fun (z : BitVec 9) => (Bool.toBits (Tx.reg d 1).r0, (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 1)))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 1) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 1 3 d)) (Bool.toBits .true) (byte e) = (Bool.toBits (Tx.reg d 1).r0, (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 1))
+    (Eq.substProp (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 1))))) = (Bool.toBits (Tx.reg d 1).r0, (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 1)))))) (Eq.symm (Uart.bit0_reg9 (Tx.reg d 1))) (refl (Bool.toBits (Tx.reg d 1).r0, (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 1)))))))
 def Tx.v_1_3_t (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 1 3 d) (.true, e)).1 := And.intro rfl rfl
 def Tx.c_1_3_t (d e : Bits8) : Tx.Case (TxS.mk 1 3 d) (.true, e) := And.intro (Tx.o_1_3_t d e) (Tx.v_1_3_t d e)
 def Tx.o_1_3_f (d e : Bits8) : Tx.GOK (TxS.mk 1 3 d) (.false, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 1) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 1 3 d)) (Bool.toBits .false) (byte e)) (Bool.toBits (Tx.reg d 1).r0, (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 1))))) (Bool.toBits (Tx.reg d 1).r0, (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, reg9 (Reg9.shift (Tx.reg d 1))))) (@Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 1) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 1 3 d)) (Bool.toBits .false) (byte e)) (bit0 (reg9 (Tx.reg d 1)), (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 1))))) (Bool.toBits (Tx.reg d 1).r0, (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 1))))) (refl (bit0 (reg9 (Tx.reg d 1)), (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 1)))))) (Eq.congrArg (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 1)))))) (Uart.bit0_reg9 (Tx.reg d 1)))) (Eq.congrArg (fun (z : BitVec 9) => (Bool.toBits (Tx.reg d 1).r0, (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 1)))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 1) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 1 3 d)) (Bool.toBits .false) (byte e) = (Bool.toBits (Tx.reg d 1).r0, (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 1))
+    (Eq.substProp (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 1))))) = (Bool.toBits (Tx.reg d 1).r0, (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 1)))))) (Eq.symm (Uart.bit0_reg9 (Tx.reg d 1))) (refl (Bool.toBits (Tx.reg d 1).r0, (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 1)))))))
 def Tx.v_1_3_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 1 3 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_1_3_f (d e : Bits8) : Tx.Case (TxS.mk 1 3 d) (.false, e) := And.intro (Tx.o_1_3_f d e) (Tx.v_1_3_f d e)
 def Tx.q_1_0 : Tx.CaseLC 1 0 := fun (d e : Bits8) => And.intro (Tx.c_1_0_t d e) (Tx.c_1_0_f d e)
@@ -405,11 +436,13 @@ def Tx.o_2_2_f (d e : Bits8) : Tx.GOK (TxS.mk 2 2 d) (.false, e) :=
 def Tx.v_2_2_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 2 2 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_2_2_f (d e : Bits8) : Tx.Case (TxS.mk 2 2 d) (.false, e) := And.intro (Tx.o_2_2_f d e) (Tx.v_2_2_f d e)
 def Tx.o_2_3_t (d e : Bits8) : Tx.GOK (TxS.mk 2 3 d) (.true, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 2) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 2 3 d)) (Bool.toBits .true) (byte e)) (Bool.toBits (Tx.reg d 2).r0, (BitVec.ofNat 4 1, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 2))))) (Bool.toBits (Tx.reg d 2).r0, (BitVec.ofNat 4 1, (BitVec.ofNat 7 0, reg9 (Reg9.shift (Tx.reg d 2))))) (@Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 2) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 2 3 d)) (Bool.toBits .true) (byte e)) (bit0 (reg9 (Tx.reg d 2)), (BitVec.ofNat 4 1, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 2))))) (Bool.toBits (Tx.reg d 2).r0, (BitVec.ofNat 4 1, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 2))))) (refl (bit0 (reg9 (Tx.reg d 2)), (BitVec.ofNat 4 1, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 2)))))) (Eq.congrArg (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 1, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 2)))))) (Uart.bit0_reg9 (Tx.reg d 2)))) (Eq.congrArg (fun (z : BitVec 9) => (Bool.toBits (Tx.reg d 2).r0, (BitVec.ofNat 4 1, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 2)))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 2) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 2 3 d)) (Bool.toBits .true) (byte e) = (Bool.toBits (Tx.reg d 2).r0, (BitVec.ofNat 4 1, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 2))
+    (Eq.substProp (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 1, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 2))))) = (Bool.toBits (Tx.reg d 2).r0, (BitVec.ofNat 4 1, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 2)))))) (Eq.symm (Uart.bit0_reg9 (Tx.reg d 2))) (refl (Bool.toBits (Tx.reg d 2).r0, (BitVec.ofNat 4 1, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 2)))))))
 def Tx.v_2_3_t (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 2 3 d) (.true, e)).1 := And.intro rfl rfl
 def Tx.c_2_3_t (d e : Bits8) : Tx.Case (TxS.mk 2 3 d) (.true, e) := And.intro (Tx.o_2_3_t d e) (Tx.v_2_3_t d e)
 def Tx.o_2_3_f (d e : Bits8) : Tx.GOK (TxS.mk 2 3 d) (.false, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 2) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 2 3 d)) (Bool.toBits .false) (byte e)) (Bool.toBits (Tx.reg d 2).r0, (BitVec.ofNat 4 1, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 2))))) (Bool.toBits (Tx.reg d 2).r0, (BitVec.ofNat 4 1, (BitVec.ofNat 7 0, reg9 (Reg9.shift (Tx.reg d 2))))) (@Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 2) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 2 3 d)) (Bool.toBits .false) (byte e)) (bit0 (reg9 (Tx.reg d 2)), (BitVec.ofNat 4 1, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 2))))) (Bool.toBits (Tx.reg d 2).r0, (BitVec.ofNat 4 1, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 2))))) (refl (bit0 (reg9 (Tx.reg d 2)), (BitVec.ofNat 4 1, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 2)))))) (Eq.congrArg (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 1, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 2)))))) (Uart.bit0_reg9 (Tx.reg d 2)))) (Eq.congrArg (fun (z : BitVec 9) => (Bool.toBits (Tx.reg d 2).r0, (BitVec.ofNat 4 1, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 2)))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 2) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 2 3 d)) (Bool.toBits .false) (byte e) = (Bool.toBits (Tx.reg d 2).r0, (BitVec.ofNat 4 1, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 2))
+    (Eq.substProp (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 1, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 2))))) = (Bool.toBits (Tx.reg d 2).r0, (BitVec.ofNat 4 1, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 2)))))) (Eq.symm (Uart.bit0_reg9 (Tx.reg d 2))) (refl (Bool.toBits (Tx.reg d 2).r0, (BitVec.ofNat 4 1, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 2)))))))
 def Tx.v_2_3_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 2 3 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_2_3_f (d e : Bits8) : Tx.Case (TxS.mk 2 3 d) (.false, e) := And.intro (Tx.o_2_3_f d e) (Tx.v_2_3_f d e)
 def Tx.q_2_0 : Tx.CaseLC 2 0 := fun (d e : Bits8) => And.intro (Tx.c_2_0_t d e) (Tx.c_2_0_f d e)
@@ -443,11 +476,13 @@ def Tx.o_3_2_f (d e : Bits8) : Tx.GOK (TxS.mk 3 2 d) (.false, e) :=
 def Tx.v_3_2_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 3 2 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_3_2_f (d e : Bits8) : Tx.Case (TxS.mk 3 2 d) (.false, e) := And.intro (Tx.o_3_2_f d e) (Tx.v_3_2_f d e)
 def Tx.o_3_3_t (d e : Bits8) : Tx.GOK (TxS.mk 3 3 d) (.true, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 3) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 3 3 d)) (Bool.toBits .true) (byte e)) (Bool.toBits (Tx.reg d 3).r0, (BitVec.ofNat 4 2, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 3))))) (Bool.toBits (Tx.reg d 3).r0, (BitVec.ofNat 4 2, (BitVec.ofNat 7 0, reg9 (Reg9.shift (Tx.reg d 3))))) (@Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 3) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 3 3 d)) (Bool.toBits .true) (byte e)) (bit0 (reg9 (Tx.reg d 3)), (BitVec.ofNat 4 2, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 3))))) (Bool.toBits (Tx.reg d 3).r0, (BitVec.ofNat 4 2, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 3))))) (refl (bit0 (reg9 (Tx.reg d 3)), (BitVec.ofNat 4 2, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 3)))))) (Eq.congrArg (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 2, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 3)))))) (Uart.bit0_reg9 (Tx.reg d 3)))) (Eq.congrArg (fun (z : BitVec 9) => (Bool.toBits (Tx.reg d 3).r0, (BitVec.ofNat 4 2, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 3)))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 3) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 3 3 d)) (Bool.toBits .true) (byte e) = (Bool.toBits (Tx.reg d 3).r0, (BitVec.ofNat 4 2, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 3))
+    (Eq.substProp (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 2, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 3))))) = (Bool.toBits (Tx.reg d 3).r0, (BitVec.ofNat 4 2, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 3)))))) (Eq.symm (Uart.bit0_reg9 (Tx.reg d 3))) (refl (Bool.toBits (Tx.reg d 3).r0, (BitVec.ofNat 4 2, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 3)))))))
 def Tx.v_3_3_t (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 3 3 d) (.true, e)).1 := And.intro rfl rfl
 def Tx.c_3_3_t (d e : Bits8) : Tx.Case (TxS.mk 3 3 d) (.true, e) := And.intro (Tx.o_3_3_t d e) (Tx.v_3_3_t d e)
 def Tx.o_3_3_f (d e : Bits8) : Tx.GOK (TxS.mk 3 3 d) (.false, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 3) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 3 3 d)) (Bool.toBits .false) (byte e)) (Bool.toBits (Tx.reg d 3).r0, (BitVec.ofNat 4 2, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 3))))) (Bool.toBits (Tx.reg d 3).r0, (BitVec.ofNat 4 2, (BitVec.ofNat 7 0, reg9 (Reg9.shift (Tx.reg d 3))))) (@Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 3) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 3 3 d)) (Bool.toBits .false) (byte e)) (bit0 (reg9 (Tx.reg d 3)), (BitVec.ofNat 4 2, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 3))))) (Bool.toBits (Tx.reg d 3).r0, (BitVec.ofNat 4 2, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 3))))) (refl (bit0 (reg9 (Tx.reg d 3)), (BitVec.ofNat 4 2, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 3)))))) (Eq.congrArg (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 2, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 3)))))) (Uart.bit0_reg9 (Tx.reg d 3)))) (Eq.congrArg (fun (z : BitVec 9) => (Bool.toBits (Tx.reg d 3).r0, (BitVec.ofNat 4 2, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 3)))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 3) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 3 3 d)) (Bool.toBits .false) (byte e) = (Bool.toBits (Tx.reg d 3).r0, (BitVec.ofNat 4 2, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 3))
+    (Eq.substProp (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 2, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 3))))) = (Bool.toBits (Tx.reg d 3).r0, (BitVec.ofNat 4 2, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 3)))))) (Eq.symm (Uart.bit0_reg9 (Tx.reg d 3))) (refl (Bool.toBits (Tx.reg d 3).r0, (BitVec.ofNat 4 2, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 3)))))))
 def Tx.v_3_3_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 3 3 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_3_3_f (d e : Bits8) : Tx.Case (TxS.mk 3 3 d) (.false, e) := And.intro (Tx.o_3_3_f d e) (Tx.v_3_3_f d e)
 def Tx.q_3_0 : Tx.CaseLC 3 0 := fun (d e : Bits8) => And.intro (Tx.c_3_0_t d e) (Tx.c_3_0_f d e)
@@ -481,11 +516,13 @@ def Tx.o_4_2_f (d e : Bits8) : Tx.GOK (TxS.mk 4 2 d) (.false, e) :=
 def Tx.v_4_2_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 4 2 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_4_2_f (d e : Bits8) : Tx.Case (TxS.mk 4 2 d) (.false, e) := And.intro (Tx.o_4_2_f d e) (Tx.v_4_2_f d e)
 def Tx.o_4_3_t (d e : Bits8) : Tx.GOK (TxS.mk 4 3 d) (.true, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 4) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 4 3 d)) (Bool.toBits .true) (byte e)) (Bool.toBits (Tx.reg d 4).r0, (BitVec.ofNat 4 3, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 4))))) (Bool.toBits (Tx.reg d 4).r0, (BitVec.ofNat 4 3, (BitVec.ofNat 7 0, reg9 (Reg9.shift (Tx.reg d 4))))) (@Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 4) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 4 3 d)) (Bool.toBits .true) (byte e)) (bit0 (reg9 (Tx.reg d 4)), (BitVec.ofNat 4 3, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 4))))) (Bool.toBits (Tx.reg d 4).r0, (BitVec.ofNat 4 3, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 4))))) (refl (bit0 (reg9 (Tx.reg d 4)), (BitVec.ofNat 4 3, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 4)))))) (Eq.congrArg (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 3, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 4)))))) (Uart.bit0_reg9 (Tx.reg d 4)))) (Eq.congrArg (fun (z : BitVec 9) => (Bool.toBits (Tx.reg d 4).r0, (BitVec.ofNat 4 3, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 4)))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 4) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 4 3 d)) (Bool.toBits .true) (byte e) = (Bool.toBits (Tx.reg d 4).r0, (BitVec.ofNat 4 3, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 4))
+    (Eq.substProp (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 3, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 4))))) = (Bool.toBits (Tx.reg d 4).r0, (BitVec.ofNat 4 3, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 4)))))) (Eq.symm (Uart.bit0_reg9 (Tx.reg d 4))) (refl (Bool.toBits (Tx.reg d 4).r0, (BitVec.ofNat 4 3, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 4)))))))
 def Tx.v_4_3_t (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 4 3 d) (.true, e)).1 := And.intro rfl rfl
 def Tx.c_4_3_t (d e : Bits8) : Tx.Case (TxS.mk 4 3 d) (.true, e) := And.intro (Tx.o_4_3_t d e) (Tx.v_4_3_t d e)
 def Tx.o_4_3_f (d e : Bits8) : Tx.GOK (TxS.mk 4 3 d) (.false, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 4) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 4 3 d)) (Bool.toBits .false) (byte e)) (Bool.toBits (Tx.reg d 4).r0, (BitVec.ofNat 4 3, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 4))))) (Bool.toBits (Tx.reg d 4).r0, (BitVec.ofNat 4 3, (BitVec.ofNat 7 0, reg9 (Reg9.shift (Tx.reg d 4))))) (@Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 4) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 4 3 d)) (Bool.toBits .false) (byte e)) (bit0 (reg9 (Tx.reg d 4)), (BitVec.ofNat 4 3, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 4))))) (Bool.toBits (Tx.reg d 4).r0, (BitVec.ofNat 4 3, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 4))))) (refl (bit0 (reg9 (Tx.reg d 4)), (BitVec.ofNat 4 3, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 4)))))) (Eq.congrArg (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 3, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 4)))))) (Uart.bit0_reg9 (Tx.reg d 4)))) (Eq.congrArg (fun (z : BitVec 9) => (Bool.toBits (Tx.reg d 4).r0, (BitVec.ofNat 4 3, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 4)))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 4) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 4 3 d)) (Bool.toBits .false) (byte e) = (Bool.toBits (Tx.reg d 4).r0, (BitVec.ofNat 4 3, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 4))
+    (Eq.substProp (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 3, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 4))))) = (Bool.toBits (Tx.reg d 4).r0, (BitVec.ofNat 4 3, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 4)))))) (Eq.symm (Uart.bit0_reg9 (Tx.reg d 4))) (refl (Bool.toBits (Tx.reg d 4).r0, (BitVec.ofNat 4 3, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 4)))))))
 def Tx.v_4_3_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 4 3 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_4_3_f (d e : Bits8) : Tx.Case (TxS.mk 4 3 d) (.false, e) := And.intro (Tx.o_4_3_f d e) (Tx.v_4_3_f d e)
 def Tx.q_4_0 : Tx.CaseLC 4 0 := fun (d e : Bits8) => And.intro (Tx.c_4_0_t d e) (Tx.c_4_0_f d e)
@@ -519,11 +556,13 @@ def Tx.o_5_2_f (d e : Bits8) : Tx.GOK (TxS.mk 5 2 d) (.false, e) :=
 def Tx.v_5_2_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 5 2 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_5_2_f (d e : Bits8) : Tx.Case (TxS.mk 5 2 d) (.false, e) := And.intro (Tx.o_5_2_f d e) (Tx.v_5_2_f d e)
 def Tx.o_5_3_t (d e : Bits8) : Tx.GOK (TxS.mk 5 3 d) (.true, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 5) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 5 3 d)) (Bool.toBits .true) (byte e)) (Bool.toBits (Tx.reg d 5).r0, (BitVec.ofNat 4 4, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 5))))) (Bool.toBits (Tx.reg d 5).r0, (BitVec.ofNat 4 4, (BitVec.ofNat 7 0, reg9 (Reg9.shift (Tx.reg d 5))))) (@Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 5) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 5 3 d)) (Bool.toBits .true) (byte e)) (bit0 (reg9 (Tx.reg d 5)), (BitVec.ofNat 4 4, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 5))))) (Bool.toBits (Tx.reg d 5).r0, (BitVec.ofNat 4 4, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 5))))) (refl (bit0 (reg9 (Tx.reg d 5)), (BitVec.ofNat 4 4, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 5)))))) (Eq.congrArg (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 4, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 5)))))) (Uart.bit0_reg9 (Tx.reg d 5)))) (Eq.congrArg (fun (z : BitVec 9) => (Bool.toBits (Tx.reg d 5).r0, (BitVec.ofNat 4 4, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 5)))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 5) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 5 3 d)) (Bool.toBits .true) (byte e) = (Bool.toBits (Tx.reg d 5).r0, (BitVec.ofNat 4 4, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 5))
+    (Eq.substProp (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 4, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 5))))) = (Bool.toBits (Tx.reg d 5).r0, (BitVec.ofNat 4 4, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 5)))))) (Eq.symm (Uart.bit0_reg9 (Tx.reg d 5))) (refl (Bool.toBits (Tx.reg d 5).r0, (BitVec.ofNat 4 4, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 5)))))))
 def Tx.v_5_3_t (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 5 3 d) (.true, e)).1 := And.intro rfl rfl
 def Tx.c_5_3_t (d e : Bits8) : Tx.Case (TxS.mk 5 3 d) (.true, e) := And.intro (Tx.o_5_3_t d e) (Tx.v_5_3_t d e)
 def Tx.o_5_3_f (d e : Bits8) : Tx.GOK (TxS.mk 5 3 d) (.false, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 5) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 5 3 d)) (Bool.toBits .false) (byte e)) (Bool.toBits (Tx.reg d 5).r0, (BitVec.ofNat 4 4, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 5))))) (Bool.toBits (Tx.reg d 5).r0, (BitVec.ofNat 4 4, (BitVec.ofNat 7 0, reg9 (Reg9.shift (Tx.reg d 5))))) (@Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 5) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 5 3 d)) (Bool.toBits .false) (byte e)) (bit0 (reg9 (Tx.reg d 5)), (BitVec.ofNat 4 4, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 5))))) (Bool.toBits (Tx.reg d 5).r0, (BitVec.ofNat 4 4, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 5))))) (refl (bit0 (reg9 (Tx.reg d 5)), (BitVec.ofNat 4 4, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 5)))))) (Eq.congrArg (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 4, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 5)))))) (Uart.bit0_reg9 (Tx.reg d 5)))) (Eq.congrArg (fun (z : BitVec 9) => (Bool.toBits (Tx.reg d 5).r0, (BitVec.ofNat 4 4, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 5)))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 5) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 5 3 d)) (Bool.toBits .false) (byte e) = (Bool.toBits (Tx.reg d 5).r0, (BitVec.ofNat 4 4, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 5))
+    (Eq.substProp (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 4, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 5))))) = (Bool.toBits (Tx.reg d 5).r0, (BitVec.ofNat 4 4, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 5)))))) (Eq.symm (Uart.bit0_reg9 (Tx.reg d 5))) (refl (Bool.toBits (Tx.reg d 5).r0, (BitVec.ofNat 4 4, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 5)))))))
 def Tx.v_5_3_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 5 3 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_5_3_f (d e : Bits8) : Tx.Case (TxS.mk 5 3 d) (.false, e) := And.intro (Tx.o_5_3_f d e) (Tx.v_5_3_f d e)
 def Tx.q_5_0 : Tx.CaseLC 5 0 := fun (d e : Bits8) => And.intro (Tx.c_5_0_t d e) (Tx.c_5_0_f d e)
@@ -557,11 +596,13 @@ def Tx.o_6_2_f (d e : Bits8) : Tx.GOK (TxS.mk 6 2 d) (.false, e) :=
 def Tx.v_6_2_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 6 2 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_6_2_f (d e : Bits8) : Tx.Case (TxS.mk 6 2 d) (.false, e) := And.intro (Tx.o_6_2_f d e) (Tx.v_6_2_f d e)
 def Tx.o_6_3_t (d e : Bits8) : Tx.GOK (TxS.mk 6 3 d) (.true, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 6) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 6 3 d)) (Bool.toBits .true) (byte e)) (Bool.toBits (Tx.reg d 6).r0, (BitVec.ofNat 4 5, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 6))))) (Bool.toBits (Tx.reg d 6).r0, (BitVec.ofNat 4 5, (BitVec.ofNat 7 0, reg9 (Reg9.shift (Tx.reg d 6))))) (@Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 6) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 6 3 d)) (Bool.toBits .true) (byte e)) (bit0 (reg9 (Tx.reg d 6)), (BitVec.ofNat 4 5, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 6))))) (Bool.toBits (Tx.reg d 6).r0, (BitVec.ofNat 4 5, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 6))))) (refl (bit0 (reg9 (Tx.reg d 6)), (BitVec.ofNat 4 5, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 6)))))) (Eq.congrArg (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 5, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 6)))))) (Uart.bit0_reg9 (Tx.reg d 6)))) (Eq.congrArg (fun (z : BitVec 9) => (Bool.toBits (Tx.reg d 6).r0, (BitVec.ofNat 4 5, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 6)))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 6) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 6 3 d)) (Bool.toBits .true) (byte e) = (Bool.toBits (Tx.reg d 6).r0, (BitVec.ofNat 4 5, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 6))
+    (Eq.substProp (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 5, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 6))))) = (Bool.toBits (Tx.reg d 6).r0, (BitVec.ofNat 4 5, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 6)))))) (Eq.symm (Uart.bit0_reg9 (Tx.reg d 6))) (refl (Bool.toBits (Tx.reg d 6).r0, (BitVec.ofNat 4 5, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 6)))))))
 def Tx.v_6_3_t (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 6 3 d) (.true, e)).1 := And.intro rfl rfl
 def Tx.c_6_3_t (d e : Bits8) : Tx.Case (TxS.mk 6 3 d) (.true, e) := And.intro (Tx.o_6_3_t d e) (Tx.v_6_3_t d e)
 def Tx.o_6_3_f (d e : Bits8) : Tx.GOK (TxS.mk 6 3 d) (.false, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 6) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 6 3 d)) (Bool.toBits .false) (byte e)) (Bool.toBits (Tx.reg d 6).r0, (BitVec.ofNat 4 5, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 6))))) (Bool.toBits (Tx.reg d 6).r0, (BitVec.ofNat 4 5, (BitVec.ofNat 7 0, reg9 (Reg9.shift (Tx.reg d 6))))) (@Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 6) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 6 3 d)) (Bool.toBits .false) (byte e)) (bit0 (reg9 (Tx.reg d 6)), (BitVec.ofNat 4 5, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 6))))) (Bool.toBits (Tx.reg d 6).r0, (BitVec.ofNat 4 5, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 6))))) (refl (bit0 (reg9 (Tx.reg d 6)), (BitVec.ofNat 4 5, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 6)))))) (Eq.congrArg (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 5, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 6)))))) (Uart.bit0_reg9 (Tx.reg d 6)))) (Eq.congrArg (fun (z : BitVec 9) => (Bool.toBits (Tx.reg d 6).r0, (BitVec.ofNat 4 5, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 6)))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 6) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 6 3 d)) (Bool.toBits .false) (byte e) = (Bool.toBits (Tx.reg d 6).r0, (BitVec.ofNat 4 5, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 6))
+    (Eq.substProp (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 5, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 6))))) = (Bool.toBits (Tx.reg d 6).r0, (BitVec.ofNat 4 5, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 6)))))) (Eq.symm (Uart.bit0_reg9 (Tx.reg d 6))) (refl (Bool.toBits (Tx.reg d 6).r0, (BitVec.ofNat 4 5, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 6)))))))
 def Tx.v_6_3_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 6 3 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_6_3_f (d e : Bits8) : Tx.Case (TxS.mk 6 3 d) (.false, e) := And.intro (Tx.o_6_3_f d e) (Tx.v_6_3_f d e)
 def Tx.q_6_0 : Tx.CaseLC 6 0 := fun (d e : Bits8) => And.intro (Tx.c_6_0_t d e) (Tx.c_6_0_f d e)
@@ -595,11 +636,13 @@ def Tx.o_7_2_f (d e : Bits8) : Tx.GOK (TxS.mk 7 2 d) (.false, e) :=
 def Tx.v_7_2_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 7 2 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_7_2_f (d e : Bits8) : Tx.Case (TxS.mk 7 2 d) (.false, e) := And.intro (Tx.o_7_2_f d e) (Tx.v_7_2_f d e)
 def Tx.o_7_3_t (d e : Bits8) : Tx.GOK (TxS.mk 7 3 d) (.true, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 7) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 7 3 d)) (Bool.toBits .true) (byte e)) (Bool.toBits (Tx.reg d 7).r0, (BitVec.ofNat 4 6, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 7))))) (Bool.toBits (Tx.reg d 7).r0, (BitVec.ofNat 4 6, (BitVec.ofNat 7 0, reg9 (Reg9.shift (Tx.reg d 7))))) (@Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 7) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 7 3 d)) (Bool.toBits .true) (byte e)) (bit0 (reg9 (Tx.reg d 7)), (BitVec.ofNat 4 6, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 7))))) (Bool.toBits (Tx.reg d 7).r0, (BitVec.ofNat 4 6, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 7))))) (refl (bit0 (reg9 (Tx.reg d 7)), (BitVec.ofNat 4 6, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 7)))))) (Eq.congrArg (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 6, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 7)))))) (Uart.bit0_reg9 (Tx.reg d 7)))) (Eq.congrArg (fun (z : BitVec 9) => (Bool.toBits (Tx.reg d 7).r0, (BitVec.ofNat 4 6, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 7)))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 7) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 7 3 d)) (Bool.toBits .true) (byte e) = (Bool.toBits (Tx.reg d 7).r0, (BitVec.ofNat 4 6, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 7))
+    (Eq.substProp (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 6, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 7))))) = (Bool.toBits (Tx.reg d 7).r0, (BitVec.ofNat 4 6, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 7)))))) (Eq.symm (Uart.bit0_reg9 (Tx.reg d 7))) (refl (Bool.toBits (Tx.reg d 7).r0, (BitVec.ofNat 4 6, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 7)))))))
 def Tx.v_7_3_t (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 7 3 d) (.true, e)).1 := And.intro rfl rfl
 def Tx.c_7_3_t (d e : Bits8) : Tx.Case (TxS.mk 7 3 d) (.true, e) := And.intro (Tx.o_7_3_t d e) (Tx.v_7_3_t d e)
 def Tx.o_7_3_f (d e : Bits8) : Tx.GOK (TxS.mk 7 3 d) (.false, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 7) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 7 3 d)) (Bool.toBits .false) (byte e)) (Bool.toBits (Tx.reg d 7).r0, (BitVec.ofNat 4 6, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 7))))) (Bool.toBits (Tx.reg d 7).r0, (BitVec.ofNat 4 6, (BitVec.ofNat 7 0, reg9 (Reg9.shift (Tx.reg d 7))))) (@Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 7) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 7 3 d)) (Bool.toBits .false) (byte e)) (bit0 (reg9 (Tx.reg d 7)), (BitVec.ofNat 4 6, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 7))))) (Bool.toBits (Tx.reg d 7).r0, (BitVec.ofNat 4 6, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 7))))) (refl (bit0 (reg9 (Tx.reg d 7)), (BitVec.ofNat 4 6, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 7)))))) (Eq.congrArg (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 6, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 7)))))) (Uart.bit0_reg9 (Tx.reg d 7)))) (Eq.congrArg (fun (z : BitVec 9) => (Bool.toBits (Tx.reg d 7).r0, (BitVec.ofNat 4 6, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 7)))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 7) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 7 3 d)) (Bool.toBits .false) (byte e) = (Bool.toBits (Tx.reg d 7).r0, (BitVec.ofNat 4 6, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 7))
+    (Eq.substProp (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 6, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 7))))) = (Bool.toBits (Tx.reg d 7).r0, (BitVec.ofNat 4 6, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 7)))))) (Eq.symm (Uart.bit0_reg9 (Tx.reg d 7))) (refl (Bool.toBits (Tx.reg d 7).r0, (BitVec.ofNat 4 6, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 7)))))))
 def Tx.v_7_3_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 7 3 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_7_3_f (d e : Bits8) : Tx.Case (TxS.mk 7 3 d) (.false, e) := And.intro (Tx.o_7_3_f d e) (Tx.v_7_3_f d e)
 def Tx.q_7_0 : Tx.CaseLC 7 0 := fun (d e : Bits8) => And.intro (Tx.c_7_0_t d e) (Tx.c_7_0_f d e)
@@ -633,11 +676,13 @@ def Tx.o_8_2_f (d e : Bits8) : Tx.GOK (TxS.mk 8 2 d) (.false, e) :=
 def Tx.v_8_2_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 8 2 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_8_2_f (d e : Bits8) : Tx.Case (TxS.mk 8 2 d) (.false, e) := And.intro (Tx.o_8_2_f d e) (Tx.v_8_2_f d e)
 def Tx.o_8_3_t (d e : Bits8) : Tx.GOK (TxS.mk 8 3 d) (.true, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 8) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 8 3 d)) (Bool.toBits .true) (byte e)) (Bool.toBits (Tx.reg d 8).r0, (BitVec.ofNat 4 7, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 8))))) (Bool.toBits (Tx.reg d 8).r0, (BitVec.ofNat 4 7, (BitVec.ofNat 7 0, reg9 (Reg9.shift (Tx.reg d 8))))) (@Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 8) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 8 3 d)) (Bool.toBits .true) (byte e)) (bit0 (reg9 (Tx.reg d 8)), (BitVec.ofNat 4 7, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 8))))) (Bool.toBits (Tx.reg d 8).r0, (BitVec.ofNat 4 7, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 8))))) (refl (bit0 (reg9 (Tx.reg d 8)), (BitVec.ofNat 4 7, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 8)))))) (Eq.congrArg (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 7, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 8)))))) (Uart.bit0_reg9 (Tx.reg d 8)))) (Eq.congrArg (fun (z : BitVec 9) => (Bool.toBits (Tx.reg d 8).r0, (BitVec.ofNat 4 7, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 8)))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 8) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 8 3 d)) (Bool.toBits .true) (byte e) = (Bool.toBits (Tx.reg d 8).r0, (BitVec.ofNat 4 7, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 8))
+    (Eq.substProp (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 7, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 8))))) = (Bool.toBits (Tx.reg d 8).r0, (BitVec.ofNat 4 7, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 8)))))) (Eq.symm (Uart.bit0_reg9 (Tx.reg d 8))) (refl (Bool.toBits (Tx.reg d 8).r0, (BitVec.ofNat 4 7, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 8)))))))
 def Tx.v_8_3_t (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 8 3 d) (.true, e)).1 := And.intro rfl rfl
 def Tx.c_8_3_t (d e : Bits8) : Tx.Case (TxS.mk 8 3 d) (.true, e) := And.intro (Tx.o_8_3_t d e) (Tx.v_8_3_t d e)
 def Tx.o_8_3_f (d e : Bits8) : Tx.GOK (TxS.mk 8 3 d) (.false, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 8) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 8 3 d)) (Bool.toBits .false) (byte e)) (Bool.toBits (Tx.reg d 8).r0, (BitVec.ofNat 4 7, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 8))))) (Bool.toBits (Tx.reg d 8).r0, (BitVec.ofNat 4 7, (BitVec.ofNat 7 0, reg9 (Reg9.shift (Tx.reg d 8))))) (@Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 8) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 8 3 d)) (Bool.toBits .false) (byte e)) (bit0 (reg9 (Tx.reg d 8)), (BitVec.ofNat 4 7, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 8))))) (Bool.toBits (Tx.reg d 8).r0, (BitVec.ofNat 4 7, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 8))))) (refl (bit0 (reg9 (Tx.reg d 8)), (BitVec.ofNat 4 7, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 8)))))) (Eq.congrArg (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 7, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 8)))))) (Uart.bit0_reg9 (Tx.reg d 8)))) (Eq.congrArg (fun (z : BitVec 9) => (Bool.toBits (Tx.reg d 8).r0, (BitVec.ofNat 4 7, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 8)))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 8) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 8 3 d)) (Bool.toBits .false) (byte e) = (Bool.toBits (Tx.reg d 8).r0, (BitVec.ofNat 4 7, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 8))
+    (Eq.substProp (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 7, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 8))))) = (Bool.toBits (Tx.reg d 8).r0, (BitVec.ofNat 4 7, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 8)))))) (Eq.symm (Uart.bit0_reg9 (Tx.reg d 8))) (refl (Bool.toBits (Tx.reg d 8).r0, (BitVec.ofNat 4 7, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 8)))))))
 def Tx.v_8_3_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 8 3 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_8_3_f (d e : Bits8) : Tx.Case (TxS.mk 8 3 d) (.false, e) := And.intro (Tx.o_8_3_f d e) (Tx.v_8_3_f d e)
 def Tx.q_8_0 : Tx.CaseLC 8 0 := fun (d e : Bits8) => And.intro (Tx.c_8_0_t d e) (Tx.c_8_0_f d e)
@@ -671,11 +716,13 @@ def Tx.o_9_2_f (d e : Bits8) : Tx.GOK (TxS.mk 9 2 d) (.false, e) :=
 def Tx.v_9_2_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 9 2 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_9_2_f (d e : Bits8) : Tx.Case (TxS.mk 9 2 d) (.false, e) := And.intro (Tx.o_9_2_f d e) (Tx.v_9_2_f d e)
 def Tx.o_9_3_t (d e : Bits8) : Tx.GOK (TxS.mk 9 3 d) (.true, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 9) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 9 3 d)) (Bool.toBits .true) (byte e)) (Bool.toBits (Tx.reg d 9).r0, (BitVec.ofNat 4 8, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 9))))) (Bool.toBits (Tx.reg d 9).r0, (BitVec.ofNat 4 8, (BitVec.ofNat 7 0, reg9 (Reg9.shift (Tx.reg d 9))))) (@Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 9) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 9 3 d)) (Bool.toBits .true) (byte e)) (bit0 (reg9 (Tx.reg d 9)), (BitVec.ofNat 4 8, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 9))))) (Bool.toBits (Tx.reg d 9).r0, (BitVec.ofNat 4 8, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 9))))) (refl (bit0 (reg9 (Tx.reg d 9)), (BitVec.ofNat 4 8, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 9)))))) (Eq.congrArg (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 8, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 9)))))) (Uart.bit0_reg9 (Tx.reg d 9)))) (Eq.congrArg (fun (z : BitVec 9) => (Bool.toBits (Tx.reg d 9).r0, (BitVec.ofNat 4 8, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 9)))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 9) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 9 3 d)) (Bool.toBits .true) (byte e) = (Bool.toBits (Tx.reg d 9).r0, (BitVec.ofNat 4 8, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 9))
+    (Eq.substProp (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 8, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 9))))) = (Bool.toBits (Tx.reg d 9).r0, (BitVec.ofNat 4 8, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 9)))))) (Eq.symm (Uart.bit0_reg9 (Tx.reg d 9))) (refl (Bool.toBits (Tx.reg d 9).r0, (BitVec.ofNat 4 8, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 9)))))))
 def Tx.v_9_3_t (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 9 3 d) (.true, e)).1 := And.intro rfl rfl
 def Tx.c_9_3_t (d e : Bits8) : Tx.Case (TxS.mk 9 3 d) (.true, e) := And.intro (Tx.o_9_3_t d e) (Tx.v_9_3_t d e)
 def Tx.o_9_3_f (d e : Bits8) : Tx.GOK (TxS.mk 9 3 d) (.false, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 9) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 9 3 d)) (Bool.toBits .false) (byte e)) (Bool.toBits (Tx.reg d 9).r0, (BitVec.ofNat 4 8, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 9))))) (Bool.toBits (Tx.reg d 9).r0, (BitVec.ofNat 4 8, (BitVec.ofNat 7 0, reg9 (Reg9.shift (Tx.reg d 9))))) (@Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 9) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 9 3 d)) (Bool.toBits .false) (byte e)) (bit0 (reg9 (Tx.reg d 9)), (BitVec.ofNat 4 8, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 9))))) (Bool.toBits (Tx.reg d 9).r0, (BitVec.ofNat 4 8, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 9))))) (refl (bit0 (reg9 (Tx.reg d 9)), (BitVec.ofNat 4 8, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 9)))))) (Eq.congrArg (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 8, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 9)))))) (Uart.bit0_reg9 (Tx.reg d 9)))) (Eq.congrArg (fun (z : BitVec 9) => (Bool.toBits (Tx.reg d 9).r0, (BitVec.ofNat 4 8, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 9)))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 9) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 9 3 d)) (Bool.toBits .false) (byte e) = (Bool.toBits (Tx.reg d 9).r0, (BitVec.ofNat 4 8, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 9))
+    (Eq.substProp (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 8, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 9))))) = (Bool.toBits (Tx.reg d 9).r0, (BitVec.ofNat 4 8, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 9)))))) (Eq.symm (Uart.bit0_reg9 (Tx.reg d 9))) (refl (Bool.toBits (Tx.reg d 9).r0, (BitVec.ofNat 4 8, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 9)))))))
 def Tx.v_9_3_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 9 3 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_9_3_f (d e : Bits8) : Tx.Case (TxS.mk 9 3 d) (.false, e) := And.intro (Tx.o_9_3_f d e) (Tx.v_9_3_f d e)
 def Tx.q_9_0 : Tx.CaseLC 9 0 := fun (d e : Bits8) => And.intro (Tx.c_9_0_t d e) (Tx.c_9_0_f d e)
@@ -709,11 +756,13 @@ def Tx.o_10_2_f (d e : Bits8) : Tx.GOK (TxS.mk 10 2 d) (.false, e) :=
 def Tx.v_10_2_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 10 2 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_10_2_f (d e : Bits8) : Tx.Case (TxS.mk 10 2 d) (.false, e) := And.intro (Tx.o_10_2_f d e) (Tx.v_10_2_f d e)
 def Tx.o_10_3_t (d e : Bits8) : Tx.GOK (TxS.mk 10 3 d) (.true, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 10) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 10 3 d)) (Bool.toBits .true) (byte e)) (Bool.toBits (Tx.reg d 10).r0, (BitVec.ofNat 4 9, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 10))))) (Bool.toBits (Tx.reg d 10).r0, (BitVec.ofNat 4 9, (BitVec.ofNat 7 0, reg9 (Reg9.shift (Tx.reg d 10))))) (@Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 10) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 10 3 d)) (Bool.toBits .true) (byte e)) (bit0 (reg9 (Tx.reg d 10)), (BitVec.ofNat 4 9, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 10))))) (Bool.toBits (Tx.reg d 10).r0, (BitVec.ofNat 4 9, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 10))))) (refl (bit0 (reg9 (Tx.reg d 10)), (BitVec.ofNat 4 9, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 10)))))) (Eq.congrArg (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 9, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 10)))))) (Uart.bit0_reg9 (Tx.reg d 10)))) (Eq.congrArg (fun (z : BitVec 9) => (Bool.toBits (Tx.reg d 10).r0, (BitVec.ofNat 4 9, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 10)))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 10) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 10 3 d)) (Bool.toBits .true) (byte e) = (Bool.toBits (Tx.reg d 10).r0, (BitVec.ofNat 4 9, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 10))
+    (Eq.substProp (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 9, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 10))))) = (Bool.toBits (Tx.reg d 10).r0, (BitVec.ofNat 4 9, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 10)))))) (Eq.symm (Uart.bit0_reg9 (Tx.reg d 10))) (refl (Bool.toBits (Tx.reg d 10).r0, (BitVec.ofNat 4 9, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 10)))))))
 def Tx.v_10_3_t (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 10 3 d) (.true, e)).1 := And.intro rfl rfl
 def Tx.c_10_3_t (d e : Bits8) : Tx.Case (TxS.mk 10 3 d) (.true, e) := And.intro (Tx.o_10_3_t d e) (Tx.v_10_3_t d e)
 def Tx.o_10_3_f (d e : Bits8) : Tx.GOK (TxS.mk 10 3 d) (.false, e) :=
-  @Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 10) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 10 3 d)) (Bool.toBits .false) (byte e)) (Bool.toBits (Tx.reg d 10).r0, (BitVec.ofNat 4 9, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 10))))) (Bool.toBits (Tx.reg d 10).r0, (BitVec.ofNat 4 9, (BitVec.ofNat 7 0, reg9 (Reg9.shift (Tx.reg d 10))))) (@Eq.trans TxT (Tx.G (BitVec.beq (BitVec.ofNat 4 10) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 10 3 d)) (Bool.toBits .false) (byte e)) (bit0 (reg9 (Tx.reg d 10)), (BitVec.ofNat 4 9, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 10))))) (Bool.toBits (Tx.reg d 10).r0, (BitVec.ofNat 4 9, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 10))))) (refl (bit0 (reg9 (Tx.reg d 10)), (BitVec.ofNat 4 9, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 10)))))) (Eq.congrArg (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 9, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 10)))))) (Uart.bit0_reg9 (Tx.reg d 10)))) (Eq.congrArg (fun (z : BitVec 9) => (Bool.toBits (Tx.reg d 10).r0, (BitVec.ofNat 4 9, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 10)))
+  Eq.substProp (fun (z : BitVec 9) => Tx.G (BitVec.beq (BitVec.ofNat 4 10) (BitVec.ofNat 4 0)) (BitVec.beq (BitVec.ofNat 7 3) (BitVec.ofNat 7 3)) (Tx.embT (TxS.mk 10 3 d)) (Bool.toBits .false) (byte e) = (Bool.toBits (Tx.reg d 10).r0, (BitVec.ofNat 4 9, (BitVec.ofNat 7 0, z)))) (Uart.shift_reg9 (Tx.reg d 10))
+    (Eq.substProp (fun (z : BitVec 1) => (z, (BitVec.ofNat 4 9, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 10))))) = (Bool.toBits (Tx.reg d 10).r0, (BitVec.ofNat 4 9, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 10)))))) (Eq.symm (Uart.bit0_reg9 (Tx.reg d 10))) (refl (Bool.toBits (Tx.reg d 10).r0, (BitVec.ofNat 4 9, (BitVec.ofNat 7 0, shift9 (reg9 (Tx.reg d 10)))))))
 def Tx.v_10_3_f (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk 10 3 d) (.false, e)).1 := And.intro rfl rfl
 def Tx.c_10_3_f (d e : Bits8) : Tx.Case (TxS.mk 10 3 d) (.false, e) := And.intro (Tx.o_10_3_f d e) (Tx.v_10_3_f d e)
 def Tx.q_10_0 : Tx.CaseLC 10 0 := fun (d e : Bits8) => And.intro (Tx.c_10_0_t d e) (Tx.c_10_0_f d e)
@@ -740,6 +789,14 @@ def Tx.inv0 : Tx.inv Tx.s0 := And.intro rfl rfl
 
 -- So, for every input trace: the circuit's state and line are the specification's.
 def Tx.run (xs : Trace (Bool × Bits8)) : Trace TxS := Mealy.stateAt Tx.spec Tx.s0 xs
+-- One step of the run, stated at a *variable* time. This is `rfl`, but it matters for
+-- elaboration cost: the `succ` case of `Mealy.stateAt` unfolds the run from zero, and at
+-- a concrete index (`Tx.run xs (Nat.succ (Nat.add 40 (Nat.succ t)))`) the symbolic start
+-- bits make that a 41-deep case tree. A lemma at a variable `t` unfolds one step only,
+-- so a proof can change spellings without normalising the run (`Tx.accepts`).
+def Tx.run_succ (xs : Trace (Bool × Bits8)) (t : Nat) :
+    Tx.run xs (Nat.succ t) = (Tx.spec (Tx.run xs t) (xs t)).1 :=
+  rfl
 def Tx.refines (xs : Trace (Bool × Bits8)) (t : Nat) :
     Mealy.stateAt txM (txC 4).init (Trace.map Tx.embIn xs) t = Tx.emb (Tx.run xs t) :=
   Mealy.simulatesInv txM Tx.spec Tx.emb Tx.embIn Tx.embOut Tx.inv Tx.pres Tx.ok Tx.s0 Tx.inv0 xs t
@@ -841,8 +898,9 @@ def Tx.returns (xs : Trace (Bool × Bits8)) (t : Nat) (e : Bits8) (hidle : (Tx.r
 def Tx.accepts (xs : Trace (Bool × Bits8)) (t : Nat) (e e' : Bits8) (hidle : (Tx.run xs t).l = 0) (hgo : (xs t) = (.true, e))
     (hnext : xs (Nat.add 40 (Nat.succ t)) = (.true, e')) :
     Tx.run xs (Nat.succ (Nat.add 40 (Nat.succ t))) = TxS.mk 10 0 e' :=
-  Eq.trans (Eq.congrArg (fun (x : Bool × Bits8) => (Tx.spec (Tx.run xs (Nat.add 40 (Nat.succ t))) x).1) hnext)
-    (Tx.go_step (Tx.run xs (Nat.add 40 (Nat.succ t))) e' (Eq.congrArg (fun (s : TxS) => s.l) (Tx.returns xs t e hidle hgo)))
+  Eq.trans (Tx.run_succ xs (Nat.add 40 (Nat.succ t)))
+    (Eq.trans (Eq.congrArg (fun (x : Bool × Bits8) => (Tx.spec (Tx.run xs (Nat.add 40 (Nat.succ t))) x).1) hnext)
+      (Tx.go_step (Tx.run xs (Nat.add 40 (Nat.succ t))) e' (Eq.congrArg (fun (s : TxS) => s.l) (Tx.returns xs t e hidle hgo))))
 -- and while a frame is on the line, start is ignored: `Tx.frameRun` holds for every
 -- input from cycle t+1 on.
 
@@ -1065,14 +1123,13 @@ def Rx.idleQ (c : Nat) (cs : Bits8) (r : Bool) : RxT × RxO :=
 def Rx.idle_g (c : Nat) (cs : Bits8) (r : Bool) : Rx.Gd (Rx.embT (RxS.mk 0 c cs)) (Bool.toBits r) = Rx.idleQ c cs r :=
   Rx.GG2 (Rx.embT (RxS.mk 0 c cs)) (Bool.toBits r) .true .false .false (BitVec.beq (BitVec.ofNat 7 c) (BitVec.ofNat 7 1)) (BitVec.beq (BitVec.ofNat 7 c) (BitVec.ofNat 7 3))
 def Rx.idle_tg (c : Nat) (hc : Nat.lt c 128 = .true) (cs : Bits8) : Rx.GOK (RxS.mk 0 c cs) .true :=
-    (@Eq.trans RxTO (Rx.Gd (Rx.embT (RxS.mk 0 c cs)) (Bool.toBits .true))
+  Eq.substProp
+    (fun (z : BitVec 7) => Rx.Gd (Rx.embT (RxS.mk 0 c cs)) (Bool.toBits .true)
+      = ((BitVec.ofNat 4 0, (z, byte cs)), (Bool.toBits .false, byte cs)))
+    (Nat.all_spec Rx.Inc 128 Rx.incs c hc)
+    (@Eq.trans RxTO (Rx.Gd (Rx.embT (RxS.mk 0 c cs)) (Bool.toBits .true)) (Rx.idleQ c cs .true)
       ((BitVec.ofNat 4 0, (@inc HwTy.El _ 7 (BitVec.ofNat 7 c), byte cs)), (Bool.toBits .false, byte cs))
-      ((BitVec.ofNat 4 0, (BitVec.ofNat 7 (Rx.cnt128 c), byte cs)), (Bool.toBits .false, byte cs))
-      (@Eq.trans RxTO (Rx.Gd (Rx.embT (RxS.mk 0 c cs)) (Bool.toBits .true)) (Rx.idleQ c cs .true)
-        ((BitVec.ofNat 4 0, (@inc HwTy.El _ 7 (BitVec.ofNat 7 c), byte cs)), (Bool.toBits .false, byte cs))
-        (Rx.idle_g c cs .true) (refl ((BitVec.ofNat 4 0, (@inc HwTy.El _ 7 (BitVec.ofNat 7 c), byte cs)), (Bool.toBits .false, byte cs))))
-      (Eq.congrArg (fun (z : BitVec 7) => ((BitVec.ofNat 4 0, (z, byte cs)), (Bool.toBits .false, byte cs)))
-        (Nat.all_spec Rx.Inc 128 Rx.incs c hc)))
+      (Rx.idle_g c cs .true) (refl ((BitVec.ofNat 4 0, (@inc HwTy.El _ 7 (BitVec.ofNat 7 c), byte cs)), (Bool.toBits .false, byte cs))))
 def Rx.idle_ti (c : Nat) (hc : Nat.lt c 128 = .true) (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 0 c cs) .true) :=
   And.intro rfl (Nat.all_spec Rx.CntLt 128 Rx.cntLts c hc)
 def Rx.idle_t (c : Nat) (hc : Nat.lt c 128 = .true) (cs : Bits8) : Rx.Case (RxS.mk 0 c cs) .true :=
@@ -1152,11 +1209,11 @@ def Rx.v_2_2_f (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 2 2 cs) .false) := And.int
 def Rx.c_2_2_f (cs : Bits8) : Rx.Case (RxS.mk 2 2 cs) .false := And.intro (Rx.o_2_2_f cs) (Rx.v_2_2_f cs)
 def Rx.q_2_2 : Rx.CaseLC 2 2 := fun (cs : Bits8) => And.intro (Rx.c_2_2_t cs) (Rx.c_2_2_f cs)
 def Rx.o_2_3_t (cs : Bits8) : Rx.GOK (RxS.mk 2 3 cs) .true :=
-  @Eq.trans RxTO (Rx.Gd (Rx.embT (RxS.mk 2 3 cs)) (Bool.toBits .true)) ((BitVec.ofNat 4 1, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs)) ((BitVec.ofNat 4 1, (BitVec.ofNat 7 0, byte (Bits8.shiftIn cs .true))), (Bool.toBits .false, byte cs)) (refl ((BitVec.ofNat 4 1, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs))) (Eq.congrArg (fun (z : BitVec 8) => ((BitVec.ofNat 4 1, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .true))
+  Eq.substProp (fun (z : BitVec 8) => Rx.Gd (Rx.embT (RxS.mk 2 3 cs)) (Bool.toBits .true) = ((BitVec.ofNat 4 1, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .true) (refl ((BitVec.ofNat 4 1, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs)))
 def Rx.v_2_3_t (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 2 3 cs) .true) := And.intro rfl rfl
 def Rx.c_2_3_t (cs : Bits8) : Rx.Case (RxS.mk 2 3 cs) .true := And.intro (Rx.o_2_3_t cs) (Rx.v_2_3_t cs)
 def Rx.o_2_3_f (cs : Bits8) : Rx.GOK (RxS.mk 2 3 cs) .false :=
-  @Eq.trans RxTO (Rx.Gd (Rx.embT (RxS.mk 2 3 cs)) (Bool.toBits .false)) ((BitVec.ofNat 4 1, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs)) ((BitVec.ofNat 4 1, (BitVec.ofNat 7 0, byte (Bits8.shiftIn cs .false))), (Bool.toBits .false, byte cs)) (refl ((BitVec.ofNat 4 1, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs))) (Eq.congrArg (fun (z : BitVec 8) => ((BitVec.ofNat 4 1, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .false))
+  Eq.substProp (fun (z : BitVec 8) => Rx.Gd (Rx.embT (RxS.mk 2 3 cs)) (Bool.toBits .false) = ((BitVec.ofNat 4 1, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .false) (refl ((BitVec.ofNat 4 1, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs)))
 def Rx.v_2_3_f (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 2 3 cs) .false) := And.intro rfl rfl
 def Rx.c_2_3_f (cs : Bits8) : Rx.Case (RxS.mk 2 3 cs) .false := And.intro (Rx.o_2_3_f cs) (Rx.v_2_3_f cs)
 def Rx.q_2_3 : Rx.CaseLC 2 3 := fun (cs : Bits8) => And.intro (Rx.c_2_3_t cs) (Rx.c_2_3_f cs)
@@ -1190,11 +1247,11 @@ def Rx.v_3_2_f (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 3 2 cs) .false) := And.int
 def Rx.c_3_2_f (cs : Bits8) : Rx.Case (RxS.mk 3 2 cs) .false := And.intro (Rx.o_3_2_f cs) (Rx.v_3_2_f cs)
 def Rx.q_3_2 : Rx.CaseLC 3 2 := fun (cs : Bits8) => And.intro (Rx.c_3_2_t cs) (Rx.c_3_2_f cs)
 def Rx.o_3_3_t (cs : Bits8) : Rx.GOK (RxS.mk 3 3 cs) .true :=
-  @Eq.trans RxTO (Rx.Gd (Rx.embT (RxS.mk 3 3 cs)) (Bool.toBits .true)) ((BitVec.ofNat 4 2, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs)) ((BitVec.ofNat 4 2, (BitVec.ofNat 7 0, byte (Bits8.shiftIn cs .true))), (Bool.toBits .false, byte cs)) (refl ((BitVec.ofNat 4 2, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs))) (Eq.congrArg (fun (z : BitVec 8) => ((BitVec.ofNat 4 2, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .true))
+  Eq.substProp (fun (z : BitVec 8) => Rx.Gd (Rx.embT (RxS.mk 3 3 cs)) (Bool.toBits .true) = ((BitVec.ofNat 4 2, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .true) (refl ((BitVec.ofNat 4 2, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs)))
 def Rx.v_3_3_t (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 3 3 cs) .true) := And.intro rfl rfl
 def Rx.c_3_3_t (cs : Bits8) : Rx.Case (RxS.mk 3 3 cs) .true := And.intro (Rx.o_3_3_t cs) (Rx.v_3_3_t cs)
 def Rx.o_3_3_f (cs : Bits8) : Rx.GOK (RxS.mk 3 3 cs) .false :=
-  @Eq.trans RxTO (Rx.Gd (Rx.embT (RxS.mk 3 3 cs)) (Bool.toBits .false)) ((BitVec.ofNat 4 2, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs)) ((BitVec.ofNat 4 2, (BitVec.ofNat 7 0, byte (Bits8.shiftIn cs .false))), (Bool.toBits .false, byte cs)) (refl ((BitVec.ofNat 4 2, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs))) (Eq.congrArg (fun (z : BitVec 8) => ((BitVec.ofNat 4 2, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .false))
+  Eq.substProp (fun (z : BitVec 8) => Rx.Gd (Rx.embT (RxS.mk 3 3 cs)) (Bool.toBits .false) = ((BitVec.ofNat 4 2, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .false) (refl ((BitVec.ofNat 4 2, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs)))
 def Rx.v_3_3_f (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 3 3 cs) .false) := And.intro rfl rfl
 def Rx.c_3_3_f (cs : Bits8) : Rx.Case (RxS.mk 3 3 cs) .false := And.intro (Rx.o_3_3_f cs) (Rx.v_3_3_f cs)
 def Rx.q_3_3 : Rx.CaseLC 3 3 := fun (cs : Bits8) => And.intro (Rx.c_3_3_t cs) (Rx.c_3_3_f cs)
@@ -1228,11 +1285,11 @@ def Rx.v_4_2_f (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 4 2 cs) .false) := And.int
 def Rx.c_4_2_f (cs : Bits8) : Rx.Case (RxS.mk 4 2 cs) .false := And.intro (Rx.o_4_2_f cs) (Rx.v_4_2_f cs)
 def Rx.q_4_2 : Rx.CaseLC 4 2 := fun (cs : Bits8) => And.intro (Rx.c_4_2_t cs) (Rx.c_4_2_f cs)
 def Rx.o_4_3_t (cs : Bits8) : Rx.GOK (RxS.mk 4 3 cs) .true :=
-  @Eq.trans RxTO (Rx.Gd (Rx.embT (RxS.mk 4 3 cs)) (Bool.toBits .true)) ((BitVec.ofNat 4 3, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs)) ((BitVec.ofNat 4 3, (BitVec.ofNat 7 0, byte (Bits8.shiftIn cs .true))), (Bool.toBits .false, byte cs)) (refl ((BitVec.ofNat 4 3, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs))) (Eq.congrArg (fun (z : BitVec 8) => ((BitVec.ofNat 4 3, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .true))
+  Eq.substProp (fun (z : BitVec 8) => Rx.Gd (Rx.embT (RxS.mk 4 3 cs)) (Bool.toBits .true) = ((BitVec.ofNat 4 3, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .true) (refl ((BitVec.ofNat 4 3, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs)))
 def Rx.v_4_3_t (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 4 3 cs) .true) := And.intro rfl rfl
 def Rx.c_4_3_t (cs : Bits8) : Rx.Case (RxS.mk 4 3 cs) .true := And.intro (Rx.o_4_3_t cs) (Rx.v_4_3_t cs)
 def Rx.o_4_3_f (cs : Bits8) : Rx.GOK (RxS.mk 4 3 cs) .false :=
-  @Eq.trans RxTO (Rx.Gd (Rx.embT (RxS.mk 4 3 cs)) (Bool.toBits .false)) ((BitVec.ofNat 4 3, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs)) ((BitVec.ofNat 4 3, (BitVec.ofNat 7 0, byte (Bits8.shiftIn cs .false))), (Bool.toBits .false, byte cs)) (refl ((BitVec.ofNat 4 3, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs))) (Eq.congrArg (fun (z : BitVec 8) => ((BitVec.ofNat 4 3, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .false))
+  Eq.substProp (fun (z : BitVec 8) => Rx.Gd (Rx.embT (RxS.mk 4 3 cs)) (Bool.toBits .false) = ((BitVec.ofNat 4 3, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .false) (refl ((BitVec.ofNat 4 3, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs)))
 def Rx.v_4_3_f (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 4 3 cs) .false) := And.intro rfl rfl
 def Rx.c_4_3_f (cs : Bits8) : Rx.Case (RxS.mk 4 3 cs) .false := And.intro (Rx.o_4_3_f cs) (Rx.v_4_3_f cs)
 def Rx.q_4_3 : Rx.CaseLC 4 3 := fun (cs : Bits8) => And.intro (Rx.c_4_3_t cs) (Rx.c_4_3_f cs)
@@ -1266,11 +1323,11 @@ def Rx.v_5_2_f (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 5 2 cs) .false) := And.int
 def Rx.c_5_2_f (cs : Bits8) : Rx.Case (RxS.mk 5 2 cs) .false := And.intro (Rx.o_5_2_f cs) (Rx.v_5_2_f cs)
 def Rx.q_5_2 : Rx.CaseLC 5 2 := fun (cs : Bits8) => And.intro (Rx.c_5_2_t cs) (Rx.c_5_2_f cs)
 def Rx.o_5_3_t (cs : Bits8) : Rx.GOK (RxS.mk 5 3 cs) .true :=
-  @Eq.trans RxTO (Rx.Gd (Rx.embT (RxS.mk 5 3 cs)) (Bool.toBits .true)) ((BitVec.ofNat 4 4, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs)) ((BitVec.ofNat 4 4, (BitVec.ofNat 7 0, byte (Bits8.shiftIn cs .true))), (Bool.toBits .false, byte cs)) (refl ((BitVec.ofNat 4 4, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs))) (Eq.congrArg (fun (z : BitVec 8) => ((BitVec.ofNat 4 4, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .true))
+  Eq.substProp (fun (z : BitVec 8) => Rx.Gd (Rx.embT (RxS.mk 5 3 cs)) (Bool.toBits .true) = ((BitVec.ofNat 4 4, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .true) (refl ((BitVec.ofNat 4 4, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs)))
 def Rx.v_5_3_t (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 5 3 cs) .true) := And.intro rfl rfl
 def Rx.c_5_3_t (cs : Bits8) : Rx.Case (RxS.mk 5 3 cs) .true := And.intro (Rx.o_5_3_t cs) (Rx.v_5_3_t cs)
 def Rx.o_5_3_f (cs : Bits8) : Rx.GOK (RxS.mk 5 3 cs) .false :=
-  @Eq.trans RxTO (Rx.Gd (Rx.embT (RxS.mk 5 3 cs)) (Bool.toBits .false)) ((BitVec.ofNat 4 4, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs)) ((BitVec.ofNat 4 4, (BitVec.ofNat 7 0, byte (Bits8.shiftIn cs .false))), (Bool.toBits .false, byte cs)) (refl ((BitVec.ofNat 4 4, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs))) (Eq.congrArg (fun (z : BitVec 8) => ((BitVec.ofNat 4 4, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .false))
+  Eq.substProp (fun (z : BitVec 8) => Rx.Gd (Rx.embT (RxS.mk 5 3 cs)) (Bool.toBits .false) = ((BitVec.ofNat 4 4, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .false) (refl ((BitVec.ofNat 4 4, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs)))
 def Rx.v_5_3_f (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 5 3 cs) .false) := And.intro rfl rfl
 def Rx.c_5_3_f (cs : Bits8) : Rx.Case (RxS.mk 5 3 cs) .false := And.intro (Rx.o_5_3_f cs) (Rx.v_5_3_f cs)
 def Rx.q_5_3 : Rx.CaseLC 5 3 := fun (cs : Bits8) => And.intro (Rx.c_5_3_t cs) (Rx.c_5_3_f cs)
@@ -1304,11 +1361,11 @@ def Rx.v_6_2_f (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 6 2 cs) .false) := And.int
 def Rx.c_6_2_f (cs : Bits8) : Rx.Case (RxS.mk 6 2 cs) .false := And.intro (Rx.o_6_2_f cs) (Rx.v_6_2_f cs)
 def Rx.q_6_2 : Rx.CaseLC 6 2 := fun (cs : Bits8) => And.intro (Rx.c_6_2_t cs) (Rx.c_6_2_f cs)
 def Rx.o_6_3_t (cs : Bits8) : Rx.GOK (RxS.mk 6 3 cs) .true :=
-  @Eq.trans RxTO (Rx.Gd (Rx.embT (RxS.mk 6 3 cs)) (Bool.toBits .true)) ((BitVec.ofNat 4 5, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs)) ((BitVec.ofNat 4 5, (BitVec.ofNat 7 0, byte (Bits8.shiftIn cs .true))), (Bool.toBits .false, byte cs)) (refl ((BitVec.ofNat 4 5, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs))) (Eq.congrArg (fun (z : BitVec 8) => ((BitVec.ofNat 4 5, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .true))
+  Eq.substProp (fun (z : BitVec 8) => Rx.Gd (Rx.embT (RxS.mk 6 3 cs)) (Bool.toBits .true) = ((BitVec.ofNat 4 5, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .true) (refl ((BitVec.ofNat 4 5, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs)))
 def Rx.v_6_3_t (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 6 3 cs) .true) := And.intro rfl rfl
 def Rx.c_6_3_t (cs : Bits8) : Rx.Case (RxS.mk 6 3 cs) .true := And.intro (Rx.o_6_3_t cs) (Rx.v_6_3_t cs)
 def Rx.o_6_3_f (cs : Bits8) : Rx.GOK (RxS.mk 6 3 cs) .false :=
-  @Eq.trans RxTO (Rx.Gd (Rx.embT (RxS.mk 6 3 cs)) (Bool.toBits .false)) ((BitVec.ofNat 4 5, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs)) ((BitVec.ofNat 4 5, (BitVec.ofNat 7 0, byte (Bits8.shiftIn cs .false))), (Bool.toBits .false, byte cs)) (refl ((BitVec.ofNat 4 5, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs))) (Eq.congrArg (fun (z : BitVec 8) => ((BitVec.ofNat 4 5, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .false))
+  Eq.substProp (fun (z : BitVec 8) => Rx.Gd (Rx.embT (RxS.mk 6 3 cs)) (Bool.toBits .false) = ((BitVec.ofNat 4 5, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .false) (refl ((BitVec.ofNat 4 5, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs)))
 def Rx.v_6_3_f (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 6 3 cs) .false) := And.intro rfl rfl
 def Rx.c_6_3_f (cs : Bits8) : Rx.Case (RxS.mk 6 3 cs) .false := And.intro (Rx.o_6_3_f cs) (Rx.v_6_3_f cs)
 def Rx.q_6_3 : Rx.CaseLC 6 3 := fun (cs : Bits8) => And.intro (Rx.c_6_3_t cs) (Rx.c_6_3_f cs)
@@ -1342,11 +1399,11 @@ def Rx.v_7_2_f (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 7 2 cs) .false) := And.int
 def Rx.c_7_2_f (cs : Bits8) : Rx.Case (RxS.mk 7 2 cs) .false := And.intro (Rx.o_7_2_f cs) (Rx.v_7_2_f cs)
 def Rx.q_7_2 : Rx.CaseLC 7 2 := fun (cs : Bits8) => And.intro (Rx.c_7_2_t cs) (Rx.c_7_2_f cs)
 def Rx.o_7_3_t (cs : Bits8) : Rx.GOK (RxS.mk 7 3 cs) .true :=
-  @Eq.trans RxTO (Rx.Gd (Rx.embT (RxS.mk 7 3 cs)) (Bool.toBits .true)) ((BitVec.ofNat 4 6, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs)) ((BitVec.ofNat 4 6, (BitVec.ofNat 7 0, byte (Bits8.shiftIn cs .true))), (Bool.toBits .false, byte cs)) (refl ((BitVec.ofNat 4 6, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs))) (Eq.congrArg (fun (z : BitVec 8) => ((BitVec.ofNat 4 6, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .true))
+  Eq.substProp (fun (z : BitVec 8) => Rx.Gd (Rx.embT (RxS.mk 7 3 cs)) (Bool.toBits .true) = ((BitVec.ofNat 4 6, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .true) (refl ((BitVec.ofNat 4 6, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs)))
 def Rx.v_7_3_t (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 7 3 cs) .true) := And.intro rfl rfl
 def Rx.c_7_3_t (cs : Bits8) : Rx.Case (RxS.mk 7 3 cs) .true := And.intro (Rx.o_7_3_t cs) (Rx.v_7_3_t cs)
 def Rx.o_7_3_f (cs : Bits8) : Rx.GOK (RxS.mk 7 3 cs) .false :=
-  @Eq.trans RxTO (Rx.Gd (Rx.embT (RxS.mk 7 3 cs)) (Bool.toBits .false)) ((BitVec.ofNat 4 6, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs)) ((BitVec.ofNat 4 6, (BitVec.ofNat 7 0, byte (Bits8.shiftIn cs .false))), (Bool.toBits .false, byte cs)) (refl ((BitVec.ofNat 4 6, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs))) (Eq.congrArg (fun (z : BitVec 8) => ((BitVec.ofNat 4 6, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .false))
+  Eq.substProp (fun (z : BitVec 8) => Rx.Gd (Rx.embT (RxS.mk 7 3 cs)) (Bool.toBits .false) = ((BitVec.ofNat 4 6, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .false) (refl ((BitVec.ofNat 4 6, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs)))
 def Rx.v_7_3_f (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 7 3 cs) .false) := And.intro rfl rfl
 def Rx.c_7_3_f (cs : Bits8) : Rx.Case (RxS.mk 7 3 cs) .false := And.intro (Rx.o_7_3_f cs) (Rx.v_7_3_f cs)
 def Rx.q_7_3 : Rx.CaseLC 7 3 := fun (cs : Bits8) => And.intro (Rx.c_7_3_t cs) (Rx.c_7_3_f cs)
@@ -1380,11 +1437,11 @@ def Rx.v_8_2_f (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 8 2 cs) .false) := And.int
 def Rx.c_8_2_f (cs : Bits8) : Rx.Case (RxS.mk 8 2 cs) .false := And.intro (Rx.o_8_2_f cs) (Rx.v_8_2_f cs)
 def Rx.q_8_2 : Rx.CaseLC 8 2 := fun (cs : Bits8) => And.intro (Rx.c_8_2_t cs) (Rx.c_8_2_f cs)
 def Rx.o_8_3_t (cs : Bits8) : Rx.GOK (RxS.mk 8 3 cs) .true :=
-  @Eq.trans RxTO (Rx.Gd (Rx.embT (RxS.mk 8 3 cs)) (Bool.toBits .true)) ((BitVec.ofNat 4 7, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs)) ((BitVec.ofNat 4 7, (BitVec.ofNat 7 0, byte (Bits8.shiftIn cs .true))), (Bool.toBits .false, byte cs)) (refl ((BitVec.ofNat 4 7, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs))) (Eq.congrArg (fun (z : BitVec 8) => ((BitVec.ofNat 4 7, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .true))
+  Eq.substProp (fun (z : BitVec 8) => Rx.Gd (Rx.embT (RxS.mk 8 3 cs)) (Bool.toBits .true) = ((BitVec.ofNat 4 7, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .true) (refl ((BitVec.ofNat 4 7, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs)))
 def Rx.v_8_3_t (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 8 3 cs) .true) := And.intro rfl rfl
 def Rx.c_8_3_t (cs : Bits8) : Rx.Case (RxS.mk 8 3 cs) .true := And.intro (Rx.o_8_3_t cs) (Rx.v_8_3_t cs)
 def Rx.o_8_3_f (cs : Bits8) : Rx.GOK (RxS.mk 8 3 cs) .false :=
-  @Eq.trans RxTO (Rx.Gd (Rx.embT (RxS.mk 8 3 cs)) (Bool.toBits .false)) ((BitVec.ofNat 4 7, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs)) ((BitVec.ofNat 4 7, (BitVec.ofNat 7 0, byte (Bits8.shiftIn cs .false))), (Bool.toBits .false, byte cs)) (refl ((BitVec.ofNat 4 7, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs))) (Eq.congrArg (fun (z : BitVec 8) => ((BitVec.ofNat 4 7, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .false))
+  Eq.substProp (fun (z : BitVec 8) => Rx.Gd (Rx.embT (RxS.mk 8 3 cs)) (Bool.toBits .false) = ((BitVec.ofNat 4 7, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .false) (refl ((BitVec.ofNat 4 7, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs)))
 def Rx.v_8_3_f (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 8 3 cs) .false) := And.intro rfl rfl
 def Rx.c_8_3_f (cs : Bits8) : Rx.Case (RxS.mk 8 3 cs) .false := And.intro (Rx.o_8_3_f cs) (Rx.v_8_3_f cs)
 def Rx.q_8_3 : Rx.CaseLC 8 3 := fun (cs : Bits8) => And.intro (Rx.c_8_3_t cs) (Rx.c_8_3_f cs)
@@ -1418,11 +1475,11 @@ def Rx.v_9_2_f (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 9 2 cs) .false) := And.int
 def Rx.c_9_2_f (cs : Bits8) : Rx.Case (RxS.mk 9 2 cs) .false := And.intro (Rx.o_9_2_f cs) (Rx.v_9_2_f cs)
 def Rx.q_9_2 : Rx.CaseLC 9 2 := fun (cs : Bits8) => And.intro (Rx.c_9_2_t cs) (Rx.c_9_2_f cs)
 def Rx.o_9_3_t (cs : Bits8) : Rx.GOK (RxS.mk 9 3 cs) .true :=
-  @Eq.trans RxTO (Rx.Gd (Rx.embT (RxS.mk 9 3 cs)) (Bool.toBits .true)) ((BitVec.ofNat 4 8, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs)) ((BitVec.ofNat 4 8, (BitVec.ofNat 7 0, byte (Bits8.shiftIn cs .true))), (Bool.toBits .false, byte cs)) (refl ((BitVec.ofNat 4 8, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs))) (Eq.congrArg (fun (z : BitVec 8) => ((BitVec.ofNat 4 8, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .true))
+  Eq.substProp (fun (z : BitVec 8) => Rx.Gd (Rx.embT (RxS.mk 9 3 cs)) (Bool.toBits .true) = ((BitVec.ofNat 4 8, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .true) (refl ((BitVec.ofNat 4 8, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .true))), (Bool.toBits .false, byte cs)))
 def Rx.v_9_3_t (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 9 3 cs) .true) := And.intro rfl rfl
 def Rx.c_9_3_t (cs : Bits8) : Rx.Case (RxS.mk 9 3 cs) .true := And.intro (Rx.o_9_3_t cs) (Rx.v_9_3_t cs)
 def Rx.o_9_3_f (cs : Bits8) : Rx.GOK (RxS.mk 9 3 cs) .false :=
-  @Eq.trans RxTO (Rx.Gd (Rx.embT (RxS.mk 9 3 cs)) (Bool.toBits .false)) ((BitVec.ofNat 4 8, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs)) ((BitVec.ofNat 4 8, (BitVec.ofNat 7 0, byte (Bits8.shiftIn cs .false))), (Bool.toBits .false, byte cs)) (refl ((BitVec.ofNat 4 8, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs))) (Eq.congrArg (fun (z : BitVec 8) => ((BitVec.ofNat 4 8, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .false))
+  Eq.substProp (fun (z : BitVec 8) => Rx.Gd (Rx.embT (RxS.mk 9 3 cs)) (Bool.toBits .false) = ((BitVec.ofNat 4 8, (BitVec.ofNat 7 0, z)), (Bool.toBits .false, byte cs))) (Uart.shift8_byte cs .false) (refl ((BitVec.ofNat 4 8, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits .false))), (Bool.toBits .false, byte cs)))
 def Rx.v_9_3_f (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 9 3 cs) .false) := And.intro rfl rfl
 def Rx.c_9_3_f (cs : Bits8) : Rx.Case (RxS.mk 9 3 cs) .false := And.intro (Rx.o_9_3_f cs) (Rx.v_9_3_f cs)
 def Rx.q_9_3 : Rx.CaseLC 9 3 := fun (cs : Bits8) => And.intro (Rx.c_9_3_t cs) (Rx.c_9_3_f cs)
@@ -1468,6 +1525,16 @@ def Rx.inv0 : Rx.inv Rx.s0 := And.intro rfl rfl
 -- specification's.
 def Rx.run (rs : Trace Bool) : Trace RxS := Mealy.stateAt Rx.spec Rx.s0 rs
 def Rx.outs (rs : Trace Bool) : Trace (Bool × Bits8) := Mealy.outAt Rx.spec Rx.s0 rs
+-- The output as a function of the run, at a *variable* time (the receiver's `Tx.run_succ`).
+-- The statement uses this to change from `Rx.outs rs (Nat.add 38 v)` to
+-- `Rx.out (Rx.run rs (Nat.add 38 v)) …` without unfolding `Mealy.outAt`/`Mealy.stateAt` at
+-- the concrete offset, which at a symbolic line is a 38-deep case tree.
+def Rx.outs_spec (rs : Trace Bool) (u : Nat) :
+    Rx.outs rs u = Rx.out (Rx.run rs u) (rs u) := rfl
+-- The same one step at the first component (an equation at `Bool`, so no pair is
+-- inspected); the statements about `valid` use this rather than `congrArg` on the pair.
+def Rx.outs_fst (rs : Trace Bool) (u : Nat) :
+    (Rx.outs rs u).1 = (Rx.out (Rx.run rs u) (rs u)).1 := rfl
 def Rx.refines (rs : Trace Bool) (t : Nat) :
     Mealy.stateAt rxM (rxC 4).init (Trace.map Rx.embIn rs) t = Rx.emb (Rx.run rs t) :=
   Mealy.simulatesInv rxM Rx.spec Rx.emb Rx.embIn Rx.embOut Rx.inv Rx.pres Rx.ok Rx.s0 Rx.inv0 rs t
@@ -1522,26 +1589,58 @@ def Rx.frameRun (rs : Trace Bool) (v c0 : Nat) (cs e : Bits8) (hidle : Rx.run rs
 
 -- (R1) Fed a well-formed frame with a high stop bit, the receiver reports the byte at
 -- the stop bit's sample (cycle 38 + v), reports nothing before, and is idle after.
+--
+-- The three lemmas below are stated first at a *variable* output index `u` (with the
+-- run/line facts at `u`): an equation between two values of the pair type
+-- `Bool × Bits8` is decided by looking inside the pair, and `Rx.outs rs (Nat.add 38 v)`
+-- then unfolds `Mealy.outAt`/`Mealy.stateAt` at a concrete offset -- a 38-deep stuck
+-- case tree. At a variable `u` the unfolding is one step and stops. The public
+-- statements keep the concrete offset and get it by instantiating `u` (an application,
+-- not a definitional comparison).
+def Rx.quietAt (rs : Trace Bool) (c0 : Nat) (cs e : Bits8) (k u : Nat)
+    (hrun : Rx.run rs u = Rx.path c0 cs e k)
+    (hquiet : (Rx.out (Rx.path c0 cs e k) (rs u)).1 = .false) :
+    (Rx.outs rs u).1 = .false :=
+  @Eq.trans Bool (Rx.outs rs u).1 (Rx.out (Rx.run rs u) (rs u)).1 .false
+    (Rx.outs_fst rs u)
+    (@Eq.trans Bool (Rx.out (Rx.run rs u) (rs u)).1 (Rx.out (Rx.path c0 cs e k) (rs u)).1 .false
+      (@Eq.congrArg RxS Bool (fun (s : RxS) => (Rx.out s (rs u)).1) (Rx.run rs u) (Rx.path c0 cs e k) hrun)
+      hquiet)
 def Rx.quiet (rs : Trace Bool) (v c0 : Nat) (cs e : Bits8) (hidle : Rx.run rs v = RxS.mk 0 c0 cs) (hf : Rx.WellFormed rs v e)
     (k : Nat) (hk : Nat.lt k 38 = .true) : (Rx.outs rs (Nat.add k v)).1 = .false :=
-  Eq.trans (Eq.congrArg (fun (s : RxS) => (Rx.out s (rs (Nat.add k v))).1) (Rx.frameRun rs v c0 cs e hidle hf k (Nat.lt_to_succ k 39 (Nat.lt_to_succ k 38 hk))))
+  Rx.quietAt rs c0 cs e k (Nat.add k v)
+    (Rx.frameRun rs v c0 cs e hidle hf k (Nat.lt_to_succ k 39 (Nat.lt_to_succ k 38 hk)))
     (Nat.all_spec (Rx.PQuiet c0 cs e) 38 (Rx.pquiet c0 cs e) k hk (rs (Nat.add k v)))
+def Rx.receivesAt (rs : Trace Bool) (c0 : Nat) (cs e : Bits8) (u : Nat)
+    (hrun : Rx.run rs u = Rx.path c0 cs e 38) (hstop : rs u = .true) :
+    Rx.outs rs u = (.true, e) :=
+  @Eq.trans (Bool × Bits8) (Rx.outs rs u) (Rx.out (Rx.run rs u) (rs u)) (.true, e)
+    (Rx.outs_spec rs u)
+    (@Eq.trans (Bool × Bits8) (Rx.out (Rx.run rs u) (rs u)) (Rx.out (Rx.path c0 cs e 38) (rs u)) (.true, e)
+      (@Eq.congrArg RxS (Bool × Bits8) (fun (s : RxS) => Rx.out s (rs u)) (Rx.run rs u) (Rx.path c0 cs e 38) hrun)
+      (@Eq.congrArg Bool (Bool × Bits8) (fun (r : Bool) => Rx.out (Rx.path c0 cs e 38) r) (rs u) .true hstop))
 def Rx.receives (rs : Trace Bool) (v c0 : Nat) (cs e : Bits8) (hidle : Rx.run rs v = RxS.mk 0 c0 cs) (hf : Rx.WellFormed rs v e)
     (hstop : rs (Nat.add 38 v) = .true) : Rx.outs rs (Nat.add 38 v) = (.true, e) :=
-  @Eq.trans (Bool × Bits8) (Rx.out (Rx.run rs (Nat.add 38 v)) (rs (Nat.add 38 v))) (Rx.out (Rx.path c0 cs e 38) (rs (Nat.add 38 v))) (.true, e)
-    (Eq.congrArg (fun (s : RxS) => Rx.out s (rs (Nat.add 38 v))) (Rx.frameRun rs v c0 cs e hidle hf 38 rfl))
-    (Eq.congrArg (fun (r : Bool) => Rx.out (Rx.path c0 cs e 38) r) hstop)
+  Rx.receivesAt rs c0 cs e (Nat.add 38 v)
+    (Rx.frameRun rs v c0 cs e hidle hf 38 rfl) hstop
 def Rx.idleAfter (rs : Trace Bool) (v c0 : Nat) (cs e : Bits8) (hidle : Rx.run rs v = RxS.mk 0 c0 cs) (hf : Rx.WellFormed rs v e) :
     Rx.run rs (Nat.add 39 v) = RxS.mk 0 0 e :=
   Rx.frameRun rs v c0 cs e hidle hf 39 rfl
 
 -- (R2) With a low stop bit: nothing is reported, and the receiver is idle again just
 -- the same (it then sees the low line as the next start bit).
+def Rx.badStopAt (rs : Trace Bool) (c0 : Nat) (cs e : Bits8) (u : Nat)
+    (hrun : Rx.run rs u = Rx.path c0 cs e 38) (hstop : rs u = .false) :
+    (Rx.outs rs u).1 = .false :=
+  @Eq.trans Bool (Rx.outs rs u).1 (Rx.out (Rx.run rs u) (rs u)).1 .false
+    (Rx.outs_fst rs u)
+    (@Eq.trans Bool (Rx.out (Rx.run rs u) (rs u)).1 (Rx.out (Rx.path c0 cs e 38) (rs u)).1 .false
+      (@Eq.congrArg RxS Bool (fun (s : RxS) => (Rx.out s (rs u)).1) (Rx.run rs u) (Rx.path c0 cs e 38) hrun)
+      (@Eq.congrArg Bool Bool (fun (r : Bool) => (Rx.out (Rx.path c0 cs e 38) r).1) (rs u) .false hstop))
 def Rx.badStop (rs : Trace Bool) (v c0 : Nat) (cs e : Bits8) (hidle : Rx.run rs v = RxS.mk 0 c0 cs) (hf : Rx.WellFormed rs v e)
     (hstop : rs (Nat.add 38 v) = .false) : (Rx.outs rs (Nat.add 38 v)).1 = .false ∧ Rx.run rs (Nat.add 39 v) = RxS.mk 0 0 e :=
   And.intro
-    (Eq.trans (Eq.congrArg (fun (s : RxS) => (Rx.out s (rs (Nat.add 38 v))).1) (Rx.frameRun rs v c0 cs e hidle hf 38 rfl))
-      (Eq.congrArg (fun (r : Bool) => (Rx.out (Rx.path c0 cs e 38) r).1) hstop))
+    (Rx.badStopAt rs c0 cs e (Nat.add 38 v) (Rx.frameRun rs v c0 cs e hidle hf 38 rfl) hstop)
     (Rx.idleAfter rs v c0 cs e hidle hf)
 
 -- (R3) A low pulse that is gone at the start bit's sample (cycle 2 + v) is a glitch:

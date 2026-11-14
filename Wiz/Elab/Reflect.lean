@@ -111,7 +111,7 @@ def inductiveView (g : Globals R) (T : Name) : Option RVal := do
   let (params, scopeΔ) := telescopeSyntax [] (tBinders.take nΔ)
   let (indices, _) := telescopeSyntax scopeΔ (tBinders.drop nΔ)
   let ctorViews ← ctors.mapM fun c => do
-    let cd ← g.find? (T ++ "." ++ c)
+    let cd ← g.find? (ctorConst T c)
     let (bs, res) := piBinders cd.type
     -- the constructor's own names for the parameters (usually the same as `T`'s)
     let (_, scope) := telescopeSyntax [] (bs.take nΔ)

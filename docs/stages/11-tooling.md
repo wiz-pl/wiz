@@ -1,6 +1,6 @@
 # Stage 11: tooling
 
-## 11a–b: queries and a language server ✅
+## 11a–b: queries and a language server
 
 * **Queries** (`Wiz/Query.lean`): elaboration is a pure function of the text, so each
   command's result is memoised under a **content hash chained through every command
@@ -12,7 +12,7 @@
   diagnostics as you type, hover types, go to definition (also into `lib/`), and
   completion of global names. Each open document has its own query engine.
 
-## 11c: a shared, content-addressed cache ✅
+## 11c: a shared, content-addressed cache
 
 `wiz check`/`build`/`run` keep each command's **effect** (declarations, messages,
 registrations, info trees) in the cache directory (`--cache DIR`, default `~/.cache/wiz`;
@@ -22,10 +22,49 @@ too. Commands that change the grammar or the macros rerun (they are cheap).
 `Wiz/Cache.lean` serialises terms as S-expressions (quantities through the rig's
 literal syntax). Every example gives the same output from the cache as without it.
 
+The store is **layered**: one directory is read and written (`--cache DIR`), and any
+number of further directories are read-only (`--cache-ro DIR`, repeatable). A lookup
+tries the write cache first, then the read caches in the order given; a missing or
+unparsable entry falls through to the next, and only a full miss is a miss. `put` and
+the module marker (`markSeen`) write to the write cache alone; with no write cache the
+marker stays in memory for the run. `binaryId`'s memo (`bin/`) also belongs to the write
+cache: a `--cache-ro`-only run hashes the executable each time, so a read-only directory
+is never created or modified. `--no-cache` clears both lists; flags parse left to right,
+so a later `--cache`/`--cache-ro` adds one again. `grail` takes the same flags (and
+`cache-ro` as a build-file setting) and forwards them to its jobs.
+
+This is what a Nix package uses: its build ships a cache in `$out/share/wiz/cache`, and
+a run is `wiz check --cache-ro $out/share/wiz/cache FILE` (or with a writable
+`--cache ~/.cache/wiz` in front). For a run with *only* read caches, say
+`--no-cache --cache-ro DIR`: `wiz` and `grail` default to a writable cache, and
+`--no-cache` clears it (it clears both lists) before the later `--cache-ro` adds the
+read-only one back. The read-only cache is shared by every user of the store path and
+is never written.
+
+**Module regions (`--region-cache`, experimental).** A module's effects are also written
+as one `<cache>/<binary ⊕ module key>.wizr`, a `Lean.CompactedRegion` (the format of
+`.olean`: an mmap'able image of the terms, saved at a base address derived from the module
+name; `Wiz/Cache.lean`, "Module regions"). `--region-cache` serves a module's cached
+commands from that region instead of decoding its `.wizc` entries. The text entries stay
+the authority and the fallback: a missing, truncated or mistagged region is a miss, and the
+next run rewrites it. The command loop (keys, imports, duplicate checks) is unchanged — it
+still parses every command and only takes the effects from the region, so the result is
+the same as the text path's. The artifact holds only `Effect`s, which have no closures, so
+the loader applies them to the live state (`Effect.apply`): `loader`, `trustedModule`,
+`pp.run` and the `Budget` stay live. `--region-stats` prints what came from a region.
+
+**Regions and layers together.** Regions live in the same directory layers as the text
+entries: a lookup tries the write cache first, then the read-only caches in order (so a
+region shipped in `--cache-ro DIR` is used, and a run with only read caches reads
+regions), and a region is only ever written to the write cache. A `--region-cache` run
+with `--cache-ro` therefore reads both kinds of artifact from both kinds of layer, never
+modifies a read-only cache, and still falls back to the text entry of the same module
+(or a later layer) when a region is missing or mistagged.
+
 Next: finer dependencies (re-elaborate only what an edit affects, not everything
 after it).
 
-## 11d: the info tree, the infoview and code actions ✅
+## 11d: the info tree, the infoview and code actions
 
 * **The info tree** (`Elab/Basic.lean`, `Elab/Info.lean`): while elaborating, the
   elaborator records identifiers, the expected type of every checked term (and of every
@@ -44,7 +83,11 @@ after it).
 * **Code actions** (`Wiz/Actions.lean`): diagnostics carry a code and data; the server
   offers *did you mean* (edit distance ≤ 2 over locals and globals), *add missing cases*
   (`| .c x y => ?c` per missing constructor) and *add type ascription* to a `def` without
-  a type, with edits inline or through `codeAction/resolve`.
+  a type, with edits inline or through `codeAction/resolve`. The common errors have
+  stable codes (`Wiz/Core/ErrorCode.lean`, listed in [error-codes.md](../error-codes.md)),
+  and the quick fixes are keyed on them: also *did you mean* for fields, constructors and
+  imports, *add the missing import*, and `@f` / dropping the `@` when the argument count
+  is off by the implicit parameters.
 
 ```
 def k : Nat → Bool → Nat := by
@@ -54,7 +97,7 @@ def k : Nat → Bool → Nat := by
 def four : Nat := doubel 2    -- unknown identifier 'doubel'   [Did you mean 'double'?]
 ```
 
-## 11l: the infoview socket ✅
+## 11l: the infoview socket
 
 `wiz lsp --infoview SOCK` also listens on the Unix socket `SOCK`, for infoviews that run
 beside the editor (the terminal infoview connects there). The editor never says where
@@ -71,7 +114,7 @@ thread per connection feeds one channel, and one loop answers in order. Protocol
 `wiz-notes/infoview-protocol.md`; tested in-process (the `lsp-server` group: the editor
 on a socket pair, an infoview on the socket).
 
-## 11m–n: the infoview, in a terminal and in a browser ✅
+## 11m–n: the infoview, in a terminal and in a browser
 
 ```
 wiz lsp --infoview /tmp/wiz.sock          # the editor's server (11l)
@@ -123,7 +166,7 @@ the real `wiz lsp --infoview`, with `infoview/editor_stub.py` as the editor.
 Node (against the stub), then the page in headless Chromium over the DevTools protocol,
 against the real `wiz lsp --ws`.
 
-### 11o: the infoview over a WebSocket ✅
+### 11o: the infoview over a WebSocket
 
 A browser can't open a Unix socket, so `wiz lsp --ws PORT` also listens on a WebSocket
 (RFC 6455), on `127.0.0.1` only unless an address is given (`--ws ADDR:PORT`; with
@@ -140,7 +183,7 @@ listen/accept/connect, with connections again as plain Lean handles; the server 
 tested in-process (the `lsp-server` group: frames of each length class, the handshake's
 RFC example, foreign origins refused, an editor on a socket pair and two pages).
 
-## 11p: a Neovim plugin ✅
+## 11p: a Neovim plugin
 
 `editors/nvim/` is **wiz.nvim**, a Lua plugin for Neovim ≥ 0.10 modelled on lean.nvim
 (installation, options, keymaps and the full abbreviation list are in its README):
@@ -154,7 +197,7 @@ RFC example, foreign origins refused, an editor on a socket pair and two pages).
   Lean's own table (vscode-lean4's `abbreviations.json`, Apache-2.0, vendored) plus Wiz's
   additions: the nine letters Lean leaves free become Greek (`\f` φ, `\h` η, `\j` ξ, `\k`
   κ, `\q` θ, `\s` σ, `\w` ω, `\y` υ, `\z` ζ; Lean's `\l` ←, `\r` →, `\x` × stay), and the
-  symbols the repository uses that Lean has no abbreviation for (`\++` ⧺, `\done` ✅,
+  symbols the repository uses that Lean has no abbreviation for (`\++` ⧺, `\done`,
   `\cross` ✗). An abbreviation is an extmark from the leader to the cursor (so it
   survives edits around it); it is replaced as soon as the next character could not
   continue any abbreviation, when it is complete and nothing longer starts with it, on
@@ -180,7 +223,7 @@ against the real `wiz lsp` on `tests/fixture/Goals.wiz`: the goal after `intro n
 argument's expected type, constants highlighted, `K` on `Bool` giving `Bool : Type`,
 the view following an edit. It is skipped without `nvim`.
 
-## 11q: go to definition and the infoview for syntax, binders, imports and instances ✅
+## 11q: go to definition and the infoview for syntax, binders, imports and instances
 
 Hovers, go to definition and the infoview used to know only about terms. Now (as in
 Lean) they also know about syntax:
@@ -236,7 +279,7 @@ a procedural macro's output (it has no ranges of the user's), the arguments of
 `attribute`, and docstrings (Wiz has none). Design notes: `wiz-notes/info-syntax.md`.
 Tested in the `lsp-server` group and by wiz.nvim's tests (`nvim`).
 
-## 11r: printing notation (unexpanders) ✅
+## 11r: printing notation (unexpanders)
 
 Terms print as the notation they were written with: `#check`, `#reduce`, `#eval`,
 messages (`type mismatch`, kernel errors), hovers and the infoview's goals.
@@ -298,7 +341,7 @@ to tactics as text and `trace_state` print without notation. The self-hosted too
 has its own printer (selfhost/Frontend.wiz) and prints no notation. Design notes:
 `wiz-notes/pp-unexpand.md`. Tested in the `language` group.
 
-## 11s: scroll, the documentation generator (`wiz doc`) ✅
+## 11s: scroll, the documentation generator (`wiz doc`)
 
 Like Lean's doc-gen4: a static site from a set of modules. Design notes:
 `wiz-notes/scroll.md`.
@@ -354,18 +397,29 @@ package's `lib` targets with its module roots (dependencies included), into
   copies the site's scripts and `scroll.css`; `wiz doc` takes them from `share/wiz/web`
   of a release, `web/out` of a checkout, or `--web DIR`. Without them the pages are
   plain HTML (and `wiz doc` says so).
-* **CI** builds the library's documentation on `master` with the Wasm module (the
-  `docs` job, on pushes only: `wiz doc --lib` with source links to the commit) and
-  uploads it as the artifact `wiz-docs` (kept 3 days). Proposed, not configured: publish it from `master` to GitHub Pages
-  (`actions/upload-pages-artifact` + `actions/deploy-pages` in that job, Pages set to
-  "GitHub Actions").
+* **CI** builds the library's documentation on `master` and publishes it: the `docs` job
+  runs `wiz doc --lib` on a push (never a pull request), with source links to the
+  commit and the Wasm module, and uploads it as the artifact `wiz-docs` (3 days, for
+  debugging); `deploy-docs` deploys that artifact to GitHub Pages at
+  <https://wiz-pl.github.io/wiz/>. The docs pages are the site root (`index.html`,
+  `A.B.html`, `A.B.json`, `search.js` and the Wasm files) and every link is relative.
+  A repository has one Pages site and each deployment replaces the whole tree, so a
+  future performance site shares this deployment under `/perf/` rather than deploying
+  separately. `docs/building.md`, "Documentation site", has the URL layout, the
+  one-time Pages setting and the single-site rule.
 * **Tests**: the group `doc` (`Tests/Doc.lean`): doc comments stored and replayed by the
   cache; Markdown; `wiz doc` on a small package with doc comments (kinds, docs, source
   links, instances, the index); every cross-link resolves; every declaration is in the
   search index; the pages without JS; `grail doc`; and the page model of the Wasm module
-  run natively on a page's JSON (hover, click, keys).
+  run natively on a page's JSON (hover, click, keys); and that the core library is
+  documented (every public declaration of `Prelude`, `Std`, `Vec` and `Word` has a doc
+  comment, and each has a module doc).
+* **The library's documentation.** Every module in `lib/` has a `/-! … -/` module doc
+  (what it is for, its main definitions, an example) and a `/-- … -/` doc comment on each
+  public declaration; `--` comments are left for implementation notes. `wiz doc --lib -o
+  OUT` builds the pages (CI's `wiz-docs` artifact).
 
-## 11w: hovers in tactic arguments, the other infoviews, `local instance`, the browser infoview ✅
+## 11w: hovers in tactic arguments, the other infoviews, `local instance`, the browser infoview
 
 * **Ranges through reflected syntax.** A tactic or procedural macro gets the user's
   syntax as a Wiz `Syntax` value, which has no ranges, and its output used to get the
@@ -429,6 +483,30 @@ package's `lib` targets with its module roots (dependencies included), into
 def foo (n : Nat) (pt : Point) : Nat := Nat.add n pt.‸   -- pt.px : Nat, pt.py : Nat, pt.norm
 def p : Point := _                                     -- [Fill with an anonymous constructor] ⟨?px, ?py⟩
 ```
+
+## 11u: signature help
+
+`textDocument/signatureHelp` (`Wiz/Signature.lean`; triggered by a space or `(`) shows
+the binders of the function being applied, `List.length {A : Type} (_ : List A) : Nat`,
+with the explicit argument being typed highlighted. The application is found in the
+text, since the document rarely elaborates mid-application: back from the cursor to the
+nearest unclosed bracket, or `:=`, `=>`, `,`, `|`, `;` at bracket depth 0, or the
+start of the command. Its first word is the function, and the complete arguments after
+it (named arguments `(x := e)` aside) say which explicit binder comes next. A global's
+binders come from its declaration; a local function's type from the info tree of the
+text cut after it, with its open brackets closed. In Neovim 0.11, `<C-s>` in insert mode.
+
+```
+def b (xs : List Nat) : Nat := List.length ‸    -- List.length {A : Type} [(_ : List A)] : Nat
+```
+
+### Doc comments in the editor (11s, 11t, 11u)
+
+The language server shows a declaration's doc comment (`/-- … -/`, `CommandState.docOf?`)
+as Markdown: in a hover under the type (`double : Nat → Nat`, a rule, then the doc), as
+a completion item's `documentation`, and as signature help's `documentation`. Locals have
+none; the library's declarations are documented (`lib/`), so `Nat.add` explains itself.
+
 ## 11v: the outline, workspace symbols and folding
 
 * **Document symbols** (`textDocument/documentSymbol`, `Wiz/Symbols.lean`): one symbol per
@@ -443,6 +521,23 @@ def p : Point := _                                     -- [Fill with an anonymou
   `by` blocks, `match`es, and block comments (kind `comment`).
 * wiz.nvim: `gO` (Neovim 0.11) lists the outline; `lsp.folding = true` folds with the
   server's ranges (`vim.lsp.foldexpr`).
+
+## 11x: inlay hints
+
+`textDocument/inlayHint` (`Wiz/Inlay.lean`) shows the type the elaborator gave a `fun`
+or `let` binder written without one, `fun x : Nat => …`, from the info tree's binders
+(`recordBinder`): a local identifier whose text is the binder's own name, with `fun`/`λ`
+(past the other binders of its group) or `let` before it and `=>`/`↦`/`:=` or another
+binder after it, not `:`. wiz.nvim: `lsp.inlay_hints = true` turns them on.
+## 11z: semantic tokens for the file's own keywords
+
+`textDocument/semanticTokens/full` (`Wiz/Semantic.lean`, one token type `keyword`)
+marks what a fixed syntax file can't know: the words of declared syntax (`syntax`,
+`notation`, the Prelude's tactics, a keyword-scoped DSL's `when … yes … no`) inside the
+nodes of that kind the info tree saw (`syntaxRef`), and the words that declared `term`
+and `command` rules reserve everywhere (`run_calc`, `done`). A DSL keyword used as a name
+outside the DSL (`def no (yes : Nat)`) stays a name. Comments and strings are skipped.
+Neovim shows them as `@lsp.type.keyword` (linked to `@keyword`) without configuration.
 
 ## 11y: references, highlights and rename
 
@@ -460,3 +555,51 @@ def p : Point := _                                     -- [Fill with an anonymou
   that spells the whole name, in all those documents; it refuses a declaration of the
   toolchain's library and a new name that isn't one. A use through generalised field
   notation (`p.norm` for `Point.norm`) is not edited.
+
+## 11ab: a static playground
+
+`web/playground.html`: a Wiz playground that runs entirely in the page. A text area
+with a small program, a **Run** button (or Ctrl/⌘+Enter), one output line per command,
+and a status line (`loading` / `running` / `done in N ms`, with error lines in red).
+No server, no editor, no install: `web/build-playground.sh` compiles the program the
+page runs.
+
+* **The engine.** The self-hosted frontend and kernel (`selfhost/Lex.wiz`,
+  `Parse.wiz`, `Kernel.wiz`, `Frontend.wiz`) are Wiz source, so the same pipeline as the
+  infoview's module builds them: `wiz` writes C (with mini-gmp for bignums), Emscripten
+  links it as a wasm64 ES module. The one addition is an export, not a compiler or
+  runtime change: `web/playground-exports.wiz` exports
+  `wiz_playground_eval : String → String`, the text in and `selfhost/Frontend.wiz`'s
+  `checkFile` lines out. The page calls it, frees the returned string, and renders it.
+  Its parser needs the Lean parser's tables, which only Lean can make;
+  `web/selfhost-tables.wiz` holds them (generated by
+  `lake env lean --run web/gen-selfhost-tables.lean`, checked in, 38 KB), so building
+  the module needs no Lean step beyond the `lake build wiz` every checkout needs.
+* **What it runs.** The self-hosted frontend's embedded Prelude (Nat, Bool, List,
+  Option, Prod, arithmetic, `String`), definitions with patterns and `match`, inductive
+  types, structures, `#check`, `#reduce`/`#eval`, and its error messages. `import` lines
+  are accepted but only Prelude is available (there is no module loader in the page);
+  without any import the page prepends `import Prelude`, so a bare `def two : Nat := 1 + 1`
+  works. `#eval` prints the kernel's normal form (`con((#1, …))`); `web/playground-values.js`
+  recognises the shapes of Nat, Bool and list values and shows `42`, `true`, `[1, 2]`,
+  keeping the raw form in the line's tooltip. Anything else is shown as it comes.
+* **Build and serve** (from a checkout after `lake build wiz`):
+
+      web/build-playground.sh                  # → web/out/wiz-playground.mjs (+ the page)
+      python3 -m http.server -d web/out 8000   # then http://127.0.0.1:8000/playground.html
+
+  `WIZ=...` picks another toolchain; `--gmp-src` is `web/build.sh`'s option for builds
+  without nix. The script writes `web/out/playground.wiz` (the assembled engine source)
+  beside the module. The page needs HTTP (an ES module and a `.wasm` fetch; `file://`
+  will not do). `web/build.sh` and its infoview are unchanged and can share `web/out`.
+* **Tests.** `node web/playground_test.mjs web/out` loads the module under Node, runs a
+  definition, a `#check`, `#eval twice 21` (the value renders as `42`), a Bool and an
+  error. `web/test.sh` now builds both Wasm modules and runs this test beside the
+  infoview's Node and Chromium tests.
+* **Limits.** The evaluator has no fuel: a non-terminating `#eval` blocks the tab (the
+  call into Wasm is synchronous). Only the embedded Prelude exists, not the library's
+  modules or `IO`/`#run`; the page is a checker, not a REPL with a filesystem.
+* **Why a second module.** The infoview's exports (`wiz_web_init`/`wiz_web_step`) are a
+  language-server client: they can ask a server for goals and diagnostics but cannot
+  evaluate a term. The playground's evaluator is the self-hosted checker, which is Wiz
+  code; exporting it is the only missing piece, and it needs no server.

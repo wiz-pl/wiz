@@ -3,6 +3,7 @@ import Tests.Eval
 import Tests.Check
 import Tests.Parser
 import Tests.Elab
+import Tests.Groups
 import Tests.ElabFix
 import Tests.Grail
 import Tests.LSP
@@ -10,6 +11,7 @@ import Tests.Meta
 import Tests.Lint
 import Tests.Allocs
 import Tests.Scaling
+import Tests.FalseFuzz
 import Tests.Feral
 import Tests.Tower
 import Tests.Native
@@ -22,12 +24,11 @@ set_option compiler.extract_closed false
 
 open Tests
 
-/-- Every test group: each test module lists its own (`groups` at its end), so that a
-new group touches only its module (and `.github/test-shards.json`). -/
-def groups : List Group :=
+/-- The groups of the older modules that list their own (`groups` at their end). New
+groups are modules of their own under `Tests/Groups/` (`registerGroup`). -/
+def moduleGroups : List Group :=
   Check.groups ++
   Doc.groups ++
-  Elab.groups ++
   ElabFix.groups ++
   Feral.groups ++
   Eval.groups ++
@@ -42,6 +43,10 @@ def groups : List Group :=
   Scaling.groups ++
   Tower.groups ++
   []
+
+/-- Every test group: the modules' and the registered ones (`Tests/Groups/`). -/
+def allGroups : IO (List Group) := do
+  return moduleGroups ++ (← groupRegistry.get).toList
 
 /-- Whether a command-line selector picks a group: `=NAME` exactly, anything else as a
 prefix of the group's name. `=NAME#I,J,…` picks only the cases with those indices
@@ -62,14 +67,15 @@ def selectedCases (g : Group) (args : List String) : Option (List Nat) := Id.run
 
 /-- The group named `name`, among the suite's and the driver's fixtures (`--run` finds
 these; no selector picks them). -/
-def findGroup (name : String) : Option Group :=
-  (groups ++ [driverFixtures]).find? (·.name == name)
+def findGroup (name : String) : IO (Option Group) := do
+  return ((← allGroups) ++ [driverFixtures]).find? (·.name == name)
 
 /-- The arguments of a suite run, checked: an argument that is neither a toolchain flag
 nor `--timings`/`--shard` (an unknown or misspelt flag), a selector that picks no group
 and a case index that the group does not have are errors (exit code 2), not an empty run
 that passes. -/
 def checkSelectors (args : List String) : IO (Option UInt32) := do
+  let groups ← allGroups
   for arg in args do
     if arg.startsWith "--" then
       IO.eprintln s!"unknown flag (or a flag without its value): {arg}"
@@ -100,7 +106,7 @@ def runOne (args : List String) : IO UInt32 := do
   let [group, ix] := args
     | IO.eprintln s!"unexpected arguments: {" ".intercalate args}\n{usage}"; return 2
   let group := if group.startsWith "=" then (group.drop 1).toString else group
-  let some g := findGroup group
+  let some g ← findGroup group
     | IO.eprintln s!"no test group named {group} (`tests --list`)\n{usage}"; return 2
   let some i := ix.toNat?
     | IO.eprintln s!"not a case index: {ix}\n{usage}"; return 2
@@ -142,6 +148,12 @@ def takeFlag (flag : String) : List String → Option String × List String
     let (x, r) := takeFlag flag (v :: rest); (x, f :: r)
   | args => (none, args)
 
+/-- Remove `--FLAG` from the arguments; whether it was there. -/
+def takeSwitch (flag : String) : List String → Bool × List String
+  | f :: rest => if f == flag then (true, rest) else
+    let (b, r) := takeSwitch flag rest; (b, f :: r)
+  | args => (false, args)
+
 /-- This machine's toolchain settings, from the uncommitted `grail.local.wiz` that the nix
 dev shell writes (`flake.nix`), as grail reads them. -/
 def localToolchain : IO Wiz.Toolchain := do
@@ -175,19 +187,23 @@ exits with its result (`runOne`). A selector that picks nothing, a case index th
 lacks and an unknown flag are errors. A skipped case (`Tests.skip`) shows as `⊘` and is
 counted apart. `--timings FILE` appends one line of JSON per case to
 FILE (its group, index, name, wall time in seconds, whether it passed, and its notes:
-`Tests.note`), labelled with `--shard NAME`. -/
+`Tests.note`), labelled with `--shard NAME`.
+
+`--jobs N` (default 1) runs the cases of a group that opted in (`Group.parallel`, see
+"Running cases in parallel" in docs/building.md) N at a time in child processes, printing
+each case's output and `--timings` line in the group's case order; groups that did not opt
+in still run one case at a time. `--jobs-all` also parallelizes groups that did not opt in
+(for auditing a group's isolation, not for CI). -/
 def main (args : List String) : IO UInt32 := do
   -- a `panic!` fails the case that hits it (each case runs in its own process), as it
   -- fails `wiz check`; `--panic-probe continue` turns it off again
   Wiz.exitOnPanic
-  -- tower, as the shims of the tower tests call it (`Tests/Tower.lean`)
   -- (23k) a grail job's supervisor, and grail itself (the job-hygiene tests run it)
   if let "--grail-exec" :: rest := args then return ← Grail.execMain rest
   if let "--grail" :: rest := args then return ← Grail.cliMain rest
-  if let "--tower" :: rest := args then return ← _root_.Tower.main (← _root_.Tower.defaultEnv) rest
   -- the processes the suite starts get the toolchain as flags
   let child := match args with
-    | "--run-case" :: _ | "--check" :: _ | "--check-libs" :: _ | "--probe-reuse" :: _ | "--panic-probe" :: _ | "--grail-job" :: _ | ["--list"] | "--list-cases" :: _ | "--allocs" :: _ => true
+    | "--run-case" :: _ | "--prop-long" :: _ | "--prop-replay" :: _ | ["--prop-no-sizes"] | ["--prop-trace"] | "--check" :: _ | "--check-libs" :: _ | "--probe-reuse" :: _ | "--probe-reuse-ir" :: _ | "--panic-probe" :: _ | "--grail-job" :: _ | "--trust-ledger" :: _ | ["--list"] | ["--list-shards"] | "--list-cases" :: _ | "--allocs" :: _ => true
     | _ => false
   let (tc, args') ← suiteToolchain args (readLocal := !child)
   toolchainRef.set tc
@@ -195,7 +211,7 @@ def main (args : List String) : IO UInt32 := do
   match args' with
   -- one case in this process: what `Group.run` starts for each case
   | ["--run-case", group, ix] =>
-    match findGroup group >>= fun g => ix.toNat? >>= (g.cases[·]?) with
+    match (← findGroup group) >>= fun g => ix.toNat? >>= (g.cases[·]?) with
     | some c => c.runHere
     | none => do IO.eprintln s!"no such case: {group} #{ix}"; pure 2
   | "--run" :: rest => runOne rest
@@ -225,14 +241,33 @@ def main (args : List String) : IO UInt32 := do
   -- `exitOnPanic`
   | ["--panic-probe", mode, site] => Lint.panicProbe mode site
   | "--probe-checker" :: opts => do Scaling.probeChecker opts; pure 0
+  -- the soundness audit's tests on their large grids (`Tests/Groups/Audit.lean`)
+  | ["--audit-long"] => Audit.longMain
+  | ["--audit-hurkens"] => Audit.hurkensMain
+  | "--audit-query" :: ixs => Audit.queryMain ixs
+  -- the property harness's long run (`Tests/Groups/Prop.lean`)
+  | "--prop-long" :: rest => Prop.longMain rest
+  | "--prop-replay" :: rest => Prop.replayMain rest
+  | "--false-fuzz" :: rest => FalseFuzz.main rest
+  | "--false-fuzz-replay" :: rest => FalseFuzz.replayMain rest
+  | "--false-fuzz-check" :: rest => FalseFuzz.checkMain rest
+  | ["--prop-no-sizes"] => Prop.flagMain true false
+  | ["--prop-trace"] => Prop.flagMain false true
   | ["--probe-reuse"] => Scaling.probeReuse
+  | "--probe-reuse-ir" :: files => Scaling.probeReuseIR files
   -- allocation counts and IR of definitions of a file (`Tests/Allocs.lean`)
   | "--allocs" :: rest => Allocs.allocsMain rest
+  -- the trust ledger (`Tests/Native.lean`, scripts/trust-ledger.sh)
+  | "--trust-ledger" :: rest => Native.trustLedgerMain rest
   | ["--list"] => do
-    for g in groups do IO.println g.name
+    for g in ← allGroups do IO.println g.name
+    pure 0
+  -- each group's shard hint (`Group.shard`; empty for the default), for `scripts/ci.py`
+  | ["--list-shards"] => do
+    for g in ← allGroups do IO.println s!"{g.name}\t{g.shard}"
     pure 0
   | "--list-cases" :: sels => do
-    for g in groups do
+    for g in ← allGroups do
       let only := selectedCases g sels
       if sels.isEmpty || sels.any (selects g) then
         for c in g.cases, i in [0:g.cases.length] do
@@ -241,19 +276,32 @@ def main (args : List String) : IO UInt32 := do
   | args => do
     let (timings, args) := takeFlag "--timings" args
     let (shard, args) := takeFlag "--shard" args
+    let (jobsArg, args) := takeFlag "--jobs" args
+    let (jobsAll, args) := takeSwitch "--jobs-all" args
+    let jobs : Option Nat := match jobsArg with
+      | none => some 1
+      | some s => match s.toNat? with
+        | some 0 => none
+        | n => n
+    let some jobs := jobs
+      | IO.eprintln "--jobs needs a count of at least 1"; return 2
     let shard := shard.getD ""
     if let some code ← checkSelectors args then return code
+    let groups ← allGroups
     let selected := if args.isEmpty then groups
       else groups.filter fun g => args.any (selects g)
+    let record (g : Group) (r : CaseResult) : IO Unit := do
+      if let some file := timings then
+        let h ← IO.FS.Handle.mk file .append
+        h.putStrLn (timingLine shard g.name r)
     let mut passed := 0
     let mut failed := 0
     let mut skipped := 0
     for g in selected do
       let start ← IO.monoMsNow
-      let results ← g.run (selectedCases g args) fun r => do
-        if let some file := timings then
-          let h ← IO.FS.Handle.mk file .append
-          h.putStrLn (timingLine shard g.name r)
+      let results ← if jobs > 1 && (g.parallel || jobsAll) then
+          g.runJobs jobs (selectedCases g args) (record g)
+        else g.run (selectedCases g args) (record g)
       let cases := results.foldl (· + ·.ms) 0
       IO.println s!"  ({g.name}: {showMs ((← IO.monoMsNow) - start)} s; cases {showMs cases} s)"
       let p := (results.filter (·.ok)).length

@@ -44,11 +44,14 @@ def closed (t : Term R) : B R := fun _ => t
 def app (f : B R) (as : List (B R)) : B R := fun d => as.foldl (fun acc a => .app acc (a d)) (f d)
 def lam (x : Name) (body : B R → B R) : B R := fun d => .lam x (body (bvar d) (d + 1))
 def pi (x : Name) (bi : BinderInfo) (q : B R) (A : B R) (body : B R → B R) : B R :=
-  fun d => .pi x bi (q d) (A d) (body (bvar d) (d + 1)) none
+  fun d => .pi x bi (q d) (A d) (body (bvar d) (d + 1)) .hole
 def fst (t : B R) : B R := fun d => .fst (t d)
 def snd (t : B R) : B R := fun d => .snd (t d)
 def pair (a b : B R) : B R := fun d => .pair (a d) (b d)
 def qlit (r : R) : B R := closed (.qlit r)
+/-- `let q (x, y) := s; body`, with the motive under the binder `z`. -/
+def split (q s : B R) (motive : B R → B R) (body : B R → B R → B R) : B R := fun d =>
+  .split (q d) (s d) "z" (motive (bvar d) (d + 1)) "x" "y" (body (bvar d) (bvar (d + 1)) (d + 2))
 
 /-- `t.2.2….1`: the `k`-th component of a right-nested tuple. -/
 def proj (t : B R) (k : Nat) : B R := fst ((List.range k).foldl (fun acc _ => snd acc) t)
@@ -102,9 +105,17 @@ for `c` (lifted to one universe, `imax (l+1) v`). `match` passes
 `fun t => ecase t [up m_c…]`, whose branches are alternatives: a variable used once in
 each branch is used once (the join, CoreSpec §5.3), where `casesOn`'s separate ω method
 arguments add up. Its body is the sized case at `∞` (`scase` runs its method once and
-does not scale it); kernel-checked like the others, so no new rule. -/
+does not scale it); kernel-checked like the others, so no new rule.
+
+With `linear`, `T.casesOn1` (linear-case stage 2): `casesOnA` for a scrutinee held at
+quantity 1, `(1 x : T Δ ξ)`. Its body is the case at quantity 1 (`scase_1`, K1), which
+hands the payload over at 1, and takes the payload apart with `split`s at 1 instead of
+projections (a projection uses its pair ω times): the tag comes out at `1·ω`, each field
+at `1·q` (its declared quantity, as the method takes it), the index equation at 0, and
+the final `Unit` is consumed by the unit eliminator `let () := u; …`. -/
 def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (sized : Bool := false)
-    (nondep : Bool := false) (additive : Bool := false) : Except String (Decl R) := do
+    (nondep : Bool := false) (additive : Bool := false) (linear : Bool := false) : Except String (Decl R) := do
+  let additive := additive || linear
   let some Td := g.find? T | throw s!"unknown inductive {T}"
   let some descD := g.find? (T ++ ".desc") | throw s!"{T} has no description"
   let ps := Td.levelParams
@@ -147,11 +158,11 @@ def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (s
   -- constructor signatures: fields after the Δ binders, and the result's index args
   let mut cinfo : Array (Name × List (Name × BinderInfo × Term R × Term R) × List (Term R)) := #[]
   for c in ctors do
-    let some cd := g.find? (T ++ "." ++ c) | throw s!"missing constructor {c}"
+    let some cd := g.find? (ctorConst T c) | throw s!"missing constructor {c}"
     let (bs, res) := peelPis cd.type
     let fields := bs.drop nΔ
     cinfo := cinfo.push (c, fields, (Term.spine res).2.drop nΔ)
-  let recName := T ++ (if additive then ".casesOnA" else if sized then ".scasesOn" else if withIH then ".rec" else ".casesOn") ++
+  let recName := T ++ (if linear then ".casesOn1" else if additive then ".casesOnA" else if sized then ".scasesOn" else if withIH then ".rec" else ".casesOn") ++
     (if nondep then "N" else "")
   -- (additive) the universe the method types are lifted to
   let uA : Level := .imax (.succ l) v
@@ -198,7 +209,7 @@ def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (s
         let xTy := match sv? with
           | some sv => sizedT Δv (σ.extract nΔ σ.size).toList sv
           | none => app Tc σ.toList
-        binder "x" .default (qlit w) xTy fun xv =>
+        binder "x" .default (qlit (if linear then 1 else w)) xTy fun xv =>
           body sv? Δv mot ms (σ.extract nΔ σ.size) xv
     let methodTy (ci : Name × List (Name × BinderInfo × Term R × Term R) × List (Term R)) : B R :=
       let (c, fields, idx) := ci
@@ -216,7 +227,7 @@ def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (s
             if isRec A then some (A, f, k) else none
           let rec ihs (rs : List (Term R × B R × Nat)) (σ' : Array (B R)) : B R :=
             match rs with
-            | [] => motApp mot ((idx.map (ofTele · σ)) ++ [app (closed (.const (T ++ "." ++ c) us)) σ.toList])
+            | [] => motApp mot ((idx.map (ofTele · σ)) ++ [app (closed (.const (ctorConst T c) us)) σ.toList])
             | (A, f, k) :: rs' =>
               -- `A` lives in the context of Δ and the fields before it
               let σk := σ.extract 0 (nΔ + k)
@@ -241,7 +252,7 @@ def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (s
       -- one method: `(1 m : (t : Enum ls) → ecase t [ULift (M_c)…])`; `M_c` is
       -- `down (m 'c)`
       let mA : B R := B.pi "t" .default (qlit w) (closed (.enum ls)) fun tv => fun d =>
-        .ecase "z" (.sort uA) (tv d) (cinfo.toList.map fun ci => .ulift uA (methodTy ci d))
+        .ecase "z" (.sort uA) (tv d) (cinfo.toList.map fun ci => .ulift .hole uA (methodTy ci d))
       binder "m" .default (qlit 1) mA fun m =>
         finish ((List.range cinfo.size).toArray.map fun k => fun d => .down (.app (m d) (.tag ls k)))
     else methods cinfo.toList #[]
@@ -271,7 +282,7 @@ def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (s
         let z := bvar (d - 1)
         let Dz := app Fv [upTag z]
         -- normalise only the template parts: evaluation would drop `conAt`'s annotation
-        (B.pi "rest" .default (qlit w) (norm g (interpOf Dz)) fun r =>
+        (B.pi "rest" .default (qlit (if linear then 1 else w)) (norm g (interpOf Dz)) fun r =>
           let goal := motApp mot (unpack i ++ [conAt i (pair (upTag z) r)])
           if ih?.isSome then B.pi "h" .default (qlit w) (norm g (allOf Dz r)) fun _ => goal else goal) d
       let branches : List (B R) := cinfo.toList.zipIdx.map fun ((c, fields, idx), ci) =>
@@ -289,7 +300,7 @@ def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (s
             (if recLifts[k]? == some .hrec then FieldLift.hrec else FieldLift.none).unwrap (proj h k d)
           let σ := Δv ++ fs.toArray
           let idxB := idx.map (ofTele · σ)
-          let ctorApp := app (closed (.const (T ++ "." ++ c) us)) (Δv.toList ++ fs)
+          let ctorApp := app (closed (.const (ctorConst T c) us)) (Δv.toList ++ fs)
           let A := norm g (motApp mot (idxB ++ [ctorApp]))
           let tag : B R := upTag (closed (.tag ls ci))
           let Bty := motApp mot (unpack i ++ [conAt i (pair tag r)])
@@ -302,8 +313,43 @@ def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (s
           -- without indices the two motives agree (`con (tag, r)` is the constructor
           -- applied to `r`'s fields, by η), so no cast: then the recursor computes on a
           -- constructor even at a neutral motive, without regularity
-          if nΞ == 0 || nondep then inner else
-          fun d => .cast (A d) (Bty d) (prf d) (inner d)
+          if !linear then
+            if nΞ == 0 || nondep then inner else
+            fun d => .cast (A d) (Bty d) (prf d) (inner d)
+          else
+          -- (casesOn1) `let 1 (f₁, r₁) := rest; …; let 1 (e, u) := rₙ; m 'c f…`: the
+          -- `k`-th split's motive is the goal with the payload rebuilt from the fields so
+          -- far and the remainder `z`; the final `u : Unit` is consumed by `let () := u`
+          let goalWith (pay : B R) : B R := motApp mot (unpack i ++ [conAt i (pair tag pay)])
+          let rec chain (k : Nat) (cur : B R) (acc : List (B R)) : B R :=
+            B.split (qlit 1) cur (fun z => goalWith (acc.foldr pair z)) fun f r' =>
+              if k < n then chain (k + 1) r' (acc ++ [f])
+              else
+                -- `f` is the equation `e`, `r'` the final `()`, consumed by the unit
+                -- eliminator `let () := r'; …`
+                let consume (body : B R) : B R := fun d => .letUnit (r' d) (body d)
+                consume <|
+                let rawFs := acc
+                let fs : List (B R) := rawFs.zipIdx.map fun (f, k) => fun d => (lifts[k]?.getD .none).unwrap (f d)
+                let σ := Δv ++ fs.toArray
+                let idxB := idx.map (ofTele · σ)
+                let ctorApp := app (closed (.const (ctorConst T c) us)) (Δv.toList ++ fs)
+                let A := norm g (motApp mot (idxB ++ [ctorApp]))
+                let inner := app (ms[ci]!) fs
+                if nΞ == 0 || nondep then inner else
+                let Bty := goalWith ((rawFs ++ [f]).foldr pair (closed .tt))
+                let Q := B.lam "j" fun j => B.lam "e" fun e' => fun d =>
+                  .eqTy (A d) ((motApp mot (unpack j ++
+                    [conAt j (pair tag ((rawFs ++ [e']).foldr pair (closed .tt)))])) d)
+                let prf : B R := fun d => .transp (Iv d) (tuple idxB d) (Q d) (.reflTy (A d)) (i d) (f d)
+                fun d => .cast (A d) (Bty d) (prf d) (inner d)
+          chain 0 r []
+      if linear then
+        -- `let 1 (t, rest) := xs; (ecase t […] : (1 rest : …) → …) rest`
+        B.split (qlit 1) xs (fun z => motApp mot (unpack i ++ [conAt i z])) fun t r => fun d =>
+          let scrut : Term R := if tagLifted then .down (t d) else t d
+          Term.app (.ecase "z" (motiveZ (d + 1)) scrut (branches.map (· d))) (r d)
+      else
       fun d =>
         let scrut : Term R := if tagLifted then .down (.fst (xs d)) else .fst (xs d)
         let e := Term.app (.ecase "z" (motiveZ (d + 1)) scrut (branches.map (· d))) (.snd (xs d))
@@ -313,7 +359,7 @@ def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (s
     match sv?.orElse fun _ => if additive then some (closed .szInf) else none with
     | some sv =>
       let M := B.lam "j" fun j => B.lam "i" fun i => B.lam "xs" fun xs => methodBody (some j) i xs none
-      fun d => .scase l (Iv d) (Dv d) v (P d) (M d) (sv d) (tuple ξ.toList d) (xv d)
+      fun d => .scase l (.qlit (if linear then 1 else w)) (Iv d) (Dv d) v (P d) (M d) (sv d) (tuple ξ.toList d) (xv d)
     | none =>
       -- (`casesOn` ignores the hypotheses: then the compiler can skip computing them)
       let M := B.lam "i" fun i => B.lam "xs" fun xs => B.lam "ih" fun ih =>

@@ -2,5 +2,5 @@ import FeralCore
 -- REJECTED (a borrow lengthened: a reborrow's region ρ is nested in σ, and a scope hands
 -- out only `Outlives σ ρ`, so `Mut.weaken` can shorten a borrow, never lengthen it).
 -- check.sh expects a type error.
-def bad {σ : Region} (v : Uniq σ U64) : Result (Unit × Uniq σ U64) :=
-  Uniq.reborrow v (fun ρ h v r => .ok ((), Mut.finish (Mut.weaken h (Mut.ofUniq r))))
+def bad {σ : Region} (1 v : Uniq σ U64) : Result1 Unit (Uniq σ U64) :=
+  Uniq.reborrow v (fun ρ h v r => .ok () (Mut.finish (Mut.weaken h (Mut.ofUniq r))))

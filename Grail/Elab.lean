@@ -49,7 +49,7 @@ def load (tc : Toolchain) (roots : List System.FilePath) (salt : UInt64) (src : 
   let init : CommandState ZeroOneMany :=
     { loader, cHeaders := (headers[·]?), cSources := some (Module.cSourceResolver sources),
       trustedModule := own.contains, trustNative := tc.trustNative,
-      nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := tc.smt }
+      nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := ← tc.smt.resolve }
   let key := Cache.moduleKey (fun n => if n == mainName then some src else loader n) (headers[·]?) salt mainName
     own.contains
   -- a `link_c` file that appears or disappears changes the check (its contents enter
@@ -61,11 +61,12 @@ def load (tc : Toolchain) (roots : List System.FilePath) (salt : UInt64) (src : 
   let key := match Cache.smtKey init.smt with | some k => mixHash key k | none => key
   pure { src, init, key }
 
-/-- Elaborate a loaded file (through the cache when there is one). -/
+/-- Elaborate a loaded file (through the cache when there is one: a write directory and
+any read-only ones). -/
 def elaborate (tc : Toolchain) (salt : UInt64) (l : Loaded) : IO (CommandState ZeroOneMany) := do
-  match tc.cacheDir with
-  | none => Cache.elaborateUncached l.src l.init salt
-  | some dir => pure (← Cache.elaborateCached dir l.src l.init l.key salt).1
+  match tc.cacheDir, tc.readCaches with
+  | none, [] => Cache.elaborateUncached l.src l.init salt
+  | write, reads => pure (← Cache.elaborateCached write reads l.src l.init l.key salt).1
 
 /-- The messages of a state, rendered `path:line:col: severity: text`. -/
 def render (path : String) (l : Loaded) (s : CommandState ZeroOneMany) : String :=

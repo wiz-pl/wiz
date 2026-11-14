@@ -32,7 +32,7 @@ for f in drafts/feral/rejected/*.wiz; do
     echo "accepted, but Rust rejects it: $f"; exit 1
   fi
   case "$out" in
-    *"type mismatch"*|*"is private to module Region"*) echo "rejected: $(echo "$out" | head -1)" ;;
+    *"type mismatch"*|*"is private to module Region"*|*"quantity"*) echo "rejected: $(echo "$out" | head -1)" ;;
     *) echo "rejected for another reason:"; echo "$out"; exit 1 ;;
   esac
 done

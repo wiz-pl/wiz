@@ -6,9 +6,9 @@ import FeralCore
 --                       { let b := 5; remember (&mut slot) (&b) }; … }
 -- `slot` holds references of a's region ρa; storing `&b : Shr ρb U64` needs
 -- `Outlives ρb ρa`, and the only evidence in scope is the other way round.
-def remember {ρa ρb ρm : Region} (0 h : Outlives ρa ρb) (slot : Uniq ρm (Option (Shr ρb U64))) (x : Shr ρa U64) :
-    Result (Unit × Uniq ρm (Option (Shr ρb U64))) :=
-  .ok ((), Uniq.set slot (Option.some (Shr.weaken h x)))
+def remember {ρa ρb ρm : Region} (0 h : Outlives ρa ρb) (1 slot : Uniq ρm (Option (Shr ρb U64))) (x : Shr ρa U64) :
+    Result1 Unit (Uniq ρm (Option (Shr ρb U64))) :=
+  .ok () (Uniq.write slot (Option.some (Shr.weaken h x)))
 def bad : Result Unit :=
   Shr.borrow Region.static (U64.lit 3) (fun ρa ha a =>
     let slot := Option.some a;

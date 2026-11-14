@@ -1,25 +1,48 @@
 import Json
 import Tagged
--- The infoview's model and its two renderers (stages 11m–n): goals as the language
--- server sends them, laid out for a terminal (SGR colours, wrapped to a width, one
--- selected subterm in reverse video) and for a browser (HTML with `data-ref`
--- attributes). Pure functions; the terminal program (`infoview/Tui.wiz`) and the
--- browser (`web/`) do the input and output. Tagged text itself (its JSON, flattening,
--- navigation, HTML) is `lib/Tagged.wiz`, shared with the documentation's pages (11s).
+/-!
+# Infoview
 
--- A hypothesis (`x y : A`, or `x : A := v`), and a goal.
+The infoview's model and its two renderers (stages 11m–n): goals as the language server
+sends them (`wiz/interactiveGoals`, `wiz/interactiveInfo`), laid out for a terminal
+(SGR colours, wrapped to a width, one selected subterm in reverse video) and for a
+browser (HTML with `data-ref` attributes). Pure functions; the terminal program
+(infoview/Tui.wiz) and the browser (web/) do the input and output. Tagged text itself
+(its JSON, flattening, navigation, HTML) is lib/Tagged.wiz, shared with the
+documentation's pages (11s).
+
+* Reading the server's answers: `Goals.ofJson`, `TacView.ofJson`, `Items.ofJson`.
+* The terminal: `View.ofInfo` lays everything out as lines of `Piece`s;
+  `Infoview.ansiLines` (or `Infoview.plainLines`) turns them into text, and
+  `View.navigate` / `Infoview.tagAt` move and find the selection.
+* The browser: `Infoview.htmlInfo`, numbered the same way, so selections agree.
+* The protocol around it: `Rpc.frame`, `Rpc.unframe`, `Rpc.request`, and `Key.decode`
+  for the terminal's keys and mouse.
+
+```
+def show (width : Nat) (answer : Json) : List String :=
+  Infoview.plainLines (View.lines (View.ofGoals width (Goals.ofJson answer)))
+-- one goal `n : Nat ⊢ n = n` shows as ["n : Nat", "⊢ n = n"]
+```
+-/
+
+
+/-- A hypothesis: `x y : A` (several names, one type), or `x : A := v` (with a value). -/
 inductive Hyp where
   | mk (names : List String) (type : TT) (val : Option TT)
+/-- A goal: its case name (empty if it has none), its hypotheses and its type. -/
 inductive Goal where
   | mk (name : String) (hyps : List Hyp) (type : TT)
 
 -- ## From JSON (the protocol's `wiz/interactiveGoals` result)
 
+/-- The strings of a list of JSON values (anything else reads as `""`). -/
 def Infoview.strings : List Json → List String
   | .nil => .nil
   | .cons j js => .cons (match j with
     | .str s => s
     | _ => "") (Infoview.strings js)
+/-- A hypothesis from the protocol's JSON (`{"names", "type", "val"?}`). -/
 def Hyp.ofJson (j : Json) : Hyp :=
   let ty : TT := match Json.get j "type" with
     | .some t => TT.ofJson t
@@ -30,30 +53,34 @@ def Hyp.ofJson (j : Json) : Hyp :=
       | .false => .some (TT.ofJson v)
     | .none => .none;
   .mk (Infoview.strings (Json.getList j "names")) ty val
+/-- `Hyp.ofJson` on each element. -/
 def Infoview.hyps : List Json → List Hyp
   | .nil => .nil
   | .cons j js => .cons (Hyp.ofJson j) (Infoview.hyps js)
+/-- A goal from the protocol's JSON (`{"userName", "hyps", "type"}`). -/
 def Goal.ofJson (j : Json) : Goal :=
   let ty : TT := match Json.get j "type" with
     | .some t => TT.ofJson t
     | .none => .text "";
   .mk (Json.getStr j "userName") (Infoview.hyps (Json.getList j "hyps")) ty
+/-- `Goal.ofJson` on each element. -/
 def Infoview.goals : List Json → List Goal
   | .nil => .nil
   | .cons j js => .cons (Goal.ofJson j) (Infoview.goals js)
--- `{"goals": [goal…], "range", "session"}` (`wiz/interactiveGoals`); `userName` may be
--- `null`, which reads as `""`
+/-- The goals of a `wiz/interactiveGoals` result, `{"goals": [goal…], "range", "session"}`.
+A goal's `userName` may be `null`, which reads as `""`. -/
 def Goals.ofJson (j : Json) : List Goal := Infoview.goals (Json.getList j "goals")
--- The tactic state at the cursor: the goals, and the info messages (`trace`,
--- `trace_state`) of the tactic it belongs to (the result's `messages`).
+/-- The tactic state at the cursor: the goals, and the info messages (`trace`,
+`trace_state`) of the tactic it belongs to (the result's `messages`). -/
 inductive TacView where
   | mk (goals : List Goal) (messages : List String)
+/-- The tactic state from a `wiz/interactiveGoals` result. -/
 def TacView.ofJson (j : Json) : TacView := .mk (Goals.ofJson j) (Infoview.strings (Json.getList j "messages"))
 
 -- ## Width
 
--- columns a code point takes in a terminal: 0 for combining marks, 2 for wide (East
--- Asian, emoji) characters, 1 otherwise
+/-- The columns a code point takes in a terminal: 0 for combining marks, 2 for wide (East
+Asian, emoji) characters, 1 otherwise. -/
 def Infoview.charWidth (c : Nat) : Nat :=
   match Bool.or (Json.between c 0x300 0x36F) (Json.between c 0x200B 0x200F) with
   | .true => 0
@@ -63,16 +90,19 @@ def Infoview.charWidth (c : Nat) : Nat :=
           (Bool.or (Json.between c 0x1F300 0x1FAFF) (Json.between c 0x20000 0x3FFFD)))) with
     | .true => 2
     | .false => 1
+/-- The columns some characters take (`Infoview.charWidth` summed). -/
 def Infoview.width : List Char → Nat
   | .nil => 0
   | .cons c cs => Infoview.charWidth (Char.code c) + Infoview.width cs
 
 -- ## Wrapping
 
--- Words: pieces cut at spaces, so a line can break between them. A word is a run of
--- non-spaces or a single space, with its piece's style.
+/-- Whether a character is a space. (Wrapping cuts pieces into words at spaces, so a line
+can break between them: a word is a run of non-spaces or a single space, with its
+piece's style.) -/
 def Infoview.isSpaceC (c : Char) : Bool := Nat.beq (Char.code c) 32
--- the longest prefix without (`sp = false`) or with only (`true`) spaces
+/-- The longest prefix without spaces (`sp = false`) or with only spaces (`sp = true`), and
+the rest. -/
 def Infoview.span (sp : Bool) : List Char → List Char × List Char
   | .nil => (List.nil, List.nil)
   | .cons c cs => match Bool.and (Bool.not sp) (Infoview.isSpaceC c) with
@@ -82,6 +112,8 @@ def Infoview.span (sp : Bool) : List Char → List Char × List Char
       | .false =>
         let r := Infoview.span sp cs;
         (List.cons c r.1, r.2)
+/-- The words of one piece's characters, with its style `k` and `tags`, onto `acc`
+(reversed). -/
 partial def Infoview.words (cs : List Char) (k : String) (tags : List Nat) (acc : List Piece) : List Piece :=
   match cs with
   | .nil => acc
@@ -90,25 +122,24 @@ partial def Infoview.words (cs : List Char) (k : String) (tags : List Nat) (acc 
     | .false =>
       let r := Infoview.span .false cs;
       Infoview.words r.2 k tags (.cons (.mk r.1 k tags) acc)
+/-- The pieces reversed onto `acc`. -/
 def Infoview.revPieces : List Piece → List Piece → List Piece
   | .nil, acc => acc
   | .cons p ps, acc => Infoview.revPieces ps (.cons p acc)
--- all words of some pieces, in order
+/-- All the words of some pieces, in order. -/
 def Infoview.allWords : List Piece → List Piece → List Piece
   | .nil, acc => Infoview.revPieces acc .nil
   | .cons (.mk cs k tags) ps, acc => Infoview.allWords ps (Infoview.words cs k tags acc)
 
--- Greedy word wrap to `width` columns. Continuation lines start with `indent` spaces;
--- a space at a break is dropped, a newline in the text breaks, and a word longer than
--- a line is cut. `line` is the current line (reversed), `col` its width, `lines` the
--- finished ones (reversed).
+/-- `n` spaces. -/
 def Infoview.spaces : Nat → List Char
   | .zero => .nil
   | .succ n => .cons (Json.chr 32) (Infoview.spaces n)
+/-- A continuation line's start: `indent` spaces (nothing for 0). -/
 def Infoview.indentLine (indent : Nat) : List Piece := match Nat.beq indent 0 with
   | .true => .nil
   | .false => .cons (.mk (Infoview.spaces indent) "" .nil) .nil
--- the longest prefix of `cs` at most `w` columns wide (at least one character)
+/-- The longest prefix of `cs` at most `w` columns wide, and the rest. -/
 def Infoview.takeWidth : Nat → List Char → List Char × List Char
   | _, .nil => (List.nil, List.nil)
   | w, .cons c cs => match Nat.lt w (Infoview.charWidth (Char.code c)) with
@@ -116,24 +147,32 @@ def Infoview.takeWidth : Nat → List Char → List Char × List Char
     | .false =>
       let r := Infoview.takeWidth (w - Infoview.charWidth (Char.code c)) cs;
       (List.cons c r.1, r.2)
+/-- Whether a word is a newline. -/
 def Infoview.isNewline : List Char → Bool
   | .cons c .nil => Nat.beq (Char.code c) 10
   | _ => .false
+/-- Whether a word is a space. -/
 def Infoview.isSpaceWord : List Char → Bool
   | .cons c .nil => Infoview.isSpaceC c
   | _ => .false
 
+/-- The state of wrapping: the current line (reversed), its width in columns, and the
+finished lines (reversed). -/
 inductive Wrap where
   | mk (line : List Piece) (col : Nat) (lines : List (List Piece))
 
--- spaces at the end of a (reversed) line
+/-- A (reversed) line without the spaces at its end. -/
 def Infoview.trimEnd : List Piece → List Piece
   | .nil => .nil
   | .cons (.mk cs k tags) rest => match Infoview.isSpaceWord cs with
     | .true => Infoview.trimEnd rest
     | .false => .cons (.mk cs k tags) rest
+/-- Ends the current line and starts a continuation line, indented. -/
 def Wrap.break (indent : Nat) : Wrap → Wrap
   | .mk line _ lines => .mk (Infoview.indentLine indent) indent (.cons (Infoview.revPieces (Infoview.trimEnd line) .nil) lines)
+/-- Greedy word wrap of words to `width` columns. Continuation lines start with `indent`
+spaces; a space at a break is dropped, a newline in the text breaks, and a word longer
+than a line is cut. -/
 partial def Infoview.wrapWords (width indent : Nat) (ws : List Piece) (st : Wrap) : Wrap := match ws with
   | .nil => st
   | .cons (.mk cs k tags) rest => match st with
@@ -156,26 +195,30 @@ partial def Infoview.wrapWords (width indent : Nat) (ws : List Piece) (st : Wrap
               | .cons _ _ => Infoview.wrapWords width indent (.cons (.mk r.2 k tags) rest)
                   (Wrap.break indent (.mk (.cons (.mk r.1 k tags) line) (col + Infoview.width r.1) lines))
 
+/-- The lines reversed onto `acc`. -/
 def Infoview.revLines : List (List Piece) → List (List Piece) → List (List Piece)
   | .nil, acc => acc
   | .cons l ls, acc => Infoview.revLines ls (.cons l acc)
--- The lines of `pieces` (in order), wrapped.
+/-- The lines of `pieces` (in order), wrapped to `width` (at least 8) with continuation
+lines indented by `indent`. -/
 def Infoview.wrap (width indent : Nat) (pieces : List Piece) : List (List Piece) :=
   match Infoview.wrapWords (Nat.max width 8) indent (Infoview.allWords pieces .nil) (.mk .nil 0 .nil) with
   | .mk line _ lines => Infoview.revLines (.cons (Infoview.revPieces line .nil) lines) .nil
 
 -- ## The view: goals laid out as lines
 
--- A whole view: its lines and the tags in it (in order of their indices).
+/-- A whole view: its lines and the tags in it (in the order of their indices). -/
 inductive View where
   | mk (lines : List (List Piece)) (tags : List TagInfo)
 
 -- ## Everything else at the cursor (`wiz/interactiveInfo`, stages 11q, 11w)
 
--- `{"kind", "title", "text"?, "type"?}`: a use of syntax or its expansion, an import, an
--- instance, a declaration of the command, a message (`text` and `type` may be null)
+/-- Something else at the cursor (`wiz/interactiveInfo`, stage 11q–r):
+`{"kind", "title", "text"?, "type"?}`, a use of syntax or its expansion, an import, an
+instance, a declaration of the command, or a message (`text` and `type` may be null). -/
 inductive InfoItem where
   | mk (kind : String) (title : String) (text : String) (type : Option TT)
+/-- An item from the protocol's JSON. -/
 def InfoItem.ofJson (j : Json) : InfoItem :=
   let ty : Option TT := match Json.get j "type" with
     | .some t => match Json.isNull t with
@@ -183,12 +226,15 @@ def InfoItem.ofJson (j : Json) : InfoItem :=
       | .false => .some (TT.ofJson t)
     | .none => .none;
   .mk (Json.getStr j "kind") (Json.getStr j "title") (Json.getStr j "text") ty
+/-- `InfoItem.ofJson` on each element. -/
 def Infoview.items : List Json → List InfoItem
   | .nil => .nil
   | .cons j js => .cons (InfoItem.ofJson j) (Infoview.items js)
--- `{"items": [item…], "session"}`, or `null` (no items)
+/-- The items of a `wiz/interactiveInfo` result, `{"items": [item…], "session"}`, or
+`null` (no items). -/
 def Items.ofJson (j : Json) : List InfoItem := Infoview.items (Json.getList j "items")
--- the section an item is shown in
+/-- The section an item is shown in: `Syntax`, `Import`, `Instances`, `Declarations` or
+`Messages`. -/
 def InfoItem.section (i : InfoItem) : String := match i with
   | .mk k _ _ _ => match String.eq k "syntax" with
     | .true => "Syntax"
@@ -201,28 +247,33 @@ def InfoItem.section (i : InfoItem) : String := match i with
           | .false => match String.eq k "declaration" with
             | .true => "Declarations"
             | .false => "Messages"
--- what goes before the type: a declaration's name, an instance's term
+/-- What goes before an item's type: a declaration's name, an instance's term. -/
 def InfoItem.head (i : InfoItem) : String := match i with
   | .mk k title text _ => match String.eq k "instance" with
     | .true => text
     | .false => title
+/-- Whether a string is empty. -/
 def Infoview.isEmptyStr (s : String) : Bool := Nat.beq (List.length (String.chars s)) 0
 
+/-- The tags reversed onto `acc`. -/
 def Infoview.revTags : List TagInfo → List TagInfo → List TagInfo
   | .nil, acc => acc
   | .cons t ts, acc => Infoview.revTags ts (.cons t acc)
+/-- A piece of plain text with a style (`kind`) and no tags. -/
 def Infoview.str (s : String) (kind : String) : Piece := .mk (String.chars s) kind .nil
+/-- Names separated by spaces. -/
 def Infoview.joinNames : List String → List Char
   | .nil => .nil
   | .cons n .nil => String.chars n
   | .cons n ns => List.append (String.chars n) (.cons (Json.chr 32) (Infoview.joinNames ns))
 
--- Tagged text as pieces in order, after `prefix`; tags numbered from the state's count.
+/-- Tagged text as pieces in order, after `prefix`; its tags are numbered from the state's
+count. -/
 def Infoview.piecesOf (prefix : List Piece) (t : TT) (st : Flat) : Flat := match st with
   | .mk _ n is => match TT.flatten t "" .nil (.mk (Infoview.revPieces prefix .nil) n is) with
     | .mk ps n2 is2 => .mk (Infoview.revPieces ps .nil) n2 is2
 
--- `x y : A` (`:= v`), wrapped with an indent of 4
+/-- A hypothesis's lines, `x y : A` (`:= v`), wrapped with an indent of 4. -/
 def Infoview.hypLines (width : Nat) (h : Hyp) (st : Flat) : List (List Piece) × Flat := match h with
   | .mk names ty val =>
     let pre : List Piece := .cons (.mk (Infoview.joinNames names) "name" .nil) (.cons (Infoview.str " : " "") .nil);
@@ -233,6 +284,7 @@ def Infoview.hypLines (width : Nat) (h : Hyp) (st : Flat) : List (List Piece) ×
       | .some v => match Infoview.piecesOf (.cons (Infoview.str " :=" "") (.cons (Infoview.str " " "") .nil)) v (.mk .nil n1 is1) with
         | .mk ps2 n2 is2 => (Infoview.wrap width 4 (List.append ps1 ps2), .mk .nil n2 is2)
 
+/-- The lines of each hypothesis, tags numbered on. -/
 def Infoview.hypsLines (width : Nat) : List Hyp → Flat → List (List Piece) × Flat
   | .nil, st => (List.nil, st)
   | .cons h hs, st =>
@@ -240,7 +292,7 @@ def Infoview.hypsLines (width : Nat) : List Hyp → Flat → List (List Piece) �
     let b := Infoview.hypsLines width hs a.2;
     (List.append a.1 b.1, b.2)
 
--- one goal: `case name`, the hypotheses, `⊢ type`
+/-- One goal's lines: `case name`, the hypotheses, `⊢ type`. -/
 def Infoview.goalLines (width : Nat) (g : Goal) (st : Flat) : List (List Piece) × Flat := match g with
   | .mk name hyps ty =>
     let header : List (List Piece) := match Nat.beq (List.length (String.chars name)) 0 with
@@ -250,6 +302,7 @@ def Infoview.goalLines (width : Nat) (g : Goal) (st : Flat) : List (List Piece) 
     match Infoview.piecesOf (.cons (Infoview.str "⊢" "turnstile") (.cons (Infoview.str " " "") .nil)) ty hs.2 with
     | .mk ps n is => (List.append header (List.append hs.1 (Infoview.wrap width 2 ps)), .mk .nil n is)
 
+/-- The lines of each goal, a blank line between goals. -/
 def Infoview.goalsLines (width : Nat) : List Goal → Flat → List (List Piece) × Flat
   | .nil, st => (List.nil, st)
   | .cons g gs, st =>
@@ -260,7 +313,7 @@ def Infoview.goalsLines (width : Nat) : List Goal → Flat → List (List Piece)
       | .cons _ _ => .cons .nil .nil;
     (List.append a.1 (List.append gap b.1), b.2)
 
--- The view of some goals at a width. No goals: one line saying so.
+/-- The view of some goals at a width. No goals: one line saying so. -/
 def View.ofGoals (width : Nat) (gs : List Goal) : View := match gs with
   | .nil => .mk (.cons (.cons (Infoview.str "No goals" "done") .nil) .nil) .nil
   | .cons _ _ =>
@@ -268,28 +321,29 @@ def View.ofGoals (width : Nat) (gs : List Goal) : View := match gs with
     match r.2 with
     | .mk _ _ is => .mk r.1 (Infoview.revTags is .nil)
 
--- The whole infoview: the tactic state (if the cursor is in a `by` block) and the
--- expected type (if there is a term), tags numbered across both.
+/-- A heading line (`Tactic state`, `Expected type`, …). -/
 def Infoview.header (s : String) : List Piece := .cons (Infoview.str s "header") .nil
--- the lines of a text (reversed line in `acc`)
+/-- The lines of a text (the current line reversed in `acc`). -/
 def Infoview.textLines : List Char → List Char → List (List Char)
   | .nil, acc => .cons (Json.revOnto acc .nil) .nil
   | .cons c cs, acc => match Nat.beq (Char.code c) 10 with
     | .true => .cons (Json.revOnto acc .nil) (Infoview.textLines cs .nil)
     | .false => Infoview.textLines cs (.cons c acc)
+/-- Lines of plain text, each wrapped. -/
 def Infoview.wrapLines (width : Nat) : List (List Char) → List (List Piece)
   | .nil => .nil
   | .cons l ls => List.append (Infoview.wrap width 0 (.cons (.mk l "" .nil) .nil)) (Infoview.wrapLines width ls)
--- messages, each line wrapped, with a blank line between them
+/-- Messages, each line wrapped, with a blank line between them. -/
 def Infoview.msgLines (width : Nat) : List String → List (List Piece)
   | .nil => .nil
   | .cons m .nil => Infoview.wrapLines width (Infoview.textLines (String.chars m) .nil)
   | .cons m ms => List.append (Infoview.wrapLines width (Infoview.textLines (String.chars m) .nil)) (.cons .nil (Infoview.msgLines width ms))
--- lines indented by two spaces
+/-- Lines indented by two spaces. -/
 def Infoview.indented : List (List Char) → List (List Char)
   | .nil => .nil
   | .cons l ls => .cons (.cons (Json.chr 32) (.cons (Json.chr 32) l)) (Infoview.indented ls)
--- one item: `head : type` (wrapped, indent 4), or its title and its text (indented)
+/-- One item's lines: `head : type` (wrapped, indent 4), or its title and its text
+(indented). -/
 def Infoview.itemLines (width : Nat) (i : InfoItem) (st : Flat) : List (List Piece) × Flat := match i with
   | .mk _ title text ty => match ty with
     | .some t =>
@@ -301,7 +355,7 @@ def Infoview.itemLines (width : Nat) (i : InfoItem) (st : Flat) : List (List Pie
         | .true => .nil
         | .false => Infoview.wrapLines width (Infoview.indented (Infoview.textLines (String.chars text) .nil));
       (List.append (Infoview.wrapLines width (.cons (String.chars title) .nil)) body, st)
--- the items, a header (after a blank line) where the section changes
+/-- The items' lines, with a heading (after a blank line) where the section changes. -/
 partial def Infoview.itemsLines (width : Nat) (sec : String) : List InfoItem → Flat → List (List Piece) × Flat
   | .nil, st => (List.nil, st)
   | .cons i is, st =>
@@ -312,11 +366,13 @@ partial def Infoview.itemsLines (width : Nat) (sec : String) : List InfoItem →
     let a := Infoview.itemLines width i st;
     let b := Infoview.itemsLines width s is a.2;
     (List.append head (List.append a.1 b.1), b.2)
+/-- The lines without a leading blank one. -/
 def Infoview.dropBlank : List (List Piece) → List (List Piece)
   | .cons .nil ls => ls
   | ls => ls
--- The whole infoview: the tactic state, the expected type and the other items, tags
--- numbered across all of them.
+/-- The whole infoview at a width: the tactic state (if the cursor is in a `by` block) and
+its messages, the expected type (if there is a term) and the other items, tags numbered
+across all of them. With nothing to show, one line saying so. -/
 def View.ofInfo (width : Nat) (st : Option TacView) (term : Option Goal) (items : List InfoItem) : View :=
   let tac0 : List (List Piece) × Flat := match st with
     | .none => (List.nil, Flat.mk List.nil 0 List.nil)
@@ -346,16 +402,17 @@ def View.ofInfo (width : Nat) (st : Option TacView) (term : Option Goal) (items 
   | .nil => .mk (.cons (.cons (Infoview.str "Nothing to show at the cursor" "dim") .nil) .nil) .nil
   | .cons _ _ => match all.2 with
     | .mk _ _ is => .mk all.1 (Infoview.revTags is .nil)
--- … without the other items
+/-- `View.ofInfo` without the other items. -/
 def View.ofTacState (width : Nat) (st : Option TacView) (term : Option Goal) : View :=
   View.ofInfo width st term .nil
--- … without messages
+/-- `View.ofTacState` without messages: just goals and the expected type. -/
 def View.ofState (width : Nat) (goals : Option (List Goal)) (term : Option Goal) : View :=
   View.ofTacState width (match goals with
     | .none => .none
     | .some gs => .some (.mk gs .nil)) term
 
--- the innermost tag (index + 1) at column `col` (from 0) of a line, or 0
+/-- The innermost tag (index + 1) at column `col` (from 0) of a line, or 0: what a mouse
+click selects. -/
 def Infoview.tagAt : List Piece → Nat → Nat
   | .nil, _ => 0
   | .cons (.mk cs _ tags) ps, col =>
@@ -366,24 +423,30 @@ def Infoview.tagAt : List Piece → Nat → Nat
       | .cons t _ => t + 1
     | .false => Infoview.tagAt ps (col - w)
 
+/-- The view's lines. -/
 def View.lines : View → List (List Piece)
   | .mk ls _ => ls
+/-- The view's tags, in the order of their indices. -/
 def View.tags : View → List TagInfo
   | .mk _ ts => ts
 
 -- ## Selection and navigation
+/-- The selection after a `Nav` key (`Tagged.navigate` on the view's tags). -/
 def View.navigate (v : View) (sel : Nat) (nav : Nav) : Nat := Tagged.navigate (View.tags v) sel nav
 
+/-- Whether `n` is in the list. -/
 def Infoview.memNat : Nat → List Nat → Bool
   | _, .nil => .false
   | n, .cons m ms => Bool.or (Nat.beq n m) (Infoview.memNat n ms)
+/-- Whether a piece inside `tags` is in the selected tag `sel` (index + 1; 0: none). -/
 def Infoview.selected (sel : Nat) (tags : List Nat) : Bool := match Nat.beq sel 0 with
   | .true => .false
   | .false => Infoview.memNat (sel - 1) tags
+/-- Whether a line shows any of the selection. -/
 def Infoview.lineHas (sel : Nat) : List Piece → Bool
   | .nil => .false
   | .cons (.mk _ _ tags) ps => Bool.or (Infoview.selected sel tags) (Infoview.lineHas sel ps)
--- the first line showing the selection (0 if none)
+/-- The first line showing the selection (0 if none), to scroll it into view. -/
 def Infoview.selLine (sel : Nat) : List (List Piece) → Nat → Nat
   | .nil, _ => 0
   | .cons l ls, i => match Infoview.lineHas sel l with
@@ -392,7 +455,8 @@ def Infoview.selLine (sel : Nat) : List (List Piece) → Nat → Nat
 
 -- ## Terminal output
 
--- SGR parameters for a kind of text
+/-- The SGR parameters (colours, bold, …) for a kind of text: constants blue, variables
+yellow, sorts cyan, and so on. -/
 def Infoview.sgrOf (kind : String) : String :=
   match String.eq kind "const" with
   | .true => "34"
@@ -417,42 +481,50 @@ def Infoview.sgrOf (kind : String) : String :=
                     | .false => match String.eq kind "dim" with
                       | .true => "2"
                       | .false => ""
+/-- The escape character, ESC. -/
 def Infoview.esc : Char := Json.chr 27
--- `ESC [ 0 ; params m`, then the text
+/-- `ESC [ 0 ; params m` (reset, then `params`), in front of `tail`. -/
 def Infoview.sgr (params : String) (tail : List Char) : List Char :=
   .cons Infoview.esc (.cons (Json.chr 91) (.cons (Json.chr 48) (match Nat.beq (List.length (String.chars params)) 0 with
     | .true => .cons (Json.chr 109) tail
     | .false => .cons (Json.chr 59) (List.append (String.chars params) (.cons (Json.chr 109) tail)))))
+/-- The SGR parameters for a piece: its kind's, in reverse video when it is selected. -/
 def Infoview.pieceSgr (sel : Nat) (kind : String) (tags : List Nat) : String :=
   match Infoview.selected sel tags with
   | .false => Infoview.sgrOf kind
   | .true => match Nat.beq (List.length (String.chars (Infoview.sgrOf kind))) 0 with
     | .true => "7"
     | .false => String.append (Infoview.sgrOf kind) ";7"
--- A line for the terminal: SGR before every piece, reset at the end. Control
--- characters in the text are dropped, so the server can't move the cursor.
+/-- The characters without control characters, in front of `tail`, so the server can't
+move the cursor. -/
 def Infoview.safe : List Char → List Char → List Char
   | .nil, tail => tail
   | .cons c cs, tail => match Bool.or (Nat.lt (Char.code c) 32) (Nat.beq (Char.code c) 127) with
     | .true => Infoview.safe cs tail
     | .false => .cons c (Infoview.safe cs tail)
+/-- A line's pieces for the terminal: SGR before every piece, reset at the end. -/
 def Infoview.ansiPieces (sel : Nat) : List Piece → List Char → List Char
   | .nil, tail => Infoview.sgr "" tail
   | .cons (.mk cs k tags) ps, tail => Infoview.sgr (Infoview.pieceSgr sel k tags) (Infoview.safe cs (Infoview.ansiPieces sel ps tail))
+/-- A line for the terminal, with tag `sel` (index + 1) in reverse video. -/
 def Infoview.ansiLine (sel : Nat) (l : List Piece) : String := .mk (Infoview.ansiPieces sel l .nil)
+/-- `Infoview.ansiLine` on each line. -/
 def Infoview.ansiLines (sel : Nat) : List (List Piece) → List String
   | .nil => .nil
   | .cons l ls => .cons (Infoview.ansiLine sel l) (Infoview.ansiLines sel ls)
--- plain text of a line (for tests and dumb terminals)
+/-- The plain text of a line (for tests and dumb terminals). -/
 def Infoview.plainLine (l : List Piece) : String := .mk (Infoview.safe (Tagged.piecesText (Infoview.revPieces l .nil) .nil) .nil)
+/-- `Infoview.plainLine` on each line. -/
 def Infoview.plainLines : List (List Piece) → List String
   | .nil => .nil
   | .cons l ls => .cons (Infoview.plainLine l) (Infoview.plainLines ls)
 
+/-- A hypothesis's names as HTML, separated by spaces. -/
 def Infoview.htmlNames : List String → Html → Html
   | .nil, h => h
   | .cons n .nil, h => Html.add (Tagged.htmlText n .nil) h
   | .cons n ns, h => Infoview.htmlNames ns (Html.lit " " (Html.add (Tagged.htmlText n .nil) h))
+/-- A hypothesis as HTML: `<div class="hyp">` with its names, its type and its value. -/
 def Infoview.htmlHyp (sel : Nat) (hy : Hyp) (h : Html) : Html := match hy with
   | .mk names ty val =>
     let h1 := TT.html sel ty (Html.lit "</span> : " (Infoview.htmlNames names (Html.lit "<div class=\"hyp\"><span class=\"names\">" h)));
@@ -460,9 +532,11 @@ def Infoview.htmlHyp (sel : Nat) (hy : Hyp) (h : Html) : Html := match hy with
       | .none => h1
       | .some v => TT.html sel v (Html.lit " := " h1);
     Html.lit "</div>" h2
+/-- Each hypothesis as HTML. -/
 def Infoview.htmlHyps (sel : Nat) : List Hyp → Html → Html
   | .nil, h => h
   | .cons hy hs, h => Infoview.htmlHyps sel hs (Infoview.htmlHyp sel hy h)
+/-- A goal as HTML: `<div class="goal">` with its case name, hypotheses and target. -/
 def Infoview.htmlGoal (sel : Nat) (g : Goal) (h : Html) : Html := match g with
   | .mk name hyps ty =>
     let h0 := Html.lit "<div class=\"goal\">" h;
@@ -471,10 +545,11 @@ def Infoview.htmlGoal (sel : Nat) (g : Goal) (h : Html) : Html := match g with
       | .false => Html.lit "</div>" (Html.add (Tagged.htmlText name .nil) (Html.lit "<div class=\"case\">case " h0));
     let h2 := Infoview.htmlHyps sel hyps h1;
     Html.lit "</div></div>" (TT.html sel ty (Html.lit "<div class=\"target\"><span class=\"turnstile\">⊢</span> " h2))
+/-- Each goal as HTML. -/
 def Infoview.htmlGoals (sel : Nat) : List Goal → Html → Html
   | .nil, h => h
   | .cons g gs, h => Infoview.htmlGoals sel gs (Infoview.htmlGoal sel g h)
--- The goals as HTML (`sel`: the selected tag's index + 1, or 0).
+/-- The goals as HTML (`sel`: the selected tag's index + 1, or 0). -/
 def Goals.toHtml (sel : Nat) (gs : List Goal) : String := match gs with
   | .nil => "<div class=\"no-goals\">No goals</div>"
   | .cons _ _ => match Infoview.htmlGoals sel gs (.mk .nil 0) with
@@ -482,7 +557,7 @@ def Goals.toHtml (sel : Nat) (gs : List Goal) : String := match gs with
 
 -- ## JSON-RPC framing (`Content-Length: N\r\n\r\n` and N bytes of UTF-8)
 
--- bytes of a code point in UTF-8
+/-- The number of bytes of a code point in UTF-8. -/
 def Infoview.utf8Len (c : Nat) : Nat := match Nat.lt c 0x80 with
   | .true => 1
   | .false => match Nat.lt c 0x800 with
@@ -490,16 +565,18 @@ def Infoview.utf8Len (c : Nat) : Nat := match Nat.lt c 0x80 with
     | .false => match Nat.lt c 0x10000 with
       | .true => 3
       | .false => 4
+/-- The number of bytes of some characters in UTF-8. -/
 def Infoview.utf8Size : List Char → Nat
   | .nil => 0
   | .cons c cs => Infoview.utf8Len (Char.code c) + Infoview.utf8Size cs
--- a message, framed
+/-- A JSON-RPC message, framed for the wire: `Content-Length: N\r\n\r\n` and the N bytes
+of the body (in UTF-8). -/
 def Rpc.frame (body : String) : String :=
   .mk (List.append (String.chars "Content-Length: ")
     (Json.natChars (Infoview.utf8Size (String.chars body)) (.cons (Json.chr 13) (.cons (Json.chr 10)
       (.cons (Json.chr 13) (.cons (Json.chr 10) (String.chars body)))))))
 
--- the header block and what follows it, when `\r\n\r\n` has arrived (`acc` reversed)
+/-- The header block and what follows it, once `\r\n\r\n` has arrived (`acc` reversed). -/
 partial def Infoview.splitHeader : List Char → List Char → Option (List Char × List Char)
   | .cons a (.cons b (.cons c (.cons d rest))), acc =>
     match Bool.and (Bool.and (Nat.beq (Char.code a) 13) (Nat.beq (Char.code b) 10))
@@ -507,29 +584,32 @@ partial def Infoview.splitHeader : List Char → List Char → Option (List Char
     | .true => .some (Json.revOnto acc .nil, rest)
     | .false => Infoview.splitHeader (.cons b (.cons c (.cons d rest))) (.cons a acc)
   | _, _ => .none
--- the number after `Content-Length:` in a header block
+/-- A code point in lower case (ASCII letters only). -/
 def Infoview.lower (c : Nat) : Nat := match Json.between c 65 90 with
   | .true => c + 32
   | .false => c
+/-- The rest of the input after a prefix, ignoring case, if it starts with it. -/
 def Infoview.prefixCI : List Char → List Char → Option (List Char)
   | .nil, s => .some s
   | .cons p ps, .cons c cs => match Nat.beq (Infoview.lower (Char.code p)) (Infoview.lower (Char.code c)) with
     | .true => Infoview.prefixCI ps cs
     | .false => .none
   | _, _ => .none
+/-- The number after `Content-Length:` (any case) in a header block. -/
 def Infoview.contentLength : List Char → Option Nat
   | .nil => .none
   | .cons c cs => match Infoview.prefixCI (String.chars "content-length:") (.cons c cs) with
     | .some rest => .some (Json.digits (Json.skipWs rest) 0 0 .nil).1
     | .none => Infoview.contentLength cs
--- the first `n` bytes' worth of characters (`none` if they haven't all arrived)
+/-- The first `n` bytes' worth of characters and the rest (`none` if they haven't all
+arrived). -/
 partial def Infoview.takeBytes : Nat → List Char → List Char → Option (List Char × List Char)
   | .zero, s, acc => .some (Json.revOnto acc .nil, s)
   | .succ n, .cons c cs, acc => Infoview.takeBytes (.succ n - Infoview.utf8Len (Char.code c)) cs (.cons c acc)
   | .succ _, .nil, _ => .none
 
--- One message from the front of a buffer: its body and the rest, or `none` when it
--- hasn't all arrived.
+/-- One message from the front of a buffer: its body and the rest, or `none` when it
+hasn't all arrived. The inverse of `Rpc.frame`. -/
 def Rpc.unframe (buf : List Char) : Option (String × List Char) := match Infoview.splitHeader buf .nil with
   | .none => .none
   | .some h => match Infoview.contentLength h.1 with
@@ -538,21 +618,26 @@ def Rpc.unframe (buf : List Char) : Option (String × List Char) := match Infovi
       | .none => .none
       | .some p => .some (String.mk p.1, p.2)
 
--- an error object with code -32801 (ContentModified: the document changed, refs are gone)
+/-- Whether an error object has code -32801 (ContentModified: the document changed, so the
+subterm references are gone). -/
 def Rpc.contentModified (e : Json) : Bool := match Json.get e "code" with
   | .some (.int neg n) => Bool.and neg (Nat.beq n 32801)
   | _ => .false
 
--- requests and notifications
+/-- A JSON-RPC request, as text: `Rpc.request 3 "wiz/interactiveGoals" params`. -/
 def Rpc.request (id : Nat) (method : String) (params : Json) : String :=
   Json.render (Json.mkObj (.cons ("jsonrpc", Json.mkStr "2.0") (.cons ("id", Json.ofNat id)
     (.cons ("method", Json.mkStr method) (.cons ("params", params) .nil)))))
+/-- The `params` of a request about a position: `{"textDocument": {"uri"}, "position":
+{"line", "character"}}` (both from 0). -/
 def Rpc.position (uri : String) (line col : Nat) : Json :=
   Json.mkObj (.cons ("textDocument", Json.mkObj (.cons ("uri", Json.mkStr uri) .nil))
     (.cons ("position", Json.mkObj (.cons ("line", Json.ofNat line) (.cons ("character", Json.ofNat col) .nil))) .nil))
 
 -- ## Keys
 
+/-- A key (or a mouse event) read from the terminal: a character, the arrows, Shift-Tab,
+Page Up/Down, Home, End, Escape, an SGR mouse report, or something unknown. -/
 inductive Key where
   | char (c : Nat)
   | up
@@ -569,12 +654,13 @@ inductive Key where
   | mouse (b x y : Nat) (press : Bool)
   | unknown
 
+/-- A character's code point. -/
 def Infoview.code (c : Char) : Nat := Char.code c
--- `n;` digits of an SGR mouse report: the number and the rest
+/-- The digits of an SGR mouse report before a `;`: the number and the rest. -/
 def Infoview.num (s : List Char) : Nat × List Char :=
   let d := Json.digits s 0 0 .nil;
   (d.1, d.2.2.2)
--- after `ESC [ <`: `b;x;yM` (press) or `…m` (release)
+/-- After `ESC [ <`: `b;x;yM` (a press) or `…m` (a release). -/
 def Infoview.mouse (s : List Char) : Key × List Char :=
   let b := Infoview.num s;
   let x := Infoview.num (Json.drop1 b.2);
@@ -582,7 +668,7 @@ def Infoview.mouse (s : List Char) : Key × List Char :=
   match y.2 with
   | .cons c rest => (.mouse b.1 x.1 y.1 (Nat.beq (Infoview.code c) 77), rest)
   | .nil => (.unknown, .nil)
--- after `ESC [`
+/-- The key of an escape sequence after `ESC [`, and the rest. -/
 def Infoview.csi (s : List Char) : Key × List Char := match s with
   | .cons c rest =>
     let n := Infoview.code c;
@@ -612,7 +698,7 @@ def Infoview.csi (s : List Char) : Key × List Char := match s with
                       | .true => (.pageDown, after)
                       | .false => (.unknown, after)
   | .nil => (.escape, .nil)
--- The keys in some terminal input.
+/-- The keys in some terminal input: `Key.decode (String.chars "q")` is `[.char 113]`. -/
 partial def Key.decode (s : List Char) : List Key := match s with
   | .nil => .nil
   | .cons c rest => match Nat.beq (Infoview.code c) 27 with
@@ -625,11 +711,11 @@ partial def Key.decode (s : List Char) : List Key := match s with
           .cons k.1 (Key.decode k.2)
         | .false => .cons .escape (Key.decode rest)
 
--- The whole infoview as HTML, numbered like `View.ofState` (so selections agree).
+/-- Messages as HTML, each in a `<pre class="message">`. -/
 def Infoview.htmlMsgs : List String → Html → Html
   | .nil, h => h
   | .cons m ms, h => Infoview.htmlMsgs ms (Html.lit "</pre>" (Html.add (Tagged.htmlText m .nil) (Html.lit "<pre class=\"message\">" h)))
--- one item, and the items with a heading where the section changes
+/-- One item as HTML. -/
 def Infoview.htmlItem (sel : Nat) (i : InfoItem) (h : Html) : Html := match i with
   | .mk _ title text ty => match ty with
     | .some t => Html.lit "</div>" (TT.html sel t (Html.lit "</span> : "
@@ -639,6 +725,7 @@ def Infoview.htmlItem (sel : Nat) (i : InfoItem) (h : Html) : Html := match i wi
       match Infoview.isEmptyStr text with
       | .true => h1
       | .false => Html.lit "</pre>" (Html.add (Tagged.htmlText text .nil) (Html.lit "<pre class=\"item-text\">" h1))
+/-- The items as HTML, with a heading where the section changes. -/
 partial def Infoview.htmlItems (sel : Nat) (sec : String) : List InfoItem → Html → Html
   | .nil, h => h
   | .cons i is, h =>
@@ -647,6 +734,8 @@ partial def Infoview.htmlItems (sel : Nat) (sec : String) : List InfoItem → Ht
       | .true => h
       | .false => Html.lit "</h3>" (Html.add (Tagged.htmlText s .nil) (Html.lit "<h3>" h));
     Infoview.htmlItems sel s is (Infoview.htmlItem sel i h1)
+/-- The whole infoview as HTML, numbered like `View.ofInfo` (so selections agree): the
+tactic state, its messages, the expected type and the other items. -/
 def Infoview.htmlInfo (sel : Nat) (st : Option TacView) (term : Option Goal) (items : List InfoItem) : String :=
   let h0 : Html := .mk .nil 0;
   let h1 : Html := match st with
@@ -667,9 +756,10 @@ def Infoview.htmlInfo (sel : Nat) (st : Option TacView) (term : Option Goal) (it
   | .mk acc _ => match acc with
     | .nil => "<div class=\"nothing\">Nothing to show at the cursor</div>"
     | .cons _ _ => .mk (Json.revOnto acc .nil)
+/-- `Infoview.htmlInfo` without the other items. -/
 def Infoview.htmlTacState (sel : Nat) (st : Option TacView) (term : Option Goal) : String :=
   Infoview.htmlInfo sel st term .nil
--- … without messages
+/-- `Infoview.htmlTacState` without messages. -/
 def Infoview.htmlState (sel : Nat) (goals : Option (List Goal)) (term : Option Goal) : String :=
   Infoview.htmlTacState sel (match goals with
     | .none => .none

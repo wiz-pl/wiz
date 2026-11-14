@@ -68,6 +68,13 @@ class QRig (R : Type) extends Rig R where
   local variables only in erased positions. -/
   many? : Option R := none
 
+/-- A stable name for a rig, used by cache artifacts that hold elaborated terms
+(`Cache.ModuleArtifact.rig`, `--region-cache`): two rigs with the same name must mean the
+same quantities, and a rig whose meaning changes needs a new name. -/
+class RigTag (R : Type) where
+  /-- e.g. `"zero-one-many"` -/
+  tag : String
+
 /-- How quantities are written in surface syntax and printed back.
 
 Binders without a quantity get a default: Idris 2 uses ω for explicit binders and 0

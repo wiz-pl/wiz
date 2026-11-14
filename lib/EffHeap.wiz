@@ -1,53 +1,62 @@
 import Eff
 import HoareTactics
--- Heap cells as an effect (lib/Eff.wiz) interpreted into the heap programs of separation
--- logic (lib/Hoare.wiz): the effect observation of plan S7 for state, and the reason
--- `Commute` is not needed for state on different cells. docs/resources.md tells how this
--- fits with Feral and the optics; /workspace/wiz-notes/cohesion-resources.md, M3.
---
--- * `Cell V l` is a state effect on the cell at location `l` (`State V` with the location
---   in its type, so a row can hold several cells and `Member` tells them apart).
--- * `Eff.toProg` is `interpret` (lib/Eff.wiz) with each cell handled by `get`/`set` on its
---   location: an `Eff` program over cells *is* a heap program, so its specification is a
---   `Triple` of `Eff.toProg c`, and the `x`-tactics prove it.
--- * Commutation. `Commute (Cell V p) (Cell V q) (Prog V)` does not hold: `Commute` asks
---   for an equation of computations, and `get p; get q` and `get q; get p` are different
---   trees. What does hold is that both orders meet the same specification from
---   `(p ↦ x) ⋆ (q ↦ y)` (`Cell.commute`): `⋆` says the cells are different, and that is
---   all the reordering needs. So for state, the commutation proofs of 10a become a
---   consequence of separation, proved once for every pair of operations.
+/-!
+# EffHeap
 
--- ## A cell as an effect
+Heap cells as an effect (lib/Eff.wiz) interpreted into the heap programs of separation
+logic (lib/Hoare.wiz): the effect observation of plan S7 for state, and the reason
+`Commute` is not needed for state on different cells. docs/resources.md tells how this
+fits with Feral and the optics; /workspace/wiz-notes/cohesion-resources.md, M3.
 
--- the operations on the cell at `l` (`l` is a phantom parameter: it is part of the type)
+* `Cell V l` is a state effect on the cell at location `l` (`State V` with the location
+  in its type, so a row can hold several cells and `Member` tells them apart).
+* `Eff.toProg` is `interpret` (lib/Eff.wiz) with each cell handled by `get`/`set` on its
+  location: an `Eff` program over cells *is* a heap program, so its specification is a
+  `Triple` of `Eff.toProg c`, and the `x`-tactics prove it.
+* Commutation. `Commute (Cell V p) (Cell V q) (Prog V)` does not hold: `Commute` asks
+  for an equation of computations, and `get p; get q` and `get q; get p` are different
+  trees. What does hold is that both orders meet the same specification from
+  `(p ↦ x) ⋆ (q ↦ y)` (`Cell.commute`): `⋆` says the cells are different, and that is
+  all the reordering needs. So for state, the commutation proofs of 10a become a
+  consequence of separation, proved once for every pair of operations.
+-/
+
+
+/-- the operations on the cell at `l` (`l` is a phantom parameter: it is part of the type) -/
 inductive CellOp (V : Type) (l : Nat) where
   | get
   | put (v : V)
+/-- The type of the answer a `CellOp` gives: `V` for `get`, `Unit` for `put`. -/
 def CellOp.ret {ω V : Type} {l : Nat} : CellOp V l → Type
   | .get => V
   | .put _ => Unit
+/-- The state effect on the cell at `l` (a `State V` with the location in its type). -/
 def Cell (V : Type) (l : Nat) : Effect := Effect.mk (CellOp V l) CellOp.ret
 
+/-- Read the cell at `l` (a `get` request in the effect row `r`). -/
 def Cell.get {V : Type} (l : Nat) {r : Row} [Member (Cell V l) r] : Eff r V :=
   send (Cell V l) (@CellOp.get V l)
+/-- Write `v` to the cell at `l` (a `put` request in the effect row `r`). -/
 def Cell.put {V : Type} (l : Nat) {r : Row} [Member (Cell V l) r] (v : V) : Eff r Unit :=
   send (Cell V l) (@CellOp.put V l v)
 
 -- ## The effect observation: cells are heap cells
 
+/-- A cell operation on the heap: `read l` and `write l v` (`Prog`). -/
 def Cell.handle {V : Type} (l : Nat) : (o : CellOp V l) → Prog V (CellOp.ret o)
   | .get => Prog.read l
   | .put v => Prog.write l v
+/-- The handler: a cell operation is `Cell.handle` on the heap. -/
 instance {V : Type} {ω l : Nat} : Handler (Cell V l) (Prog V) where
   handle := fun o => Cell.handle l o
 
--- an `Eff` program over cells, as a heap program
+/-- an `Eff` program over cells, as a heap program -/
 def Eff.toProg {V : Type} {r : Row} [hs : Handlers r (Prog V)] {A : Type} (c : Eff r A) : Prog V A :=
   @interpret r (Prog V) _ hs A c
 
 -- ## The interpretation is a monad morphism
 
--- `Prog.bind` is associative (by induction: each node's continuation, pointwise)
+/-- `Prog.bind` is associative (by induction: each node's continuation, pointwise) -/
 def Prog.bind_assoc {V A B C : Type} : (c : Prog V A) → (f : A → Prog V B) → (g : B → Prog V C) →
     Prog.bind (Prog.bind c f) g = Prog.bind c (fun a => Prog.bind (f a) g)
   | .ret a, f, g => refl (Prog.bind (f a) g)
@@ -57,8 +66,8 @@ def Prog.bind_assoc {V A B C : Type} : (c : Prog V A) → (f : A → Prog V B) �
   | .free l k, f, g => Eq.congrArg (Prog.free l) (Prog.bind_assoc k f g)
   | .fail, f, g => refl (@Prog.fail V C)
 
--- running `c >>= f` on the heap is running `c`, then `f` of its answer (DM4All's
--- morphism law for the effect observation, on the computational side)
+/-- running `c >>= f` on the heap is running `c`, then `f` of its answer (DM4All's
+morphism law for the effect observation, on the computational side) -/
 def Eff.toProg_bind {V : Type} {r : Row} [hs : Handlers r (Prog V)] {A B : Type} :
     (c : Eff r A) → (f : A → Eff r B) →
     @Eff.toProg V r hs B (Eff.bind c f) = Prog.bind (@Eff.toProg V r hs A c) (fun a => @Eff.toProg V r hs B (f a))
@@ -68,12 +77,13 @@ def Eff.toProg_bind {V : Type} {r : Row} [hs : Handlers r (Prog V)] {A B : Type}
         (funext (fun x => @Eff.toProg_bind V r hs A B (k x) f)))
       (Eq.symm (Prog.bind_assoc (@Handlers.handleU r (Prog V) hs o)
         (fun x => @Eff.toProg V r hs A (k x)) (fun a => @Eff.toProg V r hs B (f a))))
+/-- `Eff.pure` is `Prog.ret`: the interpretation takes a pure value to a pure program. -/
 def Eff.toProg_pure {V : Type} {r : Row} [hs : Handlers r (Prog V)] {A : Type} (a : A) :
     @Eff.toProg V r hs A (Eff.pure a) = Prog.ret a := refl (@Prog.ret V A a)
 
--- the same law for specifications: a triple for `c >>= f` from triples of `c` and the
--- rest (with the `x`-tactics: `Triple.effBind (by xapp …)`, so that a verified `Eff`
--- program can be called as `xapp t` instead of being stepped through again)
+/-- the same law for specifications: a triple for `c >>= f` from triples of `c` and the
+rest (with the `x`-tactics: `Triple.effBind (by xapp …)`, so that a verified `Eff`
+program can be called as `xapp t` instead of being stepped through again) -/
 def Triple.effBind {V : Type} {r : Row} [hs : Handlers r (Prog V)] {A B : Type} {P : HProp V}
     {ω c : Eff r A} {ω f : A → Eff r B} {Q : B → HProp V}
     (t : Triple P (Prog.bind (@Eff.toProg V r hs A c) (fun a => @Eff.toProg V r hs B (f a))) Q) :
@@ -86,11 +96,13 @@ def Triple.effBind {V : Type} {r : Row} [hs : Handlers r (Prog V)] {A B : Type} 
 
 -- ## Each operation's small-footprint specification
 
--- what the cell at `l`, holding `x`, satisfies after `o` answered `a`
+/-- what the cell at `l`, holding `x`, satisfies after `o` answered `a` -/
 def Cell.post {V : Type} (l : Nat) (x : V) : (o : CellOp V l) → CellOp.ret o → HProp V
   | .get, a => hpure (a = x) ⋆ (l ↦ x)
   | .put v, _ => l ↦ v
 
+/-- Each cell operation's small-footprint specification (`get` gives the old value back,
+`put` sets the new one). -/
 def Cell.spec {V : Type} (l : Nat) (x : V) : (o : CellOp V l) →
     Triple (l ↦ x) (Cell.handle l o) (Cell.post l x o)
   | .get => by xgo
@@ -98,22 +110,26 @@ def Cell.spec {V : Type} (l : Nat) (x : V) : (o : CellOp V l) →
 
 -- ## Commutation, from separation
 
--- two operations on two cells, in one order and in the other, with both answers
+/-- two operations on two cells, in one order and in the other, with both answers -/
 def Cell.both12 {V : Type} {ω p q : Nat} (o₁ : CellOp V p) (o₂ : CellOp V q) :
     Prog V (CellOp.ret o₁ × CellOp.ret o₂) :=
   Prog.bind (Cell.handle p o₁) (fun a => Prog.bind (Cell.handle q o₂) (fun b => Prog.ret (a, b)))
+/-- Two operations on two cells, the first on `q` and then the first on `p` (the other
+order's answers). -/
 def Cell.both21 {V : Type} {ω p q : Nat} (o₁ : CellOp V p) (o₂ : CellOp V q) :
     Prog V (CellOp.ret o₁ × CellOp.ret o₂) :=
   Prog.bind (Cell.handle q o₂) (fun b => Prog.bind (Cell.handle p o₁) (fun a => Prog.ret (a, b)))
 
--- both orders meet the same specification: the cells are separate, so neither operation
--- sees the other
+/-- both orders meet the same specification: the cells are separate, so neither operation
+sees the other -/
 def Cell.both12_spec {V : Type} (p q : Nat) (x y : V) (o₁ : CellOp V p) (o₂ : CellOp V q) :
     Triple ((p ↦ x) ⋆ (q ↦ y)) (Cell.both12 o₁ o₂)
       (fun ab => Cell.post p x o₁ ab.1 ⋆ Cell.post q y o₂ ab.2) := by
   xapp (Cell.spec p x o₁)
   xapp (Cell.spec q y o₂)
   xval
+/-- Both orders meet the same specification: the cells are separate, so neither
+operation sees the other. -/
 def Cell.both21_spec {V : Type} (p q : Nat) (x y : V) (o₁ : CellOp V p) (o₂ : CellOp V q) :
     Triple ((p ↦ x) ⋆ (q ↦ y)) (Cell.both21 o₁ o₂)
       (fun ab => Cell.post p x o₁ ab.1 ⋆ Cell.post q y o₂ ab.2) := by
@@ -121,8 +137,8 @@ def Cell.both21_spec {V : Type} (p q : Nat) (x y : V) (o₁ : CellOp V p) (o₂ 
   xapp (Cell.spec p x o₁)
   xval
 
--- so whatever follows, the two orders are interchangeable: a proof of the rest for one
--- order is a proof for the other (`Commute`'s use in `reorder`, as a triple)
+/-- so whatever follows, the two orders are interchangeable: a proof of the rest for one
+order is a proof for the other (`Commute`'s use in `reorder`, as a triple) -/
 def Cell.commute {V B : Type} (p q : Nat) (x y : V) (o₁ : CellOp V p) (o₂ : CellOp V q)
     (H : HProp V) (f : CellOp.ret o₁ × CellOp.ret o₂ → Prog V B) (Q : B → HProp V)
     (k : (ab : CellOp.ret o₁ × CellOp.ret o₂) →

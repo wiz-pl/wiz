@@ -11,9 +11,12 @@ hypotheses (their types mention the field it splits), so in the derived term a c
 be an argument of an inner `casesOn`, and compiled code would compute it before the case,
 whether the branch taken uses it or not. `pushCalls` moves such arguments into the
 branches of the inner split, before erasure (`eraseDecl`): a rewrite of the compiler's,
-like erasure, done on the checked term and checked again (the result must have the
-declared type, or the unrewritten term is compiled). In branch `c` the call is on
-`c fields` where its type needs the scrutinee, otherwise on the scrutinee itself.
+like erasure, done on the checked term. Its result is type-checked again (it must have
+the declared type, or the unrewritten term is compiled), but not checked to agree with the
+checked term: that it does is by construction (an argument moved into the branches of a
+case, at the value of the scrutinee there), and trusted like erasure. In branch `c` the
+call is on `c fields` where its type needs the scrutinee, otherwise on the scrutinee
+itself.
 -/
 
 namespace Wiz.Push
@@ -157,12 +160,12 @@ partial def pushHere (g : Globals R) (fn : Name) (t : Term R) : Option (Term R) 
   let ctors := ((piInfos kd.type).drop (nΔ + 1)).take nc |>.map fun (mn, _, _) => String.ofList (mn.toList.drop 2)
   let mut methods' : List (Term R) := []
   for c in ctors, mt in (args.drop (nΔ + 1)).take nc do
-    let some cd := g.find? (T' ++ "." ++ c) | pbail fn "ctor"
+    let some cd := g.find? (ctorConst T' c) | pbail fn "ctor"
     let F := (piInfos cd.type).length - nΔ
     let (fns, mb1) ← peel (F + nE) mt
     let mb := mb1
     let ctorTm : Term R := ((Δargs.map fun (a : Term R) => a.lift F) ++ (List.range F).reverse.map Term.var).foldl .app
-      (.const (T' ++ "." ++ c) us)
+      (.const (ctorConst T' c) us)
     -- the call for pushed argument `p`, right after the kept binders, with `nDeps` binders
     -- (the solution rule's re-bound fields) between the equation and them
     let callAt (nDeps p : Nat) : Term R :=
@@ -226,13 +229,13 @@ partial def reuseScrutinee (g : Globals R) (depth : Nat) (t : Term R) : Term R :
       let us := us'.dropLast
       let ctors := ((piInfos kd.type).drop (nΔ + 1)).take nc |>.map fun (mn, _, _) => String.ofList (mn.toList.drop 2)
       let methods := ctors.zip ((args.drop (nΔ + 1)).take nc) |>.map fun (c, mt) =>
-        match g.find? (T' ++ "." ++ c) with
+        match g.find? (ctorConst T' c) with
         | some cd =>
           let F := (piInfos cd.type).length - nΔ
           match peel F mt with
           | some (fns, b) =>
             let ctorTm : Term R := ((Δargs.map fun (a : Term R) => a.lift F) ++ (List.range F).reverse.map Term.var).foldl .app
-              (.const (T' ++ "." ++ c) us)
+              (.const (ctorConst T' c) us)
             -- (as the value has it: constructors unfold, `con (tag, fields…)`)
             let D := depth + F
             let env : Env R := (List.range D).reverse.map Val.var

@@ -4,8 +4,9 @@
   scripts/ci.py matrix [--only JSON] [BIN]
                                      the shards of .github/test-shards.json as a JSON
                                      matrix (one line, for $GITHUB_OUTPUT); each shard's
-                                     selectors are joined by newlines, and "heavy"
-                                     says whether it may use the self-hosted runner;
+                                     selectors are joined by newlines, "heavy"
+                                     says whether it may use the self-hosted runner, and
+                                     "jobs" how many cases it runs at a time (`--jobs`);
                                      with --only ["NAME",…], only those shards (and
                                      their parts) A shard with
                                      "split": N becomes N shards NAME-1 … NAME-N, its
@@ -13,7 +14,10 @@
                                      the test driver BIN; default .lake/build/bin/tests)
   scripts/ci.py check-shards [BIN]   check that every test case is run by exactly one
                                      shard (after splitting), and that every selector
-                                     of a shard selects something
+                                     of a shard selects something. A group that no
+                                     selector picks goes to the shard it names
+                                     (`Group.shard`) or to the shard with
+                                     "default": true (`resolved`)
   scripts/ci.py plan [BIN]           the split shards' parts with their estimated times
   scripts/ci.py changes BASE [HEAD]  what a change needs (path filters): reads the files
                                      that differ between BASE and HEAD (git diff
@@ -60,6 +64,32 @@ NOTE_BUILT = "built "
 def shards():
     with open(SHARDS) as f:
         return json.load(f)
+
+
+def resolved(binary):
+    """The shards of .github/test-shards.json, with each group that no shard's selectors
+    pick added (as `=NAME`) to the shard that the group names (`Group.shard`, `tests
+    --list-shards`), else to the shard marked `"default": true`. So a new group needs no
+    edit here; selectors still win over a group's own choice."""
+    ss = shards()
+    names = {s["name"]: s for s in ss}
+    defaults = [s for s in ss if s.get("default")]
+    if len(defaults) != 1:
+        sys.exit(f"{SHARDS}: exactly one shard must have \"default\": true (found {len(defaults)})")
+    out = subprocess.run([binary, "--list-shards"], capture_output=True, text=True, check=True,
+                         cwd=ROOT).stdout
+    for line in out.split("\n"):
+        if not line:
+            continue
+        g, _, hint = line.partition("\t")
+        if any(selects(g, sel) for s in ss for sel in s["select"]):
+            continue
+        if hint and hint not in names:
+            sys.exit(f"group {g!r} asks for the shard {hint!r}, which .github/test-shards.json lacks")
+        (names[hint] if hint else defaults[0]).setdefault("added", []).append(f"={g}")
+    for s in ss:
+        s["select"] = s["select"] + s.pop("added", [])
+    return ss
 
 
 def selects(group, sel):
@@ -155,18 +185,20 @@ def part_selectors(items):
 
 def expanded(binary, base=None):
     """The shards with each split shard replaced by its parts: [(name, selectors,
-    estimated seconds or None)]."""
+    estimated seconds or None, jobs)]; `jobs` is the shard's "--jobs" (1 unless the shard
+    says "jobs": N: the number of cases of a parallel-opted-in group it runs at a time)."""
     out = []
-    for s in shards():
+    for s in resolved(binary):
         n = s.get("split", 1)
+        jobs = s.get("jobs", 1)
         if n <= 1:
-            out.append((s["name"], s["select"], None))
+            out.append((s["name"], s["select"], None, jobs))
             continue
         base = base or baseline()
         items = estimate(list_cases(binary, s["select"]), base)
         for k, p in enumerate(partition(items, n, base["builds"]), 1):
             if p:
-                out.append((f"{s['name']}-{k}", part_selectors(p), part_cost(p, base["builds"])))
+                out.append((f"{s['name']}-{k}", part_selectors(p), part_cost(p, base["builds"]), jobs))
     return out
 
 
@@ -180,13 +212,14 @@ def matrix(binary, only=None):
         return n in heavy or (base in split and base in heavy)
     def wanted(n):
         return only is None or n in only or (n.rsplit("-", 1)[0] in split and n.rsplit("-", 1)[0] in only)
-    print(json.dumps({"shard": [{"name": n, "select": "\n".join(sel), "heavy": is_heavy(n)}
-                                for n, sel, _ in expanded(binary) if wanted(n)]}, ensure_ascii=False))
+    print(json.dumps({"shard": [{"name": n, "select": "\n".join(sel), "heavy": is_heavy(n),
+                                 "jobs": jobs}
+                                for n, sel, _, jobs in expanded(binary) if wanted(n)]}, ensure_ascii=False))
 
 
 def plan(binary):
     base = baseline()
-    for name, sel, est in expanded(binary, base):
+    for name, sel, est, _ in expanded(binary, base):
         if est is None:
             continue
         cases = list_cases(binary, sel)
@@ -212,14 +245,14 @@ def check_shards(binary):
                 errors.append(f"shard {s['name']!r}: selector {sel!r} selects no group")
     runs = {(g, i): [] for g, i, _ in list_cases(binary, [])}
     parts = expanded(binary)
-    for name, sel, _ in parts:
+    for name, sel, _, _ in parts:
         for g, i, _ in set(list_cases(binary, sel)):  # a case selected twice within a shard still runs once
             runs[(g, i)].append(name)
     for g in groups:
         missing = [i for (h, i), by in runs.items() if h == g and not by]
         if missing:
             errors.append(f"group {g!r}: {'all' if len(missing) == sum(1 for h, _ in runs if h == g) else len(missing)} "
-                          f"of its cases are in no shard: add it to .github/test-shards.json")
+                          f"of its cases are in no shard")
     for (g, i), by in runs.items():
         if len(by) > 1:
             errors.append(f"case {g} #{i} is run by several shards: {', '.join(by)}")
@@ -229,7 +262,7 @@ def check_shards(binary):
     # a split shard's cases without a baseline entry are balanced by guesswork; warn
     # (a new case has no time until a CI run measured it, so this cannot be an error)
     base = baseline()
-    for s in shards():
+    for s in resolved(binary):
         if s.get("split", 1) > 1:
             new = [n for g, _, n in list_cases(binary, s["select"]) if n not in base["cases"].get(g, {})]
             if new:
@@ -242,7 +275,7 @@ def check_shards(binary):
 # Path filters (`changes`). Files only people read: a change of only these runs no build
 # and no tests.
 DOCS = ["docs/*", "*.md", "LICENSE", "COPYING*"]
-# Files every shard depends on: the Lean sources (compiler, tests, grail, tower), the
+# Files every shard depends on: the Lean sources (compiler, tests, grail), the
 # build and its toolchain, the C runtime, CI itself. A change to any runs every shard.
 EVERYTHING = ["*.lean", "lakefile.*", "lean-toolchain", "lake-manifest.json", "flake.*",
               "devenv.*", ".envrc", "runtime/*", "c/*", "scripts/*", ".github/*", "grail.wiz"]

@@ -10,32 +10,34 @@ inductive LList where
 
 -- fn incr_all {'a} (l : &'a mut List) : Result Unit Overflow
 -- (the overflow is a panic here, L2; `partial`: wishful: reborrow-recursion)
-partial def incr_all {ρ : Region} (l : Uniq ρ LList) : Result (Unit × Uniq ρ LList) :=
+partial def incr_all {ρ : Region} (1 l : Uniq ρ LList) : Result1 Unit (Uniq ρ LList) :=
   Uniq.reborrow l (fun ρ' h l r =>                   -- match l (fields as reborrows, L15)
-    match r.val with
-    | .nil => .ok ((), r)
+    let 1 (v, r) := Uniq.peek r;
+    match v with
+    | .nil => .ok () r
     | .cons head tail => (match U64.add head (U64.lit 1) with   -- *head += 1
       | .ok head =>
         (match Uniq.borrow ρ' tail (fun ρt ht tail rt => incr_all rt) with   -- incr_all tail
         | .ok q =>
           let (u, tail) := q;
-          .ok ((), Uniq.set r (LList.cons head tail))  -- the reborrows end: rebuild the cell
-        | .err e => .err e)
-      | .err e => .err e))
+          .ok () (Uniq.write r (LList.cons head tail))  -- the reborrows end: rebuild the cell
+        | .err e => .err e r)
+      | .err e => .err e r))
 
 -- fn push_back {'a} (l : &'a mut List) (x : U64) : Unit
 -- `cur : &'a mut List` is a `Mut ρ LList LList` (L16): each step composes the backward
 -- function with the cell's; the region stays ρ.
-partial def push_back.loop0 {ρ : Region} (cur : Mut ρ LList LList) : Mut ρ LList LList :=
-  match Mut.get cur with
+partial def push_back.loop0 {ρ : Region} (1 cur : Mut ρ LList LList) : Mut ρ LList LList :=
+  let 1 (v, cur) := Mut.peek cur;
+  match v with
   | .cons head tail =>
     push_back.loop0 (Mut.comp cur (fun (_ : LList) => (tail, fun (t : LList) => LList.cons head t)))
   | .nil => cur
 
-def push_back {ρ : Region} (l : Uniq ρ LList) (x : U64) : Result (Unit × Uniq ρ LList) :=
-  let cur := push_back.loop0 (Mut.whole l);
-  let cur := Mut.set cur (LList.cons x LList.nil);   -- *cur := .cons x .nil
-  .ok ((), Mut.release cur)                          -- the cursor's last use: l comes back
+def push_back {ρ : Region} (1 l : Uniq ρ LList) (x : U64) : Result1 Unit (Uniq ρ LList) :=
+  let 1 cur := push_back.loop0 (Mut.whole l);
+  let 1 cur := Mut.set cur (LList.cons x LList.nil);   -- *cur := .cons x .nil
+  .ok () (Mut.release cur)                             -- the cursor's last use: l comes back
 
 def LList.toNats : LList → List Nat
   | .nil => .nil

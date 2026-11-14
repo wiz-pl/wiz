@@ -274,21 +274,20 @@ lifted proof is still a proof at run time). -/
 partial def erasable (ctx : Ctx R) (ty : VTy R) : Bool :=
   match whnf ty with
   | .sort _ | .size | .sizeLt _ | .qty => true
-  | .ulift _ A => erasable ctx A
+  | .ulift _ _ A => erasable ctx A
   | .pi .. => erasedFunTy ctx.globals ty ctx.lvl || isPropTy ctx ty
   | _ => isPropTy ctx ty
 where
-  /-- `isProp`, but from the sort a `Π`/`Σ` carries (checked by the kernel) when it has
-  one: `typeSort?` recomputes it from every component, which along a structure's
-  telescope of `n` fields, asked once per field, is quadratic. (The annotation is
-  optional; without it the sort is computed, and the two agree, so the answer is the
-  same on both sides of a conversion: `wiz-notes/repr-shape.md`.) A wrong "erasable" is
-  a miscompilation, so this relies on the kernel having validated the annotation
-  (`checkSortNote`): every term erasure is given has been checked, a definition's
+  /-- `isProp`, but from the sorts a `Π`/`Σ` carries (mandatory, checked by the kernel):
+  `typeSort?` would recompute them from every component, which along a structure's
+  telescope of `n` fields, asked once per field, is quadratic. A wrong "erasable" is a
+  miscompilation, so this relies on the kernel having validated the sorts
+  (`checkComponentSort`): every term erasure is given has been checked, a definition's
   implementation for the compiler included (`checkImpl`; Status.md, T1). -/
   isPropTy (ctx : Ctx R) (ty : VTy R) : Bool :=
     match whnf ty with
-    | .pi _ _ _ _ _ (some l) | .sigma _ _ _ _ (some l) => l.equiv 0
+    | .pi _ _ _ _ _ σ => if σ.hasHole then isProp ctx.globals ctx.tys ty else σ.cod.equiv 0
+    | .sigma _ _ _ _ σ => if σ.hasHole then isProp ctx.globals ctx.tys ty else σ.sigmaSort.equiv 0
     | _ => isProp ctx.globals ctx.tys ty
 
 /-- **Unboxed newtypes** (stage 22i), behind `--unbox-structs` (`Globals.unboxStructs`;
@@ -316,12 +315,62 @@ def unboxedSigma (g : Globals R) (lvl : Nat) (ty : VTy R) : Bool :=
   | .sigma _ _ _ B _ => erasedFunTy g (Closure.inst g B (.var lvl)) (lvl + 1)
   | _ => false
 
-/-- A call of a generated `T.casesOn`, unfolded and beta-reduced: as a function, its
+/-- (linear-case stage 2) Does a value of this type carry nothing at run time: `erasable`
+(the predicate erasure itself uses, so the two can't drift), `Unit`, or a `Σ` of such
+(a structure with only contentless fields), after `whnf` (so a named `def Tk := Unit`
+counts)? -/
+partial def contentless (ctx : Ctx R) (ty : VTy R) : Bool :=
+  erasable ctx ty ||
+  match whnf ty with
+  | .unit _ => true
+  | .sigma x _ A B _ => contentless ctx A && contentless (ctx.bind x [] A) (Closure.inst ctx.globals B (.var ctx.lvl))
+  | _ => false
+
+/-- (linear-case stage 2) Is the result of the function type `ty` (under its Πs)
+contentless, or is a prefix of it already erasable? `extern` and `implemented_by` refuse
+such a type: an effect behind it would be dropped by erasure. (`IO A` is a Π over the
+linear `World` into `A × World`, which is never contentless.) -/
+partial def resultContentless (g : Globals R) (ty : VTy R) : Bool :=
+  go { globals := g } ty 1000
+where
+  go (ctx : Ctx R) (ty : VTy R) : Nat → Bool
+    | 0 => false
+    | fuel + 1 =>
+      if contentless ctx ty then true else
+      match whnf ty with
+      | .pi x _ _ A B _ => go (ctx.bind x [] A) (Closure.inst ctx.globals B (.var ctx.lvl)) fuel
+      | _ => false
+
+/-- Is the result of the function type `ty` (under its Πs) a proposition? Then an
+`implemented_by` for it is allowed: the implementation is ordinary Wiz code, a proof,
+erased like the definition, so no effect can be lost (externs still refuse it). -/
+partial def resultProp (g : Globals R) (ty : VTy R) : Bool :=
+  go { globals := g } ty 1000
+where
+  go (ctx : Ctx R) (ty : VTy R) : Nat → Bool
+    | 0 => false
+    | fuel + 1 =>
+      match whnf ty with
+      | .pi x _ _ A B _ => go (ctx.bind x [] A) (Closure.inst ctx.globals B (.var ctx.lvl)) fuel
+      | ty => isProp ctx.globals ctx.tys ty
+
+/-- (linear-case stage 2, defence in depth) Is `t` an application of a foreign function
+(`extern`)? Its call is kept even where its type is erasable: an effect never hides in a
+value that erasure drops. (`extern` itself refuses a pure `Unit` result; this covers a
+polymorphic native whose result type is instantiated with an erasable one.) -/
+def externCall (g : Globals R) (t : Term R) : Bool :=
+  match t.spine.1 with
+  | .const n _ => g.builtins.any fun (k, x) => x == n && k.startsWith "extern:"
+  | _ => false
+
+/-- A call of a generated `T.casesOn` (or `casesOn1`, `casesOnA`), unfolded and beta-reduced: as a function, its
 arguments (the branches) would all be computed before the call; unfolded, they sit in
 the branches of a `case` and only the one taken runs. -/
 def unfoldCases? (g : Globals R) (t : Term R) : Option (Term R) := do
   let (.const n us, args) := t.spine | none
-  unless n.endsWith ".casesOn" do none
+  -- (also the linear `T.casesOn1` and the additive `T.casesOnA`: a `match` on a linear
+  -- handle, `Uniq`, `Result1`, is otherwise a call with its branches as closures)
+  unless n.endsWith ".casesOn" || n.endsWith ".casesOn1" || n.endsWith ".casesOnA" do none
   let d ← g.find? n
   let v ← d.value
   -- the arguments are annotated with their types, so that the kernel can still infer
@@ -414,7 +463,7 @@ lift of one? Then `tagField?` could change its answer under substitution. -/
 def neutralFieldTy (S : Val R) : Bool :=
   match whnf S with
   | .neutral .. => true
-  | .ulift _ A => match whnf A with
+  | .ulift _ _ A => match whnf A with
     | .neutral .. => true
     | _ => false
   | _ => false
@@ -552,7 +601,7 @@ partial def quickType (ctx : Ctx R) (t : Term R) : TCM (VTy R) := do
     | _ => return (← infer { ctx with erased := true } t).1
   | .ann _ ty => pure (ctx.eval ty)
   | .down p => match whnf (← quickType ctx p) with
-    | .ulift _ A => pure A
+    | .ulift _ _ A => pure A
     | _ => return (← infer { ctx with erased := true } t).1
   | .ecase _ m s _ => pure (Closure.inst g (.mk ctx.env m) (ctx.eval s))
   | .ind _ _ _ _ P _ i x => pure (vApp g (vApp g (ctx.eval P) (ctx.eval i)) (ctx.eval x))
@@ -576,9 +625,11 @@ partial def quickType (ctx : Ctx R) (t : Term R) : TCM (VTy R) := do
 * `tt` is `◾`; `letE` keeps the binder (with `◾` for a `0` let);
 * everything else: `eraseInfer`. -/
 partial def eraseCheck (ctx : Ctx R) (t : Term R) (ty : VTy R) (inDesc : Bool := false) : TCM ETerm := do
-  if erasable ctx ty then return .erased
+  if erasable ctx ty then
+    if externCall ctx.globals t && !ctx.erased then return .letE "_" (← eraseSpine ctx t).1 .erased
+    return .erased
   -- (given) Q4: `ULift` has no runtime content: `up a` is `a`
-  if let (.up a, .ulift _ A) := (t, whnf ty) then return ← eraseCheck ctx a A
+  if let (.up a, .ulift _ _ A) := (t, whnf ty) then return ← eraseCheck ctx a A
   -- (given) P2: a marked proof is erased; another marker is transparent
   if let .prf l x := t then return ← (if l.isZero then pure .erased else eraseCheck ctx x ty)
   --<sol
@@ -634,13 +685,13 @@ partial def eraseCheck (ctx : Ctx R) (t : Term R) (ty : VTy R) (inDesc : Bool :=
         "constructor tag would depend on how that type is instantiated. Give the first field a known type " ++
         "(for a choice of constructors, `Enum […]`)"))
     let D' ← eraseCheck ctx D (.pi "s" .default (.qlit QuantitySyntax.explicitDefault) vS
-      (.mk [I] (.desc l (.var 1))) none) true
+      (.mk [I] (.desc l (.var 1))) ⟨.succ l, .succ (.succ l)⟩) true
     -- a choice of tag is marked, for `pack`
     return .obj (if (tagField? vS).isSome then 4 else 1) #[.erased, D']
   | .drec _ j D, .desc l I =>
     return .obj 2 #[← eraseCheck ctx j I, ← eraseCheck ctx D (.desc l I) true]
   | .dhrec _ H j D, .desc l I =>
-    let jTy : VTy R := .pi "h" .default (.qlit QuantitySyntax.explicitDefault) (ctx.eval H) (.mk [I] (.var 1)) none
+    let jTy : VTy R := .pi "h" .default (.qlit QuantitySyntax.explicitDefault) (ctx.eval H) (.mk [I] (.var 1)) ⟨.succ l, .succ l⟩
     return .obj 3 #[.erased, ← eraseCheck ctx j jTy, ← eraseCheck ctx D (.desc l I) true]
   | .tt, _ => return .erased
   | .letE x q ty' v b, _ =>
@@ -649,6 +700,13 @@ partial def eraseCheck (ctx : Ctx R) (t : Term R) (ty : VTy R) (inDesc : Bool :=
     let v' ← if p.isErased then pure .erased else eraseCheck ctx v vTy
     let b' ← eraseCheck (ctx.define x p vTy (ctx.eval v)) b ty inDesc
     return .letE x v' b'
+  -- (linear-case stage 2) `let () := u; b`: `u` is evaluated, then `b` (a strict `let`
+  -- whose variable `b` doesn't use; never dropped as dead code: `u` is a call, not a
+  -- pure value, unless it is `()` itself)
+  | .letUnit u b, _ => do
+    let u' ← if u matches .tt then pure .erased else pure (← eraseInfer ctx u).1
+    let b' ← eraseCheck ctx b ty inDesc
+    return .letE "_" u' (b'.lift 1 0)
   -- the type is known (and not erasable), so don't infer the whole application again
   | .app .., _ => match unfoldCases? g t with
     | some t' => eraseCheck ctx t' ty inDesc
@@ -692,7 +750,9 @@ partial def eraseInfer (ctx : Ctx R) (t : Term R) (known : Option (VTy R) := non
   let ty ← match known with
     | some ty => pure ty
     | none => quickType ctx t
-  if erasable ctx ty then return (.erased, ty)
+  if erasable ctx ty then
+    if externCall ctx.globals t && !ctx.erased then return (.letE "_" (← eraseSpine ctx t).1 .erased, ty)
+    return (.erased, ty)
   if let .natLit n := t then return (.natLit n, ty)
   -- (given) Q4: `down t` is `t`
   if let .down x := t then return (← eraseE ctx x, ty)
@@ -705,7 +765,7 @@ partial def eraseInfer (ctx : Ctx R) (t : Term R) (known : Option (VTy R) := non
       | some t' => pure (← eraseInfer ctx t' ty inDesc).1
       | none => pure (← eraseSpine ctx t).1
     | .ann tm ty' => eraseCheck ctx tm (ctx.eval ty') inDesc
-    | .letE .. => eraseCheck ctx t ty inDesc
+    | .letE .. | .letUnit .. => eraseCheck ctx t ty inDesc
     | .fst p => do
       let (p', pty) ← eraseInfer ctx p
       pure (if unboxedSigma g ctx.lvl pty then p' else .proj 0 p')
@@ -765,7 +825,7 @@ partial def eraseInfer (ctx : Ctx R) (t : Term R) (known : Option (VTy R) := non
     | .delim v P a b c h D => do
       let dty ← quickType ctx D
       let .desc l I := whnf dty | throw (.other "erasure: Desc.elim on a non-description")
-      let (ta, tb, tc, th) := delimMethodTys g l I (ctx.eval P) QuantitySyntax.explicitDefault
+      let (ta, tb, tc, th) := delimMethodTys g l v I (ctx.eval P) QuantitySyntax.explicitDefault
       let _ := v
       pure (.prim .delim #[← eraseCheck ctx a ta, ← eraseCheck ctx b tb, ← eraseCheck ctx c tc,
         ← eraseCheck ctx h th, ← eraseE ctx D])
@@ -783,19 +843,26 @@ partial def eraseInfer (ctx : Ctx R) (t : Term R) (known : Option (VTy R) := non
     | .sfix l I D v P f _ i x => do
       -- (fix self. λ i x. f ◾ (λ j i y. self i y) i x) i x
       let (vI, vD, vP) := (ctx.eval I, ctx.eval D, ctx.eval P)
-      let f' ← eraseCheck ctx f (sfixFunTy g l vI vD vP QuantitySyntax.explicitDefault)
+      let f' ← eraseCheck ctx f (sfixFunTy g l v vI vD vP QuantitySyntax.explicitDefault)
       let recE : ETerm := .lam "j" (.lam "i" (.lam "y" (.apps (.var 5) [.var 1, .var 0])))
       let body : ETerm := .lam "i" (.lam "x" (.apps (f'.lift 3) [.erased, recE, .var 1, .var 0]))
       pure (.apps (.fix "self" body) [← eraseCheck ctx i vI, ← eraseE ctx x])
-    | .scase l I D v P m s i x => do
-      -- m ◾ i payload   (a value of μ is its payload)
+    | .scase l q I D v P m s i x => do
+      -- m ◾ i payload   (a value of μ is its payload; K1: the quantity plays no part,
+      -- except that a case at 0 has an erased scrutinee, whose payload is ◾)
       let (vI, vD, vP) := (ctx.eval I, ctx.eval D, ctx.eval P)
-      let mTy := scaseMethodTy g l vI vD vP (ctx.eval s) QuantitySyntax.explicitDefault
+      let vq := ctx.eval q
+      let mTy := scaseMethodTy g l v vI vD vP (ctx.eval s) vq
       let _ := v
+      let m' ← eraseCheck ctx m mTy
+      let i' ← eraseCheck ctx i vI
+      if (vq.toPoly?.map (·.isErased)) == some true then
+        pure (.apps m' [.erased, i', .erased])
+      else
       let xty ← quickType ctx x
       if let some (T, home) := nativeHome? g xty then throw (nativeHomeError T home)
       let D' ← eraseCheck ctx D (.desc l vI)
-      pure (.apps (← eraseCheck ctx m mTy) [.erased, ← eraseCheck ctx i vI, viewOf g vD xty D' (← eraseE ctx x)])
+      pure (.apps m' [.erased, i', viewOf g vD xty D' (← eraseE ctx x)])
     | .tag _ i => pure (.obj i #[])
     | _ => throw (.other s!"erasure: unexpected term {ctx.showTerm t}")
   return (e, ty)
@@ -971,7 +1038,9 @@ def eraseDecl (g : Globals R) (d : Decl R) : TCM ETerm := do
   let ctx : Ctx R := { globals := { g with module := (g.declModule[d.name]?).getD "" }, proof := true }
   -- compiled equations (derived from the value, `deriveImpl`): the calls a nested split
   -- reverted go into its branches, and a constructor rebuilt from a branch's fields is the
-  -- scrutinee (`Push`), if the result checks (else the step before, else the impl as is)
+  -- scrutinee (`Push`), if the result type-checks (else the step before, else the impl as
+  -- is). Not checked to agree with the impl: equal by construction, trusted like erasure,
+  -- as is the substitution of call closures afterwards (`ETerm.inlineCalls`)
   let derived := g.pushCalls && d.impl.isSome && d.value.isSome && Push.mentions d.name v
   let v := if derived then
       let ok (t : Term R) : Bool := (check ctx t (ctx.eval d.type)) matches .ok _

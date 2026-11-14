@@ -24,6 +24,9 @@ structure ParseError where
   /-- everything that was expected at `pos`, as the alternatives failed there (the
   self-hosted parser, selfhost/Parse.wiz, reports the same list) -/
   expected : Array String := #[]
+  /-- a token that could not be read there (a bad escape, an unexpected character): it
+  is the message, rather than what was expected -/
+  lexical : Option String := none
   /-- the same, for the message: a syntax category whose alternatives all failed at its
   first token is one entry ("term"), and what would only have continued a complete
   phrase is marked `secondary` -/
@@ -65,9 +68,11 @@ def ParseError.render (input : String) (e : ParseError) : String :=
   let exp := if first.isEmpty then second.map (·.drop 1 |>.toString) else first
   let exp := exp.eraseDups
   let found := unexp.head?.getD s!"unexpected {foundAt input e.pos}"
-  let exp := if e.shown.isEmpty then "parse error"
-    else if exp.isEmpty then found
-    else s!"{found}; expected {orList exp}"
+  let exp := match e.lexical with
+    | some m => m
+    | none => if e.shown.isEmpty then "parse error"
+      else if exp.isEmpty then found
+      else s!"{found}; expected {orList exp}"
   s!"{l + 1}:{c + 1}: {exp}"
 
 structure MemoKey where
@@ -123,6 +128,12 @@ def failAt (pos : Nat) (expected : String) : P α := fun _ s =>
       { s.err with expected := if s.err.expected.contains expected then s.err.expected else s.err.expected.push expected,
                    shown := if s.err.shown.contains expected then s.err.shown else s.err.shown.push expected }
     else s.err
+  .error { s with err }
+
+/-- Fail at `pos` because no token can be read there (`msg` says why). -/
+def failLexAt (pos : Nat) (msg : String) : P α := fun _ s =>
+  let err := if pos > s.err.pos then { pos, lexical := some msg }
+    else if pos == s.err.pos then { s.err with lexical := some msg } else s.err
   .error { s with err }
 
 /-- Replace what the farthest error expects at `pos` by `expected`, keeping what `before`
@@ -186,7 +197,8 @@ def peekToken : P (Option TokInfo) := fun c s =>
   if i ≥ c.input.size then .ok none s
   else match r with
     | .ok t => .ok (some t) s
-    | .error msg => failAt i msg c s
+    -- a bad escape is reported where it is, not at the literal's start
+    | .error msg => failLexAt (if c.input[i]? == some '"' then strErrorPos c.input i else i) msg c s
 
 /-- Consume the next token. -/
 def nextToken (expected : String) : P TokInfo := do

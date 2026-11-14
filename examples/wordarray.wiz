@@ -1,0 +1,45 @@
+import WordArray
+-- Unboxed word arrays (lib/WordArray.wiz): random updates, the same under the
+-- interpreter (the model: lists) and compiled (the natives: C arrays). Group `natives`.
+
+-- a pseudo-random sequence
+def next (x : Nat) : Nat := Nat.mod (x * 1103515245 + 12345) 2147483648
+
+-- `n` random operations on a U32Array: set, push, pop, or reading an element
+def stepsU32 : Nat → Nat → U32Array → Nat → U32Array × Nat
+  | .zero, _, a, acc => (a, acc)
+  | .succ n, x, a, acc =>
+    let y := next x;
+    let i := Nat.mod (Nat.div y 16) (U32Array.size a + 3);
+    let op := Nat.mod y 8;
+    if Nat.beq op 0 then stepsU32 n y (U32Array.pop a) acc
+    else if Nat.beq op 1 then stepsU32 n y (U32Array.set a i (U32.ofNat (y * 977))) acc
+    else if Nat.beq op 2 then stepsU32 n y (U32Array.set a i (U32.ofNat y)) acc
+    else if Nat.beq op 3 then stepsU32 n y a (Nat.mod (acc * 7 + (U32Array.get a i).toNat) 1000000007)
+    else stepsU32 n y (U32Array.push a (U32.ofNat (y * 31337))) acc
+
+-- the same on U64Array, with values above 2^63 (boxed words in the model, raw in C)
+def stepsU64 : Nat → Nat → U64Array → Nat → U64Array × Nat
+  | .zero, _, a, acc => (a, acc)
+  | .succ n, x, a, acc =>
+    let y := next x;
+    let i := Nat.mod (Nat.div y 16) (U64Array.size a + 3);
+    let op := Nat.mod y 4;
+    if Nat.beq op 0 then stepsU64 n y (U64Array.set a i (U64.ofNat (y * 18446744073709551557))) acc
+    else if Nat.beq op 1 then stepsU64 n y a (Nat.mod (acc * 7 + (U64Array.getD a i (U64.ofNat 5)).toNat) 1000000007)
+    else stepsU64 n y (U64Array.push a (UIntN.not (U64.ofNat y))) acc
+
+def sumU32 (a : U32Array) : Nat := U32Array.foldl (fun s x => Nat.mod (s * 31 + x.toNat) 1000000007) 0 a
+def sumU64 (a : U64Array) : Nat := U64Array.foldl (fun s x => Nat.mod (s * 31 + x.toNat) 1000000007) 0 a
+def bytes : U8Array := U8Array.ofList [U8.ofNat 1, U8.ofNat 255, U8.ofNat 300]
+
+def main : Nat :=
+  let r := stepsU32 600 7 U32Array.empty 0;
+  let s := stepsU64 400 11 (U64Array.replicate 5 (U64.ofNat 9223372036854775808)) 0;
+  -- persistence: `r.1` is still there after `set` made `b` (a copy: `r.1` is shared)
+  let b := U32Array.set r.1 0 (U32.ofNat 12345);
+  let c := U32Array.slice (U32Array.append r.1 b) 3 (U32Array.size r.1);
+  sumU32 r.1 + 3 * sumU32 b + 5 * sumU32 c + 7 * r.2 +
+    11 * sumU64 s.1 + 13 * s.2 + 17 * U32Array.size c + 19 * U64Array.size s.1 +
+    23 * List.foldl (fun s x => s * 256 + x.toNat) 0 (U8Array.toList (U8Array.push bytes (U8.ofNat 7))) +
+    29 * (U32Array.get (U32Array.pop (U32Array.pop r.1)) (U32Array.size r.1 - 1)).toNat

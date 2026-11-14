@@ -1,6 +1,6 @@
 # Stage 10: effects
 
-## 10a: effects as a library, commutation as proofs ✅
+## 10a: effects as a library, commutation as proofs
 
 ```
 import Eff
@@ -32,7 +32,7 @@ def main : IO Unit := do
   `Type` takes a universe argument only right of the enclosing position; types get
   their trailing instance arguments.
 
-## 10b: fusion ✅
+## 10b: fusion
 
 Effectful code can be written against classes (`MonadState S m`, `MonadReader E m`,
 `MonadConsole m`) and run two ways: as a tree of operations (`Eff r`, whose instances
@@ -47,7 +47,7 @@ runConsole (runState (prog : Eff (Row.cons (State Nat) (Row.cons Console Row.nil
 (prog : StateT Nat IO Nat) 0                                                                 -- fused
 ```
 
-## 10c: one-shot effects ✅
+## 10c: one-shot effects
 
 ```
 structure Coin where

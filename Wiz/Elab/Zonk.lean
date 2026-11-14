@@ -65,10 +65,13 @@ partial def zonk (l : Lvl) (t : Term R) : ElabM R (Term R) := do
     return args.foldl .app h
   | _ =>
     let h' ← h.mapChildrenM instLevel (fun k c => zonk (l + k) c)
-    -- a `Π`/`Σ`'s sort that stays unknown is dropped (type equality then waits)
+    -- a `Π`/`Σ`'s (or a `ULift`'s) sort that stays unknown becomes a hole, which the sorts
+    -- pass fills before the kernel (`Decl.withSorts`)
+    let unknown (k : Level) : Level := if k.hasMVar then .hole else k
     let h' := match h' with
-      | .pi x bi q a b (some s) => if s.hasMVar then .pi x bi q a b none else h'
-      | .sigma x q a b (some s) => if s.hasMVar then .sigma x q a b none else h'
+      | .pi x bi q a b σ => .pi x bi q a b ⟨unknown σ.dom, unknown σ.cod⟩
+      | .sigma x q a b σ => .sigma x q a b ⟨unknown σ.dom, unknown σ.cod⟩
+      | .ulift k l a => .ulift (unknown k) l a
       | _ => h'
     return (← args.mapM (zonk l)).foldl .app h'
 where
@@ -113,6 +116,18 @@ where
   go (t : Term R) : StateM Bool Unit :=
     t.forChildren (fun l => modify (· || l.hasMVar)) (fun _ c => go c)
 
+/-- The level metavariables occurring in a term (after `zonk`, the unsolved ones). -/
+partial def Term.levelMVars (t : Term R) : Array Nat :=
+  (go t |>.run #[]).2
+where
+  goL : Level → StateM (Array Nat) Unit
+    | .mvar m => modify (·.push m)
+    | .succ l => goL l
+    | .max a b | .imax a b => do goL a; goL b
+    | _ => pure ()
+  go (t : Term R) : StateM (Array Nat) Unit :=
+    t.forChildren goL (fun _ c => go c)
+
 /-- Fail if `t` still contains unsolved metas, pointing at the first one's hole. -/
 def ensureNoMVars (t : Term R) (info : SourceInfo := {}) : ElabM R Unit := do
   if let some m := t.mvars[0]? then
@@ -125,8 +140,18 @@ def ensureNoMVars (t : Term R) (info : SourceInfo := {}) : ElabM R Unit := do
       else if e.desc.startsWith "implicit argument " then
         s!"; give it by name, as in f ({e.desc.drop 18} := …), or add a type ascription"
       else ""
-    throwAt e.info s!"could not infer {e.desc}{hint}"
+    throwAt e.info s!"could not infer {e.desc}{hint}" ErrorCode.unsolvedHole
   if t.hasLevelMVar then
-    throwAt info "could not infer a universe level; add a universe parameter or annotation"
+    -- point at the constant whose universe parameter it is, if known
+    let ls := (← get).levelMetas
+    let infos := (← get).levelMetaInfo
+    let mut first : Option Nat := none
+    for m in t.levelMVars do
+      if (ls[m]?.join).isNone then first := some m; break
+    if let some m := first then
+      if let some (i, desc) := infos[m]? then
+        if desc != "" && i.stop != 0 then
+          throwAt i s!"could not infer {desc}; add a universe parameter or annotation" ErrorCode.unsolvedLevel
+    throwAt info "could not infer a universe level; add a universe parameter or annotation" ErrorCode.unsolvedLevel
 
 end Wiz

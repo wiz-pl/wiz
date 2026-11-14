@@ -5,28 +5,29 @@ import FeralCore
 -- can't be applied to the wrong variant.
 
 -- fn first_mut {'a} (v : &'a mut Vec U64) : Option (&'a mut U64) := v.get_mut 0
-def first_mut {ρ : Region} (v : Uniq ρ (Vec U64)) : Result (MutOpt ρ U64 (Vec U64)) :=
+-- (it cannot fail, but a function returning a borrow returns a `Borrowed`, D8)
+def first_mut {ρ : Region} (1 v : Uniq ρ (Vec U64)) : Borrowed (MutOpt ρ U64 (Vec U64)) (Uniq ρ (Vec U64)) :=
   .ok (Vec.getMut (U64.lit 0) v)
 
 -- fn zero_first (v : &mut Vec U64) : Bool :=
 --   if let .some x := first_mut v then { *x := 0; true } else false
 -- (`first_mut` returns a borrow of `*v`: a reborrow scope, L17)
-def zero_first {ρ : Region} (v : Uniq ρ (Vec U64)) : Result (Bool × Uniq ρ (Vec U64)) :=
+def zero_first {ρ : Region} (1 v : Uniq ρ (Vec U64)) : Result1 Bool (Uniq ρ (Vec U64)) :=
   Uniq.reborrow v (fun ρ' h v r =>
     match first_mut r with
     | .ok o => (match o with
       | .some x =>
-        let x := Mut.set x (U64.lit 0);             -- *x := 0
-        .ok (Bool.true, Mut.release x)              -- the borrow ends
-      | .none r => .ok (Bool.false, r))             -- no borrow: the lender straight back
-    | .err e => .err e)
+        let 1 x := Mut.set x (U64.lit 0);           -- *x := 0
+        .ok Bool.true (Mut.release x)               -- the borrow ends
+      | .none r => .ok Bool.false r)                -- no borrow: the lender straight back
+    | .err e r => .err e r)
 
 -- (the same, through the library: `MutOpt.over`)
-def zero_first' {ρ : Region} (v : Uniq ρ (Vec U64)) : Result (Unit × Uniq ρ (Vec U64)) :=
+def zero_first' {ρ : Region} (1 v : Uniq ρ (Vec U64)) : Result1 Unit (Uniq ρ (Vec U64)) :=
   Uniq.reborrow v (fun ρ' h v r =>
     match first_mut r with
-    | .ok o => .ok ((), MutOpt.over (fun (_ : U64) => U64.lit 0) o)
-    | .err e => .err e)
+    | .ok o => .ok () (MutOpt.over (fun (_ : U64) => U64.lit 0) o)
+    | .err e r => .err e r)
 
 def show (r : Result (Bool × Vec U64)) : Result (Bool × List Nat) :=
   Result.map (fun (r : Bool × Vec U64) => (r.1, List.map U64.toNat r.2.items)) r

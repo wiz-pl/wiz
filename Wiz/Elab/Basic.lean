@@ -178,10 +178,13 @@ inductive Info (R : Type) where
   /-- (11q) an instance argument found by instance search: the instance term and the class
   type it solves (in `names`) -/
   | inst (info : SourceInfo) (names : List Name) (type : Term R) (inst : Term R)
+  /-- what a quick fix for the error of code `code` at `info` needs (`ErrorCode`): named
+  lists of strings, such as the name that was not found and the type it was looked up in -/
+  | fix (info : SourceInfo) (code : String) (data : List (String × List String))
 
 def Info.info : Info R → SourceInfo
   | .ident i .. | .term i .. | .tactic i .. | .matchCases i .. | .decl i .. | .unknownIdent i .. | .warning i .. | .trace i ..
-  | .syntaxRef i .. | .expansion i .. | .importMod i .. | .inst i .. => i
+  | .syntaxRef i .. | .expansion i .. | .importMod i .. | .inst i .. | .fix i .. => i
 
 /-- An `Info` as recorded during elaboration, before quoting and zonking. -/
 inductive RawInfo (R : Type) where
@@ -224,6 +227,14 @@ structure ElabState (R : Type) where
   /-- "the solution of this hole has type `Sort l`". Metas are untyped, so these are
   checked after elaboration to solve level metavariables (see `solveSortConstraints`). -/
   sortConstraints : Array (LocalCtx R × Term R × Level) := #[]
+  /-- "the solution of this hole has this type", for an implicit argument whose type
+  mentions a level metavariable (`{C : Category.{?a, ?b}}`): solving `?C := C` never
+  unifies the types, so `?a`, `?b` are found afterwards from `C`'s type (see
+  `solveSortConstraints`) -/
+  typeConstraints : Array (LocalCtx R × Term R × VTy R) := #[]
+  /-- where each level metavariable came from (the constant whose universe parameter it
+  is), for "could not infer a universe level" -/
+  levelMetaInfo : Array (SourceInfo × String) := #[]
   /-- macro rules in scope, latest first -/
   macros : List MacroRule := []
   /-- the next fresh macro scope -/
@@ -355,6 +366,20 @@ def editDistance (a b : String) : Nat := Id.run do
     prev := cur
   prev[b.size]!
 
+/-- The candidates closest to `x` by edit distance (at most `limit`, sorted): within 2 edits,
+one for names up to four letters, none for one or two letters (a short name is "close"
+to too many others); only those at the smallest distance found. -/
+def closest (x : String) (cands : Array String) (limit : Nat := 5) : Array String :=
+  if x.length ≤ 2 then #[] else
+  let maxD := if x.length ≤ 4 then 1 else 2
+  let scored := cands.filterMap fun n =>
+    if n == x || (n.length + maxD < x.length) || (x.length + maxD < n.length) then none else
+    let d := editDistance x n
+    if d ≤ maxD then some (d, n) else none
+  let best := scored.foldl (fun m (d, _) => min m d) maxD
+  let sorted := (scored.filter (·.1 == best)).qsort fun (_, n) (_, n') => n < n'
+  (sorted.map (·.2)).toList.eraseDups.toArray.extract 0 limit
+
 /-- Names within edit distance 2 of `x` (closest first, at most `limit`): the locals, then
 the globals `g` (in the user's spelling: this module's private names without their
 prefix; other modules' private names and names the elaborator made up are left out). -/
@@ -367,18 +392,7 @@ def closeNames (g : Globals R) (x : Name) (locals : List Name) (limit : Nat := 5
   let internal := [".desc", ".rec", ".recN", ".casesOn", ".casesOnN", ".scasesOn", ".scasesOnN"]
   let cands := (locals.filter (!·.contains '✝')).toArray ++
     globals.filter fun n => !n.contains '✝' && !internal.any (fun s => n.endsWith s)
-  -- a short name is "close" to too many others: none for one or two letters, one edit
-  -- up to four
-  if x.length ≤ 2 then #[] else
-  let maxD := if x.length ≤ 4 then 1 else 2
-  let scored := cands.filterMap fun n =>
-    if n == x || (n.length + maxD < x.length) || (x.length + maxD < n.length) then none else
-    let d := editDistance x n
-    if d ≤ maxD then some (d, n) else none
-  -- only the closest ones
-  let best := scored.foldl (fun m (d, _) => min m d) maxD
-  let sorted := (scored.filter (·.1 == best)).qsort fun (_, n) (_, n') => n < n'
-  (sorted.map (·.2)).toList.eraseDups.toArray.extract 0 limit
+  closest x cands limit
 
 /-- The hint for an unknown identifier `x`: `did you mean 'y'?`, or `""`. -/
 def didYouMean (g : Globals R) (x : Name) (locals : List Name) : String :=
@@ -399,6 +413,12 @@ def pushInfo (i : RawInfo R) : ElabM R Unit :=
   -- another file, or the whole call's), except messages
   if i.isSynthetic then pure () else
   modify fun s => { s with infos := s.infos.push i }
+
+/-- Throw an error with a code, recording what its quick fix needs (`Info.fix`; nothing at
+a macro's output, which has no place of its own). -/
+def throwFix (info : SourceInfo) (msg code : String) (data : List (String × List String)) : ElabM R α := do
+  pushInfo (.done (.fix info code data))
+  throwAt info msg code
 
 /-- A `trace` of a tactic or macro at `info`: an info message, in the order traced. It is
 part of the elaborator state, so a trace in a branch that fails and is caught (`try`,
@@ -433,14 +453,15 @@ def evalIn (ctx : LocalCtx R) (t : Term R) : ElabM R (Val R) :=
 
 /-! ### Sorts of the `Π`/`Σ` types the elaborator builds
 
-A `Π`/`Σ` carries its sort so that type equality can tell propositions (compared by
-equivalence) from other types (compared by shape); without one, an equation between
-two such types stays stuck. Surface `Π`/`Σ` get theirs from `checkType`'s levels. The
-ones the elaborator builds itself (a definition's telescope, constructor types,
-recursors, match motives, …) get theirs here, from the kernel's `typeSort?` in the
-context where the type lives. A sort is only written when it is known: the kernel
-rejects a wrong one (`checkSortNote`), and an unknown one (a metavariable, or a
-variable whose type isn't known) leaves `none`. -/
+A `Π`/`Σ` carries its components' sorts (mandatory sorts, `BinderSorts`) so that type
+equality can tell propositions (compared by equivalence) from other types (compared by
+shape). Surface `Π`/`Σ` get theirs from `checkType`'s levels. The ones the elaborator
+builds itself (a definition's telescope, constructor types, recursors, match motives, …)
+are built with holes, and get theirs here, eagerly, from the kernel's `typeSort?` in the
+context where the type lives, so that elaboration-time evaluation sees them. This is
+only a first, partial filling: a hole it can't fill (a metavariable, or a variable whose
+type isn't known) stays, and the sorts pass (`Decl.withSorts`, `Mark.lean`) fills every
+remaining one before the kernel, which checks them all. -/
 namespace Sorts
 variable (g : Globals R)
 
@@ -448,16 +469,16 @@ mutual
 /-- `t` is a type in the context `tys`/`env` (types by level, values innermost
 first): fill in the missing sorts in it, and return its sort when it is known. -/
 partial def type (tys : Array (VTy R)) (env : Env R) : Term R → Term R × Option Level
-  | .pi x bi q A B s =>
+  | .pi x bi q A B σ =>
     let (A, lA) := type tys env A
     let (B, lB) := type (tys.push (eval g env A)) (Val.var tys.size :: env) B
-    let s := s.orElse fun _ => return .imax (← lA) (← lB)
-    (.pi x bi (term tys env q) A B s, s)
-  | .sigma x q A B s =>
+    let σ := σ.fill lA lB
+    (.pi x bi (term tys env q) A B σ, if σ.hasHole then none else some σ.piSort)
+  | .sigma x q A B σ =>
     let (A, lA) := type tys env A
     let (B, lB) := type (tys.push (eval g env A)) (Val.var tys.size :: env) B
-    let s := s.orElse fun _ => return .max (← lA) (← lB)
-    (.sigma x (term tys env q) A B s, s)
+    let σ := σ.fill lA lB
+    (.sigma x (term tys env q) A B σ, if σ.hasHole then none else some σ.sigmaSort)
   -- an equation is a proposition: no need to evaluate it (which computes its sides, the
   -- whole of a `refl` proof's computation; the kernel checks every sort note anyway)
   | t@(.eq ..) | t@(.eqTy ..) => (term tys env t, some 0)
@@ -494,24 +515,18 @@ end Sorts
 def LocalCtx.sortType (g : Globals R) (ctx : LocalCtx R) (t : Term R) : Term R :=
   (Sorts.type g ctx.types.reverse.toArray ctx.env t).1
 
-/-- A `Π`/`Σ` value in a local context with its sort filled in, when it is known. -/
+/-- A `Π`/`Σ` value in a local context with its components' sorts filled in, where known. -/
 def LocalCtx.sortVal (g : Globals R) (ctx : LocalCtx R) (v : Val R) : Val R :=
+  let tys := ctx.types.reverse.toArray
+  let fill (σ : BinderSorts) (A : Val R) (B : Closure R) : BinderSorts :=
+    if !σ.hasHole then σ else
+    let i := typeSort? g tys A
+    let j := typeSort? g (tys.push A) (Closure.inst g B (Val.var tys.size))
+    σ.fill i j
   match v with
-  | .pi x bi q A B none => .pi x bi q A B (typeSort? g ctx.types.reverse.toArray v)
-  | .sigma x q A B none => .sigma x q A B (typeSort? g ctx.types.reverse.toArray v)
+  | .pi x bi q A B σ => .pi x bi q A B (fill σ A B)
+  | .sigma x q A B σ => .sigma x q A B (fill σ A B)
   | v => v
-
-/-- A declaration with the sorts of its types filled in (`Sorts`). -/
-def Decl.withSorts (g : Globals R) (d : Decl R) : Decl R :=
-  let type := (Sorts.type g #[] [] d.type).1
-  -- (the type's value only directs `Sorts.value` under a term's leading `fun`s: it is
-  -- evaluated only for one, since evaluating an equation computes its sides)
-  let ty : Thunk (Val R) := Thunk.mk fun _ => eval g [] type
-  let value (t : Term R) : Term R := match t with
-    | .lam .. => Sorts.value g #[] [] t ty.get
-    | t => Sorts.term g #[] [] t
-  { d with type, value := d.value.map value, impl := d.impl.map value,
-           witness := d.witness.map value }
 
 def instM (c : Closure R) (v : Val R) : ElabM R (Val R) :=
   return Closure.inst (← getGlobals) c v
@@ -556,9 +571,17 @@ def freshMeta (ctx : LocalCtx R) (desc : String := "_") : ElabM R (Term R) := do
 def addSortConstraint (ctx : LocalCtx R) (t : Term R) (l : Level) : ElabM R Unit :=
   modify fun s => { s with sortConstraints := s.sortConstraints.push (ctx, t, l) }
 
-def freshLevelMeta : ElabM R Level := do
+/-- Record that the hole `t` (in `ctx`) must have type `ty`, when `ty` mentions a level
+metavariable (see `ElabState.typeConstraints`). -/
+def addTypeConstraint (ctx : LocalCtx R) (t : Term R) (ty : VTy R) : ElabM R Unit :=
+  modify fun s => { s with typeConstraints := s.typeConstraints.push (ctx, t, ty) }
+
+/-- A fresh level metavariable; `info` and `desc` say where it came from (the universe
+parameter `desc` of a constant written at `info`), for the error if it stays unsolved. -/
+def freshLevelMeta (info : SourceInfo := {}) (desc : String := "") : ElabM R Level := do
   let m := (← get).levelMetas.size
-  modify fun s => { s with levelMetas := s.levelMetas.push none }
+  modify fun s => { s with levelMetas := s.levelMetas.push none,
+                           levelMetaInfo := s.levelMetaInfo.push (info, desc) }
   pure (.mvar m)
 
 /-- Replace solved level metavariables. -/
@@ -567,7 +590,13 @@ def instLevel (l : Level) : ElabM R Level := do
   pure (l.instMVars fun m => ls[m]?.join)
 
 
-def showTerm (ctx : LocalCtx R) (t : Term R) : String := elideLong (t.pretty ctx.names)
+/-- A term for a message, with notation when the globals are given (11r, 13o). -/
+def showTerm (ctx : LocalCtx R) (t : Term R) (g : Option (Globals R) := none) : String :=
+  elideLong (t.pretty ctx.names g)
+
+/-- A term for a message, with notation (13o: goals, tactic messages). -/
+def showTermM (ctx : LocalCtx R) (t : Term R) : ElabM R String :=
+  return showTerm ctx t (some (← getGlobals))
 
 def showVal (ctx : LocalCtx R) (v : Val R) : ElabM R String := do
   let g ← getGlobals

@@ -1,6 +1,6 @@
 # Stage 8: the backend
 
-## 8a: IR and Perceus reference counting ✅
+## 8a: IR and Perceus reference counting
 
 ```
 #ir twice          -- def twice x0 x1 :=  dup x0;  let x2 := ap x0 x1;  let x3 := ap x0 x2;  ret x3
@@ -26,7 +26,7 @@
 |-----|-------------------|------------------------------------------|
 | 8.1 | `Compiler/RC.lean`| `insertRC`: Perceus `dup`/`drop`        |
 
-## 8b: C ✅
+## 8b: C
 
 ```
 $ wiz run fact.wiz        # def main : Nat := fact 30
@@ -38,7 +38,7 @@ $ wiz run fact.wiz        # def main : Nat := fact 30
   `main`'s type. The C compiler is `--cc X` (default `cc`), with `--cflags "…"` and
   `--ldflags "…"` for GMP ([stage 23a](23-grail.md): flags, not environment variables). The C tests
   skip themselves if GMP isn't found.
-* **Runtime** (`runtime/wiz.c`, embedded in the compiler): a value is a word; scalars
+* **Runtime** (`runtime/`, embedded in the compiler): a value is a word; scalars
   have the low bit set; objects have a header (reference count, tag, size). Closures
   point to a boxed entry and share or move their captured arguments when applied.
   Numbers that don't fit in 62 bits are GMP integers. Projecting a number gives its
@@ -51,7 +51,7 @@ $ wiz run fact.wiz        # def main : Nat := fact 30
 |-----|--------------------|----------------------------------------|
 | 8.2 | `Compiler/C.lean`  | `body`: C statements for an IR body    |
 
-## 8c: reuse ✅
+## 8c: reuse
 
 `Compiler/Reuse.lean` pairs each `drop x` with a later allocation in the same block:
 `let w := reset x; …; let y := reuse w in ctor t args`. At runtime, if `x` was unique,
@@ -78,7 +78,7 @@ bundle's `pack` (a 20-field bundle took two minutes).
 |-----|-----------------------|-----------------------------------------------|
 | 8.3 | `Compiler/Reuse.lean` | `insertReuse`: pair drops with allocations    |
 
-## 8d: LLVM ✅
+## 8d: LLVM
 
 `wiz build FILE -o OUT --llvm` and `wiz run FILE --llvm` go through textual LLVM IR
 (`Compiler/LLVM.lean`) and `llc` (`--llc X`). The runtime is the same C file,
@@ -90,7 +90,7 @@ Still to do in the backend: specialise the eliminators for known descriptions (f
 constructor objects instead of nested pairs, direct recursion instead of walking the
 description).
 
-## 8e: borrowed parameters and drop specialisation ✅
+## 8e: borrowed parameters and drop specialisation
 
 ```
 #ir len            -- def len @&x0 :=  case x0 of | 0 => … | 1 => let x2 := proj 1 x0;  let x3 := len x2; …

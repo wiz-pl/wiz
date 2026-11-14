@@ -22,7 +22,6 @@ Files:
 | `drafts/feral/lowered/NN_*.wiz` | the same programs, hand-lowered | yes, with `#eval`s |
 | `drafts/feral/rejected/surface/*.wiz` | the rejected programs in Feral, each with the error class and line it must be reported at (`-- expect:`) | rejected by the front end, and by the kernel on their `#unchecked` lowering (`feral`) |
 | `drafts/feral/rejected/*.wiz` | hand-written lowerings of programs Rust rejects (E0499, E0502, E0515 ×2, E0597 ×2, missing bounds for `&` and `&mut`, a bound pointing the wrong way, a lengthened borrow) | each must fail with a type mismatch (`check.sh`) |
-| `drafts/feral/linear/*.wiz` | the same scopes with handles at quantity 1 | no (wishful: linear-case) |
 | `drafts/feral/Optic.wiz` | the part of the optics library that doesn't check yet | no (wishful) |
 
 ## 1. The surface (RD5: closer to Wiz than to Rust; Rust's semantics)
@@ -124,25 +123,32 @@ out-of-bounds, `unwrap` on `none`, division by zero, `panic!` — is `.err (…)
 `R (Except E T)`: user errors are values, panics are not. (06)
 
 **L3. Arguments.** An owned or `Copy` argument is a plain argument. `&'a T` is
-`Shr ρ ⟦T⟧` (the value, shared; read with `.val`). `&'a mut T` is a `Uniq ρ ⟦T⟧` handle
-that is **handed back**: the result type is `R (Ret × Uniq ρ₁ T₁ × … × Uniq ρₖ Tₖ)` with
-one component per `&mut` argument, in order (a Unit `Ret` is kept). `*x` is `x.val`,
-`*x := e` is `Uniq.set x e`. All handles are structures of `lib/Region.wiz`, so their
-region is part of their type. (01, 02, 07, 09)
+`Shr ρ ⟦T⟧` (the value, shared; read with `.val`). `&'a mut T` is a `Uniq ρ ⟦T⟧` handle,
+taken at quantity 1 and **handed back**: the result type is
+`Result1 Ret ((1 _ : Uniq ρ₁ T₁) × … × Uniq ρₖ Tₖ)`, whose `ok` and `err` both carry the
+handles, in order (D8: an error hands them back too). `*x` is
+`let 1 (d, x) := Uniq.peek x` (the value at ω, the handle back), `*x := e` is
+`let 1 x := Uniq.write x e`. All handles are types of `lib/Region.wiz` with the region as
+a parameter, so their region is part of their type. **(changed, cohesion M4b)** Handles
+are linear: using one twice, or not handing it back, is a type error. (01, 02, 07, 09)
 
 **L4. Returned borrows (Aeneas backward functions, RD11).** A function returning
-`&'a mut A` borrowed from its `&'a mut S` argument returns `R (Mut ρ A S)`, a
-structure around `Store A S = A × (A → S)`: the borrowed value and the backward function
-that rebuilds the lender from the borrow's final value. The lender is *not* also handed
-back (it is inside the closure); `Mut.release m` (the borrow's last use) or
-`Mut.close m fin` gives back the `Uniq ρ S`. `*m` is `Mut.get m`, `*m := e` is
-`Mut.set m e`; `&mut v.p` is `Mut.ofLens v l`/`Mut.ofPLens v l` for the place's lens.
-`&mut` arguments in other regions are handed back as in L3. A returned borrow that may
-be one of several `&mut` arguments (`if c then x else y`) moves all of them into the
-result: `Mut.ofUniq x : Mut ρ A (Uniq ρ A)` (the whole argument, its backward function
-giving the handle back), `Mut.mapBack m f` to give the other handles back too, so the
-result is `R (Mut ρb A (Uniq ρa A × Uniq ρb A))`, and `Mut.finish m` at the borrow's last
-use gives the handles back (12). **(changed, 22j)** The lenders are decided from the
+`&'a mut A` borrowed from its `&'a mut S` argument returns
+`Borrowed (Mut ρ A S) (Uniq ρ S)`: `ok` hands over a `Mut ρ A S` (linear, around
+`Store A S = A × (A → S)`: the borrowed value and the backward function that rebuilds
+the lender from the borrow's final value), `err` hands the lender back (D8). The lender is
+*not* also handed back on `ok` (it is inside the backward function); `Mut.release m`
+(the borrow's last use) or `Mut.close m fin` gives back the `Uniq ρ S`. `*m` is
+`let 1 (d, m) := Mut.peek m`, `*m := e` is `let 1 m := Mut.set m e`; `&mut v.p` is
+`Mut.ofLens v l`/`Mut.ofPLens v l` for the place's lens. `&mut` arguments in other
+regions are handed back beside the borrow, as in L3. A returned borrow that may be one
+of several `&mut` arguments (`if c then x else y`) moves all of them into the result:
+`Mut.ofUniq x : Mut ρ A (Uniq ρ A)` (the whole argument, its backward function giving
+the handle back), and `Mut.alongside m y f` carries the other handle in the backward
+function (a linear handle can't be captured by an ordinary closure), so the result is
+`Borrowed (Mut ρb A ((1 _ : Uniq ρa A) × Uniq ρb A)) (…)`, and `Mut.finish m` at the
+borrow's last use gives the handles back (12). **(changed, cohesion M4b-3c)** An error
+exit while a returned borrow is live releases it first and hands back what it held. **(changed, 22j)** The lenders are decided from the
 signature alone: the `&mut` parameters of the result's region `'r`, and those of a region
 with a bound `'x : 'r`. One lender `&'r mut S` gives `Mut ρ A S` (`Mut.release`), several
 give the tuple of handles (`Mut.finish`); returning the single lender itself is
@@ -213,10 +219,14 @@ is `Vec.index v i : R A` (shared).
 
 **L11. Borrows of statically known places are aliases.** **(changed, 22j)** The front end
 does this for `let h := &mut s.f` with `s` a `&mut` struct: a reborrow scope of `s` whose
-body first projects *every* field (`let s_f := r.val.f; …`, not a tuple pattern), `h` is a
-name for the field's local, a second `let m := &mut s.g` inside the scope names another
-(the same field twice is E0499), and the scope's end rebuilds `Uniq.set r (S.mk …)`.
-Elsewhere (`&mut r.f` as a value) it is `Mut.ofLens r S.fL`. `let h := &mut s.hits` where
+body first peeks the struct and projects *every* field (`let 1 (d, r) := Uniq.peek r;
+let s_f := d.f; …`, not a tuple pattern), `h` is a name for the field's local, a second
+`let m := &mut s.g` inside the scope names another (the same field twice is E0499), and
+the scope's end rebuilds `Uniq.write r (S.mk …)`. Elsewhere (`&mut r.f` as a value) it is
+`Mut.ofLens r S.fL`, and **(cohesion M4b-3c)** a field passed to a `&mut` parameter,
+`f (&mut s.f)`, is a `Uniq.zoom S.fL s` scope (`zoomIn` with other handles threaded
+through; on a local `s`, inside the borrow of `s`). Two fields of one struct in one call
+are not supported yet (name them with `let`). `let h := &mut s.hits` where
 the place is known at compile time does not create a value: inside a reborrow scope of
 `s` (so `s` is a `Lent` token meanwhile, L20), the struct is unpacked
 **once, before any new field value is computed** (tuple pattern `(h, m, _)`, plan §5.1
@@ -245,9 +255,9 @@ block (04: `#ir reverse.loop0` shows `reuse … ctor 1`).
 
 **L15. Matching on a borrow.** `match t with | .node key left right => …` with
 `t : &mut Tree` binds the fields as reborrows: `left`/`right : &mut Tree`, `key : &U64`.
-Lowered: in a reborrow scope of `t`, match `r.val`, borrow the field variables
-(`Uniq.borrow ρ' left …`) to recurse on them, rebuild the constructor in each branch
-with `Uniq.set r` and hand the whole back (05, `insert`; `partial` until structural
+Lowered: in a reborrow scope of `t`, peek `r` and match the value, borrow the field
+variables (`Uniq.borrow ρ' left …`) to recurse on them, rebuild the constructor in each
+branch with `Uniq.write r` and hand the whole back (05, `insert`; `partial` until structural
 recursion sees through the scope's lambda, wishful: reborrow-recursion). A `&T` scrutinee binds fields by
 value (shared). **(changed, 22j)** The field variables are place aliases (as L11): `*key`
 is `key`, `*head := e` rebinds `head`, passing `left` where a `&mut` is expected borrows
@@ -257,7 +267,7 @@ is rebound to the scope's handle, so `*t := e` works there. Every alternative �
 
 **L16. A borrow that moves (cursor loops, R6c).** **(changed, 22j)** `let cur := r` for a
 `&mut` handle `r` makes the cursor (`Mut.whole r`; `r` is unusable until the cursor's
-release). `match`/`while let` on a cursor matches `Mut.get cur`; assigning one of the
+release). `match`/`while let` on a cursor peeks it (`Mut.peek cur`); assigning one of the
 bound fields to the cursor is the `Mut.comp` step. The release (`let r := Mut.release
 cur`) is emitted where the function returns (also on `return`/`?`), not after the loop. `cur := left` inside a loop, where
 `cur : &'a mut Tree`, composes the cursor's backward function with the child's:
@@ -284,7 +294,11 @@ released (03, 08).
 P → Result.All (fun r => Q[result := …, old(x) := x, final(x) := …]) (f args)`; for a
 returned borrow `r : Mut ρ A S`, `*result` is `r.1`, `final(result)` is a universally
 quantified `fin`, and `final(v)` is `r.2 fin` (03: `get_mut.spec`, proved as
-`get_mut.spec_holds`). No prophecy axioms.
+`get_mut.spec_holds`). No prophecy axioms. With linear handles (M4b) the spec is
+stated on values: `f.Spec` takes each `&mut` argument's value, runs the call inside the
+caller's borrow scopes (`Uniq.borrow`/`borrowIn`), and `Result.Holds` states the clauses
+on the values the scopes hand back (`old(x)` is the argument, `final(x)` the lender's
+final value).
 
 **L19. Interop (RD16).** Wiz calls lowered functions as they are (`R`, handed-back
 tuples, backward closures); `Result.map`, `Result.show`, `Mut.release`, `MutOpt.over`
@@ -351,17 +365,15 @@ lowering of the same program, and the `feral` tests require both verdicts:
 * two borrows of different regions passed where one region is expected (`Uniq ρ A` and
   `Uniq ρ' A` are different types).
 
-What is **not** rejected by the type checker, only by the lowering's shape (known gaps,
-test group `regions`, cases marked KNOWN GAP; wishful: linear-case): handles are ω
-values, so the body of a scope can duplicate one (`swap r r`, E0499), and the lender's
-outer name is only *shadowed* by the `Lent` token: a body that names the token
-differently can read the lender while it is borrowed (E0502); and a handle packed with
-its region (`(0 r : Region) × Uniq r A`) is a closed type, so it can leave its scope.
-The front end emits the rebinding of L20 and never uses a handle twice in what it accepts;
-`swap (&mut a) (&mut a)` is the one Feral program whose `#unchecked` lowering the kernel
-accepts (a KNOWN GAP case of the `feral` group). Making handles linear needs a `match`
-whose alternatives use captured variables once and a `Result` with a linear payload
-(R9a, a kernel change).
+**(changed, cohesion M4)** Handles are linear (linear-case stage 2), so the kernel also
+rejects duplicating one (`swap r r`, E0499; `swap (&mut a) (&mut a)` in Feral, on its
+`#unchecked` lowering) and a handle packed with its region (`(0 r : Region) × Uniq r A`)
+leaving its scope: it would have to be handed back as well. What is still **not**
+rejected by the type checker, only by the lowering's shape (a known gap, pinned in test
+group `regions`): the lender's outer name is only *shadowed* by the `Lent` token, and the
+lender is an ω value, so a body that names the token differently can read the lender
+while it is borrowed (E0502). Closing it needs linear lenders, and then a Copy notion to
+read `*x` out of one (K3).
 
 **L22. Outlives.** `'a : 'b` is `(0 h : Outlives ρa ρb)` (an opaque `Prop`: proofs come
 from `Outlives.refl`/`trans`/`static` and from scopes). A scope nested in `σ` hands

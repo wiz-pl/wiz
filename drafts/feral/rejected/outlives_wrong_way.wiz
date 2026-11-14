@@ -1,18 +1,18 @@
 import FeralCore
 -- REJECTED (Rust: "lifetime may not live long enough" at the call: `pick` needs `'a : 'b`,
 -- but `b`'s borrow is the outer one, so only `'b : 'a` holds). check.sh expects a type error.
-def pick {ρa ρb : Region} (0 h : Outlives ρa ρb) (c : Bool) (x : Uniq ρa U64) (y : Uniq ρb U64) :
-    Result (Mut ρb U64 (Uniq ρa U64 × Uniq ρb U64)) :=
+def pick {ρa ρb : Region} (0 h : Outlives ρa ρb) (c : Bool) (1 x : Uniq ρa U64) (1 y : Uniq ρb U64) :
+    Borrowed (Mut ρb U64 ((1 _ : Uniq ρa U64) × Uniq ρb U64)) ((1 _ : Uniq ρa U64) × Uniq ρb U64) :=
   match c with
-  | .true => .ok (Mut.mapBack (Mut.weaken h (Mut.ofUniq x)) (fun (x : Uniq ρa U64) => (x, y)))
-  | .false => .ok (Mut.mapBack (Mut.ofUniq y) (fun (y : Uniq ρb U64) => (x, y)))
+  | .true => .ok (Mut.alongside (Mut.weaken h (Mut.ofUniq x)) y (fun (x : Uniq ρa U64) (y : Uniq ρb U64) => (x, y)))
+  | .false => .ok (Mut.alongside (Mut.ofUniq y) x (fun (y : Uniq ρb U64) (x : Uniq ρa U64) => (x, y)))
 def bad : Result (U64 × U64) :=
   match Uniq.borrow Region.static (U64.lit 2) (fun ρb hb b rb =>   -- &mut b (outer)
-    match Uniq.borrow ρb (U64.lit 1) (fun ρa ha a ra =>            -- &mut a (inner): ha : Outlives ρb ρa
+    match Uniq.borrowIn ρb (U64.lit 1) rb (fun ρa ha a rb ra =>    -- &mut a (inner): ha : Outlives ρb ρa
       match pick ha .true ra rb with
-      | .ok m => .ok (Mut.finish (Mut.set m (U64.lit 10)))
-      | .err e => .err e) with
-    | .ok q => let (rb, a) := q; .ok (a, rb)
-    | .err e => .err e) with
+      | .ok m => .ok () (Mut.finish (Mut.set m (U64.lit 10)))
+      | .err e rab => .err e rab) with
+    | .ok q rb => let (u, a) := q; .ok a rb
+    | .err e rb => .err e rb) with
   | .ok p => .ok p
   | .err e => .err e

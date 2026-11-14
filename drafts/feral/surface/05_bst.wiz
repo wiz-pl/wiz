@@ -31,7 +31,7 @@ end
 def Tree.toNats : Tree → List Nat
   | .leaf => .nil
   | .node k l r => List.append (Tree.toNats l) (.cons k.val (Tree.toNats r))
-def build (ins : (0 ρ : Region) → Uniq ρ Tree → U64 → Result (Unit × Uniq ρ Tree)) : List Nat → Tree → Result Tree
+def build (ins : (0 ρ : Region) → (1 t : Uniq ρ Tree) → U64 → Result1 Unit (Uniq ρ Tree)) : List Nat → Tree → Result Tree
   | .nil, t => .ok t
   | .cons k ks, t => match Uniq.borrow Region.static t (fun ρ h t r => ins ρ r (U64.mk k)) with
     | .ok r => let (u, t) := r; build ins ks t

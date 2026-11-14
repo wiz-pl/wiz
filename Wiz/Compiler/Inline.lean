@@ -166,6 +166,74 @@ partial def projOf (body? : Name → Option ETerm) (fuel : Nat) (dict? : Name �
 end
 
 /-!
+## Known tags (linear-case scopes, cohesion M4b)
+
+A `match` on a linear scrutinee is `T.casesOn1`, unfolded at its calls like `T.casesOn`
+(`unfoldCases?`). Its method takes the constructor's tag and then the fields, so the
+unfolded call is `let t := ⟨k⟩; (case t [λ f… . …, …]) a…`: a `case` on a tag known at
+compile time, applied to the fields. Lowered as it stands, each branch is a lifted
+closure, partially applied and called through a join point. `simpKnown` finishes the
+job, everywhere:
+
+* `let x := v; b` with `v` a variable, `◾`, a numeral or a tag is substituted away;
+* `case ⟨k⟩ bs` is branch `k`;
+* `(case s bs) a` is `case s [b a, …]` (`a` bound first unless it is atomic), and
+  `(let x := v; f) a` is `let x := v; f a`;
+* `(λ x. b) a` is `let x := a; b`, and a lambda bound by a `let` and used once, not
+  under a lambda, moves to its use (a continuation, `Uniq.end r (λ v. …)`).
+
+All of it only rearranges pure code: nothing is evaluated that wasn't, and nothing twice.
+-/
+
+/-- A field-less object: a tag, free to copy. -/
+private def isTag : ETerm → Bool
+  | obj _ fs => fs.isEmpty
+  | _ => false
+
+mutual
+/-- Simplify known tags and the applications of `case`s and lambdas (see above). -/
+partial def simpKnown : ETerm → ETerm
+  | app f a => applyKnown (simpKnown f) (simpKnown a)
+  | letE x v b => letKnown x (simpKnown v) (simpKnown b)
+  | case s bs => caseKnown (simpKnown s) (bs.map simpKnown)
+  | lam x b => lam x (simpKnown b)
+  | fix x b => fix x (simpKnown b)
+  | obj t fs => obj t (fs.map simpKnown)
+  | proj i t => proj i (simpKnown t)
+  | prim op as => prim op (as.map simpKnown)
+  | t => t
+
+/-- `let x := v; b` (both simplified). -/
+partial def letKnown (x : Name) (v b : ETerm) : ETerm :=
+  match v with
+  | var _ | erased | natLit _ => subst 0 v b
+  -- (a tag may meet a `case`: simplify again where it lands)
+  | obj _ fs => if fs.isEmpty && (uses 0 b).1 > 0 then simpKnown (subst 0 v b) else letE x v b
+  -- (a lambda used once, not under a lambda: it moves to its use, and meets its
+  -- arguments there; `inlineSimp` decides before the known tags are gone)
+  | lam .. => if uses 0 b == (1, false) then simpKnown (subst 0 v b) else letE x v b
+  | _ => letE x v b
+
+/-- `case s bs` (simplified). -/
+partial def caseKnown (s : ETerm) (bs : Array ETerm) : ETerm :=
+  match s with
+  | obj k fs => if h : fs.isEmpty ∧ k < bs.size then bs[k]'h.2 else case s bs
+  | _ => case s bs
+
+/-- `f a` (both simplified). -/
+partial def applyKnown (f a : ETerm) : ETerm :=
+  match f with
+  | lam x b => letKnown x a b
+  | letE x v b => letE x v (applyKnown b (a.lift 1))
+  | case s bs =>
+    if a matches var _ | erased | natLit _ | global _ || isTag a then
+      case s (bs.map (applyKnown · a))
+    else
+      letE "a" a (case (s.lift 1) (bs.map fun b => applyKnown (b.lift 1) (var 0)))
+  | f => app f a
+end
+
+/-!
 ## Case-shaped functions (stage 15h)
 
 Application is call by value: `Bool.and a b` computed `b` before looking at `a`, so

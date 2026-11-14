@@ -1,39 +1,41 @@
 import FeralCore
 -- Lowering of drafts/feral/surface/01_swap.wiz (rules: drafts/feral/LOWERING.md).
--- `&'a mut T` arguments are `Uniq ρ T` handles, values in and values out (L3); `'a` is
--- an erased region `ρ`, part of the handle's type (L1). Call sites borrow locals in
--- scopes with fresh regions (L20), and the callee's regions are inferred from the
--- handles (L17).
+-- `&'a mut T` arguments are `Uniq ρ T` handles, used once each (quantity 1) and handed
+-- back (L3); `'a` is an erased region `ρ`, part of the handle's type (L1). Call sites
+-- borrow locals in scopes with fresh regions (L20), and the callee's regions are inferred
+-- from the handles (L17).
 
 -- fn swap {'a 'b} (x : &'a mut U64) (y : &'b mut U64) : Unit
-def swap {ρ₁ ρ₂ : Region} (x : Uniq ρ₁ U64) (y : Uniq ρ₂ U64) : Result (Unit × Uniq ρ₁ U64 × Uniq ρ₂ U64) :=
-  let t := x.val;                    -- let t := *x        (U64 is Copy)
-  let x := Uniq.set x y.val;         -- *x := *y
-  let y := Uniq.set y t;             -- *y := t
-  .ok ((), x, y)                     -- hand back the two borrows, in order
+-- `*x` reads the value and gives the handle back (`Uniq.peek`); a function returns its
+-- value and its handles in a `Result1`, whose error alternative hands them back too (D8).
+def swap {ρ₁ ρ₂ : Region} (1 x : Uniq ρ₁ U64) (1 y : Uniq ρ₂ U64) : Result1 Unit ((1 _ : Uniq ρ₁ U64) × Uniq ρ₂ U64) :=
+  let 1 (t, x) := Uniq.peek x;       -- let t := *x        (U64 is Copy)
+  let 1 (u, y) := Uniq.peek y;
+  let 1 x := Uniq.write x u;         -- *x := *y
+  let 1 y := Uniq.write y t;         -- *y := t
+  .ok () (x, y)                      -- hand back the two borrows, in order
 
 -- fn mem_swap {'a 'b} {T : Type} (x : &'a mut T) (y : &'b mut T) : Unit := mem.swap x y
 -- (a move out of a borrow is only allowed through `mem.swap`/`mem.replace`; lowered,
 -- it is just exchanging the two values)
-def mem_swap {ρ₁ ρ₂ : Region} {T : Type} (x : Uniq ρ₁ T) (y : Uniq ρ₂ T) : Result (Unit × Uniq ρ₁ T × Uniq ρ₂ T) :=
-  let t := x.val;
-  .ok ((), Uniq.set x y.val, Uniq.set y t)
+def mem_swap {ρ₁ ρ₂ : Region} {T : Type} (1 x : Uniq ρ₁ T) (1 y : Uniq ρ₂ T) : Result1 Unit ((1 _ : Uniq ρ₁ T) × Uniq ρ₂ T) :=
+  let 1 (t, x) := Uniq.peek x;
+  let 1 (u, y) := Uniq.peek y;
+  .ok () (Uniq.write x u, Uniq.write y t)
 
 -- fn main () : (U64 × U64) := { let mut a := 1; let mut b := 2; swap (&mut a) (&mut b); (a, b) }
 -- Each `&mut` is a scope with a fresh region (`ρa`, then `ρb` inside it); inside, the
--- lender's name is a `Lent` token. A scope's body hands its borrow back last; the
--- outer borrow `ra` leaves the inner scope as part of its result (its region `ρa` is
--- in scope there).
+-- lender's name is a `Lent` token. A scope's body hands its borrow back beside its
+-- result; the outer borrow `ra` is threaded through the inner scope (`Uniq.borrowIn`)
+-- and comes back beside the inner result.
 def main : Result (U64 × U64) :=
   let a := U64.lit 1;
   let b := U64.lit 2;
   match Uniq.borrow Region.static a (fun ρa ha a ra =>       -- &mut a
-    match Uniq.borrow ρa b (fun ρb hb b rb =>                -- &mut b
-      match swap ra rb with                                  -- swap {ρa ρb}
-      | .ok r => let (u, rarb) := r; let (ra, rb) := rarb; .ok (ra, rb)          -- (ra, rb) handed back
-      | .err e => .err e) with
-    | .ok q => let (ra, b) := q; .ok (b, ra)                -- the borrow of b ended: (b, ra)
-    | .err e => .err e) with
+    match Uniq.borrowIn ρa b ra (fun ρb hb b ra rb =>        -- &mut b, with ra threaded through
+      swap ra rb) with                                       -- swap {ρa ρb}: (ra, rb) handed back
+    | .ok q ra => let (u, b) := q; .ok b ra                  -- the borrow of b ended: b, and ra back
+    | .err e ra => .err e ra) with
   | .ok p => let (b, a) := p; .ok (a, b)                    -- the borrow of a ended: (a, b)
   | .err e => .err e
 
@@ -42,12 +44,9 @@ def main : Result (U64 × U64) :=
 
 def swapLists (xs ys : List Nat) : Result (List Nat × List Nat) :=
   match Uniq.borrow Region.static xs (fun ρx hx xs rx =>
-    match Uniq.borrow ρx ys (fun ρy hy ys ry =>
-      match mem_swap rx ry with
-      | .ok r => let (u, rxry) := r; let (rx, ry) := rxry; .ok (rx, ry)
-      | .err e => .err e) with
-    | .ok q => let (rx, ys) := q; .ok (ys, rx)
-    | .err e => .err e) with
+    match Uniq.borrowIn ρx ys rx (fun ρy hy ys rx ry => mem_swap rx ry) with
+    | .ok q rx => let (u, ys) := q; .ok ys rx
+    | .err e rx => .err e rx) with
   | .ok p => let (ys, xs) := p; .ok (xs, ys)
   | .err e => .err e
 #eval swapLists (List.cons 1 List.nil) List.nil

@@ -10,7 +10,9 @@ succeeds, so an interrupted build leaves nothing half-written. Keys:
 
 * `check F`: the file's key (`Cache.moduleKey`: its text, headers, and its imports'
   keys, transitively), mixed with `binId` (this grail binary: elaborator and backends);
-* `ir F` from `check F`; `c F` from `ir F`;
+* `build F` from `check F`'s key: one job that checks `F` and writes its IR, C and
+  link text (elaborating it once, not once per job); `ir F` is the same C job for a
+  file that is already checked as a package module;
 * `obj F` from the text of `main.c` and the compiler and `cflags`;
 * `link E` from `obj F` and the compiler and `ldflags`, and (9f) the `link_c` files (their
   paths and contents: the link compiles them, with `cflags`) and `link_lib` libraries,

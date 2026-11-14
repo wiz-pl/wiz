@@ -1,6 +1,6 @@
 # Stage 18: more data in the self-hosted frontend
 
-## 18a: indexed families ✅
+## 18a: indexed families
 
 `inductive Vec (A : Type) : Nat → Type where | nil : Vec A Nat.zero | cons (n : Nat)
 (a : A) (v : Vec A n) : Vec A (Nat.succ n)` (one index): the description's index type
@@ -16,7 +16,7 @@ its result type with it before the postponed `.c` arguments are done, and an arg
 whose type is still unknown at the end of its application waits in the elaboration state
 until the whole definition is elaborated (`drain`).
 
-## 18b: index equations ✅
+## 18b: index equations
 
 When the scrutinee's index is closed (`Vec A (Nat.succ Nat.zero)`, or a tag), the motive
 also takes the equation `e :0 i = idx` (and the `ind` gets `refl`). A constructor no
@@ -26,7 +26,7 @@ clause covers is then ruled out if the index makes it impossible: its payload pr
 A hypothesis for a recursive field with that same index is applied to `refl` already.
 The parameter and result types of a match are now elaborated with types too.
 
-## 18c: mutual inductive types ✅
+## 18c: mutual inductive types
 
 `mutual inductive Tm … inductive Tms … end` (no parameters or indices yet) is one
 family `Tm_Tms : Enum 2 → Type` over every member's constructors: a field whose type is
@@ -35,7 +35,7 @@ Each member is the constant `Tm := Tm_Tms (tag 0)`, and its constructors `Tm.c` 
 the family's values. A match on a `Tm` runs at a closed index, so 18b rules out the
 other members' constructors: a match lists only its own type's.
 
-## 18d–e: parameters for mutual types; structures ✅
+## 18d–e: parameters for mutual types; structures
 
 The members of a mutual block share their parameters (the first member's): the family
 is `fun ps i => μ D i`, a member `A := fun ps => A_B ps (tag j)`, a field `A ps` is
@@ -46,7 +46,7 @@ recursive, and constructors take the parameters implicitly (`Tree`/`Forest A`).
 defined by `match`. `x.f` (and `(e).f`) is `T.f x` for `x : T …`. (A field's type may
 not mention an earlier field yet.)
 
-## 18f–g: numerals; `match` as a term ✅
+## 18f–g: numerals; `match` as a term
 
 A numeral `n` is `Nat.succ` applied `n` times to `Nat.zero` (the kernel has no number
 literals), and in a pattern `0` is `.zero` and `n + 1` is `.succ n`. `match` can now

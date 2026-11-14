@@ -13,6 +13,17 @@ into one `Nat.All` table) between the `-- BEGIN GENERATED <name>` / `-- END GENE
 
 The clocks per bit are fixed at N = 4 (the example's parameterisation); for another N,
 change N here and the constants 3 / 1 in Tx.spec / Rx.spec.
+
+Where a case shifts the data path, the proof rewrites inside the *goal* with
+`Eq.substProp` rather than building an equation at `TxT`/`RxTO` with `Eq.trans` and
+`Eq.congrArg`. A word is a proof-carrying `UIntN`, so the type of an equation between
+the nested products carries `transp`/cast spines for the erased range proofs; the table
+proofs should not have to match those spines (they depend on how the word lemma's body
+normalises). `Eq.substProp`'s motive is a family of propositions, so the rewrite stops at
+propositional equality and depends only on the lemma's statement. In the shift cases the
+first component (`bit0`) and the register (`shift9`) are rewritten one after the other,
+each with the goal as the motive; the base of the second rewrite is the first rewrite's
+result, not an equation at the product type.
 """
 import re
 import sys
@@ -31,6 +42,15 @@ def nat_all(prop, items):
     for it in items:
         t = f"And.intro ({t}) ({it})"
     return t
+
+
+def tx_tuple(line, left, cnt, sh):
+    """The transmitter's tuple `(line, (left, (cnt, sh)))`."""
+    return f"({line}, ({left}, ({cnt}, {sh})))"
+
+
+def tx_tail(left, cnt, sh):
+    return f"({left}, ({cnt}, {sh}))"
 
 
 # --------------------------------------------------------------------------------
@@ -59,20 +79,25 @@ def gen_tx():
                 if kind == "same":
                     pf = f"refl (Tx.embT (TxS.mk {l2} {c2} d))"
                 elif kind == "go":
-                    pre = "(BitVec.ofNat 1 0, (BitVec.ofNat 4 10, (BitVec.ofNat 7 0, "
-                    m1 = pre + "@frame9 HwTy.El _ (byte e))))"
-                    m2 = pre + "reg9 (Reg9.frame e))))"
-                    pf = (f"@Eq.trans TxT ({lhs}) {m1} {m2} (refl {m1}) "
-                          f"(Eq.congrArg (fun (z : BitVec 9) => {pre}z)))) (Uart.frame_byte e))")
+                    # the frame enters the shift register: no `Eq` at `TxT`
+                    m1 = tx_tuple("BitVec.ofNat 1 0", "BitVec.ofNat 4 10", "BitVec.ofNat 7 0",
+                                  "@frame9 HwTy.El _ (byte e)")
+                    mz = tx_tuple("BitVec.ofNat 1 0", "BitVec.ofNat 4 10", "BitVec.ofNat 7 0", "z")
+                    pf = (f"Eq.substProp (fun (z : BitVec 9) => {lhs} = {mz}) "
+                          f"(Uart.frame_byte e) (refl {m1})")
                 else:
                     r = f"(Tx.reg d {l})"
-                    mid = f"(BitVec.ofNat 4 {l2}, (BitVec.ofNat 7 0, "
-                    m1 = f"(bit0 (reg9 {r}), {mid}shift9 (reg9 {r}))))"
-                    m2 = f"(Bool.toBits {r}.r0, {mid}shift9 (reg9 {r}))))"
-                    m3 = f"(Bool.toBits {r}.r0, {mid}reg9 (Reg9.shift {r}))))"
-                    pf = (f"@Eq.trans TxT ({lhs}) {m2} {m3} (@Eq.trans TxT ({lhs}) {m1} {m2} (refl {m1}) "
-                          f"(Eq.congrArg (fun (z : BitVec 1) => (z, {mid}shift9 (reg9 {r}))))) (Uart.bit0_reg9 {r}))) "
-                          f"(Eq.congrArg (fun (z : BitVec 9) => (Bool.toBits {r}.r0, {mid}z)))) (Uart.shift_reg9 {r}))")
+                    tail9 = tx_tail(f"BitVec.ofNat 4 {l2}", "BitVec.ofNat 7 0",
+                                    f"shift9 (reg9 {r})")
+                    l1 = tx_tuple(f"Bool.toBits {r}.r0", f"BitVec.ofNat 4 {l2}",
+                                  "BitVec.ofNat 7 0", f"shift9 (reg9 {r})")
+                    # first `bit0`, then `shift9`; each rewrite is a `Prop`, the second
+                    # starts from the first one's result
+                    inner = (f"Eq.substProp (fun (z : BitVec 1) => (z, {tail9}) = {l1}) "
+                             f"(Eq.symm (Uart.bit0_reg9 {r})) (refl {l1})")
+                    pf = (f"Eq.substProp (fun (z : BitVec 9) => {lhs} = "
+                          f"({f'Bool.toBits {r}.r0'}, {tx_tail(f'BitVec.ofNat 4 {l2}', 'BitVec.ofNat 7 0', 'z')})) "
+                          f"(Uart.shift_reg9 {r})\n    ({inner})")
                 out.append(f"def Tx.o_{nm} (d e : Bits8) : Tx.GOK (TxS.mk {l} {c} d) ({b(st)}, e) :=\n  {pf}")
                 out.append(f"def Tx.v_{nm} (d e : Bits8) : Tx.inv (Tx.spec (TxS.mk {l} {c} d) ({b(st)}, e)).1 := And.intro rfl rfl")
                 out.append(f"def Tx.c_{nm} (d e : Bits8) : Tx.Case (TxS.mk {l} {c} d) ({b(st)}, e) := And.intro (Tx.o_{nm} d e) (Tx.v_{nm} d e)")
@@ -87,7 +112,6 @@ def gen_tx():
 
 
 def gen_txframe():
-    items = "\n".join([])
     lst = [f"fun (x : Bool × Bits8) => rfl" for k in range(10 * N)]
     return f"def Tx.fsteps (d : Bits8) : Nat.All (Tx.FStep d) {10*N} :=\n  {nat_all('', lst)}"
 
@@ -130,11 +154,12 @@ def gen_rx():
                     pf = f"refl (Rx.embT (RxS.mk {ph2} {c2} cs), {o})"
                 else:
                     lhs = f"Rx.Gd (Rx.embT (RxS.mk {ph} {c} cs)) (Bool.toBits {b(r)})"
-                    pre = f"(BitVec.ofNat 4 {ph2}, (BitVec.ofNat 7 0, "
-                    m1 = f"({pre}shift8 (byte cs) (Bool.toBits {b(r)}))), {o})"
-                    m2 = f"({pre}byte (Bits8.shiftIn cs {b(r)}))), {o})"
-                    pf = (f"@Eq.trans RxTO ({lhs}) {m1} {m2} (refl {m1}) "
-                          f"(Eq.congrArg (fun (z : BitVec 8) => ({pre}z)), {o})) (Uart.shift8_byte cs {b(r)}))")
+                    rxT = f"(BitVec.ofNat 4 {ph2}, (BitVec.ofNat 7 0, shift8 (byte cs) (Bool.toBits {b(r)})))"
+                    m1 = f"({rxT}, {o})"
+                    mz = f"((BitVec.ofNat 4 {ph2}, (BitVec.ofNat 7 0, z)), {o})"
+                    # no `Eq` at `RxTO`: rewrite inside the goal (`Eq.substProp`)
+                    pf = (f"Eq.substProp (fun (z : BitVec 8) => {lhs} = {mz}) "
+                          f"(Uart.shift8_byte cs {b(r)}) (refl {m1})")
                 out.append(f"def Rx.o_{nm} (cs : Bits8) : Rx.GOK (RxS.mk {ph} {c} cs) {b(r)} :=\n  {pf}")
                 out.append(f"def Rx.v_{nm} (cs : Bits8) : Rx.inv (Rx.next (RxS.mk {ph} {c} cs) {b(r)}) := And.intro rfl rfl")
                 out.append(f"def Rx.c_{nm} (cs : Bits8) : Rx.Case (RxS.mk {ph} {c} cs) {b(r)} := And.intro (Rx.o_{nm} cs) (Rx.v_{nm} cs)")
@@ -172,10 +197,7 @@ def gen_rxgg2():
     for n in range(4, -1, -1):
         for bits in itertools.product((True, False), repeat=n):
             args = " ".join(b(x) for x in bits)
-            vs = " ".join(f"x{i}" for i in range(n + 1, 5 + 1))
-            binders = " ".join(f"(x{i} : Bool)" for i in range(n + 2, 5 + 1))
             rest = " ".join(f"x{i}" for i in range(n + 2, 5 + 1))
-            mot = f"(fun (y : Bool) => {'(' + binders.replace('(', '').replace(')', '') + ') → ' if False else ''}"
             # P y := ∀ rest, GEq q rx args y rest
             pi = "".join(f"(x{i} : Bool) → " for i in range(n + 2, 5 + 1))
             P = f"(fun (y : Bool) => {pi}Rx.GEq q rx {args} y {rest})".replace("  ", " ")

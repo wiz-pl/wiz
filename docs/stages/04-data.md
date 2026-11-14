@@ -2,11 +2,11 @@
 
 Stage 4 has several steps, each committed separately:
 
-1. **Universe polymorphism** ✅ (below)
-2. **Type-directed conversion, Σ / ⊤ / ⊥ with η** ✅ (below)
-3. **Observational equality** ✅ (below)
-4. **Quantity polymorphism** ✅ and **indexed descriptions, μ / ν** ✅ (below)
-5. Surface `inductive` / `structure` ✅ (below); dependent `match`, structural and
+1. **Universe polymorphism** (below)
+2. **Type-directed conversion, Σ / ⊤ / ⊥ with η** (below)
+3. **Observational equality** (below)
+4. **Quantity polymorphism** and **indexed descriptions, μ / ν** (below)
+5. Surface `inductive` / `structure` (below); dependent `match`, structural and
    well-founded recursion, and copatterns are next
 
 ## 4a: universe polymorphism
@@ -71,14 +71,14 @@ held unrestricted for now. `(1 g : Guard)` can be passed along, but no field of 
 be read, `match` doesn't take it apart, and a nested `let 1 (x, y)` leaves the
 structure's marker tail unconsumed. Use a tuple for linear data, e.g. `Nat × Tok`
 instead of `structure Guard where n : Nat; tok : Tok`. (Linear matching is not there
-yet: `/workspace/wiz-notes/wishful/linear-case.md`.)
+yet: `wiz-notes/wishful/linear-case.md`.)
 This includes a one-field wrapper (`structure Coin where value : Nat`, read with
 `c.value` at 1), which worked before: write it as `def Coin : Type := Nat`. The planned
 form is `let 1 (.mk a b) := s`, compiled to nested splits
-(`/workspace/wiz-notes/linear-case-design.md`). The eliminators follow the same rule:
+(`wiz-notes/linear-case-design.md`). The eliminators follow the same rule:
 `ind`, `sfix`, `scase` (and `coit`/`scofix` for their seed) bind what they take apart at
 ω, so their scrutinee counts ω times and a value of an inductive type held at 1 can be
-passed on but not eliminated; `match` already took its scrutinee at ω. The accepted follow-up is the linear-case plan (`/workspace/wiz-notes/linear-case-design.md`): K2a (an unused variable may leave its binder when its type is `Unit`, so a linear `Unit` needs no consumer), re-encoding B of structures (the marker in a 0-quantity first component, so a nested `let 1` leaves no marker tail to consume), and a quantity on `scase` (`scase_π`: the scrutinee is used π times and its fields are bound at π·q), which gives structures a destructuring form and linear inductive values an eliminator.
+passed on but not eliminated; `match` already took its scrutinee at ω. The accepted follow-up is the linear-case plan (`wiz-notes/linear-case-design.md`): K2a (an unused variable may leave its binder when its type is `Unit`, so a linear `Unit` needs no consumer), re-encoding B of structures (the marker in a 0-quantity first component, so a nested `let 1` leaves no marker tail to consume), and a quantity on `scase` (`scase_π`: the scrutinee is used π times and its fields are bound at π·q), which gives structures a destructuring form and linear inductive values an eliminator.
 
 | #   | Where              | What                                                       |
 |-----|--------------------|------------------------------------------------------------|
@@ -463,3 +463,38 @@ compare by equivalence. What this costs, and why:
   already has, and a description can't range over its own universe (fields are exactly in
   `Sort (l+1)`), so the model of codes covers it. That is an argument, not a proof:
   docs/CoreSpec.md §8.4b, docs/Status.md E1.
+
+## 4h: linear case analysis
+
+A value of an inductive type held at quantity 1 can be taken apart (linear-case stage 2;
+design in `wiz-notes/linear-case-design.md`, K1 and the unit eliminator (K2a withdrawn); rules and soundness argument in
+`docs/CoreSpec.md` §10.2 and §10.2a).
+
+* **K1, `scase` at a quantity.** `Term.scase` carries a quantity `q`. The method runs once
+  and receives the payload at `q`; the scrutinee is used `q` times (`U_m + q·U_x`). At ω
+  this is the old case; at 1 a linear value is taken apart; at 0 the scrutinee is erased
+  and the method can't branch on it. Both kernels (`Check.lean`, `Kernel.wiz`).
+* **The unit eliminator** `let () := u; b` consumes a `u : Unit` (its usage counts once)
+  and is compiled as "evaluate `u`, then `b`". It is the only way a linear `Unit` is
+  used up. (K2a, "a unit-shaped binder may go unused", was implemented and withdrawn:
+  a closure of a unit-shaped type can hold a resource; `docs/CoreSpec.md` §10.2a lists
+  the counterexamples.)
+* **`T.casesOn1`**, generated for every inductive next to `T.casesOnA`: the additive case
+  with the scrutinee at 1, built on `scase` at 1 and `split`s at 1 (fields come out at
+  their declared quantities), ending in `let () := u` for the payload's final `Unit`. `match` uses it when the scrutinee mentions a variable
+  bound at 1 (the scrutinee is then bound at 1 too), and a field bound at 1 is linear
+  again for a nested match.
+
+```
+inductive Res1 (A : Type) where
+  | ok (1 a : A)
+  | err (e : Nat) (1 back : A)
+def rebuild (1 r : Res1 Tok) : Res1 Tok := match r with
+  | .ok t => .ok t
+  | .err e t => .err e t          -- dropping `t`, or using it twice: a quantity error
+```
+
+A field that holds a resource must be declared at 1 (`1 val : S`): an ω field puts its
+value in an ω position. A *structure* held at 1 still can't be taken apart (its marker
+tail can't be consumed); linear data is a one-constructor `inductive`. Tests: the group `linear-case`, and `linearCaseRule` (both
+kernels) in the self-hosted group.

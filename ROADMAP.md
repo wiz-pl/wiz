@@ -44,7 +44,7 @@ The reasons for this order:
 
 ---
 
-## Stage 1: Core kernel ✅ scaffolded
+## Stage 1: Core kernel — scaffolded
 
 NbE kernel with bidirectional QTT checking, parametric in the rig. See
 [docs/stages/01-kernel.md](docs/stages/01-kernel.md) for the exercises.
@@ -70,7 +70,7 @@ Reading:
 - Abel & Bernardy, *A Unified View of Modalities in Type Systems* (ICFP 2020)
 - Moon, Eades & Orchard, *Graded Modal Dependent Type Theory* (ESOP 2021)
 
-## Stage 2: Surface syntax with an extensible parser ✅ scaffolded
+## Stage 2: Surface syntax with an extensible parser — scaffolded
 
 Copy Lean's architecture, because it is what makes Lean extensible:
 
@@ -85,7 +85,7 @@ Copy Lean's architecture, because it is what makes Lean extensible:
   activates its syntax, and ordering is by declaration order, which keeps it
   deterministic.
 
-**Key decision:** represent user-declared parsers as **data** (Lean's `ParserDescr`),
+**Decision:** represent user-declared parsers as **data** (Lean's `ParserDescr`),
 interpreted by the parser, not as compiled code. That lets `syntax` declarations work
 long before Wiz has a backend, and keeps them serialisable for caching.
 
@@ -95,7 +95,7 @@ partial parses.
 Reading: Ullrich & de Moura, *Beyond Notations: Hygienic Macro Expansion for Theorem
 Proving Languages* (IJCAR 2020); the Lean 4 sources `Lean/Parser/*.lean`.
 
-## Stage 3: Elaborator ✅ scaffolded
+## Stage 3: Elaborator — scaffolded
 
 `Syntax → core Term`, with:
 
@@ -111,7 +111,7 @@ Proving Languages* (IJCAR 2020); the Lean 4 sources `Lean/Parser/*.lean`.
 **Determinism:** name metavariables and fresh variables with per-declaration counters,
 never by pointer address or global counters shared across threads.
 
-## Stage 4: Data as μ/ν, structural types, nominal wrappers (4a ✅ universes, 4b ✅ Σ/⊤/⊥, 4c ✅ OTT, 4d ✅ quantity polymorphism + descriptions, μ/ν, 4e ✅ inductive/structure)
+## Stage 4: Data as μ/ν, structural types, nominal wrappers (4a universes, 4b Σ/⊤/⊥, 4c OTT, 4d quantity polymorphism + descriptions, μ/ν, 4e inductive/structure)
 
 This stage has the most open design space.
 
@@ -254,7 +254,7 @@ content-addressed key-value store, like Bazel's remote cache.
 instead of writing JSON-RPC yourself. Hover, go-to-definition and diagnostics are all
 queries.
 
-## Stage 12: Self-hosting (12a–d ✅: stdlib, flat objects, lexer and parser in Wiz)
+## Stage 12: Self-hosting (12a–d: stdlib, flat objects, lexer and parser in Wiz)
 
 * Use Lean's **stage0** approach: commit the *generated C* of the compiler. Stage 1 is
   stage0's C compiling the current sources.
@@ -263,9 +263,9 @@ queries.
   compare results.
 * Keep the Lean implementation as the reference until the Wiz one passes everything.
 
-Stage 13 ✅ improved the language for this (mutual and partial definitions, mutual
+Stage 13 improved the language for this (mutual and partial definitions, mutual
 inductive types, recursion on any argument, tuple patterns, inferred `match`), and
-stage 14 ✅ (a, b, c) has a Wiz type checker for a core calculus, with a frontend from
+stage 14 (a, b, c) has a Wiz type checker for a core calculus, with a frontend from
 text. Growing it to the full kernel, with differential tests, is next.
 
 ## Stretch: cubical type theory

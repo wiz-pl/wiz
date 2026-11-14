@@ -2,19 +2,19 @@
 
 Prerequisites shared by the HDL and Feral (decisions RD9, RD10/HD3).
 
-## 22a: division, powers and bits ✅
+## 22a: division, powers and bits
 
 The Prelude defines `Nat.div`, `Nat.mod`, `Nat.pow`, `Nat.land`, `Nat.lor`, `Nat.xor`,
 `Nat.shiftLeft`, `Nat.shiftRight`, `Nat.log2` (and `Nat.testBit`, `a / b`) by structural
 recursion on a fuel argument that bounds the number of steps, so the kernel can unfold
 them. Each is registered with `builtin nat.<op>`: on numerals the kernel computes
 natively (`def t : Nat.mod 300 256 = 44 := refl 44`), as do `#eval`, `#run`, C/LLVM
-(`runtime/wiz.c`: machine words, GMP when big) and the self-hosted backend
+(`runtime/`: machine words, GMP when big) and the self-hosted backend
 (`selfhost/rt.c`; its Prelude has the same definitions). As in Lean, `n / 0 = 0`,
 `Nat.mod n 0 = n` and `Nat.log2 0 = 0`. One table (`natNative?`, `Wiz/Core/Eval.lean`)
 serves the kernel and both interpreters.
 
-## 22b: `implemented_by` ✅
+## 22b: `implemented_by`
 
 `attribute [implemented_by g] f` gives a definition `f` a different implementation in
 compiled code: erasure (`compileReachable`) takes `g`'s code for `f`, while the kernel,
@@ -29,7 +29,7 @@ and return Wiz data types, passed as they are (marshalling kind `w`).
 Not yet: a *type* with a native representation (`Vec A` as an array, R0b), and the
 attribute in the self-hosted backend.
 
-## 22c: machine integers ✅
+## 22c: machine integers
 
 `import Word` (`lib/Word.wiz`): `UIntN w`, a w-bit unsigned integer, and `IntN w`, w-bit
 two's complement, both a number of bits below `2^w` (normalised by construction, so
@@ -48,7 +48,7 @@ arithmetic), `resize` (zero- or sign-extending, or truncating) and `toIntN`/`toU
   types and `w` is inferred. (Before 22e it had to be an index, `mk {0 w : Nat} …`,
   leaving an erased slot in the object.)
 * **Natives.** The kernel computes with the definitions, quickly on numerals (22a), and
-  so do `#eval`/`#run`. Compiled code calls natives (`runtime/wiz.c`, `wiz_word_*`) by
+  so do `#eval`/`#run`. Compiled code calls natives (`runtime/`, `wiz_word_*`) by
   `implemented_by`: in a `uint64_t` up to 64 bits, GMP beyond, one function per
   operation for every width. A table of operations at widths 8 to 100 gives the same
   values in the kernel (`refl`), both interpreters, C and LLVM (`examples/words.wiz`:
@@ -58,7 +58,7 @@ arithmetic), `resize` (zero- or sign-extending, or truncating) and `toIntN`/`toU
   object holding a number (above `2^62`, a GMP number); unboxed words need the type-level
   `implemented_by` (22d).
 
-## 22d: native representations: unboxed words ✅
+## 22d: native representations: unboxed words
 
 `attribute [implemented_by mk get] T.mk` gives a type a **native representation** in
 compiled code. `T.mk` is a constructor with one runtime field (the others erased);
@@ -83,7 +83,7 @@ as the runtime number itself, possibly big). **A word is its bits**:
   to build or read a word, and each value has exactly one representation (equality is
   a comparison of bits). `ofBits`/`toBits` convert from and to `Nat` (free below
   `2^62`).
-* **Operations** are natives on that representation (`wiz_word_*` in `runtime/wiz.c`):
+* **Operations** are natives on that representation (`wiz_word_*` in `runtime/`):
   `ofNat`/`ofNeg`, `+ - *`, `div`/`mod`/`rem`, comparisons, `land`/`lor`/`xor`/`not`,
   shifts and `testBit` (a shift or index of `2^64` or more counts as infinite),
   `resize` (zero- or sign-extending), `toIntN`/`toUIntN` (free). Up to 64 bits each is
@@ -95,7 +95,7 @@ as the runtime number itself, possibly big). **A word is its bits**:
   boundaries, as Lean's `UInt64`): the next step, once a measurement says it pays.
 * **Self-hosted backend:** not yet (it runs the model; see the wishful note).
 
-## 22e: phantom parameters ✅
+## 22e: phantom parameters
 
 ```
 inductive UIntN (w : Nat) where
@@ -140,7 +140,7 @@ instead of `Unit`. That `Unit` is the end of the index type of an `inductive` or
 * A `def` alias (`def Mut (ρ : Region) (A : Type) : Type := A`) unfolds, so its
   parameters never count. Declare a `structure` instead.
 
-## 22f: the trusted base: witnesses and tracked registrations ✅
+## 22f: the trusted base: witnesses and tracked registrations
 
 Two ways to prove `False` without writing `axiom` are closed.
 
@@ -192,7 +192,7 @@ Two ways to prove `False` without writing `axiom` are closed.
   Tests: group *modules*, "trust is part of a module's cache key", "the toolchain's
   library is the first root …".
 
-## 22g: regions: borrow checking as typing ✅
+## 22g: regions: borrow checking as typing
 
 ```
 def longest {ρa ρb : Region} (0 h : Outlives ρa ρb) (x : Shr ρa U64) (y : Shr ρb U64) : Result (Shr ρb U64) :=
@@ -247,6 +247,24 @@ reject them in the kernel, but a linear variable can't be used inside a `match`
 alternative today (`match` is built on `ind`, whose methods are scaled by ω) and
 `Result`'s payload is ω, so it needs a case whose alternatives run once (R9a, a kernel
 change). Linearity would still not be uniqueness: in-place updates stay with RC.
+(Since cohesion M4, below, the handles are linear and gaps 1 and 3 are type errors; gap 2
+stays, pinned in `regions`.)
+
+**Linear handles (cohesion M4a, on linear-case stage 2).** `Uniq1 ρ A` is `&'a mut A`
+used at quantity 1. It is a one-constructor inductive with a private constructor, because a
+linear structure can't be taken apart; the value field is ω, and the handle is what is linear.
+The scopes are `Uniq1.borrow` and `Uniq1.borrowIn` (inside a scope that holds other handles:
+a call borrowing two locals threads the outer handle through), plus `reborrow`, `share`,
+`zoom`, `both`, `read`, `write` and `end`. A body takes its handle at 1 and returns a
+`Result1 B H`, whose `ok` *and* `err` carry the handle back (D8).
+The kernel then rejects gaps 1 and 3 (E0499 by passing one `&mut` twice; packing a handle
+with its region); see group `regions`.
+Gap 2 stays: the lender is an ω value, so a body that names the `Lent` token differently
+can still read it. Closing it needs linear lenders, and reading `*x` out of a linear value
+then needs a Copy notion (K3, `sfix_π`).
+Feral's lowering moved onto these in M4b. Since M4b-3d they are the only mutable handles:
+the ω `Uniq`, `Mut` and `MutOpt` are gone, and `Uniq1`, `Mut1`, `MutOpt1` are renamed
+`Uniq`, `Mut`, `MutOpt` (`Result1` and `Borrowed` keep their names).
 
 Linearity closes the escape for `Uniq` (the body has one handle and must hand it back,
 so it can't also pack it) but not for `Shr`, which is a copy. The scope is already rank-2
@@ -259,7 +277,7 @@ structurally and with no instance for `Σ (r : Region)` or `Π (r : Region)`. Ei
 the lowering only has to state each scope's result type (it does: the variables that
 live on after the borrow), and with the second it also has to request the instance.
 
-## 22h: one bit-vector family ✅
+## 22h: one bit-vector family
 
 `BitVec n` (`lib/BitVec.wiz`) and `UIntN n` (`lib/Word.wiz`) are one type:
 
@@ -293,7 +311,7 @@ def w (x : U32) : BitVec 32 := BitVec.add x (BitVec.ofNat 32 1)   -- no conversi
   a `structure` wrapper would instead need its own `implemented_by mk get` to avoid a box.
   (Since 22i a one-field `structure` is unboxed anyway.)
 
-## 22i: unboxed newtypes and `attribute [inline]` ✅
+## 22i: unboxed newtypes and `attribute [inline]`
 
 ```
 structure Uniq (ρ : Region) (A : Type) where
@@ -328,13 +346,25 @@ The region discipline of 22g used to cost at run time: every handle was a cell
   tail. `def first {A B : Type} (p : A × B) : A := p.1`, then `first (S.mk 5)`, reads
   field 0 of a number. So the default keeps pairs, and the unboxed layout is waiting for
   an encoding that carries it in something generic code also sees (a quantity:
-  `/workspace/wiz-notes/repr-shape.md`, option B). Group `repr`.
+  `wiz-notes/repr-shape.md`, option B). Group `repr`.
 * **`attribute [inline] f`** (`Inline.lean`) substitutes `f`'s erased body where `f` is
   applied to all its arguments, then simplifies: a redex `(λ x. b) a` becomes a `let`,
   and a `let` of a variable, of `◾`, or of a lambda used once (not under a lambda) is
   substituted, so a lambda argument lands in the head of an application and is reduced.
   `lib/Region.wiz` marks its scopes and `Uniq.set`/`Shr.weaken`. The kernel never sees
   the attribute; inlining a recursive definition stops after a few levels.
+
+* **Linear scopes (cohesion M4b).** Since `Uniq` is a linear one-constructor inductive,
+  a `match` on a handle is `T.casesOn1`, whose method takes the tag and then the fields.
+  Erasure now unfolds `casesOn1` and `casesOnA` calls as it does `casesOn`
+  (`unfoldCases?`), and `simpKnown` (`Inline.lean`, run on every definition) removes what
+  is left: a `case` on a known tag is its branch, `(case s bs) a` pushes `a` into the
+  branches, a redex is a `let`, and a lambda bound once is moved to its use (a
+  continuation such as `Uniq.end r (λ v. …)`). With `--unbox-structs`, a `Uniq.borrow`
+  scope around `push1` went from 15 objects and 8 lifted functions to 4 objects and none,
+  and two nested scopes from 29 and 23 to 6 and none (no scope: 3). What remains is the
+  handle's cell: `Uniq` is an inductive, which `--unbox-structs` doesn't unbox
+  (`wiz-notes/linear-scope-cost.md`).
 
 Objects allocated on `#run`'s checked heap (`tests --allocs FILE ENTRY…`, a measuring
 mode of the test driver), before → after (the "unbox" columns are with `--unbox-structs`;
@@ -356,7 +386,7 @@ the same cells, by reuse); a recursive call through a scope's lambda is still no
 as structural (`05_bst` `insert` stays `partial`; wishful: reborrow-recursion has a
 design). The self-hosted toolchain doesn't have phantom tails at all yet.
 
-## 22j: Feral, the surface language ✅
+## 22j: Feral, the surface language
 
 ```
 import FeralCore
@@ -417,7 +447,44 @@ loops, `?`, `U64`, and functions that return borrows.
   ω values (22g, known gaps). One Feral program shows it: `swap (&mut a) (&mut a)` is
   E0499 in the front end, yet its `#unchecked` lowering checks. The surface language
   never names handles, scopes or tokens, so when handles become linear only the text
-  emitted for scopes changes.
+  emitted for scopes changes. (Since cohesion M4b they are linear, and the kernel rejects
+  that lowering too; reading a lender under a renamed `Lent` token is the gap that stays.)
+* **Linear mode (cohesion M4b-1).** A block whose functions use `&mut` and stay in the
+  fragment it covers (straight-line code, calls, `if`, `mem.swap/take/replace`) lowers to
+  the linear handles of 22g (`Uniq1`). `&mut` parameters are taken at 1. `*x` becomes
+  `let 1 (d, x) := Uniq1.peek x`, and `*x := e` becomes `let 1 x := Uniq1.write x e`.
+  A function returns `Result1 v handles`, and every error exit hands the live handles
+  back (D8). An `if` that changes a handle joins through `Result1`, and a call that
+  borrows two locals threads the outer handle through `Uniq1.borrowIn`.
+  `#lower` marks such functions `-- linear handles`. The kernel then rejects passing one
+  `&mut` twice (E0499) on the `#unchecked` lowering too.
+  Since M4b-2, `for` and `while` loops are covered too: the loop function takes every
+  handle it mentions at 1 and hands it back in `Result1`. So is `v.push x` on a `&mut`,
+  lowered to FeralCore's linear twin `Vec.push1`. Since M4b-3a, early exits (`return`
+  and `?`) leave scopes, joins and loops as `Flow` values inside `Result1`, with the
+  handles beside them. Since M4b-3b, shared borrows (`&x`, and `&*r` of a handle, e.g.
+  for `r.len`) and indexing (`v[i]`) work beside live handles. The scopes thread those
+  handles through (`Shr.borrowIn`, `Uniq1.shareIn`).
+  Since M4b-3c, returned borrows are linear too. A function returning `&'a mut A` returns
+  a `Borrowed (Mut1 ρ A S) H`. Its `ok` hands over the borrow, a `Mut1` whose backward
+  function rebuilds the lender. Its `err` hands the lender's handle back (D8). With two
+  lenders (`pick`), the one not returned rides along in the backward function
+  (`Mut1.alongside`). `Option (&mut A)` is a `MutOpt1`. An error exit while a returned borrow
+  is live first releases it (`Mut1.release`/`Mut1.finish`) and hands back what it held, so
+  the error alternative is built from the environment at the exit. Cursors
+  (`let mut cur := r`, `while let … := cur`, `cur := left`) are `Mut1.whole`/`Mut1.comp`.
+  `match`/`if let` through a `&mut` is a `Uniq1.reborrow` whose body peeks the value. Its
+  alternatives rebuild the constructor with `Uniq1.write`. `let h := &mut s.f` takes the
+  fields out in a reborrow (L11). A field passed to a `&mut` parameter, `f (&mut s.f)`, is
+  a `Uniq1.zoom` with the field's lens `S.fL`; `zoomIn` threads other handles through.
+  Every surface program that uses `&mut` now lowers linearly. Not yet: two fields of one
+  struct in one call (`g (&mut s.a) (&mut s.b)`; the `let` form does it).
+  Since M4b-3d, linear mode is the only mode: every block lowers to the linear handles
+  (renamed `Uniq`, `Mut`, `MutOpt`, 22g), the `-- linear handles` marker is gone, and
+  FeralCore's `&mut` functions (`Vec.push`, `Vec.get_mut`) take linear handles. The
+  hand-lowered drafts (`drafts/feral/lowered`, `rejected`) use the same API. Specs read
+  handles at ω through `Uniq.get`/`Mut.store` (03's `final` spec is stated on the place's
+  store).
 * **Located output for command macros.** Runtime `Syntax` has no positions. A command
   macro now names a node of its input by **path** (child indices), and its output may
   contain `Syntax.errorAt path msg`, `Syntax.infoAt path msg` and
@@ -442,16 +509,19 @@ loops, `?`, `U64`, and functions that return borrows.
 
 Specifications: a `spec f requires (P) ensures (Q)` item states `f.Spec`, a Wiz
 proposition over the arguments' values, `result`, `old x` and `final x` (an `&mut`
-argument's value when the borrow ends, its handed-back handle), with total correctness
-(`Result.Holds`), proved in Wiz; see [Resources in Wiz](../resources.md).
+argument's value when the borrow ends), with total correctness (`Result.Holds`), proved
+in Wiz. With linear handles a `&mut` argument enters as its value and the call runs
+inside the borrow scopes a caller would open, so the clauses are stated on the values the
+scopes hand back; see [Resources in Wiz](../resources.md).
 
 Limitations: the fragment (LOWERING.md §1a); loop invariants, `decreases` and `final result`
-(a returned borrow) in specs are not supported; `U64` and `Vec`
+(a returned borrow) in specs are not supported, nor (with linear handles) a spec for a
+function with an outlives bound or three or more `&mut` arguments; `U64` and `Vec`
 are the stand-ins of `drafts/feral/lib/FeralCore.wiz`; keywords such as `if` and `mut`
-are reserved in a file that imports `Feral`; one borrow error per function; stricter than rustc where a `&mut` would be
+are reserved only inside `feral … end` (13j), and only `feral` itself elsewhere; one borrow error per function; stricter than rustc where a `&mut` would be
 implicitly reborrowed at a shorter lifetime.
 
-## 22k: sealed types ✅
+## 22k: sealed types
 
 Types are structural (stage 4): two `inductive` declarations of the same shape are one
 type. For a type with a native representation (22d) that is wrong twice over: a
@@ -512,7 +582,7 @@ tail). Tests: groups `repr` (look-alikes, a native byte type in its own module
 interpreted and compiled, R5 and layer 1, the layer-3 refusals on hand-made kernel
 terms) and `selfhost` (the two frontends agree). Kernel rules: none, in either kernel.
 
-## 22l: words carry their range ✅
+## 22l: words carry their range
 
 22k made the word constructors private so that `lib/Word.wiz` alone builds words and
 keeps `toNat < 2^w`, the invariant the natives rely on. But the module also exported an

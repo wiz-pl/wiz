@@ -1,0 +1,15 @@
+-- Verified circuit optimisation, the two largest checks (docs/libraries.md, H14 V1). Not
+-- in the test suite (about ten minutes); run on demand:
+--     wiz check --trust-native examples/hdl-verified-full.wiz
+-- TRUST NOTE: as examples/hdl-verified-native.wiz: each `native_refl` is an axiom
+-- `X.native✝` (listed by `#print axioms`), accepted only with --trust-native, trusting
+-- erasure and `#eval`'s interpreter; the kernel checks none of it.
+import Hdl.Verified
+
+-- the length estimate, every a, c < 1024: n² ≤ a² + c² ≤ 1.21 (n + 2)²  (7·10⁸ steps)
+def norm_full : allBelow (Hv.normOk 1024) 1048576 = .true := native_refl
+-- the smooth minimum, every d₁, d₂ in [-64, 960), the march's distances:
+-- min − c − 1, c ≤ g²/256 < c + 2  (6·10⁹ steps)
+def smin_full : allBelow (Hv.sminOk 1024) 1048576 = .true := native_refl
+
+#print axioms smin_full

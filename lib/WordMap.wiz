@@ -1,0 +1,150 @@
+import Word
+import Text
+import Logic
+/-!
+# WordMap
+
+Maps from 64-bit words (`import WordMap`): `U64Map V`, a functional finite map with
+`U64` keys, updated in place when it is unique (as `StrMap`). Keys of other word
+types, typed ids (`NodeId k`, 22e) and interned strings (lib/Intern.wiz) go through
+`U64` (`UIntN.resize`, or the id's bits).
+
+The model. A map is its entries, `mk (entries : List (U64 × V))`, with the keys
+strictly increasing: the module keeps that invariant (the constructor is private and
+every operation here preserves it), so each map has exactly one model, and `toList`
+and `foldl` see the entries by increasing key, in the kernel, the interpreters and
+compiled code alike. The kernel computes with the definitions and proofs see them
+(the laws at the end).
+
+Compiled code runs natives instead (`runtime/`, `wiz_wmap_*`): an open-addressing
+hash table of `uint64_t` keys and Wiz values (linear probing, deletion by backward
+shift, at most half full), so `insert`, `find`, `erase` and `contains` take expected
+constant time, and only the values are Wiz objects. An update copies the table when it
+is shared and changes it in place when it is unique. Reading the entries back
+(`toList`, `foldl`, `keys`) sorts them: O(n log n).
+
+Trust. The natives are trusted to agree with the definitions (`#print axioms` lists
+them, marked `native`, 22f), and the natives' `toList` relies on the module invariant
+(the model is the sorted list). They abort when memory runs out. The tests (group
+`wordmap`) run the same programs under the interpreter and compiled, C and LLVM.
+-/
+
+def U64Map.insertL {V : Type} (k : U64) (v : V) : List (U64 × V) → List (U64 × V)
+  | .nil => .cons (k, v) .nil
+  | .cons e rest => match UIntN.lt k e.1 with
+    | .true => .cons (k, v) (.cons e rest)
+    | .false => match UIntN.beq k e.1 with
+      | .true => .cons (k, v) rest
+      | .false => .cons e (U64Map.insertL k v rest)
+def U64Map.eraseL {V : Type} (k : U64) : List (U64 × V) → List (U64 × V)
+  | .nil => .nil
+  | .cons e rest => match UIntN.beq k e.1 with
+    | .true => rest
+    | .false => .cons e (U64Map.eraseL k rest)
+def U64Map.findL {V : Type} (k : U64) : List (U64 × V) → Option V
+  | .nil => .none
+  | .cons e rest => match UIntN.beq k e.1 with
+    | .true => .some e.2
+    | .false => U64Map.findL k rest
+
+-- ## U64Map
+
+sealed inductive U64Map (V : Type) where
+  | private mk (entries : List (U64 × V))
+
+-- the entries, by increasing key
+def U64Map.toList {V : Type} : U64Map V → List (U64 × V)
+  | .mk l => l
+def U64Map.empty {V : Type} : U64Map V := .mk .nil
+-- `k` mapped to `v` (replacing `k`'s value, if any)
+def U64Map.insert {V : Type} (m : U64Map V) (k : U64) (v : V) : U64Map V := .mk (U64Map.insertL k v m.toList)
+-- without `k`
+def U64Map.erase {V : Type} (m : U64Map V) (k : U64) : U64Map V := .mk (U64Map.eraseL k m.toList)
+def U64Map.find {V : Type} (m : U64Map V) (k : U64) : Option V := U64Map.findL k m.toList
+-- `k`'s value, or `d`
+def U64Map.findD {V : Type} (m : U64Map V) (k : U64) (d : V) : V := match U64Map.find m k with
+  | .none => d
+  | .some v => v
+def U64Map.contains {V : Type} (m : U64Map V) (k : U64) : Bool := match U64Map.find m k with
+  | .none => .false
+  | .some _ => .true
+def U64Map.size {V : Type} (m : U64Map V) : Nat := List.length m.toList
+-- (Wiz functions over the operations above, so natives too when compiled)
+def U64Map.ofList {V : Type} (l : List (U64 × V)) : U64Map V :=
+  List.foldl (fun m e => U64Map.insert m e.1 e.2) U64Map.empty l
+-- `f (… (f b k₀ v₀) …) kₙ vₙ`, by increasing key
+def U64Map.foldl {V B : Type} (f : B → U64 → V → B) (b : B) (m : U64Map V) : B :=
+  List.foldl (fun acc e => f acc e.1 e.2) b m.toList
+def U64Map.keys {V : Type} (m : U64Map V) : List U64 := List.map (fun e => e.1) m.toList
+
+extern "wiz_wmap_of_list" U64Map.ofListNative : {V : Type} → List (U64 × V) → U64Map V
+extern "wiz_wmap_to_list" U64Map.toListNative : {V : Type} → U64Map V → List (U64 × V)
+attribute [implemented_by U64Map.ofListNative U64Map.toListNative] U64Map.mk
+attribute [implemented_by U64Map.toListNative] U64Map.toList
+extern "wiz_wmap_empty" U64Map.emptyNative : {V : Type} → U64Map V
+extern "wiz_wmap_insert" U64Map.insertNative : {V : Type} → U64Map V → U64 → V → U64Map V
+extern "wiz_wmap_erase" U64Map.eraseNative : {V : Type} → U64Map V → U64 → U64Map V
+extern "wiz_wmap_find" U64Map.findNative : {V : Type} → U64Map V → U64 → Option V
+extern "wiz_wmap_find_d" U64Map.findDNative : {V : Type} → U64Map V → U64 → V → V
+extern "wiz_wmap_contains" U64Map.containsNative : {V : Type} → U64Map V → U64 → Bool
+extern "wiz_wmap_size" U64Map.sizeNative : {V : Type} → U64Map V → NatObj
+attribute [implemented_by U64Map.emptyNative] U64Map.empty
+attribute [implemented_by U64Map.insertNative] U64Map.insert
+attribute [implemented_by U64Map.eraseNative] U64Map.erase
+attribute [implemented_by U64Map.findNative] U64Map.find
+attribute [implemented_by U64Map.findDNative] U64Map.findD
+attribute [implemented_by U64Map.containsNative] U64Map.contains
+attribute [implemented_by U64Map.sizeNative] U64Map.size
+
+-- ## Laws (on the model; the natives are trusted to keep them). `find` after `erase`
+-- and `insert` at another key also hold, given the module invariant (sorted keys); they
+-- are tested, not proved, here.
+
+def U64Map.natBeqSelf : (n : Nat) → Nat.beq n n = .true
+  | .zero => rfl
+  | .succ n => U64Map.natBeqSelf n
+def U64Map.beq_self (k : U64) : UIntN.beq k k = .true := U64Map.natBeqSelf k.toNat
+def U64Map.findL_cons_self {V : Type} (k : U64) (v : V) (rest : List (U64 × V)) :
+    U64Map.findL k (.cons (k, v) rest) = .some v :=
+  transp (fun b _ => (match b with
+    | .true => Option.some v
+    | .false => U64Map.findL k rest) = Option.some v) rfl (Eq.symm (U64Map.beq_self k))
+def U64Map.findL_skip {V : Type} (k : U64) (e : U64 × V) (rest : List (U64 × V)) (h : UIntN.beq k e.1 = .false) :
+    U64Map.findL k (.cons e rest) = U64Map.findL k rest :=
+  transp (fun b _ => (match b with
+    | .true => Option.some e.2
+    | .false => U64Map.findL k rest) = U64Map.findL k rest) rfl (Eq.symm h)
+def U64Map.findL_insertL {V : Type} (k : U64) (v : V) : (l : List (U64 × V)) →
+    U64Map.findL k (U64Map.insertL k v l) = .some v
+  | .nil => U64Map.findL_cons_self k v .nil
+  | .cons e rest => Or.elim (Bool.cases (UIntN.lt k e.1))
+    (fun hl => transp (fun b _ => U64Map.findL k (match b with
+        | .true => List.cons (k, v) (List.cons e rest)
+        | .false => match UIntN.beq k e.1 with
+          | .true => List.cons (k, v) rest
+          | .false => List.cons e (U64Map.insertL k v rest)) = Option.some v)
+      (U64Map.findL_cons_self k v (.cons e rest)) (Eq.symm hl))
+    (fun hl => Or.elim (Bool.cases (UIntN.beq k e.1))
+      (fun hb => transp (fun b _ => U64Map.findL k (match b with
+          | .true => List.cons (k, v) (List.cons e rest)
+          | .false => match UIntN.beq k e.1 with
+            | .true => List.cons (k, v) rest
+            | .false => List.cons e (U64Map.insertL k v rest)) = Option.some v)
+        (transp (fun c _ => U64Map.findL k (match c with
+            | .true => List.cons (k, v) rest
+            | .false => List.cons e (U64Map.insertL k v rest)) = Option.some v)
+          (U64Map.findL_cons_self k v rest) (Eq.symm hb))
+        (Eq.symm hl))
+      (fun hb => transp (fun b _ => U64Map.findL k (match b with
+          | .true => List.cons (k, v) (List.cons e rest)
+          | .false => match UIntN.beq k e.1 with
+            | .true => List.cons (k, v) rest
+            | .false => List.cons e (U64Map.insertL k v rest)) = Option.some v)
+        (transp (fun c _ => U64Map.findL k (match c with
+            | .true => List.cons (k, v) rest
+            | .false => List.cons e (U64Map.insertL k v rest)) = Option.some v)
+          (Eq.trans (U64Map.findL_skip k e (U64Map.insertL k v rest) hb) (U64Map.findL_insertL k v rest)) (Eq.symm hb))
+        (Eq.symm hl)))
+def U64Map.find_insert {V : Type} (m : U64Map V) (k : U64) (v : V) : U64Map.find (U64Map.insert m k v) k = .some v :=
+  U64Map.findL_insertL k v m.toList
+def U64Map.find_empty {V : Type} (k : U64) : U64Map.find (U64Map.empty : U64Map V) k = .none := rfl

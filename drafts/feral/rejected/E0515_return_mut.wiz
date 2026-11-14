@@ -3,7 +3,7 @@ import FeralCore
 -- fn bad {'a} (v : &'a mut U64) : &'a mut U64 := { let mut l := 5; &mut l }
 -- The borrow of `l` has the scope's fresh region ρl; no region the caller can name
 -- outlives it, so it can't be the function's `Mut ρ …`.
-def bad {ρ : Region} (v : Uniq ρ U64) : Result (Mut ρ U64 (Uniq ρ U64)) :=
-  match Uniq.borrow ρ (U64.lit 5) (fun ρl hl l rl => .ok (Mut.ofUniq rl, rl)) with
-  | .ok p => let (m, l) := p; .ok m
-  | .err e => .err e
+def bad {ρ : Region} (1 v : Uniq ρ U64) : Borrowed (Mut ρ U64 (Uniq ρ U64)) (Uniq ρ U64) :=
+  match Uniq.borrow ρ (U64.lit 5) (fun ρl hl l rl => Result1.ok (Mut.ofUniq rl) rl) with
+  | .ok p => let (m, l) := p; Borrowed.ok m
+  | .err e => .err e v

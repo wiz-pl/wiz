@@ -8,7 +8,7 @@ import WizRuntime
 Each IR function becomes a C function on `wiz_val`s, plus a *boxed* version taking an
 array, which closures point to. Variables become locals, `case` a `switch` on the
 tag, join points labelled blocks entered with `goto` (their parameters are locals
-assigned before the jump), and `dup`/`drop` calls to the runtime (`runtime/wiz.c`,
+assigned before the jump), and `dup`/`drop` calls to the runtime (`runtime/`,
 which is pasted at the top of the output; `Wiz.C.runtime`, in `runtime/WizRuntime.lean`).
 -/
 
@@ -257,10 +257,10 @@ def exportEntry (cname : String) : Name := "wiz.export." ++ cname
 
 /-- The C functions of the exports (after the generated code; with `llvm`, the closures
 come from the LLVM module). -/
-def exportWrappers (exports : List RVal.ExternSig) (llvm : Bool := false) : String :=
+def exportWrappers (exports : List RVal.ExternSig) (llvm : Bool := false) (declareEntries : Bool := false) : String :=
   String.join (exports.map fun sig =>
     let entry := mangle (exportEntry sig.cname)
-    let decl := if llvm then s!"extern wiz_val {entry}(void);\n" else ""
+    let decl := if llvm || declareEntries then s!"extern wiz_val {entry}(void);\n" else ""
     let c : RVal.CallbackSig := { params := sig.params.map (·.letter), result := sig.result.letter, io := sig.io }
     decl ++ s!"{exportProto sig} {lb}\n{callIntoWiz c s!"{entry}()"}{rb}\n")
 where
@@ -387,11 +387,13 @@ where
   --| sorry
   --sol>
 
-def signature (d : IR.Decl) : String :=
+def signatureOf (pub : Bool) (d : IR.Decl) : String :=
   let ps := if d.params.isEmpty then "void" else ", ".intercalate (d.params.toList.map (s!"wiz_val {var ·}"))
-  s!"static wiz_val {mangle d.name}({ps})"
+  s!"{if pub then "" else "static "}wiz_val {mangle d.name}({ps})"
 
-def decl (arities : Std.HashMap Name Nat) (cafs : Std.HashSet Name) (d : IR.Decl) : String :=
+def signature (d : IR.Decl) : String := signatureOf false d
+
+def decl (arities : Std.HashMap Name Nat) (cafs : Std.HashSet Name) (d : IR.Decl) (pub : Bool := false) : String :=
   -- (a reuse token may be bound in several branches: declare it once)
   let locals := ((bound d.body).filter (!d.params.contains ·)).toList.eraseDups.toArray
   let decls := if locals.isEmpty then "" else s!"  wiz_val {", ".intercalate (locals.toList.map var)};\n"
@@ -402,15 +404,134 @@ def decl (arities : Std.HashMap Name Nat) (cafs : Std.HashSet Name) (d : IR.Decl
     let m := mangle d.name
     s!"static wiz_val {m}_build(void) {lb}\n{decls}{body arities {} d.body}{rb}\n" ++
     s!"static wiz_val {m}_slot = 0;\n" ++
-    s!"{signature d} {lb} wiz_val v = __atomic_load_n(&{m}_slot, __ATOMIC_ACQUIRE); " ++
+    s!"{signatureOf pub d} {lb} wiz_val v = __atomic_load_n(&{m}_slot, __ATOMIC_ACQUIRE); " ++
     s!"if (__builtin_expect(v != 0, 1)) {lb} wiz_inc(v); return v; {rb} return wiz_caf_init(&{m}_slot, {m}_build); {rb}\n" ++
-    s!"static wiz_val {m}_boxed(wiz_val *a) {lb} return {m}(); {rb}\n"
+    s!"{if pub then "" else "static "}wiz_val {m}_boxed(wiz_val *a) {lb} return {m}(); {rb}\n"
   else
-  s!"{signature d} {lb}\n{decls}{body arities {} d.body}{rb}\n" ++
-  s!"static wiz_val {mangle d.name}_boxed(wiz_val *a) {lb} return {mangle d.name}({boxedArgs}); {rb}\n"
+  s!"{signatureOf pub d} {lb}\n{decls}{body arities {} d.body}{rb}\n" ++
+  s!"{if pub then "" else "static "}wiz_val {mangle d.name}_boxed(wiz_val *a) {lb} return {mangle d.name}({boxedArgs}); {rb}\n"
 where
   lb := "{"
   rb := "}"
+
+/-! ### A program in several translation units
+
+`wiz build --split N` (stage 15k) compiles a large program as a **support** unit (the
+runtime, the foreign glue and a `main`) plus `N` units of generated functions, so the
+C compiler's optimiser runs on the parts in parallel. The split changes nothing that
+is generated the single-file way: `program` is still what the tests and the selfhost
+fixpoint see; the parts are the same declarations, only not `static`, with a header of
+prototypes (the runtime's exported ones included). -/
+
+/-- The types and macros the generated functions use. The runtime defines the same
+ones; a part includes this header instead of the runtime. -/
+def splitPrelude : String :=
+  "#include <stdint.h>\n#include <stddef.h>\n\ntypedef uintptr_t wiz_val;\n" ++
+  "typedef struct { int64_t rc; uint32_t tag; uint32_t size; } wiz_hdr;\n" ++
+  "typedef struct { wiz_hdr h; wiz_val fields[]; } wiz_ctor;\n" ++
+  "typedef wiz_val (*wiz_boxed_fn)(wiz_val *);\n" ++
+  "#define WIZ_BOX(n) ((((wiz_val)(n)) << 1) | 1)\n" ++
+  "#define WIZ_UNBOX(v) ((v) >> 1)\n" ++
+  "#define WIZ_IS_SCALAR(v) ((v) & 1)\n" ++
+  "#define WIZ_SET(o, i, v) (((wiz_ctor *)(o))->fields[i] = (v))\n"
+
+/-- The prototypes of the runtime's `WIZ_API` functions, read from `runtime`: each
+definition's signature (up to its `{`), with `WIZ_API` dropped. -/
+def runtimeProtos : String := Id.run do
+  let mut out := ""
+  let mut acc := ""
+  for line in runtime.splitOn "\n" do
+    let hasBrace := line.any (· == '{')
+    if !acc.isEmpty then
+      acc := acc ++ " " ++ line.trimAscii.toString
+      if hasBrace then
+        out := out ++ ((acc.splitOn "{").headD "" |>.trimAsciiEnd.toString) ++ ";\n"
+        acc := ""
+    else if line.startsWith "WIZ_API " then
+      let l := (line.drop 8).toString
+      if hasBrace then
+        out := out ++ ((l.splitOn "{").headD "" |>.trimAsciiEnd.toString) ++ ";\n"
+      else acc := l
+  pure out
+
+/-- The runtime's word operations made by a macro (`WIZ_WORD_BIN`/`ANY`/`CMP`), whose
+definitions `runtimeProtos` cannot see. -/
+def wordProtos : String :=
+  String.join ((["add", "sub", "mul", "udiv", "umod", "sdiv", "srem"].map fun n =>
+      s!"wiz_val wiz_word_{n}(uint64_t, wiz_val, wiz_val);\n") ++
+    (["and", "or", "xor"].map fun n => s!"wiz_val wiz_word_{n}(wiz_val, wiz_val);\n") ++
+    (["slt", "sle"].map fun n => s!"int wiz_word_{n}(uint64_t, wiz_val, wiz_val);\n"))
+
+/-- The runtime's C interface, which is exported whatever `WIZ_API` is. -/
+def cInterfaceProtos : String :=
+  "void wiz_release(void *v);\nvoid wiz_retain(void *v);\nlong wiz_live_objects(void);\n" ++
+  "void *wiz_warray_data(wiz_val v);\nsize_t wiz_warray_len(wiz_val v);\n" ++
+  "wiz_val wiz_warray_of_c(uint32_t width, const void *p, size_t n);\n"
+
+/-- The prototypes of the foreign wrappers a program uses. -/
+def externProtos (decls : Array IR.Decl) : String :=
+  String.join ((externs decls).toList.map fun key =>
+    let n := match RVal.ExternSig.ofKey? key with
+      | some sig => sig.params.length + (if sig.io then 1 else 0)
+      | none => 0
+    let ps := if n == 0 then "void" else ", ".intercalate ((List.range n).map fun i => s!"wiz_val a{i}")
+    s!"wiz_val {externWrapper key}({ps});\n")
+
+/-- The prototypes of the generated functions (and their boxed versions). -/
+def declProtos (decls : Array IR.Decl) : String :=
+  String.join (decls.toList.map fun d =>
+    s!"{signatureOf true d};\nwiz_val {mangle d.name}_boxed(wiz_val *a);\n")
+
+/-- The header of a split program: the prelude, the runtime and foreign prototypes, and
+the generated functions the other units may call. -/
+def splitHeader (decls : Array IR.Decl) (exports : List RVal.ExternSig) : String :=
+  "/* generated by wiz build: a program in several translation units (stage 15k) */\n" ++
+  splitPrelude ++ "\n/* ---- runtime ---- */\n" ++ runtimeProtos ++
+  wordProtos ++ "\n/* ---- C interface ---- */\n" ++ cInterfaceProtos ++
+  "\n/* ---- foreign functions ---- */\n" ++ externProtos decls ++
+  "\n/* ---- generated ---- */\n" ++ declProtos decls ++
+  (if exports.isEmpty then "" else
+    "\n/* ---- exported functions ---- */\n" ++
+    String.join (exports.map fun sig => s!"wiz_val {mangle (exportEntry sig.cname)}(void);\n"))
+
+/-- The generated declarations cut into at most `n` contiguous parts, balanced by their
+C text, in declaration order (which `lowerProgram` sorts by name): deterministic, and
+functions that call each other usually stay together. -/
+def splitParts (decls : Array IR.Decl) (n : Nat) : Array String := Id.run do
+  let arities := decls.foldl (fun m d => m.insert d.name d.params.size) {}
+  let cafs := IR.cafs decls
+  let texts := decls.map fun d => decl arities cafs d true
+  let total := texts.foldl (fun a s => a + s.utf8ByteSize) 0
+  let target := max 1 (total / max 1 n)
+  let mut parts : Array String := #[]
+  let mut cur := ""
+  let mut size := 0
+  for t in texts do
+    if !cur.isEmpty && size + t.utf8ByteSize > target && parts.size + 1 < n then
+      parts := parts.push cur
+      cur := ""
+      size := 0
+    cur := cur ++ t
+    size := size + t.utf8ByteSize
+  if cur.isEmpty then parts else parts.push cur
+
+/-- A part's C text. -/
+def splitPartText (header body : String) : String :=
+  s!"#include \"{header}\"\n\n" ++ body
+
+/-- The support unit: the runtime (`-DWIZ_API=` exports its functions), the foreign
+glue, the exported wrappers, and `main`. -/
+def splitSupport (decls : Array IR.Decl) (io : Bool) (extra : String) (unbox : Bool)
+    (exports : List RVal.ExternSig) (noMain : Bool) : String :=
+  let code := runtime ++ "\n/* ---- foreign functions ---- */\n\n" ++ extra ++ "\n" ++
+    glue (externs decls) extra unbox ++
+    (if exports.isEmpty then "" else
+      "\n/* ---- exported functions ---- */\n\n" ++ exportWrappers exports false true)
+  if noMain then code else
+  let entry := match decls.find? (·.name == "wiz.entry") with
+    | some d => s!"{signatureOf true d};\n"
+    | none => s!"wiz_val {mangle "wiz.entry"}(void);\n"
+  code ++ s!"\n{entry}int main(int argc, char **argv) \{ wiz_set_args(argc, argv); return wiz_run_main({mangle "wiz.entry"}, {if io then "1" else "0"}); }\n"
 
 /-- A whole C program: the runtime, the foreign glue, the functions, and a `main` that
 prints the result of the Wiz `main` (or, for `main : IO A`, runs it) and checks for

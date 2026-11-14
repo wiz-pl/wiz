@@ -3,7 +3,10 @@ import Wiz.Query
 import Wiz.Rig.Instances
 import Wiz.Infoview
 import Wiz.Actions
+import Wiz.Inlay
+import Wiz.Semantic
 import Wiz.Completion
+import Wiz.Signature
 import Wiz.Refs
 import Wiz.Symbols
 import Wiz.Socket
@@ -110,6 +113,10 @@ def elaborate (srv : Server) (doc : Doc) : Doc :=
   let (s, eng) := elabText srv doc.engine doc.text
   { doc with state := s, engine := eng }
 
+/-- The modules `import` can reach, with their sources (for code actions). -/
+def Server.importable (srv : Server) : List (String × String) :=
+  srv.libs.toList.map fun (n, (_, src)) => (n, src)
+
 /-- `textDocument/completion` (`Completion.lean`): a `CompletionList`. Patched copies of
 the document are elaborated with its engine (the commands before the cursor are reused)
 and then forgotten. -/
@@ -122,20 +129,24 @@ def completion (srv : Server) (doc : Doc) (off : Nat) : Json :=
                  ("filterText", Json.str i.label),
                  ("textEdit", Json.mkObj [("range", Json.mkObj [("start", toPos doc.text i.start), ("end", toPos doc.text off)]),
                                           ("newText", Json.str i.insert)])] ++
-                (if i.detail.isEmpty then [] else [("detail", Json.str i.detail)]))
+                (if i.detail.isEmpty then [] else [("detail", Json.str i.detail)]) ++
+                -- (11s) the global's doc comment
+                (match i.global.bind doc.state.docOf? with
+                 | some d => [("documentation", Json.mkObj [("kind", "markdown"), ("value", Json.str d)])]
+                 | none => []))
   Json.mkObj [("isIncomplete", r.incomplete), ("items", Json.arr items)]
 
-def diagnostic (doc : Doc) (m : Msg) : Json :=
+def diagnostic (srv : Server) (doc : Doc) (m : Msg) : Json :=
   let code := if m.code.isEmpty then [] else
     [("code", Json.str m.code),
-     ("data", Json.mkObj ((Actions.messageData doc.state m).map fun (k, vs) =>
+     ("data", Json.mkObj ((Actions.messageData doc.state m doc.text srv.importable).map fun (k, vs) =>
         (k, if k == "name" then Json.str (vs.headD "") else Json.arr (vs.map Json.str).toArray)))]
   Json.mkObj ([("range", range doc.text m.info),
                ("severity", (match m.severity with | .error => 1 | .warning => 2 | .info => 3 : Nat)),
                ("source", "wiz"), ("message", m.text)] ++ code)
 
-def diagnostics (uri : String) (doc : Doc) : Json :=
-  let ds := doc.state.messages.toList.map (diagnostic doc)
+def diagnostics (srv : Server) (uri : String) (doc : Doc) : Json :=
+  let ds := doc.state.messages.toList.map (diagnostic srv doc)
   Json.mkObj [("jsonrpc", "2.0"), ("method", "textDocument/publishDiagnostics"),
               ("params", Json.mkObj [("uri", uri), ("diagnostics", Json.arr ds.toArray)])]
 
@@ -151,6 +162,10 @@ def capabilities : Json :=
     ("documentHighlightProvider", true),
     ("referencesProvider", true), ("renameProvider", Json.mkObj [("prepareProvider", true)]),
     ("completionProvider", Json.mkObj [("triggerCharacters", Json.arr #["."])]),
+    ("signatureHelpProvider", Json.mkObj [("triggerCharacters", Json.arr #[" ", "("]), ("retriggerCharacters", Json.arr #[" "])]),
+    ("inlayHintProvider", true),
+    ("semanticTokensProvider", Json.mkObj [("legend", Json.mkObj [("tokenTypes", Json.arr #["keyword"]), ("tokenModifiers", Json.arr #[])]),
+                                           ("full", true)]),
     ("documentSymbolProvider", true), ("workspaceSymbolProvider", true), ("foldingRangeProvider", true),
     ("codeActionProvider", Json.mkObj [("codeActionKinds", Json.arr #["quickfix", "refactor.rewrite"]),
                                        ("resolveProvider", true)]),
@@ -181,7 +196,8 @@ def goalJson (g : TaggedGoal) (tj : TT → Json) : Json :=
   Json.mkObj [
     ("hyps", Json.arr (g.hyps.map fun (x, t, v) => Json.mkObj [("names", Json.arr #[Json.str x]),
       ("type", tj t), ("val", match v with | some v => tj v | none => Json.null)])),
-    ("type", tj g.target), ("goalPrefix", "⊢ "),
+    ("type", tj (if goalTarget g.target.flatten != g.target.flatten then .append #[.text "(", g.target, .text ")"] else g.target)),
+    ("goalPrefix", "⊢ "),
     ("userName", match g.userName with | some n => Json.str n | none => Json.null)]
 
 def plainGoals (gs : Array (GoalView ZeroOneMany)) (traces : Array String := #[]) (g : Option (Globals ZeroOneMany) := none) : Json :=
@@ -371,7 +387,7 @@ def infoItems (srv : Server) (uri : String) (doc : Doc) (off : Nat) :
 def subtermType (g : Globals ZeroOneMany) (sub : Subterm ZeroOneMany) : Option (Term ZeroOneMany) := do
   let tys ← sub.types.reverse.mapM id
   let ctx := (sub.names.reverse.zip tys).foldl (fun (ctx : Ctx ZeroOneMany) (x, ty) =>
-    ctx.bind x (QPoly.const QuantitySyntax.explicitDefault) (Wiz.eval g ctx.env ty)) { globals := g, erased := true, proof := true }
+    ctx.bind x (QPoly.const QuantitySyntax.explicitDefault) (Wiz.eval g ctx.env ty)) { globals := { g with sortHolesOk := true }, erased := true, proof := true }
   match Wiz.infer ctx sub.term with
   | .ok (ty, _) => some (quote g ctx.lvl ty)
   | .error _ => none
@@ -449,9 +465,9 @@ def infoview (srv : Server) (uri : String) (doc : Doc) (method : String) (msg : 
     pure (memo s!"sub {r}" (withTable doc ((subtermType st.globals sub).mapM (·.prettyTagged sub.names sub.types (some st.globals))) k))
 
 /-- A code action as JSON: with its edit, or (`resolveId`) with what `codeAction/resolve` needs. -/
-def codeAction (uri : String) (doc : Doc) (a : Actions.Action) (resolveId : Option Nat) : Json :=
+def codeAction (srv : Server) (uri : String) (doc : Doc) (a : Actions.Action) (resolveId : Option Nat) : Json :=
   let diags := match a.fixes.bind (doc.state.messages[·]?) with
-    | some m => [("diagnostics", Json.arr #[diagnostic doc m])]
+    | some m => [("diagnostics", Json.arr #[diagnostic srv doc m])]
     | none => []
   let rest := match resolveId with
     | some k => [("data", Json.mkObj [("uri", uri), ("session", doc.session), ("id", k)])]
@@ -564,8 +580,18 @@ def handle (srv : Server) (msg : Json) : Server × Array Json := Id.run do
       ("params", Json.mkObj [("uri", uri), ("version", match version with | some v => Json.num v | none => Json.null),
                              ("session", session)])]
     ({ srv with docs := srv.docs.insert uri doc, sessions := session },
-     #[diagnostics uri doc] ++ (if srv.elaboratedNotes then #[note] else #[]))
+     #[diagnostics srv uri doc] ++ (if srv.elaboratedNotes then #[note] else #[]))
   | "textDocument/didClose" => ({ srv with docs := srv.docs.erase uri }, #[])
+  | "textDocument/inlayHint" =>
+    let some doc := srv.docs.get? uri | return (srv, #[reply (Json.arr #[])])
+    let pos (k : String) := ofPos doc.text (getNat msg ["params", "range", k, "line"]) (getNat msg ["params", "range", k, "character"])
+    let hs := (Inlay.hintsIn doc.state doc.text (pos "start") (pos "end")).map fun h =>
+      Json.mkObj [("position", toPos doc.text h.at_), ("label", Json.str h.label), ("kind", (1 : Nat))]
+    (srv, #[reply (Json.arr hs)])
+  | "textDocument/semanticTokens/full" =>
+    let some doc := srv.docs.get? uri | return (srv, #[reply Json.null])
+    let data := Semantic.encode doc.text (Semantic.keywords doc.state doc.text)
+    (srv, #[reply (Json.mkObj [("data", Json.arr (data.map fun (n : Nat) => (n : Json)))])])
   | "textDocument/references" | "textDocument/documentHighlight" | "textDocument/prepareRename" | "textDocument/rename" =>
     let some doc := srv.docs.get? uri | return (srv, #[reply Json.null])
     let off := ofPos doc.text (getNat msg ["params", "position", "line"]) (getNat msg ["params", "position", "character"])
@@ -623,9 +649,9 @@ def handle (srv : Server) (msg : Json) : Server × Array Json := Id.run do
   | "textDocument/codeAction" =>
     let some doc := srv.docs.get? uri | return (srv, #[reply (Json.arr #[])])
     let pos (k : String) := ofPos doc.text (getNat msg ["params", "range", k, "line"]) (getNat msg ["params", "range", k, "character"])
-    let acts := Actions.actionsAt doc.state doc.text (pos "start") (pos "end")
+    let acts := Actions.actionsAt doc.state doc.text (pos "start") (pos "end") srv.importable
     let base := doc.actions.size
-    let json := acts.mapIdx fun i a => codeAction uri doc a (if srv.resolveEdits then some (base + i) else none)
+    let json := acts.mapIdx fun i a => codeAction srv uri doc a (if srv.resolveEdits then some (base + i) else none)
     ({ srv with docs := srv.docs.insert uri { doc with actions := doc.actions ++ acts } }, #[reply (Json.arr json)])
   | "codeAction/resolve" =>
     let auri := getStr msg ["params", "data", "uri"]
@@ -634,13 +660,25 @@ def handle (srv : Server) (msg : Json) : Server × Array Json := Id.run do
     let some k := (get? msg ["params", "data", "id"]).bind (·.getNat?.toOption) | return (srv, #[replyError (-32602) "missing id"])
     if session != doc.session then return (srv, #[replyError (-32801) "the document changed"])
     let some a := doc.actions[k]? | return (srv, #[replyError (-32801) "unknown action"])
-    (srv, #[reply (codeAction auri doc a none)])
+    (srv, #[reply (codeAction srv auri doc a none)])
   | "wiz/plainGoal" | "wiz/plainTermGoal" | "wiz/interactiveGoals" | "wiz/interactiveTermGoal" | "wiz/subtermInfo"
   | "wiz/interactiveInfo" =>
     let some doc := srv.docs.get? uri | return (srv, #[replyError (-32602) s!"unknown document {uri}"])
     match infoview srv uri doc method msg with
     | .ok (doc, j) => ({ srv with docs := srv.docs.insert uri doc }, #[reply j])
     | .error (c, m) => (srv, #[replyError c m])
+  | "textDocument/signatureHelp" =>
+    let some doc := srv.docs.get? uri | return (srv, #[reply Json.null])
+    let off := ofPos doc.text (getNat msg ["params", "position", "line"]) (getNat msg ["params", "position", "character"])
+    match Signature.helpAt doc.state doc.text off (fun t => (elabText srv doc.engine t).1) with
+    | some h =>
+      let ps := h.params.map fun (a, b) => Json.mkObj [("label", Json.arr #[(a : Nat), (b : Nat)])]
+      let docs := match h.doc with
+        | some d => [("documentation", Json.mkObj [("kind", "markdown"), ("value", Json.str d)])]
+        | none => []
+      (srv, #[reply (Json.mkObj [("signatures", Json.arr #[Json.mkObj ([("label", Json.str h.label), ("parameters", Json.arr ps)] ++ docs)]),
+                                 ("activeSignature", (0 : Nat)), ("activeParameter", h.active)])])
+    | none => (srv, #[reply Json.null])
   | "textDocument/hover" | "textDocument/definition" | "textDocument/declaration" | "textDocument/completion" =>
     let some doc := srv.docs.get? uri | return (srv, #[reply Json.null])
     let off := ofPos doc.text (getNat msg ["params", "position", "line"]) (getNat msg ["params", "position", "character"])
@@ -648,7 +686,15 @@ def handle (srv : Server) (msg : Json) : Server × Array Json := Id.run do
     | "textDocument/hover" =>
       let md? := match syntaxHover srv uri doc (Query.syntaxAt doc.state off) with
         | some md => some md
-        | none => (Query.hoverAt doc.state off).map fun (n, ty) => s!"```wiz\n{identLabel doc off n} : {ty}\n```"
+        | none => (Query.hoverAt doc.state off).map fun (n, ty) =>
+            -- (11s) a global's doc comment, as Markdown under its type (a local has none)
+            let isLocal := match Query.identAt doc.state off with
+              | some (.ident _ _ true _ _) => true
+              | _ => false
+            let docs := if isLocal then "" else match doc.state.docOf? n with
+              | some d => s!"\n\n---\n\n{d}"
+              | none => ""
+            s!"```wiz\n{identLabel doc off n} : {ty}\n```{docs}"
       match md? with
       | some md => (srv, #[reply (Json.mkObj [("contents", Json.mkObj [("kind", "markdown"), ("value", md)])])])
       | none => (srv, #[reply Json.null])

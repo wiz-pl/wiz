@@ -6,7 +6,7 @@ byte) that takes minutes to hours. Compiled code computes the same thing in seco
 stage lets a proof use it, **behind a flag, as an axiom that says what it trusts**, like
 Lean's `native_decide` (`Lean.ofReduceBool`).
 
-## 27a: `native_refl` and `--trust-native` ✅
+## 27a: `native_refl` and `--trust-native`
 
     def Loop.all256 : allBelow 256 (Loop.ok 104 1100) = .true := native_refl
 
