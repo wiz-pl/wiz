@@ -179,4 +179,4 @@ def X7.pll (period : String) (mult div sysDiv : Nat) (outs : List (String × (Na
       (.cons ("DIVCLK_DIVIDE", PrimParam.int div) (.cons ("CLKOUT0_DIVIDE", PrimParam.int sysDiv)
       (.cons ("CLKOUT0_PHASE", PrimParam.real "0.0") (X7.pllOutParams outs))))))
     "CLKIN1" (.cons ("RST", "1'b0") (.cons ("PWRDWN", "1'b0") .nil)) (.cons ("CLKFBOUT", "CLKFBIN") .nil)
-    "CLKOUT0" (X7.pllClocks outs) (Hdl.map (fun (s : String) => (s, "LOCKED")) locked)
+    "CLKOUT0" (X7.pllClocks outs) (Hdl.map (fun (s : String) => (s, "LOCKED")) locked) List.nil

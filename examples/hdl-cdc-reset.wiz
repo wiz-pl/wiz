@@ -1,0 +1,211 @@
+import Hdl.Core
+import Hdl.Prim
+import Hdl.Cdc
+import Hdl.Xilinx7
+/-!
+# Reset crossings (D5)
+
+A `Circuit` has one clock domain, and a reset is **not** a clock-domain signal: it is its
+own domain (`ResetDomain`, declared in `Netlist.resets`). An asynchronous reset source (a
+button, a power-on reset, a PLL's `LOCKED`) reaches each clock domain through a **reset
+synchroniser**, `Cdc.resetSync dst arst`: two flops in `dst`, asynchronously cleared by
+`arst`, so the reset asserts at once and deasserts two `dst` edges after `arst` goes low.
+The result is in `dst`'s domain and is the `rst` of that domain's registers.
+
+`Netlist.domainErrors` rejects a reset source that reaches a register directly
+(`... no reset synchroniser`), a reset used as data, a data synchroniser (`Cdc.sync2`)
+used for a reset, and a reset synchroniser whose data is a clock-domain signal. The
+explicit escape `Cdc.unsafeCross` (a `Prim.declUnsafe`) accepts a crossing the design
+declares on purpose; there is no other way to skip the synchroniser.
+
+`Clocking` describes the wrapper's reset crossings too (`Clocking.resets`: core reset
+input port ↦ asynchronous source); `Verilog.emitTop` emits one `wiz_reset_sync` per core
+reset port, in that port's clock domain.
+
+Run with `wiz check examples/hdl-cdc-reset.wiz`; the `#eval`s are the `hdl` test.
+-/
+
+/-- The second clock domain (`clk` is `ClockDomain.sys`), 400 MHz. -/
+def d2 : ClockDomain := ClockDomain.mk "clk2" 2500
+/-- The implicit clock domain. -/
+def clk : ClockDomain := ClockDomain.sys
+/-- The asynchronous reset tree of the design. -/
+def rdom : ResetDomain := Cdc.resetDomain "rst"
+/-- A register node (register `r`). -/
+def regN (r : Nat) : NetNode := NetNode.mk (NetOp.reg r) 1 List.nil
+/-- A clock-net node of domain `d`. -/
+def clockN (d : ClockDomain) : NetNode := NetNode.mk (NetOp.clock d.name) 1 List.nil
+/-- An input node (port `p`). -/
+def inN (p : Nat) : NetNode := NetNode.mk (NetOp.input p) 1 List.nil
+/-- A one-bit operation node named by its operation (no arguments). -/
+def opN (op : NetOp) : NetNode := NetNode.mk op 1 List.nil
+/-- A `wiz_reset_sync` instance node on nodes `c` (its clock) and `a` (its reset). -/
+def rsyncN (c a : Nat) : NetNode := NetNode.mk (NetOp.inst (Prim.erase Cdc.resetSyncP)) 0 (.cons c (.cons a .nil))
+/-- A `wiz_unsafe_cross` instance node on nodes `c` and `a`. -/
+def usyncN (c a : Nat) : NetNode := NetNode.mk (NetOp.inst (Prim.erase Cdc.unsafeCrossP)) 0 (.cons c (.cons a .nil))
+/-- Output leaf 0 of the instance at node `k`. -/
+def outN (k : Nat) : NetNode := NetNode.mk (NetOp.instOut 0 0) 1 (.cons k .nil)
+/-- A one-bit register named `name`, loading node `next`, reset by `rst`, on domain `dom`. -/
+def reg (name : String) (next : Nat) (rst : Nat) (dom : String) : NetReg :=
+  NetReg.mk name 1 0 next (Option.some rst) Option.none dom
+/-- A one-bit input port named `name` (node `k`) in domain `dom`. -/
+def inP (name : String) (k : Nat) (dom : String) : NetPort := NetPort.mk name 1 k dom
+/-- A one-bit output port `y` showing node `k`. -/
+def outY (k : Nat) (dom : String) : NetPort := NetPort.mk "y" 1 k dom
+
+/-- `rst` (the asynchronous reset source) → `wiz_reset_sync` (clk2) → register `s`'s reset:
+the reset crossing is synchronised, so there are no domain errors. -/
+def acceptedReset : Netlist :=
+  Netlist.mk "rstcross"
+    (.cons (inN 0) (.cons (clockN d2) (.cons (rsyncN 1 0) (.cons (outN 2) (.cons (regN 0) .nil)))))
+    (.cons (reg "s" 4 3 "clk2") .nil)
+    (.cons (inP "rst" 0 "rst") .nil) (.cons (outY 4 "clk2") .nil)
+    List.nil List.nil (.cons d2 .nil) (.cons rdom .nil) List.nil
+
+/-- The same register reset directly by the asynchronous source: no reset synchroniser. -/
+def rejectedReset : Netlist :=
+  Netlist.mk "rstcross"
+    (.cons (inN 0) (.cons (regN 0) .nil))
+    (.cons (reg "s" 1 0 "clk2") .nil)
+    (.cons (inP "rst" 0 "rst") .nil) (.cons (outY 1 "clk2") .nil)
+    List.nil List.nil (.cons d2 .nil) (.cons rdom .nil) List.nil
+
+/-- The escape: the same crossing through `Cdc.unsafeCross` (an explicit
+`Prim.declUnsafe`), which the checker accepts. -/
+def escapeReset : Netlist :=
+  Netlist.mk "rstcross"
+    (.cons (inN 0) (.cons (clockN d2) (.cons (usyncN 1 0) (.cons (outN 2) (.cons (regN 0) .nil)))))
+    (.cons (reg "s" 4 3 "clk2") .nil)
+    (.cons (inP "rst" 0 "rst") .nil) (.cons (outY 4 "clk2") .nil)
+    List.nil List.nil (.cons d2 .nil) (.cons rdom .nil) List.nil
+
+/-- A reset synchroniser whose clock is the reset domain: a reset is not a clock. -/
+def badClockReset : Netlist :=
+  Netlist.mk "rstcross"
+    (.cons (inN 0) (.cons (NetNode.mk (NetOp.clock "rst") 1 List.nil) (.cons (rsyncN 1 0) (.cons (outN 2) .nil))))
+    List.nil
+    (.cons (inP "rst" 0 "rst") .nil) (.cons (outY 3 "clk2") .nil)
+    List.nil List.nil (.cons d2 .nil) (.cons rdom .nil) List.nil
+
+/-- A data synchroniser (`Cdc.sync2`) used for a reset: a reset needs the reset
+synchroniser (async assert). -/
+def syncAsReset : Netlist :=
+  Netlist.mk "rstcross"
+    (.cons (inN 0) (.cons (clockN d2) (.cons (NetNode.mk (NetOp.inst (Prim.erase Cdc.sync2P)) 0
+      (.cons 1 (.cons 0 .nil))) (.cons (outN 2) (.cons (regN 0) .nil)))))
+    (.cons (reg "s" 4 3 "clk2") .nil)
+    (.cons (inP "rst" 0 "rst") .nil) (.cons (outY 4 "clk2") .nil)
+    List.nil List.nil (.cons d2 .nil) (.cons rdom .nil) List.nil
+
+/-- The asynchronous reset used as data: a reset stays in its own domain. -/
+def resetAsData : Netlist :=
+  Netlist.mk "rstdata"
+    (.cons (inN 0) (.cons (NetNode.mk NetOp.not 1 (.cons 0 .nil)) .nil))
+    List.nil (.cons (inP "rst" 0 "rst") .nil) (.cons (outY 1 "clk") .nil)
+    List.nil List.nil (.cons clk .nil) (.cons rdom .nil) List.nil
+
+--------------------------------------------------------------------------------
+-- The same design as two `Multi` parts, each with a reset input, and one asynchronous
+-- source synchronised into each clock domain.
+
+/-- A one-bit circuit: its state follows the input, its output is the state. -/
+def follow : Circuit HwTy.bit HwTy.bit :=
+  Circuit.mk HwTy.bit (BitVec.ofNat 1 0) (fun s x => Hw.pair x s)
+/-- `follow` with a synchronous reset input (the circuit's reset). -/
+def followR : Circuit (HwTy.prod (HwTy.named "rst" HwTy.bit) HwTy.bit) HwTy.bit :=
+  Circuit.withReset follow
+/-- The producer on `clk`, with reset input `tx_rst`. -/
+def txPart : MultiPart :=
+  MultiPart.withResets (MultiPart.circuit "tx" clk followR (.cons "tx_rst" (.cons "go" .nil)) (.cons "tick" .nil))
+    (.cons "tx_rst" .nil)
+/-- The consumer on `clk2`, with reset input `rx_rst`. -/
+def rxPart : MultiPart :=
+  MultiPart.withResets (MultiPart.circuit "rx" d2 followR (.cons "rx_rst" (.cons "din" .nil)) (.cons "q" .nil))
+    (.cons "rx_rst" .nil)
+/-- The two parts, the data crossing (`Cdc.wire`), and one reset synchroniser per clock
+domain from the single asynchronous source `rst`. -/
+def designReset : Multi :=
+  Multi.mk "crossR" (.cons clk (.cons d2 .nil)) (.cons txPart (.cons rxPart .nil))
+    (.cons (Cdc.resetWire clk "rst" "tx_rst")
+      (.cons (Cdc.resetWire d2 "rst" "rx_rst")
+        (.cons (Cdc.wire d2 "tick" "din") .nil)))
+    (.cons rdom .nil)
+/-- The same top without the reset synchronisers: the asynchronous source into each
+part's reset input (a `link`). -/
+def designResetBad : Multi :=
+  Multi.mk "crossR" (.cons clk (.cons d2 .nil)) (.cons txPart (.cons rxPart .nil))
+    (.cons (MultiWire.link "rst" "tx_rst")
+      (.cons (MultiWire.link "rst" "rx_rst")
+        (.cons (Cdc.wire d2 "tick" "din") .nil)))
+    (.cons rdom .nil)
+/-- The explicit escape for the reset crossing. -/
+def designResetEscape : Multi :=
+  Multi.mk "crossR" (.cons clk (.cons d2 .nil)) (.cons txPart (.cons rxPart .nil))
+    (.cons (Cdc.unsafeWire clk "rst" "tx_rst")
+      (.cons (Cdc.unsafeWire d2 "rst" "rx_rst")
+        (.cons (Cdc.wire d2 "tick" "din") .nil)))
+    (.cons rdom .nil)
+/-- The same parts with their reset inputs left as core inputs (no reset wires): this is
+the design `Clocking.resets` synchronises in the wrapper. -/
+def designResetPorts : Multi :=
+  Multi.mk "crossR" (.cons clk (.cons d2 .nil)) (.cons txPart (.cons rxPart .nil))
+    (.cons (Cdc.wire d2 "tick" "din") .nil) List.nil
+
+--------------------------------------------------------------------------------
+-- A circuit with the reset synchroniser, for the value and fast simulations. At values
+-- the cell is its model (the identity: the asynchronous assert passes through, the
+-- two-edge deassert is not modelled), so `Circuit.run` and the netlist simulation agree.
+
+/-- `out` follows `x`, reset by `arst` synchronised on the implicit clock. -/
+def resetC : Circuit (HwTy.prod HwTy.bit HwTy.bit) HwTy.bit :=
+  Circuit.mk HwTy.bit (BitVec.ofNat 1 0) (fun s x =>
+    let rs := Cdc.resetSync Hw.clock (Hw.fst x);
+    Hw.pair (Hw.resetTo rs (BitVec.ofNat 1 0) (Hw.snd x)) s)
+/-- A trace of `resetC`: the asynchronous reset deasserts after two cycles, then `go`
+follows. -/
+def resetXs : List (HwTy.El (HwTy.prod HwTy.bit HwTy.bit)) :=
+  (.cons (BitVec.ofNat 1 1, BitVec.ofNat 1 1)
+    (.cons (BitVec.ofNat 1 1, BitVec.ofNat 1 0)
+      (.cons (BitVec.ofNat 1 0, BitVec.ofNat 1 1)
+        (.cons (BitVec.ofNat 1 0, BitVec.ofNat 1 0)
+          (.cons (BitVec.ofNat 1 0, BitVec.ofNat 1 1) .nil)))))
+/-- The one-clock netlist of `resetC`, with its `arst` port moved to the reset domain and
+the reset tree declared: what the checker sees when the cell is used as intended. -/
+def resetNet : Netlist :=
+  let ω n := Circuit.netlist "resetC" resetC;
+  Netlist.mk n.name n.nodes n.regs (.cons (inP "arst" 0 "rst") (.cons (inP "go" 1 "clk") .nil))
+    n.outputs n.hints n.mems n.clocks (.cons rdom .nil) n.errors
+
+-- the synchronised reset: accepted; its Verilog (the cell is an instance, like any Prim)
+#eval Netlist.domainErrors acceptedReset
+#eval Verilog.emit acceptedReset
+-- the unsynchronised reset: rejected, and the reset is not a clock-domain signal
+#eval Netlist.domainErrors rejectedReset
+-- the explicit escape: accepted
+#eval Netlist.domainErrors escapeReset
+#eval Verilog.emit escapeReset
+-- a reset synchroniser clocked by the reset domain, and a data synchroniser used for a reset
+#eval Netlist.domainErrors badClockReset
+#eval Netlist.domainErrors syncAsReset
+-- a reset used as data
+#eval Netlist.domainErrors resetAsData
+-- the two-domain design: accepted, its Verilog
+#eval (Multi.netlist designReset).errors
+#eval Multi.verilog designReset
+-- without the reset synchronisers: one error per destination domain
+#eval (Multi.netlist designResetBad).errors
+-- the escape: accepted
+#eval (Multi.netlist designResetEscape).errors
+-- the wrapper: one `wiz_reset_sync` per core reset port
+def pll : Clocking := X7.pll "10.0" 8 1 8 (.cons ("clk2", (1, (2, "0.0"))) .nil) .nil
+def pllReset : Clocking :=
+  Clocking.mk pll.name pll.params pll.input pll.ties pll.loops pll.sys pll.domains pll.signals
+    (.cons ("tx_rst", "rst") (.cons ("rx_rst", "rst") .nil))
+#eval (Clocking.problems (Multi.netlist designResetPorts) pllReset)
+#eval (Clocking.resetProblems (Multi.netlist designResetPorts) pllReset)
+#eval Verilog.emitTop (Multi.netlist designResetPorts) pllReset
+-- the value semantics and the netlist agree on the reset trace; the netlist is
+-- single-clock, so the checked runner accepts it (the cell's model is the identity)
+#eval Circuit.runLeaves resetC resetXs
+#eval Netlist.simulate resetNet (Hdl.map (fun (x : HwTy.El (HwTy.prod HwTy.bit HwTy.bit)) => HwTy.leaves (HwTy.prod HwTy.bit HwTy.bit) x) resetXs)
+#eval Netlist.simulateModelled resetNet (Hdl.map (fun (x : HwTy.El (HwTy.prod HwTy.bit HwTy.bit)) => HwTy.leaves (HwTy.prod HwTy.bit HwTy.bit) x) resetXs)

@@ -49,14 +49,14 @@ def accepted : Netlist :=
   Netlist.mk "cross"
     (.cons (regN 0) (.cons (clockN d2) (.cons (syncN 1 0) (.cons (outN 2) (.cons (regN 1) .nil)))))
     (.cons (reg "r" 0 "clk") (.cons (reg "s" 3 "clk2") .nil))
-    List.nil (.cons (outY 4) .nil) List.nil List.nil (.cons clk (.cons d2 .nil)) List.nil
+    List.nil (.cons (outY 4) .nil) List.nil List.nil (.cons clk (.cons d2 .nil)) List.nil List.nil
 
 /-- The same top without the synchroniser: `s` (clk2) samples `r` (clk) directly. -/
 def rejected : Netlist :=
   Netlist.mk "cross"
     (.cons (regN 0) (.cons (regN 1) .nil))
     (.cons (reg "r" 0 "clk") (.cons (reg "s" 0 "clk2") .nil))
-    List.nil (.cons (outY 1) .nil) List.nil List.nil (.cons clk (.cons d2 .nil)) List.nil
+    List.nil (.cons (outY 1) .nil) List.nil List.nil (.cons clk (.cons d2 .nil)) List.nil List.nil
 
 /-- A synchroniser clocked by the domain its data is already in: the cell crosses
 nothing, and `s` then samples its (clk) output from clk2. -/
@@ -64,7 +64,7 @@ def sameDomain : Netlist :=
   Netlist.mk "cross"
     (.cons (regN 0) (.cons (clockN clk) (.cons (syncN 1 0) (.cons (outN 2) (.cons (regN 1) .nil)))))
     (.cons (reg "r" 0 "clk") (.cons (reg "s" 3 "clk2") .nil))
-    List.nil (.cons (outY 4) .nil) List.nil List.nil (.cons clk (.cons d2 .nil)) List.nil
+    List.nil (.cons (outY 4) .nil) List.nil List.nil (.cons clk (.cons d2 .nil)) List.nil List.nil
 
 /-- An input port of kind clock (the second clock of a design) used as data. -/
 def clockData : Netlist :=
@@ -72,7 +72,7 @@ def clockData : Netlist :=
     (.cons (NetNode.mk (NetOp.input 0) 1 List.nil) (.cons (regN 0) .nil))
     (.cons (reg "r" 0 "clk") .nil)
     (.cons (NetPort.mk "ck" 1 0 "clk") .nil) (.cons (NetPort.mk "y" 1 1 "clk") .nil)
-    List.nil List.nil (.cons clk .nil) List.nil
+    List.nil List.nil (.cons clk .nil) List.nil List.nil
 
 /-- A one-domain circuit: its netlist has no domain errors and its Verilog is unchanged. -/
 def counter : Circuit (HwTy.bits 0) (HwTy.bits 8) :=
@@ -117,11 +117,11 @@ def rxPart : MultiPart := MultiPart.circuit "rx" d2 follow (.cons "din" .nil) (.
 /-- `tick` (clk) wired straight into `din` (clk2): the crossing the checker rejects. -/
 def linked : Multi :=
   Multi.mk "cross" (.cons clk (.cons d2 .nil)) (.cons txPart (.cons rxPart .nil))
-    (.cons (MultiWire.link "tick" "din") .nil)
+    (.cons (MultiWire.link "tick" "din") .nil) List.nil
 /-- The same top through `Cdc.wire d2`: two flops in `clk2` between the parts. -/
 def design : Multi :=
   Multi.mk "cross" (.cons clk (.cons d2 .nil)) (.cons txPart (.cons rxPart .nil))
-    (.cons (Cdc.wire d2 "tick" "din") .nil)
+    (.cons (Cdc.wire d2 "tick" "din") .nil) List.nil
 
 -- the unwired top is rejected, the wired one accepted; its Verilog
 #eval (Multi.netlist linked).errors
@@ -133,7 +133,7 @@ def pll : Clocking := X7.pll "10.0" 8 1 8 (.cons ("clk2", (1, (2, "0.0"))) .nil)
 -- a second clock from an input pin: the wrapper declares it and drives `clk2` from it
 def pinClocking : Clocking :=
   Clocking.mk "PLLE2_BASE" .nil "CLKIN1" .nil (.cons ("CLKFBOUT", "CLKFBIN") .nil) "CLKOUT0"
-    (.cons ("clk2", ClockSource.pin "clk2") .nil) .nil
+    (.cons ("clk2", ClockSource.pin "clk2") .nil) .nil .nil
 #eval Verilog.emitTop (Multi.netlist design) pinClocking
 -- constraints: a create_clock for each domain, with the period from `ClockDomain`; a
 -- second clock from a pin gets its package pin too
@@ -157,7 +157,7 @@ def syncWire : MultiWire :=
   MultiWire.through (Prim.erase Cdc.sync2P) (.cons "bufgclk" (.cons "tick" .nil)) (.cons "din" .nil)
 def designBufg : Multi :=
   Multi.mk "cross" (.cons clk (.cons d2 .nil)) (.cons txPart (.cons rxPart .nil))
-    (.cons bufgWire (.cons syncWire .nil))
+    (.cons bufgWire (.cons syncWire .nil)) List.nil
 #eval (Multi.netlist designBufg).errors
 #eval Multi.verilog designBufg
 -- simulation of the multi-clock design is refused (an event schedule is not implemented)

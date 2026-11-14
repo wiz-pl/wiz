@@ -34,12 +34,15 @@ Simulation: a primitive without a model is 0 at values and in `Netlist.simulate`
 A netlist with more than one clock domain is refused too (`Netlist.domainRefusals`):
 its registers tick at two rates, which the single-tick simulation cannot express.
 
-Clocks: a circuit's registers stay on its one implicit clock. `Clocking` describes a
-generated top-level wrapper whose clock primitive (a PLL) turns the board's clock into
-that implicit clock (through a BUFG) and into the circuit's clock inputs. Data that
-crosses from one clock domain into another goes through a synchroniser
+Clocks and resets: a circuit's registers stay on its one implicit clock. `Clocking`
+describes a generated top-level wrapper whose clock primitive (a PLL) turns the board's
+clock into that implicit clock (through a BUFG) and into the circuit's clock inputs. Data
+that crosses from one clock domain into another goes through a synchroniser
 (`Prim.declSync`; `Cdc.sync2` in `Hdl.Cdc`), and `Netlist.domainErrors` rejects every
-other crossing.
+other crossing. A reset is its own domain and goes through a reset synchroniser
+(`Prim.declResetSync`; `Cdc.resetSync`: async assert, synchronous deassert), or an
+explicit escape (`Prim.declUnsafe`; `Cdc.unsafeCross`); `Clocking.resets` puts the reset
+synchronisers in the wrapper.
 
 A parameter's value, printed as Verilog.
 -/
@@ -65,24 +68,37 @@ def PrimParam.pairs : List (String × PrimParam) → List (String × String)
 /-- A primitive declaration: its module, parameters, port names and model. -/
 def Prim.decl {ω i o : HwTy} (name : String) (ps : List (String × PrimParam)) (ins outs : List String)
     (model : Option (HwTy.El i → HwTy.El o)) : Prim i o :=
-  Prim.mk name (PrimParam.pairs ps) ins outs model .false .nil
+  Prim.mk name (PrimParam.pairs ps) ins outs model .normal .nil
 /-- A synchroniser declaration (`Prim.decl` marked as a crossing): its output is in its
-clock input's domain and its data may come from one other domain (`Netlist.domainErrors`).
-Its clock input must be the only clock leaf of `i`; `Cdc.sync2` (`Hdl.Cdc`) is the
-two-flop one. A model, if any, is not a two-flop delay (a model is one total function
-from inputs to outputs), so the checked runners still refuse a multi-domain netlist
-(`Netlist.domainRefusals`). -/
+clock input's domain and its data may come from one other *clock* domain
+(`Netlist.domainErrors`). Its clock input must be the only clock leaf of `i`; `Cdc.sync2`
+(`Hdl.Cdc`) is the two-flop one. A model, if any, is not a two-flop delay (a model is one
+total function from inputs to outputs), so the checked runners still refuse a multi-domain
+netlist (`Netlist.domainRefusals`). -/
 def Prim.declSync {ω i o : HwTy} (name : String) (ps : List (String × PrimParam)) (ins outs : List String)
     (model : Option (HwTy.El i → HwTy.El o)) : Prim i o :=
-  Prim.mk name (PrimParam.pairs ps) ins outs model .true .nil
+  Prim.mk name (PrimParam.pairs ps) ins outs model .sync .nil
+/-- A reset synchroniser declaration: the reset-domain case of `Prim.declSync`. Its output
+is the destination clock domain's reset (async assert, synchronous deassert); its data
+must be an asynchronous reset domain, not a clock-domain signal. `Cdc.resetSync` is the
+two-flop one. -/
+def Prim.declResetSync {ω i o : HwTy} (name : String) (ps : List (String × PrimParam)) (ins outs : List String)
+    (model : Option (HwTy.El i → HwTy.El o)) : Prim i o :=
+  Prim.mk name (PrimParam.pairs ps) ins outs model .resetSync .nil
+/-- An explicit unsafe crossing declaration: the escape hatch. Like `Prim.declSync`, but
+the design says there is deliberately no synchroniser (the data is already stable, or the
+crossing was reviewed by hand); `Netlist.domainErrors` accepts it. -/
+def Prim.declUnsafe {ω i o : HwTy} (name : String) (ps : List (String × PrimParam)) (ins outs : List String)
+    (model : Option (HwTy.El i → HwTy.El o)) : Prim i o :=
+  Prim.mk name (PrimParam.pairs ps) ins outs model .unsafe .nil
 def Prim.withParams {ω i o : HwTy} (p : Prim i o) (ps : List (String × PrimParam)) : Prim i o :=
-  Prim.mk p.name (PrimParam.pairs ps) p.ins p.outs p.model p.sync p.outDom
+  Prim.mk p.name (PrimParam.pairs ps) p.ins p.outs p.model p.kind p.outDom
 def Prim.withModel {ω i o : HwTy} (p : Prim i o) (f : HwTy.El i → HwTy.El o) : Prim i o :=
-  Prim.mk p.name p.params p.ins p.outs (Option.some f) p.sync p.outDom
+  Prim.mk p.name p.params p.ins p.outs (Option.some f) p.kind p.outDom
 /-- Give output leaf `j` the clock domain `d` (`outDom`): a BUFG or PLL output that clocks
 a domain. A primitive's other output leaves are in the domain their inputs are in. -/
 def Prim.withOutDomAt {ω i o : HwTy} (p : Prim i o) (j : Nat) (d : String) : Prim i o :=
-  Prim.mk p.name p.params p.ins p.outs p.model p.sync
+  Prim.mk p.name p.params p.ins p.outs p.model p.kind
     (Hdl.setNthPad (Option.none : Option String) (Option.some d) p.outDom j)
 /-- The clock domain of a primitive's first output leaf (`Prim.withOutDomAt` at 0). -/
 def Prim.withOutDom {ω i o : HwTy} (p : Prim i o) (d : String) : Prim i o :=
@@ -140,6 +156,9 @@ def ClockSource.port : ClockSource → Option String
   | .pll _ => .none
   | .pin port => .some port
 
+/-- The description of a top-level wrapper with a clock primitive, its clock domains, and
+its synchronous reset crossings (`resets`: core reset input port ↦ asynchronous reset
+source net). -/
 structure Clocking where
   name : String
   params : List (String × PrimParam)
@@ -149,6 +168,9 @@ structure Clocking where
   sys : String                      -- the output that becomes the circuit's first clock
   domains : List (String × ClockSource) -- (clock port or domain, where its net comes from)
   signals : List (String × String)  -- (circuit's data input port, output)
+  resets : List (String × String)   -- (core reset input port, asynchronous reset source)
+  -- (D5) each core reset port gets its own `wiz_reset_sync` (async assert, synchronous
+  -- deassert) in that port's clock domain, driven by the shared asynchronous source
 
 def Hdl.lookup (k : String) : List (String × String) → Option String
   | .nil => .none
@@ -180,13 +202,90 @@ def Clocking.pinPorts (ck : Clocking) : List String :=
   Hdl.concatLists (Hdl.map (fun (q : String × ClockSource) => match q.2 with
     | .pll _ => .nil
     | .pin port => .cons port .nil) ck.domains)
+/-- The core (or design) reset input ports a `Clocking` synchronises. -/
+def Clocking.resetPorts (ck : Clocking) : List String := Hdl.map (fun (q : String × String) => q.1) ck.resets
+/-- The asynchronous source of a reset port in a `Clocking`. -/
+def Clocking.resetSource (ck : Clocking) (port : String) : Option String := Hdl.lookup port ck.resets
+/-- The net a reset synchroniser produces for a core reset port (`wiz_rst_<port>`). -/
+def Clocking.rstNet (port : String) : String := "wiz_rst_" <+> Verilog.ident port
+/-- The name of the reset synchroniser instance for a core reset port. -/
+def Clocking.rstInst (port : String) : String := "u_rst_" <+> Verilog.ident port
+/-- The clock domain of a netlist input port. -/
+def Clocking.portDomAux (port : String) : List NetPort → Option String
+  | .nil => .none
+  | .cons p ps => match Hdl.strEq p.name port with
+    | .true => .some p.dom
+    | .false => Clocking.portDomAux port ps
+def Clocking.portDom (n : Netlist) (port : String) : Option String :=
+  Clocking.portDomAux port n.inputs
+/-- The Verilog net of clock domain `d` in the wrapper: the first through `sys`'s BUFG,
+each other through its `ClockSource`. -/
+def Clocking.clockNet (n : Netlist) (ck : Clocking) (d : String) : String :=
+  match n.clocks with
+  | .nil => d
+  | .cons first _ => match Hdl.strEq first.name d with
+    | .true => Clocking.bufd ck.sys
+    | .false => match Clocking.source ck d with
+      | .some (.pll out) => Clocking.bufd out
+      | .some (.pin port) => port
+      | .none => d
+/-- The reset source pins a `Clocking` adds: sources that are neither a core input nor the
+board's `clk`, each once. -/
+def Clocking.resetPinsKeep (declared : List String) : List String → List String
+  | .nil => .nil
+  | .cons p ps => match Hdl.strEq p "clk", Hdl.member p declared with
+    | .true, _ => Clocking.resetPinsKeep declared ps
+    | _, .true => Clocking.resetPinsKeep declared ps
+    | _, .false => .cons p (Clocking.resetPinsKeep declared ps)
+/-- `xs` without repeated elements (the last occurrence wins). -/
+def Clocking.nub : List String → List String
+  | .nil => .nil
+  | .cons x xs => match Hdl.member x xs with
+    | .true => Clocking.nub xs
+    | .false => .cons x (Clocking.nub xs)
+/-- The reset source pins a `Clocking` adds (`Clocking.resetPinsKeep` on the netlist's
+inputs). -/
+def Clocking.resetPins (n : Netlist) (ck : Clocking) : List String :=
+  let ω srcs := Hdl.map (fun (q : String × String) => q.2) ck.resets;
+  Clocking.resetPinsKeep (Hdl.map (fun (p : NetPort) => p.name) n.inputs) (Clocking.nub srcs)
+def Hdl.concatMap {A : Type} (f : A → String) : List A → String
+  | .nil => ""
+  | .cons x xs => f x <+> Hdl.concatMap f xs
 
--- the board-side ports (the circuit's, less the ones the clock primitive drives)
+/-- The reset synchronisers of a `Clocking`: one `wiz_reset_sync` per core reset port, in
+the port's clock domain, driven by the asynchronous source. -/
+def Clocking.resetDecls (n : Netlist) (ck : Clocking) : String :=
+  Hdl.concatMap (fun (q : String × String) =>
+    let ω d := Hdl.nthD "clk" (Hdl.map (fun (x : ClockDomain) => x.name) n.clocks) 0;
+    let ω dom := match Clocking.portDom n q.1 with
+      | .some x => x
+      | .none => d;
+    "  wire " <+> Clocking.rstNet q.1 <+> ";\n  wiz_reset_sync " <+> Clocking.rstInst q.1
+    <+> " (.clk(" <+> Clocking.clockNet n ck dom <+> "), .arst(" <+> q.2 <+> "), .rst("
+    <+> Clocking.rstNet q.1 <+> "));\n") ck.resets
+/-- The problems of a `Clocking`'s reset crossings: a reset port that is not an input, a
+source that is empty, or a reset whose port is not on a declared clock domain. -/
+def Clocking.resetProblems (n : Netlist) (ck : Clocking) : List String :=
+  Hdl.concatLists (Hdl.map (fun (q : String × String) => match Hdl.strEq q.2 "" with
+    | .true => .cons ("Clocking: reset " <+> q.1 <+> " has no asynchronous source") List.nil
+    | .false => match Hdl.member q.2 (Clocking.resetPorts ck) with
+      | .true => .cons ("Clocking: reset source " <+> q.2 <+> " is itself a core reset port") List.nil
+      | .false => match Clocking.portDom n q.1 with
+        | .none => .cons ("Clocking: no core input " <+> q.1 <+> " for the reset " <+> q.2) List.nil
+        | .some dom => match Netlist.hasDom n dom with
+          | .true => List.nil
+          | .false => .cons ("Clocking: reset " <+> q.1 <+> " is on " <+> dom
+              <+> ", not a clock domain") List.nil) ck.resets)
+
+-- the board-side ports (the circuit's, less the ones the clock primitive drives and the
+-- reset ports the wrapper synchronises internally)
 def Clocking.inDecls (ck : Clocking) : List String → List NetPort → String
-  | .cons nm nms, .cons p ps => (match p.width, Clocking.source ck nm, Hdl.lookup nm ck.signals with
-    | .zero, _, _ => ""
-    | _, .none, .none => ", input " <+> Verilog.range p.width <+> nm
-    | _, _, _ => "") <+> Clocking.inDecls ck nms ps
+  | .cons nm nms, .cons p ps => (match p.width, Clocking.resetSource ck nm with
+    | .zero, _ => ""
+    | _, .some _ => ""
+    | _, .none => match Clocking.source ck nm, Hdl.lookup nm ck.signals with
+      | .none, .none => ", input " <+> Verilog.range p.width <+> nm
+      | _, _ => "") <+> Clocking.inDecls ck nms ps
   | _, _ => ""
 /-- The input pins a `Clocking` adds for clock domains that come from a pin: each once, and
 not the board's `clk` or a port already declared above. -/
@@ -199,11 +298,13 @@ def Clocking.extraInDecls (declared : List String) : List String → String
 def Clocking.coreConns (ck : Clocking) : List String → List NetPort → List String
   | .cons nm nms, .cons p ps => (match p.width with
     | .zero => Clocking.coreConns ck nms ps
-    | .succ _ => .cons (match Clocking.source ck nm, Hdl.lookup nm ck.signals with
-        | .some (.pll out), _ => Verilog.conn nm (Clocking.bufd out)
-        | .some (.pin port), _ => Verilog.conn nm port
-        | _, .some out => Verilog.conn nm (Clocking.net out)
-        | _, _ => Verilog.conn nm nm) (Clocking.coreConns ck nms ps))
+    | .succ _ => .cons (match Clocking.resetSource ck nm with
+        | .some _ => Verilog.conn nm (Clocking.rstNet nm)
+        | .none => match Clocking.source ck nm, Hdl.lookup nm ck.signals with
+          | .some (.pll out), _ => Verilog.conn nm (Clocking.bufd out)
+          | .some (.pin port), _ => Verilog.conn nm port
+          | _, .some out => Verilog.conn nm (Clocking.net out)
+          | _, _ => Verilog.conn nm nm) (Clocking.coreConns ck nms ps))
   | _, _ => .nil
 def Clocking.outs (ck : Clocking) : List String :=
   Hdl.map (fun (q : String × String) => q.1) ck.loops
@@ -216,12 +317,8 @@ def Clocking.primConns (ck : Clocking) : List String :=
         (Hdl.map (fun (o : String) => Verilog.conn o (Clocking.net o))
           (.cons ck.sys (List.append (Clocking.pllOuts ck)
             (Hdl.map (fun (q : String × String) => q.2) ck.signals))))))
-def Hdl.concatMap {A : Type} (f : A → String) : List A → String
-  | .nil => ""
-  | .cons x xs => f x <+> Hdl.concatMap f xs
-
 def Netlist.renamed (n : Netlist) (name : String) : Netlist :=
-  Netlist.mk name n.nodes n.regs n.inputs n.outputs n.hints n.mems n.clocks n.errors
+  Netlist.mk name n.nodes n.regs n.inputs n.outputs n.hints n.mems n.clocks n.resets n.errors
 /-- The netlist's clock domain names (`clk`, `clk2`, …). -/
 def Netlist.clockNames (n : Netlist) : List String :=
   Hdl.map (fun (d : ClockDomain) => d.name) n.clocks
@@ -264,13 +361,14 @@ def Verilog.emitTop (n : Netlist) (ck : Clocking) : String :=
   let ω declared := Hdl.map (fun (p : NetPort) => p.name) n.inputs;
   Verilog.emit core
   <+> "module " <+> Verilog.ident n.name <+> "(input clk" <+> Clocking.inDecls ck vn.ins n.inputs
-  <+> Clocking.extraInDecls declared (Clocking.pinPorts ck)
+  <+> Clocking.extraInDecls declared (List.append (Clocking.pinPorts ck) (Clocking.resetPins n ck))
   <+> Verilog.outDecls cx vn.outs n.outputs <+> ");\n"
-  <+> Verilog.errors (Clocking.problems n ck)
+  <+> Verilog.errors (List.append (Clocking.problems n ck) (Clocking.resetProblems n ck))
   <+> Hdl.concatMap Clocking.wire (Clocking.outs ck)
   <+> "  " <+> ck.name <+> Verilog.params (PrimParam.pairs ck.params) <+> " clocking (" <+> Hdl.sepBy ", " (Clocking.primConns ck) <+> ");\n"
   <+> Clocking.bufg ck.sys
   <+> Hdl.concatMap (fun (o : String) => Clocking.bufg o) (Clocking.pllOuts ck)
+  <+> Clocking.resetDecls n ck
   <+> "  " <+> Verilog.ident core.name <+> " core (" <+> Hdl.sepBy ", " (List.append (Clocking.clockConns n ck)
     (List.append (Clocking.coreConns ck vn.ins n.inputs) (Clocking.coreConns ck vn.outs n.outputs))) <+> ");\n"
   <+> "endmodule\n"

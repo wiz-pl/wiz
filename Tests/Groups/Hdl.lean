@@ -303,6 +303,68 @@ def hdlGroup : Group where
            ".nil",
            "\"module cross(input clk, input clk2, input [0:0] go, output [0:0] q);\\n  reg [0:0] tx_r; initial tx_r = 1'd0;\\n  reg [0:0] rx_r; initial rx_r = 1'd0;\\n  wire [0:0] n4;\\n  wire [0:0] n6;\\n  BUFG u3 (.I(clk2), .O(n4));\\n  wiz_sync2 u5 (.clk(n4), .d(tx_r), .q(n6));\\n  always @(posedge clk) tx_r <= go;\\n  always @(posedge clk2) rx_r <= n6;\\n  assign q = rx_r;\\nendmodule\\n\"",
            ".error \"simulation refused: 2 clock domains (clk, clk2): multi-clock simulation needs an event schedule; wiz_sync2 (node 3) has no behavioural model\""] },
+    { name := "D5: reset crossings: a synchronised async reset accepted, an unsynchronised one rejected, the unsafeCross escape; Clocking.resets; the wrapper", run := fun _ => do
+        -- examples/hdl-cdc-reset.wiz: the reset-domain checks (a reset source through
+        -- Cdc.resetSync into a register, the same reset without the synchroniser, the
+        -- explicit Cdc.unsafeCross escape, a reset synchroniser clocked by the reset
+        -- domain, a data synchroniser used for a reset, a reset used as data), the
+        -- two-domain design with one synchronised reset per clock domain, the two errors
+        -- without the synchronisers, the escape accepted, and Clocking.resets emitting
+        -- one wiz_reset_sync per core reset port in the wrapper
+        okLibs (← IO.FS.readFile "examples/hdl-cdc-reset.wiz")
+          [".nil",
+           "\"module rstcross(input clk2, input [0:0] rst, output [0:0] y);\\n  reg [0:0] s; initial s = 1'd0;\\n  wire [0:0] n3;\\n  wiz_reset_sync u2 (.clk(clk2), .arst(rst), .rst(n3));\\n  always @(posedge clk2) if (n3) s <= 1'd0; else s <= s;\\n  assign y = s;\\nendmodule\\n\"",
+           ".cons \"the asynchronous reset rst (input rst) is used by clk2 logic (the reset of register s): no reset synchroniser\" .nil",
+           ".nil",
+           "\"module rstcross(input clk2, input [0:0] rst, output [0:0] y);\\n  reg [0:0] s; initial s = 1'd0;\\n  wire [0:0] n3;\\n  wiz_unsafe_cross u2 (.clk(clk2), .d(rst), .q(n3));\\n  always @(posedge clk2) if (n3) s <= 1'd0; else s <= s;\\n  assign y = s;\\nendmodule\\n\"",
+           ".cons \"reset synchroniser wiz_reset_sync (node 2): it is clocked by rst, a reset domain, not a clock domain\" (.cons \"the clock net at node 1 is on rst, a reset domain, not a clock domain\" .nil)",
+           ".cons \"synchroniser wiz_sync2 (node 2): its data is the reset rst: a reset needs a reset synchroniser (Cdc.resetSync)\" .nil",
+           ".cons \"the asynchronous reset rst is used as data (node 1): a reset stays in its own domain\" .nil",
+           ".nil",
+           "\"module crossR(input clk, input clk2, input [0:0] rst, input [0:0] go, output [0:0] q);\\n  reg [0:0] tx_r; initial tx_r = 1'd0;\\n  reg [0:0] rx_r; initial rx_r = 1'd0;\\n  wire [0:0] n3;\\n  wire [0:0] n8;\\n  wire [0:0] n10;\\n  wiz_reset_sync u2 (.clk(clk), .arst(rst), .rst(n3));\\n  wiz_reset_sync u7 (.clk(clk2), .arst(rst), .rst(n8));\\n  wiz_sync2 u9 (.clk(clk2), .d(tx_r), .q(n10));\\n  always @(posedge clk) if (n3) tx_r <= 1'd0; else tx_r <= go;\\n  always @(posedge clk2) if (n8) rx_r <= 1'd0; else rx_r <= n10;\\n  assign q = rx_r;\\nendmodule\\n\"",
+           ".cons \"the asynchronous reset rst (input rst) is used by clk logic (the reset of register tx_r): no reset synchroniser\" (.cons \"the asynchronous reset rst (input rst) is used by clk2 logic (the reset of register rx_r): no reset synchroniser\" .nil)",
+           ".nil",
+           ".nil",
+           ".nil",
+           "\"module crossR_core(input clk, input clk2, input [0:0] tx_rst, input [0:0] go, input [0:0] rx_rst, output [0:0] q);\\n  reg [0:0] tx_r; initial tx_r = 1'd0;\\n  reg [0:0] rx_r; initial rx_r = 1'd0;\\n  wire [0:0] n5;\\n  wiz_sync2 u4 (.clk(clk2), .d(tx_r), .q(n5));\\n  always @(posedge clk) if (tx_rst) tx_r <= 1'd0; else tx_r <= go;\\n  always @(posedge clk2) if (rx_rst) rx_r <= 1'd0; else rx_r <= n5;\\n  assign q = rx_r;\\nendmodule\\nmodule crossR(input clk, input [0:0] go, input rst, output [0:0] q);\\n  wire ck_CLKFBOUT;\\n  wire ck_CLKOUT0;\\n  wire ck_CLKOUT1;\\n  PLLE2_BASE #(.CLKIN1_PERIOD(10.0), .CLKFBOUT_MULT(8), .DIVCLK_DIVIDE(1), .CLKOUT0_DIVIDE(8), .CLKOUT0_PHASE(0.0), .CLKOUT1_DIVIDE(2), .CLKOUT1_PHASE(0.0)) clocking (.CLKIN1(clk), .RST(1'b0), .PWRDWN(1'b0), .CLKFBOUT(ck_CLKFBOUT), .CLKFBIN(ck_CLKFBOUT), .CLKOUT0(ck_CLKOUT0), .CLKOUT1(ck_CLKOUT1));\\n  wire ck_CLKOUT0_g;\\n  BUFG bufg_CLKOUT0 (.I(ck_CLKOUT0), .O(ck_CLKOUT0_g));\\n  wire ck_CLKOUT1_g;\\n  BUFG bufg_CLKOUT1 (.I(ck_CLKOUT1), .O(ck_CLKOUT1_g));\\n  wire wiz_rst_tx_rst;\\n  wiz_reset_sync u_rst_tx_rst (.clk(ck_CLKOUT0_g), .arst(rst), .rst(wiz_rst_tx_rst));\\n  wire wiz_rst_rx_rst;\\n  wiz_reset_sync u_rst_rx_rst (.clk(ck_CLKOUT1_g), .arst(rst), .rst(wiz_rst_rx_rst));\\n  crossR_core core (.clk(ck_CLKOUT0_g), .clk2(ck_CLKOUT1_g), .tx_rst(wiz_rst_tx_rst), .go(go), .rx_rst(wiz_rst_rx_rst), .q(q));\\nendmodule\\n\"",
+           ".cons (.cons 0 .nil) (.cons (.cons 0 .nil) (.cons (.cons 0 .nil) (.cons (.cons 1 .nil) (.cons (.cons 0 .nil) .nil))))",
+           ".cons (.cons 0 .nil) (.cons (.cons 0 .nil) (.cons (.cons 0 .nil) (.cons (.cons 1 .nil) (.cons (.cons 0 .nil) .nil))))",
+           ".ok (.cons (.cons 0 .nil) (.cons (.cons 0 .nil) (.cons (.cons 0 .nil) (.cons (.cons 1 .nil) (.cons (.cons 0 .nil) .nil)))))"] },
+    { name := "D5: reset crossings: value simulation = netlist = simFast on the single-clock reset netlist (the cell's model is the identity)", run := fun _ => do
+        -- the reset synchroniser's model is the identity (async assert passes through;
+        -- the two-edge deassert is not modelled), so on a single-clock netlist the value
+        -- simulation, Netlist.simulate and the compiled simFast agree cycle for cycle
+        cRunLibs ("import Hdl.Core\nimport Hdl.Prim\nimport Hdl.Sim\nimport Hdl.Cdc\n" ++
+          "def resetC : Circuit (HwTy.prod HwTy.bit HwTy.bit) HwTy.bit :=\n" ++
+          "  Circuit.mk HwTy.bit (BitVec.ofNat 1 0) (fun s x =>\n" ++
+          "    let rs := Cdc.resetSync Hw.clock (Hw.fst x);\n" ++
+          "    Hw.pair (Hw.resetTo rs (BitVec.ofNat 1 0) (Hw.snd x)) s)\n" ++
+          "def xs : List (HwTy.El (HwTy.prod HwTy.bit HwTy.bit)) :=\n" ++
+          "  (.cons (BitVec.ofNat 1 1, BitVec.ofNat 1 1)\n" ++
+          "    (.cons (BitVec.ofNat 1 1, BitVec.ofNat 1 0)\n" ++
+          "      (.cons (BitVec.ofNat 1 0, BitVec.ofNat 1 1)\n" ++
+          "        (.cons (BitVec.ofNat 1 0, BitVec.ofNat 1 0)\n" ++
+          "          (.cons (BitVec.ofNat 1 0, BitVec.ofNat 1 1) .nil)))))\n" ++
+          "def ins : List (List Nat) := Hdl.map (fun (x : HwTy.El (HwTy.prod HwTy.bit HwTy.bit)) => HwTy.leaves (HwTy.prod HwTy.bit HwTy.bit) x) xs\n" ++
+          "def net : Netlist :=\n" ++
+          "  let ω n := Circuit.netlist \"c\" resetC;\n" ++
+          "  Netlist.mk n.name n.nodes n.regs (.cons (NetPort.mk \"arst\" 1 0 \"rst\") (.cons (NetPort.mk \"go\" 1 1 \"clk\") .nil))\n" ++
+          "    n.outputs n.hints n.mems n.clocks (.cons (ResetDomain.named \"rst\") .nil) n.errors\n" ++
+          "def leavesEq : List (List Nat) → List (List Nat) → Bool\n" ++
+          "  | .nil, .nil => .true\n" ++
+          "  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)\n" ++
+          "  | _, _ => .false\n" ++
+          "def yes (b : Bool) : String := match b with\n" ++
+          "  | .true => \"yes\"\n" ++
+          "  | .false => \"NO\"\n" ++
+          "def main : IO Unit := do\n" ++
+          "  let ω v := Circuit.runLeaves resetC xs;\n" ++
+          "  let ω n := Netlist.simulate net ins;\n" ++
+          "  let ω f := Circuit.simFast resetC xs;\n" ++
+          "  IO.println (\"reset: value = netlist: \" <+> yes (leavesEq v n));\n" ++
+          "  IO.println (\"reset: simFast = value: \" <+> yes (leavesEq f v));\n" ++
+          "  IO.println (\"reset: simFast = netlist: \" <+> yes (leavesEq f n))\n")
+          "reset: value = netlist: yes\nreset: simFast = value: yes\nreset: simFast = netlist: yes\n" },
     { name := "S1: bundles, composition, reset and enable at random cycles; netlist simulation = values; names, test bench, PCF, VCD", run := fun _ => do
         -- t1–t6: (agreement of the netlist simulations with `Circuit.run`, the netlist size
         -- and the outputs) for the bundled counter, a delay chain, `par`, a feedback loop,

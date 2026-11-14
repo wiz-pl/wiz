@@ -512,6 +512,11 @@ clock used as data, and data fed to a clock port, stay kind errors. A primitive 
 output can name its domain (`Prim.withOutDom`; `X7.bufgIn d` is a BUFG on `d`'s output),
 so a synchroniser clocked by a BUFG output is in that domain.
 
+Resets are crossings too: a reset is its own domain (`ResetDomain`, declared in
+`Netlist.resets`) and reaches each clock domain through `Cdc.resetSync` (async assert,
+synchronous deassert), with `Cdc.unsafeCross` as the explicit escape. `Clocking.resets`
+puts the reset synchronisers in the wrapper. See H14 P3 below.
+
 Simulation: a primitive without a model is 0 at values and in `Netlist.simulate`.
 `Netlist.unmodelled`/`Circuit.unmodelled` name such instances, and
 `Circuit.runModelled`/`Netlist.simulateModelled` refuse to run a circuit with one. They
@@ -554,6 +559,54 @@ one. The example/tests (group `hdl`, examples/hdl-cdc.wiz) are a `link` crossing
 (rejected) and a `Cdc.wire` crossing (accepted) between two parts, their core and wrapper
 Verilog, the XDC/PCF text, a BUFG output as a synchroniser's clock (`Prim.withOutDom`),
 and the multi-clock simulation refusal.
+
+## H14 P3: reset crossings: `Cdc.resetSync`, `Cdc.unsafeCross`, `Clocking.resets`
+
+A reset is not a clock-domain signal: it has its own domain (`ResetDomain`, a named
+asynchronous reset tree) and is declared in `Netlist.resets` (`Multi.resets` for a design;
+a `MultiPart.withResets` names a part's reset inputs). An asynchronous reset source (a
+button, a power-on reset, a PLL's `LOCKED`) reaches a clock domain through one cell:
+
+```
+def rdom : ResetDomain := ResetDomain.named "rst"
+-- in a Multi: one reset synchroniser per destination clock domain
+Cdc.resetWire d2 "rst" "rx_rst"     -- Cdc.resetSync (Hw.clockOf d2) rst
+```
+
+`Cdc.resetSync dst arst` is two flops in `dst` whose asynchronous reset is `arst`: the
+reset asserts as soon as `arst` does and deasserts two `dst` edges after it goes low. It
+is declared with `Prim.declResetSync` (`PrimKind.resetSync`), so
+`Netlist.domainErrors`: accepts its data only from a declared reset domain (not from a
+clock domain); puts its output in `dst`, where it may drive that domain's registers'
+`rst`; rejects a reset source that drives a register directly
+(`the asynchronous reset rst (...) is used by clk2 logic (...): no reset synchroniser`);
+rejects a reset used as data (`... a reset stays in its own domain`); rejects a data
+synchroniser (`Cdc.sync2`) used for a reset; and rejects a reset synchroniser clocked by
+a reset domain. `Cdc.resetWire dst src dstName` is the `Multi` wire form.
+
+The escape is explicit: `Cdc.unsafeCross dst d` (`Prim.declUnsafe`, `PrimKind.unsafe`)
+has the shape of `Cdc.sync2` but emits `assign q = d;`, and the checker accepts the
+crossing (one clock input, one data domain, no synchroniser claimed). `Cdc.unsafeWire`
+is its `Multi` wire form. There is no other way to skip a reset synchroniser.
+
+`Clocking` gets `resets : List (String × String)`, mapping each core reset input port to
+its asynchronous source. `Verilog.emitTop` emits one `wiz_reset_sync` per core reset port,
+clocked by that port's domain, and connects the core port to the synchronised copy; the
+source becomes a top-level input if it is not a core input, and `Clocking.resetProblems`
+reports a reset port that is not a core input or not on a clock domain.
+`Cdc.resetVerilog` and `Cdc.unsafeVerilog` are the modules the instances refer to.
+The example/tests (group `hdl`, examples/hdl-cdc-reset.wiz) are the cell-level accepted,
+rejected, escape, wrong-clock, data-synchroniser and reset-as-data netlists; a two-domain
+`Multi` design with one synchronised reset per clock domain, its two errors without the
+synchronisers, and the escape; the wrapper's reset synchronisers; and the agreement of
+the value simulation, `Netlist.simulate` and the compiled `simFast` on the single-clock
+reset netlist (the cell's model is the identity).
+
+Limits: the emitted core registers still use a synchronous `if (rst)` (the reset tree and
+asynchronous reset pins of the destination flops are not inserted yet), so the cell's
+async assert is not propagated into the register file; and the identity model has no
+deassert delay, so a single-clock simulation says nothing about the two-edge timing.
+Both are noted in `wiz-notes/hdl-cdc.md`.
 
 ## H14 V1: verified circuit optimisation (`lib/Hdl/Verified.wiz`)
 
