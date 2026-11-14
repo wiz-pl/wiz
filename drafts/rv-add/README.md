@@ -51,74 +51,98 @@ closes (those are `True` and cannot be `Eq.trans` links: `wiz-notes/rv-shift-lem
 removed by an explicit `Nat.add_zero` (a stuck `q + 0` and `q` are **not** convertible,
 so it cannot be left to the conversion check under a `low`).
 
-## 2. The claims (`drafts/rv-add/AddSub.wiz`)
+## 2. The claims (`drafts/rv-add/AddSub.wiz`, `Compare.wiz`)
 
 `Rv.Proofs`'s `Pf` framework, unchanged: from the decode phase, for a symbolic
 architectural state and instruction word `w`, two cycles give `Rv.exec`'s PC and `rd`.
 
 ```wiz
-def RvAdd.add_ok  : Pf.Claim (Pf.w (A.add 9 2 3)) 9
-def RvAdd.addi_ok : Pf.Claim (Pf.w (A.addi 7 7 1365)) 7
-def RvAdd.sub_ok  : Pf.Claim (Pf.w (A.sub 5 5 1)) 5
+def RvAdd.add_ok   : Pf.Claim (Pf.w (A.add 9 2 3)) 9
+def RvAdd.addi_ok  : Pf.Claim (Pf.w (A.addi 7 7 1365)) 7
+def RvAdd.sub_ok   : Pf.Claim (Pf.w (A.sub 5 5 1)) 5
+def RvAdd.sltu_ok  : Pf.Claim (Pf.w (A.sltu 9 2 3)) 9
+def RvAdd.sltiu_ok : Pf.Claim (Pf.w (A.sltiu 7 7 1365)) 7
 ```
 
-Each is one `Eq.congrArg` on the register half of `Pf.G` (`adc_zero`/`adc_one`) and
-`Pf.ok` for the two cycles, exactly as `drafts/rv-shift/SLLI.wiz`. The `sub` control
-signal is concrete for a fixed word (ADD/ADDI: 0; SUB: 1), so the two specialised
-lemmas suffice; `adc_eq` states the general form.
+Each is one `Eq.congrArg` on the register half of `Pf.G` (`adc_zero`/`adc_one`/
+`sltu_val`) and `Pf.ok` for the two cycles, exactly as `drafts/rv-shift/SLLI.wiz`. The
+`sub` control signal is concrete for a fixed word (ADD/ADDI/SLTU/SLTIU: 0, 0, 1, 1), so
+the specialised lemmas suffice; `adc_eq` states the general form. The comparison word is
+`zext32 (not carry)`, so `Compare.wiz` also needs the branch on `Nat.le b a` (below).
 
 ## 3. What was run
 
 ```
 heavy lake build wiz tests                                        # 415 jobs, OK
-wiz --no-cache check lib/BitVecAdd.wiz                            # EXIT 0, 20 s (5 s cached)
+wiz --no-cache check lib/BitVecAdd.wiz                            # EXIT 0, 21 s (5 s cached)
 wiz check --no-cache -I /workspace/wiz-rv/src drafts/rv-add/AddSub.wiz
-    # EXIT 0, 77 s (Rv.Proofs' eight existing claims re-check too), light 2 GB
-heavy lake test -- '=vec'          # 24 passed, 0 failed (new BitVecAdd case)
+    # EXIT 0, 92 s (Rv.Proofs' eight existing claims re-check too), light 2 GB
+wiz check --no-cache -I /workspace/wiz-rv/src drafts/rv-add/Compare.wiz
+    # EXIT 0, 94 s (SLTU + SLTIU, same import), light 2 GB
+heavy lake test -- '=vec'          # 24 passed, 0 failed (BitVecAdd case covers the new lemmas)
 ```
 
-Logs: `/tmp/rv-adder-final-lib.log`, `/tmp/rv-adder-final-addsub.log` (uncached),
-`/tmp/rv-adder-vec.log`, plus the earlier probes `/tmp/rv-adder-*.log`. The `vec` test
-group has a `BitVecAdd` case (`Tests/Groups/Vec.lean`).
+Logs: `/tmp/rv-adder-final-lib.log`, `/tmp/rv-adder-final-addsub.log`,
+`/tmp/rv-adder-cmp3.log`, `/tmp/rv-adder-vec2.log`, plus the earlier probes
+`/tmp/rv-adder-*.log`. The `vec` test group has a `BitVecAdd` case
+(`Tests/Groups/Vec.lean`) that applies the adder, carry, borrow and div lemmas.
 
-## 4. The carry-out (for SLT/SLTU), and what remains
+## 4. The carry-out and SLTU/SLTIU
 
 `SLTU` writes `zext32 (not (bitOf 33 s34))` (the carry out of the 34-bit sum), the spec
 writes `one32 (BitVec.ult a b)`. With `s34 = 2·(a + (2^32 - b))` the carry-out is
-`a ≥ b`, so `not carry = a < b`. The *Nat* half is now in the library:
+`a ≥ b`, so `not carry = a < b`. The pieces are now all in the library:
 
 | lemma | statement |
 |---|---|
+| `BitVec.adcTop` | the core's carry bit: `ofNat 1 (shiftRight (adcForm s a b).toNat 33)` |
+| `BitVec.adcTop_one` | `(adcTop 1 a b).toNat = (a + (2^32 - b)) / 2^32` |
 | `Bits.div_div` | `(n / 2^k) / 2^j = n / 2^(k+j)` |
 | `Bits.div_low_pow` | `div (low (w+1) n) 2^w = low 1 (div n 2^w)` (the carry bit) |
-| `Bits.mul2_add` | `2·P = P + P` |
 | `Bits.div_one_of` | `P ≤ Z < 2P → Z / P = 1` |
-| `Bits.borrow_le` | `b ≤ a → (a + (2^32 - b)) / 2^32 = 1` |
-| `Bits.borrow_gt` | `a < b → (a + (2^32 - b)) / 2^32 = 0` |
+| `Bits.borrow_le`, `borrow_gt` | `(a + (2^32 - b))/2^32` is 1 iff `b ≤ a`, 0 iff `a < b` |
+| `Nat.lt_not_le` (`lib/Nat.wiz`) | `Nat.lt a b = Bool.not (Nat.le b a)` |
 
-What is still needed for the SLTU claim is the 1-bit *assembly*, in this order:
+and `Compare.wiz` has the 1-bit assembly: `RvAdd.sltu_le`/`sltu_gt` (the two branches of
+`Nat.le b a`, each with `transp` along the branch equation and the `1 - carry` step) and
+`RvAdd.sltu_val : zext32 (not (adcTop 1 a b)) = one32 (BitVec.ult a b)`, then
+`RvAdd.sltu_ok` (`A.sltu 9 2 3`) and `RvAdd.sltiu_ok` (`A.sltiu 7 7 1365`, the immediate
+as the `b` operand).
 
-1. `BitVec.adcTop s a b = ofNat 1 (div (adcForm s a b).toNat 2^33)` (the core's
-   `bitOf 33 s34`), and for `s = 1`
-   `(adcTop 1 a b).toNat = div (a + (2^32 - b)) 2^32`: `adcFormToNat`, then
-   `Bits.div_low_pow 33`, then `s34 = 2·Z` (`nat_ring!`) with `Bits.div_div 1 32` +
-   `Bits.div_two`, then the `~b + 1 = 2^32 - b` step from `adc_one_toNat`;
-2. `Nat.lt_not_le a b : Nat.lt a b = Bool.not (Nat.le b a)` (4 lines: `Nat.lt a b` and
-   `Nat.le b a = Nat.lt b (succ a)` are complementary, by induction on `a`, `b`), to turn
-   `BitVec.ult` into the `Nat.le` of `borrow_le`/`borrow_gt`;
-3. the word equality `zext32 (not (adcTop 1 a b)) = one32 (BitVec.ult a b)` by
-   `UIntN.ext`: `(zext32 u).toNat = low 32 u.toNat` (`BitVec.catToNat`), `u.toNat =
-   1 - T` (`Bits.wnot_val` at width 1), then `Bool.cases` on `Nat.le b a`:
-   `Nat.le b a = true` gives `T = 1`, so `1 - T = 0` while `ult = Bool.not true = false`
-   (both sides `low 32 0`); `= false` gives `T = 0`, so `1 - T = 1` while
-   `ult = Bool.not false = true` (both sides `low 32 1`), each branch by `transp` along
-   the branch equation (the `Bool.not`/`if`/`low` of numerals compute).
+**A conversion trap worth knowing** (it cost hours): `BitVec.adcTop` first used
+`Nat.div (adcForm s a b).toNat (Nat.pow 2 33)`, which is *definitionally* the core's
+`Nat.shiftRight s34.toNat 33` (`Hw.slice`'s own definition) — but the claim's
+`Pf.G ... = Pf.spec ...` check then did not finish (> 13 min, and `--inert ground` did
+not help), while the `rfl` from `Pf.G` to the `shiftRight`-shaped form took 84 s. Writing
+`adcTop` with `Nat.shiftRight` (the same reduction the core takes) makes it 109 s for
+both claims. If a word-level lemma "should" be convertible but the check hangs, match
+the *syntactic* shape of the core's expression, not just its value.
 
-`SLT`/`SLTI` then use the same top-bit lemma at bit 31 with the sign selection
-(`bit 31 sum` when the signs agree), i.e. `adcTop` at bit 31 plus `IntN.isNeg`.
+## 5. What remains: the signed forms, and the branch alignment decision
 
-**JAL/JALR/branches** need the adder only for `pc + imm`, which the core already does
-with `BitVec.add`, so it is free; their remaining obstacle is the target's alignment
-trap: the core checks `bitOf 1 target`, the ISA checks `Nat.mod target 4 = 0`. With a
-symbolic PC those differ when `PC` is odd (the core ignores bit 0), so the local claim
-needs a PC-alignment invariant (`Nat.mod pc 4 = 0`) — a statement decision, not a lemma.
+`SLT`/`SLTI` (funct3 = 2) write `zext32 slt` with
+`slt = mux (xor (bitOf 31 a) (bitOf 31 b)) (bitOf 31 a) (bitOf 31 sum)`, the spec writes
+`one32 (BitVec.slt a b)`. The pieces still needed:
+
+1. `Bits.testBit : Nat.testBit n i = Bits.bit n i` (10 lines: `Nat.testBit n i =
+   Nat.isOdd (Nat.shiftRight n i)` and `Bits.bit n i = Nat.isOdd (div n 2^i)`, by
+   induction on `i`);
+2. the top-bit lemma `Bits.bit n w = Nat.le (2^w) n` for `n < 2^(w+1)` (induction on `w`
+   with `Bits.decomp`, `Bits.bit_cons0`/`bit_consS`), so that `bit 31 (low 32 Z)`
+   reads `Z ≥ 2^31`;
+3. the same-sign order identity: for `A B < 2^32` with `bit 31 A = bit 31 B`,
+   `Nat.lt A B` iff `bit 31 (A + (2^32 - B)) = 1` (the difference is `2^32 + (A - B)`,
+   which lies in `(2^31, 2^32 + 2^31)`, so its bit 31 is 1 exactly when it is below
+   `2^32`, i.e. when `A < B`);
+4. the 1-bit assembly with `UIntN.cases1` on the two sign bits (`IntN.isNeg` is
+   `Nat.testBit A 31`, and `IntN.lt`'s definition splits on them: signs differ gives
+   `bit 31 a` directly, signs agree gives item 3).
+
+**Branches/JAL/JALR: a statement decision, not a lemma.** Their `pc + imm` is already
+`BitVec.add` in the core, so the adder is free; the obstacle is the target's alignment
+trap. The core checks `bitOf 1 target`, the ISA checks `Nat.mod target 4 = 0`. With a
+symbolic PC those differ when PC is odd (the core ignores bit 0, the ISA does not), so
+the local claim needs a PC-alignment invariant — e.g.
+`Pf.Claim` with an extra `Nat.beq (Nat.mod a.pc 4) 0 = .true` hypothesis — and then
+`Nat.mod (pc + immJ) 4 = 0` from the two alignments (a `Nat.mod`/addition lemma the
+library does not have yet). The comparison claims above do not need it.

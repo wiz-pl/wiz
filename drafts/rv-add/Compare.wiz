@@ -1,0 +1,96 @@
+import Rv.Proofs
+import BitVecAdd
+-- SLTU and SLTIU against the canonical multi-cycle core (`wiz -I /workspace/wiz-rv/src`).
+--
+-- The core compares with the 34-bit adder's carry out: `ult = not (bitOf 33 s34)` and
+-- the ALU writes `zext32 ult` for funct3 = 3; the specification writes
+-- `Rv.one32 (BitVec.ult a b)` (`Rv.alu`). For funct3 = 2 or 3 the `sub` control signal
+-- is 1, so `s34 = 2·(a + (2^32 - b))` and bit 33 is `a ≥ b`; `not` of it is `a < b`,
+-- which is `BitVec.ult`. `lib/BitVecAdd.wiz` has the arithmetic
+-- (`BitVec.adcTop_one`, `Bits.borrow_le`/`borrow_gt`); here are the two branches of the
+-- 1-bit word equality and then the claims.
+--
+-- Check: wiz check -I /workspace/wiz-rv/src drafts/rv-add/Compare.wiz
+
+-- the PC after the execute cycle (`pc + 4`; the comparisons do not jump; the same as
+-- `RvAdd.pc4` in AddSub.wiz — a separate name so that the two files can be loaded
+-- together without a duplicate definition)
+def RvCmp.pc4 (a : Arch) : BitVec 32 := BitVec.add a.pc (BitVec.ofNat 32 4)
+
+-- ## The carry bit is `BitVec.ult`
+
+/-- `b ≤ a`: the carry is 1, `1 - 1 = 0`, and `ult` is false — both words are zero. -/
+def RvAdd.sltu_le (a b : BitVec 32) (h : Nat.le b.toNat a.toNat = .true) :
+    zext32 (r := HwTy.El) (BitVec.not (BitVec.adcTop (BitVec.ofNat 1 1) a b))
+      = Rv.one32 (BitVec.ult a b) :=
+  let A := a.toNat;
+  let B := b.toNat;
+  let v := BitVec.adcTop (BitVec.ofNat 1 1) a b;
+  let u := BitVec.not v;
+  let hT : v.toNat = 1 :=
+    Eq.trans (BitVec.adcTop_one a b)
+      (Bits.borrow_le A B (UIntN.toNat_lt a) (UIntN.toNat_lt b) h);
+  let eL : (zext32 (r := HwTy.El) u).toNat = Bits.low 32 (Nat.sub 1 v.toNat) :=
+    Eq.trans (BitVec.catToNat (BitVec.ofNat 31 0) u)
+      (Bits.congr (fun t => Bits.low 32 t) (Bits.wnot_val v));
+  UIntN.ext (zext32 (r := HwTy.El) u) (Rv.one32 (BitVec.ult a b))
+    (Eq.trans
+      (transp (fun t _ => (zext32 (r := HwTy.El) u).toNat = (Rv.one32 (Bool.not t)).toNat)
+        (Eq.trans eL (Bits.congr (fun t => Bits.low 32 (Nat.sub 1 t)) hT)) (Eq.symm h))
+      (Eq.symm (Eq.congrArg (fun c => (Rv.one32 c).toNat) (Nat.lt_not_le A B))))
+
+/-- `a < b`: the carry is 0, `1 - 0 = 1`, and `ult` is true — both words are one. -/
+def RvAdd.sltu_gt (a b : BitVec 32) (h : Nat.le b.toNat a.toNat = .false) :
+    zext32 (r := HwTy.El) (BitVec.not (BitVec.adcTop (BitVec.ofNat 1 1) a b))
+      = Rv.one32 (BitVec.ult a b) :=
+  let A := a.toNat;
+  let B := b.toNat;
+  let v := BitVec.adcTop (BitVec.ofNat 1 1) a b;
+  let u := BitVec.not v;
+  let hT : v.toNat = 0 :=
+    Eq.trans (BitVec.adcTop_one a b)
+      (Bits.borrow_gt A B (UIntN.toNat_lt a) (UIntN.toNat_lt b) h);
+  let eL : (zext32 (r := HwTy.El) u).toNat = Bits.low 32 (Nat.sub 1 v.toNat) :=
+    Eq.trans (BitVec.catToNat (BitVec.ofNat 31 0) u)
+      (Bits.congr (fun t => Bits.low 32 t) (Bits.wnot_val v));
+  UIntN.ext (zext32 (r := HwTy.El) u) (Rv.one32 (BitVec.ult a b))
+    (Eq.trans
+      (transp (fun t _ => (zext32 (r := HwTy.El) u).toNat = (Rv.one32 (Bool.not t)).toNat)
+        (Eq.trans eL (Bits.congr (fun t => Bits.low 32 (Nat.sub 1 t)) hT)) (Eq.symm h))
+      (Eq.symm (Eq.congrArg (fun c => (Rv.one32 c).toNat) (Nat.lt_not_le A B))))
+
+/-- **The comparison bridge**: the core's `zext32 (not carry)` is `one32 (ult)`. -/
+def RvAdd.sltu_val (a b : BitVec 32) :
+    zext32 (r := HwTy.El) (BitVec.not (BitVec.adcTop (BitVec.ofNat 1 1) a b))
+      = Rv.one32 (BitVec.ult a b) :=
+  Or.elim (Bool.cases (Nat.le b.toNat a.toNat))
+    (fun h => RvAdd.sltu_le a b h)
+    (fun h => RvAdd.sltu_gt a b h)
+
+-- ## The claims
+
+def RvAdd.sltu_G (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32)
+    (cnt srd : BitVec 5) (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) :
+    Pf.G a (Pf.w (A.sltu 9 2 3)) 9 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio
+        (Pf.bytes (Pf.w (A.sltu 9 2 3))) = Pf.spec a (Pf.w (A.sltu 9 2 3)) 9 :=
+  Eq.congrArg (fun v => (RvCmp.pc4 a, v))
+    (RvAdd.sltu_val (Pf.rf a (BitVec.ofNat 4 2)) (Pf.rf a (BitVec.ofNat 4 3)))
+
+def RvAdd.sltu_ok : Pf.Claim (Pf.w (A.sltu 9 2 3)) 9 :=
+  fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
+    Pf.ok a (Pf.w (A.sltu 9 2 3)) 9 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio
+      (RvAdd.sltu_G a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio) h
+
+-- SLTIU: the second operand is the (concrete) immediate.
+
+def RvAdd.sltiu_G (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32)
+    (cnt srd : BitVec 5) (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) :
+    Pf.G a (Pf.w (A.sltiu 7 7 1365)) 7 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio
+        (Pf.bytes (Pf.w (A.sltiu 7 7 1365))) = Pf.spec a (Pf.w (A.sltiu 7 7 1365)) 7 :=
+  Eq.congrArg (fun v => (RvCmp.pc4 a, v))
+    (RvAdd.sltu_val (Pf.rf a (BitVec.ofNat 4 7)) (BitVec.ofNat 32 1365))
+
+def RvAdd.sltiu_ok : Pf.Claim (Pf.w (A.sltiu 7 7 1365)) 7 :=
+  fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
+    Pf.ok a (Pf.w (A.sltiu 7 7 1365)) 7 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio
+      (RvAdd.sltiu_G a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio) h

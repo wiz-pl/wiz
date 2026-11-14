@@ -132,6 +132,13 @@ def vecGroup : Group where
           "def e (A : Nat) (h : Nat.Lt A (Nat.pow 2 32)) : Bits.low 33 (Nat.add (Nat.mul A 2) 1) = Nat.add (Nat.mul A 2) 1 := Bits.low33_cat A h\n" ++
           "def f (w n : Nat) : Nat.div (Bits.low (Nat.succ w) n) 2 = Bits.low w (Nat.div n 2) := Bits.div_low_succ w n\n" ++
           "def g (x y : BitVec 32) : (BitVec.adc (BitVec.ofNat 1 0) x y).toNat = Bits.low 32 (Nat.add x.toNat y.toNat) := BitVec.adc_zero_toNat x y\n" ++
+          "def h (x y : BitVec 32) : (BitVec.adcTop (BitVec.ofNat 1 1) x y).toNat = Nat.div (Nat.add x.toNat (Nat.sub (Nat.pow 2 32) y.toNat)) (Nat.pow 2 32) := BitVec.adcTop_one x y\n" ++
+          "def i (k j n : Nat) : Nat.div (Nat.div n (Nat.pow 2 k)) (Nat.pow 2 j) = Nat.div n (Nat.pow 2 (Nat.add k j)) := Bits.div_div k j n\n" ++
+          "def j (w n : Nat) : Nat.div (Bits.low (Nat.succ w) n) (Nat.pow 2 w) = Bits.low 1 (Nat.div n (Nat.pow 2 w)) := Bits.div_low_pow w n\n" ++
+          "def k (P Z : Nat) (hP : Nat.Lt 0 P) (h1 : Nat.Le P Z) (h2 : Nat.Lt Z (Nat.mul 2 P)) : Nat.div Z P = 1 := Bits.div_one_of P Z hP h1 h2\n" ++
+          "def l (a b : Nat) (ha : Nat.Lt a (Nat.pow 2 32)) (hb : Nat.Lt b (Nat.pow 2 32)) (h : Nat.le b a = .true) : " ++
+          "Nat.div (Nat.add a (Nat.sub (Nat.pow 2 32) b)) (Nat.pow 2 32) = 1 := Bits.borrow_le a b ha hb h\n" ++
+          "def m (a b : Nat) : Nat.lt a b = Bool.not (Nat.le b a) := Nat.lt_not_le a b\n" ++
           "#eval BitVec.toNat (BitVec.adc (BitVec.ofNat 1 0) (BitVec.ofNat 32 4294967295) (BitVec.ofNat 32 2))\n" ++
           "#eval BitVec.toNat (BitVec.adc (BitVec.ofNat 1 1) (BitVec.ofNat 32 3) (BitVec.ofNat 32 5))")
           ["1", "4294967294"] },

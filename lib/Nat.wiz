@@ -218,6 +218,13 @@ def Nat.not_le : (a b : Nat) → Nat.le a b = .false → Nat.Lt b a
   | .zero, _, h => absurd h.1
   | .succ _, .zero, _ => rfl
   | .succ a, .succ b, h => Nat.not_le a b h
+/-- `<` is the complement of `≤` with the arguments swapped: `a < b` iff not `b ≤ a`. -/
+def Nat.lt_not_le : (a b : Nat) → Nat.lt a b = Bool.not (Nat.le b a)
+  | .zero, .zero => rfl
+  | .zero, .succ n => Eq.symm (congrArg Bool.not (Nat.lt_zero n))
+  | .succ _, .zero => rfl
+  | .succ a, .succ b => Nat.lt_not_le a b
+
 /-- `a ≤ b` or `b < a`: which one is decided by `Nat.le a b`. -/
 def Nat.le_or_lt (a b : Nat) : Nat.Le a b ∨ Nat.Lt b a :=
   Or.imp (fun (h : Nat.le a b = .true) => h) (fun h => Nat.not_le a b h) (Bool.cases (Nat.le a b))

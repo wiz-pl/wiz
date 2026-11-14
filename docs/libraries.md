@@ -76,10 +76,16 @@ H2 for `wiz-rv`: ADD, ADDI and SUB are one `Eq.congrArg` each
 (`drafts/rv-add/AddSub.wiz`). For the comparisons it also has the carry-out half:
 `Bits.div_div` (`(n/2^k)/2^j = n/2^(k+j)`), `Bits.div_low_pow`
 (`div (low (w+1) n) 2^w = low 1 (div n 2^w)`), `Bits.div_one_of` (`P ≤ Z < 2P → Z/P = 1`)
-and `Bits.borrow_le`/`borrow_gt` (the borrow of `a + (2^32 - b)`, i.e. `a < b`). It
-imports `BitVecShift` for the `Bits.low`/`low_low` lemmas, so it is a proof module too;
-what remains for SLT/SLTU is the 1-bit assembly around `bitOf 33` (see
-`drafts/rv-add/README.md` and `wiz-notes/rv-core-proofs.md`).
+and `Bits.borrow_le`/`borrow_gt` (the borrow of `a + (2^32 - b)`, i.e. `a < b`).
+`BitVec.adcTop` is the core's carry bit (`slice 33 1` of the 34-bit sum) and
+`BitVec.adcTop_one` its value (`(a + (2^32 - b)) / 2^32`), which with
+`Nat.lt_not_le` (`lib/Nat.wiz`: `a < b` iff not `b ≤ a`) makes the comparison
+instructions one `Eq.congrArg` each too (`drafts/rv-add/Compare.wiz`: SLTU, SLTIU). Two
+shapes matter for the conversion check: state a `Hw.slice lo w` value with
+`Nat.shiftRight x lo` (not `Nat.div x (Nat.pow 2 lo)`), and keep a `concat`'s `+ 0` in
+the lemma's own shape. It imports `BitVecShift` for the `Bits.low`/`low_low` lemmas, so
+it is a proof module too; the signed forms (SLT/SLTI) need the top-bit/order lemma
+written up in `drafts/rv-add/README.md` §4.
 
 ## H14 S0: hardware as tagless-final code, with sharing
 
