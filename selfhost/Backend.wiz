@@ -1824,8 +1824,8 @@ def implOf (n : String) : List Foreign → Option String
     | _ => implOf n rest
 partial def eraseGlobals (sl : Bool) (ffi : List Foreign) (all : Array Global) (seen : List String) (acc : List Erased) : Nat → EraseR
   | .zero => .ok acc
-  | .succ k => match Array.getD all k (.mk "?" .nil .star .star .star .nil) with
-    | .mk n _ ty v _ _ => match Bool.or (elemStr n seen) (isNative n) with
+  | .succ k => match Array.getD all k (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk n _ ty v _ _ _ => match Bool.or (elemStr n seen) (isNative n) with
       | .true => eraseGlobals sl ffi all seen acc k
       -- (an implemented definition's code is its implementation's)
       | .false => match implOf n ffi with

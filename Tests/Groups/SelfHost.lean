@@ -897,6 +897,25 @@ def classProgram : String :=
   "def get {A : Type} [Default A] : A := Default.d\n" ++
   "def main : IO Unit := do\n  IO.println (Nat.toString (get : Nat));\n" ++
   "  IO.println (Nat.toString (List.length (get : List Nat)))\n"
+/-- (A9) Named arguments: explicit, implicit, reordered, with `@f` and after other
+positional arguments. -/
+def namedArgHeader : String :=
+  "def sub (a b : Nat) : Nat := Nat.sub a b\n" ++
+  "def ident {A : Type} (x : A) : A := x\n" ++
+  "def pick {A : Type} (x y : A) (b : Bool) : A := match b with\n  | .true => x\n  | .false => y\n" ++
+  "def const2 {A B : Type} (a : A) (b : B) : A := a\n" ++
+  "def mixed {A : Type} (x : A) {B : Type} (y : B) : A := x\n"
+
+def namedArgCases : List (String × Nat) := [
+  ("sub (b := 1) 5", 4),
+  ("sub (a := 7) (b := 2)", 5),
+  ("sub (b := 1) (Nat.succ 5)", 5),
+  ("ident (A := Nat) 3", 3),
+  ("@ident (A := Nat) 4", 4),
+  ("@ident (x := 5) Nat", 5),
+  ("pick (b := .false) 1 2", 2),
+  ("const2 (B := Bool) 7 .true", 7),
+  ("mixed (B := Bool) 3 .true", 3)]
 
 def selfHostGroup : Group where
   name := "selfhost"
@@ -1053,6 +1072,20 @@ def selfHostGroup : Group where
     { name := "implicit arguments, checked in Wiz", run := fun _ =>
         selfhostCheckFile "inductive Nat where\n  | zero\n  | succ (n : Nat)\ndef id {A : Type} (x : A) : A := x\n#check id\n#check id Nat.zero\n#reduce id (Nat.succ Nat.zero)\ndef const {A B : Type} (a : A) (b : B) : A := a\n#reduce const Nat.zero (Nat.succ Nat.zero)\ninductive List (A : Type) where\n  | nil\n  | cons (head : A) (tail : List A)\ndef one : List Nat := List.cons Nat.zero List.nil\n#check one\n#reduce one\ndef two : List Nat := List.cons (id Nat.zero) (List.cons (Nat.succ Nat.zero) List.nil)\n#reduce two\ndef twice {A : Type} (f : A → A) (x : A) : A := f (f x)\n#reduce twice Nat.succ Nat.zero\ndef bad : List Nat := List.nil\ndef bad2 : Nat := id List.nil\ndef map {A B : Type} (f : A → B) (l : List A) : List B := match l with\n  | .nil => List.nil\n  | .cons h t => List.cons (f h) (map f t)\n#reduce map Nat.succ (List.cons Nat.zero List.nil)\ndef length {A : Type} : List A → Nat\n  | .nil => Nat.zero\n  | .cons _ t => Nat.succ (length t)\n#reduce length one\n"
           "Nat : U0\nid : (x0 :0 U0) → (x1 : x0) → x0\n(x0 :0 U0) → (x1 : x0) → x0\nNat\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\nconst : (x0 :0 U0) → (x1 :0 U0) → (x2 : x0) → (x3 : x1) → x0\ncon((#0, (tt, tt)))\nList : (x0 : U0) → U0\none : (List Nat)\n(List Nat)\ncon((#1, (con((#0, (tt, tt))), (con((#0, (tt, tt))), (tt, tt)))))\ntwo : (List Nat)\ncon((#1, (con((#0, (tt, tt))), (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (con((#0, (tt, tt))), (tt, tt))))), (tt, tt)))))\ntwice : (x0 :0 U0) → (x1 : (x1 : x0) → x0) → (x2 : x0) → x0\ncon((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\nbad : (List Nat)\nerror: type mismatch: expected Nat, got (List ?m1)\nmap : (x0 :0 U0) → (x1 :0 U0) → (x2 : (x2 : x0) → x1) → (x3 : (List x0)) → (List x1)\ncon((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (con((#0, (tt, tt))), (tt, tt)))))\nlength : (x0 :0 U0) → (x1 : (List x0)) → Nat\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\n" },
+    { name := "the self-hosted frontend: named arguments, explicit and implicit (A9)", run := fun _ =>
+        selfhostSameNats namedArgHeader namedArgCases },
+    { name := "the self-hosted frontend: named argument errors (A9)", run := fun _ => do
+        selfhostCheckFile "import Prelude\ndef sub (a b : Nat) : Nat := Nat.sub a b\ndef x : Nat := sub (c := 1) 2\n"
+          "sub : (x0 : Nat) → (x1 : Nat) → Nat\nerror: no parameter named 'c'\n"
+        selfhostCheckFile "import Prelude\ndef sub (a b : Nat) : Nat := Nat.sub a b\ndef x : Nat := sub (b := 1) (b := 2)\n"
+          "sub : (x0 : Nat) → (x1 : Nat) → Nat\nerror: argument 'b' was already given\n"
+        selfhostCheckFile "import Prelude\ndef sub (a b : Nat) : Nat := Nat.sub a b\ndef x : Nat := sub (b := 1)\n"
+          "sub : (x0 : Nat) → (x1 : Nat) → Nat\nerror: named argument 'b' comes after the explicit parameter 'a', which has no argument\n"
+        selfhostCheckFile "import Prelude\ndef x : Nat := (b := 1)\n"
+          "error: a named argument `(x := e)` is only allowed as an argument of an application\n" },
+    { name := "the self-hosted frontend: a named argument for a binder written in the type (A9)", run := fun _ =>
+        selfhostCheckFile "import Prelude\naxiom f : {A : Type} → A → A\ndef g : Nat := f (A := Nat) 3\n"
+          "f : (x0 :0 U0) → (x1 : x0) → x0\ng : Nat\n" },
     { name := "constructors by their names (.c) and @f, checked in Wiz", run := fun _ =>
         selfhostCheckFile "inductive Nat where\n  | zero\n  | succ (n : Nat)\ninductive List (A : Type) where\n  | nil\n  | cons (head : A) (tail : List A)\ndef two : Nat := .succ (.succ .zero)\n#reduce two\ndef xs : List Nat := .cons .zero (.cons two .nil)\n#reduce xs\ndef id {A : Type} (x : A) : A := x\n#reduce @id Nat .zero\ndef add : Nat → Nat → Nat\n  | .zero, n => n\n  | .succ m, n => .succ (add m n)\n#reduce add two two\ndef map {A B : Type} (f : A → B) : List A → List B\n  | .nil => .nil\n  | .cons h t => .cons (f h) (map f t)\n#reduce map (add two) xs\ndef bad : Nat := .nil\n"
           "Nat : U0\nList : (x0 : U0) → U0\ntwo : Nat\ncon((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\nxs : (List Nat)\ncon((#1, (con((#0, (tt, tt))), (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (con((#0, (tt, tt))), (tt, tt))))), (tt, tt)))))\nid : (x0 :0 U0) → (x1 : x0) → x0\ncon((#0, (tt, tt)))\nadd : (x0 : Nat) → (x1 : Nat) → Nat\ncon((#1, (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt))))\nmap : (x0 :0 U0) → (x1 :0 U0) → (x2 : (x2 : x0) → x1) → (x3 : (List x0)) → (List x1)\ncon((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (con((#1, (con((#1, (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (con((#0, (tt, tt))), (tt, tt))))), (tt, tt)))))\nerror: unknown identifier Nat.nil\n" },
