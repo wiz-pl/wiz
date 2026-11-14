@@ -1323,7 +1323,7 @@ def selfHostGroup : Group where
         | .ok _ => throw (IO.userError "an ill-typed declaration was accepted")
         | .error (.unmarkedProof ..) => throw (IO.userError "the error of the first check was reported")
         | .error _ => pure () },
-    { name := "P1: regularity at inert types is decided by conversion, in both kernels (the probes as core terms)", run := fun _ => do
+    { name := "P1/PF-C: regularity is decided by conversion in both kernels (the probes as core terms; the type-position control)", run := fun _ => do
         let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
         let samples := MTm.convSamples
         let show' (b : Bool) : String := if b then "ok" else "error"
@@ -1331,24 +1331,28 @@ def selfHostGroup : Group where
         for (n, t, ok) in samples do
           let v := leanVerdict t
           unless (v != "error") == ok do throw (IO.userError s!"{n}: the Lean kernel says {v}, expected {show' ok}")
-        -- with the fast path alone (`--inert ground`), the open-index probes are rejected
+        -- with the fast path alone (`--inert ground`): the *value* comparisons inside an
+        -- equation are still accepted (PF-C's prop gate sets conversion-level full
+        -- regularity, which does not consult `inertReg`); the *type* controls (`ty`, `tv`)
+        -- need the inert-only rule and are rejected
         let ground (t : MTm) : Bool :=
           let g : Globals ZeroOneMany := { leanGlobals () with inertReg := .ground }
           (infer (R := ZeroOneMany) { globals := g } (Mark.infer (R := ZeroOneMany) { globals := g } t.toTerm).1).toBool
         for (n, t, _) in samples do
-          unless ground t == (n == "ne") do throw (IO.userError s!"{n}: unexpected verdict with the fast path alone")
+          unless ground t == (n != "ty" && n != "tv") do throw (IO.userError s!"{n}: unexpected verdict with the fast path alone")
         -- the Wiz kernel
         let okV := "def okVerdict (t : Tm) : String := match infer (TCtx.inProof empty) t with\n  | .err _ => \"error\"\n  | .ok _ _ => match infer empty (MR.tm (markInfer empty t)) with\n    | .ok _ _ => \"ok\"\n    | .err _ => \"error\"\n"
         let calls := samples.map fun (_, t, _) => s!"(okVerdict {t.toWiz})"
         let printAll := "def printAll : List String → IO Unit\n  | .nil => IO.pure ()\n  | .cons s ss => do\n    IO.println s;\n    printAll ss\n"
         ioRun (kernel ++ "\n" ++ wizVerdict ++ okV ++ printAll ++ s!"def main : IO Unit := printAll {wizList calls}\n")
           ("\n".intercalate (samples.map fun (_, _, ok) => show' ok) ++ "\n")
-        -- and with `kernelInertConv := .false` it rejects the same ones
+        -- and with `kernelInertConv := .false` the value comparisons are still accepted by
+        -- the prop gate; only the type controls (`ty`, `tv`) are rejected
         let on := "def kernelInertConv : Bool := .true"
         unless (kernel.splitOn on).length == 2 do throw (IO.userError "kernelInertConv not found")
         let groundK := kernel.replace on "def kernelInertConv : Bool := .false"
         ioRun (groundK ++ "\n" ++ wizVerdict ++ okV ++ printAll ++ s!"def main : IO Unit := printAll {wizList calls}\n")
-          ("\n".intercalate (samples.map fun (n, _, _) => show' (n == "ne")) ++ "\n") },
+          ("\n".intercalate (samples.map fun (n, _, _) => show' (n != "ty" && n != "tv")) ++ "\n") },
     { name := "U5b: a cast at a Π/Σ whose sort is not known is stuck, as the equation it goes along is (both kernels)", run := fun _ => do
         -- (prop-harness, `wiz-notes/soundness-probes/ph-u5b-cast-at-unknown-sort.txt`) the cast
         -- used to compute, projecting a proof whose type is a stuck equation and no pair
