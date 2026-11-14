@@ -582,11 +582,14 @@ refused command would have become.
 * **Layout and the parser's columns.** `colGt`/`colGe` compare against a remembered
   position (`withPosition`), so the layout has to respect it: a `match`'s alternatives
   and a `by`'s tactics align with their construct's line (at 2 when it is inline, at the
-  line's indent when it starts one, deeper for nested matches), and a `let` always starts
+  line's indent when it starts one, deeper for nested matches), a `calc`'s steps align
+  under its first relation (wherever the `calc` starts; each step on its own line, the
+  proof after its `:=` on that line when it fits), and a `let` always starts
   a line — `withPosition` in `term.let` stays in force for the terms after it, so a
   `let` in the middle of a line would forbid its own body's continuation lines to its
   left. That is why `def f := let …` breaks after `:=` while `def f := match …` may stay
-  on one line.
+  on one line; a `calc` body also starts its own line, so the steps keep the column
+  `colGe` compares them at.
 * **What is refused.** A kind with no grammar in the tables, something between tokens
   that is not a comment, or a reprint that does not parse back to the same tree. The
   check is what makes a prototype safe: across the library files tested (Prelude, Logic,
@@ -594,7 +597,7 @@ refused command would have become.
   Trace, Text, Sat, Hdl/Sim and two examples) the formatter changes no command it
   accepts, is idempotent on every file (formatting twice gives the same text), and
   refuses one command (`Fe.specLin` in `lib/Feral.wiz`: a `match` inside a `let` value,
-  see `wiz-notes/wiz-fmt.md`). 13 test cases in the `format` group.
+  see `wiz-notes/wiz-fmt.md`). 18 test cases in the `format` group.
 * **Not done.** Signatures never break (a long header stays long: wrapping binder lists
   needs `fill`/alignment); a multi-line block comment keeps the indentation of its
   continuation lines; the self-hosted frontend has no formatter; and the LSP does not

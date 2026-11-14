@@ -36,6 +36,13 @@ def idempotent (input : String) : IO Unit := do
   let twice ← fmt once
   checkEq once twice
 
+/-- `--check`'s two answers: an unformatted input is changed, and a formatted one is
+left exactly as it is (which is what makes the driver exit 0). -/
+def checkMode (unformatted formatted : String) : IO Unit := do
+  formats unformatted formatted
+  check (formatted != unformatted) "the input should have needed formatting"
+  formats formatted formatted
+
 def group : Group where
   name := "format"
   exercise := "11aa: wiz fmt"
@@ -87,7 +94,35 @@ def group : Group where
     { name := "a shorter width breaks the body",
       run := fun _ => do
         checkEq "def f (a b : Nat) : Nat :=\n  Nat.add (Nat.add a b) (Nat.add a b)\n"
-          (← fmt "def f (a b : Nat) : Nat := Nat.add (Nat.add a b) (Nat.add a b)\n" 40) }
+          (← fmt "def f (a b : Nat) : Nat := Nat.add (Nat.add a b) (Nat.add a b)\n" 40) },
+    { name := "calc at Nat: steps line up under the first relation",
+      run := fun _ => do
+        let input := "infix:50 \" ≤ \" => Nat.le\ninfix:50 \" < \" => Nat.lt\ndef t (a b c d : Nat) (h1 : a ≤ b) (h2 : b < c) (h3 : c = d) : a < d :=\n    calc a ≤ b := h1\n         _ < c := h2\n         _ = d := h3\n"
+        let expected := "infix:50 \" ≤ \" => Nat.le\ninfix:50 \" < \" => Nat.lt\ndef t (a b c d : Nat) (h1 : a ≤ b) (h2 : b < c) (h3 : c = d) : a < d :=\n  calc a ≤ b := h1\n       _ < c := h2\n       _ = d := h3\n"
+        formats input expected
+        idempotent input },
+    { name := "calc at Int: a named hypothesis and a longer chain",
+      run := fun _ => do
+        let input := "infix:50 \" ≤ \" => Nat.le\ninfix:50 \" < \" => Nat.lt\n\ndef t (a b c d : Int) (h1 : a ≤ b) (h2 : b < c) (h3 : c = d) : a < d :=\n  calc a ≤ b := h1\n       _ < c := h2\n       _ = d := h3\n\ndef u (n : Int) (h : n ≤ n) : n ≤ n :=\n    calc n ≤ n := h\n         _ ≤ n := h\n"
+        let expected := "infix:50 \" ≤ \" => Nat.le\ninfix:50 \" < \" => Nat.lt\n\ndef t (a b c d : Int) (h1 : a ≤ b) (h2 : b < c) (h3 : c = d) : a < d :=\n  calc a ≤ b := h1\n       _ < c := h2\n       _ = d := h3\n\ndef u (n : Int) (h : n ≤ n) : n ≤ n :=\n  calc n ≤ n := h\n       _ ≤ n := h\n"
+        formats input expected
+        idempotent input },
+    { name := "calc nested in a `by` block: steps align under its own first relation",
+      run := fun _ => do
+        let input := "infix:50 \" ≤ \" => Nat.le\ninfix:50 \" < \" => Nat.lt\nsyntax \"exact\" term : tactic\n\ndef t (a b c d : Nat) (h1 : a ≤ b) (h2 : b < c) (h3 : c = d) : a < d := by\n  exact calc a ≤ b := h1\n             _ < c := h2\n             _ = d := h3\n"
+        let expected := "infix:50 \" ≤ \" => Nat.le\ninfix:50 \" < \" => Nat.lt\nsyntax \"exact\" term : tactic\n\ndef t (a b c d : Nat) (h1 : a ≤ b) (h2 : b < c) (h3 : c = d) : a < d :=\n  by\n  exact calc a ≤ b := h1\n             _ < c := h2\n             _ = d := h3\n"
+        formats input expected
+        idempotent input },
+    { name := "calc keeps comments: before the block, between steps, and trailing",
+      run := fun _ => do
+        let input := "infix:50 \" ≤ \" => Nat.le\ninfix:50 \" < \" => Nat.lt\n\ndef t (a b c d : Nat) (h1 : a ≤ b) (h2 : b < c) (h3 : c = d) : a < d :=\n    -- the chain\n    calc a ≤ b := h1 -- first\n         -- middle\n         _ < c := h2\n         _ = d := h3 -- last\n"
+        let expected := "infix:50 \" ≤ \" => Nat.le\ninfix:50 \" < \" => Nat.lt\n\ndef t (a b c d : Nat) (h1 : a ≤ b) (h2 : b < c) (h3 : c = d) : a < d :=\n  -- the chain\n  calc a ≤ b := h1 -- first\n       -- middle\n       _ < c := h2\n       _ = d := h3 -- last\n"
+        formats input expected
+        idempotent input },
+    { name := "--check: a formatted calc is unchanged, an unformatted one differs",
+      run := fun _ => checkMode
+        "infix:50 \" ≤ \" => Nat.le\ninfix:50 \" < \" => Nat.lt\ndef t (a b c : Nat) (h1 : a ≤ b) (h2 : b < c) : a < c :=\n    calc a ≤ b := h1\n         _ < c := h2\n"
+        "infix:50 \" ≤ \" => Nat.le\ninfix:50 \" < \" => Nat.lt\ndef t (a b c : Nat) (h1 : a ≤ b) (h2 : b < c) : a < c :=\n  calc a ≤ b := h1\n       _ < c := h2\n" }
   ]
 
 /-- This module's test groups, which `Tests/Main.lean` runs: one per line, in sorted
