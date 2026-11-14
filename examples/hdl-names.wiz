@@ -1,0 +1,91 @@
+-- HDL H14 S1/S4 (`import Hdl.Core`): readable names in the netlist and the emitter,
+-- and the reset/enable convention. Nested bundles give one port per leaf
+-- (`left_data`, `right_flag`); `Netlist.describe` prints the same names `Verilog.emit`
+-- uses, with each register's reset and enable; `rst` and `en` are the first inputs of
+-- the convention (synchronous, active high, reset wins). Checked by the `hdl` group.
+import Hdl.Core
+
+def Bit : HwTy := HwTy.bits 1
+def B4 : HwTy := HwTy.bits 4
+
+structure Inner (r : HwTy → Type) where
+  data : r B4
+  flag : r Bit
+  deriving Bundle
+
+structure Tin (r : HwTy → Type) where
+  left : Inner r
+  right : Inner r
+  deriving Bundle
+
+structure Tout (r : HwTy → Type) where
+  led : r B4
+  top : r Bit
+  deriving Bundle
+
+-- the state is one unnamed 4-bit register (`r`); every input and output leaf is named
+def step {r : HwTy → Type} [Hw r] (s : r B4) (x : Tin r) : r (HwTy.prod B4 Tout.code) :=
+  let n := Hw.label "sum" (Hw.add s (Hw.add x.left.data x.right.data));
+  Hw.pair n (Tout.pack (Tout.mk n (Hw.and x.left.flag x.right.flag)))
+
+def counter : Circuit Tin.code Tout.code :=
+  Circuit.mk B4 (BitVec.ofNat 4 0) (fun s x => step s (Tin.unpack x))
+
+-- the convention: `rst` and `en` first, reset first, both synchronous and active high
+def reCode : HwTy := HwTy.prod (HwTy.named "rst" Bit) (HwTy.prod (HwTy.named "en" Bit) Tin.code)
+def counterRE : Circuit reCode Tout.code := Circuit.withResetEnable counter
+
+-- a name changes no value: the same step at named codes (`tag`/`untag` cost no hardware)
+def inc : Circuit B4 B4 := Circuit.mk B4 (BitVec.ofNat 4 0) (fun s x => Hw.pair (Hw.add s x) s)
+def incNamed : Circuit (HwTy.named "count" B4) (HwTy.named "out" B4) :=
+  Circuit.mk B4 (BitVec.ofNat 4 0) (fun s x => Hw.pair (Hw.add s (Hw.untag x)) (Hw.tag "out" s))
+
+-- a reset value that is not the register's initial value stays a multiplexer (the
+-- documented fallback): no `rst` on the register, and the multiplexer's meaning
+def oddReset : Circuit (HwTy.prod (HwTy.named "rst" Bit) B4) B4 :=
+  Circuit.mk B4 (BitVec.ofNat 4 5) (fun s x =>
+    Hw.pair (Hw.resetTo (Hw.untag (Hw.fst x)) (Hw.lit 4 2) (Hw.add s (Hw.snd x))) s)
+
+-- names: nested bundle paths, duplicates made unique, markers skipped
+#eval HwTy.portNames "x" Tin.code
+#eval HwTy.portNames "y" (HwTy.prod (HwTy.named "led" B4) (HwTy.named "led" B4))
+#eval HwTy.portNames "z" (HwTy.named "@clock" Bit)
+
+-- positional compatibility: a name changes no value
+#eval Hdl.natsEq (Circuit.runPacked incNamed (List.cons 1 (List.cons 2 (List.cons 3 List.nil))))
+  (Circuit.runPacked inc (List.cons 1 (List.cons 2 (List.cons 3 List.nil))))
+
+-- the readable interface: named ports, the named wire `sum`, and `(rst, en)` on the register
+#eval Netlist.describe (Circuit.netlist "counter" counterRE)
+#eval Verilog.emit (Circuit.netlist "counter" counterRE)
+
+-- reset and enable, one at a time, and both
+def marksOf (n : Netlist) : String := match n.regs with
+  | .cons r _ => NetReg.marks r
+  | .nil => ""
+#eval marksOf (Circuit.netlist "re" counterRE)
+#eval marksOf (Circuit.netlist "r" (Circuit.withReset inc))
+#eval marksOf (Circuit.netlist "e" (Circuit.withEnable inc))
+#eval marksOf (Circuit.netlist "odd" oddReset)
+
+-- the reset wins over the enable: rst and en at random cycles; (rst, en, left.data,
+-- left.flag, right.data, right.flag) packed in 12 bits
+def reIn (rst en ld lf rd rf : Nat) : Nat :=
+  rst * 2048 + en * 1024 + ld * 64 + lf * 32 + rd * 2 + rf
+def reTrace : List Nat :=
+  List.cons (reIn 0 1 3 1 1 1) (List.cons (reIn 1 0 9 0 9 0) (List.cons (reIn 1 1 1 1 1 1)
+    (List.cons (reIn 0 1 0 1 0 0) (List.cons (reIn 0 0 5 1 5 1) (List.cons (reIn 0 1 1 1 2 0) List.nil)))))
+def reInputs : List (HwTy.El reCode) := Hdl.map (HwTy.unpack reCode) reTrace
+def reExpected : List Nat := .cons 9 (.cons 12 (.cons 5 (.cons 0 (.cons 21 (.cons 6 .nil)))))
+#eval Hdl.natsEq (Circuit.runPacked counterRE reTrace) reExpected
+#eval Hdl.natsEq (Circuit.simNet .true counterRE reTrace) reExpected
+#eval Hdl.natsEq (Circuit.simNet .false counterRE reTrace) reExpected
+
+-- the fallback's meaning: init 5, reset value 2, inputs (rst, x) packed in 5 bits
+def oddTrace : List Nat := .cons 1 (.cons 17 .nil)
+def oddExpected : List Nat := .cons 5 (.cons 6 .nil)
+#eval Hdl.natsEq (Circuit.runPacked oddReset oddTrace) oddExpected
+#eval Hdl.natsEq (Circuit.simNet .true oddReset oddTrace) oddExpected
+
+-- a rejected misuse: pin constraints for the wrong ports
+#eval Pcf.check (Circuit.netlist "inc" inc) (List.cons (Pin.one "nope" 1) List.nil)

@@ -116,7 +116,10 @@ invariant, fairness and ranking for liveness) apply to the same traces.
 `Circuit.netlist`, `Verilog.emit`, `Testbench.verilog` (a self-checking bench replaying
 a value simulation), `Vcd.ofRun` (a waveform) and `Pcf.emit` (pin constraints) take the
 same circuit to an iCE40 board; the hdl test group checks that the value simulation, the
-netlist simulation and Icarus Verilog agree. For long simulations in compiled programs,
+netlist simulation and Icarus Verilog agree. Names come from the bundles: one port and
+one register per leaf (`leds`, `left_data`), and `Netlist.describe` prints the same
+interface readably — `input [3:0] left_data`, `reg [3:0] count = 4'd0 (rst, en)`,
+`wire [3:0] sum = n8` — for logs and pin planning. For long simulations in compiled programs,
 `Design.simFast` (`lib/Hdl/Sim.wiz`, PR #199) runs the netlist about 25 times faster than
 the value simulation; the value simulation stays the reference that proofs are about.
 Memories (`HwTy.mem`) become Verilog arrays,
@@ -127,6 +130,8 @@ about it is pointwise (`HwTy.El.memRead_write_miss`).
 
 * `examples/hardware-tour.wiz`: this page.
 * `examples/hdl-compose.wiz`: composition, reset and enable, emitters.
+* `examples/hdl-names.wiz`: named ports from nested bundles, `Netlist.describe`, and the
+  reset/enable convention (including the `init`-value fallback).
 * `examples/hdl-optic.wiz`: lenses on bundles, the frame rule.
 * `examples/hdl-mem.wiz`: a RAM with a registered read, a ROM, block RAM inference.
 * `examples/hdl-temporal.wiz` (PR #146): a UART's line is idle-high for ever, the

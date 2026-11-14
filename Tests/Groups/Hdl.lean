@@ -90,6 +90,31 @@ def hdlArtyXdc : IO Unit := do
       ".cons (\"xc7a35ticsg324-1L\", \"xc7a35tcsg324-1\") (.cons (\"xc7a100tcsg324-1\", \"xc7a100tcsg324-1\") .nil)"] : List String)).pretty
       (repr (texts.take 4)).pretty
 
+/-- examples/hdl-names.wiz through Icarus: the module with named ports, the named wire
+`sum` and a register with both reset and enable, replayed by its generated test bench
+(skipped without iverilog). -/
+def hdlNamesTools : IO Unit := do
+    let iv ← (do let o ← IO.Process.output { cmd := "iverilog", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
+    unless iv do skip "no iverilog"; return
+    let src ← IO.FS.readFile "examples/hdl-names.wiz"
+    let s := runFrontend (R := ZeroOneMany) (src ++ "\n#eval Testbench.verilog (Circuit.netlist \"counter\" counterRE) \"counter.vec\" (List.length reTrace)\n#eval Hdl.concat (Circuit.vectors (Circuit.netlist \"counter\" counterRE) counterRE reInputs)\n")
+      { trustedModule := Tests.libModule, loader := ← libLoader }
+    let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render ""
+    unless errs.isEmpty do throw (IO.userError s!"unexpected errors: {errs}")
+    let texts := s.messages.toList.map (·.text)
+    let some vt := texts.find? (fun t => (t.splitOn "\"module counter").length > 1)
+      | throw (IO.userError s!"no Verilog in the example: {texts}")
+    let last := texts.drop (texts.length - 2)
+    let unq (t : String) : String := ((t.drop 1).dropRight 1).replace "\\n" "\n" |>.replace "\\\"" "\""
+    IO.FS.withTempDir fun dir => do
+      IO.FS.writeFile (dir / "counter.v") (unq vt)
+      for t in last, nm in ["tb.v", "counter.vec"] do IO.FS.writeFile (dir / nm) (unq t)
+      let o ← IO.Process.output { cmd := "iverilog", args := #["-g2005", "-o", (dir / "t.vvp").toString, (dir / "tb.v").toString, (dir / "counter.v").toString], cwd := dir }
+      unless o.exitCode == 0 do throw (IO.userError s!"iverilog rejects the named-port module:\n{o.stderr}")
+      let r ← IO.Process.output { cmd := "vvp", args := #["-n", (dir / "t.vvp").toString], cwd := dir }
+      unless (r.stdout.splitOn "PASS counter: 6 cycles").length > 1 do
+        throw (IO.userError s!"test bench: {r.stdout}{r.stderr}")
+
 /-- yosys's synth_xilinx on the Verilog of examples/hdl-arty.wiz: the RAMs become a
 RAMB18E1 and a RAMB36E1, the ROM a RAMB18E1, the multiply a DSP48E1 (when yosys is on
 PATH). -/
@@ -332,6 +357,23 @@ def hdlGroup : Group where
             let r ← IO.Process.output { cmd := "vvp", args := #["-n", (dir / "t.vvp").toString], cwd := dir }
             unless (r.stdout.splitOn pass).length > 1 do
               throw (IO.userError s!"test bench {m}: {r.stdout}{r.stderr}") },
+    { name := "S1: named ports in the netlist (nested bundles, duplicates, markers), positional compatibility, Netlist.describe, reset/enable marks; a rejected pin list", run := fun _ => do
+        -- examples/hdl-names.wiz: the nested bundle's leaves' names, duplicates and
+        -- markers; the same step at a named code (= values); the readable interface
+        -- (named ports, the `sum` wire, `r` with rst and en) and its Verilog; reset alone,
+        -- enable alone, both, and the `init`-value fallback; reset wins over enable and
+        -- the netlist agrees with the values; pins for no port
+        okLibs (← IO.FS.readFile "examples/hdl-names.wiz")
+          [".cons \"left_data\" (.cons \"left_flag\" (.cons \"right_data\" (.cons \"right_flag\" .nil)))",
+           ".cons \"led_0\" (.cons \"led_1\" .nil)",
+           ".cons \"z\" .nil",
+           ".true",
+           "\"netlist counter (10 nodes)\\n  input clk\\n  input [0:0] rst\\n  input [0:0] en\\n  input [3:0] left_data\\n  input [0:0] left_flag\\n  input [3:0] right_data\\n  input [0:0] right_flag\\n  output [3:0] led\\n  output [0:0] top\\n  reg [3:0] r = 4'd0 (rst, en)\\n  wire [3:0] sum = n8\\n\"",
+           "\"module counter(input clk, input [0:0] rst, input [0:0] en, input [3:0] left_data, input [0:0] left_flag, input [3:0] right_data, input [0:0] right_flag, output [3:0] led, output [0:0] top);\\n  reg [3:0] r; initial r = 4'd0;\\n  wire [3:0] n7 = left_data + right_data;\\n  wire [3:0] sum = r + n7;\\n  wire [0:0] n9 = left_flag & right_flag;\\n  always @(posedge clk) if (rst) r <= 4'd0; else if (en) r <= sum;\\n  assign led = sum;\\n  assign top = n9;\\nendmodule\\n\"",
+           "\" (rst, en)\"", "\" (rst)\"", "\" (en)\"", "\"\"",
+           ".true", ".true", ".true", ".true", ".true",
+           ".cons \"no pin for port x\" (.cons \"no pin for port y\" (.cons \"pin for no port: nope\" .nil))"] },
+    { name := "Verilog: Icarus replays the named-port design with reset and enable (skipped without iverilog)", run := fun _ => hdlNamesTools },
     { name := "fast netlist simulation (Hdl.Sim, compiled): = Netlist.simulate = Circuit.run, cycle for cycle; not well formed falls back", run := fun _ => do
         -- examples/hdl-sim.wiz: every netlist operation (shifts by a signal too), 70-bit widths, reset and enable, a
         -- table tree, composition, memories (two write ports, read-during-write, a ROM,

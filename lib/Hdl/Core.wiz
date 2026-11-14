@@ -2531,6 +2531,100 @@ def Verilog.emit (n : Netlist) : String :=
   <+> Verilog.assigns cx vn.outs n.outputs <+> "endmodule\n"
 
 ------------------------------------------------------------------------------------
+-- A readable netlist interface: the same names and widths as the emitted module, one
+-- line per port, register, memory and named wire, without the Verilog syntax. Names are
+-- the netlist's (`HwTy.portNames` for ports, `HwTy.memNames` for memories, `Hw.label`
+-- hints for wires); `Verilog.emit` sanitises them and freshens clashes, and this shows
+-- them as the netlist has them.
+
+/-- A bus range as Verilog writes it, without the trailing space: `[3:0]` (`""` for a
+zero-width bus). -/
+def Hdl.busText : Nat → String
+  | .zero => ""
+  | .succ v => "[" <+> Hdl.show v <+> ":0]"
+/-- A name with its bus range: `[3:0] count` (`count` for a zero-width bus). -/
+def Hdl.busName (w : Nat) (s : String) : String := match w with
+  | .zero => s
+  | .succ _ => Hdl.busText w <+> " " <+> s
+
+/-- A netlist's input ports, one per line: `  input [0:0] rst` (zero-width ports are not
+printed, as in the emitted module). -/
+def Netlist.inputLines : List NetPort → String
+  | .nil => ""
+  | .cons p ps => (match p.width with
+    | .zero => ""
+    | .succ _ => "  input " <+> Hdl.busName p.width p.name <+> "\n") <+> Netlist.inputLines ps
+/-- A netlist's output ports, one per line: `  output [4:0] leds`. -/
+def Netlist.outputLines : List NetPort → String
+  | .nil => ""
+  | .cons p ps => (match p.width with
+    | .zero => ""
+    | .succ _ => "  output " <+> Hdl.busName p.width p.name <+> "\n") <+> Netlist.outputLines ps
+/-- A register's reset and enable as ` (rst)`, ` (en)`, ` (rst, en)` or nothing. -/
+def NetReg.marks (r : NetReg) : String := match r.rst, r.en with
+  | .some _, .some _ => " (rst, en)"
+  | .some _, .none => " (rst)"
+  | .none, .some _ => " (en)"
+  | .none, .none => ""
+/-- A netlist's registers, one per line: `  reg [3:0] count = 4'd0 (rst, en)`. -/
+def Netlist.regLines : List NetReg → String
+  | .nil => ""
+  | .cons r rs => (match r.width with
+    | .zero => ""
+    | .succ _ => "  reg " <+> Hdl.busName r.width r.name <+> " = " <+> Verilog.lit r.width r.init
+        <+> NetReg.marks r <+> "\n") <+> Netlist.regLines rs
+/-- Whether a node is a wire (not a port, a register, a constant or the clock). -/
+def NetNode.isWire (n : NetNode) : Bool := match n.op with
+  | .input _ => .false
+  | .reg _ => .false
+  | .const _ => .false
+  | .clock => .false
+  | _ => .true
+/-- A netlist's named wires (`Hw.label`), one per line: `  wire [3:0] next = n8`. -/
+def Netlist.wireLines (nodes : List NetNode) : List (Nat × String) → String
+  | .nil => ""
+  | .cons h hs =>
+    let n := Hdl.nthD NetNode.none nodes h.1;
+    (match n.width, NetNode.isWire n with
+      | .zero, _ => ""
+      | _, .false => ""
+      | .succ _, .true => "  wire " <+> Hdl.busName n.width h.2 <+> " = n" <+> Hdl.show h.1 <+> "\n")
+    <+> Netlist.wireLines nodes hs
+/-- A netlist's memories, one per line: `  mem [7:0] cells [16]` (16 words). -/
+def Netlist.memLines : List NetMem → String
+  | .nil => ""
+  | .cons m ms => "  mem " <+> Hdl.busName m.dw m.name <+> " [" <+> Hdl.show (Nat.pow 2 m.aw) <+> "]" <+> "\n"
+    <+> Netlist.memLines ms
+/-- What the netlist could not express (see `Netlist.errors`), one per line. -/
+def Netlist.errorLines : List String → String
+  | .nil => ""
+  | .cons e es => "  error: " <+> e <+> "\n" <+> Netlist.errorLines es
+
+/-- A netlist's interface in a readable form: its name and node count, then one line per
+input, output, register (with its reset and enable), memory and named wire, and its
+errors. The names are the netlist's own, as `HwTy.portNames`, `HwTy.memNames` and
+`Hw.label` made them (the emitter sanitises them and freshens clashes). For logs, tests
+and pin planning; `Verilog.emit` remains the synthesiser's view.
+
+```
+netlist counter (19 nodes)
+  input clk
+  input [0:0] rst
+  input [0:0] en
+  input [3:0] x
+  output [3:0] y
+  reg [3:0] r = 4'd0 (rst, en)
+``` -/
+def Netlist.describe (n : Netlist) : String :=
+  "netlist " <+> n.name <+> " (" <+> Hdl.show (Netlist.size n) <+> " nodes)" <+> "\n"
+  <+> "  input clk" <+> "\n"
+  <+> Netlist.inputLines n.inputs
+  <+> Netlist.outputLines n.outputs
+  <+> Netlist.regLines n.regs
+  <+> Netlist.memLines n.mems
+  <+> Netlist.wireLines n.nodes n.hints
+  <+> Netlist.errorLines n.errors
+
 -- Bundles: structures of signals. A bundle is a structure parameterised by the
 -- representation, `structure Tx (r : HwTy → Type) where line : r Bit; …`, so that
 -- `s.line` is field access; `Bundle F` gives its code (a product of `named` fields) and

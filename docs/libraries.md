@@ -143,7 +143,15 @@ def top : Circuit In.code Out.code := Circuit.bundled Tx.bundle In.bundle Out.bu
   compares every output in every cycle), `Circuit.vectors n c xs` (the vector file of a
   value simulation), `Vcd.ofRun name c xs` (a waveform of every input, output and state
   leaf), `Pcf.emit n clkPin pins` and `Pcf.check` (pin constraints from named ports:
-  `Pin.one "uart_tx" 8`, `Pin.bus "leds" [99, 98, …]`).
+  `Pin.one "uart_tx" 8`, `Pin.bus "leds" [99, 98, …]`). `Netlist.describe n` is the
+  readable netlist interface: `netlist counter (10 nodes)` then one line per named input,
+  output, register (with `(rst, en)` when it has them), memory and named wire, e.g.
+  `reg [3:0] r = 4'd0 (rst, en)` and `wire [3:0] sum = n8`. It shows the netlist's own
+  names; `Verilog.emit` sanitises them and freshens clashes. Names are ignored by
+  `HwTy.El`, `HwTy.width` and the bus encoding, so adding them changes no value and no
+  positional interface: the same step at named and unnamed codes has the same run
+  (`examples/hdl-names.wiz`, which also checks the readable netlist and the reset/enable
+  marks).
 * **Designs in a list.** `Circuit i o` quantifies over representations and lives in
   `Type 1`; `Circuit.design name c : Design` packs a top at the first order (the step at
   values and the netlist), so `List Design` works.
@@ -155,7 +163,9 @@ def top : Circuit In.code Out.code := Circuit.bundled Tx.bundle In.bundle Out.bu
   `NetReg`, `NetPort`. (`<+>` stays.)
 
 Not done: module hierarchy in the Verilog, enumerations at `HwTy`, wire names from `let`
-binders (an elaborator hook, wishful `hdl-let-names`), asynchronous reset, several clocks.
+binders (an elaborator hook, wishful `hdl-let-names`), asynchronous reset, several clocks
+(clock domains are `lib/Hdl` C1–C3 on their own branch). The reset/enable semantics are
+in H14 S4; `Netlist.describe` shows where the netlist recognised them.
 (Numerals and operators: H14 S2.)
 
 ## H14 S2: operator notation for signals
@@ -430,7 +440,13 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
 
   Every register keeps its `initial` value, which is all an iCE40 needs (yosys turns a
   non-zero initial value into inverters around a flip-flop); a reset is for targets
-  without initial values and for restarting a design.
+  without initial values and for restarting a design. `Netlist.describe` prints a
+  register's recognised reset and enable as ` (rst)`, ` (en)` or ` (rst, en)`, and a
+  reset value other than the register's `init` is visibly left as a multiplexer (the
+  documented fallback above; `examples/hdl-names.wiz` checks both the marks and the
+  fallback's simulation). Both are synchronous and per register, so each circuit of a
+  multi-clock design (C1–C3) resets its own registers on its own clock; the CDC check
+  keeps requiring `rst`/`en` in the register's domain.
 
 Not done: a general bit-level round-trip lemma for bundles (above), `BitPack` for
 inductive types with fields (a tag and the widest constructor's fields), `!` on signals,
