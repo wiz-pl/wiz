@@ -78,6 +78,8 @@ def smt := 35
 def define := 36
 def assignLate := 37
 def nativeDecide := 38
+-- (11af) a widget from a tactic (static HTML, shown by the infoview)
+def widget := 39
 end TacTag
 
 structure Goal (R : Type) where

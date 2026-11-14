@@ -181,10 +181,14 @@ inductive Info (R : Type) where
   /-- what a quick fix for the error of code `code` at `info` needs (`ErrorCode`): named
   lists of strings, such as the name that was not found and the type it was looked up in -/
   | fix (info : SourceInfo) (code : String) (data : List (String × List String))
+  /-- (11af) a widget a tactic emitted: static HTML, at the tactic's range, with the goals
+  that were open when it was emitted (the infoview's trust boundary: user code chooses the
+  content; `Wiz/Infoview.lean` sanitises it and the protocol forbids scripts) -/
+  | widget (info : SourceInfo) (title html : String) (goals : Array (GoalView R))
 
 def Info.info : Info R → SourceInfo
   | .ident i .. | .term i .. | .tactic i .. | .matchCases i .. | .decl i .. | .unknownIdent i .. | .warning i .. | .trace i ..
-  | .syntaxRef i .. | .expansion i .. | .importMod i .. | .inst i .. | .fix i .. => i
+  | .syntaxRef i .. | .expansion i .. | .importMod i .. | .inst i .. | .fix i .. | .widget i .. => i
 
 /-- An `Info` as recorded during elaboration, before quoting and zonking. -/
 inductive RawInfo (R : Type) where
@@ -194,12 +198,15 @@ inductive RawInfo (R : Type) where
   | decl (info : SourceInfo) (name : Name) (ctx : LocalCtx R) (type : Term R) (annotated : Bool) (insertAt : Nat)
   /-- (11q) an instance problem solved by `inst` (the hole, in `ctx`, of class type `ty`) -/
   | inst (info : SourceInfo) (ctx : LocalCtx R) (ty : VTy R) (inst : Term R)
+  /-- (11af) a tactic's widget, with the goals open when the request was made -/
+  | widget (info : SourceInfo) (title html : String) (goals : Array (LocalCtx R × VTy R))
   /-- nothing to quote -/
   | done (i : Info R)
 
 /-- (11q) Is this recorded at a macro's output? (Messages never are: they must be shown.) -/
 def RawInfo.isSynthetic : RawInfo R → Bool
   | .ident i .. | .term i .. | .tactic i .. | .decl i .. | .inst i .. => i.synthetic
+  | .widget .. => false
   | .done (.trace ..) | .done (.warning ..) => false
   | .done i => i.info.synthetic
 
