@@ -31,6 +31,7 @@
   {"name": "library", "split": 5, "jobs": 4, "default": true, "select": [
     "=bus-crc",
     "=bus-law",
+    "=bus-protocol",
     "builtins",
     "classes",
     "deriving",
