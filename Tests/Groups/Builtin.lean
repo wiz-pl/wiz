@@ -30,7 +30,12 @@ def builtinGroup : Group where
           "def u : Nat.lt 9223372036854775807 9223372036854775808 = Bool.true := rfl\n" ++
           "def v : Nat.lt 9223372036854775808 9223372036854775807 = Bool.false := rfl\n" ++
           "def w : UIntN.beq (U64.ofNat 9223372036854775808) (U64.ofNat 9223372036854775809) = .false := rfl\n" ++
-          "#reduce Nat.beq 3 4\n#reduce Nat.lt 3 4") [".false", ".true"] },
+          "#reduce Nat.beq 3 4\n#reduce Nat.lt 3 4")
+          ["`rfl` budget: this equation contains the large numeral 9223372036854775808; state it as a named definition (or use a decision tactic) so the proof term stays small.",
+           "`rfl` budget: this equation contains the large numeral 9223372036854775808; state it as a named definition (or use a decision tactic) so the proof term stays small.",
+           "`rfl` budget: this equation contains the large numeral 9223372036854775808; state it as a named definition (or use a decision tactic) so the proof term stays small.",
+           "`rfl` budget: this equation contains the large numeral 9223372036854775809; state it as a named definition (or use a decision tactic) so the proof term stays small.",
+           ".false", ".true"] },
     { name := "numerals and native arithmetic", run := fun _ =>
         okLib "import Prelude\n#eval 100 * 100 * 100 - 1" ["999999"] },
     { name := "recursion over native numbers", run := fun _ =>

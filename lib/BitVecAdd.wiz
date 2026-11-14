@@ -1,5 +1,9 @@
 import BitVec
 import BitVecShift
+-- (MATH-02) the borrow lemmas below are deliberately stated with `Nat.div` (they use
+-- `Bits.div_one_of`/`Bits.div_zero_of`); they are arithmetic lemmas, not a comparison
+-- with a circuit's `Nat.shiftRight` shape, so the conversion-shape lint is off here.
+set_option conv.lint false
 /-!
 # BitVecAdd
 

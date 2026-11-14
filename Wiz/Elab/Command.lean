@@ -104,6 +104,9 @@ structure CommandState (R : Type) where
   /-- the erased code of every registered macro and tactic, made on first use (a `Thunk`
   remembers its value) and remade when one is registered -/
   metaCode : Thunk (Except String Code) := Thunk.pure (.ok {})
+  /-- (MATH-02) the conversion-shape lint (and its `rfl` budget); `set_option conv.lint
+  false` turns it off for the rest of the module -/
+  convLint : Bool := true
   /-- type classes and instances (stage 7) -/
   classes : List ClassInfo := []
   instances : Array InstanceInfo := #[]
@@ -1334,6 +1337,7 @@ def CommandState.endModule (inner outer : CommandState R) : CommandState R :=
   let reset := { inner with localKinds := outer.localKinds, localCats := outer.localCats,
                             localRules := outer.localRules, localProcs := outer.localProcs,
                             localInsts := outer.localInsts, localPP := outer.localPP,
+                            convLint := outer.convLint,
                             globals := { inner.globals with pp := { inner.globals.pp with useNotation := outer.globals.pp.useNotation } } }
   -- (11w) a `local instance` is found only in its module (its definition stays: a name)
   let reset := if insts.isEmpty then reset else
@@ -1359,6 +1363,103 @@ def CommandState.endModule (inner outer : CommandState R) : CommandState R :=
     cmdMacros := inner.cmdMacros.filter (!kinds.contains ·.1)
     ppUser := keep (·.head) inner.ppUser pps }
   s'.refreshPP
+
+/-! ## (MATH-02) the conversion-shape lint
+
+Conversion is shape-directed: two spellings of the same `Nat` operation can differ by
+minutes and gigabytes (`wiz-notes/nat-shape-conversion.md`). The lint is cheap and
+advisory, and `set_option conv.lint false` turns it off. It flags
+
+* a **statement** using `Nat.div` with a power-of-two divisor, where the core writes
+  `Nat.shiftRight` (the glued heads then differ, so conversion must force both sides);
+* `rfl` at an equation that puts `Nat.div` against `Nat.shiftRight`;
+* `rfl` at an equation with a large numeral (the numeral must be normalised);
+* `rfl` at a record type with many fields (a computed Σ equation, not the cheap `refl`);
+* `rfl` at a large equation (the `rfl` budget). -/
+
+private partial def syntaxFindKind (k : String) (stx : Syntax) : Option SourceInfo :=
+  if stx.isOfKind k then some stx.info else stx.args.findSome? (syntaxFindKind k)
+
+private partial def stripDeclPis : Term R → Term R
+  | .pi _ _ _ _ b _ => stripDeclPis b
+  | .ann t _ => stripDeclPis t
+  | t => t
+
+private partial def termSize (t : Term R) : Nat :=
+  ((t.mapChildrenM (m := StateM Nat) pure
+    (fun _ c => do
+      modify (fun n => n + termSize c)
+      pure c)).run 1).2
+
+private partial def termMaxLit : Term R → Nat
+  | .natLit n => n
+  | t => ((t.mapChildrenM (m := StateM Nat) pure
+      (fun _ c => do
+        modify (fun n => max n (termMaxLit c))
+        pure c)).run 0).2
+
+private partial def termMentions (n : Name) : Term R → Bool
+  | .const m _ => m == n
+  | t => ((t.mapChildrenM (m := StateM Bool) pure
+      (fun _ c => do
+        if termMentions n c then modify (fun _ => true)
+        pure c)).run false).2
+
+/-- A literal that is a power of two at least 8 (`8`, `16`, …): a shift in disguise. -/
+private def shiftLiteral (n : Nat) : Bool :=
+  n >= 8 && (List.range 64).any fun k => Nat.pow 2 (k + 3) == n
+
+private partial def divShiftShape (t : Term R) : Bool :=
+  let here := match Term.spine t with
+    | (.const "Nat.div" _, [_a, d]) =>
+      (match Term.spine d with
+        -- (`Nat.pow 2 1` is a `*2`, not a shift; only a literal exponent at least 3 is
+        -- flagged, so symbolic shifts in generic lemmas stay quiet)
+        | (.const "Nat.pow" _, [b, e]) =>
+          b == .natLit 2 && (match e with | .natLit k => k >= 3 | _ => false)
+        | _ => match d with | .natLit n => shiftLiteral n | _ => false)
+    | _ => false
+  here || ((t.mapChildrenM (m := StateM Bool) pure
+    (fun _ c => do
+      if divShiftShape c then modify (fun _ => true)
+      pure c)).run false).2
+
+/-- If `A` is a structure (not a data type), its number of fields. -/
+private def recordFields? (g : Globals R) (A : Term R) : Option Nat :=
+  match (Term.spine A).1 with
+  | .const S _ =>
+    if g.contains (S ++ ".desc") then none
+    else if g.contains (S ++ ".mk") then (structLayout? g S).map (·.fields.length)
+    else none
+  | _ => none
+
+/-- (MATH-02) The conversion-shape lint's warnings for one definition. -/
+private def convShapeWarnings (g : Globals R) (info : SourceInfo) (ty : Term R)
+    (valStx : Option Syntax) : Array (SourceInfo × String) := Id.run do
+  let mut out : Array (SourceInfo × String) := #[]
+  let ty := stripDeclPis ty
+  -- the statement's shape (whether or not it is proved by `rfl`)
+  if divShiftShape ty && !termMentions "Nat.shiftRight" ty then
+    out := out.push (info, "conversion-shape lint: this statement uses `Nat.div` with a power-of-two divisor; the core writes `Nat.shiftRight`, and conversion compares glued heads (wiz-notes/nat-shape-conversion.md). Write the core's shape, or `set_option conv.lint false`.")
+  match valStx.bind (syntaxFindKind "term.rfl") with
+  | none => pure ()
+  | some ri =>
+    match ty with
+    | .eq A a b =>
+      if (termMentions "Nat.div" a && termMentions "Nat.shiftRight" b) ||
+          (termMentions "Nat.shiftRight" a && termMentions "Nat.div" b) then
+        out := out.push (ri, "`rfl` budget: the two sides use different `Nat` heads (`Nat.div` and `Nat.shiftRight`); conversion must force both sides (wiz-notes/nat-shape-conversion.md). State the lemma in the core's shape.")
+      let big := max (termMaxLit a) (termMaxLit b)
+      if big >= 65536 then
+        out := out.push (ri, s!"`rfl` budget: this equation contains the large numeral {big}; state it as a named definition (or use a decision tactic) so the proof term stays small.")
+      if let some k := recordFields? g A then
+        if k >= 8 then
+          out := out.push (ri, s!"`rfl` budget: `rfl` at the {k}-field record {A.pretty [] (some g)} computes the whole record; use `refl` or prove the fields separately (wiz-notes/nat-shape-conversion.md).")
+      let size := termSize a + termSize b
+      if size >= 400 then
+        out := out.push (ri, s!"`rfl` budget: this equation is large ({size} term nodes); conversion may be expensive; split it into lemmas.")
+    | _ => pure ()
+  out
 
 /-- Elaborate one command, updating the state and adding messages. -/
 partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
@@ -1642,7 +1743,12 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
     else match runElabS (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) (smt := { s.smt with trustNative := s.trustNative, nativeFuel := s.nativeFuel }) (smtDecl := name) s.globals (elabDeclTerms binders typeStx valStx cmd.info (declName? := some (name, (cmd.getArg 1).info, declInsertAt cmd))) levelParams with
       | (.ok ((ty, val), sides), hv) =>
         addInfos hv
-        if sides.isEmpty then addDeclChecked name levelParams ty val
+        if sides.isEmpty then
+          addDeclChecked name levelParams ty val
+          -- (MATH-02) the conversion-shape lint, after the kernel accepted it
+          if s.convLint && (← get).globals.contains name then
+            for (inf, text) in convShapeWarnings s.globals (cmd.getArg 1).info ty valStx do
+              report .warning inf text
         else
           -- (28) declarations a tactic added: definitions (28c, `TacticM.define`), checked
           -- by the kernel like any other, and axioms, checked as types (an axiom's
@@ -2579,11 +2685,15 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
       | _ => none
     let set (b : Bool) : StateM (CommandState R) Unit :=
       modify fun s => { s with globals := { s.globals with pp := { s.globals.pp with useNotation := b } } }
+    let setLint (b : Bool) : StateM (CommandState R) Unit :=
+      modify fun s => { s with convLint := b }
     match opt, v with
     | "pp.notation", some b => set b
     | "pp.all", some b => set !b
-    | "pp.notation", none | "pp.all", none => report .error (cmd.getArg 2).info "expected `true` or `false`"
-    | o, _ => report .error (cmd.getArg 1).info s!"unknown option {o} (there are pp.notation and pp.all)"
+    | "conv.lint", some b => setLint b
+    | "pp.notation", none | "pp.all", none | "conv.lint", none =>
+      report .error (cmd.getArg 2).info "expected `true` or `false`"
+    | o, _ => report .error (cmd.getArg 1).info s!"unknown option {o} (there are pp.notation, pp.all and conv.lint)"
   | "command.attrTactic" =>
     let k := ((cmd.getArg 3).getId?).getD "_"
     let f := ((cmd.getArg 5).getId?).getD "_"

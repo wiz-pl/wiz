@@ -230,14 +230,15 @@ unifying with every shape they knew. Four requests (and the tactics of the same 
 * `TacticM.change g ty` (`change t`): the goal restated as a convertible type, checked
   by unification at once (a tactic that assigned a new goal's hole itself got its
   error from the kernel, at the end of the declaration). `unfold` and `whnf` end with it.
-* `TacticM.rewrite g h rtl` (`rw h`, `rw ← h`): for `h : a = b`, a complete term, the
-  occurrences of `a` in the goal `G[a]` become `b`. The old goal is solved with
+* `TacticM.rewrite g h rtl` (`rw h`, `rw ← h`): for `h : a = b`, the occurrences of
+  `a` in the goal `G[a]` become `b`. The old goal is solved with
   `cast (transp (fun x _ => G[x] = G[a]) (refl G[a]) h) ?new`, as `Eq.substBack` does,
   so it works for goals in any universe. Occurrences are found syntactically in the
-  normal form the goal is printed in (no unification: instantiate a quantified
-  equation yourself, `rw (h x)`), and the equation must still be one: an equation at a
-  data type that has computed (`succ a = succ b` is `a = b`) is rewritten as what it
-  computed to.
+  normal form the goal is printed in, and the equation must still be one: an equation
+  at a data type that has computed (`succ a = succ b` is `a = b`) is rewritten as what
+  it computed to. Since MATH-02 the leading binders are instantiated with holes and the
+  match determines them (`rw (Nat.add_zero)` is usable), `nth_rw n h` selects one
+  occurrence, and a goal that has become `rfl` is closed; see 6i.
 
 None of this is trusted: the unfolded or rewritten type is a candidate that `change`
 checks by conversion, and the kernel checks the finished term (it does not evaluate the
@@ -291,3 +292,79 @@ different handles.
   constructor (its type, number of parameters and of fields), `TacticM.ctorApp e` gives
   a constructor application's name and fields, and `TacticM.whnfCtorApp g e` computes
   first: `Prog.swap p q` is read as the `Prog.get p …` it computes to, in one request.
+
+## 6i: naming intermediate facts, and the conversion-shape lint
+
+The current `Eq.via`/helper-`def` workaround for an intermediate fact pollutes the
+namespace and repeats the statement. Three tactics name things in place (MATH-02):
+
+```
+def dep (n : Nat) : n = n := by
+  have m : Nat := n            -- a local definition: rfl sees m as n
+  have h : m = n := rfl
+  exact h
+
+def s (n : Nat) : n = n := by
+  suffices h : n = n           -- prove n = n, then the rest with h
+  exact rfl
+  exact h
+
+def first (p : (a : Nat) × Nat) : Nat := by
+  obtain ⟨x, y⟩ := p           -- x : Nat, y : Nat; p is consumed once (a split)
+  exact x
+```
+
+* **`have h : T := p`** adds `h` to the goal's context as a `let` (`T`'s proof is
+  checked against `T`, so a constructor gets its expected type). `have h : T` without
+  a proof is the same as `suffices h : T`: the first goal is `T`, and once it is
+  closed the main goal continues with `h` bound to its proof. Tactics see `h` as a
+  real hypothesis (`assumption`, `exact h`, a later `have /* : … h … */`), and because
+  the context entry is a `let`, `rfl` and conversion see `h`'s value (the request
+  builds `let h := p; ?goal`). The prelude wrappers are `TacticM.have`,
+  `TacticM.suffices` (the proof goal and the main goal) and `TacticM.obtain`.
+* **`obtain ⟨x, y⟩ := e`** for `e : (a : A) × B a`: the components become the
+  hypotheses `x` and `y`, with `y`'s type depending on `x`. It is a `split`, so the
+  pair is consumed once whatever its quantity (a first component at a quantity other
+  than ω is bound at `q·p`, as `let (x, y) := e` does). A term that is not a Σ is an
+  error ("obtain: expected a pair"). Only the two-component form is implemented.
+* **Expected-type errors.** A `have` proof that does not check against the stated
+  type reports that type mismatch at the proof, not at the `have`; a quantified
+  proof term is elaborated with the type as its expected type, as `exact` is.
+
+**`rw`.** `rw` now instantiates a lemma's leading Π binders with holes and lets the
+match against the goal determine them: `rw (Nat.add_zero)` replaces `n + 0` by `n`
+without writing the argument. An argument the goal does *not* determine is an error
+("rw: could not determine the arguments of …; write them out"), never a guess.
+`nth_rw n h` / `nth_rw n ← h` replace only the `n`th occurrence (1-based, outermost
+first, left to right); `nth_rw 3 h` with no third occurrence is an error. After the
+rewrite a goal whose sides have become convertible is closed by `rfl`, so
+`rw (Nat.add_zero)` proves `n + 0 = n` outright. The matcher is still syntactic (no
+rewriting under a definition that has not been unfolded); `rw` does not rewrite
+hypotheses yet.
+
+**The lint.** Conversion is shape-directed (`wiz-notes/nat-shape-conversion.md`):
+`Nat.div X (Nat.pow 2 n)` and `Nat.shiftRight X n` are equal, but with different glued
+heads conversion forces both sides and the cost can go from seconds to gigabytes. A
+declaration is now linted (a warning, never an error):
+
+* a **statement** using `Nat.div` with a power-of-two divisor (and no `Nat.shiftRight`)
+  — the core writes `Nat.shiftRight`;
+* `rfl` at an equation with `Nat.div` on one side and `Nat.shiftRight` on the other;
+* `rfl` at an equation containing a numeral at least 65536 (inline numerals make the
+  proof term and the conversion large; name the value);
+* `rfl` at a record type with at least 8 fields (conversion computes the whole record;
+  `refl` or fieldwise proofs are cheaper);
+* `rfl` at an equation of at least 400 term nodes (the `rfl` budget: split the lemma).
+
+`set_option conv.lint false` turns it off for the rest of the module (and
+`set_option conv.lint true` turns it back on). The thresholds are deliberately
+conservative: the lint is a hint about the known blow-ups, not a cost model, and it
+does not change a proof, a normal form or the kernel.
+
+Implementation: the requests are appended to `Tac` (`Elab/Tactic.lean`'s `TacTag`
+39–45: `haveHyp`, `sufficesGoal`, `obtainPair`, `checkTerm`, `closeRefl`,
+`rewriteN`, `getOpen`), interpreted in `Elab/Term.lean`; the lint is
+`convShapeWarnings` in `Elab/Command.lean`. `getOpen` is the raw goal list: a tactic
+that closes the main goal and then calls `replaceMainGoal` must replace *that* goal,
+not the next open one (the old `getGoals` filtered the closed goal out, which dropped
+a sibling — visible once `suffices` leaves two goals).

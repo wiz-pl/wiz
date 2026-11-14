@@ -595,6 +595,16 @@ inductive Tac where
   -- (28e) decide the closed `e = .true` by running it (the trusted evaluator of 27a:
   -- --trust-native); the axiom that says so
   | nativeDecide (g : Nat) (e : Expr) (k : Expr → Tac)
+  -- (MATH-02) proof UX: a local hypothesis (its value already elaborated), a suffices
+  -- step (the proof goal, then the original goal), an `obtain` from a Σ, elaboration
+  -- against an expected type, closing with `rfl`, and occurrence-selected rewriting
+  | have (g : Nat) (x : String) (ty : Expr) (val : Expr) (next : Nat → Tac)
+  | suffices (g : Nat) (x : String) (ty : Expr) (k : Nat × Nat → Tac)
+  | obtain (g : Nat) (x : String) (y : String) (e : Expr) (ty : Expr) (k : Nat → Tac)
+  | checkTerm (g : Nat) (stx : Syntax) (ty : Expr) (k : Expr → Tac)
+  | closeRefl (g : Nat) (k : Bool → Tac)
+  | rewriteN (g : Nat) (h : Expr) (rtl : Bool) (occ : Nat) (k : Nat → Tac)
+  | getOpen (k : List Nat → Tac)
 
 /-- The metaprogramming monad: requests to the elaborator (`Tac`) in
 continuation-passing style, so `bind` is just composition. Macros (`MacroM`) and
@@ -680,8 +690,29 @@ back): `MList (x :: L) p` becomes `∃ n, (p ↦ (x, n)) ⋆ MList L n`. A name 
 a definition, or has nothing to unfold, leaves `e` unchanged. -/
 def TacticM.unfold (g : Nat) (n : String) (e : Expr) : TacticM Expr := fun k => Tac.unfold g n e k
 /-- Rewrite goal `g` with `h : a = b` (a complete term): every `a` in it becomes `b` (or
-every `b` becomes `a`, if `rtl`). The new goal. -/
+every `b` becomes `a`, if `rtl`). A lemma with leading binders is instantiated where
+the match determines them. The new goal. -/
 def TacticM.rewrite (g : Nat) (h : Expr) (rtl : Bool) : TacticM Nat := fun k => Tac.rewrite g h rtl k
+/-- Rewrite only occurrence `occ` (1-based, outermost first) instead of all of them. -/
+def TacticM.rewriteN (g : Nat) (h : Expr) (rtl : Bool) (occ : Nat) : TacticM Nat :=
+  fun k => Tac.rewriteN g h rtl occ k
+/-- Add the hypothesis `x : ty := val` to goal `g`'s context (a `let`, encoded so that
+`x` is a real variable of later tactic goals): the new goal. -/
+def TacticM.have (g : Nat) (x : String) (ty val : Expr) : TacticM Nat := fun k => Tac.have g x ty val k
+/-- `suffices x : ty`: the proof goal for `ty`, and the original goal with `x : ty`: the
+two goals, proof first. -/
+def TacticM.suffices (g : Nat) (x : String) (ty : Expr) : TacticM (Nat × Nat) :=
+  fun k => Tac.suffices g x ty k
+/-- Take the pair `e : (a : A) × B e` apart as the hypotheses `x` and `y` (a `split`):
+the new goal. -/
+def TacticM.obtain (g : Nat) (x : String) (y : String) (e ty : Expr) : TacticM Nat :=
+  fun k => Tac.obtain g x y e ty k
+/-- Elaborate `stx` with `ty` as its expected type: the elaborated term. -/
+def TacticM.checkTerm (g : Nat) (stx : Syntax) (ty : Expr) : TacticM Expr :=
+  fun k => Tac.checkTerm g stx ty k
+/-- Close goal `g` with `rfl` if it is an equation whose sides are definitionally equal
+(or `True`): whether it closed it. -/
+def TacticM.closeRefl (g : Nat) : TacticM Bool := fun k => Tac.closeRefl g k
 /-- Is the constant `n` a constructor of an inductive type? Then the type's name, its
 number of parameters and the constructor's number of fields: `List.cons` is
 `("List", 1, 2)`, and `List.cons A x L` has the fields `x` and `L` after one parameter. -/
@@ -914,9 +945,14 @@ def TacticM.mainGoal : TacticM Nat := do
   | .nil => TacticM.fail "no goals"
   | .cons g _ => TacticM.pure g
 
+/-- The raw open-goal list, **including** a goal a tactic has just closed (unlike
+`TacticM.getGoals`, which filters closed ones): `replaceMainGoal` replaces the goal the
+tactic was given. -/
+def TacticM.getOpen : TacticM (List Nat) := fun k => Tac.getOpen k
+
 /-- Replace the main goal by the goals `new` (none, when it was closed). -/
 def TacticM.replaceMainGoal (new : List Nat) : TacticM Unit := do
-  gs ← TacticM.getGoals;
+  gs ← TacticM.getOpen;
   match gs with
   | .nil => TacticM.setGoals new
   | .cons _ rest => TacticM.setGoals (List.append new rest)
@@ -1300,13 +1336,55 @@ def Tactic.change : Tactic := fun stx => do
   TacticM.replaceMainGoal (.cons g' .nil)
 attribute [tactic tactic.change] Tactic.change
 
+/-- After rewriting, a goal that is an equation with convertible sides is closed by
+`rfl` (as `rw` does in Lean). -/
+def TacticM.finishRewrite (g : Nat) : TacticM Unit := do
+  done ← TacticM.closeRefl g;
+  match done with
+  | .true => TacticM.replaceMainGoal .nil
+  | .false => TacticM.replaceMainGoal (.cons g .nil)
+
+/-- A run of decimal digits as a number (`none` on anything else): `nth_rw 2 h` reads
+its occurrence count with this. -/
+def String.digitsNat : Nat → List Char → Option Nat
+  | acc, .nil => .some acc
+  | acc, .cons c cs =>
+    let n := Char.code c;
+    match Bool.and (Nat.le 48 n) (Nat.lt n 58) with
+    | .false => .none
+    | .true => String.digitsNat (Nat.add (Nat.mul acc 10) (Nat.sub n 48)) cs
+/-- The decimal value of a string of digits, or `none`. -/
+def String.toNatOpt : String → Option Nat
+  | .mk .nil => .none
+  | .mk cs => String.digitsNat 0 cs
+/-- Is this the empty optional group (`null` with no children)? -/
+def Syntax.isNone (stx : Syntax) : Bool := match stx with
+  | .node kind args =>
+    match Expr.nameEq kind "null" with
+    | .true => (match args with | .nil => .true | _ => .false)
+    | .false => .false
+  | _ => .false
+/-- The value of a `num` syntax node (the occurrence count of `nth_rw`). -/
+def Syntax.numValOpt : Syntax → Option Nat
+  | .node kind (.cons (.atom v) .nil) =>
+    match Expr.nameEq kind "num" with
+    | .true => String.toNatOpt v
+    | .false => .none
+  | _ => .none
+/-- The `num` syntax node's value, or `d` (1 for `nth_rw`'s occurrence). -/
+def Syntax.numOr (stx : Syntax) (d : Nat) : Nat := match stx.numValOpt with
+  | .some n => n
+  | .none => d
+
 syntax (name := rw) "rw" term : tactic
-/-- `rw h`: rewrite the goal with the equation `h : a = b`, every `a` becoming `b`. -/
+/-- `rw h`: rewrite the goal with the equation `h : a = b`, every `a` becoming `b`
+(leading binders are instantiated where the match determines them), then close the goal
+with `rfl` if it has become one. -/
 def Tactic.rw : Tactic := fun stx => do
   g ← TacticM.mainGoal;
   p ← TacticM.elabInfer g (Syntax.getArg stx 1);
   g' ← TacticM.rewrite g p.1 .false;
-  TacticM.replaceMainGoal (.cons g' .nil)
+  TacticM.finishRewrite g'
 attribute [tactic tactic.rw] Tactic.rw
 syntax (name := rwBack) "rw" "←" term : tactic
 /-- `rw ← h`: rewrite the goal with `h : a = b` right to left, every `b` becoming `a`. -/
@@ -1314,8 +1392,73 @@ def Tactic.rwBack : Tactic := fun stx => do
   g ← TacticM.mainGoal;
   p ← TacticM.elabInfer g (Syntax.getArg stx 2);
   g' ← TacticM.rewrite g p.1 .true;
-  TacticM.replaceMainGoal (.cons g' .nil)
+  TacticM.finishRewrite g'
 attribute [tactic tactic.rwBack] Tactic.rwBack
+syntax (name := nthRw) "nth_rw" num term : tactic
+/-- `nth_rw n h`: rewrite only the `n`th occurrence (1-based, outermost first, left to
+right) of the equation's left-hand side. -/
+def Tactic.nthRw : Tactic := fun stx => do
+  g ← TacticM.mainGoal;
+  p ← TacticM.elabInfer g (Syntax.getArg stx 2);
+  let n := (Syntax.getArg stx 1).numOr 1;
+  g' ← TacticM.rewriteN g p.1 .false n;
+  TacticM.finishRewrite g'
+attribute [tactic tactic.nthRw] Tactic.nthRw
+syntax (name := nthRwBack) "nth_rw" num "←" term : tactic
+/-- `nth_rw n ← h`: rewrite only the `n`th occurrence, right to left. -/
+def Tactic.nthRwBack : Tactic := fun stx => do
+  g ← TacticM.mainGoal;
+  p ← TacticM.elabInfer g (Syntax.getArg stx 3);
+  let n := (Syntax.getArg stx 1).numOr 1;
+  g' ← TacticM.rewriteN g p.1 .true n;
+  TacticM.finishRewrite g'
+attribute [tactic tactic.nthRwBack] Tactic.nthRwBack
+
+-- ## Local hypotheses (MATH-02): `have`, `suffices`, `obtain`
+--
+-- Naming an intermediate fact is what makes a proof maintainable (`Eq.via` and helper
+-- `def`s are the workaround without it). `have h : T := p` adds `h` to the context;
+-- `suffices h : T` proves `T`, then continues with `h`; `obtain ⟨x, y⟩ := e` takes a
+-- pair (a Σ) apart. The proof `p` is checked against `T` (expected type), not inferred.
+syntax (name := have) "have" ident ":" term (" :=" term)? : tactic
+/-- `have h : T := p` (or `have h : T`, proved by the next tactic): add `h : T` to the
+context. `p` is elaborated with `T` as its expected type. -/
+def Tactic.have : Tactic := fun stx => do
+  g ← TacticM.mainGoal;
+  x ← Syntax.identName (Syntax.getArg stx 1);
+  ty ← TacticM.elabInfer g (Syntax.getArg stx 3);
+  let opt := Syntax.getArg stx 4;
+  match opt.isNone with
+  | .true => do
+    r ← TacticM.suffices g x ty.1;
+    TacticM.replaceMainGoal (.cons r.1 (.cons r.2 .nil))
+  | .false => do
+    p ← TacticM.checkTerm g (opt.getArg 1) ty.1;
+    g' ← TacticM.have g x ty.1 p;
+    TacticM.replaceMainGoal (.cons g' .nil)
+attribute [tactic tactic.have] Tactic.have
+
+syntax (name := suffices) "suffices" ident ":" term : tactic
+/-- `suffices h : T`: show `T`, then prove the original goal with `h : T`. -/
+def Tactic.suffices : Tactic := fun stx => do
+  g ← TacticM.mainGoal;
+  x ← Syntax.identName (Syntax.getArg stx 1);
+  ty ← TacticM.elabInfer g (Syntax.getArg stx 3);
+  r ← TacticM.suffices g x ty.1;
+  TacticM.replaceMainGoal (.cons r.1 (.cons r.2 .nil))
+attribute [tactic tactic.suffices] Tactic.suffices
+
+syntax (name := obtain) "obtain" "⟨" ident "," ident "⟩" ":=" term : tactic
+/-- `obtain ⟨x, y⟩ := e` for `e : (a : A) × B`: add `x : A` and `y : B x` to the
+context, taking the pair apart once (a `split`). -/
+def Tactic.obtain : Tactic := fun stx => do
+  g ← TacticM.mainGoal;
+  x ← Syntax.identName (Syntax.getArg stx 2);
+  y ← Syntax.identName (Syntax.getArg stx 4);
+  e ← TacticM.elabInfer g (Syntax.getArg stx 7);
+  g' ← TacticM.obtain g x y e.1 e.2;
+  TacticM.replaceMainGoal (.cons g' .nil)
+attribute [tactic tactic.obtain] Tactic.obtain
 
 -- ## Notation: `++` and list literals (agent/notation)
 --

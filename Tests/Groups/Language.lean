@@ -578,7 +578,24 @@ def languageGroup : Group where
         okLoc locMod "import Loc\n#check fun (x : Nat) (xs : List Nat) => List.cons x xs\n#check fun (a b : String) => a &&& b"
           ["fun x xs => List.cons Nat x xs : Nat → List Nat → List Nat", "fun a b => a &&& b : String → String → String"] },
     { name := "... an unexpander that is not an Unexpander is rejected", run := fun _ =>
-        failsLib "import Prelude\ndef notOne : Nat := 1\nattribute [app_unexpander List.nil] notOne" "is not an unexpander" }
+        failsLib "import Prelude\ndef notOne : Nat := 1\nattribute [app_unexpander List.nil] notOne" "is not an unexpander" },
+    -- (MATH-02) the conversion-shape lint and the `rfl` budget
+    { name := "conversion-shape lint: Nat.div against shiftRight at rfl", run := fun _ =>
+        okLib "import Prelude\ndef t (x : Nat) : Nat.div x (Nat.pow 2 3) = Nat.shiftRight x 3 := rfl"
+          ["`rfl` budget: the two sides use different `Nat` heads (`Nat.div` and `Nat.shiftRight`); conversion must force both sides (wiz-notes/nat-shape-conversion.md). State the lemma in the core's shape."] },
+    { name := "conversion-shape lint: a statement in the div shape of a shift", run := fun _ =>
+        okLib "import Prelude\ndef t (x : Nat) : Nat.div x (Nat.pow 2 3) = Nat.div x 8 := rfl"
+          ["conversion-shape lint: this statement uses `Nat.div` with a power-of-two divisor; the core writes `Nat.shiftRight`, and conversion compares glued heads (wiz-notes/nat-shape-conversion.md). Write the core's shape, or `set_option conv.lint false`."] },
+    { name := "rfl budget: a large numeral, and a record rfl", run := fun _ =>
+        okLib ("import Prelude\ndef big : 65536 = 65536 := rfl\n" ++
+          "structure R8 where\n  a : Nat\n  b : Nat\n  c : Nat\n  d : Nat\n  e : Nat\n  f : Nat\n  g : Nat\n  h : Nat\n" ++
+          "def rid (r : R8) : r = r := rfl")
+          ["`rfl` budget: this equation contains the large numeral 65536; state it as a named definition (or use a decision tactic) so the proof term stays small.",
+           "`rfl` budget: `rfl` at the 8-field record R8 computes the whole record; use `refl` or prove the fields separately (wiz-notes/nat-shape-conversion.md)."] },
+    { name := "the conversion-shape lint can be turned off with set_option", run := fun _ =>
+        okLib ("import Prelude\nset_option conv.lint false\ndef big : 65536 = 65536 := rfl\n" ++
+          "set_option conv.lint true\ndef big2 : 65536 = 65536 := rfl")
+          ["`rfl` budget: this equation contains the large numeral 65536; state it as a named definition (or use a decision tactic) so the proof term stays small."] }
   ]
 
 builtin_initialize registerGroup languageGroup

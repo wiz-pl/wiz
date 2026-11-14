@@ -78,6 +78,17 @@ def smt := 35
 def define := 36
 def assignLate := 37
 def nativeDecide := 38
+-- (MATH-02) proof UX: local hypotheses, expected-type checking, `rfl` closing, and
+-- rewrite occurrence selection. Appended, as the ABI requires.
+def haveHyp := 39
+def sufficesGoal := 40
+def obtainPair := 41
+def checkTerm := 42
+def closeRefl := 43
+def rewriteN := 44
+-- (MATH-02) the *raw* open-goal list, including a goal a tactic has just closed:
+-- `replaceMainGoal` must replace the goal the tactic was given, not the next one
+def getOpen := 45
 end TacTag
 
 structure Goal (R : Type) where
@@ -630,14 +641,31 @@ the new goal is `G[b]`, and the old one is solved by a cast along `G[b] = G[a]`,
 `transp` gets from `h` (as `Eq.substBack` in the prelude does). Occurrences are found
 syntactically, on the normal forms the elaborator prints; the kernel checks the cast. -/
 
-/-- `t` (under `depth` binders more than `a`) with the occurrences of `a` replaced by
-the variable `depth`, the other variables making room for it; and whether there were any. -/
-partial def abstractOcc (a : Term R) (t : Term R) (depth : Nat := 0) : StateM Bool (Term R) := do
+/-- `t` (under `depth` binders more than `a`) with occurrences of `a` replaced by the
+variable `depth`, the other variables making room for them. `nth = 0` replaces every
+occurrence, `nth = k` only the `k`th (outermost first, left to right). The state is
+whether an occurrence was replaced and how many were seen. -/
+partial def abstractOcc (a : Term R) (t : Term R) (nth : Nat := 0) (depth : Nat := 0) :
+    StateM (Bool × Nat) (Term R) := do
   if t == a.lift depth then
-    set true
-    return .var depth
+    let (found, seen) ← get
+    let seen := seen + 1
+    if nth == 0 || seen == nth then
+      set (true, seen)
+      return .var depth
+    set (found, seen)
+    -- (the body gains the placeholder binder at index 0: an occurrence not replaced
+    -- still has its free variables lifted by one)
+    return t.lift 1
   match t with
   | .var i => pure (.var (if i ≥ depth then i + 1 else i))
-  | t => t.mapChildrenM pure fun k c => abstractOcc a c (depth + k)
+  | t => t.mapChildrenM pure fun k c => abstractOcc a c nth (depth + k)
+
+/-- The immediate subterms of `t`, each with the number of binders it is under (0,
+except a binder's body, which is 1). Used by `rw` to look for an occurrence of a
+lemma's left-hand side. -/
+def childrenWithDepth (t : Term R) : List (Nat × Term R) :=
+  ((t.mapChildrenM (m := StateM (List (Nat × Term R))) pure
+    (fun k c => do modify (fun l => l ++ [(k, c)]); pure c)).run []).2
 
 end Wiz.Elab

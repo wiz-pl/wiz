@@ -191,6 +191,37 @@ def tacticGroup : Group where
            "r2 : (a : Nat) → (b : Nat) → a = b → (P : Nat → Type) → P a → P b"]
         failsLib "import Prelude\ndef r (a b c : Nat) (h : a = b) (P : Nat → Prop) (pc : P c) : P c := by\n  rw h\n  exact pc" "rewrite: the goal does not mention a"
         failsLib "import Prelude\ndef r (a : Nat) (P : Nat → Prop) (pa : P a) : P a := by\n  rw pa\n  exact pa" "rewrite: not an equation" },
+    -- proof UX (MATH-02): have, suffices, obtain
+    { name := "have: a named hypothesis, its proof checked against the stated type", run := fun _ =>
+        okLib ("import Prelude\ndef t (n : Nat) : n = n := by\n  have h : n = n := rfl\n  exact h\n" ++
+          "def dep (n : Nat) : n = n := by\n  have m : Nat := n\n  have h : m = n := rfl\n  exact h\n" ++
+          "def ap (A B : Type) (f : A → B) (a : A) : B := by\n  have b : B := f a\n  exact b") },
+    { name := "have without a proof, and suffices: prove the statement, then use it", run := fun _ =>
+        okLib ("import Prelude\ndef t (n : Nat) : n = n := by\n  have h : n = n\n  exact rfl\n  exact h\n" ++
+          "def s (n : Nat) : n = n := by\n  suffices h : n = n\n  trace_state\n  exact rfl\n  trace_state\n  exact h")
+          ["n : Nat\n⊢ n = n\n\nn : Nat\nh : n = n\n⊢ n = n",
+           "n : Nat\nh : n = n\n⊢ n = n"] },
+    { name := "have: the expected type directs the proof (a constructor)", run := fun _ =>
+        okLib "import Prelude\ndef t : List Nat := by\n  have l : List Nat := .nil\n  exact l" },
+    { name := "have: a proof of the wrong type is an error at the proof", run := fun _ =>
+        failsLib "import Prelude\ndef bad : Nat := by\n  have h : Nat := Bool.true\n  exact h" "expected: Nat" },
+    { name := "obtain: take a Σ apart, and its components have their types", run := fun _ =>
+        okLib ("import Prelude\ndef Pair : Type := (a : Nat) × Nat\n" ++
+          "def t (p : (a : Nat) × Nat) : Nat := by\n  obtain ⟨x, y⟩ := p\n  exact x + y\n" ++
+          "def dep (p : Pair) : Nat := by\n  obtain ⟨x, y⟩ := p\n  trace_state\n  exact y")
+          ["p : Pair\nx : Nat\ny : Nat\n⊢ Nat"] },
+    { name := "obtain: not a pair", run := fun _ =>
+        failsLib "import Prelude\ndef t (n : Nat) : Nat := by\n  obtain ⟨x, y⟩ := n\n  exact x" "obtain: expected a pair" },
+    { name := "rw: leading binders are instantiated where the match determines them", run := fun _ =>
+        okLib ("import Prelude\ndef t (a : Nat) (h : (n : Nat) → n + 0 = n) : a + 0 = a := by rw h\n" ++
+          "def t2 (a b : Nat) (h : (m n : Nat) → m + n = n + m) : a + b = b + a := by rw h") },
+    { name := "rw: an argument the goal does not determine is an error", run := fun _ => do
+        failsLib ("import Prelude\naxiom lem : (m n : Nat) → n + 0 = n\n" ++
+          "def t (a : Nat) : a + 0 = a := by rw lem") "rw: could not determine the arguments" },
+    { name := "rw closes a goal that has become rfl; nth_rw selects an occurrence", run := fun _ => do
+        okLib ("import Prelude\ndef t (a b : Nat) (h : a = b) : a = a := by\n  nth_rw 1 h\n  trace_state\n  rw ← h")
+          ["a : Nat\nb : Nat\nh : a = b\n⊢ b = a"]
+        failsLib "import Prelude\ndef t (a b : Nat) (h : a = b) : a = a := by\n  nth_rw 3 h" "the goal has no occurrence 3 of a" },
     -- typed reflection (docs/stages/06-macros.md, 6g)
     { name := "constructor applications are reflected by name, with the type's parameters", run := fun _ =>
         okLib (reflectPrelude ++

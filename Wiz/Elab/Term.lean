@@ -3436,6 +3436,25 @@ partial def evalTacticStx (code : Code) (st : TacState R) (stx : Syntax) (record
   let t := apply code (run code [] (.global "TacticM.run")) (apply code (run code [] (.global f)) (encodeSyntax stx))
   runTac code stx.info st t
 
+/-- (MATH-02) Does `pat` match a subterm of `t`, solving the metavariables in `pat`?
+`depth` is the number of binders `t` is under. Outer subterms are tried first, then the
+children left to right; the first match wins, and unification rolls back the others. -/
+private partial def tacticMatchAnywhere (ctx : LocalCtx R) (pat : Term R) (t : Term R)
+    (depth : Nat := 0) : ElabM R Bool := do
+  let c := bindAnon ctx depth
+  let matched ← try
+    let p ← evalIn c (pat.lift depth)
+    let v ← evalIn c t
+    unify c.lvl p v
+    pure true
+  catch _ => pure false
+  if matched then return true
+  let rec go : List (Nat × Term R) → ElabM R Bool
+    | [] => pure false
+    | (k, child) :: rest => do
+      if ← tacticMatchAnywhere ctx pat child (depth + k) then pure true else go rest
+  go (childrenWithDepth t)
+
 /-- **Exercise 6.5** (the request loop). Interpret the requests of a `Tac` value (the
 constructor numbers are in `TacTag`), threading the tactic state, until `done`.
 Each request's last field is its continuation: apply it (`apply code`) to the encoded
@@ -3492,6 +3511,10 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
       | some gl => gl.isOpen
       | none => pure false
     return ← runTac code info { st with «open» := opens } (apply code (fld 0) (encodeList (opens.map encodeNat)))
+  if tag == TacTag.getOpen then
+    -- (MATH-02) the raw list: a tactic that has just closed the main goal must still
+    -- replace *that* goal, not the next open one (which `getGoals` would show)
+    return ← runTac code info st (apply code (fld 0) (encodeList (st.open.map encodeNat)))
   if tag == TacTag.setGoals then
     let some gs := decodeList (fld 0) | throwAt info "tactic: malformed goal list"
     return ← runTac code info { st with «open» := ← gs.mapM num } (fld 1)
@@ -3707,31 +3730,61 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
       | _ => pure t
     let (r, st) ← refl st gl t' (← typeOf? gl t)
     return ← runTac code info st (apply code (fld 3) r)
-  if tag == TacTag.rewrite then
+  if tag == TacTag.rewrite || tag == TacTag.rewriteN then
     let h ← zonk lvl (← reify st.handles (fld 1) lvl)
     let rtl := decodeBool (fld 2) == some true
+    -- (0: every occurrence; k: the kth, outermost first)
+    let occ ← if tag == TacTag.rewriteN then num (fld 3) else pure 0
+    let k := if tag == TacTag.rewriteN then fld 4 else fld 3
     unless h.mvars.isEmpty do throwAt info "rewrite: the equation has holes" ErrorCode.tacticFailed
     -- the universe levels of its constants (fresh after reflection), from the arguments' types
-    let h ← if h.hasLevelMVar then do
+    let mut h ← if h.hasLevelMVar then do
         let _ ← (RCtx.ofLocal gl.ctx).typeOfUnifying? h
         zonk lvl h
       else pure h
     -- (the variables' types with the holes solved since they were bound, as the kernel
     -- takes a hole as rigid: `U : UnitCounit F G` with `F`'s categories holes then)
-    let hty ← match (← get).kernelInfer (gl.kernelCtx g) h with
+    let mut hty ← match (← get).kernelInfer (gl.kernelCtx g) h with
       | .ok ty => pure ty
       | .error e =>
         match (← get).kernelInfer { gl.kernelCtx g with types := (← zonkedTypes gl.ctx).toList.reverse } h with
         | .ok ty => pure ty
         | .error _ => throwAt info s!"rewrite: {e}" ErrorCode.tacticFailed
+    -- (MATH-02) `rw (Nat.add_zero)`: instantiate the lemma's leading binders with holes,
+    -- and let the match with the goal determine them; an argument that stays unknown is
+    -- an error (write it out) rather than a guess.
+    let mut nBinders := 0
+    for _ in [0:64] do
+      match ← force hty with
+      | .pi _ _ _ _ cod _ =>
+        let m ← freshMeta gl.ctx "rw"
+        h := .app h m
+        hty := ← instM cod (← evalIn gl.ctx m)
+        nBinders := nBinders + 1
+      | _ => break
     let (A, a, b) ← match ← force hty with
       | .neutral (.eq A a b) #[] => pure (quote g lvl A, quote g lvl a, quote g lvl b)
       | v => throwAt info s!"rewrite: not an equation between two terms: {← showVal gl.ctx v}" ErrorCode.tacticFailed
+    let a0 ← zonk lvl a
+    let b0 ← zonk lvl b
     let goalT ← zonk lvl (quote g lvl gl.ty)
+    if nBinders > 0 && !(Term.mvars a0).isEmpty then
+      unless ← tacticMatchAnywhere gl.ctx a0 goalT do
+        throwAt info s!"rewrite: the left-hand side {← showTermM gl.ctx a0} does not match the goal; write the lemma's arguments, e.g. `rw (lemma a b)`" ErrorCode.tacticFailed
+    let A ← zonk lvl A
+    let a ← zonk lvl a0
+    let b ← zonk lvl b0
+    h := ← zonk lvl h
+    unless (Term.mvars h).isEmpty && (Term.mvars A).isEmpty && (Term.mvars a).isEmpty && (Term.mvars b).isEmpty do
+      throwAt info s!"rw: could not determine the arguments of {← showTermM gl.ctx h} from the goal; write them out, e.g. `rw (lemma a b)`" ErrorCode.tacticFailed
     -- the side to replace, and its replacement
     let (old, new) := if rtl then (b, a) else (a, b)
-    let (body, found) := (abstractOcc old goalT).run false
-    unless found do throwAt info s!"rewrite: the goal does not mention {← showTermM gl.ctx old}" ErrorCode.tacticFailed
+    let (body, (found, _)) := (abstractOcc old goalT occ).run (false, 0)
+    unless found do
+      if occ == 0 then
+        throwAt info s!"rewrite: the goal does not mention {← showTermM gl.ctx old}" ErrorCode.tacticFailed
+      else
+        throwAt info s!"rewrite: the goal has no occurrence {occ} of {← showTermM gl.ctx old}" ErrorCode.tacticFailed
     let newT := body.instantiateAt 0 new
     -- `P x _ := G[x] = G[a]` (or `G[a] = G[x]`, right to left), transported along `h : a = b`
     let Ga := body.instantiateAt 0 a
@@ -3741,7 +3794,7 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     let m ← freshMeta gl.ctx "goal"
     unifyGoal gl (.cast newT goalT pf m)
     let (st, id) := addGoal st { ctx := gl.ctx, ty := ← evalIn gl.ctx newT, tm := m }
-    return ← runTac code info st (apply code (fld 3) (.nat id))
+    return ← runTac code info st (apply code k (.nat id))
   if tag == TacTag.exact then
     let stx ← stxOf (fld 1)
     let t ← check (gl.ctx.withInfo stx) stx gl.ty
@@ -3776,6 +3829,82 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     let m ← freshMeta gl.ctx "goal"
     let (st, id) := addGoal st { ctx := gl.ctx, ty, tm := m }
     return ← runTac code info st (apply code (fld 2) (.nat id))
+  -- (MATH-02) `have h : T := p`: a local hypothesis, a `let` of the context (so later
+  -- goals can depend on it, `assumption`/`exact h` see it, and `rfl` sees its value)
+  if tag == TacTag.haveHyp then
+    let x ← str (fld 1)
+    let tyT ← zonk lvl (← reify st.handles (fld 2) lvl)
+    let valT ← zonk lvl (← reify st.handles (fld 3) lvl)
+    let ty ← evalIn gl.ctx tyT
+    let ctx' := gl.ctx.define x ty (← evalIn gl.ctx valT)
+    let goalT ← zonk (lvl + 1) (quote g (lvl + 1) gl.ty)
+    let m ← freshMeta ctx' "goal"
+    let q : Term R := .qlit QuantitySyntax.explicitDefault
+    unifyGoal gl (.letE x q tyT valT m)
+    let (st, id) := addGoal st { ctx := ctx', ty := ← evalIn ctx' goalT, tm := m }
+    return ← runTac code info st (apply code (fld 4) (.nat id))
+  -- (MATH-02) `suffices h : T`: prove `T` (the first goal), then the original goal with
+  -- `h : T` in the context (the second), `h` bound to the proof
+  if tag == TacTag.sufficesGoal then
+    let x ← str (fld 1)
+    let tyT ← zonk lvl (← reify st.handles (fld 2) lvl)
+    let ty ← evalIn gl.ctx tyT
+    let pf ← freshMeta gl.ctx "suffices"
+    let ctx' := gl.ctx.define x ty (← evalIn gl.ctx pf)
+    let goalT ← zonk (lvl + 1) (quote g (lvl + 1) gl.ty)
+    let m ← freshMeta ctx' "goal"
+    let q : Term R := .qlit QuantitySyntax.explicitDefault
+    unifyGoal gl (.letE x q tyT pf m)
+    let (st, iT) := addGoal st { ctx := gl.ctx, ty, tm := pf }
+    let (st, iG) := addGoal st { ctx := ctx', ty := ← evalIn ctx' goalT, tm := m }
+    return ← runTac code info st (apply code (fld 3) (encodePair (.nat iT) (.nat iG)))
+  -- (MATH-02) `obtain ⟨x, y⟩ := e` for `e : (a : A) × B`: the components as bound
+  -- variables (a `split`, so the pair is consumed once whatever its quantity)
+  if tag == TacTag.obtainPair then
+    let x ← str (fld 1)
+    let y ← str (fld 2)
+    let eT ← zonk lvl (← reify st.handles (fld 3) lvl)
+    let ety ← evalIn gl.ctx (← reify st.handles (fld 4) lvl)
+    match ← force ety with
+    | .sigma _bx p A B _ =>
+      let g' ← getGlobals
+      let q : Term R := .qlit QuantitySyntax.explicitDefault
+      let (qx, qy) := splitQtys q p
+      let ctx1 := gl.ctx.bindQ x A qx
+      let ctx2 := ctx1.bindQ y (← instM B (Val.var lvl)) qy
+      let motive := quote g (lvl + 1) gl.ty
+      let m ← freshMeta ctx2 "goal"
+      let body := .split q eT "z" motive x y m
+      unifyGoal gl body
+      let (st, id) := addGoal st { ctx := ctx2, ty := ← evalIn ctx2 (quote g' (lvl + 2) gl.ty), tm := m }
+      return ← runTac code info st (apply code (fld 5) (.nat id))
+    | v => throwAt info s!"obtain: expected a pair (a Σ type), got {← showVal gl.ctx v}" ErrorCode.tacticFailed
+  -- (MATH-02) elaborate `stx` against an expected type (how `have … := …` checks the proof)
+  if tag == TacTag.checkTerm then
+    let stx ← stxOf (fld 1)
+    let ty ← evalIn gl.ctx (← reify st.handles (fld 2) lvl)
+    let t ← check (gl.ctx.withInfo stx) stx ty
+    let (r, st) ← refl st gl t (some ty)
+    return ← runTac code info st (apply code (fld 3) r)
+  -- (MATH-02) close the goal with `rfl`, if it is an equation whose sides are
+  -- definitionally equal (or `True`): what `rw` tries after rewriting
+  if tag == TacTag.closeRefl then
+    let closed ← match ← force gl.ty with
+      | .neutral (.eq A a b) #[] => do
+        let ok ← try unify lvl a b; pure true catch _ => pure false
+        if ok then
+          let pf ← zonk lvl (.refl (quote g lvl A) (quote g lvl a))
+          unifyGoal gl pf
+        pure ok
+      | .neutral (.eqTy X Y) #[] => do
+        let ok ← try unify lvl X Y; pure true catch _ => pure false
+        if ok then
+          let pf ← zonk lvl (.reflTy (quote g lvl X))
+          unifyGoal gl pf
+        pure ok
+      | .unit _ => do unifyGoal gl .tt; pure true
+      | _ => pure false
+    return ← runTac code info st (apply code (fld 1) (encodeBool closed))
   if tag == TacTag.normalize then
     let t ← reify st.handles (fld 1) lvl
     let v' ← evalIn gl.ctx t

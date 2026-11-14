@@ -37,6 +37,16 @@ Along the way the elaborator learned to:
 * erase a `cast` against its source type (the solution rule casts a function, so
   `head`, `tail` and `zipWith` on vectors failed at runtime).
 
+Conversion is **shape-directed**: `Nat.div x (Nat.pow 2 n)` and `Nat.shiftRight x n`
+are definitionally equal, but their glued heads differ, and comparing them inside a
+large term can turn seconds into minutes and gigabytes
+(`wiz-notes/nat-shape-conversion.md`). Write a lemma about a circuit word in the shape
+the core writes it (`BitVec.ofNat w (Nat.shiftRight x.toNat lo)`), and heed the
+conversion-shape lint (`docs/stages/06-macros.md` 6i): an `rfl` with a large numeral,
+at a record type, or between `Nat.div` and `Nat.shiftRight` is warned about (opt out
+with `set_option conv.lint false`). `refl a` is cheaper than `rfl` for structure
+equality; a pipeline record's `rfl` should be fieldwise.
+
 Not yet: facts like `Vec.get v (Fin.of 3 1 rfl) = 20 := rfl` (the `rfl` shape
 problem above; `drafts/vec-lib/VecProofs.wiz`), arithmetic facts about `BitVec` in general, numerals and operators
 (`a + b`) for `BitVec` (decision HD9).
