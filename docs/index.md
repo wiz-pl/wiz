@@ -13,6 +13,8 @@ docs/building.md, "Documentation site").
 * [release/v0.1.md](release/v0.1.md): the draft 0.1 release notes
 * [release/v0.1-checklist.md](release/v0.1-checklist.md): the 0.1 gate list, and
   [release-manifest.json](release/release-manifest.json): the machine-readable record
+* [attestation.md](attestation.md): signed in-toto statements, build manifests and
+  TPM 2.0 quotes, and how to verify them
 * [CHANGELOG.md](../CHANGELOG.md)
 * [building.md](building.md)
 * [ci-runner.md](ci-runner.md): a self-hosted runner for the heavy CI shards

@@ -114,6 +114,21 @@ jobs:
         shell: bash
         run: scripts/test-source-tarball.sh
 
+  # (seconds, no build) Manifest canonicalization, DSSE/Ed25519 signing and
+  # quote verification (scripts/attest).  The unit tests generate a throwaway
+  # ssh-keygen key, use a stub tpm2_checkquote, and need no TPM, no Wiz build,
+  # no committed private key and no network.
+  attest:
+    name: attestation verifier
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Test the statement signing, manifest format and verifier
+        shell: bash
+        run: python3 -m unittest discover -s scripts/attest/tests -v
+
   build:
     name: build
     needs: changes
