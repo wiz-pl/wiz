@@ -265,7 +265,42 @@
             };
         in { inherit wiz unwrapped tower tests wiz-nvim nvim-wiz; default = wiz; };
     in {
-      packages = forAll packagesFor;
+      packages = forAll (pkgs: packagesFor pkgs // {
+        wiz-ci-runner = import ./nix/ci-runner/runner.nix { inherit pkgs; };
+      });
+
+      # The optional self-hosted runner (docs/ci-runner.md): import the module,
+      # set services.wiz-ci-runner.enable, and give it a runtime token file.
+      nixosModules = rec {
+        ci-runner = import ./nix/ci-runner/module.nix;
+        default = ci-runner;
+      };
+
+      # A local smoke test of the runner script (no GitHub, no network): it
+      # checks the environment and the credential handling.  `nix flake check`
+      # builds it; tests/ci-runner-smoke.sh also evaluates the NixOS module.
+      checks = forAll (pkgs: {
+        wiz-ci-runner-smoke = pkgs.runCommand "wiz-ci-runner-smoke" {
+          nativeBuildInputs = [ (import ./nix/ci-runner/runner.nix { inherit pkgs; }) ];
+        } ''
+          export WIZ_CI_RUNNER_URL=https://github.com/wiz-pl/wiz
+          export WIZ_CI_RUNNER_NAME=wiz-heavy-smoke
+          export WIZ_CI_RUNNER_LABELS=wiz-heavy
+          export WIZ_CI_RUNNER_TOKEN_TYPE=auto
+          export WIZ_CI_RUNNER_API_URL=https://api.github.com
+          export WIZ_CI_RUNNER_SCOPE=repo:wiz-pl/wiz
+          export WIZ_CI_RUNNER_STATE_DIR=$TMPDIR/runner
+          export WIZ_CI_RUNNER_WORK_DIR=$TMPDIR/work
+          export WIZ_CI_RUNNER_USER=nobody
+          export WIZ_CI_RUNNER_GROUP=nogroup
+          export WIZ_CI_RUNNER_GITHUB_RUNNER=${pkgs.github-runner}
+          export CREDENTIALS_DIRECTORY=$TMPDIR/credentials
+          mkdir -p "$CREDENTIALS_DIRECTORY"
+          printf '%s\n' 'github_pat_smoke' > "$CREDENTIALS_DIRECTORY/token"
+          wiz-ci-runner check
+          touch $out
+        '';
+      });
 
       apps = forAll (pkgs:
         let

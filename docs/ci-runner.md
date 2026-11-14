@@ -166,6 +166,144 @@ gh variable delete WIZ_RUNNER_HEAVY -R wiz-pl/wiz
 A label names one or more machines: run the loop on several hosts (or several loops on a
 big one, with smaller `--cpus`/`--memory`) to take several heavy shards at once.
 
+## A NixOS host
+
+The repository also exports an optional NixOS module, `nixosModules.ci-runner`. It runs
+the runner directly on the host instead of in a container: systemd registers an ephemeral
+runner, the listener takes one job, and the service starts again with an empty state and
+work directory. It is disabled unless `services.wiz-ci-runner.enable` is set, so importing
+it changes nothing by itself.
+
+The module provides:
+
+* Nix (the host's daemon) with flakes, the `badlydrawnwizards` Cachix cache as a
+  substituter, and the runner user as a trusted user (so `cachix-action` can add the cache
+  for the job).
+* The `git`, `curl`, `tar`, `bash`, `python3` and other tools the workflow's own scripts
+  use, and a boot-time `nix develop` of the Wiz dev shell so the first job starts warm.
+* `LoadCredential=` for the GitHub token. The token is not in the Nix store, not in the
+  unit's environment, and not in the job's environment: the service starts as root only
+  long enough to register, then drops to an unprivileged user before the listener runs.
+* An ephemeral runner (`--ephemeral --replace`): one job per registration. The work
+  directory and the runner's state are emptied before each registration and after each
+  stop, and `PrivateTmp=true` gives every job a fresh `/tmp`.
+* Cleanup on stop: if the listener was stopped before it could unregister, the service
+  removes a runner with its name through the GitHub API (a personal access token is
+  needed for that; a registration token cannot list runners).
+
+### Token
+
+Use a fine-grained personal access token with **Administration: read and write** on this
+repository only (a classic token with `repo` scope also works). The module exchanges it
+for a fresh, one-use registration token on every start, so nothing has to be rotated by
+hand. Keep it root-readable only, outside the Nix store:
+
+```sh
+sudo install -d -m 0755 /run/secrets
+sudo sh -c 'umask 077; printf %s "$WIZ_RUNNER_TOKEN" > /run/secrets/wiz-ci-runner-token'
+```
+
+`/run/secrets` is a tmpfs, so the token is lost on reboot; recreating it is fine. For a
+persistent file use `/etc/wiz-ci-runner/token` (mode 0600, root) and point `tokenFile`
+there, or put it in systemd's credential store (`/etc/credstore/wiz-ci-runner-token`) and
+set `tokenCredential = "wiz-ci-runner-token"`. sops-nix and agenix paths work as they are:
+any file path is read by systemd when the unit starts.
+
+### Enable it
+
+Import the module in the host's flake. On `noobnoob` (`/etc/nixos`) the `wiz` input
+already exists; on `millionants` add it first:
+
+```nix
+{
+  inputs.wiz.url = "github:wiz-pl/wiz";
+
+  outputs = { nixpkgs, wiz, ... }: {
+    nixosConfigurations.millionants = nixpkgs.lib.nixosSystem {
+      modules = [
+        wiz.nixosModules.ci-runner
+        {
+          services.wiz-ci-runner = {
+            enable = true;
+            url = "https://github.com/wiz-pl/wiz";
+            tokenFile = "/run/secrets/wiz-ci-runner-token";
+            labels = [ "wiz-heavy" ];
+          };
+        }
+      ];
+    };
+  };
+}
+```
+
+Then apply it and watch the first registration:
+
+```sh
+sudo nixos-rebuild switch --flake /etc/nixos#noobnoob   # or #millionants
+systemctl status wiz-ci-runner
+journalctl -u wiz-ci-runner -f
+gh api repos/wiz-pl/wiz/actions/runners \
+  --jq '.runners[] | [.name, .status, (.labels | map(.name) | join(","))]'
+```
+
+The runner appears with `--ephemeral`; while idle it shows as offline between jobs. Switch
+CI to it with `gh variable set WIZ_RUNNER_HEAVY -R wiz-pl/wiz -b wiz-heavy`; while the
+variable is unset the heavy shards stay on `ubuntu-latest`.
+
+Several machines can run the module at once. Give each a distinct `name` (the default is
+`wiz-heavy-<hostname>`) and use the same label; the heavy shards then queue for any of
+them. One job runs at a time per service.
+
+### Turning it off
+
+Unset the repository variable first, so no job queues for a machine that is stopping:
+
+```sh
+gh variable delete WIZ_RUNNER_HEAVY -R wiz-pl/wiz
+sudo systemctl stop wiz-ci-runner
+```
+
+`ExecStopPost` deregisters the runner (when the token is a personal access token) and
+empties the state and work directories. If the machine is destroyed instead, remove the
+offline runner from the repository's runner list by hand.
+
+### Security
+
+The module hardens the listener and makes every job start from an empty state, but it is
+**not** a container or VM boundary: a job runs as the unprivileged runner user on the
+host, with network access and the Nix daemon. The rest of the runner's security model is
+the same as above: only this repository's code is sent there (a fork pull request stays
+on `ubuntu-latest`), the host is on a network that can reach nothing private, and the
+Cachix auth token is visible to the job while it runs. A dedicated host or a VM is the
+right place for it; do not co-locate other secrets on the machine.
+
+Two consequences of running on the host are worth stating explicitly:
+
+* The runner's own credentials (`.runner`, `.credentials`) are readable by the runner
+  user, because the listener needs them; a job can therefore act as the runner. The
+  personal access token used for registration is not among them, and the systemd
+  credential directory is unreadable to that user.
+* `nix.settings.trusted-users` includes the runner user, so a job can add Nix
+  substituters and use the daemon with the privileges a trusted user has. That is what
+  lets `cachix-action` work on a self-hosted runner; it is another reason not to put
+  anything else on the machine.
+
+The work directory holds the Nix store downloads, `.lake`, and the Wiz caches; allow
+tens of GB on the filesystem under `/var/lib/wiz-ci-runner`, and keep an eye on it if
+jobs can fill it (`systemd-tmpfiles` does not enforce a quota).
+
+For a local check before enabling it, build the runner and evaluate the module (no
+GitHub token and no runner registration):
+
+```sh
+nix flake check
+tests/ci-runner-smoke.sh
+```
+
+`tests/ci-runner-smoke.sh` builds the wrapper, checks its environment and credential
+handling, evaluates the module, and verifies that a token path in the Nix store is
+rejected.
+
 ## Caches
 
 Each job starts with an empty container: Lake's build (`.lake`, from the build job, by the
