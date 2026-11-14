@@ -85,6 +85,53 @@ def opticGroup : Group where
         failsOptic ("import OpticDep\n" ++
           "def badSet {A S : Type} (1 st : Store1 A S) (1 b : A) : S :=\n" ++
           "  let 1 (a, k) := st;\n  k b") "quantity 1 but used 0" },
+    -- indexed optics (lib/OpticIndexed.wiz): the focus's address is returned with it
+    { name := "indexed optics: a lens returns the focus's address", run := fun _ =>
+        okOptic ("import OpticIndexed\n" ++
+          "def t : Tagged := Tagged.mk 7 41\n" ++
+          "#eval IxLens.get taggedL t\n" ++
+          "#eval IxLens.index taggedL t\n" ++
+          "#eval IxLens.over taggedL (fun _ n => Nat.add n 1) t\n" ++
+          "#eval IxLens.get (IxLens.id ▷ taggedL) t\n" ++
+          "#eval IxLens.get (IxPreCoend.toIxLens (IxPreCoend.ofIxLens taggedL)) t")
+          ["(7, 41)", "7", "(7, 42, ())", "(7, 41)", "(7, 41)"] },
+    { name := "indexed traversals: a vector and a record, with the index in the update", run := fun _ =>
+        okOptic ("import OpticIndexed\n" ++
+          "def p : Point := Point.mk 1 2\n" ++
+          "#eval Vec.toList (ixtraverse vecIx (fun i n => Nat.add n (Fin.val i)) (Vec.fromList [10, 20]))\n" ++
+          "#eval IxTraverse.over pointIx (fun f n => match f with | .x => Nat.add n 10 | .y => Nat.add n 20) p\n" ++
+          "#eval IxTraverse.getIx pointIx p Field.x\n" ++
+          "#eval IxTraverse.getIx pointIx p Field.y\n" ++
+          "def vv : Vec (Vec Nat 2) 2 :=\n" ++
+          "  Vec.cons (Vec.fromList [1, 2]) (Vec.cons (Vec.fromList [3, 4]) Vec.nil)\n" ++
+          "#eval Vec.toList (Vec.map Vec.toList (ixtraverse (IxTraverse.comp vecIx vecIx)\n" ++
+          "  (fun ij n => Nat.add n (Nat.add (Fin.val ij.1) (Fin.val ij.2))) vv))\n" ++
+          "#check pointIx_lawful")
+          [".cons 10 (.cons 21 .nil)", "(11, 22, ())", "1", "2",
+           ".cons (.cons 1 (.cons 3 .nil)) (.cons (.cons 4 (.cons 6 .nil)) .nil)",
+           "pointIx_lawful : IxTraverse.Lawful Field Point Nat pointIx"] },
+    { name := "an index-changing put is not an indexed lens", run := fun _ =>
+        failsOptic ("import OpticIndexed\n" ++
+          "def badIx : IxLens Nat Tagged Nat :=\n" ++
+          "  IxLens.mk (fun t => (t.tag, t.val)) (fun t v => Tagged.mk (Nat.add t.tag 1) v)\n" ++
+          "def badLaw : IxLens.IndexPreserved badIx := fun t v => rfl") "not definitionally equal" },
+    { name := "a coindexed prism carries the failure reason", run := fun _ =>
+        okOptic ("import OpticIndexed\n" ++
+          "#eval CoPrism.over listHeadP Nat.succ (List.cons 1 (List.cons 2 List.nil))\n" ++
+          "#eval CoPrism.over listHeadP Nat.succ (List.nil : List Nat)\n" ++
+          "#eval CoPrism.run listHeadP (List.nil : List Nat)\n" ++
+          "#check listHeadP_buildMatch")
+          [".cons 2 .nil", ".nil", ".err .outOfBounds",
+           "listHeadP_buildMatch : {A : Type} → CoPrism.BuildMatch Error (List A) A (listHeadP A)"] },
+    { name := "a linear indexed lens moves a quantity-1 token", run := fun _ => do
+        okOptic ("import OpticIndexed\nimport Handle\n" ++
+          "def ownedPass {H : Type} {h : H} (1 o : Owned h) : Owned h :=\n" ++
+          "  IxLens1.over (tokenIx (T := Owned h)) (fun _ x => x) o\n" ++
+          "#check ownedPass")
+          ["ownedPass : {H : Type} → {h : H} → (1 o : Owned H h) → Owned H h"]
+        failsOptic ("import OpticIndexed\n" ++
+          "def badSet {I A S : Type} (1 st : IxStore1 I A S) (1 b : A) : S :=\n" ++
+          "  let 1 (i, rest) := st;\n  let 1 (a, k) := rest;\n  k b") "quantity 1 but used 0" },
     { name := "a dependent traversal resizes a vector", run := fun _ =>
         okOptic ("import OpticDep\n" ++
           "#eval Vec.toList (DepTraverse.put vecResize (3, Vec.fromList [1,2,3]) [9, 8]).2\n" ++

@@ -1,0 +1,534 @@
+import Vec
+import Logic
+import Optic
+import OpticDep
+
+/-!
+# OpticIndexed: optics with an index on the focus
+
+`lib/Optic.wiz`'s `Lens S A` says *where* a focus is by giving a getter and a putter, but
+the caller cannot see the focus's address: `Lens.get` returns `A`, not "field 3" or
+"position 2". An **indexed optic** returns the address with the focus. This file is the
+additive prototype for that idea; the design and the decision are in
+`/workspace/wiz-notes/indexed-optics.md`.
+
+Two shapes, both explicit records (decision O1: no van Laarhoven/profunctor API):
+
+    IxLens I S A     = (get : S → I × A) × (put : S → A → S)
+    IxTraverse I S A = (get : S → I → A) × (put : S → (I → A) → S)
+
+The first is Kmett's `IndexedLens` in get/put form; the second is a *tabular* indexed
+traversal: the index type `I` enumerates every focus of the source, so `get` is total in
+the index and `put` writes a whole tabulation back. A vector and a homogeneous record are
+the canonical instances (`vecIx`, `pointIx`); `Point` is a record and `Vec` is a vector,
+the two examples the brief asks for.
+
+A **coindex** (Kmett's "information back in the failing match case", Oleg Grenrus's
+`IndexedOpticJ`) is the opposite direction: information flowing from the focus to the
+source. `CoPrism` below carries it on the failure branch; a total lens has nowhere to put
+it, and a `Store` must not grow one (decision O2). See the note for the argument.
+
+Everything here is additive: it imports `Vec`, `Logic`, `Optic` and `OpticDep`, and
+defines no name that shadows them.
+
+```
+import OpticIndexed
+
+def t : Tagged := Tagged.mk 7 41
+#eval IxLens.get taggedL t             -- (7, 41)
+#eval IxLens.index taggedL t           -- 7
+#eval IxLens.over taggedL (fun _ n => Nat.add n 1) t   -- (7, 42, ())
+#eval Vec.toList (ixtraverse vecIx (fun i n => Nat.add n (Fin.val i)) (Vec.fromList [10, 20])) -- .cons 10 (.cons 21 .nil)
+```
+-/
+
+-- ## 1. Indexed lenses
+
+/-- An indexed lens: `get` returns the focus's index and the focus, `put` rebuilds the
+source. The index is a value (not a type), so it is ordinary ω data. -/
+structure IxLens (I S A : Type) where
+  /-- the index of the focus, and the focus -/
+  get : S → I × A
+  /-- rebuild the source from a new focus -/
+  put : S → A → S
+
+/-- The index of the focus in `s`. -/
+def IxLens.index {I S A : Type} (l : IxLens I S A) (s : S) : I := (l.get s).1
+/-- The focus in `s`, with its index discarded. -/
+def IxLens.focus {I S A : Type} (l : IxLens I S A) (s : S) : A := (l.get s).2
+/-- Read the focus, keeping its index. -/
+def IxLens.getIx {I S A : Type} (l : IxLens I S A) (s : S) : I × A := l.get s
+/-- Update the indexed focus: `f` sees the index as well as the old value. -/
+def IxLens.over {I S A : Type} (l : IxLens I S A) (f : I → A → A) (s : S) : S :=
+  l.put s (f (l.get s).1 (l.get s).2)
+
+/-- The whole source as the focus, at the unique index `()`. -/
+def IxLens.id {S : Type} : IxLens Unit S S :=
+  IxLens.mk (fun s => ((), s)) (fun _ s' => s')
+
+/-- A simple lens is an indexed lens at the unique index. -/
+def IxLens.ofLens {S A : Type} (l : Lens S A) : IxLens Unit S A :=
+  IxLens.mk (fun s => ((), (l s).1)) (fun s a => (l s).2 a)
+
+/-- Forget the index. -/
+def IxLens.unindex {I S A : Type} (l : IxLens I S A) : Lens S A :=
+  fun s => ((l.get s).2, fun a => l.put s a)
+
+/-- `l` then `m`, keeping the *inner* index (the `lens` library's `.`: with two indexed
+optics the latter index wins; use `icompose` to keep both). -/
+def IxLens.comp {I J S A B : Type} (l : IxLens I S A) (m : IxLens J A B) : IxLens J S B :=
+  IxLens.mk
+    (fun s => (m.get (l.get s).2))
+    (fun s b => l.put s (m.put (l.get s).2 b))
+
+/-- `l` then `m`, combining the two indices with `f` (Kmett's `icompose`). This is the
+composition that keeps *both* addresses, e.g. `(row, column)`. -/
+def IxLens.icompose {I J K S A B : Type} (f : I → J → K)
+    (l : IxLens I S A) (m : IxLens J A B) : IxLens K S B :=
+  IxLens.mk
+    (fun s =>
+      let i := (l.get s).1;
+      let b := m.get (l.get s).2;
+      (f i b.1, b.2))
+    (fun s b => l.put s (m.put (l.get s).2 b))
+
+-- ### Laws
+
+/-- GetPut: a focus that is never written leaves the source unchanged. -/
+def IxLens.GetPut {I S A : Type} (l : IxLens I S A) : Prop :=
+  (s : S) → l.put s (l.get s).2 = s
+
+/-- PutGet: reading after a write sees the write. -/
+def IxLens.PutGet {I S A : Type} (l : IxLens I S A) : Prop :=
+  (s : S) → (a : A) → (l.get (l.put s a)).2 = a
+
+/-- PutPut: the last write wins. -/
+def IxLens.PutPut {I S A : Type} (l : IxLens I S A) : Prop :=
+  (s : S) → (a b : A) → l.put (l.put s a) b = l.put s b
+
+/-- **Index preservation**: a write does not move the focus. This is the law that makes an
+indexed lens different from an ordinary lens with a decorative index; it is the indexed
+analogue of Kmett's `IndexedLens` being "index-preserving". -/
+def IxLens.IndexPreserved {I S A : Type} (l : IxLens I S A) : Prop :=
+  (s : S) → (a : A) → (l.get (l.put s a)).1 = (l.get s).1
+
+/-- A lawful indexed lens: the three lens laws and index preservation. -/
+def IxLens.Lawful {I S A : Type} (l : IxLens I S A) : Prop :=
+  IxLens.GetPut l × IxLens.PutGet l × IxLens.PutPut l × IxLens.IndexPreserved l
+
+/-- Composition of lawful indexed lenses is lawful. -/
+def IxLens.comp_lawful {I J S A B : Type} (l : IxLens I S A) (m : IxLens J A B)
+    (hl : IxLens.Lawful l) (hm : IxLens.Lawful m) : IxLens.Lawful (IxLens.comp l m) :=
+  (fun s =>
+    Eq.trans
+      (Eq.congrArg (fun a => l.put s a) (hm.1 (l.get s).2))
+      (hl.1 s),
+   fun s b =>
+    Eq.trans
+      (Eq.congrArg (fun a => (m.get a).2) (hl.2.1 s (m.put (l.get s).2 b)))
+      (hm.2.1 (l.get s).2 b),
+   fun s b c =>
+    let a0 := (l.get s).2;
+    let a1 := m.put a0 b;
+    Eq.trans
+      (Eq.congrArg (fun a => l.put (l.put s a1) (m.put a c))
+        (hl.2.1 s a1))
+      (Eq.trans
+        (hl.2.2.1 s a1 (m.put a1 c))
+        (Eq.congrArg (fun a => l.put s a) (hm.2.2.1 a0 b c))),
+   fun s b =>
+    Eq.trans
+      (Eq.congrArg (fun a => (m.get a).1) (hl.2.1 s (m.put (l.get s).2 b)))
+      (hm.2.2.2 (l.get s).2 b))
+
+/-- The store view of an indexed lens: an index with the focus, and the backward
+function — `Store A S` with the index in front. This is the representation a
+`Region`/`Uniq.zoom` lowering wants (one pair, one closure). -/
+def IxStore (I A S : Type) : Type := (I × A) × (A → S)
+
+/-- The store view of a lens: applying the lens gives `(index, focus)` and the putter. -/
+def IxLens.toStore {I S A : Type} (l : IxLens I S A) : S → IxStore I A S :=
+  fun s => (l.get s, fun a => l.put s a)
+
+/-- The record view of a store: a lens whose get reads the pair and whose put applies
+the backward function. -/
+def IxLens.ofStore {I S A : Type} (l : S → IxStore I A S) : IxLens I S A :=
+  IxLens.mk
+    (fun s => (l s).1)
+    (fun s a => (l s).2 a)
+
+/-- An indexed lens is a dependent lens at the constant family `I × A` (the index is a
+*value*, not a type family; this is why indexed and dependent optics are orthogonal). The
+put ignores the index. -/
+def IxLens.toDepLens {I S A : Type} (l : IxLens I S A) : DepLens S (fun _ => I × A) :=
+  fun s => (l.get s, fun ia => l.put s ia.2)
+
+-- ## 2. Indexed traversals (tabular)
+
+/-- A tabular indexed traversal: `get s : I → A` enumerates every focus at its index, and
+`put s` writes a whole tabulation back. `I` is fixed, so this is not dependent: a vector's
+index is `Fin n` at a fixed `n`, a record's is its field tag. -/
+structure IxTraverse (I S A : Type) where
+  /-- every focus, at its index -/
+  get : S → I → A
+  /-- write a whole tabulation back -/
+  put : S → (I → A) → S
+
+/-- The tabulation view of an indexed traversal: a pair of the tabulation and the
+backward function, `Store (I → A) S` with the tabulation in the value position. -/
+def IxTab (I A S : Type) : Type := (I → A) × ((I → A) → S)
+
+/-- The tabulation view of a traversal. -/
+def IxTraverse.toTab {I S A : Type} (t : IxTraverse I S A) : S → IxTab I A S :=
+  fun s => ((fun i => t.get s i), fun f => t.put s f)
+
+/-- An indexed traversal is a dependent lens at the constant family `I → A`: the
+tabulation is the focus, so `DepLens.get`/`set` apply. -/
+def IxTraverse.toDepLens {I S A : Type} (t : IxTraverse I S A) :
+    DepLens S (fun _ => I → A) :=
+  fun s => ((fun i => t.get s i), fun f => t.put s f)
+
+/-- The focus at `i`. -/
+def IxTraverse.getIx {I S A : Type} (t : IxTraverse I S A) (s : S) (i : I) : A := t.get s i
+/-- Write a whole tabulation. -/
+def IxTraverse.putIx {I S A : Type} (t : IxTraverse I S A) (s : S) (f : I → A) : S := t.put s f
+
+/-- `ixtraverse`: apply `f` at every focus, with its index. -/
+def ixtraverse {I S A : Type} (t : IxTraverse I S A) (f : I → A → A) (s : S) : S :=
+  t.put s (fun i => f i (t.get s i))
+
+/-- `IxTraverse.over` is `ixtraverse` under the optic's namespace. -/
+def IxTraverse.over {I S A : Type} (t : IxTraverse I S A) (f : I → A → A) (s : S) : S :=
+  ixtraverse t f s
+
+/-- Nested traversals pair their indices: a leaf is `(outer, inner)`. Unlike `IxLens.comp`,
+the outer index cannot be discarded: it is what selects which inner traversal a leaf
+belongs to. -/
+def IxTraverse.comp {I J S A B : Type} (t : IxTraverse I S A) (u : IxTraverse J A B) :
+    IxTraverse (I × J) S B :=
+  IxTraverse.mk
+    (fun s ij => u.get (t.get s ij.1) ij.2)
+    (fun s f => t.put s (fun i => u.put (t.get s i) (fun j => f (i, j))))
+
+/-- A lens read as a one-focus traversal: the only index is `()`. -/
+def IxLens.toTraverse {I S A : Type} (l : IxLens I S A) : IxTraverse Unit S A :=
+  IxTraverse.mk
+    (fun s _ => (l.get s).2)
+    (fun s f => l.put s (f ()))
+
+/-- Two tabulations that agree pointwise are put back the same way. (This is the
+`funext` step that OTT makes definitional; naming it keeps `Eq.congrArg` from having to
+infer a function-valued equation.) -/
+def IxTraverse.put_congr {I S A : Type} (t : IxTraverse I S A) (s : S) {f g : I → A}
+    (h : (i : I) → f i = g i) : t.put s f = t.put s g :=
+  Eq.congrArg (t.put s) (funext h)
+
+-- ### Laws
+
+/-- GetPut: putting the foci back changes nothing. -/
+def IxTraverse.GetPut {I S A : Type} (t : IxTraverse I S A) : Prop :=
+  (s : S) → t.put s (fun i => t.get s i) = s
+
+/-- PutGet: after a put, reading index `i` gives what was put there. This is stronger than
+the lens PutGet: it is pointwise over the whole index type, so it also says the index set
+did not change. -/
+def IxTraverse.PutGet {I S A : Type} (t : IxTraverse I S A) : Prop :=
+  (s : S) → (f : I → A) → (i : I) → t.get (t.put s f) i = f i
+
+/-- PutPut: the last put wins. -/
+def IxTraverse.PutPut {I S A : Type} (t : IxTraverse I S A) : Prop :=
+  (s : S) → (f g : I → A) → t.put (t.put s f) g = t.put s g
+
+/-- A lawful indexed traversal. -/
+def IxTraverse.Lawful {I S A : Type} (t : IxTraverse I S A) : Prop :=
+  IxTraverse.GetPut t × IxTraverse.PutGet t × IxTraverse.PutPut t
+
+/-- Composition of lawful indexed traversals is lawful. -/
+def IxTraverse.comp_lawful {I J S A B : Type} (t : IxTraverse I S A) (u : IxTraverse J A B)
+    (ht : IxTraverse.Lawful t) (hu : IxTraverse.Lawful u) :
+    IxTraverse.Lawful (IxTraverse.comp t u) :=
+  (fun s =>
+    Eq.trans
+      (Eq.congrArg (t.put s) (funext (fun i => hu.1 (t.get s i))))
+      (ht.1 s),
+   fun s f ij =>
+    Eq.trans
+      (Eq.congrArg (fun a => u.get a ij.2)
+        (ht.2.1 s (fun i => u.put (t.get s i) (fun j => f (i, j))) ij.1))
+      (hu.2.1 (t.get s ij.1) (fun j => f (ij.1, j)) ij.2),
+   fun s f g =>
+    let f' : I → A := fun i => u.put (t.get s i) (fun j => f (i, j));
+    let g' : I → A := fun i => u.put (t.get (t.put s f') i) (fun j => g (i, j));
+    let g'' : I → A := fun i => u.put (t.get s i) (fun j => g (i, j));
+    Eq.trans
+      (IxTraverse.put_congr t (t.put s f') (fun i =>
+        Eq.trans
+          (Eq.congrArg (fun a => u.put a (fun j => g (i, j)))
+            (ht.2.1 s f' i))
+          (hu.2.2 (t.get s i) (fun j => f (i, j)) (fun j => g (i, j)))))
+      (ht.2.2 s f' g''))
+
+-- ## 3. Instances: a record and a vector
+
+/-- The two fields of `Point`, as an index type. -/
+inductive Field where
+  | x
+  | y
+
+/-- A homogeneous record: both fields are `Nat`, so the whole record is a tabulation. -/
+structure Point where
+  px : Nat
+  py : Nat
+
+/-- `Point` as an indexed traversal: the index is the field name. -/
+def pointIx : IxTraverse Field Point Nat :=
+  IxTraverse.mk
+    (fun p f => match f with
+      | .x => p.px
+      | .y => p.py)
+    (fun p g => Point.mk (g .x) (g .y))
+
+/-- `pointIx` is GetPut (by `rfl`). -/
+def pointIx_getPut : IxTraverse.GetPut pointIx := fun p => rfl
+/-- `pointIx` is PutGet (by cases on the field). -/
+def pointIx_putGet : IxTraverse.PutGet pointIx := fun p g f =>
+  match f with
+  | .x => rfl
+  | .y => rfl
+/-- `pointIx` is PutPut (by `rfl`). -/
+def pointIx_putPut : IxTraverse.PutPut pointIx := fun p f g => rfl
+/-- `pointIx` is lawful. -/
+def pointIx_lawful : IxTraverse.Lawful pointIx :=
+  (pointIx_getPut, pointIx_putGet, pointIx_putPut)
+
+/-- Put a tabulation into a vector *by the vector's structure*: no length is needed at
+run time, so the index `n` stays erased. -/
+def Vec.ixPut {A : Type} {0 n : Nat} : Vec A n → (Fin n → A) → Vec A n
+  | .nil, _ => .nil
+  | .cons x xs, f => .cons (f Fin.zero) (Vec.ixPut xs (fun i => f (Fin.succ i)))
+
+/-- Reading `Vec.ixPut v f` at `i` gives `f i`. -/
+def Vec.get_ixPut {A : Type} {0 n : Nat} : (v : Vec A n) → (f : Fin n → A) → (i : Fin n) →
+    Vec.get (Vec.ixPut v f) i = f i
+  | .nil, _, .mk .zero h => absurd h.1
+  | .nil, _, .mk (.succ _) h => absurd h.1
+  | .cons x xs, f, .mk .zero h => rfl
+  | .cons x xs, f, .mk (.succ k) h =>
+    Vec.get_ixPut xs (fun i => f (Fin.succ i)) (Fin.mk k h)
+
+/-- The tail's reads are the cons's reads at the successor index (a named pointwise
+lemma, so the proof below does not match on a `Fin` inside a lambda). -/
+def Vec.cons_get_succ {A : Type} {0 n : Nat} (x : A) (xs : Vec A n) :
+    (i : Fin n) → Vec.get (Vec.cons x xs) (Fin.succ i) = Vec.get xs i
+  | .mk k h => Vec.get_cons_succ x xs k h
+
+/-- `Vec.ixPut` respects pointwise equality of the tabulation (the congruence form that
+keeps the erased length out of the proof). -/
+def Vec.ixPut_congr {A : Type} {0 n : Nat} : (v : Vec A n) → {f g : Fin n → A} →
+    ((i : Fin n) → f i = g i) → Vec.ixPut v f = Vec.ixPut v g
+  | .nil, f, g, h => rfl
+  | .cons x xs, f, g, h =>
+    Eq.trans
+      (Eq.congrArg (fun y => Vec.cons y (Vec.ixPut xs (fun i => f (Fin.succ i)))) (h Fin.zero))
+      (Eq.congrArg (Vec.cons (g Fin.zero))
+        (Vec.ixPut_congr xs (fun i => h (Fin.succ i))))
+
+/-- Putting the reads back gives the vector (by induction on the vector, so the erased
+length is never needed). -/
+def Vec.ixPut_get {A : Type} {0 n : Nat} : (v : Vec A n) →
+    Vec.ixPut v (fun i => Vec.get v i) = v
+  | .nil => rfl
+  | .cons x xs =>
+    Eq.trans
+      (Eq.congrArg (fun y => Vec.cons y (Vec.ixPut xs (fun i => Vec.get (Vec.cons x xs) (Fin.succ i))))
+        (Vec.get_cons_zero x xs rfl))
+      (Eq.trans
+        (Eq.congrArg (fun w => Vec.cons x w)
+          (Eq.trans
+            (Vec.ixPut_congr xs (Vec.cons_get_succ x xs))
+            (Vec.ixPut_get xs)))
+        rfl)
+
+/-- A second put wins (by induction on the vector). -/
+def Vec.ixPut_ixPut {A : Type} {0 n : Nat} : (v : Vec A n) → (f g : Fin n → A) →
+    Vec.ixPut (Vec.ixPut v f) g = Vec.ixPut v g
+  | .nil, f, g => rfl
+  | .cons x xs, f, g =>
+    Eq.congrArg (Vec.cons (g Fin.zero))
+      (Vec.ixPut_ixPut xs (fun i => f (Fin.succ i)) (fun i => g (Fin.succ i)))
+
+/-- A vector as an indexed traversal: the index is the position. The put walks the
+vector, so `n` is erased. -/
+def vecIx {A : Type} {0 n : Nat} : IxTraverse (Fin n) (Vec A n) A :=
+  IxTraverse.mk
+    (fun v i => Vec.get v i)
+    (fun v f => Vec.ixPut v f)
+
+/-- `vecIx` is GetPut. -/
+def vecIx_getPut {A : Type} {0 n : Nat} : IxTraverse.GetPut (@vecIx A n) :=
+  fun v => Vec.ixPut_get v
+/-- `vecIx` is PutGet. -/
+def vecIx_putGet {A : Type} {0 n : Nat} : IxTraverse.PutGet (@vecIx A n) :=
+  fun v f i => Vec.get_ixPut v f i
+/-- `vecIx` is PutPut. -/
+def vecIx_putPut {A : Type} {0 n : Nat} : IxTraverse.PutPut (@vecIx A n) :=
+  fun v f g => Vec.ixPut_ixPut v f g
+/-- `vecIx` is lawful. -/
+def vecIx_lawful {A : Type} {0 n : Nat} : IxTraverse.Lawful (@vecIx A n) :=
+  (vecIx_getPut, vecIx_putGet, vecIx_putPut)
+
+-- ## 4. An indexed lens: a tagged record
+
+/-- A record whose focus is tagged: `tag` says where `val` lives. -/
+structure Tagged where
+  tag : Nat
+  val : Nat
+
+/-- The `val` field, indexed by the record's own tag. The put keeps the tag, so the index
+is preserved by construction (every law is `rfl`). -/
+def taggedL : IxLens Nat Tagged Nat :=
+  IxLens.mk
+    (fun t => (t.tag, t.val))
+    (fun t v => Tagged.mk t.tag v)
+
+/-- `taggedL` is GetPut (by `rfl`). -/
+def taggedL_getPut : IxLens.GetPut taggedL := fun t => rfl
+/-- `taggedL` is PutGet (by `rfl`). -/
+def taggedL_putGet : IxLens.PutGet taggedL := fun t v => rfl
+/-- `taggedL` is PutPut (by `rfl`). -/
+def taggedL_putPut : IxLens.PutPut taggedL := fun t v w => rfl
+/-- `taggedL` is index-preserving (by `rfl`). -/
+def taggedL_indexPreserved : IxLens.IndexPreserved taggedL := fun t v => rfl
+/-- `taggedL` is lawful. -/
+def taggedL_lawful : IxLens.Lawful taggedL :=
+  (taggedL_getPut, taggedL_putGet, taggedL_putPut, taggedL_indexPreserved)
+
+-- ## 5. A coindexed prism (the failing branch)
+
+-- A **coindex** is information flowing backwards on failure: which case did not match and
+-- why. Kmett's example is a prism returning an error message on failure; Oleg Grenrus
+-- implements it as an indexed profunctor `p i j a b` with an output index `j`. A total
+-- lens has no failure branch, so it cannot carry one.
+
+/-- A value or a coindex (the failure reason). `Result`'s error is fixed to `Error`; a
+coindex is the caller's own type. -/
+inductive CoResult (A J : Type) where
+  | ok (a : A)
+  | err (j : J)
+
+/-- A partial optic whose failure carries a coindex `J`; the success branch has a focus
+and a builder (the prism's backward map). -/
+structure CoPrism (J S A : Type) where
+  /-- match, or fail with a reason -/
+  run : S → CoResult A J
+  /-- build a source from a focus -/
+  build : A → S
+
+/-- Update the focus on success; a failed match leaves the source unchanged. -/
+def CoPrism.over {J S A : Type} (p : CoPrism J S A) (f : A → A) (s : S) : S :=
+  match p.run s with
+  | .ok a => p.build (f a)
+  | .err _ => s
+
+/-- BuildMatch: building a focus then matching gives it back (the prism law's success
+half). -/
+def CoPrism.BuildMatch {J S A : Type} (p : CoPrism J S A) : Prop :=
+  (a : A) → p.run (p.build a) = .ok a
+
+/-- The head of a list, as a coindexed prism: failure is `.outOfBounds`, the `Error` value
+`lib/Result.wiz` already has. `build` makes a singleton, so it is a prism, not a lens. -/
+def listHeadP {A : Type} : CoPrism Error (List A) A :=
+  CoPrism.mk
+    (fun l => match l with
+      | .nil => .err .outOfBounds
+      | .cons x _ => .ok x)
+    (fun x => List.cons x List.nil)
+
+/-- `listHeadP` is BuildMatch (by `rfl`). -/
+def listHeadP_buildMatch {A : Type} : CoPrism.BuildMatch (@listHeadP A) := fun a => rfl
+
+-- ## 6. Quantities: a linear indexed lens
+
+/-- The linear indexed store: the index is ω data, the focus and its backward function are
+at quantity 1 (`Store1 A S` with an index added; `Owned h` is the motivating token). -/
+def IxStore1 (I A S : Type) : Type := (i : I) × (1 _ : A) × ((1 _ : A) → S)
+
+/-- A linear indexed lens: the source and the focus are each used once. -/
+def IxLens1 (I S A : Type) : Type := (1 s : S) → IxStore1 I A S
+
+/-- Update a linear indexed focus. A `get` cannot be given: it would drop the residual
+`S`; a `set` cannot be given: it would drop the old focus (the same two negatives as
+`lib/OpticDep.wiz`'s `Lens1`). -/
+def IxLens1.over {I S A : Type} (l : IxLens1 I S A) (1 f : (i : I) → (1 _ : A) → A) (1 s : S) : S :=
+  let 1 st := l s;
+  let 1 (i, rest) := st;
+  let 1 (a, k) := rest;
+  k (f i a)
+
+/-- A linear focus in a linear indexed focus; the indices pair. -/
+def IxLens1.comp {I J S A B : Type} (l : IxLens1 I S A) (m : IxLens1 J A B) :
+    IxLens1 (I × J) S B := fun (1 s : S) =>
+  let 1 st := l s;
+  let 1 (i, rest) := st;
+  let 1 (a, k) := rest;
+  let 1 inner := m a;
+  let 1 (j, rest') := inner;
+  let 1 (b, h) := rest';
+  ((i, j), (b, fun (1 b' : B) => k (h b')))
+
+/-- The identity linear lens with an index: the token is the whole source, so `over`
+moves it with no duplication and no drop. `T = Owned h` is the case that matters. -/
+def tokenIx {T : Type} : IxLens1 Unit T T :=
+  fun (1 t : T) => ((), (t, fun (1 t' : T) => t'))
+
+-- ## 6b. Notation
+
+-- Arrow-style composition (decision O1), one operator per optic shape: an indexed lens
+-- composes with `▷` (the inner index wins), a tabular traversal with `⊛` (the indices
+-- pair). `⊳[...]` keeps both indices of two lenses.
+infixr:60 " ▷ " => IxLens.comp
+infixr:60 " ⊛ " => IxTraverse.comp
+notation:60 l " ⊳[" f "] " m => IxLens.icompose f l m
+
+-- ## 7. The coend shape, additively
+
+-- An indexed lens is a coend over the residual `M` with the index on the focus:
+--
+--     IxOptic I S A = ∫^{M : Type} (S → M × I × A) × (M × A → S)
+--
+-- Wiz has no quotients (decision O13: no coend primitive), so what can be written is the
+-- coproduct over residuals, its normal form, and the retraction — the same construction
+-- as `OpticDep.PreCoend`, with `I × A` in place of `A`.
+
+/-- One residual-`M` representation of an indexed lens. -/
+def IxRep (I S A M : Type) : Type := (S → M × I × A) × (M × A → S)
+
+/-- The coproduct `∐_M IxRep I S A M` (the pre-coend, before the identification). -/
+def IxPreCoend (I S A : Type) : Type 1 := (0 M : Type) × IxRep I S A M
+
+/-- The normal form: an indexed lens. -/
+def IxPreCoend.toIxLens {I S A : Type} (p : IxPreCoend I S A) : IxLens I S A :=
+  IxLens.mk
+    (fun s =>
+      let r := p.2;
+      let mia := r.1 s;
+      ((mia.2.1, mia.2.2)))
+    (fun s a =>
+      let r := p.2;
+      let mia := r.1 s;
+      r.2 (mia.1, a))
+
+/-- Every indexed lens is a representation with residual `S` (the Yoneda step). -/
+def IxPreCoend.ofIxLens {I S A : Type} (l : IxLens I S A) : IxPreCoend I S A :=
+  (S, (fun s => (s, ((l.get s).1, (l.get s).2)),
+    fun ma => l.put ma.1 ma.2))
+
+/-- The normal form of `ofIxLens l` is `l` (by `rfl`): the residual-`S` representation is
+the lens. The other direction is the coend's quotient (the sliding relation), which Wiz
+cannot state. -/
+def IxPreCoend.toIxLens_ofIxLens {I S A : Type} (l : IxLens I S A) :
+    IxPreCoend.toIxLens (IxPreCoend.ofIxLens l) = l := rfl
+
+-- (measured: inlining the variable-length vector lens drops a get from 11 to 8
+-- allocations by removing the lens record; the record and point lenses do not change)
+attribute [inline] vecIx

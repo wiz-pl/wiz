@@ -1041,4 +1041,24 @@ lens), the coend encoding as a coproduct of residual representations plus its no
 `Store1 A S = (1 _ : A) × ((1 _ : A) → S)` with `Lens1`, `Lens1.over`, `Lens1.comp` and
 `zoom1`: a linear optic moves a 1-quantity focus but has no `get`/`set`. Tests: `optic`.
 Design, laws, runtime (allocation counts) and open questions:
-`/workspace/wiz-notes/dependent-optics.md`.
+`wiz-notes/dependent-optics.md`.
+
+## H14 C4: indexed optics, and a coindexed prism (`lib/OpticIndexed.wiz`)
+
+`IxLens I S A` is a record of `get : S → I × A` and `put : S → A → S`: the focus's
+address (a field tag, a vector position) is returned with the focus, and
+`IndexPreserved` says a put does not move it. `IxTraverse I S A` is its tabular
+multi-focus form (`get : S → I → A`, `put : S → (I → A) → S`); `ixtraverse` applies a
+function of the index and the focus. A vector (`I = Fin n`) and a homogeneous record
+(`I = Field`) are the instances; `IxLens.icompose` combines two lens indices, while two
+traversals pair theirs (`I × J`) because a composite traversal must route every leaf.
+`IxLens.toStore` gives the region-lowering view `(I × A) × (A → S)` without changing
+`Store`; `IxLens.toDepLens`/`IxTraverse.toDepLens` read an indexed optic as a dependent
+lens at a constant family. `CoPrism J S A` is the coindexed partial optic: failure
+carries `J` (`.outOfBounds` for the list head), the Kmett/Grenrus "information back in
+the failing match". `IxLens1`/`IxStore1` move a quantity-1 focus (the `Owned` token in
+the tests) and have no `get`/`set`; `IxPreCoend` is the indexed coend's coproduct and
+normal form (`toIxLens ∘ ofIxLens = id` by `rfl`), the quotient being inexpressible.
+Tests: `optic`. The design decision (index the focus, coindex only on partial optics;
+no coend primitive; no change to `Store`), the laws, the runtime counts and the limits
+are in `wiz-notes/indexed-optics.md`.
