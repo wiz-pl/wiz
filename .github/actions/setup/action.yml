@@ -1,43 +1,55 @@
 name: Wiz toolchain
 description: >
   Nix with the flake's dev shell (GMP, Boehm GC, LLVM, cc, elan), the Cachix binary cache
-  if one is configured, and the elan toolchain from lean-toolchain (cached). Later steps
-  run in the dev shell through `shell: nix develop --command bash -eo pipefail {0}`.
+  if one is configured, and (for the jobs that still run Lake) the elan toolchain from
+  lean-toolchain (cached). Later steps run in the dev shell through
+  `shell: nix develop --command bash -eo pipefail {0}`.
 inputs:
   cachix-name:
-    description: The Cachix cache to pull from (and push to, given a token); empty for none.
+    description: The Cachix cache to substitute from; empty for none (pushing is a separate step).
     default: ""
   cachix-token:
-    description: The Cachix auth token; empty means pull only (e.g. pull requests from forks).
+    description: The Cachix auth token for substitution; empty means anonymous (fork pull requests).
     default: ""
+  lean:
+    description: >
+      Restore and save the elan toolchain. Only jobs that still run Lake need it (the
+      fixpoint and release.yml); the Nix build uses nixpkgs' Lean.
+    default: "true"
 runs:
   using: composite
   steps:
     # a self-hosted runner brings its own Nix (docs/ci-runner.md)
     - if: runner.environment == 'github-hosted'
       uses: cachix/install-nix-action@v31
+    # Substitution only: publishing is an explicit `cachix push` step in the build job
+    # (`nix shell nixpkgs#cachix -c cachix push …`, with the token in its environment), so
+    # this action never pushes whatever a job happened to build.
     - if: inputs.cachix-name != ''
       uses: cachix/cachix-action@v16
       with:
         name: ${{ inputs.cachix-name }}
         authToken: ${{ inputs.cachix-token }}
-        skipPush: ${{ inputs.cachix-token == '' }}
+        skipPush: true
     - name: Dev shell
       shell: bash
       run: nix develop --command bash -c 'cat grail.local.wiz; cc --version | head -1; elan --version'
-    # Restored everywhere, saved only by master (a 770 MB entry per pull request would
-    # crowd the repository's 10 GB Actions cache; pull requests read master's entry).
+    # Only for the jobs that pass lean: true. Restored everywhere it is needed, saved only
+    # by master (a 770 MB entry per pull request would crowd the repository's 10 GB
+    # Actions cache; pull requests read master's entry).
     - name: Restore the Lean toolchain
       id: elan-cache
+      if: inputs.lean == 'true'
       uses: actions/cache/restore@v4
       with:
         path: ~/.elan
         key: elan-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ hashFiles('lean-toolchain') }}
     - name: Lean toolchain
+      if: inputs.lean == 'true'
       shell: bash
       run: nix develop --command bash -c 'lake --version'
     - name: Save the Lean toolchain (master)
-      if: steps.elan-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/master'
+      if: inputs.lean == 'true' && steps.elan-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/master'
       uses: actions/cache/save@v4
       with:
         path: ~/.elan

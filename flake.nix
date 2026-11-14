@@ -150,14 +150,21 @@
             };
           };
           # The test driver (`tests --list`, `tests --run GROUP INDEX`), from the same
-          # build as wiz and grail (so `nix build .#wiz` builds it too).
+          # build as wiz and grail (so `nix build .#wiz` builds it too). The driver looks
+          # for `wiz`/`grail` beside itself (`IO.appPath.parent` in Tests/Grail.lean), so
+          # the wrapped binaries are installed here too: their flags carry the packaged
+          # library, cache and C toolchain, exactly what a `.lake/build/bin/wiz` in a
+          # checkout has.
           tests = pkgs.stdenv.mkDerivation {
             pname = "wiz-tests";
             inherit (unwrapped) version;
             dontUnpack = true;
             installPhase = ''
               runHook preInstall
-              install -Dm755 ${unwrapped}/bin/tests $out/bin/tests
+              mkdir -p $out/bin
+              install -m755 ${unwrapped}/bin/tests $out/bin/tests
+              install -m755 ${wiz}/bin/wiz $out/bin/wiz
+              install -m755 ${wiz}/bin/grail $out/bin/grail
               runHook postInstall
             '';
             meta = {

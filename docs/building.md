@@ -77,10 +77,11 @@ the artifact cache never serves a stale one. The only one today is the C runtime
 `runtime/WizRuntime.lean` (library `WizRuntime`, imported by `Wiz/Compiler/C.lean`); the
 parts are concatenated in the order of the old single file, so generated C is unchanged.
 A new `include_str` goes in such a library too, not in `Wiz` (a `needs` on `Wiz` would
-rebuild all of it); `scripts/test-embed.sh` checks the setup (CI runs it in the build
-job), and `scripts/test-runtime.sh` compiles the runtime alone with `cc -fsyntax-only
--Wall -Wextra`, with `WIZ_API=` and `WIZ_API=static` (the header's prototypes are checked
-against the parts).
+rebuild all of it); `scripts/test-embed.sh` checks the setup (a local
+`nix develop -c scripts/test-embed.sh` check, since it needs an incremental Lake build;
+CI runs only `scripts/test-runtime.sh`), and `scripts/test-runtime.sh` compiles the
+runtime alone with `cc -fsyntax-only -Wall -Wextra`, with `WIZ_API=` and `WIZ_API=static`
+(the header's prototypes are checked against the parts).
 
 ## Test layout
 
@@ -154,12 +155,41 @@ which grail and the test driver read (`Tests/Main.lean`; flags to `lake test -- 
 `wiz` takes flags. Nothing reads environment variables.
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on pushes and pull requests to
-`master`. Every job runs in that dev shell (with the Cachix cache, when
-one is configured); the elan toolchain and `.lake` (including Lake's artifact cache) are
-cached between runs.
+`master`. The toolchain is built **once**, with Nix: the `build` job runs
+`nix build .#wiz .#tests` (nixpkgs' Lean, no Lake artifact cache) and publishes the two
+store paths to Cachix with
 
-* **The test suite** runs in parallel shards, one job per entry of `.github/test-shards.json` (each entry
-  is a list of `lake test` selectors). A group that no shard's selectors pick runs in
+```sh
+nix shell nixpkgs#cachix -c cachix push badlydrawnwizards $(nix path-info .#wiz .#tests)
+```
+
+with `CACHIX_AUTH_TOKEN` (the repository secret) in that step's environment only. A Nix
+build has no Lake artifact cache: a commit's first build compiles every module in the
+sandbox (Lean comes from nixpkgs), and a rerun of the same commit substitutes the store
+paths. Pull requests from forks get no secret: they skip the push and their shards build
+the paths themselves. The `test`, `trust-ledger` and `docs` jobs pull from Cachix
+(`cachix-action` is set up for substitution only, `skipPush: true`); no job on the
+critical path runs `lake build` directly or saves a `.lake` Actions cache. The shards run the
+Nix-built test driver (`packages.tests`), not `lake test`, and symlink the store `wiz`
+and `grail` into the checkout's `.lake/build/bin`, which some cases and
+`scripts/trust-ledger.sh` name directly (the driver also carries the wrapped `wiz` and
+`grail` beside itself, which `Tests/Grail.lean` looks for). The dev shell (`nix develop`)
+is still what puts `cc`, `llc`, z3, cadical and Neovim on `PATH`, and it writes
+`grail.local.wiz` for the cases that compile C.
+
+The Nix build is about 353 MB for `wiz` (1.8 GB with its closure: Lean, GMP, Boehm GC,
+LLVM) and 165 MB for the test driver (2.0 GB with its closure, which includes the wrapped
+`wiz` it carries beside itself), so a shard's substitution is a download, not a compile. The store path is content-addressed: the same
+sources give the same path, and a shard on another architecture (the aarch64 caveat in
+[ci-runner.md](ci-runner.md)) has a different one and builds it there. The weekly
+bootstrap fixpoint, the release workflow and `scripts/test-embed.sh` still use Lake and
+the elan toolchain, so the setup action keeps the elan cache for those
+(`lean: true`); it is skipped in the Nix jobs (`lean: false`).
+
+* **The test suite** runs in parallel shards, one job per entry of
+  `.github/test-shards.json` (each entry is a list of test-driver selectors, the same
+  ones `lake test --` takes; the shards run the Nix-built `tests` binary). A group that
+  no shard's selectors pick runs in
   the shard its `Group.shard` names, else in the shard marked `"default": true`
   (`library`), so **a new group needs no edit there**; the build job checks that every
   case is in exactly one shard (`scripts/ci.py check-shards`, after splitting). See
@@ -197,7 +227,7 @@ cached between runs.
   `prop`, `audit`), so adding a slow case there does not unbalance `core`.
   To refresh the baseline from a CI run:
   `gh run download RUN -n test-timings && scripts/ci.py baseline timings.jsonl > .github/test-timings.json`.
-* **`"jobs"`.** A shard may say `"jobs": N` to give `lake test` `--jobs N` (above): its
+* **`"jobs"`.** A shard may say `"jobs": N` to give the test driver `--jobs N` (above): its
   opted-in groups run N cases at a time. Only set it on a shard whose groups were
   verified (and opted in) to be safe in parallel; `core`, `library` and `backends` use
   4 on the 4-core hosted runner. A shard of one long case (`grail-selfhost`,
@@ -240,15 +270,17 @@ cached between runs.
   equals its stage-2 C) runs weekly on `master`, or from "Run workflow" with
   `fixpoint` ticked. It takes a long time; run it locally with `nix develop -c
   scripts/fixpoint.sh`.
-* **The Nix package** (the `nix package` job): `nix build .#wiz` builds `wiz` and
-  `grail` with Lake and nixpkgs' Lean (the flake checks that it is the version in
-  `lean-toolchain`), and wraps them with the toolchain as flags (`--cc`, `--cflags`,
-  `--ldflags`, `--llc`, `--gc-cflags`, `--gc-ldflags`; flags you pass come later and
-  win) and, for `wiz`, the packaged standard library as a module root after `./lib`. CI
-  pushes it to the public Cachix cache `badlydrawnwizards` on pushes and on pull
-  requests from this repository (which have the token). The tests still use Lake, whose
-  artifact cache rebuilds only what changed. `packages.tests` is the test driver
-  (`nix run .#tests -- --list`), from the same build, so building `wiz` builds it too.
+* **The Nix package** (the `build` job; the old separate `nix package` job is folded
+  into it): `nix build .#wiz .#tests` builds `wiz` and `grail` with Lake in the Nix
+  sandbox and nixpkgs' Lean (the flake checks that it is the version in `lean-toolchain`)
+  and the test driver from the same build, and wraps the binaries with the toolchain as
+  flags (`--cc`, `--cflags`, `--ldflags`, `--llc`, `--gc-cflags`, `--gc-ldflags`; flags
+  you pass come later and win) and, for `wiz`, the packaged standard library as a module
+  root after `./lib`. The job then checks the package from a directory with no checkout
+  (`nix run "$GITHUB_WORKSPACE#wiz" -- check/build …`, and `#grail` starts), so the
+  publication path is exercised before the push. It publishes to the public Cachix cache
+  `badlydrawnwizards` from `master` and from this repository's pull requests (which have
+  the token); `packages.tests` is `nix run .#tests -- --list`.
 * **The packaged read-only elaboration cache.** The `wiz` package prewarms the
   elaboration cache during its build and installs it at `$out/share/wiz/cache`: the
   `.wizc` effects and the `.wizm` seen markers, with no `bin/` memo and `a-w`
@@ -282,7 +314,7 @@ cached between runs.
   read-only in the store, so a miss (a user's own module) is elaborated and written to
   the write cache as usual.
 * **The Wiz build caches.** Each test shard keeps what the suite builds from Wiz
-  programs between runs: the elaboration cache (`lake test -- --cache ~/.cache/wiz …`),
+  programs between runs: the elaboration cache (`tests --cache ~/.cache/wiz …`),
   `.grail`, and the self-hosted checker and compiler that the tests compile
   (`/tmp/wiz-selfhost-*`). The cache key starts with a hash of everything the compiler
   is made of (the `.lean` files, Lean, `flake.lock`), and partial hits only come from the
@@ -293,12 +325,12 @@ cached between runs.
   can ship one in `$out/share/wiz/cache` for `--cache-ro $out/share/wiz/cache`, so CI and
   users share a warm cache without a writable store path; a run with no write cache
   hashes the wiz executable each time instead of remembering it under `bin/`.
-* **Storage.** The repository's Actions cache holds 10 GB and evicts the least recently
-  used entries, so pull requests don't keep big entries: the elan toolchain (~770 MB) is
-  saved only by `master` (pull requests restore master's), and a pull request's (or merge
-  queue entry's) `lake-*` and `exercises-*` entries (~500 MB each), saved only to hand
-  the build to its test shards, are deleted by the `CI result` job when the run ends
-  (not when it is cancelled). The next push restores master's build and catches up.
+* **Storage.** CI no longer stores the build in the Actions cache: the build lives in the
+  Nix store and is shared through Cachix (~350 MB for `wiz` plus its closure; the test
+  driver is ~165 MB, with `wiz` in its closure, on x86_64-linux). The Actions cache now
+  holds only the per-shard Wiz build caches (the elaboration cache, `.grail`,
+  `/tmp/wiz-selfhost-*`) and the elan toolchain (~770 MB, saved only by `master`; pull
+  requests restore master's entry), which only the fixpoint/release jobs still need.
   Artifacts are short-lived: test logs 3 days, `test-timings` 7 days on master (2
   elsewhere), `test-timings-baseline` 7 days, the release tarball 90 days for a tag,
   7 for a snapshot (both are also release assets) and 3 for a pull request.
@@ -344,9 +376,25 @@ nix run --option extra-substituters https://badlydrawnwizards.cachix.org \
 or `cachix use badlydrawnwizards` once and then `nix run
 github:wiz-pl/wiz#wiz -- …` (`#grail` for grail; `wiz build FILE -o OUT`
 works out of the box). Without a branch the flake reference means the default branch,
-`master`, whose binaries are on Cachix once its `nix package` job has run. The
+`master`, whose binaries are on Cachix once its `build` job has pushed them. The
 `--option`s count only for a trusted Nix user (or with the cache in `nix.conf`);
 otherwise Nix builds wiz from source, which takes a few minutes.
+
+The same store path is a tower toolchain: `/share/wiz` has the layout tower accepts
+(`.lake/build/bin/wiz`, `bin/grail`, `lib/`). To use the build under a name:
+
+```sh
+wiz=$(nix build .#wiz --no-link --print-out-paths)
+tower toolchain link "ci-$(git rev-parse --short HEAD)" "$wiz/share/wiz"
+tower run "ci-$(git rev-parse --short HEAD)" -- wiz check hello.wiz
+tower run "ci-$(git rev-parse --short HEAD)" -- grail --version
+```
+
+`tower settings` can also take future toolchains from this flake rather than building
+them with Lake: `tower set source nix`, `tower set flake github:wiz-pl/wiz` (and
+`tower set releases wiz-pl/wiz` for the release source), then
+`tower toolchain install master@<sha> --source nix` substitutes the Cachix build. CI
+does not install a toolchain: it consumes the `nix build` outputs directly.
 
 `#nvim-wiz` is Neovim with the Wiz plugin (editors/nvim, docs/stages/11-tooling.md
 11p) and this wiz on `PATH`: `nix run github:wiz-pl/wiz#nvim-wiz --
