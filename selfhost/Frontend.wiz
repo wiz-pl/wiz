@@ -2355,6 +2355,50 @@ def headImplicit : List Bool → Bool
 def descFn : Tm → Tm
   | .darg _ _ f => f
   | t => t
+-- (A16) The level syntax of `Sort`: a closed level, built from numerals, `max`, `imax`
+-- and `+ n` (the kernel's `Lvl`, `Kernel.wiz:32`). A level parameter or a hole needs
+-- universe polymorphism (A15), which the self-hosted frontend does not have yet.
+inductive LR where
+  | ok (l : Lvl)
+  | err (msg : String)
+def lvlSyntaxErr : String :=
+  "a Sort needs a closed level (a numeral, or max/imax/+ of closed levels): universe parameters and holes are not supported by the self-hosted frontend (A15)"
+def lvlAdd (l : Lvl) : Nat → Lvl
+  | .zero => l
+  | .succ k => .lsucc (lvlAdd l k)
+def levelOfGo : Nat → Syntax → LR
+  | .zero, _ => .err "a Sort's level is nested too deeply (more than 64 levels)"
+  | .succ f, s =>
+    let k := kindOf s;
+    match strEq k "level.num" with
+    | .true => .ok (.lnum (numValue (kid s 0)))
+    | .false => match strEq k "level.param" with
+      | .true => .err lvlSyntaxErr
+      | .false => match strEq k "level.hole" with
+        | .true => .err lvlSyntaxErr
+        | .false => match strEq k "level.paren" with
+          | .true => levelOfGo f (kid s 1)
+          | .false => match strEq k "level.max" with
+            | .true => match levelOfGo f (kid s 1) with
+              | .err m => .err m
+              | .ok x => match levelOfGo f (kid s 2) with
+                | .err m => .err m
+                | .ok y => .ok (.lmax x y)
+            | .false => match strEq k "level.imax" with
+              | .true => match levelOfGo f (kid s 1) with
+                | .err m => .err m
+                | .ok x => match levelOfGo f (kid s 2) with
+                  | .err m => .err m
+                  | .ok y => .ok (.limax x y)
+              | .false => match strEq k "level.add" with
+                | .true => match levelOfGo f (kid s 0) with
+                  | .ok l => .ok (lvlAdd l (numValue (kid s 2)))
+                  | e => e
+                | .false => .err (String.append "unsupported universe level " k)
+def levelOf (s : Syntax) : LR := levelOfGo 64 s
+def sortLvlSyntax (s : Syntax) : LR := match kids (kid s 1) with
+  | .cons l _ => levelOf l
+  | .nil => .ok (.lnum 0)
 mutual
 -- infer the type of `s` (an identifier's leading implicit arguments are inserted)
 def inferT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
@@ -2402,9 +2446,13 @@ def identHead (gs : Globals) (es : ES) (cx : Cx) (n : String) : HE :=
         | .err msg => .err msg
       | e => e
     | .none => match strEq n "Unit" with
-      -- (built in, like `Type`)
+      -- (built in, like `Type`, `True` and `False`: the kernel's `unit`, `ptrue`, `pfalse`)
       | .true => .ok (.unit 0) (.vsort (.lnum 1)) es .nil
-      | .false => .err (String.append "unknown identifier " n)
+      | .false => match strEq n "True" with
+        | .true => .ok .ptrue (.vsort (.lnum 0)) es .nil
+        | .false => match strEq n "False" with
+          | .true => .ok .pfalse (.vsort (.lnum 0)) es .nil
+          | .false => .err (String.append "unknown identifier " n)
   | .some i => match Nat.lt i d with
     | .true => .ok (.var i) (lookup (TCtx.types (Cx.c cx)) i) es .nil
     | .false => match globalTm .false gs (i - d) with
@@ -2470,6 +2518,79 @@ def insertImplicits (gs : Globals) (es : ES) (cx : Cx) (t : Tm) (ty : Val) (m : 
       | .mk mt es' => insertImplicits gs es' cx (.app t mt) (eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod) rest
     | _ => .ok t ty es
   | _ => .ok t ty es
+-- **The proof surface (A16)**. The kernel's forms for `Prop`, `Sort`, equality, `refl`,
+-- `cast` and `transp` had no handlers before; these build them (and the kernel type
+-- checks the result, as for every other term).
+--
+-- `a = b`: `eq A a b`, with `A` the type of `a` (a proposition, `Sort 0`)
+def inferEq (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
+  match inferT gs es cx (kid s 0) with
+  | .ok a ty es1 =>
+    let d := Cx.lvl cx;
+    let A := force es1 ty;
+    match checkT gs es1 cx (kid s 2) A with
+    | .ok b _ es2 => .ok (.eq (quote d A) a b) (.vsort (.lnum 0)) es2
+    | e => e
+  | e => e
+-- `refl a`: `reflTy a` when `a` is a type (`EqTy a a`), else `refl A a` (`a =_A a`)
+def inferRefl (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
+  match inferT gs es cx (kid s 1) with
+  | .ok a ty es1 =>
+    let d := Cx.lvl cx;
+    let v := eval (TCtx.env (Cx.c cx)) a;
+    let A := force es1 ty;
+    match whnf A with
+    | .vsort _ => .ok (.tyRefl a) (vEqType v v) es1
+    | _ => .ok (.eqRefl (quote d A) a) (vEq A v v) es1
+  | e => e
+-- `rfl` against the expected type: an equation, at a term (`refl A a`) or between types
+-- (`reflTy X`), or a proposition that computed to `True` (`()`). The kernel checks it.
+def checkRfl (gs : Globals) (es : ES) (cx : Cx) (ty : Val) : TE :=
+  let d := Cx.lvl cx;
+  match whnf ty with
+  | .vne (.heq A a b) .snil => .ok (.eqRefl (quote d A) (quote d a)) ty es
+  | .vne (.heqTy X Y) .snil => .ok (.tyRefl (quote d X)) ty es
+  | .vunit _ => .ok .star ty es
+  | v => .err (String.append "rfl: the expected type is not an equation (it may have computed further): "
+      (show (scopeNames (Cx.sc cx)) d (quote d v)))
+-- `cast e t` along `e : A ≡ B`: `coe A B e t : B` (`t : A`)
+def inferCast (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
+  match inferT gs es cx (kid s 1) with
+  | .ok e ety es1 => match whnf (force es1 ety) with
+    | .vne (.heqTy X Y) .snil =>
+      let d := Cx.lvl cx;
+      match checkT gs es1 cx (kid s 2) X with
+      | .ok t _ es2 => .ok (.coe (quote d X) (quote d Y) e t) Y es2
+      | e => e
+    | .vempty _ => .err "cannot infer the type of this cast: its proof's type is an empty equation, so it no longer shows the target type; write `(cast e t : T)`"
+    | .vunit _ => .err "cannot infer the type of this cast: its proof's type computed to True, so it no longer shows the target type; write `(cast e t : T)`"
+    | v => .err (String.append "cannot infer the type of this cast: its proof's type is not an equation, but "
+        (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) v)))
+  | e => e
+-- `transp P p e` along `e : a = b`: `subst A a P p b e : P b e`, with
+-- `P : (b : A) → a = b → Prop` and `p : P a (refl A a)`
+def inferTransp (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
+  match inferT gs es cx (kid s 3) with
+  | .ok e ety es1 => match whnf (force es1 ety) with
+    | .vne (.heq A a b) .snil =>
+      let d := Cx.lvl cx;
+      let i : Lvl := match sortOf (Cx.c cx) A with
+        | .some l => l
+        | .none => .lhole;
+      -- `(b :0 A) → (_ :0 a =_A b) → Prop` (the kernel's `subst` motive type)
+      let motiveTy : Val := .vpi .qz i (ln 1) A (.cons a (.cons A .nil))
+        (.pi .qz (ln 0) (ln 1) (.eq (.var 2) (.var 1) (.var 0)) .prop);
+      match checkT gs es1 cx (kid s 1) motiveTy with
+      | .ok P _ es2 =>
+        let vP := eval (TCtx.env (Cx.c cx)) P;
+        match checkT gs es2 cx (kid s 2) (vapp (vapp vP a) (.vne (.hrefl A a) .snil)) with
+        | .ok p _ es3 => .ok (.subst (quote d A) (quote d a) P p (quote d b) e)
+            (vapp (vapp vP b) (suspend (TCtx.env (Cx.c cx)) e)) es3
+        | e => e
+      | e => e
+    | v => .err (String.append "transp: expected a proof of an equation, got "
+        (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) v)))
+  | e => e
 -- the other forms
 def inferT1 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
   let k := kindOf s;
@@ -2485,6 +2606,22 @@ def inferT1 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
     | .true => .ok .star (.vunit 1) es
     | .false => match strEq k "term.type" with
     | .true => .ok (.univ (univLevel s)) (.vsort (.lnum (univLevel s + 2))) es
+    | .false => match strEq k "term.prop" with
+    | .true => .ok .prop (.vsort (.lnum 1)) es
+    | .false => match strEq k "term.sort" with
+    | .true => match sortLvlSyntax s with
+      | .ok l => .ok (.sortL l) (.vsort (.lsucc l)) es
+      | .err m => .err m
+    | .false => match strEq k "term.eq" with
+    | .true => inferEq gs es cx s
+    | .false => match strEq k "term.refl" with
+    | .true => inferRefl gs es cx s
+    | .false => match strEq k "term.cast" with
+    | .true => inferCast gs es cx s
+    | .false => match strEq k "term.transp" with
+    | .true => inferTransp gs es cx s
+    | .false => match strEq k "term.rfl" with
+    | .true => .err "cannot infer the type of rfl; add a type ascription"
     | .false => match strEq k "term.app" with
       | .true => match inferHead gs es cx (kid s 0) with
         | .ok f fty es' m => appArgsT gs es' cx f fty m (kids (kid s 1)) .nil .none .nil
@@ -2809,6 +2946,8 @@ def checkT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
       | .true => checkLams gs es cx (binders (kids (kid s 1))) (binderWs (kids (kid s 1))) (kid s 3) ty
       | .false => match strEq k "term.let" with
         | .true => letT gs es cx s (.some ty)
+        | .false => match strEq k "term.rfl" with
+        | .true => checkRfl gs es cx (force es ty)
         | .false => match (match strEq k "term.app" with
           | .true => match inferHead gs es cx (kid s 0) with
             | .ok f fty es1 m => appExpected gs es1 cx (kid s 0) f fty m (kids (kid s 1)) ty

@@ -717,3 +717,37 @@ checked once), a cycle, a missing module, a duplicate name across modules, a `-I
 and the cache key (stable for one graph, different when a module's text changes). `wiz
 check` of the generated self-hosted sources passes, and the self-hosted frontend still
 checks itself.
+
+## 21z: the proof surface in the self-hosted frontend (A16)
+
+The self-hosted frontend could define data and functions but not state or prove a
+proposition: `term.prop`, `term.sort`, `term.eq`, `term.refl`, `term.rfl`, `term.cast`
+and `term.transp` had no handlers (the parser already produced them, the kernel already
+had the forms). `Frontend.wiz` now elaborates them:
+
+* `Prop` is the kernel's `.prop` (`Sort 0`); `Sort n` is `.sortL`, with the level read
+  from the level syntax: numerals, `max`, `imax` and `+ n`, closed. A level parameter
+  or hole is an error naming A15 (universe polymorphism is not in this frontend yet).
+  `Sort 0` and `Sort (max 1 2)` are the tests; `Type n` is unchanged.
+* `a = b` is `.eq A a b` (`A` the inferred type of `a`, the result in `Prop`).
+* `refl a` is `.tyRefl a` when `a` is a type and `.eqRefl A a` otherwise; `rfl` is
+  checked against the expected equation (`.eqRefl`, `.tyRefl`, or the unit proof for an
+  equation that computed to `True`), and a non-equation expected type is an error.
+* `cast e t` is `.coe A B e t`, with `e : A ≡ B` (the equation's type must still show
+  its sides: a computed one is reported, as in the Lean frontend).
+* `transp P p e` is `.subst A a P p b e`, with `P : (b : A) → a = b → Prop` and
+  `p : P a (refl A a)`.
+* `True` and `False` are built-in names for `.ptrue`/`.pfalse` (like `Unit`).
+
+Nothing in `Kernel.wiz` changed: the kernel infers/checks and marks the terms like every
+other declaration. Types still have no `Eq` name (only the `a = b` form), and `by`
+(tactics, A13), macros/notation (A12) and `deriving` (A11) remain the next surface
+pieces; `Sort` beyond closed levels needs A15.
+
+**Tests** (group `selfhost`): a file with `n = n` by `rfl`, a `Prop`-valued definition,
+`Prop`, `Sort 0`, `Sort (max 1 2)`, a `Sort`-typed definition, a polymorphic `cast`, a
+`transp` along an equality (its motive a proposition), `True`/`False`, four rejected
+proofs/types (a wrong equation by `rfl`, `Prop := Type`, `Sort 1 := Type 1`, `cast` on
+`False`) and the A15 level error; a differential case with the same 11 declarations
+accepted/rejected by the Lean frontend and the self-hosted one; `wiz check` of the
+generated self-hosted sources passes, and the self-hosted frontend still checks itself.
