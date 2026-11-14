@@ -369,3 +369,37 @@ is the fallback if cross-unit inlining cannot be recovered: byte-identical outpu
 
 Raising grail's `-j` default is not one of them: the 4 -> 8 gain is 1.27×, and
 memory per check job is the limit of the shared heavy slot.
+### 15l: the performance dashboard
+
+`scripts/perf-dashboard.py` turns the measurement log into one self-contained HTML page
+(inline CSS, JS and SVG; it loads nothing from the network, and writes the file through a
+temporary name and a rename, so it is safe to re-run):
+
+```sh
+python3 scripts/perf-dashboard.py                       # wiz-tools/perf-history.tsv
+python3 scripts/perf-dashboard.py --timings RUNS --html out.html
+```
+
+`--history TSV` is the measurement log (a row per run: date, commit, label, seconds, max
+RSS, exit code), `--repo DIR` the checkout whose `git log` orders commits and names them
+from their merge commits, `--gap MIN` the pause between measurements that starts a new
+window, and `--out`/`--html` the page to write. Labels lose their `@worktree` suffix;
+failed runs are counted but leave out the medians, and A/B pairs compare each measured
+commit with its nearest measured ancestor inside a window's interleaved rounds.
+
+**CI test timings.** `--timings FILE_OR_DIR` (repeatable) ingests `test-timings.jsonl`
+artifacts — the records `lake test --timings` writes and `scripts/ci.py summary` reads,
+one per case (`shard`, `group`, `index`, `case`, `seconds`, `ok`, `notes`) — beside the
+measurement log. A directory (a `gh run download -n test-timings` tree) is searched for
+`*.jsonl`, one file is one run. A run's date and commit are not in the artifact: they
+come from a `<name>.meta.json` sidecar, the records' optional `date`/`commit` fields, a
+7–40 digit hex commit in the file name or a parent directory's name, else `--commit` and
+`--at`. The page then has a *CI test timings* section: a table of runs, each group's
+case count, total (the sum of its passed cases) with its median across runs, the change
+from the previous run and a sparkline, and the slowest cases with their medians and
+maximums. Since CI runs cases with `--jobs`, a group's total is test time, not wall
+time; compare groups over runs, not runs on different runners.
+
+`scripts/test-perf-dashboard.sh` checks the two input formats and the self-contained
+output against the small fixtures in `scripts/fixtures/perf/` (under a second, no
+toolchain). The page is published from the notes directory (`wiz-notes/`).
