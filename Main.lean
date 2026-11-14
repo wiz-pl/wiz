@@ -1,4 +1,5 @@
 import Wiz
+import Wiz.Attest
 import Wiz.Version
 import Wiz.Doc.Site
 
@@ -10,6 +11,12 @@ def usage : String := "usage:
   wiz check [-I DIR] FILE elaborate and type check (quantities: 0, 1, ω); -I DIR: another
                           module root (a package's src/), before or after FILE
   wiz build FILE -o OUT [--llvm]   compile the definition `main` to an executable (via C or LLVM)
+  wiz build FILE -o OUT [--attest [FILE]]  … and write a build attestation (default
+                                   OUT.attest.json: an unsigned in-toto statement, see
+                                   stage 11ae and docs/building.md)
+  wiz verify [--attest FILE] ARTIFACT  check an attestation against ARTIFACT (default
+                                   FILE: ARTIFACT.attest.json); non-zero on a mismatch;
+                                   --artifact-only skips re-hashing the inputs
   wiz build FILE -o OUT [--split N]  compile the program as N C units in parallel
                                    (default 1: one unit; a split build is faster but the
                                    generated program runs somewhat slower, stage 15k)
@@ -171,6 +178,25 @@ def takeSplitOpt : List String → Except String (Option Nat × List String)
     return (k, a :: rest)
   | [] => return (none, [])
 
+/-- Take `--attest [FILE]` out of the arguments: `some FILE` when a file is given,
+`some ""` for the bare flag (the default path, `OUT.attest.json`), `none` without it.
+`--attest` also takes no file when the next word is another flag. -/
+partial def takeAttestOpt : List String → Except String (Option String × List String)
+  | "--attest" :: rest =>
+    match rest with
+    | f :: more =>
+      if f.startsWith "-" then do
+        let (o, a) ← takeAttestOpt rest
+        return (o.orElse (fun _ => some ""), a)
+      else do
+        let (_, a) ← takeAttestOpt more
+        return (some f, a)
+    | [] => return (some "", [])
+  | a :: rest => do
+    let (o, r) ← takeAttestOpt rest
+    return (o, a :: r)
+  | [] => return (none, [])
+
 /-- Take `--inert MODE` out of the arguments. -/
 def takeInertOpt : List String → Except String (Option InertReg × List String)
   | "--inert" :: m :: rest => do
@@ -319,11 +345,34 @@ def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOne
   pure (if s.messages.any (·.severity == .error) then none else some s)
 
 def buildCmd (tc : Toolchain) (path out : String) (llvm : Bool) (lib : Bool := false) (noMain : Bool := false)
-    (split : Nat := 0) : IO UInt32 := do
+    (split : Nat := 0) (attest : Option String := none) : IO UInt32 := do
   let some s ← elabFile tc path | pure 1
   match ← Build.build tc s "main" out llvm lib noMain split with
   | .error e => IO.eprintln e; pure 1
-  | .ok _ => pure 0
+  | .ok _ =>
+    match attest with
+    | none => pure 0
+    | some file =>
+      let file : System.FilePath := System.FilePath.mk (if file.isEmpty then out ++ ".attest.json" else file)
+      match ← Attest.emit tc path (System.FilePath.mk out) llvm lib noMain split file with
+      | .error e => IO.eprintln s!"attest: {e}"; pure 1
+      | .ok () => IO.eprintln s!"wiz: attestation written to {file}"; pure 0
+
+/-- `wiz verify [--attest FILE] [--artifact-only] ARTIFACT`. -/
+def verifyCmd (tc : Toolchain) (attest : Option String) (args : List String) : IO UInt32 := do
+  let artifactOnly := args.contains "--artifact-only"
+  let args := args.filter (· != "--artifact-only")
+  match args with
+  | [artifact] =>
+    let file := match attest with
+      | some f => if f.isEmpty then artifact ++ ".attest.json" else f
+      | none => artifact ++ ".attest.json"
+    match ← Attest.verify (System.FilePath.mk file) (System.FilePath.mk artifact) (!artifactOnly) tc with
+    | .ok v => IO.println v; pure 0
+    | .error e => IO.eprintln s!"verify: {e}"; pure 1
+  | _ =>
+    IO.eprintln "usage: wiz verify [--attest FILE] [--artifact-only] ARTIFACT"
+    pure 2
 
 def runCmd (tc : Toolchain) (path : String) (llvm : Bool) (split : Nat := 0) : IO UInt32 := do
   let some s ← elabFile tc path | pure 1
@@ -382,6 +431,10 @@ def main (args : List String) : IO UInt32 := do
       if let some k := k then splitOpt.set k
       pure a
     | .error e => do IO.eprintln e; return 1
+  let args ← match takeAttestOpt args with
+    | .ok (o, a) => pure (a, o)
+    | .error e => do IO.eprintln e; return 1
+  let (args, attest) := args
   let args ← match kernelOpt args with
     | .ok (r, p, a) => do kernelOpts.set (r, p); pure a
     | .error e => do IO.eprintln e; return 1
@@ -392,14 +445,15 @@ def main (args : List String) : IO UInt32 := do
   match args with
   | ["parse", path] => parseCmd path
   | ["check", path] => checkCmd tc path
-  | ["build", path, "-o", out] => buildCmd tc path out false (split := split)
-  | ["build", path, "-o", out, "--llvm"] => buildCmd tc path out true (split := split)
-  | ["build", path, "-o", out, "--lib"] => buildCmd tc path out false true (split := split)
+  | ["build", path, "-o", out] => buildCmd tc path out false (split := split) (attest := attest)
+  | ["build", path, "-o", out, "--llvm"] => buildCmd tc path out true (split := split) (attest := attest)
+  | ["build", path, "-o", out, "--lib"] => buildCmd tc path out false true (split := split) (attest := attest)
   | ["build", path, "-o", out, "--lib", "--llvm"] | ["build", path, "-o", out, "--llvm", "--lib"] =>
-    buildCmd tc path out true true (split := split)
-  | ["build", path, "-o", out, "--no-main"] => buildCmd tc path out false false true (split := split)
+    buildCmd tc path out true true (split := split) (attest := attest)
+  | ["build", path, "-o", out, "--no-main"] => buildCmd tc path out false false true (split := split) (attest := attest)
   | ["build", path, "-o", out, "--no-main", "--llvm"] | ["build", path, "-o", out, "--llvm", "--no-main"] =>
-    buildCmd tc path out true false true (split := split)
+    buildCmd tc path out true false true (split := split) (attest := attest)
+  | "verify" :: rest => verifyCmd tc attest rest
   | "doc" :: rest => docCmd tc rest
   | ["run", path] => runCmd tc path false (split := split)
   | ["run", path, "--llvm"] => runCmd tc path true (split := split)
