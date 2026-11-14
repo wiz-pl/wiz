@@ -738,12 +738,14 @@ named argument outside an application is `a named argument `(x := e)` is only al
 an argument of an application`. `@f` still makes every binder positional (named
 arguments still match by name), and `f (b := 1) 5` gives `a` the `5`.
 
-Named arguments work for a global function whose parameters are written as binders.
+Named arguments work for a global function whose parameters are written as binders, or
+in the leading Π binders of its type (`axiom f : {A : Type} → …`, so `MVar.new
+(A := B)` is accepted; that also reads the names an `extern` writes in its type).
 A constructor's fields and a local variable's Π type keep no names yet, so a named
 argument there is rejected (a clear error, not a silent mismatch); class/instance
-binders will use the same path once A10 stores their names. Implicit parameters written
-only in a declaration's type (rather than as binders before the `:`) are still not
-inserted (A3), so they are not named either.
+binders will use the same path once A10 stores their names. An implicit parameter
+written only in a declaration's type is still not inserted positionally when it is
+omitted (A3); it can be supplied by name.
 
 **Tests** (group `selfhost`): explicit, implicit, reordered and interleaved named
 arguments, a named implicit, `@f` with a named implicit and with a named explicit, and

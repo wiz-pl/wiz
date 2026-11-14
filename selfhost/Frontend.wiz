@@ -399,6 +399,20 @@ def paramMask : List Syntax → List Bool
 def binderParamNames : List Syntax → List String
   | .nil => .nil
   | .cons b bs => List.append (binderNames b) (binderParamNames bs)
+-- (A9) the names a type's leading Π binders introduce: a declaration may write its
+-- parameters in its type (`axiom f : {A : Type} → …`, `extern … : {A : Type} → …`)
+partial def typeBinderNames : Syntax → List String
+  | s => match strEq (kindOf s) "term.depArrow" with
+    | .true => List.append (binderNames (kid s 0)) (typeBinderNames (kid s 2))
+    | .false => match strEq (kindOf s) "term.arrow" with
+      | .true => .cons "_" (typeBinderNames (kid s 2))
+      | .false => .nil
+-- a declaration's parameter names: its written binders, else its type's Π binders
+def declParamNames (d : Syntax) : List String := match binderParamNames (kids (kid d 3)) with
+  | .nil => match kids (kid d 4) with
+    | .cons _ (.cons ty _) => typeBinderNames ty
+    | _ => .nil
+  | ns => ns
 
 def fieldsNamed (q : Q) (impl : Bool) (ty : Syntax) : List String → List Field
   | .nil => .nil
@@ -3523,7 +3537,7 @@ def matchDefCmd (gs : Globals) (stx : Syntax) : Step := match kid stx 1 with
                       | .bad m => errStep gs m
                       | .good fn => .mk (String.append f (String.append " : " (show .nil 0 tyT)))
                           (Globals.add gs (.mk f tyT fn (inlineTm gs fn) (paramMask (kids (kid stx 3)))
-                            (binderParamNames (kids (kid stx 3)))))
+                            (declParamNames stx)))
     | _ => errStep gs "a definition needs a type"
   | _ => errStep gs "a definition needs a name"
 
@@ -3552,7 +3566,7 @@ def command (gs : Globals) (stx : Syntax) : Step :=
                 | .bad m => errStep gs m
                 | .good v => .mk (String.append x (String.append " : " (show .nil 0 tyT)))
                     (Globals.add gs (.mk x tyT v (inlineTm gs v) (paramMask (kids (kid stx 3)))
-                      (binderParamNames (kids (kid stx 3)))))
+                      (declParamNames stx)))
       | _ => errStep gs "a definition needs a type"
     | _ => errStep gs "a definition needs a name"
   | .false =>
@@ -4208,7 +4222,7 @@ def addAxioms : Globals → List Syntax → AxR
   | gs, .cons d rest => match sigType gs d with
     | .err m => .err m
     | .ok f ty => addAxioms (Globals.add gs (.mk f ty (.axiomC f ty) (.axiomC f ty)
-        (paramMask (kids (kid d 3))) (binderParamNames (kids (kid d 3))))) rest
+        (paramMask (kids (kid d 3))) (declParamNames d))) rest
 -- a member of a partial group: `def …`, or `partial (default := w) def …`
 def unwrapDef (d : Syntax) : Syntax := match strEq (kindOf d) "command.partial" with
   | .true => kid d 2
@@ -4242,7 +4256,7 @@ def addPartials : Globals → List Syntax → AxR
       | .ok _ w => match checkPartial ty (markClosed w ty) with
         | .err m => .err (String.append (String.append "the witness of " f) (String.append ": " m))
         | .ok _ _ => addPartials (Globals.add gs (.mk f ty (.axiomC f ty) (.axiomC f ty)
-            (paramMask (kids (kid (unwrapDef d) 3))) (binderParamNames (kids (kid (unwrapDef d) 3))))) rest
+            (paramMask (kids (kid (unwrapDef d) 3))) (declParamNames (unwrapDef d)))) rest
 -- `axiom f (bs) : T` (stage 19c), printed like a definition
 def axiomCmd (gs : Globals) (stx : Syntax) : Step := match addAxioms gs (one stx) with
   | .err m => errStep gs m
