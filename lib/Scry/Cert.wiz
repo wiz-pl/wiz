@@ -53,9 +53,14 @@ rules. Three theorems are proved below, all by induction over the flat node list
   `Scry.inLfpNeg p frozen db`: for a frozen set of relations that contains every
   relation the program negates, extensions may not add an absent tuple of a frozen
   relation. That is the stratified reading at one stratum (the lower relations are
-  frozen; current-stratum facts may still be derived); the remaining obligation is to
-  instantiate `frozen` with the program's lower strata and prove the side condition
-  from `Program.check` (see `wiz-notes/scry-derivation.md`).
+  frozen; current-stratum facts may still be derived); `check_sound_stratified`
+  instantiates `frozen` with the program's lower strata from `Program.check`.
+
+For absence certificates, `edbInModel` is proved sound (`edbInModel_dbIncl`: the
+executable enumeration of the EDB's entries implies the semantic inclusion), and
+`absence_check_sound_checked` composes that with `check` and `closedB`. The remaining
+`syntactic` side condition is the matcher-completeness statement
+`absence_closedB_soundStmt` (see `wiz-notes/scry-derivation.md` §7.2).
 -/
 
 /-- Evaluate a list of terms under an environment (the certificate's row constructor). -/
@@ -1017,6 +1022,27 @@ structure Scry.LatLaws {L : Type} (ops : Scry.LatOps L) where
   join_idem : (a : L) -> ops.join a a = a
   join_comm : (a b : L) -> ops.join a b = ops.join b a
   join_assoc : (a b c : L) -> ops.join (ops.join a b) c = ops.join a (ops.join b c)
+  /-- `bot` is the identity of the join. This is the law behind a lattice
+  provenance chain's first contribution: the engine joins every value onto `bot`. -/
+  join_bot_left : (a : L) -> ops.join ops.bot a = a
+  join_bot_right : (a : L) -> ops.join a ops.bot = a
+
+/-- The value of an `Option L` with `bot` for `none`. -/
+def Scry.optLatVal {L : Type} (ops : Scry.LatOps L) : Option L → L
+  | .none => ops.bot
+  | .some v => v
+
+/-- `latVal` is `optLatVal` of the lookup (definitionally). -/
+def Scry.latVal_eq {L : Type} (ops : Scry.LatOps L) (db : Scry.Db L)
+    (rel : Nat) (key : List U64) :
+    Scry.latVal ops db rel key = Scry.optLatVal ops (Scry.Db.findLat db rel key) := rfl
+
+/-- `bot` is below every value (the left identity law). -/
+def Scry.le_bot_left {L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws ops)
+    (a : L) : Scry.LatOps.le ops ops.bot a = .true :=
+  Eq.trans
+    (Eq.congrArg (fun x => ops.eq x a) (laws.join_bot_left a))
+    (laws.eq_refl a)
 
 /-- `le a a`. -/
 def Scry.le_refl {L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws ops)
@@ -2386,11 +2412,359 @@ def Scry.latsFacts {L : Type} : List (Nat × Scry.LatRel L) → List (Scry.PFact
 def Scry.dbFacts {L : Type} (db : Scry.Db L) : List (Scry.PFact L) :=
   List.append (Scry.tuplesFacts db.tuples) (Scry.latsFacts db.lats)
 
+/-- Every row of a tuple relation holds in the model. -/
+def Scry.allRowsHoldB {L : Type} (p : Scry.Program L) (a : Scry.Absence L)
+    (rel : Nat) (rows : List (List U64)) : Bool :=
+  List.foldr (fun row acc =>
+    if Scry.factHoldsB p.ops a.db (Scry.PFact.mk rel row (Option.none : Option L))
+    then acc else Bool.false) Bool.true rows
+
+/-- Every tuple entry of a database holds in the model. -/
+def Scry.allTupleEntriesHoldB {L : Type} (p : Scry.Program L) (a : Scry.Absence L) :
+    List (Nat × Scry.TupleRel) → Bool
+  | .nil => Bool.true
+  | .cons e rest =>
+    if Scry.allRowsHoldB p a e.1 e.2.toList then
+      Scry.allTupleEntriesHoldB p a rest
+    else Bool.false
+
+/-- Every entry of one lattice relation holds in the model. -/
+def Scry.allLatRowsHoldB {L : Type} (p : Scry.Program L) (a : Scry.Absence L)
+    (rel : Nat) (entries : List (List U64 × L)) : Bool :=
+  List.foldr (fun kv acc =>
+    if Scry.factHoldsB p.ops a.db
+      (Scry.PFact.mk rel kv.1 (Option.some kv.2)) then acc else Bool.false)
+    Bool.true entries
+
+/-- Every lattice entry of a database holds in the model. -/
+def Scry.allLatEntriesHoldB {L : Type} (p : Scry.Program L) (a : Scry.Absence L) :
+    List (Nat × Scry.LatRel L) → Bool
+  | .nil => Bool.true
+  | .cons e rest =>
+    if Scry.allLatRowsHoldB p a e.1 e.2.toList then
+      Scry.allLatEntriesHoldB p a rest
+    else Bool.false
+
 /-- The first side condition, syntactically: every fact of the EDB holds in the model. -/
 def Scry.Absence.edbInModel {L : Type} (p : Scry.Program L) (edb : Scry.Db L)
     (a : Scry.Absence L) : Bool :=
-  List.foldr (fun f acc => if Scry.factHoldsB p.ops a.db f then acc else Bool.false)
-    Bool.true (Scry.dbFacts edb)
+  Bool.and (Scry.allTupleEntriesHoldB p a edb.tuples)
+    (Scry.allLatEntriesHoldB p a edb.lats)
+
+-- ### The EDB side: enumerating the EDB facts
+
+def Scry.natBeq_refl : (n : Nat) -> Nat.beq n n = .true
+  | .zero => rfl
+  | .succ n => Scry.natBeq_refl n
+
+def Scry.eqU64_refl (a : U64) : Scry.eqU64 a a = .true :=
+  Scry.natBeq_refl (UIntN.toNat a)
+
+def Scry.rowEq_refl : (r : List U64) -> Scry.rowEq r r = .true
+  | .nil => rfl
+  | .cons a as => Eq.trans
+      (Eq.congrArg (fun (b : Bool) => if b then Scry.rowEq as as else Bool.false) (Scry.eqU64_refl a))
+      (Scry.rowEq_refl as)
+
+def Scry.rowEq_true : (a b : List U64) -> Scry.rowEq a b = .true -> a = b
+  | .nil, .nil, _ => rfl
+  | .nil, .cons _ _, h => absurd h.1
+  | .cons _ _, .nil, h => absurd h.1
+  | .cons a as, .cons b bs, h =>
+    let h1 : Scry.eqU64 a b = .true :=
+      (Scry.ifTrueAnd (Scry.eqU64 a b) (Scry.rowEq as bs) h).1;
+    let h2 : Scry.rowEq as bs = .true :=
+      (Scry.ifTrueAnd (Scry.eqU64 a b) (Scry.rowEq as bs) h).2;
+    Eq.trans
+      (Eq.congrArg (fun (z : List U64) => List.cons a z) (Scry.rowEq_true as bs h2))
+      (Eq.congrArg (fun (z : U64) => List.cons z bs) (Scry.eqU64_true a b h1))
+
+def Scry.allRowsHoldB_get {L : Type} (p : Scry.Program L) (a : Scry.Absence L)
+    (rel : Nat) : (rows : List (List U64)) -> (w : List U64) ->
+    Scry.allRowsHoldB p a rel rows = .true ->
+    Scry.memRow w rows = .true ->
+    Scry.factHoldsB p.ops a.db (Scry.PFact.mk rel w (Option.none : Option L)) = .true
+  | .nil, w, _, h2 => absurd h2
+  | .cons x xs, w, h1, h2 =>
+    let hif : (if Scry.factHoldsB p.ops a.db
+        (Scry.PFact.mk rel x (Option.none : Option L)) then Scry.allRowsHoldB p a rel xs else Bool.false) = .true := h1;
+    Or.elim (Bool.cases (Scry.rowEq w x))
+      (fun (ht : Scry.rowEq w x = .true) =>
+        let e : w = x := Scry.rowEq_true w x ht;
+        let hc := (Scry.ifTrueAnd (Scry.factHoldsB p.ops a.db
+          (Scry.PFact.mk rel x (Option.none : Option L))) (Scry.allRowsHoldB p a rel xs) hif).1;
+        Eq.mpr' (fun (z : List U64) => Scry.factHoldsB p.ops a.db
+          (Scry.PFact.mk rel z (Option.none : Option L)) = .true) e hc)
+      (fun (hf : Scry.rowEq w x = .false) =>
+        let h2' : Scry.memRow w xs = .true :=
+          Eq.mp' (fun (b : Bool) => (if b then Bool.true else Scry.memRow w xs) = .true) hf h2;
+        let ht := (Scry.ifTrueAnd (Scry.factHoldsB p.ops a.db
+          (Scry.PFact.mk rel x (Option.none : Option L))) (Scry.allRowsHoldB p a rel xs) hif).2;
+        Scry.allRowsHoldB_get p a rel xs w ht h2')
+
+def Scry.assocGet_cons {A : Type} (d : A) (k : Nat) (e : Nat × A) (rest : List (Nat × A)) :
+    Scry.assocGet d k (List.cons e rest) =
+      (if Nat.beq k e.1 then e.2 else Scry.assocGet d k rest) := rfl
+
+def Scry.any_if {A : Type} (p : A -> Bool) (c : Bool) (a b : List A) :
+    List.any p (if c then a else b) = (if c then List.any p a else List.any p b) :=
+  match c with
+  | .true => rfl
+  | .false => rfl
+
+def Scry.tupleToList_if (c : Bool) (a b : Scry.TupleRel) :
+    (if c then a else b).toList = (if c then a.toList else b.toList) :=
+  match c with
+  | .true => rfl
+  | .false => rfl
+
+def Scry.tupleLookup_holds {L : Type} (p : Scry.Program L) (a : Scry.Absence L)
+    (r : Nat) (row : List U64) : (entries : List (Nat × Scry.TupleRel)) ->
+    Scry.allTupleEntriesHoldB p a entries = .true ->
+    List.any (Scry.rowEq row) (Scry.assocGet Scry.TupleRel.empty r entries).toList = .true ->
+    Scry.factHoldsB p.ops a.db (Scry.PFact.mk r row (Option.none : Option L)) = .true
+  | .nil, h1, h2 => absurd h2
+  | .cons e rest, h1, h2 =>
+    let hif : (if Scry.allRowsHoldB p a e.1 e.2.toList then
+        Scry.allTupleEntriesHoldB p a rest else Bool.false) = .true := h1;
+        let h2u : (if Nat.beq r e.1 then
+            List.any (Scry.rowEq row) e.2.toList
+          else List.any (Scry.rowEq row) (Scry.assocGet Scry.TupleRel.empty r rest).toList) = .true :=
+          let e1 : Scry.TupleRel.toList (Scry.assocGet Scry.TupleRel.empty r (List.cons e rest)) =
+              Scry.TupleRel.toList (if Nat.beq r e.1 then e.2 else Scry.assocGet Scry.TupleRel.empty r rest) :=
+            Eq.congrArg Scry.TupleRel.toList (Scry.assocGet_cons Scry.TupleRel.empty r e rest);
+          let e2 : Scry.TupleRel.toList (if Nat.beq r e.1 then e.2 else Scry.assocGet Scry.TupleRel.empty r rest) =
+              (if Nat.beq r e.1 then Scry.TupleRel.toList e.2
+               else Scry.TupleRel.toList (Scry.assocGet Scry.TupleRel.empty r rest)) :=
+            Scry.tupleToList_if (Nat.beq r e.1) e.2 (Scry.assocGet Scry.TupleRel.empty r rest);
+          let e3 : List.any (Scry.rowEq row)
+              (if Nat.beq r e.1 then Scry.TupleRel.toList e.2
+               else Scry.TupleRel.toList (Scry.assocGet Scry.TupleRel.empty r rest)) =
+              (if Nat.beq r e.1 then List.any (Scry.rowEq row) e.2.toList
+               else List.any (Scry.rowEq row) (Scry.assocGet Scry.TupleRel.empty r rest).toList) :=
+            Scry.any_if (Scry.rowEq row) (Nat.beq r e.1) e.2.toList
+              (Scry.assocGet Scry.TupleRel.empty r rest).toList;
+          let hany : List.any (Scry.rowEq row)
+              (if Nat.beq r e.1 then Scry.TupleRel.toList e.2
+               else Scry.TupleRel.toList (Scry.assocGet Scry.TupleRel.empty r rest)) = .true :=
+            Eq.mp' (fun (t : List (List U64)) => List.any (Scry.rowEq row) t = .true)
+              (Eq.trans e1 e2) h2;
+          Eq.mp' (fun (b : Bool) => b = .true) e3 hany;
+    Or.elim (Bool.cases (Nat.beq r e.1))
+      (fun ht =>
+        let he : r = e.1 := Scry.natBeq_true r e.1 ht;
+        let hrows := (Scry.ifTrueAnd (Scry.allRowsHoldB p a e.1 e.2.toList)
+          (Scry.allTupleEntriesHoldB p a rest) hif).1;
+        let h2e : List.any (Scry.rowEq row) e.2.toList = .true :=
+          Eq.mp' (fun (b : Bool) => (if b then
+              List.any (Scry.rowEq row) e.2.toList
+            else List.any (Scry.rowEq row) (Scry.assocGet Scry.TupleRel.empty r rest).toList) = .true) ht h2u;
+        let hf := Scry.allRowsHoldB_get p a e.1 e.2.toList row hrows h2e;
+        Eq.mpr' (fun (z : Nat) => Scry.factHoldsB p.ops a.db
+          (Scry.PFact.mk z row (Option.none : Option L)) = .true) (he) hf)
+      (fun hf =>
+        let h2' : List.any (Scry.rowEq row) (Scry.assocGet Scry.TupleRel.empty r rest).toList = .true :=
+          Eq.mp' (fun (b : Bool) => (if b then
+              List.any (Scry.rowEq row) e.2.toList
+            else List.any (Scry.rowEq row) (Scry.assocGet Scry.TupleRel.empty r rest).toList) = .true) hf h2u;
+        let hrest := (Scry.ifTrueAnd (Scry.allRowsHoldB p a e.1 e.2.toList)
+          (Scry.allTupleEntriesHoldB p a rest) hif).2;
+        Scry.tupleLookup_holds p a r row rest hrest h2')
+
+def Scry.latLookup_holds {L : Type} (p : Scry.Program L) (a : Scry.Absence L)
+    (rel : Nat) (key : List U64) : (entries : List (List U64 × L)) -> (w : L) ->
+    Scry.allLatRowsHoldB p a rel entries = .true ->
+    Scry.LatRel.findL key entries = Option.some w ->
+    Scry.factHoldsB p.ops a.db (Scry.PFact.mk rel key (Option.some w)) = .true
+  | .nil, w, _, hf => absurd hf.1
+  | .cons e rest, w, h1, hf =>
+    let hif : (if Scry.factHoldsB p.ops a.db
+        (Scry.PFact.mk rel e.1 (Option.some e.2)) then
+        Scry.allLatRowsHoldB p a rel rest else Bool.false) = .true := h1;
+    Or.elim (Bool.cases (Scry.rowEq key e.1))
+      (fun ht =>
+        let hf' : Option.some e.2 = Option.some w :=
+          Eq.mp' (fun (b : Bool) => (if b then Option.some e.2 else
+            Scry.LatRel.findL key rest) = Option.some w) ht hf;
+        let he2 : e.2 = w := Scry.someInj hf';
+        let hkey : key = e.1 := Scry.rowEq_true key e.1 ht;
+        let hc := (Scry.ifTrueAnd (Scry.factHoldsB p.ops a.db
+          (Scry.PFact.mk rel e.1 (Option.some e.2)))
+          (Scry.allLatRowsHoldB p a rel rest) hif).1;
+        let hc' : Scry.factHoldsB p.ops a.db
+            (Scry.PFact.mk rel key (Option.some w)) = .true :=
+          Eq.mpr' (fun (z : List U64) => Scry.factHoldsB p.ops a.db
+            (Scry.PFact.mk rel z (Option.some w)) = .true) hkey
+            (Eq.mpr' (fun (z : L) => Scry.factHoldsB p.ops a.db
+              (Scry.PFact.mk rel e.1 (Option.some z)) = .true) (Eq.symm he2) hc);
+        hc')
+      (fun hf0 =>
+        let hf' : Scry.LatRel.findL key rest = Option.some w :=
+          Eq.mp' (fun (b : Bool) => (if b then Option.some e.2 else
+            Scry.LatRel.findL key rest) = Option.some w) hf0 hf;
+        let hrest := (Scry.ifTrueAnd (Scry.factHoldsB p.ops a.db
+          (Scry.PFact.mk rel e.1 (Option.some e.2)))
+          (Scry.allLatRowsHoldB p a rel rest) hif).2;
+        Scry.latLookup_holds p a rel key rest w hrest hf')
+
+def Scry.latToList_if {L : Type} (c : Bool) (a b : Scry.LatRel L) :
+    (if c then a else b).toList = (if c then a.toList else b.toList) :=
+  match c with
+  | .true => rfl
+  | .false => rfl
+
+def Scry.latFindL_if {L : Type} (key : List U64) (c : Bool)
+    (a b : List (List U64 × L)) :
+    Scry.LatRel.findL key (if c then a else b) =
+      (if c then Scry.LatRel.findL key a else Scry.LatRel.findL key b) :=
+  match c with
+  | .true => rfl
+  | .false => rfl
+
+def Scry.findLat_cons {L : Type} (tuples : List (Nat × Scry.TupleRel))
+    (e : Nat × Scry.LatRel L) (rest : List (Nat × Scry.LatRel L))
+    (r : Nat) (key : List U64) :
+    Scry.Db.findLat (Scry.Db.mk tuples (List.cons e rest)) r key =
+      (if Nat.beq r e.1 then (e.2.find key)
+       else Scry.Db.findLat (Scry.Db.mk tuples rest) r key) :=
+  let e1 : Scry.LatRel.findL key
+      (Scry.LatRel.toList (Scry.assocGet (@Scry.LatRel.empty L) r (List.cons e rest))) =
+      Scry.LatRel.findL key
+        (Scry.LatRel.toList (if Nat.beq r e.1 then e.2
+          else Scry.assocGet (@Scry.LatRel.empty L) r rest)) :=
+    Eq.congrArg (fun (t : Scry.LatRel L) => Scry.LatRel.findL key t.toList)
+      (Scry.assocGet_cons (@Scry.LatRel.empty L) r e rest);
+  let e2 : Scry.LatRel.findL key
+      (Scry.LatRel.toList (if Nat.beq r e.1 then e.2
+        else Scry.assocGet (@Scry.LatRel.empty L) r rest)) =
+      Scry.LatRel.findL key
+        (if Nat.beq r e.1 then e.2.toList
+         else (Scry.assocGet (@Scry.LatRel.empty L) r rest).toList) :=
+    Eq.congrArg (fun (xs : List (List U64 × L)) => Scry.LatRel.findL key xs)
+      (Scry.latToList_if (Nat.beq r e.1) e.2
+        (Scry.assocGet (@Scry.LatRel.empty L) r rest));
+  let e3 : Scry.LatRel.findL key
+      (if Nat.beq r e.1 then e.2.toList
+       else (Scry.assocGet (@Scry.LatRel.empty L) r rest).toList) =
+      (if Nat.beq r e.1 then Scry.LatRel.findL key e.2.toList
+       else Scry.LatRel.findL key
+         (Scry.assocGet (@Scry.LatRel.empty L) r rest).toList) :=
+    Scry.latFindL_if key (Nat.beq r e.1) e.2.toList
+      (Scry.assocGet (@Scry.LatRel.empty L) r rest).toList;
+  Eq.trans e1 (Eq.trans e2 e3)
+
+def Scry.latEntryLookup_holds {L : Type} (p : Scry.Program L) (a : Scry.Absence L)
+    (tuples : List (Nat × Scry.TupleRel)) :
+    (lats : List (Nat × Scry.LatRel L)) -> (r : Nat) -> (key : List U64) -> (w : L) ->
+    Scry.allLatEntriesHoldB p a lats = .true ->
+    Scry.Db.findLat (Scry.Db.mk tuples lats) r key = Option.some w ->
+    Scry.factHoldsB p.ops a.db (Scry.PFact.mk r key (Option.some w)) = .true
+  | .nil, r, key, w, h1, hf => absurd hf.1
+  | .cons e rest, r, key, w, h1, hf =>
+    let hif : (if Scry.allLatRowsHoldB p a e.1 e.2.toList then
+        Scry.allLatEntriesHoldB p a rest else Bool.false) = .true := h1;
+    let hfs : (if Nat.beq r e.1 then (e.2.find key)
+        else Scry.Db.findLat (Scry.Db.mk tuples rest) r key) = Option.some w :=
+      Eq.mp' (fun (x : Option L) => x = Option.some w)
+        (Scry.findLat_cons tuples e rest r key) hf;
+    Or.elim (Bool.cases (Nat.beq r e.1))
+      (fun ht =>
+        let hrows := (Scry.ifTrueAnd (Scry.allLatRowsHoldB p a e.1 e.2.toList)
+          (Scry.allLatEntriesHoldB p a rest) hif).1;
+        let hfind : Scry.LatRel.findL key e.2.toList = Option.some w :=
+          Eq.mp' (fun (b : Bool) => (if b then (e.2.find key)
+            else Scry.Db.findLat (Scry.Db.mk tuples rest) r key) = Option.some w) ht hfs;
+        let hc := Scry.latLookup_holds p a e.1 key e.2.toList w hrows hfind;
+        let he : e.1 = r := Eq.symm (Scry.natBeq_true r e.1 ht);
+        Eq.mp' (fun (z : Nat) => Scry.factHoldsB p.ops a.db
+          (Scry.PFact.mk z key (Option.some w)) = .true) he hc)
+      (fun hf0 =>
+        let hrest := (Scry.ifTrueAnd (Scry.allLatRowsHoldB p a e.1 e.2.toList)
+          (Scry.allLatEntriesHoldB p a rest) hif).2;
+        let hf' : Scry.Db.findLat (Scry.Db.mk tuples rest) r key = Option.some w :=
+          Eq.mp' (fun (b : Bool) => (if b then (e.2.find key)
+            else Scry.Db.findLat (Scry.Db.mk tuples rest) r key) = Option.some w) hf0 hfs;
+        Scry.latEntryLookup_holds p a tuples rest r key w hrest hf')
+
+def Scry.latVal_some {L : Type} (ops : Scry.LatOps L) (db : Scry.Db L)
+    (r : Nat) (key : List U64) (w : L)
+    (h : Scry.Db.findLat db r key = Option.some w) :
+    Scry.latVal ops db r key = w :=
+  Eq.trans (Scry.latVal_eq ops db r key)
+    (Eq.congrArg (Scry.optLatVal ops) h)
+
+def Scry.latVal_none {L : Type} (ops : Scry.LatOps L) (db : Scry.Db L)
+    (r : Nat) (key : List U64)
+    (h : Scry.Db.findLat db r key = Option.none) :
+    Scry.latVal ops db r key = ops.bot :=
+  Eq.trans (Scry.latVal_eq ops db r key)
+    (Eq.congrArg (Scry.optLatVal ops) h)
+
+def Scry.edbTupleHolds {L : Type} (p : Scry.Program L) (a : Scry.Absence L)
+    (edb : Scry.Db L) (r : Nat) (row : List U64)
+    (hall : Scry.allTupleEntriesHoldB p a edb.tuples = .true)
+    (hmem : Scry.Db.memTuple edb r row = .true) :
+    Scry.factHoldsB p.ops a.db (Scry.PFact.mk r row (Option.none : Option L)) = .true :=
+  Scry.tupleLookup_holds p a r row edb.tuples hall hmem
+
+def Scry.edbLatHoldsOpt {L : Type} (p : Scry.Program L) (a : Scry.Absence L)
+    (laws : Scry.LatLaws p.ops) (edb : Scry.Db L) (r : Nat) (key : List U64)
+    (v : L) (hall : Scry.allLatEntriesHoldB p a edb.lats = .true) :
+    (o : Option L) -> Scry.Db.findLat edb r key = o ->
+    Scry.LatOps.le p.ops v (Scry.optLatVal p.ops o) = .true ->
+    Scry.LatOps.le p.ops v (Scry.latVal p.ops a.db r key) = .true
+  | .none, hfind, hmem =>
+    let hb : Scry.latVal p.ops edb r key = p.ops.bot := Scry.latVal_none p.ops edb r key hfind;
+    let hv : Scry.LatOps.le p.ops v p.ops.bot = .true := hmem;
+    Scry.le_trans p.ops laws v p.ops.bot (Scry.latVal p.ops a.db r key)
+      hv (Scry.le_bot_left p.ops laws (Scry.latVal p.ops a.db r key))
+  | .some w, hfind, hmem =>
+    let hw : Scry.latVal p.ops edb r key = w := Scry.latVal_some p.ops edb r key w hfind;
+    let hv : Scry.LatOps.le p.ops v w = .true := hmem;
+    let hlook := Scry.latEntryLookup_holds p a edb.tuples edb.lats r key w hall hfind;
+    Scry.le_trans p.ops laws v w (Scry.latVal p.ops a.db r key) hv hlook
+
+def Scry.edbLatHolds {L : Type} (p : Scry.Program L) (a : Scry.Absence L)
+    (laws : Scry.LatLaws p.ops) (edb : Scry.Db L) (r : Nat) (key : List U64)
+    (v : L) (hall : Scry.allLatEntriesHoldB p a edb.lats = .true)
+    (hmem : Scry.LatOps.le p.ops v (Scry.latVal p.ops edb r key) = .true) :
+    Scry.LatOps.le p.ops v (Scry.latVal p.ops a.db r key) = .true :=
+  Scry.edbLatHoldsOpt p a laws edb r key v hall
+    (Scry.Db.findLat edb r key) rfl
+    (Eq.mp' (fun (z : L) => Scry.LatOps.le p.ops v z = .true)
+      (Scry.latVal_eq p.ops edb r key) hmem)
+
+def Scry.factInModel {L : Type} (p : Scry.Program L) (a : Scry.Absence L)
+    (laws : Scry.LatLaws p.ops) (edb : Scry.Db L)
+    (ht : Scry.allTupleEntriesHoldB p a edb.tuples = .true)
+    (hl : Scry.allLatEntriesHoldB p a edb.lats = .true) :
+    (rel : Nat) -> (args : List U64) -> (lat : Option L) ->
+    Scry.factHolds p.ops edb (Scry.PFact.mk rel args lat) ->
+    Scry.factHolds p.ops a.db (Scry.PFact.mk rel args lat)
+  | rel, args, .none, hf =>
+    Scry.edbTupleHolds p a edb rel args ht hf
+  | rel, args, (.some v), hf =>
+    Scry.edbLatHolds p a laws edb rel args v hl hf
+
+def Scry.edbInModel_dbIncl {L : Type} (p : Scry.Program L) (a : Scry.Absence L)
+    (laws : Scry.LatLaws p.ops) (edb : Scry.Db L)
+    (hedb : Scry.Absence.edbInModel p edb a = .true) :
+    Scry.dbIncl p.ops edb a.db :=
+  fun (f : Scry.PFact L) (hf : Scry.factHolds p.ops edb f) =>
+    let ht : Scry.allTupleEntriesHoldB p a edb.tuples = .true :=
+      Scry.andLeft (Scry.allTupleEntriesHoldB p a edb.tuples)
+        (Scry.allLatEntriesHoldB p a edb.lats) hedb;
+    let hl : Scry.allLatEntriesHoldB p a edb.lats = .true :=
+      Scry.andRight (Scry.allTupleEntriesHoldB p a edb.tuples)
+        (Scry.allLatEntriesHoldB p a edb.lats) hedb;
+    let hf' : Scry.factHolds p.ops edb (Scry.PFact.mk f.rel f.args f.lat) :=
+      Eq.mpr' (fun (x : Scry.PFact L) => Scry.factHolds p.ops edb x)
+        (Scry.pfact_etaR f) hf;
+    let h := Scry.factInModel p a laws edb ht hl f.rel f.args f.lat hf';
+    Eq.mp' (fun (x : Scry.PFact L) => Scry.factHolds p.ops a.db x)
+      (Scry.pfact_etaR f) h
+
+
 
 /-- The second side condition, syntactically: for every rule and every body match the
 evaluator finds in the model, the instance's head holds in the model. (The matcher's
@@ -2441,3 +2815,39 @@ obligation (see `wiz-notes/scry-derivation.md`). -/
 def Scry.absence_closedB_soundStmt {L : Type} (p : Scry.Program L) (a : Scry.Absence L) :
     Prop :=
   Scry.Absence.closedB p a = Bool.true → Scry.closed p a.db
+
+/-- The full checker's soundness statement: a certificate that passes `checkFull` proves
+the tuple absent from the least fixpoint. -/
+def Scry.absenceCheckedStmt {L : Type} (p : Scry.Program L) (edb : Scry.Db L)
+    (a : Scry.Absence L) : Prop :=
+  Scry.Absence.checkFull p edb a = Bool.true →
+  ¬ Scry.inLfp p edb (Scry.PFact.mk a.rel a.row (Option.none : Option L))
+
+/-- **Absence certificates are sound from the executable checks alone**, given the
+lattice laws of the program and the matcher-completeness fact `ClosedB` (the single
+remaining syntactic side condition, stated as `absence_closedB_soundStmt`).
+
+The EDB side is no longer a hypothesis: `edbInModel` is an enumeration of `edb`'s tuple
+and lattice entries, and `edbInModel_dbIncl` proves it implies `dbIncl` (lattice facts use
+transitivity and `le_bot_left`, hence the `LatLaws`). The model side is `closedB` through
+`ClosedB`. -/
+def Scry.absence_check_sound_checked {L : Type} (p : Scry.Program L)
+    (laws : Scry.LatLaws p.ops) (edb : Scry.Db L) (a : Scry.Absence L)
+    (ClosedB : Scry.absence_closedB_soundStmt p a) :
+    Scry.absenceCheckedStmt p edb a :=
+  fun hfull hlfp =>
+    let hcheck : Scry.Absence.check p a = Bool.true :=
+      (Scry.ifTrueAnd (Scry.Absence.check p a)
+        (if Scry.Absence.edbInModel p edb a then Scry.Absence.closedB p a else Bool.false)
+        hfull).1;
+    let htail : (if Scry.Absence.edbInModel p edb a then
+        Scry.Absence.closedB p a else Bool.false) = Bool.true :=
+      (Scry.ifTrueAnd (Scry.Absence.check p a)
+        (if Scry.Absence.edbInModel p edb a then Scry.Absence.closedB p a else Bool.false)
+        hfull).2;
+    let hparts := Scry.ifTrueAnd (Scry.Absence.edbInModel p edb a)
+      (Scry.Absence.closedB p a) htail;
+    Scry.absence_check_sound p edb a hcheck
+      (Scry.edbInModel_dbIncl p a laws edb hparts.1)
+      (ClosedB hparts.2) hlfp
+

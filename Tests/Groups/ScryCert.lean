@@ -82,9 +82,16 @@ def scryCertGroup : Group where
         probes "scry-derivation"
           "#eval absGoodOk\n#eval absBadOk\n#eval counterexample"
           ["1", "0", "1"] },
+    { name := "a non-range-restricted program is rejected by Program.check", run := fun _ => do
+        let src := "import Scry.Eval\n" ++
+          "def p : Scry.Program Nat := Scry.Program.mk (Scry.LatOps.mk 0 (fun a b => if Nat.lt a b then b else a) Nat.beq) [1, 1] [] [] " ++
+          "[Scry.Rule.mk (Scry.Head.tuple 1 [Scry.Term.var 0]) [Scry.Atom.neg 0 [Scry.Term.var 0]]]\n" ++
+          "#eval (match Scry.Program.check p with | .none => 1 | .some _ => 0)"
+        Elab.okLibs src ["1"] },
     { name := "the new soundness theorems trust only the existing natives", run := fun _ => do
         let ms ← msgs ("import Scry.Cert\n#print axioms Scry.check_sound_stratified\n" ++
-          "#print axioms Scry.check_sound_negFree\n#print axioms Scry.absence_check_sound\n")
+          "#print axioms Scry.check_sound_negFree\n#print axioms Scry.absence_check_sound\n" ++
+          "#print axioms Scry.edbInModel_dbIncl\n#print axioms Scry.absence_check_sound_checked\n")
         unless has ms "'Scry.check_sound_stratified' depends on axioms:" do
           throw (IO.userError s!"no axiom list for check_sound_stratified: {ms}")
         unless has ms "'Scry.absence_check_sound' depends on axioms:" do

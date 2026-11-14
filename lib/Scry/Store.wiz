@@ -65,6 +65,7 @@ sealed inductive Scry.LatRel (L : Type) where
 
 def Scry.LatRel.toList {L : Type} : Scry.LatRel L → List (List U64 × L)
   | .mk es => es
+def Scry.LatRel.empty {L : Type} : Scry.LatRel L := .mk List.nil
 def Scry.LatRel.size {L : Type} (t : Scry.LatRel L) : Nat := List.length t.toList
 def Scry.LatRel.findL {L : Type} (key : List U64) : List (List U64 × L) → Option L
   | .nil => .none

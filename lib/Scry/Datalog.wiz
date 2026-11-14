@@ -156,9 +156,54 @@ def Scry.Program.arity {L : Type} (p : Scry.Program L) (r : Nat) : Nat :=
 def Scry.Program.isLat {L : Type} (p : Scry.Program L) (r : Nat) : Bool :=
   Scry.natMem r p.latRels
 
+-- ## Evaluation-order range restriction
+
+/-- The variables bound so far by *positive tuple* atoms, checked through the body in
+evaluation order. A negated atom and a lattice atom may read only variables bound by an
+earlier positive atom: the evaluator's matcher (and `Absence.closedB`) walks the body in
+this order, so this is the condition under which a match exists for every semantic
+instance. (`Rule.rangeOk`'s `negOk` is the weaker, order-insensitive version.) -/
+def Scry.bodyOrderOkF : List Scry.Atom → (List Nat → Bool)
+  | .nil => fun _ => .true
+  | .cons a rest =>
+    fun bound =>
+      match a with
+      | .neg _ args =>
+        if Scry.natSubset (Scry.termsVars args) bound then
+          Scry.bodyOrderOkF rest bound
+        else .false
+      | .pos _ args => Scry.bodyOrderOkF rest (List.append (Scry.termsVars args) bound)
+      | .lat _ key _ =>
+        if Scry.natSubset (Scry.termsVars key) bound then
+          Scry.bodyOrderOkF rest bound
+        else .false
+
+def Scry.bodyOrderOk (bound : List Nat) (body : List Scry.Atom) : Bool :=
+  Scry.bodyOrderOkF body bound
+
+def Scry.bodyLatOkF : List Scry.Atom → (List Nat → Bool)
+  | .nil => fun _ => .true
+  | .cons a rest =>
+    fun seen =>
+      match a with
+      | .lat _ _ vv =>
+        if Scry.natMem vv seen then .false
+        else Scry.bodyLatOkF rest (List.cons vv seen)
+      | _ => Scry.bodyLatOkF rest seen
+
+def Scry.bodyLatOk (seen : List Nat) (body : List Scry.Atom) : Bool :=
+  Scry.bodyLatOkF body seen
+
+def Scry.Rule.orderOk {L : Type} (r : Scry.Rule L) : Bool :=
+  Scry.bodyOrderOk List.nil r.body
+
+def Scry.Rule.latOk {L : Type} (r : Scry.Rule L) : Bool :=
+  Scry.bodyLatOk List.nil r.body
+
 /-- Every head variable and every negated variable is bound by a positive body atom,
-every lattice head variable by a body lattice atom, and every atom has its declared
-arity. -/
+every lattice head variable by a body lattice atom, every atom has its declared
+arity, and (in evaluation order) every negated/lattice atom only reads variables
+bound by an earlier positive atom. -/
 def Scry.Rule.rangeOk {L : Type} (p : Scry.Program L) (r : Scry.Rule L) : Bool :=
   let bound : List Nat := List.foldr (fun (a : Scry.Atom) (acc : List Nat) => List.append a.posVars acc) List.nil r.body;
   let latBound : List Nat := List.foldr (fun (a : Scry.Atom) (acc : List Nat) => match a.latVal with
@@ -200,8 +245,17 @@ def Scry.Rule.rangeOk {L : Type} (p : Scry.Program L) (r : Scry.Rule L) : Bool :
     else .false
   else .false
 
+/-- The three per-rule checks, as one conjunction (so `wellFormed` has one fold). -/
+def Scry.Rule.structOk {L : Type} (p : Scry.Program L) (r : Scry.Rule L) : Bool :=
+  Bool.and (Bool.and (Scry.Rule.rangeOk p r) (Scry.Rule.orderOk r)) (Scry.Rule.latOk r)
+
+def Scry.Program.wellFormedFrom {L : Type} (p : Scry.Program L) : List (Scry.Rule L) → Bool
+  | .nil => .true
+  | .cons r rest =>
+    if Scry.Rule.structOk p r then Scry.Program.wellFormedFrom p rest else .false
+
 def Scry.Program.wellFormed {L : Type} (p : Scry.Program L) : Bool :=
-  List.foldr (fun (r : Scry.Rule L) (acc : Bool) => if Scry.Rule.rangeOk p r then acc else Bool.false) Bool.true p.rules
+  Scry.Program.wellFormedFrom p p.rules
 
 /-- The least stratum a rule's head may have, given the strata of its body relations.
 A negated atom needs one more than its relation. -/
