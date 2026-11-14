@@ -53,6 +53,10 @@ lean_lib WizRuntime where
   root := `Main
   moreLinkObjs := #[`@/sockets]
 
+-- scratch probe for /workspace/wiz-notes/module-mmap.md (not part of the build)
+lean_exe mmapProbe where
+  root := `scratch.MmapProbe
+
 lean_exe tests where
   root := `Tests.Main
   moreLinkObjs := #[`@/sockets, `@/proc]
