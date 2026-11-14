@@ -34,12 +34,12 @@ def runeGroup : Group where
            uart 10-bit n=866: sim yes, sent 85 165 0 255 , got 85 165 0 255 , ok yes, well formed yes\n\
            uart 16-bit n=5: sim yes, sent 85 165 0 255 , got 85 165 0 255 , ok yes, well formed yes\n\
            reset/CDC rx 7-bit n=5: sim yes, bytes 85 165 , ok yes, well formed yes\n" },
-    { name := "SPI: mode 0 master loopback, divider 1 and 3; generic master at 4/8/16-bit widths, 8- and 16-bit counters, one and three chip selects; bit order, received words, chip-select patterns; simFast = values", run := fun _ => do
+    { name := "SPI: mode 0 master loopback, divider 1 and 3; MSB-first receive with non-palindromic 0x81/0x01 (Spi.shiftIn8 fix); generic master at 4/8/16-bit widths, 8- and 16-bit counters, one and three chip selects; bit order, received words, chip-select patterns; simFast = values", run := fun _ => do
         cRunLibs (← IO.FS.readFile "examples/rune-spi.wiz")
-          "spi div=1: sim yes, edges 16, shift yes, bytes 165 60 , ok yes, well formed yes\n\
-           spi div=3: sim yes, edges 16, shift yes, bytes 165 60 , ok yes, well formed yes\n\
-           spi compat div=1: same yes, bytes yes\n\
-           spi compat div=3: same yes, bytes yes\n\
+          "spi div=1: sim yes, edges 16, shift yes, bytes 129 1 , ok yes, well formed yes\n\
+           spi div=3: sim yes, edges 16, shift yes, bytes 129 1 , ok yes, well formed yes\n\
+           spi compat div=1: same yes\n\
+           spi compat div=3: same yes\n\
            spi w=4 cw=16 ncs=1 div=1: sim yes simFast yes, edges 4, shift yes, bytes 10 , ok yes, well formed yes\n\
            spi w=16 cw=16 ncs=1 div=1: sim yes simFast yes, edges 16, shift yes, bytes 4660 , ok yes, well formed yes\n\
            spi w=8 cw=16 ncs=1 div=1: sim yes simFast yes, edges 8, shift yes, bytes 150 , ok yes, well formed yes\n\

@@ -29,9 +29,12 @@ three things meta-level parameters: the transfer width `w` (8 bits below), the w
 `cw` of the half-period counter (16 bits below) and the number of chip selects `ncs`
 (one below). Its input `Spi.InW` adds `sel`, the index of the selected slave, and its
 output `Spi.OutW.cs` is `ncs` lines, all high when idle and bit `sel` low while a
-transfer runs. The original `masterC`/`loopC` API is unchanged (the generic master at
-`w = 8`, `cw = 16`, `ncs = 1` produces the same protocol; `examples/rune-spi.wiz`
-checks the two cycle for cycle).
+transfer runs. The original `masterC`/`loopC` API names are unchanged. One behaviour
+changed intentionally: `Spi.shiftIn8` used to shift a received bit in at the top
+(`cat b (slice 1 7 x)`), which reverses the byte; it now shifts like the generic path
+(`x << 1 | b`), so the first (most significant) bit sampled ends at the top. The old
+8-bit loopback did not show the reversal because its test bytes 0xA5 and 0x3C are
+palindromes; `examples/rune-spi.wiz` now uses 0x81 and 0x01, which distinguishes them.
 
 What remains (see `wiz-notes/rune.md`): modes 1 … 3 (CPOL/CPHA), a `cs` decoder with
 active-high selects or per-slave timing, and a `miso` input synchroniser as a separate
@@ -48,10 +51,11 @@ def Spi.cntW : Nat := 16
 /-- The divider, with 0 read as 1 (a half period is at least one cycle). -/
 def Spi.divN (div : Nat) : Nat := Nat.max 1 div
 
-/-- Shift a bit in at the top of an 8-bit register (mode 0 samples the most significant
-bit first). -/
+/-- Shift a bit in at the bottom of an 8-bit register (`x << 1 | b`), so the first bit
+sampled (mode 0 samples the most significant bit first) ends at the top. This is the
+same order as the generic `Spi.shiftIn`. -/
 def Spi.shiftIn8 {r : HwTy → Type} [Hw r] (x : r Spi.B8) (b : r Spi.Bit) : r Spi.B8 :=
-  Hw.cat b (Hw.slice 1 7 x)
+  Hw.cat (Hw.slice 0 7 x) b
 
 /-- The master's state: the pins are registers, plus the transfer's phase, its
 half-period counter, the number of bits left and the two shift registers. -/
@@ -151,11 +155,8 @@ def Spi.selW (ncs : Nat) : Nat := Nat.log2 (ncs - 1) + 1
 def Spi.allCS (ncs : Nat) : Nat := Nat.pow 2 ncs - 1
 
 /-- Shift a bit in at the bottom of a `w`-bit register: `x << 1 | b`, so the first bit
-sampled (the most significant of the word) ends at the top. (The original
-`Spi.shiftIn8` shifts the other way, `cat b (slice 1 7 x)`, which reverses the received
-byte; its 8-bit test data 0xA5 and 0x3C are palindromes, so the loopback did not show
-it. The generic master uses this order, and `examples/rune-spi.wiz` checks it with
-non-palindromic data.) -/
+sampled (the most significant of the word) ends at the top. `Spi.shiftIn8` uses the
+same order for 8 bits. -/
 def Spi.shiftIn {r : HwTy → Type} [Hw r] {ω w : Nat} (x : r (HwTy.bits w))
     (b : r Spi.Bit) : r (HwTy.bits w) :=
   Hw.or (Hw.shl x 1) (Hw.mux b (Hw.lit w 1) (Hw.lit w 0))

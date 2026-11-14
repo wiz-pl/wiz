@@ -110,10 +110,9 @@ def reportW (w cw ncs div : Nat) (datas sels : List Nat) : String :=
     <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "spiW" c))
 
 -- The generic master at 8 bits, a 16-bit counter and one chip select, on the same
--- input trace as `Spi.loopC`: every output leaf must agree, cycle for cycle. The bytes
--- are palindromes (0xA5, 0x3C): the original receiver's `shiftIn8` reverses the bit
--- order, which only shows with non-palindromic data (the generic `Spi.shiftIn` is
--- correct, so its bytes below include 0x96).
+-- input trace as `Spi.loopC`: every output leaf must agree, cycle for cycle, on
+-- non-palindromic bytes (0x81, 0x01). Both receivers shift most significant bit first;
+-- before the `Spi.shiftIn8` fix the old one reversed the bytes, so this case failed.
 def reportCompat (div : Nat) (datas : List Nat) : String :=
   let spacing := 16 * div + 8;
   let cycles := List.length datas * spacing;
@@ -122,13 +121,7 @@ def reportCompat (div : Nat) (datas : List Nat) : String :=
     (Hdl.map (fun (_ : Nat) => 0) (Hdl.upto cycles 0)) k) (Hdl.upto cycles 0);
   let outs0 := Circuit.runLeaves (Spi.loopC div) ins0;
   let outs1 := Circuit.runLeaves (Spi.loopCW 8 16 1 div) ins1;
-  -- the pins, busy and done agree; the received-data register differs cycle by cycle
-  -- (the generic one shifts the other way), but the final byte is the same for these
-  -- palindromic test bytes
-  let pins0 := Hdl.map (fun (o : List Nat) => List.take 5 o) outs0;
-  let pins1 := Hdl.map (fun (o : List Nat) => List.take 5 o) outs1;
-  "spi compat div=" <+> Hdl.show div <+> ": same " <+> yes (leavesEq pins0 pins1)
-    <+> ", bytes " <+> yes (Hdl.natsEq (doneBytes outs0) (doneBytes outs1))
+  "spi compat div=" <+> Hdl.show div <+> ": same " <+> yes (leavesEq outs0 outs1)
 
 -- The chip-select values while `busy` (leaf 3 of `Spi.OutW`), and their distinct
 -- consecutive values.
@@ -160,10 +153,10 @@ def reportCS : String :=
     <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "spiCS" c))
 
 def main : IO Unit := do
-  IO.println (report 1 (.cons 165 (.cons 60 .nil)));
-  IO.println (report 3 (.cons 165 (.cons 60 .nil)));
-  IO.println (reportCompat 1 (.cons 165 (.cons 60 .nil)));
-  IO.println (reportCompat 3 (.cons 165 (.cons 60 .nil)));
+  IO.println (report 1 (.cons 129 (.cons 1 .nil)));
+  IO.println (report 3 (.cons 129 (.cons 1 .nil)));
+  IO.println (reportCompat 1 (.cons 129 (.cons 1 .nil)));
+  IO.println (reportCompat 3 (.cons 129 (.cons 1 .nil)));
   IO.println (reportW 4 16 1 1 (.cons 10 .nil) (.cons 0 .nil));
   IO.println (reportW 16 16 1 1 (.cons 4660 .nil) (.cons 0 .nil));
   IO.println (reportW 8 16 1 1 (.cons 150 .nil) (.cons 0 .nil));

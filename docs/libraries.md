@@ -676,21 +676,22 @@ output `Spi.OutW.cs` is `ncs` lines, all high when idle and bit `sel` low while 
 transfer runs. `Spi.StW`/`Spi.InW`/`Spi.OutW`/`Spi.CmdW` are the generic bundles;
 `Spi.master8C` and `Spi.loop8C` fix `w = 8` and `cw = Spi.cntW = 16`. The original
 `Spi.masterC`/`Spi.loopC` (8 bits, 16-bit counter, one select, `Spi.In`/`Spi.Out`) keep
-their own definitions, so their netlists and Verilog are unchanged; the example checks
-the generic master's pins, flags and final bytes against them. The generic `Spi.shiftIn`
-receives most significant bit first (`x << 1 | b`); the original `Spi.shiftIn8` shifts
-the other way and reverses the received byte, which its 8-bit loopback (0xA5, 0x3C, both
-palindromes) did not show. The example's non-palindromic 0x96 and the 4- and 16-bit
-words check the correct order.
+their names and definitions, and the example checks the generic master against them
+cycle for cycle. Both receivers now shift most significant bit first (`x << 1 | b`):
+`Spi.shiftIn8` had shifted the other way (`cat b (slice 1 7 x)`), which reversed the
+received byte, but its old loopback data (0xA5, 0x3C) were palindromes and hid it. The
+fix is intentional and changes only the two receive-shift wires in the Verilog of
+`Spi.masterC`/`Spi.loopC`; the example uses 0x81 and 0x01, which distinguishes the
+orders.
 
 Examples (run by the test group `rune`): `examples/rune-uart.wiz` (the baud generator and
 the loopback at the 16-bit default and the 7-bit and 10-bit configurations, `n = 1` and
 each width's maximum `n`, and the reset/CDC receiver), `examples/rune-spi.wiz` (the
-original loopback at dividers 1 and 3, the generic master at those parameters against
-it, 4- and 16-bit transfers, an 8-bit counter, and three chip selects selecting slaves 0,
-1 and 2), `examples/rune-ddr.wiz` — value simulation = `Netlist.simFast`, the loopback
-bytes, the SPI shift order and edges, the chip-select patterns, the DDR handshake and
-masked write.
+original loopback at dividers 1 and 3 with non-palindromic 0x81/0x01, the generic master
+at those parameters against it cycle for cycle, 4- and 16-bit transfers, an 8-bit
+counter, and three chip selects selecting slaves 0, 1 and 2), `examples/rune-ddr.wiz` —
+value simulation = `Netlist.simFast`, the loopback bytes, the SPI shift order and edges,
+the chip-select patterns, the DDR handshake and masked write.
 
 What remains is in `wiz-notes/rune.md`: SPI modes 1 … 3 and a chip-select decoder or
 per-slave timing, the real DDR controller's wrapper and timing, and clock-domain
