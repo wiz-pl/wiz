@@ -193,6 +193,13 @@ def wilLawsSrc : String := "import Scry.AiWLaws
 #print axioms WEnv.gamma_mono
 "
 
+/-- The checker's edge side is proved (`Scry.AiWSound.checkW_sound`): acceptance gives
+every `cfg.edges` post-fixpoint condition. -/
+def soundSrc : String := "import Scry.AiWSound
+
+#print axioms checkW_sound
+"
+
 /-- `cRunLibs`, but a missing C compiler is a skip (this host has no `cc`; CI does). -/
 def compiledOrSkip (src expected : String) (llvm : Bool) : IO Unit := do
   try
@@ -268,6 +275,8 @@ def scryGroup : Group where
         "'WValue.gamma_join_sound' does not depend on any axioms",
         "'WEnv.gamma_join_sound' does not depend on any axioms",
         "'WEnv.gamma_mono' does not depend on any axioms"] },
+    { name := "checker soundness: acceptance implies every CFG edge's post-fixpoint (checkW_sound)",
+      run := fun _ => okLibs soundSrc ["'checkW_sound' does not depend on any axioms"] },
     { name := "the Wil checker compiled to C and LLVM (digest 111111)",
       run := fun _ => wilCompiled }
   ]

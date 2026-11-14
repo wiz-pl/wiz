@@ -1,3 +1,4 @@
+import Logic
 import Text
 import Functor
 /-!
@@ -714,3 +715,17 @@ def Wil.runFunction (p : Wil.Program) (fuel : Nat) (name : String) (args : List 
   match Wil.entry p name args with
   | .error m => .fault m
   | .ok c => Wil.run fuel c
+
+-- ## The per-statement step relation (S5's `Transfer.sound_stmt`)
+
+/-- One statement step: `s` is the statement at the current frame's program counter
+(`fr.pc`), `c.frames = fr :: rest`, and `Wil.step c` takes the configuration to `c'` with
+head frame `fr'` and heap `mem'`. The frame context is explicit (rather than existentially
+quantified) so a proof can rewrite with the four equations directly. This is the relation
+`WStmt.transfer_sound_stmt` is stated against. -/
+def Wil.StepStmt (s : Wil.Stmt) (c : Wil.Config) (fr : Wil.Frame) (rest : List Wil.Frame)
+    (blk : Wil.Block) (fr' : Wil.Frame) (mem' : Wil.Mem) : Prop :=
+  (c.frames = .cons fr rest) ∧
+  (Wil.listNth fr.code.blocks fr.block.index = .some blk) ∧
+  (Wil.listNth blk.stmts fr.pc = .some s) ∧
+  (Wil.step c = .next (Wil.Config.mk c.prog mem' (.cons fr' rest)))

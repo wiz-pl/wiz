@@ -36,6 +36,13 @@ import Scry.AiWilExamples
 ```
 -/
 
+-- ## A list membership proposition (used by `checkW_sound_stmt`)
+
+/-- `x` is an element of the list. -/
+def List.Has {A : Type} (x : A) : List A → Prop
+  | .nil => False
+  | .cons y ys => (x = y) ∨ List.Has x ys
+
 -- ## A signedness-aware value
 
 /-- A numerical abstract value, tagged by signedness. `bot` is unreachable, `any` is the
@@ -853,8 +860,10 @@ def WStmt.sound_stmt (m : AiMach) (sem : WStmt → WConc → WConc → Prop) : P
   Transfer.sound_stmt (AiMach × WStmt) WConc WEnv
     (fun p c c' => sem p.2 c c')
 
-/-- The post-fixpoint theorem's edge side: acceptance implies every edge's
-post-fixpoint condition. The run induction and the alarm side are S5's remaining proof;
-the per-statement transfer obligation is `WStmt.transfer_sound_stmt` above. -/
+/-- The post-fixpoint theorem's edge side: acceptance implies every *edge of the CFG* has
+its post-fixpoint condition. (`checkW` only inspects `cfg.edges`, so the membership
+hypothesis is necessary: an arbitrary `WEdge` has no post condition.) The run induction
+and the alarm side are S5's remaining proof; the per-statement transfer obligation is
+`WStmt.transfer_sound_stmt` above. -/
 def checkW_sound_stmt (m : AiMach) (cfg : WCfg) (inv : WState) : Prop :=
-  checkW m cfg inv = [] → (e : WEdge) → WEdge.post m cfg inv e
+  checkW m cfg inv = .nil → (e : WEdge) → List.Has e cfg.edges → WEdge.post m cfg inv e

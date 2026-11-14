@@ -1,0 +1,188 @@
+import Prelude
+import Logic
+import Nat
+import Text
+import Scry.AiWil
+import Scry.Wil
+/-!
+# Scry.AiWSound: the Wil-side soundness skeleton
+
+What is *proved* here (no axioms):
+
+* the list plumbing the checker needs (`List.append_eq_nil`, `List.concat_nil_has`);
+* `checkW_sound`: if `checkW m cfg inv = []` then every edge *of `cfg`* satisfies its
+  post-fixpoint condition `WEdge.post`. This is `checkW_sound_stmt` (edge side) and it is
+  complete: `checkW_sound_stmt` in `Scry.AiWil` was missing the membership hypothesis
+  (an arbitrary `WEdge` is not checked), and the corrected statement is
+  `checkW_sound_stmt` there.
+
+What is *stated, exactly*, and still to be proved (the run induction and the alarm
+side; no `axiom`/`sorry` is introduced for them):
+
+* `WConc.ofFrame`/`ofConfig`: the register file of a Wil frame/configuration.
+* `Wil.RegStep`: the register-file relation induced by `Wil.StepStmt` (the concrete
+  statement step of `Scry.Wil`).
+* `WStmt.transfer_sound_stmt` instantiated with `Wil.RegStep` for `.wil` statements and
+  with an explicit `loadSem` for the array model (`WStmt`'s `load` has no Wil equivalent:
+  Wil's `load` carries no index or length, so the frontend/points-to analysis supplies
+  the length; the semantics of a `load` is therefore a hypothesis, not a definition).
+* The per-case obligations the proof decomposes into, with their exact statements:
+  `Wil.assign_regs_stmt` (the register effect of an assignment in `Wil.step`),
+  `WStmt.assume_refine_stmt` (guard refinement sound for `Wil.evalCond`),
+  `WStmt.load_recall_stmt` (the loaded value is the array's element — the points-to
+  fact), `WStmt.alarm_safe_stmt` (the alarm side of §5.3).
+
+The frame-context equations of `Wil.StepStmt` are what the per-case proofs rewrite with;
+`Wil.step` is total, so each case is a computation on the frame/memory projections.
+-/
+
+
+def Ai.boolCases {0 P : Prop} (b : Bool) (ht : b = .true → P) (hf : b = .false → P) : P :=
+  Or.elim (Bool.cases b) ht hf
+
+def List.consNeNil {A : Type} (x : A) (xs : List A) (h : List.cons x xs = .nil) : False := h.1
+
+-- ## List plumbing
+
+def List.append_nil_left {A : Type} (l : List A) : List.append l .nil = l :=
+  match l with
+  | .nil => rfl
+  | .cons x xs => congrArg (List.cons x) (List.append_nil_left xs)
+
+def List.append_eq_nil {A : Type} : (l1 l2 : List A) → List.append l1 l2 = .nil →
+    (l1 = .nil) × (l2 = .nil)
+  | .nil, l2, h => (rfl, h)
+  | .cons x xs, l2, h => absurd h.1
+
+def List.concat_nil_has {A : Type} : (ls : List (List A)) →
+    List.concat ls = .nil → (x : List A) → List.Has x ls → x = .nil
+  | .nil, h, x, hx => absurd hx
+  | .cons y ys, h, x, hx =>
+      let h' : (y = .nil) × (List.concat ys = .nil) := List.append_eq_nil y (List.concat ys) h;
+      Or.elim hx
+        (fun (e : x = y) => Eq.mpr' (fun (t : List A) => t = .nil) e h'.1)
+        (fun hy => List.concat_nil_has ys h'.2 x hy)
+
+-- ## checkW edge side
+
+def checkWEdge_false (m : AiMach) (cfg : WCfg) (st : WState) (e : WEdge)
+    (hf : WEnv.le (WEdge.out m cfg st e) (WState.at cfg st e.dst) = .false) :
+    checkWEdge m cfg st e = .cons (Alarm.unsoundEdge e.src e.dst) .nil :=
+  Eq.mpr' (fun (r : Bool) => (match r with
+      | .true => List.nil
+      | .false => List.cons (Alarm.unsoundEdge e.src e.dst) List.nil) =
+        List.cons (Alarm.unsoundEdge e.src e.dst) List.nil) hf rfl
+
+def checkWEdge_post (m : AiMach) (cfg : WCfg) (st : WState) (e : WEdge)
+    (h : checkWEdge m cfg st e = .nil) : WEdge.post m cfg st e :=
+  Ai.boolCases (WEnv.le (WEdge.out m cfg st e) (WState.at cfg st e.dst))
+    (fun ht => ht)
+    (fun hf => absurd
+      (List.consNeNil (Alarm.unsoundEdge e.src e.dst) List.nil
+        (Eq.mp' (fun (t : List Alarm) => t = List.nil)
+          (checkWEdge_false m cfg st e hf) h)))
+
+def checkWEdgesGo_post (m : AiMach) (cfg : WCfg) (st : WState) :
+    (edges : List WEdge) →
+      List.concat (List.map (fun (e : WEdge) => checkWEdge m cfg st e) edges) = .nil →
+      (e : WEdge) → List.Has e edges → WEdge.post m cfg st e
+  | .nil, h, e, he => absurd he
+  | .cons x xs, h, e, he =>
+      let h' : (checkWEdge m cfg st x = .nil) ×
+          (List.concat (List.map (fun (e : WEdge) => checkWEdge m cfg st e) xs) = .nil) :=
+        List.append_eq_nil (checkWEdge m cfg st x)
+          (List.concat (List.map (fun (e : WEdge) => checkWEdge m cfg st e) xs)) h;
+      Or.elim he
+        (fun (ex : e = x) =>
+          Eq.mpr' (fun (t : WEdge) => WEdge.post m cfg st t) ex
+            (checkWEdge_post m cfg st x h'.1))
+        (fun hx => checkWEdgesGo_post m cfg st xs h'.2 e hx)
+
+def checkW_sound (m : AiMach) (cfg : WCfg) (inv : WState)
+    (h : checkW m cfg inv = .nil) (e : WEdge) (he : List.Has e cfg.edges) :
+    WEdge.post m cfg inv e :=
+  let hparts : (checkWEntry cfg inv = .nil) ×
+      (List.append (checkWEdges m cfg inv) (checkWAlarms m cfg inv) = .nil) :=
+    List.append_eq_nil (checkWEntry cfg inv)
+      (List.append (checkWEdges m cfg inv) (checkWAlarms m cfg inv)) h;
+  let hEdges : checkWEdges m cfg inv = .nil :=
+    (List.append_eq_nil (checkWEdges m cfg inv) (checkWAlarms m cfg inv) hparts.2).1;
+  checkWEdgesGo_post m cfg inv cfg.edges hEdges e he
+
+-- ## Register files of Wil configurations
+
+/-- The register file of a frame (the `WConc` a `WEnv` describes). -/
+def WConc.ofFrame (fr : Wil.Frame) : WConc := fr.regs
+
+/-- The register file of the current (head) frame of a configuration. -/
+def WConc.ofConfig (c : Wil.Config) : WConc :=
+  match c.frames with
+  | .nil => List.nil
+  | .cons fr _ => fr.regs
+
+-- ## The register-file relation induced by `Wil.StepStmt`
+
+/-- A statement of Wil, run in some configuration, takes register file `c` to `c'`.
+The frame context is existentially quantified because the transfer functions only see
+the register file; a proof of a specific statement case gets the context from
+`Wil.StepStmt`'s fields. -/
+def Wil.RegStep (s : Wil.Stmt) (c c' : WConc) : Prop :=
+  ∃ (cfg : Wil.Config) (fr : Wil.Frame) (rest : List Wil.Frame) (blk : Wil.Block)
+    (fr' : Wil.Frame) (mem' : Wil.Mem),
+    (c = fr.regs) ∧ (c' = fr'.regs) ∧ Wil.StepStmt s cfg fr rest blk fr' mem'
+
+/-- The array-model semantics of `WStmt.load`, supplied by the frontend or a points-to
+analysis: reading `arr[idx]` with static length `len` writes `v` into `x`. -/
+def WStmt.loadSem (loadSem : Wil.Var → Wil.Var → Wil.Var → Len → WConc → WConc → Prop) :
+    WStmt → WConc → WConc → Prop
+  | .wil s, c, c' => Wil.RegStep s c c'
+  | .load x arr idx len, c, c' => loadSem x arr idx len c c'
+
+/-- The per-statement transfer obligation of S5, stated against Wil's concrete statement
+step (`Wil.StepStmt`, hence `Wil.step`) and an explicit array model `loadSem`. -/
+def WStmt.transfer_sound (m : AiMach)
+    (loadSem : Wil.Var → Wil.Var → Wil.Var → Len → WConc → WConc → Prop) : Prop :=
+  WStmt.transfer_sound_stmt m (WStmt.loadSem loadSem)
+
+-- ## The per-case obligations the proof decomposes into
+
+/-- The register effect of an assignment in `Wil.step`: after the step, the result
+frame's register file is `Wil.setReg x.index (Wil.Val.fit x.ty v) fr.regs` for the value
+`v` that `Wil.evalRhs` computed. (Unfold `Wil.step` with the `Wil.StepStmt` equations;
+`Wil.execStmt`'s `assign` case is the computation.) -/
+def Wil.assign_regs_stmt (x : Wil.Var) (e : Wil.Rhs) : Prop :=
+  (cfg : Wil.Config) → (fr : Wil.Frame) → (rest : List Wil.Frame) → (blk : Wil.Block) →
+  (fr' : Wil.Frame) → (mem' : Wil.Mem) →
+  Wil.StepStmt (.assign x e) cfg fr rest blk fr' mem' →
+  ∃ (v : Wil.Val), Wil.evalRhs fr cfg.mem e = .ok v ∧
+    fr'.regs = Wil.setReg x.index (Wil.Val.fit x.ty v) fr.regs
+
+/-- Guard refinement is sound for Wil's concrete condition evaluator: if the concrete
+condition is true, every value described by the refined environment is described by the
+concrete register file (and the refinement only *removes* states). The concrete side is
+`Wil.evalCond`, whose `.cmp` reads two registers (hence `WConc.getD`); the proof is the
+case analysis of `WCond.refineGo`/`refineCmp` against `Wil.Val.cmp`. -/
+def WStmt.assume_refine_stmt (c : Wil.Cond) : Prop :=
+  (fr : Wil.Frame) → (mem : Wil.Mem) → (a : WEnv) →
+  WEnv.gamma a fr.regs → Wil.evalCond fr c = .ok .true →
+  WEnv.gamma (WCond.refine (AiMach.mk 64 .false .wrap) a c) fr.regs
+
+/-- The array model's value: a `load x arr idx len` step writes the element at the
+concrete index, and the loaded value is described by `WValue.loadedValue x.ty`. This is
+the frontend/points-to fact (Wil's pointer load has no index or length): it is a
+hypothesis on the concrete `loadSem`, not something the checker may assume. -/
+def WStmt.load_recall_stmt
+    (loadSem : Wil.Var → Wil.Var → Wil.Var → Len → WConc → WConc → Prop)
+    (x arr idx : Wil.Var) (len : Len) : Prop :=
+  (c c' : WConc) → loadSem x arr idx len c c' →
+    WValue.gamma (WValue.loadedValue x.ty) (WConc.getD c' x.index .undef)
+
+/-- The alarm side of §5.3: if `WStmt.alarms` is empty under the invariant, the concrete
+statement cannot fault. `faults` is the concrete fault predicate of the statement step
+(for a `load` it is the out-of-bounds/null-dereference condition of `Wil.memLoad`; for a
+`store`/`free` it is `Wil.memStore`/`Wil.memFree`'s error). The null half is γ of
+`Null.nonNull`; the out-of-bounds half is the `load_recall_stmt` frontend fact. -/
+def WStmt.alarm_safe_stmt (m : AiMach) (s : WStmt)
+    (faults : Wil.Frame → Prop) : Prop :=
+  (fr : Wil.Frame) → (a : WEnv) → WStmt.alarms m fr.pc a s = List.nil →
+  WEnv.gamma a fr.regs → ¬ faults fr

@@ -31,6 +31,7 @@ three fields are exactly the unproved statements (`mono`, `join`, and the point
 reflexivity `contains (range z z) z = true` that the `known` normalisation needs). No
 `axiom` is used: the record is an explicit hypothesis, so the unsigned cases are
 unconditional and the signed ones are `SIntObl → …`.
+-/
 
 -- ## Option/WValue helpers
 def WEnv.optSymm (a b : Option WValue) (h : a = b) : b = a := Eq.symm h
