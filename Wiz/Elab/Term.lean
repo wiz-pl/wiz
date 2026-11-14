@@ -3875,6 +3875,9 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
         (abstractOccAt cand goalT (if all then none else some 0)).run (false, 0)
       if !found then return ← runTac code info st (ans (mkCon 0 []))
       let newT := abstr.instantiateAt 0 repl
+      -- a rule that rewrites a term to itself is not a step: report no match, so a set
+      -- with a degenerate rule (a left side convertible with its right side) terminates
+      if newT == goalT then return ← runTac code info st (ans (mkCon 0 []))
       -- for `← h` the abstraction puts back the *replacement*, as `rewrite` does
       let Ga := abstr.instantiateAt 0 (if rtl then repl else cand)
       -- `P x := G[x] = G[a]` (or `G[a] = G[x]`, right to left), as `rewrite`
@@ -3886,6 +3889,19 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
       let (st, id) := addGoal st { ctx := gl.ctx, ty := ← evalIn gl.ctx newT, tm := m }
       let (r, st) ← refl st gl newT
       return ← runTac code info st (ans (mkCon 1 [.nat id, r]))
+  if tag == TacTag.getSimpLemmas then
+    -- (6h S2) the default set, in the order the Wiz driver tries it: priority (higher
+    -- first), then registration order (oldest first). Each lemma is the reflected
+    -- constant; `rewriteAt` reads its type as written, so levels are not needed here.
+    let entries := (← get).simpLemmas.reverse.mergeSort
+      (fun a b => decide (a.priority ≥ b.priority))
+    let mut st := st
+    let mut ls : Array RVal := #[]
+    for e in entries do
+      let (r, st') ← refl st gl (.const e.name [])
+      st := st'
+      ls := ls.push (encodePair (encodeString e.name) r)
+    return ← runTac code info st (apply code (fld 1) (encodeList ls.toList))
   if tag == TacTag.exact then
     let stx ← stxOf (fld 1)
     let t ← check (gl.ctx.withInfo stx) stx gl.ty

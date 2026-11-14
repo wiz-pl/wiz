@@ -971,9 +971,9 @@ def v (p q : Q) : (p + q) * (p + q) ≈ p * p + 2 * p * q + q * q :=
 ## Simp lemmas: normal forms for rewriting (`lib/SimpLemmas.wiz`)
 
 `import SimpLemmas` collects the default rewrite set: equations oriented left to right,
-towards the normal form a simplifier uses. It is independent of the tactic core (there
-is no `simp` tactic yet), so the set is a list of names used in explicit `rw` chains
-(or in a future `simp only [...]`). Every rule is a theorem (no axiom, no `sorry`).
+towards the normal form a simplifier uses. The safe subset is registered with
+`attribute [simp]`, so `simp` (stage 6h) uses it without a list; `simp only [...]` and
+`rw` use the rest explicitly. Every rule is a theorem (no axiom, no `sorry`).
 
 | type | rules (left to right) | where |
 |------|-----------------------|-------|
@@ -984,6 +984,16 @@ is no `simp` tactic yet), so the set is a list of names used in explicit `rw` ch
 | `Option`, pairs | `Option.map_none : Option.map f none = none`, `Option.map_some : Option.map f (some a) = some (f a)`, `Prod.fst_mk : (a, b).1 = a`, `Prod.snd_mk : (a, b).2 = b` | `lib/SimpLemmas.wiz` |
 | `Int` | `Int.add_zero : a + 0 = a`, `Int.zero_add : 0 + a = a`, `Int.mul_one : a * 1 = a`, `Int.one_mul : 1 * a = a`, `Int.mul_zero : a * 0 = 0`, `Int.zero_mul : 0 * a = 0`, `Int.sub_zero : a - 0 = a` | `lib/Int.wiz` |
 
+* **The registered default set.** `simp` uses these without a list (all at priority
+  1000, oldest registration first): `Nat.add_zero`, `Nat.mul_one`, `Nat.one_mul`,
+  `Nat.mul_zero`, `Bool.not_not`, `Bool.and_true`, `Bool.and_false`, `Bool.or_false`,
+  `List.append_nil`, `List.nil_append`, `List.map_map`, and the `Int` identities
+  (`add_zero`, `zero_add`, `sub_zero`, `mul_one`, `one_mul`, `mul_zero`, `zero_mul`).
+  The others stay available to `simp only [...]`/`rw`: a rule whose left side computes
+  to a variable or a bare data value would match anything (matching is up to
+  conversion) or has already computed away in the goal, so it is not registered. The
+  `attribute [simp]` command warns about a duplicate and about a right side that
+  contains its left side.
 * **Orientation.** Rewriting goes from the left column (the term with the neutral
   operation) to the smaller one: `n + 0 → n`, `n * 1 → n`, `b ^ 0 → 1`,
   `b ^ (n+1) → b * b^n`, `xs ++ [] → xs`, `map f (x :: xs) → f x :: map f xs`. Rules
@@ -999,8 +1009,8 @@ is no `simp` tactic yet), so the set is a list of names used in explicit `rw` ch
   `Bool.if_true`, `Bool.if_false`), the kernel computes that type to `True` (or to the
   payload equation of the constructors), so `rw` rejects the lemma even though it is
   true. The `std` tests therefore check those by direct application and the rest by
-  `rw`; a `simp` core can use all of them unchanged. This is a limitation of `rw`, not
-  of the lemma set.
+  `rw`; `simp` uses the registered safe subset and the others explicitly. This is a
+  limitation of `rw`, not of the lemma set.
 
 ```
 import SimpLemmas

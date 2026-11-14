@@ -21,8 +21,9 @@ def ex (a b : Nat) (h : a = b) (P : Nat → Prop) (pb : P b) : P a := by
   exact pb
 ```
 
-S1 (this stage) is goal rewriting with an explicit rule list. `[simp]`/the default
-`lib/SimpLemmas.wiz` set, conditional rules (dischargers), `simp at h` and `simp?` are
-S2–S4 and need their own requests (`getSimpLemmas`, premise goals, `changeHyp`/
-`addHyp`/`clearHyp`). There is no automatic closer: `simp` rewrites and the user writes
-`rfl`/`exact`/`assumption`, and `simp only []` is the identity.
+S1 is goal rewriting with an explicit rule list. S2 adds `attribute [simp]`, the default
+set (`lib/SimpLemmas.wiz`), `local` scoping and the `Tac.getSimpLemmas` read; conditional
+rules (dischargers), `simp at h` and `simp?` are S3–S4 and need their own requests
+(premise goals, `changeHyp`/`addHyp`/`clearHyp`). There is no automatic closer: `simp`
+rewrites and the user writes `rfl`/`exact`/`assumption`, and `simp only []` is the
+identity.

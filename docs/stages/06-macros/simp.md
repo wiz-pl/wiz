@@ -1,54 +1,94 @@
 # `simp`: a simplifier whose algorithm is Wiz
 
-`simp` rewrites the goal with a list of equations until no rule applies, then stops.
-The **algorithm** (rule order, direction, fuel, messages) lives in Wiz, in
-`lib/Prelude.wiz`; the host (`Wiz/Elab/Tactic.lean`, `Wiz/Elab/Term.lean`) provides one
-small request, `Tac.rewriteAt`, that matches a rule and builds the transport. This is
-deliberate: `simp` must be runnable by the self-hosted frontend once its `Tac`/`Expr`
-layer reaches parity, so the tactic is ordinary Wiz code, not a second engine in Lean
+`simp` rewrites the goal with equations until no rule applies, then stops. The
+**algorithm** (rule order, direction, fuel, the default set's use, messages) lives in
+Wiz, in `lib/Prelude.wiz`; the host (`Wiz/Elab/Tactic.lean`, `Wiz/Elab/Term.lean`)
+provides two small requests: `Tac.rewriteAt` matches one rule and builds the transport,
+and `Tac.getSimpLemmas` hands the default set to the driver. This is deliberate: `simp`
+must be runnable by the self-hosted frontend once its `Tac`/`Expr` layer reaches parity,
+so the tactic is ordinary Wiz code, not a second engine in Lean
 (`wiz-notes/simp-design.md` §4.3, §6.6).
 
 ```
-def ex (a b : Nat) (h : a = b) (P : Nat → Prop) (pb : P b) : P a := by
-  simp [h]            -- ⊢ P b
-  exact pb
+import SimpLemmas
 
-def ex2 (n : Nat) (h : (k : Nat) → k + 0 = k) : n + 0 = n := by
-  simp [h]            -- the rule's k is found by matching: ⊢ n = n
+def ex (a b : Nat) (h : a = b) : a + 0 = b := by
+  simp [h]            -- h first, then the default Nat.add_zero: ⊢ b = b
+  rfl
+
+def ex2 (a : Nat) : a + 0 = a := by
+  simp                -- the default set (Nat.add_zero is registered with [simp])
   rfl
 ```
 
-## Syntax and semantics (S1)
+## Syntax and semantics
 
 ```
-simp                          -- the default set; empty today (no [simp] attribute yet)
-simp [h, Nat.add_zero]        -- add these equations
-simp only [h]                 -- exactly these
-simp only []                  -- identity
+simp                          -- the default set (the registered [simp] lemmas)
+simp [h, Nat.add_zero]        -- the listed equations, then the default set
+simp only [h]                 -- exactly these; no default set
+simp only []                  -- identity (no rules, no computation)
 simp [← h]                    -- use h right to left
+attribute [simp] Nat.add_zero -- add a theorem to the default set
+attribute [simp 500] myLemma  -- with a priority (higher is tried first)
+local attribute [simp] myLemma -- only in this module (dropped by its end)
 ```
 
 * A rule is a complete term whose type is a telescope `∀ x₁ … xₙ, lhs = rhs`. The
   telescope variables are **matched** against a subterm of the goal: this is what makes
   `simp [h]` work for `h : (n : Nat) → n + 0 = n`, where `rw h` cannot (it needs `h n`).
-* Rules are tried in list order, each in the direction written (`← h` flips it), and a
-  rewrite restarts the pass. A pass that changes nothing ends `simp` **successfully**:
-  `simp` is not `rw`, so no match is not an error, and the goal is left as it is.
-* There is **no automatic closer** in S1. `simp` only rewrites; `rfl`, `exact` or
-  `assumption` are written by the user (Wiz keeps computation and closing explicit;
-  `simp only []` is the identity, unlike Lean's beta/iota reduction). This is why the
-  stage's tests end in `exact`/`rfl`.
-* `simp only []` uses no rules and changes nothing.
-* A rule that is not an equation after its binders is an error:
-  `simp: expected an equation: not an equation`. A bare proposition `h : P` is not
-  rewritten to `True` (Wiz has no propositional extensionality).
+* **Order.** Explicit arguments are tried first, in the order written, then the default
+  set: higher priority first, and within one priority oldest registration first. A
+  rewrite restarts the pass. `simp only [r₂, r₁]` therefore overrides registration order.
+* **No match is not an error.** A pass that changes nothing ends `simp` successfully and
+  leaves the goal as it is; `simp` is not `rw`. A rule that rewrites a term to itself is
+  not a step (the host reports no match), so a degenerate rule cannot loop.
+* **No automatic closer.** `simp` only rewrites; `rfl`, `exact` or `assumption` are
+  written by the user (Wiz keeps computation and closing explicit; `simp only []` is the
+  identity, unlike Lean's beta/iota reduction). This is why the tests end in
+  `exact`/`rfl`.
 * **Fuel.** At most `Simp.fuel` (100) rewrites; exhausting it is
   `simp: maximum steps (100) reached: possible loop (…)`, never a silent "normal form".
-  A rule that rewrites a term to itself is not a step, so it is skipped. Direction is
-  explicit; a rule like `Nat.add_zero` is never run backwards automatically (that would
-  grow `n` to `n + 0` forever).
+  Direction is explicit; a rule like `Nat.add_zero` is never run backwards automatically
+  (that would grow `n` to `n + 0` forever).
 
-## The host request: `Tac.rewriteAt`
+## The `[simp]` attribute (S2)
+
+`attribute [simp] f` registers an existing declaration. The command checks it and the
+default set is data in the elaborator state, not in the kernel environment: `local`
+drops it at the end of its module, and an imported module's registrations are replayed
+(the command is not cacheable, so a cache hit re-runs it rather than losing the set).
+
+The checks (with stable error codes):
+
+| case | result |
+|---|---|
+| unknown name | error `unknown-declaration` |
+| a constructor | error `simp-lemma-not-equation` ("is a constructor, not an equation") |
+| an axiom (no value or witness) | error `simp-lemma-not-equation` ("must be a theorem, not an axiom") |
+| not an equation after its `∀` binders | error `simp-lemma-not-equation` |
+| a premise before the equation (`… → lhs = rhs`) | error `simp-lemma-conditional` (dischargers are S3) |
+| already registered | warning "duplicate `[simp]` registration" (kept once) |
+| `lhs = lhs` | warning "does not simplify" |
+| the right side contains the left side | warning "possibly looping simp theorem" |
+
+Orientation is not guessed: a lemma is used left to right, and the reverse would have to
+be a separate registration. A looping rule still fails with the fuel message if it was
+registered before the warning was seen.
+
+**The default set.** `lib/SimpLemmas.wiz` registers its rules at the end of the file:
+`Nat.add_zero`, `Nat.mul_one`/`one_mul`/`mul_zero`, `Bool.not_not`/`and_true`/`and_false`/
+`or_false`, `List.append_nil`/`nil_append`/`map_map`, and the `Int` identities
+(`add_zero`, `zero_add`, `sub_zero`, `mul_one`, `one_mul`, `mul_zero`, `zero_mul`).
+`import SimpLemmas` therefore gives `simp` a terminating identity set. The set is
+deliberately small and confluent where it matters: commutativity and associativity stay
+out, and rules whose left side computes to a variable or a bare data value (`0 + n`,
+`b ^ 0`, `Prod.fst (a, b)`) are not registered: matching is up to conversion, so such a
+rule would match anything or have already computed away in the goal. The same rules
+remain available explicitly (`simp only [Nat.zero_add]`), and S5 is where matching
+computes-away patterns is revisited.
+
+## The host requests
 
 `Tac.rewrite` takes a *complete* equation: `rw (Nat.add_zero n)`. Matching a rule needs
 fresh metavariables and unification, and the reflected `Expr` has no metavariable, so
@@ -62,6 +102,7 @@ inductive RewriteResult where
 
 | rewriteAt (g : Nat) (lemma : Expr) (rtl : Bool) (all : Bool)
     (k : RewriteResult → Tac)
+| getSimpLemmas (g : Nat) (k : List (String × Expr) → Tac)
 ```
 
 What `Tac.rewriteAt` does (`Wiz/Elab/Term.lean`, helpers in `Wiz/Elab/Tactic.lean`):
@@ -83,14 +124,19 @@ What `Tac.rewriteAt` does (`Wiz/Elab/Term.lean`, helpers in `Wiz/Elab/Tactic.lea
 3. The matched **subterm** is what the transport abstracts (`abstractOccAt`: every
    occurrence, or the first), because the rule's side may equal it only up to
    conversion (`List.append x []` is written `x ++ []` in the lemma).
-4. It builds the same `transp`/`cast` proof as `rewrite` and returns the new goal and
+4. A step that would leave the type syntactically unchanged is reported as `noMatch`
+   (`newT == goalT`), so a degenerate rule is skipped instead of consuming fuel.
+5. It builds the same `transp`/`cast` proof as `rewrite` and returns the new goal and
    its reflected type. No match changes nothing; the kernel checks the finished term.
 
-The Wiz side then commits the new goal (`replaceMainGoal`), restarts the pass, and reads
-the returned type (no extra `goalType` crossing per step). The request is deliberately
-the *only* host addition: there is no simplifier, no discharger and no default set on
-the host. `Tac.rewrite` is unchanged (it could be expressed as `rewriteAt` with
-`all := true`).
+`Tac.getSimpLemmas` returns each registered lemma's name and its reflected constant, in
+the order the driver should try them (priority, then registration). The command
+elaborator threads the set from `CommandState.simpLemmas` into `ElabState.simpLemmas`;
+`local` registrations are recorded by position and dropped by `CommandState.endModule`,
+exactly like `local instance`s. The Wiz side then commits the new goal
+(`replaceMainGoal`), restarts the pass, and reads the returned type (no extra `goalType`
+crossing per step). `Tac.rewrite` is unchanged (it could be expressed as `rewriteAt`
+with `all := true`).
 
 ## Why not a host-side engine
 
@@ -99,37 +145,39 @@ request per run instead of one per rule per pass), and matching, occurrence sele
 and context transport all need `Term` anyway. It was rejected (user decision,
 2026-11-14) because the algorithm would then have to be written a second time for the
 self-hosted frontend, and `simp` would stop being a Wiz library tactic: rule order,
-`only`, direction, fuel and later `[simp]`/`simp?` policy are exactly the parts that
-must stay changeable in Wiz. The accepted costs and their mitigations are in
+`only`, the default set, direction, fuel and later `simp?` policy are exactly the parts
+that must stay changeable in Wiz. The accepted costs and their mitigations are in
 `wiz-notes/simp-design.md` §4.3 and §9 (host-side scan per rule, the new type in the
 answer, no re-reflection per step).
 
 ## What remains
 
-* **S2: `[simp]` and the default set.** `lib/SimpLemmas.wiz` is the written set (Nat
-  powers, Bool, List, Option/pairs, Int); it needs the attribute, the default-set read
-  (`Tac.getSimpLemmas`), `local attribute`, and caching. Until then `simp` with no list
-  rewrites with nothing, and `simp [..]` is the way to use the set.
 * **S3: conditional lemmas and dischargers.** A rule with a premise before the equation
-  currently does not fire (the premise metavariable is not determined); the Wiz
-  discharger (`assumption`, `rfl`, recursive `simp`) and premise goals in
-  `rewriteAt` are S3.
+  is rejected by `attribute [simp]` and does not fire from an explicit list (the premise
+  metavariable is not determined); the Wiz discharger (`assumption`, `rfl`, recursive
+  `simp`) and premise goals in `rewriteAt` are S3.
 * **S4: `simp at h`, `simp?`.** Hypothesis surgery (`changeHyp`/`addHyp`/`clearHyp`) and
   used-rule tracking are host/Wiz additions of their own. Goal rewriting only for now.
 * **S5: congruence and arithmetic.** Dependent arguments, ordered/AC rewriting, a rule
-  index by head name; and matching rules whose pattern computes to a data value (S1
-  refuses them: the goal value has already computed, so a usable occurrence needs a
-  stuck form).
+  index by head name; and matching rules whose pattern computes to a variable or a bare
+  data value (today such rules are not in the default set and, from an explicit list,
+  either do nothing useful or hit the fuel bound).
 * **Occurrences.** `rewriteAt` takes `all : Bool` (all occurrences, or the first); an
   `Occurrence` with `nth`/`path` and an `at` syntax are follow-ups.
 * **Selfhost parity.** Port `stripRule`/`matchRule`/`abstractOccAt` and the `Tac`
-  branch to `selfhost/Kernel.wiz`/`selfhost/Frontend.wiz`, add goal/tactic state and
-  `Expr` reflection there, and run the same sources (P1–P5 in the design note).
+  branches (including `getSimpLemmas`) to `selfhost/Kernel.wiz`/`selfhost/Frontend.wiz`,
+  add goal/tactic state and `Expr` reflection there, and run the same sources (P1–P5 in
+  the design note).
 
 ## Tests
 
-The `tactics` group (`Tests/Groups/Tactic.lean`): a local equation under a context; a
-quantified lemma matched (`(n : Nat) → n + 0 = n`); `simp only` order and restriction;
-no match / `simp only []`; the step bound on a growing rule; a non-equation argument;
-`#print axioms` clean; `rw` then `simp`; `← h`; and rules from `lib/SimpLemmas.wiz`
-(`Bool.and_true`, `List.append_nil`).
+The `tactics` group (`Tests/Groups/Tactic.lean`), in addition to the S1 cases: the
+default set fires (`import SimpLemmas`; `simp` on `a + 0 = a` gives `⊢ a = a`) while
+`simp only []` does not; `simp [h]` adds to the default set and `simp only [h]` does
+not; the default order is priority first then oldest registration (`getSimpLemmas`);
+`[simp]` errors for a constructor, an unknown name and a conditional lemma; warnings for
+a duplicate registration and a possibly looping orientation; and a two-module fixture
+that checks `local attribute [simp]` works in its module and is gone in the importer,
+through both the frontend and the command cache. The S1 cases (explicit list, matched
+quantified lemma, `simp only` order, no match / identity, fuel, non-equation argument,
+`#print axioms`, `rw` then `simp`, `← h`, `SimpLemmas` rules) are unchanged.

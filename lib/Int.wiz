@@ -209,3 +209,15 @@ def Int.abs_neg : (a : Int) → Int.abs (-a) = Int.abs a
   | .ofNat .zero => rfl
   | .ofNat (.succ _) => rfl
   | .negSucc _ => rfl
+
+-- ## The default `simp` set
+--
+-- The Int identities in normal-form orientation (`docs/stages/06-macros/simp.md`).
+
+attribute [simp] Int.add_zero
+attribute [simp] Int.zero_add
+attribute [simp] Int.sub_zero
+attribute [simp] Int.mul_one
+attribute [simp] Int.one_mul
+attribute [simp] Int.mul_zero
+attribute [simp] Int.zero_mul

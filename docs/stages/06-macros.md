@@ -294,8 +294,9 @@ different handles.
 
 ## 6h: `simp`
 
-`simp [h₁, …]` / `simp only [h₁, …]` rewrite the goal with a rule list until no rule
-applies: the algorithm is Wiz (`lib/Prelude.wiz`), the host adds one request,
-`Tac.rewriteAt`, which matches a rule's `∀` telescope against a subterm and builds the
-transport. There is no automatic closer and (until S2) no default set; fuel bounds the
-rewrites. Full section: [`06-macros/simp.md`](06-macros/simp.md).
+`simp` / `simp [h₁, …]` / `simp only [h₁, …]` rewrite the goal until no rule applies:
+the algorithm is Wiz (`lib/Prelude.wiz`), and the host adds two requests:
+`Tac.rewriteAt` (match a rule's `∀` telescope against a subterm and build the
+transport) and `Tac.getSimpLemmas` (the default set registered with `attribute [simp]`,
+including `local` scoping). There is no automatic closer; fuel bounds the rewrites.
+Full section: [`06-macros/simp.md`](06-macros/simp.md).

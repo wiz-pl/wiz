@@ -7,9 +7,9 @@ import Functor
 
 The default set of rewrite lemmas for normal forms (`import SimpLemmas`): the
 equations a simplifier uses, oriented left to right, together with the laws they build
-on. It is independent of the tactic core (there is no `simp` yet): the set is a list of
-names, and `rw` with these names (or an explicit `simp only [...]`, when the tactic
-exists) rewrites goals into the normal forms below.
+on. The rules are registered with `attribute [simp]` at the end of this file, so
+`simp` (stage 6h) uses them without a list; `simp only [...]` does not, and
+`simp [h]` adds `h` before the default set.
 
 The rules, by the normal form they aim at:
 
@@ -109,3 +109,23 @@ def Option.map_some {A B : Type} (f : A → B) (a : A) :
 def Prod.fst_mk {A B : Type} (a : A) (b : B) : ((a, b) : A × B).1 = a := rfl
 /-- The second projection of a pair. -/
 def Prod.snd_mk {A B : Type} (a : A) (b : B) : ((a, b) : A × B).2 = b := rfl
+
+-- ## The default `simp` set
+--
+-- These registrations are what `simp` (with no list) uses, oldest registration first
+-- within a priority (all 1000 here); see `docs/stages/06-macros/simp.md`. The `Nat`
+-- and `Int` identities are registered in `lib/Nat.wiz` and `lib/Int.wiz`, so
+-- `import SimpLemmas` brings them along. `simp only [...]` does not use the set, and
+-- `simp [h]` adds `h` before it. Rules with a premise cannot be registered yet
+-- (dischargers are S3), and neither can a rule whose left side computes to a variable
+-- or a bare data value (matching is up to conversion, so it would match anything): the
+-- `attribute` command warns about a looping orientation and skips a duplicate.
+-- Commutativity and associativity stay out, as before.
+
+attribute [simp] Bool.not_not
+attribute [simp] Bool.and_true
+attribute [simp] Bool.and_false
+attribute [simp] Bool.or_false
+attribute [simp] List.append_nil
+attribute [simp] List.nil_append
+attribute [simp] List.map_map

@@ -8,6 +8,34 @@ set_option compiler.extract_closed false
 
 namespace Tests.Elab
 
+/-- (6h S2) The messages of `input` with the module `SimpLoc` (`loc`) importable besides
+the library, through the frontend and through the command cache (`Cache.elaborateUncached`):
+errors (rendered) and the rest. -/
+def runSimpLoc (loc input : String) : IO (List (Array String × Array String)) := do
+  let lib ← libLoader
+  let init : CommandState ZeroOneMany :=
+    { trustedModule := Tests.libModule, loader := fun m => if m == "SimpLoc" then some loc else lib m }
+  let split (s : CommandState ZeroOneMany) :=
+    ((s.messages.filter (·.severity == .error)).map (·.render input),
+     (s.messages.filter (·.severity != .error)).map (·.text))
+  pure [split (runFrontend input init), split (← Cache.elaborateUncached input init)]
+
+/-- No errors, and these messages, with `SimpLoc` importable. -/
+def okSimpLoc (loc input : String) (infos : List String := []) : IO Unit := do
+  for (errs, msgs) in ← runSimpLoc loc input do
+    unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+    checkEq (repr infos).pretty (repr msgs.toList).pretty
+
+/-- Exactly one warning, mentioning `fragment` (with every library importable). -/
+def warnsLibs (input fragment : String) : IO Unit := do
+  let s := runFrontend (R := ZeroOneMany) input { trustedModule := Tests.libModule, loader := ← libLoader }
+  let errs := (s.messages.filter (·.severity == .error)).map (·.render input)
+  unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+  let ws := (s.messages.filter (·.severity == .warning)).map (·.render input)
+  unless ws.size == 1 do throw (IO.userError s!"expected one warning, got {ws.size}: {ws}")
+  unless (ws[0]!.splitOn fragment).length > 1 do
+    throw (IO.userError s!"warning does not mention '{fragment}':\n{ws[0]!}")
+
 /-- A language server with `src` open: the server and what it sent (the diagnostics). -/
 def tacticLsp (src : String) : IO (LSP.Server × Array Lean.Json) := do
   let prelude ← IO.FS.readFile "lib/Prelude.wiz"
@@ -234,6 +262,48 @@ def tacticGroup : Group where
           "def sl1 (b : Bool) : (b && Bool.true) = b := by\n  simp [Bool.and_true]\n  rfl\n" ++
           "def sl2 {A : Type} (xs : List A) : List.append xs List.nil = xs := by\n  simp [List.append_nil]\n  rfl")
           [] },
+    -- simp S2: the default set, `[simp]`, priorities and diagnostics
+    { name := "simp: the default set from [simp] lemmas; simp only [] does not use it", run := fun _ => do
+        okLibs ("import SimpLemmas\n" ++
+          "def d1 (a : Nat) : a + 0 = a := by\n  simp\n  trace_state\n  rfl\n" ++
+          "def d2 (a : Nat) : a + 0 = a := by\n  simp only []\n  trace_state\n  exact (Nat.add_zero a)")
+          ["a : Nat\n⊢ a = a", "a : Nat\n⊢ a + 0 = a"]
+        okLibs ("import SimpLemmas\n" ++
+          "def d3 (a b : Nat) (h : a = b) : a + 0 = b := by\n  simp [h]\n  trace_state\n  rfl\n" ++
+          "def d4 (a b : Nat) (h : a = b) : a + 0 = b := by\n  simp only [h]\n  trace_state\n  exact (Nat.add_zero b)")
+          ["a : Nat\nb : Nat\nh : a = b\n⊢ b = b", "a : Nat\nb : Nat\nh : a = b\n⊢ b + 0 = b"] },
+    { name := "simp: the default set is priority first, then registration order", run := fun _ => do
+        let namesTac := "def simpNames : List (String × Expr) → String\n" ++
+          "  | .nil => \"\"\n  | .cons p .nil => p.1\n  | .cons p ps => String.append p.1 (String.append \", \" (simpNames ps))\n" ++
+          "syntax (name := showSimps) \"show_simps\" : tactic\n" ++
+          "def showSimpsTac : Tactic := fun _ => do\n  g ← TacticM.mainGoal;\n" ++
+          "  ls ← TacticM.getSimpLemmas g;\n  TacticM.trace (simpNames ls)\n" ++
+          "attribute [tactic tactic.showSimps] showSimpsTac\n"
+        let defs := "def f (n : Nat) : Nat := n\ndef g (n : Nat) : Nat := n\n" ++
+          "def r1 (n : Nat) : f n = g n := rfl\ndef r2 (n : Nat) : f n = g n := rfl\n"
+        okLib (("import Prelude\n" ++ defs ++ "attribute [simp] r1\nattribute [simp] r2\n" ++ namesTac ++
+          "def t : Nat := by\n  show_simps\n  exact 0") ++
+          "\ndef t2 : Nat := by\n  show_simps\n  exact 0") ["r1, r2", "r1, r2"]
+        okLib ("import Prelude\n" ++ defs ++ "attribute [simp] r1\nattribute [simp 2000] r2\n" ++ namesTac ++
+          "def t : Nat := by\n  show_simps\n  exact 0") ["r2, r1"] },
+    { name := "simp: [simp] attribute errors and warnings", run := fun _ => do
+        failsLibs "import Prelude\nattribute [simp] Nat.succ" "not an equation"
+        failsLibs "import Prelude\nattribute [simp] nope" "unknown declaration"
+        failsLibs ("import Prelude\ndef f (n : Nat) : Nat := n\n" ++
+          "def cond (n : Nat) : n = 0 → f n = f n := fun _ => rfl\nattribute [simp] cond")
+          "conditional simp lemma"
+        warnsLibs ("import Prelude\ndef f (n : Nat) : Nat := n\ndef g (n : Nat) : Nat := n\n" ++
+          "def r (n : Nat) : f n = g n := rfl\nattribute [simp] r\nattribute [simp] r") "duplicate"
+        warnsLibs ("import Prelude\ndef f (n : Nat) : Nat := n\n" ++
+          "def loop (n : Nat) : f n = f (f n) := rfl\nattribute [simp] loop") "possibly looping" },
+    { name := "simp: local [simp] is dropped at the end of its module", run := fun _ => do
+        let loc := "import Nat\ndef locNil {A : Type} : (xs : List A) → List.append xs List.nil = xs\n" ++
+          "  | .nil => rfl\n  | .cons x xs => Eq.congrArg (List.cons x) (locNil xs)\n" ++
+          "local attribute [simp] locNil\n" ++
+          "def inside {A : Type} (xs : List A) : List.append xs List.nil = xs := by\n  simp\n  rfl\n"
+        okSimpLoc loc ("import SimpLoc\ndef outside {A : Type} (xs : List A) : " ++
+          "List.append xs List.nil = xs := by\n  simp\n  trace_state\n  exact (locNil xs)")
+          ["A : Type\nxs : List A\n⊢ List.append A xs .nil = xs"] },
     -- typed reflection (docs/stages/06-macros.md, 6g)
     { name := "constructor applications are reflected by name, with the type's parameters", run := fun _ =>
         okLib (reflectPrelude ++

@@ -80,6 +80,8 @@ def assignLate := 37
 def nativeDecide := 38
 -- (stage 6h) match a lemma's `∀` telescope, rewrite an occurrence, one request
 def rewriteAt := 39
+-- (stage 6h S2) the registered `[simp]` lemmas, for the default set
+def getSimpLemmas := 40
 end TacTag
 
 structure Goal (R : Type) where
