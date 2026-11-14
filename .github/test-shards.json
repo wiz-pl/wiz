@@ -48,6 +48,7 @@
     "=natives",
     "=nvim",
     "optic",
+    "persistent",
     "phantom",
     "regions",
     "=linear-case",

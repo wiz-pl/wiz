@@ -772,3 +772,31 @@ def v (p q : Q) : (p + q) * (p + q) ≈ p * p + 2 * p * q + q * q :=
 `lib/WordArray.wiz` (`U8Array`, `U32Array`, `U64Array`), `lib/WordMap.wiz` (`U64Map V`)
 and `lib/Intern.wiz` (`InternTable`, ids as `U32`): list models with laws, run natively
 in compiled code, updated in place when unique. See `docs/stages/29-natives.md`.
+
+## Persistent data structures: maps and sets
+
+`lib/PMap.wiz` (`import PMap`): `PMap K V` and `PSet K` (a `PMap K Unit`), immutable and
+structurally shared. A map is a size-balanced (weight-balanced, Adams scheme) binary
+search tree; every update returns a new map and leaves the old one valid, copying only
+the O(log n) nodes on the path to the change (plus O(1) for a rebalancing rotation).
+`empty`, `insert`, `erase`, `find`/`findD`, `contains`, `size`, `toList`, `keys`,
+`fromList`/`ofList`, `foldl` and `height`; sets have `empty`, `insert`, `erase`,
+`contains`, `size`, `toList`, `fromList` and `foldl`. `toList` and `foldl` go in
+increasing key order, and `fromList` accepts entries in any order (a later duplicate
+wins).
+
+Keys are ordered by a `Compare` instance (`compare : K → K → Ordering`), with instances
+for `Nat` (through the native `Nat.lt`/`Nat.beq`) and `U64` (`U64.cmp`, unsigned);
+define one instance to use any other key type. `PSet` and the map
+algorithms are key-generic, unlike `U64Map`. `size` and the balance checks are O(1) (the
+subtree size is stored in each node), so `insert`, `erase`, `find` and `contains` are
+O(log n) worst case, `toList`, `keys` and `foldl` are O(n), and `fromList` is
+O(n log n) for a list in arbitrary order.
+
+Only `find_empty` and `size_empty` are proved on the definitions; `find_insert`,
+`find_erase` and `size_insert` (and the sortedness and balance invariants across
+rotations) are checked by the tests rather than proved. Examples: `examples/persistent.wiz`
+(the checks, group `persistent`) and `examples/persistent-bench.wiz`. The representation,
+complexity, persistence guarantees, benchmark plan and the migration path for replacing
+`U64Map` with a pure model plus a native backend are in
+`wiz-notes/persistent-data.md`.
