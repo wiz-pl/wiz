@@ -457,8 +457,18 @@ def SatT.showInputs (g : Nat) (model : List Nat) : List Sat.GNode → List Expr 
   | _, _ => TacticM.pure ""
 
 -- decide node `out` of `st`, closing goal `g` with `close nodes proof σ holds`
+/-- The proof that the LRAT check passes: by the kernel's evaluation (`Sat.trivial`), or
+(28e, `native`) by running the checker compiled, an axiom (trusted: --trust-native)
+(`nodesC`, the node list, is a closed definition: the native axiom's statement is then
+exactly the type the proof expects, compared by its arguments, never run). -/
+def SatT.checkProof (g : Nat) (native : Bool) (nodesC : Expr) (out : Nat) (proofE : Expr) : TacticM Expr :=
+  match native with
+  | .false => TacticM.pure (.const "Sat.trivial")
+  | .true => TacticM.nativeDecide g (Expr.mkApp (.const "Sat.lratCheck")
+      (.cons (Expr.mkApp (.const "Sat.dagFull") (.cons nodesC (.cons (.lit out) .nil))) (.cons proofE .nil)))
+
 /-- `TacticM Unit`. -/
-def SatT.solveDag (g : Nat) (out : Nat) (st : SatT.St) (close : Expr → Expr → Expr → Expr → Expr) : TacticM Unit := do
+def SatT.solveDag (g : Nat) (native : Bool) (out : Nat) (st : SatT.St) (close : Expr → Expr → Expr → Expr → Expr → Expr) : TacticM Unit := do
   let nodes := SatT.St.nodes st;
   ans ← TacticM.satSolve (SatT.St.next st) (SatT.cnfCodes (Sat.dagFull nodes out));
   match ans with
@@ -467,37 +477,36 @@ def SatT.solveDag (g : Nat) (out : Nat) (st : SatT.St) (close : Expr → Expr �
     m ← SatT.showInputs g model nodes (SatT.St.vals st);
     TacticM.fail (String.append "sat_decide: the goal is false; a counterexample:" m)
   | .unsat proof => do
+    let proofE := SatT.stepsE proof;
     -- σ and the node list, once each: definitions the proof mentions by name
     σ ← TacticM.define g (.const "Sat.Env") (.app (.const "Sat.envOf") (SatT.exprsE (.const "Bool") (SatT.revE (SatT.St.vals st) .nil)));
     nodesC ← TacticM.define g (.app (.const "List") (.const "Sat.GNode")) (SatT.gnodesE nodes);
+    hE ← SatT.checkProof g native nodesC out proofE;
     -- (not checked now: the kernel checks the declaration, which is where it costs)
-    TacticM.assignLate g (close nodesC (SatT.stepsE proof) σ (SatT.holdsE σ nodesC 0 nodes (SatT.St.vals st) (SatT.St.pfs st)))
+    TacticM.assignLate g (close nodesC proofE hE σ (SatT.holdsE σ nodesC 0 nodes (SatT.St.vals st) (SatT.St.pfs st)))
 
 -- (from `st0`: nodes another tactic has already made, e.g. `bv_decide`'s comparisons)
 /-- Decide `lhs = rhs` from the state `st0` (whose nodes another tactic has already made,
 as `bv_decide`'s comparisons are), closing the goal with the certificate. -/
-def SatT.decideDagFrom (g : Nat) (st0 : SatT.St) (lhs rhs : Expr) : TacticM Unit := match SatT.isConst "Bool.true" rhs with
+def SatT.decideDagFrom (g : Nat) (native : Bool) (st0 : SatT.St) (lhs rhs : Expr) : TacticM Unit := match SatT.isConst "Bool.true" rhs with
   | .true => do
     r ← SatT.node g 1000 lhs st0;
-    SatT.solveDag g r.1 r.2 (fun nodesE proofE σ holdsE =>
-      Expr.mkApp (.const "Sat.dag_sound") (.cons nodesE (.cons (.lit r.1) (.cons proofE (.cons (.const "Sat.trivial")
+    SatT.solveDag g native r.1 r.2 (fun nodesE proofE hE σ holdsE =>
+      Expr.mkApp (.const "Sat.dag_sound") (.cons nodesE (.cons (.lit r.1) (.cons proofE (.cons hE
         (.cons σ (.cons holdsE .nil)))))))
   | .false => do
     ra ← SatT.node g 1000 lhs st0;
     rb ← SatT.node g 1000 rhs ra.2;
     let iffE := Expr.mkApp (.const "Sat.boolEq") (.cons lhs (.cons rhs .nil));
     let ro := SatT.St.add iffE (.iff ra.1 rb.1) rb.2;
-    SatT.solveDag g ro.1 ro.2 (fun nodesE proofE σ holdsE =>
-      Expr.mkApp (.const "Sat.dag_eq") (.cons nodesE (.cons (.lit ro.1) (.cons proofE (.cons (.const "Sat.trivial")
+    SatT.solveDag g native ro.1 ro.2 (fun nodesE proofE hE σ holdsE =>
+      Expr.mkApp (.const "Sat.dag_eq") (.cons nodesE (.cons (.lit ro.1) (.cons proofE (.cons hE
         (.cons σ (.cons holdsE (.cons lhs (.cons rhs (.cons (.app (.const "Sat.eqRefl") iffE) .nil))))))))))
 
 /-- Decide `lhs = rhs` from an empty state, closing the goal with the certificate. -/
-def SatT.decideDag (g : Nat) (lhs rhs : Expr) : TacticM Unit := SatT.decideDagFrom g SatT.St.empty lhs rhs
+def SatT.decideDag (g : Nat) (native : Bool) (lhs rhs : Expr) : TacticM Unit := SatT.decideDagFrom g native SatT.St.empty lhs rhs
 
-syntax (name := satDecide) "sat_decide" : tactic
-/-- `sat_decide`: decide a goal at `Bool` (`e = .true` or `e₁ = e₂`) with a SAT solver,
-and close it with the kernel-checked certificate. -/
-def Tactic.satDecide : Tactic := fun _ => do
+def SatT.run (native : Bool) : TacticM Unit := do
   g0 ← TacticM.mainGoal;
   g ← SatT.introAll 1000 g0;
   ty ← TacticM.goalType g;
@@ -506,7 +515,17 @@ def Tactic.satDecide : Tactic := fun _ => do
   | .none => TacticM.fail "sat_decide: the goal is not an equation of booleans"
   | .some eq => match SatT.isConst "Bool" eq.1 with
     | .true => do
-      SatT.decideDag g eq.2.1 eq.2.2;
+      SatT.decideDag g native eq.2.1 eq.2.2;
       TacticM.replaceMainGoal .nil
     | .false => TacticM.fail "sat_decide: the goal is an equation, but not of booleans"
+
+syntax (name := satDecide) "sat_decide" : tactic
+/-- `sat_decide`: decide a goal at `Bool` (`e = .true` or `e₁ = e₂`) with a SAT solver,
+and close it with the kernel-checked certificate. -/
+def Tactic.satDecide : Tactic := fun _ => SatT.run .false
 attribute [tactic tactic.satDecide] Tactic.satDecide
+-- (28e) the same, with the LRAT check run compiled instead of by the kernel: an axiom
+-- `X.satK.native✝` (trusted: erasure and the interpreter, as the 27a evaluator; not the solver)
+syntax (name := satDecideNative) "sat_decide_native" : tactic
+def Tactic.satDecideNative : Tactic := fun _ => SatT.run .true
+attribute [tactic tactic.satDecideNative] Tactic.satDecideNative

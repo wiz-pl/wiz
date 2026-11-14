@@ -1,0 +1,17 @@
+-- (11ab) The playground's entry point. `web/build-playground.sh` concatenates the
+-- self-hosted frontend (`selfhost/Lex.wiz`, `Parse.wiz`, `Kernel.wiz`, `Frontend.wiz`)
+-- with the parser tables (`web/selfhost-tables.wiz`) and this file, then
+-- `wiz build --no-main` turns it into the WebAssembly module `web/out/wiz-playground.mjs`.
+--
+-- `checkFile` is the self-hosted frontend's one-file entry (the embedded Prelude plus
+-- the text): it returns one output line per command, so a definition gives its
+-- signature, `#check` a type, `#eval`/`#reduce` the kernel's normal form, and errors
+-- start with `error:` or `parse error`. The page only moves text in and lines out.
+
+def pgJoin : List String → String
+  | .nil => ""
+  | .cons s ss => String.append s (String.append "\n" (pgJoin ss))
+
+def playgroundEval (text : String) : String := pgJoin (checkFile cats tokens text)
+
+export "wiz_playground_eval" playgroundEval
