@@ -308,25 +308,88 @@ edit to `grail.wiz`.
 
 ## 23o: `grail new`
 
-`grail new NAME [--dir DIR]` writes the smallest package that builds, runs and tests:
+`grail new NAME [--template lib|exe|hdl] [--dir DIR]` writes a small package that
+builds, runs (where it has a program) and tests. It goes into `DIR` — `./NAME` by
+default, `DIR/NAME` with `-C DIR` — and an existing non-empty directory is refused, so
+`new` never overwrites work. The name must be a letter followed by letters, digits, `_`
+or `-` (at most 64 characters); it is the package's name and its targets' names (and,
+for `lib` and `exe`, the greeting). Inside the new directory `grail build` and
+`grail test` work as they do here (`grail run NAME` too, for `exe`); the second build
+runs nothing. An unknown template is an error before anything is written.
+
+**`--template lib`** (a library and its tests):
 
 ```
-grail.wiz        Package.new "NAME"
-                   |> Package.lib "NAME-lib" "src"
-                   |> Package.exe "NAME" "src/Main.wiz"
-                   |> Package.tests "tests" "tests"
-src/Main.wiz     import Std; def main : IO Unit := IO.println "hello from NAME"
-tests/hello.wiz  a `-- test: run` golden test, with hello.expected
-README.md        how to build, run and test it
-.gitignore       .grail/
+NAME/
+  grail.wiz        Package.new "NAME"
+                     |> Package.lib "NAME-lib" "src"
+                     |> Package.tests "NAME-tests" "tests"
+  src/Greeting.wiz import Prelude; def greeting : String := "hello from NAME"
+  tests/greeting.wiz        a `-- test: run` test importing Greeting
+  tests/greeting.expected   hello from NAME
+  README.md        the tree and how to build and test it
+  .gitignore       .grail/
 ```
 
-It goes into `DIR` — `./NAME` by default, `DIR/NAME` with `-C DIR` — and an existing
-non-empty directory is refused, so `new` never overwrites work. The name must be a
-letter followed by letters, digits, `_` or `-` (at most 64 characters); it is the
-package's name, its targets' names and the greeting. Inside the new directory
-`grail build`, `grail run NAME` and `grail test` work as they do here; the second build
-runs nothing.
+`grail build` checks the library; `grail test` builds and runs the golden test.
+
+**`--template exe`** (the default: a library, an executable and its tests):
+
+```
+NAME/
+  grail.wiz        Package.new "NAME"
+                     |> Package.lib "NAME-lib" "src"
+                     |> Package.exe "NAME" "src/Main.wiz"
+                     |> Package.tests "tests" "tests"
+  src/Main.wiz     import Std; def main : IO Unit := IO.println "hello from NAME"
+  tests/hello.wiz  a `-- test: run` golden test, with hello.expected
+  README.md        the tree and how to build, run and test it
+  .gitignore       .grail/
+```
+
+`grail build` builds the library and the executable (`.grail/bin/NAME`); `grail run
+NAME` runs it, and `grail test` builds and runs the golden test.
+
+**`--template hdl`** (an HDL design, a Verilog generator and a board package):
+
+```
+NAME/
+  grail.wiz        Package.new "NAME" with the targets below
+  src/Counter.wiz  import Hdl.Core; `counter`, a four-bit counter (output `Count.count`)
+  app/Verilog.wiz  import Std, Hdl.Core, Counter; IO.print (Verilog.emit (Circuit.netlist "top" counter))
+  board/pins.pcf   set_io clk and count[0..3] (iCEstick-like; edit for your board)
+  tests/counter.wiz         a `-- test: run`: simulate three cycles and print their sum
+  tests/counter.expected    3
+  README.md        the tree, the synthesis commands and how to build and test it
+  .gitignore       .grail/ and build/
+```
+
+The targets are `NAME-lib` (the design under `src/`), `NAME-verilog` (the program that
+prints the Verilog), `NAME-tests`, and four commands: `verilog` (`Tool.exe
+"NAME-verilog"` with `Command.stdout "build/top.v"`), `synth` (yosys, to
+`build/top.json`), `place` (nextpnr-ice40, to `build/top.asc`) and `pack` (icepack, to
+`build/top.bin`), plus the phony `flash` (iceprog).
+
+A bare `grail build` checks the design, builds the Verilog generator, and installs
+`build/top.v` (the `verilog` command's stdout); it does not run the test. `grail test`
+builds and runs the counter simulation. The external steps are there for a board but
+are never part of a bare build: `synth`, `place` and `pack` are `Command.manual`, and
+`flash` is phony. So the template needs no external tool to build or test.
+
+**After `grail build`.** The source tree stays as above (plus `.grail/`, the
+content-addressed store, which git ignores), and the build adds:
+
+```
+lib template:   .grail/build/…                     (the checked modules; no package file)
+exe template:   .grail/bin/NAME                    (the executable)
+hdl template:   .grail/bin/NAME-verilog            (the generator)
+                build/top.v                        (the `verilog` command's output)
+                .grail/installed                   (the command output grail installed)
+```
+
+`grail test` adds no file outside `.grail/`; it runs tests from the store (and, with
+`--update`, rewrites a `.expected`). `grail clean` removes the `.grail/` directories
+and the outputs grail installed.
 
 `grail new` found a link-key bug: a link job's key did not include the name of the
 binary it makes, so a test whose program compiles to the same C as an `exe` (the
@@ -336,4 +399,6 @@ output's name (and whether it is installed in `.grail/bin`), so two programs wit
 same object and link files no longer share a directory.
 
 Tests: `grail-commands`, "new: the generated package builds, runs and tests; a
-non-empty directory is refused" (also covers the refusal and the name check).
+non-empty directory is refused" (the default `exe` template, the refusal and the name
+check) and "new --template: lib, exe and hdl packages build and test"; `grail`, "new:
+templates write the documented trees and build files".

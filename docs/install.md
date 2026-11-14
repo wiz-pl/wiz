@@ -154,42 +154,43 @@ wiz build Main.wiz -o hello && ./hello
 ```
 
 A **grail package** is a directory with a `grail.wiz`, which is itself a Wiz program:
-`package` lists the targets. There is no `grail new` yet; the files are short:
+`package` lists the targets. Start one with `grail new`:
 
 ```sh
-mkdir -p src tests
-echo nightly > wiz-toolchain                  # optional: the toolchain of this project
-cat > src/Greet.wiz <<'EOF'
-import Prelude
-def greeting : String := "hello from grail"
-EOF
-cat > App.wiz <<'EOF'
-import IO
-import Greet
-def main : IO Unit := IO.println greeting
-EOF
-cat > tests/greet.wiz <<'EOF'
-import Greet
-#eval greeting
-EOF
-cat > grail.wiz <<'EOF'
-import Grail
-def package : Package := Package.new "hello"
-  |> Package.lib "greet" "src"           -- every module under src/ (import Greet)
-  |> Package.exe "app" "App.wiz"         -- compile main: .grail/bin/app
-  |> Package.tests "tests" "tests"       -- each tests/*.wiz against its .expected
-EOF
-grail build               # 6 jobs run
-grail run app             # hello from grail
-grail test --update       # writes tests/greet.expected: the messages of the file
-grail test                # 1 passed, 0 failed
+grail new hello                    # executable + test (the default template)
+grail new shapes --template lib    # a library and its tests
+grail new blinky --template hdl    # an HDL design, Verilog generator and board constraints
+cd hello
+grail build                        # build the library and the executable
+grail run hello                    # hello from hello
+grail test                         # build and run the golden test
 ```
+
+`grail new hello` writes this tree (the other templates are documented in
+[stages/23-grail.md](stages/23-grail.md)):
+
+```
+hello/
+  grail.wiz        Package.new "hello"
+                     |> Package.lib "hello-lib" "src"
+                     |> Package.exe "hello" "src/Main.wiz"
+                     |> Package.tests "tests" "tests"
+  src/Main.wiz     import Std; def main : IO Unit := IO.println "hello from hello"
+  tests/hello.wiz  a `-- test: run` golden test, with hello.expected
+  README.md
+  .gitignore       .grail/
+```
+
+The generated `grail.wiz` names the targets: `Package.lib "hello-lib" "src"` checks
+every module under `src/`, `Package.exe "hello" "src/Main.wiz"` compiles `main` to
+`.grail/bin/hello`, and `Package.tests "tests" "tests"` runs each `tests/*.wiz` against
+its `.expected`. An optional `wiz-toolchain` file pins the toolchain of the project.
 
 `grail build` again runs nothing: every job is keyed by its inputs. `grail targets`
 lists the targets, and `grail config` prints the C toolchain grail uses. Packages can
 depend on other packages in git repositories (`Package.dep`, with a lock file) and run
 commands as build steps; see [stages/23-grail.md](stages/23-grail.md). Add `.grail/` to
-your `.gitignore`.
+your `.gitignore` (the templates do).
 
 ## Editors
 

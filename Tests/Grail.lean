@@ -22,6 +22,9 @@ def mkTree (files : List (String × String)) : IO System.FilePath := do
 
 def loaderOf (m : Std.HashMap Name (System.FilePath × String)) : Name → Option String := fun n => (m[n]?).map (·.2)
 
+/-- Whether `log` contains `needle`. -/
+def has (log needle : String) : Bool := (log.splitOn needle).length > 1
+
 /-- Every file under `dir`, as (path relative to `root`, modification time, hash of the
 contents), sorted by path: a read-only cache must leave this unchanged. The contents are
 read as bytes (a `.wizr` region is not UTF-8). -/
@@ -944,6 +947,39 @@ def grailGroup : Group where
         let (s, _) ← build dir tc
         checkEq 1 s.ran
         checkEq 2 s.upToDate },
+    { name := "new: templates write the documented trees and build files", run := fun _ => do
+        check (Grail.Template.ofName "lib" == some .lib) "lib is not a template"
+        check (Grail.Template.ofName "exe" == some .exe) "exe is not a template"
+        check (Grail.Template.ofName "hdl" == some .hdl) "hdl is not a template"
+        check (Grail.Template.ofName "nope" == none) "nope is a template"
+        let root ← IO.FS.createTempDir
+        let write (template : Grail.Template) : IO System.FilePath := do
+          let dir := root / template.name
+          match ← Grail.newPackage "demo" dir template with
+          | .error e => throw (IO.userError e)
+          | .ok () => pure dir
+        -- exactly the documented tree, and nothing else
+        let lib ← write .lib
+        checkEq #[".gitignore", "README.md", "grail.wiz", "src/Greeting.wiz",
+                  "tests/greeting.expected", "tests/greeting.wiz"] (← Grail.treeFiles lib)
+        check (!(← (lib / "src/Main.wiz").pathExists)) "the lib template wrote an executable"
+        check (has (← IO.FS.readFile (lib / "grail.wiz")) "Package.tests \"demo-tests\" \"tests\"")
+          (← IO.FS.readFile (lib / "grail.wiz"))
+        let exe ← write .exe
+        checkEq #[".gitignore", "README.md", "grail.wiz", "src/Main.wiz",
+                  "tests/hello.expected", "tests/hello.wiz"] (← Grail.treeFiles exe)
+        check (has (← IO.FS.readFile (exe / "grail.wiz")) "Package.exe \"demo\" \"src/Main.wiz\"")
+          (← IO.FS.readFile (exe / "grail.wiz"))
+        let hdl ← write .hdl
+        checkEq #[".gitignore", "README.md", "app/Verilog.wiz", "board/pins.pcf", "grail.wiz",
+                  "src/Counter.wiz", "tests/counter.expected", "tests/counter.wiz"] (← Grail.treeFiles hdl)
+        checkEq ".grail/\nbuild/\n" (← IO.FS.readFile (hdl / ".gitignore"))
+        checkEq "3\n" (← IO.FS.readFile (hdl / "tests/counter.expected"))
+        let bw ← IO.FS.readFile (hdl / "grail.wiz")
+        for needle in ["Package.lib \"demo-lib\" \"src\"", "Package.exe \"demo-verilog\" \"app/Verilog.wiz\"",
+                       "Command.new \"synth\" (Tool.path \"yosys\")", "Command.manual",
+                       "Package.phony (Command.new \"flash\" (Tool.path \"iceprog\")"] do
+          check (has bw needle) s!"the hdl build file has no {needle}:\n{bw}" },
     linkCCase,
     grailLspCase
   ]
@@ -1383,8 +1419,6 @@ def cmdFiles (extra : String := "") : List (String × String) :=
 
 def cmdTc : IO Toolchain := do pure { cacheDir := some (← IO.FS.createTempDir) }
 
-def has (log needle : String) : Bool := (log.splitOn needle).length > 1
-
 /-- A process is gone (or a zombie) within `ms` milliseconds. -/
 partial def goneWithin (pid : String) (ms : Nat) : IO Bool := do
   let stat := System.FilePath.mk "/proc" / pid / "stat"
@@ -1591,7 +1625,49 @@ def grailCommandsGroup : Group where
         check (has out5 "hello from demo") out5
         let (c6, out6, err6) ← grail (tc.toFlags ++ ["-C", demo.toString, "test"])
         checkEq 0 c6
-        check (has out6 "1 passed, 0 failed") (out6 ++ err6) }
+        check (has out6 "1 passed, 0 failed") (out6 ++ err6) },
+    { name := "new --template: lib, exe and hdl packages build and test", run := fun _ => do
+        let root ← IO.FS.createTempDir
+        let self ← IO.appPath
+        let grail (args : List String) : IO (UInt32 × String × String) := do
+          let o ← IO.Process.output { cmd := self.toString, args := ("--grail" :: args).toArray }
+          pure (o.exitCode, o.stdout, o.stderr)
+        let tc ← toolchain
+        let runOne (template : String) (files : List String) : IO Bool := do
+          let dir := root / template
+          let (c, out, err) ← grail ["new", "demo", "--template", template, "--dir", dir.toString]
+          checkEq 0 c
+          check (has out "grail new: wrote") (out ++ err)
+          check (has out s!"template {template}") (out ++ err)
+          for f in files do check (← (dir / f).pathExists) s!"{template}: missing {f}"
+          let (cb, _, eb) ← grail (tc.toFlags ++ ["-C", dir.toString, "build"])
+          if cb != 0 && (has eb "could not execute external process" || has eb "gmp.h") then
+            skip "no toolchain"
+            return false
+          checkEq 0 cb
+          -- a second build runs nothing
+          let (cb2, ob2, _) ← grail (tc.toFlags ++ ["-C", dir.toString, "build"])
+          checkEq 0 cb2
+          check (has ob2 "0 jobs run") ob2
+          let (ct, ot, et) ← grail (tc.toFlags ++ ["-C", dir.toString, "test"])
+          checkEq 0 ct
+          check (has ot "1 passed, 0 failed") (ot ++ et)
+          pure true
+        for (template, files) in [
+            ("lib", ["grail.wiz", "src/Greeting.wiz", "tests/greeting.wiz", "tests/greeting.expected"]),
+            ("exe", ["grail.wiz", "src/Main.wiz", "tests/hello.wiz", "tests/hello.expected"]),
+            ("hdl", ["grail.wiz", "src/Counter.wiz", "app/Verilog.wiz", "board/pins.pcf",
+                     "tests/counter.wiz", "tests/counter.expected"])] do
+          unless ← runOne template files do return
+        -- the hdl build's Verilog output and its manual/phony commands
+        check (← (root / "hdl" / "build" / "top.v").pathExists) "the hdl build wrote no build/top.v"
+        check (has (← IO.FS.readFile (root / "hdl" / "build" / "top.v")) "module top") "unexpected Verilog"
+        -- an unknown template is an error, before anything is written
+        let bad := root / "bad"
+        let (c, _, err) ← grail ["new", "bad", "--template", "nope", "--dir", bad.toString]
+        checkEq 1 c
+        check (has err "unknown template") err
+        check (!(← bad.pathExists)) "the unknown template wrote a directory" }
   ]
 
 /-- A command that starts a grandchild (`sleep`), writes its pid, and waits. -/

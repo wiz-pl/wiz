@@ -10,6 +10,9 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* grail: `grail new NAME --template lib|exe|hdl` writes a library, an executable with
+  tests (the default), or an HDL/board package; every template builds and tests without
+  external tools (23o).
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to

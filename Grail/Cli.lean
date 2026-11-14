@@ -15,12 +15,15 @@ namespace Grail
 open Wiz
 
 def usage : String := "usage:
-  grail new NAME [--dir DIR]
-                          write a minimal package (grail.wiz with a lib, an exe and
-                          a tests target, src/Main.wiz, a README and a .gitignore)
-                          into DIR (default: ./NAME); an existing non-empty
-                          directory is refused, the name must be a letter then
-                          letters, digits, '_' or '-'
+  grail new NAME [--template lib|exe|hdl] [--dir DIR]
+                          write a small package into DIR (default: ./NAME); an
+                          existing non-empty directory is refused, the name must
+                          be a letter then letters, digits, '_' or '-'.
+                          --template lib: a library and golden tests;
+                          --template exe (default): a library, an executable and
+                          golden tests; --template hdl: an HDL design, a Verilog
+                          generator, board constraints, a simulation test and
+                          manual synthesis/flash commands
   grail build [TARGET…]   build the package's targets (by default all but the
                           bootstrap check, which takes minutes)
   grail test [FILTER…] [--update]
@@ -64,6 +67,8 @@ structure Opts where
   dir : Option String := none
   /-- `grail new`: the directory to write the package into (default: `./NAME`) -/
   newDir : Option String := none
+  /-- `grail new`: which template to write (default: `exe`) -/
+  template : Option String := none
   std : Option String := none
   jobs : Option Nat := none
   timeout : Option Nat := none
@@ -75,6 +80,7 @@ structure Opts where
 partial def grailOpts (o : Opts) : List String → Opts × List String
   | "-C" :: d :: rest => grailOpts { o with dir := some d } rest
   | "--dir" :: d :: rest => grailOpts { o with newDir := some d } rest
+  | "--template" :: t :: rest => grailOpts { o with template := some t } rest
   | "--std" :: d :: rest => grailOpts { o with std := some d } rest
   | "-j" :: n :: rest => grailOpts { o with jobs := n.toNat? } rest
   | "--timeout" :: n :: rest => grailOpts { o with timeout := n.toNat? } rest
@@ -125,19 +131,30 @@ def cliMain (args : List String) : IO UInt32 := do
   let binId ← binaryId flagged.cacheDir
   match args with
   | "new" :: rest =>
-    -- (23o) the smallest package; an existing non-empty directory is refused
+    -- (23o) a small package; an existing non-empty directory is refused
     match rest with
     | [name] =>
       let base : System.FilePath := opts.newDir.getD name
       let target := if base.isAbsolute then base else dir / base
-      match ← newPackage name target with
-      | .error e => IO.eprintln e; pure 1
-      | .ok () =>
-        IO.println s!"grail new: wrote {target} (grail.wiz, src/Main.wiz, tests/hello.wiz, README.md, .gitignore)"
-        IO.println s!"  cd {target} && grail build && grail run {name}"
-        pure 0
+      let writeNew (template : Template) : IO UInt32 := do
+        match ← newPackage name target template with
+        | .error e => IO.eprintln e; pure 1
+        | .ok () =>
+          let files := (templateFiles name template).map (·.1)
+          IO.println s!"grail new: wrote {target} (template {template.name}):"
+          IO.println s!"  {" ".intercalate files}"
+          IO.println s!"  cd {target} && {newAdvice name template}"
+          pure 0
+      match opts.template with
+      | some t =>
+        match Template.ofName t with
+        | none =>
+          IO.eprintln s!"grail new: unknown template '{t}' (template is one of {Template.names})"
+          pure 1
+        | some template => writeNew template
+      | none => writeNew .exe
     | _ =>
-      IO.eprintln "grail new: expected NAME [--dir DIR]"
+      IO.eprintln "grail new: expected NAME [--template lib|exe|hdl] [--dir DIR]"
       IO.eprintln usage
       pure 2
   | ["clean"] =>
