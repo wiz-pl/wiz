@@ -55,9 +55,10 @@ jobs:
   # Path filters: which jobs a pull request needs (scripts/ci.py changes; the shards'
   # "inputs" in .github/test-shards.json). A docs-only PR builds and tests nothing; a PR
   # touching only lib/ files no core test reads skips the core shard; the selfhost
-  # shards run for selfhost/ and the lib/ files it imports. Everything but a
-  # pull_request (pushes, the merge queue, manual runs) runs every job except `package`,
-  # which runs on push and workflow_dispatch only (see its comment).
+  # shards run for selfhost/ and the lib/ files it imports; the scry job runs for scry/,
+  # lib/Scry/ and the Scry test groups. Everything but a pull_request (pushes, the merge
+  # queue, manual runs) runs every job except `package`, which runs on push and
+  # workflow_dispatch only (see its comment).
   changes:
     name: changes
     if: github.event_name != 'schedule'
@@ -65,6 +66,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       shards: ${{ steps.filter.outputs.shards }}
+      scry: ${{ steps.filter.outputs.scry }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -340,6 +342,80 @@ jobs:
           nix run "$GITHUB_WORKSPACE#wiz" -- build io.wiz -o io
           ./io | head -3
           nix run "$GITHUB_WORKSPACE#grail" -- 2>&1 | head -2
+
+  # (light) The scry package: `grail test` in scry/ (scry/grail.wiz), its own tests of
+  # the loader, the CST store, the tree-sitter shim, codegen and the CLI. It is not part
+  # of `lake test` (a grail package of its own; the six Scry library groups stay in the
+  # `library` shard). Not in `CI result`'s needs yet: a new job gets a track record
+  # before it can block a merge, so a failure is a red check (and the annotation below),
+  # not a failed `CI result`. docs/building.md, "Continuous integration".
+  scry:
+    name: scry package
+    needs: [changes, build]
+    if: github.event_name != 'schedule' && needs.changes.outputs.scry == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      # The build job's .lake, under the same key the test shards use; on a miss, build
+      # grail here rather than run without it.
+      - name: Restore the Lake build
+        id: lake-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .lake
+          key: lake-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ needs.build.outputs.lake-hash }}
+          restore-keys: lake-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-
+      - name: lake build grail (unless restored)
+        run: |
+          if [ "${{ steps.lake-cache.outputs.cache-hit }}" != true ]; then
+            echo "::warning title=Lake cache::no exact Lake build for this commit (evicted?): building grail here"
+          fi
+          lake build grail
+          [ -x .lake/build/bin/grail ] || { echo "::error::.lake/build/bin/grail is missing after lake build"; exit 1; }
+      # `grail test` records a passing test under scry/.grail (a second run does nothing):
+      # 14 MB, keyed by the compiler and the package's sources, so a new grail rebuilds.
+      - name: Restore the scry build
+        id: scry-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: scry/.grail
+          key: scry-${{ runner.os }}-${{ needs.build.outputs.compiler-key }}-${{ hashFiles('scry/**') }}
+          restore-keys: scry-${{ runner.os }}-${{ needs.build.outputs.compiler-key }}-
+      - name: grail test (scry/)
+        working-directory: scry
+        run: |
+          mkdir -p ../logs
+          # the dev shell wrote this machine's toolchain at the root; grail reads it in
+          # the package directory (scry/README.md)
+          if [ -f ../grail.local.wiz ]; then cp ../grail.local.wiz .; fi
+          export PATH="${{ github.workspace }}/.lake/build/bin:$PATH"
+          grail test 2>&1 | tee ../logs/scry.log
+      - name: Summary
+        if: always()
+        run: |
+          [ -f logs/scry.log ] || exit 0
+          { echo "### scry package (grail test)"; echo; echo '```'; tail -40 logs/scry.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Not a required check yet
+        if: failure()
+        run: echo "::error title=scry package::grail test failed in scry/; this job is not in CI result's needs yet, so it does not block a merge"
+      - name: Save the scry build (master)
+        if: github.event_name == 'push' && steps.scry-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: scry/.grail
+          key: scry-${{ runner.os }}-${{ needs.build.outputs.compiler-key }}-${{ hashFiles('scry/**') }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scry-package-log
+          path: logs/scry.log
+          if-no-files-found: ignore
+          retention-days: 3
 
   # (11s) The standard library's documentation (`wiz doc`, scroll), with the Wasm module
   # that makes its signatures interactive, as the artifact `wiz-docs`: on master only (a

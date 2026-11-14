@@ -167,6 +167,19 @@ cached between runs.
   (three decimals), group subtotals and the shard's total; the `CI result` job sums the
   shards up (a table of shard totals and the grand total, and the 15 slowest cases) and
   uploads every case's time as the `test-timings` artifact.
+* **The scry package** (the `scry package` job): `grail test` in `scry/`, the package's
+  own tests of the facts loader, the CST store, the tree-sitter shim, schema codegen and
+  the CLI (`scry/tests/*.wiz`; `scry/README.md`). It is not part of `lake test`: `scry/`
+  is a grail package of its own (`scry/grail.wiz`), and the six Scry library groups stay
+  in the `library` shard. The job puts the build's `.lake/build/bin/grail` on `PATH`
+  (entering the dev shell at the root writes `grail.local.wiz`, which the job copies into
+  `scry/` as the README says), so it builds only what the restored `scry/.grail` does not
+  already record (grail's record of passing tests, 14 MB). That cache is keyed by the
+  compiler (so a new grail invalidates it) and saved on `master` only. The job runs when
+  `scry/`, `lib/Scry/`, the Scry test groups, `flake.*`, `scripts/ci.py` or `.github/`
+  change. It is deliberately **not** in `CI result`'s `needs` yet: a new job gets a track
+  record before it can block a merge, so its failure is a red `scry package` check and
+  the annotation it prints, not a failed `CI result`.
 * **Documentation style** (the `docs_style` job): `scripts/check-docs-style.py` fails on
   absolute paths from an agent's scratch tree, internal `agent/...` branch names and AI
   worker roles, U+2705 status checkmarks, and decision/step phrases attributed to

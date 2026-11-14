@@ -23,10 +23,12 @@
                                      that differ between BASE and HEAD (git diff
                                      BASE HEAD; CI: a PR's merge commit and its first
                                      parent) and prints GitHub outputs: code=true
-                                     unless only docs changed, and shards=[NAMES], the
+                                     unless only docs changed, shards=[NAMES], the
                                      shards of .github/test-shards.json to run (each
-                                     shard's "inputs", see `needed_shards`). `changes
-                                     --all` prints everything
+                                     shard's "inputs", see `needed_shards`), and
+                                     scry=true when the `scry package` job's files
+                                     changed (see `SCRY`). `changes --all` prints
+                                     everything
   scripts/ci.py summary TITLE FILE.. a Markdown summary for $GITHUB_STEP_SUMMARY of
                                      `lake test` logs (*.log: pass/fail, failing cases)
                                      and `--timings` files (*.jsonl: a table of every
@@ -280,6 +282,13 @@ DOCS = ["docs/*", "*.md", "LICENSE", "COPYING*"]
 EVERYTHING = ["*.lean", "lakefile.*", "lean-toolchain", "lake-manifest.json", "flake.*",
               "devenv.*", ".envrc", "runtime/*", "c/*", "scripts/*", ".github/*", "grail.wiz"]
 
+# The `scry package` job (`.github/workflows/ci.yml`): the grail package in `scry/` and
+# its own `grail test`, which is not part of `lake test`. It runs when the package, the
+# Scry library or the Scry test groups change, and when what builds or schedules it does
+# (the dev shell, this script, the workflow). Light, so the globs are deliberately broad.
+SCRY = ["scry/*", "lib/Scry/*", "Tests/Groups/Scry*.lean", "flake.*", "scripts/ci.py",
+        ".github/*"]
+
 
 def matches(path, globs):
     """fnmatch with `*` crossing `/` (so `docs/*` is the whole tree, `*.md` any file)."""
@@ -332,6 +341,7 @@ def changes(args):
         names = [s["name"] for s in shards()]
         print("code=true")
         print(f"shards={json.dumps(names)}")
+        print("scry=true")
         return 0
     base, head = args[0], (args[1] if len(args) > 1 else "HEAD")
     out = subprocess.run(["git", "diff", "--name-only", base, head], capture_output=True,
@@ -339,9 +349,12 @@ def changes(args):
     files = [f for f in out.split("\n") if f]
     names = needed_shards(files)
     code = any(not matches(f, DOCS) for f in files)
+    scry = any(matches(f, SCRY) for f in files)
     print(f"code={'true' if code else 'false'}")
     print(f"shards={json.dumps(names)}")
-    print(f"{len(files)} files changed; code: {code}; shards: {', '.join(names) or 'none'}", file=sys.stderr)
+    print(f"scry={'true' if scry else 'false'}")
+    print(f"{len(files)} files changed; code: {code}; shards: {', '.join(names) or 'none'}; "
+          f"scry: {scry}", file=sys.stderr)
     return 0
 
 
