@@ -1,4 +1,5 @@
 import Hdl.Core
+import Vec
 /-!
 # Hdl.Bus
 
@@ -23,7 +24,14 @@ The parts:
   `Bus.ReqW.ofReq`/`toReq` to use it where a word-level `Bus.Req` is expected;
 * `Bus.arbC aw dw`: two masters onto one slave, round-robin when both ask and neither
   owns the bus, holding the owner until its answer (so a master that holds `valid`, as
-  a core does, is never starved mid-word);
+  a core does, is never starved mid-word); `Bus.arbStepAtBits`/`Bus.arbStepAt` is the
+  same step with the grant (`g`) as an input, which is the form the proofs in
+  `Hdl.BusLaw` use;
+* `Bus.arbNStep n aw dw`: the N-master generalisation over value vectors (`Vec`): a
+  round-robin grant over a `last` index, the same hold-until-answered rule, and one
+  response per master. `HwTy` has no vector code, so this is an executable reference
+  model (value-level `Mealy`), not a circuit; `Bus.arbC` remains the synthesisable
+  two-master API;
 * `Bus.routeC aw dw base size`: the address decode: requests inside `[base, base+size)`
   go to the slave, anything else is answered immediately with `err` high and zero data
   (golem's `GBus.route`, without golem's memory map);
@@ -168,33 +176,128 @@ structure Bus.ArbOut (aw dw : Nat) (r : HwTy → Type) where
   rb : Bus.Resp dw r
   deriving Bundle
 
-/-- One cycle of the arbiter: the next state, the request to the slave and the answers.
-The master that did not get the bus sees a quiet response (`ready` and `rvalid` low). -/
-def Bus.arbStep {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (s : Bus.Arb r)
+/-- One cycle of the arbiter with the grant already chosen: `g = 0` gives the bus to
+master `a`, `g = 1` to master `b`. This is the indexed form of `Bus.arbStep` (the
+arbiter's choice is an input to the step, not part of it), so a proof can fix `g` and
+case-split on the small control bits. `Bus.arbStep` is the definition with
+`g = Bus.pick s a.valid b.valid`. -/
+def Bus.arbStepAtBits {r : HwTy → Type} [Hw r] {ω aw dw : Nat}
+    (busy owner last : r Bus.Bit) (g : r Bus.Bit)
     (a b : Bus.Req aw dw r) (resp : Bus.Resp dw r) :
     r (HwTy.prod Bus.Arb.code (Bus.ArbOut.code aw dw)) :=
-  let g := Bus.pick s a.valid b.valid;
   let selV := Hw.mux g b.valid a.valid;
   let sel := Hw.mux g (Bus.Req.pack aw dw b) (Bus.Req.pack aw dw a);
   -- the answer ends the request; so does the selected master dropping `valid`
-  let done := Hw.or (Hw.or resp.ready resp.rvalid) (Hw.and s.busy (Hw.not selV));
+  let done := Hw.or (Hw.or resp.ready resp.rvalid) (Hw.and busy (Hw.not selV));
   let zero := Bus.Resp.pack dw (Bus.noResp : Bus.Resp dw r);
   let one := Bus.Resp.pack dw resp;
   Hw.pair
     (Bus.Arb.pack (Bus.Arb.mk
-      (Hw.mux done (Hw.lit 1 0) (Hw.mux s.busy (Hw.lit 1 1) selV))
-      (Hw.mux s.busy s.owner g)
-      (Hw.mux s.busy s.last (Hw.mux selV g s.last))))
+      (Hw.mux done (Hw.lit 1 0) (Hw.mux busy (Hw.lit 1 1) selV))
+      (Hw.mux busy owner g)
+      (Hw.mux busy last (Hw.mux selV g last))))
     (Bus.ArbOut.pack aw dw (Bus.ArbOut.mk
       (Bus.Req.unpack aw dw sel)
       (Bus.Resp.unpack dw (Hw.mux g zero one))
       (Bus.Resp.unpack dw (Hw.mux g one zero))))
+
+/-- The indexed step on a packed state: `Bus.arbStepAtBits` of its three bits. -/
+def Bus.arbStepAt {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (s : Bus.Arb r) (g : r Bus.Bit)
+    (a b : Bus.Req aw dw r) (resp : Bus.Resp dw r) :
+    r (HwTy.prod Bus.Arb.code (Bus.ArbOut.code aw dw)) :=
+  Bus.arbStepAtBits s.busy s.owner s.last g a b resp
+
+/-- One cycle of the arbiter: choose the grant by the round-robin rule, then run the
+indexed step. Keeping the choice out of `Bus.arbStepAt` makes the properties of one
+grant a two-case proof (`g = 0` or `g = 1`). -/
+def Bus.arbStep {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (s : Bus.Arb r)
+    (a b : Bus.Req aw dw r) (resp : Bus.Resp dw r) :
+    r (HwTy.prod Bus.Arb.code (Bus.ArbOut.code aw dw)) :=
+  Bus.arbStepAt s (Bus.pick s a.valid b.valid) a b resp
 
 /-- The arbiter as a circuit: input `a`, `b` and the slave's answer, output the slave
 request and each master's answer. -/
 def Bus.arbC (aw dw : Nat) : Circuit (Bus.ArbIn.code aw dw) (Bus.ArbOut.code aw dw) :=
   Circuit.bundled Bus.Arb.bundle (Bus.ArbIn.bundle aw dw) (Bus.ArbOut.bundle aw dw)
     Bus.arbInit (fun s x => Bus.arbStep s x.a x.b x.slave)
+
+------------------------------------------------------------------------------------
+-- N masters. `HwTy` is a flat code (no vector), so the N-master arbiter is stated on
+-- value vectors (`Vec`): it is the executable reference model used by the laws and
+-- tests. The two-master `Bus.arbC` above remains the synthesisable circuit, and is the
+-- `n = 2` special case of the same round-robin rule.
+
+/-- The N-master arbiter's state: whether a request is in flight, which master owns it,
+and which master was granted last (indices, only meaningful while `busy` for `owner`). -/
+structure Bus.ArbN where
+  busy : Bool
+  owner : Nat
+  last : Nat
+
+/-- The N-master arbiter at rest: no owner, master 0 was granted last. -/
+def Bus.arbNInit : Bus.ArbN := Bus.ArbN.mk Bool.false 0 0
+
+/-- `valid` of a request, as a Boolean. -/
+def Bus.reqValid {ω aw dw : Nat} (q : Bus.Req aw dw HwTy.El) : Bool :=
+  BitVec.isTrue q.valid
+
+/-- The `valid` bits of a vector of requests. -/
+def Bus.validVec {ω n aw dw : Nat} (qs : Vec (Bus.Req aw dw HwTy.El) n) : List Bool :=
+  Hdl.map Bus.reqValid (Vec.toList qs)
+
+/-- The first index in `[i, n)` whose `valid` bit is set, or `n` if none is. `fuel`
+bounds the scan (call it with `n`); recursion is on the fuel. -/
+def Bus.firstFrom (vs : List Bool) : (fuel i n : Nat) → Nat
+  | .zero, _, n => n
+  | .succ fuel, i, n =>
+    if Nat.lt i n then
+      if Hdl.nthD Bool.false vs i then i else Bus.firstFrom vs fuel (Nat.succ i) n
+    else n
+
+/-- The round-robin choice: the first valid master after `last` (wrapping), else the
+first valid master at or before `last`, else `n` (none). -/
+def Bus.pickN (n last : Nat) (vs : List Bool) : Nat :=
+  let start := if Nat.lt (Nat.succ last) n then Nat.succ last else 0;
+  let r := Bus.firstFrom vs n start n;
+  if Nat.lt r n then r
+  else
+    let r2 := Bus.firstFrom vs n 0 (Nat.succ last);
+    if Nat.lt r2 (Nat.succ last) then r2 else n
+
+/-- The response to master `i`: the granted master (`i = g`) gets `resp`, everyone else
+a quiet response. -/
+def Bus.respAt {ω dw : Nat} (g : Nat) (resp : Bus.Resp dw HwTy.El) (i : Nat) :
+    Bus.Resp dw HwTy.El :=
+  if Nat.beq i g then resp else Bus.noResp
+
+/-- The response vector: the granted master gets `resp`, everyone else a quiet response. -/
+def Bus.respN {ω dw : Nat} (n g : Nat) (resp : Bus.Resp dw HwTy.El) : Vec (Bus.Resp dw HwTy.El) n :=
+  Vec.ofFn n (fun (i : Fin n) => Bus.respAt g resp i.val)
+
+/-- One cycle of the N-master arbiter. It mirrors `Bus.arbStepAtBits` on value vectors:
+the grant is `owner` while busy, else the round-robin choice; the owner keeps the bus
+until the slave answers or the owner drops `valid`; only the granted master gets the
+slave's response. -/
+def Bus.arbNStep (n aw dw : Nat) (s : Bus.ArbN)
+    (qs : Vec (Bus.Req aw dw HwTy.El) n) (resp : Bus.Resp dw HwTy.El) :
+    Bus.ArbN × Vec (Bus.Resp dw HwTy.El) n :=
+  let vs := Bus.validVec qs;
+  let g := if s.busy then s.owner else Bus.pickN n s.last vs;
+  let selV := Hdl.nthD Bool.false vs g;
+  let ack := Bool.or (BitVec.isTrue resp.ready) (BitVec.isTrue resp.rvalid);
+  let done := Bool.or ack (Bool.and s.busy (Bool.not selV));
+  let s' := Bus.ArbN.mk
+    (if done then Bool.false else if s.busy then Bool.true else selV)
+    (if s.busy then s.owner else g)
+    (if s.busy then s.last else if selV then g else s.last);
+  (s', Bus.respN n g resp)
+
+/-- The N-master arbiter as a value-level Mealy machine (input: all requests and the
+slave's answer; output: one response per master). -/
+def Bus.arbNMealy (n aw dw : Nat) :
+    Mealy Bus.ArbN (Vec (Bus.Req aw dw HwTy.El) n × Bus.Resp dw HwTy.El)
+      (Vec (Bus.Resp dw HwTy.El) n) :=
+  fun s x => Bus.arbNStep n aw dw s x.1 x.2
 
 ------------------------------------------------------------------------------------
 -- Decode and route. A request inside the window goes to the slave; one outside it is

@@ -238,6 +238,102 @@ def arbAgreeAll : Bool :=
   Bool.and (agree arbC arbFastIns) (Bool.and (agree arbC arbHoldIns) (agree arbC genArbIns))
 
 ------------------------------------------------------------------------------------
+-- 2b. The N-master arbiter (value reference model). The ownership/progress law is
+-- proved for `Bus.respAt` in `Hdl.BusLaw`; here we check the round-robin selector
+-- exhaustively for n = 1..4, the response vector against the law for n = 3, and that
+-- under an always-ready sink every master is answered within n cycles.
+
+def bitOfMask (m k : Nat) : Bool :=
+  Nat.beq (Nat.mod (Nat.div m (Nat.pow 2 k)) 2) 1
+
+def boolsN (n m : Nat) : List Bool :=
+  Hdl.map (fun (k : Nat) => bitOfMask m k) (units n)
+
+def bitAt (m k : Nat) : Bool := bitOfMask m k
+
+-- the round-robin order: last+1, ..., n-1, 0, ..., last
+def rotStart (n last : Nat) : Nat :=
+  if Nat.lt (Nat.succ last) n then Nat.succ last else 0
+
+def rotIdx (n last : Nat) : List Nat :=
+  Hdl.map (fun (k : Nat) => Nat.mod (Nat.add (rotStart n last) k) n) (units n)
+
+-- all indices before `g` in the order have `valid` low (and `g` itself is valid)
+def beforeFalse (m g : Nat) : List Nat → Bool
+  | .nil => .true
+  | .cons k ks =>
+    if Nat.beq k g then .true
+    else Bool.and (Bool.not (bitAt m k)) (beforeFalse m g ks)
+
+def pickNCheck (n last m : Nat) : Bool :=
+  let g := Bus.pickN n last (boolsN n m);
+  if Nat.beq m 0 then Nat.beq g n
+  else Bool.and (Nat.lt g n)
+    (Bool.and (bitAt m g) (beforeFalse m g (rotIdx n last)))
+
+def pickNAllN (n : Nat) : Bool :=
+  allTrue (bind (fun (m : Nat) => Hdl.map (fun (last : Nat) =>
+    pickNCheck n last m) (units n)) (units (Nat.pow 2 n)))
+
+def pickNAll : Bool :=
+  Bool.and (pickNAllN 1) (Bool.and (pickNAllN 2) (Bool.and (pickNAllN 3) (pickNAllN 4)))
+
+-- n = 3 inputs: request vector from a mask, and an always-ready (or not) sink
+def reqsN3 (m : Nat) : Vec (Bus.Req 8 8 HwTy.El) 3 :=
+  Vec.ofFn 3 (fun (i : Fin 3) => Bus.Req.mk
+    (BitVec.ofNat 1 (n01 (bitAt m i.val))) (BitVec.ofNat 1 0)
+    (BitVec.ofNat 8 i.val) (BitVec.ofNat 8 0))
+
+def respN3 (ack : Nat) : Bus.Resp 8 HwTy.El :=
+  Bus.Resp.mk (BitVec.ofNat 1 ack) (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 1 0)
+
+def ackOut3 (rs : Vec (Bus.Resp 8 HwTy.El) 3) (i : Nat) : Bool :=
+  if Nat.lt i 3 then Bus.Law.ackS (Hdl.nthD (Bus.noResp : Bus.Resp 8 HwTy.El) (Vec.toList rs) i)
+  else .false
+
+def gOf3 (s : Bus.ArbN) (m : Nat) : Nat :=
+  if s.busy then s.owner else Bus.pickN 3 s.last (boolsN 3 m)
+
+def nPairAtMost (rs : Vec (Bus.Resp 8 HwTy.El) 3) : Bool :=
+  Bool.and (Bool.not (Bool.and (ackOut3 rs 0) (ackOut3 rs 1)))
+    (Bool.and (Bool.not (Bool.and (ackOut3 rs 0) (ackOut3 rs 2)))
+      (Bool.not (Bool.and (ackOut3 rs 1) (ackOut3 rs 2))))
+
+def nStepCheck (busy ack m owner last : Nat) : Bool :=
+  let s := Bus.ArbN.mk (Bool.not (Nat.beq busy 0)) owner last;
+  let out := Bus.arbNStep 3 8 8 s (reqsN3 m) (respN3 ack);
+  let rs := out.2;
+  let g := gOf3 s m;
+  let granted :=
+    if Nat.lt g 3 then
+      Bool.or (Bool.not (Nat.beq ack 1)) (ackOut3 rs g)
+    else Bool.true;
+  Bool.and (nPairAtMost rs) granted
+
+def nStepAll : Bool :=
+  allTrue (bind (fun (busy : Nat) => bind (fun (owner : Nat) => bind (fun (last : Nat) =>
+    bind (fun (m : Nat) => Hdl.map (fun (ack : Nat) => nStepCheck busy ack m owner last)
+      (units 2)) (units 8)) (units 3)) (units 3)) (units 2))
+
+def nIn3 (t : Nat) : Vec (Bus.Req 8 8 HwTy.El) 3 × Bus.Resp 8 HwTy.El :=
+  (reqsN3 7, respN3 1)
+
+def nOut3 (t : Nat) : Vec (Bus.Resp 8 HwTy.El) 3 :=
+  Mealy.outAt (Bus.arbNMealy 3 8 8) Bus.arbNInit nIn3 t
+
+def ackWithin3 (i : Nat) : Nat → Nat → Bool
+  | .zero, _ => .false
+  | .succ k, t => Bool.or (ackOut3 (nOut3 t) i) (ackWithin3 i k (Nat.succ t))
+
+def ackWithin3At (i t : Nat) : Bool := ackWithin3 i 3 t
+
+def nFairCheck (t : Nat) : Bool :=
+  allTrue (Hdl.map (fun (i : Nat) => ackWithin3At i t) (units 3))
+
+def nFairAll : Bool :=
+  allTrue (Hdl.map nFairCheck (units 32))
+
+------------------------------------------------------------------------------------
 -- 3. The RAM: read-after-write and address stability, and the byte strobes.
 
 def ramC : Circuit (Bus.Req.code 8 8) (Bus.Resp.code 8) := Bus.ramC 0 8 6 8
@@ -356,6 +452,9 @@ def main : IO Unit := do
     <+> ", value = simulate = simFast " <+> yes arbAgreeAll);
   IO.println ("arb fast grants " <+> shows arbFastGrants <+> " " <+> yes arbFastOk
     <+> ", hold grants " <+> shows arbHoldGrants <+> " " <+> yes arbHoldOk);
+  IO.println ("n-master pick n=1..4 " <+> yes pickNAll);
+  IO.println ("n-master step law n=3 " <+> yes nStepAll);
+  IO.println ("n-master fair n=3, 32 starts " <+> yes nFairAll);
   IO.println ("ram read-after-write " <+> yes ramReadAll
     <+> ", answered after 2 " <+> yes ramAnsweredAll
     <+> ", value = simulate = simFast " <+> yes ramAgreeAll);

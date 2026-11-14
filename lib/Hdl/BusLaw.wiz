@@ -278,3 +278,198 @@ API is unchanged by the byte-enabled variant. -/
 def Bus.Law.ofReq_toReq {ω aw dw : Nat} (q : Bus.Req aw dw HwTy.El) :
     Bus.ReqW.toReq (Bus.ReqW.ofReq q) = q := rfl
 
+------------------------------------------------------------------------------------
+-- The arbiter, proved. `Bus.arbStepAtBits` has the grant as an argument, so one
+-- grant is a two-case proof (`g = 0` or `g = 1`); the round-robin choice is only
+-- needed for `Bus.pick_busy` and the trace-level progress theorem.
+
+/-- `a && false = false` on a symbolic `a`. -/
+def Bus.Law.andFalse (a : Bool) : Bool.and a .false = .false := match a with
+  | .true => rfl
+  | .false => rfl
+
+/-- `!(a && false) = true` on a symbolic `a` (the quiet-response case). -/
+def Bus.Law.notAndFalse (a : Bool) : Bool.not (Bool.and a .false) = .true := match a with
+  | .true => rfl
+  | .false => rfl
+
+/-- From `a = false` and `a = true`, anything: the two Boolean constants differ. -/
+def Bus.Law.trueEqFalse (a : Bool) (hf : a = .false) (ht : a = .true) :
+    Bool.true = Bool.false :=
+  Eq.substProp (fun (z : Bool) => z = .false) ht hf
+
+/-- `a` cannot be both `.false` and `.true`. -/
+def Bus.Law.ackContra (a : Bool) (hf : a = .false) (ht : a = .true) : False :=
+  absurd (Bus.Law.trueEqFalse a hf ht).1
+
+/-- The quiet response never acknowledges. -/
+def Bus.Law.ackNoResp {ω dw : Nat} :
+    Bus.Law.ackS (Bus.noResp : Bus.Resp dw HwTy.El) = .false := rfl
+
+/-- The output fields of the indexed step at values. -/
+def Bus.Law.arbOutAt {ω aw dw : Nat} (s : Bus.Arb HwTy.El) (g : HwTy.El Bus.Bit)
+    (a b : Bus.Req aw dw HwTy.El) (resp : Bus.Resp dw HwTy.El) :
+    Bus.ArbOut aw dw HwTy.El :=
+  Bus.ArbOut.unpack aw dw (Hw.snd (Bus.arbStepAt s g a b resp))
+
+/-- Mutual exclusion of one indexed arbiter step: whichever master `g` selects, the
+other response is the quiet one. This is the kernel-checked form of `AtMostOneAck`. -/
+def Bus.Law.arbStepAt_mutex {ω aw dw : Nat} (s : Bus.Arb HwTy.El)
+    (g : HwTy.El Bus.Bit) (a b : Bus.Req aw dw HwTy.El) (resp : Bus.Resp dw HwTy.El) :
+    Bus.Law.AtMostOneAckStepS (Bus.Law.arbOutAt s g a b resp).ra
+      (Bus.Law.arbOutAt s g a b resp).rb = .true :=
+  Bit.ind (fun (x : BitVec 1) =>
+      Bus.Law.AtMostOneAckStepS (Bus.Law.arbOutAt s x a b resp).ra
+        (Bus.Law.arbOutAt s x a b resp).rb = .true)
+    (Bus.Law.notAndFalse (Bus.Law.ackS resp)) True.intro g
+
+/-- While a request is in flight, `Bus.pick` grants it to the owner. -/
+def Bus.Law.pick_busy (s : Bus.Arb HwTy.El) (av bv : HwTy.El Bus.Bit)
+    (h : s.busy = Bit.one) : Bus.pick s av bv = s.owner :=
+  Eq.substProp (fun (z : HwTy.El Bus.Bit) =>
+      Bus.pick (Bus.Arb.mk z s.owner s.last) av bv = s.owner)
+    (Eq.symm h) rfl
+
+/-- Single-owner, step form: if the grant is the owner (`g = s.owner`), an answer to
+`a` forces the owner to be 0 and an answer to `b` forces it to be 1. Combined with
+`Bus.pick_busy`, only the owner is ever answered. -/
+def Bus.Law.arbStepAt_ownerAckSelf {ω aw dw : Nat} (s : Bus.Arb HwTy.El)
+    (a b : Bus.Req aw dw HwTy.El) (resp : Bus.Resp dw HwTy.El) :
+    (Bus.Law.ackS (Bus.Law.arbOutAt s s.owner a b resp).ra = .true →
+      s.owner = Bit.zero) ∧
+    (Bus.Law.ackS (Bus.Law.arbOutAt s s.owner a b resp).rb = .true →
+      s.owner = Bit.one) :=
+  Bit.ind (fun (x : BitVec 1) =>
+      (Bus.Law.ackS (Bus.Law.arbOutAt s x a b resp).ra = .true → x = Bit.zero) ∧
+      (Bus.Law.ackS (Bus.Law.arbOutAt s x a b resp).rb = .true → x = Bit.one))
+    (And.intro
+      (fun (h : Bus.Law.ackS (Bus.Law.arbOutAt s Bit.zero a b resp).ra = .true) => rfl)
+      (fun (h : Bus.Law.ackS (Bus.Law.arbOutAt s Bit.zero a b resp).rb = .true) =>
+        absurd (Bus.Law.ackContra (Bus.Law.ackS (Bus.Law.arbOutAt s Bit.zero a b resp).rb)
+          (Bus.Law.ackNoResp (dw := dw)) h)))
+    (And.intro
+      (fun (h : Bus.Law.ackS (Bus.Law.arbOutAt s Bit.one a b resp).ra = .true) =>
+        absurd (Bus.Law.ackContra (Bus.Law.ackS (Bus.Law.arbOutAt s Bit.one a b resp).ra)
+          (Bus.Law.ackNoResp (dw := dw)) h))
+      (fun (h : Bus.Law.ackS (Bus.Law.arbOutAt s Bit.one a b resp).rb = .true) => rfl))
+    s.owner
+
+/-- The same with an arbitrary grant known to be the owner. -/
+def Bus.Law.arbStepAt_ownerAck {ω aw dw : Nat} (s : Bus.Arb HwTy.El)
+    (g : HwTy.El Bus.Bit) (a b : Bus.Req aw dw HwTy.El) (resp : Bus.Resp dw HwTy.El)
+    (hg : g = s.owner) :
+    (Bus.Law.ackS (Bus.Law.arbOutAt s g a b resp).ra = .true →
+      s.owner = Bit.zero) ∧
+    (Bus.Law.ackS (Bus.Law.arbOutAt s g a b resp).rb = .true →
+      s.owner = Bit.one) :=
+  Eq.substProp (fun (x : HwTy.El Bus.Bit) =>
+      (Bus.Law.ackS (Bus.Law.arbOutAt s x a b resp).ra = .true →
+        s.owner = Bit.zero) ∧
+      (Bus.Law.ackS (Bus.Law.arbOutAt s x a b resp).rb = .true →
+        s.owner = Bit.one))
+    (Eq.symm hg) (Bus.Law.arbStepAt_ownerAckSelf s a b resp)
+
+/-- Progress of one indexed step: if the slave acknowledges this cycle, at least one
+master is answered. (`g = 0` answers `a`, `g = 1` answers `b`; the non-selected
+response is quiet.) -/
+def Bus.Law.arbStepAt_someAck {ω aw dw : Nat} (s : Bus.Arb HwTy.El)
+    (g : HwTy.El Bus.Bit) (a b : Bus.Req aw dw HwTy.El) (resp : Bus.Resp dw HwTy.El)
+    (hack : Bus.Law.ackS resp = .true) :
+    Bus.Law.ackS (Bus.Law.arbOutAt s g a b resp).ra = .true ∨
+    Bus.Law.ackS (Bus.Law.arbOutAt s g a b resp).rb = .true :=
+  Bit.ind (fun (x : BitVec 1) =>
+      Bus.Law.ackS (Bus.Law.arbOutAt s x a b resp).ra = .true ∨
+      Bus.Law.ackS (Bus.Law.arbOutAt s x a b resp).rb = .true)
+    (Or.inl hack) (Or.inr hack) g
+
+/-- The circuit trace's output is the indexed step at the current state and the
+round-robin grant (definitional, stated so the progress theorem can be read). -/
+def Bus.Law.arbTraceOut {ω aw dw : Nat}
+    (xs : Trace (HwTy.El (Bus.ArbIn.code aw dw))) (t : Nat) :
+    Bus.Law.arbOut (Circuit.trace (Bus.arbC aw dw) xs t) =
+    Bus.Law.arbOutAt (Bus.Arb.unpack (Circuit.stateAt (Bus.arbC aw dw) xs t))
+      (Bus.pick (Bus.Arb.unpack (Circuit.stateAt (Bus.arbC aw dw) xs t))
+        (Bus.Law.arbIn (xs t)).a.valid (Bus.Law.arbIn (xs t)).b.valid)
+      (Bus.Law.arbIn (xs t)).a (Bus.Law.arbIn (xs t)).b
+      (Bus.Law.arbIn (xs t)).slave := rfl
+
+/-- Trace-level progress: on every cycle in which the slave acknowledges, at least one
+master is answered. This is the proved liveness half; it does not by itself say *which*
+master or bound the wait (see `NoStarvation`, checked in the example). -/
+def Bus.Law.arbProgress {ω aw dw : Nat}
+    (xs : Trace (HwTy.El (Bus.ArbIn.code aw dw)))
+    (hack : (t : Nat) → Bus.Law.ackS (Bus.Law.arbIn (xs t)).slave = .true) :
+    (t : Nat) →
+      Bus.Law.ackS (Bus.Law.arbOut (Circuit.trace (Bus.arbC aw dw) xs t)).ra = .true ∨
+      Bus.Law.ackS (Bus.Law.arbOut (Circuit.trace (Bus.arbC aw dw) xs t)).rb = .true :=
+  fun (t : Nat) =>
+    Bus.Law.arbStepAt_someAck (Bus.Arb.unpack (Circuit.stateAt (Bus.arbC aw dw) xs t))
+      (Bus.pick (Bus.Arb.unpack (Circuit.stateAt (Bus.arbC aw dw) xs t))
+        (Bus.Law.arbIn (xs t)).a.valid (Bus.Law.arbIn (xs t)).b.valid)
+      (Bus.Law.arbIn (xs t)).a (Bus.Law.arbIn (xs t)).b
+      (Bus.Law.arbIn (xs t)).slave (hack t)
+
+------------------------------------------------------------------------------------
+-- The N-master response law. The ownership and progress properties are stated on the
+-- response *function* `Bus.respAt` (the vector `Bus.respN` is `Vec.ofFn` of it): every
+-- non-granted master is quiet (mutual exclusion), and the granted one receives the
+-- slave's response (progress when the grant is valid). Stating it on the function keeps
+-- the proof out of `Vec.get`/`Vec.ofFn` (whose reduction on a symbolic length is huge).
+
+/-- At most one master is answered by a response function on `Fin n`. -/
+def Bus.Law.AtMostOneAckN {ω n dw : Nat}
+    (rs : Fin n → Bus.Resp dw HwTy.El) : Prop :=
+  (i j : Fin n) → ¬ (i.val = j.val) →
+    ¬ (Bus.Law.ackS (rs i) = .true ∧ Bus.Law.ackS (rs j) = .true)
+
+/-- The granted master (index `g`) is the one answered when the slave acknowledges. -/
+def Bus.Law.GrantedAnsweredN {ω n dw : Nat}
+    (rs : Fin n → Bus.Resp dw HwTy.El) (g : Nat) (resp : Bus.Resp dw HwTy.El) : Prop :=
+  (i : Fin n) → i.val = g → Bus.Law.ackS resp = .true →
+    Bus.Law.ackS (rs i) = .true
+
+/-- The N-master ownership/progress law for one response function. -/
+def Bus.Law.ArbNLaw {ω n dw : Nat} (g : Nat) (resp : Bus.Resp dw HwTy.El)
+    (rs : Fin n → Bus.Resp dw HwTy.El) : Prop :=
+  Bus.Law.AtMostOneAckN rs ∧ Bus.Law.GrantedAnsweredN rs g resp
+
+/-- From `a = b`, `Nat.beq a b` is true. -/
+def Bus.Law.beqOfEq (a b : Nat) (h : a = b) : Nat.beq a b = .true :=
+  Eq.substProp (fun (z : Nat) => Nat.beq a z = .true) h (Bus.Law.natBeqSelf a)
+
+/-- `Bus.respAt g resp i` acknowledges only when `i = g`. -/
+def Bus.Law.ackIfBeq {ω dw : Nat} (i g : Nat) (resp : Bus.Resp dw HwTy.El)
+    (h : Bus.Law.ackS (if Nat.beq i g then resp else Bus.noResp) = .true) :
+    Nat.beq i g = .true :=
+  Or.elim (Bool.cases (Nat.beq i g))
+    (fun (e : Nat.beq i g = .true) => e)
+    (fun (e : Nat.beq i g = .false) =>
+      absurd (Bus.Law.ackContra
+        (Bus.Law.ackS (if Bool.false then resp else Bus.noResp))
+        (Bus.Law.ackNoResp (dw := dw))
+        (Eq.substProp (fun (z : Bool) =>
+            Bus.Law.ackS (if z then resp else Bus.noResp) = .true) e h)))
+
+/-- The granted master's response is the slave's acknowledgement. -/
+def Bus.Law.respAt_ack_of {ω dw : Nat} (g : Nat) (resp : Bus.Resp dw HwTy.El)
+    (i : Nat) (h : i = g) (ha : Bus.Law.ackS resp = .true) :
+    Bus.Law.ackS (Bus.respAt g resp i) = .true :=
+  Eq.trans (Eq.congrArg (fun (z : Bool) =>
+      Bus.Law.ackS (if z then resp else Bus.noResp)) (Bus.Law.beqOfEq i g h)) ha
+
+/-- A non-granted master is quiet: the N-master mutual-exclusion half. -/
+def Bus.Law.respAt_ack_val {ω dw : Nat} (g : Nat) (resp : Bus.Resp dw HwTy.El)
+    (i : Nat) (h : Bus.Law.ackS (Bus.respAt g resp i) = .true) : i = g :=
+  Nat.beq_eq i g (Bus.Law.ackIfBeq i g resp h)
+
+/-- The N-master response function satisfies the ownership/progress law. -/
+def Bus.Law.respAt_law {ω n dw : Nat} (g : Nat) (resp : Bus.Resp dw HwTy.El) :
+    Bus.Law.ArbNLaw g resp (fun (i : Fin n) => Bus.respAt g resp i.val) :=
+  And.intro
+    (fun (i j : Fin n) (hij : ¬ (i.val = j.val))
+        (h : Bus.Law.ackS (Bus.respAt g resp i.val) = .true ∧
+             Bus.Law.ackS (Bus.respAt g resp j.val) = .true) =>
+      hij (Eq.trans (Bus.Law.respAt_ack_val g resp i.val h.1)
+        (Eq.symm (Bus.Law.respAt_ack_val g resp j.val h.2))))
+    (fun (i : Fin n) (h : i.val = g) (ha : Bus.Law.ackS resp = .true) =>
+      Bus.Law.respAt_ack_of g resp i.val h ha)

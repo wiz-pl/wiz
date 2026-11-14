@@ -22,6 +22,9 @@ def hdlBusLawGroup : Group where
           ("route: all laws yes, value = simulate = simFast yes, 4608 inputs\n" ++
            "arb mutex yes, answers only requests yes, stable under stall yes, windows yes, generated matches yes, value = simulate = simFast yes\n" ++
            "arb fast grants 2 1 2 1 2 1 2 1 2 1 2 1 2 1 2 1 yes, hold grants 4 4 4 4 3 4 yes\n" ++
+           "n-master pick n=1..4 yes\n" ++
+           "n-master step law n=3 yes\n" ++
+           "n-master fair n=3, 32 starts yes\n" ++
            "ram read-after-write yes, answered after 2 yes, value = simulate = simFast yes\n" ++
            "ramw strobes yes, value = simulate = simFast yes\n" ++
            "well formed yes\n") }
