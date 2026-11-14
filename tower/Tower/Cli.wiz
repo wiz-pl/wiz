@@ -41,11 +41,27 @@ def Tower.tools : List String := "wiz" :> "grail" :> .nil
 
 def Tower.isComment (l : String) : Bool :=
   Bool.or (String.isEmpty l) (Bool.or (String.startsWith l "#") (String.startsWith l "--"))
--- the spec in a `wiz-toolchain` file: its first line that isn't blank or a comment
-def Tower.readToolchainFile (f : String) : EIO (Option String) := do
+-- the lines of a toolchain file that aren't blank or comments
+def Tower.specLines (f : String) : EIO (List String) := do
   t ← FS.readFile f;
-  EIO.pure (List.find (fun (l : String) => Bool.not (Tower.isComment l)) (List.map String.trim (String.splitOn t "\n")))
-
+  EIO.pure (List.filter (fun (l : String) => Bool.not (Tower.isComment l)) (List.map String.trim (String.splitOn t "\n")))
+-- the file's one line, or an error: a `wiz-toolchain` file is one spec line, not a
+-- description of a local merge (that is a `tower toolchain link` name and a spec)
+def Tower.oneLine (f : String) : EIO (Option String) := do
+  ls ← Tower.specLines f;
+  match ls with
+  | .nil => EIO.pure .none
+  | .cons l rest => match rest with
+    | .nil => EIO.pure (.some l)
+    | .cons _ _ => EIO.fail (f & ": wiz-toolchain must be one spec line (there are " & Nat.repr (List.length ls) & ", e.g. \"" & l & "\")")
+-- the spec in a `wiz-toolchain` file: exactly one line, and it is a spec
+def Tower.readSpecFile (f : String) : EIO (Option String) := do
+  one ← Tower.oneLine f;
+  match one with
+  | .none => EIO.pure .none
+  | .some l => match Tower.isSpecLine l with
+    | .true => EIO.pure (.some l)
+    | .false => EIO.fail (f & ": " & Tower.specLineError l)
 -- is a line of `wiz-toolchain.local` a path rather than a spec? (a bare `a/b` is a branch)
 def Tower.isPathEntry (l : String) : Bool :=
   Bool.or (String.startsWith l "/") (Bool.or (String.startsWith l "./") (Bool.or (String.startsWith l "../")
@@ -68,11 +84,13 @@ def Tower.under (d x : String) : String := match String.eq d "/" with
 -- (relative to the file's directory, absolute, or under `~/`), as its real absolute path.
 -- A path that isn't a toolchain is an error that names the file.
 def Tower.readLocalFile (f : String) : EIO (Option String) := do
-  found ← Tower.readToolchainFile f;
+  found ← Tower.oneLine f;
   match found with
   | .none => EIO.pure .none
   | .some l => match Tower.isPathEntry l with
-    | .false => EIO.pure (.some l)
+    | .false => match Tower.isSpecLine l with
+      | .true => EIO.pure (.some l)
+      | .false => EIO.fail (f & ": " & Tower.specLineError l)
     | .true => do
       home ← EIO.lift (Env.get "HOME");
       let p := (match String.startsWith l "~/" with
@@ -103,7 +121,7 @@ partial def Tower.activeGo (s : Settings) (d : String) : EIO (Option (String × 
       | .true => Tower.readLocalFile lf
       | .false => EIO.pure .none : EIO (Option String));
     base ← (match ex with
-      | .true => Tower.readToolchainFile f
+      | .true => Tower.readSpecFile f
       | .false => EIO.pure .none : EIO (Option String));
     match loc with
     | .some spec => EIO.pure (.some (spec, lf & " (local override: " & (match base with

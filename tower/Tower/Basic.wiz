@@ -40,6 +40,17 @@ def Tower.splitKey (l : String) : String × String := match String.splitOn l " "
   | .cons k rest => (k, String.intercalate " " rest)
 -- a shell word: single-quoted
 def Tower.shQuote (s : String) : String := "'" & String.replace s "'" "'\\''" & "'"
+-- A spec is one word: `nightly`, `stable`, a tag, a branch, a commit, `REF@COMMIT` or a
+-- linked name. A description (spaces, parentheses) is a mistake, not a ref: never send it
+-- to `git ls-remote`.
+-- (no space, tab or parentheses: `Char.mk 32`, 9, 40, 41)
+def Tower.isSpecLine (l : String) : Bool :=
+  Bool.and (Bool.not (String.isEmpty l))
+    (Bool.not (Bool.or (String.containsChar l (Char.mk 32))
+      (Bool.or (String.containsChar l (Char.mk 9))
+        (Bool.or (String.containsChar l (Char.mk 40)) (String.containsChar l (Char.mk 41))))))
+def Tower.specLineError (l : String) : String :=
+  "wiz-toolchain must be one spec line (got \"" & l & "\"): nightly, stable, a tag, a branch, a commit, REF@COMMIT or a linked name; a local merge is `tower toolchain link NAME DIR`, and the file names NAME"
 def Tower.isHex (s : String) : Bool := Bool.and (Bool.not (String.isEmpty s))
   (List.all (fun (c : Char) => Bool.or (Char.isDigit c) (Bool.and (Nat.le 97 (Char.code c)) (Nat.le (Char.code c) 102))) (String.chars s))
 -- pairs without the key `k`

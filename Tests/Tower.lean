@@ -181,6 +181,26 @@ def cases (impl : IO Impl) : List Case := [
         checkEq (some "v1") ((← showIn e (proj / "sub/deep")).map (·.1))
         let tmp ← IO.FS.createTempDir
         checkEq (some ("nightly", "the default toolchain")) (← showIn e tmp) },
+    { name := "a malformed wiz-toolchain: a description is not a spec", run := fun _ => do
+        let e ← mkEnv (← impl)
+        let root ← IO.FS.realPath (← mkTree [
+          ("desc/wiz-toolchain", "agent/a+agent/b@master-50cd3e7 (local merge, see README)\n"),
+          ("space/wiz-toolchain", "master 50cd3e7\n"),
+          ("two/wiz-toolchain", "v1\nv2\n"),
+          ("good/wiz-toolchain", "# mine\nv1\n")])
+        -- a description (space, parentheses) or more than one line: an error that names the
+        -- rule, from show and from which (no `git ls-remote`: it would not find it)
+        for dir in ["desc", "space", "two"] do
+          let (r, out, err) ← towerOut e ["show"] (root / dir)
+          check (r != 0) s!"show in {dir} succeeded: {out}"
+          checkHas err "wiz-toolchain must be one spec line"
+          let (r, out, err) ← towerOut e ["which", "wiz"] (root / dir)
+          check (r != 0) s!"which in {dir} succeeded: {out}"
+          checkHas err "wiz-toolchain must be one spec line"
+        let m ← towerFails e ["toolchain", "install", "agent/a+agent/b@master-50cd3e7 (local merge)"]
+        checkHas m "wiz-toolchain must be one spec line"
+        -- a comment and one spec line is fine
+        checkEq (some ("v1", (root / "good/wiz-toolchain").toString)) (← showIn e (root / "good")) },
     { name := "wiz-toolchain.local: a spec or a path, over wiz-toolchain; bad paths; the shims", run := fun _ => do
         let e ← mkEnv (← impl)
         tower e ["set", "cflags", "-I/opt/x"]

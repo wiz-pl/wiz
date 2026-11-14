@@ -10,3 +10,5 @@ tests/pure.wiz:11:1: info: "# tower settings (`tower set KEY VALUE`)\ndefault v1
 tests/pure.wiz:14:1: info: "unknown setting colour (default, source, flake, git, releases, nightly-ref, auto-install, cc, cflags, ldflags, libs, llc, gc-cflags, gc-ldflags)"
 tests/pure.wiz:17:1: info: "spec v1\nsource source\nref v1\ncommit abc\npath \nflag cc gcc\n"
 tests/pure.wiz:18:1: info: (.cons ("cc", "gcc") .nil, .some "release", .true, .cons "v1" .nil, ())
+tests/pure.wiz:19:1: info: .cons .true (.cons .true (.cons .true (.cons .true (.cons .false (.cons .true .nil)))))
+tests/pure.wiz:20:1: info: "wiz-toolchain must be one spec line (got \"agent/a+agent/b@master-50cd3e7 (local merge, see README)\"): nightly, stable, a tag, a branch, a commit, REF@COMMIT or a linked name; a local merge is `tower toolchain link NAME DIR`, and the file names NAME"

@@ -16,3 +16,5 @@ import Tower.Cli
   | .error e => e
 #eval Info.render (Info.parse (Info.render (Info.mk "v1" "source" "v1" "abc" "" (("cc", "gcc") :> .nil))))
 #eval Tower.opts ("v1" :> "--source" :> "release" :> "--cc" :> "gcc" :> "--force" :> .nil)
+#eval List.map Tower.isSpecLine ("nightly" :> "stable" :> "master@50cd3e7691dd7e63ff72c33aa24b68a032179c8d" :> "agent/x-y" :> "master@50cd3e7 (local merge, see README)" :> "agent/a+agent/b@master-50cd3e7" :> .nil)
+#eval Tower.specLineError "agent/a+agent/b@master-50cd3e7 (local merge, see README)"

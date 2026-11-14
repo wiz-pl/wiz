@@ -15,6 +15,10 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to
   `.gitignore`) overrides it with a spec or a path to a toolchain directory or built
   checkout; the shims, `which` and `show` honour it (26a, #281).
+* tower: a `wiz-toolchain` file is checked as one spec line: a description, spaces or
+  parentheses (`master@abc (local merge)`) are rejected with `wiz-toolchain must be one
+  spec line`, before `git ls-remote`; a local merge is a `tower toolchain link` name,
+  not a description (26a).
 
 ## [0.1.0] - unreleased (draft)
 

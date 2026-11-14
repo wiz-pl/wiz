@@ -85,9 +85,12 @@ def Tower.findRef (rs : List (String × String)) (ref : String) : Option String 
 def Tower.snapshotNamer (ref : String) : Bool :=
   Bool.or (String.startsWith ref "keep/") (Bool.or (String.startsWith ref "snapshot-") (String.eq ref "nightly"))
 
--- What a spec asks for, resolved against the repository's refs.
+-- What a spec asks for, resolved against the repository's refs. A line with a space or
+-- parentheses is a description, not a spec: fail before `git ls-remote` sees it.
 def Tower.resolveSpec (s : Settings) (spec : String) : EIO Want :=
-  match String.splitOn spec "@" with
+  match Tower.isSpecLine spec with
+  | .false => EIO.fail (Tower.specLineError spec)
+  | .true => match String.splitOn spec "@" with
   | .cons r (.cons c .nil) => EIO.pure (Want.mk r (.some c) .none .none)
   | _ => do
     refs ← EIO.lift (Tower.lsRemote s.git);

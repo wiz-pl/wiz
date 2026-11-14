@@ -23,6 +23,22 @@ spec; lines starting with `#` or `--` are comments), the same way `lean-toolchai
 for Lean. It's a separate file rather than a field of `grail.wiz`: tower then never has
 to evaluate Wiz, and directories that have no grail package can use one too.
 
+**One line, one spec.** The file holds exactly one non-comment line, and that line is a
+spec: no description, and no spaces or parentheses. A line such as
+`master@50cd3e7 (local merge, see README)` is a malformed spec, not a ref, and tower
+says so (`wiz-toolchain must be one spec line`) before it asks the remote; it used to
+pass the description to `git ls-remote` and to a release URL. A local merge is a
+toolchain, not a spec: build it (or link a Nix store path), link it with
+`tower toolchain link merge-x DIR`, and put the name in the file:
+
+```sh
+tower toolchain link merge-x ~/src/wiz      # or /nix/store/…-wiz-…/share/wiz
+printf 'merge-x\n' > wiz-toolchain
+```
+
+The link is local to the machine (`~/.tower`), so a committed `wiz-toolchain` that is
+meant to be reproducible pins a commit (`master@<sha>`), a tag or a channel.
+
 Which toolchain runs (`tower show` says which, and why):
 
 1. `wiz +SPEC …`: a first argument starting with `+` (as with rustup);
@@ -207,6 +223,9 @@ holding a tiny Lake project whose `wiz` and `grail` print their arguments, with 
 `v1` and a moving `main`. The cases:
 
 * resolution order, settings and version ordering;
+* a malformed `wiz-toolchain` (a description with a space or parentheses, or more than
+  one line) is refused by `show`, `which` and `toolchain install` with `wiz-toolchain
+  must be one spec line`; a comment and one spec line are accepted;
 * a source install with flags baked into the wrappers, then shims with a
   `wiz-toolchain` file, `+nightly` installing on first use, an override beating the
   file, `run`, `update` moving `nightly` but not `v1`, `uninstall`, and `auto-install

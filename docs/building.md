@@ -319,3 +319,20 @@ otherwise Nix builds wiz from source, which takes a few minutes.
 11p) and this wiz on `PATH`: `nix run github:wiz-pl/wiz#nvim-wiz --
 file.wiz`. `packages.<system>.wiz-nvim` is the plugin alone, for a Neovim
 configuration in Nix.
+
+### Project toolchains (`wiz-toolchain`)
+
+A directory run with tower's shims can pin its toolchain in a **`wiz-toolchain`** file:
+exactly one non-comment line, and that line is a spec (`nightly`, `stable`, a tag, a
+branch, a commit, `master@<sha>`, or a name made by `tower toolchain link`). tower
+rejects a description, a space or parentheses with `wiz-toolchain must be one spec
+line`, before asking the remote; commit a valid spec, not a note about a local merge.
+For a local merge, link the checkout or store path and name the link:
+
+```sh
+tower toolchain link merge-x ~/src/wiz   # or /nix/store/…-wiz-…/share/wiz
+printf 'merge-x\n' > wiz-toolchain
+```
+
+A `wiz-toolchain.local` next to it (not committed) overrides it, and may also be a path
+to a checkout or toolchain directory. See docs/stages/26-tower.md, 26a.
