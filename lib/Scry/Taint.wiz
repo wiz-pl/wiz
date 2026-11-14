@@ -1,0 +1,323 @@
+import Scry.Analysis
+import Scry.Eval
+import Text
+import Word
+/-!
+# Scry.Taint
+
+Intraprocedural **taint analysis as Datalog** (`import Scry.Taint`), over the def-use
+edges of `Scry.Analysis` and a small source/sink/sanitiser specification.
+
+## The spec
+
+`Scry.TaintSpec` names:
+
+* `sources` — direct calls whose **result** is attacker-controlled (`getenv`, `recv`,
+  …);
+* `sanitisers` — direct calls whose **result** is clean (`sanitize`, `escape_shell`,
+  …); a sanitiser is a kill for its own result, not for its arguments;
+* `sinks` — direct calls and the argument index to check (`("system", 0)`,
+  `("printf", 0)`, …).
+
+The spec can be written as a Wiz value (`Scry.TaintSpec.mk …`) or parsed from the small
+line format in `Scry.parseTaintSpec`:
+
+```
+source getenv
+source recv
+sanitise sanitize
+sink system 0
+sink printf 0
+```
+
+Blank lines and lines with an unknown first word are ignored. The format is
+deliberately tiny: S4's rule pack will replace it with a real `.scry` spec file.
+
+## The Datalog program
+
+Relations (all columns are `U64` in `Scry.Store`):
+
+| # | relation | arity | kind |
+|---|---|---|---|
+| 0 | `flow (def, use)` | 2 | EDB, from reaching definitions |
+| 1 | `src (def)` | 1 | EDB, a source call with a result |
+| 2 | `sink (call, arg)` | 2 | EDB, a sink call and the checked argument |
+| 3 | `san (def)` | 1 | EDB, a sanitiser call with a result |
+| 4 | `tainted (def)` | 1 | IDB |
+| 5 | `alert (call, arg)` | 2 | IDB |
+
+Rules:
+
+```
+tainted s      :- src s.
+tainted b      :- tainted a, flow a b, !san b.
+alert s arg    :- tainted d, flow d s, sink s arg.
+```
+
+The negation is stratified (`san` is EDB, `tainted` is one stratum up), so
+`Scry.Program.check` accepts the program. `!san b` blocks taint at a sanitiser's
+**result definition**: a sanitiser's argument may be tainted (it is a normal use), but
+the value it returns is not. Because every Wil statement writes at most one register,
+`tainted b` means "the register defined at `b` is tainted", and a `flow` edge is
+per-register, so a branch merge with one tainted arm is tainted (union at the merge).
+
+## Findings and paths
+
+`Scry.findingsInFunc` evaluates the program with the semi-naive engine, reads the
+`alert` relation, and rebuilds a **source -> sink path** from the engine's provenance:
+the alert's `tainted` premise is walked back through `tainted`/`flow` premises until a
+`src` seed, then the sink call point is appended. A finding is one `(sink call, arg)`
+tuple; if several definitions reach the same argument the engine reports one path (the
+first derivation in provenance order).
+
+## What this prototype does not model
+
+* **Memory**: `store`/`load` do not carry taint, so `*p = getenv(); system(*p)` is a
+  false negative (tested, and named in `wiz-notes/scry-taint.md`).
+* **Calls**: an ordinary call does not propagate taint from arguments to its result,
+  and there are no interprocedural summaries (S7). Sources, sanitisers and sinks are
+  the only calls the spec interprets.
+* **Terminator uses**: `ret`/`br` conditions are CFG edges but not data edges yet.
+-/
+
+-- ## The specification
+
+structure Scry.TaintSpec where
+  sources : List String
+  sanitisers : List String
+  /-- `(callee, argument index)` pairs. -/
+  sinks : List (String × Nat)
+
+def Scry.stringIn (s : String) (l : List String) : Bool := List.any (String.eq s) l
+
+/-- A call's result, callee name and arguments, when it is a direct call. -/
+structure Scry.CallInfo where
+  result : Option Wil.Var
+  name : String
+  args : List Wil.Var
+
+def Scry.stmtCall : Wil.Stmt → Option Scry.CallInfo
+  | .call r (.direct name) args => .some (Scry.CallInfo.mk r name args)
+  | _ => .none
+
+-- ## The line format
+
+structure Scry.SpecBuilder where
+  sources : List String
+  sanitisers : List String
+  sinks : List (String × Nat)
+
+def Scry.SpecBuilder.empty : Scry.SpecBuilder := Scry.SpecBuilder.mk .nil .nil .nil
+
+def Scry.SpecBuilder.addSink (name : String) (rest : List String)
+    (b : Scry.SpecBuilder) : Scry.SpecBuilder :=
+  match rest with
+  | .cons idx _ => match String.parseNat (String.trim idx) with
+    | .some n => Scry.SpecBuilder.mk b.sources b.sanitisers (.cons (name, n) b.sinks)
+    | .none => b
+  | .nil => b
+
+def Scry.SpecBuilder.addLine (line : String) (b : Scry.SpecBuilder) : Scry.SpecBuilder :=
+  let words := String.splitOn (String.trim line) " ";
+  match words with
+  | .cons kw (.cons name rest) =>
+    if String.eq kw "source" then
+      Scry.SpecBuilder.mk (.cons name b.sources) b.sanitisers b.sinks
+    else if String.eq kw "sanitise" then
+      Scry.SpecBuilder.mk b.sources (.cons name b.sanitisers) b.sinks
+    else if String.eq kw "sanitize" then
+      Scry.SpecBuilder.mk b.sources (.cons name b.sanitisers) b.sinks
+    else if String.eq kw "sink" then
+      Scry.SpecBuilder.addSink name rest b
+    else b
+  | _ => b
+
+/-- Parse the tiny line format into a spec. -/
+def Scry.parseTaintSpec (text : String) : Scry.TaintSpec :=
+  let b := List.foldl (fun acc line => Scry.SpecBuilder.addLine line acc) Scry.SpecBuilder.empty
+    (String.splitOn text "\n");
+  Scry.TaintSpec.mk b.sources b.sanitisers b.sinks
+
+/-- Render a spec in the same line format (round-trips through `parseTaintSpec`). -/
+def Scry.TaintSpec.render (spec : Scry.TaintSpec) : String :=
+  let sources := List.map (fun s => String.append "source " s) spec.sources;
+  let sans := List.map (fun s => String.append "sanitise " s) spec.sanitisers;
+  let sinks := List.map (fun p => String.append "sink "
+    (String.append p.1 (String.append " " (Nat.repr p.2)))) spec.sinks;
+  String.intercalate "\n" (List.concat [sources, sans, sinks])
+
+-- ## Spec facts over a Wil function
+
+def Scry.srcNodes (info : Scry.FnInfo) (spec : Scry.TaintSpec) : List Nat :=
+  List.filter (fun n =>
+    match Scry.nodeStmt info.g n with
+    | .none => .false
+    | .some s => match Scry.stmtCall s with
+      | .none => .false
+      | .some c => match c.result with
+        | .none => .false
+        | .some _ => Scry.stringIn c.name spec.sources)
+    (Scry.range info.g.count)
+
+/-- A sanitiser result definition is a kill; a sanitiser call without a result cannot
+carry a clean value, so it is not a kill point. -/
+def Scry.sanNodes (info : Scry.FnInfo) (spec : Scry.TaintSpec) : List Nat :=
+  List.filter (fun n =>
+    match Scry.nodeStmt info.g n with
+    | .none => .false
+    | .some s => match Scry.stmtCall s with
+      | .none => .false
+      | .some c => match c.result with
+        | .none => .false
+        | .some _ => Scry.stringIn c.name spec.sanitisers)
+    (Scry.range info.g.count)
+
+structure Scry.SinkFact where
+  node : Nat
+  name : String
+  arg : Nat
+
+def Scry.sinkFactsAt (info : Scry.FnInfo) (spec : Scry.TaintSpec) (n : Nat) : List Scry.SinkFact :=
+  match Scry.nodeStmt info.g n with
+  | .none => .nil
+  | .some s => match Scry.stmtCall s with
+    | .none => .nil
+    | .some c =>
+      Scry.concatMap (fun p =>
+        match p with
+        | (name, idx) =>
+          if String.eq c.name name then
+            if Nat.lt idx (List.length c.args) then .cons (Scry.SinkFact.mk n name idx) .nil
+            else .nil
+          else .nil)
+        spec.sinks
+
+def Scry.sinkFacts (info : Scry.FnInfo) (spec : Scry.TaintSpec) : List Scry.SinkFact :=
+  Scry.concatMap (fun n => Scry.sinkFactsAt info spec n) (Scry.range info.g.count)
+
+-- ## The Datalog program
+
+def Scry.taintOps : Scry.LatOps Nat :=
+  Scry.LatOps.mk 0 (fun a b => if Nat.lt a b then b else a) Nat.beq
+
+def Scry.taintSrcRule : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 4 (List.map Scry.Term.var [0]))
+    [Scry.Atom.pos 1 (List.map Scry.Term.var [0])]
+
+def Scry.taintFlowRule : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 4 (List.map Scry.Term.var [1]))
+    [ Scry.Atom.pos 4 (List.map Scry.Term.var [0])
+    , Scry.Atom.pos 0 (List.map Scry.Term.var [0, 1])
+    , Scry.Atom.neg 3 (List.map Scry.Term.var [1]) ]
+
+def Scry.taintAlertRule : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 5 (List.map Scry.Term.var [1, 2]))
+    [ Scry.Atom.pos 4 (List.map Scry.Term.var [0])
+    , Scry.Atom.pos 0 (List.map Scry.Term.var [0, 1])
+    , Scry.Atom.pos 2 (List.map Scry.Term.var [1, 2]) ]
+
+/-- Relations: `flow/2`, `src/1`, `sink/2`, `san/1`, `tainted/1`, `alert/2`. -/
+def Scry.taintProgram : Scry.Program Nat :=
+  Scry.Program.mk Scry.taintOps [2, 1, 2, 1, 1, 2] [] []
+    [Scry.taintSrcRule, Scry.taintFlowRule, Scry.taintAlertRule]
+
+-- ## EDB construction
+
+def Scry.u (n : Nat) : U64 := U64.ofNat n
+
+def Scry.addPairFacts (rel : Nat) (pairs : List (Nat × Nat)) (st : Scry.State Nat) :
+    Scry.State Nat :=
+  List.foldr (fun p acc => Scry.State.addTuple acc rel [Scry.u p.1, Scry.u p.2]) st pairs
+
+def Scry.addNodeFacts (rel : Nat) (ns : List Nat) (st : Scry.State Nat) : Scry.State Nat :=
+  List.foldr (fun n acc => Scry.State.addTuple acc rel [Scry.u n]) st ns
+
+def Scry.taintInput (info : Scry.FnInfo) (spec : Scry.TaintSpec) : Scry.State Nat :=
+  let flows := List.map (fun d => (d.from, d.to)) info.deps;
+  let srcs := Scry.srcNodes info spec;
+  let sans := Scry.sanNodes info spec;
+  let sinks := List.map (fun f => (f.node, f.arg)) (Scry.sinkFacts info spec);
+  let st0 := Scry.State.empty;
+  let st1 := Scry.addPairFacts 0 flows st0;
+  let st2 := Scry.addNodeFacts 1 srcs st1;
+  let st3 := Scry.addPairFacts 2 sinks st2;
+  Scry.addNodeFacts 3 sans st3
+
+-- ## Findings and source -> sink paths
+
+structure Scry.Finding where
+  sink : Nat
+  name : String
+  arg : Nat
+  path : List Nat
+
+def Scry.rowNat (row : List U64) (i : Nat) : Nat :=
+  UIntN.toNat (Scry.nthD (U64.ofNat 0) row i)
+
+def Scry.singleNat (x : Nat) : List Nat := .cons x .nil
+
+def Scry.factNode {L : Type} (s : Scry.ProofStep L) : Nat := Scry.rowNat s.fact.args 0
+
+/-- The premise id whose fact is in relation `rel`, if any. -/
+def Scry.premiseOfRel {L : Type} (st : Scry.State L) (step : Scry.ProofStep L)
+    (rel : Nat) : Option Nat :=
+  List.find (fun id => match Scry.stepByIdL st.nodes id with
+    | .none => .false
+    | .some s => Nat.beq s.fact.rel rel) step.premises
+
+/-- Walk a `tainted` derivation back to its source seed, collecting the definition
+points from source to the tainted definition (inclusive). -/
+partial def Scry.taintChain {L : Type} (st : Scry.State L) (id : Nat) : List Nat :=
+  match Scry.stepByIdL st.nodes id with
+  | .none => .nil
+  | .some step =>
+    match Scry.premiseOfRel st step 4 with
+    | .some pid => List.append (Scry.taintChain st pid) (.cons (Scry.factNode step) .nil)
+    | .none => .cons (Scry.factNode step) .nil
+
+def Scry.sinkNameAt (info : Scry.FnInfo) (n : Nat) : String :=
+  match Scry.nodeStmt info.g n with
+  | .none => ""
+  | .some s => match Scry.stmtCall s with
+    | .none => ""
+    | .some c => c.name
+
+/-- One finding per alert tuple. The path is `source, …, reaching definition, sink`. -/
+def Scry.alertFindings (info : Scry.FnInfo) (st : Scry.State Nat) : List Scry.Finding :=
+  List.map (fun row =>
+    let s := Scry.rowNat row 0;
+    let arg := Scry.rowNat row 1;
+    let path := match Scry.State.whyTuple st Scry.taintOps 5 row with
+      | .none => Scry.singleNat s
+      | .some step => match Scry.premiseOfRel st step 4 with
+        | .none => Scry.singleNat s
+        | .some pid => List.append (Scry.taintChain st pid) (Scry.singleNat s);
+    Scry.Finding.mk s (Scry.sinkNameAt info s) arg path)
+    (Scry.Db.tupleAt st.db 5).toList
+
+def Scry.insertFinding (f : Scry.Finding) (fs : List Scry.Finding) : List Scry.Finding :=
+  match fs with
+  | .nil => .cons f .nil
+  | .cons x xs => match Nat.lt f.sink x.sink with
+    | .true => .cons f fs
+    | .false => .cons x (Scry.insertFinding f xs)
+
+def Scry.sortFindings (fs : List Scry.Finding) : List Scry.Finding :=
+  List.foldr (fun f acc => Scry.insertFinding f acc) .nil fs
+
+def Scry.findingsInFunc (fn : Wil.Func) (spec : Scry.TaintSpec) : List Scry.Finding :=
+  let info := Scry.fnInfo fn;
+  match Scry.eval Scry.taintProgram (Scry.taintInput info spec) with
+  | .none => .nil
+  | .some st => Scry.sortFindings (Scry.alertFindings info st)
+
+def Scry.findings (p : Wil.Program) (spec : Scry.TaintSpec) : List Scry.Finding :=
+  Scry.concatMap (fun fn => Scry.findingsInFunc fn spec) p.funcs
+
+/-- The alert tuples as `(sink point, argument index)`, unsorted (the test hook). -/
+def Scry.alertsInFunc (fn : Wil.Func) (spec : Scry.TaintSpec) : List (Nat × Nat) :=
+  let info := Scry.fnInfo fn;
+  match Scry.eval Scry.taintProgram (Scry.taintInput info spec) with
+  | .none => .nil
+  | .some st => List.map (fun row => (Scry.rowNat row 0, Scry.rowNat row 1))
+      (Scry.Db.tupleAt st.db 5).toList

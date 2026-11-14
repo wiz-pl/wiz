@@ -238,6 +238,35 @@ def Nat.lt_of_le_of_lt (a b c : Nat) (h : Nat.Le a b) (h' : Nat.Lt b c) : Nat.Lt
 /-- `<` is transitive. -/
 def Nat.lt_trans (a b c : Nat) (h : Nat.Lt a b) (h' : Nat.Lt b c) : Nat.Lt a c :=
   Nat.lt_of_lt_of_le a b c h (Nat.le_of_lt b c h')
+
+-- ## `calc`: composing `=`, `≤` and `<`
+--
+-- Adjacent `calc` steps compose through `Trans` (lib/Logic.wiz). The equation instances
+-- transport a proof along `=`, so `a = b ≤ c` and `a ≤ b = c` both give `a ≤ c`.
+/-- `a = b → b ≤ c → a ≤ c`. -/
+instance {a b c : Nat} : Trans (a = b) (b ≤ c) (a ≤ c) :=
+  Trans.mk (fun e h => Eq.mp' (fun (x : Nat) => Nat.Le x c) (Eq.symm e) h)
+/-- `a ≤ b → b = c → a ≤ c`. -/
+instance {a b c : Nat} : Trans (a ≤ b) (b = c) (a ≤ c) :=
+  Trans.mk (fun h e => Eq.mp' (fun (x : Nat) => Nat.Le a x) e h)
+/-- `a = b → b < c → a < c`. -/
+instance {a b c : Nat} : Trans (a = b) (b < c) (a < c) :=
+  Trans.mk (fun e h => Eq.mp' (fun (x : Nat) => Nat.Lt x c) (Eq.symm e) h)
+/-- `a < b → b = c → a < c`. -/
+instance {a b c : Nat} : Trans (a < b) (b = c) (a < c) :=
+  Trans.mk (fun h e => Eq.mp' (fun (x : Nat) => Nat.Lt a x) e h)
+/-- `a ≤ b → b ≤ c → a ≤ c`. -/
+instance {a b c : Nat} : Trans (a ≤ b) (b ≤ c) (a ≤ c) :=
+  Trans.mk (fun h h' => Nat.le_trans a b c h h')
+/-- `a ≤ b → b < c → a < c`. -/
+instance {a b c : Nat} : Trans (a ≤ b) (b < c) (a < c) :=
+  Trans.mk (fun h h' => Nat.lt_of_le_of_lt a b c h h')
+/-- `a < b → b ≤ c → a < c`. -/
+instance (priority := 1001) {a b c : Nat} : Trans (a < b) (b ≤ c) (a < c) :=
+  Trans.mk (fun h h' => Nat.lt_of_lt_of_le a b c h h')
+/-- `a < b → b < c → a < c`. -/
+instance {a b c : Nat} : Trans (a < b) (b < c) (a < c) :=
+  Trans.mk (fun h h' => Nat.lt_trans a b c h h')
 /-- `a ≤ b` and `b < a` contradict each other. -/
 def Nat.not_lt_of_le (a b : Nat) (h : Nat.Le a b) (h' : Nat.Lt b a) : False :=
   Nat.lt_irrefl a (Nat.lt_of_le_of_lt a b a h h')

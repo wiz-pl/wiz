@@ -1,0 +1,132 @@
+import Prelude
+import Word
+import Text
+import WordArray
+/-!
+# Scry.Store
+
+The relation store for scry's Datalog engine (`import Scry.Store`): a **pure list
+model** of the relations a Datalog program derives.
+
+A `Db L` has one `TupleRel` for each ordinary (set-valued) relation and one `LatRel L`
+for each lattice-valued relation, both looked up by the relation's number (the schema's
+`arities` list fixes the arities; nothing here checks them). A tuple is a `List U64`, so
+ids, `U32`/`U64` columns and interned-string ids all use one representation.
+
+The model keeps each tuple relation as a list of distinct rows, and each lattice
+relation as one entry per key. `insert` is linear (`memRow`), which is the right model
+for the kernel and the interpreter and for small inputs; the interface is the set of
+functions below, so a native backend (a hash set over `U64Array` for tuples and a
+`U64Map` from a key's hash to its value for lattice entries, both stage S0,
+`lib/WordArray.wiz` and `lib/WordMap.wiz`) can replace it without touching the
+evaluator. This module does not provide that backend.
+
+The constructor of each relation is private, so the model is the only accessor and a
+user cannot break the distinctness invariant.
+-/
+
+def Scry.eqU64 (a b : U64) : Bool := UIntN.beq a b
+
+/-- Whether two rows (`List U64`) are equal, element by element. -/
+def Scry.rowEq : List U64 → List U64 → Bool
+  | .nil, .nil => .true
+  | .nil, .cons _ _ => .false
+  | .cons _ _, .nil => .false
+  | .cons a as, .cons b bs => if UIntN.beq a b then Scry.rowEq as bs else .false
+
+/-- Whether `row` is one of `rows`. -/
+def Scry.memRow (row : List U64) (rows : List (List U64)) : Bool :=
+  List.any (fun r => Scry.rowEq row r) rows
+
+/-- The first row equal to `row`, if any. -/
+def Scry.findRow (row : List U64) (rows : List (List U64)) : Option (List U64) :=
+  match rows with
+  | .nil => .none
+  | .cons r rest => if Scry.rowEq row r then .some r else Scry.findRow row rest
+
+/-- A set-valued relation: its distinct rows, most recent first. -/
+sealed inductive Scry.TupleRel where
+  | private mk (rows : List (List U64))
+
+def Scry.TupleRel.toList : Scry.TupleRel → List (List U64)
+  | .mk rows => rows
+def Scry.TupleRel.empty : Scry.TupleRel := .mk .nil
+def Scry.TupleRel.size (t : Scry.TupleRel) : Nat := List.length t.toList
+def Scry.TupleRel.mem (t : Scry.TupleRel) (row : List U64) : Bool :=
+  Scry.memRow row t.toList
+/-- `t` with `row`; the flag says whether it was new. -/
+def Scry.TupleRel.insert (t : Scry.TupleRel) (row : List U64) : Scry.TupleRel × Bool :=
+  if Scry.memRow row t.toList then (t, .false) else (.mk (.cons row t.toList), .true)
+
+/-- A lattice-valued relation: a value for each key, with a value's key its columns.
+`bot` is the value of a key that is not stored (see `Scry.Datalog.LatOps`). -/
+sealed inductive Scry.LatRel (L : Type) where
+  | private mk (entries : List (List U64 × L))
+
+def Scry.LatRel.toList {L : Type} : Scry.LatRel L → List (List U64 × L)
+  | .mk es => es
+def Scry.LatRel.size {L : Type} (t : Scry.LatRel L) : Nat := List.length t.toList
+def Scry.LatRel.findL {L : Type} (key : List U64) : List (List U64 × L) → Option L
+  | .nil => .none
+  | .cons e rest => if Scry.rowEq key e.1 then .some e.2 else Scry.LatRel.findL key rest
+def Scry.LatRel.find {L : Type} (t : Scry.LatRel L) (key : List U64) : Option L :=
+  Scry.LatRel.findL key t.toList
+def Scry.LatRel.mem {L : Type} (t : Scry.LatRel L) (key : List U64) : Bool :=
+  match Scry.LatRel.find t key with
+  | .none => .false
+  | .some _ => .true
+
+/-- `es` with `key` mapped to `v`, replacing an existing entry (the first one). -/
+def Scry.LatRel.setL {L : Type} : List (List U64 × L) → List U64 → L → List (List U64 × L)
+  | .nil, k, v => .cons (k, v) .nil
+  | .cons e rest, k, v =>
+    if Scry.rowEq k e.1 then .cons (k, v) rest else .cons e (Scry.LatRel.setL rest k v)
+
+def Scry.LatRel.set {L : Type} (t : Scry.LatRel L) (key : List U64) (v : L) : Scry.LatRel L :=
+  .mk (Scry.LatRel.setL t.toList key v)
+
+/-- Set the value at a relation number in an association list, adding the entry if it
+is absent. -/
+def Scry.assocSet {A : Type} (k : Nat) (v : A) : List (Nat × A) → List (Nat × A)
+  | .nil => .cons (k, v) .nil
+  | .cons e rest => if Nat.beq k e.1 then .cons (k, v) rest else .cons e (Scry.assocSet k v rest)
+
+def Scry.assocGet {A : Type} (d : A) (k : Nat) : List (Nat × A) → A
+  | .nil => d
+  | .cons e rest => if Nat.beq k e.1 then e.2 else Scry.assocGet d k rest
+
+/-- The database: tuple relations and lattice relations, by relation number. Only the
+relations that have facts need an entry. -/
+structure Scry.Db (L : Type) where
+  tuples : List (Nat × Scry.TupleRel)
+  lats : List (Nat × Scry.LatRel L)
+
+def Scry.Db.empty {L : Type} : Scry.Db L := Scry.Db.mk .nil .nil
+
+def Scry.Db.tupleAt {L : Type} (db : Scry.Db L) (r : Nat) : Scry.TupleRel :=
+  Scry.assocGet Scry.TupleRel.empty r db.tuples
+def Scry.Db.latAt {L : Type} (db : Scry.Db L) (r : Nat) : Scry.LatRel L :=
+  Scry.assocGet (Scry.LatRel.mk .nil) r db.lats
+def Scry.Db.setTupleAt {L : Type} (db : Scry.Db L) (r : Nat) (t : Scry.TupleRel) : Scry.Db L :=
+  Scry.Db.mk (Scry.assocSet r t db.tuples) db.lats
+def Scry.Db.setLatAt {L : Type} (db : Scry.Db L) (r : Nat) (t : Scry.LatRel L) : Scry.Db L :=
+  Scry.Db.mk db.tuples (Scry.assocSet r t db.lats)
+
+/-- Add `row` to relation `r`; the flag says whether it was new. -/
+def Scry.Db.insertTuple {L : Type} (db : Scry.Db L) (r : Nat) (row : List U64) : Scry.Db L × Bool :=
+  match (Scry.Db.tupleAt db r).insert row with
+  | (t, new) => (Scry.Db.setTupleAt db r t, new)
+
+def Scry.Db.memTuple {L : Type} (db : Scry.Db L) (r : Nat) (row : List U64) : Bool :=
+  (Scry.Db.tupleAt db r).mem row
+
+def Scry.Db.findLat {L : Type} (db : Scry.Db L) (r : Nat) (key : List U64) : Option L :=
+  (Scry.Db.latAt db r).find key
+
+def Scry.Db.setLat {L : Type} (db : Scry.Db L) (r : Nat) (key : List U64) (v : L) : Scry.Db L :=
+  Scry.Db.setLatAt db r ((Scry.Db.latAt db r).set key v)
+
+/-- The number of rows in a tuple relation and the number of entries in a lattice
+relation; handy for tests and for a fixpoint's progress report. -/
+def Scry.Db.relSize {L : Type} (db : Scry.Db L) (r : Nat) : Nat := (Scry.Db.tupleAt db r).size
+def Scry.Db.latSize {L : Type} (db : Scry.Db L) (r : Nat) : Nat := (Scry.Db.latAt db r).size

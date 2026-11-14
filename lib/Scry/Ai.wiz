@@ -1,0 +1,20 @@
+import Scry.AiDomain
+import Scry.AiCfg
+import Scry.AiFixpoint
+/-!
+# Scry.Ai: the abstract-interpretation core
+
+The parser-free core of stage S5 (design `wiz-notes/code-analysis-design.md` §4.6,
+§5.3): lattice/domain/transfer interfaces, unsigned machine intervals with constants and
+nullness, a widening worklist, narrowing, overflow/out-of-bounds/nullness alarms, and
+the post-fixpoint checker. See `wiz-notes/scry-ai.md`.
+
+`import Scry.Ai` gives the interfaces and the engine; tests and examples use
+`Scry.AiExamples` (`lib/Scry/AiExamples.wiz`). Nothing here imports Wil or tree-sitter.
+
+```
+import Scry.Ai
+
+#eval accepts (AiMach.mk 8) cfg inv   -- the checker's verdict on a post-fixpoint
+```
+-/
