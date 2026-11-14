@@ -1,0 +1,227 @@
+import Hdl.Core
+/-!
+# Hdl.Bus
+
+A small, board-independent valid/ready bus (`import Hdl.Bus`): a request/response
+record, a two-master round-robin arbiter, an address decode/route helper, and a
+behavioural RAM for simulation. It generalises the golem SoC's `GBus`/`Bus.wiz`
+(`/workspace/wiz-rv/src/Rv/Golem/Bus.wiz`): the golem bus hard-codes a 32-bit address,
+32-bit data, golem's DDR window and a 28-bit cache port; here the address and data
+widths are parameters and nothing knows a board or a memory map.
+
+The handshake is the usual one: a master asserts `valid` and holds the request until
+the slave answers with `ready` (the request was taken) or, for a read, `rvalid` with
+the data. `err` marks a request the decoder did not map (it is answered at once, so a
+wild pointer cannot hang a machine). A request is one clock cycle at values and one
+netlist cycle in simulation; `Bus.ramC` answers two cycles after the request, which is
+the simple model golem's cache stand-in used.
+
+The parts:
+
+* `Bus.Req aw dw` / `Bus.Resp dw`: the request and response records (`deriving Bundle`);
+* `Bus.arbC aw dw`: two masters onto one slave, round-robin when both ask and neither
+  owns the bus, holding the owner until its answer (so a master that holds `valid`, as
+  a core does, is never starved mid-word);
+* `Bus.routeC aw dw base size`: the address decode: requests inside `[base, base+size)`
+  go to the slave, anything else is answered immediately with `err` high and zero data
+  (golem's `GBus.route`, without golem's memory map);
+* `Bus.ramC shift aw ab dw`: a behavioural RAM with `2^ab` words of `dw` bits, a
+  `shift`-bit word offset inside `addr` (0 for a word-addressed bus, 2 for a 32-bit
+  byte-addressed one) and a two-cycle answer.
+
+All parts are plain `Circuit`s or step functions over bundles, polymorphic in the
+representation, so the same definitions simulate at values, simulate as a netlist and
+synthesise. The example is `examples/hdl-bus.wiz`, checked by the `bus-crc` test group:
+the value simulation, `Netlist.simulate` and `Circuit.simFast` agree cycle for cycle.
+-/
+
+/-- One bit, the bus's control signals. -/
+def Bus.Bit : HwTy := HwTy.bits 1
+
+/-- A bus request: `valid` and the request fields. `addr` is a word address for a
+word-addressed bus (or a byte address when the slave's `shift` says so), `we` a write
+when high, and `wdata` the word to write. It has no byte strobes: a cache or a board
+port that needs them keeps them in its own request record (as golem's `CacheReq` does)
+and adapts. -/
+structure Bus.Req (aw dw : Nat) (r : HwTy → Type) where
+  valid : r Bus.Bit
+  we : r Bus.Bit
+  addr : r (HwTy.bits aw)
+  wdata : r (HwTy.bits dw)
+  deriving Bundle
+
+/-- A bus response: `ready` (the request was taken), `rvalid` with `rdata` (a read's
+data), and `err` (the address was not mapped). -/
+structure Bus.Resp (dw : Nat) (r : HwTy → Type) where
+  ready : r Bus.Bit
+  rvalid : r Bus.Bit
+  rdata : r (HwTy.bits dw)
+  err : r Bus.Bit
+  deriving Bundle
+
+/-- An idle request (at any representation). -/
+def Bus.noReq {r : HwTy → Type} [Hw r] {ω aw dw : Nat} : Bus.Req aw dw r :=
+  Bus.Req.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit aw 0) (Hw.lit dw 0)
+
+/-- A response that is not answering anything. -/
+def Bus.noResp {r : HwTy → Type} [Hw r] {ω dw : Nat} : Bus.Resp dw r :=
+  Bus.Resp.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit dw 0) (Hw.lit 1 0)
+
+/-- `x === k`, as one bit (the `isK` of golem's `Rv.Core`). -/
+def Bus.isK {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) (k : Nat) : r Bus.Bit :=
+  Hw.eq x (Hw.lit n k)
+
+/-- `a` is in `[base, base + size)`: golem's `GMap.addrIn`, at any address width. -/
+def Bus.addrIn {r : HwTy → Type} [Hw r] {ω aw : Nat} (base size : Nat) (a : r (HwTy.bits aw)) : r Bus.Bit :=
+  Hw.and (Hw.not (Hw.ult a (Hw.lit aw base))) (Hw.ult a (Hw.lit aw (base + size)))
+
+/-- The decode helper: whether `addr` is in the window `[base, base + size)`. -/
+def Bus.decode {r : HwTy → Type} [Hw r] {ω aw : Nat} (base size : Nat) (addr : r (HwTy.bits aw)) : r Bus.Bit :=
+  Bus.addrIn base size addr
+
+------------------------------------------------------------------------------------
+-- The round-robin arbiter: two masters, one slave. `last` is the master granted most
+-- recently; when the bus is free and both ask, the other one goes first. Once a request
+-- is granted the owner keeps the bus until the slave answers (`ready` or `rvalid`) or
+-- the owner drops `valid` (a master that traps mid-request may do that; without it the
+-- bus would stay owned forever).
+
+/-- The arbiter's state: whether a request is in flight, which master owns it, and which
+-- master was granted last (for the round-robin). -/
+structure Bus.Arb (r : HwTy → Type) where
+  busy : r Bus.Bit
+  owner : r Bus.Bit
+  last : r Bus.Bit
+  deriving Bundle
+
+/-- The arbiter at rest: no owner, and master 0 was granted last (so master 1 goes first
+when both ask). -/
+def Bus.arbInit : Bus.Arb HwTy.El :=
+  Bus.Arb.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)
+
+/-- Who gets the bus this cycle (0: master `a`, 1: master `b`): the owner while a request
+is in flight, else the master that did not go last, else the other one. -/
+def Bus.pick {r : HwTy → Type} [Hw r] (s : Bus.Arb r) (av bv : r Bus.Bit) : r Bus.Bit :=
+  let preferB := Hw.not s.last;
+  let idlePick := Hw.mux preferB (Hw.mux bv (Hw.lit 1 1) (Hw.lit 1 0))
+    (Hw.mux av (Hw.lit 1 0) (Hw.lit 1 1));
+  Hw.mux s.busy s.owner idlePick
+
+/-- The arbiter's input: the two masters and the slave's answer. -/
+structure Bus.ArbIn (aw dw : Nat) (r : HwTy → Type) where
+  a : Bus.Req aw dw r
+  b : Bus.Req aw dw r
+  slave : Bus.Resp dw r
+  deriving Bundle
+
+/-- The arbiter's output: the request the slave sees and the answer to each master. -/
+structure Bus.ArbOut (aw dw : Nat) (r : HwTy → Type) where
+  req : Bus.Req aw dw r
+  ra : Bus.Resp dw r
+  rb : Bus.Resp dw r
+  deriving Bundle
+
+/-- One cycle of the arbiter: the next state, the request to the slave and the answers.
+The master that did not get the bus sees a quiet response (`ready` and `rvalid` low). -/
+def Bus.arbStep {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (s : Bus.Arb r)
+    (a b : Bus.Req aw dw r) (resp : Bus.Resp dw r) :
+    r (HwTy.prod Bus.Arb.code (Bus.ArbOut.code aw dw)) :=
+  let g := Bus.pick s a.valid b.valid;
+  let selV := Hw.mux g b.valid a.valid;
+  let sel := Hw.mux g (Bus.Req.pack aw dw b) (Bus.Req.pack aw dw a);
+  -- the answer ends the request; so does the selected master dropping `valid`
+  let done := Hw.or (Hw.or resp.ready resp.rvalid) (Hw.and s.busy (Hw.not selV));
+  let zero := Bus.Resp.pack dw (Bus.noResp : Bus.Resp dw r);
+  let one := Bus.Resp.pack dw resp;
+  Hw.pair
+    (Bus.Arb.pack (Bus.Arb.mk
+      (Hw.mux done (Hw.lit 1 0) (Hw.mux s.busy (Hw.lit 1 1) selV))
+      (Hw.mux s.busy s.owner g)
+      (Hw.mux s.busy s.last (Hw.mux selV g s.last))))
+    (Bus.ArbOut.pack aw dw (Bus.ArbOut.mk
+      (Bus.Req.unpack aw dw sel)
+      (Bus.Resp.unpack dw (Hw.mux g zero one))
+      (Bus.Resp.unpack dw (Hw.mux g one zero))))
+
+/-- The arbiter as a circuit: input `a`, `b` and the slave's answer, output the slave
+request and each master's answer. -/
+def Bus.arbC (aw dw : Nat) : Circuit (Bus.ArbIn.code aw dw) (Bus.ArbOut.code aw dw) :=
+  Circuit.bundled Bus.Arb.bundle (Bus.ArbIn.bundle aw dw) (Bus.ArbOut.bundle aw dw)
+    Bus.arbInit (fun s x => Bus.arbStep s x.a x.b x.slave)
+
+------------------------------------------------------------------------------------
+-- Decode and route. A request inside the window goes to the slave; one outside it is
+-- answered in the same cycle with `ready` (and `rvalid` for a read), zero data and `err`
+-- high. The forwarded request's `valid` is low on a miss, so the slave does not see it.
+
+/-- The router's input: the master's request and the slave's answer. -/
+structure Bus.RouteIn (aw dw : Nat) (r : HwTy → Type) where
+  req : Bus.Req aw dw r
+  slave : Bus.Resp dw r
+  deriving Bundle
+
+/-- The router's output: the request the slave sees and the answer to the master. -/
+structure Bus.RouteOut (aw dw : Nat) (r : HwTy → Type) where
+  req : Bus.Req aw dw r
+  resp : Bus.Resp dw r
+  deriving Bundle
+
+/-- The combinational decode/route step. -/
+def Bus.routeStep {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (base size : Nat)
+    (q : Bus.Req aw dw r) (slave : Bus.Resp dw r) :
+    r (HwTy.prod (Bus.Req.code aw dw) (Bus.Resp.code dw)) :=
+  let hit := Bus.decode base size q.addr;
+  let q' := Bus.Req.mk (Hw.and q.valid hit) q.we q.addr q.wdata;
+  let miss := Bus.Resp.mk (Hw.lit 1 1) (Hw.and q.valid (Hw.not q.we)) (Hw.lit dw 0) (Hw.lit 1 1);
+  Hw.pair (Bus.Req.pack aw dw q')
+    (Hw.mux hit (Bus.Resp.pack dw slave) (Bus.Resp.pack dw miss))
+
+/-- The router as combinational code, for `Circuit.comb`. -/
+def Bus.routeComb (aw dw base size : Nat) {r : HwTy → Type} [Hw r]
+    (x : r (Bus.RouteIn.code aw dw)) : r (Bus.RouteOut.code aw dw) :=
+  let i := Bus.RouteIn.unpack aw dw x;
+  let o := Bus.routeStep base size i.req i.slave;
+  Bus.RouteOut.pack aw dw (Bus.RouteOut.mk
+    (Bus.Req.unpack aw dw (Hw.fst o)) (Bus.Resp.unpack dw (Hw.snd o)))
+
+/-- The router as a circuit: requests inside `[base, base + size)` go to `slave`. -/
+def Bus.routeC (aw dw base size : Nat) : Circuit (Bus.RouteIn.code aw dw) (Bus.RouteOut.code aw dw) :=
+  Circuit.comb (Bus.routeComb aw dw base size)
+
+------------------------------------------------------------------------------------
+-- A behavioural RAM for simulation: `2^ab` words of `dw` bits, one request at a time,
+-- answering two cycles after the request (the latency of golem's `GBus.ramStep`). The
+-- word index is the `ab` bits of `addr` from bit `shift`: `shift = 0` for a word
+-- addressed bus, `shift = 2` for a 32-bit byte-addressed one. Reads see the memory before
+-- this cycle's write; `ready`/`rvalid` are high in the answering cycle. `dw` should be a
+-- whole number of bytes for a byte-addressed bus (the model has no byte strobes).
+
+/-- The RAM's state: the cells and the number of cycles since the request. -/
+structure Bus.Ram (ab dw : Nat) (r : HwTy → Type) where
+  cells : r (HwTy.mem ab dw)
+  wait : r (HwTy.bits 2)
+  deriving Bundle
+
+/-- A RAM at rest: every word zero. -/
+def Bus.ramInit (ab dw : Nat) : Bus.Ram ab dw HwTy.El :=
+  Bus.Ram.mk (fun (a : BitVec ab) => BitVec.ofNat dw 0) (BitVec.ofNat 2 0)
+
+/-- One cycle of the RAM: after two cycles of `valid` the request is answered; a write
+is applied then, a read returns the old word. The request must be held until the answer
+(the usual valid/ready rule). -/
+def Bus.ramStep {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
+    (s : Bus.Ram ab dw r) (q : Bus.Req aw dw r) :
+    r (HwTy.prod (Bus.Ram.code ab dw) (Bus.Resp.code dw)) :=
+  let go := Hw.and q.valid (Bus.isK s.wait 2);
+  let ix : r (HwTy.bits ab) := Hw.slice shift ab q.addr;
+  let old := Hw.memRead s.cells ix;
+  Hw.pair
+    (Bus.Ram.pack ab dw (Bus.Ram.mk
+      (Hw.memWrite s.cells (Hw.and go q.we) ix q.wdata)
+      (Hw.mux q.valid (Hw.mux go (Hw.lit 2 0) (Hw.add s.wait (Hw.lit 2 1))) (Hw.lit 2 0))))
+    (Bus.Resp.pack dw (Bus.Resp.mk go (Hw.and go (Hw.not q.we)) old (Hw.lit 1 0)))
+
+/-- The RAM as a circuit: input `req`, output `resp`. -/
+def Bus.ramC (shift aw ab dw : Nat) : Circuit (Bus.Req.code aw dw) (Bus.Resp.code dw) :=
+  Circuit.bundled (Bus.Ram.bundle ab dw) (Bus.Req.bundle aw dw) (Bus.Resp.bundle dw)
+    (Bus.ramInit ab dw) (fun s q => Bus.ramStep shift ab dw s q)

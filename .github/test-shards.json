@@ -29,6 +29,7 @@
     "sys"
   ]},
   {"name": "library", "split": 5, "jobs": 4, "default": true, "select": [
+    "=bus-crc",
     "builtins",
     "classes",
     "deriving",

@@ -555,6 +555,52 @@ one. The example/tests (group `hdl`, examples/hdl-cdc.wiz) are a `link` crossing
 Verilog, the XDC/PCF text, a BUFG output as a synchroniser's clock (`Prim.withOutDom`),
 and the multi-clock simulation refusal.
 
+## A generic valid/ready bus (`lib/Hdl/Bus.wiz`)
+
+`lib/Hdl/Bus.wiz` (`import Hdl.Bus`) is the board-independent part of golem's
+`GBus` (`wiz-rv`'s `src/Rv/Golem/Bus.wiz`), with the address and data widths as
+parameters and no memory map:
+
+* `Bus.Req aw dw` (`valid`, `we`, `addr`, `wdata`) and `Bus.Resp dw` (`ready`,
+  `rvalid`, `rdata`, `err`) are `deriving Bundle` records: a master holds the request
+  until `ready` (a write) or `rvalid` (a read), and `err` marks a request the decoder
+  did not map. `Bus.noReq` and `Bus.noResp` are the quiet values.
+* `Bus.arbC aw dw` puts two masters on one slave. It is round-robin when the bus is free
+  (`last` remembers the master granted most recently), keeps the owner until its answer
+  (`ready` or `rvalid`), and also releases the bus if the owner drops `valid` (a master
+  that traps mid-request must not own it forever). The idle master sees a quiet
+  response.
+* `Bus.decode`/`Bus.addrIn` test a window `[base, base + size)`; `Bus.routeC aw dw base
+  size` forwards a hit to the slave and answers a miss in the same cycle with `ready`
+  (and `rvalid` for a read), zero data and `err` high (golem's wild-pointer rule).
+* `Bus.ramC shift aw ab dw` is a behavioural RAM of `2^ab` words of `dw` bits, answering
+  two cycles after the request (golem's `GBus.ramStep` latency). `shift` selects the word
+  index inside `addr`: 0 for a word-addressed bus, 2 for a 32-bit byte-addressed one.
+  The model has no byte strobes; a cache or board port that needs them keeps them in
+  its own request record (as golem's `CacheReq` does).
+
+`examples/hdl-bus.wiz` (test group `bus-crc`) writes and reads the RAM, checks the
+arbiter's grants alternate (and hold while the slave is not ready), and routes hits and
+misses; every circuit's value simulation, `Netlist.simulate` and `Circuit.simFast` agree
+cycle for cycle.
+
+## CRC-8/SMBUS (`lib/Hdl/Crc.wiz`)
+
+`lib/Hdl/Crc.wiz` (`import Hdl.Crc`) is the iCEstick CRC
+(`/workspace/wiz-icestick-uart/src/Icestick/Crc.wiz`) without the board vocabulary:
+polynomial `x^8 + x^2 + x + 1` (`0x07`), initial value 0, MSB first, no reflection and
+no final xor. The specification is on numbers (`Crc.bit`, `Crc.iter`, `Crc.step`,
+`Crc.ofList`, `Crc.hex`, `Crc.reply`); the hardware is `Crc.hwBit`, `Crc.hwIter` and
+`Crc.hwStep` (eight unrolled bits on `c XOR d`), plus `Crc.hexDigit`. `Crc.crcC` is the
+streaming circuit: input `valid`/`data`, output `valid`/`crc`, one byte per cycle.
+`Crc.check_ok` is the kernel-checked known answer (CRC-8/SMBUS of `"123456789"` is
+`0xF4` = 244).
+
+`examples/hdl-crc.wiz` (test group `bus-crc`) checks the hardware step against the
+specification on all 65536 `(crc, byte)` pairs, `hexDigit` on all 16 nibbles, the known
+answer, and the streaming circuit through the value simulation, `Netlist.simulate` and
+`Circuit.simFast`.
+
 ## H14 V1: verified circuit optimisation (`lib/Hdl/Verified.wiz`)
 
 The OLED demo's arithmetic units (wiz-icestick-uart, branch oled-demo: `Sphere.wiz`,
