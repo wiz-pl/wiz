@@ -274,21 +274,20 @@ lifted proof is still a proof at run time). -/
 partial def erasable (ctx : Ctx R) (ty : VTy R) : Bool :=
   match whnf ty with
   | .sort _ | .size | .sizeLt _ | .qty => true
-  | .ulift _ A => erasable ctx A
+  | .ulift _ _ A => erasable ctx A
   | .pi .. => erasedFunTy ctx.globals ty ctx.lvl || isPropTy ctx ty
   | _ => isPropTy ctx ty
 where
-  /-- `isProp`, but from the sort a `Π`/`Σ` carries (checked by the kernel) when it has
-  one: `typeSort?` recomputes it from every component, which along a structure's
-  telescope of `n` fields, asked once per field, is quadratic. (The annotation is
-  optional; without it the sort is computed, and the two agree, so the answer is the
-  same on both sides of a conversion: `wiz-notes/repr-shape.md`.) A wrong "erasable" is
-  a miscompilation, so this relies on the kernel having validated the annotation
-  (`checkSortNote`): every term erasure is given has been checked, a definition's
+  /-- `isProp`, but from the sorts a `Π`/`Σ` carries (mandatory, checked by the kernel):
+  `typeSort?` would recompute them from every component, which along a structure's
+  telescope of `n` fields, asked once per field, is quadratic. A wrong "erasable" is a
+  miscompilation, so this relies on the kernel having validated the sorts
+  (`checkComponentSort`): every term erasure is given has been checked, a definition's
   implementation for the compiler included (`checkImpl`; Status.md, T1). -/
   isPropTy (ctx : Ctx R) (ty : VTy R) : Bool :=
     match whnf ty with
-    | .pi _ _ _ _ _ (some l) | .sigma _ _ _ _ (some l) => l.equiv 0
+    | .pi _ _ _ _ _ σ => if σ.hasHole then isProp ctx.globals ctx.tys ty else σ.cod.equiv 0
+    | .sigma _ _ _ _ σ => if σ.hasHole then isProp ctx.globals ctx.tys ty else σ.sigmaSort.equiv 0
     | _ => isProp ctx.globals ctx.tys ty
 
 /-- **Unboxed newtypes** (stage 22i), behind `--unbox-structs` (`Globals.unboxStructs`;
@@ -464,7 +463,7 @@ lift of one? Then `tagField?` could change its answer under substitution. -/
 def neutralFieldTy (S : Val R) : Bool :=
   match whnf S with
   | .neutral .. => true
-  | .ulift _ A => match whnf A with
+  | .ulift _ _ A => match whnf A with
     | .neutral .. => true
     | _ => false
   | _ => false
@@ -602,7 +601,7 @@ partial def quickType (ctx : Ctx R) (t : Term R) : TCM (VTy R) := do
     | _ => return (← infer { ctx with erased := true } t).1
   | .ann _ ty => pure (ctx.eval ty)
   | .down p => match whnf (← quickType ctx p) with
-    | .ulift _ A => pure A
+    | .ulift _ _ A => pure A
     | _ => return (← infer { ctx with erased := true } t).1
   | .ecase _ m s _ => pure (Closure.inst g (.mk ctx.env m) (ctx.eval s))
   | .ind _ _ _ _ P _ i x => pure (vApp g (vApp g (ctx.eval P) (ctx.eval i)) (ctx.eval x))
@@ -630,7 +629,7 @@ partial def eraseCheck (ctx : Ctx R) (t : Term R) (ty : VTy R) (inDesc : Bool :=
     if externCall ctx.globals t && !ctx.erased then return .letE "_" (← eraseSpine ctx t).1 .erased
     return .erased
   -- (given) Q4: `ULift` has no runtime content: `up a` is `a`
-  if let (.up a, .ulift _ A) := (t, whnf ty) then return ← eraseCheck ctx a A
+  if let (.up a, .ulift _ _ A) := (t, whnf ty) then return ← eraseCheck ctx a A
   -- (given) P2: a marked proof is erased; another marker is transparent
   if let .prf l x := t then return ← (if l.isZero then pure .erased else eraseCheck ctx x ty)
   --<sol
@@ -686,13 +685,13 @@ partial def eraseCheck (ctx : Ctx R) (t : Term R) (ty : VTy R) (inDesc : Bool :=
         "constructor tag would depend on how that type is instantiated. Give the first field a known type " ++
         "(for a choice of constructors, `Enum […]`)"))
     let D' ← eraseCheck ctx D (.pi "s" .default (.qlit QuantitySyntax.explicitDefault) vS
-      (.mk [I] (.desc l (.var 1))) none) true
+      (.mk [I] (.desc l (.var 1))) ⟨.succ l, .succ (.succ l)⟩) true
     -- a choice of tag is marked, for `pack`
     return .obj (if (tagField? vS).isSome then 4 else 1) #[.erased, D']
   | .drec _ j D, .desc l I =>
     return .obj 2 #[← eraseCheck ctx j I, ← eraseCheck ctx D (.desc l I) true]
   | .dhrec _ H j D, .desc l I =>
-    let jTy : VTy R := .pi "h" .default (.qlit QuantitySyntax.explicitDefault) (ctx.eval H) (.mk [I] (.var 1)) none
+    let jTy : VTy R := .pi "h" .default (.qlit QuantitySyntax.explicitDefault) (ctx.eval H) (.mk [I] (.var 1)) ⟨.succ l, .succ l⟩
     return .obj 3 #[.erased, ← eraseCheck ctx j jTy, ← eraseCheck ctx D (.desc l I) true]
   | .tt, _ => return .erased
   | .letE x q ty' v b, _ =>
@@ -826,7 +825,7 @@ partial def eraseInfer (ctx : Ctx R) (t : Term R) (known : Option (VTy R) := non
     | .delim v P a b c h D => do
       let dty ← quickType ctx D
       let .desc l I := whnf dty | throw (.other "erasure: Desc.elim on a non-description")
-      let (ta, tb, tc, th) := delimMethodTys g l I (ctx.eval P) QuantitySyntax.explicitDefault
+      let (ta, tb, tc, th) := delimMethodTys g l v I (ctx.eval P) QuantitySyntax.explicitDefault
       let _ := v
       pure (.prim .delim #[← eraseCheck ctx a ta, ← eraseCheck ctx b tb, ← eraseCheck ctx c tc,
         ← eraseCheck ctx h th, ← eraseE ctx D])
@@ -844,7 +843,7 @@ partial def eraseInfer (ctx : Ctx R) (t : Term R) (known : Option (VTy R) := non
     | .sfix l I D v P f _ i x => do
       -- (fix self. λ i x. f ◾ (λ j i y. self i y) i x) i x
       let (vI, vD, vP) := (ctx.eval I, ctx.eval D, ctx.eval P)
-      let f' ← eraseCheck ctx f (sfixFunTy g l vI vD vP QuantitySyntax.explicitDefault)
+      let f' ← eraseCheck ctx f (sfixFunTy g l v vI vD vP QuantitySyntax.explicitDefault)
       let recE : ETerm := .lam "j" (.lam "i" (.lam "y" (.apps (.var 5) [.var 1, .var 0])))
       let body : ETerm := .lam "i" (.lam "x" (.apps (f'.lift 3) [.erased, recE, .var 1, .var 0]))
       pure (.apps (.fix "self" body) [← eraseCheck ctx i vI, ← eraseE ctx x])
@@ -853,7 +852,7 @@ partial def eraseInfer (ctx : Ctx R) (t : Term R) (known : Option (VTy R) := non
       -- except that a case at 0 has an erased scrutinee, whose payload is ◾)
       let (vI, vD, vP) := (ctx.eval I, ctx.eval D, ctx.eval P)
       let vq := ctx.eval q
-      let mTy := scaseMethodTy g l vI vD vP (ctx.eval s) vq
+      let mTy := scaseMethodTy g l v vI vD vP (ctx.eval s) vq
       let _ := v
       let m' ← eraseCheck ctx m mTy
       let i' ← eraseCheck ctx i vI

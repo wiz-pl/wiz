@@ -1,0 +1,112 @@
+unsafe: one finding: ok
+unsafe: checked: ok
+unsafe: rule command-injection: ok
+unsafe: sink function main: ok
+unsafe: sink span known: ok
+unsafe: no lowering-boundary warning: ok
+unsafe: no parse errors: ok
+safe: zero findings: ok
+safe: zero boundary warnings: ok
+chain: one finding: ok
+chain: checked: ok
+chain: rule command-injection: ok
+chain: sink function run: ok
+chain: sink span known: ok
+chain: path starts in main: ok
+chain: path ends in run: ok
+clean: zero findings: ok
+clean: zero boundary warnings: ok
+boundary: zero findings: ok
+boundary: two havoc warnings: ok
+boundary: warnings are unchecked: ok
+boundary: spans are on the offending statements: ok
+mem-slot: one finding: ok
+mem-slot: checked: ok
+mem-slot: rule command-injection: ok
+mem-slot: sink function main: ok
+mem-slot: sink span known: ok
+mem-slot: no memory warnings: ok
+mem-slot: path goes through memory: ok
+mem-slot: a stack slot is a location: ok
+mem-distinct: zero findings: ok
+mem-distinct: zero memory warnings: ok
+mem-distinct: two stack slots, no unknown: ok
+mem-struct: two findings (s.x and g.x): ok
+mem-struct: no memory warnings: ok
+mem-struct: both sinks are in main: ok
+mem-struct: field and global locations: ok
+mem-array: one finding: ok
+mem-array: no memory warnings: ok
+mem-heap: one finding: ok
+mem-heap: checked: ok
+mem-heap: rule command-injection: ok
+mem-heap: sink function main: ok
+mem-heap: sink span known: ok
+mem-heap: no memory warnings: ok
+mem-heap: a heap location: ok
+mem-ptrptr: one finding: ok
+mem-ptrptr: checked: ok
+mem-ptrptr: rule command-injection: ok
+mem-ptrptr: sink function main: ok
+mem-ptrptr: sink span known: ok
+mem-ptrptr: no memory warnings: ok
+mem-params: one finding: ok
+mem-params: checked: ok
+mem-params: rule command-injection: ok
+mem-params: sink function sink_q: ok
+mem-params: sink span known: ok
+mem-params: path starts in main: ok
+mem-free: one finding: ok
+mem-free: checked: ok
+mem-free: rule command-injection: ok
+mem-free: sink function main: ok
+mem-free: sink span known: ok
+mem-free: one use-after-free warning: ok
+mem-indirect: one finding: ok
+mem-indirect: checked: ok
+mem-indirect: rule command-injection: ok
+mem-indirect: sink function tainted_sink: ok
+mem-indirect: sink span known: ok
+mem-indirect: no memory warnings: ok
+mem-indirect: path starts in main: ok
+mem-ret: one finding: ok
+mem-ret: checked: ok
+mem-ret: rule command-injection: ok
+mem-ret: sink function main: ok
+mem-ret: sink span known: ok
+mem-ret: no memory warnings: ok
+mem-ret: a global location: ok
+mem-external: one finding: ok
+mem-external: no memory warnings: ok
+mem-external: no lowering-boundary warning: ok
+mem-array-var: one finding: ok
+mem-array-var: no memory warnings: ok
+mem-unknown: one finding (the flow is kept): ok
+mem-unknown: two unknown-memory warnings: ok
+mem-unknown: an unknown location: ok
+mem-indirect-unknown: zero findings: ok
+mem-indirect-unknown: one unknown-indirect warning: ok
+mem-indirect-unknown: an unknown location: ok
+macro errors: refused without --allow-errors: ok
+macro errors: recovered with --allow-errors: ok
+sarif: version 2.1.0: ok
+sarif: one run: ok
+sarif: driver name: ok
+sarif: four rule descriptors: ok
+sarif: one result: ok
+sarif: rule id: ok
+sarif: namespaced rule descriptor: ok
+sarif: utf16 column kind: ok
+sarif: derivation checked: ok
+sarif: one primary location: ok
+sarif: primary span line: ok
+sarif: related spans present: ok
+{"tool":"scry","file":"tests/fixtures/taint-unsafe.c","rules":4,"parseErrors":0,"findings":[{"rule":"command-injection","severity":"error","kind":"taint","message":"Attacker-controlled data reaches a command interpreter","function":"main","point":3,"callee":"system","argument":0,"derivation":"checked","location":{"uri":"tests/fixtures/taint-unsafe.c","startLine":7,"startColumn":3,"endLine":7,"endColumn":14},"path":[{"function":"main","point":1,"var":2,"kind":"source"},{"function":"main","point":2,"var":0,"kind":"flow"},{"function":"main","point":3,"var":0,"kind":"sink"}]}],"boundary":[],"memory":[],"counts":{"findings":1,"checked":1,"unchecked":0,"boundary":0,"memory":0}}
+cli --sarif: exit 0: ok
+cli --sarif: file parses: ok
+{"tool":"scry","file":"tests/fixtures/taint-unsafe.c","rules":4,"parseErrors":0,"findings":[{"rule":"command-injection","severity":"error","kind":"taint","message":"Attacker-controlled data reaches a command interpreter","function":"main","point":3,"callee":"system","argument":0,"derivation":"checked","location":{"uri":"tests/fixtures/taint-unsafe.c","startLine":7,"startColumn":3,"endLine":7,"endColumn":14},"path":[{"function":"main","point":1,"var":2,"kind":"source"},{"function":"main","point":2,"var":0,"kind":"flow"},{"function":"main","point":3,"var":0,"kind":"sink"}]}],"boundary":[],"memory":[],"counts":{"findings":1,"checked":1,"unchecked":0,"boundary":0,"memory":0}}
+cli --fail-on-finding: unsafe exits 1: ok
+{"tool":"scry","file":"tests/fixtures/taint-clean.c","rules":4,"parseErrors":0,"findings":[],"boundary":[],"memory":[],"counts":{"findings":0,"checked":0,"unchecked":0,"boundary":0,"memory":0}}
+cli --fail-on-finding: clean exits 0: ok
+{"tool":"scry","file":"tests/fixtures/mem-free.c","rules":4,"parseErrors":0,"findings":[{"rule":"command-injection","severity":"error","kind":"taint","message":"Attacker-controlled data reaches a command interpreter","function":"main","point":8,"callee":"system","argument":0,"derivation":"checked","location":{"uri":"tests/fixtures/mem-free.c","startLine":12,"startColumn":3,"endLine":12,"endColumn":13},"path":[{"function":"main","point":3,"var":3,"kind":"source"},{"function":"main","point":4,"var":3,"kind":"store"},{"function":"main","point":7,"var":5,"kind":"load"},{"function":"main","point":8,"var":5,"kind":"sink"}]}],"boundary":[],"memory":[{"rule":"scry/memory/use-after-free","severity":"warning","kind":"memory","message":"load to a location freed by free at point 6","function":"main","point":7,"derivation":"unchecked","location":{"uri":"tests/fixtures/mem-free.c","startLine":12,"startColumn":10,"endLine":12,"endColumn":12}}],"counts":{"findings":1,"checked":1,"unchecked":0,"boundary":0,"memory":1}}
+cli --json memory: exit 0: ok

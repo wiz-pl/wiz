@@ -232,10 +232,10 @@ def BvD.decide (g : Nat) (w : Nat) (lhs rhs : Expr) : TacticM Unit := do
       let B := BvD.toNatE w rhs;
       match SatT.St.add (BvD.eqE A B 0) (.const .true) st2 with
       | (e0, st3) => match BvD.chain A B e0 0 ls rs st3 with
-        | (out, st4) => SatT.solveDag g out st4 (fun nodesE proofE σ holdsE =>
+        | (out, st4) => SatT.solveDag g .false out st4 (fun nodesE proofE hE σ holdsE =>
             Expr.mkApp (.const "Bits.word_ext") (.cons (.lit w) (.cons lhs (.cons rhs
               (.cons (Expr.mkApp (.const "Sat.dag_sound") (.cons nodesE (.cons (.lit out) (.cons proofE
-                (.cons (.const "Sat.trivial") (.cons σ (.cons holdsE .nil))))))) .nil)))))
+                (.cons hE (.cons σ (.cons holdsE .nil))))))) .nil)))))
 
 -- ## Comparisons (`<ᵤ`, `≤ᵤ`) in boolean goals
 def BvD.ltcE (c : Bool) (A B : Expr) (k : Nat) : Expr :=
@@ -300,7 +300,7 @@ def Tactic.bvDecide : Tactic := fun _ => do
       | .true => do
         st1 ← BvD.cmps g eq.2.1 SatT.St.empty;
         st2 ← BvD.cmps g eq.2.2 st1;
-        SatT.decideDagFrom g st2 eq.2.1 eq.2.2;
+        SatT.decideDagFrom g .false st2 eq.2.1 eq.2.2;
         TacticM.replaceMainGoal .nil
       | .false => TacticM.fail "bv_decide: the goal is an equation, but not of words UIntN w or BitVec w with a numeral width, nor of booleans"
 attribute [tactic tactic.bvDecide] Tactic.bvDecide

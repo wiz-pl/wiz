@@ -53,9 +53,9 @@ inductive Val (R : Type) where
   /-- `head` followed by the eliminations in `spine`, innermost first -/
   | neutral (head : Head R) (spine : Array (Elim R))
   | sort (level : Level)
-  | pi (x : Name) (bi : BinderInfo) (q : Val R) (dom : Val R) (cod : Closure R) (s : Option Level)
+  | pi (x : Name) (bi : BinderInfo) (q : Val R) (dom : Val R) (cod : Closure R) (σ : BinderSorts)
   | lam (x : Name) (body : Closure R)
-  | sigma (x : Name) (q : Val R) (fst : Val R) (snd : Closure R) (s : Option Level)
+  | sigma (x : Name) (q : Val R) (fst : Val R) (snd : Closure R) (σ : BinderSorts)
   | pair (a b : Val R)
   | unit (level : Level)
   | tt
@@ -83,8 +83,8 @@ inductive Val (R : Type) where
   | coit (l : Level) (I D S step i s : Val R)
   /-- a numeral of the `builtin nat` type (see `Term.natLit`) -/
   | natLit (n : Nat)
-  /-- `ULift.{l} A` and its constructor (Q4) -/
-  | ulift (l : Level) (A : Val R)
+  /-- `ULift.{l} A` (for `A : Sort k`) and its constructor (Q4) -/
+  | ulift (k l : Level) (A : Val R)
   | up (a : Val R)
   /-- **glued**: the global `name` applied to the eliminations `sp`, together with its
   unfolding, computed only when needed (a `Thunk` remembers it). Keeping the head
