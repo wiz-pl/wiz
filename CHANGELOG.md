@@ -17,7 +17,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   [--locked] [--offline]`, `--index URL#COMMIT`/`index-commit` pins, rollback protection
   over the index's git history (`--allow-rewind`), SHA-256-before-unpack fetching with a
   content-addressed archive cache, `grail publish`, and a hermetic `tests/fixtures/grail-index`
-  fixture (`=grail-deps`). The index is not signed yet.
+  fixture (`=grail-deps`).
 * grail (23m), the static index side: a `grail-index` repository layout (static
   `index/NAME.sexpr`, deterministic `packages/NAME-VERSION.tar.gz`, `index.wiz` as the
   index's Wiz manifest and generator templates), a complete `examples/grail-index/` with
@@ -25,8 +25,13 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   semver requirements, local archive SHA-256s and layouts, `index.wiz` completeness,
   module-prefix conflicts; offline by default), `(modules …)`/`(prefix …)` in the index
   schema, `grail publish` recording module names, and a resolve-time module-conflict
-  check (`=grail-index`). The index still is not signed and there is no transparency log;
-  the TUF/Sigsum staging and the remaining gaps are in
+  check (`=grail-index`). A signed index snapshot (`index/snapshot.sexpr` with
+  `(seq)`/`(updated)`/key fingerprint/`(expires)`, plus a detached SSH signature),
+  `grail update --require-signature --allowed-signers FILE`, the lock's
+  `(index-signature …)` fields (key, fingerprint, sequence, digest) and an offline
+  `grail index verify`; later updates re-verify from the pinned key and refuse tampering,
+  rollback, a same-sequence rewrite and an expired key. There is no transparency log;
+  the TUF/Sigsum staging, key rotation and the remaining gaps are in
   `docs/stages/23-grail/index-repository.md`.
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).

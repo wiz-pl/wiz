@@ -1734,9 +1734,13 @@ def grailDepsGroup : Group where
         let sha := String.ofList (List.replicate 64 'b')
         IO.FS.writeFile (dir / "tool.sexpr")
           s!"(index (package \"tool\" (version \"0.1.0\" (source \"../../packages/tool-0.1.0.tar.gz\") (sha256 \"{sha}\") (deps))))\n"
+        -- a scoped package literally named `snapshot` is not the root snapshot file
+        IO.FS.writeFile (dir / "snapshot.sexpr")
+          s!"(index (package \"snapshot\" (version \"0.1.0\" (source \"../../packages/snapshot-0.1.0.tar.gz\") (sha256 \"{sha}\") (deps))))\n"
         let .ok src ← Grail.Registry.loadIndex (root / "cache") root.toString false
           | throw (IO.userError "the scoped index did not load")
         check (src.pkgs.contains "@acme/tool") "the scoped package is not keyed by its path"
+        check (src.pkgs.contains "@acme/snapshot") "a scoped package named snapshot was skipped"
         checkEq "@acme/tool" (src.pkgs["@acme/tool"]?.map (·.name) |>.getD "?")
         let .ok rs := Grail.Resolve.resolve src.pkgs [⟨"@acme/tool", "^0.1"⟩] "0.1.0-dev"
           | throw (IO.userError "resolve of the scoped package failed")
@@ -2242,6 +2246,64 @@ def grailHygieneGroup : Group where
         check (← goneWithin pid 5000) s!"the job's process {pid} outlived its time limit" }
   ]
 
+/-- `ssh-keygen` signs and verifies the index snapshots; a machine without it skips the
+signed-index cases (as the toolchain cases skip without a C compiler). -/
+def haveSshKeygen : IO Bool := do
+  try
+    let _ ← IO.Process.output { cmd := "ssh-keygen", args := #["-h"] }
+    pure true
+  catch _ => pure false
+
+/-- `SHA256:…` fingerprint of a public key file (`ssh-keygen -lf -E sha256`). -/
+def fingerprintOf (pub : System.FilePath) : IO String := do
+  let out ← runIn (pub.parent.getD ".") "ssh-keygen" ["-lf", pub.toString, "-E", "sha256"]
+  match out.splitOn " " with
+  | _ :: fp :: _ => pure fp
+  | _ => throw (IO.userError s!"ssh-keygen -lf {pub}: {out}")
+
+/-- Write an index snapshot; `pkgs` are `(name, version, sha256, size)` (size 0: unknown).
+The tests write it directly (the CLI's `index snapshot` is covered separately). -/
+def writeSnapshot (idx : System.FilePath) (name : String) (seq : Nat) (updated expires fp : String)
+    (pkgs : List (String × String × String × UInt64)) : IO Unit := do
+  let entry (n v sha : String) (size : UInt64) : String :=
+    s!"  (package \"{n}\" \"{v}\" \"{sha}\"" ++ (if size == 0 then ")" else s!" (size {size}))")
+  let text := "(snapshot\n" ++
+    s!"  (name \"{name}\")\n  (seq {seq})\n  (updated \"{updated}\")\n  (key \"{fp}\")\n  (expires \"{expires}\")\n" ++
+    "\n".intercalate (pkgs.map fun (n, v, sha, size) => entry n v sha size) ++ ")\n"
+  IO.FS.writeFile (idx / "index" / "snapshot.sexpr") text
+
+/-- Sign `index/snapshot.sexpr` with `key` (removing an old signature first, since
+`ssh-keygen` would otherwise ask before overwriting it). -/
+def signSnapshot (idx key : System.FilePath) : IO Unit := do
+  let _ ← runIn idx "rm" ["-f", (idx / "index" / "snapshot.sexpr.sig").toString]
+  let _ ← runIn idx "ssh-keygen" ["-Y", "sign", "-q", "-n", "grail-index", "-f", key.toString,
+    (idx / "index" / "snapshot.sexpr").toString]
+
+/-- A one-package index (`greet` 1.0.0) with a snapshot signed by a throwaway Ed25519 key.
+Returns `(index dir, private key, allowed_signers, archive sha256, key fingerprint)`. -/
+def signedGreetIndex (root : System.FilePath) (seq : Nat)
+    (expires : String := "2030-01-01T00:00:00Z") :
+    IO (System.FilePath × System.FilePath × System.FilePath × String × String) := do
+  IO.FS.createDirAll (root / "index")
+  let (tar, sha) ← tarballOf root "greet" "1.0.0"
+    [("grail.wiz", "import Grail\ndef package : Package := Package.new \"greet\"\n  |> Package.version \"1.0.0\"\n  |> Package.lib \"greet\" \"src\"\n"),
+     ("src/Greet/Hello.wiz", "import Prelude\ndef hello : Nat := 1\n")]
+  IO.FS.writeFile (root / "index" / "greet.sexpr")
+    s!"(index (package \"greet\" (version \"1.0.0\" (source \"file://{tar}\") (sha256 \"{sha}\") (toolchain \">=0.1.0\") (deps))))\n"
+  IO.FS.writeFile (root / "registry.sexpr") "(registry (name \"test/grail-index\") (format 1))\n"
+  let key := root / "key"
+  let _ ← runIn root "ssh-keygen"
+    ["-q", "-t", "ed25519", "-N", "", "-C", "grail index test", "-f", key.toString]
+  let pub : System.FilePath := System.FilePath.mk (key.toString ++ ".pub")
+  let fp ← fingerprintOf pub
+  let size := (← tar.metadata).byteSize
+  writeSnapshot root "test/grail-index" seq "2026-11-15T00:00:00Z" expires fp
+    [("greet", "1.0.0", sha, size)]
+  signSnapshot root key
+  let allowed := root / "allowed_signers"
+  IO.FS.writeFile allowed s!"test {(← IO.FS.readFile pub)}"
+  pure (root, key, allowed, sha, fp)
+
 def grailIndexGroup : Group where
   name := "grail-index"
   exercise := "Stage 23m"
@@ -2389,7 +2451,129 @@ def grailIndexGroup : Group where
         let .ok (pkg, _) ← Grail.readConfig {} 7 "lib" work | throw (IO.userError "bad manifest")
         let .ok entry ← Grail.Registry.publish (some tar) "https://example.org/greet-1.0.0.tar.gz" pkg
           | throw (IO.userError "publish failed")
-        check ((entry.splitOn "(modules Greet.Hello)").length > 1) entry }
+        check ((entry.splitOn "(modules Greet.Hello)").length > 1) entry },
+    { name := "a signed index snapshot is verified offline and pinned in the lock", run := fun _ => do
+        unless ← haveSshKeygen do
+          skip "no ssh-keygen"
+          return
+        let root ← IO.FS.createTempDir
+        let (idx, _key, allowed, _sha, fp) ← signedGreetIndex root 1
+        let std ← IO.FS.realPath "lib"
+        let cache := root / "cache"
+        let dir ← mkTree [
+          ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{idx}\"\n  |> Package.require \"greet\" \"^1\"\n")]
+        let run (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir.toString, "--std", std.toString, "--cache", cache.toString] ++ args)
+        checkEq 0 (← run ["update", "--require-signature", "--allowed-signers", allowed.toString])
+        let .ok lock := Grail.Lock.parse (← IO.FS.readFile (dir / "grail.lock"))
+          | throw (IO.userError "bad grail.lock")
+        let some sig := lock.indexSignature | throw (IO.userError "the lock has no index signature")
+        checkEq fp sig.fingerprint
+        checkEq 1 sig.seq
+        check (sig.key.startsWith "ssh-ed25519") sig.key
+        -- `--locked` validates the recorded signature fields without reading the index
+        checkEq 0 (← run ["update", "--locked", "--require-signature"])
+        -- the lock's pinned key makes verification offline on the next run
+        checkEq 0 (← run ["index", "verify", idx.toString, "--locked"])
+        -- a first use needs a trust root from outside the index; without one, refuse
+        checkEq 1 (← run ["index", "verify", idx.toString])
+        checkEq 0 (← run ["index", "verify", idx.toString, "--allowed-signers", allowed.toString])
+        match ← Grail.checkDir cache {} 7 "lib" idx.toString false true (some allowed.toString) with
+        | .error e => throw (IO.userError e)
+        | .ok r =>
+          checkEq 1 r.signatures
+          checkEq ([] : List String) r.errors
+        -- the generator writes the document the helper above wrote by hand
+        let gen := root / "gen"
+        IO.FS.createDirAll (gen / "index")
+        IO.FS.writeFile (gen / "index" / "greet.sexpr") (← IO.FS.readFile (idx / "index" / "greet.sexpr"))
+        checkEq 0 (← Grail.cliMain ["--cache", cache.toString, "index", "snapshot", gen.toString,
+          "--seq", "7", "--updated", "2026-11-15T00:00:00Z", "--key", fp,
+          "--expires", "2030-01-01T00:00:00Z"])
+        let generated ← IO.FS.readFile (gen / "index" / "snapshot.sexpr")
+        check ((generated.splitOn "(seq 7)").length > 1) generated
+        check ((generated.splitOn "(package greet 1.0.0").length > 1) generated
+        -- without a snapshot, --require-signature refuses (a fresh app, so no lock pins one)
+        IO.FS.removeFile (idx / "index" / "snapshot.sexpr")
+        IO.FS.removeFile (idx / "index" / "snapshot.sexpr.sig")
+        let dir2 ← mkTree [
+          ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app2\"\n  |> Package.set \"index\" \"{idx}\"\n  |> Package.require \"greet\" \"^1\"\n")]
+        let run2 (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir2.toString, "--std", std.toString, "--cache", cache.toString] ++ args)
+        checkEq 1 (← run2 ["update", "--require-signature", "--allowed-signers", allowed.toString]) },
+    { name := "an edited entry, snapshot or expiry is refused", run := fun _ => do
+        unless ← haveSshKeygen do
+          skip "no ssh-keygen"
+          return
+        let root ← IO.FS.createTempDir
+        let (idx, key, allowed, sha, fp) ← signedGreetIndex root 1
+        let std ← IO.FS.realPath "lib"
+        let cache := root / "cache"
+        let dir ← mkTree [
+          ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{idx}\"\n  |> Package.require \"greet\" \"^1\"\n")]
+        let run (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir.toString, "--std", std.toString, "--cache", cache.toString] ++ args)
+        let updated := ["update", "--require-signature", "--allowed-signers", allowed.toString]
+        checkEq 0 (← run updated)
+        -- an edited entry no longer matches the signed snapshot
+        let entryPath := idx / "index" / "greet.sexpr"
+        let entry ← IO.FS.readFile entryPath
+        let zeros := String.ofList (List.replicate 64 '0')
+        IO.FS.writeFile entryPath (entry.replace sha zeros)
+        checkEq 1 (← run updated)
+        IO.FS.writeFile entryPath entry
+        -- an edited snapshot without a new signature
+        let snapPath := idx / "index" / "snapshot.sexpr"
+        let snap ← IO.FS.readFile snapPath
+        IO.FS.writeFile snapPath (snap.replace "(seq 1)" "(seq 2)")
+        checkEq 1 (← run updated)
+        -- re-signing a snapshot that disagrees with the index is still refused
+        IO.FS.writeFile snapPath (snap.replace sha zeros)
+        signSnapshot idx key
+        checkEq 1 (← run updated)
+        -- an expired key
+        writeSnapshot idx "test/grail-index" 1 "2026-11-15T00:00:00Z" "2020-01-01T00:00:00Z" fp
+          [("greet", "1.0.0", sha, 0)]
+        signSnapshot idx key
+        checkEq 1 (← run updated)
+        checkEq 1 (← run ["index", "verify", idx.toString, "--allowed-signers", allowed.toString])
+        match ← Grail.checkDir cache {} 7 "lib" idx.toString false true (some allowed.toString) with
+        | .error e => throw (IO.userError e)
+        | .ok r => check r.hasErrors s!"the expired snapshot passed: {r.errors}" },
+    { name := "a lower snapshot seq is a rollback; a same-seq rewrite is refused", run := fun _ => do
+        unless ← haveSshKeygen do
+          skip "no ssh-keygen"
+          return
+        let root ← IO.FS.createTempDir
+        let (idx, key, allowed, sha, fp) ← signedGreetIndex root 1
+        let std ← IO.FS.realPath "lib"
+        let cache := root / "cache"
+        let dir ← mkTree [
+          ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{idx}\"\n  |> Package.require \"greet\" \"^1\"\n")]
+        let run (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir.toString, "--std", std.toString, "--cache", cache.toString] ++ args)
+        let updated := ["update", "--require-signature", "--allowed-signers", allowed.toString]
+        checkEq 0 (← run updated)
+        -- seq 2 is an ordinary update
+        writeSnapshot idx "test/grail-index" 2 "2026-11-16T00:00:00Z" "2030-01-01T00:00:00Z" fp
+          [("greet", "1.0.0", sha, 0)]
+        signSnapshot idx key
+        checkEq 0 (← run updated)
+        let .ok lock := Grail.Lock.parse (← IO.FS.readFile (dir / "grail.lock"))
+          | throw (IO.userError "bad grail.lock")
+        checkEq 2 (lock.indexSignature.map (·.seq) |>.getD 0)
+        -- seq 1 is a rollback: refused, unless deliberately accepted
+        writeSnapshot idx "test/grail-index" 1 "2026-11-15T00:00:00Z" "2030-01-01T00:00:00Z" fp
+          [("greet", "1.0.0", sha, 0)]
+        signSnapshot idx key
+        checkEq 1 (← run ["index", "verify", idx.toString, "--locked"])
+        checkEq 1 (← run updated)
+        checkEq 0 (← run (updated ++ ["--allow-rewind"]))
+        -- a rewrite at the same sequence is refused even with --allow-rewind
+        writeSnapshot idx "test/grail-index" 1 "2026-11-16T00:00:00Z" "2030-01-01T00:00:00Z" fp
+          [("greet", "1.0.0", sha, 0)]
+        signSnapshot idx key
+        checkEq 1 (← run (updated ++ ["--allow-rewind"])) }
   ]
 
 /-- This module's test groups, which `Tests/Main.lean` runs: one per line, in sorted

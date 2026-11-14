@@ -37,6 +37,9 @@ done
 tmp=$(mktemp)
 printf '(index\n' > "$tmp"
 for f in index/*.sexpr; do
+  # index/snapshot.sexpr is the signed state, not a package: it is not part of the
+  # single-file index (grail reads it separately when a signature is required)
+  case "$f" in */snapshot.sexpr) continue ;; esac
   sed -e '1s/^(index//' -e '$s/)$//' "$f" >> "$tmp"
 done
 printf ')\n' >> "$tmp"

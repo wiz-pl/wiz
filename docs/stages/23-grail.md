@@ -441,6 +441,9 @@ lock:
   (pkg "text" "1.2.0" "https://…/text-1.2.0.tar.gz" "<sha256>" (deps)))
 ```
 
+A signed index adds an `(index-signature …)` entry after `(index …)` (key, fingerprint,
+sequence, digest, expiry); an existing lock without one parses as before.
+
 * `grail update [--locked] [--offline]`: resolve and rewrite the lock. `--locked` is a
   **check, not a resolution**: it reads the existing lock, verifies that every
   requirement is pinned and satisfied, and never reads the index or touches the network,
@@ -495,13 +498,22 @@ and building it is running its author's code. There is no sandbox. Git `dep` ent
 v1's 64-bit content hash (accident detection, not cryptographic); registry entries are
 the strong path.
 
-**Not signed yet.** Index commits and tags are not signed; authenticity comes from the
-git URL, its history (and the rollback check above) and review of the index repository.
-A force-push is refused only when a lock records an older commit; a first-time user has
-no such baseline. Signing index tags and recording a signature in the lock
-(`--require-signature`) is the next step, together with an index CI that rebuilds each
-archive from its tag and compares the SHA-256. Until then: SHA-256 gives integrity, not
-authorship, and the index's own history is the audit log.
+**Signed index state (Stage 1).** An index may publish `index/snapshot.sexpr` — every
+`name@version` with its SHA-256 and size, a monotone `(seq)`, an `(updated)` time, the
+signing key's fingerprint `(key)` and its `(expires)` date — signed as
+`index/snapshot.sexpr.sig` with `ssh-keygen -Y sign -n grail-index`. `grail update
+--require-signature --allowed-signers FILE` verifies the signature offline and writes an
+`(index-signature …)` entry in `grail.lock` with the key, fingerprint, sequence and
+snapshot digest. Later updates re-verify from that pinned key even without the flag, and
+refuse a changed key, a lower `(seq)` (rollback; `--allow-rewind` accepts a deliberate
+rewind), a same-sequence rewrite, an expired key, or an entry whose hash differs from the
+snapshot. `grail index verify INDEX [--locked]` is the standalone offline verifier, and
+`grail index check --require-signature` audits a repository. The `allowed_signers` file
+is a trust root from outside the index: the copy inside a checkout proves nothing. This
+gives authorship for an index state, not freshness: there is no transparency log or
+gossip, key rotation needs a re-lock, and a mirror serving an old snapshot is only caught
+when the lock records a newer sequence. SHA-256 still gives integrity, not authorship.
+The snapshot is additive: an index without one is read exactly as before.
 
 **Cache layout.** `<cache>/grail/downloads/<sha256>` holds the archives
 (content-addressed, re-verified on every use); `<cache>/grail/index` the clone of a URL
@@ -509,8 +521,8 @@ index; `.grail/packages/NAME/` the unpacked tree with a `.grail-pkg` stamp equal
 archive hash. `.grail/` is not committed; `grail.lock` is.
 
 **Deferred:** a real `wiz-pl/grail-index` with CI naming rules and the first packages;
-signed index commits/tags and a signature in the lock (`--require-signature`);
-per-registry index caches and repeatable `--index` overlays; `grail update -p NAME` and
+signed index tags (the signed-snapshot form is implemented) and key rotation without a
+re-lock; per-registry index caches and repeatable `--index` overlays; `grail update -p NAME` and
 `--minimal`; a tree hash for unpacked packages (lock v3) and a SHA-256 tree hash for git
 deps; private-index credential settings, `grail vendor`, binary artifacts, and automated
 publish (a bot that verifies the artifact before merging). The reader understands the

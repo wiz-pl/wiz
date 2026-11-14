@@ -30,6 +30,8 @@ structure CheckResult where
   versions : Nat := 0
   archives : Nat := 0
   remote : Nat := 0
+  /-- signed snapshots that verified (0 or 1: an index has at most one) -/
+  signatures : Nat := 0
   errors : List String := []
   warnings : List String := []
   deriving Repr, Inhabited
@@ -44,7 +46,8 @@ def lines (r : CheckResult) : List String :=
 
 def summary (r : CheckResult) : String :=
   s!"{r.packages} packages, {r.versions} versions, {r.archives} archives verified, \
-     {r.remote} remote not verified, {r.errors.length} errors, {r.warnings.length} warnings"
+     {r.remote} remote not verified, {r.signatures} signatures verified, \
+     {r.errors.length} errors, {r.warnings.length} warnings"
 
 end CheckResult
 
@@ -211,7 +214,8 @@ def checkRegistry (r : CheckResult) (dir : System.FilePath) : IO (CheckResult ×
 Offline by default: without `fetch`, a non-local spec is refused and remote archives are
 counted, never downloaded. -/
 def checkDir (cache : System.FilePath) (tc : Toolchain) (salt : UInt64)
-    (std : System.FilePath) (spec : String) (fetch : Bool := false) :
+    (std : System.FilePath) (spec : String) (fetch : Bool := false)
+    (requireSignature : Bool := false) (allowedSigners : Option String := none) :
     IO (Except String CheckResult) := do
   let p : System.FilePath := spec
   let isLocal := ← p.pathExists
@@ -220,7 +224,10 @@ def checkDir (cache : System.FilePath) (tc : Toolchain) (salt : UInt64)
   -- a bare repository path is cloned by `loadIndex`; the checkout (and its index.wiz and
   -- registry.sexpr) is then in the cache, not at the bare path
   let isBare := isLocal && (← (p / "HEAD").pathExists) && (← (p / "objects").isDir)
-  let rootDir : System.FilePath := if isLocal && !isBare then p else cache / "grail" / "index"
+  let rootDir : System.FilePath ←
+    if isLocal && !isBare then
+      if ← p.isDir then pure p else pure (p.parent.getD ".")
+    else pure (cache / "grail" / "index")
   match ← Registry.loadIndex cache spec (!fetch) with
   | .error e => pure (.error e)
   | .ok src =>
@@ -241,9 +248,49 @@ def checkDir (cache : System.FilePath) (tc : Toolchain) (salt : UInt64)
         unless src.pkgs.contains name do
           r := addError r "index.wiz" s!"lists {name}, but index/{name}.sexpr is missing"
     let entries := (src.pkgs.toList.toArray.qsort (fun a b => a.1 < b.1)).toList
+    -- the signed snapshot: a warning when merely present, an error when required. The
+    -- verifier is offline (`ssh-keygen -Y verify` with a local allowed_signers file).
+    let mut snapOk : Option Snapshot := none
+    match ← Sign.snapshotFile rootDir with
+    | none =>
+      if requireSignature then
+        r := addError r "signature" "the index has no signed snapshot (index/snapshot.sexpr)"
+    | some _ =>
+      match ← Sign.verifySnapshot rootDir (allowedSigners.map System.FilePath.mk) none false with
+      | .error e =>
+        r := if requireSignature then addError r "signature" e
+             else addWarning r "signature" e
+      | .ok (snap, _) =>
+        r := { r with signatures := r.signatures + 1 }
+        if !regName.isEmpty && !snap.name.isEmpty && snap.name != regName then
+          r := addError r "snapshot" s!"names {snap.name}, but registry.sexpr says {regName}"
+        snapOk := some snap
     for (name, pkg) in entries do
       r := ← checkPackage r name pkg fetch tmp
     r := checkConflicts r entries
+    if let some snap := snapOk then
+      if let .error e := snap.covers src.pkgs then r := addError r "snapshot" e
+      if snap.updated.isEmpty then
+        r := addWarning r "snapshot" "no (updated …): a mirror's freshness cannot be judged"
+      else if !Sign.validUtc snap.updated then
+        r := addWarning r "snapshot" s!"updated {snap.updated} is not a UTC date (YYYY-MM-DDTHH:MM:SSZ)"
+      -- a `(size …)` in the snapshot is the archive's length: check it when the archive
+      -- is local (the download cap itself is still not enforced, R19)
+      for (name, pkg) in entries do
+        for v in pkg.versions do
+          match snap.find? name (Version.render v.version) with
+          | none => pure ()
+          | some e =>
+            if e.size > 0 then
+              match localArchive? v.source with
+              | none => pure ()
+              | some path =>
+                let f : System.FilePath := path
+                if ← f.pathExists then
+                  let md ← f.metadata
+                  if md.byteSize.toNat != e.size then
+                    r := addError r s!"{name} {Version.render v.version}"
+                      s!"the archive is {md.byteSize} bytes, the signed snapshot says {e.size}"
     match manifest with
     | .error _ => pure ()  -- already reported above
     | .ok none => pure ()
