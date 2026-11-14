@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wiz playground</title>
+<link rel="stylesheet" href="playground.css">
+</head>
+<body>
+<header>
+  <strong>Wiz playground</strong>
+  <span class="dim">the self-hosted checker, compiled to WebAssembly &mdash; no server</span>
+  <span id="status" class="status" role="status">loading the engine&hellip;</span>
+</header>
+<main>
+  <section class="pane">
+    <div class="pane-head"><label for="editor">Program</label><span class="hint">Ctrl/&#8984;+Enter runs</span></div>
+    <textarea id="editor" spellcheck="false">import Prelude
+
+-- Everything here runs in the page: the self-hosted Wiz frontend and kernel
+-- (selfhost/*.wiz, stage 11ab), compiled to WebAssembly by web/build-playground.sh.
+def twice (n : Nat) : Nat := n + n
+
+#check twice
+#eval twice 21
+</textarea>
+    <div class="actions">
+      <button id="run" type="button" disabled>Run</button>
+      <span id="count" class="dim"></span>
+    </div>
+  </section>
+  <section class="pane">
+    <div class="pane-head"><span>Output</span><span class="hint">one line per command; <code>#eval</code> is the kernel's normal form</span></div>
+    <div id="output" class="output" aria-live="polite"></div>
+  </section>
+</main>
+<footer>
+  <span id="engine" class="dim">engine: loading</span>
+  <span class="dim">A definition prints its signature, <code>#check</code> a type, <code>#eval</code> a value (shown raw if it is not a Nat, Bool or list).</span>
+</footer>
+<script type="module" src="playground.js"></script>
+</body>
+</html>
