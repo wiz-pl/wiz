@@ -1177,6 +1177,18 @@ void wiz_retain(void *v) { (void)v; }
 long wiz_live_objects(void) { return 0; }
 #endif
 
+/* The driver's whole-file write (`selfhost/Cli.wiz`: the cache entries and `-o`): 0 or
+   1. The same interface as the Lean runtime's `wiz_sys_write_file` (`runtime/wiz.c`), so
+   the generated driver builds with either runtime. */
+uint64_t wiz_sys_write_file(const char *p, const char *s, int append) {
+  FILE *f = fopen(p, append ? "ab" : "wb");
+  if (!f) return 1;
+  size_t n = strlen(s);
+  int ok = fwrite(s, 1, n, f) == n;
+  if (fclose(f) != 0) ok = 0;
+  return ok ? 0 : 1;
+}
+
 /* the program needs a big stack (deep recursion): raise the limit and start again (a
    thread with a big stack would do, but the collector's stopping of the world lost
    its signals) */
