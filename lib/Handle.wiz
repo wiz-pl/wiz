@@ -51,15 +51,15 @@ private def Handle.releaseWith {H B : Type} (close : H → EIO Unit) (h : H) (1 
     (1 k : (r : Except String Unit) → IO B) : IO B :=
   fun w => let 1 (u, w') := Owned.burn o w; IO.bind (close h) k w'
 /-- An operation on an owned handle: the token goes in and comes back. -/
-def Handle.use {H A B : Type} (h : H) (1 o : Owned h) (act : H → IO A) (1 k : (a : A) → (1 o : Owned h) → IO B) : IO B :=
-  IO.bind (act h) (fun a => k a o)
+def Handle.use {H A B : Type} (h : H) (1 o : Owned h) (act : H → IO A) (1 k : (a : A) → (1 o : Owned h) → IO B) : IO B := do1
+  a ← act h;
+  k a o
 -- acquire a fresh handle with `acquire` (an error owns nothing), then `k` owns it. `k` is
 -- an ordinary function (it runs only if `acquire` succeeds), so it can't capture another
 -- linear value: an acquisition that fails would leave that value unused.
-private def Handle.with {H B : Type} (acquire : EIO H) (k : (h : H) → (1 o : Owned h) → EIO B) : EIO B :=
-  IO.bind acquire (fun r => match r with
-    | .ok h => Handle.own h (k h)
-    | .error e => EIO.fail e)
+private def Handle.with {H B : Type} (acquire : EIO H) (k : (h : H) → (1 o : Owned h) → EIO B) : EIO B := do
+  h ← acquire;
+  Handle.own h (k h)
 
 -- ## The handles of lib/Sys.wiz: owned constructors and their releases
 
