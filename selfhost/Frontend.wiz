@@ -5810,10 +5810,9 @@ def kindPtr (sp : String) (gs : Globals) (noAuto : Bool) (skips : List String) :
     match hasForeignTypeName (Globals.ffi gs) name with
     | .true => .kok "p" name gs
     | .false =>
-      if Bool.or noAuto (elemStr sp skips) then .kerr else
-      match addForeignType gs name sp with
+      if Bool.or noAuto (elemStr sp skips) then .kerr else (match addForeignType gs name sp with
       | .some gs1 => .kok "p" name gs1
-      | .none => .kerr
+      | .none => .kerr)
 mutual
 
 partial def kindOfCTy2 (isResult : Bool) (ct : CTy) (gs : Globals) (noAuto : Bool) (skips : List String) (fuel : Nat) : KR := match ct with

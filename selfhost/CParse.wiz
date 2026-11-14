@@ -308,10 +308,9 @@ partial def cpSpecGo2 (p : CP) (ints : List String) (base : Option CTy) (isTd : 
       let p2 := cpAdvance p1; if strEq t "enum" then cpSpecGo p2 ints (.some (.cint "enum")) isTd isConst
       else if strEq t "struct" then cpSpecGo p2 ints (.some (.cstruct ("struct " +++ tag))) isTd isConst
       else cpSpecGo p2 ints (.some (.cother (t +++ " " +++ tag))) isTd isConst))
-  else if Bool.and (match base with | .none => .true | _ => .false) (match ints with | .nil => .true | _ => .false) then (
-    let m := cpLookup t (p.typedefs); match m with
-      | .some ty => cpSpecGo (cpAdvance p) ints (.some ty) isTd isConst
-      | .none => cpFinishSpec base ints isTd isConst p)
+  else if Bool.and (match base with | .none => .true | _ => .false) (match ints with | .nil => .true | _ => .false) then (match cpLookup t (p.typedefs) with
+    | .some ty => cpSpecGo (cpAdvance p) ints (.some ty) isTd isConst
+    | .none => cpFinishSpec base ints isTd isConst p)
   else cpFinishSpec base ints isTd isConst p
 
 partial def cpPtrs (ty : CTy) (p : CP) : PtrR :=
