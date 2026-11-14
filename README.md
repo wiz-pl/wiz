@@ -65,8 +65,8 @@ See [docs/building.md](docs/building.md) for the details, CI and caches.
 * [docs/install.md](docs/install.md): installing Wiz (tower, Nix), editors, a first package.
 * [docs/tour.md](docs/tour.md): a tour of the language, with checked examples.
 * [docs/index.md](docs/index.md): the stage-by-stage docs, one file per stage.
-* [docs/attestation.md](docs/attestation.md): signed in-toto statements, build manifests
-  and TPM 2.0 quotes, and how to verify them.
+* [docs/attestation.md](docs/attestation.md): signed in-toto statements, build manifests,
+  TPM 2.0 quotes and AMD SEV-SNP reports, and how to verify them.
 * [docs/CoreSpec.md](docs/CoreSpec.md): the kernel's calculus as inference rules.
 * [docs/Status.md](docs/Status.md): what is proved, what is conjectured, and the known
   soundness issues. Nothing about Wiz as a whole is proved yet.

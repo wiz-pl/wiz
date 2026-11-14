@@ -16,6 +16,9 @@ library plus OpenSSH's `ssh-keygen` (already needed for SSH).  It defines:
   `extraData = H("wiz-quote-v1" || nonce || statement_digest)`, an expected PCR
   policy and, when `tpm2-tools` is installed, the quote signature and PCR
   digest via `tpm2_checkquote` (TPM cryptography is not reimplemented here).
+  With `--snp-report`/`--snp-policy` it also verifies an AMD SEV-SNP
+  attestation report and its VCEK/VLEK -> ASK -> ARK chain (`snp.py`), binding
+  `REPORT_DATA = H("wiz-snp-v1" || nonce || statement_digest)`.
 
 The formats and the trust model are documented in `docs/attestation.md`.
 Exit codes are the same for all CLIs:
@@ -50,6 +53,8 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+
+import snp as wiz_snp
 
 SCHEMA = "wiz-build-manifest/v1"
 POLICY_SCHEMA = "wiz-pcr-policy/v1"
@@ -1361,6 +1366,7 @@ class VerifyResult:
     signed: bool | None = None
     statement_sha256: str | None = None
     keyid: str | None = None
+    snp: dict[str, Any] | None = None
 
     def add(self, name: str, status: str, detail: str = "") -> None:
         self.checks.append(Check(name, status, detail))
@@ -1668,13 +1674,15 @@ def verify(args: argparse.Namespace) -> VerifyResult:
             result.add("nonce", "skip",
                        "no --nonce and no quote.nonce; freshness is not checked")
 
+    # The statement digest is what both the TPM quote and an SNP report bind.
+    # If the bundle is unsigned (explicitly allowed) or has no envelope, rebuild
+    # the deterministic statement so the binding can still be checked.
+    statement_digest = result.statement_sha256
+    if statement_digest is None:
+        statement_digest = sha256_bytes(canonical_bytes(
+            build_statement(parsed, manifest_digest)))
+
     if quote is not None:
-        statement_digest = result.statement_sha256
-        if statement_digest is None:
-            # Unsigned (explicitly allowed) or no envelope: rebuild the
-            # deterministic statement so the quote binding can still be checked.
-            statement_digest = sha256_bytes(canonical_bytes(
-                build_statement(parsed, manifest_digest)))
         if nonce is None:
             if quote.extra_data == manifest_digest:
                 result.add("quote_extra_data", "skip",
@@ -1696,6 +1704,47 @@ def verify(args: argparse.Namespace) -> VerifyResult:
                 result.add("quote_extra_data", "fail",
                            f"extraData is {quote.extra_data}, expected "
                            f"{expected_extra}")
+
+    # 7b. AMD SEV-SNP evidence (E2).  This is an independent verifier for the
+    # raw report: a guest's own attestation.json is evidence, never a result.
+    snp_report = getattr(args, "snp_report", None)
+    snp_certs = getattr(args, "snp_certs", None)
+    snp_policy = getattr(args, "snp_policy", None)
+    snp_measurement = getattr(args, "snp_measurement", None)
+    snp_product = getattr(args, "snp_product", None)
+    snp_requested = bool(snp_report or snp_certs or snp_policy or snp_measurement
+                         or snp_product or getattr(args, "require_snp", False))
+    if snp_report:
+        try:
+            snp_result = wiz_snp.verify_report(
+                report_path=Path(snp_report),
+                certs_path=Path(snp_certs) if snp_certs else None,
+                policy_path=Path(snp_policy) if snp_policy else None,
+                statement_digest=statement_digest,
+                nonce=nonce,
+                measurement_pin=snp_measurement,
+                product_pin=snp_product,
+                ark_paths=getattr(args, "ark", None) or [],
+                openssl=getattr(args, "openssl", None),
+                now=getattr(args, "now", None),
+            )
+        except (wiz_snp.SnpError, OSError) as exc:
+            result.add("snp_report", "fail", str(exc))
+        else:
+            for check in snp_result.checks:
+                result.add(check.name, check.status, check.detail)
+            result.snp = snp_result.info
+    elif snp_requested:
+        if getattr(args, "allow_machine_only", False):
+            result.add("snp_report", "skip",
+                       "--allow-machine-only: E1-only result; no E2 evidence")
+        else:
+            result.add("snp_report", "fail",
+                       "E2 evidence is required (--snp-policy/--snp-measurement/"
+                       "--require-snp) but --snp-report is missing; pass "
+                       "--allow-machine-only for an explicit E1-only result")
+    elif getattr(args, "allow_machine_only", False):
+        result.add("snp_report", "skip", "--allow-machine-only: E1-only result")
 
     # 8. Signature and PCR digest: tpm2_checkquote, never reimplemented here.
     if args.skip_crypto:
@@ -1766,6 +1815,7 @@ def result_json(result: VerifyResult) -> dict[str, Any]:
         ],
         "errors": result.errors,
         "warnings": result.warnings,
+        "snp": result.snp,
     }
     if result.quote is not None:
         payload["quote"] = {
@@ -2403,7 +2453,8 @@ def _verify_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="wiz-verify",
         description="Verify a DSSE-signed in-toto statement, a Wiz build manifest, "
-                    "a TPM 2.0 quote, an expected PCR policy and the artifact bytes.",
+                    "a TPM 2.0 quote, an expected PCR policy and the artifact bytes. "
+                    "With --snp-* it also verifies AMD SEV-SNP evidence (E2).",
     )
     p.add_argument("--manifest", required=True, help="manifest.json")
     p.add_argument("--envelope", help="DSSE envelope (default: "
@@ -2442,6 +2493,29 @@ def _verify_parser() -> argparse.ArgumentParser:
     p.add_argument("--ak-name", help="pin the AK TPM Name (000b + 64 hex)")
     p.add_argument("--ak-sha256", help="legacy pin: SHA-256 of the ak.pub file bytes")
     p.add_argument("--now", help=argparse.SUPPRESS)  # test clock for expiry
+    p.add_argument("--snp-report",
+                   help="raw AMD SEV-SNP ATTESTATION_REPORT (1184 bytes); an ABI "
+                        "certificate table may be appended")
+    p.add_argument("--snp-certs",
+                   help="SEV-SNP certificate evidence: a directory of PEM files, a "
+                        "PEM bundle, or an ABI certificate table (default: the table "
+                        "appended to --snp-report)")
+    p.add_argument("--snp-policy",
+                   help="wiz-snp-policy/v1 JSON: measurement, TCB floor, policy bits")
+    p.add_argument("--snp-measurement",
+                   help="pin the 48-byte SNP launch measurement (96 hex)")
+    p.add_argument("--snp-product", choices=("Milan", "Genoa", "Turin"),
+                   help="require this AMD SEV-SNP product family")
+    p.add_argument("--ark", action="append", default=[],
+                   help="override the embedded AMD KDS trust root with a PEM file "
+                        "(repeatable; for tests or private deployments)")
+    p.add_argument("--openssl", help="openssl executable (default: PATH or "
+                                     "WIZ_ATTEST_OPENSSL)")
+    p.add_argument("--require-snp", action="store_true",
+                   help="fail unless SEV-SNP evidence is verified (E2)")
+    p.add_argument("--allow-machine-only", action="store_true",
+                   help="explicitly allow an E1-only result when E2 evidence is "
+                        "absent; invalid evidence is never accepted")
     p.add_argument("--tpm2-checkquote", help="path to tpm2_checkquote")
     p.add_argument("--tpm2-bin", help="directory containing tpm2-tools")
     p.add_argument("--skip-crypto", action="store_true",
@@ -2458,6 +2532,17 @@ def main_verify(argv: Sequence[str]) -> int:
             raise UsageError(f"policy file does not exist: {args.policy}")
         if args.require_signature and args.allow_unsigned:
             raise UsageError("--require-signature and --allow-unsigned conflict")
+        if args.require_snp and args.allow_machine_only:
+            raise UsageError("--require-snp and --allow-machine-only conflict")
+        for option, label in (("snp_report", "SNP report"),
+                              ("snp_policy", "SNP policy"),
+                              ("snp_certs", "SNP certificate evidence")):
+            value = getattr(args, option)
+            if value and not Path(value).exists():
+                raise UsageError(f"{label} does not exist: {value}")
+        for value in args.ark:
+            if not Path(value).is_file():
+                raise UsageError(f"--ark is not a file: {value}")
         if args.nonce_file:
             try:
                 args.nonce = Path(args.nonce_file).read_bytes().hex()
@@ -2486,6 +2571,12 @@ def main_verify(argv: Sequence[str]) -> int:
                 raise UsageError("--ak-name must be a sha256 TPM Name "
                                  "(000b + 64 hex characters)")
             args.ak_name = name
+        if args.snp_measurement:
+            measurement = normalize_hex(args.snp_measurement, "--snp-measurement")
+            if len(measurement) != 96:
+                raise UsageError("--snp-measurement must be 96 hex characters "
+                                 "(48 bytes)")
+            args.snp_measurement = measurement
         args.key_fingerprint = [normalize_fingerprint(value)
                                 for value in args.key_fingerprint]
         if args.now:
