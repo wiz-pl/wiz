@@ -10,6 +10,8 @@ import STC.F0.Obligations
 import STC.F0.Sorting
 import STC.F0.Typing
 import STC.F0.TopSort
+import STC.F0.Context
+import STC.F0.ConvJoin
 import STC.F0.Sanity
 
 /-!
@@ -37,6 +39,13 @@ M0.1 of the design note `/workspace/wiz-notes/stc-m0-spec.md`:
   the remaining law obligation (`StructRenClosed`, `StructSubClosed`);
 * `F0/TopSort`: the checked refutation of `TyUnique` at the top universe (the obligation
   is the corrected pair `TyUniqueTyped` + `TopSortUnique`);
+* `F0/Context`: context validity for `F0` (`Γ ⊢ J → ⊢ Γ`), extending the fragment's
+  `F0Base_ctx` by the two `Struct` cases, with `F0_wf_tail` and the sorting reduction at a
+  typing (`sortUniqueAt_of_typing`, no `⊢ Γ` hypothesis);
+* `F0/ConvJoin`: the checked refutation of `ConvJoin` (proof irrelevance and η are
+  conversions, not reductions: two `λ`-proofs of `(x : Unit prop) → Unit prop` are
+  `irrel`-convertible and have no reduct), so the canonical-head obligation is the
+  algorithmic `DecConv`, not reduction joinability;
 * `F0/Obligations`: `Sound(F0)`, `Con(F0)`, `WHN`, `DecConv`, `DecTC` as `Prop`s, and the
   sorting lemma's supporting statements (`TyUnique`, `ConvInj*`);
 * `F0/Sanity`: small derivations that witness that the rules are inhabited.

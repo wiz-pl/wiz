@@ -131,7 +131,12 @@ def TyUnique (sg : Sig) : Prop :=
     ∃ s, Derivable (F0 sg) (Γ ⊢ A ≡ B ∶ .sort s)
 
 /-- **`ConvInjSort`**: two convertible sorts are the same sort. This is what the `irrel`
-case of `SortUniqueAt` needs: proof irrelevance must not identify a sort with anything. -/
+case of `SortUniqueAt` needs: proof irrelevance must not identify a sort with anything.
+The reduction-based route through `ConvJoin` is closed (`F0/ConvJoin.lean` refutes that
+statement); the remaining proof is read off the algorithmic conversion `DecConv`, which
+never relates distinct closed sorts because no conversion rule does (`refl` needs the same
+sort, `irrel` needs a proposition type, the `cong`s have a former head, and no reduction
+starts at a sort). -/
 def ConvInjSort (sg : Sig) : Prop :=
   ∀ Γ u v C, Derivable (F0 sg) (Γ ⊢ .sort u ≡ .sort v ∶ C) → u = v
 

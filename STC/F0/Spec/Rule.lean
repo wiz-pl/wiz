@@ -46,6 +46,10 @@ def Jdg.rectx (Δ : Ctx) : Jdg → Jdg
   | .eq _ t u A => .eq Δ t u A
   | .red _ t u A => .red Δ t u A
 
+/-- `rectx` replaces the context, so the context of the result is the new context. -/
+theorem Jdg.ctx_rectx (Δ : Ctx) (j : Jdg) : Jdg.ctx (j.rectx Δ) = Δ := by
+  cases j <;> rfl
+
 structure Rule where
   prems : List Jdg
   concl : Jdg

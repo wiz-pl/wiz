@@ -167,7 +167,14 @@ therefore the "context conversion under renaming" lemma, and it is not a corolla
 architecture below. -/
 
 /-- **The renaming law for `Struct`, as an obligation**: every rule of `Struct sg`,
-renamed, is derivable in `F0 sg` from its renamed premises. -/
+renamed, is derivable in `F0 sg` from its renamed premises.
+
+This interface is **not** discharged by a case analysis with the plain `Renames` hypothesis
+of the premise (see `agents/stc-m1.md`): the `ctxConv` case needs a relation between
+contexts that is `RenOK` except at one entry whose target is only *convertible*, and the
+hole's conversion has to be lifted under binders; the premise's `Renames` is a black box
+over the derivation and does not expose it. Proving it needs the relation redesign of
+`Renaming.lean` (`RenOK` with a distinguished hole, indexed by the hole's depth). -/
 def StructRenClosed (sg : Sig) : Prop := RenClosed (Struct sg) (F0 sg)
 
 /-- **The substitution law for `Struct`, as an obligation**. -/
