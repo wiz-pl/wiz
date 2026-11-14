@@ -842,3 +842,19 @@ provenance. `import Scry.TaintExamples` is the hand-built corpus used by the
 `scry-taint` group. This is the S4 intraprocedural prototype: no tree-sitter, no C
 lowering, no SARIF, and no interprocedural or memory modelling yet;
 `wiz-notes/scry-taint.md` has the design, the spec format and the gaps.
+
+## Scry: e-graph and equality saturation (`lib/Scry/Egraph.wiz`, `lib/Scry/EgraphNative.wiz`)
+
+`import Scry.Egraph` is the S12 e-graph in its **reference** form: a union-find,
+congruence closure by rebuilding a hash-consed e-node table, relational e-matching,
+extraction, and saturation with a fuel bound. `import Scry.EgraphNative` defines the same
+`Scry.EGraph` interface on native tables (`U64Array`/`U64Map`) and adds per-e-class
+analyses (the `Interval` lattice of `Scry.AiDomain`, with guarded rewrites), union
+explanations (a flat proof forest), node/round/clock limits with a reported stop reason,
+and `Option Nat` extraction costs. The test group reads every example through both
+imports and compares the digests. `import Scry.EqPlan` is the Datalog seam: `eqsort`
+columns (`Scry.ColKind`), rules whose head is an equality assertion
+(`Scry.Head.eqAssert`), and a plan interpreter that calls `mergeFacts` and canonicalises
+the database between rounds. This is the second S12 slice: no scheduler/backoff, no
+sharing-aware extraction, no canonicalisation-aware provenance and no kernel-checked
+certificates yet; `wiz-notes/scry-egraph.md` has the design, the API and the gaps.

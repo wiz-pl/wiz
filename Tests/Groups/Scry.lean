@@ -31,6 +31,13 @@ def interp (name expected : String) : IO Unit := do
   let src ← IO.FS.readFile s!"examples/{name}.wiz"
   Elab.okLibs (src ++ "\n#eval main") [expected]
 
+/-- An example run against another backend module: the file's `import Scry.Egraph` line
+is swapped for `mod`. The native-table engine defines the same `Scry.EGraph` interface,
+so the same source and the same digest must work (the differential case). -/
+def interpAs (mod name expected : String) : IO Unit := do
+  let src ← IO.FS.readFile s!"examples/{name}.wiz"
+  Elab.okLibs ((src.replace "import Scry.Egraph" s!"import {mod}") ++ "\n#eval main") [expected]
+
 /-- The same, compiled to C and to LLVM. -/
 def compiled (name expected : String) : IO Unit := do
   let src ← IO.FS.readFile s!"examples/{name}.wiz"
@@ -73,7 +80,28 @@ def scryEgraphGroup : Group where
     { name := "fuel: a growing rewrite adds one layer per round and stops at the bound", run := fun _ =>
         interp "scry-egraph-fuel" "2851" },
     { name := "Datalog: derived equality facts feed one mergeFacts, then congruence", run := fun _ =>
-        interp "scry-egraph-datalog" "4021" }
+        interp "scry-egraph-datalog" "4021" },
+    { name := "native tables: all six examples give the reference digests", run := fun _ => do
+        interpAs "Scry.EgraphNative" "scry-egraph-congruence" "14111"
+        interpAs "Scry.EgraphNative" "scry-egraph-rebuild" "14111"
+        interpAs "Scry.EgraphNative" "scry-egraph-extract" "11332"
+        interpAs "Scry.EgraphNative" "scry-egraph-saturate" "3171"
+        interpAs "Scry.EgraphNative" "scry-egraph-fuel" "2851"
+        interpAs "Scry.EgraphNative" "scry-egraph-datalog" "4021" },
+    { name := "Datalog: eqsort columns, an equality-assertion head, canonicalise between rounds", run := fun _ =>
+        interp "scry-egraph-eqplan" "11111121" },
+    { name := "canonicalise: merge eq facts, rewrite eqsort columns, idempotent", run := fun _ =>
+        interp "scry-egraph-canon" "111012" },
+    { name := "analysis: an interval per e-class, a guarded rewrite and a joined interval", run := fun _ =>
+        interp "scry-egraph-analysis" "1131341" },
+    { name := "the analysis example under C and LLVM", run := fun _ =>
+        compiled "scry-egraph-analysis" "1131341" },
+    { name := "explanation: a rewrite chain and a congruence chain from the union log", run := fun _ =>
+        interp "scry-egraph-explain" "1000111" },
+    { name := "limits: fixpoint, fuel, node cap and clock cap stop reasons", run := fun _ =>
+        interp "scry-egraph-limits" "123415" },
+    { name := "extraction: Option costs, a cycle with no finite term, a large weight", run := fun _ =>
+        interp "scry-egraph-extract-opt" "111111" }
   ]
 
 def scryGroup : Group where
