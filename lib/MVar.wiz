@@ -22,7 +22,7 @@ around output. What each API guarantees (25d has the table):
   from any thread. **No deadlock freedom**: lock order is up to the program.
 
 Programs that use these are outside the deadlock-freedom claim of lib/Session.wiz.
-In compiled code the natives are `wiz_mvar_*` and `wiz_lock_*` in runtime/wiz.c; the
+In compiled code the natives are `wiz_mvar_*` and `wiz_lock_*` in runtime/; the
 interpreters (`#eval`, `#run`) can't run them.
 
 ```

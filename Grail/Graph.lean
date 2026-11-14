@@ -6,10 +6,11 @@ import Grail.Command
 /-!
 # The build graph and its scheduler (stage 23g)
 
-`grail build` turns the targets into a graph of **nodes** (`check F`, `ir F`, `c F`,
-`obj F`, `link E`, `test F`, the steps of the bootstrap check), each with the nodes it
-depends on: `ir F` on `check F`, …, `link E` on `obj F`, a check on the checks of the
-package modules it imports, a `run` test on its executable. A node's key is computed
+`grail build` turns the targets into a graph of **nodes** (`check F`, `build F`
+(check, IR and C of an executable's source, in one job), `ir F`, `obj F`, `link E`,
+`test F`, the steps of the bootstrap check), each with the nodes it depends on:
+`obj F` on `build F`, …, `link E` on `obj F`, a check on the checks of the package
+modules it imports, a `run` test on its executable. A node's key is computed
 only once its dependencies are done (an object's key hashes the C text its `c` node
 wrote), by the scheduler, in its own process, cheaply; a node whose output directory
 `.grail/build/<key>/` exists is up to date.
@@ -47,8 +48,10 @@ def readLink (f : System.FilePath) : IO Build.Link := do
 /-- What a node of the build graph does. -/
 inductive Action where
   | check (file : String)
+  /-- check, lower and emit the C of a standalone source, in one job (it is elaborated
+  once: `check`, `ir` and `c` as three jobs elaborated it three times) -/
+  | build (file : String)
   | ir (file : String)
-  | c (file : String)
   | obj (file : String)
   /-- link the executable `name`; `bin`: install it as `.grail/bin/<name>` -/
   | link (name file : String) (bin : Bool)
@@ -107,15 +110,37 @@ partial def addCheck (dir : System.FilePath) (libs : List String) (file : String
             if let some i ← addCheck dir libs f then deps := deps.push i
     pure (.check file, deps, false)
 
-/-- `check → ir → c → obj → link` for the executable `name` from `file`'s `main`. -/
+/-- The check nodes `F` depends on: those of the package modules it imports, and
+`extra`. `F` itself is not checked. -/
+def addCheckImports (dir : System.FilePath) (libs : List String) (file : String)
+    (extra : Array Nat := #[]) : GraphM (Array Nat) := do
+  let mut deps := extra
+  if ← (dir / file).pathExists then
+    for m in Module.importsOf (← IO.FS.readFile (dir / file)) do
+      if let some f ← libFileOf dir libs m then
+        if f != file then
+          if let some i ← addCheck dir libs f then deps := deps.push i
+  pure deps
+
+/-- `src → obj → link` for the executable `name` from `file`'s `main`, where `src` makes
+`file`'s C (`build`, or `ir` for a file already checked as a module). -/
+def addLinkFrom (name file : String) (bin : Bool) (src : Nat) : GraphM (Option Nat) := do
+  let some o ← GraphM.add s!"obj {file}" (pure (.obj file, #[src], false)) | return none
+  -- (the link reads the `link_c` files and libraries that `src` lists)
+  GraphM.add s!"link {name}" (pure (.link name file bin, #[o, src], false))
+
+/-- `build → obj → link` for the executable `name` from `file`'s `main`: one job checks
+`file` and emits its IR and C (the source is elaborated once, not once per job). A file
+that is already checked as a package module keeps its check job, and `ir` (which also
+emits the C) follows it. -/
 def addLink (dir : System.FilePath) (libs : List String) (name file : String) (bin : Bool)
     (extra : Array Nat := #[]) : GraphM (Option Nat) := do
-  let some ck ← addCheck dir libs file extra | return none
-  let some ir ← GraphM.add s!"ir {file}" (pure (.ir file, #[ck], false)) | return none
-  let some c ← GraphM.add s!"c {file}" (pure (.c file, #[ir], false)) | return none
-  let some o ← GraphM.add s!"obj {file}" (pure (.obj file, #[c], false)) | return none
-  -- (the link reads the `link_c` files and libraries that `c` lists)
-  GraphM.add s!"link {name}" (pure (.link name file bin, #[o, c], false))
+  if let some ck := (← get).ids[s!"check {file}"]? then
+    let some ir ← GraphM.add s!"ir {file}" (pure (.ir file, #[ck], false)) | return none
+    return ← addLinkFrom name file bin ir
+  let deps ← addCheckImports dir libs file extra
+  let some b ← GraphM.add s!"build {file}" (pure (.build file, deps, false)) | return none
+  addLinkFrom name file bin b
 
 def testExe (file : String) : String := s!"test-{hash file}"
 
@@ -330,8 +355,9 @@ def Runner.prep (r : Runner) (update : Bool) (results : TestResults) (n : Node)
   let tc := r.ctx.tc
   match n.action with
   | .check file => pure (.job { key := ← r.checkKey file, how := .grail (node "check" [str file]), timeoutMs := r.timeoutMs })
-  | .ir file => pure (.job { key := mixHash (hash "ir") (d 0).key, how := .grail (node "ir" [str file]), timeoutMs := r.timeoutMs })
-  | .c file => pure (.job { key := mixHash (hash "c") (d 0).key, how := .grail (node "c" [str file]), timeoutMs := r.timeoutMs })
+  | .build file => pure (.job { key := mixHash (hash "build") (← r.checkKey file), how := .grail (node "build" [str file]), timeoutMs := r.timeoutMs })
+  -- (`ir` also writes the C: its key is new, so an old `ir` directory (without main.c) is not reused)
+  | .ir file => pure (.job { key := mixHash (hash "ir+c") (d 0).key, how := .grail (node "ir" [str file]), timeoutMs := r.timeoutMs })
   | .obj _ =>
     let cFile := (d 0).out / "main.c"
     let cText ← IO.FS.readFile cFile
@@ -654,6 +680,17 @@ def Runner.tests (r : Runner) (targets : List Target) (filters : List String) (u
 
 /-! ## A job, in its own process -/
 
+/-- The IR, C and link text of a checked program. One job writes all three, so a file
+is elaborated once instead of once per job. -/
+def writeCode (out : System.FilePath) (s : CommandState ZeroOneMany) : IO (Except String Unit) :=
+  match mainDecls s with
+  | .error e => pure (.error e)
+  | .ok (ds, io) => do
+    IO.FS.writeFile (out / "main.ir") ("\n".intercalate (ds.toList.map (·.toString)))
+    IO.FS.writeFile (out / "main.c") (C.program ds io (Build.extraC s) s.globals.unboxStructs)
+    IO.FS.writeFile (out / "link.txt") (renderLink (Build.linkOf s))
+    pure (.ok ())
+
 /-- Run one job (`(KIND ARGS…)`), writing into `out`. -/
 def Runner.runJob (r : Runner) (out : System.FilePath) : Sx → IO (Except String Unit)
   | .l #[.a "check", .a file] => do
@@ -664,20 +701,17 @@ def Runner.runJob (r : Runner) (out : System.FilePath) : Sx → IO (Except Strin
     IO.print msgs
     IO.FS.writeFile (out / "messages.txt") msgs
     pure (.ok ())
-  | .l #[.a "ir", .a file] => do
-    match mainDecls (← r.elab file) with
-    | .error e => pure (.error e)
-    | .ok (ds, _) =>
-      IO.FS.writeFile (out / "main.ir") ("\n".intercalate (ds.toList.map (·.toString)))
-      pure (.ok ())
-  | .l #[.a "c", .a file] => do
+  -- (`build`: check, IR and C of a standalone source; `ir`: the same for a file that is
+  -- already checked as a package module)
+  | .l #[.a "build", .a file] => do
+    let l ← r.load file
     let s ← r.elab file
-    match mainDecls s with
-    | .error e => pure (.error e)
-    | .ok (ds, io) =>
-      IO.FS.writeFile (out / "main.c") (C.program ds io (Build.extraC s) s.globals.unboxStructs)
-      IO.FS.writeFile (out / "link.txt") (renderLink (Build.linkOf s))
-      pure (.ok ())
+    let msgs := render file l s
+    if hasErrors s then return .error msgs
+    IO.print msgs
+    IO.FS.writeFile (out / "messages.txt") msgs
+    writeCode out s
+  | .l #[.a "ir", .a file] => do writeCode out (← r.elab file)
   | .l #[.a "run-on", .a exe, .a input, .a file] => do
     runOn exe (← IO.FS.readFile input) out file
   | .l #[.a "test", .a file, .a kind, .a exe] => do

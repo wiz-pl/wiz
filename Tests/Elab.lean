@@ -358,12 +358,12 @@ def main : IO Unit := IO.bind twice (fun _ => twice)
 
 /-- Build `main` with the C backend and compare its printed value. Skipped (passes) if
 the C toolchain can't find GMP: give the suite a toolchain (`Tests/Main.lean`) to run these. -/
-def cRun (src : String) (expected : String) (llvm : Bool := false) : IO Unit := do
+def cRun (src : String) (expected : String) (llvm : Bool := false) (split : Nat := 0) : IO Unit := do
   let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := ← preludeLoader }
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
   unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
   let dir ← IO.FS.createTempDir
-  match ← Build.runGlobal (← toolchain) s "main" dir llvm with
+  match ← Build.runGlobal (← toolchain) s "main" dir llvm (split := split) with
   | .ok v => checkEq expected v
   | .error e =>
     let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
@@ -693,7 +693,7 @@ inductive MTm where
   | transp (A a P p b e : MTm)
   | desc (l : Nat) (I : MTm)
   | dret (i : MTm)
-  /-- (21w) a field's quantity, last (ω by default) -/
+  /-- (21x) a field's quantity, last (ω by default) -/
   | darg (S E : MTm) (q : ZeroOneMany := .many)
   | drec (j E : MTm) (q : ZeroOneMany := .many)
   | dhrec (H j E : MTm) (q : ZeroOneMany := .many)
@@ -992,7 +992,7 @@ partial def ofTerm : Term ZeroOneMany → Option MTm
   | .prf _ t => ofTerm t
   | _ => none
 
-/-- (21w) a description field's quantity, as `Kernel.wiz`'s `show` prints it: nothing at ω -/
+/-- (21x) a description field's quantity, as `Kernel.wiz`'s `show` prints it: nothing at ω -/
 def fieldQPre : ZeroOneMany → String
   | .zero => "0 "
   | .one => "1 "

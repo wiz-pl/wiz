@@ -193,8 +193,8 @@ def group : Group where
         let init : St := { trustedModule := Tests.libModule, loader := fun m => if m == "Prelude" then some p else none, termInfo := true }
         let src := tacticSrc ++ "def f (n : Nat) : Nat := Nat.add n _\ndef h := Nat.add 1 2\n"
         let dir ← IO.FS.createTempDir
-        let (cold, _) ← Cache.elaborateCached dir src init 0
-        let (warm, hits) ← Cache.elaborateCached dir src init 0
+        let (cold, _) ← Cache.elaborateCached (some dir) [] src init 0
+        let (warm, hits) ← Cache.elaborateCached (some dir) [] src init 0
         check (hits > 0) "nothing came from the cache"
         checkEq cold.infos.size warm.infos.size
         for off in [offAfter src "intro A", offAfter src "intro x", offAfter src "n _" (-1), offAfter src "Nat.add 1"] do

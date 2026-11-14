@@ -31,7 +31,6 @@ on:
       - scripts/bundle-cc.sources
       - scripts/release-licenses/**
       - .github/workflows/release.yml
-      - Tower/**
       - tower/**
       - scripts/build-tower-wiz.sh
       - scripts/release-snapshots.sh
@@ -207,9 +206,10 @@ jobs:
         run: |
           set -eu
           if [ ! -d tower ] || [ ! -f scripts/build-tower-wiz.sh ]; then
-            # A dispatched commit before 26e: build its own (Lean) tower.
-            lake build tower
-            exit 0
+            # Every commit with the Wiz tower (26e and later) has both; an older commit
+            # has no shipped tower, and a Lean build step is no longer used here.
+            echo "::error::commit $GITHUB_SHA predates the Wiz tower (tower/, 26e)"
+            exit 1
           fi
           # The bundled C toolchain links GMP statically and targets the tarball's glibc
           # 2.27; without a bundle (an older commit), the system cc and GMP do.

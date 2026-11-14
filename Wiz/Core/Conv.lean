@@ -299,6 +299,11 @@ mutual
 partial def conv (g : Globals R) (tys : Array (VTy R)) (ty : VTy R) (a b : Val R) : Bool :=
   -- (P2, `lazyProofs`) proof irrelevance first, so that a glued proof is never unfolded
   if g.lazyProofs && isProp g tys ty then true else
+  -- a `Nat` operation with a zero argument that makes the other one irrelevant
+  -- (`Nat.mul 0 x`, `Nat.add 0 x`, …): reduce it *before* `convGlued` descends into `x`
+  -- (a stuck application, perhaps the comparison being decided).
+  let a := vNatStep g a
+  let b := vNatStep g b
   -- glued values with the same head: compare the spines first, unfold if that fails
   if let some r := convGlued g tys a b then r || conv g tys ty (whnf a) (whnf b) else
   let a := whnf a

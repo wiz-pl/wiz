@@ -10,6 +10,9 @@ def usage : String := "usage:
   wiz check [-I DIR] FILE elaborate and type check (quantities: 0, 1, ω); -I DIR: another
                           module root (a package's src/), before or after FILE
   wiz build FILE -o OUT [--llvm]   compile the definition `main` to an executable (via C or LLVM)
+  wiz build FILE -o OUT [--split N]  compile the program as N C units in parallel
+                                   (default 1: one unit; a split build is faster but the
+                                   generated program runs somewhat slower, stage 15k)
   wiz build FILE -o OUT --lib      … or the exported functions to an object file, with OUT.h
   wiz build FILE -o OUT --no-main  … or the exported functions, linked without a `main`
                                    (say, a Wasm module: --cc emcc --ldflags --no-entry)
@@ -25,7 +28,12 @@ def usage : String := "usage:
   wiz lsp … --web DIR              the web infoview's files, served on the WebSocket's port
                                    (default: share/wiz/web, or web/out in a checkout)
 options: --cache DIR (the elaboration cache, default ~/.cache/wiz; shared, since it is
-content-addressed), --no-cache, -I DIR (another module root, after lib/)
+content-addressed), --cache-ro DIR (repeatable: a read-only cache, searched in order
+after the write cache and never written, as in a Nix package's share/wiz/cache),
+--no-cache (both), -I DIR (another module root, after lib/)
+  --region-cache (experimental: also serve cached modules from mmap'ed .wizr regions,
+  read from the same caches and written to the write cache), --region-stats (print what
+  the regions served, with --region-cache)
 trust: --trust-native (27a: `def X : a = b := native_refl` is decided by running a and b;
 the kernel does not check it, `#print axioms` lists it), --native-fuel N (its step limit)
 experimental kernel options (D1, they turn the cache off): --regularity off|full (full:
@@ -137,6 +145,32 @@ initialize inertOpt : IO.Ref InertReg ← IO.mkRef .conv
 representation is not stable under substitution (`unboxedSigma` in `Erase.lean`). -/
 initialize unboxOpt : IO.Ref Bool ← IO.mkRef false
 
+/-- `--region-cache` (experimental): serve a module's cached effects from an mmap'ed `.wizr`
+region instead of decoding its `.wizc` entries. The text entries stay the authority and the
+fallback; off by default. -/
+initialize regionCacheOpt : IO.Ref Bool ← IO.mkRef false
+
+/-- `--region-stats`: with `--region-cache`, print what the regions served (to stderr). -/
+initialize regionStatsOpt : IO.Ref Bool ← IO.mkRef false
+
+/-- `--region-stats`' counters (per process). -/
+initialize regionStats : IO.Ref Cache.RegionCounts ← IO.mkRef {}
+
+/-- (15k) `--split N`: compile a large program as `N` C translation units in parallel
+(0: automatically, for a large program; 1: one unit). -/
+initialize splitOpt : IO.Ref Nat ← IO.mkRef 0
+
+/-- Take `--split N` out of the arguments. -/
+def takeSplitOpt : List String → Except String (Option Nat × List String)
+  | "--split" :: n :: rest => do
+    let some k := n.toNat? | throw s!"bad --split {n}"
+    let (_, rest) ← takeSplitOpt rest
+    return (some k, rest)
+  | a :: rest => do
+    let (k, rest) ← takeSplitOpt rest
+    return (k, a :: rest)
+  | [] => return (none, [])
+
 /-- Take `--inert MODE` out of the arguments. -/
 def takeInertOpt : List String → Except String (Option InertReg × List String)
   | "--inert" :: m :: rest => do
@@ -181,16 +215,18 @@ def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandSta
       trustedModule := own.contains, trustNative := tc.trustNative,
       nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := ← tc.smt.resolve }
   -- the cache doesn't know the experimental options
-  let cache := if regularity == .off && !predicativeProp && lazyProofs && inertReg == .conv && !unboxStructs &&
+  let cacheOn := regularity == .off && !predicativeProp && lazyProofs && inertReg == .conv && !unboxStructs &&
       proofSteps == Budget.defaultSteps && !traceProofSteps && !(← strictPrivacyOpt.get) && !(← ppAllOpt.get)
-    then tc.cacheDir else none
-  match cache with
-  | none => Cache.elaborateUncached input init
-  | some dir =>
+  if cacheOn && (tc.cacheDir.isSome || !tc.readCaches.isEmpty) then
     -- the key starts from the headers the file sees; modules enter it by their own keys
     let key₀ := hash (toString (headers.toList.map (·.2)))
-    pure (← Cache.elaborateCached dir input init key₀).1
-
+    let region ← if ← regionCacheOpt.get then
+        pure (some ({ rig := RigTag.tag (R := ZeroOneMany), stats := some regionStats } :
+          Cache.RegionOptions))
+      else pure none
+    pure (← Cache.elaborateCached tc.cacheDir tc.readCaches input init key₀ (region := region)).1
+  else
+    Cache.elaborateUncached input init
 /-- (27a) `--trust-native` and `--native-fuel N`. -/
 def nativeOpts (tc : Toolchain) : Bool × Nat := (tc.trustNative, tc.nativeFuel.getD NativeRun.defaultFuel)
 
@@ -270,6 +306,9 @@ def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
   for m in s.messages do
     let line := s!"{path}:{m.render input}"
     if m.severity == .error then IO.eprintln line else IO.println line
+  if ← regionStatsOpt.get then
+    let c ← regionStats.get
+    IO.eprintln s!"region cache: {c.hits} modules from a region, {c.misses} without, {c.commands} commands"
   pure (if s.messages.any (·.severity == .error) then 1 else 0)
 
 def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOneMany)) := do
@@ -279,16 +318,17 @@ def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOne
     if m.severity == .error then IO.eprintln s!"{path}:{m.render input}"
   pure (if s.messages.any (·.severity == .error) then none else some s)
 
-def buildCmd (tc : Toolchain) (path out : String) (llvm : Bool) (lib : Bool := false) (noMain : Bool := false) : IO UInt32 := do
+def buildCmd (tc : Toolchain) (path out : String) (llvm : Bool) (lib : Bool := false) (noMain : Bool := false)
+    (split : Nat := 0) : IO UInt32 := do
   let some s ← elabFile tc path | pure 1
-  match ← Build.build tc s "main" out llvm lib noMain with
+  match ← Build.build tc s "main" out llvm lib noMain split with
   | .error e => IO.eprintln e; pure 1
   | .ok _ => pure 0
 
-def runCmd (tc : Toolchain) (path : String) (llvm : Bool) : IO UInt32 := do
+def runCmd (tc : Toolchain) (path : String) (llvm : Bool) (split : Nat := 0) : IO UInt32 := do
   let some s ← elabFile tc path | pure 1
   let dir ← IO.FS.createTempDir
-  match ← Build.runGlobal tc s "main" dir llvm with
+  match ← Build.runGlobal tc s "main" dir llvm (split := split) with
   | .error e => IO.eprintln e; pure 1
   | .ok v => IO.print (if v.endsWith "\n" then v else v ++ "\n"); pure 0
 
@@ -324,6 +364,10 @@ def main (args : List String) : IO UInt32 := do
   let args := args.filter (· != "--pp-all")
   if args.contains "--unbox-structs" then unboxOpt.set true
   let args := args.filter (· != "--unbox-structs")
+  regionCacheOpt.set (args.contains "--region-cache")
+  let args := args.filter (· != "--region-cache")
+  regionStatsOpt.set (args.contains "--region-stats")
+  let args := args.filter (· != "--region-stats")
   lazyProofsOpt.set (!args.contains "--eager-proofs")
   let args := args.filter (· != "--eager-proofs")
   let args ← match takeProofSteps args with
@@ -333,26 +377,32 @@ def main (args : List String) : IO UInt32 := do
     | .ok (r, a) => do if let some r := r then inertOpt.set r
                        pure a
     | .error e => do IO.eprintln e; return 1
+  let args ← match takeSplitOpt args with
+    | .ok (k, a) => do
+      if let some k := k then splitOpt.set k
+      pure a
+    | .error e => do IO.eprintln e; return 1
   let args ← match kernelOpt args with
     | .ok (r, p, a) => do kernelOpts.set (r, p); pure a
     | .error e => do IO.eprintln e; return 1
   -- a `panic!` (a kernel-internal failure) ends a batch command with status 1 instead of
   -- going on with a default value; the language server keeps running
   unless args.head? == some "lsp" do exitOnPanic
+  let split ← splitOpt.get
   match args with
   | ["parse", path] => parseCmd path
   | ["check", path] => checkCmd tc path
-  | ["build", path, "-o", out] => buildCmd tc path out false
-  | ["build", path, "-o", out, "--llvm"] => buildCmd tc path out true
-  | ["build", path, "-o", out, "--lib"] => buildCmd tc path out false true
+  | ["build", path, "-o", out] => buildCmd tc path out false (split := split)
+  | ["build", path, "-o", out, "--llvm"] => buildCmd tc path out true (split := split)
+  | ["build", path, "-o", out, "--lib"] => buildCmd tc path out false true (split := split)
   | ["build", path, "-o", out, "--lib", "--llvm"] | ["build", path, "-o", out, "--llvm", "--lib"] =>
-    buildCmd tc path out true true
-  | ["build", path, "-o", out, "--no-main"] => buildCmd tc path out false false true
+    buildCmd tc path out true true (split := split)
+  | ["build", path, "-o", out, "--no-main"] => buildCmd tc path out false false true (split := split)
   | ["build", path, "-o", out, "--no-main", "--llvm"] | ["build", path, "-o", out, "--llvm", "--no-main"] =>
-    buildCmd tc path out true false true
+    buildCmd tc path out true false true (split := split)
   | "doc" :: rest => docCmd tc rest
-  | ["run", path] => runCmd tc path false
-  | ["run", path, "--llvm"] => runCmd tc path true
+  | ["run", path] => runCmd tc path false (split := split)
+  | ["run", path, "--llvm"] => runCmd tc path true (split := split)
   | "lsp" :: opts => do
     match lspOptions opts with
     | none => IO.println usage; pure 2

@@ -22,6 +22,37 @@ def mkTree (files : List (String × String)) : IO System.FilePath := do
 
 def loaderOf (m : Std.HashMap Name (System.FilePath × String)) : Name → Option String := fun n => (m[n]?).map (·.2)
 
+/-- Every file under `dir`, as (path relative to `root`, modification time, hash of the
+contents), sorted by path: a read-only cache must leave this unchanged. The contents are
+read as bytes (a `.wizr` region is not UTF-8). -/
+partial def snapshotAt (root dir : System.FilePath) : IO (List (String × String × UInt64)) := do
+  let mut out := []
+  for e in ← dir.readDir do
+    if ← e.path.isDir then
+      out := out ++ (← snapshotAt root e.path)
+    else
+      let md ← e.path.metadata
+      let bytes ← IO.FS.readBinFile e.path
+      let rel := (e.path.toString.drop root.toString.length).toString
+      out := out ++ [(rel, s!"{md.modified.sec}.{md.modified.nsec}", hash bytes.toList)]
+  pure out
+
+def snapshot (dir : System.FilePath) : IO (List (String × String × UInt64)) := do
+  pure ((← snapshotAt dir dir).mergeSort (fun a b => a.1 < b.1))
+
+/-- A digest of one cached effect, for comparing the text path with the region path
+(the effect types have no `BEq`: terms are not compared structurally). -/
+def effectSig (e : Cache.Effect ZeroOneMany) : String :=
+  s!"{e.decls.toList.map (·.name)}|{e.messages.toList.map (·.text)}|{e.infos.size}|" ++
+  s!"{e.sites.size}|{e.docs.size}|{e.instances.size}|{e.builtins.length}"
+
+def effectSigs (es : Array (Cache.Effect ZeroOneMany)) : List String := es.toList.map effectSig
+
+/-- The `.wizr` module regions in a cache directory. -/
+def regionFiles (cache : System.FilePath) : IO (Array System.FilePath) := do
+  let entries ← cache.readDir
+  pure (entries.filter (fun e => e.fileName.endsWith ".wizr") |>.map (·.path))
+
 /-- A small library: `Data.Two` (in a subdirectory) imports `Prelude`; `Use` imports it. -/
 def libFiles : List (String × String) :=
   [("Data/Two.wiz", "import Prelude\ndef two : Nat := 2\n"),
@@ -85,21 +116,118 @@ def modulesGroup : Group where
         let cache ← IO.FS.createTempDir
         let ms ← Module.loadAll ["lib", dir]
         let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
-        let (_, h1) ← Cache.elaborateCached cache "import Data.Two\ndef a : Nat := two\n" init 0
+        let (_, h1) ← Cache.elaborateCached (some cache) [] "import Data.Two\ndef a : Nat := two\n" init 0
         checkEq 0 h1
         -- another file: the modules come from the cache (Prelude's commands, and `two`)
-        let (s, h2) ← Cache.elaborateCached cache "import Use\ndef b : Nat := four\n" init 0
+        let (s, h2) ← Cache.elaborateCached (some cache) [] "import Use\ndef b : Nat := four\n" init 0
         check s.messages.isEmpty s!"messages: {s.messages.toList.map (·.text)}"
         check (h2 > 100) s!"only {h2} commands came from the cache"
         -- no temporary files are left behind
         for e in ← cache.readDir do
           check ((e.fileName.splitOn ".tmp").length == 1) s!"left behind: {e.fileName}" },
+    { name := "a layered cache: write shadows reads, reads in order, misses and corruption fall through", run := fun _ => do
+        let binary : UInt64 := 11
+        let k : UInt64 := 4242
+        let e (tag : String) : Cache.Effect ZeroOneMany := { cCode := #[tag] }
+        let tag (o : Option (Cache.Effect ZeroOneMany)) : Option String := o.bind fun e => e.cCode.toList.head?
+        let write ← IO.FS.createTempDir
+        let r1 ← IO.FS.createTempDir
+        let r2 ← IO.FS.createTempDir
+        let name := s!"{mixHash binary k}.wizc"
+        IO.FS.writeFile (r1 / name) (e "r1").toSx.render
+        IO.FS.writeFile (r2 / name) (e "r2").toSx.render
+        let store ← Cache.Store.layered (R := ZeroOneMany) (some write) [r1, r2] binary
+        -- the write cache shadows a stale read cache; reads are searched in order
+        checkEq (some "r1") (tag (← store.get k))
+        store.put k (e "write")
+        checkEq (some "write") (tag (← store.get k))
+        IO.FS.removeFile (write / name)
+        checkEq (some "r1") (tag (← store.get k))
+        IO.FS.removeFile (r1 / name)
+        checkEq (some "r2") (tag (← store.get k))
+        -- an unparsable entry is a miss, not an error
+        IO.FS.writeFile (r1 / name) "(this is not an effect"
+        checkEq (some "r2") (tag (← store.get k))
+        IO.FS.removeFile (r2 / name)
+        checkEq (none : Option String) (tag (← store.get k))
+        IO.FS.writeFile (write / name) "garbage"
+        IO.FS.writeFile (r2 / name) (e "r2").toSx.render
+        checkEq (some "r2") (tag (← store.get k))
+        store.put k (e "again")
+        checkEq (some "again") (tag (← store.get k))
+        -- a store with no write cache writes nowhere (put is a no-op)
+        let before ← snapshot r1
+        let roStore ← Cache.Store.layered (R := ZeroOneMany) none [r1] binary
+        roStore.put k (e "nowhere")
+        checkEq (repr before).pretty (repr (← snapshot r1)).pretty
+        checkEq (none : Option String) (tag (← roStore.get k))
+        -- seen: a marker in any cache; markSeen: only the write cache (or memory)
+        let k2 : UInt64 := 777
+        IO.FS.writeFile (r2 / s!"{mixHash binary k2}.wizm") "M"
+        checkEq true (← store.seen k2)
+        checkEq false (← store.seen 778)
+        checkEq (repr before).pretty (repr (← snapshot r1)).pretty
+        let memory ← Cache.Store.layered (R := ZeroOneMany) none [] binary
+        checkEq false (← memory.seen 779)
+        memory.markSeen 779 "M"
+        checkEq true (← memory.seen 779) },
+    { name := "a read-only cache replays modules and is never written", run := fun _ => do
+        let ms ← Module.loadAll ["lib"]
+        let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
+        let src := "import Prelude\ndef a : Nat := 1 + 1\n#eval a\n"
+        let ro ← IO.FS.createTempDir
+        let (_, h0) ← Cache.elaborateCached (some ro) [] src init 0 (binary := some 1)
+        checkEq 0 h0
+        let before ← snapshot ro
+        -- only a read cache: modules replay, nothing errors, nothing is written
+        let (s1, h1) ← Cache.elaborateCached none [ro] src init 0 (binary := some 1)
+        check (h1 > 0) "nothing came from the read-only cache"
+        check (!s1.messages.any (·.severity == .error)) s!"messages: {s1.messages.toList.map (·.text)}"
+        checkEq (repr before).pretty (repr (← snapshot ro)).pretty
+        -- with a write cache too: the read cache still stays as it was, and the new
+        -- entries land only in the write cache
+        let write ← IO.FS.createTempDir
+        let src2 := src ++ "def extra : Nat := 7\n#eval extra\n"
+        let (s2, h2) ← Cache.elaborateCached (some write) [ro] src2 init 0 (binary := some 1)
+        check (h2 > 0) "nothing came from the read-only cache"
+        check (!s2.messages.any (·.severity == .error)) s!"messages: {s2.messages.toList.map (·.text)}"
+        checkEq (repr before).pretty (repr (← snapshot ro)).pretty
+        checkEq (repr ((runFrontend src2 init).messages.toList.map (·.render src2))).pretty
+          (repr (s2.messages.toList.map (·.render src2))).pretty
+        check ((← write.readDir).size > 0) "nothing was written to the write cache"
+        for entry in ← write.readDir do
+          check (!(← (ro / entry.fileName).pathExists)) s!"also written to the read-only cache: {entry.fileName}" },
+    { name := "the command line: a warm and an empty read-only cache plus a write cache match --no-cache", run := fun _ => do
+        let wiz := ((← IO.appPath).parent.getD ".") / "wiz"
+        unless ← wiz.pathExists do skip "no wiz binary"; return
+        let dir ← mkTree [("main.wiz", "import M\ndef n : Nat := two + 3\n#eval n\n"),
+                          ("M.wiz", "import Prelude\ndef two : Nat := 2\n")]
+        let ro := dir / "ro"
+        IO.FS.createDirAll ro
+        let empty := dir / "empty"
+        IO.FS.createDirAll empty
+        let write := dir / "write"
+        let run (args : List String) : IO IO.Process.Output :=
+          IO.Process.output { cmd := wiz.toString, args := args.toArray, cwd := some dir }
+        let base := ["check", "main.wiz", "-I", "."]
+        let cold ← run (["--cache", ro.toString] ++ base)
+        checkEq 0 cold.exitCode
+        check ((cold.stdout.splitOn "info: 5").length > 1) s!"cold: {cold.stdout}{cold.stderr}"
+        let before ← snapshot ro
+        let cached ← run (["--cache-ro", ro.toString, "--cache-ro", empty.toString, "--cache", write.toString] ++ base)
+        let plain ← run (["--no-cache"] ++ base)
+        checkEq 0 cached.exitCode
+        checkEq plain.exitCode cached.exitCode
+        checkEq plain.stdout cached.stdout
+        checkEq plain.stderr cached.stderr
+        checkEq (repr before).pretty (repr (← snapshot ro)).pretty
+        check ((← write.readDir).size > 0) "the write cache stayed empty" },
     { name := "editing a module re-elaborates only it and what imports it", run := fun _ => do
         let dir ← mkTree libFiles
         let cache ← IO.FS.createTempDir
         let elabSrc (src : String) : IO Nat := do
           let ms ← Module.loadAll ["lib", dir]
-          let (s, h) ← Cache.elaborateCached cache src ({ trustedModule := Tests.libModule, loader := loaderOf ms } : CommandState ZeroOneMany) 0
+          let (s, h) ← Cache.elaborateCached (some cache) [] src ({ trustedModule := Tests.libModule, loader := loaderOf ms } : CommandState ZeroOneMany) 0
           check (!s.messages.any (·.severity == .error)) s!"messages: {s.messages.toList.map (·.text)}"
           pure h
         let src := "import Use\nimport Other\ndef c : Nat := four + one\n"
@@ -114,7 +242,7 @@ def modulesGroup : Group where
         let dir ← mkTree [("Sneaky.wiz", "def three : Nat := 3\n")]
         let ms ← Module.loadAll ["lib", dir]
         let cache ← IO.FS.createTempDir
-        let (s, _) ← Cache.elaborateCached cache "import Prelude\nimport Sneaky\n" ({ trustedModule := Tests.libModule, loader := loaderOf ms } : CommandState ZeroOneMany) 0
+        let (s, _) ← Cache.elaborateCached (some cache) [] "import Prelude\nimport Sneaky\n" ({ trustedModule := Tests.libModule, loader := loaderOf ms } : CommandState ZeroOneMany) 0
         check (s.messages.any fun m => (m.text.splitOn "module Sneaky has errors").length > 1)
           s!"Sneaky used Nat without importing Prelude: {s.messages.toList.map (·.text)}" },
     { name := "without the cache too", run := fun _ => do
@@ -164,8 +292,8 @@ def modulesGroup : Group where
         -- every way a file is elaborated: wiz check (cold and warm cache, no cache), the
         -- frontend, the language server's engine
         let paths (src : String) : IO (List (String × CommandState ZeroOneMany)) := do
-          let cold := (← Cache.elaborateCached cache src init 0).1
-          let warm := (← Cache.elaborateCached cache src init 0).1
+          let cold := (← Cache.elaborateCached (some cache) [] src init 0).1
+          let warm := (← Cache.elaborateCached (some cache) [] src init 0).1
           pure [("cold cache", cold), ("warm cache", warm), ("no cache", ← Cache.elaborateUncached src init),
                 ("runFrontend", runFrontend src init), ("Query", (Query.elaborate {} src { init with termInfo := true }).1)]
         let clash (s : CommandState ZeroOneMany) : Bool := s.messages.any fun m =>
@@ -179,7 +307,7 @@ def modulesGroup : Group where
             check (clash s) s!"{how}: no clash reported for\n{src}\n{s.messages.toList.map (·.text)}"
             check (!s.globals.contains "boom") s!"{how}: boom : Empty was accepted for\n{src}"
         -- the message names both modules
-        let (s, _) ← Cache.elaborateCached cache "import M.A\nimport M.B\n" init 0
+        let (s, _) ← Cache.elaborateCached (some cache) [] "import M.A\nimport M.B\n" init 0
         check (s.messages.any fun m => m.text == "'b' is declared by both module M.A and module M.B")
           s!"{s.messages.toList.map (·.text)}"
         for (how, s) in ← paths "import M.A\ndef b : Bool := Bool.false\n" do
@@ -204,10 +332,10 @@ def modulesGroup : Group where
         -- a module whose dependency changed is elaborated again, not replayed from the
         -- cache: M.A's `pa` no longer holds once its `b` is `false`
         let src := "import M.A\n" ++ boomA
-        let (s, _) ← Cache.elaborateCached cache src init 0
+        let (s, _) ← Cache.elaborateCached (some cache) [] src init 0
         check (s.messages.any (·.severity == .error)) "pa : false = true with b = true"
         let ms' := ms.insert "M.A" (dir / "M/A.wiz", "import M.Base\ndef b : Bool := Bool.false\ndef pa : b = Bool.true := refl Bool.true\n")
-        let (s, _) ← Cache.elaborateCached cache src { init with loader := loaderOf ms' } 0
+        let (s, _) ← Cache.elaborateCached (some cache) [] src { init with loader := loaderOf ms' } 0
         check (s.messages.any fun m => (m.text.splitOn "module M.A has errors").length > 1)
           s!"the changed M.A was replayed: {s.messages.toList.map (·.text)}"
         check (!s.globals.contains "boom") "boom accepted after M.A changed" },
@@ -222,8 +350,8 @@ def modulesGroup : Group where
         let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
         let cache ← IO.FS.createTempDir
         let paths (src : String) : IO (List (String × CommandState ZeroOneMany)) := do
-          let cold := (← Cache.elaborateCached cache src init 0).1
-          let warm := (← Cache.elaborateCached cache src init 0).1
+          let cold := (← Cache.elaborateCached (some cache) [] src init 0).1
+          let warm := (← Cache.elaborateCached (some cache) [] src init 0).1
           pure [("cold cache", cold), ("warm cache", warm), ("no cache", ← Cache.elaborateUncached src init),
                 ("runFrontend", runFrontend src init), ("Query", (Query.elaborate {} src { init with termInfo := true }).1)]
         let src := "import P.A\nimport P.B\n#eval fa\n#eval fb\ndef helper : Nat := 5\n#eval helper\n"
@@ -240,8 +368,8 @@ def modulesGroup : Group where
         let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
         let cache ← IO.FS.createTempDir
         let paths (src : String) : IO (List (String × CommandState ZeroOneMany)) := do
-          let cold := (← Cache.elaborateCached cache src init 0).1
-          let warm := (← Cache.elaborateCached cache src init 0).1
+          let cold := (← Cache.elaborateCached (some cache) [] src init 0).1
+          let warm := (← Cache.elaborateCached (some cache) [] src init 0).1
           pure [("cold cache", cold), ("warm cache", warm), ("no cache", ← Cache.elaborateUncached src init),
                 ("runFrontend", runFrontend src init), ("Query", (Query.elaborate {} src { init with termInfo := true }).1)]
         -- (the importer may have a `Color` of its own)
@@ -267,8 +395,8 @@ def modulesGroup : Group where
         let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
         let cache ← IO.FS.createTempDir
         let paths (src : String) : IO (List (String × CommandState ZeroOneMany)) := do
-          let cold := (← Cache.elaborateCached cache src init 0).1
-          let warm := (← Cache.elaborateCached cache src init 0).1
+          let cold := (← Cache.elaborateCached (some cache) [] src init 0).1
+          let warm := (← Cache.elaborateCached (some cache) [] src init 0).1
           pure [("cold cache", cold), ("warm cache", warm), ("no cache", ← Cache.elaborateUncached src init),
                 ("runFrontend", runFrontend src init)]
         let src := "import Q.M\n#eval three\n#eval shown\ndef x := Od.s\n"
@@ -282,7 +410,7 @@ def modulesGroup : Group where
         let ms ← Module.loadAll ["lib"]
         let src := "import Prelude\ndef y : Nat := 2 + 2\n#print axioms y\n"
         let run (trusted : Name → Bool) : IO (CommandState ZeroOneMany) := do
-          pure (← Cache.elaborateCached cache src ({ trustedModule := trusted, loader := loaderOf ms } : CommandState ZeroOneMany) 0).1
+          pure (← Cache.elaborateCached (some cache) [] src ({ trustedModule := trusted, loader := loaderOf ms } : CommandState ZeroOneMany) 0).1
         let unchecked (s : CommandState ZeroOneMany) : Nat :=
           (s.messages.filter fun m => (m.text.splitOn "is not checked").length > 1).size
         let axiomsOf (s : CommandState ZeroOneMany) : String :=
@@ -314,12 +442,179 @@ def modulesGroup : Group where
         let dir ← mkTree [("A.wiz", "import B\n"), ("B.wiz", "import A\n")]
         let ms ← Module.loadAll [dir]
         let cache ← IO.FS.createTempDir
-        let (s, _) ← Cache.elaborateCached cache "import A\n" ({ trustedModule := Tests.libModule, loader := loaderOf ms } : CommandState ZeroOneMany) 0
+        let (s, _) ← Cache.elaborateCached (some cache) [] "import A\n" ({ trustedModule := Tests.libModule, loader := loaderOf ms } : CommandState ZeroOneMany) 0
         check (s.messages.any fun m => (m.text.splitOn "import cycle").length > 1)
           s!"messages: {s.messages.toList.map (·.text)}"
         let s := runFrontend (R := ZeroOneMany) "import A\n" { trustedModule := Tests.libModule, loader := loaderOf ms }
         check (s.messages.any fun m => (m.text.splitOn "import cycle").length > 1)
-          s!"runFrontend: {s.messages.toList.map (·.text)}" }
+          s!"runFrontend: {s.messages.toList.map (·.text)}" },
+    { name := "a module region round-trips (one artifact per module, tags checked)", run := fun _ => do
+        -- (`--region-cache`: the module's effects as one mmap'able artifact)
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 1 + 1\ndef y : Nat := x + x\n")]
+        let ms ← Module.loadAll ["lib", dir]
+        let cache ← IO.FS.createTempDir
+        let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
+        let rig := RigTag.tag (R := ZeroOneMany)
+        let (s, _) ← Cache.elaborateCached (some cache) [] "import M\n#eval y\n" init 0 (region := some { rig })
+        check (!s.messages.any (·.severity == .error)) s!"messages: {s.messages.toList.map (·.text)}"
+        let binary ← Cache.binaryId (some cache)
+        let k := Cache.moduleKey (loaderOf ms) (fun _ => none) 0 "M" (trusted := Tests.libModule)
+        -- one region for the module, not one per command
+        let regs ← regionFiles cache
+        checkEq 1 (regs.filter (fun p => p.fileName == some (Cache.regionFileName binary k))).size
+        let some a ← Cache.readModuleRegion (R := ZeroOneMany) cache binary rig k
+          | throw (IO.userError "M has no region")
+        checkEq "M" a.module
+        checkEq k a.key
+        checkEq Cache.regionFormat a.format
+        checkEq Cache.salt a.textSalt
+        checkEq Cache.regionMagic a.magic
+        check (a.effects.size > 0) "the region holds no effects"
+        check (!a.complete) "M imports Prelude, so it is not complete"
+        check (a.rerun.size > 0) "M's import is not recorded for the rerun path"
+        -- (a pure cache: write the effects back out and read them; every field survives)
+        let dir2 ← IO.FS.createTempDir
+        Cache.writeModuleRegion dir2 binary rig (k + 1) "M" a.effects a.keys a.complete a.rerun
+        let some b ← Cache.readModuleRegion (R := ZeroOneMany) dir2 binary rig (k + 1)
+          | throw (IO.userError "the region written for M does not read back")
+        checkEq (effectSigs a.effects) (effectSigs b.effects)
+        checkEq a.keys.toList b.keys.toList
+        checkEq a.effects.size a.keys.size
+        checkEq (k + 1) b.key
+        -- (the tags are checked: another rig, format or key is not this module's artifact)
+        check (b.fits binary (k + 1) rig) "a region does not fit itself"
+        check (!(b.fits binary (k + 1) "nat")) "the rig is not checked"
+        check (!(b.fits binary (k + 2) rig)) "the key is not checked"
+        let badFormat : Cache.ModuleArtifact ZeroOneMany := { b with format := 999 }
+        check (!(badFormat.fits binary (k + 1) rig)) "the format is not checked"
+        let badBinary : Cache.ModuleArtifact ZeroOneMany := { b with binary := binary + 1 }
+        check (!(badBinary.fits binary (k + 1) rig)) "the binary is not checked"
+        let badSalt : Cache.ModuleArtifact ZeroOneMany := { b with textSalt := Cache.salt + 1 }
+        check (!(badSalt.fits binary (k + 1) rig)) "the salt is not checked" },
+    { name := "a corrupt or mismatched region is a miss (the text cache answers)", run := fun _ => do
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 1\n")]
+        let ms ← Module.loadAll ["lib", dir]
+        let cache ← IO.FS.createTempDir
+        let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
+        let rig := RigTag.tag (R := ZeroOneMany)
+        let stats ← IO.mkRef ({} : Cache.RegionCounts)
+        let opts : Cache.RegionOptions := { rig, stats := some stats }
+        let src := "import M\n#eval x\n"
+        let (s0, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
+        let good := s0.messages.toList.map (·.render src)
+        check (!s0.messages.any (·.severity == .error)) s!"messages: {good}"
+        let before ← stats.get
+        let _ ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
+        check ((← stats.get).hits > before.hits) "the warm run did not come from a region"
+        -- (a truncated region: a miss, not an error, and the run is rewritten)
+        for f in ← regionFiles cache do IO.FS.writeFile f ""
+        let after ← stats.get
+        let (s1, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
+        checkEq good (s1.messages.toList.map (·.render src))
+        check ((← stats.get).misses > after.misses) "a truncated region was not a miss"
+        for f in ← regionFiles cache do
+          check ((← f.metadata).byteSize > 0) s!"{f} was not rewritten"
+        -- (a region with the wrong format is rejected and rewritten, too)
+        let binary ← Cache.binaryId (some cache)
+        let k := Cache.moduleKey (loaderOf ms) (fun _ => none) 0 "M" (trusted := Tests.libModule)
+        Cache.writeRegionFile (R := ZeroOneMany) (cache / Cache.regionFileName binary k)
+          { magic := Cache.regionMagic, format := 999, binary, textSalt := Cache.salt, rig,
+            module := "M", key := k }
+        let after2 ← stats.get
+        let (s2, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
+        checkEq good (s2.messages.toList.map (·.render src))
+        check ((← stats.get).misses > after2.misses) "a mismatched region was not a miss"
+        let some a ← Cache.readModuleRegion (R := ZeroOneMany) cache binary rig k
+          | throw (IO.userError "the mismatched region was not rewritten")
+        checkEq Cache.regionFormat a.format
+        check (a.effects.size > 0) "the rewritten region holds no effects" },
+    { name := "a warm run is served from the module region, with the same state", run := fun _ => do
+        let dir ← mkTree libFiles
+        let ms ← Module.loadAll ["lib", dir]
+        let cache ← IO.FS.createTempDir
+        let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
+        let rig := RigTag.tag (R := ZeroOneMany)
+        let stats ← IO.mkRef ({} : Cache.RegionCounts)
+        let opts : Cache.RegionOptions := { rig, stats := some stats }
+        let src := "import Use\nimport Other\n#eval four + one\n"
+        let (cold, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
+        check (!cold.messages.any (·.severity == .error)) s!"messages: {cold.messages.toList.map (·.text)}"
+        let before ← stats.get
+        let (warm, hw) ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
+        let after ← stats.get
+        check (after.hits > before.hits) s!"no module came from a region: {repr after}"
+        check (after.commands > 0) s!"no command came from a region: {repr after}"
+        -- (the text path, same directory: the same state and the same hit count)
+        let (text, ht) ← Cache.elaborateCached (some cache) [] src init 0
+        checkEq (warm.messages.toList.map (·.render src)) (text.messages.toList.map (·.render src))
+        checkEq warm.globals.order.toList text.globals.order.toList
+        checkEq hw ht },
+    { name := "editing a module does not serve its stale region", run := fun _ => do
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 1\n")]
+        let cache ← IO.FS.createTempDir
+        let rig := RigTag.tag (R := ZeroOneMany)
+        let src := "import M\n#eval x\n"
+        let recheck : IO (CommandState ZeroOneMany) := do
+          let ms ← Module.loadAll ["lib", dir]
+          let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
+          pure (← Cache.elaborateCached (some cache) [] src init 0 (region := some { rig })).1
+        let s1 ← recheck
+        check (s1.messages.any fun m => (m.render src).endsWith "info: 1") s!"{s1.messages.toList.map (·.render src)}"
+        IO.FS.writeFile (dir / "M.wiz") "import Prelude\ndef x : Nat := 2\n"
+        let s2 ← recheck
+        check (s2.messages.any fun m => (m.render src).endsWith "info: 2") s!"{s2.messages.toList.map (·.render src)}"
+        check (!s2.messages.any fun m => (m.render src).endsWith "info: 1") s!"stale: {s2.messages.toList.map (·.render src)}"
+        -- (the new key has its own region; the old one is stale, not served)
+        let ms ← Module.loadAll ["lib", dir]
+        let k2 := Cache.moduleKey (loaderOf ms) (fun _ => none) 0 "M" (trusted := Tests.libModule)
+        let binary ← Cache.binaryId (some cache)
+        check (← (cache / Cache.regionFileName binary k2).pathExists) "no region for the edited module"
+        let some a ← Cache.readModuleRegion (R := ZeroOneMany) cache binary rig k2
+          | throw (IO.userError "no readable region for the edited module")
+        checkEq k2 a.key },
+    { name := "regions layer over read-only caches (and never repair them)", run := fun _ => do
+        -- (`--region-cache` + `--cache-ro`: regions live in the same directory layers)
+        let dir ← mkTree libFiles
+        let ms ← Module.loadAll ["lib", dir]
+        let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
+        let rig := RigTag.tag (R := ZeroOneMany)
+        let stats ← IO.mkRef ({} : Cache.RegionCounts)
+        let opts : Cache.RegionOptions := { rig, stats := some stats }
+        let src := "import Use\nimport Other\n#eval four + one\n"
+        -- (cold: the text entries and the regions in `ro`, as a Nix store would ship them)
+        let ro ← IO.FS.createTempDir
+        let (cold, _) ← Cache.elaborateCached (some ro) [] src init 0 (region := some opts)
+        check (!cold.messages.any (·.severity == .error)) s!"messages: {cold.messages.toList.map (·.text)}"
+        check ((← regionFiles ro).size > 0) "no region was written"
+        let expected := cold.messages.toList.map (·.render src)
+        let before ← snapshot ro
+        -- (read caches only: a region is served from the read-only layer, nothing is written)
+        let h0 ← stats.get
+        let (s1, _) ← Cache.elaborateCached none [ro] src init 0 (region := some opts)
+        check ((← stats.get).hits > h0.hits) "no module came from a region in the read-only layer"
+        checkEq expected (s1.messages.toList.map (·.render src))
+        checkEq before (← snapshot ro)
+        -- (a write cache in front: the read-only region still answers, and stays untouched)
+        let write ← IO.FS.createTempDir
+        let h1 ← stats.get
+        let (s2, _) ← Cache.elaborateCached (some write) [ro] src init 0 (region := some opts)
+        check ((← stats.get).hits > h1.hits) "the read-only region did not answer through the write layer"
+        checkEq expected (s2.messages.toList.map (·.render src))
+        checkEq before (← snapshot ro)
+        -- (a truncated region in a read-only layer is a miss, not an error: the text entry
+        -- answers, the module is re-elaborated once into the write cache, and the bad file
+        -- is left alone — a read-only cache is never repaired)
+        let binary ← Cache.binaryId (some ro)
+        let k := Cache.moduleKey (loaderOf ms) (fun _ => none) 0 "Use" (trusted := Tests.libModule)
+        let bad := ro / Cache.regionFileName binary k
+        IO.FS.writeFile bad ""
+        let beforeBad ← snapshot ro
+        let h2 ← stats.get
+        let (s3, _) ← Cache.elaborateCached (some write) [ro] src init 0 (region := some opts)
+        checkEq expected (s3.messages.toList.map (·.render src))
+        check ((← stats.get).misses > h2.misses) "a truncated read-only region was not a miss"
+        checkEq beforeBad (← snapshot ro)
+        checkEq 0 (← bad.metadata).byteSize }
   ]
 
 /-- A package: a library with two modules, and a file that checks against it. -/
@@ -401,6 +696,38 @@ def toolchainGroup : Group where
         checkEq (repr tc).pretty (repr tc').pretty
         check (tc.id != ({ tc with cflags := [] } : Toolchain).id) "cflags are not in the id"
         checkEq tc.id ({ tc with cacheDir := none } : Toolchain).id },
+    { name := "--cache-ro is repeatable and --no-cache clears both caches", run := fun _ => do
+        let parse (args : List String) := ({} : Toolchain).parseFlags args
+        -- left to right: reads keep their order, --cache sets the write cache
+        let (tc, rest) := parse ["--cache-ro", "/a", "--cache", "/w", "--cache-ro", "/b", "check", "x.wiz"]
+        checkEq ["/a", "/b"] (tc.readCaches.map toString)
+        checkEq (some "/w") (tc.cacheDir.map toString)
+        checkEq ["check", "x.wiz"] rest
+        -- --no-cache clears both; a later --cache-ro (or --cache) adds again
+        let (tc, _) := parse ["--cache-ro", "/a", "--cache", "/w", "--no-cache"]
+        check tc.readCaches.isEmpty "a read cache survived --no-cache"
+        check tc.cacheDir.isNone "the write cache survived --no-cache"
+        let (tc, _) := parse ["--cache-ro", "/a", "--cache", "/w", "--no-cache", "--cache-ro", "/c"]
+        checkEq ["/c"] (tc.readCaches.map toString)
+        check tc.cacheDir.isNone "the write cache survived --no-cache"
+        let (tc, _) := parse ["--no-cache", "--cache", "/w2"]
+        checkEq (some "/w2") (tc.cacheDir.map toString)
+        -- a grail build file's setting appends
+        checkEq (some ["/a"]) ((({} : Toolchain).set "cache-ro" "/a").map fun t => t.readCaches.map toString)
+        -- toFlags round-trips, with a write cache and read-only only
+        let full : Toolchain := { cacheDir := some "/w", readCaches := ["/a", "/b"] }
+        checkEq ["--cache-ro", "/a", "--cache-ro", "/b", "--cache", "/w"]
+          ((full.toFlags).dropWhile (· != "--cache-ro") |>.take 6)
+        let (back, rest) := parse full.toFlags
+        checkEq [] rest
+        checkEq (repr full).pretty (repr back).pretty
+        let roOnly : Toolchain := { readCaches := ["/a", "/b"] }
+        let (back, rest) := parse roOnly.toFlags
+        checkEq [] rest
+        checkEq (repr roOnly).pretty (repr back).pretty
+        -- render: one line per read cache, in order, then the write cache
+        check ((full.render.splitOn "cache-ro /a\ncache-ro /b\ncache /w\n").length > 1) full.render
+        check ((roOnly.render.splitOn "cache-ro /a\ncache-ro /b\ncache (off)\n").length > 1) roOnly.render },
     { name := "-I DIR adds a module root", run := fun _ => do
         let dir ← mkTree [("Pkg/Three.wiz", "import Prelude\ndef three : Nat := 3\n")]
         let (tc, _) := ({} : Toolchain).parseFlags ["check", "main.wiz", "-I", dir.toString]
@@ -418,7 +745,33 @@ def toolchainGroup : Group where
           checkEq s!"{args}: 0 src/Crux/A.wiz:2:1: info: 1\n" s!"{args}: {out.exitCode} {out.stdout}{out.stderr}"
         -- the usage text names -I for check
         let out ← IO.Process.output { cmd := wiz, args := #["help"] }
-        check ((out.stdout.splitOn "wiz check [-I DIR] FILE").length > 1) out.stdout }
+        check ((out.stdout.splitOn "wiz check [-I DIR] FILE").length > 1) out.stdout },
+    { name := "wiz check --region-cache: a warm run comes from regions, and corrupt ones are misses", run := fun _ => do
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 2\n"), ("main.wiz", "import M\n#eval x\n")]
+        let cache ← IO.FS.createTempDir
+        let wiz := (← IO.FS.realPath ".lake/build/bin/wiz").toString
+        let args := #["check", "main.wiz", "-I", dir.toString, "--cache", cache.toString,
+                      "--region-cache", "--region-stats"]
+        let run := IO.Process.output { cmd := wiz, args, cwd := some dir }
+        let o1 ← run
+        checkEq 0 o1.exitCode
+        checkEq "main.wiz:2:1: info: 2\n" o1.stdout
+        check ((o1.stderr.splitOn "region cache:").length > 1) s!"no stats: {o1.stderr}"
+        let regions ← regionFiles cache
+        check (regions.size > 0) "no region files were written"
+        -- (a warm run: modules come from the regions, the answer is the same)
+        let o2 ← run
+        checkEq 0 o2.exitCode
+        checkEq o1.stdout o2.stdout
+        check ((o2.stderr.splitOn "region cache: 0 modules").length == 1)
+          s!"nothing came from a region: {o2.stderr}"
+        -- (corrupt every region: the next run falls back to the text entries and rewrites them)
+        for f in regions do IO.FS.writeFile f ""
+        let o3 ← run
+        checkEq 0 o3.exitCode
+        checkEq o1.stdout o3.stdout
+        for f in ← regionFiles cache do
+          check ((← f.metadata).byteSize > 0) s!"{f} was not rewritten" }
   ]
 
 /-- (9f) An executable with a `link_c` file: editing the C file relinks it (only). -/
@@ -433,7 +786,7 @@ def linkCCase : Case :=
         if !ok then
           skip "no toolchain"
           return
-        checkEq 5 s.ran
+        checkEq 3 s.ran
         let exe := (dir / ".grail" / "bin" / "hi").toString
         checkEq "1\n" (← IO.Process.output { cmd := exe }).stdout
         let (s, _) ← build dir tc
@@ -528,6 +881,30 @@ def grailGroup : Group where
         check ok2 "the second build failed"
         checkEq 0 s2.ran
         checkEq 3 s2.upToDate },
+    { name := "--cache-ro is forwarded; a build replays from a read-only cache", run := fun _ => do
+        let dir ← mkTree pkgFiles
+        let self ← IO.appPath
+        -- config: the read caches are rendered in order, then the write cache
+        let ro1 ← IO.FS.createTempDir
+        let ro2 ← IO.FS.createTempDir
+        let w ← IO.FS.createTempDir
+        let cfgArgs := #["--grail", "-C", dir.toString, "--cache-ro", ro1.toString,
+                         "--cache-ro", ro2.toString, "--cache", w.toString, "config"]
+        let cfg ← IO.Process.output { cmd := self.toString, args := cfgArgs }
+        checkEq 0 cfg.exitCode
+        check ((cfg.stdout.splitOn s!"cache-ro {ro1}\ncache-ro {ro2}\ncache {w}\n").length > 1) cfg.stdout
+        -- a warm cache, written by a build through this binary
+        let warm ← IO.FS.createTempDir
+        let (_, ok) ← build dir ({ cacheDir := some warm } : Toolchain) ["app"]
+        check ok "the warm build failed"
+        -- a fresh package: only the read-only cache and an empty write cache
+        let dir2 ← mkTree pkgFiles
+        let write ← IO.FS.createTempDir
+        let buildArgs := #["--grail", "-C", dir2.toString, "--cache-ro", warm.toString,
+                           "--cache", write.toString, "build", "app"]
+        let out ← IO.Process.output { cmd := self.toString, args := buildArgs }
+        checkEq 0 out.exitCode
+        check ((out.stdout.splitOn "jobs run").length > 1) s!"{out.stdout}{out.stderr}" },
     { name := "an edit reruns the checks that depend on it", run := fun _ => do
         let dir ← mkTree pkgFiles
         let tc : Toolchain := { cacheDir := some (← IO.FS.createTempDir) }
@@ -549,7 +926,7 @@ def grailGroup : Group where
         -- nothing half-written is left
         let tmp := dir / ".grail" / "tmp"
         if ← tmp.pathExists then checkEq 0 (← tmp.readDir).size },
-    { name := "an executable: check, IR, C, object, link", run := fun _ => do
+    { name := "an executable: build (check, IR and C in one job), object, link", run := fun _ => do
         let tc : Toolchain := { (← toolchain) with cacheDir := some (← IO.FS.createTempDir) }
         let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"p\" |> Package.exe \"hello\" \"hello.wiz\"\n"),
                           ("hello.wiz", "import IO\ndef main : IO Unit := IO.println \"hello from grail\"\n")]
@@ -557,15 +934,15 @@ def grailGroup : Group where
         if !ok then
           skip "no toolchain"
           return
-        checkEq 5 s.ran
+        checkEq 3 s.ran
         let out ← IO.Process.output { cmd := (dir / ".grail" / "bin" / "hello").toString }
         checkEq "hello from grail\n" out.stdout
         let (s, _) ← build dir tc
         checkEq 0 s.ran
-        -- a change that doesn't change the program's code: only check, IR and C rerun
+        -- a change that doesn't change the program's code: only the one build job reruns
         IO.FS.writeFile (dir / "hello.wiz") "import IO\n-- a comment\ndef main : IO Unit := IO.println \"hello from grail\"\n"
         let (s, _) ← build dir tc
-        checkEq 3 s.ran
+        checkEq 1 s.ran
         checkEq 2 s.upToDate },
     linkCCase,
     grailLspCase
@@ -1162,12 +1539,12 @@ def grailCommandsGroup : Group where
           skip "no toolchain"
           return
         check ok log
-        checkEq 6 s.ran
+        checkEq 4 s.ran
         checkEq "hello from grail\n" (← IO.FS.readFile (dir / "said.txt"))
         -- a comment: the program is rebuilt as far as its C, which doesn't change
         IO.FS.writeFile (dir / "hello.wiz") "import IO\n-- c\ndef main : IO Unit := IO.println \"hello from grail\"\n"
         let (s, _, _) ← buildLog dir tc ["say"]
-        checkEq 3 s.ran },
+        checkEq 1 s.ran },
     { name := "an installed output keeps its executable bit", run := fun _ => do
         let mk := "  |> Package.command (Command.new \"script\" (Tool.path \"sh\") |> Command.arg \"-c\" |> Command.arg \"printf '#!/bin/sh\\\\necho ran\\\\n' > \\\"$1\\\"; chmod +x \\\"$1\\\"; echo data > \\\"$2\\\"\" |> Command.arg \"sh\" |> Command.output \"bin/run.sh\" |> Command.output \"bin/data.txt\")\n"
         let dir ← mkTree (cmdFiles mk)

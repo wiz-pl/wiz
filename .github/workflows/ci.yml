@@ -56,7 +56,8 @@ jobs:
   # "inputs" in .github/test-shards.json). A docs-only PR builds and tests nothing; a PR
   # touching only lib/ files no core test reads skips the core shard; the selfhost
   # shards run for selfhost/ and the lib/ files it imports. Everything but a
-  # pull_request (pushes, the merge queue, manual runs) runs every job.
+  # pull_request (pushes, the merge queue, manual runs) runs every job except `package`,
+  # which runs on push and workflow_dispatch only (see its comment).
   changes:
     name: changes
     if: github.event_name != 'schedule'
@@ -79,6 +80,22 @@ jobs:
             python3 scripts/ci.py changes --all >> "$GITHUB_OUTPUT"
           fi
           cat "$GITHUB_OUTPUT"
+
+  # (seconds, no build) Documentation style: no authoring-environment paths, no
+  # agent roles and no status checkmarks (scripts/check-docs-style.py). Runs on
+  # every pull request too, including docs-only ones, which build and test skip.
+  docs_style:
+    name: docs style
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check the docs, and the checker's fixtures
+        shell: bash
+        run: |
+          python3 scripts/check-docs-style.py --self-test
+          python3 scripts/check-docs-style.py
 
   build:
     name: build
@@ -133,9 +150,14 @@ jobs:
           # only the shards this change needs (all of them outside pull requests)
           echo "matrix=$(python3 scripts/ci.py matrix --only '${{ needs.changes.outputs.shards }}')" >> "$GITHUB_OUTPUT"
           python3 scripts/ci.py plan
-      - name: Lake tracks the embedded runtime (runtime/wiz.c)
-        # editing wiz.c rebuilds what embeds it and nothing else (docs/building.md)
+      - name: Lake tracks the embedded runtime (runtime/wiz_rt.h, runtime/rt_*.inc)
+        # editing one of the runtime's files rebuilds what embeds it and nothing else
+        # (docs/building.md)
         run: scripts/test-embed.sh
+      - name: The runtime compiles on its own
+        # cc -fsyntax-only -Wall -Wextra, with WIZ_API= (the object ABI) and WIZ_API=static
+        # (a generated program); the header's prototypes are checked against the parts
+        run: scripts/test-runtime.sh
 
   test:
     name: test (${{ matrix.shard.name }})
@@ -244,15 +266,57 @@ jobs:
           # always uploaded (the `CI result` job sums them up), but kept briefly
           retention-days: 3
 
+  # The trust ledger: every declaration of lib/ and of the axiom-free examples through
+  # `#print axioms` (Tests/Native.lean), compared with the checked-in
+  # .github/trust-baseline.tsv. A new axiom, `sorry`, native_refl or SMT axiom,
+  # implemented_by/repr, builtin registration or partial definition fails until it is
+  # reviewed and the baseline regenerated (scripts/trust-ledger.sh --update). The
+  # `native` and `hdl-verified` groups check their part of the ledger too; this job
+  # checks lib/ and the examples together, without a shard's path filter to skip it.
+  trust-ledger:
+    name: trust ledger
+    needs: [changes, build]
+    if: github.event_name != 'schedule' && needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Restore the Lake build
+        id: lake-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .lake
+          key: lake-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ needs.build.outputs.lake-hash }}
+          restore-keys: lake-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-
+      - name: Build the toolchain and the test driver (unless restored)
+        run: |
+          if [ "${{ steps.lake-cache.outputs.cache-hit }}" != true ]; then
+            echo "::warning title=Lake cache::no exact Lake build for this commit (evicted?): building wiz and tests here"
+          fi
+          lake build wiz tests
+          for b in wiz tests; do
+            [ -x ".lake/build/bin/$b" ] || { echo "::error::.lake/build/bin/$b is missing after lake build"; exit 1; }
+          done
+      - name: The trusted base matches the baseline
+        run: scripts/trust-ledger.sh --check
+
   # The Nix package (flake.nix: wiz and grail, wrapped with the toolchain), pushed to
-  # Cachix when the token is there (pushes, and pull requests from this repository), so
-  # that `nix run github:wiz-pl/wiz` downloads it. It is a pure Nix build
-  # without Lake's artifact cache, so it rebuilds every module when a .lean file changes;
-  # the tests keep using Lake (incremental) and don't wait for it.
+  # Cachix on master (and on a manual run), so that `nix run github:wiz-pl/wiz` downloads
+  # it. It is a pure Nix build without Lake's artifact cache, so it rebuilds every module
+  # when a .lean file changes; running it on pull requests doubled the build load for no
+  # merge signal (the Lake build already tests the same sources).
   package:
     name: nix package
     needs: changes
-    if: github.event_name != 'schedule' && needs.changes.outputs.code == 'true'
+    # The Nix package is a second full build of the same commit. It is published to
+    # Cachix from master (and tested on release tags); running it on every pull request
+    # only doubled the build load and lengthened the runner queue. `workflow_dispatch`
+    # keeps it available on demand.
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -316,7 +380,7 @@ jobs:
   # One check for branch protection, and the whole suite's summary.
   result:
     name: CI result
-    needs: [changes, build, test, package]
+    needs: [changes, docs_style, build, test, trust-ledger, package]
     if: always() && github.event_name != 'schedule'
     runs-on: ubuntu-latest
     permissions:
@@ -400,19 +464,26 @@ jobs:
         shell: bash
         run: |
           echo "changes: ${{ needs.changes.result }} (code: ${{ needs.changes.outputs.code }}, shards: ${{ needs.changes.outputs.shards }})"
+          echo "docs style: ${{ needs.docs_style.result }}"
+          echo "trust ledger: ${{ needs['trust-ledger'].result }}"
           echo "build: ${{ needs.build.result }}, test: ${{ needs.test.result }}, package: ${{ needs.package.result }}"
           # the path filter must have run; a job it skipped is not a failure, but outside
           # pull requests (and whenever the filter wants them) every job must succeed
           [ "${{ needs.changes.result }}" = success ] || exit 1
           code="${{ needs.changes.outputs.code }}"
           want_tests=$([ "${{ needs.changes.outputs.shards }}" != "[]" ] && echo true || echo false)
+          # `package` runs on push and workflow_dispatch only, so a skipped package is
+          # fine on a pull request (and on a docs-only push); on a code push it is needed
+          want_package=$([ "$code" = true ] && { [ "${{ github.event_name }}" = push ] || [ "${{ github.event_name }}" = workflow_dispatch ]; } && echo true || echo false)
           check() { # NAME RESULT WANTED
             if [ "$3" = true ]; then [ "$2" = success ] || { echo "$1: $2 (needed)"; exit 1; }
             else [ "$2" = success ] || [ "$2" = skipped ] || { echo "$1: $2"; exit 1; }; fi
           }
+          check "docs style" "${{ needs.docs_style.result }}" true
+          check "trust ledger" "${{ needs['trust-ledger'].result }}" "$code"
           check build "${{ needs.build.result }}" "$code"
           check test "${{ needs.test.result }}" "$want_tests"
-          check package "${{ needs.package.result }}" "$code"
+          check package "${{ needs.package.result }}" "$want_package"
 
   # Stage-1 C of the toolchain = stage-2 C (scripts/fixpoint.sh). Scheduled runs use the
   # default branch (master).

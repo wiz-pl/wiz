@@ -268,7 +268,7 @@ inductive Global where
 -- each constructor's fields: name, whether recursive, and type (over the fields before)
 inductive CField where
   | mk (name : String) (isRec : Bool) (ty tyI : Tm)
--- (21w) and each field's quantity, and whether it is implicit
+-- (21x) and each field's quantity, and whether it is implicit
 inductive Ctor where
   | mk (name : String) (fields : List CField) (res : Tm) (qs : List Q) (impl : List Bool)
 inductive IndInfo where
@@ -377,7 +377,7 @@ def errStep (gs : Globals) (m : String) : Step := .mk (String.append "error: " m
 -- and each constructor `T.c` the constant `fun fields => con (tag, fields…, tt, tt)`.
 
 -- a binder of a telescope (a constructor's field, a parameter): its name, its quantity
--- (the default filled in: ω explicit, 0 implicit; 21w) and whether it is implicit, and
+-- (the default filled in: ω explicit, 0 implicit; 21x) and whether it is implicit, and
 -- its type
 inductive Field where
   | mk (name : String) (q : Q) (impl : Bool) (ty : Syntax)
@@ -604,7 +604,7 @@ def ctorFieldTys (gs : Globals) (T : String) (ps : List String) (nidx : Nat) (Tc
 def ctorType (Tc : Tm) : List Q → List CField → Tm
   | _, .nil => Tc
   | qs, .cons (.mk _ _ A _) rest => piTm (headQ qs) A (ctorType Tc (tailQ qs) rest)
--- (21w) the fields' quantities, and which are implicit
+-- (21x) the fields' quantities, and which are implicit
 def fieldQs : List Field → List Q
   | .nil => .nil
   | .cons (.mk _ q _ _) rest => .cons q (fieldQs rest)
@@ -780,7 +780,7 @@ def retailTms (v : Tm) : Tms → Tms
   | .tnil => .tnil
   | .tcons D rest => .tcons (retail v D) (retailTms v rest)
 -- (`strct`: a structure's constructor, 18e. The Lean elaborator takes a structure apart
--- by projections at ω, `structPattern?`: so a match binds a linear field at ω, 21w; a
+-- by projections at ω, `structPattern?`: so a match binds a linear field at ω, 21x; a
 -- field at 0 stays at 0, so that the projections of the others, which are matches here,
 -- are accepted)
 def structBindQs : List Q → List Q
@@ -864,7 +864,7 @@ def lastIdx : List Syntax → Nat → Nat
   | .cons _ rest, i => match rest with
     | .nil => i
     | .cons _ _ => lastIdx rest (i + 1)
--- (stage 21m, 21w) A constructor field's quantity is its description's (`darg q S D`,
+-- (stage 21m, 21x) A constructor field's quantity is its description's (`darg q S D`,
 -- `Desc.arg q S D` in the Lean kernel): written, or by default ω for an explicit field
 -- and 0 for an implicit one (`{n : Nat}`), as `elabQuantity` gives it. A bad quantity
 -- (`2`, `%t`) on a field or a parameter is an error.
@@ -902,7 +902,7 @@ def fixDotsArgs (T I : String) : SyntaxF .false → SyntaxF .false
   | .nil => .nil
   | .cons s rest => .cons (fixDots T I s) (fixDotsArgs T I rest)
 end
--- (21w) the inductive command a `structure` makes is marked (`structCmd`)
+-- (21x) the inductive command a `structure` makes is marked (`structCmd`)
 def isStructCmd (stx : Syntax) : Bool := match kid stx 7 with
   | .atom _ => .true
   | _ => .false
@@ -1762,7 +1762,7 @@ def padPats : Nat → List Syntax → List Syntax
     | .nil => .cons holeStx (padPats k .nil)
     | .cons p rest => .cons p (padPats k rest)
 
--- (21w) the sub-patterns of a constructor pattern name its explicit fields: a hole for
+-- (21x) the sub-patterns of a constructor pattern name its explicit fields: a hole for
 -- each implicit one (`impl`), as the Lean elaborator's `explicitIdx`
 def explicitPats : List Bool → List Syntax → List Syntax
   | .nil, ps => ps
@@ -1947,7 +1947,7 @@ def genVars (d : Nat) : Nat → Nat → Tms
 -- gets the arguments `args` (at depth `L`)
 inductive Lets where
   | mk (wrap : Tm → Tm) (cols : List Col) (recs : List Nat) (cx : Cx)
--- (21w) a field is bound at its quantity (`T.casesOn`'s method takes it so: `letTm`), and
+-- (21x) a field is bound at its quantity (`T.casesOn`'s method takes it so: `letTm`), and
 -- so is a pattern variable that names it (`bindLetsT`)
 def fieldCols (np L d0 : Nat) (args : Tms) : Cx → Nat → List Q → List CField → Lets
   | cx, _, _, .nil => .mk (fun b => b) .nil .nil cx
@@ -4516,7 +4516,7 @@ def fieldBinders : List Syntax → List Syntax
 def fieldIdents : List Syntax → List Syntax
   | .nil => .nil
   | .cons f rest => .cons (identStx (fieldName f)) (fieldIdents rest)
--- (21w) a field at 0 has no projection (`classMethods` in the Lean elaborator)
+-- (21x) a field at 0 has no projection (`classMethods` in the Lean elaborator)
 def erasedField (f : Syntax) : Bool := match writtenQ (kid f 1) with
   | .is q => qEq q .qz
   | _ => .false

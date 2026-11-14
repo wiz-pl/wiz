@@ -5,7 +5,7 @@ import IO
 System interfaces (stage 9h): the environment, files and directories, processes, clocks
 and file descriptors.
 
-Everything here is POSIX underneath (`runtime/wiz.c`, section "system interfaces"). An
+Everything here is POSIX underneath (`runtime/`, section "system interfaces"). An
 operation that can fail returns `IO (Except String A)`: the error is the C library's
 message for `errno`, after what was being done (`"/x: No such file or directory"`).
 `EIO A` is that type as a monad, for `do` blocks that stop at the first error, and

@@ -49,7 +49,7 @@
                 fileset = fs.unions [
                   ./lakefile.lean ./lake-manifest.json ./lean-toolchain
                   ./Main.lean ./Wiz.lean ./Wiz ./Grail.lean ./Grail
-                  ./runtime # wiz.c and WizRuntime.lean, which embeds it (include_str)
+                  ./runtime # the C runtime (wiz_rt.h, rt_*.inc) and WizRuntime.lean, which embeds it (include_str)
                   ./c # linked into the executables (moreLinkObjs)
                 ];
               };

@@ -112,7 +112,7 @@ def natOpArity : Name → Nat
   | _ => 2
 
 /-- The registered operations on numbers that return a number, computed natively. The
-kernel, the interpreters and the native runtime (`runtime/wiz.c`) agree with these, and
+kernel, the interpreters and the native runtime (`runtime/`) agree with these, and
 with the Prelude's definitions (`Nat.div`, …): `n / 0 = 0`, `n % 0 = n`, `log2 0 = 0`. -/
 def natNative? : Name → Array Nat → Option Nat
   | "nat.succ", #[a] => some (a + 1)
@@ -540,9 +540,48 @@ partial def vNatView (g : Globals R) : Val R → Val R
     if n == 0 then ctor "nat.zero" else vApp g (ctor "nat.succ") (.natLit (n - 1))
   | v => v
 
+/-- One step of a `Nat` operation whose result does not depend on a possibly-stuck
+argument: `Nat.add 0 x ↦ x`, `Nat.mul 0 x ↦ 0`, `Nat.sub x 0 ↦ x`, `Nat.pow b 0 ↦ 1`.
+Conversion does this before comparing a glued application by its spine: otherwise
+`Nat.mul 0 s` against `Nat.mul 0 t` first compares the stuck applications `s` and `t`
+(which may be large, or the very comparison being decided), only to find `0 = 0`.
+The reduction is cheap: the definition's pattern match selects the zero branch before
+forcing the other argument. -/
+partial def vNatStep (g : Globals R) (v : Val R) : Val R :=
+  match v with
+  | .unfold n _ sp _ =>
+    let zeroAt (i : Nat) : Bool := match sp[i]? with
+      | some (.app (.natLit 0)) => true
+      | _ => false
+    if zeroAt 0 then
+      match g.builtinKey? n with
+      | some "nat.add" | some "nat.mul" => whnf v
+      | _ => v
+    else if zeroAt 1 then
+      match g.builtinKey? n with
+      | some "nat.sub" | some "nat.pow" => whnf v
+      | _ => v
+    else v
+  | _ => v
+
+/-- A `Nat` operation with a zero argument whose result does not depend on the other
+argument: `Nat.add 0 x ↦ x`, `Nat.mul 0 x ↦ 0`, `Nat.sub x 0 ↦ x`, `Nat.pow b 0 ↦ 1`.
+These are the definition's own reductions (the pattern match selects the zero branch
+first), but they must not *force* the other argument: `Nat.mul 0 x` would otherwise
+`whnf` an expensive or stuck `x` (a `Nat.div` under comparison) just to check whether it
+is a numeral. -/
+partial def natFast? (op : Name) (args : Array (Val R)) : Option (Val R) :=
+  match op, args with
+  | "nat.mul", #[x, _] => match whnf x with | .natLit 0 => some (.natLit 0) | _ => none
+  | "nat.add", #[x, y] => match whnf x with | .natLit 0 => some y | _ => none
+  | "nat.sub", #[x, y] => match whnf y with | .natLit 0 => some x | _ => none
+  | "nat.pow", #[_, y] => match whnf y with | .natLit 0 => some (.natLit 1) | _ => none
+  | _, _ => none
+
 /-- A registered operation applied to all its arguments: native arithmetic on literals,
 otherwise the operation's definition. -/
 partial def vNatOp (g : Globals R) (op : Name) (args : Array (Val R)) : Val R :=
+  if let some v := natFast? op args then v else
   -- the arguments as numerals, stopping at the first that isn't one: forcing the rest
   -- could run a numeral's recursion all the way down (`d * 2^64` is `d + d * (2^64 - 1)`,
   -- whose second argument is the next step, and so on)

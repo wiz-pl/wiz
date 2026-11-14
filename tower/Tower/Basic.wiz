@@ -1,7 +1,8 @@
 import Sys
 import Text
--- tower: the home directory, settings, and processes (stage 26; the Lean original is
--- Tower/Basic.lean, and this follows it definition by definition).
+-- tower: the home directory, settings, and processes (stage 26). This was ported from
+-- the Lean reference implementation (`Tower/Basic.lean`, removed in 26h); it follows
+-- that definition by definition.
 --
 -- ~/.tower/
 --   settings                 key value lines (`tower settings`)

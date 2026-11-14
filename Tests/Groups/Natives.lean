@@ -16,7 +16,7 @@ def nativesSame (name expected : String) : IO Unit := do
   cRunLibs src expected
   cRunLibs src expected (llvm := true)
 
-/-- C code reading a `U32Array` and making a `U64Array` (`wiz_warray_*`, runtime/wiz.c). -/
+/-- C code reading a `U32Array` and making a `U64Array` (`wiz_warray_*`, runtime/). -/
 def warrayHelper : String := "#include <stdint.h>
 #include <stdlib.h>
 typedef uintptr_t wiz_val;

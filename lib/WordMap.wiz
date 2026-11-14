@@ -16,7 +16,7 @@ and `foldl` see the entries by increasing key, in the kernel, the interpreters a
 compiled code alike. The kernel computes with the definitions and proofs see them
 (the laws at the end).
 
-Compiled code runs natives instead (`runtime/wiz.c`, `wiz_wmap_*`): an open-addressing
+Compiled code runs natives instead (`runtime/`, `wiz_wmap_*`): an open-addressing
 hash table of `uint64_t` keys and Wiz values (linear probing, deletion by backward
 shift, at most half full), so `insert`, `find`, `erase` and `contains` take expected
 constant time, and only the values are Wiz objects. An update copies the table when it

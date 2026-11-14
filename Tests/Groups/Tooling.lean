@@ -44,8 +44,8 @@ def toolingGroup : Group where
         let src := "import Prelude\ninductive T where\n  | a\n  | b (t : T)\ndef size : T → Nat\n  | .a => 1\n  | .b t => size t + 1\n#eval size (.b (.b .a))\ndef bad : Nat := true\n"
         let plain := runFrontend src init
         let dir ← IO.FS.createTempDir
-        let (cold, h1) ← Cache.elaborateCached dir src init 0
-        let (warm, h2) ← Cache.elaborateCached dir src init 0
+        let (cold, h1) ← Cache.elaborateCached (some dir) [] src init 0
+        let (warm, h2) ← Cache.elaborateCached (some dir) [] src init 0
         checkEq 0 h1
         check (h2 > 0) "nothing came from the cache"
         let msgs (st : CommandState ZeroOneMany) := toString (st.messages.toList.map (·.render src))
@@ -57,9 +57,9 @@ def toolingGroup : Group where
         let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := fun m => if m == "Prelude" then some prelude else none }
         let src := "import Prelude\ndef two : Nat := 1 + 1\n#eval two\n"
         let dir ← IO.FS.createTempDir
-        let (_, h1) ← Cache.elaborateCached dir src init 0 (binary := some 1)
-        let (_, h2) ← Cache.elaborateCached dir src init 0 (binary := some 1)
-        let (_, h3) ← Cache.elaborateCached dir src init 0 (binary := some 2)
+        let (_, h1) ← Cache.elaborateCached (some dir) [] src init 0 (binary := some 1)
+        let (_, h2) ← Cache.elaborateCached (some dir) [] src init 0 (binary := some 1)
+        let (_, h3) ← Cache.elaborateCached (some dir) [] src init 0 (binary := some 2)
         checkEq 0 h1
         check (h2 > 0) "the same binary got nothing from the cache"
         checkEq 0 h3
@@ -67,8 +67,8 @@ def toolingGroup : Group where
         let me ← Cache.binaryId (some dir)
         checkEq me (← Cache.binaryId (some dir))
         checkEq me (hash (← IO.FS.readBinFile (← IO.appPath)))
-        let (_, h4) ← Cache.elaborateCached dir src init 0
-        let (_, h5) ← Cache.elaborateCached dir src init 0 (binary := some me)
+        let (_, h4) ← Cache.elaborateCached (some dir) [] src init 0
+        let (_, h5) ← Cache.elaborateCached (some dir) [] src init 0 (binary := some me)
         checkEq 0 h4
         check (h5 > 0) "the default is not this binary's hash" },
     { name := "terms survive the cache's format", run := fun _ => do

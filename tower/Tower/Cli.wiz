@@ -1,5 +1,6 @@
 import Tower.Install
--- tower's commands (stage 26c; the Lean original is Tower/Cli.lean).
+-- tower's commands (stage 26c; ported from the Lean reference implementation,
+-- `Tower/Cli.lean`, removed in 26h).
 --
 -- Which toolchain runs in a directory (`tower show`): a `+SPEC` first argument of a shim,
 -- else, walking up from the directory, an override set for it or a `wiz-toolchain.local`

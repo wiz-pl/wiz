@@ -16,7 +16,7 @@ The model. A table is the list of its strings, by id, all distinct
 new. The module keeps the strings distinct (the constructor is private). The kernel
 computes with the definitions, and `#eval`/`#run` run them.
 
-Compiled code runs natives instead (`runtime/wiz.c`, `wiz_itab_*`): the strings by
+Compiled code runs natives instead (`runtime/`, `wiz_itab_*`): the strings by
 id (each `String` value kept as it is, so `lookup` copies nothing) and a hash index
 from a string to its id, so `intern` and `find` take time proportional to the
 string's length, and `lookup` constant time.

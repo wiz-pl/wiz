@@ -8,7 +8,7 @@ set_option compiler.extract_closed false
 
 namespace Tests.Elab
 
-/-! ## 25: concurrency (runtime/wiz.c threads, lib/Session.wiz, lib/MVar.wiz) -/
+/-! ## 25: concurrency (runtime/ threads, lib/Session.wiz, lib/MVar.wiz) -/
 
 /-- The dependent protocol of docs/stages/25-concurrency.md: send a length `n`, then `n`
 numbers, receive their sum; the server and client as pure processes and over channels. -/

@@ -22,7 +22,7 @@ function's type is its Hoare triple: `Ref.set l w : (1 t : Pts l v) → … Pts 
 `{l ↦ v} set l w {l ↦ w}` (lib/Hoare.wiz, `Triple.write`), and `Ref.get` returns the
 value with an erased proof that it is the token's index (`Triple.read`).
 
-**What is trusted.** The four natives `wiz_ref_*` (runtime/wiz.c, over the MVar
+**What is trusted.** The four natives `wiz_ref_*` (runtime/, over the MVar
 cells of 25d) and the types given to them below; the kernel checks everything else.
 The one type that asserts a fact is `Ref.readRaw`'s: the value read equals the token's
 index. It holds by an invariant the API keeps: a cell is created with its token
