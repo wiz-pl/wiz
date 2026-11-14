@@ -586,6 +586,10 @@ parameters and no memory map:
   `rvalid`, `rdata`, `err`) are `deriving Bundle` records: a master holds the request
   until `ready` (a write) or `rvalid` (a read), and `err` marks a request the decoder
   did not map. `Bus.noReq` and `Bus.noResp` are the quiet values.
+* `Bus.ReqW aw dw` adds `wstrb`, one write-enable bit per byte (`dw / 8` bits, low byte
+  first); `Bus.ReqW.ofReq` fills every strobe and `Bus.ReqW.toReq` drops them, so the
+  word-level `Bus.Req` API is unchanged. `Bus.byteMask` expands strobes to a data-width
+  mask with slices, a byte-wide `mux` and constant shifts (no new primitive).
 * `Bus.arbC aw dw` puts two masters on one slave. It is round-robin when the bus is free
   (`last` remembers the master granted most recently), keeps the owner until its answer
   (`ready` or `rvalid`), and also releases the bus if the owner drops `valid` (a master
@@ -597,13 +601,29 @@ parameters and no memory map:
 * `Bus.ramC shift aw ab dw` is a behavioural RAM of `2^ab` words of `dw` bits, answering
   two cycles after the request (golem's `GBus.ramStep` latency). `shift` selects the word
   index inside `addr`: 0 for a word-addressed bus, 2 for a 32-bit byte-addressed one.
-  The model has no byte strobes; a cache or board port that needs them keeps them in
-  its own request record (as golem's `CacheReq` does).
+  `Bus.ramWC shift aw ab dw` is the same RAM on `Bus.ReqW`: a write is a read-modify-write
+  of the enabled bytes.
+
+`lib/Hdl/BusLaw.wiz` (`import Hdl.BusLaw`) states the protocol laws over value traces:
+`Stable`/`ValidStable`/`PayloadStable`/`AddressStable` (the source holds `valid` and the
+payload while stalled), `AnsweredAfter` (a response answers a request `d` cycles
+earlier; 0 for the router, 2 for the RAM), `AtMostOneAck` (arbiter mutual exclusion),
+`NoStarvation` (progress under a fair sink), `RouteCorrect` (hit forwards unchanged, miss
+answers with `err`) and `ReadAfterWrite` (the RAM reads back a completed write, with byte
+strobes). The kernel checks the value-level memory read-after-write and no-alias lemmas
+(`Bus.Law.memWrite_read_same`, `Bus.Law.memWrite_read_miss`) and the
+`Bus.ReqW.ofReq`/`toReq` round trip; the rest are
+Boolean checks (`StableStep`, `RouteOk`, …) over exhaustively generated or long
+pseudo-random traces, compared against `Netlist.simulate` and `Circuit.simFast`:
+**tested, not proved**.
 
 `examples/hdl-bus.wiz` (test group `bus-crc`) writes and reads the RAM, checks the
 arbiter's grants alternate (and hold while the slave is not ready), and routes hits and
 misses; every circuit's value simulation, `Netlist.simulate` and `Circuit.simFast` agree
-cycle for cycle.
+cycle for cycle. `examples/hdl-bus-law.wiz` (test group `bus-law`) exhausts the router
+(4608 inputs), checks 256 generated arbiter cycles with a compliant source and a fair
+sink, and checks the RAM read-after-write and all 16-bit byte-strobe masks, again across
+the three simulations.
 
 ## CRC-8/SMBUS (`lib/Hdl/Crc.wiz`)
 

@@ -19,6 +19,8 @@ the simple model golem's cache stand-in used.
 The parts:
 
 * `Bus.Req aw dw` / `Bus.Resp dw`: the request and response records (`deriving Bundle`);
+* `Bus.ReqW aw dw`: a request with byte enables (`wstrb`, `dw / 8` bits), and
+  `Bus.ReqW.ofReq`/`toReq` to use it where a word-level `Bus.Req` is expected;
 * `Bus.arbC aw dw`: two masters onto one slave, round-robin when both ask and neither
   owns the bus, holding the owner until its answer (so a master that holds `valid`, as
   a core does, is never starved mid-word);
@@ -27,7 +29,9 @@ The parts:
   (golem's `GBus.route`, without golem's memory map);
 * `Bus.ramC shift aw ab dw`: a behavioural RAM with `2^ab` words of `dw` bits, a
   `shift`-bit word offset inside `addr` (0 for a word-addressed bus, 2 for a 32-bit
-  byte-addressed one) and a two-cycle answer.
+  byte-addressed one) and a two-cycle answer;
+* `Bus.ramWC shift aw ab dw`: the same RAM with byte enables (`Bus.ReqW`), a
+  read-modify-write on the addressed word.
 
 All parts are plain `Circuit`s or step functions over bundles, polymorphic in the
 representation, so the same definitions simulate at values, simulate as a netlist and
@@ -59,9 +63,52 @@ structure Bus.Resp (dw : Nat) (r : HwTy → Type) where
   err : r Bus.Bit
   deriving Bundle
 
+/-- A bus request with byte enables: the same fields as `Bus.Req` plus `wstrb`, one bit
+per byte of `wdata` (`dw / 8` bits, low byte first). A write applies byte `k` only when
+bit `k` of `wstrb` is set; a read ignores it. For a data width that is not a multiple of
+8 the strobe covers the low `8 * (dw / 8)` bits and the remaining high bits keep their
+old value; use a multiple of 8 for a byte-addressed bus. `Bus.ReqW.ofReq` turns a plain
+request into one that writes every byte, so `Bus.Req` stays the simple word-level API. -/
+structure Bus.ReqW (aw dw : Nat) (r : HwTy → Type) where
+  valid : r Bus.Bit
+  we : r Bus.Bit
+  addr : r (HwTy.bits aw)
+  wdata : r (HwTy.bits dw)
+  wstrb : r (HwTy.bits (Nat.div dw 8))
+  deriving Bundle
+
 /-- An idle request (at any representation). -/
 def Bus.noReq {r : HwTy → Type} [Hw r] {ω aw dw : Nat} : Bus.Req aw dw r :=
   Bus.Req.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit aw 0) (Hw.lit dw 0)
+
+/-- An idle byte-enabled request: no bytes written. -/
+def Bus.noReqW {r : HwTy → Type} [Hw r] {ω aw dw : Nat} : Bus.ReqW aw dw r :=
+  Bus.ReqW.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit aw 0) (Hw.lit dw 0) (Hw.lit (Nat.div dw 8) 0)
+
+/-- Forget the byte enables: the word-level request. -/
+def Bus.ReqW.toReq {r : HwTy → Type} {aw dw : Nat} (q : Bus.ReqW aw dw r) : Bus.Req aw dw r :=
+  Bus.Req.mk q.valid q.we q.addr q.wdata
+
+/-- The word-level request with every byte enabled (the `Bus.Req` API in `Bus.ReqW`). -/
+def Bus.ReqW.ofReq {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (q : Bus.Req aw dw r) : Bus.ReqW aw dw r :=
+  Bus.ReqW.mk q.valid q.we q.addr q.wdata
+    (Hw.lit (Nat.div dw 8) (Nat.sub (Nat.pow 2 (Nat.div dw 8)) 1))
+
+/-- The byte mask of a strobe: bit `8 * k` through `8 * k + 7` are set when strobe bit
+`k` is. Built with slices, a byte-wide `mux` and a constant shift, so it is in the same
+synthesisable subset as the rest of `Hdl.Bus` (no loops over widths at run time). -/
+def Bus.byteMaskAux {r : HwTy → Type} [Hw r] (dw nb : Nat) : (fuel i : Nat) → r (HwTy.bits nb) → r (HwTy.bits dw)
+  | .zero, _, _ => Hw.lit dw 0
+  | .succ fuel, i, strb =>
+    let bit := Hw.slice i 1 strb;
+    let byte := Hw.mux bit (Hw.lit dw 255) (Hw.lit dw 0);
+    let shifted := Hw.shlBy byte (Hw.lit dw (8 * i));
+    Hw.or shifted (Bus.byteMaskAux dw nb fuel (Nat.succ i) strb)
+
+/-- `Bus.byteMask dw nb strb`: a `dw`-bit mask from `nb` byte strobes (`nb = dw / 8`
+for a bus). -/
+def Bus.byteMask {r : HwTy → Type} [Hw r] {ω dw nb : Nat} (strb : r (HwTy.bits nb)) : r (HwTy.bits dw) :=
+  Bus.byteMaskAux dw nb nb 0 strb
 
 /-- A response that is not answering anything. -/
 def Bus.noResp {r : HwTy → Type} [Hw r] {ω dw : Nat} : Bus.Resp dw r :=
@@ -194,7 +241,8 @@ def Bus.routeC (aw dw base size : Nat) : Circuit (Bus.RouteIn.code aw dw) (Bus.R
 -- word index is the `ab` bits of `addr` from bit `shift`: `shift = 0` for a word
 -- addressed bus, `shift = 2` for a 32-bit byte-addressed one. Reads see the memory before
 -- this cycle's write; `ready`/`rvalid` are high in the answering cycle. `dw` should be a
--- whole number of bytes for a byte-addressed bus (the model has no byte strobes).
+-- whole number of bytes for a byte-addressed bus. This word-level model has no strobes;
+-- `Bus.ramWC` is the same RAM on `Bus.ReqW`.
 
 /-- The RAM's state: the cells and the number of cycles since the request. -/
 structure Bus.Ram (ab dw : Nat) (r : HwTy → Type) where
@@ -225,3 +273,25 @@ def Bus.ramStep {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
 def Bus.ramC (shift aw ab dw : Nat) : Circuit (Bus.Req.code aw dw) (Bus.Resp.code dw) :=
   Circuit.bundled (Bus.Ram.bundle ab dw) (Bus.Req.bundle aw dw) (Bus.Resp.bundle dw)
     (Bus.ramInit ab dw) (fun s q => Bus.ramStep shift ab dw s q)
+
+/-- One cycle of the byte-enabled RAM. It is `Bus.ramStep` with a write mask: the word
+written is `wdata` in the enabled bytes and the old word in the others. Reads answer with
+the old word (the store lands at the clock edge, after this cycle's read). -/
+def Bus.ramWStep {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
+    (s : Bus.Ram ab dw r) (q : Bus.ReqW aw dw r) :
+    r (HwTy.prod (Bus.Ram.code ab dw) (Bus.Resp.code dw)) :=
+  let go := Hw.and q.valid (Bus.isK s.wait 2);
+  let ix : r (HwTy.bits ab) := Hw.slice shift ab q.addr;
+  let old := Hw.memRead s.cells ix;
+  let mask := Bus.byteMask (dw := dw) (nb := Nat.div dw 8) q.wstrb;
+  let merged := Hw.or (Hw.and old (Hw.not mask)) (Hw.and q.wdata mask);
+  Hw.pair
+    (Bus.Ram.pack ab dw (Bus.Ram.mk
+      (Hw.memWrite s.cells (Hw.and go q.we) ix merged)
+      (Hw.mux q.valid (Hw.mux go (Hw.lit 2 0) (Hw.add s.wait (Hw.lit 2 1))) (Hw.lit 2 0))))
+    (Bus.Resp.pack dw (Bus.Resp.mk go (Hw.and go (Hw.not q.we)) old (Hw.lit 1 0)))
+
+/-- The byte-enabled RAM as a circuit. -/
+def Bus.ramWC (shift aw ab dw : Nat) : Circuit (Bus.ReqW.code aw dw) (Bus.Resp.code dw) :=
+  Circuit.bundled (Bus.Ram.bundle ab dw) (Bus.ReqW.bundle aw dw) (Bus.Resp.bundle dw)
+    (Bus.ramInit ab dw) (fun s q => Bus.ramWStep shift ab dw s q)

@@ -1,0 +1,364 @@
+-- The bus protocol laws (`import Hdl.BusLaw`): valid/ready stability, no data change
+-- while stalled, arbiter mutual exclusion and progress, decode/route correctness, RAM
+-- read-after-write/address stability, and the byte strobes of `Bus.ReqW`.
+--
+-- The laws in `Hdl.BusLaw` are propositions over traces. The checks here evaluate a
+-- Boolean form of each on generated inputs, and at the same time compare the value
+-- simulation, `Netlist.simulate` (hash-consed and naive) and `Circuit.simFast`: a law
+-- that passes is therefore *tested*, not proved, on those inputs. The kernel-checked
+-- lemmas (`Bus.Law.memWrite_read_same`, the `ReqW` round trip) are checked when
+-- `Hdl.BusLaw` is elaborated; the RAM section checks the two-cycle version. Run by the
+-- `bus-law` test group.
+import Hdl.Core
+import Hdl.Sim
+import Hdl.Bus
+import Hdl.BusLaw
+import IO
+
+def Bit : HwTy := HwTy.bits 1
+def B8 : HwTy := HwTy.bits 8
+
+def yes (b : Bool) : String := match b with
+  | .true => "yes"
+  | .false => "NO"
+
+def shows : List Nat → String
+  | .nil => ""
+  | .cons x xs => match xs with
+    | .nil => Hdl.show x
+    | .cons _ _ => Hdl.show x <+> " " <+> shows xs
+
+def leavesEq : List (List Nat) → List (List Nat) → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
+  | _, _ => .false
+
+-- value simulation = netlist simulation (hash-consed and naive) = fast simulation
+def agree {ω i o : HwTy} (c : Circuit i o) (ins : List (HwTy.El i)) : Bool :=
+  let ω v := Circuit.runLeaves c ins;
+  Bool.and (leavesEq v (Circuit.simFast c ins))
+    (Bool.and (leavesEq v (Circuit.simLeaves .true c ins)) (leavesEq v (Circuit.simLeaves .false c ins)))
+
+def allTrue : List Bool → Bool
+  | .nil => .true
+  | .cons b bs => Bool.and b (allTrue bs)
+
+def bind {A B : Type} (f : A → List B) : List A → List B
+  | .nil => .nil
+  | .cons x xs => List.append (f x) (bind f xs)
+
+def units (n : Nat) : List Nat := Hdl.upto n 0
+
+def zipWith {A B C : Type} (f : A → B → C) : List A → List B → List C
+  | .cons a as, .cons b bs => .cons (f a b) (zipWith f as bs)
+  | _, _ => .nil
+
+def n01 (b : Bool) : Nat := match b with
+  | .true => 1
+  | .false => 0
+
+def eqNatList (xs ys : List Nat) : Bool := Hdl.natsEq xs ys
+
+------------------------------------------------------------------------------------
+-- Requests and responses as values of their bundles
+
+def reqE (aw dw : Nat) (valid we addr wdata : Nat) : HwTy.El (Bus.Req.code aw dw) :=
+  Bundle.toEl (Bus.Req.bundle aw dw)
+    (Bus.Req.mk (BitVec.ofNat 1 valid) (BitVec.ofNat 1 we)
+      (BitVec.ofNat aw addr) (BitVec.ofNat dw wdata))
+
+def respE (dw : Nat) (ready rvalid err rdata : Nat) : HwTy.El (Bus.Resp.code dw) :=
+  Bundle.toEl (Bus.Resp.bundle dw)
+    (Bus.Resp.mk (BitVec.ofNat 1 ready) (BitVec.ofNat 1 rvalid)
+      (BitVec.ofNat dw rdata) (BitVec.ofNat 1 err))
+
+def reqWE (aw dw : Nat) (valid we addr wdata strb : Nat) : HwTy.El (Bus.ReqW.code aw dw) :=
+  Bundle.toEl (Bus.ReqW.bundle aw dw)
+    (Bus.ReqW.mk (BitVec.ofNat 1 valid) (BitVec.ofNat 1 we)
+      (BitVec.ofNat aw addr) (BitVec.ofNat dw wdata)
+      (BitVec.ofNat (Nat.div dw 8) strb))
+
+def arbInE (aw dw : Nat) (av bv aa ba sr sv se sd : Nat) : HwTy.El (Bus.ArbIn.code aw dw) :=
+  Bundle.toEl (Bus.ArbIn.bundle aw dw)
+    (Bus.ArbIn.mk (Bus.Req.unpack aw dw (reqE aw dw av 0 aa 0))
+      (Bus.Req.unpack aw dw (reqE aw dw bv 0 ba 0))
+      (Bus.Resp.unpack dw (respE dw sr sv se sd)))
+
+def routeInE (valid we addr wdata sr sv se sd : Nat) : HwTy.El (Bus.RouteIn.code 4 8) :=
+  Bundle.toEl (Bus.RouteIn.bundle 4 8)
+    (Bus.RouteIn.mk (Bus.Req.unpack 4 8 (reqE 4 8 valid we addr wdata))
+      (Bus.Resp.unpack 8 (respE 8 sr sv se sd)))
+
+def arbAddr (p : HwTy.El (Bus.ArbOut.code 8 8)) : Nat :=
+  BitVec.toNat (Bus.Law.arbOut p).req.addr
+
+------------------------------------------------------------------------------------
+-- 1. Decode/route: exhaustively over every control bit, every 4-bit address, a few
+-- data/sink values. base = 4, size = 8 (the window [4, 12)).
+
+def routeC : Circuit (Bus.RouteIn.code 4 8) (Bus.RouteOut.code 4 8) := Bus.routeC 4 8 4 8
+
+def routeIns : List (HwTy.El (Bus.RouteIn.code 4 8)) :=
+  Hdl.map (fun (n : Nat) =>
+    let valid := Nat.mod n 2;
+    let we := Nat.mod (Nat.div n 2) 2;
+    let addr := Nat.mod (Nat.div n 4) 16;
+    let wdata := Nat.mul 127 (Nat.mod (Nat.div n 64) 3);
+    let sr := Nat.mod (Nat.div n 192) 2;
+    let sv := Nat.mod (Nat.div n 384) 2;
+    let se := Nat.mod (Nat.div n 768) 2;
+    let sd := Nat.mul 255 (Nat.mod (Nat.div n 1536) 3);
+    routeInE valid we addr wdata sr sv se sd)
+    (Hdl.upto 4608 0)
+
+def routeOuts : List (HwTy.El (Bus.RouteOut.code 4 8)) := Circuit.run routeC routeIns
+
+def routeOkAll : Bool :=
+  allTrue (zipWith (fun (x : HwTy.El (Bus.RouteIn.code 4 8))
+    (o : HwTy.El (Bus.RouteOut.code 4 8)) => Bus.Law.RouteOk 4 8 x o) routeIns routeOuts)
+
+------------------------------------------------------------------------------------
+-- 2. The arbiter: mutual exclusion, forwarded-request stability under a compliant
+-- source, and progress. `genArb` drives two always-valid masters whose payload changes
+-- only in a cycle where that master is answered (the valid/ready source obligation), and
+-- a sink that answers in three cycles out of four.
+
+def arbC : Circuit (Bus.ArbIn.code 8 8) (Bus.ArbOut.code 8 8) := Bus.arbC 8 8
+
+def arbFastIns : List (HwTy.El (Bus.ArbIn.code 8 8)) :=
+  Hdl.map (fun (k : Nat) => arbInE 8 8 1 1 1 2 1 0 0 0) (Hdl.upto 16 0)
+
+def arbFastGrants : List Nat := Hdl.map arbAddr (Circuit.run arbC arbFastIns)
+
+-- cycles 0–3: the sink holds the first grant; cycles 4–5: it answers and the other goes
+def arbHoldIns : List (HwTy.El (Bus.ArbIn.code 8 8)) :=
+  .cons (arbInE 8 8 1 1 3 4 0 0 0 0) (.cons (arbInE 8 8 1 1 3 4 0 0 0 0)
+  (.cons (arbInE 8 8 1 1 3 4 0 0 0 0) (.cons (arbInE 8 8 1 1 3 4 1 0 0 0)
+  (.cons (arbInE 8 8 1 1 3 4 1 0 0 0) (.cons (arbInE 8 8 1 1 3 4 1 0 0 0) .nil)))))
+
+def arbHoldGrants : List Nat := Hdl.map arbAddr (Circuit.run arbC arbHoldIns)
+
+-- the generator: a compliant source and a fair sink, 256 cycles
+def genArbAux : Nat → Bus.Arb HwTy.El → Nat → Nat → Nat → Nat → Nat → Nat →
+    List (HwTy.El (Bus.ArbIn.code 8 8) × HwTy.El (Bus.ArbOut.code 8 8))
+  | .zero, _, _, _, _, _, _, _ => .nil
+  | .succ f, s, aa, ad, ba, bd, ph, seed =>
+    let sr := n01 (Bool.not (Nat.beq ph 3));
+    let sv := n01 (Nat.beq ph 1);
+    let se := 0;
+    let sd := Nat.mod seed 256;
+    let a := Bus.Req.unpack 8 8 (reqE 8 8 1 0 aa ad);
+    let b := Bus.Req.unpack 8 8 (reqE 8 8 1 0 ba bd);
+    let slave := Bus.Resp.unpack 8 (respE 8 sr sv se sd);
+    let x := Bundle.toEl (Bus.ArbIn.bundle 8 8) (Bus.ArbIn.mk a b slave);
+    let r := Bus.arbStep s a b slave;
+    let s' := Bus.Arb.unpack (Hw.fst r);
+    let o := Bus.ArbOut.unpack 8 8 (Hw.snd r);
+    let y := Bundle.toEl (Bus.ArbOut.bundle 8 8) o;
+    let aa' := if Bus.Law.ackS o.ra then Nat.mod (Nat.succ aa) 256 else aa;
+    let ad' := if Bus.Law.ackS o.ra then Nat.mod (Nat.succ ad) 256 else ad;
+    let ba' := if Bus.Law.ackS o.rb then Nat.mod (Nat.succ ba) 256 else ba;
+    let bd' := if Bus.Law.ackS o.rb then Nat.mod (Nat.succ bd) 256 else bd;
+    let ph' := Nat.mod (Nat.succ ph) 4;
+    let seed' := Nat.mod (Nat.add (Nat.mul seed 13) 7) 251;
+    .cons (x, y) (genArbAux f s' aa' ad' ba' bd' ph' seed')
+
+def genArbPairs : List (HwTy.El (Bus.ArbIn.code 8 8) × HwTy.El (Bus.ArbOut.code 8 8)) :=
+  genArbAux 256 (Bus.arbInit : Bus.Arb HwTy.El) 0 0 16 0 0 1
+
+def genArbIns : List (HwTy.El (Bus.ArbIn.code 8 8)) := Hdl.fsts genArbPairs
+def genArbOuts : List (HwTy.El (Bus.ArbOut.code 8 8)) := Hdl.snds genArbPairs
+def genArbRun : List (HwTy.El (Bus.ArbOut.code 8 8)) := Circuit.run arbC genArbIns
+
+def outPack (y : HwTy.El (Bus.ArbOut.code 8 8)) : Nat :=
+  HwTy.pack (Bus.ArbOut.code 8 8) y
+
+def genArbMatches : Bool :=
+  eqNatList (Hdl.map outPack genArbRun) (Hdl.map outPack genArbOuts)
+
+def arbMutexAll : Bool :=
+  allTrue (Hdl.map (fun (y : HwTy.El (Bus.ArbOut.code 8 8)) =>
+    Bus.Law.AtMostOneAckStepS (Bus.Law.arbOut y).ra (Bus.Law.arbOut y).rb) genArbRun)
+
+-- one step of "a response to a master means that master offered": same-cycle
+def answeredStep {ω aw dw : Nat} (q : Bus.Req aw dw HwTy.El) (r : Bus.Resp dw HwTy.El) : Bool :=
+  Bool.or (Bool.not (Bus.Law.ackS r)) (Bus.Law.validS q)
+
+def arbAnswerAll : Bool :=
+  allTrue (Hdl.map (fun (p : HwTy.El (Bus.ArbIn.code 8 8) × HwTy.El (Bus.ArbOut.code 8 8)) =>
+    let i := Bus.Law.arbIn p.1;
+    let o := Bus.Law.arbOut p.2;
+    Bool.and (answeredStep i.a o.ra) (answeredStep i.b o.rb)) genArbPairs)
+
+-- the forwarded request is held while the sink stalls
+def arbStableCheck : List (HwTy.El (Bus.ArbIn.code 8 8)) → List (HwTy.El (Bus.ArbOut.code 8 8)) → Bool
+  | .cons x xs, .cons y ys =>
+    match xs, ys with
+    | .cons x' _, .cons y' _ =>
+      let q := Bus.Req.pack 8 8 (Bus.Law.arbOut y).req;
+      let r := Bus.Resp.pack 8 (Bus.Law.arbIn x).slave;
+      let q' := Bus.Req.pack 8 8 (Bus.Law.arbOut y').req;
+      Bool.and
+        (Bool.and (Bus.Law.StableStep q r q')
+          (Bool.and (Bus.Law.ValidStableStep q r q')
+            (Bool.and (Bus.Law.PayloadStableStep q r q') (Bus.Law.AddressStableStep q r q'))))
+        (arbStableCheck xs ys)
+    | _, _ => .true
+  | _, _ => .true
+
+def arbStableAll : Bool := arbStableCheck genArbIns genArbRun
+
+-- progress: every window of 16 cycles contains an answer to each master
+def windowAck : Nat → List (HwTy.El (Bus.Resp.code 8)) → Bool
+  | .zero, _ => .false
+  | .succ k, .nil => .false
+  | .succ k, .cons r rs => Bool.or (Bus.Law.ack r) (windowAck k rs)
+
+def everyWindowAux : Nat → List (HwTy.El (Bus.Resp.code 8)) → Bool
+  | _, .nil => .true
+  | w, .cons r rs =>
+    if Nat.le w (Nat.succ (List.length rs)) then
+      Bool.and (windowAck w (.cons r rs)) (everyWindowAux w rs)
+    else .true
+
+def arbProgressAll : Bool :=
+  let ra := Hdl.map (fun (y : HwTy.El (Bus.ArbOut.code 8 8)) => Bus.Resp.pack 8 (Bus.Law.arbOut y).ra) genArbRun;
+  let rb := Hdl.map (fun (y : HwTy.El (Bus.ArbOut.code 8 8)) => Bus.Resp.pack 8 (Bus.Law.arbOut y).rb) genArbRun;
+  Bool.and (everyWindowAux 16 ra) (everyWindowAux 16 rb)
+
+def arbFastOk : Bool :=
+  eqNatList arbFastGrants
+    (.cons 2 (.cons 1 (.cons 2 (.cons 1 (.cons 2 (.cons 1 (.cons 2 (.cons 1
+     (.cons 2 (.cons 1 (.cons 2 (.cons 1 (.cons 2 (.cons 1 (.cons 2 (.cons 1 .nil))))))))))))))))
+
+def arbHoldOk : Bool :=
+  eqNatList arbHoldGrants (.cons 4 (.cons 4 (.cons 4 (.cons 4 (.cons 3 (.cons 4 .nil))))))
+
+def arbAgreeAll : Bool :=
+  Bool.and (agree arbC arbFastIns) (Bool.and (agree arbC arbHoldIns) (agree arbC genArbIns))
+
+------------------------------------------------------------------------------------
+-- 3. The RAM: read-after-write and address stability, and the byte strobes.
+
+def ramC : Circuit (Bus.Req.code 8 8) (Bus.Resp.code 8) := Bus.ramC 0 8 6 8
+
+def ramInE (valid we addr wdata : Nat) : HwTy.El (Bus.Req.code 8 8) := reqE 8 8 valid we addr wdata
+
+def ramChunk (valid we addr wdata : Nat) : List (HwTy.El (Bus.Req.code 8 8)) :=
+  .cons (ramInE valid we addr wdata) (.cons (ramInE valid we addr wdata)
+    (.cons (ramInE valid we addr wdata) .nil))
+
+def ramIdle : List (HwTy.El (Bus.Req.code 8 8)) := .cons (ramInE 0 0 0 0) .nil
+
+def ramTrace (a d : Nat) : List (HwTy.El (Bus.Req.code 8 8)) :=
+  List.append (ramChunk 1 1 a d) (List.append ramIdle
+    (List.append (ramChunk 1 0 a 0) ramIdle))
+
+def readData : List (HwTy.El (Bus.Resp.code 8)) → List Nat
+  | .nil => .nil
+  | .cons p ps =>
+    let q := Bus.Resp.unpack 8 p;
+    if BitVec.isTrue q.rvalid then .cons (BitVec.toNat q.rdata) (readData ps) else readData ps
+
+def ramReadOk (a d : Nat) : Bool :=
+  eqNatList (readData (Circuit.run ramC (ramTrace a d))) (.cons d .nil)
+
+def ramReadAll : Bool :=
+  allTrue (bind (fun (a : Nat) => Hdl.map (fun (d : Nat) => ramReadOk a d) (units 4)) (units 8))
+
+def ramAgreeAll : Bool :=
+  allTrue (bind (fun (a : Nat) => Hdl.map (fun (d : Nat) => agree ramC (ramTrace a d)) (units 8)) (units 4))
+
+-- a response at cycle t answers the request offered at t - 2
+def nthReq (xs : List (HwTy.El (Bus.Req.code 8 8))) (t : Nat) : HwTy.El (Bus.Req.code 8 8) :=
+  Hdl.nthD (ramInE 0 0 0 0) xs t
+
+def nthResp (xs : List (HwTy.El (Bus.Resp.code 8))) (t : Nat) : HwTy.El (Bus.Resp.code 8) :=
+  Hdl.nthD (respE 8 0 0 0 0) xs t
+
+def answeredAfter2Check (qs : List (HwTy.El (Bus.Req.code 8 8)))
+    (rs : List (HwTy.El (Bus.Resp.code 8))) : Nat → Bool
+  | .zero => .true
+  | .succ k =>
+    Bool.and
+      (Bool.or (Bool.not (Bus.Law.ack (nthResp rs (Nat.succ k))))
+        (Bool.and (Bus.Law.valid (nthReq qs (Nat.succ k)))
+          (Bus.Law.valid (nthReq qs (Nat.sub (Nat.succ k) 2)))))
+      (answeredAfter2Check qs rs k)
+
+def ramAnsweredAll : Bool :=
+  allTrue (bind (fun (a : Nat) => Hdl.map (fun (d : Nat) =>
+    let qs := ramTrace a d;
+    answeredAfter2Check qs (Circuit.run ramC qs) (List.length qs)) (units 4)) (units 8))
+
+-- byte strobes: 16-bit words, two strobe bits. Write `d0` everywhere, then `d1` with
+-- `mask`, then read back; the expected word is the byte merge.
+def byteOf (w k : Nat) : Nat := Nat.mod (Nat.div w (Nat.pow 2 (Nat.mul 8 k))) 256
+
+def merge16 (old new mask : Nat) : Nat :=
+  let b0 := if Nat.beq (Nat.mod mask 2) 1 then byteOf new 0 else byteOf old 0;
+  let b1 := if Nat.beq (Nat.div mask 2) 1 then byteOf new 1 else byteOf old 1;
+  Nat.add b0 (Nat.mul 256 b1)
+
+def ramWC : Circuit (Bus.ReqW.code 8 16) (Bus.Resp.code 16) := Bus.ramWC 0 8 6 16
+
+def ramWIn (valid we addr wdata strb : Nat) : HwTy.El (Bus.ReqW.code 8 16) :=
+  reqWE 8 16 valid we addr wdata strb
+
+def ramWChunk (valid we addr wdata strb : Nat) : List (HwTy.El (Bus.ReqW.code 8 16)) :=
+  .cons (ramWIn valid we addr wdata strb) (.cons (ramWIn valid we addr wdata strb)
+    (.cons (ramWIn valid we addr wdata strb) .nil))
+
+def ramWIdle : List (HwTy.El (Bus.ReqW.code 8 16)) := .cons (ramWIn 0 0 0 0 0) .nil
+
+def ramWTrace (a d0 d1 mask : Nat) : List (HwTy.El (Bus.ReqW.code 8 16)) :=
+  List.append (ramWChunk 1 1 a d0 3) (List.append ramWIdle
+    (List.append (ramWChunk 1 1 a d1 mask) (List.append ramWIdle
+      (List.append (ramWChunk 1 0 a 0 0) ramWIdle))))
+
+def readData16 : List (HwTy.El (Bus.Resp.code 16)) → List Nat
+  | .nil => .nil
+  | .cons p ps =>
+    let q := Bus.Resp.unpack 16 p;
+    if BitVec.isTrue q.rvalid then .cons (BitVec.toNat q.rdata) (readData16 ps) else readData16 ps
+
+def ramWOk (a d0 d1 mask : Nat) : Bool :=
+  eqNatList (readData16 (Circuit.run ramWC (ramWTrace a d0 d1 mask)))
+    (.cons (merge16 d0 d1 mask) .nil)
+
+def ramWAll : Bool :=
+  allTrue (bind (fun (a : Nat) => bind (fun (mask : Nat) =>
+    Hdl.map (fun (d1 : Nat) => ramWOk a 43690 (Nat.mul 21845 d1) mask) (units 3)) (units 4)) (units 3))
+
+def ramWAgreeAll : Bool :=
+  allTrue (bind (fun (a : Nat) => bind (fun (mask : Nat) =>
+    Hdl.map (fun (d1 : Nat) => agree ramWC (ramWTrace a 43690 (Nat.mul 21845 d1) mask)) (units 3)) (units 4)) (units 3))
+
+-- The old word-level `Bus.Req` API still works unchanged (`Bus.ReqW.ofReq` fills every
+-- strobe); `Bus.Law.ofReq_toReq` is the kernel-checked round trip.
+def ramWellFormed : Bool :=
+  Bool.and (Netlist.wellFormed (Circuit.netlist "ram" ramC))
+    (Bool.and (Netlist.wellFormed (Circuit.netlist "ramw" ramWC))
+      (Bool.and (Netlist.wellFormed (Circuit.netlist "route" routeC))
+        (Netlist.wellFormed (Circuit.netlist "arb" arbC))))
+
+------------------------------------------------------------------------------------
+
+def main : IO Unit := do
+  IO.println ("route: all laws " <+> yes routeOkAll
+    <+> ", value = simulate = simFast " <+> yes (agree routeC routeIns)
+    <+> ", " <+> Hdl.show (List.length routeIns) <+> " inputs");
+  IO.println ("arb mutex " <+> yes arbMutexAll
+    <+> ", answers only requests " <+> yes arbAnswerAll
+    <+> ", stable under stall " <+> yes arbStableAll
+    <+> ", windows " <+> yes arbProgressAll
+    <+> ", generated matches " <+> yes genArbMatches
+    <+> ", value = simulate = simFast " <+> yes arbAgreeAll);
+  IO.println ("arb fast grants " <+> shows arbFastGrants <+> " " <+> yes arbFastOk
+    <+> ", hold grants " <+> shows arbHoldGrants <+> " " <+> yes arbHoldOk);
+  IO.println ("ram read-after-write " <+> yes ramReadAll
+    <+> ", answered after 2 " <+> yes ramAnsweredAll
+    <+> ", value = simulate = simFast " <+> yes ramAgreeAll);
+  IO.println ("ramw strobes " <+> yes ramWAll
+    <+> ", value = simulate = simFast " <+> yes ramWAgreeAll);
+  IO.println ("well formed " <+> yes ramWellFormed)
