@@ -2501,13 +2501,13 @@ def allClosed (es : ES) (d : Nat) : List Val → Bool
   | .nil => .true
   | .cons v rest => Bool.and (closedVal es d v) (allClosed es d rest)
 -- a candidate: the metavariables after applying it, and its term
-inductive CR where
+inductive InstCand where
   | ok (es : ES) (t : Tm)
   | no
 -- a global instance applied to fresh arguments: its explicit and implicit parameters
 -- become metavariables (the goal, or a later parameter, fixes them) and its instance
 -- parameters become subgoals; then its conclusion is unified with the goal
-partial def applyCand (gs : Globals) (es : ES) (cx : Cx) (t : Tm) (ty : Val) (m : List BKind) (goal : Val) : CR :=
+partial def applyCand (gs : Globals) (es : ES) (cx : Cx) (t : Tm) (ty : Val) (m : List BKind) (goal : Val) : InstCand :=
   match m with
   | .cons .inst m' => match whnf (force es ty) with
     | .vpi _ _ _ dom env cod => match newMeta es cx dom with
@@ -2524,7 +2524,7 @@ partial def applyCand (gs : Globals) (es : ES) (cx : Cx) (t : Tm) (ty : Val) (m 
     | .some es' => .ok es' t
     | .none => .no
 -- the local hypotheses, innermost first
-partial def tryLocals (gs : Globals) (es : ES) (cx : Cx) (goal : Val) (i : Nat) : CR :=
+partial def tryLocals (gs : Globals) (es : ES) (cx : Cx) (goal : Val) (i : Nat) : InstCand :=
   match Nat.lt i (Cx.lvl cx) with
   | .false => .no
   | .true => match unify es cx (lookup (TCtx.types (Cx.c cx)) i) goal with
@@ -2543,13 +2543,13 @@ def insertInst (i : InstInfo) : List InstInfo → List InstInfo
 def sortInsts : List InstInfo → List InstInfo
   | .nil => .nil
   | .cons i rest => insertInst i (sortInsts rest)
-def instanceCand (gs : Globals) (es : ES) (cx : Cx) (goal : Val) (i : InstInfo) : CR :=
+def instanceCand (gs : Globals) (es : ES) (cx : Cx) (goal : Val) (i : InstInfo) : InstCand :=
   match Scope.lookup (Globals.scope gs) (nameOf i) with
   | .none => .no
   | .some k => match globalTm .false gs k with
     | .const _ _ _ _ ty => applyCand gs es cx (globalTm .false gs k) (eval .nil ty) (globalMask gs k) goal
     | _ => .no
-partial def tryGlobals (gs : Globals) (es : ES) (cx : Cx) (goal : Val) : List InstInfo → CR
+partial def tryGlobals (gs : Globals) (es : ES) (cx : Cx) (goal : Val) : List InstInfo → InstCand
   | .nil => .no
   | .cons i rest => match instanceCand gs es cx goal i with
     | .ok es' t => .ok es' t
@@ -2557,19 +2557,19 @@ partial def tryGlobals (gs : Globals) (es : ES) (cx : Cx) (goal : Val) : List In
 -- the type of a problem, as the user sees it
 def goalShow : PInst → String
   | .mk _ ty cx => show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) ty)
-inductive RR where
+inductive InstRes where
   | ok (es : ES)
   | err (msg : String)
 def stuckMsg (p : PInst) : String := String.append "type class problem is stuck: " (goalShow p)
 def missingMsg (p : PInst) : String := String.append "failed to synthesize an instance of " (goalShow p)
 -- one problem, with `es` already holding the other problems
-def resolveOne (gs : Globals) (es : ES) (p : PInst) : RR := match p with
+def resolveOne (gs : Globals) (es : ES) (p : PInst) : InstRes := match p with
   | .mk hole ty cx =>
     let d := Cx.lvl cx;
     let env := TCtx.env (Cx.c cx);
     let commit := fun (es1 : ES) (t : Tm) => match unify es1 cx (eval env hole) (eval env t) with
-      | .some es2 => RR.ok es2
-      | .none => RR.err (missingMsg p);
+      | .some es2 => InstRes.ok es2
+      | .none => InstRes.err (missingMsg p);
     match goalOf es ty with
     | .other => .err (stuckMsg p)
     | .mk C args => match Globals.class gs C with
@@ -2582,7 +2582,7 @@ def resolveOne (gs : Globals) (es : ES) (p : PInst) : RR := match p with
             | .ok es1 t => commit es1 t
             | .no => .err (missingMsg p)
 -- all the problems, each after the ones it creates (the step budget catches cycles)
-partial def resolveAll (gs : Globals) (es : ES) (fuel : Nat) : RR := match es with
+partial def resolveAll (gs : Globals) (es : ES) (fuel : Nat) : InstRes := match es with
   | .mk ms ps (.cons p rest) => match fuel with
     | .zero => .err (String.append "instance search did not finish in 100 steps (a cyclic instance?): " (goalShow p))
     | .succ f => match resolveOne gs (.mk ms ps rest) p with
@@ -3495,7 +3495,7 @@ end
 
 -- `drain` and instance resolution alternate: solving a problem can solve a postponed
 -- argument's type, and checking a postponed argument can make a problem ready
-partial def finishRounds (gs : Globals) (es : ES) : Nat → RR
+partial def finishRounds (gs : Globals) (es : ES) : Nat → InstRes
   | .zero => .err "could not finish the instance problems of a command"
   | .succ k => match drain gs es with
     | .none => .err "could not elaborate a constructor argument"
@@ -3504,7 +3504,7 @@ partial def finishRounds (gs : Globals) (es : ES) : Nat → RR
       | _ => match resolveAll gs es1 100 with
         | .err m => .err m
         | .ok es2 => finishRounds gs es2 k
-def finishElab (gs : Globals) (es : ES) : RR := finishRounds gs es 8
+def finishElab (gs : Globals) (es : ES) : InstRes := finishRounds gs es 8
 
 -- a definition `(binders) : T := v`: its type and value (zonked later)
 inductive DefR where
