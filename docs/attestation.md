@@ -295,7 +295,9 @@ The `attestation verifier` job in `.github/workflows/ci.yml` runs
 no TPM, no Wiz build and no network; the signing tests generate a throwaway Ed25519 key
 with `ssh-keygen` in a temporary directory.  No private key is committed.  The real-TPM
 and two-build reproducibility tests stay opt-in (`WIZ_ATTEST_TPM=1`,
-`WIZ_ATTEST_REPRO=1`) and are not part of the default job.
+`WIZ_ATTEST_REPRO=1`) and are not part of the default job.  A pull request that changes
+only `scripts/attest/*` is self-tested by this job: `scripts/ci.py` treats it like a docs
+change, so the Lean build and test shards are skipped.
 
 ## Manifest format
 
