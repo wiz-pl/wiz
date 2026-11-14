@@ -204,6 +204,204 @@ def Prog.freeAll.spec : (L : List Nat) → (f : Nat) → Nat.lt (List.length L) 
       xstep; xstep; xstep
       xapp (Prog.freeAll.spec L f h n)
 
+-- ## A small allocator: the free-list invariant
+--
+-- A free list is a mutable list whose values are the sizes of the free blocks (any `Nat`
+-- here); `MList` is the invariant, read as "these cells are free". Allocating takes the
+-- head off the list and hands out its two cells; freeing links a cell back in front.
+
+/-- Take the head of the free list at `p`: clear its next pointer and return `p` (the
+value at `p` stays; the caller now owns the two cells `p` and `p + 1`). -/
+def Prog.allocHead (p : Nat) : Prog Nat Nat :=
+  .get (Nat.succ p) (fun n => .set (Nat.succ p) 0 (.ret p))
+
+/-- `allocHead` pops the free list: `{MList (List.cons x L) p}` becomes the allocated cell `p ↦ x`
+(and its cleared next pointer) beside the shorter free list `MList L n`. -/
+def Prog.allocHead.spec (L : List Nat) (x p : Nat) :
+    Triple (MList (List.cons x L) p) (Prog.allocHead p)
+      (fun r => hexists (fun (n : Nat) =>
+        hpure (r = p) ⋆ ((p ↦ x) ⋆ (((Nat.succ p) ↦ 0) ⋆ MList L n)))) := by
+  xunfold
+  xgo
+
+/-- Free the cell at `p` by linking it in front of the free list at `q`: its next pointer
+becomes `q`, and the free list grows by `v` (the freed value) in front of `L`. -/
+def Prog.freeCell (p q : Nat) : Prog Nat Unit := .set (Nat.succ p) q (.ret ())
+
+/-- `freeCell` pushes a cell onto the free list: the two cells `p ↦ v` and `p + 1 ↦ w`
+become the head of `MList L q`, so the invariant is `MList (List.cons v L) p`. The precondition
+says `p` is a real pointer (`p ≠ 0`), which `MList`'s head also asks for. -/
+def Prog.freeCell.spec (L : List Nat) (v w p q : Nat) :
+    Triple (hpure (Not (p = 0)) ⋆ ((p ↦ v) ⋆ (((Nat.succ p) ↦ w) ⋆ MList L q))) (Prog.freeCell p q)
+      (fun _ => MList (List.cons v L) p) := by
+  xgo
+
+-- ## A tree with parent pointers
+--
+-- A node occupies four cells: its value at `p`, the left and right child pointers at
+-- `p + 1` and `p + 2`, and its parent pointer at `p + 3`; `0` is the null pointer. `MTree`
+-- is the shape (the parent fields are arbitrary), `MTreeP t p par` the same tree with every
+-- parent field correct. `setParents` is the in-place repair pass.
+
+/-- A binary tree of natural numbers. -/
+inductive Tree where
+  | leaf
+  | node (left : Tree) (value : Nat) (right : Tree)
+/-- The number of nodes. -/
+def Tree.size : Tree → Nat
+  | .leaf => 0
+  | .node l _ r => Nat.succ (Nat.add (Tree.size l) (Tree.size r))
+
+/-- The tree in the heap, parent fields arbitrary: each node is four cells (value, left,
+right, parent), and the children are trees at their pointers. -/
+def MTree : Tree → Nat → HProp Nat
+  | .leaf, p => hpure (p = 0)
+  | .node l x r, p => hexists (fun (lp : Nat) => hexists (fun (rp : Nat) => hexists (fun (q : Nat) =>
+      hpure (Not (p = 0)) ⋆ ((p ↦ x) ⋆ (((p + 1) ↦ lp) ⋆ (((p + 2) ↦ rp) ⋆
+        (((p + 3) ↦ q) ⋆ (MTree l lp ⋆ MTree r rp))))))))
+/-- The tree in the heap with every parent pointer correct: the node at `p` has parent
+`par`, and its children's parent is `p`. -/
+def MTreeP : Tree → Nat → Nat → HProp Nat
+  | .leaf, p, _ => hpure (p = 0)
+  | .node l x r, p, par => hexists (fun (lp : Nat) => hexists (fun (rp : Nat) =>
+      hpure (Not (p = 0)) ⋆ ((p ↦ x) ⋆ (((p + 1) ↦ lp) ⋆ (((p + 2) ↦ rp) ⋆
+        (((p + 3) ↦ par) ⋆ (MTreeP l lp p ⋆ MTreeP r rp p)))))))
+
+/-- Repair the parent pointers of the tree at `p`, whose parent is `par` (fuel: one step
+per node). -/
+def Prog.setParents : Nat → Nat → Nat → Prog Nat Unit
+  | .zero, p, par => .fail
+  | .succ f, .zero, par => .ret ()
+  | .succ f, .succ p, par =>
+      .set (Nat.succ p + 3) par
+        (.get (Nat.succ p + 1) (fun lp =>
+          .get (Nat.succ p + 2) (fun rp =>
+            .bind (Prog.setParents f lp (Nat.succ p)) (fun _ =>
+              Prog.setParents f rp (Nat.succ p)))))
+
+/-- `Tree.size` of the left child is below the fuel when the whole tree is. -/
+def Tree.size_left (l : Tree) (x : Nat) (r : Tree) (f : Nat)
+    (h : Nat.lt (Tree.size (Tree.node l x r)) (Nat.succ f) = .true) : Nat.lt (Tree.size l) f = .true :=
+  Nat.le_trans (Nat.succ (Tree.size l)) (Nat.succ (Nat.add (Tree.size l) (Tree.size r))) f
+    (Nat.add_le_add_left 1 (Tree.size l) (Nat.add (Tree.size l) (Tree.size r)) (Nat.le_add_right (Tree.size l) (Tree.size r)))
+    h
+/-- `Tree.size` of the right child is below the fuel when the whole tree is. -/
+def Tree.size_right (l : Tree) (x : Nat) (r : Tree) (f : Nat)
+    (h : Nat.lt (Tree.size (Tree.node l x r)) (Nat.succ f) = .true) : Nat.lt (Tree.size r) f = .true :=
+  Nat.le_trans (Nat.succ (Tree.size r)) (Nat.succ (Nat.add (Tree.size l) (Tree.size r))) f
+    (Nat.add_le_add_left 1 (Tree.size r) (Nat.add (Tree.size l) (Tree.size r)) (Nat.le_add_left (Tree.size r) (Tree.size l)))
+    h
+
+/-- `setParents` repairs every parent pointer: `{MTree t p}` becomes `{MTreeP t p par}`. -/
+def Prog.setParents.spec : (t : Tree) → (f : Nat) → Nat.lt (Tree.size t) f = .true → (p par : Nat) →
+    Triple (MTree t p) (Prog.setParents f p par) (fun _ => MTreeP t p par)
+  | .leaf, .zero, h, p, par => absurd h.1
+  | .node l x r, .zero, h, p, par => absurd h.1
+  | .leaf, .succ f, h, .zero, par => by xgo
+  | .leaf, .succ f, h, .succ p, par => by xunfold
+  | .node l x r, .succ f, h, .zero, par => by xunfold
+  | .node l x r, .succ f, h, .succ p, par => by
+      xunfold
+      xstep; xstep; xstep
+      xapp (Prog.setParents.spec l f (Tree.size_left l x r f h) lp (Nat.succ p))
+      xapp (Prog.setParents.spec r f (Tree.size_right l x r f h) rp (Nat.succ p))
+
+-- ## A loop rule, and a Dijkstra-style predicate transformer
+--
+-- `Triple.while` (lib/Hoare.wiz) is the invariant rule for loops: an invariant `I`, a
+-- measure `m` the body decreases, and enough fuel. `W.while` is the loop's *weakest
+-- precondition* computed backwards, and `wp.while` says the effect observation of the
+-- program is exactly that transformer. A traversal of a mutable list shows both.
+
+/-- The state of the traversal: done at `p`, or at `p` with the elements still to walk. -/
+inductive Walk where
+  | done (p : Nat)
+  | more (p : Nat) (x : Nat) (xs : List Nat)
+/-- The loop test: continue while the state has elements left. -/
+def Walk.test : Walk → Bool
+  | .done _ => .false
+  | .more _ _ _ => .true
+/-- The test at a done state is `false` (by computation). -/
+def Walk.test_done (p : Nat) : Walk.test (.done p) = .false := rfl
+/-- The measure: the number of elements left. -/
+def Walk.measure : Walk → Nat
+  | .done _ => 0
+  | .more _ _ xs => Nat.succ (List.length xs)
+/-- The initial state for the list `L` at `p`. -/
+def Walk.init : List Nat → Nat → Walk
+  | .nil, p => .done p
+  | .cons x xs, p => .more p x xs
+/-- The invariant: the remaining list is in the heap at the pointer. -/
+def Walk.inv : Walk → HProp Nat
+  | .done p => hpure (p = 0)
+  | .more p x xs => MList (List.cons x xs) p
+/-- The state after following the next pointer `n`. -/
+def Walk.next (n : Nat) : List Nat → Walk
+  | .nil => .done n
+  | .cons y ys => .more n y ys
+
+/-- The measure decreases at every step (by computation). -/
+def Walk.stepMeasure : (p x n : Nat) → (xs : List Nat) →
+    Nat.lt (Walk.measure (Walk.next n xs)) (Walk.measure (.more (.succ p) x xs)) = .true
+  | p, x, n, .nil => Nat.le_refl 1
+  | p, x, n, .cons y ys => Nat.le_refl (Nat.succ (Nat.succ (List.length ys)))
+
+/-- One step of the traversal: free the two cells of the node at `p`, follow its next
+pointer, and keep the rest as the new state (so the loop consumes the list). -/
+def Prog.walkBody : Walk → Prog Nat Walk
+  | .done p => .ret (.done p)
+  | .more .zero x xs => .fail
+  | .more (.succ p) x xs => .get (Nat.succ (Nat.succ p)) (fun n =>
+      .free (Nat.succ p) (.free (Nat.succ (Nat.succ p)) (.ret (Walk.next n xs))))
+
+/-- Walk the mutable list at `p` (freeing it), with the loop's own state. -/
+def Prog.walk (fuel : Nat) (L : List Nat) (p : Nat) : Prog Nat Walk :=
+  Prog.while Walk.test Prog.walkBody fuel (Walk.init L p)
+
+/-- The body preserves the invariant and decreases the measure (which is why the fuel
+suffices). -/
+def Prog.walk.step : (s : Walk) → Walk.test s = .true →
+    Triple (Walk.inv s) (Prog.walkBody s) (fun s' => hpure (Nat.lt (Walk.measure s') (Walk.measure s) = .true) ⋆ Walk.inv s')
+  | .done p, e => absurd (Bool.not_both (Walk.test (.done p)) e (Walk.test_done p))
+  | .more .zero x xs, e => by xunfold; xunfold
+  | .more (.succ p) x .nil, e => by
+      xunfold
+      xstep; xstep; xstep
+      xgo
+  | .more (.succ p) x (.cons y ys), e => by
+      xunfold
+      xstep; xstep; xstep
+      xgo
+      exact Walk.stepMeasure p x n (.cons y ys)
+
+/-- The invariant at the initial state is the list predicate. -/
+def Walk.inv_init : (L : List Nat) → (p : Nat) → Walk.inv (Walk.init L p) = MList L p
+  | .nil, p => Entails.antisym (Entails.refl (hpure (p = 0))) (Entails.refl (hpure (p = 0)))
+  | .cons x xs, p =>
+      Entails.antisym (Entails.refl (MList (List.cons x xs) p)) (Entails.refl (MList (List.cons x xs) p))
+/-- The measure of the initial state is the length of the list. -/
+def Walk.measure_init : (L : List Nat) → (p : Nat) → Walk.measure (Walk.init L p) = List.length L
+  | .nil, p => rfl
+  | .cons x xs, p => rfl
+
+/-- `Prog.walk` is verified by the loop rule (not by induction on the list): the invariant
+`MList` is preserved and the measure decreases. -/
+def Prog.walk.spec (L : List Nat) (fuel p : Nat) (h : Nat.lt (List.length L) fuel = .true) :
+    Triple (MList L p) (Prog.walk fuel L p) (fun s => Walk.inv s) :=
+  Triple.conseq
+    (Triple.while Walk.test Prog.walkBody Walk.measure Walk.inv Walk.inv Prog.walk.step
+      (fun s e => Entails.refl (Walk.inv s)) fuel (Walk.init L p)
+      (@Eq.substProp Nat (fun (n : Nat) => Nat.lt n fuel = .true) (List.length L) (Walk.measure (Walk.init L p))
+        (Eq.symm (Walk.measure_init L p)) h))
+    (fun h q => (Walk.inv_init L p h).2 q)
+    (fun s => Entails.refl (Walk.inv s))
+
+/-- Dijkstra: the weakest precondition of the traversal loop is the transformer `W.while`
+applied to the body's transformer (the loop's characteristic formula). -/
+def Prog.walk.wp (L : List Nat) (fuel p : Nat) (Q : Walk → HProp Nat) :
+    wp (Prog.walk fuel L p) Q = W.while Walk.test (fun s => wp (Prog.walkBody s)) Q fuel (Walk.init L p) :=
+  wp.while Walk.test Prog.walkBody Q fuel (Walk.init L p)
+
 -- ## Running programs on concrete heaps
 
 /-- The heap holding `vs` from location `l` on. -/

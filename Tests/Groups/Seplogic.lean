@@ -204,6 +204,30 @@ def seplogicGroup : Group where
           "def bad (p q a b : Nat) :\n" ++
           "    Triple ((p ↦ a) ⋆ (q ↦ b)) (Eff.toProg (incrBoth p q)) (fun _ => (p ↦ Nat.succ a) ⋆ (q ↦ b)) := by\n" ++
           "  xgo\n") "unsolved goals" },
+    { name := "the free-list allocator's invariant: allocHead pops and freeCell pushes", run := fun _ =>
+        okLibs ("import HoareExamples\n" ++
+          "#print axioms Prog.allocHead.spec\n#print axioms Prog.freeCell.spec\n" ++
+          "#eval Prog.show (Prog.allocHead 1) (Heap.ofList (.cons 5 (.cons 0 .nil)) 1) 3 3\n" ++
+          "#eval Prog.show (Prog.freeCell 1 7) (Heap.ofList (.cons 5 (.cons 9 .nil)) 1) 3 3")
+          ["'Prog.allocHead.spec' does not depend on any axioms",
+           "'Prog.freeCell.spec' does not depend on any axioms",
+           ".some (1, .cons .none (.cons (.some 5) (.cons (.some 0) .nil)))",
+           ".some ((), .cons .none (.cons (.some 5) (.cons (.some 7) .nil)))"] },
+    { name := "a tree with parent pointers: setParents repairs every parent field", run := fun _ =>
+        okLibs ("import HoareExamples\n" ++
+          "#print axioms Prog.setParents.spec\n" ++
+          "#eval Prog.show (Prog.setParents 3 1 9)\n" ++
+          "  (Heap.ofList (.cons 1 (.cons 0 (.cons 0 (.cons 0 .nil)))) 1) 3 5")
+          ["'Prog.setParents.spec' does not depend on any axioms",
+           ".some ((), .cons .none (.cons (.some 1) (.cons (.some 0) (.cons (.some 0) (.cons (.some 9) .nil)))))"] },
+    { name := "a loop rule and its weakest precondition: Triple.while and wp.while on a walk", run := fun _ =>
+        okLibs ("import HoareExamples\n" ++
+          "#print axioms Prog.walk.spec\n#print axioms Prog.walk.wp\n" ++
+          "#eval Prog.show (Prog.bind (Prog.walk 10 [1, 2] 1) (fun s => .ret (Walk.measure s)))\n" ++
+          "  (Heap.ofList (.cons 1 (.cons 3 (.cons 2 (.cons 0 .nil)))) 1) 12 5")
+          ["'Prog.walk.spec' does not depend on any axioms",
+           "'Prog.walk.wp' does not depend on any axioms",
+           ".some (0, .cons .none (.cons .none (.cons .none (.cons .none (.cons .none .nil)))))"] },
     { name := "HeapBorrow: a borrow of a heap cell, specified by its functional model", run := fun _ => do
         okLibs ("import HeapBorrow\n" ++
           "def incr (n : Nat) : Result (Unit × Nat) := Result.ok ((), Nat.succ n)\n" ++

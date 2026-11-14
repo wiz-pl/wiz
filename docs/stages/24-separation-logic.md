@@ -242,3 +242,125 @@ def MList' (p : Nat) : HProp Nat := ∃ʰ (n : Nat), p ↦ n ⋆ ⌜n = 0⌝
 Not covered: implicit arguments outside notation still print (`Prog.read Nat l`, 11r's
 limitation), and `wp c Q` has no notation. Conventions: docs/dsls.md. Tests: group
 `seplogic`.
+
+## 24f: more verified programs, and a loop rule
+
+The examples of 24d are a swap, a counter and list traversals; this section adds three
+programs that stress the tactics in different directions (a free-list allocator, a tree
+with parent pointers, a walk that frees as it goes, driven by a loop rule) and the rule that makes the
+last one a *Dijkstra-style* derivation: the loop's weakest precondition as a predicate
+transformer. Everything here is in `lib/HoareExamples.wiz` (the rule itself in
+`lib/Hoare.wiz`), is proved with the same `x`-tactics, and `#print axioms` lists no axiom
+for any of it.
+
+### An allocator: the free-list invariant
+
+A free list is just a mutable list whose values are the sizes of the free blocks, so its
+invariant is the representation predicate of 24c read the other way: `MList L p` says the
+cells from `p` are free. Allocation pops the head and hands the caller its two cells;
+freeing links a cell back in front.
+
+```wiz
+def Prog.allocHead (p : Nat) : Prog Nat Nat :=
+  .get (Nat.succ p) (fun n => .set (Nat.succ p) 0 (.ret p))
+
+def Prog.allocHead.spec (L : List Nat) (x p : Nat) :
+    Triple (MList (x :: L) p) (Prog.allocHead p)
+      (fun r => ∃ʰ n, ⌜r = p⌝ ⋆ (p ↦ x) ⋆ ((Nat.succ p) ↦ 0) ⋆ MList L n) := by
+  xunfold; xstep; xstep; xsimpl
+
+def Prog.freeCell (p q : Nat) : Prog Nat Unit := .set (Nat.succ p) q (.ret ())
+
+def Prog.freeCell.spec (L : List Nat) (v w p q : Nat) :
+    Triple (⌜Not (p = 0)⌝ ⋆ ((p ↦ v) ⋆ (((Nat.succ p) ↦ w) ⋆ MList L q))) (Prog.freeCell p q)
+      (fun _ => MList (v :: L) p) := by
+  xgo
+```
+
+`allocHead` unfolds the free-list invariant (which names the next pointer), reads it, and
+clears it; `xsimpl` picks the witness for the shorter list from the cell it finds on the
+left. `freeCell` writes the new next pointer and `xsimpl` folds `MList` back together.
+The explicit `⌜p ≠ 0⌝` is what the head of `MList` asks for; the program's caller has it,
+since an allocated cell is a `p ↦ v` (whose disjointness from the null heap says `p ≠ 0`).
+
+### A tree with parent pointers
+
+A node is four cells: the value at `p`, the child pointers at `p + 1` and `p + 2`, the
+parent at `p + 3`. `MTree t p` is the shape (the parent fields are arbitrary); `MTreeP t
+p par` is the same tree with every parent pointer correct. The repair pass writes the
+parent cell and recurses into the two children.
+
+```wiz
+def Prog.setParents : Nat → Nat → Nat → Prog Nat Unit
+  | .zero, p, par => .fail
+  | .succ f, .zero, par => .ret ()
+  | .succ f, .succ p, par =>
+      .set (Nat.succ p + 3) par
+        (.get (Nat.succ p + 1) (fun lp =>
+          .get (Nat.succ p + 2) (fun rp =>
+            .bind (Prog.setParents f lp (Nat.succ p)) (fun _ =>
+              Prog.setParents f rp (Nat.succ p)))))
+
+def Prog.setParents.spec : (t : Tree) → (f : Nat) → Nat.lt (Tree.size t) f = .true → (p par : Nat) →
+    Triple (MTree t p) (Prog.setParents f p par) (fun _ => MTreeP t p par)
+  | .node l x r, .succ f, h, .succ p, par => by
+      xunfold
+      xstep; xstep; xstep
+      xapp (Prog.setParents.spec l f (Tree.size_left l x r f h) lp (Nat.succ p))
+      xapp (Prog.setParents.spec r f (Tree.size_right l x r f h) rp (Nat.succ p))
+  -- the other cases: out of fuel, a leaf, or a null node (contradictory `MTree _ 0`)
+  | ...
+```
+
+The specification is by recursion on the tree and the fuel (one step per node); the two
+fuel side conditions (`Tree.size_left/right`) are the arithmetic that the two recursive
+calls need, and `xunfold` disposes of the null-node and out-of-fuel cases. `xapp` splits
+the two recursive calls, framing each subtree while the other is repaired.
+
+### A loop rule and the weakest precondition of a loop
+
+`Triple.while` (in `lib/Hoare.wiz`) is the missing structural rule for loops: the loop is
+a `while` combinator whose state `S` carries the loop variables (and, through the
+invariant `I : S → HProp V`, its heap cells), with a measure `m` that the body decreases.
+
+```wiz
+def Prog.while {V S : Type} (test : S → Bool) (body : S → Prog V S) : Nat → S → Prog V S
+  | .zero, s => .fail
+  | .succ f, s => match test s with
+    | .true => .bind (body s) (fun s' => Prog.while test body f s')
+    | .false => .ret s
+
+def Triple.while … (step : ∀ s, test s = .true →
+      Triple (I s) (body s) (fun s' => ⌜m s' < m s⌝ ⋆ I s'))
+    (exit : ∀ s, test s = .false → I s ⊢ Q s) :
+    (f : Nat) → (s : S) → Nat.lt (m s) f = .true → Triple (I s) (Prog.while test body f s) Q
+```
+
+The proof is an induction on the fuel; the measure is what lets the induction hypothesis
+apply after the body (the body's postcondition carries `m s' < m s` as a pure fact).
+
+The same file defines the loop's **weakest precondition** as a predicate transformer,
+Dijkstra's `wp` of a loop (SLF's characteristic formula), and proves that the effect
+observation of the program is exactly it:
+
+```wiz
+def W.while {V S : Type} (test : S → Bool) (body : S → W V S) (0 Q : S → HProp V) : Nat → S → HProp V
+  | .zero, s => hpure False
+  | .succ f, s => match test s with
+    | .true => body s (fun s' => W.while test body Q f s')
+    | .false => Q s
+
+def wp.while … : (f : Nat) → (s : S) → wp (Prog.while test body f s) Q
+    = W.while test (fun s => wp (body s)) Q f s
+```
+
+At fuel zero the loop faults, so its precondition is `\[False]`; at a step the body's
+transformer is composed with the rest. This is the computation a `wp`-based verifier does:
+the specification is not guessed, it is the loop's transformer. The walk of a
+mutable list uses both halves: `Prog.walk.step` preserves `MList` and decreases
+`Walk.measure` (the number of elements left), `Triple.while` turns that into
+`{MList L p} walk {fun s => Walk.inv s}`, and `Prog.walk.wp` states the transformer
+equation. Its state is an inductive (`done p`, or `more p x xs`), so the test is a
+constructor match and the impossible cases (a null node, a null cell) are contradictory
+preconditions that `xunfold` closes — no well-founded recursion or arithmetic measure is
+needed beyond `List.length`.

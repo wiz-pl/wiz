@@ -267,9 +267,123 @@ def Triple.bind {V A B : Type} {0 P : HProp V} {ω c : Prog V A} {ω f : A → P
 /-- Extract an existential from the precondition. -/
 def Triple.exists {V A X : Type} {0 J : X → HProp V} {c : Prog V A} {0 Q : A → HProp V}
     (k : (x : X) → Triple (J x) c Q) : Triple (hexists J) c Q := hexists.elim k
+/-- `b` cannot be both `true` and `false` (a `False` from the two equations). -/
+def Bool.not_both (b : Bool) (e₁ : b = .true) (e₂ : b = .false) : False :=
+  Bool.trueNeFalse (@Eq.trans Bool Bool.true b Bool.false (Eq.symm e₁) e₂)
 /-- Extract a pure fact from the precondition. -/
 def Triple.pure {V A : Type} {P : Prop} {0 H : HProp V} {c : Prog V A} {0 Q : A → HProp V}
     (k : P → Triple H c Q) : Triple (hpure P ⋆ H) c Q := hpure.elim_l k
+
+-- ## Loops: the `while` combinator, its weakest precondition, and its invariant rule
+--
+-- A loop is a program like any other, so it needs an effect observation and a rule. The
+-- combinator takes the loop's state `S` (which can carry the loop variables, and through
+-- the invariant its heap cells) and a fuel, since programs are total; `W.while` is its
+-- *weakest precondition* computed as a predicate transformer (Dijkstra's `wp` of a loop,
+-- SLF's characteristic formula for `while`), and `wp.while` says the effect observation
+-- of the program is exactly that transformer. From it follows the usual invariant rule
+-- `Triple.while`, with a measure that the body decreases (so the fuel lasts).
+
+/-- A `while` loop: test the state, and either stop or run the body and go round again.
+The fuel makes it total (`fail` when it runs out). -/
+def Prog.while {V S : Type} (test : S → Bool) (body : S → Prog V S) : Nat → S → Prog V S
+  | .zero, s => .fail
+  | .succ f, s => match test s with
+    | .true => .bind (body s) (fun s' => Prog.while test body f s')
+    | .false => .ret s
+
+/-- One step of the loop: the body and the rest if `b` is `true`, the answer otherwise. -/
+def Prog.whileTest {V S : Type} (test : S → Bool) (body : S → Prog V S) (f : Nat) (s : S) (b : Bool) : Prog V S :=
+  match b with
+  | .true => .bind (body s) (fun s' => Prog.while test body f s')
+  | .false => .ret s
+
+/-- The weakest precondition of a `while` loop, computed backwards (Dijkstra): the body's
+transformer composed as often as the loop runs. In fuel zero the loop fails, so the
+precondition is `\[False]`. -/
+def W.while {V S : Type} (test : S → Bool) (body : S → W V S) (Q : S → HProp V) : Nat → S → HProp V
+  | .zero, s => hpure False
+  | .succ f, s => match test s with
+    | .true => body s (fun s' => W.while test body Q f s')
+    | .false => Q s
+
+/-- One step of the loop's specification: the body's transformer, then the rest. -/
+def W.whileTest {V S : Type} (test : S → Bool) (body : S → W V S) (Q : S → HProp V) (f : Nat) (s : S) (b : Bool) : HProp V :=
+  match b with
+  | .true => body s (fun s' => W.while test body Q f s')
+  | .false => Q s
+
+/-- The forward direction of `wp.while`, one step: the goal mentions `b`, so matching on
+it reduces both sides. -/
+def wp.while_l_test {V S : Type} (test : S → Bool) (body : S → Prog V S) (Q : S → HProp V) (f : Nat)
+    (ih : (s' : S) → (wp (Prog.while test body f s') Q ⊢ W.while test (fun s => wp (body s)) Q f s'))
+    (s : S) (b : Bool) :
+    (wp (Prog.whileTest test body f s b) Q ⊢ W.whileTest test (fun s => wp (body s)) Q f s b) :=
+  match b with
+  | .true => Entails.trans (wp.bind_l (body s) (fun s' => Prog.while test body f s') Q)
+      (wp.mono (body s) (fun s' => wp (Prog.while test body f s') Q)
+        (fun s' => W.while test (fun s => wp (body s)) Q f s')
+        (fun s' => ih s'))
+  | .false => Entails.refl (Q s)
+/-- The forward direction of `wp.while`: the loop's precondition entails the transformer. -/
+def wp.while_l {V S : Type} (test : S → Bool) (body : S → Prog V S) (Q : S → HProp V) :
+    (f : Nat) → (s : S) → (wp (Prog.while test body f s) Q ⊢ W.while test (fun s => wp (body s)) Q f s)
+  | .zero, s => Entails.refl (hpure False)
+  | .succ f, s => wp.while_l_test test body Q f (wp.while_l test body Q f) s (test s)
+
+/-- The backward direction of `wp.while`, one step. -/
+def wp.while_r_test {V S : Type} (test : S → Bool) (body : S → Prog V S) (Q : S → HProp V) (f : Nat)
+    (ih : (s' : S) → (W.while test (fun s => wp (body s)) Q f s' ⊢ wp (Prog.while test body f s') Q))
+    (s : S) (b : Bool) :
+    (W.whileTest test (fun s => wp (body s)) Q f s b ⊢ wp (Prog.whileTest test body f s b) Q) :=
+  match b with
+  | .true => Entails.trans
+      (wp.mono (body s) (fun s' => W.while test (fun s => wp (body s)) Q f s')
+        (fun s' => wp (Prog.while test body f s') Q)
+        (fun s' => ih s'))
+      (wp.bind_r (body s) (fun s' => Prog.while test body f s') Q)
+  | .false => Entails.refl (Q s)
+/-- The backward direction of `wp.while`. -/
+def wp.while_r {V S : Type} (test : S → Bool) (body : S → Prog V S) (Q : S → HProp V) :
+    (f : Nat) → (s : S) → (W.while test (fun s => wp (body s)) Q f s ⊢ wp (Prog.while test body f s) Q)
+  | .zero, s => Entails.refl (hpure False)
+  | .succ f, s => wp.while_r_test test body Q f (wp.while_r test body Q f) s (test s)
+
+/-- The effect observation of a loop is the loop's weakest precondition. -/
+def wp.while {V S : Type} (test : S → Bool) (body : S → Prog V S) (Q : S → HProp V) :
+    (f : Nat) → (s : S) → wp (Prog.while test body f s) Q = W.while test (fun s => wp (body s)) Q f s :=
+  fun f s => Entails.antisym (wp.while_l test body Q f s) (wp.while_r test body Q f s)
+
+/-- One step of the invariant rule: case on the test's result (`Bool.cases`, since the
+result is neutral in the rule), transport the goal to the branch, and use the body's or the
+exit's specification. -/
+def Triple.whileStep {V S : Type} (test : S → Bool) (body : S → Prog V S) (m : S → Nat)
+    (I : S → HProp V) (Q : S → HProp V)
+    (step : (s : S) → (e : test s = .true) → Triple (I s) (body s) (fun s' => hpure (Nat.lt (m s') (m s) = .true) ⋆ I s'))
+    (exit : (s : S) → (e : test s = .false) → Entails (I s) (Q s))
+    (f : Nat) (ih : (s' : S) → Nat.lt (m s') f = .true → Triple (I s') (Prog.while test body f s') Q)
+    (s : S) (h : Nat.lt (m s) (Nat.succ f) = .true) (b : Bool) (e : test s = b) :
+    Triple (I s) (Prog.whileTest test body f s b) Q :=
+  Bool.cases b (Triple (I s) (Prog.whileTest test body f s b) Q)
+    (fun (e' : b = .true) =>
+      @Eq.substProp Bool (fun (b' : Bool) => Triple (I s) (Prog.whileTest test body f s b') Q)
+        Bool.true b (Eq.symm e')
+        (Triple.bind (step s (Eq.trans e e')) (fun s' => Triple.pure (fun (hm : Nat.lt (m s') (m s) = .true) =>
+          ih s' (Nat.le_trans (Nat.succ (m s')) (m s) f hm h)))))
+    (fun (e' : b = .false) =>
+      @Eq.substProp Bool (fun (b' : Bool) => Triple (I s) (Prog.whileTest test body f s b') Q)
+        Bool.false b (Eq.symm e') (exit s (Eq.trans e e')))
+/-- The invariant rule for loops: if the body preserves the invariant `I` and decreases the
+measure `m`, and `I` at an exit state entails `Q`, then `I` at the start is a
+precondition of the loop, provided the fuel is above the measure at the start. -/
+def Triple.while {V S : Type} (test : S → Bool) (body : S → Prog V S) (m : S → Nat)
+    (I : S → HProp V) (Q : S → HProp V)
+    (step : (s : S) → (e : test s = .true) → Triple (I s) (body s) (fun s' => hpure (Nat.lt (m s') (m s) = .true) ⋆ I s'))
+    (exit : (s : S) → (e : test s = .false) → Entails (I s) (Q s)) :
+    (f : Nat) → (s : S) → Nat.lt (m s) f = .true → Triple (I s) (Prog.while test body f s) Q
+  | .zero, s, h => fun _ _ => absurd (Bool.not_both (Nat.lt (m s) 0) h (Nat.lt_zero (m s)))
+  | .succ f, s, h =>
+      Triple.whileStep test body m I Q step exit f (Triple.while test body m I Q step exit f) s h (test s) (refl (test s))
 
 /-- The small-footprint specification of `Prog.read` (SLF, WPsem: `triple_get`): the result
 is the cell's value. -/
