@@ -319,6 +319,52 @@
         {"rule": "strcpy-overflow", "function": "main", "callee": "strcpy", "argument": 0, "sinkLine": 8}
       ],
       "note": "detected, but the destination array is a lowering boundary"
+    },
+    {
+      "id": "s2/cwe78/exec-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/taint-exec-unsafe.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "execl", "argument": 3, "sinkLine": 18, "sourceLine": 17},
+        {"rule": "command-injection", "function": "main", "callee": "execlp", "argument": 3, "sinkLine": 19, "sourceLine": 17},
+        {"rule": "command-injection", "function": "main", "callee": "execv", "argument": 0, "sinkLine": 20, "sourceLine": 17},
+        {"rule": "command-injection", "function": "main", "callee": "execvp", "argument": 0, "sinkLine": 21, "sourceLine": 17},
+        {"rule": "command-injection", "function": "main", "callee": "execve", "argument": 0, "sinkLine": 22, "sourceLine": 17},
+        {"rule": "command-injection", "function": "main", "callee": "posix_spawn", "argument": 1, "sinkLine": 23, "sourceLine": 17},
+        {"rule": "command-injection", "function": "main", "callee": "posix_spawnp", "argument": 1, "sinkLine": 24, "sourceLine": 17},
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 25, "sourceLine": 17}
+      ],
+      "note": "the exec family, including the variadic execl argument selector and posix_spawn's path"
+    },
+    {
+      "id": "s2/cwe78/exec-safe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/taint-exec-safe.c",
+      "expect": "safe",
+      "note": "the same exec-family calls with a constant command"
+    },
+    {
+      "id": "s2/cwe78/entry-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/taint-entry-unsafe.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "iv_spawn", "callee": "execl", "argument": 3, "sinkLine": 6, "sourceLine": 6}
+      ],
+      "note": "an exported C-ABI entry with no caller: its parameter is a source"
+    },
+    {
+      "id": "s2/cwe78/entry-safe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/taint-entry-safe.c",
+      "expect": "safe",
+      "note": "an internally called function and a static function are not exported entries"
     }
+
   ]
 }

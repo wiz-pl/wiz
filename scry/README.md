@@ -61,6 +61,18 @@ a struct field, array/subscript, cast, `?:`, `sizeof`, string literal, global, s
 not modelled. `scry taint` prints those warnings as `lowering-boundary` findings and puts
 them in SARIF; they are `unchecked` (there is no derivation, and the value is unknown).
 
+**Command sinks and exported entries.** The command-injection rule covers `system`,
+`popen`, `execl`, `execlp`, `execv`, `execvp`, `execve`, `posix_spawn` and
+`posix_spawnp`. `sink execl args` checks every argument, so the real
+`execl("/bin/sh", "sh", "-c", cmd, NULL)` pattern reports the tainted word at argument
+3; the non-variadic calls name their path/argv positions. A function with external
+linkage, no caller in the translation unit, and no address taken (`p = f`, a `qsort`
+callback) is an **exported C-ABI entry**: its parameters are sources, because an
+external/Wiz caller supplies them. `main`, `static` functions, internally called
+functions and callbacks keep the ordinary parameter summary, so the policy does not
+turn every helper into a source. `tests/fixtures/taint-entry-*.c` and the
+`tests/fixtures/taint-exec-*.c` pair are the positive/negative controls.
+
 ## Points-to and memory
 
 `Scry.PointsTo` is a **flow-insensitive, field-sensitive** Andersen-style points-to
