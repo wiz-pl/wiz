@@ -693,7 +693,7 @@ inductive MTm where
   | transp (A a P p b e : MTm)
   | desc (l : Nat) (I : MTm)
   | dret (i : MTm)
-  /-- (21w) a field's quantity, last (ω by default) -/
+  /-- (21x) a field's quantity, last (ω by default) -/
   | darg (S E : MTm) (q : ZeroOneMany := .many)
   | drec (j E : MTm) (q : ZeroOneMany := .many)
   | dhrec (H j E : MTm) (q : ZeroOneMany := .many)
@@ -992,7 +992,7 @@ partial def ofTerm : Term ZeroOneMany → Option MTm
   | .prf _ t => ofTerm t
   | _ => none
 
-/-- (21w) a description field's quantity, as `Kernel.wiz`'s `show` prints it: nothing at ω -/
+/-- (21x) a description field's quantity, as `Kernel.wiz`'s `show` prints it: nothing at ω -/
 def fieldQPre : ZeroOneMany → String
   | .zero => "0 "
   | .one => "1 "

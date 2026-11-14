@@ -788,7 +788,7 @@ def templatePairs : List (String × Term ZeroOneMany) :=
    ("hypsTm 0 0", Templates.hypsTm (L 0) (L 0)), ("hypsTm 0 2", Templates.hypsTm (L 0) (L 2)),
    ("mapTm 0", Templates.mapTm (L 0)), ("mapTm 1", Templates.mapTm (L 1))]
 
-/-- (21w) Drop the description fields' quantities and every `sigmaQ` to the `Σ` at ω, as
+/-- (21x) Drop the description fields' quantities and every `sigmaQ` to the `Σ` at ω, as
 the Lean side's `dropQty` does before `MTm.ofTerm`: the audit compares the kernels modulo
 quantities (the differential `MTm` can write a literal, and the templates at a method's
 quantity variable print as `%q` in Kernel.wiz and as `Σ` at ω after `dropQty`). -/

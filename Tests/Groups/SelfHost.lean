@@ -393,7 +393,7 @@ def quantityDecls : List (String × Bool) := [
   ("def l0 (x : Nat) : Nat := let 0 y := x; y\n", false),
   ("def linTwice (1 z : Nat) : Nat := lin z (fun y => Nat.add y y)\n", false)]
 
-/-- (stage 21w) Constructor fields with quantities (`Desc.arg q S D`) and implicit
+/-- (stage 21x) Constructor fields with quantities (`Desc.arg q S D`) and implicit
 constructor fields (at 0, filled in at the call, not named by patterns): the same
 verdicts in both frontends. -/
 def fieldQtyHeader : String :=
@@ -433,7 +433,7 @@ def fieldQtyDecls : List (String × Bool) := [
   ("inductive R1 where\n  | z\n  | s (1 r : R1)\n", true),
   ("inductive Q2 where\n  | mk (2 n : Nat)\n", false)]
 
-/-- (stage 21w) Field quantities and implicit fields, compiled and run. -/
+/-- (stage 21x) Field quantities and implicit fields, compiled and run. -/
 def fieldQtyProgram : String :=
   "import Prelude\n" ++
   "inductive E0 where\n  | mk (0 n : Nat) (m : Nat)\n" ++
@@ -451,7 +451,7 @@ def fieldQtyProgram : String :=
 accepts)` (docs/CoreSpec.md §15): the Lean frontend takes a `match` on a linear scrutinee
 apart with `T.casesOn1` (the case at 1), the self-hosted frontend's match is the case at
 ω, which uses the scrutinee ω times. (Constructor field quantities and implicit fields
-were differences until 21w; a linear variable used once in each branch of a `match`
+were differences until 21x; a linear variable used once in each branch of a `match`
 until 21v: `linearMatchDecls`.) -/
 def quantityDiffs : List (String × Bool × Bool) := [
   ("def m2 (1 x : Nat) : Nat := match x with\n  | .zero => 0\n  | .succ k => k\n", true, false),
@@ -1095,7 +1095,7 @@ def selfHostGroup : Group where
           "def main : IO Unit := IO.println (Nat.toString (get b + sum p))\n") "6\n" },
     { name := "the self-hosted frontend: written quantities, as in the Lean frontend (21m, K10)", run := fun _ =>
         selfhostAgrees quantityHeader quantityDecls },
-    { name := "Kernel.wiz quantity terms: the same variable is the same quantity, and a Σ at a stuck non-variable quantity is rejected, as in the Lean kernel (21w, review probes 7a, 15b)", run := fun _ => do
+    { name := "Kernel.wiz quantity terms: the same variable is the same quantity, and a Σ at a stuck non-variable quantity is rejected, as in the Lean kernel (21x, review probes 7a, 15b)", run := fun _ => do
         -- (`MTm` has no `Qty` terms; the Lean kernel's verdicts are in
         -- wiz-notes/fieldq-review-probes: 7a accepted, 15b rejected by `qtyPoly`)
         let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
@@ -1108,9 +1108,9 @@ def selfHostGroup : Group where
           "(.app (.ann (.lam (.darg (.var 0) (.unit 0) (.lam (.dret .star)))) (piW .qty (.descr 0 (.unit 0)))) (.app (.var 0) .star)) .star)))"
         ioRun (kernel ++ "\n" ++ verdict ++ s!"def main : IO Unit := do\n  IO.println (verdict {p7a});\n  IO.println (verdict {p15b})\n")
           "ok\nerror\n" },
-    { name := "the self-hosted frontend: constructor field quantities (0, 1, ω) and implicit fields, as in the Lean frontend (21w)", run := fun _ =>
+    { name := "the self-hosted frontend: constructor field quantities (0, 1, ω) and implicit fields, as in the Lean frontend (21x)", run := fun _ =>
         selfhostAgrees fieldQtyHeader fieldQtyDecls },
-    { name := "constructor field quantities and implicit fields: the Lean and the self-hosted compilers agree (21w)", run := fun _ => do
+    { name := "constructor field quantities and implicit fields: the Lean and the self-hosted compilers agree (21x)", run := fun _ => do
         ioRun (fieldQtyProgram.replace "import Prelude" "import IO") "4\n3\n9\n"
         selfhostCompileRun fieldQtyProgram "4\n3\n9\n"
         selfhostCompileRun fieldQtyProgram "4\n3\n9\n" (flags := #["--rc"]) },
