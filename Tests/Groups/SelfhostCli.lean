@@ -225,6 +225,33 @@ def cliGroup : Group where
         let (c, _, err) ← cliRun exe #[("c.wiz", cliGood)] #["check", "c.wiz", "--cache", cache, "--no-cache", "-v"]
         checkEq 0 c
         cliCheck err "cache miss: " "no-cache" },
+    { name := "private names: a warm cache replays the same diagnostic (21n)", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let cacheDir ← IO.FS.createTempDir
+        let cache := (cacheDir / "c").toString
+        -- (A declares `secret` privately and uses it; main imports A and writes it)
+        let files := #[("A.wiz", "import Prelude\nprivate def secret : Nat := 42\ndef visible : Nat := secret\n"),
+                       ("main.wiz", "import Prelude\nimport A\ndef x : Nat := secret\n")]
+        let (c, _, err) ← cliRun exe files #["check", "main.wiz", "--cache", cache, "-v"]
+        checkEq 1 c
+        cliCheck err "cache miss: " "cold"
+        cliCheck err "main.wiz:3:1: error: 'secret' is private to module A [private]" "cold diagnostic"
+        -- a warm hit replays it: the visibility check is an elaboration-time lookup, and
+        -- the key covers both modules' texts
+        let (c, _, err) ← cliRun exe files #["check", "main.wiz", "--cache", cache, "-v"]
+        checkEq 1 c
+        cliCheck err "cache hit: " "warm"
+        cliCheck err "main.wiz:3:1: error: 'secret' is private to module A [private]" "warm diagnostic"
+        -- the same module with a public reference checks (a private name is visible in
+        -- its own module), cold and warm
+        let files2 := #[("A.wiz", "import Prelude\nprivate def secret : Nat := 42\n"),
+                        ("main.wiz", "import Prelude\nimport A\ndef x : Nat := 1\n")]
+        let (c, _, err) ← cliRun exe files2 #["check", "main.wiz", "--cache", cache, "-v"]
+        checkEq 0 c
+        cliCheck err "cache miss: " "good cold"
+        let (c, _, err) ← cliRun exe files2 #["check", "main.wiz", "--cache", cache, "-v"]
+        checkEq 0 c
+        cliCheck err "cache hit: " "good warm" },
     { name := "the one-shot mode (input.wiz to standard output) still works", run := fun _ =>
         withSelfhostCli fun exe => do
         let (c, out, _) ← cliRun exe #[("input.wiz", cliHello)] #[]
