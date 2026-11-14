@@ -305,3 +305,175 @@ workspace root.
 The server reads the package's modules when it starts, as before: an edit to a module
 is seen by the files that import it after a restart (`:WizLspRestart`), and so is an
 edit to `grail.wiz`.
+
+## 23m: a package registry
+
+A **registry** gives packages global names and versions. It is three layers, each a file
+with one writer:
+
+| layer | file | written by | read at |
+|---|---|---|---|
+| manifest | `grail.wiz` in the package | the author | `grail update`, every build (targets, roots) |
+| index | `index/NAME.sexpr` in a git repository | the publisher, by pull request | `grail update` only |
+| lock | `grail.lock` in the consumer | `grail update` | every build, fetch, lsp, doc |
+
+Builds read the lock only: with `grail.lock` and the archives cached, a build needs
+neither the index nor the network. That split is what makes a **static index** enough:
+there is no server, API or token, just a git repository of text files (a directory or a
+`file://` URL is an index too, which is how the tests and air-gapped mirrors use it).
+
+```wiz
+import Grail
+def package : Package := Package.new "greet"
+  |> Package.version "1.2.0"                  -- this release's version
+  |> Package.toolchain ">=0.1 <0.3"           -- the Wiz it was tested with (a range)
+  |> Package.require "std" "^0.1"             -- a registry dependency
+  |> Package.require "text" "~1.0.3"
+  |> Package.lib "greet" "src"
+```
+
+`Package.version` and `Package.toolchain` are optional (empty means "unversioned" and
+"any toolchain"), so an existing `grail.wiz` decodes unchanged.
+
+**`require` and `dep` stay two combinators.** `Package.dep NAME URL REV` names a source
+(a git URL and a revision), and `grail update` pins it to a commit. `Package.require
+NAME REQ` names a registry package and a *version range*, resolved through the index.
+The split keeps the security and compatibility stories separate: a git dependency is a
+source you chose, a registry dependency is a constraint the index resolves. They can be
+mixed in one package; the lock records both.
+
+### The index
+
+One S-expression file per package, `index/NAME.sexpr` (the parser is the one grail
+already uses for `grail.lock`):
+
+```lisp
+(index
+  (package "greet"
+    (summary "Hello, in Wiz")
+    (repo "https://github.com/example/greet")
+    (version "1.2.0"
+      (source "https://github.com/example/greet/releases/download/v1.2.0/greet-1.2.0.tar.gz")
+      (sha256 "8a3349def55974e5cbc2eb530a2fc4fff48b292e7b81c6b6563da515f9cdc064")
+      (toolchain ">=0.1.0 <0.3.0")
+      (deps (dep "std" "^0.1") (dep "text" "~1.0")))
+    (yanked "1.2.1" "wrong tarball; use 1.2.2")))
+```
+
+* `source` is the immutable archive (an `https`, `file://` or plain path URL);
+  `sha256` is the SHA-256 of its bytes. `deps` is **authoritative for resolution**; it
+  must agree with the published manifest, so a lock records the whole graph and a build
+  never re-reads dependency manifests to resolve.
+* `yanked` stops new resolutions from choosing a version; a lock that already pins it
+  keeps working, because `grail fetch` never reads the index.
+* Names are global and lowercase (`[a-z][a-z0-9-]{0,63}`); `name@version` is immutable.
+  A corrected release gets a new version. Namespaces (`@org/name`) are deferred, with
+  room in the file layout (`index/@org/name.sexpr`).
+
+**The archive is deterministic.** The publisher makes it from the release tag with
+
+```sh
+git archive --format=tar --prefix=greet-1.2.0/ COMMIT | gzip -n > greet-1.2.0.tar.gz
+```
+
+`gzip -n` drops the filename and timestamp and `git archive` stamps every entry with the
+commit's time, so the bytes are a function of the commit and the hash can be re-derived
+by anyone. The layout is fixed: one top directory `NAME-VERSION/` containing
+`grail.wiz`; `fetch` strips that component.
+
+### Configuring the index
+
+The index is a URL (a git repository), or, for tests and local review, a directory of
+`*.sexpr` files or one file holding several packages. (A bare git repository path is
+cloned like a URL; an ordinary directory is read in place, so uncommitted edits are
+visible.) The URL is chosen by, in order:
+
+1. `--index URL` on the command line;
+2. `Package.set "index" "URL"` in `grail.wiz` (or in the machine's
+   `grail.local.wiz`, which wins, as for toolchain settings).
+
+The intended deployment is `https://github.com/wiz-pl/grail-index`, but any git URL is
+an index, including an organisation's private one. A URL index is cloned once into
+`<cache>/grail/index`; `grail update` fetches and resets it, and `--offline` reads the
+cached clone (and refuses if there is none, or if it is a clone of another URL). The
+lock records the index URL and commit that produced it, so an audit can name the exact
+index state.
+
+### Resolution
+
+Requirements: `1.2.3` (exact), `^1.2.3` (`>=1.2.3 <2.0.0`; `^0.2.3` is `<0.3.0`),
+`~1.2.3` (`>=1.2.3 <1.3.0`; `~1` is `<2.0.0`), `>=1.2 <2`, `>`, `<=`, `<`, and `*`.
+The resolver is flat and greedy: it picks the **highest** version of each name that
+satisfies *every* requirement on it (one version per name; Wiz has one global name
+space), adds that version's index `deps`, and repeats until the requirement set is
+stable. A conflict names both requesters; there is no backtracking. A version whose
+`toolchain` range does not admit the running toolchain is filtered out (so `>=0.1.0`
+admits the `0.1.0-dev` nightly), which is a compatibility signal, not a security
+boundary. Prereleases only match a requirement that names one.
+
+`grail index resolve` prints the same choice without writing the lock;
+`grail index show NAME` prints a package's versions.
+
+### The lock (v2) and the commands
+
+`grail update` resolves the manifest's `require`s (and git `dep`s) and writes
+`grail.lock`, which is committed. Version 1 (23h) held git dependencies; version 2 adds
+the index and registry packages, and a package with only git dependencies keeps a v1
+lock:
+
+```lisp
+(lock
+  (index "https://github.com/wiz-pl/grail-index" "885c4c903032ba188e1c819906ecad6c1912ab2f")
+  (dep "legacy" "https://example.org/legacy.git" "v2" "<commit>" "<content>")
+  (pkg "std" "0.1.1" "https://…/std-0.1.1.tar.gz" "<sha256>"
+    (deps (dep "text" "^1")))
+  (pkg "text" "1.2.0" "https://…/text-1.2.0.tar.gz" "<sha256>" (deps)))
+```
+
+* `grail update [--locked] [--offline]`: resolve and rewrite the lock. `--locked` never
+  writes and fails with `grail.lock is out of date` when the result differs (the CI check
+  that a PR committed its lock); `--offline` uses the cached index and existing git
+  clones. With no dependencies at all it succeeds and does nothing.
+* `grail fetch [--locked] [--offline]`: materialise the lock without building. A missing
+  lock is created unless `--locked`; `--locked` never writes and fails when a
+  requirement is not pinned or is pinned to a version that does not satisfy it.
+  `--offline` downloads nothing: the index, archives and git clones must be cached,
+  otherwise it is an error. With no dependencies it succeeds and does nothing.
+* `grail build/test/run/lsp/doc` read the lock only. A missing lock with require/dep
+  lines says `no grail.lock: run grail update`.
+* The lock holds the **transitive closure** (each `pkg` has its deps), so a build knows
+  the graph offline. `checkLocked` also refuses a lock whose `pkg` dependency is absent
+  or not satisfied, before anything is fetched.
+* Fetching a registry package (`Grail/Registry.lean`) is: if
+  `.grail/packages/NAME/.grail-pkg` already equals the archive hash, done; otherwise
+  find `<cache>/grail/downloads/SHA256`, verify it (re-download if corrupt), download
+  and verify the hash **before** unpacking, unpack into a temporary directory with
+  `tar -xzf --strip-components=1 --no-same-owner`, write the stamp, and rename into
+  place. A second fetch is a few stat calls.
+
+### Publishing
+
+Publishing is a **reviewed pull request to the index repository**: the author tags a
+release, uploads the deterministic archive to the release, and opens a PR that adds the
+`(version …)` entry. `grail publish ARCHIVE --source URL` does the mechanical part: it
+reads the manifest, checks the name, version, toolchain and requirement syntax, checks
+the archive layout (one `NAME-VERSION/` with `grail.wiz`), hashes the archive, and
+prints the entry to paste into the index. It does not merge anything; the review (URL
+resolves, hash matches the release, deps match the manifest, name untaken) is the gate.
+
+### Trust: fetch is not build
+
+The registry gives **integrity and naming**, not safety. A version's bytes cannot change
+without failing every lock's SHA-256 check, the lock pins name+version+source+hash, and
+a corrupted cache entry is re-verified on every use. But `grail fetch` downloads files,
+and `grail build` evaluates the package's `grail.wiz` (a Wiz program), compiles its C and
+runs its commands: fetching a package you do not trust is downloading its author's files,
+and building it is running its author's code. There is no sandbox. Git `dep` entries keep
+v1's 64-bit content hash (accident detection, not cryptographic); registry entries are
+the strong path.
+
+**Deferred:** a real `wiz-pl/grail-index` with CI naming rules and the first packages;
+signed index commits and a signature in the lock (`--require-signature`); `grail update
+-p NAME`; a tree hash for unpacked packages (lock v3) and a SHA-256 tree hash for git
+deps; namespaces, private-index credential settings, `grail vendor`, binary artifacts,
+and automated publish (a bot that verifies the artifact before merging).

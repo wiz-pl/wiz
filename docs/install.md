@@ -186,10 +186,42 @@ grail test                # 1 passed, 0 failed
 ```
 
 `grail build` again runs nothing: every job is keyed by its inputs. `grail targets`
-lists the targets, and `grail config` prints the C toolchain grail uses. Packages can
-depend on other packages in git repositories (`Package.dep`, with a lock file) and run
-commands as build steps; see [stages/23-grail.md](stages/23-grail.md). Add `.grail/` to
+lists the targets, and `grail config` prints the C toolchain grail uses. Add `.grail/` to
 your `.gitignore`.
+
+### Dependencies
+
+A package can depend on another package from git with `Package.dep NAME URL REV`, or on
+a **registry** package by name and version range with `Package.require NAME REQ`:
+
+```wiz
+import Grail
+def package : Package := Package.new "app"
+  |> Package.set "index" "https://github.com/wiz-pl/grail-index"  -- or --index URL
+  |> Package.require "std" "^0.1"
+  |> Package.dep "helper" "https://example.org/helper.git" "v1"
+```
+
+`grail update` resolves the requirements through the index and writes `grail.lock`;
+commit it. Builds, tests, the language server and `grail doc` use the lock only, so they
+need the index only after a dependency changes. To restore a checkout on another
+machine, run `grail fetch --locked` (or `grail fetch --locked --offline` when the
+archives are already cached); CI should run `grail update --locked` to catch a forgotten
+lock. Update a dependency with `grail update`, never by editing the lock.
+
+`Package.require` and `Package.dep` are deliberately different: `require` names a
+version range that the index resolves, `dep` names a git source (URL and revision) that
+`grail update` pins to a commit. A package may use both. The index itself is a static
+git repository (any URL; a directory also works), so there is no package server. See
+[stages/23-grail.md](stages/23-grail.md), 23m, for the index format, resolution rules,
+lock v2 and publishing (a reviewed pull request; `grail publish ARCHIVE --source URL`
+prints the entry).
+
+**Fetching is not building.** `grail fetch` downloads and checks archives; `grail build`
+evaluates each dependency's `grail.wiz` (a Wiz program), compiles its C and runs its
+commands. The registry, index and lock give integrity and naming (SHA-256, pinned
+versions, a lock that notices changes); they do not sandbox a package. Building a
+package you do not trust runs its author's code.
 
 ## Editors
 

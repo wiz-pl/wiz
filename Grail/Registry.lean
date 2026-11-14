@@ -132,8 +132,10 @@ def untar (tar : System.FilePath) (dest : System.FilePath) : IO (Except String U
       else .error s!"tar {tar}: {o.stderr.trimAscii}")
   catch e => pure (.error s!"tar: {e}")
 
-/-- The cached archive for `sha256`, downloading and verifying it if needed. -/
-def archive (cache : System.FilePath) (p : PkgLock) : IO (Except String System.FilePath) := do
+/-- The cached archive for `sha256`, downloading and verifying it if needed. With
+`offline`, a missing or corrupt cache entry is an error: nothing is downloaded. -/
+def archive (cache : System.FilePath) (p : PkgLock) (offline : Bool := false) :
+    IO (Except String System.FilePath) := do
   let dir := cache / "grail" / "downloads"
   IO.FS.createDirAll dir
   let f := dir / p.sha256
@@ -143,6 +145,8 @@ def archive (cache : System.FilePath) (p : PkgLock) : IO (Except String System.F
     | .error _ => pure ()
     -- a corrupt or wrongly named archive: fetch it again
     IO.FS.removeFile f
+  if offline then
+    return .error s!"--offline: {p.name} {p.version} is not in the archive cache ({f}); run `grail fetch` without --offline"
   let tmp := dir / s!"{p.sha256}.tmp{← IO.Process.getPID}"
   match ← download p.source tmp with
   | .error e => IO.FS.removeFile tmp; return .error s!"{p.name} {p.version}: {e}"
@@ -165,11 +169,11 @@ def stamp (dir : System.FilePath) : IO (Option String) := do
   pure (some (← IO.FS.readFile f).trimAscii.toString)
 
 /-- Make `.grail/packages/NAME` the unpacked `p`; `false` when it already was. -/
-def ensurePkg (cache : System.FilePath) (packagesDir : System.FilePath) (p : PkgLock) :
-    IO (Except String Bool) := do
+def ensurePkg (cache : System.FilePath) (packagesDir : System.FilePath) (p : PkgLock)
+    (offline : Bool := false) : IO (Except String Bool) := do
   let dir := packagesDir / p.name
   if (← stamp dir) == some p.sha256 then return .ok false
-  match ← archive cache p with
+  match ← archive cache p offline with
   | .error e => pure (.error e)
   | .ok tar =>
     let tmp := packagesDir / s!"{p.name}.tmp{← IO.Process.getPID}"
@@ -210,25 +214,30 @@ def loadIndex (cache : System.FilePath) (spec : String) (offline : Bool) :
     IO (Except String Source) := do
   let p : System.FilePath := spec
   if ← p.isDir then
-    return (← readDir p spec)
-  if ← p.pathExists then
-    match Index.parse (← IO.FS.readFile p) with
-    | .error e => return .error s!"{spec}: {e}"
-    | .ok ps => pure (.ok { url := spec, pkgs := ps.foldl (fun m p => m.insert p.name p) {} })
+    -- a bare git repository is a URL-like index (clone it); an ordinary directory is
+    -- read in place (index/*.sexpr or *.sexpr)
+    let bare := (← (p / "HEAD").pathExists) && (← (p / "objects").isDir)
+    unless bare do return (← readDir p spec)
   else
-    -- a URL: a git index cloned into the cache, at the tip of its default branch
-    let dir := cache / "grail" / "index"
-    if offline then
-      unless ← dir.pathExists do
-        return .error s!"--offline: no index at {dir} (load {spec} once without --offline)"
-    else
-      if let .error e ← ensureClone dir spec then return .error e
-      if let .error e ← git #["fetch", "--quiet", "--tags", "--force", "origin"] (some dir) then
-        return .error e
-      if let .error e ← git #["reset", "--hard", "--quiet", "FETCH_HEAD"] (some dir) then
-        return .error e
-    let commit := (← git #["rev-parse", "HEAD"] (some dir)).toOption.getD ""
-    return (← readDir dir spec).map fun m => { m with commit }
+    if ← p.pathExists then
+      match Index.parse (← IO.FS.readFile p) with
+      | .error e => return .error s!"{spec}: {e}"
+      | .ok ps => return .ok { url := spec, pkgs := ps.foldl (fun m p => m.insert p.name p) {} }
+  -- a URL: a git index cloned into the cache, at the tip of its default branch
+  let dir := cache / "grail" / "index"
+  if offline then
+    unless ← dir.pathExists do
+      return .error s!"--offline: no index at {dir} (load {spec} once without --offline)"
+    unless (← git #["remote", "get-url", "origin"] (some dir)).toOption == some spec do
+      return .error s!"--offline: {dir} is a clone of another index (run without --offline to switch to {spec})"
+  else
+    if let .error e ← ensureClone dir spec then return .error e
+    if let .error e ← git #["fetch", "--quiet", "--tags", "--force", "origin"] (some dir) then
+      return .error e
+    if let .error e ← git #["reset", "--hard", "--quiet", "FETCH_HEAD"] (some dir) then
+      return .error e
+  let commit := (← git #["rev-parse", "HEAD"] (some dir)).toOption.getD ""
+  return (← readDir dir spec).map fun m => { m with commit }
 where
   readDir (dir : System.FilePath) (what : String) : IO (Except String Source) := do
     match ← readIndexDir dir with
@@ -256,7 +265,7 @@ def resolveLock (cache : System.FilePath) (indexSpec : String) (offline : Bool)
     match Resolve.resolve src.pkgs pkg.requires Wiz.version with
     | .error e => pure (.error e)
     | .ok resolved =>
-      match ← resolveDeps readPkg dir pkg.deps [] with
+      match ← resolveDeps readPkg dir pkg.deps [] offline with
       | .error e => pure (.error e)
       | .ok git =>
         let pkgs : List PkgLock := resolved.map fun r =>
@@ -264,7 +273,15 @@ def resolveLock (cache : System.FilePath) (indexSpec : String) (offline : Bool)
              sha256 := r.sha256, deps := r.deps } : PkgLock)
         pure (.ok { indexUrl := src.url, indexCommit := src.commit, git := git, pkgs := pkgs })
 
-/-- Is every requirement of the manifest pinned in `lock`, and every git dependency? -/
+/-- 64 lowercase hex digits: the shape of a SHA-256 in the index and the lock. -/
+def isSha256 (s : String) : Bool :=
+  s.length == 64 && s.toList.all fun c =>
+    ('0' ≤ c && c ≤ '9') || ('a' ≤ c && c ≤ 'f')
+
+/-- Is every requirement of the manifest pinned in `lock` (and satisfied), is every git
+dependency pinned, and is the lock's registry graph complete? A lock holds the transitive
+closure, so a `pkg` entry whose dependency is absent or not satisfied is a stale or
+hand-edited lock. -/
 def checkLocked (lock : Lock) (pkg : Package) : Except String Unit := do
   for r in pkg.requires do
     match lock.pkgs.find? (·.name == r.name) with
@@ -277,26 +294,99 @@ def checkLocked (lock : Lock) (pkg : Package) : Except String Unit := do
   for d in pkg.deps do
     if !lock.git.any (·.name == d.name) then
       throw s!"{d.name} is not in grail.lock: run `grail update`"
+  let mut seen : List String := []
+  for p in lock.pkgs do
+    if seen.contains p.name then
+      throw s!"grail.lock lists {p.name} twice: run `grail update`"
+    seen := p.name :: seen
+    if !isSha256 p.sha256 then
+      throw s!"grail.lock: {p.name} {p.version}: sha256 is not 64 lowercase hex digits: run `grail update`"
+    if p.source.isEmpty then
+      throw s!"grail.lock: {p.name} {p.version}: no source: run `grail update`"
+    let _ ← Version.parse p.version
+    for d in p.deps do
+      match lock.pkgs.find? (·.name == d.name) with
+      | none =>
+        throw s!"grail.lock is incomplete: {p.name} depends on {d.name}, which is not in it: run `grail update`"
+      | some q =>
+        let req ← Requirement.parse d.req
+        let v ← Version.parse q.version
+        if !Requirement.satisfies req v then
+          throw s!"grail.lock has {q.name} {q.version}, but {p.name} asks for {d.req}: run `grail update`"
 
 /-- `grail fetch`: make every package of the lock present and verified. Returns the
-lines to print. -/
-def fetch (cache : System.FilePath) (dir : System.FilePath) (lock : Lock) :
-    IO (Except String (List String)) := do
+lines to print. With `offline`, a missing archive or clone is an error (nothing is
+downloaded). -/
+def fetch (cache : System.FilePath) (dir : System.FilePath) (lock : Lock)
+    (offline : Bool := false) : IO (Except String (List String)) := do
   let mut out := []
   for p in lock.pkgs do
-    match ← ensurePkg cache (dir / ".grail" / "packages") p with
+    match ← ensurePkg cache (dir / ".grail" / "packages") p offline with
     | .error e => return .error e
     | .ok fresh =>
       out := out ++ [s!"{p.name} {p.version}\t{p.sha256}\t{if fresh then "fetched" else "up to date"}"]
   for g in lock.git do
     let d := packageDir dir g.name
-    if let .error e ← ensureClone d g.url then return .error e
-    if let .error e ← checkout d g.commit then return .error e
+    if offline then
+      if let .error e ← ensureCloneCached d g.url then return .error e
+      if let .error e ← checkoutCached d g.commit then return .error e
+    else
+      if let .error e ← ensureClone d g.url then return .error e
+      if let .error e ← checkout d g.commit then return .error e
     let content ← contentHash d
     if content != g.content then
       return .error s!"{d} differs from grail.lock (content {content}, locked {g.content}): edited? remove it, or `grail update`"
     out := out ++ [s!"{g.name}\t{g.commit}\t{content}"]
   pure (.ok out)
+
+/-- Build the index entry for one release from its manifest and archive: the checks a
+publisher (and the index's reviewer) can make locally. The archive layout must be the
+fixed one: one top-level `NAME-VERSION/` with the package's `grail.wiz` in it. -/
+def publishEntry (pkg : Package) (source sha : String) : Except String IxVersion := do
+  if !validName pkg.name then throw s!"package name {pkg.name}: expected [a-z][a-z0-9-]* (at most 64)"
+  if pkg.version.isEmpty then throw "grail.wiz has no Package.version: a published package needs one"
+  let v ← Version.parse pkg.version
+  if Version.render v != pkg.version then
+    throw s!"Package.version {pkg.version}: expected a normalised version like 1.2.3"
+  if source.isEmpty then throw "no --source URL for the archive"
+  if !isSha256 sha then throw s!"sha256 {sha}: expected 64 lowercase hex digits"
+  if !pkg.toolchain.isEmpty then
+    if let .error e := Requirement.parse pkg.toolchain then
+      throw s!"Package.toolchain {pkg.toolchain}: {e}"
+  for r in pkg.requires do
+    if let .error e := Requirement.parse r.req then
+      throw s!"Package.require {r.name} {r.req}: {e}"
+  pure { version := v, source, sha256 := sha, toolchain := pkg.toolchain, deps := pkg.requires }
+
+/-- Check that `archive` is a tar.gz of the fixed layout (`NAME-VERSION/` at the top,
+with a `grail.wiz` in it). -/
+def checkArchiveLayout (archive : System.FilePath) (name version : String) : IO (Except String Unit) := do
+  let o ← IO.Process.output { cmd := "tar", args := #["-tzf", archive.toString] }
+  if o.exitCode != 0 then
+    return .error s!"tar -tzf {archive}: {o.stderr.trimAscii}"
+  let top := s!"{name}-{version}"
+  let members := o.stdout.splitOn "\n" |>.filter (!·.isEmpty)
+  if members.isEmpty then return .error s!"{archive}: empty archive"
+  if let some bad := members.find? (fun m => !(m == top || m.startsWith (top ++ "/"))) then
+    return .error s!"{archive}: member {bad} is not under {top}/ (the archive layout is one top directory)"
+  unless members.contains s!"{top}/grail.wiz" do
+    return .error s!"{archive}: no {top}/grail.wiz (wrong version in the archive?)"
+  pure (.ok ())
+
+/-- `grail publish ARCHIVE --source URL`: hash the release archive and print the index
+entry, after checking the manifest and the archive layout. Printing (not writing) is the
+MVP: publishing is a reviewed pull request to the index repository. -/
+def publish (archive : Option System.FilePath) (source : String) (pkg : Package) :
+    IO (Except String String) := do
+  let some ar := archive | return .error "usage: grail publish ARCHIVE --source URL"
+  unless ← ar.pathExists do return .error s!"{ar}: no such archive"
+  if let .error e ← checkArchiveLayout ar pkg.name pkg.version then return .error e
+  match ← sha256File ar with
+  | .error e => pure (.error e)
+  | .ok sha =>
+    match publishEntry pkg source sha with
+    | .error e => pure (.error e)
+    | .ok v => pure (.ok (Index.renderVersion v))
 
 /-- Before a build: check the lock out (registry packages unpacked and verified, git
 dependencies at their commits) and return the module roots they give (their `lib`

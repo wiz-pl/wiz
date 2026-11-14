@@ -200,9 +200,53 @@ structure IxPackage where
   versions : List IxVersion := []
   deriving Repr, Inhabited
 
+/-- Package names are global and lowercase: a letter, then letters, digits and `-`
+(at most 64 characters). -/
+def validName (s : String) : Bool :=
+  let cs := s.toList
+  !cs.isEmpty && s.length ≤ 64 &&
+    (match cs.head? with
+     | some c => 'a' ≤ c && c ≤ 'z'
+     | none => false) &&
+    cs.all fun c => ('a' ≤ c && c ≤ 'z') || ('0' ≤ c && c ≤ '9') || c == '-'
+
 namespace Index
 
 open Wiz.Cache
+
+def versionNode (v : IxVersion) : Sx :=
+  let fields : List Sx :=
+    [node "source" [str v.source], node "sha256" [str v.sha256]]
+      ++ (if v.toolchain.isEmpty then [] else [node "toolchain" [str v.toolchain]])
+      ++ (if v.deps.isEmpty then []
+          else [node "deps" (v.deps.map fun d => node "dep" [str d.name, str d.req])])
+  node "version" (str (Version.render v.version) :: fields)
+
+def renderVersion (v : IxVersion) : String := (versionNode v).render
+
+def IxPackage.render (p : IxPackage) : String :=
+  let fields : List Sx :=
+    (if p.summary.isEmpty then [] else [node "summary" [str p.summary]])
+      ++ (if p.repo.isEmpty then [] else [node "repo" [str p.repo]])
+      ++ p.versions.map versionNode
+      ++ (p.versions.filterMap fun v =>
+           if v.yanked.isEmpty then none else some (node "yanked" [str (Version.render v.version), str v.yanked]))
+  (node "package" (str p.name :: fields)).render
+
+/-- Render a whole index document, packages and versions in a stable (sorted) order. -/
+def render (ps : List IxPackage) : String :=
+  let sorted := (ps.toArray.qsort fun a b => a.name < b.name).toList
+  "(index\n  " ++ "\n  ".intercalate (sorted.map IxPackage.render) ++ ")\n"
+
+/-- Add one published version to an index. `name@version` is immutable: an existing
+version is refused, not replaced (publish a corrected release instead). -/
+def addVersion (ps : List IxPackage) (p : IxPackage) (v : IxVersion) : Except String (List IxPackage) := do
+  match ps.find? (·.name == p.name) with
+  | none => pure (ps ++ [{ p with versions := [v] }])
+  | some old =>
+    if old.versions.any (fun x => Version.render x.version == Version.render v.version) then
+      throw s!"{p.name} {Version.render v.version} is already in the index: a version is immutable (publish a new version)"
+    pure (ps.map fun x => if x.name == p.name then { x with versions := x.versions ++ [v] } else x)
 
 def decodeReq (x : Sx) : Except String Req :=
   match x with

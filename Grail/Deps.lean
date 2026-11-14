@@ -85,15 +85,32 @@ def checkout (d : System.FilePath) (commit : String) : IO (Except String Unit) :
     if let .error e ← git #["fetch", "--quiet", "--tags", "origin"] d then return .error e
   pure ((← git #["checkout", "--quiet", "--force", "--detach", commit] d).map fun _ => ())
 
+/-- `--offline` versions of `ensureClone`/`checkout`: use the cache, never the network. -/
+def ensureCloneCached (d : System.FilePath) (url : String) : IO (Except String Unit) := do
+  unless ← (d / ".git").pathExists do
+    return .error s!"--offline: {d} is not cloned (run `grail update` once without --offline)"
+  if (← git #["remote", "get-url", "origin"] d).toOption == some url then return .ok ()
+  pure (.error s!"--offline: {d} is a clone of another URL (run `grail update` without --offline)")
+
+def checkoutCached (d : System.FilePath) (commit : String) : IO (Except String Unit) := do
+  if (← git #["rev-parse", "HEAD"] d).toOption == some commit then return .ok ()
+  if (← git #["cat-file", "-e", s!"{commit}^\{commit}"] d).toOption.isSome then
+    return (← git #["checkout", "--quiet", "--force", "--detach", commit] d).map fun _ => ()
+  pure (.error s!"--offline: {d} has no commit {commit} (run `grail update` without --offline)")
+
 /-- Resolve `deps` (after the ones in `acc`), fetching each to `.grail/packages/NAME`, and
-their dependencies after them. -/
+their dependencies after them. With `offline`, only the existing clones and refs are
+used. -/
 partial def resolveDeps (readPkg : System.FilePath → IO (Except String Package)) (dir : System.FilePath)
-    (deps : List Dep) (acc : List Locked) : IO (Except String (List Locked)) := do
+    (deps : List Dep) (acc : List Locked) (offline : Bool := false) : IO (Except String (List Locked)) := do
   let mut acc := acc
   for dep in deps do
     let d := packageDir dir dep.name
-    if let .error e ← ensureClone d dep.url then return .error e
-    if let .error e ← git #["fetch", "--quiet", "--tags", "--force", "origin"] d then return .error e
+    if offline then
+      if let .error e ← ensureCloneCached d dep.url then return .error e
+    else
+      if let .error e ← ensureClone d dep.url then return .error e
+      if let .error e ← git #["fetch", "--quiet", "--tags", "--force", "origin"] d then return .error e
     let commit ← match ← git #["rev-parse", "--verify", "--quiet", s!"refs/remotes/origin/{dep.rev}^\{commit}"] d with
       | .ok c => pure c
       | .error _ => match ← git #["rev-parse", "--verify", "--quiet", s!"{dep.rev}^\{commit}"] d with
@@ -102,13 +119,13 @@ partial def resolveDeps (readPkg : System.FilePath → IO (Except String Package
     if let some l := acc.find? (·.name == dep.name) then
       if l.commit == commit then continue
       return .error s!"two commits of {dep.name}: {l.commit} ({l.url} {l.rev}) and {commit} ({dep.url} {dep.rev})"
-    if let .error e ← checkout d commit then return .error e
+    if let .error e ← (if offline then checkoutCached d commit else checkout d commit) then return .error e
     acc := acc ++ [{ name := dep.name, url := dep.url, rev := dep.rev, commit, content := ← contentHash d }]
     if ← (d / "grail.wiz").pathExists then
       match ← readPkg d with
       | .error e => return .error s!"{dep.name}: {e}"
       | .ok p =>
-        match ← resolveDeps readPkg dir p.deps acc with
+        match ← resolveDeps readPkg dir p.deps acc offline with
         | .error e => return .error e
         | .ok a => acc := a
   pure (.ok acc)

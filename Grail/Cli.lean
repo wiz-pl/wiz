@@ -30,6 +30,9 @@ def usage : String := "usage:
   grail index resolve [--index URL] [--offline]
                           print the versions `grail update` would pick
   grail index show NAME   print a package's index entry
+  grail publish ARCHIVE --source URL
+                          hash a release archive and print its index entry (after
+                          checking the manifest and the archive layout)
   grail run TARGET [-- ARGS…]
                           build an exe or command target's needs and run it with
                           ARGS, its input and output grail's own; exits with its code
@@ -54,6 +57,7 @@ options: -C DIR (the package directory), --std DIR (the standard library),
   a read-only cache, searched in order after the write cache), --no-cache (both),
   --index URL (the package index: a directory, a file, or a git URL; default: the
   `index` setting of grail.wiz), --offline (never touch the network),
+  --source URL (grail publish: the archive's public URL),
   --trust-native (27a: allow `native_refl`, passed on to every check and to `wiz lsp`), --native-fuel N
 Machine settings (where GMP lives) go in an uncommitted grail.local.wiz:
   import Grail
@@ -77,6 +81,8 @@ structure Opts where
   offline : Bool := false
   /-- (23m) fail instead of writing grail.lock -/
   locked : Bool := false
+  /-- (23m) `grail publish`: the archive's public URL -/
+  source : Option String := none
 
 /-- `-C DIR`, `--std DIR`, `-j N`, `--timeout SECS`, `--test-timeout SECS`, taken out of the arguments. -/
 partial def grailOpts (o : Opts) : List String → Opts × List String
@@ -87,6 +93,7 @@ partial def grailOpts (o : Opts) : List String → Opts × List String
   | "--test-timeout" :: n :: rest => grailOpts { o with testTimeout := n.toNat? } rest
   | "--wiz" :: w :: rest => grailOpts { o with wiz := some w } rest
   | "--index" :: i :: rest => grailOpts { o with index := some i } rest
+  | "--source" :: s :: rest => grailOpts { o with source := some s } rest
   | "--offline" :: rest => grailOpts { o with offline := true } rest
   | "--locked" :: rest => grailOpts { o with locked := true } rest
   | a :: rest =>
@@ -204,7 +211,7 @@ def cliMain (args : List String) : IO UInt32 := do
       catch e => IO.eprintln s!"grail doc: {wiz}: {e}"; return 127
     child.wait
   | "build" :: _ | "test" :: _ | ["targets"] | ["config"] | "update" :: _ | "fetch" :: _
-  | "index" :: _ | ["run", _] =>
+  | "index" :: _ | "publish" :: _ | ["run", _] =>
     let (pkg, localSettings) ← match ← readConfig flagged binId std dir with
       | .ok r => pure r
       | .error e => do IO.eprintln e; return 1
@@ -240,16 +247,18 @@ def cliMain (args : List String) : IO UInt32 := do
       | .ok l =>
         let text := Lock.render l
         let old ← if ← (lockFile dir).pathExists then some <$> IO.FS.readFile (lockFile dir) else pure none
-        if opts.locked && old != some text then
+        let empty := l.git.isEmpty && l.pkgs.isEmpty
+        if opts.locked && old != some text && !(empty && old.isNone) then
           IO.eprintln "grail.lock is out of date: run `grail update` without --locked"
           pure 1
         else
-          if old != some text then Cache.writeAtomic (lockFile dir) text
+          if old != some text && (!empty || old.isSome) then Cache.writeAtomic (lockFile dir) text
           for p in l.pkgs do IO.println s!"{p.name}\t{p.version}\t{p.source}"
           for g in l.git do IO.println s!"{g.name}\t{g.url} {g.rev}\t{g.commit}"
           pure 0
     | "fetch" :: _ =>
       -- `--locked`: never write the lock, and fail if it is missing or out of date
+      let noDeps := pkg.deps.isEmpty && pkg.requires.isEmpty
       let getLock : IO (Except String Lock) := do
         match ← readLock with
         | .ok l =>
@@ -257,7 +266,8 @@ def cliMain (args : List String) : IO UInt32 := do
           | .ok () => pure (.ok l)
           | .error e => pure (.error e)
         | .error e =>
-          if opts.locked then pure (.error e) else
+          if noDeps then pure (.ok {})
+          else if opts.locked then pure (.error e) else
             match ← Registry.resolveLock cache indexSpec opts.offline readPkg dir pkg with
             | .error e => pure (.error e)
             | .ok l =>
@@ -266,13 +276,19 @@ def cliMain (args : List String) : IO UInt32 := do
       match ← getLock with
       | .error e => IO.eprintln e; pure 1
       | .ok l =>
-        match ← Registry.fetch cache dir l with
+        match ← Registry.fetch cache dir l opts.offline with
         | .error e => IO.eprintln e; pure 1
         | .ok lines =>
           for line in lines do IO.println line
           pure 0
+    | "publish" :: rest =>
+      let archive := rest.find? (fun a => !a.startsWith "-")
+      match ← Registry.publish (archive.map System.FilePath.mk) (opts.source.getD "") pkg with
+      | .error e => IO.eprintln e; pure 1
+      | .ok entry => IO.println entry; pure 0
     | "index" :: "resolve" :: _ =>
-      match ← Registry.loadIndex cache indexSpec opts.offline with
+      if pkg.requires.isEmpty then pure 0 else
+        match ← Registry.loadIndex cache indexSpec opts.offline with
       | .error e => IO.eprintln e; pure 1
       | .ok src =>
         match Resolve.resolve src.pkgs pkg.requires Wiz.version with
