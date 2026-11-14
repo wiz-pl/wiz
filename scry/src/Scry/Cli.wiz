@@ -13,6 +13,7 @@ grail target is one file):
 scry facts FILE                 load a fact store and print its stats
 scry query FILE --kind KIND     nodes of a CST kind
 scry query FILE --edge LABEL    edges with a label
+scry query FILE --edge-src L    sources of edges labelled L
 scry query FILE --rel NAME      a relation's tuples
 scry explain FILE NODE          one node: span, parent, children, arcs, relations
 scry parse FILE… --stats        stats of JSON or scry-cst stores (no tree-sitter: S1)
@@ -33,6 +34,7 @@ def Scry.usage : String :=
   ++ "  facts FILE                 load a fact store and print its stats\n"
   ++ "  query FILE --kind KIND     nodes of a CST kind\n"
   ++ "  query FILE --edge LABEL    edges with a label\n"
+  ++ "  query FILE --edge-src L    sources of edges labelled L\n"
   ++ "  query FILE --rel NAME      a relation's tuples\n"
   ++ "  explain FILE NODE          one node: span, parent, children, arcs, relations\n"
   ++ "  parse FILE… --stats        stats of JSON or scry-cst stores (S1)\n"
@@ -65,13 +67,16 @@ def Scry.queryCmd (file : String) (args : List String) : EIO Nat := do
   | .cons "--edge" (.cons label .nil) => do
     Scry.say (Scry.renderQueryEdge f label);
     EIO.pure 0
+  | .cons "--edge-src" (.cons label .nil) => do
+    Scry.say (Scry.renderQueryEdgeSrc f label);
+    EIO.pure 0
   | .cons "--rel" (.cons name .nil) => match Scry.renderQueryRel f name with
     | .ok s => do
       Scry.say s;
       EIO.pure 0
     | .error e => EIO.fail e
-  | .nil => EIO.fail "usage: scry query FILE --kind KIND | --edge LABEL | --rel NAME"
-  | _ => EIO.fail "usage: scry query FILE --kind KIND | --edge LABEL | --rel NAME"
+  | .nil => EIO.fail "usage: scry query FILE --kind KIND | --edge LABEL | --edge-src L | --rel NAME"
+  | _ => EIO.fail "usage: scry query FILE --kind KIND | --edge LABEL | --edge-src L | --rel NAME"
 
 /-- `scry explain FILE NODE`. -/
 def Scry.explainCmd (file : String) (node : String) : EIO Nat := do
@@ -150,7 +155,7 @@ def Scry.dispatch (args : List String) : EIO Nat := match args with
     | _ => EIO.fail "usage: scry facts FILE"
   | .cons "query" rest => match rest with
     | .cons file more => Scry.queryCmd file more
-    | .nil => EIO.fail "usage: scry query FILE --kind KIND | --edge LABEL | --rel NAME"
+    | .nil => EIO.fail "usage: scry query FILE --kind KIND | --edge LABEL | --edge-src L | --rel NAME"
   | .cons "explain" rest => match rest with
     | .cons file (.cons node .nil) => Scry.explainCmd file node
     | _ => EIO.fail "usage: scry explain FILE NODE"

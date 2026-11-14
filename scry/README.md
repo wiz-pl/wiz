@@ -25,10 +25,24 @@ grail run scry -- query fixtures/demo.facts.json --kind call_expression
 grail run scry -- explain fixtures/demo.facts.json 4
 ```
 
-Commands: `facts`, `query --kind|--edge|--rel`, `explain`, `parse --stats` (a C source,
-a `scry-cst` spill, or a JSON store), `cst` (JSON store → spill), and `taint` (C →
-Wil → taint → findings/SARIF). `parse --stats` prints counts only; the perf agent owns
-throughput numbers.
+Commands: `facts`, `query --kind|--edge|--edge-src|--rel`, `explain`, `parse --stats` (a
+C source, a `scry-cst` spill, or a JSON store), `cst` (JSON store → spill), and `taint`
+(C → Wil → taint → findings/SARIF). `parse --stats` prints counts only; the perf agent
+owns throughput numbers.
+
+## Optics and accessors
+
+`lib/Scry/Optics.wiz` and `src/Scry/CstOptics.wiz` add a read-only `Getter`/`Fold`/
+`Lens`/`Traversal` layer over the existing Wil, analysis, CST and fact types. It is
+additive and non-mutating: no pass or existing query is migrated, and no second
+representation is introduced. The CST/facts half is direct traversal (`Fold`), not a
+lens per node; only Wil values have pure local rewrites (origins, data-dependence
+variables). See `OPTICS.md` for the API, laws, what is deliberately an ordinary function,
+and the limits. The new `query --edge-src L` command is the one additive CLI query:
+
+```sh
+grail run scry -- query fixtures/demo.facts.json --edge-src function
+```
 
 ## `scry taint`: C → Wil → taint → findings/SARIF
 
