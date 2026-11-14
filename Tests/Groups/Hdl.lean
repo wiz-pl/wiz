@@ -247,6 +247,9 @@ def hdlGroup : Group where
            ".cons \"a choice between two different memories (a memory can only be written, not chosen)\" .nil",
            "\"module ram(input clk, input [0:0] we, input [3:0] waddr, input [7:0] wdata, input [3:0] raddr, output [7:0] y);\\n  reg [7:0] q; initial q = 8'd0;\\n  reg [7:0] cells [0:15];\\n  initial begin\\n    cells[0] = 8'd0;\\n    cells[1] = 8'd0;\\n    cells[2] = 8'd0;\\n    cells[3] = 8'd0;\\n    cells[4] = 8'd0;\\n    cells[5] = 8'd0;\\n    cells[6] = 8'd0;\\n    cells[7] = 8'd0;\\n    cells[8] = 8'd0;\\n    cells[9] = 8'd0;\\n    cells[10] = 8'd0;\\n    cells[11] = 8'd0;\\n    cells[12] = 8'd0;\\n    cells[13] = 8'd0;\\n    cells[14] = 8'd0;\\n    cells[15] = 8'd0;\\n  end\\n  wire [7:0] n5 = cells[raddr];\\n  always @(posedge clk) q <= n5;\\n  always @(posedge clk) begin\\n    if (we) cells[waddr] <= wdata;\\n  end\\n  assign y = q;\\nendmodule\\n\""] },
     { name := "memories in Verilog: Icarus replays the RAM's test bench; yosys maps RAM and a 256-word ROM to SB_RAM40_4K (skipped without the tools)", run := fun _ => hdlMemTools },
+    { name := "Hdl.Mem: word/byte read-after-write and no-alias laws, every byte-strobe mask, one- and two-cycle RAMs, values = netlist", run := fun _ => do
+        okLibs (← IO.FS.readFile "examples/hdl-mem-laws.wiz")
+          [".cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true .nil))))))))"] },
     { name := "bits: one-bit laws by case split (Hdl.Bits); control logic written with gates proved with symbolic inputs; the Boolean bridge", run := fun _ => do
         okLibs (← IO.FS.readFile "examples/hdl-bits.wiz") ["1"] },
     { name := "Verilog: declarations before use (regs, wires, then the updates), sized initial values", run := fun _ =>

@@ -432,6 +432,41 @@ become RAMB18E1 or RAMB36E1 and `Hw.mul` a DSP48E1; a ROM of 4 Kbit or more is d
 (`examples/hdl-arty.wiz`, below). What the netlist cannot express is listed in
 `Netlist.errors` and printed as `// error:` lines: a choice between two different
 memories, a memory in a port, a state memory replaced instead of written.
+## H14 C5: a reusable memory interface (`lib/Hdl/Mem.wiz`)
+
+`lib/Hdl/Mem.wiz` (`import Hdl.Mem`) collects the memory facts a proof or a RAM model
+keeps needing. It is a thin layer over `HwTy.mem` (`H14 C3`), not a second memory model:
+a word memory is still `BitVec aw → BitVec dw`, and the operations are `Hw.memRead` and
+`Hw.memWrite`.
+
+* **Word memory.** `Mem.read`/`Mem.write` write the core operations down; `Mem.index`
+  and `Mem.lane` split a byte address into word index and lane, and `Mem.wordByte` is
+  byte `i` of a word. The laws are kernel-checked: `read_write_same` (an enabled write is read back at its address),
+  `read_write_other` (a read at another address is the old word: no aliasing),
+  `read_write_off` (a disabled write changes nothing), `write_write_same` and
+  `write_write_other` (the write-write forms).
+* **Byte memory.** A byte-addressable memory is `HwTy.mem aw 8`; `Mem.byteRead`,
+  `Mem.byteWrite`, `byte_read_write_same`, `_other` and `_off` are its interface. The
+  byte-enable law at one byte is `byteEnabled` (enable high: the addressed byte is the
+  byte written) and `byteDisabled` (enable low: the byte is unchanged).
+* **Byte enables in a word.** `Mem.byteMask dw nb strb` is the `dw`-bit mask of `nb`
+  strobe bits (byte `k` is `0xff` when bit `k` is set), `Mem.merge old new mask` is the
+  read-modify-write value, and `Mem.writeBytes` is the masked write. The two closed
+  32-bit cases (`byteMask_full32`, `byteMask_zero32`) are proved by evaluation; the
+  symbolic mask is checked for every strobe pattern and every byte lane of 8-, 16- and
+  32-bit words in the example (a checked law is *tested*, not proved).
+* **One-cycle and two-cycle RAMs.** `Mem.Req`/`Mem.ReqW`/`Mem.Resp` are the bundles and
+  `Mem.Ram` the state (`cells` plus a two-bit wait counter). `Mem.ramC1` answers in the
+  request cycle (a write lands at the clock edge, so a read sees the old word);
+  `Mem.ramC2` answers two cycles after the request, with the timing of `Bus.ramC`.
+  `Mem.ramWC1`/`Mem.ramWC2` take byte strobes and do the read-modify-write of
+  `Bus.ramWC`; `Mem.ram1_write_read` is the one-cycle RAM's read-after-write law.
+
+Example: `examples/hdl-mem-laws.wiz` (test group `hdl`) exhaustively checks the mask and
+the byte-enable value against an independent byte-memory model, replays every strobe
+through both RAMs, and checks value simulation = netlist simulation over a deterministic
+stream for the plain and byte-enabled variants.
+
 ## H14 C2: lenses for structures and bundles (`lib/OpticDerive.wiz`, `lib/Hdl/Optic.wiz`)
 
 `deriving Lens` gives every field of a structure a lens (lib/Optic.wiz's `Lens S A`), its
