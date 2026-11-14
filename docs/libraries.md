@@ -704,11 +704,11 @@ else`, short-circuiting `&&` and `||`, and `!` ([13c](stages/13-language.md)).
 
 ## 9j: text and lists (`lib/Text.wiz`)
 
-`import Text` (only `Prelude` underneath): the string and list functions a program needs,
-pure (so `#eval` runs them) and linear in their input.
+`import Text` (only `Prelude` and `Logic` underneath): the string and list functions a
+program needs, pure (so `#eval` runs them) and linear in their input.
 
 * **Lists**: `List.reverse`, `revApp`, `map`, `filter`, `foldl`, `foldr`, `any`, `all`,
-  `find`, `isEmpty`, `head`, `take`, `drop`, `concat`.
+  `find`, `isEmpty`, `head`, `take`, `drop`, `concat`, and `length_append`.
 * **Characters**: `Char.eq`, `isSpace` (ASCII), `isDigit`.
 * **Strings**: `chars`, `ofChars`, `singleton`, `length`, `isEmpty`, `eq` (also `beq`),
   `lt` (by code point), `startsWith`, `endsWith`, `stripPrefix`, `stripSuffix`
@@ -755,7 +755,9 @@ library gives an `Add` instance and gets `+`; it may also give a mixed one (`HMu
   instead of `.negSucc 9` (a printing hint, not an axiom: `#print axioms` lists nothing
   for it). Division truncates (`-7 / 2 = -3`, `-7 % 2 = -1`), like `IntN` and C. Also
   `Int.natAbs`, `Int.toNat` (negatives to 0), `Int.lt`/`le`/`beq`, and lemmas
-  `Int.neg_neg`, `Int.add_zero`, `Int.zero_add`, `Int.natAbs_neg`, `Int.lt_irrefl`, `Int.abs` with `Int.abs_mul`, `Int.abs_neg`. The ring laws, `int_ring!` and the order
+  `Int.neg_neg`, `Int.add_zero`, `Int.zero_add`, `Int.mul_one`, `Int.one_mul`,
+  `Int.mul_zero`, `Int.zero_mul`, `Int.sub_zero`, `Int.natAbs_neg`, `Int.lt_irrefl`,
+  `Int.abs` with `Int.abs_mul`, `Int.abs_neg`. The ring laws, `int_ring!` and the order
   are in lib/IntRing.wiz and lib/IntOrder.wiz ("Arithmetic", below).
 * **Words.** One set of instances at `UIntN w` serves `U8 … U64` and `BitVec n` (aliases
   are seen through). `UIntN w` and `IntN w` have the same shape but are sealed, different
@@ -818,6 +820,53 @@ def v (p q : Q) : (p + q) * (p + q) ≈ p * p + 2 * p * q + q * q :=
   integer identity and `q_ring!` is `int_ring!` on numerators and denominators. Use the
   congruences (`Q.add_congr`, `Q.le_congr`, …) to rewrite under `≈`.
 * `Vec.wiz` and `Hoare.wiz` import `Nat` for the lemmas they used to define themselves.
+
+## Simp lemmas: normal forms for rewriting (`lib/SimpLemmas.wiz`)
+
+`import SimpLemmas` collects the default rewrite set: equations oriented left to right,
+towards the normal form a simplifier uses. It is independent of the tactic core (there
+is no `simp` tactic yet), so the set is a list of names used in explicit `rw` chains
+(or in a future `simp only [...]`). Every rule is a theorem (no axiom, no `sorry`).
+
+| type | rules (left to right) | where |
+|------|-----------------------|-------|
+| `Nat` | `Nat.add_zero : n + 0 = n`, `Nat.zero_add : 0 + n = n`, `Nat.mul_one : n * 1 = n`, `Nat.one_mul : 1 * n = n`, `Nat.mul_zero : n * 0 = 0`, `Nat.zero_mul : 0 * n = 0` | `lib/Nat.wiz` |
+| `Nat` powers | `Nat.pow_zero : b ^ 0 = 1`, `Nat.pow_succ : b ^ Nat.succ n = b * b ^ n` | `lib/SimpLemmas.wiz` |
+| `Bool` | `Bool.not_not : !(!b) = b`, `Bool.and_true : b && true = b`, `Bool.and_false : b && false = false`, `Bool.or_false : b \|\| false = b`, `Bool.if_true : (if true then a else b) = a`, `Bool.if_false : (if false then a else b) = b` | `lib/SimpLemmas.wiz` |
+| `List` | `List.append_nil : xs ++ [] = xs`, `List.nil_append : [] ++ xs = xs`, `List.length_append : length (xs ++ ys) = length xs + length ys`, `List.map_nil : map f [] = []`, `List.map_cons : map f (x :: xs) = f x :: map f xs`, `List.map_map : map f (map g xs) = map (fun x => f (g x)) xs` | `SimpLemmas`; `length_append` is in `lib/Text.wiz` |
+| `Option`, pairs | `Option.map_none : Option.map f none = none`, `Option.map_some : Option.map f (some a) = some (f a)`, `Prod.fst_mk : (a, b).1 = a`, `Prod.snd_mk : (a, b).2 = b` | `lib/SimpLemmas.wiz` |
+| `Int` | `Int.add_zero : a + 0 = a`, `Int.zero_add : 0 + a = a`, `Int.mul_one : a * 1 = a`, `Int.one_mul : 1 * a = a`, `Int.mul_zero : a * 0 = 0`, `Int.zero_mul : 0 * a = 0`, `Int.sub_zero : a - 0 = a` | `lib/Int.wiz` |
+
+* **Orientation.** Rewriting goes from the left column (the term with the neutral
+  operation) to the smaller one: `n + 0 → n`, `n * 1 → n`, `b ^ 0 → 1`,
+  `b ^ (n+1) → b * b^n`, `xs ++ [] → xs`, `map f (x :: xs) → f x :: map f xs`. Rules
+  that would loop are deliberately absent: commutativity (`Nat.add_comm`,
+  `Nat.mul_comm`), associativity, and the other directions of the identities above.
+* **Booleans.** In the prelude, `&&`, `\|\|` and `if … then … else` are `match`
+  expressions, not `Bool.and`/`Bool.or`; the rules are stated on the notation users
+  write. `!` is `Bool.not`.
+* **`rw` and definitional equations.** `rw` needs the elaborated type of its lemma to be
+  an equation. When both sides are definitionally equal (`Nat.zero_add`,
+  `Nat.zero_mul`, `Nat.pow_zero`, `Nat.pow_succ`, `List.nil_append`, `List.map_nil`,
+  `List.map_cons`, `Option.map_none`, `Option.map_some`, `Prod.fst_mk`, `Prod.snd_mk`,
+  `Bool.if_true`, `Bool.if_false`), the kernel computes that type to `True` (or to the
+  payload equation of the constructors), so `rw` rejects the lemma even though it is
+  true. The `std` tests therefore check those by direct application and the rest by
+  `rw`; a `simp` core can use all of them unchanged. This is a limitation of `rw`, not
+  of the lemma set.
+
+```
+import SimpLemmas
+
+def t (n : Nat) : (n + 0) * 1 = n := by
+  rw (Nat.mul_one (n + 0))
+  rw (Nat.add_zero n)
+  rfl
+def u {A : Type} (xs : List A) : xs ++ [] = xs := by
+  rw (List.append_nil xs)
+  rfl
+```
+
 ## Native structures: word arrays, word maps, interned strings
 
 `lib/WordArray.wiz` (`U8Array`, `U32Array`, `U64Array`), `lib/WordMap.wiz` (`U64Map V`)

@@ -1,0 +1,111 @@
+import Nat
+import Int
+import Text
+import Functor
+/-!
+# Simp lemmas
+
+The default set of rewrite lemmas for normal forms (`import SimpLemmas`): the
+equations a simplifier uses, oriented left to right, together with the laws they build
+on. It is independent of the tactic core (there is no `simp` yet): the set is a list of
+names, and `rw` with these names (or an explicit `simp only [...]`, when the tactic
+exists) rewrites goals into the normal forms below.
+
+The rules, by the normal form they aim at:
+
+* **`Nat`**: `n + 0 → n`, `0 + n → n`, `n * 1 → n`, `1 * n → n`, `n * 0 → 0`,
+  `0 * n → 0` (`lib/Nat.wiz`); `b ^ 0 → 1`, `b ^ (n+1) → b * b ^ n` (here).
+* **`Bool`** (`&&`, `||`, `if` are matches in the prelude): `!(!b) → b`,
+  `b && true → b`, `b && false → false`, `b || false → b`, `if true then a else b → a`,
+  `if false then a else b → b` (here).
+* **`List`**: `xs ++ [] → xs`, `[] ++ xs → xs` (here); `length (xs ++ ys) →
+  length xs + length ys` (`lib/Text.wiz`); `map f [] → []`, `map f (x :: xs) →
+  f x :: map f xs`, `map f (map g xs) → map (fun x => f (g x)) xs` (here).
+* **`Option` and pairs**: `Option.map f none → none`, `Option.map f (some a) →
+  some (f a)`, `(a, b).1 → a`, `(a, b).2 → b` (here).
+* **`Int`**: `a + 0 → a`, `0 + a → a`, `a * 1 → a`, `1 * a → a`, `a * 0 → 0`,
+  `0 * a → 0`, `a - 0 → a` (`lib/Int.wiz`).
+
+Every rule is a theorem (no axioms, no `sorry`). Rules that would loop are deliberately
+not here: commutativity (`Nat.add_comm`, `Nat.mul_comm`), associativity
+(`Nat.add_assoc`, `Nat.mul_assoc`, and the `List` counterpart), and the reverse of the
+identities above. `Nat.add_zero` and `Int.add_zero` are stated for an explicit argument
+(`rw (Nat.add_zero n)`), so a rewrite chain names the instance.
+
+```
+import SimpLemmas
+
+def ex (n : Nat) (xs : List Nat) : (n + 0) * 1 = n := by
+  rw (Nat.mul_one (n + 0))
+  rw (Nat.add_zero n)
+  rfl
+
+def exList {A : Type} (xs : List A) : xs ++ [] = xs := by
+  rw (List.append_nil xs)
+  rfl
+```
+-/
+
+-- ## Nat powers
+
+/-- `b ^ 0 = 1`. -/
+def Nat.pow_zero (b : Nat) : b ^ 0 = 1 := rfl
+/-- `b ^ (n + 1) = b * b ^ n` (the exponent recurses, so the step is on the left). -/
+def Nat.pow_succ (b n : Nat) : b ^ Nat.succ n = b * b ^ n := rfl
+
+-- ## Booleans
+--
+-- `&&`, `||` and `if` are `match` expressions in the prelude (not `Bool.and`/`Bool.or`),
+-- so these lemmas are stated on the notation the user writes. `!` is `Bool.not`.
+
+/-- Negation is an involution. -/
+def Bool.not_not : (b : Bool) → !(!b) = b
+  | .true => rfl
+  | .false => rfl
+/-- `b && true = b`. -/
+def Bool.and_true : (b : Bool) → (b && Bool.true) = b
+  | .true => rfl
+  | .false => rfl
+/-- `b && false = false`. -/
+def Bool.and_false : (b : Bool) → (b && Bool.false) = Bool.false
+  | .true => rfl
+  | .false => rfl
+/-- `b || false = b`. -/
+def Bool.or_false : (b : Bool) → (b || Bool.false) = b
+  | .true => rfl
+  | .false => rfl
+/-- `if true then a else b = a`. -/
+def Bool.if_true {A : Type} (a b : A) : (if Bool.true then a else b) = a := rfl
+/-- `if false then a else b = b`. -/
+def Bool.if_false {A : Type} (a b : A) : (if Bool.false then a else b) = b := rfl
+
+-- ## Lists
+
+/-- `xs ++ [] = xs`. -/
+def List.append_nil {A : Type} : (xs : List A) → xs ++ .nil = xs
+  | .nil => rfl
+  | .cons x xs => Eq.congrArg (List.cons x) (List.append_nil xs)
+/-- `[] ++ xs = xs`. -/
+def List.nil_append {A : Type} (xs : List A) : .nil ++ xs = xs := rfl
+/-- `map f [] = []`. -/
+def List.map_nil {A B : Type} (f : A → B) : List.map f .nil = .nil := rfl
+/-- `map f (x :: xs) = f x :: map f xs`. -/
+def List.map_cons {A B : Type} (f : A → B) (x : A) (xs : List A) :
+    List.map f (.cons x xs) = .cons (f x) (List.map f xs) := rfl
+/-- `map f (map g xs) = map (fun x => f (g x)) xs`. -/
+def List.map_map {A B C : Type} (f : B → C) (g : A → B) :
+    (xs : List A) → List.map f (List.map g xs) = List.map (fun x => f (g x)) xs
+  | .nil => rfl
+  | .cons x xs => Eq.congrArg (List.cons (f (g x))) (List.map_map f g xs)
+
+-- ## Option and pairs
+
+/-- Mapping over `none` is `none`. -/
+def Option.map_none {A B : Type} (f : A → B) : Option.map f .none = .none := rfl
+/-- Mapping over `some a` applies the function. -/
+def Option.map_some {A B : Type} (f : A → B) (a : A) :
+    Option.map f (.some a) = .some (f a) := rfl
+/-- The first projection of a pair. -/
+def Prod.fst_mk {A B : Type} (a : A) (b : B) : ((a, b) : A × B).1 = a := rfl
+/-- The second projection of a pair. -/
+def Prod.snd_mk {A B : Type} (a : A) (b : B) : ((a, b) : A × B).2 = b := rfl

@@ -477,8 +477,6 @@ def Int.add_neg (a : Int) : a + -a = 0 := int_ring! a + -a = 0
 def Int.neg_add (a : Int) : -a + a = 0 := int_ring! -a + a = 0
 /-- `a - a = 0`. -/
 def Int.sub_self (a : Int) : a - a = 0 := int_ring! a - a = 0
-/-- `a - 0 = a`. -/
-def Int.sub_zero (a : Int) : a - 0 = a := int_ring! a - 0 = a
 /-- `0 - a = -a`. -/
 def Int.zero_sub (a : Int) : 0 - a = -a := int_ring! 0 - a = -a
 /-- Subtraction is adding the negation. -/
@@ -497,14 +495,6 @@ def Int.mul_comm (a b : Int) : a * b = b * a := int_ring! a * b = b * a
 def Int.mul_assoc (a b c : Int) : a * b * c = a * (b * c) := int_ring! a * b * c = a * (b * c)
 /-- `a * (b * c) = b * (a * c)`. -/
 def Int.mul_left_comm (a b c : Int) : a * (b * c) = b * (a * c) := int_ring! a * (b * c) = b * (a * c)
-/-- `a * 1 = a`. -/
-def Int.mul_one (a : Int) : a * 1 = a := int_ring! a * 1 = a
-/-- `1 * a = a`. -/
-def Int.one_mul (a : Int) : 1 * a = a := int_ring! 1 * a = a
-/-- `a * 0 = 0`. -/
-def Int.mul_zero (a : Int) : a * 0 = 0 := int_ring! a * 0 = 0
-/-- `0 * a = 0`. -/
-def Int.zero_mul (a : Int) : 0 * a = 0 := int_ring! 0 * a = 0
 /-- Multiplication distributes over addition on the left. -/
 def Int.mul_add (a b c : Int) : a * (b + c) = a * b + a * c := int_ring! a * (b + c) = a * b + a * c
 /-- Multiplication distributes over addition on the right. -/

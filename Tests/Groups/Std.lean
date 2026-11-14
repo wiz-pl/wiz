@@ -44,6 +44,39 @@ def stdGroup : Group where
           ["Nat.mul_add : (a : Nat) → (b : Nat) → (c : Nat) → a * (b + c) = a * b + a * c",
            "Nat.le_trans : (a : Nat) → (b : Nat) → (c : Nat) → Nat.Le a b → Nat.Le b c → Nat.Le a c",
            "'Nat.mul_assoc' does not depend on any axioms"] },
+    { name := "simp lemmas: normal forms and explicit rw chains (lib/SimpLemmas.wiz)", run := fun _ =>
+        okLibs ("import SimpLemmas\n" ++
+          "-- equations stuck on a variable: `rw` sees them\n" ++
+          "def r1 (n : Nat) : (n + 0) * 1 = n := by\n  rw (Nat.mul_one (n + 0))\n  rw (Nat.add_zero n)\n  rfl\n" ++
+          "def r2 (n : Nat) : n * 0 = 0 := by\n  rw (Nat.mul_zero n)\n  rfl\n" ++
+          "def r3 (n : Nat) : 1 * n = n := by\n  rw (Nat.one_mul n)\n  rfl\n" ++
+          "def r4 (b : Bool) (n : Nat) : (if !(!b) then n else 0) = (if b then n else 0) := by\n  rw (Bool.not_not b)\n  rfl\n" ++
+          "def r5 (b : Bool) : (b && Bool.true) = b := by\n  rw (Bool.and_true b)\n  rfl\n" ++
+          "def r6 (b : Bool) : (b && Bool.false) = Bool.false := by\n  rw (Bool.and_false b)\n  rfl\n" ++
+          "def r7 (b : Bool) : (b || Bool.false) = b := by\n  rw (Bool.or_false b)\n  rfl\n" ++
+          "def r8 {A : Type} (xs : List A) : xs ++ .nil = xs := by\n  rw (List.append_nil xs)\n  rfl\n" ++
+          "def r9 {A : Type} (xs ys : List A) : List.length (xs ++ ys) = List.length xs + List.length ys := by\n  rw (List.length_append xs ys)\n  rfl\n" ++
+          "def r10 (f : Nat → Nat) (g : Nat → Nat) (xs : List Nat) :\n    List.map f (List.map g xs) = List.map (fun x => f (g x)) xs := by\n  rw (List.map_map f g xs)\n  rfl\n" ++
+          "def r11 (a : Int) : a * 1 = a := by\n  rw (Int.mul_one a)\n  rfl\n" ++
+          "def r12 (a : Int) : 1 * a = a := by\n  rw (Int.one_mul a)\n  rfl\n" ++
+          "def r13 (a : Int) : 0 * a = 0 := by\n  rw (Int.zero_mul a)\n  rfl\n" ++
+          "def r14 (a : Int) : a - 0 = a := by\n  rw (Int.sub_zero a)\n  rfl\n" ++
+          "def r15 (a : Int) : a + 0 = a := by\n  rw (Int.add_zero a)\n  rfl\n" ++
+          "-- definitional equations: checked by application (their type computes to True, so `rw` cannot use them)\n" ++
+          "def d1 (b : Nat) : b ^ 0 = 1 := Nat.pow_zero b\n" ++
+          "def d2 (b n : Nat) : b ^ Nat.succ n = b * b ^ n := Nat.pow_succ b n\n" ++
+          "def d3 (n : Nat) : 0 + n = n := Nat.zero_add n\n" ++
+          "def d4 (n : Nat) : 0 * n = 0 := Nat.zero_mul n\n" ++
+          "def d5 (a b : Nat) : (if Bool.true then a else b) = a := Bool.if_true a b\n" ++
+          "def d6 (a b : Nat) : (if Bool.false then a else b) = b := Bool.if_false a b\n" ++
+          "def d7 {A : Type} (xs : List A) : .nil ++ xs = xs := List.nil_append xs\n" ++
+          "def d8 {A B : Type} (f : A → B) : List.map f .nil = .nil := List.map_nil f\n" ++
+          "def d9 {A B : Type} (f : A → B) (x : A) (xs : List A) :\n    List.map f (.cons x xs) = .cons (f x) (List.map f xs) := List.map_cons f x xs\n" ++
+          "def d10 {A B : Type} (f : A → B) : Option.map f .none = .none := Option.map_none f\n" ++
+          "def d11 {A B : Type} (f : A → B) (a : A) : Option.map f (.some a) = .some (f a) := Option.map_some f a\n" ++
+          "def d12 (a b : Nat) : ((a, b) : Nat × Nat).1 = a := Prod.fst_mk a b\n" ++
+          "def d13 (a b : Nat) : ((a, b) : Nat × Nat).2 = b := Prod.snd_mk a b\n" ++
+          "def d14 (a : Int) : 0 + a = a := Int.zero_add a\n") },
     { name := "nat_ring! proves semiring identities by reflection", run := fun _ =>
         okLibs ("import Ring\ndef t (a b c : Nat) : (a + b) * (a + c) = a * a + a * c + b * a + b * c :=\n" ++
           "  nat_ring! (a + b) * (a + c) = a * a + a * c + b * a + b * c\n" ++
