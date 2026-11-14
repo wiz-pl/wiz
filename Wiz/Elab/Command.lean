@@ -2475,7 +2475,7 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
           | (.const "IO" _, [A]) => (true, A)
           | _ => (false, res)
         -- erased parameters (`{A : Type}`) are passed as ◾ and ignored
-        -- a runtime native (`wiz_…`, runtime/wiz.c) takes and returns any other Wiz value
+        -- a runtime native (`wiz_…`, runtime/) takes and returns any other Wiz value
         -- as it is: an opaque type's (`Chan p`, `MVar A`), a closure, a Σ pair (25a)
         let kind (t : Term R) : Option RVal.FKind :=
           match kind t with

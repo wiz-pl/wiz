@@ -1,3 +1,4 @@
+import Lean.CompactedRegion
 import Wiz.Query
 import Wiz.Module
 
@@ -9,6 +10,12 @@ adds, its messages, and its registrations) is stored in `<cache dir>/<key>.wizc`
 the key is the chained content hash of the command and everything before it (and a
 version salt). Elaboration is deterministic, so a shared directory is a shared cache:
 two machines elaborating the same text compute the same keys and the same effects.
+
+Any number of directories may also be **read-only caches** (`wiz --cache-ro DIR`, in
+order): misses are looked up there after the write cache, and they are never written. A
+Nix package ships one in `$out/share/wiz/cache`; a run with only read caches
+(`--no-cache --cache-ro DIR`, since the default write cache is on) still replays modules
+and computes the binary's id on every run.
 
 Commands that change the grammar or the macros (`syntax`, `macro_rules`, `notation`,
 attributes, `import`, user-defined commands) aren't cached; they are cheap to rerun.
@@ -537,7 +544,9 @@ def writeAtomic (file : System.FilePath) (content : String) : IO Unit := do
 executable. Hashing it takes a moment, so the result is remembered in `dir/bin/`, by the
 executable's path, size and modification time. Without it, a cache directory shared by
 several builds (worktrees on different branches, CI runs) would serve one kernel's
-verdicts to another whenever a change forgot to bump `salt`. -/
+verdicts to another whenever a change forgot to bump `salt`. `dir` is the **write** cache:
+with none (read-only caches only), the executable is hashed on every run and nothing is
+written. -/
 def binaryId (dir : Option System.FilePath) : IO UInt64 := do
   let exe ← IO.appPath
   let md ← exe.metadata
@@ -602,28 +611,213 @@ inductive Mode where
   (their effect could depend on what the importer imported before) -/
   | replay
 
-/-- Where command effects are kept: a directory (the shared cache), or memory (for one
-run without the cache: modules are still elaborated in isolation, so the cache on or off
-gives the same results). -/
+/-! ## Module regions (`--region-cache`)
+
+Lean's `.olean` files are *compacted regions*: a byte image of a module's terms, saved at a
+base address derived from the module name, and read back with `mmap`
+(`Lean.CompactedRegion`). A Wiz `.wizc` entry is S-expression text, decoded and reallocated
+on every hit. A module's effects are plain data (no closures), so they can be saved as a
+region too: **one artifact per module**, `<cache>/<binary ⊕ module key>.wizr`, holding every
+cacheable command's `Effect` in command order. `--region-cache` serves those effects from the
+mapped region; the text entries stay in place, are the authority, and are the fallback.
+
+`CompactedRegion.read` does not check the type it loads (`α` is erased at the boundary), so a
+file is guarded by its name (this binary's hash and the module's key), Lean's `.olean` header
+(magic and version), and the payload's `magic`, `format`, `binary`, `salt`, `rig` and `key`.
+Never content-address a region by its bytes: they are pointers, and not canonical. Bump
+`regionFormat` whenever `Effect`, `Decl`, `Term` or `Info` change shape.
+
+The artifact is a *projection*: `CommandState`/`Globals` carry closures (`loader`,
+`trustedModule`, `pp.run`, `metaCode`, `Budget.ref`) that the compactor refuses. Loading
+applies the effects to the live state with `Effect.apply`, so those fields stay live; the
+regions themselves are kept for the process lifetime (mapped objects have no reference
+counts: a state must not outlive the region it was built from). -/
+
+/-- Format of a `ModuleArtifact`'s payload: bump it when `Effect`, `Decl`, `Term` or `Info`
+change shape (`salt` covers the same ground for the text entries). -/
+def regionFormat : Nat := 1
+
+/-- `"wizreg01"`: checked after a region is read (Lean's header is the first line). -/
+def regionMagic : UInt64 := 0x77697A7265673031
+
+/-- What one module contributes to an importer, as pure data. -/
+structure ModuleArtifact (R : Type) where
+  /-- `regionMagic`, checked after the read -/
+  magic : UInt64 := regionMagic
+  /-- `regionFormat` -/
+  format : Nat := regionFormat
+  /-- the `wiz` binary that wrote it (`binaryId`; the file name has it too) -/
+  binary : UInt64 := 0
+  /-- the text format's `salt`, in case the file name is reused -/
+  textSalt : UInt64 := 0
+  /-- the rig the effects were elaborated for (`RigTag.tag`) -/
+  rig : String := ""
+  /-- the module these effects belong to -/
+  module : Name := ""
+  /-- the module key (`moduleKey`: text, headers and imports) -/
+  key : UInt64 := 0
+  /-- every cacheable command's effect, in command order (`Effect.apply` in order) -/
+  effects : Array (Effect R) := #[]
+  /-- the chained key at each of those commands, in the same order: a replay checks its
+  own parsed text's keys against these, so a command loop that parses differently (an
+  importer's extra syntax) falls back to the text instead of taking the wrong effect -/
+  keys : Array UInt64 := #[]
+  /-- every command was cacheable: no `import`/`syntax`/`macro` needs rerunning, so a
+  loader may skip the per-command loop (commit 3; the writer records it, the reader does
+  not act on it yet) -/
+  complete : Bool := false
+  /-- the source ranges of the commands that are not cacheable, for the rerun path
+  (commit 3) -/
+  rerun : Array (Nat × Nat) := #[]
+
+/-- Does this artifact belong to module `key` of `binary`, under `rig`? -/
+def ModuleArtifact.fits (a : ModuleArtifact R) (binary key : UInt64) (rig : String) : Bool :=
+  a.magic == regionMagic && a.format == regionFormat && a.binary == binary &&
+  a.textSalt == salt && a.rig == rig && a.key == key
+
+/-- What `--region-stats` reports. -/
+structure RegionCounts where
+  -- (so `IO.mkRef {}` works)
+  /-- module lookups that found a usable region -/
+  hits : Nat := 0
+  /-- module lookups that found none (cold, missing, corrupt or mistagged): the text cache
+  answered, and a new region was written -/
+  misses : Nat := 0
+  /-- command effects that came from a region -/
+  commands : Nat := 0
+  deriving Inhabited, Repr
+
+/-- `--region-cache`'s settings. -/
+structure RegionOptions where
+  /-- the rig the effects were elaborated for (`RigTag.tag (R := R)`) -/
+  rig : String
+  /-- where to count hits and misses, for `--region-stats` and tests -/
+  stats : Option (IO.Ref RegionCounts) := none
+
+/-- The module region cache: one artifact per module key, `get` treating any read error or
+mismatched tag as a miss (and dropping the file). -/
+structure RegionStore (R : Type) where
+  get : UInt64 → IO (Option (ModuleArtifact R))
+  /-- write `a`; the store fills in `binary`, `salt` and `rig` -/
+  put : ModuleArtifact R → IO Unit
+  stats : Option (IO.Ref RegionCounts) := none
+
+/-- The `.wizr` file for module `key` as `binary` (the same mix as `.wizc`). -/
+def regionFileName (binary key : UInt64) : String := s!"{mixHash binary key}.wizr"
+
+-- (`CompactedRegion.save`/`read` are `unsafe opaque`: `α` is erased at the boundary and the
+-- caller must load with the type it saved. The `opaque` wrappers keep the loader safe, as
+-- `Budget.tick` does; the type is checked by the tags above, never by Lean.)
+
+private unsafe def regionSaveImpl {α : Type} (file : System.FilePath) (key : Lean.Name)
+    (a : α) : IO Unit := do
+  let _ ← Lean.CompactedRegion.save file key a #[] none
+  pure ()
+
+@[implemented_by regionSaveImpl]
+private opaque regionSave {α : Type} (file : System.FilePath) (key : Lean.Name) (a : α) : IO Unit
+
+private unsafe def regionReadImpl {α : Type} (file : System.FilePath) :
+    IO (α × Lean.CompactedRegion) :=
+  Lean.CompactedRegion.read (α := α) file #[]
+
+@[implemented_by regionReadImpl]
+private opaque regionRead {α : Type} (file : System.FilePath) : IO (α × Lean.CompactedRegion)
+
+/-- Regions read in this process, kept until it exits: the objects in a mapped region are
+not reference counted, so a state built from one must not outlive it (design §6.3 of
+`wiz-notes/module-mmap.md`). One region per module name: re-reading the same module takes
+Lean's copy path, which is correct, only slower. -/
+initialize regionRoots : IO.Ref (Array Lean.CompactedRegion) ← IO.mkRef #[]
+
+/-- Read the artifact at `file`; `none` if it is missing, truncated, or fails to load. The
+region is kept alive for the process (`regionRoots`). -/
+def readRegionFile (file : System.FilePath) : IO (Option (ModuleArtifact R)) := do
+  if !(← file.pathExists) then return none
+  try
+    let (a, r) ← regionRead (α := ModuleArtifact R) file
+    regionRoots.modify (·.push r)
+    pure (some a)
+  catch _ => pure none
+
+/-- Write an artifact to `file` (Lean writes a temporary file and renames it). -/
+def writeRegionFile (file : System.FilePath) (a : ModuleArtifact R) : IO Unit :=
+  regionSave file (Lean.Name.mkSimple a.module) a
+
+/-- Module `key`'s artifact, if it exists and its tags match; a bad file is dropped (a pure
+cache: the next run rewrites it). -/
+def readModuleRegion (dir : System.FilePath) (binary : UInt64) (rig : String) (key : UInt64) :
+    IO (Option (ModuleArtifact R)) := do
+  let file := dir / regionFileName binary key
+  match ← readRegionFile (R := R) file with
+  | some a => if a.fits binary key rig then pure (some a) else
+      (try IO.FS.removeFile file catch _ => pure ())
+      pure none
+  | none =>
+      if ← file.pathExists then (try IO.FS.removeFile file catch _ => pure ())
+      pure none
+
+/-- Write module `key`'s artifact (the tags are filled in here). -/
+def writeModuleRegion (dir : System.FilePath) (binary : UInt64) (rig : String) (key : UInt64)
+    (module : Name) (effects : Array (Effect R)) (keys : Array UInt64) (complete := false)
+    (rerun : Array (Nat × Nat) := #[]) : IO Unit :=
+  writeRegionFile (dir / regionFileName binary key)
+    { magic := regionMagic, format := regionFormat, binary, textSalt := salt, rig, module, key,
+      effects, keys, complete, rerun }
+
+/-- Where command effects are kept: a write directory and read-only directories (the
+layered shared cache), or memory (for one run without the cache: modules are still
+elaborated in isolation, so the cache on or off gives the same results). A store may also
+carry a module region cache (`--region-cache`): its regions live in the same directory
+layers, the text entries remain the authority. -/
 structure Store (R : Type) where
   get : UInt64 → IO (Option (Effect R))
   put : UInt64 → Effect R → IO Unit
   /-- has module `k` been elaborated in isolation? -/
   seen : UInt64 → IO Bool
   markSeen : UInt64 → Name → IO Unit
+  /-- the module region cache (`--region-cache`), when the store has one -/
+  region : Option (RegionStore R) := none
 
-/-- The store in directory `dir`, for the binary `binary` (`binaryId`): its files are
-named by the key mixed with the binary, so another build of wiz finds none of them. -/
-def Store.disk (dir : System.FilePath) (binary : UInt64) : IO (Store R) := do
-  IO.FS.createDirAll dir
+/-- A layered store: entries are looked up in `write` first, then in each of `reads` in
+order, and written only to `write` (none: `put` does nothing). A read cache is never
+created or written: `get` just reports a missing or unparsable entry as a miss, so a
+corrupt entry falls through to the next cache. `seen` is true when any cache has the
+module's marker; `markSeen` writes the marker to `write`, or keeps it in memory when
+there is none, so a `--cache-ro`-only run knows which modules it has already elaborated
+in isolation. Its files are named by the key mixed with the binary, so another build of
+wiz finds none of them. -/
+def Store.layered (write : Option System.FilePath) (reads : List System.FilePath)
+    (binary : UInt64) : IO (Store R) := do
+  if let some dir := write then IO.FS.createDirAll dir
   let name (k : UInt64) := toString (mixHash binary k)
+  let dirs := write.toList ++ reads
+  let seenInMemory ← IO.mkRef ({} : Std.HashSet UInt64)
   pure {
     get := fun k => do
-      let file := dir / s!"{name k}.wizc"
-      if ← file.pathExists then pure ((Sx.parse (← IO.FS.readFile file)).bind Effect.ofSx?) else pure none
-    put := fun k e => writeAtomic (dir / s!"{name k}.wizc") e.toSx.render
-    seen := fun k => (dir / s!"{name k}.wizm").pathExists
-    markSeen := fun k m => writeAtomic (dir / s!"{name k}.wizm") m }
+      let file := s!"{name k}.wizc"
+      for dir in dirs do
+        let f := dir / file
+        if ← f.pathExists then
+          if let some e := (Sx.parse (← IO.FS.readFile f)).bind Effect.ofSx? then return some e
+      pure none
+    put := fun k e => match write with
+      | some dir => writeAtomic (dir / s!"{name k}.wizc") e.toSx.render
+      | none => pure ()
+    seen := fun k => do
+      if (← seenInMemory.get).contains k then return true
+      for dir in dirs do
+        if ← (dir / s!"{name k}.wizm").pathExists then return true
+      pure false
+    markSeen := fun k m => match write with
+      | some dir => writeAtomic (dir / s!"{name k}.wizm") m
+      | none => seenInMemory.modify (·.insert k) }
+
+/-- The store in directory `dir`, for the binary `binary` (`binaryId`): a layered store
+with one write directory and no read caches (the compatibility name for the old
+single-directory store). -/
+def Store.disk (dir : System.FilePath) (binary : UInt64) : IO (Store R) :=
+  Store.layered (some dir) [] binary
 
 def Store.memory : IO (Store R) := do
   let effects ← IO.mkRef ({} : Std.HashMap UInt64 (Effect R))
@@ -633,6 +827,98 @@ def Store.memory : IO (Store R) := do
     put := fun k e => effects.modify (·.insert k e)
     seen := fun k => return (← seen.get).contains k
     markSeen := fun k _ => seen.modify (·.insert k) }
+
+/-- A module's effects, collected while it is elaborated in isolation, to write its region. -/
+structure RegionSink (R : Type) where
+  module : Name
+  effects : IO.Ref (Array (Effect R))
+  /-- the chained key at each collected effect, in the same order -/
+  keys : IO.Ref (Array UInt64)
+  /-- the source ranges of the commands that are not cacheable (commit 3's rerun path) -/
+  rerun : IO.Ref (Array (Nat × Nat))
+
+/-- Remove `file` if it exists, ignoring errors (a pure cache never fails a run). -/
+def removeQuietly (file : System.FilePath) : IO Unit :=
+  try IO.FS.removeFile file catch _ => pure ()
+
+/-- The region store over the same layers as `Store.layered`: `get` searches the write
+directory first, then each read-only directory in order, and `put` writes only to the write
+directory (none: no writes). A read-only cache is never created, written or repaired, so a
+missing, truncated or mistagged region there is just a miss; a bad file in the write
+directory is dropped (the next run rewrites it). -/
+def RegionStore.layered (write : Option System.FilePath) (reads : List System.FilePath)
+    (binary : UInt64) (opts : RegionOptions) : IO (RegionStore R) := do
+  let dirs := write.toList ++ reads
+  let inWrite (dir : System.FilePath) : Bool :=
+    some dir.toString == write.map (·.toString)
+  pure {
+    get := fun k => do
+      for dir in dirs do
+        let file := dir / regionFileName binary k
+        if ← file.pathExists then
+          match ← readRegionFile (R := R) file with
+          | some a =>
+            if a.fits binary k opts.rig then
+              return some a
+            else if inWrite dir then
+              removeQuietly file
+          | none =>
+            if inWrite dir then removeQuietly file
+      pure none
+    put := fun a => match write with
+      | some dir => do
+        -- (a pure cache: a region that cannot be written, say because `Effect` grew a
+        -- closure, must not fail the run; the `.wizc` entries remain the authority)
+        try
+          writeRegionFile (dir / regionFileName binary a.key)
+            { a with binary := binary, textSalt := salt, rig := opts.rig }
+        catch _ => pure ()
+      | none => pure ()
+    stats := opts.stats }
+
+/-- A layered store with module regions (`--region-cache`): the text entries and the
+regions are searched in the same layer order. -/
+def Store.layeredRegion (write : Option System.FilePath) (reads : List System.FilePath)
+    (binary : UInt64) (opts : RegionOptions) : IO (Store R) := do
+  let store ← Store.layered write reads binary
+  let region ← RegionStore.layered write reads binary opts
+  pure { store with region := some region }
+
+/-- The store in `dir` with module regions (`--region-cache`), for the rig `opts.rig`. -/
+def Store.diskRegion (dir : System.FilePath) (binary : UInt64) (opts : RegionOptions) :
+    IO (Store R) :=
+  Store.layeredRegion (some dir) [] binary opts
+
+/-- Module `key`'s artifact, if the region cache is on and the file matches. -/
+def Store.getRegion (s : Store R) (k : UInt64) : IO (Option (ModuleArtifact R)) :=
+  match s.region with
+  | some r => r.get k
+  | none => pure none
+
+/-- Save a module artifact as its region (a no-op without `--region-cache`). -/
+def Store.putRegion (s : Store R) (a : ModuleArtifact R) : IO Unit :=
+  match s.region with
+  | some r => r.put a
+  | none => pure ()
+
+/-- Count a module that the region cache served (or did not; a no-op without stats). -/
+def Store.countRegion (s : Store R) (hit : Bool) : IO Unit :=
+  match s.region with
+  | some r =>
+    match r.stats with
+    | some stats =>
+      stats.modify fun c => if hit then { c with hits := c.hits + 1 } else { c with misses := c.misses + 1 }
+    | none => pure ()
+  | none => pure ()
+
+/-- Count one command whose effect came from a region. -/
+def Store.countRegionCommand (s : Store R) : IO Unit :=
+  match s.region with
+  | some r =>
+    match r.stats with
+    | some stats => stats.modify fun c => { c with commands := c.commands + 1 }
+    | none => pure ()
+  | none => pure ()
 
 /-- (28) The solver settings, as a key, when they are not the defaults (none: nothing to
 mix in, so the keys of every run without them stay as they were). -/
@@ -675,24 +961,50 @@ where
   importModule (keys : IO.Ref (Std.HashMap Name UInt64)) (base : CommandState R) (stack : List Name)
       (s : CommandState R) (m : Name) (src : String) : IO (CommandState R × Nat) := do
     let k ← keyOf keys m
-    let fresh ← if ← store.seen k then pure none else do
-      let (_, h) ← go keys base (m :: stack) src { base with imported := [m], messages := #[], module := m } k .write
+    -- (`--region-cache`) the module's artifact: one region for all its cacheable commands
+    let region₀ ← store.getRegion k
+    store.countRegion region₀.isSome
+    -- with the region cache on, a warm module without an artifact is elaborated in
+    -- isolation once more (from its `.wizc` entries) to write it: one extra pass, once
+    let rebuild := store.region.isSome && region₀.isNone
+    let fresh ← if (← store.seen k) && !rebuild then pure none else do
+      let sink : Option (RegionSink R) ←
+        if store.region.isSome then
+          pure (some { module := m, effects := ← IO.mkRef #[], keys := ← IO.mkRef #[],
+                       rerun := ← IO.mkRef #[] })
+        else pure none
+      let (_, h) ← go keys base (m :: stack) src { base with imported := [m], messages := #[], module := m } k .write none sink
       store.markSeen k m
       pure (some h)
-    let (s', h) ← go keys base (m :: stack) src { s with imported := m :: s.imported, messages := #[], module := m } k .replay
+    -- (the isolated run above wrote the artifact if it was missing or unusable)
+    let region ← if region₀.isSome then pure region₀ else if rebuild then store.getRegion k else pure none
+    -- (the command loop still runs: imports, keys and duplicate checks are unchanged; the
+    -- effects come from the region when it has them)
+    let (s', h) ← go keys base (m :: stack) src { s with imported := m :: s.imported, messages := #[], module := m } k .replay region
     -- after a fresh isolated run, the hits are that run's (the replay reads what it wrote)
     pure (s', fresh.getD h)
   go (keys : IO.Ref (Std.HashMap Name UInt64)) (base : CommandState R) (stack : List Name) (input : String)
-      (s₀ : CommandState R) (key₀ : UInt64) (mode : Mode) : IO (CommandState R × Nat) := do
+      (s₀ : CommandState R) (key₀ : UInt64) (mode : Mode)
+      (region : Option (ModuleArtifact R) := none) (sink : Option (RegionSink R) := none) :
+      IO (CommandState R × Nat) := do
     let chars := input.toList.toArray
     let mut pos := 0
     let mut s := s₀
     let mut key := key₀
     let _ : Inhabited (CommandState R) := ⟨init⟩
     let mut hits := 0
+    -- (`complete` in the artifact: every command is cacheable, so the region could replace
+    -- the loop; commit 3 uses it)
+    let mut allCacheable := true
+    -- (a parse error or an aborted module: no region is written for it)
+    let mut aborted := false
+    -- (which effect in the module's region is next; imports and non-cacheable commands
+    -- don't consume one)
+    let regionIdx ← IO.mkRef 0
     while skipWs chars pos < chars.size do
       match parseCommand chars s.tables pos with
       | .error _ =>
+        aborted := true
         -- report the parse error (and everything after it) without the cache
         s := runFrontend.go input base chars pos s
         break
@@ -700,6 +1012,8 @@ where
         let text := String.ofList (chars.extract pos stop).toList
         key := mixHash key (hash text)
         if cmd.isOfKind "command.import" then
+          allCacheable := false
+          if let some sink := sink then sink.rerun.modify (·.push (pos, stop))
           let m := ((cmd.getArg 1).getId?).getD "_"
           -- what the rest of the file sees depends on the module's text, through its key
           key := mixHash key (← keyOf keys m)
@@ -732,32 +1046,76 @@ where
                 -- they would refer to declarations that aren't there, or to the other
                 -- module's (the macro interpreter then ran a deriver of lib/Deriving.wiz
                 -- with lib/Text.wiz dropped, and panicked). The importer drops the module.
-                unless stack.isEmpty do break
+                unless stack.isEmpty do
+                  aborted := true
+                  break
               else
               s := { inner with messages := (if errs.isEmpty then s.messages else s.messages.push msg) ++ warns,
                                 module := s.module, infos := s.infos }
           pos := stop
           continue
+        let cacheable? := cacheable.contains cmd.kind
+        unless cacheable? do
+          allCacheable := false
+          if let some sink := sink then sink.rerun.modify (·.push (pos, stop))
         let cached : Option (Effect R) ←
-          if cacheable.contains cmd.kind then store.get key else pure none
+          if !cacheable? then pure none
+          else match region with
+            -- (`--region-cache`: the module's region holds the effects in command order;
+            -- the chained key at each command is checked, so a parse that diverges from
+            -- the isolated run's — an importer's extra syntax — falls back to the text)
+            | some a => do
+              let i ← regionIdx.get
+              regionIdx.set (i + 1)
+              match a.keys[i]?, a.effects[i]? with
+              | some k', some e =>
+                if k' == key then do
+                  store.countRegionCommand
+                  pure (some e)
+                else
+                  store.get key
+              | _, _ => store.get key
+            | none => store.get key
         match cached with
         | some e =>
+          if let some sink := sink then do
+            sink.effects.modify (·.push e)
+            sink.keys.modify (·.push key)
           s := e.apply s
           hits := hits + 1
         | none =>
           let s' := Query.elaborate.elabOne input base chars pos stop s
-          if cacheable.contains cmd.kind && mode matches .write then
-            store.put key (effectOf s s')
+          if cacheable? && mode matches .write then
+            let e := effectOf s s'
+            store.put key e
+            if let some sink := sink then do
+              sink.effects.modify (·.push e)
+              sink.keys.modify (·.push key)
           s := s'
         pos := stop
+    -- (write the module's region once: after a complete isolated run)
+    if let some sink := sink then
+      unless aborted do
+        store.putRegion { magic := regionMagic, format := regionFormat, module := sink.module,
+                          key := key₀, effects := ← sink.effects.get, keys := ← sink.keys.get,
+                          complete := allCacheable, rerun := ← sink.rerun.get }
     pure (s, hits)
 
-/-- `elaborateWith`, through the cache directory `dir`, as this binary (`binaryId`) unless
-`binary` says otherwise (tests). -/
-def elaborateCached (dir : System.FilePath) (input : String) (init : CommandState R) (key₀ : UInt64)
-    (toolchain : UInt64 := 0) (binary : Option UInt64 := none) : IO (CommandState R × Nat) := do
-  let binary ← match binary with | some b => pure b | none => binaryId (some dir)
-  elaborateWith (← Store.disk dir binary) input init key₀ toolchain
+/-- `elaborateWith`, through the layered cache: `write` is the directory that is written
+(none: no writes), `reads` are read-only directories searched after it, in order. As this
+binary (`binaryId` of `write`) unless `binary` says otherwise (tests). With `region`, module
+effects are also served from `<dir>/<binary ⊕ module key>.wizr` (`--region-cache`): the
+regions live in the same layers, are read from the write cache first and then from the
+read-only caches, and are only written to the write cache. -/
+def elaborateCached (write : Option System.FilePath) (reads : List System.FilePath)
+    (input : String) (init : CommandState R) (key₀ : UInt64)
+    (toolchain : UInt64 := 0) (binary : Option UInt64 := none)
+    (region : Option RegionOptions := none) : IO (CommandState R × Nat) := do
+  let binary ← match binary with | some b => pure b | none => binaryId write
+  let store ← match region with
+    | some opts => Store.layeredRegion write reads binary opts
+    | none => Store.layered write reads binary
+  elaborateWith store input init key₀ toolchain
 
 /-- `elaborateWith`, without a cache: modules are elaborated in isolation all the same. -/
 def elaborateUncached (input : String) (init : CommandState R) (toolchain : UInt64 := 0) : IO (CommandState R) := do

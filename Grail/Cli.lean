@@ -41,14 +41,15 @@ options: -C DIR (the package directory), --std DIR (the standard library),
   -j N (jobs at once; default: the number of cores, at most 4),
   --timeout SECS (a job's time limit, default 1800), --test-timeout SECS (default 300),
   --cc X --cflags \"…\" --ldflags \"…\" --libs \"…\" --llc X --gc-cflags \"…\" --gc-ldflags \"…\" -I DIR,
-  --cache DIR (the elaboration cache, default ~/.cache/wiz), --no-cache,
+  --cache DIR (the elaboration cache, default ~/.cache/wiz), --cache-ro DIR (repeatable:
+  a read-only cache, searched in order after the write cache), --no-cache (both),
   --trust-native (27a: allow `native_refl`, passed on to every check and to `wiz lsp`), --native-fuel N
 Machine settings (where GMP lives) go in an uncommitted grail.local.wiz:
   import Grail
   def settings : Settings := Settings.empty |> Settings.set \"cflags\" \"-I…\""
 
 /-- What identifies this binary (so a new elaborator or backend rebuilds everything):
-`Cache.binaryId`, remembered under the cache directory. -/
+`Cache.binaryId`, remembered under the write cache directory (never a read-only one). -/
 def binaryId (cacheDir : Option System.FilePath) : IO UInt64 := Cache.binaryId cacheDir
 
 structure Opts where

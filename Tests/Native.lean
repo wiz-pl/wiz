@@ -9,6 +9,13 @@ import Grail
 The group `native`: closed equations decided by running them, only with the flag, with
 an axiom per use that `#print axioms` lists together with the native implementations
 the run can reach; never in the library; and cache entries that never cross the flag.
+
+The group also checks the **trust ledger** (`scripts/trust-ledger.sh`,
+`.github/trust-baseline.tsv`): every declaration of `lib/` is run through
+`#print axioms`, and a source of trust that is not in the checked-in baseline — an
+axiom, `sorry`, `native_refl`, `implemented_by`/`repr:`, SMT or `builtin`
+registration, or a `partial` definition — fails until it is reviewed and the baseline
+is regenerated. The `hdl-verified` group checks the axiom-free example the same way.
 -/
 
 open Wiz
@@ -73,6 +80,292 @@ partial def wizFiles (dir : System.FilePath) : IO (List System.FilePath) := do
     if ← e.path.isDir then out := out ++ (← wizFiles e.path)
     else if e.path.extension == some "wiz" then out := e.path :: out
   pure out
+
+/-! ## The trust ledger
+
+A checked-in baseline of the **trusted base** of `lib/` (`.github/trust-baseline.tsv`):
+every declaration the kernel does not check, and every registration that decides how a
+definition computes. `#print axioms` is still run on every declaration (as the case
+below always did), and every axiom it lists must be one of the ledger's sources; the
+baseline then makes a *new* source — a new `axiom`, `native_refl`, SMT answer,
+`implemented_by`, `builtin` or `partial` definition — a test failure that a reviewer must
+approve by updating the file.
+
+The ledger records sources, not every dependency edge: a new theorem that uses
+`castRefl` doesn't add a line (the axiom was already trusted), while a new
+`implemented_by` or a new use of `native_refl`/`smt` (each introduces a declaration of
+its own) does. See `scripts/trust-ledger.sh` and the header of
+`.github/trust-baseline.tsv`. -/
+
+/-- A source of trust: the module (or example file) that declares it, the declaration it
+belongs to, and the words `#print axioms` uses for it. -/
+structure TrustSource where
+  module : String
+  name : String
+  item : String
+  deriving Repr, BEq, Inhabited
+
+def TrustSource.line (t : TrustSource) : String :=
+  s!"{t.module}\t{t.name}\t{t.item}"
+
+/-- Is `n` the axiom a `native_refl` added (`f.native✝`)? -/
+def isNativeReflAxiom (n : Name) : Bool := n.endsWith ".native✝"
+
+/-- Is `n` an axiom an `smt` answer added (`f.smt✝k⟨solver⟩`)? -/
+def isSmtAxiom (n : Name) : Bool := (n.splitOn ".smt✝").length > 1
+
+/-- The module a declaration was made in, for the ledger's label. A `private`
+declaration is re-inserted under `_private.M._0.name` after elaboration, and
+`Globals.renamePrivate` does not rewrite `declModule`; read the module from the name
+then. -/
+def trustModuleOf (g : Globals ZeroOneMany) (n : Name) : String :=
+  match g.declModule[n]? with
+  | some m => m
+  | none =>
+    if n.startsWith "_private." then
+      match (n.drop "_private.".length).toString.splitOn "._0." with
+      | m :: _ => m
+      | [] => "(no module)"
+    else "(no module)"
+
+/-- The trusted base of `g`: one entry per declaration that is an axiom (no value, no
+witness), a `partial` definition (its body is compiled, not unfolded), a native
+implementation (`implemented_by`, and a type's `repr:` representation), a `native_refl`
+or `smt` axiom, and one per `builtin` registration. `only` restricts it to a scope (an
+example's own declarations). -/
+def trustSources (g : Globals ZeroOneMany) (labelOf : Name → String)
+    (only : Name → Bool := fun _ => true) : List TrustSource := Id.run do
+  let mut out : Array TrustSource := #[]
+  for n in g.order do
+    if !only n then continue
+    let some d := g.find? n | continue
+    let m := labelOf n
+    if isNativeReflAxiom n then
+      out := out.push { module := m, name := n, item := s!"native_refl {n}" }
+    else if isSmtAxiom n then
+      out := out.push { module := m, name := n, item := s!"smt {n}" }
+    else if d.value.isNone && d.witness.isNone then
+      -- `axiom`, `extern`, a `foreign` type, a seal (`T.seal✝`)
+      out := out.push { module := m, name := n, item := s!"axiom {n}" }
+    if d.witness.isSome then
+      out := out.push { module := m, name := n, item := "partial" }
+    if let some i := d.nativeImpl? then
+      out := out.push { module := m, name := n, item := s!"native {n} := {i}" }
+  -- every registration, including `repr:` (a type's native representation) and `seal:`;
+  -- `inline` (a compiler hint) and `int` (only how values print) are not trust
+  for (k, nm) in g.builtins do
+    if k == "inline" || k == "int" then continue
+    if !only nm then continue
+    let m := labelOf nm
+    let item := match k.splitOn ":" with
+      | "repr" :: T :: mk :: get :: _ => s!"native {T} := {mk}/{get}"
+      | _ => s!"builtin {k} := {nm}"
+    out := out.push { module := m, name := nm, item }
+  return out.toList
+
+/-- Every trust `#print axioms` lists for the declarations in `only` is one of
+`sources`: the walk over the whole environment is what makes the ledger a *ledger* and
+not just a grep; a trust the source list misses is reported. -/
+def checkCovered (g : Globals ZeroOneMany) (sources : List TrustSource)
+    (only : Name → Bool := fun _ => true) : IO Unit := do
+  let keys := sources.foldl (fun s t => s.insert t.item) ({} : Std.HashSet String)
+  for n in g.order do
+    if !only n then continue
+    for a in g.axiomsOf n do
+      -- `inline` and `int` registrations are not trust (see `trustSources`)
+      if a.startsWith "builtin inline " || a.startsWith "builtin int " then continue
+      let key :=
+        if a.startsWith "builtin " || a.startsWith "native " then a
+        else if isNativeReflAxiom a then s!"native_refl {a}"
+        else if isSmtAxiom a then s!"smt {a}"
+        else s!"axiom {a}"
+      unless keys.contains key do
+        throw (IO.userError s!"{n}: `#print axioms` lists '{a}', which is not a source in the trust ledger")
+
+/-- Is the identifier `sorry` in `src`, outside comments and strings? Returns its
+offsets. Wiz has no `sorry` keyword on this branch, so a use is a parse error anyway;
+the check makes it a trust-ledger failure with a clear message (and covers an exercise
+tree or a future keyword that would parse it). -/
+partial def sorryOffsets (src : String) : List Nat :=
+  let a := src.toList.toArray
+  let n := a.size
+  let rec strEnd (j : Nat) : Nat :=
+    if j >= n then j
+    else if a[j]! == '\\' then strEnd (j + 2)
+    else if a[j]! == '"' then j + 1
+    else strEnd (j + 1)
+  let rec identEnd (j : Nat) : Nat := if j < n && isIdRest a[j]! then identEnd (j + 1) else j
+  let isSorry (i j : Nat) : Bool :=
+    j - i == 5 && a[i]! == 's' && a[i+1]? == some 'o' && a[i+2]? == some 'r' &&
+      a[i+3]? == some 'r' && a[i+4]? == some 'y'
+  let rec go (i : Nat) (acc : List Nat) : List Nat :=
+    let i := skipWs a i
+    if i >= n then acc.reverse
+    else if a[i]! == '"' then go (strEnd (i + 1)) acc
+    else if isIdStart a[i]! then
+      let j := identEnd (i + 1)
+      go j (if isSorry i j then i :: acc else acc)
+    else go (i + 1) acc
+  go 0 []
+
+/-- The line (1-based) of character offset `off`. -/
+def lineOf (src : String) (off : Nat) : Nat :=
+  (String.ofList (src.toList.take off)).splitOn "\n" |>.length
+
+/-- The examples that are meant to be axiom-free (kernel-checked, nothing trusted):
+their own declarations must add no trust. `examples/hdl-verified.wiz` is checked by the
+`hdl-verified` group too; `-native`/`-full` are deliberately trusted and are not here. -/
+def trustLedgerExamples : List String := ["examples/hdl-verified.wiz"]
+
+/-- The state of importing every module of `lib/`, as `wiz check` does (the toolchain's
+library trusted). Both trust extensions are on so that a use is *recorded* by the
+ledger rather than merely an error; `lib/` is not allowed to use either (the cases below
+and `lib/ never uses native_refl` still fail on a use). -/
+def libTrustState : IO (CommandState ZeroOneMany) := do
+  let files ← wizFiles "lib"
+  let mods := files.filterMap fun f => do
+    let cs := (f.toString.toList.drop 4)
+    pure ((String.ofList (cs.take (cs.length - 4))).replace "/" ".")
+  let mods := mods.toArray.qsort (· ≤ ·) |>.toList
+  let input := String.join (mods.map (s!"import {·}\n"))
+  pure (runFrontend (R := ZeroOneMany) input
+    { loader := ← Elab.libLoader, trustedModule := Tests.libModule
+      trustNative := true, smt := { trust := true } })
+
+/-- The state of elaborating `path` (an example) with every library module importable. -/
+def exampleTrustState (path : String) : IO (CommandState ZeroOneMany) := do
+  let input ← IO.FS.readFile path
+  pure (runFrontend (R := ZeroOneMany) input
+    { loader := ← Elab.libLoader, trustedModule := Tests.libModule
+      trustNative := true, smt := { trust := true } })
+
+def noTrustErrors (what : String) (s : CommandState ZeroOneMany) : IO Unit := do
+  let errs := s.messages.filter (·.severity == .error)
+  unless errs.isEmpty do
+    throw (IO.userError s!"{what} has errors:\n{"\n".intercalate (errs.toList.map (·.text))}")
+
+/-- Reject `sorry` anywhere in `files`. -/
+def rejectSorry (files : List System.FilePath) : IO Unit := do
+  for f in files do
+    let src ← IO.FS.readFile f
+    match sorryOffsets src with
+    | [] => pure ()
+    | off :: _ => throw (IO.userError s!"{f}:{lineOf src off}: `sorry` is not checked by the kernel; it is never allowed in the trusted base")
+
+/-- The ledger's lines: `module<TAB>declaration<TAB>item`, sorted and deduplicated. With
+`includeExamples`, the axiom-free examples' own declarations are included too. -/
+def ledgerLines (includeExamples : Bool) : IO (List String) := do
+  let libFiles ← wizFiles "lib"
+  rejectSorry libFiles
+  let s ← libTrustState
+  noTrustErrors "the library" s
+  check (s.globals.order.size > 1000) s!"only {s.globals.order.size} library declarations"
+  let libLabel (n : Name) : String := trustModuleOf s.globals n
+  let libSources := trustSources s.globals libLabel
+  checkCovered s.globals libSources
+  let mut sources := libSources
+  if includeExamples then
+    for path in trustLedgerExamples do
+      rejectSorry [path]
+      let es ← exampleTrustState path
+      noTrustErrors path es
+      let own (n : Name) : Bool := es.globals.declModule[n]?.isNone
+      let labelOf (n : Name) : String := if own n then path else ""
+      let ownSources := (trustSources es.globals labelOf own)
+      -- an example's declarations may depend on the library's trusted base, so the
+      -- walk checks against both; its own sources are what the baseline would gain
+      checkCovered es.globals (libSources ++ ownSources) own
+      sources := sources ++ ownSources
+  let lines := (sources.map TrustSource.line).toArray.qsort (· ≤ ·) |>.toList.eraseDups
+  pure lines
+
+def trustBaseline : System.FilePath := ".github/trust-baseline.tsv"
+
+def trustBaselineHeader : String :=
+  "# The Wiz trust ledger: the trusted base of lib/ (and the axiom-free examples).\n" ++
+  "# One line per source of trust: module<TAB>declaration<TAB>item.  `item` is the wording\n" ++
+  "# of `#print axioms` (`axiom X`, `native f := g` for implemented_by, `native T := mk/get`\n" ++
+  "# for a repr registration, `native_refl X.native✝`, `smt X.smt✝…`, `builtin k := n`), or\n" ++
+  "# `partial` for a partial definition (its body is compiled, not unfolded).\n" ++
+  "# `builtin inline` (a compiler hint) and `builtin int` (how values print) are not\n" ++
+  "# trust and are not listed. A new line fails the `native` group (and\n" ++
+  "# scripts/trust-ledger.sh): review it, then regenerate this file with\n" ++
+  "# `scripts/trust-ledger.sh --update`.\n"
+
+def readTrustBaseline : IO (List String) := do
+  unless ← trustBaseline.pathExists do
+    throw (IO.userError s!"no {trustBaseline}: run scripts/trust-ledger.sh --update")
+  let text ← IO.FS.readFile trustBaseline
+  pure (text.splitOn "\n" |>.map (·.trimAsciiEnd.toString) |>.filter fun l => !l.isEmpty && !l.startsWith "#")
+
+/-- The baseline lines in the scope of `includeExamples`: without examples, the lines
+labelled with an example path are left out (the `native` group checks `lib/` alone; the
+`hdl-verified` group checks the example in its own heavy case). -/
+def baselineFor (lines : List String) (includeExamples : Bool) : List String :=
+  if includeExamples then lines
+  else lines.filter fun l => !(((l.splitOn "\t").headD "").startsWith "examples/")
+
+/-- Compare `actual` with `baseline`, failing on either a new trust (the security
+relevant direction) or a stale baseline entry. -/
+def compareTrust (what : String) (actual baseline : List String) : IO Nat := do
+  let added := actual.filter fun l => !baseline.contains l
+  let removed := baseline.filter fun l => !actual.contains l
+  if !added.isEmpty || !removed.isEmpty then
+    let fmt (sign : String) (ls : List String) : String :=
+      "\n" ++ "\n".intercalate (ls.map fun l => s!"  {sign} {l.replace "\t" " | "}")
+    let parts :=
+      (if added.isEmpty then "" else s!"\nnew trust ({added.length}):{fmt "+" added}") ++
+      (if removed.isEmpty then "" else s!"\nstale baseline ({removed.length}; regenerate the file):{fmt "-" removed}")
+    throw (IO.userError s!"{what} changed ({actual.length} items, baseline {baseline.length}):{parts}\n\nreview each new trust, then run scripts/trust-ledger.sh --update")
+  pure baseline.length
+
+/-- Check the ledger against `.github/trust-baseline.tsv`; returns its item count. -/
+def checkTrustLedger (includeExamples : Bool := true) : IO Nat := do
+  let actual ← ledgerLines includeExamples
+  compareTrust "the trust ledger" actual (baselineFor (← readTrustBaseline) includeExamples)
+
+/-- Check one axiom-free example's own declarations against its part of the baseline,
+from the state a case already elaborated (no second elaboration). -/
+def checkExampleTrustLedger (path : String) (g : Globals ZeroOneMany) : IO Nat := do
+  let own (n : Name) : Bool := g.declModule[n]?.isNone
+  let libLabel (n : Name) : String := trustModuleOf g n
+  let libSources := trustSources g libLabel (fun n => !own n)
+  let labelOf (n : Name) : String := if own n then path else ""
+  let ownSources := trustSources g labelOf own
+  checkCovered g (libSources ++ ownSources) own
+  let actual := (ownSources.map TrustSource.line).toArray.qsort (· ≤ ·) |>.toList.eraseDups
+  let baseline := (← readTrustBaseline).filter fun l => ((l.splitOn "\t").headD "") == path
+  compareTrust path actual baseline
+
+def updateTrustLedger (includeExamples : Bool) : IO Unit := do
+  let lines ← ledgerLines includeExamples
+  IO.FS.writeFile trustBaseline (trustBaselineHeader ++ "\n".intercalate lines ++ "\n")
+  IO.println s!"wrote {trustBaseline} ({lines.length} items)"
+
+/-- `tests --trust-ledger [--check|--update|--print] [--lib-only]` (`scripts/trust-ledger.sh`). -/
+def trustLedgerMain (args : List String) : IO UInt32 := do
+  let known := ["--check", "--update", "--print", "--lib-only"]
+  let bad := args.filter fun a => !known.contains a
+  unless bad.isEmpty do
+    IO.eprintln s!"usage: tests --trust-ledger [--check|--update|--print] [--lib-only] (unknown: {" ".intercalate bad})"
+    return 2
+  let includeExamples := !args.contains "--lib-only"
+  if args.contains "--update" then
+    if !includeExamples then
+      IO.eprintln "trust-ledger: --update always includes the examples (they are part of the ledger)"
+      return 2
+    updateTrustLedger true
+    return 0
+  if args.contains "--print" then
+    for l in ← ledgerLines includeExamples do IO.println l
+    return 0
+  try
+    let n ← checkTrustLedger includeExamples
+    IO.println s!"trust ledger: OK ({n} sources in the checked scope)"
+    return 0
+  catch e =>
+    IO.eprintln e
+    return 1
 
 def group : Group where
   name := "native"
@@ -229,18 +522,12 @@ def group : Group where
           check ((src.splitOn "native_refl").length == 1 && (src.splitOn "nativeRefl").length == 1)
             s!"{f} mentions native_refl" },
     { name := "no library declaration depends on a native axiom", run := fun _ => do
-        let files ← wizFiles "lib"
-        let mods := files.filterMap fun f => do
-          let cs := (f.toString.toList.drop 4)
-          pure ((String.ofList (cs.take (cs.length - 4))).replace "/" ".")
-        let input := String.join (mods.map (s!"import {·}\n"))
-        let s := runFrontend (R := ZeroOneMany) input { trustedModule := Tests.libModule, loader := ← Elab.libLoader }
-        let errs := s.messages.filter (·.severity == .error)
-        unless errs.isEmpty do throw (IO.userError s!"the library has errors: {errs.toList.map (·.text)}")
-        check (s.globals.order.size > 1000) s!"only {s.globals.order.size} library declarations"
-        for n in s.globals.order do
-          if (s.globals.axiomsOf n).any (·.endsWith ".native✝") then
-            throw (IO.userError s!"{n} depends on a native_refl axiom") }
+        -- The trust ledger: every declaration of lib/ is run through `#print axioms`;
+        -- each axiom listed must be a source in .github/trust-baseline.tsv, and a new
+        -- source (axiom, `sorry`, native_refl, implemented_by, SMT, builtin, partial)
+        -- fails. The examples that must be axiom-free are checked in `hdl-verified`.
+        let _ ← checkTrustLedger (includeExamples := false)
+        pure () }
   ]
 
 /-- H14 V1 (docs/libraries.md): the OLED demo's arithmetic units, against their Nat
@@ -252,10 +539,17 @@ def hdlVerifiedGroup : Group where
   exercise := "—"
   cases := [
     { name := "V1: kernel-checked on the units' domains, nothing trusted (examples/hdl-verified.wiz)", run := fun _ => do
-        let ms ← msgsLibs (← IO.FS.readFile "examples/hdl-verified.wiz") (trust := false)
+        let path := "examples/hdl-verified.wiz"
+        let s := runFrontend (R := ZeroOneMany) (← IO.FS.readFile path)
+          { loader := ← Elab.libLoader, trustedModule := Tests.libModule }
+        let ms := s.messages.toList.map fun m =>
+          s!"{match m.severity with | .error => "error" | .warning => "warning" | .info => "info"}: {m.text}"
         noErrors ms
         expect ms "info: (20, 19)"
-        if has ms "native" then throw (IO.userError s!"the kernel-checked file mentions native evaluation:\n{"\n".intercalate ms}") },
+        if has ms "native" then throw (IO.userError s!"the kernel-checked file mentions native evaluation:\n{"\n".intercalate ms}")
+        -- the trust ledger's part for this file: it must add no source of trust
+        let _ ← checkExampleTrustLedger path s.globals
+        pure () },
     { name := "V1: full widths by native_refl, each an axiom #print axioms names (examples/hdl-verified-native.wiz)", run := fun _ => do
         let ms ← msgsLibs (← IO.FS.readFile "examples/hdl-verified-native.wiz")
         noErrors ms

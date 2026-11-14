@@ -112,7 +112,7 @@ def natOpArity : Name → Nat
   | _ => 2
 
 /-- The registered operations on numbers that return a number, computed natively. The
-kernel, the interpreters and the native runtime (`runtime/wiz.c`) agree with these, and
+kernel, the interpreters and the native runtime (`runtime/`) agree with these, and
 with the Prelude's definitions (`Nat.div`, …): `n / 0 = 0`, `n % 0 = n`, `log2 0 = 0`. -/
 def natNative? : Name → Array Nat → Option Nat
   | "nat.succ", #[a] => some (a + 1)

@@ -256,7 +256,7 @@ def main : IO Unit := EIO.toIO (do
 
 `lib/Sys.wiz` binds the POSIX interfaces a program needs to drive other programs
 (what the toolchain manager and grail need, see stages 23 and 26), with C in the
-runtime's section "system interfaces" (`runtime/wiz.c`, so both backends have it).
+runtime's section "system interfaces" (`runtime/`, so both backends have it).
 
 * **Errors.** Anything that can fail returns `EIO A := IO (Except String A)`, a monad of
   its own, so a `do` block stops at the first error; `EIO.lift` runs an `IO` action in

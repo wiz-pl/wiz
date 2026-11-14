@@ -184,12 +184,12 @@ def ffiGroup : Group where
           pure { loader := fun m => if m == "Prelude" then some prelude else none,
                  trustedModule := Tests.libModule, includes := some (Module.includeResolver includes) }
         let infos (s : CommandState ZeroOneMany) := (s.messages.filter (·.severity == .info)).map (·.text)
-        let (s1, h1) ← Cache.elaborateCached cache src (← state "one\n") 0
+        let (s1, h1) ← Cache.elaborateCached (some cache) [] src (← state "one\n") 0
         checkEq 0 h1
         checkEq #["\"one\\n\""] (infos s1)
-        let (s2, h2) ← Cache.elaborateCached cache src (← state "two\n") 0
+        let (s2, h2) ← Cache.elaborateCached (some cache) [] src (← state "two\n") 0
         checkEq #["\"two\\n\""] (infos s2)
-        let (_, h3) ← Cache.elaborateCached cache src (← state "two\n") 0
+        let (_, h3) ← Cache.elaborateCached (some cache) [] src (← state "two\n") 0
         -- the edit re-elaborates the `#eval` command (the imported Prelude is still cached)
         check (h2 < h3) s!"the edited include did not invalidate the #eval command: {h2} vs {h3}" },
   ]

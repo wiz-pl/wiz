@@ -8,7 +8,7 @@ design: `concurrency.md`. Tests: group `conc`.
 
 ## 25a: a thread-safe runtime
 
-`runtime/wiz.c` (C and LLVM backends) can run Wiz code on several threads at once. Wiz has
+`runtime/` (C and LLVM backends) can run Wiz code on several threads at once. Wiz has
 no user-visible mutation, so only the runtime's own state needs care: reference counts,
 in-place updates of unique objects, memoised thunks and lazy cells, hoisted constants,
 and a few globals. The scheme is Lean 4's:

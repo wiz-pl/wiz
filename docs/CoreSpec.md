@@ -1275,7 +1275,7 @@ conv at a proposition       true, before either side is unfolded
     review F7): its `quote` reads a suspended proof back within 1 000 000 steps (a step
     is `instC`, a closure's instantiation) and writes the same message, as a constant
     (`proofStub`) that its kernel rejects with that message. The counter is the
-    runtime's (`wiz_proof_start`/`tick`/`end` in `runtime/wiz.c` and `selfhost/rt.c`);
+    runtime's (`wiz_proof_start`/`tick`/`end` in `runtime/` and `selfhost/rt.c`);
     a step is always granted while no read-back runs, so the kernel's checks never see
     it. There is no `--proof-steps` flag there: the message is Lean's, word for word.
   - Not covered: the elaborator's own evaluation of a term it has not marked yet (a

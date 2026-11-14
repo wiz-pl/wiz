@@ -11,7 +11,7 @@ The model. Each is a list of words (`mk (toList : List U32)`), and every operati
 below is defined on that list: the kernel computes with the definitions, proofs see
 them (the laws at the end), and `#eval`/`#run` run them.
 
-Compiled code runs natives instead (`runtime/wiz.c`, `wiz_warray_*`), by
+Compiled code runs natives instead (`runtime/`, `wiz_warray_*`), by
 `implemented_by`. An array is then a header and one C array of `uint8_t`, `uint32_t`
 or `uint64_t` with its length: no element is a Wiz object, so a 1M-element `U32Array`
 is 4 MB with nothing for reference counting to visit (an `Array U32` is 8 MB of

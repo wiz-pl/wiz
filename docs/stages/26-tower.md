@@ -132,11 +132,12 @@ codes need. The shims are scripts rather than tower itself under another name (e
 uses one binary for everything) because a Lean program can't see its `argv[0]` and
 can't `exec`. A script costs one `sh` and one quick tower run per call.
 
-**Why tower was written in Lean** (it is now also written in Wiz, 26e). Wiz programs could read their arguments (`IO.args`,
+**Why tower was first written in Lean** (it was ported to Wiz in 26e, and the Lean
+version was removed in 26h). Wiz programs could read their arguments (`IO.args`,
 21k), but they couldn't start or `exec` processes, read environment variables, list,
 rename or link files, or set file modes. tower needs all of these, and grail is written
-in Lean for the same reason. tower is its own small library (`Tower/`, which doesn't
-import Wiz) and its own Lake executable, so its Nix package builds in seconds.
+in Lean for the same reason. tower was then its own small library (`Tower/`, which didn't
+import Wiz) and its own Lake executable, so its Nix package built in seconds.
 
 Commands:
 
@@ -201,7 +202,7 @@ directory, so the shim picks that project's `wiz-toolchain`. `share/wiz/editors/
 `vim.opt.rtp:append(vim.fn.trim(vim.fn.system 'tower which wiz'):gsub('/bin/wiz$', '') .. '/share/wiz/editors/nvim')`.
 `wiz-toolchain` is one of the plugin's root markers.
 
-**Tests** (`lake test -- tower`, all offline). The upstream is a local bare repository
+**Tests** (`lake test -- '=tower'`, all offline). The upstream is a local bare repository
 holding a tiny Lake project whose `wiz` and `grail` print their arguments, with a tag
 `v1` and a moving `main`. The cases:
 
@@ -224,32 +225,32 @@ holding a tiny Lake project whose `wiz` and `grail` print their arguments, with 
 * a Nix install from a local flake whose package is a plain directory (no nixpkgs),
   linked as a GC root and unlinked by `uninstall` (skipped when there is no `nix`).
 
-The shims in the tests call the test driver (`tests --tower …`), which runs tower.
+The shims in the tests are written by `tower self shims`, so they call the Wiz tower
+under test.
 
 ## 26e: tower in Wiz
 
 `tower/` is tower again, in Wiz: a grail package (`tower/grail.wiz`) whose executable
 `tower` (`cd tower && grail build`: `.grail/bin/tower`) has the same commands, messages,
-settings file, `tower.info` and layout as the Lean one, module for module
-(`Tower/Basic.wiz`, `Install.wiz`, `Cli.wiz`). It uses `lib/Sys.wiz` (9h, 9k) for processes,
+settings file, `tower.info` and layout as the Lean reference implementation it replaced,
+module for module (`Tower/Basic.wiz`, `Install.wiz`, `Cli.wiz`). It uses `lib/Sys.wiz`
+(9h, 9k) for processes,
 the environment and files (`FS.realPath`, `IO.appPath`, and `SpawnOptions` for a child's
 working directory and for `lake build` without the Lean variables), and `lib/Text.wiz`
 (9j) for text; no C of its own. `grail test` in `tower/` checks the pure
 functions (`tests/pure.wiz` against `tests/pure.expected`).
 
 **Tests.** The cases of `Tests/Tower.lean` run tower as a process, through its command
-line only, against either implementation: group `tower` against the Lean one (the test
-driver, `tests --tower`), group `tower-wiz` against `tower/`, which the group's first case
-builds with grail in `.lake/build/tower-wiz` (about 10 s from clean; later cases find it
-up to date) and whose `grail test` it runs. The Wiz tower follows 26g too: release
-snapshots of commits (short shas through the `snapshot-*` tags, the `.sha256` required),
-`nightly` as the commit of the tag `nightly`, `keep/` tags as specs, release in the `auto`
-candidates, and the same error for a commit without a snapshot.
+line only: group `tower` against `tower/`, which the group's first case builds with grail
+in `.lake/build/tower-wiz` (about 10 s from clean; later cases find it up to date) and
+whose `grail test` it runs. The Wiz tower follows 26g too: release snapshots of commits
+(short shas through the `snapshot-*` tags, the `.sha256` required), `nightly` as the
+commit of the tag `nightly`, `keep/` tags as specs, release in the `auto` candidates, and
+the same error for a commit without a snapshot.
 
-The flake (`packages.tower`) and the release tarball now build `tower/` with grail
-(stage 26h); `Tower/` and the `--tower` mode of the test driver remain as the reference
-implementation, so the `tower` group still runs the same cases against both. Removing
-them is the last, optional step; nothing shipped depends on the Lean tower any more.
+The flake (`packages.tower`) and the release tarball build `tower/` with grail (stage
+26h). The Lean reference implementation (`Tower/`) and the test driver's `--tower` mode
+were removed in 26h: the `tower` group now tests only the Wiz tower.
 
 ## 26f: the C toolchain in the release tarball
 
@@ -394,38 +395,38 @@ source.
 
 ## 26h: shipping the Wiz tower
 
-The Wiz tower is feature-complete against the Lean one for the command line, and the
-flake package and the release tarball now ship it (`scripts/build-tower-wiz.sh`). The
-two implementations were compared command by command and against a local upstream and
-release directory; their stdout, stderr, exit codes and written files agree (apart from
-the home path, and the OS error text for a path that does not exist). `--version` is
-`tower 0.1.0-dev` in both, and `tower settings` is byte-identical.
+The Wiz tower is feature-complete for the command line, and the flake package and the
+release tarball ship it (`scripts/build-tower-wiz.sh`). It was compared command by command
+against the Lean reference implementation and against a local upstream and release
+directory; their stdout, stderr, exit codes and written files agreed (apart from the home
+path, and the OS error text for a path that does not exist). `--version` was
+`tower 0.1.0-dev` in both, and `tower settings` byte-identical. The Lean implementation
+(`Tower/`) and the test driver's `--tower` mode were then removed; `tower/` is the only
+implementation.
 
-| feature | Lean `Tower/` | Wiz `tower/` |
-|---|---|---|
-| `toolchain install/uninstall/list/link`, aliases `install`, `uninstall`, `list`, `link` | ✓ | ✓ |
-| `install` flags `--source`, `--force`, `--cflags …`, several specs, per-spec status | ✓ | ✓ |
-| `default`, `override set/unset/list`, `show`, `which`, `resolve`, `run`, `update` | ✓ | ✓ |
-| `set KEY VALUE`, `settings`, `--home`, `--self`, `--self-arg`, `--version`, `--help` | ✓ | ✓ |
-| settings file: `default`, `source`, `flake`, `git`, `releases`, `nightly-ref`, `auto-install`, seven flag keys, `override` | ✓ | ✓ |
-| `wiz-toolchain` (`#`/`--` comments), `wiz-toolchain.local` (spec or path), overrides walking up | ✓ | ✓ |
-| sources `auto`/`nix`/`release`/`source`; channels as tags (`nightly`, `stable`), `REF@COMMIT`, `keep/`; release snapshots and their `.sha256` | ✓ | ✓ |
-| layout `toolchains/NAME/{bin,share/wiz,tower.info}`, wrappers with flags, atomic install, linked toolchains | ✓ | ✓ |
-| shims (including `+SPEC`), `self shims`, `self install`, `resolve` installing on first use | ✓ | ✓ |
-| error messages and exit codes (1: command failure, 2: usage, child status for `run`) | ✓ | ✓ |
-| `grail test` pure checks / the `tower` and `tower-wiz` test groups | ✓ | ✓ |
+| feature | `tower/` |
+|---|---|
+| `toolchain install/uninstall/list/link`, aliases `install`, `uninstall`, `list`, `link` | ✓ |
+| `install` flags `--source`, `--force`, `--cflags …`, several specs, per-spec status | ✓ |
+| `default`, `override set/unset/list`, `show`, `which`, `resolve`, `run`, `update` | ✓ |
+| `set KEY VALUE`, `settings`, `--home`, `--self`, `--self-arg`, `--version`, `--help` | ✓ |
+| settings file: `default`, `source`, `flake`, `git`, `releases`, `nightly-ref`, `auto-install`, seven flag keys, `override` | ✓ |
+| `wiz-toolchain` (`#`/`--` comments), `wiz-toolchain.local` (spec or path), overrides walking up | ✓ |
+| sources `auto`/`nix`/`release`/`source`; channels as tags (`nightly`, `stable`), `REF@COMMIT`, `keep/`; release snapshots and their `.sha256` | ✓ |
+| layout `toolchains/NAME/{bin,share/wiz,tower.info}`, wrappers with flags, atomic install, linked toolchains | ✓ |
+| shims (including `+SPEC`), `self shims`, `self install`, `resolve` installing on first use | ✓ |
+| error messages and exit codes (1: command failure, 2: usage, child status for `run`) | ✓ |
+| `grail test` pure checks, and the `tower` test group (CLI cases) | ✓ |
 
 Shipping it means no Lean at build time: `scripts/build-tower-wiz.sh` copies `tower/` to
 a scratch directory and runs `grail build tower` there. `packages.tower` passes the Nix
 C compiler and GMP's flags (not the Boehm collector: tower's generated C does not use
 it); the release workflow passes the bundled C toolchain (`cc-bundle/bin/cc`) when there
 is one, which links GMP statically and keeps the tarball's glibc 2.27 promise, and the
-system `cc` otherwise (an older commit). A new test case covers `self install` for the
-Wiz tower: the copy and the shims call the copy, and it still runs tower.
+system `cc` otherwise. A test case covers `self install` for the Wiz tower: the copy and
+the shims call the copy, and it still runs tower.
 
-Remaining (not needed for shipping): `Tower/`, the `--tower` test driver mode and the
-`tower` group are still there as the reference implementation; delete them once the Wiz
-tests alone are trusted. The Wiz tower's `--version` is a literal that must be kept in
-step with `Wiz/Version.lean` (the file says so); a build-time substitution would remove
-that duplicated constant.
+The Wiz tower's `--version` is a literal that must be kept in step with
+`Wiz/Version.lean` (the file says so); a build-time substitution would remove that
+duplicated constant.
 

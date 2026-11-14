@@ -1,11 +1,11 @@
 import Tests.Harness
-import Tower
+import Wiz.Version
 
 /-!
-Stage 26: tower, the toolchain manager. No network: the "upstream" is a local bare git
-repository (a tiny Lake project whose `wiz` and `grail` print their arguments), a release
-directory made by `scripts/release-tarball.sh`, and a local flake whose package is a
-plain directory (no nixpkgs).
+Stage 26: tower, the toolchain manager, in Wiz (`tower/`). No network: the "upstream" is
+a local bare git repository (a tiny Lake project whose `wiz` and `grail` print their
+arguments), a release directory made by `scripts/release-tarball.sh`, and a local flake
+whose package is a plain directory (no nixpkgs).
 -/
 
 namespace Tests.Tower
@@ -30,6 +30,40 @@ def gitIn (dir : System.FilePath) (args : List String) : IO String := do
 def fakeMain (tool version : String) : String :=
   s!"def main (args : List String) : IO Unit := IO.println s!\"{tool} {version} \{args}\"\n"
 
+/-- A tower home whose shims call the tower under test. -/
+structure Env where
+  home : System.FilePath
+  /-- the command a shim runs to reach tower (a path, then arguments) -/
+  self : List String
+  deriving Inhabited
+
+def Env.toolchains (e : Env) : System.FilePath := e.home / "toolchains"
+def Env.binDir (e : Env) : System.FilePath := e.home / "bin"
+
+/-- A toolchain's directory name: its spec, with `/` (a branch like `agent/x`) as `--`. -/
+def tcName (spec : String) : String := (spec.replace "/" "--").replace " " "-"
+
+def Env.tcDir (e : Env) (spec : String) : System.FilePath := e.toolchains / tcName spec
+
+def makeExecutable (f : System.FilePath) : IO Unit :=
+  IO.setAccessRights f { user := { read := true, write := true, execution := true },
+                         group := { read := true, execution := true },
+                         other := { read := true, execution := true } }
+
+/-- The machine's architecture, as the release tarballs name it. -/
+def arch : IO String := do
+  let o ← IO.Process.output { cmd := "uname", args := #["-m"] }
+  pure (if o.exitCode == 0 then o.stdout.trimAscii.toString else "x86_64")
+
+def tarballName (a : String) : String := s!"wiz-{a}-linux.tar.gz"
+
+/-- Is there an executable `cmd` on `PATH`? -/
+def have? (cmd : String) (args : List String := ["--version"]) : IO Bool := do
+  try
+    let o ← IO.Process.output { cmd, args := args.toArray }
+    pure (o.exitCode == 0)
+  catch _ => pure false
+
 /-- An upstream: a Lake project with `wiz` and `grail` executables, tagged `v1` (version
 1) and with `main` at version 2. (bare repository, work tree) -/
 def upstream : IO (System.FilePath × System.FilePath) := do
@@ -50,13 +84,10 @@ def upstream : IO (System.FilePath × System.FilePath) := do
   pure (bare, work)
 
 /-- A tower to test: the command that runs it (a program, then its first arguments).
-The Lean one is this test driver (`tests --tower`, `Tower/`); the Wiz one is `tower/`,
-built by grail (stage 26e). Both are run as processes, so the cases only see the CLI and
-the files it writes. -/
+The Wiz tower (`tower/`) is built by grail (stage 26e) and run as a process, so the cases
+only see the CLI and the files it writes. -/
 structure Impl where
   cmd : List String
-
-def leanImpl : IO Impl := do pure { cmd := [(← IO.appPath).toString, "--tower"] }
 
 /-- Build `tower/` (the Wiz tower) with grail, in `.lake/build/tower-wiz` (a copy of the
 sources: grail's cache makes the second build of the same sources run no jobs, so only the
@@ -77,27 +108,27 @@ def wizImpl : IO Impl := do
   note "uses tower-wiz"
   pure { cmd := [(dir / ".grail/bin/tower").toString] }
 
-/-- A tower home whose shims call the tower under test. -/
-def mkEnv (impl : Impl) : IO Tower.Env := do
+/-- A fresh home for one case. -/
+def mkEnv (impl : Impl) : IO Env := do
   let home ← IO.FS.createTempDir
   pure { home, self := impl.cmd }
 
 /-- The arguments that make the tower under test use the home `e` and write shims that call it. -/
-def towerArgs (e : Tower.Env) (args : List String) : Array String :=
+def towerArgs (e : Env) (args : List String) : Array String :=
   (e.self.tail ++ ["--home", e.home.toString, "--self", e.self.head!] ++
     e.self.tail.flatMap (["--self-arg", ·]) ++ args).toArray
 
 /-- Run the tower under test: exit code, stdout, stderr. -/
-def towerOut (e : Tower.Env) (args : List String) (cwd : Option System.FilePath := none) : IO (UInt32 × String × String) := do
+def towerOut (e : Env) (args : List String) (cwd : Option System.FilePath := none) : IO (UInt32 × String × String) := do
   let o ← IO.Process.output { cmd := e.self.head!, args := towerArgs e args, cwd }
   pure (o.exitCode, o.stdout, o.stderr)
 
-def tower (e : Tower.Env) (args : List String) (cwd : Option System.FilePath := none) : IO Unit := do
+def tower (e : Env) (args : List String) (cwd : Option System.FilePath := none) : IO Unit := do
   let (r, out, err) ← towerOut e args cwd
   unless r == 0 do throw (IO.userError s!"tower {args}: exit {r}\n{err}{out}")
 
 /-- A tower command that must fail: its stderr. -/
-def towerFails (e : Tower.Env) (args : List String) : IO String := do
+def towerFails (e : Env) (args : List String) : IO String := do
   let (r, out, err) ← towerOut e args
   if r == 0 then throw (IO.userError s!"tower {args} succeeded:\n{out}")
   pure err
@@ -116,7 +147,7 @@ def readFile? (f : System.FilePath) : IO String := do
   if ← f.pathExists then IO.FS.readFile f else pure ""
 
 /-- `tower show` in a directory: the toolchain and why (`none` when it fails). -/
-def showIn (e : Tower.Env) (dir : System.FilePath) : IO (Option (String × String)) := do
+def showIn (e : Env) (dir : System.FilePath) : IO (Option (String × String)) := do
   let (r, out, _) ← towerOut e ["show"] dir
   if r != 0 then return none
   match out.splitOn "\n" with
@@ -125,7 +156,7 @@ def showIn (e : Tower.Env) (dir : System.FilePath) : IO (Option (String × Strin
     pure (some (spec, if why.startsWith "from " then (why.drop 5).toString else why))
   | _ => throw (IO.userError s!"tower show: {out}")
 
-/-- The cases, against either tower. -/
+/-- The cases, against the Wiz tower. -/
 def cases (impl : IO Impl) : List Case := [
     { name := "settings, wiz-toolchain files, overrides and the default", run := fun _ => do
         let e ← mkEnv (← impl)
@@ -161,7 +192,7 @@ def cases (impl : IO Impl) : List Case := [
           ("co/lib/Prelude.wiz", ""), ("empty/x", ""),
           ("proj/wiz-toolchain", "v1\n"), ("proj/sub/x.wiz", "")])
         for b in ["tc/bin/wiz", "tc/bin/grail", "co/.lake/build/bin/wiz", "co/.lake/build/bin/grail"] do
-          Tower.makeExecutable (root / b)
+          makeExecutable (root / b)
         let proj := root / "proj"
         let lf := proj / "wiz-toolchain.local"
         let wiz := (e.binDir / "wiz").toString
@@ -258,14 +289,14 @@ def cases (impl : IO Impl) : List Case := [
         let (bare, _) ← upstream
         let fake ← mkTree [("wiz", "#!/bin/sh\necho release wiz \"$@\"\n"), ("grail", "#!/bin/sh\necho release grail \"$@\"\n"),
                            ("tower", "#!/bin/sh\necho tower\n")]
-        for b in ["wiz", "grail", "tower"] do Tower.makeExecutable (fake / b)
+        for b in ["wiz", "grail", "tower"] do makeExecutable (fake / b)
         let rel ← IO.FS.createTempDir
         IO.FS.createDirAll (rel / "v1")
-        let a ← Tower.arch
-        let _ ← runOut "sh" ["scripts/release-tarball.sh", (rel / "v1" / Tower.tarballName a).toString, fake.toString, "abc123"]
+        let a ← arch
+        let _ ← runOut "sh" ["scripts/release-tarball.sh", (rel / "v1" / tarballName a).toString, fake.toString, "abc123"]
         -- the tarball works on its own
         let x ← IO.FS.createTempDir
-        let _ ← runOut "tar" ["-xzf", (rel / "v1" / Tower.tarballName a).toString, "-C", x.toString]
+        let _ ← runOut "tar" ["-xzf", (rel / "v1" / tarballName a).toString, "-C", x.toString]
         checkHas (← runOut (x / s!"wiz-{a}-linux/bin/wiz").toString ["check"]) s!"wiz-{a}-linux/share/wiz/lib check"
         let e ← mkEnv (← impl)
         tower e ["set", "git", bare.toString]
@@ -275,7 +306,7 @@ def cases (impl : IO Impl) : List Case := [
         checkHas (← runOut (tc / "bin/wiz").toString ["check"]) s!"release wiz --cc gcc -I {tc / "share/wiz/lib"} check"
         checkHas (← readFile? (tc / "tower.info")) "commit abc123"
         -- a corrupt download is refused
-        IO.FS.writeFile (rel / "v1" / (Tower.tarballName a ++ ".sha256")) "0000  x\n"
+        IO.FS.writeFile (rel / "v1" / (tarballName a ++ ".sha256")) "0000  x\n"
         checkHas (← towerFails e ["toolchain", "install", "v1", "--source", "release", "--force"]) "sha256"
         -- a branch's commit has no snapshot here
         let m ← towerFails e ["toolchain", "install", "main", "--source", "release"]
@@ -288,16 +319,16 @@ def cases (impl : IO Impl) : List Case := [
         checkHas (← runOut (e.binDir / "grail").toString ["y"] (← IO.FS.createTempDir)) "release grail y" },
     { name := "release snapshots: per-commit tarballs, nightly by its tag, pruned commits", run := fun _ => do
         let (bare, work) ← upstream
-        let a ← Tower.arch
+        let a ← arch
         let fake ← mkTree [("wiz", "#!/bin/sh\necho snapshot wiz \"$@\"\n"), ("grail", "#!/bin/sh\necho snapshot grail\n")]
-        for b in ["wiz", "grail"] do Tower.makeExecutable (fake / b)
+        for b in ["wiz", "grail"] do makeExecutable (fake / b)
         let rel ← IO.FS.createTempDir
         let c1 ← gitIn work ["rev-parse", "v1^{commit}"]
         let c2 ← gitIn work ["rev-parse", "HEAD"]
         -- what release.yml publishes for a master commit: snapshot-SHA, its tag, and nightly
         let snapshot (c : String) : IO Unit := do
           IO.FS.createDirAll (rel / s!"snapshot-{c}")
-          let _ ← runOut "sh" ["scripts/release-tarball.sh", (rel / s!"snapshot-{c}" / Tower.tarballName a).toString, fake.toString, c]
+          let _ ← runOut "sh" ["scripts/release-tarball.sh", (rel / s!"snapshot-{c}" / tarballName a).toString, fake.toString, c]
           let _ ← gitIn work ["push", "--quiet", bare.toString, s!"{c}:refs/tags/snapshot-{c}"]
         snapshot c1; snapshot c2
         let _ ← gitIn work ["push", "--quiet", bare.toString, s!"{c2}:refs/tags/nightly", s!"{c1}:refs/tags/keep/demo"]
@@ -319,7 +350,7 @@ def cases (impl : IO Impl) : List Case := [
         tower e ["toolchain", "install", "keep/demo"]
         checkHas (← readFile? (e.tcDir "keep/demo" / "tower.info")) s!"commit {c1}"
         -- a snapshot is only installed with its checksum
-        IO.FS.removeFile (rel / s!"snapshot-{c1}" / (Tower.tarballName a ++ ".sha256"))
+        IO.FS.removeFile (rel / s!"snapshot-{c1}" / (tarballName a ++ ".sha256"))
         checkHas (← towerFails e ["toolchain", "install", s!"main@{c1}", "--force"]) "sha256"
         -- nightly: the commit of the tag nightly, which may be behind the branch
         IO.FS.writeFile (work / "FakeWiz.lean") (fakeMain "wiz" "3")
@@ -342,13 +373,13 @@ def cases (impl : IO Impl) : List Case := [
         let m ← towerFails e ["toolchain", "install", s!"main@{(c3.take 8)}"]
         checkHas m "no snapshot"; checkHas m "keep/demo" },
     { name := "from Nix: a flake's package, linked as a GC root", run := fun _ => do
-        unless ← Tower.have? "nix" do skip "no nix"; return
+        unless ← have? "nix" do skip "no nix"; return
         let (bare, _) ← upstream
         let flake ← mkTree [
           ("flake.nix", "{ outputs = { self }: let p = builtins.path { path = ./tc; name = \"fake-wiz\"; }; in\n" ++
                         "  { packages.x86_64-linux.wiz = p; packages.aarch64-linux.wiz = p; }; }\n"),
           ("tc/bin/wiz", "#!/bin/sh\necho nix wiz \"$@\"\n"), ("tc/share/wiz/lib/Prelude.wiz", "")]
-        Tower.makeExecutable (flake / "tc/bin/wiz")
+        makeExecutable (flake / "tc/bin/wiz")
         let _ ← gitIn flake ["init", "--quiet"]
         let _ ← gitIn flake ["add", "."]
         let _ ← gitIn flake ["commit", "--quiet", "-m", "flake"]
@@ -368,26 +399,12 @@ def cases (impl : IO Impl) : List Case := [
         check (← System.FilePath.pathExists target) "uninstall removed the store path" }
   ]
 
+/-- The tower group: the Wiz tower (`tower/`, stage 26e) as a process, plus its own pure
+tests (`grail test` in `tower/`). It is not parallel: the first case builds the shared
+`.lake/build/tower-wiz`, which N processes would build N times. -/
 def group : Group where
   name := "tower"
-  parallel := true
   exercise := "Stage 26"
-  cases :=
-    { name := "the Lean functions: settings, specs, flake references", run := fun _ => do
-        let s := ((({} : Tower.Settings).set "cflags" "-I/x y").toOption.get!.set "override" "v1 /a b").toOption.get!
-        checkEq s.render ((Tower.Settings.parse s.render).toOption.get!).render
-        checkEq [("/a b", "v1")] s.overrides
-        -- specs: versions order numerically
-        checkEq (some "v1.10.0") (Tower.latestTag [("refs/tags/v1.9.2", ""), ("refs/tags/v1.10.0", ""), ("refs/tags/x", ""), ("refs/heads/v9", "")])
-        checkEq "github:o/r/abc" (Tower.flakeRef "github:o/r" "abc")
-        checkEq "git+file:///r?rev=abc" (Tower.flakeRef "git+file:///r" "abc") } ::
-    cases leanImpl
-
-/-- The same cases against tower written in Wiz (`tower/`, stage 26e), and its own tests
-(`grail test` in `tower/`: the pure functions, against `tower/tests/*.expected`). -/
-def wizGroup : Group where
-  name := "tower-wiz"
-  exercise := "Stage 26e"
   cases :=
     { name := "the Wiz functions: grail test in tower/", run := fun _ => do
         let _ ← wizImpl
@@ -407,7 +424,7 @@ def wizGroup : Group where
         let shim ← IO.FS.readFile (e.binDir / "wiz")
         checkHas shim s!"'{installed}'"
         checkHas shim s!"--home '{e.home}'"
-        -- the copy is this tower (it runs the same command), not the test driver
+        -- the installed copy runs
         let (r, out, err) ← towerOut { e with self := [installed.toString] } ["settings"]
         check (r == 0) s!"the installed tower failed: {err}{out}"
         checkHas out "source auto" } ::
@@ -418,7 +435,6 @@ order, so that branches adding groups rarely touch the same lines. A new group a
 needs a shard in `.github/test-shards.json` (CI checks). -/
 def groups : List Group :=
   group ::
-  wizGroup ::
   []
 
 end Tests.Tower

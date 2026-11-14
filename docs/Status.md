@@ -1105,7 +1105,7 @@ with two different but equal descriptions checks; the Hur-style encoding over `T
   representations and `#eval` and compiled code gave wrong values (soundness audit, R3;
   not a proof of `False`: the kernel is not involved).
 * **Fixed, in erasure only** (`Compiler/Erase.lean`, `Run.lean`'s readback, `◾` applied
-  is `◾` in `runtime/wiz.c` and the IR interpreter): erased functions into `Unit` by
+  is `◾` in `runtime/` and the IR interpreter): erased functions into `Unit` by
   quantities (`erasedFunTy`), `Nat` by the description's shape (`natShaped`), one function
   deciding unboxing at every site. Group `repr`.
 * **Refused instead of miscompiled:** a description whose first field has an abstract type
@@ -1256,9 +1256,9 @@ on it. Details in §7.1 and CoreSpec §16.
 | templates and kernel-built types | `Templates.lean`, method/motive types, the terms built in `vEq`/`vEqType`/`vCast` | — | type-checked by audit-2's tests (#120, open), not by the kernel |
 | axioms | `axiom`, `extern`/`C.*` functions, `foreign` types; the Prelude's `castRefl`; each sealed type's `T.seal✝ : Type` (#119) | yes | a seal is an inhabitant of `Type`, harmless |
 | `builtin` registrations | `nat.*` of the toolchain's `lib/Prelude.wiz` (reviewed, §7.1), `memo`, `string` | library: no; elsewhere: yes (an axiom) | one registration per key (T14) |
-| native implementations | `implemented_by` functions, native representations (`repr:`, sealed types only since #119), the word natives in `runtime/wiz.c` | yes, as `native f := g`; **first link of a chain only** (L2, §4) | the kernel never runs them; `UIntN.ofBitsTrusted` (O4) is an unchecked builder until #145 |
+| native implementations | `implemented_by` functions, native representations (`repr:`, sealed types only since #119), the word natives in `runtime/` | yes, as `native f := g`; **first link of a chain only** (L2, §4) | the kernel never runs them; `UIntN.ofBitsTrusted` (O4) is an unchecked builder until #145 |
 | compiled equations (`Decl.impl`) | **not** trusted for their value since #126; trusted to **terminate** (M1, §3 T1) | no | |
-| erasure and the backends | `Compiler/Erase.lean`, `Compiler/Push.lean` (rewrites 1, 2 re-checked for typing only; `inlineCalls` not checked), the IR, RC, the C and LLVM backends, `runtime/wiz.c`, the C compiler, the eliminators' code (`PrimCode.lean`, the runtime's `ind`) | — | erasure relies on QTT (a 0-quantity value is never needed): not proved |
+| erasure and the backends | `Compiler/Erase.lean`, `Compiler/Push.lean` (rewrites 1, 2 re-checked for typing only; `inlineCalls` not checked), the IR, RC, the C and LLVM backends, `runtime/`, the C compiler, the eliminators' code (`PrimCode.lean`, the runtime's `ind`) | — | erasure relies on QTT (a 0-quantity value is never needed): not proved |
 | partial definitions | the body (opaque to the kernel; a witness of the type is checked) | no | compiled code runs the body; it may loop |
 | the elaboration cache | replayed declarations are not checked again; an entry is keyed by the binary, the source text and (since #104) the module name; a replay refuses a name already declared (F12) | — | `~/.cache/wiz` |
 | library invariants behind private constructors | `lib/Word.wiz` keeps `toNat < 2^w` (until #145 makes it a field), `lib/Region.wiz` handles (linear handles, §4) | — | privacy is the elaborator's (13b) plus erasure's layer 3 (#119); the kernel does not see it |
@@ -1327,7 +1327,7 @@ that checks everything. Wiz's situation:
   for a type (`attribute [implemented_by mk get] T.mk`, builtin keys `repr:T:…`, used by
   `UIntN`/`IntN` in `lib/Word.wiz`; since #119 only for a sealed type with a private
   constructor, found by the seal) and the word natives (`UIntN.addNative` …,
-  `runtime/wiz.c`). The kernel never sees them (`vBuiltin?` acts only on `nat.*` keys),
+  `runtime/`). The kernel never sees them (`vBuiltin?` acts only on `nat.*` keys),
   so they can't prove anything; they are trusted to agree with the definitions, as in
   Lean, and the tests compare the two (`#eval` runs the definitions, compiled code the
   natives). They are not `builtin` commands, so the registration checks don't apply.

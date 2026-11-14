@@ -9,7 +9,7 @@ The Prelude defines `Nat.div`, `Nat.mod`, `Nat.pow`, `Nat.land`, `Nat.lor`, `Nat
 recursion on a fuel argument that bounds the number of steps, so the kernel can unfold
 them. Each is registered with `builtin nat.<op>`: on numerals the kernel computes
 natively (`def t : Nat.mod 300 256 = 44 := refl 44`), as do `#eval`, `#run`, C/LLVM
-(`runtime/wiz.c`: machine words, GMP when big) and the self-hosted backend
+(`runtime/`: machine words, GMP when big) and the self-hosted backend
 (`selfhost/rt.c`; its Prelude has the same definitions). As in Lean, `n / 0 = 0`,
 `Nat.mod n 0 = n` and `Nat.log2 0 = 0`. One table (`natNative?`, `Wiz/Core/Eval.lean`)
 serves the kernel and both interpreters.
@@ -48,7 +48,7 @@ arithmetic), `resize` (zero- or sign-extending, or truncating) and `toIntN`/`toU
   types and `w` is inferred. (Before 22e it had to be an index, `mk {0 w : Nat} …`,
   leaving an erased slot in the object.)
 * **Natives.** The kernel computes with the definitions, quickly on numerals (22a), and
-  so do `#eval`/`#run`. Compiled code calls natives (`runtime/wiz.c`, `wiz_word_*`) by
+  so do `#eval`/`#run`. Compiled code calls natives (`runtime/`, `wiz_word_*`) by
   `implemented_by`: in a `uint64_t` up to 64 bits, GMP beyond, one function per
   operation for every width. A table of operations at widths 8 to 100 gives the same
   values in the kernel (`refl`), both interpreters, C and LLVM (`examples/words.wiz`:
@@ -83,7 +83,7 @@ as the runtime number itself, possibly big). **A word is its bits**:
   to build or read a word, and each value has exactly one representation (equality is
   a comparison of bits). `ofBits`/`toBits` convert from and to `Nat` (free below
   `2^62`).
-* **Operations** are natives on that representation (`wiz_word_*` in `runtime/wiz.c`):
+* **Operations** are natives on that representation (`wiz_word_*` in `runtime/`):
   `ofNat`/`ofNeg`, `+ - *`, `div`/`mod`/`rem`, comparisons, `land`/`lor`/`xor`/`not`,
   shifts and `testBit` (a shift or index of `2^64` or more counts as infinite),
   `resize` (zero- or sign-extending), `toIntN`/`toUIntN` (free). Up to 64 bits each is
@@ -364,7 +364,7 @@ The region discipline of 22g used to cost at run time: every handle was a cell
   scope around `push1` went from 15 objects and 8 lifted functions to 4 objects and none,
   and two nested scopes from 29 and 23 to 6 and none (no scope: 3). What remains is the
   handle's cell: `Uniq` is an inductive, which `--unbox-structs` doesn't unbox
-  (`/workspace/wiz-notes/linear-scope-cost.md`).
+  (`wiz-notes/linear-scope-cost.md`).
 
 Objects allocated on `#run`'s checked heap (`tests --allocs FILE ENTRY…`, a measuring
 mode of the test driver), before → after (the "unbox" columns are with `--unbox-structs`;

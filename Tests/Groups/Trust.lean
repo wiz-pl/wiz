@@ -357,7 +357,7 @@ def trustGroup : Group where
         check (once (runFrontend (R := ZeroOneMany) both init)) "the frontend took a second `builtin nat`"
         let cache ← IO.FS.createTempDir
         for _ in [0:2] do
-          let (s, _) ← Cache.elaborateCached cache both init 0
+          let (s, _) ← Cache.elaborateCached (some cache) [] both init 0
           check (once s) s!"the cache took a second `builtin nat`: {s.messages.toList.map (·.text)}"
           check (s.globals.builtins.lookup "nat" == some "Nat") "`nat` was redirected"
         IO.FS.removeDirAll dir },

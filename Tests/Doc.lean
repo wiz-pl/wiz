@@ -79,7 +79,7 @@ def elabBasic (cache : Option System.FilePath := none) : IO (CommandState ZeroOn
   let init : CommandState ZeroOneMany := { loader, trustedModule := Tests.libModule }
   match cache with
   | none => pure (runFrontend basicSrc init)
-  | some dir => pure (← Cache.elaborateCached dir basicSrc init 0).1
+  | some dir => pure (← Cache.elaborateCached (some dir) [] basicSrc init 0).1
 
 def docOf (s : CommandState ZeroOneMany) (n : Name) : String :=
   match s.declDocs.get? n with
