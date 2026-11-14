@@ -1,0 +1,152 @@
+import Region
+import Std
+
+/-!
+# Arena
+
+Region-indexed arenas with linear tokens (`import Arena`; COMP-06,
+`/workspace/wiz-notes/prior-art/compilers-runtime-ffi.md` §2.5). This is the
+*allocation* half that `lib/Region.wiz` deliberately leaves out: the region `ρ`
+is still only a type index, but the arena token `Arena ρ A` is a quantity-1
+value, so it is allocated and freed exactly once.
+
+`Arena.new` makes a token for a region `ρ`; `Arena.alloc` adds a value and
+hands the reference and the token to a continuation; `Arena.get` reads a
+reference and hands the token back; `Arena.free` consumes the token and
+releases the whole arena. `withArena` is the safe bracket: it creates a fresh
+region `ρ` (as `Shr.borrow` and `Uniq.borrow` do), runs a body that returns the
+token, and frees the arena. Because every operation consumes the token and
+hands it back, a reference cannot be used after `free`, and the token cannot be
+freed twice. `ArenaRef ρ A` is a `Nat` index at run time: it is only useful
+with the token, and an index that escapes is inert (it names a slot, not a
+live allocation), so the region parameter is documentation rather than an
+escape check.
+
+`Arena.allocOut`, `Arena.getOut` and `Arena.sizeOut` are the direct-style
+variants: they put the reference/value/count in a quantity-1 result
+(`ArenaAlloc`, `ArenaVal`, `ArenaSize`). Each costs one result cell; the
+continuation forms are the low-allocation path.
+
+```
+import Arena
+
+def total : IO Nat := withArena Region.static Nat (fun ρ h a =>
+  Arena.alloc a 10 (fun r1 a =>
+    Arena.alloc a 32 (fun r2 a =>
+      Arena.get a r1 0 (fun x a =>
+        Arena.get a r2 0 (fun y a =>
+          IO1.pure (.ok (x + y) a))))))
+```
+
+**What the types guarantee, and what they do not.** `1` is exact at binders in
+Wiz, so a token that is bound at 1 cannot be dropped or used twice: the
+no-leak/double-free/use-after-free checks below are ordinary type errors. What
+is *not* enforced is the identity of a token hidden in an unrestricted pair
+field (the same `1`-is-affine projection gap as `docs/CoreSpec.md` §7.1 and
+§14.4, COMP-06's prerequisite): a function that takes `(B × Arena ρ A)` at ω
+may drop the token and return a different one. The arena results here put the
+token in a quantity-1 field (`ArenaAlloc`, `ArenaVal`, `ArenaOut`) so the safe
+path never goes through such a pair.
+
+The representation is a growable `Array A`, so allocation is a bump append and
+`free` is one release of the whole buffer; no per-element arena node is
+allocated (see the `regions` group's allocation counts). `Array` runs on the C
+and LLVM backends; `#eval` cannot run it, but the checked-heap IR interpreter
+(`#run`, `Tests --allocs`) has an `Array` model (`Wiz/Compiler/IRRun.lean`), so
+the benchmark below runs there without a C toolchain.
+
+This is additive: `lib/Region.wiz` is unchanged. It should stay as the QTT
+test COMP-06 recommends — its negative cases (escape, use while borrowed,
+double mutable borrow, forged handles) are the evidence that QTT's `1` carries
+the borrow discipline, and moving them into a separate "region inference"
+experiment would lose that evidence.
+-/
+
+/-- A handle to the arena `ρ` (a capability, used at quantity 1). -/
+inductive Arena (ρ : Region) (A : Type) where
+  /-- the token's storage: a flat growable buffer -/
+  | private mk (cells : Array A)
+
+/-- A reference into an arena at `ρ`: its index. A `Nat` at run time (no cell);
+`ρ` and `A` are erased documentation, and the token is what makes it usable. -/
+def ArenaRef (ρ : Region) (A : Type) : Type := Nat
+
+/-- `Arena.alloc`'s result: the new reference and the token, both linear. -/
+inductive ArenaAlloc (ρ : Region) (A : Type) where
+  | mk (ref : ArenaRef ρ A) (1 arena : Arena ρ A)
+
+/-- `Arena.get`'s result: the value (ordinary) and the token (linear). -/
+inductive ArenaVal (ρ : Region) (A : Type) where
+  | mk (val : A) (1 arena : Arena ρ A)
+
+/-- `Arena.size`'s result: the count (ordinary) and the token (linear). -/
+inductive ArenaSize (ρ : Region) (A : Type) where
+  | mk (size : Nat) (1 arena : Arena ρ A)
+
+/-- `withArena`'s body result: `b`, and the token handed back for freeing. -/
+inductive ArenaOut (B : Type) (H : Type) where
+  | ok (b : B) (1 h : H)
+
+/-- A new arena token for `ρ`. Prefer `withArena`, which picks a fresh region and
+frees the token for you. -/
+def Arena.new {ρ : Region} {A : Type} : Arena ρ A := Arena.mk Array.empty
+
+/-- Add `x`; the reference and the token go to `k`. This is the allocation path:
+one arena cell per operation (reused in place where the compiler can), and no
+result cell. `Arena.allocOut` is the direct-style wrapper that pays for one. -/
+def Arena.alloc {ρ : Region} {A B : Type} (1 a : Arena ρ A) (x : A)
+    (1 k : (r : ArenaRef ρ A) → (1 a : Arena ρ A) → B) : B :=
+  match a with
+  | .mk cells => k (Array.size cells) (Arena.mk (Array.push cells x))
+
+/-- `Arena.get a r d`: the value at `r`, or `d` if `r` is out of range (as
+`Array.getD`); the value and the token go to `k`. -/
+def Arena.get {ρ : Region} {A B : Type} (1 a : Arena ρ A) (r : ArenaRef ρ A) (d : A)
+    (1 k : (x : A) → (1 a : Arena ρ A) → B) : B :=
+  match a with
+  | .mk cells => k (Array.getD cells r d) (Arena.mk cells)
+
+/-- The number of values allocated; the token goes to `k`. -/
+def Arena.size {ρ : Region} {A B : Type} (1 a : Arena ρ A)
+    (1 k : (n : Nat) → (1 a : Arena ρ A) → B) : B :=
+  match a with
+  | .mk cells => k (Array.size cells) (Arena.mk cells)
+
+/-- `Arena.alloc` with the reference in a quantity-1 result (`ArenaAlloc`): the
+convenience form, one result cell per allocation. -/
+def Arena.allocOut {ρ : Region} {A : Type} (1 a : Arena ρ A) (x : A) : ArenaAlloc ρ A :=
+  Arena.alloc a x (fun r a => ArenaAlloc.mk r a)
+
+/-- `Arena.get` with the value in a quantity-1 result (`ArenaVal`). -/
+def Arena.getOut {ρ : Region} {A : Type} (1 a : Arena ρ A) (r : ArenaRef ρ A) (d : A) :
+    ArenaVal ρ A :=
+  Arena.get a r d (fun x a => ArenaVal.mk x a)
+
+/-- `Arena.size` with the count in a quantity-1 result (`ArenaSize`). -/
+def Arena.sizeOut {ρ : Region} {A : Type} (1 a : Arena ρ A) : ArenaSize ρ A :=
+  Arena.size a (fun n a => ArenaSize.mk n a)
+
+/-- Release the whole arena: the token is consumed. -/
+def Arena.free {ρ : Region} {A : Type} (1 a : Arena ρ A) : Unit :=
+  match a with
+  | .mk _ => ()
+
+/-- Run `body` with a fresh arena in `σ`, then free it. `body` returns the token
+in an `ArenaOut` (an `IO1` result, so the token stays linear), and `withArena`
+consumes it: the arena is released exactly once, after the body. -/
+def withArena (0 σ : Region) (A : Type) {B : Type}
+    (body : (0 ρ : Region) → (0 h : Outlives σ ρ) →
+      (1 a : Arena ρ A) → IO1 (ArenaOut B (Arena ρ A))) : IO B :=
+  fun w =>
+    let 1 (r, w') := body σ (Outlives.refl σ) Arena.new w;
+    match r with
+    | .ok b a => let () := Arena.free a; (b, w')
+
+attribute [inline] Arena.alloc
+attribute [inline] Arena.get
+attribute [inline] Arena.size
+attribute [inline] Arena.allocOut
+attribute [inline] Arena.getOut
+attribute [inline] Arena.sizeOut
+attribute [inline] Arena.free
+attribute [inline] withArena

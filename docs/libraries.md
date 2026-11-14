@@ -790,6 +790,40 @@ that it is the index. The trusted part is the four natives `wiz_ref_*` (runtime/
 over MVar cells) and their types, kept true by an invariant the API maintains; the header
 of lib/Ref.wiz has the argument. Compiled code only.
 
+## Arenas (`lib/Arena.wiz`)
+
+`Arena ρ A` is a quantity-1 token for a region-indexed bump arena over a flat
+`Array A`. `Arena.new` makes one, `Arena.alloc a x k` passes the reference and
+the token to `k`, `Arena.get a r d k` passes the value and the token, and
+`Arena.free` consumes the token and releases the whole buffer. `withArena σ A
+body` picks a fresh `ρ` (as `Shr.borrow`/`Uniq.borrow` do), runs `body` in
+`IO1`, and frees the arena when the body hands the token back; the body result
+is an `ArenaOut` so the token stays linear. `Arena.allocOut`/`getOut`/`sizeOut`
+are direct-style variants that put the result and token in a linear result and
+cost one result cell.
+
+The token is exact in Wiz: dropping it, freeing it twice, or using it after
+`free` is a type error, and the `regions` group has those three negative cases.
+The limit is the `1`-is-affine projection gap (`docs/CoreSpec.md` §7.1/§14.4,
+COMP-06's prerequisite): a token hidden in an unrestricted pair field can be
+dropped by the projection. `ArenaRef ρ A` is a `Nat` index at run time; it is
+inert without the token, so an escaped index is not a live allocation.
+
+The `regions` benchmark (checked-heap IR, no C toolchain) builds `n` values:
+
+| n | `List` | `Array` | `Arena` (continuation form) |
+|---:|---:|---:|---:|
+| 100 | 100 | 1 | 3 |
+| 1000 | 1000 | 1 | 3 |
+| 10000 | 10000 | 1 | 3 |
+
+The arena is flat in `n` because `Array.push` appends in place and the token's
+cell is reused; the direct-style result variants add one cell per operation.
+That is the allocation win COMP-06 asked for; a native bump allocator would
+remove the remaining constant, but is not needed for the typing experiment.
+`lib/Region.wiz` stays as it is: COMP-06 says keep it as the QTT test, and its
+escape/use-while-borrowed/double-borrow/forged-handle cases are that evidence.
+
 ## Owned handles (`lib/Handle.wiz`)
 
 `Owned h` is the obligation to release the handle `h`: a token at quantity 1 indexed by

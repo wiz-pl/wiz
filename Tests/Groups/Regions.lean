@@ -108,6 +108,46 @@ def libsAllocs (s : CommandState ZeroOneMany) (n : Name) : IO Nat := do
   | .ok a => pure a
   | .error e => throw (IO.userError s!"{n}: {e}")
 
+/-- The arena, list and array builders the allocation benchmark compares. -/
+def arenaBench : String := r#"import Arena
+
+def fillArena {ρ : Region} (n : Nat) (1 a : Arena ρ Nat)
+    (1 k : (s : Nat) → (1 a : Arena ρ Nat) → Nat) : Nat :=
+  match n with
+  | .zero => k 0 a
+  | .succ m => Arena.alloc a n (fun _ a => fillArena m a k)
+
+def benchArena (n : Nat) : Nat :=
+  fillArena n (Arena.new (ρ := Region.static) (A := Nat))
+    (fun s a => let () := Arena.free a; s)
+
+def fillList : Nat → List Nat → List Nat
+  | .zero, xs => xs
+  | .succ n, xs => fillList n (List.cons n xs)
+
+def benchList (n : Nat) : Nat := List.length (fillList n List.nil)
+
+def fillArray : Nat → Array Nat → Array Nat
+  | .zero, a => a
+  | .succ n, a => fillArray n (Array.push a n)
+
+def benchArray (n : Nat) : Nat := Array.size (fillArray n Array.empty)
+"#
+
+def arenaUse : String := r#"import Arena
+
+def total : IO Nat := withArena Region.static Nat (fun ρ h a =>
+  Arena.alloc a 10 (fun r1 a =>
+    Arena.alloc a 32 (fun r2 a =>
+      Arena.get a r1 0 (fun x a =>
+        Arena.get a r2 0 (fun y a =>
+          IO1.pure (.ok (x + y) a))))))
+
+def sizeOf : IO Nat := withArena Region.static Nat (fun ρ h a =>
+  Arena.alloc a 7 (fun _ a =>
+    Arena.size a (fun n a => IO1.pure (.ok n a))))
+"#
+
 def regionsGroup : Group where
   name := "regions"
   exercise := "lib/Region.wiz (Feral lifetimes)"
@@ -210,6 +250,27 @@ def regionsGroup : Group where
         -- compares in the elaborator's view)
         failsLibs ("import Region\nstructure MyShr (ρ : Region) (A : Type) where\n  val : A\n" ++
           "def forge {ρ : Region} (x : Nat) : Shr ρ Nat := cast rfl (MyShr.mk x : MyShr ρ Nat)") "not definitionally equal" },
+    { name := "arena: linear token, withArena alloc/get/free, and size type-check", run := fun _ =>
+        okLibs arenaUse },
+    { name := "arena: no leak, no double free, no use after free are type errors", run := fun _ => do
+        failsLibs "import Arena\ndef leak (1 a : Arena Region.static Nat) : Unit := ()" "quantity 1 but used 0"
+        failsLibs "import Arena\ndef doubleFree (1 a : Arena Region.static Nat) : Unit :=\n  let () := Arena.free a;\n  Arena.free a"
+          "quantity 1 but used ω"
+        failsLibs ("import Arena\ndef uaf (1 a : Arena Region.static Nat) : IO Unit :=\n" ++
+          "  Arena.alloc a 7 (fun r a =>\n    let () := Arena.free a;\n" ++
+          "    Arena.get a r 0 (fun _ a => let () := Arena.free a; IO.pure ()))")
+          "quantity 1 but used ω" },
+    { name := "arena allocation is flat in the element count (Array path), not one cell per element", run := fun _ => do
+        let src := arenaBench ++ "\ndef a100 : Nat := benchArena 100\ndef l100 : Nat := benchList 100\n" ++
+          "def r100 : Nat := benchArray 100\ndef a1000 : Nat := benchArena 1000\n" ++
+          "def l1000 : Nat := benchList 1000\ndef r1000 : Nat := benchArray 1000\n"
+        let s ← libsState src
+        checkEq [3, 100, 1, 3, 1000, 1]
+          [← libsAllocs s "a100", ← libsAllocs s "l100", ← libsAllocs s "r100",
+           ← libsAllocs s "a1000", ← libsAllocs s "l1000", ← libsAllocs s "r1000"] },
+    { name := "arena: compiled alloc/get/free run, and the runtime reports no leak", run := fun _ =>
+        cRunLibs (arenaUse ++ "def main : IO Unit := do\n  s ← total;\n  IO.println (Nat.toString s);\n" ++
+          "  n ← sizeOf;\n  IO.println (Nat.toString n)") "42\n1\n" },
     { name := "with --unbox-structs a shared handle is its value at run time and its scope is its body run in place (22i); a linear &mut scope is its body run in place, but for the handle's cell", run := fun _ => do
         let s ← libsState ("import Region\n" ++ regionsPush ++
           "def get {ρ : Region} (x : Shr ρ Nat) : Nat := x.val\n" ++

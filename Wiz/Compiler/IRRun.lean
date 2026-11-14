@@ -27,6 +27,8 @@ inductive Obj where
   | clo (f : Name) (args : Array IVal)
   /-- a cell kept by `reset` for `reuse` -/
   | token (size : Nat)
+  /-- a flat `Array` (`lib/Std.wiz`): elements are owned references, as in `wiz_array` -/
+  | arr (elems : Array IVal)
   deriving Inhabited
 
 structure Heap where
@@ -64,6 +66,7 @@ partial def dropV : IVal → RunM Unit
       | .ctor _ fs => fs.forM dropV
       | .clo _ as => as.forM dropV
       | .token _ => pure ()
+      | .arr fs => fs.forM dropV
   | _ => pure ()
 
 /-- Field `i` of a number's unary view (`natView`): field 0 is its constructor tag. The
@@ -81,6 +84,85 @@ def nativeOp (op : Name) (args : Array IVal) : RunM IVal := do
     | _ => 0
   if op.startsWith "nat." then
     if let some r := natNative? op ((List.range args.size).toArray.map n) then return .num r
+  -- `Array` (`lib/Std.wiz`): the same ownership as `runtime/rt_data.inc`'s `wiz_array*`
+  if op.startsWith "extern:wiz_array_" then
+    -- the key starts with the erased type parameter (`e`) for `Array`
+    let vs := (args.toList.dropWhile (· == .erased)).toArray
+    let arg (i : Nat) : Option IVal := vs[i]?
+    let r ←
+      if op.startsWith "extern:wiz_array_empty:" then
+        alloc (.arr #[])
+      else if op.startsWith "extern:wiz_array_push:" then
+        match arg 0, arg 1 with
+        | some (.ptr id), some x =>
+          match ← getObj id with
+          | (rc, .arr fs) =>
+            if rc == 1 then do
+              modify fun h => { h with objs := h.objs.insert id (1, .arr (fs.push x)) }
+              pure (.ptr id)
+            else do
+              -- shared: copy the elements (one reference each), then drop this reference
+              fs.forM dupV
+              let nv ← alloc (.arr fs)
+              modify fun h => { h with objs := h.objs.insert id (rc - 1, .arr fs) }
+              match nv with
+              | .ptr id2 => do
+                modify fun h => { h with objs := h.objs.insert id2 (1, .arr (fs.push x)) }
+                pure nv
+              | _ => throw "array.push: not an array"
+          | _ => throw "array.push: not an array"
+        | _, _ => throw "array.push: bad arguments"
+      else if op.startsWith "extern:wiz_array_size:" then
+        match arg 0 with
+        | some (.ptr id) =>
+          match ← getObj id with
+          | (_, .arr fs) => do
+            dropV (.ptr id)
+            pure (.num fs.size)
+          | _ => throw "array.size: not an array"
+        | _ => throw "array.size: bad arguments"
+      else if op.startsWith "extern:wiz_array_get:" then
+        match arg 0, arg 1, arg 2 with
+        | some (.ptr id), some (.num i), some d =>
+          match ← getObj id with
+          | (_, .arr fs) =>
+            if i < fs.size then do
+              let x := fs[i]!
+              dupV x
+              dropV (.ptr id)
+              dropV d
+              pure x
+            else do
+              dropV (.ptr id)
+              pure d
+          | _ => throw "array.get: not an array"
+        | _, _, _ => throw "array.get: bad arguments"
+      else if op.startsWith "extern:wiz_array_set:" then
+        match arg 0, arg 1, arg 2 with
+        | some (.ptr id), some (.num i), some x =>
+          match ← getObj id with
+          | (rc, .arr fs) =>
+            if i >= fs.size then do
+              dropV x
+              pure (.ptr id)
+            else if rc == 1 then do
+              dropV fs[i]!
+              modify fun h => { h with objs := h.objs.insert id (1, .arr (fs.set! i x)) }
+              pure (.ptr id)
+            else do
+              fs.forM dupV
+              let nv ← alloc (.arr fs)
+              modify fun h => { h with objs := h.objs.insert id (rc - 1, .arr fs) }
+              match nv with
+              | .ptr id2 => do
+                dropV fs[i]!
+                modify fun h => { h with objs := h.objs.insert id2 (1, .arr (fs.set! i x)) }
+                pure nv
+              | _ => throw "array.set: not an array"
+          | _ => throw "array.set: not an array"
+        | _, _, _ => throw "array.set: bad arguments"
+      else throw s!"{op}: foreign functions only run in compiled code (wiz run)"
+    return r
   match op with
   | "nat.beq" => pure (.tag (if n 0 == n 1 then 1 else 0))
   | "nat.blt" => pure (.tag (if n 0 < n 1 then 1 else 0))
@@ -300,6 +382,7 @@ partial def toRVal (h : Heap) : IVal → RVal
     | some (_, .ctor t fs) => .obj t (fs.map (toRVal h))
     | some (_, .clo _ _) => .clo [] .erased
     | some (_, .token _) => .erased
+    | some (_, .arr _) => .erased
     | none => .erased
 
 /-- Run `main`; returns the result (as an interpreter value), the number of objects
