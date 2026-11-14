@@ -36,8 +36,9 @@ $ wiz run fact.wiz        # def main : Nat := fact 30
 * `wiz build FILE -o OUT` compiles the definition `main` to C and then to an
   executable; `wiz run FILE` also runs it and reads the printed result back with
   `main`'s type. The C compiler is `--cc X` (default `cc`), with `--cflags "…"` and
-  `--ldflags "…"` for GMP ([stage 23a](23-grail.md): flags, not environment variables). The C tests
-  skip themselves if GMP isn't found.
+  `--ldflags "…"` for GMP ([stage 23a](23-grail.md): flags, not environment variables).
+  `--target TRIPLE` selects a cross target and its compiler ([8f](#8f-cross-compilation-targets)).
+  The C tests skip themselves if GMP isn't found.
 * **Runtime** (`runtime/`, embedded in the compiler): a value is a pointer-sized word
   (`wiz_val`); scalars have the low bit set; objects have a header (reference count,
   tag, size). Closures point to a boxed entry and share or move their captured
@@ -106,7 +107,9 @@ bundle's `pack` (a 20-field bundle took two minutes).
 (`Compiler/LLVM.lean`) and `llc` (`--llc X`). The runtime is the same C file,
 compiled separately with `-DWIZ_API=` so that its functions are exported. In SSA form,
 join point parameters live in stack slots, and a variable bound in several branches
-gets one name per branch. The LLVM tests are the C tests, through LLVM.
+gets one name per branch. The LLVM tests are the C tests, through LLVM. It is not a
+cross backend (`llc` is not given a triple, and its values are host `i64`):
+`--llvm` with a different `--target` is refused ([8f](#8f-cross-compilation-targets)).
 
 Still to do in the backend: specialise the eliminators for known descriptions (flat
 constructor objects instead of nested pairs, direct recursion instead of walking the
@@ -141,4 +144,49 @@ description).
   at their arguments, so they borrow them (`Expr.primBorrows`; the runtime's
   `wiz_nat_beq`/`wiz_nat_blt` no longer decrement): a lookup in a tree counts neither
   the key nor the keys it compares it with.
+
+## 8f: cross-compilation targets
+
+```
+$ wiz --target aarch64-linux-gnu build hello.wiz -o hello
+$ wiz --target aarch64-linux-gnu --runner "qemu-aarch64 -L /usr/aarch64-linux-gnu" run hello.wiz
+```
+
+`--target TRIPLE` is a field of the toolchain (`Wiz/Toolchain.lean`, `BuildTarget`), not
+a spelling of `--cc`: it names the triple, its `cc`, its pointer width and endianness,
+and how to run its binaries. `--target` sets `cc` to the target's compiler unless `--cc`
+was given explicitly (in either order; a release bundle's compiler is a default too), so
+`--cc` still overrides it. `--target native` (or `host`) is the host. `--runner "CMD
+ARGS"` overrides the target's emulator prefix; `wiz run`, `grail run` and `grail test`
+use it for the built program. `grail config` prints the target and runner.
+
+The targets the toolchain advertises are the ones with a C path and a pointer-width
+guard, and no others:
+
+| triple | `cc` | word | tier |
+|---|---|---|---|
+| `x86_64-linux-gnu` | `cc` | 64 | 1: tested on the target |
+| `aarch64-linux-gnu` | `aarch64-linux-gnu-gcc` | 64 | 2: built and run under emulation |
+| `i686-linux-gnu` | `i686-linux-gnu-gcc` | 32 | 3: builds only |
+
+The C path is the ordinary one: `Compiler/C.lean` emits portable C and the runtime is
+pasted in, so `cc` is the only thing that has to know the target. Before a build,
+`Build.checkTarget` asks the compiler for `__SIZEOF_POINTER__` (its own target's, for a
+cross compiler) and refuses a `--target` whose declared width differs; the runtime's
+`WIZ_WORD_BITS` guard ([8b](#8b-c)) then selects the same word in the generated C. A
+32-bit target gets the 30-bit small-int path and the checked `WIZ_BOX`; a 64-bit
+compiler under a 32-bit target (or the reverse) is an error, not a silently mismatched
+binary. The differential tests build the same program for the host and for
+`aarch64-linux-gnu`/`i686-linux-gnu`, run the target one under `qemu-aarch64`/`qemu-i386`
+with the compiler's `-print-sysroot`, and compare the printed value; a machine without
+the cross compiler, emulator or target GMP skips the case (a skip is not a pass).
+
+The target also **namespaces the cache**: `Toolchain.targetId` (triple, pointer width,
+endianness) is mixed into every module key, so the text entries and the `.wizr` regions
+of a native build and a cross build never serve each other. `Toolchain.id` (and so
+grail's object, link and test keys) includes it too. The LLVM backend is **not** a cross
+backend: its values are host `i64` and `llc` is not given a triple, so `--llvm` with a
+different `--target` is refused with a message; use the C backend. Boehm-GC self-hosting
+and a bare-metal target (`*-none-elf`) are not advertised: the runtime expects a hosted
+OS, and the collector needs target support.
 

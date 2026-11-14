@@ -106,8 +106,9 @@ failure) in every 0.1.z:
 | `wiz lsp` | a language server on stdin/stdout |
 
 The same holds for the toolchain flags, which may go before or after the command:
-`-I DIR`, `--cache DIR`, `--cache-ro DIR`, `--no-cache`, `--cc X`, `--cflags "…"`, `--ldflags "…"`,
-`--libs "…"`, `--gmp "…"`, `--llc X`, `--gc-cflags "…"` and `--gc-ldflags "…"`.
+`-I DIR`, `--cache DIR`, `--cache-ro DIR`, `--no-cache`, `--cc X`, `--target TRIPLE`,
+`--runner "CMD ARGS"`, `--cflags "…"`, `--ldflags "…"`, `--libs "…"`, `--gmp "…"`,
+`--llc X`, `--gc-cflags "…"` and `--gc-ldflags "…"`.
 
 Not covered:
 
@@ -143,12 +144,18 @@ Anything not listed above may change in a 0.1.z release. In particular:
   never share entries; it may be deleted at any time.
 * **The self-hosted toolchain** (`selfhost/*.wiz`), the HDL and separation-logic
   libraries, Feral, and everything documented as experimental in the stage docs.
-* **Platforms**: x86_64 Linux only, glibc 2.27 or later (2.30 or later for `wiz build`
-  with the bundled C compiler). Other platforms work from source, without a promise.
-  The runtime's value representation (`runtime/wiz_abi.h`) selects a 62-bit small-int
-  range on a 64-bit word and a 30-bit one on a 32-bit word, and refuses any other
-  pointer width at compile time; 32-bit is not a supported platform yet (the LLVM
-  backend is 64-bit only), but a 32-bit build cannot silently take the 64-bit path.
+* **Platforms**: x86_64 Linux is the supported host, glibc 2.27 or later (2.30 or later
+  for `wiz build` with the bundled C compiler). Other platforms work from source,
+  without a promise. Cross targets are advertised only when the C backend has a
+  compiler for them and `runtime/wiz_abi.h` guards their pointer width: x86-64 Linux
+  (tier 1, tested on the target), aarch64 Linux (tier 2, built and run under
+  `qemu-aarch64` when it is installed), and i686 Linux (tier 3, 32-bit, builds only —
+  the LLVM backend is 64-bit only, 8-byte atomics may need `-latomic`, and the
+  C-struct ABI has no layout asserts yet). The runtime's value representation selects a
+  62-bit small-int range on a 64-bit word and a 30-bit one on a 32-bit word, and
+  refuses any other pointer width at compile time; `--target` also checks the compiler's
+  `__SIZEOF_POINTER__` against the target before a build. A target without both is not
+  listed.
 
 ## Changing this page
 

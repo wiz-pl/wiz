@@ -10,6 +10,11 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* backend: `--target TRIPLE` is a toolchain field (`aarch64-linux-gnu`, `i686-linux-gnu`,
+  `x86_64-linux-gnu`): it sets the target's C compiler, checks its `__SIZEOF_POINTER__`
+  against the target's word (the 32-bit guard), runs target binaries through
+  `--runner`, and namespaces the elaboration cache by target. The LLVM backend does not
+  cross-compile; a target is listed only with a C path and a pointer-width guard (8f).
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to

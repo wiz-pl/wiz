@@ -7,6 +7,6 @@ tests/pure.wiz:8:1: info: "agent--x-y"
 tests/pure.wiz:9:1: info: "'it'\\''s'"
 tests/pure.wiz:10:1: info: " --cc 'gcc' --cflags '-I/opt/gmp/include'"
 tests/pure.wiz:11:1: info: "# tower settings (`tower set KEY VALUE`)\ndefault v1\nsource auto\nflake github:wiz-pl/wiz\ngit https://github.com/wiz-pl/wiz\nreleases https://github.com/wiz-pl/wiz/releases/download\nnightly-ref master\nauto-install true\ncflags -I/x y\noverride v1 /a b\n"
-tests/pure.wiz:14:1: info: "unknown setting colour (default, source, flake, git, releases, nightly-ref, auto-install, cc, cflags, ldflags, libs, llc, gc-cflags, gc-ldflags)"
+tests/pure.wiz:14:1: info: "unknown setting colour (default, source, flake, git, releases, nightly-ref, auto-install, cc, target, runner, cflags, ldflags, libs, llc, gc-cflags, gc-ldflags)"
 tests/pure.wiz:17:1: info: "spec v1\nsource source\nref v1\ncommit abc\npath \nflag cc gcc\n"
 tests/pure.wiz:18:1: info: (.cons ("cc", "gcc") .nil, .some "release", .true, .cons "v1" .nil, ())

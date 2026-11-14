@@ -48,7 +48,9 @@ options: -C DIR (the package directory), --dir DIR (with `new`: where to write t
   package, instead of ./NAME), --std DIR (the standard library),
   -j N (jobs at once; default: the number of cores, at most 4),
   --timeout SECS (a job's time limit, default 1800), --test-timeout SECS (default 300),
-  --cc X --cflags \"…\" --ldflags \"…\" --libs \"…\" --llc X --gc-cflags \"…\" --gc-ldflags \"…\" -I DIR,
+  --cc X --target TRIPLE (a cross target, sets --cc unless given; native/host is the host)
+  --runner \"CMD ARGS\" (how to run target binaries) --cflags \"…\" --ldflags \"…\" --libs \"…\"
+  --llc X --gc-cflags \"…\" --gc-ldflags \"…\" -I DIR,
   --cache DIR (the elaboration cache, default ~/.cache/wiz), --cache-ro DIR (repeatable:
   a read-only cache, searched in order after the write cache), --no-cache (both),
   --trust-native (27a: allow `native_refl`, passed on to every check and to `wiz lsp`), --native-fuel N
@@ -218,6 +220,10 @@ def cliMain (args : List String) : IO UInt32 := do
       | none => IO.eprintln s!"unknown setting {k}"; return 1
     -- the flags again, over the build files
     tc := (tc.parseFlags raw).1
+    -- (8f) the target's word must be the one its compiler produces (not for `config`,
+    -- which prints the toolchain, or `targets`/`update`, which build nothing)
+    if !(args == ["config"] || args == ["targets"] || args == ["update"]) then
+      if let .error e ← Wiz.Build.checkTarget tc then IO.eprintln e; return 1
     -- a dependency's build file
     let readPkg (d : System.FilePath) : IO (Except String Package) := do
       pure ((← readConfig tc binId std d).map (·.1))

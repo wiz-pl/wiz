@@ -150,6 +150,30 @@ A release toolchain's `share/wiz/NOTICE` says the same, and also lists the third
 code linked into `wiz`, `grail` and `tower` themselves; the licence texts are in
 `share/wiz/LICENSES/` and `share/wiz/cc/LICENSES/`.
 
+## Cross-compilation
+
+`--target TRIPLE` builds through the C backend with that target's compiler:
+
+```sh
+wiz --target aarch64-linux-gnu build hello.wiz -o hello
+wiz --target aarch64-linux-gnu \
+    --runner "qemu-aarch64 -L /usr/aarch64-linux-gnu" run hello.wiz
+```
+
+`--target` sets `--cc` unless you give one, and `--runner` is how `wiz run` (and
+`grail run`/`grail test`) runs the result. The advertised targets — x86-64 Linux,
+aarch64 Linux (tier 2, under `qemu-aarch64`) and i686 Linux (tier 3, 32-bit) — are the
+ones the C backend has a compiler for and `runtime/wiz_abi.h` guards the pointer width
+of; a target without both is not listed. Before building, `wiz` asks the compiler for
+`__SIZEOF_POINTER__` and refuses a target whose declared width differs. The target is
+part of the elaboration cache's key, so native and cross entries never mix. The LLVM
+backend does not cross-compile. The `target` group builds the same program for the host
+and for a cross target, runs it under `qemu-*` when the cross compiler, emulator and
+target GMP are installed, and otherwise skips the case; the guard itself is checked by
+`scripts/test-runtime.sh` and the `c` group. A cross build needs that target's GMP
+(`--gmp`/`--cflags`/`--ldflags`), and the Boehm-GC self-hosted runtime is not a cross
+target yet.
+
 ## Continuous integration
 
 `nix develop` gives the toolchain the tests need besides Lean (see `flake.nix`): GMP and

@@ -361,7 +361,7 @@ def Runner.prep (r : Runner) (update : Bool) (results : TestResults) (n : Node)
   | .obj _ =>
     let cFile := (d 0).out / "main.c"
     let cText ← IO.FS.readFile cFile
-    let key := mixHash (hash "obj") (hash (toString [cText, tc.cc, " ".intercalate tc.cflags]))
+    let key := mixHash (hash "obj") (hash (toString [cText, tc.targetName, tc.cc, " ".intercalate tc.cflags]))
     pure (.job {
       key := key, timeoutMs := r.timeoutMs, how := .cmd tc.cc fun out =>
       #["-O2", "-w", "-c", "-o", (out / "main.o").toString, cFile.toString] ++ tc.cflags.toArray })
@@ -376,7 +376,7 @@ def Runner.prep (r : Runner) (update : Bool) (results : TestResults) (n : Node)
     -- the output is `out/name`, so the name is part of what the job makes: two programs
     -- with the same object and link files (a test's `test-…` beside the exe it mirrors)
     -- must not share a directory and a key
-    let key := mixHash (hash "link") (hash (toString [name, toString bin, toString o.key, tc.cc, " ".intercalate tc.ldflags, " ".intercalate tc.libs,
+    let key := mixHash (hash "link") (hash (toString [name, toString bin, toString o.key, tc.targetName, tc.cc, " ".intercalate tc.ldflags, " ".intercalate tc.libs,
       " ".intercalate tc.gmp, toString link.sources.toList, toString contents.toList, toString link.libs.toList,
       if link.sources.isEmpty then "" else " ".intercalate tc.cflags]))
     pure (.job {
@@ -638,7 +638,8 @@ def Runner.runTarget (r : Runner) (all : List Target) (t : Target) (extra : Arra
   match t with
   | .exe n _ =>
     unless ← r.build all [t] do return 1
-    spawn (bin n).toString extra []
+    let (cmd, args) := r.ctx.tc.runCommand (bin n) extra
+    spawn cmd args []
   | .command c =>
     let mut needs : List Target := []
     for tool in c.tool :: c.uses do
@@ -649,16 +650,16 @@ def Runner.runTarget (r : Runner) (all : List Target) (t : Target) (extra : Arra
     for i in c.inputs do
       if let some p := producerOf all i then needs := needs ++ [.command p]
     unless ← r.build all needs do return 1
-    let exe ← match c.tool with
-      | .exe n => pure (bin n).toString
+    let (exe, pre) ← match c.tool with
+      | .exe n => pure (r.ctx.tc.runCommand (bin n))
       | .path n => match ← r.resolveTool n with
-        | .ok (run, _) => pure run
+        | .ok (run, _) => pure (run, #[])
         | .error e => r.err s!"{e}\n"; return 127
     for i in c.inputs do
       unless (producerOf all i).isSome || (← (r.ctx.dir / i).pathExists) do
         r.err s!"command {c.name}: the input {i} does not exist, and no target makes it\n"; return 1
     prepareOutputs c pkgAbs
-    spawn exe (renderArgs { c with inOutDir := false } pkgAbs pkgAbs ++ extra) c.env
+    spawn exe (pre ++ renderArgs { c with inOutDir := false } pkgAbs pkgAbs ++ extra) c.env
   | _ => r.err s!"grail run: {t.name} is not an exe or a command target\n"; pure 2
 
 /-- Run the tests of these targets whose path contains one of `filters` (all, if none). -/

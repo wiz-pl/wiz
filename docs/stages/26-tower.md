@@ -108,9 +108,10 @@ toolchain is just links into the store. A toolchain is built in
 
 **Flags, not environment variables** (stage 23a). The wrappers `bin/wiz` and
 `bin/grail` of a release, source or linked toolchain are generated `sh` scripts. They
-`exec` the binary with the C toolchain as flags (`--cc`, `--cflags`, `--ldflags`,
-`--libs`, `--llc`, `--gc-cflags`, `--gc-ldflags`: the `tower set cflags …` settings,
-overridden by `tower toolchain install … --cflags …`), and `wiz` also gets
+`exec` the binary with the C toolchain as flags (`--cc`, `--target`, `--runner`,
+`--cflags`, `--ldflags`, `--libs`, `--llc`, `--gc-cflags`, `--gc-ldflags`: the
+`tower set cflags …` settings, overridden by `tower toolchain install … --cflags …`),
+and `wiz` also gets
 `-I share/wiz/lib`. This is the same thing the Nix package's `makeWrapper` does. With no
 flags set, `wiz build` uses `cc` and the system's GMP.
 

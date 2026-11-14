@@ -47,8 +47,11 @@ unboxed; not stable under substitution, so off by default)
 --strict-privacy (13b, an experiment; turns the cache off): check each declaration again with
   the definitions of other modules' types with private parts hidden
 --pp-all (11r; turns the cache off): print terms without notation (as `set_option pp.all true`)
-toolchain: --cc X (default: a release's own share/wiz/cc, else cc), --cflags \"…\" --ldflags \"…\" (where GMP lives),
-  --libs \"…\" (say -lm), --gmp \"…\" (default -lgmp), --llc X (default llc)"
+toolchain: --cc X (default: a release's own share/wiz/cc, else cc), --target TRIPLE (a cross
+  target; sets --cc unless that was given: aarch64-linux-gnu, i686-linux-gnu, x86_64-linux-gnu;
+  native/host is the host), --runner \"CMD ARGS\" (how to run target binaries, say qemu-aarch64),
+  --cflags \"…\" --ldflags \"…\" (where GMP lives), --libs \"…\" (say -lm), --gmp \"…\"
+  (default -lgmp), --llc X (default llc). The LLVM backend is not a cross backend."
 
 def parseCmd (path : String) : IO UInt32 := do
   let input ← IO.FS.readFile path
@@ -224,9 +227,10 @@ def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandSta
         pure (some ({ rig := RigTag.tag (R := ZeroOneMany), stats := some regionStats } :
           Cache.RegionOptions))
       else pure none
-    pure (← Cache.elaborateCached tc.cacheDir tc.readCaches input init key₀ (region := region)).1
+    pure (← Cache.elaborateCached tc.cacheDir tc.readCaches input init key₀
+      (toolchain := tc.targetId) (region := region)).1
   else
-    Cache.elaborateUncached input init
+    Cache.elaborateUncached input init tc.targetId
 /-- (27a) `--trust-native` and `--native-fuel N`. -/
 def nativeOpts (tc : Toolchain) : Bool × Nat := (tc.trustNative, tc.nativeFuel.getD NativeRun.defaultFuel)
 
@@ -416,6 +420,10 @@ def main (args : List String) : IO UInt32 := do
     -- (an unknown flag, `--impl` say, or a command used wrongly: an error, not the usage
     -- with success)
     match args.find? (·.startsWith "-") with
+    | some "--target" =>
+      match args.dropWhile (· != "--target") with
+      | _ :: t :: _ => IO.eprintln s!"unknown target: {t} (the targets are {BuildTarget.names}; native is the host)"
+      | _ => IO.eprintln "unknown target"
     | some f => IO.eprintln s!"unknown flag: {f}"
     | none => IO.eprintln s!"unknown command: {" ".intercalate args}"
     IO.eprintln usage

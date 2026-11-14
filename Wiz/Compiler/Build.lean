@@ -66,6 +66,47 @@ def cProgram (s : CommandState R) (n : Name) : Except String (String × Term R) 
 def words (s : Option String) : List String :=
   ((s.getD "").splitOn " ").filter (· ≠ "")
 
+/-- The pointer width (in bytes) a C compiler's predefined macros state
+(`__SIZEOF_POINTER__`). -/
+def pointerWidthIn (predefines : String) : Option Nat :=
+  ((predefines.splitOn "\n").find? (·.startsWith "#define __SIZEOF_POINTER__ ")).bind fun l =>
+    match l.splitOn " " with
+    | _ :: _ :: n :: _ => n.toNat?
+    | _ => none
+
+/-- Ask `cc` which pointer width it produces (its target's, for a cross compiler). -/
+def pointerWidthOf (cc : String) (flags : List String) : IO (Except String Nat) := do
+  let dir ← IO.FS.createTempDir
+  let probe := dir / "wiz-probe.c"
+  IO.FS.writeFile probe ""
+  try
+    let out ← IO.Process.output
+      { cmd := cc, args := #["-dM", "-E", "-x", "c", probe.toString] ++ flags.toArray }
+    if out.exitCode != 0 then return .error s!"{cc} -dM failed:\n{out.stderr}"
+    match pointerWidthIn out.stdout with
+    | some bytes => pure (.ok (bytes * 8))
+    | none => pure (.error s!"{cc} did not define __SIZEOF_POINTER__")
+  catch e => pure (.error s!"{cc}: {e}")
+
+/-- A target's declared pointer width must be the one its compiler produces: a `--target`
+that says 32 bits and a compiler that makes 64-bit code (or the reverse) must not build
+a program whose runtime silently selects the other word. -/
+def checkWidth (g : BuildTarget) (cc : String) (w : Nat) : Except String Unit :=
+  if w == g.pointerWidth then .ok ()
+  else .error s!"target {g.triple} needs a {g.pointerWidth}-bit word, but {cc} produces {w}-bit code; `runtime/wiz_abi.h` would select the {w}-bit representation, not the target's"
+
+/-- Check the target against the C compiler that will build it (none: nothing to
+check). The compiler's `__SIZEOF_POINTER__` is the same value the runtime's
+`WIZ_WORD_BITS` guard selects from, so this catches a missing `-m32`/`--target` flag
+before a mismatched binary is produced. -/
+def checkTarget (tc : Toolchain) : IO (Except String Unit) := do
+  match tc.target with
+  | none => pure (.ok ())
+  | some g =>
+    match ← pointerWidthOf tc.cc tc.cflags with
+    | .error e => pure (.error s!"cannot check target {g.triple}: {e}")
+    | .ok w => pure (checkWidth g tc.cc w)
+
 /-- Compile C source to an executable. -/
 def compileC (tc : Toolchain) (src : String) (exe : System.FilePath) (link : Link := {}) (lib : Bool := false) : IO (Except String Unit) := do
   let cFile := exe.withExtension "c"
@@ -179,6 +220,9 @@ a program but without a `main` (a Wasm module, a shared library: the toolchain's
 say which). -/
 def build (tc : Toolchain) (s : CommandState R) (n : Name) (out : System.FilePath) (llvm lib : Bool)
     (noMain : Bool := false) (split : Nat := 0) : IO (Except String (Term R)) := do
+  if llvm && tc.isCross then
+    return .error s!"--target {tc.targetName}: the LLVM backend is not a cross backend (its values are host i64); use the C backend"
+  if let .error e ← checkTarget tc then return .error e
   let bare := lib || noMain
   match irProgram s n bare with
   | .error e => pure (.error e)
@@ -229,9 +273,10 @@ def runGlobal (tc : Toolchain) (s : CommandState R) (n : Name) (dir : System.Fil
     | .error e => pure (.error e)
     | .ok ty =>
       let io := isIO ty
+      let (cmd, runArgs) := tc.runCommand exe args
       let out ← match timeout with
-        | some t => IO.Process.output { cmd := "timeout", args := #[toString t, exe.toString] ++ args }
-        | none => IO.Process.output { cmd := exe.toString, args }
+        | some t => IO.Process.output { cmd := "timeout", args := #[toString t, cmd] ++ runArgs }
+        | none => IO.Process.output { cmd, args := runArgs }
       if out.exitCode == 124 && timeout.isSome then return .error "the program timed out"
       if out.exitCode != 0 then return .error s!"the program failed ({out.exitCode}): {out.stderr}"
       -- an `IO` program prints for itself

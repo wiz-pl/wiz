@@ -34,7 +34,7 @@ of this.
 
 A module's key is computed from text alone, before anything is elaborated:
 
-    key(M) = hash(salt, toolchain, name and text of M, M's C headers, key(N) for each import N)
+    key(M) = hash(salt, toolchain, target, name and text of M, M's C headers, key(N) for each import N)
 
 and a module is elaborated **in isolation**, from the empty state plus its own imports,
 so what it elaborates to depends only on its key. An importer's chain of command keys
@@ -90,10 +90,13 @@ def settings : Settings := Settings.empty
 ## 23a: the toolchain as flags
 
 `wiz` reads no environment variables: the toolchain record (`Wiz/Toolchain.lean`: C
-compiler and flags, `llc`, the collector's flags, the cache, module roots) comes from
-`--cc`, `--cflags`, `--ldflags`, `--libs`, `--llc`, `--cache DIR`/`--cache-ro DIR`/`--no-cache` and
+compiler and flags, `llc`, the collector's flags, the cache, module roots, and the build
+target) comes from `--cc`, `--target TRIPLE`, `--runner "CMD ARGS"`, `--cflags`,
+`--ldflags`, `--libs`, `--llc`, `--cache DIR`/`--cache-ro DIR`/`--no-cache` and
 `-I DIR` (which replaces `$WIZ_PATH`), and is passed explicitly to everything that
-compiles. Its compiler fields are its `id`, which enters grail's keys.
+compiles. Its compiler fields and target are its `id`, which enters grail's keys; the
+target alone (`targetId`) namespaces the elaboration cache
+([8f](08-backend.md#8f-cross-compilation-targets)).
 
 ## 23e: the self-hosted toolchain as targets
 

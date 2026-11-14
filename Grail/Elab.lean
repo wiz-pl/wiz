@@ -50,7 +50,10 @@ def load (tc : Toolchain) (roots : List System.FilePath) (salt : UInt64) (src : 
     { loader, cHeaders := (headers[·]?), cSources := some (Module.cSourceResolver sources),
       trustedModule := own.contains, trustNative := tc.trustNative,
       nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := ← tc.smt.resolve }
-  let key := Cache.moduleKey (fun n => if n == mainName then some src else loader n) (headers[·]?) salt mainName
+  -- (8f) the target namespaces the cache: the same sources never share entries
+  -- between a native and a cross build (nor two data layouts of one triple)
+  let keySalt := mixHash salt tc.targetId
+  let key := Cache.moduleKey (fun n => if n == mainName then some src else loader n) (headers[·]?) keySalt mainName
     own.contains
   -- a `link_c` file that appears or disappears changes the check (its contents enter
   -- only the link's key)
@@ -64,9 +67,10 @@ def load (tc : Toolchain) (roots : List System.FilePath) (salt : UInt64) (src : 
 /-- Elaborate a loaded file (through the cache when there is one: a write directory and
 any read-only ones). -/
 def elaborate (tc : Toolchain) (salt : UInt64) (l : Loaded) : IO (CommandState ZeroOneMany) := do
+  let keySalt := mixHash salt tc.targetId
   match tc.cacheDir, tc.readCaches with
-  | none, [] => Cache.elaborateUncached l.src l.init salt
-  | write, reads => pure (← Cache.elaborateCached write reads l.src l.init l.key salt).1
+  | none, [] => Cache.elaborateUncached l.src l.init keySalt
+  | write, reads => pure (← Cache.elaborateCached write reads l.src l.init l.key keySalt).1
 
 /-- The messages of a state, rendered `path:line:col: severity: text`. -/
 def render (path : String) (l : Loaded) (s : CommandState ZeroOneMany) : String :=

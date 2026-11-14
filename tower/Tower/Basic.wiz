@@ -118,7 +118,7 @@ def Tower.readFileD (f : String) : EIO String := do
 
 -- The toolchain flags a wrapper passes, in this order (the names of `wiz`'s flags).
 def Tower.flagKeys : List String :=
-  "cc" :> "cflags" :> "ldflags" :> "libs" :> "llc" :> "gc-cflags" :> "gc-ldflags" :> .nil
+  "cc" :> "target" :> "runner" :> "cflags" :> "ldflags" :> "libs" :> "llc" :> "gc-cflags" :> "gc-ldflags" :> .nil
 
 structure Settings where
   -- the default toolchain (a spec)

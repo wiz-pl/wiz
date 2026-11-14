@@ -20,7 +20,9 @@ registrations, info trees) in the cache directory (`--cache DIR`, default `~/.ca
 since equal keys mean equal results. Imported modules are cached command by command
 too. Commands that change the grammar or the macros rerun (they are cheap).
 `Wiz/Cache.lean` serialises terms as S-expressions (quantities through the rig's
-literal syntax). Every example gives the same output from the cache as without it.
+literal syntax). Every example gives the same output from the cache as without it. The
+module key also mixes in `Toolchain.targetId`, so a native build and a cross build
+never share entries ([8f](08-backend.md#8f-cross-compilation-targets)).
 
 The store is **layered**: one directory is read and written (`--cache DIR`), and any
 number of further directories are read-only (`--cache-ro DIR`, repeatable). A lookup
