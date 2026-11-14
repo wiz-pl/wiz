@@ -68,6 +68,17 @@ theorem inst_eq_sort (b : Tm) : ∀ (a : Tm) (s : Srt), b.inst a = Tm.sort s →
   | ulift s' A ihA => intro a s h; simp [Tm.inst, Tm.sub] at h
   | up x ih => intro a s h; simp [Tm.inst, Tm.sub] at h
   | down t ih => intro a s h; simp [Tm.inst, Tm.sub] at h
+  | ext A φ x ihA ihx => intro a s h; simp [Tm.inst, Tm.sub] at h
+  | extIn A φ x t ihA ihx iht => intro a s h; simp [Tm.inst, Tm.sub] at h
+  | extOut x ih => intro a s h; simp [Tm.inst, Tm.sub] at h
+  | glueTy φ A T f ihA ihT ihf => intro a s h; simp [Tm.inst, Tm.sub] at h
+  | glue φ t x iht ihx => intro a s h; simp [Tm.inst, Tm.sub] at h
+  | unglue φ f x ihf ihx => intro a s h; simp [Tm.inst, Tm.sub] at h
+  | closedTy φ A ihA => intro a s h; simp [Tm.inst, Tm.sub] at h
+  | closedIn φ x ih => intro a s h; simp [Tm.inst, Tm.sub] at h
+  | closedStar φ A ihA => intro a s h; simp [Tm.inst, Tm.sub] at h
+  | closedElim φ A B mEta mStar x ihA ihB ihEta ihStar ihx =>
+    intro a s h; simp [Tm.inst, Tm.sub] at h
 
 end Tm
 

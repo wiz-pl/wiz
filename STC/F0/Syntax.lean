@@ -1,4 +1,5 @@
 import STC.F0.Sort
+import STC.F1.Cof
 /-!
 # F0 terms
 
@@ -13,11 +14,19 @@ Departures from `WizMeta/Syntax.lean`, all deliberate:
 * `letUnit u b` is added (the kernel's `Term.letUnit`, emitted by the elaborator);
 * `Π`/`Σ` sorts are mandatory (no `Option`);
 * de Bruijn indices; a binder's body lives under one more variable.
+
+F2's term formers (`Ext 0`, strict `Glue`, the closed modality `●`) are declared here as
+extra `Tm` constructors so that the F2 library can extend the same syntax; F0's rules
+never inspect them, and no F0 proof changes because of them.
 -/
 
 
 namespace STC
 namespace F0
+
+/- F2's term formers use the cofibration syntax of `F1/Cof.lean`; the dependency is on
+that file alone (it has no imports of its own), so F0's own rules are unchanged. -/
+open STC.F1
 
 inductive Tm where
   | var (i : Nat)
@@ -60,6 +69,29 @@ inductive Tm where
   | ulift (s : Srt) (A : Tm)
   | up (a : Tm)
   | down (t : Tm)
+  /-- F2 `Ext 0 A φ a`, the extension type `{A ∣ φ ↦ a}` (`shared-cofib-layer.md` §1,
+  stage 22c): `A` is a type and `a : [φ] → A` is its boundary. -/
+  | ext (A : Tm) (φ : Cof) (a : Tm)
+  /-- `in` of `Ext 0`: an element `t : A` whose boundary is `a` (`extIn A φ a t`). -/
+  | extIn (A : Tm) (φ : Cof) (a : Tm) (t : Tm)
+  /-- `out` of `Ext 0`: an element of `A`. -/
+  | extOut (x : Tm)
+  /-- strict `Glue φ A T f` (`shared-cofib-layer.md` §1, stage 22d), with `T : [φ] → Sort`
+  and `f : (z : [φ]) → T z → A`; it is `T prf` under `φ` (R4, `eqv = none`). -/
+  | glueTy (φ : Cof) (A T f : Tm)
+  /-- `glue t a`: `t : (z : [φ]) → T z`, `a : A`, agreeing on the face. -/
+  | glue (φ : Cof) (t a : Tm)
+  /-- `unglue φ f x`: the underlying element of `A`. -/
+  | unglue (φ : Cof) (f x : Tm)
+  /-- the closed modality `●_φ A` (`shared-cofib-layer.md` §7b, stage 22e, R3). -/
+  | closedTy (φ : Cof) (A : Tm)
+  /-- `η● a`. -/
+  | closedIn (φ : Cof) (a : Tm)
+  /-- `⋆●`, available when the context entails `φ`. -/
+  | closedStar (φ : Cof) (A : Tm)
+  /-- a (non-dependent) eliminator for `●_φ A` with methods `mη : A → B` and
+  `m⋆ : [φ] → B`. -/
+  | closedElim (φ : Cof) (A B mEta mStar x : Tm)
   deriving Repr, Inhabited, BEq
 
 namespace Tm
@@ -118,6 +150,16 @@ def ren (ρ : Nat → Nat) : Tm → Tm
   | ulift s A => ulift s (ren ρ A)
   | up a => up (ren ρ a)
   | down t => down (ren ρ t)
+  | ext A φ a => ext (ren ρ A) φ (ren ρ a)
+  | extIn A φ a t => extIn (ren ρ A) φ (ren ρ a) (ren ρ t)
+  | extOut x => extOut (ren ρ x)
+  | glueTy φ A T f => glueTy φ (ren ρ A) (ren ρ T) (ren ρ f)
+  | glue φ t a => glue φ (ren ρ t) (ren ρ a)
+  | unglue φ f x => unglue φ (ren ρ f) (ren ρ x)
+  | closedTy φ A => closedTy φ (ren ρ A)
+  | closedIn φ a => closedIn φ (ren ρ a)
+  | closedStar φ A => closedStar φ (ren ρ A)
+  | closedElim φ A B mEta mStar x => closedElim φ (ren ρ A) (ren ρ B) (ren ρ mEta) (ren ρ mStar) (ren ρ x)
 
 /-- Weakening by one variable. -/
 def shift (t : Tm) : Tm := ren (· + 1) t
@@ -160,6 +202,16 @@ def sub (σ : Nat → Tm) : Tm → Tm
   | ulift s A => ulift s (sub σ A)
   | up a => up (sub σ a)
   | down t => down (sub σ t)
+  | ext A φ a => ext (sub σ A) φ (sub σ a)
+  | extIn A φ a t => extIn (sub σ A) φ (sub σ a) (sub σ t)
+  | extOut x => extOut (sub σ x)
+  | glueTy φ A T f => glueTy φ (sub σ A) (sub σ T) (sub σ f)
+  | glue φ t a => glue φ (sub σ t) (sub σ a)
+  | unglue φ f x => unglue φ (sub σ f) (sub σ x)
+  | closedTy φ A => closedTy φ (sub σ A)
+  | closedIn φ a => closedIn φ (sub σ a)
+  | closedStar φ A => closedStar φ (sub σ A)
+  | closedElim φ A B mEta mStar x => closedElim φ (sub σ A) (sub σ B) (sub σ mEta) (sub σ mStar) (sub σ x)
 
 /-- The substitution `[a/0]`. -/
 def one (a : Tm) : Nat → Tm

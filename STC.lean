@@ -14,9 +14,10 @@ import STC.F0.Sanity
 import STC.F1.Cof
 import STC.F1.Phase
 import STC.F1.Sanity
+import STC.F2.Sanity
 
 /-!
-# STC: the F0 specification and the F1 phase layer of the STC track
+# STC: the F0 specification, the F1 phase layer, and the F2 term formers
 
 M0.1 of the design note `/workspace/wiz-notes/stc-m0-spec.md`:
 
@@ -65,10 +66,47 @@ M0.1 of the design note `/workspace/wiz-notes/stc-m0-spec.md`:
 * `F1/Sanity`: compile-time witnesses and `#eval` checks of the decision procedure.
 
 `F1` is `F0Base ∪ Phase`: it does not include F0's two `Struct` rules, whose law closure
-remains the open `StructRenClosed`/`StructSubClosed` of `F0/Typing.lean`. The F1 *term*
-formers `Ext`, strict `Glue` and `●` are not in this slice. The implementation note is
-`/workspace/wiz-notes/agents/stc-f1.md`; the design paragraph is in
+remains the open `StructRenClosed`/`StructSubClosed` of `F0/Typing.lean`. The implementation
+note is `/workspace/wiz-notes/agents/stc-f1.md`; the design paragraph is in
 `/workspace/wiz-notes/stc-m0-spec.md` §3 (2026-11-14, agent `stc-f1`).
+
+## F2 (the term formers: `Ext 0`, strict `Glue`, `●`)
+
+`F2/` adds the three term formers F1 deferred (`shared-cofib-layer.md` R3/R4,
+`stc-plan.md` M4b), with their phase rules:
+
+* `F2/Ext0`: `Ext 0 A φ a` (`{A ∣ φ ↦ a}`, stage 22c) with `extIn`/`extOut`, the
+  boundary premise `a z ≡ t` under `z : [φ]`, `β` (`out (in t) ⟶ t`) and `η`
+  (`in (out x) ≡ x`);
+* `F2/Glue`: strict `Glue φ A T f` (stage 22d, `eqv = none`) with `glue`/`unglue`, the
+  boundary premise `f z (t z) ≡ a` under `φ`, and `β`; the two *restriction* rules
+  (`Glue ≡ T z`, `glue t a ≡ t z` under `φ`) are stated as `GlueRestr`, outside `F2`
+  (see the gap below);
+* `F2/Closed`: the closed modality `●_φ A` (stage 22e, R3) with `η●`/`⋆●`, a
+  **non-dependent** eliminator and its two computation rules; the collapse
+  `η● a ≡ ⋆●` under `φ` is `ClosedRestr`, outside `F2` for the same reason;
+* `F2/Fragment`: `F2 = F1 ∪ Ext0 ∪ Glue ∪ Closed` and its membership lemmas;
+* `F2/Laws`: **renaming and substitution for all three formers**
+  (`ext0_renClosed`/`ext0_subClosed`, `glue_renClosed`/`glue_subClosed`,
+  `closed_renClosed`/`closed_subClosed`) and the laws for `F2`
+  (`F2_rename`, `F2_substs`, `F2_weakening`, `F2_subst`, `F2_subst_eq`,
+  `F2_subst_red`);
+* `F2/Ctx`: **context validity** for F1 and F2 (`F1_ctx`, `F2_ctx`), and the concrete
+  `[a/0]` companions without the explicit `⊢ Γ` (`F1_subst'`, `F2_subst'`, …);
+* `F2/Sanity`: `Ext 0` formation, `η●`/`⋆●`/elimination/computation for `●`.
+
+The F2 syntax lives in `STC/F0/Syntax.lean` (the three formers are new `Tm`
+constructors, which F0's rules and proofs do not inspect); `Tm.ren`/`Tm.sub` cover them
+without binders. F0's and F1's theorems are untouched and still build.
+
+**Gaps.** The two Glue restriction rules and the `●` collapse rule are not in `F2`:
+their conclusions live under `z : [φ]`, and F0/F1's `Renames R j` is stated for `j`'s own
+context, so their closure needs a relation between a renaming of `Γ` and one of
+`φ :: Γ` — the same restricted-context/hole relation that `StructRenClosed` needs.
+They are stated as the separate rule sets `GlueRestr`/`ClosedRestr`. `F2` is also still
+`Struct`-free (`F0Base ∪ Phase ∪ …`), and the `●` eliminator is non-dependent; the
+dependent one with its coherence premise is the next refinement. The implementation note
+is `/workspace/wiz-notes/agents/stc-f2.md`.
 
 Not a default Lake target; nothing imports it yet. The F0 implementation note is
 `/workspace/wiz-notes/stc-m0-impl.md`.
