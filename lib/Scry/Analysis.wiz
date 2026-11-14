@@ -171,10 +171,10 @@ def Scry.succs (g : Scry.Fn) (n : Nat) : List Nat :=
     | .false => match Scry.blockAt g b with
       | .none => .nil
       | .some blk => match blk.term with
-        | .goto t => .cons (Scry.nodeOf g t 0) .nil
-        | .br _ t f => .cons (Scry.nodeOf g t 0) (.cons (Scry.nodeOf g f 0) .nil)
-        | .ret _ => .nil
-        | .unreachable => .nil
+        | .goto t _ => .cons (Scry.nodeOf g t 0) .nil
+        | .br _ t f _ => .cons (Scry.nodeOf g t 0) (.cons (Scry.nodeOf g f 0) .nil)
+        | .ret _ _ => .nil
+        | .unreachable _ => .nil
 
 def Scry.predsOf (g : Scry.Fn) (n : Nat) : List Nat :=
   List.filter (fun m => Scry.memNat n (Scry.succs g m)) (Scry.range g.count)
@@ -203,22 +203,22 @@ def Scry.condUses : Wil.Cond → List Nat
 
 /-- The registers a statement writes. -/
 def Scry.stmtDefs : Wil.Stmt → List Nat
-  | .assign x _ => .cons x.index .nil
-  | .call (.some r) _ _ => .cons r.index .nil
+  | .assign x _ _ => .cons x.index .nil
+  | .call (.some r) _ _ _ => .cons r.index .nil
   | _ => .nil
 
 /-- The registers a statement reads. -/
 def Scry.stmtUses : Wil.Stmt → List Nat
-  | .assign _ e => Scry.rhsUses e
-  | .assume c => Scry.condUses c
-  | .store p v => .cons p.index (.cons v.index .nil)
-  | .free p => .cons p.index .nil
-  | .call _ callee args =>
+  | .assign _ e _ => Scry.rhsUses e
+  | .assume c _ => Scry.condUses c
+  | .store p v _ => .cons p.index (.cons v.index .nil)
+  | .free p _ => .cons p.index .nil
+  | .call _ callee args _ =>
     let argUses := List.map (fun v => v.index) args;
     match callee with
     | .direct _ => argUses
     | .indirect f => .cons f.index argUses
-  | .nop => .nil
+  | .nop _ => .nil
 
 /-- Every `(definition point, register)` in the function. -/
 def Scry.defsOf (g : Scry.Fn) : List (Nat × Nat) :=

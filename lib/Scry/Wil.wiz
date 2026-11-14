@@ -24,13 +24,13 @@ a concrete, fuel-bounded semantics over a block memory:
   fuel-bounded driver. Memory is CompCert style (blocks × offsets), so `lib/Hoare.wiz`'s
   heap predicates can be given to a function's Wil form later.
 
-Every statement will carry an *origin* (a span/CST node), so findings point at source
-and CST queries can join Wil facts. The field is not in this stage: the C frontend adds
-it in S2, and adding `origin` to `Wil.Stmt` and `Wil.Term` is a mechanical change.
+Every statement and terminator carries an *origin* (`Wil.Span`: file, byte range and CST
+node), so findings point at source and CST queries can join Wil facts. The builder
+stamps `Wil.noSpan`; S2's C lowering (`scry/src/Scry/Lower.wiz`) stamps the exact node.
 
 ## What is deliberately not here yet
 
-* C lowering, origins, the CFG/dominator/CDG passes and the call graph (S2 rest);
+* Dominators/post-dominators/CDG, points-to and the rest of the C frontend (S2/S4/S7);
 * indirect calls and function pointers (`Callee.direct` is implemented; `.indirect`
   faults);
 * floating point, aggregates and unions (`dyn` carries an unknown value);
@@ -59,6 +59,28 @@ def Wil.StmtId : Type := Wil.Id .stmt
 def Wil.mkBlockId (n : Nat) : Wil.BlockId := Wil.Id.mk n
 def Wil.mkFuncId (n : Nat) : Wil.FuncId := Wil.Id.mk n
 def Wil.mkStmtId (n : Nat) : Wil.StmtId := Wil.Id.mk n
+
+-- ## Origins
+
+/-- Where a Wil statement or terminator comes from: the byte range `[start, stop)` in
+file `file` (an index into the translation unit's source files), and the CST node it was
+lowered from (`node`, 0 when unknown). Every statement and terminator carries one, so a
+finding names source (S4's SARIF) and Wil facts join back to CST facts. -/
+structure Wil.Span where
+  /-- The source file's index in the translation unit. -/
+  file : Nat
+  /-- The first byte of the range (inclusive). -/
+  start : Nat
+  /-- One past the last byte of the range (exclusive). -/
+  stop : Nat
+  /-- The CST node the statement came from (0 when the origin is synthetic). -/
+  node : Nat
+
+/-- No origin: what a hand-built (builder or test) statement carries. -/
+def Wil.noSpan : Wil.Span := Wil.Span.mk 0 0 0 0
+
+/-- A synthetic origin in file `f` spanning `[start, stop)`. -/
+def Wil.spanAt (f start stop : Nat) : Wil.Span := Wil.Span.mk f start stop 0
 
 -- ## Types and values
 
@@ -327,21 +349,23 @@ inductive Wil.Callee where
   | indirect (v : Wil.Var)
 
 /-- A statement. These are the only effects: a register assignment, an assumption, a
-memory store/free, and a call. `nop` exists so a block can carry a label. -/
+memory store/free, and a call. `nop` exists so a block can carry a label. Every
+constructor's last argument is its origin (a `Wil.Span`), added in S2. -/
 inductive Wil.Stmt where
-  | assign (x : Wil.Var) (e : Wil.Rhs)
-  | assume (c : Wil.Cond)
-  | store (p : Wil.Var) (v : Wil.Var)
-  | free (p : Wil.Var)
-  | call (r : Option Wil.Var) (callee : Wil.Callee) (args : List Wil.Var)
-  | nop
+  | assign (x : Wil.Var) (e : Wil.Rhs) (origin : Wil.Span)
+  | assume (c : Wil.Cond) (origin : Wil.Span)
+  | store (p : Wil.Var) (v : Wil.Var) (origin : Wil.Span)
+  | free (p : Wil.Var) (origin : Wil.Span)
+  | call (r : Option Wil.Var) (callee : Wil.Callee) (args : List Wil.Var) (origin : Wil.Span)
+  | nop (origin : Wil.Span)
 
-/-- A block's terminator: `goto`, a two-way branch, a return, or `unreachable`. -/
+/-- A block's terminator: `goto`, a two-way branch, a return, or `unreachable`. Every
+constructor's last argument is its origin (a `Wil.Span`). -/
 inductive Wil.Term where
-  | goto (b : Wil.BlockId)
-  | br (c : Wil.Cond) (t : Wil.BlockId) (f : Wil.BlockId)
-  | ret (v : Option Wil.Var)
-  | unreachable
+  | goto (b : Wil.BlockId) (origin : Wil.Span)
+  | br (c : Wil.Cond) (t : Wil.BlockId) (f : Wil.BlockId) (origin : Wil.Span)
+  | ret (v : Option Wil.Var) (origin : Wil.Span)
+  | unreachable (origin : Wil.Span)
 
 structure Wil.Block where
   stmts : List Wil.Stmt
@@ -353,6 +377,8 @@ structure Wil.Func where
   locals : List Wil.Var
   entry : Wil.BlockId
   blocks : List Wil.Block
+  /-- Where the function was defined (`Wil.noSpan` when hand-built). -/
+  origin : Wil.Span
 
 structure Wil.Program where
   funcs : List Wil.Func
@@ -374,31 +400,101 @@ def Wil.Ty.signed : Wil.Ty → Bool
 -- program by hand: they are ordinary Wiz constructors, and a function's blocks are a
 -- list indexed by `BlockId`.
 
-def Wil.assign (x : Wil.Var) (e : Wil.Rhs) : Wil.Stmt := .assign x e
-def Wil.copy (x : Wil.Var) (y : Wil.Var) : Wil.Stmt := .assign x (.use y)
-def Wil.cst (x : Wil.Var) (v : Wil.Val) : Wil.Stmt := .assign x (.cst v)
-def Wil.num (x : Wil.Var) (n : Nat) : Wil.Stmt := .assign x (.cst (Wil.Val.ofNat (Wil.Ty.width x.ty) (Wil.Ty.signed x.ty) n))
-def Wil.binop (x : Wil.Var) (op : Wil.Op) (a b : Wil.Var) : Wil.Stmt := .assign x (.bin op a b)
-def Wil.unop (x : Wil.Var) (op : Wil.Op) (a : Wil.Var) : Wil.Stmt := .assign x (.un op a)
-def Wil.load (x : Wil.Var) (p : Wil.Var) : Wil.Stmt := .assign x (.load p)
-def Wil.gep (x : Wil.Var) (p : Wil.Var) (offset : Nat) : Wil.Stmt := .assign x (.gep p offset)
-def Wil.alloc (x : Wil.Var) (cells : Nat) : Wil.Stmt := .assign x (.alloc cells)
-def Wil.havoc (x : Wil.Var) : Wil.Stmt := .assign x (.havoc x.ty)
-def Wil.store (p : Wil.Var) (v : Wil.Var) : Wil.Stmt := .store p v
-def Wil.free (p : Wil.Var) : Wil.Stmt := .free p
-def Wil.assume (c : Wil.Cond) : Wil.Stmt := .assume c
+def Wil.assign (x : Wil.Var) (e : Wil.Rhs) : Wil.Stmt := .assign x e Wil.noSpan
+def Wil.copy (x : Wil.Var) (y : Wil.Var) : Wil.Stmt := .assign x (.use y) Wil.noSpan
+def Wil.cst (x : Wil.Var) (v : Wil.Val) : Wil.Stmt := .assign x (.cst v) Wil.noSpan
+def Wil.num (x : Wil.Var) (n : Nat) : Wil.Stmt := .assign x (.cst (Wil.Val.ofNat (Wil.Ty.width x.ty) (Wil.Ty.signed x.ty) n)) Wil.noSpan
+def Wil.binop (x : Wil.Var) (op : Wil.Op) (a b : Wil.Var) : Wil.Stmt := .assign x (.bin op a b) Wil.noSpan
+def Wil.unop (x : Wil.Var) (op : Wil.Op) (a : Wil.Var) : Wil.Stmt := .assign x (.un op a) Wil.noSpan
+def Wil.load (x : Wil.Var) (p : Wil.Var) : Wil.Stmt := .assign x (.load p) Wil.noSpan
+def Wil.gep (x : Wil.Var) (p : Wil.Var) (offset : Nat) : Wil.Stmt := .assign x (.gep p offset) Wil.noSpan
+def Wil.alloc (x : Wil.Var) (cells : Nat) : Wil.Stmt := .assign x (.alloc cells) Wil.noSpan
+def Wil.havoc (x : Wil.Var) : Wil.Stmt := .assign x (.havoc x.ty) Wil.noSpan
+def Wil.store (p : Wil.Var) (v : Wil.Var) : Wil.Stmt := .store p v Wil.noSpan
+def Wil.free (p : Wil.Var) : Wil.Stmt := .free p Wil.noSpan
+def Wil.assume (c : Wil.Cond) : Wil.Stmt := .assume c Wil.noSpan
 def Wil.call (r : Option Wil.Var) (name : String) (args : List Wil.Var) : Wil.Stmt :=
-  .call r (.direct name) args
+  .call r (.direct name) args Wil.noSpan
 def Wil.callIndirect (r : Option Wil.Var) (f : Wil.Var) (args : List Wil.Var) : Wil.Stmt :=
-  .call r (.indirect f) args
-def Wil.jump (b : Wil.BlockId) : Wil.Term := .goto b
-def Wil.branch (c : Wil.Cond) (t f : Wil.BlockId) : Wil.Term := .br c t f
-def Wil.ret (v : Option Wil.Var) : Wil.Term := .ret v
-def Wil.retV (v : Wil.Var) : Wil.Term := .ret (.some v)
+  .call r (.indirect f) args Wil.noSpan
+def Wil.jump (b : Wil.BlockId) : Wil.Term := .goto b Wil.noSpan
+def Wil.branch (c : Wil.Cond) (t f : Wil.BlockId) : Wil.Term := .br c t f Wil.noSpan
+def Wil.ret (v : Option Wil.Var) : Wil.Term := .ret v Wil.noSpan
+def Wil.retV (v : Wil.Var) : Wil.Term := .ret (.some v) Wil.noSpan
 def Wil.block (stmts : List Wil.Stmt) (term : Wil.Term) : Wil.Block := Wil.Block.mk stmts term
 def Wil.func (name : String) (params locals : List Wil.Var) (blocks : List Wil.Block) : Wil.Func :=
-  Wil.Func.mk name params locals (Wil.mkBlockId 0) blocks
+  Wil.Func.mk name params locals (Wil.mkBlockId 0) blocks Wil.noSpan
+def Wil.funcAt (name : String) (params locals : List Wil.Var) (blocks : List Wil.Block)
+    (origin : Wil.Span) : Wil.Func :=
+  Wil.Func.mk name params locals (Wil.mkBlockId 0) blocks origin
 def Wil.program (funcs : List Wil.Func) : Wil.Program := Wil.Program.mk funcs
+
+-- ## Origins of a statement or terminator
+
+/-- `s` with its origin replaced (the builder's default is `Wil.noSpan`; the C lowering
+stamps each statement with the CST node it came from). -/
+def Wil.withOrigin (s : Wil.Stmt) (o : Wil.Span) : Wil.Stmt :=
+  match s with
+  | .assign x e _ => .assign x e o
+  | .assume c _ => .assume c o
+  | .store p v _ => .store p v o
+  | .free p _ => .free p o
+  | .call r c args _ => .call r c args o
+  | .nop _ => .nop o
+
+/-- `t` with its origin replaced. -/
+def Wil.withTermOrigin (t : Wil.Term) (o : Wil.Span) : Wil.Term :=
+  match t with
+  | .goto b _ => .goto b o
+  | .br c tb fb _ => .br c tb fb o
+  | .ret v _ => .ret v o
+  | .unreachable _ => .unreachable o
+
+/-- A statement's origin. -/
+def Wil.stmtOrigin (s : Wil.Stmt) : Wil.Span :=
+  match s with
+  | .assign _ _ o => o
+  | .assume _ o => o
+  | .store _ _ o => o
+  | .free _ o => o
+  | .call _ _ _ o => o
+  | .nop o => o
+
+/-- A terminator's origin. -/
+def Wil.termOrigin (t : Wil.Term) : Wil.Span :=
+  match t with
+  | .goto _ o => o
+  | .br _ _ _ o => o
+  | .ret _ o => o
+  | .unreachable o => o
+
+-- ## The CFG
+--
+-- The CFG is derived from terminators, so it cannot disagree with the blocks: a `goto`
+-- has one successor, a `br` two, and `ret`/`unreachable` none. `Wil.Func.cfg` is the
+-- edge list S2's graph passes (and S4's report) consume.
+
+/-- A block's successor blocks, from its terminator. -/
+def Wil.Block.succs (b : Wil.Block) : List Wil.BlockId :=
+  match b.term with
+  | .goto t _ => .cons t .nil
+  | .br _ t f _ => .cons t (.cons f .nil)
+  | .ret _ _ => .nil
+  | .unreachable _ => .nil
+
+/-- `(block id, block)` for every block, in index order. -/
+partial def Wil.indexedBlocks : Nat → List Wil.Block → List (Wil.BlockId × Wil.Block)
+  | _, .nil => .nil
+  | i, .cons b rest => .cons (Wil.mkBlockId i, b) (Wil.indexedBlocks (Nat.succ i) rest)
+
+/-- A function's CFG edges: every block paired with each of its successors. -/
+def Wil.Func.cfg (fn : Wil.Func) : List (Wil.BlockId × Wil.BlockId) :=
+  List.concat (List.map (fun p => List.map (fun t => (p.1, t)) (Wil.Block.succs p.2))
+    (Wil.indexedBlocks 0 fn.blocks))
+
+/-- Every CFG target names a block of the function. -/
+def Wil.Func.cfgValid (fn : Wil.Func) : Bool :=
+  List.all (fun e => Nat.lt e.2.index (List.length fn.blocks)) (Wil.Func.cfg fn)
 
 -- ## Register files and block memory
 
@@ -592,29 +688,29 @@ inductive Wil.Act where
 def Wil.execStmt (prog : Wil.Program) (fr : Wil.Frame) (mem : Wil.Mem) : Wil.Stmt → Except String Wil.Act
   -- `alloc` is the one right-hand side that changes memory, so it is handled here (the
   -- other right-hand sides are pure).
-  | .assign x (.alloc cells) =>
+  | .assign x (.alloc cells) _ =>
     let r := Wil.memAlloc mem cells;
     let v := Wil.Val.fit x.ty r.2;
     .ok (.cont { fr with regs := Wil.setReg x.index v fr.regs, pc := Nat.succ fr.pc } r.1)
-  | .assign x e => do
+  | .assign x e _ => do
     v ← Wil.evalRhs fr mem e;
     let v' := Wil.Val.fit x.ty v;
     .ok (.cont { fr with regs := Wil.setReg x.index v' fr.regs, pc := Nat.succ fr.pc } mem)
-  | .assume c => do
+  | .assume c _ => do
     b ← Wil.evalCond fr c;
     match b with
     | .true => .ok (.cont { fr with pc := Nat.succ fr.pc } mem)
     | .false => .error "infeasible: assumption is false"
-  | .store p v => do
+  | .store p v _ => do
     pv ← Wil.getReg fr p;
     vv ← Wil.getReg fr v;
     mem' ← Wil.memStore mem pv (Wil.fitPointee p.ty vv);
     .ok (.cont { fr with pc := Nat.succ fr.pc } mem')
-  | .free p => do
+  | .free p _ => do
     pv ← Wil.getReg fr p;
     mem' ← Wil.memFree mem pv;
     .ok (.cont { fr with pc := Nat.succ fr.pc } mem')
-  | .call r callee args => do
+  | .call r callee args _ => do
     vals ← Wil.evalArgs fr args;
     match callee with
     | .direct name => match Wil.findFunc prog name with
@@ -623,21 +719,21 @@ def Wil.execStmt (prog : Wil.Program) (fr : Wil.Frame) (mem : Wil.Mem) : Wil.Stm
         | .true => .ok (.invoke fr mem fn vals r)
         | .false => .error (String.append "arity mismatch calling " name)
     | .indirect _ => .error "indirect call: not implemented (S2)"
-  | .nop => .ok (.cont { fr with pc := Nat.succ fr.pc } mem)
+  | .nop _ => .ok (.cont { fr with pc := Nat.succ fr.pc } mem)
 
 def Wil.execTerm (fr : Wil.Frame) (mem : Wil.Mem) : Wil.Term → Except String Wil.Act
-  | .goto b => .ok (.cont { fr with block := b, pc := 0 } mem)
-  | .br c t f => do
+  | .goto b _ => .ok (.cont { fr with block := b, pc := 0 } mem)
+  | .br c t f _ => do
     b ← Wil.evalCond fr c;
     match b with
     | .true => .ok (.cont { fr with block := t, pc := 0 } mem)
     | .false => .ok (.cont { fr with block := f, pc := 0 } mem)
-  | .ret v => match v with
+  | .ret v _ => match v with
     | .none => .ok (.ret fr .undef mem)
     | .some x => do
       xv ← Wil.getReg fr x;
       .ok (.ret fr xv mem)
-  | .unreachable => .error "unreachable block executed"
+  | .unreachable _ => .error "unreachable block executed"
 
 def Wil.advance (fr : Wil.Frame) : Wil.Frame := { fr with pc := Nat.succ fr.pc }
 

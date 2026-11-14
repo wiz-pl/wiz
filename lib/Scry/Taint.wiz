@@ -97,7 +97,7 @@ structure Scry.CallInfo where
   args : List Wil.Var
 
 def Scry.stmtCall : Wil.Stmt → Option Scry.CallInfo
-  | .call r (.direct name) args => .some (Scry.CallInfo.mk r name args)
+  | .call r (.direct name) args _ => .some (Scry.CallInfo.mk r name args)
   | _ => .none
 
 -- ## The line format

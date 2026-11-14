@@ -353,12 +353,14 @@ def Scry.CstStore.fieldIdByName (s : Scry.CstStore) (name : String) : Option U32
 
 -- ## The spill format
 
-/-- A name as a table line (`-` for the empty string, which node fields use). -/
+/-- A name as a table line (`<>` for the empty string, which node fields use). The
+sentinel is not `-`: `-` is the grammar kind of C's minus token, so a kind name would
+collide with the sentinel. -/
 def Scry.cstEnc (s : String) : String := match String.isEmpty s with
-  | .true => "-"
+  | .true => "<>"
   | .false => s
 /-- The inverse of `Scry.cstEnc`. -/
-def Scry.cstDec (s : String) : String := match String.eq s "-" with
+def Scry.cstDec (s : String) : String := match String.eq s "<>" with
   | .true => ""
   | .false => s
 
