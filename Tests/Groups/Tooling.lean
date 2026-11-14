@@ -136,17 +136,32 @@ def toolingGroup : Group where
         checkEq 0 code
         check ((out.splitOn "8").length > 1) s!"no result in the piped session:\n{out}\n{err}"
         check ((out.splitOn "wiz> ").length == 1) s!"a prompt was printed to a pipe:\n{out}" },
-    { name := "wiz test: the driver's --list, a group, and a clear error without the driver", run := fun _ => do
+    { name := "wiz repl: :type prints a type and :load adds a file's definitions", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        let file := dir / "Loaded.wiz"
+        -- the second definition is an error: its file's messages are prefixed, the
+        -- session goes on, and the good definition stays in scope
+        IO.FS.writeFile file "def three : Nat := 1 + 2\ndef bad : Nat := true\n"
+        let missing := dir / "missing.wiz"
+        let (code, out, err) := ← runRepl
+          s!"def two : Nat := 1 + 1\n:type two\n:load {file}\n#check three\n#eval three + 1\n:load {missing}\n#check two\n:quit\n"
+        checkEq 0 code
+        check ((out.splitOn "two : Nat").length > 1) s!"`:type` printed nothing:\n{out}\n{err}"
+        check ((out.splitOn "three : Nat").length > 1) s!"the loaded definition is not in scope:\n{out}\n{err}"
+        check ((out.splitOn "1:1: info: 4").length > 1) s!"`:load` broke the session:\n{out}\n{err}"
+        check ((err.splitOn s!"{file}:2:").length > 1) s!"no error with the loaded file's path:\n{err}"
+        check ((err.splitOn "cannot read").length > 1) s!"a missing file was not reported:\n{err}" },
+    { name := "wiz test-driver: the driver's --list, a group, and a clear error without the driver", run := fun _ => do
         let self ← IO.appPath
-        let (code, out, err) := ← runWiz ["test", "--list"] #[("WIZ_TESTS", some self.toString)]
+        let (code, out, err) := ← runWiz ["test-driver", "--list"] #[("WIZ_TESTS", some self.toString)]
         checkEq 0 code
         check ((out.splitOn "tooling").length > 1) s!"no tooling group in --list:\n{out}\n{err}"
         -- the cheapest group, through the wrapper: each case is one child process
-        let (code, out, err) := ← runWiz ["test", "=rig", "--jobs", "2"] #[("WIZ_TESTS", some self.toString)]
+        let (code, out, err) := ← runWiz ["test-driver", "=rig", "--jobs", "2"] #[("WIZ_TESTS", some self.toString)]
         checkEq 0 code
         check ((out.splitOn "── rig").length > 1 && (out.splitOn "0 failed").length > 1) s!"not the rig group's result:\n{out}\n{err}"
         let missing := "/nonexistent/wiz-tests"
-        let (code, out, err) := ← runWiz ["test", "--list"] #[("WIZ_TESTS", some missing)]
+        let (code, out, err) := ← runWiz ["test-driver", "--list"] #[("WIZ_TESTS", some missing)]
         checkEq 2 code
         check ((err.splitOn "no test driver").length > 1) s!"no clear error:\n{out}\n{err}" }
   ]

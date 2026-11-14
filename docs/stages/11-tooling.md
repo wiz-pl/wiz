@@ -627,17 +627,17 @@ page runs.
   for a definition that spans lines, no readline (history, line editing or completion),
   and no goal display — that is `wiz lsp` and the infoview. The REPL is a frontend
   session, not a separate evaluator: `#eval`/`:run` are the elaborator's interpreter and
-  IR. C headers and `link_c` files are resolved for the modules the REPL can import, but
-  the session itself has no package directory (the `:load` file's own `link_c` paths are
-  not resolved).
+  IR. C headers are preprocessed for the modules the REPL can import, but the session has
+  no file of its own: a `link_c` path (also one inside a `:load`ed file) is resolved
+  relative to the current directory.
 
-* **`wiz test-driver [GROUPS…] [--jobs N] [--list]`** (`testCmd`): a thin wrapper that
-  runs the test driver with these arguments unchanged. It looks for the driver beside the
-  `wiz` binary (a checkout's `.lake/build/bin/tests`), then `WIZ_TESTS`, then
-  `.lake/build/bin/tests` in the current directory. Without a driver it says how to build
-  one (`lake build wiz tests`) and exits 2. It is not a second runner: selectors,
-  `--jobs`, `--list`, `--timings` and the summary are the driver's. (The single-file form
-  `wiz test FILE` is 11ah.)
+* **`wiz test-driver [GROUPS…] [--jobs N] [--list]`** (`testDriverCmd`): a thin wrapper
+  that runs the test driver with these arguments unchanged. It looks for the driver named
+  by `WIZ_TESTS` (when it is a file), else beside the `wiz` binary (a checkout's
+  `.lake/build/bin/tests`), else `.lake/build/bin/tests` in the current directory. Without
+  a driver it says how to build one (`lake build wiz tests`) and exits 2. It is not a
+  second runner: selectors, `--jobs`, `--list`, `--timings` and the summary are the
+  driver's. (The single-file form `wiz test FILE` is 11ah.)
 
 ```
 $ wiz repl
@@ -647,7 +647,8 @@ wiz> #eval answer
 wiz> :type answer
 1:1: info: answer : Nat
 wiz> :load session.wiz
-session.wiz:1:1: info: …
+wiz> #check three
+1:1: info: three : Nat
 wiz> :quit
 $ printf 'def x : Nat := 7\n#eval x\n' | wiz repl
 1:1: info: 7

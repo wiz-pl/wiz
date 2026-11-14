@@ -18,8 +18,9 @@ def usage : String := "usage:
                                    (say, a Wasm module: --cc emcc --ldflags --no-entry)
   wiz run FILE [--llvm]            build and run `main`, printing its value
   wiz repl [--llvm]                read one command per line, keeping definitions (`:help`;
-                                   a pipe: one command per line, no prompt)
-  wiz test [GROUPS…] [--jobs N] [--list]
+                                   a pipe: one command per line, no prompt; `:type EXPR`,
+                                   `:load FILE`)
+  wiz test-driver [GROUPS…] [--jobs N] [--list]
                                    run the test driver (`.lake/build/bin/tests`, or WIZ_TESTS)
   wiz doc [MODULE|FILE|DIR…] -o OUT [--lib] [--source-url URL] [--title T] [--web DIR]
                                    documentation: a static site (one page per module,
@@ -355,8 +356,9 @@ def replInit (tc : Toolchain) : IO (CommandState ZeroOneMany) := do
 
 /-- `wiz repl [--llvm]`: read one command per line from stdin, elaborate it against the
 accumulated `CommandState` (definitions persist), print its messages and go on after an
-error. `:quit`/EOF exit, `:reset` forgets every definition, `:help` lists the commands.
-With `--llvm`, `:run NAME` builds through LLVM instead of C.
+error. `:quit`/EOF exit, `:reset` forgets every definition, `:help` lists the commands;
+`:type EXPR` prints a type and `:load FILE` elaborates a file into the session. With
+`--llvm`, `:run NAME` builds through LLVM instead of C.
 
 The base state stays pristine, so an `import` is checked in isolation as in a file, then
 elaborated into the session's state. A pipe has one command per line and no prompt. -/
@@ -372,11 +374,22 @@ def replCmd (tc : Toolchain) (llvm : Bool) : IO UInt32 := do
     | none => base
   let help := "commands:\n" ++
     "  LINE          elaborate a command (`def`, `#check`, `#eval`, `import`, …)\n" ++
+    "  :type EXPR    print the type of EXPR (like #check)\n" ++
+    "  :load FILE    elaborate FILE into this session (its definitions stay)\n" ++
     "  :run NAME     build and run the definition NAME (" ++ (if llvm then "LLVM" else "C") ++ ")\n" ++
     "  :reset        forget every definition\n" ++
     "  :help         this list\n" ++
     "  :quit         leave (EOF does too)\n" ++
     "The Prelude is imported at the start; errors are reported and the session goes on."
+  -- print the messages an input added (with its path, for `:load`), then forget them so
+  -- the next input does not print them again
+  let report (before : Nat) (s' : CommandState ZeroOneMany) (input : String)
+      (path? : Option String) : IO Unit := do
+    for m in s'.messages.extract before s'.messages.size do
+      let text := match path? with
+        | some p => s!"{p}:{m.render input}"
+        | none => m.render input
+      if m.severity == .error then stderr.putStrLn text else stdout.putStrLn text
   let mut state := preloaded
   let mut reading := true
   while reading do
@@ -399,27 +412,49 @@ def replCmd (tc : Toolchain) (llvm : Bool) : IO UInt32 := do
           stdout.putStrLn "reset"; stdout.flush
         | c =>
           if c.startsWith ":" then
-            match c.splitOn " " with
-            | [":run", name] =>
-              let dir ← IO.FS.createTempDir
-              match ← Build.runGlobal tc state name dir llvm with
-              | .error e => stderr.putStrLn e
-              | .ok v => stdout.putStr (if v.endsWith "\n" then v else v ++ "\n")
-              stdout.flush
-            | _ => stderr.putStrLn s!"unknown command {c} (`:help`)"
+            if c == ":type" then
+              stderr.putStrLn "usage: :type EXPR"
+            else if c.startsWith ":type " then
+              let text := s!"#check {(c.drop 6).trimAscii.toString}"
+              let s' := runFrontend.go text base text.toList.toArray 0 state
+              report state.messages.size s' text none
+              state := { s' with messages := #[] }
+            else if c == ":load" then
+              stderr.putStrLn "usage: :load FILE"
+            else if c.startsWith ":load " then
+              let path := (c.drop 6).trimAscii.toString
+              let text? ← try
+                pure (some (← IO.FS.readFile path))
+              catch e =>
+                stderr.putStrLn s!"cannot read {path}: {e}"
+                pure none
+              match text? with
+              | none => pure ()
+              | some text =>
+                let s' := runFrontend.go text base text.toList.toArray 0 state
+                report state.messages.size s' text (some path)
+                state := { s' with messages := #[] }
+            else
+              match c.splitOn " " with
+              | [":run", name] =>
+                let dir ← IO.FS.createTempDir
+                match ← Build.runGlobal tc state name dir llvm with
+                | .error e => stderr.putStrLn e
+                | .ok v => stdout.putStr (if v.endsWith "\n" then v else v ++ "\n")
+                stdout.flush
+              | _ => stderr.putStrLn s!"unknown command {c} (`:help`)"
           else
             -- the line is one command: elaborate it into the session, from the pristine base
             let s' := runFrontend.go line base line.toList.toArray 0 state
-            for m in s'.messages do
-              let text := m.render line
-              if m.severity == .error then stderr.putStrLn text else stdout.putStrLn text
+            report state.messages.size s' line none
             state := { s' with messages := #[] }
             stdout.flush
             stderr.flush
   return 0
 
-/-- The test driver: beside this binary (a checkout's `.lake/build/bin/tests`), or
-`WIZ_TESTS`, else `.lake/build/bin/tests` under the current directory. -/
+/-- The test driver: `WIZ_TESTS` (when it is a file), else beside this binary (a
+checkout's `.lake/build/bin/tests`), else `.lake/build/bin/tests` under the current
+directory. -/
 def testDriver : IO (Option System.FilePath) := do
   if let some p ← IO.getEnv "WIZ_TESTS" then
     let p := System.FilePath.mk p
@@ -429,11 +464,12 @@ def testDriver : IO (Option System.FilePath) := do
   let localPath : System.FilePath := ".lake/build/bin/tests"
   return (if (← localPath.pathExists) && !(← localPath.isDir) then some localPath else none)
 
-/-- `wiz test [GROUPS…] [--jobs N] [--list]`: run the test driver with these arguments
-(`lake build wiz tests` builds it). A convenience wrapper: the driver is the runner. -/
-def testCmd (args : List String) : IO UInt32 := do
+/-- `wiz test-driver [GROUPS…] [--jobs N] [--list]`: run the test driver with these
+arguments (`lake build wiz tests` builds it). A convenience wrapper: the driver is the
+runner. (`wiz test FILE` is the single-file form, stage 11ah.) -/
+def testDriverCmd (args : List String) : IO UInt32 := do
   let some driver ← testDriver
-    | IO.eprintln "wiz test: no test driver: build it with `lake build wiz tests`, or set WIZ_TESTS to its path"
+    | IO.eprintln "wiz test-driver: no test driver: build it with `lake build wiz tests`, or set WIZ_TESTS to its path"
       return 2
   let child ← IO.Process.spawn { cmd := driver.toString, args := args.toArray }
   child.wait
@@ -511,7 +547,7 @@ def main (args : List String) : IO UInt32 := do
   | ["run", path, "--llvm"] => runCmd tc path true (split := split)
   | ["repl"] => replCmd tc false
   | ["repl", "--llvm"] => replCmd tc true
-  | "test" :: rest => testCmd rest
+  | "test-driver" :: rest => testDriverCmd rest
   | "lsp" :: opts => do
     match lspOptions opts with
     | none => IO.println usage; pure 2
