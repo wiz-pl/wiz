@@ -693,9 +693,10 @@ inductive MTm where
   | transp (A a P p b e : MTm)
   | desc (l : Nat) (I : MTm)
   | dret (i : MTm)
-  | darg (S E : MTm)
-  | drec (j E : MTm)
-  | dhrec (H j E : MTm)
+  /-- (21x) a field's quantity, last (ω by default) -/
+  | darg (S E : MTm) (q : ZeroOneMany := .many)
+  | drec (j E : MTm) (q : ZeroOneMany := .many)
+  | dhrec (H j E : MTm) (q : ZeroOneMany := .many)
   | delim (v : Nat) (P a b c h D : MTm)
   | mu (l : Nat) (I D i : MTm)
   | con (x : MTm)
@@ -724,10 +725,11 @@ inductive MTm where
   | scase (l : Nat) (I D : MTm) (v : Nat) (P m s i x : MTm)
   /-- `scase` at a quantity (K1); `scase` is the one at ω -/
   | scaseq (q : ZeroOneMany) (l : Nat) (I D : MTm) (v : Nat) (P m s i x : MTm)
-  /-- a `Π`/`Σ` with its sort (level `l`) -/
-  | sorted (l : Nat) (t : MTm)
-  /-- `ULift A` in `Sort l` (Q4), its constructor and eliminator -/
-  | ulift (l : Nat) (A : MTm)
+  /-- a `Π`/`Σ` with its components' sorts written (`i`, `j`; mandatory sorts). The others
+  (`pi`, `sigma`, …) are written with holes, which each side's sorts pass fills -/
+  | sorted (i j : Nat) (t : MTm)
+  /-- `ULift A` in `Sort l` for `A : Sort k` (Q4), its constructor and eliminator -/
+  | ulift (k l : Nat) (A : MTm)
   | up (a : MTm)
   | down (t : MTm)
   /-- (P2) the proof marker, at a level -/
@@ -754,14 +756,14 @@ def globalDefs : List (String × List String × Option MTm × MTm) :=
    -- a proposition whose value depends on its level and whose type does not: `polyK.{0}`
    -- is `Prop → True`, `polyK.{1}` is `Type → True` (two instances of one constant must
    -- not be identified by their name: the property harness compares them, `Tests/Prop.lean`)
-   ("polyK", ["u"], some (sorted 0 (pi (sortParam "u") ptrue)), prop),
+   ("polyK", ["u"], some (pi (sortParam "u") ptrue), prop),
    -- (W1, `wiz-notes/kernel-lint.md`) a proposition that is a theorem at level 0 and false
    -- at level 1, and a case that is stuck on its scrutinee with `A` in its environment
    -- (its propositional Π's carry their sort, `0`: unannotated, a cast between two of
    -- them computes where their equation is stuck, the known U5 class of the property
    -- harness, `Tests/Prop.lean`; `A → Prop` has a sort that depends on `u` and stays bare)
-   ("dLv", ["u"], some (sorted 0 (pi (sortParam "u") (sorted 0 (pi (var 0) (sorted 0 (pi (var 1)
-     (sorted 0 (pi (pi (var 2) prop) (sorted 0 (pi (app (var 0) (var 2)) (app (var 1) (var 2)))))))))))), prop),
+   ("dLv", ["u"], some (pi (sortParam "u") (pi (var 0) (pi (var 1)
+     (pi (pi (var 2) prop) (pi (app (var 0) (var 2)) (app (var 1) (var 2))))))), prop),
    ("caseF", [], some (lam (lam (ecase prop (var 0) [var 1]))), pi prop (pi (enum 1) prop))]
 
 /-- (W1) `fun x p => p : (x : Enum 1) → caseF dLv.{l} x → caseF dLv.{l'} x`: the two types
@@ -781,12 +783,12 @@ def labels (k : Nat) : List Name := (List.range k).map (s!"a{·}")
 partial def toWiz : MTm → String
   | var i => s!"(.var {i})"
   | univ n => s!"(.univ {n})"
-  | pi a b => s!"(.pi {a.toWiz} {b.toWiz})"
+  | pi a b => s!"(.pi .qw .lhole .lhole {a.toWiz} {b.toWiz})"
   | lam b => s!"(.lam {b.toWiz})"
   | app f a => s!"(.app {f.toWiz} {a.toWiz})"
   | letE t v b => s!"(.letE {t.toWiz} {v.toWiz} {b.toWiz})"
   | ann t ty => s!"(.ann {t.toWiz} {ty.toWiz})"
-  | sigma a b => s!"(.sigma {a.toWiz} {b.toWiz})"
+  | sigma a b => s!"(.sigma .qw .lhole .lhole {a.toWiz} {b.toWiz})"
   | pair a b => s!"(.pair {a.toWiz} {b.toWiz})"
   | fst p => s!"(.fst {p.toWiz})"
   | snd p => s!"(.snd {p.toWiz})"
@@ -805,14 +807,19 @@ partial def toWiz : MTm → String
   | eqTy A B => s!"(.eqTy {A.toWiz} {B.toWiz})"
   | refl A a => s!"(.eqRefl {A.toWiz} {a.toWiz})"
   | reflTy X => s!"(.tyRefl {X.toWiz})"
-  | sorted l t => s!"(.sorted (.lnum {l}) {t.toWiz})"
+  | sorted i j t => match t with
+    | pi a b => s!"(.pi .qw (.lnum {i}) (.lnum {j}) {a.toWiz} {b.toWiz})"
+    | piq q a b => s!"(.pi {qWiz q} (.lnum {i}) (.lnum {j}) {a.toWiz} {b.toWiz})"
+    | sigma a b => s!"(.sigma .qw (.lnum {i}) (.lnum {j}) {a.toWiz} {b.toWiz})"
+    | sigmaq q a b => s!"(.sigma {qWiz q} (.lnum {i}) (.lnum {j}) {a.toWiz} {b.toWiz})"
+    | t => t.toWiz
   | cast A B e t => s!"(.coe {A.toWiz} {B.toWiz} {e.toWiz} {t.toWiz})"
   | transp A a P p b e => s!"(.subst {A.toWiz} {a.toWiz} {P.toWiz} {p.toWiz} {b.toWiz} {e.toWiz})"
   | desc l I => s!"(.descr {l} {I.toWiz})"
   | dret i => s!"(.dret {i.toWiz})"
-  | darg S E => s!"(.darg {S.toWiz} {E.toWiz})"
-  | drec j E => s!"(.drec {j.toWiz} {E.toWiz})"
-  | dhrec H j E => s!"(.dhrec {H.toWiz} {j.toWiz} {E.toWiz})"
+  | darg S E q => s!"(.darg (.qlit {qWiz q}) {S.toWiz} {E.toWiz})"
+  | drec j E q => s!"(.drec (.qlit {qWiz q}) {j.toWiz} {E.toWiz})"
+  | dhrec H j E q => s!"(.dhrec (.qlit {qWiz q}) {H.toWiz} {j.toWiz} {E.toWiz})"
   | delim v P a b c h D => s!"(.delim {v} {P.toWiz} {a.toWiz} {b.toWiz} {c.toWiz} {h.toWiz} {D.toWiz})"
   | mu l I D i => s!"(.mu {l} {I.toWiz} {D.toWiz} {i.toWiz})"
   | con x => s!"(.con {x.toWiz})"
@@ -821,14 +828,14 @@ partial def toWiz : MTm → String
     | some (_, ps, some v, ty) =>
       let psW := ps.foldr (fun p acc => s!"(.cons \"{p}\" {acc})") ".nil"
       let lsW := ls.foldr (fun l acc => s!"(.cons (.lnum {l}) {acc})") ".nil"
-      -- (the value with its proof markers, as the frontend stores it)
-      s!"(.const \"{n}\" {psW} {lsW} (markClosed {v.toWiz} {ty.toWiz}) {ty.toWiz})"
-    | some (_, _, none, ty) => s!"(.axiomC \"{n}\" {ty.toWiz})"
+      -- (the value with its proof markers and sorts, as the frontend stores it)
+      s!"(.const \"{n}\" {psW} {lsW} (markClosed {v.toWiz} (sortsTy {ty.toWiz})) (sortsTy {ty.toWiz}))"
+    | some (_, _, none, ty) => s!"(.axiomC \"{n}\" (sortsTy {ty.toWiz}))"
     | none => "(.var 999)"
   | sortParam u => s!"(.sortL (.lparam \"{u}\"))"
   | sortLv l => s!"(.sortL {l.toWiz})"
-  | piq q a b => s!"(.piq {qWiz q} {a.toWiz} {b.toWiz})"
-  | sigmaq q a b => s!"(.sigmaq {qWiz q} {a.toWiz} {b.toWiz})"
+  | piq q a b => s!"(.pi {qWiz q} .lhole .lhole {a.toWiz} {b.toWiz})"
+  | sigmaq q a b => s!"(.sigma {qWiz q} .lhole .lhole {a.toWiz} {b.toWiz})"
   | letq q t v b => s!"(.letq {qWiz q} {t.toWiz} {v.toWiz} {b.toWiz})"
   | size => ".size"
   | szInf => ".szInf"
@@ -843,7 +850,7 @@ partial def toWiz : MTm → String
   | coit l I D S st i s => s!"(.coit {l} {I.toWiz} {D.toWiz} {S.toWiz} {st.toWiz} {i.toWiz} {s.toWiz})"
   | scaseq q l I D v P m s i x => s!"(.scase {l} {qWiz q} {I.toWiz} {D.toWiz} {v} {P.toWiz} {m.toWiz} {s.toWiz} {i.toWiz} {x.toWiz})"
   | scase l I D v P m s i x => s!"(.scase {l} .qw {I.toWiz} {D.toWiz} {v} {P.toWiz} {m.toWiz} {s.toWiz} {i.toWiz} {x.toWiz})"
-  | ulift l A => s!"(.ulift {l} {A.toWiz})"
+  | ulift k l A => s!"(.ulift {k} {l} {A.toWiz})"
   | up a => s!"(.up {a.toWiz})"
   | down t => s!"(.down {t.toWiz})"
   | prf l t => s!"(.prf {l.toWiz} {t.toWiz})"
@@ -851,12 +858,12 @@ partial def toWiz : MTm → String
 partial def toTerm : MTm → Term ZeroOneMany
   | var i => .var i
   | univ n => .sort (Level.ofNat (n + 1))
-  | pi a b => .pi "x" .default (.qlit .many) a.toTerm b.toTerm none
+  | pi a b => .pi "x" .default (.qlit .many) a.toTerm b.toTerm .hole
   | lam b => .lam "x" b.toTerm
   | app f a => .app f.toTerm a.toTerm
   | letE t v b => .letE "x" (.qlit .many) t.toTerm v.toTerm b.toTerm
   | ann t ty => .ann t.toTerm ty.toTerm
-  | sigma a b => .sigma "x" (.qlit .many) a.toTerm b.toTerm none
+  | sigma a b => .sigma "x" (.qlit .many) a.toTerm b.toTerm .hole
   | pair a b => .pair a.toTerm b.toTerm
   | fst p => .fst p.toTerm
   | snd p => .snd p.toTerm
@@ -875,17 +882,17 @@ partial def toTerm : MTm → Term ZeroOneMany
   | eqTy A B => .eqTy A.toTerm B.toTerm
   | refl A a => .refl A.toTerm a.toTerm
   | reflTy X => .reflTy X.toTerm
-  | sorted l t => match t.toTerm with
-    | .pi x bi q a b _ => .pi x bi q a b (some (Level.ofNat l))
-    | .sigma x q a b _ => .sigma x q a b (some (Level.ofNat l))
+  | sorted i j t => match t.toTerm with
+    | .pi x bi q a b _ => .pi x bi q a b ⟨Level.ofNat i, Level.ofNat j⟩
+    | .sigma x q a b _ => .sigma x q a b ⟨Level.ofNat i, Level.ofNat j⟩
     | u => u
   | cast A B e t => .cast A.toTerm B.toTerm e.toTerm t.toTerm
   | transp A a P p b e => .transp A.toTerm a.toTerm P.toTerm p.toTerm b.toTerm e.toTerm
   | desc l I => .desc (Level.ofNat l) I.toTerm
   | dret i => .dret i.toTerm
-  | darg S E => .darg (.qlit .many) S.toTerm E.toTerm
-  | drec j E => .drec (.qlit .many) j.toTerm E.toTerm
-  | dhrec H j E => .dhrec (.qlit .many) H.toTerm j.toTerm E.toTerm
+  | darg S E q => .darg (.qlit q) S.toTerm E.toTerm
+  | drec j E q => .drec (.qlit q) j.toTerm E.toTerm
+  | dhrec H j E q => .dhrec (.qlit q) H.toTerm j.toTerm E.toTerm
   | delim v P a b c h D => .delim (Level.ofNat v) P.toTerm a.toTerm b.toTerm c.toTerm h.toTerm D.toTerm
   | mu l I D i => .mu (Level.ofNat l) I.toTerm D.toTerm i.toTerm .szInf none
   | con x => .con x.toTerm
@@ -893,8 +900,8 @@ partial def toTerm : MTm → Term ZeroOneMany
   | const n ls => .const n (ls.map Level.ofNat)
   | sortParam u => .sort (.param u)
   | sortLv l => .sort l.toLevel
-  | piq q a b => .pi "x" .default (.qlit q) a.toTerm b.toTerm none
-  | sigmaq q a b => .sigma "x" (.qlit q) a.toTerm b.toTerm none
+  | piq q a b => .pi "x" .default (.qlit q) a.toTerm b.toTerm .hole
+  | sigmaq q a b => .sigma "x" (.qlit q) a.toTerm b.toTerm .hole
   | letq q t v b => .letE "x" (.qlit q) t.toTerm v.toTerm b.toTerm
   | size => .size
   | szInf => .szInf
@@ -909,10 +916,16 @@ partial def toTerm : MTm → Term ZeroOneMany
   | coit l I D S st i s => .coit (Level.ofNat l) I.toTerm D.toTerm S.toTerm st.toTerm i.toTerm s.toTerm
   | scaseq q l I D v P m s i x => .scase (Level.ofNat l) (.qlit q) I.toTerm D.toTerm (Level.ofNat v) P.toTerm m.toTerm s.toTerm i.toTerm x.toTerm
   | scase l I D v P m s i x => .scase (Level.ofNat l) (.qlit .many) I.toTerm D.toTerm (Level.ofNat v) P.toTerm m.toTerm s.toTerm i.toTerm x.toTerm
-  | ulift l A => .ulift (Level.ofNat l) A.toTerm
+  | ulift k l A => .ulift (Level.ofNat k) (Level.ofNat l) A.toTerm
   | up a => .up a.toTerm
   | down t => .down t.toTerm
   | prf l t => .prf l.toLevel t.toTerm
+
+/-- A `Π`/`Σ` read back with its sorts, when they are closed numbers. -/
+def sortedOf (σ : BinderSorts) (t : MTm) : MTm :=
+  match σ.dom.toNat?, σ.cod.toNat? with
+  | some i, some j => sorted i j t
+  | _, _ => t
 
 partial def ofTerm : Term ZeroOneMany → Option MTm
   | .var i => some (var i)
@@ -920,12 +933,12 @@ partial def ofTerm : Term ZeroOneMany → Option MTm
     | some (n + 1) => some (univ n)
     | some 0 => some prop
     | _ => none
-  | .pi _ _ (.qlit .many) a b _ => return pi (← ofTerm a) (← ofTerm b)
-  | .pi _ _ (.qlit q) a b _ => return piq q (← ofTerm a) (← ofTerm b)
+  | .pi _ _ (.qlit .many) a b σ => return sortedOf σ (pi (← ofTerm a) (← ofTerm b))
+  | .pi _ _ (.qlit q) a b σ => return sortedOf σ (piq q (← ofTerm a) (← ofTerm b))
   | .lam _ b => return lam (← ofTerm b)
   | .app f a => return app (← ofTerm f) (← ofTerm a)
-  | .sigma _ (.qlit .many) a b _ => return sigma (← ofTerm a) (← ofTerm b)
-  | .sigma _ (.qlit q) a b _ => return sigmaq q (← ofTerm a) (← ofTerm b)
+  | .sigma _ (.qlit .many) a b σ => return sortedOf σ (sigma (← ofTerm a) (← ofTerm b))
+  | .sigma _ (.qlit q) a b σ => return sortedOf σ (sigmaq q (← ofTerm a) (← ofTerm b))
   | .pair a b => return pair (← ofTerm a) (← ofTerm b)
   | .fst p => return fst (← ofTerm p)
   | .snd p => return snd (← ofTerm p)
@@ -951,9 +964,9 @@ partial def ofTerm : Term ZeroOneMany → Option MTm
   | .transp A a P p b e => return transp (← ofTerm A) (← ofTerm a) (← ofTerm P) (← ofTerm p) (← ofTerm b) (← ofTerm e)
   | .desc l I => return desc (← l.toNat?) (← ofTerm I)
   | .dret i => return dret (← ofTerm i)
-  | .darg _ S E => return darg (← ofTerm S) (← ofTerm E)
-  | .drec _ j E => return drec (← ofTerm j) (← ofTerm E)
-  | .dhrec _ H j E => return dhrec (← ofTerm H) (← ofTerm j) (← ofTerm E)
+  | .darg (.qlit q) S E => return darg (← ofTerm S) (← ofTerm E) q
+  | .drec (.qlit q) j E => return drec (← ofTerm j) (← ofTerm E) q
+  | .dhrec (.qlit q) H j E => return dhrec (← ofTerm H) (← ofTerm j) (← ofTerm E) q
   | .delim v P a b c h D => return delim (← v.toNat?) (← ofTerm P) (← ofTerm a) (← ofTerm b) (← ofTerm c) (← ofTerm h) (← ofTerm D)
   | .mu l I D i .szInf _ => return mu (← l.toNat?) (← ofTerm I) (← ofTerm D) (← ofTerm i)
   | .mu l I D i s _ => return mus (← l.toNat?) (← ofTerm I) (← ofTerm D) (← ofTerm i) (← ofTerm s)
@@ -972,12 +985,18 @@ partial def ofTerm : Term ZeroOneMany → Option MTm
   | .con x => return con (← ofTerm x)
   | .ind l I D v P m i x => return ind (← l.toNat?) (← ofTerm I) (← ofTerm D) (← v.toNat?) (← ofTerm P) (← ofTerm m) (← ofTerm i) (← ofTerm x)
   | .const n us => return const n (← us.mapM Level.toNat?)
-  | .ulift l A => return ulift (← l.toNat?) (← ofTerm A)
+  | .ulift k l A => return ulift (← k.toNat?) (← l.toNat?) (← ofTerm A)
   | .up a => return up (← ofTerm a)
   | .down t => return down (← ofTerm t)
   -- (the marker is not printed)
   | .prf _ t => ofTerm t
   | _ => none
+
+/-- (21x) a description field's quantity, as `Kernel.wiz`'s `show` prints it: nothing at ω -/
+def fieldQPre : ZeroOneMany → String
+  | .zero => "0 "
+  | .one => "1 "
+  | .many => ""
 
 /-- Printed like `show .nil` in `Kernel.wiz`. -/
 partial def pretty (l : Nat) : MTm → String
@@ -1007,14 +1026,14 @@ partial def pretty (l : Nat) : MTm → String
   | eqTy A B => s!"EqTy({pretty l A}, {pretty l B})"
   | refl A a => s!"refl({pretty l A}, {pretty l a})"
   | reflTy X => s!"reflTy({pretty l X})"
-  | sorted _ t => pretty l t
+  | sorted _ _ t => pretty l t
   | cast A B e t => s!"cast({pretty l A}, {pretty l B}, {pretty l e}, {pretty l t})"
   | transp A a P p b e => s!"transp({pretty l A}, {pretty l a}, {pretty l P}, {pretty l p}, {pretty l b}, {pretty l e})"
   | desc k I => s!"Desc{k}({pretty l I})"
   | dret i => s!"ret({pretty l i})"
-  | darg S E => s!"arg({pretty l S}, {pretty l E})"
-  | drec j E => s!"rec({pretty l j}, {pretty l E})"
-  | dhrec H j E => s!"hrec({pretty l H}, {pretty l j}, {pretty l E})"
+  | darg S E q => s!"arg({fieldQPre q}{pretty l S}, {pretty l E})"
+  | drec j E q => s!"rec({fieldQPre q}{pretty l j}, {pretty l E})"
+  | dhrec H j E q => s!"hrec({fieldQPre q}{pretty l H}, {pretty l j}, {pretty l E})"
   | delim _ P a b c h D => s!"elim({pretty l P}, {pretty l a}, {pretty l b}, {pretty l c}, {pretty l h}, {pretty l D})"
   | mu k I D i => s!"μ{k}({pretty l I}, {pretty l D}, {pretty l i})"
   | con x => s!"con({pretty l x})"
@@ -1038,7 +1057,7 @@ partial def pretty (l : Nat) : MTm → String
   | szSuc s => s!"↑({pretty l s})"
   | sizeLt s => s!"Size<({pretty l s})"
   | mus k I D i s => s!"μ{k}({pretty l I}, {pretty l D}, {pretty l i}, {pretty l s})"
-  | ulift k A => s!"ULift{k}({pretty l A})"
+  | ulift _ k A => s!"ULift{k}({pretty l A})"
   | up a => pretty l a
   | down t => pretty l t
   | prf _ t => pretty l t
@@ -1077,8 +1096,8 @@ def eqRefl' (A a : MTm) : MTm := refl A a
 → True)` at `Prop`, carried by `transp` to `(True → Unit) = ((True → True) → Unit)`, whose
 first component (the domains' equation) was `False` when domains were compared by shape. -/
 def propShapes : List MTm :=
-  let T1 := sorted 0 (pi ptrue ptrue)
-  let G (X : MTm) := sorted 1 (pi X (unit 0))
+  let T1 := sorted 0 0 (pi ptrue ptrue)
+  let G (X : MTm) := sorted 0 1 (pi X (unit 0))
   let e := ann (pair (lam (lam (var 0))) (lam star)) (eq prop ptrue T1)
   let bad := transp prop ptrue (lam (lam (eqTy (G ptrue) (G (var 1))))) (reflTy (G ptrue)) T1 e
   let erasedArg (A : MTm) := app (ann (lam star) (piq .zero A (unit 0))) (fst bad)
@@ -1126,7 +1145,11 @@ of `ULift` (a boxed proof, `down`, equality and casts, η, the level check). -/
 def smallField : List MTm :=
   let getS (D : MTm) := delim 2 (lam (univ 0)) (lam (unit 0)) (lams 4 (var 2)) (lams 4 (unit 0)) (lams 5 (unit 0)) D
   let D := ann (darg ptrue (lam (dret star))) (desc 0 (unit 0))
-  let L (A : MTm) := ulift 1 A
+  -- (`k`: the content's sort, `True : Sort 0`, `Enum 2 : Sort 1`, `Type : Sort 2`)
+  let L (A : MTm) := match A with
+    | ptrue => ulift 0 1 A
+    | univ _ => ulift 2 1 A
+    | _ => ulift 1 1 A
   let D' := ann (darg (L ptrue) (lam (dret star))) (desc 0 (unit 0))
   let boxed := ann (up star) (L ptrue)
   let liftedTag (i : Nat) := ann (up (tag 2 i)) (L (enum 2))
@@ -1140,7 +1163,7 @@ def smallField : List MTm :=
    ann (lam (lam star)) (pi (L ptrue) (pi (L ptrue) (eq (L ptrue) (var 1) (var 0)))),
    -- η: a variable of type `ULift A` is `up (down x)`
    ann (lam (refl (L (enum 2)) (var 0))) (pi (L (enum 2)) (eq (L (enum 2)) (var 0) (up (down (var 0))))),
-   ann (lam (up (var 0))) (pi (enum 2) (ulift 2 (enum 2))),
+   ann (lam (up (var 0))) (pi (enum 2) (ulift 1 2 (enum 2))),
    -- type equality: `ULift A = ULift B` is `A = B`; `ULift A = A` is `False`
    reflTy (L ptrue), reflTy (L (enum 2)),
    ann (lam (exfalso (empty 0) (var 0))) (pi (eqTy (L (enum 2)) (enum 2)) (empty 0)),
@@ -1153,9 +1176,9 @@ def smallField : List MTm :=
 the `absurd` checks), and equal literals give the Σ rule. (`MTm` has no quantity variables,
 the case F6 was about: its Lean test is in the group *quantity polymorphism*.) -/
 def qtyApart : List MTm :=
-  let F (q : ZeroOneMany) := sorted 1 (piq q (enum 2) (enum 2))
+  let F (q : ZeroOneMany) := sorted 1 1 (piq q (enum 2) (enum 2))
   [ann (lam (exfalso (empty 0) (var 0))) (pi (eqTy (F .zero) (F .one)) (empty 0)),
-   ann (lam (exfalso (empty 0) (var 0))) (pi (eqTy (sorted 1 (sigmaq .one (enum 2) (enum 2))) (sorted 1 (sigma (enum 2) (enum 2)))) (empty 0)),
+   ann (lam (exfalso (empty 0) (var 0))) (pi (eqTy (sorted 1 1 (sigmaq .one (enum 2) (enum 2))) (sorted 1 1 (sigma (enum 2) (enum 2)))) (empty 0)),
    ann (lam (exfalso (empty 0) (var 0))) (pi (eqTy (F .one) (F .one)) (empty 0)),
    reflTy (F .one)]
 
@@ -1561,12 +1584,12 @@ def levelPuzzles (n : Nat) : List (List String × Option MTm × MTm) := Id.run d
 kernel. `selfApp`: `Omega := delta omega` (no normal form); otherwise `Omega := omega`, the
 control. -/
 def abelCoquand (selfApp : Bool) : MTm :=
-  let top := sorted 0 (pi prop (sorted 0 (pi (var 0) (var 1))))
+  let top := sorted 1 0 (pi prop (sorted 0 0 (pi (var 0) (var 1))))
   -- Box P := μ (Desc.arg ((_ : Enum [u]) × P) (fun _ => Desc.ret ())) (); `boxD n` with P at index n
-  let boxD (n : Nat) := darg (sorted 1 (sigma (enum 1) (var (n + 1)))) (lam (dret star))
-  let p2 := sorted 1 (sigma (enum 2) (enum 2))
+  let boxD (n : Nat) := darg (sorted 1 0 (sigma (enum 1) (var (n + 1)))) (lam (dret star))
+  let p2 := sorted 1 1 (sigma (enum 2) (enum 2))
   letE prop top <|                                                 -- Top
-  letE prop (sorted 0 (pi (var 0) (var 1))) <|                     -- T2 := Top → Top
+  letE prop (sorted 0 0 (pi (var 0) (var 1))) <|                   -- T2 := Top → Top
   letE (var 0) (lam (var 0)) <|                                    -- id2 : T2
   letE (var 1) (lam (app (app (app (var 0) (var 2)) (var 1)) (var 0))) <|  -- delta z := z T2 id2 z
   letE (pi prop (univ 0)) (lam (mu 0 (unit 0) (boxD 0) star)) <|  -- Box
@@ -1591,8 +1614,8 @@ normalise, inside a marked proof: `let two : (A : Prop) → (A → A) → A → 
 f (f x); let h : True := two A_k (two A_{k-1}) … (two True) (fun x => x) (); ()`, all in
 `Prop`. The checker must not run it: inside a proof it binds a proof suspended. -/
 def proofTower (k : Nat) : MTm :=
-  let A : Nat → MTm := fun n => (List.range n).foldl (fun a _ => sorted 0 (pi a a)) ptrue
-  let twoTy := sorted 0 (pi prop (sorted 0 (pi (sorted 0 (pi (var 0) (var 1))) (sorted 0 (pi (var 1) (var 2))))))
+  let A : Nat → MTm := fun n => (List.range n).foldl (fun a _ => sorted 0 0 (pi a a)) ptrue
+  let twoTy := sorted 1 0 (pi prop (sorted 0 0 (pi (sorted 0 0 (pi (var 0) (var 1))) (sorted 0 0 (pi (var 1) (var 2))))))
   let twoVal := lams 3 (app (var 1) (app (var 1) (var 0)))
   let head := (List.range k).foldl (fun acc i => app acc (app (var 0) (A (k - 1 - i)))) (app (var 0) (A k))
   ann (prf (.num 0) (letE twoTy twoVal (letE ptrue (app (app head (lam (var 0))) star) star))) ptrue
@@ -1603,13 +1626,13 @@ def proofTower (k : Nat) : MTm :=
 the proof; reading the type back does (it is evaluated, to be a normal form), and must stop
 at the step budget. -/
 def proofTowerAbsurd (k : Nat) : MTm :=
-  let A : Nat → MTm := fun n => (List.range n).foldl (fun a _ => sorted 0 (pi a a)) ptrue
-  let twoTy := sorted 0 (pi prop (sorted 0 (pi (sorted 0 (pi (var 0) (var 1))) (sorted 0 (pi (var 1) (var 2))))))
+  let A : Nat → MTm := fun n => (List.range n).foldl (fun a _ => sorted 0 0 (pi a a)) ptrue
+  let twoTy := sorted 1 0 (pi prop (sorted 0 0 (pi (sorted 0 0 (pi (var 0) (var 1))) (sorted 0 0 (pi (var 1) (var 2))))))
   let twoVal := lams 3 (app (var 1) (app (var 1) (var 0)))
   let head := (List.range k).foldl (fun acc i => app acc (app (var 0) (A (k - 1 - i)))) (app (var 0) (A k))
   let tower := letE twoTy twoVal (letE ptrue (app (app head (lam (var 0))) star) (var 2))
   ann (prf (.num 0) (lam (refl (enum 2) (exfalso (enum 2) (var 0)))))
-    (pi pfalse (eq (enum 2) (exfalso (enum 2) (var 0)) (exfalso (enum 2) (prf (.num 0) tower))))
+    (sorted 0 0 (pi pfalse (eq (enum 2) (exfalso (enum 2) (var 0)) (exfalso (enum 2) (prf (.num 0) tower)))))
 
 /-- (P2) The proof marker, on terms that are *not* run through the marking pass: is the
 term accepted? `T2` is `True → True`, a proposition. -/
@@ -1620,7 +1643,7 @@ def markerSamples : List (MTm × Bool) :=
   let rE := refl (enum 2) (tag 2 0)
   let TE := eq (enum 2) (tag 2 0) (tag 2 0)
   let tr (p e : MTm) := transp (enum 2) (tag 2 0) (lam (lam ptrue)) p (tag 2 0) e
-  let SP := sorted 1 (sigma (enum 2) ptrue)
+  let SP := sorted 1 0 (sigma (enum 2) ptrue)
   [ -- a λ at a proposition must be marked
     (ann (lam (var 0)) T2, false),
     (ann (prf z (lam (var 0))) T2, true),
@@ -1746,8 +1769,13 @@ def leanVerdict (t : MTm) (mark : Bool := true) : String :=
   -- marked only if it is well typed (checked first without the marker's requirement).
   -- (the pre-check requires no markers at all, also inside proofs, so that a term whose
   -- proofs hold relevant subterms reaches the pass: review F2)
-  if mark && !(infer (R := ZeroOneMany) { globals := { g with lazyProofs := false } } t.toTerm).toBool then "error" else
-  let tm := if mark then (Mark.infer (R := ZeroOneMany) { globals := g } t.toTerm).1 else t.toTerm
+  -- (mandatory sorts: the holes `MTm` writes for the `Π`/`Σ` sorts are filled first, by the
+  -- sorts pass, in every case)
+  -- (the pre-check, holes allowed, comes first: the sorts pass evaluates the term)
+  -- (`mark := false`: hand-written terms, given to the pass as they are)
+  if mark && !(infer (R := ZeroOneMany) { globals := { g with lazyProofs := false, sortHolesOk := true } } t.toTerm).toBool then "error" else
+  let t0 := (Mark.infer (R := ZeroOneMany) { globals := g, sortsOnly := true } t.toTerm).1
+  let tm := if mark then (Mark.infer (R := ZeroOneMany) { globals := g } t0).1 else t0
   match infer (R := ZeroOneMany) { globals := g } tm with
   | .ok (ty, _) => match MTm.ofTerm (quote g 0 ty) with
     | some m => m.pretty 0
@@ -1757,23 +1785,26 @@ def leanVerdict (t : MTm) (mark : Bool := true) : String :=
 /-- The Wiz kernel's verdict on a closed term, as a Wiz definition: the term gets its proof
 markers from the Wiz marking pass first (`rawVerdict`: the term as it is). -/
 def wizVerdict : String :=
-  "def rawVerdict (t : Tm) : String := match infer empty t with\n  | .ok ty _ => show .nil 0 (quote 0 ty)\n  | .err _ => \"error\"\n" ++
-  "def markedVerdict (t : Tm) : String := rawVerdict (MR.tm (markInfer empty t))\n" ++
+  -- (mandatory sorts: the holes `MTm` writes are filled by the sorts pass first, always)
+  "def rawVerdict (t0 : Tm) : String := match infer empty (sortsInfer t0) with\n  | .ok ty _ => show .nil 0 (quote 0 ty)\n  | .err _ => \"error\"\n" ++
+  "def markedVerdict (t : Tm) : String := rawVerdict (MR.tm (markInfer empty (sortsInfer t)))\n" ++
   -- (a random term is marked only if it is well typed: the pass checks nothing)
-  "def verdict (t : Tm) : String := match infer (TCtx.noMarkers empty) t with\n  | .err _ => \"error\"\n  | .ok _ _ => markedVerdict t\n"
+  "def verdict (t : Tm) : String := match infer (TCtx.noMarkers empty) (sortsInfer t) with\n  | .err _ => \"error\"\n  | .ok _ _ => markedVerdict t\n"
 
 /-- What the Lean kernel says about a declaration: `ok` or `error`. -/
 def leanDeclVerdict (d : List String × Option MTm × MTm) : String :=
   let (ps, v, ty) := d
   let g := leanGlobals ()
-  -- (marked only if well typed, as in `leanVerdict`)
+  -- (marked only if well typed, as in `leanVerdict`; holes allowed in the pre-check, the
+  -- sorts pass after it)
   let pre : TCM Unit := do
-    let ctx : Ctx ZeroOneMany := { globals := { g with lazyProofs := false } }
+    let ctx : Ctx ZeroOneMany := { globals := { g with lazyProofs := false, sortHolesOk := true } }
     let _ ← Wiz.checkType ctx ty.toTerm
     if let some v := v then
       let _ ← Wiz.check ctx v.toTerm (ctx.eval ty.toTerm)
   if !pre.toBool then "error" else
-  match addDecl (R := ZeroOneMany) g (Decl.withMarks g { name := "test", levelParams := ps, type := ty.toTerm, value := v.map MTm.toTerm }) with
+  let d0 := Decl.withSorts g { name := "test", levelParams := ps, type := ty.toTerm, value := v.map MTm.toTerm }
+  match addDecl (R := ZeroOneMany) g (Decl.withMarks g d0) with
   | .ok _ => "ok"
   | .error _ => "error"
 

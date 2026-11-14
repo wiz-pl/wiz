@@ -114,25 +114,27 @@ def ottGroup : Group where
           "def e (f : Unit → True) : pf f = ((), ()) := ((), ())")
           ["fun f => (0 e : True) × True"]
         fails (p ++ "def bad (f : Unit → True) (h : pf f = ((), ())) : False := h.2") "mismatch" },
-    -- (nu-transp-elab) `refl a` whose argument's type has a metavariable (`fun x => x`):
-    -- after the rule "an equation at a proposition is True", inferring the equation from
-    -- `a` alone computed it by the funext rule (the sort of `?m → ?m` unknown), which didn't
-    -- unify with the expected `(0 e : True) × True`; `refl` is now checked against `A`
-    { name := "refl at a pair with a proof component, its type from the expected equation (nu-transp-elab)", run := fun _ =>
+    -- (closed by mandatory sorts; it was a known gap, pinned) a *neutral* proposition (`P q.1`
+    -- for a variable `P : A → Prop`, or `P : Prop`): the Σ rule reads whether a component is
+    -- a proposition off the Σ's component sorts, so both rules fire: `g1`'s second
+    -- component's equation is `True`, and `g2`'s first is `True` with `ê = reflTy`
+    { name := "an equation at a Σ with a neutral proof component (nu-transp; closed by mandatory sorts)", run := fun _ => do
+        ok ("def g1 (A : Type) (P : A → Prop) (p q : (x : A) × P x) (h : p = q) : True :=\n  let h2 := h.2\n  ()\n" ++
+          "def g2 (P : Prop) (B : Type) (p q : (0 k : P) × B) (h : p = q) : True :=\n  let h2 := h.2\n  ()\n" ++
+          "#reduce fun (P : Prop) (B : Type) (p q : (0 k : P) × B) => p = q\n" ++
+          "#reduce fun (A : Type) (P : A → Prop) (p q : (x : A) × P x) => p = q")
+          ["fun P B p q => (0 e : True) × cast (refl B) p.2 = q.2", "fun A P p q => (0 e : p.1 = q.1) × True"] },
+    -- (msorts review F1) `refl` at a Σ whose second component is a proposition, the pair's
+    -- type inferred (`fun x => x` with its domain a hole): checked against the computed
+    -- equation, by its sides (`eqSigmaSides?`), not by inferring `x = x` first
+    { name := "refl at a Σ with a proof component, the pair's type inferred (msorts review F1)", run := fun _ =>
         ok ("def B2 : Type := (x : Unit) × (True → True)\n" ++
           "def P (h : ((), fun (x : True) => x) = (((), fun x => x) : B2)) : Prop := True\n" ++
           "def t3 (h : ((), fun (x : True) => x) = (((), fun x => x) : B2)) : P h := ()\n" ++
           "def t5 : P (refl ((), fun x => x)) := t3 (refl ((), fun x => x))\n" ++
-          "def t4 : P (refl ((), fun x => x)) := t3 _\n") },
-    -- KNOWN GAP (pinned): a *neutral* proposition (`P q.1` for a variable `P : A → Prop`,
-    -- or `P : Prop`) is not seen by `propSort?`, so the two rules don't fire and the
-    -- kernel still rejects these. Mandatory sorts (`wiz-notes/mandatory-sorts.md`: every
-    -- Π/Σ carries its components' sorts) closes it; then this case flips: make it `ok`.
-    { name := "known gap: an equation at a Σ with a neutral proof component (nu-transp)", run := fun _ => do
-        fails "def g1 (A : Type) (P : A → Prop) (p q : (x : A) × P x) (h : p = q) : True :=\n  let h2 := h.2\n  ()"
-          "equality is for types in Type u, not propositions"
-        fails "def g2 (P : Prop) (B : Type) (p q : (0 k : P) × B) (h : p = q) : True :=\n  let h2 := h.2\n  ()"
-          "transp is for types in Type u, not propositions" },
+          "def t4 : P (refl ((), fun x => x)) := t3 _\n" ++
+          "def t8 : (((), fun (x : True) => x) : B2) = ((), fun x => x) := refl _\n" ++
+          "def t9 : (((), fun (x : True) => x) : B2) = ((), fun x => x) := rfl") },
     { name := "equality at Unit is True", run := fun _ =>
         ok "def uu (u v : Unit) : u = v := rfl" },
     { name := "η for pairs, via refl", run := fun _ =>

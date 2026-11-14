@@ -1,0 +1,54 @@
+import Hdl.Core
+import Hdl.Prim
+/-!
+# Hdl.Cdc
+
+Clock-domain crossings (`import Hdl.Cdc`).
+
+A `Circuit` has one clock domain: all its registers tick together and `Circuit.run` is
+one step per input. A design with two clocks is a composition of such circuits, each
+clocked by its own domain, wired at the top: `ClockDomain` names the Verilog net, and
+`Circuit.netlistIn d name c` puts a circuit's registers on `d`.
+
+Data that crosses from one domain into another must go through a synchroniser. `Cdc.sync2
+dst d` is two flops in the destination domain (`dst`'s), the first one sampling the
+asynchronous data `d`; it is a `Prim` declared with `Prim.declSync`, so
+`Netlist.domainErrors` lets its data come from exactly one other domain, puts its output
+in `dst`'s domain, and rejects every other crossing (a register sampling another domain,
+a combinational path that mixes domains, a memory written from another domain, ...).
+
+```
+def d2 : ClockDomain := ClockDomain.named "clk2"
+-- in the clk2 circuit: `d` (from the clk circuit) two clk2 edges later
+def synced {r : HwTy → Type} [Hw r] (d : r HwTy.bit) : r HwTy.bit :=
+  Cdc.sync2 (Hw.clockOf d2) d
+```
+
+The cell has no behavioural model (a model is one total function of its inputs, so a
+two-flop delay can only be written as the identity), and the checked runners refuse a
+multi-domain netlist anyway (`Netlist.domainRefusals`): a two-clock design needs an
+event schedule, which `Netlist.simulate` does not have. `Cdc.verilog` is the Verilog
+module the emitted instance refers to; append its text to the module's file (the
+`async_reg` attributes keep the two flops together in synthesis).
+-/
+
+/-- The two-flop synchroniser's input: the destination clock and the asynchronous data. -/
+def Cdc.sync2In : HwTy := HwTy.prod HwTy.clock HwTy.bit
+/-- `wiz_sync2`: two flops in the destination clock's domain (`Prim.declSync`). -/
+def Cdc.sync2P : Prim Cdc.sync2In HwTy.bit :=
+  Prim.declSync "wiz_sync2" .nil (.cons "clk" (.cons "d" .nil)) (.cons "q" .nil) .none
+/-- `Cdc.sync2 dst d`: `d` (a signal of another clock domain) through two flops clocked by
+`dst`. The result is in `dst`'s domain, two `dst` edges later. -/
+def Cdc.sync2 {r : HwTy → Type} [Hw r] (dst : r HwTy.clock) (d : r HwTy.bit) : r HwTy.bit :=
+  Hw.prim Cdc.sync2P (Hw.pair dst d)
+/-- A top-level `Multi` wire through `Cdc.sync2` into domain `dst`: the destination part's
+input `dstName` is the synchronised source `src` (two flops in `dst`). -/
+def Cdc.wire (dst : ClockDomain) (src dstName : String) : MultiWire :=
+  MultiWire.through (Prim.erase Cdc.sync2P) (.cons dst.name (.cons src .nil)) (.cons dstName .nil)
+/-- The Verilog module `wiz_sync2` that `Cdc.sync2P`'s instances refer to. -/
+def Cdc.verilog : String :=
+  "module wiz_sync2(input clk, input d, output q);\n"
+  <+> "  (* async_reg = \"true\" *) reg q1;\n"
+  <+> "  (* async_reg = \"true\" *) reg q2;\n"
+  <+> "  always @(posedge clk) begin\n    q1 <= d;\n    q2 <= q1;\n  end\n"
+  <+> "  assign q = q2;\nendmodule\n"

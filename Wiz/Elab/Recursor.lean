@@ -44,7 +44,7 @@ def closed (t : Term R) : B R := fun _ => t
 def app (f : B R) (as : List (B R)) : B R := fun d => as.foldl (fun acc a => .app acc (a d)) (f d)
 def lam (x : Name) (body : B R → B R) : B R := fun d => .lam x (body (bvar d) (d + 1))
 def pi (x : Name) (bi : BinderInfo) (q : B R) (A : B R) (body : B R → B R) : B R :=
-  fun d => .pi x bi (q d) (A d) (body (bvar d) (d + 1)) none
+  fun d => .pi x bi (q d) (A d) (body (bvar d) (d + 1)) .hole
 def fst (t : B R) : B R := fun d => .fst (t d)
 def snd (t : B R) : B R := fun d => .snd (t d)
 def pair (a b : B R) : B R := fun d => .pair (a d) (b d)
@@ -252,7 +252,7 @@ def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (s
       -- one method: `(1 m : (t : Enum ls) → ecase t [ULift (M_c)…])`; `M_c` is
       -- `down (m 'c)`
       let mA : B R := B.pi "t" .default (qlit w) (closed (.enum ls)) fun tv => fun d =>
-        .ecase "z" (.sort uA) (tv d) (cinfo.toList.map fun ci => .ulift uA (methodTy ci d))
+        .ecase "z" (.sort uA) (tv d) (cinfo.toList.map fun ci => .ulift .hole uA (methodTy ci d))
       binder "m" .default (qlit 1) mA fun m =>
         finish ((List.range cinfo.size).toArray.map fun k => fun d => .down (.app (m d) (.tag ls k)))
     else methods cinfo.toList #[]
