@@ -709,5 +709,78 @@ not "expected unknown escape sequence …". Strings print with Lean's escapes (`
 a carriage return). Tests: `language` ("string escapes …"); `selfhost` ("the lexer in
 Wiz agrees with the Lean lexer", whose input now has every escape and a bad one).
 
+Sections of this stage without a letter live in `13-language/`:
+[`include_str`: a file's text, as a string literal](13-language/include-str.md).
+
+## 13s: `calc` chains
+
+A `calc` block is a chain of relations, each with a proof: adjacent steps compose, and
+the chain proves the last step's relation between its first left endpoint and its last
+right endpoint. It is a term (`term.calc`, `Wiz/Parser/Builtin.lean`, `elabCalc` in
+`Wiz/Elab/Term.lean`):
+
+```
+import Nat
+
+def t (a b c d : Nat) (h1 : a ≤ b) (h2 : b < c) (h3 : c = d) : a < d :=
+  calc a ≤ b := h1
+       _ < c := h2
+       _ = d := h3
+```
+
+* A step is `term := term`, where the first term is a proposition of the form `a R b`
+  (a relation applied to two endpoints: `≤`, `<`, `=`, `↔`, `≈`, or a relation a program
+  declares). The last two arguments of its application spine are the endpoints.
+* `_` is the previous step's right endpoint; an explicit intermediate term must be the
+  same (definitionally), or "the middle term does not match". The chain itself is built
+  left-associated, `Trans.trans (Trans.trans h₀ h₁) h₂ …`: after each composition the
+  composite relation is found, and it is the next composition's first relation.
+* The steps' relations must be propositions: a relation between two terms whose result
+  is not a `Prop` is rejected. The relation at the last step is the chain's; `≤` then `<`
+  then `=` is `<`.
+* **Composition.** `class Trans (p q : Prop) (r : outParam Prop)` with
+  `trans : p → q → r` lives in `lib/Logic.wiz`. An instance composes two relations;
+  `r` is an output parameter, so instance search finds the composite proposition from
+  the two adjacent ones. `=` (at a type, and between propositions) and `↔` have
+  instances there; `Nat`, `Int` and `Q` register `=`, `≤` and `<` (and `≈` at `Q`) in
+  `lib/Nat.wiz`, `lib/IntOrder.wiz` and `lib/Rat.wiz`. A program registers its own
+  relation the same way:
+
+  ```
+  def Same (a b : Nat) : Prop := (a ≤ b) ∧ (b ≤ a)
+  infix:50 " ≈≈ " => Same
+  def Same.trans {a b c : Nat} (h1 : a ≈≈ b) (h2 : b ≈≈ c) : a ≈≈ c := …
+  instance {a b c : Nat} : Trans (a ≈≈ b) (b ≈≈ c) (a ≈≈ c) :=
+    Trans.mk (fun h h' => Same.trans h h')
+  ```
+* **Errors.** A composition with no instance reports both relations and the meeting
+  term ("calc: no `Trans` instance composes … at the middle term …"); a step whose proof
+  has the wrong type says so with the step's relation; a step that is not a binary
+  relation, or not a proposition, is rejected at the step. All are checked by the
+  kernel: a calc term is a `Trans.trans` application, with no axiom and no native
+  shortcut (`#print axioms`).
+* **The order is a `Bool` at `Nat`.** `Nat.Le m n` is `Nat.le m n = .true` and
+  `Nat.Lt m n` is `Nat.Le (succ m) n`; `Nat.le` reduces on constructors, so `a < succ b`
+  and `a ≤ b` are the *same proposition* by computation. Then the `Trans` instance for
+  `<` then `<` also matches a `<` then `≤` pair, through the shifted relation, and that
+  answer is weaker (`a ≤ c` instead of `a < c`). The intended instance for `<` then `≤`
+  is declared with `priority := 1001` (`lib/Nat.wiz`), so it is tried first. (At `Int`
+  and `Q` the strict and non-strict orders are not definitionally the same, so no
+  priority is needed; an overlapping user relation needs its own priority.) This is the
+  price of composing propositions rather than relation *functions*: relations that are
+  convertible are not told apart by instance search. A `Trans` over relation functions
+  (Lean's design) would not need the priority, but `=` is not a function constant in
+  Wiz, so the propositional class is the smaller, sounder fit here.
+* **Scope.** `BitVec`'s `ult`/`ule` are `Bool`-valued, so they are not relations in this
+  sense and have no instances; a `Prop` wrapper would be a new relation with its own
+  `Trans` instances. There is no dedicated `calc` tactic: `by exact calc …` works
+  (`calc` is a term). The syntax is in the Lean frontend only: `selfhost/Frontend.wiz`
+  has its own parser and no type classes or macros (23m), so a self-hosted `calc` would
+  need a mirrored `Trans` table there.
+
+Tests: `calc` (the mixed chains at `Nat`, `Int` and `Q`, `↔` and propositional `=`, `_`
+and explicit intermediates, a user-registered relation, and the three errors). The
+unrelated `calc_e` syntax category in the `language` group is untouched.
+
 The `simp` tactic (stage 6h) is library code written in Wiz, with only one new host
 request (`Tac.rewriteAt`): [13-language/simp.md](13-language/simp.md).

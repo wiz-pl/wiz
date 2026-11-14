@@ -60,6 +60,27 @@ the right-shift instruction probes are blocked on a conversion limitation, see
 `wiz-notes/rv-shift-lemmas.md`). It imports `BitBlast` for `Bits.low`, so it is a proof
 module, not part of `BitVec` itself.
 
+`lib/BitVecAdd.wiz` (`import BitVecAdd`): the 34-bit carry/borrow adder of a RISC-V ALU
+in word form. `BitVec.adcForm` is `zext1 {a, 1} + zext1 {b', sub}` (`b' = b`, or `~b`
+when subtracting, `BitVec.muxBit` being `Hw.mux` at values) and `BitVec.adc` is its
+`slice 1 32`, so `BitVec.adc s a b` is the core's expression for any control bit `s`.
+The bridge puts the pieces in the same `toNat`/`Bits.low` normal form as
+`BitVecShift`: `BitVec.catToNat`/`zext1ToNat` for a concatenation, `Bits.low33_cat`/
+`low33_cat0` (`Bits.low_of_lt` under `A * 2 + 1 < 2^33`, from `Bits.cat_lt`),
+`Bits.div_low_succ` (a `low (w+1)` divided by 2 is the `low w` of the divide, so the
+carry bit falls off) and `Bits.div_two_add`/`div_two`. The result is
+`BitVec.adc_zero`/`adc_one` (`add`/`sub`) and `BitVec.adc_eq`
+(`adc s a b = muxBit s (sub a b) (add a b)`), plus the `toNat` forms `adcW1`,
+`adcW2_zero`, `adcW2_one`, `adc_zero_toNat`, `adc_one_toNat`. This closes FINDINGS.md
+H2 for `wiz-rv`: ADD, ADDI and SUB are one `Eq.congrArg` each
+(`drafts/rv-add/AddSub.wiz`). For the comparisons it also has the carry-out half:
+`Bits.div_div` (`(n/2^k)/2^j = n/2^(k+j)`), `Bits.div_low_pow`
+(`div (low (w+1) n) 2^w = low 1 (div n 2^w)`), `Bits.div_one_of` (`P ≤ Z < 2P → Z/P = 1`)
+and `Bits.borrow_le`/`borrow_gt` (the borrow of `a + (2^32 - b)`, i.e. `a < b`). It
+imports `BitVecShift` for the `Bits.low`/`low_low` lemmas, so it is a proof module too;
+what remains for SLT/SLTU is the 1-bit assembly around `bitOf 33` (see
+`drafts/rv-add/README.md` and `wiz-notes/rv-core-proofs.md`).
+
 ## H14 S0: hardware as tagless-final code, with sharing
 
 `lib/Hdl/Core.wiz` (`import Hdl.Core`) is the L2 layer of the HDL plan: combinational
@@ -244,6 +265,20 @@ def Uart.onlyThat_a5 :     -- the loopback reports byte 0xa5 and nothing else, f
   with `_spec`, `checkFrom_during`, `findFrom_within`: `refl Bool.true` (the kernel
   evaluates) becomes a temporal statement. For long checks, `native_refl` (stage 27a).
 
+* **Refinement and case-analysis tools** (lib/Trace.wiz, from H14 T2):
+  `Mealy.simulatesInv`/`simulatesInvOut` (refinement for the specification's reachable
+  states: the one-step premise only from states satisfying an invariant it preserves),
+  `Mealy.follows` (a run along a known path `F`: from `F 0` at `t`, every step `k < K`
+  taken on the inputs that come, gives `stateAt (k + t) = F k`), `Mealy.seq` with
+  `seq_stateAt`/`seq_outAt` (two machines in sequence, `Circuit.seq` on traces: the second
+  runs on the first's outputs), `Nat.All P n`/`Nat.all_spec` (a table of the cases
+  `P 0 … P (n-1)` gives `∀ k < n, P k`), `Bool.all`/`Bool.forall9` (a Boolean check of all
+  2^9 inputs, `refl Bool.true`, holds at every input), `Bool.indP` (Bool elimination into
+  `Prop`), and small Nat facts (`Nat.lt_succ_split`, `Nat.lt_to_succ`, `Nat.lt_self_succ`,
+  `Nat.eq_of_beq`). Word equality from numbers is `UIntN.ext` (lib/Word.wiz): since
+  words carry their range (stage 22k), a word is not definitionally `BitVec.mk` of its
+  number, so the H14 T2 proofs call `UIntN.ext` directly.
+
 The examples: the UART transmitter's line is high whenever it is idle, at every cycle;
 the loopback delivers the byte sent within 45 cycles and reports no other, for ever
 (per byte: 48 evaluated cycles and a fixed point); a valid/ready buffer refines a
@@ -251,10 +286,104 @@ Bool-level specification for every input trace (eight cases of the control bits,
 variables), keeps an offered item stable (AXI), and hands on every accepted item if the
 consumer is ready infinitely often.
 
+The iCEstick UART (`examples/hdl-uart-temporal.wiz`, group `hdl-uart-temporal` in a
+heavy shard, about three minutes) is the same method on a real design: the transmitter
+is idle-high and frames every accepted byte for 40 cycles, the receiver reports a
+well-formed frame (and nothing on a bad stop bit or a short glitch), and the loopback
+delivers each byte 41 cycles after it is accepted, for every input trace and byte.
+
 Not done: sequences with repetition (SEREs; planned as monitor circuits), stuttering
 invariance as a theorem, a deep embedding printable as SVA, notation (□, ◇, `|->`:
 dsl-ergo, stacked on this), case splits on neutral bits (they need the range of `UIntN` in
 the sealed type; wishful `uintn-range-proof`), a tactic for the Bool case splits.
+
+## H14 T2: the iCEstick UART, temporal properties
+
+The first use of H14 T on a real design: the UART of wiz-icestick-uart
+(`src/Icestick/Uart.wiz`: transmitter, two-flip-flop synchroniser, receiver), copied
+unchanged into `examples/hdl-uart-temporal.wiz` (group `hdl-uart-temporal`, a heavy
+shard: about three minutes cold), with 4 clock cycles per bit. Everything is
+kernel-checked, for **every input trace** and **every byte** (a byte is 8 Booleans,
+`Bits8`; `byte d : BitVec 8` is the word), with no `sat_decide`, no `native_refl` and no
+bit lemmas beyond four lemmas about the shift registers. The generated table proofs are
+at statement level (they build each equation through a propositional motive rather than
+unfolding the `transp`/cast spines), so the file checks in ~171 s cold instead of >700 s
+(`scripts/gen-uart-temporal.py` regenerates it).
+
+| claim | statement |
+|---|---|
+| `Tx.idleHigh` | □ (idle → line high): `TL.always (TL.imp Tx.idleA …) (Tx.obs xs) 0` |
+| `Tx.frame`, `Tx.frameTL` | a byte `e` taken at cycle t (idle and start): for m < 40 the circuit's line at t+1+m is bit m/4 of the frame (start, `e`'s bits least significant first, stop), 4 cycles each; start is ignored meanwhile |
+| `Tx.returns`, `Tx.accepts` | at t+41 the transmitter is idle again, and a start then begins the next frame |
+| `Rx.receives`, `Rx.quiet`, `Rx.idleAfter` | idle at v (any counter, any register) and fed a well-formed frame of `e` (`Rx.WellFormed`: the transmitter's waveform up to the stop bit's middle): no report before v+38, `valid` with `byte e` at v+38, idle at v+39 |
+| `Rx.badStop` | the same with a low stop bit: no report, idle at v+39 (the design returns to idle; the low line then starts the next frame) |
+| `Rx.glitch` | a low pulse gone at the start bit's sample (v+2) is ignored: idle at v+3, register unchanged |
+| `Loop.delivers`, `Loop.silent` (+ `Loop.refinesOut`) | transmitter → synchroniser → receiver (`loopC`, the board's loopback): a byte taken at t while the loopback is quiet (`Loop.Quiet`) is reported at t+41, nothing in between |
+| `Loop.firstByte` | after reset, for every input trace whose first start is at t, the byte is reported at t+41 |
+
+**Method.** (1) Specifications on friendly types: `Tx.spec`, `Rx.spec`, `Sy.spec`, with
+control as Nats, data as Booleans, the state a one-constructor `inductive`. (2) The
+refinement premise, one step for every reachable control state (`Tx.inv`, `Rx.inv`):
+the circuit's step is first rewritten, by one `refl` with everything a variable, into
+its *decision form* `Tx.G`/`Rx.G` (the same gates on plain tuples, with the comparisons
+`left == 0`, `cnt == 3`, … as Booleans); the cases (44 for the transmitter, 38 + one
+lemma for all 128 idle counter values of the receiver) are evaluations of the decision
+form with the data as variables, plus four word lemmas (`Uart.shift_reg9`,
+`Uart.bit0_reg9`, `Uart.frame_byte`, `Uart.shift8_byte`, each 2^9 Boolean evaluations
+via `Bool.forall9`). The cases are generated by `scripts/gen-uart-temporal.py`. (3)
+`Mealy.simulatesInv` gives the circuit's run as the image of the specification's, for
+ever; `Mealy.seq_outAt` and the synchroniser's refinement give the loopback's. (4) The
+properties are proved on the specifications: `Mealy.follows` (a run along a known path:
+the 40 cycles of a frame, the 39 of a reception) and `Nat.all_spec` (case tables over
+small Nats).
+
+**Generalisation.** The proofs are for 4 cycles per bit; the board uses 104. Nothing
+in them depends on the number except the case tables: with n cycles per bit the
+transmitter has 11·n control states, the receiver 2 + 9·n (+ the idle lemma), a frame
+10·n cycles and a reception 10·n − 2. The generator takes `N`; the specifications'
+constants (3, 1 for the counter, 40/38/39 for the frames) become `n - 1`, `n/2 - 1`, …
+For n = 104 that is ~1100 transmitter and ~950 receiver cases: the same proof, too slow
+for the kernel today (see the findings), or a parametric proof by induction on the
+counter (the counter lemmas `Rx.incs` are already per value).
+
+**Findings (what H14 T and the kernel lacked).** Repros in
+`wiz-notes/perf-repros/` (relative to the repository root).
+* *Eq at a record type with stuck sides* is η-split by conversion and each field
+  re-walks the stuck computation: `stateAt m s0 xs (succ t) = (m (stateAt …) (xs t)).1` by
+  `rfl` takes 107 s with the state `Nat × (Nat × Bits8)` and 1.8 s with a one-constructor
+  inductive (`record-eq-eta/`; analysed by glued-eq: wishful `conv-sigma-eta-neutral`).
+  Workaround: inductive specification states.
+* *Case tables over expensive propositions*: `Nat.All P 128` whose entries are step
+  equations (a few muxes) costs ~1.3 s per entry to check against the table (180 s
+  for 128), while a table of closed facts costs ms. Workaround: the decision form with
+  Boolean logic (`Rx.G2`, equal to `Rx.G` for all 32 comparison values), so the idle step
+  is one lemma for every counter.
+* *Circuit steps in types are expensive*: a proposition mentioning `txM (Tx.st …)`
+  (bundle packing, the whole step) costs ~0.5 s per mention; hence the decision form,
+  related to the circuit by a single `refl`.
+* *Equations between circuit outputs*: composing `Rx.refinesOut` (circuit output = image
+  of the specification's) with `Rx.receives` into one equation about the circuit's
+  `Byte` output fails: with implicit arguments the elaborator computes the first
+  equation's type into its Σ form ("expected ?a = ?b"), and with the middle terms given
+  (`@Eq.trans`, or through `Eq.congrArg (fun o => o)`) the check goes over 2 GB (the
+  record-η issue again, with the circuit's step as the stuck side). The circuit-level
+  statements are therefore the refinement theorems (`Tx.refinesOut`, `Rx.refinesOut`,
+  `Loop.refinesOut`) plus the specification-level properties; the transmitter's line
+  (one field) composes fine (`Tx.frame`).
+* Missing in the library, now in lib/Trace.wiz (see H14 T): `Mealy.simulatesInv`,
+  `Mealy.follows`, `Mealy.seq`, `Nat.All`, `Bool.forall9`, `Bool.indP`. (Word equality
+  from numbers is `UIntN.ext`, lib/Word.wiz; the old `BitVec.eqOfNat` helper is gone:
+  its `rfl` premises do not hold once a word carries its range.)
+* The temporal vocabulary had no *rigid (local) variables* (SVA's `(go, v = data) |=> …`):
+  `Tx.frameTL` quantifies the byte outside the formula. `TL.during` reads its formula at
+  absolute times, so "bit m/4 at offset m" is written as an explicit `∀ m < 40`.
+* No `Nat` literal patterns (`| 0 =>`) in this branch's surface language (13q is
+  separate), so frame bits and paths are written with `Nat.beq`/`Nat.lt` matches.
+* Not proved: the unconditional loopback for arbitrary sequences of bytes (the joint
+  invariant over transmitter, synchroniser and receiver phases; `Loop.Quiet` holds at
+  every go of a well-spaced sequence, but only the first byte after reset is discharged,
+  `Loop.firstByte`); "nothing is reported that was not sent" (needs reasoning backwards
+  from a report).
 
 ## H14 C1: traces, the common semantics (`lib/Trace.wiz`)
 
@@ -694,6 +823,24 @@ File.withOwned p "w" (fun f o => do1
 `IO` is unchanged and so is lib/Sys.wiz's ω API; only the owned variants are `IO1`.
 Acquisition stays in continuation style until linear `match` lands (linear-case stage 2).
 
+## Quantity-polymorphic results (`lib/Result.wiz`, `lib/Region.wiz`)
+
+`ResultQ q A` is `Result` with its success value at quantity `q`: `ok` carries the value at
+`%q`, `err` only the `Error` (no payload). `ResultQ ω A` and `Result A` are the same type
+definitionally (`Result.toResultQ`/`ResultQ.toResult` are the identity), and at `q = 1`
+the success value is linear. `ResultQ.bind` threads the success value to its continuation
+at `q` and can change the result quantity; `ResultQ.map` and `ResultQ.elim` stay at `q`.
+At `q = 0` the value is erased: it cannot be used by a consumer, only ignored.
+
+`ResultH q B H` is the same generalization of `Result1`: the handle `H` is on both
+branches, at `%q`, and the value `B` is unrestricted. `ResultH 1 B H` and `Result1 B H`
+are definitionally equal (`Result1.toResultH`/`ResultH.toResult1` are the identity);
+`ResultH.bind` sequences handle-threading results and `ResultH.map` maps the value,
+keeping the handle. `Result1` stays the linear resource result: `ResultQ`'s error branch
+has no value, so a handle cannot be threaded through it, and `ResultH`'s only useful
+instance is `q = 1` (at `q = ω` the handle is droppable, at `q = 0` unusable).
+Details and the `q = 0` representation caveat: `wiz-notes/result-q.md`.
+
 ## Functors and Booleans
 
 `lib/Functor.wiz` (`import Functor`): `Functor`, `Applicative`, `<$>`, `<*>`; every `Monad`
@@ -872,3 +1019,54 @@ def u {A : Type} (xs : List A) : xs ++ [] = xs := by
 `lib/WordArray.wiz` (`U8Array`, `U32Array`, `U64Array`), `lib/WordMap.wiz` (`U64Map V`)
 and `lib/Intern.wiz` (`InternTable`, ids as `U32`): list models with laws, run natively
 in compiled code, updated in place when unique. See `docs/stages/29-natives.md`.
+
+## Persistent data structures: maps and sets
+
+`lib/PMap.wiz` (`import PMap`): `PMap K V` and `PSet K` (a `PMap K Unit`), immutable and
+structurally shared. A map is a size-balanced (weight-balanced, Adams scheme) binary
+search tree; every update returns a new map and leaves the old one valid, copying only
+the O(log n) nodes on the path to the change (plus O(1) for a rebalancing rotation).
+`empty`, `insert`, `erase`, `find`/`findD`, `contains`, `size`, `toList`, `keys`,
+`fromList`/`ofList`, `foldl` and `height`; sets have `empty`, `insert`, `erase`,
+`contains`, `size`, `toList`, `fromList` and `foldl`. `toList` and `foldl` go in
+increasing key order, and `fromList` accepts entries in any order (a later duplicate
+wins).
+
+Keys are ordered by a `Compare` instance (`compare : K → K → Ordering`), with instances
+for `Nat` (through the native `Nat.lt`/`Nat.beq`) and `U64` (`U64.cmp`, unsigned);
+define one instance to use any other key type. `PSet` and the map
+algorithms are key-generic, unlike `U64Map`. `size` and the balance checks are O(1) (the
+subtree size is stored in each node), so `insert`, `erase`, `find` and `contains` are
+O(log n) worst case, `toList`, `keys` and `foldl` are O(n), and `fromList` is
+O(n log n) for a list in arbitrary order.
+
+Only `find_empty` and `size_empty` are proved on the definitions; `find_insert`,
+`find_erase` and `size_insert` (and the sortedness and balance invariants across
+rotations) are checked by the tests rather than proved. Examples: `examples/persistent.wiz`
+(the checks, group `persistent`) and `examples/persistent-bench.wiz`. The representation,
+complexity, persistence guarantees, benchmark plan and the migration path for replacing
+`U64Map` with a pure model plus a native backend are in
+`wiz-notes/persistent-data.md`.
+
+## Scry: Wil, the analysis IR (`lib/Scry/Wil.wiz`)
+
+`import Scry.Wil` is the small three-address IR of the `scry` analyser
+(`wiz-notes/code-analysis-design.md` §4.3): typed variables and ids, `Rhs`/`Stmt`/
+`Term`, basic blocks and functions over a CompCert-style block memory, and a concrete,
+fuel-bounded small-step semantics (`Wil.step`, `Wil.Step`, `Wil.run`). `import
+Scry.WilExamples` is the hand-built golden corpus (`Scry.arith`, `Scry.sumTo`,
+`Scry.facLoop`, …) used by the `scry-wil` test group. There is no parser or C lowering
+in this stage; `wiz-notes/scry-wil.md` has the grammar, the rules, the corpus and what
+S2 still needs.
+
+## Scry: CFG, reaching definitions and taint (`lib/Scry/Analysis.wiz`, `lib/Scry/Taint.wiz`)
+
+`import Scry.Analysis` numbers a Wil function's statements and terminators as program
+points and computes the CFG, dominators, reaching definitions and the PDG's def-use
+(flow-dependence) edges. `import Scry.Taint` feeds those edges to the Datalog engine
+(`lib/Scry/Datalog.wiz`, `lib/Scry/Eval.wiz`) with a `TaintSpec` of source, sanitiser
+and sink calls; the source -> sink path of each finding comes from the engine's
+provenance. `import Scry.TaintExamples` is the hand-built corpus used by the
+`scry-taint` group. This is the S4 intraprocedural prototype: no tree-sitter, no C
+lowering, no SARIF, and no interprocedural or memory modelling yet;
+`wiz-notes/scry-taint.md` has the design, the spec format and the gaps.

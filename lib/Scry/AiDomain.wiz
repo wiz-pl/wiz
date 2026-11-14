@@ -1,0 +1,508 @@
+import Prelude
+import Text
+import Deriving
+import Logic
+/-!
+# Scry.AiDomain: lattices and abstract domains
+
+The domain half of scry's abstract-interpretation core (design
+`wiz-notes/code-analysis-design.md` §4.6, §5.3, stage S5). This module is independent
+of the Wil frontend: it defines the interfaces, the small numerical and nullness
+domains, and their *soundness obligations*. The obligations are `Prop`-valued
+statements, not proofs; §5.3's `check_sound` is conditional on them (the checker itself
+does not call them, which is the point of result checking).
+
+Main definitions:
+
+* `Lattice`, `Widen`, `Narrow`, `AbsDomain`, `Transfer`: the interfaces. The
+  computational fields are what the engine runs; γ and the transfer relation live in
+  `AbsDomain`/`Transfer`, and the laws are separate `Prop` statements below.
+* `Interval`: unsigned machine intervals `[lo, hi]`, `Top`, and `Bot`, with a width
+  supplied by the transfer functions (`AiMach`).
+* `Const`: a constant domain (`known n`, `unknown`, `cbot`).
+* `Null`: `nul`, `nonNull`, `maybe`, `nbot`.
+* `Value`: the simple reduced product `Interval × Const × Null`.
+* `Env`: a non-relational environment `Var → Value`, as an association list.
+
+The product is reduced in one direction: a known constant tightens the interval to a
+point (`Value.norm`). Nothing here is relational (no octagons yet, §4.6).
+
+```
+import Scry.AiDomain
+
+#eval Interval.contains (Interval.range 2 4) 3   -- true
+```
+-/
+
+-- ## Interfaces
+
+/-- A lattice with a decidable order: `le` is the concrete order, `join` the least upper
+bound, `bot` the least element. The laws are `Lattice.le_refl_stmt`, … below; they are
+not fields, so an engine can run an instance whose proofs are still open (result
+checking). -/
+class Lattice (L : Type) where
+  /-- the least element -/
+  bot : L
+  /-- `a ⊑ b`, decided -/
+  le : L → L → Bool
+  /-- the least upper bound -/
+  join : L → L → L
+
+/-- A widening operator. Only `Widen.widen_ub_stmt` is needed for soundness; termination
+is deliberately *not* required (the engine is untrusted, §5.3). -/
+class Widen (L : Type) [Lattice L] where
+  /-- `widen old new` over-approximates `old ⊔ new` -/
+  widen : L → L → L
+
+/-- A narrowing operator, used once after the post-fixpoint. -/
+class Narrow (L : Type) where
+  /-- `narrow old new` is between `old` and `old ⊓ new` -/
+  narrow : L → L → L
+
+/-- A concretisation-only abstract domain (Verasco style: no α). `C` is the type of
+concrete states, `L` the abstract one. -/
+class AbsDomain (C : Type) (L : Type) [Lattice L] where
+  /-- `γ a c`: concrete state `c` is described by abstract value `a` -/
+  gamma : L → C → Prop
+
+/-- Transfer functions for statements of type `S` over abstract values `L`. -/
+class Transfer (S : Type) (L : Type) [Lattice L] where
+  /-- the abstract post-state of `s` from `a` -/
+  step : S → L → L
+
+-- ## Obligations (statements, not proofs)
+
+/-- Reflexivity of `le`. -/
+def Lattice.le_refl_stmt (L : Type) [Lattice L] : Prop :=
+  (a : L) → Lattice.le a a = .true
+/-- Transitivity of `le`. -/
+def Lattice.le_trans_stmt (L : Type) [Lattice L] : Prop :=
+  (a b c : L) → Lattice.le a b = .true → Lattice.le b c = .true → Lattice.le a c = .true
+/-- `bot` is below everything. -/
+def Lattice.bot_le_stmt (L : Type) [Lattice L] : Prop :=
+  (a : L) → Lattice.le Lattice.bot a = .true
+/-- `join` is an upper bound on the left. -/
+def Lattice.join_ub_left_stmt (L : Type) [Lattice L] : Prop :=
+  (a b : L) → Lattice.le a (Lattice.join a b) = .true
+/-- `join` is an upper bound on the right. -/
+def Lattice.join_ub_right_stmt (L : Type) [Lattice L] : Prop :=
+  (a b : L) → Lattice.le b (Lattice.join a b) = .true
+/-- `join` is the *least* upper bound. -/
+def Lattice.join_least_stmt (L : Type) [Lattice L] : Prop :=
+  (a b c : L) → Lattice.le a c = .true → Lattice.le b c = .true →
+    Lattice.le (Lattice.join a b) c = .true
+/-- The widening over-approximates `join` (soundness; termination is not claimed). -/
+def Widen.widen_ub_stmt (L : Type) [Lattice L] [Widen L] : Prop :=
+  (a b : L) → Lattice.le (Lattice.join a b) (Widen.widen a b) = .true
+/-- γ is monotone: a more precise abstract value describes fewer states. -/
+def AbsDomain.gamma_mono_stmt (C L : Type) [Lattice L] [AbsDomain C L] : Prop :=
+  (a b : L) → (c : C) → Lattice.le a b = .true → AbsDomain.gamma a c → AbsDomain.gamma b c
+/-- `join` is sound for γ. -/
+def AbsDomain.join_sound_stmt (C L : Type) [Lattice L] [AbsDomain C L] : Prop :=
+  (a b : L) → (c : C) → AbsDomain.gamma a c → AbsDomain.gamma b c →
+    AbsDomain.gamma (Lattice.join a b) c
+/-- `bot` is sound. -/
+def AbsDomain.bot_sound_stmt (C L : Type) [Lattice L] [AbsDomain C L] : Prop :=
+  (c : C) → AbsDomain.gamma Lattice.bot c → False
+/-- A transfer function is monotone (the "monotone framework" condition). -/
+def Transfer.mono_stmt (S L : Type) [Lattice L] [Transfer S L] : Prop :=
+  (s : S) → (a b : L) → Lattice.le a b = .true →
+    Lattice.le (Transfer.step s a) (Transfer.step s b) = .true
+/-- Every transfer function is sound against a concrete statement semantics `sem`. -/
+def Transfer.sound_stmt (S C L : Type) [Lattice L] [AbsDomain C L] [Transfer S L]
+    (sem : S → C → C → Prop) : Prop :=
+  (s : S) → (a : L) → (c c' : C) → AbsDomain.gamma a c → sem s c c' →
+    AbsDomain.gamma (Transfer.step s a) c'
+
+-- ## Naturals: small helpers
+
+/-- The smaller of two naturals. -/
+def Ai.min (a b : Nat) : Nat := match Nat.le a b with
+  | .true => a
+  | .false => b
+/-- The larger of two naturals. -/
+def Ai.max (a b : Nat) : Nat := match Nat.le a b with
+  | .true => b
+  | .false => a
+/-- `2^w - 1`, the largest unsigned value of width `w`. -/
+def Ai.maxVal (w : Nat) : Nat := Nat.sub (Nat.pow 2 w) 1
+/-- Membership in a list of naturals (no `BEq` needed). -/
+def Ai.memNat (x : Nat) : List Nat → Bool
+  | .nil => .false
+  | .cons y ys => match Nat.beq x y with
+    | .true => .true
+    | .false => Ai.memNat x ys
+/-- Add a natural to the end of a list. -/
+def Ai.snoc {A : Type} (xs : List A) (x : A) : List A := List.append xs (.cons x .nil)
+
+-- ## Intervals
+
+/-- An unsigned interval: `bot` (no values, unreachable), `top` (any value of the
+ambient width), or `range lo hi` with `lo ≤ hi`. Signed intervals are a later extension;
+width is supplied by the operations, so `top` means "any value representable at that
+width". -/
+inductive Interval where
+  | bot
+  | top
+  | range (lo hi : Nat)
+  deriving Inhabited, BEq, Repr
+
+/-- `a ⊑ b`. -/
+def Interval.le : Interval → Interval → Bool
+  | .bot, _ => .true
+  | .top, .top => .true
+  | .top, _ => .false
+  | _, .top => .true
+  | _, .bot => .false
+  | .range lo hi, .range lo' hi' => Bool.and (Nat.le lo' lo) (Nat.le hi hi')
+
+/-- Least upper bound. -/
+def Interval.join : Interval → Interval → Interval
+  | .bot, b => b
+  | a, .bot => a
+  | .top, _ => .top
+  | _, .top => .top
+  | .range lo hi, .range lo' hi' => .range (Ai.min lo lo') (Ai.max hi hi')
+
+/-- The empty interval. -/
+def Interval.ebot : Interval := .bot
+/-- The universal interval. -/
+def Interval.etop : Interval := .top
+/-- A point interval, if the point is representable at width `w`. -/
+def Interval.point (w n : Nat) : Interval := match Nat.lt n (Nat.pow 2 w) with
+  | .true => .range n n
+  | .false => .top
+/-- Lower bound, if the interval is a nonempty range. -/
+def Interval.loOpt : Interval → Option Nat
+  | .range lo _ => .some lo
+  | _ => .none
+/-- Upper bound, if the interval is a nonempty range. -/
+def Interval.hiOpt : Interval → Option Nat
+  | .range _ hi => .some hi
+  | _ => .none
+/-- Is the interval empty? (`top` is not.) -/
+def Interval.isBot : Interval → Bool
+  | .bot => .true
+  | _ => .false
+/-- Is the interval the whole machine range? -/
+def Interval.isTop : Interval → Bool
+  | .top => .true
+  | _ => .false
+/-- Does the interval contain a natural? This is the computable concretisation used in
+the soundness obligations (`top` contains every natural; width restricts it outside). -/
+def Interval.contains (i : Interval) (n : Nat) : Bool := match i with
+  | .bot => .false
+  | .top => .true
+  | .range lo hi => Bool.and (Nat.le lo n) (Nat.le n hi)
+
+/-- Intersect two intervals. -/
+def Interval.meet : Interval → Interval → Interval
+  | .bot, _ => .bot
+  | _, .bot => .bot
+  | .top, b => b
+  | a, .top => a
+  | .range lo hi, .range lo' hi' =>
+      let l := Ai.max lo lo'
+      let h := Ai.min hi hi'
+      match Nat.le l h with
+      | .true => .range l h
+      | .false => .bot
+
+instance : Lattice Interval where
+  bot := Interval.ebot
+  le := Interval.le
+  join := Interval.join
+
+/-- Widening jumps to `top` as soon as the value grows. It is crude on purpose: the
+engine's precision is not trusted, only the post-fixpoint is checked. -/
+def Interval.widen (a b : Interval) : Interval := match Interval.le b a with
+  | .true => a
+  | .false => Interval.etop
+
+instance : Widen Interval where
+  widen := Interval.widen
+
+/-- Narrowing: take the new value when it is below the old one. -/
+def Interval.narrow (a b : Interval) : Interval := match Interval.le b a with
+  | .true => b
+  | .false => a
+
+instance : Narrow Interval where
+  narrow := Interval.narrow
+
+/-- The interval obligations, as one proposition. -/
+def Interval.laws : Prop :=
+  Lattice.le_refl_stmt Interval × Lattice.le_trans_stmt Interval ×
+  Lattice.bot_le_stmt Interval × Lattice.join_ub_left_stmt Interval ×
+  Lattice.join_ub_right_stmt Interval × Lattice.join_least_stmt Interval ×
+  Widen.widen_ub_stmt Interval
+
+/-- `join` sound for the computable concretisation. -/
+def Interval.join_sound_stmt : Prop :=
+  (a b : Interval) → (n : Nat) → Interval.contains a n = .true →
+    Interval.contains b n = .true → Interval.contains (Interval.join a b) n = .true
+
+/-- `meet` sound (used by guard refinement). -/
+def Interval.meet_sound_stmt : Prop :=
+  (a b : Interval) → (n : Nat) → Interval.contains (Interval.meet a b) n = .true →
+    Interval.contains a n = .true
+
+-- ## Constants
+
+/-- A constant domain: `cbot` (unreachable), `known n`, or `unknown` (top). -/
+inductive Const where
+  | cbot
+  | known (n : Nat)
+  | unknown
+  deriving Inhabited, BEq, Repr
+
+/-- `a ⊑ b`. -/
+def Const.le : Const → Const → Bool
+  | .cbot, _ => .true
+  | .known a, .known b => Nat.beq a b
+  | .known _, .unknown => .true
+  | .known _, .cbot => .false
+  | .unknown, .unknown => .true
+  | .unknown, _ => .false
+
+/-- Least upper bound: equal constants stay known, different ones become `unknown`. -/
+def Const.join : Const → Const → Const
+  | .cbot, b => b
+  | a, .cbot => a
+  | .unknown, _ => .unknown
+  | _, .unknown => .unknown
+  | .known a, .known b => match Nat.beq a b with
+    | .true => .known a
+    | .false => .unknown
+
+/-- The least element. -/
+def Const.cbotV : Const := .cbot
+/-- The greatest element. -/
+def Const.ctopV : Const := .unknown
+
+instance : Lattice Const where
+  bot := Const.cbotV
+  le := Const.le
+  join := Const.join
+
+def Const.widen (a b : Const) : Const := match Const.le b a with
+  | .true => a
+  | .false => Const.ctopV
+
+instance : Widen Const where
+  widen := Const.widen
+
+def Const.narrow (a b : Const) : Const := match Const.le b a with
+  | .true => b
+  | .false => a
+
+instance : Narrow Const where
+  narrow := Const.narrow
+
+def Const.laws : Prop :=
+  Lattice.le_refl_stmt Const × Lattice.le_trans_stmt Const ×
+  Lattice.bot_le_stmt Const × Lattice.join_ub_left_stmt Const ×
+  Lattice.join_ub_right_stmt Const × Lattice.join_least_stmt Const
+
+-- ## Nullness
+
+/-- Nullness: `nbot` (unreachable), `nul`, `nonNull`, or `maybe` (top). `nul` and
+`nonNull` are incomparable. -/
+inductive Null where
+  | nbot
+  | nul
+  | nonNull
+  | maybe
+  deriving Inhabited, BEq, Repr
+
+def Null.le : Null → Null → Bool
+  | .nbot, _ => .true
+  | .nul, .nul => .true
+  | .nul, .maybe => .true
+  | .nul, _ => .false
+  | .nonNull, .nonNull => .true
+  | .nonNull, .maybe => .true
+  | .nonNull, _ => .false
+  | .maybe, .maybe => .true
+  | .maybe, _ => .false
+
+def Null.join : Null → Null → Null
+  | .nbot, b => b
+  | a, .nbot => a
+  | .maybe, _ => .maybe
+  | _, .maybe => .maybe
+  | .nul, .nul => .nul
+  | .nonNull, .nonNull => .nonNull
+  | _, _ => .maybe
+
+def Null.nbotV : Null := .nbot
+def Null.ntopV : Null := .maybe
+/-- Could this value be null? Used for the null-dereference alarm. -/
+def Null.mayBeNull : Null → Bool
+  | .nul => .true
+  | .maybe => .true
+  | _ => .false
+/-- Is it definitely not null? -/
+def Null.notNull : Null → Bool
+  | .nonNull => .true
+  | _ => .false
+
+instance : Lattice Null where
+  bot := Null.nbotV
+  le := Null.le
+  join := Null.join
+
+def Null.widen (a b : Null) : Null := match Null.le b a with
+  | .true => a
+  | .false => Null.ntopV
+
+instance : Widen Null where
+  widen := Null.widen
+
+def Null.narrow (a b : Null) : Null := match Null.le b a with
+  | .true => b
+  | .false => a
+
+instance : Narrow Null where
+  narrow := Null.narrow
+
+def Null.laws : Prop :=
+  Lattice.le_refl_stmt Null × Lattice.le_trans_stmt Null ×
+  Lattice.bot_le_stmt Null × Lattice.join_ub_left_stmt Null ×
+  Lattice.join_ub_right_stmt Null × Lattice.join_least_stmt Null
+
+-- ## The reduced product
+
+/-- A value: an interval, a constant (a must-domain), and nullness. The product is
+reduced by `Value.norm`: a known constant tightens the interval to a point. -/
+structure Value where
+  itv : Interval
+  cst : Const
+  nul : Null
+  deriving Inhabited, BEq, Repr
+
+/-- Tighten an interval by a known constant. -/
+def Value.norm (v : Value) : Value := match v.cst with
+  | .known n => { v with itv := .range n n }
+  | _ => v
+
+/-- The least element. -/
+def Value.bot : Value := Value.mk .bot .cbot .nbot
+/-- The greatest element. -/
+def Value.top : Value := Value.mk .top .unknown .maybe
+/-- An integer: a point interval, known constant, non-null. -/
+def Value.ofNat (n : Nat) : Value := Value.mk (.range n n) (.known n) .nonNull
+/-- An unknown integer, known not to be null. -/
+def Value.intTop : Value := Value.mk .top .unknown .nonNull
+/-- The null pointer. -/
+def Value.null : Value := Value.mk .bot .cbot .nul
+/-- A fresh, non-null pointer (no numerical information). -/
+def Value.ptr : Value := Value.mk .bot .cbot .nonNull
+
+def Value.le (a b : Value) : Bool :=
+  Bool.and (Interval.le a.itv b.itv)
+    (Bool.and (Const.le a.cst b.cst) (Null.le a.nul b.nul))
+
+def Value.join (a b : Value) : Value :=
+  Value.norm (Value.mk (Interval.join a.itv b.itv) (Const.join a.cst b.cst) (Null.join a.nul b.nul))
+
+def Value.widen (a b : Value) : Value :=
+  Value.norm (Value.mk (Interval.widen a.itv b.itv) (Const.widen a.cst b.cst) (Null.widen a.nul b.nul))
+
+def Value.narrow (a b : Value) : Value :=
+  Value.norm (Value.mk (Interval.narrow a.itv b.itv) (Const.narrow a.cst b.cst) (Null.narrow a.nul b.nul))
+
+instance : Lattice Value where
+  bot := Value.bot
+  le := Value.le
+  join := Value.join
+
+instance : Widen Value where
+  widen := Value.widen
+
+instance : Narrow Value where
+  narrow := Value.narrow
+
+/-- The product's soundness obligations: pointwise soundness of the components. -/
+def Value.laws : Prop :=
+  Lattice.le_refl_stmt Value × Lattice.le_trans_stmt Value ×
+  Lattice.bot_le_stmt Value × Lattice.join_ub_left_stmt Value ×
+  Lattice.join_ub_right_stmt Value × Lattice.join_least_stmt Value ×
+  Widen.widen_ub_stmt Value
+
+-- ## Environments
+
+/-- A non-relational environment: a finite map from `Nat` variable ids to `Value`.
+Every block's state has an entry for every variable of the function (`Env.topOf`), so
+`Env.le` is a pointwise comparison. -/
+def Env : Type := List (Nat × Value)
+
+/-- Look a variable up. -/
+def Env.lookup (x : Nat) : Env → Option Value
+  | .nil => .none
+  | .cons (k, v) rest => match Nat.beq x k with
+    | .true => .some v
+    | .false => Env.lookup x rest
+
+/-- Look a variable up, with a default (missing entries are `Value.bot`). -/
+def Env.getD (e : Env) (x : Nat) (d : Value) : Value := match Env.lookup x e with
+  | .some v => v
+  | .none => d
+
+/-- Set a variable. -/
+def Env.set (x : Nat) (v : Value) : Env → Env
+  | .nil => .cons (x, v) .nil
+  | .cons (k, w) rest => match Nat.beq x k with
+    | .true => .cons (k, v) rest
+    | .false => .cons (k, w) (Env.set x v rest)
+
+/-- All variables at `v`, in the order of `vars`. -/
+def Env.allOf (vars : List Nat) (v : Value) : Env :=
+  List.map (fun x => (x, v)) vars
+
+/-- The initial state of a function: every variable unknown (`Value.top`). -/
+def Env.topOf (vars : List Nat) : Env := Env.allOf vars Value.top
+
+/-- The bottom state. -/
+def Env.botOf (vars : List Nat) : Env := Env.allOf vars Value.bot
+
+/-- Pointwise order. -/
+def Env.le (a b : Env) : Bool :=
+  List.all (fun p => Value.le p.2 (Env.getD b p.1 Value.bot)) a
+
+/-- Is a variable present? -/
+def Env.has (x : Nat) : Env → Bool
+  | .nil => .false
+  | .cons (k, _) rest => match Nat.beq x k with
+    | .true => .true
+    | .false => Env.has x rest
+
+/-- Pointwise join, with the union of both key sets. The empty environment is `bot`. -/
+def Env.join (a b : Env) : Env :=
+  List.append
+    (List.map (fun p => (p.1, Value.join p.2 (Env.getD b p.1 Value.bot))) a)
+    (List.filter (fun q => Bool.not (Env.has q.1 a)) b)
+
+/-- Pointwise widening, with the union of both key sets. -/
+def Env.widen (a b : Env) : Env :=
+  List.append
+    (List.map (fun p => (p.1, Value.widen p.2 (Env.getD b p.1 Value.bot))) a)
+    (List.filter (fun q => Bool.not (Env.has q.1 a)) b)
+
+/-- Pointwise narrowing (no new keys: narrowing only improves old bounds). -/
+def Env.narrow (a b : Env) : Env :=
+  List.map (fun p => (p.1, Value.narrow p.2 (Env.getD b p.1 Value.bot))) a
+
+instance : Lattice Env where
+  bot := []
+  le := Env.le
+  join := Env.join
+
+instance : Widen Env where
+  widen := Env.widen
+
+instance : Narrow Env where
+  narrow := Env.narrow
+
+/-- Environment soundness reduces to the value obligations, pointwise. -/
+def Env.laws (vars : List Nat) : Prop := Value.laws

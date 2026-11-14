@@ -10,7 +10,9 @@
   `hoverAt`, `definitionAt` and `completionsAt`.
 * **`wiz lsp`** (`Wiz/LSP.lean`): the Language Server Protocol over stdio, with
   diagnostics as you type, hover types, go to definition (also into `lib/`), and
-  completion of global names. Each open document has its own query engine.
+  completion of global names. Each open document has its own query engine. A document's
+  `include_str` files are read from its own directory, as on the command line (see
+  [13-language/include-str.md](13-language/include-str.md), "Language server").
 
 ## 11c: a shared, content-addressed cache
 
@@ -397,11 +399,16 @@ package's `lib` targets with its module roots (dependencies included), into
   copies the site's scripts and `scroll.css`; `wiz doc` takes them from `share/wiz/web`
   of a release, `web/out` of a checkout, or `--web DIR`. Without them the pages are
   plain HTML (and `wiz doc` says so).
-* **CI** builds the library's documentation on `master` with the Wasm module (the
-  `docs` job, on pushes only: `wiz doc --lib` with source links to the commit) and
-  uploads it as the artifact `wiz-docs` (kept 3 days). Proposed, not configured: publish it from `master` to GitHub Pages
-  (`actions/upload-pages-artifact` + `actions/deploy-pages` in that job, Pages set to
-  "GitHub Actions").
+* **CI** builds the library's documentation on `master` and publishes it: the `docs` job
+  runs `wiz doc --lib` on a push (never a pull request), with source links to the
+  commit and the Wasm module, and uploads it as the artifact `wiz-docs` (3 days, for
+  debugging); `deploy-docs` deploys that artifact to GitHub Pages at
+  <https://wiz-pl.github.io/wiz/>. The docs pages are the site root (`index.html`,
+  `A.B.html`, `A.B.json`, `search.js` and the Wasm files) and every link is relative.
+  A repository has one Pages site and each deployment replaces the whole tree, so a
+  future performance site shares this deployment under `/perf/` rather than deploying
+  separately. `docs/building.md`, "Documentation site", has the URL layout, the
+  one-time Pages setting and the single-site rule.
 * **Tests**: the group `doc` (`Tests/Doc.lean`): doc comments stored and replayed by the
   cache; Markdown; `wiz doc` on a small package with doc comments (kinds, docs, source
   links, instances, the index); every cross-link resolves; every declaration is in the
@@ -550,3 +557,97 @@ Neovim shows them as `@lsp.type.keyword` (linked to `@keyword`) without configur
   that spells the whole name, in all those documents; it refuses a declaration of the
   toolchain's library and a new name that isn't one. A use through generalised field
   notation (`p.norm` for `Point.norm`) is not edited.
+
+## 11aa: `wiz fmt`, a formatter
+
+    wiz fmt [FILE|-] [--check] [--width N] [--explain]
+
+Reprints a file from its syntax tree: each command is parsed with the tables that are in
+effect at it (imported `syntax` and `notation` included), printed from the tree with the
+grammar of every node kind (`PPFormat`, the table 11r's printer walks, so declared
+spacing like `" + "` and `noWs` are honoured), and laid out by a small pretty-printing
+document (`Wiz/Format.lean`: `group`/`line`/`nest`, strictly pretty). `FILE` alone prints
+to stdout, `-` (the default) reads stdin, `--check` changes nothing and exits 1 when the
+file differs, `--width` is the column budget (default 100), `--explain` prints what a
+refused command would have become.
+
+* **Why reprint, not rewrite whitespace.** The parser is the single source of truth for
+  the tokens and for precedence, so a reprint cannot disagree with it about `a + b` or
+  `(fun x => b) c`; user-declared `syntax` formats from its own grammar; and the output
+  can be **checked**: every command's reprint is parsed again with the same tables and
+  must give the same tree (`toSExpr`), or the command keeps its original text and is
+  reported (`line N: left as written (…)`, exit status 1). A token/whitespace rewriter
+  keeps comments for free but can never reindent, join or split lines, or drop
+  parentheses, and it has to reimplement every declared spacing rule anyway.
+* **Comments.** The tree drops them (`Token.skipWs`), so they are recovered from the
+  source: every leaf keeps its byte range, and the text between two leaves is a run of
+  comments. One written after a token, on its line, stays there (`;  -- note`); the rest
+  go on their own line before the token they precede. A comment makes a `def` body start
+  on its own line (below).
+* **Layout and the parser's columns.** `colGt`/`colGe` compare against a remembered
+  position (`withPosition`), so the layout has to respect it: a `match`'s alternatives
+  and a `by`'s tactics align with their construct's line (at 2 when it is inline, at the
+  line's indent when it starts one, deeper for nested matches), and a `let` always starts
+  a line — `withPosition` in `term.let` stays in force for the terms after it, so a
+  `let` in the middle of a line would forbid its own body's continuation lines to its
+  left. That is why `def f := let …` breaks after `:=` while `def f := match …` may stay
+  on one line.
+* **What is refused.** A kind with no grammar in the tables, something between tokens
+  that is not a comment, or a reprint that does not parse back to the same tree. The
+  check is what makes a prototype safe: across the library files tested (Prelude, Logic,
+  BitBlast, Deriving, Eff, Vec, EffHeap, Word, Grail, Feral, HeapBorrow, OpticDerive,
+  Trace, Text, Sat, Hdl/Sim and two examples) the formatter changes no command it
+  accepts, is idempotent on every file (formatting twice gives the same text), and
+  refuses one command (`Fe.specLin` in `lib/Feral.wiz`: a `match` inside a `let` value,
+  see `wiz-notes/wiz-fmt.md`). 13 test cases in the `format` group.
+* **Not done.** Signatures never break (a long header stays long: wrapping binder lists
+  needs `fill`/alignment); a multi-line block comment keeps the indentation of its
+  continuation lines; the self-hosted frontend has no formatter; and the LSP does not
+  offer `textDocument/formatting` yet (`Wiz/Format.lean` is that plumbing's core).
+## 11ab: a static playground
+
+`web/playground.html`: a Wiz playground that runs entirely in the page. A text area
+with a small program, a **Run** button (or Ctrl/⌘+Enter), one output line per command,
+and a status line (`loading` / `running` / `done in N ms`, with error lines in red).
+No server, no editor, no install: `web/build-playground.sh` compiles the program the
+page runs.
+
+* **The engine.** The self-hosted frontend and kernel (`selfhost/Lex.wiz`,
+  `Parse.wiz`, `Kernel.wiz`, `Frontend.wiz`) are Wiz source, so the same pipeline as the
+  infoview's module builds them: `wiz` writes C (with mini-gmp for bignums), Emscripten
+  links it as a wasm64 ES module. The one addition is an export, not a compiler or
+  runtime change: `web/playground-exports.wiz` exports
+  `wiz_playground_eval : String → String`, the text in and `selfhost/Frontend.wiz`'s
+  `checkFile` lines out. The page calls it, frees the returned string, and renders it.
+  Its parser needs the Lean parser's tables, which only Lean can make;
+  `web/selfhost-tables.wiz` holds them (generated by
+  `lake env lean --run web/gen-selfhost-tables.lean`, checked in, 38 KB), so building
+  the module needs no Lean step beyond the `lake build wiz` every checkout needs.
+* **What it runs.** The self-hosted frontend's embedded Prelude (Nat, Bool, List,
+  Option, Prod, arithmetic, `String`), definitions with patterns and `match`, inductive
+  types, structures, `#check`, `#reduce`/`#eval`, and its error messages. `import` lines
+  are accepted but only Prelude is available (there is no module loader in the page);
+  without any import the page prepends `import Prelude`, so a bare `def two : Nat := 1 + 1`
+  works. `#eval` prints the kernel's normal form (`con((#1, …))`); `web/playground-values.js`
+  recognises the shapes of Nat, Bool and list values and shows `42`, `true`, `[1, 2]`,
+  keeping the raw form in the line's tooltip. Anything else is shown as it comes.
+* **Build and serve** (from a checkout after `lake build wiz`):
+
+      web/build-playground.sh                  # → web/out/wiz-playground.mjs (+ the page)
+      python3 -m http.server -d web/out 8000   # then http://127.0.0.1:8000/playground.html
+
+  `WIZ=...` picks another toolchain; `--gmp-src` is `web/build.sh`'s option for builds
+  without nix. The script writes `web/out/playground.wiz` (the assembled engine source)
+  beside the module. The page needs HTTP (an ES module and a `.wasm` fetch; `file://`
+  will not do). `web/build.sh` and its infoview are unchanged and can share `web/out`.
+* **Tests.** `node web/playground_test.mjs web/out` loads the module under Node, runs a
+  definition, a `#check`, `#eval twice 21` (the value renders as `42`), a Bool and an
+  error. `web/test.sh` now builds both Wasm modules and runs this test beside the
+  infoview's Node and Chromium tests.
+* **Limits.** The evaluator has no fuel: a non-terminating `#eval` blocks the tab (the
+  call into Wasm is synchronous). Only the embedded Prelude exists, not the library's
+  modules or `IO`/`#run`; the page is a checker, not a REPL with a filesystem.
+* **Why a second module.** The infoview's exports (`wiz_web_init`/`wiz_web_step`) are a
+  language-server client: they can ask a server for goals and diagnostics but cannot
+  evaluate a term. The playground's evaluator is the self-hosted checker, which is Wiz
+  code; exporting it is the only missing piece, and it needs no server.

@@ -21,6 +21,9 @@ def usage : String := "usage:
                                    documentation: a static site (one page per module,
                                    index, search); --lib: the toolchain's library;
                                    source links are URL + path in its root + #L<line>
+  wiz fmt [FILE|-] [--check] [--width N] [--explain]
+                                   reprint a file from its syntax tree (stdin/stdout;
+                                   --check: change nothing, exit 1 when it differs)
   wiz lsp                          a language server on stdin/stdout
   wiz lsp --infoview SOCK          … and for infoviews on the Unix socket SOCK
   wiz lsp --ws [ADDR:]PORT         … and on a WebSocket (127.0.0.1 unless ADDR is given;
@@ -184,10 +187,11 @@ def takeInertOpt : List String → Except String (Option InertReg × List String
     return (r, a :: rest)
   | [] => return (none, [])
 
-/-- Elaborate a file, through the toolchain's cache (if any). -/
-def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandState ZeroOneMany) := do
-  -- every module the file can reach (`import A.B` is `A/B.wiz` under a root), read up
-  -- front: the frontend is pure
+/-- The initial state the frontend runs from: the module loader (every module the file can
+reach, `import A.B` is `A/B.wiz` under a root, read up front: the frontend is pure), the
+C headers and `link_c` sources, and the kernel/printing options. -/
+def initState (tc : Toolchain) (path : String) (input : String) :
+    IO (CommandState ZeroOneMany × Std.HashMap String String) := do
   let roots ← moduleRoots tc
   let closure ← Module.loadClosure roots input
   let lib : Std.HashMap Name String := closure.fold (fun m n (_, src) => m.insert n src) {}
@@ -195,6 +199,8 @@ def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandSta
   let headers ← Build.preprocessHeaders tc (String.join (input :: lib.values))
   -- (9f) the `link_c` files, each relative to its own file
   let sources ← Module.cSourceTable ((System.FilePath.mk path).parent.getD ".") input closure
+  -- (include-str) the `include_str` files, each relative to its own file
+  let includes ← Module.includeTable ((System.FilePath.mk path).parent.getD ".") input closure
   let (regularity, predicativeProp) ← kernelOpts.get
   let lazyProofs ← lazyProofsOpt.get
   let inertReg ← inertOpt.get
@@ -207,13 +213,30 @@ def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandSta
   let shadow := (← Module.shadowed roots closure).map fun (n, p) =>
     ({ info := {}, severity := .warning,
        text := s!"{p} is ignored: module {n} is the toolchain's own ({roots.head!}), which a module root cannot replace" } : Msg)
+  let strictP ← strictPrivacyOpt.get
+  let useNotation := !(← ppAllOpt.get)
+  let smt ← tc.smt.resolve
+  let pp : PPTable := { useNotation := useNotation }
+  let loader := fun n => lib[n]?
+  let cHeaders := fun h => headers[h]?
   let init : CommandState ZeroOneMany :=
-    { loader := (lib[·]?), cHeaders := (headers[·]?), cSources := some (Module.cSourceResolver sources),
+    { loader := loader, cHeaders := cHeaders, cSources := some (Module.cSourceResolver sources),
+      includes := some (Module.includeResolver includes),
       messages := shadow.toArray,
       globals := { regularity, predicativeProp, lazyProofs, inertReg, unboxStructs, proofSteps, traceProofSteps,
-                   strictPrivacy := ← strictPrivacyOpt.get, pp := { useNotation := !(← ppAllOpt.get) } },
+                   strictPrivacy := strictP, pp := pp },
       trustedModule := own.contains, trustNative := tc.trustNative,
-      nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := ← tc.smt.resolve }
+      nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := smt }
+  pure (init, headers)
+
+/-- Elaborate a file, through the toolchain's cache (if any). -/
+def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandState ZeroOneMany) := do
+  let (init, headers) ← initState tc path input
+  let (regularity, predicativeProp) ← kernelOpts.get
+  let lazyProofs ← lazyProofsOpt.get
+  let inertReg ← inertOpt.get
+  let (proofSteps, traceProofSteps) ← proofStepsOpt.get
+  let unboxStructs ← unboxOpt.get
   -- the cache doesn't know the experimental options
   let cacheOn := regularity == .off && !predicativeProp && lazyProofs && inertReg == .conv && !unboxStructs &&
       proofSteps == Budget.defaultSteps && !traceProofSteps && !(← strictPrivacyOpt.get) && !(← ppAllOpt.get)
@@ -299,6 +322,49 @@ def docCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   IO.println s!"wiz doc: {n} modules, {out}/index.html"
   if web.isNone then IO.println "wiz doc: no Wasm module (web/build.sh): the pages are plain HTML"
   pure 0
+
+/-- (11aa) `wiz fmt`'s options: the file (or stdin), `--check`, `--width`. -/
+structure FmtArgs where
+  input : Option String := none
+  check : Bool := false
+  width : Nat := 100
+  explain : Bool := false
+
+def fmtArgs (a : FmtArgs) : List String → Except String FmtArgs
+  | [] => pure a
+  | "--check" :: rest => fmtArgs { a with check := true } rest
+  | "--explain" :: rest => fmtArgs { a with explain := true } rest
+  | "--width" :: n :: rest => do
+    let some w := n.toNat? | throw s!"wiz fmt: --width needs a number, not {n}"
+    fmtArgs { a with width := w } rest
+  | x :: rest =>
+    if x.startsWith "-" && x != "-" then throw s!"wiz fmt: unknown option {x}"
+    else match a.input with
+      | some _ => throw "wiz fmt: one file at a time (and `-` for stdin)"
+      | none => fmtArgs { a with input := some x } rest
+
+/-- (11aa) `wiz fmt`: reprint a file from its syntax tree (stdin/stdout). -/
+def fmtCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
+  let a ← match fmtArgs {} args with
+    | .ok a => pure a
+    | .error e => do IO.eprintln e; return 2
+  let path := a.input.getD "-"
+  let input ← if path == "-" then (← IO.getStdin).readToEnd else IO.FS.readFile path
+  let (init, _) ← initState tc (if path == "-" then "<stdin>" else path) input
+  let r := Fmt.run init input { width := a.width, explain := a.explain }
+  unless r.errors.isEmpty do
+    for e in r.errors do IO.eprintln s!"{path}:{e}"
+    IO.eprintln s!"wiz fmt: {path}: not formatted (the file did not parse)"
+    return 2
+  for m in r.refused do IO.eprintln s!"{path}:{m}"
+  if a.check then
+    if r.text == input then pure 0
+    else
+      IO.eprintln s!"wiz fmt: {path}: not formatted"
+      pure 1
+  else
+    IO.print r.text
+    pure (if r.refused.isEmpty then 0 else 1)
 
 def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
   let input ← IO.FS.readFile path
@@ -401,6 +467,7 @@ def main (args : List String) : IO UInt32 := do
   | ["build", path, "-o", out, "--no-main", "--llvm"] | ["build", path, "-o", out, "--llvm", "--no-main"] =>
     buildCmd tc path out true false true (split := split)
   | "doc" :: rest => docCmd tc rest
+  | "fmt" :: rest => fmtCmd tc rest
   | ["run", path] => runCmd tc path false (split := split)
   | ["run", path, "--llvm"] => runCmd tc path true (split := split)
   | "lsp" :: opts => do

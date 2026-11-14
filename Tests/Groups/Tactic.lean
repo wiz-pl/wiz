@@ -14,9 +14,9 @@ def tacticLsp (src : String) : IO (LSP.Server × Array Lean.Json) := do
   let srv : LSP.Server :=
     { libs := ({} : Std.HashMap String (String × String)).insert "Prelude" ("lib/Prelude.wiz", prelude), trusted := ["Prelude"] }
   let json (s : String) : Lean.Json := (Lean.Json.parse s).toOption.get!
-  let (srv, _) := LSP.handle srv (json "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{}}")
-  pure (LSP.handle srv (Lean.Json.mkObj [("jsonrpc", "2.0"), ("method", "textDocument/didOpen"),
-    ("params", Lean.Json.mkObj [("textDocument", Lean.Json.mkObj [("uri", "file:///t.wiz"), ("version", (1 : Nat)), ("text", src)])])]))
+  let (srv, _) ← LSP.handle srv (json "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{}}")
+  LSP.handle srv (Lean.Json.mkObj [("jsonrpc", "2.0"), ("method", "textDocument/didOpen"),
+    ("params", Lean.Json.mkObj [("textDocument", Lean.Json.mkObj [("uri", "file:///t.wiz"), ("version", (1 : Nat)), ("text", src)])])])
 
 /-- A recursive representation predicate in the style of separation logic, for `unfold`. -/
 def unfoldPrelude : String := "import Prelude
@@ -270,7 +270,7 @@ def tacticGroup : Group where
           | _ => []
         checkEq ["3: n : Nat\n⊢ Nat"] (ds.map fun d => s!"{LSP.getNat d ["severity"]}: {LSP.getStr d ["message"]}")
         checkEq [3] (ds.map fun d => LSP.getNat d ["range", "start", "line"])
-        let (_, r) := LSP.handle srv ((Lean.Json.parse "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"wiz/plainGoal\",\"params\":{\"textDocument\":{\"uri\":\"file:///t.wiz\"},\"position\":{\"line\":3,\"character\":5}}}").toOption.get!)
+        let (_, r) ← LSP.handle srv ((Lean.Json.parse "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"wiz/plainGoal\",\"params\":{\"textDocument\":{\"uri\":\"file:///t.wiz\"},\"position\":{\"line\":3,\"character\":5}}}").toOption.get!)
         checkEq "```wiz\nn : Nat\n⊢ Nat\n```\n\nn : Nat\n⊢ Nat" (LSP.getStr r[0]! ["result", "rendered"])
         checkEq "[\"n : Nat\\n⊢ Nat\"]" (((LSP.get? r[0]! ["result", "messages"]).map (·.compress)).getD "") }
   ]

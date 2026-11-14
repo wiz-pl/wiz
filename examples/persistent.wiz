@@ -1,0 +1,265 @@
+import PMap
+import WordMap
+
+-- Persistent maps and sets (lib/PMap.wiz): persistence, the BST invariant, sorted
+-- `toList`, `fromList`/`toList` round trips, a differential test against `U64Map`, the
+-- expected laws, structural sharing, sets, and a generic key type. `main` returns 0 when
+-- every check holds, otherwise the first failing check's code. Run it under `#eval`,
+-- `#run` and compiled (C and LLVM): group `persistent`.
+
+def next (x : Nat) : Nat := Nat.mod (x * 1103515245 + 12345) 2147483648
+def key (y : Nat) : U64 :=
+  let k := Nat.mod (Nat.div y 8) 300;
+  if Nat.beq (Nat.mod k 3) 0 then UIntN.not (U64.ofNat k) else U64.ofNat (k * 1000003)
+
+-- ## checks
+
+def addChk (a b : Nat) : Nat := if Nat.beq a 0 then b else a
+
+def sameNatList : List Nat → List Nat → Bool
+  | .nil, .nil => .true
+  | .cons x xs, .cons y ys => Bool.and (Nat.beq x y) (sameNatList xs ys)
+  | _, _ => .false
+
+def samePairs : List (Nat × Nat) → List (Nat × Nat) → Bool
+  | .nil, .nil => .true
+  | .cons x xs, .cons y ys =>
+    Bool.and (Nat.beq x.1 y.1) (Bool.and (Nat.beq x.2 y.2) (samePairs xs ys))
+  | _, _ => .false
+
+def sameU64NatPairs : List (U64 × Nat) → List (U64 × Nat) → Bool
+  | .nil, .nil => .true
+  | .cons x xs, .cons y ys =>
+    Bool.and (UIntN.beq x.1 y.1) (Bool.and (Nat.beq x.2 y.2) (sameU64NatPairs xs ys))
+  | _, _ => .false
+
+def sortedNatPairs : List (Nat × Nat) → Bool
+  | .nil => .true
+  | .cons x rest => match rest with
+    | .nil => .true
+    | .cons y _ => Bool.and (Nat.lt x.1 y.1) (sortedNatPairs rest)
+
+def sortedU64Pairs : List (U64 × Nat) → Bool
+  | .nil => .true
+  | .cons x rest => match rest with
+    | .nil => .true
+    | .cons y _ => Bool.and (UIntN.lt x.1 y.1) (sortedU64Pairs rest)
+
+def sortedNats : List Nat → Bool
+  | .nil => .true
+  | .cons x rest => match rest with
+    | .nil => .true
+    | .cons y _ => Bool.and (Nat.lt x y) (sortedNats rest)
+
+def digestNatPairs : List (Nat × Nat) → Nat
+  | .nil => .zero
+  | .cons e rest =>
+    Nat.mod (Nat.add (Nat.add (Nat.mul e.1 31) (Nat.mul e.2 7))
+      (Nat.mul (digestNatPairs rest) 131)) 1000000007
+
+-- The tree invariant: the stored size, the weight balance and strict in-order keys.
+def balanceOk (l r : Tree Nat Nat) : Bool :=
+  let sl := Tree.size l;
+  let sr := Tree.size r;
+  Bool.or (Nat.lt (Nat.add sl sr) 2)
+    (Bool.and (Nat.lt sl (Nat.succ (Nat.mul 3 sr))) (Nat.lt sr (Nat.succ (Nat.mul 3 sl))))
+def above : Option Nat → Nat → Bool
+  | .none, _ => .true
+  | .some lo, k => Nat.lt lo k
+def below : Option Nat → Nat → Bool
+  | .none, _ => .true
+  | .some hi, k => Nat.lt k hi
+def treeOkFrom : Tree Nat Nat → Option Nat → Option Nat → Bool
+  | .leaf, _, _ => .true
+  | .node l k _ r n, lo, hi =>
+    Bool.and (Nat.beq n (Nat.succ (Nat.add (Tree.size l) (Tree.size r))))
+      (Bool.and (balanceOk l r)
+        (Bool.and (above lo k) (Bool.and (below hi k)
+          (Bool.and (treeOkFrom l lo (Option.some k)) (treeOkFrom r (Option.some k) hi)))))
+def treeOk (t : Tree Nat Nat) : Bool := treeOkFrom t .none .none
+
+def log2Fuel : Nat → Nat → Nat
+  | .zero, _ => Nat.zero
+  | .succ f, n => if Nat.lt n 2 then Nat.zero else Nat.succ (log2Fuel f (Nat.div n 2))
+def log2 (n : Nat) : Nat := log2Fuel 64 n
+
+-- A weight-balanced tree with the delta = 3, ratio = 2 scheme has height below
+-- `2 log₂(n + 1) + 2`; the bound here is loose, so a real imbalance fails it.
+def heightOk (n : Nat) (m : PMap Nat Nat) : Bool :=
+  Nat.lt (PMap.height m) (Nat.add (Nat.mul 2 (Nat.succ (log2 (Nat.succ n)))) 6)
+
+-- ## 1. persistence: an old version does not change when a derived one is updated
+
+def checkPersistence : Nat :=
+  let m : PMap Nat Nat :=
+    PMap.insert (PMap.insert (PMap.insert (PMap.insert (PMap.empty : PMap Nat Nat) 2 20) 1 10) 3 30) 2 200;
+  let d := digestNatPairs (PMap.toList m);
+  let _m2 := PMap.erase (PMap.insert m 4 40) 1;
+  let before := digestNatPairs (PMap.toList m);
+  addChk (if Nat.beq d before then 0 else 1) 0
+
+-- ## 2. BST invariant, sorted toList, round trip, foldl
+
+def checkOrder : Nat :=
+  let l : List (Nat × Nat) :=
+    [(50, 5), (10, 1), (90, 9), (30, 3), (70, 7), (20, 2), (80, 8), (40, 4), (60, 6),
+     (100, 10), (30, 33)];
+  let m : PMap Nat Nat := PMap.fromList l;
+  let c := addChk (if sortedNatPairs (PMap.toList m) then 0 else 16) 0;
+  let c := addChk (if Nat.beq (PMap.size m) 10 then 0 else 32) c;
+  let c := addChk (if Nat.beq (PMap.findD m 30 0) 33 then 0 else 64) c;
+  let c := addChk (if samePairs (PMap.toList (PMap.fromList (PMap.toList m)))
+      [(10, 1), (20, 2), (30, 33), (40, 4), (50, 5), (60, 6), (70, 7), (80, 8), (90, 9),
+       (100, 10)] then 0 else 128) c;
+  let folded := PMap.foldl (fun acc k v => Nat.add (Nat.mul acc 10) (Nat.add k v)) 0 m;
+  let listed := List.foldl (fun acc e => Nat.add (Nat.mul acc 10) (Nat.add e.1 e.2)) 0
+    (PMap.toList m);
+  addChk (if Nat.beq folded listed then 0 else 256) c
+
+-- ## 3. differential against the U64Map model (interpreted) and native backend (compiled)
+
+def diffSteps : Nat → Nat → PMap U64 Nat → U64Map Nat → Nat → Nat
+  | .zero, _, _, _, bad => bad
+  | .succ n, x, pm, um, bad =>
+    let y := next x;
+    let k := key y;
+    let op := Nat.mod y 8;
+    let bad' := if sameU64NatPairs (PMap.toList pm) (U64Map.toList um) then bad
+      else Nat.succ bad;
+    if Nat.lt op 3 then diffSteps n y (PMap.insert pm k y) (U64Map.insert um k y) bad'
+    else if Nat.lt op 5 then diffSteps n y (PMap.erase pm k) (U64Map.erase um k) bad'
+    else
+      let bad2 := if Nat.beq (PMap.findD pm k 3) (U64Map.findD um k 3) then bad'
+        else Nat.succ bad';
+      let sameC := match PMap.contains pm k with
+        | .true => U64Map.contains um k
+        | .false => Bool.not (U64Map.contains um k);
+      diffSteps n y pm um (if sameC then bad2 else Nat.succ bad2)
+
+def checkDifferential : Nat :=
+  let m : PMap U64 Nat := PMap.fromList [(key 8, 1), (key 16, 2), (key 24, 3)];
+  addChk (if sortedU64Pairs (PMap.toList m) then 0 else 1024)
+    (addChk (if Nat.beq (PMap.size (PMap.insert m (key 32) 4)) 4 then 0 else 2048)
+      (addChk (if Nat.beq (PMap.findD (PMap.insert m (key 32) 4) (key 32) 0) 4 then 0 else 4096)
+        (addChk (if Nat.beq (diffSteps 1500 3 PMap.empty U64Map.empty 0) 0 then 0 else 512) 0)))
+
+-- ## 4. laws: find_insert, find_erase, size_insert (new and duplicate key), contains
+
+def checkLaws : Nat :=
+  let m : PMap Nat Nat := PMap.fromList [(1, 10), (3, 30), (5, 50), (7, 70)];
+  let c := addChk (if Nat.beq (PMap.findD (PMap.insert m 4 40) 4 0) 40 then 0 else 1) 0;
+  let c := addChk (if PMap.contains (PMap.erase m 3) 3 then 4 else 0) c;
+  let c := addChk (if Nat.beq (PMap.findD (PMap.erase m 3) 3 99) 99 then 0 else 8) c;
+  let c := addChk (if Nat.beq (PMap.size (PMap.insert m 1 11)) 4 then 0 else 16) c;
+  let c := addChk (if Nat.beq (PMap.size (PMap.insert m 2 20)) 5 then 0 else 32) c;
+  let c := addChk (if Nat.beq (PMap.findD (PMap.insert m 2 20) 3 0) 30 then 0 else 64) c;
+  let c := addChk (if Bool.not (PMap.contains (PMap.erase m 1) 1) then 0 else 128) c;
+  addChk (if Nat.beq (PMap.findD m 2 77) 77 then 0 else 256) c
+
+-- ## 5. structural sharing: 100 retained versions keep their own size and order
+
+def buildVersions : Nat → PMap Nat Nat → List (PMap Nat Nat) → List (PMap Nat Nat)
+  | .zero, _, acc => acc
+  | .succ k, m, acc =>
+    let m' := PMap.insert m k (Nat.mul k 3);
+    buildVersions k m' (.cons m' acc)
+
+def versionsOk : List (PMap Nat Nat) → Nat → Nat
+  | .nil, _ => 0
+  | .cons m rest, n =>
+    let c := addChk (if Nat.beq (PMap.size m) n then 0 else 1) 0;
+    let c := addChk (if sortedNatPairs (PMap.toList m) then 0 else 2) c;
+    let c := addChk (if treeOk (PMap.tree m) then 0 else 3) c;
+    let c := addChk (if heightOk n m then 0 else 4) c;
+    addChk (versionsOk rest (Nat.sub n 1)) c
+
+def checkSharing : Nat := versionsOk (buildVersions 100 PMap.empty .nil) 100
+
+-- ## 6. sets
+
+def checkSets : Nat :=
+  let s : PSet Nat := PSet.fromList [5, 1, 3, 1, 4, 2, 5, 9, 8, 6, 7, 0];
+  let c := addChk (if Nat.beq (PSet.size s) 10 then 0 else 1) 0;
+  let c := addChk (if sortedNats (PSet.toList s) then 0 else 2) c;
+  let c := addChk (if sameNatList (PSet.toList s) [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] then 0 else 4) c;
+  let c := addChk (if PSet.contains (PSet.insert s 11) 11 then 0 else 8) c;
+  let c := addChk (if PSet.contains (PSet.erase s 5) 5 then 16 else 0) c;
+  let c := addChk (if Nat.beq (PSet.size (PSet.erase s 5)) 9 then 0 else 32) c;
+  let folded := PSet.foldl (fun acc k => Nat.add (Nat.mul acc 10) k) 0 s;
+  let listed := List.foldl (fun acc k => Nat.add (Nat.mul acc 10) k) 0 (PSet.toList s);
+  addChk (if Nat.beq folded listed then 0 else 64) c
+
+-- ## 7. a generic key type: lexicographic pairs
+
+inductive Key where
+  | mk (a : Nat) (b : Nat)
+
+def Key.a : Key → Nat
+  | .mk a _ => a
+def Key.b : Key → Nat
+  | .mk _ b => b
+def Key.cmp (x y : Key) : Ordering :=
+  Ordering.andThen (Nat.cmp (Key.a x) (Key.a y)) (Nat.cmp (Key.b x) (Key.b y))
+instance : Compare Key := Compare.mk Key.cmp
+
+def checkGeneric : Nat :=
+  let l : List (Key × Nat) :=
+    [(Key.mk 2 1, 21), (Key.mk 1 2, 12), (Key.mk 1 1, 11), (Key.mk 2 0, 20), (Key.mk 1 2, 112)];
+  let m : PMap Key Nat := PMap.fromList l;
+  let c := addChk (if Nat.beq (PMap.size m) 4 then 0 else 1) 0;
+  let c := addChk (if Nat.beq (PMap.findD m (Key.mk 1 2) 0) 112 then 0 else 2) c;
+  addChk (if Nat.beq (PMap.findD (PMap.erase m (Key.mk 2 0)) (Key.mk 2 0) 9) 9 then 0 else 4) c
+
+-- ## 8. adversarial insert orders stay shallow: ascending, descending, random
+
+def fillAsc : Nat → PMap Nat Nat → PMap Nat Nat
+  | .zero, m => m
+  | .succ k, m => fillAsc k (PMap.insert m k k)
+def fillDesc : Nat → PMap Nat Nat → PMap Nat Nat
+  | .zero, m => m
+  | .succ k, m => fillDesc k (PMap.insert m (Nat.sub 500 k) k)
+def fillRnd : Nat → Nat → PMap Nat Nat → PMap Nat Nat
+  | .zero, _, m => m
+  | .succ k, x, m =>
+    let y := next x;
+    fillRnd k y (PMap.insert m (Nat.mod y 1000) k)
+
+def checkAdversarial : Nat :=
+  let asc := fillAsc 500 PMap.empty;
+  let desc := fillDesc 500 PMap.empty;
+  let rnd := fillRnd 500 7 PMap.empty;
+  let c := addChk (if treeOk (PMap.tree asc) then 0 else 32) 0;
+  let c := addChk (if treeOk (PMap.tree desc) then 0 else 64) c;
+  let c := addChk (if treeOk (PMap.tree rnd) then 0 else 128) c;
+  let c := addChk (if sortedNatPairs (PMap.toList asc) then 0 else 8) c;
+  let c := addChk (if sortedNatPairs (PMap.toList desc) then 0 else 16) c;
+  let c := addChk (if heightOk 500 asc then 0 else 1) c;
+  let c := addChk (if heightOk 500 desc then 0 else 2) c;
+  addChk (if heightOk 500 rnd then 0 else 4) c
+
+-- ## 9. random inserts and erases keep the invariant (deleteMin and rebalancing)
+
+def randOps : Nat → Nat → PMap Nat Nat → PMap Nat Nat
+  | .zero, _, m => m
+  | .succ k, x, m =>
+    let y := next x;
+    let kk := Nat.mod y 500;
+    if Nat.lt (Nat.mod y 4) 2 then randOps k y (PMap.insert m kk y)
+    else randOps k y (PMap.erase m kk)
+
+def checkEraseInvariant : Nat :=
+  let m := randOps 10000 11 PMap.empty;
+  addChk (if treeOk (PMap.tree m) then 0 else 1)
+    (addChk (if sortedNatPairs (PMap.toList m) then 0 else 2)
+      (addChk (if heightOk (PMap.size m) m then 0 else 4) 0))
+
+def main : Nat :=
+  let c := checkPersistence;
+  let c := addChk checkOrder c;
+  let c := addChk checkDifferential c;
+  let c := addChk checkLaws c;
+  let c := addChk checkSharing c;
+  let c := addChk checkSets c;
+  let c := addChk checkGeneric c;
+  let c := addChk checkAdversarial c;
+  addChk checkEraseInvariant c

@@ -1,0 +1,273 @@
+import Prelude
+import Text
+import Deriving
+import Logic
+import Scry.AiDomain
+/-!
+# Scry.AiCfg: a tiny three-address language, CFG and transfer functions
+
+The frontend-independent half of the abstract-interpretation core: a small language
+(`AExpr`/`ACond`/`AStmt`), a CFG (`ACfg`/`AEdge`), and the concrete-ish transfer
+functions for the `Value` domain of `Scry.AiDomain`. There is no parser and no Wil
+dependency: a Wil lowering will construct these values in stage S2/S5.
+
+The language has the operations the S5 alarms need: machine-width `add`/`sub`/`mul`,
+array `load` with an explicit static length, `alloc`, and `null`. The transfer functions
+are width-aware: an operation whose exact range could leave `[0, 2^w)` becomes `Top`
+(unsigned wrap-around is never ignored). Soundness obligations are the `Prop` statements
+at the end of the module.
+
+```
+import Scry.AiCfg
+
+#eval (AExpr.eval (AiMach.mk 8) [] (.lit 7)).itv
+```
+-/
+
+/-- The ambient machine: an unsigned width. Signedness and endianness belong to Wil;
+the core only needs the value range for overflow reasoning. -/
+structure AiMach where
+  /-- the width in bits -/
+  width : Nat
+
+/-- The largest unsigned value at this width. -/
+def AiMach.maxVal (m : AiMach) : Nat := Ai.maxVal m.width
+/-- The number of representable values. -/
+def AiMach.modulus (m : AiMach) : Nat := Nat.pow 2 m.width
+
+-- ## Expressions
+
+/-- A three-address expression. `load arr idx len` reads an array (`arr` is a variable)
+of static length `len`; `alloc len` makes a fresh non-null array of `len` elements. -/
+inductive AExpr where
+  | var (x : Nat)
+  | lit (n : Nat)
+  | add (a b : AExpr)
+  | sub (a b : AExpr)
+  | mul (a b : AExpr)
+  | load (arr : Nat) (idx : AExpr) (len : Nat)
+  | alloc (len : AExpr)
+  | null
+  deriving BEq, Repr
+
+/-- A guard. -/
+inductive ACond where
+  | lt (x : Nat) (e : AExpr)
+  | le (x : Nat) (e : AExpr)
+  | gt (x : Nat) (e : AExpr)
+  | ge (x : Nat) (e : AExpr)
+  | eq (x : Nat) (e : AExpr)
+  | ne (x : Nat) (e : AExpr)
+  | isNull (x : Nat)
+  | notNull (x : Nat)
+  deriving BEq, Repr
+
+/-- A statement. -/
+inductive AStmt where
+  | assign (x : Nat) (e : AExpr)
+  | assume (c : ACond)
+  | skip
+  deriving BEq, Repr
+
+-- ## Value-level operations
+
+/-- Build a numeric value, tightening the interval only if the constant is known and the
+interval is not `Top` (so an out-of-range result is never narrowed to a wrong point). -/
+def AiValue.num (itv : Interval) (cst : Const) : Value :=
+  Value.norm (Value.mk itv cst Null.nonNull)
+
+/-- A word of width `m`: a point if representable, otherwise `Top`. -/
+def AiValue.word (m : AiMach) (n : Nat) : Value := match Nat.lt n (AiMach.modulus m) with
+  | .true => AiValue.num (.range n n) (.known n)
+  | .false => AiValue.num .top .unknown
+
+/-- Addition of intervals, width-aware. -/
+def Interval.add (m : AiMach) : Interval → Interval → Interval
+  | .bot, _ => .bot
+  | _, .bot => .bot
+  | .range al ah, .range bl bh =>
+      let s := Nat.add ah bh
+      match Nat.lt s (AiMach.modulus m) with
+      | .true => .range (Nat.add al bl) s
+      | .false => .top
+  | _, _ => .top
+
+/-- Subtraction of unsigned intervals: underflow (any `a < b` possible) gives `Top`. -/
+def Interval.sub (m : AiMach) : Interval → Interval → Interval
+  | .bot, _ => .bot
+  | _, .bot => .bot
+  | .range al ah, .range bl bh =>
+      match Nat.le bh al with
+      | .true => .range (Nat.sub al bh) (Nat.sub ah bl)
+      | .false => .top
+  | _, _ => .top
+
+/-- Multiplication of unsigned intervals, width-aware. -/
+def Interval.mul (m : AiMach) : Interval → Interval → Interval
+  | .bot, _ => .bot
+  | _, .bot => .bot
+  | .range al ah, .range bl bh =>
+      let p := Nat.mul ah bh
+      match Nat.lt p (AiMach.modulus m) with
+      | .true => .range (Nat.mul al bl) p
+      | .false => .top
+  | _, _ => .top
+
+/-- Constant arithmetic: known only when both sides are known and the result is
+representable. -/
+def Const.addC (m : AiMach) : Const → Const → Const
+  | .known a, .known b => match Nat.lt (Nat.add a b) (AiMach.modulus m) with
+    | .true => .known (Nat.add a b)
+    | .false => .unknown
+  | _, _ => .unknown
+
+def Const.subC (m : AiMach) : Const → Const → Const
+  | .known a, .known b => match Nat.le b a with
+    | .true => .known (Nat.sub a b)
+    | .false => .unknown
+  | _, _ => .unknown
+
+def Const.mulC (m : AiMach) : Const → Const → Const
+  | .known a, .known b => match Nat.lt (Nat.mul a b) (AiMach.modulus m) with
+    | .true => .known (Nat.mul a b)
+    | .false => .unknown
+  | _, _ => .unknown
+
+/-- Evaluate an expression abstractly. -/
+def AExpr.eval (m : AiMach) (env : Env) : AExpr → Value
+  | .var x => Env.getD env x Value.top
+  | .lit n => AiValue.word m n
+  | .add a b =>
+      let av := AExpr.eval m env a
+      let bv := AExpr.eval m env b
+      AiValue.num (Interval.add m av.itv bv.itv) (Const.addC m av.cst bv.cst)
+  | .sub a b =>
+      let av := AExpr.eval m env a
+      let bv := AExpr.eval m env b
+      AiValue.num (Interval.sub m av.itv bv.itv) (Const.subC m av.cst bv.cst)
+  | .mul a b =>
+      let av := AExpr.eval m env a
+      let bv := AExpr.eval m env b
+      AiValue.num (Interval.mul m av.itv bv.itv) (Const.mulC m av.cst bv.cst)
+  | .load _ _ _ => AiValue.num .top .unknown
+  | .alloc _ => Value.ptr
+  | .null => Value.null
+
+-- ## Guard refinement
+
+/-- Refine the interval of `x` by intersecting it with `i`; keep the other components. -/
+def Env.refineItv (x : Nat) (i : Interval) (env : Env) : Env :=
+  let v := Env.getD env x Value.top
+  Env.set x (Value.norm (Value.mk (Interval.meet v.itv i) v.cst v.nul)) env
+
+/-- Refine nullness of `x`, keeping its other components. -/
+def Env.refineNull (x : Nat) (n : Null) (env : Env) : Env :=
+  let v := Env.getD env x Value.top
+  Env.set x (Value.mk v.itv (match n with | .nul => .cbot | _ => v.cst) n) env
+
+/-- Refine the environment by a guard. A guard whose right side is `Top` refines
+nothing numerically; one whose right side is `Bot` makes the edge unreachable
+(`Env` bottom, i.e. the variable set to `Value.bot`). -/
+def ACond.refine (m : AiMach) (env : Env) : ACond → Env
+  | .lt x e =>
+      let ev := AExpr.eval m env e
+      match ev.itv with
+      | .bot => Env.set x Value.bot env
+      | .range _ eh => match Nat.beq eh 0 with
+        | .true => Env.set x Value.bot env
+        | .false => Env.refineItv x (.range 0 (Nat.sub eh 1)) env
+      | .top => Env.refineNull x .nonNull env
+  | .le x e =>
+      let ev := AExpr.eval m env e
+      match ev.itv with
+      | .bot => Env.set x Value.bot env
+      | .range _ eh => Env.refineItv x (.range 0 eh) env
+      | .top => Env.refineNull x .nonNull env
+  | .gt x e =>
+      let ev := AExpr.eval m env e
+      match ev.itv with
+      | .bot => Env.set x Value.bot env
+      | .range el _ => Env.refineItv x (.range (Nat.succ el) (AiMach.maxVal m)) env
+      | .top => Env.refineNull x .nonNull env
+  | .ge x e =>
+      let ev := AExpr.eval m env e
+      match ev.itv with
+      | .bot => Env.set x Value.bot env
+      | .range el _ => Env.refineItv x (.range el (AiMach.maxVal m)) env
+      | .top => Env.refineNull x .nonNull env
+  | .eq x e =>
+      let ev := AExpr.eval m env e
+      match ev.itv with
+      | .bot => Env.set x Value.bot env
+      | _ => Env.refineItv x ev.itv env
+  | .ne _ _ => env
+  | .isNull x => Env.refineNull x .nul env
+  | .notNull x => Env.refineNull x .nonNull env
+
+-- ## Statements, edges and CFGs
+
+/-- The abstract transfer function of a statement. -/
+def AStmt.transfer (m : AiMach) (env : Env) : AStmt → Env
+  | .assign x e => Env.set x (AExpr.eval m env e) env
+  | .assume c => ACond.refine m env c
+  | .skip => env
+
+/-- One CFG edge. A guard is the condition under which control takes the edge; `none`
+is an unconditional edge. -/
+structure AEdge where
+  src : Nat
+  dst : Nat
+  guard : Option ACond
+  deriving BEq, Repr
+
+/-- A CFG: an entry block, the function's variables, each block's statement, and the
+edge list. Block ids are natural numbers; every edge's ends must have a statement. -/
+structure ACfg where
+  entry : Nat
+  vars : List Nat
+  stmts : List (Nat × AStmt)
+  edges : List AEdge
+
+/-- Look a block's statement up. -/
+def ACfg.stmtGo (p : Nat) : List (Nat × AStmt) → AStmt
+  | .nil => AStmt.skip
+  | .cons (k, s) rest => match Nat.beq p k with
+    | .true => s
+    | .false => ACfg.stmtGo p rest
+
+def ACfg.stmt (cfg : ACfg) (p : Nat) : AStmt := ACfg.stmtGo p cfg.stmts
+
+/-- The outgoing edges of a block. -/
+def ACfg.outEdges (cfg : ACfg) (p : Nat) : List AEdge :=
+  List.filter (fun e => Nat.beq e.src p) cfg.edges
+
+/-- Transfer along an edge: the source state, refined by the edge's guard. -/
+def AEdge.transfer (m : AiMach) (env : Env) (e : AEdge) : Env :=
+  match e.guard with
+  | .none => env
+  | .some c => ACond.refine m env c
+
+-- ## Obligations
+
+/-- Transfer soundness for the expression evaluator: if `n` is a concrete value of `e`
+in concrete state `c`, it is in `γ (eval env e).itv`. The concrete relation `den` is
+deliberately abstract here (it is Wil's semantics in S5); the statement records what S5
+must prove. -/
+def AExpr.eval_sound_stmt (C : Type) [AbsDomain C Env]
+    (den : AiMach → C → AExpr → Nat → Prop) : Prop :=
+  (m : AiMach) → (c : C) → (env : Env) → (e : AExpr) → (n : Nat) →
+    AbsDomain.gamma env c → den m c e n → Interval.contains (AExpr.eval m env e).itv n = .true
+
+/-- The width-aware addition never claims a value outside the machine range. -/
+def Interval.add_range_stmt (m : AiMach) : Prop :=
+  (a b : Interval) → (x y : Nat) → Interval.contains a x = .true →
+    Interval.contains b y = .true →
+    (n : Nat) → Interval.contains (Interval.add m a b) n = .true →
+      Nat.lt n (AiMach.modulus m) = .true
+
+/-- Statement transfer soundness (the S5 obligation for `AStmt.transfer`), in the shape
+of `Transfer.sound_stmt`: γ before, concrete step, γ after. -/
+def AStmt.transfer_sound_stmt (m : AiMach) (C : Type) [AbsDomain C Env]
+    (sem : AStmt → C → C → Prop) : Prop :=
+  (s : AStmt) → (a : Env) → (c c' : C) → AbsDomain.gamma a c → sem s c c' →
+    AbsDomain.gamma (AStmt.transfer m a s) c'

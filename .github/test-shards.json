@@ -10,6 +10,9 @@
   {"name": "hdl-verified", "heavy": true, "select": [
     "=hdl-verified"
   ]},
+  {"name": "hdl-uart-temporal", "heavy": true, "select": [
+    "=hdl-uart-temporal"
+  ]},
   {"name": "grail-selfhost", "heavy": true,
    "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz", "lib/Grail.wiz"],
    "select": [
@@ -30,6 +33,7 @@
   ]},
   {"name": "library", "split": 5, "jobs": 4, "default": true, "select": [
     "builtins",
+    "calc",
     "classes",
     "deriving",
     "=doc",
@@ -49,12 +53,20 @@
     "=natives",
     "=nvim",
     "optic",
+    "persistent",
     "phantom",
     "regions",
+    "=scry-wil",
+    "=scry-ai",
+    "=scry-taint",
     "=linear-case",
     "repr",
+    "result-q",
     "seplogic",
     "=sat",
+    "=scry-datalog",
+    "=scry-cert",
+    "=scry-egraph",
     "=smt",
     "std",
     "tactics",
@@ -88,6 +100,7 @@
     "desceq",
     "elab",
     "eval",
+    "format",
     "inductive",
     "lexer",
     "lift",
