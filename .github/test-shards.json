@@ -43,6 +43,7 @@
     "infoview",
     "language",
     "lsp",
+    "=lsp-ext",
     "macros",
     "modules",
     "=native",

@@ -273,6 +273,8 @@ continue onto a line starting at the command's column.
 | `command.local`              | "local" command (13m: a `syntax`, `notation`, `infix…`, `macro_rules` or `attribute [macro …]` whose syntax stays in the module; 11w: an `instance` found only in the module) |
 | `command.deriving`           | "deriving" "instance" C,+ "for" T,+ |
 | `command.attrDeriver`        | "attribute" "[" "deriver" ident "]" ident |
+| `command.attrCodeAction`     | "attribute" "[" "codeAction" ident "]" ident (11ae) |
+| `command.attrHover`          | "attribute" "[" "hover" ident "]" ident (11ae) |
 | `command.attrInline`         | "attribute" "[" "inline" "]" ident |
 | `command.attrDefaultInstance`| "attribute" "[" "default_instance" [num] "]" ident (7f) |
 | `command.attrBinop`          | "attribute" "[" "binop" "]" ident (7f) |
@@ -359,6 +361,12 @@ def commandLeading : List LeadingParser := [
   -- HD8: `deriving`
   { kind := "command.attrDeriver", prec := maxPrec,
     p := seqs ["attribute", "[", nonReserved "deriver", ident, "]", ident] },
+  -- 11ae: user-defined language-server extensions: `attribute [codeAction k] f` and
+  -- `attribute [hover k] f`, with `f : Syntax → String`
+  { kind := "command.attrCodeAction", prec := maxPrec,
+    p := seqs ["attribute", "[", nonReserved "codeAction", ident, "]", ident] },
+  { kind := "command.attrHover", prec := maxPrec,
+    p := seqs ["attribute", "[", nonReserved "hover", ident, "]", ident] },
   { kind := "command.deriving", prec := maxPrec,
     p := seqs ["deriving", "instance", sepBy1 ident ",", nonReserved "for", sepBy1 ident ","] },
   { kind := "command.declareSyntaxCat", prec := maxPrec, p := seqs ["declare_syntax_cat", ident, optional (seqs ["(", nonReserved "keywords", ":=", ident, ")"])] },

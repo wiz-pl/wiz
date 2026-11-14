@@ -550,3 +550,58 @@ Neovim shows them as `@lsp.type.keyword` (linked to `@keyword`) without configur
   that spells the whole name, in all those documents; it refuses a declaration of the
   toolchain's library and a new name that isn't one. A use through generalised field
   notation (`p.norm` for `Point.norm`) is not edited.
+
+## 11ae: user-defined language-server extensions
+
+A file can teach the server what to offer at the nodes of a syntax kind it declares. The
+function is a pure Wiz function `Syntax → String`, type-checked at the attribute:
+
+```wiz
+syntax (name := double) "double" term:max : term
+macro_rules
+  | `(term| double $x) => `(term| Nat.add $x $x)
+
+def doubleName : Syntax → String
+  | .ident n => n
+  | .node _ args => match Syntax.identNames args with
+    | .cons n _ => n
+    | .nil => "?"
+  | _ => "?"
+def doubleAction (stx : Syntax) : String :=
+  let n := doubleName (Syntax.getArg stx 1);
+  "{\"title\": \"Rewrite as addition\", \"text\": \"Nat.add " ++ n ++ " " ++ n ++ "\"}"
+
+def doubleHover (stx : Syntax) : String := "**double**: rewrites to addition"
+attribute [codeAction term.double] doubleAction
+attribute [hover term.double] doubleHover
+```
+
+At `double two`, `textDocument/codeAction` offers *Rewrite as addition*, whose edit is
+exactly the `double two` node (`Nat.add two two`); `textDocument/hover` appends the
+extension's Markdown under the ordinary syntax hover. Both hooks use the same registry
+(`Wiz/Extensions.lean`, `CommandState.extCodeActions`/`extHovers`, like
+`attribute [macro]`/`[tactic]`; see [06-macros.md](06-macros.md), 6b):
+
+* **The node** is the innermost node of the registered kind in the *parsed* command at
+  the cursor, not an info-tree entry: an extension works in a file that does not
+  elaborate (that is where code actions matter most). The server reparses with the
+  document's tables, so user `syntax` declarations are in the grammar, and recovers from
+  a broken command as the frontend does.
+* **The call**: the function is erased and interpreted in the server
+  (`compileReachable`, `Elab.encodeSyntax`/`RVal`), once per document per function, and
+  applied to the parsed node. A failure is ignored: an extension cannot break the
+  server.
+* **The bridge**: `codeAction` returns JSON (one object or an array) —
+  `{"title": …, "text": …}` replaces the node, `kind` defaults to `refactor.rewrite`;
+  `hover` returns Markdown. Malformed results are skipped. The Wiz side only builds a
+  string, so the host owns the LSP shapes.
+* **A malformed registration** (a function that is not `Syntax → String`) is ignored and
+  reported as an ordinary diagnostic at the attribute, as `attribute [macro]` reports a
+  non-macro.
+* **Security**: this runs user code in the server process, with the trust model macros
+  and tactics already have (a pure function, no IO; the interpreter has no fuel yet, so
+  a nonterminating extension blocks the request — a bounded step budget is a follow-up).
+  The self-hosted frontend does not parse these attributes yet; parity is to check and
+  ignore them, as it does `inline`/`implemented_by`. Design notes:
+  `wiz-notes/lsp-extensions.md`; tested in the `lsp-ext` group. Next: a term-aware hook
+  (the info tree at the node), completion items, and infoview widgets.

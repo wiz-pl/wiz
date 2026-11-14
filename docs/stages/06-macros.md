@@ -59,6 +59,13 @@ attribute [macro term.twice] twiceMacro
   the environment, encodes the node as a runtime value, runs `f` in the interpreter,
   and decodes the result (`Elab/ProcMacro.lean`). The `x✝` marks then get this
   expansion's scope.
+* **Language-server extensions** use the same registry pattern with a smaller, pure
+  signature: `attribute [codeAction k] f` and `attribute [hover k] f` register
+  `f : Syntax → String` for a syntax kind, and the language server runs it on the parsed
+  node at the cursor (hover Markdown, or JSON code actions; the host bridges the JSON).
+  The attribute is type-checked like `attribute [macro]`; a malformed function is ignored
+  with a diagnostic. See [11-tooling.md](11-tooling.md), 11ae, and
+  `wiz-notes/lsp-extensions.md`.
 * Antiquotations win ties within their category; `$x:term` picks the other reading.
   `match` alternatives must line up (`colGe`), so a nested `match` ends where the
   outer one's next alternative starts.

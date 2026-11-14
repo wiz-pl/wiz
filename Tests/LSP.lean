@@ -1106,10 +1106,99 @@ def nvimGroup : Group where
           throw (IO.userError s!"editors/nvim/tests/run.sh failed:\n{out.stdout}{out.stderr}") }
   ]
 
+/-- (11ae) User-defined language-server extensions: a file registers a Wiz function for a
+syntax kind with `attribute [codeAction k] f` or `attribute [hover k] f`; the server runs
+it on the node at the cursor. -/
+def extSrc : String := r#"import Prelude
+syntax (name := double) "double" term:max : term
+macro_rules
+  | `(term| double $x) => `(term| Nat.add $x $x)
+def doubleName : Syntax → String
+  | .ident n => n
+  | .node _ args => match Syntax.identNames args with
+    | .cons n _ => n
+    | .nil => "?"
+  | _ => "?"
+def doubleAction (stx : Syntax) : String :=
+  let n := doubleName (Syntax.getArg stx 1);
+  "{\"title\": \"Rewrite as addition\", \"text\": \"Nat.add " ++ n ++ " " ++ n ++ "\"}"
+def doubleHover (stx : Syntax) : String := "**double** extension: rewrite as addition"
+attribute [codeAction term.double] doubleAction
+attribute [hover term.double] doubleHover
+def two : Nat := 2
+def four : Nat := double two
+"#
+
+def extBadRegSrc : String := r#"import Prelude
+syntax (name := double) "double" term:max : term
+macro_rules
+  | `(term| double $x) => `(term| Nat.add $x $x)
+def badAction : Nat := 0
+attribute [codeAction term.double] badAction
+def two : Nat := 2
+def four : Nat := double two
+"#
+
+def extBadJsonSrc : String := r#"import Prelude
+syntax (name := twice) "twice" term:max : term
+macro_rules
+  | `(term| twice $x) => `(term| Nat.add $x $x)
+def badOut (stx : Syntax) : String := "not json"
+attribute [codeAction term.twice] badOut
+def two : Nat := 2
+def four : Nat := twice two
+"#
+
+def extGroup : Group where
+  name := "lsp-ext"
+  exercise := "Stage 11 (user-defined LSP extensions)"
+  cases := [
+    { name := "a registered code action appears at its node, and only there", run := fun _ => do
+        let (srv, out) ← openDoc extSrc
+        check (!(has out[0]! "severity\":1")) s!"unexpected error: {out[0]!.compress}"
+        let atNode := offAfter extSrc "def four : Nat := "
+        let (srv, as) := codeActions srv extSrc (atNode + 2)
+        let some a := titled as "Rewrite as addition" | throw (IO.userError s!"actions: {as.map (·.compress)}")
+        -- the edit is exactly the `double two` node
+        let some (.arr #[e]) := LSP.get? a ["edit", "changes", "file:///t.wiz"]
+          | throw (IO.userError s!"edit: {a.compress}")
+        checkEq atNode (LSP.ofPos extSrc (LSP.getNat e ["range", "start", "line"]) (LSP.getNat e ["range", "start", "character"]))
+        checkEq (atNode + "double two".length)
+          (LSP.ofPos extSrc (LSP.getNat e ["range", "end", "line"]) (LSP.getNat e ["range", "end", "character"]))
+        -- the function saw the node: the argument's name is in the replacement
+        checkEq "Nat.add two two" (LSP.getStr e ["newText"])
+        checkEq ([] : List String) (← codes (applyEdit extSrc (LSP.get? a ["edit"]).get!))
+        -- nowhere else: the declaration of `two`, whitespace between commands, `Nat.add`'s name
+        for off in [offAfter extSrc "def two" (-1), offAfter extSrc "def two" (-6), offAfter extSrc "def four" (-2)] do
+          let (_, as) := codeActions srv extSrc off
+          check (titled as "Rewrite as addition").isNone s!"action at {off}" },
+    { name := "a registered hover appears at its node, and only there", run := fun _ => do
+        let (srv, _) ← openDoc extSrc
+        let (_, r) := ask srv "textDocument/hover" extSrc (offAfter extSrc "def four : Nat := " + 2)
+        let value := LSP.getStr r ["contents", "value"]
+        check (has r "extension: rewrite as addition") s!"hover: {r.compress}"
+        check (has r "by macro rule") s!"no syntax hover: {value}"
+        -- an ordinary identifier's hover is unchanged
+        let (_, r) := ask srv "textDocument/hover" extSrc (offAfter extSrc "def four : Nat" (-1))
+        check (!(has r "extension: rewrite as addition")) s!"extension hover at `Nat`: {r.compress}"
+        check (has r "Nat : Type") s!"no ordinary hover: {r.compress}" },
+    { name := "a malformed function is ignored, with a diagnostic", run := fun _ => do
+        let (srv, out) ← openDoc extBadRegSrc
+        check (has out[0]! "not a language-server extension") s!"no diagnostic: {out[0]!.compress}"
+        let (_, as) := codeActions srv extBadRegSrc (offAfter extBadRegSrc "double two" (-2))
+        check (titled as "Rewrite as addition").isNone s!"an action was registered: {as.map (·.compress)}" },
+    { name := "a malformed result is ignored", run := fun _ => do
+        let (srv, out) ← openDoc extBadJsonSrc
+        check (!(has out[0]! "severity\":1")) s!"unexpected error: {out[0]!.compress}"
+        let (_, as) := codeActions srv extBadJsonSrc (offAfter extBadJsonSrc "twice two" (-2))
+        check as.isEmpty s!"actions: {as.map (·.compress)}" }
+  ]
+
 /-- This module's test groups, which `Tests/Main.lean` runs: one per line, in sorted
 order, so that branches adding groups rarely touch the same lines. A new group also
 needs a shard in `.github/test-shards.json` (CI checks). -/
 def groups : List Group :=
+  extGroup ::
   group ::
   nvimGroup ::
   serverGroup ::

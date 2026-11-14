@@ -3,6 +3,7 @@ import Wiz.Query
 import Wiz.Rig.Instances
 import Wiz.Infoview
 import Wiz.Actions
+import Wiz.Extensions
 import Wiz.Inlay
 import Wiz.Semantic
 import Wiz.Completion
@@ -49,6 +50,9 @@ structure Doc where
   memo : Std.HashMap String Json := {}
   /-- code actions offered in this session, for `codeAction/resolve` -/
   actions : Array Actions.Action := #[]
+  /-- (11ae) the compiled code of the document's extension functions, by function: built
+  once per document, and dropped when the text changes -/
+  extCode : Std.HashMap Name (Except String Code) := {}
 
 structure Server where
   docs : Std.HashMap String Doc := {}
@@ -478,6 +482,54 @@ def codeAction (srv : Server) (uri : String) (doc : Doc) (a : Actions.Action) (r
       [("edit", Json.mkObj [("changes", Json.mkObj [(uri, Json.arr edits)])])]
   Json.mkObj ([("title", Json.str a.title), ("kind", Json.str a.kind)] ++ diags ++ rest)
 
+/-! ## User-defined extensions (11ae)
+
+`attribute [codeAction k] f` and `attribute [hover k] f` (see `Extensions.lean`): the
+function is compiled for the interpreter once per document (`Doc.extCode`) and run on the
+innermost parsed node of kind `k` at the cursor. A function that does not compile, fails,
+or returns malformed JSON is ignored: an extension never takes the server down. -/
+
+/-- The compiled code of an extension function, built once per document. -/
+def extCodeOf (doc : Doc) (f : Name) : Doc × Except String Code :=
+  match doc.extCode.get? f with
+  | some c => (doc, c)
+  | none => let c := Extensions.compile doc.state f
+            ({ doc with extCode := doc.extCode.insert f c }, c)
+
+/-- Run an extension on `stx`; `none` if it could not be compiled or run. -/
+def runExtension (doc : Doc) (h : Extensions.Handler) (stx : Syntax) : Doc × Option String :=
+  let (doc, c) := extCodeOf doc h.fn
+  match c with
+  | .ok code => match Extensions.runString code h.fn stx with
+    | .ok out => (doc, some out)
+    | .error _ => (doc, none)
+  | .error _ => (doc, none)
+
+/-- The code actions the document's `codeAction` extensions add at `[start, stop]`. -/
+def extensionActions (doc : Doc) (start stop : Nat) : Doc × Array Actions.Action := Id.run do
+  let mut doc := doc
+  let mut out : Array Actions.Action := #[]
+  for h in Extensions.codeActionHandlers doc.state do
+    let some stx := Extensions.nodeIn doc.state doc.text start stop h.kind | continue
+    let (d, res) := runExtension doc h stx
+    doc := d
+    let some text := res | continue
+    for a in Extensions.parseActions text do
+      out := out.push (Extensions.ExtAction.toAction a stx.info)
+  (doc, out)
+
+/-- The Markdown the document's `hover` extensions add at `off`. -/
+def extensionHover (doc : Doc) (off : Nat) : Doc × Option String := Id.run do
+  let mut doc := doc
+  let mut parts : Array String := #[]
+  for h in Extensions.hoverHandlers doc.state do
+    let some stx := Extensions.nodeAt doc.state doc.text off h.kind | continue
+    let (d, res) := runExtension doc h stx
+    doc := d
+    if let some t := res then
+      if !t.isEmpty then parts := parts.push t
+  (doc, if parts.isEmpty then none else some ("\n\n".intercalate parts.toList))
+
 /-! ## References and rename (11x) -/
 
 /-- The modules besides the open documents where a global's uses can be: the library
@@ -575,7 +627,7 @@ def handle (srv : Server) (msg : Json) : Server × Array Json := Id.run do
     let version := (get? msg ["params", "textDocument", "version"]).bind (·.getInt?.toOption)
     let old := (srv.docs.get? uri).getD { text }
     let session := srv.sessions + 1
-    let doc := elaborate srv { old with text, version, session, table := #[], memo := {}, actions := #[] }
+    let doc := elaborate srv { old with text, version, session, table := #[], memo := {}, actions := #[], extCode := {} }
     let note := Json.mkObj [("jsonrpc", "2.0"), ("method", "wiz/elaborated"),
       ("params", Json.mkObj [("uri", uri), ("version", match version with | some v => Json.num v | none => Json.null),
                              ("session", session)])]
@@ -650,6 +702,9 @@ def handle (srv : Server) (msg : Json) : Server × Array Json := Id.run do
     let some doc := srv.docs.get? uri | return (srv, #[reply (Json.arr #[])])
     let pos (k : String) := ofPos doc.text (getNat msg ["params", "range", k, "line"]) (getNat msg ["params", "range", k, "character"])
     let acts := Actions.actionsAt doc.state doc.text (pos "start") (pos "end") srv.importable
+    -- (11ae) the actions the document's own extensions add
+    let (doc, extActs) := extensionActions doc (pos "start") (pos "end")
+    let acts := acts ++ extActs
     let base := doc.actions.size
     let json := acts.mapIdx fun i a => codeAction srv uri doc a (if srv.resolveEdits then some (base + i) else none)
     ({ srv with docs := srv.docs.insert uri { doc with actions := doc.actions ++ acts } }, #[reply (Json.arr json)])
@@ -684,6 +739,7 @@ def handle (srv : Server) (msg : Json) : Server × Array Json := Id.run do
     let off := ofPos doc.text (getNat msg ["params", "position", "line"]) (getNat msg ["params", "position", "character"])
     match method with
     | "textDocument/hover" =>
+      let (doc, ext) := extensionHover doc off
       let md? := match syntaxHover srv uri doc (Query.syntaxAt doc.state off) with
         | some md => some md
         | none => (Query.hoverAt doc.state off).map fun (n, ty) =>
@@ -695,8 +751,13 @@ def handle (srv : Server) (msg : Json) : Server × Array Json := Id.run do
               | some d => s!"\n\n---\n\n{d}"
               | none => ""
             s!"```wiz\n{identLabel doc off n} : {ty}\n```{docs}"
+      let md? := match md?, ext with
+        | some md, some e => some s!"{md}\n\n{e}"
+        | none, some e => some e
+        | md, none => md
       match md? with
-      | some md => (srv, #[reply (Json.mkObj [("contents", Json.mkObj [("kind", "markdown"), ("value", md)])])])
+      | some md => ({ srv with docs := srv.docs.insert uri doc },
+                    #[reply (Json.mkObj [("contents", Json.mkObj [("kind", "markdown"), ("value", md)])])])
       | none => (srv, #[reply Json.null])
     | "textDocument/definition" | "textDocument/declaration" =>
       -- one location, or (several macro rules, say) a list

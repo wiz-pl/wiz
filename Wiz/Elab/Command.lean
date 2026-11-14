@@ -97,6 +97,11 @@ structure CommandState (R : Type) where
   procMacros : List (Name × Name) := []
   /-- `attribute [tactic k] f` registrations, latest first -/
   tactics : List (Name × Name) := []
+  /-- (11ae) `attribute [codeAction k] f`: Wiz functions the language server runs on
+  nodes of syntax kind `k`, latest first -/
+  extCodeActions : List (Name × Name) := []
+  /-- (11ae) `attribute [hover k] f`: the same, for the hover at a node of kind `k` -/
+  extHovers : List (Name × Name) := []
   /-- (HD8) `attribute [macro k] f` for `f : CommandMacro`, and `attribute [deriver C] f`,
   latest first -/
   cmdMacros : List (Name × Name) := []
@@ -2596,6 +2601,33 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
     | .ok () =>
       modify fun s => { s with tactics := (k, f) :: s.tactics }
       remakeMetaCode
+  | "command.attrCodeAction" | "command.attrHover" =>
+    -- (11ae) `attribute [codeAction k] f` / `attribute [hover k] f`: a Wiz function the
+    -- language server runs on nodes of syntax kind `k`. It is pure and small on purpose:
+    -- `Syntax → String` (for `codeAction`, the string is JSON; the host bridges it).
+    let isAction := cmd.kind == "command.attrCodeAction"
+    let what := if isAction then "codeAction" else "hover"
+    let k := ((cmd.getArg 3).getId?).getD "_"
+    let f0 := ((cmd.getArg 5).getId?).getD "_"
+    let expected : Term R := .pi "_" .default (.qlit QuantitySyntax.explicitDefault)
+      (.const "Syntax" []) (.const "String" []) .hole
+    let ok := runElab (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros)
+        (tactics := s.tactics) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances)
+        s.globals do
+      let (_, ty) ← Elab.infer {} (.node cmd.info "term.ident" #[cmd.getArg 5])
+      let want ← evalIn {} expected
+      unifyAt {} cmd want ty
+    match ok with
+    | .error e => report .error e.info s!"{f0} is not a language-server extension for `{what}` (a `Syntax → String`): {e.msg}"
+    | .ok () =>
+      -- (the global's name: a private declaration's is renamed)
+      let f := s.globals.resolve f0
+      if s.globals.find? f |>.isNone then
+        report .error (cmd.getArg 5).info s!"unknown declaration '{f0}'"
+      else
+        modify fun s =>
+          if isAction then { s with extCodeActions := (k, f) :: s.extCodeActions }
+          else { s with extHovers := (k, f) :: s.extHovers }
   | "command.attrImplementedBy" =>
     -- `attribute [implemented_by g] f`: compiled code runs `g` wherever it would run `f`
     -- (erasure takes `g`'s code for `f`); the kernel and proofs keep `f`'s definition. So
