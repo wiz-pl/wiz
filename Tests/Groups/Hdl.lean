@@ -156,6 +156,25 @@ def hdlPrimTools : IO Unit := do
         unless (st.splitOn cell).length > 1 do throw (IO.userError s!"no {cell} in serial:\n{st}")
       if (o.stderr.splitOn "has no driver").length > 1 then throw (IO.userError s!"undriven wire:\n{o.stderr}")
 
+/-- H14 S5: yosys `check -assert` on the data-path and flow pipelines of
+examples/hdl-pipe.wiz (when yosys is on PATH). -/
+def hdlPipeTools : IO Unit := do
+    let ys ← (do let o ← IO.Process.output { cmd := "yosys", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
+    unless ys do skip "no yosys"; return
+    let src ← IO.FS.readFile "examples/hdl-pipe.wiz"
+    let s := runFrontend (R := ZeroOneMany) (src ++ "\n#eval aluVerilog\n#eval flowVerilog\n")
+      { trustedModule := Tests.libModule, loader := ← libLoader }
+    let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
+    unless errs.isEmpty do throw (IO.userError s!"unexpected errors: {errs}")
+    let all := s.messages.toList.map (·.text)
+    let texts := all.drop (all.length - 2)
+    let unq (t : String) : String := ((t.drop 1).dropRight 1).replace "\\n" "\n" |>.replace "\\\"" "\""
+    IO.FS.withTempDir fun dir => do
+      for (t, top) in texts.zip ["alu3", "flow3"] do
+        IO.FS.writeFile (dir / s!"{top}.v") (unq t)
+        let o ← IO.Process.output { cmd := "yosys", args := #["-q", "-p", s!"read_verilog {top}.v; hierarchy -top {top}; check -assert"], cwd := dir }
+        unless o.exitCode == 0 do throw (IO.userError s!"yosys check fails on {top}.v:\n{o.stderr}")
+
 def hdlGroup : Group where
   name := "hdl"
   exercise := "HDL stage S0 (hdl-plan H14)"
@@ -412,7 +431,28 @@ def hdlGroup : Group where
            "memories: yes, 3000 cycles, well formed yes, checksum 380888474\n" ++
            "memories, raw out-of-range values: simFast = simulate: yes\n" ++
            "shifter: yes, 3000 cycles, well formed yes, checksum 331396695\n" ++
-           "not well formed: yes, simFast = simulate: yes\n") }
+           "not well formed: yes, simFast = simulate: yes\n") },
+    { name := "H14 S5: pipeline arrows (Pipe/Flow): latency, identity/associativity laws, throughput, stalls, reset; values = netlist; notation round-trip", run := fun _ => do
+        okLibs (← IO.FS.readFile "examples/hdl-pipe.wiz")
+          ["(1, 2, 3)",
+           ".cons 0 (.cons 254 (.cons 254 (.cons 13 (.cons 18 (.cons 23 (.cons 28 (.cons 33 (.cons 38 .nil))))))))",
+           ".true",
+           "fun p q => p |>> q : Pipe B8 B8 → Pipe B8 B8 → Pipe B8 B8",
+           "fun p q => p *** q : Pipe B8 B8 → Pipe B8 B8 → Pipe (.prod B8 B8) (.prod B8 B8)",
+           "fun p q => p &> q : Pipe B8 B8 → Pipe B8 B8 → Pipe B8 (.prod B8 B8)",
+           "fun p i => Pipe.loop B8 B8 B8 p i : Pipe (.prod B8 B8) (.prod B8 B8) → HwTy.El B8 → Pipe B8 B8",
+           "(.cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 .nil)))))))), .cons 0 (.cons 254 (.cons 254 (.cons 63 (.cons 68 (.cons 73 (.cons 78 (.cons 83 (.cons 88 .nil)))))))))",
+           "(.cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 .nil))))))))))), .cons 0 (.cons 254 (.cons 254 (.cons 13 (.cons 13 (.cons 13 (.cons 18 (.cons 23 (.cons 28 (.cons 33 (.cons 38 (.cons 43 .nil))))))))))))",
+           ".cons 13 (.cons 18 (.cons 23 (.cons 28 (.cons 33 (.cons 38 (.cons 43 .nil))))))",
+           ".true",
+           ".cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 .nil)))))))))))",
+           ".cons (0, 0, 1) (.cons (0, 0, 1) (.cons (0, 0, 1) (.cons (254, 0, 1) (.cons (254, 0, 1) (.cons (163, 1, 1) .nil)))))"] },
+    { name := "H14 S5: yosys check -assert on the data-path and flow pipeline Verilog (skipped without yosys)", run := fun _ => hdlPipeTools },
+    { name := "H14 S5: simFast = Circuit.run = netlist for the pipelines (compiled; skipped without a C toolchain)", run := fun _ => do
+        let has (c : String) : IO Bool := (do let o ← IO.Process.output { cmd := c, args := #["--version"] }; pure (o.exitCode == 0)) <|> pure false
+        unless (← has "cc") do skip "no cc"; return
+        cRunLibs (← IO.FS.readFile "examples/hdl-pipe.wiz")
+          "alu3: simFast = run = netlist: yes\nflow3: simFast = run = netlist: yes\n" }
   ]
 
 builtin_initialize registerGroup hdlGroup

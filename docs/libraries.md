@@ -598,6 +598,80 @@ iCEstick's 12 MHz / 104 = 115384.6 baud equals the FT2232's rate exactly, which 
 it never showed there. Compute the divider from the host's real rate and round it down
 (wiz-arty's `Ftdi.divisor` and `clocksPerBit`: 866 at 100 MHz).
 
+## H14 S5: pipelines as arrows (`lib/Hdl/Pipe.wiz`)
+
+An *arrow* for pipelines over `Circuit`: a `Pipe i o` is a circuit plus its latency in
+cycles, and the combinators compose circuits and add (or max) the latencies. The module
+is additive: `Pipe.circuit` is the underlying `Circuit`, so `Circuit.run`,
+`Circuit.netlist`, `Netlist.simulate`, `Hdl.Sim`'s `simFast`, `Verilog.emit`, `Multi` and
+the temporal logic apply unchanged.
+
+**Why an arrow.** A state monad is right for *building* a netlist (`NetM`, `MultiM`
+accumulate nodes), but as a user language it hides the state type: every
+`seq` would need an existential state, and an *indexed* monad would need type-level
+latency and state to recover the `Circuit.seq`/`par`/`loop` lemmas that already exist.
+The arrow keeps `i` and `o` first-class `HwTy` codes, leaves the `ω` quantities where
+Core puts them, and every combinator is a thin wrapper with a Core law behind it. Plain
+`Circuit.seq`/`par`/`loop` calls are the third option: correct, but a pipeline reads as a
+chain, and the latency bookkeeping and the valid/ready discipline have nowhere to live.
+
+| notation | meaning | latency | precedence |
+|---|---|---|---|
+| `p |>> q` | `Pipe.seq` (sequential) | `a + b` | 20, right |
+| `p *** q` | `Pipe.par` (side by side) | `Nat.max a b` | 30, right |
+| `p &> q` | `Pipe.fanout` (shared input, paired outputs) | `Nat.max a b` | 30, right |
+| `Pipe.pipe name p` | name a whole chain | same | |
+| `Pipe.stage name init f` | combinational `f`, then one register | 1 | |
+| `Pipe.reg t init`, `Pipe.regN t n init` | one register, `n` registers | 1, `n` | |
+| `Pipe.loop c init`, `Pipe.feedback c init` | feedback through a register | `c`'s | |
+| `Pipe.fanout` / `Pipe.join` / `Pipe.mergeWith f` | fork / pair / merge | max | |
+
+`&&&` is already the HDL's bitwise-and and `>>>` its logical shift (H14 S2), so this
+module uses `|>>` and `&>`; `***` was free. The symbols print back as written (the
+`hdl` group checks `#check` round-trips).
+
+```
+def alu3 : Pipe B8 B8 :=
+  Pipe.pipe "alu3" (
+    Pipe.stage "add" 0 (fun x => x + 3) |>>
+    Pipe.stage "mul" 0 (fun x => x * 5) |>>
+    Pipe.stage "sub" 0 (fun x => x - 2))
+```
+
+**Laws.** `Pipe.run_id`, `Pipe.run_seq_id_left`/`_right` and `Pipe.run_seq_assoc` are
+`Circuit.run_seq`/`runFrom_comb` through the projection: identity and associativity hold
+for every pipeline and trace, although the nested states differ (which `Circuit.run`
+does not observe). `Pipe.run_par` and `Pipe.run_reg` are `Circuit.run_par` and
+`Circuit.run_delay`; `Pipe.seq_latency`, `Pipe.par_latency` and `Pipe.stage_latency` are
+`rfl`.
+
+**Handshake path.** A `Flow i o` is an elastic stage with the ready function kept
+separate from the step: `ready st out_ready` is `in_ready` (it does not depend on
+`in_data`/`in_valid`, the AXI rule), and `step st data valid out_ready` gives the next
+state, `out_data` and `out_valid`. `Flow.seq` computes the downstream ready first, so
+the backward ready wire connects without a combinational loop; `Flow.reg` is the
+one-register elastic buffer (`in_ready = ¬full ∨ out_ready`) that can take an item in the
+cycle it hands one on, and `Flow.source` is a free-running counter source for tests.
+`Flow.toCircuit` lowers a flow to an ordinary `Circuit` over the bundles `FlowIn`
+(`in_data`, `in_valid`, `out_ready`) and `FlowOut` (`out_data`, `out_valid`, `in_ready`).
+
+`examples/hdl-pipe.wiz` is the 3-stage ALU plus a 3-stage flow: latency 3 in both,
+throughput one item per cycle with ready high (valid delayed by 3), data held while ready
+is low, and transfer order preserved under backpressure (7 transfers, no loss or
+duplication in a 12-cycle trace with a 3-cycle stall); reset clears the elastic
+registers; `Circuit.run`, the netlist and `simFast` agree (the compiled `cRunLibs`
+case passed). The `hdl` group passed 23 cases, 0 failed and skipped 5 (no yosys, no
+iverilog in the default PATH); with a nix yosys 0.70 on PATH the pipeline's
+`check -assert` case also passed.
+
+**What remains.** A `Flow` is one clock and one `Circuit`: no multi-clock flow, no
+memories inside a flow, no true fork/join of independent ready/valid channels (the data
+path has `fanout`/`join`; a flow fork needs an arbiter or a lockstep rule), no proved
+throughput/no-loss/backpressure theorem (the transfer tests are checks; the `TL`
+protocol lemmas of H14 T are the next step), and no structural "`valid` does not depend
+on `ready`" check on the netlist. `Pipe.par`'s latency is the maximum, which is right for
+a pipeline but not a formal latency theorem; `Flow` carries no latency field.
+
 ## H14 P1: vendor primitives (black boxes): `Hdl.Prim`, `Hdl.Xilinx7`
 
 A `Prim i o` (in `Hdl.Core`) declares a vendor cell: its Verilog module name, parameters
