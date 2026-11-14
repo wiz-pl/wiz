@@ -1,6 +1,7 @@
 -- Temporal properties of a real design: the iCEstick UART (transmitter, synchroniser,
 -- receiver) of wiz-icestick-uart (src/Icestick/Uart.wiz, copied below unchanged), with
--- 4 clock cycles per bit. Checked by the `hdl` test group. Doc:
+-- 4 clock cycles per bit. Checked by the `hdl-uart-temporal` test group (a heavy
+-- shard: about three minutes cold). Doc:
 -- docs/libraries.md, "H14 T2: the iCEstick UART, temporal properties".
 --
 -- What is proved (kernel-checked, for every input trace and every byte):

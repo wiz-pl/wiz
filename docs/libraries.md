@@ -232,6 +232,12 @@ Bool-level specification for every input trace (eight cases of the control bits,
 variables), keeps an offered item stable (AXI), and hands on every accepted item if the
 consumer is ready infinitely often.
 
+The iCEstick UART (`examples/hdl-uart-temporal.wiz`, group `hdl-uart-temporal` in a
+heavy shard, about three minutes) is the same method on a real design: the transmitter
+is idle-high and frames every accepted byte for 40 cycles, the receiver reports a
+well-formed frame (and nothing on a bad stop bit or a short glitch), and the loopback
+delivers each byte 41 cycles after it is accepted, for every input trace and byte.
+
 Not done: sequences with repetition (SEREs; planned as monitor circuits), stuttering
 invariance as a theorem, a deep embedding printable as SVA, notation (□, ◇, `|->`:
 dsl-ergo, stacked on this), case splits on neutral bits (they need the range of `UIntN` in

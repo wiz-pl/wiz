@@ -9,6 +9,9 @@
   {"name": "hdl-verified", "heavy": true, "select": [
     "=hdl-verified"
   ]},
+  {"name": "hdl-uart-temporal", "heavy": true, "select": [
+    "=hdl-uart-temporal"
+  ]},
   {"name": "grail-selfhost", "heavy": true,
    "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz", "lib/Grail.wiz"],
    "select": [
