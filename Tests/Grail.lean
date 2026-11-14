@@ -53,6 +53,28 @@ def regionFiles (cache : System.FilePath) : IO (Array System.FilePath) := do
   let entries ← cache.readDir
   pure (entries.filter (fun e => e.fileName.endsWith ".wizr") |>.map (·.path))
 
+/-- Every file under `dir`, recursively. -/
+partial def everyFile (dir : System.FilePath) : IO (Array System.FilePath) := do
+  let mut out := #[]
+  for e in ← dir.readDir do
+    if ← e.path.isDir then out := out ++ (← everyFile e.path)
+    else out := out.push e.path
+  pure out
+
+/-- Set a file's modification time (`touch -d`), for the pruning tests. -/
+def touchAgo (f : System.FilePath) (when : String) : IO Unit := do
+  let o ← IO.Process.output { cmd := "touch", args := #["-d", when, f.toString] }
+  if o.exitCode != 0 then throw (IO.userError s!"touch -d {when} {f}: {o.exitCode} {o.stderr}")
+
+/-- Flip one byte in `f` (by default the middle): a same-size corruption no header or tag
+would catch. Returns the index flipped. -/
+def flipByte (f : System.FilePath) (i : Nat := 0) : IO Nat := do
+  let b ← IO.FS.readBinFile f
+  if b.size == 0 then throw (IO.userError s!"{f} is empty")
+  let j := min (if i == 0 then b.size / 2 else i) (b.size - 1)
+  IO.FS.writeBinFile f (b.set! j (b.get! j ^^^ 0xff))
+  pure j
+
 /-- A small library: `Data.Two` (in a subdirectory) imports `Prelude`; `Use` imports it. -/
 def libFiles : List (String × String) :=
   [("Data/Two.wiz", "import Prelude\ndef two : Nat := 2\n"),
@@ -528,6 +550,139 @@ def modulesGroup : Group where
           | throw (IO.userError "the mismatched region was not rewritten")
         checkEq Cache.regionFormat a.format
         check (a.effects.size > 0) "the rewritten region holds no effects" },
+    { name := "a region checksum catches a bit flip and a truncation (miss, text fallback, repair)", run := fun _ => do
+        -- (format 2: a `.wizs` sidecar holds the 8-byte hash of the image's bytes)
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 1 + 1\n")]
+        let ms ← Module.loadAll ["lib", dir]
+        let cache ← IO.FS.createTempDir
+        let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
+        let rig := RigTag.tag (R := ZeroOneMany)
+        let stats ← IO.mkRef ({} : Cache.RegionCounts)
+        let opts : Cache.RegionOptions := { rig, stats := some stats }
+        let src := "import M\n#eval x\n"
+        let (s0, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
+        let good := s0.messages.toList.map (·.render src)
+        check (!s0.messages.any (·.severity == .error)) s!"messages: {good}"
+        -- (the sidecar round-trips: a file's hash reads back as its checksum)
+        let probe := cache / "checksum-probe.wizr"
+        IO.FS.writeFile probe "abcdefgh"
+        let sum ← Cache.checksumFile probe
+        IO.FS.writeBinFile (Cache.regionSumFile probe) (Cache.u64Bytes sum)
+        checkEq (some sum) (← Cache.regionFileChecksum probe)
+        let _ ← flipByte probe 2
+        checkEq (none : Option UInt64) (← Cache.regionFileChecksum probe)
+        -- (a good region carries one)
+        let binary ← Cache.binaryId (some cache)
+        let k := Cache.moduleKey (loaderOf ms) (fun _ => none) 0 "M" (trusted := Tests.libModule)
+        let f := cache / Cache.regionFileName binary k
+        check (← Cache.regionFileChecksum f).isSome "a fresh region has no checksum"
+        -- (a same-size bit flip in the payload: a miss, not a load error or a wrong term)
+        let _ ← flipByte f
+        checkEq (none : Option UInt64) (← Cache.regionFileChecksum f)
+        let m0 ← stats.get
+        let (s1, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
+        checkEq good (s1.messages.toList.map (·.render src))
+        check ((← stats.get).misses > m0.misses) "a flipped byte was not a miss"
+        check (← Cache.regionFileChecksum f).isSome "the write cache did not repair the region"
+        -- (the repaired region is served again)
+        let h0 ← stats.get
+        let (s2, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
+        check ((← stats.get).hits > h0.hits) "the repaired region was not served"
+        checkEq good (s2.messages.toList.map (·.render src))
+        -- (truncation: one byte short, then the payload cut in half)
+        for (what, keep) in ([("one byte short", fun n => n - 1), ("half the payload", fun n => n / 2)] :
+            List (String × (Nat → Nat))) do
+          let b ← IO.FS.readBinFile f
+          IO.FS.writeBinFile f (b.extract 0 (keep b.size))
+          checkEq (none : Option UInt64) (← Cache.regionFileChecksum f)
+          let m1 ← stats.get
+          let (s3, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
+          checkEq good (s3.messages.toList.map (·.render src))
+          check ((← stats.get).misses > m1.misses) s!"a region {what} was not a miss"
+          check (← Cache.regionFileChecksum f).isSome s!"a region {what} was not repaired" },
+    { name := "a read-only region with a bad checksum is a miss, and the layer is left alone", run := fun _ => do
+        let dir ← mkTree libFiles
+        let ms ← Module.loadAll ["lib", dir]
+        let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
+        let rig := RigTag.tag (R := ZeroOneMany)
+        let stats ← IO.mkRef ({} : Cache.RegionCounts)
+        let opts : Cache.RegionOptions := { rig, stats := some stats }
+        let src := "import Use\nimport Other\n#eval four + one\n"
+        let ro ← IO.FS.createTempDir
+        let (cold, _) ← Cache.elaborateCached (some ro) [] src init 0 (region := some opts)
+        let expected := cold.messages.toList.map (·.render src)
+        -- (corrupt one region's payload in the read-only layer)
+        let binary ← Cache.binaryId (some ro)
+        let k := Cache.moduleKey (loaderOf ms) (fun _ => none) 0 "Use" (trusted := Tests.libModule)
+        let bad := ro / Cache.regionFileName binary k
+        let _ ← flipByte bad
+        checkEq (none : Option UInt64) (← Cache.regionFileChecksum bad)
+        let before ← snapshot ro
+        -- (served with a write cache in front: the text entry answers, nothing is repaired)
+        let write ← IO.FS.createTempDir
+        let m0 ← stats.get
+        let (s1, _) ← Cache.elaborateCached (some write) [ro] src init 0 (region := some opts)
+        checkEq expected (s1.messages.toList.map (·.render src))
+        check ((← stats.get).misses > m0.misses) "a bad read-only checksum was not a miss"
+        checkEq before (← snapshot ro)
+        check (!(← Cache.regionFileChecksum bad).isSome) "the read-only region was repaired" },
+    { name := "cache prune: old keyed files go, fresh and unrelated ones stay, ro layers are untouched", run := fun _ => do
+        let write ← IO.FS.createTempDir
+        let ro ← IO.FS.createTempDir
+        IO.FS.createDirAll (write / "bin")
+        let old (dir : System.FilePath) (name : String) : IO System.FilePath := do
+          let f := dir / name
+          IO.FS.writeFile f "x"
+          touchAgo f "40 days ago"
+          pure f
+        let oldEntry ← old write "a.wizc"
+        let oldMarker ← old write "a.wizm"
+        let oldRegion ← old write "a.wizr"
+        let oldSum ← old write "a.wizs"
+        let fresh ← old write "b.wizc"
+        touchAgo fresh "1 day ago"
+        let other ← old write "notes.txt"
+        let binMemo ← old (write / "bin") "stamp"
+        let roEntry ← old ro "a.wizc"
+        let before ← snapshot ro
+        let now := (← Std.Time.Timestamp.now).val.toSeconds.toInt
+        -- (dry run: counted, nothing removed; `now` is explicit, so a clock cannot race the test)
+        let d ← Cache.pruneCache write 7 (dryRun := true) (now := some now)
+        checkEq 4 d.total
+        checkEq 1 d.entries
+        checkEq 1 d.markers
+        checkEq 1 d.regions
+        checkEq 1 d.sums
+        for f in [oldEntry, oldMarker, oldRegion, oldSum] do
+          check (← f.pathExists) s!"the dry run removed {f}"
+        -- (the real run removes the old keyed files only)
+        let c ← Cache.pruneCache write 7 (now := some now)
+        checkEq 4 c.total
+        check (!(← oldEntry.pathExists) && !(← oldMarker.pathExists) && !(← oldRegion.pathExists) &&
+               !(← oldSum.pathExists)) "an old keyed file survived"
+        check (← fresh.pathExists) "a fresh entry was pruned"
+        check (← other.pathExists) "a non-cache file was pruned"
+        check (← binMemo.pathExists) "the binary memo was pruned"
+        check (← roEntry.pathExists) "a read-only layer's file was pruned"
+        checkEq before (← snapshot ro)
+        let summary := c.render 7 false write
+        check ((summary.splitOn "removed 4 files (1 .wizc, 1 .wizm, 1 .wizr, 1 .wizs)").length > 1) summary
+        -- (a pruned entry is just a miss: a warm cache still works, and is rewritten)
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 1\n")]
+        let ms ← Module.loadAll ["lib", dir]
+        let cache ← IO.FS.createTempDir
+        let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
+        let rig := RigTag.tag (R := ZeroOneMany)
+        let src := "import M\n#eval x\n"
+        let (r0, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some { rig })
+        let expected := r0.messages.toList.map (·.render src)
+        let far := now + 400 * 86400
+        let n ← Cache.pruneCache cache 7 (now := some far)
+        check (n.total > 0) "a warm cache had nothing to prune"
+        checkEq #[] (← regionFiles cache)
+        let (r1, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some { rig })
+        checkEq expected (r1.messages.toList.map (·.render src))
+        check ((← regionFiles cache).size > 0) "the pruned region was not rewritten" },
     { name := "a warm run is served from the module region, with the same state", run := fun _ => do
         let dir ← mkTree libFiles
         let ms ← Module.loadAll ["lib", dir]
@@ -653,6 +808,18 @@ def build (dir : System.FilePath) (tc : Toolchain) (only : List String := []) (j
   let (s, ok, _) ← buildLog dir tc only jobs
   pure (s, ok)
 
+/-- Run `grail build app` in a package directory through this driver's grail (a child
+process, so its jobs are separate processes too). -/
+def grailBuild (dir : System.FilePath) (flags : List String) : IO IO.Process.Output := do
+  let self ← IO.appPath
+  let args := #["--grail", "-C", dir.toString] ++ flags.toArray ++ #["build", "app"]
+  IO.Process.output { cmd := self.toString, args }
+
+/-- The names in a package's `.grail/build`, sorted. -/
+def buildDirs (dir : System.FilePath) : IO (List String) := do
+  let entries ← (dir / ".grail" / "build").readDir
+  pure (entries.map (·.fileName)).toList.mergeSort
+
 /-- Every `.lean` file under a directory. -/
 partial def leanFiles (dir : System.FilePath) : IO (Array System.FilePath) := do
   let mut out := #[]
@@ -728,6 +895,26 @@ def toolchainGroup : Group where
         -- render: one line per read cache, in order, then the write cache
         check ((full.render.splitOn "cache-ro /a\ncache-ro /b\ncache /w\n").length > 1) full.render
         check ((roOnly.render.splitOn "cache-ro /a\ncache-ro /b\ncache (off)\n").length > 1) roOnly.render },
+    { name := "--region-cache is a toolchain flag and a build-file setting", run := fun _ => do
+        let parse (args : List String) := ({} : Toolchain).parseFlags args
+        let (tc, rest) := parse ["--region-cache", "check", "x.wiz"]
+        checkEq ["check", "x.wiz"] rest
+        check tc.regionCache "the flag did not set region-cache"
+        check (!({} : Toolchain).regionCache) "region-cache is on by default"
+        -- (the build-file setting: `(set "region-cache" "true")`)
+        checkEq (some "true") ((({} : Toolchain).set "region-cache" "true").map fun t => toString t.regionCache)
+        checkEq (some "false") ((({} : Toolchain).set "region-cache" "false").map fun t => toString t.regionCache)
+        -- (forwarded to every job, beside the layered cache flags)
+        let full : Toolchain := { cacheDir := some "/w", readCaches := ["/a"], regionCache := true }
+        check (full.toFlags.contains "--region-cache") "toFlags drops region-cache"
+        checkEq ["--cache-ro", "/a", "--cache", "/w", "--region-cache"]
+          ((full.toFlags).dropWhile (· != "--cache-ro") |>.take 5)
+        let (back, rest) := parse full.toFlags
+        checkEq [] rest
+        checkEq (repr full).pretty (repr back).pretty
+        -- render, for `grail config`
+        check ((full.render.splitOn "cache /w\nregion-cache true\n").length > 1) full.render
+        check ((({} : Toolchain).render.splitOn "region-cache false\n").length > 1) ({} : Toolchain).render },
     { name := "-I DIR adds a module root", run := fun _ => do
         let dir ← mkTree [("Pkg/Three.wiz", "import Prelude\ndef three : Nat := 3\n")]
         let (tc, _) := ({} : Toolchain).parseFlags ["check", "main.wiz", "-I", dir.toString]
@@ -746,6 +933,101 @@ def toolchainGroup : Group where
         -- the usage text names -I for check
         let out ← IO.Process.output { cmd := wiz, args := #["help"] }
         check ((out.stdout.splitOn "wiz check [-I DIR] FILE").length > 1) out.stdout },
+    { name := "wiz cache prune: --days/--dry-run, and a --cache-ro layer is never pruned", run := fun _ => do
+        let wiz := (← IO.FS.realPath ".lake/build/bin/wiz").toString
+        let run (args : Array String) := IO.Process.output { cmd := wiz, args }
+        let write ← IO.FS.createTempDir
+        let ro ← IO.FS.createTempDir
+        let old (dir : System.FilePath) (name : String) : IO System.FilePath := do
+          let f := dir / name
+          IO.FS.writeFile f "x"
+          touchAgo f "40 days ago"
+          pure f
+        let oldEntry ← old write "old.wizc"
+        let oldRegion ← old write "old.wizr"
+        let oldSum ← old write "old.wizs"
+        let roEntry ← old ro "ro.wizc"
+        let before ← snapshot ro
+        -- (dry run: a summary, nothing removed; say that read-only caches are out of scope)
+        let o ← run #["cache", "prune", "--cache", write.toString, "--cache-ro", ro.toString,
+                       "--days", "7", "--dry-run"]
+        checkEq 0 o.exitCode
+        check ((o.stdout.splitOn "cache prune: would remove 3 files").length > 1) s!"stdout: {o.stdout}"
+        check ((o.stderr.splitOn "never pruned").length > 1) s!"stderr: {o.stderr}"
+        check (← oldEntry.pathExists) "the dry run removed a file"
+        -- (the real thing: the write cache only)
+        let o ← run #["cache", "prune", "--cache", write.toString, "--cache-ro", ro.toString, "--days", "7"]
+        checkEq 0 o.exitCode
+        check ((o.stdout.splitOn "cache prune: removed 3 files").length > 1) s!"stdout: {o.stdout}"
+        check (!(← oldEntry.pathExists) && !(← oldRegion.pathExists) && !(← oldSum.pathExists))
+          "an old keyed file survived"
+        check (← roEntry.pathExists) "a read-only cache was pruned"
+        checkEq before (← snapshot ro)
+        -- (a zero age or an unknown argument is an error)
+        checkEq 2 (← run #["cache", "prune", "--days", "0"]).exitCode
+        checkEq 2 (← run #["cache", "prune", "--bogus"]).exitCode },
+    { name := "--cache-prune DAYS prunes the write cache before a run (a pruned entry is a miss)", run := fun _ => do
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 2\n"),
+                          ("main.wiz", "import M\n#eval x\n")]
+        let cache ← IO.FS.createTempDir
+        let wiz := (← IO.FS.realPath ".lake/build/bin/wiz").toString
+        let base : Array String := #["check", "main.wiz", "-I", dir.toString, "--cache", cache.toString,
+                                     "--region-cache"]
+        let go (extra : Array String := #[]) : IO IO.Process.Output :=
+          IO.Process.output { cmd := wiz, args := base ++ extra, cwd := some dir }
+        let o1 ← go
+        checkEq 0 o1.exitCode
+        checkEq "main.wiz:2:1: info: 2\n" o1.stdout
+        check ((← regionFiles cache).size > 0) "no region was written"
+        -- (age everything keyed; the run prunes it first, and still answers the same)
+        for f in ← everyFile cache do
+          let name := f.fileName.getD ""
+          if [".wizc", ".wizm", ".wizr", ".wizs"].any (fun e => name.endsWith e) then
+            touchAgo f "40 days ago"
+        let o2 ← go #["--cache-prune", "7"]
+        checkEq 0 o2.exitCode
+        checkEq o1.stdout o2.stdout
+        check ((o2.stderr.splitOn "cache prune: removed").length > 1) s!"stderr: {o2.stderr}"
+        check ((o2.stderr.splitOn "removed 0 files").length == 1) s!"nothing was pruned: {o2.stderr}"
+        check ((← regionFiles cache).size > 0) "the pruned regions were not rewritten"
+        -- (and the run's own files are fresh: pruning again removes nothing)
+        let o3 ← go #["--cache-prune", "7"]
+        checkEq 0 o3.exitCode
+        check ((o3.stderr.splitOn "cache prune: removed 0 files").length > 1) s!"stderr: {o3.stderr}"
+        -- (a bad number of days is an error, not a silent no-op)
+        checkEq 1 (← go #["--cache-prune", "0"]).exitCode },
+    { name := "--cache-ro with --region-cache serves the read-only layer and never writes it", run := fun _ => do
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 2\n"),
+                          ("main.wiz", "import M\n#eval x\n")]
+        let ro ← IO.FS.createTempDir
+        let wiz := (← IO.FS.realPath ".lake/build/bin/wiz").toString
+        let coldArgs : Array String := #["check", "main.wiz", "-I", dir.toString, "--cache", ro.toString,
+                                       "--region-cache"]
+        let cold ← IO.Process.output { cmd := wiz, args := coldArgs, cwd := some dir }
+        checkEq 0 cold.exitCode
+        checkEq "main.wiz:2:1: info: 2\n" cold.stdout
+        let regions ← regionFiles ro
+        check (regions.size > 0) "no region was written"
+        let before ← snapshot ro
+        -- (read caches only: the regions answer, and nothing in the layer changes)
+        let warm (stats : Bool) : IO IO.Process.Output := do
+          let extra : Array String := if stats then #["--region-stats"] else #[]
+          let args : Array String := #["check", "main.wiz", "-I", dir.toString, "--no-cache",
+                                       "--cache-ro", ro.toString, "--region-cache"] ++ extra
+          IO.Process.output { cmd := wiz, args, cwd := some dir }
+        let o ← warm true
+        checkEq 0 o.exitCode
+        checkEq cold.stdout o.stdout
+        check ((o.stderr.splitOn "0 modules from a region").length == 1) s!"no region answered: {o.stderr}"
+        checkEq before (← snapshot ro)
+        -- (a bad checksum in the read-only layer: a miss, the text answers, nothing is repaired)
+        let _ ← flipByte regions[0]!
+        let beforeBad ← snapshot ro
+        let o ← warm true
+        checkEq 0 o.exitCode
+        checkEq cold.stdout o.stdout
+        check ((o.stderr.splitOn "0 without").length == 1) s!"the corrupt region was not a miss: {o.stderr}"
+        checkEq beforeBad (← snapshot ro) },
     { name := "wiz check --region-cache: a warm run comes from regions, and corrupt ones are misses", run := fun _ => do
         let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 2\n"), ("main.wiz", "import M\n#eval x\n")]
         let cache ← IO.FS.createTempDir
@@ -905,6 +1187,53 @@ def grailGroup : Group where
         let out ← IO.Process.output { cmd := self.toString, args := buildArgs }
         checkEq 0 out.exitCode
         check ((out.stdout.splitOn "jobs run").length > 1) s!"{out.stdout}{out.stderr}" },
+    { name := "grail build --region-cache: jobs write regions, and a warm build matches the text cache", run := fun _ => do
+        let cache ← IO.FS.createTempDir
+        -- the text-only reference, in its own package tree
+        let text ← mkTree pkgFiles
+        let o0 ← grailBuild text ["--cache", cache.toString]
+        checkEq 0 o0.exitCode
+        checkEq 0 (← regionFiles cache).size
+        -- a first region build: each package module's effects become one .wizr
+        let cold ← mkTree pkgFiles
+        let o1 ← grailBuild cold ["--cache", cache.toString, "--region-cache"]
+        checkEq 0 o1.exitCode
+        check ((← regionFiles cache).size > 0) "the region build wrote no .wizr"
+        -- a warm region build in a fresh tree: the same report and job keys as the text build
+        let warm ← mkTree pkgFiles
+        let o2 ← grailBuild warm ["--cache", cache.toString, "--region-cache"]
+        checkEq 0 o2.exitCode
+        checkEq o0.stdout o2.stdout
+        checkEq (← buildDirs text) (← buildDirs warm) },
+    { name := "grail build --region-cache: a corrupt region falls back, and a read-only layer serves regions", run := fun _ => do
+        let cache ← IO.FS.createTempDir
+        let dir ← mkTree pkgFiles
+        let o0 ← grailBuild dir ["--cache", cache.toString, "--region-cache"]
+        checkEq 0 o0.exitCode
+        let regs ← regionFiles cache
+        check (regs.size > 0) "no regions were written"
+        -- corrupt every region: the text entries answer and the region is rewritten
+        for f in regs do IO.FS.writeFile f ""
+        let dir2 ← mkTree pkgFiles
+        let o1 ← grailBuild dir2 ["--cache", cache.toString, "--region-cache"]
+        checkEq 0 o1.exitCode
+        checkEq o0.stdout o1.stdout
+        for f in ← regionFiles cache do
+          check ((← f.metadata).byteSize > 0) s!"{f} was not rewritten"
+        -- a read-only cache serves regions: the fresh write cache gets none, and `ro` is untouched
+        let ro ← IO.FS.createTempDir
+        let roPkg ← mkTree pkgFiles
+        let o2 ← grailBuild roPkg ["--cache", ro.toString, "--region-cache"]
+        checkEq 0 o2.exitCode
+        check ((← regionFiles ro).size > 0) "no region was written to the read-only source"
+        let before ← snapshot ro
+        let write ← IO.FS.createTempDir
+        let pkg ← mkTree pkgFiles
+        let o3 ← grailBuild pkg ["--cache-ro", ro.toString, "--cache", write.toString, "--region-cache"]
+        checkEq 0 o3.exitCode
+        checkEq o0.stdout o3.stdout
+        checkEq before (← snapshot ro)
+        checkEq 0 (← regionFiles write).size },
     { name := "an edit reruns the checks that depend on it", run := fun _ => do
         let dir ← mkTree pkgFiles
         let tc : Toolchain := { cacheDir := some (← IO.FS.createTempDir) }
@@ -956,11 +1285,6 @@ def diamondFiles : List (String × String) :=
    ("src/C.wiz", "import A\ndef c : Nat := a + 2\n"),
    ("src/D.wiz", "import B\nimport C\ndef d : Nat := b + c\n"),
    ("app.wiz", "import D\n#eval d\n")]
-
-/-- The names in a package's `.grail/build`, sorted. -/
-def buildDirs (dir : System.FilePath) : IO (List String) := do
-  let entries ← (dir / ".grail" / "build").readDir
-  pure (entries.map (·.fileName)).toList.mergeSort
 
 def grailJobsGroup : Group where
   name := "grail-jobs"

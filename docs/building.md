@@ -201,7 +201,8 @@ cached between runs.
   in one part).
   `scripts/ci.py plan` shows the parts and their
   estimates. The heavy groups have dedicated shards of their own (`hdl-verified`,
-  `prop`, `audit`), so adding a slow case there does not unbalance `core`.
+  `hdl-uart-temporal`, `prop`, `audit`), so adding a slow case there does not unbalance
+  `core`.
   To refresh the baseline from a CI run:
   `gh run download RUN -n test-timings && scripts/ci.py baseline timings.jsonl > .github/test-timings.json`.
 * **`"jobs"`.** A shard may say `"jobs": N` to give `lake test` `--jobs N` (above): its
@@ -406,3 +407,39 @@ otherwise Nix builds wiz from source, which takes a few minutes.
 11p) and this wiz on `PATH`: `nix run github:wiz-pl/wiz#nvim-wiz --
 file.wiz`. `packages.<system>.wiz-nvim` is the plugin alone, for a Neovim
 configuration in Nix.
+
+## Merge order and stacked pull requests
+
+CI runs a limited number of jobs, so work lands in **stacks** rather than one pull
+request per topic. A stack branch merges several finished component branches in
+dependency order and is opened as one integration pull request; that PR is the unit
+of review, CI and merge. The component PRs are closed as folded, and their branches
+stay: the stack's ancestry is what makes the next restack cheap.
+
+* The first line of a stack PR is `Depends on: #a, #b`, naming every **unmerged** PR
+  whose commits the branch contains. The stack does not merge until each of them is
+  `MERGED`. A dependency that was closed because another PR superseded it is not
+  merged, so rewrite the line when that happens.
+* **One ready stack PR per dependency chain.** A dependent stack stays draft or
+  local until its base has merged and the branch has been restacked on `master`.
+  Opening it earlier only produces an unmergeable PR, and an unmergeable PR gets no
+  CI run at all.
+* Restack with `git merge origin/master` (or the dependency branch), never by
+  rebasing a shared branch. Merge a stack with a merge commit
+  (`gh pr merge N --merge`), not squash or rebase.
+* While a stack's CI is the critical path, no other top-level PR is opened; a
+  docs-only PR may follow the stack's run, not precede it.
+* Cancel only superseded runs of the same branch. A conflicting PR has no checks
+  to wait for, so restack it instead.
+
+A stack is ready to merge when its merge state is `CLEAN`, the required checks are
+green on the current head (not on a superseded one), every `Depends on:` PR is
+merged, its component PRs are closed, the test groups it touches have been run with
+counts in the PR body, the documentation style check passes, it is not a draft, and
+the restack plan for its dependents is written down.
+
+The queue order is kept in a ledger outside the checkout
+(`wiz-notes/stack-ledger.json`, or `$WIZ_STACK_LEDGER`). `scripts/stack-status.py
+--next 5` prints the next actions with their gates, `--check` rejects a ledger with
+two ready PRs in one chain or a ready PR with an unmerged dependency, and `--write`
+refreshes the ledger's facts from `gh` and `git`.

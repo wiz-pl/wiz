@@ -1,4 +1,5 @@
 import Lean.CompactedRegion
+import Std.Time.DateTime.Timestamp
 import Wiz.Query
 import Wiz.Module
 
@@ -535,6 +536,10 @@ def writeAtomic (file : System.FilePath) (content : String) : IO Unit := do
   IO.FS.writeFile tmp content
   IO.FS.rename tmp file
 
+/-- Remove `file` if it exists, ignoring errors (a pure cache never fails a run). -/
+def removeQuietly (file : System.FilePath) : IO Unit :=
+  try IO.FS.removeFile file catch _ => pure ()
+
 /-- What identifies the running binary, and so its elaborator and kernel: the hash of the
 executable. Hashing it takes a moment, so the result is remembered in `dir/bin/`, by the
 executable's path, size and modification time. Without it, a cache directory shared by
@@ -612,9 +617,15 @@ mapped region; the text entries stay in place, are the authority, and are the fa
 
 `CompactedRegion.read` does not check the type it loads (`α` is erased at the boundary), so a
 file is guarded by its name (this binary's hash and the module's key), Lean's `.olean` header
-(magic and version), and the payload's `magic`, `format`, `binary`, `salt`, `rig` and `key`.
-Never content-address a region by its bytes: they are pointers, and not canonical. Bump
-`regionFormat` whenever `Effect`, `Decl`, `Term` or `Info` change shape.
+(magic and version), the payload's `magic`, `format`, `binary`, `salt`, `rig` and `key`, and
+— format 2 — a **payload checksum**: a `.wizs` sidecar holds the 8-byte hash of the whole
+image (`checksumFile`: one read, a 64-bit hash), checked before the image is mapped, so a
+same-size bit flip (even one that would corrupt a pointer) is a miss and never reaches the
+type-erased reader. The check is one read and a `ByteArray.hash` pass, not a decode: a
+millisecond or two for a multi-MB region. Never content-address a region by its bytes: they
+are pointers, and not canonical. Bump `regionFormat` whenever `Effect`, `Decl`, `Term` or
+`Info` change shape, or the file framing changes; the format is disposable, never
+migrated.
 
 The artifact is a *projection*: `CommandState`/`Globals` carry closures (`loader`,
 `trustedModule`, `pp.run`, `metaCode`, `Budget.ref`) that the compactor refuses. Loading
@@ -622,12 +633,17 @@ applies the effects to the live state with `Effect.apply`, so those fields stay 
 regions themselves are kept for the process lifetime (mapped objects have no reference
 counts: a state must not outlive the region it was built from). -/
 
-/-- Format of a `ModuleArtifact`'s payload: bump it when `Effect`, `Decl`, `Term` or `Info`
-change shape (`salt` covers the same ground for the text entries). -/
-def regionFormat : Nat := 1
+/-- Format of a `.wizr` file: bump it when `Effect`, `Decl`, `Term` or `Info` change shape
+(`salt` covers the same ground for the text entries), and when the file's framing changes.
+1: a bare `Lean.CompactedRegion` image. 2: the image and, beside it, a `.wizs` sidecar
+holding the image's 8-byte little-endian hash (`regionSumFile`). A file of the wrong format
+(or without its sidecar) is a miss, never migrated (`RegionStore.layered`: the write cache
+drops and rewrites it, a read-only cache keeps it). -/
+def regionFormat : Nat := 2
 
-/-- `"wizreg01"`: checked after a region is read (Lean's header is the first line). -/
-def regionMagic : UInt64 := 0x77697A7265673031
+/-- `"wizreg02"` (format 2): checked after a region is read (Lean's header is the first
+line). A format-1 file ("wizreg01") has no checksum and fails `fits`. -/
+def regionMagic : UInt64 := 0x77697A7265673032
 
 /-- What one module contributes to an importer, as pure data. -/
 structure ModuleArtifact (R : Type) where
@@ -719,19 +735,102 @@ not reference counted, so a state built from one must not outlive it (design §6
 Lean's copy path, which is correct, only slower. -/
 initialize regionRoots : IO.Ref (Array Lean.CompactedRegion) ← IO.mkRef #[]
 
-/-- Read the artifact at `file`; `none` if it is missing, truncated, or fails to load. The
-region is kept alive for the process (`regionRoots`). -/
-def readRegionFile (file : System.FilePath) : IO (Option (ModuleArtifact R)) := do
-  if !(← file.pathExists) then return none
+/-! ### The payload checksum
+
+A region is a byte image, and `CompactedRegion.read` does no validation: a flipped byte is
+not an error but a wrong term (or a crash). Format 2 therefore comes with a **sidecar**,
+`<region>.wizs`: the 8-byte little-endian 64-bit hash of the `.wizr`'s bytes. It is checked
+**before** the image is mapped, so a same-size bit flip — even one in a pointer the reader
+would follow — is an ordinary miss, never UB.
+
+Why a sidecar and not a trailer: Lean's compacted-region reader walks the image *backwards
+from its end* (the root is written last), so appending 8 bytes shifts where it looks for the
+root and the read fails ("unreachable code was reached"). Prepending is impossible (the
+`.olean` header must be at offset 0), and patching a field inside the image would need its
+offset, which is not stable. The sidecar keeps the `.wizr` byte-identical to what
+`CompactedRegion.save` wrote, and lets the raw bytes be hashed before the mapping.
+
+The check is cheap: one read of the region (the pages the `mmap` then uses) and the
+runtime's 64-bit `ByteArray.hash` over the bytes — a millisecond or two for a multi-MB
+region, never a decode. The hash is not content addressing (the image is not canonical): it
+only guards the bytes this file on disk has. A missing sidecar, a wrong-size sidecar or a
+mismatch is a miss; the write cache drops both files, a read-only cache keeps them. -/
+
+/-- `n` as its eight little-endian bytes. -/
+def u64Bytes (n : UInt64) : ByteArray :=
+  ByteArray.mk #[ (n &&& 0xff).toUInt8, ((n >>> 8) &&& 0xff).toUInt8,
+                  ((n >>> 16) &&& 0xff).toUInt8, ((n >>> 24) &&& 0xff).toUInt8,
+                  ((n >>> 32) &&& 0xff).toUInt8, ((n >>> 40) &&& 0xff).toUInt8,
+                  ((n >>> 48) &&& 0xff).toUInt8, ((n >>> 56) &&& 0xff).toUInt8 ]
+
+/-- The little-endian `UInt64` in `b`'s first eight bytes. -/
+def u64OfBytes (b : ByteArray) : UInt64 :=
+  (b.get! 0).toUInt64 ||| ((b.get! 1).toUInt64 <<< 8) ||| ((b.get! 2).toUInt64 <<< 16) |||
+  ((b.get! 3).toUInt64 <<< 24) ||| ((b.get! 4).toUInt64 <<< 32) ||| ((b.get! 5).toUInt64 <<< 40) |||
+  ((b.get! 6).toUInt64 <<< 48) ||| ((b.get! 7).toUInt64 <<< 56)
+
+/-- The checksum of every byte of `file`: the runtime's 64-bit `ByteArray.hash` over one
+read of the whole image. (Chunked `Handle.read` calls were 80× slower here — about 0.8 ms
+per 64 KiB — so the image is read once instead; a region is a few MB.) -/
+def checksumFile (file : System.FilePath) : IO UInt64 := do
+  pure (hash (← IO.FS.readBinFile file))
+
+/-- A region's checksum file: the same stem as the `.wizr`, extension `.wizs`. -/
+def regionSumFile (file : System.FilePath) : System.FilePath :=
+  file.withExtension "wizs"
+
+/-- `file`'s recorded checksum, if its sidecar holds the hash of the file's bytes. `none`
+for a missing region or sidecar, a wrong-size sidecar, or corrupt bytes (any read error is
+a miss). -/
+def regionFileChecksum (file : System.FilePath) : IO (Option UInt64) := do
   try
+    if !(← file.pathExists) then return none
+    let side ← IO.FS.readBinFile (regionSumFile file)
+    if side.size != 8 then return none
+    let sum ← checksumFile file
+    pure (if u64OfBytes side == sum then some sum else none)
+  catch _ => pure none
+
+/-- Read the artifact at `file`; `none` if it is missing, truncated, corrupt (the payload
+checksum is checked first, so a bit flip never reaches the type-erased reader) or fails to
+load. The region is kept alive for the process (`regionRoots`). -/
+def readRegionFile (file : System.FilePath) : IO (Option (ModuleArtifact R)) := do
+  try
+    if !(← file.pathExists) then return none
+    let md ← file.metadata
+    unless (← regionFileChecksum file).isSome do return none
     let (a, r) ← regionRead (α := ModuleArtifact R) file
+    -- (another process may have replaced the file between the check and the read: its
+    -- bytes were not the ones we hashed, so do not trust them)
+    let md' ← file.metadata
+    if md'.byteSize != md.byteSize || md'.modified != md.modified then return none
     regionRoots.modify (·.push r)
     pure (some a)
   catch _ => pure none
 
-/-- Write an artifact to `file` (Lean writes a temporary file and renames it). -/
-def writeRegionFile (file : System.FilePath) (a : ModuleArtifact R) : IO Unit :=
-  regionSave file (Lean.Name.mkSimple a.module) a
+/-- Delete a region and its checksum (both, so neither is left behind). -/
+def removeRegionFiles (file : System.FilePath) : IO Unit := do
+  removeQuietly file
+  removeQuietly (regionSumFile file)
+
+/-- Write an artifact to `file`: Lean writes a temporary image, its bytes are hashed into a
+temporary `.wizs`, and both are renamed into place (image first: a reader that sees the new
+image with the old checksum gets a clean miss, never a wrong term). -/
+def writeRegionFile (file : System.FilePath) (a : ModuleArtifact R) : IO Unit := do
+  let stamp := s!".tmp{← IO.Process.getPID}-{← IO.monoNanosNow}"
+  let tmp := file.toString ++ stamp
+  let sumFile := regionSumFile file
+  let sumTmp := sumFile.toString ++ stamp
+  try
+    regionSave tmp (Lean.Name.mkSimple a.module) a
+    let sum ← checksumFile tmp
+    IO.FS.writeBinFile sumTmp (u64Bytes sum)
+    IO.FS.rename tmp file
+    IO.FS.rename sumTmp sumFile
+  catch e =>
+    removeQuietly tmp
+    removeQuietly sumTmp
+    throw e
 
 /-- Module `key`'s artifact, if it exists and its tags match; a bad file is dropped (a pure
 cache: the next run rewrites it). -/
@@ -740,10 +839,10 @@ def readModuleRegion (dir : System.FilePath) (binary : UInt64) (rig : String) (k
   let file := dir / regionFileName binary key
   match ← readRegionFile (R := R) file with
   | some a => if a.fits binary key rig then pure (some a) else
-      (try IO.FS.removeFile file catch _ => pure ())
+      removeRegionFiles file
       pure none
   | none =>
-      if ← file.pathExists then (try IO.FS.removeFile file catch _ => pure ())
+      if ← file.pathExists then removeRegionFiles file
       pure none
 
 /-- Write module `key`'s artifact (the tags are filled in here). -/
@@ -826,10 +925,6 @@ structure RegionSink (R : Type) where
   /-- the source ranges of the commands that are not cacheable (commit 3's rerun path) -/
   rerun : IO.Ref (Array (Nat × Nat))
 
-/-- Remove `file` if it exists, ignoring errors (a pure cache never fails a run). -/
-def removeQuietly (file : System.FilePath) : IO Unit :=
-  try IO.FS.removeFile file catch _ => pure ()
-
 /-- The region store over the same layers as `Store.layered`: `get` searches the write
 directory first, then each read-only directory in order, and `put` writes only to the write
 directory (none: no writes). A read-only cache is never created, written or repaired, so a
@@ -850,9 +945,9 @@ def RegionStore.layered (write : Option System.FilePath) (reads : List System.Fi
             if a.fits binary k opts.rig then
               return some a
             else if inWrite dir then
-              removeQuietly file
+              removeRegionFiles file
           | none =>
-            if inWrite dir then removeQuietly file
+            if inWrite dir then removeRegionFiles file
       pure none
     put := fun a => match write with
       | some dir => do
@@ -877,6 +972,92 @@ def Store.layeredRegion (write : Option System.FilePath) (reads : List System.Fi
 def Store.diskRegion (dir : System.FilePath) (binary : UInt64) (opts : RegionOptions) :
     IO (Store R) :=
   Store.layeredRegion (some dir) [] binary opts
+
+/-! ## Pruning (`--cache-prune`, `wiz cache prune`)
+
+Keyed entries are never invalidated by name: every edit, every binary and every option
+change leaves last generation's `.wizc`/`.wizm`/`.wizr`/`.wizs` behind. Pruning is by **age**
+(modification time) and only ever in the **write** cache — a `--cache-ro` layer is not
+passed to `pruneCache` at all, so it cannot be touched. A pruned entry is an ordinary
+miss: the next run elaborates and rewrites it. Pruning happens *before* a batch command
+(`--cache-prune DAYS`) or as `wiz cache prune`, so the current process has not mapped any
+region yet; only the three keyed extensions are considered (never a directory, the `bin/`
+memo or anything else), and the CLI requires at least one day. -/
+
+/-- What a prune removed (or would remove, with `dryRun`). -/
+structure PruneCounts where
+  /-- `.wizc` effect entries -/
+  entries : Nat := 0
+  /-- `.wizm` module markers -/
+  markers : Nat := 0
+  /-- `.wizr` module regions -/
+  regions : Nat := 0
+  /-- `.wizs` region checksums -/
+  sums : Nat := 0
+  /-- their total size in bytes -/
+  bytes : Nat := 0
+  deriving Inhabited, Repr
+
+def PruneCounts.total (c : PruneCounts) : Nat := c.entries + c.markers + c.regions + c.sums
+
+def PruneCounts.plus (a b : PruneCounts) : PruneCounts :=
+  { entries := a.entries + b.entries, markers := a.markers + b.markers,
+    regions := a.regions + b.regions, sums := a.sums + b.sums, bytes := a.bytes + b.bytes }
+
+/-- A byte count in readable units. -/
+def sizeText (n : Nat) : String :=
+  if n < 1024 then s!"{n} B"
+  else if n < 1024 * 1024 then s!"{n / 1024} KiB"
+  else if n < 1024 * 1024 * 1024 then s!"{n / (1024 * 1024)} MiB"
+  else s!"{n / (1024 * 1024 * 1024)} GiB"
+
+/-- Delete the keyed cache files under `dir` older than `days` days (by modification time),
+recursively; with `dryRun`, only count them. `now` (seconds since the Unix epoch) is for
+tests and defaults to the wall clock. Only `.wizc`, `.wizm`, `.wizr` and `.wizs` are
+considered: everything else — the `bin/` memo, a package's files, a subdirectory that is not
+part of the cache — is left alone, and symlinks are not followed. Call it on the **write** cache: a
+read-only layer is never pruned. -/
+partial def pruneCache (dir : System.FilePath) (days : Nat) (dryRun : Bool := false)
+    (now : Option Int := none) : IO PruneCounts := do
+  let now ← match now with
+    | some t => pure t
+    | none => pure (← Std.Time.Timestamp.now).val.toSeconds.toInt
+  let cutoff := now - (Int.ofNat days * 86400)
+  let rec walk (d : System.FilePath) : IO PruneCounts := do
+    let mut c : PruneCounts := {}
+    for e in ← d.readDir do
+      let link ← try pure (← e.path.symlinkMetadata).type catch _ => pure .other
+      if link == .symlink then continue
+      let md ← try pure (some (← e.path.metadata)) catch _ => pure none
+      match md with
+      | none => pure ()
+      | some md =>
+        if md.type == .dir then
+          c := c.plus (← walk e.path)
+        else if md.type == .file && md.modified.sec < cutoff then
+          let entry := e.fileName.endsWith ".wizc"
+          let marker := e.fileName.endsWith ".wizm"
+          let region := e.fileName.endsWith ".wizr"
+          let sum := e.fileName.endsWith ".wizs"
+          if entry || marker || region || sum then
+            unless dryRun do removeQuietly e.path
+            c := c.plus { entries := if entry then 1 else 0, markers := if marker then 1 else 0,
+                          regions := if region then 1 else 0, sums := if sum then 1 else 0,
+                          bytes := md.byteSize.toNat }
+    pure c
+  walk dir
+
+/-- One line, for `--cache-prune` or `wiz cache prune`. -/
+def PruneCounts.render (c : PruneCounts) (days : Nat) (dryRun : Bool)
+    (dir : System.FilePath) : String :=
+  let what := if dryRun then "would remove" else "removed"
+  s!"cache prune: {what} {c.total} files ({c.entries} .wizc, {c.markers} .wizm, " ++
+  s!"{c.regions} .wizr, {c.sums} .wizs), {sizeText c.bytes} older than {days} days in {dir}"
+
+/-- Prune `dir` and render the summary (`--cache-prune DAYS`, `wiz cache prune`). -/
+def pruneSummary (dir : System.FilePath) (days : Nat) (dryRun : Bool := false)
+    (now : Option Int := none) : IO String := do
+  pure ((← pruneCache dir days dryRun now).render days dryRun dir)
 
 /-- Module `key`'s artifact, if the region cache is on and the file matches. -/
 def Store.getRegion (s : Store R) (k : UInt64) : IO (Option (ModuleArtifact R)) :=

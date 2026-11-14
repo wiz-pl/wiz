@@ -62,11 +62,17 @@ def load (tc : Toolchain) (roots : List System.FilePath) (salt : UInt64) (src : 
   pure { src, init, key }
 
 /-- Elaborate a loaded file (through the cache when there is one: a write directory and
-any read-only ones). -/
+any read-only ones). With `--region-cache` (`tc.regionCache`), module effects are also
+read from and written to `.wizr` regions in the same layers as the `.wizc` entries; the
+text entries stay the authority, and a missing or corrupt region is a miss. -/
 def elaborate (tc : Toolchain) (salt : UInt64) (l : Loaded) : IO (CommandState ZeroOneMany) := do
   match tc.cacheDir, tc.readCaches with
   | none, [] => Cache.elaborateUncached l.src l.init salt
-  | write, reads => pure (← Cache.elaborateCached write reads l.src l.init l.key salt).1
+  | write, reads =>
+    let region := if tc.regionCache then
+        some ({ rig := RigTag.tag (R := ZeroOneMany) } : Cache.RegionOptions)
+      else none
+    pure (← Cache.elaborateCached write reads l.src l.init l.key salt (region := region)).1
 
 /-- The messages of a state, rendered `path:line:col: severity: text`. -/
 def render (path : String) (l : Loaded) (s : CommandState ZeroOneMany) : String :=
