@@ -744,3 +744,16 @@ or `&struct` in self-hosted glue, no rewriting of matches through `get`.
 **Tests** (group `selfhost`): an `import_c` header whose functions are called from Wiz
 and from `glue`, and a native representation on a sealed constructor that runs through
 `wiz_u32array_*`, in GC and RC modes.
+
+**ABI v1 (aligned with `wiz-notes/prior-art/compilers-runtime-ffi.md` §2.2, cheap
+parts only).** Kinds are explicit in every `Foreign.fn`: `n`/`u` are `uint64_t`, `f`
+is `double`, `s` is `const char *` (borrowed in, caller-owned out), `b` is `int`, `p`
+is `void *` (+1 wrapped, borrowed for a call), `w` is a Wiz `wiz_val` (+0 in, +1 out),
+and `e`/`v` are omitted from the C prototype. Structs by value go only through an
+explicit `c_struct`; a native representation is accepted only on a **sealed** type
+whose constructor's `mk`/`get` are registered, so values of the type are the runtime
+natives. The generated `--header` now defines `WIZ_ABI_MAJOR`/`WIZ_ABI_MINOR` (1/0)
+and carries the ownership table as comments. Deferred (documented, not implemented):
+a linked `wiz_abi_version` symbol, `_Static_assert`s for `c_struct` layouts, boxed
+`Nat`/`NatObj` by default, callback roots on both collectors, and the preprocessor or
+automatic struct/pointer import for `import_c`.

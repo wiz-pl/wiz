@@ -1184,13 +1184,14 @@ def selfHostGroup : Group where
           "attribute [implemented_by WA.mkImpl WA.getImpl] WA.mk\n" ++
           "def WA.ofList (xs : List Nat) : WA := .mk xs\n" ++
           "def WA.toList (a : WA) : List Nat := WA.getImpl a\n" ++
-          "extern \"wiz_u32array_of_list\" WA.ofListNative : List Nat → WA\n" ++
-          "extern \"wiz_warray_to_list\" WA.toListNative : WA → List Nat\n" ++
+          "extern \"wa_id\" WA.ofListNative : List Nat → WA\n" ++
+          "extern \"wa_id\" WA.toListNative : WA → List Nat\n" ++
           "attribute [implemented_by WA.ofListNative] WA.ofList\n" ++
           "attribute [implemented_by WA.toListNative] WA.toList\n" ++
           "def main : IO Unit := IO.println (Nat.toString (List.length (WA.toList (WA.ofList (List.cons 1 (List.cons 2 (List.cons 3 .nil)))))))"
-        selfhostCompileRun prog "3\n"
-        selfhostCompileRun prog "3\n" (flags := #["--rc"]) },
+        let csrc := "typedef unsigned long wiz_val;\nwiz_val wa_id(wiz_val x) { return x; }\n"
+        selfhostLinkRun [("main.wiz", prog ++ "\nlink_c \"c/wa.c\"\n"), ("c/wa.c", csrc)] "3\n"
+        selfhostLinkRun [("main.wiz", prog ++ "\nlink_c \"c/wa.c\"\n"), ("c/wa.c", csrc)] "3\n" (flags := #["--rc"]) },
     { name := "a link_c file that does not exist is an error, in both toolchains (21t)", run := fun _ => do
         let prog := "import IO\nlink_c \"c/nope.c\"\ndef main : IO Unit := IO.println \"hi\"\n"
         let (s, src, _) ← elabTree [("main.wiz", prog)]
