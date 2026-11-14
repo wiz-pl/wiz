@@ -1187,6 +1187,13 @@ def selfHostGroup : Group where
           ("def bad (x : V 8) : W 8 := x\n", false),
           ("def bad (x : W 8) : W 16 := x\n", false),
           ("sealed structure P where\n  x : Nat\n", false)] },
+    { name := "the self-hosted frontend: inductive recursion is guarded (positivity), as in the Lean frontend", run := fun _ =>
+        selfhostAgrees "" [
+          ("inductive Rose where\n  | leaf\n  | node (l : Rose) (r : Rose)\n", true),
+          ("inductive Bad where\n  | mk (x : Bad)\n", true),
+          ("inductive Bad where\n  | mk (f : Bad → Prop)\n", false),
+          ("inductive Bad where\n  | mk (f : (Bad → Prop) → Prop)\n", false),
+          ("inductive Bad where\n  | mk (xs : List Bad)\n", false)] },
     { name := "the self-hosted frontend: constructor parameters from the expected type (21j)", run := fun _ =>
         selfhostAgrees ("def Code : Bool → Type\n  | .true => Nat\n  | .false => Bool\n" ++
           "structure Tagged (b : Bool) where\n  val : Code b\n")
@@ -1221,6 +1228,11 @@ def selfHostGroup : Group where
         let vs := MTm.sizeArgs.map leanVerdict
         unless vs.take 2 == ["error", "error"] && (vs.drop 2).all (· != "error") do
           throw (IO.userError s!"unexpected verdicts {vs}") },
+    { name := "guarded μ/ν descriptions: μ X. X is rejected, Nat/List/tree and a stream are accepted (and both kernels agree below)", run := fun _ => do
+        for (t, ok) in MTm.muSize do
+          let v := leanVerdict t
+          unless (v != "error") == ok do
+            throw (IO.userError s!"expected {if ok then "accepted" else "rejected"}, got {v}: {MTm.pretty 0 t}") },
     { name := "∞ is not below itself (and both kernels agree on it below)", run := fun _ => do
         let vs := MTm.sizeInf.map leanVerdict
         unless vs.take 5 == List.replicate 5 "error" && (vs.drop 5).all (· != "error") do

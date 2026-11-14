@@ -524,6 +524,24 @@ def ctorName (c : Syntax) : String := match kid c 2 with
   | .ident n => n
   | _ => "_"
 def ctorFields (c : Syntax) : List Field := fieldsOf (kids (kid c 3))
+-- (positivity) does the type being defined occur as an identifier in a field's type?
+-- `T` may only occur as a recursive field (`T args`, which `recField` turns into
+-- `drec`) or in the result; any other occurrence is a negative or non-strictly-positive
+-- one (the Lean frontend's `ctorDesc` message, `Inductive.lean`).
+mutual
+def typeOccurs (T : String) (s : Syntax) : Bool := match s with
+  | .ident n => strEq n T
+  | .node _ args => typeOccursArgs T args
+  | _ => .false
+def typeOccursArgs (T : String) : SyntaxF .false → Bool
+  | .nil => .false
+  | .cons s rest => Bool.or (typeOccurs T s) (typeOccursArgs T rest)
+end
+def typeOccursAny (Ts : List String) (s : Syntax) : Bool := match Ts with
+  | .nil => .false
+  | .cons t rest => Bool.or (typeOccurs t s) (typeOccursAny rest s)
+def positivityError : String :=
+  "the type being defined may only occur as the type of a recursive field or the result"
 
 -- an index (`tt` without one), scope-checked in `sc` and closed at depth `d`
 def idxTm (inline : Bool) (gs : Globals) (sc : Scope) (d : Nat) : Option Syntax → Elab
@@ -549,11 +567,13 @@ def ctorDesc (inline : Bool) (gs : Globals) (T : String) (ps : List String) (nid
       | .ok jt => match ctorDesc inline gs T ps nidx res sc d rest with
         | .ok D => .ok (.drec (.qlit q) jt D)
         | e => e
-    | .no => match elab sc ty with
-      | .err m => .err m
-      | .ok A => match ctorDesc inline gs T ps nidx res (Scope.bind sc x) (d + 1) rest with
-        | .ok D => .ok (.darg (.qlit q) (closeG inline gs d A) (.lam D))
-        | e => e
+    | .no => match typeOccurs T ty with
+      | .true => .err positivityError
+      | .false => match elab sc ty with
+        | .err m => .err m
+        | .ok A => match ctorDesc inline gs T ps nidx res (Scope.bind sc x) (d + 1) rest with
+          | .ok D => .ok (.darg (.qlit q) (closeG inline gs d A) (.lam D))
+          | e => e
   --|ex
   --| | _, _, _ => .err "not implemented"
   --sol>
@@ -3499,16 +3519,20 @@ def mctorDesc (inline : Bool) (gs : Globals) (members ps : List String) (m j : N
       | .ok D => .ok (.drec (.qlit q) (.tag m j') D)
       | e => e
     | .none => match hrecMember members ps ty with
-    | .yes H j' => match elab sc H with
-      | .err m' => .err m'
-      | .ok Ht => match mctorDesc inline gs members ps m j sc d rest with
-        | .ok D => .ok (.dhrec (.qlit q) (closeG inline gs d Ht) (.lam (.tag m j')) D)
-        | e => e
-    | .no => match elab sc ty with
-      | .err m' => .err m'
-      | .ok A => match mctorDesc inline gs members ps m j (Scope.bind sc x) (d + 1) rest with
-        | .ok D => .ok (.darg (.qlit q) (closeG inline gs d A) (.lam D))
-        | e => e
+    | .yes H j' => match typeOccursAny members H with
+      | .true => .err positivityError
+      | .false => match elab sc H with
+        | .err m' => .err m'
+        | .ok Ht => match mctorDesc inline gs members ps m j sc d rest with
+          | .ok D => .ok (.dhrec (.qlit q) (closeG inline gs d Ht) (.lam (.tag m j')) D)
+          | e => e
+    | .no => match typeOccursAny members ty with
+      | .true => .err positivityError
+      | .false => match elab sc ty with
+        | .err m' => .err m'
+        | .ok A => match mctorDesc inline gs members ps m j (Scope.bind sc x) (d + 1) rest with
+          | .ok D => .ok (.darg (.qlit q) (closeG inline gs d A) (.lam D))
+          | e => e
 -- a member constructor: the member's index and the syntax
 inductive MCtor where
   | mk (j : Nat) (c : Syntax)

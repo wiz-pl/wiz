@@ -127,7 +127,8 @@ Proofs carry no usage: they are erased, and conversion never looks at them.
     Γ ⊢ μ.{l} I D i ⇒ Type l           Γ ⊢ con x ⇐ μ D i  if  Γ ⊢ x ⇐ ⟦D⟧ (μ D) i
     Γ ⊢ ind P m i x ⇒ P i x ⊣ ω·(Uₘ + Uₓ)                  (`indMotiveTy`, `indMethodTy`)
     Γ ⊢ ν.{l} I D i ⇒ Type l           Γ ⊢ out x ⇒ ⟦D⟧ (ν D) i
-    (at a size: Γ ⊢ μ^s.{l} I D i ⇒ Type l and Γ ⊢ ν^s.{l} I D i ⇒ Type l if also Γ⁰ ⊢ s ⇐ Size)
+    (at a size: Γ ⊢ μ^s.{l} I D i and Γ ⊢ ν^s.{l} I D i ⇒ Type l if also Γ⁰ ⊢ s ⇐ Size;
+     for μ, D is guarded: every rec/hrec is under an arg field (`descGuarded`; μ X. X is rejected))
     Γ ⊢ coit S step i s ⇒ ν D i ⊣ ω·(U_step + U_s)
 
 ## Sizes (stage 4f)
@@ -520,6 +521,44 @@ partial def largeDomain (ctx : Ctx R) (A : Val R) (l : Nat) : Bool :=
   | .sort _ => true
   | .pi _ _ _ _ B _ => largeDomain ctx (Closure.inst ctx.globals B (Val.var l)) (l + 1)
   | _ => false
+
+/-- **The guarded inductive description (`μ`).** A recursive field (`rec`, `hrec`) is
+strictly smaller than the data type it belongs to only when it occurs under at least one
+non-recursive constructor field (`arg`): the constructor has then consumed a field before
+the recursive occurrence, so the recursive position is a field of the value, not the
+value itself. A description that begins with `rec`/`hrec` is the unguarded `μ X. X`
+(the identity functor): a recursive occurrence with nothing consumed before it, which the
+size side condition rejects. `guarded` is whether an `arg` field has been seen on the
+spine. (`ν` is not checked: `ν X. X` is a valid coinductive type, and guardedness there
+is `cocon`/`out`'s productivity rule, plus the surface copattern check.)
+
+A description whose head is not a constructor (a variable, `ret`, or an
+application/projection) is left alone: its spine is not visible to the kernel (the `μ`
+over `c.2.1` in the codes test, `μ Chain.desc i`, …). A *constant* is looked through to
+its value, so `def D := Desc.rec …; μ D ()` cannot hide an unguarded description
+(depth-bounded, so recursive globals stop). The check is conservative: it only rejects a
+`rec`/`hrec` it can see at the head of a constructor spine. -/
+partial def descGuarded (g : Globals R) (depth : Nat) (guarded : Bool) : Term R → Bool
+  | .darg _ _ E => descGuarded g depth true E
+  | .drec _ _ E => guarded && descGuarded g depth guarded E
+  | .dhrec _ _ _ E => guarded && descGuarded g depth guarded E
+  | .lam _ b => descGuarded g depth guarded b
+  | .ann t _ => descGuarded g depth guarded t
+  | .ecase _ _ _ bs => bs.all (descGuarded g depth guarded)
+  | .letE _ _ _ _ b => descGuarded g depth guarded b
+  | .const n _ =>
+    match depth with
+    | 0 => true
+    | k + 1 => match g.find? n with
+      | some d => match d.value with
+        | some v => descGuarded g k guarded v
+        | none => true
+      | none => true
+  | _ => true
+
+/-- The error a `μ` whose description is not guarded gets. -/
+def unguardedDescription : String :=
+  "unguarded recursive description: every recursive field (Desc.rec/Desc.hrec) must occur under a non-recursive (Desc.arg) field; μ X. X is not an inductive type"
 
 mutual
 
@@ -924,6 +963,11 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
     unless lI.equiv (.succ l) do throw (.other "an index type must be in the data type's universe")
     let vI := ctx.eval I
     let _ ← check ctx D (.desc l vI)
+    -- (μ only: a recursive field must be guarded, a non-recursive field before it; μ X. X
+    -- is out. `ν X. X` is a valid coinductive type: its guardedness is `cocon`/`out`)
+    match t with
+    | .mu .. => unless descGuarded ctx.globals 16 false D do throw (.other unguardedDescription)
+    | _ => pure ()
     let _ ← check ctx i vI
     pure (.sort (.succ l), Usage.zeros ctx.lvl)
   | .ind l I D v P m i x => do
