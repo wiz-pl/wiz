@@ -583,7 +583,7 @@ repository's controller are the origins, with the board-specific parts removed.
 | module | what | configuration |
 |---|---|---|
 | `Hdl.Uart` | `Uart.baudC n` (counter, `ce` in, `tick` out), `Uart.txC n` (8N1, `start`/`data` in, `line`/`busy` out), `Uart.rxC n` (`line` in, `valid`/`data`/`busy` out, two-flip-flop input synchroniser), `Uart.loopbackC n` (the line wired from TX to RX); the `…w` forms (`Uart.baudCw`, `Uart.txCw`, `Uart.rxCw`, `Uart.loopbackCw`, whose first argument is the counter width) and the named 7-bit (`Uart.tx7C`, …) and 10-bit (`Uart.tx10C`, …) configurations | `n` clocks per bit, 1 … 2^w; the default `Uart.cntW` is 16 bits (1 … 65536), `Uart.cntW7` is the iCEstick's 7 bits (1 … 128), `Uart.cntW10` is the Arty/OLED 10 bits (1 … 1024) |
-| `Hdl.Spi` | `Spi.masterC div` (mode 0, CPOL = 0, CPHA = 0: sample on the rising edge, shift on the falling edge), `Spi.loopC div` (`mosi` wired to `miso`) | `div` clocks per half period, 1 … 65536 |
+| `Hdl.Spi` | `Spi.masterC div` (mode 0, CPOL = 0, CPHA = 0: sample on the rising edge, shift on the falling edge), `Spi.loopC div` (`mosi` wired to `miso`); the generic `Spi.masterCW w cw ncs div` / `Spi.loopCW w cw ncs div` (`w`-bit transfer, `cw`-bit half-period counter, `ncs` chip selects, input `sel`), and `Spi.master8C` / `Spi.loop8C` for 8 bits with the default counter | `div` clocks per half period, 1 … 2^`cw` (the original is `cw = 16`); `w ≥ 1` bits a transfer; `ncs ≥ 1` selects |
 | `Hdl.Ddr` | the native port of a DDR3 controller (`Ddr.Req`: `valid`/`we`/`addr` 24/`wdata` 128/`wmask` 16; `Ddr.Resp`: `ready`/`rvalid`/`rdata` 128), and `Ddr.modelC`, a 64K-word model with the same valid/ready handshake and byte-masked writes | the real controller is `Ddr3.Ctrl` in wiz-ddr3 (see the module header for the field mapping) |
 
 The UART counter width is a meta-level parameter: only the clocks-per-bit counter (and
@@ -598,14 +598,68 @@ glitches), and its first (most significant) bit is on `mosi` in the cycle `cs` g
 The DDR module is a documented stub for the handshake: it has no timing parameters and no
 PHY, and a design on another clock needs a CDC wrapper around the port.
 
+The SPI master is generalised in the same way. `Spi.masterCW w cw ncs div` transfers `w`
+bits, uses a `cw`-bit half-period counter (`div` in each half period, `1 … 2^cw`) and
+drives `ncs` chip selects; its input `Spi.InW` has `sel` (`Spi.selW ncs` bits) and its
+output `Spi.OutW.cs` is `ncs` lines, all high when idle and bit `sel` low while a
+transfer runs. `Spi.StW`/`Spi.InW`/`Spi.OutW`/`Spi.CmdW` are the generic bundles;
+`Spi.master8C` and `Spi.loop8C` fix `w = 8` and `cw = Spi.cntW = 16`. The original
+`Spi.masterC`/`Spi.loopC` (8 bits, 16-bit counter, one select, `Spi.In`/`Spi.Out`) keep
+their own definitions, so their netlists and Verilog are unchanged; the example checks
+the generic master's pins, flags and final bytes against them. The generic `Spi.shiftIn`
+receives most significant bit first (`x << 1 | b`); the original `Spi.shiftIn8` shifts
+the other way and reverses the received byte, which its 8-bit loopback (0xA5, 0x3C, both
+palindromes) did not show. The example's non-palindromic 0x96 and the 4- and 16-bit
+words check the correct order.
+
 Examples (run by the test group `rune`): `examples/rune-uart.wiz` (the baud generator and
 the loopback at the 16-bit default and the 7-bit and 10-bit configurations, `n = 1` and
-each width's maximum `n`, and the reset/CDC receiver), `examples/rune-spi.wiz`,
-`examples/rune-ddr.wiz` — value simulation = `Netlist.simFast`, the loopback bytes, the
-SPI shift order and edges, the DDR handshake and masked write.
+each width's maximum `n`, and the reset/CDC receiver), `examples/rune-spi.wiz` (the
+original loopback at dividers 1 and 3, the generic master at those parameters against
+it, 4- and 16-bit transfers, an 8-bit counter, and three chip selects selecting slaves 0,
+1 and 2), `examples/rune-ddr.wiz` — value simulation = `Netlist.simFast`, the loopback
+bytes, the SPI shift order and edges, the chip-select patterns, the DDR handshake and
+masked write.
 
-What remains is in `wiz-notes/rune.md`: SPI modes 1 … 3 and multiple slaves,
-the real DDR controller's wrapper and timing, and clock-domain crossing for the ports.
+What remains is in `wiz-notes/rune.md`: SPI modes 1 … 3 and a chip-select decoder or
+per-slave timing, the real DDR controller's wrapper and timing, and clock-domain
+crossing for the ports.
+
+## Hdl.Display: the OLED command, data and window layer
+
+`lib/Hdl/Display.wiz` (`import Hdl.Display`) is the reusable part of the OLED project
+(`wiz-icestick-uart`'s SSD1306 and SSD1331 demos and their Arty ports), with the board's
+power switches, reset pulse, frame timing and effect generators removed. It is a new
+file with no board imports and no primitives.
+
+| module | what | widths / configuration |
+|---|---|---|
+| `Display.Ssd` | the SSD1306 command set the demos use (`displayOff`/`displayOn`, `clockDiv`, `multiplex`, `offset`, `startLine`, `chargePump`, `addrMode`, `segRemap`, `comReverse`, `comPins`, `contrast`, `precharge`, `vcomh`, `resume`, `normal`, `columns`, `pages`); `Display.Ssd.bytes` is one command's bytes | arguments are `Nat`/`Bool`, encoded as the datasheet's bytes |
+| `Display.S1331` | the SSD1331 command set (`unlock`, display on/off, `remap`, `startLine`, `offset`, `normal`, `multiplex`, `master`, `powerSave`, `phase`, `clock`, the pre-charge and contrast commands, `vcomh`, `current`, `columns`, `rows`, …); `Display.S1331.bytes` | as above; every byte, arguments too, goes with D/C low |
+| `Display.Ssd.init rows`, `Display.S1331.init` | the controller configuration sequences of the OLED project (display off, clock, multiplex, addressing, remap, COM scan, contrast, charge pump, …) | SSD1306 `rows = 32` or `64` (COM pins and multiplex); SSD1331 is 96 × 64 |
+| `Display.Ssd.window rows`, `Display.S1331.window`, `.start` | the full-panel address window (SSD1306 columns 0 … 127 and pages 0 … rows/8 - 1; SSD1331 columns 0 … 95 and rows 0 … 63); `start` is init + window + display on | meta-level command lists |
+| `Display.Byte` | one transfer with its D/C level (`dc = false` command, `true` data), and `entry` (the 9-bit ROM word) | 8-bit data |
+| `Display.serC` | a byte writer: `WIn` = `valid`/`dc`/`data`, `WOut` = `sclk`/`mosi`/`cs`/`dc`/`busy`/`done`; 16 cycles a byte, mode 0, MSB first, CS low from the cycle the byte is taken through its last rising edge (SCLK is high while idle) | 8-bit data |
+| `Display.seqC xs` | a sequence writer: on `QIn.start` it emits a meta-level `List Display.Byte` from a ROM tree, holding CS low, and pulses `done` at the end; `QOut` has the same pins and flags | `xs` non-empty; a byte is 16 cycles |
+| `Display.rgb565`, `Display.S1331.red`/`.green`/`.blue`/`.highByte`/`.lowByte` | RGB 565 packing and field extraction | 5/6/5 → 16 bits |
+| `Display.Ssd.pixel`, `setPixel`, `fillRect`, `packPage`, `unpackPage`, `blank` | a page-addressed 128-wide frame: read/set a pixel, fill a rectangle, pack/unpack a page byte (bit 0 is the top row), a blank frame | `rows/8` pages of 128 bytes |
+
+Both writers are ordinary `Circuit`s over bundles, so the same definition simulates at
+values, runs as a netlist (`Netlist.simulate`, `Hdl.Sim`'s `simFast`) and synthesises;
+the pins are registers of the state, so they cannot glitch. The interface is four-wire
+SPI only: neither the SSD1306 nor the SSD1331 source supports a parallel (8080/6800)
+path, so none is invented here.
+
+The example `examples/hdl-display.wiz` (test group `display`) checks the command bytes,
+the two init sequences and windows, the RGB and pixel helpers, and decodes the pins of
+`Display.seqC` (an SSD1306 `start` for 32 rows, a window plus two data bytes, an SSD1331
+start) and `Display.serC` back into command/data bytes; the value simulation,
+`Netlist.simulate` and `simFast` agree and the netlists are well formed.
+
+What remains: the OLED project's frame streamer (the pixel generator that packs eight
+pixels a byte and streams a whole frame), the PmodOLED/PmodOLEDrgb power-on sequencer
+(RES pulse and the supply delays), the SSD1331's gentle power ramp with its delays, and
+the scrolling commands.
 
 ## Logic, heap predicates and Hoare triples
 

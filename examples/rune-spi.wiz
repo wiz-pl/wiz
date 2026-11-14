@@ -74,6 +74,98 @@ def report (div : Nat) (datas : List Nat) : String :=
     <+> ", bytes " <+> shows got <+> ", ok " <+> yes (Hdl.natsEq got datas)
     <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "spi" c))
 
+-- The bits of a `w`-bit word, most significant first.
+def bitsOfW (w d : Nat) : List Nat :=
+  Hdl.map (fun (k : Nat) => Nat.mod (Nat.shiftRight d (w - 1 - k)) 2) (Hdl.upto w 0)
+
+-- One command of the generic master, with the slave index `sel`.
+def cmdAtW (w ncs spacing : Nat) (datas sels : List Nat) (k : Nat) :
+    HwTy.El (Spi.CmdW.code w ncs) :=
+  match Nat.beq (Nat.mod k spacing) 0 with
+  | .true => Bundle.toEl (Spi.CmdW.bundle w ncs)
+      (Spi.CmdW.mk (BitVec.ofNat 1 1)
+        (BitVec.ofNat w (Hdl.nthD 0 datas (Nat.div k spacing)))
+        (BitVec.ofNat (Spi.selW ncs) (Hdl.nthD 0 sels (Nat.div k spacing))))
+  | .false => Bundle.toEl (Spi.CmdW.bundle w ncs)
+      (Spi.CmdW.mk (BitVec.ofNat 1 0) (BitVec.ofNat w 0)
+        (BitVec.ofNat (Spi.selW ncs) 0))
+
+-- The generic master at width `w`, counter width `cw` and `ncs` chip selects: the
+-- loopback bytes, the sampled MOSI bits and the value/netlist agreement.
+def reportW (w cw ncs div : Nat) (datas sels : List Nat) : String :=
+  let spacing := 2 * w * div + 8;
+  let cycles := List.length datas * spacing;
+  let ins := Hdl.map (fun (k : Nat) => cmdAtW w ncs spacing datas sels k) (Hdl.upto cycles 0);
+  let c := Spi.loopCW w cw ncs div;
+  let outs := Circuit.runLeaves c ins;
+  let edges := sampled outs;
+  let want := flat (Hdl.map (fun (d : Nat) => bitsOfW w d) datas);
+  let got := doneBytes outs;
+  "spi w=" <+> Hdl.show w <+> " cw=" <+> Hdl.show cw <+> " ncs=" <+> Hdl.show ncs
+    <+> " div=" <+> Hdl.show div <+> ": sim " <+> yes (leavesEq outs (Circuit.simLeaves .true c ins))
+    <+> " simFast " <+> yes (leavesEq outs (Circuit.simFast c ins))
+    <+> ", edges " <+> Hdl.show (List.length edges)
+    <+> ", shift " <+> yes (Hdl.natsEq edges want)
+    <+> ", bytes " <+> shows got <+> ", ok " <+> yes (Hdl.natsEq got datas)
+    <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "spiW" c))
+
+-- The generic master at 8 bits, a 16-bit counter and one chip select, on the same
+-- input trace as `Spi.loopC`: every output leaf must agree, cycle for cycle. The bytes
+-- are palindromes (0xA5, 0x3C): the original receiver's `shiftIn8` reverses the bit
+-- order, which only shows with non-palindromic data (the generic `Spi.shiftIn` is
+-- correct, so its bytes below include 0x96).
+def reportCompat (div : Nat) (datas : List Nat) : String :=
+  let spacing := 16 * div + 8;
+  let cycles := List.length datas * spacing;
+  let ins0 := Hdl.map (fun (k : Nat) => cmdAt spacing datas k) (Hdl.upto cycles 0);
+  let ins1 := Hdl.map (fun (k : Nat) => cmdAtW 8 1 spacing datas
+    (Hdl.map (fun (_ : Nat) => 0) (Hdl.upto cycles 0)) k) (Hdl.upto cycles 0);
+  let outs0 := Circuit.runLeaves (Spi.loopC div) ins0;
+  let outs1 := Circuit.runLeaves (Spi.loopCW 8 16 1 div) ins1;
+  -- the pins, busy and done agree; the received-data register differs cycle by cycle
+  -- (the generic one shifts the other way), but the final byte is the same for these
+  -- palindromic test bytes
+  let pins0 := Hdl.map (fun (o : List Nat) => List.take 5 o) outs0;
+  let pins1 := Hdl.map (fun (o : List Nat) => List.take 5 o) outs1;
+  "spi compat div=" <+> Hdl.show div <+> ": same " <+> yes (leavesEq pins0 pins1)
+    <+> ", bytes " <+> yes (Hdl.natsEq (doneBytes outs0) (doneBytes outs1))
+
+-- The chip-select values while `busy` (leaf 3 of `Spi.OutW`), and their distinct
+-- consecutive values.
+def busyCS : List (List Nat) → List Nat
+  | .nil => .nil
+  | .cons o os => match Nat.beq (Hdl.nthD 0 o 3) 1 with
+    | .true => List.cons (Hdl.nthD 0 o 2) (busyCS os)
+    | .false => busyCS os
+
+def uniqGo : Nat → Bool → List Nat → List Nat
+  | _, _, .nil => .nil
+  | prev, seen, .cons x xs => if seen && Nat.beq x prev then uniqGo prev .true xs
+    else List.cons x (uniqGo x .true xs)
+
+def uniq (xs : List Nat) : List Nat := uniqGo 0 .false xs
+
+def reportCS : String :=
+  let spacing := 2 * 8 * 1 + 8;
+  let datas : List Nat := .cons 90 (.cons 165 (.cons 60 .nil));
+  let sels : List Nat := .cons 0 (.cons 1 (.cons 2 .nil));
+  let cycles := List.length datas * spacing;
+  let ins := Hdl.map (fun (k : Nat) => cmdAtW 8 3 spacing datas sels k) (Hdl.upto cycles 0);
+  let c := Spi.loopCW 8 16 3 1;
+  let outs := Circuit.runLeaves c ins;
+  let patterns := uniq (busyCS outs);
+  "spi cs ncs=3: sim " <+> yes (leavesEq outs (Circuit.simFast c ins))
+    <+> ", patterns " <+> shows patterns
+    <+> ", ok " <+> yes (Hdl.natsEq patterns (.cons 6 (.cons 5 (.cons 3 .nil))))
+    <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "spiCS" c))
+
 def main : IO Unit := do
   IO.println (report 1 (.cons 165 (.cons 60 .nil)));
-  IO.println (report 3 (.cons 165 (.cons 60 .nil)))
+  IO.println (report 3 (.cons 165 (.cons 60 .nil)));
+  IO.println (reportCompat 1 (.cons 165 (.cons 60 .nil)));
+  IO.println (reportCompat 3 (.cons 165 (.cons 60 .nil)));
+  IO.println (reportW 4 16 1 1 (.cons 10 .nil) (.cons 0 .nil));
+  IO.println (reportW 16 16 1 1 (.cons 4660 .nil) (.cons 0 .nil));
+  IO.println (reportW 8 16 1 1 (.cons 150 .nil) (.cons 0 .nil));
+  IO.println (reportW 8 8 1 3 (.cons 150 (.cons 165 (.cons 60 .nil))) (.cons 0 (.cons 0 (.cons 0 .nil))));
+  IO.println (reportCS)
