@@ -24,9 +24,9 @@ def thirdCheckerGroup : Group where
     { name := "the independent checker agrees with the committed selfhost dump", run := fun _ => do
         let out ← thirdCheckerRun #["tools/third-checker/harness.py"]
         check ((out.splitOn "0 mismatches").length > 1) out },
-    { name := "positive corpus, ill-typed proof, wrong level and quantity violations", run := fun _ => do
+    { name := "corpus verdicts, split/level/quantity rules and mismatch detection", run := fun _ => do
         let out ← thirdCheckerRun #["tools/third-checker/test_checker.py", "-v"]
-        check ((out.splitOn "Ran 11 tests").length > 1) out }
+        check ((out.splitOn "Ran 30 tests").length > 1) out }
   ]
 
 builtin_initialize registerGroup thirdCheckerGroup

@@ -32,6 +32,10 @@ def lvls : List Lvl -> List String
   | .nil => .nil
   | .cons l rest => .cons (serLvl l) (lvls rest)
 
+def strs : List String -> List String
+  | .nil => .nil
+  | .cons s rest => .cons s (strs rest)
+
 mutual
 def serTms : Tms -> List String
   | .tnil => .nil
@@ -91,7 +95,7 @@ def ser : Tm -> String
   | .cocon x => wrapS (.cons "cocon" (.cons (ser x) .nil))
   | .scofix l I D A f s i a => wrapS (.cons "scofix" (.cons (Nat.toString l) (.cons (ser I) (.cons (ser D) (.cons (ser A) (.cons (ser f) (.cons (ser s) (.cons (ser i) (.cons (ser a) .nil)))))))))
   | .coit l I D S st i s => wrapS (.cons "coit" (.cons (Nat.toString l) (.cons (ser I) (.cons (ser D) (.cons (ser S) (.cons (ser st) (.cons (ser i) (.cons (ser s) .nil))))))))
-  | .const n ps ls v ty => wrapS (.cons "const" (.cons n (.cons (wrapS (.cons "ls" (lvls ls))) (.cons (ser v) (.cons (ser ty) .nil)))))
+  | .const n ps ls v ty => wrapS (.cons "const" (.cons n (.cons (wrapS (.cons "ps" (strs ps))) (.cons (wrapS (.cons "ls" (lvls ls))) (.cons (ser v) (.cons (ser ty) .nil))))))
   | .axiomC n ty => wrapS (.cons "axiom" (.cons n (.cons (ser ty) .nil)))
   | .ulift k l A => wrapS (.cons "ulift" (.cons (Nat.toString k) (.cons (Nat.toString l) (.cons (ser A) .nil))))
   | .up a => wrapS (.cons "up" (.cons (ser a) .nil))

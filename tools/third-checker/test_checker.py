@@ -3,10 +3,13 @@
 
 The positive/negative corpus is the *kernel-level* corpus in `driver.py`; the verdicts
 come from `corpus.dump`, produced by the self-hosted kernel.  These tests check the
-checker against that dump and exercise the four required cases directly, so they also
-run when the dump is absent (the dump agreement test is then skipped).
+checker against that dump and exercise the rules the kernel's fragment cannot express
+(`split`) plus the mismatch detector, so they also run when the dump is absent (the
+dump agreement test is then skipped).
 """
 
+import contextlib
+import io
 import os
 import sys
 import unittest
@@ -16,8 +19,12 @@ sys.path.insert(0, HERE)
 
 import checker  # noqa: E402
 import driver   # noqa: E402
+import harness  # noqa: E402
 
 DUMP = os.path.join(HERE, "corpus.dump")
+
+NEGATIVES = ("bad-proof", "bad-level", "bad-eq-prop",
+             "bad-linear-dup", "bad-linear-drop")
 
 
 def load_dump():
@@ -49,7 +56,7 @@ class TestFormat(unittest.TestCase):
                 self.assertEqual(driver.ser(t), s, name)
 
 
-class TestRequiredCases(unittest.TestCase):
+class TestCorpusVerdicts(unittest.TestCase):
     def test_positive_terms(self):
         if not os.path.exists(DUMP):
             self.skipTest("no corpus.dump (run harness.py --regen)")
@@ -62,7 +69,19 @@ class TestRequiredCases(unittest.TestCase):
             good, msg = checker.check_decl(ty, val)
             self.assertTrue(good, f"{name}: {msg}")
             ok += 1
-        self.assertGreaterEqual(ok, 20, "the corpus must have at least 20 positives")
+        self.assertGreaterEqual(ok, 40, "the corpus must have at least 40 positives")
+
+    def test_negative_terms(self):
+        if not os.path.exists(DUMP):
+            self.skipTest("no corpus.dump (run harness.py --regen)")
+        for verdict, name, ty_s, val_s in checker.read_dump(load_dump()):
+            if verdict != "ERR":
+                continue
+            ty = checker.parse_term(checker.parse_sexpr(checker.tokenize(ty_s)))
+            val = checker.parse_term(checker.parse_sexpr(checker.tokenize(val_s)))
+            good, msg = checker.check_decl(ty, val)
+            self.assertFalse(good, f"{name} was accepted: {msg}")
+        self.assertGreaterEqual(len(NEGATIVES), 5)
 
     def test_ill_typed_proof(self):
         ty, val = decl("bad-proof")
@@ -85,6 +104,20 @@ class TestRequiredCases(unittest.TestCase):
         ty, val = decl("linear-ok")
         good, msg = checker.check_decl(ty, val)
         self.assertTrue(good, msg)
+
+    def test_new_inductive_rules_are_present(self):
+        for name in ("nat-type", "nat-zero", "nat-succ", "nat-ind",
+                     "list-type", "list-nil", "list-cons", "desc-elim"):
+            ty, val = decl(name)
+            good, msg = checker.check_decl(ty, val)
+            self.assertTrue(good, f"{name}: {msg}")
+
+    def test_level_parameters_are_present(self):
+        for name in ("level-param-sort", "level-param-max",
+                     "level-param-id", "level-param-const"):
+            ty, val = decl(name)
+            good, msg = checker.check_decl(ty, val)
+            self.assertTrue(good, f"{name}: {msg}")
 
 
 class TestCheckerIndependently(unittest.TestCase):
@@ -112,13 +145,167 @@ class TestCheckerIndependently(unittest.TestCase):
         self.assertFalse(good)
 
     def test_unsupported_rule_is_rejected_not_accepted(self):
-        # `ind` is out of scope; the checker must not silently accept it
+        # sizes/coinduction are out of scope; the checker must not silently accept them
         ty = driver.UNIT(0)
-        val = driver.IND(0, driver.UNIT(0), driver.DRET(driver.STAR), 0,
-                         driver.LAM(driver.UNIT(0)), driver.STAR, driver.STAR, driver.STAR)
+        val = ("out", driver.CON(driver.STAR))
         good, msg = checker.check_decl(ty, val)
         self.assertFalse(good)
         self.assertIn("out of scope", msg)
+
+    def test_induction_method_type_is_checked(self):
+        # a method that returns a tag of the wrong enumeration is ill typed
+        bad_m = driver.LAM(driver.LAM(driver.LAM(driver.TAG(3, 0))))
+        val = driver.LAM(driver.IND(
+            0, driver.UNIT(0), driver.NAT_D, 1,
+            driver.LAM(driver.LAM(driver.ENUM(2))), bad_m,
+            driver.STAR, driver.V(0)))
+        good, _ = checker.check_decl(decl("nat-ind")[0], val)
+        self.assertFalse(good)
+
+    def test_delim_on_a_non_description_is_rejected(self):
+        val = driver.LAM(driver.DELIM(
+            1, driver.LAM(driver.ENUM(2)), driver.LAM(driver.TAG(2, 0)),
+            driver.LAM(driver.LAM(driver.LAM(driver.LAM(driver.TAG(2, 1))))),
+            driver.LAM(driver.LAM(driver.LAM(driver.LAM(driver.TAG(2, 1))))),
+            driver.LAM(driver.LAM(driver.LAM(driver.LAM(driver.LAM(driver.TAG(2, 1)))))),
+            driver.UNIT(0)))
+        good, msg = checker.check_decl(decl("desc-elim")[0], val)
+        self.assertFalse(good)
+        self.assertIn("description", msg)
+
+
+class TestQuantityCases(unittest.TestCase):
+    def _sig(self, q):
+        return driver.SIG(q, driver.N(1), driver.N(1), driver.UNIT(0), driver.UNIT(0))
+
+    def test_linear_projection_is_rejected(self):
+        ty = driver.PI(driver.Q1, driver.N(1), driver.N(1),
+                       self._sig(driver.Q1), driver.UNIT(0))
+        good, msg = checker.check_decl(ty, driver.LAM(driver.FST(driver.V(0))))
+        self.assertFalse(good)
+        self.assertIn("quantity", msg)
+
+    def test_erased_field_projection_is_rejected(self):
+        ty = driver.PI(driver.QW, driver.N(1), driver.N(1),
+                       self._sig(driver.Q0), driver.UNIT(0))
+        good, msg = checker.check_decl(ty, driver.LAM(driver.FST(driver.V(0))))
+        self.assertFalse(good)
+        self.assertIn("erased field", msg)
+
+    def test_unrestricted_projection_is_accepted(self):
+        ty = driver.PI(driver.QW, driver.N(1), driver.N(1),
+                       self._sig(driver.QW), driver.UNIT(0))
+        good, msg = checker.check_decl(ty, driver.LAM(driver.FST(driver.V(0))))
+        self.assertTrue(good, msg)
+
+    def test_linear_let_used_twice_is_rejected(self):
+        end = driver.ANN(driver.STAR, driver.UNIT(0))
+        body = driver.LETUNIT(driver.V(0), driver.LETUNIT(driver.V(0), end))
+        val = driver.LAM(driver.LETQ(driver.Q1, driver.UNIT(0), driver.V(0), body))
+        ty = driver.PI(driver.Q1, driver.N(1), driver.N(1),
+                       driver.UNIT(0), driver.UNIT(0))
+        good, msg = checker.check_decl(ty, val)
+        self.assertFalse(good)
+        self.assertIn("let-bound", msg)
+
+
+class TestSplit(unittest.TestCase):
+    """`split` is in CoreSpec but not in Kernel.wiz's term language, so it has no
+    corpus declaration; these cases exercise the checker's rule directly."""
+
+    def _sig(self, q):
+        return driver.SIG(q, driver.N(1), driver.N(1), driver.UNIT(0), driver.UNIT(0))
+
+    def test_split_at_omega_is_checked(self):
+        val = ("split", driver.QW,
+               driver.ANN(driver.PAIR(driver.STAR, driver.STAR), self._sig(driver.QW)),
+               driver.UNIT(0), driver.STAR)
+        good, msg = checker.check_decl(driver.UNIT(0), val)
+        self.assertTrue(good, msg)
+
+    def test_linear_split_using_both_components(self):
+        body = driver.LETUNIT(driver.V(1), driver.LETUNIT(driver.V(0), driver.STAR))
+        val = driver.LAM(("split", driver.Q1, driver.V(0),
+                          driver.UNIT(0), body))
+        ty = driver.PI(driver.Q1, driver.N(1), driver.N(1),
+                       self._sig(driver.Q1), driver.UNIT(0))
+        good, msg = checker.check_decl(ty, val)
+        self.assertTrue(good, msg)
+
+    def test_linear_split_dropping_a_component_is_rejected(self):
+        body = driver.LETUNIT(driver.V(1), driver.STAR)  # drops y
+        val = driver.LAM(("split", driver.Q1, driver.V(0),
+                          driver.UNIT(0), body))
+        ty = driver.PI(driver.Q1, driver.N(1), driver.N(1),
+                       self._sig(driver.Q1), driver.UNIT(0))
+        good, msg = checker.check_decl(ty, val)
+        self.assertFalse(good)
+        self.assertIn("quantity", msg)
+
+    def test_linear_split_using_a_component_twice_is_rejected(self):
+        body = driver.LETUNIT(driver.V(1), driver.LETUNIT(driver.V(1), driver.STAR))
+        val = driver.LAM(("split", driver.Q1, driver.V(0),
+                          driver.UNIT(0), body))
+        ty = driver.PI(driver.Q1, driver.N(1), driver.N(1),
+                       self._sig(driver.Q1), driver.UNIT(0))
+        good, msg = checker.check_decl(ty, val)
+        self.assertFalse(good)
+        self.assertIn("quantity", msg)
+
+    def test_split_on_a_pair_computes(self):
+        t = ("split", driver.QW,
+             driver.ANN(driver.PAIR(driver.STAR, driver.STAR), self._sig(driver.QW)),
+             driver.UNIT(0), driver.V(1))
+        self.assertEqual(checker.whnf(t), driver.STAR)
+
+
+class TestLevels(unittest.TestCase):
+    def test_imax_with_a_parameter(self):
+        u = driver.P("u")
+        self.assertTrue(checker.level_eq(driver.IMAX(u, u), u))
+        self.assertTrue(checker.level_eq(driver.IMAX(u, driver.N(0)), driver.N(0)))
+
+    def test_imax_with_a_parameter_that_matters(self):
+        u = driver.P("u")
+        self.assertFalse(checker.level_eq(driver.IMAX(driver.N(1), u), driver.N(1)))
+
+    def test_const_levels_are_instantiated(self):
+        u = driver.P("u")
+        ty = driver.PI(driver.Q0, driver.SUC(u), u, driver.SL(u),
+                       driver.PI(driver.Q1, u, u, driver.V(0), driver.V(1)))
+        inst = checker.inst_levels(ty, ("u",), (driver.N(1),))
+        self.assertTrue(checker.level_eq(inst[2], driver.N(2)))
+        self.assertTrue(checker.level_eq(inst[3], driver.N(1)))
+        self.assertEqual(inst[4], driver.SL(driver.N(1)))
+        self.assertTrue(checker.level_eq(inst[5][2], driver.N(1)))
+        self.assertTrue(checker.level_eq(inst[5][3], driver.N(1)))
+
+
+class TestMismatch(unittest.TestCase):
+    def test_a_forged_ok_is_a_mismatch(self):
+        # the checker, not the verdict column, decides this term is ill typed
+        ty, val = decl("bad-proof")
+        line = "OK\tbad-proof\t" + driver.ser(ty) + "\t" + driver.ser(val)
+        rows = checker.check_dump(line)
+        self.assertEqual(len(rows), 1)
+        verdict, name, ok, msg = rows[0]
+        self.assertEqual((verdict, name), ("OK", "bad-proof"))
+        self.assertFalse(ok, msg)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            bad = harness.report(rows, False)
+        self.assertEqual(bad, 1)
+        self.assertIn("1 mismatches", buf.getvalue())
+
+    def test_a_forged_err_is_a_mismatch(self):
+        ty, val = decl("id")
+        line = "ERR\tid\t" + driver.ser(ty) + "\t" + driver.ser(val)
+        rows = checker.check_dump(line)
+        self.assertTrue(rows[0][2])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            bad = harness.report(rows, False)
+        self.assertEqual(bad, 1)
 
 
 if __name__ == "__main__":
