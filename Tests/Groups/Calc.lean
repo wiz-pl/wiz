@@ -13,8 +13,9 @@ an instance of `Trans p q r` (`lib/Logic.wiz`), so the steps may use different r
 and the last one is the chain's. `_` is the previous step's right endpoint.
 
 The tests cover the order of `Nat`, `Int` and `Q`, `↔` and `=` between propositions, a
-relation a test source registers itself, and the three errors (no composable relation, a
-mismatched middle term, a proof of the wrong type). -/
+relation a test source registers itself, steps proved by named lemmas (`Nat.le_succ`,
+`Int.le_refl`, …) with and without an ascription, and the three errors (no composable
+relation, a mismatched middle term, a proof of the wrong type). -/
 
 def natCalc : String := "import Nat
 def t (a b c d : Nat) (h1 : a ≤ b) (h2 : b < c) (h3 : c = d) : a < d :=
@@ -144,6 +145,46 @@ def bad (a b c : Nat) (h1 : b < c) : a ≤ c :=
        _ ≤ c := Nat.le_refl c
 "
 
+/-- Steps proved by a named lemma. The lemma's result type is definitionally the step's
+proposition, but only through the class projection (`4 ≤ 5` infers `LE.le … 4 5`, whose
+instance is a pending default-instance problem, while `Nat.le_succ 4` has type `Nat.Le 4
+5`), so the step must be evaluated with its instance holes solved. -/
+def namedCalc : String := "import Nat
+def t : 4 < 6 :=
+  calc 4 ≤ 5 := Nat.le_succ 4
+       _ < 6 := Nat.lt_succ_self 5
+def single : 4 ≤ 5 := calc 4 ≤ 5 := Nat.le_succ 4
+def ascription : 4 < 6 :=
+  calc 4 ≤ 5 := (Nat.le_succ 4 : 4 ≤ 5)
+       _ < 6 := (Nat.lt_succ_self 5 : 5 < 6)
+def mixed (a b : Nat) (h : a ≤ b) : a < Nat.succ b :=
+  calc a ≤ b := h
+       _ < Nat.succ b := Nat.lt_succ_self b
+#print axioms t
+"
+
+/-- Named lemmas at `Int`: the endpoints are variables (or ascribed), since a bare
+numeral defaults to `Nat` even when `IntOrder` is imported. -/
+def namedIntCalc : String := "import IntOrder
+def t (a b : Int) (h : a < b) : a ≤ b :=
+  calc a ≤ a := Int.le_refl a
+       _ ≤ b := Int.le_of_lt a b h
+def nums : (4 : Int) ≤ 5 :=
+  calc (4 : Int) ≤ (4 : Int) := Int.le_refl 4
+       _ ≤ (5 : Int) := Int.le_of_lt 4 5 (Int.le_refl 5)
+#print axioms t
+"
+
+/-- A named lemma of *another* relation is not accepted for the step: the step's own
+proposition is checked, not the lemma's inferred type. (`b` is a variable here: `a ≤ b`
+and `a ≤ Nat.succ a` are not convertible. With closed numerals every true `Nat` order
+proposition computes to the same one, so this needs a variable.) -/
+def wrongNamed : String := "import Nat
+def bad (a b c : Nat) (h : b < c) : a < c :=
+  calc a ≤ b := Nat.le_succ a
+       _ < c := h
+"
+
 def calcGroup : Group where
   name := "calc"
   exercise := "Stage 13s"
@@ -158,6 +199,12 @@ def calcGroup : Group where
         okLibs propCalc ["'t' does not depend on any axioms"] },
     { name := "`_` placeholders and an explicit intermediate term", run := fun _ =>
         okLibs placeholders },
+    { name := "steps proved by named lemmas (`Nat.le_succ`, `Nat.lt_succ_self`), a single-step chain, an ascription, and a hypothesis then a lemma", run := fun _ =>
+        okLibs namedCalc ["'t' does not depend on any axioms"] },
+    { name := "an Int chain of named lemmas (`Int.le_refl`, `Int.le_of_lt`)", run := fun _ =>
+        okLibs namedIntCalc ["'t' does not depend on any axioms"] },
+    { name := "a named lemma of another relation is still rejected", run := fun _ =>
+        failsLibs wrongNamed "has the wrong type" },
     { name := "a relation registered by the program (`Same`, with its own `Trans` instance)", run := fun _ =>
         okLibs userCalc ["'t' does not depend on any axioms"] },
     { name := "no `Trans` instance: both relations and the meeting term are reported", run := fun _ =>

@@ -1137,8 +1137,16 @@ partial def elabCalc (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy 
     unless lvl == .zero do
       try unify ctx'.lvl (.sort lvl) (.sort .zero)
       catch _ => throwAt propStx.info "a calc step must be a proposition, `a ≤ b` (or another relation to a proposition)"
-    let some (lhs, rhs) := calcEndpoints? prop
-      | throwAt propStx.info s!"calc: a step must be a relation between two terms, such as `a ≤ b`, not {← showTermM ctx' prop}"
+    -- (13s) The step's proposition is elaborated like a declared type: its pending
+    -- instance problems take their default instances (`4 ≤ 5` infers `LE.le ?A ?inst 4 5`
+    -- with `?A` and `?inst` stuck until the numeral's `OfNat Nat` default decides them),
+    -- then its solved holes are replaced. Otherwise the evaluated proposition keeps a
+    -- stuck projection at its head (`LE.le`, not `Nat.Le`) and neither the proof's type
+    -- nor the `Trans` search can meet it.
+    synthDefaults
+    let propZ0 ← zonk ctx'.lvl prop
+    let some (lhs, rhs) := calcEndpoints? propZ0
+      | throwAt propStx.info s!"calc: a step must be a relation between two terms, such as `a ≤ b`, not {← showTermM ctx' propZ0}"
     if let some prevRhs := prevRhs? then
       -- the middle endpoint: `_` is a hole, unified with the previous right endpoint;
       -- an explicit intermediate term must be the same
@@ -1151,8 +1159,8 @@ partial def elabCalc (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy 
           | some (_, resType) => showTermM ctx' (← zonk ctx'.lvl resType)
           | none => pure ""
         throwAt propStx.info s!"calc: the middle term does not match:\n  the previous relation is {prevRelS}\n  this step's relation is {propS}\n  this step starts at\n  {lhsS}\nbut the previous step ends at\n  {prevS}"
-    -- the proof, against the step's own relation
-    let propTy ← evalIn ctx' prop
+    -- The proof, against the step's own relation
+    let propTy ← evalIn ctx' propZ0
     let proof ← try check ctx' proofStx propTy
       catch e =>
         let relS ← showTermM ctx' (← zonk ctx'.lvl prop)
@@ -1163,6 +1171,8 @@ partial def elabCalc (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy 
             pure s!"\n(the step after `{prevS}`, meeting at `{mS}`)"
           | _, _ => pure ""
         throw { e with msg := s!"calc: the proof of `{relS}` has the wrong type:{after}\n{e.msg}" }
+    -- what the proof solved (an endpoint, an instance argument) also belongs in the
+    -- relation the composition below starts from
     let propZ ← zonk ctx'.lvl prop
     -- compose the accumulated relation with this step's, at their shared endpoint
     let next ← match result? with

@@ -726,11 +726,25 @@ def t (a b c d : Nat) (h1 : a ≤ b) (h2 : b < c) (h3 : c = d) : a < d :=
   calc a ≤ b := h1
        _ < c := h2
        _ = d := h3
+
+def four : 4 < 6 :=
+  calc 4 ≤ 5 := Nat.le_succ 4
+       _ < 6 := Nat.lt_succ_self 5
 ```
 
 * A step is `term := term`, where the first term is a proposition of the form `a R b`
   (a relation applied to two endpoints: `≤`, `<`, `=`, `↔`, `≈`, or a relation a program
   declares). The last two arguments of its application spine are the endpoints.
+* A step's proposition is elaborated like a declared type: its pending instance problems
+  take their default instances and its solved holes are replaced before it is evaluated
+  (`synthDefaults`, then `zonk`, in `elabCalc`). Without that, `4 ≤ 5` infers
+  `LE.le ?A ?inst 4 5` with `?A` stuck until the numeral's `OfNat Nat` default decides
+  it, and the evaluated proposition keeps `LE.le` (a stuck projection) at its head
+  instead of `Nat.Le`. Then a proof by a named lemma, whose result type is
+  `Nat.Le 4 5`, could not meet the step's relation — it was rejected as "wrong type"
+  (or, later in the chain, found no `Trans` instance) unless the proof was ascribed to
+  the written relation. A named lemma now works as written (`Nat.le_succ 4` for
+  `4 ≤ 5`); an ascription and a hypothesis step work as before.
 * `_` is the previous step's right endpoint; an explicit intermediate term must be the
   same (definitionally), or "the middle term does not match". The chain itself is built
   left-associated, `Trans.trans (Trans.trans h₀ h₁) h₂ …`: after each composition the
@@ -756,9 +770,14 @@ def t (a b c d : Nat) (h1 : a ≤ b) (h2 : b < c) (h3 : c = d) : a < d :=
 * **Errors.** A composition with no instance reports both relations and the meeting
   term ("calc: no `Trans` instance composes … at the middle term …"); a step whose proof
   has the wrong type says so with the step's relation; a step that is not a binary
-  relation, or not a proposition, is rejected at the step. All are checked by the
-  kernel: a calc term is a `Trans.trans` application, with no axiom and no native
-  shortcut (`#print axioms`).
+  relation, or not a proposition, is rejected at the step. What is checked is the
+  step's *written* proposition, not the proof's inferred type, so a named lemma of a
+  different relation is rejected (`a ≤ b := Nat.le_succ a` with `b` a variable). At
+  closed numerals, though, every true `Nat`/`Int` order proposition computes to the same
+  one (`4 ≤ 5`, `5 < 6`, `5 ≤ 5` are all `true = true`), so those *are* the same
+  proposition by computation; to test that relations are told apart, use variables.
+  All errors are checked by the kernel: a calc term is a `Trans.trans` application, with
+  no axiom and no native shortcut (`#print axioms`).
 * **The order is a `Bool` at `Nat`.** `Nat.Le m n` is `Nat.le m n = .true` and
   `Nat.Lt m n` is `Nat.Le (succ m) n`; `Nat.le` reduces on constructors, so `a < succ b`
   and `a ≤ b` are the *same proposition* by computation. Then the `Trans` instance for
@@ -779,5 +798,7 @@ def t (a b c d : Nat) (h1 : a ≤ b) (h2 : b < c) (h3 : c = d) : a < d :=
   need a mirrored `Trans` table there.
 
 Tests: `calc` (the mixed chains at `Nat`, `Int` and `Q`, `↔` and propositional `=`, `_`
-and explicit intermediates, a user-registered relation, and the three errors). The
+and explicit intermediates, a user-registered relation, steps proved by named lemmas
+(`Nat.le_succ`, `Nat.lt_succ_self`, `Int.le_refl`, `Int.le_of_lt`) with and without an
+ascription, and the three errors plus a named lemma of another relation). The
 unrelated `calc_e` syntax category in the `language` group is untouched.
