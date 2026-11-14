@@ -321,6 +321,24 @@ def hdlGroup : Group where
            ".cons \"no pin for port rst\" (.cons \"no pin for port en\" (.cons \"port leds has 4 bits, one pin given\" (.cons \"no pin for port top\" (.cons \"pin for no port: led\" .nil))))",
            "\"$timescale 1ns $end\\n$scope module counter $end\\n$var wire 1 ! clk $end\\n$var wire 1 \\\" go $end\\n$var wire 4 # leds $end\\n$var wire 1 $ top $end\\n$var wire 4 % count $end\\n$var wire 1 & up $end\\n$upscope $end\\n$enddefinitions $end\\n#0\\n0!\\n0\\\"\\nb0000 #\\n0$\\nb0000 %\\n1&\\n#1\\n1!\\n#2\\n0!\\n#3\\n1!\\n#4\\n0!\\n#5\\n1!\\n#6\\n0!\\n1\\\"\\n#7\\n1!\\n#8\\n\"",
            ".cons 17 (.cons 5 (.cons 4 .nil))"] },
+    { name := "traces: refinement and case-analysis tools (Mealy.follows, Mealy.seq, Nat.All, Bool.forall9, simulatesInv)", run := fun _ =>
+        okLibs ("import Trace\n" ++
+          "def cnt : Mealy Nat Bool Nat := fun (s : Nat) (b : Bool) => (match b with | .true => Nat.succ s | .false => s, s)\n" ++
+          "def up : Trace Bool := Trace.const .true\n" ++
+          "def steps : Nat.All (fun (k : Nat) => (cnt k .true).1 = Nat.succ k) 3 := And.intro (And.intro (And.intro True.intro rfl) rfl) rfl\n" ++
+          "def run3 (t : Nat) (h0 : Mealy.stateAt cnt 0 up t = 0) : Mealy.stateAt cnt 0 up (Nat.add 3 t) = 3 :=\n" ++
+          "  Mealy.follows cnt 0 up (fun (k : Nat) => k) t 3 h0 (fun (k : Nat) (hk : Nat.lt k 3 = .true) => Nat.all_spec (fun (j : Nat) => (cnt j .true).1 = Nat.succ j) 3 steps k hk) 3 rfl\n" ++
+          "def lem (a b c d e f g i j : Bool) : Bool.or a (Bool.not a) = .true :=\n" ++
+          "  Bool.forall9 (fun (a b c d e f g i j : Bool) => Bool.or a (Bool.not a)) (refl Bool.true) a b c d e f g i j\n" ++
+          "def acc : Mealy Nat Nat Nat := fun (s x : Nat) => (Nat.add s x, s)\n" ++
+          "def two (t : Nat) : Mealy.outAt (Mealy.seq cnt acc) (0, 0) up t = Mealy.outAt acc 0 (Mealy.outAt cnt 0 up) t :=\n" ++
+          "  Mealy.seq_outAt cnt acc 0 0 up t\n" ++
+          "def evenInv (s : Nat) : Prop := True\n" ++
+          "def same (t : Nat) : Mealy.stateAt cnt 0 (Trace.map (fun (b : Bool) => b) up) t = Mealy.stateAt cnt 0 up t :=\n" ++
+          "  Mealy.simulatesInv cnt cnt (fun (s : Nat) => s) (fun (b : Bool) => b) (fun (o : Nat) => o) evenInv\n" ++
+          "    (fun (s : Nat) (b : Bool) (h : evenInv s) => True.intro) (fun (s : Nat) (b : Bool) (h : evenInv s) => refl (cnt s b)) 0 True.intro up t\n" ++
+          "#eval Mealy.stateAt (Mealy.seq cnt acc) (0, 0) up 4\n")
+          ["(4, 6)"] },
     { name := "H14 T: temporal properties (UART idle-high and delivery for ever, valid/ready refinement, stability, liveness)", run := fun _ => do
         okLibs (← IO.FS.readFile "examples/hdl-temporal.wiz") },
     { name := "H14 T: temporal notation □ ◇ ○ ~> |-> |=>, printed back; `|=>` leaves `fun`/`match` alone (13o)", run := fun _ => do
