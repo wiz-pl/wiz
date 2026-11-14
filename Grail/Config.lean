@@ -217,4 +217,48 @@ def readConfig (tc : Toolchain) (salt : UInt64) (std dir : System.FilePath) :
     | .error e => pure (.error s!"{localFile}: {e}")
     | .ok ss => pure (.ok (pkg, ss))
 
+/-- (23m) The manifest of a `grail-index` repository (`index.wiz`): the index's name,
+its format, and the packages it publishes. `Index.render` turns it into
+`(index (name "…") (format N) (package "…") …)`, which `grail index check` compares
+with the static `index/*.sexpr` files. Keeping it Wiz code means the index repository
+is described by the same kind of program as a package. -/
+structure IndexManifest where
+  name : String
+  format : Nat
+  packages : List String
+  deriving Repr, Inhabited, BEq
+
+open Cache in
+/-- Decode `Index.render`'s output: `(index (name S) (format N) (package P) …)`. -/
+def decodeIndexManifest (x : Sx) : Except String IndexManifest := do
+  let .l xs := x | throw s!"expected (index …), got {x.render}"
+  match xs.toList with
+  | .a "index" :: fields =>
+    let mut m : IndexManifest := { name := "", format := 0, packages := [] }
+    for f in fields do
+      match f with
+      | .l #[.a "name", .a s] => m := { m with name := s }
+      | .l #[.a "format", .a n] =>
+        match n.toNat? with
+        | some k => m := { m with format := k }
+        | none => throw s!"format {n} is not a number"
+      | .l #[.a "package", .a p] => m := { m with packages := m.packages ++ [p] }
+      | _ => throw s!"unknown field {f.render} (expected (name …), (format …), (package …))"
+    if m.name.isEmpty then throw "no (name …)"
+    if m.format == 0 then throw "no (format N)"
+    pure m
+  | _ => throw s!"expected (index …), got {x.render}"
+
+/-- Read the index repository's `index.wiz`, if it has one. It is evaluated like a
+build file (`evalBuildFile`): the file imports `Grail` and defines `index : Index`. -/
+def readIndexManifest (tc : Toolchain) (salt : UInt64) (std dir : System.FilePath) :
+    IO (Except String (Option IndexManifest)) := do
+  let file := dir / "index.wiz"
+  if !(← file.pathExists) then return .ok none
+  match ← evalBuildFile tc salt [std, dir] file "Index.render index" with
+  | .error e => pure (.error e)
+  | .ok x => match decodeIndexManifest x with
+    | .error e => pure (.error s!"{file}: {e}")
+    | .ok m => pure (.ok (some m))
+
 end Grail

@@ -295,3 +295,29 @@ def Package.render : Package → String
   | .mk n ts s ds v tc rs => Grail.node "package" (.cons (Grail.quote n) (.cons (Grail.list (Grail.renderTargets ts))
       (.cons (Settings.render s) (.cons (Grail.list (Grail.renderDeps ds))
         (.cons (Grail.quote v) (.cons (Grail.quote tc) (.cons (Grail.renderRequires rs) .nil)))))))
+
+-- ## The index repository (23m)
+/-- A `grail-index` repository's manifest (`index.wiz`): the index's name, its format,
+and the packages it publishes (one `index/NAME.sexpr` for each). It is a Wiz program, as
+a package's `grail.wiz` is; `grail index check` evaluates `Index.render index` and
+compares the result with the files on disk. -/
+inductive Index where
+  | mk (name : String) (format : Nat) (packages : List String)
+/-- An index manifest with this name, format 1, and no packages yet:
+`Index.new "wiz-pl/grail-index"`. -/
+def Index.new (name : String) : Index := .mk name 1 .nil
+/-- Sets the index format (today only 1 is read). -/
+def Index.withFormat (n : Nat) : Index → Index
+  | .mk name _ ps => .mk name n ps
+/-- Adds a published package name (`index/NAME.sexpr`). -/
+def Index.package (p : String) : Index → Index
+  | .mk name n ps => .mk name n (List.append ps (.cons p .nil))
+/-- Each package name as `(package "NAME")`. -/
+def Grail.renderIndexPackages : List String → List String
+  | .nil => .nil
+  | .cons p ps => .cons (Grail.node "package" (.cons (Grail.quote p) .nil)) (Grail.renderIndexPackages ps)
+/-- An `Index` as `(index (name NAME) (format N) (package "…") …)`: what grail reads
+from `index.wiz`. -/
+def Index.render : Index → String
+  | .mk name n ps => Grail.node "index" (.cons (Grail.node "name" (.cons (Grail.quote name) .nil))
+      (.cons (Grail.node "format" (.cons (Syntax.decimal n) .nil)) (Grail.renderIndexPackages ps)))

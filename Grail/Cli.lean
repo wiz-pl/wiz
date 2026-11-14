@@ -1,6 +1,7 @@
 import Grail.Graph
 import Grail.Deps
 import Grail.Registry
+import Grail.IndexCheck
 import Grail.Lsp
 import Wiz.Version
 
@@ -30,6 +31,11 @@ def usage : String := "usage:
   grail index resolve [--index URL] [--offline]
                           print the versions `grail update` would pick
   grail index show NAME   print a package's index entry
+  grail index check [INDEX] [--fetch]
+                          validate an index repository offline (names, versions,
+                          SHA-256s of local archives, semver ranges, module-prefix
+                          conflicts, index.wiz); --fetch downloads remote archives
+                          and clones a git index
   grail publish ARCHIVE --source URL
                           hash a release archive and print its index entry (after
                           checking the manifest and the archive layout)
@@ -82,6 +88,8 @@ structure Opts where
   indexCommit : Option String := none
   /-- (23m) accept a rewritten index history (R22) -/
   allowRewind : Bool := false
+  /-- (23m) `grail index check`: also download remote archives and clone a git index -/
+  fetch : Bool := false
   /-- (23m) never touch the network -/
   offline : Bool := false
   /-- (23m) fail instead of writing grail.lock -/
@@ -101,6 +109,7 @@ partial def grailOpts (o : Opts) : List String → Opts × List String
   | "--index-commit" :: c :: rest => grailOpts { o with indexCommit := some c } rest
   | "--allow-rewind" :: rest => grailOpts { o with allowRewind := true } rest
   | "--source" :: s :: rest => grailOpts { o with source := some s } rest
+  | "--fetch" :: rest => grailOpts { o with fetch := true } rest
   | "--offline" :: rest => grailOpts { o with offline := true } rest
   | "--locked" :: rest => grailOpts { o with locked := true } rest
   | a :: rest =>
@@ -148,6 +157,16 @@ def cliMain (args : List String) : IO UInt32 := do
   let binId ← binaryId flagged.cacheDir
   -- (23m) the registry cache (archives, the index) shares --cache with elaboration
   let cache : System.FilePath := flagged.cacheDir.getD (System.FilePath.mk home / ".cache" / "wiz")
+  -- (23m) `grail index check`: validate an index repository. It needs no grail.wiz
+  -- (the index repository is not a package) and touches no network unless --fetch.
+  if let "index" :: "check" :: rest := args then
+    let spec := rest.find? (fun a => !a.startsWith "-") |>.getD (opts.index.getD dir.toString)
+    match ← checkDir cache flagged binId std spec opts.fetch with
+    | .error e => IO.eprintln e; return 1
+    | .ok r =>
+      for line in r.lines do IO.println line
+      IO.println r.summary
+      return (if r.hasErrors then 1 else 0)
   match args with
   | ["clean"] =>
     -- (23i) the outputs grail installed in the package, unless they were changed since

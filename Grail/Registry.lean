@@ -430,8 +430,11 @@ def fetch (cache : System.FilePath) (dir : System.FilePath) (lock : Lock)
 
 /-- Build the index entry for one release from its manifest and archive: the checks a
 publisher (and the index's reviewer) can make locally. The archive layout must be the
-fixed one: one top-level `NAME-VERSION/` with the package's `grail.wiz` in it. -/
-def publishEntry (pkg : Package) (source sha : String) : Except String IxVersion := do
+fixed one: one top-level `NAME-VERSION/` with the package's `grail.wiz` in it. `modules`
+are the package's module names (from `archiveModules`), recorded so the resolver can
+refuse two packages that would collide at `import` (R32). -/
+def publishEntry (pkg : Package) (source sha : String) (modules : List String := []) :
+    Except String IxVersion := do
   if !validName pkg.name then throw s!"package name {pkg.name}: expected [a-z][a-z0-9-]* (at most 64)"
   if pkg.version.isEmpty then throw "grail.wiz has no Package.version: a published package needs one"
   let v ← Version.parse pkg.version
@@ -445,22 +448,51 @@ def publishEntry (pkg : Package) (source sha : String) : Except String IxVersion
   for r in pkg.requires do
     if let .error e := Requirement.parse r.req then
       throw s!"Package.require {r.name} {r.req}: {e}"
-  pure { version := v, source, sha256 := sha, toolchain := pkg.toolchain, deps := pkg.requires }
+  pure { version := v, source, sha256 := sha, toolchain := pkg.toolchain, modules, deps := pkg.requires }
+
+/-- The members of a `.tar.gz` (`tar -tzf`), one path per line. -/
+def archiveMembers (archive : System.FilePath) : IO (Except String (List String)) := do
+  try
+    let o ← IO.Process.output { cmd := "tar", args := #["-tzf", archive.toString] }
+    if o.exitCode != 0 then
+      return .error s!"tar -tzf {archive}: {o.stderr.trimAscii}"
+    pure (.ok (o.stdout.splitOn "\n" |>.filter (!·.isEmpty)))
+  catch e => pure (.error s!"tar: {e}")
+
+/-- The module names an archive provides, from the package's `lib` roots: a member
+`NAME-V/src/Greet/Hello.wiz` under the root `src` is the module `Greet.Hello`. This is
+what `grail publish` records (`(modules …)`), and what makes the resolve-time module
+check possible (R32). -/
+def archiveModules (archive : System.FilePath) (name version : String) (roots : List String) :
+    IO (Except String (List String)) := do
+  match ← archiveMembers archive with
+  | .error e => pure (.error e)
+  | .ok members =>
+    let top := s!"{name}-{version}/"
+    let mut mods : List String := []
+    for root in roots do
+      let root := if root.endsWith "/" then (root.drop 0).dropEnd 1 |>.toString else root
+      let pre := s!"{top}{root}/"
+      for m in members do
+        if m.startsWith pre && m.endsWith ".wiz" then
+          let rel := (m.drop pre.length).toString
+          let mod := ((rel.drop 0).dropEnd 4).toString.replace "/" "."
+          if !mod.isEmpty && !mods.contains mod then mods := mods ++ [mod]
+    pure (.ok (mods.mergeSort (· ≤ ·)))
 
 /-- Check that `archive` is a tar.gz of the fixed layout (`NAME-VERSION/` at the top,
 with a `grail.wiz` in it). -/
 def checkArchiveLayout (archive : System.FilePath) (name version : String) : IO (Except String Unit) := do
-  let o ← IO.Process.output { cmd := "tar", args := #["-tzf", archive.toString] }
-  if o.exitCode != 0 then
-    return .error s!"tar -tzf {archive}: {o.stderr.trimAscii}"
-  let top := s!"{name}-{version}"
-  let members := o.stdout.splitOn "\n" |>.filter (!·.isEmpty)
-  if members.isEmpty then return .error s!"{archive}: empty archive"
-  if let some bad := members.find? (fun m => !(m == top || m.startsWith (top ++ "/"))) then
-    return .error s!"{archive}: member {bad} is not under {top}/ (the archive layout is one top directory)"
-  unless members.contains s!"{top}/grail.wiz" do
-    return .error s!"{archive}: no {top}/grail.wiz (wrong version in the archive?)"
-  pure (.ok ())
+  match ← archiveMembers archive with
+  | .error e => pure (.error e)
+  | .ok members =>
+    let top := s!"{name}-{version}"
+    if members.isEmpty then return .error s!"{archive}: empty archive"
+    if let some bad := members.find? (fun m => !(m == top || m.startsWith (top ++ "/"))) then
+      return .error s!"{archive}: member {bad} is not under {top}/ (the archive layout is one top directory)"
+    unless members.contains s!"{top}/grail.wiz" do
+      return .error s!"{archive}: no {top}/grail.wiz (wrong version in the archive?)"
+    pure (.ok ())
 
 /-- `grail publish ARCHIVE --source URL`: hash the release archive and print the index
 entry, after checking the manifest and the archive layout. Printing (not writing) is the
@@ -470,10 +502,14 @@ def publish (archive : Option System.FilePath) (source : String) (pkg : Package)
   let some ar := archive | return .error "usage: grail publish ARCHIVE --source URL"
   unless ← ar.pathExists do return .error s!"{ar}: no such archive"
   if let .error e ← checkArchiveLayout ar pkg.name pkg.version then return .error e
+  let roots := pkg.targets.filterMap fun | .lib _ r => some r | _ => none
+  let modules ← match ← archiveModules ar pkg.name pkg.version roots with
+    | .error e => return .error e
+    | .ok ms => pure ms
   match ← sha256File ar with
   | .error e => pure (.error e)
   | .ok sha =>
-    match publishEntry pkg source sha with
+    match publishEntry pkg source sha modules with
     | .error e => pure (.error e)
     | .ok v => pure (.ok (Index.renderVersion v))
 

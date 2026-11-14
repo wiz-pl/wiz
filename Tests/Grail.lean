@@ -1106,6 +1106,18 @@ def indexFixture : IO System.FilePath := do
     throw (IO.userError s!"{p}: no index/ directory (run the tests from the repository root)")
   pure p
 
+/-- The checked-in example index (`examples/grail-index`): the `grail-index` repository
+layout (23m), with `index.wiz`, three packages and their deterministic archives. -/
+def exampleIndex : IO System.FilePath := do
+  let p ← IO.FS.realPath "examples/grail-index"
+  unless ← (p / "index").isDir do
+    throw (IO.userError s!"{p}: no index/ directory (run the tests from the repository root)")
+  pure p
+
+/-- A module conflict the checker reports for `checkDir`. -/
+def hasModuleConflict (r : Grail.CheckResult) : Bool :=
+  r.errors.any fun e => (e.splitOn "module conflict").length > 1
+
 def grailDepsGroup : Group where
   name := "grail-deps"
   exercise := "Stage 23h"
@@ -2230,6 +2242,156 @@ def grailHygieneGroup : Group where
         check (← goneWithin pid 5000) s!"the job's process {pid} outlived its time limit" }
   ]
 
+def grailIndexGroup : Group where
+  name := "grail-index"
+  exercise := "Stage 23m"
+  cases := [
+    { name := "the example grail-index validates offline", run := fun _ => do
+        let ex ← exampleIndex
+        let cache ← IO.FS.createTempDir
+        match ← Grail.checkDir cache {} 7 "lib" ex.toString false with
+        | .error e => throw (IO.userError e)
+        | .ok r =>
+          checkEq 3 r.packages
+          checkEq 4 r.versions
+          checkEq 4 r.archives
+          checkEq 0 r.remote
+          checkEq ([] : List String) r.errors
+          checkEq ([] : List String) r.warnings },
+    { name := "grail index check: offline by default, and an error exits 1", run := fun _ => do
+        let ex ← exampleIndex
+        let cache ← IO.FS.createTempDir
+        let run (args : List String) : IO UInt32 :=
+          Grail.cliMain (["--cache", cache.toString, "index", "check"] ++ args)
+        checkEq 0 (← run [ex.toString])
+        -- a non-local spec is refused without --fetch, so a CI run cannot clone by accident
+        checkEq 1 (← run ["https://example.invalid/grail-index"])
+        -- a malformed entry exits 1
+        let root ← IO.FS.createTempDir
+        let idx := root / "index"
+        IO.FS.createDirAll idx
+        IO.FS.writeFile (idx / "bad.sexpr")
+          "(index (package \"bad\" (version \"1.0.0\" (source \"x\") (sha256 \"short\") (deps))))\n"
+        checkEq 1 (← run [root.toString]) },
+    { name := "a changed archive, a bad requirement and a missing entry are errors", run := fun _ => do
+        let ex ← exampleIndex
+        let root ← IO.FS.createTempDir
+        let work := root / "idx"
+        IO.FS.createDirAll work
+        for f in ["index", "packages", "index.wiz", "registry.sexpr"] do
+          let _ ← runIn work "cp" ["-a", (ex / f).toString, (work / f).toString]
+        IO.FS.writeFile (work / "packages/text-1.1.0.tar.gz") "not a tarball"
+        let hello := ← IO.FS.readFile (work / "index/hello.sexpr")
+        IO.FS.writeFile (work / "index/hello.sexpr") (hello.replace "^1" "^^1")
+        IO.FS.removeFile (work / "index/base.sexpr")
+        let cache ← IO.FS.createTempDir
+        match ← Grail.checkDir cache {} 7 "lib" work.toString false with
+        | .error e => throw (IO.userError e)
+        | .ok r =>
+          check r.hasErrors "the broken index passed"
+          check (r.errors.any fun e => (e.splitOn "sha256").length > 1) s!"no hash error: {r.errors}"
+          check (r.errors.any fun e =>
+            (e.splitOn "requirement").length > 1 || (e.splitOn "not a version").length > 1) s!"no requirement error: {r.errors}"
+          check (r.errors.any fun e => (e.splitOn "base.sexpr is missing").length > 1) s!"no missing-entry error: {r.errors}" },
+    { name := "module-prefix conflicts are an index error and a resolver error", run := fun _ => do
+        let root ← IO.FS.createTempDir
+        let idx := root / "index"
+        IO.FS.createDirAll idx
+        let sha := String.ofList (List.replicate 64 'a')
+        IO.FS.writeFile (idx / "alpha.sexpr")
+          s!"(index (package \"alpha\" (version \"1.0.0\" (source \"packages/alpha-1.0.0.tar.gz\") (sha256 \"{sha}\") (modules \"Ddr3\" \"Ddr3.Ctrl\") (deps))))\n"
+        IO.FS.writeFile (idx / "beta.sexpr")
+          s!"(index (package \"beta\" (version \"1.0.0\" (source \"packages/beta-1.0.0.tar.gz\") (sha256 \"{sha}\") (modules \"Ddr3.Ctrl\" \"Ddr3.Mem\") (deps))))\n"
+        let cache ← IO.FS.createTempDir
+        match ← Grail.checkDir cache {} 7 "lib" root.toString false with
+        | .error e => throw (IO.userError e)
+        | .ok r => check (hasModuleConflict r) s!"no module conflict: {r.errors}"
+        let .ok src ← Grail.Registry.loadIndex cache root.toString true
+          | throw (IO.userError "the index did not load")
+        match Grail.Resolve.resolve src.pkgs [⟨"alpha", "^1"⟩, ⟨"beta", "^1"⟩] "0.1.0-dev" with
+        | .error e =>
+          check ((e.splitOn "module conflict").length > 1) e
+          check ((e.splitOn "alpha").length > 1 && (e.splitOn "beta").length > 1) e
+        | .ok _ => throw (IO.userError "resolved two packages that both own Ddr3") },
+    { name := "index.wiz lists exactly the packages on disk", run := fun _ => do
+        let ex ← exampleIndex
+        let root ← IO.FS.createTempDir
+        let work := root / "idx"
+        IO.FS.createDirAll work
+        for f in ["index", "packages", "index.wiz", "registry.sexpr"] do
+          let _ ← runIn work "cp" ["-a", (ex / f).toString, (work / f).toString]
+        IO.FS.removeFile (work / "index/hello.sexpr")
+        let sha := String.ofList (List.replicate 64 'b')
+        IO.FS.writeFile (work / "index/extra.sexpr")
+          s!"(index (package \"extra\" (version \"1.0.0\" (source \"packages/base-0.1.0.tar.gz\") (sha256 \"{sha}\") (deps))))\n"
+        let cache ← IO.FS.createTempDir
+        match ← Grail.checkDir cache {} 7 "lib" work.toString false with
+        | .error e => throw (IO.userError e)
+        | .ok r =>
+          check (r.errors.any fun e =>
+            (e.splitOn "hello").length > 1 && (e.splitOn "missing").length > 1) s!"no missing-package error: {r.errors}"
+          check (r.errors.any fun e =>
+            (e.splitOn "extra").length > 1 && (e.splitOn "not listed").length > 1) s!"no unlisted-package error: {r.errors}" },
+    { name := "grail update reads the example index as a directory, a file and a git URL", run := fun _ => do
+        let ex ← exampleIndex
+        let std ← IO.FS.realPath "lib"
+        let cache ← IO.FS.createTempDir
+        let mkApp (spec : String) : IO System.FilePath := mkTree [
+          ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{spec}\"\n  |> Package.require \"hello\" \"^1\"\n"),
+          ("app.wiz", "import Hello.Main\n#eval helloValue\n")]
+        let grailIn (dir : System.FilePath) (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir.toString, "--std", std.toString, "--cache", cache.toString] ++ args)
+        let names (dir : System.FilePath) : IO (List String) := do
+          let .ok lock := Grail.Lock.parse (← IO.FS.readFile (dir / "grail.lock"))
+            | throw (IO.userError "bad grail.lock")
+          pure (lock.pkgs.map (·.name))
+        let d1 ← mkApp ex.toString
+        checkEq 0 (← grailIn d1 ["update"])
+        checkEq ["base", "hello", "text"] (← names d1)
+        -- one file holding every package
+        let d2 ← mkApp (ex / "index.sexpr").toString
+        checkEq 0 (← grailIn d2 ["update"])
+        checkEq ["base", "hello", "text"] (← names d2)
+        -- a git URL: a bare clone of the example
+        let root ← IO.FS.createTempDir
+        let work := root / "work"
+        IO.FS.createDirAll work
+        for f in ["index", "packages", "entries", "sources", "index.wiz", "registry.sexpr", "index.sexpr"] do
+          let _ ← runIn work "cp" ["-a", (ex / f).toString, (work / f).toString]
+        let _ ← gitIn work ["init", "--quiet"]
+        let _ ← gitIn work ["add", "."]
+        let _ ← gitIn work ["commit", "--quiet", "-m", "index"]
+        let bare := root / "index.git"
+        let _ ← runIn root "git" ["clone", "--quiet", "--bare", work.toString, bare.toString]
+        let _ ← gitIn bare ["symbolic-ref", "HEAD", "refs/heads/main"]
+        let _ ← gitIn work ["push", "--quiet", bare.toString, "HEAD:refs/heads/main"]
+        let d3 ← mkApp s!"file://{bare}"
+        checkEq 0 (← grailIn d3 ["update"])
+        checkEq ["base", "hello", "text"] (← names d3)
+        let .ok lock := Grail.Lock.parse (← IO.FS.readFile (d3 / "grail.lock"))
+          | throw (IO.userError "bad grail.lock")
+        checkEq "1.1.0" ((lock.pkgs.find? (·.name == "text")).map (·.version) |>.getD "?")
+        checkEq 40 lock.indexCommit.length
+        -- `index check --fetch` on the same URL (a local clone: still no network)
+        match ← Grail.checkDir cache {} 7 "lib" s!"file://{bare}" true with
+        | .error e => throw (IO.userError e)
+        | .ok r =>
+          checkEq 3 r.packages
+          checkEq 4 r.archives
+          checkEq ([] : List String) r.errors },
+    { name := "publish records the archive's module names", run := fun _ => do
+        let root ← IO.FS.createTempDir
+        let files : List (String × String) :=
+          [("grail.wiz", "import Grail\ndef package : Package := Package.new \"greet\"\n  |> Package.version \"1.0.0\"\n  |> Package.lib \"greet\" \"src\"\n"),
+           ("src/Greet/Hello.wiz", "import Prelude\ndef hello : Nat := 1\n")]
+        let work ← mkTree files
+        let (tar, _) ← tarballOf root "greet" "1.0.0" files
+        let .ok (pkg, _) ← Grail.readConfig {} 7 "lib" work | throw (IO.userError "bad manifest")
+        let .ok entry ← Grail.Registry.publish (some tar) "https://example.org/greet-1.0.0.tar.gz" pkg
+          | throw (IO.userError "publish failed")
+        check ((entry.splitOn "(modules Greet.Hello)").length > 1) entry }
+  ]
+
 /-- This module's test groups, which `Tests/Main.lean` runs: one per line, in sorted
 order, so that branches adding groups rarely touch the same lines. A new group also
 needs a shard in `.github/test-shards.json` (CI checks). -/
@@ -2238,6 +2400,7 @@ def groups : List Group :=
   grailDepsGroup ::
   grailGroup ::
   grailHygieneGroup ::
+  grailIndexGroup ::
   grailJobsGroup ::
   grailSelfhostGroup ::
   modulesGroup ::

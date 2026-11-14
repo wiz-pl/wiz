@@ -18,6 +18,16 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   over the index's git history (`--allow-rewind`), SHA-256-before-unpack fetching with a
   content-addressed archive cache, `grail publish`, and a hermetic `tests/fixtures/grail-index`
   fixture (`=grail-deps`). The index is not signed yet.
+* grail (23m), the static index side: a `grail-index` repository layout (static
+  `index/NAME.sexpr`, deterministic `packages/NAME-VERSION.tar.gz`, `index.wiz` as the
+  index's Wiz manifest and generator templates), a complete `examples/grail-index/` with
+  three packages, `grail index check` / `scripts/grail-index-check.sh` (names, versions,
+  semver requirements, local archive SHA-256s and layouts, `index.wiz` completeness,
+  module-prefix conflicts; offline by default), `(modules …)`/`(prefix …)` in the index
+  schema, `grail publish` recording module names, and a resolve-time module-conflict
+  check (`=grail-index`). The index still is not signed and there is no transparency log;
+  the TUF/Sigsum staging and the remaining gaps are in
+  `docs/stages/23-grail/index-repository.md`.
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to

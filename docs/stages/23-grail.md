@@ -515,3 +515,10 @@ per-registry index caches and repeatable `--index` overlays; `grail update -p NA
 deps; private-index credential settings, `grail vendor`, binary artifacts, and automated
 publish (a bot that verifies the artifact before merging). The reader understands the
 `index/@org/name.sexpr` layout, but scopes are not enforced in names or manifests yet.
+
+**The index repository.** The layout of a `grail-index` (the static `index/NAME.sexpr`
+files, deterministic `packages/NAME-VERSION.tar.gz` archives, `index.wiz` and the
+generator), the `grail index check` validation (names, versions, semver ranges, archive
+SHA-256s, module-prefix conflicts) and the hosting/signing plan (TUF stages, Sigsum; no
+transparency log yet) are in
+[index-repository.md](23-grail/index-repository.md).

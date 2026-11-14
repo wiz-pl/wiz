@@ -142,6 +142,15 @@ versions, the transitive closure, a missing package, a hash mismatch, stale lock
 rollback. Rebuild the archives with `cd tests/fixtures/grail-index && ./make.sh`. There
 is no network in these tests.
 
+There is also a complete example **index repository** at `examples/grail-index/`
+(`index.wiz`, `registry.sexpr`, `index/`, `entries/`, `sources/`, `packages/`, `make.sh`)
+and a checker: `scripts/grail-index-check.sh DIR` (also `grail index check DIR`) validates
+names, versions, semver requirements, local archive SHA-256s and layouts, `index.wiz`
+against the files on disk, and module-prefix conflicts, **offline by default**. CI runs it
+on the example; `=grail-index` covers its failure modes. The index repository's layout,
+generation rules and the signing/hosting plan (TUF stages; no transparency log yet) are in
+`docs/stages/23-grail/index-repository.md`.
+
 ## What `wiz build` links
 
 `wiz build` turns a program into C (or LLVM IR) and hands it to a C compiler with the

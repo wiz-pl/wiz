@@ -16,6 +16,7 @@ reads the index and the lock, and fetches.
           (source "https://github.com/example/greet/releases/download/v1.2.0/greet-1.2.0.tar.gz")
           (sha256 "9f2c…")
           (toolchain ">=0.1.0 <0.3.0")
+          (modules "Greet" "Greet.Hello")
           (deps (dep "std" "^0.1")))
         (yanked "1.2.0" "wrong tarball; use 1.2.1")))
 
@@ -195,9 +196,36 @@ structure IxVersion where
   toolchain : String := ""
   /-- its dependencies, as the index records them (authoritative for resolution) -/
   deps : List Req := []
+  /-- (R32) the module names the package provides (`Greet`, `Greet.Hello`). Wiz has one
+  global module namespace, so two selected packages may not claim overlapping names.
+  Optional: an entry without it is not checked (and old indexes keep decoding). -/
+  modules : List String := []
+  /-- (R32) module prefixes the package reserves for future modules (`Greet`). A prefix
+  conflicts with any other package's module or prefix below it. -/
+  prefixes : List String := []
   /-- why it is yanked; `""` when it isn't -/
   yanked : String := ""
   deriving Repr, Inhabited, BEq
+
+/-- Every module name one version claims: the modules it provides and the prefixes it
+reserves. -/
+def IxVersion.claims (v : IxVersion) : List String := v.modules ++ v.prefixes
+
+/-- Whether two dotted module names overlap: they are equal, or one is a prefix of the
+other at a dot (`Ddr3` and `Ddr3.Ctrl`). Because Wiz's module names live in one global
+namespace (23b), two packages that own overlapping prefixes cannot be selected together:
+one may grow a module that collides with the other. This is deliberately conservative;
+an entry that lists only its exact modules still conflicts with a package that reserves
+their common prefix. -/
+def moduleOverlap (a b : String) : Bool :=
+  a == b || b.startsWith (a ++ ".") || a.startsWith (b ++ ".")
+
+/-- The first pair of module names two versions disagree on, if any. -/
+def IxVersion.firstClash (a b : IxVersion) : Option (String × String) := Id.run do
+  for x in a.claims do
+    for y in b.claims do
+      if moduleOverlap x y then return some (x, y)
+  return none
 
 /-- A package's index entry -/
 structure IxPackage where
@@ -225,6 +253,8 @@ def versionNode (v : IxVersion) : Sx :=
   let fields : List Sx :=
     [node "source" [str v.source], node "sha256" [str v.sha256]]
       ++ (if v.toolchain.isEmpty then [] else [node "toolchain" [str v.toolchain]])
+      ++ (if v.modules.isEmpty then [] else [node "modules" (v.modules.map str)])
+      ++ (v.prefixes.map fun p => node "prefix" [str p])
       ++ (if v.deps.isEmpty then []
           else [node "deps" (v.deps.map fun d => node "dep" [str d.name, str d.req])])
   node "version" (str (Version.render v.version) :: fields)
@@ -275,6 +305,14 @@ def decodeVersion (x : Sx) : Except String IxVersion := do
     | .l ys =>
       match ys.toList with
       | .a "deps" :: rest => out := { out with deps := ← rest.mapM decodeReq }
+      | .a "modules" :: rest =>
+        out := { out with modules := rest.filterMap fun
+          | .a m => some m
+          | _ => none }
+      | .a "prefix" :: rest =>
+        out := { out with prefixes := rest.filterMap fun
+          | .a p => some p
+          | _ => none }
       -- (R3) the index is a shared, long-lived artifact: an unknown field added by a
       -- newer publisher is ignored here (the *lock* decoder stays strict), so an old
       -- grail can still read a package whose entry gained `(license …)`, `(size …)`, …
@@ -405,6 +443,21 @@ partial def step (index : Std.HashMap String IxPackage) (toolchain : String)
   if chosen == selection then pure chosen
   else step index toolchain (fuel - 1) roots chosen
 
+/-- Refuse a selection in which two packages claim overlapping module names. This is
+23b's "one name, one declaration" checked before a build: two packages can have valid,
+distinct registry names and still collide at `import` (R32). The lock does not record
+modules, so the check lives in the resolver, not in the lock. -/
+def moduleConflicts (sel : List (String × IxVersion)) : Except String Unit := do
+  let arr := sel.toArray
+  for i in [0:arr.size] do
+    for j in [i + 1:arr.size] do
+      let (n, v) := arr[i]!
+      let (m, w) := arr[j]!
+      match v.firstClash w with
+      | some (x, y) =>
+        throw s!"module conflict: {n} {Version.render v.version} and {m} {Version.render w.version} claim overlapping module namespaces ({x} and {y}); Wiz has one global module namespace"
+      | none => pure ()
+
 /-- Resolve `roots` against `index`: the highest version of each reachable name that
 satisfies every requirement on it. Flat: one version per name (Wiz has one global name
 space, and grail refuses two commits of one dependency name). -/
@@ -412,6 +465,7 @@ def resolve (index : Std.HashMap String IxPackage) (roots : List Req) (toolchain
     Except String (List Resolved) := do
   let rootAsks : List Req := roots
   let chosen ← step index toolchain 64 rootAsks []
+  moduleConflicts chosen
   pure (chosen.map fun (name, v) => {
     name := name, version := v.version, source := v.source, sha256 := v.sha256,
     toolchain := v.toolchain, deps := v.deps })

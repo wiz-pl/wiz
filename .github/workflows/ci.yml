@@ -158,6 +158,10 @@ jobs:
         # cc -fsyntax-only -Wall -Wextra, with WIZ_API= (the object ABI) and WIZ_API=static
         # (a generated program); the header's prototypes are checked against the parts
         run: scripts/test-runtime.sh
+      - name: The example index validates offline
+        # stage 23m: entries, archive SHA-256s, semver ranges, module-prefix conflicts and
+        # index.wiz; no network (the sources are relative paths)
+        run: scripts/grail-index-check.sh examples/grail-index
 
   test:
     name: test (${{ matrix.shard.name }})
