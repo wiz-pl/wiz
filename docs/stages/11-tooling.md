@@ -550,3 +550,37 @@ Neovim shows them as `@lsp.type.keyword` (linked to `@keyword`) without configur
   that spells the whole name, in all those documents; it refuses a declaration of the
   toolchain's library and a new name that isn't one. A use through generalised field
   notation (`p.norm` for `Point.norm`) is not edited.
+
+## 11ac: `wiz repl` and `wiz test`
+
+* **`wiz repl [--llvm]`** (`Main.lean`, `replCmd`): reads one command per line on stdin
+  and elaborates it with the ordinary frontend (`runFrontend.go`) against the session's
+  accumulated `CommandState`. Definitions (and `syntax`, `macro`, `instance`, an
+  `import`) last for the rest of the session, and `#check`, `#eval`, `#print` print as
+  they do in a file. An error is printed and the session goes on with the next line. The
+  Prelude is imported at the start; `:reset` forgets every definition (it returns to that
+  state), `:help` lists the commands and `:quit` (or EOF) leaves. The base state stays
+  pristine, so an `import` is first checked in isolation, exactly as in a file, and then
+  elaborated into the session. With no terminal on stdin there is no prompt, so a pipe is
+  a script: one command per line. `:run NAME` builds and runs the definition `NAME` (C,
+  or LLVM with `--llvm`); `--llvm` affects only that.
+
+* **`wiz test [GROUPS…] [--jobs N] [--list]`** (`testCmd`): a thin wrapper that runs the
+  test driver with these arguments unchanged. It looks for the driver beside the `wiz`
+  binary (a checkout's `.lake/build/bin/tests`), then `WIZ_TESTS`, then
+  `.lake/build/bin/tests` in the current directory. Without a driver it says how to build
+  one (`lake build wiz tests`) and exits 2. It is not a second runner: selectors,
+  `--jobs`, `--list`, `--timings` and the summary are the driver's.
+
+```
+$ wiz repl
+wiz> def answer : Nat := 41 + 1
+wiz> #eval answer
+1:1: info: 42
+wiz> :quit
+$ printf 'def x : Nat := 7\n#eval x\n' | wiz repl
+1:1: info: 7
+$ wiz test =rig --jobs 4
+…
+8 passed, 0 failed
+```
