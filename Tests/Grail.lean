@@ -53,6 +53,39 @@ def regionFiles (cache : System.FilePath) : IO (Array System.FilePath) := do
   let entries ← cache.readDir
   pure (entries.filter (fun e => e.fileName.endsWith ".wizr") |>.map (·.path))
 
+/-- The per-module output manifests in a cache directory. -/
+def manifestFiles (cache : System.FilePath) : IO (Array System.FilePath) := do
+  let d := cache / "manifest.d"
+  if !(← d.pathExists) then return #[]
+  let entries ← d.readDir
+  pure (entries.filter (fun e => e.fileName.endsWith ".wizmf") |>.map (·.path))
+
+/-- The first `(file, entry)` that a cache's manifests list (for a tamper test). -/
+def firstManifestEntry (cache : System.FilePath) : IO (Option (System.FilePath × Cache.ManifestEntry)) := do
+  for f in ← manifestFiles cache do
+    let text ← IO.FS.readFile f
+    if let some m := Cache.parseManifest text then
+      if let some e := m.allEntries[0]? then return some (cache / e.file, e)
+  pure none
+
+/-- The manifest file for module `name` in a cache directory. -/
+def manifestFor (cache : System.FilePath) (name : String) : IO (Option System.FilePath) := do
+  for f in ← manifestFiles cache do
+    let text ← IO.FS.readFile f
+    if let some m := Cache.parseManifest text then
+      if toString m.module == name then return some f
+  pure none
+
+/-- Change the first digit of a manifest's root (its own root no longer matches). -/
+def tamperManifestRoot (f : System.FilePath) : IO Unit := do
+  let text ← IO.FS.readFile f
+  match text.splitOn "(root " with
+  | before :: after :: _ =>
+    let after := after.drop 1
+    let bad := if after.startsWith "0" then "1" else "0"
+    IO.FS.writeFile f (before ++ "(root " ++ bad ++ after.drop 1)
+  | _ => IO.FS.writeFile f (text ++ " ")
+
 /-- Every file under `dir`, recursively. -/
 partial def everyFile (dir : System.FilePath) : IO (Array System.FilePath) := do
   let mut out := #[]
@@ -496,7 +529,7 @@ def modulesGroup : Group where
         check (a.rerun.size > 0) "M's import is not recorded for the rerun path"
         -- (a pure cache: write the effects back out and read them; every field survives)
         let dir2 ← IO.FS.createTempDir
-        Cache.writeModuleRegion dir2 binary rig (k + 1) "M" a.effects a.keys a.complete a.rerun
+        let _ ← Cache.writeModuleRegion dir2 binary rig (k + 1) "M" a.effects a.keys a.complete a.rerun
         let some b ← Cache.readModuleRegion (R := ZeroOneMany) dir2 binary rig (k + 1)
           | throw (IO.userError "the region written for M does not read back")
         checkEq (effectSigs a.effects) (effectSigs b.effects)
@@ -539,7 +572,7 @@ def modulesGroup : Group where
         -- (a region with the wrong format is rejected and rewritten, too)
         let binary ← Cache.binaryId (some cache)
         let k := Cache.moduleKey (loaderOf ms) (fun _ => none) 0 "M" (trusted := Tests.libModule)
-        Cache.writeRegionFile (R := ZeroOneMany) (cache / Cache.regionFileName binary k)
+        let _ ← Cache.writeRegionFile (R := ZeroOneMany) (cache / Cache.regionFileName binary k)
           { magic := Cache.regionMagic, format := 999, binary, textSalt := Cache.salt, rig,
             module := "M", key := k }
         let after2 ← stats.get
@@ -883,6 +916,78 @@ def toolchainGroup : Group where
         -- render: one line per read cache, in order, then the write cache
         check ((full.render.splitOn "cache-ro /a\ncache-ro /b\ncache /w\n").length > 1) full.render
         check ((roOnly.render.splitOn "cache-ro /a\ncache-ro /b\ncache (off)\n").length > 1) roOnly.render },
+    { name := "--cache-verify off|warn|strict round-trips and is not in the toolchain id", run := fun _ => do
+        let parse (args : List String) := ({} : Toolchain).parseFlags args
+        let (tc, rest) := parse ["--cache-verify", "strict", "check", "x.wiz"]
+        checkEq "strict" tc.cacheVerify
+        checkEq ["check", "x.wiz"] rest
+        let (tc2, _) := parse ["--cache-verify=off", "check", "x.wiz"]
+        checkEq "off" tc2.cacheVerify
+        checkEq "warn" ({} : Toolchain).cacheVerify
+        check (tc.id == ({ tc with cacheVerify := "warn" } : Toolchain).id)
+          "cache-verify is in the toolchain id"
+        let (back, rest) := parse ({ tc with cacheVerify := "strict" }).toFlags
+        checkEq [] rest
+        checkEq "strict" back.cacheVerify
+        check ((tc.render.splitOn "cache-verify strict").length > 1) tc.render },
+    { name := "wiz cache verify/manifest, and a --cache-ro layer is strict by default", run := fun _ => do
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 2\n"),
+                          ("main.wiz", "import M\n#eval x\n")]
+        let cache ← IO.FS.createTempDir
+        let wiz := (← IO.FS.realPath ".lake/build/bin/wiz").toString
+        let run (args : Array String) := IO.Process.output { cmd := wiz, args, cwd := some dir }
+        let base : Array String := #["check", "main.wiz", "-I", dir.toString]
+        let cold ← run (base ++ #["--cache", cache.toString])
+        checkEq 0 cold.exitCode
+        checkEq "main.wiz:2:1: info: 2\n" cold.stdout
+        -- (a full scan: the manifests match the bytes)
+        let v0 ← run #["cache", "verify", "--cache", cache.toString]
+        checkEq 0 v0.exitCode
+        check ((v0.stdout.splitOn "0 modules").length == 1) s!"no modules verified: {v0.stdout}"
+        check ((v0.stdout.splitOn "0 unmanifested").length > 1) s!"unmanifested: {v0.stdout}"
+        -- (the generation index names its predecessor and an expiry)
+        let m ← run #["cache", "manifest", "--cache", cache.toString, "--valid-days", "1"]
+        checkEq 0 m.exitCode
+        let gen ← IO.FS.readFile (cache / "manifest.sexpr")
+        check ((gen.splitOn "(valid-until ").length > 1) gen
+        check ((gen.splitOn "(prev ").length > 1) gen
+        -- (a tampered entry: the scan fails, a warm run repairs it)
+        let some (entryFile, ent) ← firstManifestEntry cache
+          | throw (IO.userError "no manifest entry")
+        checkEq "wizc" ent.kind
+        let _ ← flipByte entryFile
+        checkEq 1 (← run #["cache", "verify", "--cache", cache.toString]).exitCode
+        let warm ← run (base ++ #["--cache", cache.toString])
+        checkEq 0 warm.exitCode
+        checkEq cold.stdout warm.stdout
+        checkEq 0 (← run #["cache", "verify", "--cache", cache.toString]).exitCode
+        -- (a read-only layer: strict by default; nothing there is written or repaired)
+        let ro := cache
+        let before ← snapshot ro
+        let rw ← run (base ++ #["--no-cache", "--cache-ro", ro.toString, "--cache-verify-stats"])
+        checkEq 0 rw.exitCode
+        checkEq cold.stdout rw.stdout
+        check ((rw.stderr.splitOn "cache verify: ").length > 1) s!"no verify stats: {rw.stderr}"
+        checkEq before (← snapshot ro)
+        -- (a tampered read-only entry: a miss, the text path answers, the layer is unchanged)
+        let some (roFile, _) ← firstManifestEntry ro
+          | throw (IO.userError "no read-only manifest entry")
+        let _ ← flipByte roFile
+        let bad ← snapshot ro
+        let o ← run (base ++ #["--no-cache", "--cache-ro", ro.toString])
+        checkEq 0 o.exitCode
+        checkEq cold.stdout o.stdout
+        checkEq bad (← snapshot ro)
+        -- (delete a manifest: its entries are not used, and the layer says so; still no write)
+        let some mf ← manifestFor ro "M"
+          | throw (IO.userError "no manifest for M")
+        IO.FS.removeFile mf
+        let after ← snapshot ro
+        let o2 ← run (base ++ #["--no-cache", "--cache-ro", ro.toString])
+        checkEq 0 o2.exitCode
+        checkEq cold.stdout o2.stdout
+        check ((o2.stderr.splitOn "no manifest for a module").length > 1) s!"no warning: {o2.stderr}"
+        checkEq after (← snapshot ro) },
     { name := "-I DIR adds a module root", run := fun _ => do
         let dir ← mkTree [("Pkg/Three.wiz", "import Prelude\ndef three : Nat := 3\n")]
         let (tc, _) := ({} : Toolchain).parseFlags ["check", "main.wiz", "-I", dir.toString]
@@ -1021,7 +1126,50 @@ def toolchainGroup : Group where
         checkEq 0 o3.exitCode
         checkEq o1.stdout o3.stdout
         for f in ← regionFiles cache do
-          check ((← f.metadata).byteSize > 0) s!"{f} was not rewritten" }
+          check ((← f.metadata).byteSize > 0) s!"{f} was not rewritten" },
+    { name := "output manifests: warm hits are verified; a tampered entry or manifest is a miss", run := fun _ => do
+        let dir ← mkTree libFiles
+        let cache ← IO.FS.createTempDir
+        let ms ← Module.loadAll ["lib", dir]
+        let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
+        let src := "import Data.Two\ndef a : Nat := two\n#eval a\n"
+        let stats ← IO.mkRef ({} : Cache.VerifyCounts)
+        let run : IO (CommandState ZeroOneMany) := do
+          pure (← Cache.elaborateCached (some cache) [] src init 0 (verify := .warn)
+            (rig := "zero-one-many") (stats := some stats)).1
+        let cold ← run
+        check (!cold.messages.any (·.severity == .error)) s!"cold: {cold.messages.toList.map (·.text)}"
+        check ((← manifestFiles cache).size > 0) "no module manifest was written"
+        let c0 ← stats.get
+        checkEq 0 c0.mismatches
+        -- (a warm run: every entry comes from a manifest and matches its digest)
+        stats.set {}
+        let warm ← run
+        checkEq (cold.messages.toList.map (·.render src)) (warm.messages.toList.map (·.render src))
+        let c1 ← stats.get
+        check (c1.hits > 0) s!"no entry was served from a manifest: {repr c1}"
+        checkEq 0 c1.mismatches
+        -- (flip a byte of a manifested `.wizc`: a miss, the text is rebuilt, the file repaired)
+        let some (entryFile, ent) ← firstManifestEntry cache
+          | throw (IO.userError "no manifest lists an entry")
+        checkEq "wizc" ent.kind
+        let before ← IO.FS.readFile entryFile
+        let _ ← flipByte entryFile
+        stats.set {}
+        let tampered ← run
+        checkEq (cold.messages.toList.map (·.render src)) (tampered.messages.toList.map (·.render src))
+        let c2 ← stats.get
+        check (c2.mismatches > 0) s!"a tampered entry was not a miss: {repr c2}"
+        checkEq before (← IO.FS.readFile entryFile)
+        -- (tamper a manifest's root: its entries are misses, and it is rewritten)
+        let mfile := (← manifestFiles cache)[0]!
+        tamperManifestRoot mfile
+        stats.set {}
+        let t2 ← run
+        checkEq (cold.messages.toList.map (·.render src)) (t2.messages.toList.map (·.render src))
+        let c3 ← stats.get
+        check (c3.mismatches > 0) s!"a tampered manifest was trusted: {repr c3}"
+        check ((← manifestFiles cache).size > 0) "the manifest was not rewritten" }
   ]
 
 /-- (9f) An executable with a `link_c` file: editing the C file relinks it (only). -/

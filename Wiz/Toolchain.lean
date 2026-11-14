@@ -31,6 +31,10 @@ structure Toolchain where
   readCaches : List System.FilePath := []
   /-- module roots searched after the standard library -/
   searchPath : List System.FilePath := []
+  /-- `--cache-verify off|warn|strict`: check cache output against its manifest (and
+  write manifests to the write cache); default `warn`. It is not in `Toolchain.id` (a
+  policy change must not invalidate entries). -/
+  cacheVerify : String := "warn"
   /-- (27a) `--trust-native`: `native_refl` may decide equations by running them -/
   trustNative : Bool := false
   /-- (27a) `--native-fuel N`: the interpreter steps one `native_refl` may take (none: the
@@ -69,6 +73,7 @@ def set (t : Toolchain) (key value : String) : Option Toolchain :=
   | "gc-ldflags" => some { t with gcLdflags := words value }
   | "cache" => some { t with cacheDir := some (System.FilePath.mk value) }
   | "cache-ro" => some { t with readCaches := t.readCaches ++ [System.FilePath.mk value] }
+  | "cache-verify" => some { t with cacheVerify := value }
   | "root" => some { t with searchPath := t.searchPath ++ [System.FilePath.mk value] }
   | "native-fuel" => value.toNat?.map fun n => { t with nativeFuel := some n }
   | _ => none
@@ -81,20 +86,33 @@ read caches; a later `--cache` or `--cache-ro` adds one again), `-I DIR`, (27a)
 `--trust-native`, `--native-fuel N`, (28b) `--sat-solver CMD`, `--solver-timeout MS`,
 (28a) `--trust-smt`, `--smt-solver CMD` (flags only, not settings of a grail file). -/
 partial def parseFlags (t : Toolchain) : List String → Toolchain × List String
-  | "--no-cache" :: rest => parseFlags { t with cacheDir := none, readCaches := [] } rest
-  | "--trust-native" :: rest => parseFlags { t with trustNative := true } rest
-  | "--sat-solver" :: cmd :: rest => parseFlags { t with satSolver := some cmd } rest
-  | "--trust-smt" :: rest => parseFlags { t with trustSmt := true } rest
-  | "--smt-solver" :: cmd :: rest => parseFlags { t with smtSolver := some cmd } rest
-  | "--solver-timeout" :: ms :: rest => match ms.toNat? with
-    | some n => parseFlags { t with solverTimeout := some n } rest
-    | none => let (t, r) := parseFlags t rest; (t, "--solver-timeout" :: ms :: r)
-  | "-I" :: dir :: rest => parseFlags { t with searchPath := t.searchPath ++ [System.FilePath.mk dir] } rest
-  | flag :: v :: rest =>
-    match (if flag.startsWith "--" then t.set (flag.drop 2).toString v else none) with
-    | some t' => parseFlags t' rest
-    | none => let (t, r) := parseFlags t (v :: rest); (t, flag :: r)
-  | [a] => (t, [a])
+  | arg :: rest =>
+    if arg.startsWith "--cache-verify=" then
+      parseFlags { t with cacheVerify := (arg.drop 15).toString } rest
+    else match arg with
+    | "--no-cache" => parseFlags { t with cacheDir := none, readCaches := [] } rest
+    | "--trust-native" => parseFlags { t with trustNative := true } rest
+    | "--sat-solver" => match rest with
+      | cmd :: rest => parseFlags { t with satSolver := some cmd } rest
+      | [] => (t, [arg])
+    | "--trust-smt" => parseFlags { t with trustSmt := true } rest
+    | "--smt-solver" => match rest with
+      | cmd :: rest => parseFlags { t with smtSolver := some cmd } rest
+      | [] => (t, [arg])
+    | "--solver-timeout" => match rest with
+      | ms :: rest => match ms.toNat? with
+        | some n => parseFlags { t with solverTimeout := some n } rest
+        | none => let (t, r) := parseFlags t rest; (t, "--solver-timeout" :: ms :: r)
+      | [] => (t, [arg])
+    | "-I" => match rest with
+      | dir :: rest => parseFlags { t with searchPath := t.searchPath ++ [System.FilePath.mk dir] } rest
+      | [] => (t, [arg])
+    | _ => match rest with
+      | v :: rest =>
+        match (if arg.startsWith "--" then t.set (arg.drop 2).toString v else none) with
+        | some t' => parseFlags t' rest
+        | none => let (t, r) := parseFlags t (v :: rest); (t, arg :: r)
+      | [] => (t, [arg])
   | [] => (t, [])
 
 /-- Flags that give this toolchain (its compilers, flags and caches) to another process.
@@ -109,6 +127,7 @@ def toFlags (t : Toolchain) : List String :=
    match t.cacheDir with
    | some d => reads ++ ["--cache", d.toString]
    | none => if t.readCaches.isEmpty then ["--no-cache"] else "--no-cache" :: reads) ++
+  (if t.cacheVerify == "warn" then [] else ["--cache-verify", t.cacheVerify]) ++
   t.searchPath.flatMap (fun d => ["-I", d.toString]) ++
   (if t.trustNative then ["--trust-native"] else []) ++
   (match t.nativeFuel with | some n => ["--native-fuel", toString n] | none => []) ++
@@ -145,7 +164,8 @@ def render (t : Toolchain) : String :=
   s!"cc {t.cc}\ncflags {" ".intercalate t.cflags}\nldflags {" ".intercalate t.ldflags}\nlibs {" ".intercalate t.libs}\ngmp {" ".intercalate t.gmp}\nllc {t.llc}\n" ++
   s!"gc-cflags {" ".intercalate t.gcCflags}\ngc-ldflags {" ".intercalate t.gcLdflags}\n" ++
   String.join (t.readCaches.map fun d => s!"cache-ro {d}\n") ++
-  s!"cache {(t.cacheDir.map toString).getD "(off)"}\nroots {" ".intercalate (t.searchPath.map toString)}\n"
+  s!"cache {(t.cacheDir.map toString).getD "(off)"}\nroots {" ".intercalate (t.searchPath.map toString)}\n" ++
+  s!"cache-verify {t.cacheVerify}\n"
 
 end Toolchain
 end Wiz

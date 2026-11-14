@@ -66,7 +66,9 @@ any read-only ones). -/
 def elaborate (tc : Toolchain) (salt : UInt64) (l : Loaded) : IO (CommandState ZeroOneMany) := do
   match tc.cacheDir, tc.readCaches with
   | none, [] => Cache.elaborateUncached l.src l.init salt
-  | write, reads => pure (← Cache.elaborateCached write reads l.src l.init l.key salt).1
+  | write, reads => pure (← Cache.elaborateCached write reads l.src l.init l.key salt
+      (verify := (Cache.VerifyMode.ofString? tc.cacheVerify).getD .warn)
+      (rig := RigTag.tag (R := ZeroOneMany))).1
 
 /-- The messages of a state, rendered `path:line:col: severity: text`. -/
 def render (path : String) (l : Loaded) (s : CommandState ZeroOneMany) : String :=

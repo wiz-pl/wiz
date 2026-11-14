@@ -25,6 +25,10 @@ def usage : String := "usage:
                                     remove keyed cache files (.wizc/.wizm/.wizr) older than
                                     N days (default 30) from the write cache; a pruned file is
                                     just a miss, and --cache-ro layers are never touched
+  wiz cache verify [--strict]        check every cache entry against its output manifest
+                                    (a full scan); exit 1 on a mismatch or missing file
+  wiz cache manifest                 rebuild the write cache's manifest.sexpr generation
+                                    index from its per-module manifests
   wiz lsp                          a language server on stdin/stdout
   wiz lsp --infoview SOCK          … and for infoviews on the Unix socket SOCK
   wiz lsp --ws [ADDR:]PORT         … and on a WebSocket (127.0.0.1 unless ADDR is given;
@@ -41,6 +45,9 @@ after the write cache and never written, as in a Nix package's share/wiz/cache),
   --region-cache (experimental: also serve cached modules from mmap'ed .wizr regions,
   read from the same caches and written to the write cache), --region-stats (print what
   the regions served, with --region-cache)
+--cache-verify off|warn|strict (default warn: check an entry's bytes against its output
+  manifest before using it; strict: only manifested entries; --cache-verify=strict works
+  too), --cache-verify-stats (print what the manifests verified)
 trust: --trust-native (27a: `def X : a = b := native_refl` is decided by running a and b;
 the kernel does not check it, `#print axioms` lists it), --native-fuel N (its step limit)
 experimental kernel options (D1, they turn the cache off): --regularity off|full (full:
@@ -163,6 +170,12 @@ initialize regionStatsOpt : IO.Ref Bool ← IO.mkRef false
 /-- `--region-stats`' counters (per process). -/
 initialize regionStats : IO.Ref Cache.RegionCounts ← IO.mkRef {}
 
+/-- `--cache-verify`'s counters (per process). -/
+initialize verifyStats : IO.Ref Cache.VerifyCounts ← IO.mkRef {}
+
+/-- `--cache-verify-stats`: print what output manifests verified (to stderr). -/
+initialize verifyStatsOpt : IO.Ref Bool ← IO.mkRef false
+
 /-- `--cache-prune DAYS`: remove keyed files older than DAYS days from the write cache
 before the run (never from `--cache-ro`; a pruned file is just a miss). -/
 initialize cachePruneOpt : IO.Ref (Option Nat) ← IO.mkRef none
@@ -248,7 +261,10 @@ def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandSta
         pure (some ({ rig := RigTag.tag (R := ZeroOneMany), stats := some regionStats } :
           Cache.RegionOptions))
       else pure none
-    pure (← Cache.elaborateCached tc.cacheDir tc.readCaches input init key₀ (region := region)).1
+    let verify := (Cache.VerifyMode.ofString? tc.cacheVerify).getD .warn
+    pure (← Cache.elaborateCached tc.cacheDir tc.readCaches input init key₀ (region := region)
+      (verify := verify) (rig := RigTag.tag (R := ZeroOneMany))
+      (stats := if verify == .off then none else some verifyStats)).1
   else
     Cache.elaborateUncached input init
 /-- (27a) `--trust-native` and `--native-fuel N`. -/
@@ -344,6 +360,54 @@ def cachePruneCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   | none => do IO.eprintln "cache prune: no write cache (--cache DIR)"; pure 1
   | some dir => do IO.println (← Cache.pruneSummary dir days dry); pure 0
 
+/-- `wiz cache verify`: check every manifest in each cache layer against the bytes beside
+it (a full scan; normal runs verify only what they read). Exit 1 on a mismatch or a missing
+file, and in `strict`/`--strict` also on an unmanifested keyed file. -/
+def cacheVerifyCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
+  let strict := tc.cacheVerify == "strict" || args.contains "--strict" || !tc.readCaches.isEmpty
+  for a in args do
+    unless a == "--strict" do
+      IO.eprintln s!"cache verify: unknown argument {a}"
+      return 2
+  let dirs := tc.cacheDir.toList ++ tc.readCaches
+  if dirs.isEmpty then
+    IO.eprintln "cache verify: no cache (--cache DIR, --cache-ro DIR)"
+    return 2
+  let mut bad := 0
+  for dir in dirs do
+    let c ← Cache.verifyLayer dir
+    IO.println (s!"cache verify: {dir}: {c.modules} modules, {c.entries} entries, {c.regions} regions, " ++
+      s!"{c.mismatches} mismatched, {c.missing} missing, {c.expired} expired, {c.unmanifested} unmanifested")
+    if c.mismatches + c.missing + c.expired > 0 || (strict && c.unmanifested > 0) then bad := bad + 1
+  pure (if bad == 0 then 0 else 1)
+
+/-- `wiz cache manifest`: rebuild (or, for a read-only layer, report) the generation index
+`manifest.sexpr` from a layer's per-module manifests. -/
+def cacheManifestCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
+  let rec parse (days : Option Nat) : List String → Except String (Option Nat)
+    | [] => pure days
+    | "--valid-days" :: n :: rest => do
+      let some k := n.toNat? | throw s!"--valid-days needs a number, not {n}"
+      if k == 0 then throw "--valid-days must be at least 1"
+      parse (some k) rest
+    | a :: _ => throw s!"cache manifest: unknown argument {a}"
+  let days ← match parse none args with
+    | .ok d => pure d
+    | .error e => do IO.eprintln e; return 2
+  let validUntil ← match days with
+    | some d => do pure ((← Cache.unixNow) + d * 86400)
+    | none => pure 0
+  let dirs := tc.cacheDir.toList ++ tc.readCaches
+  if dirs.isEmpty then
+    IO.eprintln "cache manifest: no cache (--cache DIR, --cache-ro DIR)"
+    return 2
+  for dir in dirs do
+    let write := some dir.toString == tc.cacheDir.map (·.toString)
+    let (mods, entries) ← Cache.sealLayer dir write validUntil
+    let what := if write then "generation written" else "read-only"
+    IO.println s!"cache manifest: {dir}: {mods} modules, {entries} entries ({what})"
+  pure 0
+
 def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
   let input ← IO.FS.readFile path
   let s ← elaborate tc path input
@@ -353,6 +417,10 @@ def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
   if ← regionStatsOpt.get then
     let c ← regionStats.get
     IO.eprintln s!"region cache: {c.hits} modules from a region, {c.misses} without, {c.commands} commands"
+  if ← verifyStatsOpt.get then
+    let c ← verifyStats.get
+    IO.eprintln (s!"cache verify: {c.manifests} manifests, {c.hits} entries, {c.regions} regions, " ++
+      s!"{c.mismatches} mismatches, {c.unverified} unverified")
   pure (if s.messages.any (·.severity == .error) then 1 else 0)
 
 def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOneMany)) := do
@@ -412,6 +480,11 @@ def main (args : List String) : IO UInt32 := do
   let args := args.filter (· != "--region-cache")
   regionStatsOpt.set (args.contains "--region-stats")
   let args := args.filter (· != "--region-stats")
+  verifyStatsOpt.set (args.contains "--cache-verify-stats")
+  let args := args.filter (· != "--cache-verify-stats")
+  if (Cache.VerifyMode.ofString? tc.cacheVerify).isNone then
+    IO.eprintln s!"--cache-verify: unknown mode {tc.cacheVerify} (off, warn, strict)"
+    return 2
   lazyProofsOpt.set (!args.contains "--eager-proofs")
   let args := args.filter (· != "--eager-proofs")
   let args ← match takeProofSteps args with
@@ -445,6 +518,8 @@ def main (args : List String) : IO UInt32 := do
   match args with
   | ["parse", path] => parseCmd path
   | "cache" :: "prune" :: rest => cachePruneCmd tc rest
+  | "cache" :: "verify" :: rest => cacheVerifyCmd tc rest
+  | "cache" :: "manifest" :: rest => cacheManifestCmd tc rest
   | ["check", path] => checkCmd tc path
   | ["build", path, "-o", out] => buildCmd tc path out false (split := split)
   | ["build", path, "-o", out, "--llvm"] => buildCmd tc path out true (split := split)
