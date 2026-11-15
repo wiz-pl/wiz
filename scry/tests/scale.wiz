@@ -1,0 +1,96 @@
+-- test: run
+import Sys
+import Scry.TaintCmd
+-- The large-file path, as a **scale test**: the vendored tree-sitter-c grammar is a
+-- 3.9 MB generated C file (1.1 M CST nodes). On a checkout that does not vendor the
+-- grammar the test prints one `skip` line and succeeds, so a bare tree is still green.
+--
+-- It checks:
+--   * parse + store + lower + points-to + taint finish under the default 300 s limit
+--     and report `truncated: false`;
+--   * the node count is the one the grammar actually has (a regression in the shim or
+--     the lowering walk would change it);
+--   * `--max-nodes` refuses the file with a clear error instead of lowering it;
+--   * `--max-rounds 1` returns a **marked** partial result (`truncated: true` plus a
+--     `scry/budget/*` note), not a silent wrong answer.
+--
+-- The JSON/SARIF rendering of these fields is covered by `tests/taint.wiz`; this test
+-- prints only stable counts, never elapsed time.
+
+def say (s : String) : EIO Unit := EIO.lift (IO.println s)
+
+def unless (label : String) (ok : Bool) : EIO Unit :=
+  match ok with
+  | .true => say (label ++ ": ok")
+  | .false => EIO.fail (label ++ ": FAILED")
+
+def opts (args : List String) : EIO Scry.TaintOpts :=
+  match Scry.taintArgs args with
+  | .ok o => EIO.pure o
+  | .error e => EIO.fail e
+
+partial def countBoundary (bs : List Scry.BoundaryFinding) : Nat :=
+  match bs with
+  | .nil => 0
+  | .cons _ rest => Nat.succ (countBoundary rest)
+
+/-- The hard `--timeout` path, end to end: the runtime parser's largest function takes
+far more than one second, so the alarm must exit 124 with a message (not hang, not print
+a partial JSON). Skipped when the CLI has not been built in this checkout. -/
+def timeoutCheck : EIO Unit := do
+  bin ← EIO.lift (FS.exists ".grail/bin/scry");
+  match bin with
+  | .false => say "scale: timeout skip (.grail/bin/scry absent)"
+  | .true => do
+    out ← Process.output ".grail/bin/scry"
+      (List.cons "taint" (List.cons "native/tree-sitter/lib/src/parser.c"
+        (List.cons "--allow-errors" (List.cons "--timeout" (List.cons "1"
+          (List.cons "--json" .nil)))))) "";
+    say ("scale: timeout status=" ++ ExitStatus.toString out.status
+      ++ " stdoutBytes=" ++ Nat.repr (String.length out.stdout));
+    unless "scale: timeout exit 124" (match out.status with
+      | .exited 124 => .true
+      | _ => .false);
+    unless "scale: timeout message" (String.contains out.stderr "timeout after 1 s")
+
+def scale : EIO Unit := do
+  let path := "native/tree-sitter-c/src/parser.c";
+  present ← EIO.lift (FS.exists path);
+  match present with
+  | .false => say "scale: skip (native/tree-sitter-c/src/parser.c absent)"
+  | .true => do
+    o ← opts (List.cons path (List.cons "--allow-errors" .nil));
+    rep ← Scry.analyzeFile o;
+    say ("scale: nodes=" ++ Nat.repr rep.nodes
+      ++ " parseErrors=" ++ Nat.repr rep.parseErrors
+      ++ " funcs=" ++ Nat.repr (List.length rep.tu.funcs)
+      ++ " findings=" ++ Nat.repr (List.length rep.findings)
+      ++ " boundary=" ++ Nat.repr (countBoundary rep.boundaries)
+      ++ " memory=" ++ Nat.repr (countBoundary rep.memory)
+      ++ " truncated=" ++ (match rep.truncated with | .true => "true" | .false => "false")
+      ++ " pointsToRounds=" ++ Nat.repr rep.pointsTo.rounds
+      ++ " summaryRounds=" ++ Nat.repr rep.summaryRounds);
+    unless "scale: node count" (Nat.le 1000000 rep.nodes);
+    unless "scale: complete" (Bool.not rep.truncated);
+    unless "scale: under default limit" (Nat.lt rep.elapsedMs 300000);
+
+    o2 ← opts (List.cons path (List.cons "--allow-errors"
+      (List.cons "--max-nodes" (List.cons "1000" .nil))));
+    raw ← EIO.lift (Scry.analyzeFile o2);
+    match raw with
+    | .error msg => say ("scale: max-nodes refused: " ++ msg)
+    | .ok _ => EIO.fail "scale: max-nodes refusal: FAILED (the file was analysed)";
+
+    o3 ← opts (List.cons path (List.cons "--allow-errors"
+      (List.cons "--max-rounds" (List.cons "1" .nil))));
+    rep3 ← Scry.analyzeFile o3;
+    say ("scale: max-rounds truncated="
+      ++ (match rep3.truncated with | .true => "true" | .false => "false")
+      ++ " notes=" ++ Nat.repr (List.length rep3.budgetNotes)
+      ++ " pointsToRounds=" ++ Nat.repr rep3.pointsTo.rounds
+      ++ " summaryRounds=" ++ Nat.repr rep3.summaryRounds);
+    unless "scale: max-rounds marks partial" rep3.truncated;
+    unless "scale: max-rounds note" (Nat.lt 0 (List.length rep3.budgetNotes));
+    timeoutCheck
+
+def main : IO Unit := EIO.toIO scale

@@ -57,12 +57,21 @@ structure Scry.Cst where
   parentOf : Nat → Option Nat
   /-- Node `i`'s children, in tree order. -/
   childrenOf : Nat → List Nat
-  /-- The source text of file `i` (byte offsets index it; ASCII in this slice). -/
+  /-- The source text of file `i` (byte offsets index it; ASCII in this slice). Retained
+  for `Scry.spanText` and the lowering tests. -/
   fileText : Nat → String
+  /-- The same source as a word array: `textOf` slices this, which is O(span) rather
+  than O(file). A `String` is a `List Char` in this runtime, so taking a token from the
+  middle with `String.drop` was O(file) per identifier, i.e. quadratic on a real file.
+  A `U32Array` (not `Bytes`) is deliberate: it has a pure list model, so the same
+  lowering runs in the Lean test interpreter as well as in compiled code. -/
+  fileBytes : Nat → U32Array
 
 /-- The view of a `Scry.CstStore`, with the source text its spans index. The shim's
 store has one file per parse, so `text` is file 0. -/
 def Scry.Cst.ofStore (text : String) (s : Scry.CstStore) : Scry.Cst :=
+  let bytes := List.foldl (fun a c => U32Array.push a (U32.ofNat (Char.code c)))
+    U32Array.empty (String.chars text);
   Scry.Cst.mk (Scry.CstStore.nodeCount s)
     (fun i => Scry.CstStore.kindName s i)
     (fun i => Scry.CstStore.fieldName s i)
@@ -72,13 +81,17 @@ def Scry.Cst.ofStore (text : String) (s : Scry.CstStore) : Scry.Cst :=
       | .some x => .some x.n)
     (fun i => List.map (fun x => x.n) (Scry.CstStore.childrenOf s i))
     (fun _ => text)
+    (fun _ => bytes)
 
-/-- The text of node `i`'s span. Byte offsets are used as character indices: the
-fixtures are ASCII (the shim's offsets are bytes; a UTF-8 identifier would need a byte
-slice, noted in `wiz-notes/scry-c2wil.md`). -/
+/-- The text of words `[start, start + len)` as a string. -/
+def Scry.Cst.wordsText (a : U32Array) (start len : Nat) : String :=
+  String.ofChars (List.map (fun x => Char.mk (UIntN.toNat x))
+    (U32Array.toList (U32Array.slice a start len)))
+
+/-- The text of node `i`'s span, sliced from the word view in O(span length). -/
 def Scry.Cst.textOf (c : Scry.Cst) (i : Nat) : String :=
   let sp := c.spanOf i;
-  String.take (Nat.sub sp.stop sp.start) (String.drop sp.start (c.fileText sp.file))
+  Scry.Cst.wordsText (c.fileBytes sp.file) sp.start (Nat.sub sp.stop sp.start)
 
 /-- The text of an origin. -/
 def Scry.spanText (files : List String) (sp : Wil.Span) : String :=

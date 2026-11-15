@@ -15,7 +15,7 @@ columns; no `TSNode` crosses the FFI. `src/Scry/Native.wiz` exposes the columns 
 cd scry
 cp ../grail.local.wiz .         # this machine's toolchain (not committed)
 grail build                     # check src/gen, build .grail/bin/scry, run the commands
-grail test                      # schema, cst, native shim, codegen, CLI, parse --stats, taint
+grail test                      # schema, cst, native shim, codegen, CLI, parse --stats, taint, scale
 grail build schema              # regenerate gen/C/Schema.wiz from node-types.json
 grail build schema-check        # fail if the checked-in schema is stale
 grail run scry -- parse --stats fixtures/hello.c
@@ -122,6 +122,55 @@ column; a non-ASCII source would need an explicit conversion).
 
 A parser error is refused by default; `--allow-errors` analyses the recovered tree and
 reports the `ERROR`/`MISSING` count.
+
+## Large files: limits, progress and partial results
+
+The C → Wil → points-to → taint pipeline used to scale worse than linearly: the CST child
+lookup copied the whole child column per node, token text was sliced with
+`String.drop` (a `List Char`, so O(file) per identifier), and the origin map scanned the
+source from byte 0 for every program point. The vendored tree-sitter-c grammar
+(`native/tree-sitter-c/src/parser.c`, 3.9 MB, 1.1 M nodes) therefore never finished under
+a 300 s limit. The lookup, slice and line-table paths are now O(children), O(span) and
+O(points + lines); the fixpoint machinery is bounded and reports what it did.
+
+```sh
+grail run scry -- taint FILE.c --progress
+grail run scry -- taint FILE.c --progress --timeout 60 --max-nodes 200000 --max-rounds 8
+```
+
+| option | default | contract |
+|---|---|---|
+| `--timeout SECS` | 300 | hard wall-clock limit; `0` disables. On expiry the run stops with a message and exit **124**, never a silent hang |
+| `--max-nodes N` | 2 000 000 | refuse a CST larger than `N` *before* lowering, naming the count and the flag; `0` disables |
+| `--max-rounds N` | historical bound | cap the points-to **and** summary fixpoints; a capped run is a sound lower bound and is marked `truncated` |
+| `--progress` | off | one `scry: [stage] name elapsed=…` line per stage (and per ten functions in the summary fixpoint) on **stderr**; stdout stays the JSON/lines |
+
+`--json` carries the contract in a `budget` object (`nodes`, `truncated`,
+`pointsToRounds`, `pointsToComplete`, `summaryRounds`, `summaryComplete`, `notes`) next
+to the findings. A capped fixpoint adds a `scry/budget/points-to-incomplete` or
+`scry/budget/summaries-incomplete` diagnostic to the boundary list and SARIF, so a caller
+cannot mistake a truncated run for a complete one. Every reported finding is still a
+real derivation; only recall can be reduced.
+
+Measured on this machine (`grail` build, cold-ish cache; wall time, informational):
+
+| input | nodes | before | after | peak RSS |
+|---|---:|---:|---:|---:|
+| `tree-sitter-c/src/parser.c` (3.9 MB, generated tables) | 1 110 871 | **timeout at 300 s** | **≈ 1.2–2 s warm, 6–7.5 s cold** | ≈ 650 MiB |
+| `tree-sitter/lib/src/parser.c` (17 k nodes, one huge function) | 17 163 | 79 s | ≈ 48 s | ≈ 650 MiB |
+| `tree-sitter/lib/src/query.c` (34 k nodes, 113 functions) | 34 450 | 149 s | ≈ 35 s | ≈ 70 MiB |
+
+Parsing and building the store account for ≈ 1.7 s of the 3.9 MB case; the rest is the
+lowering walk. One generated grammar function dominates the two tree-sitter runtime
+files: rule evaluation of a single very large function is the remaining hot spot, and
+`--timeout` (or a smaller `--max-nodes`) is the escape hatch.
+
+`tests/scale.wiz` is the regression test: on a checkout with the vendored grammar it
+asserts the node count, that the run is complete under the default limit, that
+`--max-nodes` refuses cleanly, that `--max-rounds 1` returns a marked partial result, and
+that the CLI's `--timeout 1` exits 124 with the timeout message and no stdout. When
+`native/tree-sitter-c/src/parser.c` is absent it prints `scale: skip (… absent)` and
+passes, so a bare tree stays green.
 
 `tests/native.wiz` checks the shim on `fixtures/hello.c`: 55 nodes, 54 edges, the root
 span `[0,95)`, parent/child/next-sibling links, and that `fixtures/broken.c` is refused

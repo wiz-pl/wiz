@@ -180,18 +180,22 @@ which keeps the provenance — a fact seeded as EDB would shadow its derivation)
 def Scry.seedsFor (sums : List Scry.Summary) (func : String) : List Scry.MemSeed :=
   List.filter (fun m => Bool.not (String.eq m.func func)) (Scry.allMemSeeds sums)
 
+/-- Evaluate one function under the current summaries (the unit of the summary
+fixpoint). Exposed so a driver can checkpoint between functions for `--timeout`. -/
+def Scry.evalWith (graph : Scry.CallGraph) (pack : Scry.RulePack) (pt : Scry.PtResult)
+    (sums : List Scry.Summary) (fn : Wil.Func) : Scry.FuncResult :=
+  Scry.evaluateFunc fn pack pt (Scry.seedsFor sums fn.name)
+    (Scry.summaryOf sums fn.name).params
+    (Scry.retSeedsOf graph sums fn.name)
+
 def Scry.resultsWith (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
     (pt : Scry.PtResult) (sums : List Scry.Summary) : List Scry.FuncResult :=
-  List.map (fun fn =>
-    Scry.evaluateFunc fn pack pt (Scry.seedsFor sums fn.name)
-      (Scry.summaryOf sums fn.name).params
-      (Scry.retSeedsOf graph sums fn.name)) p.funcs
+  List.map (Scry.evalWith graph pack pt sums) p.funcs
 
-/-- One summary round: evaluate every function under `prev`, then grow every summary
-with the argument-taint contributions the results expose and the return flags. -/
-def Scry.stepSummaries (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
-    (pt : Scry.PtResult) (prev : List Scry.Summary) : List Scry.Summary :=
-  let results := Scry.resultsWith p pack graph pt prev;
+/-- Grow every summary from one round's results: the argument-taint contributions the
+results expose and the return flags, plus the tainted memory locations. -/
+def Scry.growSummaries (p : Wil.Program) (graph : Scry.CallGraph)
+    (prev : List Scry.Summary) (results : List Scry.FuncResult) : List Scry.Summary :=
   let mems := Scry.dedupSeeds (Scry.concatLists (fun r => Scry.resultMemSeeds r) results);
   List.map (fun fn =>
     let old := Scry.summaryOf prev fn.name;
@@ -201,6 +205,12 @@ def Scry.stepSummaries (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.Ca
       | .none => (.false : Bool);
     Scry.Summary.mk fn.name (Scry.unionNat old.params contrib)
       (Bool.or old.retTainted ret) (Scry.dedupSeeds (List.append old.mems mems))) p.funcs
+
+/-- One summary round: evaluate every function under `prev`, then grow every summary
+with the argument-taint contributions the results expose and the return flags. -/
+def Scry.stepSummaries (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
+    (pt : Scry.PtResult) (prev : List Scry.Summary) : List Scry.Summary :=
+  Scry.growSummaries p graph prev (Scry.resultsWith p pack graph pt prev)
 
 partial def Scry.summaryLoop (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
     (pt : Scry.PtResult) (fuel : Nat) (sums : List Scry.Summary) : List Scry.Summary :=
@@ -239,8 +249,9 @@ def Scry.dedupWarnings (ws : List Scry.MemWarning) : List Scry.MemWarning :=
 
 /-- Analyse a program: points-to first (the memory model every later stage uses), then the
 summary fixpoint, then one final evaluation per function. -/
-def Scry.analyze (p : Wil.Program) (pack : Scry.RulePack) : Scry.ProgramResult :=
-  let pt := Scry.pointsTo p;
+def Scry.analyzeBounded (p : Wil.Program) (pack : Scry.RulePack)
+    (maxRounds : Option Nat) : Scry.ProgramResult :=
+  let pt := Scry.pointsToBounded p maxRounds;
   let graph := Scry.callGraph p pt;
   let sums0 := List.map (fun fn => Scry.Summary.mk fn.name .nil .false .nil) p.funcs;
   let fuel := Nat.add 8 (Nat.add (Nat.add (List.length p.funcs) (Scry.totalParams p.funcs))
@@ -249,6 +260,10 @@ def Scry.analyze (p : Wil.Program) (pack : Scry.RulePack) : Scry.ProgramResult :
   let results := Scry.resultsWith p pack graph pt sums;
   let warnings := Scry.dedupWarnings (Scry.concatLists (fun r => r.plan.memWarnings) results);
   Scry.ProgramResult.mk results sums graph pt warnings
+
+/-- The default analysis (historical round bound; `pointsTo.complete` is normally true). -/
+def Scry.analyze (p : Wil.Program) (pack : Scry.RulePack) : Scry.ProgramResult :=
+  Scry.analyzeBounded p pack .none
 
 -- ## Stitching paths across calls
 
