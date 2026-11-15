@@ -3,8 +3,9 @@ import Grail.Build
 /-!
 # The test runner (stage 23f)
 
-A `tests` target names a directory; every `.wiz` file under it is a test, and
-`F.expected` beside `F.wiz` is its expected output. The first line says what kind of
+A `tests` target names a directory; every `.wiz` file under it is a test (except inside
+a nested package, a subdirectory with its own `grail.wiz`), and `F.expected` beside
+`F.wiz` is its expected output. The first line says what kind of
 test it is (default `check`):
 
 * `-- test: check`: the messages of elaborating the file, as `wiz check` prints them
@@ -106,9 +107,29 @@ def expectedOf (dir : System.FilePath) (file : String) : IO (System.FilePath × 
   let expFile := dir / ((System.FilePath.mk file).withExtension "expected")
   pure (expFile, ← if ← expFile.pathExists then some <$> IO.FS.readFile expFile else pure none)
 
-/-- The test files of a `tests` target, relative to the package, sorted. -/
+/-- Is `rel` (a file's path under `base`) inside a nested package, a directory below
+`base` with its own `grail.wiz`? Such a package has its own dependencies and tests
+(`examples/grail-index/sources/*` are packages a registry fixture publishes), so its
+files are not tests of the enclosing one. -/
+def inNestedPackage (base : System.FilePath) (rel : String) : IO Bool := do
+  let dirs := (rel.splitOn "/").dropLast
+  let mut d := base
+  for c in dirs do
+    d := d / c
+    if ← (d / "grail.wiz").pathExists then return true
+  return false
+
+/-- The test files of a `tests` target, relative to the package, sorted. A directory
+with its own `grail.wiz` below the root is another package and is left out. -/
 def testFiles (dir : System.FilePath) (root : String) : IO (Array String) := do
   let files ← Module.listRoot (dir / root)
-  pure (files.map fun (m, _) => (System.FilePath.mk root / Module.relPath m).toString)
+  let mut out := #[]
+  let base := (dir / root).toString ++ "/"
+  for (m, path) in files do
+    -- (the listed path, not `relPath m`: a directory such as `base-0.1.0` has dots)
+    let underBase := (path.toString.dropPrefix? base).map (·.toString)
+    if ← inNestedPackage (dir / root) (underBase.getD "") then continue
+    out := out.push (System.FilePath.mk root / Module.relPath m).toString
+  pure out
 
 end Grail

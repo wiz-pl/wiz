@@ -2627,6 +2627,17 @@ def testRunnerGroup : Group where
           check t.skipped "the skipped test was not reported as skipped"
           check ((t.message.splitOn "needs --trust-native").length > 1) t.message
           check (!(← (dir / "tests/on-demand.expected").pathExists)) "--update wrote a skipped test's .expected" },
+    { name := "a nested package under the tests root is not a test", run := fun _ => do
+        -- examples/grail-index/sources/*: packages with their own grail.wiz (and a
+        -- directory name with dots), whose modules import each other's packages
+        let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),
+          ("tests/one.wiz", "import Prelude\ndef x : Nat := 1\n"), ("tests/one.expected", ""),
+          ("tests/fixture/pkg-0.1.0/grail.wiz", "import Grail\ndef package : Package := Package.new \"p\" |> Package.lib \"p\" \"src\"\n"),
+          ("tests/fixture/pkg-0.1.0/src/P.wiz", "import Missing\ndef y : Nat := missing\n")]
+        let tc : Toolchain := { cacheDir := some (← IO.FS.createTempDir) }
+        let (res, _) ← runTests dir tc false
+        check (res.size == 1) s!"expected one test, got {res.toList.map (·.file)}"
+        check (res.all (·.ok)) s!"{res.toList.map (·.message)}" },
     { name := "-- test: run compiles and runs main", run := fun _ => do
         let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),
           ("tests/hello.wiz", "-- test: run\nimport IO\ndef main : IO Unit := IO.println \"hi\"\n"),

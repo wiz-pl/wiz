@@ -112,7 +112,8 @@ leaves it out.
 ## 23f: a test runner
 
 `Package.tests NAME DIR` makes every `.wiz` file under `DIR` a test, with its expected
-output beside it in `.expected`. The first line gives the kind: `-- test: check` (the
+output beside it in `.expected` (not the files of a nested package: a subdirectory with
+its own `grail.wiz` is left out). The first line gives the kind: `-- test: check` (the
 default: the messages, as `wiz check` prints them) or `-- test: run` (what `main` prints,
 compiled through C). `-- test: skip REASON` marks an example that the package-wide run
 cannot check (it needs `--trust-native`, or it takes minutes): it is reported as skipped,

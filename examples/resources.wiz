@@ -1,4 +1,3 @@
--- test: skip needs drafts/feral/lib; the `feral` test group checks it
 import FeralCore
 import Feral
 import HeapBorrow
