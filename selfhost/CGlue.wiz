@@ -263,12 +263,12 @@ partial def gExprLoop (prec : Nat) (lhs : GTy) (p : GS) : GR :=
         | .gerr m => .gerr m
         | .gok b p3 =>
           if Bool.not lhs.isNum then .gerr "the condition of ?: must be a number" else
-          if Bool.not (Bool.or (GTy.fits a b) (GTy.fits b a)) then .gerr "the branches of ?: have different types" else
+          if Bool.not (Bool.or (GTy.fits a b) (GTy.fits b a)) then .gerr "the branches of ?: have different types" else (
           let r : GTy := match a, b with
             | .gdbl, _ => .gdbl
             | _, .gdbl => .gdbl
-            | _, _ => .gint
-          gExprLoop prec r p3)
+            | _, _ => .gint;
+          gExprLoop prec r p3))
     | _ => .gok lhs p
   | .false => match gFindLevel gBinops t 0 with
     | .none => .gok lhs p
