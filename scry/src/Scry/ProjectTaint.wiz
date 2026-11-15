@@ -205,6 +205,8 @@ def Scry.ProjectReport.json (r : Scry.ProjectReport) : Json :=
     , ("functions", Json.ofNat (List.length p.funcs))
     , ("analyzed", Json.ofNat (List.length p.analyzed))
     , ("symbols", Json.ofNat (List.length p.symbols))
+    , ("parseErrors", Json.ofNat p.errors)
+    , ("warnings", Json.ofNat p.warnings)
     , ("counts", Json.mkObj
         [ ("findings", Json.ofNat (List.length r.findings))
         , ("checked", Json.ofNat (r.checkedCount))
