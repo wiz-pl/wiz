@@ -10,6 +10,10 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* `Float64.ofNat` rounds correctly for every `Nat`: it used to abort above `2^64`
+  ("a number is too big for a C integer"). The value-level semantics matrix
+  (`docs/semantics-matrix.md`, group `=semantics`) pins the numeric and textual
+  boundaries across `#eval`, `#run`, Lean → C and Wiz → C (22c).
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to
