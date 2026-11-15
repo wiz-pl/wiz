@@ -95,7 +95,8 @@ typedef struct {
   wiz_val *data;
 } wiz_array;
 
-/* UTF-8 text (immutable) */
+/* UTF-8 text (immutable). `h.size` (unused for strings: they have no fields) keeps the
+   bytes' 32-bit hash, so a map from text does not hash a key again on every lookup. */
 typedef struct {
   wiz_hdr h;
   size_t len; /* bytes */

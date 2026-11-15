@@ -22,3 +22,6 @@ __pycache__/
 
 # tower: a developer's own toolchain override (docs/stages/26-tower.md, 26a)
 wiz-toolchain.local
+
+# benchmark build outputs
+bench/.build/

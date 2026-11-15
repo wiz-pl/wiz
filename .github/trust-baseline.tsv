@@ -499,7 +499,7 @@ Tagged	TT.html	partial
 Tagged	TT.htmlAll	partial
 Tagged	TT.ofJson	partial
 Tagged	TT.ofJsons	partial
-Text	Chars.replaceGo	partial
+Text	Chars.replaceAcc	partial
 Text	Chars.splitGo	partial
 Text	Nat.reprGo	partial
 Word	IntN.add	native IntN.add := IntN.addNative

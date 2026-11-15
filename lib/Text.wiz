@@ -113,10 +113,18 @@ def Char.isDigit (c : Char) : Bool := Bool.and (Nat.le 48 (Char.code c)) (Nat.le
 
 -- ## Character lists
 
-/-- Equality of character lists. -/
+/-- The number of characters (`List.length` with an accumulator: a tail call, so a
+long string doesn't build a stack of `succ`s). -/
+def Chars.lengthGo : List Char → Nat → Nat
+  | .nil, n => n
+  | .cons _ cs, n => Chars.lengthGo cs (Nat.succ n)
+/-- The number of characters. -/
+def Chars.length (cs : List Char) : Nat := Chars.lengthGo cs 0
+/-- Equality of character lists. (Compared by code point directly: `Char.eq` on the
+fields avoids a `Char` projection at every element.) -/
 def Chars.eq : List Char → List Char → Bool
   | .nil, .nil => .true
-  | .cons a as, .cons b bs => match Char.eq a b with
+  | .cons (.mk a) as, .cons (.mk b) bs => match Nat.beq a b with
     | .true => Chars.eq as bs
     | .false => .false
   | _, _ => .false
@@ -153,6 +161,18 @@ def Chars.dropSpace : List Char → List Char
   | .cons c cs => match Char.isSpace c with
     | .true => Chars.dropSpace cs
     | .false => .cons c cs
+/-- Without trailing white space (`Char.isSpace`). (`List.reverse` then `Chars.dropSpace`
+then `List.reverse` is cheaper than a length scan and `List.take`: measured on
+`text-trim` in `bench/stdlib-bench.wiz`.) -/
+def Chars.trimRight (cs : List Char) : List Char := List.reverse (Chars.dropSpace (List.reverse cs))
+/-- `Chars.endsWith s p`: whether `s` ends with `p` (by lengths and a suffix comparison,
+without reversing either list). -/
+def Chars.endsWith (s p : List Char) : Bool :=
+  let ns := Chars.length s;
+  let np := Chars.length p;
+  match Nat.le np ns with
+  | .true => Chars.eq p (List.drop (Nat.sub ns np) s)
+  | .false => .false
 /-- The pieces between occurrences of `sep` (not empty); `cur` is the current piece,
 reversed. A helper for `Chars.splitOn`. -/
 partial def Chars.splitGo (sep : List Char) : List Char → List Char → List (List Char)
@@ -160,16 +180,40 @@ partial def Chars.splitGo (sep : List Char) : List Char → List Char → List (
   | .cons c cs, cur => match Chars.stripPrefix sep (.cons c cs) with
     | .some rest => .cons (List.reverse cur) (Chars.splitGo sep rest .nil)
     | .none => Chars.splitGo sep cs (.cons c cur)
+/-- The pieces between the occurrences of a one-character separator (`cur` is the
+current piece, reversed, `acc` the pieces before it, reversed). A helper of
+`Chars.splitOn`: the common one-byte case avoids a `Chars.stripPrefix` and a rebuilt
+list cell at every character. -/
+def Chars.splitCharGo (c : Nat) : List Char → List Char → List (List Char) → List (List Char)
+  | .nil, cur, acc => List.reverse (.cons (List.reverse cur) acc)
+  | .cons ch cs, cur, acc => match ch with
+    | .mk d => match Nat.beq c d with
+      | .true => Chars.splitCharGo c cs .nil (.cons (List.reverse cur) acc)
+      | .false => Chars.splitCharGo c cs (.cons ch cur) acc
 /-- The pieces between the occurrences of `sep`; an empty `sep` gives the list alone. -/
 def Chars.splitOn (sep s : List Char) : List (List Char) := match sep with
   | .nil => .cons s .nil
+  | .cons (.mk c) .nil => Chars.splitCharGo c s .nil .nil
   | .cons _ _ => Chars.splitGo sep s .nil
+/-- `Chars.replaceGo`'s loop, building the result reversed in `acc` (tail recursive: no
+`List.append` on every occurrence). A helper of `Chars.replaceGo`. -/
+partial def Chars.replaceAcc (pat rep : List Char) : List Char → List Char → List Char
+  | .nil, acc => List.reverse acc
+  | .cons c cs, acc => match Chars.stripPrefix pat (.cons c cs) with
+    | .some rest => Chars.replaceAcc pat rep rest (List.revApp rep acc)
+    | .none => Chars.replaceAcc pat rep cs (.cons c acc)
 /-- Every occurrence of `pat` (not empty) replaced by `rep`. A helper for `String.replace`. -/
-partial def Chars.replaceGo (pat rep : List Char) : List Char → List Char
-  | .nil => .nil
-  | .cons c cs => match Chars.stripPrefix pat (.cons c cs) with
-    | .some rest => List.append rep (Chars.replaceGo pat rep rest)
-    | .none => .cons c (Chars.replaceGo pat rep cs)
+def Chars.replaceGo (pat rep : List Char) (cs : List Char) : List Char :=
+  Chars.replaceAcc pat rep cs .nil
+/-- `Chars.replaceCharGo`'s loop: every occurrence of the character `c` replaced by
+`rep`, built reversed in `acc` (tail recursive; keeps the matched character value, so
+no `Char.mk` allocation at every element). A helper of `String.replace`. -/
+def Chars.replaceCharGo (c : Nat) (rep : List Char) : List Char → List Char → List Char
+  | .nil, acc => List.reverse acc
+  | .cons ch cs, acc => match ch with
+    | .mk d => match Nat.beq c d with
+      | .true => Chars.replaceCharGo c rep cs (List.revApp rep acc)
+      | .false => Chars.replaceCharGo c rep cs (.cons ch acc)
 /-- `Chars.natGo n cs`: the digits `cs` read after `n` (`n * 10 + …`); `none` if some
 character is not a digit. A helper for `String.parseNat`. -/
 def Chars.natGo : Nat → List Char → Option Nat
@@ -188,7 +232,7 @@ def String.ofChars (cs : List Char) : String := .mk cs
 /-- The one-character string. -/
 def String.singleton (c : Char) : String := .mk (.cons c .nil)
 /-- The number of characters. -/
-def String.length (s : String) : Nat := List.length (String.chars s)
+def String.length (s : String) : Nat := Chars.length (String.chars s)
 /-- Whether the string is empty. -/
 def String.isEmpty (s : String) : Bool := List.isEmpty (String.chars s)
 /-- Equality of strings. -/
@@ -199,9 +243,9 @@ def String.beq (a b : String) : Bool := String.eq a b
 def String.lt (a b : String) : Bool := Chars.lt (String.chars a) (String.chars b)
 /-- `String.startsWith s p`: whether `s` starts with `p`. -/
 def String.startsWith (s p : String) : Bool := Chars.isPrefix (String.chars p) (String.chars s)
-/-- `String.endsWith s p`: whether `s` ends with `p` (reverses both once). -/
-def String.endsWith (s p : String) : Bool :=
-  Chars.isPrefix (List.reverse (String.chars p)) (List.reverse (String.chars s))
+/-- `String.endsWith s p`: whether `s` ends with `p` (by lengths and a suffix
+comparison; it does not reverse either string). -/
+def String.endsWith (s p : String) : Bool := Chars.endsWith (String.chars s) (String.chars p)
 /-- `String.stripPrefix s p`: `s` without the prefix `p`, if it has it:
 `String.stripPrefix "wiz.c" "wiz"` is `some ".c"`. -/
 def String.stripPrefix (s p : String) : Option String :=
@@ -210,11 +254,14 @@ def String.stripPrefix (s p : String) : Option String :=
   | .none => .none
 /-- `String.stripSuffix s p`: `s` without the suffix `p`, if it has it. -/
 def String.stripSuffix (s p : String) : Option String :=
-  match Chars.stripPrefix (List.reverse (String.chars p)) (List.reverse (String.chars s)) with
-  | .some r => .some (.mk (List.reverse r))
-  | .none => .none
+  match Chars.endsWith (String.chars s) (String.chars p) with
+  | .true =>
+    let cs := String.chars s;
+    .some (.mk (List.take (Nat.sub (Chars.length cs) (Chars.length (String.chars p))) cs))
+  | .false => .none
 /-- `String.contains s needle`: whether `needle` occurs in `s`. -/
-def String.contains (s needle : String) : Bool := Chars.contains (String.chars needle) (String.chars s)
+def String.contains (s needle : String) : Bool :=
+  Chars.contains (String.chars needle) (String.chars s)
 /-- Whether the character occurs in the string. -/
 def String.containsChar (s : String) (c : Char) : Bool := List.any (Char.eq c) (String.chars s)
 /-- The first `n` characters. -/
@@ -223,7 +270,8 @@ def String.take (n : Nat) (s : String) : String := .mk (List.take n (String.char
 def String.drop (n : Nat) (s : String) : String := .mk (List.drop n (String.chars s))
 /-- Without the last `n` characters. -/
 def String.dropEnd (n : Nat) (s : String) : String :=
-  .mk (List.reverse (List.drop n (List.reverse (String.chars s))))
+  let cs := String.chars s;
+  .mk (List.take (Nat.sub (Chars.length cs) n) cs)
 /-- The pieces between the occurrences of `sep`: `"a,b,,c"` split on `","` is
 `["a", "b", "", "c"]`; an empty `sep` gives `[s]`. -/
 def String.splitOn (s sep : String) : List String :=
@@ -241,13 +289,14 @@ def String.intercalate (sep : String) : List String → String
 /-- Without white space (ASCII) at the start. -/
 def String.trimLeft (s : String) : String := .mk (Chars.dropSpace (String.chars s))
 /-- Without white space (ASCII) at the end. -/
-def String.trimRight (s : String) : String := .mk (List.reverse (Chars.dropSpace (List.reverse (String.chars s))))
+def String.trimRight (s : String) : String := .mk (Chars.trimRight (String.chars s))
 /-- Without white space (ASCII) at either end. -/
 def String.trim (s : String) : String := String.trimRight (String.trimLeft s)
 /-- `String.replace s pat rep`: every occurrence of `pat` replaced by `rep` (an empty `pat`
 changes nothing). -/
 def String.replace (s pat rep : String) : String := match String.chars pat with
   | .nil => s
+  | .cons (.mk c) .nil => .mk (Chars.replaceCharGo c (String.chars rep) (String.chars s) .nil)
   | .cons _ _ => .mk (Chars.replaceGo (String.chars pat) (String.chars rep) (String.chars s))
 /-- A decimal number (digits only, at least one): `String.parseNat "42"` is `some 42`,
 `String.parseNat "4x"` is `none`. -/

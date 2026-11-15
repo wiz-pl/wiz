@@ -10,6 +10,13 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* standard library performance: `bench/stdlib-bench.wiz` and
+  `scripts/stdlib-bench.py` measure StrMap, Array, Bytes, String, sorting and hashing
+  (median, variance, and an interleaved A/B mode; JSON). The changes it drove:
+  single-character `String.splitOn`/`String.replace` paths, `String.length` and
+  `endsWith`/`stripSuffix`/`dropEnd`; a cached `Str` hash and an insert path that
+  doesn't grow on an update; a radix sort for `U64Map.toList`; and a mask instead of a
+  division in `NatList.hash` (15m).
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to

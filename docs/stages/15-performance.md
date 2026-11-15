@@ -403,3 +403,71 @@ time; compare groups over runs, not runs on different runners.
 `scripts/test-perf-dashboard.sh` checks the two input formats and the self-contained
 output against the small fixtures in `scripts/fixtures/perf/` (under a second, no
 toolchain). The page is published from the notes directory (`wiz-notes/`).
+
+### 15m: the standard library's hot paths
+
+`bench/stdlib-bench.wiz` and `scripts/stdlib-bench.py` measure the structures programs
+spend their time in: `StrMap` (insert, hit, miss, iterate), `Array` (push, index, map,
+fold), `Bytes` (append, slice, compare), `String` (split, replace, trim, equality,
+suffix operations), the sorted `U64Map.toList` read-back, and `NatList.hash`. Sizes are
+fixed and passed to the program; it prints a checksum of the work, so nothing measured
+can be optimised away. The driver runs each mode in its own process, reports the median,
+variance, standard deviation and coefficient of variation, writes JSON, and can
+interleave an older executable with the new one (`--baseline-bin`): the reported ratio
+is the median of the per-pair ratios, with the order alternated, so machine drift
+cancels. `bench/stdlib-baseline.json` is a recorded run; regenerate it after a
+deliberate change and keep the old file for the comparison.
+
+Paired A/B (median of 15 pairs, the order alternated), on a shared machine. The
+`StrMap` rows are a 51-pair run: those modes are the shortest and the find/miss medians
+move by a few percent between 15-pair runs (the JSON records every ratio).
+
+| benchmark | before | after | change |
+|---|---:|---:|---:|
+| `strmap-insert` (200k) | 78.6 ms | 76.8 ms | −3% |
+| `strmap-find` (200k, 8 passes) | 183.8 ms | 163.8 ms | −11% |
+| `strmap-miss` (200k, 8 passes) | 255.0 ms | 259.3 ms | ±2% (noise) |
+| `strmap-iterate` (200k, 4 passes) | 113.2 ms | 101.3 ms | −9% |
+| `array-push` (2M) | 19.4 ms | 19.6 ms | +1% |
+| `array-index` (500k, 10 passes) | 111.0 ms | 109.9 ms | −1% |
+| `array-map` (1M) | 27.0 ms | 26.9 ms | +1% |
+| `array-fold` (1M) | 23.9 ms | 24.0 ms | 0% |
+| `bytes-append` (2M) | 22.6 ms | 22.2 ms | −3% |
+| `bytes-slice` (2M) | 52.4 ms | 52.8 ms | +1% |
+| `bytes-compare` (2M) | 70.2 ms | 70.5 ms | +1% |
+| `text-split` (40k) | 125.4 ms | 83.8 ms | −33% |
+| `text-replace` (40k) | 138.0 ms | 78.0 ms | −43% |
+| `text-trim` (40k) | 79.2 ms | 78.5 ms | −1% |
+| `text-eq` (40k) | 219.8 ms | 214.8 ms | −3% |
+| `text-suffix` (40k) | 198.7 ms | 190.4 ms | −4% |
+| `sort` (100k, 8 read-backs) | 145.1 ms | 65.4 ms | −55% |
+| `hash` (300k) | 16.2 ms | 14.1 ms | −12% |
+
+What changed:
+
+* **`String`**: the single-character paths of `splitOn` and `replace` keep the matched
+  character value instead of rebuilding a `Char` and calling `stripPrefix` at every
+  element, and build the result in an accumulator (tail calls); `length` is a tail call;
+  `endsWith`/`stripSuffix`/`dropEnd` use lengths and `take`/`drop` instead of reversing
+  both strings; `Chars.eq` compares the code points directly.
+* **`StrMap`**: a `Str` keeps its 32-bit FNV hash in the header's unused `size` field
+  (strings have no fields), so lookups and the growth rehash do not hash the bytes
+  again. `insert` probes for the key first: an update no longer grows the table, and a
+  new key hashes once.
+* **Sorting**: `U64Map.toList` sorts the entries with a stable 6-pass LSD radix sort
+  (11-bit digits) instead of `qsort`'s comparison callback per element.
+* **Hashing**: `NatList.hash` keeps the polynomial in 32 bits with a mask instead of a
+  `Nat.mod` division. Its exact values are not an API; `HTrie` reads the low 20 bits
+  (the hash-consing tests, including `hdl` case 4, still pass).
+
+`Array` and `Bytes` were not touched: their operations are already thin wrappers over
+`realloc`/`memcpy` (roughly 10–35 ns per call), and the small differences above are
+code-layout and load noise. The `text-trim` change is the `String.length` tail call; the trim itself
+still reverses twice, which measured faster than a length-scan-and-`take`.
+
+`examples/stdlib-props.wiz` checks the same paths as properties (0 on success), under
+`#eval` for the pure `String` model and compiled C and LLVM for the natives; the
+`stdlib` test group runs all three. `StrMap`'s hash field, the radix sort and the insert
+update path are also covered by the existing `natives`, `persistent`, `text` and `std`
+groups. The intern table shares the cheaper `wiz_string_same` fast path (compare the
+code-point scalars before calling `wiz_nat_same`), which changes no string semantics.

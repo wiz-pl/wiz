@@ -1,0 +1,109 @@
+import Std
+import Text
+import WordMap
+
+-- Property checks for the standard library's data structures. `allChecks` is 0 when
+-- every check holds, and the code of the first failing check otherwise; `main` returns
+-- it, so `wiz run examples/stdlib-props.wiz` prints `0` (and the tests run it under
+-- `#eval` and compiled). The checks cover the Array, StrMap, Bytes and String paths
+-- that are hot in `bench/stdlib-bench.wiz`, and the sorted read-back of `U64Map`.
+
+/-- 0 when `b`, `code` otherwise (the code names the failed check). -/
+def check (b : Bool) (code : Nat) : Nat := match b with
+  | .true => 0
+  | .false => code
+/-- The first non-zero code in the list, or 0. -/
+def all : List Nat → Nat
+  | .nil => 0
+  | .cons x xs => match Nat.beq x 0 with
+    | .true => all xs
+    | .false => x
+
+-- ## Array
+
+def arrFill : Nat → Array Nat → Array Nat
+  | .zero, a => a
+  | .succ n, a => arrFill n (Array.push a n)
+def arrSum : Array Nat → Nat → Nat → Nat
+  | a, .zero, acc => acc
+  | a, .succ k, acc => arrSum a k (Nat.add acc (Array.getD a k 0))
+
+def arrayChecks : List Nat :=
+  let a := arrFill 10 Array.empty;
+  [check (Nat.beq (Array.size a) 10) 10, check (Nat.beq (Array.getD a 0 99) 9) 11, check (Nat.beq (Array.getD a 9 99) 0) 12, check (Nat.beq (Array.getD a 10 99) 99) 13, check (Nat.beq (Array.getD (Array.set a 0 77) 0 0) 77) 14, check (Nat.beq (Array.getD a 0 0) 9) 15, check (Nat.beq (Array.getD (Array.set a 10 77) 10 5) 5) 16, check (Nat.beq (Array.size (arrFill 1000 Array.empty)) 1000) 17, check (Nat.beq (arrSum (arrFill 100 Array.empty) 100 0) 4950) 18]
+
+-- ## StrMap
+
+def key (i : Nat) : Str := Str.ofString (String.append "key" (Nat.toString i))
+def insRange : Nat → StrMap Nat → StrMap Nat
+  | .zero, m => m
+  | .succ k, m => insRange k (StrMap.insert m (key k) k)
+
+def strMapChecks : List Nat :=
+  let m := insRange 50 StrMap.empty;
+  let m2 := StrMap.insert m (key 0) 1000;
+  let m3 := StrMap.insert m (key 50) 50;
+  let m4 := StrMap.insert StrMap.empty (Str.ofString (String.append "a" "b")) 7;
+  [check (Nat.beq (StrMap.size m) 50) 20, check (Nat.beq (StrMap.findD m (key 0) 999) 0) 21, check (Nat.beq (StrMap.findD m (key 49) 999) 49) 22, check (Nat.beq (StrMap.findD m (key 50) 999) 999) 23, check (Nat.beq (StrMap.findD m2 (key 0) 999) 1000) 24, check (Nat.beq (StrMap.size m2) 50) 25, check (Nat.beq (StrMap.findD m (key 0) 999) 0) 26, check (Nat.beq (StrMap.findD m3 (key 50) 999) 50) 27, check (Nat.beq (StrMap.size m3) 51) 28, check (Nat.beq (StrMap.size m) 50) 29, check (Nat.beq (StrMap.findD m4 (Str.ofString "ab") 0) 7) 30, check (Nat.beq (StrMap.size (StrMap.empty : StrMap Nat)) 0) 31]
+
+-- ## Bytes
+
+def bytesChecks : List Nat :=
+  let b := Bytes.ofList [1, 2, 3, 4, 5];
+  let c := Bytes.append b (Bytes.ofList [6, 7]);
+  let d := Bytes.push b 6;
+  [check (Nat.beq (Bytes.size b) 5) 40, check (Nat.beq (Bytes.get b 0) 1) 41, check (Nat.beq (Bytes.get b 4) 5) 42, check (Nat.beq (Bytes.get b 5) 0) 43, check (Nat.beq (Bytes.size c) 7) 44, check (Nat.beq (Bytes.get c 6) 7) 45, check (Nat.beq (Bytes.size b) 5) 46, check (Nat.beq (Bytes.size d) 6) 47, check (Nat.beq (Bytes.size b) 5) 48, check (Nat.beq (Bytes.size (Bytes.slice b 1 3)) 3) 49, check (Nat.beq (Bytes.get (Bytes.slice b 1 3) 0) 2) 50, check (Nat.beq (Bytes.size (Bytes.slice b 0 100)) 5) 51, check (Nat.beq (Bytes.size (Bytes.slice b 9 2)) 0) 52, check (Bytes.eq b (Bytes.ofList [1, 2, 3, 4, 5])) 53, check (Bool.not (Bytes.eq b (Bytes.ofList [1, 2]))) 54, check (Bool.not (Bytes.eq b c)) 55, check (Bytes.eq Bytes.empty Bytes.empty) 56]
+
+-- ## String (`List Char`)
+
+def someEq : Option String → String → Bool
+  | .some s, t => String.eq s t
+  | .none, _ => .false
+
+def textChecks : List Nat :=
+  let pieces := String.splitOn "a,b,,c" ",";
+  let pieces2 := String.splitOn "abc,abc," ",";
+  [check (String.eq "abc" "abc") 60, check (Bool.not (String.eq "abc" "abd")) 61, check (Bool.not (String.eq "" "a")) 62, check (String.eq (String.append "a" "bc") "abc") 63, check (Nat.beq (String.length "abc") 3) 64, check (Nat.beq (String.length "") 0) 65, check (Nat.beq (List.length pieces) 4) 66, check (Nat.beq (List.length (List.filter (fun s =>
+    String.eq s "") pieces)) 1) 67, check (String.eq (String.intercalate "," pieces) "a,b,,c") 68, check (Nat.beq (List.length pieces2) 3) 69, check (String.eq (String.replace "abc,abc," "," "X") "abcXabcX") 70, check (String.eq (String.replace "abab" "ab" "Z") "ZZ") 71, check (String.eq (String.replace "ab" "" "X") "ab") 72, check (String.endsWith "abc" "bc") 73, check (String.endsWith "abc" "abc") 74, check (String.endsWith "abc" "") 75, check (Bool.not (String.endsWith "abc" "abcd")) 76, check (someEq (String.stripSuffix "abc" "bc") "a") 77, check (match String.stripSuffix "abc" "x" with
+      | .none => .true
+      | .some _ =>
+        .false) 78, check (String.eq (String.dropEnd 2 "abc") "a") 79, check (String.eq (String.dropEnd 5 "abc") "") 80, check (String.eq (String.trim "  ab  ") "ab") 81, check (String.eq (String.trim "   ") "") 82, check (String.eq (String.trim "ab") "ab") 83, check (String.eq (String.take 2 "abc") "ab") 84, check (String.eq (String.drop 2 "abc") "c") 85, check (String.startsWith "abc" "ab") 86, check (String.contains "abc" "bc") 87]
+
+-- ## U64Map's sorted read-back (the native radix sort)
+
+def next (x : Nat) : Nat := Nat.mod (x * 1103515245 + 12345) 2147483648
+def sortIns : Nat → Nat → U64Map Nat → U64Map Nat
+  | .zero, _, m => m
+  | .succ k, x, m =>
+    let y := next x;
+    sortIns k y (U64Map.insert m (U64.ofNat (Nat.mod y 4000)) k)
+def sortedPairs : List (U64 × Nat) → Bool
+  | .nil => .true
+  | .cons _ .nil => .true
+  | .cons a rest => match rest with
+    | .nil => .true
+    | .cons b more => match UIntN.lt a.1 b.1 with
+      | .true => sortedPairs rest
+      | .false => .false
+def keysBelow (k : Nat) : List (U64 × Nat) → Bool
+  | .nil => .true
+  | .cons e rest => match UIntN.lt e.1 (U64.ofNat k) with
+    | .true => keysBelow k rest
+    | .false => .false
+def highKey (i : Nat) : U64 := U64.ofNat (Nat.add (Nat.mul i 184467440737095516) (Nat.sub 100 i))
+def highIns : Nat → U64Map Nat → U64Map Nat
+  | .zero, m => m
+  | .succ k, m => highIns k (U64Map.insert m (highKey k) k)
+
+def sortChecks : List Nat :=
+  let m := sortIns 4000 7 U64Map.empty;
+  let l := U64Map.toList m;
+  let h := U64Map.toList (highIns 100 U64Map.empty);
+  [check (sortedPairs l) 90, check (keysBelow 4000 l) 91, check (Nat.beq (List.length l) (U64Map.size m)) 92, check (sortedPairs h) 93, check (Nat.beq (List.length h) 100) 94]
+
+def textAll : Nat := all textChecks
+
+def allChecks : Nat :=
+  all (List.concat [arrayChecks, strMapChecks, bytesChecks, textChecks, sortChecks])
+
+def main : Nat := allChecks

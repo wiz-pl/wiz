@@ -181,9 +181,15 @@ WIZ_API wiz_val wiz_array_set(wiz_val v, uint64_t i, wiz_val x) {
 
 /* ---- text ---- */
 
+static uint64_t wiz_str_hash_bytes(const char *s, size_t n) {
+  uint64_t h = 1469598103934665603ULL;
+  for (size_t i = 0; i < n; i++) { h ^= (unsigned char)s[i]; h *= 1099511628211ULL; }
+  return h;
+}
 static wiz_val wiz_str_new(const char *s, size_t n) {
   wiz_str *t = (wiz_str *)wiz_alloc(sizeof(wiz_str) + n + 1, WIZ_TAG_STR, 0);
   t->len = n;
+  t->h.size = (uint32_t)wiz_str_hash_bytes(s, n);
   memcpy(t->data, s, n);
   t->data[n] = 0;
   return (wiz_val)t;
@@ -203,6 +209,7 @@ WIZ_API wiz_val wiz_str_append(wiz_val a, wiz_val b) {
   t->len = x->len + y->len;
   memcpy(t->data, x->data, x->len);
   memcpy(t->data + x->len, y->data, y->len + 1);
+  t->h.size = (uint32_t)wiz_str_hash_bytes(t->data, t->len);
   wiz_dec(a); wiz_dec(b);
   return (wiz_val)t;
 }
@@ -238,11 +245,7 @@ WIZ_API int wiz_str_lt(wiz_val a, wiz_val b) {
 
 /* ---- maps from text: functional, updated in place when unique ---- */
 
-static uint64_t wiz_str_hash(wiz_str *t) {
-  uint64_t h = 1469598103934665603ULL;
-  for (size_t i = 0; i < t->len; i++) { h ^= (unsigned char)t->data[i]; h *= 1099511628211ULL; }
-  return h;
-}
+static uint64_t wiz_str_hash(wiz_str *t) { return t->h.size; }
 static int wiz_str_same(wiz_str *x, wiz_str *y) { return x->len == y->len && memcmp(x->data, y->data, x->len) == 0; }
 WIZ_API wiz_val wiz_map_empty(void) {
   wiz_map *m = (wiz_map *)wiz_alloc(sizeof(wiz_map), WIZ_TAG_MAP, 0);
@@ -263,25 +266,39 @@ static wiz_val wiz_map_unique(wiz_val v) {
   wiz_dec(v);
   return (wiz_val)c;
 }
-static void wiz_map_put(wiz_map *m, wiz_val k, wiz_val x) {
-  size_t i = wiz_str_hash((wiz_str *)k) & (m->cap - 1);
+static size_t wiz_map_slot(const wiz_map *m, uint64_t h, wiz_val k) {
+  size_t i = h & (m->cap - 1);
   while (m->keys[i] && !wiz_str_same((wiz_str *)m->keys[i], (wiz_str *)k)) i = (i + 1) & (m->cap - 1);
-  if (m->keys[i]) { wiz_dec(m->keys[i]); wiz_dec(m->vals[i]); } else m->count++;
+  return i;
+}
+/* put a key known not to be in the table, at the slot found for its hash */
+static void wiz_map_put_new(wiz_map *m, wiz_val k, wiz_val x, uint64_t h) {
+  size_t i = wiz_map_slot(m, h, k);
+  m->count++;
   m->keys[i] = k; m->vals[i] = x;
+}
+static void wiz_map_grow(wiz_map *m) {
+  size_t oc = m->cap;
+  wiz_val *ok = m->keys, *ov = m->vals;
+  m->cap *= 2; m->count = 0;
+  m->keys = (wiz_val *)calloc(m->cap, sizeof(wiz_val));
+  m->vals = (wiz_val *)calloc(m->cap, sizeof(wiz_val));
+  for (size_t i = 0; i < oc; i++)
+    if (ok[i]) wiz_map_put_new(m, ok[i], ov[i], wiz_str_hash((wiz_str *)ok[i]));
+  free(ok); free(ov);
 }
 WIZ_API wiz_val wiz_map_insert(wiz_val v, wiz_val k, wiz_val x) {
   v = wiz_map_unique(v);
   wiz_map *m = (wiz_map *)v;
-  if (2 * (m->count + 1) > m->cap) {
-    size_t oc = m->cap;
-    wiz_val *ok = m->keys, *ov = m->vals;
-    m->cap *= 2; m->count = 0;
-    m->keys = (wiz_val *)calloc(m->cap, sizeof(wiz_val));
-    m->vals = (wiz_val *)calloc(m->cap, sizeof(wiz_val));
-    for (size_t i = 0; i < oc; i++) if (ok[i]) wiz_map_put(m, ok[i], ov[i]);
-    free(ok); free(ov);
+  uint64_t h = wiz_str_hash((wiz_str *)k);
+  size_t i = wiz_map_slot(m, h, k);
+  if (m->keys[i]) { /* an update: no growth, no second probe */
+    wiz_dec(m->keys[i]); wiz_dec(m->vals[i]);
+    m->keys[i] = k; m->vals[i] = x;
+    return v;
   }
-  wiz_map_put(m, k, x);
+  if (2 * (m->count + 1) > m->cap) wiz_map_grow(m);
+  wiz_map_put_new(m, k, x, h);
   return v;
 }
 /* the value for k (a new reference), or the default */
@@ -567,9 +584,26 @@ WIZ_API wiz_val wiz_wmap_erase(wiz_val v, wiz_val k) {
 }
 WIZ_API wiz_val wiz_wmap_size(wiz_val v) { size_t n = ((wiz_wmap *)v)->count; wiz_dec(v); return WIZ_BOX(n); }
 typedef struct { uint64_t k; wiz_val v; } wiz_wmap_ent;
-static int wiz_wmap_ent_cmp(const void *a, const void *b) {
-  uint64_t x = ((const wiz_wmap_ent *)a)->k, y = ((const wiz_wmap_ent *)b)->k;
-  return x < y ? -1 : x > y;
+/* Stable least-significant-digit radix sort of the entries by key (11 bits at a time,
+   six passes).  The keys are unsigned and the order is the same as `qsort`'s ascending
+   order, without a comparison callback per element. */
+static void wiz_wmap_sort(wiz_wmap_ent *es, size_t n) {
+  if (n < 2) return;
+  wiz_wmap_ent *tmp = (wiz_wmap_ent *)malloc(n * sizeof(wiz_wmap_ent));
+  if (!tmp) wiz_panic("out of memory");
+  wiz_wmap_ent *src = es, *dst = tmp;
+  for (unsigned shift = 0; shift < 64; shift += 11) {
+    unsigned bits = 64 - shift < 11 ? 64 - shift : 11;
+    unsigned buckets = 1u << bits, mask = buckets - 1;
+    size_t count[2048] = {0};
+    for (size_t i = 0; i < n; i++) count[(src[i].k >> shift) & mask]++;
+    size_t off = 0;
+    for (unsigned b = 0; b < buckets; b++) { size_t c = count[b]; count[b] = off; off += c; }
+    for (size_t i = 0; i < n; i++) dst[count[(src[i].k >> shift) & mask]++] = src[i];
+    wiz_wmap_ent *t = src; src = dst; dst = t;
+  }
+  if (src != es) memcpy(es, src, n * sizeof(wiz_wmap_ent));
+  free(tmp);
 }
 /* the model's field: the entries as pairs, by increasing key */
 WIZ_API wiz_val wiz_wmap_to_list(wiz_val v) {
@@ -577,7 +611,7 @@ WIZ_API wiz_val wiz_wmap_to_list(wiz_val v) {
   wiz_wmap_ent *es = (wiz_wmap_ent *)malloc((m->count ? m->count : 1) * sizeof(wiz_wmap_ent));
   size_t n = 0;
   for (size_t i = 0; i < m->cap; i++) if (m->vals[i]) { es[n].k = m->keys[i]; es[n].v = m->vals[i]; n++; }
-  qsort(es, n, sizeof(wiz_wmap_ent), wiz_wmap_ent_cmp);
+  wiz_wmap_sort(es, n);
   wiz_val l = WIZ_BOX(0);
   for (size_t i = n; i > 0; i--) {
     wiz_inc(es[i - 1].v);
@@ -624,9 +658,12 @@ static int wiz_nat_same(wiz_val a, wiz_val b) {
 static int wiz_string_same(wiz_val a, wiz_val b) {
   if (a == b) return 1;
   wiz_val x = wiz_field_ref(a, 0), y = wiz_field_ref(b, 0);
-  for (; wiz_tag(x) == 1 && wiz_tag(y) == 1; x = wiz_field_ref(x, 1), y = wiz_field_ref(y, 1))
+  for (; wiz_tag(x) == 1 && wiz_tag(y) == 1; x = wiz_field_ref(x, 1), y = wiz_field_ref(y, 1)) {
     if (x == y) return 1; /* a shared tail */
-    else if (!wiz_nat_same(wiz_field_ref(wiz_field_ref(x, 0), 0), wiz_field_ref(wiz_field_ref(y, 0), 0))) return 0;
+    wiz_val ca = wiz_field_ref(wiz_field_ref(x, 0), 0);
+    wiz_val cb = wiz_field_ref(wiz_field_ref(y, 0), 0);
+    if (ca != cb && ((WIZ_IS_SCALAR(ca) && WIZ_IS_SCALAR(cb)) || !wiz_nat_same(ca, cb))) return 0;
+  }
   return wiz_tag(x) == wiz_tag(y);
 }
 static wiz_itab *wiz_itab_alloc(size_t scap, size_t cap) {

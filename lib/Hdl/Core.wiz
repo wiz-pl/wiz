@@ -836,10 +836,12 @@ def NetNode.canonArgs (op : NetOp) (args : List Nat) : List Nat := match NetOp.c
 def NetNode.key (op : NetOp) (w : Nat) (args : List Nat) : List Nat :=
   NetOp.code op ++ List.cons w args
 
-/-- A hash of a list of numbers, from the seed `h` (polynomial, modulo a prime below 2³²). -/
+/-- A hash of a list of numbers, from the seed `h` (a polynomial, kept in 32 bits by a
+mask rather than a division; `HTrie` reads its low 20 bits, so the distribution that
+matters is the same, and the exact value is an implementation detail of that trie). -/
 def NatList.hash : List Nat → Nat → Nat
   | .nil, h => h
-  | .cons k ks, h => NatList.hash ks (Nat.mod (h * 1000003 + k + 1) 4294967291)
+  | .cons k ks, h => NatList.hash ks (Nat.land (h * 1000003 + k + 1) 4294967295)
 
 /-- A hash trie: `depth` levels of binary branching on the hash's bits, exact buckets at the
 leaves (a lookup compares whole keys, so a hash collision costs time, never
