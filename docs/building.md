@@ -44,7 +44,12 @@ regression fails the run early; the `native` group also covers the `lib/` part a
 `hdl-verified` the example's inside the shards;
 `scripts/trust-ledger.sh --update` regenerates the
 baseline (build the driver first). `--print` shows the recorded sources; the baseline's
-header explains the format.
+header explains the format. Two branches that review different ledger rows need no
+hand merge: install the local git driver once per checkout with
+`scripts/setup-trust-merge.sh` (the committed `.gitattributes` selects it for this
+file; the rule and its ambiguity failure are in `docs/trust-ledger.md`). A local
+driver is not cloned and CI cannot set it, so run `scripts/trust-ledger.sh --check`
+after a merge; `scripts/trust-ledger-merge_test.sh` tests the driver without a build.
 
 ### Running cases in parallel (`--jobs`)
 
@@ -70,6 +75,89 @@ needs a shared program the first case builds (the self-hosted checker, the Wiz `
 groups that did not opt in, for auditing one group's isolation — not for CI. On a 4-core
 runner `--jobs 4` is the useful setting; more jobs only add memory pressure (a case that
 compiles C can peak at a few hundred MB).
+
+### Flaky tests and the quarantine
+
+A failure in a CI shard does not say whether it is deterministic. `scripts/flaky.py`
+reruns the selected cases (or the cases a failed run reported) several times, with a seed
+matrix, and classifies each as **always pass**, **deterministic fail**, **flaky**,
+**always skip**, or **incomplete** (the rerun budget ran out). It also runs a failing
+case alone and then after a shuffled predecessor, so a case that only fails in sequence
+is reported as order dependent. The default budget is 600 seconds; run it under
+`heavy --mem 2G` locally.
+
+```sh
+scripts/flaky.py '=rig' '=toolchain' --repeats 10 --report flaky.json
+scripts/flaky.py --from-log logs/*.log --report flaky.json
+scripts/flaky.py --from-timings timings.jsonl --repeats 5
+scripts/flaky.py --shard library --order-check suspects
+```
+
+`scripts/flaky.py --self-test` exercises the classifier on deliberate fixtures (an
+alternating case, a deterministic failure, a skip, and a case that fails only after a
+predecessor); it needs no test driver and no build. `scripts/flaky-ci.sh self-test`
+does the same for the CI gate: a synthetic failing log against the fixture driver,
+including a quarantined flake, a deterministic failure, an unreproduced failure, a
+skip, an expired entry, an exhausted budget, and the job verdict.
+
+The seed matrix (`--seeds 11,23,47` or `--seed-base`/`--repeats`) numbers the reruns,
+chooses the shuffled predecessor, and is exported as `FLAKY_SEED`. The order check runs
+a suspect alone and then after a predecessor from the same group by default
+(`--predecessor-scope selected|group|all`); a case that passes alone and fails in
+sequence is reported as order dependent and classified as flaky.
+
+The driver has no JUnit output: `--from-log` reads its stdout (the `test-log-*`
+artifacts) and `--from-timings` its `--timings` JSONL. `--from-junit` is accepted for a
+JUnit file produced elsewhere. A skip is not a pass; a timeout is recorded, never
+counted as a pass. A pass beside a timeout is flaky; a pass/skip mixture is incomplete.
+A case that failed in the source run and passes every rerun is **flaky** (the failure
+did not reproduce), never "always pass"; a source failure that now only skips stays a
+failure. Exit status: 0 clean (or only active quarantines), 1 a deterministic failure,
+an incomplete measurement, a source failure that only skips, or an expired quarantine,
+2 usage/input error, 3 an unquarantined flaky case, 4 the budget ran out.
+
+Known flakes live in `.github/flaky-quarantine.json` (data only; no code). Every entry
+has a `group`, a `case`, a fixed `expires` date (`YYYY-MM-DD`) and a `reason`; `owner`,
+`issue` and `index` are optional:
+
+```json
+{
+  "version": 1,
+  "entries": [
+    {"group": "rig", "case": "a case name", "index": 3,
+     "expires": "2026-12-01", "reason": "intermittent, see the linked issue",
+     "owner": "the area's maintainer", "issue": "#123"}
+  ]
+}
+```
+
+`scripts/flaky.py --check-quarantine` exits 1 from the expiry date on, so a flake cannot
+be parked indefinitely. An active entry makes the verdict of a flaky case exit 0; it
+never turns a deterministic failure into a pass. Add an entry in a PR with a reason and
+an expiry that leaves time to fix or replace the test; refresh the date only with a new
+reason, never by deleting the entry silently.
+
+**In CI.** The test shard's `tests` step has `continue-on-error: true`, so a failed
+shard reaches the classifier instead of ending the job. `scripts/flaky-ci.sh shard`
+runs `scripts/flaky.py --from-log logs/<shard>.log` with `--budget 600`, writes
+`logs/<shard>-flaky.json` (uploaded with the `test-log-*` artifact) and a Markdown
+section in the run summary, and exits 0 only when every failure is an active quarantine
+entry. The last step, `scripts/flaky-ci.sh verdict`, then makes the job green only when
+the tests passed or the classifier cleared the failure; a deterministic failure, an
+incomplete measurement, a source failure that only skips, or a flaky case with no active
+entry keeps the job red. `scripts/flaky-ci.sh expiry` runs in the `result` job with
+`if: always()` and fails it (naming the entry and its owner) from the entry's expiry
+date on. The `shard` mode prints the shard, case, class, seed(s) and quarantine expiry
+in one table.
+
+**What a failed shard costs.** The classifier reruns each failing case five times alone
+and a suspect five more times after a predecessor: about ten driver runs per failing
+case, plus two `--list-cases` calls. The whole classification is capped at 600 seconds
+of wall time per failed shard (exit 4 if it runs out, which keeps the shard red). It
+runs in the same job as the shard, so it uses that job's store paths, `~/.cache/wiz`
+(the helper passes it as `--cache`) and `.grail`; on the self-hosted runner this is the
+same incremental path, while a cold cache pays elaboration again for every rerun. A
+green shard pays nothing: the classifier only runs after `tests` fails.
 
 **Embedded files.** Lake does not track files a module reads with `include_str`, so each
 embedded file gets a library of its own whose `needs` names the file as an
@@ -109,6 +197,79 @@ Adding a test group touches no shared file:
 * `scripts/migrate-tests.py` made this layout from the old single `Tests/Elab.lean`,
   deterministically; a branch that still edits the old file replays its changes with it
   (AGENTS.md, "Test layout").
+
+## The grail package registry (23m)
+
+`grail update` resolves `Package.require` lines through a **static index** (a directory,
+one S-expression file, or a git repository) and writes `grail.lock`; `grail fetch
+--locked` materialises that lock and `grail build/test/run/lsp/doc` read only the lock.
+`grail update --locked` is a check, not a resolution: it reads the lock, verifies that
+the manifest's requirements are pinned, and never reads the index (so a new publication
+cannot break CI). `--offline` makes `update`, `fetch` and builds use cached index clones
+and archives only; a missing item is an error, never a download. `--index URL#COMMIT`
+(or `Package.set "index-commit"`) pins the index revision; the lock also records the
+index URL and commit that produced it. A URL index must fast-forward from the lock's
+commit: a force-pushed/rewritten history is refused unless `--allow-rewind` (TUF's
+rollback protection over git's DAG).
+
+`grail.lock` is v3: it records the resolving toolchain, each package's `(size …)`,
+`(tree …)` and `(commands …)` as well as its SHA-256, and any `Package.override` from
+`grail.local.wiz` (which `--locked` refuses). Entries are flat and sorted; a v1/v2 lock
+still parses and `grail update` upgrades it.
+
+Cache layout (under `--cache`, default `~/.cache/wiz`):
+
+| path | contents |
+|---|---|
+| `grail/downloads/<sha256>` | content-addressed release archives; re-hashed on every use, re-downloaded when corrupt |
+| `grail/packages/<sha256>/` | unpacked packages (23n), stamped `.grail-pkg`; `.grail/packages/<name>` links to one |
+| `grail/index/` | the cached clone of a URL index (one clone; a directory index is read in place) |
+
+Fetch verifies the SHA-256 **before** unpacking, into a temporary directory, and renames
+only after the hash matches, so a bad transfer leaves no partial tree. The archive layout
+is one `NAME-VERSION/` with `grail.wiz`; relative `source` paths in a local index are
+resolved against the index root (which is what makes the checked-in fixture usable
+offline). An index may publish a signed `index/snapshot.sexpr` (+ `.sig`);
+`grail update --require-signature --allowed-signers FILE` verifies it offline and pins
+its key, sequence and digest in the lock, and `grail index verify` checks one without a
+network. SHA-256 and the lock still give integrity, the index's git history and review
+give names, and building a package still runs its author's code.
+
+`grail vendor [DIR]` (23n) copies the lock's registry archives into `DIR` (default
+`vendor/`) as `<sha256>.tar.gz` and writes `DIR/index.sexpr`; the lock is unchanged, so
+the same lock works with or without it. `--vendor DIR` (or `Package.set "vendor" "DIR"`) makes
+`fetch`/`build`/`test`/`run`/`lsp`/`doc` look archives up by hash in that directory
+before the cache or the network. The hermetic CI prelude is:
+
+```sh
+grail fetch --locked --offline --vendor vendor   # after `grail vendor` once, committed
+grail build
+```
+
+`grail cache path|list|verify` inspects the shared cache; `verify` re-hashes every
+archive and checks every unpacked tree's stamp, and exits 1 on a corrupt entry.
+
+The hermetic fixture is `tests/fixtures/grail-index/` (`index/NAME.sexpr`,
+`packages/NAME-V.tar.gz`, `sources/` and `make.sh`); `=grail-deps` covers exact/range
+versions, the transitive closure, a missing package, a hash mismatch, stale locks,
+`fetch --locked` with cold/warm caches, scoped `index/@org/name.sexpr` files, index
+rollback, and lock v3 (round-trip, old locks, upgrade, `grail.local.wiz` overrides).
+`=grail-vendor` (five cases) covers vendoring, an offline `--locked` fetch from
+`vendor/` without a cache, the shared store and the cache commands. `=grail-index`
+includes three signed-snapshot cases (a throwaway Ed25519 key via `ssh-keygen`; they
+skip when it is absent): the lock records the fingerprint/sequence, offline
+verification from the pinned key, and refusal of a tampered or re-signed snapshot, an
+expired key, a lower sequence and a same-sequence rewrite. Rebuild the archives with
+`cd tests/fixtures/grail-index && ./make.sh`. There is no network in these tests.
+
+There is also a complete example **index repository** at `examples/grail-index/`
+(`index.wiz`, `registry.sexpr`, `index/`, `entries/`, `sources/`, `packages/`, `make.sh`)
+and a checker: `scripts/grail-index-check.sh DIR` (also `grail index check DIR`) validates
+names, versions, semver requirements, local archive SHA-256s and layouts, `index.wiz`
+against the files on disk, and module-prefix conflicts, **offline by default**. CI runs it
+on the example; `=grail-index` covers its failure modes. The index repository's layout,
+generation rules and the signing/hosting plan (TUF stages; no transparency log yet) are in
+`docs/stages/23-grail/index-repository.md`.
 
 ## What `wiz build` links
 
@@ -194,6 +355,99 @@ Lean's `.olean`/`.ilean`/`.trace` files store absolute source paths; the Lean to
 report whichever error finishes first (artifacts are unaffected). The compiler binary,
 the generated C and the linked programs are compared byte for byte by the script.
 
+## Memory budget
+
+Time is not the only way a build dies. A run that peaks at 5 GiB is killed by a
+4 GiB memory cgroup whatever its wall time was, and the self-hosted checker once
+retained 10.7 GB after a `mutual`/`partial` inline-cache change (the `inlineTm` fix
+brought its self-check down to 413 MiB). `scripts/mem-bench.py` measures the peak
+resident set of a fixed corpus and gates it two ways:
+
+```sh
+python3 scripts/mem-bench.py                 # run, write bench/mem-bench.json
+python3 scripts/mem-bench.py --check         # exit 1 on a regression or a cap
+python3 scripts/mem-bench.py --update        # re-record bench/mem-baseline.json
+python3 scripts/mem-bench.py --self-test     # the thresholds on synthetic series
+python3 scripts/mem-bench.py --from-json bench/mem-bench.json --check  # re-check a saved run
+```
+
+| invocation | what it measures | cap |
+|---|---|---:|
+| `check-prelude` | `wiz check --no-cache lib/Prelude.wiz` | 1 GiB |
+| `check-std` | `wiz check --no-cache lib/Std.wiz` | 1 GiB |
+| `check-text` | `wiz check --no-cache lib/Text.wiz` | 1 GiB |
+| `check-json` | `wiz check --no-cache lib/Json.wiz` | 1 GiB |
+| `check-example-hdl` | `wiz check --no-cache examples/hdl-temporal.wiz` (a large temporal-properties example) | 2 GiB |
+| `build-stdlib-bench` | `wiz build --no-cache bench/stdlib-bench.wiz` (elaborate, lower, C, `cc`) | 2 GiB |
+| `selfhost-checker` | the self-hosted checker checking the whole frontend | 1 GiB |
+
+The checks are cold (`--no-cache`): a warm content-addressed cache hides the
+elaboration a CI runner does on every build. Peak RSS is sampled every 20 ms as the
+sum of the process tree's RSS, plus the root's `VmHWM` on every sample, because a
+build fans out into `cc`, `as` and `ld`; `ru_maxrss` of the root is the floor for a
+process that starts and exits inside one interval. A sampling peak can miss a spike
+shorter than the interval: treat a number as ±5 % (the same caveat as the fixpoint's
+timings). The self-hosted checker is built once as preparation (`wiz build` of the
+concatenated `selfhost/*.wiz`, kept under `bench/.build/mem/`); its *run* is the
+corpus entry. `--phases` adds the only phase profiler that exists today: after the
+corpus, it runs the test driver's `--probe-checker`, which prints the checker
+*build*'s RSS and `VmHWM` after each compiler phase (frontend, erasure, lowering,
+hoisting, optimisation, C emission). That breakdown is recorded in the JSON but is
+not part of the gate; with a future `wiz build --profile`, the same slot can carry a
+per-phase split. It needs the test driver (`lake build tests`) and about 6 GiB for
+the in-process checker build, so the nightly job does not pass `--phases`.
+
+There are two limits, and both are failures:
+
+* **relative** — a peak above the baseline's peak by more than 25 % (the baseline
+  records the limit; `--tolerance` overrides it for one run). RSS is noisier than
+  time, so this is looser than the timing gate's 10 %.
+* **hard cap** — the per-invocation budget in the table. `--scope` also wraps each
+  invocation in `systemd-run --user --scope -p MemoryMax=<cap>`, so the kernel
+  enforces the cap live and an over-cap run exits 137 instead of merely failing
+  afterwards. Without `--scope` the measured peak is compared with the cap.
+
+The baseline is `bench/mem-baseline.json`; the run record is `bench/mem-bench.json`.
+`--check` also fails when an invocation is missing from the baseline, when the
+corpus changed its arguments or cap, or when an invocation exits nonzero — a stale
+baseline cannot silently stop checking an entry. `--markdown FILE` appends the table
+to a CI step summary.
+
+Absolute RSS depends on the C compiler, the GC version, the page size and what else
+shares the machine; the checked-in baseline was recorded on the 27 GiB development
+host with about twenty concurrent agents, so the relative limit and the caps are the
+decision, not the absolute numbers. Re-record with `--update` after a deliberate
+change (a new corpus entry, a new allocator), and keep the old baseline in the PR.
+
+Today's numbers (2026-11-15, 27 GiB host, 32 CPUs, Linux 7.3.3, GCC 16.2,
+Boehm GC, about twenty agents sharing the machine; `wiz` built from `627b48f6`,
+peak of the recorded samples, ±5 %):
+
+| invocation | peak RSS | cap | wall (median) |
+|---|---:|---:|---:|
+| `check-prelude` | 99 MiB | 1 GiB | 1.1 s |
+| `check-std` | 104 MiB | 1 GiB | 1.7 s |
+| `check-text` | 104 MiB | 1 GiB | 1.5 s |
+| `check-json` | 105 MiB | 1 GiB | 2.3 s |
+| `check-example-hdl` | 140 MiB | 2 GiB | 35 s |
+| `build-stdlib-bench` | 222 MiB | 2 GiB | 146 s |
+| `selfhost-checker` | 413 MiB | 1 GiB | 31 s |
+
+The worst offender is the self-hosted checker at 413 MiB: it is 40 % of its 1 GiB
+cap and an order of magnitude above the module checks, which is why it has its own
+entry. It was 10.7 GB before the `inlineTm` fix and is the reason the cap exists.
+The stdlib build is the slow entry (146 s; two samples, because the peak is stable),
+not the largest peak. The 167 KiB `hdl-uart-temporal` example is not in the corpus:
+a cold check takes over four minutes on this host, so the corpus uses
+`hdl-temporal` (294 lines, 35 s cold) instead and keeps the nightly bounded.
+
+The nightly `.github/workflows/bench.yml` runs this as a second job
+(`mem`, after the timing jobs) with `--check --markdown "$GITHUB_STEP_SUMMARY"`;
+`bench.yml` is owned by its own PR, so the exact diff is in
+`bench/mem-bench.bench.yml.diff` for the coordinator to apply after that lands. The
+job declares 6 GiB (the preparation builds the checker) and uploads
+`bench-out/mem-bench.json` as an artifact.
+
 ## Continuous integration
 
 `nix develop` gives the toolchain the tests need besides Lean (see `flake.nix`): GMP and
@@ -254,6 +508,16 @@ the elan toolchain, so the setup action keeps the elan cache for those
   script's fixtures (`--self-test`) and then the check, on every push and pull request
   (including docs-only ones), and `CI result` requires it. No code block is exempt; a
   reviewed exception goes in the script's `ALLOW` list with a reason.
+* **Documentation examples** (the `docs_examples` job, and a step in `build`):
+  `scripts/check-docs-examples.py` checks every fenced block marked `wiz` in `README.md`
+  and `docs/**/*.md` with `wiz check` and runs the blocks marked `wiz run`, comparing
+  their output with the block beside them; a `wiz no-check` block is an explicit
+  exception.
+  Relative links and `examples/...` references must resolve. On a docs-only pull request
+  `docs_examples` substitutes the Nix-built `wiz` from Cachix (the same store path
+  `build` publishes); a pull request that changes code runs the same check in `build`.
+  Its cache (`.lake/docs-examples`) is keyed by the Lean sources that build `wiz`, so a
+  docs-only run is seconds and a toolchain change invalidates it.
 * **The documentation site** (the `docs` and `deploy-docs` jobs): on a push to `master`
   only (not a pull request, the weekly run or a manual run), `docs` builds the two Wasm
   modules (the infoview's and the playground's), the standard library's pages with
@@ -454,9 +718,9 @@ the elan toolchain, so the setup action keeps the elan cache for those
   `gh cache list -R wiz-pl/wiz -S size_in_bytes`.
 
 * **Path filters.** On a pull request the `changes` job (`scripts/ci.py changes`) reads
-  the files the PR changes and decides what runs: nothing but `changes`, `docs_style`
-  and `CI result` for a docs-only PR (`docs/`, `*.md`, LICENSE); `trust-ledger` runs
-  whenever any code did; every shard when a Lean
+  the files the PR changes and decides what runs: nothing but `changes`, `docs_style`,
+  `docs_examples` and `CI result` for a docs-only PR (`docs/`, `*.md`, LICENSE);
+  `trust-ledger` runs whenever any code did; every shard when a Lean
   file, the build, the runtime, `scripts/` or `.github/` changed; otherwise each shard
   with `"inputs"` in `.github/test-shards.json` only when one of its inputs changed
   (a `lib/X.wiz` input brings the lib files it imports), and the shards without

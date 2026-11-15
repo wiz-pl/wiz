@@ -21,6 +21,27 @@ function decodeUTF8(bytes) {
   return new TextDecoder().decode(bytes);
 }
 
+// Does this engine implement the WebAssembly tail-call proposal? The backend emits
+// `return_call` for tail positions, so an older engine rejects the module at
+// instantiation. The probe is the smallest module that uses `return_call` (`(func
+// (return_call 0))`); `WebAssembly.validate` returns false both for "unsupported" and
+// for "invalid", which is enough to distinguish an engine feature failure from a module
+// bug when instantiation fails.
+const TAIL_CALL_PROBE = Uint8Array.from([
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+  0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+  0x03, 0x02, 0x01, 0x00,
+  0x0a, 0x06, 0x01, 0x04, 0x00, 0x12, 0x00, 0x0b,
+]);
+
+export function supportsTailCalls() {
+  try {
+    return WebAssembly.validate(TAIL_CALL_PROBE);
+  } catch {
+    return false;
+  }
+}
+
 export async function instantiate(source) {
   // (a path needs Node's `fs`; bytes work in a browser too, so the import is lazy)
   const bytes = typeof source === 'string' ? (await import('node:fs')).readFileSync(source) : source;
@@ -99,7 +120,18 @@ export async function instantiate(source) {
     },
   };
 
-  const { instance } = await WebAssembly.instantiate(bytes, imports);
+  let instance;
+  try {
+    ({ instance } = await WebAssembly.instantiate(bytes, imports));
+  } catch (e) {
+    if (!supportsTailCalls()) {
+      throw new Error(
+        'Wiz (Wasm): this engine lacks the WebAssembly tail-call proposal ' +
+        '(`return_call`), which this module uses; run it on an engine with tail calls. ' +
+        `Original error: ${e.message}`);
+    }
+    throw e;
+  }
   ex = instance.exports;
   return ex;
 }
