@@ -487,8 +487,8 @@ def libDiffSummarize (recs : Array LibRec) : LibSummary :=
     | some (_, n) => n
     | none => 0
   let entries := gaps.toList.map (fun r => (r.file, r.klass, (r.self.msg.take 110).toString))
-  let blockers := entries.qsort fun (f1, k1, _) (f2, k2, _) =>
-    if rank k1 != rank k2 then rank k1 > rank k2 else f1 < f2
+  let blockers := (entries.toArray.qsort fun (f1, k1, _) (f2, k2, _) =>
+    if rank k1 != rank k2 then decide (rank k1 > rank k2) else f1 < f2).toList
   { s with
     byConstruct := byConstruct,
     byCode := libDiffCount (rejects.toList.map (·.self.code)),
