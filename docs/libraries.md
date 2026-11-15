@@ -922,10 +922,12 @@ forwarded request is the granted one. The same example checks the circuit's fair
 n = 3, and the test case runs yosys `check -assert` and `synth_ice40` on the emitted
 Verilog when yosys is on PATH (skipped silently otherwise).
 
-## APB, Wishbone and AXI4-Lite (`lib/Hdl/Apb.wiz`, `lib/Hdl/Wishbone.wiz`, `lib/Hdl/AxiLite.wiz`)
+## APB, Wishbone, AXI4-Lite and AXI4 bursts (`lib/Hdl/Apb.wiz`, `lib/Hdl/Wishbone.wiz`, `lib/Hdl/AxiLite.wiz`, `lib/Hdl/Axi4.wiz`)
 
-`Bus` is the single-outstanding, AXI4-Lite-shaped core; these three modules put the
-standard names on it rather than inventing another on-chip protocol.
+`Bus` is the single-outstanding, AXI4-Lite-shaped core; these four modules put the
+standard names on it rather than inventing another on-chip protocol. The first three are
+unchanged by the burst module: `Hdl.Axi4` adds channels and adapters, it does not alter
+`Hdl.AxiLite`, `Hdl.Apb` or `Hdl.Wishbone`.
 
 * `lib/Hdl/Apb.wiz` (`import Hdl.Apb`): the AMBA APB4 subset (one transfer, `PSTRB`,
   `PSLVERR`). `Apb.busToApbC aw dw` is the full two-phase bridge: it captures a
@@ -949,6 +951,21 @@ standard names on it rather than inventing another on-chip protocol.
   or separate `AW`/`W` arrival), and `AxiLite.errOf` turns a non-`OKAY` response into
   `err`. A full AXI4-Lite slave still needs the `AW`/`W` queue that this subset does not
   claim.
+* `lib/Hdl/Axi4.wiz` (`import Hdl.Axi4`): the AXI4 burst subset. `Axi4.Aw`/`W`/`B` and
+  `Axi4.Ar`/`R` add `AxLEN`, `AxSIZE`, `AxBURST` (FIXED/INCR/WRAP), `AxID`, `WLAST`/
+  `RLAST` and the response ID to the AXI4-Lite shapes; `SlaveIn`/`SlaveOut`/`MasterIn`/
+  `MasterOut` are the five channels with their ready directions. `Axi4.beatAddr` is the
+  address of beat `k` (INCR: `base + k * 2^SIZE`; WRAP: the aligned
+  `(LEN + 1) * 2^SIZE`-byte window, wrapping at its end; FIXED: `base`), and
+  `Axi4.beatSeq` is the whole address list. `Axi4.wrC aw dw idw` adapts an AXI4 write
+  burst to one `Bus.ReqW` write per beat and one `B` response; `Axi4.rdC aw dw idw`
+  adapts an `AR` burst to one `Bus.ReqW` read per beat and `R` beats with `RLAST`. Both
+  hold the bus request (and the AXI beat) under backpressure, follow `LEN` for the beat
+  count, and carry the ID and `SLVERR` on a bus error. The subset is one burst
+  outstanding per direction, `AW` accepted at rest with each `W` beat consumed as its
+  bus beat completes, and `AxSIZE` no wider than the bus data width; `Axi4.orderOf`
+  models the general multi-ID ordering rule (each ID's completions in issue order) at
+  values.
 
 `lib/Hdl/ProtocolLaw.wiz` (`import Hdl.ProtocolLaw`) is the bridge obligation set:
 `Bus.Law.ReqWStable` and its components (a `Bus.ReqW` source holds `valid`, `we`, `addr`,
@@ -972,6 +989,30 @@ read-back, and round-trips the AXI4-Lite bundles. Every circuit is checked for s
 response/request matching, response order and strobe preservation, its value simulation,
 `Netlist.simulate` and `Circuit.simFast` agree cycle for cycle, and the four bridge
 netlists are `Netlist.wellFormed`.
+
+`lib/Hdl/Axi4Law.wiz` (`import Hdl.Axi4Law`) is the AXI4 burst obligation set:
+`Axi4.Law.AddressProgression` (the bus addresses are `Axi4.beatSeq`), `Axi4.Law.BeatCount`
+(`LEN + 1` beats), `Axi4.Law.WrBeatOk`/`RdBeatOk` (one beat's address, data and byte
+strobes at the adapter pins), `Axi4.Law.WLastOk`/`RLastOk` (the last marker is on beat
+`LEN`), `Axi4.Law.BRespOk`/`RRespOk` (the response ID, data and `SLVERR`) and
+`Axi4.ResponseOrder`/`Axi4.orderOf` (per-ID completion order). The kernel checks only the
+small facts (`legalWrap` for 2/4/8/16 beats and its rejection of 5, `beats 0 = 1`,
+`bytes 0 = 1`, the quiet channels and the reset phases, and the `respOfErr` codes); the
+rest are Boolean checks over generated traces: **tested, not proved**.
+
+`examples/hdl-axi4.wiz` (test group `bus-protocol`) runs an INCR and a WRAP write burst
+and an INCR and a WRAP read burst, four beats each, through `Axi4.wrC`/`Axi4.rdC` with a
+bus slave that stalls (one bus answer in three cycles for the INCR write, one in two for
+the WRAP write, and one `R` accepted in three for the reads). It checks the `LEN + 1` bus beats and W handshakes, the address progression
+(INCR `16 18 20 22`; WRAP `22 16 18 20`), every beat's data and byte strobes, `WLAST`
+only on the last `W`, `RLAST` only on the last `R`, the echoed IDs and one `B` per burst,
+the `SLVERR` mapping for a bus error, and the multi-ID `Axi4.orderOf` model on
+interleaved completions. The `SlaveIn`/`SlaveOut` bundles round-trip through
+`Bundle.toEl`/`Bundle.ofEl`. The value simulation, `Netlist.simulate` and `Circuit.simFast`
+agree cycle for cycle, the two adapter netlists are `Netlist.wellFormed`, and yosys
+`check -assert`/`synth_ice40` runs on their Verilog when yosys is on PATH (skipped
+silently otherwise). The test group now has two cases (the existing APB/Wishbone/AXI4-Lite
+case and this one).
 
 ## CRC-8/SMBUS (`lib/Hdl/Crc.wiz`)
 
