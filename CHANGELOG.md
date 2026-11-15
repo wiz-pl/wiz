@@ -49,7 +49,10 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `grail index verify`; later updates re-verify from the pinned key and refuse tampering,
   rollback, a same-sequence rewrite and an expired key. There is no transparency log;
   the TUF/Sigsum staging, key rotation and the remaining gaps are in
-  `docs/stages/23-grail/index-repository.md`.
+  `docs/stages/23-grail/index-repository.md`. `update --locked --require-signature`
+  refuses a registry lock with no `(index-signature …)` even when its `(index …)` line
+  is absent; `--locked` reads no index, so it checks the entry's shape only, and
+  `grail index verify --locked` is the command that re-verifies the signature.
 * `Float64.ofNat` rounds correctly for every `Nat`: it used to abort above `2^64`
   ("a number is too big for a C integer"). The value-level semantics matrix
   (`docs/semantics-matrix.md`, group `=semantics`) pins the numeric and textual

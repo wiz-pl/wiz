@@ -610,7 +610,10 @@ def checkLocked (lock : Lock) (pkg : Package) (indexCommit : String := "")
     throw s!"a machine-local override is in effect ({os}), but --locked refuses overrides: remove it from grail.local.wiz or run without --locked"
   match lock.indexSignature with
   | none =>
-    if requireSignature && !lock.indexUrl.isEmpty then
+    -- a registry lock is one with `pkg` entries, whether or not its `(index …)` line is
+    -- present: `--locked` cannot verify a signature (it reads no index), so it must at
+    -- least refuse an unsigned registry lock rather than trust a stripped one
+    if requireSignature && (!lock.indexUrl.isEmpty || !lock.pkgs.isEmpty) then
       throw "grail.lock has no index signature: run `grail update --require-signature`"
   | some sig =>
     if let .error e := Signature.checkFields sig then throw s!"{e}: run `grail update --require-signature`"

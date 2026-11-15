@@ -3417,6 +3417,12 @@ def grailIndexGroup : Group where
         check (sig.key.startsWith "ssh-ed25519") sig.key
         -- `--locked` validates the recorded signature fields without reading the index
         checkEq 0 (← run ["update", "--locked", "--require-signature"])
+        -- and a registry lock whose index/signature lines were stripped is not signed
+        let lockText ← IO.FS.readFile (dir / "grail.lock")
+        let kept := (lockText.splitOn "\n").filter fun l => !l.startsWith "  (index"
+        IO.FS.writeFile (dir / "grail.lock") ("\n".intercalate kept)
+        checkEq 1 (← run ["update", "--locked", "--require-signature"])
+        IO.FS.writeFile (dir / "grail.lock") lockText
         -- the lock's pinned key makes verification offline on the next run
         checkEq 0 (← run ["index", "verify", idx.toString, "--locked"])
         -- a first use needs a trust root from outside the index; without one, refuse

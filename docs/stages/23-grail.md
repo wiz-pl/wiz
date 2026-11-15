@@ -576,8 +576,10 @@ The snapshot is additive: an index without one is read exactly as before.
   `.grail/packages/NAME` is refused.
 * **The lock's shape** is checked before a build: package versions satisfy the
   requirements, the transitive closure is complete, `sha256`/`tree`/`commands` are
-  64 lowercase hex digits, and `--locked` refuses a stale lock or a recorded
-  machine-local override.
+  64 lowercase hex digits, and `--locked` refuses a stale lock, a recorded
+  machine-local override, or an unsigned registry lock when `--require-signature` is
+  given. `--locked` reads no index, so it checks a signature *entry's shape* only;
+  `grail index verify --locked` is the command that re-verifies the signature itself.
 * **A signed index** is verified with `ssh-keygen -Y verify` against an
   `allowed_signers` file passed from outside the index (or the key a `grail.lock`
   already pinned); the snapshot must cover every entry of the index with the same
