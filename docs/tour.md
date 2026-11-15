@@ -399,7 +399,12 @@ variable at run time:
 |---|---|---|
 | `0` | never: erased | types, proofs, indices like `Vec`'s length |
 | `1` | exactly once: linear | resources: a file handle, a channel end, the world |
-| `ω` | any number of times | everything else; the default |
+| `ω` | any number of times | everything else; the default for explicit **and implicit** binders |
+
+An implicit binder is inferred and may be used freely, so `fun {n} => n` uses `n` as
+data without writing `{ω n}`. An explicit quantity is still authoritative: write
+`{0 A : Type}` for an erased type argument inside braces, or `{1 x}` to make an
+implicit linear.
 
 ```
 def id {0 A : Type} (1 x : A) : A := x

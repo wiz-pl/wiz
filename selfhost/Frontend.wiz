@@ -236,12 +236,11 @@ def binderW (b : Syntax) : QW := match b with
   | _ => match Bool.or (strEq (kindOf b) "binder.explicit") (isImplicitB b) with
     | .true => writtenQ (kid b 1)
     | .false => .dflt
--- a binder's quantity, the default filled in
+-- a binder's quantity, the default filled in (implicits are ω too: the language decision
+-- "implicit binders are ω by default")
 def binderQ (b : Syntax) : Option Q := match binderW b with
   | .is q => .some q
-  | .dflt => .some (match isImplicitB b with
-    | .true => .qz
-    | .false => .qw)
+  | .dflt => .some .qw
   | .bad => .none
 def qsFor (q : Q) : List String → List Q
   | .nil => .nil
@@ -4724,14 +4723,15 @@ def setNthSyn (v : Syntax) : List Syntax → Nat → List Syntax
     | .zero => .cons v rest
     | .succ j => .cons s (setNthSyn v rest j)
 def setKid (s : Syntax) (i : Nat) (v : Syntax) : Syntax := mkNode (kindOf s) (setNthSyn v (kids s) i)
--- (an implicit binder keeps its quantity: its default 0 is written out, stage 21m)
-def zeroQtyStx : Syntax := mkNull (one (mkNode "quantity" (one (mkNode "num" (one (.atom "0"))))))
+-- (an implicit binder keeps its written quantity; a bare implicit now means ω, the same
+-- as a bare explicit binder, so its empty quantity slot needs nothing written)
 def explicitBinders : List Syntax → List Syntax
   | .nil => .nil
-  | .cons b rest => .cons (mkNode "binder.explicit" (.cons (.atom "(") (.cons (match Bool.and (isImplicitB b) (isNilS (kids (kid b 1))) with
-      | .true => zeroQtyStx
-      | .false => kid b 1) (.cons (kid b 2)
+  | .cons b rest => .cons (mkNode "binder.explicit" (.cons (.atom "(") (.cons (kid b 1) (.cons (kid b 2)
       (.cons (kid b 3) (one (.atom ")"))))))) (explicitBinders rest)
+-- a generated parameter binder is implicit at quantity 0 (as the Lean elaborator's
+-- `implicitΔ`), even though a user-written bare implicit is now ω
+def zeroQtyStx : Syntax := mkNull (one (mkNode "quantity" (one (mkNode "num" (one (.atom "0"))))))
 -- `let x := scrutinee; …` for the clause's variables
 def letsFor (body : Syntax) : List Syntax → List Syntax → Syntax
   | .cons p ps, .cons sc scs => match strEq (identOf p) "_" with
@@ -5557,10 +5557,11 @@ def binderStx (ob cb x : String) (A : Syntax) : Syntax := match strEq ob "[" wit
     | .true => "binder.implicit"
     | .false => "binder.explicit") (.cons (.atom ob) (.cons (mkNull .nil)
     (.cons (mkNull (one (.ident x))) (.cons (mkNull (.cons (.atom ":") (one A))) (one (.atom cb))))))
--- the parameter binders, made implicit
+-- the parameter binders, made implicit at 0 (generated declarations keep the erased
+-- parameter even though a user-written bare implicit is now ω)
 def implicitBinders : List Syntax → List Syntax
   | .nil => .nil
-  | .cons b rest => .cons (mkNode "binder.implicit" (.cons (.atom "{") (.cons (kid b 1) (.cons (kid b 2)
+  | .cons b rest => .cons (mkNode "binder.implicit" (.cons (.atom "{") (.cons zeroQtyStx (.cons (kid b 2)
       (.cons (kid b 3) (one (.atom "}"))))))) (implicitBinders rest)
 -- (a field is ["private"] [quantity] ident ":" T)
 def fieldName (f : Syntax) : String := identOf' (kid f 2)

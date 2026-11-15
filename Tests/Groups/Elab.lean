@@ -22,6 +22,21 @@ def group : Group where
         ok "def id2 : {A : Type} → A → A := fun x => x" },
     { name := "explicit implicit lambda", run := fun _ =>
         ok "def id3 : {A : Type} → A → A := fun {A} x => x" },
+    { name := "implicit binders are ω by default: a named implicit is usable as data", run := fun _ =>
+        okLib "import Prelude\ndef width {n : Nat} : Nat := n\ndef t : Nat := (fun {n : Nat} => n) (n := 3)\ndef twice {n : Nat} : Nat := Nat.add n n" },
+    { name := "an explicit quantity is authoritative: {0 n} stays erased", run := fun _ => do
+        okLib "import Prelude\ndef f {0 n : Nat} (x : Nat) : Nat := x"
+        failsLib "import Prelude\ndef bad {0 n : Nat} : Nat := n" "quantity" },
+    { name := "an explicit quantity is authoritative: {1 n} must be used once", run := fun _ => do
+        okLib "import Prelude\ndef good {1 n : Nat} : Nat := n"
+        failsLib "import Prelude\ndef bad {1 n : Nat} : Nat := Nat.add n n" "quantity" },
+    { name := "class instance binders are ω by default: the dictionary can be used twice", run := fun _ =>
+        okLib ("import Prelude\nclass Twice (A : Type) where\n  val : A\ninstance : Twice Nat where\n  val := 7\n" ++
+          "def addIt {A : Type} [c : Twice A] : A := c.val\ndef twice [c : Twice Nat] : Nat := Nat.add c.val c.val") },
+    { name := "an unused implicit erases: a {n : Nat} used only in a type leaves no runtime use", run := fun _ =>
+        okLib ("import Prelude\ninductive V (A : Type) : Nat → Type where\n  | nil : V A .zero\n" ++
+          "def onlyType {n : Nat} (v : V Nat n) (x : Nat) : Nat := x\n#erase onlyType")
+          ["onlyType := (λn. (λv. (λx. #0)))"] },
     { name := "return type inferred", run := fun _ =>
         ok "def ap (A B : Type) (f : A → B) (a : A) := f a\n#check ap"
           ["ap : (A : Type) → (B : Type) → (A → B) → A → B"] },
@@ -46,8 +61,9 @@ def group : Group where
         fails "def loop (A : Type) : A := loop A" "recursive call to loop in a definition without equations" },
     { name := "linearity is checked by the kernel", run := fun _ =>
         fails "def dup {A : Type} (f : A → A → A) (1 x : A) : A := f x x" "quantity" },
-    { name := "erased implicit used at runtime", run := fun _ =>
-        fails "def leak {A : Type} (x : A) : Type := A" "quantity" },
+    { name := "an implicit type is ω by default; {0 A} is still erased", run := fun _ => do
+        ok "def leak {A : Type} (x : A) : Type := A"
+        fails "def leak0 {0 A : Type} (x : A) : Type := A" "quantity" },
     { name := "binder quantity must match the expected type", run := fun _ =>
         fails "def f : (1 x : Type) → Type := fun (ω x) => x" "quantity" },
     { name := "linear identity checks", run := fun _ =>

@@ -34,7 +34,7 @@ def coinductiveGroup : Group where
           "def bad {A : Type} (a : A) (t : Tree A) : Tree A\n  | .label => a\n  | .left => bad a t\n  | .right => t") "guardedness" },
     { name := "the coconstructor T.mk and .mk", run := fun _ =>
         ok (streamPrelude ++ "#check @Stream.mk\ndef s : Stream Nat := .mk .zero (Stream.mk (.succ .zero) (nats .zero))\n#reduce s.tail.tail.head")
-          ["Stream.mk : {A : Type} → A → Stream A → Stream A", ".zero"] },
+          ["Stream.mk : {0 A : Type} → A → Stream A → Stream A", ".zero"] },
     { name := "cocon, the kernel primitive", run := fun _ =>
         ok (streamPrelude ++ "def s : Stream Nat := cocon (.zero, nats (.succ .zero), (), ())\n#reduce s.tail.head")
           [".succ .zero"] },

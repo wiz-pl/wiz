@@ -37,8 +37,8 @@ def liftGroup : Group where
     { name := "the fields of Prod.{u,v} and the tag of a polymorphic type are lifted invisibly", run := fun _ =>
         okLib (liftPrelude ++ "#check Prod2.mk\n#eval Prod2.snd (Prod2.mk 1 Bool.true)\n#reduce Prod2.mk 1 Bool.false\n" ++
             "#check Prod2.casesOn\n#reduce Prod2.desc Nat Bool")
-          ["Prod2.mk : {A : Type ?u0} → {B : Type ?u1} → A → B → Prod2 A B", ".true", ".mk 1 .false",
-           "Prod2.casesOn : {A : Type ?u0} → {B : Type ?u1} → (0 motive : Prod2 A B → Sort ?u2) → ((a : A) → (b : B) → motive (.mk a b)) → (x : Prod2 A B) → motive x",
+          ["Prod2.mk : {0 A : Type ?u0} → {0 B : Type ?u1} → A → B → Prod2 A B", ".true", ".mk 1 .false",
+           "Prod2.casesOn : {0 A : Type ?u0} → {0 B : Type ?u1} → (0 motive : Prod2 A B → Sort ?u2) → ((a : A) → (b : B) → motive (.mk a b)) → (x : Prod2 A B) → motive x",
            "Desc.arg ω (ULift Enum [mk]) (fun t => ecase t [Desc.arg ω (ULift Nat) (fun a => Desc.arg ω (ULift Bool) (fun b => Desc.ret ()))])"] },
     { name := "an infinitary field over a smaller domain, in a type in Type 1 (structural recursion through it)", run := fun _ =>
         okLib (liftPrelude ++ "#eval depth (T3.node (fun _ => T3.node (fun _ => T3.leaf)))\n" ++

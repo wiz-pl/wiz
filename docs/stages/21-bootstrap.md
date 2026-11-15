@@ -247,8 +247,9 @@ runtime; 21p). `implemented_by`, callbacks and `c_struct` came later (21q–21t)
 Finding K10 of audit 2: `Frontend.wiz` built every binder at ω, whatever was written, so
 `def twice (1 x : Nat) (f : Nat → Nat → Nat) : Nat := f x x` was accepted. It now reads
 the binder's `quantity` node as `elabQuantity` does in the Lean elaborator (`binderQ`,
-`writtenQ`): `0`, `1` or `ω`, by default ω on an explicit binder and 0 on an implicit
-one; a numeral other than 0 or 1, or a quantity term `%t`, is an error. The quantities
+`writtenQ`): `0`, `1` or `ω`, by default ω on explicit **and implicit** binders (the
+language decision "implicit binders are ω by default"; write `{0 x}`/`{1 x}` to override
+it); a numeral other than 0 or 1, or a quantity term `%t`, is an error. The quantities
 reach the kernel, which already checks usage (`popUsage`):
 
 * the binders of a `def`, an `axiom` and a partial definition's signature (`defT`,
@@ -258,14 +259,16 @@ reach the kernel, which already checks usage (`popUsage`):
 * a `fun` checked against a Π: a written quantity must be the Π's ("binder quantity 1
   does not match the expected ω", as `checkFun`); an unwritten one takes it;
 * `let 1 x := v; b` is the kernel's `letq` (the backend erases the value of a `let 0`);
-* a constructor's parameters are implicit at 0 (the Lean elaborator's `implicitΔ`), so
-  `List.cons` is `(x0 :0 U0) → (x1 : x0) → …`; an inductive type's own parameters keep
-  their binders' quantities. The helper definition that `withDefault'` makes writes an
-  implicit binder's 0 out when it makes the binder explicit.
+* a constructor's *generated* parameters are implicit at 0 (the Lean elaborator's
+  `implicitΔ`), so `List.cons` is `(x0 :0 U0) → (x1 : x0) → …`; an inductive type's own
+  parameters keep their binders' quantities. The helper definition that `withDefault'`
+  makes writes a generated parameter's 0 out when it makes the binder explicit (a
+  user-written bare implicit is now ω, so the generated binders must say `0`).
 
-Erasure needs nothing new: arguments at 0 were erased already, and there are more of
-them now (an implicit `{w : Nat}` is no longer passed). The self-hosted sources needed no
-change: the Lean frontend checks them with the same rules.
+Erasure needs no new rule: an argument or field at 0 is erased as before, and a bare
+implicit is now ω like an explicit binder (write `{0 n}` to erase one whose value is
+only needed in types). The self-hosted sources needed no change: the Lean frontend
+checks them with the same rules.
 
 What does not match the Lean frontend (pinned in a test, and in
 [CoreSpec §15](../CoreSpec.md)): a linear variable used once in each branch of a `match`
@@ -278,9 +281,10 @@ eliminator rules (PR #84).
 
 **Tests** (group `selfhost`): `selfhostAgrees` runs 23 declarations through both
 frontends (accepted and rejected alike: linear functions passed and used twice, `let 1`,
-`let 0`, implicit parameters used at runtime, a `fun`'s quantity against the expected
-one, a quantity `2`); `selfhostVerdicts` pins the three differences above; a program
-with quantities is compiled and run under both collectors.
+`let 0`, implicit parameters used at runtime — accepted now that implicit binders are
+ω by default — a `fun`'s quantity against the expected one, a quantity `2`);
+`selfhostVerdicts` pins the three differences above; a program with quantities is
+compiled and run under both collectors.
 
 ## 21n: `private`, and unknown commands, in the self-hosted frontend
 
@@ -691,9 +695,10 @@ field's quantity as the Lean kernel's do (`Desc.arg q S D`, CoreSpec §9.1):
   two descriptions), `castDesc`, `groundEqDesc`, `eqPayload`, `quote` and `show`
   (`arg(0 Nat, …)`; nothing is printed at ω) follow the Lean kernel.
 
-`Frontend.wiz`: a field's quantity is read as `elabQuantity` reads it (ω explicit, 0
-implicit; `2` and `%t` are errors), kept in `Field` (now `mk name q impl ty`), and goes
-into the description (`ctorDesc`, `mctorDesc`) and the constructor's type (`ctorType`).
+`Frontend.wiz`: a field's quantity is read as `elabQuantity` reads it (ω explicit and
+implicit by default; write `{0 n : Nat}` for an erased index; `2` and `%t` are errors),
+kept in `Field` (now `mk name q impl ty`), and goes into the description (`ctorDesc`,
+`mctorDesc`) and the constructor's type (`ctorType`).
 An implicit field (`| cons {n : Nat} …`) is an implicit argument of the constructor
 (`Global.implicits`), so a call leaves it out, and patterns name only the explicit
 fields (`explicitPats`, as `explicitIdx`). A match binds each field at its quantity

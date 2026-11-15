@@ -2103,13 +2103,14 @@ Each item says what the code does; the code is what the kernel checks.
 
 **The self-hosted frontend's quantities** (`Frontend.wiz`, stage 21m; finding K10 of audit 2,
 now closed). The frontend reads written quantities (`0`, `1`, `ω`) on binders, `fun`
-binders and `let`, with the Lean elaborator's defaults (ω explicit, 0 implicit; a
-constructor's parameters at 0), and the kernel checks usage. What still differs is below. A linear
+binders and `let`, with the Lean elaborator's defaults (ω on explicit and implicit
+binders; a generated constructor's parameters at 0), and the kernel checks usage. What still differs is below. A linear
 variable used once in each branch of a `match` was a difference until stage 21v: the Lean
 frontend now compiles such a match to the additive `T.casesOnA`, and both accept it.
 Constructor field quantities and implicit constructor fields were differences until 21x:
-a field `(q x : A)` is `darg q A …` here too (an implicit field `{n : A}` at 0, inserted at
-the call and not named by patterns), a match binds each field at its quantity (`T.casesOn`'s
+a field `(q x : A)` is `darg q A …` here too (an implicit field `{n : A}` at the default
+ω, inserted at the call and not named by patterns; write `{0 n : A}` for an erased
+index), a match binds each field at its quantity (`T.casesOn`'s
 method does), and a structure's field at 0 has no projection.
 Commands: `#eval` is `#reduce` here, and `attribute [inline]` is checked and ignored
 (21u); classes and instances, the other attributes and `import_c` are errors.

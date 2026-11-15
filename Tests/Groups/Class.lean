@@ -34,7 +34,7 @@ def classGroup : Group where
   exercise := "Exercise 7.1"
   cases := [
     { name := "methods take the instance as an instance-implicit argument", run := fun _ =>
-        okLib (classPrelude ++ "#check Inhabited.default") ["Inhabited.default : {A : Type} → [self : Inhabited A] → A"] },
+        okLib (classPrelude ++ "#check Inhabited.default") ["Inhabited.default : {0 A : Type} → [self : Inhabited A] → A"] },
     { name := "an instance is found", run := fun _ =>
         okLib (classPrelude ++ "#eval (Inhabited.default : Bool)") [".true"] },
     { name := "instances with instance arguments chain", run := fun _ =>
