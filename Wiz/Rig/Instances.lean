@@ -76,7 +76,7 @@ instance : QuantitySyntax Nat where
   display := toString
 
 instance : RigTag Nat where
-  tag := "nat"
+  tag := "nat-implicit-one"
 
 /-! ## `ZeroOneMany`: Idris 2's quantities -/
 
@@ -227,7 +227,9 @@ instance : QuantitySyntax ZeroOneMany where
   display := toString
 
 instance : RigTag ZeroOneMany where
-  tag := "zero-one-many"
+  -- (bumped: the implicit-binder default changed from 0 to ω, so cached terms from the
+  -- old meaning must not be reused; `RigTag`'s contract)
+  tag := "zero-one-many-implicit-many"
 
 end ZeroOneMany
 

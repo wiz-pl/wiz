@@ -23,7 +23,7 @@ def group : Group where
     { name := "explicit implicit lambda", run := fun _ =>
         ok "def id3 : {A : Type} → A → A := fun {A} x => x" },
     { name := "implicit binders are ω by default: a named implicit is usable as data", run := fun _ =>
-        okLib "import Prelude\ndef width {n : Nat} : Nat := n\ndef t : Nat := (fun {n : Nat} => n) (n := 3)\ndef twice {n : Nat} : Nat := Nat.add n n" },
+        okLib "import Prelude\ndef width {n : Nat} : Nat := n\ndef t : {n : Nat} → Nat := fun {n} => n\ndef twice {n : Nat} : Nat := Nat.add n n" },
     { name := "an explicit quantity is authoritative: {0 n} stays erased", run := fun _ => do
         okLib "import Prelude\ndef f {0 n : Nat} (x : Nat) : Nat := x"
         failsLib "import Prelude\ndef bad {0 n : Nat} : Nat := n" "quantity" },

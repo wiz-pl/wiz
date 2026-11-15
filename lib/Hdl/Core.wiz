@@ -563,13 +563,13 @@ def HwTy.El.resetToAt : (ω t : HwTy) → HwTy.El HwTy.bit → HwTy.El t → HwT
 def HwTy.El.resetTo {ω t : HwTy} (c : HwTy.El HwTy.bit) (v : HwTy.El t) (x : HwTy.El t) : HwTy.El t :=
   HwTy.El.resetToAt t c v x
 /-- `d` at a hit, else `old` -/
-def Hdl.memPick {A : Type} : Bool → A → A → A
+def Hdl.memPick {0 A : Type} : Bool → A → A → A
   | .true, d, old => d
   | .false, d, old => old
 /-- A write: a disabled one is the memory itself, so that a simulation does not wrap the
 memory in one more function per cycle (a read would cost the number of cycles so far,
 not the number of writes). -/
-def Hdl.memWr {aw dw : Nat} : Bool → (BitVec aw → BitVec dw) → BitVec aw → BitVec dw → (BitVec aw → BitVec dw)
+def Hdl.memWr {0 aw dw : Nat} : Bool → (BitVec aw → BitVec dw) → BitVec aw → BitVec dw → (BitVec aw → BitVec dw)
   | .false, m, a, d => m
   | .true, m, a, d => fun (b : BitVec aw) => Hdl.memPick (BitVec.beq a b) d (m b)
 /-- Read a memory at an address (combinational). -/

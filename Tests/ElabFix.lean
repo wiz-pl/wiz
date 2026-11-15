@@ -224,7 +224,7 @@ def group : Group where
     { name := "a constructor with a pair argument in a match branch (placeholders solved directly)", run := fun _ =>
         okLib ("import Prelude\ninductive Vec (A : Type) : Nat → Type where\n  | nil : Vec A .zero\n" ++
           "  | cons {0 n : Nat} (x : A) (xs : Vec A n) : Vec A (.succ n)\n" ++
-          "def zip {A B : Type} {n : Nat} : Vec A n → Vec B n → Vec (A × B) n\n" ++
+          "def zip {A B : Type} {0 n : Nat} : Vec A n → Vec B n → Vec (A × B) n\n" ++
           "  | .nil, .nil => .nil\n  | .cons a as, .cons b bs => .cons (a, b) (zip as bs)") },
     { name := "an argument naming a tuple pattern's component, before a postponed lambda (no scope escape)", run := fun _ =>
         okLib ("import Prelude\nstructure P where\n  a : Nat\n  b : Nat\n" ++
