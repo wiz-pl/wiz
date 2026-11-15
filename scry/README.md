@@ -27,8 +27,8 @@ grail run scry -- explain fixtures/demo.facts.json 4
 
 Commands: `facts`, `query --kind|--edge|--rel`, `explain`, `parse --stats` (a C source,
 a `scry-cst` spill, or a JSON store), `cst` (JSON store → spill), `taint` (C →
-Wil → taint → findings/SARIF), and `bench` (run the checked-in taint corpus and compare
-findings with its manifest). `parse --stats` prints counts only; the perf agent owns
+Wil → taint → findings/SARIF), `bench` (run the checked-in taint corpus and compare
+findings with its manifest), and `repl` (the Wiz REPL with `Scry.Repl` preloaded). `parse --stats` prints counts only; the perf agent owns
 throughput numbers.
 
 ## `scry repl`: the Wiz REPL with `Scry.Repl` preloaded

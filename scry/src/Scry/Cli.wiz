@@ -144,56 +144,27 @@ def Scry.cstCmd (file : String) (out : String) : EIO Nat := do
     ++ Nat.repr (Scry.CstStore.relationCount s) ++ " relations to " ++ out);
   EIO.pure 0
 
-/-- The `wiz` executable: a sibling of this binary, else `wiz` on PATH. -/
-partial def Scry.wizExeGo : List String → IO String
-  | .nil => IO.pure "wiz"
-  | .cons p rest => do
-    ok ← FS.exists p;
-    match ok with | .true => IO.pure p | .false => Scry.wizExeGo rest
 
-def Scry.wizExeDefault : IO String := do
-  app ← IO.appPath;
-  let here := match List.reverse (String.splitOn app "/") with
-    | .cons _ rest => String.intercalate "/" (List.reverse rest)
-    | .nil => ".";
-  Scry.wizExeGo [Path.join here "wiz", "../.lake/build/bin/wiz",
-    "../../.lake/build/bin/wiz", ".lake/build/bin/wiz"]
 
-def Scry.wizExe : IO String := do
-  env ← IO.getEnv "WIZ";
-  match env with
-  | .some p => do
-    ok ← FS.exists p;
-    match ok with | .true => IO.pure p | .false => Scry.wizExeDefault
-  | .none => Scry.wizExeDefault
 
-/-- The module roots `Scry.Repl` needs, from the repository root or from `scry/`. -/
-partial def Scry.replRootsGo (acc : List String) : List String → IO (List String)
-  | .nil => IO.pure (List.reverse acc)
-  | .cons p rest => do
-    ok ← FS.isDir p;
-    match ok with | .true => Scry.replRootsGo (List.cons p acc) rest | .false => Scry.replRootsGo acc rest
-
-def Scry.replRoots : IO (List String) :=
-  Scry.replRootsGo .nil ["lib", "src", "../lib", "../scry/src"]
 
 /-- `scry repl [FILE]`: literally `wiz repl --prelude Scry.Repl -I …`, with `FILE`
 loaded through `Scry.Repl.load` before the first input. -/
 def Scry.replCmd (args : List String) : EIO Nat := do
-  roots ← EIO.lift Scry.replRoots;
-  wiz ← EIO.lift Scry.wizExe;
+  let roots := ["lib", "src", "../lib", "../scry/src"];
+  let wizPath := "wiz";
   let rootArgs := List.concat (List.map (fun r => ["-I", r]) roots);
   let (file, rest) := match args with
     | .cons a more => match String.startsWith a "--" with
-      | .true => (.none, args)
-      | .false => (.some a, more)
-    | .nil => (.none, .nil);
-  loadStep ← (match file with
+      | .true => ((Option.none : Option String), args)
+      | .false => ((Option.some a : Option String), more)
+    | .nil => ((Option.none : Option String), ([] : List String));
+  step ← (match file with
     | .some f => do
-      _ ← EIO.lift (Scry.Repl.load f);
-      EIO.pure ()
+      s ← EIO.lift (Scry.Repl.load f);
+      EIO.pure s
     | .none => EIO.pure ());
-  st ← Process.run wiz (List.append ["repl", "--prelude", "Scry.Repl"]
+  st ← Process.runWith wizPath (List.append ["repl", "--prelude", "Scry.Repl"]
     (List.append rootArgs rest)) SpawnOptions.default;
   EIO.pure (match st with | .exited n => n | _ => 1)
 
