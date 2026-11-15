@@ -1,0 +1,148 @@
+-- HDL pipelines as arrows (`import Hdl.Pipe`): a three-stage ALU pipeline written with
+-- the `|>>` notation, and a three-stage elastic (valid/ready) pipeline with stalls and a
+-- reset. Run by the `hdl` test group: the value simulation is compared with the netlist
+-- simulation, `Hdl.Sim`'s `simFast` (compiled, in `main`), and the emitted Verilog.
+import Hdl.Core
+import Hdl.Pipe
+import Hdl.Sim
+import IO
+
+def B8 : HwTy := HwTy.bits 8
+
+------------------------------------------------------------------------------------
+-- 1. The data path: a three-stage ALU pipeline, one register per stage.
+
+def alu3 : Pipe B8 B8 :=
+  Pipe.pipe "alu3" (
+    Pipe.stage "add" 0 (fun x => Hw.add x (Hw.lit 8 3)) |>>
+    Pipe.stage "mul" 0 (fun x => Hw.mul x (Hw.lit 8 5)) |>>
+    Pipe.stage "sub" 0 (fun x => Hw.sub x (Hw.lit 8 2)))
+
+-- the first values in, and the latency the arrow reports
+def xsP : List Nat := .cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 (.cons 6 (.cons 7 (.cons 8 .nil))))))))
+def aluOut : List Nat := Pipe.runPacked alu3 xsP
+
+def aluNetOk : Bool :=
+  Bool.and (Hdl.natsEq aluOut (Pipe.simNet .true alu3 xsP)) (Hdl.natsEq aluOut (Pipe.simNet .false alu3 xsP))
+
+def aluVerilog : String := Pipe.verilog "alu3" alu3
+
+-- the arrow's laws, for every pipeline and trace (the proofs are `Hdl.Core`'s)
+def pipeIdLeft {i o : HwTy} (p : Pipe i o) (xs : List (HwTy.El i)) :
+    Pipe.run (Pipe.seq Pipe.id p) xs = Pipe.run p xs := Pipe.run_seq_id_left p xs
+def pipeIdRight {i o : HwTy} (p : Pipe i o) (xs : List (HwTy.El i)) :
+    Pipe.run (Pipe.seq p Pipe.id) xs = Pipe.run p xs := Pipe.run_seq_id_right p xs
+def pipeAssoc {i a b c o : HwTy} (p : Pipe i a) (q : Pipe a b) (r : Pipe b o)
+    (xs : List (HwTy.El i)) :
+    Pipe.run (Pipe.seq (Pipe.seq p q) r) xs = Pipe.run (Pipe.seq p (Pipe.seq q r)) xs :=
+  @Pipe.run_seq_assoc i a b c o p q r xs
+def stageLatency {i o : HwTy} (name : String) (init : HwTy.El o) (f : Comb i o) :
+    (Pipe.stage name init f).latency = 1 := Pipe.stage_latency name init f
+
+#eval (((Pipe.stage "s" 0 (fun x => Hw.add x (Hw.lit 8 1))).latency,
+  (Pipe.seq (Pipe.reg B8 0) (Pipe.reg B8 0)).latency, (Pipe.par alu3 (Pipe.reg B8 0)).latency) : Nat × Nat × Nat)
+#eval aluOut
+#eval aluNetOk
+-- the notation prints back as written (round-trip)
+#check (fun (p q : Pipe B8 B8) => p |>> q)
+#check (fun (p q : Pipe B8 B8) => p *** q)
+#check (fun (p q : Pipe B8 B8) => p &> q)
+#check (fun (p : Pipe (HwTy.prod B8 B8) (HwTy.prod B8 B8)) (i : HwTy.El B8) => Pipe.loop p i)
+
+------------------------------------------------------------------------------------
+-- 2. The handshake path: three elastic stages. The input is (data, valid, out_ready);
+-- the output is (data, valid, in_ready).
+
+def fadd : Flow B8 B8 := Flow.stage "fadd" 0 (fun x => Hw.add x (Hw.lit 8 3))
+def fmul : Flow B8 B8 := Flow.stage "fmul" 0 (fun x => Hw.mul x (Hw.lit 8 5))
+def fsub : Flow B8 B8 := Flow.stage "fsub" 0 (fun x => Hw.sub x (Hw.lit 8 2))
+def flow3 : Flow B8 B8 := Flow.seq fadd (Flow.seq fmul fsub)
+
+def fin (d v r : Nat) : HwTy.El (FlowIn.code B8) :=
+  @Flow.inn B8 (BitVec.ofNat 8 d) (BitVec.ofNat 1 v) (BitVec.ofNat 1 r)
+def fout (o : HwTy.El (FlowOut.code B8)) : Nat × Nat × Nat :=
+  let x := FlowOut.unpack B8 o;
+  (BitVec.toNat x.out_data, BitVec.toNat x.out_valid, BitVec.toNat x.in_ready)
+
+-- throughput: valid every cycle, ready every cycle; the three registers delay by three
+def throughTrace : List (HwTy.El (FlowIn.code B8)) :=
+  Hdl.map (fun (k : Nat) => fin (10 + k) 1 1) xsP
+def throughOut : List (Nat × Nat × Nat) := Hdl.map fout (Flow.run flow3 throughTrace)
+def flowVerilog : String := Flow.verilog "flow3" flow3
+
+-- backpressure: a free-running source (it holds its value while the pipeline is not
+-- ready) feeding the three stages; the consumer is not ready in cycles 2-4
+def fcount : Flow (HwTy.bits 0) B8 := Flow.source 0 (fun x => Hw.add x (Hw.lit 8 1))
+def gen3 : Flow (HwTy.bits 0) B8 := Flow.seq fcount flow3
+def gin (v r : Nat) : HwTy.El (FlowIn.code (HwTy.bits 0)) :=
+  @Flow.inn (HwTy.bits 0) (BitVec.ofNat 0 0) (BitVec.ofNat 1 v) (BitVec.ofNat 1 r)
+def ks : List Nat := .cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 (.cons 6 (.cons 7
+  (.cons 8 (.cons 9 (.cons 10 (.cons 11 .nil)))))))))))
+def genTrace : List (HwTy.El (FlowIn.code (HwTy.bits 0))) :=
+  Hdl.map (fun (k : Nat) => gin 1 (match Nat.lt k 2 with
+    | .true => 1
+    | .false => (match Nat.lt k 5 with
+      | .true => 0
+      | .false => 1))) ks
+
+def genReady : List Nat :=
+  Hdl.map (fun (k : Nat) => match Nat.lt k 2 with
+    | .true => 1
+    | .false => (match Nat.lt k 5 with
+      | .true => 0
+      | .false => 1)) ks
+-- the transfers (valid and ready in the same cycle): no loss, no duplication, in order
+def transfers : List (Nat × Nat × Nat) → List Nat → List Nat
+  | .cons t ts, .cons r rs => (match Bool.and (Nat.beq t.2.1 1) (Nat.beq r 1) with
+    | .true => .cons t.1 (transfers ts rs)
+    | .false => transfers ts rs)
+  | _, _ => .nil
+def expectedData : List Nat := .cons 13 (.cons 18 (.cons 23 (.cons 28 (.cons 33 (.cons 38 (.cons 43 .nil))))))
+
+#eval ((Hdl.map (fun (t : Nat × Nat × Nat) => t.2.1) throughOut, Hdl.map (fun (t : Nat × Nat × Nat) => t.1) throughOut) : List Nat × List Nat)
+#eval ((Hdl.map (fun (t : Nat × Nat × Nat) => t.2.1) (Hdl.map fout (Flow.run gen3 genTrace)),
+  Hdl.map (fun (t : Nat × Nat × Nat) => t.1) (Hdl.map fout (Flow.run gen3 genTrace))) : List Nat × List Nat)
+#eval transfers (Hdl.map fout (Flow.run gen3 genTrace)) genReady
+#eval Hdl.natsEq (transfers (Hdl.map fout (Flow.run gen3 genTrace)) genReady) expectedData
+#eval Hdl.map (fun (t : Nat × Nat × Nat) => t.2.2) (Hdl.map fout (Flow.run gen3 genTrace))
+
+------------------------------------------------------------------------------------
+-- 3. Reset: `rst` clears the elastic registers (valid 0, data 0).
+
+def flow3R : Circuit (HwTy.prod (HwTy.named "rst" HwTy.bit) (FlowIn.code B8)) (FlowOut.code B8) :=
+  Circuit.withReset (Flow.toCircuit flow3)
+
+def rinput (rst d v r : Nat) : HwTy.El (HwTy.prod (HwTy.named "rst" HwTy.bit) (FlowIn.code B8)) :=
+  (BitVec.ofNat 1 rst, fin d v r)
+
+def resetTrace : List (HwTy.El (HwTy.prod (HwTy.named "rst" HwTy.bit) (FlowIn.code B8))) :=
+  .cons (rinput 1 99 1 1) (.cons (rinput 1 99 1 1) (.cons (rinput 0 30 1 1)
+    (.cons (rinput 0 31 1 1) (.cons (rinput 0 32 1 1) (.cons (rinput 0 33 1 1) .nil)))))
+
+def resetOut : List (Nat × Nat × Nat) := Hdl.map fout (Circuit.run flow3R resetTrace)
+
+#eval resetOut
+
+------------------------------------------------------------------------------------
+-- 4. The three simulations agree (compiled; `Array` is not available in `#eval`).
+
+def leavesEq : List (List Nat) → List (List Nat) → Bool
+  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
+  | .nil, .nil => .true
+  | _, _ => .false
+
+def yes (b : Bool) : String := match b with
+  | .true => "yes"
+  | .false => "NO"
+
+def main : IO Unit := do
+  let vA := Circuit.runLeaves alu3.circuit (Hdl.map (HwTy.unpack B8) xsP);
+  let fA := Circuit.simFast alu3.circuit (Hdl.map (HwTy.unpack B8) xsP);
+  let vF := Circuit.runLeaves (Flow.toCircuit flow3) throughTrace;
+  let fF := Circuit.simFast (Flow.toCircuit flow3) throughTrace;
+  IO.println ("alu3: simFast = run = netlist: " <+> yes (Bool.and (leavesEq fA vA)
+    (Bool.and (leavesEq fA (Circuit.simLeaves .true alu3.circuit (Hdl.map (HwTy.unpack B8) xsP)))
+      (leavesEq fA (Circuit.simLeaves .false alu3.circuit (Hdl.map (HwTy.unpack B8) xsP))))));
+  IO.println ("flow3: simFast = run = netlist: " <+> yes (Bool.and (leavesEq fF vF)
+    (Bool.and (leavesEq fF (Circuit.simLeaves .true (Flow.toCircuit flow3) throughTrace))
+      (leavesEq fF (Circuit.simLeaves .false (Flow.toCircuit flow3) throughTrace)))))

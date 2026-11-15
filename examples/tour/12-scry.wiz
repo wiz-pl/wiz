@@ -1,0 +1,16 @@
+-- The tour, section 12: taint analysis with scry (docs/tour.md).
+import Scry.Taint
+import Scry.TaintExamples
+
+-- Source, sanitiser and sink calls, in the small line format.
+def spec : Scry.TaintSpec :=
+  Scry.parseTaintSpec "source getenv\nsanitise sanitize\nsink system 0"
+
+-- `getenv` -> copy -> add -> `system`: one alert, at the sink call, argument 0.
+#eval Scry.alertsInFunc Scry.directFn spec
+
+-- `getenv` -> `sanitize` -> `system`: the sanitiser kills the flow, so no alert.
+#eval Scry.alertsInFunc Scry.sanitisedFn spec
+
+-- A finding carries the source -> sink path of its derivation.
+#eval List.map (fun f => f.path) (Scry.findings Scry.taintDirect spec)

@@ -120,6 +120,16 @@ licence, in `share/wiz/cc/LICENSES/lean4-LICENSES` with Lean's third-party licen
 not bundled). A checkout uses `cc` and the system's GMP unless you pass
 `--cc`/`--cflags`/`--ldflags` (the Nix dev shell writes them to `grail.local.wiz`).
 
+`wiz build FILE -o OUT --target wasm` is a third path (stage 8f,
+[08-backend/wasm.md](stages/08-backend/wasm.md)): it emits a binary WebAssembly module
+directly from the IR and does not invoke a C compiler, the C runtime or GMP. Values live
+in the module's linear memory; a small checked-in JS host (`web/wasm-host.mjs`) supplies
+big integers as `BigInt`s and prints the result. It runs IO-less `main`s over `Nat`/`Int`,
+closures, arrays and algebraic data; `wiz run FILE --target wasm` builds and runs it under
+Node. The subset boundary is checked at compile time and every module is structurally
+validated before it is written; the limits (no reference counting, no IO/FFI, no library
+target) are in that section. `--wasm` is the older spelling of the same target.
+
 **Licences of what is linked into your programs.** The Wiz Runtime Library Exception
 (COPYING.RUNTIME) lets you distribute programs compiled by Wiz under any terms, but it
 covers only Wiz's own runtime. Other libraries keep their licences:
@@ -149,7 +159,8 @@ code linked into `wiz`, `grail` and `tower` themselves; the licence texts are in
 
 `nix develop` gives the toolchain the tests need besides Lean (see `flake.nix`): GMP and
 LLVM's `llc` for the C and LLVM backends, Boehm GC for the self-hosted backend, a C
-compiler, and elan, which installs the Lean in `lean-toolchain`. Entered at the
+compiler, yosys for synthesis, Node for the Wasm modules, and elan, which installs the
+Lean in `lean-toolchain`. Entered at the
 repository root, it writes this machine's paths to the uncommitted `grail.local.wiz`,
 which grail and the test driver read (`Tests/Main.lean`; flags to `lake test -- …` win);
 `wiz` takes flags. Nothing reads environment variables.
@@ -174,7 +185,7 @@ Nix-built test driver (`packages.tests`), not `lake test`, and symlink the store
 and `grail` into the checkout's `.lake/build/bin`, which some cases and
 `scripts/trust-ledger.sh` name directly (the driver also carries the wrapped `wiz` and
 `grail` beside itself, which `Tests/Grail.lean` looks for). The dev shell (`nix develop`)
-is still what puts `cc`, `llc`, z3, cadical and Neovim on `PATH`, and it writes
+is still what puts `cc`, `llc`, z3, cadical, yosys, Node and Neovim on `PATH`, and it writes
 `grail.local.wiz` for the cases that compile C.
 
 The Nix build is about 353 MB for `wiz` (1.8 GB with its closure: Lean, GMP, Boehm GC,
@@ -205,12 +216,14 @@ the elan toolchain, so the setup action keeps the elan cache for those
   (including docs-only ones), and `CI result` requires it. No code block is exempt; a
   reviewed exception goes in the script's `ALLOW` list with a reason.
 * **The documentation site** (the `docs` and `deploy-docs` jobs): on a push to `master`
-  only (not a pull request, the weekly run or a manual run), `docs` builds the
-  standard library's pages with `wiz doc --lib` (source links to the commit) and the Wasm
-  module that makes their signatures interactive, and uploads them as the artifact
-  `wiz-docs` (3 days, for debugging). `deploy-docs` then publishes that artifact to
-  GitHub Pages. Neither job is a required check, so a Pages outage does not fail the
-  suite. See "Documentation site" below.
+  only (not a pull request, the weekly run or a manual run), `docs` builds the two Wasm
+  modules (the infoview's and the playground's), the standard library's pages with
+  `wiz doc --lib` (source links to the commit) into `doc-site/docs`, and the landing page
+  and the static playground around them (`web/build-site.sh`); `web/check-site.sh`
+  checks that `/`, `/docs/` and `/playground/` exist and that the landing page's local
+  links resolve. It uploads the tree as the artifact `wiz-docs` (3 days, for debugging),
+  and `deploy-docs` publishes it to GitHub Pages. Neither job is a required check, so a
+  Pages outage does not fail the suite. See "Documentation site" below.
 * **Trust ledger** (the `trust-ledger` job): `scripts/trust-ledger.sh --check` runs the
   `--trust-ledger` mode of the test driver (`Tests/Native.lean`) over `lib/` and the
   axiom-free examples, and compares the sources of trust it finds with
@@ -268,16 +281,56 @@ the elan toolchain, so the setup action keeps the elan cache for those
   limit cannot be split: `grail-selfhost` is one case of several minutes, and
   `scaling`'s sweep over `lib/` and `examples/` is one case of about 14 min (the
   `scaling` shard's other part holds its 26 shorter cases).
+* **Skips.** A green run must have run its cases: a skipped case is not a pass, and a
+  group that skipped wholesale means CI tested nothing there. The `CI result` job runs
+  `scripts/ci.py check-skips` on the shard logs and `--timings` files, and fails when
+  * a group's cases all skipped and the group is not in
+    `.github/skip-allowlist.json` (each entry names the group, the reason it may skip
+    for and an owner);
+  * a skip names a tool the dev shell must provide (`cc`, GMP, Boehm GC, yosys, Node,
+    nix, `llc`, z3, cadical, the `wiz`/`grail` binaries): that is a gap in `flake.nix`'s
+    `devShells.default`, not an environment skip, even for an allow-listed group. A tool
+    that is only needed on some machines (Icarus Verilog, an ARM toolchain) is excused by
+    the allow-list instead;
+  * a shard's unexplained skipped ratio is over 25% (`--max-ratio`).
+
+  Explained skips are reported in the summary (with the reason and the allow-list owner)
+  and give a warning annotation, never a failure. Skips that are not whole-group and stay
+  under the ratio also warn, so a few skipped cases are visible without blocking. The
+  step first runs `scripts/ci.py check-skips --self-test`, which checks the rule on
+  synthetic logs (all-skip, partial-skip, clean, an allow-listed group, a required tool)
+  without running the suite. Adding an allow-list entry needs a real reason: prefer
+  putting the tool in the dev shell.
 * **The exercise tree** is checked only for a release tag: the `exercise tree` job of
   `release.yml` generates it with `scripts/mkexercises.py` into a temporary directory
   and builds it (`lake build wiz grail tests`), and the tarball job (which publishes)
   waits for it. Pull requests and master pushes don't build it. It does not run the
   exercise tree's tests (almost all of them fail by design). See
   [exercises.md](exercises.md).
-* **The bootstrap fixpoint** (`scripts/fixpoint.sh`: the stage-1 C of the toolchain
-  equals its stage-2 C) runs weekly on `master`, or from "Run workflow" with
-  `fixpoint` ticked. It takes a long time; run it locally with `nix develop -c
-  scripts/fixpoint.sh`.
+* **The bootstrap fixpoint** (`scripts/fixpoint.sh`) runs **three stages** by default.
+  Stage 1 is the self-hosted compiler built by the Lean `wiz build`; it compiles the
+  whole toolchain to `self1.c`. Stage 2 is that C compiled with `selfhost/rt.c` and
+  Boehm GC, compiling the toolchain to `self2.c`, and stage 3 is `self2.c` compiled the
+  same way, compiling to `self3.c`. The script prints every stage's size and md5 and
+  marks each stage after the first PASS/FAIL against stage 1; all three C files must be
+  byte-identical (`--stages N` for more stages, 2 for the old two-stage check; `--keep`
+  keeps the C files and binaries, and `--compare-only` re-checks kept ones).
+  Stage 1 = stage 2 shows that the C emitted by the Lean-built compiler is reproduced by
+  the compiler that C builds. Stage 2 = stage 3 shows that reproduction is a fixed point
+  and not one coincident round. The comparison covers the generated `self.wiz` input in
+  the selected mode (`--rc` for reference counting): it shows that code generation is
+  deterministic and does not depend on whether the compiler came from Lean or from C. It
+  does not show that the C is correct (it is compiled with `-w`), that the compiled
+  toolchain behaves correctly (the test suite covers that), or anything about other
+  inputs, flags, C compilers or GC versions.
+  The self-compile peaks at 5.1–5.4 GiB (the three-stage run measured 5.4 GiB in stage 2
+  and 5.2 GiB in stage 3), so **reserve 6 GiB**; the script names that requirement if a
+  stage is killed for memory (exit 137). Run it locally with `nix develop -c
+  scripts/fixpoint.sh` and a 6 GiB reservation.
+  The weekly `fixpoint` job in `ci.yml` runs it on `ubuntu-latest`. The separate
+  `.github/workflows/fixpoint.yml` runs it nightly on `master` and from "Run workflow" on
+  the self-hosted runner named by `WIZ_RUNNER_HEAVY`; it checks for 6 GiB free, is skipped
+  when the variable is unset, and is not part of `CI result`.
 * **The Nix package** (the `build` job; the old separate `nix package` job is folded
   into it): `nix build .#wiz .#tests` builds `wiz` and `grail` with Lake in the Nix
   sandbox and nixpkgs' Lean (the flake checks that it is the version in `lean-toolchain`)
@@ -375,23 +428,56 @@ the elan toolchain, so the setup action keeps the elan cache for those
 
 ### Documentation site
 
-A push to `master` publishes the standard library's documentation from the `docs` job to
-GitHub Pages, at <https://wiz-pl.github.io/wiz/>. The tree is `wiz doc --lib`'s output
-plus the Wasm module (`web/build.sh`), exactly as the `wiz-docs` artifact holds it:
+A push to `master` publishes the site from the `docs` job to GitHub Pages, at
+<https://wiz-pl.github.io/wiz/>. The tree has three parts, and every link in it is
+relative, so the project-site prefix (or a custom domain root) works either way:
+
+| URL | what it is | built from |
+|---|---|---|
+| `/` | the landing page: introduction, features, quickstart | `web/landing/index.html`, `web/landing/landing.css` |
+| `/docs/` | the standard library's API documentation | `wiz doc --lib` |
+| `/playground/` | the static playground (stage 11ab) | `web/playground.*`, `web/build-playground.sh` |
+
+The `docs` job builds the two Wasm modules (`web/build.sh` for the documentation's
+interactive signatures, `web/build-playground.sh` for the playground), runs `wiz doc
+--lib -o doc-site/docs --web web/out` (source links to the commit), assembles the
+landing page and the playground with `web/build-site.sh doc-site web/out`, checks the
+result with `web/check-site.sh doc-site` (the three entry points exist and the landing
+page's local links resolve; no server), and uploads `doc-site` as the artifact
+`wiz-docs` (3 days, for debugging). `deploy-docs` then publishes that artifact.
 
 | path | what it is |
 |---|---|
-| `index.html` | the landing page: the documented modules and their summaries |
-| `A.B.html` | one page per module (its declarations, signatures, docs, source links) |
-| `A.B.json` | the same page's data, for the interactive signatures |
-| `search.js`, `scroll.css`, `scroll.js`, `tagged.js`, `scroll-search.js` | the site's scripts and styles |
-| `wiz-infoview.mjs`, `wiz-infoview.wasm` | the infoview's Wasm module, when `web/build.sh` built it |
+| `index.html`, `landing.css` | the landing page |
+| `docs/index.html` | the documentation index: the documented modules and their summaries |
+| `docs/api.html` | the API index: every module and declaration, with signatures and doc summaries |
+| `docs/api.json` | the same index as data, for tools |
+| `docs/A.B.html` | one page per module (its declarations, signatures, docs, source links) |
+| `docs/A.B.json` | the same page's data, for the interactive signatures |
+| `docs/search.js`, `docs/scroll.css`, `docs/scroll.js`, `docs/tagged.js`, `docs/scroll-search.js` | the documentation's scripts and styles (search covers names, doc comments and signatures) |
+| `docs/wiz-infoview.mjs`, `docs/wiz-infoview.wasm` | the infoview's Wasm module, when `web/build.sh` built it |
+| `playground/index.html` | the playground page |
+| `playground/playground.js`, `playground/playground.css`, `playground/playground-values.js` | the page's scripts and styles |
+| `playground/wiz-playground.mjs`, `playground/wiz-playground.wasm` | the playground's engine (the self-hosted checker), when `web/build-playground.sh` built it |
 
-All links in the pages are relative, so the `/wiz/` prefix of a project site works.
-`docs` and `deploy-docs` run only on `push` (`workflow_dispatch` runs do not publish).
-The artifact stays for 3 days for debugging; the site keeps the newest deployed tree
-until the next successful deployment, and `deploy-docs` serialises deployments
-(`concurrency: pages`, `cancel-in-progress: false`) so the site ends at the newest commit.
+To build the site locally from a checkout (after `nix develop` and `lake build wiz`):
+
+```sh
+sh web/build.sh web/out                         # the infoview module, scroll assets
+sh web/build-playground.sh web/out              # the playground module
+.lake/build/bin/wiz doc --lib -o doc-site/docs --web web/out
+sh web/build-site.sh doc-site web/out           # landing page and /playground/
+sh web/check-site.sh doc-site                   # the entry points and the links
+python3 -m http.server -d doc-site 8000         # then http://127.0.0.1:8000/
+```
+
+`web/build-playground.sh` compiles the self-hosted frontend to WebAssembly, so it is the
+slow part; without `emcc` on `PATH` the script runs Emscripten from nixpkgs. Without
+`--source-url`, the local documentation's source links are plain paths. `docs` and
+`deploy-docs` run only on `push` (`workflow_dispatch` runs do not publish). The artifact
+stays for 3 days for debugging; the site keeps the newest deployed tree until the next
+successful deployment, and `deploy-docs` serialises deployments (`concurrency: pages`,
+`cancel-in-progress: false`) so the site ends at the newest commit.
 
 **One-time repository setting.** Settings → Pages → Build and deployment → Source =
 "GitHub Actions". Without it `actions/configure-pages` has no site to configure and
@@ -415,10 +501,9 @@ the entire tree, so `deploy-docs` must stay the only Pages publisher. The perfor
 site (the `perf-site.yml` workflow when it lands) is designed to publish a
 self-contained dashboard; when it lands, it belongs *under* this deployment as
 `/perf/` — built into `doc-site/perf` before `upload-pages-artifact` — not in a second
-deploy job, which would replace the docs tree. Until then its own `deploy` job stays
-off (`PERF_SITE_DEPLOY` unset). Once `perf/` is there, link it from the site root (a
-step after `wiz doc` can add the link to its `index.html`, which is regenerated on every
-deploy).
+deploy job, which would replace the site. Until then its own `deploy` job stays
+off (`PERF_SITE_DEPLOY` unset). Once `perf/` is there, link it from the landing page
+(`web/landing/index.html`), which is a checked-in source file, not generated.
 
 To run Wiz without a checkout or a Lean toolchain, with the binaries from Cachix:
 

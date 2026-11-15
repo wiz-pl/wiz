@@ -1,0 +1,139 @@
+import Hdl.Bus
+/-!
+# Hdl.Wishbone
+
+A thin classic Wishbone B4 bridge for `Hdl.Bus` (`import Hdl.Wishbone`), in both
+directions over the existing `Bus.ReqW` valid/ready model. It is deliberately the
+single-transfer, non-pipelined Wishbone subset (`CYC`/`STB`/`ACK`/`ERR`), not a new
+protocol:
+
+* `Wishbone.busToWbC aw dw`: a `Bus.ReqW` master on a Wishbone slave. It maps
+  `valid` to `CYC` and `STB`, `we` to `WE`, `addr` to `ADR`, `wdata` to `DAT_W` and
+  `wstrb` to `SEL`; `ACK` (or `ERR`) is the bus answer, `DAT_R` is `rdata`, and `RTY`
+  is folded into `err` because the wiz bus has no retry. `STALL` is passed through in
+  the bundle but is not needed for this classic subset: a stalled slave simply does not
+  assert `ACK`, so the bus waits and the master holds the request.
+* `Wishbone.wbToBusC aw dw`: a Wishbone master on a `Bus.ReqW` slave. `CYC && STB` is
+  the bus `valid`, `WE`/`ADR`/`DAT_W`/`SEL` the payload, and the bus answer drives
+  `ACK`/`ERR`/`DAT_R`; `RTY` and `STALL` are low because the bus has no retry/stall
+  phase.
+
+Both directions are combinational, pass every byte strobe through unchanged, and never
+answer without a request. `examples/hdl-protocols.wiz` (test group `bus-protocol`)
+checks the stability, response-order and strobe laws on generated traces and compares
+the value simulation, `Netlist.simulate` and `Circuit.simFast`.
+
+Wishbone B4 is the OpenCores specification; `SEL` here is the per-byte select, as in
+Wishbone B4, so it lines up with `Bus.ReqW.wstrb`.
+-/
+
+/-- A classic Wishbone request: `cyc` is high for the whole transfer, `stb` for the
+request itself, `we` a write, `adr` the address, `dat` the write data and `sel` one
+bit per data byte. -/
+structure Wishbone.Req (aw dw : Nat) (r : HwTy → Type) where
+  cyc : r Bus.Bit
+  stb : r Bus.Bit
+  we : r Bus.Bit
+  adr : r (HwTy.bits aw)
+  dat : r (HwTy.bits dw)
+  sel : r (HwTy.bits (Nat.div dw 8))
+  deriving Bundle
+
+/-- A classic Wishbone response: `ack` accepts the transfer, `err` fails it, `rty`
+asks for a retry, `stall` asks the master to wait and `dat` is the read data. -/
+structure Wishbone.Resp (dw : Nat) (r : HwTy → Type) where
+  ack : r Bus.Bit
+  err : r Bus.Bit
+  rty : r Bus.Bit
+  stall : r Bus.Bit
+  dat : r (HwTy.bits dw)
+  deriving Bundle
+
+/-- A quiet Wishbone response. -/
+def Wishbone.noResp {r : HwTy → Type} [Hw r] {ω dw : Nat} : Wishbone.Resp dw r :=
+  Wishbone.Resp.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit dw 0)
+
+/-- A quiet Wishbone request. -/
+def Wishbone.noReq {r : HwTy → Type} [Hw r] {ω aw dw : Nat} : Wishbone.Req aw dw r :=
+  Wishbone.Req.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 1 0)
+    (Hw.lit aw 0) (Hw.lit dw 0) (Hw.lit (Nat.div dw 8) 0)
+
+------------------------------------------------------------------------------------
+-- Bus master -> Wishbone slave
+
+/-- The bridge's input: the bus request and the Wishbone slave's answer. -/
+structure Wishbone.In (aw dw : Nat) (r : HwTy → Type) where
+  req : Bus.ReqW aw dw r
+  slave : Wishbone.Resp dw r
+  deriving Bundle
+
+/-- The bridge's output: the Wishbone master signals and the bus answer. -/
+structure Wishbone.Out (aw dw : Nat) (r : HwTy → Type) where
+  req : Wishbone.Req aw dw r
+  resp : Bus.Resp dw r
+  deriving Bundle
+
+/-- The Wishbone signals for a bus request: `CYC`/`STB` are `valid`, and the rest map
+field by field. -/
+def Wishbone.reqOf {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (q : Bus.ReqW aw dw r) :
+    Wishbone.Req aw dw r :=
+  Wishbone.Req.mk q.valid q.valid q.we q.addr q.wdata q.wstrb
+
+/-- One cycle of the bus-to-Wishbone bridge: the request is forwarded combinationally
+and a Wishbone `ACK`/`ERR`/`RTY` answers the bus. `RTY` becomes `err` (no retry on the
+bus), and every response is gated by `valid`, so a stray slave response cannot answer a
+request that is not there. -/
+def Wishbone.busToWbComb (aw dw : Nat) {r : HwTy → Type} [Hw r]
+    (x : r (Wishbone.In.code aw dw)) : r (Wishbone.Out.code aw dw) :=
+  let i := Wishbone.In.unpack aw dw x;
+  let q := i.req;
+  let done := Hw.and q.valid (Hw.or (Hw.or i.slave.ack i.slave.err) i.slave.rty);
+  Wishbone.Out.pack aw dw (Wishbone.Out.mk
+    (Wishbone.reqOf q)
+    (Bus.Resp.mk done (Hw.and done (Hw.not q.we)) i.slave.dat
+      (Hw.and done (Hw.or i.slave.err i.slave.rty))))
+
+/-- The bus-to-Wishbone bridge as a circuit (no state). -/
+def Wishbone.busToWbC (aw dw : Nat) : Circuit (Wishbone.In.code aw dw) (Wishbone.Out.code aw dw) :=
+  Circuit.comb (Wishbone.busToWbComb aw dw)
+
+------------------------------------------------------------------------------------
+-- Wishbone master -> Bus slave
+
+/-- The bridge's input: the Wishbone master signals and the bus slave's answer. -/
+structure Wishbone.ToBusIn (aw dw : Nat) (r : HwTy → Type) where
+  wb : Wishbone.Req aw dw r
+  slave : Bus.Resp dw r
+  deriving Bundle
+
+/-- The bridge's output: the bus request and the Wishbone answer. -/
+structure Wishbone.ToBusOut (aw dw : Nat) (r : HwTy → Type) where
+  req : Bus.ReqW aw dw r
+  wb : Wishbone.Resp dw r
+  deriving Bundle
+
+/-- The bus request a Wishbone transfer makes: both `CYC` and `STB` (classic, not
+pipelined) are the bus `valid`. -/
+def Wishbone.toBusReq {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (p : Wishbone.Req aw dw r) :
+    Bus.ReqW aw dw r :=
+  Bus.ReqW.mk (Hw.and p.cyc p.stb) p.we p.adr p.dat p.sel
+
+/-- The Wishbone answer for a bus answer, gated by the request (`CYC && STB`). -/
+def Wishbone.respOfBus {r : HwTy → Type} [Hw r] {ω aw dw : Nat}
+    (p : Wishbone.Req aw dw r) (b : Bus.Resp dw r) : Wishbone.Resp dw r :=
+  let go := Hw.and p.cyc p.stb;
+  let ack := Hw.and go (Hw.or b.ready b.rvalid);
+  Wishbone.Resp.mk ack (Hw.and ack b.err) (Hw.lit 1 0) (Hw.lit 1 0) b.rdata
+
+/-- The combinational Wishbone-to-bus adapter. -/
+def Wishbone.wbToBusComb (aw dw : Nat) {r : HwTy → Type} [Hw r]
+    (x : r (Wishbone.ToBusIn.code aw dw)) : r (Wishbone.ToBusOut.code aw dw) :=
+  let i := Wishbone.ToBusIn.unpack aw dw x;
+  Wishbone.ToBusOut.pack aw dw (Wishbone.ToBusOut.mk
+    (Wishbone.toBusReq i.wb)
+    (Wishbone.respOfBus i.wb i.slave))
+
+/-- The Wishbone-to-bus adapter as a circuit (no state). -/
+def Wishbone.wbToBusC (aw dw : Nat) :
+    Circuit (Wishbone.ToBusIn.code aw dw) (Wishbone.ToBusOut.code aw dw) :=
+  Circuit.comb (Wishbone.wbToBusComb aw dw)

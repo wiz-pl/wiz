@@ -75,10 +75,16 @@ def BitVec.toNat_concat_zero_left {ω j n : Nat} (lo : BitVec n) :
       (Nat.add (Nat.shiftLeft t n) lo.toNat)).toNat) (BitVec.toNat_zero j))
     (Bits.wofNat_val (Nat.add j n) lo.toNat)
 
--- `BitVec.shl` in the same normal form as the barrel's stages
+-- `BitVec.shl` in the same normal form as the barrel's stages. The exponent is capped
+-- at the width (`Word.min k n`), so the lemma is total (at `k >= n` the value is `0`).
 def BitVec.shl_toNat (n k : Nat) (x : BitVec n) :
+    (BitVec.shl x k).toNat = Bits.low n (Nat.mul x.toNat (Nat.pow 2 (Word.min k n))) :=
+  Bits.wofNat_val n (Nat.mul x.toNat (Nat.pow 2 (Word.min k n)))
+-- ... and with the count itself for a shift below the width.
+def BitVec.shl_toNat_lt (n k : Nat) (x : BitVec n) (hk : Nat.lt k n = .true) :
     (BitVec.shl x k).toNat = Bits.low n (Nat.mul x.toNat (Nat.pow 2 k)) :=
-  Bits.wofNat_val n (Nat.mul x.toNat (Nat.pow 2 k))
+  Eq.trans (BitVec.shl_toNat n k x)
+    (Bits.congr (fun t => Bits.low n (Nat.mul x.toNat (Nat.pow 2 t))) (Word.min_left hk))
 
 -- `a / 1 = a` (the barrel's `slice 0 w x` is `x >> 0`)
 def Bits.div_one (a : Nat) : Nat.div a 1 = a :=

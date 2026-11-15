@@ -1,4 +1,5 @@
 import Hdl.Core
+import Hdl.Netlist
 import Trace
 /-!
 # Hdl.Temporal
@@ -326,3 +327,16 @@ def Mealy.always_settled_const {S I O : Type} (m : Mealy S I O) (p : S → I →
   Mealy.always_settled m p s0 xs F c early hF
     (fun (j : Nat) => Eq.substProp (fun (z : I) => (m c z).1 = c) (Eq.symm (rest j)) fixed)
     (fun (j : Nat) => Eq.substProp (fun (z : I) => p c z = .true) (Eq.symm (rest j)) late)
+
+--------------------------------------------------------------------------------
+-- The netlist simulation theorem as a temporal law (Hdl.Netlist)
+
+/-- Every finite prefix of a circuit's infinite trace is what its netlist simulates,
+when the circuit and the netlist are in the Mealy-core subset (`Circuit.Simulates`). -/
+def Circuit.Simulates.trace_take {ω i o : HwTy} {c : Circuit i o} {n : Netlist}
+    (h : Circuit.Simulates c n) (xs : Trace (HwTy.El i)) (k : Nat) :
+    Netlist.simulate n (Hdl.map (HwTy.leaves i) (Trace.take k xs)) =
+      Hdl.map (HwTy.leaves o) (Trace.take k (Circuit.trace c xs)) :=
+  Eq.trans (Circuit.Simulates.simulate_eq_run h (Trace.take k xs))
+    (Eq.congrArg (fun (ys : List (HwTy.El o)) => Hdl.map (HwTy.leaves o) ys)
+      (Circuit.run_take c k xs))
