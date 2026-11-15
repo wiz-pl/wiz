@@ -56,6 +56,10 @@ start. The REPL's own commands are `:type EXPR` (its type, like `#check`), `:loa
 (elaborate a file into the session: its definitions stay), `:run NAME` (build and run a
 definition, with `--llvm` for LLVM), `:reset`, `:help` and `:quit` (EOF exits too). A
 terminal gets a prompt; a pipe is a script, and its output is only the commands' output.
+`--prelude MODULE`/`-p MODULE` (repeatable, comma-separated) imports modules after the
+Prelude and before the first prompt, composing with `-I`; a missing module is a startup
+error. A tool that ships a prelude module can wrap the ordinary REPL instead of forking
+it (`scry repl` is `wiz repl -I <scry>/lib --prelude Scry.Repl`).
 
 Limits: input is one line per command (no continuation, history or line editing, and no
 completion or goal display — that is `wiz lsp` and the infoview). The REPL is a frontend

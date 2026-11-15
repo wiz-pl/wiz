@@ -742,6 +742,7 @@ refused command would have become.
   needs `fill`/alignment); a multi-line block comment keeps the indentation of its
   continuation lines; the self-hosted frontend has no formatter; and the LSP does not
   offer `textDocument/formatting` yet (`Wiz/Format.lean` is that plumbing's core).
+
 ## 11ab: a static playground
 
 `web/playground.html`: a Wiz playground that runs entirely in the page. A text area
@@ -810,24 +811,32 @@ page runs.
 
 ## 11ac: `wiz repl`
 
-* **`wiz repl [--llvm]`** (`Main.lean`, `replCmd`): reads one command per line on stdin
-  and elaborates it with the ordinary frontend (`runFrontend.go`) against the session's
-  accumulated `CommandState`. Definitions (and `syntax`, `macro`, `instance`, an
-  `import`) last for the rest of the session, and `#check`, `#eval`, `#print` print as
-  they do in a file. An error is printed and the session goes on with the next line. The
-  Prelude is imported at the start; `:reset` forgets every definition (it returns to that
-  state), `:help` lists the commands and `:quit` (or EOF) leaves. The base state stays
-  pristine, so an `import` is first checked in isolation, exactly as in a file, and then
-  elaborated into the session. With no terminal on stdin there is no prompt, so a pipe is
-  a script: one command per line. `:run NAME` builds and runs the definition `NAME` (C,
-  or LLVM with `--llvm`); `--llvm` affects only that. `--prelude MODULE` imports MODULE
-  after the Prelude (this is how `scry repl` gets `Scry.Repl`), `--script FILE` reads the
-  commands from a file instead of stdin, and `--init CMD` elaborates CMD before the first
-  input.
+* **`wiz repl [--llvm] [--prelude MODULE]`** (`Main.lean`, `replCmd`): reads one command
+  per line on stdin and elaborates it with the ordinary frontend (`runFrontend.go`)
+  against the session's accumulated `CommandState`. Definitions (and `syntax`, `macro`,
+  `instance`, an `import`) last for the rest of the session, and `#check`, `#eval`,
+  `#print` print as they do in a file. An error is printed and the session goes on with
+  the next line. The Prelude is imported at the start; `:reset` forgets every definition
+  (it returns to that state), `:help` lists the commands and `:quit` (or EOF) leaves. The
+  base state stays pristine, so an `import` is first checked in isolation, exactly as in
+  a file, and then elaborated into the session. With no terminal on stdin there is no
+  prompt, so a pipe is a script: one command per line. `:run NAME` builds and runs the
+  definition `NAME` (C, or LLVM with `--llvm`; `--target llvm` is the same flag);
+  `--llvm` affects only that. `--script FILE` reads the commands from FILE instead of
+  stdin (one per line; for tests and CI), and `--init CMD` (repeatable) runs CMD before
+  the first input.
 
   `:type EXPR` prints `EXPR`'s type (it is `#check EXPR` in the session), and
   `:load FILE` elaborates a file's commands into the session, so its definitions stay in
   scope; messages from the file carry its path and positions.
+
+  `--prelude MODULE` (also `-p MODULE`, `--prelude=MODULE`; repeatable and
+  comma-separated) imports each module **after** the Prelude and before the first prompt,
+  exactly as an `import` line would; it composes with `-I` (`wiz repl -I src --prelude
+  Scry.Repl`). A module that does not resolve is reported at startup and the REPL exits 2
+  instead of failing on the first input. That is how a tool becomes "the ordinary Wiz REPL
+  with an extra prelude" rather than forking the loop: it ships a prelude module, and e.g.
+  `scry repl` is `wiz repl -I <scry>/lib --prelude Scry.Repl`.
 
 * **Limits.** Input is one line per command (`IO.FS.Stream.getLine`): no continuation
   for a definition that spans lines, no readline (history, line editing or completion),

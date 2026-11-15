@@ -53,6 +53,13 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   with the same 8.1 MiB peak where the old allocator would have needed 7.8 GiB. Freeing is
   iterative (through the dead object's own header), so a long chain does not recurse on
   the engine's stack. `scripts/wasm-peak.mjs` reports a module's peak and time.
+* `wiz repl` (11ac): one command per line into one persistent frontend session
+  (definitions, `syntax`, `macro`, `instance` and `import` stay in scope), with `:type`,
+  `:load`, `:run` (C, or LLVM with `--llvm`), `:reset`, `:help` and `:quit`; a pipe is a
+  script with no prompt. `--prelude MODULE`/`-p` (repeatable, comma-separated) imports
+  modules after the Prelude, so a tool can ship a prelude and wrap the ordinary REPL. The
+  test wrapper is `wiz test-driver` (the old `wiz test` name is left for the single-file
+  form, 11ah).
 
 ## [0.1.0] - unreleased (draft)
 
