@@ -7,12 +7,13 @@
 --   wiz-selfhost run FILE [ARG…]       compile `main` and run it (also `eval`)
 --   wiz-selfhost version | help
 --   options: -I DIR (module root, repeatable), -o OUT, --cache DIR, --no-cache,
---            -v (cache hits/misses), --types (print each declaration's type),
+--            --cache-verify off|warn|strict, --target c (the backend the host names;
+--            llvm/wasm are C5), -v (cache hits/misses), --types (each declaration's type),
 --            --cc, --rt, --cflags, --ldflags (the C toolchain for `run`),
 --            --rc | --rc-owned | --gc | --lib | --no-main | --header (the backend),
 --            --version, -h | --help
---   exit codes: 0 ok, 1 user error (no file, the frontend's errors, cc, the program),
---               2 usage (unknown command or option, missing argument)
+--   exit codes: 0 ok, 1 user error (no file, the frontend's errors, cc, the program,
+--               a bad `--target`), 2 usage (unknown command or option, missing argument)
 --
 -- Without a subcommand it is the tool it was: `input.wiz` in the working directory to
 -- standard output (the fixpoint and the selfhost tests use that), and the first argument
@@ -42,6 +43,9 @@
 -- ------------------------------------------------------------------------------------
 -- Options
 
+-- `verify` is `--cache-verify off|warn|strict`, the Lean-hosted `wiz`'s flag (D5); the
+-- driver's cache has no manifests, so `strict` never trusts an entry (see `cacheRead`).
+-- `target` is `--target c`, the only backend the self-hosted code generator has (C5).
 structure Opts where
   roots : List String
   cache : Option String
@@ -53,11 +57,14 @@ structure Opts where
   cflags : List String
   ldflags : List String
   backend : List String
+  verify : String
+  target : Option String
 
 -- (the cache directory is `$HOME/.cache/wiz` unless `--cache` says otherwise; the
--- `.wiz-cache` here is the fallback for a process without `HOME`)
+-- `.cache/wiz` here is the fallback for a process without `HOME`, as the host's is)
 def optsDefault : Opts :=
-  Opts.mk .nil (.some ".wiz-cache") .none .false .false "cc" "selfhost" .nil .nil .nil
+  Opts.mk .nil (.some ".cache/wiz") .none .false .false "cc" "selfhost" .nil .nil .nil
+    "warn" .none
 
 -- ------------------------------------------------------------------------------------
 -- The file system (whole-file read and write, directories; `access` is `Backend.wiz`'s
@@ -73,10 +80,11 @@ extern "rename" (header := "stdio.h") cRename : String → String → IO Nat
 extern "system" (header := "stdlib.h") cSystem : String → IO Nat
 
 -- the default cache directory: `$HOME/.cache/wiz` (the Lean-hosted toolchain's), or
--- `.wiz-cache` in the working directory when there is no `HOME`
+-- `./.cache/wiz` in the working directory when there is no `HOME` (the host reads
+-- `$HOME` with `.` as its default too: `Main.lean`)
 def defaultCache : IO String :=
   IO.bind (cGetenv "HOME") (fun home => IO.pure (match strEq home "" with
-    | .true => ".wiz-cache"
+    | .true => "./.cache/wiz"
     | .false => String.append home "/.cache/wiz"))
 
 def pathExists (p : String) : IO Bool :=
@@ -631,13 +639,22 @@ def entryOf (text : String) : Option Cached := match splitFirstLine text with
 def someCached (c : Cached) : IO (Option Cached) := IO.pure (.some c)
 def noneCached : IO (Option Cached) := IO.pure (.none : Option Cached)
 
+-- `--cache-verify strict` (`require` is the host's synonym): only an entry listed in an
+-- output manifest is used. The driver's cache has no manifests (D5), so strict is always
+-- a miss; the host, which writes manifests, has a warm hit. The output is the same either
+-- way; only the work is not saved here. `off` and `warn` (the default) read the entry.
+def strictVerify (o : Opts) : Bool :=
+  Bool.or (strEq o.verify "strict") (strEq o.verify "require")
+
 def cacheRead (o : Opts) (key ext : String) : IO (Option Cached) := match o.cache with
   | .none => noneCached
-  | .some dir => IO.bind (readIf (cachePath dir key ext)) (fun t => match t with
-    | .none => noneCached
-    | .some text => match entryOf text with
+  | .some dir => match strictVerify o with
+    | .true => noneCached
+    | .false => IO.bind (readIf (cachePath dir key ext)) (fun t => match t with
       | .none => noneCached
-      | .some c => someCached c)
+      | .some text => match entryOf text with
+        | .none => noneCached
+        | .some c => someCached c)
 
 def cacheWriteDo (dir key ext : String) (status : Nat) (payload : String) : IO Bool := do
   ensureDir dir;
@@ -657,7 +674,11 @@ def cacheWrite (o : Opts) (key ext : String) (status : Nat) (payload : String) :
 
 inductive Arg where
   | ok (o : Opts) (file : String) (extra : List String)
+  -- a usage error: the message, then the usage hint, exit 2 (the host's `_` case)
   | err (msg : String)
+  -- the host's `--target`/`--cache-verify` errors inside its `take*` helpers: the
+  -- message alone (no usage), exit 1
+  | fail (msg : String)
   | version
   | help
 
@@ -670,6 +691,27 @@ inductive Kind where
 def isBackendFlag (a : String) : Bool :=
   Bool.or (strEq a "--rc") (Bool.or (strEq a "--rc-owned") (Bool.or (strEq a "--gc")
     (Bool.or (strEq a "--lib") (Bool.or (strEq a "--no-main") (strEq a "--header")))))
+
+-- a word in a list
+def listHas (s : String) : List String → Bool
+  | .nil => .false
+  | .cons x rest => match strEq s x with
+    | .true => .true
+    | .false => listHas s rest
+
+-- `--target`: the host's names are c, llvm and wasm; the self-hosted backend emits C
+-- only (C5), so `c` is the one it can select
+def targetModes : List String := .cons "c" (.cons "llvm" (.cons "wasm" .nil))
+
+def targetOk (t : String) : Bool := strEq t "c"
+def targetKnown (t : String) : Bool := listHas t targetModes
+
+-- `--cache-verify`: the host's modes (`Cache.VerifyMode.ofString?`; `require` is strict)
+def verifyOk (m : String) : Bool :=
+  Bool.or (strEq m "off") (Bool.or (strEq m "warn") (Bool.or (strEq m "strict") (strEq m "require")))
+
+def verifyErr (m : String) : String :=
+  String.append "--cache-verify: unknown mode " (String.append m " (off, warn, strict)")
 
 -- options may come before or after FILE; after FILE, a non-option is a program
 -- argument (`run FILE ARG…`), and `--` makes everything after it an argument.
@@ -726,13 +768,32 @@ partial def parseOptsGo : List String → Opts → Option String → List String
                             | .true => match rest with
                               | .nil => .err "unknown flag: --ldflags"
                               | .cons f r2 => parseOptsGo r2 { o with ldflags := List.append o.ldflags (singleton f) } file extra
-                            | .false => match isBackendFlag a with
-                              | .true => parseOptsGo rest { o with backend := List.append o.backend (singleton a) } file extra
-                              | .false => match strStarts "-" a with
-                                | .true => .err (String.append "unknown flag: " a)
-                                | .false => match file with
-                                  | .none => parseOptsGo rest o (.some a) extra
-                                  | .some _ => parseOptsGo rest o file (.cons a extra)
+                            -- (the host's `takeTarget` messages and exit 1)
+                            | .false => match strEq a "--target" with
+                              | .true => match rest with
+                                | .nil => .fail "--target needs c, llvm or wasm"
+                                | .cons t r2 => match targetOk t with
+                                  | .true => parseOptsGo r2 { o with target := .some t } file extra
+                                  | .false => match targetKnown t with
+                                    | .true => .fail (String.append "unsupported target " (String.append t ": the self-hosted backend emits C only (C5)"))
+                                    | .false => .fail (String.append "unknown target " (String.append t " (choose c, llvm or wasm)"))
+                              | .false => match strEq a "--cache-verify" with
+                                | .true => match rest with
+                                  | .nil => .err "unknown flag: --cache-verify"
+                                  | .cons m r2 => match verifyOk m with
+                                    | .true => parseOptsGo r2 { o with verify := m } file extra
+                                    | .false => .err (verifyErr m)
+                                | .false => match stripPrefix "--cache-verify=" a with
+                                  | .some m => match verifyOk m with
+                                    | .true => parseOptsGo rest { o with verify := m } file extra
+                                    | .false => .err (verifyErr m)
+                                  | .none => match isBackendFlag a with
+                                    | .true => parseOptsGo rest { o with backend := List.append o.backend (singleton a) } file extra
+                                    | .false => match strStarts "-" a with
+                                      | .true => .err (String.append "unknown flag: " a)
+                                      | .false => match file with
+                                        | .none => parseOptsGo rest o (.some a) extra
+                                        | .some _ => parseOptsGo rest o file (.cons a extra)
 
 def parseOpts (args : List String) (o : Opts) : Arg := parseOptsGo args o .none .nil
 
@@ -750,7 +811,9 @@ def usageText : String :=
   "  in the working directory),\n" +++
   "  -o OUT (the C `run` compiles, kept), --cache DIR (default ~/.cache/wiz, as\n" +++
   "  the Lean-hosted `wiz`'s),\n" +++
-  "  --no-cache, -v (cache hits and misses), --types (each declaration's type),\n" +++
+  "  --no-cache, --cache-verify off|warn|strict (the driver's cache has no output\n" +++
+  "  manifests yet, so strict never trusts an entry), --target c (the only backend),\n" +++
+  "  -v (cache hits and misses), --types (each declaration's type),\n" +++
   "  --cc CMD, --rt DIR (the selfhost runtime, default selfhost), --cflags FLAGS,\n" +++
   "  --ldflags FLAGS; backend: --rc, --rc-owned, --gc, --lib, --no-main, --header\n" +++
   "\n" +++
@@ -761,7 +824,7 @@ def versionText : String := String.append "wiz-selfhost " wizVersion
 -- the Lean-hosted `wiz`'s usage errors: the message, then the usage, exit 2
 def usageError (msg : String) : IO Unit := do
   IO.ePrintln msg;
-  IO.ePrintln "usage: wiz-selfhost help";
+  IO.ePrintln usageText;
   Process.exit 2
 
 -- ------------------------------------------------------------------------------------
@@ -967,6 +1030,8 @@ def parseThen (k : Kind) (args : List String) : IO Unit := do
   match parseOpts args { optsDefault with cache := .some cache } with
   | .version => IO.println versionText
   | .help => IO.println usageText
+  -- (the host's `takeTarget`/`--cache-verify` mode errors print the message alone, exit 1)
+  | .fail msg => do IO.ePrintln msg; Process.exit 1
   -- (the Lean-hosted `wiz` answers a command without its FILE or with extra arguments
   -- with `unknown command: …`; its flags are positional, and it has no `-o` for check)
   | .err msg => match strEq msg "no FILE" with
@@ -994,11 +1059,14 @@ def parseThen (k : Kind) (args : List String) : IO Unit := do
 -- take a value, the rest do not)
 def takesValueFlag (a : String) : Bool :=
   Bool.or (strEq a "-I") (Bool.or (strEq a "--include") (Bool.or (strEq a "-o")
-    (Bool.or (strEq a "--cache") (Bool.or (strEq a "--cc") (Bool.or (strEq a "--rt")
-      (Bool.or (strEq a "--cflags") (strEq a "--ldflags")))))))
+    (Bool.or (strEq a "--cache") (Bool.or (strEq a "--cache-verify") (Bool.or (strEq a "--target")
+      (Bool.or (strEq a "--cc") (Bool.or (strEq a "--rt")
+        (Bool.or (strEq a "--cflags") (strEq a "--ldflags")))))))))
 
 def knownTopFlag (a : String) : Bool :=
-  Bool.or (takesValueFlag a) (Bool.or (strEq a "--no-cache") (Bool.or (strEq a "-v")
+  match stripPrefix "--cache-verify=" a with
+  | .some _ => .true
+  | .none => Bool.or (takesValueFlag a) (Bool.or (strEq a "--no-cache") (Bool.or (strEq a "-v")
     (Bool.or (strEq a "--verbose") (strEq a "--types"))))
 
 inductive LeadSplit where
@@ -1042,9 +1110,19 @@ def dispatch : List String → IO Unit
       -- host's usage, exit 0)
       | .nil => match unknownTopFlag lead with
         | .some f => usageError (String.append "unknown flag: " f)
-        | .none => match hasBackendFlag lead with
-          | .true => legacyCmd lead
-          | .false => IO.println usageText
+        -- (flags alone: the host still validates `--cache-verify MODE` before its usage,
+        -- and `--target`'s errors come from `takeTarget`; a valid flag set is the usage,
+        -- exit 0, as the host's)
+        | .none => match parseOpts lead optsDefault with
+          | .err msg => match strEq msg "no FILE" with
+            | .true => match hasBackendFlag lead with
+              | .true => legacyCmd lead
+              | .false => IO.println usageText
+            | .false => usageError msg
+          | .fail msg => do IO.ePrintln msg; Process.exit 1
+          | .ok _ _ _ => IO.println usageText
+          | .version => IO.println versionText
+          | .help => IO.println usageText
       | .cons b rest3 => match strEq b "check" with
         | .true => parseThen .check (List.append lead rest3)
         | .false => match strEq b "build" with
