@@ -1,4 +1,5 @@
-⚠ [11/110] Replayed Wiz.Core.Templates
+light: this looks like a build — 100 of 177 memcg kills came from builds under the 2G cap; use heavy --mem 5G
+⚠ [18/238] Replayed Wiz.Core.Templates
 warning: Wiz/Core/Templates.lean:82:6: Variable name `tyL` is not explicitly referenced.
 
 Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
@@ -17,24 +18,24 @@ Hint: The binding can be removed (if unused) or named `_` (if used implicitly). 
   [apply] _tyL
 
 Note: This linter can be disabled with `set_option linter.unusedVariables false`
-⚠ [39/110] Replayed Wiz.Elab.ProcMacro
+⚠ [44/238] Replayed Wiz.Elab.ProcMacro
 warning: Wiz/Elab/ProcMacro.lean:244:3: `String.mk` has been deprecated: Use `String.ofList` instead
 
 Hint: Replace the deprecated name:
   String.m̵k̵o̲f̲L̲i̲s̲t̲
-⚠ [42/110] Replayed Wiz.Smt.Translate
+⚠ [47/238] Replayed Wiz.Smt.Translate
 warning: Wiz/Smt/Translate.lean:70:11: `String.mk` has been deprecated: Use `String.ofList` instead
 
 Hint: Replace the deprecated name:
   String.m̵k̵o̲f̲L̲i̲s̲t̲
-⚠ [44/110] Replayed Wiz.Elab.Term
+⚠ [49/238] Replayed Wiz.Elab.Term
 warning: Wiz/Elab/Term.lean:434:24: Variable name `args` is not explicitly referenced.
 
 Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
   [apply] _args
 
 Note: This linter can be disabled with `set_option linter.unusedVariables false`
-⚠ [47/110] Replayed Wiz.Elab.Recursor
+⚠ [52/238] Replayed Wiz.Elab.Recursor
 warning: Wiz/Elab/Recursor.lean:88:11: Variable name `h` is not explicitly referenced.
 
 Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
@@ -47,7 +48,7 @@ Hint: The binding can be removed (if unused) or named `_` (if used implicitly). 
   [apply] _tele0
 
 Note: This linter can be disabled with `set_option linter.unusedVariables false`
-⚠ [70/110] Replayed Wiz.Compiler.C
+⚠ [75/238] Replayed Wiz.Compiler.C
 warning: Wiz/Compiler/C.lean:23:42: `List.asString` has been deprecated: Use `String.ofList` instead
 
 Note: The updated constant is in a different namespace. Dot notation may need to be changed (e.g., from `x.asString` to `String.ofList x`).
@@ -57,13 +58,28 @@ Hint: The binding can be removed (if unused) or named `_` (if used implicitly). 
   [apply] _cb
 
 Note: This linter can be disabled with `set_option linter.unusedVariables false`
-✔ [229/469] Built Wiz.Elab.Recursor:c.o (7.6s)
-✖ [230/469] Building Wiz.Elab.Command (21s)
-trace: .> LEAN_PATH=/workspace/wt/host-indpro/.lake/build/lib/lean /home/reuben/.elan/toolchains/leanprover--lean4---v4.35.0/bin/lean /workspace/wt/host-indpro/Wiz/Elab/Command.lean -o /workspace/wt/host-indpro/.lake/build/lib/lean/Wiz/Elab/Command.olean -i /workspace/wt/host-indpro/.lake/build/lib/lean/Wiz/Elab/Command.ilean -c /workspace/wt/host-indpro/.lake/build/ir/Wiz/Elab/Command.c --setup /workspace/wt/host-indpro/.lake/build/ir/Wiz/Elab/Command.setup.json --json
-info: stderr:
-permission denied (error code: 13)
-  file: /workspace/wt/host-indpro/.lake/build/lib/lean/Wiz/Elab/Command.ilean
-error: Lean exited with code 1
-Some required targets logged failures:
-- Wiz.Elab.Command
-error: build failed
+⚠ [84/238] Replayed Wiz.Compiler.Build
+warning: Wiz/Compiler/Build.lean:252:39: `String.mk` has been deprecated: Use `String.ofList` instead
+
+Hint: Replace the deprecated name:
+  String.m̵k̵o̲f̲L̲i̲s̲t̲
+⚠ [85/238] Replayed Wiz.Query
+warning: Wiz/Query.lean:44:11: Variable name `cmd` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _cmd
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [127/238] Replayed Tests.Groups.Hdl
+warning: Tests/Groups/Hdl.lean:58:49: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+warning: Tests/Groups/Hdl.lean:100:49: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+warning: Tests/Groups/Hdl.lean:118:48: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+warning: Tests/Groups/Hdl.lean:171:49: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+warning: Tests/Groups/Hdl.lean:383:41: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+warning: Tests/Groups/Hdl.lean:396:53: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+⚠ [228/238] Replayed Tests.Scaling
+warning: Tests/Scaling.lean:556:105: `String.mk` has been deprecated: Use `String.ofList` instead
+
+Hint: Replace the deprecated name:
+  String.m̵k̵o̲f̲L̲i̲s̲t̲
+Build completed successfully (238 jobs).
