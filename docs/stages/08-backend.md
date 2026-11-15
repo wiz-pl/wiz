@@ -28,7 +28,7 @@
 
 ## 8b: C
 
-```wiz no-check
+```
 $ wiz run fact.wiz        # def main : Nat := fact 30
 265252859812191058636308480000000
 ```
