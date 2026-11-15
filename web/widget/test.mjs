@@ -15,12 +15,26 @@ import { WidgetView, MIME, TARGET } from "../../tools/jupyter/static/widget.js";
 import { renderElement, commById } from "../../tools/jupyter/static/loader.js";
 
 const fixture = JSON.parse(readFileSync(process.argv[2], "utf8"));
+
+// The exact VDOM for one widget of each kind. This is the golden: a change to a
+// constructor, an attribute name or the escaping shows up here first.
+const GOLDEN = {
+  sliderHtml: `<div class="wiz-widgets" data-wiz-widget-root=""><span class="wiz-widget wiz-slider" data-wiz-widget="gain" data-wiz-widget-kind="slider" data-wiz-widget-event="input" data-wiz-widget-value="0.50"><input type="range" min="0" max="1" step="0.05" value="0.50" data-wiz-widget-input="gain"><output class="wiz-widget-value">0.50</output></span></div>`,
+  buttonHtml: `<div class="wiz-widgets" data-wiz-widget-root=""><button class="wiz-widget wiz-button" data-wiz-widget="play" data-wiz-widget-kind="button" data-wiz-widget-event="click" data-wiz-widget-value="play" type="button">Play</button></div>`,
+  textHtml: `<div class="wiz-widgets" data-wiz-widget-root=""><span class="wiz-widget wiz-text" data-wiz-widget="name" data-wiz-widget-kind="text" data-wiz-widget-event="input" data-wiz-widget-value="ada"><input type="text" value="ada" data-wiz-widget-input="name"><output class="wiz-widget-value">ada</output></span></div>`,
+  plotHtml: `<div class="wiz-widgets" data-wiz-widget-root=""><div class="wiz-widget wiz-plot" data-wiz-widget="trace" data-wiz-widget-kind="plot" data-wiz-widget-event="click" data-wiz-widget-value="" data-wiz-widget-data="{&quot;points&quot;:[1,2,3]}"><div class="wiz-plot-canvas"></div><output class="wiz-widget-value"></output></div></div>`,
+};
+
 let checks = 0;
 function ok(name, fn) {
   fn();
   checks += 1;
   console.log("ok: " + name);
 }
+
+ok("golden: the VDOM of each widget kind is exactly this HTML", () => {
+  for (const key of Object.keys(GOLDEN)) assert.equal(fixture[key], GOLDEN[key], key);
+});
 
 function applied(html, patches) {
   const root = new DocumentFragment();
