@@ -106,9 +106,25 @@ such λ (`bodyCheckOnly`/`funBodyCheckOnly`) is **postponed** as a λ with an un
 already was (`funDomMeta`), so it is checked by `resolvePosts` *after* `appArgsT` unifies
 the result type with the expected one. The bind's body then sees `IO Unit`, not `IO ?B`.
 
+Minimal repro (it needs a branch whose *arguments* need the result type; an `if` whose
+branches are applications like `IO.println …` worked before, because they solve `?B`):
+
+```
+def g (n : Nat) : IO Nat := IO.pure n
+def h1 (c : Bool) : IO (Option Nat) := do
+  x ← g 3;
+  if c then IO.pure (.some x) else IO.pure .none
+```
+
+Before: `error: could not elaborate a constructor argument` (no type for the `.none`;
+the `drain` of the `match`'s leaf cannot wait for the bind's result type). After:
+`h1 : (x0 : Bool) → (IO (Option Nat))`. The same with `match x with` and with
+`IO.pure (.cons x .nil)`; the `do`-in-a-branch form (`if c then (do …) else …`) too.
+
 So `do x ← f; if c then a else b` and `do x ← f; match x with …` elaborate, and the
-loader's three helpers are one function each again. Cases in `=selfhost`: the reported
-types of the four shapes (see "a `match`/`if` as the body of a `do`/`IO.bind` lambda"),
-the verdicts pinned against the Lean frontend (including an `if` whose branches differ in
-type, rejected by both), and a differential that compiles a `do`-with-`match` program with
-both compilers and compares its output.
+loader's three helpers are one function each again. Cases in `=selfhost` (146 passed, 0
+failed): the reported types of the shapes (see "a `match`/`if` as the body of a
+`do`/`IO.bind` lambda"), the verdicts pinned against the Lean frontend (including an `if`
+whose branches differ in type, rejected by both), and a differential that compiles a
+`do`-with-`match` program with both compilers and compares its output. The self-check
+(case `#98`) and the fixpoint compile `Frontend.wiz` with the new form in it.
