@@ -1,0 +1,14 @@
+-- expect: accept
+inductive Nat where
+  | zero
+  | succ (n : Nat)
+
+coinductive Stream (A : Type) where
+  head : A
+  tail : Stream A
+
+def repeat {A : Type} (a : A) : Stream A
+  | .head => a
+  | .tail => repeat a
+
+def t : Nat := (repeat Nat.zero).head

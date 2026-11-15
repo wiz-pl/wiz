@@ -1656,7 +1656,10 @@ partial def inferTuple (ctx : LocalCtx R) (items : List Syntax) : ElabM R (Term 
     let g ← getGlobals
     -- the second component's type, weakened under the Σ binder
     let bTerm := quote g (ctx.lvl + 1) bty
-    return (.pair a b, ctx.sortVal g (.sigma "_" (.qlit QuantitySyntax.explicitDefault) aty (.mk ctx.env bTerm) .hole))
+    let ty := ctx.sortVal g (.sigma "_" (.qlit QuantitySyntax.explicitDefault) aty (.mk ctx.env bTerm) .hole)
+    -- annotate: the kernel can't infer the type of a bare pair (e.g. `(a, b).1`), as
+    -- for a bare lambda
+    return (.ann (.pair a b) (quote g ctx.lvl ty), ty)
 
 /-- `let q (x₁, x₂, …, xₙ) := e; body` (n ≥ 3) as right-nested pairs:
 `let q (x₁, r₁) := e; let q (x₂, r₂) := r₁; …; let q (xₙ₋₁, xₙ) := rₙ₋₂; body`, with
@@ -3191,6 +3194,10 @@ partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Ela
   let goal ← evalIn ctx' goalTm
   if let some x := lvls.head? then recordMatch stx.info alts clauses ctx'.types[ctx'.lvl - x - 1]! ctx'.types.reverse.toArray
   let body ← compileMatch ctx' lvls clauses goal none true
+  -- checking the branches may solve the goal (a metavariable, in inference mode): zonk
+  -- it, so the motive's `Π` gets its sort (`Sorts.type` cannot compute the sort of an
+  -- unsolved metavariable, and the kernel rejects a `Π`/`Σ` without its sorts)
+  goalTm := ← zonk ctx'.lvl goalTm
   let lam := (binders.toList.map (·.1)).foldr .lam body
   -- (the `i`-th scrutinee's type is under the `i` binders before it)
   let piTy := (binders.toList.zip linearScruts.toList).foldr (fun ((n, A), lin) acc =>

@@ -1,0 +1,15 @@
+-- expect: accept
+inductive Nat where
+  | zero
+  | succ (n : Nat)
+
+def id.{u} {A : Type u} (x : A) : A := x
+
+def apply {A B : Type} (f : A → B) (a : A) : B := f a
+
+def t1 : Nat := @id Nat Nat.zero
+def t2 : Nat := id (A := Nat) Nat.zero
+def t3 : Nat := id Nat.zero
+def t4 : Nat := apply (fun x => x) Nat.zero
+def t5 : Nat := apply (A := Nat) (B := Nat) (fun x => x) Nat.zero
+def t6 : Nat := @apply Nat Nat (fun x => x) Nat.zero

@@ -1,0 +1,8 @@
+-- expect: accept
+def idL.{u} (A : Type u) (a : A) : A := a
+
+def pairOf.{u, v} (A : Type u) (B : Type v) (a : A) (b : B) : A × B := (a, b)
+
+def piSort.{u, v} (A : Type u) (B : Type v) : Type (max u v) := A → B
+
+def higher.{u} (A : Type u) : Type (u + 1) := A → Type u

@@ -1,0 +1,13 @@
+-- expect: accept
+-- The same, where the match's goal is a structure pattern's `let` (which compiles to a
+-- `match`): `let ⟨a, b⟩ := p; b` inferred inside a tuple component.
+inductive Nat where
+  | zero
+  | succ (n : Nat)
+
+structure Pair where
+  fst : Nat
+  snd : Nat
+
+def t : Nat :=
+  ((let ⟨a, b⟩ := (⟨Nat.zero, Nat.zero⟩ : Pair); b), Nat.zero).1

@@ -4,6 +4,7 @@ import Tests.Format
 import Tests.Check
 import Tests.Parser
 import Tests.Elab
+import Tests.ElabFuzz
 import Tests.Groups
 import Tests.ElabFix
 import Tests.Grail
@@ -205,7 +206,7 @@ def main (args : List String) : IO UInt32 := do
   if let "--grail" :: rest := args then return ← Grail.cliMain rest
   -- the processes the suite starts get the toolchain as flags
   let child := match args with
-    | "--run-case" :: _ | "--prop-long" :: _ | "--prop-replay" :: _ | ["--prop-no-sizes"] | ["--prop-trace"] | "--check" :: _ | "--check-libs" :: _ | "--probe-reuse" :: _ | "--probe-reuse-ir" :: _ | "--panic-probe" :: _ | "--grail-job" :: _ | "--trust-ledger" :: _ | ["--list"] | ["--list-shards"] | "--list-cases" :: _ | "--allocs" :: _ => true
+    | "--run-case" :: _ | "--prop-long" :: _ | "--prop-replay" :: _ | ["--prop-no-sizes"] | ["--prop-trace"] | "--check" :: _ | "--check-libs" :: _ | "--probe-reuse" :: _ | "--probe-reuse-ir" :: _ | "--panic-probe" :: _ | "--grail-job" :: _ | "--trust-ledger" :: _ | ["--list"] | ["--list-shards"] | "--list-cases" :: _ | "--allocs" :: _ | "--elab-fuzz" :: _ | ["--elab-fuzz-dump"] | "--elab-fuzz-sample" :: _ | "--elab-fuzz-replay" :: _ => true
     | _ => false
   let (tc, args') ← suiteToolchain args (readLocal := !child)
   toolchainRef.set tc
@@ -251,6 +252,10 @@ def main (args : List String) : IO UInt32 := do
   | "--prop-long" :: rest => Prop.longMain rest
   | "--prop-replay" :: rest => Prop.replayMain rest
   | "--false-fuzz" :: rest => FalseFuzz.main rest
+  | "--elab-fuzz" :: rest => ElabFuzz.main rest
+  | ["--elab-fuzz-dump"] => ElabFuzz.dumpMain
+  | "--elab-fuzz-sample" :: rest => ElabFuzz.oneMain rest
+  | "--elab-fuzz-replay" :: rest => ElabFuzz.replayMain rest
   | "--false-fuzz-replay" :: rest => FalseFuzz.replayMain rest
   | "--false-fuzz-check" :: rest => FalseFuzz.checkMain rest
   | ["--prop-no-sizes"] => Prop.flagMain true false

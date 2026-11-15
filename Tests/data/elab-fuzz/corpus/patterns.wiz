@@ -1,0 +1,29 @@
+-- expect: accept
+inductive Nat where
+  | zero
+  | succ (n : Nat)
+
+structure Pair where
+  fst : Nat
+  snd : Nat
+
+def t1 : Nat :=
+  let (x, y) := (Nat.zero, Nat.succ Nat.zero);
+  x
+
+def t2 : Nat :=
+  let ⟨x, y⟩ := (⟨Nat.zero, Nat.succ Nat.zero⟩ : Pair);
+  y
+
+def t3 : Nat := let () := (); Nat.zero
+
+def t4 : Nat :=
+  match Nat.succ Nat.zero with
+  | .zero => Nat.zero
+  | .succ k => k
+
+def t5 : Nat := (Nat.zero, Nat.zero).1
+
+def t6 : Nat :=
+  let (x, y, z) := (Nat.zero, Nat.zero, Nat.zero);
+  x

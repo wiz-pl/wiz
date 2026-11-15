@@ -1,0 +1,22 @@
+-- expect: accept
+inductive Nat where
+  | zero
+  | succ (n : Nat)
+
+inductive List (A : Type) where
+  | nil
+  | cons (x : A) (xs : List A)
+
+class Inhabited (A : Type) where
+  default : A
+
+instance instNat : Inhabited Nat := Inhabited.mk Nat.zero
+
+instance instList {A : Type} [Inhabited A] : Inhabited (List A) where
+  default := List.cons Inhabited.default List.nil
+
+def pick (A : Type) [Inhabited A] : A := Inhabited.default
+
+def t1 : Nat := pick Nat
+def t2 : List Nat := pick (List Nat)
+def t3 : List (List Nat) := pick (List (List Nat))

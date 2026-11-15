@@ -1,0 +1,9 @@
+-- expect: accept
+-- A tuple literal in inference position is annotated with its Σ type: the kernel
+-- cannot infer a bare pair's type (`(a, b).1` used to be "kernel rejected: cannot
+-- infer a type for (a, b); add an annotation").
+inductive Nat where
+  | zero
+  | succ (n : Nat)
+
+def t : Nat := (Nat.zero, Nat.zero).1

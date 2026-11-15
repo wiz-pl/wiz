@@ -1,0 +1,23 @@
+-- expect: accept
+inductive Nat where
+  | zero
+  | succ (n : Nat)
+
+def add : Nat → Nat → Nat
+  | .zero, n => n
+  | .succ m, n => .succ (add m n)
+
+def double : Nat → Nat
+  | .zero => .zero
+  | .succ n => .succ (.succ (double n))
+
+mutual
+  def even : Nat → Nat
+    | .zero => .succ .zero
+    | .succ k => odd k
+  def odd : Nat → Nat
+    | .zero => .zero
+    | .succ k => even k
+end
+
+partial (default := fun n => n) def loop (n : Nat) : Nat := loop n

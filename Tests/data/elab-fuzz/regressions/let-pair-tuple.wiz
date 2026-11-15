@@ -1,0 +1,14 @@
+-- expect: accept
+-- `let (x, y) :=` infers the pair's type; the inferred pair is annotated, so the
+-- kernel's check of the `split` accepts it.
+inductive Nat where
+  | zero
+  | succ (n : Nat)
+
+def add : Nat → Nat → Nat
+  | .zero, n => n
+  | .succ m, n => .succ (add m n)
+
+def t : Nat :=
+  let (x, y) := (Nat.zero, Nat.succ Nat.zero);
+  add x y

@@ -1,0 +1,12 @@
+-- expect: accept
+-- A `match` elaborated in inference mode (as a tuple component) solves the goal
+-- metavariable only after its branches are checked; the goal is zonked before the
+-- motive's Π is built, so the kernel no longer rejects it for a Π/Σ without its sorts.
+inductive Nat where
+  | zero
+  | succ (n : Nat)
+
+def t : Nat :=
+  ((match Nat.zero with
+    | .zero => Nat.zero
+    | .succ k => k), Nat.zero).1

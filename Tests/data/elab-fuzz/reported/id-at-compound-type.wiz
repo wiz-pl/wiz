@@ -1,0 +1,15 @@
+-- reported (not fixed): `@id` (and `id (A := …)`) at a compound type is rejected:
+--   type mismatch
+--     expected: Type ?u0
+--     inferred: Type
+--     (universe level mismatch: ?u0+1 vs 1)
+-- The level constraint `max ?u 1 =?= 1` has the solution `?u = 0`, but `unifyLevel`
+-- is deliberately incomplete for a `max` with a metavariable (`Elab/Unify.lean`).
+-- `id.{0} …` and `@id Nat …` (a constant type) work; this is the minimised input.
+inductive Nat where
+  | zero
+  | succ (n : Nat)
+
+def id.{u} {A : Type u} (x : A) : A := x
+
+def t : Nat × Nat := @id (Nat × Nat) (Nat.zero, Nat.zero)

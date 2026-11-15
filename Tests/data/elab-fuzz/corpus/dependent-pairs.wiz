@@ -1,0 +1,21 @@
+-- expect: accept
+inductive Nat where
+  | zero
+  | succ (n : Nat)
+
+inductive Bool where
+  | true
+  | false
+
+def D (b : Bool) : Type :=
+  match b with
+  | .true => Nat
+  | .false => Bool
+
+def p : (b : Bool) × D b := (Bool.true, Nat.zero)
+
+def fst (p : (b : Bool) × D b) : Bool := p.1
+
+def snd : D p.1 := p.2
+
+def swapSigma (p : (n : Nat) × Nat) : (n : Nat) × Nat := (p.2, p.1)
