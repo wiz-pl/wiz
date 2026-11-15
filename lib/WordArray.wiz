@@ -103,8 +103,6 @@ def U8Array.foldl {B : Type} (f : B → U8 → B) (b : B) (a : U8Array) : B :=
 extern "wiz_u8array_of_list" U8Array.ofListNative : List U8 → U8Array
 extern "wiz_warray_to_list" U8Array.toListNative : U8Array → List U8
 attribute [implemented_by U8Array.ofListNative U8Array.toListNative] U8Array.mk
-attribute [implemented_by U8Array.toListNative] U8Array.toList
-attribute [implemented_by U8Array.ofListNative] U8Array.ofList
 extern "wiz_u8array_empty" U8Array.emptyNative : U8Array
 extern "wiz_warray_size" U8Array.sizeNative : U8Array → NatObj
 extern "wiz_warray_get" U8Array.getDNative : U8Array → NatObj → U8 → U8
@@ -173,8 +171,6 @@ def U32Array.foldl {B : Type} (f : B → U32 → B) (b : B) (a : U32Array) : B :
 extern "wiz_u32array_of_list" U32Array.ofListNative : List U32 → U32Array
 extern "wiz_warray_to_list" U32Array.toListNative : U32Array → List U32
 attribute [implemented_by U32Array.ofListNative U32Array.toListNative] U32Array.mk
-attribute [implemented_by U32Array.toListNative] U32Array.toList
-attribute [implemented_by U32Array.ofListNative] U32Array.ofList
 extern "wiz_u32array_empty" U32Array.emptyNative : U32Array
 extern "wiz_warray_size" U32Array.sizeNative : U32Array → NatObj
 extern "wiz_warray_get" U32Array.getDNative : U32Array → NatObj → U32 → U32
@@ -243,8 +239,6 @@ def U64Array.foldl {B : Type} (f : B → U64 → B) (b : B) (a : U64Array) : B :
 extern "wiz_u64array_of_list" U64Array.ofListNative : List U64 → U64Array
 extern "wiz_warray_to_list" U64Array.toListNative : U64Array → List U64
 attribute [implemented_by U64Array.ofListNative U64Array.toListNative] U64Array.mk
-attribute [implemented_by U64Array.toListNative] U64Array.toList
-attribute [implemented_by U64Array.ofListNative] U64Array.ofList
 extern "wiz_u64array_empty" U64Array.emptyNative : U64Array
 extern "wiz_warray_size" U64Array.sizeNative : U64Array → NatObj
 extern "wiz_warray_get" U64Array.getDNative : U64Array → NatObj → U64 → U64

@@ -291,7 +291,7 @@ end
 
 /-- Decimal digits: their value `n`, how many there were `k`, the reversed text `acc` so
 far, and the rest. -/
-partial def Json.digits (s : List Char) (n k : Nat) (acc : List Char) : Nat × Nat × List Char × List Char :=
+def Json.digits (s : List Char) (n k : Nat) (acc : List Char) : Nat × Nat × List Char × List Char :=
   match s with
   | .cons c rest => match Json.between (Char.code c) 48 57 with
     | .true => Json.digits rest (n * 10 + (Char.code c - 48)) (k + 1) (.cons c acc)

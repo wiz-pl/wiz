@@ -61,6 +61,12 @@ lean_exe tests where
   root := `Tests.Main
   moreLinkObjs := #[`@/sockets, `@/proc]
 
+/-- `lake build genSelfhostTables`: rewrite `selfhost/Tables.wiz` from the Lean parser's
+tables (`scripts/GenSelfhostTables.lean`). Not a default target: only the grammar's
+owner runs it. -/
+lean_exe genSelfhostTables where
+  root := `scripts.GenSelfhostTables
+
 @[default_target] lean_exe grail where
   root := `Grail.Main
   moreLinkObjs := #[`@/sockets, `@/proc]
