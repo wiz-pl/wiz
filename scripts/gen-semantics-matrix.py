@@ -56,6 +56,16 @@ def sval(w, bits):
     return bits - (1 << w) if bits >= (1 << (w - 1)) else bits
 
 
+def SHIFT_COUNTS(w):
+    """The shift counts a width-indexed word is pinned at: the boundary `w`, and
+    counts far beyond any width (`2^32 - 1`, `2^32`, `2^64 - 1`) that a naive model
+    would try to materialise as `2^k`."""
+    return [("0", 0), ("1", 1), ("w-1", max(0, w - 1)),
+            ("w", w), ("w+1", w + 1),
+            ("2^32-1", (1 << 32) - 1), ("2^32", 1 << 32),
+            ("2^64-1", (1 << 64) - 1)]
+
+
 def U(w, v):
     return "(UIntN.ofNat %d %d)" % (w, v)
 
@@ -134,10 +144,10 @@ def uintn_cells():
             cell("uintn", w, "neg", "-%s" % a,
                  un(w, "UIntN.neg %s" % uexpr(w, a)), (-v[a]) & mask(w),
                  "(0 - a) mod 2^w")
-        # shifts, both directions: k = 0, 1, w-1, w, w+1 (and a huge k compiled only)
+        # shifts, both directions. The count is a Nat, so the huge cases are no
+        # different from `k >= w`: the model must not build `2^k` to learn that.
         for a in ["1", "max", "mid"]:
-            for kn, k in [("0", 0), ("1", 1), ("w-1", max(0, w - 1)),
-                          ("w", w), ("w+1", w + 1)]:
+            for kn, k in SHIFT_COUNTS(w):
                 cell("uintn", w, "shl", "%s<<%s" % (a, kn),
                      un(w, "UIntN.shiftLeft %s %d" % (uexpr(w, a), k)),
                      (v[a] << k) & mask(w) if k < w else 0,
@@ -147,12 +157,6 @@ def uintn_cells():
                      un(w, "UIntN.shiftRight %s %d" % (uexpr(w, a), k)),
                      (v[a] >> k) if k < w else 0,
                      "logical: 0 for k >= w" if k >= w else "a >> k")
-        # a huge shift: the natives short-circuit; the model computes 2^k
-        for op, e, exp in [("shl", "UIntN.shiftLeft", 0), ("shr", "UIntN.shiftRight", 0)]:
-            cell("uintn", w, op, "max<<huge" if op == "shl" else "max>>huge",
-                 un(w, "%s %s 18446744073709551615" % (e, uexpr(w, "max"))), exp,
-                 "k = 2^64-1 >= w: 0; compiled only (the model would compute 2^k)",
-                 interp=False)
         # bits
         for op, e in [("and", "UIntN.land"), ("or", "UIntN.lor"), ("xor", "UIntN.xor")]:
             for a, b in [("max", "0"), ("max", "max"), ("max", "mid"), ("mid", "mid-1")]:
@@ -216,17 +220,17 @@ def uintn_cells():
                            "div": a // b, "mod": a % b}[op] & mask(w)
                 cell("uintn", w, "repr", label, e, exp,
                      "a representation boundary of the runtime (2^63 or 2^64)")
-        # a rotate is not a primitive; this is its documented composition
+        # a rotate is not a primitive; this is its documented composition. For k >= w
+        # shiftLeft is 0 and `Nat.sub w k` is 0, so the composition is just `a`.
         for a in ["max", "mid"]:
-            for kn, k in [("0", 0), ("1", 1), ("w-1", max(0, w - 1)), ("w", w)]:
-                if k > w:
-                    continue
-                # shiftRight by w is 0, so the k = 0 and k = w cases are the operand
-                exp = (v[a] if k == 0 else
+            for kn, k in [("0", 0), ("1", 1), ("w-1", max(0, w - 1)), ("w", w),
+                          ("w+1", w + 1), ("2^32-1", (1 << 32) - 1),
+                          ("2^32", 1 << 32), ("2^64-1", (1 << 64) - 1)]:
+                exp = (v[a] if k == 0 or k >= w else
                        ((v[a] << k) | (v[a] >> (w - k))) & mask(w))
                 cell("uintn", w, "rotl", "rotl %s %s" % (a, kn),
                      un(w, "rotl %s %d" % (uexpr(w, a), k)), exp,
-                     "no primitive: (a << k) | (a >> (w-k)); k = 0 and k = w are a")
+                     "no primitive: (a << k) | (a >> (w-k)); k = 0 and k >= w are a")
 
 
 # -- IntN -------------------------------------------------------------------
@@ -295,10 +299,11 @@ def intn_cells():
                  out("IntN.neg %s" % IE(a)), wrap(-v[a]),
                  "-min = min (wraps); -0 = 0")
         for a in ["1", "-1", "min", "max"]:
-            for kn, k in [("0", 0), ("1", 1), ("w-1", max(0, w - 1)),
-                          ("w", w), ("w+1", w + 1)]:
+            for kn, k in SHIFT_COUNTS(w):
                 cell("intn", w, "shl", "%s<<%s" % (a, kn),
-                     out("IntN.shiftLeft %s %d" % (IE(a), k)), wrap(v[a] << k),
+                     out("IntN.shiftLeft %s %d" % (IE(a), k)),
+                     wrap(v[a] << k) if k < w else 0,
+                     "wrapping left shift; k >= w: 0" if k >= w else
                      "wrapping left shift")
                 if w == 0:
                     exp = 0
@@ -310,15 +315,6 @@ def intn_cells():
                      out("IntN.shiftRight %s %d" % (IE(a), k)), wrap(exp),
                      "arithmetic: sign bits in; -1 for k >= w when negative"
                      if k >= w else "signed a >> k")
-        for a in ["1", "-1", "min"]:
-            # a negative value shifts to -1 (all ones); at width 1 the numeral "1"
-            # is already -1, so this is read from the signed value, not the name
-            neg = mask(w) if v[a] < 0 else 0
-            for op, fn, ex in [("shl", "IntN.shiftLeft", 0), ("shr", "IntN.shiftRight", neg)]:
-                cell("intn", w, op, "%s%s huge" % (a, "<<" if op == "shl" else ">>"),
-                     out("%s %s 18446744073709551615" % (fn, IE(a))), ex,
-                     "k = 2^64-1 >= w; compiled only (the model's Nat.shiftl guards "
-                     "an exponent of 2^32 or more)", interp=False)
         for op, e in [("lt", "IntN.lt"), ("le", "IntN.le"), ("beq", "IntN.beq")]:
             for a, b in [("min", "max"), ("-1", "0"), ("0", "-1"), ("min", "min"),
                          ("max", "-1"), ("min+1", "min")]:
@@ -383,6 +379,22 @@ def nat_cells():
              "2^%d" % k)
         cell("nat", "", "shr", "(2^100)>>%s" % kn,
              "Nat.shiftRight %d %d" % (1 << 100, k), (1 << 100) >> k, ">>")
+    # A huge count: `0 << k` is 0 (no `2^k` is needed for the value), and `a >> k`
+    # is 0 once k passes a's bit length. A nonzero `a << k` has a value with `k` bits,
+    # too large to write down here (a resource limit, not a value question).
+    for kn, k in [("2^32-1", (1 << 32) - 1), ("2^32", 1 << 32),
+                  ("2^64-1", (1 << 64) - 1)]:
+        # the self-hosted Nat is 63 bits: the count must fit, and 2^64 - 1 does not
+        pre = k < (1 << 63)
+        cell("nat", "", "shl", "0<<%s" % kn, "Nat.shiftLeft 0 %d" % k, 0,
+             "0 << k = 0, whatever k is", prelude=pre)
+        cell("nat", "", "shr", "0>>%s" % kn, "Nat.shiftRight 0 %d" % k, 0,
+             "0 >> k = 0", prelude=pre)
+        cell("nat", "", "shr", "1>>%s" % kn, "Nat.shiftRight 1 %d" % k, 0,
+             "k is past the bit length of 1", prelude=pre)
+        cell("nat", "", "shr", "(2^100)>>%s" % kn,
+             "Nat.shiftRight %d %d" % (1 << 100, k), 0,
+             "k is past the bit length of 2^100")
     for name, n in [("0", 0), ("1", 1), ("62", 1 << 62), ("63", 1 << 63), ("100", 1 << 100)]:
         pre = n < (1 << 63)
         cell("nat", "", "log2", "log2 %s" % name, "Nat.log2 %d" % n,
@@ -766,11 +778,10 @@ def gen_docs():
     w("")
     w("* `[W]`: `Float64` and `Bytes` are `axiom`s implemented by `extern`s with no")
     w("  model, so both interpreters stop (`#eval (3 : Float64)` panics: \"foreign")
-    w("  functions only run in compiled code\"). A shift by a huge amount is also")
-    w("  `[L]`/`[S]` only: the model's `Nat.shiftLeft` is `a * 2^k`, and its registered")
-    w("  native guards the exponent — `#eval Nat.shiftLeft 1 4294967296` is an")
-    w("  `INTERNAL PANIC: Nat.shiftl exponent is too big`, while the word natives")
-    w("  short-circuit `k >= w` to `0`.")
+    w("  functions only run in compiled code\"). Word shifts by a huge count are")
+    w("  evaluable: the model caps the exponent at the width before building `2^k`")
+    w("  (below). A nonzero `Nat.shiftLeft` by a huge count has a numeral with `k`")
+    w("  bits, so it is not a matrix cell; `0 << k` and `a >> k` are.")
     w("* `[S]`: the self-hosted frontend has no `term.eq` (an equality *type*), and")
     w("  `lib/Word.wiz`, `lib/Int.wiz` and `lib/Text.wiz` use it (a word's erased range")
     w("  proof is `Nat.lt ... = .true`), so `import Word` is rejected with \"unsupported")
@@ -780,6 +791,25 @@ def gen_docs():
     w("* `[L]` (and C generally) runs every cell; that is the point of the matrix.")
     w("")
     w("## The matrix")
+    w("")
+    w("### Shift rules")
+    w("")
+    w("Every shift count is a `Nat`, so no count is negative (`lib/Int.wiz`'s unbounded")
+    w("`Int` has no shift operation). The rules are total for every count `k`:")
+    w("")
+    w("* `UIntN.shiftLeft a k = (a * 2^k) mod 2^w` and `UIntN.shiftRight a k = a / 2^k`;")
+    w("  both are `0` for `k >= w`.")
+    w("* `IntN.shiftLeft` is the same bits as unsigned; `IntN.shiftRight` is")
+    w("  arithmetic, `floor(a / 2^k)`, so it is `0` for `k >= w` when `a >= 0` and")
+    w("  `-1` (all ones) when `a < 0`.")
+    w("* `Nat.shiftLeft a k = a * 2^k` and `Nat.shiftRight a k = a / 2^k` (floor).")
+    w("  `0 << k = 0`; `a >> k = 0` once `k` is past the bit length of `a`. A nonzero")
+    w("  `a << k` with a huge `k` has a numeral with `k` bits, too large to write")
+    w("  down here: its value is fixed by the rule, but the matrix only pins the")
+    w("  `0 << k` and `a >> k` cases (a resource limit, not a value difference).")
+    w("* There is no rotate primitive. The `rotl` cells pin the composition")
+    w("  `(a << k) | (a >> (w - k))`: for `k >= w` the left shift is `0` and")
+    w("  `Nat.sub w k` is `0`, so the composition is `a` (also at `k = 0`).")
     w("")
 
     fam_names = {
@@ -847,13 +877,18 @@ def gen_docs():
     w("  cell that a backend can express agrees with the documented value: the word")
     w("  natives (scalar, raw box and GMP paths), the model at widths 0 … 128, the")
     w("  signed special cases (`min / -1`, `min % -1`, `-min`, wrapping overflow),")
-    w("  shifts by `0, 1, w-1, w, w+1`, div/mod by zero, the runtime's")
-    w("  representation boundaries (`2^63`, `2^64`) and the UTF-8/NUL/astral text")
-    w("  cases.")
-    w("* **The model cannot compute a huge shift.** `Nat.shiftLeft`'s registered native")
-    w("  panics for an exponent of `2^32` or more, so the documented `k >= w => 0` rule")
-    w("  is only observable in compiled code.  Not fixed: the guard prevents an")
-    w("  enormous allocation, and the model would need a different `Nat` shift.")
+    w("  shifts by `0, 1, w-1, w, w+1, 2^32-1, 2^32, 2^64-1`, div/mod by zero, the")
+    w("  runtime's representation boundaries (`2^63`, `2^64`) and the")
+    w("  UTF-8/NUL/astral text cases.")
+    w("* **Huge shifts agree in the model now.** `UIntN.shiftLeft` used to unfold to")
+    w("  `ofNat w (Nat.shiftLeft a.toNat k)` for every `k`, so the model built `2^k`")
+    w("  even when `k >= w` made the result `0`; at `k >= 2^32` Lean's `Nat.shiftLeft`")
+    w("  panicked (\"Nat.shiftl exponent is too big\") while compiled code returned `0`.")
+    w("  The definition now caps the exponent at the width (`Word.min k w`,")
+    w("  `lib/Word.wiz`), so `[W]`, `[L]` and the kernel all give `0` (and `-1` for")
+    w("  a negative `IntN.shiftRight`).")
+    w("  Huge `Nat.shiftRight` counts are short-circuited to `0` in the model's native")
+    w("  table (`natNative?`), so `a >> 2^64-1` no longer walks `2^64-1` steps.")
     w("* **The self-hosted frontend cannot import `Word`.** It has no `term.eq`, so")
     w("  `lib/Word.wiz` (whose words carry a `Nat.lt ... = .true` proof) is rejected.")
     w("  That is a coverage limit of `[S]`, not a value difference; where `[S]` runs")
@@ -867,6 +902,8 @@ def gen_docs():
     w("| `intn.1.1>> huge` | the matrix expected `0`, C gave `1` | the **matrix** was wrong: at width 1 the numeral `1` is the signed value `-1`, so an arithmetic shift keeps `1` (all ones). The generator now reads the signed value; C was right |")
     w("| `uintn.0.1%max`, `uintn.0.0 lt 1`, … | the matrix expected the values of 1 at width 0 | the **matrix** was wrong: width 0 has one value, `0`; the generator now masks every unsigned operand at its width |")
     w("| `text..surrogate round trip` | the harness used `String.length (Bytes.toUtf8 …)` (`Except String String`) | the **harness** expression was wrong; the value (`1`, U+FFFD) was right |")
+    w("| `uintn.*.max<<huge`, `intn.*.*<<huge` (and the new `2^32-1`/`2^32`/`2^64-1` rows) | the model panicked with \"Nat.shiftl exponent is too big\"; C gave `0` / all ones | the **model** was wrong: `UIntN.shiftLeft` now caps the exponent at the width (`Word.min k w`, the documented word rule). The huge word cells are no longer compiled-only |")
+    w("| `nat..(2^100)>>2^32`, `nat..1>>2^32-1`, … | the model walked `2^32` steps (or hung) | the **native table** was too literal: `a >> k` is `0` once `k` is past `a`'s bit length, which is now tested before the shift. `0 << k` is likewise `0` without building `2^k` |")
     w("")
     w("After those fixes every cell that a backend can express agrees; the run report")
     w("is `7 passed, 0 failed` (`#eval`, `#run`, Lean → C, `Float64`, Wiz → C and the")
@@ -915,19 +952,33 @@ def gen_docs():
     w("  round-to-even ties at `2^53`).")
     w("* **No rotate primitive.** Neither `UIntN`/`IntN` nor `BitVec` has")
     w("  `rotateLeft`/`rotateRight`. The `rotl` cells pin the composition")
-    w("  `(a << k) | (a >> (w - k))` for `k <= w`; `k > w` is unspecified (there is no")
-    w("  `k mod w` convention to appeal to), and `k = 0` relies on `a >> w = 0`.")
+    w("  `(a << k) | (a >> (w - k))`. It is total: for `k >= w` the left shift is `0`")
+    w("  and `Nat.sub w k` is `0`, so the composition is `a` (the same as `k = 0`);")
+    w("  there is no `k mod w` convention and none is needed.")
     w("* **No checked arithmetic.** The words are wrapping only (`add`/`sub`/`mul`/")
     w("  `neg`/`div`/`rem`); there is no `checked_*`, `overflowing_*` or `wrapping_*`")
     w("  family, and no way to observe an overflow besides the wrapped value. The")
     w("  overflow cells (`max+1`, `min-1`, `min/-1`, `-min`, `min*min`) pin the")
     w("  wrapping behaviour the docs state.")
-    w("* **A huge shift panics in the model.** `k >= w` is documented to give `0` (and")
-    w("  `-1` for a negative arithmetic shift), and the natives do. The model's")
-    w("  `Nat.shiftLeft` computes `2^k`, and its registered native rejects an exponent")
-    w("  of `2^32` or more with `INTERNAL PANIC: Nat.shiftl exponent is too big` (a")
-    w("  guard against an enormous allocation). So the value is well defined but not")
-    w("  computable in the model at `k = 2^64 - 1`; those cells are compiled-only.")
+    w("* **A nonzero `Nat.shiftLeft` by a huge count is resource-limited.** The value")
+    w("  `a * 2^k` has `k` bits, so `k = 2^32` would be a 512 MiB numeral (before its")
+    w("  decimal text); the model's registered native refuses exponents of `2^32` or")
+    w("  more and the C runtime refuses a count it cannot hold as a machine word.")
+    w("  That is a resource limit, not a value difference: the matrix pins `0 << k`")
+    w("  and `a >> k` for huge `k`, and the rule for `a > 0` stays `a * 2^k`.")
+    w("* **Still under-specified (not cheap to settle here).**")
+    w("  * **No total order on `Float64`.** Only `lt` exists; there is no `beq`, `le`")
+    w("    or total order, and no `toNat` (a float is observed only as text).")
+    w("  * **`Float64` NaN payload/sign.** `toString` is C's `%.17g`; `-nan` is")
+    w("    glibc's spelling for the x86 default NaN, while the spec says only \"NaN\".")
+    w("  * **`Float64` `lt` with NaN / signed zero** is IEEE (all comparisons with")
+    w("    NaN false, `-0 = 0`), but there is no total order to pin.")
+    w("  * **Non-scalar `Char`s.** A `Char` is an unchecked `Nat` code; `Bytes.ofUtf8`")
+    w("    maps a lone surrogate or a value above `U+10FFFF` to `U+FFFD`, so")
+    w("    `toUtf8 (ofUtf8 s) != s`. The behaviour is pinned by the surrogate cells")
+    w("    but is not stated as a general rule.")
+    w("  * **`Int` has no shift or bitwise operation**, so there is nothing to pin")
+    w("    there (the `int` cells cover arithmetic, comparison and conversion only).")
     w("* **`String` can contain non-scalar `Char`s.** `Char` is a `Nat` code, with no")
     w("  check that it is a Unicode scalar value. `Bytes.ofUtf8` maps a lone surrogate")
     w("  or a code point above `U+10FFFF` to `U+FFFD` (three bytes), so")

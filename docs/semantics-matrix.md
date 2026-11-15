@@ -29,11 +29,10 @@ listed below. A cell with no comparison is not evidence.
 
 * `[W]`: `Float64` and `Bytes` are `axiom`s implemented by `extern`s with no
   model, so both interpreters stop (`#eval (3 : Float64)` panics: "foreign
-  functions only run in compiled code"). A shift by a huge amount is also
-  `[L]`/`[S]` only: the model's `Nat.shiftLeft` is `a * 2^k`, and its registered
-  native guards the exponent — `#eval Nat.shiftLeft 1 4294967296` is an
-  `INTERNAL PANIC: Nat.shiftl exponent is too big`, while the word natives
-  short-circuit `k >= w` to `0`.
+  functions only run in compiled code"). Word shifts by a huge count are
+  evaluable: the model caps the exponent at the width before building `2^k`
+  (below). A nonzero `Nat.shiftLeft` by a huge count has a numeral with `k`
+  bits, so it is not a matrix cell; `0 << k` and `a >> k` are.
 * `[S]`: the self-hosted frontend has no `term.eq` (an equality *type*), and
   `lib/Word.wiz`, `lib/Int.wiz` and `lib/Text.wiz` use it (a word's erased range
   proof is `Nat.lt ... = .true`), so `import Word` is rejected with "unsupported
@@ -43,6 +42,25 @@ listed below. A cell with no comparison is not evidence.
 * `[L]` (and C generally) runs every cell; that is the point of the matrix.
 
 ## The matrix
+
+### Shift rules
+
+Every shift count is a `Nat`, so no count is negative (`lib/Int.wiz`'s unbounded
+`Int` has no shift operation). The rules are total for every count `k`:
+
+* `UIntN.shiftLeft a k = (a * 2^k) mod 2^w` and `UIntN.shiftRight a k = a / 2^k`;
+  both are `0` for `k >= w`.
+* `IntN.shiftLeft` is the same bits as unsigned; `IntN.shiftRight` is
+  arithmetic, `floor(a / 2^k)`, so it is `0` for `k >= w` when `a >= 0` and
+  `-1` (all ones) when `a < 0`.
+* `Nat.shiftLeft a k = a * 2^k` and `Nat.shiftRight a k = a / 2^k` (floor).
+  `0 << k = 0`; `a >> k = 0` once `k` is past the bit length of `a`. A nonzero
+  `a << k` with a huge `k` has a numeral with `k` bits, too large to write
+  down here: its value is fixed by the rule, but the matrix only pins the
+  `0 << k` and `a >> k` cases (a resource limit, not a value difference).
+* There is no rotate primitive. The `rotl` cells pin the composition
+  `(a << k) | (a >> (w - k))`: for `k >= w` the left shift is `0` and
+  `Nat.sub w k` is `0`, so the composition is `a` (also at `k = 0`).
 
 ### `UIntN w` (unsigned words, widths 0 … 128)
 
@@ -102,6 +120,12 @@ its two's-complement pattern.
 | `1>>w` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | logical: 0 for k >= w |
 | `1<<w+1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | k >= w: 0 (bits shifted out) |
 | `1>>w+1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | logical: 0 for k >= w |
+| `1<<2^32-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | k >= w: 0 (bits shifted out) |
+| `1>>2^32-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | logical: 0 for k >= w |
+| `1<<2^32` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | k >= w: 0 (bits shifted out) |
+| `1>>2^32` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | logical: 0 for k >= w |
+| `1<<2^64-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | k >= w: 0 (bits shifted out) |
+| `1>>2^64-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | logical: 0 for k >= w |
 | `max<<0` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | k >= w: 0 (bits shifted out) |
 | `max>>0` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | logical: 0 for k >= w |
 | `max<<1` | `0` | `0` | `126` | `254` | `32766` | `65534` | `2147483646` | `4294967294` | `9223372036854775806` | `18446744073709551614` | `340282366920938463463374607431768211454` | W L | k >= w: 0 (bits shifted out) |
@@ -112,6 +136,12 @@ its two's-complement pattern.
 | `max>>w` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | logical: 0 for k >= w |
 | `max<<w+1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | k >= w: 0 (bits shifted out) |
 | `max>>w+1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | logical: 0 for k >= w |
+| `max<<2^32-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | k >= w: 0 (bits shifted out) |
+| `max>>2^32-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | logical: 0 for k >= w |
+| `max<<2^32` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | k >= w: 0 (bits shifted out) |
+| `max>>2^32` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | logical: 0 for k >= w |
+| `max<<2^64-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | k >= w: 0 (bits shifted out) |
+| `max>>2^64-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | logical: 0 for k >= w |
 | `mid<<0` | `0` | `1` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `170141183460469231731687303715884105728` | W L | k >= w: 0 (bits shifted out) |
 | `mid>>0` | `0` | `1` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `170141183460469231731687303715884105728` | W L | logical: 0 for k >= w |
 | `mid<<1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | k >= w: 0 (bits shifted out) |
@@ -122,8 +152,12 @@ its two's-complement pattern.
 | `mid>>w` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | logical: 0 for k >= w |
 | `mid<<w+1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | k >= w: 0 (bits shifted out) |
 | `mid>>w+1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | logical: 0 for k >= w |
-| `max<<huge` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | L | k = 2^64-1 >= w: 0; compiled only (the model would compute 2^k) |
-| `max>>huge` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | L | k = 2^64-1 >= w: 0; compiled only (the model would compute 2^k) |
+| `mid<<2^32-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | k >= w: 0 (bits shifted out) |
+| `mid>>2^32-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | logical: 0 for k >= w |
+| `mid<<2^32` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | k >= w: 0 (bits shifted out) |
+| `mid>>2^32` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | logical: 0 for k >= w |
+| `mid<<2^64-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | k >= w: 0 (bits shifted out) |
+| `mid>>2^64-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | logical: 0 for k >= w |
 | `max and 0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | bitwise on the bits |
 | `max and max` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | bitwise on the bits |
 | `max and mid` | `0` | `1` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `170141183460469231731687303715884105728` | W L | bitwise on the bits |
@@ -176,14 +210,22 @@ its two's-complement pattern.
 | `mid to u64` | `0` | `1` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `0` | W L | ofNat v: zero-extend or truncate |
 | `mid to u128` | `0` | `1` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `170141183460469231731687303715884105728` | W L | ofNat v: zero-extend or truncate |
 | `toIntN max` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | the same bits |
-| `rotl max 0` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k = w are a |
-| `rotl max w-1` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k = w are a |
-| `rotl max w` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k = w are a |
-| `rotl mid 0` | `0` | `1` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `170141183460469231731687303715884105728` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k = w are a |
-| `rotl mid w-1` | `0` | `1` | `32` | `64` | `8192` | `16384` | `536870912` | `1073741824` | `2305843009213693952` | `4611686018427387904` | `85070591730234615865843651857942052864` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k = w are a |
-| `rotl mid w` | `0` | `1` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `170141183460469231731687303715884105728` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k = w are a |
-| `rotl max 1` | – | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k = w are a |
-| `rotl mid 1` | – | `1` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k = w are a |
+| `rotl max 0` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k >= w are a |
+| `rotl max 1` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k >= w are a |
+| `rotl max w-1` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k >= w are a |
+| `rotl max w` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k >= w are a |
+| `rotl max w+1` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k >= w are a |
+| `rotl max 2^32-1` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k >= w are a |
+| `rotl max 2^32` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k >= w are a |
+| `rotl max 2^64-1` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k >= w are a |
+| `rotl mid 0` | `0` | `1` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `170141183460469231731687303715884105728` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k >= w are a |
+| `rotl mid 1` | `0` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k >= w are a |
+| `rotl mid w-1` | `0` | `1` | `32` | `64` | `8192` | `16384` | `536870912` | `1073741824` | `2305843009213693952` | `4611686018427387904` | `85070591730234615865843651857942052864` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k >= w are a |
+| `rotl mid w` | `0` | `1` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `170141183460469231731687303715884105728` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k >= w are a |
+| `rotl mid w+1` | `0` | `1` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `170141183460469231731687303715884105728` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k >= w are a |
+| `rotl mid 2^32-1` | `0` | `1` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `170141183460469231731687303715884105728` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k >= w are a |
+| `rotl mid 2^32` | `0` | `1` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `170141183460469231731687303715884105728` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k >= w are a |
+| `rotl mid 2^64-1` | `0` | `1` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `170141183460469231731687303715884105728` | W L | no primitive: (a << k) \| (a >> (w-k)); k = 0 and k >= w are a |
 | `p63-1+1` | – | – | – | – | – | – | – | – | – | `9223372036854775808` | `9223372036854775808` | W L | a representation boundary of the runtime (2^63 or 2^64) |
 | `p63+p63` | – | – | – | – | – | – | – | – | – | `0` | `18446744073709551616` | W L | a representation boundary of the runtime (2^63 or 2^64) |
 | `p63-1` | – | – | – | – | – | – | – | – | – | `9223372036854775807` | `9223372036854775807` | W L | a representation boundary of the runtime (2^63 or 2^64) |
@@ -256,52 +298,70 @@ its two's-complement pattern.
 | `-min` | `0` | `1` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `170141183460469231731687303715884105728` | W L | -min = min (wraps); -0 = 0 |
 | `-max` | `0` | `0` | `65` | `129` | `16385` | `32769` | `1073741825` | `2147483649` | `4611686018427387905` | `9223372036854775809` | `170141183460469231731687303715884105729` | W L | -min = min (wraps); -0 = 0 |
 | `-min+1` | `0` | `0` | `63` | `127` | `16383` | `32767` | `1073741823` | `2147483647` | `4611686018427387903` | `9223372036854775807` | `170141183460469231731687303715884105727` | W L | -min = min (wraps); -0 = 0 |
-| `1<<0` | `0` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | W L | wrapping left shift |
+| `1<<0` | `0` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | W L | wrapping left shift; k >= w: 0 |
 | `1>>0` | `0` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
-| `1<<1` | `0` | `0` | `2` | `2` | `2` | `2` | `2` | `2` | `2` | `2` | `2` | W L | wrapping left shift |
+| `1<<1` | `0` | `0` | `2` | `2` | `2` | `2` | `2` | `2` | `2` | `2` | `2` | W L | wrapping left shift; k >= w: 0 |
 | `1>>1` | `0` | `1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
-| `1<<w-1` | `0` | `1` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `170141183460469231731687303715884105728` | W L | wrapping left shift |
+| `1<<w-1` | `0` | `1` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `170141183460469231731687303715884105728` | W L | wrapping left shift; k >= w: 0 |
 | `1>>w-1` | `0` | `1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
-| `1<<w` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift |
+| `1<<w` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift; k >= w: 0 |
 | `1>>w` | `0` | `1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
-| `1<<w+1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift |
+| `1<<w+1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift; k >= w: 0 |
 | `1>>w+1` | `0` | `1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
-| `-1<<0` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | wrapping left shift |
+| `1<<2^32-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift; k >= w: 0 |
+| `1>>2^32-1` | `0` | `1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
+| `1<<2^32` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift; k >= w: 0 |
+| `1>>2^32` | `0` | `1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
+| `1<<2^64-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift; k >= w: 0 |
+| `1>>2^64-1` | `0` | `1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
+| `-1<<0` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | wrapping left shift; k >= w: 0 |
 | `-1>>0` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
-| `-1<<1` | `0` | `0` | `126` | `254` | `32766` | `65534` | `2147483646` | `4294967294` | `9223372036854775806` | `18446744073709551614` | `340282366920938463463374607431768211454` | W L | wrapping left shift |
+| `-1<<1` | `0` | `0` | `126` | `254` | `32766` | `65534` | `2147483646` | `4294967294` | `9223372036854775806` | `18446744073709551614` | `340282366920938463463374607431768211454` | W L | wrapping left shift; k >= w: 0 |
 | `-1>>1` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
-| `-1<<w-1` | `0` | `1` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `170141183460469231731687303715884105728` | W L | wrapping left shift |
+| `-1<<w-1` | `0` | `1` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `170141183460469231731687303715884105728` | W L | wrapping left shift; k >= w: 0 |
 | `-1>>w-1` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
-| `-1<<w` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift |
+| `-1<<w` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift; k >= w: 0 |
 | `-1>>w` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
-| `-1<<w+1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift |
+| `-1<<w+1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift; k >= w: 0 |
 | `-1>>w+1` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
-| `min<<0` | `0` | `1` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `170141183460469231731687303715884105728` | W L | wrapping left shift |
+| `-1<<2^32-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift; k >= w: 0 |
+| `-1>>2^32-1` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
+| `-1<<2^32` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift; k >= w: 0 |
+| `-1>>2^32` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
+| `-1<<2^64-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift; k >= w: 0 |
+| `-1>>2^64-1` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
+| `min<<0` | `0` | `1` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `170141183460469231731687303715884105728` | W L | wrapping left shift; k >= w: 0 |
 | `min>>0` | `0` | `1` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `170141183460469231731687303715884105728` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
-| `min<<1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift |
+| `min<<1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift; k >= w: 0 |
 | `min>>1` | `0` | `1` | `96` | `192` | `24576` | `49152` | `1610612736` | `3221225472` | `6917529027641081856` | `13835058055282163712` | `255211775190703847597530955573826158592` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
-| `min<<w-1` | `0` | `1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift |
+| `min<<w-1` | `0` | `1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift; k >= w: 0 |
 | `min>>w-1` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
-| `min<<w` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift |
+| `min<<w` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift; k >= w: 0 |
 | `min>>w` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
-| `min<<w+1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift |
+| `min<<w+1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift; k >= w: 0 |
 | `min>>w+1` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
-| `max<<0` | `0` | `0` | `63` | `127` | `16383` | `32767` | `1073741823` | `2147483647` | `4611686018427387903` | `9223372036854775807` | `170141183460469231731687303715884105727` | W L | wrapping left shift |
+| `min<<2^32-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift; k >= w: 0 |
+| `min>>2^32-1` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
+| `min<<2^32` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift; k >= w: 0 |
+| `min>>2^32` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
+| `min<<2^64-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift; k >= w: 0 |
+| `min>>2^64-1` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
+| `max<<0` | `0` | `0` | `63` | `127` | `16383` | `32767` | `1073741823` | `2147483647` | `4611686018427387903` | `9223372036854775807` | `170141183460469231731687303715884105727` | W L | wrapping left shift; k >= w: 0 |
 | `max>>0` | `0` | `0` | `63` | `127` | `16383` | `32767` | `1073741823` | `2147483647` | `4611686018427387903` | `9223372036854775807` | `170141183460469231731687303715884105727` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
-| `max<<1` | `0` | `0` | `126` | `254` | `32766` | `65534` | `2147483646` | `4294967294` | `9223372036854775806` | `18446744073709551614` | `340282366920938463463374607431768211454` | W L | wrapping left shift |
+| `max<<1` | `0` | `0` | `126` | `254` | `32766` | `65534` | `2147483646` | `4294967294` | `9223372036854775806` | `18446744073709551614` | `340282366920938463463374607431768211454` | W L | wrapping left shift; k >= w: 0 |
 | `max>>1` | `0` | `0` | `31` | `63` | `8191` | `16383` | `536870911` | `1073741823` | `2305843009213693951` | `4611686018427387903` | `85070591730234615865843651857942052863` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
-| `max<<w-1` | `0` | `0` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `170141183460469231731687303715884105728` | W L | wrapping left shift |
+| `max<<w-1` | `0` | `0` | `64` | `128` | `16384` | `32768` | `1073741824` | `2147483648` | `4611686018427387904` | `9223372036854775808` | `170141183460469231731687303715884105728` | W L | wrapping left shift; k >= w: 0 |
 | `max>>w-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
-| `max<<w` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift |
+| `max<<w` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift; k >= w: 0 |
 | `max>>w` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
-| `max<<w+1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift |
+| `max<<w+1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift; k >= w: 0 |
 | `max>>w+1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
-| `1<< huge` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | L | k = 2^64-1 >= w; compiled only (the model's Nat.shiftl guards an exponent of 2^32 or more) |
-| `1>> huge` | `0` | `1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | L | k = 2^64-1 >= w; compiled only (the model's Nat.shiftl guards an exponent of 2^32 or more) |
-| `-1<< huge` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | L | k = 2^64-1 >= w; compiled only (the model's Nat.shiftl guards an exponent of 2^32 or more) |
-| `-1>> huge` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | L | k = 2^64-1 >= w; compiled only (the model's Nat.shiftl guards an exponent of 2^32 or more) |
-| `min<< huge` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | L | k = 2^64-1 >= w; compiled only (the model's Nat.shiftl guards an exponent of 2^32 or more) |
-| `min>> huge` | `0` | `1` | `127` | `255` | `32767` | `65535` | `2147483647` | `4294967295` | `9223372036854775807` | `18446744073709551615` | `340282366920938463463374607431768211455` | L | k = 2^64-1 >= w; compiled only (the model's Nat.shiftl guards an exponent of 2^32 or more) |
+| `max<<2^32-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift; k >= w: 0 |
+| `max>>2^32-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
+| `max<<2^32` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift; k >= w: 0 |
+| `max>>2^32` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
+| `max<<2^64-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | wrapping left shift; k >= w: 0 |
+| `max>>2^64-1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | arithmetic: sign bits in; -1 for k >= w when negative |
 | `min lt max` | `0` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | W L | signed comparison |
 | `-1 lt 0` | `0` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | `1` | W L | signed comparison |
 | `0 lt -1` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | W L | signed comparison |
@@ -398,6 +458,18 @@ its two's-complement pattern.
 | `(2^100)>>127` | `0` | W L | >> |
 | `1<<1000` | `10715086071862673209484250490600018105614048117055336074437503883703510511249361224931983788156958581275946729175531468251871452856923140435984577574698574803934567774824230985421074605062371141877954182153046474983581941267398767559165543946077062914571196477686542167660429831652624386837205668069376` | W L | 2^1000 |
 | `(2^100)>>1000` | `0` | W L | >> |
+| `0<<2^32-1` | `0` | W L S | 0 << k = 0, whatever k is |
+| `0>>2^32-1` | `0` | W L S | 0 >> k = 0 |
+| `1>>2^32-1` | `0` | W L S | k is past the bit length of 1 |
+| `(2^100)>>2^32-1` | `0` | W L | k is past the bit length of 2^100 |
+| `0<<2^32` | `0` | W L S | 0 << k = 0, whatever k is |
+| `0>>2^32` | `0` | W L S | 0 >> k = 0 |
+| `1>>2^32` | `0` | W L S | k is past the bit length of 1 |
+| `(2^100)>>2^32` | `0` | W L | k is past the bit length of 2^100 |
+| `0<<2^64-1` | `0` | W L | 0 << k = 0, whatever k is |
+| `0>>2^64-1` | `0` | W L | 0 >> k = 0 |
+| `1>>2^64-1` | `0` | W L | k is past the bit length of 1 |
+| `(2^100)>>2^64-1` | `0` | W L | k is past the bit length of 2^100 |
 | `log2 0` | `0` | W L S | log2 0 = 0 |
 | `bit 0 0` | `0` | W L S | bit 0 |
 | `0 &&& 1` | `0` | W L S | bitwise and |
@@ -641,13 +713,18 @@ its two's-complement pattern.
   cell that a backend can express agrees with the documented value: the word
   natives (scalar, raw box and GMP paths), the model at widths 0 … 128, the
   signed special cases (`min / -1`, `min % -1`, `-min`, wrapping overflow),
-  shifts by `0, 1, w-1, w, w+1`, div/mod by zero, the runtime's
-  representation boundaries (`2^63`, `2^64`) and the UTF-8/NUL/astral text
-  cases.
-* **The model cannot compute a huge shift.** `Nat.shiftLeft`'s registered native
-  panics for an exponent of `2^32` or more, so the documented `k >= w => 0` rule
-  is only observable in compiled code.  Not fixed: the guard prevents an
-  enormous allocation, and the model would need a different `Nat` shift.
+  shifts by `0, 1, w-1, w, w+1, 2^32-1, 2^32, 2^64-1`, div/mod by zero, the
+  runtime's representation boundaries (`2^63`, `2^64`) and the
+  UTF-8/NUL/astral text cases.
+* **Huge shifts agree in the model now.** `UIntN.shiftLeft` used to unfold to
+  `ofNat w (Nat.shiftLeft a.toNat k)` for every `k`, so the model built `2^k`
+  even when `k >= w` made the result `0`; at `k >= 2^32` Lean's `Nat.shiftLeft`
+  panicked ("Nat.shiftl exponent is too big") while compiled code returned `0`.
+  The definition now caps the exponent at the width (`Word.min k w`,
+  `lib/Word.wiz`), so `[W]`, `[L]` and the kernel all give `0` (and `-1` for
+  a negative `IntN.shiftRight`).
+  Huge `Nat.shiftRight` counts are short-circuited to `0` in the model's native
+  table (`natNative?`), so `a >> 2^64-1` no longer walks `2^64-1` steps.
 * **The self-hosted frontend cannot import `Word`.** It has no `term.eq`, so
   `lib/Word.wiz` (whose words carry a `Nat.lt ... = .true` proof) is rejected.
   That is a coverage limit of `[S]`, not a value difference; where `[S]` runs
@@ -661,6 +738,8 @@ its two's-complement pattern.
 | `intn.1.1>> huge` | the matrix expected `0`, C gave `1` | the **matrix** was wrong: at width 1 the numeral `1` is the signed value `-1`, so an arithmetic shift keeps `1` (all ones). The generator now reads the signed value; C was right |
 | `uintn.0.1%max`, `uintn.0.0 lt 1`, … | the matrix expected the values of 1 at width 0 | the **matrix** was wrong: width 0 has one value, `0`; the generator now masks every unsigned operand at its width |
 | `text..surrogate round trip` | the harness used `String.length (Bytes.toUtf8 …)` (`Except String String`) | the **harness** expression was wrong; the value (`1`, U+FFFD) was right |
+| `uintn.*.max<<huge`, `intn.*.*<<huge` (and the new `2^32-1`/`2^32`/`2^64-1` rows) | the model panicked with "Nat.shiftl exponent is too big"; C gave `0` / all ones | the **model** was wrong: `UIntN.shiftLeft` now caps the exponent at the width (`Word.min k w`, the documented word rule). The huge word cells are no longer compiled-only |
+| `nat..(2^100)>>2^32`, `nat..1>>2^32-1`, … | the model walked `2^32` steps (or hung) | the **native table** was too literal: `a >> k` is `0` once `k` is past `a`'s bit length, which is now tested before the shift. `0 << k` is likewise `0` without building `2^k` |
 
 After those fixes every cell that a backend can express agrees; the run report
 is `7 passed, 0 failed` (`#eval`, `#run`, Lean → C, `Float64`, Wiz → C and the
@@ -670,13 +749,13 @@ kernel` on this machine).
 
 | what | cells | comparisons |
 |---|---|---|
-| all cells | 3213 | |
-| `[W]`, `#eval` and `#run` | 3034 | 6068 |
-| `[L]`, Lean → C (every `Nat`-valued cell) | 3174 | 3174 |
+| all cells | 3689 | |
+| `[W]`, `#eval` and `#run` | 3598 | 7196 |
+| `[L]`, Lean → C (every `Nat`-valued cell) | 3650 | 3650 |
 | `[L]`, `Float64` text cells | 39 | 39 |
-| `[S]`, Wiz → C (prelude fragment) | 56 | 56 |
-| `K`, the kernel by `refl` (width-8 words, `Nat`, `Int`) | 157 | 157 |
-| **total** | | **9494** |
+| `[S]`, Wiz → C (prelude fragment) | 62 | 62 |
+| `K`, the kernel by `refl` (width-8 words, `Nat`, `Int`) | 169 | 169 |
+| **total** | | **11116** |
 
 
 ## Known gaps and underspecification
@@ -699,19 +778,33 @@ kernel` on this machine).
   round-to-even ties at `2^53`).
 * **No rotate primitive.** Neither `UIntN`/`IntN` nor `BitVec` has
   `rotateLeft`/`rotateRight`. The `rotl` cells pin the composition
-  `(a << k) | (a >> (w - k))` for `k <= w`; `k > w` is unspecified (there is no
-  `k mod w` convention to appeal to), and `k = 0` relies on `a >> w = 0`.
+  `(a << k) | (a >> (w - k))`. It is total: for `k >= w` the left shift is `0`
+  and `Nat.sub w k` is `0`, so the composition is `a` (the same as `k = 0`);
+  there is no `k mod w` convention and none is needed.
 * **No checked arithmetic.** The words are wrapping only (`add`/`sub`/`mul`/
   `neg`/`div`/`rem`); there is no `checked_*`, `overflowing_*` or `wrapping_*`
   family, and no way to observe an overflow besides the wrapped value. The
   overflow cells (`max+1`, `min-1`, `min/-1`, `-min`, `min*min`) pin the
   wrapping behaviour the docs state.
-* **A huge shift panics in the model.** `k >= w` is documented to give `0` (and
-  `-1` for a negative arithmetic shift), and the natives do. The model's
-  `Nat.shiftLeft` computes `2^k`, and its registered native rejects an exponent
-  of `2^32` or more with `INTERNAL PANIC: Nat.shiftl exponent is too big` (a
-  guard against an enormous allocation). So the value is well defined but not
-  computable in the model at `k = 2^64 - 1`; those cells are compiled-only.
+* **A nonzero `Nat.shiftLeft` by a huge count is resource-limited.** The value
+  `a * 2^k` has `k` bits, so `k = 2^32` would be a 512 MiB numeral (before its
+  decimal text); the model's registered native refuses exponents of `2^32` or
+  more and the C runtime refuses a count it cannot hold as a machine word.
+  That is a resource limit, not a value difference: the matrix pins `0 << k`
+  and `a >> k` for huge `k`, and the rule for `a > 0` stays `a * 2^k`.
+* **Still under-specified (not cheap to settle here).**
+  * **No total order on `Float64`.** Only `lt` exists; there is no `beq`, `le`
+    or total order, and no `toNat` (a float is observed only as text).
+  * **`Float64` NaN payload/sign.** `toString` is C's `%.17g`; `-nan` is
+    glibc's spelling for the x86 default NaN, while the spec says only "NaN".
+  * **`Float64` `lt` with NaN / signed zero** is IEEE (all comparisons with
+    NaN false, `-0 = 0`), but there is no total order to pin.
+  * **Non-scalar `Char`s.** A `Char` is an unchecked `Nat` code; `Bytes.ofUtf8`
+    maps a lone surrogate or a value above `U+10FFFF` to `U+FFFD`, so
+    `toUtf8 (ofUtf8 s) != s`. The behaviour is pinned by the surrogate cells
+    but is not stated as a general rule.
+  * **`Int` has no shift or bitwise operation**, so there is nothing to pin
+    there (the `int` cells cover arithmetic, comparison and conversion only).
 * **`String` can contain non-scalar `Char`s.** `Char` is a `Nat` code, with no
   check that it is a Unicode scalar value. `Bytes.ofUtf8` maps a lone surrogate
   or a code point above `U+10FFFF` to `U+FFFD` (three bytes), so
