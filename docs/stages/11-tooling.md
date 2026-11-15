@@ -335,6 +335,20 @@ against the real `wiz lsp` on `tests/fixture/Goals.wiz`: the goal after `intro n
 argument's expected type, constants highlighted, `K` on `Bool` giving `Bool : Type`,
 the view following an edit. It is skipped without `nvim`.
 
+The harness separates the two ways the case can fail. A test failure prints `N passed,
+M failed` and the `✗` case; `run.sh` then exits 1 and names the case again on a
+`harness: failed case(s): …` line. Neovim itself can also exit nonzero *after* a clean
+summary (a libuv handle, job or language server still alive while it tears down); that
+is an environment anomaly, not a test result, so `run.sh` prints
+`harness: nvim exited N after P passed, 0 failed`, keeps the end of nvim's raw output
+(progress lines included) and its `NVIM_LOG_FILE`, and exits 2. When that log says
+`uv_loop_close() hang?` (libuv could not close its event loop within the 2 seconds nvim
+allows, which is the known silent 0→1 exit), the harness adds
+`harness: cause: nvim/libuv teardown could not close its event loop`. A future flake
+therefore reads as a `harness:` anomaly rather than as a failing test. `editors/nvim/tests/run.sh
+--self-check` pins all of these paths against fixture output, without nvim or a build;
+the `nvim` group runs it as its second case.
+
 ## 11q: go to definition and the infoview for syntax, binders, imports and instances
 
 Hovers, go to definition and the infoview used to know only about terms. Now (as in
