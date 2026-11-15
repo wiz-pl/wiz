@@ -29,7 +29,8 @@
     "llvm",
     "reuse",
     "serial",
-    "sys"
+    "sys",
+    "wasm"
   ]},
   {"name": "library", "split": 6, "jobs": 4, "default": true, "select": [
     "=bus-crc",
