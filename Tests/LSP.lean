@@ -69,6 +69,13 @@ where
   result (j : Lean.Json) : Lean.Json :=
     (j.getObjVal? "result").toOption.getD ((j.getObjVal? "error").toOption.getD Lean.Json.null)
 
+/-- A request at a raw LSP position `(line, character)`, counted by the client in the
+encoding it negotiated — not converted from an offset here, so a test can check that the
+server reads the client's column in that encoding. -/
+def askAt (srv : LSP.Server) (method : String) (line char : Nat) : IO (LSP.Server × Lean.Json) := do
+  let (srv, out) ← LSP.handle srv (req s!"\{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"{method}\",\"params\":\{\"textDocument\":\{\"uri\":\"file:///t.wiz\"\},\"position\":\{\"line\":{line},\"character\":{char}\}\}}")
+  pure (srv, (out[0]!.getObjVal? "result").toOption.getD ((out[0]!.getObjVal? "error").toOption.getD Lean.Json.null))
+
 def has (j : Lean.Json) (s : String) : Bool := (j.compress.splitOn s).length > 1
 
 /-- Open `src` as the document `uri` (one with a real path, for `include_str`). -/
@@ -1286,6 +1293,16 @@ counts it as two UTF-16 code units or four UTF-8 bytes, not one character. -/
 def compAstralSrc : String :=
   compPartialSrc.replace "def g : Nat := when" "def g : Nat := /- 𝕏😀 -/ when"
 
+/-- A source that puts astral characters in a string (line 1) and in comments before an
+identifier (line 3) and an unknown name (line 4). At line 3 the `x` is scalar offset 24
+but UTF-16 column 26; at line 4 `nope` is scalar offset 26 but UTF-16 column 28. -/
+def astralPosSrc : String := r#"import Prelude
+def s : String := "𝕏😀"
+def x : Nat := 41
+def y : Nat := /- 𝕏😀 -/ x
+def bad : Nat := /- 𝕏😀 -/ nope
+"#
+
 def compBadJsonSrc : String := r#"import Prelude
 syntax (name := when) "when" ident "yes" term "no" term : term
 macro_rules
@@ -1415,6 +1432,42 @@ def extGroup : Group where
           | throw (IO.userError s!"no `yes` at an astral UTF-8 position: {is8.toList.map item}")
         checkEq (col .utf8 (off - 1)) (LSP.getNat y8 ["textEdit", "range", "start", "character"])
         checkEq (col .utf8 off) (LSP.getNat y8 ["textEdit", "range", "end", "character"]) },
+    { name := "11ag: astral positions are UTF-16 in requests, diagnostics and completion", run := fun _ => do
+        -- diagnostics: the published range of `nope` is a UTF-16 column (28), not the
+        -- scalar count (26) and not the UTF-8 byte count (34)
+        let (srv, out) ← openDoc astralPosSrc
+        let some (.arr ds) := LSP.get? out[0]! ["params", "diagnostics"]
+          | throw (IO.userError s!"no diagnostics: {out[0]!.compress}")
+        let some d := ds.find? fun d => has d "nope"
+          | throw (IO.userError s!"no `nope` diagnostic: {out[0]!.compress}")
+        checkEq 4 (LSP.getNat d ["range", "start", "line"])
+        checkEq 28 (LSP.getNat d ["range", "start", "character"])
+        -- hover: a raw client position at UTF-16 column 26 lands on `x`; the same
+        -- scalar column (24) is inside the comment before it, which is the bug this
+        -- case excludes
+        let (_, h) ← askAt srv "textDocument/hover" 3 26
+        check (has h "x : Nat") s!"hover at UTF-16 (3, 26): {h.compress}"
+        let (_, h') ← askAt srv "textDocument/hover" 3 24
+        check (!(has h' "x : Nat")) s!"hover at scalar (3, 24) found `x`: {h'.compress}"
+        -- completion: the request position and the word's edit range are UTF-16
+        let off := offAfter compAstralSrc "when n yes y"
+        let (line, col) := lineCol compAstralSrc (off - 1)
+        let (srv16, _) ← openDoc compAstralSrc
+        let (_, r16) ← askAt srv16 "textDocument/completion" line (col + 3)
+        let some (.arr is16) := LSP.get? r16 ["items"] | throw (IO.userError s!"no items: {r16.compress}")
+        let some y16 := is16.find? fun j => LSP.getStr j ["label"] == "yes"
+          | throw (IO.userError s!"no `yes` at raw UTF-16 ({line}, {col + 3}): {is16.toList.map item}")
+        checkEq (col + 2) (LSP.getNat y16 ["textEdit", "range", "start", "character"])
+        checkEq (col + 3) (LSP.getNat y16 ["textEdit", "range", "end", "character"])
+        -- and a UTF-8 client: the same word is four bytes per astral character
+        let init8 := initCaps "{\"general\":{\"positionEncodings\":[\"utf-8\"]}}"
+        let (srv8, _) ← openDoc compAstralSrc init8
+        let (_, r8) ← askAt srv8 "textDocument/completion" line (col + 7)
+        let some (.arr is8) := LSP.get? r8 ["items"] | throw (IO.userError s!"no items: {r8.compress}")
+        let some y8 := is8.find? fun j => LSP.getStr j ["label"] == "yes"
+          | throw (IO.userError s!"no `yes` at raw UTF-8 ({line}, {col + 7}): {is8.toList.map item}")
+        checkEq (col + 6) (LSP.getNat y8 ["textEdit", "range", "start", "character"])
+        checkEq (col + 7) (LSP.getNat y8 ["textEdit", "range", "end", "character"]) },
     { name := "11ag: a malformed completion result is ignored, without an error", run := fun _ => do
         let (srv, out) ← openDoc compBadJsonSrc
         check (!(has out[0]! "severity\":1")) s!"unexpected error: {out[0]!.compress}"

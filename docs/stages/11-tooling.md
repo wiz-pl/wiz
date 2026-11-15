@@ -918,10 +918,16 @@ string (a label and its insert text) or an object with `label` (required), `inse
   `general.positionEncodings` (LSP 3.17, UTF-16 by default) and converts at every LSP
   boundary (`Wiz/Position.lean`). Completion items' `textEdit` ranges therefore count
   astral characters as two UTF-16 code units or four UTF-8 bytes, and the request's
-  position is decoded the same way.
+  position is decoded the same way. The same conversion is used for hover requests and
+  published diagnostic ranges, so a client that asks for UTF-16 (as the playground does)
+  gets UTF-16 columns everywhere; a case pins raw client columns in a source with astral
+  characters in a string and in comments, rather than computing the expected column with
+  the server's own `toPos`.
 
-Seven cases in the `lsp-ext` group: a DSL keyword hook merged and deduplicated with the
-built-in `Nat`, prefix filtering, astral UTF-16 and UTF-8 positions, a malformed result,
-a malformed registration, a `local` registration staying in its module, and the item
-budget. The self-hosted frontend does not parse the attribute yet; as with 11ae, parity
-is to check and ignore it. Design notes: `wiz-notes/lsp-extensions.md`.
+Eight completion cases (twelve in the `lsp-ext` group): a DSL keyword hook merged and
+deduplicated with the built-in `Nat`, prefix filtering, astral UTF-16 and UTF-8 positions
+for the request and the edit range, a malformed result, a malformed registration, a
+`local` registration staying in its module, the item budget, and the hover/diagnostic
+columns after astral characters in a string or comment. The self-hosted frontend does not
+parse the attribute yet; as with 11ae, parity is to check and ignore it. Design notes:
+`wiz-notes/lsp-extensions.md`.
