@@ -97,11 +97,12 @@ jobs:
           python3 scripts/check-docs-style.py --self-test
           python3 scripts/check-docs-style.py
 
-  # (seconds, no build) The source tarball (scripts/source-tarball.py,
-  # docs/building.md): two builds in different directories and environments are
-  # byte-identical, the manifest matches the archive, and SOURCE_DATE_EPOCH changes
-  # only the metadata. The Nix target (.#release-tarball) is checked with
-  # `nix build --check` in the `package` job.
+  # (seconds, no build) The source tarball and the release supply-chain artifacts
+  # (scripts/source-tarball.py, scripts/release-sbom.py, docs/building.md): two builds
+  # in different directories and environments are byte-identical, the manifest matches
+  # the archive, SOURCE_DATE_EPOCH changes only the metadata, and the SBOM/provenance
+  # parse, match every digest and are byte-identical on a second run. The Nix target
+  # (.#release-tarball) is checked with `nix build --check` in the `package` job.
   source-tarball:
     name: source tarball
     needs: changes
@@ -113,6 +114,9 @@ jobs:
       - name: Two builds are identical, and the manifest matches
         shell: bash
         run: scripts/test-source-tarball.sh
+      - name: SBOMs and provenance parse, match every digest, and are deterministic
+        shell: bash
+        run: python3 scripts/test_release_sbom.py -v
 
   # (seconds, no build) Manifest canonicalization, DSSE/Ed25519 signing and
   # quote verification (scripts/attest).  The unit tests generate a throwaway

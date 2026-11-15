@@ -90,8 +90,30 @@ assert seen == set(files), f"manifest and tarball differ: {seen ^ set(files)}"
 assert m["tree"]["files"] == len(files)
 assert m["tree"]["bytes"] == sum(f["size"] for f in m["files"])
 assert hashlib.sha256(open(path, "rb").read()).hexdigest() == m["tarball"]["sha256"]
+# The source SBOM is beside the tarball and its digest is in the manifest.
+assert m["version"] == m["name"].removeprefix("wiz-")
+sbom_path = path + ".cdx.json"
+sbom_raw = open(sbom_path, "rb").read()
+assert hashlib.sha256(sbom_raw).hexdigest() == m["sbom"]["sha256"], "SBOM digest"
+assert m["sbom"]["file"].endswith(".cdx.json")
+assert m["sbom"]["schema"] == "CycloneDX-1.6"
+sbom = json.loads(sbom_raw)
+assert sbom["bomFormat"] == "CycloneDX" and sbom["specVersion"] == "1.6"
+assert sbom_raw == json.dumps(sbom, sort_keys=True, separators=(",", ":")).encode()
+top = sbom["metadata"]["component"]
+assert {h["alg"]: h["content"] for h in top["hashes"]}["SHA-256"] == m["tarball"]["sha256"]
+by_path = {}
+for component in sbom["components"]:
+    props = {p["name"]: p["value"] for p in component.get("properties", [])}
+    if "wiz:path" in props:
+        by_path[props["wiz:path"]] = {
+            h["alg"]: h["content"] for h in component.get("hashes", [])
+        }["SHA-256"]
+assert set(by_path) == set(files), "the SBOM does not list exactly the source files"
+assert all(by_path[p] == files[p]["sha256"] for p in files), "an SBOM file digest differs"
 PY
 echo "ok: the manifest lists every file, with its size, mode and SHA-256"
+echo "ok: the source SBOM is canonical and matches the tarball and every file"
 
 # --- what the tarball contains, and what it must not ---------------------------------
 prefix=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["name"])' \
@@ -100,7 +122,7 @@ tar -tzf "$a" > "$tmp/names"
 for p in LICENSE COPYING.RUNTIME README.md CHANGELOG.md docs/index.md docs/building.md \
          lib/Prelude.wiz runtime/wiz_rt.h runtime/WizRuntime.lean lakefile.lean \
          lake-manifest.json lean-toolchain Wiz.lean Wiz/Version.lean selfhost/rt.c \
-         scripts/source-tarball.py; do
+         scripts/source-tarball.py scripts/sbom.py scripts/release-sbom.py; do
   grep -qx "$prefix/$p" "$tmp/names" || fail "the tarball has no $p"
 done
 python3 - "$tmp/names" "$prefix" <<'PY'

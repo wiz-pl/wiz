@@ -151,7 +151,7 @@ deterministic source tarball and its manifest; `scripts/source-tarball.py` does 
 for any checkout:
 
 ```sh
-nix build .#release-tarball          # result/ holds the three files below
+nix build .#release-tarball          # result/ holds the four files below
 python3 scripts/source-tarball.py --out dist --mode git
 scripts/test-source-tarball.sh       # the check CI runs
 ```
@@ -162,7 +162,16 @@ The output is
 wiz-<version>-src.tar.gz                 the source tree under one wiz-<version>/ directory
 wiz-<version>-src.tar.gz.manifest.json   canonical JSON: every path, size and SHA-256
 wiz-<version>-src.tar.gz.sha256          the tarball's sha256sum line
+wiz-<version>-src.tar.gz.cdx.json        CycloneDX 1.6 SBOM for the source tree
 ```
+
+The manifest's `sbom` object records the SBOM's file name, SHA-256 and component count.
+The SBOM lists every source file as a component (path, size, mode, SHA-256), plus the
+external inputs and build tools: the five `scripts/bundle-cc.sources` downloads with
+their licence expressions, the locked Nix inputs in `flake.lock`, `lean-toolchain`, the
+release workflow's actions and runner, and Emscripten when the workflow builds the web
+infoview. It contains no timestamps or absolute paths, so it is byte-identical for the
+same tree.
 
 `<version>` is `Wiz/Version.lean`'s version (`0.1.0-dev` today). The tar entries are
 sorted, every mtime is the source date epoch, uid/gid are 0 with empty uname/gname,
@@ -199,9 +208,12 @@ wiz-source-tarball/v1`). Shown formatted; the file is one line:
 {
   "files": [{ "mode": "0644", "path": "LICENSE", "sha256": "…", "size": 35140 }, …],
   "name": "wiz-0.1.0-dev",
+  "version": "0.1.0-dev",
   "revision": "<40-hex commit, or unknown; a dirty checkout ends -dirty>",
   "schema": "wiz-source-tarball/v1",
   "sourceDateEpoch": 1700000000,
+  "sbom": { "components": 764, "file": "wiz-0.1.0-dev-src.tar.gz.cdx.json",
+            "schema": "CycloneDX-1.6", "sha256": "…" },
   "tarball": { "file": "wiz-0.1.0-dev-src.tar.gz", "sha256": "…", "size": 1234567 },
   "tree": { "bytes": 8700000, "files": 580, "sha256": "…" }
 }
@@ -230,8 +242,46 @@ environments and even architectures); binaries are reproducible with the same co
 but differ across C compilers and architectures, so a cross-build's *binary* digest is
 not comparable. The binary release tarball (`scripts/release-tarball.sh`, what tower
 installs) is not yet deterministic: it copies build outputs and adds files in checkout
-order, so its digest can differ between builds of one commit. Signing (DSSE/cosign), an
-SBOM and SLSA provenance are not produced.
+order, so its digest can differ between builds of one commit.
+
+## Release SBOM and provenance
+
+`scripts/release-sbom.py` takes the source tarball, its canonical manifest (and the
+source SBOM recorded in it) and the binary tarball, and writes:
+
+```
+wiz-<arch>-linux.tar.gz.cdx.json   CycloneDX 1.6 for the binary tarball
+provenance.intoto.json             in-toto Statement v1, SLSA provenance v1 predicate
+```
+
+The binary SBOM lists every file in the tarball with its size, mode and SHA-256; the
+bundled C toolchain's `cc/VERSIONS` is recorded, along with the `scripts/bundle-cc.sources`
+inputs, the `flake.lock` Nix inputs, `lean-toolchain`, and the release workflow's actions,
+runner and Emscripten version. Both SBOMs name their licences (Wiz's GPL-3.0-or-later
+with the runtime exception, and the third-party expressions from the NOTICE); the
+runtime exception is recorded as a property because it is not an SPDX-registered
+exception.
+
+The provenance's `subject` is the source tarball, source manifest, source SBOM, binary
+tarball and binary SBOM, each with its SHA-256. Its predicate records the builder id
+(the release workflow and ref), commit, source date epoch, channel, the source tree
+digest, the Lean toolchain hash, the locked Nix inputs and the bundled C inputs. It is a
+**SLSA-style** statement: an in-toto Statement v1 with the SLSA provenance v1 predicate,
+not a hosted SLSA build, and **no SLSA level is claimed** (`wiz:slsaLevelClaimed` is
+null). Signing is optional and uses the E1 offline Ed25519 path
+(`scripts/attest/wiz-attest keygen|sign`): with `--sign-key` the statement is written as
+a DSSE envelope (`provenance.intoto.json.dsse`) plus a detached SSHSIG; without a key it
+is an unsigned claim. The release workflow reads the key material from the
+`WIZ_ATTEST_KEY` secret on pushes and tags, skips signing on pull requests, and skips
+it when the secret is absent.
+
+`python3 scripts/test_release_sbom.py -v` builds a tiny source tree and a fake binary
+tarball and checks that both SBOMs parse, every component digest matches the archive,
+the manifest and provenance digests agree, two runs are byte-identical, a tampered SBOM
+is rejected, and the optional signature verifies. CI runs it in the `source-tarball`
+job, and `release.yml` runs it before generating the assets. A Nix closure can be added
+with `--nix-closure-json` (`nix path-info --json --recursive`); the GitHub release
+tarball is built outside Nix, so only the locked inputs are recorded there.
 
 ## Continuous integration
 
@@ -270,10 +320,13 @@ cached between runs.
   `wiz-docs` (3 days, for debugging). `deploy-docs` then publishes that artifact to
   GitHub Pages. Neither job is a required check, so a Pages outage does not fail the
   suite. See "Documentation site" below.
-* **Source tarball** (the `source-tarball` job): `scripts/test-source-tarball.sh`
-  builds the release source tarball twice in different directories and environments,
-  compares the archives and manifests, and checks the exclusions; the `package` job
-  also runs `nix build .#release-tarball --rebuild` ("Reproducible source tarball").
+* **Source tarball and supply chain** (the `source-tarball` job):
+  `scripts/test-source-tarball.sh` builds the release source tarball twice in different
+  directories and environments, compares the archives, manifests and source SBOM, and
+  checks the exclusions; `scripts/test_release_sbom.py` checks that the source and
+  binary SBOMs and the provenance parse, match every archive digest and are
+  byte-identical on a second run. The `package` job also runs
+  `nix build .#release-tarball --rebuild` ("Reproducible source tarball").
 * **Trust ledger** (the `trust-ledger` job): `scripts/trust-ledger.sh --check` runs the
   `--trust-ledger` mode of the test driver (`Tests/Native.lean`) over `lib/` and the
   axiom-free examples, and compares the sources of trust it finds with

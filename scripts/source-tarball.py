@@ -4,13 +4,15 @@
     scripts/source-tarball.py [--root DIR] [--out DIR] [--mode git|tree|auto]
                              [--name NAME] [--revision REV] [--epoch SECONDS]
 
-Writes three files to OUT (default: the current directory):
+Writes these files to OUT (default: the current directory):
 
     wiz-<version>-src.tar.gz                 the source tree, one top directory
     wiz-<version>-src.tar.gz.manifest.json   canonical JSON (sorted keys, compact, no
                                              trailing newline): every path, its size,
                                              its SHA-256, and the tree digest
     wiz-<version>-src.tar.gz.sha256          the tarball's `sha256sum` line
+    wiz-<version>-src.tar.gz.cdx.json        CycloneDX 1.6 SBOM for the source tree;
+                                             its digest is recorded in the manifest
 
 The tarball is byte-for-byte reproducible for one git commit (and one gzip/zlib):
 entries are sorted, every mtime is the source date epoch, uid/gid are 0 with empty
@@ -40,6 +42,13 @@ import re
 import subprocess
 import sys
 import tarfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+try:
+    import sbom as _sbom
+except ImportError:  # a lone copy still writes the tarball and manifest; no SBOM
+    _sbom = None
 
 SCHEMA = "wiz-source-tarball/v1"
 
@@ -249,6 +258,8 @@ def main(argv: list[str]) -> int:
                                        "'unknown')")
     ap.add_argument("--epoch", help="mtime for every entry (default: "
                                     "SOURCE_DATE_EPOCH, the commit time, or 0)")
+    ap.add_argument("--no-sbom", action="store_true",
+                    help="do not write the CycloneDX source SBOM (default: write it)")
     args = ap.parse_args(argv)
 
     root = os.path.abspath(args.root)
@@ -287,10 +298,12 @@ def main(argv: list[str]) -> int:
     with open(tar_path, "rb") as f:
         tarball_sha = hashlib.sha256(f.read()).hexdigest()
     tarball_size = os.path.getsize(tar_path)
+    version = version_of(root)
 
     manifest = {
         "schema": SCHEMA,
         "name": name,
+        "version": version,
         "revision": revision,
         "sourceDateEpoch": epoch,
         "tarball": {"file": os.path.basename(tar_path),
@@ -298,6 +311,18 @@ def main(argv: list[str]) -> int:
         "tree": {"sha256": tree_digest, "files": len(entries), "bytes": total},
         "files": entries,
     }
+    sbom_path = tar_path + ".cdx.json"
+    if _sbom is None and not args.no_sbom:
+        die("scripts/sbom.py is missing; keep it beside this script or pass --no-sbom")
+    if _sbom is not None and not args.no_sbom:
+        document = _sbom.source_sbom(manifest, root, version=version)
+        data = _sbom.write_canonical(sbom_path, document)
+        manifest["sbom"] = {
+            "schema": f"CycloneDX-{_sbom.CDX_SPEC}",
+            "file": os.path.basename(sbom_path),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "components": len(document.get("components", [])),
+        }
     # Canonical JSON: sorted keys, compact separators, no trailing newline, so the
     # manifest's bytes (and therefore its SHA-256) depend only on its content.
     text = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
@@ -310,6 +335,8 @@ def main(argv: list[str]) -> int:
     print(f"sha256 {tarball_sha}")
     print(f"tree {tree_digest} ({len(entries)} files, {total} bytes)")
     print(manifest_path)
+    if "sbom" in manifest:
+        print(sbom_path)
     return 0
 
 

@@ -228,12 +228,13 @@
             };
           };
 
-          # A deterministic source tarball with a manifest (scripts/source-tarball.py,
-          # docs/building.md "Reproducible source tarball"): sorted entries, epoch
-          # mtimes, uid/gid 0, normalised modes, no .git/caches/build outputs. The
-          # epoch is the flake's commit time (0 for a source archive) and the revision
-          # the commit, so two builds of one commit are byte-identical. `source-tarball`
-          # is the same derivation under the name the docs use.
+          # A deterministic source tarball with a manifest and a CycloneDX SBOM
+          # (scripts/source-tarball.py, docs/building.md "Reproducible source tarball"):
+          # sorted entries, epoch mtimes, uid/gid 0, normalised modes, no
+          # .git/caches/build outputs. The epoch is the flake's commit time (0 for a
+          # source archive) and the revision the commit, so two builds of one commit are
+          # byte-identical. `source-tarball` is the same derivation under the name the
+          # docs use.
           release-tarball =
             let
               revision = self.rev or self.dirtyRev or "unknown";
@@ -243,7 +244,7 @@
               nativeBuildInputs = [ pkgs.python3 ];
             } ''
               mkdir -p $out
-              python3 ${./scripts/source-tarball.py} --root ${./.} --mode tree \
+              python3 ${./scripts}/source-tarball.py --root ${./.} --mode tree \
                 --out $out --revision ${lib.escapeShellArg revision} --epoch ${epoch}
             '';
 
