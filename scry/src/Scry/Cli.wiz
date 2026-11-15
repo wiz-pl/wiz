@@ -3,6 +3,7 @@ import Scry.Query
 import Scry.Parse
 import Scry.CstStore
 import Scry.TaintCmd
+import Scry.DynamicCmd
 import Scry.BenchCmd
 /-!
 # Scry.Cli: the `scry` command line
@@ -41,6 +42,10 @@ def Scry.usage : String :=
   ++ "  taint FILE.c [--rules FILE] [--sarif OUT] [--json] [--allow-errors]\n"
   ++ "              [--fail-on-finding] [--origin-map]\n"
   ++ "                             C -> Wil -> taint -> findings/SARIF\n"
+  ++ "  dynamic FILE.c [--cc PATH] [--json] [--sarif OUT] [--timeout SECS]\n"
+  ++ "              [--no-coverage] [--witness FILE] [--keep] [--work-dir DIR]\n"
+  ++ "              [--no-static]\n"
+  ++ "                             compile/run under ASAN/UBSAN, correlate with taint\n"
   ++ "  bench [--corpus DIR] [--baseline FILE] [--extra DIR]... [--json OUT]\n"
   ++ "        [--markdown OUT] [--update-baseline FILE] [--no-timing] [--quiet]\n"
   ++ "        [--fail-on-regression]\n"
@@ -164,6 +169,7 @@ def Scry.dispatch (args : List String) : EIO Nat := match args with
     | .cons file (.cons out .nil) => Scry.cstCmd file out
     | _ => EIO.fail "usage: scry cst FILE OUT"
   | .cons "taint" rest => Scry.taintCmd rest
+  | .cons "dynamic" rest => Scry.dynCmd rest
   | .cons "bench" rest => Scry.benchCmd rest
   | .cons cmd rest => EIO.fail ("unknown command \"" ++ cmd ++ "\" (see scry help)")
 

@@ -72,6 +72,13 @@ The C frontend in this slice lowers a deliberate subset and reports the rest as
 This split is a measurement decision, not a soundness claim. `wiz-notes/scry-bench.md`
 records the limitation and the cases that are `unknown` today.
 
+## Dynamic evidence
+
+`scry bench --dynamic` also runs the separate corpus in `../dynamic/` (ASan/UBSan/
+coverage). It is reported in its own `dynamic` section and does not change the static
+TPR/FPR metrics or the baseline comparison; a clean dynamic run is not a negative
+static case. See `../dynamic/README.md`.
+
 ## External suites
 
 Nothing from Juliet, OWASP Benchmark or SV-COMP is checked in (and none was present on

@@ -982,3 +982,29 @@ expected `(rule, function, callee, argument)` tuples, and computes:
 (`scry/src/Scry/BenchCmd.wiz`); the S0/S2 corpus and its manifest are in
 `scry/bench/corpus/`, and the policy is in `scry/bench/corpus/README.md`.
 `wiz-notes/scry-bench.md` records the baseline, the corpus size and the limitations.
+
+## Scry: dynamic execution evidence (`scry/src/Scry/Dynamic.wiz`)
+
+`import Scry.Dynamic` is the dynamic-evidence layer, not a second analyser. `scry dynamic
+FILE.c` probes a compiler (AddressSanitizer, then UndefinedBehaviorSanitizer), compiles
+and runs the file, parses the sanitizer stream into `crash`/`ub`/`leak` events, resolves
+the first target-file frame to a `Scry.Origin`, and links the event to the static
+findings/memory warnings at the same source line (else the same function). LLVM coverage
+(`llvm-profdata` + `llvm-cov`) reports which lines executed and whether each static
+site's line was reached.
+
+The evidence is deliberately separate from a finding: `properties.kind = dynamic`,
+`evidenceKind = dynamic`, `claim = none`, and `Scry.DynReport.status` is `ok`/`skipped`/
+`error`. A `validated` event has a recognised sanitizer signature *and* a frame in the
+analysed file; an event without one is kept as `unvalidated`. A clean run says "no event
+on this input" and never proves absence. The small corpus (`scry/bench/dynamic/`) covers
+the prior-art tiers T1 CWE-78/134, T2 CWE-416/476 and T3 CWE-190/787/121, plus a leak;
+`scry bench --dynamic` reports it separately from the static TPR/FPR baseline. CWE-120/
+242/362 are out of scope for a witness (the call is the bug, or concurrency is unmodelled).
+
+The optional `--witness FILE` is a data contract for the future S6a concolic slice
+(`Trace` + `PathCond` + `Flip` + `Witness`): the file supplies input, validation label,
+path condition, model, assumptions and budget, and this command records it with
+`revalidated: false` and `claim: none`. It does not solve, prune or promote anything; no
+solver plumbing lives in the dynamic layer. `wiz-notes/scry-dynamic.md` has the design,
+the trust boundary, the counts and the remaining work.
