@@ -1,6 +1,0 @@
-✖ [465/467] Building Main (19s)
-trace: .> LEAN_PATH=/workspace/wt/doc-serve/.lake/build/lib/lean /home/reuben/.elan/toolchains/leanprover--lean4---v4.35.0/bin/lean /workspace/wt/doc-serve/Main.lean -o /workspace/wt/doc-serve/.lake/build/lib/lean/Main.olean -i /workspace/wt/doc-serve/.lake/build/lib/lean/Main.ilean -c /workspace/wt/doc-serve/.lake/build/ir/Main.c --setup /workspace/wt/doc-serve/.lake/build/ir/Main.setup.json --json
-error: Main.lean:395:63: Unknown constant `Std.HashMap.empty`
-Some required targets logged failures:
-- Main
-error: build failed
