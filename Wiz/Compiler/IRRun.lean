@@ -15,6 +15,10 @@ constructor tag; any other field of one is an error (see `natField`).
 
 namespace Wiz.IR
 
+/-- Lean core has no `Repr` for `ByteArray`; the IR interpreter's error messages print
+a byte buffer as its bytes (stage 21ac). -/
+instance : Repr ByteArray := ⟨fun b _ => "bytes" ++ toString b.toList⟩
+
 inductive IVal where
   | num (n : Nat)
   | tag (t : Nat)
