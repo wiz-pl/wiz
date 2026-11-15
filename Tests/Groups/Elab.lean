@@ -52,6 +52,12 @@ def group : Group where
         fails "def f : (1 x : Type) → Type := fun (ω x) => x" "quantity" },
     { name := "linear identity checks", run := fun _ =>
         ok "def lid {A : Type} (1 x : A) : A := x" },
+    { name := "#260 an unannotated motive for an implicit-typed argument", run := fun _ =>
+        -- `P` is a placeholder for `fun x => …`, applied to both the context's `u` and
+        -- the argument `u` (a repeated variable in the spine): the solution is still a
+        -- pattern (it uses the applied occurrence)
+        okLib ("import Logic\ndef t1 (u : Nat) (h : Nat.beq u 0 = .false) (e : u = 0) : Nat.beq 0 0 = .false :=\n" ++
+          "  Eq.substProp (fun x => Nat.beq x 0 = .false) e h") },
     { name := "self-application escapes the hole's scope", run := fun _ => do
         -- (with pruning, the escaping variable is pruned away and the occurs check fires
         -- instead: either is right)

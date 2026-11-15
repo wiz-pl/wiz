@@ -38,6 +38,16 @@ def matchGroup : Group where
           [".cons .zero (.zero, .succ .zero) .nil"] },
     { name := "tuples of variables infer their type", run := fun _ =>
         ok (matchPrelude ++ "def t1 (A B : Type) (n : Nat) (a : A) (b : B) (r : Vec (A × B) n) : Vec (A × B) (.succ n) := Vec.cons (a, b) r") },
+    { name := "#267 a parameter before the colon that a recursive call changes", run := fun _ =>
+        -- the varying parameter moves after the colon, as Lean does (it used to be
+        -- "recursive call of run must pass the parameter s unchanged")
+        okLib ("import Prelude\ndef run (s : Nat) : List Nat → Nat\n  | .nil => s\n" ++
+          "  | .cons x xs => run (Nat.add s x) xs\n#eval run 1 (.cons 2 (.cons 3 .nil))") ["6"] },
+    { name := "#259 a hypothesis before the colon is refined by the match", run := fun _ =>
+        -- `h : b = .true` depends on the scrutinee, so it is generalised into the match
+        -- (otherwise the `.false` branch sees `h : b = .true`, and `h.1` has no `False`)
+        okLib ("import Logic\ndef f (b : Bool) (h : b = .true) : Nat := match b with\n" ++
+          "  | .true => 0\n  | .false => absurd h.1\n#eval f .true rfl") ["0"] },
     { name := "missing cases are reported", run := fun _ =>
         fails (matchPrelude ++ "def missing : Nat → Nat\n  | .zero => .zero") "missing case" },
     { name := "non-structural recursion is rejected", run := fun _ =>

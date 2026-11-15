@@ -641,9 +641,67 @@ def indexEscapes (g : Globals R) (val : Term R) : Bool :=
     | none => false
   | _ => false
 
+/-- Does a call `f …` in `stx` pass one of the explicit parameters `movedNames` (which
+start at position `prefixLen` of `f`'s binders) differently from its name? (A `@f`
+call names all the binders before them.) -/
+private partial def recCallVaries (name : Name) (prefixLen : Nat) (movedNames : Array Name)
+    (stx : Syntax) : Bool :=
+  match stx with
+  | .node _ k args =>
+    let here := k == "term.app" &&
+      (fun (head : Syntax) (as : Array Syntax) =>
+        if head.isOfKind "term.ident" && (head.getArg 0).getId? == some name then
+          movedNames.zipIdx.any fun (p, i) => match as[i]? with
+            | some a => !(a.isOfKind "term.ident" && (a.getArg 0).getId? == some p)
+            | none => false
+        else if head.isOfKind "term.explicit" && (head.getArg 1).getId? == some name then
+          movedNames.zipIdx.any fun (p, i) => match as[prefixLen + i]? with
+            | some a => !a.isOfKind "term.hole" &&
+                !(a.isOfKind "term.ident" && (a.getArg 0).getId? == some p)
+            | none => false
+        else false) args[0]! args[1]!.args
+    here || args.any (recCallVaries name prefixLen movedNames)
+  | _ => false
+
+/-- (#267) A recursive definition may pass a parameter before the colon differently:
+`def run (s : Nat) : List Nat → Nat | .nil => s | .cons x xs => run (Nat.add s x) xs`.
+The induction hypothesis of a structurally recursive call is only at its parameters
+unchanged, so that call used to be an error ("must pass the parameter s unchanged").
+Lean moves the varying parameter after the colon; do the same here: move the trailing
+explicit binders into the type and match them by variable patterns, i.e. elaborate
+
+    def run : Nat → List Nat → Nat | s, .nil => s | s, .cons x xs => run (Nat.add s x) xs
+
+`none` when no recursive call varies a parameter (the common case), so nothing changes
+for definitions that don't need it. -/
+def varyParamsAsEqns? (name : Name) (cmd : Syntax) : Option Syntax := do
+  guard (cmd.isOfKind "command.defEqns")
+  let groups := (cmd.getArg 3).args
+  -- the trailing run of explicit binders: those are all the explicit parameters
+  let mut g0 := groups.size
+  while g0 > 0 && groups[g0 - 1]!.isOfKind "binder.explicit" do g0 := g0 - 1
+  guard (g0 < groups.size)
+  let prefixLen := (groups.extract 0 g0).foldl (fun n g => n + (binderViews g).size) 0
+  let moved := (groups.extract g0 groups.size).flatMap binderViews
+  let movedNames := moved.map (·.name)
+  guard ((cmd.getArg 5).args.any fun a => recCallVaries name prefixLen movedNames (a.getArg 3))
+  let ident (n : Name) : Syntax := .node {} "term.ident" #[.ident {} n]
+  let kept := groups.extract 0 g0
+  let movedGroups := groups.extract g0 groups.size
+  let newTy := movedGroups.foldr (fun b acc =>
+    Syntax.node cmd.info "term.depArrow" #[b, .atom {} "→", acc]) ((cmd.getArg 4).getArg 1)
+  let cols := movedNames.toList.map fun n => if n == "_" then holeStx else ident n
+  let alts := (cmd.getArg 5).args.map fun a =>
+    let ps := (a.getArg 1).args.filter (!· matches .atom ..)
+    let all := cols ++ ps.toList
+    let sep := (all.flatMap fun c => [Syntax.atom {} ",", c]).drop 1
+    Syntax.node a.info "match.alt" #[a.getArg 0, .node {} "null" sep.toArray, a.getArg 2, a.getArg 3]
+  pure (.node cmd.info "command.defEqns" #[cmd.getArg 0, cmd.getArg 1, cmd.getArg 2,
+    .node {} "null" kept, .node {} "null" #[.atom {} ":", newTy], .node {} "null" alts])
+
 /-- `def f binders : T | p… => rhs …`: the alternatives match the leading explicit
 arguments of `T`; a right-hand side that calls `f` makes it structurally recursive. -/
-def elabDefEqns (name : Name) (cmd : Syntax) (isPartial : Bool := false) :
+private def elabDefEqnsCore (name : Name) (cmd : Syntax) (isPartial : Bool := false) :
     ElabM R (Term R × Term R × Option (Term R)) := do
   let info := cmd.info
   let (ctx, tele) ← elabTelescope { info } (((cmd.getArg 3).args.flatMap binderViews)).toList
@@ -715,6 +773,13 @@ def elabDefEqns (name : Name) (cmd : Syntax) (isPartial : Bool := false) :
   let impl := if rc.isNone || indexEscapes g val then none
     else deriveImpl g name us tele.size names.length pos val
   pure (fullTy, val, impl)
+
+/-- `def f binders : T | p… => rhs …`: a recursive call that changes a parameter before
+the colon moves the (trailing) explicit binders after it first (`varyParamsAsEqns?`,
+#267); the rest is `elabDefEqnsCore`. -/
+def elabDefEqns (name : Name) (cmd : Syntax) (isPartial : Bool := false) :
+    ElabM R (Term R × Term R × Option (Term R)) :=
+  elabDefEqnsCore name ((varyParamsAsEqns? name cmd).getD cmd) isPartial
 
 /-- Does the identifier `n` occur anywhere in `stx`? -/
 partial def mentionsIdent (n : Name) (stx : Syntax) : Bool :=
