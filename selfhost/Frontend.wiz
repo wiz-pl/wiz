@@ -6714,12 +6714,13 @@ def cmpFields (C m helper : String) (np : Nat) : Nat → List CField → List Q 
       match here with
       | .none => cmpFields C m helper np (i + 1) fs qs impl
       | .some c => .cons c (cmpFields C m helper np (i + 1) fs qs impl)
--- `match c with | .lt => .lt | .eq => rest | .gt => .gt`
+-- `match c with | .lt => Ordering.lt | .eq => rest | .gt => Ordering.gt`
+def ordStx (c : String) : Syntax := identStx ("Ordering." +++ c)
 def cmpAfter (c rest : Syntax) : Syntax := matchStx (one c)
-  (.cons (alt1 (dotStx "lt") (dotStx "lt")) (.cons (alt1 (dotStx "eq") rest)
-    (.cons (alt1 (dotStx "gt") (dotStx "gt")) .nil)))
+  (.cons (alt1 (dotStx "lt") (ordStx "lt")) (.cons (alt1 (dotStx "eq") rest)
+    (.cons (alt1 (dotStx "gt") (ordStx "gt")) .nil)))
 def cmpLex : List Syntax → Syntax
-  | .nil => dotStx "eq"
+  | .nil => ordStx "eq"
   | .cons c .nil => c
   | .cons c rest => cmpAfter c (cmpLex rest)
 def cmpAlt (C m helper : String) (np : Nat) (c : Ctor) : Syntax := match c with
@@ -6737,8 +6738,8 @@ def ctorHoles (c : Ctor) : List Syntax := match c with
   | .mk _ _ _ _ impl => holeVars 0 impl
 def crossAlt (c d : Ctor) (less : Bool) : Syntax :=
   let rhs := match less with
-    | .true => dotStx "lt"
-    | .false => dotStx "gt";
+    | .true => ordStx "lt"
+    | .false => ordStx "gt";
   alt2 (ctorPatStx (ctorNameOf c) (ctorHoles c)) (ctorPatStx (ctorNameOf d) (ctorHoles d)) rhs
 def crossRow (i : Nat) (c : Ctor) : Nat → List Ctor → List Syntax
   | j, .nil => .nil
