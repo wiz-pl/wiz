@@ -81,7 +81,7 @@ accepted now, but will fail on 2027-05-14 unless individually reviewed or renewe
 ## Reducing the legacy rows
 
 The migration's 753 rows are not a renewal list: the reviewed base is now 676 rows
-(639 still carrying the migration marker), 77 fewer and just over a 10% reduction. The
+(349 still carrying the migration marker), 77 fewer and just over a 10% reduction. The
 removals are all structural, not a loosening of the gate:
 
 | what was removed | rows | why it was not trust |
@@ -97,7 +97,12 @@ The remaining rows fall into five groups, with the plan for each:
   function) and a `builtin extern:` row (the marshalling). These are the mechanical
   bulk and the next review unit: audit by C symbol against `runtime/` and `c/`, then
   replace the two `legacy:` rows with one reason naming the symbol and its contract.
-  Do not bulk-renew them.
+  Do not bulk-renew them. The OS/runtime modules (`Sys`, `Std`, `IO`, `MVar`, `Handle`,
+  `Ref`, `Intern`, `Session`, `Serial`) had 147 declarations; 290 of their rows now have
+  a symbol-specific reason. `UInt64.ofNat` and `Float64.ofNat` (4 rows) stay legacy:
+  their shared `Nat` marshalling panics at 2^64 while their doc promises modulo/nearest
+  (see `scripts/trust-ffi-audit.sh --legacy`). The remaining FFI rows are the word, array
+  and map modules.
 * **Mutual recursion, 109 `partial` rows.** `Feral` (70), `Json` (9), `SatTactic` (7),
   `BvDecide` (6), `Tagged` (6), `Ring` (2) and the rest are compiled engines. Wiz's
   structural checker does not accept nested/mutual induction here, so they cannot be
@@ -117,10 +122,46 @@ The remaining rows fall into five groups, with the plan for each:
 
 The 35 pure axioms (the foreign types, the seals, `Region`'s `Outlives` evidence and
 `Prelude.castRefl`) now carry a specific reason and the owner `wiz-pl maintainers`; so
-does the kept `UIntN.toNat` native (the word tests pin it in the compiled IR). The FFI
-and engine rows still say `legacy:`; `--strict-legacy` lists them, and the 2027-05-14
-expiry is the deadline for the per-symbol and per-engine review above. `Json.sub` is
-partial by intent (it is an elaboration fence, not recursion) and now has a reason.
+does the kept `UIntN.toNat` native (the word tests pin it in the compiled IR). The
+engine rows and the remaining word/array/map FFI rows still say `legacy:`;
+`--strict-legacy` lists them, and the 2027-05-14 expiry is the deadline for the
+remaining per-symbol (word/array/map) and per-engine review above. The OS/runtime FFI
+rows reviewed in this pass are due 2027-05-01. `Json.sub` is partial by intent (it is an
+elaboration fence, not recursion) and now has a reason. `Prelude` has no `extern`s: its
+`builtin nat`/`string`/`memo` rows are compiler registrations, reviewed as a group with
+the `builtin` rows, not as C bindings.
+
+## Audit cadence
+
+An FFI row is due at its `review` date (the default is 180 days out) and again whenever
+an `extern` declaration, a `WIZ_API` definition or prototype in `runtime/`, `lib/serial.c`
+or `c/`, or the marshalling in `Wiz/Elab/Command.lean` changes. The PR that changes one of
+those re-runs the audit; a new extern without rows fails `trust-ledger.sh --check`, and a
+changed C signature fails the helper below.
+
+An audit checks four things: both rows exist (`axiom name` and
+`builtin extern:SYM:… := name`); `SYM` is defined with the arity and types the marshalling
+codes imply; the reason names `SYM`, the ownership rule (a consumed `wiz_val`, a borrowed
+`const char *`, a copied result, a finalizer), the bounds/error convention, and any
+precondition the Wiz type does not express; and the claim holds for the whole declared
+type, not just the test inputs. If it does not hold, the row stays `legacy:` and the exact
+question goes in the audit report. Do not renew a row you cannot defend.
+
+The `owner` is a named person who read the C and can defend the contract, not a team
+name; `review` is the next due date, at most 180 days out. The author of a new FFI binding
+is not the only signer.
+
+A bad signature is caught by generation, not by eye: `scripts/trust-ffi-audit.sh --check`
+emits `static <result> (*chk_N)(<params>) = SYM;` for every ledger row, using the C types
+the Wiz marshalling implies, then compiles the file against `runtime/wiz_rt.h` and
+`lib/serial.c`. Arity/type drift and a deleted symbol are `cc` errors. `--legacy` is the
+queue for the next pass; `--strict` fails while any FFI row still says `legacy:` and is the
+switch for CI once the word/array/map groups are reviewed too.
+
+```
+scripts/trust-ffi-audit.sh --legacy           # what still needs a reason
+scripts/trust-ffi-audit.sh --check --strict   # generated signature check, no legacy FFI
+```
 
 ## Tests
 

@@ -10,6 +10,9 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* runtime: `IO.arg` past the end returns `""` without the `i + 1` overflow at 2^64-1;
+  `Child.killGroup` after `Child.wait` is `ESRCH` instead of a signal to a possibly
+  reused process group; `Pty.name` uses a thread-local buffer (FFI audit).
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to
