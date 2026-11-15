@@ -1529,7 +1529,7 @@ def chart : Plot.Chart :=
 ```
 
 `Plot.chart title frame` gives 640 × 400 with linear axes; `Plot.size`, `Plot.labels`
-and `Plot.scales Scale.linear Scale.log` set the fixed layout. Points are
+and `Plot.scales Plot.Scale.linear Plot.Scale.log` set the fixed layout. Points are
 exact rationals: `Plot.frac 3 2` is 3/2, `Plot.fracInt (-1) 4` is −1/4, and `(3 : Q)`
 works too. `Plot.boundsOf`/`Plot.logBoundsOf` pad a domain by 5% (all-equal data, one
 point and zero are handled without a degenerate axis); `Plot.niceRange` widens a domain

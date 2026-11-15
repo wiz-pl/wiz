@@ -43,7 +43,7 @@ does not guess), and text metrics (labels are placed by fixed offsets, not measu
 -- ## Numbers
 
 /-- A point in data coordinates. -/
-structure Point where
+structure Plot.Point where
   x : Q
   y : Q
 
@@ -59,10 +59,10 @@ def Plot.fracInt (a : Int) (d : Nat) : Q := match d with
   | .succ k => Q.mk a (Int.ofNat (.succ k)) (Int.ofNat_succ_pos k)
 
 /-- A point from two rationals. -/
-def Plot.pt (x y : Q) : Point := Point.mk x y
+def Plot.pt (x y : Q) : Plot.Point := Plot.Point.mk x y
 
 /-- A point from two naturals. -/
-def Plot.ptNat (x y : Nat) : Point := Point.mk (Q.ofNat x) (Q.ofNat y)
+def Plot.ptNat (x y : Nat) : Plot.Point := Plot.Point.mk (Q.ofNat x) (Q.ofNat y)
 
 /-- `a < b` on rationals, compared by cross-multiplication (both denominators are
 positive, so this is exact). -/
@@ -159,23 +159,23 @@ def Plot.showQ (q : Q) : String :=
 -- ## Scales, steps and ticks
 
 /-- A scale: linear, or base-10 logarithmic (positive data only). -/
-inductive Scale where
+inductive Plot.Scale where
   | linear
   | log
 
 /-- A data interval. -/
-structure Bounds where
+structure Plot.Bounds where
   lo : Q
   hi : Q
 
 /-- A nice step: `mant · 10^exp` with `mant ∈ {1, 2, 5}`. -/
-structure Step where
+structure Plot.Step where
   mant : Nat
   exp : Int
   value : Q
 
 /-- A tick: its value and the exact decimal `mant · 10^exp` it is printed from. -/
-structure Tick where
+structure Plot.Tick where
   value : Q
   mant : Int
   exp : Int
@@ -229,94 +229,72 @@ def Plot.log10Fixed (x : Q) : Int :=
 
 /-- A mark. Stacked bars are not a mark: several bar series are drawn at the same
 positions (see the module comment). -/
-inductive Mark where
+inductive Plot.Mark where
   | line
   | scatter
   | bar
   | step
 
 /-- A named series of points, drawn with one mark. -/
-structure Series where
+structure Plot.Series where
   label : String
-  mark : Mark
-  points : List Point
+  mark : Plot.Mark
+  points : List Plot.Point
 
 /-- An error band: a lower and an upper point per x, filled between them. -/
-structure Band where
+structure Plot.Band where
   label : String
-  lower : List Point
-  upper : List Point
+  lower : List Plot.Point
+  upper : List Plot.Point
 
 /-- The data of a plot. -/
-structure Frame where
-  series : List Series
-  bands : List Band
+structure Plot.Frame where
+  series : List Plot.Series
+  bands : List Plot.Band
 
 /-- A chart: the frame and the fixed layout. -/
-structure Chart where
+structure Plot.Chart where
   title : String
   xlabel : String
   ylabel : String
   width : Nat
   height : Nat
-  xscale : Scale
-  yscale : Scale
-  frame : Frame
+  xscale : Plot.Scale
+  yscale : Plot.Scale
+  frame : Plot.Frame
 
--- Public type names, so callers can write `Plot.Chart` even though the structures are
--- declared in the global namespace (Wiz has no per-module namespaces).
-/-- The point type, as `Plot.Point`. -/
-def Plot.Point : Type := Point
-/-- The series type, as `Plot.Series`. -/
-def Plot.Series : Type := Series
-/-- The band type, as `Plot.Band`. -/
-def Plot.Band : Type := Band
-/-- The frame type, as `Plot.Frame`. -/
-def Plot.Frame : Type := Frame
-/-- The chart type, as `Plot.Chart`. -/
-def Plot.Chart : Type := Chart
-/-- The scale type, as `Plot.Scale`. -/
-def Plot.Scale : Type := Scale
-/-- The mark type, as `Plot.Mark`. -/
-def Plot.Mark : Type := Mark
-/-- The bounds type, as `Plot.Bounds`. -/
-def Plot.Bounds : Type := Bounds
-/-- The step type, as `Plot.Step`. -/
-def Plot.Step : Type := Step
-/-- The tick type, as `Plot.Tick`. -/
-def Plot.Tick : Type := Tick
 
 /-- A line series. -/
-def Plot.line (label : String) (pts : List Point) : Series := Series.mk label .line pts
+def Plot.line (label : String) (pts : List Plot.Point) : Plot.Series := Plot.Series.mk label .line pts
 /-- A scatter series. -/
-def Plot.scatter (label : String) (pts : List Point) : Series := Series.mk label .scatter pts
+def Plot.scatter (label : String) (pts : List Plot.Point) : Plot.Series := Plot.Series.mk label .scatter pts
 /-- A bar series. -/
-def Plot.bar (label : String) (pts : List Point) : Series := Series.mk label .bar pts
+def Plot.bar (label : String) (pts : List Plot.Point) : Plot.Series := Plot.Series.mk label .bar pts
 /-- A step series (horizontal, then vertical, between consecutive points). -/
-def Plot.step (label : String) (pts : List Point) : Series := Series.mk label .step pts
+def Plot.step (label : String) (pts : List Plot.Point) : Plot.Series := Plot.Series.mk label .step pts
 
 /-- An error band. -/
-def Plot.band (label : String) (lower upper : List Point) : Band := Band.mk label lower upper
+def Plot.band (label : String) (lower upper : List Plot.Point) : Plot.Band := Plot.Band.mk label lower upper
 
 /-- A frame with series and no bands. -/
-def Plot.frame (series : List Series) : Frame := Frame.mk series .nil
+def Plot.frame (series : List Plot.Series) : Plot.Frame := Plot.Frame.mk series .nil
 
 /-- Add bands to a frame. -/
-def Plot.withBands (bands : List Band) (f : Frame) : Frame := Frame.mk f.series bands
+def Plot.withBands (bands : List Plot.Band) (f : Plot.Frame) : Plot.Frame := Plot.Frame.mk f.series bands
 
 /-- A chart with a title and default layout (640 × 400, linear axes, no axis labels). -/
-def Plot.chart (title : String) (f : Frame) : Chart :=
-  Chart.mk title "" "" 640 400 .linear .linear f
+def Plot.chart (title : String) (f : Plot.Frame) : Plot.Chart :=
+  Plot.Chart.mk title "" "" 640 400 .linear .linear f
 
 /-- Set the axis labels. -/
-def Plot.labels (xlabel ylabel : String) (c : Chart) : Chart :=
-  Chart.mk c.title xlabel ylabel c.width c.height c.xscale c.yscale c.frame
+def Plot.labels (xlabel ylabel : String) (c : Plot.Chart) : Plot.Chart :=
+  Plot.Chart.mk c.title xlabel ylabel c.width c.height c.xscale c.yscale c.frame
 /-- Set the fixed size, in CSS pixels. -/
-def Plot.size (width height : Nat) (c : Chart) : Chart :=
-  Chart.mk c.title c.xlabel c.ylabel width height c.xscale c.yscale c.frame
+def Plot.size (width height : Nat) (c : Plot.Chart) : Plot.Chart :=
+  Plot.Chart.mk c.title c.xlabel c.ylabel width height c.xscale c.yscale c.frame
 /-- Set the two scales. -/
-def Plot.scales (xscale yscale : Scale) (c : Chart) : Chart :=
-  Chart.mk c.title c.xlabel c.ylabel c.width c.height xscale yscale c.frame
+def Plot.scales (xscale yscale : Plot.Scale) (c : Plot.Chart) : Plot.Chart :=
+  Plot.Chart.mk c.title c.xlabel c.ylabel c.width c.height xscale yscale c.frame
 
 /-- The smaller of a value and a list. -/
 def Plot.minOf (x : Q) : List Q → Q
@@ -331,22 +309,22 @@ def Plot.maxOf (x : Q) : List Q → Q
 /-- Pad an interval by 5% of its width on each side. All-equal data has no width: at zero
 the interval becomes `[-1, 1]`, elsewhere `v ± |v|/20`, so the point is centred and the
 scale is never degenerate. -/
-def Plot.padBounds (lo hi : Q) : Bounds :=
+def Plot.padBounds (lo hi : Q) : Plot.Bounds :=
   let r := Q.sub hi lo;
   match Plot.qEq r 0 with
   | .true =>
     let d := match Plot.qEq lo 0 with
       | .true => 1
       | .false => Q.div (Q.abs lo) 20;
-    Bounds.mk (Q.sub lo d) (Q.add hi d)
+    Plot.Bounds.mk (Q.sub lo d) (Q.add hi d)
   | .false =>
     let d := Q.div r 20;
-    Bounds.mk (Q.sub lo d) (Q.add hi d)
+    Plot.Bounds.mk (Q.sub lo d) (Q.add hi d)
 
 /-- A linear domain from values: min/max, optionally including zero (bars), padded. -/
-def Plot.boundsOf (vals : List Q) (includeZero : Bool) : Bounds :=
+def Plot.boundsOf (vals : List Q) (includeZero : Bool) : Plot.Bounds :=
   match vals with
-  | .nil => Bounds.mk (-1) 1
+  | .nil => Plot.Bounds.mk (-1) 1
   | .cons v vs =>
     let lo := Plot.minOf v vs;
     let hi := Plot.maxOf v vs;
@@ -360,10 +338,10 @@ def Plot.boundsOf (vals : List Q) (includeZero : Bool) : Bounds :=
 
 /-- A log domain: the smallest and largest positive value, widened to whole decades.
 No positive value: `[1, 10]` (an empty log plot, not a NaN). -/
-def Plot.logBoundsOf (vals : List Q) : Bounds :=
+def Plot.logBoundsOf (vals : List Q) : Plot.Bounds :=
   let ps := List.filter (fun v => Plot.qLt 0 v) vals;
   match ps with
-  | .nil => Bounds.mk 1 10
+  | .nil => Plot.Bounds.mk 1 10
   | .cons v vs =>
     let mn := Plot.minOf v vs;
     let mx := Plot.maxOf v vs;
@@ -375,40 +353,40 @@ def Plot.logBoundsOf (vals : List Q) : Bounds :=
     let e2 := match Int.beq e1 e2 with
       | .true => Int.add e1 1
       | .false => e2;
-    Bounds.mk (Plot.pow10Q e1) (Plot.pow10Q e2)
+    Plot.Bounds.mk (Plot.pow10Q e1) (Plot.pow10Q e2)
 
 /-- The x values of the series. -/
-def Plot.seriesXs : List Series → List Q
+def Plot.seriesXs : List Plot.Series → List Q
   | .nil => .nil
   | .cons s ss => List.append (List.map (fun p => p.x) s.points) (Plot.seriesXs ss)
 
 /-- The y values of the series. -/
-def Plot.seriesYs : List Series → List Q
+def Plot.seriesYs : List Plot.Series → List Q
   | .nil => .nil
   | .cons s ss => List.append (List.map (fun p => p.y) s.points) (Plot.seriesYs ss)
 
 /-- The x values of the bands (their lower and upper edges share x). -/
-def Plot.bandXs : List Band → List Q
+def Plot.bandXs : List Plot.Band → List Q
   | .nil => .nil
   | .cons b bs =>
     List.append (List.append (List.map (fun p => p.x) b.lower) (List.map (fun p => p.x) b.upper))
       (Plot.bandXs bs)
 
 /-- The y values of the bands, both edges. -/
-def Plot.bandYs : List Band → List Q
+def Plot.bandYs : List Plot.Band → List Q
   | .nil => .nil
   | .cons b bs =>
     List.append (List.append (List.map (fun p => p.y) b.lower) (List.map (fun p => p.y) b.upper))
       (Plot.bandYs bs)
 
 /-- Every x value of a frame. -/
-def Plot.frameXs (f : Frame) : List Q := List.append (Plot.seriesXs f.series) (Plot.bandXs f.bands)
+def Plot.frameXs (f : Plot.Frame) : List Q := List.append (Plot.seriesXs f.series) (Plot.bandXs f.bands)
 
 /-- Every y value of a frame. -/
-def Plot.frameYs (f : Frame) : List Q := List.append (Plot.seriesYs f.series) (Plot.bandYs f.bands)
+def Plot.frameYs (f : Plot.Frame) : List Q := List.append (Plot.seriesYs f.series) (Plot.bandYs f.bands)
 
 /-- Whether any series is bars (bars include zero in a linear domain). -/
-def Plot.hasBar (f : Frame) : Bool :=
+def Plot.hasBar (f : Plot.Frame) : Bool :=
   List.any (fun s => match s.mark with
     | .bar => .true
     | .line => .false
@@ -416,12 +394,12 @@ def Plot.hasBar (f : Frame) : Bool :=
     | .step => .false) f.series
 
 /-- The x domain of a chart. -/
-def Plot.xDomain (c : Chart) : Bounds := match c.xscale with
+def Plot.xDomain (c : Plot.Chart) : Plot.Bounds := match c.xscale with
   | .linear => Plot.boundsOf (Plot.frameXs c.frame) .false
   | .log => Plot.logBoundsOf (Plot.frameXs c.frame)
 
 /-- The y domain of a chart. Bars include zero on a linear axis. -/
-def Plot.yDomain (c : Chart) : Bounds := match c.yscale with
+def Plot.yDomain (c : Plot.Chart) : Plot.Bounds := match c.yscale with
   | .linear => Plot.boundsOf (Plot.frameYs c.frame) (Plot.hasBar c.frame)
   | .log => Plot.logBoundsOf (Plot.frameYs c.frame)
 
@@ -429,9 +407,9 @@ def Plot.yDomain (c : Chart) : Bounds := match c.yscale with
 
 /-- A nice step for an interval of width `range` and about `target` ticks: the smallest
 of `1, 2, 5, 10` times a power of ten that is at least `range / target`. -/
-def Plot.niceStep (range : Q) (target : Nat) : Step :=
+def Plot.niceStep (range : Q) (target : Nat) : Plot.Step :=
   match Plot.qLe range 0 with
-  | .true => Step.mk 1 0 1
+  | .true => Plot.Step.mk 1 0 1
   | .false =>
     let t := Nat.max 1 target;
     let raw := Q.div range (Q.ofNat t);
@@ -446,8 +424,8 @@ def Plot.niceStep (range : Q) (target : Nat) : Step :=
           | .true => 5
           | .false => 10;
     match Nat.beq m 10 with
-    | .true => Step.mk 1 (Int.add e 1) (Q.mul 10 p)
-    | .false => Step.mk m e (Q.mul (Q.ofNat m) p)
+    | .true => Plot.Step.mk 1 (Int.add e 1) (Q.mul 10 p)
+    | .false => Plot.Step.mk m e (Q.mul (Q.ofNat m) p)
 
 /-- `ceil (a / b)` for integers, `b > 0`. -/
 def Plot.ceilDivInt (a b : Int) : Int :=
@@ -466,15 +444,15 @@ def Plot.floorDivInt (a b : Int) : Int :=
 so the axis starts and ends on ticks. This is the usual plotting convention; `Plot.svg`
 uses the padded domain itself (the ticks inside it), and renderers that want exact
 endpoints can call this. -/
-def Plot.niceRange (lo hi : Q) (target : Nat) : Bounds :=
+def Plot.niceRange (lo hi : Q) (target : Nat) : Plot.Bounds :=
   let b := Plot.padBounds lo hi;
   let s := Plot.niceStep (Q.sub b.hi b.lo) target;
   let kLo := Plot.floorDivInt (Int.mul b.lo.num s.value.den) (Int.mul b.lo.den s.value.num);
   let kHi := Plot.ceilDivInt (Int.mul b.hi.num s.value.den) (Int.mul b.hi.den s.value.num);
-  Bounds.mk (Q.mul (Q.ofInt kLo) s.value) (Q.mul (Q.ofInt kHi) s.value)
+  Plot.Bounds.mk (Q.mul (Q.ofInt kLo) s.value) (Q.mul (Q.ofInt kHi) s.value)
 
 /-- The ticks `k · step` of a step, from the first one inside the domain. -/
-partial def Plot.ticksStepGo (hi : Q) (s : Step) (k : Int) (fuel : Nat) : List Tick :=
+partial def Plot.ticksStepGo (hi : Q) (s : Plot.Step) (k : Int) (fuel : Nat) : List Plot.Tick :=
   match fuel with
   | .zero => .nil
   | .succ f =>
@@ -482,26 +460,26 @@ partial def Plot.ticksStepGo (hi : Q) (s : Step) (k : Int) (fuel : Nat) : List T
     let v := Q.mul (Q.ofInt p.1) (Plot.pow10Q p.2);
     match Plot.qLe v hi with
     | .false => .nil
-    | .true => .cons (Tick.mk v p.1 p.2) (Plot.ticksStepGo hi s (Int.add k 1) f)
+    | .true => .cons (Plot.Tick.mk v p.1 p.2) (Plot.ticksStepGo hi s (Int.add k 1) f)
 
 /-- The ticks of a nice step that lie in a domain, left to right. -/
-def Plot.ticksWith (b : Bounds) (s : Step) (target : Nat) : List Tick :=
+def Plot.ticksWith (b : Plot.Bounds) (s : Plot.Step) (target : Nat) : List Plot.Tick :=
   let k0 := Plot.ceilDivInt (Int.mul b.lo.num s.value.den) (Int.mul b.lo.den s.value.num);
   Plot.ticksStepGo b.hi s k0 (Nat.add 16 (Nat.mul 4 (Nat.max 1 target)))
 
 /-- Linear nice ticks: at most about `target` of them, each an integer multiple of a
 `1/2/5 × 10^k` step. -/
-def Plot.linearTicks (b : Bounds) (target : Nat) : List Tick :=
+def Plot.linearTicks (b : Plot.Bounds) (target : Nat) : List Plot.Tick :=
   Plot.ticksWith b (Plot.niceStep (Q.sub b.hi b.lo) target) target
 
 /-- The `1`, `2` and `5` candidates of one decade, in order. -/
-def Plot.mantTicks (e : Int) : List Tick :=
-  .cons (Tick.mk (Plot.pow10Q e) 1 e)
-    (.cons (Tick.mk (Q.mul 2 (Plot.pow10Q e)) 2 e)
-      (.cons (Tick.mk (Q.mul 5 (Plot.pow10Q e)) 5 e) .nil))
+def Plot.mantTicks (e : Int) : List Plot.Tick :=
+  .cons (Plot.Tick.mk (Plot.pow10Q e) 1 e)
+    (.cons (Plot.Tick.mk (Q.mul 2 (Plot.pow10Q e)) 2 e)
+      (.cons (Plot.Tick.mk (Q.mul 5 (Plot.pow10Q e)) 5 e) .nil))
 
 /-- The `1/2/5` candidates of the decades `e, e+1, …`. -/
-partial def Plot.logGo (b : Bounds) (e : Int) (fuel : Nat) : List Tick :=
+partial def Plot.logGo (b : Plot.Bounds) (e : Int) (fuel : Nat) : List Plot.Tick :=
   match fuel with
   | .zero => .nil
   | .succ f =>
@@ -519,7 +497,7 @@ partial def Plot.thin {A : Type} (k : Nat) : List A → List A
 
 /-- Log ticks: `1, 2, 5 × 10^e` inside the domain. A domain of one or two decades shows
 the `2` and `5` too; a wider one uses decades only, thinned to about `target` ticks. -/
-def Plot.logTicks (b : Bounds) (target : Nat) : List Tick :=
+def Plot.logTicks (b : Plot.Bounds) (target : Nat) : List Plot.Tick :=
   let e0 := Plot.floorLog10 b.lo;
   let e1 := Plot.floorLog10 b.hi;
   let fuel := Int.toNat (Int.add (Int.sub e1 e0) 1);
@@ -534,12 +512,12 @@ def Plot.logTicks (b : Bounds) (target : Nat) : List Tick :=
     Plot.thin stride decades
 
 /-- The ticks of a chart's x axis. -/
-def Plot.xTicks (c : Chart) : List Tick := match c.xscale with
+def Plot.xTicks (c : Plot.Chart) : List Plot.Tick := match c.xscale with
   | .linear => Plot.linearTicks (Plot.xDomain c) 6
   | .log => Plot.logTicks (Plot.xDomain c) 6
 
 /-- The ticks of a chart's y axis. -/
-def Plot.yTicks (c : Chart) : List Tick := match c.yscale with
+def Plot.yTicks (c : Plot.Chart) : List Plot.Tick := match c.yscale with
   | .linear => Plot.linearTicks (Plot.yDomain c) 6
   | .log => Plot.logTicks (Plot.yDomain c) 6
 
@@ -547,22 +525,19 @@ def Plot.yTicks (c : Chart) : List Tick := match c.yscale with
 
 /-- The plot rectangle inside the SVG: space for the y labels on the left and the x
 labels below. -/
-structure Rect where
+structure Plot.Rect where
   left : Nat
   top : Nat
   width : Nat
   height : Nat
 
-/-- The rectangle type, as `Plot.Rect`. -/
-def Plot.Rect : Type := Rect
-
 /-- The fixed layout: 64 px left, 32 px top, 16 px right, 48 px bottom. Widths and
 heights below the margins are clamped to one pixel (a tiny canvas is cramped but not
 invalid SVG). -/
-def Plot.rect (c : Chart) : Rect :=
+def Plot.rect (c : Plot.Chart) : Plot.Rect :=
   let w := Nat.max 1 (Nat.sub (Nat.sub c.width 64) 16);
   let h := Nat.max 1 (Nat.sub (Nat.sub c.height 32) 48);
-  Rect.mk 64 32 w h
+  Plot.Rect.mk 64 32 w h
 
 /-- A rounded offset clamped into `[0, span]` (a point just outside the domain, from
 rounding, draws on the border rather than outside the plot). -/
@@ -575,7 +550,7 @@ def Plot.clampOffset (span : Nat) (k : Int) : Nat :=
   | .false => Int.toNat k
 
 /-- The pixel offset of a value on a linear scale. -/
-def Plot.linearOffset (b : Bounds) (v : Q) (span : Nat) : Nat :=
+def Plot.linearOffset (b : Plot.Bounds) (v : Q) (span : Nat) : Nat :=
   let r := Q.sub b.hi b.lo;
   match Plot.qEq r 0 with
   | .true => 0
@@ -584,7 +559,7 @@ def Plot.linearOffset (b : Bounds) (v : Q) (span : Nat) : Nat :=
     Plot.clampOffset span (Plot.qRound (Q.mul t (Q.ofNat span)))
 
 /-- The pixel offset of a positive value on a log scale. -/
-def Plot.logOffset (b : Bounds) (v : Q) (span : Nat) : Nat :=
+def Plot.logOffset (b : Plot.Bounds) (v : Q) (span : Nat) : Nat :=
   let l0 := Plot.log10Fixed b.lo;
   let l1 := Plot.log10Fixed b.hi;
   let lv := Plot.log10Fixed v;
@@ -598,7 +573,7 @@ def Plot.logOffset (b : Bounds) (v : Q) (span : Nat) : Nat :=
       Plot.clampOffset span (Plot.intRoundDiv num den)
 
 /-- The x pixel of a value. -/
-def Plot.xAt (c : Chart) (b : Bounds) (v : Q) : Nat :=
+def Plot.xAt (c : Plot.Chart) (b : Plot.Bounds) (v : Q) : Nat :=
   let r := Plot.rect c;
   let off := match c.xscale with
     | .linear => Plot.linearOffset b v r.width
@@ -606,7 +581,7 @@ def Plot.xAt (c : Chart) (b : Bounds) (v : Q) : Nat :=
   Nat.add r.left off
 
 /-- The y pixel of a value (`y` grows down in SVG). -/
-def Plot.yAt (c : Chart) (b : Bounds) (v : Q) : Nat :=
+def Plot.yAt (c : Plot.Chart) (b : Plot.Bounds) (v : Q) : Nat :=
   let r := Plot.rect c;
   let off := match c.yscale with
     | .linear => Plot.linearOffset b v r.height
@@ -614,7 +589,7 @@ def Plot.yAt (c : Chart) (b : Bounds) (v : Q) : Nat :=
   Nat.add r.top (Nat.sub r.height off)
 
 /-- Whether a point can be drawn on the chart (positive where the axis is log). -/
-def Plot.visible (c : Chart) (p : Point) : Bool :=
+def Plot.visible (c : Plot.Chart) (p : Plot.Point) : Bool :=
   let okX : Bool := match c.xscale with
     | .linear => .true
     | .log => Plot.qLt 0 p.x;
@@ -624,11 +599,11 @@ def Plot.visible (c : Chart) (p : Point) : Bool :=
   Bool.and okX okY
 
 /-- The drawable points of a series, in order. -/
-def Plot.visiblePoints (c : Chart) (s : Series) : List Point :=
+def Plot.visiblePoints (c : Plot.Chart) (s : Plot.Series) : List Plot.Point :=
   List.filter (Plot.visible c) s.points
 
 /-- Pixel coordinates of points. -/
-def Plot.pixelPoints (c : Chart) (xb yb : Bounds) : List Point → List (Nat × Nat)
+def Plot.pixelPoints (c : Plot.Chart) (xb yb : Plot.Bounds) : List Plot.Point → List (Nat × Nat)
   | .nil => .nil
   | .cons p ps => .cons (Plot.xAt c xb p.x, Plot.yAt c yb p.y) (Plot.pixelPoints c xb yb ps)
 
@@ -680,7 +655,7 @@ def Plot.esc (s : String) : String :=
   String.join (List.map Plot.escChar (String.chars s))
 
 /-- The `mark` as the JSON renderer's name for it. -/
-def Plot.markName : Mark → String
+def Plot.markName : Plot.Mark → String
   | .line => "line"
   | .scatter => "scatter"
   | .bar => "bar"
@@ -691,17 +666,17 @@ def Plot.attr (name value : String) : String :=
   String.append " " (String.append name (String.append "=\"" (String.append (Plot.esc value) "\"")))
 
 /-- Pair each series with its index (for the palette). -/
-def Plot.indexSeries : List Series → Nat → List (Nat × Series)
+def Plot.indexSeries : List Plot.Series → Nat → List (Nat × Plot.Series)
   | .nil, _ => .nil
   | .cons s ss, i => .cons (i, s) (Plot.indexSeries ss (Nat.succ i))
 
 /-- Pair each band with its index. -/
-def Plot.indexBands : List Band → Nat → List (Nat × Band)
+def Plot.indexBands : List Plot.Band → Nat → List (Nat × Plot.Band)
   | .nil, _ => .nil
   | .cons b bs, i => .cons (i, b) (Plot.indexBands bs (Nat.succ i))
 
 /-- The top-left legend: labels in series order, with a swatch of each colour. -/
-def Plot.legendGo (r : Rect) (xmax : Nat) : List (Nat × Series) → List String
+def Plot.legendGo (r : Plot.Rect) (xmax : Nat) : List (Nat × Plot.Series) → List String
   | .nil => .nil
   | .cons (i, s) ss => match String.isEmpty s.label with
     | .true => Plot.legendGo r xmax ss
@@ -724,7 +699,7 @@ def Plot.legendGo (r : Rect) (xmax : Nat) : List (Nat × Series) → List String
 
 /-- The legend's white plate, then its entries. `n` is the number of labelled series
 and `xmax` the longest label, which fixes the plate's size (no text measurement). -/
-def Plot.legend (c : Chart) (r : Rect) (n xmax : Nat) : List String :=
+def Plot.legend (c : Plot.Chart) (r : Plot.Rect) (n xmax : Nat) : List String :=
   match Nat.beq n 0 with
   | .true => .nil
   | .false =>
@@ -739,19 +714,19 @@ def Plot.legend (c : Chart) (r : Rect) (n xmax : Nat) : List String :=
     .cons plate (Plot.legendGo r xmax (Plot.indexSeries c.frame.series 0))
 
 /-- The number of labelled series. -/
-def Plot.labelledCount : List Series → Nat
+def Plot.labelledCount : List Plot.Series → Nat
   | .nil => 0
   | .cons s ss => match String.isEmpty s.label with
     | .true => Plot.labelledCount ss
     | .false => Nat.succ (Plot.labelledCount ss)
 
 /-- The longest label. -/
-def Plot.labelWidth : List Series → Nat
+def Plot.labelWidth : List Plot.Series → Nat
   | .nil => 0
   | .cons s ss => Nat.max (String.length s.label) (Plot.labelWidth ss)
 
 /-- One band's polygon. -/
-def Plot.bandSvg (c : Chart) (xb yb : Bounds) (i : Nat) (b : Band) : List String :=
+def Plot.bandSvg (c : Plot.Chart) (xb yb : Plot.Bounds) (i : Nat) (b : Plot.Band) : List String :=
   let lo := Plot.pixelPoints c xb yb (List.filter (Plot.visible c) b.lower);
   let hi := Plot.pixelPoints c xb yb (List.filter (Plot.visible c) b.upper);
   match lo with
@@ -774,7 +749,7 @@ def Plot.scatterSvg (ps : List (Nat × Nat)) (colour : String) : List String :=
 
 /-- The rectangles of a bar series. The baseline is zero on a linear axis, the bottom of
 the plot on a log axis. -/
-def Plot.barSvg (c : Chart) (xb yb : Bounds) (i : Nat) (s : Series) : List String :=
+def Plot.barSvg (c : Plot.Chart) (xb yb : Plot.Bounds) (i : Nat) (s : Plot.Series) : List String :=
   let r := Plot.rect c;
   let ps := Plot.visiblePoints c s;
   let n := Nat.max 1 (List.length ps);
@@ -783,7 +758,7 @@ def Plot.barSvg (c : Chart) (xb yb : Bounds) (i : Nat) (s : Series) : List Strin
   let base := match c.yscale with
     | .linear => Plot.yAt c yb 0
     | .log => Nat.add r.top r.height;
-  let one := fun (p : Point) =>
+  let one := fun (p : Plot.Point) =>
     let x := Plot.xAt c xb p.x;
     let y := Plot.yAt c yb p.y;
     let top := match Nat.le y base with
@@ -802,7 +777,7 @@ def Plot.barSvg (c : Chart) (xb yb : Bounds) (i : Nat) (s : Series) : List Strin
   List.map one ps
 
 /-- One line, scatter or step series. -/
-def Plot.markSvg (c : Chart) (xb yb : Bounds) (i : Nat) (s : Series) : List String :=
+def Plot.markSvg (c : Plot.Chart) (xb yb : Plot.Bounds) (i : Nat) (s : Plot.Series) : List String :=
   let ps := Plot.pixelPoints c xb yb (Plot.visiblePoints c s);
   let colour := Plot.colour i;
   match s.mark with
@@ -824,7 +799,7 @@ def Plot.markSvg (c : Chart) (xb yb : Bounds) (i : Nat) (s : Series) : List Stri
   | .bar => Plot.barSvg c xb yb i s
 
 /-- The grid, axis lines, tick marks and tick labels. -/
-def Plot.axesSvg (c : Chart) (r : Rect) (xb yb : Bounds) : List String :=
+def Plot.axesSvg (c : Plot.Chart) (r : Plot.Rect) (xb yb : Plot.Bounds) : List String :=
   let left := r.left;
   let top := r.top;
   let right := Nat.add left r.width;
@@ -889,7 +864,7 @@ def Plot.axesSvg (c : Chart) (r : Rect) (xb yb : Bounds) : List String :=
     (List.append border (List.append (List.concat xticks) (List.concat yticks))))
 
 /-- The title and the two axis labels. -/
-def Plot.textSvg (c : Chart) (r : Rect) : List String :=
+def Plot.textSvg (c : Plot.Chart) (r : Plot.Rect) : List String :=
   let w := c.width;
   let title : List String := match String.isEmpty c.title with
     | .true => .nil
@@ -924,7 +899,7 @@ def Plot.textSvg (c : Chart) (r : Rect) : List String :=
   List.append title (List.append xlabel ylabel)
 
 /-- The deterministic SVG document of a chart. -/
-def Plot.svg (c : Chart) : String :=
+def Plot.svg (c : Plot.Chart) : String :=
   let xb := Plot.xDomain c;
   let yb := Plot.yDomain c;
   let r := Plot.rect c;
@@ -960,36 +935,36 @@ def Plot.svg (c : Chart) : String :=
 -- ## JSON (for a JavaScript renderer, and the notebook hook)
 
 /-- A tick as JSON: exact decimal value and label. -/
-def Plot.tickJson (t : Tick) : Json :=
+def Plot.tickJson (t : Plot.Tick) : Json :=
   Json.mkObj
     (.cons (Json.field "value" (.dec (Plot.showDec t.mant t.exp)))
       (.cons (Json.field "label" (.str (Plot.showDec t.mant t.exp))) .nil))
 
 /-- A point as JSON: `[x, y]`, decimal strings (JSON numbers keep their source text in
 `Json.dec`, so a renderer parses them as doubles if it wants). -/
-def Plot.pointJson (p : Point) : Json :=
+def Plot.pointJson (p : Plot.Point) : Json :=
   Json.mkArr (.cons (.dec (Plot.showQ p.x)) (.cons (.dec (Plot.showQ p.y)) .nil))
 
 /-- A bounds pair as JSON: `{"min": …, "max": …}`. -/
-def Plot.boundsJson (b : Bounds) : Json :=
+def Plot.boundsJson (b : Plot.Bounds) : Json :=
   Json.mkObj
     (.cons (Json.field "min" (.dec (Plot.showQ b.lo)))
       (.cons (Json.field "max" (.dec (Plot.showQ b.hi))) .nil))
 
 /-- A scale's name. -/
-def Plot.scaleName : Scale → String
+def Plot.scaleName : Plot.Scale → String
   | .linear => "linear"
   | .log => "log"
 
 /-- A series as JSON. -/
-def Plot.seriesJson (s : Series) : Json :=
+def Plot.seriesJson (s : Plot.Series) : Json :=
   Json.mkObj
     (.cons (Json.field "label" (.str s.label))
       (.cons (Json.field "mark" (.str (Plot.markName s.mark)))
         (.cons (Json.field "points" (Json.mkArr (List.map Plot.pointJson s.points))) .nil)))
 
 /-- A band as JSON. -/
-def Plot.bandJson (b : Band) : Json :=
+def Plot.bandJson (b : Plot.Band) : Json :=
   Json.mkObj
     (.cons (Json.field "label" (.str b.label))
       (.cons (Json.field "lower" (Json.mkArr (List.map Plot.pointJson b.lower)))
@@ -997,7 +972,7 @@ def Plot.bandJson (b : Band) : Json :=
 
 /-- The chart as JSON: the data, domains, ticks and layout, for a JavaScript renderer.
 The schema is stable and documented in `docs/libraries.md`. -/
-def Plot.toJson (c : Chart) : Json :=
+def Plot.toJson (c : Plot.Chart) : Json :=
   Json.mkObj
     (.cons (Json.field "title" (.str c.title))
       (.cons (Json.field "xlabel" (.str c.xlabel))
@@ -1016,7 +991,7 @@ def Plot.toJson (c : Chart) : Json :=
                     (.cons (Json.field "bands" (Json.mkArr (List.map Plot.bandJson c.frame.bands))) .nil)))))))))
 
 /-- A one-line plain-text rendering (the `text/plain` MIME entry). -/
-def Plot.summary (c : Chart) : String :=
+def Plot.summary (c : Plot.Chart) : String :=
   String.append "plot: " (String.append (match String.isEmpty c.title with
     | .true => "(untitled)"
     | .false => c.title)
@@ -1027,7 +1002,7 @@ def Plot.summary (c : Chart) : String :=
 /-- The notebook payload: a Jupyter mime bundle with `text/plain`, `image/svg+xml` and
 `text/html`. This is the one hook the kernel needs: `#eval Json.render (Plot.render c)`
 is a JSON object it can use as the cell's `data` (see `tools/jupyter`). -/
-def Plot.render (c : Chart) : Json :=
+def Plot.render (c : Plot.Chart) : Json :=
   let svg := Plot.svg c;
   Json.mkObj
     (.cons (Json.field "text/plain" (.str (Plot.summary c)))
