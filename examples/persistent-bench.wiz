@@ -1,0 +1,113 @@
+import IO
+import PMap
+import WordMap
+import Text
+
+-- A benchmark of the persistent map (lib/PMap.wiz) against the U64Map's model and its
+-- native backend (lib/WordMap.wiz). Each mode does the same operations with the same
+-- keys and values and prints the same checksum:
+--
+--   wiz build examples/persistent-bench.wiz -o pbench && ./pbench MODE N
+--
+-- modes:
+--   pmap  PMap U64 Nat: N inserts, N lookups, N/2 erasures (the persistent tree);
+--   umap  U64Map Nat: the same (compiled: the native hash table; #eval/#run: the sorted
+--         list model);
+--   list  U64Map's pure list model used directly (insertL/eraseL/findL): the same, with
+--         O(n) operations, so it is the baseline to run at 10k rather than 100k.
+--
+-- Keys are pseudo-random below 4N (so erasures hit), values are the insertion index.
+-- (Bench script: /workspace/wiz-tools/bench/persistent.)
+
+def next (x : Nat) : Nat := Nat.mod (x * 1103515245 + 12345) 2147483648
+def keyOf (n y : Nat) : U64 := U64.ofNat (Nat.mod y (Nat.mul 4 n))
+
+def digestU64Pairs : List (U64 × Nat) → Nat
+  | .nil => .zero
+  | .cons e rest =>
+    Nat.mod (Nat.add (Nat.add (Nat.mod e.1.toNat 1000000007) (Nat.mul e.2 7))
+      (Nat.mul (digestU64Pairs rest) 131)) 1000000007
+
+-- ## PMap
+
+def pmIns (n : Nat) : Nat → Nat → PMap U64 Nat → PMap U64 Nat
+  | .zero, _, m => m
+  | .succ i, x, m => let y := next x; pmIns n i y (PMap.insert m (keyOf n y) i)
+def pmFind (n : Nat) (m : PMap U64 Nat) : Nat → Nat → Nat → Nat
+  | .zero, _, acc => acc
+  | .succ i, x, acc =>
+    let y := next x;
+    pmFind n m i y (Nat.mod (Nat.add acc (PMap.findD m (keyOf n y) 1)) 1000000007)
+def pmErase (n : Nat) : Nat → Nat → PMap U64 Nat → PMap U64 Nat
+  | .zero, _, m => m
+  | .succ i, x, m => let y := next x; pmErase n i y (PMap.erase m (keyOf n y))
+
+def runPmap (n : Nat) : Nat :=
+  let m := pmIns n n 1 PMap.empty;
+  let f := pmFind n m n 2 0;
+  let m2 := pmErase n (Nat.div n 2) 3 m;
+  Nat.mod (Nat.add (Nat.mul (PMap.size m2) 1000000007)
+    (Nat.add (Nat.mul f 3) (Nat.mul (digestU64Pairs (PMap.toList m2)) 7))) 1000000007
+
+-- ## U64Map
+
+def umIns (n : Nat) : Nat → Nat → U64Map Nat → U64Map Nat
+  | .zero, _, m => m
+  | .succ i, x, m => let y := next x; umIns n i y (U64Map.insert m (keyOf n y) i)
+def umFind (n : Nat) (m : U64Map Nat) : Nat → Nat → Nat → Nat
+  | .zero, _, acc => acc
+  | .succ i, x, acc =>
+    let y := next x;
+    umFind n m i y (Nat.mod (Nat.add acc (U64Map.findD m (keyOf n y) 1)) 1000000007)
+def umErase (n : Nat) : Nat → Nat → U64Map Nat → U64Map Nat
+  | .zero, _, m => m
+  | .succ i, x, m => let y := next x; umErase n i y (U64Map.erase m (keyOf n y))
+
+def runUmap (n : Nat) : Nat :=
+  let m := umIns n n 1 U64Map.empty;
+  let f := umFind n m n 2 0;
+  let m2 := umErase n (Nat.div n 2) 3 m;
+  Nat.mod (Nat.add (Nat.mul (U64Map.size m2) 1000000007)
+    (Nat.add (Nat.mul f 3) (Nat.mul (digestU64Pairs (U64Map.toList m2)) 7))) 1000000007
+
+-- ## the pure list model, used directly (no `implemented_by`)
+
+def liIns (n : Nat) : Nat → Nat → List (U64 × Nat) → List (U64 × Nat)
+  | .zero, _, l => l
+  | .succ i, x, l => let y := next x; liIns n i y (U64Map.insertL (keyOf n y) i l)
+def liFind (n : Nat) (l : List (U64 × Nat)) : Nat → Nat → Nat → Nat
+  | .zero, _, acc => acc
+  | .succ i, x, acc =>
+    let y := next x;
+    liFind n l i y (Nat.mod (Nat.add acc
+      (match U64Map.findL (keyOf n y) l with | .none => 1 | .some v => v)) 1000000007)
+def liErase (n : Nat) : Nat → Nat → List (U64 × Nat) → List (U64 × Nat)
+  | .zero, _, l => l
+  | .succ i, x, l => let y := next x; liErase n i y (U64Map.eraseL (keyOf n y) l)
+
+def runList (n : Nat) : Nat :=
+  let l := liIns n n 1 .nil;
+  let f := liFind n l n 2 0;
+  let l2 := liErase n (Nat.div n 2) 3 l;
+  Nat.mod (Nat.add (Nat.mul (List.length l2) 1000000007)
+    (Nat.add (Nat.mul f 3) (Nat.mul (digestU64Pairs l2) 7))) 1000000007
+
+def run (mode : String) (n : Nat) : Nat :=
+  if String.eq mode "umap" then runUmap n
+  else if String.eq mode "list" then runList n
+  else runPmap n
+
+def argN : List String → Nat
+  | .cons _ (.cons s _) => match String.parseNat s with
+    | .some n => n
+    | .none => 10000
+  | _ => 10000
+def argMode : List String → String
+  | .cons m _ => m
+  | .nil => "pmap"
+
+def main : IO Unit := IO.bind IO.args (fun as => match as with
+  | .nil => IO.println (String.append (String.append (Nat.toString (runPmap 300)) " ")
+      (String.append (String.append (Nat.toString (runUmap 300)) " ")
+        (Nat.toString (runList 300))))
+  | _ => IO.println (Nat.toString (run (argMode as) (argN as))))

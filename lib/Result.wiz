@@ -10,6 +10,11 @@ Two readings of a specification over a `Result`: `Result.All` (partial correctne
 failure satisfies everything) and `Result.Holds` (total correctness: a failure satisfies
 nothing). `Result.Holds` is the one that lines up with separation logic's `Triple`,
 where a fault (`Prog.fail`) satisfies nothing either.
+
+`ResultQ q A` is the quantity-polymorphic form: `ResultQ ω A` is `Result A`
+(definitionally), and `ResultQ 1 A` has a linear success value. `Result1` (lib/Region.wiz)
+is its resource-threading sibling `ResultH 1`, not an instance of `ResultQ`: its error
+branch carries a handle. See `wiz-notes/result-q.md`.
 -/
 
 -- The result monad of lowered code (RD7): every panic (`panic!`, `unwrap` on `none`,
@@ -42,6 +47,48 @@ def Result.map {A B : Type} (f : A → B) (x : Result A) : Result B := match x w
 instance : Monad Result where
   pure := fun a => Result.ok a
   bind := Result.bind
+
+-- ## Quantity-polymorphic results (`ResultQ`)
+
+/-- A result whose success value is used at quantity `q`: `ok` carries the value at `%q`,
+`err` carries only the `Error` (no payload). At `q = ω` this is exactly `Result`
+(definitionally; `Result.toResultQ`/`ResultQ.toResult` are the identity), and at `q = 1`
+the success value is linear. It is **not** `Result1`: an `err` has no value, so a linear
+resource cannot be threaded through the error path (see `ResultH` in lib/Region.wiz,
+whose `err` carries a handle).
+
+`q = 0`: the value is at quantity 0, so it may not be used by a consumer (`ResultQ.elim`
+takes it at `%0` and the branch may ignore it); constructing `.ok a` needs `a` at 0.
+The generic compiled representation still keeps the field (erasure is compiled once at a
+quantity variable), as for any q-polymorphic type: `wiz-notes/result-q.md` §3. -/
+inductive ResultQ (q : Qty) (A : Type) where
+  | ok (%q a : A)
+  | err (e : Error)
+
+/-- `Result ω` as a `ResultQ ω` (the identity: the two types are definitionally equal). -/
+def Result.toResultQ {A : Type} (x : Result A) : ResultQ ω A := x
+/-- `ResultQ ω` as a `Result` (the identity). -/
+def ResultQ.toResult {A : Type} (x : ResultQ ω A) : Result A := x
+
+/-- Sequence two results, stopping at the first error; the success value goes to `f` at
+the input's quantity `q`, and the result is at `p`. The scrutinee is consumed once, so a
+linear success value cannot be duplicated; `f` itself is unrestricted because the `err`
+branch drops it. -/
+def ResultQ.bind {q p : Qty} {A B : Type} (1 x : ResultQ q A)
+    (f : (%q a : A) → ResultQ p B) : ResultQ p B := match x with
+  | .ok a => f a
+  | .err e => .err e
+/-- Apply `f` to the success value, at the input's quantity `q`. -/
+def ResultQ.map {q : Qty} {A B : Type} (f : (%q a : A) → B) (x : ResultQ q A) : ResultQ q B :=
+  match x with
+  | .ok a => .ok (f a)
+  | .err e => .err e
+/-- Case analysis: the success branch takes the value at `%q`, the error branch takes the
+`Error`. Both branches are unrestricted (each is dropped on the other path). -/
+def ResultQ.elim {q : Qty} {A B : Type} (onOk : (%q a : A) → B) (onErr : (e : Error) → B)
+    (1 x : ResultQ q A) : B := match x with
+  | .ok a => onOk a
+  | .err e => onErr e
 
 /-- `P` holds of the value, if there is one (a failure satisfies everything): "if it
 succeeds, then `P`". -/

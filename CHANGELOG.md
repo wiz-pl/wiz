@@ -10,11 +10,56 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* selfhost: the parser tables are a checked-in Wiz source file (`selfhost/Tables.wiz`,
+  rendered by `lake build genSelfhostTables`; the `selfhost` group checks that it is
+  current and that its tables accept the same corpus as the Lean parser), and the
+  compiler's entry point is `selfhost/Main.wiz` (the checker's is
+  `selfhost/Check.wiz`). The fixpoint's input is `selfhost/*.wiz` with no generated Wiz
+  text in it: only the build identity (`wizVersion`, `toolchainId`) is passed in (23e).
+* `Float64.ofNat` rounds correctly for every `Nat`: it used to abort above `2^64`
+  ("a number is too big for a C integer"). The value-level semantics matrix
+  (`docs/semantics-matrix.md`, group `=semantics`) pins the numeric and textual
+  boundaries across `#eval`, `#run`, Lean → C and Wiz → C (22c).
+* Shifts agree for every `Nat` count. `UIntN.shiftLeft` caps the exponent at the
+  width (`Word.min k w`), so `k >= w` gives `0` without the model trying to build
+  `2^k` (which panicked at `k >= 2^32`); `a >> k` is `0` once `k` passes the bit
+  length of `a`. The matrix now pins `0, 1, w-1, w, w+1, 2^32-1, 2^32, 2^64-1`,
+  and the rotate composition for `k >= w` (22a, 22c).
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to
   `.gitignore`) overrides it with a spec or a path to a toolchain directory or built
   checkout; the shims, `which` and `show` honour it (26a, #281).
+* A WebAssembly target (8f): `wiz build FILE -o OUT --target wasm` emits a binary module
+  directly from the IR, and `wiz run FILE --target wasm` runs it under Node with
+  `web/wasm-host.mjs` (big integers as `BigInt`; values in linear memory). IO-less
+  `main`s over `Nat`/`Int`, constructors, closures, join points, codata and `Array` work;
+  C and LLVM are unchanged, and `--llvm`/`--wasm` remain aliases. The subset boundary is
+  checked at compile time and every module is parsed and type-checked before it is
+  written (`Wiz/Compiler/WasmValidate.lean`); golden tests compare the module's result
+  with the interpreter's. Limits and the 29-case `wasm` test group are in
+  `docs/stages/08-backend/wasm.md`.
+* The published site has a `/bench/` page: standard-library timings (with the
+  interleaved A/B ratios and the spread of each run) and the Scry taint metrics,
+  rendered from the checked-in JSON by `web/build-bench.py`. The page is committed, so a
+  JSON change that was not regenerated is a diff, and the docs job refuses it
+  (`web/build-site.sh` runs the generator's `--check`).
+* The WebAssembly target reclaims memory (8f): `dup`/`drop` maintain the object header's
+  reference count, the last drop releases the fields and returns the block to a segregated
+  free list, and `reset`/`reuse` refill a unique cell. A long-running program's peak is its
+  peak live set, not everything it allocated: the fixed workload in
+  `scripts/wasm-workload.wiz` (320 MiB under the bump allocator, 40 iterations) drops from
+  320 MiB to 8.1 MiB of linear memory in 0.6× the time, and a 1000-iteration run completes
+  with the same 8.1 MiB peak where the old allocator would have needed 7.8 GiB. Freeing is
+  iterative (through the dead object's own header), so a long chain does not recurse on
+  the engine's stack. `scripts/wasm-peak.mjs` reports a module's peak and time.
+* `wiz repl` (11ac): one command per line into one persistent frontend session
+  (definitions, `syntax`, `macro`, `instance` and `import` stay in scope), with `:type`,
+  `:load`, `:run` (C, or LLVM with `--llvm`), `:reset`, `:help` and `:quit`; a pipe is a
+  script with no prompt. `--prelude MODULE`/`-p` (repeatable, comma-separated) imports
+  modules after the Prelude, so a tool can ship a prelude and wrap the ordinary REPL. The
+  test wrapper is `wiz test-driver` (the old `wiz test` name is left for the single-file
+  form, 11ah).
 
 ## [0.1.0] - unreleased (draft)
 

@@ -1,0 +1,164 @@
+import Sys
+import Scry.Query
+import Scry.Parse
+import Scry.CstStore
+/-!
+# Scry.Cli: the `scry` command line
+
+The package's CLI (design §7.1 has this as `app/scry.wiz`; plain `App.wiz` here so the
+grail target is one file):
+
+```
+scry facts FILE                 load a fact store and print its stats
+scry query FILE --kind KIND     nodes of a CST kind
+scry query FILE --edge LABEL    edges with a label
+scry query FILE --rel NAME      a relation's tuples
+scry explain FILE NODE          one node: span, parent, children, arcs, relations
+scry parse FILE… --stats        stats of JSON or scry-cst stores (no tree-sitter: S1)
+scry cst FILE OUT.cst           convert a JSON fact store to the native spill format
+```
+
+Exit status is 0 on success, 1 on an error (a message on stderr), 2 on a usage error.
+The grail command targets in `grail.wiz` run `facts`, `query`, `explain` and `parse` over
+`fixtures/demo.facts.json`, so `grail build` exercises the loaders end to end.
+-/
+
+/-- The CLI's usage text. -/
+def Scry.usage : String :=
+  "scry: a code-analysis platform in Wiz (S1)\n"
+  ++ "\n"
+  ++ "usage: scry COMMAND …\n"
+  ++ "\n"
+  ++ "  facts FILE                 load a fact store and print its stats\n"
+  ++ "  query FILE --kind KIND     nodes of a CST kind\n"
+  ++ "  query FILE --edge LABEL    edges with a label\n"
+  ++ "  query FILE --rel NAME      a relation's tuples\n"
+  ++ "  explain FILE NODE          one node: span, parent, children, arcs, relations\n"
+  ++ "  parse FILE… --stats        stats of JSON or scry-cst stores (S1)\n"
+  ++ "  cst FILE OUT               convert a JSON fact store to scry-cst\n"
+  ++ "  help, --help               this text\n"
+  ++ "  --version                  the version\n"
+
+/-- Load a fact store from `path`, with a message naming it on failure. -/
+def Scry.loadFacts (path : String) : EIO Scry.Facts := Scry.loadFactsFile path
+
+/-- Print a line. -/
+def Scry.say (s : String) : EIO Unit := EIO.lift (IO.println s)
+
+/-- `scry facts FILE`. -/
+def Scry.factsCmd (file : String) : EIO Nat := do
+  f ← Scry.loadFacts file;
+  Scry.say (Scry.renderFacts f);
+  EIO.pure 0
+
+/-- `scry query FILE …`. -/
+def Scry.queryCmd (file : String) (args : List String) : EIO Nat := do
+  f ← Scry.loadFacts file;
+  match args with
+  | .cons "--kind" (.cons kind .nil) => do
+    Scry.say (Scry.renderQueryKind f kind);
+    EIO.pure 0
+  | .cons "--edge" (.cons label .nil) => do
+    Scry.say (Scry.renderQueryEdge f label);
+    EIO.pure 0
+  | .cons "--rel" (.cons name .nil) => match Scry.renderQueryRel f name with
+    | .ok s => do
+      Scry.say s;
+      EIO.pure 0
+    | .error e => EIO.fail e
+  | .nil => EIO.fail "usage: scry query FILE --kind KIND | --edge LABEL | --rel NAME"
+  | _ => EIO.fail "usage: scry query FILE --kind KIND | --edge LABEL | --rel NAME"
+
+/-- `scry explain FILE NODE`. -/
+def Scry.explainCmd (file : String) (node : String) : EIO Nat := do
+  f ← Scry.loadFacts file;
+  match String.parseNat node with
+  | .none => EIO.fail ("\"" ++ node ++ "\" is not a node id")
+  | .some n => match Scry.explainNode f (Scry.nodeId n) with
+    | .ok s => do
+      Scry.say s;
+      EIO.pure 0
+    | .error e => EIO.fail e
+
+/-- Read and print the `parse --stats` block of every path, in order. -/
+def Scry.parseBlocks : List String → EIO (List Scry.ParseBlock)
+  | .nil => EIO.pure .nil
+  | .cons p rest => do
+    b ← Scry.parseBlock p;
+    bs ← Scry.parseBlocks rest;
+    EIO.pure (.cons b bs)
+
+/-- `scry parse FILE… --stats`: one block per store, and a total for several. -/
+def Scry.parseStatsAll (files : List String) : EIO Nat := do
+  blocks ← Scry.parseBlocks files;
+  Scry.say (String.intercalate "\n" (List.map (fun b => b.text) blocks));
+  match files with
+  | .cons _ (.cons _ _) => do
+    Scry.say (Scry.renderParseTotal blocks);
+    EIO.pure 0
+  | _ => EIO.pure 0
+
+/-- The `parse --stats` block for one path (the tests use this directly). -/
+def Scry.parseStats (file : String) : EIO Nat := do
+  b ← Scry.parseBlock file;
+  Scry.say b.text;
+  EIO.pure 0
+
+/-- `--stats` in any position is a flag, not a file. -/
+def Scry.isStatsFlag (a : String) : Bool := String.eq a "--stats"
+
+/-- `scry parse FILE… --stats` (`--stats` may come first, last or between files). -/
+def Scry.parseCmd (args : List String) : EIO Nat :=
+  let files := List.filter (fun a => Bool.not (Scry.isStatsFlag a)) args;
+  match List.any Scry.isStatsFlag args with
+  | .false => EIO.fail "usage: scry parse FILE… --stats"
+  | .true => match files with
+    | .nil => EIO.fail "usage: scry parse FILE… --stats (at least one store)"
+    | _ => Scry.parseStatsAll files
+
+/-- `scry cst FILE OUT`: load a JSON fact store and write the native columns' spill
+format (`Scry.CstStore.render`). -/
+def Scry.cstCmd (file : String) (out : String) : EIO Nat := do
+  f ← Scry.loadFacts file;
+  let s := Scry.CstStore.ofFacts f;
+  FS.writeFile out (Scry.CstStore.render s);
+  Scry.say ("wrote " ++ Nat.repr (Scry.CstStore.nodeCount s) ++ " nodes, "
+    ++ Nat.repr (Scry.CstStore.edgeCount s) ++ " edges, "
+    ++ Nat.repr (Scry.CstStore.relationCount s) ++ " relations to " ++ out);
+  EIO.pure 0
+
+/-- Run one command; the result is the exit status or an error message. -/
+def Scry.dispatch (args : List String) : EIO Nat := match args with
+  | .nil => do
+    Scry.say Scry.usage;
+    EIO.pure 0
+  | .cons "help" rest => do
+    Scry.say Scry.usage;
+    EIO.pure 0
+  | .cons "--help" rest => do
+    Scry.say Scry.usage;
+    EIO.pure 0
+  | .cons "--version" rest => do
+    Scry.say "scry 0.1.0-dev (S1)";
+    EIO.pure 0
+  | .cons "facts" rest => match rest with
+    | .cons file .nil => Scry.factsCmd file
+    | _ => EIO.fail "usage: scry facts FILE"
+  | .cons "query" rest => match rest with
+    | .cons file more => Scry.queryCmd file more
+    | .nil => EIO.fail "usage: scry query FILE --kind KIND | --edge LABEL | --rel NAME"
+  | .cons "explain" rest => match rest with
+    | .cons file (.cons node .nil) => Scry.explainCmd file node
+    | _ => EIO.fail "usage: scry explain FILE NODE"
+  | .cons "parse" rest => Scry.parseCmd rest
+  | .cons "cst" rest => match rest with
+    | .cons file (.cons out .nil) => Scry.cstCmd file out
+    | _ => EIO.fail "usage: scry cst FILE OUT"
+  | .cons cmd rest => EIO.fail ("unknown command \"" ++ cmd ++ "\" (see scry help)")
+
+/-- `main`: run a command and exit with its status (1 with a `scry: …` message on an
+error). -/
+def Scry.mainArgs (args : List String) : IO Unit :=
+  IO.bind (Scry.dispatch args) (fun r => match r with
+    | .ok n => Process.exit n
+    | .error m => IO.bind (IO.ePrintln ("scry: " ++ m)) (fun _ => Process.exit 1))

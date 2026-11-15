@@ -98,8 +98,9 @@ compiles. Its compiler fields are its `id`, which enters grail's keys.
 ## 23e: the self-hosted toolchain as targets
 
 `Package.selfhost NAME ROLE` builds the self-hosted programs from `selfhost/*.wiz`
-(`Wiz/Selfhost.lean` generates their sources, parser tables included, for grail and the
-tests alike): `checker`, `compiler`, and `bootstrap`, the fixpoint check of
+(`Wiz/Selfhost.lean` concatenates their sources — the parser tables are the checked-in
+`selfhost/Tables.wiz` — for grail and the tests alike): `checker`, `compiler`, and
+`bootstrap`, the fixpoint check of
 `scripts/fixpoint.sh` as jobs (generate the source, build stage 1, `self1.c`, stage 2,
 `self2.c`, compare). `grail build bootstrap` runs it (minutes); run again, it runs
 nothing unless a source, `rt.c`, the toolchain or grail changed. `grail build` alone
@@ -133,6 +134,14 @@ hangs fails instead of hanging the run). A failed job is reported and the jobs t
 on it are skipped; the others still run. Each job's output is buffered and printed in the
 graph's order, so `-j 1` and `-j 8` print the same report, and a second build still runs
 no jobs.
+
+`--region-cache` (11c) is part of the toolchain record (`Toolchain.regionCache`, or the
+`region-cache` setting of `grail.wiz`), so `grail config` shows it and every job gets it
+through `Toolchain.toFlags`. A job then serves its imported modules' cached effects from
+the `.wizr` regions in the same cache layers as the `.wizc` entries: the write cache is
+searched first, then the `--cache-ro` caches (which are never written), and a missing,
+truncated or mistagged region falls back to the text entries. Since job keys are unchanged,
+a warm region build and a text build produce the same outputs.
 
 ## 23h: git dependencies and a lock file
 
