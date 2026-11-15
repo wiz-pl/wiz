@@ -84,3 +84,31 @@ allocating: `valSame`) are equal without comparing the branches. The self-check:
 
 The self-check: 13 s to 11 s. Since the start of stage 20 it went from about 17
 minutes (on a stubbed prefix) to 11 s.
+
+## 20g: a `match`/`if` as the body of a `do` block
+
+`do x ← e; rest` desugars to `IO.bind e (fun x => rest)` (`expandDo`), so the last
+statement of a `do` block is the body of a bind lambda, and it is checked against the
+bind's result type `IO B` — `B` a metavariable until the arguments of `IO.bind` are
+elaborated. `appArgsT` only unified the application's result type with the expected type
+at the end, after every argument, so a `match` or `if` there was checked against
+`IO ?B` with `?B` unsolved: its branches could be checked (they are applications, whose
+types solve `?B`) but a branch that *needs* the expected type could not — the
+"constructor-argument/expected-type inference is too weak" gap. The module loader's
+`modHeaderTexts`/`modProbeAt`/`modDiscover` were split into helpers that put the `if` at
+the top level of a definition, where the declared result type is the expected type.
+
+The Lean frontend has no such gap because `checkApp` gives every explicit argument a
+placeholder metavariable, unifies the result type with the expected type first, and only
+then elaborates the arguments (`Wiz/Elab/Term.lean`). The self-hosted frontend now does
+the same for the arguments that need it: a λ whose body is a `match`, an `if` or another
+such λ (`bodyCheckOnly`/`funBodyCheckOnly`) is **postponed** as a λ with an unknown domain
+already was (`funDomMeta`), so it is checked by `resolvePosts` *after* `appArgsT` unifies
+the result type with the expected one. The bind's body then sees `IO Unit`, not `IO ?B`.
+
+So `do x ← f; if c then a else b` and `do x ← f; match x with …` elaborate, and the
+loader's three helpers are one function each again. Cases in `=selfhost`: the reported
+types of the four shapes (see "a `match`/`if` as the body of a `do`/`IO.bind` lambda"),
+the verdicts pinned against the Lean frontend (including an `if` whose branches differ in
+type, rejected by both), and a differential that compiles a `do`-with-`match` program with
+both compilers and compares its output.

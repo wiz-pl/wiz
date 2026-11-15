@@ -2200,7 +2200,75 @@ def selfHostGroup : Group where
           ("def badEq {A : Type} (x y : A) : x = y := rfl\n", false),
           ("def badProp : Prop := Type\n", false),
           ("def badSort : Sort 1 := Type 1\n", false),
-          ("def badCast (e : False) (n : Nat) : Nat := cast e n\n", false)] }
+          ("def badCast (e : False) (n : Nat) : Nat := cast e n\n", false)] },
+    -- (`do` desugars to `IO.bind e (fun x => rest)`, so the last statement of a `do` block
+    -- is the body of a bind lambda. `appArgsT` unified the application's result type with
+    -- the expected type only after the arguments, so a `match`/`if` there was elaborated
+    -- against a metavariable `IO ?B`: its branches that are applications solved `?B`, but
+    -- a branch whose constructor arguments need the result type (`IO.pure (.some x)`,
+    -- `IO.pure .none`) failed with "could not elaborate a constructor argument" — the
+    -- module loader was split into helpers because of it. `funBodyCheckOnly` postpones such
+    -- a lambda, so the body sees `IO (Option Nat)`.)
+    { name := "the self-hosted frontend: a `match`/`if` as the body of a `do`/`IO.bind` lambda", run := fun _ => do
+        selfhostCheckFile ("import Prelude\n" ++
+          "def g (n : Nat) : IO Nat := IO.pure n\n" ++
+          "def h (o : Option Nat) : IO Unit := do\n  x ← g 1;\n  match o with\n" ++
+          "  | .some n => IO.println (Nat.toString (Nat.add x n))\n  | .none => IO.println \"none\"\n" ++
+          "def k (c : Bool) : IO Unit := IO.bind (g 2) (fun x =>\n" ++
+          "  if c then IO.println (Nat.toString x) else IO.println \"no\")\n" ++
+          "def o1 (c : Bool) : IO (Option Nat) := do\n  x ← g 3;\n" ++
+          "  if c then IO.pure (.some x) else IO.pure .none\n" ++
+          "def o2 (o : Option Nat) : IO (Option Nat) := do\n  x ← g 1;\n  match o with\n" ++
+          "  | .some n => IO.pure (.some (Nat.add x n))\n  | .none => IO.pure .none\n" ++
+          "def ls (c : Bool) : IO (List Nat) := do\n  x ← g 8;\n" ++
+          "  if c then IO.pure (.cons x .nil) else IO.pure (.cons 0 .nil)\n" ++
+          "def nested (c : Bool) : IO (List Nat) := do\n  x ← g 2;\n" ++
+          "  if c then (do y ← g x; IO.pure (.cons y .nil)) else IO.pure .nil\n")
+          ("g : (x0 : Nat) → (IO Nat)\n" ++
+           "h : (x0 : (Option Nat)) → (IO Unit0)\n" ++
+           "k : (x0 : Bool) → (IO Unit0)\n" ++
+           "o1 : (x0 : Bool) → (IO (Option Nat))\n" ++
+           "o2 : (x0 : (Option Nat)) → (IO (Option Nat))\n" ++
+           "ls : (x0 : Bool) → (IO (List Nat))\n" ++
+           "nested : (x0 : Bool) → (IO (List Nat))\n") },
+    -- the same programs, compiled and run by both toolchains: the `do`-with-`match`/
+    -- `if` bodies must elaborate to the same program (parser, elaborator and backend)
+    { name := "the self-hosted compiler: a `do` block with `match`/`if` agrees with the Lean compiler", run := fun _ => do
+        let prog :=
+          "import IO\n" ++
+          "def g (n : Nat) : IO Nat := IO.pure n\n" ++
+          "def label (o : Option Nat) : String := match o with\n  | .some n => Nat.toString n\n  | .none => \"none\"\n" ++
+          "def showL (xs : List Nat) : String := match xs with\n  | .nil => \"[]\"\n  | .cons y _ => Nat.toString y\n" ++
+          -- the branches are constructor-shaped: their arguments need the bind's result type
+          "def pick (c : Bool) : IO (Option Nat) := do\n  x ← g 3;\n" ++
+          "  if c then IO.pure (.some (Nat.add x 39)) else IO.pure .none\n" ++
+          "def first (o : Option Nat) : IO (Option Nat) := do\n  x ← g 1;\n  match o with\n" ++
+          "  | .some n => IO.pure (.some (Nat.add x n))\n  | .none => IO.pure .none\n" ++
+          "def listy (c : Bool) : IO (List Nat) := do\n  x ← g 8;\n" ++
+          "  if c then IO.pure (.cons x .nil) else IO.pure (.cons 0 .nil)\n" ++
+          "def report (c : Bool) (o : Option Nat) : IO Unit := do\n  x ← g 3;\n  match o with\n" ++
+          "  | .some n => if c then IO.println (Nat.toString (Nat.add x n)) else IO.println \"off\"\n" ++
+          "  | .none => IO.println \"none\"\n" ++
+          "def main : IO Unit := do\n  a ← pick .true;\n  IO.println (label a);\n  b ← pick .false;\n" ++
+          "  IO.println (label b);\n  c ← first (.some 39);\n  IO.println (label c);\n" ++
+          "  d ← first .none;\n  IO.println (label d);\n  e ← listy .true;\n  IO.println (showL e);\n" ++
+          "  f ← listy .false;\n  IO.println (showL f);\n  report .true (.some 39);\n" ++
+          "  report .false (.some 1);\n  report .true .none\n"
+        let expected := "42\nnone\n40\nnone\n8\n0\n42\noff\nnone\n"
+        ioRun prog expected
+        selfhostCompileRun prog expected },
+    -- the verdicts agree: the forms are accepted, and an `if` whose branches differ in type
+    -- is rejected by both frontends
+    { name := "the `do`/`IO.bind` body: the Lean and self-hosted frontends agree", run := fun _ =>
+        selfhostAgreesIO "def g (n : Nat) : IO Nat := IO.pure n\n" [
+          ("def u (c : Bool) : IO Unit := do\n  x ← g 3;\n  if c then IO.println (Nat.toString x) else IO.println \"no\"\n", true),
+          ("def h (o : Option Nat) : IO Unit := do\n  x ← g 1;\n  match o with\n  | .some n => IO.println (Nat.toString n)\n  | .none => IO.println \"none\"\n", true),
+          ("def k (c : Bool) : IO Unit := IO.bind (g 2) (fun x => if c then IO.println (Nat.toString x) else IO.println \"no\")\n", true),
+          ("def o1 (c : Bool) : IO (Option Nat) := do\n  x ← g 3;\n  if c then IO.pure (.some x) else IO.pure .none\n", true),
+          ("def o2 (o : Option Nat) : IO (Option Nat) := do\n  x ← g 1;\n  match o with\n  | .some n => IO.pure (.some (Nat.add x n))\n  | .none => IO.pure .none\n", true),
+          ("def ls (c : Bool) : IO (List Nat) := do\n  x ← g 8;\n  if c then IO.pure (.cons x .nil) else IO.pure (.cons 0 .nil)\n", true),
+          ("def bad (c : Bool) : IO Unit := do\n  x ← g 3;\n  if c then IO.println (Nat.toString x) else x\n", false),
+          ("def badM (o : Option Nat) : IO Unit := do\n  x ← g 1;\n  match o with\n  | .some n => IO.println (Nat.toString n)\n  | .none => g 1\n", false)] }
 
   ]
 

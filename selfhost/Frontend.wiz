@@ -2100,6 +2100,24 @@ def funDomMeta (es : ES) (a : Syntax) (ty : Val) : Bool := match strEq (kindOf (
     | .vpi _ _ _ d _ _ => isMetaApp es d
     | _ => .false
   | .false => .false
+-- a term that can only be elaborated in check mode: a `match`, an `if`, or a `fun`
+-- whose body is one (`do x ← e; if …` is `IO.bind e (fun x => if …)`)
+partial def bodyCheckOnly (s : Syntax) : Bool := match ifMatch (unparen s) with
+  | .some _ => .true
+  | .none => match strEq (kindOf (unparen s)) "term.match" with
+    | .true => .true
+    | .false => match strEq (kindOf (unparen s)) "term.fun" with
+      | .true => bodyCheckOnly (kid (unparen s) 3)
+      | .false => .false
+-- a `fun` whose body needs its expected type (a `do` block's last statement) waits for it
+-- as a `fun` with an unknown domain does (`funDomMeta`): `appArgsT` unifies the
+-- application's result type with the expected type at the end, so the body of
+-- `IO.bind e (fun x => if …)` is checked against the bind's result type, not a
+-- metavariable. (The Lean frontend gets the same from `checkApp`'s placeholders, which
+-- unify the result type with the expected one before the arguments' bodies.)
+def funBodyCheckOnly (a : Syntax) : Bool := match strEq (kindOf (unparen a)) "term.fun" with
+  | .true => bodyCheckOnly (kid (unparen a) 3)
+  | .false => .false
 -- `.c` (or `.c a …`) against a type `T …`: `T.c`
 -- (a type that is a definition, like `Syntax := SyntaxF .true`, is unfolded: stage 19d)
 partial def dotName (gs : Globals) (es : ES) (ty : Val) (c : String) : Option String := match force es ty with
@@ -3665,7 +3683,8 @@ def appArgsT (gs : Globals) (es : ES) (cx : Cx) (f : Tm) (fty : Val) (m : List B
           | .mk mt es' => appArgsT gs es' cx (.app f mt) (eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod) m' args post expected .nil
       | _ => .err "too many implicit arguments"
     | _ => match whnf (force es fty) with
-      | .vpi _ _ _ dom env cod => match Bool.and (postponable a) (Bool.or (isMetaApp es dom) (funDomMeta es a dom)) with
+      | .vpi _ _ _ dom env cod => match Bool.and (postponable a) (Bool.or (isMetaApp es dom)
+          (Bool.or (funDomMeta es a dom) (funBodyCheckOnly a))) with
         | .true => match newMeta es cx dom with
           | .mk mt es1 => appArgsT gs es1 cx (.app f mt) (eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod) (tailKinds m) rest
               (.cons (.mk a dom mt) post) expected pre
@@ -6734,14 +6753,11 @@ partial def modHeaderNamesAt : List Char → List String
     else modHeaderNamesAt rest
 def modHeaderNames (text : String) : List String := match text with
   | .mk cs => modHeaderNamesAt cs
-mutual
 partial def modHeaderTexts (names : List String) : IO (List Header) := match names with
   | .nil => IO.pure .nil
-  | .cons n rest => IO.bind (IO.readFile n) (fun t => modHeaderTextsGo n t rest)
-partial def modHeaderTextsGo (n t : String) (rest : List String) : IO (List Header) :=
-  if modEmpty t then modHeaderTexts rest
-  else IO.bind (modHeaderTexts rest) (fun more => IO.pure (.cons (Header.mk n t) more))
-end
+  | .cons n rest => IO.bind (IO.readFile n) (fun t =>
+      if modEmpty t then modHeaderTexts rest
+      else IO.bind (modHeaderTexts rest) (fun more => IO.pure (.cons (Header.mk n t) more)))
 def moduleHeaderTexts (text : String) : IO (List Header) :=
   modHeaderTexts (modHeaderNames text)
 -- the output lines of the graph (each module's `#check`s and errors, in load order),
@@ -6765,16 +6781,12 @@ def modHasFlag : List String → String → Bool
 
 -- the first candidate path of `name` with text ("" when none: with `IO.readFile` an empty
 -- file and a missing one look alike)
-mutual
 partial def modProbeAt (cats : List Cat) (tokens : List String) (name : String) : List String → IO ModSrc
   | .nil => IO.pure (ModSrc.mk name "" "" .nil)
-  | .cons p ps => IO.bind (IO.readFile p) (fun t => modProbeGo cats tokens name p t ps)
-partial def modProbeGo (cats : List Cat) (tokens : List String) (name p t : String) (ps : List String) : IO ModSrc :=
-  if modEmpty t then modProbeAt cats tokens name ps
-  else IO.pure (ModSrc.mk name p t (moduleImports cats tokens t))
-end
+  | .cons p ps => IO.bind (IO.readFile p) (fun t =>
+      if modEmpty t then modProbeAt cats tokens name ps
+      else IO.pure (ModSrc.mk name p t (moduleImports cats tokens t)))
 -- read `name`, and then (breadth first) the modules it imports, once each
-mutual
 partial def modDiscover (cats : List Cat) (tokens : List String) (roots : List String)
     (tab : List ModSrc) (queue : List String) : IO (List ModSrc) :=
   match queue with
@@ -6782,12 +6794,8 @@ partial def modDiscover (cats : List Cat) (tokens : List String) (roots : List S
   | .cons name rest => match modFind tab name with
     | .some _ => modDiscover cats tokens roots tab rest
     | .none => IO.bind (modProbeAt cats tokens name (modCandidates roots name)) (fun m =>
-      modDiscoverGo cats tokens roots tab m rest)
-partial def modDiscoverGo (cats : List Cat) (tokens : List String) (roots : List String)
-    (tab : List ModSrc) (m : ModSrc) (rest : List String) : IO (List ModSrc) :=
-  if modEmpty (modText m) then modDiscover cats tokens roots (.cons m tab) rest
-  else modDiscover cats tokens roots (.cons m tab) (List.append rest (modImports m))
-end
+      if modEmpty (modText m) then modDiscover cats tokens roots (.cons m tab) rest
+      else modDiscover cats tokens roots (.cons m tab) (List.append rest (modImports m)))
 
 -- the root module and, from it, the modules it imports: its name and the path its
 -- diagnostics are reported at (the driver's FILE; the checker's `input.wiz`)
