@@ -925,14 +925,16 @@ The S4 rule pack and interprocedural slice are separate modules:
   ordinary definition a statement's tainted input transfers to.
 * `import Scry.Models` — the external-function model table: `source`, `sink`, `sanitise`,
   `copy`/`copyArgs`, `alloc`, `free` and `unknown` effects for libc/syscalls
-  (`getenv`, `read`/`recv`, the `exec*` family, `system`/`popen`, the
-  `printf`/`sprintf`/`snprintf` family, the `strcpy`/`memcpy` family,
-  `malloc`/`calloc`/`realloc`/`free`), the policy sanitisers, and the pure read-only
-  calls. Model source/sink/sanitiser facts are a deduplicated fallback after the pack;
-  model copy pairs become memory stores, model allocation/free drives the lowering, and
-  an unmodelled external with a pointer result/argument is an explicit
-  `unmodelled-external` warning (its result stays `Loc.unknown`). `RulePack.withModels`
-  supplies the model rule descriptors.
+  (`getenv`, `read`/`recv`, `fgets`/`getline`/`fread`, `getopt`/`getopt_long`, `main`'s
+  `argv` at the entry, the `exec*`/`posix_spawn*` family, `system`/`popen`, the
+  `printf`/`sprintf`/`snprintf`/`v*printf`/`asprintf` family, the
+  `strcpy`/`memcpy` family, `malloc`/`calloc`/`realloc`/`free`), the policy
+  sanitisers (`realpath`, `strlcpy`/`strlcat`, the checked/clamped-size policy names),
+  and the pure read-only calls. Model source/sink/sanitiser facts are a deduplicated
+  fallback after the pack; model copy pairs become memory stores, model allocation/free
+  drives the lowering, and an unmodelled external with a pointer result/argument is an
+  explicit `unmodelled-external` warning (its result stays `Loc.unknown`).
+  `RulePack.withModels` supplies the model rule descriptors.
 * `import Scry.PointsTo` — a flow-insensitive, field-sensitive points-to analysis over
   the lowered Wil: the location lattice `Loc.stack/glob/heap/fn/field/anyOff/unknown`,
   per-register location sets (`Scry.ptIds`), per-location pointer contents (`mem`, for

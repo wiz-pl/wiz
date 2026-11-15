@@ -108,17 +108,21 @@ through two allocation sites is two sets), context sensitivity, and offsets past
 
 ## External function models
 
-`Scry.Models` is one table of libc/syscall effects: `source` (a written buffer or
-`getenv`'s result), `sink` (a command/format/length/size argument), `sanitise` (a policy
-sanitiser's result or in-place clean), `copy`/`copyArgs` (`strcpy`, `sprintf`'s formatted
-destination), `alloc`/`free` (`malloc`/`calloc`/`realloc`/`free`) and the explicit
+`Scry.Models` is one table of libc/syscall effects: `source` (a written buffer,
+`getenv`'s result, `main`'s `argv`, a `getopt` option), `sink` (a command/format/length/
+size argument), `sanitise` (a policy sanitiser's result or in-place clean),
+`copy`/`copyArgs` (`strcpy`, `sprintf`'s formatted destination, `asprintf`'s output
+pointer), `alloc`/`free` (`malloc`/`calloc`/`realloc`/`free`) and the explicit
 `unknown` fallback. A policy sanitiser is only applied when the pack names it
 (`RulePack.trustsSanitiser`), so a pack that omits `sanitize` keeps the no-sanitiser
 behaviour. The rule pack's own lines are applied first; model facts are a
 deduplicated fallback, so `system` is not reported twice. A model sink makes the
 `exec*` family's **variadic argv** a command sink (argument 3 of
-`execl("/bin/sh", "sh", "-c", cmd)`, not only the path), `sprintf`'s format argument a
-format-string sink, and `sprintf`'s formatted arguments a copy into the destination.
+`execl("/bin/sh", "sh", "-c", cmd)`, not only the path), the `v*printf`/`syslog`/
+`dprintf`/`asprintf` formats format-string sinks, and `sprintf`/`asprintf`'s formatted
+arguments a copy into the destination (a tainted `va_list` contributes to the
+destination too). `strcpy-overflow` is a `note`/hint: it cannot distinguish a
+fixed-size overflow from a buffer whose capacity is unknown.
 
 An external call with a pointer result or argument and no model is an explicit
 `unmodelled-external` warning at the call point; its pointer result stays `Loc.unknown`,

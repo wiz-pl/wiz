@@ -1,12 +1,16 @@
 # Scry on real historical CVEs (2026-11-15)
 
-Status: measurement report, **no analysis or rule changes** on the corpus
-branch. Branch `agent/scry-cve`, based on `agent/scry-scale` `f9294ec4` with
+Status: measurement report. The original run is on the corpus branch
+`agent/scry-cve`, based on `agent/scry-scale` `f9294ec4` with
 `agent/scry-real-corpus` `acd4b34c` merged (the 51-case `scry bench` harness and
-the real-C source runner are present; this corpus does not use them). The
-external-model re-run is on `agent/scry-cve-models` (`agent/scry-models`
-`54f6ded5` merged with `agent/scry-cve` `722e3fe9`); see
+the real-C source runner are present; this corpus does not use them), and it made
+**no analysis or rule changes**. The external-model re-run is on
+`agent/scry-cve-models` (`agent/scry-models` `54f6ded5` merged with
+`agent/scry-cve` `722e3fe9`); see
 [External-model re-run](#external-model-re-run-agentscry-models-54f6ded5).
+`agent/scry-coverage` then closes the named source/sink gaps and detects the two
+format-string CVEs; see
+[Coverage re-run](#coverage-re-run-agentscry-coverage).
 
 This is an **opt-in benchmark**, not part of `scry bench`, `grail test`, the
 default fast gate, or CI. It runs each case in its own process because one case
@@ -159,7 +163,80 @@ pointer may point at, with the same budget/unknown discipline as `ptrAccess`.
 That is a change to the sink rule, not to this corpus, and it should be
 measured on both the model fixtures and these twelve cases.
 
-## Precision and recall
+## Coverage re-run (`agent/scry-coverage`)
+
+Branch `agent/scry-coverage` (from `agent/scry-cve-models` `64df0ae4`) closes the
+source/sink gaps named above. The corpus and driver are unchanged; the same twelve
+cases ran with `--timeout 120 --max-nodes 200000`, and the checked-in rule pack,
+`lib/Scry/Models.wiz` and the model tests changed. Two engine prerequisites were
+needed: `Scry.memDep` dropped all but one data edge between the same two points
+(a call reading `n, f, 0` lost the edge for `f`), and the staged CLI pipeline had
+stopped collecting `unmodelled-external` warnings.
+
+| CVE | CWE | before | after | expected rule | matched / expected | extra | hints | after ms | after RSS MiB |
+|---|---|---|---|---:|---:|---:|---:|---:|---:|
+| CVE-2000-0573 | CWE-134 | miss | **tp** | `format-string` | 1 / 1 | 3 | 0 | 33 | 6.8 |
+| CVE-2012-0809 | CWE-134 | miss | **tp** | `format-string` | 1 / 1 | 4 | 0 | 45 | 6.8 |
+| CVE-2016-3714 | CWE-78 | miss | miss | `command-injection` | 0 / 1 | 1 | 0 | 28 | 6.8 |
+| CVE-2024-23749 | CWE-78 | miss | miss | `command-injection` | 0 / 1 | 0 | 11 | 430 | 6.8 |
+| CVE-2020-1752 | CWE-416 | miss | miss | `scry/memory/use-after-free` | 0 / 1 | 5 | 0 | 460 | 6.8 |
+| CVE-2019-7317 | CWE-416 | miss | miss | `scry/memory/use-after-free` | 0 / 1 | 1 | 0 | 21 | 6.8 |
+| CVE-2021-41773 | CWE-22 | out | out | -- | 0 / 0 | 0 | 0 | 69 746 | 9.2 |
+| CVE-2021-3449 | CWE-476 | out | out | -- | 0 / 0 | 3 | 0 | 212 | 6.8 |
+| CVE-2017-7529 | CWE-190 | out | out | -- | 0 / 0 | 0 | 0 | 90 | 6.8 |
+| CVE-2021-23017 | CWE-787 | out | out | -- | 0 / 0 | 5 | 0 | 669 | 7.2 |
+| CVE-2014-0160 | CWE-125 | out | out | -- | 0 / 0 | 6 | 0 | 171 | 7.0 |
+| CVE-2018-1000001 | CWE-787 | out | out | -- | 0 / 0 | 3 | 1 | 383 | 6.8 |
+
+**In-scope recall: 2/6 (33.3%); overall: 2/12 (16.7%).** Finding-level precision is
+**2/33 (6.1%)** counting non-hint alerts (2 matched + 31 extras); the 12
+`strcpy-overflow` results are now `note` hints and are excluded (with them the
+denominator is 45). Both new detections are the
+vulnerable sink argument itself: `format-string` at `vsnprintf` argument 2
+(CVE-2000-0573) and at `vfprintf` argument 1 (CVE-2012-0809), each with a checked
+source path from `read`/`argv[0]`.
+
+### What changed
+
+| kind | added or changed |
+|---|---|
+| source | `main` argument 1 (`argv`) at the entry; `getopt` and `getopt_long` results; `fgets`/`getline`/`fread` buffers and `read`/`recv` buffer arguments in the default pack |
+| format sink | `vsyslog` (argument 1), `vdprintf` (1), `asprintf`/`easprintf`/`vasprintf` (1); `vsnprintf`, `vfprintf`, `syslog`, `dprintf` already present |
+| formatted destination | `asprintf`/`easprintf`/`vasprintf` copy their formatted arguments into the object argument 0 points at; `vsnprintf`/`vsprintf` copy the `va_list` argument into the destination |
+| command sink | the existing `exec*`/`posix_spawn*` family; the default pack now repeats the concrete argument indices (`execv` 0 and 1, `execve` 0 and 1, …) so a pack reader sees them |
+| policy | `realpath` (result and argument 1), `strlcpy`/`strlcat` (destination) as **opt-in** sanitiser models; a pack has to name them. The default pack does not trust them for command/format taint, and `snprintf` is explicitly not a sanitiser |
+| hint | `strcpy-overflow` is `severity note`, message "hint, not a finding: unbounded strcpy/strcat; destination capacity unknown". The driver reports `hints` separately |
+| va_list | a `va_list` passed through parameters keeps its taint after the data-edge fix; the format string reaches `vsnprintf` even when the `va_list` is built by `va_start` in another function |
+
+The 11 KiTTY `strcat` alerts and the glibc `realpath` alert remain true statements
+about unbounded writes, but they do not claim a fixed-size overflow. Distinguishing
+"write into a fixed-size array" from "write into a buffer whose capacity is unknown"
+needs a bounds analysis; the rule now says it is a hint rather than pretending to
+know.
+
+### Deliberately left unmodelled
+
+* `optarg` (the `getopt` side channel) and `environ`; only `getenv` and `main`'s
+  `argv` are sources. A non-`main` entry point (a library constructor, `wmain`) does
+  not get the argv seed.
+* `snprintf` truncation is not a sanitiser, and `realpath`/`strlcpy`/`strlcat` are not
+  trusted by the default pack: they are bounds/path sanitisers, not content
+  sanitisers.
+* `strdup`, `strchr`/`strrchr` returning a pointer into their argument, and callback
+  frees (`png_safe_execute`) remain unmodelled: they need alias/lifetime models, not
+  taint rows.
+* `execl*` models command positions 0–7; a call with more variadic arguments is
+  handled by those positions only.
+* A `va_list` is modelled as a value that can be copied to a destination; it is not
+  expanded into its individual formatted fields, and `vfprintf` has no destination
+  string to taint. `easprintf`'s non-standard `char *` return value is not modelled
+  as the formatted string; its `char **` out argument is.
+
+
+## Precision and recall (original run)
+
+The table below is the first run's score, kept for comparison with the coverage
+re-run above.
 
 | metric | value |
 |---|---:|
@@ -195,6 +272,10 @@ The external-model re-run above is the same 0/6 and 0/12; its extra count is
 
 ## Why each in-scope case missed
 
+This is the original run's diagnosis, kept for the record. CVE-2000-0573 and
+CVE-2012-0809 are detected on `agent/scry-coverage`; the remaining four reasons
+below still hold.
+
 | CVE | actual | reason |
 |---|---|---|
 | CVE-2000-0573 | nothing | the sink is `vsnprintf`; the pack only has `printf`/`fprintf`. `va_list` and the conditional size expression also lower as boundaries. |
@@ -205,6 +286,10 @@ The external-model re-run above is the same 0/6 and 0/12; its extra count is
 | CVE-2019-7317 | 1 unknown-indirect | the free happens inside a callback copied through a stack control block; there is no stack-lifetime or indirect-call summary, so the stale `image->opaque` is not recognised as a freed heap object. |
 
 ## Top three analysis gaps
+
+The format-string half of gap 1 is closed on `agent/scry-coverage` (`vsnprintf`,
+`vfprintf` and the `va_list` path); command injection through a copied buffer
+still needs the memory-aware sink the model re-run called for.
 
 1. **Taint is register/value-level, not string-content-level.** Every real
    command-injection and format-string case builds the sink argument with a
@@ -254,6 +339,9 @@ rule evaluation/fixpoint on `ap_normalize_path`; it was left alone because
 this task measures, and does not tune, the analysis.
 
 ## Follow-up issues (do not tune the corpus)
+
+Items 1–2 are implemented on `agent/scry-coverage` (see the coverage re-run); items
+3–4 remain.
 
 1. Add destination-taint models for `strcat`/`strcpy`/`sprintf`/`snprintf`
    and source-taint for the formatted result; add `vsnprintf`/`vfprintf` to

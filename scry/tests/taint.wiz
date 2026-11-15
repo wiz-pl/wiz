@@ -334,6 +334,18 @@ def main : IO Unit := EIO.toIO (do
     (Bool.and (Nat.beq (List.length repModel11.memory) 1)
       (List.all (fun s => String.eq s "scry/memory/unmodelled-external") (memKinds repModel11)));
 
+  oModelArgv ← opts ["tests/fixtures/model-argv.c"];
+  repModelArgv ← Scry.analyzeFile oModelArgv;
+  checkOne "model-argv" repModelArgv "format-string" "main";
+
+  oModelVa ← opts ["tests/fixtures/model-valist.c"];
+  repModelVa ← Scry.analyzeFile oModelVa;
+  checkOne "model-valist" repModelVa "format-string" "static:v";
+
+  oModelAsp ← opts ["tests/fixtures/model-asprintf.c"];
+  repModelAsp ← Scry.analyzeFile oModelAsp;
+  checkOne "model-asprintf" repModelAsp "format-string" "main";
+
   -- memory: an unmodelled external's pointer is unknown: taint flows, both accesses warn
   oM14 ← opts ["tests/fixtures/mem-unknown.c"];
   repM14 ← Scry.analyzeFile oM14;

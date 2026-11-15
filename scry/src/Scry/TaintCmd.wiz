@@ -593,7 +593,9 @@ def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do
         (List.length prog.funcs);
       Scry.checkDeadline o startMs "results";
       let warnings := Scry.dedupWarnings
-        (Scry.concatLists (fun r => r.plan.memWarnings) results);
+        (List.append
+          (Scry.concatLists (fun r => r.plan.memWarnings) results)
+          (Scry.concatLists (fun r => Scry.unmodelledWarningsOf prog r) results));
       let pr := Scry.ProgramResult.mk results sums.1 graph pt warnings;
       Scry.reportStage o startMs "analyse" (Nat.repr (List.length results)
         ++ " function(s), " ++ Nat.repr sums.2.1 ++ " summary round(s)"

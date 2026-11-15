@@ -264,7 +264,7 @@ def group : Group where
           "#eval Nat.add (Nat.mul (List.length Scry.demoRules.rules) 10000) (Nat.add (Nat.mul (List.length (Scry.RulePack.taintRules Scry.demoRules)) 1000) (Nat.add (Nat.mul (List.length (Scry.RulePack.forbiddenRules Scry.demoRules)) 100) (Nat.add (Nat.mul (totalSinks (Scry.RulePack.taintRules Scry.demoRules)) 10) (totalSources (Scry.RulePack.taintRules Scry.demoRules)))))\n" ++
           "#eval if Scry.nameMatches \"mem*\" \"memcpy\" then 1 else 0\n" ++
           "#eval if Scry.nameMatches \"strcpy*\" \"astrcpy\" then 1 else 0\n" ++
-          "#eval match Scry.Program.check Scry.ruleTaintProgram with | .none => 999 | .some st => List.length st") [42245, 1, 0, 14]
+          "#eval match Scry.Program.check Scry.ruleTaintProgram with | .none => 999 | .some st => List.length st") [42534, 1, 0, 14]
         evalRuleTexts (rulePrelude ++
           "#eval ruleSev Scry.demoRules.rules \"gets-overflow\"\n" ++
           "#eval ruleKind Scry.demoRules.rules \"gets-overflow\"")
@@ -410,8 +410,15 @@ def group : Group where
         "#eval if Scry.Models.isModelled \"mystery_external\" then 0 else 1\n" ++
         "#eval if Scry.Models.isUnknownModel (Scry.Models.modelFor \"mystery_external\") then 1 else 0\n" ++
         "#eval if Scry.RulePack.trustsSanitiser Scry.demoRules \"sanitize\" then 1 else 0\n" ++
-        "#eval if Scry.RulePack.trustsSanitiser Scry.demoRulesNoSan \"sanitize\" then 0 else 1")
-        [1, 1, 1, 8, 13, 9, 10, 0, 1, 1, 1, 1, 1] },
+        "#eval if Scry.RulePack.trustsSanitiser Scry.demoRulesNoSan \"sanitize\" then 0 else 1\n" ++
+        "#eval List.length (Scry.Models.sinksOf \"vsnprintf\")\n" ++
+        "#eval List.length (Scry.Models.sinksOf \"vsyslog\")\n" ++
+        "#eval List.length (Scry.Models.copyPairsOf \"asprintf\" 4)\n" ++
+        "#eval List.length (Scry.Models.copyPairsOf \"vsnprintf\" 4)\n" ++
+        "#eval List.length (Scry.Models.entrySourceArgs \"main\")\n" ++
+        "#eval List.length (Scry.Models.sourcesOf \"getopt\")\n" ++
+        "#eval List.length (Scry.Models.sourcesOf \"fgets\")")
+        [1, 1, 1, 8, 13, 9, 10, 0, 1, 1, 1, 1, 1, 2, 1, 3, 3, 1, 1, 1] },
     { name := "external models: a model sink on execl argument 3 is a command-injection finding",
       run := fun _ => do
         evalRuleNats (rulePrelude ++

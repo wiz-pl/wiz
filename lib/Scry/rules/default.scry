@@ -15,6 +15,13 @@
 #   end
 #
 # Names match with `*` as a wildcard over the whole callee name.
+#
+# External models (`lib/Scry/Models.wiz`) add the effects of libc/syscall calls
+# after these lines: a model source is the same as a `source` line, a model sink
+# for a `(call, argument)` the pack does not claim is added with the model's rule
+# id, and a model `copy`/`copyArgs` becomes a memory store. Sources that arrive at
+# a program entry rather than at a call (`main`'s argv) are seeded by the model's
+# entry-source hook.
 
 rule command-injection
   kind taint
@@ -23,11 +30,31 @@ rule command-injection
   source getenv result
   source recv result
   source read arg 1
+  source fgets arg 0
+  source getline arg 0
+  source fread arg 0
+  source getopt result
+  source getopt_long result
   sanitise escape_shell result
   sanitise shellescape result
   sanitise sanitize arg 0
   sink system arg 0
   sink popen arg 0
+  sink execl arg 0
+  sink execlp arg 0
+  sink execle arg 0
+  sink execv arg 0
+  sink execv arg 1
+  sink execvp arg 0
+  sink execvp arg 1
+  sink execve arg 0
+  sink execve arg 1
+  sink execvpe arg 0
+  sink execvpe arg 1
+  sink posix_spawn arg 1
+  sink posix_spawn arg 4
+  sink posix_spawnp arg 1
+  sink posix_spawnp arg 4
 end
 
 rule format-string
@@ -36,9 +63,27 @@ rule format-string
   message Attacker-controlled data is used as a format string
   source getenv result
   source recv result
+  source read arg 1
+  source fgets arg 0
+  source getline arg 0
+  source fread arg 0
   sanitise escape_shell result
+  sanitise sanitize_format result
   sink printf arg 0
   sink fprintf arg 1
+  sink sprintf arg 1
+  sink snprintf arg 2
+  sink vprintf arg 0
+  sink vfprintf arg 1
+  sink vsprintf arg 1
+  sink vsnprintf arg 2
+  sink syslog arg 1
+  sink vsyslog arg 1
+  sink dprintf arg 1
+  sink vdprintf arg 1
+  sink asprintf arg 1
+  sink vasprintf arg 1
+  sink easprintf arg 1
 end
 
 rule gets-overflow
@@ -48,10 +93,18 @@ rule gets-overflow
   call gets
 end
 
+# A hint, not a finding. `strcpy`/`strcat` are unbounded writes, but whether the
+# destination is a fixed-size array (a real overflow) or a buffer whose capacity
+# this analysis has not established (for example a `char *` from a caller) is a
+# bounds question the taint domain does not answer. The rule therefore reports a
+# `note`; it is not evidence of a CVE on its own. `strlcpy`/`strncat` are bounded
+# and are not called here. `snprintf` truncation is deliberately NOT a sanitiser:
+# a truncated command can still be dangerous, and truncation is not a content
+# sanitiser.
 rule strcpy-overflow
   kind forbidden
-  severity warning
-  message strcpy does not bound the copy; use strlcpy or a checked length
+  severity note
+  message hint, not a finding: unbounded strcpy/strcat; destination capacity unknown
   call strcpy
   call strcat
 end
