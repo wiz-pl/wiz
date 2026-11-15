@@ -51,7 +51,9 @@ def Scry.ProjectIO.resolvePath (base p : String) : String :=
 def Scry.ProjectIO.parentDir (p : String) : String :=
   match String.splitOn p "/" with
   | .nil => "."
-  | .cons _ .nil => "."
+  | .cons _ .nil => match String.startsWith p "/" with
+    | .true => "/"
+    | .false => "."
   | parts => String.intercalate "/" (List.dropLast parts)
 
 
