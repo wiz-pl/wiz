@@ -745,9 +745,9 @@ throughput one item per cycle with ready high (valid delayed by 3), data held wh
 is low, and transfer order preserved under backpressure (7 transfers, no loss or
 duplication in a 12-cycle trace with a 3-cycle stall); reset clears the elastic
 registers; `Circuit.run`, the netlist and `simFast` agree (the compiled `cRunLibs`
-case passed). The `hdl` group passed 23 cases, 0 failed and skipped 5 (no yosys, no
-iverilog in the default PATH); with a nix yosys 0.70 on PATH the pipeline's
-`check -assert` case also passed.
+case passed). The `hdl` group has 30 cases: with yosys, Icarus and a C toolchain on
+PATH all 30 passed; without yosys or Icarus the five tool cases are marked skipped with
+their reason, never silently passed.
 
 **What remains.** A `Flow` is one clock and one `Circuit`: no multi-clock flow, no
 memories inside a flow, no true fork/join of independent ready/valid channels (the data
@@ -924,7 +924,8 @@ simulation, `Netlist.simulate` and `Circuit.simFast` agree, the output equals th
 ownership/progress law (at most one acknowledgement; a valid grant is answered) and the
 forwarded request is the granted one. The same example checks the circuit's fairness for
 n = 3, and the test case runs yosys `check -assert` and `synth_ice40` on the emitted
-Verilog when yosys is on PATH (skipped silently otherwise).
+Verilog when yosys is on PATH; without yosys the case is marked skipped with the reason
+`no yosys`, never silently passed.
 
 ## APB, Wishbone, AXI4-Lite and AXI4 bursts (`lib/Hdl/Apb.wiz`, `lib/Hdl/Wishbone.wiz`, `lib/Hdl/AxiLite.wiz`, `lib/Hdl/Axi4.wiz`)
 
@@ -1014,9 +1015,9 @@ the `SLVERR` mapping for a bus error, and the multi-ID `Axi4.orderOf` model on
 interleaved completions. The `SlaveIn`/`SlaveOut` bundles round-trip through
 `Bundle.toEl`/`Bundle.ofEl`. The value simulation, `Netlist.simulate` and `Circuit.simFast`
 agree cycle for cycle, the two adapter netlists are `Netlist.wellFormed`, and yosys
-`check -assert`/`synth_ice40` runs on their Verilog when yosys is on PATH (skipped
-silently otherwise). The test group now has two cases (the existing APB/Wishbone/AXI4-Lite
-case and this one).
+`check -assert`/`synth_ice40` runs on their Verilog when yosys is on PATH; without yosys
+the case is marked skipped with the reason `no yosys`, never silently passed. The test
+group has two cases (the APB/Wishbone/AXI4-Lite one and this one).
 
 ## CRC-8/SMBUS (`lib/Hdl/Crc.wiz`)
 

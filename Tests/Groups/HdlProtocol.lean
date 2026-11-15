@@ -13,7 +13,7 @@ yosys is on PATH: an unmapped cell or a combinational loop in the write or read 
 fails here. -/
 def hdlAxi4Synthesis : IO Unit := do
   let ys ← (do let o ← IO.Process.output { cmd := "yosys", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
-  unless ys do return
+  unless ys do skip "no yosys"; return
   let src ← IO.FS.readFile "examples/hdl-axi4.wiz"
   let body := "import Hdl.Core\nimport Hdl.Axi4\nimport Hdl.Axi4Law\n" ++ src ++
     "\n#eval Verilog.emit (Circuit.netlist \"axi4_wr\" (Axi4.wrC 8 16 4))\n" ++

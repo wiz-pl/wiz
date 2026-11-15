@@ -12,7 +12,7 @@ namespace Tests.Elab
 yosys is on PATH; a design with an unmapped cell or a combinational loop fails here. -/
 def hdlArbNSynthesis : IO Unit := do
   let ys ← (do let o ← IO.Process.output { cmd := "yosys", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
-  unless ys do return
+  unless ys do skip "no yosys"; return
   let src ← IO.FS.readFile "examples/hdl-arb-n.wiz"
   let body := "import Hdl.Core\nimport Hdl.Bus\n" ++ src ++
     "\n#eval Verilog.emit (Circuit.netlist \"arbn2\" (Bus.arbNC 2 8 8))\n" ++
