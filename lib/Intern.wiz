@@ -71,14 +71,9 @@ def StringObj : Type := String
 extern "wiz_itab_of_list" InternTable.ofListNative : List String → InternTable
 extern "wiz_itab_to_list" InternTable.toListNative : InternTable → List String
 attribute [implemented_by InternTable.ofListNative InternTable.toListNative] InternTable.mk
-attribute [implemented_by InternTable.toListNative] InternTable.toList
-extern "wiz_itab_empty" InternTable.emptyNative : InternTable
-extern "wiz_itab_size" InternTable.sizeNative : InternTable → NatObj
 extern "wiz_itab_find" InternTable.findNative : InternTable → StringObj → Option U32
 extern "wiz_itab_intern" InternTable.internNative : InternTable → StringObj → InternTable × U32
 extern "wiz_itab_lookup" InternTable.lookupNative : InternTable → U32 → StringObj
-attribute [implemented_by InternTable.emptyNative] InternTable.empty
-attribute [implemented_by InternTable.sizeNative] InternTable.size
 attribute [implemented_by InternTable.findNative] InternTable.find
 attribute [implemented_by InternTable.internNative] InternTable.intern
 attribute [implemented_by InternTable.lookupNative] InternTable.lookup

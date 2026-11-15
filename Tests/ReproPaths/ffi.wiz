@@ -1,0 +1,12 @@
+-- A path-reproducibility corpus program: `link_c` makes the link job's key and its
+-- `link.txt` path-sensitive unless both are relative to the package.
+import IO
+
+link_c "ffi.c"
+
+extern "repro_add" repro_add : Nat → Nat → Nat
+extern "repro_len" repro_len : String → Nat
+
+def main : IO Unit := do
+  IO.println (Nat.toString (repro_add 20 22));
+  IO.println (Nat.toString (repro_len "linked from C"))

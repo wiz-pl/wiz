@@ -89,10 +89,17 @@ revision (a tag, a branch or a commit); `grail update` pins it in `grail.lock`. 
 inductive Dep where
   | mk (name : String) (url : String) (rev : String)
 
+-- A package from the registry: its name and a version requirement (`^1.2`, `~0.1.3`,
+-- `>=0.1 <0.3`, `1.2.0`); `grail update` resolves it through the index.
+inductive Req where
+  | mk (name : String) (req : String)
+
 /-- A package: its name, its targets, its settings and its dependencies. Built with
-`Package.new` and the `Package.*` functions, in a pipeline. -/
+`Package.new` and the `Package.*` functions, in a pipeline. (23m adds the version, the
+toolchain range and the registry requirements.) -/
 inductive Package where
   | mk (name : String) (targets : List Target) (settings : Settings) (deps : List Dep)
+       (version : String) (toolchain : String) (requires : List Req)
 
 /-- No settings. -/
 def Settings.empty : Settings := .mk .nil
@@ -102,11 +109,11 @@ def Settings.set (key value : String) : Settings → Settings
   | .mk ps => .mk (List.append ps (.cons (Setting.mk key value) .nil))
 
 /-- A package with this name and nothing in it yet: `Package.new "shapes"`. -/
-def Package.new (name : String) : Package := .mk name .nil Settings.empty .nil
+def Package.new (name : String) : Package := .mk name .nil Settings.empty .nil "" "" .nil
 /-- Adds a target at the end of the package's targets. The `Package.lib`, `Package.exe`, …
 shorthands use it. -/
 def Package.add (t : Target) : Package → Package
-  | .mk n ts s ds => .mk n (List.append ts (.cons t .nil)) s ds
+  | .mk n ts s ds v tc rs => .mk n (List.append ts (.cons t .nil)) s ds v tc rs
 /-- `Package.lib name root`: a library target, every module under the directory `root`
 (the module `A.B` is `root/A/B.wiz`). -/
 def Package.lib (name root : String) (p : Package) : Package := Package.add (.lib name root) p
@@ -181,10 +188,35 @@ def Package.phony (c : Command) (p : Package) : Package := Package.add (.command
 
 /-- `Package.set key value`: sets one of the package's own settings (see `Setting`). -/
 def Package.set (key value : String) : Package → Package
-  | .mk n ts s ds => .mk n ts (Settings.set key value s) ds
+  | .mk n ts s ds v tc rs => .mk n ts (Settings.set key value s) ds v tc rs
 /-- `Package.dep name url rev`: depends on the package at a git URL and revision. -/
 def Package.dep (name url rev : String) : Package → Package
-  | .mk n ts s ds => .mk n ts s (List.append ds (.cons (Dep.mk name url rev) .nil))
+  | .mk n ts s ds v tc rs => .mk n ts s (List.append ds (.cons (Dep.mk name url rev) .nil)) v tc rs
+
+-- ## The registry (23m)
+-- This package's version (`1.2.3`, `1.2.3-rc.1`) and the toolchain it was tested with
+-- (`>=0.1 <0.3`); `grail publish` puts both in the index entry.
+def Package.version (v : String) : Package → Package
+  | .mk n ts s ds _ tc rs => .mk n ts s ds v tc rs
+def Package.toolchain (req : String) : Package → Package
+  | .mk n ts s ds v _ rs => .mk n ts s ds v req rs
+-- depend on a package from the registry by version requirement
+def Package.require (name req : String) : Package → Package
+  | .mk n ts s ds v tc rs => .mk n ts s ds v tc (List.append rs (.cons (Req.mk name req) .nil))
+
+-- ## Local overrides (lock v3, R37)
+/-- `Package.override NAME PATH`: in `grail.local.wiz` (uncommitted, this machine only),
+take `NAME` from the package at `PATH` instead of the registry. The lock records the
+override and its tree hash; `--locked` refuses it, and a plain build says which path it
+used. The argument is the local `Settings`, so it composes with `Settings.set`:
+
+```
+def settings : Settings := Settings.empty
+  |> Package.override "ddr3" "../wiz-ddr3"
+  |> Settings.set "cflags" "-I…"
+``` -/
+def Package.override (name path : String) : Settings → Settings
+  | .mk ps => .mk (List.append ps (.cons (Setting.mk (String.append "override " name) path) .nil))
 
 /-- `String.append`, shorter. (The rendering helpers below build the S-expression text.) -/
 def Grail.cat (a b : String) : String := String.append a b
@@ -265,8 +297,41 @@ def Settings.render : Settings → String
 def Grail.renderDeps : List Dep → List String
   | .nil => .nil
   | .cons (.mk n u r) ds => .cons (Grail.node "dep" (.cons (Grail.quote n) (.cons (Grail.quote u) (.cons (Grail.quote r) .nil)))) (Grail.renderDeps ds)
-/-- A `Package` as `(package NAME (list TARGET …) SETTINGS (list DEP …))`: what grail reads
-from `grail.wiz`. -/
+-- (23m) the manifest's registry fields, as a list of tagged nodes (absent ones are "")
+def Grail.renderReqList : List Req → List String
+  | .nil => .nil
+  | .cons (.mk n r) rs => .cons (Grail.node "require" (.cons (Grail.quote n) (.cons (Grail.quote r) .nil))) (Grail.renderReqList rs)
+def Grail.renderRequires : List Req → String
+  | rs => Grail.list (Grail.renderReqList rs)
+/-- A `Package` as `(package NAME (list TARGET …) SETTINGS (list DEP …) VERSION
+TOOLCHAIN (list REQUIRE …))`: what grail reads from `grail.wiz`. -/
 def Package.render : Package → String
-  | .mk n ts s ds => Grail.node "package" (.cons (Grail.quote n) (.cons (Grail.list (Grail.renderTargets ts))
-      (.cons (Settings.render s) (.cons (Grail.list (Grail.renderDeps ds)) .nil))))
+  | .mk n ts s ds v tc rs => Grail.node "package" (.cons (Grail.quote n) (.cons (Grail.list (Grail.renderTargets ts))
+      (.cons (Settings.render s) (.cons (Grail.list (Grail.renderDeps ds))
+        (.cons (Grail.quote v) (.cons (Grail.quote tc) (.cons (Grail.renderRequires rs) .nil)))))))
+
+-- ## The index repository (23m)
+/-- A `grail-index` repository's manifest (`index.wiz`): the index's name, its format,
+and the packages it publishes (one `index/NAME.sexpr` for each). It is a Wiz program, as
+a package's `grail.wiz` is; `grail index check` evaluates `Index.render index` and
+compares the result with the files on disk. -/
+inductive Index where
+  | mk (name : String) (format : Nat) (packages : List String)
+/-- An index manifest with this name, format 1, and no packages yet:
+`Index.new "wiz-pl/grail-index"`. -/
+def Index.new (name : String) : Index := .mk name 1 .nil
+/-- Sets the index format (today only 1 is read). -/
+def Index.withFormat (n : Nat) : Index → Index
+  | .mk name _ ps => .mk name n ps
+/-- Adds a published package name (`index/NAME.sexpr`). -/
+def Index.package (p : String) : Index → Index
+  | .mk name n ps => .mk name n (List.append ps (.cons p .nil))
+/-- Each package name as `(package "NAME")`. -/
+def Grail.renderIndexPackages : List String → List String
+  | .nil => .nil
+  | .cons p ps => .cons (Grail.node "package" (.cons (Grail.quote p) .nil)) (Grail.renderIndexPackages ps)
+/-- An `Index` as `(index (name NAME) (format N) (package "…") …)`: what grail reads
+from `index.wiz`. -/
+def Index.render : Index → String
+  | .mk name n ps => Grail.node "index" (.cons (Grail.node "name" (.cons (Grail.quote name) .nil))
+      (.cons (Grail.node "format" (.cons (Syntax.decimal n) .nil)) (Grail.renderIndexPackages ps)))

@@ -1,0 +1,12 @@
+(index
+  (package "text"
+    (summary "Text helpers")
+    (repo "https://example.org/wiz/text")
+    (version "1.0.0"
+      (source "packages/text-1.0.0.tar.gz")
+      (sha256 "62aedb9aaf7e94f4617c015a0a857a4e08afccbe35ee3e66fcb7edc94229f1d7")
+      (deps (dep "std" "^0.1")))
+    (version "1.1.0"
+      (source "packages/text-1.1.0.tar.gz")
+      (sha256 "a38331b6c60d69596c52957f3f11b3731a7b8b9952884313f044f374ae8e35f5")
+      (deps (dep "std" "^0.1")))))
