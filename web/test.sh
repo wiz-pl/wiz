@@ -18,6 +18,11 @@ WIZ=${WIZ:-$ROOT/.lake/build/bin/wiz}
 node "$ROOT/web/scroll-search_test.mjs" > "$OUT/search.txt"
 grep -qF 'scroll-search: all checks passed' "$OUT/search.txt" && echo "ok (search)" || {
   echo "FAIL (search)"; cat "$OUT/search.txt"; exit 1; }
+# (playground-lsp) the language client and goals panel against a mock WebSocket server
+# (no Wasm build, no browser)
+node "$ROOT/web/playground_lsp_test.mjs" > "$OUT/lsp.txt"
+if grep -qF 'playground lsp: all checks passed' "$OUT/lsp.txt"; then echo "ok (playground, lsp)"; else
+  echo "FAIL (playground, lsp)"; cat "$OUT/lsp.txt"; exit 1; fi
 "$ROOT/web/build.sh" "$OUT" >/dev/null
 "$ROOT/web/build-playground.sh" "$OUT" >/dev/null
 node "$ROOT/web/node_test.mjs" "$OUT" python3 "$ROOT/infoview/stub_server.py" --stdio > "$OUT/node.txt"
