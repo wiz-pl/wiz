@@ -62,6 +62,7 @@
     "=scry-ai",
     "=scry-taint",
     "=scry-uaf",
+    "=scry-workflow",
     "=linear-case",
     "repr",
     "result-q",

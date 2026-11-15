@@ -19,7 +19,7 @@ malformed manifest is an error. `--fail-on-regression` makes a baseline mismatch
 def Scry.benchUsage : String :=
   "usage: scry bench [--corpus DIR] [--baseline FILE] [--extra DIR]...\n"
   ++ "                 [--json OUT] [--markdown OUT] [--update-baseline FILE]\n"
-  ++ "                 [--no-timing] [--quiet] [--fail-on-regression]\n"
+  ++ "                 [--no-baseline] [--no-timing] [--quiet] [--fail-on-regression]\n"
   ++ "                 [--dynamic] [--cc PATH] [--no-coverage]\n"
 
 def Scry.benchDefaultOpts : Scry.BenchOpts :=
