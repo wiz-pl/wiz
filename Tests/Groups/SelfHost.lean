@@ -1018,6 +1018,17 @@ def namedArgCases : List (String × Nat) := [
   ("const2 (B := Bool) 7 .true", 7),
   ("mixed (B := Bool) 3 .true", 3)]
 
+/-- The parser differential's corpus (`selfhost` group): the category and the input. The
+Lean parser is the oracle; the tables generated here and the checked-in
+`selfhost/Tables.wiz` must both accept it and produce the same tree. -/
+def parseDiffCorpus : List (Name × String) := [
+  ("term", "f x y"), ("term", "fun (x : Nat) => x"), ("term", "(x : A) → B x"),
+  ("term", "(a, b).1"), ("term", "match n with\n  | .zero => a\n  | .succ m => b"),
+  ("term", "let x := 1; x"), ("term", "f (g x"), ("term", "Type 1"),
+  ("command", "def f (x : Nat) : Nat := x"),
+  ("command", "inductive T where\n  | a\n  | b (t : T)"),
+  ("command", "#eval f 41"), ("command", "def f : Nat → Nat\n  | .zero => 0\n  | .succ n => n")]
+
 
 def selfHostGroup : Group where
   name := "selfhost"
@@ -1040,17 +1051,30 @@ def selfHostGroup : Group where
         let lexSrc ← IO.FS.readFile "selfhost/Lex.wiz"
         let parseSrc ← IO.FS.readFile "selfhost/Parse.wiz"
         let t := Builtin.tables
-        let cases : List (Name × String) := [
-          ("term", "f x y"), ("term", "fun (x : Nat) => x"), ("term", "(x : A) → B x"),
-          ("term", "(a, b).1"), ("term", "match n with\n  | .zero => a\n  | .succ m => b"),
-          ("term", "let x := 1; x"), ("term", "f (g x"), ("term", "Type 1"),
-          ("command", "def f (x : Nat) : Nat := x"),
-          ("command", "inductive T where\n  | a\n  | b (t : T)"),
-          ("command", "#eval f 41"), ("command", "def f : Nat → Nat\n  | .zero => 0\n  | .succ n => n")]
-        let expected := cases.map fun (c, i) => leanParse t c i
-        let calls := cases.map fun (c, i) => s!"(parse cats tokens {wizLit c} {wizLit i})"
+        let expected := parseDiffCorpus.map fun (c, i) => leanParse t c i
+        let calls := parseDiffCorpus.map fun (c, i) => s!"(parse cats tokens {wizLit c} {wizLit i})"
         let prog := lexSrc ++ "\n" ++ parseSrc ++ "\n" ++ wizTables t ++
           s!"def tokens : List String := {wizList (t.tokens.toList.map wizLit)}\n" ++
+          s!"def main : IO Unit := printAll {wizList calls}\n"
+        ioRun prog ("\n".intercalate expected ++ "\n") },
+    { name := "selfhost/Tables.wiz is current (regenerate with `lake build genSelfhostTables`)", run := fun _ => do
+        -- the checked-in file is what the selfhost builds read; a grammar change that
+        -- does not regenerate it is a stale compiler, so fail here (CI runs this shard
+        -- when `Wiz/Parser/*` changes)
+        let file ← IO.FS.readFile "selfhost/Tables.wiz"
+        unless file == Selfhost.tablesFile do
+          throw (IO.userError s!"selfhost/Tables.wiz is stale: run `lake build genSelfhostTables` and commit it (file {file.length} bytes, the tables now {Selfhost.tablesFile.length})") },
+    { name := "the checked-in tables accept the corpus the Lean parser accepts", run := fun _ => do
+        -- the semantic check of the file: not "the text is the same" but "the tables in
+        -- selfhost/Tables.wiz parse, on the differential's corpus, exactly what the Lean
+        -- parser produces" (the case above does the same with freshly generated tables)
+        let lexSrc ← IO.FS.readFile "selfhost/Lex.wiz"
+        let parseSrc ← IO.FS.readFile "selfhost/Parse.wiz"
+        let tablesSrc ← IO.FS.readFile "selfhost/Tables.wiz"
+        let t := Builtin.tables
+        let expected := parseDiffCorpus.map fun (c, i) => leanParse t c i
+        let calls := parseDiffCorpus.map fun (c, i) => s!"(parse cats tokens {wizLit c} {wizLit i})"
+        let prog := lexSrc ++ "\n" ++ parseSrc ++ "\n" ++ tablesSrc ++
           s!"def main : IO Unit := printAll {wizList calls}\n"
         ioRun prog ("\n".intercalate expected ++ "\n") },
     { name := "the type checker in Wiz", run := fun _ => do
@@ -1114,7 +1138,7 @@ def selfHostGroup : Group where
         -- `(True → Unit) = ((True → True) → Unit)` computes to the domains' equivalence: with
         -- the sorts `sortTy` fills in, and (mandatory sorts) with those the sorts pass fills
         -- in where none were written (`normalize` runs it), so both are the same
-        let src ← Selfhost.checkerFiles.mapM (fun (f : String) => IO.FS.readFile f)
+        let src ← Selfhost.frontendFiles.mapM (fun (f : String) => IO.FS.readFile f)
         let body := "\n".intercalate (src.map fun f => "\n".intercalate ((f.splitOn "\n").filter (!·.startsWith "import")))
         let prog := "import IO\nimport Std\n" ++ body ++ "\n" ++
           "def gTy (X : Tm) : Tm := piH X (.unit (ln 1))\n" ++
@@ -1130,7 +1154,7 @@ def selfHostGroup : Group where
     { name := "a name is declared once: a second declaration is an error (it proved an empty type inhabited)", run := fun _ =>
         selfhostCheckFile dupNames dupNamesExpected },
     { name := "text to checked term, all in Wiz", run := fun _ => do
-        let src ← Selfhost.checkerFiles.mapM (fun (f : String) => IO.FS.readFile f)
+        let src ← Selfhost.frontendFiles.mapM (fun (f : String) => IO.FS.readFile f)
         let body := "\n".intercalate (src.map fun f => "\n".intercalate ((f.splitOn "\n").filter (!·.startsWith "import")))
         let t := Builtin.tables
         let bad := "(fun (x : Type) => x"
@@ -1533,7 +1557,7 @@ def selfHostGroup : Group where
         unless vs[5]? == some "U0" && vs[9]? == some "True" do
           throw (IO.userError s!"unexpected types {vs}") },
     { name := "the self-hosted frontend checks itself (Lex, Parse, Kernel, CParse, CGlue and Frontend.wiz)", run := fun _ => do
-        let srcs ← Selfhost.checkerFiles.mapM (fun (f : String) => IO.FS.readFile f)
+        let srcs ← Selfhost.frontendFiles.mapM (fun (f : String) => IO.FS.readFile f)
         let src := "\n".intercalate srcs
         let body := "\n".intercalate ((src.splitOn "\n").filter (!·.startsWith "import"))
         -- every declaration is reported, none with an error
@@ -1954,7 +1978,7 @@ def selfHostGroup : Group where
     { name := "Backend.wiz erases the value of a let at 0, and keeps it at 1 and ω", run := fun _ => do
         -- the backend test does not need the CLI driver (which expects the generated
         -- parser tables and toolchain constants): checker + Backend only
-        let src ← (Selfhost.checkerFiles ++ ["selfhost/Backend.wiz"]).mapM (fun (f : String) => IO.FS.readFile f)
+        let src ← (Selfhost.frontendFiles ++ ["selfhost/Backend.wiz"]).mapM (fun (f : String) => IO.FS.readFile f)
         let show1 (q : String) := s!"(match eraseCheck empty (.letq {q} (.enum 2) (.tag 2 0) (.tag 2 1)) (.venum 2) with\n    | .ok e => showE e\n    | .err m => String.append \"error: \" m)"
         let prog := "import IO\nimport Std\n" ++ "\n".intercalate (src.map Selfhost.strip) ++ "\n" ++
           s!"def main : IO Unit := do\n  IO.println {show1 ".qz"};\n  IO.println {show1 ".qo"};\n  IO.println {show1 ".qw"}\n"

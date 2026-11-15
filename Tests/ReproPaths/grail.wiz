@@ -1,0 +1,9 @@
+-- The grail package for scripts/check-repro.sh: `grail build` under two absolute roots
+-- must write the same `main.c`, `main.ir`, `link.txt` and binaries in `.grail/`.
+import Grail
+
+def package : Package := Package.new "repro-paths"
+  |> Package.exe "pure" "pure.wiz"
+  |> Package.exe "io" "io.wiz"
+  |> Package.exe "text" "text.wiz"
+  |> Package.exe "ffi" "ffi.wiz"

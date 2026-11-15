@@ -1,6 +1,7 @@
 [
   {"name": "selfhost", "split": 6, "heavy": true,
-   "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz"],
+   "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz",
+              "Wiz/Parser/*", "scripts/GenSelfhostTables.lean"],
    "select": [
     "=prop-kernels",
     "=false-fuzz",
