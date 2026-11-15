@@ -175,6 +175,11 @@ def Scry.wfWriteOutputs (outDir logText reproText : String) : EIO Unit := do
   s2 ← Scry.wfWrite (Path.join outDir "repro.sh") reproText;
   EIO.pure ()
 
+def Scry.wfAttemptJson (san : String) (o : Option Output) : Json :=
+  match o with
+  | .some out => Json.mkObj [("sanitizer", Json.mkStr san), ("result", Scry.wfOutputJson out)]
+  | .none => Json.mkObj [("sanitizer", Json.mkStr san), ("status", Json.mkStr "not-attempted")]
+
 def Scry.wfReproScript (cc : String) (compileCmd : List String) (timedArgs : List String)
     (inputPath : String) : String :=
   String.append "#!/bin/sh\nset -eu\n"
@@ -325,7 +330,10 @@ def Scry.reproRun (cfg : Scry.ReproConfig) (source outDir : String) (tag : Strin
             , ("version", Json.mkStr comp.ccVersion) ])
         , ("compile", Json.mkObj
             [ ("command", Scry.wfListJson comp.compileCmd)
-            , ("result", Scry.wfOutputJson comp.compileOut) ])
+            , ("result", Scry.wfOutputJson comp.compileOut)
+            , ("attempts", Json.mkArr
+                [ Scry.wfAttemptJson comp.requested comp.opt1
+                , Scry.wfAttemptJson "none" comp.opt2 ]) ])
         , ("harness", Json.mkObj
             [ ("path", Json.mkStr harnessPath)
             , ("hash", Json.mkStr harnessHash) ])
