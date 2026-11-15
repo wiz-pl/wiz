@@ -97,7 +97,8 @@ The remaining rows fall into five groups, with the plan for each:
   function) and a `builtin extern:` row (the marshalling). These are the mechanical
   bulk and the next review unit: audit by C symbol against `runtime/` and `c/`, then
   replace the two `legacy:` rows with one reason naming the symbol and its contract.
-  Do not bulk-renew them.
+  Do not bulk-renew them. The numeric/container modules are done (see below); the OS
+  modules are the remaining unit.
 * **Mutual recursion, 109 `partial` rows.** `Feral` (70), `Json` (9), `SatTactic` (7),
   `BvDecide` (6), `Tagged` (6), `Ring` (2) and the rest are compiled engines. Wiz's
   structural checker does not accept nested/mutual induction here, so they cannot be
@@ -117,10 +118,46 @@ The remaining rows fall into five groups, with the plan for each:
 
 The 35 pure axioms (the foreign types, the seals, `Region`'s `Outlives` evidence and
 `Prelude.castRefl`) now carry a specific reason and the owner `wiz-pl maintainers`; so
-does the kept `UIntN.toNat` native (the word tests pin it in the compiled IR). The FFI
-and engine rows still say `legacy:`; `--strict-legacy` lists them, and the 2027-05-14
-expiry is the deadline for the per-symbol and per-engine review above. `Json.sub` is
-partial by intent (it is an elaboration fence, not recursion) and now has a reason.
+does the kept `UIntN.toNat` native (the word tests pin it in the compiled IR). The
+engine rows and the OS-surface FFI rows still say `legacy:`; `--strict-legacy` lists
+them, and the 2027-05-14 expiry is the deadline for the per-engine and per-symbol review
+above. `Json.sub` is partial by intent (it is an elaboration fence, not recursion) and
+now has a reason.
+
+### The numeric/container FFI audit
+
+`Word`, `WordArray`, `WordMap` and `Intern` declare 66 externs (198 rows: each extern's
+`axiom` and `builtin extern:` pair, plus the `native` registration and the seal
+`builtin`s). All are reviewed with a reason naming the C function, the property that
+makes it the definition, and the marshalling's kind string; the `native` rows name the
+extern and point at the group that runs the model and the native against each other
+(`=word` for the words, `=natives` for arrays, maps and intern tables, in C and LLVM).
+
+The declaration is checked against the C prototype by
+`scripts/trust-ffi-audit.sh --check` (the OS audit's script, shared): for every ledger
+`builtin extern:SYM:kinds:result:…` it writes
+`static <result> (*chk)(<params>) = SYM;` with the C types the marshalling uses and
+compiles it against `runtime/wiz_rt.h`. `-Werror=incompatible-pointer-types` makes a
+width or signedness mismatch a failure on compilers that would otherwise only warn:
+without it a `uint64_t` declaration against an `int` definition is a silent
+truncation, which the `native`/`natives` tests need not reach.
+
+That check and the review found one real mismatch, in the `IO` module's machine types:
+`UInt64.ofNat` said "modulo 2⁶⁴" and had type `Nat → UInt64`, so its `Nat` was
+marshalled as a `uint64_t` (`wiz_in_nat`), which **panics** for a `Nat` of 2⁶⁴ or more.
+The reduction now happens in Wiz before the call
+(`UInt64.ofNat n := UInt64.ofNatRaw (Nat.mod n (2^64))`, with a private
+`wiz_u64_id` extern), and the `ffi` group pins 2⁶⁴−1, 2⁶⁴ and 2⁶⁴+1 in C and LLVM.
+`UInt64.toNat` needs no change (a `UInt64` is a raw 64-bit box, so the C side takes the
+bits). `Float64.ofNat`'s rounding is another change; the `UInt64` fix does not overlap
+it.
+
+Not established by this pass: whether a *word* scalar in [2⁶², 2⁶³) can ever reach a
+runtime path that assumes every scalar is a `Nat` (a word's representation is its bits,
+so `wiz_word_out` boxes up to 2⁶³−1, while `wiz_out_nat` boxes only to 2⁶²−1); the
+answer turns on the type discipline between `UIntN w` and `Nat` at every C entry point,
+not on any one function. `UInt64`/`Float64`/`Array`/`Str`/`StrMap` externs are in
+`IO`/`Std` (the OS audit's modules), so their reasons are not in this pass.
 
 ## Tests
 
