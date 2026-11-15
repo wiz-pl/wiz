@@ -370,6 +370,22 @@ the elan toolchain, so the setup action keeps the elan cache for those
   `.github/workflows/fixpoint.yml` runs it nightly on `master` and from "Run workflow" on
   the self-hosted runner named by `WIZ_RUNNER_HEAVY`; it checks for 6 GiB free, is skipped
   when the variable is unset, and is not part of `CI result`.
+* **The nightly benchmarks** (`.github/workflows/bench.yml`) also run only on
+  `master` and from "Run workflow", on the `WIZ_RUNNER_HEAVY` runner (a clean skip
+  when it is unset). They use the Nix-built `wiz`/`grail` and need 6 GiB free (the fixpoint's
+  reservation; a Cachix miss compiles the toolchain). The
+  standard-library A/B (`scripts/stdlib-bench.py --baseline-bin`) alternates one run of
+  the previous green night's executable, restored from the Actions cache, with tonight's
+  build; the per-mode sizes come from `bench/stdlib-baseline.json`, and the measurement
+  is pinned with `taskset` to `WIZ_BENCH_CPUSET` (otherwise two CPUs are left free).
+  `scripts/bench-threshold.py` gates on the **median paired ratio** (default 10%, at
+  least 5 pairs per mode), not on absolute time, and writes the table to the job
+  summary; the run JSON records the machine id, CPU set and CPU model. `scry bench
+  --no-timing --fail-on-regression` is the second, deterministic corpus gate. On a
+  green night the current executable becomes the next A side; the first run compares
+  the build with itself, and "Run workflow" with `bootstrap: true` does that again
+  after a deliberate change to the benchmark program. The JSONs, `bench/history.jsonl`
+  (one line per run) and the baseline executable are artifacts, not committed files.
 * **The Nix package** (the `build` job; the old separate `nix package` job is folded
   into it): `nix build .#wiz .#tests` builds `wiz` and `grail` with Lake in the Nix
   sandbox and nixpkgs' Lean (the flake checks that it is the version in `lean-toolchain`)
