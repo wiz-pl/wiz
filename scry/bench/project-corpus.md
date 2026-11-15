@@ -47,7 +47,8 @@ Skipped TUs (`--skip-broken`): `wiz-lang` skipped `web/js.c` (missing `emscripte
 
 The full tree-sitter group (8 `lib/src` files, including `parser.c` and `query.c`) does
 not finish in 900 s in project mode. The 3-file subset (`alloc.c`, `tree.c`,
-`tree_cursor.c`) is the successful tree-sitter data point above.
+`tree_cursor.c`) is the successful tree-sitter data point above; it was run separately
+with the same command, so it is in this report but not in `project-corpus.json`.
 
 ## Precision / recall
 
