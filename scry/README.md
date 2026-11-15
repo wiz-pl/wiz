@@ -34,7 +34,8 @@ grail run scry -- explain fixtures/demo.facts.json 4
 
 Commands: `facts`, `query --kind|--edge|--edge-src|--rel`, `explain`, `parse --stats` (a C source,
 a `scry-cst` spill, or a JSON store), `cst` (JSON store → spill), `taint` (C →
-Wil → taint → findings/SARIF), `bench` (run the checked-in taint corpus and compare
+Wil → taint → findings/SARIF), `dynamic` (compile/run under ASAN/UBSAN/coverage and
+correlate with the static findings), `bench` (run the checked-in taint corpus and compare
 findings with its manifest), and `project` (a `compile_commands.json` multi-file C
 project: cross-TU call graph, project EDB, per-file findings/SARIF and a TU cache).
 `parse --stats` prints counts only; the perf agent owns throughput numbers.
@@ -354,6 +355,31 @@ line-independent id built from the rule, normalized path, sink function/callee/a
 and path shape; moving a finding keeps the id, renaming the sink or changing the path
 shape creates a new one. Two identical sinks in one function with the same path shape can
 still collide (the id is a handle, not a proof of uniqueness).
+
+## `scry dynamic`: observed execution evidence
+
+`scry dynamic FILE.c` compiles and runs the file under AddressSanitizer /
+UndefinedBehaviorSanitizer, parses crash/UB/leak events, resolves their first frame to a
+Scry source span, and links each event to the static findings/memory warnings at the
+same line (else the same function). With `llvm-profdata`/`llvm-cov` it also reports line
+coverage and whether each static site's line executed.
+
+```sh
+grail run scry -- dynamic tests/fixtures/mem-free.c
+grail run scry -- dynamic FILE.c --json --sarif out.sarif
+grail run scry -- dynamic FILE.c --no-coverage --timeout 5
+grail run scry -- dynamic FILE.c --witness witness.json   # S6a data contract
+grail run scry -- bench --dynamic                         # the dynamic corpus
+```
+
+Dynamic evidence is **separate** from a static finding (`properties.kind = dynamic`,
+`claim = none`) and is *observed*, not verified: a validated event needs a recognised
+sanitizer signature and a frame in the analysed file; a clean run is not a proof of
+absence. No compiler/sanitizer is a clean skip. The corpus (`bench/dynamic/`) covers the
+prior-art tiers T1 CWE-78/134, T2 CWE-416/476, T3 CWE-190/787/121 and a leak; CWE-120/
+242/362 are out of scope for a witness. `--witness` records the future S6a concolic
+witness (path condition, model, assumptions, budget) without solving or promoting it;
+`wiz-notes/scry-dynamic.md` has the design and the counts.
 
 Limits: the shim is sequential (one parser, one tree, one file) and tree-sitter-c is the
 only grammar. Threads, a native store shared across files, and tree-sitter queries are

@@ -3,6 +3,7 @@ import Json
 import Text
 import Int
 import Scry.TaintCmd
+import Scry.Dynamic
 import Scry.Interproc
 import Scry.Sarif
 /-!
@@ -62,6 +63,8 @@ structure Scry.BenchCase where
   rules : Option String
   reason : String
   note : String
+  /-- A dynamic expectation (the `dynamic` object in the manifest), if any. -/
+  dynamic : Option Scry.DynExpect
 
 /-- A corpus is a manifest plus its root directory. -/
 structure Scry.BenchCorpus where
@@ -191,6 +194,7 @@ structure Scry.BenchRun where
   cases : List Scry.BenchCaseResult
   summary : Scry.BenchSummary
   baseline : Scry.BenchBaseline
+  dynamic : Option Scry.DynBenchRun
   skippedSources : List String
 
 /-- The result of walking the main and extra corpora. -/
@@ -211,6 +215,12 @@ structure Scry.BenchOpts where
   noTiming : Bool
   quiet : Bool
   failOnRegression : Bool
+  /-- Also run the dynamic corpus (`bench/dynamic`). -/
+  dynamic : Bool
+  /-- Compiler for dynamic cases (`--cc`). -/
+  cc : Option String
+  /-- Coverage for dynamic cases. -/
+  coverage : Bool
 
 -- ## Small helpers
 
@@ -352,6 +362,7 @@ def Scry.benchCaseOfJson (root : String) (j : Json) : Scry.BenchCase :=
     rules
     (Scry.benchJsonStr j "reason")
     (Scry.benchJsonStr j "note")
+    (Scry.dynExpectOfJson j)
 
 /-- Load one manifest. `.none` means the manifest is not there (a clean skip);
 `.error` means it was found but malformed. -/
@@ -825,6 +836,12 @@ def Scry.benchReportJson (run : Scry.BenchRun) : Json :=
         , ("checked", Json.ofNat run.summary.checked)
         , ("checked_fraction", Json.dec (Scry.benchDec4
             (Scry.benchRatio run.summary.checked run.summary.findings))) ])
+    , ("dynamic", match run.dynamic with
+        | .some d => Scry.dynBenchJson d
+        | .none => Json.mkObj
+            [ ("status", Json.mkStr "disabled")
+            , ("reason", Json.mkStr "pass --dynamic to run bench/dynamic")
+            , ("claim", Json.mkStr "none") ])
     , ("boundary", Json.mkObj
         [ ("warnings", Json.ofNat run.summary.boundary)
         , ("blocking", Json.ofNat run.summary.blocking)
@@ -960,9 +977,19 @@ def Scry.benchMarkdown (run : Scry.BenchRun) : String :=
     , ""
     , "This is a corpus result, not a whole-tool claim. The checked-in corpus is S0/S2 (hand-authored C); S1/S3/S4 are optional `--extra` corpora. A safe case with a blocking lowering boundary is `unknown`, not TN. Runtime is wall clock and informational; the perf agent owns real measurements. The `path valid` column checks that the reported path reaches the sink and starts at a source; it is not a proof of the C semantics."
     ];
-  Scry.benchJoinLines (List.append header (List.append overall (List.append cweHeader
-    (List.append cweRows (List.append caseHeader (List.append caseRows
-      (List.append base (List.append changes (List.append skipped footer)))))))))
+  let dynSection : List String := match run.dynamic with
+    | .none => .nil
+    | .some d => String.splitOn (Scry.dynBenchMarkdown d) "\n";
+  let body0 := List.append header overall;
+  let body1 := List.append body0 dynSection;
+  let body2 := List.append body1 cweHeader;
+  let body3 := List.append body2 cweRows;
+  let body4 := List.append body3 caseHeader;
+  let body5 := List.append body4 caseRows;
+  let body6 := List.append body5 base;
+  let body7 := List.append body6 changes;
+  let body8 := List.append body7 skipped;
+  Scry.benchJoinLines (List.append body8 footer)
 
 -- ## Baseline comparison
 
@@ -1045,9 +1072,12 @@ def Scry.benchRun (opts : Scry.BenchOpts) : EIO Scry.BenchRun := do
     | .true => 0
     | .false => Duration.toMillis (Duration.sub t1 t0);
   let summary := Scry.benchSummaryOf res.cases;
+  dyn ← match opts.dynamic with
+    | .true => do d ← Scry.dynBenchRun "bench/dynamic" opts.cc opts.coverage; EIO.pure (.some d)
+    | .false => EIO.pure (.none : Option Scry.DynBenchRun);
   let blank := Scry.BenchRun.mk res.status res.reason opts.corpus
     (Path.join opts.corpus "manifest.json") (Bool.not opts.noTiming) totalMs res.cases
-    summary (Scry.BenchBaseline.mk "absent" "" .false .nil) res.skipped;
+    summary (Scry.BenchBaseline.mk "absent" "" .false .nil) dyn res.skipped;
   match opts.baseline with
   | .none => EIO.pure blank
   | .some b => match String.eq res.status "ok" with
