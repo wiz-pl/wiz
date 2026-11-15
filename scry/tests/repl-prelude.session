@@ -1,3 +1,2 @@
-#check Scry.Repl.load
-#check Scry.Repl.functions
-#check Scry.Repl.taintPaths
+#check replPreludeAnswer
+#eval replPreludeAnswer

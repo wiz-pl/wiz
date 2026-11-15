@@ -42,7 +42,7 @@ wrap:
 cd scry
 scry repl                       # = wiz repl --prelude Scry.Repl -I src -I ../lib
 scry repl tests/fixtures/taint-unsafe.c   # load the file before the first prompt
-scry repl --script tests/repl.session     # one command per line, for tests/CI
+scry repl --script SESSION.wiz            # one command per line, for tests/CI
 ```
 
 The module is `scry/src/Scry/Repl.wiz`, imported as `Scry.Repl`. Its state is a small

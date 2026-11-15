@@ -11,7 +11,7 @@ def main : IO Unit := do
   | .false => IO.println "repl prelude: skipped (no .lake/build/bin/wiz)"
   | .true => do
     resOpt ← IO.bind (Process.outputWith wiz
-      ["--no-cache", "-I", "src", "-I", "../lib", "repl", "--prelude", "Scry.Repl",
+      ["-I", "tests", "repl", "--prelude", "ReplPrelude",
        "--script", "tests/repl-prelude.session"] "" SpawnOptions.default)
       (fun r => match r with
         | .ok o => IO.pure (.some o)
@@ -19,7 +19,7 @@ def main : IO Unit := do
     match resOpt with
     | .none => IO.println "repl prelude: FAILED"
     | .some res => do
-      let wants := "Scry.Repl.load : String → IO Unit";
+      let wants := "replPreludeAnswer : Nat";
       match String.contains res.stdout wants with
       | .true => IO.println "repl prelude: ok"
       | .false => do
