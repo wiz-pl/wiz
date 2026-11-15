@@ -36,8 +36,8 @@
 -- (`toolchainId`, injected by `Wiz/Selfhost.lean` from the selfhost sources and the
 -- version), the subcommand's backend flags, the loader's module graph key (every
 -- module's name and text, in load order) and the modules' paths. A `.check` entry is the
--- tagged lines and the exit status; a `.c` entry is the C `run` would print, so a warm
--- run skips elaboration and code generation.
+-- tagged lines and the exit status; a `.c` entry is the C `build` writes (and `run`
+-- prints), so a warm build or run skips elaboration and code generation.
 
 -- ------------------------------------------------------------------------------------
 -- Options
@@ -54,6 +54,8 @@ structure Opts where
   ldflags : List String
   backend : List String
 
+-- (the cache directory is `$HOME/.cache/wiz` unless `--cache` says otherwise; the
+-- `.wiz-cache` here is the fallback for a process without `HOME`)
 def optsDefault : Opts :=
   Opts.mk .nil (.some ".wiz-cache") .none .false .false "cc" "selfhost" .nil .nil .nil
 
@@ -62,9 +64,20 @@ def optsDefault : Opts :=
 -- `cAccessFails`)
 
 extern "wiz_sys_write_file" cWriteFile : String → String → Nat → IO Nat
+-- the Lean-hosted `wiz`'s default cache is `~/.cache/wiz` (`Main.lean`); the driver has
+-- the same default. `wiz_sys_getenv` is the Lean runtime's (`runtime/rt_sys.inc`) and
+-- the selfhost runtime's (`rt.c`), so the driver builds with either.
+extern "wiz_sys_getenv" cGetenv : String → IO String
 extern "mkdir" (header := "sys/stat.h") cMkdir : String → Nat → IO Nat
 extern "rename" (header := "stdio.h") cRename : String → String → IO Nat
 extern "system" (header := "stdlib.h") cSystem : String → IO Nat
+
+-- the default cache directory: `$HOME/.cache/wiz` (the Lean-hosted toolchain's), or
+-- `.wiz-cache` in the working directory when there is no `HOME`
+def defaultCache : IO String :=
+  IO.bind (cGetenv "HOME") (fun home => IO.pure (match strEq home "" with
+    | .true => ".wiz-cache"
+    | .false => String.append home "/.cache/wiz"))
 
 def pathExists (p : String) : IO Bool :=
   IO.bind (cAccessFails p 0) (fun bad => IO.pure (Bool.not bad))
@@ -254,6 +267,9 @@ inductive Sev where
   | error
   | warning
   | info
+  -- an `info` the Lean-hosted `wiz check` prints without `--types` (`#check`, `#reduce`,
+  -- `#eval`); a declaration's own type line waits for `--types` (D6)
+  | infoEval
 
 inductive Diag where
   | mk (sev : Sev) (file : String) (line : Nat) (col : Nat) (msg : String) (code : String)
@@ -262,6 +278,7 @@ def sevName : Sev → String
   | .error => "error"
   | .warning => "warning"
   | .info => "info"
+  | .infoEval => "info"
 
 inductive NumRest where
   | mk (n : Nat) (rest : List Char)
@@ -309,6 +326,17 @@ def parseDetail (s : String) : String := match stripPrefix "parse " s with
     | .some u => match u with
       | .mk us => match readNat us 0 with
         | .mk _ after => afterColonSp after
+
+-- the offset a parse error names (`parse error 57: …`): the parser reports the token it
+-- stopped at, where the Lean-hosted `wiz` reports it, not the command's start
+def parseOff (s : String) : Option Nat := match stripPrefix "parse error " s with
+  | .none => .none
+  | .some t => match readNat (charsOf t) 0 with
+    | .mk n after => match after with
+      | .cons c _ => match strEqC c 58 with
+        | .true => .some n
+        | .false => .none
+      | .nil => .none
 
 def sevOf (s : String) : Sev := match stripPrefix "error: " s with
   | .some _ => .error
@@ -398,11 +426,89 @@ def taggedOf (l : String) : Tagged := match l with
                 | .false => Tagged.mk "Main" 0 l
               | .nil => Tagged.mk "Main" 0 l
 
+-- the first `n` characters dropped
+def dropChars : Nat → List Char → List Char
+  | .zero, cs => cs
+  | .succ _, .nil => .nil
+  | .succ k, .cons _ cs => dropChars k cs
+
+-- leading whitespace (spaces, tabs, newlines) dropped
+def skipSpaceChars : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => match strEqC c 32 with
+    | .true => skipSpaceChars cs
+    | .false => match strEqC c 9 with
+      | .true => skipSpaceChars cs
+      | .false => match strEqC c 10 with
+        | .true => skipSpaceChars cs
+        | .false => match strEqC c 13 with
+          | .true => skipSpaceChars cs
+          | .false => .cons c cs
+
+-- the command that starts at `off`: the first token of the text there
+def cmdAt (text : String) (off : Nat) : String := match text with
+  | .mk cs => String.mk (skipSpaceChars (dropChars off cs))
+
+-- the characters up to the end of their line
+def takeLineChars : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => match strEqC c 10 with
+    | .true => .nil
+    | .false => .cons c (takeLineChars cs)
+
+def dropSpaces : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => match strEqC c 32 with
+    | .true => dropSpaces cs
+    | .false => .cons c cs
+
+-- the characters without their trailing spaces
+def rtrimChars (cs : List Char) : List Char :=
+  List.reverseOf (dropSpaces (List.reverseOf cs .nil)) .nil
+
+-- (a `#check c` prints `c : T`, as the Lean-hosted `wiz` does; the self-hosted
+-- frontend's own line carries the type alone. The source text stands in for the
+-- elaborator's pretty-printed term, which the driver has not got.)
+def infoPrefix (tab : List ModSrc) (m : String) (off : Nat) : String :=
+  match modTextOf tab m with
+  | .none => ""
+  | .some t => match stripPrefix "#check" (cmdAt t off) with
+    | .none => ""
+    | .some arg => match rtrimChars (takeLineChars (skipSpaceChars (charsOf arg))) with
+      | .nil => ""
+      | a => String.append (String.mk a) " : "
+
+-- (`#check c`, `#reduce c` and `#eval c` print their result without `--types`, as the
+-- Lean-hosted `wiz check` does; a declaration's own type line does not)
+def printsInfo (tab : List ModSrc) (m : String) (off : Nat) : Bool :=
+  match modTextOf tab m with
+  | .none => .false
+  | .some t => match cmdAt t off with
+    | s => Bool.or (strStarts "#check" s) (Bool.or (strStarts "#reduce" s) (strStarts "#eval" s))
+
+def sevOfTagged (tab : List ModSrc) (m : String) (off : Nat) (rest : String) : Sev :=
+  match sevOf rest with
+  | .info => match printsInfo tab m off with
+    | .true => .infoEval
+    | .false => .info
+  | s => s
+
+-- the message: a `#check`'s with the term in front (see `infoPrefix`)
+def msgOfTagged (tab : List ModSrc) (m : String) (off : Nat) (rest : String) : String :=
+  match sevOf rest with
+  | .info => String.append (infoPrefix tab m off) (msgOf rest)
+  | _ => msgOf rest
+
 def diagOf (tab : List ModSrc) (l : String) : Diag := match taggedOf l with
-  | .mk m off rest => match modTextOf tab m with
-    | .none => Diag.mk (sevOf rest) (modFile tab m) 1 1 (msgOf rest) (codeOf rest)
-    | .some t => match lineCol t off with
-      | .mk ln col => Diag.mk (sevOf rest) (modFile tab m) ln col (msgOf rest) (codeOf rest)
+  | .mk m off rest =>
+    -- a parse error reports the token it stopped at, not its command's start
+    let off' := match parseOff rest with
+      | .some n => n
+      | .none => off;
+    match modTextOf tab m with
+    | .none => Diag.mk (sevOfTagged tab m off' rest) (modFile tab m) 1 1 (msgOfTagged tab m off' rest) (codeOf rest)
+    | .some t => match lineCol t off' with
+      | .mk ln col => Diag.mk (sevOfTagged tab m off' rest) (modFile tab m) ln col (msgOfTagged tab m off' rest) (codeOf rest)
 
 def diagsOf (tab : List ModSrc) : List String → List Diag
   | .nil => .nil
@@ -429,11 +535,25 @@ def emitDiag (o : Opts) (d : Diag) : IO Unit := match d with
     | .info => match o.types with
       | .true => IO.println (diagLine d)
       | .false => IO.pure ()
-    | _ => IO.ePrintln (diagLine d)
+    | .infoEval => IO.println (diagLine d)
+    -- (`check` prints a warning, on standard output, as the Lean-hosted `wiz` does)
+    | .warning => IO.println (diagLine d)
+    | .error => IO.ePrintln (diagLine d)
 
 def emitDiags (o : Opts) : List Diag → IO Unit
   | .nil => IO.pure ()
   | .cons d rest => IO.bind (emitDiag o d) (fun u => emitDiags o rest)
+
+-- `build` and `run` report the errors only (the Lean-hosted `wiz` drops the warnings
+-- there: `Main.elabFile`)
+def emitErrorOnly (d : Diag) : IO Unit := match d with
+  | .mk sev _ _ _ _ _ => match sev with
+    | .error => IO.ePrintln (diagLine d)
+    | _ => IO.pure ()
+
+def emitErrors : List Diag → IO Unit
+  | .nil => IO.pure ()
+  | .cons d rest => IO.bind (emitErrorOnly d) (fun u => emitErrors rest)
 
 def ePrintAll : List String → IO Unit
   | .nil => IO.pure ()
@@ -552,32 +672,35 @@ def isBackendFlag (a : String) : Bool :=
     (Bool.or (strEq a "--lib") (Bool.or (strEq a "--no-main") (strEq a "--header")))))
 
 -- options may come before or after FILE; after FILE, a non-option is a program
--- argument (`run FILE ARG…`), and `--` makes everything after it an argument
+-- argument (`run FILE ARG…`), and `--` makes everything after it an argument.
+-- The messages match the Lean-hosted `wiz` (`Main.lean`): `unknown flag: X`,
+-- `unknown command: …` and exit 2; a value-taking option without its value is an
+-- unknown flag there too (its `parseFlags` leaves both words over).
 partial def parseOptsGo : List String → Opts → Option String → List String → Arg
   | .nil, o, file, extra => match file with
-    | .none => .err "no FILE (try `wiz-selfhost help`)"
+    | .none => .err "no FILE"
     | .some f => .ok o f (List.reverseOf extra .nil)
   | .cons a rest, o, file, extra => match strEq a "--" with
     | .true => match file with
       | .none => match rest with
-        | .nil => .err "no FILE after --"
+        | .nil => .err "unknown flag: --"
         | .cons f r2 => .ok o f r2
       | .some f => .ok o f (List.append (List.reverseOf extra .nil) rest)
     | .false => match strEq a "-I" with
       | .true => match rest with
-        | .nil => .err "-I needs a directory"
+        | .nil => .err "unknown flag: -I"
         | .cons d r2 => parseOptsGo r2 { o with roots := List.append o.roots (singleton d) } file extra
       | .false => match strEq a "--include" with
         | .true => match rest with
-          | .nil => .err "--include needs a directory"
+          | .nil => .err "unknown flag: --include"
           | .cons d r2 => parseOptsGo r2 { o with roots := List.append o.roots (singleton d) } file extra
         | .false => match strEq a "-o" with
           | .true => match rest with
-            | .nil => .err "-o needs a file"
+            | .nil => .err "unknown flag: -o"
             | .cons p r2 => parseOptsGo r2 { o with out := .some p } file extra
           | .false => match strEq a "--cache" with
             | .true => match rest with
-              | .nil => .err "--cache needs a directory"
+              | .nil => .err "unknown flag: --cache"
               | .cons d r2 => parseOptsGo r2 { o with cache := .some d } file extra
             | .false => match strEq a "--no-cache" with
               | .true => parseOptsGo rest { o with cache := .none } file extra
@@ -589,33 +712,27 @@ partial def parseOptsGo : List String → Opts → Option String → List String
                     | .true => parseOptsGo rest { o with types := .true } file extra
                     | .false => match strEq a "--cc" with
                       | .true => match rest with
-                        | .nil => .err "--cc needs a command"
+                        | .nil => .err "unknown flag: --cc"
                         | .cons c r2 => parseOptsGo r2 { o with cc := c } file extra
                       | .false => match strEq a "--rt" with
                         | .true => match rest with
-                          | .nil => .err "--rt needs a directory (the selfhost runtime, rt.c)"
+                          | .nil => .err "unknown flag: --rt"
                           | .cons d r2 => parseOptsGo r2 { o with rt := d } file extra
                         | .false => match strEq a "--cflags" with
                           | .true => match rest with
-                            | .nil => .err "--cflags needs flags"
+                            | .nil => .err "unknown flag: --cflags"
                             | .cons f r2 => parseOptsGo r2 { o with cflags := List.append o.cflags (singleton f) } file extra
                           | .false => match strEq a "--ldflags" with
                             | .true => match rest with
-                              | .nil => .err "--ldflags needs flags"
+                              | .nil => .err "unknown flag: --ldflags"
                               | .cons f r2 => parseOptsGo r2 { o with ldflags := List.append o.ldflags (singleton f) } file extra
-                            | .false => match strEq a "--version" with
-                              | .true => .version
-                              | .false => match strEq a "--help" with
-                                | .true => .help
-                                | .false => match strEq a "-h" with
-                                  | .true => .help
-                                  | .false => match isBackendFlag a with
-                                    | .true => parseOptsGo rest { o with backend := List.append o.backend (singleton a) } file extra
-                                    | .false => match strStarts "-" a with
-                                      | .true => .err (String.append "unknown option " a)
-                                      | .false => match file with
-                                        | .none => parseOptsGo rest o (.some a) extra
-                                        | .some _ => parseOptsGo rest o file (.cons a extra)
+                            | .false => match isBackendFlag a with
+                              | .true => parseOptsGo rest { o with backend := List.append o.backend (singleton a) } file extra
+                              | .false => match strStarts "-" a with
+                                | .true => .err (String.append "unknown flag: " a)
+                                | .false => match file with
+                                  | .none => parseOptsGo rest o (.some a) extra
+                                  | .some _ => parseOptsGo rest o file (.cons a extra)
 
 def parseOpts (args : List String) (o : Opts) : Arg := parseOptsGo args o .none .nil
 
@@ -631,7 +748,8 @@ def usageText : String :=
   "\n" +++
   "options: -I DIR (a module root, repeatable; an `import M` is M.wiz there, then\n" +++
   "  in the working directory),\n" +++
-  "  -o OUT (the C `run` compiles, kept), --cache DIR (default .wiz-cache),\n" +++
+  "  -o OUT (the C `run` compiles, kept), --cache DIR (default ~/.cache/wiz, as\n" +++
+  "  the Lean-hosted `wiz`'s),\n" +++
   "  --no-cache, -v (cache hits and misses), --types (each declaration's type),\n" +++
   "  --cc CMD, --rt DIR (the selfhost runtime, default selfhost), --cflags FLAGS,\n" +++
   "  --ldflags FLAGS; backend: --rc, --rc-owned, --gc, --lib, --no-main, --header\n" +++
@@ -640,8 +758,9 @@ def usageText : String :=
 
 def versionText : String := String.append "wiz-selfhost " wizVersion
 
+-- the Lean-hosted `wiz`'s usage errors: the message, then the usage, exit 2
 def usageError (msg : String) : IO Unit := do
-  IO.ePrintln (String.append "wiz-selfhost: " msg);
+  IO.ePrintln msg;
   IO.ePrintln "usage: wiz-selfhost help";
   Process.exit 2
 
@@ -693,21 +812,36 @@ def cOf (o : Opts) (p : Prepared) : IO (Option String) := do
   let lines := linesOf p.run;
   let ds := diagsOf p.tab lines;
   match hasError ds with
-  | .true => IO.bind (emitDiags o ds) (fun u => noneIO)
+  | .true => IO.bind (emitErrors ds) (fun u => noneIO)
   | .false => IO.bind (missingLinks (List.reverseOf (Globals.ffi (Run.gs p.run)) .nil)) (fun missing => match missing with
     | .cons _ _ => IO.bind (ePrintAll missing) (fun u => noneIO)
     | .nil => someIO (String.append (commentsOf (mapS (fun l => stripAt l) lines))
         (docsText (genProgramArgs o.backend (modTextOr p.tab "Main" "") (Run.gs p.run)))))
 
+def writeOut (out text : String) : IO Unit := do
+  ok ← writeFile out text;
+  match ok with
+  | .true => IO.pure ()
+  | .false => do IO.ePrintln (String.append "error: cannot write " out); Process.exit 1
+
+-- the C for `p`, through the cache: `build` and `run` share the `.c` entry (the key
+-- covers the backend flags), so a second build is a hit, as the Lean-hosted `wiz`'s is
 def buildWith (o : Opts) (out : String) (p : Prepared) : IO Unit := do
-  c ← cOf o p;
-  match c with
-  | .none => Process.exit 1
-  | .some ctext => do
-    ok ← writeFile out ctext;
-    match ok with
-    | .true => IO.pure ()
-    | .false => do IO.ePrintln (String.append "error: cannot write " out); Process.exit 1
+  let key := keyOf o "c" p;
+  cached ← cacheRead o key ".c";
+  match cached with
+  | .some (.mk st ctext) => do
+    if o.verbose then IO.ePrintln (String.append "cache hit: " key) else IO.pure ();
+    writeOut out ctext
+  | .none => do
+    if o.verbose then IO.ePrintln (String.append "cache miss: " key) else IO.pure ();
+    c ← cOf o p;
+    match c with
+    | .none => Process.exit 1
+    | .some ctext => do
+      cacheWrite o (keyOf o "check" p) ".check" 0 (linesPayload (linesOf p.run));
+      cacheWrite o key ".c" 0 ctext;
+      writeOut out ctext
 
 def buildCmd (o : Opts) (file : String) : IO Unit :=
   match o.out with
@@ -768,7 +902,7 @@ def runPrepared (o : Opts) (p : Prepared) (extra : List String) : IO Unit := do
     let st := statusOf ds;
     cacheWrite o (keyOf o "check" p) ".check" st (linesPayload lines);
     match Nat.beq st 0 with
-    | .false => do emitDiags o ds; Process.exit 1
+    | .false => do emitErrors ds; Process.exit 1
     | .true => do
       missing ← missingLinks (List.reverseOf (Globals.ffi (Run.gs p.run)) .nil);
       match missing with
@@ -819,46 +953,127 @@ def legacyCmd (args : List String) : IO Unit := do
 -- ------------------------------------------------------------------------------------
 -- dispatch
 
-def parseThen (k : Kind) (args : List String) : IO Unit :=
-  match parseOpts args optsDefault with
+def kindName : Kind → String
+  | .check => "check"
+  | .build => "build"
+  | .run => "run"
+  | .eval => "eval"
+
+-- a command and its arguments as the user wrote them, for `unknown command: …`
+def argv (words : List String) : String := joinSpaces words
+
+def parseThen (k : Kind) (args : List String) : IO Unit := do
+  cache ← defaultCache;
+  match parseOpts args { optsDefault with cache := .some cache } with
   | .version => IO.println versionText
   | .help => IO.println usageText
-  | .err msg => usageError msg
+  -- (the Lean-hosted `wiz` answers a command without its FILE or with extra arguments
+  -- with `unknown command: …`; its flags are positional, and it has no `-o` for check)
+  | .err msg => match strEq msg "no FILE" with
+    | .true => usageError (String.append "unknown command: " (kindName k))
+    | .false => usageError msg
   | .ok o file extra => match k with
-    | .check => match extra with
-      | .nil => match o.out with
-        | .some _ => usageError "check does not write an output file (-o)"
-        | .none => checkCmd o file
-      | .cons _ _ => usageError (String.append "check takes one FILE, not " (joinSpaces (.cons file extra)))
+    | .check => match o.out with
+      -- (the host finds the first flag-looking argument; `-o` is not a `check` option)
+      | .some _ => usageError "unknown flag: -o"
+      | .none => match o.backend with
+        | .cons b _ => usageError (String.append "unknown flag: " b)
+        | .nil => match extra with
+          | .nil => checkCmd o file
+          | .cons _ _ => usageError (String.append "unknown command: " (argv (.cons "check" (.cons file extra))))
     | .build => match extra with
-      | .nil => buildCmd o file
-      | .cons _ _ => usageError (String.append "build takes one FILE, not " (joinSpaces (.cons file extra)))
+      | .nil => match o.out with
+        | .none => usageError (String.append "unknown command: " (argv (.cons "build" (.cons file extra))))
+        | .some _ => buildCmd o file
+      | .cons _ _ => usageError (String.append "unknown command: " (argv (.cons "build" (.cons file extra))))
     | .run => runCmd o file extra
     | .eval => runCmd o file extra
 
+-- (the Lean-hosted `wiz` takes its toolchain flags before the command too:
+-- `wiz -I src check f.wiz`, `wiz --cache d build f.wiz -o out`; `-o`/`--cache`/`-I`
+-- take a value, the rest do not)
+def takesValueFlag (a : String) : Bool :=
+  Bool.or (strEq a "-I") (Bool.or (strEq a "--include") (Bool.or (strEq a "-o")
+    (Bool.or (strEq a "--cache") (Bool.or (strEq a "--cc") (Bool.or (strEq a "--rt")
+      (Bool.or (strEq a "--cflags") (strEq a "--ldflags")))))))
+
+def knownTopFlag (a : String) : Bool :=
+  Bool.or (takesValueFlag a) (Bool.or (strEq a "--no-cache") (Bool.or (strEq a "-v")
+    (Bool.or (strEq a "--verbose") (strEq a "--types"))))
+
+inductive LeadSplit where
+  | mk (lead : List String) (rest : List String)
+
+-- the flags before the command (values kept beside them) and the rest; a
+-- `--version`/`--help`/`-h` ends the flags even though it starts with `-`
+partial def splitLeadGo (lead : List String) : List String → LeadSplit
+  | .nil => LeadSplit.mk (List.reverseOf lead .nil) .nil
+  | .cons a rest => match Bool.or (strEq a "--version") (Bool.or (strEq a "--help") (strEq a "-h")) with
+    | .true => LeadSplit.mk (List.reverseOf lead .nil) (.cons a rest)
+    | .false => match strStarts "-" a with
+      | .false => LeadSplit.mk (List.reverseOf lead .nil) (.cons a rest)
+      | .true => match takesValueFlag a with
+        | .true => match rest with
+          | .nil => LeadSplit.mk (List.reverseOf (.cons a lead) .nil) .nil
+          | .cons v r2 => splitLeadGo (.cons v (.cons a lead)) r2
+        | .false => splitLeadGo (.cons a lead) rest
+
+-- a leading flag that neither the driver nor the backend knows: host `wiz` errors on
+-- it; so does the driver (`unknown flag: …`, exit 2)
+def unknownTopFlag : List String → Option String
+  | .nil => .none
+  | .cons a rest => match knownTopFlag a with
+    | .true => unknownTopFlag rest
+    | .false => match isBackendFlag a with
+      | .true => unknownTopFlag rest
+      | .false => .some a
+
+def hasBackendFlag : List String → Bool
+  | .nil => .false
+  | .cons a rest => match isBackendFlag a with
+    | .true => .true
+    | .false => hasBackendFlag rest
+
 def dispatch : List String → IO Unit
   | .nil => legacyCmd .nil
-  | .cons a rest => match strEq a "check" with
-    | .true => parseThen .check rest
-    | .false => match strEq a "build" with
-      | .true => parseThen .build rest
-      | .false => match strEq a "run" with
-        | .true => parseThen .run rest
-        | .false => match strEq a "eval" with
-          | .true => parseThen .eval rest
-          | .false => match strEq a "version" with
-            | .true => IO.println versionText
-            | .false => match strEq a "help" with
-              | .true => IO.println usageText
-              | .false => match strEq a "--version" with
+  | .cons a rest => match splitLeadGo .nil (.cons a rest) with
+    | .mk lead rest2 => match rest2 with
+      -- (`selfhost --rc` and `selfhost` are the one-shot mode; other flags alone are the
+      -- host's usage, exit 0)
+      | .nil => match unknownTopFlag lead with
+        | .some f => usageError (String.append "unknown flag: " f)
+        | .none => match hasBackendFlag lead with
+          | .true => legacyCmd lead
+          | .false => IO.println usageText
+      | .cons b rest3 => match strEq b "check" with
+        | .true => parseThen .check (List.append lead rest3)
+        | .false => match strEq b "build" with
+          | .true => parseThen .build (List.append lead rest3)
+          | .false => match strEq b "run" with
+            | .true => parseThen .run (List.append lead rest3)
+            | .false => match strEq b "eval" with
+              | .true => parseThen .eval (List.append lead rest3)
+              | .false => match strEq b "version" with
                 | .true => IO.println versionText
-                | .false => match strEq a "--help" with
+                | .false => match strEq b "help" with
                   | .true => IO.println usageText
-                  | .false => match strEq a "-h" with
-                    | .true => IO.println usageText
-                    | .false => match strStarts "-" a with
-                      | .true => legacyCmd (.cons a rest)
-                      | .false => usageError (String.append "unknown command " a)
+                  | .false => match strEq b "--version" with
+                    | .true => match rest3 with
+                      | .nil => IO.println versionText
+                      | .cons _ _ => usageError "unknown flag: --version"
+                    | .false => match strEq b "--help" with
+                      | .true => match rest3 with
+                        | .nil => IO.println usageText
+                        | .cons _ _ => usageError "unknown flag: --help"
+                      | .false => match strEq b "-h" with
+                        | .true => match rest3 with
+                          | .nil => IO.println usageText
+                          | .cons _ _ => usageError "unknown flag: -h"
+                        | .false => match unknownTopFlag lead with
+                          | .some f => usageError (String.append "unknown flag: " f)
+                          | .none => match strStarts "-" b with
+                            | .true => usageError (String.append "unknown flag: " b)
+                            | .false => usageError (String.append "unknown command: " (argv (.cons b rest3)))
 
 def main : IO Unit := do
   args ← IO.args;

@@ -96,16 +96,16 @@ def cliGroup : Group where
         withSelfhostCli fun exe => do
         let (c, _, err) ← cliRun exe #[] #["nonsense"]
         checkEq 2 c
-        cliCheck err "unknown command nonsense" "unknown command"
+        cliCheck err "unknown command: nonsense" "unknown command"
         let (c, _, err) ← cliRun exe #[] #["check", "--bogus", "x.wiz"]
         checkEq 2 c
-        cliCheck err "unknown option --bogus" "unknown option"
+        cliCheck err "unknown flag: --bogus" "unknown option"
         let (c, _, err) ← cliRun exe #[] #["check"]
         checkEq 2 c
-        cliCheck err "no FILE" "missing FILE"
+        cliCheck err "unknown command: check" "missing FILE"
         let (c, _, err) ← cliRun exe #[] #["check", "a.wiz", "b.wiz"]
         checkEq 2 c
-        cliCheck err "check takes one FILE" "two files" },
+        cliCheck err "unknown command: check a.wiz b.wiz" "two files" },
     { name := "a missing file: one diagnostic, exit 1, no stack trace", run := fun _ =>
         withSelfhostCli fun exe => do
         let (c, out, err) ← cliRun exe #[] #["check", "no.wiz"]
@@ -198,7 +198,7 @@ def cliGroup : Group where
         -- the parser's error, at the command that starts it
         let (c, _, err) ← cliRun exe #[("parse.wiz", "import Prelude\ndef one : Nat := 1\ndef two : Nat :=\n")] #["check", "parse.wiz"]
         checkEq 1 c
-        cliCheck err "parse.wiz:3:1: error: " "parse position"
+        cliCheck err "parse.wiz:4:1: error: " "parse position"
         cliCheck err "[parse-error]" "parse code" },
     { name := "the cache: cold, warm, then invalidated by an edit", run := fun _ =>
         withSelfhostCli fun exe => do
