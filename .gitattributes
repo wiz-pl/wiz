@@ -1,0 +1,3 @@
+# The trust ledger is merged by key, not by line: scripts/setup-trust-merge.sh
+# installs the local driver named here (docs/trust-ledger.md, "Merging the ledger").
+/.github/trust-baseline.tsv merge=trust-ledger

@@ -22,6 +22,7 @@ from .backends import (Backend, BackendError, BackendUnavailable, CellResult,
 from .magics import handle_magic
 from .widgets import (MIME, PREFIX, SCHEMA, TARGET, WidgetError, WidgetManager,
                       decode_eval_text, mime_bundle, parse_display, plain_summary)
+from .progress import COMM_TARGET, ProgressChannel
 from .wire import Message, Session, WireError, iopub_topic
 
 try:  # the kernel is useless without it, but `--self-test` explains that cleanly
@@ -33,10 +34,11 @@ except ImportError:  # pragma: no cover - exercised by the tests' skip path
 BANNER = """Wiz kernel {version}
 
 Wiz is a didactic dependently typed language (https://wiz-pl.github.io/wiz/).
-Cells keep their definitions; `:help`-style magics are %%scry (C taint analysis),
-%%wiz and %backend.  `wiz check` reports, not runs: a bare final expression becomes
-the cell's result.  `Web.Widget` displays render as an interactive MIME bundle
-(`application/vnd.wiz.widget+json`) over a comm.
+Cells keep their definitions; magics are %%scry (C taint analysis), %%sh (shell),
+%%time (wall clock and peak RSS), %%wiz, %backend and %progress.  `wiz check`
+reports, not runs: a bare final expression becomes the cell's result.  `Web.Widget`
+displays render as an interactive MIME bundle (`application/vnd.wiz.widget+json`)
+over a comm.
 """
 
 
@@ -57,6 +59,7 @@ class Kernel:
         self.toolchain_args = list(toolchain_args or [])
         self.backend: Backend | None = None
         self.widgets = WidgetManager(self.backend)
+        self.progress = ProgressChannel(publish=self.publish, stream=self.stream)
         self.fallback_reason: str | None = None
         self.backend_error: str | None = None
         self.execution_count = 0
@@ -228,14 +231,30 @@ class Kernel:
         elif kind == "history_request":
             self.reply(socket, msg, "history_reply", {"status": "ok", "history": []})
         elif kind == "comm_info_request":
-            self.reply(socket, msg, "comm_info_reply", {"status": "ok",
-                                                        "comms": self.widgets.info()})
+            comms = self.widgets.info()
+            if self.progress.comm_id:
+                comms[self.progress.comm_id] = {"target_name": COMM_TARGET}
+            self.reply(socket, msg, "comm_info_reply", {"status": "ok", "comms": comms})
         elif kind == "comm_open":
-            self.handle_comm_open(msg)
+            content = msg.content or {}
+            if content.get("target_name") == COMM_TARGET:
+                self.progress.attach_comm(content.get("comm_id", ""))
+            else:
+                self.handle_comm_open(msg)
         elif kind == "comm_msg":
-            self.handle_comm_msg(msg)
+            content = msg.content or {}
+            if content.get("comm_id") and content["comm_id"] == self.progress.comm_id:
+                data = content.get("data") or {}
+                if isinstance(data, dict) and data.get("method") == "close":
+                    self.progress.detach_comm(content["comm_id"])
+            else:
+                self.handle_comm_msg(msg)
         elif kind == "comm_close":
-            self.handle_comm_close(msg)
+            comm_id = (msg.content or {}).get("comm_id", "")
+            if comm_id and comm_id == self.progress.comm_id:
+                self.progress.detach_comm(comm_id)
+            else:
+                self.handle_comm_close(msg)
         elif kind == "connect_request":
             self.reply(socket, msg, "connect_reply", {
                 "status": "ok",
@@ -311,7 +330,8 @@ class Kernel:
             if not self._announced_backend:
                 self._announced_backend = True
                 self.stream("stderr", self._backend_notice(), parent=parent)
-        result = self._run_cell(code)
+        result = self._run_cell(code, parent)
+        self.progress.finish()
         for bundle in result.comms:
             self.publish("comm_open", {
                 "comm_id": bundle["comm_id"],
@@ -350,7 +370,7 @@ class Kernel:
             notice += f" (`wiz repl` unavailable: {self.fallback_reason})"
         return notice + "\n"
 
-    def _run_cell(self, code: str) -> CellResult:
+    def _run_cell(self, code: str, parent: dict | None = None) -> CellResult:
         if self.backend is None:
             message = self.backend_error or "no backend"
             return CellResult(errors=[ErrorReport(
@@ -358,8 +378,11 @@ class Kernel:
                 "no Wiz backend: " + message,
                 ["no Wiz backend: " + message])])
         try:
+            self.progress.parent = parent
             magic = handle_magic(code, self.backend, fallback_reason=self.fallback_reason,
-                                 cwd=self.cwd, wiz=self.wiz)
+                                 cwd=self.cwd, wiz=self.wiz, progress=self.progress,
+                                 emit=lambda name, text: self.stream(name, text,
+                                                                     parent=parent))
             if magic is not None:
                 return self._attach_widgets(magic)
             result = self.backend.execute(code)

@@ -1,11 +1,13 @@
 """``python -m wiz_kernel --self-test``: no Jupyter required.
 
-Three sections, each printed as PASS/FAIL/SKIP:
+Four sections, each printed as PASS/FAIL/SKIP:
 
 1. the wire protocol (signing, framing, tampered messages) — no ZeroMQ;
 2. the drivers (a real ``wiz`` on a temp workspace: definitions persist, a
    multi-line definition, a last expression, an error);
-3. the live protocol — a kernel process on ephemeral ports, asked
+3. the magics (``%%sh`` exit status and stream order, the ``%%time`` line,
+   ``%%wiz`` against a plain cell, ``%%scry --progress`` order);
+4. the live protocol — a kernel process on ephemeral ports, asked
    ``kernel_info_request`` and ``execute_request`` over raw ZeroMQ (skipped when
    ``pyzmq`` is not installed).  Jupyter itself is never needed.
 """
@@ -15,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -25,6 +28,8 @@ import uuid
 
 from . import __version__
 from .backends import (BackendUnavailable, CellResult, find_wiz, make_backend)
+from .magics import handle_magic, scry_command
+from .progress import ProgressChannel
 from .wire import Session, WireError
 
 TOOL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -136,7 +141,129 @@ def backend_checks(results: Results, wiz: str | None, backend: str, cwd: str) ->
         driver.close()
 
 
-# -- 3: the live protocol ----------------------------------------------
+# -- 3: the magics ------------------------------------------------------
+
+_FAKE_SCRY = '''import json, sys, time
+for i in range(1, 4):
+    print(f"progress: {i}/3 files ({(i * 100) // 3}%) taint", file=sys.stderr, flush=True)
+    time.sleep(0.02)
+print(json.dumps({"counts": {"findings": 1, "checked": 1, "unchecked": 0, "boundary": 0},
+                  "findings": [{"severity": "error", "rule": "command-injection",
+                                "location": {"uri": "fake.c", "startLine": 7,
+                                             "startColumn": 3},
+                                "derivation": "checked", "message": "bad"}],
+                  "boundary": [], "file": "fake.c"}))
+'''
+
+
+def _fake_scry(workspace: str) -> str:
+    path = os.path.join(workspace, "fake-scry.py")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(_FAKE_SCRY)
+    return path
+
+
+def _channel(**kwargs) -> tuple[ProgressChannel, list]:
+    sent: list = []
+
+    def publish(msg_type: str, content: dict, *, parent=None, metadata=None) -> None:
+        sent.append(("publish", msg_type, content))
+
+    def stream(name: str, text: str, *, parent=None) -> None:
+        sent.append(("stream", name, text))
+
+    return ProgressChannel(publish=publish, stream=stream, **kwargs), sent
+
+
+def magic_checks(results: Results, wiz: str | None, backend: str, cwd: str) -> None:
+    executable = find_wiz(wiz)
+    if executable is None:
+        results.skip("magics", "no wiz executable")
+        return
+    try:
+        driver, _ = make_backend(backend, wiz, cwd)
+    except BackendUnavailable as exc:
+        results.check("magics: backend available", False, str(exc))
+        return
+    try:
+        emitted: list[tuple[str, str]] = []
+        result = handle_magic("%%sh\necho out\necho err >&2\nexit 0\n", driver,
+                              cwd=cwd, emit=lambda name, text: emitted.append((name, text)))
+        results.check("magic: %%sh streams stdout then stderr and returns status 0",
+                      result is not None and not result.errors
+                      and result.result == "exit status 0"
+                      and [name for name, _ in emitted] == ["stdout", "stderr"],
+                      repr(result))
+        result = handle_magic("%%sh\nexit 7\n", driver, cwd=cwd)
+        results.check("magic: %%sh reports a non-zero exit status",
+                      result is not None and bool(result.errors)
+                      and "7" in result.errors[0].evalue,
+                      repr(result))
+        result = handle_magic("%%time\n6 * 7\n", driver, cwd=cwd)
+        timing = result.streams[-1].text.strip() if result and result.streams else ""
+        match = re.match(r"^\[time\] wall (\d+\.\d+) s", timing)
+        plausible = bool(match) and 0.0 <= float(match.group(1)) < 600.0
+        results.check("magic: %%time returns the cell result and appends a wall line",
+                      result is not None and result.result == "42"
+                      and not result.errors and plausible
+                      and ("peak RSS" in timing),
+                      f"result={getattr(result, 'result', None)!r} timing={timing!r}")
+        plain = driver.execute("def magic_plain : Nat := 5")
+        explicit = handle_magic("%%wiz\ndef magic_explicit : Nat := 5\n", driver, cwd=cwd)
+        plain_value = driver.execute("#eval magic_plain")
+        explicit_value = driver.execute("#eval magic_explicit")
+        results.check("magic: %%wiz is the plain-cell path (same driver, same file)",
+                      not plain.errors and explicit is not None and not explicit.errors
+                      and "5" in _streams(plain_value)
+                      and "5" in _streams(explicit_value),
+                      f"plain={plain.errors} explicit={getattr(explicit, 'errors', None)}")
+
+        channel, sent = _channel()
+        fake = _fake_scry(cwd)
+        previous = os.environ.get("WIZ_SCRY")
+        os.environ["WIZ_SCRY"] = f"{sys.executable} {fake}"
+        try:
+            result = handle_magic("%%scry --progress\nint main(void) { return 0; }\n",
+                                  driver, cwd=cwd, progress=channel)
+        finally:
+            if previous is None:
+                os.environ.pop("WIZ_SCRY", None)
+            else:
+                os.environ["WIZ_SCRY"] = previous
+        forwarded = [payload[2] for payload in sent if payload[0] == "stream"]
+        results.check("magic: %%scry --progress forwards the three lines in order",
+                      channel.lines == [
+                          "progress: 1/3 files (33%) taint",
+                          "progress: 2/3 files (66%) taint",
+                          "progress: 3/3 files (100%) taint",
+                      ] and forwarded == [line + "\n" for line in channel.lines],
+                      repr(channel.lines) + " / " + repr(forwarded))
+        results.check("magic: %%scry --progress still renders the report",
+                      result is not None and not result.errors
+                      and "command-injection" in (result.result or ""),
+                      repr(getattr(result, "errors", None)))
+
+        comm_channel, comm_sent = _channel(comm_supported=True, reason="test comm")
+        comm_channel.begin()
+        comm_channel.forward("progress: 1/4 files (25%) points-to")
+        comm_channel.forward("progress: 2/4 files (50%) points-to")
+        comm_channel.finish()
+        msg_types = [payload[1] for payload in comm_sent]
+        fractions = [payload[2]["data"]["fraction"] for payload in comm_sent
+                     if payload[1] == "comm_msg"]
+        results.check("magic: the comm transport opens, updates with fractions, closes",
+                      msg_types == ["comm_open", "comm_msg", "comm_msg", "comm_close"]
+                      and comm_sent[0][2]["target_name"] == "wiz.progress"
+                      and fractions == [0.25, 0.5]
+                      and all(payload[0] == "publish" for payload in comm_sent),
+                      repr(comm_sent))
+    except Exception:
+        results.check("magics: run", False, traceback.format_exc())
+    finally:
+        driver.close()
+
+
+# -- 4: the live protocol ----------------------------------------------
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -300,6 +427,10 @@ def live_checks(results: Results, wiz: str | None, backend: str, workspace: str)
     connection_file, config = _connection_file(workspace)
     env = dict(os.environ)
     env["PYTHONPATH"] = TOOL_DIR + os.pathsep + env.get("PYTHONPATH", "")
+    fake_scry = _fake_scry(workspace)
+    using_fake = scry_command(workspace, wiz) is None
+    if using_fake:
+        env["WIZ_SCRY"] = f"{sys.executable} {fake_scry}"
     command = [sys.executable, "-m", "wiz_kernel", "-f", connection_file,
                "--backend", backend, "--cwd", workspace]
     if wiz:
@@ -355,10 +486,39 @@ def live_checks(results: Results, wiz: str | None, backend: str, workspace: str)
         results.check("live: %backend names the driver",
                       "backend:" in _execute_result(iopub).get("text/plain", ""),
                       repr(_execute_result(iopub)))
-        from .magics import scry_command
-        if scry_command(workspace, wiz) is None:
-            results.skip("live: %%scry", "no scry executable (set WIZ_SCRY)")
-        else:
+        reply, iopub = client.execute("%progress")
+        results.check("live: %progress names the transport",
+                      "progress:" in _execute_result(iopub).get("text/plain", ""),
+                      repr(_execute_result(iopub)))
+        reply, iopub = client.execute("%%sh\necho shell-out\necho shell-err >&2\nexit 0\n")
+        results.check("live: %%sh streams both pipes and returns status 0",
+                      reply.content.get("status") == "ok"
+                      and "shell-out" in _texts(iopub, "stream")
+                      and "shell-err" in _texts(iopub, "stream")
+                      and _execute_result(iopub).get("text/plain") == "exit status 0",
+                      _texts(iopub, "stream") + repr(reply.content))
+        reply, iopub = client.execute("%%sh\nexit 3\n")
+        errors = [m for m in iopub if m.msg_type == "error"]
+        results.check("live: %%sh reports the exit status as an error",
+                      reply.content.get("status") == "error" and bool(errors)
+                      and "3" in errors[0].content.get("evalue", ""),
+                      repr([m.content for m in errors]) + repr(reply.content))
+        reply, iopub = client.execute("%%time\n6 * 7\n")
+        timing = _texts(iopub, "stream")
+        results.check("live: %%time appends a plausible wall/RSS line",
+                      reply.content.get("status") == "ok"
+                      and "42" in _execute_result(iopub).get("text/plain", "")
+                      and re.search(r"\[time\] wall \d+\.\d+ s, peak RSS ", timing)
+                      is not None,
+                      timing + repr(_execute_result(iopub)))
+        reply, iopub = client.execute("%%wiz\ndef live_explicit : Nat := 9\n")
+        reply2, iopub2 = client.execute("#eval live_explicit")
+        results.check("live: %%wiz behaves like a plain cell",
+                      reply.content.get("status") == "ok"
+                      and reply2.content.get("status") == "ok"
+                      and "9" in _texts(iopub2, "stream"),
+                      repr(reply.content) + _texts(iopub2, "stream"))
+        if using_fake or scry_command(workspace, wiz) is not None:
             reply, iopub = client.execute(
                 "%%scry\nchar *getenv(const char *name);\n"
                 "int system(const char *command);\n"
@@ -367,6 +527,19 @@ def live_checks(results: Results, wiz: str | None, backend: str, workspace: str)
             results.check("live: %%scry renders a finding",
                           "command-injection" in json.dumps(bundle),
                           repr(bundle) + repr(reply.content))
+        if using_fake:
+            reply, iopub = client.execute(
+                "%%scry --progress\nint main(void) { return 0; }\n")
+            streamed = [line for line in _texts(iopub, "stream").splitlines()
+                        if line.startswith("progress:")]
+            results.check("live: %%scry --progress forwards three lines in order",
+                          reply.content.get("status") == "ok"
+                          and streamed == ["progress: 1/3 files (33%) taint",
+                                           "progress: 2/3 files (66%) taint",
+                                           "progress: 3/3 files (100%) taint"],
+                          repr(streamed) + repr(reply.content))
+        else:
+            results.skip("live: %%scry --progress", "the real scry may not take --progress")
         msg_id = client.send("shutdown_request", {"restart": False})
         reply = client.reply(msg_id, timeout=30)
         results.check("live: shutdown_reply", reply.content.get("status") == "ok",
@@ -413,6 +586,7 @@ def main(argv: list[str]) -> int:
     try:
         wire_checks(results)
         backend_checks(results, args.wiz, args.backend, workspace)
+        magic_checks(results, args.wiz, args.backend, workspace)
         live_checks(results, args.wiz, args.backend, workspace)
     finally:
         if args.cwd is None:
