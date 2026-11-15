@@ -53,6 +53,13 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   with the same 8.1 MiB peak where the old allocator would have needed 7.8 GiB. Freeing is
   iterative (through the dead object's own header), so a long chain does not recurse on
   the engine's stack. `scripts/wasm-peak.mjs` reports a module's peak and time.
+* [`tools/wiz-mcp/`](tools/wiz-mcp/README.md) is a stdlib-only MCP server for the
+  toolchain: `version`, `check`, `parse`, `fmt`, `build`, and the language server's
+  `diagnostics`, `hover` and `goals` over MCP stdio, with one lazily started
+  `wiz lsp --ws` daemon per bridge and worktree (idle unload, a per-call deadline, and
+  no sharing between worktrees). It is opt-in (not in the dev shell), and
+  `.github/workflows/tools.yml` runs its unit tests on every change under `tools/`,
+  with the end-to-end smoke test on manual dispatch.
 
 ## [0.1.0] - unreleased (draft)
 

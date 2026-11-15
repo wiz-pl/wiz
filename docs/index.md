@@ -19,6 +19,9 @@ published `/docs/` is generated from `lib/` by `wiz doc --lib`.
 * [release.md](release.md): making a release (checklist, tagging, smoke test)
 * [CHANGELOG.md](../CHANGELOG.md)
 * [building.md](building.md)
+* [tools/wiz-mcp/README.md](../tools/wiz-mcp/README.md): a stdlib-only MCP server that
+  gives an MCP client (OpenCode, Claude Code, Zed) type checking, formatting, building,
+  and the language server's diagnostics, hover and tactic state
 * [bench/README.md](../bench/README.md): the standard-library benchmark harness, its
   modes and how to compare two builds; the published page is generated from the JSON
   the harness writes (web/build-bench.py)
