@@ -27,9 +27,19 @@ Nat.succ <$> Option.some 1 = Option.some 2
 -/
 
 /-- Type constructors you can map over: `map f` turns an `f A` into an `f B` by
-applying `f : A → B` to what is inside. Written `f <$> x`. -/
-class Functor (f : Type → Type) where
-  map : {A B : Type} → (A → B) → f A → f B
+applying `f : A → B` to what is inside. Written `f <$> x`.
+
+At every universe (`f : Type u → Type v`): a constructor in `Type u` lands in
+`Type v`, so a functor on `Types.{u}` has a type `Types.{v}` (wiz-cats FINDINGS.md,
+G8: this used to be `Type → Type` only). -/
+class Functor.{u, v} (f : Type u → Type v) where
+  map : {A B : Type u} → (A → B) → f A → f B
+/-- A `Functor` whose `map` obeys the functor laws (wiz-cats FINDINGS.md, G8: the class
+had no laws, so every user defined their own). -/
+class LawfulFunctor.{u, v} (f : Type u → Type v) [i : Functor.{u, v} f] where
+  map_id : {A : Type u} → (x : f A) → Functor.map (fun (a : A) => a) x = x
+  map_comp : {A B C : Type u} → (g : A → B) → (h : B → C) → (x : f A) →
+    Functor.map (fun a => h (g a)) x = Functor.map h (Functor.map g x)
 /-- Functors with `pure` (a value with no effect) and `seq` (apply a function that is
 itself a result, written `mf <*> ma`). Every `Monad` is one. -/
 class Applicative (f : Type → Type) where

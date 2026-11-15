@@ -35,6 +35,26 @@ def levelGroup : Group where
           ["Pred : Type 1 → Type 2"] },
     { name := "level metavariables solved by unification", run := fun _ =>
         ok "def id.{u} {A : Sort u} (x : A) : A := x\ndef t (A : Type 3) (a : A) : A := id a" },
+    { name := "normal forms to levels (B4)", run := fun _ => do
+        let u : Level := .param "u"
+        let v : Level := .param "v"
+        let maxSucc := Level.max (.succ u) (.succ v)
+        check (Level.normalize (Level.ofNF (Level.normalize maxSucc)) == Level.normalize maxSucc)
+          "ofNF (normalize l) has l's normal form"
+        check (Level.shiftDown (Level.normalize maxSucc) 1 == some (Level.normalize (.max u v)))
+          "max (u+1) (v+1) shifted by one is max u v"
+        check ((Level.shiftDown (Level.normalize (.max u (.succ v))) 1).isNone)
+          "max u (v+1) cannot be shifted by one"
+        check (Level.metavarOffset? (Level.normalize (.succ (.mvar 3))) == some (3, 1))
+          "a lone metavariable under +1 is found" },
+    { name := "a level metavariable under max (B4)", run := fun _ =>
+        okLib "import Logic
+def eqCongr.{u, v} {A : Type u} {B : Type v} (0 f : A → B) {a b : A} (0 e : a = b) : f a = f b :=
+  transp (fun b _ => f a = f b) (refl (f a)) e
+-- `?u0+1 =?= max (u+1) (u+1)` used to be a mismatch; it is `?u0 := u`.
+def t.{u} (A B : Type u) (x : A × B) : x = x := eqCongr (fun y => y) (refl x)
+-- the same with two level parameters: `?u := max u v`.
+def t2.{u, v} (A : Type u) (B : Type v) (x : A × B) : x = x := eqCongr (fun y => y) (refl x)" },
     { name := "unknown level parameter", run := fun _ =>
         fails "def f (A : Type u) : Type u := A" "unknown universe level 'u'" },
     { name := "wrong number of explicit levels", run := fun _ =>

@@ -464,9 +464,14 @@ def Level.occurs (m : Nat) : Level → Bool
 (`instLevel`). Then:
 
 * if the levels are already equivalent (`Level.equiv`), succeed;
-* a lone metavariable `?u` against any level not containing it: assign it;
+* a lone metavariable `?u` (possibly under `+k`) against any level it does not occur
+  in, after normalising: assign it (`?u + k := l - k`);
 * `a+1 =?= b+1`: unify `a` and `b`;
 * otherwise fail with a "universe level mismatch" error.
+
+The normal form step is what makes `?u+1 =?= max (u+1) (u+1)` work: syntactically the
+second side is a `max`, but it normalises to `u+1`, and `?u := u` is the solution
+(`FINDINGS.md`, B4 in wiz-cats).
 
 This is deliberately incomplete. `max ?u ?v =?= 1` has several solutions, and Lean
 postpones such constraints instead of failing (see the optional exercises). -/
@@ -477,10 +482,25 @@ partial def unifyLevel (a b : Level) : ElabM R Unit := do
   let a ← instLevel a
   let b ← instLevel b
   if a.equiv b then return
-  match a, b with
-  | .mvar m, l | l, .mvar m =>
+  let assign (m : Nat) (l : Level) : ElabM R Unit := do
     if Level.occurs m l then throwAt {} s!"universe level mismatch: {a} vs {b}"
     modify fun s => { s with levelMetas := s.levelMetas.set! m (some l) }
+  -- `?u + k =?= l`: normalise `l`, shift it down by `k`, and assign `?u`. The
+  -- syntactic rules below only see `?u` at offset 0, and only when it heads the term.
+  let solveOffset (na nb : Level.NF) : ElabM R Bool := do
+    match Level.metavarOffset? na with
+    | some (m, k) =>
+      match Level.shiftDown nb k with
+      | some nb' =>
+        if nb'.any (fun (atom, _) => atom == .mvar m) then return false
+        assign m (Level.ofNF nb')
+        return true
+      | none => return false
+    | none => return false
+  if ← solveOffset a.normalize b.normalize then return
+  if ← solveOffset b.normalize a.normalize then return
+  match a, b with
+  | .mvar m, l | l, .mvar m => assign m l
   | .succ a', .succ b' => unifyLevel a' b'
   | _, _ => throwAt {} s!"universe level mismatch: {a} vs {b}"
   --|ex

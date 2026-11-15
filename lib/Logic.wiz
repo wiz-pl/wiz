@@ -196,14 +196,15 @@ def Forall.notEx {A : Type} {P : A → Prop} (n : ¬ ∃ a, P a) (a : A) : ¬ P 
 --
 -- `transp` is the eliminator; these are J in its usual shapes. (lib/Optic.wiz has the
 -- same lemmas under `Optic.*`.)
-/-- Equality is symmetric (`transp` with the motive `fun b _ => b = a`). -/
-def Eq.symm {A : Type} {a b : A} (e : a = b) : b = a :=
+/-- Equality is symmetric (`transp` with the motive `fun b _ => b = a`). At every
+universe: an equation between terms of a type in `Type u` is itself a proposition. -/
+def Eq.symm.{u} {A : Type u} {a b : A} (e : a = b) : b = a :=
   transp (fun b _ => b = a) (refl a) e
 /-- Equality is transitive. -/
-def Eq.trans {A : Type} {a b c : A} (e₁ : a = b) (e₂ : b = c) : a = c :=
+def Eq.trans.{u} {A : Type u} {a b c : A} (e₁ : a = b) (e₂ : b = c) : a = c :=
   transp (fun c _ => a = c) e₁ e₂
 /-- Equal arguments give equal results: from `a = b`, `f a = f b`. -/
-def Eq.congrArg {A B : Type} (0 f : A → B) {a b : A} (e : a = b) : f a = f b :=
+def Eq.congrArg.{u, v} {A : Type u} {B : Type v} (0 f : A → B) {a b : A} (e : a = b) : f a = f b :=
   transp (fun b _ => f a = f b) (refl (f a)) e
 /-- Transport a proof of `P a` along `a = b` to a proof of `P b`, for a family of
 propositions `P`.
@@ -211,7 +212,7 @@ propositions `P`.
 (It goes through `congrArg`: a motive `fun b _ => P b` would use `b`, which `transp`
 binds at 0; an equation of propositions computes to the pair of implications, whose
 second field is the direction we want.) -/
-def Eq.substProp {A : Type} (0 P : A → Prop) {a b : A} (e : a = b) (pa : P a) : P b :=
+def Eq.substProp.{u} {A : Type u} (0 P : A → Prop) {a b : A} (e : a = b) (pa : P a) : P b :=
   (@Eq.congrArg A Prop P b a (@Eq.symm A a b e)).2 pa
 /-- Equivalent propositions are equal: propositional extensionality is definitional
 (`P = Q` computes to a pair of implications). -/
@@ -225,9 +226,9 @@ def propext {P Q : Prop} (h : P ↔ Q) : P = Q := Iff.toEq h
 lemma that matches on it) can't be written against it directly; `funext` takes the
 unerased form and lets subtyping (quantities don't matter in a Π that is a
 proposition, CoreSpec §11.5) do the rest. -/
-def funext {A B : Type} {f g : A → B} (h : (x : A) → f x = g x) : f = g := h
+def funext.{u, v} {A : Type u} {B : Type v} {f g : A → B} (h : (x : A) → f x = g x) : f = g := h
 /-- Equal functions agree at every argument: from `f = g`, `f x = g x`. -/
-def congrFun {A B : Type} {f g : A → B} (e : f = g) (x : A) : f x = g x := e x
+def congrFun.{u, v} {A : Type u} {B : Type v} {f g : A → B} (e : f = g) (x : A) : f x = g x := e x
 
 -- ## Booleans
 

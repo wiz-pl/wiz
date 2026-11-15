@@ -162,6 +162,37 @@ partial def normalize : Level → NF
   | mvar m => [(.mvar m, 0)]
   | .hole => [(.hole, 0)]
 
+mutual
+
+  /-- A level with the given normal form: the `max` of every atom at its offset. The
+  inverse of `normalize` up to `equiv` (`normalize (ofNF (normalize l))` has the same
+  normal form as `l`). The level unifier uses it to solve `?u + k =?= l` after
+  normalising `l` (`FINDINGS.md`, B4 in wiz-cats: `?u+1 =?= max (u+1) (u+1)`). -/
+  partial def ofNF (n : NF) : Level :=
+    n.foldl (fun acc (a, k) => .max acc (a.toLevel.addOffset k)) .zero
+
+  /-- The level of an atom of a normal form. -/
+  partial def Atom.toLevel : Atom → Level
+    | .const => .zero
+    | .param p => .param p
+    | .mvar m => .mvar m
+    | .imax a b => .imax (ofNF a) (ofNF b)
+    | .hole => .hole
+
+end
+
+/-- The normal form of `l - k` when `l` has normal form `n`, if every atom of `n` has
+offset at least `k`: `max (u+1) (v+1)` shifted by one is `max u v`. `none` when an atom
+is below `k` (`max u (v+3) - 1` is not a level). Levels have no subtraction; this is
+the inverse of `addOffset` on normal forms. -/
+def shiftDown (n : NF) (k : Nat) : Option NF :=
+  if n.all (fun (_, k') => k ≤ k') then some (n.map fun (a, k') => (a, k' - k)) else none
+
+/-- `n` is a single metavariable at offset `k`: the level `?u + k`. -/
+def metavarOffset? : NF → Option (Nat × Nat)
+  | [(.mvar m, k)] => some (m, k)
+  | _ => none
+
 /-- Is the level nonzero under every instantiation of its parameters? -/
 def isNeverZero (l : Level) : Bool := (normalize l).any fun (_, k) => k > 0
 
