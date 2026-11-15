@@ -614,6 +614,19 @@ The tour's own examples are tests of exactly this kind. A `wiz-toolchain` file n
 [install.md](install.md#a-first-project-with-grail) walks through a first package;
 [stages/23-grail.md](stages/23-grail.md) has the rest.
 
+A new package starts with `grail new`:
+
+```
+$ grail new hello
+grail new: wrote hello (grail.wiz, src/Main.wiz, tests/hello.wiz, README.md, .gitignore)
+  cd hello && grail build && grail run hello
+```
+
+It writes a library, an executable and a golden test; `grail run hello` prints
+`hello from hello`, and the test checks the same line. An existing non-empty directory
+is refused, so `new` never overwrites work, and the name must start with a letter.
+([stages/23-grail.md](stages/23-grail.md), 23o.)
+
 Modules are files: `import A.B` reads `A/B.wiz` from a module root (the standard
 library `lib/`, a package's `lib` directories, `-I DIR`). Wiz has no namespaces yet, so
 one name can be declared only once among everything a file imports. Mark helpers
