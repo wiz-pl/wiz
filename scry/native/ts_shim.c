@@ -362,6 +362,7 @@ ScryStore *scry_parse(const char *lang, const char *src, uint64_t len) {
   if (!s->ok) {
     /* `build_edges` failed; the block is still freeable and `storeError` says why. */
   }
+  free(bad); /* the success path did not use the pre-allocated error store */
   return s;
 }
 

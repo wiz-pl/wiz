@@ -5,3 +5,5 @@
 # project driver TU cache
 /.scry-project-cache/
 /scry-workflow/
+# Python bytecode from fuzz/run.py
+__pycache__/
