@@ -304,6 +304,34 @@ def tacticGroup : Group where
         okSimpLoc loc ("import SimpLoc\ndef outside {A : Type} (xs : List A) : " ++
           "List.append xs List.nil = xs := by\n  simp\n  trace_state\n  exact (locNil xs)")
           ["A : Type\nxs : List A\n⊢ List.append A xs .nil = xs"] },
+    { name := "simp: the annotated ListLemmas and Logic sets normalise real goals", run := fun _ => do
+        -- No explicit rule list: append_nil, reverse_reverse and length_append_eq carry
+        -- the goal to a reflexive equation, and the two append_nil occurrences are
+        -- rewritten in separate passes (a rewrite restarts the pass).
+        okLibs ("import ListLemmas\n" ++
+          "def l1 {A : Type} (xs ys : List A) :\n" ++
+          "    List.length (List.reverse (List.reverse (List.append xs (List.append ys List.nil)))) =\n" ++
+          "      Nat.add (List.length xs) (List.length ys) := by\n" ++
+          "  simp\n" ++
+          "  rfl\n" ++
+          "def l2 {A : Type} (xs : List A) : (xs ++ []) ++ [] = xs := by\n" ++
+          "  simp\n" ++
+          "  rfl\n" ++
+          "def l3 {A : Type} (xs : List A) : (xs ++ []) ++ [] = xs := by\n" ++
+          "  simp only [List.append_nil]\n" ++
+          "  rfl") []
+        -- `&&`, `||` and `!` are the terms the Logic rules are stated on, so they fire
+        -- on the notation (a match on the first argument is `Bool.and`/`Bool.or` stuck).
+        okLibs ("import Logic\n" ++
+          "def b1 (a : Bool) : (a && Bool.true) = a := by\n" ++
+          "  simp\n" ++
+          "  rfl\n" ++
+          "def b2 (a : Bool) : !(!a) = a := by\n" ++
+          "  simp\n" ++
+          "  rfl\n" ++
+          "def b3 (a : Bool) : Bool.and (Bool.or a a) (Bool.not (Bool.not a)) = a := by\n" ++
+          "  simp\n" ++
+          "  rfl") [] },
     -- typed reflection (docs/stages/06-macros.md, 6g)
     { name := "constructor applications are reflected by name, with the type's parameters", run := fun _ =>
         okLib (reflectPrelude ++

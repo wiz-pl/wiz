@@ -76,17 +76,25 @@ Orientation is not guessed: a lemma is used left to right, and the reverse would
 be a separate registration. A looping rule still fails with the fuel message if it was
 registered before the warning was seen.
 
-**The default set.** `lib/SimpLemmas.wiz` registers its rules at the end of the file:
-`Nat.add_zero`, `Nat.mul_one`/`one_mul`/`mul_zero`, `Bool.not_not`/`and_true`/`and_false`/
-`or_false`, `List.append_nil`/`nil_append`/`map_map`, and the `Int` identities
-(`add_zero`, `zero_add`, `sub_zero`, `mul_one`, `one_mul`, `mul_zero`, `zero_mul`).
-`import SimpLemmas` therefore gives `simp` a terminating identity set. The set is
-deliberately small and confluent where it matters: commutativity and associativity stay
-out, and rules whose left side computes to a variable or a bare data value (`0 + n`,
-`b ^ 0`, `Prod.fst (a, b)`) are not registered: matching is up to conversion, so such a
-rule would match anything or have already computed away in the goal. The same rules
-remain available explicitly (`simp only [Nat.zero_add]`), and S5 is where matching
-computes-away patterns is revisited.
+**The default set.** Each library registers its own rules at the end of its file, so
+importing it is enough: `lib/Nat.wiz` (`Nat.add_zero`, `Nat.mul_one`/`one_mul`/
+`mul_zero`), `lib/Int.wiz` (the seven `Int` identities), `lib/Logic.wiz` (the oriented
+Boolean algebra: `Bool.not_not`, `Bool.and_true`/`and_false`/`and_self`/`and_absorb`/
+`and_not_self`, `Bool.or_false`/`or_true_right`/`or_self`/`or_absorb`/`or_not_self`,
+`Bool.not_and`/`not_or`) and `lib/ListLemmas.wiz` (`List.append_nil`, `List.map_id`,
+`List.map_map`, `List.map_append`, and the `length`/`reverse`/`filter`/`any`/`all`
+normal forms). `lib/SimpLemmas.wiz` is the umbrella: `import SimpLemmas` brings all of
+them, and it also keeps the lemmas that are deliberately explicit-only. The set is
+deliberately small and confluent where it matters: commutativity, associativity and
+distributivity stay out, and rules whose left side computes to a variable or a bare data
+value (`0 + n`, `b ^ 0`, `[] ++ l`, `Prod.fst (a, b)`), patterns that compute to a
+constructor carrying rule variables (`map f (x :: xs)`), `↔` lemmas and conditional
+lemmas are not registered: matching is up to conversion, so such a rule would match
+anything or have already computed away in the goal. The same rules remain available
+explicitly (`simp only [Nat.zero_add]`), and S5 is where matching computes-away patterns
+is revisited. The Boolean rules are stated over `Bool.and`/`Bool.or`/`Bool.not`, which
+is the stuck term that `&&`, `||` and `!` elaborate to, so a goal written with the
+notation is simplified too.
 
 ## The host requests
 
@@ -178,6 +186,10 @@ not; the default order is priority first then oldest registration (`getSimpLemma
 `[simp]` errors for a constructor, an unknown name and a conditional lemma; warnings for
 a duplicate registration and a possibly looping orientation; and a two-module fixture
 that checks `local attribute [simp]` works in its module and is gone in the importer,
-through both the frontend and the command cache. The S1 cases (explicit list, matched
+through both the frontend and the command cache. The library-set case uses the
+annotations of `lib/ListLemmas.wiz` and `lib/Logic.wiz` on real goals: a list goal that
+needs `List.append_nil`, `List.length_append_eq` and `List.reverse_reverse`, the
+`&&`/`!` notation against the `lib/Logic.wiz` Boolean rules, and `simp only
+[List.append_nil]` rewriting both occurrences. The S1 cases (explicit list, matched
 quantified lemma, `simp only` order, no match / identity, fuel, non-equation argument,
 `#print axioms`, `rw` then `simp`, `← h`, `SimpLemmas` rules) are unchanged.

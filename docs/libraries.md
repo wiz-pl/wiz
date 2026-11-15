@@ -1454,38 +1454,52 @@ def v (p q : Q) : (p + q) * (p + q) ≈ p * p + 2 * p * q + q * q :=
 
 ## Simp lemmas: normal forms for rewriting (`lib/SimpLemmas.wiz`)
 
-`import SimpLemmas` collects the default rewrite set: equations oriented left to right,
-towards the normal form a simplifier uses. The safe subset is registered with
-`attribute [simp]`, so `simp` (stage 6h) uses it without a list; `simp only [...]` and
-`rw` use the rest explicitly. Every rule is a theorem (no axiom, no `sorry`).
+The rewrite library: equations oriented left to right, towards the normal form `simp`
+(stage 6h) computes. Each rule is registered with `attribute [simp]` in the module that
+defines it, so importing that module alone is enough; `import SimpLemmas` is the
+umbrella that brings them all, and it also keeps the lemmas that are deliberately not
+registered. `simp` uses the registered set without a list; `simp only [...]` and `rw`
+use any lemma explicitly. Every rule is a theorem (no axiom, no `sorry`).
 
-| type | rules (left to right) | where |
-|------|-----------------------|-------|
-| `Nat` | `Nat.add_zero : n + 0 = n`, `Nat.zero_add : 0 + n = n`, `Nat.mul_one : n * 1 = n`, `Nat.one_mul : 1 * n = n`, `Nat.mul_zero : n * 0 = 0`, `Nat.zero_mul : 0 * n = 0` | `lib/Nat.wiz` |
-| `Nat` powers | `Nat.pow_zero : b ^ 0 = 1`, `Nat.pow_succ : b ^ Nat.succ n = b * b ^ n` | `lib/SimpLemmas.wiz` |
-| `Bool` | `Bool.not_not : !(!b) = b`, `Bool.and_true : b && true = b`, `Bool.and_false : b && false = false`, `Bool.or_false : b \|\| false = b`, `Bool.if_true : (if true then a else b) = a`, `Bool.if_false : (if false then a else b) = b` | `lib/SimpLemmas.wiz` |
-| `List` | `List.append_nil : xs ++ [] = xs`, `List.nil_append : [] ++ xs = xs`, `List.length_append : length (xs ++ ys) = length xs + length ys`, `List.map_nil : map f [] = []`, `List.map_cons : map f (x :: xs) = f x :: map f xs`, `List.map_map : map f (map g xs) = map (fun x => f (g x)) xs` | `SimpLemmas`; `length_append` is in `lib/Text.wiz` |
-| `Option`, pairs | `Option.map_none : Option.map f none = none`, `Option.map_some : Option.map f (some a) = some (f a)`, `Prod.fst_mk : (a, b).1 = a`, `Prod.snd_mk : (a, b).2 = b` | `lib/SimpLemmas.wiz` |
-| `Int` | `Int.add_zero : a + 0 = a`, `Int.zero_add : 0 + a = a`, `Int.mul_one : a * 1 = a`, `Int.one_mul : 1 * a = a`, `Int.mul_zero : a * 0 = 0`, `Int.zero_mul : 0 * a = 0`, `Int.sub_zero : a - 0 = a` | `lib/Int.wiz` |
+| module | registered rules (left to right) |
+|--------|----------------------------------|
+| `lib/Nat.wiz` | `Nat.add_zero : n + 0 = n`, `Nat.mul_one : n * 1 = n`, `Nat.one_mul : 1 * n = n`, `Nat.mul_zero : n * 0 = 0` |
+| `lib/Int.wiz` | `Int.add_zero`, `Int.zero_add`, `Int.sub_zero`, `Int.mul_one`, `Int.one_mul`, `Int.mul_zero`, `Int.zero_mul` |
+| `lib/Logic.wiz` | `Bool.not_not`, `Bool.and_true`, `Bool.and_false`, `Bool.and_self`, `Bool.and_absorb`, `Bool.and_not_self`, `Bool.or_false`, `Bool.or_true_right`, `Bool.or_self`, `Bool.or_absorb`, `Bool.or_not_self`, `Bool.not_and`, `Bool.not_or` |
+| `lib/ListLemmas.wiz` | `List.append_nil`, `List.map_id`, `List.map_map`, `List.map_append`, `List.length_map`, `List.length_append_eq`, `List.reverse_cons`, `List.reverse_append`, `List.reverse_reverse`, `List.map_reverse`, `List.length_reverse`, `List.filter_map`, `List.filter_filter`, `List.any_append`, `List.all_append` |
+| `lib/SimpLemmas.wiz` | none of its own: `Nat.pow_zero`/`Nat.pow_succ`, `Bool.if_true`/`Bool.if_false`, `Option.map_none`/`Option.map_some`, `Prod.fst_mk`/`Prod.snd_mk` stay explicit (see below) |
 
-* **The registered default set.** `simp` uses these without a list (all at priority
-  1000, oldest registration first): `Nat.add_zero`, `Nat.mul_one`, `Nat.one_mul`,
-  `Nat.mul_zero`, `Bool.not_not`, `Bool.and_true`, `Bool.and_false`, `Bool.or_false`,
-  `List.append_nil`, `List.nil_append`, `List.map_map`, and the `Int` identities
-  (`add_zero`, `zero_add`, `sub_zero`, `mul_one`, `one_mul`, `mul_zero`, `zero_mul`).
-  The others stay available to `simp only [...]`/`rw`: a rule whose left side computes
-  to a variable or a bare data value would match anything (matching is up to
-  conversion) or has already computed away in the goal, so it is not registered. The
-  `attribute [simp]` command warns about a duplicate and about a right side that
-  contains its left side.
+* **Boolean notation.** `&&`, `||` and `!` are a `match` on the first argument and
+  `Bool.not` in the prelude; for a variable first argument that `match` is the same
+  stuck term as `Bool.and`/`Bool.or` applied. The rules are stated with
+  `Bool.and`/`Bool.or`/`Bool.not` and fire on the notation too.
+* **What is not registered, and why.** A rule must be `∀ x₁ … xₙ, lhs = rhs` with no
+  premise (dischargers are S3) and a left side that still appears in a goal. So several
+  lemmas are explicit-only:
+  * identities whose left side computes to a variable or a data value — `Nat.zero_add`,
+    `Nat.zero_mul`, `Nat.pow_zero`, `List.nil_append`, `Bool.true_and`,
+    `Bool.false_and`, `Bool.false_or`, `Bool.true_or`, `Bool.not_true`,
+    `Bool.not_false`, `Option.map_none`, `Prod.fst_mk`, `Prod.snd_mk`,
+    `Bool.if_true`, `Bool.if_false`;
+  * patterns that compute to a constructor carrying rule variables — `List.map_nil`,
+    `List.map_cons`, `Option.map_some`;
+  * commutativity and associativity (`Nat.add_comm`, `Bool.and_comm`,
+    `List.append_assoc`, …), which have no normal form to aim at, and distributivity,
+    which expands;
+  * the `↔` lemmas (`List.mem_append`, `List.mem_map`, `Bool.and_eq_true`, …), which
+    are not equations;
+  * conditional equations (`List.filter_cons_true`, `List.any_cons_true`, `Eq.symm`,
+    `propext`, …), which need a discharger.
+
+  Each library file lists its own exclusions with the reason.
 * **Orientation.** Rewriting goes from the left column (the term with the neutral
   operation) to the smaller one: `n + 0 → n`, `n * 1 → n`, `b ^ 0 → 1`,
-  `b ^ (n+1) → b * b^n`, `xs ++ [] → xs`, `map f (x :: xs) → f x :: map f xs`. Rules
-  that would loop are deliberately absent: commutativity (`Nat.add_comm`,
-  `Nat.mul_comm`), associativity, and the other directions of the identities above.
-* **Booleans.** In the prelude, `&&`, `\|\|` and `if … then … else` are `match`
-  expressions, not `Bool.and`/`Bool.or`; the rules are stated on the notation users
-  write. `!` is `Bool.not`.
+  `b ^ (n+1) → b * b^n`, `xs ++ [] → xs`, `b && true → b`,
+  `reverse (reverse l) → l`, `reverse (l ++ m) → reverse m ++ reverse l`. Rules that
+  would loop are deliberately absent: commutativity, associativity, distributivity, and
+  the other directions of the identities above. `Nat.add_zero` and `Int.add_zero` are
+  stated for an explicit argument (`rw (Nat.add_zero n)`), so a rewrite chain names the
+  instance.
 * **`rw` and definitional equations.** `rw` needs the elaborated type of its lemma to be
   an equation. When both sides are definitionally equal (`Nat.zero_add`,
   `Nat.zero_mul`, `Nat.pow_zero`, `Nat.pow_succ`, `List.nil_append`, `List.map_nil`,
@@ -1496,17 +1510,27 @@ towards the normal form a simplifier uses. The safe subset is registered with
   `rw`; `simp` uses the registered safe subset and the others explicitly. This is a
   limitation of `rw`, not of the lemma set.
 
+`simp` rewrites and the user closes the goal, so a normal form is `simp; rfl`:
+
 ```
 import SimpLemmas
 
 def t (n : Nat) : (n + 0) * 1 = n := by
-  rw (Nat.mul_one (n + 0))
-  rw (Nat.add_zero n)
+  simp
   rfl
 def u {A : Type} (xs : List A) : xs ++ [] = xs := by
-  rw (List.append_nil xs)
+  simp
+  rfl
+def v {A : Type} (xs : List A) : (xs ++ []) ++ [] = xs := by
+  simp
   rfl
 ```
+
+`v` is the case the registrations were for: by `rw` it needs
+`rw (List.append_nil (xs ++ []))`, then `rw (List.append_nil xs)`, then `rfl`; `simp`
+finds both occurrences and restarts after each rewrite. The same annotations make the
+`List.reverse`, `List.filter`, `List.any` and `List.all` lemmas usable as normal forms
+instead of one `rw` per step.
 
 ## Native structures: word arrays, word maps, interned strings
 
