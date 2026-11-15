@@ -1633,7 +1633,7 @@ def testRunnerGroup : Group where
 its `.expected`), in a package of its own so that only that file runs. -/
 def tourFiles : List String :=
   ["00-hello", "01-basics", "02-data", "03-structures", "04-classes", "05-vec", "06-proofs",
-   "07-quantities", "08-codata", "09-ffi", "10-hdl", "11-mistakes"]
+   "06b-calc", "07-quantities", "08-codata", "09-ffi", "10-hdl", "11-mistakes", "12-scry"]
 
 def tourCase (f : String) : Case :=
   { name := s!"examples/tour/{f}.wiz", run := fun _ => do
@@ -1651,6 +1651,29 @@ def tourCase (f : String) : Case :=
           skip "no toolchain"; return
         check t.ok s!"{t.file}: {t.message}" }
 
+/-- Section 11's command: `grail new` writes the `exe` template, and its package tests
+pass. -/
+def tourNewCase : Case :=
+  { name := "docs/tour: grail new writes a package that tests", run := fun _ => do
+      let root ← IO.FS.createTempDir
+      let dir := root / "hello"
+      let exe := (← IO.FS.realPath ".lake/build/bin/grail").toString
+      let o ← IO.Process.output {
+        cmd := exe, args := #["new", "hello", "--dir", dir.toString] }
+      if o.exitCode != 0 then throw (IO.userError s!"grail new failed: {o.stderr}")
+      check ((o.stdout.splitOn "grail new: wrote").length > 1) o.stdout
+      for f in ["grail.wiz", "src/Main.wiz", "tests/hello.wiz", "tests/hello.expected",
+                "README.md", ".gitignore"] do
+        check (← (dir / f).pathExists) s!"missing {f}"
+      let tc ← toolchain
+      let tc : Toolchain := { tc with cacheDir := some (← IO.FS.createTempDir) }
+      let (res, _) ← runTests dir tc
+      checkEq 1 res.size
+      for t in res do
+        if !t.ok && (t.message.splitOn "gmp.h").length > 1 then
+          skip "no toolchain"; return
+        check t.ok s!"{t.file}: {t.message}" }
+
 def tourGroup : Group where
   name := "tour"
   exercise := "docs/tour.md"
@@ -1661,7 +1684,7 @@ def tourGroup : Group where
           names := names.push e.fileName
         let want := tourFiles.flatMap fun f => [f ++ ".expected", f ++ ".wiz"]
         checkEq (want.toArray.qsort (· < ·)).toList (names.qsort (· < ·)).toList } ::
-    tourFiles.map tourCase
+    (tourFiles.map tourCase ++ [tourNewCase])
 
 def grailSelfhostGroup : Group where
   name := "grail-selfhost"
