@@ -26,6 +26,35 @@ namespace Wiz
 
 abbrev Lvl := Nat
 
+/-! ### A memoising thunk
+
+Lean's `Thunk` is not memoising in this toolchain (`Thunk.get` is `fun x => x.fn ()`),
+so a glued definition or a lazy induction that kept a plain one would be recomputed on
+every `whnf`: conversion of a value behind a definition then re-evaluates the definition
+at each step, exponentially on a machine's run (issue #256). `memoThunk` is a `Thunk`
+whose function remembers its first result.
+
+The cell is **owned by one thunk** and its function is the pure computation that the
+value denotes: a definition's value term evaluated at the captured levels and globals,
+in the empty environment, or a projection/application of one. Forcing the same thunk
+twice therefore gives the same result, and a cell is never keyed by a name or shared
+between declarations: the captured `Globals` is persistent (insertion keeps the old
+value), so a later declaration cannot change what an existing cell computes. This is
+the invariant that makes the `unsafe` implementation below unobservable; it is the same
+arrangement `Budget` uses for a counter behind a pure interface. -/
+unsafe def memoThunkImpl {α : Type} [Inhabited α] (f : Unit → α) : Thunk α := unsafeBaseIO do
+  let cell ← IO.mkRef (none : Option α)
+  pure (Thunk.mk fun _ => unsafeBaseIO do
+    match ← cell.get with
+    | some v => pure v
+    | none =>
+      let v := f ()
+      cell.set (some v)
+      pure v)
+
+/-- A `Thunk` computed at most once. -/
+@[implemented_by memoThunkImpl] opaque memoThunk {α : Type} [Inhabited α] (f : Unit → α) : Thunk α
+
 mutual
 /-- What a neutral is stuck on. Besides variables, globals and metas, stage 4c adds
 stuck observational constructs: an equality or cast whose type is a neutral, and
@@ -87,7 +116,7 @@ inductive Val (R : Type) where
   | ulift (k l : Level) (A : Val R)
   | up (a : Val R)
   /-- **glued**: the global `name` applied to the eliminations `sp`, together with its
-  unfolding, computed only when needed (a `Thunk` remembers it). Keeping the head
+  unfolding, computed only when needed (a `memoThunk` remembers it). Keeping the head
   lets conversion compare `f a` with `f b` without unfolding `f`, keeps names in error
   messages, and lets type classes see their class and the nominal heads. Use `whnf`
   before matching on a value's shape. -/

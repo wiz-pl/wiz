@@ -2,8 +2,12 @@
 #
 # Runs on `master` (the integration branch, with the solutions in it) and on pull
 # requests into it: the full suite, split into shards (.github/test-shards.json). The
-# exercise tree (scripts/mkexercises.py) is checked only when a release is tagged:
-# release.yml's `exercise tree` job, which must pass before anything is published.
+# toolchain is built once, with Nix (`nix build .#wiz .#tests`), and published to Cachix;
+# the test shards substitute those store paths instead of rebuilding (no Lake build and
+# no `.lake` Actions cache on the critical path). The exercise tree
+# (scripts/mkexercises.py) is checked only when a release is tagged: release.yml's
+# `exercise tree` job, which must pass before anything is published (it still builds
+# with Lake, as does the weekly fixpoint).
 name: CI
 
 on:
@@ -41,10 +45,12 @@ permissions:
 env:
   # The Cachix binary cache (empty: none, everything comes from cache.nixos.org). Pushing
   # to it needs the repository secret CACHIX_AUTH_TOKEN; without the secret (pull
-  # requests from forks) it is pull-only.
+  # requests from forks) it is pull-only, and those shards rebuild what the build job
+  # could not publish.
   CACHIX_NAME: badlydrawnwizards
   # Lake's artifact cache (enableArtifactCache in lakefile.lean) inside .lake rather than
-  # under the elan toolchain, so that caching .lake caches the whole build.
+  # under the elan toolchain. Only the jobs that still run Lake use it: the weekly
+  # fixpoint (and release.yml, which has its own workflow).
   LAKE_CACHE_DIR: ${{ github.workspace }}/.lake/cache
 
 defaults:
@@ -56,8 +62,7 @@ jobs:
   # "inputs" in .github/test-shards.json). A docs-only PR builds and tests nothing; a PR
   # touching only lib/ files no core test reads skips the core shard; the selfhost
   # shards run for selfhost/ and the lib/ files it imports. Everything but a
-  # pull_request (pushes, the merge queue, manual runs) runs every job except `package`,
-  # which runs on push and workflow_dispatch only (see its comment).
+  # pull_request (pushes, the merge queue, manual runs) runs every job.
   changes:
     name: changes
     if: github.event_name != 'schedule'
@@ -102,13 +107,17 @@ jobs:
     needs: changes
     if: github.event_name != 'schedule' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # one cold Nix build (unwrapped + prewarm), then the Cachix push of ~1.8 GB
+    timeout-minutes: 90
     outputs:
       tree: solution # only the summary's title reads it (there is one tree now)
       matrix: ${{ steps.shards.outputs.matrix }}
-      lake-key: ${{ steps.key.outputs.key }}
-      lake-hash: ${{ steps.key.outputs.hash }}
+      # what identifies the compiler and test driver (and the C toolchain they use); the
+      # test shards key their Wiz build caches on it
       compiler-key: ${{ steps.key.outputs.compiler }}
+      # the store paths of this commit's build (the shards substitute them from Cachix)
+      wiz: ${{ steps.nix.outputs.wiz }}
+      tests: ${{ steps.nix.outputs.tests }}
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup
@@ -116,48 +125,69 @@ jobs:
           cachix-name: ${{ env.CACHIX_NAME }}
           # empty in pull requests from forks: Cachix is then pull-only
           cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # no Lake here: nixpkgs' Lean builds the packages (elan is only for the
+          # fixpoint)
+          lean: false
       - name: Cache key
         id: key
         shell: bash
         run: |
-          # the hash part alone too: a test job on another architecture (a self-hosted
-          # runner, docs/ci-runner.md) prefixes its own os/arch
-          echo "hash=${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-${{ hashFiles('lakefile.lean', '**/*.lean') }}" >> "$GITHUB_OUTPUT"
-          echo "key=lake-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-${{ hashFiles('lakefile.lean', '**/*.lean') }}" >> "$GITHUB_OUTPUT"
           # what identifies the compiler and test driver (and the C toolchain they use)
           echo "compiler=${{ hashFiles('flake.lock', 'flake.nix', 'lean-toolchain', 'lake-manifest.json', 'lakefile.lean', '**/*.lean', 'runtime/**', 'c/**') }}" >> "$GITHUB_OUTPUT"
-      - name: Cache the Lake build
-        uses: actions/cache@v4
-        with:
-          path: .lake
-          key: ${{ steps.key.outputs.key }}
-          restore-keys: lake-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-
-      - name: lake build
+      - name: nix build (wiz, grail and the test driver)
+        id: nix
         run: |
-          # The artifact cache only grows (each commit adds the modules it changed); start
-          # afresh when it gets big.
-          if [ -d .lake/cache ] && [ "$(du -sm .lake/cache | cut -f1)" -gt 3000 ]; then
-            echo "Lake's artifact cache is over 3 GB: building from scratch"; rm -rf .lake
+          # One build for every job: the shards substitute these store paths from Cachix
+          # (on this repository's branches, which have the push token). `packages.wiz` is
+          # the default package; `packages.tests` is the test driver, from the same build.
+          nix build .#wiz .#tests --no-link -L
+          wiz=$(nix path-info .#wiz)
+          tests=$(nix path-info .#tests)
+          echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+          echo "wiz: $wiz"; echo "tests: $tests"
+          du -sh "$wiz" "$tests"
+          nix path-info -S "$wiz" "$tests" | sed 's/^/closure: /'
+      - name: Publish the store paths to Cachix
+        # The shards substitute from here. Explicit (not the action's post-step) so that
+        # exactly this commit's build is published, with the token only in this step's
+        # environment; fork pull requests have no secret and skip it (their shards build).
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          if [ -z "$CACHIX_AUTH_TOKEN" ]; then
+            echo "::warning title=Cachix::no CACHIX_AUTH_TOKEN: the store paths are not published"
+            exit 0
           fi
-          lake build wiz grail tests
-          du -sh .lake .lake/cache 2>/dev/null || true
+          nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" \
+            $(nix path-info .#wiz .#tests)
       - name: Every test case is in exactly one shard
-        run: python3 scripts/ci.py check-shards
+        run: python3 scripts/ci.py check-shards "${{ steps.nix.outputs.tests }}/bin/tests"
       - name: Shards
         id: shards
         run: |
           # a shard with "split" becomes several, balanced by .github/test-timings.json
           # only the shards this change needs (all of them outside pull requests)
-          echo "matrix=$(python3 scripts/ci.py matrix --only '${{ needs.changes.outputs.shards }}')" >> "$GITHUB_OUTPUT"
-          python3 scripts/ci.py plan
-      - name: Lake tracks the embedded runtime (runtime/wiz_rt.h, runtime/rt_*.inc)
-        # editing one of the runtime's files rebuilds what embeds it and nothing else
-        # (docs/building.md)
-        run: scripts/test-embed.sh
+          echo "matrix=$(python3 scripts/ci.py matrix --only '${{ needs.changes.outputs.shards }}' '${{ steps.nix.outputs.tests }}/bin/tests')" >> "$GITHUB_OUTPUT"
+          python3 scripts/ci.py plan "${{ steps.nix.outputs.tests }}/bin/tests"
       - name: The runtime compiles on its own
         # cc -fsyntax-only -Wall -Wextra, with WIZ_API= (the object ABI) and WIZ_API=static
-        # (a generated program); the header's prototypes are checked against the parts
+        # (a generated program); the header's prototypes are checked against the parts.
+        # (`scripts/test-embed.sh`, which needs an incremental Lake build, is a local
+        # dev-shell check now: `nix develop -c scripts/test-embed.sh`.)
         run: scripts/test-runtime.sh
+      - name: The package checks, builds and runs a program outside the checkout
+        # what the old `package` job tested, after the one build: a program is checked and
+        # built from a directory with no checkout, and grail starts
+        run: |
+          dir=$(mktemp -d)
+          cp examples/io.wiz "$dir/"
+          cd "$dir"
+          nix run "$GITHUB_WORKSPACE#wiz" -- check io.wiz
+          nix run "$GITHUB_WORKSPACE#wiz" -- build io.wiz -o io
+          ./io | head -3
+          nix run "$GITHUB_WORKSPACE#grail" -- 2>&1 | head -2
 
   test:
     name: test (${{ matrix.shard.name }})
@@ -179,31 +209,29 @@ jobs:
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
           cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
-      # The build job's .lake (same os/arch); on another architecture the same sources'
-      # build for it, if a run there saved one (else `lake test` builds from scratch)
-      - name: Restore the Lake build
-        id: lake-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: .lake
-          key: lake-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ needs.build.outputs.lake-hash }}
-          # the exact entry can be gone already: the build job saved it minutes ago, but
-          # the repository's 10 GB cache evicts the least recently used entries, and
-          # with many PRs a 740 MB Lake cache lasts only minutes (#103, #134: the late
-          # shards of a run found nothing and ran without wiz and grail). Then the
-          # newest older build of the same toolchain, and the next step catches up.
-          restore-keys: lake-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-
-      # `lake test` builds only the test driver: build the executables the tests run too
-      # (a no-op after an exact hit), and stop if they're missing rather than run without
-      - name: lake build (unless restored)
+          # the tower group's "from source" case runs Lake, so that one shard needs the
+          # elan toolchain (the others run only the store's binaries)
+          lean: ${{ contains(toJSON(matrix.shard), 'tower') }}
+      # The build job's store paths, substituted from Cachix (same os/arch). A fork pull
+      # request has no push token, so its build job could not publish them and this
+      # builds them again here.
+      - name: nix build (the store paths, from Cachix)
+        id: nix
         run: |
-          if [ "${{ steps.lake-cache.outputs.cache-hit }}" != true ]; then
-            echo "::warning title=Lake cache::no exact Lake build for this commit (evicted?): building wiz, grail and tests here"
-          fi
-          lake build wiz grail tests
-          for b in wiz grail tests; do
-            [ -x ".lake/build/bin/$b" ] || { echo "::error::.lake/build/bin/$b is missing after lake build"; exit 1; }
-          done
+          nix build .#wiz .#tests --no-link -L
+          wiz=$(nix path-info .#wiz)
+          tests=$(nix path-info .#tests)
+          echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+          # the suite and its helpers name the checkout's binaries (`.lake/build/bin/wiz`,
+          # `.lake/build/bin/grail`, `scripts/trust-ledger.sh`); point them at the store.
+          # No Lake build and no .lake cache: this is a directory of symlinks.
+          mkdir -p .lake/build/bin
+          ln -sf "$wiz/bin/wiz" .lake/build/bin/wiz
+          ln -sf "$wiz/bin/grail" .lake/build/bin/grail
+          ln -sf "$tests/bin/tests" .lake/build/bin/tests
+          echo "$wiz/bin" >> "$GITHUB_PATH"
+          du -sh "$wiz" "$tests"
       # What the suite builds from Wiz programs, kept between runs: the elaboration cache
       # (`--cache`, which the grail-selfhost test uses), grail's `.grail` (the test's
       # build of the self-hosted checker) and the self-hosted checker and compiler that
@@ -222,7 +250,7 @@ jobs:
             /tmp/wiz-selfhost-*
           key: wiz-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ matrix.shard.name }}-${{ needs.build.outputs.compiler-key }}-${{ hashFiles('**/*.wiz') }}
           restore-keys: wiz-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ matrix.shard.name }}-${{ needs.build.outputs.compiler-key }}-
-      - name: lake test -- ${{ matrix.shard.name }}
+      - name: tests -- ${{ matrix.shard.name }}
         env:
           SELECT: ${{ matrix.shard.select }}
           JOBS: ${{ matrix.shard.jobs }}
@@ -230,18 +258,12 @@ jobs:
           mapfile -t sel <<< "$SELECT"
           mkdir -p logs ~/.cache/wiz
           du -sh ~/.cache/wiz .grail /tmp/wiz-selfhost-* 2>/dev/null || true
-          echo "lake test -- --cache ~/.cache/wiz --jobs $JOBS ${sel[*]}"
-          # every case's time, as JSON lines (scripts/ci.py summary and baseline read them)
-          lake test -- --cache "$HOME/.cache/wiz" --jobs "$JOBS" \
+          echo "tests -- --cache ~/.cache/wiz --jobs $JOBS ${sel[*]}"
+          # the Nix-built driver, exactly as `lake test -- …` would run it; every case's
+          # time as JSON lines (scripts/ci.py summary and baseline read them)
+          "${{ steps.nix.outputs.tests }}/bin/tests" --cache "$HOME/.cache/wiz" --jobs "$JOBS" \
             --timings "logs/${{ matrix.shard.name }}.jsonl" \
             --shard "${{ matrix.shard.name }}" "${sel[@]}" 2>&1 | tee "logs/${{ matrix.shard.name }}.log"
-      # a test job on another architecture (no build job there) keeps its own build
-      - name: Save the Lake build (${{ runner.arch }})
-        if: always() && runner.arch != 'X64' && steps.lake-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: .lake
-          key: lake-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ needs.build.outputs.lake-hash }}
       - name: Save the Wiz build caches
         if: always() && steps.wiz-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -285,69 +307,28 @@ jobs:
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
           cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
-      - name: Restore the Lake build
-        id: lake-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: .lake
-          key: lake-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ needs.build.outputs.lake-hash }}
-          restore-keys: lake-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-
-      - name: Build the toolchain and the test driver (unless restored)
+          lean: false
+      - name: nix build (the test driver, from Cachix)
+        id: nix
         run: |
-          if [ "${{ steps.lake-cache.outputs.cache-hit }}" != true ]; then
-            echo "::warning title=Lake cache::no exact Lake build for this commit (evicted?): building wiz and tests here"
-          fi
-          lake build wiz tests
-          for b in wiz tests; do
-            [ -x ".lake/build/bin/$b" ] || { echo "::error::.lake/build/bin/$b is missing after lake build"; exit 1; }
-          done
+          tests=$(nix build .#tests --no-link --print-out-paths)
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+          mkdir -p .lake/build/bin
+          ln -sf "$tests/bin/tests" .lake/build/bin/tests
+          du -sh "$tests"
       - name: The trusted base matches the baseline
         run: scripts/trust-ledger.sh --check
+      - name: The trust gate's fixtures
+        run: Tests/trust-ledger/run.sh
 
-  # The Nix package (flake.nix: wiz and grail, wrapped with the toolchain), pushed to
-  # Cachix on master (and on a manual run), so that `nix run github:wiz-pl/wiz` downloads
-  # it. It is a pure Nix build without Lake's artifact cache, so it rebuilds every module
-  # when a .lean file changes; running it on pull requests doubled the build load for no
-  # merge signal (the Lake build already tests the same sources).
-  package:
-    name: nix package
-    needs: changes
-    # The Nix package is a second full build of the same commit. It is published to
-    # Cachix from master (and tested on release tags); running it on every pull request
-    # only doubled the build load and lengthened the runner queue. `workflow_dispatch`
-    # keeps it available on demand.
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v5
-      - uses: cachix/install-nix-action@v31
-      - uses: cachix/cachix-action@v16
-        with:
-          name: ${{ env.CACHIX_NAME }}
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          skipPush: ${{ secrets.CACHIX_AUTH_TOKEN == '' }}
-      - name: nix build .#wiz
-        shell: bash
-        run: nix build .#wiz -L --print-out-paths
-      - name: The package checks, builds and runs a program outside the checkout
-        shell: bash
-        run: |
-          dir=$(mktemp -d)
-          cp examples/io.wiz "$dir/"
-          cd "$dir"
-          nix run "$GITHUB_WORKSPACE#wiz" -- check io.wiz
-          nix run "$GITHUB_WORKSPACE#wiz" -- build io.wiz -o io
-          ./io | head -3
-          nix run "$GITHUB_WORKSPACE#grail" -- 2>&1 | head -2
-
-  # (11s) The standard library's documentation (`wiz doc`, scroll), with the Wasm module
-  # that makes its signatures interactive, as the artifact `wiz-docs`: on master only (a
-  # push), kept 3 days (artifact storage). Not a required check (not in `result`);
-  # `deploy-docs` publishes it to GitHub Pages on the same push (docs/building.md,
-  # "Documentation site").
+  # (11s) The published site, as the artifact `wiz-docs`: on master only (a push), kept
+  # 3 days (artifact storage). The tree is the landing page at the root, the standard
+  # library's documentation (`wiz doc`, scroll) under `docs/`, and the static playground
+  # under `playground/`; the two Wasm modules make the docs' signatures interactive and
+  # run the playground. Not a required check (not in `result`); `deploy-docs` publishes
+  # it to GitHub Pages on the same push (docs/building.md, "Documentation site").
   docs:
-    name: docs (wiz doc --lib)
+    name: docs (wiz doc --lib + site)
     needs: build
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
@@ -358,34 +339,48 @@ jobs:
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
           cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
-      - name: Restore the Lake build
-        uses: actions/cache/restore@v4
-        with:
-          path: .lake
-          key: lake-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ needs.build.outputs.lake-hash }}
-      - name: The Wasm module (web/build.sh)
+          lean: false
+      - name: nix build (wiz, from Cachix)
+        id: nix
         run: |
-          lake build wiz
+          wiz=$(nix build .#wiz --no-link --print-out-paths)
+          echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
+          du -sh "$wiz"
+      - name: The Wasm modules (web/build.sh, web/build-playground.sh)
+        env:
+          WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
+        run: |
           sh web/build.sh web/out
+          sh web/build-playground.sh web/out
       - name: wiz doc --lib
         run: |
-          .lake/build/bin/wiz doc --lib -o doc-site --web web/out \
+          "${{ steps.nix.outputs.wiz }}/bin/wiz" doc --lib -o doc-site/docs --web web/out \
             --source-url "https://github.com/${{ github.repository }}/blob/${{ github.sha }}/lib/"
-          ls doc-site | head -50
+          ls doc-site/docs | head -50
+      - name: The landing page and the playground (web/build-site.sh)
+        run: sh web/build-site.sh doc-site web/out
+      - name: The site has its three entry points and the landing's links resolve
+        run: sh web/check-site.sh doc-site
       - uses: actions/upload-artifact@v4
         with:
           name: wiz-docs
           path: doc-site
           retention-days: 3
 
-  # (11s) Publish the `wiz-docs` artifact to GitHub Pages, at the site root:
-  #   https://wiz-pl.github.io/wiz/                    the docs index (wiz doc's index.html)
-  #   https://wiz-pl.github.io/wiz/Prelude.html        one page per module, plus A.B.json
+  # (11s) Publish the `wiz-docs` artifact to GitHub Pages. The artifact's tree, and so
+  # the site's URL layout, is:
+  #   https://wiz-pl.github.io/wiz/                     the landing page (web/landing/)
+  #   https://wiz-pl.github.io/wiz/docs/                the docs index (wiz doc's index.html)
+  #   https://wiz-pl.github.io/wiz/docs/api.html        the API index (every declaration)
+  #   https://wiz-pl.github.io/wiz/docs/Prelude.html    one page per module, plus A.B.json
+  #   https://wiz-pl.github.io/wiz/playground/          the static playground (stage 11ab)
+  # Every link is relative, so the same tree works at the project-site prefix above and
+  # at a custom domain root.
   # A repository has ONE Pages site and every deployment replaces the whole tree, so this
   # job is the only Pages publisher. The performance site (when it lands) goes under
   # `/perf/` in the same artifact: build it into `doc-site/perf` in the `docs` job, or
   # add it here with a checkout, rather than enabling a second deploy job (which would
-  # delete the docs). The repository's Pages source must be "GitHub Actions" once
+  # delete the site). The repository's Pages source must be "GitHub Actions" once
   # (Settings -> Pages; docs/building.md, "Documentation site"); until then this job
   # fails and the site keeps its last published tree. It is not in `result`: a Pages
   # outage does not fail the suite.
@@ -425,12 +420,11 @@ jobs:
   # One check for branch protection, and the whole suite's summary.
   result:
     name: CI result
-    needs: [changes, docs_style, build, test, trust-ledger, package]
+    needs: [changes, docs_style, build, test, trust-ledger]
     if: always() && github.event_name != 'schedule'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: write # deleting this pull request's big cache entries (below)
     steps:
       - uses: actions/checkout@v5
         with:
@@ -453,6 +447,23 @@ jobs:
           # all shards' case times in one file, for `scripts/ci.py baseline`
           mkdir -p timings
           cat logs/*.jsonl > timings/timings.jsonl 2>/dev/null || true
+      # A green run must have tested something. Fails when a group skipped wholesale
+      # (unless .github/skip-allowlist.json allows it, with a reason and an owner), when
+      # a skip names a tool the dev shell must provide (cc, GMP, GC, yosys, node, nix,
+      # …), or when a shard's unexplained skipped ratio is over 25%. The self-test runs
+      # first, so the rule itself is checked on synthetic logs without the suite.
+      - name: Skips are explained
+        if: needs.test.result != 'skipped'
+        shell: bash
+        run: |
+          python3 scripts/ci.py check-skips --self-test
+          shopt -s nullglob
+          logs=(logs/*.log logs/*.jsonl)
+          if [ ${#logs[@]} -eq 0 ]; then
+            echo "::error title=Skips::no test logs: a green run that wrote no test log tested nothing"
+            exit 1
+          fi
+          python3 scripts/ci.py check-skips "${logs[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: needs.test.result != 'skipped' # no shard ran: nothing to sum up
         with:
@@ -486,40 +497,18 @@ jobs:
           name: test-timings-baseline
           path: test-timings.json
           retention-days: 7
-      # A pull request's (or merge queue entry's) Lake build is saved only to hand it to
-      # its test shards; once they're done it's dead weight that evicts master's entries
-      # from the 10 GB Actions cache (each is ~500 MB). The next push restores master's
-      # build and catches up. The small per-shard wiz-* entries stay. Not in a cancelled
-      # run (the newer run of this ref may be using them). Fork PRs get a read-only token:
-      # the step may fail, which is fine.
-      - name: Drop this ref's Lake caches
-        if: ${{ !cancelled() && github.event_name != 'push' && github.event_name != 'workflow_dispatch' }}
-        continue-on-error: true
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh cache list -R "${{ github.repository }}" --ref "${{ github.ref }}" --limit 100 --json id,key,sizeInBytes \
-            --jq '.[] | select(.key | test("^(lake|exercises|elan)-")) | "\(.id) \(.sizeInBytes) \(.key)"' |
-          while read -r id size key; do
-            echo "deleting $key ($((size / 1000000)) MB)"
-            gh cache delete -R "${{ github.repository }}" "$id" || true
-          done
       - name: Verdict
         shell: bash
         run: |
           echo "changes: ${{ needs.changes.result }} (code: ${{ needs.changes.outputs.code }}, shards: ${{ needs.changes.outputs.shards }})"
           echo "docs style: ${{ needs.docs_style.result }}"
           echo "trust ledger: ${{ needs['trust-ledger'].result }}"
-          echo "build: ${{ needs.build.result }}, test: ${{ needs.test.result }}, package: ${{ needs.package.result }}"
+          echo "build: ${{ needs.build.result }}, test: ${{ needs.test.result }}"
           # the path filter must have run; a job it skipped is not a failure, but outside
           # pull requests (and whenever the filter wants them) every job must succeed
           [ "${{ needs.changes.result }}" = success ] || exit 1
           code="${{ needs.changes.outputs.code }}"
           want_tests=$([ "${{ needs.changes.outputs.shards }}" != "[]" ] && echo true || echo false)
-          # `package` runs on push and workflow_dispatch only, so a skipped package is
-          # fine on a pull request (and on a docs-only push); on a code push it is needed
-          want_package=$([ "$code" = true ] && { [ "${{ github.event_name }}" = push ] || [ "${{ github.event_name }}" = workflow_dispatch ]; } && echo true || echo false)
           check() { # NAME RESULT WANTED
             if [ "$3" = true ]; then [ "$2" = success ] || { echo "$1: $2 (needed)"; exit 1; }
             else [ "$2" = success ] || [ "$2" = skipped ] || { echo "$1: $2"; exit 1; }; fi
@@ -528,10 +517,11 @@ jobs:
           check "trust ledger" "${{ needs['trust-ledger'].result }}" "$code"
           check build "${{ needs.build.result }}" "$code"
           check test "${{ needs.test.result }}" "$want_tests"
-          check package "${{ needs.package.result }}" "$want_package"
 
-  # Stage-1 C of the toolchain = stage-2 C (scripts/fixpoint.sh). Scheduled runs use the
-  # default branch (master).
+  # The three-stage bootstrap fixpoint (scripts/fixpoint.sh): stage-1 C = stage-2 C =
+  # stage-3 C. Scheduled runs use the default branch (master). This weekly job stays on
+  # ubuntu-latest as the fallback; the nightly .github/workflows/fixpoint.yml is the
+  # opt-in one on the self-hosted runner.
   fixpoint:
     name: bootstrap fixpoint
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.fixpoint)
@@ -543,6 +533,8 @@ jobs:
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
           cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # the fixpoint still builds with Lake (scripts/fixpoint.sh)
+          lean: true
       - name: Cache the Lake build and the elaboration cache
         uses: actions/cache@v4
         with:
@@ -557,4 +549,4 @@ jobs:
         if: always()
         shell: bash
         run: |
-          { echo "### Bootstrap fixpoint"; echo; echo '```'; grep -E 'FIXPOINT|^==' fixpoint.log || echo "(no result)"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo "### Bootstrap fixpoint"; echo; echo '```'; grep -E 'FIXPOINT|^==|^stage [0-9]|^   |^total|^timings|^FAILED' fixpoint.log || echo "(no result)"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

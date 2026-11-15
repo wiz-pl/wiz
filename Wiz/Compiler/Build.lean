@@ -1,6 +1,8 @@
 import Wiz.Elab.Command
 import Wiz.Compiler.C
 import Wiz.Compiler.LLVM
+import Wiz.Compiler.Wasm
+import Wiz.Compiler.WasmValidate
 import Wiz.Compiler.Lower
 import Wiz.Toolchain
 
@@ -173,12 +175,33 @@ def compileLLVM (tc : Toolchain) (ll : String) (exe : System.FilePath) (glue : S
   step cc (#["-o", exe.toString, mainObj.toString, rtObj.toString] ++ srcArgs ++ tc.gmp.toArray ++
     tc.ldflags.toArray ++ tc.libs.toArray ++ link.libFlags)
 
-/-- Build the program computing `main`, through C or LLVM. With `lib`, the exports as
-an object file, with a header `OUT.h` for them; with `noMain`, the exports linked like
-a program but without a `main` (a Wasm module, a shared library: the toolchain's flags
-say which). -/
+/-- (8f) Write the WebAssembly module of the program to `out`. The JS host
+(`web/wasm-host.mjs`) prints its result; `runWasm` below uses it. The bytes are parsed
+and type-checked by `WasmValidate.validate` before they are written, so an encoder bug
+(or an instruction outside the supported subset) is a compile error, not a module that
+an engine rejects later. -/
+def compileWasm (decls : Array IR.Decl) (io : Bool) (out : System.FilePath) : IO (Except String Unit) := do
+  match Wasm.program decls io with
+  | .error e => pure (.error e)
+  | .ok bytes =>
+    match WasmValidate.validate bytes with
+    | .error e => pure (.error s!"internal error: the Wasm backend emitted an invalid module: {e}")
+    | .ok () =>
+      IO.FS.writeBinFile out bytes
+      pure (.ok ())
+
+/-- Build the program computing `main`, through C, LLVM, or WebAssembly. With `lib`, the
+exports as an object file, with a header `OUT.h` for them; with `noMain`, the exports
+linked like a program but without a `main` (a Wasm module, a shared library: the
+toolchain's flags say which). -/
 def build (tc : Toolchain) (s : CommandState R) (n : Name) (out : System.FilePath) (llvm lib : Bool)
-    (noMain : Bool := false) (split : Nat := 0) : IO (Except String (Term R)) := do
+    (noMain : Bool := false) (split : Nat := 0) (wasm : Bool := false) : IO (Except String (Term R)) := do
+  if wasm && llvm then
+    return .error "choose one backend: --target wasm, --target llvm, or --target c"
+  if wasm && (lib || noMain) then
+    return .error "the Wasm backend builds a `main`; `--lib` and `--no-main` are not supported (stage 8f)"
+  if wasm && split != 0 then
+    return .error "the Wasm backend has one module; `--split` does not apply (stage 8f)"
   let bare := lib || noMain
   match irProgram s n bare with
   | .error e => pure (.error e)
@@ -187,7 +210,8 @@ def build (tc : Toolchain) (s : CommandState R) (n : Name) (out : System.FilePat
     let ex := (exports s).map (·.1)
     let unbox := s.globals.unboxStructs
     if lib then IO.FS.writeFile (out.withExtension "h") (C.exportHeader ex)
-    let r ← if llvm then
+    let r ← if wasm then compileWasm decls io out
+      else if llvm then
         compileLLVM tc (LLVM.program decls io bare) out
           (extraC s ++ "\n" ++ C.glue (C.externs decls) (extraC s) unbox ++ "\n" ++ C.exportWrappers ex true) (linkOf s) lib
       else compileDecls tc decls io (extraC s) unbox ex (linkOf s) lib bare out split
@@ -236,6 +260,30 @@ def runGlobal (tc : Toolchain) (s : CommandState R) (n : Name) (dir : System.Fil
       if out.exitCode != 0 then return .error s!"the program failed ({out.exitCode}): {out.stderr}"
       -- an `IO` program prints for itself
       if io then return .ok out.stdout
+      match parseValue out.stdout with
+      | none => pure (.error s!"could not read the result: {out.stdout}")
+      | some v => pure (.ok (readback s.globals s.builtins (eval s.globals [] ty) v).pretty)
+
+/-- (8f) Build `main` as a WebAssembly module and run it under Node with the JS host
+(`web/wasm-host.mjs`), reading the printed result back with `main`'s type. -/
+def runWasmGlobal (s : CommandState R) (n : Name) (dir : System.FilePath) : IO (Except String String) := do
+  match irProgram s n with
+  | .error e => pure (.error e)
+  | .ok (decls, ty) =>
+    let wasmFile := dir / "wiz_main.wasm"
+    match ← compileWasm decls (isIO ty) wasmFile with
+    | .error e => pure (.error e)
+    | .ok () =>
+      let host : System.FilePath := "web" / "wasm-host.mjs"
+      unless ← host.pathExists do
+        return .error "web/wasm-host.mjs is missing (run from the Wiz checkout)"
+      let out ← try
+        -- (under `lake env`, Lean's LD_LIBRARY_PATH breaks Node's own library lookup)
+        IO.Process.output
+          { cmd := "node", args := #[host.toString, wasmFile.toString], env := #[("LD_LIBRARY_PATH", none)] }
+      catch e => return .error s!"node: {e}"
+      if out.exitCode != 0 then
+        return .error s!"the Wasm program failed ({out.exitCode}): {out.stderr.take 1000}"
       match parseValue out.stdout with
       | none => pure (.error s!"could not read the result: {out.stdout}")
       | some v => pure (.ok (readback s.globals s.builtins (eval s.globals [] ty) v).pretty)
