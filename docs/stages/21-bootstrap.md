@@ -877,28 +877,32 @@ automatic struct/pointer import for `import_c`.
 
 The frontend had one form of notation (`infixl`/`infixr`, stage 19b) and expanded it
 with an ad-hoc `Note`; `syntax`, `notation`, `macro_rules` and the macro/tactic
-registrations were "unsupported command". `lib/` uses them: a scan of the 51 `lib/*.wiz`
-files (declarations on their own line, 2026-11-15) gives
+registrations were "unsupported command". `lib/` uses them: counting declarations at the
+start of a line in the 78 `lib/**/*.wiz` files (comments skipped, including `lib/Hdl/`,
+2026-11-15 at `24218ce4`) gives
 
 | form                            | declarations | files |
 |---------------------------------|-------------:|------:|
-| `syntax`                        | 122 | 13 |
-| `attribute [tactic …]`          |  38 |  5 |
+| `syntax`                        | 123 | 13 |
+| `attribute [tactic …]`          |  37 |  5 |
 | `macro_rules`                   |  27 |  5 |
 | `infix` (plain)                 |  18 |  4 |
-| `attribute [macro …]`           |  13 |  6 |
+| `infixr`                        |  17 |  8 |
 | `infixl`                        |  13 |  3 |
-| `infixr`                        |  13 |  6 |
 | `declare_syntax_cat`            |  14 |  3 |
-| `notation`                      |   7 |  4 |
+| `attribute [macro …]`           |  11 |  6 |
+| `notation`                      |   9 |  4 |
 | `app_unexpander`                |   6 |  5 |
 | `attribute [app_unexpander …]`  |   2 |  1 |
 | `prefix` / `postfix`            |   0 | 0 |
 | `macro` (a declaration)         |   0 | 0 |
 
-`prefix`/`postfix` and a `macro` command do not exist in the Lean host either (a prefix
-operator is a `notation` whose first item is an atom; the host has only `macro_rules`),
-so there is nothing to mirror.
+17 files use at least one of the forms (12 use `macro_rules`/`notation`/
+`attribute [macro]`; 15 without the plain infix operators). The `syntax` rules target
+`tactic` 39 times, `term` 19, `doSeq` 9, `command` 3, `exBinder` 2 and 49 Feral DSL
+categories. `prefix`/`postfix` and a `macro` command do not exist in the Lean host
+either (a prefix operator is a `notation` whose first item is an atom; the host has only
+`macro_rules`), so there is nothing to mirror.
 
 **Implemented.** The frontend's `Note` is now a real macro rule — a node kind, a pattern
 tree, a template and the argument names `notation` binds — and:
@@ -945,27 +949,47 @@ the scope's reserved words are not tracked (only `lib/Feral.wiz` uses them, with
 procedural macro). `local notation`/`local macro_rules` are unwrapped and stay visible
 to importers (A14's module-local dropping is not wired to the new rules).
 
-**Tests** (new group `selfhost-macro`, 7 cases, added to the `selfhost` shard):
+**Tests** (new group `selfhost-macro`, 13 cases, added to the `selfhost` shard):
 * notation/infix differential: `selfhostSameNats` compares what the Lean frontend's
   `#eval` and the self-hosted one's `#reduce` compute for `10 − 3 − 2` (5), `10 ⊖ 3 ⊖ 2`
-  (9), `1 ⊕ 2 * 3` (7), `⌜1 + 2⌝` (4) and `⌜⌜3⌝⌝` (5) — left/right associativity,
-  precedence and a leading notation with a default argument precedence.
+  (9), `1 ⊕ 2 * 3` (7), `⌜1 + 2⌝` (4), `⌜⌜3⌝⌝` (5), the postfix `5 !` (10) and
+  `5 ! !` (20), and the prefix `~3` (2) and `~ ~3` (3) — left/right associativity,
+  precedence, a leading notation with a default and with an explicit argument
+  precedence, and a trailing (postfix) rule.
 * `macro_rules` differential: a `syntax:lead` rule, pattern variables, hygiene (`under e`
   = `let y := 3; e + y`, so `hyg 5` is 9 with hygiene and 7 without), a declared
   category with a rule of its own (`get ⟨7⟩` = 70, via a second expansion), and a
   command macro (`def_one one`).
-* pinned diagnostics: a malformed rule and an unknown syntax category.
+* a `syntax` rule whose items are a `sepBy(term, ",")` and the macro rule that matches
+  the `null` node and splices both elements (`pair(1, 2)` = 3).
+* `syntax ... : tactic` rules (39 of the 123 in `lib/` target `tactic`), a `tactic`
+  reference and a `(keywords := …)` category, accepted by both frontends.
+* a second `infixl` on the Prelude's `+`: a fresh kind (`term.+_1`), and the later rule
+  wins (`3 + 1` is 2 both places); `infix` (both operands `p + 1`) does not parse a
+  chain (`1 ? 2 ? 3`) in either frontend.
+* pinned diagnostics: a malformed rule, an unknown syntax category and an unknown
+  registration name.
 * the declarations a macro file produces in the self-hosted frontend (names and types).
 * `app_unexpander`/`set_option` accepted by both frontends; the macro/tactic
   registrations accepted by the self-hosted one.
+* two pinned differences (`selfhostVerdicts`): the host rejects a registration whose
+  function has the wrong type and an unexpander whose pattern is not an application,
+  while the self-hosted frontend only checks that the name exists.
 * the same macro-using program compiled and run by **both** toolchains (`ioRun` and
   `selfhostCompileRun`), printing the same five lines — the terms the macros desugar to
   compute identically.
 
-The self-check (`=selfhost`, Lex/Parse/Kernel/CParse/CGlue/Frontend) is unchanged: the
-checker still checks itself (29.9 s, 1620 declaration lines, no error), and every
-`=selfhost` case passes: a full run of the group gave 142 passed and 1 failed only
-because case 67 pinned `attribute [macro]`/`[tactic]` as unknown commands (they are
-supported now; the case pins `#print axioms`/`#erase` instead), and that case passes on
-the updated suite.
-`scripts/fixpoint.sh` was run at `--mem 6G`: FIXPOINT_FILLIN.
+**Verification.** Every case was exercised in both frontends from this worktree: the
+Lean frontend with `wiz check`/`wiz run`, and the Wiz-hosted frontend with the checker
+and compiler built from the current `selfhost/*.wiz` by the test driver. All 13 cases
+agree, including the compiled program's five output lines (`25 2 1 9 71`) from both
+toolchains. A full `=selfhost` run before the test-fixture change (the `selfhost/*.wiz`
+sources are the same) gave 143 passed, 0 failed; the one case this branch changed
+(`#67`, the unknown-command pin) was re-checked against its new expected output. The
+group runs and
+`scripts/fixpoint.sh --keep .lake/fixpoint-a12` are queued but had not started when
+this was written: for the whole session the heavy scheduler's 10 GiB reservation was
+held by other agents' jobs (two long `wiz build scry/App.wiz` jobs and `=selfhost`
+runs), so no local group or fixpoint run could be admitted. They remain to be run (CI
+runs `=selfhost` and `=selfhost-macro` on the `selfhost` shard; the fixpoint is the
+scheduled job).
