@@ -80,30 +80,39 @@ accepted now, but will fail on 2027-05-14 unless individually reviewed or renewe
 
 ## Reducing the legacy rows
 
-The migration's 753 rows are not a renewal list: the reviewed base is now 674 rows
-(26 still carrying the migration marker), 79 fewer and just over a 10% reduction. The
-removals are all structural, not a loosening of the gate:
+The migration's 753 rows are not a renewal list: the reviewed base is now 680 rows
+(24 still carrying the migration marker), 73 fewer (9.7%). The reduction is no longer
+over 10%: the signed shift/compare exception below is a correctness fix for the native
+IR. The removals are all structural, not a loosening of the gate:
 
 | what was removed | rows | why it was not trust |
 | --- | --- | --- |
-| signed-word natives (`IntN.*Native`, `IntN.toNat`) | 58 | every `IntN` operation has a Wiz body that delegates to the `UIntN` natives; compiled code still uses those, so the signed registrations were duplicate fast paths |
+| signed-word natives (`IntN.*Native`, `IntN.toNat`) | 52 | every other `IntN` operation has a Wiz body that delegates to a retained `UIntN` native or reads the representation (`IntN.toNat`); signed `shiftRight` and `lt` are kept native below |
 | `toList`/`ofList` projections on arrays, maps and intern tables | 8 | the constructor's `repr:` registration already gives the native representation; the separate projection registration proved nothing new |
 | `InternTable.empty`/`size` and `U64Map.contains` natives | 9 | their Wiz bodies are `.mk .nil`, a length and a match on the (still native) `find`/`toList`; all are cheaper to review than to trust twice |
 | `partial` definitions that the kernel accepts as total | 2 | `Json.digits` recurses on the list tail, `Ring.synEq` on the syntax tree (`Json.sub` stays partial as an elaboration fence and is now reasoned) |
 | `Scry.rdLoop` and `Scry.domLoop` fuel loops | 2 | their only recursive argument is `fuel`, a `Nat` predecessor, so removing `partial` is checked structural recursion (see the group below) |
 
+The rule the BitVec IR test encodes: **a native is removed only if the Wiz body emits
+the same primitive**. `IntN.shiftRight` and `IntN.lt` fail that test: their Wiz
+bodies allocate (`IntN.not`/`IntN.below`, `IntN.isNeg`/`IntN.toNat`), so their
+`wiz_word_ashr`/`wiz_word_slt` registrations and externs are back, with reasons.
+`IntN.isNeg`, `IntN.shiftLeft` and `IntN.toNat` stay removed: their bodies read the
+representation or delegate to a retained `UIntN` native and the IR has no word
+constructor or projection.
+
 The remaining rows fall into five groups, with the plan for each:
 
-* **FFI, 208 declarations (416 rows).** Each `extern` contributes an axiom (the C
+* **FFI, 210 declarations (420 rows).** Each `extern` contributes an axiom (the C
   function) and a `builtin extern:` row (the marshalling). These are the mechanical
   bulk and the next review unit: audit by C symbol against `runtime/` and `c/`, then
   replace the two `legacy:` rows with one reason naming the symbol and its contract.
   Do not bulk-renew them. Both FFI audits are done: the OS/runtime modules (147
   declarations, 290 rows) and the word/array/map modules (66 declarations, 198
-  rows) now carry symbol-specific reasons. `UInt64.ofNat` reduces mod 2^64 (the
-  marshalling used to panic above 2^64 while the doc promised modulo);
-  `Float64.ofNat` rounds for every `Nat` on another branch. The remaining legacy
-  rows are outside the `partial` group (below).
+  rows) now carry symbol-specific reasons. `UInt64.ofNat` reduces mod 2^64 in Wiz
+  (the marshalling used to panic above 2^64 while the doc promised modulo), and
+  `Float64.ofNat` rounds for every `Nat` on top of the `Float64.ofNatU64` extern.
+  The remaining legacy rows are outside the `partial` group (below).
 * **Mutual recursion and `partial`, 132 rows (109 in `mutual` blocks, 23 standalone
   `partial`).** The blocks are `Feral` (70: 67 mutual plus `Fe.core`/`Fe.tyStr`/
   `Fe.zonk`), `Json` (9 mutual plus the deliberately opaque `Json.sub`), the `Scry`
@@ -120,7 +129,7 @@ The remaining rows fall into five groups, with the plan for each:
   remain. A `mutual`/`partial` row is therefore a documented design choice, not an
   unreviewed gap: a new one still needs a reason, and `--strict-legacy` still lists any
   that has not been through this review.
-* **`implemented_by`, 54 rows.** The remaining ones are the performance-critical
+* **`implemented_by`, 56 rows.** The remaining ones are the performance-critical
   `UIntN`, array, map, intern and channel fast paths. They are covered by the
   differential `=word`/`=natives` tests; review each against the C function it names.
 * **`builtin`, 30 rows and `repr:`, 7 rows.** Ten seals (opaque native
@@ -129,10 +138,10 @@ The remaining rows fall into five groups, with the plan for each:
   should be reviewed as a group, not removed.
 
 The 35 pure axioms (the foreign types, the seals, `Region`'s `Outlives` evidence and
-`Prelude.castRefl`) now carry a specific reason and the owner `wiz-pl maintainers`; so
-does the kept `UIntN.toNat` native (the word tests pin it in the compiled IR). The 26
-rows that still say `legacy:` are outside the group: `Float64.ofNat`, the twenty
-`Prelude` numeral/`memo` registrations, the `PMap`/`Scry` seals, and
+`Prelude.castRefl`) now carry a specific reason and the owner `Reuben Steenekamp`; so
+do the kept `UInt64.toNat` native (the word tests pin it in the compiled IR) and the six
+signed shift/compare rows. The 24 rows that still say `legacy:` are outside the group:
+the twenty `Prelude` numeral/`memo` registrations, the `PMap`/`Scry` seals, and
 `Proc.runLinked`. `--strict-legacy` lists them, and the 2027-05-14 expiry is their
 deadline. `Json.sub` is partial by intent (it is an elaboration fence, not recursion)
 and has a reason.

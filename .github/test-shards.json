@@ -33,10 +33,14 @@
     "wasm"
   ]},
   {"name": "library", "split": 6, "jobs": 4, "default": true, "select": [
+    "=bus-crc",
+    "=bus-law",
+    "=bus-protocol",
     "builtins",
     "calc",
     "classes",
     "deriving",
+    "=display",
     "=doc",
     "=feral",
     "=grail",
@@ -64,6 +68,7 @@
     "=linear-case",
     "repr",
     "result-q",
+    "=rune",
     "seplogic",
     "=sat",
     "=scry-datalog",
@@ -90,6 +95,11 @@
   ]},
   {"name": "audit", "select": [
     "=audit"
+  ]},
+  {"name": "semantics", "heavy": true,
+   "inputs": ["lib/*", "selfhost/*", "Tests/Semantics/*", "scripts/gen-semantics-matrix.py"],
+   "select": [
+    "=semantics"
   ]},
   {"name": "core", "jobs": 4,
    "inputs": ["selfhost/Kernel.wiz", "examples/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz",

@@ -1,0 +1,121 @@
+import Hdl.Bus
+/-!
+# Hdl.AxiLite
+
+AXI4-Lite channel bundles for `Hdl.Bus` (`import Hdl.AxiLite`). `Bus` is already the
+single-outstanding, AXI4-Lite-shaped core: `Bus.ReqW` is a write with `WSTRB` or a read,
+and `Bus.Resp` is the corresponding `B`/`R` answer. This file gives the ARM channel
+names a concrete shape so a design can expose them, rather than inventing another bus:
+
+* `AxiLite.Aw`/`W`/`B` are the write address, write data and write response channels;
+  `AxiLite.Ar`/`R` are the read address and read response channels.
+* `AxiLite.MasterOut`/`MasterIn` and `AxiLite.SlaveIn`/`SlaveOut` are the five channels
+  with their `*READY` signals in the direction the name says.
+* `AxiLite.writeOf`/`readOf` are the documented `Bus.ReqW` view of a write/read in the
+  subset `Bus` supports: one outstanding transfer, no bursts, no IDs, and `AW`/`W`
+  presented together (so `awvalid && wvalid` is the bus `valid`). `AxiLite.errOf` turns
+  a non-`OKAY` `BRESP`/`RRESP` into the bus's `err`.
+
+The subset is deliberately the shape `Bus` already has: single outstanding, no bursts,
+no `AxLEN`/`AxSIZE`/`AxBURST`/`AxID`/`AxPROT`, no exclusive or cache attributes. For a
+full AXI4-Lite slave the `AW` and `W` channels may arrive in different cycles; that
+needs a small queue and is not claimed here. The APB and Wishbone bridges
+(`Hdl.Apb`, `Hdl.Wishbone`) take `Bus.ReqW` as their internal form.
+
+`examples/hdl-protocols.wiz` (test group `bus-protocol`) round-trips these bundles
+through `Bundle.toEl`/`Bundle.ofEl` and checks a sample of the `Bus.ReqW` views.
+
+AXI4-Lite is ARM IHI 0022, chapter C.
+-/
+
+/-- The AXI4-Lite response code width (`BRESP`/`RRESP`): 2 bits. -/
+def AxiLite.respW : Nat := 2
+
+/-- `OKAY`, the only response a successful AXI4-Lite transfer returns. -/
+def AxiLite.okay : Nat := 0
+
+/-- A write address channel. -/
+structure AxiLite.Aw (aw : Nat) (r : HwTy → Type) where
+  addr : r (HwTy.bits aw)
+  valid : r Bus.Bit
+  deriving Bundle
+
+/-- A write data channel: the data and its byte strobes (low byte first). -/
+structure AxiLite.W (dw : Nat) (r : HwTy → Type) where
+  data : r (HwTy.bits dw)
+  strb : r (HwTy.bits (Nat.div dw 8))
+  valid : r Bus.Bit
+  deriving Bundle
+
+/-- A write response channel. -/
+structure AxiLite.B (r : HwTy → Type) where
+  resp : r (HwTy.bits AxiLite.respW)
+  valid : r Bus.Bit
+  deriving Bundle
+
+/-- A read address channel. -/
+structure AxiLite.Ar (aw : Nat) (r : HwTy → Type) where
+  addr : r (HwTy.bits aw)
+  valid : r Bus.Bit
+  deriving Bundle
+
+/-- A read response channel. -/
+structure AxiLite.R (dw : Nat) (r : HwTy → Type) where
+  data : r (HwTy.bits dw)
+  resp : r (HwTy.bits AxiLite.respW)
+  valid : r Bus.Bit
+  deriving Bundle
+
+/-- The slave's input: the three request channels and the two response-ready signals. -/
+structure AxiLite.SlaveIn (aw dw : Nat) (r : HwTy → Type) where
+  awch : AxiLite.Aw aw r
+  wch : AxiLite.W dw r
+  arch : AxiLite.Ar aw r
+  bready : r Bus.Bit
+  rready : r Bus.Bit
+  deriving Bundle
+
+/-- The slave's output: the three request-ready signals and the two response channels. -/
+structure AxiLite.SlaveOut (aw dw : Nat) (r : HwTy → Type) where
+  awready : r Bus.Bit
+  wready : r Bus.Bit
+  bch : AxiLite.B r
+  arready : r Bus.Bit
+  rch : AxiLite.R dw r
+  deriving Bundle
+
+/-- The master's output: the three request channels and the two response-ready signals
+(the same shape as `AxiLite.SlaveIn`, named for the other side). -/
+structure AxiLite.MasterOut (aw dw : Nat) (r : HwTy → Type) where
+  awch : AxiLite.Aw aw r
+  wch : AxiLite.W dw r
+  arch : AxiLite.Ar aw r
+  bready : r Bus.Bit
+  rready : r Bus.Bit
+  deriving Bundle
+
+/-- The master's input: the three request-ready signals and the two response channels
+(the same shape as `AxiLite.SlaveOut`). -/
+structure AxiLite.MasterIn (aw dw : Nat) (r : HwTy → Type) where
+  awready : r Bus.Bit
+  wready : r Bus.Bit
+  bch : AxiLite.B r
+  arready : r Bus.Bit
+  rch : AxiLite.R dw r
+  deriving Bundle
+
+/-- The `Bus.ReqW` of an AXI4-Lite write when both address and data are presented
+(`awvalid && wvalid`); this is the subset `Bus` supports, not a general AXI slave. -/
+def AxiLite.writeOf {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (a : AxiLite.Aw aw r)
+    (w : AxiLite.W dw r) : Bus.ReqW aw dw r :=
+  Bus.ReqW.mk (Hw.and a.valid w.valid) (Hw.lit 1 1) a.addr w.data w.strb
+
+/-- The `Bus.ReqW` of an AXI4-Lite read: one beat, no burst fields. -/
+def AxiLite.readOf {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (a : AxiLite.Ar aw r) :
+    Bus.ReqW aw dw r :=
+  Bus.ReqW.mk a.valid (Hw.lit 1 0) a.addr (Hw.lit dw 0) (Hw.lit (Nat.div dw 8) 0)
+
+/-- `err` is high for any response other than `OKAY` (`SLVERR` or `DECERR`). -/
+def AxiLite.errOf {r : HwTy → Type} [Hw r] (resp : r (HwTy.bits AxiLite.respW)) :
+    r Bus.Bit :=
+  Hw.not (Hw.eq resp (Hw.lit AxiLite.respW AxiLite.okay))

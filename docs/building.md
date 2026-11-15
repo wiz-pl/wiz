@@ -159,7 +159,8 @@ code linked into `wiz`, `grail` and `tower` themselves; the licence texts are in
 
 `nix develop` gives the toolchain the tests need besides Lean (see `flake.nix`): GMP and
 LLVM's `llc` for the C and LLVM backends, Boehm GC for the self-hosted backend, a C
-compiler, and elan, which installs the Lean in `lean-toolchain`. Entered at the
+compiler, yosys for synthesis, Node for the Wasm modules, and elan, which installs the
+Lean in `lean-toolchain`. Entered at the
 repository root, it writes this machine's paths to the uncommitted `grail.local.wiz`,
 which grail and the test driver read (`Tests/Main.lean`; flags to `lake test -- …` win);
 `wiz` takes flags. Nothing reads environment variables.
@@ -184,7 +185,7 @@ Nix-built test driver (`packages.tests`), not `lake test`, and symlink the store
 and `grail` into the checkout's `.lake/build/bin`, which some cases and
 `scripts/trust-ledger.sh` name directly (the driver also carries the wrapped `wiz` and
 `grail` beside itself, which `Tests/Grail.lean` looks for). The dev shell (`nix develop`)
-is still what puts `cc`, `llc`, z3, cadical, Node and Neovim on `PATH`, and it writes
+is still what puts `cc`, `llc`, z3, cadical, yosys, Node and Neovim on `PATH`, and it writes
 `grail.local.wiz` for the cases that compile C.
 
 The Nix build is about 353 MB for `wiz` (1.8 GB with its closure: Lean, GMP, Boehm GC,
@@ -280,6 +281,26 @@ the elan toolchain, so the setup action keeps the elan cache for those
   limit cannot be split: `grail-selfhost` is one case of several minutes, and
   `scaling`'s sweep over `lib/` and `examples/` is one case of about 14 min (the
   `scaling` shard's other part holds its 26 shorter cases).
+* **Skips.** A green run must have run its cases: a skipped case is not a pass, and a
+  group that skipped wholesale means CI tested nothing there. The `CI result` job runs
+  `scripts/ci.py check-skips` on the shard logs and `--timings` files, and fails when
+  * a group's cases all skipped and the group is not in
+    `.github/skip-allowlist.json` (each entry names the group, the reason it may skip
+    for and an owner);
+  * a skip names a tool the dev shell must provide (`cc`, GMP, Boehm GC, yosys, Node,
+    nix, `llc`, z3, cadical, the `wiz`/`grail` binaries): that is a gap in `flake.nix`'s
+    `devShells.default`, not an environment skip, even for an allow-listed group. A tool
+    that is only needed on some machines (Icarus Verilog, an ARM toolchain) is excused by
+    the allow-list instead;
+  * a shard's unexplained skipped ratio is over 25% (`--max-ratio`).
+
+  Explained skips are reported in the summary (with the reason and the allow-list owner)
+  and give a warning annotation, never a failure. Skips that are not whole-group and stay
+  under the ratio also warn, so a few skipped cases are visible without blocking. The
+  step first runs `scripts/ci.py check-skips --self-test`, which checks the rule on
+  synthetic logs (all-skip, partial-skip, clean, an allow-listed group, a required tool)
+  without running the suite. Adding an allow-list entry needs a real reason: prefer
+  putting the tool in the dev shell.
 * **The exercise tree** is checked only for a release tag: the `exercise tree` job of
   `release.yml` generates it with `scripts/mkexercises.py` into a temporary directory
   and builds it (`lake build wiz grail tests`), and the tarball job (which publishes)
@@ -555,3 +576,43 @@ The queue order is kept in a ledger outside the checkout
 --next 5` prints the next actions with their gates, `--check` rejects a ledger with
 two ready PRs in one chain or a ready PR with an unmerged dependency, and `--write`
 refreshes the ledger's facts from `gh` and `git`.
+
+## Branch hygiene
+
+`scripts/branch-rot.py` makes branch hygiene a five-minute monthly task (Python 3,
+standard library only). It classifies every local branch, and with `--remote` every
+`origin/*` tracking ref, into four buckets:
+
+* **redundant** — the tip is an ancestor of `origin/master`, or every commit is
+  patch-equivalent to one upstream (`git cherry` reports no `+` lines). Branches with
+  merge commits are never called redundant: `git cherry` skips merges, and a merge
+  resolution can carry content that is not upstream.
+* **in-flight** — an open pull request exists for the branch. These are kept.
+* **attic** — unique commits, no open PR, and the tip is older than `--days`
+  (default 30).
+* **needs-pr** — unique commits and no open PR. This is the conservative default
+  whenever the script is unsure.
+
+Run it from a checkout:
+
+```sh
+scripts/branch-rot.py                  # table and counts
+scripts/branch-rot.py --limit 10       # show at most 10 rows per bucket
+scripts/branch-rot.py --json           # machine-readable, for a dashboard
+scripts/branch-rot.py --remote         # include origin/* tracking refs
+scripts/branch-rot.py --days 30        # attic threshold in days (default 30)
+```
+
+The classifier is read-only. Deleting redundant branches is explicit and needs both
+flags:
+
+```sh
+scripts/branch-rot.py --delete-redundant            # dry run: list what would go
+scripts/branch-rot.py --delete-redundant --apply    # actually delete
+```
+
+Deletion refuses the current branch, any branch checked out in a worktree (including
+another agent's), `master` and `main`, and any branch with an open PR or a PR state it
+could not read. `--no-gh` skips GitHub entirely (every PR state becomes unknown, so
+nothing is deleted); `--self-test` builds a throwaway repository with a merge, a
+cherry-pick, an unmerged branch and a worktree and checks the classification offline.
