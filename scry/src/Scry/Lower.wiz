@@ -2196,10 +2196,26 @@ def Scry.externalOf (funcs : List Wil.Func) : List (String × String) :=
         | .some _ => .false
         | .none => .true) (Scry.dedup (Scry.calleesOf f)))) funcs)
 
+/-- The translation unit's top-level nodes with recovery `ERROR` nodes unwrapped, in
+source order. Tree-sitter often recovers from one bad construct by wrapping every later
+declaration in a single top-level `ERROR` (the generated `old-wizard.c`/`droste.c` both
+have one `ERROR` holding all 1 000-odd functions). Walking only `translation_unit`'s
+direct children would lower none of them, so a partial tree is still analysed function
+by function instead of becoming an empty unit. Nested `ERROR`s are unwrapped too; a
+node is never included twice. -/
+partial def Scry.recoverTop (c : Scry.Cst) : List Nat → List Nat
+  | .nil => .nil
+  | .cons i rest =>
+    match Scry.isK c i "ERROR" with
+    | .true => List.append (Scry.recoverTop c (c.childrenOf i)) (Scry.recoverTop c rest)
+    | .false => .cons i (Scry.recoverTop c rest)
+
 /-- Lower a translation unit's CST. The typedef/struct and function-symbol passes run
-first, so a call sees a definition that appears later in the file (C's rule). -/
+first, so a call sees a definition that appears later in the file (C's rule). Parsing is
+recoverable: the passes and the function walk use `Scry.recoverTop`, so functions inside
+tree-sitter's `ERROR` nodes keep their partial AST and facts. -/
 def Scry.lowerTU (path : String) (c : Scry.Cst) : Scry.TU :=
-  let top := c.childrenOf 0;
+  let top := Scry.recoverTop c (c.childrenOf 0);
   let s1 := (Scry.runLM (Scry.scanTypes c top) Scry.emptyState).1;
   let s2 := (Scry.runLM (Scry.scanSyms c top) s1).1;
   let r := Scry.lowerFuncs c top s2 .nil;

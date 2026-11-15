@@ -138,12 +138,18 @@ external's pointer (1 finding + two `unknown-memory` warnings and one `unmodelle
 **Boundary warnings now carry spans.** `Scry.Warning` has a `Wil.Span`, so a
 `lowering-boundary` result points at the construct (a cast, `sizeof`, a skipped `goto`, …)
 instead of the function definition. SARIF rule ids are namespaced (`scry/c/<rule>`,
-`scry/lowering/boundary`, `scry/memory/<kind>`) and the run declares
+`scry/lowering/boundary`, `scry/lowering/parse-recovery`, `scry/memory/<kind>`) and the
+run declares
 `columnKind: utf16CodeUnits` (the C slice is ASCII, where a byte column is a UTF-16
 column; a non-ASCII source would need an explicit conversion).
 
-A parser error is refused by default; `--allow-errors` analyses the recovered tree and
-reports the `ERROR`/`MISSING` count.
+A parser error is refused by default; `--allow-errors` analyses the recovered tree,
+reports the `ERROR`/`MISSING` count, and adds a `scry/lowering/parse-recovery` warning.
+Tree-sitter can wrap every declaration after a syntax error in one top-level `ERROR`
+(the generated `old-wizard.c`/`droste.c` shape); the lowering unwraps those nodes and
+keeps the partial functions and facts, then says how many functions it recovered. If
+none can be recovered the warning says `unit not analysed` instead of returning a
+silent empty result.
 
 `tests/native.wiz` checks the shim on `fixtures/hello.c`: 55 nodes, 54 edges, the root
 span `[0,95)`, parent/child/next-sibling links, and that `fixtures/broken.c` is refused

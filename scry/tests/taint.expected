@@ -136,6 +136,17 @@ mem-indirect-unknown: one unknown-indirect warning: ok
 mem-indirect-unknown: an unknown location: ok
 macro errors: refused without --allow-errors: ok
 macro errors: recovered with --allow-errors: ok
+macro errors: not a silent empty unit: ok
+recovery wizard: parse errors: ok
+recovery wizard: functions recovered: ok
+recovery wizard: two strcpy findings: ok
+recovery wizard: sink spans known: ok
+recovery wizard: parse-recovery warning: ok
+recovery droste: parse errors: ok
+recovery droste: functions recovered: ok
+recovery droste: two strcpy findings: ok
+recovery droste: sink spans known: ok
+recovery droste: parse-recovery warning: ok
 sarif: version 2.1.0: ok
 sarif: one run: ok
 sarif: driver name: ok
