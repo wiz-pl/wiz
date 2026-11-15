@@ -1019,6 +1019,58 @@ def namedArgCases : List (String × Nat) := [
   ("mixed (B := Bool) 3 .true", 3)]
 
 
+/-- (A11) `deriving`: a `deriving` clause on an inductive/structure and
+`deriving instance … for …`, with the class declared in the file (the self-hosted
+prelude has none). A 0-field type, 1/2/3-field structures, a recursive polymorphic
+inductive and an after-the-fact instance. -/
+def selfhostDeriving : String :=
+  "import Prelude\nclass BEq (A : Type) where\n  beq : A → A → Bool\n" ++
+  "instance : BEq Nat := BEq.mk Nat.beq\n" ++
+  "def Bool.beqEq : Bool → Bool → Bool\n  | .true, .true => .true\n  | .false, .false => .true\n" ++
+  "  | _, _ => .false\ninstance : BEq Bool := BEq.mk Bool.beqEq\n" ++
+  "inductive Zero where\n  | z\n  deriving BEq\n" ++
+  "structure One where\n  a : Nat\n  deriving BEq\n" ++
+  "structure Two where\n  a : Nat\n  b : Bool\n  deriving BEq\n" ++
+  "structure Three where\n  a : Nat\n  b : Bool\n  c : Nat\n  deriving BEq\n" ++
+  "inductive Tree (A : Type) where\n  | leaf\n  | node (l : Tree A) (x : A) (r : Tree A)\n  deriving BEq\n" ++
+  "structure Box (A : Type) where\n  val : A\n" ++
+  "deriving instance BEq for Box\n" ++
+  "class Repr (A : Type) where\n  reprPrec : A → Nat → String\n" ++
+  "instance : Repr Nat := Repr.mk (fun n p => \"n\")\n" ++
+  "instance : Repr Bool := Repr.mk (fun b p => \"b\")\n" ++
+  "structure R2 where\n  a : Nat\n  b : Bool\n  deriving Repr\n" ++
+  "inductive RT where\n  | leaf\n  | node (l : RT) (x : Nat)\n  deriving Repr\n" ++
+  "def t1 : Tree Nat := Tree.node Tree.leaf 1 Tree.leaf\n" ++
+  "def t2 : Tree Nat := Tree.node (Tree.node Tree.leaf 2 Tree.leaf) 1 Tree.leaf\n" ++
+  "#reduce BEq.beq Zero.z Zero.z\n" ++
+  "#reduce BEq.beq (One.mk 1) (One.mk 1)\n" ++
+  "#reduce BEq.beq (One.mk 1) (One.mk 2)\n" ++
+  "#reduce BEq.beq (Two.mk 1 .true) (Two.mk 1 .true)\n" ++
+  "#reduce BEq.beq (Two.mk 1 .true) (Two.mk 1 .false)\n" ++
+  "#reduce BEq.beq (Three.mk 1 .true 2) (Three.mk 1 .true 2)\n" ++
+  "#reduce BEq.beq (Three.mk 1 .true 2) (Three.mk 1 .false 2)\n" ++
+  "#reduce BEq.beq t1 t1\n" ++
+  "#reduce BEq.beq t1 t2\n" ++
+  "#reduce BEq.beq (Box.mk 3) (Box.mk 3)\n" ++
+  "#reduce BEq.beq (Box.mk 3) (Box.mk 4)\n" ++
+  "#reduce Nat.beq (String.length (Repr.reprPrec (R2.mk 1 .true) 0)) 9\n" ++
+  "#reduce Nat.beq (String.length (Repr.reprPrec (R2.mk 1 .true) 1024)) 11\n" ++
+  "#reduce Nat.beq (String.length (Repr.reprPrec (RT.node RT.leaf 1) 0)) 17\n"
+
+def selfhostDerivingExpected : String :=
+  "TBD\n"
+
+/-- (A11) `deriving` rejects what it cannot do, with the message naming the class and the
+type (the command's offset, as every command's, becomes `file:line:col` in the driver's
+diagnostics): a field with no `BEq` instance, and a class with no deriver. -/
+def selfhostDerivingBad : String :=
+  "import Prelude\nclass BEq (A : Type) where\n  beq : A → A → Bool\n" ++
+  "structure Bad where\n  f : Nat → Nat\n  deriving BEq\n" ++
+  "class Size (A : Type) where\n  size : A → Nat\nderiving instance Size for Nat\n"
+
+def selfhostDerivingBadExpected : String :=
+  "TBD\n"
+
 def selfHostGroup : Group where
   name := "selfhost"
   exercise := "Stages 12b–14q"
@@ -2200,7 +2252,13 @@ def selfHostGroup : Group where
           ("def badEq {A : Type} (x y : A) : x = y := rfl\n", false),
           ("def badProp : Prop := Type\n", false),
           ("def badSort : Sort 1 := Type 1\n", false),
-          ("def badCast (e : False) (n : Nat) : Nat := cast e n\n", false)] }
+          ("def badCast (e : False) (n : Nat) : Nat := cast e n\n", false)] },
+
+    { name := "(A11) deriving BEq: 0/1/2/3 fields, a recursive polymorphic inductive, and an after-the-fact instance", run := fun _ =>
+        selfhostCheckFile selfhostDeriving selfhostDerivingExpected },
+
+    { name := "(A11) deriving rejects a field with no BEq instance and a class with no deriver", run := fun _ =>
+        selfhostCheckFile selfhostDerivingBad selfhostDerivingBadExpected }
 
   ]
 
