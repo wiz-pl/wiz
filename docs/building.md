@@ -370,6 +370,22 @@ the elan toolchain, so the setup action keeps the elan cache for those
   `.github/workflows/fixpoint.yml` runs it nightly on `master` and from "Run workflow" on
   the self-hosted runner named by `WIZ_RUNNER_HEAVY`; it checks for 6 GiB free, is skipped
   when the variable is unset, and is not part of `CI result`.
+* **The nightly benchmarks** (`.github/workflows/bench.yml`) also run only on
+  `master` and from "Run workflow", on the `WIZ_RUNNER_HEAVY` runner (a clean skip
+  when it is unset). They use the Nix-built `wiz`/`grail` and need 6 GiB free (the fixpoint's
+  reservation; a Cachix miss compiles the toolchain). The
+  standard-library A/B (`scripts/stdlib-bench.py --baseline-bin`) alternates one run of
+  the previous green night's executable, restored from the Actions cache, with tonight's
+  build; the per-mode sizes come from `bench/stdlib-baseline.json`, and the measurement
+  is pinned with `taskset` to `WIZ_BENCH_CPUSET` (otherwise two CPUs are left free).
+  `scripts/bench-threshold.py` gates on the **median paired ratio** (default 10%, at
+  least 5 pairs per mode), not on absolute time, and writes the table to the job
+  summary; the run JSON records the machine id, CPU set and CPU model. `scry bench
+  --no-timing --fail-on-regression` is the second, deterministic corpus gate. On a
+  green night the current executable becomes the next A side; the first run compares
+  the build with itself, and "Run workflow" with `bootstrap: true` does that again
+  after a deliberate change to the benchmark program. The JSONs, `bench/history.jsonl`
+  (one line per run) and the baseline executable are artifacts, not committed files.
 * **The Nix package** (the `build` job; the old separate `nix package` job is folded
   into it): `nix build .#wiz .#tests` builds `wiz` and `grail` with Lake in the Nix
   sandbox and nixpkgs' Lean (the flake checks that it is the version in `lean-toolchain`)
@@ -464,6 +480,50 @@ the elan toolchain, so the setup action keeps the elan cache for those
   queue run that fails drops that PR from the queue and rebuilds the ones behind it
   without it. Without a queue (a user-owned repository), `--auto` waits for the required
   check and merges, and "require branches to be up to date" serialises merges instead.
+
+### Golden diffs
+
+A golden failure in CI is a test case whose output no longer matches its `.expected`
+file (`grail test`, stage 23f). The `golden-diff` workflow
+(`.github/workflows/golden-diff.yml`) runs after a failed `CI` run whose test shard
+failed, and makes the diff the artifact a reviewer needs:
+
+* it downloads the run's `test-log-*` artifacts (the shards' `*.log` and `*.jsonl`);
+* it checks out the failing commit, builds `grail` from the public Cachix cache (a fork
+  pull request has no published store path and builds it instead), and runs
+  `scripts/golden-diff.py`;
+* the script re-runs **only the failing golden cases** with `grail test --update` in a
+  temporary copy of the checkout, then prints a one-line-per-case summary and a unified
+  diff of every changed `.expected` file (a new `.expected` shows as `/dev/null`);
+* the diff job writes that report to the run summary and uploads it as the
+  `golden-diff` artifact; on a pull request, a second job posts it as one
+  (`pull-requests: write`) comment, replacing that job's earlier comment on a rerun.
+
+The job has two permissions levels on purpose. The `diff` job runs the pull request's
+code and its flake, so it has `contents: read` and `actions: read` only and uses no
+secrets (Cachix is read anonymously). The `comment` job has
+`pull-requests: write` but runs no pull request code; it only posts the uploaded
+Markdown.
+
+**What it will not do.** The script never modifies the checkout, commits, or pushes;
+the workflow has no write permission outside the comment job. It re-runs only cases
+whose name (or failure output) is a `.wiz` under a `Package.tests` root, at most 12
+files with a 300 s limit each, and it reports a case that fails for another reason
+(a build error, a timeout, a missing toolchain) as "not diffed" instead of writing a
+`.expected` file: `grail test --update` never records a failure either. The diff is
+**advisory** — it is what `--update` would write, not evidence that the new output is
+correct.
+
+Locally, after a failing `lake test` run:
+
+```sh
+python3 scripts/golden-diff.py logs/shard.log logs/shard.jsonl
+python3 scripts/golden-diff.py --case 'tour:examples/tour/00-hello.wiz'
+python3 scripts/golden-diff.py --self-test   # the diff engine's synthetic fixtures
+```
+
+The script uses `.lake/build/bin/grail` (or `$GRAIL`, or `--grail PATH`); `--keep` keeps
+the temporary copy, and `--out FILE` writes the report.
 
 ### Documentation site
 
