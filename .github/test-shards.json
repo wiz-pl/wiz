@@ -57,6 +57,7 @@
     "=scry-c2wil",
     "=scry-ai",
     "=scry-taint",
+    "=scry-uaf",
     "=linear-case",
     "repr",
     "result-q",

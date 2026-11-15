@@ -3,6 +3,7 @@ import Scry.Analysis
 import Scry.PointsTo
 import Scry.Rules
 import Scry.Models
+import Scry.Lifetime
 import Text
 /-!
 # Scry.Interproc
@@ -281,6 +282,8 @@ structure Scry.ProgramResult where
   pointsTo : Scry.PtResult
   /-- Memory diagnostics (unknown target, use after free, unresolved indirect call). -/
   warnings : List Scry.MemWarning
+  /-- Findings of `kind memory` pack rules (the CWE-416 lifetime rule). -/
+  memoryFindings : List Scry.RuleFinding
 
 def Scry.findResult (pr : Scry.ProgramResult) (name : String) : Option Scry.FuncResult :=
   List.find (fun r => String.eq r.fn.name name) pr.results
@@ -322,6 +325,13 @@ def Scry.unmodelledWarningsOf (p : Wil.Program) (r : Scry.FuncResult) : List Scr
                 ++ ": result and memory effects are unknown")) .nil
     | _ => .nil) (Scry.range g.count)
 
+/-- The lifetime rule supersedes the old points-to `use-after-free` warning: once a
+`kind memory` rule is enabled its finding is the diagnostic, so do not print both. -/
+def Scry.keepMemWarning (hasLifetime : Bool) (w : Scry.MemWarning) : Bool :=
+  match w.kind with
+  | .useAfterFree => Bool.not hasLifetime
+  | _ => .true
+
 /-- Analyse a program: points-to first (the memory model every later stage uses), then the
 summary fixpoint, then one final evaluation per function. The pack gains the missing
 model rule descriptors, so a model-only sink (`execl`, `sprintf`, `read`'s bound) has a
@@ -341,10 +351,15 @@ def Scry.analyzeEntries (p : Wil.Program) (pack0 : Scry.RulePack)
     (Scry.ptLocCount pt));
   let sums := Scry.summaryLoopWithEntries p pack graph pt fuel sums0 entries;
   let results := Scry.resultsWithEntries p pack graph pt sums entries;
-  let warnings := Scry.dedupWarnings (List.append
-    (Scry.concatLists (fun r => r.plan.memWarnings) results)
-    (Scry.concatLists (fun r => Scry.unmodelledWarningsOf p r) results));
-  Scry.ProgramResult.mk results sums graph pt warnings
+  let hasLifetime : Bool := match pack.memoryRuleFor "use-after-free" with
+    | .some _ => .true
+    | .none => .false;
+  let warnings := Scry.dedupWarnings (List.filter (Scry.keepMemWarning hasLifetime)
+    (List.append
+      (Scry.concatLists (fun r => r.plan.memWarnings) results)
+      (Scry.concatLists (fun r => Scry.unmodelledWarningsOf p r) results)));
+  let memoryFindings := Scry.lifetimeFindings p pt pack;
+  Scry.ProgramResult.mk results sums graph pt warnings memoryFindings
 
 /-- The library analysis: no exported-entry policy. -/
 def Scry.analyze (p : Wil.Program) (pack : Scry.RulePack) : Scry.ProgramResult :=
@@ -508,10 +523,11 @@ def Scry.sortRuleFindings (fs : List Scry.RuleFinding) : List Scry.RuleFinding :
 
 /-- All findings of an analysed program, with interprocedural paths. -/
 def Scry.programFindings (pr : Scry.ProgramResult) : List Scry.RuleFinding :=
-  Scry.sortRuleFindings (Scry.concatLists (fun r =>
-    List.map (fun f =>
-      { f with path := Scry.extendPath pr .nil 16 r f.path }) (Scry.resultFindings r))
-    pr.results)
+  Scry.sortRuleFindings (List.append pr.memoryFindings
+    (Scry.concatLists (fun r =>
+      List.map (fun f =>
+        { f with path := Scry.extendPath pr .nil 16 r f.path }) (Scry.resultFindings r))
+      pr.results))
 
 /-- The findings of one function (its intraprocedural part; the path is not stitched). -/
 def Scry.funcFindings (pr : Scry.ProgramResult) (name : String) : List Scry.RuleFinding :=

@@ -37,7 +37,7 @@ The boundary is deliberate. What lowers:
 
 Everything else is **havoc plus a warning**, never a silent wrong value: a cast, `?:`,
 `sizeof`, a string literal, `&&`/`||` as a value, an unknown identifier, an unmodelled
-aggregate initialiser, `realloc`, `do`/`goto`, an unsupported declaration. A
+aggregate initialiser, `do`/`goto`, an unsupported declaration. A
 havoc'd value is the type's default (zero/null). Each warning carries the offending
 statement's `Wil.Span`, so `Scry.TU.warnings` is a list of
 `Scry.Warning {func, message, span}` and `scry taint` places the diagnostic on the
