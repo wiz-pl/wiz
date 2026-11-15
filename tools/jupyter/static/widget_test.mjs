@@ -107,7 +107,7 @@ async function main(port) {
     console.log("      the Node fallback ran; the goldens are still checked");
   } else {
     try {
-      browserResult = await runBrowser(fixture, browser, port);
+      browserResult = await runBrowserWithRetry(fixture, browser, port);
       console.log("browser (" + browser + "): " + browserResult.checks.length + " checks passed");
       if (!same(node.initial, browserResult.initial)
           || !same(node.afterClick, browserResult.afterClick)
@@ -251,6 +251,19 @@ function startServer() {
 
 // -- headless Chrome over the DevTools protocol --------------------------
 
+// A browser can fail to start on a loaded machine (no DevToolsActivePort, a wrapper
+// that exits).  Retry that once; a page/golden failure is never retried.
+async function runBrowserWithRetry(fixture, browser, port) {
+  try {
+    return await runBrowser(fixture, browser, port);
+  } catch (error) {
+    const message = String((error && error.message) || error);
+    if (!/DevTools|browser exited|websocket/i.test(message)) throw error;
+    console.log("retry: browser startup failed: " + message);
+    return await runBrowser(fixture, browser, port);
+  }
+}
+
 async function runBrowser(fixture, browser, port) {
   const profile = mkdtempSync(join(tmpdir(), "wiz-widget-chrome-"));
   const proc = spawn(browser, [
@@ -339,7 +352,7 @@ async function runBrowser(fixture, browser, port) {
 
 async function waitForDebugPort(profile, proc) {
   const file = join(profile, "DevToolsActivePort");
-  const deadline = Date.now() + 20000;
+  const deadline = Date.now() + 30000;
   while (Date.now() < deadline) {
     if (proc.exitCode !== null) {
       throw new Error("the browser exited (code " + proc.exitCode + ") before DevTools was ready");
@@ -351,7 +364,7 @@ async function waitForDebugPort(profile, proc) {
     } catch {}
     await sleep(100);
   }
-  throw new Error("no DevToolsActivePort after 20s");
+  throw new Error("no DevToolsActivePort after 30s");
 }
 
 async function waitForTarget(port, proc) {
