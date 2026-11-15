@@ -189,3 +189,44 @@ policy and the external-manifest hook are in `bench/corpus/README.md`.
 Limits: the shim is sequential (one parser, one tree, one file) and tree-sitter-c is the
 only grammar. Threads, a native store shared across files, and tree-sitter queries are
 the remaining S1 work.
+
+## `scry findings`: exploration → triage → repro → verify
+
+`scry findings` is the workflow/evidence layer over the existing analysis. `scan` calls
+`Scry.analyzeFile` (**the same pipeline as `scry taint`**, not a second analysis) and
+writes a local JSON store plus one artifact directory per finding:
+
+```sh
+grail run scry -- findings scan FILE.c --db scry-workflow/findings.json \
+  --artifacts scry-workflow
+grail run scry -- findings list --state confirmed
+grail run scry -- findings show f_0123456789abcdef
+grail run scry -- findings triage f_0123456789abcdef --state confirmed --reason 'ASAN repro'
+grail run scry -- findings repro f_0123456789abcdef --sanitize both
+grail run scry -- findings verify f_0123456789abcdef
+```
+
+The **semantic id** is `f_<16 hex>` over the rule id, normalized path, sink function,
+sink callee + argument and the coarse path shape. Line/column, program points,
+timestamps and rule-array indices are excluded, so a line move keeps the id; a renamed
+sink or a changed path shape is a new id. A separate `lineHash` is the
+GitHub-compatible primary-line identity. The **triage machine** is
+`new -> triaged -> confirmed -> fixed`, with `false-positive` and reopen edges; an
+illegal edge is an error. `fixed` is a triage decision, never an automatic result of
+`verify`.
+
+`repro` selects or generates a deterministic harness/input, builds with
+`-fsanitize=address,undefined` when the compiler accepts it (and records a fallback to an
+uninstrumented build when it does not), runs under `timeout`, and stores the exact
+commands, exit status, stdout/stderr and the first sanitizer lines as `dynamic.json`.
+`verify` re-runs the same analysis and the stored repro and reports the verdict
+`not-reported-and-repro-clean` (or `...no-dynamic`), `still-reported`,
+`not-reported-but-repro-crashed`, or `inconclusive`: **"not reported by this run" is
+never "absent from the program"**. The static certificate and the dynamic trace are
+separate evidence items; see `wiz-notes/scry-workflow.md`.
+
+A concolic-witness slot is reserved for the future S6a slice
+(`wiz-notes/prior-art/symbolic-execution.md` §11): `repro --witness FILE` accepts a
+`scry-workflow-witness/1` document only when its `authority` is L2/L3 and it is
+`validated`, uses its `input` as the deterministic input, and records its path condition
+and model. The prototype does **not** run symbolic execution.
