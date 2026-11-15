@@ -91,8 +91,6 @@ def treeHash (root : System.FilePath) : IO (Except String String) := do
     pure (.ok (sha256String text))
   catch e => pure (.error s!"{root}: {e}")
 
-namespace Lock
-
 /-- (R36) The digest of a package's declared `Package.command` set. Empty when the package
 has no command targets. It covers every field of a command (tool, arguments, declared
 inputs/outputs, stdout, environment, working directory, used tools, phony/manual), so a
