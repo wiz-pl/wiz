@@ -128,6 +128,6 @@ integers only; values live in linear memory). `--wasm` is the older spelling of 
 target. It is additive: C and LLVM are unchanged. The supported subset is enforced when
 the module is emitted, and every module is parsed and type-checked by a small validator
 before it is written (so an encoder bug is a compile error). Its representation, limits,
-the validator and the 25-case `wasm` test group are in
+the validator and the 34-case `wasm` test group are in
 [08-backend/wasm.md](08-backend/wasm.md).
 
