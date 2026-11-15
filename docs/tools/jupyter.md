@@ -8,7 +8,7 @@ Python (standard library plus `pyzmq`), not Lean.
 
 ```
 tools/jupyter/
-  wiz_kernel/            the kernel (wire protocol, drivers, magics, exporter)
+  wiz_kernel/            the kernel (wire protocol, drivers, magics, progress, exporter)
   wiz-kernel/kernel.json the kernelspec template
   tests/test_kernel.py   protocol-level tests (jupyter_client)
   tests/test_export.py   exporter tests (fixtures, no kernel)
@@ -149,6 +149,97 @@ an executable the cell fails with `ename: ScryUnavailable` and an explanation.
 `%wiz CODE` force the Wiz driver for a cell whose first line would look like a
 magic. Unknown magics are an `UnknownMagic` error.
 
+### `%%wiz` and a plain cell
+
+There is no difference in execution. A plain cell and the same text after
+`%%wiz` reach the same driver through the same `execute` call, are written to the
+same kind of temp file, and have the same line numbers, state and result. The
+only difference is **dispatch**: a plain cell's first line is offered to the
+magic table, so a cell that begins with `%%scry` (or any other magic name) runs
+that magic. `%%wiz` skips that one check, which is how a cell whose first line
+really is `%%…` is written as Wiz. Use it for disambiguation, not for a different
+backend; `%backend` is what reports the driver.
+
+### `%%sh`
+
+`%%sh` runs the cell as a shell script, streaming both pipes and returning the
+exit status:
+
+```
+%%sh
+git status --short
+wc -l lib/*.wiz
+```
+
+stdout and stderr are published as `stream` messages **as the lines arrive**, so
+a slow command shows output while it runs. A zero exit becomes the cell's result
+(`exit status 0`); a non-zero one is an `error` with `ename: ShellError` and the
+status in `evalue`, so `%%sh` is usable as a check (Jupyter marks the cell
+failed). The interpreter is `/bin/sh`; arguments replace that command line, e.g.
+`%%sh bash -e`. The timeout is `$WIZ_SHELL_TIMEOUT` seconds (default 300).
+
+**Security: there is no sandbox.** `%%sh` and every other magic run as your user,
+with your environment, in the kernel's working directory, on the machine that
+runs the kernel. The kernel does not restrict commands, paths, network or
+subprocesses, and it makes no claim that it does: a notebook is code, and a
+notebook from someone else is their code running as you. The same is true of
+`%%scry` (it executes the `scry` binary) and of ordinary Wiz cells. Run untrusted
+notebooks in a container, VM or separate user account, not by trusting this
+kernel to contain them.
+
+### `%%time`
+
+`%%time` runs the cell through the normal backend (the plain-cell path) and
+appends one `stream` line *after* the cell's output, so it sits above the cell's
+`execute_result`:
+
+```
+%%time
+def slow : Nat := 6 * 7
+```
+
+→
+
+```
+[time] wall 0.412 s, peak RSS 54.2 MiB (sampled descendants (/proc))
+```
+
+The wall clock is `time.monotonic` around the cell. Peak RSS is sampled every
+50 ms from `/proc` for the kernel's descendants (the `wiz repl` process, or the
+`wiz check` that batch starts), so it is a lower bound and the line says
+`sampled`; where `/proc` is absent it falls back to
+`resource.getrusage(RUSAGE_CHILDREN)` and says `children peak`. Sampling is a
+daemon thread of small `/proc` reads, cheap enough to be the default. `%%time`
+does not time `%%sh` (put `time` in the script) or `%%scry`; it is a Wiz-cell
+timer.
+
+### Progress for long analyses
+
+A two-minute `scry taint` run must not look like a frozen notebook. `%%scry
+--progress` passes `--progress` to `scry` and forwards each stderr line **while
+the cell runs**, in order, through a progress channel. There are two transports:
+
+* **iopub stream** (the default on this kernel): each line is a `stdout`
+  `stream` message, in order. It needs nothing from the front end, so it works in
+  `jupyter console`, JupyterLab and any client that shows streams.
+* **comm**: a kernel-initiated `comm_open` with target `wiz.progress` and one
+  `comm_msg` per line (with a `fraction` when the line has `n/m` or `n%`). This
+  is the channel the widget support in `wiz-widgets` adds; the kernel chooses it
+  when that support is present, and a client may also open the comm itself with
+  the same target. Until `wiz-widgets` is merged the default is the iopub stream,
+  and `%progress` says so.
+
+`%progress` reports which transport is in use and why:
+
+```
+progress: iopub stream (no widget comm support (wiz-widgets is not merged)); each line is a `stdout` stream message, in order
+```
+
+The contract with `scry` is deliberately loose while `--progress` is new: every
+non-blank stderr line is forwarded, and a `3/12` or `25%` in it becomes a
+fraction. A `scry` without `--progress` rejects the flag and the cell reports a
+`ScryError`; use plain `%%scry` there.
+
 ## Exporting a notebook
 
 A notebook is only useful outside Jupyter if its output survives the trip. The
@@ -232,17 +323,20 @@ output.
 * **Completion and inspection are empty.** `complete_request` returns no
   matches and `inspect_request` answers `found: false`. The Wiz language server
   (stage 11, `wiz lsp`) knows both; connecting it to the kernel is future work.
-* **Interrupt is not implemented.** The kernelspec sets
+* **Interrupt is not implemented (frozen).** The kernelspec sets
   `"interrupt_mode": "message"`, so Jupyter sends `interrupt_request` on the
   control channel instead of a signal (a signal would kill the kernel and its
   child). The reply is `ok`, but the running `wiz` process is **not** stopped;
-  a warning is printed. A cell that loops forever must be stopped by restarting
+  a warning is printed. This includes `%%sh` and `%%scry --progress`: the child
+  runs to completion or its own timeout (`WIZ_SHELL_TIMEOUT`,
+  `WIZ_SCRY_TIMEOUT`). A cell that loops forever must be stopped by restarting
   the kernel (which kills the child).
 * **No stdin.** The kernel never sends `input_request`; `allow_stdin` is
   ignored. Programs that read stdin in the REPL's `:run` are not supported.
 * **No rich display or debugger.** Output is streams, `execute_result` text/HTML
   and errors. `display_data`, widgets, the debug protocol and `user_expressions`
-  (always `{}`) are not implemented.
+  (always `{}`) are not implemented. The comm endpoint for progress exists, but
+  it is transport only: no widget rendering.
 * **Batch is O(cells²).** The fallback rechecks the notebook per cell; a long
   notebook is slow, and deleting a definition means restarting. A failed cell is
   kept in that accumulated source (as it would be in a file): later cells still
@@ -256,9 +350,9 @@ output.
 * **`%%scry` is one C file per cell**, with tree-sitter's recovery on request
   only (`--allow-errors`). It is the taint slice, not the whole scry platform
   (points-to, memory, multi-file analysis are not in the CLI yet).
-* Notebook `%%scry` analysis is not sandboxed: like any kernel, the process runs
-  code you give it, and the toolchain and scry binaries are ordinary local
-  programs. Use it on sources you would run locally.
+* **Notebook code is not sandboxed.** Like any kernel, the process runs code you
+  give it; `%%sh`, `%%scry` and the toolchain are ordinary local programs. Use it
+  on sources and notebooks you would run locally (see the `%%sh` security note).
 
 ## Tests
 
@@ -269,7 +363,7 @@ python3 -m unittest discover -s tools/jupyter/tests -v
 # the same, with a toolchain that has `wiz repl`
 WIZ_TEST_WIZ=/path/to/wiz python3 -m unittest discover -s tools/jupyter/tests -v
 
-# no Jupyter at all: wire + drivers + a raw-ZeroMQ kernel session
+# no Jupyter at all: wire + drivers + magics + a raw-ZeroMQ kernel session
 PYTHONPATH=tools/jupyter python3 -m wiz_kernel --self-test [--wiz PATH]
 
 # the exporter alone (pure Python; fixtures plus the docs notebook's --check)
@@ -278,10 +372,18 @@ python3 -m unittest discover -s tools/jupyter/tests -p 'test_export.py' -v
 
 The unittest module skips cleanly when `pyzmq` or `jupyter_client` is missing or
 no `wiz` is found. `$WIZ_TEST_BACKEND` pins `repl`/`batch` (default `auto`);
-`$WIZ_SCRY` enables the `%%scry` cases. `--self-test` needs only `pyzmq` (and
-skips the live session without it); it prints PASS/FAIL/SKIP per check and exits
-1 on a failure. `test_export.py` needs neither `pyzmq` nor a toolchain: it
-renders the checked-in fixture notebooks and runs `--check` on the example.
+`$WIZ_SCRY` enables the `%%scry` cases. `ProgressTransportTest` starts a second
+kernel with `WIZ_SCRY` pointing at a small script in its workspace, which emits
+three `progress:` lines on stderr and a JSON report on stdout, so the ordered
+forwarding is tested without a real `scry` (or a `--progress` implementation).
+
+`--self-test` needs only `pyzmq` (and skips the live session without it); it
+prints PASS/FAIL/SKIP per check and exits 1 on a failure. It covers, besides the
+wire and the drivers: `%%sh` stream order and exit status (0 and non-zero), the
+`%%time` line (present, plausible wall, RSS field), `%%wiz` against a plain cell,
+`%%scry --progress` ordering, and the same four cells through a live kernel. `test_export.py` needs
+neither `pyzmq` nor a toolchain: it renders the checked-in fixture notebooks and
+runs `--check` on the example.
 
 The kernel is not hooked into `lake test` or the CI workflows; it needs no Lean
 build and only a `wiz` executable (whose `repl` subcommand is the stage 11 REPL,

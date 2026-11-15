@@ -1,0 +1,19 @@
+(index
+  (package "greet"
+    (summary "Hello, in Wiz")
+    (repo "https://example.org/wiz/greet")
+    (version "1.0.0"
+      (source "packages/greet-1.0.0.tar.gz")
+      (sha256 "8a7daa3ed82f40ab48c3f9852636331eeaf1f4677112d7931f587965b6e7e105")
+      (toolchain ">=0.1.0 <0.3.0")
+      (deps (dep "text" "~1.0")))
+    (version "1.2.0"
+      (source "packages/greet-1.2.0.tar.gz")
+      (sha256 "3638cbeee9dbd4db396963b71f89ae5fd473f35c27be1dd179333c55e8b6e5fb")
+      (toolchain ">=0.1.0 <0.3.0")
+      (deps (dep "text" "^1")))
+    (version "2.0.0"
+      (source "packages/greet-2.0.0.tar.gz")
+      (sha256 "1f5858c9208b0900ce6852cf1fc9ee75469c63621ce60de18954f192dac6801b")
+      (toolchain ">=0.1.0 <0.3.0")
+      (deps))))
