@@ -318,14 +318,17 @@ jobs:
           du -sh "$tests"
       - name: The trusted base matches the baseline
         run: scripts/trust-ledger.sh --check
+      - name: The trust gate's fixtures
+        run: Tests/trust-ledger/run.sh
 
-  # (11s) The standard library's documentation (`wiz doc`, scroll), with the Wasm module
-  # that makes its signatures interactive, as the artifact `wiz-docs`: on master only (a
-  # push), kept 3 days (artifact storage). Not a required check (not in `result`);
-  # `deploy-docs` publishes it to GitHub Pages on the same push (docs/building.md,
-  # "Documentation site").
+  # (11s) The published site, as the artifact `wiz-docs`: on master only (a push), kept
+  # 3 days (artifact storage). The tree is the landing page at the root, the standard
+  # library's documentation (`wiz doc`, scroll) under `docs/`, and the static playground
+  # under `playground/`; the two Wasm modules make the docs' signatures interactive and
+  # run the playground. Not a required check (not in `result`); `deploy-docs` publishes
+  # it to GitHub Pages on the same push (docs/building.md, "Documentation site").
   docs:
-    name: docs (wiz doc --lib)
+    name: docs (wiz doc --lib + site)
     needs: build
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
@@ -343,29 +346,41 @@ jobs:
           wiz=$(nix build .#wiz --no-link --print-out-paths)
           echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
           du -sh "$wiz"
-      - name: The Wasm module (web/build.sh)
+      - name: The Wasm modules (web/build.sh, web/build-playground.sh)
         env:
           WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
-        run: sh web/build.sh web/out
+        run: |
+          sh web/build.sh web/out
+          sh web/build-playground.sh web/out
       - name: wiz doc --lib
         run: |
-          "${{ steps.nix.outputs.wiz }}/bin/wiz" doc --lib -o doc-site --web web/out \
+          "${{ steps.nix.outputs.wiz }}/bin/wiz" doc --lib -o doc-site/docs --web web/out \
             --source-url "https://github.com/${{ github.repository }}/blob/${{ github.sha }}/lib/"
-          ls doc-site | head -50
+          ls doc-site/docs | head -50
+      - name: The landing page and the playground (web/build-site.sh)
+        run: sh web/build-site.sh doc-site web/out
+      - name: The site has its three entry points and the landing's links resolve
+        run: sh web/check-site.sh doc-site
       - uses: actions/upload-artifact@v4
         with:
           name: wiz-docs
           path: doc-site
           retention-days: 3
 
-  # (11s) Publish the `wiz-docs` artifact to GitHub Pages, at the site root:
-  #   https://wiz-pl.github.io/wiz/                    the docs index (wiz doc's index.html)
-  #   https://wiz-pl.github.io/wiz/Prelude.html        one page per module, plus A.B.json
+  # (11s) Publish the `wiz-docs` artifact to GitHub Pages. The artifact's tree, and so
+  # the site's URL layout, is:
+  #   https://wiz-pl.github.io/wiz/                     the landing page (web/landing/)
+  #   https://wiz-pl.github.io/wiz/docs/                the docs index (wiz doc's index.html)
+  #   https://wiz-pl.github.io/wiz/docs/api.html        the API index (every declaration)
+  #   https://wiz-pl.github.io/wiz/docs/Prelude.html    one page per module, plus A.B.json
+  #   https://wiz-pl.github.io/wiz/playground/          the static playground (stage 11ab)
+  # Every link is relative, so the same tree works at the project-site prefix above and
+  # at a custom domain root.
   # A repository has ONE Pages site and every deployment replaces the whole tree, so this
   # job is the only Pages publisher. The performance site (when it lands) goes under
   # `/perf/` in the same artifact: build it into `doc-site/perf` in the `docs` job, or
   # add it here with a checkout, rather than enabling a second deploy job (which would
-  # delete the docs). The repository's Pages source must be "GitHub Actions" once
+  # delete the site). The repository's Pages source must be "GitHub Actions" once
   # (Settings -> Pages; docs/building.md, "Documentation site"); until then this job
   # fails and the site keeps its last published tree. It is not in `result`: a Pages
   # outage does not fail the suite.
@@ -486,8 +501,10 @@ jobs:
           check build "${{ needs.build.result }}" "$code"
           check test "${{ needs.test.result }}" "$want_tests"
 
-  # Stage-1 C of the toolchain = stage-2 C (scripts/fixpoint.sh). Scheduled runs use the
-  # default branch (master).
+  # The three-stage bootstrap fixpoint (scripts/fixpoint.sh): stage-1 C = stage-2 C =
+  # stage-3 C. Scheduled runs use the default branch (master). This weekly job stays on
+  # ubuntu-latest as the fallback; the nightly .github/workflows/fixpoint.yml is the
+  # opt-in one on the self-hosted runner.
   fixpoint:
     name: bootstrap fixpoint
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.fixpoint)
@@ -515,4 +532,4 @@ jobs:
         if: always()
         shell: bash
         run: |
-          { echo "### Bootstrap fixpoint"; echo; echo '```'; grep -E 'FIXPOINT|^==' fixpoint.log || echo "(no result)"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo "### Bootstrap fixpoint"; echo; echo '```'; grep -E 'FIXPOINT|^==|^stage [0-9]|^   |^total|^timings|^FAILED' fixpoint.log || echo "(no result)"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
