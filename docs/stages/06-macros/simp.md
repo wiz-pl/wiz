@@ -79,12 +79,12 @@ registered before the warning was seen.
 **The default set.** Each library registers its own rules at the end of its file, so
 importing it is enough: `lib/Nat.wiz` (`Nat.add_zero`, `Nat.mul_one`/`one_mul`/
 `mul_zero`), `lib/Int.wiz` (the seven `Int` identities), `lib/Logic.wiz` (the oriented
-Boolean algebra over `Bool.and`/`Bool.or`/`Bool.not`: `Bool.not_not`,
-`Bool.and_self`/`and_absorb`/`and_not_self`, `Bool.or_true_right`/`or_self`/`or_absorb`/
-`or_not_self`, `Bool.not_and`/`not_or`), `lib/ListLemmas.wiz` (`List.append_nil`,
-`List.map_id`, `List.map_map`, `List.map_append`, and the `length`/`reverse`/`filter`/
-`any`/`all` normal forms) and `lib/SimpLemmas.wiz` (the three notation identities
-`Bool.and_true`/`and_false`/`or_false`). `lib/SimpLemmas.wiz` is the umbrella:
+Boolean algebra: `Bool.not_not`, the `&&`/`||` identities `Bool.and_true`/`and_false`/
+`or_false` stated on the notation, `Bool.and_self`/`and_absorb`/`and_not_self`,
+`Bool.or_true_right`/`or_self`/`or_absorb`/`or_not_self`, `Bool.not_and`/`not_or`) and
+`lib/ListLemmas.wiz` (`List.append_nil`, `List.map_id`, `List.map_map`,
+`List.map_append`, and the `length`/`reverse`/`filter`/`any`/`all` normal forms).
+`lib/SimpLemmas.wiz` is the umbrella:
 `import SimpLemmas` brings all of them, and it also keeps the lemmas that are
 deliberately explicit-only. The set is deliberately small and confluent where it
 matters: commutativity, associativity and distributivity stay out, and rules whose left
@@ -95,8 +95,8 @@ up to conversion, so such a rule would match anything or have already computed a
 the goal. The same rules remain available explicitly (`simp only [Nat.zero_add]`), and
 S5 is where matching computes-away patterns is revisited. The `&&`/`||` macros expand
 to a `match` whose stuck form is not the same term as `Bool.and`/`Bool.or` applied, so
-the notation's identities are stated with the notation in `lib/SimpLemmas.wiz`; `!` is
-`Bool.not`, so `Bool.not_not` fires on `!(!b)`.
+the three notation identities are stated with the notation; `!` is `Bool.not`, so
+`Bool.not_not` fires on `!(!b)`.
 
 ## The host requests
 

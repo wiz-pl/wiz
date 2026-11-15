@@ -333,7 +333,7 @@ def tacticGroup : Group where
           "  simp\n" ++
           "  rfl") []
         -- The `&&`/`||` macros make a different stuck term, so their identities are
-        -- stated with the notation and registered by SimpLemmas.
+        -- stated with the notation and registered by Logic.
         okLibs ("import SimpLemmas\n" ++
           "def n1 (a : Bool) : (a && Bool.true) = a := by\n" ++
           "  simp\n" ++

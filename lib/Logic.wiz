@@ -308,20 +308,25 @@ def Bool.or_assoc : (a b c : Bool) → Bool.or (Bool.or a b) c = Bool.or a (Bool
   | .true, b, c => rfl
   | .false, b, c => rfl
 
-/-- `.true` is a right identity of `Bool.and`. -/
-def Bool.and_true : (a : Bool) → Bool.and a .true = a
+/-- `.true` is a right identity of `Bool.and` (`b && true = b`). Stated on the notation:
+the `&&` macro's stuck form is the one a goal written `b && true` contains. A rule stated
+`Bool.and b .true = b` would *not* fire on it (`Bool.and` matches on both arguments), so
+the three notation identities are stated here with the notation. -/
+def Bool.and_true : (a : Bool) → (a && Bool.true) = a
   | .true => rfl
   | .false => rfl
 /-- `.true` is a left identity of `Bool.and`. -/
 def Bool.true_and (a : Bool) : Bool.and .true a = a := rfl
-/-- `.false` is absorbing on the right for `Bool.and`. -/
-def Bool.and_false : (a : Bool) → Bool.and a .false = .false
+/-- `.false` is absorbing on the right for `Bool.and` (`b && false = false`), on the
+notation for the reason above. -/
+def Bool.and_false : (a : Bool) → (a && Bool.false) = Bool.false
   | .true => rfl
   | .false => rfl
 /-- `.false` is absorbing on the left for `Bool.and`. -/
 def Bool.false_and (a : Bool) : Bool.and .false a = .false := rfl
-/-- `.false` is a right identity of `Bool.or`. -/
-def Bool.or_false : (a : Bool) → Bool.or a .false = a
+/-- `.false` is a right identity of `Bool.or` (`b || false = b`), on the notation for the
+reason above. -/
+def Bool.or_false : (a : Bool) → (a || Bool.false) = a
   | .true => rfl
   | .false => rfl
 /-- `.false` is a left identity of `Bool.or`. -/
@@ -445,21 +450,14 @@ def Bool.eq_false_iff : (b : Bool) → ((b = .false) ↔ ¬ (b = .true))
 -- ## The default `simp` set
 --
 -- The Boolean algebra above, oriented the way `simp` rewrites
--- (`docs/stages/06-macros/simp.md`). The rules are stated with `Bool.and`/`Bool.or`/
--- `Bool.not`; they fire on goals that contain those functions (e.g. a `Nat.land` or a
--- Boolean proof that did not use the notation). They do **not** fire on the `&&`/`||`
--- notation: the macros expand to a `match` on the first argument, and for a variable
--- first argument that stuck match is not the same term as `Bool.and`/`Bool.or` applied.
--- The notation's three identities are stated with the notation and registered in
--- `lib/SimpLemmas.wiz`. `!` is `Bool.not` itself, so `Bool.not_not` below does fire on
--- `!(!a)`.
+-- (`docs/stages/06-macros/simp.md`). `Bool.and_true`, `Bool.and_false` and
+-- `Bool.or_false` are stated on the `&&`/`||` notation (the spelling a goal uses); the
+-- rest are stated with `Bool.and`/`Bool.or`/`Bool.not` and fire on goals that contain
+-- those functions (e.g. a `Nat.land`, or a Boolean proof that did not use the notation).
+-- `!` is `Bool.not` itself, so `Bool.not_not` fires on `!(!a)`.
 --
 -- What is **not** registered, and why:
 --
--- * `Bool.and_true`, `Bool.and_false`, `Bool.or_false`: the `&&`/`||` forms are the
---   rules users need, and they live in `lib/SimpLemmas.wiz`; registering these too would
---   be a duplicate by name (the `attribute` command keeps the first and warns). Use the
---   lemma explicitly on a goal that contains `Bool.and`/`Bool.or` itself.
 -- * `Bool.true_and`, `Bool.false_and`, `Bool.false_or`, `Bool.true_or`, `Bool.not_true`,
 --   `Bool.not_false`: the left side computes to a variable or a data value. The goal has
 --   already computed it, so the rule could never match; use the lemma explicitly when a
@@ -483,9 +481,12 @@ def Bool.eq_false_iff : (b : Bool) → ((b = .false) ↔ ¬ (b = .true))
 attribute [simp] Bool.not_not
 attribute [simp] Bool.not_and
 attribute [simp] Bool.not_or
+attribute [simp] Bool.and_true
+attribute [simp] Bool.and_false
 attribute [simp] Bool.and_self
 attribute [simp] Bool.and_absorb
 attribute [simp] Bool.and_not_self
+attribute [simp] Bool.or_false
 attribute [simp] Bool.or_true_right
 attribute [simp] Bool.or_self
 attribute [simp] Bool.or_absorb
