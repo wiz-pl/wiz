@@ -73,6 +73,45 @@ def pkgFiles : List (String × String) :=
   [("grail.wiz", "import Grail\ndef package : Package := Package.new \"shapes\" |> Package.lib \"shapes\" \"src\"\n"),
    ("src/Shapes/Basic.wiz", basicSrc), ("src/Shapes/Use.wiz", useSrc)]
 
+/-- A package for the reference manual: an implicit argument, a class with two
+instances, an infix operator of its own, markup in a doc comment, and a module without
+any doc comments. -/
+def refSrc : String := "/-! # Reference fixture
+
+A module with **markup** and `Ref.A.Sized`, for the `reference` tests. -/
+import Prelude
+
+/-- The identity, at an implicit type. -/
+def ident {A : Type} (a : A) : A := a
+
+/-- Things with a size. -/
+class Sized (A : Type) where
+  /-- how big it is -/
+  size : A → Nat
+
+/-- A pair of numbers. -/
+structure Pair where
+  /-- the first -/
+  left : Nat
+  /-- the second -/
+  right : Nat
+
+instance : Sized Pair := Sized.mk (fun _ => 2)
+instance : Sized Nat := Sized.mk (fun n => n)
+
+/-- A made-up operator, to show the notation table. -/
+infixl:33 " +? " => HAdd.hAdd
+"
+
+def refEmpty : String := "import Prelude
+
+def quiet : Nat := 1
+"
+
+def refPkgFiles : List (String × String) :=
+  [("grail.wiz", "import Grail\ndef package : Package := Package.new \"ref\" |> Package.lib \"ref\" \"src\"\n"),
+   ("src/Ref/A.wiz", refSrc), ("src/Ref/Empty.wiz", refEmpty)]
+
 def elabBasic (cache : Option System.FilePath := none) : IO (CommandState ZeroOneMany) := do
   let prelude ← IO.FS.readFile "lib/Prelude.wiz"
   let loader : Name → Option String := fun m => if m == "Prelude" then some prelude else none
@@ -344,6 +383,60 @@ def docGroup : Group where
         -- the arrow key moves the selection to the next tag
         checkHas o.stdout "data-idx=\"1\" title=\"Shape\""
         check (lines.any (fun l => has l "sel\" data-ref" && has l "data-idx=\"1\"")) o.stdout },
+    { name := "wiz doc --reference: implicits, a class with two instances, an infix row, doc markup, a module without docs", run := fun _ => do
+        let dir ← mkTree refPkgFiles
+        let out := dir / "site"
+        let ref := dir / "reference"
+        discard <| runOut (← wiz) ["doc", (dir / "src").toString, "-o", out.toString,
+          "--web", (dir / "no-web").toString, "--reference", ref.toString]
+        let md ← IO.FS.readFile (ref / "index.md")
+        -- (the header counts, and the manual links its sections and declarations)
+        checkHas md "2 modules"
+        checkHas md "## Contents"
+        checkHas md "#notation"
+        checkHas md "## Notation and precedence"
+        -- (a declaration with an implicit argument: the elaborated type keeps it)
+        checkHas md "<a id=\"Ref.A.ident\"></a>"
+        checkHas md "def · `Ref/A.wiz:"
+        checkHas md "{A : Type} → A → A"
+        -- (a class and its two instances, with their types)
+        checkHas md "<a id=\"Ref.A.Sized\"></a>"
+        checkHas md "**Instances of this class (2)**"
+        checkHas md "Sized Pair"
+        checkHas md "Sized Nat"
+        -- (its field, with a doc comment)
+        checkHas md "<a id=\"Ref.A.Sized.size\"></a>"
+        checkHas md "<p>how big it is</p>"
+        -- (the module's own infix operator, with precedence and associativity)
+        checkHas md "| `+?` | infixl | 33 | left |"
+        -- (doc comments are Markdown, links included)
+        checkHas md "<strong>markup</strong>"
+        checkHas md "<a href=\"#Ref.A.Sized\"><code>Ref.A.Sized</code></a>"
+        -- (a module without doc comments is still a section, with its declaration)
+        checkHas md "## Ref.Empty"
+        checkHas md "<a id=\"Ref.Empty.quiet\"></a>"
+        -- (the generated page links to the manual, and the manual to the pages)
+        let html ← IO.FS.readFile (out / "reference.html")
+        checkHas html "id=\"module-Ref.A\""
+        checkHas html "id=\"Ref.A.ident\""
+        let page ← IO.FS.readFile (out / "Ref.A.html")
+        checkHas page "href=\"reference.html#Ref.A.ident\""
+        checkHas page "href=\"reference.html#module-Ref.A\""
+        -- (--check passes on what was just written, and fails when it changes)
+        let o ← runOut (← wiz) ["doc", (dir / "src").toString, "-o", (dir / "site2").toString,
+          "--web", (dir / "no-web").toString, "--reference", ref.toString, "--check"]
+        checkHas o "is up to date"
+        IO.FS.writeFile (ref / "index.md") (md ++ "\nstale\n")
+        let p ← IO.Process.output { cmd := ← wiz, args := #["doc", (dir / "src").toString,
+          "-o", (dir / "site3").toString, "--web", (dir / "no-web").toString,
+          "--reference", ref.toString, "--check"] }
+        check (p.exitCode == 1) s!"--check exit {p.exitCode}: {p.stdout}{p.stderr}"
+        check (has p.stderr "is out of date") p.stderr },
+    { name := "the committed reference manual (docs/reference/index.md) is up to date", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        let o ← runOut (← wiz) ["doc", "--lib", "-o", (dir / "site").toString,
+          "--reference", "docs/reference", "--check"]
+        checkHas o "is up to date" },
     libDocCase
   ]
 

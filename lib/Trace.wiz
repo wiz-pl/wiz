@@ -4,7 +4,7 @@ import Logic
 
 Traces and Mealy machines (`import Trace`): the common semantics of the HDL's circuits
 (lib/Hdl/Core.wiz, `Circuit.trace`), the temporal logic over them, and anything else
-that runs step by step. Design: /workspace/wiz-notes/cohesion-hardware.md, 2.1.
+that runs step by step. Design: wiz-notes/cohesion-hardware.md, 2.1.
 
 * A trace is a function `Nat → A`, not a ν-stream: equality at ν is stuck, while
   equality of functions is pointwise and computes (funext is a definition).

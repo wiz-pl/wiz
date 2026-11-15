@@ -1,6 +1,6 @@
 import Wiz
 import Wiz.Version
-import Wiz.Doc.Site
+import Wiz.Doc.Build
 
 open Wiz
 
@@ -23,8 +23,12 @@ def usage : String := "usage:
                                    (`--llvm` and `--wasm` are aliases)
   wiz doc [MODULE|FILE|DIR…] -o OUT [--lib] [--source-url URL] [--title T] [--web DIR]
                                    documentation: a static site (one page per module,
-                                   index, search); --lib: the toolchain's library;
+                                   index, search, reference); --lib: the toolchain's library;
                                    source links are URL + path in its root + #L<line>
+  wiz doc … --reference DIR [--check]
+                                   also the reference manual (full signatures, doc comments,
+                                   class instances, notation table) into DIR/index.md;
+                                   --check: change nothing, exit 1 when DIR/index.md differs
   wiz fmt [FILE|-] [--check] [--width N] [--explain]
                                    reprint a file from its syntax tree (stdin/stdout;
                                    --check: change nothing, exit 1 when it differs)
@@ -307,6 +311,8 @@ structure DocArgs where
   sourceUrl : Option String := none
   title : Option String := none
   web : Option String := none
+  reference : Option String := none
+  check : Bool := false
   inputs : List String := []
 
 def docArgs (a : DocArgs) : List String → Except String DocArgs
@@ -316,6 +322,8 @@ def docArgs (a : DocArgs) : List String → Except String DocArgs
   | "--source-url" :: u :: rest => docArgs { a with sourceUrl := some u } rest
   | "--title" :: t :: rest => docArgs { a with title := some t } rest
   | "--web" :: w :: rest => docArgs { a with web := some w } rest
+  | "--reference" :: d :: rest => docArgs { a with reference := some d } rest
+  | "--check" :: rest => docArgs { a with check := true } rest
   | x :: rest => if x.startsWith "-" then throw s!"wiz doc: unknown option {x}" else docArgs { a with inputs := x :: a.inputs } rest
 
 /-- The path of `p` relative to `root` (`p` itself if it isn't under it). -/
@@ -330,6 +338,8 @@ def docCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
     | .ok a => pure a
     | .error e => do IO.eprintln e; return 2
   let some out := a.out | IO.eprintln "wiz doc: -o OUT is required"; return 2
+  if a.check && a.reference.isNone then
+    IO.eprintln "wiz doc: --check needs --reference DIR"; return 2
   -- every input that is a directory or a file is a module root
   let mut tc := tc
   let mut wanted : Array (String × System.FilePath × System.FilePath) := #[]
@@ -364,10 +374,17 @@ def docCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   let mut assets : Option System.FilePath := none
   for d in (web.toList ++ [base / "web", base / "share" / "wiz" / "web"]) do
     if assets.isNone && (← (d / "scroll.css").pathExists) then assets := some d
-  let o : Doc.Options := { out, sourceUrl := a.sourceUrl, title := a.title.getD "Wiz documentation", web, assets }
-  let n ← Doc.run (fun m => elaborate tc "<doc>" s!"import {m}\n") mods o
-  IO.println s!"wiz doc: {n} modules, {out}/index.html"
+  let o : Doc.Options := { out, sourceUrl := a.sourceUrl, title := a.title.getD "Wiz documentation", web, assets,
+    reference := a.reference.map System.FilePath.mk, check := a.check }
+  let r ← Doc.run (fun m => elaborate tc "<doc>" s!"import {m}\n") mods o
+  IO.println s!"wiz doc: {r.pages} modules, {out}/index.html"
+  for f in r.written do IO.println s!"wiz doc: wrote {f}"
   if web.isNone then IO.println "wiz doc: no Wasm module (web/build.sh): the pages are plain HTML"
+  if !r.stale.isEmpty then
+    for f in r.stale do
+      IO.eprintln s!"wiz doc --check: {f} is out of date (regenerate with `wiz doc --lib --reference {a.reference.getD ""}`)"
+    return 1
+  if a.check then IO.println s!"wiz doc --check: {a.reference.getD ""}/index.md is up to date"
   pure 0
 
 /-- (11aa) `wiz fmt`'s options: the file (or stdin), `--check`, `--width`. -/
