@@ -300,6 +300,31 @@ def main : IO Unit := EIO.toIO (do
       (List.all (fun f => Bool.or (String.eq f.rule "strcpy-overflow")
         (String.eq f.rule "command-injection")) repModel5.findings));
 
+  -- buffer content: the sink argument is a pointer whose object was built by a copy
+  oStr1 ← opts ["tests/fixtures/str-content.c"];
+  repStr1 ← Scry.analyzeFile oStr1;
+  check "str-content: the unbounded copy and the content sink"
+    (Bool.and (Nat.beq (List.length repStr1.findings) 2)
+      (List.any (fun f => Bool.and (String.eq f.rule "command-injection")
+        (Bool.and (String.eq f.name "system") (Nat.beq f.arg 0))) repStr1.findings));
+  check "str-content: the content path enters memory at the copy"
+    (List.all (fun f => Bool.or (String.eq f.rule "strcpy-overflow")
+      (pathHasKind f.path "store")) repStr1.findings);
+  check "str-content: no memory warnings" (Nat.beq (List.length repStr1.memory) 0);
+
+  oStr2 ← opts ["tests/fixtures/str-content-safe.c"];
+  repStr2 ← Scry.analyzeFile oStr2;
+  check "str-content-safe: zero findings" (Nat.beq (List.length repStr2.findings) 0);
+
+  oStr3 ← opts ["tests/fixtures/str-format.c"];
+  repStr3 ← Scry.analyzeFile oStr3;
+  check "str-format: the formatted buffer is a format-string finding"
+    (Bool.and (Nat.beq (List.length repStr3.findings) 1)
+      (match firstFinding repStr3 with
+        | .some f => Bool.and (String.eq f.rule "format-string")
+            (Bool.and (String.eq f.name "printf") (Nat.beq f.arg 0))
+        | .none => .false));
+
   oModel6 ← opts ["tests/fixtures/model-strncpy-safe.c"];
   repModel6 ← Scry.analyzeFile oModel6;
   check "model-strncpy-safe: zero findings" (Nat.beq (List.length repModel6.findings) 0);

@@ -99,7 +99,23 @@ Supported in memory: struct/union fields by constant offset, array elements by c
 index, a variable index (widened to the base object), `&x`/`*p`/`**pp`, pointer arithmetic
 by a constant or a variable index, `malloc`/`calloc`/`free`, globals, function pointers
 (assigned, copied, passed as an argument, stored in memory), pointer returns
-(`p = f()`), aliased parameters, and the `strcpy`-family copy model. `malloc`/`calloc`/
+(`p = f()`), aliased parameters, and the `strcpy`-family copy model.
+
+### Buffer content
+
+A pointer has two taint components: its **value** and the **content** of the objects it
+may point at. `strcat(buf, t); system(buf)` is a path because `system`'s pointer argument
+is checked against the content of every location in `buf`'s alias closure, and the copy
+family transfers content (`Scry.StringTaint`): `strcpy`/`strncpy`/`stpcpy`,
+`strcat`/`strncat`, `strlcpy`/`strlcat`, `memcpy`/`memmove`, the formatted family
+(`sprintf`/`snprintf`/`vsprintf`/`vsnprintf`: every formatted argument may be written),
+and the result buffer of `strdup`/`strndup`. Concatenation joins into the destination
+object, so a buffer built by several calls keeps every source's taint. The transfer is
+**may**: a bound (`strncpy(dst, src, 0)`), a terminator or a zero length does not stop it,
+and a tainted integer formatted with `%d` is a may-source too (documented
+over-approximation; a finding is evidence, not a proof). `Loc.unknown` keeps its meaning:
+a copy through an unknown destination or source still transfers and warns
+`unknown-memory`; an empty set transfers nothing. `malloc`/`calloc`/
 `realloc`/`free` are read from the external model table (`Scry.Models`), so `realloc` is
 an allocation effect rather than havoc. Not modelled: `realloc`'s may-free of the old
 object, external calls' memory effects outside the model table, heap shape (a linked list
@@ -134,6 +150,16 @@ parameters (1 across two calls), `free` then use (1 finding + `use-after-free`),
 indirect target (1), unknown indirect target (0 findings + `unknown-indirect`),
 returned pointer (1), `strcpy` into one array (1, the other array 0), and an unmodelled
 external's pointer (1 finding + two `unknown-memory` warnings and one `unmodelled-external`).
+The buffer-content fixtures are `str-content.c` (a copy then `system(buf)`: the
+`strcpy-overflow` warning plus a `command-injection` finding whose path enters memory at
+the copy), `str-content-safe.c` (a clean copy: no finding) and `str-format.c` (a
+formatted buffer reaching `printf`: one `format-string` finding on the buffer).
+
+A **known false-positive boundary**: an in-place sanitiser (`sanitize(buf)`) does not
+clear the content component, because content taint is monotone per location and there is
+no strong update; a sink on that buffer after the clean can be reported. The register
+side does kill the sanitiser's result definition. This is the cost of the may-analysis,
+not a claim that the program is vulnerable.
 
 **Boundary warnings now carry spans.** `Scry.Warning` has a `Wil.Span`, so a
 `lowering-boundary` result points at the construct (a cast, `sizeof`, a skipped `goto`, …)

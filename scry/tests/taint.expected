@@ -110,6 +110,11 @@ model-snprintf-copy: the sink is system: ok
 model-snprintf-length: one buffer-overflow finding: ok
 model-calloc: forbidden and copy findings: ok
 model-strcpy: forbidden and copy findings: ok
+str-content: the unbounded copy and the content sink: ok
+str-content: the content path enters memory at the copy: ok
+str-content: no memory warnings: ok
+str-content-safe: zero findings: ok
+str-format: the formatted buffer is a format-string finding: ok
 model-strncpy-safe: zero findings: ok
 model-read: one finding: ok
 model-read: checked: ok

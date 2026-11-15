@@ -1,0 +1,208 @@
+import Scry.Rules
+/-!
+# Scry.StringTaint
+
+**Buffer-content transfer functions** (`import Scry.StringTaint`): what the C string and
+formatted-output family writes into its destination object, so a taint path survives
+`strcpy(buf, src); system(buf)`.
+
+## Why a buffer-content domain
+
+Scry's taint relation is register/value-level: `tainted (point, register)` says the value
+*in* a register is attacker controlled. A C program usually does not pass the source
+straight to the sink. It builds the sink argument:
+
+```c
+char buf[64];
+char *t = getenv("X");
+strcat(buf, t);
+system(buf);          /* buf is a pointer; its content is tainted, not the pointer */
+```
+
+The copy family does not write a **register**; it writes the *object the destination
+pointer points at*. So the domain needs a second component:
+
+```
+pointer value  =  (regTaint, mayContent)      mayContent = { loc | content(loc) may be tainted }
+```
+
+`Scry.PointsTo` gives the `loc` component (`Loc.stack`, `Loc.heap`, `Loc.field`, …) and
+`Scry.RuleTaint`'s `mtainedt (loc)` relation is the content component. A pointer's
+*may-content* is the content of every location in its points-to alias closure
+(`Scry.ptClosure`), so an unknown index (`Loc.anyOff`) or an unknown pointer
+(`Loc.unknown`) is a may-location exactly as it is for stores and loads.
+
+This module owns the **transfer functions** for that component: which destination
+receives which source's content. The `Scry.Models` table also has `copy`/`copyArgs`
+effects; my table is the same shape for the string family plus the result-buffer
+transfers (`strdup`), and `Scry.RuleTaint` deduplicates the pairs, so the two tables can
+overlap without double-reporting a diagnostic.
+
+## The transfer table
+
+| call | destination | content source |
+|---|---|---|
+| `strcpy`, `strncpy`, `stpcpy` | arg 0 | arg 1 |
+| `strcat`, `strncat`, `strlcat` | arg 0 | arg 1 (appended: joined, not overwritten) |
+| `strlcpy` | arg 0 | arg 1 |
+| `memcpy`, `memmove` | arg 0 | arg 1 |
+| `sprintf`, `vsprintf` | arg 0 | every argument from 1 |
+| `snprintf`, `vsnprintf` | arg 0 | every argument from 2 |
+| `strdup`, `strndup` | result | arg 0 |
+
+Every entry is **may**: `strncpy(dst, src, 0)`, a size that happens to be zero, or a
+destination that already holds a terminator still count as a copy. There is no length or
+extent reasoning here (that is a separate bounds analysis); the question is only *can
+bytes from this source be in this object*.
+
+### Concatenation and growth
+
+`strcat(dst, src)` is the same abstract effect as `strcpy` here: the destination
+**object** is one abstract cell (or the `anyOff`/`field` cells of its closure), so an
+append joins the source's content into it and cannot remove the bytes already there.
+That is what makes a buffer built by several calls nevertheless tainted at the sink:
+
+```c
+strcpy(buf, "user@");
+strcat(buf, t);          /* t's content joins buf */
+system(buf);
+```
+
+### The formatted family and `%s` vs `%d`
+
+A format call has no single source: the destination receives the format string and its
+variadic arguments. Every argument from the format position on is a **may source** of the
+destination's content. That is deliberately conservative:
+
+* `%s` (and `%c`, `%[`, `%p`) writes bytes taken from the argument, so propagating the
+  argument's content is what is needed;
+* `%d`/`%x`/`%f` write a **rendering** of the argument's value. A tainted integer is
+  still attacker-influenced output (e.g. `sprintf(buf, "%d", atoi(env))` writes digits
+  the attacker chose), so we keep it as a may-source. The cost is a possible false
+  positive: a tainted integer that is formatted with `%d` into a buffer that later
+  reaches `system` is reported even though the bytes are only digits. The alternative —
+  parsing the format string and propagating only `%s` — would be a false-negative risk
+  for `%n`/`%p`/positional formats and needs the format literal, which the C lowering
+  currently havocs. We choose the may-over-approximation and state it; the finding is
+  evidence, not a proof.
+
+`vsprintf`/`vsnprintf` copy from the `va_list` argument's *position*, but a `va_list` is
+an opaque pointer whose content this domain does not model: the arguments inside it are
+not visible. So a `vsnprintf(dst, n, fmt, ap)` whose only tainted data is in `ap` does
+not taint `dst`. That is a documented false-negative boundary, not a silent assumption
+(it is the remaining mechanism on CVE-2000-0573).
+
+## Soundness direction
+
+This is a **may-analysis**: the least fixpoint over positive rules, so a fact that is
+derived is possible, and a missing fact is not a claim of absence. A finding is
+`authority = observed/static` evidence with a path; there is no absence certificate.
+`Loc.unknown` keeps its `Scry.PointsTo` meaning: a destination or source whose points-to
+set contains `Loc.unknown` transfers through the unknown location (may) and the existing
+`unknown-memory` warning is reported at the call. An empty points-to set is a known
+non-target: no transfer and no warning.
+
+An in-place sanitiser of a buffer (`sanitize(buf)`) does **not** clear the content
+lattice: the store that wrote tainted bytes is still in the derivation, and the content
+component is monotone per location (there is no strong update). A sink on that buffer
+after the in-place clean is therefore a possible false positive. The register/value
+side does kill the sanitiser's result definition (`RuleTaint`'s `san`); the buffer side
+would need a flow-sensitive strong update or a must-path check, which is left to the
+path-sensitivity work. This is recorded as a known boundary, not hidden.
+-/
+
+-- ## The transfer table
+
+/-- Where a string call writes: the object of an argument, or the call's result object. -/
+inductive Scry.StrDst where
+  | arg (index : Nat)
+  | result
+
+def Scry.StrDst.show : Scry.StrDst → String
+  | .arg k => String.append "arg " (Nat.repr k)
+  | .result => "result"
+
+/-- One family entry: `dst` receives the content of the explicit `srcs` and, for a
+formatted call, of every argument from `variadic` on. -/
+structure Scry.StrTransfer where
+  name : String
+  dst : Scry.StrDst
+  srcs : List Nat
+  variadic : Option Nat
+  note : String
+
+def Scry.copyToArg (name : String) (note : String) : Scry.StrTransfer :=
+  Scry.StrTransfer.mk name (.arg 0) (List.cons 1 .nil) .none note
+
+def Scry.formattedToArg (name : String) (first : Nat) (note : String) : Scry.StrTransfer :=
+  Scry.StrTransfer.mk name (.arg 0) .nil (.some first) note
+
+/-- The string and formatted-output family. The bounded variants (`strncpy`,
+`strncat`, `strlcpy`, `strlcat`, `snprintf`, `vsnprintf`) are the same **may** transfer:
+a bound does not make the copy not happen, and the bound is not a length analysis. -/
+def Scry.strTransfers : List Scry.StrTransfer :=
+  [ Scry.copyToArg "strcpy" "argument 1 is copied into the object argument 0 points at"
+  , Scry.copyToArg "strncpy" "a bounded copy; the bytes still come from argument 1"
+  , Scry.copyToArg "stpcpy" "argument 1 is copied into argument 0"
+  , Scry.copyToArg "strcat" "argument 1 is appended to argument 0's object"
+  , Scry.copyToArg "strncat" "a bounded append; the bytes still come from argument 1"
+  , Scry.copyToArg "strlcpy" "a size-bounded copy; the bytes still come from argument 1"
+  , Scry.copyToArg "strlcat" "a size-bounded append; the bytes still come from argument 1"
+  , Scry.copyToArg "memcpy" "argument 1's bytes are copied into argument 0's object"
+  , Scry.copyToArg "memmove" "argument 1's bytes are moved into argument 0's object"
+  , Scry.formattedToArg "sprintf" 1
+      "the format and every formatted argument are written into argument 0"
+  , Scry.formattedToArg "snprintf" 2
+      "the format and every formatted argument are written into argument 0"
+  , Scry.formattedToArg "vsprintf" 1
+      "the format and the va_list arguments are written into argument 0"
+  , Scry.formattedToArg "vsnprintf" 2
+      "the format and the va_list arguments are written into argument 0"
+  , Scry.StrTransfer.mk "strdup" .result (List.cons 0 .nil) .none
+      "the result is a fresh copy of argument 0's bytes (a result buffer, not an argument)"
+  , Scry.StrTransfer.mk "strndup" .result (List.cons 0 .nil) .none
+      "the result is a bounded fresh copy of argument 0's bytes"
+  ]
+
+/-- The table entry for a call name, if the name is a string/format transfer. -/
+def Scry.strTransferOf (name : String) : Option Scry.StrTransfer :=
+  List.find (fun t => String.eq t.name name) Scry.strTransfers
+
+/-- Is this call in the string-content transfer table? -/
+def Scry.strTransferKnown (name : String) : Bool :=
+  match Scry.strTransferOf name with
+  | .some _ => .true
+  | .none => .false
+
+def Scry.strRangeFrom : Nat → Nat → List Nat
+  | .zero, _ => .nil
+  | .succ k, first => List.append (Scry.strRangeFrom k first)
+      (List.cons (Nat.add first k) .nil)
+
+/-- The `(destination, source argument)` content pairs of one call. `arity` expands a
+formatted entry; a call with fewer arguments than the format position has no variadic
+sources. -/
+def Scry.strCopyPairs (name : String) (arity : Nat) : List (Scry.StrDst × Nat) :=
+  match Scry.strTransferOf name with
+  | .none => .nil
+  | .some t =>
+    let explicit := List.map (fun s => (t.dst, s)) t.srcs;
+    let variadic := match t.variadic with
+      | .none => (.nil : List (Scry.StrDst × Nat))
+      | .some first => List.map (fun s => (t.dst, s)) (Scry.strRangeFrom (Nat.sub arity first) first);
+    List.append explicit variadic
+
+/-- The argument-destination pairs only: the ones that write through a pointer argument.
+A result-destination entry (`strdup`) is returned by `Scry.strResultPairs`. -/
+def Scry.strArgPairs (name : String) (arity : Nat) : List (Nat × Nat) :=
+  List.foldr (fun p acc => match p.1 with
+    | .arg d => List.cons (d, p.2) acc
+    | .result => acc) .nil (Scry.strCopyPairs name arity)
+
+/-- The source arguments whose content lands in the call's **result** object (a fresh
+buffer such as `strdup`'s). The destination is the result register's points-to
+closure. -/
+def Scry.strResultPairs (name : String) (arity : Nat) : List Nat :=
+  List.foldr (fun p acc => match p.1 with
+    | .arg _ => acc
+    | .result => List.cons p.2 acc) .nil (Scry.strCopyPairs name arity)

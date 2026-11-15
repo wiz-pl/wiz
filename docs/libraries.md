@@ -933,6 +933,14 @@ The S4 rule pack and interprocedural slice are separate modules:
   an unmodelled external with a pointer result/argument is an explicit
   `unmodelled-external` warning (its result stays `Loc.unknown`). `RulePack.withModels`
   supplies the model rule descriptors.
+* `import Scry.StringTaint` — the **buffer-content** transfer functions: which destination
+  object receives which source's bytes for `strcpy`/`strncpy`/`stpcpy`/`strcat`/
+  `strncat`/`strlcpy`/`strlcat`/`memcpy`/`memmove`, the formatted family
+  (`sprintf`/`snprintf`/`vsprintf`/`vsnprintf`, every formatted argument is a may
+  source; `%d` is a documented over-approximation) and the result buffer of
+  `strdup`/`strndup`. A copy is **may**: bounds and terminators are not reasoned about.
+  `Scry.strArgPairs`/`Scry.strResultPairs` are what `Scry.RuleTaint` turns into
+  `mstore`/`mcopy` rows.
 * `import Scry.PointsTo` — a flow-insensitive, field-sensitive points-to analysis over
   the lowered Wil: the location lattice `Loc.stack/glob/heap/fn/field/anyOff/unknown`,
   per-register location sets (`Scry.ptIds`), per-location pointer contents (`mem`, for
@@ -946,9 +954,13 @@ The S4 rule pack and interprocedural slice are separate modules:
   carry their rule metadata and a stitched source -> sink path.
 * `import Scry.RuleTaint` also carries the memory rules: `mstore`/`mload`/`mtainted`
   make a `store` taint the locations it may alias and a later `load` receive it, with
-  `store`/`load` path nodes. Diagnostics that are not findings (unknown memory, use after
-  free, unresolved indirect call) are `Scry.MemWarning`s with a function and program
-  point.
+  `store`/`load` path nodes. `mtainted` is the **buffer-content** component: a sink on a
+  pointer argument is checked against the content of every location in its alias closure
+  (`sinkbuf`, the second `alert` rule), and `mcopy` carries content through the copy
+  family (`mtainted ld :- mtainted ls, mcopy ld p ls v`) so `strcpy(dst, src);
+  system(dst)` and `strcpy(b, p)` inside a callee are paths. Diagnostics that are not
+  findings (unknown memory, use after free, unresolved indirect call) are
+  `Scry.MemWarning`s with a function and program point.
 * `import Scry.Sarif` — SARIF 2.1.0 JSON with rule metadata, primary and related
   locations from an `OriginMap` (S2's `Wil.Span` supplies the entries; a finding's
   `properties.derivation` is `checked`/`unchecked`), namespaced rule ids

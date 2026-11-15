@@ -368,6 +368,15 @@ def Scry.findParamSource (pr : Scry.ProgramResult) (callee : String) (pos : Nat)
       List.map (fun (site : Scry.CallSite) => (r, site)) (Scry.sitesFrom pr.graph r.fn.name))
       pr.results)
 
+/-- The memory store at `point` that carries `var`, if any; a copy call can produce
+several store rows at one point (one per copied argument), so the one the path names is
+preferred and the first row at the point is the fallback. -/
+def Scry.storeAt (plan : Scry.FuncPlan) (point var : Nat) : Option Scry.MemOp :=
+  match List.find (fun m => Bool.and (Nat.beq m.node point) (Nat.beq m.var var))
+      plan.mstores with
+  | .some m => .some m
+  | .none => List.find (fun m => Nat.beq m.node point) plan.mstores
+
 /-- Replace a parameter or return seed in `path` by the interprocedural evidence behind
 it, recursively. `stack` is the set of `(function, point)` roots already expanded, so
 recursion becomes a `recursion` node instead of a loop. -/
@@ -415,11 +424,10 @@ partial def Scry.extendPath (pr : Scry.ProgramResult) (stack : List (String × N
           | .none => path
           | .some producer =>
             if String.eq producer.fn.name fr.fn.name then path
-            else match List.find (fun m => Nat.beq m.node root.point) producer.plan.mstores with
+            else match Scry.storeAt producer.plan root.point root.var with
               | .none => path
               | .some m =>
                 match Scry.defReaching producer root.point m.var with
-                | .none => path
                 | .some d =>
                   let pst := match producer.state with
                     | .none => Scry.State.empty
@@ -427,6 +435,20 @@ partial def Scry.extendPath (pr : Scry.ProgramResult) (stack : List (String × N
                   let chain := Scry.chainToDef producer.fn.name producer.plan.seeds pst d m.var;
                   let chain := Scry.extendPath pr stack' k producer chain;
                   List.append chain path
+                /-- The stored value's content came from another location (a copy whose
+                source pointer was never tainted as a value): follow the content seed for
+                the copy's source location. -/
+                | .none =>
+                  match List.find (fun c => Bool.and (Nat.beq c.node root.point)
+                      (Nat.beq c.var root.var)) producer.plan.mcopies with
+                  | .none => path
+                  | .some c =>
+                    match List.find (fun s => Nat.beq s.loc c.src) producer.plan.seeds with
+                    | .none => path
+                    | .some s =>
+                      let seedNode := Scry.PathNode.mk s.func s.point s.var
+                        Scry.PathKind.store;
+                      Scry.extendPath pr stack' k producer (List.cons seedNode path)
         | _ => path
 
 -- ## Findings

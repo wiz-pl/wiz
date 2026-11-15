@@ -23,6 +23,14 @@ Hand-built Wil programs for the S4 rule pack and interprocedural engine
   argument, and the in-place sanitiser all yield no finding;
 * `indirectProgram` — a call through a function value: the graph records it as unknown,
   so neither its argument nor its result carries taint.
+* `copySinkProgram`/`copySafeProgram` — buffer **content**: a copy into a stack array,
+  then a sink on the pointer. The destination's register is untainted; the content is
+  (or is clean for the safe pair).
+* `sprintfSinkProgram` — the formatted destination reaches `printf`; the finding is
+  `format-string` on the buffer, not on a direct argument.
+* `relayProgram` — content crosses a call through the **location**: `main` copies the
+  source into an array it passes, `relay` copies from its parameter into a local array
+  and sinks it, and no parameter's value is tainted.
 
 Point numbering follows `Scry.Analysis` (statements then a terminator per block); the
 comments name the interesting ones.
@@ -252,6 +260,119 @@ def Scry.argSanFn : Wil.Func :=
         (Wil.ret .none) ]
 
 def Scry.argSanProgram : Wil.Program := Wil.program [Scry.argSanFn]
+
+-- ## Buffer content (the string/format copy family)
+
+/-- `copySink() { dst = slot 64; n = 63; t = getenv(); strncpy(dst, t, n);
+system(dst) }`. The pointer `dst` is never tainted as a value; its **content** is.
+`strncpy` is not a forbidden call, so the only finding is the content sink. Points: 0
+slot, 1 length, 2 source, 3 copy, 4 sink, 5 return. -/
+def Scry.copySinkFn : Wil.Func :=
+  let dst := Wil.var 0 (.ptr Wil.i8);
+  let n := Scry.rtv 1;
+  let t := Wil.var 2 (.ptr Wil.i8);
+  Wil.func "copySink" [] [dst, n, t]
+    [ Wil.block
+        [ Wil.slot dst 64
+        , Wil.num n 63
+        , Wil.call (.some t) "getenv" []
+        , Wil.call .none "strncpy" [dst, t, n]
+        , Wil.call .none "system" [dst] ]
+        (Wil.ret .none) ]
+
+def Scry.copySinkProgram : Wil.Program := Wil.program [Scry.copySinkFn]
+
+/-- `copySafe() { dst = slot 64; n = 63; zero = 0; strncpy(dst, zero, n);
+system(dst) }`: the copy source is clean, so the destination content is clean. -/
+def Scry.copySafeFn : Wil.Func :=
+  let dst := Wil.var 0 (.ptr Wil.i8);
+  let n := Scry.rtv 1;
+  let zero := Wil.var 2 (.ptr Wil.i8);
+  Wil.func "copySafe" [] [dst, n, zero]
+    [ Wil.block
+        [ Wil.slot dst 64
+        , Wil.num n 63
+        , Wil.num zero 0
+        , Wil.call .none "strncpy" [dst, zero, n]
+        , Wil.call .none "system" [dst] ]
+        (Wil.ret .none) ]
+
+def Scry.copySafeProgram : Wil.Program := Wil.program [Scry.copySafeFn]
+
+/-- `sprintfSink() { buf = slot 64; fmt = 0; t = getenv(); sprintf(buf, fmt, t);
+printf(buf) }`: the formatted destination is a **format-string** sink, not a command
+sink. Points: 0 slot, 1 fmt, 2 source, 3 copy, 4 sink, 5 return. -/
+def Scry.sprintfSinkFn : Wil.Func :=
+  let buf := Wil.var 0 (.ptr Wil.i8);
+  let fmt := Wil.var 1 (.ptr Wil.i8);
+  let t := Wil.var 2 (.ptr Wil.i8);
+  Wil.func "sprintfSink" [] [buf, fmt, t]
+    [ Wil.block
+        [ Wil.slot buf 64
+        , Wil.num fmt 0
+        , Wil.call (.some t) "getenv" []
+        , Wil.call .none "sprintf" [buf, fmt, t]
+        , Wil.call .none "printf" [buf] ]
+        (Wil.ret .none) ]
+
+def Scry.sprintfSinkProgram : Wil.Program := Wil.program [Scry.sprintfSinkFn]
+
+/-- `relay(p) { b = slot 64; n = 63; strncpy(b, p, n); system(b) }` with `main` copying a
+source into the object it passes: the content crosses the call through the **location**,
+not through the parameter's value. `relay` points: 0 slot, 1 length, 2 copy, 3 sink.
+`main` points: 0 slot, 1 length, 2 source, 3 copy, 4 call, 5 return. -/
+def Scry.relayFn : Wil.Func :=
+  let p := Wil.var 0 (.ptr Wil.i8);
+  let b := Wil.var 1 (.ptr Wil.i8);
+  let n := Scry.rtv 2;
+  Wil.func "relay" [p] [b, n]
+    [ Wil.block
+        [ Wil.slot b 64
+        , Wil.num n 63
+        , Wil.call .none "strncpy" [b, p, n]
+        , Wil.call .none "system" [b] ]
+        (Wil.ret .none) ]
+
+def Scry.relayMainFn : Wil.Func :=
+  let src := Wil.var 0 (.ptr Wil.i8);
+  let n := Scry.rtv 1;
+  let t := Wil.var 2 (.ptr Wil.i8);
+  Wil.func "main" [] [src, n, t]
+    [ Wil.block
+        [ Wil.slot src 64
+        , Wil.num n 63
+        , Wil.call (.some t) "getenv" []
+        , Wil.call .none "strncpy" [src, t, n]
+        , Wil.call .none "relay" [src] ]
+        (Wil.ret .none) ]
+
+def Scry.relayProgram : Wil.Program := Wil.program [Scry.relayMainFn, Scry.relayFn]
+
+/-- `concatSink() { buf = slot 64; n = 63; zero = 0; fmt = 0; t = getenv();
+strncpy(buf, zero, n); strncat(buf, t, n); sprintf(buf, fmt, t); system(buf) }`.
+Concatenation and formatting **join** into the same destination object: the buffer keeps
+the source's taint from each write, and the sink is on the pointer. Points: 0 slot, 1
+length, 2 zero, 3 fmt, 4 source, 5 copy, 6 append, 7 format, 8 sink, 9 return. -/
+def Scry.concatSinkFn : Wil.Func :=
+  let buf := Wil.var 0 (.ptr Wil.i8);
+  let n := Scry.rtv 1;
+  let zero := Wil.var 2 (.ptr Wil.i8);
+  let fmt := Wil.var 3 (.ptr Wil.i8);
+  let t := Wil.var 4 (.ptr Wil.i8);
+  Wil.func "concatSink" [] [buf, n, zero, fmt, t]
+    [ Wil.block
+        [ Wil.slot buf 64
+        , Wil.num n 63
+        , Wil.num zero 0
+        , Wil.num fmt 0
+        , Wil.call (.some t) "getenv" []
+        , Wil.call .none "strncpy" [buf, zero, n]
+        , Wil.call .none "strncat" [buf, t, n]
+        , Wil.call .none "sprintf" [buf, fmt, t]
+        , Wil.call .none "system" [buf] ]
+        (Wil.ret .none) ]
+
+def Scry.concatSinkProgram : Wil.Program := Wil.program [Scry.concatSinkFn]
 
 -- ## Safe fixtures (no false positives)
 

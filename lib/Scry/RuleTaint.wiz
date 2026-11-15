@@ -3,6 +3,7 @@ import Scry.PointsTo
 import Scry.Eval
 import Scry.Rules
 import Scry.Models
+import Scry.StringTaint
 import Text
 import Word
 /-!
@@ -36,7 +37,9 @@ carries the register:
 | 10 | `gen (point, var)` | 2 | EDB: the ordinary definition at a point |
 | 11 | `mstore (loc, point, var)` | 3 | EDB: a store of `var` at `point` into `loc` |
 | 12 | `mload (loc, point, var)` | 3 | EDB: a load from `loc` at `point` into `var` |
-| 13 | `mtainted (loc)` | 1 | IDB: the location holds attacker-controlled data |
+| 13 | `mtainted (loc)` | 1 | IDB: the location's **content** may be attacker-controlled |
+| 14 | `sinkbuf (sink, arg, loc)` | 3 | EDB: the sink's pointer argument may point at `loc` |
+| 15 | `mcopy (dst, point, src, var)` | 4 | EDB: a content copy `src -> dst` at `point`, the source register `var` |
 
 Rules:
 
@@ -46,8 +49,10 @@ tainted n v   :- param n v.
 tainted n v   :- retsrc n v.
 tainted n w   :- tainted d v, flow d n v, gen n w, !san n w.
 alert n a     :- tainted d v, flow d n v, sink n a v.
+alert n a     :- mtainted l, sinkbuf n a l.
 badalert n    :- badcall n.
 mtainted l    :- tainted d v, flow d s v, mstore l s v.
+mtainted ld   :- mtainted ls, mcopy ld p ls v.
 tainted n w   :- mtainted l, mload l n w, !san n w.
 ```
 
@@ -61,6 +66,31 @@ intersect (`Scry.expandIds`): a constant field/element index is exact, an unknow
 alias** (an empty location set) does not meet anything — the `mstore`/`mload` rows simply
 do not exist. `Scry.FuncPlan.memWarnings` carries the diagnostics the rows cannot: an
 unknown target or a use after `free`.
+
+### Buffer content
+
+`mtainted (loc)` is a second lattice component: the **bytes** of an abstract location
+may be attacker controlled. It is not the pointer's value. `strcpy(buf, src)` writes
+`src`'s bytes into the object `buf` points at, so `buf`'s register stays untainted while
+`mtainted` holds for its location; `sinkbuf` is the alias-closure bridge from a sink's
+pointer argument to the locations whose content is the sink argument, and the second
+`alert` rule reads the content component. `Scry.StringTaint` owns the transfer table
+(the copy family and the formatted family), and a copy has two transfer functions:
+
+* `mstore (dst, point, srcVar)` — the source **register's** value taint reaches the
+  destination object (the existing value-to-memory rule);
+* `mcopy (dst, point, srcLoc, srcVar)` — the source **location's content** reaches the
+  destination object (`mtainted ld :- mtainted ls, mcopy ld p ls v`). This is what lets
+  content flow through a pointer parameter that is itself never tainted as a value:
+  `void relay(char *p) { char b[..]; strcpy(b, p); system(b); }`.
+
+`Scry.ptClosure` expands both sides, so a copy into/out of a `field`, `anyOff` or
+`unknown` location meets the sink's closure exactly as a store/load would. The path
+walker treats an `mtainedt` derived by `mcopy` as a value chain plus a `store` node at
+the copy point, so a finding reads `source -> ... -> store -> sink`.
+
+An in-place sanitiser does not clear the content component (there is no strong update);
+see the `Scry.StringTaint` header for that boundary.
 
 `flow` is the def-use relation from `Scry.Analysis`: a definition of `v` reaching a
 *use* of `v`. `gen` is the variable a point *defines* (`assign x e` defines `x`, a call
@@ -102,6 +132,8 @@ def Scry.rtGen : Nat := 10
 def Scry.rtMStore : Nat := 11
 def Scry.rtMLoad : Nat := 12
 def Scry.rtMTainted : Nat := 13
+def Scry.rtSinkBuf : Nat := 14
+def Scry.rtMCopy : Nat := 15
 
 -- ## The plan for one function
 
@@ -133,6 +165,23 @@ structure Scry.MemOp where
   node : Nat
   var : Nat
   locs : List Nat
+
+/-- A sink's pointer argument and one location its alias closure reaches. The sink checks
+the **content** of each such location (`sinkbuf`), so `system(buf)` is a sink on `buf`'s
+bytes, not only on `buf`'s pointer value. -/
+structure Scry.SinkLoc where
+  node : Nat
+  arg : Nat
+  loc : Nat
+
+/-- A content copy: the object at location `dst` receives the content of the object at
+location `src`. `point` and `var` are the copy call and its source register, kept for
+provenance (a cross-function seed expands at `point`/`var`). -/
+structure Scry.MemCopy where
+  node : Nat
+  dst : Nat
+  src : Nat
+  var : Nat
 
 /-- The kind of a memory diagnostic. -/
 inductive Scry.MemWarnKind where
@@ -198,6 +247,11 @@ structure Scry.FuncPlan where
   mstores : List Scry.MemOp
   /-- Loads through a pointer, with the locations they may read. -/
   mloads : List Scry.MemOp
+  /-- Sinks whose argument is a pointer: the locations whose content is checked. -/
+  sinkLocs : List Scry.SinkLoc
+  /-- Content copies (`strcpy`/`strcat`/`sprintf`/`strdup` family): `dst`'s object gets
+  `src`'s content. -/
+  mcopies : List Scry.MemCopy
   /-- Memory diagnostics (unknown target, use after free, unknown indirect call). -/
   memWarnings : List Scry.MemWarning
   /-- The tainted-location seeds this evaluation started from (for path provenance). -/
@@ -319,6 +373,7 @@ so does one that touches a location `free` was called on. -/
 structure Scry.MemScan where
   stores : List Scry.MemOp
   loads : List Scry.MemOp
+  copies : List Scry.MemCopy
   warnings : List Scry.MemWarning
 
 def Scry.memInter (xs ys : List Nat) : List Nat :=
@@ -460,24 +515,91 @@ def Scry.freedWarning (g : Scry.Fn) (frees : List (Nat × List Nat)) (func : Str
   | .cons h _ => .cons (Scry.memWarning Scry.MemWarnKind.useAfterFree func n
       (what ++ " to a location freed by free at point " ++ Nat.repr h)) .nil
 
-/-- A call's memory effects that are copies. `Scry.Models.copyPairsOf` expands a
-`copyArgs` effect (a format call) against the actual arity, so every formatted argument
-is a source of the destination object. An unmodelled external has no copy rows; its
-result stays unknown via the points-to external rule and it is warned about explicitly. -/
-def Scry.copyScan (pt : Scry.PtResult) (g : Scry.Fn) (frees : List (Nat × List Nat))
-    (func : String) (n : Nat) (name : String) (args : List Wil.Var) : Scry.MemScan :=
-  List.foldr (fun dstsrc acc =>
-    match Wil.listNth args dstsrc.1, Wil.listNth args dstsrc.2 with
-    | .some dst, .some src =>
-      let r := Scry.ptrAccess pt func n dst.index ("external " ++ name)
-      let op : List Scry.MemOp := match r.1 with
+/-- Deduplicate copy pairs, keeping the first. `Scry.Models` and `Scry.StringTaint` may
+both list `strcpy`; one pair is one transfer, so one diagnostic. -/
+def Scry.copyPairKey (p : Nat × Nat) : String := Nat.repr p.1 ++ ":" ++ Nat.repr p.2
+
+def Scry.dedupCopyPairs (xs : List (Nat × Nat)) : List (Nat × Nat) :=
+  List.foldl (fun acc p =>
+    match List.any (fun q => String.eq (Scry.copyPairKey q) (Scry.copyPairKey p)) acc with
+    | .true => acc
+    | .false => List.append acc (List.cons p .nil)) .nil xs
+
+/-- The content copies out of one source register into a destination closure: the
+source's location closure is what `mtainedt` is keyed by. -/
+def Scry.contentCopies (pt : Scry.PtResult) (func : String) (n : Nat)
+    (dstLocs : List Nat) (srcVar : Nat) : List Scry.MemCopy :=
+  let srcLocs := Scry.ptClosure pt func srcVar;
+  Scry.rulePackConcat (fun d =>
+    List.map (fun s => Scry.MemCopy.mk n d s srcVar) srcLocs) dstLocs
+
+/-- A copy into an **argument's** object (the `dst <- src` family): the source register's
+value taint and the source locations' content both reach the destination closure. -/
+def Scry.copyArgRows (pt : Scry.PtResult) (g : Scry.Fn) (frees : List (Nat × List Nat))
+    (func : String) (n : Nat) (name : String) (args : List Wil.Var) (p : Nat × Nat) :
+    Scry.MemScan :=
+  match Wil.listNth args p.1, Wil.listNth args p.2 with
+  | .some dst, .some src =>
+    let r := Scry.ptrAccess pt func n dst.index ("external " ++ name);
+    let op : List Scry.MemOp := match r.1 with
+      | .nil => .nil
+      | locs => List.cons (Scry.MemOp.mk n src.index locs) .nil;
+    Scry.MemScan.mk (List.append op .nil) .nil (Scry.contentCopies pt func n r.1 src.index)
+      (List.append (List.append r.2
+        (Scry.freedWarning g frees func n r.1 ("external " ++ name))) .nil)
+  | _, _ => Scry.MemScan.mk .nil .nil .nil .nil
+
+/-- A content copy into the call's **result** object (`strdup`/`strndup`). The result's
+points-to closure is the destination; when the external is unmodelled it is
+`Loc.unknown`, so the content lands on the unknown location (a may-location) and the
+existing `unknown-memory` discipline applies. -/
+def Scry.copyResultRows (pt : Scry.PtResult) (g : Scry.Fn) (frees : List (Nat × List Nat))
+    (func : String) (n : Nat) (name : String) (args : List Wil.Var) (rv : Nat) :
+    Scry.MemScan :=
+  let dstLocs := Scry.ptClosure pt func rv;
+  let r := Scry.ptrAccess pt func n rv ("external " ++ name ++ " result");
+  let rows := List.foldr (fun srcIdx acc =>
+    match Wil.listNth args srcIdx with
+    | .none => acc
+    | .some src =>
+      let op : List Scry.MemOp := match dstLocs with
         | .nil => .nil
         | locs => List.cons (Scry.MemOp.mk n src.index locs) .nil;
       Scry.MemScan.mk (List.append op acc.stores) acc.loads
-        (List.append (List.append r.2
-          (Scry.freedWarning g frees func n r.1 ("external " ++ name))) acc.warnings)
-    | _, _ => acc) (Scry.MemScan.mk .nil .nil .nil)
+        (List.append (Scry.contentCopies pt func n dstLocs src.index) acc.copies)
+        acc.warnings) (Scry.MemScan.mk .nil .nil .nil .nil)
+    (Scry.strResultPairs name (List.length args));
+  Scry.MemScan.mk rows.stores rows.loads rows.copies
+    (List.append r.2 (List.append
+      (Scry.freedWarning g frees func n r.1 ("external " ++ name ++ " result"))
+      rows.warnings))
+
+/-- A call's memory effects that are copies. `Scry.Models.copyPairsOf` and
+`Scry.StringTaint.strArgPairs` are unioned (a name may be in both), expanded against the
+actual arity, and deduplicated. A formatted call's variadic arguments are sources of the
+destination object; the content of a **pointer** argument also transfers by location
+(`mcopy`), so `sprintf(dst, "%s", other)` carries `other`'s bytes. An unmodelled external
+has no copy rows; its result stays unknown via the points-to external rule and it is
+warned about explicitly. -/
+def Scry.copyScan (pt : Scry.PtResult) (g : Scry.Fn) (frees : List (Nat × List Nat))
+    (func : String) (n : Nat) (name : String) (callResult : Option Nat)
+    (args : List Wil.Var) : Scry.MemScan :=
+  let pairs := Scry.dedupCopyPairs (List.append
     (Scry.Models.copyPairsOf name (List.length args))
+    (Scry.strArgPairs name (List.length args)));
+  let intoArgs := List.foldr (fun p acc =>
+    let a := Scry.copyArgRows pt g frees func n name args p;
+    Scry.MemScan.mk (List.append a.stores acc.stores) (List.append a.loads acc.loads)
+      (List.append a.copies acc.copies) (List.append a.warnings acc.warnings))
+    (Scry.MemScan.mk .nil .nil .nil .nil) pairs;
+  match callResult with
+  | .none => intoArgs
+  | .some rv =>
+    let intoResult := Scry.copyResultRows pt g frees func n name args rv;
+    Scry.MemScan.mk (List.append intoResult.stores intoArgs.stores)
+      (List.append intoResult.loads intoArgs.loads)
+      (List.append intoResult.copies intoArgs.copies)
+      (List.append intoResult.warnings intoArgs.warnings)
 
 def Scry.memScan (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn) : Scry.MemScan :=
   let frees := Scry.fnFrees pt fn g;
@@ -490,7 +612,7 @@ def Scry.memScan (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn) : Scry.MemSc
         let op : List Scry.MemOp := match r.1 with
           | .nil => .nil
           | locs => .cons (Scry.MemOp.mk n v.index locs) .nil;
-        Scry.MemScan.mk (List.append op acc.stores) acc.loads
+        Scry.MemScan.mk (List.append op acc.stores) acc.loads acc.copies
           (List.append (List.append r.2
             (Scry.freedWarning g frees fn.name n r.1 "store")) acc.warnings)
       | .assign x (.load p) _ =>
@@ -498,13 +620,17 @@ def Scry.memScan (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn) : Scry.MemSc
         let op : List Scry.MemOp := match r.1 with
           | .nil => .nil
           | locs => .cons (Scry.MemOp.mk n x.index locs) .nil;
-        Scry.MemScan.mk acc.stores (List.append op acc.loads)
+        Scry.MemScan.mk acc.stores (List.append op acc.loads) acc.copies
           (List.append (List.append r.2
             (Scry.freedWarning g frees fn.name n r.1 "load")) acc.warnings)
-      | .call _ (.direct name) args _ =>
-        let cs := Scry.copyScan pt g frees fn.name n name args;
+      | .call r (.direct name) args _ =>
+        let rv := match r with
+          | .some v => .some v.index
+          | .none => (.none : Option Nat);
+        let cs := Scry.copyScan pt g frees fn.name n name rv args;
         Scry.MemScan.mk (List.append cs.stores acc.stores)
-          (List.append cs.loads acc.loads) (List.append cs.warnings acc.warnings)
+          (List.append cs.loads acc.loads) (List.append cs.copies acc.copies)
+          (List.append cs.warnings acc.warnings)
       | .call _ (.indirect fv) _ _ =>
         let t := Scry.indirectAt pt fn.name n;
         let w : List Scry.MemWarning := match t.unknown with
@@ -512,8 +638,9 @@ def Scry.memScan (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn) : Scry.MemSc
           | .true => .cons (Scry.memWarning Scry.MemWarnKind.unknownIndirect fn.name n
               ("indirect call through register " ++ Nat.repr fv.index
                ++ " has no fully known target")) .nil;
-        Scry.MemScan.mk acc.stores acc.loads (List.append w acc.warnings)
-      | _ => acc) (Scry.MemScan.mk .nil .nil .nil) (Scry.range g.count)
+        Scry.MemScan.mk acc.stores acc.loads acc.copies
+          (List.append w acc.warnings)
+      | _ => acc) (Scry.MemScan.mk .nil .nil .nil .nil) (Scry.range g.count)
 
 /-- Build a function's plan for a rule pack. Extra definitions are the tainted-parameter
 definitions at entry and the arguments a source/sanitiser writes, so the def-use layer
@@ -564,9 +691,14 @@ def Scry.prepareFunc (fn : Wil.Func) (pack0 : Scry.RulePack) (pt : Scry.PtResult
   let sinks := Scry.rulePackConcat (fun p => p.sinks) scan;
   let bads := Scry.rulePackConcat (fun p => p.bads) scan;
   let mem := Scry.memScan pt fn g;
+  /-- A sink's pointer argument is checked against the **content** of every location it
+  may point at. A scalar argument has an empty closure, so this adds no facts for it. -/
+  let sinkLocs := Scry.rulePackConcat (fun s =>
+    List.map (fun l => Scry.SinkLoc.mk s.node s.arg l) (Scry.ptClosure pt fn.name s.var))
+    sinks;
   Scry.FuncPlan.mk info (Scry.entryNode g) (Scry.paramMap 0 fn.params)
     (Scry.retPoints g) sources sans sinks bads
-    mem.stores mem.loads mem.warnings .nil
+    mem.stores mem.loads sinkLocs mem.copies mem.warnings .nil
 
 -- ## The Datalog program
 
@@ -622,29 +754,49 @@ def Scry.rtRuleMemLoad : Scry.Rule Nat :=
     , Scry.Atom.pos 12 [Scry.Term.var 2, Scry.Term.var 0, Scry.Term.var 1]
     , Scry.Atom.neg 3 [Scry.Term.var 0, Scry.Term.var 1] ]
 
+/-- **Buffer-content sink**: a sink argument may point at a location whose bytes are
+tainted. `system(buf)` after `strcat(buf, t)` is this rule; the sink's argument
+register itself need not be tainted. -/
+def Scry.rtRuleAlertBuf : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 5 [Scry.Term.var 0, Scry.Term.var 1])
+    [ Scry.Atom.pos 13 [Scry.Term.var 2]
+    , Scry.Atom.pos 14 [Scry.Term.var 0, Scry.Term.var 1, Scry.Term.var 2] ]
+
+/-- **Content copy**: the destination object receives the source object's content. This
+is the concatenation/growth step: `strcpy`, `strcat` and the formatted family all add a
+`mcopy` row, so a buffer keeps the taint of every value copied or appended into it. -/
+def Scry.rtRuleMemCopy : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 13 [Scry.Term.var 0])
+    [ Scry.Atom.pos 13 [Scry.Term.var 2]
+    , Scry.Atom.pos 15 [Scry.Term.var 0, Scry.Term.var 1, Scry.Term.var 2,
+        Scry.Term.var 3] ]
+
 /-- The program without the memory relations: a function whose plan has no store, no
 load and no seeded location cannot use them, and the smaller program keeps the summary
 fixpoint cheap for memory-free code. -/
 def Scry.ruleTaintProgramPlain : Scry.Program Nat :=
-  Scry.Program.mk Scry.rtOps [3, 2, 3, 2, 2, 2, 2, 2, 1, 1, 2] [] []
+  Scry.Program.mk Scry.rtOps [3, 2, 3, 2, 2, 2, 2, 2, 1, 1, 2, 3, 3, 1, 3, 4] [] []
     [ Scry.rtRuleSrc
     , Scry.rtRuleParam
     , Scry.rtRuleRetSrc
     , Scry.rtRuleProp
     , Scry.rtRuleAlert
+    , Scry.rtRuleAlertBuf
     , Scry.rtRuleBad ]
 
 /-- Arity 3 `flow`, then the rule-pack relations; see the module header. This is the
 full program (with `mstore`/`mload`/`mtainted`). -/
 def Scry.ruleTaintProgram : Scry.Program Nat :=
-  Scry.Program.mk Scry.rtOps [3, 2, 3, 2, 2, 2, 2, 2, 1, 1, 2, 3, 3, 1] [] []
+  Scry.Program.mk Scry.rtOps [3, 2, 3, 2, 2, 2, 2, 2, 1, 1, 2, 3, 3, 1, 3, 4] [] []
     [ Scry.rtRuleSrc
     , Scry.rtRuleParam
     , Scry.rtRuleRetSrc
     , Scry.rtRuleProp
     , Scry.rtRuleAlert
+    , Scry.rtRuleAlertBuf
     , Scry.rtRuleBad
     , Scry.rtRuleMemStore
+    , Scry.rtRuleMemCopy
     , Scry.rtRuleMemLoad ]
 
 /-- The program a plan needs: the full one only when the plan has a store, a load or a
@@ -695,10 +847,16 @@ def Scry.planInput (plan : Scry.FuncPlan) (paramTaint : List Nat)
   let st7 := Scry.rtAddTuples Scry.rtBadCall badRows st6;
   let st8 := Scry.rtAddTuples Scry.rtMStore (Scry.memRows plan.mstores) st7;
   let st9 := Scry.rtAddTuples Scry.rtMLoad (Scry.memRows plan.mloads) st8;
+  let sinkBufRows := List.map (fun s => List.cons s.node (List.cons s.arg (List.cons s.loc .nil)))
+    plan.sinkLocs;
+  let st9a := Scry.rtAddTuples Scry.rtSinkBuf sinkBufRows st9;
+  let copyRows := List.map (fun c => List.cons c.dst
+    (List.cons c.node (List.cons c.src (List.cons c.var .nil)))) plan.mcopies;
+  let st9b := Scry.rtAddTuples Scry.rtMCopy copyRows st9a;
   -- tainted locations from other functions' summaries (and this function's previous
   -- rounds): an `mtainted` EDB fact per distinct location
   let seedRows := List.map (fun m => (.cons m.loc .nil : List Nat)) (Scry.dedupSeeds plan.seeds);
-  Scry.rtAddTuples Scry.rtMTainted seedRows st9
+  Scry.rtAddTuples Scry.rtMTainted seedRows st9b
 
 -- ## Reading a result
 
@@ -756,9 +914,10 @@ def Scry.chainFunc (d : String) (n : Scry.ChainNode) : String :=
 /-- Walk a derivation back to its seed, collecting nodes oldest first. A plain
 propagation step is `.flow`. A step whose premise is `mtainted` came **through memory**:
 the `mtainted` half contributes the value's own chain plus the `.store` node, and this
-half is the `.load` node. An `mtainted` fact with no premise is a seed from another
-function's summary: the path names that function's store and
-`Scry.Interproc.extendPath` expands it. -/
+half is the `.load` node. An `mtainted` derived by a **content copy** (`mcopy`) is the
+copy point: the source location's chain plus a `.store` node at the copy. An `mtainted`
+fact with no premise is a seed from another function's summary: the path names that
+function's store and `Scry.Interproc.extendPath` expands it. -/
 partial def Scry.rtChainKinds {L : Type} (st : Scry.State L) (seeds : List Scry.MemSeed)
     (id : Nat) : List Scry.ChainNode :=
   match Scry.stepByIdL st.nodes id with
@@ -767,11 +926,26 @@ partial def Scry.rtChainKinds {L : Type} (st : Scry.State L) (seeds : List Scry.
     match Nat.beq step.fact.rel Scry.rtMTainted with
     | .true => match Scry.rtPremiseOfRel st step Scry.rtTainted with
       | .none =>
-        let loc := Scry.rtRowNat step.fact.args 0;
-        match List.find (fun m => Nat.beq m.loc loc) seeds with
-        | .some m => List.cons (Scry.ChainNode.mk (.some m.func) m.point m.var
-            Scry.PathKind.store) .nil
-        | .none => .nil
+        match Scry.rtPremiseOfRel st step Scry.rtMCopy with
+        | .some cid =>
+          let from : List Scry.ChainNode :=
+            match Scry.rtPremiseOfRel st step Scry.rtMTainted with
+            | .some mid => Scry.rtChainKinds st seeds mid
+            | .none => .nil;
+          let copyNode : Option (Nat × Nat) :=
+            match Scry.stepByIdL st.nodes cid with
+            | .some cs => .some (Scry.rtRowNat cs.fact.args 1, Scry.rtRowNat cs.fact.args 3)
+            | .none => .none;
+          match copyNode with
+          | .none => from
+          | .some sn => List.append from
+              (List.cons (Scry.mkK sn Scry.PathKind.store) .nil)
+        | .none =>
+          let loc := Scry.rtRowNat step.fact.args 0;
+          match List.find (fun m => Nat.beq m.loc loc) seeds with
+          | .some m => List.cons (Scry.ChainNode.mk (.some m.func) m.point m.var
+              Scry.PathKind.store) .nil
+          | .none => .nil
       | .some pid =>
         let fromTaint := Scry.rtChainKinds st seeds pid;
         let storeNode : Option (Nat × Nat) :=
@@ -811,6 +985,18 @@ def Scry.rtSeedKind (st : Scry.State Nat) (n v : Nat) : Scry.PathKind :=
 def Scry.chainNodeToPath (d : String) (n : Scry.ChainNode) : Scry.PathNode :=
   Scry.PathNode.mk (Scry.chainFunc d n) n.point n.var n.kind
 
+/-- Turn a provenance walk into path nodes; the first node gets its seed kind from the
+rule that introduced it when the walk did not cross into another function. -/
+def Scry.chainNodesToPath (func : String) (seeds : List Scry.MemSeed) (st : Scry.State Nat)
+    (id : Nat) : List Scry.PathNode :=
+  match Scry.rtChainKinds st seeds id with
+  | .nil => .nil
+  | .cons x rest =>
+    let first := match x.func with
+      | .some _ => Scry.chainNodeToPath func x
+      | .none => Scry.PathNode.mk func x.point x.var (Scry.rtSeedKind st x.point x.var);
+    List.cons first (List.map (Scry.chainNodeToPath func) rest)
+
 /-- The path from the taint seed to the definition `(n, v)` in this function, using the
 engine's provenance (through memory when the definition is a load, and across functions
 through a memory seed). The last node is `(n, v)`; an untainted query gives `[]`. -/
@@ -818,14 +1004,16 @@ def Scry.chainToDef (func : String) (seeds : List Scry.MemSeed) (st : Scry.State
     (n v : Nat) : List Scry.PathNode :=
   match Scry.State.whyTuple st Scry.rtOps Scry.rtTainted [U64.ofNat n, U64.ofNat v] with
   | .none => .nil
-  | .some step =>
-    match Scry.rtChainKinds st seeds step.id with
-    | .nil => .nil
-    | .cons x rest =>
-      let first := match x.func with
-        | .some _ => Scry.chainNodeToPath func x
-        | .none => Scry.PathNode.mk func x.point x.var (Scry.rtSeedKind st x.point x.var);
-      List.cons first (List.map (Scry.chainNodeToPath func) rest)
+  | .some step => Scry.chainNodesToPath func seeds st step.id
+
+/-- The path from the taint seed to the **content** of location `loc`: the store or copy
+that put the bytes there, and its source. This is the buffer-content counterpart of
+`chainToDef`, used by a sink on a pointer argument. -/
+def Scry.chainToLoc (func : String) (seeds : List Scry.MemSeed) (st : Scry.State Nat)
+    (loc : Nat) : List Scry.PathNode :=
+  match st.findStep Scry.rtOps (Scry.PFact.mk Scry.rtMTainted [U64.ofNat loc] .none) with
+  | .none => .nil
+  | .some step => Scry.chainNodesToPath func seeds st step.id
 
 /-- The tainted definition reaching a sink argument, from the alert's provenance. -/
 def Scry.alertDef (st : Scry.State Nat) (sink arg : Nat) : Option (Nat × Nat) :=
@@ -837,6 +1025,18 @@ def Scry.alertDef (st : Scry.State Nat) (sink arg : Nat) : Option (Nat × Nat) :
     | .some pid => match Scry.stepByIdL st.nodes pid with
       | .none => .none
       | .some s => .some (Scry.rtRowNat s.fact.args 0, Scry.rtRowNat s.fact.args 1)
+
+/-- The location whose **content** reached a sink argument, when the alert came from the
+buffer-content rule (`mtainedt` + `sinkbuf`). -/
+def Scry.alertBufLoc (st : Scry.State Nat) (sink arg : Nat) : Option Nat :=
+  match Scry.State.whyTuple st Scry.rtOps Scry.rtAlert [U64.ofNat sink, U64.ofNat arg] with
+  | .none => .none
+  | .some step =>
+    match Scry.rtPremiseOfRel st step Scry.rtMTainted with
+    | .none => .none
+    | .some mid => match Scry.stepByIdL st.nodes mid with
+      | .none => .none
+      | .some s => .some (Scry.rtRowNat s.fact.args 0)
 
 -- ## Evaluating one function
 
@@ -908,7 +1108,16 @@ def Scry.resultTaintFindings (r : Scry.FuncResult) : List Scry.RuleFinding :=
     let path := match Scry.alertDef st sink arg with
       | .some d => List.append (Scry.chainToDef r.fn.name r.plan.seeds st d.1 d.2)
           (List.cons (Scry.PathNode.mk r.fn.name sink d.2 Scry.PathKind.sink) .nil)
-      | .none => List.cons (Scry.PathNode.mk r.fn.name sink 0 Scry.PathKind.sink) .nil;
+      | .none => match Scry.alertBufLoc st sink arg with
+        /-- A buffer-content alert: the path is the content's chain (ending at the copy
+        or store that wrote the bytes) and the sink. The sink's register is the
+        argument's pointer register, which is what a reader needs to locate it. -/
+        | .some l => match List.find (fun s => Bool.and (Nat.beq s.node sink)
+              (Nat.beq s.arg arg)) r.plan.sinks with
+          | .some s => List.append (Scry.chainToLoc r.fn.name r.plan.seeds st l)
+              (List.cons (Scry.PathNode.mk r.fn.name sink s.var Scry.PathKind.sink) .nil)
+          | .none => List.cons (Scry.PathNode.mk r.fn.name sink 0 Scry.PathKind.sink) .nil
+        | .none => List.cons (Scry.PathNode.mk r.fn.name sink 0 Scry.PathKind.sink) .nil;
     List.map (fun f => Scry.RuleFinding.mk f.rule f.severity f.message Scry.FindingKind.taint
       r.fn.name sink f.name f.arg path) facts) alerts
 

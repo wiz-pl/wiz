@@ -264,7 +264,7 @@ def group : Group where
           "#eval Nat.add (Nat.mul (List.length Scry.demoRules.rules) 10000) (Nat.add (Nat.mul (List.length (Scry.RulePack.taintRules Scry.demoRules)) 1000) (Nat.add (Nat.mul (List.length (Scry.RulePack.forbiddenRules Scry.demoRules)) 100) (Nat.add (Nat.mul (totalSinks (Scry.RulePack.taintRules Scry.demoRules)) 10) (totalSources (Scry.RulePack.taintRules Scry.demoRules)))))\n" ++
           "#eval if Scry.nameMatches \"mem*\" \"memcpy\" then 1 else 0\n" ++
           "#eval if Scry.nameMatches \"strcpy*\" \"astrcpy\" then 1 else 0\n" ++
-          "#eval match Scry.Program.check Scry.ruleTaintProgram with | .none => 999 | .some st => List.length st") [42245, 1, 0, 14]
+          "#eval match Scry.Program.check Scry.ruleTaintProgram with | .none => 999 | .some st => List.length st") [42245, 1, 0, 16]
         evalRuleTexts (rulePrelude ++
           "#eval ruleSev Scry.demoRules.rules \"gets-overflow\"\n" ++
           "#eval ruleKind Scry.demoRules.rules \"gets-overflow\"")
@@ -429,6 +429,65 @@ def group : Group where
         ("#eval List.length (Scry.RulePack.withModels Scry.demoRules).rules\n" ++
          "#eval List.length (Scry.RulePack.withModels (Scry.RulePack.withModels Scry.demoRules)).rules\n" ++
          "#eval List.length (Scry.RulePack.withModels (Scry.parseRulePack \"\")).rules") [6, 6, 4] },
+    { name := "string transfers: the copy and formatted families and the result buffer",
+      run := fun _ => evalRuleNats ("#eval List.length (List.filter (fun n => Scry.strTransferKnown n)\n" ++
+        "  [\"strcpy\", \"strncpy\", \"stpcpy\", \"strcat\", \"strncat\", \"strlcpy\", \"strlcat\",\n" ++
+        "   \"memcpy\", \"memmove\", \"sprintf\", \"snprintf\", \"vsprintf\", \"vsnprintf\"])\n" ++
+        "#eval List.length (Scry.strArgPairs \"strcpy\" 2)\n" ++
+        "#eval List.length (Scry.strArgPairs \"strcat\" 2)\n" ++
+        "#eval List.length (Scry.strArgPairs \"sprintf\" 4)\n" ++
+        "#eval List.length (Scry.strArgPairs \"snprintf\" 5)\n" ++
+        "#eval List.length (Scry.strArgPairs \"vsnprintf\" 5)\n" ++
+        "#eval List.length (Scry.strArgPairs \"strdup\" 2)\n" ++
+        "#eval List.length (Scry.strResultPairs \"strdup\" 2)\n" ++
+        "#eval match Scry.strArgPairs \"strcpy\" 2 with\n" ++
+        "  | .cons p .nil => Nat.add (Nat.mul p.1 10) p.2\n" ++
+        "  | _ => 99\n" ++
+        "#eval match Scry.strArgPairs \"snprintf\" 5 with\n" ++
+        "  | .cons a (.cons b _) => Nat.add (Nat.mul a.1 10) a.2\n" ++
+        "  | _ => 99") [13, 1, 1, 3, 3, 3, 0, 1, 1, 2] },
+    { name := "buffer content: a copy then system(buf) is a tainted-content path",
+      run := fun _ => evalRuleNats (rulePrelude ++
+        "def prS : Scry.ProgramResult := Scry.analyze Scry.copySinkProgram Scry.demoRules\n" ++
+        "def sf : List Scry.RuleFinding := Scry.programFindings prS\n" ++
+        "def sp : List Scry.PathNode := match sf with | .cons f _ => f.path | .nil => []\n" ++
+        "#eval List.length sf\n" ++
+        "#eval List.length sp\n" ++
+        "#eval kindsCode sp\n" ++
+        "#eval firstPt sp\n" ++
+        "#eval lastPt sp") [1, 3, 801, 2, 4] },
+    { name := "buffer content: a copy from a clean value is not a finding",
+      run := fun _ => evalRuleNats
+        "#eval List.length (Scry.programFindings (Scry.analyze Scry.copySafeProgram Scry.demoRules))" [0] },
+    { name := "buffer content: a formatted destination reaching printf is a format-string",
+      run := fun _ => do
+        evalRuleNats (rulePrelude ++
+          "def prF : Scry.ProgramResult := Scry.analyze Scry.sprintfSinkProgram Scry.demoRules\n" ++
+          "def ff : List Scry.RuleFinding := Scry.programFindings prF\n" ++
+          "#eval List.length ff\n" ++
+          "#eval match ff with | .cons f _ => f.sink | .nil => 99\n" ++
+          "#eval match ff with | .cons f _ => kindsCode f.path | .nil => 0") [1, 4, 801]
+        evalRuleTexts ("#eval match Scry.programFindings (Scry.analyze Scry.sprintfSinkProgram Scry.demoRules) with | .cons f _ => f.rule | .nil => \"\"") ["\"format-string\""] },
+    { name := "buffer content: content crosses a call through the parameter's location",
+      run := fun _ => evalRuleNats (rulePrelude ++
+        "def prL : Scry.ProgramResult := Scry.analyze Scry.relayProgram Scry.demoRules\n" ++
+        "def lf : List Scry.RuleFinding := Scry.programFindings prL\n" ++
+        "def lp : List Scry.PathNode := match lf with | .cons f _ => f.path | .nil => []\n" ++
+        "#eval List.length lf\n" ++
+        "#eval kindsCode lp\n" ++
+        "#eval lastPt lp") [1, 8101, 3] },
+    { name := "buffer content: concatenation and formatting join into one destination",
+      run := fun _ => evalRuleNats (rulePrelude ++
+        "def anyStore : List Scry.PathNode → Bool\n" ++
+        "  | .nil => .false\n" ++
+        "  | .cons p ps => Bool.or (match p.kind with | .store => .true | _ => .false) (anyStore ps)\n" ++
+        "def prC : Scry.ProgramResult := Scry.analyze Scry.concatSinkProgram Scry.demoRules\n" ++
+        "def cf : List Scry.RuleFinding := Scry.programFindings prC\n" ++
+        "def cp : List Scry.PathNode := match cf with | .cons f _ => f.path | .nil => []\n" ++
+        "#eval List.length cf\n" ++
+        "#eval if anyStore cp then 1 else 0\n" ++
+        "#eval firstPt cp\n" ++
+        "#eval lastPt cp") [1, 1, 4, 8] },
     { name := "certificates: the derivation checks, reports axioms, and a tampered one is rejected",
       run := fun _ => do
         evalRuleNats (rulePrelude ++
