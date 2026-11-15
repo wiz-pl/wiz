@@ -65,8 +65,8 @@ partial def unlazyCon : Val R → Val R
 partial def vFst : Val R → Val R
   -- (given) a projection of a glued value stays glued, like an application (`vApp`):
   -- `(f a).1` is computed only when needed (`f a` may be a big computation)
-  | .unfold n us sp v => .unfold n us (sp.push .fst) (Thunk.mk fun _ => vFst v.get)
-  | .lazyInd l I D w P m i x sp v => .lazyInd l I D w P m i x (sp.push .fst) (Thunk.mk fun _ => vFst v.get)  -- (given)
+  | .unfold n us sp v => .unfold n us (sp.push .fst) (memoThunk fun _ => vFst v.get)
+  | .lazyInd l I D w P m i x sp v => .lazyInd l I D w P m i x (sp.push .fst) (memoThunk fun _ => vFst v.get)  -- (given)
   --<sol
   | .pair a _ => a
   | .neutral h sp => .neutral h (sp.push .fst)
@@ -77,8 +77,8 @@ partial def vFst : Val R → Val R
 
 /-- **Exercise 4.4c.** Second projection. -/
 partial def vSnd : Val R → Val R
-  | .unfold n us sp v => .unfold n us (sp.push .snd) (Thunk.mk fun _ => vSnd v.get)  -- (given)
-  | .lazyInd l I D w P m i x sp v => .lazyInd l I D w P m i x (sp.push .snd) (Thunk.mk fun _ => vSnd v.get)  -- (given)
+  | .unfold n us sp v => .unfold n us (sp.push .snd) (memoThunk fun _ => vSnd v.get)  -- (given)
+  | .lazyInd l I D w P m i x sp v => .lazyInd l I D w P m i x (sp.push .snd) (memoThunk fun _ => vSnd v.get)  -- (given)
   --<sol
   | .pair _ b => b
   | .neutral h sp => .neutral h (sp.push .snd)
@@ -90,7 +90,7 @@ partial def vSnd : Val R → Val R
 /-- `down` (Q4): `down (up a) ↦ a`; stuck on a neutral. -/
 partial def vDown : Val R → Val R
   | .unfold _ _ _ v => vDown v.get
-  | .lazyInd l I D w P m i x sp v => .lazyInd l I D w P m i x (sp.push .down) (Thunk.mk fun _ => vDown v.get)
+  | .lazyInd l I D w P m i x sp v => .lazyInd l I D w P m i x (sp.push .down) (memoThunk fun _ => vDown v.get)
   | .up a => a
   | .neutral h sp => .neutral h (sp.push .down)
   | _ => panic! "vDown: ill-typed"
@@ -213,14 +213,36 @@ partial def sizePred? : Val R → Option (Val R)
 space), so no user term evaluates to a closure that carries it. -/
 def eqReductMark : Val R := .neutral (.global " eq-reduct" []) #[]
 
-/-- The equation `a =_A b` that `vEq` computed (at a Σ type `A`) to this Σ, read back from
-its closure: `(A, a, b)`. Only a Σ that carries `eqReductMark` qualifies. With
-`Globals.quoteEqs` (the elaborator), `quote` reads such a Σ back as the equation `a = b`
-(which evaluates to it again), so the equation survives a read-back (a `match` clause's
-motive), and `rfl` can prove it by one `refl`. -/
+/-- The equation `a =_A b` that `vEq` computed to this Σ, read back from its closure:
+`(A, a, b)`. A structural Σ carries `eqReductMark`; a data type's payload Σ carries
+`eqDataMark` at the end of its environment. With `Globals.quoteEqs` (the elaborator),
+`quote` reads such a Σ back as the equation `a = b` (which evaluates to it again), so
+the equation survives a read-back (a `match` clause's motive), and `rfl` can prove it
+by one `refl`. -/
 def eqSigmaSides? : Val R → Option (Val R × Val R × Val R)
   | .sigma "e" _ _ (.mk [b, a, _, _, A, .neutral (.global " eq-reduct" []) #[]] _) _ => some (A, a, b)
+  -- a data type's equation (`vEq` at a `μ`): the original sides ride at the end of the
+  -- outermost Σ's environment, after `eqDataMark`
+  | .sigma _ _ _ (.mk env _) _ =>
+    match env.reverse with
+    | .neutral (.global " eq-reduct-data" []) #[] :: A :: a :: b :: _ => some (A, a, b)
+    | _ => none
   | _ => none
+
+/-- The mark a data type's computed equation carries (as `eqReductMark` does for a
+structural Σ). The name cannot be written, so no user term builds a closure with it. -/
+def eqDataMark : Val R := .neutral (.global " eq-reduct-data" []) #[]
+
+/-- Put the original equation's type and sides at the end of a computed data-type
+equation's outermost Σ environment. The body does not use them (it indexes from the
+head), so the value, its type and its computation are unchanged; `eqSigmaSides?` reads
+them back, and `quote` with `quoteEqs` gives the equation again, so `rfl` is one
+`refl` rather than a structural proof over the whole value. -/
+def markDataEq (v : Val R) (A a b : Val R) : Val R :=
+  match v with
+  | .sigma x q fst (.mk env body) s =>
+    .sigma x q fst (.mk (env ++ [b, a, A, eqDataMark]) body) s
+  | _ => v
 
 mutual
 
@@ -260,7 +282,7 @@ partial def eval (g : Globals R) (env : Env R) : Term R → Val R
   | .const n us => if let some v := vBuiltin? g n then v else match g.find? n with
     | some { value := some v, levelParams, inline, .. } =>
       if inline || g.eager then eval g [] (g.instValue n v levelParams us)
-      else .unfold n us #[] (Thunk.mk fun _ => eval g [] (g.instValue n v levelParams us))
+      else .unfold n us #[] (memoThunk fun _ => eval g [] (g.instValue n v levelParams us))
     | _ => .neutral (.global n us) #[]
   | .natLit n => .natLit n
   | .natOp op args => vNatOp g op (args.map (eval g env))
@@ -415,8 +437,8 @@ A `lam` β-reduces; a neutral grows its spine (with `Elim.app`). Anything else i
 type error that the checker should have ruled out (use `panic!`). -/
 partial def vApp (g : Globals R) : Val R → Val R → Val R
   -- (given) a glued application grows its spine, and its unfolding lazily
-  | .unfold n us sp v, a => .unfold n us (sp.push (.app a)) (Thunk.mk fun _ => vApp g v.get a)
-  | .lazyInd l I D w P m i x sp v, a => .lazyInd l I D w P m i x (sp.push (.app a)) (Thunk.mk fun _ => vApp g v.get a)
+  | .unfold n us sp v, a => .unfold n us (sp.push (.app a)) (memoThunk fun _ => vApp g v.get a)
+  | .lazyInd l I D w P m i x sp v, a => .lazyInd l I D w P m i x (sp.push (.app a)) (memoThunk fun _ => vApp g v.get a)
   --<sol
   | .lam _ c, a => Closure.inst g c a
   | .neutral h sp, a => .neutral h (sp.push (.app a))
@@ -605,7 +627,7 @@ partial def vNatOp (g : Globals R) (op : Name) (args : Array (Val R)) : Val R :=
     | some n =>
       if stuckSub then .neutral (.global n []) (args.map .app)
       else if op == "nat.succ" then args.foldl (vApp g) d
-      else .unfold n [] (args.map .app) (Thunk.mk fun _ => args.foldl (vApp g) d)
+      else .unfold n [] (args.map .app) (memoThunk fun _ => args.foldl (vApp g) d)
     | none => panic! s!"no definition for builtin {op}"
   match lits with
   | some ns => match natNative? op ns, op, ns with
@@ -675,9 +697,9 @@ cost its length (`wiz-notes/kernel-eval.md`). Not for a normal form (`g.eager`, 
 (the D1 experiments' loops are loops of that evaluator). -/
 partial def vInd (g : Globals R) (l : Level) (I D : Val R) (v : Level) (P m i x : Val R) : Val R :=
   match whnf x with
-  | .natLit (_ + 1) => .lazyInd l I D v P m i x #[] (Thunk.mk fun _ => vIndStep g l I D v P m i x)
+  | .natLit (_ + 1) => .lazyInd l I D v P m i x #[] (memoThunk fun _ => vIndStep g l I D v P m i x)
   | .con _ => if g.eager || !g.lazyProofs then vIndStep g l I D v P m i x
-    else .lazyInd l I D v P m i x #[] (Thunk.mk fun _ => vIndStep g l I D v P m i x)
+    else .lazyInd l I D v P m i x #[] (memoThunk fun _ => vIndStep g l I D v P m i x)
   | _ => vIndStep g l I D v P m i x
 
 /-- **Exercise 4.22a.** Sized recursion unfolds on a constructor, with the recursive
@@ -768,6 +790,10 @@ Reference: Pujet & Tabareau, *Observational Equality: Now for Good* (POPL 2022).
 it's stuck. At a proposition (`propSort?`), the equation is `True` (proof irrelevance);
 in the Σ rule, if `A₁` is a proposition, the proof is just `reflTy (B p.1)`. -/
 partial def vEq (g : Globals R) (A a b : Val R) : Val R :=
+  -- (the original sides, for a computed equation's marker: `rfl` recovers them)
+  let A0 := A
+  let a0 := a
+  let b0 := b
   -- numerals: decide directly, or else look one step inside (`vNatView`)
   if let (.natLit n, .natLit m) := (whnf a, whnf b) then (if n == m then .unit 0 else .empty 0) else
   -- (stuck, it keeps its sides as written: their names, for display and for `match`)
@@ -815,7 +841,7 @@ partial def vEq (g : Globals R) (A a b : Val R) : Val R :=
     | .tag _ i, .tag _ j => if i == j then .unit 0 else .empty 0
     | _, _ => stuck
   | .mu l I D i _ _ => match a, b with
-    | .con x, .con y => (vEqPayload g l I (muFamily l I D) i D x y).getD stuck
+    | .con x, .con y => markDataEq ((vEqPayload g l I (muFamily l I D) i D x y).getD stuck) A0 a0 b0
     | _, _ => stuck
   | .sort l =>
     if l.equiv 0 then
