@@ -6,7 +6,7 @@ Foundations*: each stage of the implementation is a set of exercises, with a tes
 that tells you when you've got them right. The toolchain is self-hosted: its kernel,
 elaborator and compiler are also written in Wiz.
 
-```
+```wiz
 def id {0 A : Type} (1 x : A) : A := x
 ```
 

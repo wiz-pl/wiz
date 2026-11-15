@@ -53,7 +53,8 @@ defaults:
 
 jobs:
   # Path filters: which jobs a pull request needs (scripts/ci.py changes; the shards'
-  # "inputs" in .github/test-shards.json). A docs-only PR builds and tests nothing; a PR
+  # "inputs" in .github/test-shards.json). A docs-only PR builds no shard and runs no
+  # test, but it does check the documentation's Wiz examples (docs_examples); a PR
   # touching only lib/ files no core test reads skips the core shard; the selfhost
   # shards run for selfhost/ and the lib/ files it imports. Everything but a
   # pull_request (pushes, the merge queue, manual runs) runs every job except `package`,
@@ -96,6 +97,53 @@ jobs:
         run: |
           python3 scripts/check-docs-style.py --self-test
           python3 scripts/check-docs-style.py
+
+  # The Wiz snippets in docs/**/*.md (scripts/check-docs-examples.py). A docs-only
+  # pull request has no `build` job, so this one restores the .lake build from the
+  # same key `build` uses, builds only `wiz` (a no-op on an exact cache hit), and
+  # checks the snippets. A pull request that changes code runs the same check in
+  # `build`, after the build it already has.
+  docs_examples:
+    name: docs examples
+    needs: changes
+    if: github.event_name != 'schedule' && needs.changes.outputs.code == 'false' && needs.changes.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Cache key
+        id: key
+        shell: bash
+        run: |
+          echo "lake=lake-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-${{ hashFiles('lakefile.lean', '**/*.lean') }}" >> "$GITHUB_OUTPUT"
+          echo "compiler=${{ hashFiles('flake.lock', 'flake.nix', 'lean-toolchain', 'lake-manifest.json', 'lakefile.lean', '**/*.lean', 'runtime/**', 'c/**') }}" >> "$GITHUB_OUTPUT"
+      - name: Restore the Lake build
+        uses: actions/cache/restore@v4
+        with:
+          path: .lake
+          key: ${{ steps.key.outputs.lake }}
+          restore-keys: lake-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-
+      - name: Build wiz (a no-op after an exact restore)
+        shell: bash
+        run: |
+          lake build wiz
+          [ -x .lake/build/bin/wiz ] || { echo "::error::.lake/build/bin/wiz is missing"; exit 1; }
+      - name: Restore the docs examples cache
+        uses: actions/cache@v4
+        with:
+          path: .lake/docs-examples
+          key: docs-examples-${{ runner.os }}-${{ steps.key.outputs.compiler }}
+          restore-keys: docs-examples-${{ runner.os }}-
+      - name: Check the docs examples
+        shell: bash
+        run: |
+          python3 scripts/check-docs-examples.py --self-test
+          .lake/build/bin/wiz --version
+          python3 scripts/check-docs-examples.py --wiz .lake/build/bin/wiz
 
   build:
     name: build
@@ -158,6 +206,19 @@ jobs:
         # cc -fsyntax-only -Wall -Wextra, with WIZ_API= (the object ABI) and WIZ_API=static
         # (a generated program); the header's prototypes are checked against the parts
         run: scripts/test-runtime.sh
+      - name: Restore the docs examples cache
+        uses: actions/cache@v4
+        with:
+          path: .lake/docs-examples
+          key: docs-examples-${{ runner.os }}-${{ steps.key.outputs.compiler }}
+          restore-keys: docs-examples-${{ runner.os }}-
+      - name: Check the docs examples
+        # the Wiz blocks in docs/**/*.md; a code change can stale one even without a
+        # docs change, so every build checks them (seconds on a warm cache)
+        shell: bash
+        run: |
+          python3 scripts/check-docs-examples.py --self-test
+          python3 scripts/check-docs-examples.py --wiz .lake/build/bin/wiz
 
   test:
     name: test (${{ matrix.shard.name }})
@@ -425,7 +486,7 @@ jobs:
   # One check for branch protection, and the whole suite's summary.
   result:
     name: CI result
-    needs: [changes, docs_style, build, test, trust-ledger, package]
+    needs: [changes, docs_style, docs_examples, build, test, trust-ledger, package]
     if: always() && github.event_name != 'schedule'
     runs-on: ubuntu-latest
     permissions:
@@ -508,15 +569,20 @@ jobs:
       - name: Verdict
         shell: bash
         run: |
-          echo "changes: ${{ needs.changes.result }} (code: ${{ needs.changes.outputs.code }}, shards: ${{ needs.changes.outputs.shards }})"
+          echo "changes: ${{ needs.changes.result }} (code: ${{ needs.changes.outputs.code }}, docs: ${{ needs.changes.outputs.docs }}, shards: ${{ needs.changes.outputs.shards }})"
           echo "docs style: ${{ needs.docs_style.result }}"
+          echo "docs examples: ${{ needs.docs_examples.result }}"
           echo "trust ledger: ${{ needs['trust-ledger'].result }}"
           echo "build: ${{ needs.build.result }}, test: ${{ needs.test.result }}, package: ${{ needs.package.result }}"
           # the path filter must have run; a job it skipped is not a failure, but outside
           # pull requests (and whenever the filter wants them) every job must succeed
           [ "${{ needs.changes.result }}" = success ] || exit 1
           code="${{ needs.changes.outputs.code }}"
+          docs="${{ needs.changes.outputs.docs }}"
           want_tests=$([ "${{ needs.changes.outputs.shards }}" != "[]" ] && echo true || echo false)
+          # a docs-only change has no build job, so `docs_examples` builds wiz and checks
+          # the snippets; a code change runs the same check in `build`
+          want_docs_examples=$([ "$code" = false ] && [ "$docs" = true ] && echo true || echo false)
           # `package` runs on push and workflow_dispatch only, so a skipped package is
           # fine on a pull request (and on a docs-only push); on a code push it is needed
           want_package=$([ "$code" = true ] && { [ "${{ github.event_name }}" = push ] || [ "${{ github.event_name }}" = workflow_dispatch ]; } && echo true || echo false)
@@ -525,6 +591,7 @@ jobs:
             else [ "$2" = success ] || [ "$2" = skipped ] || { echo "$1: $2"; exit 1; }; fi
           }
           check "docs style" "${{ needs.docs_style.result }}" true
+          check "docs examples" "${{ needs.docs_examples.result }}" "$want_docs_examples"
           check "trust ledger" "${{ needs['trust-ledger'].result }}" "$code"
           check build "${{ needs.build.result }}" "$code"
           check test "${{ needs.test.result }}" "$want_tests"
