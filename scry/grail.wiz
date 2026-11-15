@@ -51,6 +51,13 @@ def package : Package := Package.new "scry"
        |> Command.arg "--stats"
        |> Command.input "fixtures/hello.c"
        |> Command.stdout "build/parse-native.txt")
+  -- Dynamic evidence: a malformed fixture's CST/ERROR spans as JSON (fuzz/run.py
+  -- embeds the same object in its report; this target keeps the CLI exercised).
+  |> Package.command (Command.new "fuzz-span" (Tool.exe "scry")
+       |> Command.arg "fuzz-span"
+       |> Command.arg "--json"
+       |> Command.input "fixtures/broken.c"
+       |> Command.stdout "build/fuzz-span.json")
   -- Schema codegen (design §4.2): `gen/C/Schema.wiz` is the checked-in output of this
   -- command, and `schema-check` (phony) refuses a stale one.
   |> Package.command (Command.new "schema" (Tool.exe "scry-schema")

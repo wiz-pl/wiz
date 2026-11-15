@@ -4,6 +4,7 @@ import Scry.Parse
 import Scry.CstStore
 import Scry.TaintCmd
 import Scry.BenchCmd
+import Scry.FuzzCmd
 /-!
 # Scry.Cli: the `scry` command line
 
@@ -18,6 +19,7 @@ scry query FILE --rel NAME      a relation's tuples
 scry explain FILE NODE          one node: span, parent, children, arcs, relations
 scry parse FILE… --stats        stats of JSON or scry-cst stores (no tree-sitter: S1)
 scry cst FILE OUT.cst           convert a JSON fact store to the native spill format
+scry fuzz-span FILE             map a fuzz artifact to CST spans (dynamic evidence)
 ```
 
 Exit status is 0 on success, 1 on an error (a message on stderr), 2 on a usage error.
@@ -45,6 +47,8 @@ def Scry.usage : String :=
   ++ "        [--markdown OUT] [--update-baseline FILE] [--no-timing] [--quiet]\n"
   ++ "        [--fail-on-regression]\n"
   ++ "                             run the taint corpus and compare with expectations\n"
+  ++ "  fuzz-span FILE [--offset N] [--json] [--out FILE]\n"
+  ++ "                             map a fuzz artifact's CST/ERROR spans for dynamic evidence\n"
   ++ "  help, --help               this text\n"
   ++ "  --version                  the version\n"
 
@@ -165,6 +169,7 @@ def Scry.dispatch (args : List String) : EIO Nat := match args with
     | _ => EIO.fail "usage: scry cst FILE OUT"
   | .cons "taint" rest => Scry.taintCmd rest
   | .cons "bench" rest => Scry.benchCmd rest
+  | .cons "fuzz-span" rest => Scry.fuzzSpanCmd rest
   | .cons cmd rest => EIO.fail ("unknown command \"" ++ cmd ++ "\" (see scry help)")
 
 /-- `main`: run a command and exit with its status (1 with a `scry: …` message on an

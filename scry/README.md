@@ -15,7 +15,7 @@ columns; no `TSNode` crosses the FFI. `src/Scry/Native.wiz` exposes the columns 
 cd scry
 cp ../grail.local.wiz .         # this machine's toolchain (not committed)
 grail build                     # check src/gen, build .grail/bin/scry, run the commands
-grail test                      # schema, cst, native shim, codegen, CLI, parse --stats, taint
+grail test                      # schema, cst, native shim, codegen, CLI, parse --stats, taint, fuzz spans
 grail build schema              # regenerate gen/C/Schema.wiz from node-types.json
 grail build schema-check        # fail if the checked-in schema is stale
 grail run scry -- parse --stats fixtures/hello.c
@@ -23,12 +23,14 @@ grail run scry -- parse --stats fixtures/broken.c
 grail run scry -- facts fixtures/demo.facts.json
 grail run scry -- query fixtures/demo.facts.json --kind call_expression
 grail run scry -- explain fixtures/demo.facts.json 4
+grail run scry -- fuzz-span fixtures/broken.c --json
 ```
 
 Commands: `facts`, `query --kind|--edge|--rel`, `explain`, `parse --stats` (a C source,
 a `scry-cst` spill, or a JSON store), `cst` (JSON store → spill), `taint` (C →
-Wil → taint → findings/SARIF), and `bench` (run the checked-in taint corpus and compare
-findings with its manifest). `parse --stats` prints counts only; the perf agent owns
+Wil → taint → findings/SARIF), `bench` (run the checked-in taint corpus and compare
+findings with its manifest), and `fuzz-span` (map a fuzz artifact to CST spans for the
+dynamic-evidence report). `parse --stats` prints counts only; the perf agent owns
 throughput numbers.
 
 ## `scry taint`: C → Wil → taint → findings/SARIF
@@ -160,6 +162,35 @@ is not a `perf-run` measurement, and the perf agent owns real numbers.
 `tests/bench.wiz` checks the metric formulas, the boundary/path/outcome rules, the
 missing-corpus skip, and that the corpus still matches `bench/baseline.json`. The corpus
 policy and the external-manifest hook are in `bench/corpus/README.md`.
+
+## Fuzzing the C front end (dynamic evidence)
+
+`fuzz/` runs a bounded libFuzzer campaign over the vendored C shim and tree-sitter,
+with `-fsanitize=fuzzer,address,undefined`. The target checks the struct-of-arrays
+contract (preorder ids, parent/CSR/edge agreement, in-range ids, spans inside the input,
+`ERROR`/`MISSING` flags); a violation, ASan report or UBSan report is minimised and
+deduplicated by stack signature. `scry fuzz-span FILE [--offset N] [--json]` maps an
+artifact to the same `start`/`stop` span shape the static findings use, including the
+smallest CST node containing an invariant's `input_offset`.
+
+```sh
+cd scry
+./.grail/bin/scry bench --no-timing --json build/bench.json
+python3 fuzz/run.py --build --runs 5000 --time 15 --seed 20261115 \
+  --static build/bench.json --out build/fuzz
+```
+
+The driver seeds from `bench/corpus/**/*.c` plus the taint fixtures, sweeps the static
+corpus once under the same sanitizers, and writes `build/fuzz/dynamic.json` and
+`dynamic.md` with a `dynamic` evidence section beside the static `scry bench` cases. A
+missing clang/libFuzzer is a clean skip (exit 0). Finding no crash in a bounded run is
+**not** evidence of safety; the target covers the C parser boundary, not the Wiz
+lowering/taint pipeline. `fuzz/README.md` has the schema, the exact bounds and the
+limits.
+
+`tests/fuzz.wiz` checks the span mapper and the JSON shape on `fixtures/broken.c`. The
+first harness run found and this branch fixes a 744-byte leak on every successful parse
+in `native/ts_shim.c`; that is a dynamic finding, not a clean bill of health.
 
 Limits: the shim is sequential (one parser, one tree, one file) and tree-sitter-c is the
 only grammar. Threads, a native store shared across files, and tree-sitter queries are

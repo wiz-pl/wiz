@@ -982,3 +982,24 @@ expected `(rule, function, callee, argument)` tuples, and computes:
 (`scry/src/Scry/BenchCmd.wiz`); the S0/S2 corpus and its manifest are in
 `scry/bench/corpus/`, and the policy is in `scry/bench/corpus/README.md`.
 `wiz-notes/scry-bench.md` records the baseline, the corpus size and the limitations.
+
+## Scry: fuzzing the C front end (`scry/fuzz`, `scry/src/Scry/Fuzz.wiz`)
+
+`scry/fuzz/run.py` is a coverage-guided bug search over the vendored C shim and
+tree-sitter, not another analysis. It builds `fuzz/ts_shim_fuzz.c` with clang's
+`-fsanitize=fuzzer,address,undefined`, seeds from `scry/bench/corpus/**/*.c` and the
+taint fixtures, and checks the struct-of-arrays contract the Wiz side reads (preorder
+ids, one root, parent/CSR/edge agreement, in-range kind/field ids, spans inside the
+input, `ERROR`/`MISSING` flags). ASan, UBSan and invariant failures are minimised with
+libFuzzer and deduplicated by a normalised stack signature.
+
+`Scry.Fuzz` (`scry fuzz-span FILE [--offset N] [--json]`) maps an artifact to the same
+`start`/`stop` span shape as a static finding: the root span, every `ERROR`/`MISSING`
+node (up to 64) with line/column, and the smallest CST node containing a byte offset (an
+invariant failure prints `input_offset=N`). `Scry.fuzzInputJsonAt` is the stable JSON;
+`scry/fuzz/run.py` embeds it in `build/fuzz/dynamic.json` beside the static
+`scry bench` report and its 34-case corpus sweep. A missing clang/libFuzzer is a clean
+skip (exit 0); a bounded run with no crash is explicit dynamic evidence, not a safety
+claim, and the target covers the parser boundary rather than the Wiz lowering/taint
+pipeline. `scry/fuzz/README.md` has the command, schema, counts and limits, and
+`wiz-notes/scry-fuzz.md` records the branch results.

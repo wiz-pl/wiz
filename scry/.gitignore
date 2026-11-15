@@ -1,3 +1,6 @@
 # grail's store and the command targets' installed outputs
 /.grail/
 /build/
+
+# Python bytecode from fuzz/run.py
+__pycache__/
