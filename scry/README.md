@@ -26,8 +26,9 @@ grail run scry -- explain fixtures/demo.facts.json 4
 ```
 
 Commands: `facts`, `query --kind|--edge|--rel`, `explain`, `parse --stats` (a C source,
-a `scry-cst` spill, or a JSON store), `cst` (JSON store → spill), and `taint` (C →
-Wil → taint → findings/SARIF). `parse --stats` prints counts only; the perf agent owns
+a `scry-cst` spill, or a JSON store), `cst` (JSON store → spill), `taint` (C →
+Wil → taint → findings/SARIF), and `bench` (run the checked-in taint corpus and compare
+findings with its manifest). `parse --stats` prints counts only; the perf agent owns
 throughput numbers.
 
 ## `scry taint`: C → Wil → taint → findings/SARIF
@@ -175,6 +176,58 @@ passes, so a bare tree stays green.
 `tests/native.wiz` checks the shim on `fixtures/hello.c`: 55 nodes, 54 edges, the root
 span `[0,95)`, parent/child/next-sibling links, and that `fixtures/broken.c` is refused
 by `parseChecked` (tree-sitter's recovery tree has 2 `ERROR`/`MISSING` nodes).
+
+## `scry bench`: the taint corpus and metrics
+
+`scry bench` runs the same pipeline as `scry taint` over `bench/corpus/manifest.json`,
+compares the findings with the manifest's expectations, and writes stable JSON and
+Markdown. The checked-in corpus is **S0/S2**: the existing `tests/fixtures/taint-*.c`
+goldens plus hand-authored safe/unsafe pairs for CWE-78 (command injection), CWE-134
+(format string), CWE-242 (`gets`) and CWE-120/121 (`strcpy`/`strcat`). S1/S3/S4 are
+optional external corpora (`--extra DIR`); no third-party corpus is checked in.
+
+```sh
+grail run scry -- bench                         # build/bench.json + build/bench.md
+grail run scry -- bench --no-timing --json -    # deterministic report on stdout
+grail run scry -- bench --extra /path/to/subset # an external manifest
+grail run scry -- bench --fail-on-regression    # exit 1 if the baseline changed
+grail run scry -- bench --update-baseline bench/baseline.json
+```
+
+Reported per CWE and overall: TP/FN/TN/FP case counts, TPR, FPR, Youden's J, precision,
+F1, macro averages, path validity (the path ends at the reported sink; a taint path also
+starts at a source), certificate (`checked`) coverage, boundary warnings, and runtime.
+The ratios are computed in integer basis points, so the checked-in baseline is stable.
+
+Metrics are per **case**, not per alert. An `unsafe` case is TP only when every expected
+finding is matched with valid evidence and no extra finding appears; a `safe` case with a
+finding is FP; a `safe` case with a *blocking* lowering boundary is `unknown`, not TN. A
+missing corpus/manifest is a clean skip (exit 0), and a missing individual case file is
+`skipped`. Runtime is wall clock from `Clock.monotonic` and is marked informational: it
+is not a `perf-run` measurement, and the perf agent owns real numbers.
+
+`tests/bench.wiz` checks the metric formulas, the boundary/path/outcome rules, the
+missing-corpus skip, and that the corpus still matches `bench/baseline.json`. The corpus
+policy and the external-manifest hook are in `bench/corpus/README.md`.
+
+## Real C corpus
+
+`scripts/real-corpus.sh` runs `scry taint --json --allow-errors --sarif` over the C
+sources that are already on this machine (the Wiz C runtime/sockets/serial/infoview/
+self-hosted runtime, the `wiz-rv/sw` bare-metal programs, the vendored tree-sitter
+library, and two generated project files when present) and writes a per-file JSON,
+SARIF, runtime and warning summary. It skips missing external files, so it also runs on
+a bare checkout.
+
+```sh
+scry/scripts/real-corpus.sh                  # build/real-corpus/summary.{json,md}
+SCRY_LIMIT=300 SCRY_STRESS=1 scry/scripts/real-corpus.sh  # include the 3.8 MB parser
+```
+
+The checked-in result and the precision/false-positive follow-up list are in
+`bench/real-corpus.md` (raw machine record: `bench/real-corpus.json`). There are only
+two findings in 24 files and both are manually judged false positives; the report lists
+the parse-recovery, exec-sink, bounds, points-to-argument and warning-noise gaps.
 
 Limits: the shim is sequential (one parser, one tree, one file) and tree-sitter-c is the
 only grammar. Threads, a native store shared across files, and tree-sitter queries are
