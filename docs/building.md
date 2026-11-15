@@ -120,6 +120,16 @@ licence, in `share/wiz/cc/LICENSES/lean4-LICENSES` with Lean's third-party licen
 not bundled). A checkout uses `cc` and the system's GMP unless you pass
 `--cc`/`--cflags`/`--ldflags` (the Nix dev shell writes them to `grail.local.wiz`).
 
+`wiz build FILE -o OUT --target wasm` is a third path (stage 8f,
+[08-backend/wasm.md](stages/08-backend/wasm.md)): it emits a binary WebAssembly module
+directly from the IR and does not invoke a C compiler, the C runtime or GMP. Values live
+in the module's linear memory; a small checked-in JS host (`web/wasm-host.mjs`) supplies
+big integers as `BigInt`s and prints the result. It runs IO-less `main`s over `Nat`/`Int`,
+closures, arrays and algebraic data; `wiz run FILE --target wasm` builds and runs it under
+Node. The subset boundary is checked at compile time and every module is structurally
+validated before it is written; the limits (no reference counting, no IO/FFI, no library
+target) are in that section. `--wasm` is the older spelling of the same target.
+
 **Licences of what is linked into your programs.** The Wiz Runtime Library Exception
 (COPYING.RUNTIME) lets you distribute programs compiled by Wiz under any terms, but it
 covers only Wiz's own runtime. Other libraries keep their licences:
@@ -174,7 +184,7 @@ Nix-built test driver (`packages.tests`), not `lake test`, and symlink the store
 and `grail` into the checkout's `.lake/build/bin`, which some cases and
 `scripts/trust-ledger.sh` name directly (the driver also carries the wrapped `wiz` and
 `grail` beside itself, which `Tests/Grail.lean` looks for). The dev shell (`nix develop`)
-is still what puts `cc`, `llc`, z3, cadical and Neovim on `PATH`, and it writes
+is still what puts `cc`, `llc`, z3, cadical, Node and Neovim on `PATH`, and it writes
 `grail.local.wiz` for the cases that compile C.
 
 The Nix build is about 353 MB for `wiz` (1.8 GB with its closure: Lean, GMP, Boehm GC,
@@ -276,10 +286,30 @@ the elan toolchain, so the setup action keeps the elan cache for those
   waits for it. Pull requests and master pushes don't build it. It does not run the
   exercise tree's tests (almost all of them fail by design). See
   [exercises.md](exercises.md).
-* **The bootstrap fixpoint** (`scripts/fixpoint.sh`: the stage-1 C of the toolchain
-  equals its stage-2 C) runs weekly on `master`, or from "Run workflow" with
-  `fixpoint` ticked. It takes a long time; run it locally with `nix develop -c
-  scripts/fixpoint.sh`.
+* **The bootstrap fixpoint** (`scripts/fixpoint.sh`) runs **three stages** by default.
+  Stage 1 is the self-hosted compiler built by the Lean `wiz build`; it compiles the
+  whole toolchain to `self1.c`. Stage 2 is that C compiled with `selfhost/rt.c` and
+  Boehm GC, compiling the toolchain to `self2.c`, and stage 3 is `self2.c` compiled the
+  same way, compiling to `self3.c`. The script prints every stage's size and md5 and
+  marks each stage after the first PASS/FAIL against stage 1; all three C files must be
+  byte-identical (`--stages N` for more stages, 2 for the old two-stage check; `--keep`
+  keeps the C files and binaries, and `--compare-only` re-checks kept ones).
+  Stage 1 = stage 2 shows that the C emitted by the Lean-built compiler is reproduced by
+  the compiler that C builds. Stage 2 = stage 3 shows that reproduction is a fixed point
+  and not one coincident round. The comparison covers the generated `self.wiz` input in
+  the selected mode (`--rc` for reference counting): it shows that code generation is
+  deterministic and does not depend on whether the compiler came from Lean or from C. It
+  does not show that the C is correct (it is compiled with `-w`), that the compiled
+  toolchain behaves correctly (the test suite covers that), or anything about other
+  inputs, flags, C compilers or GC versions.
+  The self-compile peaks at 5.1–5.4 GiB (the three-stage run measured 5.4 GiB in stage 2
+  and 5.2 GiB in stage 3), so **reserve 6 GiB**; the script names that requirement if a
+  stage is killed for memory (exit 137). Run it locally with `nix develop -c
+  scripts/fixpoint.sh` and a 6 GiB reservation.
+  The weekly `fixpoint` job in `ci.yml` runs it on `ubuntu-latest`. The separate
+  `.github/workflows/fixpoint.yml` runs it nightly on `master` and from "Run workflow" on
+  the self-hosted runner named by `WIZ_RUNNER_HEAVY`; it checks for 6 GiB free, is skipped
+  when the variable is unset, and is not part of `CI result`.
 * **The Nix package** (the `build` job; the old separate `nix package` job is folded
   into it): `nix build .#wiz .#tests` builds `wiz` and `grail` with Lake in the Nix
   sandbox and nixpkgs' Lean (the flake checks that it is the version in `lean-toolchain`)
