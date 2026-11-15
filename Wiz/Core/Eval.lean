@@ -126,8 +126,11 @@ def natNative? : Name → Array Nat → Option Nat
   | "nat.land", #[a, b] => some (a &&& b)
   | "nat.lor", #[a, b] => some (a ||| b)
   | "nat.xor", #[a, b] => some (a ^^^ b)
-  | "nat.shiftLeft", #[a, b] => some (a <<< b)
-  | "nat.shiftRight", #[a, b] => some (a >>> b)
+  | "nat.shiftLeft", #[a, b] => if a == 0 then some 0 else some (a <<< b)
+  -- `a >>> b` recurses on `b`; once `b` is past the bit length of `a` the result is
+  -- `0`, so a huge count is not walked (the model must also not build `2^b`)
+  | "nat.shiftRight", #[a, b] =>
+    if a == 0 || b > a.log2 then some 0 else some (a >>> b)
   | "nat.log2", #[a] => some a.log2
   | _, _ => none
 

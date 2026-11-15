@@ -1,0 +1,402 @@
+import Hdl.Core
+/-!
+# Hdl.Mem
+
+A small memory interface for hardware proofs (`import Hdl.Mem`), on the memory model of
+`Hdl.Core` (`HwTy.mem aw dw`, read with `Hw.memRead`, written with `Hw.memWrite`).
+
+The point of the module is to have one place for the facts a memory proof keeps needing,
+instead of re-deriving them per instruction or per RAM:
+
+* **Word memory.** `Mem.read`/`Mem.write` are the core operations with the type written
+  down; `Mem.index`/`Mem.lane` split a byte address into word index and lane, and
+  `Mem.wordByte` is byte `i` of a word. `read_write_same`, `read_write_other` and
+  `read_write_off` are the read-after-write/no-alias laws
+  (`HwTy.El.memRead_write_hit`/`_miss`/`_off`, restated for `Mem.read`/`Mem.write`).
+* **Byte memory.** A byte-addressable memory is `HwTy.mem aw 8`; `Mem.byteRead`,
+  `Mem.byteWrite` and the same three laws are its interface. A byte write with the
+  enable high is `Mem.byteEnabled`; with it low, `Mem.byteDisabled` (the byte-enable law
+  at byte granularity).
+* **Byte enables in a word.** `Mem.byteMask` builds the `dw`-bit mask of `dw / 8`
+  strobes (the same construction as `Bus.byteMask`, but here it does not depend on
+  `Hdl.Bus`), and `Mem.merge` is the read-modify-write value. `Mem.writeBytes` writes a
+  word with a strobe. `byteMask_full32`/`byteMask_zero32` are the two closed cases at
+  the common 32-bit width; the example checks every strobe and every byte lane of 8-,
+  16- and 32-bit words.
+* **One-cycle and two-cycle RAMs.** `Mem.Req`/`Mem.Resp`/`Mem.Ram` are the request,
+  response and state, and `Mem.ramC1`/`Mem.ramC2` answer in one or two cycles. The
+  `W` variants (`Mem.ramWC1`/`Mem.ramWC2`) take byte strobes. Both are plain
+  `Circuit`s over bundles, so they simulate at values and synthesise like any other
+  circuit; `ramC2` has the same state and timing as `Bus.ramC`/`Bus.ramWC` (the one-cycle
+  RAM takes `we` as its write enable; the two-cycle RAM gates the write with `valid`).
+
+The word and byte laws are proved; the byte-enable *mask* is a wiring function whose
+32-bit closed cases are proved and whose strobe patterns are checked exhaustively in
+`examples/hdl-mem-laws.wiz` (test group `hdl`). The checks are marked as such: a law
+checked by evaluation is *tested*, not proved.
+-/
+
+/-- One bit. -/
+def Mem.Bit : HwTy := HwTy.bits 1
+
+/-- The number of bytes in a `dw`-bit word. -/
+def Mem.bytes (dw : Nat) : Nat := Nat.div dw 8
+
+/-- The byte lane of a byte address inside its word: `addr % 2^shift` (`shift = 2` for a
+32-bit byte-addressed bus). At values only; the circuit uses `Hw.slice`. -/
+def Mem.laneOf (shift : Nat) (addr : Nat) : Nat := Nat.mod addr (Nat.pow 2 shift)
+
+/-- The word address of a byte address: `addr / 2^shift`. -/
+def Mem.wordOf (shift : Nat) (addr : Nat) : Nat := Nat.div addr (Nat.pow 2 shift)
+
+/-- The byte address of word `w` and lane `i`: `w · 2^shift + i` (`shift = 2`, `w = 3`,
+`i = 1` gives 13). -/
+def Mem.byteAddr (shift w i : Nat) : Nat := Nat.add (Nat.mul w (Nat.pow 2 shift)) i
+
+/-- The value of a word memory: a total map from word addresses to words. -/
+def Mem.Store (aw dw : Nat) : Type := HwTy.El (HwTy.mem aw dw)
+
+/-- The value of a byte memory: a total map from byte addresses to bytes. -/
+def Mem.ByteStore (aw : Nat) : Type := HwTy.El (HwTy.mem aw 8)
+
+/-- A word read (the core operation, written down). -/
+def Mem.read {ω aw dw : Nat} (m : Mem.Store aw dw) (a : BitVec aw) : BitVec dw :=
+  @Hw.memRead HwTy.El _ aw dw m a
+
+/-- A word write: enabled writes replace the word at `a`, disabled ones are the memory
+itself. -/
+def Mem.write {ω aw dw : Nat} (m : Mem.Store aw dw) (we : BitVec 1) (a : BitVec aw)
+    (d : BitVec dw) : Mem.Store aw dw :=
+  @Hw.memWrite HwTy.El _ aw dw m we a d
+
+/-- The enabled bit, as a `BitVec 1`. -/
+def Mem.one : BitVec 1 := BitVec.ofNat 1 1
+/-- The disabled bit, as a `BitVec 1`. -/
+def Mem.zero : BitVec 1 := BitVec.ofNat 1 0
+
+/-- `Nat.beq` is reflexive (a local copy: `Hdl.Mem` does not import `HProp`). -/
+def Mem.natBeqSelf : (n : Nat) → Nat.beq n n = .true
+  | .zero => rfl
+  | .succ n => Mem.natBeqSelf n
+
+/-- A bit vector is equal to itself. -/
+def Mem.beqSelf {ω n : Nat} (a : BitVec n) : BitVec.beq a a = .true :=
+  Mem.natBeqSelf a.toNat
+
+/-- A word read after an enabled write to the same address is the word written. -/
+def Mem.read_write_same {ω aw dw : Nat} (m : Mem.Store aw dw) (a : BitVec aw) (d : BitVec dw) :
+    Mem.read (Mem.write m Mem.one a d) a = d :=
+  HwTy.El.memRead_write_hit m a d a (Mem.beqSelf a)
+
+/-- A read after a write to another address is the old word: addresses do not alias. -/
+def Mem.read_write_other {ω aw dw : Nat} (m : Mem.Store aw dw) (a b : BitVec aw)
+    (d : BitVec dw) (h : BitVec.beq a b = .false) :
+    Mem.read (Mem.write m Mem.one a d) b = Mem.read m b :=
+  HwTy.El.memRead_write_miss m Mem.one a d b h
+
+/-- A disabled write leaves every read unchanged. -/
+def Mem.read_write_off {ω aw dw : Nat} (m : Mem.Store aw dw) (a b : BitVec aw) (d : BitVec dw) :
+    Mem.read (Mem.write m Mem.zero a d) b = Mem.read m b :=
+  HwTy.El.memRead_write_off m a d b
+
+/-- A read after an enabled write to the same address is the word written (the
+read-after-write law in terms of the address's `beq`, without a reflexive premise). -/
+def Mem.write_then_read_same {ω aw dw : Nat} (m : Mem.Store aw dw) (a : BitVec aw)
+    (d : BitVec dw) : Mem.read (Mem.write m Mem.one a d) a = d :=
+  Mem.read_write_same m a d
+
+/-- Two writes to the same address: the read is the last word written. -/
+def Mem.write_write_same {ω aw dw : Nat} (m : Mem.Store aw dw) (a : BitVec aw)
+    (d e : BitVec dw) :
+    Mem.read (Mem.write (Mem.write m Mem.one a d) Mem.one a e) a = e :=
+  Mem.read_write_same (Mem.write m Mem.one a d) a e
+
+/-- A write to `b` does not change a read of `a` (the no-alias law in the write-write
+direction). -/
+def Mem.write_write_other {ω aw dw : Nat} (m : Mem.Store aw dw) (a b : BitVec aw)
+    (d e : BitVec dw) (h : BitVec.beq b a = .false) :
+    Mem.read (Mem.write (Mem.write m Mem.one a d) Mem.one b e) a = d :=
+  Eq.trans (Mem.read_write_other (Mem.write m Mem.one a d) b a e h)
+    (Mem.read_write_same m a d)
+
+------------------------------------------------------------------------------------
+-- Byte-addressable memory
+
+/-- A byte read. -/
+def Mem.byteRead {ω aw : Nat} (m : Mem.ByteStore aw) (a : BitVec aw) : BitVec 8 :=
+  @Hw.memRead HwTy.El _ aw 8 m a
+
+/-- A byte write. -/
+def Mem.byteWrite {ω aw : Nat} (m : Mem.ByteStore aw) (we : BitVec 1) (a : BitVec aw)
+    (d : BitVec 8) : Mem.ByteStore aw :=
+  @Hw.memWrite HwTy.El _ aw 8 m we a d
+
+/-- A byte read after an enabled write to the same address is the byte written. -/
+def Mem.byte_read_write_same {ω aw : Nat} (m : Mem.ByteStore aw) (a : BitVec aw) (d : BitVec 8) :
+    Mem.byteRead (Mem.byteWrite m Mem.one a d) a = d :=
+  HwTy.El.memRead_write_hit m a d a (Mem.beqSelf a)
+
+/-- A byte read after a write to another address is the old byte. -/
+def Mem.byte_read_write_other {ω aw : Nat} (m : Mem.ByteStore aw) (a b : BitVec aw)
+    (d : BitVec 8) (h : BitVec.beq a b = .false) :
+    Mem.byteRead (Mem.byteWrite m Mem.one a d) b = Mem.byteRead m b :=
+  HwTy.El.memRead_write_miss m Mem.one a d b h
+
+/-- A disabled byte write leaves the byte unchanged. -/
+def Mem.byte_read_write_off {ω aw : Nat} (m : Mem.ByteStore aw) (a b : BitVec aw) (d : BitVec 8) :
+    Mem.byteRead (Mem.byteWrite m Mem.zero a d) b = Mem.byteRead m b :=
+  HwTy.El.memRead_write_off m a d b
+
+/-- **The byte-enable law, at one byte.** An enabled byte write is visible at the address
+written. -/
+def Mem.byteEnabled {ω aw : Nat} (m : Mem.ByteStore aw) (a : BitVec aw) (d : BitVec 8) :
+    Mem.byteRead (Mem.byteWrite m Mem.one a d) a = d :=
+  Mem.byte_read_write_same m a d
+
+/-- **The byte-enable law, disabled lane.** A disabled byte write leaves its address
+alone. -/
+def Mem.byteDisabled {ω aw : Nat} (m : Mem.ByteStore aw) (a : BitVec aw) (d : BitVec 8) :
+    Mem.byteRead (Mem.byteWrite m Mem.zero a d) a = Mem.byteRead m a :=
+  Mem.read_write_off (aw := aw) (dw := 8) m a a d
+
+------------------------------------------------------------------------------------
+-- Byte enables in a word: a mask and a read-modify-write
+
+/-- The mask of one strobe bit: `0xff` in a word when the bit is high, else `0`. -/
+def Mem.maskByte {r : HwTy → Type} [Hw r] {ω dw : Nat} (b : r Mem.Bit) : r (HwTy.bits dw) :=
+  Hw.mux b (Hw.lit dw 255) (Hw.lit dw 0)
+
+/-- Strobe bit `i` (one bit of an `nb`-bit strobe). -/
+def Mem.byteBit {r : HwTy → Type} [Hw r] {ω nb : Nat} (i : Nat)
+    (strb : r (HwTy.bits nb)) : r Mem.Bit :=
+  @Hw.slice r _ i 1 nb strb
+
+/-- The mask of the first `fuel` byte strobes, lane 0 in the low bits. -/
+def Mem.byteMaskAux {r : HwTy → Type} [Hw r] (dw nb : Nat) :
+    (fuel i : Nat) → r (HwTy.bits nb) → r (HwTy.bits dw)
+  | .zero, _, _ => Hw.lit dw 0
+  | .succ fuel, i, strb =>
+    let shifted := Hw.shlBy (Mem.maskByte (dw := dw) (Mem.byteBit i strb))
+      (Hw.lit dw (Nat.mul 8 i));
+    Hw.or shifted (Mem.byteMaskAux dw nb fuel (Nat.succ i) strb)
+
+/-- `Mem.byteMask dw nb strb`: a `dw`-bit mask with byte `k` set to `0xff` when strobe
+bit `k` is, and to 0 otherwise. `nb` is `dw / 8` for a word bus. -/
+def Mem.byteMask {r : HwTy → Type} [Hw r] {ω dw nb : Nat}
+    (strb : r (HwTy.bits nb)) : r (HwTy.bits dw) :=
+  Mem.byteMaskAux dw nb nb 0 strb
+
+/-- The read-modify-write value: the old word in the bytes whose mask bit is 0, the new
+word in the bytes whose mask bit is set. -/
+def Mem.merge {r : HwTy → Type} [Hw r] {ω dw : Nat}
+    (old new mask : r (HwTy.bits dw)) : r (HwTy.bits dw) :=
+  Hw.or (Hw.and old (Hw.not mask)) (Hw.and new mask)
+
+/-- A word write with byte strobes: the enabled bytes come from `d`, the others keep the
+old word. -/
+def Mem.writeBytes {r : HwTy → Type} [Hw r] {ω aw dw nb : Nat}
+    (m : r (HwTy.mem aw dw)) (we : r Mem.Bit) (a : r (HwTy.bits aw))
+    (d : r (HwTy.bits dw)) (strb : r (HwTy.bits nb)) : r (HwTy.mem aw dw) :=
+  let old := Hw.memRead m a;
+  let mask := Mem.byteMask (dw := dw) (nb := nb) strb;
+  Hw.memWrite m we a (Mem.merge old d mask)
+
+-- The two closed 32-bit cases: all four strobes set (the whole word is new) and none
+-- (the word is unchanged). Both are kernel-checked by evaluation; the symbolic case is
+-- checked for every strobe pattern in `examples/hdl-mem-laws.wiz`.
+/-- With every strobe set, the 32-bit mask has all bits set. -/
+def Mem.byteMask_full32 :
+    Mem.byteMask (r := HwTy.El) (dw := 32) (nb := 4) (BitVec.ofNat 4 15)
+      = BitVec.allOnes 32 := rfl
+
+/-- With no strobe set, the 32-bit mask is zero. -/
+def Mem.byteMask_zero32 :
+    Mem.byteMask (r := HwTy.El) (dw := 32) (nb := 4) (BitVec.ofNat 4 0)
+      = BitVec.ofNat 32 0 := rfl
+
+------------------------------------------------------------------------------------
+-- Request, response and RAM
+
+/-- A word request. `addr` is a word address (or a byte address when the RAM's `shift`
+is not 0); `we` is high for a write. -/
+structure Mem.Req (aw dw : Nat) (r : HwTy → Type) where
+  valid : r Mem.Bit
+  we : r Mem.Bit
+  addr : r (HwTy.bits aw)
+  wdata : r (HwTy.bits dw)
+  deriving Bundle
+
+/-- A word request with byte enables (`dw / 8` strobe bits, low byte first). -/
+structure Mem.ReqW (aw dw : Nat) (r : HwTy → Type) where
+  valid : r Mem.Bit
+  we : r Mem.Bit
+  addr : r (HwTy.bits aw)
+  wdata : r (HwTy.bits dw)
+  wstrb : r (HwTy.bits (Nat.div dw 8))
+  deriving Bundle
+
+/-- An answer: `ready` (the request was taken), `rvalid` with `rdata` (a read's data). -/
+structure Mem.Resp (dw : Nat) (r : HwTy → Type) where
+  ready : r Mem.Bit
+  rvalid : r Mem.Bit
+  rdata : r (HwTy.bits dw)
+  deriving Bundle
+
+/-- The RAM's state: the cells and (for the two-cycle variant) the number of cycles
+since the request. -/
+structure Mem.Ram (ab dw : Nat) (r : HwTy → Type) where
+  cells : r (HwTy.mem ab dw)
+  wait : r (HwTy.bits 2)
+  deriving Bundle
+
+/-- A RAM at rest: every word zero. -/
+def Mem.ramInit (ab dw : Nat) : Mem.Ram ab dw HwTy.El :=
+  Mem.Ram.mk (fun (a : BitVec ab) => BitVec.ofNat dw 0) (BitVec.ofNat 2 0)
+
+/-- An idle request. -/
+def Mem.noReq {r : HwTy → Type} [Hw r] {ω aw dw : Nat} : Mem.Req aw dw r :=
+  Mem.Req.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit aw 0) (Hw.lit dw 0)
+
+/-- An idle byte-enabled request: no byte written. -/
+def Mem.noReqW {r : HwTy → Type} [Hw r] {ω aw dw : Nat} : Mem.ReqW aw dw r :=
+  Mem.ReqW.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit aw 0) (Hw.lit dw 0) (Hw.lit (Nat.div dw 8) 0)
+
+/-- A response that is not answering anything. -/
+def Mem.noResp {r : HwTy → Type} [Hw r] {ω dw : Nat} : Mem.Resp dw r :=
+  Mem.Resp.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit dw 0)
+
+/-- `x === k`, as one bit (for the two-cycle counter). -/
+def Mem.isK {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) (k : Nat) : r Mem.Bit :=
+  Hw.eq x (Hw.lit n k)
+
+/-- The word index of a request: the `ab` bits of `addr` from bit `shift`. -/
+def Mem.index {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab : Nat)
+    (addr : r (HwTy.bits aw)) : r (HwTy.bits ab) :=
+  @Hw.slice r _ shift ab aw addr
+
+/-- The lane of a byte address: its low `shift` bits (`shift = 2` for a 32-bit
+byte-addressed bus). -/
+def Mem.lane {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift : Nat)
+    (addr : r (HwTy.bits aw)) : r (HwTy.bits shift) :=
+  @Hw.slice r _ 0 shift aw addr
+
+/-- Byte `i` of a word (lane 0 is the low byte). -/
+def Mem.wordByte {r : HwTy → Type} [Hw r] {ω dw : Nat} (i : Nat)
+    (w : r (HwTy.bits dw)) : r (HwTy.bits 8) :=
+  @Hw.slice r _ (Nat.mul 8 i) 8 dw w
+
+/-- The next state of the one-cycle RAM: the write lands at the clock edge, so a read
+in this cycle sees the old word. `we` is the write enable of the RAM itself, so it may be
+held high with `valid` low (the one-cycle variant is an ordinary synchronous RAM; the
+two-cycle variant gates the write with `valid`). -/
+def Mem.ramNext1 {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
+    (s : Mem.Ram ab dw r) (q : Mem.Req aw dw r) : Mem.Ram ab dw r :=
+  Mem.Ram.mk (Hw.memWrite s.cells q.we (Mem.index shift ab q.addr) q.wdata) (Hw.lit 2 0)
+
+/-- The answer of the one-cycle RAM: the request is taken and a read returns its word in
+the same cycle. -/
+def Mem.ramOut1 {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
+    (s : Mem.Ram ab dw r) (q : Mem.Req aw dw r) : Mem.Resp dw r :=
+  Mem.Resp.mk q.valid (Hw.and q.valid (Hw.not q.we)) (Hw.memRead s.cells (Mem.index shift ab q.addr))
+
+/-- One cycle of the one-cycle RAM. -/
+def Mem.ramStep1 {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
+    (s : Mem.Ram ab dw r) (q : Mem.Req aw dw r) :
+    r (HwTy.prod (Mem.Ram.code ab dw) (Mem.Resp.code dw)) :=
+  Hw.pair (Mem.Ram.pack ab dw (Mem.ramNext1 shift ab dw s q))
+    (Mem.Resp.pack dw (Mem.ramOut1 shift ab dw s q))
+
+/-- The next state of the two-cycle RAM: after two cycles of `valid`, the write lands. -/
+def Mem.ramNext2 {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
+    (s : Mem.Ram ab dw r) (q : Mem.Req aw dw r) : Mem.Ram ab dw r :=
+  let go := Hw.and q.valid (Mem.isK s.wait 2);
+  Mem.Ram.mk
+    (Hw.memWrite s.cells (Hw.and go q.we) (Mem.index shift ab q.addr) q.wdata)
+    (Hw.mux q.valid (Hw.mux go (Hw.lit 2 0) (Hw.add s.wait (Hw.lit 2 1))) (Hw.lit 2 0))
+
+/-- The answer of the two-cycle RAM: `go` is high in the answering cycle, and a read
+returns the old word. -/
+def Mem.ramOut2 {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
+    (s : Mem.Ram ab dw r) (q : Mem.Req aw dw r) : Mem.Resp dw r :=
+  let go := Hw.and q.valid (Mem.isK s.wait 2);
+  Mem.Resp.mk go (Hw.and go (Hw.not q.we)) (Hw.memRead s.cells (Mem.index shift ab q.addr))
+
+/-- One cycle of the two-cycle RAM. -/
+def Mem.ramStep2 {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
+    (s : Mem.Ram ab dw r) (q : Mem.Req aw dw r) :
+    r (HwTy.prod (Mem.Ram.code ab dw) (Mem.Resp.code dw)) :=
+  Hw.pair (Mem.Ram.pack ab dw (Mem.ramNext2 shift ab dw s q))
+    (Mem.Resp.pack dw (Mem.ramOut2 shift ab dw s q))
+
+/-- One cycle of the byte-enabled one-cycle RAM: the word written is `wdata` in the
+enabled bytes and the old word in the others. As `ramStep1`, `we` is the RAM's write
+enable and is not gated by `valid`. -/
+def Mem.ramWStep1 {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
+    (s : Mem.Ram ab dw r) (q : Mem.ReqW aw dw r) :
+    r (HwTy.prod (Mem.Ram.code ab dw) (Mem.Resp.code dw)) :=
+  let ix := Mem.index shift ab q.addr;
+  let old := Hw.memRead s.cells ix;
+  let mask := Mem.byteMask (dw := dw) (nb := Nat.div dw 8) q.wstrb;
+  let merged := Mem.merge old q.wdata mask;
+  Hw.pair
+    (Mem.Ram.pack ab dw (Mem.Ram.mk (Hw.memWrite s.cells q.we ix merged) (Hw.lit 2 0)))
+    (Mem.Resp.pack dw (Mem.Resp.mk q.valid (Hw.and q.valid (Hw.not q.we)) old))
+
+/-- One cycle of the byte-enabled two-cycle RAM (the `Bus.ramWC` shape). -/
+def Mem.ramWStep2 {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
+    (s : Mem.Ram ab dw r) (q : Mem.ReqW aw dw r) :
+    r (HwTy.prod (Mem.Ram.code ab dw) (Mem.Resp.code dw)) :=
+  let go := Hw.and q.valid (Mem.isK s.wait 2);
+  let ix := Mem.index shift ab q.addr;
+  let old := Hw.memRead s.cells ix;
+  let mask := Mem.byteMask (dw := dw) (nb := Nat.div dw 8) q.wstrb;
+  let merged := Mem.merge old q.wdata mask;
+  Hw.pair
+    (Mem.Ram.pack ab dw (Mem.Ram.mk
+      (Hw.memWrite s.cells (Hw.and go q.we) ix merged)
+      (Hw.mux q.valid (Hw.mux go (Hw.lit 2 0) (Hw.add s.wait (Hw.lit 2 1))) (Hw.lit 2 0))))
+    (Mem.Resp.pack dw (Mem.Resp.mk go (Hw.and go (Hw.not q.we)) old))
+
+/-- The one-cycle RAM as a circuit. -/
+def Mem.ramC1 (shift aw ab dw : Nat) : Circuit (Mem.Req.code aw dw) (Mem.Resp.code dw) :=
+  Circuit.bundled (Mem.Ram.bundle ab dw) (Mem.Req.bundle aw dw) (Mem.Resp.bundle dw)
+    (Mem.ramInit ab dw) (fun s q => Mem.ramStep1 shift ab dw s q)
+
+/-- The two-cycle RAM as a circuit (`Bus.ramC`'s timing). -/
+def Mem.ramC2 (shift aw ab dw : Nat) : Circuit (Mem.Req.code aw dw) (Mem.Resp.code dw) :=
+  Circuit.bundled (Mem.Ram.bundle ab dw) (Mem.Req.bundle aw dw) (Mem.Resp.bundle dw)
+    (Mem.ramInit ab dw) (fun s q => Mem.ramStep2 shift ab dw s q)
+
+/-- The byte-enabled one-cycle RAM as a circuit. -/
+def Mem.ramWC1 (shift aw ab dw : Nat) : Circuit (Mem.ReqW.code aw dw) (Mem.Resp.code dw) :=
+  Circuit.bundled (Mem.Ram.bundle ab dw) (Mem.ReqW.bundle aw dw) (Mem.Resp.bundle dw)
+    (Mem.ramInit ab dw) (fun s q => Mem.ramWStep1 shift ab dw s q)
+
+/-- The byte-enabled two-cycle RAM as a circuit (`Bus.ramWC`'s timing). -/
+def Mem.ramWC2 (shift aw ab dw : Nat) : Circuit (Mem.ReqW.code aw dw) (Mem.Resp.code dw) :=
+  Circuit.bundled (Mem.Ram.bundle ab dw) (Mem.ReqW.bundle aw dw) (Mem.Resp.bundle dw)
+    (Mem.ramInit ab dw) (fun s q => Mem.ramWStep2 shift ab dw s q)
+
+------------------------------------------------------------------------------------
+-- The RAM's read-after-write law, through the one-cycle step
+
+/-- The one-cycle RAM's next state after a request with `we = 1` is a word write. -/
+def Mem.ramNext1_eq_write {ω aw ab dw : Nat} (shift : Nat) (s : Mem.Ram ab dw HwTy.El)
+    (q : Mem.Req aw dw HwTy.El) (h : q.we = Mem.one) :
+    (Mem.ramNext1 shift ab dw s q).cells
+      = Mem.write s.cells Mem.one (Mem.index shift ab q.addr) q.wdata :=
+  Eq.substProp (fun (we : BitVec 1) => (Mem.Ram.mk
+      (@Hw.memWrite HwTy.El _ ab dw s.cells we (Mem.index shift ab q.addr) q.wdata)
+      (BitVec.ofNat 2 0)).cells
+      = Mem.write s.cells Mem.one (Mem.index shift ab q.addr) q.wdata)
+    (Eq.symm h) rfl
+
+/-- **RAM read-after-write.** A one-cycle RAM request with `we = 1` writes `wdata`, so
+the next state's read of the same word is `wdata`. -/
+def Mem.ram1_write_read {ω aw ab dw : Nat} (shift : Nat) (s : Mem.Ram ab dw HwTy.El)
+    (q : Mem.Req aw dw HwTy.El) (h : q.we = Mem.one) :
+    Mem.read (Mem.ramNext1 shift ab dw s q).cells (Mem.index shift ab q.addr) = q.wdata :=
+  Eq.trans
+    (Eq.congrArg (fun (m : Mem.Store ab dw) => Mem.read m (Mem.index shift ab q.addr))
+      (Mem.ramNext1_eq_write shift s q h))
+    (Mem.read_write_same s.cells (Mem.index shift ab q.addr) q.wdata)

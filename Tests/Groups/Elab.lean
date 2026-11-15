@@ -78,7 +78,45 @@ def group : Group where
     { name := "user syntax without an elaborator is reported", run := fun _ =>
         fails "syntax \"magic\" : term\ndef x : Type := magic" "the syntax term.magic has no meaning" },
     { name := "duplicate definition", run := fun _ =>
-        fails "def a : Type 1 := Type\ndef a : Type 1 := Type" "already been declared" }
+        fails "def a : Type 1 := Type\ndef a : Type 1 := Type" "already been declared" },
+    -- 13i: structure update
+    { name := "structure update { s with f := v }: fields, nested values, a polymorphic structure", run := fun _ =>
+        okLibs ("import Prelude\nstructure Stats where\n  hits : Nat\n  misses : Nat\n" ++
+          "def bump (s : Stats) : Stats := { s with hits := Nat.succ s.hits }\n" ++
+          "#eval (bump (Stats.mk 3 4)).hits\n#eval (bump (Stats.mk 3 4)).misses\n" ++
+          "def both (s : Stats) : Stats := { s with hits := 0, misses := 10 }\n" ++
+          "#eval (both (Stats.mk 3 4)).hits\n#eval (both (Stats.mk 3 4)).misses\n" ++
+          "structure Inner where\n  x : Nat\nstructure Outer where\n  inner : Inner\n  n : Nat\n" ++
+          "def nest (o : Outer) : Outer := { o with inner := { o.inner with x := 1 }, n := 2 }\n" ++
+          "#eval (nest (Outer.mk (Inner.mk 7) 9)).inner.x\n#eval (nest (Outer.mk (Inner.mk 7) 9)).n\n" ++
+          "structure Box (A : Type) where\n  val : A\n  tag : Nat\n" ++
+          "def retag {A : Type} (b : Box A) (n : Nat) : Box A := { b with tag := n }\n" ++
+          "#eval (retag (Box.mk Bool.true 1) 9).tag\n" ++
+          "def keeps (s : Stats) : (bump s).misses = s.misses := rfl")
+          ["4", "4", "0", "10", "1", "2", "9"] },
+    { name := "structure update: an unknown field, a repeated field, and a non-structure are errors", run := fun _ => do
+        failsLibs ("import Prelude\nstructure Stats where\n  hits : Nat\n  misses : Nat\n" ++
+          "def f (s : Stats) : Stats := { s with hit := 1 }")
+          "Stats has no field 'hit' (its fields are hits, misses)"
+        failsLibs ("import Prelude\nstructure Stats where\n  hits : Nat\n  misses : Nat\n" ++
+          "def f (s : Stats) : Stats := { s with hits := 1, hits := 2 }")
+          "field 'hits' is updated twice"
+        failsLibs "import Prelude\ndef f (n : Nat) : Nat := { n with hits := 1 }"
+          "structure update needs a value of a structure type" },
+    { name := "deriving DecidableEq: an enumeration and a single-constructor record", run := fun _ =>
+        okLibs ("import Deriving\ninductive Status where\n  | pending\n  | completed\n  deriving DecidableEq\n" ++
+          "#eval DecidableEq.decide Status.pending Status.pending\n" ++
+          "#eval DecidableEq.decide Status.pending Status.completed\n" ++
+          "structure Pt where\n  x : Nat\n  y : Bool\n  deriving DecidableEq\n" ++
+          "#eval DecidableEq.decide (Pt.mk 1 Bool.true) (Pt.mk 1 Bool.true)\n" ++
+          "#eval DecidableEq.decide (Pt.mk 1 Bool.true) (Pt.mk 2 Bool.true)\n" ++
+          "#eval DecidableEq.decide (Pt.mk 1 Bool.true) (Pt.mk 1 Bool.false)\n" ++
+          "inductive Box (A : Type) where\n  | mk (v : A)\n  deriving DecidableEq\n" ++
+          "#eval DecidableEq.decide (Box.mk 7) (Box.mk 7)\n" ++
+          "#eval DecidableEq.decide (Option.some 2) (Option.some 2)\n" ++
+          "#eval DecidableEq.decide (List.cons 1 List.nil) (List.cons 2 List.nil)\n" ++
+          "def cmp (a b : Status) : Bool := DecidableEq.decide a b")
+          [".true", ".false", ".true", ".false", ".false", ".true", ".true", ".false"] }
   ]
 
 builtin_initialize registerGroup group

@@ -624,13 +624,36 @@ def Bits.shl_lo : (k A i : Nat) → Nat.lt i k = .true → Bits.bit (Nat.mul A (
   | .succ k, A, .succ i, h =>
     Eq.trans (Bits.congr (fun t => Bits.bit t (Nat.succ i)) (Bits.shl_cons A k))
       (Eq.trans (Bits.bit_consS .false (Nat.mul A (Nat.pow 2 k)) i) (Bits.shl_lo k A i h))
+-- `k + j < w` gives `k < w` (the capped shift exponent is then `k`)
+def Bits.lt_of_succ_lt : (m w : Nat) → Nat.lt (Nat.succ m) w = .true → Nat.lt m w = .true
+  | .zero, .zero, h => absurd (Sat.contra (Nat.lt 1 0) h (Bits.ltz 1))
+  | .zero, .succ v, h => Word.lt_succ 0 v h
+  | .succ m, .zero, h =>
+    absurd (Sat.contra (Nat.lt (Nat.succ (Nat.succ m)) 0) h (Bits.ltz (Nat.succ (Nat.succ m))))
+  | .succ m, .succ v, h => Word.lt_succ (Nat.succ m) v h
+def Bits.lt_add_right : (k j w : Nat) → Nat.lt (Nat.add k j) w = .true → Nat.lt k w = .true
+  | k, .zero, w, h => Bits.lt_congr (Nat.add_zero k) (refl w) h
+  | k, .succ j, w, h =>
+    Bits.lt_add_right k j w
+      (Bits.lt_of_succ_lt (Nat.add k j) w (Bits.lt_congr (Nat.add_succ k j) (refl w) h))
+-- `i` is below the capped exponent when it is below both `k` and `w`
+def Bits.lt_min {i k w : Nat} (hk : Nat.lt i k = .true) (hi : Nat.lt i w = .true) :
+    Nat.lt i (Word.min k w) = .true :=
+  Or.elim (Bool.cases (Nat.lt k w))
+    (fun ht => transp (fun t _ => Nat.lt i t = .true) hk (Word.symm (Word.min_left ht)))
+    (fun hf => transp (fun t _ => Nat.lt i t = .true) hi (Word.symm (Word.min_right hf)))
 def Bits.wshl_hi {ω w : Nat} (x : UIntN w) (k j : Nat) (hi : Nat.lt (Nat.add k j) w = .true) :
     Bits.bit (UIntN.toNat (UIntN.shiftLeft x k)) (Nat.add k j) = Bool.and (Bits.bit (UIntN.toNat x) j) (Bits.bit (UIntN.toNat x) j) :=
-  Eq.trans (Bits.wofNat_bit w (Nat.mul (UIntN.toNat x) (Nat.pow 2 k)) (Nat.add k j) hi)
-    (Eq.trans (Bits.shl_hi k (UIntN.toNat x) j) (Eq.symm (Bits.and_self (Bits.bit (UIntN.toNat x) j))))
+  let hk : Nat.lt k w = .true := Bits.lt_add_right k j w hi;
+  let hshift : Nat.shiftLeft (UIntN.toNat x) (Word.min k w) = Nat.shiftLeft (UIntN.toNat x) k :=
+    Bits.congr (fun t => Nat.shiftLeft (UIntN.toNat x) t) (Word.min_left hk);
+  Eq.trans (Bits.congr (fun t => Bits.bit (UIntN.toNat (UIntN.ofNat w t)) (Nat.add k j)) hshift)
+    (Eq.trans (Bits.wofNat_bit w (Nat.mul (UIntN.toNat x) (Nat.pow 2 k)) (Nat.add k j) hi)
+      (Eq.trans (Bits.shl_hi k (UIntN.toNat x) j) (Eq.symm (Bits.and_self (Bits.bit (UIntN.toNat x) j)))))
 def Bits.wshl_lo {ω w : Nat} (x : UIntN w) (k i : Nat) (hi : Nat.lt i w = .true) (hk : Nat.lt i k = .true) :
     Bits.bit (UIntN.toNat (UIntN.shiftLeft x k)) i = .false :=
-  Eq.trans (Bits.wofNat_bit w (Nat.mul (UIntN.toNat x) (Nat.pow 2 k)) i hi) (Bits.shl_lo k (UIntN.toNat x) i hk)
+  Eq.trans (Bits.wofNat_bit w (Nat.mul (UIntN.toNat x) (Nat.pow 2 (Word.min k w))) i hi)
+    (Bits.shl_lo (Word.min k w) (UIntN.toNat x) i (Bits.lt_min hk hi))
 
 def Bits.div_pow (k A : Nat) : Nat.div A (Nat.pow 2 k) = Bits.high k A :=
   let P := Nat.pow 2 k;
