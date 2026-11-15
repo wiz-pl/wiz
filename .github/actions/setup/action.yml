@@ -1,8 +1,8 @@
 name: Wiz toolchain
 description: >
-  Nix with the flake's dev shell (GMP, Boehm GC, LLVM, cc, elan), the Cachix binary cache
-  if one is configured, and (for the jobs that still run Lake) the elan toolchain from
-  lean-toolchain (cached). Later steps run in the dev shell through
+  Nix with the flake's dev shell (GMP, Boehm GC, LLVM, cc, yosys, Node, elan), the Cachix
+  binary cache if one is configured, and (for the jobs that still run Lake) the elan
+  toolchain from lean-toolchain (cached). Later steps run in the dev shell through
   `shell: nix develop --command bash -eo pipefail {0}`.
 inputs:
   cachix-name:
