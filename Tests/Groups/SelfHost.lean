@@ -1058,7 +1058,7 @@ def selfhostDeriving : String :=
   "#reduce Nat.beq (String.length (Repr.reprPrec (RT.node RT.leaf 1) 0)) 17\n"
 
 def selfhostDerivingExpected : String :=
-  "TBD\n"
+  "BEq : (x0 : U0) → U0\nBEq.beq : (x0 :0 U0) → (x1 : (BEq x0)) → (x2 : x0) → (x3 : x0) → Bool\ninstBEq : (BEq Nat)\nBool.beqEq : (x0 : Bool) → (x1 : Bool) → Bool\ninstBEq1 : (BEq Bool)\nZero : U0\nOne : U0\nOne.a : (x0 : One) → Nat\nTwo : U0\nTwo.a : (x0 : Two) → Nat\nTwo.b : (x0 : Two) → Bool\nThree : U0\nThree.a : (x0 : Three) → Nat\nThree.b : (x0 : Three) → Bool\nThree.c : (x0 : Three) → Nat\nTree : (x0 : U0) → U0\nBox : (x0 : U0) → U0\nBox.val : (x0 :0 U0) → (x1 : (Box x0)) → x0\ninstBEq7 : (x0 :0 U0) → (x1 : (BEq x0)) → (BEq (Box x0))\nRepr : (x0 : U0) → U0\nRepr.reprPrec : (x0 :0 U0) → (x1 : (Repr x0)) → (x2 : x0) → (x3 : Nat) → String\ninstRepr : (Repr Nat)\ninstRepr1 : (Repr Bool)\nR2 : U0\nR2.a : (x0 : R2) → Nat\nR2.b : (x0 : R2) → Bool\nRT : U0\nt1 : (Tree Nat)\nt2 : (Tree Nat)\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\n"
 
 /-- (A11) `deriving` rejects what it cannot do, with the message naming the class and the
 type (the command's offset, as every command's, becomes `file:line:col` in the driver's
@@ -1069,7 +1069,7 @@ def selfhostDerivingBad : String :=
   "class Size (A : Type) where\n  size : A → Nat\nderiving instance Size for Nat\n"
 
 def selfhostDerivingBadExpected : String :=
-  "TBD\n"
+  "BEq : (x0 : U0) → U0\nBEq.beq : (x0 :0 U0) → (x1 : (BEq x0)) → (x2 : x0) → (x3 : x0) → Bool\nerror: failed to synthesize an instance of (BEq ((((((((((((((((((?m0 x✝0) x✝1) j✝) i✝) xs✝) ih✝) rest✝) ihs✝) _) j✝) i✝) xs✝) ih✝) rest✝) ihs✝) _) a✝0) b✝0))\nSize : (x0 : U0) → U0\nSize.size : (x0 :0 U0) → (x1 : (Size x0)) → (x2 : x0) → Nat\nerror: cannot derive Size for Nat: no deriver for class Size (the self-hosted frontend derives BEq and Repr)\n"
 
 def selfHostGroup : Group where
   name := "selfhost"

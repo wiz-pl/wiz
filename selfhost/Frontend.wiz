@@ -2633,7 +2633,7 @@ def ihLetsB (gs : Globals) (MB0 MB : Tm) (md d0 F np L : Nat) (args : Tms) (I id
     -- tag)
     let jD : Tm := match headOf fty .tnil with
       | .mk nm as => match Globals.ind gs nm with
-        | .some (.mk _ _ _ _ _ (.some f) _) => f
+        | .some (.mk _ _ _ _ _ (.some f) _ _) => f
         | _ => lastTm (shiftTms (D - l) as)
       | .none => .star;
     let ID := nfAt D (tApps (tLams np I) (shiftTms (D - L) args));
@@ -2840,7 +2840,7 @@ def cfieldNames : List CField → List String
   | .nil => .nil
   | .cons (.mk x _ _ _) rest => .cons x (cfieldNames rest)
 def structFieldsOf (info : IndInfo) : Option (List String) := match info with
-  | .mk _ _ _ _ ctors _ _ => match ctors with
+  | .mk _ _ _ _ ctors _ _ _ => match ctors with
     | .cons (.mk _ fs _ _ _) _ => .some (cfieldNames fs)
     | .nil => .some .nil
 -- a structure's fields; `T` is a source name, or a term's kernel name (then its module
@@ -6374,7 +6374,7 @@ inductive DBuild where
   | mk (bs : List Syntax) (names : List String) (i : Nat)
 def deriveInstName (i : Nat) : String := "b✝" +++ Nat.toString i
 def deriveBinder1 (C x : String) (b : Syntax) (i : Nat) : DBuild :=
-  let ty := match binderType b with
+  let ty : Syntax := match binderType b with
     | .some t => t
     | .none => .missing;
   let main := match isInstB b with
@@ -6387,7 +6387,7 @@ def deriveBinder1 (C x : String) (b : Syntax) (i : Nat) : DBuild :=
       | .true => .cons (binderStx "[" "]" (deriveInstName i)
           (mkNode "term.app" (.cons (identStx C) (one (mkNull (one (identStx x))))))) .nil
       | .false => .nil;
-  let ns := match extra with
+  let ns : List String := match extra with
     | .nil => .cons x .nil
     | .cons _ _ => .cons x (.cons (deriveInstName i) .nil);
   .mk (.cons main extra) ns (i + 1)
@@ -6513,7 +6513,7 @@ def deriveBEq (gs : Globals) (C T : String) (info : IndInfo) : DerivedR := match
             let ps := binderParamNames params;
             let tapp := appIdents T ps;
             let ty := arrowStx tapp (arrowStx tapp (identStx "Bool"));
-            let fb := match ctors with
+            let fb : List Syntax := match ctors with
               | .cons _ (.cons _ _) => .cons fallbackAlt .nil
               | _ => .nil;
             let alts := List.append (beqAlts gs C helper np allNames ctors) fb;
@@ -6530,8 +6530,8 @@ def deriveBEq (gs : Globals) (C T : String) (info : IndInfo) : DerivedR := match
 -- `Repr`: `T.c a b` at the top level, `(T.c a b)` at argument position (p ≥ 1024),
 -- every data field through `Repr.reprPrec`/the deriver at 1024, an explicit proof field
 -- as `_`.
-def strStx (s : String) : Syntax := mkNode "str" (one (.atom s))
-def numStx (n : Nat) : Syntax := mkNode "num" (one (.atom (Nat.toString n)))
+def strStx (s : String) : Syntax := mkNode "term.str" (one (.atom s))
+def numStx (n : Nat) : Syntax := mkNode "term.num" (one (.atom (Nat.toString n)))
 def reprConcat : List Syntax → Syntax
   | .nil => strStx ""
   | .cons x rest => appStx (identStx "String.append") (.cons x (one (reprConcat rest)))
@@ -6623,22 +6623,22 @@ def deriveClassOn (gs : Globals) (C T : String) : DerivedR := match Globals.clas
       | .succ (.succ (.zero)) => deriveRepr gs C T info
       | _ => .err ("error: cannot derive " +++ C +++ " for " +++ T
           +++ ": the " +++ C +++ " deriver is not implemented yet")
-def deriveEach (gs : Globals) (T : String) : List String → DerivedR
-  | .nil => .ok gs ""
-  | .cons C cs => match deriveClassOn gs C T with
+def deriveEach (T : String) : List String → Globals → DerivedR
+  | .nil, gs => .ok gs ""
+  | .cons C cs, gs => match deriveClassOn gs C T with
     | .err m => .err m
-    | .ok gs1 line => match deriveEach gs1 T cs with
+    | .ok gs1 line => match deriveEach T cs gs1 with
       | .err m => .err m
       | .ok gs2 line2 =>
         let out := match strEq line2 "" with
           | .true => line
           | .false => line2;
         .ok gs2 out
-def deriveForTypes (gs : Globals) (classes : List String) : List String → DerivedR
-  | .nil => .ok gs ""
-  | .cons T ts => match deriveEach gs T classes with
+def deriveForTypes (classes : List String) : List String → Globals → DerivedR
+  | .nil, gs => .ok gs ""
+  | .cons T ts, gs => match deriveEach T classes gs with
     | .err m => .err m
-    | .ok gs1 line => match deriveForTypes gs1 classes ts with
+    | .ok gs1 line => match deriveForTypes classes ts gs1 with
       | .err m => .err m
       | .ok gs2 line2 =>
         let out := match strEq line2 "" with
@@ -6653,7 +6653,7 @@ def withDeriving (gs : Globals) (stx : Syntax) (step : Step) : Step := match ste
     | .false => match derivingNames stx with
       | .nil => .mk line gs1
       | classes => match kid stx 1 with
-        | .ident T => match deriveEach gs1 T classes with
+        | .ident T => match deriveEach T classes gs1 with
           | .ok gs2 _ => .mk line gs2
           | .err m => .mk m gs1
         | _ => .mk line gs1
@@ -6661,7 +6661,7 @@ def withDeriving (gs : Globals) (stx : Syntax) (step : Step) : Step := match ste
 def derivingCmd (gs : Globals) (stx : Syntax) : Step :=
   let classes := identNames (kids (kid stx 2));
   let types := identNames (kids (kid stx 4));
-  match deriveForTypes gs classes types with
+  match deriveForTypes classes types gs with
   | .ok gs1 line => .mk line gs1
   | .err m => .mk m gs
 

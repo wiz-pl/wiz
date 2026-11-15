@@ -155,7 +155,10 @@ no output line), as in the Lean toolchain.
   (`T.rec` in the Lean deriver); the constructor's **explicit data fields** are compared
   (`Bool.and` of `BEq.beq a✝i b✝i`, or the helper for a recursive field), and two
   different constructors are `Bool.false`. Proof fields and fields at quantity 0 are not
-  compared (a proof of a proposition is unique; it also has no `BEq` instance). The
+  compared (a proof of a proposition is unique; it also has no `BEq` instance; a field
+  is a proof when the kernel's `isProp` says so of its type, the question
+  `FieldView.proof` answers in the Lean reflection, evaluated here under dummy values
+  for the binders the field type is over). The
   helper's name contains `✝`, so no source program can name it. The instance is
   `instance … : BEq (T p…) where beq := @T.beq✝ p… b✝…`.
 * **What `Repr` generates.** The same shape: `def T.repr✝ … : T p… → Nat → String` with
@@ -190,6 +193,8 @@ written in Wiz would want to apply it by name). Once (1)–(3) exist, the derive
 
 The `selfhost` group gains two cases: `deriving BEq` on a 0-field inductive, 1-, 2- and
 3-field structures, a recursive polymorphic inductive, and an after-the-fact
-`deriving instance BEq for Box`, with every comparison reduced; and the negative cases
-(`structure Bad` with a `Nat → Nat` field, and a class with no deriver), whose exact
-error messages are pinned.
+`deriving instance BEq for Box`, with every comparison reduced; `deriving Repr` on a
+two-field structure and on a recursive type (checked by the length of the rendered
+string, at precedence 0 and 1024); and the negative cases (`structure Bad` with a
+`Nat → Nat` field, and a class with no deriver), whose exact error messages are
+pinned.
