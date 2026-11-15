@@ -2823,7 +2823,7 @@ def structFieldsOf (info : IndInfo) : Option (List String) := match info with
 -- is the marker's too, stage 21n)
 def Globals.structFields (gs : Globals) (T : String) : Option (List String) := match privSplit T with
   | .some (.mk m base) => match gs with
-    | .mk _ _ inds _ _ =>
+    | .mk _ _ inds _ _ _ _ _ =>
       match StrMap.findD inds (Str.ofString (privName m ("structure " +++ base))) .none with
       | .some info => structFieldsOf info
       | .none => .none
@@ -6133,7 +6133,7 @@ def mapGlueParams : List KN → List NamedGTy
   | .cons e rest => .cons (NamedGTy.mk e.name (glueGtyOfKind e.kind)) (mapGlueParams rest)
 def glueParamDecls (gs : Globals) (names : List String) (ks : List String) : String := match names, ks with
   | .cons n ns, .cons k ks1 =>
-    let more := glueParamDecls gs ns ks1; if strEq more "" then kindCType gs k +++ " " +++ n
+    let more := glueParamDecls gs ns ks1; if strEq more "" then (kindCType gs k +++ " " +++ n)
     else kindCType gs k +++ " " +++ n +++ ", " +++ more
   | _, _ => ""
 def mapGlueKinds : List String → List GTy
@@ -6711,13 +6711,14 @@ partial def modHeaderNamesAt : List Char → List String
     else modHeaderNamesAt rest
 def modHeaderNames (text : String) : List String := match text with
   | .mk cs => modHeaderNamesAt cs
+mutual
 partial def modHeaderTexts (names : List String) : IO (List Header) := match names with
   | .nil => IO.pure .nil
-  | .cons n rest => do
-    t ← IO.readFile n;
-    match modEmpty t with
-    | .true => modHeaderTexts rest
-    | .false => IO.bind (modHeaderTexts rest) (fun more => IO.pure (.cons (Header.mk n t) more))
+  | .cons n rest => IO.bind (IO.readFile n) (fun t => modHeaderTextsGo n t rest)
+partial def modHeaderTextsGo (n t : String) (rest : List String) : IO (List Header) :=
+  if modEmpty t then modHeaderTexts rest
+  else IO.bind (modHeaderTexts rest) (fun more => IO.pure (.cons (Header.mk n t) more))
+end
 def moduleHeaderTexts (text : String) : IO (List Header) :=
   modHeaderTexts (modHeaderNames text)
 -- the output lines of the graph (each module's `#check`s and errors, in load order),
@@ -6741,25 +6742,29 @@ def modHasFlag : List String → String → Bool
 
 -- the first candidate path of `name` with text ("" when none: with `IO.readFile` an empty
 -- file and a missing one look alike)
+mutual
 partial def modProbeAt (cats : List Cat) (tokens : List String) (name : String) : List String → IO ModSrc
   | .nil => IO.pure (ModSrc.mk name "" "" .nil)
-  | .cons p ps => do
-    t ← IO.readFile p;
-    match modEmpty t with
-    | .true => modProbeAt cats tokens name ps
-    | .false => IO.pure (ModSrc.mk name p t (moduleImports cats tokens t))
+  | .cons p ps => IO.bind (IO.readFile p) (fun t => modProbeGo cats tokens name p t ps)
+partial def modProbeGo (cats : List Cat) (tokens : List String) (name p t : String) (ps : List String) : IO ModSrc :=
+  if modEmpty t then modProbeAt cats tokens name ps
+  else IO.pure (ModSrc.mk name p t (moduleImports cats tokens t))
+end
 -- read `name`, and then (breadth first) the modules it imports, once each
+mutual
 partial def modDiscover (cats : List Cat) (tokens : List String) (roots : List String)
     (tab : List ModSrc) (queue : List String) : IO (List ModSrc) :=
   match queue with
   | .nil => IO.pure tab
   | .cons name rest => match modFind tab name with
     | .some _ => modDiscover cats tokens roots tab rest
-    | .none => do
-      m ← modProbeAt cats tokens name (modCandidates roots name);
-      match modEmpty (modText m) with
-      | .true => modDiscover cats tokens roots (.cons m tab) rest
-      | .false => modDiscover cats tokens roots (.cons m tab) (List.append rest (modImports m))
+    | .none => IO.bind (modProbeAt cats tokens name (modCandidates roots name)) (fun m =>
+      modDiscoverGo cats tokens roots tab m rest)
+partial def modDiscoverGo (cats : List Cat) (tokens : List String) (roots : List String)
+    (tab : List ModSrc) (m : ModSrc) (rest : List String) : IO (List ModSrc) :=
+  if modEmpty (modText m) then modDiscover cats tokens roots (.cons m tab) rest
+  else modDiscover cats tokens roots (.cons m tab) (List.append rest (modImports m))
+end
 
 -- the root module and, from it, the modules it imports: its name and the path its
 -- diagnostics are reported at (the driver's FILE; the checker's `input.wiz`)

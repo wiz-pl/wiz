@@ -1539,12 +1539,20 @@ def selfHostGroup : Group where
         -- every declaration is reported, none with an error
         let decls := (src.splitOn "\n").filter fun l =>
           ["def ", "partial def ", "inductive ", "structure ", "extern "].any (fun (p : String) => l.startsWith p)
+        -- a `structure` also reports each projection (`T.f`), which is not a source line
+        let structs : List String := (src.splitOn "\n").filterMap fun l =>
+          if l.startsWith "structure " then
+            let n := ((l.drop 10).takeWhile (fun c => c != ' ' && c != '(')).toString
+            if n.isEmpty then none else some n
+          else none
+        let isProjection (l : String) : Bool := structs.any fun T => l.startsWith (T ++ ".")
         let some out ← selfhostOutput ("import Prelude\n" ++ body) | pure ()
         let lines := (out.splitOn "\n").filter (· != "")
         for l in lines do
           if l.startsWith "error" || l.startsWith "parse error" then throw (IO.userError l)
-        unless lines.length == decls.length do
-          throw (IO.userError s!"{lines.length} lines for {decls.length} declarations") },
+        let projs := (lines.filter isProjection).length
+        unless lines.length == decls.length + projs do
+          throw (IO.userError s!"{lines.length} lines for {decls.length} declarations and {projs} projections") },
     { name := "the Wiz kernel agrees with the Lean kernel (400 random terms)", run := fun _ => do
         let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
         let mut terms : Array MTm := MTm.samples.toArray

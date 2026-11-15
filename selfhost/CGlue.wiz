@@ -263,30 +263,30 @@ partial def gExprLoop (prec : Nat) (lhs : GTy) (p : GS) : GR :=
         | .gerr m => .gerr m
         | .gok b p3 =>
           if Bool.not lhs.isNum then .gerr "the condition of ?: must be a number" else
-          if Bool.not (Bool.or (GTy.fits a b) (GTy.fits b a)) then .gerr "the branches of ?: have different types" else
+          if Bool.not (Bool.or (GTy.fits a b) (GTy.fits b a)) then .gerr "the branches of ?: have different types" else (
           let r : GTy := match a, b with
             | .gdbl, _ => .gdbl
             | _, .gdbl => .gdbl
-            | _, _ => .gint
-          gExprLoop prec r p3)
+            | _, _ => .gint;
+          gExprLoop prec r p3))
     | _ => .gok lhs p
   | .false => match gFindLevel gBinops t 0 with
     | .none => .gok lhs p
     | .some lvl =>
-      if Nat.lt lvl prec then .gok lhs p else
+      if Nat.lt lvl prec then .gok lhs p else (
       let p1 := gAdvance p;
       match gExpr (lvl + 1) p1 with
       | .gerr m => .gerr m
       | .gok rhs p2 =>
-        if Bool.not (Bool.and lhs.isNum rhs.isNum) then .gerr ("'" +++ t +++ "' needs numbers") else
+        if Bool.not (Bool.and lhs.isNum rhs.isNum) then .gerr ("'" +++ t +++ "' needs numbers") else (
         let r : GTy := match Nat.le lvl 6 with
           | .true => .gint
           | .false => match lhs with
             | .gdbl => .gdbl
             | _ => match rhs with
               | .gdbl => .gdbl
-              | _ => .gint
-        gExprLoop prec r p2
+              | _ => .gint;
+        gExprLoop prec r p2))
 
 partial def gUnary (p : GS) : GR :=
   let t := gPeek p; if gContains t gForbidden then .gerr ("'" +++ t +++ "' is not allowed in glue code")
@@ -343,14 +343,14 @@ partial def gVar (t : String) (p : GS) : GR :=
 -- Field accesses `.f` after a struct-valued variable.
 partial def gMembers (ty : GTy) (p : GS) : GR := match ty with
   | .gstruct sp =>
-    if strNe (gPeek p) "." then .gok ty p else
+    if strNe (gPeek p) "." then .gok ty p else (
     let p1 := gAdvance p;
     let f := gPeek p1;
     match gLookupStruct sp (match p with | .mk _ _ _ _ st => st) with
     | .none => .gerr ("the fields of " +++ sp +++ " are not known")
     | .some fs => match gLookupField f fs with
       | .none => .gerr (sp +++ " has no field " +++ f)
-      | .some fty => gMembers fty (gAdvance p1)
+      | .some fty => gMembers fty (gAdvance p1))
   | _ => .gok ty p
 
 partial def gArgsMore (p : GS) (args : List GTy) : GArgs :=
@@ -448,7 +448,7 @@ partial def gDecl (p : GS) : GSt :=
 
 partial def gDeclare (p : GS) (ws : List String) (ty : GTy) : GSt :=
   let p1 := gAdvanceN p (gLenS ws);
-  let x := gPeek p1; if Bool.not (gIsIdent x) then .serr ("expected a variable name, found '" +++ x +++ "'") else
+  let x := gPeek p1; if Bool.not (gIsIdent x) then .serr ("expected a variable name, found '" +++ x +++ "'") else (
   let p2 := gAdvance p1;
   match strEq (gPeek p2) "=" with
   | .true => match gExpr 0 (gAdvance p2) with
@@ -469,7 +469,7 @@ partial def gDeclare (p : GS) (ws : List String) (ty : GTy) : GSt :=
       | .none => .serr (x +++ ": the fields of " +++ sp +++ " are not known")
     | _ =>
       if strNe (gPeek p2) ";" then .serr ("expected ';', found '" +++ gPeek p2 +++ "'") else
-      .sok (gFoldVars (gAdvance p2) x ty)
+      .sok (gFoldVars (gAdvance p2) x ty))
 
 partial def gSimple (p : GS) : GSt :=
   let x := gPeek p; if strEq (gPeekAt p 1) "." then (match gLookupVar x (match p with | .mk _ vs _ _ _ => vs) with
