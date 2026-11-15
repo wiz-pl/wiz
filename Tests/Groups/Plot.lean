@@ -11,13 +11,12 @@ namespace Tests.Elab
 /-- `lib/Plot.wiz`: exact rational data, linear and log scales, 1/2/5 × 10^k ticks and
 deterministic SVG. The tick cases are properties (inside the domain, increasing,
 multiples of a nice step); the four SVGs are byte-for-byte goldens in `Tests/data/plot/`,
-so a diff there means the library changed the picture (or stopped being deterministic). -/
-def plotGroup : Group where
-  name := "plot"
-  exercise := "lib/Plot.wiz"
-  cases := [
-    { name := "linear ticks: 1/2/5 step, inside the domain, increasing, integer multiples (awkward domains)", run := fun _ =>
-        okLibs r#"import Plot
+so a diff there means the library changed the picture (or stopped being deterministic).
+
+The Wiz sources and their expected outputs are top-level definitions: a raw string
+inside a structure literal followed by another argument is a Lean parser gap, not a
+Wiz one. -/
+def plotTicksSrc : String := r#"import Plot
 import Text
 
 partial def inc : List Plot.Tick → Bool
@@ -58,9 +57,13 @@ def okDomain (lo hi : Q) : Bool :=
   (999999, 1000001), (Plot.fracInt (-12345) 100, Plot.fracInt 6789 100)]
 #eval nrOk 0 1
 #eval nrOk (Plot.fracInt (-7) 3) (Plot.frac 22 7)
-"# [".cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true .nil))))))", ".true", ".true"] },
-    { name := "domains: one point, all-equal, zero, tiny magnitudes, bars include zero; log drops ≤ 0", run := fun _ =>
-        okLibs r#"import Plot
+"#
+
+def plotTicksExpected : List String := [
+  ".cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true .nil))))))",
+  ".true", ".true"]
+
+def plotDomainsSrc : String := r#"import Plot
 
 def between (b : Plot.Bounds) (v : Q) : Bool :=
   Bool.and (Plot.qLt b.lo v) (Plot.qLt v b.hi)
@@ -79,9 +82,13 @@ def logHi (vs : List Q) (v : Q) : Bool := Plot.qEq (Plot.logBoundsOf vs).hi v
 #eval logHi [0] 10
 #eval logLo [Plot.frac 1 1000000000, Plot.frac 1 1000000000] (Plot.frac 1 1000000000)
 #eval logHi [Plot.frac 1 1000000000, Plot.frac 1 1000000000] (Plot.frac 1 100000000)
-"# [".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true"] },
-    { name := "log ticks: 1/2/5 mantissas, inside the domain, increasing; wide domains use decades", run := fun _ =>
-        okLibs r#"import Plot
+"#
+
+def plotDomainsExpected : List String := [
+  ".true", ".true", ".true", ".true", ".true", ".true",
+  ".true", ".true", ".true", ".true", ".true"]
+
+def plotLogSrc : String := r#"import Plot
 import Text
 
 partial def inc : List Plot.Tick → Bool
@@ -105,10 +112,13 @@ def okLog (lo hi : Q) : Bool :=
 #eval List.length (Plot.logTicks (Plot.logBoundsOf [(1 : Q), 10]) 6)
 #eval List.length (Plot.logTicks (Plot.logBoundsOf [(1 : Q), 100]) 6)
 #eval List.map (fun t => Plot.showDec t.mant t.exp) (Plot.logTicks (Plot.logBoundsOf [(1 : Q), 10]) 6)
-"# [".cons .true (.cons .true (.cons .true (.cons .true .nil)))", "4", "3",
-     ".cons \"1\" (.cons \"2\" (.cons \"5\" (.cons \"10\" .nil)))"] },
-    { name := "rounding and decimal text are pinned (halves away from zero, exact tick labels)", run := fun _ =>
-        okLibs r#"import Plot
+"#
+
+def plotLogExpected : List String := [
+  ".cons .true (.cons .true (.cons .true (.cons .true .nil)))", "4", "3",
+  ".cons \"1\" (.cons \"2\" (.cons \"5\" (.cons \"10\" .nil)))"]
+
+def plotRoundSrc : String := r#"import Plot
 #eval Plot.qRound (Plot.frac 1 2)
 #eval Plot.qRound (Plot.fracInt (-1) 2)
 #eval Plot.qRound (Plot.frac 3 2)
@@ -118,15 +128,12 @@ def okLog (lo hi : Q) : Bool :=
 #eval Plot.showDec 125 (-2)
 #eval Plot.showDec (-1) 0
 #eval Plot.showQ (Plot.frac 1 3)
-"# ["1", "-1", "2", "-2", "\"0.2\"", "\"1000\"", "\"1.25\"", "\"-1\"", "\"0.333333333333\""] },
-    { name := "golden SVGs: line, scatter, bar, histogram (byte for byte, twice the same)", run := fun _ => do
-        let line ← IO.FS.readFile "Tests/data/plot/line.svg"
-        let scatter ← IO.FS.readFile "Tests/data/plot/scatter.svg"
-        let bar ← IO.FS.readFile "Tests/data/plot/bar.svg"
-        let histogram ← IO.FS.readFile "Tests/data/plot/histogram.svg"
-        let expected := String.intercalate "\n@@\n"
-          [line, scatter, bar, histogram, line, line]
-        cRunLibs r#"import IO
+"#
+
+def plotRoundExpected : List String := [
+  "1", "-1", "2", "-2", "\"0.2\"", "\"1000\"", "\"1.25\"", "\"-1\"", "\"0.333333333333\""]
+
+def plotGoldenSrc : String := r#"import IO
 import Plot
 
 def lineData : Plot.Frame := Plot.frame [
@@ -163,7 +170,28 @@ def main : IO Unit := do
   IO.print (Plot.svg lineChart);
   IO.print "\n@@\n";
   IO.print (Plot.svg lineChart)
-"# expected }
+"#
+
+def plotGroup : Group where
+  name := "plot"
+  exercise := "lib/Plot.wiz"
+  cases := [
+    { name := "linear ticks: 1/2/5 step, inside the domain, increasing, integer multiples (awkward domains)", run := fun _ =>
+        okLibs plotTicksSrc plotTicksExpected },
+    { name := "domains: one point, all-equal, zero, tiny magnitudes, bars include zero; log drops ≤ 0", run := fun _ =>
+        okLibs plotDomainsSrc plotDomainsExpected },
+    { name := "log ticks: 1/2/5 mantissas, inside the domain, increasing; wide domains use decades", run := fun _ =>
+        okLibs plotLogSrc plotLogExpected },
+    { name := "rounding and decimal text are pinned (halves away from zero, exact tick labels)", run := fun _ =>
+        okLibs plotRoundSrc plotRoundExpected },
+    { name := "golden SVGs: line, scatter, bar, histogram (byte for byte, twice the same)", run := fun _ => do
+        let line ← IO.FS.readFile "Tests/data/plot/line.svg"
+        let scatter ← IO.FS.readFile "Tests/data/plot/scatter.svg"
+        let bar ← IO.FS.readFile "Tests/data/plot/bar.svg"
+        let histogram ← IO.FS.readFile "Tests/data/plot/histogram.svg"
+        let expected := String.intercalate "\n@@\n"
+          [line, scatter, bar, histogram, line, line]
+        cRunLibs plotGoldenSrc expected }
   ]
 
 builtin_initialize registerGroup plotGroup
