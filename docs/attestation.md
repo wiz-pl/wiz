@@ -1,15 +1,17 @@
 # Build attestation with a signed statement and a TPM 2.0 quote
 
-A Wiz build produces a small, canonical **build manifest**, wraps it in an **in-toto
-Statement v1**, signs that statement as a **DSSE envelope** with an offline Ed25519 key,
-and binds the statement digest to a **TPM 2.0 quote**:
+`wiz build --attest` writes an **in-toto Statement v1** whose predicate **is** the
+canonical `wiz-build-manifest/v1` body.  There is one manifest, not a wrapper around a
+second one: the signer signs the payload the build wrote, and the verifier checks that
+same payload.  `scripts/attest/wiz-attest sign` signs the statement as a **DSSE
+envelope** with an offline Ed25519 key, and the quote binds the statement digest:
 
 ```
 statement_digest = SHA-256(canonical DSSE payload)
 quote_extraData  = SHA-256("wiz-quote-v1" || nonce || statement_digest)
 ```
 
-The manifest is **challenge-free**, so the same inputs produce the same manifest and two
+The manifest is **challenge-free**, so the same inputs produce the same statement and two
 builders can compare digests.  Freshness lives in the quote's `extraData`, not in the
 hashed manifest.  The TPM quote proves *this TPM, in this boot state, signed this
 statement digest together with this verifier nonce*; the DSSE signature proves *the
@@ -21,10 +23,12 @@ for the signature.  They make no network call unless you explicitly pass `--sigs
 
 * `scripts/attest/wiz-attest keygen` generates an offline Ed25519 key and prints its
   `SHA256:` fingerprint;
-* `scripts/attest/wiz-attest sign` signs an existing manifest (and `ak-info` prints the
-  AK's TPM Name and DER SPKI digest for a policy);
-* `scripts/attest/wiz-attest SOURCE|--artifact ...` builds and signs, then asks the TPM
-  for a quote;
+* `scripts/attest/wiz-attest sign --attest FILE` signs the statement from `wiz build
+  --attest` (and `ak-info` prints the AK's TPM Name and DER SPKI digest for a policy);
+* `scripts/attest/wiz-attest quote --attest ENVELOPE` binds a signed statement to a TPM
+  quote (E1);
+* `scripts/attest/wiz-attest SOURCE` (or `--statement FILE`) is the convenience producer:
+  build with `wiz build --attest`, sign, then quote;
 * `scripts/attest/wiz-verify` verifies the DSSE payloadType, the signature over the PAE,
   the key-fingerprint allowlist, the statement/artifact/manifest binding, the nonce in
   `extraData`, a PCR policy and (via `tpm2_checkquote`) the quote signature.  With
@@ -51,7 +55,8 @@ proves that the build was honest, reproducible or run in a particular cloud loca
   The producer uses only transient objects: it creates no persistent handle, writes no
   NV index and discards the AK private blob after the quote.
 * For `wiz-attest SOURCE`, a built `wiz` (`--wiz`) and its C toolchain flags, exactly as
-  for `wiz build`.  `--artifact` works without `wiz` when `--wiz-version` is given.
+  for `wiz build`.  `--statement` takes a statement produced elsewhere, so a machine
+  without `wiz` can still sign and quote it.
 * Optional: `cosign` for the opt-in `--sigstore`/`--sigstore-upload` path.  Nothing uses
   `cosign`, the network or Rekor unless you ask for it.
 * For SEV-SNP evidence, `openssl` (X.509 chain validation and ECDSA-P384/SHA-384 report
@@ -90,7 +95,7 @@ An envelope is canonical JSON (sorted keys, no whitespace, no trailing newline):
 The signature is over the DSSE PAE (`DSSEv1 <len(type)> <type> <len(payload)> <payload>`),
 not over the payload alone.  `keyid` is the signing key's `SHA256:` fingerprint; the
 verifier treats it as an unauthenticated hint and requires it to equal the fingerprint of
-the key that actually verifies.  A detached `manifest.intoto.json.sig` (raw SSHSIG over
+the key that actually verifies.  A detached `attestation.json.sig` (raw SSHSIG over
 the PAE) is written next to the envelope.  With the same key and inputs the envelope is
 byte-for-byte deterministic.
 
@@ -98,20 +103,24 @@ The statement is the signed root:
 
 ```json
 {"_type": "https://in-toto.io/Statement/v1",
- "subject": [{"name": "prog", "digest": {"sha256": "..."}}],
- "predicateType": "https://wiz-lang.dev/attestation/build-manifest/v1",
+ "subject": [{"name": "prog", "digest": {"sha256": "..."}},
+             {"name": "prog.c", "digest": {"sha256": "..."}}],
+ "predicateType": "https://wiz-lang.org/attestation/wiz-build/v1",
  "predicate": {
    "schema": "wiz-build-manifest/v1",
-   "buildType": "https://wiz-lang.dev/buildtypes/wiz-build/v1",
-   "externalParameters": {"entry": "examples/io.wiz", "target": "x86_64-linux-gnu"},
-   "resolvedDependencies": [{"uri": "wiz:source", "digest": {"sha256": "..."}}],
-   "byproducts": [],
-   "manifest": { ... the whole canonical manifest ... },
-   "manifest_sha256": "..."
+   "buildType": "https://wiz-lang.org/buildtypes/wiz-build/v1",
+   "format": 1,
+   "builder": {"kind": "wiz-build", "version": "0.1.0-dev"},
+   "target": "x86_64-unknown-linux-gnu",
+   "source": {"file": "examples/io.wiz", "sha256": "...", "git": {...}},
+   "inputsRoot": "sha256:...",
+   "inputs": [...], "headers": [...],
+   "toolchain": {...}, "flags": {...},
+   "artifacts": [...], "environment": {"platform": "..."}
  }}
 ```
 
-Two optional fields chain and expire a statement: `prev` (the previous statement digest,
+Two optional predicate fields chain and expire a statement: `prev` (the previous statement digest,
 64 hex; verify with `--expect-prev`) and `valid_until` (RFC 3339 UTC; an expired statement
 fails).  They are *inside* the signed statement, so they cannot be changed without
 breaking the signature.  The manifest itself still has no timestamp.  Use
@@ -150,17 +159,44 @@ this boot state.  It does **not** prove:
 
 ## Build, sign and quote
 
-From a checkout, build `examples/io.wiz`, sign the statement, and bind it to PCRs 0, 1,
-4, 7, 11, 12 and 14.  The nonce must come from the verifier (or KBS); it is not stored in
-the manifest:
+The flow has three explicit steps, and `wiz-attest SOURCE` runs all three.  First ask
+`wiz build` for the statement (the build and its manifest):
+
+```sh
+wiz build examples/io.wiz -o build-attest/prog \
+  --attest build-attest/prog.attest.json \
+  -I lib --cc cc --cflags "$CFLAGS" --ldflags "$LDFLAGS"
+```
+
+`prog.attest.json` is a DSSE envelope with `signatures: []`; its payload is the
+statement described above and its predicate is the manifest.  Sign that exact payload:
+
+```sh
+scripts/attest/wiz-attest sign \
+  --attest build-attest/prog.attest.json \
+  --key ~/.config/wiz/attest-signing-key \
+  --out build-attest/attestation.json \
+  --valid-until 2027-02-01T00:00:00Z
+```
+
+Then bind its digest to a TPM quote (the nonce must come from the verifier or KBS; it is
+not stored in the statement):
 
 ```sh
 NONCE=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+scripts/attest/wiz-attest quote \
+  --attest build-attest/attestation.json \
+  --pcr-list sha256:0,1,4,7,11,12,14 \
+  --nonce "$NONCE"
+```
+
+Or, in one command:
+
+```sh
 scripts/attest/wiz-attest examples/io.wiz \
   --out build-attest \
   --wiz .lake/build/bin/wiz \
   --wiz-flag=-I --wiz-flag=lib \
-  --tree-root lib --tree-root runtime \
   --pcr-list sha256:0,1,4,7,11,12,14 \
   --sign-key ~/.config/wiz/attest-signing-key \
   --valid-until 2027-02-01T00:00:00Z \
@@ -170,9 +206,9 @@ scripts/attest/wiz-attest examples/io.wiz \
 The output directory then contains:
 
 ```
-manifest.json                  canonical, challenge-free build manifest
-manifest.intoto.json           DSSE envelope with the signed in-toto Statement
-manifest.intoto.json.sig       detached SSHSIG over the DSSE PAE
+prog.attest.json               the statement `wiz build --attest` wrote (unsigned)
+attestation.json               DSSE envelope with the signed in-toto Statement
+attestation.json.sig           detached SSHSIG over the DSSE PAE
 quote.msg                      TPMS_ATTEST quote message (signed by the AK)
 quote.sig                      quote signature
 quote.pcr                      PCR values, `-F values` format (32 bytes per PCR)
@@ -184,29 +220,17 @@ The quote's `extraData` is `H("wiz-quote-v1" || nonce || statement_digest)`.  If
 `--nonce` is omitted the producer generates a random one and records it in
 `quote.nonce`; that is only local freshness, not proof that the quote is fresh to *you*.
 
-`--tree-root` names the compiler inputs whose digest goes into the manifest.  When it is
-omitted, the producer uses `lib` and `runtime` if they exist in the current directory.
-Use `--wiz-flag=--cc --wiz-flag=/path/to/clang` (and the other toolchain flags) for a
-checkout build that needs them.  `--output-name` names the executable.  A quote requires
-`--sign-key`: an unsigned quote would not bind a statement, so the producer fails with a
-usage error instead of emitting one.
+`--wiz-flag=--cc --wiz-flag=/path/to/clang` (and the other toolchain flags) go to `wiz
+build`; `--output-name` names the executable.  A quote requires `--sign-key`: an
+unsigned quote would not bind a statement, so the producer fails with a usage error
+instead of emitting one.  `--no-quote` writes the signed envelope and detached signature
+only (CI, no TPM).
 
-To produce only the manifest and statement (no TPM, useful for CI and reproducibility):
-
-```sh
-scripts/attest/wiz-attest --artifact build/prog --artifact build/prog.c \
-  --out build --no-quote \
-  --wiz-version 0.1.0-dev --target x86_64-linux-gnu \
-  --source-entry examples/io.wiz \
-  --sign-key ~/.config/wiz/attest-signing-key \
-  --valid-until 2027-02-01T00:00:00Z
-```
-
-To sign an existing manifest separately (or re-sign before quoting again):
+To sign a statement that was produced elsewhere (or re-sign before quoting again):
 
 ```sh
 scripts/attest/wiz-attest sign \
-  --manifest build-attest/manifest.json \
+  --attest build-attest/prog.attest.json \
   --key ~/.config/wiz/attest-signing-key \
   --prev "$PREVIOUS_STATEMENT_SHA256" \
   --valid-until 2027-02-01T00:00:00Z
@@ -214,9 +238,8 @@ scripts/attest/wiz-attest sign \
 
 `sign` does not read or change `quote.msg`; if you add `--prev`/`--valid-until` after a
 quote exists, that quote binds the *old* statement digest and must be regenerated with
-the producer.  Artifact paths are recorded relative to `--out`.  If an artifact lives
-elsewhere, it is recorded by basename and `wiz-verify --artifacts-dir DIR` says where to
-find it.
+`wiz-attest quote`.  Artifact paths are recorded by the build; if an artifact lives
+elsewhere, `wiz-verify --artifacts-dir DIR` says where to find it.
 
 ## Verify
 
@@ -256,7 +279,7 @@ Then, with the verifier's own nonce and an explicit trust root:
 
 ```sh
 scripts/attest/wiz-verify \
-  --manifest build-attest/manifest.json \
+  --attest build-attest/attestation.json \
   --policy policy.json \
   --nonce "$NONCE" \
   --public-key release-signing-key.pub \
@@ -270,20 +293,20 @@ scripts/attest/wiz-verify \
 `--nonce` checks the `extraData` formula and freshness; `--require-nonce` makes a missing
 verifier nonce an error.  `--public-key` (repeatable) or `--allowed-signers` supplies the
 trusted key(s), and `--key-fingerprint` (repeatable) is the allowlist the verifying key
-must match.  `--require-signature` makes an unsigned manifest an error.  An unsigned
+must match.  `--require-signature` makes an unsigned statement an error.  An unsigned
 bundle is accepted only with the explicit `--allow-unsigned`, which records a warning;
 the default is to **fail closed**.  `--expect-digest` pins the manifest,
 `--expect-statement-digest` pins the statement, and `--expect-prev` pins a `prev` chain.
 `--detached-signature` verifies the sidecar `.sig` in addition to the envelope.  If
-`ak.pub` is not next to the manifest, pass `--ak`; the same applies to `--quote`,
+`ak.pub` is not next to the statement, pass `--ak`; the same applies to `--quote`,
 `--signature` and `--pcr`.
 
-A **verified** result needs all of: a canonical manifest, matching artifact bytes, a DSSE
-payloadType of `application/vnd.in-toto+json`, a valid SSHSIG over the PAE under an
-allowlisted key, a statement that still matches the manifest/artifacts, quote `extraData`
-equal to `H("wiz-quote-v1" || nonce || statement_digest)`, the quote's PCR selection equal
-to the manifest's, PCR values matching the policy, a pinned AK, and a successful
-`tpm2_checkquote`.  Anything less is **partial** (exit 3), and any mismatch is
+A **verified** result needs all of: a canonical statement whose predicate is a valid
+manifest, matching artifact bytes, a DSSE payloadType of
+`application/vnd.in-toto+json`, a valid SSHSIG over the PAE under an allowlisted key, a
+statement that still matches the manifest/artifacts, quote `extraData` equal to
+`H("wiz-quote-v1" || nonce || statement_digest)`, PCR values matching the policy (the
+quote must cover every pinned index), a pinned AK, and a successful `tpm2_checkquote`.  Anything less is **partial** (exit 3), and any mismatch is
 **failed** (exit 1).
 
 ## AMD SEV-SNP evidence (E2)
@@ -370,7 +393,7 @@ machine:
 
 ```sh
 scripts/attest/wiz-verify \
-  --manifest build-attest/manifest.json \
+  --attest build-attest/attestation.json \
   --policy policy.json \
   --nonce "$NONCE" \
   --public-key release-signing-key.pub \
@@ -449,8 +472,8 @@ needed for AMD hardware.  Nothing is fetched from the network.
 `checks` array (`pass`, `fail` or `skip` with a detail), `errors`, `warnings`, the parsed
 quote fields, and a `snp` object (report fields, certificate chain and the pinned product)
 when E2 evidence was checked.  Human-readable output is one line per check.  The
-producer's `--json` prints the manifest, statement, envelope, keyid and (with a quote) the
-AK Name and SPKI digest.
+producer's `--json` prints the statement path and digest, artifacts, envelope, keyid and
+(with a quote) the AK Name and SPKI digest.
 
 ### CI job
 
@@ -467,72 +490,91 @@ skipped.
 
 ## Manifest format
 
-The manifest is `wiz-build-manifest/v1`:
+The manifest is the statement's **predicate** (`wiz-build-manifest/v1`); there is no
+second file.  `wiz build --attest` writes it inside the DSSE envelope:
 
 ```json
 {
-  "artifacts": [
-    {"path": "prog", "sha256": "c950a5f8…", "size": 45288},
-    {"path": "prog.c", "sha256": "d8598d2b…", "size": 186729}
-  ],
-  "builder": {"kind": "tpm2-quote"},
-  "pcr": {"bank": "sha256", "indices": [0, 1, 4, 7, 11, 12, 14]},
   "schema": "wiz-build-manifest/v1",
+  "buildType": "https://wiz-lang.org/buildtypes/wiz-build/v1",
+  "format": 1,
+  "builder": {"kind": "wiz-build", "version": "0.1.0-dev"},
+  "target": "x86_64-unknown-linux-gnu",
   "source": {
-    "entry": "examples/io.wiz",
+    "file": "examples/io.wiz",
     "sha256": "78b4e978…",
-    "tree_roots": ["lib", "runtime"],
-    "tree_sha256": "233c6aa7…"
+    "git": {"commit": "e3bd36ff…", "dirty": false}
   },
-  "target": "x86_64-linux-gnu",
-  "wiz": {
-    "binary_sha256": "7d89c302…",
-    "commit": "e3bd36ff…",
-    "version": "0.1.0-dev"
-  }
+  "inputsRoot": "sha256:2c2d3d5c…",
+  "inputs": [
+    {"path": "extra.c", "role": "link-c", "sha256": "4c3ffc2d…"},
+    {"name": "IO", "role": "module", "sha256": "a0654855…"},
+    {"path": "examples/io.wiz", "role": "source", "sha256": "78b4e978…"}
+  ],
+  "headers": [],
+  "toolchain": {
+    "wiz": {"version": "0.1.0-dev", "sha256": "…"},
+    "cc": {"path": "/usr/bin/cc", "sha256": "…", "version": "cc 1.0"}
+  },
+  "flags": {"backend": "c", "kind": "executable", "split": 0, "...": "..."},
+  "artifacts": [
+    {"path": "prog", "role": "output", "kind": "executable",
+     "size": 45288, "sha256": "c950a5f8…"},
+    {"path": "prog.c", "role": "byproduct", "kind": "c",
+     "size": 186729, "sha256": "d8598d2b…"}
+  ],
+  "environment": {"platform": "x86_64-unknown-linux-gnu"}
 }
 ```
 
 * `artifacts` are sorted by path; paths are relative, use `/`, and must not contain `.`
-  or `..` components.  Sizes and SHA-256 digests are checked against the files.
-* `source.tree_sha256` is SHA-256 over the sorted lines
-  `"<sha256>  <root>/<relative-path>\n"` for every regular file under `tree_roots`.
-  This is a simple deterministic Merkle substitute, not a standard transparency format.
-  With `--artifact`, pass `--source-entry` and, if that file is not in the current
-  directory, `--source-sha256`; the producer does not invent a source digest.
-* `wiz` records the toolchain version, and the commit and binary hash when known.
-* `target` is the target triple of the produced binary.
-* `pcr` names the bank and exactly the PCR indices the quote selects.
-* `builder.kind` is `tpm2-quote`.  SEV-SNP evidence is a separate report bound to the
-  statement digest, not a manifest field; the manifest stays a stable, challenge-free
-  description of the inputs and outputs whether or not E2 evidence accompanies it.
-* There is no `challenge`, nonce, timestamp, hostname or absolute path.  Freshness is
-  `quote.extraData = H("wiz-quote-v1" || nonce || statement_digest)`; expiry and the
-  previous root, when used, are optional fields of the signed statement predicate, not
-  the manifest.
+  or `..` components.  Exactly one has `role: "output"`; the rest are `byproduct`.
+  Sizes and SHA-256 digests are checked against the files, and the statement's `subject`
+  must be exactly `[{path, digest.sha256} for each artifact]`.
+* `inputs` are the root file (`source`), each imported module (`module`, named by module
+  name, not path, so the record is portable) and each `link_c` file (`link-c`), sorted by
+  role/name/path.  `inputsRoot` is `sha256:` + SHA-256 over
+  `"role\tname\tpath\tsha256\n"` lines under a `wiz-inputs-v1` label; the verifier
+  recomputes it.  `headers` lists `import_c` names (their preprocessed text is the C
+  compiler's, so it is not hashed).
+* `toolchain` records the running `wiz` (version, optional release revision, SHA-256 of
+  its bytes) and `cc`/`llc` (resolved path, SHA-256, `--version` line).
+* `flags` records backend, output kind, `cc`, cflags, ldflags, libs, GMP, `llc`, the GC
+  flags, split count and the `-I` roots.
+* `source` is the root file, its digest, and `git.commit`/`git.dirty` when the invocation
+  directory is a repository (tracked modifications only; untracked outputs do not
+  count).
+* `builder.kind` is `wiz-build`: the build tool is the builder; the TPM quote is evidence
+  about the machine, not a builder field.  SEV-SNP evidence is a separate report bound to
+  the statement digest, never a manifest field, so the manifest stays a stable,
+  challenge-free description of inputs and outputs.
+* There is no `challenge`, nonce, timestamp, hostname or absolute build directory.
+  Freshness is `quote.extraData = H("wiz-quote-v1" || nonce || statement_digest)`;
+  expiry and the previous root, when used, are optional fields of the signed predicate.
 
-The file is **canonical JSON**: keys sorted recursively, no insignificant whitespace, no
-trailing newline, UTF-8.  The signed object is the canonical in-toto Statement whose
-`predicate.manifest` is exactly these bytes; the quote binds the SHA-256 of the canonical
-statement payload.  The verifier rejects a manifest that is not in canonical form,
-duplicate keys, unknown fields and non-finite numbers.  There are no timestamps,
-hostnames, cache paths or absolute build directories in the manifest, so the same inputs
-produce the same manifest; `wiz-attest` writes that form directly.
+The payload is **canonical JSON**: keys sorted recursively, no insignificant whitespace,
+no trailing newline, UTF-8.  `wiz build` writes that form; `wiz-attest sign` preserves the
+payload byte-for-byte (it only re-serialises if you add `--prev`/`--valid-until`), and the
+quote and SNP report bind `SHA-256(payload)`.  The verifier rejects a payload that is not
+canonical, duplicate keys, unknown fields and non-finite numbers.  There are no
+timestamps, hostnames, cache paths or absolute build directories in the manifest, so the
+same inputs produce the same statement.
 
 ## Trust model
 
 A successful verification says:
 
 * the artifact bytes match the signed statement's `subject` and the manifest;
-* the statement (and its embedded manifest root) was signed by the key whose
+* the statement (and its predicate, the manifest) was signed by the key whose
   `SHA256:` fingerprint is in your allowlist, over the exact DSSE PAE;
 * the statement digest and your nonce are what the TPM put in `extraData`, via
   `H("wiz-quote-v1" || nonce || statement_digest)`;
 * the quote signature verifies under the `ak.pub` you supplied, its `qualifiedSigner`
   Name matches the pinned `ak_name`, and its PCR digest covers the supplied values (via
   `tpm2_checkquote`);
-* the quoted PCRs match your policy, the policy has not expired, and the manifest names
-  the source tree, toolchain and target that the builder claims.
+* the quoted PCRs match your policy (and cover every pinned index), the policy has not
+  expired, and the manifest names the inputs, toolchain and target that the builder
+  claims.
 
 When E2 evidence verifies, it additionally says:
 
@@ -611,7 +653,7 @@ implementation.
   local quote plus a signed statement can be shown only to the parties who receive them;
   two verifiers can still be shown different bundles.  Logging one claim per build to
   Rekor/Sigsum and verifying inclusion offline is future work.
-* **Cache generation root (deferred).** The manifest records the source tree and
+* **Cache generation root (deferred).** The manifest records the input files and
   artifacts, not which elaboration or grail cache supplied declarations, and there is no
   signed cache-generation root.  A shared writable cache can still change what is
   elaborated.  The TPM measures the booted OS image (PCR 7/11), not the `wiz` process or

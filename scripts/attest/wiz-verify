@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Verify a DSSE-signed statement, a Wiz manifest, its artifacts and a quote.
+"""Verify a DSSE-signed build statement, its manifest, artifacts, quote and E2.
 
-See `docs/attestation.md`.  Exit codes: 0 verified, 1 failed, 2 usage,
-3 incomplete (missing trust root, nonce, pin, tpm2_checkquote, or --skip-crypto).
+Takes the envelope from `wiz build --attest` + `wiz-attest sign` (or the
+producer) and checks the signature, the artifacts, the TPM quote and, with
+--snp-*, the SEV-SNP evidence.  See `docs/attestation.md`.
+Exit codes: 0 verified, 1 failed, 2 usage, 3 incomplete (missing trust root,
+nonce, pin, tpm2_checkquote, or --skip-crypto).
 """
 
 import os

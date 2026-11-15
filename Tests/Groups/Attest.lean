@@ -80,7 +80,16 @@ def predicate (st : Json) : Json := (st.getObjVal? "predicate").toOption.getD Js
 
 def source (st : Json) : Json := ((predicate st).getObjVal? "source").toOption.getD Json.null
 
-def output (st : Json) : Json := ((predicate st).getObjVal? "output").toOption.getD Json.null
+/-- The manifest's artifacts. -/
+def artifacts (st : Json) : Array Json := (Wiz.Attest.arrField? (predicate st) "artifacts").getD #[]
+
+/-- The artifact entry with `role = "output"`. -/
+def output (st : Json) : Json :=
+  (artifacts st).find? (fun a => Wiz.Attest.strField? a "role" == some "output") |>.getD Json.null
+
+/-- The artifact entry whose path is `name`. -/
+def artifact (st : Json) (name : String) : Json :=
+  (artifacts st).find? (fun a => Wiz.Attest.strField? a "path" == some name) |>.getD Json.null
 
 /-- `predicate.toolchain` as an object. -/
 def toolchainPart (st : Json) : Json := ((predicate st).getObjVal? "toolchain").toOption.getD Json.null
@@ -117,6 +126,18 @@ def group : Group where
         checkEq "prog" name
         checkEq (← shaOf (dir / "prog")) sha
         checkEq (some sha) (Wiz.Attest.strField? (output st) "sha256")
+        checkEq (some Wiz.Attest.schema) (Wiz.Attest.strField? (predicate st) "schema")
+        checkEq (some Wiz.Attest.buildType) (Wiz.Attest.strField? (predicate st) "buildType")
+        checkEq (some "wiz-build")
+          (((predicate st).getObjVal? "builder").toOption.bind fun b =>
+            Wiz.Attest.strField? b "kind")
+        checkEq (some (← (dir / "prog").metadata).byteSize.toNat)
+          (Wiz.Attest.natField? (output st) "size")
+        checkEq (artifacts st).size (Wiz.Attest.arrField? st "subject" |>.getD #[]).size
+        check ((artifacts st).any fun a =>
+          Wiz.Attest.strField? a "role" == some "byproduct" &&
+          Wiz.Attest.strField? a "path" == some "prog.c") "no prog.c byproduct"
+        checkEq (← shaOf (dir / "prog.c")) ((Wiz.Attest.strField? (artifact st "prog.c") "sha256").getD "")
         let ins := inputs st
         check (ins.size == 4) s!"expected 4 inputs, got {ins.size}"
         check (ins.any fun i => Wiz.Attest.strField? i "role" == some "source") "no source input"
@@ -218,7 +239,7 @@ def group : Group where
         IO.FS.writeFile (dir / "forged.json") (forged.compress ++ "\n")
         let (_, verr, vcode) ← verify dir tc "forged.json" "prog"
         check (vcode == 1) "a forged signature was accepted"
-        check ((verr.splitOn "signature verification is not implemented").length > 1) verr }
+        check ((verr.splitOn "wiz-verify").length > 1) verr }
   ]
 
 builtin_initialize registerGroup group

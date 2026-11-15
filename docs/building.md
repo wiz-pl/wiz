@@ -146,11 +146,15 @@ code linked into `wiz`, `grail` and `tower` themselves; the licence texts are in
 
 ## Build attestations
 
-`wiz build --attest [FILE]` writes an unsigned in-toto statement (a DSSE-style envelope
-with an empty `signatures` array) about the build: the source file and Git commit/dirty
-flag, the SHA-256 of every input (the file, imported modules by name, `link_c` files), the
-`wiz`/`cc`/`llc` identities, the compiler flags, and the output binary's and generated
-C's hashes. The default path is `OUT.attest.json`.
+`wiz build --attest [FILE]` writes an unsigned in-toto statement (a DSSE envelope with
+an empty `signatures` array) about the build: the source file and Git commit/dirty flag,
+the SHA-256 of every input (the file, imported modules by name, `link_c` files), the
+`wiz`/`cc`/`llc` identities, the compiler flags, and an `artifacts` list with the output
+binary and the generated C (path, role, kind, size, SHA-256). The statement's predicate
+is the build manifest (`wiz-build-manifest/v1`); `scripts/attest/wiz-attest sign` signs
+that same payload and `scripts/attest/wiz-verify` checks the signature, a TPM quote and
+optional SEV-SNP evidence (`docs/attestation.md`). The default path is
+`OUT.attest.json`.
 
 ```sh
 wiz build hello.wiz -o hello --attest
@@ -159,12 +163,14 @@ wiz verify --attest hello.attest.json hello
 wiz verify --artifact-only hello    # artifact only: the sources need not be present
 ```
 
-`wiz verify` re-hashes the artifact, the recorded inputs (pass the same `-I` roots; a
-module is looked up by name) and the manifest root, and exits 1 on any mismatch. It does
-not check a signature: a non-empty `signatures` array is an error, so an unsigned
-verifier never accepts a "signed" claim it cannot check. An unsigned statement proves
-integrity relative to the statement, not that its author was honest — signing and
-independent rebuilds are the next steps (`wiz-notes/build-attest.md`). Absolute paths
+`wiz verify` checks the manifest schema and the `subject`/`artifacts` binding, re-hashes
+the artifact, the recorded inputs (pass the same `-I` roots; a module is looked up by
+name) and the manifest root, and exits 1 on any mismatch. It does not check a signature:
+a non-empty `signatures` array is an error, so an unsigned verifier never accepts a
+"signed" claim it cannot check (use `scripts/attest/wiz-verify` for that). An unsigned
+statement proves integrity relative to the statement, not that its author was honest —
+signing and independent rebuilds are the next steps (`wiz-notes/build-attest.md`).
+Absolute paths
 appear for toolchain binaries and for inputs outside the invocation directory; no
 environment variables or timestamps are recorded. `grail build --attest DIR` writes one
 statement per executable.

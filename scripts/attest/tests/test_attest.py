@@ -102,8 +102,49 @@ def make_key(directory: Path, name: str = "key") -> tuple[Path, Path]:
     return key, Path(str(key) + ".pub")
 
 
+def sample_manifest(artifacts, *, source_entry="examples/io.wiz",
+                    target="x86_64-linux-gnu", wiz_version="0.1.0-dev",
+                    inputs=None) -> dict:
+    """A `wiz-build-manifest/v1` body with the shape Wiz/Attest.lean writes."""
+    if inputs is None:
+        inputs = [{"role": "source", "path": source_entry,
+                   "sha256": hashlib.sha256(b"source").hexdigest()}]
+    return {
+        "schema": wa.SCHEMA,
+        "buildType": wa.BUILD_TYPE,
+        "format": 1,
+        "builder": {"kind": "wiz-build", "version": wiz_version},
+        "target": target,
+        "source": {"file": source_entry,
+                   "sha256": hashlib.sha256(b"source").hexdigest()},
+        "inputsRoot": "sha256:" + wa.inputs_root(inputs),
+        "inputs": inputs,
+        "headers": [],
+        "toolchain": {
+            "wiz": {"version": wiz_version,
+                    "sha256": hashlib.sha256(b"wiz-binary").hexdigest()},
+            "cc": {"path": "/usr/bin/cc",
+                   "sha256": hashlib.sha256(b"cc").hexdigest(),
+                   "version": "cc 1.0"},
+        },
+        "flags": {"backend": "c", "kind": "executable", "split": 0,
+                  "cflags": [], "ldflags": []},
+        "artifacts": artifacts,
+        "environment": {"platform": target},
+    }
+
+
+def statement_of(manifest: dict) -> dict:
+    return {
+        "_type": wa.STATEMENT_TYPE,
+        "subject": wa.subject_of(manifest),
+        "predicateType": wa.PREDICATE_TYPE,
+        "predicate": manifest,
+    }
+
+
 class Fixture:
-    """A complete, valid manifest/quote/policy/artifact bundle in a temp dir."""
+    """A valid statement/manifest/quote/policy/artifact bundle in a temp dir."""
 
     def __init__(self, *, indices=(7, 11), nonce="11" * 32):
         self.dir = Path(tempfile.mkdtemp(prefix="wiz-attest-test-"))
@@ -126,32 +167,29 @@ class Fixture:
         self._write_policy()
         (self.dir / "ak.pub").write_bytes(b"ak-public")
         (self.dir / "quote.sig").write_bytes(b"signature-bytes")
-        self.manifest = wa.build_manifest(
-            artifacts=[{"path": name, "size": len(data),
-                        "sha256": hashlib.sha256(data).hexdigest()}
-                       for name, data in self.artifacts.items()],
-            wiz_version="0.1.0-dev",
-            wiz_commit="e3bd36ffd0093d2d72973f01515489e641b8de1b",
-            wiz_binary_sha256=hashlib.sha256(b"wiz-binary").hexdigest(),
-            source_entry="examples/io.wiz",
-            source_sha256=hashlib.sha256(b"source").hexdigest(),
-            tree_sha256=hashlib.sha256(b"tree").hexdigest(),
-            tree_roots=["lib", "runtime"],
-            target="x86_64-linux-gnu",
-            pcr_indices=self.indices,
-        )
+        artifacts = [
+            {"path": name, "role": "byproduct" if name.endswith(".c") else "output",
+             "kind": "c" if name.endswith(".c") else "executable",
+             "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            for name, data in self.artifacts.items()
+        ]
+        self.manifest = sample_manifest(artifacts)
+        self.statement = statement_of(self.manifest)
+        self.statement_path = self.dir / "statement.json"
+        self.envelope = self.dir / wa.ENVELOPE_NAME
         self.write_manifest()
         self.write_quote()
 
     def write_manifest(self) -> None:
-        (self.dir / "manifest.json").write_bytes(wa.canonical_bytes(self.manifest))
+        """Write the bare statement (`wiz build --attest`'s payload)."""
+        self.statement = statement_of(self.manifest)
+        self.statement_path.write_bytes(wa.canonical_bytes(self.statement))
 
     def manifest_digest(self) -> str:
         return hashlib.sha256(wa.canonical_bytes(self.manifest)).hexdigest()
 
     def statement_digest(self) -> str:
-        statement = wa.build_statement(self.manifest, self.manifest_digest())
-        return hashlib.sha256(wa.canonical_bytes(statement)).hexdigest()
+        return hashlib.sha256(wa.canonical_bytes(self.statement)).hexdigest()
 
     def quote_extra(self, nonce: str | None = None,
                     statement_digest: str | None = None) -> bytes:
@@ -185,9 +223,10 @@ class Fixture:
         (self.dir / "quote.pcr").write_bytes(data)
 
     def verify_args(self, *, allow_unsigned: bool = True,
-                    nonce: str | None = None) -> list[str]:
+                    nonce: str | None = None,
+                    attest: Path | None = None) -> list[str]:
         args = [
-            "--manifest", str(self.dir / "manifest.json"),
+            "--attest", str(attest or self.statement_path),
             "--policy", str(self.dir / "policy.json"),
             "--nonce", self.nonce if nonce is None else nonce,
         ]
@@ -267,25 +306,6 @@ class CanonicalTests(unittest.TestCase):
         with self.assertRaises(wa.SchemaError):
             wa.load_json_strict(b'{"a":1,"a":2}')
 
-    def test_tree_digest_is_deterministic(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            for name, data in (("lib/b.wiz", b"B"), ("lib/a.wiz", b"A"),
-                               ("lib/sub/c.wiz", b"C")):
-                path = root / name
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(data)
-            old = os.getcwd()
-            os.chdir(root)
-            try:
-                first = wa.tree_digest(["lib"])
-                second = wa.tree_digest(["./lib"])
-                self.assertEqual(first, second)
-                (root / "lib/a.wiz").write_bytes(b"A2")
-                self.assertNotEqual(first[0], wa.tree_digest(["lib"])[0])
-            finally:
-                os.chdir(old)
-
 
 class SchemaTests(FixtureTest):
     def assert_schema_fails(self, mutate) -> None:
@@ -324,21 +344,27 @@ class SchemaTests(FixtureTest):
     def test_bad_digest(self):
         self.assert_schema_fails(lambda m: m["artifacts"][0].update({"sha256": "abc"}))
 
-    def test_unsorted_pcr_indices(self):
-        self.assert_schema_fails(lambda m: m["pcr"].update({"indices": [11, 7]}))
+    def test_unsorted_inputs(self):
+        def mutate(m):
+            m["inputs"] = [
+                {"role": "source", "path": "examples/io.wiz", "sha256": "11" * 32},
+                {"role": "link-c", "path": "extra.c", "sha256": "22" * 32},
+            ]
+        self.assert_schema_fails(mutate)
 
-    def test_pcr_out_of_range(self):
-        self.assert_schema_fails(lambda m: m["pcr"].update({"indices": [24]}))
+    def test_inputs_root_mismatch(self):
+        self.assert_schema_fails(
+            lambda m: m["inputs"][0].update({"sha256": "00" * 32}))
 
     def test_unknown_builder(self):
         self.assert_schema_fails(lambda m: m["builder"].update({"kind": "sev-snp"}))
 
     def test_non_canonical_file_rejected(self):
-        path = self.fx.dir / "manifest.json"
-        path.write_text(json.dumps(self.fx.manifest, indent=2), encoding="utf-8")
+        path = self.fx.statement_path
+        path.write_text(json.dumps(self.fx.statement, indent=2), encoding="utf-8")
         code, out, _ = run_verify(self.fx.verify_args() + ["--skip-crypto", "--json"])
         self.assertEqual(code, wa.EXIT_FAIL)
-        self.assertIn("not in canonical form", json.dumps(json.loads(out)))
+        self.assertIn("not canonical JSON", json.dumps(json.loads(out)))
 
 
 # --------------------------------------------------------------------------
@@ -362,10 +388,12 @@ class VerifyTests(FixtureTest):
                              self.fx.quote_extra().hex())
             self.assertEqual(args[args.index("-l") + 1], "sha256:7,11")
 
-    def test_manifest_digest_matches_file_bytes(self):
-        raw = (self.fx.dir / "manifest.json").read_bytes()
-        self.assertEqual(wa.sha256_bytes(raw), self.fx.manifest_digest())
-        self.assertEqual(wa.canonical_bytes(wa.load_json_strict(raw)), raw)
+    def test_manifest_digest_matches_canonical_predicate(self):
+        raw = self.fx.statement_path.read_bytes()
+        statement = wa.load_json_strict(raw)
+        self.assertEqual(wa.sha256_bytes(wa.canonical_bytes(statement["predicate"])),
+                         self.fx.manifest_digest())
+        self.assertEqual(wa.canonical_bytes(statement), raw)
 
     def test_verified_json_has_verified_flag(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -466,13 +494,6 @@ class VerifyTests(FixtureTest):
         self.assertEqual(checks["pcr_policy:0"]["status"], "fail")
         self.assertIn("not covered", checks["pcr_policy:0"]["detail"])
 
-    def test_quote_pcr_selection_mismatch(self):
-        self.fx.write_quote(indices=[7])
-        code, out, _ = run_verify(self.base_args() + ["--skip-crypto", "--json"])
-        self.assertEqual(code, wa.EXIT_FAIL)
-        checks = {c["name"]: c for c in json.loads(out)["checks"]}
-        self.assertEqual(checks["quote_pcr_selection"]["status"], "fail")
-
     def test_quote_pcr_values_wrong_length(self):
         (self.fx.dir / "quote.pcr").write_bytes(b"\x00" * 33)
         code, out, _ = run_verify(self.base_args() + ["--skip-crypto", "--json"])
@@ -512,7 +533,7 @@ class VerifyTests(FixtureTest):
 
     def test_require_nonce_without_one(self):
         args = [
-            "--manifest", str(self.fx.dir / "manifest.json"),
+            "--attest", str(self.fx.statement_path),
             "--policy", str(self.fx.dir / "policy.json"),
             "--allow-unsigned", "--require-nonce",
             "--ak-sha256", hashlib.sha256(b"ak-public").hexdigest(),
@@ -525,7 +546,7 @@ class VerifyTests(FixtureTest):
 
     def test_without_nonce_is_partial(self):
         args = [
-            "--manifest", str(self.fx.dir / "manifest.json"),
+            "--attest", str(self.fx.statement_path),
             "--policy", str(self.fx.dir / "policy.json"),
             "--allow-unsigned",
             "--ak-sha256", hashlib.sha256(b"ak-public").hexdigest(),
@@ -585,163 +606,126 @@ class ProducerTests(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="wiz-attest-producer-"))
         (self.tmp / "prog").write_bytes(b"artifact-bytes")
         (self.tmp / "prog.c").write_bytes(b"int main(void){return 0;}\n")
+        self.manifest = sample_manifest([
+            {"path": "prog", "role": "output", "kind": "executable",
+             "size": len(b"artifact-bytes"),
+             "sha256": hashlib.sha256(b"artifact-bytes").hexdigest()},
+            {"path": "prog.c", "role": "byproduct", "kind": "c",
+             "size": len(b"int main(void){return 0;}\n"),
+             "sha256": hashlib.sha256(b"int main(void){return 0;}\n").hexdigest()},
+        ])
+        self.statement = statement_of(self.manifest)
+        self.statement_path = self.tmp / "statement.json"
+        self.statement_path.write_bytes(wa.canonical_bytes(self.statement))
+        self.key = self.tmp / "producer-key"
+        keygen = run_attest(["keygen", "--key", str(self.key)])
+        self.assertEqual(keygen.returncode, 0, keygen.stderr)
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_manifest_only_is_canonical_and_valid(self):
-        proc = run_attest([
-            "--artifact", str(self.tmp / "prog"),
-            "--artifact", str(self.tmp / "prog.c"),
-            "--out", str(self.tmp / "out"), "--no-quote",
-            "--wiz-version", "0.1.0-dev",
-            "--wiz-commit", "e3bd36ffd0093d2d72973f01515489e641b8de1b",
-            "--target", "x86_64-linux-gnu",
-            "--source-entry", "examples/io.wiz",
-            "--source-sha256", "22" * 32,
-        ])
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        out = self.tmp / "out"
-        raw = (out / "manifest.json").read_bytes()
-        manifest = wa.load_json_strict(raw)
-        wa.validate_manifest(manifest)
-        self.assertEqual(wa.canonical_bytes(manifest), raw)
-        self.assertEqual([a["path"] for a in manifest["artifacts"]], ["prog", "prog.c"])
-        self.assertEqual(manifest["wiz"]["version"], "0.1.0-dev")
-        self.assertEqual(manifest["pcr"]["indices"], [0, 1, 4, 7, 11, 12, 14])
-
-    def test_source_build_records_binary_and_generated_c(self):
-        wiz = self.tmp / "fake-wiz"
-        wiz.write_text(
-            "#!/bin/sh\n"
-            'if [ "$1" = "--version" ]; then echo "wiz 9.9.9 (abcdef0)"; exit 0; fi\n'
-            'printf \'%s\\n\' "$@" > "$0.args"\n'
-            'out=""; prev=""\n'
-            'for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done\n'
-            'printf "fake binary\\n" > "$out"\n'
-            'printf "int main(void){return 0;}\\n" > "$out.c"\n',
-            encoding="utf-8",
-        )
-        wiz.chmod(0o755)
-        source = self.tmp / "src.wiz"
-        source.write_text("fn main() { }\n", encoding="utf-8")
+    def test_statement_mode_signs_the_wiz_statement(self):
         out = self.tmp / "out"
         proc = run_attest([
-            str(source), "--out", str(out), "--wiz", str(wiz),
-            "--output-name", "prog", "--target", "x86_64-linux-gnu",
-            "--wiz-flag=-I", "--wiz-flag=lib", "--no-quote",
-        ])
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        manifest = wa.load_json_strict((out / "manifest.json").read_bytes())
-        self.assertEqual([a["path"] for a in manifest["artifacts"]], ["prog", "prog.c"])
-        self.assertEqual(manifest["wiz"]["version"], "9.9.9")
-        self.assertEqual(manifest["wiz"]["commit"], "abcdef0")
-        self.assertEqual(manifest["source"]["entry"], "src.wiz")
-        args = (self.tmp / "fake-wiz.args").read_text().split()
-        self.assertEqual(args[:4], ["-I", "lib", "build", str(source)])
-        self.assertIn("-o", args)
-        self.assertEqual(args[args.index("-o") + 1], str(out / "prog"))
-
-    def test_same_inputs_make_same_manifest(self):
-        args = [
-            "--artifact", str(self.tmp / "prog"),
-            "--out", str(self.tmp / "out"),
-            "--wiz-version", "0.1.0-dev",
-            "--target", "x86_64-linux-gnu",
-            "--source-entry", "examples/io.wiz",
-            "--source-sha256", "22" * 32,
-            "--no-quote",
-        ]
-        first = run_attest(args)
-        self.assertEqual(first.returncode, 0, first.stderr)
-        digest1 = hashlib.sha256((self.tmp / "out/manifest.json").read_bytes()).hexdigest()
-        second = run_attest(args)
-        self.assertEqual(second.returncode, 0, second.stderr)
-        digest2 = hashlib.sha256((self.tmp / "out/manifest.json").read_bytes()).hexdigest()
-        self.assertEqual(digest1, digest2)
-
-    def test_manifest_is_challenge_free(self):
-        proc = run_attest([
-            "--artifact", str(self.tmp / "prog"),
-            "--out", str(self.tmp / "out"), "--no-quote",
-            "--wiz-version", "0.1.0-dev",
-            "--target", "x86_64-linux-gnu",
-            "--source-entry", "examples/io.wiz",
-            "--source-sha256", "22" * 32,
-            "--nonce", "AB" * 32,
-        ])
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        manifest = wa.load_json_strict((self.tmp / "out/manifest.json").read_bytes())
-        self.assertNotIn("challenge", manifest)
-        self.assertNotIn("nonce", manifest)
-        # The same inputs (with or without a nonce) produce the same manifest.
-        second = run_attest([
-            "--artifact", str(self.tmp / "prog"),
-            "--out", str(self.tmp / "out2"), "--no-quote",
-            "--wiz-version", "0.1.0-dev",
-            "--target", "x86_64-linux-gnu",
-            "--source-entry", "examples/io.wiz",
-            "--source-sha256", "22" * 32,
-        ])
-        self.assertEqual(second.returncode, 0, second.stderr)
-        self.assertEqual((self.tmp / "out/manifest.json").read_bytes(),
-                         (self.tmp / "out2/manifest.json").read_bytes())
-
-    def test_no_quote_with_sign_key_writes_envelope(self):
-        key = self.tmp / "producer-key"
-        keygen = run_attest(["keygen", "--key", str(key)])
-        self.assertEqual(keygen.returncode, 0, keygen.stderr)
-        proc = run_attest([
-            "--artifact", str(self.tmp / "prog"),
-            "--out", str(self.tmp / "signed"), "--no-quote",
-            "--wiz-version", "0.1.0-dev",
-            "--target", "x86_64-linux-gnu",
-            "--source-entry", "examples/io.wiz",
-            "--source-sha256", "22" * 32,
-            "--nonce", "cd" * 32,
-            "--sign-key", str(key), "--json",
+            "--statement", str(self.statement_path), "--out", str(out),
+            "--no-quote", "--sign-key", str(self.key), "--json",
         ])
         self.assertEqual(proc.returncode, 0, proc.stderr)
         info = json.loads(proc.stdout)
         self.assertTrue(info["signed"])
-        self.assertTrue(Path(info["envelope"]).is_file())
+        envelope = wa.load_json_strict(Path(info["envelope"]).read_bytes())
+        payload = wa._unb64(envelope["payload"], "payload")
+        self.assertEqual(payload, wa.canonical_bytes(self.statement))
+        self.assertEqual(info["statement_sha256"], wa.sha256_bytes(payload))
+        self.assertEqual([a["path"] for a in self.manifest["artifacts"]],
+                         ["prog", "prog.c"])
         self.assertTrue(Path(info["detached_signature"]).is_file())
-        manifest = wa.load_json_strict(
-            (self.tmp / "signed/manifest.json").read_bytes())
-        self.assertNotIn("nonce", manifest)
-        self.assertNotIn("challenge", manifest)
+
+    def test_source_build_asks_wiz_for_the_attestation(self):
+        statement_path = self.tmp / "statement.json"
+        fake = self.tmp / "fake-wiz"
+        log = self.tmp / "fake-wiz.args"
+        fake.write_text(
+            "#!/usr/bin/env python3\n"
+            "import shutil, sys\n"
+            f"open({str(log)!r}, 'w').write('\\n'.join(sys.argv[1:]))\n"
+            "args = sys.argv[1:]\n"
+            "out = args[args.index('-o') + 1]\n"
+            "open(out, 'w').write('fake binary\\n')\n"
+            "open(out + '.c', 'w').write('int main(void){return 0;}\\n')\n"
+            f"shutil.copy({str(statement_path)!r}, args[args.index('--attest') + 1])\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        source = self.tmp / "src.wiz"
+        source.write_text("def main : IO Unit := pure ()\n", encoding="utf-8")
+        proc = run_attest([
+            str(source), "--out", str(self.tmp / "out"), "--wiz", str(fake),
+            "--output-name", "prog", "--wiz-flag=-I", "--wiz-flag=lib",
+            "--no-quote", "--sign-key", str(self.key), "--json",
+        ])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        args = log.read_text().split("\n")
+        self.assertEqual(args[:4], ["-I", "lib", "build", str(source)])
+        self.assertIn("--attest", args)
+        self.assertEqual(args[args.index("--attest") + 1],
+                         str(self.tmp / "out/prog.attest.json"))
+        info = json.loads(proc.stdout)
+        envelope = wa.load_json_strict(Path(info["envelope"]).read_bytes())
+        self.assertEqual(wa._unb64(envelope["payload"], "payload"),
+                         wa.canonical_bytes(self.statement))
+
+    def test_same_inputs_make_same_envelope(self):
+        args = [
+            "--statement", str(self.statement_path),
+            "--no-quote", "--sign-key", str(self.key), "--json",
+        ]
+        first = run_attest(args + ["--out", str(self.tmp / "a")])
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second = run_attest(args + ["--out", str(self.tmp / "b")])
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual((self.tmp / "a/attestation.json").read_bytes(),
+                         (self.tmp / "b/attestation.json").read_bytes())
+
+    def test_the_nonce_is_not_in_the_statement(self):
+        proc = run_attest([
+            "--statement", str(self.statement_path), "--out", str(self.tmp / "out"),
+            "--no-quote", "--sign-key", str(self.key), "--nonce", "AB" * 32,
+            "--json",
+        ])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        envelope = wa.load_json_strict(
+            (self.tmp / "out/attestation.json").read_bytes())
+        payload = wa._unb64(envelope["payload"], "payload")
+        self.assertEqual(payload, wa.canonical_bytes(self.statement))
+        self.assertNotIn(b"nonce", payload)
 
     def test_quote_without_signing_key_is_usage_error(self):
         proc = run_attest([
-            "--artifact", str(self.tmp / "prog"),
-            "--out", str(self.tmp / "out"),
-            "--wiz-version", "0.1.0-dev",
-            "--target", "x86_64-linux-gnu",
-            "--source-entry", "examples/io.wiz",
-            "--source-sha256", "22" * 32,
+            "--statement", str(self.statement_path), "--out", str(self.tmp / "out"),
         ])
         self.assertEqual(proc.returncode, wa.EXIT_USAGE)
         self.assertIn("--sign-key", proc.stderr)
 
     def test_bad_pcr_list_is_usage_error(self):
         proc = run_attest([
-            "--artifact", str(self.tmp / "prog"),
-            "--out", str(self.tmp / "out"), "--no-quote",
-            "--wiz-version", "0.1.0-dev",
-            "--target", "x86_64-linux-gnu",
-            "--source-entry", "examples/io.wiz",
-            "--pcr-list", "sha256:11,7",
+            "--statement", str(self.statement_path), "--out", str(self.tmp / "out"),
+            "--no-quote", "--sign-key", str(self.key), "--pcr-list", "sha256:11,7",
         ])
         self.assertEqual(proc.returncode, wa.EXIT_USAGE)
 
-    def test_missing_artifact_is_usage_error(self):
+    def test_quote_of_an_unsigned_statement_is_usage_error(self):
         proc = run_attest([
-            "--artifact", str(self.tmp / "nope"),
-            "--out", str(self.tmp / "out"), "--no-quote",
-            "--wiz-version", "0.1.0-dev",
-            "--target", "x86_64-linux-gnu",
-            "--source-entry", "examples/io.wiz",
-            "--source-sha256", "22" * 32,
+            "quote", "--attest", str(self.statement_path),
+            "--out", str(self.tmp / "quote"),
+        ])
+        self.assertEqual(proc.returncode, wa.EXIT_USAGE)
+        self.assertIn("signed", proc.stderr)
+
+    def test_missing_statement_is_usage_error(self):
+        proc = run_attest([
+            "--statement", str(self.tmp / "nope"), "--out", str(self.tmp / "out"),
+            "--no-quote", "--sign-key", str(self.key),
         ])
         self.assertEqual(proc.returncode, wa.EXIT_USAGE)
 
@@ -757,7 +741,7 @@ class SigningTests(unittest.TestCase):
         self.key, self.pub = make_key(self.tmp, "a")
         self.key2, self.pub2 = make_key(self.tmp, "b")
         self.stub = write_stub(self.tmp)
-        self.envelope = self.fx.dir / wa.ENVELOPE_NAME
+        self.envelope = self.fx.envelope
         self.detached = Path(str(self.envelope) + wa.DETACHED_SUFFIX)
         self.info = self.sign()
         self.fx.bind_quote_to_statement(self.info["statement_sha256"])
@@ -768,7 +752,7 @@ class SigningTests(unittest.TestCase):
 
     def sign(self, *extra: str, key: Path | None = None,
              out: Path | None = None) -> dict:
-        args = ["sign", "--manifest", str(self.fx.dir / "manifest.json"),
+        args = ["sign", "--attest", str(self.fx.statement_path),
                 "--key", str(key or self.key), "--json", *extra]
         if out is not None:
             args += ["--out", str(out)]
@@ -780,17 +764,15 @@ class SigningTests(unittest.TestCase):
     def verify_args(self, *, pub: Path | None = None,
                     extras: tuple[str, ...] = (),
                     allow_unsigned: bool = False,
-                    envelope: Path | None = None) -> list[str]:
+                    attest: Path | None = None) -> list[str]:
         args = [
-            "--manifest", str(self.fx.dir / "manifest.json"),
+            "--attest", str(attest or self.envelope),
             "--policy", str(self.fx.dir / "policy.json"),
             "--nonce", self.fx.nonce,
             "--ak-sha256", hashlib.sha256(b"ak-public").hexdigest(),
         ]
         if pub is not None:
             args += ["--public-key", str(pub)]
-        if envelope is not None:
-            args += ["--envelope", str(envelope)]
         if allow_unsigned:
             args.append("--allow-unsigned")
         return args + list(extras)
@@ -798,12 +780,12 @@ class SigningTests(unittest.TestCase):
     def verify(self, *, pub: Path | None = None,
                extras: tuple[str, ...] = (),
                allow_unsigned: bool = False,
-               envelope: Path | None = None,
+               attest: Path | None = None,
                stub: bool = False,
                with_key: bool = True) -> tuple[int, dict, str]:
         args = self.verify_args(pub=(pub or self.pub) if with_key else None,
                                 extras=extras, allow_unsigned=allow_unsigned,
-                                envelope=envelope)
+                                attest=attest)
         if stub:
             args += ["--tpm2-checkquote", str(self.stub)]
         else:
@@ -866,7 +848,7 @@ class SigningTests(unittest.TestCase):
     def test_tampered_payload(self):
         envelope = self.envelope_data()
         statement = json.loads(base64.b64decode(envelope["payload"]))
-        statement["subject"][0]["digest"]["sha256"] = "00" * 32
+        statement["predicate"]["environment"]["platform"] = "tampered"
         envelope["payload"] = base64.b64encode(
             wa.canonical_bytes(statement)).decode()
         self.write_envelope(envelope)
@@ -874,7 +856,7 @@ class SigningTests(unittest.TestCase):
         self.assertEqual(code, wa.EXIT_FAIL)
         checks = self.checks(payload)
         self.assertEqual(checks["dsse_signature"]["status"], "fail")
-        self.assertEqual(checks["dsse_statement"]["status"], "fail")
+        self.assertEqual(checks["dsse_statement"]["status"], "pass")
 
     def test_tampered_signature(self):
         envelope = self.envelope_data()
@@ -895,26 +877,20 @@ class SigningTests(unittest.TestCase):
         self.assertEqual(self.checks(payload)["dsse_payload_type"]["status"], "fail")
 
     def test_unsigned_rejected_by_default(self):
-        self.envelope.unlink()
-        self.detached.unlink()
-        code, payload, _ = self.verify(stub=True)
+        code, payload, _ = self.verify(stub=True, attest=self.fx.statement_path)
         self.assertEqual(code, wa.EXIT_FAIL)
         self.assertEqual(self.checks(payload)["signature_policy"]["status"], "fail")
 
     def test_unsigned_allowed_with_explicit_flag(self):
-        self.envelope.unlink()
-        self.detached.unlink()
-        code, payload, err = self.verify(stub=True, allow_unsigned=True)
+        code, payload, err = self.verify(stub=True, attest=self.fx.statement_path, allow_unsigned=True)
         self.assertEqual(code, wa.EXIT_OK, err)
         self.assertEqual(payload["status"], "verified")
         self.assertFalse(payload["signed"])
         self.assertEqual(self.checks(payload)["signature_policy"]["status"], "pass")
 
     def test_require_signature_rejects_unsigned(self):
-        self.envelope.unlink()
-        self.detached.unlink()
         code, payload, _ = self.verify(
-            stub=True, extras=("--require-signature",))
+            stub=True, attest=self.fx.statement_path, extras=("--require-signature",))
         self.assertEqual(code, wa.EXIT_FAIL)
         self.assertEqual(self.checks(payload)["signature_policy"]["status"], "fail")
 
@@ -942,12 +918,19 @@ class SigningTests(unittest.TestCase):
                          Path(info2["detached_signature"]).read_bytes())
         self.assertEqual(info1["statement_sha256"], info2["statement_sha256"])
 
-    def test_tampered_manifest_fails_statement(self):
-        self.fx.manifest["artifacts"][0]["sha256"] = "00" * 32
-        self.fx.write_manifest()
+    def test_a_rewritten_manifest_fails_the_signature_and_artifacts(self):
+        envelope = self.envelope_data()
+        statement = json.loads(base64.b64decode(envelope["payload"]))
+        statement["predicate"]["artifacts"][0]["sha256"] = "00" * 32
+        statement["subject"][0]["digest"]["sha256"] = "00" * 32
+        envelope["payload"] = base64.b64encode(
+            wa.canonical_bytes(statement)).decode()
+        self.write_envelope(envelope)
         code, payload, _ = self.verify(stub=True)
         self.assertEqual(code, wa.EXIT_FAIL)
-        self.assertEqual(self.checks(payload)["dsse_statement"]["status"], "fail")
+        checks = self.checks(payload)
+        self.assertEqual(checks["dsse_signature"]["status"], "fail")
+        self.assertEqual(checks["artifact:prog"]["status"], "fail")
 
     def test_statement_and_quote_binding_mismatch(self):
         self.fx.write_quote(extra_data=b"\x00" * 32)
@@ -1201,18 +1184,22 @@ class TpmIntegrationTests(unittest.TestCase):
     def test_real_quote_verifies_and_detects_tampering(self):
         artifact = self.tmp / "prog"
         artifact.write_bytes(b"tpm integration artifact\n")
+        statement = statement_of(sample_manifest([{
+            "path": "prog", "role": "output", "kind": "executable",
+            "size": artifact.stat().st_size,
+            "sha256": wa.sha256_file(artifact),
+        }]))
+        statement_path = self.tmp / "statement.json"
+        statement_path.write_bytes(wa.canonical_bytes(statement))
         nonce = os.urandom(32).hex()
         out = self.tmp / "out"
         key = self.tmp / "signing-key"
         keygen = run_attest(["keygen", "--key", str(key)])
         self.assertEqual(keygen.returncode, 0, keygen.stderr)
         args = [
-            "--artifact", str(artifact), "--out", str(out),
+            "--statement", str(statement_path), "--out", str(out),
             "--pcr-list", self.PCRS, "--nonce", nonce,
             "--sign-key", str(key),
-            "--wiz-version", "0.1.0-dev", "--target", "x86_64-linux-gnu",
-            "--source-entry", "examples/io.wiz",
-            "--source-sha256", "22" * 32,
         ]
         if self.tpm2_bin:
             args += ["--tpm2-bin", self.tpm2_bin]
@@ -1220,9 +1207,8 @@ class TpmIntegrationTests(unittest.TestCase):
             args.append("--sudo")
         proc = run_attest(args)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        for name in ("manifest.json", "manifest.intoto.json",
-                     "manifest.intoto.json.sig", "quote.msg", "quote.sig",
-                     "quote.pcr", "ak.pub", "quote.nonce"):
+        for name in ("attestation.json", "attestation.json.sig", "quote.msg",
+                     "quote.sig", "quote.pcr", "ak.pub", "quote.nonce"):
             self.assertTrue((out / name).is_file(), name)
 
         pcrs = self._read_pcrs()
@@ -1238,7 +1224,7 @@ class TpmIntegrationTests(unittest.TestCase):
         policy_path.write_text(json.dumps(policy), encoding="utf-8")
 
         verify_args = [
-            "--manifest", str(out / "manifest.json"),
+            "--attest", str(out / "attestation.json"),
             "--policy", str(policy_path),
             "--nonce", nonce,
             "--public-key", str(key) + ".pub",
@@ -1252,15 +1238,15 @@ class TpmIntegrationTests(unittest.TestCase):
         self.assertEqual(code, wa.EXIT_OK, err + out_text)
         result = json.loads(out_text)
         self.assertEqual(result["status"], "verified")
-        self.assertEqual(result["manifest_sha256"],
-                         wa.sha256_file(out / "manifest.json"))
+        self.assertEqual(result["statement_sha256"],
+                         wa.sha256_bytes(wa.canonical_bytes(statement)))
 
         # A different PCR policy fails before any cryptographic check.
         bad_policy = json.loads(json.dumps(policy))
         bad_policy["pcr"]["7"] = "00" * 32
         policy_path.write_text(json.dumps(bad_policy), encoding="utf-8")
         code, _, _ = run_verify([
-            "--manifest", str(out / "manifest.json"),
+            "--attest", str(out / "attestation.json"),
             "--policy", str(policy_path),
             "--nonce", nonce,
             "--public-key", str(key) + ".pub",
