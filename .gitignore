@@ -27,3 +27,5 @@ wiz-toolchain.local
 # nightly benchmark outputs (artifacts; see .github/workflows/bench.yml)
 bench-out/
 bench/history.jsonl
+# benchmark build outputs
+bench/.build/
