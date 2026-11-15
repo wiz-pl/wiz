@@ -446,12 +446,20 @@ def Bool.eq_false_iff : (b : Bool) → ((b = .false) ↔ ¬ (b = .true))
 --
 -- The Boolean algebra above, oriented the way `simp` rewrites
 -- (`docs/stages/06-macros/simp.md`). The rules are stated with `Bool.and`/`Bool.or`/
--- `Bool.not`, which are the terms `a && b`, `a || b` and `!a` elaborate to (the `&&` and
--- `||` macros are a `match` on the first argument, the same stuck term as the function
--- applied to a variable), so a goal written with the notation simplifies too.
+-- `Bool.not`; they fire on goals that contain those functions (e.g. a `Nat.land` or a
+-- Boolean proof that did not use the notation). They do **not** fire on the `&&`/`||`
+-- notation: the macros expand to a `match` on the first argument, and for a variable
+-- first argument that stuck match is not the same term as `Bool.and`/`Bool.or` applied.
+-- The notation's three identities are stated with the notation and registered in
+-- `lib/SimpLemmas.wiz`. `!` is `Bool.not` itself, so `Bool.not_not` below does fire on
+-- `!(!a)`.
 --
 -- What is **not** registered, and why:
 --
+-- * `Bool.and_true`, `Bool.and_false`, `Bool.or_false`: the `&&`/`||` forms are the
+--   rules users need, and they live in `lib/SimpLemmas.wiz`; registering these too would
+--   be a duplicate by name (the `attribute` command keeps the first and warns). Use the
+--   lemma explicitly on a goal that contains `Bool.and`/`Bool.or` itself.
 -- * `Bool.true_and`, `Bool.false_and`, `Bool.false_or`, `Bool.true_or`, `Bool.not_true`,
 --   `Bool.not_false`: the left side computes to a variable or a data value. The goal has
 --   already computed it, so the rule could never match; use the lemma explicitly when a
@@ -475,12 +483,9 @@ def Bool.eq_false_iff : (b : Bool) → ((b = .false) ↔ ¬ (b = .true))
 attribute [simp] Bool.not_not
 attribute [simp] Bool.not_and
 attribute [simp] Bool.not_or
-attribute [simp] Bool.and_true
-attribute [simp] Bool.and_false
 attribute [simp] Bool.and_self
 attribute [simp] Bool.and_absorb
 attribute [simp] Bool.and_not_self
-attribute [simp] Bool.or_false
 attribute [simp] Bool.or_true_right
 attribute [simp] Bool.or_self
 attribute [simp] Bool.or_absorb

@@ -1465,14 +1465,18 @@ use any lemma explicitly. Every rule is a theorem (no axiom, no `sorry`).
 |--------|----------------------------------|
 | `lib/Nat.wiz` | `Nat.add_zero : n + 0 = n`, `Nat.mul_one : n * 1 = n`, `Nat.one_mul : 1 * n = n`, `Nat.mul_zero : n * 0 = 0` |
 | `lib/Int.wiz` | `Int.add_zero`, `Int.zero_add`, `Int.sub_zero`, `Int.mul_one`, `Int.one_mul`, `Int.mul_zero`, `Int.zero_mul` |
-| `lib/Logic.wiz` | `Bool.not_not`, `Bool.and_true`, `Bool.and_false`, `Bool.and_self`, `Bool.and_absorb`, `Bool.and_not_self`, `Bool.or_false`, `Bool.or_true_right`, `Bool.or_self`, `Bool.or_absorb`, `Bool.or_not_self`, `Bool.not_and`, `Bool.not_or` |
+| `lib/Logic.wiz` | `Bool.not_not`, `Bool.and_self`, `Bool.and_absorb`, `Bool.and_not_self`, `Bool.or_true_right`, `Bool.or_self`, `Bool.or_absorb`, `Bool.or_not_self`, `Bool.not_and`, `Bool.not_or` |
 | `lib/ListLemmas.wiz` | `List.append_nil`, `List.map_id`, `List.map_map`, `List.map_append`, `List.length_map`, `List.length_append_eq`, `List.reverse_cons`, `List.reverse_append`, `List.reverse_reverse`, `List.map_reverse`, `List.length_reverse`, `List.filter_map`, `List.filter_filter`, `List.any_append`, `List.all_append` |
-| `lib/SimpLemmas.wiz` | none of its own: `Nat.pow_zero`/`Nat.pow_succ`, `Bool.if_true`/`Bool.if_false`, `Option.map_none`/`Option.map_some`, `Prod.fst_mk`/`Prod.snd_mk` stay explicit (see below) |
+| `lib/SimpLemmas.wiz` | `Bool.and_true : b && true = b`, `Bool.and_false : b && false = false`, `Bool.or_false : b \|\| false = b`; `Nat.pow_zero`/`Nat.pow_succ`, `Bool.if_true`/`Bool.if_false`, `Option.map_none`/`Option.map_some`, `Prod.fst_mk`/`Prod.snd_mk` stay explicit (see below) |
 
 * **Boolean notation.** `&&`, `||` and `!` are a `match` on the first argument and
-  `Bool.not` in the prelude; for a variable first argument that `match` is the same
-  stuck term as `Bool.and`/`Bool.or` applied. The rules are stated with
-  `Bool.and`/`Bool.or`/`Bool.not` and fire on the notation too.
+  `Bool.not` in the prelude. For a variable first argument the `&&`/`||` match is *not*
+  the same stuck term as `Bool.and`/`Bool.or` applied (`Bool.and` matches on both
+  arguments, so its stuck form carries the second match in a lambda). The notation's
+  three identities (`b && true`, `b && false`, `b || false`) are therefore stated with
+  the notation in `lib/SimpLemmas.wiz` and registered there; the `Bool.and`/`Bool.or`
+  rules are for goals that contain the functions themselves. `!` *is* `Bool.not`, so
+  `Bool.not_not` in `lib/Logic.wiz` fires on `!(!b)`.
 * **What is not registered, and why.** A rule must be `∀ x₁ … xₙ, lhs = rhs` with no
   premise (dischargers are S3) and a left side that still appears in a goal. So several
   lemmas are explicit-only:
@@ -1490,6 +1494,10 @@ use any lemma explicitly. Every rule is a theorem (no axiom, no `sorry`).
     are not equations;
   * conditional equations (`List.filter_cons_true`, `List.any_cons_true`, `Eq.symm`,
     `propext`, …), which need a discharger.
+
+  The same-named `Bool.and_true`/`Bool.and_false`/`Bool.or_false` in `lib/Logic.wiz`
+  are explicit-only because the registered rules with those names are the notation
+  forms in `lib/SimpLemmas.wiz` (a duplicate registration is by name and would warn).
 
   Each library file lists its own exclusions with the reason.
 * **Orientation.** Rewriting goes from the left column (the term with the neutral

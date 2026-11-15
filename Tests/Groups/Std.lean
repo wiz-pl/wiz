@@ -54,8 +54,8 @@ def stdGroup : Group where
           "def r5 (b : Bool) : (b && Bool.true) = b := by\n  rw (Bool.and_true b)\n  rfl\n" ++
           "def r6 (b : Bool) : (b && Bool.false) = Bool.false := by\n  rw (Bool.and_false b)\n  rfl\n" ++
           "def r7 (b : Bool) : (b || Bool.false) = b := by\n  rw (Bool.or_false b)\n  rfl\n" ++
-          "def r8 {A : Type} (xs : List A) : xs ++ .nil = xs := by\n  rw (List.append_nil xs)\n  rfl\n" ++
-          "def r9 {A : Type} (xs ys : List A) : List.length (xs ++ ys) = List.length xs + List.length ys := by\n  rw (List.length_append_eq xs ys)\n  rfl\n" ++
+          "def r8 {A : Type} (xs : List A) : List.append xs .nil = xs := by\n  rw (List.append_nil xs)\n  rfl\n" ++
+          "def r9 {A : Type} (xs ys : List A) : List.length (List.append xs ys) = List.length xs + List.length ys := by\n  rw (List.length_append_eq xs ys)\n  rfl\n" ++
           "def r10 (f : Nat → Nat) (g : Nat → Nat) (xs : List Nat) :\n    List.map f (List.map g xs) = List.map (fun x => f (g x)) xs := by\n  rw (List.map_map f g xs)\n  rfl\n" ++
           "def r11 (a : Int) : a * 1 = a := by\n  rw (Int.mul_one a)\n  rfl\n" ++
           "def r12 (a : Int) : 1 * a = a := by\n  rw (Int.one_mul a)\n  rfl\n" ++

@@ -17,10 +17,13 @@ importing that module alone also gives `simp` the rule:
 * **`Nat`** (`lib/Nat.wiz`): `n + 0 → n`, `n * 1 → n`, `1 * n → n`, `n * 0 → 0`.
 * **`Int`** (`lib/Int.wiz`): `a + 0 → a`, `0 + a → a`, `a - 0 → a`, `a * 1 → a`,
   `1 * a → a`, `a * 0 → 0`, `0 * a → 0`.
-* **`Bool`** (`lib/Logic.wiz`): `!(!b) → b`, `b && true → b`, `b && false → false`,
-  `b || false → b`, `b || true → true`, `a && a → a`, `a || a → a`, the absorption
-  laws and De Morgan. The lemmas are stated with `Bool.and`/`Bool.or`/`Bool.not`,
-  which are the terms `&&`, `||` and `!` elaborate to, so the notation simplifies too.
+* **`Bool`**: here, in the notation the user writes: `b && true → b`, `b && false →
+  false`, `b || false → b`. In `lib/Logic.wiz`: `!(!b) → b`, `b || true → true`,
+  `a && a → a`, `a || a → a`, the absorption laws and De Morgan, stated with
+  `Bool.and`/`Bool.or`. The `&&`/`||` macros expand to a `match` whose stuck form is not
+  the same term as `Bool.and`/`Bool.or` applied, so the notation's identities must be
+  stated with the notation (see the comment by the definitions); `!` is `Bool.not`, so
+  `Bool.not_not` fires on `!(!b)`.
 * **`List`** (`lib/ListLemmas.wiz`): `xs ++ [] → xs`, `l ++ m` pushed through `map`,
   `length`, `filter`, `any` and `all`, and `reverse` in normal form
   (`reverse (reverse l) → l`, `reverse (l ++ m) → reverse m ++ reverse l`, …).
@@ -56,14 +59,39 @@ def Nat.pow_succ (b n : Nat) : b ^ Nat.succ n = b * b ^ n := rfl
 -- (`rw (Nat.pow_zero b)`, `simp only [Nat.pow_succ]`).
 
 -- ## Booleans
+--
+-- `a && b`, `a || b` and `!a` expand to a `match` on the first argument. For a variable
+-- first argument that stuck match is *not* the same term as `Bool.and`/`Bool.or` applied
+-- (`Bool.and` matches on both arguments, so its stuck form carries the second match in a
+-- lambda), so a rule stated with `Bool.and` does not fire on `&&`. These three lemmas are
+-- therefore stated on the notation, and registered here; the `Bool.and`/`Bool.or` laws
+-- (`Bool.and_self`, the absorption laws, De Morgan) live in `lib/Logic.wiz`.
+
+/-- `b && true = b`. -/
+def Bool.and_true : (b : Bool) → (b && Bool.true) = b
+  | .true => rfl
+  | .false => rfl
+/-- `b && false = false`. -/
+def Bool.and_false : (b : Bool) → (b && Bool.false) = Bool.false
+  | .true => rfl
+  | .false => rfl
+/-- `b || false = b`. -/
+def Bool.or_false : (b : Bool) → (b || Bool.false) = b
+  | .true => rfl
+  | .false => rfl
 
 /-- `if true then a else b = a`. -/
 def Bool.if_true {A : Type} (a b : A) : (if Bool.true then a else b) = a := rfl
 /-- `if false then a else b = b`. -/
 def Bool.if_false {A : Type} (a b : A) : (if Bool.false then a else b) = b := rfl
 
--- Not registered: the condition is a closed data value, so the left side computes to the
--- branch and the goal never contains the `if`. They stay available explicitly.
+-- The two `if`s are not registered: the condition is a closed data value, so the left
+-- side computes to the branch and the goal never contains the `if`. They stay available
+-- explicitly.
+
+attribute [simp] Bool.and_true
+attribute [simp] Bool.and_false
+attribute [simp] Bool.or_false
 
 -- ## Option and pairs
 

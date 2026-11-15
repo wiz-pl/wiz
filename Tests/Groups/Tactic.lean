@@ -320,16 +320,31 @@ def tacticGroup : Group where
           "def l3 {A : Type} (xs : List A) : (xs ++ []) ++ [] = xs := by\n" ++
           "  simp only [List.append_nil]\n" ++
           "  rfl") []
-        -- `&&`, `||` and `!` are the terms the Logic rules are stated on, so they fire
-        -- on the notation (a match on the first argument is `Bool.and`/`Bool.or` stuck).
+        -- The Logic rules are stated with `Bool.and`/`Bool.or`/`Bool.not`; they fire on a
+        -- goal that contains those functions (`!` *is* `Bool.not`).
         okLibs ("import Logic\n" ++
-          "def b1 (a : Bool) : (a && Bool.true) = a := by\n" ++
+          "def b1 (a : Bool) : Bool.or a .true = .true := by\n" ++
           "  simp\n" ++
           "  rfl\n" ++
           "def b2 (a : Bool) : !(!a) = a := by\n" ++
           "  simp\n" ++
           "  rfl\n" ++
           "def b3 (a : Bool) : Bool.and (Bool.or a a) (Bool.not (Bool.not a)) = a := by\n" ++
+          "  simp\n" ++
+          "  rfl") []
+        -- The `&&`/`||` macros make a different stuck term, so their identities are
+        -- stated with the notation and registered by SimpLemmas.
+        okLibs ("import SimpLemmas\n" ++
+          "def n1 (a : Bool) : (a && Bool.true) = a := by\n" ++
+          "  simp\n" ++
+          "  rfl\n" ++
+          "def n2 (a : Bool) : (a && Bool.false) = Bool.false := by\n" ++
+          "  simp\n" ++
+          "  rfl\n" ++
+          "def n3 (a : Bool) : (a || Bool.false) = a := by\n" ++
+          "  simp\n" ++
+          "  rfl\n" ++
+          "def n4 (a : Bool) : !(!a) = a := by\n" ++
           "  simp\n" ++
           "  rfl") [] },
     -- typed reflection (docs/stages/06-macros.md, 6g)

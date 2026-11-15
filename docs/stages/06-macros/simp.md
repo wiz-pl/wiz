@@ -79,22 +79,24 @@ registered before the warning was seen.
 **The default set.** Each library registers its own rules at the end of its file, so
 importing it is enough: `lib/Nat.wiz` (`Nat.add_zero`, `Nat.mul_one`/`one_mul`/
 `mul_zero`), `lib/Int.wiz` (the seven `Int` identities), `lib/Logic.wiz` (the oriented
-Boolean algebra: `Bool.not_not`, `Bool.and_true`/`and_false`/`and_self`/`and_absorb`/
-`and_not_self`, `Bool.or_false`/`or_true_right`/`or_self`/`or_absorb`/`or_not_self`,
-`Bool.not_and`/`not_or`) and `lib/ListLemmas.wiz` (`List.append_nil`, `List.map_id`,
-`List.map_map`, `List.map_append`, and the `length`/`reverse`/`filter`/`any`/`all`
-normal forms). `lib/SimpLemmas.wiz` is the umbrella: `import SimpLemmas` brings all of
-them, and it also keeps the lemmas that are deliberately explicit-only. The set is
-deliberately small and confluent where it matters: commutativity, associativity and
-distributivity stay out, and rules whose left side computes to a variable or a bare data
-value (`0 + n`, `b ^ 0`, `[] ++ l`, `Prod.fst (a, b)`), patterns that compute to a
-constructor carrying rule variables (`map f (x :: xs)`), `↔` lemmas and conditional
-lemmas are not registered: matching is up to conversion, so such a rule would match
-anything or have already computed away in the goal. The same rules remain available
-explicitly (`simp only [Nat.zero_add]`), and S5 is where matching computes-away patterns
-is revisited. The Boolean rules are stated over `Bool.and`/`Bool.or`/`Bool.not`, which
-is the stuck term that `&&`, `||` and `!` elaborate to, so a goal written with the
-notation is simplified too.
+Boolean algebra over `Bool.and`/`Bool.or`/`Bool.not`: `Bool.not_not`,
+`Bool.and_self`/`and_absorb`/`and_not_self`, `Bool.or_true_right`/`or_self`/`or_absorb`/
+`or_not_self`, `Bool.not_and`/`not_or`), `lib/ListLemmas.wiz` (`List.append_nil`,
+`List.map_id`, `List.map_map`, `List.map_append`, and the `length`/`reverse`/`filter`/
+`any`/`all` normal forms) and `lib/SimpLemmas.wiz` (the three notation identities
+`Bool.and_true`/`and_false`/`or_false`). `lib/SimpLemmas.wiz` is the umbrella:
+`import SimpLemmas` brings all of them, and it also keeps the lemmas that are
+deliberately explicit-only. The set is deliberately small and confluent where it
+matters: commutativity, associativity and distributivity stay out, and rules whose left
+side computes to a variable or a bare data value (`0 + n`, `b ^ 0`, `[] ++ l`,
+`Prod.fst (a, b)`), patterns that compute to a constructor carrying rule variables
+(`map f (x :: xs)`), `↔` lemmas and conditional lemmas are not registered: matching is
+up to conversion, so such a rule would match anything or have already computed away in
+the goal. The same rules remain available explicitly (`simp only [Nat.zero_add]`), and
+S5 is where matching computes-away patterns is revisited. The `&&`/`||` macros expand
+to a `match` whose stuck form is not the same term as `Bool.and`/`Bool.or` applied, so
+the notation's identities are stated with the notation in `lib/SimpLemmas.wiz`; `!` is
+`Bool.not`, so `Bool.not_not` fires on `!(!b)`.
 
 ## The host requests
 
@@ -187,9 +189,10 @@ not; the default order is priority first then oldest registration (`getSimpLemma
 a duplicate registration and a possibly looping orientation; and a two-module fixture
 that checks `local attribute [simp]` works in its module and is gone in the importer,
 through both the frontend and the command cache. The library-set case uses the
-annotations of `lib/ListLemmas.wiz` and `lib/Logic.wiz` on real goals: a list goal that
-needs `List.append_nil`, `List.length_append_eq` and `List.reverse_reverse`, the
-`&&`/`!` notation against the `lib/Logic.wiz` Boolean rules, and `simp only
-[List.append_nil]` rewriting both occurrences. The S1 cases (explicit list, matched
-quantified lemma, `simp only` order, no match / identity, fuel, non-equation argument,
-`#print axioms`, `rw` then `simp`, `← h`, `SimpLemmas` rules) are unchanged.
+annotations of `lib/ListLemmas.wiz`, `lib/Logic.wiz` and `lib/SimpLemmas.wiz` on real
+goals: a list goal that needs `List.append_nil`, `List.length_append_eq` and
+`List.reverse_reverse`, `Bool.and`/`!` goals against the Logic rules, the `&&`/`||`
+notation against the SimpLemmas rules, and `simp only [List.append_nil]` rewriting both
+occurrences. The S1 cases (explicit list, matched quantified lemma, `simp only` order,
+no match / identity, fuel, non-equation argument, `#print axioms`, `rw` then `simp`,
+`← h`, `SimpLemmas` rules) are unchanged.
