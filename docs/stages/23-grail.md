@@ -52,7 +52,7 @@ written to a temporary name and renamed, so concurrent runs never see half a fil
 
 A package is a directory with a `grail.wiz`, written in Wiz against `lib/Grail.wiz`:
 
-```
+```wiz
 import Grail
 def package : Package := Package.new "wiz"
   |> Package.lib "std" "lib"                    -- check every module under lib/
@@ -80,7 +80,7 @@ There are no environment variables: the C compiler and its flags come from flags
 an uncommitted `grail.local.wiz` with this machine's paths (`nix develop` writes it from
 `flake.nix`):
 
-```
+```wiz
 import Grail
 def settings : Settings := Settings.empty
   |> Settings.set "cflags" "-I/nix/store/…-gmp-…-dev/include"
@@ -169,7 +169,7 @@ A **command** runs a program with declared inputs and outputs, as a job of the b
 graph like any other: it waits for what makes its inputs, runs under `-j N` and the time
 limit, and is up to date when its key's directory exists.
 
-```
+```wiz
 import Grail
 def package : Package := Package.new "uart"
   |> Package.exe "icestick" "app/icestick.wiz"

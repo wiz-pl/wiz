@@ -259,6 +259,16 @@ the elan toolchain, so the setup action keeps the elan cache for those
   script's fixtures (`--self-test`) and then the check, on every push and pull request
   (including docs-only ones), and `CI result` requires it. No code block is exempt; a
   reviewed exception goes in the script's `ALLOW` list with a reason.
+* **Documentation examples** (the `docs_examples` job, and a step in `build`):
+  `scripts/check-docs-examples.py` checks every fenced block marked `wiz` in `README.md`
+  and `docs/**/*.md` with `wiz check` and runs the blocks marked `wiz run`, comparing
+  their output with the block beside them; a `wiz no-check` block is an explicit
+  exception.
+  Relative links and `examples/...` references must resolve. On a docs-only pull request
+  `docs_examples` substitutes the Nix-built `wiz` from Cachix (the same store path
+  `build` publishes); a pull request that changes code runs the same check in `build`.
+  Its cache (`.lake/docs-examples`) is keyed by the Lean sources that build `wiz`, so a
+  docs-only run is seconds and a toolchain change invalidates it.
 * **The documentation site** (the `docs` and `deploy-docs` jobs): on a push to `master`
   only (not a pull request, the weekly run or a manual run), `docs` builds the two Wasm
   modules (the infoview's and the playground's), the standard library's pages with
@@ -459,9 +469,9 @@ the elan toolchain, so the setup action keeps the elan cache for those
   `gh cache list -R wiz-pl/wiz -S size_in_bytes`.
 
 * **Path filters.** On a pull request the `changes` job (`scripts/ci.py changes`) reads
-  the files the PR changes and decides what runs: nothing but `changes`, `docs_style`
-  and `CI result` for a docs-only PR (`docs/`, `*.md`, LICENSE); `trust-ledger` runs
-  whenever any code did; every shard when a Lean
+  the files the PR changes and decides what runs: nothing but `changes`, `docs_style`,
+  `docs_examples` and `CI result` for a docs-only PR (`docs/`, `*.md`, LICENSE);
+  `trust-ledger` runs whenever any code did; every shard when a Lean
   file, the build, the runtime, `scripts/` or `.github/` changed; otherwise each shard
   with `"inputs"` in `.github/test-shards.json` only when one of its inputs changed
   (a `lib/X.wiz` input brings the lib files it imports), and the shards without
