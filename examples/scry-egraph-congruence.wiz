@@ -1,0 +1,40 @@
+import Scry.Egraph
+-- Congruence closure (`scry-egraph-congruence`): after `a = b`, the hash-consed
+-- e-graph must also equate `f a = f b` and `g (f a) = g (f b)`. `main` is the digest.
+
+-- ops: 0 = a, 1 = b, 2 = f (unary), 3 = g (unary)
+def ga : Scry.EGraph × Nat :=
+  let e := Scry.EGraph.empty;
+  let a := Scry.EGraph.add e (Scry.ENode.leaf 0);
+  let b := Scry.EGraph.add a.1 (Scry.ENode.leaf 1);
+  let fa := Scry.EGraph.add b.1 (Scry.ENode.mk 2 [a.2]);
+  let fb := Scry.EGraph.add fa.1 (Scry.ENode.mk 2 [b.2]);
+  let ga' := Scry.EGraph.add fb.1 (Scry.ENode.mk 3 [fa.2]);
+  let gb := Scry.EGraph.add ga'.1 (Scry.ENode.mk 3 [fb.2]);
+  (gb.1, gb.2)
+
+def classOfD (g : Scry.EGraph) (n : Scry.ENode) (d : Nat) : Nat :=
+  match Scry.EGraph.classOf g n with
+  | .none => d
+  | .some c => c
+
+def main : Nat :=
+  let ca := classOfD ga.1 (Scry.ENode.leaf 0) 900;
+  let cb := classOfD ga.1 (Scry.ENode.leaf 1) 901;
+  let cfa := classOfD ga.1 (Scry.ENode.mk 2 [ca]) 902;
+  let cfb := classOfD ga.1 (Scry.ENode.mk 2 [cb]) 903;
+  let cga := classOfD ga.1 (Scry.ENode.mk 3 [cfa]) 904;
+  let cgb := classOfD ga.1 (Scry.ENode.mk 3 [cfb]) 905;
+  let before := Scry.EGraph.numClasses ga.1;
+  let m := Scry.EGraph.merge ga.1 ca cb;
+  let sameF := Scry.EGraph.sameClass m.1 cfa cfb;
+  let sameG := Scry.EGraph.sameClass m.1 cga cgb;
+  let again := Scry.EGraph.merge m.1 ca cb;
+  let canon := Scry.EGraph.canonical m.1;
+  (if m.2 then 10000 else 0) +
+  (if again.2 then 100000 else 0) +
+  Scry.EGraph.numClasses m.1 * 1000 +
+  (if Nat.beq before 6 then 100 else 0) +
+  (if sameF then 10 else 0) +
+  (if sameG then 1 else 0) +
+  (if canon then 1000 else 0)

@@ -27,8 +27,8 @@ def qEq : Q → Q → Bool
   | _, _ => .false
 
 -- universe levels in terms: numerals, parameters (of a universe-polymorphic constant),
--- and their successors and maxima. Values only ever see closed levels (a constant is
--- instantiated before it is evaluated), so their levels are numbers.
+-- and their successors and maxima. While a declaration is checked its parameters stay
+-- symbolic; a constant's use substitutes its instantiation before it is evaluated.
 inductive Lvl where
   | lnum (n : Nat)
   | lparam (name : String)
@@ -38,6 +38,10 @@ inductive Lvl where
   -- (mandatory sorts) a component sort the frontend has not written yet: the sorts pass
   -- (`sortsClosed`, below the kernel) fills every one, and `infer` rejects one
   | lhole
+  -- (universe polymorphism) an elaborator-only level metavariable: the frontend assigns
+  -- it by unification and substitutes it before the kernel sees a declaration (like a
+  -- term metavariable, an unsolved one is an error)
+  | lmvar (id : Nat)
 
 mutual
 inductive Tm where
@@ -341,14 +345,20 @@ def nfNonZero : LNF → Bool
   | .ncons _ k r => Bool.or (Nat.lt 0 k) (nfNonZero r)
 def nfZero : LNF := .ncons .aconst 0 .nnil
 
+-- the name a level metavariable is shown by (never a declaration's parameter: its
+-- prefix `?u` is not a Wiz identifier)
+def lvlMVarName (i : Nat) : String := String.append "?u" (Nat.toString i)
+
 -- **Exercise 14.8.** Normalise a level (`Level.normalize`): `imax a b` is `max a b` when
 -- `b` is certainly nonzero, `0` when `b` is `0`, and an atom otherwise.
 def lvlNorm : Lvl → LNF
   --<sol
   | .lnum n => .ncons .aconst n .nnil
   | .lparam n => .ncons (.aparam n) 0 .nnil
-  -- (an opaque atom: `infer` rejects a hole before comparing levels)
+  -- (an opaque atom: `infer` rejects a hole before comparing levels; a level
+  -- metavariable never reaches the kernel)
   | .lhole => .ncons (.aparam " _") 0 .nnil
+  | .lmvar i => .ncons (.aparam (lvlMVarName i)) 0 .nnil
   | .lsucc l => nfCleanup (nfShift (lvlNorm l))
   | .lmax a b => nfCleanup (nfMerge (lvlNorm a) (lvlNorm b))
   -- (`b`'s normal form once: a chain of `imax`es, along a telescope, would be normalised
@@ -434,6 +444,7 @@ def lvlClosed : Lvl → Option Nat
     | .none => .none
   | .lparam _ => .none
   | .lhole => .none
+  | .lmvar _ => .none
 -- is the level `0`? A closed level is computed (exact: after a constant's level parameters
 -- are instantiated its body's levels are closed); a symbolic one (while a declaration is
 -- checked, its parameters are symbolic) by `lvlEquiv`, which says no when it does not know.
@@ -448,6 +459,7 @@ def lvlShow : Lvl → String
   | .lmax a b => String.append (String.append (String.append "max(" (lvlShow a)) ", ") (String.append (lvlShow b) ")")
   | .limax a b => String.append (String.append (String.append "imax(" (lvlShow a)) ", ") (String.append (lvlShow b) ")")
   | .lhole => "_"
+  | .lmvar i => lvlMVarName i
 -- does the level have a hole (a sort the sorts pass has not filled)?
 def lvlHasHole : Lvl → Bool
   | .lhole => .true
@@ -456,6 +468,29 @@ def lvlHasHole : Lvl → Bool
   | .limax a b => Bool.or (lvlHasHole a) (lvlHasHole b)
   | .lnum _ => .false
   | .lparam _ => .false
+  | .lmvar _ => .false
+-- does the level have an unsolved metavariable (the frontend's, before it zonks)?
+def lvlHasMVar : Lvl → Bool
+  | .lmvar _ => .true
+  | .lsucc l => lvlHasMVar l
+  | .lmax a b => Bool.or (lvlHasMVar a) (lvlHasMVar b)
+  | .limax a b => Bool.or (lvlHasMVar a) (lvlHasMVar b)
+  | _ => .false
+def elemStr (x : String) : List String → Bool
+  | .nil => .false
+  | .cons y ys => match kStrEq x y with
+    | .true => .true
+    | .false => elemStr x ys
+-- a declaration's levels: every parameter is declared, and nothing is left to solve or
+-- to fill
+def lvlDeclared (ps : List String) : Lvl → Bool
+  | .lnum _ => .true
+  | .lparam n => elemStr n ps
+  | .lsucc l => lvlDeclared ps l
+  | .lmax a b => Bool.and (lvlDeclared ps a) (lvlDeclared ps b)
+  | .limax a b => Bool.and (lvlDeclared ps a) (lvlDeclared ps b)
+  | .lhole => .false
+  | .lmvar _ => .false
 -- levels, compared and shown as `.{1, u}`
 def lvlsEq : List Lvl → List Lvl → Bool
   | .nil, .nil => .true
@@ -1889,6 +1924,29 @@ def nameFrom : List String → Nat → Nat → String
     | .succ k' => nameFrom ns k' l
 def nameAt (names : List String) (l : Nat) : String := nameFrom names l l
 
+-- (stage 21n) a private declaration's kernel name is `_private.M._0.x` (the Frontend's
+-- `privName`): print the source name `x`, as the Lean frontend does (`Globals.privateBase`)
+def kmatchPrefix : List Char → List Char → Option (List Char)
+  | .nil, rest => .some rest
+  | .cons a as, .cons b bs => match Nat.beq (Char.code a) (Char.code b) with
+    | .true => kmatchPrefix as bs
+    | .false => .none
+  | _, .nil => .none
+def kreverse : List Char → List Char → List Char
+  | .nil, acc => acc
+  | .cons c cs, acc => kreverse cs (.cons c acc)
+def ksplice : List Char → List Char → Option (List Char)
+  | _, .nil => .none
+  | acc, .cons c cs => match kmatchPrefix (match "._0." with | .mk ds => ds) (.cons c cs) with
+    | .some after => .some after
+    | .none => ksplice (.cons c acc) cs
+def privBase (x : String) : String := match x with
+  | .mk cs => match kmatchPrefix (match "_private." with | .mk ps => ps) cs with
+    | .some rest => match ksplice .nil rest with
+      | .some base => String.mk base
+      | .none => x
+    | .none => x
+
 mutual
 -- terms, printed with the variables named by level (`x0` is the outermost, unless
 -- `names` names it)
@@ -1952,13 +2010,13 @@ def show (names : List String) : Nat → Tm → String
       (String.append (String.append ", " (show names l sz)) (String.append (String.append ", " (show names l i)) (String.append ", " (String.append (show names l a) ")"))))
   | l, .coit _ _ _ S st i x => String.append (String.append (String.append "coit(" (show names l S)) (String.append ", " (show names l st)))
       (String.append (String.append ", " (show names l i)) (String.append ", " (String.append (show names l x) ")")))
-  | _, .const n _ ls _ _ => String.append n (showLvls ls)
+  | _, .const n _ ls _ _ => String.append (privBase n) (showLvls ls)
   | _, .sortL l => match lvlClosed l with
     | .some n => match n with
       | .zero => "Prop"
       | .succ m => String.append "U" (Nat.toString m)
     | .none => String.append (String.append "Sort(" (lvlShow l)) ")"
-  | _, .axiomC n _ => n
+  | _, .axiomC n _ => privBase n
   | l, .ind _ _ _ _ P m i x => String.append (String.append (String.append "ind(" (show names l P)) (String.append ", " (show names l m)))
       (String.append (String.append ", " (show names l i)) (String.append ", " (String.append (show names l x) ")")))
   | l, .tyRefl X => String.append (String.append "reflTy(" (show names l X)) ")"
@@ -1999,57 +2057,82 @@ end
 -- (P2) `pm` is the proof marker's mode: `0` relevant (a term whose sort may be `0` must be
 -- marked or neutral-shaped), `1` inside a proof (nothing is required), `2` the term is
 -- the one a marker wraps (exempt; relevant again below it)
+-- (PF-C) `reg`: regularity at every type is on for this comparison. Set by `convTy` when
+-- both sides are propositions (`TCtx.propGate`), and inherited by every comparison below
+-- it; `false` (the default) keeps the inert-only rule. (`g.regularity := .full` in
+-- `Conv.lean`; `stripCast` reads it.)
 inductive TCtx where
-  | mk (env : Env) (types : Env) (lvl : Nat) (erased : Bool) (pm : Nat)
+  | mk (env : Env) (types : Env) (lvl : Nat) (erased : Bool) (pm : Nat) (reg : Bool)
 def TCtx.lvl : TCtx → Nat
-  | .mk _ _ l _ _ => l
+  | .mk _ _ l _ _ _ => l
 def TCtx.env : TCtx → Env
-  | .mk e _ _ _ _ => e
+  | .mk e _ _ _ _ _ => e
 def TCtx.types : TCtx → Env
-  | .mk _ t _ _ _ => t
+  | .mk _ t _ _ _ _ => t
 def TCtx.erased : TCtx → Bool
-  | .mk _ _ _ x _ => x
+  | .mk _ _ _ x _ _ => x
 def TCtx.pm : TCtx → Nat
-  | .mk _ _ _ _ m => m
+  | .mk _ _ _ _ m _ => m
+def TCtx.reg : TCtx → Bool
+  | .mk _ _ _ _ _ r => r
 def TCtx.erase (c : TCtx) : TCtx := match c with
-  | .mk e t l _ m => .mk e t l .true m
+  | .mk e t l _ m r => .mk e t l .true m r
 -- (P2) inside a proof
 def TCtx.inProof (c : TCtx) : TCtx := match c with
-  | .mk e t l x m => match Nat.beq m 3 with
+  | .mk e t l x m r => match Nat.beq m 3 with
     | .true => c
     | .false => match Nat.lt 3 m with
       -- (the sorts pass, below the kernel: inside a proof, still placing no markers)
-      | .true => .mk e t l x 5
-      | .false => .mk e t l x 1
+      | .true => .mk e t l x 5 r
+      | .false => .mk e t l x 1 r
 -- (P2) is `c` inside a proof (`1`; `5` is the same in the sorts pass, which places no
 -- markers: `4` relevant, `5` inside a proof)?
 def inProofMode (c : TCtx) : Bool := match c with
-  | .mk _ _ _ _ m => Bool.or (Nat.beq m 1) (Nat.beq m 5)
+  | .mk _ _ _ _ m _ => Bool.or (Nat.beq m 1) (Nat.beq m 5)
 def sortsMode (c : TCtx) : Bool := match c with
-  | .mk _ _ _ _ m => Nat.lt 3 m
+  | .mk _ _ _ _ m _ => Nat.lt 3 m
 -- (tests only) no marker requirement anywhere below, and proofs evaluated: the
 -- well-typedness pre-check of the differential tests, so that a term which needs markers
 -- inside a proof reaches the marking passes (review F2; `lazyProofs := false` in Lean)
 def TCtx.noMarkers (c : TCtx) : TCtx := match c with
-  | .mk e t l x _ => .mk e t l x 3
+  | .mk e t l x _ r => .mk e t l x 3 r
 -- (P2) at the term a marker wraps, and below it
 def TCtx.atMarked (c : TCtx) : TCtx := match c with
-  | .mk e t l x m => match m with
-    | .zero => .mk e t l x 2
+  | .mk e t l x m r => match m with
+    | .zero => .mk e t l x 2 r
     | _ => c
 def TCtx.belowMarked (c : TCtx) : TCtx := match c with
-  | .mk e t l x m => match Nat.beq m 2 with
-    | .true => .mk e t l x 0
+  | .mk e t l x m r => match Nat.beq m 2 with
+    | .true => .mk e t l x 0 r
     | .false => c
 def erasedIf (q : Q) (c : TCtx) : TCtx := match q with
   | .qz => TCtx.erase c
   | _ => c
 -- a new variable of type `ty`
 def TCtx.bind (c : TCtx) (ty : Val) : TCtx := match c with
-  | .mk e t l x m => .mk (.cons (fresh l) e) (.cons ty t) (l + 1) x m
+  | .mk e t l x m r => .mk (.cons (fresh l) e) (.cons ty t) (l + 1) x m r
 -- a new variable defined as `v`
 def TCtx.define (c : TCtx) (v ty : Val) : TCtx := match c with
-  | .mk e t l x m => .mk (.cons v e) (.cons ty t) (l + 1) x m
+  | .mk e t l x m r => .mk (.cons v e) (.cons ty t) (l + 1) x m r
+-- (PF-C) the same context with regularity at every type on
+def TCtx.fullReg (c : TCtx) : TCtx := match c with
+  | .mk e t l x m _ => .mk e t l x m .true
+-- (PF-C, `Conv.convTy`) **Cast-Refl at every type while deciding equality of two
+-- propositions.** The two sides are truth values in the model, which validates Cast-Refl at
+-- every type; so while they are compared, a stuck cast is its argument at *any* type, not
+-- only at inert ones. The flag is taken from the evaluator's proposition test (`propSort`,
+-- `propSort?` in Lean; `isProp`/`typeSort?` would recompute a Π/Σ sort and miss an
+-- annotated proposition whose tail is a Π over a data domain — `vEq`'s equation at a
+-- product is that). Both tests see weak head normal forms (`convTy` whnf's first). It is
+-- off outside such a comparison: two data *types* are still compared by the inert-only
+-- rule.
+def TCtx.propGate (c : TCtx) (a b : Val) : TCtx := match propSort a with
+  | .some pa => match propSort b with
+    | .some pb => match Bool.and pa pb with
+      | .true => TCtx.fullReg c
+      | .false => c
+    | .none => c
+  | .none => c
 
 -- Usage (`Usage` in `Check.lean`): one quantity per variable, the innermost first.
 def qadd : Q → Q → Q
@@ -2545,7 +2628,7 @@ def conv : TCtx → Val → Val → Val → Bool
   --sol>
 def convTy (c : TCtx) (a b : Val) : Bool := match lazyDelta c a b with
   | .true => .true
-  | .false => convTyW c (whnf a) (whnf b)
+  | .false => let a := whnf a; let b := whnf b; convTyW (TCtx.propGate c a b) a b
 -- two glued values with the same head: compare the spines (else they get unfolded)
 def lazyDelta : TCtx → Val → Val → Bool
   | c, .vglued h sp _, .vglued h' sp' _ => convSpine c h h' sp sp'
@@ -2605,12 +2688,14 @@ def convNeW : TCtx → Val → Val → Bool
 -- the argument of a stuck cast with the neutral's eliminations applied, when the rule
 -- applies: the two types are convertible, and one of them is inert (`inertTy` reads a
 -- `Σ`'s sort annotation, which is optional, so of two convertible types one can be inert
--- and the other not) or regularity is on at every type (`kernelRegularity`). `convTy A B`
--- compares two components of the neutral, as the congruence rule for two casts does, and
--- each step removes one cast: it terminates. Every head is listed.
+-- and the other not) or regularity is on at every type. The latter is either the context's
+-- PF-C flag (`TCtx.reg`: this comparison is of two propositions, `convTy`'s prop gate) or
+-- the `kernelRegularity` experiment. `convTy A B` compares two components of the neutral,
+-- as the congruence rule for two casts does, and each step removes one cast: it
+-- terminates. Every head is listed.
 def stripCast : TCtx → Head → Spine → Option Val
-  | c, .hcast A B _ t, sp => match Bool.or kernelRegularity
-      (Bool.and kernelInertConv (Bool.or (inertTy 0 A) (inertTy 0 B))) with
+  | c, .hcast A B _ t, sp => match Bool.or (TCtx.reg c)
+      (Bool.or kernelRegularity (Bool.and kernelInertConv (Bool.or (inertTy 0 A) (inertTy 0 B)))) with
     | .false => .none
     | .true => match convTy c A B with
       | .true => .some (forceSp t sp)
@@ -2807,11 +2892,11 @@ def isProofTy (c : TCtx) (ty : Val) : Bool := match kernelLazyProofs with
     | .some l => lvlIsZero l
     | .none => .false
 def TCtx.relevant (c : TCtx) : TCtx := match c with
-  | .mk e t l x m => match Nat.beq m 3 with
+  | .mk e t l x m r => match Nat.beq m 3 with
     | .true => c
     | .false => match Nat.lt 3 m with
-      | .true => .mk e t l x 4
-      | .false => .mk e t l x 0
+      | .true => .mk e t l x 4 r
+      | .false => .mk e t l x 0 r
 def modeAt (c : TCtx) (ty : Val) : TCtx := match inProofMode c with
   | .false => c
   | .true => match sortOf c ty with
@@ -3201,7 +3286,12 @@ def inferW : TCtx → Tm → TyRes
         | r => r
       | r => r
     | r => r
-  | c, .const _ ps ls _ ty => .ok (eval .nil (substIfAny ps ls ty)) (uZeros (TCtx.lvl c))
+  -- a constant's level instantiation has one level per declaration parameter (a
+  -- declaration carried its parameters in its type, so a mismatch would silently leave
+  -- parameters unsubstituted)
+  | c, .const _ ps ls _ ty => match Nat.beq (List.length ps) (List.length ls) with
+    | .true => .ok (eval .nil (substIfAny ps ls ty)) (uZeros (TCtx.lvl c))
+    | .false => .err "internal error: a constant has the wrong number of universe levels"
   -- (P2) a proof that was not read back (`forceProof`) is no constant: rejected, with the
   -- message it is named by (Lean's kernel: an unbound global with that name)
   | c, .axiomC n ty => match kStrEq n proofStub with
@@ -3486,7 +3576,95 @@ def qtyOk (c : TCtx) (q : Tm) : Option String := match check (TCtx.erase c) q .v
     | _ => .some "a quantity must be a literal or a variable"
 end
 
-def empty : TCtx := .mk .nil .nil 0 .false 0
+def empty : TCtx := .mk .nil .nil 0 .false 0 .false
+
+-- does the term have a level the predicate rejects, in any level position? (the
+-- declaration check uses it for "every level parameter is declared, and none is left
+-- unsolved or unfilled"; the frontend for its own error messages)
+mutual
+def tmHasLvlWith (p : Lvl → Bool) : Tm → Bool
+  | .pi _ i j a b => Bool.or (Bool.or (p i) (p j)) (Bool.or (tmHasLvlWith p a) (tmHasLvlWith p b))
+  | .sigma _ i j a b => Bool.or (Bool.or (p i) (p j)) (Bool.or (tmHasLvlWith p a) (tmHasLvlWith p b))
+  | .sigmaQ q i j a b => Bool.or (Bool.or (p i) (p j))
+      (Bool.or (tmHasLvlWith p q) (Bool.or (tmHasLvlWith p a) (tmHasLvlWith p b)))
+  | .lam b => tmHasLvlWith p b
+  | .app f a => Bool.or (tmHasLvlWith p f) (tmHasLvlWith p a)
+  | .letE t v b => Bool.or (tmHasLvlWith p t) (Bool.or (tmHasLvlWith p v) (tmHasLvlWith p b))
+  | .letq _ t v b => Bool.or (tmHasLvlWith p t) (Bool.or (tmHasLvlWith p v) (tmHasLvlWith p b))
+  | .letUnit u b => Bool.or (tmHasLvlWith p u) (tmHasLvlWith p b)
+  | .ann t ty => Bool.or (tmHasLvlWith p t) (tmHasLvlWith p ty)
+  | .pair a b => Bool.or (tmHasLvlWith p a) (tmHasLvlWith p b)
+  | .fst x => tmHasLvlWith p x
+  | .snd x => tmHasLvlWith p x
+  | .exfalso m t => Bool.or (tmHasLvlWith p m) (tmHasLvlWith p t)
+  | .ecase m sc bs => Bool.or (tmHasLvlWith p m) (Bool.or (tmHasLvlWith p sc) (tmsHasLvlWith p bs))
+  | .eq A a b => Bool.or (tmHasLvlWith p A) (Bool.or (tmHasLvlWith p a) (tmHasLvlWith p b))
+  | .eqTy A B => Bool.or (tmHasLvlWith p A) (tmHasLvlWith p B)
+  | .eqRefl A a => Bool.or (tmHasLvlWith p A) (tmHasLvlWith p a)
+  | .tyRefl X => tmHasLvlWith p X
+  | .coe A B e t => Bool.or (Bool.or (tmHasLvlWith p A) (tmHasLvlWith p B)) (Bool.or (tmHasLvlWith p e) (tmHasLvlWith p t))
+  | .subst A a P pr b e => Bool.or (Bool.or (tmHasLvlWith p A) (Bool.or (tmHasLvlWith p a) (tmHasLvlWith p P)))
+      (Bool.or (tmHasLvlWith p pr) (Bool.or (tmHasLvlWith p b) (tmHasLvlWith p e)))
+  | .descr _ I => tmHasLvlWith p I
+  | .dret i => tmHasLvlWith p i
+  | .darg q S D => Bool.or (tmHasLvlWith p q) (Bool.or (tmHasLvlWith p S) (tmHasLvlWith p D))
+  | .drec q j D => Bool.or (tmHasLvlWith p q) (Bool.or (tmHasLvlWith p j) (tmHasLvlWith p D))
+  | .dhrec q H j D => Bool.or (tmHasLvlWith p q) (Bool.or (tmHasLvlWith p H) (Bool.or (tmHasLvlWith p j) (tmHasLvlWith p D)))
+  | .delim _ P a b c h D => Bool.or (Bool.or (tmHasLvlWith p P) (Bool.or (tmHasLvlWith p a) (tmHasLvlWith p b)))
+      (Bool.or (Bool.or (tmHasLvlWith p c) (tmHasLvlWith p h)) (tmHasLvlWith p D))
+  | .mu _ I D i => Bool.or (tmHasLvlWith p I) (Bool.or (tmHasLvlWith p D) (tmHasLvlWith p i))
+  | .con x => tmHasLvlWith p x
+  | .szSuc x => tmHasLvlWith p x
+  | .sizeLt x => tmHasLvlWith p x
+  | .mus _ I D i x => Bool.or (Bool.or (tmHasLvlWith p I) (tmHasLvlWith p D)) (Bool.or (tmHasLvlWith p i) (tmHasLvlWith p x))
+  | .sfix _ I D _ P f x i y => Bool.or (Bool.or (Bool.or (tmHasLvlWith p I) (tmHasLvlWith p D)) (Bool.or (tmHasLvlWith p P) (tmHasLvlWith p f)))
+      (Bool.or (tmHasLvlWith p x) (Bool.or (tmHasLvlWith p i) (tmHasLvlWith p y)))
+  | .scase _ _ I D _ P m x i y => Bool.or (Bool.or (Bool.or (tmHasLvlWith p I) (tmHasLvlWith p D)) (Bool.or (tmHasLvlWith p P) (tmHasLvlWith p m)))
+      (Bool.or (tmHasLvlWith p x) (Bool.or (tmHasLvlWith p i) (tmHasLvlWith p y)))
+  | .nu _ I D i x => Bool.or (Bool.or (tmHasLvlWith p I) (tmHasLvlWith p D)) (Bool.or (tmHasLvlWith p i) (tmHasLvlWith p x))
+  | .out x => tmHasLvlWith p x
+  | .cocon x => tmHasLvlWith p x
+  | .scofix _ I D A f x i a => Bool.or (Bool.or (Bool.or (tmHasLvlWith p I) (tmHasLvlWith p D)) (Bool.or (tmHasLvlWith p A) (tmHasLvlWith p f)))
+      (Bool.or (tmHasLvlWith p x) (Bool.or (tmHasLvlWith p i) (tmHasLvlWith p a)))
+  | .coit _ I D S st i x => Bool.or (Bool.or (Bool.or (tmHasLvlWith p I) (tmHasLvlWith p D)) (Bool.or (tmHasLvlWith p S) (tmHasLvlWith p st)))
+      (Bool.or (tmHasLvlWith p i) (tmHasLvlWith p x))
+  | .ind _ I D _ P m i x => Bool.or (Bool.or (Bool.or (tmHasLvlWith p I) (tmHasLvlWith p D)) (Bool.or (tmHasLvlWith p P) (tmHasLvlWith p m)))
+      (Bool.or (tmHasLvlWith p i) (tmHasLvlWith p x))
+  | .ulift _ _ A => tmHasLvlWith p A
+  | .up a => tmHasLvlWith p a
+  | .down x => tmHasLvlWith p x
+  | .prf l x => Bool.or (p l) (tmHasLvlWith p x)
+  | .sortL l => p l
+  -- (a constant's levels are its instantiation; its value and type are the declaration's,
+  -- with that declaration's own parameters)
+  | .const _ _ ls _ _ => lvlsHasLvlWith p ls
+  -- (the leaves, by name)
+  | .var _ => .false
+  | .univ _ => .false
+  | .prop => .false
+  | .unit _ => .false
+  | .star => .false
+  | .empty _ => .false
+  | .ptrue => .false
+  | .pfalse => .false
+  | .enum _ => .false
+  | .tag _ _ => .false
+  | .size => .false
+  | .szInf => .false
+  | .qty => .false
+  | .qlit _ => .false
+  | .axiomC _ _ => .false
+def tmsHasLvlWith (p : Lvl → Bool) : Tms → Bool
+  | .tnil => .false
+  | .tcons t rest => Bool.or (tmHasLvlWith p t) (tmsHasLvlWith p rest)
+def lvlsHasLvlWith (p : Lvl → Bool) : List Lvl → Bool
+  | .nil => .false
+  | .cons l rest => Bool.or (p l) (lvlsHasLvlWith p rest)
+end
+def tmHasLvlMVar (t : Tm) : Bool := tmHasLvlWith lvlHasMVar t
+-- a declaration: its type and value use only its level parameters (`addDecl`'s check,
+-- after the frontend's zonk; a hole or an unsolved metavariable is rejected here too).
+-- (Defined after `checkDecl`, which it wraps.)
 
 -- check a declaration (`addDecl` in `Check.lean`): its type is a type and its value, if
 -- it has one, has that type. Its level parameters stay symbolic, so this checks it at
@@ -3497,12 +3675,27 @@ def checkDecl (ty : Tm) (value : Option Tm) : TyRes := match inferUniv empty ty 
     | .some v => check empty v (eval .nil ty)
   | r => r
 
+-- a declaration: its type and value use only its level parameters (`addDecl`'s check,
+-- after the frontend's zonk; a hole or an unsolved metavariable is rejected here too)
+def checkDeclParams (ps : List String) (ty : Tm) (value : Option Tm) : TyRes :=
+  match Bool.or (tmHasLvlWith (fun l => Bool.not (lvlDeclared ps l)) ty) (match value with
+    | .some v => tmHasLvlWith (fun l => Bool.not (lvlDeclared ps l)) v
+    | .none => .false) with
+  | .true => .err "the declaration uses a universe level it does not declare, or an unsolved one"
+  | .false => checkDecl ty value
+
 -- a partial definition's signature (`addPartialDecl`): its type is a type and the
 -- witness, a term of that type, checks (erased: it is evidence, never run). The
 -- definition stays opaque, an axiom whose type is inhabited.
 def checkPartial (ty w : Tm) : TyRes := match inferUniv empty ty with
   | .ok _ _ => check (TCtx.erase empty) w (eval .nil ty)
   | r => r
+
+-- as `checkPartial`, with the declaration's level parameters checked too
+def checkPartialParams (ps : List String) (ty w : Tm) : TyRes :=
+  match checkDeclParams ps ty .none with
+  | .err m => .err m
+  | .ok _ _ => checkPartial ty w
 
 
 -- ---------------------------------------------------------------------------------------
@@ -3959,7 +4152,7 @@ def markClosed (v ty : Tm) : Tm := markCheck empty v (eval .nil ty)
 -- in a `Π`/`Σ`'s sorts from its components' levels, everywhere, inside proofs too. The
 -- frontend runs it on every type and value before the kernel; the kernel rejects a hole
 -- that is left (an ill-typed term) and checks every sort.
-def sortsCtx : TCtx := .mk .nil .nil 0 .false 4
+def sortsCtx : TCtx := .mk .nil .nil 0 .false 4 .false
 def sortsTy (t : Tm) : Tm := match tmHasHole t with
   | .false => t
   | .true => markTy sortsCtx t
@@ -3977,7 +4170,7 @@ def normalize (t : Tm) : String := show .nil 0 (quote 0 (eval .nil (sortsInfer t
 def sortsTyIn (c : TCtx) (t : Tm) : Tm := match tmHasHole t with
   | .false => t
   | .true => match c with
-    | .mk e ts l x _ => markTy (.mk e ts l x 4) t
+    | .mk e ts l x _ r => markTy (.mk e ts l x 4 r) t
 -- (`ty` already filled)
 def sortsClosed (v ty : Tm) : Tm := match tmHasHole v with
   | .false => v
@@ -4021,3 +4214,12 @@ def checkMarking (v0 ty : Tm) : Checked :=
           match check empty v' (eval .nil ty) with
           | .ok _ _ => .good v'
           | .err m' => .bad m'
+
+-- `checkMarking` for a declaration: its level parameters must be declared (and every
+-- level metavariable solved), then its type is a type and its marked value has it
+def checkMarkingParams (ps : List String) (v0 ty : Tm) : Checked :=
+  match Bool.or (tmHasLvlMVar v0) (tmHasLvlMVar ty) with
+  | .true => .bad "could not infer a universe level; add a universe parameter or annotation"
+  | .false => match checkDeclParams ps ty .none with
+    | .err m => .bad m
+    | .ok _ _ => checkMarking v0 ty

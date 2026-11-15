@@ -59,3 +59,4 @@ import Wiz.Toolchain
 import Wiz.Module
 import Wiz.Selfhost
 import Wiz.Cache
+import Wiz.Format

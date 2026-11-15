@@ -1,0 +1,45 @@
+-- test: check
+import Text
+import C.Schema
+-- The generated schema from tree-sitter-C's node-types.json: one constructor per
+-- concrete named kind, generated ordinals (`sym`, `idx`) that round-trip, typed ids,
+-- and field specs whose supertypes are expanded to concrete kinds. Printed:
+--   kinds, fields, supertypes | ofName/ofIdx round trip | _declarator's subtype count |
+--   function_definition's fields | body's allowed kinds |
+--   allows body compound_statement (true) / a body identifier (false).
+def declSubs : List String := match C.Supertype.ofName "_declarator" with
+  | .none => .nil
+  | .some t => List.map C.Kind.name (C.Supertype.subtypes t)
+
+def fieldNames (specs : List C.FieldSpec) : List String :=
+  List.map (fun s => C.Field.name s.field) specs
+
+def allowedNames (specs : List C.FieldSpec) : List String :=
+  List.concat (List.map (fun s => List.map C.Kind.name s.kinds) specs)
+
+def round : String := match C.Kind.ofName "call_expression" with
+  | .none => "no call_expression"
+  | .some k => match C.Kind.ofIdx (UIntN.toNat (C.Kind.sym k)) with
+    | .none => "no ofIdx"
+    | .some k2 => match C.Kind.beq k k2 with
+      | .true => C.Kind.name k
+      | .false => "roundtrip mismatch"
+
+#eval String.intercalate " | " [
+  "kinds " ++ Nat.repr C.kindCount ++ ", fields " ++ Nat.repr C.fieldCount
+    ++ ", supertypes " ++ Nat.repr C.supertypeCount,
+  "roundtrip " ++ round,
+  "_declarator " ++ Nat.repr (List.length declSubs) ++ ": "
+    ++ String.intercalate "," declSubs,
+  "function_definition fields: "
+    ++ String.intercalate "," (fieldNames (C.fields .function_definition)),
+  "body allows: "
+    ++ String.intercalate "," (allowedNames (C.fields .function_definition))
+    ++ " / "
+    ++ (match C.fieldSpec .function_definition .body with
+      | .none => "no body spec"
+      | .some s => String.intercalate "," (List.map C.Kind.name s.kinds)),
+  (match C.allows .function_definition .body .compound_statement with
+    | .true => "allows body compound_statement" | .false => "REFUSES-BODY"),
+  (match C.allows .function_definition .body .identifier with
+    | .true => "ALLOWS-IDENTIFIER" | .false => "refuses body identifier")]

@@ -1,0 +1,24 @@
+import Scry.Egraph
+-- A non-terminating rewrite, bounded by fuel (`scry-egraph-fuel`): `f x → f (g x)`
+-- grows a fresh `g` node every round (the e-graph does not collapse it, unlike
+-- `f x → f (f x)`). Fuel 0 changes nothing; fuel 3 adds exactly three `g` layers.
+-- `main` is the digest.
+
+-- ops: 0 = x, 1 = f (unary), 2 = g (unary)
+def pF : Scry.Pat := .pnode 1 (.pcons (.var 0) .pnil)
+def pGx : Scry.Pat := .pnode 2 (.pcons (.var 0) .pnil)
+def rGrow : Scry.Rewrite := Scry.Rewrite.mk pF (.pnode 1 (.pcons pGx .pnil))
+
+def ga : Scry.EGraph :=
+  let e := Scry.EGraph.empty;
+  let x := Scry.EGraph.add e (Scry.ENode.leaf 0);
+  let fx := Scry.EGraph.add x.1 (Scry.ENode.mk 1 [x.2]);
+  fx.1
+
+def main : Nat :=
+  let s0 := Scry.EGraph.saturate 0 ga [rGrow];
+  let s3 := Scry.EGraph.saturate 3 ga [rGrow];
+  Scry.EGraph.numNodes s0 * 1000 +
+  Scry.EGraph.numNodes s3 * 100 +
+  Scry.EGraph.numClasses s3 * 10 +
+  (if Scry.EGraph.canonical s3 then 1 else 0)

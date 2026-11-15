@@ -25,7 +25,9 @@ later (plan D4) without renaming.
 
 What is here: `Not` (`¬`), `And` (`∧`), `Or` (`∨`), `Iff` (`↔`), `Ex` (`∃`, with binder
 notation), the equality lemmas `Eq.symm`, `Eq.trans`, `Eq.congrArg`, `Eq.substProp`,
-and the definitional `propext` and `funext`.
+the definitional `propext` and `funext`, and the Boolean algebra (`Bool.and_comm`,
+`Bool.or_assoc`, `Bool.and_absorb`, the De Morgan laws, …) with its bridges from
+`b = true` to `∧`, `∨` and `¬` (`Bool.and_eq_true`, `Bool.or_eq_true`, `Bool.not_eq_true`).
 
 ```
 import Logic
@@ -229,6 +231,40 @@ def funext {A B : Type} {f g : A → B} (h : (x : A) → f x = g x) : f = g := h
 /-- Equal functions agree at every argument: from `f = g`, `f x = g x`. -/
 def congrFun {A B : Type} {f g : A → B} (e : f = g) (x : A) : f x = g x := e x
 
+-- ## Composing relations: `Trans` and `calc`
+
+/-- `Trans p q r`: a proof of `p` and one of `q` give one of `r`. `calc` (stage 13s)
+composes adjacent steps with an instance of it: the relations may differ (`a ≤ b` then
+`b < c` gives `a < c`), and the last step's relation is the chain's.
+
+`r` is an `outParam`, so instance search finds it from `p` and `q`. A library registers
+a relation by adding instances (`lib/Nat.wiz`, `lib/IntOrder.wiz`, `lib/Rat.wiz`), and
+so can a program:
+
+```
+def MyRel (a b : Nat) : Prop := a = b
+infix:50 " ~ " => MyRel
+instance {a b c : Nat} : Trans (a ~ b) (b ~ c) (a ~ c) := Trans.mk (fun h h' => Eq.trans h h')
+``` -/
+class Trans (p q : Prop) (r : outParam Prop) where
+  /-- Compose a proof of `p` and one of `q` into a proof of `r`. -/
+  trans : p → q → r
+
+/-- `=` composes with itself. -/
+instance {A : Type} {a b c : A} : Trans (a = b) (b = c) (a = c) :=
+  Trans.mk (fun e₁ e₂ => Eq.trans e₁ e₂)
+/-- `=` between propositions is transitive. (The generic `Eq.trans` is at a `Type`, and
+`Prop` is a `Sort`, not a `Type`.) -/
+def Eq.transProp {P Q R : Prop} (e₁ : P = Q) (e₂ : Q = R) : P = R :=
+  Iff.toEq (Iff.trans (Iff.ofEq e₁) (Iff.ofEq e₂))
+/-- `=` between propositions composes with itself. (The generic instance does not apply:
+equations of propositions live at `Prop`, not at a `Type`.) -/
+instance {P Q R : Prop} : Trans (P = Q) (Q = R) (P = R) :=
+  Trans.mk (fun e₁ e₂ => Eq.transProp e₁ e₂)
+/-- `↔` composes with itself. -/
+instance {P Q R : Prop} : Trans (P ↔ Q) (Q ↔ R) (P ↔ R) :=
+  Trans.mk (fun h₁ h₂ => Iff.trans h₁ h₂)
+
 -- ## Booleans
 
 /-- Every boolean is `.true` or `.false`. -/
@@ -246,3 +282,160 @@ def Bool.and_left : (a b : Bool) → Bool.and a b = .true → a = .true
 def Bool.and_right : (a b : Bool) → Bool.and a b = .true → b = .true
   | .true, _, h => h
   | .false, _, h => absurd h.1
+
+-- ## Boolean algebra
+
+/-- `Bool.and` (`a && b`) is commutative. -/
+def Bool.and_comm : (a b : Bool) → Bool.and a b = Bool.and b a
+  | .true, .true => rfl
+  | .true, .false => rfl
+  | .false, .true => rfl
+  | .false, .false => rfl
+/-- `Bool.and` is associative. -/
+def Bool.and_assoc : (a b c : Bool) → Bool.and (Bool.and a b) c = Bool.and a (Bool.and b c)
+  | .true, b, c => rfl
+  | .false, b, c => rfl
+/-- `Bool.or` (`a || b`) is commutative. -/
+def Bool.or_comm : (a b : Bool) → Bool.or a b = Bool.or b a
+  | .true, .true => rfl
+  | .true, .false => rfl
+  | .false, .true => rfl
+  | .false, .false => rfl
+/-- `Bool.or` is associative. -/
+def Bool.or_assoc : (a b c : Bool) → Bool.or (Bool.or a b) c = Bool.or a (Bool.or b c)
+  | .true, b, c => rfl
+  | .false, b, c => rfl
+
+/-- `.true` is a right identity of `Bool.and`. -/
+def Bool.and_true : (a : Bool) → Bool.and a .true = a
+  | .true => rfl
+  | .false => rfl
+/-- `.true` is a left identity of `Bool.and`. -/
+def Bool.true_and (a : Bool) : Bool.and .true a = a := rfl
+/-- `.false` is absorbing on the right for `Bool.and`. -/
+def Bool.and_false : (a : Bool) → Bool.and a .false = .false
+  | .true => rfl
+  | .false => rfl
+/-- `.false` is absorbing on the left for `Bool.and`. -/
+def Bool.false_and (a : Bool) : Bool.and .false a = .false := rfl
+/-- `.false` is a right identity of `Bool.or`. -/
+def Bool.or_false : (a : Bool) → Bool.or a .false = a
+  | .true => rfl
+  | .false => rfl
+/-- `.false` is a left identity of `Bool.or`. -/
+def Bool.false_or (a : Bool) : Bool.or .false a = a := rfl
+/-- `.true` is absorbing on the right for `Bool.or`. (`lib/Hdl/Temporal.wiz` uses the name
+`Bool.or_true` for the elimination form of a true disjunction.) -/
+def Bool.or_true_right : (a : Bool) → Bool.or a .true = .true
+  | .true => rfl
+  | .false => rfl
+/-- `.true` is absorbing on the left for `Bool.or`. -/
+def Bool.true_or (a : Bool) : Bool.or .true a = .true := rfl
+
+/-- `Bool.and` is idempotent. -/
+def Bool.and_self : (a : Bool) → Bool.and a a = a
+  | .true => rfl
+  | .false => rfl
+/-- `Bool.or` is idempotent. -/
+def Bool.or_self : (a : Bool) → Bool.or a a = a
+  | .true => rfl
+  | .false => rfl
+
+/-- Absorption: `a && (a || b) = a`. -/
+def Bool.and_absorb : (a b : Bool) → Bool.and a (Bool.or a b) = a
+  | .true, b => rfl
+  | .false, b => rfl
+/-- Absorption: `a || (a && b) = a`. -/
+def Bool.or_absorb : (a b : Bool) → Bool.or a (Bool.and a b) = a
+  | .true, b => rfl
+  | .false, b => rfl
+
+/-- `Bool.and` distributes over `Bool.or`. -/
+def Bool.and_or_distrib : (a b c : Bool) →
+    Bool.and a (Bool.or b c) = Bool.or (Bool.and a b) (Bool.and a c)
+  | .true, b, c => rfl
+  | .false, b, c => rfl
+/-- `Bool.or` distributes over `Bool.and`. -/
+def Bool.or_and_distrib : (a b c : Bool) →
+    Bool.or a (Bool.and b c) = Bool.and (Bool.or a b) (Bool.or a c)
+  | .true, b, c => rfl
+  | .false, b, c => rfl
+
+/-- Negation is an involution. -/
+def Bool.not_not : (a : Bool) → Bool.not (Bool.not a) = a
+  | .true => rfl
+  | .false => rfl
+/-- `!true = false`. -/
+def Bool.not_true : Bool.not .true = .false := rfl
+/-- `!false = true`. -/
+def Bool.not_false : Bool.not .false = .true := rfl
+/-- `a && !a = false`. -/
+def Bool.and_not_self : (a : Bool) → Bool.and a (Bool.not a) = .false
+  | .true => rfl
+  | .false => rfl
+/-- `a || !a = true`. -/
+def Bool.or_not_self : (a : Bool) → Bool.or a (Bool.not a) = .true
+  | .true => rfl
+  | .false => rfl
+/-- De Morgan: `!(a && b) = !a || !b`. -/
+def Bool.not_and : (a b : Bool) → Bool.not (Bool.and a b) = Bool.or (Bool.not a) (Bool.not b)
+  | .true, .true => rfl
+  | .true, .false => rfl
+  | .false, .true => rfl
+  | .false, .false => rfl
+/-- De Morgan: `!(a || b) = !a && !b`. -/
+def Bool.not_or : (a b : Bool) → Bool.not (Bool.or a b) = Bool.and (Bool.not a) (Bool.not b)
+  | .true, .true => rfl
+  | .true, .false => rfl
+  | .false, .true => rfl
+  | .false, .false => rfl
+
+-- ## Booleans as propositions
+--
+-- `b = .true` is the proposition a Boolean stands for; these are its bridges to `∧`,
+-- `∨` and `¬`, and the way a `Bool` case split used to feed a proposition.
+
+/-- `a && b = true` exactly when both are true. -/
+def Bool.and_eq_true : (a b : Bool) → ((Bool.and a b = .true) ↔ (a = .true ∧ b = .true))
+  | .true, .true => Iff.intro (fun h => And.intro rfl rfl) (fun h => rfl)
+  | .true, .false => Iff.intro (fun h => absurd h.1) (fun h => absurd h.2.1)
+  | .false, .true => Iff.intro (fun h => absurd h.1) (fun h => absurd h.1.1)
+  | .false, .false => Iff.intro (fun h => absurd h.1) (fun h => absurd h.1.1)
+/-- `a && b = false` exactly when one of them is false. -/
+def Bool.and_eq_false : (a b : Bool) → ((Bool.and a b = .false) ↔ (a = .false ∨ b = .false))
+  | .true, .true => Iff.intro (fun h => absurd h.1) (fun h => Or.elim h (fun ha => absurd ha.1) (fun hb => absurd hb.1))
+  | .true, .false => Iff.intro (fun h => Or.inr rfl) (fun h => rfl)
+  | .false, .true => Iff.intro (fun h => Or.inl rfl) (fun h => rfl)
+  | .false, .false => Iff.intro (fun h => Or.inl rfl) (fun h => rfl)
+/-- `a || b = true` exactly when one of them is true. -/
+def Bool.or_eq_true : (a b : Bool) → ((Bool.or a b = .true) ↔ (a = .true ∨ b = .true))
+  | .true, .true => Iff.intro (fun h => Or.inl rfl) (fun h => rfl)
+  | .true, .false => Iff.intro (fun h => Or.inl rfl) (fun h => rfl)
+  | .false, .true => Iff.intro (fun h => Or.inr rfl) (fun h => rfl)
+  | .false, .false => Iff.intro (fun h => absurd h.1) (fun h => Or.elim h (fun ha => absurd ha.1) (fun hb => absurd hb.1))
+/-- `a || b = false` exactly when both are false. -/
+def Bool.or_eq_false : (a b : Bool) → ((Bool.or a b = .false) ↔ (a = .false ∧ b = .false))
+  | .true, .true => Iff.intro (fun h => absurd h.1) (fun h => absurd h.1.1)
+  | .true, .false => Iff.intro (fun h => absurd h.1) (fun h => absurd h.1.1)
+  | .false, .true => Iff.intro (fun h => absurd h.1) (fun h => absurd h.2.1)
+  | .false, .false => Iff.intro (fun h => And.intro rfl rfl) (fun h => rfl)
+/-- `!a = true` exactly when `a = false`. -/
+def Bool.not_eq_true : (a : Bool) → ((Bool.not a = .true) ↔ (a = .false))
+  | .true => Iff.intro (fun h => absurd h.1) (fun h => absurd h.1)
+  | .false => Iff.intro (fun h => rfl) (fun h => rfl)
+/-- `!a = false` exactly when `a = true`. -/
+def Bool.not_eq_false : (a : Bool) → ((Bool.not a = .false) ↔ (a = .true))
+  | .true => Iff.intro (fun h => rfl) (fun h => rfl)
+  | .false => Iff.intro (fun h => absurd h.1) (fun h => absurd h.1)
+/-- `!a = true` exactly when `a` is not true. -/
+def Bool.not_true_iff : (a : Bool) → ((Bool.not a = .true) ↔ ¬ (a = .true))
+  | .true => Iff.intro (fun h => absurd h.1) (fun h => absurd (h rfl))
+  | .false => Iff.intro (fun h => fun ht => absurd ht.1) (fun h => rfl)
+/-- The bridge `b = true ↔ ¬ (b = false)`. -/
+def Bool.eq_true_iff : (b : Bool) → ((b = .true) ↔ ¬ (b = .false))
+  | .true => Iff.intro (fun h => fun hf => Bool.trueNeFalse hf) (fun h => rfl)
+  | .false => Iff.intro (fun h => absurd h.1) (fun h => absurd (h rfl))
+/-- The bridge `b = false ↔ ¬ (b = true)`. -/
+def Bool.eq_false_iff : (b : Bool) → ((b = .false) ↔ ¬ (b = .true))
+  | .true => Iff.intro (fun h => absurd h.1) (fun h => absurd (h rfl))
+  | .false => Iff.intro (fun h => fun ht => absurd ht.1) (fun h => rfl)

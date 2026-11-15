@@ -1,0 +1,5 @@
+-- test: run
+import Scry.Cli
+-- End to end over the synthetic store: the loader reads fixtures/demo.facts.json and
+-- `facts` prints the report. The grail command targets run the same CLI on the same file.
+def main : IO Unit := Scry.mainArgs ["facts", "fixtures/demo.facts.json"]

@@ -3,6 +3,7 @@ import Grail.Deps
 import Grail.Registry
 import Grail.IndexCheck
 import Grail.Lsp
+import Grail.New
 import Wiz.Version
 
 /-!
@@ -16,6 +17,12 @@ namespace Grail
 open Wiz
 
 def usage : String := "usage:
+  grail new NAME [--dir DIR]
+                          write a minimal package (grail.wiz with a lib, an exe and
+                          a tests target, src/Main.wiz, a README and a .gitignore)
+                          into DIR (default: ./NAME); an existing non-empty
+                          directory is refused, the name must be a letter then
+                          letters, digits, '_' or '-'
   grail build [TARGET…]   build the package's targets (by default all but the
                           bootstrap check, which takes minutes)
   grail test [FILTER…] [--update]
@@ -69,7 +76,8 @@ def usage : String := "usage:
   grail --version         print the version
   grail clean             remove .grail/build, .grail/bin, .grail/tmp, .grail/log and
                           the command outputs grail installed (unless changed since)
-options: -C DIR (the package directory), --std DIR (the standard library),
+options: -C DIR (the package directory), --dir DIR (with `new`: where to write the
+  package, instead of ./NAME), --std DIR (the standard library),
   -j N (jobs at once; default: the number of cores, at most 4),
   --timeout SECS (a job's time limit, default 1800), --test-timeout SECS (default 300),
   --cc X --cflags \"…\" --ldflags \"…\" --libs \"…\" --llc X --gc-cflags \"…\" --gc-ldflags \"…\" -I DIR,
@@ -83,6 +91,8 @@ options: -C DIR (the package directory), --std DIR (the standard library),
   --offline (never touch the network),
   --vendor DIR (a directory of vendored archives; default: the `vendor` setting),
   --source URL (grail publish: the archive's public URL),
+  --region-cache (experimental: serve module effects from mmap'ed .wizr regions in the
+  same cache layers; the text entries remain the authority and the fallback),
   --trust-native (27a: allow `native_refl`, passed on to every check and to `wiz lsp`), --native-fuel N
 Machine settings (where GMP lives) go in an uncommitted grail.local.wiz:
   import Grail
@@ -94,6 +104,8 @@ def binaryId (cacheDir : Option System.FilePath) : IO UInt64 := Cache.binaryId c
 
 structure Opts where
   dir : Option String := none
+  /-- `grail new`: the directory to write the package into (default: `./NAME`) -/
+  newDir : Option String := none
   std : Option String := none
   jobs : Option Nat := none
   timeout : Option Nat := none
@@ -121,9 +133,10 @@ structure Opts where
   /-- (23m) `grail publish`: the archive's public URL -/
   source : Option String := none
 
-/-- `-C DIR`, `--std DIR`, `-j N`, `--timeout SECS`, `--test-timeout SECS`, taken out of the arguments. -/
+/-- `-C DIR`, `--dir DIR`, `--std DIR`, `-j N`, `--timeout SECS`, `--test-timeout SECS`, taken out of the arguments. -/
 partial def grailOpts (o : Opts) : List String → Opts × List String
   | "-C" :: d :: rest => grailOpts { o with dir := some d } rest
+  | "--dir" :: d :: rest => grailOpts { o with newDir := some d } rest
   | "--std" :: d :: rest => grailOpts { o with std := some d } rest
   | "-j" :: n :: rest => grailOpts { o with jobs := n.toNat? } rest
   | "--timeout" :: n :: rest => grailOpts { o with timeout := n.toNat? } rest
@@ -297,6 +310,22 @@ def cliMain (args : List String) : IO UInt32 := do
       IO.println s!"sign it with: ssh-keygen -Y sign -n grail-index -f KEY {path}"
       return 0
   match args with
+  | "new" :: rest =>
+    -- (23o) the smallest package; an existing non-empty directory is refused
+    match rest with
+    | [name] =>
+      let base : System.FilePath := opts.newDir.getD name
+      let target := if base.isAbsolute then base else dir / base
+      match ← newPackage name target with
+      | .error e => IO.eprintln e; pure 1
+      | .ok () =>
+        IO.println s!"grail new: wrote {target} (grail.wiz, src/Main.wiz, tests/hello.wiz, README.md, .gitignore)"
+        IO.println s!"  cd {target} && grail build && grail run {name}"
+        pure 0
+    | _ =>
+      IO.eprintln "grail new: expected NAME [--dir DIR]"
+      IO.eprintln usage
+      pure 2
   | ["clean"] =>
     -- (23i) the outputs grail installed in the package, unless they were changed since
     IO.print (← cleanInstalled { dir, std, tc := defaults, binId })

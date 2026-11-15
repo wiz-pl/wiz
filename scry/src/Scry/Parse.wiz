@@ -1,0 +1,134 @@
+import Sys
+import Scry.Facts
+import Scry.CstStore
+import Scry.Native
+/-!
+# Scry.Parse: the `parse --stats` path
+
+S1's parser is one C shim over tree-sitter (design §4.1): `native/ts_shim.c` walks the
+tree with a `TSTreeCursor` and bulk-loads the CST columns; no `TSNode` crosses into Wiz
+(`Scry.Native`). `parse --stats FILE…` reads, per file, whichever store it finds:
+
+* a C source file (the text is not a store) is parsed by the shim
+  (`Scry.Native.parse`), converted to `Scry.CstStore` and reported;
+* a `scry-cst 1` spill (`Scry.CstStore.ofText`);
+* a JSON fact store (`Scry.Facts.ofText`).
+
+The format is sniffed from the text, not the extension. With several files it prints
+each block and a `total` line (nodes, edges, errors, stores); that is the "small corpus"
+view. `Scry.parseSource` is the single-file entry point (`EIO Scry.CstStore`).
+
+There are no timing claims here (AGENTS.md): everything is a count, and the perf agent
+owns throughput.
+-/
+
+/-- What one store's `parse --stats` block says happened. -/
+structure Scry.ParseBlock where
+  /-- The printed block (banner, stats, CSR counts). -/
+  text : String
+  /-- The counts, for the corpus total. -/
+  stats : Scry.Stats
+
+/-- The banner for a JSON fact store. -/
+def Scry.parseBanner : String :=
+  "parse: JSON facts store\n"
+  ++ "note: --stats reads the store's columns; no source file was parsed now\n"
+
+/-- The banner for a `scry-cst 1` spill store. -/
+def Scry.parseBannerCst : String :=
+  "parse: native cst store (scry-cst spill format)\n"
+
+/-- The banner for a file parsed now by the vendored tree-sitter shim. -/
+def Scry.parseBannerNative : String :=
+  "parse: tree-sitter (vendored 0.27.2, tree-sitter-c 0.24.2) native cst\n"
+
+/-- The zero stats, for a corpus total. -/
+def Scry.emptyStats : Scry.Stats :=
+  Scry.Stats.mk 0 0 0 0 0 0 0 0 .nil .nil
+
+/-- Add the numeric counts of two stat blocks (histograms are not summed: the total line
+is counts only). -/
+def Scry.statsSum (a b : Scry.Stats) : Scry.Stats :=
+  Scry.Stats.mk (Nat.add a.files b.files) (Nat.add a.nodes b.nodes)
+    (Nat.add a.edges b.edges) (Nat.add a.relations b.relations)
+    (Nat.add a.tuples b.tuples) (Nat.add a.roots b.roots) (Nat.max a.maxDepth b.maxDepth)
+    (Nat.add a.errors b.errors) .nil .nil
+
+/-- The sum of the blocks' counts. -/
+def Scry.totalOf (bs : List Scry.ParseBlock) : Scry.Stats :=
+  List.foldl (fun acc b => Scry.statsSum acc b.stats) Scry.emptyStats bs
+
+/-- The one-line corpus total `parse --stats` prints after several stores. -/
+def Scry.renderParseTotal (bs : List Scry.ParseBlock) : String :=
+  let t := Scry.totalOf bs;
+  "total: " ++ Nat.repr (List.length bs) ++ " store(s), " ++ Nat.repr t.nodes
+  ++ " nodes, " ++ Nat.repr t.edges ++ " edges, " ++ Nat.repr t.relations
+  ++ " relations, " ++ Nat.repr t.tuples ++ " tuples, " ++ Nat.repr t.roots
+  ++ " roots, " ++ Nat.repr t.errors ++ " errors, max depth " ++ Nat.repr t.maxDepth
+
+/-- The report `scry parse --stats` prints for a JSON store: the banner, then stats. -/
+def Scry.renderParseStats (f : Scry.Facts) : String :=
+  Scry.parseBanner ++ Scry.renderFacts f
+
+/-- The report for a parsed C file: the banner, the source size and the same stats and
+CSR counts from the columns. -/
+def Scry.renderParseStatsNative (st : ScryStore) (s : Scry.CstStore) : String :=
+  Scry.parseBannerNative
+  ++ "format: scry-cst v1 (native columns)\n"
+  ++ "language: " ++ s.language ++ "\n"
+  ++ "bytes: " ++ Nat.repr (Scry.Native.storeBytes st) ++ "\n"
+  ++ Scry.renderStats (Scry.CstStore.statsOf s)
+  ++ "csr out: " ++ Nat.repr (U32Array.size s.childOff) ++ " offsets, "
+  ++ Nat.repr (U32Array.size s.children) ++ " arcs\n"
+  ++ "csr in: (not stored: the shim's tree walk is outward)\n"
+
+/-- The report for a `scry-cst 1` spill: the banner, then the same stats and CSR counts
+from the columns (`CstStore.statsOf`, not a `Facts` view). -/
+def Scry.renderParseStatsCst (s : Scry.CstStore) : String :=
+  Scry.parseBannerCst
+  ++ "format: scry-cst v1\n"
+  ++ "language: " ++ s.language ++ "\n"
+  ++ Scry.renderStats (Scry.CstStore.statsOf s)
+  ++ "csr out: " ++ Nat.repr (U32Array.size s.childOff) ++ " offsets, "
+  ++ Nat.repr (U32Array.size s.children) ++ " arcs\n"
+  ++ "csr in: (not stored: the shim's tree walk is outward)\n"
+
+/-- Load `path` as a JSON fact store. -/
+def Scry.loadFactsFile (path : String) : EIO Scry.Facts := do
+  text ← FS.readFile path;
+  match Scry.Facts.ofText text with
+  | .ok f => EIO.pure f
+  | .error e => EIO.fail (path ++ ": " ++ e)
+
+/-- Load `path` as a native column store (`scry-cst 1`). -/
+def Scry.loadCstFile (path : String) : EIO Scry.CstStore := do
+  text ← FS.readFile path;
+  match Scry.CstStore.ofText text with
+  | .ok s => EIO.pure s
+  | .error e => EIO.fail (path ++ ": " ++ e)
+
+/-- The `parse --stats` block for one path: a `scry-cst` spill, a JSON store, or (when
+the text is neither) C source parsed by the native shim. -/
+def Scry.parseBlock (path : String) : EIO Scry.ParseBlock := do
+  text ← FS.readFile path;
+  match String.startsWith text "scry-cst " with
+  | .true => match Scry.CstStore.ofText text with
+    | .error e => EIO.fail (path ++ ": " ++ e)
+    | .ok s => EIO.pure (Scry.ParseBlock.mk (Scry.renderParseStatsCst s)
+        (Scry.CstStore.statsOf s))
+  | .false => match String.startsWith (String.trim text) "{" with
+    | .true => match Scry.Facts.ofText text with
+      | .error e => EIO.fail (path ++ ": " ++ e)
+      | .ok f => EIO.pure (Scry.ParseBlock.mk (Scry.renderParseStats f) (Scry.statsOf f))
+    | .false => do
+      st ← Scry.Native.parse "c" text;
+      cst ← EIO.lift (Scry.Native.toCstStore path st);
+      EIO.pure (Scry.ParseBlock.mk (Scry.renderParseStatsNative st cst)
+        (Scry.CstStore.statsOf cst))
+
+/-- Parse one C (or other supported language) file into the model store. The shim has
+tree-sitter-c only; another `lang` is an error from `Scry.Native.parse`. -/
+def Scry.parseSource (lang : String) (path : String) : EIO Scry.CstStore := do
+  text ← FS.readFile path;
+  st ← Scry.Native.parse lang text;
+  EIO.lift (Scry.Native.toCstStore path st)

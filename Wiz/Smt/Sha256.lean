@@ -42,8 +42,8 @@ private def block (h : Array UInt32) (b : ByteArray) (off : Nat) : Array UInt32 
     hh := g; g := f; f := e; e := d + t1; d := c; c := bb; bb := a; a := t1 + t2
   pure #[h[0]! + a, h[1]! + bb, h[2]! + c, h[3]! + d, h[4]! + e, h[5]! + f, h[6]! + g, h[7]! + hh]
 
-/-- The SHA-256 digest of `b`, as 64 hexadecimal digits. -/
-def hexBytes (msg : ByteArray) : String := Id.run do
+/-- The SHA-256 digest of `msg`, as its 32 raw bytes. -/
+def bytes (msg : ByteArray) : ByteArray := Id.run do
   let len := msg.size
   let mut b := msg.push 0x80
   while b.size % 64 != 56 do b := b.push 0
@@ -52,13 +52,44 @@ def hexBytes (msg : ByteArray) : String := Id.run do
   let mut h : Array UInt32 := #[0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
     0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
   for i in [0:b.size / 64] do h := block h b (64 * i)
+  let mut out : ByteArray := .empty
+  for x in h do
+    for j in [0:4] do out := out.push (UInt8.ofNat ((x.toNat >>> (8 * (3 - j))) % 256))
+  pure out
+
+/-- `n` as eight big-endian bytes (the framing length in `framed`). -/
+private def be64 (n : Nat) : ByteArray :=
+  ByteArray.mk #[ UInt8.ofNat ((n >>> 56) % 256), UInt8.ofNat ((n >>> 48) % 256),
+                  UInt8.ofNat ((n >>> 40) % 256), UInt8.ofNat ((n >>> 32) % 256),
+                  UInt8.ofNat ((n >>> 24) % 256), UInt8.ofNat ((n >>> 16) % 256),
+                  UInt8.ofNat ((n >>> 8) % 256), UInt8.ofNat (n % 256) ]
+
+/-- SHA-256 over a **domain label** and a list of byte fields, each length-prefixed with
+eight big-endian bytes. This is the canonical way to turn structured inputs into a key:
+without the lengths, `["ab", "c"]` and `["a", "bc"]` would have the same preimage, and
+without the domain, a module key could be replayed as a toolchain id or a manifest entry.
+The domain is itself length-prefixed, so no label is a prefix of another. -/
+def framed (domain : String) (fields : List ByteArray) : ByteArray := Id.run do
+  let d := domain.toUTF8
+  let mut b := be64 d.size ++ d
+  for f in fields do
+    b := b ++ be64 f.size ++ f
+  pure (bytes b)
+
+/-- `msg`'s SHA-256 digest as 64 hexadecimal digits. -/
+def hexBytes (msg : ByteArray) : String := Id.run do
   let digit (n : Nat) : Char := "0123456789abcdef".toList[n]!
   let mut out := ""
-  for x in h do
-    for j in [0:8] do out := out.push (digit ((x.toNat >>> (4 * (7 - j))) % 16))
+  for byte in bytes msg do
+    out := out.push (digit (byte.toNat >>> 4)) |>.push (digit (byte.toNat % 16))
   pure out
 
 /-- The SHA-256 digest of `s`'s UTF-8 bytes, as 64 hexadecimal digits. -/
 def hex (s : String) : String := hexBytes s.toUTF8
+
+/-- The digest of a domain-separated, length-framed list of string fields, as 64
+hexadecimal digits. -/
+def hexFramed (domain : String) (fields : List String) : String :=
+  hexBytes (framed domain (fields.map String.toUTF8))
 
 end Wiz.Smt.Sha256

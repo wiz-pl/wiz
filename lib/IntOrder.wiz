@@ -137,6 +137,35 @@ def Int.lt_of_le_of_lt (a b c : Int) (h : Int.Le a b) (h' : Int.Lt b c) : Int.Lt
 /-- `<` is transitive. -/
 def Int.lt_trans (a b c : Int) (h : Int.Lt a b) (h' : Int.Lt b c) : Int.Lt a c :=
   Int.lt_of_lt_of_le a b c h (Int.le_of_lt b c h')
+
+-- ## `calc`: composing `=`, `≤` and `<`
+--
+-- Adjacent `calc` steps compose through `Trans` (lib/Logic.wiz); the equation instances
+-- transport a proof along `=`.
+/-- `a = b → b ≤ c → a ≤ c`. -/
+instance {a b c : Int} : Trans (a = b) (b ≤ c) (a ≤ c) :=
+  Trans.mk (fun e h => Eq.mp' (fun (x : Int) => Int.Le x c) (Eq.symm e) h)
+/-- `a ≤ b → b = c → a ≤ c`. -/
+instance {a b c : Int} : Trans (a ≤ b) (b = c) (a ≤ c) :=
+  Trans.mk (fun h e => Eq.mp' (fun (x : Int) => Int.Le a x) e h)
+/-- `a = b → b < c → a < c`. -/
+instance {a b c : Int} : Trans (a = b) (b < c) (a < c) :=
+  Trans.mk (fun e h => Eq.mp' (fun (x : Int) => Int.Lt x c) (Eq.symm e) h)
+/-- `a < b → b = c → a < c`. -/
+instance {a b c : Int} : Trans (a < b) (b = c) (a < c) :=
+  Trans.mk (fun h e => Eq.mp' (fun (x : Int) => Int.Lt a x) e h)
+/-- `a ≤ b → b ≤ c → a ≤ c`. -/
+instance {a b c : Int} : Trans (a ≤ b) (b ≤ c) (a ≤ c) :=
+  Trans.mk (fun h h' => Int.le_trans a b c h h')
+/-- `a ≤ b → b < c → a < c`. -/
+instance {a b c : Int} : Trans (a ≤ b) (b < c) (a < c) :=
+  Trans.mk (fun h h' => Int.lt_of_le_of_lt a b c h h')
+/-- `a < b → b ≤ c → a < c`. -/
+instance {a b c : Int} : Trans (a < b) (b ≤ c) (a < c) :=
+  Trans.mk (fun h h' => Int.lt_of_lt_of_le a b c h h')
+/-- `a < b → b < c → a < c`. -/
+instance {a b c : Int} : Trans (a < b) (b < c) (a < c) :=
+  Trans.mk (fun h h' => Int.lt_trans a b c h h')
 /-- `a ≤ b` and `b < a` contradict each other. -/
 def Int.not_lt_of_le (a b : Int) (h : Int.Le a b) (h' : Int.Lt b a) : False :=
   Int.Lt.irrefl a (Int.lt_of_le_of_lt a b a h h')

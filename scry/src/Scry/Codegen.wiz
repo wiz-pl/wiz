@@ -1,0 +1,462 @@
+import Json
+import Text
+/-!
+# Scry.Codegen: a typed schema from `node-types.json`
+
+`Scry.Codegen.generate` reads a grammar's `node-types.json` (tree-sitter's grammar
+description; `scry/grammars/tree-sitter-c/node-types.json` is a real excerpt of
+tree-sitter-c) and emits the Wiz module `C.Schema` (design
+`wiz-notes/code-analysis-design.md` §4.2, `wiz-notes/scry-package.md` §"What S1
+needs"). `tools/SchemaMain.wiz` is the command; `gen/C/Schema.wiz` is the checked-in
+output, and `tests/codegen.wiz` fails when it is out of date.
+
+What the generated module holds:
+
+* `C.Kind`: one constructor per **concrete named** node kind (`expression`,
+  `_declarator` and the other supertypes are not constructors: no node has them).
+  `C.Kind.sym` is the generated ordinal in `U16`, `C.Kind.idx` the same in `U32`; the
+  tree-sitter shim will check them against `ts_language_symbol_name` at load time.
+  `C.Kind.ofName` / `C.Kind.ofIdx` are the way back, for the JSON loader and the
+  native store's kind column.
+* `C.Field`: one constructor per field name, with `name`, `idx` and `ofName`; `end`
+  and other reserved words get a trailing `_` (the printed `name` is unchanged).
+* `C.Supertype`, with `name` and `subtypes`: the grammar's supertypes, expanded to
+  concrete `C.Kind`s (so a field typed `expression` becomes a list of node kinds).
+* `C.NodeId (k : C.Kind)`, `C.FieldId (f : C.Field)`, `C.AnyNode` and
+  `C.Edge src f dst`: typed ids. `C.NodeId`'s index is phantom (22e), so it erases to
+  the `U32` row index; the kind is checked at compile time, not at run time.
+* `C.FieldSpec` and `C.fields : C.Kind → List C.FieldSpec`: each field's cardinality
+  (`required`, `multiple`) and its **allowed concrete child kinds**. `C.allows k f c`
+  is the runtime check for a typed traversal. Every accessor is partial in spirit:
+  tree-sitter trees can hold `ERROR`/`MISSING` nodes anywhere (design §4.2's honest
+  limit), so an accessor over a store returns `Option`.
+
+The module only depends on `Word`; it is pure, so the generator itself is testable
+without the shim. `C.Kind.sym` is an ordinal of the *file order* of `node-types.json`,
+not tree-sitter's symbol id: the grammar's generated `parser.c` assigns those, and the
+shim (S1, remaining) reports them so a load-time check can compare the two.
+-/
+
+-- ## The grammar description, as read
+
+/-- One field of a node kind (`node-types.json`'s `"fields"` entry). -/
+structure Scry.NtField where
+  /-- The tree-sitter field name. -/
+  name : String
+  /-- Tree-sitter's `required`. -/
+  required : Bool
+  /-- Tree-sitter's `multiple` (a list of children rather than one). -/
+  multiple : Bool
+  /-- The allowed types, as written: concrete kinds, supertypes, or token literals. -/
+  types : List String
+
+/-- One entry of `node-types.json`. -/
+structure Scry.NtType where
+  /-- The node kind (or supertype) name. -/
+  name : String
+  /-- Tree-sitter's `named` (anonymous tokens are not node kinds). -/
+  named : Bool
+  /-- A supertype: a name fields may use, not a node that appears in a tree. -/
+  super : Bool
+  /-- For a supertype, its direct subtypes. -/
+  subtypes : List String
+  /-- The kind's fields (empty for a supertype). -/
+  fields : List Scry.NtField
+
+/-- The fields of a JSON object, in order. (`JFields` is a mutual inductive, so this
+walk is hand-written; `Json.get` uses it from the other side.) -/
+def Scry.jobjFields : JFields → List (String × Json)
+  | .fnil => .nil
+  | .fcons k v rest => .cons (k, v) (Scry.jobjFields rest)
+
+/-- A boolean field with a default. -/
+def Scry.boolD (j : Json) (key : String) (d : Bool) : Bool :=
+  match Json.get j key with
+  | .some v => match Json.asBool v with
+    | .some b => b
+    | .none => d
+  | .none => d
+
+/-- One `"fields"` entry. -/
+def Scry.readField (p : String × Json) : Scry.NtField :=
+  Scry.NtField.mk p.1 (Scry.boolD p.2 "required" .false)
+    (Scry.boolD p.2 "multiple" .false)
+    (List.map (fun t => Json.getStr t "type") (Json.getList p.2 "types"))
+
+/-- A kind's `"fields"` object (`[]` when it has none). -/
+def Scry.readFields (j : Json) : List Scry.NtField :=
+  match Json.get j "fields" with
+  | .some (.obj fs) => List.map Scry.readField (Scry.jobjFields fs)
+  | _ => .nil
+
+/-- One entry of the top-level array. -/
+def Scry.readType (j : Json) : Scry.NtType :=
+  let subs := List.map (fun t => Json.getStr t "type") (Json.getList j "subtypes");
+  Scry.NtType.mk (Json.getStr j "type") (Scry.boolD j "named" .false)
+    (Bool.not (List.isEmpty subs)) subs (Scry.readFields j)
+
+/-- The entries of a grammar's `node-types.json`, in file order. -/
+def Scry.readNodeTypes (j : Json) : List Scry.NtType :=
+  List.filter (fun t => Bool.and t.named (Bool.not (String.isEmpty t.name)))
+    (List.map Scry.readType (Json.asList j))
+
+-- ## Small list helpers (deterministic order: first appearance, or sorted)
+
+/-- `s` in front of `l` unless `l` already has it. -/
+def Scry.pushNew (s : String) : List String → List String
+  | .nil => .cons s .nil
+  | .cons t rest => match String.eq s t with
+    | .true => .cons t rest
+    | .false => .cons t (Scry.pushNew s rest)
+
+/-- The strings of `l`, first occurrence kept. -/
+def Scry.dedup : List String → List String
+  | .nil => .nil
+  | .cons s rest => Scry.pushNew s (Scry.dedup rest)
+
+/-- Insert `s` into a sorted string list (dropping a duplicate). -/
+def Scry.insertStr (s : String) : List String → List String
+  | .nil => .cons s .nil
+  | .cons t rest => match String.lt s t with
+    | .true => .cons s (.cons t rest)
+    | .false => match String.eq s t with
+      | .true => .cons t rest
+      | .false => .cons t (Scry.insertStr s rest)
+
+/-- Insertion sort (stable, duplicates dropped); the schema's order must not depend on
+`node-types.json`'s object key order. -/
+def Scry.sortStrs : List String → List String
+  | .nil => .nil
+  | .cons s rest => Scry.insertStr s (Scry.sortStrs rest)
+
+/-- `f x` for each `x`, with its index; `i` starts at 0. -/
+def Scry.indexedFrom {A B : Type} (f : Nat → A → B) : Nat → List A → List B
+  | _, .nil => .nil
+  | i, .cons x rest => .cons (f i x) (Scry.indexedFrom f (Nat.succ i) rest)
+/-- `f i x` for each `x`, in order. -/
+def Scry.indexed {A B : Type} (f : Nat → A → B) (xs : List A) : List B :=
+  Scry.indexedFrom f 0 xs
+
+/-- The concatenation of the lists `f x`. -/
+def Scry.concatMap {A : Type} (f : A → List String) : List A → List String
+  | .nil => .nil
+  | .cons x rest => List.append (f x) (Scry.concatMap f rest)
+
+/-- The lines joined with newlines, and a final newline. -/
+def Scry.joinLines (ls : List String) : String :=
+  List.foldr (fun l acc => l ++ "\n" ++ acc) "" ls
+
+/-- Look a supertype's direct subtypes up. -/
+def Scry.subtypesOf (types : List Scry.NtType) (name : String) : List String :=
+  match List.find (fun t => Bool.and t.super (String.eq t.name name)) types with
+  | .some t => t.subtypes
+  | .none => .nil
+
+/-- Expand the allowed types of a field to concrete kinds: supertypes become their
+subtypes, transitively; token literals (which are not kinds) are dropped. `fuel` cuts
+a malformed grammar's cycle. -/
+def Scry.expandTypes (types : List Scry.NtType) (kinds : List String) :
+    Nat → List String → List String
+  | .zero, _ => .nil
+  | .succ fuel, .nil => .nil
+  | .succ fuel, .cons t rest =>
+    match String.elem t kinds with
+    | .true => Scry.pushNew t (Scry.expandTypes types kinds fuel rest)
+    | .false => List.append (Scry.expandTypes types kinds fuel
+        (Scry.subtypesOf types t)) (Scry.expandTypes types kinds fuel rest)
+
+/-- `expandTypes` with enough fuel for any acyclic grammar of this size. -/
+def Scry.expand (types : List Scry.NtType) (kinds : List String)
+    (ts : List String) : List String :=
+  Scry.dedup (Scry.expandTypes types kinds 16 ts)
+
+-- ## Names
+
+/-- Words that cannot be constructor or binder names in Wiz. (`null`, `true` and `false`
+are fine: constructors are namespaced by their inductive.) -/
+def Scry.reserved : List String :=
+  List.append ["end", "fun", "let", "match", "with", "do", "if", "then", "else", "in"]
+  (List.append ["where", "def", "private", "sealed", "partial", "mutual", "inductive",
+                "structure", "class", "instance"]
+  (List.append ["namespace", "open", "import", "attribute", "extern", "axiom", "theorem",
+                "example", "by", "have"]
+  (List.append ["show", "from", "at", "this", "Type", "Prop"] .nil)))
+
+/-- Whether `c` may appear in a Wiz identifier (`A-Z`, `a-z`, `0-9`, `_`). -/
+def Scry.identChar (c : Char) : Bool :=
+  let n := Char.code c;
+  Bool.or (Bool.or (Bool.and (Nat.le 97 n) (Nat.le n 122))
+                   (Bool.and (Nat.le 65 n) (Nat.le n 90)))
+    (Bool.or (Bool.and (Nat.le 48 n) (Nat.le n 57)) (Nat.beq n 95))
+
+/-- The Wiz identifier for a grammar name: reserved words get a trailing `_`, and any
+other character that cannot appear in an identifier becomes `_`. -/
+def Scry.identChars : List Char → List Char
+  | .nil => .nil
+  | .cons c rest => match Scry.identChar c with
+    | .true => .cons c (Scry.identChars rest)
+    | .false => .cons (Char.mk 95) (Scry.identChars rest)
+
+/-- `s` as a Wiz identifier (see `Scry.identChars` and `Scry.reserved`). -/
+def Scry.ident (s : String) : String :=
+  let t := String.ofChars (Scry.identChars (String.chars s));
+  match String.elem s Scry.reserved with
+  | .true => t ++ "_"
+  | .false => t
+
+/-- Field names that would collide with the generated `C.Field` accessors. -/
+def Scry.fieldReserved : List String := ["name"]
+
+/-- The Wiz constructor name for a field: `Scry.ident`, plus a trailing `_` for a name
+that collides with an accessor (`name` → `name_`, whose `C.Field.name` is "name"). -/
+def Scry.fieldIdent (s : String) : String :=
+  let t := Scry.ident s;
+  match String.elem s Scry.fieldReserved with
+  | .true => t ++ "_"
+  | .false => t
+
+/-- `x,` on every line but the last, for a list literal. -/
+def Scry.commaLines : List String → List String
+  | .nil => .nil
+  | .cons x .nil => .cons x .nil
+  | .cons x rest => .cons (x ++ ",") (Scry.commaLines rest)
+
+/-- A boolean as Wiz source. -/
+def Scry.boolSrc (b : Bool) : String := match b with
+  | .true => ".true"
+  | .false => ".false"
+
+/-- Up to `fuel` chunks of at most 12 source items, appended (Wiz's elaborator slows
+down sharply on list literals longer than about 25 elements, so generated field lists
+are chunked). -/
+def Scry.listSrcGo (fuel : Nat) (xs : List String) : String := match fuel with
+  | .zero => ".nil"
+  | .succ k => match xs with
+    | .nil => ".nil"
+    | _ =>
+      let first := List.take 12 xs;
+      let rest := List.drop 12 xs;
+      match rest with
+      | .nil => "[" ++ String.intercalate ", " first ++ "]"
+      | _ => "(List.append [" ++ String.intercalate ", " first ++ "] "
+          ++ Scry.listSrcGo k rest ++ ")"
+
+/-- A list of `.kind` expressions as Wiz source (`.nil` when empty, so no bare `[]`;
+at most 48 items, which is more than any `node-types.json` field allows). -/
+def Scry.listSrc (xs : List String) : String := Scry.listSrcGo 4 xs
+
+-- ## Rendering
+
+/-- `C.Kind`'s constructors. -/
+def Scry.renderKindCtors (kinds : List String) : List String :=
+  List.map (fun k => "  | " ++ Scry.ident k) kinds
+
+/-- `C.Kind.name`'s equations. -/
+def Scry.renderKindNames (kinds : List String) : List String :=
+  List.map (fun k => "  | ." ++ Scry.ident k ++ " => \"" ++ k ++ "\"") kinds
+
+/-- `C.Kind.sym`'s equations. -/
+def Scry.renderKindSyms (kinds : List String) : List String :=
+  Scry.indexed (fun i k => "  | ." ++ Scry.ident k ++ " => U16.ofNat " ++ Nat.repr i) kinds
+
+/-- `C.Kind.ofIdx`'s equations, as `(index, constructor)`. -/
+def Scry.renderKindOfIdx (kinds : List String) : List String :=
+  Scry.indexed (fun i k => "  | " ++ Nat.repr i ++ " => .some ." ++ Scry.ident k) kinds
+
+/-- `C.Kind.ofName`'s equations. -/
+def Scry.renderKindOfName (kinds : List String) : List String :=
+  List.map (fun k => "  | \"" ++ k ++ "\" => .some ." ++ Scry.ident k) kinds
+
+/-- `C.Field`'s constructors. -/
+def Scry.renderFieldCtors (fields : List String) : List String :=
+  List.map (fun f => "  | " ++ Scry.fieldIdent f) fields
+
+/-- `C.Field.name`'s equations. -/
+def Scry.renderFieldNames (fields : List String) : List String :=
+  List.map (fun f => "  | ." ++ Scry.fieldIdent f ++ " => \"" ++ f ++ "\"") fields
+
+/-- `C.Field.idx`'s equations. -/
+def Scry.renderFieldIdxs (fields : List String) : List String :=
+  Scry.indexed (fun i f => "  | ." ++ Scry.fieldIdent f ++ " => U32.ofNat " ++ Nat.repr i) fields
+
+/-- `C.Field.ofName`'s equations. -/
+def Scry.renderIfChainGo (mk : String → String) : List String → List String
+  | .nil => .nil
+  | .cons n rest => List.append
+      ["if String.eq s \"" ++ n ++ "\" then .some (" ++ mk n ++ ")"]
+      (List.map (fun l => "else if String.eq s \"" ++ l ++ "\" then .some (" ++ mk l ++ ")")
+        rest)
+
+/-- `if String.eq s "a" then .some (mk "a")` … `else .none`: string patterns are not
+available in Wiz, so `ofName` is an if chain. -/
+def Scry.renderIfChain (mk : String → String) (names : List String) : List String :=
+  List.append (Scry.renderIfChainGo mk names) ["else .none"]
+
+/-- One `C.FieldSpec`: `.field`, `required`, `multiple`, allowed kinds. -/
+def Scry.renderFieldSpec (types : List Scry.NtType) (kinds : List String)
+    (f : Scry.NtField) : String :=
+  let ks := Scry.expand types kinds f.types;
+  "      C.FieldSpec.mk C.Field." ++ Scry.fieldIdent f.name ++ " "
+    ++ Scry.boolSrc f.required ++ " " ++ Scry.boolSrc f.multiple ++ " "
+    ++ Scry.listSrc (List.map (fun k => "C.Kind." ++ Scry.ident k) ks)
+
+/-- A kind's `C.fields` equation. -/
+def Scry.renderKindFields (types : List Scry.NtType) (kinds : List String)
+    (t : Scry.NtType) : List String :=
+  match t.fields with
+  | .nil => ["  | ." ++ Scry.ident t.name ++ " => .nil"]
+  | _ => List.append
+      [("  | ." ++ Scry.ident t.name ++ " => [")]
+      (List.append
+        (Scry.commaLines (List.map (Scry.renderFieldSpec types kinds) t.fields))
+        ["    ]"])
+
+/-- A supertype's `C.Supertype.subtypes` equation. -/
+def Scry.renderSupertypeSubs (types : List Scry.NtType) (kinds : List String)
+    (t : Scry.NtType) : String :=
+  let ks := Scry.expand types kinds t.subtypes;
+  "  | ." ++ Scry.ident t.name ++ " => "
+    ++ Scry.listSrc (List.map (fun k => "C.Kind." ++ Scry.ident k) ks)
+
+/-- The whole generated module. -/
+def Scry.generate (j : Json) : Except String String :=
+  let types := Scry.readNodeTypes j;
+  let concrete := List.filter (fun t => Bool.not t.super) types;
+  let supers := List.filter (fun t => t.super) types;
+  match concrete with
+  | .nil => .error "node-types.json: no named concrete node kinds"
+  | _ =>
+    let kinds := List.map (fun t => t.name) concrete;
+    let fieldNames := Scry.sortStrs
+      (Scry.dedup (Scry.concatMap (fun t => List.map (fun f => f.name) t.fields) concrete));
+    let superNames := List.map (fun t => t.name) supers;
+    let docA := ["/-!", "# C.Schema: the generated tree-sitter-C schema", "",
+      "Generated by `tools/SchemaMain.wiz` from `grammars/tree-sitter-c/node-types.json`",
+      "(a real excerpt of tree-sitter-c, 132 named entries). **Do not edit**: rerun",
+      "`grail run scry-schema -- grammars/tree-sitter-c/node-types.json`, or",
+      "`grail build schema`. `tests/codegen.wiz` fails when this file is stale.", "",
+      "`C.Kind` has one constructor per concrete named node kind; `C.Kind.sym` is the",
+      "generated ordinal (`U16`) and `C.Kind.idx` the same in `U32`, so a kind can index",
+      "the native store's column. The tree-sitter shim checks `sym` against"];
+    let docB := ["`ts_language_symbol_name` when it lands. `C.fields` gives each field's",
+      "cardinality and allowed **concrete** kinds (supertypes expanded); `C.allows` is",
+      "the runtime check. Typed ids (`C.NodeId k`, `C.FieldId f`, `C.Edge`) carry the",
+      "kind/field in the type only (phantom, 22e). Every tree may contain ERROR/MISSING",
+      "nodes, so accessors over a store are `Option` (design §4.2).", "-/", "",
+      "import Word", "import Text", "", "inductive C.Kind where"];
+    let kindLines := Scry.renderKindCtors kinds;
+    let kindRest := List.append
+      ["", "/-- The node kind's grammar name (`call_expression`, …). -/",
+       "def C.Kind.name : C.Kind → String"]
+      (List.append (Scry.renderKindNames kinds)
+      (List.append
+        ["", "/-- The generated symbol ordinal in 16 bits (checked against tree-sitter's",
+         "symbol id when the shim lands). -/", "def C.Kind.sym : C.Kind → U16"]
+      (List.append (Scry.renderKindSyms kinds)
+      (List.append
+        ["", "/-- The generated symbol ordinal in 32 bits, to index a native kind column. -/",
+         "def C.Kind.idx (k : C.Kind) : U32 := U32.ofNat (UIntN.toNat (C.Kind.sym k))", "",
+         "/-- The kind with generated ordinal `i`, if any. -/",
+         "def C.Kind.ofIdx (i : Nat) : Option C.Kind := match i with"]
+      (List.append (Scry.renderKindOfIdx kinds)
+      (List.append
+        ["  | _ => .none", "", "/-- The kind with generated ordinal `i`, if any. -/",
+         "def C.Kind.ofSym (i : U16) : Option C.Kind := C.Kind.ofIdx (UIntN.toNat i)", "",
+         "/-- The kind with generated ordinal `i`, if any. -/",
+         "def C.Kind.ofU32 (i : U32) : Option C.Kind := C.Kind.ofIdx (UIntN.toNat i)", "",
+         "/-- The kind named `s`, if the grammar has it. -/",
+         "def C.Kind.ofName (s : String) : Option C.Kind :="]
+      (List.append (Scry.renderIfChain (fun n => "C.Kind." ++ Scry.ident n) kinds)
+      (List.append
+        ["", "",
+         "/-- Kind equality, by generated ordinal. -/",
+         "def C.Kind.beq (a b : C.Kind) : Bool :=",
+         "  Nat.beq (UIntN.toNat (C.Kind.sym a)) (UIntN.toNat (C.Kind.sym b))", "",
+         "/-- The number of generated node kinds. -/",
+         "def C.kindCount : Nat := " ++ Nat.repr (List.length kinds)]
+        .nil))))))));
+    let fieldLines := List.append
+      ["", "inductive C.Field where"]
+      (List.append (Scry.renderFieldCtors fieldNames)
+      (List.append
+        ["", "/-- The field's tree-sitter name (`declarator`, `body`, …). -/",
+         "def C.Field.name : C.Field → String"]
+      (List.append (Scry.renderFieldNames fieldNames)
+      (List.append
+        ["", "/-- The generated field ordinal (`U32`). -/",
+         "def C.Field.idx : C.Field → U32"]
+      (List.append (Scry.renderFieldIdxs fieldNames)
+      (List.append
+        ["", "/-- The field named `s`, if the grammar has it. -/",
+         "def C.Field.ofName (s : String) : Option C.Field :="]
+      (List.append (Scry.renderIfChain (fun n => "C.Field." ++ Scry.fieldIdent n) fieldNames)
+      (List.append
+        ["", "", "/-- The field with generated ordinal `i`, if any. -/",
+         "def C.Field.ofIdx (i : Nat) : Option C.Field := match i with"]
+      (List.append (Scry.indexed (fun i f => "  | " ++ Nat.repr i ++ " => .some ."
+          ++ Scry.fieldIdent f) fieldNames)
+      (List.append
+        ["  | _ => .none", "", "/-- The field with generated ordinal `i`, if any. -/",
+         "def C.Field.ofU32 (i : U32) : Option C.Field := C.Field.ofIdx (UIntN.toNat i)", "",
+         "/-- Field equality, by generated ordinal. -/",
+         "def C.Field.beq (a b : C.Field) : Bool :=",
+         "  Nat.beq (UIntN.toNat (C.Field.idx a)) (UIntN.toNat (C.Field.idx b))", "",
+         "/-- The number of generated fields. -/",
+         "def C.fieldCount : Nat := " ++ Nat.repr (List.length fieldNames)]
+        .nil))))))))));
+    let superLines := List.append
+      ["", "inductive C.Supertype where"]
+      (List.append (Scry.renderKindCtors superNames)
+      (List.append
+        ["", "/-- The supertype's grammar name. -/",
+         "def C.Supertype.name : C.Supertype → String"]
+      (List.append (Scry.renderKindNames superNames)
+      (List.append
+        ["", "/-- Its concrete subtypes (transitively; supertypes are not node kinds). -/",
+         "def C.Supertype.subtypes : C.Supertype → List C.Kind"]
+      (List.append (List.map (Scry.renderSupertypeSubs types kinds) supers)
+      (List.append
+        ["", "/-- The supertype named `s`, if the grammar has it. -/",
+         "def C.Supertype.ofName (s : String) : Option C.Supertype :="]
+      (List.append (Scry.renderIfChain (fun n => "C.Supertype." ++ Scry.ident n) superNames)
+      (List.append
+        ["", "", "/-- The supertype with generated ordinal `i`, if any. -/",
+         "def C.Supertype.ofIdx (i : Nat) : Option C.Supertype := match i with"]
+      (List.append (Scry.indexed (fun i t => "  | " ++ Nat.repr i ++ " => .some ."
+          ++ Scry.ident t.name) supers)
+        ["  | _ => .none", "", "/-- The number of generated supertypes. -/",
+         "def C.supertypeCount : Nat := " ++ Nat.repr (List.length supers)])))))))));
+    let typedLines :=
+      ["", "/-- A typed node id: the row index, with the kind in the type only (22e). -/",
+       "structure C.NodeId (k : C.Kind) where", "  n : U32", "",
+       "/-- A typed field id: the field label's ordinal, with the field in the type only. -/",
+       "structure C.FieldId (f : C.Field) where", "  n : U32", "",
+       "/-- A node whose kind is known only at run time (a Σ of kind and row). -/",
+       "structure C.AnyNode where", "  kind : C.Kind", "  id : U32", "",
+       "/-- A typed edge: source kind, field label, target kind. -/",
+       "structure C.Edge (src : C.Kind) (f : C.Field) (dst : C.Kind) where", "  id : U32", "",
+       "/-- One field of one kind: its label, cardinality and allowed concrete kinds. -/",
+       "structure C.FieldSpec where", "  field : C.Field", "  required : Bool",
+       "  multiple : Bool", "  kinds : List C.Kind"];
+    let specLines := List.append
+      ["", "/-- Every field of a kind, in `node-types.json` order. `ERROR`/`MISSING` may",
+       "appear where a spec does not allow: check with `C.allows`. -/",
+       "def C.fields : C.Kind → List C.FieldSpec"]
+      (Scry.concatMap (Scry.renderKindFields types kinds) concrete);
+    let tailLines :=
+      ["", "/-- The first spec of `f` in `specs`, if any. -/",
+       "def C.findSpec (f : C.Field) : List C.FieldSpec → Option C.FieldSpec",
+       "  | .nil => .none",
+       "  | .cons s rest => match C.Field.beq s.field f with",
+       "    | .true => .some s",
+       "    | .false => C.findSpec f rest", "",
+       "/-- The spec of field `f` on kind `k`, if the grammar has one. -/",
+       "def C.fieldSpec (k : C.Kind) (f : C.Field) : Option C.FieldSpec :=",
+       "  C.findSpec f (C.fields k)", "",
+       "/-- Whether kind `k` allows field `f` to hold a child of kind `c`. -/",
+       "def C.allows (k : C.Kind) (f : C.Field) (c : C.Kind) : Bool := match C.fieldSpec k f with",
+       "  | .none => .false",
+       "  | .some s => List.any (fun x => C.Kind.beq x c) s.kinds"];
+    let chunks := [docA, docB, kindLines, kindRest, fieldLines, superLines, typedLines,
+      specLines, tailLines];
+    .ok (Scry.joinLines (List.concat chunks))

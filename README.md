@@ -21,13 +21,30 @@ def id {0 A : Type} (1 x : A) : A := x
   descriptions with `μ`/`ν`; dependent pattern matching, mutual and indexed families.
 * **Sized types** for termination and productivity, and **codata** (`ν`, copatterns).
 * **Self-hosted**: the kernel, frontend and compiler in `selfhost/*.wiz` check and
-  compile themselves, and the bootstrap reaches a fixpoint (stage-1 C = stage-2 C).
+  compile themselves, and the bootstrap reaches a fixpoint (stages 1-3 emit the same C).
 * **Native code**: erasure to an IR with Perceus reference counting and reuse, C and
   LLVM backends, a C FFI with header import, and machine integers and bit vectors.
 * **Tooling**: a language server with an infoview (terminal and browser clients),
   a content-addressed elaboration cache, and **grail**, a build tool and test runner
   configured in Wiz.
 * **Nix**: `nix develop` gives the whole toolchain; prebuilt binaries are on Cachix.
+
+## Component names
+
+The parts of the toolchain have names from the wizard theme; the binaries stay `wiz` and
+`grail`.
+
+| Name | Component |
+|---|---|
+| **familiar** | the language server and editor companion (`wiz lsp`, `--infoview`, the Neovim plugin) |
+| **tome** | the documentation generator (`wiz doc`, the CI `docs` job) |
+| **oracle** | the SAT/SMT front end (`sat_decide`, the trusted `smt` tactic) |
+| **cauldron** | the CI process (`scripts/ci.py`, test shards, measurement windows) |
+| **aether** | the performance dashboards (perf runs and CI timings) |
+
+Three names are reserved for parts in review: **glyph** for the formatter (`wiz fmt`),
+**alembic** for scry's e-graph, and **sigil** for scry's derivation-certificate checker.
+**grimoire**, a package registry, stays deferred: no part of it is in this tree.
 
 ## Quick start
 

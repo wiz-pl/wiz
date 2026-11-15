@@ -137,6 +137,14 @@ on it are skipped; the others still run. Each job's output is buffered and print
 graph's order, so `-j 1` and `-j 8` print the same report, and a second build still runs
 no jobs.
 
+`--region-cache` (11c) is part of the toolchain record (`Toolchain.regionCache`, or the
+`region-cache` setting of `grail.wiz`), so `grail config` shows it and every job gets it
+through `Toolchain.toFlags`. A job then serves its imported modules' cached effects from
+the `.wizr` regions in the same cache layers as the `.wizc` entries: the write cache is
+searched first, then the `--cache-ro` caches (which are never written), and a missing,
+truncated or mistagged region falls back to the text entries. Since job keys are unchanged,
+a warm region build and a text build produce the same outputs.
+
 ## 23h: git dependencies and a lock file
 
 `Package.dep NAME URL REV` depends on the package at a git URL (a path, `file://`,
@@ -558,6 +566,30 @@ gossip, key rotation needs a re-lock, and a mirror serving an old snapshot is on
 when the lock records a newer sequence. SHA-256 still gives integrity, not authorship.
 The snapshot is additive: an index without one is read exactly as before.
 
+**What is verified.** Short list, so "checked" is not read as "safe":
+
+* **Every archive** is SHA-256-checked against the lock *before* it is unpacked, and
+  again whenever the cached file is used; a corrupt cache entry is re-downloaded.
+  `grail vendor` files are looked up by that same hash.
+* **Every unpacked tree** is checked against the lock's `(tree SHA256)` when the lock
+  has one, in the shared store before the stamp/rename; a hand-edited file in
+  `.grail/packages/NAME` is refused.
+* **The lock's shape** is checked before a build: package versions satisfy the
+  requirements, the transitive closure is complete, `sha256`/`tree`/`commands` are
+  64 lowercase hex digits, and `--locked` refuses a stale lock or a recorded
+  machine-local override.
+* **A signed index** is verified with `ssh-keygen -Y verify` against an
+  `allowed_signers` file passed from outside the index (or the key a `grail.lock`
+  already pinned); the snapshot must cover every entry of the index with the same
+  SHA-256, `(seq)` must not go backwards, the key must not change, the same sequence
+  must not be rewritten, and `(expires)` must be in the future.
+* **Not verified:** git `dep` entries keep a 64-bit content hash (accident detection,
+  not cryptographic); there are no signed git tags, no transparency log, no gossip, no
+  download size cap, and no build sandbox — `grail build` runs the package author's
+  Wiz/C code. Expiry and sequence are checked at `update`/`index verify`, not on every
+  build. A first use needs an external `--allowed-signers` policy; an index without a
+  snapshot is accepted unless `--require-signature` or a lock pinned one.
+
 **Cache layout.** `<cache>/grail/downloads/<sha256>` holds the archives
 (content-addressed, re-verified on every use); `<cache>/grail/packages/<sha256>/` the
 unpacked trees (23n), with `.grail/packages/NAME` linked to one; `<cache>/grail/index`
@@ -623,3 +655,35 @@ local file. Tests: group `grail-vendor` (five cases: content-addressed vendoring
 stable lock, an offline `--locked` fetch from the vendor directory through the shared
 store, one download and one unpack for two packages with the same archive, the cache
 commands with a corrupt entry, and the `vendor --locked`/`--offline` failures).
+
+## 23o: `grail new`
+
+`grail new NAME [--dir DIR]` writes the smallest package that builds, runs and tests:
+
+```
+grail.wiz        Package.new "NAME"
+                   |> Package.lib "NAME-lib" "src"
+                   |> Package.exe "NAME" "src/Main.wiz"
+                   |> Package.tests "tests" "tests"
+src/Main.wiz     import Std; def main : IO Unit := IO.println "hello from NAME"
+tests/hello.wiz  a `-- test: run` golden test, with hello.expected
+README.md        how to build, run and test it
+.gitignore       .grail/
+```
+
+It goes into `DIR` — `./NAME` by default, `DIR/NAME` with `-C DIR` — and an existing
+non-empty directory is refused, so `new` never overwrites work. The name must be a
+letter followed by letters, digits, `_` or `-` (at most 64 characters); it is the
+package's name, its targets' names and the greeting. Inside the new directory
+`grail build`, `grail run NAME` and `grail test` work as they do here; the second build
+runs nothing.
+
+`grail new` found a link-key bug: a link job's key did not include the name of the
+binary it makes, so a test whose program compiles to the same C as an `exe` (the
+generated test and `src/Main.wiz` print the same line) was "up to date" from the exe's
+link directory and the test ran a binary that was not there. The key now includes the
+output's name (and whether it is installed in `.grail/bin`), so two programs with the
+same object and link files no longer share a directory.
+
+Tests: `grail-commands`, "new: the generated package builds, runs and tests; a
+non-empty directory is refused" (also covers the refusal and the name check).

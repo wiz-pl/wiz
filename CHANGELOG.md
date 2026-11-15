@@ -50,11 +50,29 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   rollback, a same-sequence rewrite and an expired key. There is no transparency log;
   the TUF/Sigsum staging, key rotation and the remaining gaps are in
   `docs/stages/23-grail/index-repository.md`.
+* `Float64.ofNat` rounds correctly for every `Nat`: it used to abort above `2^64`
+  ("a number is too big for a C integer"). The value-level semantics matrix
+  (`docs/semantics-matrix.md`, group `=semantics`) pins the numeric and textual
+  boundaries across `#eval`, `#run`, Lean → C and Wiz → C (22c).
+* Shifts agree for every `Nat` count. `UIntN.shiftLeft` caps the exponent at the
+  width (`Word.min k w`), so `k >= w` gives `0` without the model trying to build
+  `2^k` (which panicked at `k >= 2^32`); `a >> k` is `0` once `k` passes the bit
+  length of `a`. The matrix now pins `0, 1, w-1, w, w+1, 2^32-1, 2^32, 2^64-1`,
+  and the rotate composition for `k >= w` (22a, 22c).
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to
   `.gitignore`) overrides it with a spec or a path to a toolchain directory or built
   checkout; the shims, `which` and `show` honour it (26a, #281).
+* A WebAssembly target (8f): `wiz build FILE -o OUT --target wasm` emits a binary module
+  directly from the IR, and `wiz run FILE --target wasm` runs it under Node with
+  `web/wasm-host.mjs` (big integers as `BigInt`; values in linear memory). IO-less
+  `main`s over `Nat`/`Int`, constructors, closures, join points, codata and `Array` work;
+  C and LLVM are unchanged, and `--llvm`/`--wasm` remain aliases. The subset boundary is
+  checked at compile time and every module is parsed and type-checked before it is
+  written (`Wiz/Compiler/WasmValidate.lean`); golden tests compare the module's result
+  with the interpreter's. Limits and the 25-case `wasm` test group are in
+  `docs/stages/08-backend/wasm.md`.
 
 ## [0.1.0] - unreleased (draft)
 

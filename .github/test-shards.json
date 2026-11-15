@@ -1,5 +1,5 @@
 [
-  {"name": "selfhost", "split": 4, "heavy": true,
+  {"name": "selfhost", "split": 6, "heavy": true,
    "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz"],
    "select": [
     "=prop-kernels",
@@ -9,6 +9,9 @@
   ]},
   {"name": "hdl-verified", "heavy": true, "select": [
     "=hdl-verified"
+  ]},
+  {"name": "hdl-uart-temporal", "heavy": true, "select": [
+    "=hdl-uart-temporal"
   ]},
   {"name": "grail-selfhost", "heavy": true,
    "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz", "lib/Grail.wiz"],
@@ -26,12 +29,18 @@
     "llvm",
     "reuse",
     "serial",
-    "sys"
+    "sys",
+    "wasm"
   ]},
-  {"name": "library", "split": 5, "jobs": 4, "default": true, "select": [
+  {"name": "library", "split": 6, "jobs": 4, "default": true, "select": [
+    "=bus-crc",
+    "=bus-law",
+    "=bus-protocol",
     "builtins",
+    "calc",
     "classes",
     "deriving",
+    "=display",
     "=doc",
     "=feral",
     "=grail",
@@ -43,6 +52,7 @@
     "=grail-vendor",
     "=hdl",
     "infoview",
+    "=json",
     "language",
     "lsp",
     "macros",
@@ -51,12 +61,21 @@
     "=natives",
     "=nvim",
     "optic",
+    "persistent",
     "phantom",
     "regions",
+    "=scry-wil",
+    "=scry-ai",
+    "=scry-taint",
     "=linear-case",
     "repr",
+    "result-q",
+    "=rune",
     "seplogic",
     "=sat",
+    "=scry-datalog",
+    "=scry-cert",
+    "=scry-egraph",
     "=smt",
     "std",
     "tactics",
@@ -79,6 +98,11 @@
   {"name": "audit", "select": [
     "=audit"
   ]},
+  {"name": "semantics", "heavy": true,
+   "inputs": ["lib/*", "selfhost/*", "Tests/Semantics/*", "scripts/gen-semantics-matrix.py"],
+   "select": [
+    "=semantics"
+  ]},
   {"name": "core", "jobs": 4,
    "inputs": ["selfhost/Kernel.wiz", "examples/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz",
               "lib/Eff.wiz", "lib/BitVec.wiz", "lib/Logic.wiz", "lib/Hdl/*"],
@@ -90,6 +114,7 @@
     "desceq",
     "elab",
     "eval",
+    "format",
     "inductive",
     "lexer",
     "lift",
