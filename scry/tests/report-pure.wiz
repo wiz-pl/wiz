@@ -1,0 +1,61 @@
+-- test: run
+import Sys
+import Scry.Report
+-- `Scry.Report`: the pure HTML renderer. Escaping and the page shape are tested here
+-- without a C front end, so the XSS case runs even when the analysis modules are busy.
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+def step (kind : String) (line : Nat) : Scry.ReportStep :=
+  Scry.ReportStep.mk kind "main" line 3
+
+def sourceFinding : Scry.ReportFinding :=
+  Scry.ReportFinding.mk "f_0123456789abcdef" "f_0123456789abcdef" "xss.c"
+    "command-injection" "error" "CWE-78" "T1"
+    "Attacker-controlled data reaches a command interpreter" "main" "system" 0
+    3 3 .true
+    [step "source" 2, step "sink" 3]
+    .true "" 0
+
+def sourceFile : Scry.ReportFile :=
+  Scry.ReportFile.mk "xss.c" "file_0123456789abcdef"
+    "int main(void) {\n  char *s = \"<script>alert('x&y')</script></style>\";\n  system(s);\n}\n"
+    [sourceFinding] .nil .nil .nil .nil
+
+def page : String :=
+  Scry.renderReport (Scry.ReportMeta.mk "scry test" "") [sourceFile]
+
+def main : IO Unit := EIO.toIO (do
+  -- The escaping function itself.
+  check "escape: script tag" (String.eq (Scry.htmlEscape "<script>")
+    "&lt;script&gt;");
+  check "escape: amp and quotes" (String.eq (Scry.htmlEscape "a&b\"c'd")
+    "a&amp;b&quot;c&#39;d");
+  check "escape: closing style" (String.eq (Scry.htmlEscape "</style>")
+    "&lt;/style&gt;");
+
+  -- The source reaches the page as text: no raw tag, the escaped form present.
+  check "page: no raw script" (Bool.not (String.contains page "<script"));
+  check "page: escaped script" (String.contains page "&lt;script&gt;");
+  check "page: escaped closing style" (String.contains page "&lt;/style&gt;");
+  check "page: escaped ampersand" (String.contains page "x&amp;y");
+  check "page: escaped quote" (String.contains page "&quot;&lt;script&gt;");
+
+  -- The sink is highlighted and the path step is marked.
+  check "page: sink row" (String.contains page "class=\"sink\"");
+  check "page: source step" (String.contains page "step-tag\">1 source");
+  check "page: sink step" (String.contains page "step-tag\">2 sink");
+  check "page: chain" (String.contains page "source &rarr; sink");
+  check "page: CWE" (String.contains page "CWE-78 (T1)");
+
+  -- No timestamp or remote resource; two renders agree.
+  check "page: no remote resource"
+    (Bool.and (Bool.not (String.contains page "http://"))
+      (Bool.not (String.contains page "https://")));
+  check "page: deterministic"
+    (String.eq page (Scry.renderReport (Scry.ReportMeta.mk "scry test" "") [sourceFile]))
+)
