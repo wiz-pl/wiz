@@ -1,5 +1,9 @@
 # Libraries
 
+The generated [API index](https://wiz-pl.github.io/wiz/api.html) lists every library
+module and declaration, with signatures and doc summaries, and searches names, doc
+comments and signatures.
+
 ## H0c: vectors and bit vectors
 
 `lib/Vec.wiz` (`import Vec`): `Fin n` (a `Nat` with an erased proof `Nat.lt val n = .true`;
