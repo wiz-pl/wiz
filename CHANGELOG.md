@@ -17,6 +17,13 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   plain baseline runs in the build job. It found (and this fixes) a NULL pointer passed
   to `memcpy` for empty `Bytes`, GMP limb leaks when a big number was moved into its
   object, and per-thread result buffers that were never freed.
+* runtime: `scripts/test-fuzz.sh` adds four libFuzzer harnesses for the C runtime
+  (constructors and fields, reference counting, strings/Bytes/Array/StringMap, words and
+  numbers, and finalizers) under AddressSanitizer and UndefinedBehaviorSanitizer. They
+  start from the `runtime/corpus/` programs and a generated operation seed, check their
+  own leaks, and deduplicate and minimise a crash; the opt-in `fuzz` CI job runs one
+  harness per matrix entry and skips one this runner cannot use. See
+  `docs/building.md`, "Fuzzing", and `runtime/fuzz/README.md`.
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to

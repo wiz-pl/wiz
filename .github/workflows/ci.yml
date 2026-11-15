@@ -27,6 +27,10 @@ on:
         description: Also run the C runtime and its corpus under ASAN, UBSAN and TSAN (opt-in)
         type: boolean
         default: false
+      fuzz:
+        description: Also run the C runtime's libFuzzer harnesses under ASAN and UBSAN (opt-in)
+        type: boolean
+        default: false
 
 # A newer push supersedes an older run of the same ref (saves runners): on a pull
 # request, and on master too, where merges come in quick succession and every run
@@ -354,6 +358,48 @@ jobs:
             *) exit "$rc" ;;
           esac
 
+  # (opt-in) The C runtime under libFuzzer. Four harnesses (constructors/fields,
+  # reference counting, strings and containers, words and numbers, finalizers) are
+  # compiled with ASAN and UBSAN and run from a generated seed corpus; a crash is
+  # deduplicated and minimised by scripts/test-fuzz.sh. The default is a bounded smoke
+  # run (--runs), not an open-ended fuzz campaign. A runner without Clang/libFuzzer or
+  # a working sanitizer is a `skip:` line and exit 3, which this step reports as a
+  # warning, not a failure. It is not part of `CI result` unless the manual run ticked
+  # `fuzz`, so it costs nothing on pushes and pull requests.
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    needs: [changes]
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.fuzz == 'true' &&
+      needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [values, data, words, finalizers]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: The runtime under libFuzzer (${{ matrix.target }})
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set +e
+          scripts/test-fuzz.sh --target "$TARGET" --runs 20000
+          rc=$?
+          set -e
+          case "$rc" in
+            0) echo "### Fuzz: $TARGET passed" >> "$GITHUB_STEP_SUMMARY" ;;
+            3) echo "::warning title=fuzz ($TARGET)::Clang/libFuzzer or a sanitizer is not available on this runner; skipped"
+               echo "### Fuzz: $TARGET skipped (not available on this runner)" >> "$GITHUB_STEP_SUMMARY" ;;
+            *) exit "$rc" ;;
+          esac
+
   # The Nix package (flake.nix: wiz and grail, wrapped with the toolchain), pushed to
   # Cachix on master (and on a manual run), so that `nix run github:wiz-pl/wiz` downloads
   # it. It is a pure Nix build without Lake's artifact cache, so it rebuilds every module
@@ -475,7 +521,7 @@ jobs:
   # One check for branch protection, and the whole suite's summary.
   result:
     name: CI result
-    needs: [changes, docs_style, build, test, trust-ledger, sanitizers, package]
+    needs: [changes, docs_style, build, test, trust-ledger, sanitizers, fuzz, package]
     if: always() && github.event_name != 'schedule'
     runs-on: ubuntu-latest
     permissions:
@@ -562,6 +608,7 @@ jobs:
           echo "docs style: ${{ needs.docs_style.result }}"
           echo "trust ledger: ${{ needs['trust-ledger'].result }}"
           echo "sanitizers: ${{ needs.sanitizers.result }}"
+          echo "fuzz: ${{ needs.fuzz.result }}"
           echo "build: ${{ needs.build.result }}, test: ${{ needs.test.result }}, package: ${{ needs.package.result }}"
           # the path filter must have run; a job it skipped is not a failure, but outside
           # pull requests (and whenever the filter wants them) every job must succeed
@@ -582,6 +629,9 @@ jobs:
           # the sanitizer jobs run only on an opt-in manual run (and only for code)
           want_sanitizers=$([ "${{ github.event_name }}" = workflow_dispatch ] && [ "${{ github.event.inputs.sanitizers }}" = true ] && [ "$code" = true ] && echo true || echo false)
           check sanitizers "${{ needs.sanitizers.result }}" "$want_sanitizers"
+          # the fuzz jobs are opt-in in the same way
+          want_fuzz=$([ "${{ github.event_name }}" = workflow_dispatch ] && [ "${{ github.event.inputs.fuzz }}" = true ] && [ "$code" = true ] && echo true || echo false)
+          check fuzz "${{ needs.fuzz.result }}" "$want_fuzz"
           check package "${{ needs.package.result }}" "$want_package"
 
   # Stage-1 C of the toolchain = stage-2 C (scripts/fixpoint.sh). Scheduled runs use the
