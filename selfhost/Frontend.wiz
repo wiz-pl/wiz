@@ -6363,7 +6363,7 @@ def deriverOf : List String → Nat
         | .false => 0
     | _ => 0
 -- a type's leading Πs (its parameters, and an index)
-partial def piArity : Tm → Nat
+def piArity : Tm → Nat
   | .pi _ _ _ _ b => Nat.succ (piArity b)
   | _ => 0
 -- the parameters and instance arguments of a derived instance, as binders plus their
