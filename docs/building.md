@@ -194,6 +194,86 @@ Lean's `.olean`/`.ilean`/`.trace` files store absolute source paths; the Lean to
 report whichever error finishes first (artifacts are unaffected). The compiler binary,
 the generated C and the linked programs are compared byte for byte by the script.
 
+## Memory budget
+
+Time is not the only way a build dies. A run that peaks at 5 GiB is killed by a
+4 GiB memory cgroup whatever its wall time was, and the self-hosted checker once
+retained 10.7 GB after a `mutual`/`partial` inline-cache change (the `inlineTm` fix
+brought its self-check down to 413 MiB). `scripts/mem-bench.py` measures the peak
+resident set of a fixed corpus and gates it two ways:
+
+```sh
+python3 scripts/mem-bench.py                 # run, write bench/mem-bench.json
+python3 scripts/mem-bench.py --check         # exit 1 on a regression or a cap
+python3 scripts/mem-bench.py --update        # re-record bench/mem-baseline.json
+python3 scripts/mem-bench.py --self-test     # the thresholds on synthetic series
+python3 scripts/mem-bench.py --from-json bench/mem-bench.json --check  # re-check a saved run
+```
+
+| invocation | what it measures | cap |
+|---|---|---:|
+| `check-prelude` | `wiz check --no-cache lib/Prelude.wiz` | 1 GiB |
+| `check-std` | `wiz check --no-cache lib/Std.wiz` | 1 GiB |
+| `check-text` | `wiz check --no-cache lib/Text.wiz` | 1 GiB |
+| `check-json` | `wiz check --no-cache lib/Json.wiz` | 1 GiB |
+| `check-example-hdl` | `wiz check --no-cache examples/hdl-temporal.wiz` (a large temporal-properties example) | 2 GiB |
+| `build-stdlib-bench` | `wiz build --no-cache bench/stdlib-bench.wiz` (elaborate, lower, C, `cc`) | 2 GiB |
+| `selfhost-checker` | the self-hosted checker checking the whole frontend | 1 GiB |
+
+The checks are cold (`--no-cache`): a warm content-addressed cache hides the
+elaboration a CI runner does on every build. Peak RSS is sampled every 20 ms as the
+sum of the process tree's RSS, plus the root's `VmHWM` on every sample, because a
+build fans out into `cc`, `as` and `ld`; `ru_maxrss` of the root is the floor for a
+process that starts and exits inside one interval. A sampling peak can miss a spike
+shorter than the interval: treat a number as ±5 % (the same caveat as the fixpoint's
+timings). The self-hosted checker is built once as preparation (`wiz build` of the
+concatenated `selfhost/*.wiz`, kept under `bench/.build/mem/`); its *run* is the
+corpus entry. `--phases` adds the only phase profiler that exists today: after the
+corpus, it runs the test driver's `--probe-checker`, which prints the checker
+*build*'s RSS and `VmHWM` after each compiler phase (frontend, erasure, lowering,
+hoisting, optimisation, C emission). That breakdown is recorded in the JSON but is
+not part of the gate; with a future `wiz build --profile`, the same slot can carry a
+per-phase split. It needs the test driver (`lake build tests`) and about 6 GiB for
+the in-process checker build, so the nightly job does not pass `--phases`.
+
+There are two limits, and both are failures:
+
+* **relative** — a peak above the baseline's peak by more than 25 % (the baseline
+  records the limit; `--tolerance` overrides it for one run). RSS is noisier than
+  time, so this is looser than the timing gate's 10 %.
+* **hard cap** — the per-invocation budget in the table. `--scope` also wraps each
+  invocation in `systemd-run --user --scope -p MemoryMax=<cap>`, so the kernel
+  enforces the cap live and an over-cap run exits 137 instead of merely failing
+  afterwards. Without `--scope` the measured peak is compared with the cap.
+
+The baseline is `bench/mem-baseline.json`; the run record is `bench/mem-bench.json`.
+`--check` also fails when an invocation is missing from the baseline, when the
+corpus changed its arguments or cap, or when an invocation exits nonzero — a stale
+baseline cannot silently stop checking an entry. `--markdown FILE` appends the table
+to a CI step summary.
+
+Absolute RSS depends on the C compiler, the GC version, the page size and what else
+shares the machine; the checked-in baseline was recorded on the 27 GiB development
+host with about twenty concurrent agents, so the relative limit and the caps are the
+decision, not the absolute numbers. Re-record with `--update` after a deliberate
+change (a new corpus entry, a new allocator), and keep the old baseline in the PR.
+
+Today's numbers (2026-11-15, 27 GiB host, GCC 16.2, Boehm GC, ~20 agents sharing
+the machine; peak of the recorded samples, ±5 %):
+
+TODAY_TABLE
+
+The worst offender is the cold check of the largest example; everything else is
+under a few hundred MiB. The self-hosted checker is the entry to watch: it was
+10.7 GB before the `inlineTm` fix and is the reason the 1 GiB cap exists.
+
+The nightly `.github/workflows/bench.yml` runs this as a second job
+(`mem`, after the timing jobs) with `--check --markdown "$GITHUB_STEP_SUMMARY"`;
+`bench.yml` is owned by its own PR, so the exact diff is in
+`bench/mem-bench.bench.yml.diff` for the coordinator to apply after that lands. The
+job declares 6 GiB (the preparation builds the checker) and uploads
+`bench-out/mem-bench.json` as an artifact.
+
 ## Continuous integration
 
 `nix develop` gives the toolchain the tests need besides Lean (see `flake.nix`): GMP and
