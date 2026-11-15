@@ -7,6 +7,11 @@
     "=selfhost",
     "=audit-kernels"
   ]},
+  {"name": "selfhost-parse-diff", "heavy": true,
+   "inputs": ["selfhost/*", "lib/*", "examples/*", "src/*", "scry/*"],
+   "select": [
+    "=selfhost-parse-diff"
+  ]},
   {"name": "hdl-verified", "heavy": true, "select": [
     "=hdl-verified"
   ]},
