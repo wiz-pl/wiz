@@ -48,5 +48,6 @@ ENGINE="$OUT/playground.wiz"
 -sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=\$stringToNewUTF8,\$UTF8ToString" \
   build "$ENGINE" -o "$OUT/wiz-playground.mjs" --no-main)
 cp "$ROOT/web/playground.html" "$ROOT/web/playground.js" "$ROOT/web/playground-values.js" \
-  "$ROOT/web/playground.css" "$OUT/"
+  "$ROOT/web/playground.css" "$ROOT/web/lsp-client.js" "$ROOT/web/goals.js" \
+  "$ROOT/web/playground-lsp.js" "$ROOT/web/tagged.js" "$OUT/"
 echo "built $OUT/wiz-playground.mjs"
