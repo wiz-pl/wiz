@@ -88,10 +88,18 @@ def builtinGroup : Group where
           -- below it, the value is a native numeral (and is needed here)
           "def x : Nat.log2 (Nat.pow 2 400) = 400 := refl 400\n" ++
           "def y : Nat.pow 2 64 = 18446744073709551616 := refl 18446744073709551616\n" ++
+          -- the other expansive operation, `Nat.shiftLeft` (a huge *count* builds the value)
+          "def s : Nat.shiftLeft 1 (Nat.pow 2 34) = Nat.shiftLeft 1 (Nat.pow 2 34) := rfl\n" ++
           -- kernel proofs only: nothing is assumed, and nothing is trusted to a native run
-          "#print axioms t\n#print axioms u\n#print axioms v")
+          "#print axioms t\n#print axioms u\n#print axioms v\n#print axioms s")
           ["'t' does not depend on any axioms", "'u' does not depend on any axioms",
-           "'v' does not depend on any axioms"] },
+           "'v' does not depend on any axioms", "'s' does not depend on any axioms"] },
+    { name := "a huge power is computed when the value is needed (#eval, #reduce)", run := fun _ =>
+        -- the glue is not a refusal: `#eval` (the IR interpreter) and `#reduce` (the eager
+        -- kernel, `g.eager` skips `natExpansive?`) both force the value. A modest huge power
+        -- is bounded, so ask for its bit length rather than printing 1506 digits.
+        okLib ("import Prelude\n#eval Nat.log2 (Nat.pow 2 5000)\n#reduce Nat.log2 (Nat.pow 2 5000)")
+          ["5000", "5000"] },
     { name := "different huge powers are not equal", run := fun _ =>
         -- the arguments are compared first; they differ, so equality fails (cleanly, and
         -- without claiming that any two glued applications are equal)
