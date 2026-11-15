@@ -40,6 +40,21 @@ except ImportError:  # pragma: no cover - the skip path
 from wiz_kernel.backends import find_wiz  # noqa: E402
 from wiz_kernel.magics import scry_command  # noqa: E402
 
+# A scry that takes `taint FILE --json [--progress]`: three progress lines on
+# stderr, then one JSON report on stdout.  `--progress` is deliberately ignored
+# here; the kernel only has to pass it through and forward the stderr lines.
+FAKE_SCRY = '''import json, sys, time
+for i in range(1, 4):
+    print(f"progress: {i}/3 files ({(i * 100) // 3}%) taint", file=sys.stderr, flush=True)
+    time.sleep(0.02)
+print(json.dumps({"counts": {"findings": 1, "checked": 1, "unchecked": 0, "boundary": 0},
+                  "findings": [{"severity": "error", "rule": "command-injection",
+                                "location": {"uri": "fake.c", "startLine": 7,
+                                             "startColumn": 3},
+                                "derivation": "checked", "message": "bad"}],
+                  "boundary": [], "file": "fake.c"}))
+'''
+
 
 def _kernel_command(connection_file: str, backend: str, wiz: str | None,
                     cwd: str) -> list[str]:
@@ -50,9 +65,14 @@ def _kernel_command(connection_file: str, backend: str, wiz: str | None,
     return command
 
 
-@unittest.skipUnless(HAVE_JUPYTER, "pyzmq and jupyter_client are not installed")
-class KernelProtocolTest(unittest.TestCase):
+class KernelFixture:
+    """One kernel process per test class; subclasses add tests only."""
+
     backend = os.environ.get("WIZ_TEST_BACKEND", "auto")
+
+    @classmethod
+    def extra_env(cls, workspace: str) -> dict:
+        return {}
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -66,6 +86,7 @@ class KernelProtocolTest(unittest.TestCase):
             os.path.join(cls.tmp, "connection.json"), ip="127.0.0.1")
         env = dict(os.environ)
         env["PYTHONPATH"] = TOOL_DIR + os.pathsep + env.get("PYTHONPATH", "")
+        env.update(cls.extra_env(cls.workspace))
         cls.process = subprocess.Popen(
             _kernel_command(cls.connection_file, cls.backend, cls.wiz, cls.workspace),
             cwd=cls.workspace, env=env,
@@ -146,7 +167,9 @@ class KernelProtocolTest(unittest.TestCase):
                 return msg["content"].get("data", {})
         return {}
 
-    # -- tests ---------------------------------------------------------
+
+@unittest.skipUnless(HAVE_JUPYTER, "pyzmq and jupyter_client are not installed")
+class KernelProtocolTest(KernelFixture, unittest.TestCase):
 
     def test_kernel_info(self):
         self.assertEqual(self.info.get("protocol_version"), "5.3")
@@ -190,6 +213,47 @@ class KernelProtocolTest(unittest.TestCase):
         self.assertIn("backend:", text)
         self.assertIn(self.backend_name, text)
 
+    def test_progress_magic_names_the_transport(self):
+        reply, iopub = self.execute("%progress")
+        text = self.result(iopub).get("text/plain", "")
+        self.assertIn("progress:", text)
+        self.assertIn("iopub stream", text)
+
+    def test_sh_streams_both_pipes_and_returns_status(self):
+        reply, iopub = self.execute("%%sh\necho shell-out\necho shell-err >&2\n")
+        self.assertEqual(reply["content"]["status"], "ok", reply["content"])
+        self.assertIn("shell-out", self.streams(iopub, "stdout"))
+        self.assertIn("shell-err", self.streams(iopub, "stderr"))
+        self.assertEqual(self.result(iopub).get("text/plain"), "exit status 0")
+
+    def test_sh_nonzero_exit_is_an_error(self):
+        reply, iopub = self.execute("%%sh\nexit 7\n")
+        self.assertEqual(reply["content"]["status"], "error", reply["content"])
+        errors = [m for m in iopub if m["msg_type"] == "error"]
+        self.assertTrue(errors)
+        self.assertEqual(errors[0]["content"]["ename"], "ShellError")
+        self.assertIn("7", errors[0]["content"]["evalue"])
+
+    def test_time_appends_a_plausible_line(self):
+        reply, iopub = self.execute("%%time\n6 * 7\n")
+        self.assertEqual(reply["content"]["status"], "ok", reply["content"])
+        self.assertEqual(self.result(iopub).get("text/plain"), "42")
+        timing = [line for line in self.streams(iopub).splitlines()
+                  if line.startswith("[time] wall ")]
+        self.assertEqual(len(timing), 1, self.streams(iopub))
+        wall = float(timing[0].split()[2])
+        self.assertGreaterEqual(wall, 0.0)
+        self.assertLess(wall, 600.0)
+        self.assertIn("peak RSS", timing[0])
+
+    def test_wiz_magic_is_the_plain_cell_path(self):
+        reply, _ = self.execute("def notebook_plain : Nat := 9")
+        self.assertEqual(reply["content"]["status"], "ok", reply["content"])
+        reply, _ = self.execute("%%wiz\ndef notebook_explicit : Nat := 9\n")
+        self.assertEqual(reply["content"]["status"], "ok", reply["content"])
+        reply, iopub = self.execute("#eval notebook_explicit + notebook_plain")
+        self.assertIn("18", self.streams(iopub))
+
     def test_unknown_magic_is_an_error(self):
         reply, iopub = self.execute("%%nope")
         self.assertEqual(reply["content"]["status"], "error")
@@ -227,6 +291,36 @@ class KernelProtocolTest(unittest.TestCase):
             cwd=TOOL_DIR, env=env, capture_output=True, text=True, timeout=300)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn("0 failed", done.stdout)
+
+
+@unittest.skipUnless(HAVE_JUPYTER, "pyzmq and jupyter_client are not installed")
+class ProgressTransportTest(KernelFixture, unittest.TestCase):
+    """`%%scry --progress` with a scry that emits three stderr progress lines."""
+
+    @classmethod
+    def extra_env(cls, workspace: str) -> dict:
+        path = os.path.join(workspace, "fake-scry.py")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(FAKE_SCRY)
+        return {"WIZ_SCRY": f"{sys.executable} {path}"}
+
+    def test_progress_lines_are_forwarded_in_order_while_the_cell_runs(self):
+        reply, iopub = self.execute(
+            "%%scry --progress\nint main(void) { return 0; }\n")
+        self.assertEqual(reply["content"]["status"], "ok", reply["content"])
+        progress = [line for line in self.streams(iopub).splitlines()
+                    if line.startswith("progress:")]
+        self.assertEqual(progress, [
+            "progress: 1/3 files (33%) taint",
+            "progress: 2/3 files (66%) taint",
+            "progress: 3/3 files (100%) taint",
+        ])
+
+    def test_progress_cell_still_renders_the_report(self):
+        reply, iopub = self.execute(
+            "%%scry --progress\nint main(void) { return 0; }\n")
+        self.assertEqual(reply["content"]["status"], "ok", reply["content"])
+        self.assertIn("command-injection", json.dumps(self.result(iopub)))
 
 
 if __name__ == "__main__":

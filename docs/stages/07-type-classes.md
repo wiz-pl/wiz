@@ -26,7 +26,7 @@ The prelude now elaborates about 6× faster.
 
 ## 7b: classes, instances, tabled resolution
 
-```
+```wiz
 class Inhabited (A : Type) where
   default : A
 instance : Inhabited Nat := Inhabited.mk 0
@@ -65,8 +65,11 @@ complete terms; no default instances or coercions yet.
 
 ## 7c: command macros, reflection, `deriving`
 
-```
+```wiz
 import Deriving
+inductive Shape where
+  | circle
+  | square
 inductive Tree (A : Type) where
   | leaf
   | node (l : Tree A) (x : A) (r : Tree A)
@@ -114,7 +117,7 @@ one-element quotations and use `Syntax.mkApp`; the self-hosted frontend has no m
 
 ## 7d: deriving with proof fields and in any universe
 
-```
+```wiz
 import Deriving
 structure Pos where
   n : Nat
@@ -145,7 +148,7 @@ inductive Box.{u} (A : Type u) where          -- Box : Type u → Type u (inferr
 
 ## 7e: numeric classes
 
-```
+```wiz no-check
 class Add (A : Type) where
   add : A → A → A                      -- also Sub, Mul, Div, Mod, Neg
 class OfNat (A : Type) (n : Nat) where
@@ -212,7 +215,7 @@ for a look-alike type applies too; numerals as patterns: see 13q (`docs/stages/1
 
 ## 7f: heterogeneous operators, default instances
 
-```
+```wiz no-check
 class HAdd (A B : Type) (C : outParam Type) where
   hAdd : A → B → C                     -- also HSub, HMul, HDiv, HMod, HPow, HAppend
 instance instHAdd {A : Type} [Add A] : HAdd A A A := HAdd.mk Add.add
