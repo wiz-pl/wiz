@@ -224,25 +224,34 @@ which keeps the provenance — a fact seeded as EDB would shadow its derivation)
 def Scry.seedsFor (sums : List Scry.Summary) (func : String) : List Scry.MemSeed :=
   List.filter (fun m => Bool.not (String.eq m.func func)) (Scry.allMemSeeds sums)
 
+/-- Evaluate one function under the current summaries (the unit of the summary
+fixpoint). Exposed so a driver can checkpoint between functions for `--timeout`. The
+entry sources are the C-ABI policy's parameter seeds for exported entries. -/
+def Scry.evalWithEntries (graph : Scry.CallGraph) (pack : Scry.RulePack)
+    (pt : Scry.PtResult) (entries : List (String × Nat)) (sums : List Scry.Summary)
+    (fn : Wil.Func) : Scry.FuncResult :=
+  Scry.evaluateFuncWith fn pack pt (Scry.seedsFor sums fn.name)
+    (Scry.summaryOf sums fn.name).params
+    (Scry.retSeedsOf graph sums fn.name)
+    (Scry.entrySourcesFor entries fn.name)
+
+def Scry.evalWith (graph : Scry.CallGraph) (pack : Scry.RulePack) (pt : Scry.PtResult)
+    (sums : List Scry.Summary) (fn : Wil.Func) : Scry.FuncResult :=
+  Scry.evalWithEntries graph pack pt .nil sums fn
+
 def Scry.resultsWithEntries (p : Wil.Program) (pack : Scry.RulePack)
     (graph : Scry.CallGraph) (pt : Scry.PtResult) (sums : List Scry.Summary)
     (entries : List (String × Nat)) : List Scry.FuncResult :=
-  List.map (fun fn =>
-    Scry.evaluateFuncWith fn pack pt (Scry.seedsFor sums fn.name)
-      (Scry.summaryOf sums fn.name).params
-      (Scry.retSeedsOf graph sums fn.name)
-      (Scry.entrySourcesFor entries fn.name)) p.funcs
+  List.map (Scry.evalWithEntries graph pack pt entries sums) p.funcs
 
 def Scry.resultsWith (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
     (pt : Scry.PtResult) (sums : List Scry.Summary) : List Scry.FuncResult :=
   Scry.resultsWithEntries p pack graph pt sums .nil
 
-/-- One summary round: evaluate every function under `prev`, then grow every summary
-with the argument-taint contributions the results expose and the return flags. -/
-def Scry.stepSummariesWithEntries (p : Wil.Program) (pack : Scry.RulePack)
-    (graph : Scry.CallGraph) (pt : Scry.PtResult) (prev : List Scry.Summary)
-    (entries : List (String × Nat)) : List Scry.Summary :=
-  let results := Scry.resultsWithEntries p pack graph pt prev entries;
+/-- Grow every summary from one round's results: the argument-taint contributions the
+results expose and the return flags, plus the tainted memory locations. -/
+def Scry.growSummaries (p : Wil.Program) (graph : Scry.CallGraph)
+    (prev : List Scry.Summary) (results : List Scry.FuncResult) : List Scry.Summary :=
   let mems := Scry.dedupSeeds (Scry.concatLists (fun r => Scry.resultMemSeeds r) results);
   List.map (fun fn =>
     let old := Scry.summaryOf prev fn.name;
@@ -252,6 +261,13 @@ def Scry.stepSummariesWithEntries (p : Wil.Program) (pack : Scry.RulePack)
       | .none => (.false : Bool);
     Scry.Summary.mk fn.name (Scry.unionNat old.params contrib)
       (Bool.or old.retTainted ret) (Scry.dedupSeeds (List.append old.mems mems))) p.funcs
+
+/-- One summary round: evaluate every function under `prev`, then grow every summary
+with the argument-taint contributions the results expose and the return flags. -/
+def Scry.stepSummariesWithEntries (p : Wil.Program) (pack : Scry.RulePack)
+    (graph : Scry.CallGraph) (pt : Scry.PtResult) (prev : List Scry.Summary)
+    (entries : List (String × Nat)) : List Scry.Summary :=
+  Scry.growSummaries p graph prev (Scry.resultsWithEntries p pack graph pt prev entries)
 
 def Scry.stepSummaries (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
     (pt : Scry.PtResult) (prev : List Scry.Summary) : List Scry.Summary :=
@@ -337,11 +353,12 @@ summary fixpoint, then one final evaluation per function. The pack gains the mis
 model rule descriptors, so a model-only sink (`execl`, `sprintf`, `read`'s bound) has a
 rule id even when the textual pack does not repeat it. `entryMode` enables the C-ABI
 policy that seeds the parameters of exported entries; the library/old API passes
-`false` through `Scry.analyze`. -/
-def Scry.analyzeEntries (p : Wil.Program) (pack0 : Scry.RulePack)
-    (entryMode : Bool) : Scry.ProgramResult :=
+`false` through `Scry.analyze`. `maxRounds` bounds the points-to fixpoint (a partial
+result when it is hit). -/
+def Scry.analyzeEntriesBounded (p : Wil.Program) (pack0 : Scry.RulePack)
+    (entryMode : Bool) (maxRounds : Option Nat) : Scry.ProgramResult :=
   let pack := Scry.RulePack.withModels pack0;
-  let pt := Scry.pointsTo p;
+  let pt := Scry.pointsToBounded p maxRounds;
   let graph := Scry.callGraph p pt;
   let entries := match entryMode with
     | .true => Scry.entrySources p graph
@@ -361,13 +378,24 @@ def Scry.analyzeEntries (p : Wil.Program) (pack0 : Scry.RulePack)
   let memoryFindings := Scry.lifetimeFindings p pt pack;
   Scry.ProgramResult.mk results sums graph pt warnings memoryFindings
 
-/-- The library analysis: no exported-entry policy. -/
+/-- The library analysis: no exported-entry policy, the historical round bound. -/
 def Scry.analyze (p : Wil.Program) (pack : Scry.RulePack) : Scry.ProgramResult :=
-  Scry.analyzeEntries p pack .false
+  Scry.analyzeEntriesBounded p pack .false .none
 
 /-- The C-ABI analysis: parameters of exported entry functions are sources. -/
 def Scry.analyzeC (p : Wil.Program) (pack : Scry.RulePack) : Scry.ProgramResult :=
-  Scry.analyzeEntries p pack .true
+  Scry.analyzeEntriesBounded p pack .true .none
+
+/-- The bounded analysis with the C-ABI entry policy (the `scry taint` driver uses the
+staged loop in `Scry.TaintCmd`; this is the library-level equivalent). -/
+def Scry.analyzeEntries (p : Wil.Program) (pack : Scry.RulePack)
+    (entryMode : Bool) : Scry.ProgramResult :=
+  Scry.analyzeEntriesBounded p pack entryMode .none
+
+/-- The default analysis with an explicit points-to round bound. -/
+def Scry.analyzeBounded (p : Wil.Program) (pack : Scry.RulePack)
+    (maxRounds : Option Nat) : Scry.ProgramResult :=
+  Scry.analyzeEntriesBounded p pack .false maxRounds
 
 -- ## Stitching paths across calls
 

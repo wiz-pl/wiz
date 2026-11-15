@@ -161,14 +161,23 @@ def Scry.zipU32 : List U32 → List U32 → List (U32 × U32)
   | .cons a as, .cons b bs => .cons (a, b) (Scry.zipU32 as bs)
   | _, _ => .nil
 
+/-- `(children, childField)` rows `lo … hi-1` as a list, reading the arrays by index.
+The obvious `U32Array.toList` + `List.drop` version is **O(nodes)** per call (it copies
+the whole column), which made lowering the 1.1 M-node `parser.c` quadratic; this walk is
+O(children). -/
+partial def Scry.CstStore.arcsFrom (s : Scry.CstStore) (lo hi : Nat) :
+    List (Scry.NodeId × U32) :=
+  match Nat.lt lo hi with
+  | .false => .nil
+  | .true => List.cons
+      (Scry.nodeId (UIntN.toNat (U32Array.get s.children lo)), U32Array.get s.childField lo)
+      (Scry.CstStore.arcsFrom s (Nat.succ lo) hi)
+
 /-- Node `i`'s children, in tree order, with their field ids. -/
 def Scry.CstStore.childArcs (s : Scry.CstStore) (i : Nat) : List (Scry.NodeId × U32) :=
   let lo := UIntN.toNat (U32Array.get s.childOff i);
   let hi := UIntN.toNat (U32Array.get s.childOff (Nat.succ i));
-  let k := Nat.sub hi lo;
-  let ids := List.take k (List.drop lo (U32Array.toList s.children));
-  let fs := List.take k (List.drop lo (U32Array.toList s.childField));
-  List.map (fun p => (Scry.nodeId (UIntN.toNat p.1), p.2)) (Scry.zipU32 ids fs)
+  Scry.CstStore.arcsFrom s lo hi
 
 /-- Node `i`'s children, in tree order. -/
 def Scry.CstStore.childrenOf (s : Scry.CstStore) (i : Nat) : List Scry.NodeId :=

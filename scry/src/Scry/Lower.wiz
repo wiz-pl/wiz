@@ -64,7 +64,8 @@ structure Scry.Cst where
   parentOf : Nat → Option Nat
   /-- Node `i`'s children, in tree order. -/
   childrenOf : Nat → List Nat
-  /-- The source text of file `i` (byte offsets index it; ASCII in this slice). -/
+  /-- The source text of file `i` (byte offsets index it; ASCII in this slice). Retained
+  for `Scry.spanText` and the lowering tests. -/
   fileText : Nat → String
   /-- The path of file `i` (as the preprocessor or the caller named it). -/
   filePath : Nat → String
@@ -75,6 +76,12 @@ structure Scry.Cst where
   tree-sitter parsed (so a macro-expanded literal reads `5`), while `spanOf` maps the
   node back to the original source; token spellings come from here. -/
   nodeText : Nat → String
+  /-- The same source as a word array: `textOf` slices this, which is O(span) rather
+  than O(file). A `String` is a `List Char` in this runtime, so taking a token from the
+  middle with `String.drop` was O(file) per identifier, i.e. quadratic on a real file.
+  A `U32Array` (not `Bytes`) is deliberate: it has a pure list model, so the same
+  lowering runs in the Lean test interpreter as well as in compiled code. -/
+  fileBytes : Nat → U32Array
 
 /-- The view of a *preprocessed* shim store: every node's span is mapped back through
 the `cc -E` line markers to the original file, byte range, line and column, and
@@ -95,6 +102,8 @@ def Scry.Cst.ofPreprocessed (pre : Scry.Preprocessed) (s : Scry.CstStore) : Scry
     (List.length pre.paths)
     (fun i => let sp := Scry.CstStore.spanOf s i;
       String.take (Nat.sub sp.stop sp.start) (String.drop sp.start pre.text))
+    (fun f => List.foldl (fun a c => U32Array.push a (U32.ofNat (Char.code c)))
+      U32Array.empty (String.chars (List.getD pre.texts f "")))
 
 /-- The view of a `Scry.CstStore`, with the source text its spans index. The shim's
 store has one file per parse, so `text` is file 0. Line and column of every node's
@@ -102,10 +111,17 @@ origin are derived from the text (a direct parse, not preprocessed). -/
 def Scry.Cst.ofStore (text : String) (s : Scry.CstStore) : Scry.Cst :=
   Scry.Cst.ofPreprocessed (Scry.Preprocessed.plain (Scry.CstStore.pathName s 0) text) s
 
-/-- The text of node `i` as the parser saw it (`nodeText`). Byte offsets are used as
-character indices: the fixtures are ASCII (the shim's offsets are bytes; a UTF-8
-identifier would need a byte slice, noted in `wiz-notes/scry-c2wil.md`). -/
-def Scry.Cst.textOf (c : Scry.Cst) (i : Nat) : String := c.nodeText i
+/-- The text of words `[start, start + len)` as a string. -/
+def Scry.Cst.wordsText (a : U32Array) (start len : Nat) : String :=
+  String.ofChars (List.map (fun x => Char.mk (UIntN.toNat x))
+    (U32Array.toList (U32Array.slice a start len)))
+
+/-- The text of node `i`'s span, sliced from the word view in O(span length). Byte
+offsets are used as character indices: the fixtures are ASCII (the shim's offsets are
+bytes; a UTF-8 identifier would need a byte slice, noted in `wiz-notes/scry-c2wil.md`). -/
+def Scry.Cst.textOf (c : Scry.Cst) (i : Nat) : String :=
+  let sp := c.spanOf i;
+  Scry.Cst.wordsText (c.fileBytes sp.file) sp.start (Nat.sub sp.stop sp.start)
 
 /-- The text of an origin. -/
 def Scry.spanText (files : List String) (sp : Wil.Span) : String :=

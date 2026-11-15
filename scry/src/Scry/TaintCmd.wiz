@@ -1,6 +1,9 @@
 import Sys
 import Json
 import Text
+import IO
+import WordArray
+import Scry.Budget
 import Scry.Native
 import Scry.CstStore
 import Scry.Lower
@@ -21,7 +24,14 @@ SARIF 2.1.0. The command is the vertical slice the design's §7.1 CLI calls for:
 scry taint FILE.c [--rules FILE] [--sarif OUT] [--json]
                   [--allow-errors] [--fail-on-finding] [--origin-map]
                   [--diff BASE|all] [--changed-lines FILE] [--diff-context N]
+                  [--timeout SECS] [--max-nodes N] [--max-rounds N] [--progress]
 ```
+
+The limits are a contract for large inputs (defaults: 300 s, 2 000 000 CST nodes). A
+stage that can run long checkpoints between rounds/functions and refuses with a message
+when `--timeout` expires; `Scry.Native.installTimeout` arms `SIGALRM` as a last resort so
+even one huge function's rule evaluation cannot hang the run. `--max-rounds` stops a
+fixpoint early and marks the result `truncated`, with a `scry/budget/*` diagnostic.
 
 * **parse.** `Scry.Native.parse`/`toCstStore` (S1). Tree-sitter recovers from syntax
   errors, so a file with `ERROR`/`MISSING` nodes is refused by default; `--allow-errors`
@@ -80,9 +90,26 @@ structure Scry.TaintOpts where
   changedLines : Option String
   /-- `--diff-context N`: widen the changed hunks by N lines either side. -/
   diffContext : Option Nat
+  /-- `--timeout SECS`: stop with a clear refusal after this many seconds. -/
+  timeoutSecs : Option Nat
+  /-- `--max-nodes N`: refuse a CST with more nodes before lowering it. -/
+  maxNodes : Option Nat
+  /-- `--max-rounds N`: cap the points-to/summary fixpoints (a partial result). -/
+  maxRounds : Option Nat
+  /-- `--progress`: print one stage line per phase on stderr. -/
+  progress : Bool
 
+/-- The defaults are a **contract**, not an accident: a single file is analysed under a
+300 s wall-clock limit and a 2 M-node CST cap, so an unexpectedly large input produces a
+clear refusal instead of an unbounded run. `--timeout 0` and `--max-nodes 0` disable
+the respective limit. -/
 def Scry.emptyTaintOpts (file : String) : Scry.TaintOpts :=
   Scry.TaintOpts.mk file .none .none .false .false .false .false .none .none .none
+    (.some 300) (.some 2000000) .none .false
+
+/-- The budget view of the options (`--progress` is included there too). -/
+def Scry.TaintOpts.toBudget (o : Scry.TaintOpts) : Scry.RunBudget :=
+  Scry.RunBudget.mk o.timeoutSecs o.maxNodes o.maxRounds o.progress
 
 /-- Print a line on stdout (the CLI's `say`; `Scry.say` lives in `Scry.Cli`, which
 imports this module, so it cannot be used here). -/
@@ -92,6 +119,10 @@ def Scry.taintUsage : String :=
   "usage: scry taint FILE.c [--rules FILE] [--sarif OUT] [--json]\n"
   ++ "                      [--allow-errors] [--fail-on-finding] [--origin-map]\n"
   ++ "                      [--diff BASE|all] [--changed-lines FILE] [--diff-context N]\n"
+  ++ "                      [--timeout SECS] [--max-nodes N] [--max-rounds N]\n"
+  ++ "                      [--progress]\n"
+  ++ "  limits: default --timeout 300 --max-nodes 2000000; 0 disables a limit.\n"
+  ++ "  A truncated fixpoint is reported as scry/budget/* and \"truncated\": true.\n"
 
 /-- Parse the flags after `scry taint`. Flags may come in any order; the first
 non-flag argument is the C source. -/
@@ -107,6 +138,21 @@ partial def Scry.taintArgsGo (file : Option String) (o : Scry.TaintOpts) :
     | "--sarif" => match rest with
       | .cons p more => Scry.taintArgsGo file { o with sarif := .some p } more
       | .nil => .error "--sarif needs an output file"
+    | "--timeout" => match rest with
+      | .cons p more => match String.parseNat p with
+        | .some n => Scry.taintArgsGo file { o with timeoutSecs := .some n } more
+        | .none => .error ("--timeout needs a number of seconds, not \"" ++ p ++ "\"")
+      | .nil => .error "--timeout needs a number of seconds"
+    | "--max-nodes" => match rest with
+      | .cons p more => match String.parseNat p with
+        | .some n => Scry.taintArgsGo file { o with maxNodes := .some n } more
+        | .none => .error ("--max-nodes needs a node count, not \"" ++ p ++ "\"")
+      | .nil => .error "--max-nodes needs a node count"
+    | "--max-rounds" => match rest with
+      | .cons p more => match String.parseNat p with
+        | .some n => Scry.taintArgsGo file { o with maxRounds := .some n } more
+        | .none => .error ("--max-rounds needs a round count, not \"" ++ p ++ "\"")
+      | .nil => .error "--max-rounds needs a round count"
     | "--json" => Scry.taintArgsGo file { o with json := .true } rest
     | "--allow-errors" => Scry.taintArgsGo file { o with allowErrors := .true } rest
     | "--fail-on-finding" => Scry.taintArgsGo file { o with failOnFinding := .true } rest
@@ -122,6 +168,7 @@ partial def Scry.taintArgsGo (file : Option String) (o : Scry.TaintOpts) :
         | .some n => Scry.taintArgsGo file { o with diffContext := .some n } more
         | .none => .error ("--diff-context needs a number, not \"" ++ p ++ "\"")
       | .nil => .error "--diff-context needs a number"
+    | "--progress" => Scry.taintArgsGo file { o with progress := .true } rest
     | "--help" => .error Scry.taintUsage
     | _ => match String.startsWith a "--" with
       | .true => .error ("unknown flag " ++ a ++ "\n" ++ Scry.taintUsage)
@@ -189,27 +236,51 @@ def Scry.loadTaintPack (rules : Option String) : EIO Scry.RulePack :=
 
 -- ## Spans and locations
 
-/-- A 1-based line and column for a byte offset. The shim's offsets are bytes; the C
-frontend's slice is ASCII (see `wiz-notes/scry-c2wil.md`), so characters are a faithful
-index here. -/
-partial def Scry.lineColGo (cs : List Char) (fuel line col : Nat) : Nat × Nat :=
-  match fuel with
-  | .zero => (line, col)
-  | .succ k => match cs with
-    | .nil => (line, col)
-    | .cons c rest =>
-      match Nat.beq (Char.code c) 10 with
-      | .true => Scry.lineColGo rest k (Nat.succ line) 1
-      | .false => Scry.lineColGo rest k line (Nat.succ col)
+/-- The byte offsets where each line starts (`0`, then one past every `\n`). Built once
+per file: the old `lineColAt` walked the source from byte 0 for **every** origin entry,
+which is O(points × file) and dominated the report on a real file. -/
+def Scry.lineStartsGo (b : Bytes) (n : Nat) : Nat → U32Array → U32Array
+  | .zero, acc => acc
+  | .succ k, acc =>
+    let i := Nat.sub n (Nat.succ k);
+    let acc' := match Nat.beq (Bytes.get b i) 10 with
+      | .true => U32Array.push acc (U32.ofNat (Nat.succ i))
+      | .false => acc;
+    Scry.lineStartsGo b n k acc'
 
+def Scry.lineStartsOf (text : String) : U32Array :=
+  let b := Bytes.ofString text;
+  Scry.lineStartsGo b (Bytes.size b) (Bytes.size b) (U32Array.ofList (List.cons (U32.ofNat 0) .nil))
+
+/-- Binary search for the largest line-start index whose offset is `<= off`. -/
+partial def Scry.lineIndexGo (starts : U32Array) (off : Nat) (lo hi : Nat) : Nat :=
+  match Nat.lt lo hi with
+  | .false => lo
+  | .true =>
+    let mid := Nat.div (Nat.add (Nat.add lo hi) 1) 2;
+    match Nat.le (UIntN.toNat (U32Array.get starts mid)) off with
+    | .true => Scry.lineIndexGo starts off mid hi
+    | .false => Scry.lineIndexGo starts off lo (Nat.sub mid 1)
+
+/-- A 1-based line and column for a byte offset, from the precomputed line starts. -/
+def Scry.lineColFrom (starts : U32Array) (off : Nat) : Nat × Nat :=
+  let n := U32Array.size starts;
+  match Nat.beq n 0 with
+  | .true => (1, Nat.succ off)
+  | .false =>
+    let i := Scry.lineIndexGo starts off 0 (Nat.sub n 1);
+    (Nat.succ i, Nat.succ (Nat.sub off (UIntN.toNat (U32Array.get starts i))))
+
+/-- The old signature, kept for callers that only have the text (it builds the line
+table first, so prefer `originOfSpanAt` when several spans are located). -/
 def Scry.lineColAt (text : String) (off : Nat) : Nat × Nat :=
-  Scry.lineColGo (String.chars text) off 1 1
+  Scry.lineColFrom (Scry.lineStartsOf text) off
 
 /-- The SARIF origin of a `Wil.Span`. `endColumn` is exclusive; an empty span still gets
 a one-character region so a result has a visible place. -/
-def Scry.originOfSpan (uri text : String) (sp : Wil.Span) : Scry.Origin :=
-  let start := Scry.lineColAt text sp.start;
-  let stop := Scry.lineColAt text sp.stop;
+def Scry.originOfSpanAt (uri : String) (starts : U32Array) (sp : Wil.Span) : Scry.Origin :=
+  let start := Scry.lineColFrom starts sp.start;
+  let stop := Scry.lineColFrom starts sp.stop;
   let endCol := match Nat.beq sp.stop sp.start with
     | .true => Nat.succ start.2
     | .false => stop.2;
@@ -222,19 +293,25 @@ def Scry.spanAtPoint (g : Scry.Fn) (n : Nat) : Option Wil.Span :=
     | .some t => .some (Wil.termOrigin t)
     | .none => .none
 
-def Scry.originEntryAt (uri text : String) (fn : Wil.Func) (g : Scry.Fn) (n : Nat) :
-    Option Scry.OriginEntry :=
+/-- The old `text`-only origin lookup: builds the line table and locates one span. -/
+def Scry.originOfSpan (uri text : String) (sp : Wil.Span) : Scry.Origin :=
+  Scry.originOfSpanAt uri (Scry.lineStartsOf text) sp
+
+def Scry.originEntryAt (uri : String) (starts : U32Array) (fn : Wil.Func) (g : Scry.Fn)
+    (n : Nat) : Option Scry.OriginEntry :=
   match Scry.spanAtPoint g n with
   | .none => .none
-  | .some sp => .some (Scry.OriginEntry.mk fn.name n (Scry.originOfSpan uri text sp))
+  | .some sp => .some (Scry.OriginEntry.mk fn.name n (Scry.originOfSpanAt uri starts sp))
 
-def Scry.originEntriesOfFunc (uri text : String) (fn : Wil.Func) : List Scry.OriginEntry :=
+def Scry.originEntriesOfFunc (uri : String) (starts : U32Array) (fn : Wil.Func) :
+    List Scry.OriginEntry :=
   let g := Scry.flatten fn;
-  Scry.filterMapOpt (fun n => Scry.originEntryAt uri text fn g n) (Scry.range g.count)
+  Scry.filterMapOpt (fun n => Scry.originEntryAt uri starts fn g n) (Scry.range g.count)
 
 /-- Every `(function, program point) -> span` entry of the lowered unit. -/
-def Scry.originEntries (uri text : String) (funcs : List Wil.Func) : Scry.OriginMap :=
-  Scry.concatLists (fun fn => Scry.originEntriesOfFunc uri text fn) funcs
+def Scry.originEntries (uri : String) (starts : U32Array) (funcs : List Wil.Func) :
+    Scry.OriginMap :=
+  Scry.concatLists (fun fn => Scry.originEntriesOfFunc uri starts fn) funcs
 
 def Scry.locationText (m : Scry.OriginMap) (func : String) (point : Nat) : String :=
   match Scry.originAt m func point with
@@ -520,12 +597,14 @@ def Scry.baselineState (dm : Option Scry.DiffMode) (h : Scry.DiffHit) : Option S
 
 -- ## Lowering-boundary warnings
 
-def Scry.boundaryOfWarning (uri text : String) (w : Scry.Warning) : Scry.BoundaryFinding :=
+def Scry.boundaryOfWarning (uri : String) (starts : U32Array) (w : Scry.Warning) :
+    Scry.BoundaryFinding :=
   Scry.BoundaryFinding.mk "scry/lowering/boundary" w.message w.func 0
-    (.some (Scry.originOfSpan uri text w.span))
+    (.some (Scry.originOfSpanAt uri starts w.span))
 
-def Scry.boundaryFindings (uri text : String) (tu : Scry.TU) : List Scry.BoundaryFinding :=
-  List.map (Scry.boundaryOfWarning uri text) tu.warnings
+def Scry.boundaryFindings (uri : String) (starts : U32Array) (tu : Scry.TU) :
+    List Scry.BoundaryFinding :=
+  List.map (Scry.boundaryOfWarning uri starts) tu.warnings
 
 /-- The points-to diagnostics as warning findings, located with the same origin map the
 findings use. -/
@@ -738,6 +817,124 @@ structure Scry.TaintReport where
   /-- The points-to solution (locations and indirect targets), for `--origin-map`-style
   inspection and the tests. -/
   pointsTo : Scry.PtResult
+  /-- CST nodes seen (the `--max-nodes` unit). -/
+  nodes : Nat
+  /-- Wall time of the run, in milliseconds (informational). -/
+  elapsedMs : Nat
+  /-- True when a fixpoint stopped at its `--max-rounds` bound: the findings are real
+  derivations, but recall is reduced and the report says so. -/
+  truncated : Bool
+  /-- Rounds the summary fixpoint ran (`--max-rounds`). -/
+  summaryRounds : Nat
+  /-- False when the summary fixpoint ran out of rounds. -/
+  summaryComplete : Bool
+  /-- `scry/budget/*` diagnostics explaining a truncated run. -/
+  budgetNotes : List Scry.BudgetNote
+
+/-- A stage line (stderr) after `name` finished. -/
+def Scry.reportStage (o : Scry.TaintOpts) (startMs : Nat) (name detail : String) :
+    EIO Unit := do
+  now ← EIO.lift Scry.nowMs;
+  EIO.lift (Scry.Budget.stage (Scry.TaintOpts.toBudget o) name (Nat.sub now startMs) detail)
+
+/-- Refuse to continue when `--timeout` has expired, naming the stage that was running.
+This is a **clear refusal**, not a silent hang: no findings are printed, the message says
+how far the run got, and the exit status is non-zero. -/
+def Scry.checkDeadline (o : Scry.TaintOpts) (startMs : Nat) (stage : String) : EIO Unit := do
+  now ← EIO.lift Scry.nowMs;
+  match Scry.Budget.expired (Scry.TaintOpts.toBudget o) startMs now with
+  | .false => EIO.pure ()
+  | .true => EIO.fail (o.file ++ ": timeout after " ++ Nat.repr (Nat.sub now startMs)
+      ++ "ms during " ++ stage ++ " (--timeout "
+      ++ Nat.repr (match o.timeoutSecs with | .some s => s | .none => 0)
+      ++ "s); no analysis result was produced. Raise --timeout, or bound the work with"
+      ++ " --max-nodes/--max-rounds")
+
+/-- How a stopped fixpoint names its bound: the user's flag when given, otherwise the
+internal historical bound (so a message never claims a flag the caller did not pass). -/
+def Scry.limitText (maxRounds : Option Nat) (ran : Nat) : String :=
+  match maxRounds with
+  | .some n => "at --max-rounds " ++ Nat.repr n
+  | .none => "at the internal round bound (" ++ Nat.repr ran ++ " round(s) run)"
+
+/-- The `scry/budget/*` notes a capped points-to solution earns. Every note is also
+printed as a boundary-style warning and written to SARIF, so a caller cannot mistake a
+truncated run for a complete one. -/
+def Scry.pointsToBudgetNotes (maxRounds : Option Nat) (pt : Scry.PtResult) :
+    List Scry.BudgetNote :=
+  match pt.complete with
+  | .true => .nil
+  | .false => List.cons (Scry.BudgetNote.mk "scry/budget/points-to-incomplete"
+      ("points-to stopped after " ++ Nat.repr pt.rounds ++ " round(s) "
+       ++ Scry.limitText maxRounds pt.rounds
+       ++ ": the location sets are a lower bound, so recall is reduced (findings that"
+       ++ " are reported are still real derivations)")) .nil
+
+/-- The `scry/budget/*` note a capped summary fixpoint earns. -/
+def Scry.summariesBudgetNotes (maxRounds : Option Nat) (rounds : Nat) (complete : Bool) :
+    List Scry.BudgetNote :=
+  match complete with
+  | .true => .nil
+  | .false => List.cons (Scry.BudgetNote.mk "scry/budget/summaries-incomplete"
+      ("summary fixpoint stopped after " ++ Nat.repr rounds ++ " round(s) "
+       ++ Scry.limitText maxRounds rounds
+       ++ ": parameter/return/memory summaries are a lower bound, so recall is reduced"))
+      .nil
+
+/-- Evaluate every function of the summary fixpoint one at a time, checking `--timeout`
+between them and printing a progress line every ten functions. This is what makes a
+function-heavy file (e.g. tree-sitter's `query.c`) show where it is instead of running
+silently for a minute. -/
+partial def Scry.evalAllStaged (o : Scry.TaintOpts) (startMs : Nat) (tag : String)
+    (graph : Scry.CallGraph) (pack : Scry.RulePack) (pt : Scry.PtResult)
+    (entries : List (String × Nat)) (sums : List Scry.Summary) (funcs : List Wil.Func)
+    (i total : Nat) : EIO (List Scry.FuncResult) :=
+  match funcs with
+  | .nil => EIO.pure .nil
+  | .cons fn rest => do
+    Scry.checkDeadline o startMs tag;
+    match o.progress with
+    | .true => match Nat.beq (Nat.mod i 10) 0 with
+      | .true => do
+        now ← EIO.lift Scry.nowMs;
+        EIO.lift (IO.ePrintln ("scry: [stage] " ++ tag ++ " function "
+          ++ Nat.repr (Nat.succ i) ++ "/" ++ Nat.repr total ++ " " ++ fn.name
+          ++ " elapsed=" ++ Nat.repr (Nat.sub now startMs) ++ "ms"))
+      | .false => EIO.pure ()
+    | .false => EIO.pure ();
+    let r := Scry.evalWithEntries graph pack pt entries sums fn;
+    rs ← Scry.evalAllStaged o startMs tag graph pack pt entries sums rest (Nat.succ i) total;
+    EIO.pure (List.cons r rs)
+
+/-- The summary fixpoint, one round at a time (so `--timeout` and progress can act
+between rounds). Returns the summaries, the rounds run, and whether it converged. -/
+partial def Scry.summaryRounds (o : Scry.TaintOpts) (startMs : Nat)
+    (p : Wil.Program) (graph : Scry.CallGraph) (pack : Scry.RulePack) (pt : Scry.PtResult)
+    (entries : List (String × Nat)) (fuel rounds : Nat) (sums : List Scry.Summary) :
+    EIO (List Scry.Summary × Nat × Bool) :=
+  match fuel with
+  | .zero => EIO.pure (sums, rounds, .false)
+  | .succ k => do
+    Scry.checkDeadline o startMs "summaries";
+    results ← Scry.evalAllStaged o startMs "summaries" graph pack pt entries sums p.funcs 0
+      (List.length p.funcs);
+    let next := Scry.growSummaries p graph sums results;
+    match Scry.summariesEq next sums with
+    | .true => do
+      Scry.reportStage o startMs "summaries" (Nat.repr (Nat.succ rounds)
+        ++ " round(s), converged");
+      EIO.pure (next, Nat.succ rounds, .true)
+    | .false => Scry.summaryRounds o startMs p graph pack pt entries k (Nat.succ rounds) next
+
+/-- The summary fixpoint's fuel: its historical bound, or `--max-rounds` when given. -/
+def Scry.summaryFuel (o : Scry.TaintOpts) (p : Wil.Program) (pt : Scry.PtResult) : Nat :=
+  let historical := Nat.add 8 (Nat.add (Nat.add (List.length p.funcs)
+    (Scry.totalParams p.funcs)) (Scry.ptLocCount pt));
+  match o.maxRounds with
+  | .none => historical
+  | .some n => match Nat.lt historical n with
+    | .true => historical
+    | .false => n
 
 /-- The whole-file diagnostic for a recovered tree. Tree-sitter can wrap every
 declaration after a syntax error in one top-level `ERROR`; `Scry.lowerTU` unwraps those
@@ -768,28 +965,84 @@ def Scry.certVerified : Option Scry.Certificate → Bool
 
 /-- The pipeline up to the report: parse, lower, analyse, certify-status, locate. -/
 def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do
+  startMs ← EIO.lift Scry.nowMs;
   text ← FS.readFile o.file;
+  starts ← EIO.lift (IO.pure (Scry.lineStartsOf text));
+  Scry.reportStage o startMs "read" (Nat.repr (String.length text) ++ " bytes, "
+    ++ Nat.repr (U32Array.size starts) ++ " lines");
   st ← Scry.Native.parse "c" text;
-  cst ← EIO.lift (Scry.Native.toCstStore o.file st);
-  let errs := Scry.CstStore.errorCount cst;
-  match Bool.and (Nat.lt 0 errs) (Bool.not o.allowErrors) with
-  | .true => EIO.fail (o.file ++ ": " ++ Nat.repr errs
-      ++ " parse error node(s); pass --allow-errors to analyse the recovered tree")
-  | .false => do
-    pack ← Scry.loadTaintPack o.rules;
-    let c := Scry.Cst.ofStore text cst;
-    let tu := Scry.lowerTU o.file c;
-    let prog := Wil.program tu.funcs;
-    let pr := Scry.analyzeC prog pack;
-    let findings := Scry.programFindings pr;
-    let origins := Scry.originEntries o.file text tu.funcs;
-    let boundaries := List.append (Scry.parseRecoveryFindings o.file text cst errs
-      (List.length tu.funcs)) (Scry.boundaryFindings o.file text tu);
-    let memory := Scry.memoryFindings origins pr.warnings;
-    let certificates := List.map (fun f => Scry.certifyFinding pr f) findings;
-    let checks := List.map Scry.certVerified certificates;
-    EIO.pure (Scry.TaintReport.mk o.file errs pack tu findings checks certificates origins
-      boundaries memory pr.pointsTo)
+  nodes ← EIO.lift (IO.pure (Scry.Native.nodeCount st));
+  Scry.reportStage o startMs "parse" (Nat.repr nodes ++ " nodes");
+  -- The node cap is checked **before** the column copy: refusing a giant file should
+  -- not pay for shrinking it into Wiz arrays first.
+  match Scry.Budget.tooManyNodes (Scry.TaintOpts.toBudget o) o.file nodes with
+  | .some msg => EIO.fail msg
+  | .none => do
+    cst ← EIO.lift (Scry.Native.toCstStore o.file st);
+    Scry.reportStage o startMs "store" (Nat.repr (Scry.CstStore.nodeCount cst) ++ " nodes, "
+      ++ Nat.repr (Scry.CstStore.edgeCount cst) ++ " edges");
+    let errs := Scry.CstStore.errorCount cst;
+    match Bool.and (Nat.lt 0 errs) (Bool.not o.allowErrors) with
+    | .true => EIO.fail (o.file ++ ": " ++ Nat.repr errs
+        ++ " parse error node(s); pass --allow-errors to analyse the recovered tree")
+    | .false => do
+      Scry.checkDeadline o startMs "parse";
+      pack ← Scry.loadTaintPack o.rules;
+      let c := Scry.Cst.ofStore text cst;
+      let tu := Scry.lowerTU o.file c;
+      Scry.reportStage o startMs "lower" (Nat.repr (List.length tu.funcs) ++ " functions, "
+        ++ Nat.repr (List.length tu.warnings) ++ " boundary warnings");
+      Scry.checkDeadline o startMs "lower";
+      let prog := Wil.program tu.funcs;
+      let pt := Scry.pointsToBounded prog o.maxRounds;
+      Scry.reportStage o startMs "points-to" (Nat.repr (Scry.ptVarCount pt)
+        ++ " vars, " ++ Nat.repr (Scry.ptLocCount pt) ++ " locations, "
+        ++ Nat.repr pt.rounds ++ " round(s)"
+        ++ (match pt.complete with
+          | .true => ""
+          | .false => " (incomplete)"));
+      Scry.checkDeadline o startMs "points-to";
+      let graph := Scry.callGraph prog pt;
+      /-- The C-ABI policy: a non-`static`, non-`main` function with no caller and no
+      address taken is an exported entry, so its parameters are sources. -/
+      let entries := Scry.entrySources prog graph;
+      let sums0 := List.map (fun fn => Scry.Summary.mk fn.name .nil .false .nil) prog.funcs;
+      let summaryFuel := Scry.summaryFuel o prog pt;
+      sums ← Scry.summaryRounds o startMs prog graph pack pt entries summaryFuel 0 sums0;
+      Scry.checkDeadline o startMs "summaries";
+      results ← Scry.evalAllStaged o startMs "results" graph pack pt entries sums.1
+        prog.funcs 0 (List.length prog.funcs);
+      Scry.checkDeadline o startMs "results";
+      let hasLifetime : Bool := match pack.memoryRuleFor "use-after-free" with
+        | .some _ => .true
+        | .none => .false;
+      let warnings := Scry.dedupWarnings (List.filter (Scry.keepMemWarning hasLifetime)
+        (List.append
+          (Scry.concatLists (fun r => r.plan.memWarnings) results)
+          (Scry.concatLists (fun r => Scry.unmodelledWarningsOf prog r) results)));
+      let memoryFindings := Scry.lifetimeFindings prog pt pack;
+      let pr := Scry.ProgramResult.mk results sums.1 graph pt warnings memoryFindings;
+      Scry.reportStage o startMs "analyse" (Nat.repr (List.length results)
+        ++ " function(s), " ++ Nat.repr sums.2.1 ++ " summary round(s)"
+        ++ (match sums.2.2 with
+          | .true => ""
+          | .false => " (incomplete)"));
+      let findings := Scry.programFindings pr;
+      let origins := Scry.originEntries o.file starts tu.funcs;
+      Scry.reportStage o startMs "origins" (Nat.repr (List.length origins) ++ " entries");
+      Scry.checkDeadline o startMs "origins";
+      let boundaries := List.append (Scry.parseRecoveryFindings o.file text cst errs
+        (List.length tu.funcs)) (Scry.boundaryFindings o.file starts tu);
+      let memory := Scry.memoryFindings origins pr.warnings;
+      let certificates := List.map (fun f => Scry.certifyFinding pr f) findings;
+      let checks := List.map Scry.certVerified certificates;
+      let notes := List.append (Scry.pointsToBudgetNotes o.maxRounds pr.pointsTo)
+        (Scry.summariesBudgetNotes o.maxRounds sums.2.1 sums.2.2);
+      let truncated := Bool.or (Bool.not pr.pointsTo.complete) (Bool.not sums.2.2);
+      endMs ← EIO.lift Scry.nowMs;
+      EIO.pure (Scry.TaintReport.mk o.file errs pack tu findings checks certificates origins
+        boundaries memory pr.pointsTo nodes (Nat.sub endMs startMs) truncated sums.2.1
+        sums.2.2 notes)
 
 /-- `(finding, checked)` pairs in the findings' order. -/
 def Scry.zipFindings (fs : List Scry.RuleFinding) (cs : List Bool) :
@@ -840,6 +1093,7 @@ def Scry.runTaint (o : Scry.TaintOpts) : EIO Nat := do
   let boundaries := rep.boundaries;
   let memory := rep.memory;
   let pack := rep.pack;
+  let notes := rep.budgetNotes;
   let checked := Scry.checkedCount checks;
   let unchecked := Nat.sub (List.length findings) checked;
   let fhits : List Scry.DiffHit := match dmOpt with
@@ -875,12 +1129,24 @@ def Scry.runTaint (o : Scry.TaintOpts) : EIO Nat := do
       | .true => Scry.DiffTally.mk (List.length memory) 0 0
       | .false => Scry.diffTally mhits
     | .none => Scry.diffTally mhits;
+
+  let budgetJson := Json.mkObj
+    [ ("nodes", Json.ofNat rep.nodes)
+    , ("truncated", Json.mkBool rep.truncated)
+    , ("pointsToRounds", Json.ofNat rep.pointsTo.rounds)
+    , ("pointsToComplete", Json.mkBool rep.pointsTo.complete)
+    , ("summaryRounds", Json.ofNat rep.summaryRounds)
+    , ("summaryComplete", Json.mkBool rep.summaryComplete)
+    , ("notes", Json.mkArr (List.map (fun n => Json.mkObj
+        [ ("rule", Json.mkStr n.rule), ("message", Json.mkStr n.message) ]) notes)) ];
   unit1 ← (match o.json with
   | .true => EIO.lift (IO.println (Json.render (Json.mkObj (List.append
       [ ("tool", Json.mkStr "scry")
       , ("file", Json.mkStr o.file)
       , ("rules", Json.ofNat (List.length pack.rules))
       , ("parseErrors", Json.ofNat errs)
+      , ("truncated", Json.mkBool rep.truncated)
+      , ("budget", budgetJson)
       , ("findings", Json.mkArr (List.map (fun r => match r.hit with
           | .some h => Scry.findingJsonHit origins r.f r.checked h
           | .none => Scry.findingJson origins r.f r.checked)
@@ -921,22 +1187,32 @@ def Scry.runTaint (o : Scry.TaintOpts) : EIO Nat := do
     unitS ← (match dmOpt with
       | .none => EIO.pure ()
       | .some dm => Scry.printLines (Scry.diffSummaryLines dm ft bt mt));
+    Scry.printBoundaries (List.map (fun n => Scry.BoundaryFinding.mk n.rule n.message
+      "<budget>" 0 .none) notes);
     Scry.taintSay ("taint: " ++ Nat.repr (List.length findings) ++ " finding(s), "
       ++ Nat.repr checked ++ " checked, " ++ Nat.repr unchecked ++ " unchecked, "
       ++ Nat.repr (List.length boundaries) ++ " boundary warning(s), "
-      ++ Nat.repr (List.length memory) ++ " memory warning(s)");
+      ++ Nat.repr (List.length memory) ++ " memory warning(s)"
+      ++ (match rep.truncated with
+        | .true => " [truncated: " ++ Nat.repr (List.length notes) ++ " budget note(s)]"
+        | .false => ""));
     unit3 ← (match o.showOriginMap with
       | .true => Scry.taintSay ("origin map:\n" ++ Scry.renderOriginMap origins)
       | .false => EIO.pure ());
     EIO.pure ());
   unit4 ← (match o.sarif with
   | .some out => do
+    let notesBoundary := List.map (fun n => Scry.BoundaryFinding.mk n.rule n.message
+      "<budget>" 0 .none) notes;
     let sarifText := Scry.renderSarifWithBaselines "scry" origins pack
       (List.map (fun r => Scry.SarifFinding.mk r.f r.checked
         (Scry.baselineOfRow dmOpt r.hit)) frows)
-      (List.map (fun r => Scry.boundaryResultJsonFull r.w.rule r.w.origin r.w.func
-        r.w.point r.w.message o.file
-        (Scry.baselineOfRow dmOpt r.hit)) (List.append brows mrows));
+      (List.append
+        (List.map (fun r => Scry.boundaryResultJsonFull r.w.rule r.w.origin r.w.func
+          r.w.point r.w.message o.file
+          (Scry.baselineOfRow dmOpt r.hit)) (List.append brows mrows))
+        (List.map (fun b => Scry.boundaryResultJsonFull b.rule b.origin b.func b.point
+          b.message o.file .none) notesBoundary));
     FS.writeFile out sarifText;
     EIO.lift (IO.ePrintln ("wrote SARIF 2.1.0: " ++ out ++ " ("
       ++ Nat.repr (List.length findings) ++ " result(s), "
@@ -964,8 +1240,21 @@ def Scry.runTaint (o : Scry.TaintOpts) : EIO Nat := do
   | .true => EIO.pure 1
   | .false => EIO.pure 0
 
+/-- Run `act` with the `--timeout` alarm armed, and always disarm it afterwards (a
+failed parse or a clear deadline refusal must not leave an alarm armed for a later
+command in the same process, which is what the tests do). -/
+def Scry.withTimeout (o : Scry.TaintOpts) (act : EIO Nat) : EIO Nat := do
+  EIO.lift (match o.timeoutSecs with
+    | .some s => Scry.Native.installTimeout s
+    | .none => IO.pure ());
+  raw ← EIO.lift act;
+  EIO.lift Scry.Native.cancelTimeout;
+  match raw with
+  | .ok n => EIO.pure n
+  | .error e => EIO.fail e
+
 /-- `scry taint …`. -/
 def Scry.taintCmd (args : List String) : EIO Nat :=
   match Scry.taintArgs args with
-  | .ok o => Scry.runTaint o
+  | .ok o => Scry.withTimeout o (Scry.runTaint o)
   | .error e => EIO.fail e

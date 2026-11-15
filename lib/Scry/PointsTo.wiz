@@ -472,6 +472,19 @@ def Scry.ptStep (p : Wil.Program) (st : Scry.PtState) : Scry.PtState :=
 def Scry.totalPoints (p : Wil.Program) : Nat :=
   List.foldr (fun fn acc => Nat.add acc (Scry.flatten fn).count) 0 p.funcs
 
+/-- `ptLoop`, also reporting whether it reached a fixpoint (`complete`) and how many
+rounds it ran. A `complete = false` result is a **sound partial** solution: the sets are
+a lower bound, so every finding derived from them is real, but recall may be reduced. -/
+partial def Scry.ptLoopB (p : Wil.Program) (fuel : Nat) (st : Scry.PtState)
+    (rounds : Nat) : Scry.PtState × Nat × Bool :=
+  match fuel with
+  | .zero => (st, rounds, .false)
+  | .succ k =>
+    let st' := Scry.ptStep p st;
+    match Scry.stateEq st st' with
+    | .true => (st', Nat.succ rounds, .true)
+    | .false => Scry.ptLoopB p k st' (Nat.succ rounds)
+
 partial def Scry.ptLoop (p : Wil.Program) (fuel : Nat) (st : Scry.PtState) : Scry.PtState :=
   match fuel with
   | .zero => st
@@ -519,6 +532,32 @@ def Scry.ptSolve (p : Wil.Program) : Scry.PtState :=
   | .true => st
   | .false => Scry.ptLoop p fuel st2
 
+/-- `ptSolve` with an explicit round cap: the result, the number of rounds it ran, and
+whether it converged. `none` keeps the historical `2 * program points + 8` bound (which
+is finite but far too large for a million-point file); `some n` is the `--max-rounds`
+contract. Exhausting the cap is reported, never hidden. -/
+def Scry.ptSolveBounded (p : Wil.Program) (maxRounds : Option Nat) :
+    Scry.PtState × Nat × Bool :=
+  match maxRounds with
+  | .none =>
+    let fuel := Nat.add 8 (Nat.mul 2 (Scry.totalPoints p));
+    let r := Scry.ptLoopB p fuel Scry.ptEmpty 0;
+    let st2 := Scry.ptSeeds p r.1;
+    match Scry.stateEq r.1 st2 with
+    | .true => (r.1, r.2.1, r.2.2)
+    | .false =>
+      let r2 := Scry.ptLoopB p fuel st2 r.2.1;
+      (r2.1, r2.2.1, Bool.and r.2.2 r2.2.2)
+  | .some cap =>
+    let r := Scry.ptLoopB p cap Scry.ptEmpty 0;
+    let st2 := Scry.ptSeeds p r.1;
+    match Scry.stateEq r.1 st2 with
+    | .true => (r.1, r.2.1, r.2.2)
+    | .false =>
+      let left := Nat.sub cap r.2.1;
+      let r2 := Scry.ptLoopB p left st2 r.2.1;
+      (r2.1, r2.2.1, Bool.and r.2.2 r2.2.2)
+
 -- ## The location table and ids
 
 /-- Every location the solution mentions, deduplicated. -/
@@ -557,6 +596,11 @@ structure Scry.PtResult where
   state : Scry.PtState
   locs : List Scry.Loc
   indirect : List (Scry.CallKey × Scry.IndirectTargets)
+  /-- The number of fixpoint rounds the solution took. -/
+  rounds : Nat
+  /-- False when the round cap stopped the fixpoint before it converged. The sets are
+  then a lower bound: findings are real, recall is reduced, and the caller must say so. -/
+  complete : Bool
 
 def Scry.locId (r : Scry.PtResult) (l : Scry.Loc) : Option Nat := Scry.locIdFrom l 0 r.locs
 
@@ -624,8 +668,9 @@ def Scry.ptVarCount (r : Scry.PtResult) : Nat :=
 def Scry.ptLocCount (r : Scry.PtResult) : Nat := List.length r.locs
 
 /-- The whole analysis: solve, build the table, resolve the indirect calls. -/
-def Scry.pointsTo (p : Wil.Program) : Scry.PtResult :=
-  let st := Scry.ptSolve p;
+def Scry.pointsToBounded (p : Wil.Program) (maxRounds : Option Nat) : Scry.PtResult :=
+  let solved := Scry.ptSolveBounded p maxRounds;
+  let st := solved.1;
   let locs := Scry.locSort (Scry.locTable st);
   let indirect := Scry.concatLists (fun fn =>
     let g := Scry.flatten fn;
@@ -638,4 +683,8 @@ def Scry.pointsTo (p : Wil.Program) : Scry.PtResult :=
           | .indirect v => .cons (Scry.CallKey.mk fn.name n,
               Scry.targetsOf (Scry.ptGet st (Scry.vk fn.name v.index))) .nil
         | _ => .nil) (Scry.range g.count)) p.funcs;
-  Scry.PtResult.mk st locs indirect
+  Scry.PtResult.mk st locs indirect solved.2.1 solved.2.2
+
+/-- The default analysis: the historical (finite) round bound. -/
+def Scry.pointsTo (p : Wil.Program) : Scry.PtResult :=
+  Scry.pointsToBounded p .none
