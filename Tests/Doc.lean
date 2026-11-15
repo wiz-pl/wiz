@@ -116,6 +116,15 @@ def brokenLinks (out : System.FilePath) : IO (Array String) := do
           broken := broken.push s!"{f.fileName.getD ""}: {target}"
   pure broken
 
+/-- The rows of `search.js`, if it is the generated index. -/
+def searchRows? (js : String) : Option (Array Lean.Json) := do
+  let some json := (js.splitOn "window.wizSearchIndex = ")[1]? | none
+  let .ok (.arr rows) := Lean.Json.parse ((json.trimAscii.dropEnd 1).toString) | none
+  pure rows
+
+/-- A string field of an index row (`""` if missing). -/
+def field (j : Lean.Json) (k : String) : String := (j.getObjValAs? String k).toOption.getD ""
+
 def runOut (cmd : String) (args : List String) (cwd : Option System.FilePath := none) : IO String := do
   let o ← IO.Process.output { cmd, args := args.toArray, cwd }
   unless o.exitCode == 0 do throw (IO.userError s!"{cmd} {args}: exit {o.exitCode}\n{o.stdout}\n{o.stderr}")
@@ -226,6 +235,9 @@ def docGroup : Group where
         let out ← makeSite dir
         let broken ← brokenLinks out
         check broken.isEmpty s!"broken links: {broken}"
+        let api ← IO.FS.readFile (out / "api.html")
+        checkHas api "href=\"Shapes.Basic.html#Shape\""
+        checkHas api "href=\"Shapes.Use.html#twice\""
         let idx ← IO.FS.readFile (out / "search.js")
         let some json := (idx.splitOn "window.wizSearchIndex = ")[1]? | throw (IO.userError "no index")
         let .ok (.arr rows) := Lean.Json.parse ((json.trimAscii.dropEnd 1).toString) | throw (IO.userError "index is not JSON")
@@ -239,6 +251,41 @@ def docGroup : Group where
           for part in (html.splitOn "<div class=\"decl\" id=\"").drop 1 do
             let n := (part.splitOn "\"").headD ""
             check (names.contains n) s!"{n} ({page}) is not in the index" },
+    { name := "wiz doc: the API index and api.json list every module and declaration; search covers docs and signatures", run := fun _ => do
+        let dir ← mkTree pkgFiles
+        let out ← makeSite dir
+        let api ← IO.FS.readFile (out / "api.html")
+        for frag in ["<h1>API index</h1>", "id=\"module-Shapes.Basic\"", "id=\"module-Shapes.Use\"",
+            "href=\"Shapes.Basic.html#Shape\"", "href=\"Shapes.Use.html#twice\"",
+            "href=\"index.html\"", "class=\"api-sig\"", "class=\"lede\""] do
+          checkHas api frag
+        -- the signature on the index retains its cross-links (to the module's page)
+        checkHas api "<a href=\"Shapes.Basic.html#Shape\">Shape</a>"
+        -- api.json is the same index, for machines
+        let text ← IO.FS.readFile (out / "api.json")
+        let .ok j := Lean.Json.parse text | throw (IO.userError "api.json is not JSON")
+        let some (.arr mods) := (j.getObjVal? "modules").toOption | throw (IO.userError "api.json has no modules")
+        checkEq 2 mods.size
+        let some (.arr decls) := (j.getObjVal? "decls").toOption | throw (IO.userError "api.json has no decls")
+        check (decls.size ≥ 16) "api.json lost declarations"
+        let some area := decls.find? (fun d => field d "name" == "Shape.area") | throw (IO.userError "Shape.area is not in api.json")
+        checkEq "Shapes.Basic" (field area "module")
+        checkEq "Shapes.Basic.html#Shape.area" (field area "href")
+        check (has (field area "sig") "Shape") (field area "sig")
+        check (has (field area "doc") "The area of a shape") (field area "doc")
+        -- the search index: modules, declaration docs and signatures
+        let idx ← IO.FS.readFile (out / "search.js")
+        let some rows := searchRows? idx | throw (IO.userError "search.js is not the index")
+        let some modRow := rows.find? (fun r => field r "k" == "module" && field r "n" == "Shapes.Basic")
+          | throw (IO.userError "the module is not searchable")
+        checkEq "Shapes.Basic.html" (field modRow "u")
+        let some areaRow := rows.find? (fun r => field r "n" == "Shape.area")
+          | throw (IO.userError "Shape.area is not in the search index")
+        checkEq "Shapes.Basic.html#Shape.area" (field areaRow "u")
+        check (has (field areaRow "s") "Shape") (field areaRow "s")
+        let some point := rows.find? (fun r => field r "n" == "Point")
+          | throw (IO.userError "Point is not in the search index")
+        check (has (field point "d") "plane") (field point "d") },
     { name := "wiz doc: the pages are complete without JS (no module script without the Wasm); the data is there for it", run := fun _ => do
         let dir ← mkTree pkgFiles
         let out ← makeSite dir
