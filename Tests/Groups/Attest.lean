@@ -80,7 +80,18 @@ def predicate (st : Json) : Json := (st.getObjVal? "predicate").toOption.getD Js
 
 def source (st : Json) : Json := ((predicate st).getObjVal? "source").toOption.getD Json.null
 
-def output (st : Json) : Json := ((predicate st).getObjVal? "output").toOption.getD Json.null
+def builder (st : Json) : Json :=
+  ((predicate st).getObjVal? "builder").toOption.getD Json.null
+
+/-- The artifact entry with `role = "output"`. -/
+def output (st : Json) : Json :=
+  let arts := (Wiz.Attest.arrField? (predicate st) "artifacts").getD #[]
+  arts.find? (fun a => Wiz.Attest.strField? a "role" == some "output") |>.getD Json.null
+
+/-- The artifact entry whose path is `name`. -/
+def artifact (st : Json) (name : String) : Json :=
+  let arts := (Wiz.Attest.arrField? (predicate st) "artifacts").getD #[]
+  arts.find? (fun a => Wiz.Attest.strField? a "path" == some name) |>.getD Json.null
 
 /-- `predicate.toolchain` as an object. -/
 def toolchainPart (st : Json) : Json := ((predicate st).getObjVal? "toolchain").toOption.getD Json.null
@@ -88,6 +99,24 @@ def toolchainPart (st : Json) : Json := ((predicate st).getObjVal? "toolchain").
 def gitDirty (st : Json) : Option Bool :=
   ((source st).getObjVal? "git").toOption.bind fun g =>
     (g.getObjVal? "dirty").toOption.bind fun v => (Json.getBool? v).toOption
+
+/-- The checkout root, from `.lake/build/bin/tests`. -/
+def repoRoot : IO System.FilePath := do
+  let mut p ← IO.FS.realPath (← IO.appPath)
+  for _ in [0:4] do p := p.parent.getD p
+  pure p
+
+def haveCmd (cmd : String) (arg : String) : IO Bool := do
+  try
+    let o ← IO.Process.output { cmd, args := #[arg] }
+    pure (o.exitCode == 0)
+  catch _ => pure false
+
+def runPy (dir : System.FilePath) (script : System.FilePath) (args : List String) :
+    IO (String × String × UInt32) := do
+  let o ← IO.Process.output { cmd := "python3", args := #[script.toString] ++ args.toArray,
+                              cwd := some dir }
+  pure (o.stdout, o.stderr, o.exitCode)
 
 def shaOf (p : System.FilePath) : IO String := do
   pure (Wiz.Smt.Sha256.hexBytes (← IO.FS.readBinFile p))
@@ -117,6 +146,13 @@ def group : Group where
         checkEq "prog" name
         checkEq (← shaOf (dir / "prog")) sha
         checkEq (some sha) (Wiz.Attest.strField? (output st) "sha256")
+        checkEq (some Wiz.Attest.schema) (Wiz.Attest.strField? (predicate st) "schema")
+        checkEq (some Wiz.Attest.buildType) (Wiz.Attest.strField? (predicate st) "buildType")
+        checkEq (some "wiz-build") (Wiz.Attest.strField? (builder st) "kind")
+        check ((Wiz.Attest.strField? (predicate st) "target").isSome) "no target triple"
+        checkEq (some (← (dir / "prog").metadata).byteSize.toNat)
+          (Wiz.Attest.natField? (output st) "size")
+        checkEq (← shaOf (dir / "prog.c")) ((Wiz.Attest.strField? (artifact st "prog.c") "sha256").getD "")
         let ins := inputs st
         check (ins.size == 4) s!"expected 4 inputs, got {ins.size}"
         check (ins.any fun i => Wiz.Attest.strField? i "role" == some "source") "no source input"
@@ -218,7 +254,53 @@ def group : Group where
         IO.FS.writeFile (dir / "forged.json") (forged.compress ++ "\n")
         let (_, verr, vcode) ← verify dir tc "forged.json" "prog"
         check (vcode == 1) "a forged signature was accepted"
-        check ((verr.splitOn "signature verification is not implemented").length > 1) verr }
+        check ((verr.splitOn "wiz-verify").length > 1) verr },
+    { name := "wiz-attest signs the emitted statement; wiz-verify checks it", run := fun _ => do
+        unless (← haveCmd "python3" "--version") do skip "python3 is not installed"; return
+        unless (← haveCmd "which" "ssh-keygen") do skip "ssh-keygen is not installed"; return
+        let root ← repoRoot
+        let att := root / "scripts" / "attest" / "wiz-attest"
+        let ver := root / "scripts" / "attest" / "wiz-verify"
+        let (dir, tc, cache) ← project
+        let (_, _, code) ← build dir tc cache
+        if code != 0 then skip "no toolchain"; return
+        let key := dir / "attest-key"
+        let (_, kerr, kcode) ← runPy dir att ["keygen", "--key", key.toString]
+        if kcode != 0 then throw (IO.userError s!"keygen failed: {kerr}")
+        let (_, serr, scode) ← runPy dir att
+          ["sign", "--attest", "prog.attest.json", "--key", key.toString,
+           "--out", "prog.signed.json"]
+        check (scode == 0) s!"sign failed: {serr}"
+        let modRoot := "--module-root"
+        let lib := (root / "lib").toString
+        let (sout, serr, scode) ← runPy dir ver
+          ["--attest", "prog.signed.json", "--public-key", key.toString ++ ".pub",
+           "--statement-only", modRoot, lib, "--json"]
+        check (scode == 0) s!"signed verify failed: {serr}{sout}"
+        check ((sout.splitOn "\"status\": \"verified\"").length > 1) sout
+        -- an unsigned producer envelope is refused by default, accepted explicitly
+        let (_, _, ucode) ← runPy dir ver
+          ["--attest", "prog.attest.json", "--statement-only", modRoot, lib, "--json"]
+        check (ucode == 1) "an unsigned statement verified without --allow-unsigned"
+        let (_, uerr, ucode2) ← runPy dir ver
+          ["--attest", "prog.attest.json", "--statement-only", modRoot, lib,
+           "--allow-unsigned", "--json"]
+        check (ucode2 == 0) s!"--allow-unsigned failed: {uerr}"
+        -- a wrong key fails
+        let other := dir / "other-key"
+        let (_, _, okc) ← runPy dir att ["keygen", "--key", other.toString]
+        check (okc == 0) "second keygen failed"
+        let (_, _, wcode) ← runPy dir ver
+          ["--attest", "prog.signed.json", "--public-key", other.toString ++ ".pub",
+           "--statement-only", modRoot, lib, "--json"]
+        check (wcode == 1) "a wrong key verified"
+        -- tampered generated C fails (it is an artifact, not only the executable)
+        let cFile := dir / "prog.c"
+        IO.FS.writeFile cFile ((← IO.FS.readFile cFile) ++ "/* tampered */\n")
+        let (_, terr, tcode) ← runPy dir ver
+          ["--attest", "prog.signed.json", "--public-key", key.toString ++ ".pub",
+           "--statement-only", modRoot, lib, "--json"]
+        check (tcode == 1) s!"a tampered byproduct verified: {terr}" }
   ]
 
 builtin_initialize registerGroup group

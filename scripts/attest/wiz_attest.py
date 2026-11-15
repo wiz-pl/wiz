@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import datetime
 import hashlib
 import json
@@ -58,10 +59,11 @@ RESULT_SCHEMA = "wiz-attestation-result/v1"
 # DSSE / in-toto statement signing.  The signature is an OpenSSH SSHSIG made by
 # `ssh-keygen -Y sign` with an offline Ed25519 key; the payload is the canonical
 # in-toto statement, and the signature is over the DSSE PAE, not the payload
-# alone.
+# alone.  The statement's predicate is the one manifest body `wiz build --attest`
+# emits (Wiz/Attest.lean); there is no second manifest format.
 DSSE_PAYLOAD_TYPE = "application/vnd.in-toto+json"
 STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
-PREDICATE_TYPE = "https://wiz-lang.dev/attestation/build-manifest/v1"
+PREDICATE_TYPE = "https://wiz-lang.org/attestation/wiz-build/v1"
 DSSE_NAMESPACE = "wiz-attest-dsse"
 DSSE_KEY_IDENTITY = "wiz-attest"
 ENVELOPE_NAME = "manifest.intoto.json"
@@ -69,7 +71,7 @@ DETACHED_SUFFIX = ".sig"
 SIGSTORE_BUNDLE_SUFFIX = ".cosign.bundle"
 KEY_SCHEMA = "wiz-attest-key/v1"
 SIGN_RESULT_SCHEMA = "wiz-attest-sign-result/v1"
-BUILD_TYPE = "https://wiz-lang.dev/buildtypes/wiz-build/v1"
+BUILD_TYPE = "https://wiz-lang.org/buildtypes/wiz-build/v1"
 QUOTE_LABEL = b"wiz-quote-v1"
 
 BANK = "sha256"
@@ -234,13 +236,27 @@ def tree_digest(roots: Iterable[str]) -> tuple[str, list[str], int]:
 
 _MANIFEST_KEYS = {
     "schema",
-    "artifacts",
-    "wiz",
-    "source",
-    "target",
-    "pcr",
+    "buildType",
+    "format",
     "builder",
+    "target",
+    "source",
+    "inputsRoot",
+    "inputs",
+    "headers",
+    "toolchain",
+    "flags",
+    "artifacts",
+    "environment",
+    "prev",
+    "valid_until",
 }
+_REQUIRED_MANIFEST_KEYS = {
+    "schema", "buildType", "format", "builder", "target", "source",
+    "inputsRoot", "inputs", "artifacts",
+}
+_INPUT_ROLES = {"source", "module", "link-c", "tree"}
+_ARTIFACT_ROLES = {"output", "byproduct"}
 
 
 def _is_int(value: Any) -> bool:
@@ -250,6 +266,11 @@ def _is_int(value: Any) -> bool:
 def _expect(condition: bool, message: str) -> None:
     if not condition:
         raise SchemaError(message)
+
+
+def _expect_hex64(value: Any, what: str) -> None:
+    _expect(isinstance(value, str) and _HEX64.match(value) is not None,
+            f"{what} must be 64 lowercase hex characters")
 
 
 def _normalize_relative(path: str, what: str) -> str:
@@ -263,81 +284,191 @@ def _normalize_relative(path: str, what: str) -> str:
     return path
 
 
+def _validate_tool(value: Any, what: str) -> None:
+    _expect(isinstance(value, dict), f"{what} must be an object")
+    unknown = set(value) - {"path", "sha256", "version"}
+    missing = {"path", "sha256"} - set(value)
+    _expect(not unknown, f"unknown {what} fields: {', '.join(sorted(unknown))}")
+    _expect(not missing, f"missing {what} fields: {', '.join(sorted(missing))}")
+    _expect(isinstance(value["path"], str) and value["path"] != "",
+            f"{what}.path must be a non-empty string")
+    _expect_hex64(value["sha256"], f"{what}.sha256")
+    if "version" in value:
+        _expect(isinstance(value["version"], str), f"{what}.version must be a string")
+
+
+def _validate_flag_value(value: Any, where: str) -> None:
+    if isinstance(value, (str, bool)) or _is_int(value):
+        return
+    if isinstance(value, list):
+        _expect(all(isinstance(v, str) for v in value),
+                f"{where} must be a string or an array of strings")
+        return
+    raise SchemaError(f"{where} must be a string, integer, boolean or array of strings")
+
+
 def validate_manifest(obj: Any) -> None:
-    """Raise SchemaError unless `obj` is a valid `SCHEMA` manifest."""
+    """Raise SchemaError unless `obj` is a canonical `SCHEMA` manifest.
+
+    This is the **one** manifest body: the predicate of the in-toto Statement that
+    `wiz build --attest` emits.  `wiz-attest sign` wraps and signs this body,
+    `wiz-verify` checks the signed body, the artifacts and (optionally) the quote.
+    """
     _expect(isinstance(obj, dict), "manifest must be a JSON object")
     keys = set(obj)
     unknown = keys - _MANIFEST_KEYS
-    missing = {"schema", "artifacts", "wiz", "source", "target", "pcr", "builder"} - keys
+    missing = _REQUIRED_MANIFEST_KEYS - keys
     _expect(not unknown, f"unknown manifest fields: {', '.join(sorted(unknown))}")
     _expect(not missing, f"missing manifest fields: {', '.join(sorted(missing))}")
     _expect(obj["schema"] == SCHEMA, f"schema must be {SCHEMA!r}")
+    _expect(obj["buildType"] == BUILD_TYPE, f"buildType must be {BUILD_TYPE!r}")
+    _expect(_is_int(obj["format"]) and obj["format"] == 1,
+            "format must be the integer 1")
 
-    artifacts = obj["artifacts"]
-    _expect(isinstance(artifacts, list) and artifacts, "artifacts must be a non-empty array")
-    paths: list[str] = []
-    for i, art in enumerate(artifacts):
-        _expect(isinstance(art, dict) and set(art) == {"path", "size", "sha256"},
-                f"artifacts[{i}] must have exactly path, size, sha256")
-        path = _normalize_relative(art["path"], f"artifacts[{i}].path")
-        _expect(_is_int(art["size"]) and art["size"] >= 0,
-                f"artifacts[{i}].size must be a non-negative integer")
-        _expect(isinstance(art["sha256"], str) and _HEX64.match(art["sha256"]) is not None,
-                f"artifacts[{i}].sha256 must be 64 lowercase hex characters")
-        paths.append(path)
-    _expect(paths == sorted(paths), "artifacts must be sorted by path")
-    _expect(len(paths) == len(set(paths)), "artifact paths must be unique")
-
-    wiz = obj["wiz"]
-    _expect(isinstance(wiz, dict), "wiz must be an object")
-    unknown = set(wiz) - {"version", "commit", "binary_sha256"}
-    _expect(not unknown, f"unknown wiz fields: {', '.join(sorted(unknown))}")
-    _expect(isinstance(wiz.get("version"), str) and 0 < len(wiz["version"]) <= 128,
-            "wiz.version must be a non-empty string")
-    if "commit" in wiz:
-        _expect(re.fullmatch(r"[0-9a-f]{7,64}", wiz["commit"]) is not None,
-                "wiz.commit must be 7-64 lowercase hex characters")
-    if "binary_sha256" in wiz:
-        _expect(isinstance(wiz["binary_sha256"], str)
-                and _HEX64.match(wiz["binary_sha256"]) is not None,
-                "wiz.binary_sha256 must be 64 lowercase hex characters")
-
-    source = obj["source"]
-    _expect(isinstance(source, dict), "source must be an object")
-    _expect(set(source) == {"entry", "sha256", "tree_sha256", "tree_roots"},
-            "source must have exactly entry, sha256, tree_sha256, tree_roots")
-    _normalize_relative(source["entry"], "source.entry")
-    _expect(isinstance(source["sha256"], str) and _HEX64.match(source["sha256"]) is not None,
-            "source.sha256 must be 64 lowercase hex characters")
-    _expect(isinstance(source["tree_sha256"], str)
-            and _HEX64.match(source["tree_sha256"]) is not None,
-            "source.tree_sha256 must be 64 lowercase hex characters")
-    roots = source["tree_roots"]
-    _expect(isinstance(roots, list), "source.tree_roots must be an array")
-    normalized_roots = [_normalize_relative(r, "source.tree_roots[]") for r in roots]
-    _expect(normalized_roots == sorted(normalized_roots), "source.tree_roots must be sorted")
-    _expect(len(normalized_roots) == len(set(normalized_roots)),
-            "source.tree_roots must be unique")
+    builder = obj["builder"]
+    _expect(isinstance(builder, dict), "builder must be an object")
+    _expect(set(builder) <= {"kind", "name", "version"}, "unknown builder fields")
+    _expect(builder.get("kind") == "wiz-build",
+            "builder.kind must be \"wiz-build\" (the TPM quote is not the builder)")
 
     target = obj["target"]
     _expect(isinstance(target, str) and 0 < len(target) <= 128
             and all(32 <= ord(c) < 127 for c in target),
             "target must be a non-empty printable string (a target triple)")
 
-    pcr = obj["pcr"]
-    _expect(isinstance(pcr, dict) and set(pcr) == {"bank", "indices"},
-            "pcr must have exactly bank and indices")
-    _expect(pcr["bank"] == BANK, f"pcr.bank must be {BANK!r}")
-    indices = pcr["indices"]
-    _expect(isinstance(indices, list) and indices, "pcr.indices must be a non-empty array")
-    _expect(all(_is_int(i) and 0 <= i <= MAX_PCR for i in indices),
-            f"pcr.indices must be integers 0..{MAX_PCR}")
-    _expect(indices == sorted(indices), "pcr.indices must be sorted")
-    _expect(len(indices) == len(set(indices)), "pcr.indices must be unique")
+    source = obj["source"]
+    _expect(isinstance(source, dict), "source must be an object")
+    unknown = set(source) - {"file", "sha256", "git"}
+    missing = {"file", "sha256"} - set(source)
+    _expect(not unknown, f"unknown source fields: {', '.join(sorted(unknown))}")
+    _expect(not missing, f"missing source fields: {', '.join(sorted(missing))}")
+    _expect(isinstance(source["file"], str) and source["file"] != "",
+            "source.file must be a non-empty string")
+    _expect_hex64(source["sha256"], "source.sha256")
+    if "git" in source:
+        git = source["git"]
+        _expect(isinstance(git, dict) and set(git) == {"commit", "dirty"},
+                "source.git must have exactly commit and dirty")
+        _expect(isinstance(git["commit"], str)
+                and re.fullmatch(r"[0-9a-f]{7,64}", git["commit"]) is not None,
+                "source.git.commit must be 7-64 lowercase hex characters")
+        _expect(isinstance(git["dirty"], bool), "source.git.dirty must be a boolean")
 
-    builder = obj["builder"]
-    _expect(builder == {"kind": "tpm2-quote"},
-            "builder must be {\"kind\": \"tpm2-quote\"}")
+    inputs = obj["inputs"]
+    _expect(isinstance(inputs, list) and inputs, "inputs must be a non-empty array")
+    input_keys: list[tuple[str, str, str]] = []
+    for i, item in enumerate(inputs):
+        _expect(isinstance(item, dict), f"inputs[{i}] must be an object")
+        unknown = set(item) - {"role", "sha256", "name", "path"}
+        _expect(not unknown,
+                f"unknown inputs[{i}] fields: {', '.join(sorted(unknown))}")
+        role = item.get("role")
+        _expect(role in _INPUT_ROLES, f"inputs[{i}].role must be one of "
+                f"{', '.join(sorted(_INPUT_ROLES))}")
+        _expect_hex64(item.get("sha256"), f"inputs[{i}].sha256")
+        name = item.get("name", "")
+        path = item.get("path", "")
+        _expect(isinstance(name, str) and isinstance(path, str),
+                f"inputs[{i}].name/path must be strings")
+        if role == "module":
+            _expect(name != "", f"inputs[{i}] (module) needs a name")
+            _expect(path == "", f"inputs[{i}] (module) must not have a path")
+        else:
+            _expect(path != "", f"inputs[{i}] ({role}) needs a path")
+            _expect(name == "", f"inputs[{i}] ({role}) must not have a name")
+        input_keys.append((role, name, path))
+    _expect(input_keys == sorted(input_keys), "inputs must be sorted by role, name, path")
+    _expect(len(input_keys) == len(set(input_keys)), "inputs must be unique")
+
+    root = obj["inputsRoot"]
+    _expect(isinstance(root, str)
+            and re.fullmatch(r"sha256:[0-9a-f]{64}", root) is not None,
+            "inputsRoot must be sha256: followed by 64 lowercase hex characters")
+
+    headers = obj.get("headers", [])
+    _expect(isinstance(headers, list)
+            and all(isinstance(h, str) and h != "" for h in headers),
+            "headers must be an array of non-empty strings")
+    _expect(headers == sorted(headers), "headers must be sorted")
+    _expect(len(headers) == len(set(headers)), "headers must be unique")
+
+    if "toolchain" in obj:
+        toolchain = obj["toolchain"]
+        _expect(isinstance(toolchain, dict), "toolchain must be an object")
+        unknown = set(toolchain) - {"wiz", "cc", "llc"}
+        _expect(not unknown,
+                f"unknown toolchain fields: {', '.join(sorted(unknown))}")
+        if "wiz" in toolchain:
+            wiz = toolchain["wiz"]
+            _expect(isinstance(wiz, dict), "toolchain.wiz must be an object")
+            unknown = set(wiz) - {"version", "sha256", "revision"}
+            missing = {"version"} - set(wiz)
+            _expect(not unknown, f"unknown toolchain.wiz fields: "
+                    f"{', '.join(sorted(unknown))}")
+            _expect(not missing, "toolchain.wiz.version is required")
+            _expect(isinstance(wiz["version"], str) and 0 < len(wiz["version"]) <= 128,
+                    "toolchain.wiz.version must be a non-empty string")
+            if "sha256" in wiz:
+                _expect_hex64(wiz["sha256"], "toolchain.wiz.sha256")
+            if "revision" in wiz:
+                _expect(isinstance(wiz["revision"], str)
+                        and re.fullmatch(r"[0-9a-f]{7,64}", wiz["revision"]) is not None,
+                        "toolchain.wiz.revision must be 7-64 lowercase hex characters")
+        if "cc" in toolchain:
+            _validate_tool(toolchain["cc"], "toolchain.cc")
+        if "llc" in toolchain:
+            _validate_tool(toolchain["llc"], "toolchain.llc")
+
+    flags = obj.get("flags", {})
+    _expect(isinstance(flags, dict), "flags must be an object")
+    for key, value in flags.items():
+        _expect(isinstance(key, str) and key != "", "flag names must be non-empty strings")
+        _validate_flag_value(value, f"flags.{key}")
+
+    artifacts = obj["artifacts"]
+    _expect(isinstance(artifacts, list) and artifacts,
+            "artifacts must be a non-empty array")
+    paths: list[str] = []
+    outputs = 0
+    for i, art in enumerate(artifacts):
+        _expect(isinstance(art, dict), f"artifacts[{i}] must be an object")
+        unknown = set(art) - {"path", "role", "kind", "size", "sha256"}
+        missing = {"path", "role", "size", "sha256"} - set(art)
+        _expect(not unknown,
+                f"unknown artifacts[{i}] fields: {', '.join(sorted(unknown))}")
+        _expect(not missing,
+                f"missing artifacts[{i}] fields: {', '.join(sorted(missing))}")
+        path = _normalize_relative(art["path"], f"artifacts[{i}].path")
+        role = art["role"]
+        _expect(role in _ARTIFACT_ROLES,
+                f"artifacts[{i}].role must be output or byproduct")
+        if role == "output":
+            outputs += 1
+        if "kind" in art:
+            _expect(isinstance(art["kind"], str) and art["kind"] != "",
+                    f"artifacts[{i}].kind must be a non-empty string")
+        _expect(_is_int(art["size"]) and art["size"] >= 0,
+                f"artifacts[{i}].size must be a non-negative integer")
+        _expect_hex64(art["sha256"], f"artifacts[{i}].sha256")
+        paths.append(path)
+    _expect(outputs == 1, "artifacts must contain exactly one output")
+    _expect(paths == sorted(paths), "artifacts must be sorted by path")
+    _expect(len(paths) == len(set(paths)), "artifact paths must be unique")
+
+    environment = obj.get("environment", {})
+    _expect(isinstance(environment, dict), "environment must be an object")
+    if "platform" in environment:
+        _expect(isinstance(environment["platform"], str),
+                "environment.platform must be a string")
+
+    if "prev" in obj:
+        _expect_hex64(obj["prev"], "prev")
+    if "valid_until" in obj:
+        _expect(isinstance(obj["valid_until"], str), "valid_until must be a string")
+        try:
+            _iso_utc(obj["valid_until"], "valid_until")
+        except UsageError as exc:
+            raise SchemaError(str(exc)) from None
 
 
 def validate_policy(obj: Any) -> dict[str, Any]:
@@ -388,6 +519,29 @@ def validate_policy(obj: Any) -> dict[str, Any]:
     return result
 
 
+def input_sort_key(item: dict[str, Any]) -> tuple[str, str, str]:
+    return (item.get("role", ""), item.get("name", ""), item.get("path", ""))
+
+
+def inputs_root(inputs: Sequence[dict[str, Any]]) -> str:
+    """SHA-256 over `wiz-inputs-v1` plus one tab-separated line per input.
+
+    This is the same root `Wiz/Attest.lean` computes, so a statement emitted by
+    `wiz build --attest` and one built by the Python producer agree.
+    """
+    lines = []
+    for item in sorted(inputs, key=input_sort_key):
+        lines.append(
+            f"{item['role']}\t{item.get('name', '')}\t{item.get('path', '')}"
+            f"\t{item['sha256']}\n"
+        )
+    return "sha256:" + sha256_bytes(("wiz-inputs-v1\n" + "".join(lines)).encode("utf-8"))
+
+
+def _artifact_role(path: str) -> str:
+    return "byproduct" if Path(path).suffix in (".c", ".h", ".ll") else "output"
+
+
 def build_manifest(
     *,
     artifacts: Sequence[dict[str, Any]],
@@ -396,30 +550,50 @@ def build_manifest(
     wiz_binary_sha256: str | None,
     source_entry: str,
     source_sha256: str,
-    tree_sha256: str,
-    tree_roots: Sequence[str],
     target: str,
-    pcr_indices: Sequence[int],
+    inputs: Sequence[dict[str, Any]] | None = None,
+    tree_sha256: str | None = None,
+    tree_roots: Sequence[str] = (),
+    pcr_indices: Sequence[int] = (),
 ) -> dict[str, Any]:
-    """Assemble a manifest object (validated before it is returned)."""
+    """Assemble the canonical manifest body (validated before it is returned).
+
+    `inputs` is the input manifest (`role`, `sha256`, plus `name` for a module or
+    `path` for a file).  The legacy `tree_sha256`/`tree_roots`/`pcr_indices`
+    arguments are accepted for callers of the old API; the PCR selection now
+    belongs to the policy and quote, not the build claim.
+    """
+    del tree_sha256, tree_roots, pcr_indices  # quote policy is not a build fact
     wiz: dict[str, Any] = {"version": wiz_version}
     if wiz_commit:
-        wiz["commit"] = wiz_commit
+        wiz["revision"] = wiz_commit
     if wiz_binary_sha256:
-        wiz["binary_sha256"] = wiz_binary_sha256
+        wiz["sha256"] = wiz_binary_sha256
+    if inputs is None:
+        inputs = [{"role": "source", "path": source_entry,
+                   "sha256": source_sha256}]
+    normalized_artifacts: list[dict[str, Any]] = []
+    for art in artifacts:
+        entry = {
+            "path": art["path"],
+            "role": art.get("role") or _artifact_role(art["path"]),
+            "size": art["size"],
+            "sha256": art["sha256"],
+        }
+        if art.get("kind"):
+            entry["kind"] = art["kind"]
+        normalized_artifacts.append(entry)
     manifest: dict[str, Any] = {
         "schema": SCHEMA,
-        "artifacts": sorted(artifacts, key=lambda a: a["path"]),
-        "wiz": wiz,
-        "source": {
-            "entry": source_entry,
-            "sha256": source_sha256,
-            "tree_sha256": tree_sha256,
-            "tree_roots": sorted(tree_roots),
-        },
+        "buildType": BUILD_TYPE,
+        "format": 1,
+        "builder": {"kind": "wiz-build"},
         "target": target,
-        "pcr": {"bank": BANK, "indices": sorted(pcr_indices)},
-        "builder": {"kind": "tpm2-quote"},
+        "source": {"file": source_entry, "sha256": source_sha256},
+        "inputsRoot": inputs_root(inputs),
+        "inputs": sorted(inputs, key=input_sort_key),
+        "artifacts": sorted(normalized_artifacts, key=lambda a: a["path"]),
+        "toolchain": {"wiz": wiz},
     }
     validate_manifest(manifest)
     return manifest
@@ -896,40 +1070,30 @@ def _valid_until_expired(value: str, *, now: datetime.datetime | None = None) ->
     return current > when
 
 
-def build_statement(manifest: dict[str, Any], manifest_digest: str, *,
+def statement_subject(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {"name": art["path"], "digest": {"sha256": art["sha256"]}}
+        for art in manifest["artifacts"]
+    ]
+
+
+def build_statement(manifest: dict[str, Any], manifest_digest: str | None = None, *,
                     prev: str | None = None,
                     valid_until: str | None = None) -> dict[str, Any]:
-    """Wrap the manifest in an in-toto Statement v1 (the signed root)."""
-    predicate: dict[str, Any] = {
-        "schema": SCHEMA,
-        "buildType": BUILD_TYPE,
-        "externalParameters": {
-            "entry": manifest["source"]["entry"],
-            "target": manifest["target"],
-        },
-        "resolvedDependencies": [
-            {"uri": "wiz:source",
-             "digest": {"sha256": manifest["source"]["tree_sha256"]}},
-        ],
-        "byproducts": [],
-        "manifest": manifest,
-        "manifest_sha256": manifest_digest,
-    }
-    if manifest["wiz"].get("binary_sha256"):
-        predicate["resolvedDependencies"].append({
-            "uri": "wiz:binary",
-            "digest": {"sha256": manifest["wiz"]["binary_sha256"]},
-        })
+    """Wrap the canonical manifest in an in-toto Statement v1 (the signed root).
+
+    The predicate *is* the manifest body; `manifest_digest` is accepted for old
+    callers but is not embedded (the statement digest is what a quote binds).
+    """
+    del manifest_digest
+    predicate = copy.deepcopy(manifest)
     if prev is not None:
         predicate["prev"] = prev
     if valid_until is not None:
         predicate["valid_until"] = valid_until
     return {
         "_type": STATEMENT_TYPE,
-        "subject": [
-            {"name": art["path"], "digest": {"sha256": art["sha256"]}}
-            for art in manifest["artifacts"]
-        ],
+        "subject": statement_subject(manifest),
         "predicateType": PREDICATE_TYPE,
         "predicate": predicate,
     }
@@ -961,6 +1125,66 @@ def _sigstore_bundle(envelope_path: Path, bundle_path: Path, *,
     _run(cmd, what="cosign sign-blob", timeout=300)
 
 
+def validate_statement(statement: Any, manifest: dict[str, Any]) -> None:
+    """Raise SchemaError unless `statement` is the canonical wrapper of `manifest`."""
+    _expect(isinstance(statement, dict), "statement must be a JSON object")
+    expected = {"_type", "subject", "predicateType", "predicate"}
+    _expect(set(statement) == expected,
+            "statement fields must be exactly "
+            f"{', '.join(sorted(expected))}; got {', '.join(sorted(statement))}")
+    _expect(statement["_type"] == STATEMENT_TYPE,
+            f"statement _type must be {STATEMENT_TYPE!r}")
+    _expect(statement["predicateType"] == PREDICATE_TYPE,
+            f"predicateType must be {PREDICATE_TYPE!r}")
+    _expect(statement["subject"] == statement_subject(manifest),
+            "statement subject does not match the manifest artifacts")
+    # `prev`/`valid_until` are added by the signer and live in the signed
+    # predicate; they are not part of the build manifest body.
+    predicate = {k: v for k, v in statement["predicate"].items()
+                 if k not in ("prev", "valid_until")}
+    expected = {k: v for k, v in manifest.items()
+                if k not in ("prev", "valid_until")}
+    _expect(canonical_bytes(predicate) == canonical_bytes(expected),
+            "statement predicate is not the canonical manifest body")
+
+
+def load_attest(path: Path, *, strict_statement: bool = True
+                ) -> tuple[dict[str, Any], bytes | None, dict[str, Any] | None, bool]:
+    """Load a DSSE envelope, a bare statement or a bare manifest.
+
+    Returns (manifest, exact payload bytes or None, statement or None, envelope?).
+    A signed/unsigned producer envelope keeps its exact payload bytes: the
+    signature covers those bytes, so they are never re-serialized here.
+    """
+    raw = _read_bytes(path, "attestation")
+    parsed = load_json_strict(raw)
+    if isinstance(parsed, dict) and "payloadType" in parsed:
+        _expect(set(parsed) == {"payloadType", "payload", "signatures"},
+                "DSSE envelope fields must be exactly payloadType, payload, signatures")
+        _expect(parsed["payloadType"] == DSSE_PAYLOAD_TYPE,
+                f"payloadType must be {DSSE_PAYLOAD_TYPE!r}")
+        _expect(isinstance(parsed.get("signatures"), list),
+                "DSSE signatures must be an array")
+        payload = _unb64(parsed.get("payload"), "payload")
+        statement = load_json_strict(payload)
+        _expect(isinstance(statement, dict), "signed payload is not a JSON object")
+        predicate = statement.get("predicate")
+        _expect(isinstance(predicate, dict), "statement predicate is not an object")
+        validate_manifest(predicate)
+        if strict_statement:
+            validate_statement(statement, predicate)
+        return predicate, payload, statement, True
+    if isinstance(parsed, dict) and "_type" in parsed and "predicate" in parsed:
+        predicate = parsed["predicate"]
+        _expect(isinstance(predicate, dict), "statement predicate is not an object")
+        validate_manifest(predicate)
+        if strict_statement:
+            validate_statement(parsed, predicate)
+        return predicate, canonical_bytes(parsed), parsed, False
+    validate_manifest(parsed)
+    return parsed, None, None, False
+
+
 def sign_manifest(manifest_path: Path, key_path: Path, *,
                   out: Path | None = None,
                   detached: Path | None = None,
@@ -970,24 +1194,18 @@ def sign_manifest(manifest_path: Path, key_path: Path, *,
                   sigstore_upload: bool = False,
                   cosign_bin: str | None = None,
                   ssh_keygen: str | None = None) -> dict[str, Any]:
-    raw = _read_bytes(manifest_path, "manifest")
-    parsed = load_json_strict(raw)
-    validate_manifest(parsed)
-    if canonical_bytes(parsed) != raw:
-        raise SchemaError(
-            "manifest is not in canonical form; regenerate it with wiz-attest"
-        )
-    manifest_digest = sha256_bytes(raw)
+    manifest, payload, _statement, _is_envelope = load_attest(manifest_path)
+    manifest_digest = sha256_bytes(canonical_bytes(manifest))
     if prev is not None:
         prev = normalize_hex(prev, "--prev")
         if len(prev) != 64:
             raise UsageError("--prev must be 64 hex characters")
     if valid_until is not None:
         valid_until = _iso_utc(valid_until, "--valid-until")
+    if payload is None or prev is not None or valid_until is not None:
+        payload = canonical_bytes(build_statement(manifest, prev=prev,
+                                                  valid_until=valid_until))
     public = parse_public_key(key_path, ssh_keygen=ssh_keygen)
-    statement = build_statement(parsed, manifest_digest, prev=prev,
-                                valid_until=valid_until)
-    payload = canonical_bytes(statement)
     payload_digest = statement_digest_of_payload(payload)
     signature = sign_pae(key_path, dsse_pae(DSSE_PAYLOAD_TYPE, payload),
                          ssh_keygen=ssh_keygen)
@@ -1053,142 +1271,143 @@ def verify_statement_payload(payload: bytes, manifest: dict[str, Any],
             f"{', '.join(sorted(expected_keys))}; got {', '.join(sorted(statement))}",
         )
         return
-    failures: list[str] = []
-    if statement["_type"] != STATEMENT_TYPE:
-        failures.append(f"_type is {statement['_type']!r}, expected {STATEMENT_TYPE!r}")
-    expected_subjects = [
-        {"name": art["path"], "digest": {"sha256": art["sha256"]}}
-        for art in manifest["artifacts"]
-    ]
-    if statement["subject"] != expected_subjects:
-        failures.append("subject does not match the manifest artifacts")
-    if statement["predicateType"] != PREDICATE_TYPE:
-        failures.append(
-            f"predicateType is {statement['predicateType']!r}, expected {PREDICATE_TYPE!r}"
-        )
-    predicate = statement["predicate"]
-    if not isinstance(predicate, dict):
-        failures.append("predicate is not an object")
-    else:
-        required = {"schema", "buildType", "externalParameters",
-                    "resolvedDependencies", "byproducts", "manifest",
-                    "manifest_sha256"}
-        unknown = set(predicate) - required - {"prev", "valid_until"}
-        missing = required - set(predicate)
-        if unknown:
-            failures.append(f"unknown predicate fields: {', '.join(sorted(unknown))}")
-        if missing:
-            failures.append(f"missing predicate fields: {', '.join(sorted(missing))}")
-        if not missing and not unknown:
-            if predicate["schema"] != SCHEMA:
-                failures.append(f"predicate.schema is {predicate['schema']!r}")
-            if predicate["buildType"] != BUILD_TYPE:
-                failures.append(f"predicate.buildType is {predicate['buildType']!r}")
-            if predicate["externalParameters"] != {
-                "entry": manifest["source"]["entry"],
-                "target": manifest["target"],
-            }:
-                failures.append("externalParameters do not match the manifest")
-            expected_dependencies = [{
-                "uri": "wiz:source",
-                "digest": {"sha256": manifest["source"]["tree_sha256"]},
-            }]
-            if manifest["wiz"].get("binary_sha256"):
-                expected_dependencies.append({
-                    "uri": "wiz:binary",
-                    "digest": {"sha256": manifest["wiz"]["binary_sha256"]},
-                })
-            if predicate["resolvedDependencies"] != expected_dependencies:
-                failures.append("resolvedDependencies do not match the manifest")
-            if predicate["byproducts"] != []:
-                failures.append("byproducts must be empty in this version")
-            try:
-                validate_manifest(predicate["manifest"])
-            except SchemaError as exc:
-                failures.append(f"predicate.manifest is invalid: {exc}")
-            else:
-                embedded = canonical_bytes(predicate["manifest"])
-                if embedded != canonical_bytes(manifest):
-                    failures.append("predicate.manifest differs from manifest.json")
-                if predicate["manifest_sha256"] != manifest_digest:
-                    failures.append(
-                        "predicate.manifest_sha256 does not match manifest.json"
-                    )
-                if sha256_bytes(embedded) != predicate["manifest_sha256"]:
-                    failures.append(
-                        "predicate.manifest_sha256 is not sha256(canonical manifest)"
-                    )
-        if "prev" in predicate:
-            prev = predicate["prev"]
-            if not isinstance(prev, str) or _HEX64.match(prev.lower()) is None:
-                failures.append("predicate.prev must be 64 hex characters")
-            elif expect_prev is None:
-                result.add("dsse_prev", "skip",
-                           f"statement chains to {prev.lower()}; pass --expect-prev "
-                           "to pin the previous root")
-            elif prev.lower() == expect_prev.lower():
-                result.add("dsse_prev", "pass", prev.lower())
-            else:
-                result.add("dsse_prev", "fail",
-                           f"statement prev is {prev.lower()}, expected {expect_prev.lower()}")
-        else:
-            result.add("dsse_prev", "pass", "no previous root (first statement)")
-        if "valid_until" in predicate:
-            until = predicate["valid_until"]
-            if not isinstance(until, str):
-                result.add("dsse_valid_until", "fail",
-                           "predicate.valid_until must be a string")
-            else:
-                try:
-                    _iso_utc(until, "predicate.valid_until")
-                except UsageError as exc:
-                    result.add("dsse_valid_until", "fail", str(exc))
-                else:
-                    if _valid_until_expired(until, now=now):
-                        result.add("dsse_valid_until", "fail",
-                                   f"statement expired at {until}")
-                    else:
-                        result.add("dsse_valid_until", "pass", until)
-        else:
-            result.add("dsse_valid_until", "pass",
-                       "no expiry in statement (use --valid-until for releases)")
-            result.warnings.append(
-                "statement has no valid_until; an old signed statement verifies "
-                "forever unless a policy or log limits it"
-            )
-    if failures:
-        _statement_failure(result, "; ".join(failures))
+    try:
+        validate_statement(statement, manifest)
+    except SchemaError as exc:
+        _statement_failure(result, str(exc))
     else:
         result.add("dsse_statement", "pass",
-                   "statement matches manifest, artifacts and build parameters")
+                   "statement is the canonical manifest, subjects and predicate type")
+    predicate = statement.get("predicate", {})
+    if not isinstance(predicate, dict):
+        return
+    if "prev" in predicate:
+        prev = predicate["prev"]
+        if not isinstance(prev, str) or _HEX64.match(prev.lower()) is None:
+            result.add("dsse_prev", "fail",
+                       "statement prev must be 64 hex characters")
+        elif expect_prev is None:
+            result.add("dsse_prev", "skip",
+                       f"statement chains to {prev.lower()}; pass --expect-prev "
+                       "to pin the previous root")
+        elif prev.lower() == expect_prev.lower():
+            result.add("dsse_prev", "pass", prev.lower())
+        else:
+            result.add("dsse_prev", "fail",
+                       f"statement prev is {prev.lower()}, expected {expect_prev.lower()}")
+    else:
+        result.add("dsse_prev", "pass", "no previous root (first statement)")
+    if "valid_until" in predicate:
+        until = predicate["valid_until"]
+        if not isinstance(until, str):
+            result.add("dsse_valid_until", "fail",
+                       "statement valid_until must be a string")
+        else:
+            try:
+                _iso_utc(until, "statement valid_until")
+            except UsageError as exc:
+                result.add("dsse_valid_until", "fail", str(exc))
+            else:
+                if _valid_until_expired(until, now=now):
+                    result.add("dsse_valid_until", "fail",
+                               f"statement expired at {until}")
+                else:
+                    result.add("dsse_valid_until", "pass", until)
+    else:
+        result.add("dsse_valid_until", "pass",
+                   "no expiry in statement (use --valid-until for releases)")
+        result.warnings.append(
+            "statement has no valid_until; an old signed statement verifies "
+            "forever unless a policy or log limits it"
+        )
+
+
+def _unsigned_allowed(args: argparse.Namespace, result: "VerifyResult") -> None:
+    result.signed = False
+    if getattr(args, "allow_unsigned", False):
+        result.add("signature_policy", "pass",
+                   "unsigned statement accepted explicitly (--allow-unsigned)")
+        result.warnings.append(
+            "no DSSE signature was checked; --allow-unsigned is for local checks"
+        )
+    else:
+        result.add("signature_policy", "fail",
+                   "statement is unsigned; run wiz-attest sign or pass "
+                   "--allow-unsigned for an explicit unsigned check"
+                   + (" (--require-signature)"
+                      if getattr(args, "require_signature", False) else ""))
+
+
+def _load_keys(args: argparse.Namespace) -> tuple[list[PublicKey], str | None]:
+    keys: list[PublicKey] = []
+    key_problem: str | None = None
+    for item in getattr(args, "public_key", []) or []:
+        try:
+            keys.append(parse_public_key(Path(item),
+                                         ssh_keygen=getattr(args, "ssh_keygen", None)))
+        except AttestError as exc:
+            key_problem = str(exc)
+    for item in getattr(args, "allowed_signers", []) or []:
+        try:
+            keys.extend(load_allowed_signers(Path(item)))
+        except AttestError as exc:
+            key_problem = str(exc)
+    deduped: dict[str, PublicKey] = {}
+    for key in keys:
+        deduped.setdefault(key.fingerprint, key)
+    keys = list(deduped.values())
+    fingerprints = [normalize_fingerprint(value)
+                    for value in getattr(args, "key_fingerprint", []) or []]
+    if fingerprints:
+        keys = [key for key in keys
+                if any(fingerprint_matches(fp, key) for fp in fingerprints)]
+        if not keys and key_problem is None:
+            key_problem = ("none of the provided public keys match "
+                           "--key-fingerprint")
+    return keys, key_problem
 
 
 def verify_signature(args: argparse.Namespace, result: "VerifyResult",
                      manifest: dict[str, Any], manifest_digest: str) -> None:
-    """Verify the DSSE envelope, key allowlist and statement binding."""
-    manifest_dir = Path(args.manifest).parent
+    """Verify the DSSE envelope, key allowlist and statement binding.
+
+    `--attest FILE` is the canonical input: `FILE` may be the DSSE envelope that
+    `wiz build --attest` wrote, a signed envelope from `wiz-attest sign`, or a
+    bare statement.  `--manifest FILE` remains an alias for older callers; the
+    envelope is then `FILE.intoto.json` next to it (or `--envelope`).
+    """
+    src_path = Path(getattr(args, "attest", None) or args.manifest)
+    try:
+        _manifest, loaded_payload, _statement, is_envelope = load_attest(
+            src_path, strict_statement=False)
+    except AttestError as exc:
+        result.add("dsse_envelope", "fail", str(exc))
+        return
     envelope_arg = getattr(args, "envelope", None)
-    envelope_path = (Path(envelope_arg) if envelope_arg
-                     else manifest_dir / ENVELOPE_NAME)
-    explicit = envelope_arg is not None
-    allow_unsigned = bool(getattr(args, "allow_unsigned", False))
-    require_signature = bool(getattr(args, "require_signature", False))
-    if not envelope_path.is_file():
-        result.signed = False
-        if explicit:
+    if is_envelope:
+        envelope_path: Path | None = src_path
+        explicit = True
+    elif envelope_arg:
+        envelope_path = Path(envelope_arg)
+        explicit = True
+    elif getattr(args, "attest", None):
+        envelope_path = None
+        explicit = True
+    else:
+        envelope_path = src_path.parent / ENVELOPE_NAME
+        explicit = False
+
+    if envelope_path is None or not envelope_path.is_file():
+        if explicit and envelope_path is not None:
             result.add("dsse_envelope", "fail",
                        f"DSSE envelope does not exist: {envelope_path}")
-        elif allow_unsigned:
-            result.add("signature_policy", "pass",
-                       "unsigned manifest accepted explicitly (--allow-unsigned)")
-            result.warnings.append(
-                "no DSSE signature was checked; --allow-unsigned is for local checks"
-            )
-        else:
-            result.add("signature_policy", "fail",
-                       "manifest is unsigned; run wiz-attest sign or pass "
-                       "--allow-unsigned for an explicit unsigned check"
-                       + (" (--require-signature)" if require_signature else ""))
+            return
+        _unsigned_allowed(args, result)
+        payload = loaded_payload or canonical_bytes(build_statement(manifest))
+        result.statement_sha256 = sha256_bytes(payload)
+        verify_statement_payload(payload, manifest, manifest_digest, result,
+                                 expect_prev=getattr(args, "expect_prev", None),
+                                 now=getattr(args, "now", None))
         return
 
     try:
@@ -1223,31 +1442,22 @@ def verify_signature(args: argparse.Namespace, result: "VerifyResult",
     pae = dsse_pae(payload_type if isinstance(payload_type, str) else "",
                    payload)
 
-    keys: list[PublicKey] = []
-    key_problem: str | None = None
-    for item in getattr(args, "public_key", []) or []:
-        try:
-            keys.append(parse_public_key(Path(item),
-                                         ssh_keygen=getattr(args, "ssh_keygen", None)))
-        except AttestError as exc:
-            key_problem = str(exc)
-    for item in getattr(args, "allowed_signers", []) or []:
-        try:
-            keys.extend(load_allowed_signers(Path(item)))
-        except AttestError as exc:
-            key_problem = str(exc)
-    deduped: dict[str, PublicKey] = {}
-    for key in keys:
-        deduped.setdefault(key.fingerprint, key)
-    keys = list(deduped.values())
-    fingerprints = [normalize_fingerprint(value)
-                    for value in getattr(args, "key_fingerprint", []) or []]
-    if fingerprints:
-        keys = [key for key in keys
-                if any(fingerprint_matches(fp, key) for fp in fingerprints)]
-        if not keys and key_problem is None:
-            key_problem = ("none of the provided public keys match "
-                           "--key-fingerprint")
+    signatures = envelope.get("signatures")
+    if not isinstance(signatures, list) or not signatures:
+        _unsigned_allowed(args, result)
+        if getattr(args, "allow_unsigned", False):
+            result.add("dsse_signature", "pass",
+                       "envelope has no signatures; accepted by --allow-unsigned")
+        else:
+            result.add("dsse_signature", "fail",
+                       "envelope has no signatures; pass --allow-unsigned only "
+                       "for local unsigned checks")
+        verify_statement_payload(payload, manifest, manifest_digest, result,
+                                 expect_prev=getattr(args, "expect_prev", None),
+                                 now=getattr(args, "now", None))
+        return
+
+    keys, key_problem = _load_keys(args)
     if not keys:
         result.signed = True
         result.add("dsse_key", "fail",
@@ -1258,62 +1468,50 @@ def verify_signature(args: argparse.Namespace, result: "VerifyResult",
                                  now=getattr(args, "now", None))
         return
 
-    signatures = envelope.get("signatures")
     accepted: PublicKey | None = None
     rejected_keyid: str | None = None
-    if not isinstance(signatures, list) or not signatures:
-        if allow_unsigned:
-            result.add("dsse_signature", "skip",
-                       "envelope has no signatures; accepted by --allow-unsigned")
-            result.warnings.append("signed envelope has no signatures")
-        else:
+    for entry in signatures:
+        if (not isinstance(entry, dict)
+                or set(entry) != {"keyid", "sig"}
+                or not isinstance(entry.get("keyid"), str)
+                or not entry["keyid"]):
             result.add("dsse_signature", "fail",
-                       "DSSE envelope has no signatures; pass --allow-unsigned "
-                       "only for local unsigned checks")
-        result.signed = False
-    else:
-        for entry in signatures:
-            if (not isinstance(entry, dict)
-                    or set(entry) != {"keyid", "sig"}
-                    or not isinstance(entry.get("keyid"), str)
-                    or not entry["keyid"]):
-                result.add("dsse_signature", "fail",
-                           "each signature needs exactly a non-empty keyid and sig")
-                break
-            try:
-                signature = _unb64(entry["sig"], "signature")
-            except SchemaError as exc:
-                result.add("dsse_signature", "fail", str(exc))
-                break
-            for key in keys:
-                ok, _ = verify_pae(key, signature, pae,
-                                   ssh_keygen=getattr(args, "ssh_keygen", None))
-                if not ok:
-                    continue
-                if entry["keyid"] != key.fingerprint:
-                    rejected_keyid = entry["keyid"]
-                    continue
-                accepted = key
-                break
-            if accepted is not None:
-                break
+                       "each signature needs exactly a non-empty keyid and sig")
+            break
+        try:
+            signature = _unb64(entry["sig"], "signature")
+        except SchemaError as exc:
+            result.add("dsse_signature", "fail", str(exc))
+            break
+        for key in keys:
+            ok, _ = verify_pae(key, signature, pae,
+                               ssh_keygen=getattr(args, "ssh_keygen", None))
+            if not ok:
+                continue
+            if entry["keyid"] != key.fingerprint:
+                rejected_keyid = entry["keyid"]
+                continue
+            accepted = key
+            break
         if accepted is not None:
-            result.add("dsse_signature", "pass",
-                       f"SSHSIG over DSSE PAE verifies under {accepted.fingerprint}")
-            result.add("dsse_key", "pass", accepted.fingerprint)
-            result.signed = True
-            result.keyid = accepted.fingerprint
+            break
+    if accepted is not None:
+        result.add("dsse_signature", "pass",
+                   f"SSHSIG over DSSE PAE verifies under {accepted.fingerprint}")
+        result.add("dsse_key", "pass", accepted.fingerprint)
+        result.signed = True
+        result.keyid = accepted.fingerprint
+    else:
+        result.signed = True
+        if rejected_keyid is not None:
+            result.add("dsse_key", "fail",
+                       f"envelope keyid {rejected_keyid} does not match the "
+                       "fingerprint of the key that signed")
         else:
-            result.signed = True
-            if rejected_keyid is not None:
-                result.add("dsse_key", "fail",
-                           f"envelope keyid {rejected_keyid} does not match the "
-                           "fingerprint of the key that signed")
-            else:
-                result.add("dsse_key", "fail",
-                           "signature does not verify under any allowlisted key")
-            result.add("dsse_signature", "fail",
-                       "no signature verifies over the DSSE PAE")
+            result.add("dsse_key", "fail",
+                       "signature does not verify under any allowlisted key")
+        result.add("dsse_signature", "fail",
+                   "no signature verifies over the DSSE PAE")
 
     detached_arg = getattr(args, "detached_signature", None)
     if detached_arg:
@@ -1421,46 +1619,104 @@ def _tail(text: str, lines: int = 4) -> str:
     return " | ".join(kept[-lines:])
 
 
+def _module_relpath(name: str) -> Path:
+    return Path(*name.split(".")).with_suffix(".wiz")
+
+
+def verify_inputs(args: argparse.Namespace, manifest: dict[str, Any],
+                  result: "VerifyResult") -> None:
+    """Re-hash the manifest inputs and recompute `inputsRoot`.
+
+    Source, `link-c` and `tree` paths are relative to `--source-root` (default:
+    the verifier's current directory, which is the build directory for the
+    `=attest` cases).  A module is resolved under `--module-root` (default:
+    `lib`) by its dotted name, exactly as `Wiz.Module.resolve` does.
+    """
+    if getattr(args, "artifact_only", False):
+        result.add("inputs", "pass", "not checked (--artifact-only)")
+        return
+    source_root = (Path(args.source_root) if getattr(args, "source_root", None)
+                   else Path.cwd())
+    module_roots = [Path(r) for r in (getattr(args, "module_root", None) or ["lib"])]
+    recomputed: list[dict[str, Any]] = []
+    for item in manifest["inputs"]:
+        role = item["role"]
+        if role == "module":
+            path = None
+            for root in module_roots:
+                candidate = root / _module_relpath(item["name"])
+                if candidate.is_file():
+                    path = candidate
+                    break
+            if path is None:
+                result.add("inputs", "fail",
+                           f"module {item['name']} is not under any --module-root "
+                           f"({', '.join(str(r) for r in module_roots)})")
+                return
+        else:
+            path = Path(item["path"])
+            if not path.is_absolute():
+                path = source_root / path
+        try:
+            if not path.is_file():
+                raise AttestError(f"input is missing: {item.get('path') or item.get('name')}")
+            digest = sha256_file(path)
+        except (AttestError, OSError) as exc:
+            result.add("inputs", "fail", str(exc))
+            return
+        if digest != item["sha256"]:
+            result.add("inputs", "fail",
+                       f"{item.get('path') or item.get('name')} is {digest}, "
+                       f"manifest says {item['sha256']}")
+            return
+        recomputed.append({**item, "sha256": digest})
+    expected = inputs_root(recomputed)
+    if expected != manifest["inputsRoot"]:
+        result.add("inputs", "fail",
+                   f"inputsRoot is {expected}, manifest says {manifest['inputsRoot']} "
+                   "(an input was edited or the manifest was changed)")
+        return
+    result.add("inputs", "pass",
+               f"{len(recomputed)} input(s), {manifest['inputsRoot']}")
+
+
 def verify(args: argparse.Namespace) -> VerifyResult:
     result = VerifyResult()
-    manifest_path = Path(args.manifest)
-    manifest_dir = manifest_path.parent
+    src_arg = getattr(args, "attest", None) or args.manifest
+    src_path = Path(src_arg)
+    base_dir = src_path.parent
 
-    # 1. manifest bytes and schema.  Nothing below is trustworthy if this fails,
-    # so schema failure stops the run.
+    # 1. The one canonical body: the predicate of the envelope/statement, or a
+    # bare manifest.  Nothing below is trustworthy if this fails.
     try:
-        raw = _read_bytes(manifest_path, "manifest")
-        parsed = load_json_strict(raw)
-        validate_manifest(parsed)
-        if canonical_bytes(parsed) != raw:
-            raise SchemaError(
-                "manifest is not in canonical form (sorted keys, no whitespace, "
-                "no trailing newline); regenerate it with wiz-attest"
-            )
+        parsed, payload, _statement, _is_envelope = load_attest(
+            src_path, strict_statement=False)
     except AttestError as exc:
         result.add("manifest_schema", "fail", str(exc))
         return result
 
-    manifest_digest = sha256_bytes(raw)
+    manifest_digest = sha256_bytes(canonical_bytes(parsed))
     result.manifest_sha256 = manifest_digest
-    result.add("manifest_schema", "pass", f"{SCHEMA}, canonical, {len(raw)} bytes")
+    result.add("manifest_schema", "pass",
+               f"{SCHEMA}, {len(parsed['artifacts'])} artifact(s)")
     result.add("manifest_digest", "pass", manifest_digest)
 
     if args.expect_digest:
         expected = normalize_hex(args.expect_digest, "--expect-digest")
         if expected == manifest_digest:
-            result.add("manifest_pin", "pass", "manifest digest matches --expect-digest")
+            result.add("manifest_pin", "pass",
+                       "manifest digest matches --expect-digest")
         else:
             result.add("manifest_pin", "fail",
                        f"manifest is {manifest_digest}, expected {expected}")
 
-    # 2. Every artifact's size and digest.
-    artifacts_dir = Path(args.artifacts_dir) if args.artifacts_dir else manifest_dir
+    # 2. Every artifact's size and digest (the output and its byproducts).
+    artifacts_dir = Path(args.artifacts_dir) if args.artifacts_dir else base_dir
     try:
         artifacts_root = artifacts_dir.resolve()
     except OSError as exc:
         result.add("artifacts", "fail", f"cannot resolve --artifacts-dir: {exc}")
-        artifacts_root = manifest_dir.resolve()
+        artifacts_root = base_dir.resolve()
     artifact_failures = 0
     for art in parsed["artifacts"]:
         rel = art["path"]
@@ -1485,54 +1741,67 @@ def verify(args: argparse.Namespace) -> VerifyResult:
     if artifact_failures:
         result.add("artifacts", "fail", f"{artifact_failures} artifact(s) failed")
     else:
-        result.add("artifacts", "pass", f"{len(parsed['artifacts'])} artifact(s) match")
+        result.add("artifacts", "pass",
+                   f"{len(parsed['artifacts'])} artifact(s) match")
 
-    # 3. Quote message: shape and extraData binding.
-    quote_path = Path(args.quote) if args.quote else manifest_dir / "quote.msg"
-    sig_path = Path(args.signature) if args.signature else manifest_dir / "quote.sig"
-    pcr_path = Path(args.pcr) if args.pcr else manifest_dir / "quote.pcr"
-    ak_path = Path(args.ak) if args.ak else manifest_dir / "ak.pub"
+    # 3. Quote, policy and AK pins.  The quote is optional for the build -> sign
+    # -> verify flow; a bundle with quote.msg gets the full machine check.
+    quote_path = Path(args.quote) if args.quote else base_dir / "quote.msg"
+    sig_path = Path(args.signature) if args.signature else base_dir / "quote.sig"
+    pcr_path = Path(args.pcr) if args.pcr else base_dir / "quote.pcr"
+    ak_path = Path(args.ak) if args.ak else base_dir / "ak.pub"
+    statement_only = bool(getattr(args, "statement_only", False))
+    quote_requested = bool(args.quote) or quote_path.is_file()
+    check_quote = quote_requested and not statement_only
 
-    quote: QuoteAttest | None = None
-    pcr_values: dict[int, str] = {}
-    try:
-        quote = parse_quote(_read_bytes(quote_path, "quote message"))
-        result.quote = quote
-    except AttestError as exc:
-        result.add("quote_message", "fail", str(exc))
-    else:
-        result.add("quote_message", "pass",
-                   f"TPMS_ATTEST quote over {len(quote.pcr_indices)} PCRs")
-        manifest_indices = parsed["pcr"]["indices"]
-        if quote.pcr_indices == manifest_indices:
-            result.add("quote_pcr_selection", "pass",
-                       f"sha256:{','.join(map(str, manifest_indices))}")
-        else:
-            result.add("quote_pcr_selection", "fail",
-                       f"quote selects {quote.pcr_indices}, manifest says {manifest_indices}")
-
-    # 4. PCR values against the expected policy.
     policy: dict[str, Any] | None = None
     try:
-        policy_obj = load_json_strict(_read_bytes(Path(args.policy), "policy"))
-        policy = validate_policy(policy_obj)
-        result.add("policy_schema", "pass",
-                   f"{POLICY_SCHEMA}, {len(policy['pcr'])} PCR(s)")
+        if args.policy:
+            policy_obj = load_json_strict(_read_bytes(Path(args.policy), "policy"))
+            policy = validate_policy(policy_obj)
+            result.add("policy_schema", "pass",
+                       f"{POLICY_SCHEMA}, {len(policy['pcr'])} PCR(s)")
+        elif check_quote:
+            result.add("policy_schema", "fail",
+                       "a policy is required when a quote is present")
     except AttestError as exc:
         result.add("policy_schema", "fail", str(exc))
 
-    if quote is not None:
-        try:
-            pcr_values = parse_pcr_values(_read_bytes(pcr_path, "PCR values"),
-                                          quote.pcr_indices)
-            result.add("pcr_values", "pass",
-                       f"{len(pcr_values)} value(s), `-F values` format")
-        except AttestError as exc:
-            result.add("pcr_values", "fail", str(exc))
+    quote: QuoteAttest | None = None
+    pcr_values: dict[int, str] = {}
+    if not check_quote:
+        reason = ("statement-only verification requested (--statement-only)"
+                  if statement_only else
+                  "no quote in the bundle (statement-only verification)")
+        result.add("quote_message", "pass", reason)
     else:
-        result.add("pcr_values", "fail", "no parsed quote to interpret quote.pcr")
+        try:
+            quote = parse_quote(_read_bytes(quote_path, "quote message"))
+            result.quote = quote
+        except AttestError as exc:
+            result.add("quote_message", "fail", str(exc))
+        else:
+            result.add("quote_message", "pass",
+                       f"TPMS_ATTEST quote over {len(quote.pcr_indices)} PCRs")
+            if policy is not None:
+                policy_indices = sorted(policy["pcr"])
+                if quote.pcr_indices == policy_indices:
+                    result.add("quote_pcr_selection", "pass",
+                               f"sha256:{','.join(map(str, policy_indices))}")
+                else:
+                    result.add("quote_pcr_selection", "fail",
+                               f"quote selects {quote.pcr_indices}, policy says "
+                               f"{policy_indices}")
+        if quote is not None:
+            try:
+                pcr_values = parse_pcr_values(_read_bytes(pcr_path, "PCR values"),
+                                              quote.pcr_indices)
+                result.add("pcr_values", "pass",
+                           f"{len(pcr_values)} value(s), `-F values` format")
+            except AttestError as exc:
+                result.add("pcr_values", "fail", str(exc))
 
-    if policy is not None and quote is not None and pcr_values:
+    if check_quote and policy is not None and quote is not None and pcr_values:
         failures = 0
         for index, expected in sorted(policy["pcr"].items()):
             if index not in pcr_values:
@@ -1549,76 +1818,78 @@ def verify(args: argparse.Namespace) -> VerifyResult:
             result.add("pcr_policy", "pass",
                        f"{len(policy['pcr'])} pinned PCR(s) match")
 
-    # 5. AK pin.  Prefer the DER SPKI digest and the TPM Name (which the quote
+    # 4. AK pin.  Prefer the DER SPKI digest and the TPM Name (which the quote
     # signs as qualifiedSigner); the legacy ak_sha256 is the TPM2B_PUBLIC file
     # hash and is kept only for older policies.
-    pin_conflict = False
+    if check_quote:
+        pin_conflict = False
 
-    def _pin(option: str, policy_key: str) -> str | None:
-        nonlocal pin_conflict
-        cli = getattr(args, option, None)
-        cli = cli.lower() if cli else None
-        from_policy = policy.get(policy_key) if policy is not None else None
-        if cli and from_policy and cli != from_policy:
-            pin_conflict = True
-            result.add("ak_pin", "fail",
-                       f"--{option.replace('_', '-')} {cli} conflicts with policy "
-                       f"{from_policy}")
-        return cli or from_policy
-
-    expected_spki = _pin("ak_spki_sha256", "ak_spki_sha256")
-    expected_name = _pin("ak_name", "ak_name")
-    expected_ak_file = _pin("ak_sha256", "ak_sha256")
-    ak_parsed: AkInfo | None = None
-    try:
-        ak_parsed = ak_info(ak_path)
-    except AttestError as exc:
-        if expected_spki or expected_name:
-            result.add("ak_pin", "fail", f"cannot parse {ak_path}: {exc}")
-    if ak_parsed is not None:
-        if quote is not None and quote.qualified_signer != ak_parsed.name:
-            result.add("ak_name", "fail",
-                       f"quote qualifiedSigner is {quote.qualified_signer}, "
-                       f"ak.pub Name is {ak_parsed.name}")
-        elif quote is not None:
-            result.add("ak_name", "pass", ak_parsed.name)
-        if expected_name:
-            if ak_parsed.name == expected_name:
-                result.add("ak_name_pin", "pass", expected_name)
-            else:
-                result.add("ak_name_pin", "fail",
-                           f"ak.pub Name is {ak_parsed.name}, expected {expected_name}")
-        if expected_spki:
-            if ak_parsed.spki_sha256 == expected_spki:
-                result.add("ak_spki_pin", "pass", expected_spki)
-            else:
-                result.add("ak_spki_pin", "fail",
-                           f"ak.pub DER SPKI is {ak_parsed.spki_sha256}, "
-                           f"expected {expected_spki}")
-    if expected_ak_file:
-        try:
-            actual_ak = sha256_file(ak_path)
-        except OSError as exc:
-            result.add("ak_pin", "fail", f"cannot read {ak_path}: {exc.strerror}")
-        else:
-            if actual_ak == expected_ak_file:
-                result.add("ak_pin", "pass", actual_ak)
-            else:
+        def _pin(option: str, policy_key: str) -> str | None:
+            nonlocal pin_conflict
+            cli = getattr(args, option, None)
+            cli = cli.lower() if cli else None
+            from_policy = policy.get(policy_key) if policy is not None else None
+            if cli and from_policy and cli != from_policy:
+                pin_conflict = True
                 result.add("ak_pin", "fail",
-                           f"AK file is {actual_ak}, expected {expected_ak_file}")
-    elif not expected_spki and not expected_name and not pin_conflict:
-        result.add("ak_pin", "skip",
-                   "no --ak-spki-sha256/--ak-name (or legacy --ak-sha256) and no "
-                   "policy pin: the AK identity is not pinned")
-    if policy is not None and "valid_until" in policy:
-        if _valid_until_expired(policy["valid_until"],
-                                now=getattr(args, "now", None)):
-            result.add("policy_valid_until", "fail",
-                       f"policy expired at {policy['valid_until']}")
-        else:
-            result.add("policy_valid_until", "pass", policy["valid_until"])
+                           f"--{option.replace('_', '-')} {cli} conflicts with policy "
+                           f"{from_policy}")
+            return cli or from_policy
 
-    # 6. DSSE signature, key allowlist and statement/manifest binding.  This
+        expected_spki = _pin("ak_spki_sha256", "ak_spki_sha256")
+        expected_name = _pin("ak_name", "ak_name")
+        expected_ak_file = _pin("ak_sha256", "ak_sha256")
+        ak_parsed: AkInfo | None = None
+        try:
+            ak_parsed = ak_info(ak_path)
+        except AttestError as exc:
+            if expected_spki or expected_name:
+                result.add("ak_pin", "fail", f"cannot parse {ak_path}: {exc}")
+        if ak_parsed is not None:
+            if quote is not None and quote.qualified_signer != ak_parsed.name:
+                result.add("ak_name", "fail",
+                           f"quote qualifiedSigner is {quote.qualified_signer}, "
+                           f"ak.pub Name is {ak_parsed.name}")
+            elif quote is not None:
+                result.add("ak_name", "pass", ak_parsed.name)
+            if expected_name:
+                if ak_parsed.name == expected_name:
+                    result.add("ak_name_pin", "pass", expected_name)
+                else:
+                    result.add("ak_name_pin", "fail",
+                               f"ak.pub Name is {ak_parsed.name}, expected "
+                               f"{expected_name}")
+            if expected_spki:
+                if ak_parsed.spki_sha256 == expected_spki:
+                    result.add("ak_spki_pin", "pass", expected_spki)
+                else:
+                    result.add("ak_spki_pin", "fail",
+                               f"ak.pub DER SPKI is {ak_parsed.spki_sha256}, "
+                               f"expected {expected_spki}")
+        if expected_ak_file:
+            try:
+                actual_ak = sha256_file(ak_path)
+            except OSError as exc:
+                result.add("ak_pin", "fail", f"cannot read {ak_path}: {exc.strerror}")
+            else:
+                if actual_ak == expected_ak_file:
+                    result.add("ak_pin", "pass", actual_ak)
+                else:
+                    result.add("ak_pin", "fail",
+                               f"AK file is {actual_ak}, expected {expected_ak_file}")
+        elif not expected_spki and not expected_name and not pin_conflict:
+            result.add("ak_pin", "skip",
+                       "no --ak-spki-sha256/--ak-name (or legacy --ak-sha256) and no "
+                       "policy pin: the AK identity is not pinned")
+        if policy is not None and "valid_until" in policy:
+            if _valid_until_expired(policy["valid_until"],
+                                    now=getattr(args, "now", None)):
+                result.add("policy_valid_until", "fail",
+                           f"policy expired at {policy['valid_until']}")
+            else:
+                result.add("policy_valid_until", "pass", policy["valid_until"])
+
+    # 5. DSSE signature, key allowlist and statement/manifest binding.  This
     # runs before the quote check because the quote binds statement_digest.
     verify_signature(args, result, parsed, manifest_digest)
     expected_statement = getattr(args, "expect_statement_digest", None)
@@ -1633,48 +1904,50 @@ def verify(args: argparse.Namespace) -> VerifyResult:
                        f"statement is {result.statement_sha256}, expected "
                        f"{expected_statement}")
 
+    # 6. Re-hash the inputs and the manifest root.
+    verify_inputs(args, parsed, result)
+
     # 7. Freshness and quote extraData:
     #    H("wiz-quote-v1" || nonce || statement_digest).
     nonce_hex = getattr(args, "nonce", None) or getattr(args, "challenge", None)
     nonce: bytes | None = None
-    if nonce_hex:
-        nonce_hex = normalize_hex(nonce_hex, "--nonce")
-        if not 16 <= len(nonce_hex) // 2 <= 64:
-            result.add("nonce", "fail", "nonce must be 16..64 bytes")
+    if check_quote:
+        if nonce_hex:
+            nonce_hex = normalize_hex(nonce_hex, "--nonce")
+            if not 16 <= len(nonce_hex) // 2 <= 64:
+                result.add("nonce", "fail", "nonce must be 16..64 bytes")
+            else:
+                nonce = bytes.fromhex(nonce_hex)
+                result.add("nonce", "pass", nonce_hex)
+        elif getattr(args, "require_nonce", False) or getattr(args, "require_challenge", False):
+            result.add("nonce", "fail",
+                       "no verifier-supplied nonce; a quote can be replayed")
         else:
-            nonce = bytes.fromhex(nonce_hex)
-            result.add("nonce", "pass", nonce_hex)
-    elif getattr(args, "require_nonce", False) or getattr(args, "require_challenge", False):
-        result.add("nonce", "fail",
-                   "no verifier-supplied nonce; a quote can be replayed")
-    else:
-        sidecar = manifest_dir / "quote.nonce"
-        if sidecar.is_file():
-            try:
-                sidecar_hex = normalize_hex(sidecar.read_text(encoding="utf-8"),
-                                            "quote.nonce")
-                nonce = bytes.fromhex(sidecar_hex)
-            except (AttestError, OSError, ValueError):
-                nonce = None
-            if nonce is not None:
+            sidecar = base_dir / "quote.nonce"
+            if sidecar.is_file():
+                try:
+                    sidecar_hex = normalize_hex(sidecar.read_text(encoding="utf-8"),
+                                                "quote.nonce")
+                    nonce = bytes.fromhex(sidecar_hex)
+                except (AttestError, OSError, ValueError):
+                    nonce = None
+                if nonce is not None:
+                    result.add("nonce", "skip",
+                               f"read {sidecar.name}; the verifier did not supply it, "
+                               "so replay protection is not established")
+                    result.warnings.append(
+                        "nonce came from the bundle (quote.nonce), not from the verifier; "
+                        "pass --nonce from your own channel for freshness"
+                    )
+            if nonce is None:
                 result.add("nonce", "skip",
-                           f"read {sidecar.name}; the verifier did not supply it, "
-                           "so replay protection is not established")
-                result.warnings.append(
-                    "nonce came from the bundle (quote.nonce), not from the verifier; "
-                    "pass --nonce from your own channel for freshness"
-                )
-        if nonce is None:
-            result.add("nonce", "skip",
-                       "no --nonce and no quote.nonce; freshness is not checked")
+                           "no --nonce and no quote.nonce; freshness is not checked")
 
-    if quote is not None:
+    if check_quote and quote is not None:
         statement_digest = result.statement_sha256
         if statement_digest is None:
-            # Unsigned (explicitly allowed) or no envelope: rebuild the
-            # deterministic statement so the quote binding can still be checked.
             statement_digest = sha256_bytes(canonical_bytes(
-                build_statement(parsed, manifest_digest)))
+                build_statement(parsed)))
         if nonce is None:
             if quote.extra_data == manifest_digest:
                 result.add("quote_extra_data", "skip",
@@ -1698,6 +1971,8 @@ def verify(args: argparse.Namespace) -> VerifyResult:
                            f"{expected_extra}")
 
     # 8. Signature and PCR digest: tpm2_checkquote, never reimplemented here.
+    if not check_quote:
+        return result
     if args.skip_crypto:
         result.add("tpm_quote_signature", "skip", "--skip-crypto")
         result.add("pcr_digest", "skip", "--skip-crypto")
@@ -1746,7 +2021,6 @@ def verify(args: argparse.Namespace) -> VerifyResult:
                                "not established because tpm2_checkquote failed")
 
     return result
-
 
 def result_json(result: VerifyResult) -> dict[str, Any]:
     status = result.status()
@@ -2006,8 +2280,11 @@ def attest(args: argparse.Namespace) -> dict[str, Any]:
         if name in names:
             raise UsageError(f"two artifacts would be recorded as {name!r}")
         names.add(name)
+        suffix = path.suffix.lstrip(".")
         artifacts.append({
             "path": name,
+            "role": "byproduct" if suffix in ("c", "h", "ll") else "output",
+            "kind": suffix or "executable",
             "size": path.stat().st_size,
             "sha256": sha256_file(path),
         })
@@ -2045,6 +2322,8 @@ def attest(args: argparse.Namespace) -> dict[str, Any]:
     else:
         roots = [r for r in ("lib", "runtime") if Path(r).is_dir()]
     tree_sha, roots, tree_files = tree_digest(roots)
+    tree_inputs = [{"role": "tree", "path": path, "sha256": digest}
+                   for path, digest in tree_entries(roots)]
 
     if args.wiz_version:
         version, commit = args.wiz_version, args.wiz_commit
@@ -2074,6 +2353,10 @@ def attest(args: argparse.Namespace) -> dict[str, Any]:
             raise UsageError("--nonce must be 16..64 bytes of hex")
         nonce = bytes.fromhex(nonce_hex)
 
+    inputs: list[dict[str, Any]] = [
+        {"role": "source", "path": entry, "sha256": source_sha},
+        *tree_inputs,
+    ]
     manifest = build_manifest(
         artifacts=artifacts,
         wiz_version=version,
@@ -2081,10 +2364,8 @@ def attest(args: argparse.Namespace) -> dict[str, Any]:
         wiz_binary_sha256=binary_sha,
         source_entry=entry,
         source_sha256=source_sha,
-        tree_sha256=tree_sha,
-        tree_roots=roots,
         target=target,
-        pcr_indices=args.pcr_list,
+        inputs=inputs,
     )
     manifest_path = out / "manifest.json"
     manifest_path.write_bytes(canonical_bytes(manifest))
@@ -2095,7 +2376,7 @@ def attest(args: argparse.Namespace) -> dict[str, Any]:
         "manifest": str(manifest_path),
         "manifest_sha256": manifest_digest,
         "artifacts": [a["path"] for a in manifest["artifacts"]],
-        "pcr_indices": manifest["pcr"]["indices"],
+        "pcr_indices": list(args.pcr_list),
         "tree_sha256": tree_sha,
         "tree_files": tree_files,
         "quoted": False,
@@ -2202,10 +2483,14 @@ def main_keygen(argv: Sequence[str]) -> int:
 def _sign_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="wiz-attest sign",
-        description="Sign a canonical manifest as an in-toto Statement in a DSSE "
-                    "envelope with an offline Ed25519 key.",
+        description="Sign the in-toto Statement that `wiz build --attest` wrote "
+                    "(or a canonical manifest body) as a DSSE envelope with an "
+                    "offline Ed25519 key.",
     )
-    p.add_argument("--manifest", required=True, help="manifest.json")
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument("--attest", help="DSSE envelope or bare statement from "
+                                         "`wiz build --attest`")
+    source.add_argument("--manifest", help="bare canonical manifest body")
     p.add_argument("--key", required=True, help="Ed25519 private key")
     p.add_argument("--out", help="DSSE envelope path")
     p.add_argument("--detached-signature", help="detached SSHSIG path")
@@ -2229,7 +2514,7 @@ def main_sign(argv: Sequence[str]) -> int:
         return int(exc.code)
     try:
         info = sign_manifest(
-            Path(args.manifest), Path(args.key),
+            Path(args.attest or args.manifest), Path(args.key),
             out=Path(args.out) if args.out else None,
             detached=(Path(args.detached_signature)
                       if args.detached_signature else None),
@@ -2402,12 +2687,17 @@ def main_attest(argv: Sequence[str]) -> int:
 def _verify_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="wiz-verify",
-        description="Verify a DSSE-signed in-toto statement, a Wiz build manifest, "
-                    "a TPM 2.0 quote, an expected PCR policy and the artifact bytes.",
+        description="Verify the in-toto Statement that `wiz build --attest` wrote "
+                    "(signed or explicitly unsigned), its artifacts and inputs, a "
+                    "TPM 2.0 quote, an expected PCR policy and AK pins.",
     )
-    p.add_argument("--manifest", required=True, help="manifest.json")
-    p.add_argument("--envelope", help="DSSE envelope (default: "
-                                      "manifest.intoto.json next to the manifest)")
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument("--attest", help="DSSE envelope or statement from "
+                                         "`wiz build --attest` (signed or unsigned)")
+    source.add_argument("--manifest", help="bare canonical manifest body "
+                                           "(alias for older callers)")
+    p.add_argument("--envelope", help="DSSE envelope (default: the --attest file, "
+                                      "else manifest.intoto.json next to --manifest)")
     p.add_argument("--detached-signature", help="detached SSHSIG over the DSSE PAE")
     p.add_argument("--public-key", action="append", default=[],
                    help="trusted Ed25519 public key (repeatable)")
@@ -2425,10 +2715,21 @@ def _verify_parser() -> argparse.ArgumentParser:
     p.add_argument("--signature", help="quote.sig (default: next to the manifest)")
     p.add_argument("--pcr", help="quote.pcr (default: next to the manifest)")
     p.add_argument("--ak", help="ak.pub (default: next to the manifest)")
-    p.add_argument("--policy", required=True,
-                   help="expected PCR policy JSON (PCR index -> sha256 value)")
+    p.add_argument("--policy",
+                   help="expected PCR policy JSON (PCR index -> sha256 value); "
+                        "required only when a quote is present")
     p.add_argument("--artifacts-dir", help="where artifact paths are resolved "
-                                           "(default: the manifest's directory)")
+                                           "(default: the attestation's directory)")
+    p.add_argument("--source-root", help="directory for source/link-c/tree input "
+                                         "paths (default: the current directory)")
+    p.add_argument("--module-root", action="append", default=[],
+                   help="module search root for `module` inputs (repeatable; "
+                        "default: lib)")
+    p.add_argument("--artifact-only", action="store_true",
+                   help="skip the input re-hash (like `wiz verify --artifact-only`)")
+    p.add_argument("--statement-only", action="store_true",
+                   help="verify the signed statement, artifacts and inputs only; "
+                        "do not look for or check a TPM quote")
     p.add_argument("--nonce", help="verifier-supplied hex nonce (16..64 bytes)")
     p.add_argument("--nonce-file", help="read the verifier nonce from a file")
     p.add_argument("--challenge", help=argparse.SUPPRESS)  # deprecated alias
@@ -2454,7 +2755,7 @@ def main_verify(argv: Sequence[str]) -> int:
     parser = _verify_parser()
     try:
         args = parser.parse_args(list(argv))
-        if not Path(args.policy).is_file():
+        if args.policy and not Path(args.policy).is_file():
             raise UsageError(f"policy file does not exist: {args.policy}")
         if args.require_signature and args.allow_unsigned:
             raise UsageError("--require-signature and --allow-unsigned conflict")

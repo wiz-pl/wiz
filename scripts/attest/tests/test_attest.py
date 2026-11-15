@@ -115,6 +115,11 @@ class Fixture:
         }
         for name, data in self.artifacts.items():
             (self.dir / name).write_bytes(data)
+        # real files for the input manifest (source and one tree input)
+        (self.dir / "examples").mkdir()
+        (self.dir / "examples/io.wiz").write_bytes(b"source")
+        (self.dir / "runtime").mkdir()
+        (self.dir / "runtime/wiz.c").write_bytes(b"runtime")
         self.values = {i: hashlib.sha256(f"pcr-{i}".encode()).digest()
                        for i in self.indices}
         self.policy = {
@@ -140,6 +145,12 @@ class Fixture:
             target="x86_64-linux-gnu",
             pcr_indices=self.indices,
         )
+        # a second input so order/root tests have something to reorder
+        self.manifest["inputs"].append({
+            "role": "tree", "path": "runtime/wiz.c",
+            "sha256": hashlib.sha256(b"runtime").hexdigest(),
+        })
+        self.manifest["inputsRoot"] = wa.inputs_root(self.manifest["inputs"])
         self.write_manifest()
         self.write_quote()
 
@@ -190,6 +201,7 @@ class Fixture:
             "--manifest", str(self.dir / "manifest.json"),
             "--policy", str(self.dir / "policy.json"),
             "--nonce", self.nonce if nonce is None else nonce,
+            "--source-root", str(self.dir),
         ]
         if allow_unsigned:
             args.append("--allow-unsigned")
@@ -324,21 +336,22 @@ class SchemaTests(FixtureTest):
     def test_bad_digest(self):
         self.assert_schema_fails(lambda m: m["artifacts"][0].update({"sha256": "abc"}))
 
-    def test_unsorted_pcr_indices(self):
-        self.assert_schema_fails(lambda m: m["pcr"].update({"indices": [11, 7]}))
+    def test_unsorted_inputs(self):
+        self.assert_schema_fails(lambda m: m["inputs"].reverse())
 
-    def test_pcr_out_of_range(self):
-        self.assert_schema_fails(lambda m: m["pcr"].update({"indices": [24]}))
+    def test_input_role_and_shape(self):
+        self.assert_schema_fails(lambda m: m["inputs"][0].update({"role": "mystery"}))
+        self.assert_schema_fails(lambda m: m["inputs"][0].pop("path"))
+
+    def test_inputs_root_shape(self):
+        self.assert_schema_fails(lambda m: m.update({"inputsRoot": "sha256:abc"}))
 
     def test_unknown_builder(self):
         self.assert_schema_fails(lambda m: m["builder"].update({"kind": "sev-snp"}))
 
-    def test_non_canonical_file_rejected(self):
-        path = self.fx.dir / "manifest.json"
-        path.write_text(json.dumps(self.fx.manifest, indent=2), encoding="utf-8")
-        code, out, _ = run_verify(self.fx.verify_args() + ["--skip-crypto", "--json"])
-        self.assertEqual(code, wa.EXIT_FAIL)
-        self.assertIn("not in canonical form", json.dumps(json.loads(out)))
+    def test_two_outputs_rejected(self):
+        self.assert_schema_fails(
+            lambda m: m["artifacts"][1].update({"role": "output"}))
 
 
 # --------------------------------------------------------------------------
@@ -516,6 +529,7 @@ class VerifyTests(FixtureTest):
             "--policy", str(self.fx.dir / "policy.json"),
             "--allow-unsigned", "--require-nonce",
             "--ak-sha256", hashlib.sha256(b"ak-public").hexdigest(),
+            "--source-root", str(self.fx.dir),
             "--skip-crypto", "--json",
         ]
         code, out, _ = run_verify(args)
@@ -529,6 +543,7 @@ class VerifyTests(FixtureTest):
             "--policy", str(self.fx.dir / "policy.json"),
             "--allow-unsigned",
             "--ak-sha256", hashlib.sha256(b"ak-public").hexdigest(),
+            "--source-root", str(self.fx.dir),
             "--skip-crypto", "--json",
         ]
         code, out, _ = run_verify(args)
@@ -607,8 +622,11 @@ class ProducerTests(unittest.TestCase):
         wa.validate_manifest(manifest)
         self.assertEqual(wa.canonical_bytes(manifest), raw)
         self.assertEqual([a["path"] for a in manifest["artifacts"]], ["prog", "prog.c"])
-        self.assertEqual(manifest["wiz"]["version"], "0.1.0-dev")
-        self.assertEqual(manifest["pcr"]["indices"], [0, 1, 4, 7, 11, 12, 14])
+        self.assertEqual(manifest["toolchain"]["wiz"]["version"], "0.1.0-dev")
+        self.assertEqual(manifest["builder"]["kind"], "wiz-build")
+        self.assertEqual(manifest["inputs"][0]["role"], "source")
+        self.assertEqual(manifest["inputsRoot"],
+                         wa.inputs_root(manifest["inputs"]))
 
     def test_source_build_records_binary_and_generated_c(self):
         wiz = self.tmp / "fake-wiz"
@@ -634,9 +652,9 @@ class ProducerTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         manifest = wa.load_json_strict((out / "manifest.json").read_bytes())
         self.assertEqual([a["path"] for a in manifest["artifacts"]], ["prog", "prog.c"])
-        self.assertEqual(manifest["wiz"]["version"], "9.9.9")
-        self.assertEqual(manifest["wiz"]["commit"], "abcdef0")
-        self.assertEqual(manifest["source"]["entry"], "src.wiz")
+        self.assertEqual(manifest["toolchain"]["wiz"]["version"], "9.9.9")
+        self.assertEqual(manifest["toolchain"]["wiz"]["revision"], "abcdef0")
+        self.assertEqual(manifest["source"]["file"], "src.wiz")
         args = (self.tmp / "fake-wiz.args").read_text().split()
         self.assertEqual(args[:4], ["-I", "lib", "build", str(source)])
         self.assertIn("-o", args)
@@ -786,6 +804,7 @@ class SigningTests(unittest.TestCase):
             "--policy", str(self.fx.dir / "policy.json"),
             "--nonce", self.fx.nonce,
             "--ak-sha256", hashlib.sha256(b"ak-public").hexdigest(),
+            "--source-root", str(self.fx.dir),
         ]
         if pub is not None:
             args += ["--public-key", str(pub)]
