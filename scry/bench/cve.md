@@ -1,9 +1,12 @@
 # Scry on real historical CVEs (2026-11-15)
 
-Status: measurement report, **no analysis or rule changes**. Branch
-`agent/scry-cve`, based on `agent/scry-scale` `f9294ec4` with
+Status: measurement report, **no analysis or rule changes** on the corpus
+branch. Branch `agent/scry-cve`, based on `agent/scry-scale` `f9294ec4` with
 `agent/scry-real-corpus` `acd4b34c` merged (the 51-case `scry bench` harness and
-the real-C source runner are present; this corpus does not use them).
+the real-C source runner are present; this corpus does not use them). The
+external-model re-run is on `agent/scry-cve-models` (`agent/scry-models`
+`54f6ded5` merged with `agent/scry-cve` `722e3fe9`); see
+[External-model re-run](#external-model-re-run-agentscry-models-54f6ded5).
 
 This is an **opt-in benchmark**, not part of `scry bench`, `grail test`, the
 default fast gate, or CI. It runs each case in its own process because one case
@@ -82,6 +85,80 @@ Total analysis wall time **56 190 ms**; the Apache case is 54.3 s of it
 start + parse + lower + points-to + rules + certify; the `scry --version`
 floor is about 2 ms / 6 MiB.
 
+## External-model re-run (`agent/scry-models` `54f6ded5`)
+
+Branch `agent/scry-cve-models` (merge `acbf3b47`) keeps the corpus and driver
+unchanged and adds `lib/Scry/Models.wiz`: `fgets`/`getline`/`fread` sources,
+the `exec*`/`posix_spawn*` and `v*printf` sinks, and `copy`/`copyArgs` effects
+so `strcpy`/`strcat`/`sprintf`/`snprintf` destinations become `mstore` rows.
+The question for this run is narrow: **does taint now survive string
+construction?**
+
+Run: same 12 cases, same `--timeout 120 --max-nodes 200000`, under
+`heavy --mem 3G`. The model commit binary was used because the merged build
+does not complete in this environment: a clean `grail build scry` timed out
+checking `Models.wiz` itself at grail's 3600 s per-job limit, and the
+stale-cache attempts first failed on `Lower.wiz`/`RuleTaint.wiz` and then on
+`Interproc.wiz` (unknown `Scry.pointsToBounded` from the copied build DB). The
+pre-merge model worktree has a binary built from its own cache. The merge only
+adds the scale budget flags and the text-slice optimisation, neither of which
+changes taint. All cases are 262-1 147 nodes, far below the
+200 000-node limit. Timing is therefore again informational, not a `perf-run`.
+
+| CVE | CWE | before | after | expected rule | matched / expected | after ms | after RSS MiB |
+|---|---|---|---|---|---:|---:|---:|
+| CVE-2000-0573 | CWE-134 | miss | **miss** | `format-string` | 0 / 1 | 38 | 6.6 |
+| CVE-2012-0809 | CWE-134 | miss | **miss** | `format-string` | 0 / 1 | 31 | 6.6 |
+| CVE-2016-3714 | CWE-78 | miss | **miss** | `command-injection` | 0 / 1 | 37 | 6.6 |
+| CVE-2024-23749 | CWE-78 | miss | **miss** | `command-injection` | 0 / 1 | 248 | 6.6 |
+| CVE-2020-1752 | CWE-416 | miss | **miss** | `scry/memory/use-after-free` | 0 / 1 | 381 | 6.6 |
+| CVE-2019-7317 | CWE-416 | miss | **miss** | `scry/memory/use-after-free` | 0 / 1 | 37 | 6.6 |
+| CVE-2021-41773 | CWE-22 | out | out | -- | 0 / 0 | 51 895 | 8.6 |
+| CVE-2021-3449 | CWE-476 | out | out | -- | 0 / 0 | 207 | 6.7 |
+| CVE-2017-7529 | CWE-190 | out | out | -- | 0 / 0 | 128 | 6.6 |
+| CVE-2021-23017 | CWE-787 | out | out | -- | 0 / 0 | 413 | 6.9 |
+| CVE-2014-0160 | CWE-125 | out | out | -- | 0 / 0 | 181 | 6.6 |
+| CVE-2018-1000001 | CWE-787 | out | out | -- | 0 / 0 | 332 | 6.6 |
+
+**Verdict: no delta. In-scope recall stays 0/6; overall stays 0/12.** The
+model machinery is active -- a direct probe `printf(getenv(...))` reports
+`format-string`, `execl(..., getenv(...))` reports `command-injection`, and
+`sprintf(buf, "%s", getenv(...))` followed by `system(buf[0])` reports
+`command-injection`. But every real corpus case passes the **buffer pointer**
+to the sink (`system(buffer)`, `system(command)`, `vfprintf(..., fmt2)`), not a
+load from it. The copy effect writes `mstore` rows; the sink rule reads the
+register value. A direct probe with `sprintf(buf, "%s", getenv(...))` then
+`system(buf)` is still a miss, while the same probe with `system(buf[0])` is a
+hit. That is the dominant reason the new models do not move the CVE corpus.
+
+The new diagnostics are honest but not detections: after the change the 45
+"extras" are 12 `strcpy-overflow` findings, 21 `unknown-memory`, 1
+`unknown-indirect`, and **11 new `unmodelled-external` warnings** (previously
+silent havocs) for `va_start`/`va_end`, `easprintf`, `strdup`, `strpbrk`,
+`mempcpy`, `RAND_pseudo_bytes` and `dtls1_write_bytes`. No in-scope expected
+finding matched.
+
+### Remaining mechanism per miss
+
+| CVE | after actual | remaining mechanism |
+|---|---|---|
+| CVE-2000-0573 | no finding; `vsnprintf` unknown-memory, `va_start`/`va_end` unmodelled | **copy effect not applied through a `va_list` parameter.** `read` -> `cmd`, `lreply` -> `vreply(..., va_list ap)` loses the format taint. A probe with `vsnprintf` inlined in `lreply` hits; the separate `vreply` misses. |
+| CVE-2012-0809 | 2 unknown-memory, `easprintf`/`va_start`/`va_end` unmodelled | **source not modelled** (`argv[0]`) and **copy effect not applied** (`easprintf` is an unmodelled external). `vfprintf` is now a sink, but its format string never becomes tainted. |
+| CVE-2016-3714 | 2 `unmodelled-external` (`strdup`, `strpbrk`) | **copy effect not applied at the sink.** `snprintf` does write the tainted filename into `command`, but `system(sanitize_command)` is a pointer argument; `SanitizeDelegateCommand`'s `strdup` return is unmodelled. |
+| CVE-2024-23749 | 11 `strcpy-overflow` findings, no command-injection | **copy effect not applied at the sink.** `strcat` writes the tainted filename into `buffer`, but `system(buffer)` is a pointer argument. The rule findings are real unbounded-copy warnings, not the CVE. |
+| CVE-2020-1752 | 3 unknown-memory, 2 `unmodelled-external` (`mempcpy`) | **alias/lifetime.** `strchr` is modelled pure, not as returning a pointer into its first argument; `mempcpy` is unmodelled; no heap-use path from `end_name` to the freed `dirname`. |
+| CVE-2019-7317 | 1 `unknown-indirect` | **alias/lifetime.** The free is reached through an indirect callback and a stack-copied control block; the model has no callback or stack-lifetime summary. |
+| six out-of-scope cases | unchanged | **no rule family** (CWE-22/476/190/787/125). |
+
+The model's own fixtures pass because they load from the destination
+(`system(buf[0])`) or pass a direct value to the sink. The real-CVE corpus
+uses the C idiom `system(buffer)`, so the copy effects are not observable at
+the sink. The next model/engine change, if this direction is continued, is a
+memory-aware sink: for a pointer argument, check the `mtainted` locations the
+pointer may point at, with the same budget/unknown discipline as `ptrAccess`.
+That is a change to the sink rule, not to this corpus, and it should be
+measured on both the model fixtures and these twelve cases.
+
 ## Precision and recall
 
 | metric | value |
@@ -112,6 +189,9 @@ not be scored as false positives but they also cannot be scored as detections.
 Either way, **no in-scope CVE was detected**. This is the honest result: the
 51-case synthetic corpus in `wiz-notes/scry-bench.md` reports 100% in-scope
 TPR, and that number does not transfer to these real vulnerable versions.
+The external-model re-run above is the same 0/6 and 0/12; its extra count is
+45 (12 rule findings and 33 memory diagnostics, including 11 new explicit
+`unmodelled-external` warnings).
 
 ## Why each in-scope case missed
 
