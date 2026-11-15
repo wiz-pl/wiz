@@ -22,6 +22,18 @@ def mkTree (files : List (String × String)) : IO System.FilePath := do
 
 def loaderOf (m : Std.HashMap Name (System.FilePath × String)) : Name → Option String := fun n => (m[n]?).map (·.2)
 
+/-- A module's cache key: the fast half (old names) and the SHA-256 half (regions,
+manifests). These tests use no toolchain/target namespace, as `elaborateCached`'s defaults
+do. -/
+def moduleCacheKey (m : Std.HashMap Name (System.FilePath × String)) (toolchain : UInt64)
+    (n : Name) : Cache.Key :=
+  let loader := loaderOf m
+  let strongToolchain := Cache.toolchainOptionsTag "" false false NativeRun.defaultFuel none
+  { fast := Cache.moduleKey loader (fun _ => none) toolchain n (trusted := Tests.libModule)
+    strong := Cache.moduleKeyStrong loader (fun _ => none) toolchain n (trusted := Tests.libModule)
+      (strongToolchain := strongToolchain)
+    toolchain := strongToolchain }
+
 /-- Every file under `dir`, as (path relative to `root`, modification time, hash of the
 contents), sorted by path: a read-only cache must leave this unchanged. The contents are
 read as bytes (a `.wizr` region is not UTF-8). -/
@@ -52,6 +64,39 @@ def effectSigs (es : Array (Cache.Effect ZeroOneMany)) : List String := es.toLis
 def regionFiles (cache : System.FilePath) : IO (Array System.FilePath) := do
   let entries ← cache.readDir
   pure (entries.filter (fun e => e.fileName.endsWith ".wizr") |>.map (·.path))
+
+/-- The per-module output manifests in a cache directory. -/
+def manifestFiles (cache : System.FilePath) : IO (Array System.FilePath) := do
+  let d := cache / "manifest.d"
+  if !(← d.pathExists) then return #[]
+  let entries ← d.readDir
+  pure (entries.filter (fun e => e.fileName.endsWith ".wizmf") |>.map (·.path))
+
+/-- The first `(file, entry)` that a cache's manifests list (for a tamper test). -/
+def firstManifestEntry (cache : System.FilePath) : IO (Option (System.FilePath × Cache.ManifestEntry)) := do
+  for f in ← manifestFiles cache do
+    let text ← IO.FS.readFile f
+    if let some m := Cache.parseManifest text then
+      if let some e := m.allEntries[0]? then return some (cache / e.file, e)
+  pure none
+
+/-- The manifest file for module `name` in a cache directory. -/
+def manifestFor (cache : System.FilePath) (name : String) : IO (Option System.FilePath) := do
+  for f in ← manifestFiles cache do
+    let text ← IO.FS.readFile f
+    if let some m := Cache.parseManifest text then
+      if toString m.module == name then return some f
+  pure none
+
+/-- Change the first digit of a manifest's root (its own root no longer matches). -/
+def tamperManifestRoot (f : System.FilePath) : IO Unit := do
+  let text ← IO.FS.readFile f
+  match text.splitOn "(root " with
+  | before :: after :: _ =>
+    let after := after.drop 1
+    let bad := if after.startsWith "0" then "1" else "0"
+    IO.FS.writeFile f (before ++ "(root " ++ bad ++ after.drop 1)
+  | _ => IO.FS.writeFile f (text ++ " ")
 
 /-- Every file under `dir`, recursively. -/
 partial def everyFile (dir : System.FilePath) : IO (Array System.FilePath) := do
@@ -115,6 +160,127 @@ def modulesGroup : Group where
         let ms ← Module.loadAll ["lib", dir]
         check (Cache.moduleKey (loaderOf ms) (fun _ => none) 0 "Other" != Cache.moduleKey (loaderOf ms) (fun _ => none) 1 "Other")
           "the toolchain is not in the key" },
+    { name := "cache keys: SHA-256 keys are domain-separated and length-framed", run := fun _ => do
+        let digest := Smt.Sha256.hexFramed "wiz-cache-test-v1"
+        checkEq 64 (digest ["ab", "c"]).length
+        -- (without lengths, ["ab", "c"] and ["a", "bc"] would collide)
+        check (digest ["ab", "c"] != digest ["a", "bc"]) "fields are concatenated without framing"
+        check (digest ["ab", "c"] != Smt.Sha256.hexFramed "wiz-cache-test-v2" ["ab", "c"])
+          "the domain does not separate keys"
+        check (digest ["ab", "c"] != digest ["ab", "c", ""]) "an empty trailing field is free"
+        let loader : Name → Option String := fun n => if n == "M" then some "def x : Nat := 1\n" else none
+        let k := Cache.moduleKeyStrong loader (fun _ => none) 0 "M"
+        checkEq 64 k.length
+        checkEq k (Cache.moduleKeyStrong loader (fun _ => none) 0 "M")
+        check (k != Cache.moduleKeyStrong loader (fun _ => none) 1 "M") "the toolchain is not in the strong key"
+        check (k != Cache.moduleKeyStrong loader (fun _ => none) 0 "M" (strongToolchain := "tc-a"))
+          "the strong toolchain is not in the module key"
+        check (k != Cache.moduleKeyStrong loader (fun _ => none) 0 "M" (targetTag := "target-a"))
+          "the target is not in the module key" },
+    { name := "target and toolchain ids: separate SHA-256 namespaces, not the 64-bit build id", run := fun _ => do
+        let tc : Toolchain := {}
+        let other : Toolchain := { tc with cflags := ["-O2"] }
+        checkEq 64 tc.tag.length
+        checkEq 64 tc.targetTag.length
+        check (tc.tag != other.tag) "cflags are not in the toolchain tag"
+        check (tc.targetTag == other.targetTag) "the target tag depends on compiler flags"
+        checkEq tc.tag ({ tc with cacheDir := some "/tmp/c" } : Toolchain).tag
+        check (tc.tag != toString tc.id) "the strong tag is just the 64-bit id"
+        -- (the elaboration cache's example namespaces the same inputs)
+        let loader : Name → Option String := fun n => if n == "M" then some "def x : Nat := 1\n" else none
+        check (Cache.moduleKeyStrong loader (fun _ => none) 0 "M" (strongToolchain := tc.tag)
+          != Cache.moduleKeyStrong loader (fun _ => none) 0 "M" (strongToolchain := other.tag))
+          "two toolchains share a module key"
+        check (Cache.moduleKeyStrong loader (fun _ => none) 0 "M" (targetTag := tc.targetTag)
+          != Cache.moduleKeyStrong loader (fun _ => none) 0 "M" (targetTag := "another-target"))
+          "two targets share a module key" },
+    { name := "cache keys: a manifest binds the SHA-256 key, so a 64-bit collision is a miss", run := fun _ => do
+        let hex (c : Char) : String := String.ofList (List.replicate 64 c)
+        let k1 : Cache.Key := { fast := 42, strong := hex 'a', toolchain := "tc", target := "target",
+                                binary := "binary" }
+        let k2 : Cache.Key := { k1 with strong := hex 'b' }
+        let e : Cache.ManifestEntry :=
+          { kind := "wizc", key := k1.fast, keySha := k1.strong,
+            file := s!"{mixHash 1 k1.fast}.wizc", size := 1, sha256 := hex 'c',
+            format := Cache.salt.toNat }
+        check (e.valid 1) "the fixture entry is not self-consistent"
+        let m0 : Cache.ModuleManifest :=
+          { module := "M", key := k1.fast, keySha := k1.strong, binary := 1,
+            toolchainTag := k1.toolchain, targetTag := k1.target, entries := #[e] }
+        let m := { m0 with root := m0.rootOf }
+        check (m.valid k1 1 "" "") "the manifest does not wake its own key"
+        check (!(m.valid k2 1 "" "")) "the same fast key with another SHA-256 key was accepted"
+        check (!(m.valid { k1 with toolchain := "other" } 1 "" "")) "the toolchain tag was not checked"
+        check (!(m.valid { k1 with target := "other" } 1 "" "")) "the target tag was not checked"
+        check (Cache.manifestFileName 1 k1 != Cache.manifestFileName 1 k2)
+          "two strong keys share a manifest file"
+        let dir ← IO.FS.createTempDir
+        let ms ← Cache.ManifestStore.create (some dir) [] 1 "" "" .warn
+        ms.writeManifest k1 "M" #[e] none
+        ms.load k1
+        check ((← ms.entryFor k1).isSome) "the written entry was not indexed under its SHA-256 key"
+        ms.load k2
+        check ((← ms.entryFor k2).isNone) "a colliding fast key found another key's entry" },
+    { name := "cache keys: editing an include_str file changes the fast and SHA-256 keys", run := fun _ => do
+        let dir ← mkTree [("M.wiz", "include_str \"data.txt\"\ndef x : Nat := 1\n"),
+                          ("data.txt", "one\n")]
+        let src ← IO.FS.readFile (dir / "M.wiz")
+        let loader : Name → Option String := fun n => if n == "M" then some src else none
+        let mods : Std.HashMap Name (System.FilePath × String) :=
+          ({} : Std.HashMap Name (System.FilePath × String)).insert "M" (dir / "M.wiz", src)
+        let keys : IO (UInt64 × String) := do
+          let table ← Module.includeTable dir src mods
+          let includes := Module.includeResolver table
+          pure (Cache.moduleKey loader (fun _ => none) 0 "M" (includes := includes),
+                Cache.moduleKeyStrong loader (fun _ => none) 0 "M" (includes := includes))
+        let (fast1, strong1) ← keys
+        IO.FS.writeFile (dir / "data.txt") "two\n"
+        let (fast2, strong2) ← keys
+        check (fast1 != fast2) "the include edit did not change the fast key"
+        check (strong1 != strong2) "the include edit did not change the SHA-256 key"
+        checkEq 64 strong2.length
+        -- (going back to the old contents restores both halves)
+        IO.FS.writeFile (dir / "data.txt") "one\n"
+        let (fast3, strong3) ← keys
+        checkEq fast1 fast3
+        checkEq strong1 strong3 },
+    { name := "cache keys: an old-format region and manifest are a miss and regenerate", run := fun _ => do
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 1\n")]
+        let ms ← Module.loadAll ["lib", dir]
+        let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
+        let cache ← IO.FS.createTempDir
+        let rig := RigTag.tag (R := ZeroOneMany)
+        let binary ← Cache.binaryId (some cache)
+        let k := moduleCacheKey ms 0 "M"
+        -- (a format-2 region under the new strong name: it has no SHA-256 fields, so it
+        -- is a miss and the write cache replaces it)
+        let _ ← Cache.writeRegionFile (R := ZeroOneMany) (cache / Cache.regionFileName binary k)
+          { magic := Cache.regionMagic, format := 2, binary, textSalt := Cache.salt, rig,
+            module := "M", key := k.fast, keySha := k.strong }
+        let rstats ← IO.mkRef ({} : Cache.RegionCounts)
+        let opts : Cache.RegionOptions := { rig, stats := some rstats }
+        let src := "import M\n#eval x\n"
+        let (s0, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
+          (verify := .warn) (rig := rig)
+        check (!s0.messages.any (·.severity == .error)) s!"messages: {s0.messages.toList.map (·.text)}"
+        check ((← rstats.get).misses > 0) "the old-format region was not a miss"
+        let some a ← Cache.readModuleRegion (R := ZeroOneMany) cache binary rig k
+          | throw (IO.userError "the region was not regenerated")
+        checkEq Cache.regionFormat a.format
+        checkEq k.strong a.keySha
+        -- (a format-1 manifest: the loader rejects it and the run writes format 2)
+        let some mf ← manifestFor cache "M"
+          | throw (IO.userError "no manifest for M")
+        let old ← IO.FS.readFile mf
+        IO.FS.writeFile mf (old.replace "(format 2)" "(format 1)")
+        let (s1, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts) (verify := .warn) (rig := rig)
+        checkEq (s0.messages.toList.map (·.render src)) (s1.messages.toList.map (·.render src))
+        let some text := (String.fromUTF8? (← IO.FS.readBinFile mf))
+          | throw (IO.userError "the manifest is not UTF-8")
+        let some man := Cache.parseManifest text
+          | throw (IO.userError "the manifest was not rewritten")
+        checkEq Cache.manifestFormat man.format
+        checkEq k.strong man.keySha },
     { name := "the isolated-module key has the proof marker's options (strictProofs, proofSteps, traceProofSteps)", run := fun _ => do
         -- a module elaborated in isolation is kept per process under `isoKey`: a module kept
         -- under one setting must not be replayed under another
@@ -187,12 +353,12 @@ def modulesGroup : Group where
         let k2 : UInt64 := 777
         IO.FS.writeFile (r2 / s!"{mixHash binary k2}.wizm") "M"
         checkEq true (← store.seen k2)
-        checkEq false (← store.seen 778)
+        checkEq false (← store.seen (778 : UInt64))
         checkEq (repr before).pretty (repr (← snapshot r1)).pretty
         let memory ← Cache.Store.layered (R := ZeroOneMany) none [] binary
-        checkEq false (← memory.seen 779)
-        memory.markSeen 779 "M"
-        checkEq true (← memory.seen 779) },
+        checkEq false (← memory.seen (779 : UInt64))
+        memory.markSeen (779 : UInt64) "M"
+        checkEq true (← memory.seen (779 : UInt64)) },
     { name := "a read-only cache replays modules and is never written", run := fun _ => do
         let ms ← Module.loadAll ["lib"]
         let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
@@ -480,14 +646,15 @@ def modulesGroup : Group where
         let (s, _) ← Cache.elaborateCached (some cache) [] "import M\n#eval y\n" init 0 (region := some { rig })
         check (!s.messages.any (·.severity == .error)) s!"messages: {s.messages.toList.map (·.text)}"
         let binary ← Cache.binaryId (some cache)
-        let k := Cache.moduleKey (loaderOf ms) (fun _ => none) 0 "M" (trusted := Tests.libModule)
+        let k := moduleCacheKey ms 0 "M"
         -- one region for the module, not one per command
         let regs ← regionFiles cache
         checkEq 1 (regs.filter (fun p => p.fileName == some (Cache.regionFileName binary k))).size
         let some a ← Cache.readModuleRegion (R := ZeroOneMany) cache binary rig k
           | throw (IO.userError "M has no region")
         checkEq "M" a.module
-        checkEq k a.key
+        checkEq k.fast a.key
+        checkEq k.strong a.keySha
         checkEq Cache.regionFormat a.format
         checkEq Cache.salt a.textSalt
         checkEq Cache.regionMagic a.magic
@@ -496,23 +663,32 @@ def modulesGroup : Group where
         check (a.rerun.size > 0) "M's import is not recorded for the rerun path"
         -- (a pure cache: write the effects back out and read them; every field survives)
         let dir2 ← IO.FS.createTempDir
-        Cache.writeModuleRegion dir2 binary rig (k + 1) "M" a.effects a.keys a.complete a.rerun
-        let some b ← Cache.readModuleRegion (R := ZeroOneMany) dir2 binary rig (k + 1)
+        let k1 : Cache.Key := { k with fast := k.fast + 1 }
+        let _ ← Cache.writeModuleRegion dir2 binary rig k1 "M" a.effects a.keys a.complete a.rerun
+        let some b ← Cache.readModuleRegion (R := ZeroOneMany) dir2 binary rig k1
           | throw (IO.userError "the region written for M does not read back")
         checkEq (effectSigs a.effects) (effectSigs b.effects)
         checkEq a.keys.toList b.keys.toList
         checkEq a.effects.size a.keys.size
-        checkEq (k + 1) b.key
+        checkEq k1.fast b.key
         -- (the tags are checked: another rig, format or key is not this module's artifact)
-        check (b.fits binary (k + 1) rig) "a region does not fit itself"
-        check (!(b.fits binary (k + 1) "nat")) "the rig is not checked"
-        check (!(b.fits binary (k + 2) rig)) "the key is not checked"
+        check (b.fits binary k1 rig) "a region does not fit itself"
+        check (!(b.fits binary k1 "nat")) "the rig is not checked"
+        check (!(b.fits binary { k1 with fast := k1.fast + 1 } rig)) "the key is not checked"
+        check (!(b.fits binary { k1 with strong := String.ofList (List.replicate 64 '0') } rig))
+          "the SHA-256 key is not checked"
+        check (!(b.fits binary { k1 with toolchain := "toolchain-2" } rig))
+          "the toolchain namespace is not checked"
+        check (!(b.fits binary { k1 with target := "target-2" } rig))
+          "the target namespace is not checked"
+        check (!(b.fits binary { k1 with binary := "binary-2" } rig))
+          "the binary SHA-256 is not checked"
         let badFormat : Cache.ModuleArtifact ZeroOneMany := { b with format := 999 }
-        check (!(badFormat.fits binary (k + 1) rig)) "the format is not checked"
+        check (!(badFormat.fits binary k1 rig)) "the format is not checked"
         let badBinary : Cache.ModuleArtifact ZeroOneMany := { b with binary := binary + 1 }
-        check (!(badBinary.fits binary (k + 1) rig)) "the binary is not checked"
+        check (!(badBinary.fits binary k1 rig)) "the binary is not checked"
         let badSalt : Cache.ModuleArtifact ZeroOneMany := { b with textSalt := Cache.salt + 1 }
-        check (!(badSalt.fits binary (k + 1) rig)) "the salt is not checked" },
+        check (!(badSalt.fits binary k1 rig)) "the salt is not checked" },
     { name := "a corrupt or mismatched region is a miss (the text cache answers)", run := fun _ => do
         let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 1\n")]
         let ms ← Module.loadAll ["lib", dir]
@@ -538,10 +714,10 @@ def modulesGroup : Group where
           check ((← f.metadata).byteSize > 0) s!"{f} was not rewritten"
         -- (a region with the wrong format is rejected and rewritten, too)
         let binary ← Cache.binaryId (some cache)
-        let k := Cache.moduleKey (loaderOf ms) (fun _ => none) 0 "M" (trusted := Tests.libModule)
-        Cache.writeRegionFile (R := ZeroOneMany) (cache / Cache.regionFileName binary k)
+        let k := moduleCacheKey ms 0 "M"
+        let _ ← Cache.writeRegionFile (R := ZeroOneMany) (cache / Cache.regionFileName binary k)
           { magic := Cache.regionMagic, format := 999, binary, textSalt := Cache.salt, rig,
-            module := "M", key := k }
+            module := "M", key := k.fast, keySha := k.strong }
         let after2 ← stats.get
         let (s2, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
         checkEq good (s2.messages.toList.map (·.render src))
@@ -573,7 +749,7 @@ def modulesGroup : Group where
         checkEq (none : Option UInt64) (← Cache.regionFileChecksum probe)
         -- (a good region carries one)
         let binary ← Cache.binaryId (some cache)
-        let k := Cache.moduleKey (loaderOf ms) (fun _ => none) 0 "M" (trusted := Tests.libModule)
+        let k := moduleCacheKey ms 0 "M"
         let f := cache / Cache.regionFileName binary k
         check (← Cache.regionFileChecksum f).isSome "a fresh region has no checksum"
         -- (a same-size bit flip in the payload: a miss, not a load error or a wrong term)
@@ -613,7 +789,7 @@ def modulesGroup : Group where
         let expected := cold.messages.toList.map (·.render src)
         -- (corrupt one region's payload in the read-only layer)
         let binary ← Cache.binaryId (some ro)
-        let k := Cache.moduleKey (loaderOf ms) (fun _ => none) 0 "Use" (trusted := Tests.libModule)
+        let k := moduleCacheKey ms 0 "Use"
         let bad := ro / Cache.regionFileName binary k
         let _ ← flipByte bad
         checkEq (none : Option UInt64) (← Cache.regionFileChecksum bad)
@@ -721,12 +897,12 @@ def modulesGroup : Group where
         check (!s2.messages.any fun m => (m.render src).endsWith "info: 1") s!"stale: {s2.messages.toList.map (·.render src)}"
         -- (the new key has its own region; the old one is stale, not served)
         let ms ← Module.loadAll ["lib", dir]
-        let k2 := Cache.moduleKey (loaderOf ms) (fun _ => none) 0 "M" (trusted := Tests.libModule)
+        let k2 := moduleCacheKey ms 0 "M"
         let binary ← Cache.binaryId (some cache)
         check (← (cache / Cache.regionFileName binary k2).pathExists) "no region for the edited module"
         let some a ← Cache.readModuleRegion (R := ZeroOneMany) cache binary rig k2
           | throw (IO.userError "no readable region for the edited module")
-        checkEq k2 a.key },
+        checkEq k2.fast a.key },
     { name := "regions layer over read-only caches (and never repair them)", run := fun _ => do
         -- (`--region-cache` + `--cache-ro`: regions live in the same directory layers)
         let dir ← mkTree libFiles
@@ -760,7 +936,7 @@ def modulesGroup : Group where
         -- answers, the module is re-elaborated once into the write cache, and the bad file
         -- is left alone — a read-only cache is never repaired)
         let binary ← Cache.binaryId (some ro)
-        let k := Cache.moduleKey (loaderOf ms) (fun _ => none) 0 "Use" (trusted := Tests.libModule)
+        let k := moduleCacheKey ms 0 "Use"
         let bad := ro / Cache.regionFileName binary k
         IO.FS.writeFile bad ""
         let beforeBad ← snapshot ro
@@ -895,6 +1071,78 @@ def toolchainGroup : Group where
         -- render: one line per read cache, in order, then the write cache
         check ((full.render.splitOn "cache-ro /a\ncache-ro /b\ncache /w\n").length > 1) full.render
         check ((roOnly.render.splitOn "cache-ro /a\ncache-ro /b\ncache (off)\n").length > 1) roOnly.render },
+    { name := "--cache-verify off|warn|strict round-trips and is not in the toolchain id", run := fun _ => do
+        let parse (args : List String) := ({} : Toolchain).parseFlags args
+        let (tc, rest) := parse ["--cache-verify", "strict", "check", "x.wiz"]
+        checkEq "strict" tc.cacheVerify
+        checkEq ["check", "x.wiz"] rest
+        let (tc2, _) := parse ["--cache-verify=off", "check", "x.wiz"]
+        checkEq "off" tc2.cacheVerify
+        checkEq "warn" ({} : Toolchain).cacheVerify
+        check (tc.id == ({ tc with cacheVerify := "warn" } : Toolchain).id)
+          "cache-verify is in the toolchain id"
+        let (back, rest) := parse ({ tc with cacheVerify := "strict" }).toFlags
+        checkEq [] rest
+        checkEq "strict" back.cacheVerify
+        check ((tc.render.splitOn "cache-verify strict").length > 1) tc.render },
+    { name := "wiz cache verify/manifest, and a --cache-ro layer is strict by default", run := fun _ => do
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 2\n"),
+                          ("main.wiz", "import M\n#eval x\n")]
+        let cache ← IO.FS.createTempDir
+        let wiz := (← IO.FS.realPath ".lake/build/bin/wiz").toString
+        let run (args : Array String) := IO.Process.output { cmd := wiz, args, cwd := some dir }
+        let base : Array String := #["check", "main.wiz", "-I", dir.toString]
+        let cold ← run (base ++ #["--cache", cache.toString])
+        checkEq 0 cold.exitCode
+        checkEq "main.wiz:2:1: info: 2\n" cold.stdout
+        -- (a full scan: the manifests match the bytes)
+        let v0 ← run #["cache", "verify", "--cache", cache.toString]
+        checkEq 0 v0.exitCode
+        check ((v0.stdout.splitOn "0 modules").length == 1) s!"no modules verified: {v0.stdout}"
+        check ((v0.stdout.splitOn "0 unmanifested").length > 1) s!"unmanifested: {v0.stdout}"
+        -- (the generation index names its predecessor and an expiry)
+        let m ← run #["cache", "manifest", "--cache", cache.toString, "--valid-days", "1"]
+        checkEq 0 m.exitCode
+        let gen ← IO.FS.readFile (cache / "manifest.sexpr")
+        check ((gen.splitOn "(valid-until ").length > 1) gen
+        check ((gen.splitOn "(prev ").length > 1) gen
+        -- (a tampered entry: the scan fails, a warm run repairs it)
+        let some (entryFile, ent) ← firstManifestEntry cache
+          | throw (IO.userError "no manifest entry")
+        checkEq "wizc" ent.kind
+        let _ ← flipByte entryFile
+        checkEq 1 (← run #["cache", "verify", "--cache", cache.toString]).exitCode
+        let warm ← run (base ++ #["--cache", cache.toString])
+        checkEq 0 warm.exitCode
+        checkEq cold.stdout warm.stdout
+        checkEq 0 (← run #["cache", "verify", "--cache", cache.toString]).exitCode
+        -- (a read-only layer: strict by default; nothing there is written or repaired)
+        let ro := cache
+        let before ← snapshot ro
+        let rw ← run (base ++ #["--no-cache", "--cache-ro", ro.toString, "--cache-verify-stats"])
+        checkEq 0 rw.exitCode
+        checkEq cold.stdout rw.stdout
+        check ((rw.stderr.splitOn "cache verify: ").length > 1) s!"no verify stats: {rw.stderr}"
+        checkEq before (← snapshot ro)
+        -- (a tampered read-only entry: a miss, the text path answers, the layer is unchanged)
+        let some (roFile, _) ← firstManifestEntry ro
+          | throw (IO.userError "no read-only manifest entry")
+        let _ ← flipByte roFile
+        let bad ← snapshot ro
+        let o ← run (base ++ #["--no-cache", "--cache-ro", ro.toString])
+        checkEq 0 o.exitCode
+        checkEq cold.stdout o.stdout
+        checkEq bad (← snapshot ro)
+        -- (delete a manifest: its entries are not used, and the layer says so; still no write)
+        let some mf ← manifestFor ro "M"
+          | throw (IO.userError "no manifest for M")
+        IO.FS.removeFile mf
+        let after ← snapshot ro
+        let o2 ← run (base ++ #["--no-cache", "--cache-ro", ro.toString])
+        checkEq 0 o2.exitCode
+        checkEq cold.stdout o2.stdout
+        check ((o2.stderr.splitOn "no manifest for a module").length > 1) s!"no warning: {o2.stderr}"
+        checkEq after (← snapshot ro) },
     { name := "--region-cache is a toolchain flag and a build-file setting", run := fun _ => do
         let parse (args : List String) := ({} : Toolchain).parseFlags args
         let (tc, rest) := parse ["--region-cache", "check", "x.wiz"]
@@ -1053,7 +1301,50 @@ def toolchainGroup : Group where
         checkEq 0 o3.exitCode
         checkEq o1.stdout o3.stdout
         for f in ← regionFiles cache do
-          check ((← f.metadata).byteSize > 0) s!"{f} was not rewritten" }
+          check ((← f.metadata).byteSize > 0) s!"{f} was not rewritten" },
+    { name := "output manifests: warm hits are verified; a tampered entry or manifest is a miss", run := fun _ => do
+        let dir ← mkTree libFiles
+        let cache ← IO.FS.createTempDir
+        let ms ← Module.loadAll ["lib", dir]
+        let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
+        let src := "import Data.Two\ndef a : Nat := two\n#eval a\n"
+        let stats ← IO.mkRef ({} : Cache.VerifyCounts)
+        let run : IO (CommandState ZeroOneMany) := do
+          pure (← Cache.elaborateCached (some cache) [] src init 0 (verify := .warn)
+            (rig := "zero-one-many") (stats := some stats)).1
+        let cold ← run
+        check (!cold.messages.any (·.severity == .error)) s!"cold: {cold.messages.toList.map (·.text)}"
+        check ((← manifestFiles cache).size > 0) "no module manifest was written"
+        let c0 ← stats.get
+        checkEq 0 c0.mismatches
+        -- (a warm run: every entry comes from a manifest and matches its digest)
+        stats.set {}
+        let warm ← run
+        checkEq (cold.messages.toList.map (·.render src)) (warm.messages.toList.map (·.render src))
+        let c1 ← stats.get
+        check (c1.hits > 0) s!"no entry was served from a manifest: {repr c1}"
+        checkEq 0 c1.mismatches
+        -- (flip a byte of a manifested `.wizc`: a miss, the text is rebuilt, the file repaired)
+        let some (entryFile, ent) ← firstManifestEntry cache
+          | throw (IO.userError "no manifest lists an entry")
+        checkEq "wizc" ent.kind
+        let before ← IO.FS.readFile entryFile
+        let _ ← flipByte entryFile
+        stats.set {}
+        let tampered ← run
+        checkEq (cold.messages.toList.map (·.render src)) (tampered.messages.toList.map (·.render src))
+        let c2 ← stats.get
+        check (c2.mismatches > 0) s!"a tampered entry was not a miss: {repr c2}"
+        checkEq before (← IO.FS.readFile entryFile)
+        -- (tamper a manifest's root: its entries are misses, and it is rewritten)
+        let mfile := (← manifestFiles cache)[0]!
+        tamperManifestRoot mfile
+        stats.set {}
+        let t2 ← run
+        checkEq (cold.messages.toList.map (·.render src)) (t2.messages.toList.map (·.render src))
+        let c3 ← stats.get
+        check (c3.mismatches > 0) s!"a tampered manifest was trusted: {repr c3}"
+        check ((← manifestFiles cache).size > 0) "the manifest was not rewritten" }
   ]
 
 /-- (9f) An executable with a `link_c` file: editing the C file relinks it (only). -/

@@ -32,6 +32,8 @@ structure Loaded where
   /-- the file's key: as for a module (`Cache.moduleKey`), its text, headers and imports,
   and (9f) which of its `link_c` files exist, where -/
   key : UInt64
+  /-- the SHA-256 version of `key`, for the manifest/region namespace -/
+  keyStrong : String
 
 /-- The name a file that isn't itself imported goes by in the key computation. -/
 def mainName : Name := "main✝"
@@ -53,19 +55,30 @@ def load (tc : Toolchain) (roots : List System.FilePath) (salt : UInt64) (src : 
       includes := some (Module.includeResolver includes),
       trustedModule := own.contains, trustNative := tc.trustNative,
       nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := ← tc.smt.resolve }
+  let includesResolver := Module.includeResolver includes
   let key := Cache.moduleKey (fun n => if n == mainName then some src else loader n) (headers[·]?) salt mainName
     own.contains (Module.includeResolver includes)
+  let keyStrong := Cache.moduleKeyStrong (fun n => if n == mainName then some src else loader n)
+    (headers[·]?) salt mainName own.contains (strongToolchain := tc.tag) (targetTag := tc.targetTag)
+    (includes := includesResolver)
   -- a `link_c` file that appears or disappears changes the check: the key names it by
-  -- its module and path as written. Its contents do not enter the check (they cannot
-  -- change the elaborated result; the link job's key hashes them), and its resolved
-  -- absolute path does not either (that would tie the key to where the checkout is).
-  let sourceKey := (sources.toList.toArray.qsort (fun a b => a.1 < b.1)).map (·.1)
-  let key := mixHash key (hash (toString sourceKey))
+  -- its module name as written. Its contents do not enter the check (they cannot change
+  -- the elaborated result; the link job's key hashes them), and its resolved absolute
+  -- path does not either (that would tie the key to where the checkout is).
+  let sourceTag := toString ((sources.toList.map (·.1)).toArray.qsort (· < ·))
+  let key := mixHash key (hash sourceTag)
+  let keyStrong := Smt.Sha256.hexFramed "wiz-cache/grail-link-v1" [keyStrong, sourceTag]
   -- (27a) `--trust-native` changes what a check accepts: its jobs are others
   let key := if tc.trustNative then mixHash key (hash s!"trust-native {init.nativeFuel}") else key
+  let keyStrong := if tc.trustNative then
+      Smt.Sha256.hexFramed "wiz-cache/grail-native-v1" [keyStrong, toString init.nativeFuel]
+    else keyStrong
   -- (28) so do the solver settings
   let key := match Cache.smtKey init.smt with | some k => mixHash key k | none => key
-  pure { src, init, key }
+  let keyStrong := match Cache.smtKey init.smt with
+    | some k => Smt.Sha256.hexFramed "wiz-cache/grail-smt-v1" [keyStrong, toString k]
+    | none => keyStrong
+  pure { src, init, key, keyStrong }
 
 /-- Elaborate a loaded file (through the cache when there is one: a write directory and
 any read-only ones). With `--region-cache` (`tc.regionCache`), module effects are also
@@ -78,7 +91,10 @@ def elaborate (tc : Toolchain) (salt : UInt64) (l : Loaded) : IO (CommandState Z
     let region := if tc.regionCache then
         some ({ rig := RigTag.tag (R := ZeroOneMany) } : Cache.RegionOptions)
       else none
-    pure (← Cache.elaborateCached write reads l.src l.init l.key salt (region := region)).1
+    pure (← Cache.elaborateCached write reads l.src l.init l.key salt (region := region)
+      (verify := (Cache.VerifyMode.ofString? tc.cacheVerify).getD .warn)
+      (rig := RigTag.tag (R := ZeroOneMany))
+      (strongToolchain := tc.tag) (targetTag := tc.targetTag) (rootTag := l.keyStrong)).1
 
 /-- The messages of a state, rendered `path:line:col: severity: text`. -/
 def render (path : String) (l : Loaded) (s : CommandState ZeroOneMany) : String :=
