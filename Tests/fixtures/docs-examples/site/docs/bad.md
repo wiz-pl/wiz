@@ -8,6 +8,16 @@
 FAIL
 ```
 
+```wiz run
+import IO
+
+def main : IO Unit := IO.println "actual"
+```
+
+```text
+not the output
+```
+
 ```wiz wat
 def a_bad_marker : Nat := 1
 ```

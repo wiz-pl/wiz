@@ -539,10 +539,12 @@ def self_test() -> int:
             failures.append("an unknown `wiz` marker was not reported")
         if not any("check failed" in p for p in problems):
             failures.append("a failing `wiz check` was not reported")
-        if report.checked != 3:
-            failures.append(f"expected 3 checked blocks, got {report.checked}")
-        if report.run != 1:
-            failures.append(f"expected 1 run block, got {report.run}")
+        if not any("output differs" in p for p in problems):
+            failures.append("a run block whose output differs was not reported")
+        if report.checked != 4:
+            failures.append(f"expected 4 checked blocks, got {report.checked}")
+        if report.run != 2:
+            failures.append(f"expected 2 run blocks, got {report.run}")
         if report.no_check != 1:
             failures.append(f"expected 1 no-check block, got {report.no_check}")
         if report.links != 6:
@@ -554,8 +556,8 @@ def self_test() -> int:
         cached, _ = run_check(fixture, wiz, cache, 30)
         if cached.cache_hits != 2:
             failures.append(f"expected 2 cache hits, got {cached.cache_hits}")
-        if cached.checked != 3:
-            failures.append(f"cache run checked {cached.checked} blocks, expected 3")
+        if cached.checked != 4:
+            failures.append(f"cache run checked {cached.checked} blocks, expected 4")
 
         # The fake wiz rejects a block without an import unless the checker added the
         # implicit Prelude, so the good block also exercises that convention.
