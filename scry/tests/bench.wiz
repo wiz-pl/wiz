@@ -1,0 +1,116 @@
+-- test: run
+import Sys
+import Int
+import Text
+import Scry.Bench
+import Scry.BenchCmd
+-- Tests for the benchmark *measurement* code, not for the taint analysis:
+--
+-- * the integer TPR/FPR/Youden/precision formulas (basis points);
+-- * the advisory/blocking boundary split;
+-- * path validity (ends at the sink, starts at a source; forbidden calls are the
+--   call itself);
+-- * the case outcome rules (TP/FN/TN/FP/unknown, including a safe case with a
+--   blocking boundary);
+-- * a missing corpus is a clean skip;
+-- * the checked-in corpus still matches the checked-in baseline.
+--
+-- The last check is the regression gate: update `bench/baseline.json` with
+-- `scry bench --update-baseline bench/baseline.json` after reviewing a change.
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+def path (kind : Scry.PathKind) (func : String) (point : Nat) : List Scry.PathNode :=
+  [Scry.PathNode.mk func point 0 kind]
+
+def taintFinding (path : List Scry.PathNode) : Scry.RuleFinding :=
+  Scry.RuleFinding.mk "command-injection" Scry.Severity.error "m" Scry.FindingKind.taint "main" 3 "system" 0 path
+
+def forbiddenFinding : Scry.RuleFinding :=
+  Scry.RuleFinding.mk "gets-overflow" Scry.Severity.error "m" Scry.FindingKind.forbidden "main" 2 "gets" 0
+    (path Scry.PathKind.sink "main" 2)
+
+def benchFinding (rule : String) (kind : Scry.FindingKind) (valid : Bool) :
+    Scry.BenchFinding :=
+  Scry.BenchFinding.mk rule "main" "system" 0 3 kind .true .true valid .true .none .none
+
+def expectOne (rule : String) : List Scry.BenchExpect :=
+  [Scry.BenchExpect.mk rule "main" "system" 0 .none .none]
+
+def main : IO Unit := EIO.toIO (do
+  -- metrics: 8 TP, 2 FN, 8 TN, 2 FP; one positive slice and one negative slice
+  let c := { Scry.benchEmptyCounts with cases := 20, tp := 8, fn := 2, tn := 8, fp := 2 };
+  let m := Scry.benchMetricsOf c;
+  check "metric: tpr is 0.8000" (Nat.beq m.tpr 8000);
+  check "metric: fpr is 0.2000" (Nat.beq m.fpr 2000);
+  check "metric: youden is 0.6000" (Bool.and (Bool.not (Int.isNeg m.youden))
+    (Nat.beq (Int.natAbs m.youden) 6000));
+  check "metric: precision is 0.8000" (Nat.beq m.precision 8000);
+  check "metric: f1 is 0.8000" (Nat.beq m.f1 8000);
+  let cneg := { Scry.benchEmptyCounts with cases := 20, tp := 1, fn := 9, tn := 5, fp := 5 };
+  let mneg := Scry.benchMetricsOf cneg;
+  check "metric: negative youden" (Bool.and (Int.isNeg mneg.youden)
+    (Nat.beq (Int.natAbs mneg.youden) 4000));
+  check "metric: formatting" (Bool.and (String.eq (Scry.benchDec4 8750) "0.8750")
+    (Bool.and (String.eq (Scry.benchDec4Signed (Int.ofNat 8750)) "0.8750")
+      (String.eq (Scry.benchPct 8750) "87.50%")));
+
+  -- boundary policy
+  check "boundary: external call is advisory"
+    (Scry.benchAdvisory "call to undeclared function system (external)");
+  check "boundary: string literal is advisory"
+    (Scry.benchAdvisory "string literal not modelled: havoc i8*");
+  check "boundary: else is blocking"
+    (Scry.benchBlockingMsg "else not modelled: statement skipped");
+  check "boundary: array declarator is blocking"
+    (Scry.benchBlockingMsg "declarator not modelled: buf[16]");
+
+  -- path validity
+  check "path: taint source -> flow -> sink"
+    (Scry.benchValidPath (taintFinding
+      [Scry.PathNode.mk "main" 1 0 Scry.PathKind.source,
+       Scry.PathNode.mk "main" 2 0 Scry.PathKind.flow,
+       Scry.PathNode.mk "main" 3 0 Scry.PathKind.sink]));
+  check "path: taint without a source is invalid"
+    (Bool.not (Scry.benchValidPath (taintFinding
+      [Scry.PathNode.mk "main" 2 0 Scry.PathKind.flow,
+       Scry.PathNode.mk "main" 3 0 Scry.PathKind.sink])));
+  check "path: a path not ending at the sink is invalid"
+    (Bool.not (Scry.benchValidPath (taintFinding
+      [Scry.PathNode.mk "main" 1 0 Scry.PathKind.source,
+       Scry.PathNode.mk "main" 2 0 Scry.PathKind.flow])));
+  check "path: forbidden call is the sink"
+    (Scry.benchValidPath forbiddenFinding);
+
+  -- outcome rules
+  let vTp := Scry.benchOutcome "unsafe" (expectOne "command-injection")
+    [benchFinding "command-injection" Scry.FindingKind.taint .true] 0;
+  check "outcome: unsafe match is TP" (String.eq vTp.outcome "tp");
+  let vFn := Scry.benchOutcome "unsafe" (expectOne "command-injection") .nil 0;
+  check "outcome: unsafe miss is FN" (String.eq vFn.outcome "fn");
+  let vTn := Scry.benchOutcome "safe" .nil .nil 0;
+  check "outcome: safe clean is TN" (String.eq vTn.outcome "tn");
+  let vFp := Scry.benchOutcome "safe" .nil
+    [benchFinding "command-injection" Scry.FindingKind.taint .true] 0;
+  check "outcome: safe finding is FP" (String.eq vFp.outcome "fp");
+  let vUnknown := Scry.benchOutcome "safe" .nil .nil 1;
+  check "outcome: safe with a blocking boundary is unknown"
+    (String.eq vUnknown.outcome "unknown");
+  let vProbe := Scry.benchOutcome "unknown" .nil .nil 0;
+  check "outcome: unknown probe is unknown" (String.eq vProbe.outcome "unknown");
+
+  -- a missing corpus is a clean skip, not an error
+  missing ← Scry.benchRun { Scry.benchDefaultOpts with
+    corpus := "bench/corpus-does-not-exist", baseline := .none, noTiming := .true };
+  check "corpus: missing manifest skips" (String.eq missing.status "skipped");
+
+  -- the checked-in baseline is the regression gate
+  run ← Scry.benchRun { Scry.benchDefaultOpts with
+    baseline := .some "bench/baseline.json", noTiming := .true };
+  check "baseline: corpus run is ok" (String.eq run.status "ok");
+  check "baseline: checked-in baseline matches"
+    (Bool.and (String.eq run.baseline.status "compared") run.baseline.matches))
