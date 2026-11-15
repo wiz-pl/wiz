@@ -481,7 +481,6 @@ def run_check(
     wiz: str,
     cache_dir: Path | None,
     timeout: int,
-    quiet: bool = False,
     files: list[Path] | None = None,
 ) -> tuple[Report, list[str]]:
     files = files if files is not None else doc_files(root)
@@ -641,7 +640,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--timeout must be positive")
     root = args.root.resolve()
     cache = None if args.no_cache else (root / args.cache if not args.cache.is_absolute() else args.cache)
-    report, problems = run_check(root, args.wiz, cache, args.timeout, args.quiet)
+    report, problems = run_check(root, args.wiz, cache, args.timeout)
     return print_report(report, problems, args.quiet)
 
 
