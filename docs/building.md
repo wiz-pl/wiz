@@ -576,3 +576,43 @@ The queue order is kept in a ledger outside the checkout
 --next 5` prints the next actions with their gates, `--check` rejects a ledger with
 two ready PRs in one chain or a ready PR with an unmerged dependency, and `--write`
 refreshes the ledger's facts from `gh` and `git`.
+
+## Branch hygiene
+
+`scripts/branch-rot.py` makes branch hygiene a five-minute monthly task (Python 3,
+standard library only). It classifies every local branch, and with `--remote` every
+`origin/*` tracking ref, into four buckets:
+
+* **redundant** — the tip is an ancestor of `origin/master`, or every commit is
+  patch-equivalent to one upstream (`git cherry` reports no `+` lines). Branches with
+  merge commits are never called redundant: `git cherry` skips merges, and a merge
+  resolution can carry content that is not upstream.
+* **in-flight** — an open pull request exists for the branch. These are kept.
+* **attic** — unique commits, no open PR, and the tip is older than `--days`
+  (default 30).
+* **needs-pr** — unique commits and no open PR. This is the conservative default
+  whenever the script is unsure.
+
+Run it from a checkout:
+
+```sh
+scripts/branch-rot.py                  # table and counts
+scripts/branch-rot.py --limit 10       # show at most 10 rows per bucket
+scripts/branch-rot.py --json           # machine-readable, for a dashboard
+scripts/branch-rot.py --remote         # include origin/* tracking refs
+scripts/branch-rot.py --days 30        # attic threshold in days (default 30)
+```
+
+The classifier is read-only. Deleting redundant branches is explicit and needs both
+flags:
+
+```sh
+scripts/branch-rot.py --delete-redundant            # dry run: list what would go
+scripts/branch-rot.py --delete-redundant --apply    # actually delete
+```
+
+Deletion refuses the current branch, any branch checked out in a worktree (including
+another agent's), `master` and `main`, and any branch with an open PR or a PR state it
+could not read. `--no-gh` skips GitHub entirely (every PR state becomes unknown, so
+nothing is deleted); `--self-test` builds a throwaway repository with a merge, a
+cherry-pick, an unmerged branch and a worktree and checks the classification offline.
