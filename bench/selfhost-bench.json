@@ -55,6 +55,40 @@
     "cold",
     "warm"
   ],
+  "rejected": [
+    {
+      "path": "lib/Prelude.wiz",
+      "why": "unsupported command command.builtin"
+    },
+    {
+      "path": "lib/Std.wiz",
+      "why": "'Array' has already been declared (the embedded prelude)"
+    },
+    {
+      "path": "lib/Vec.wiz",
+      "why": "imports Logic: unsupported term.absurd / notation"
+    },
+    {
+      "path": "lib/Json.wiz",
+      "why": "imports Text: 'List.map' has already been declared"
+    },
+    {
+      "path": "examples/run.wiz",
+      "why": "unknown identifier Size (sized types)"
+    },
+    {
+      "path": "examples/streams.wiz",
+      "why": "unsupported command command.coinductive"
+    },
+    {
+      "path": "examples/tactics.wiz",
+      "why": "parse error in a tactic quotation"
+    },
+    {
+      "path": "examples/std.wiz",
+      "why": "unknown identifier Str.append"
+    }
+  ],
   "reps": 3,
   "results": {
     "cold": {

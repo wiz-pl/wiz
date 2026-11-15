@@ -433,6 +433,7 @@ def main(argv=None):
             "reps": args.reps,
             "corpus": [{"path": p, "kind": k, "lines": lines_of(p)[0], "bytes": lines_of(p)[1]}
                        for p, k in CORPUS],
+            "rejected": [{"path": p, "why": w} for p, w in REJECTED],
             "modes": list(MODES),
             "results": results,
         }
