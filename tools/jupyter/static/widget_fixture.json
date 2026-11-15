@@ -1,0 +1,39 @@
+{
+  "target_name": "wiz.widget",
+  "comm_id": "widget-1",
+  "html": "<div title=\"widget &lt;demo&gt; &amp; &quot;quoted&quot;\" data-widget=\"app\" class=\"widget\"><p data-widget=\"readout\">count 0</p><button data-widget=\"inc\" type=\"button\" data-wiz-on-click=\"0\">+</button><input data-widget=\"level\" type=\"range\" min=\"0\" max=\"3\" step=\"1\" value=\"1\" data-wiz-on-input=\"1\"><span data-widget=\"level-text\">1</span></div>",
+  "handlers": 2,
+  "steps": {
+    "click": {
+      "event": "click",
+      "index": 0,
+      "patch": [
+        {
+          "op": "text",
+          "path": "0.0.0",
+          "text": "count 1"
+        }
+      ],
+      "html": "<div title=\"widget &lt;demo&gt; &amp; &quot;quoted&quot;\" data-widget=\"app\" class=\"widget\"><p data-widget=\"readout\">count 1</p><button data-widget=\"inc\" type=\"button\" data-wiz-on-click=\"0\">+</button><input data-widget=\"level\" type=\"range\" min=\"0\" max=\"3\" step=\"1\" value=\"1\" data-wiz-on-input=\"1\"><span data-widget=\"level-text\">1</span></div>"
+    },
+    "input": {
+      "event": "input",
+      "index": 1,
+      "value": "3",
+      "patch": [
+        {
+          "op": "setAttr",
+          "path": "0.2",
+          "name": "value",
+          "value": "0"
+        },
+        {
+          "op": "text",
+          "path": "0.3.0",
+          "text": "0"
+        }
+      ],
+      "html": "<div title=\"widget &lt;demo&gt; &amp; &quot;quoted&quot;\" data-widget=\"app\" class=\"widget\"><p data-widget=\"readout\">count 1</p><button data-widget=\"inc\" type=\"button\" data-wiz-on-click=\"0\">+</button><input data-widget=\"level\" type=\"range\" min=\"0\" max=\"3\" step=\"1\" value=\"0\" data-wiz-on-input=\"1\"><span data-widget=\"level-text\">0</span></div>"
+    }
+  }
+}

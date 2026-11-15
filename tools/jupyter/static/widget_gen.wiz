@@ -1,0 +1,94 @@
+-- A fixture for tools/jupyter/static/widget_test.mjs: a notebook widget view with a
+-- button and a range slider, rendered and diffed by the Wiz framework.  The test does
+-- not run this file (it must not need wiz or Python); `widget_gen.sh` runs it once and
+-- commits `widget_fixture.json` and the goldens.
+--
+--   .lake/build/bin/wiz run tools/jupyter/static/widget_gen.wiz
+import IO
+import Json
+import Optic
+import Web.React
+
+inductive Msg where
+  | inc
+  | levelDown
+
+structure Model where
+  count : Nat
+  level : Nat
+
+def Model.countL : Lens Model Nat := fun s => (s.count, fun n => Model.mk n s.level)
+def Model.levelL : Lens Model Nat := fun s => (s.level, fun n => Model.mk s.count n)
+
+/-- A widget: a counter, a range slider, and the level it shows.  The slider's handler
+is `Msg.levelDown` on purpose: `React.App.event` receives `(event, handler-index)` and
+not the control's value, so dragging the slider to 3 still runs the decrement.  The
+browser test pins that (and the comm payload does carry the value). -/
+def view (s : Model) : React.VNode Msg :=
+  React.el "div"
+    [ React.attr "title" "widget <demo> & \"quoted\""
+    , React.attr "data-widget" "app"
+    , React.class "widget" ]
+    [ React.el "p" [React.attr "data-widget" "readout"]
+        [React.text (String.append "count " (Nat.toString s.count))]
+    , React.on "click" Msg.inc
+        (React.el "button"
+          [React.attr "data-widget" "inc", React.attr "type" "button"]
+          [React.text "+"])
+    , React.on "input" Msg.levelDown
+        (React.el "input"
+          [ React.attr "data-widget" "level"
+          , React.attr "type" "range"
+          , React.attr "min" "0"
+          , React.attr "max" "3"
+          , React.attr "step" "1"
+          , React.attr "value" (Nat.toString s.level) ]
+          List.nil)
+    , React.el "span" [React.attr "data-widget" "level-text"]
+        [React.text (Nat.toString s.level)]
+    ]
+
+def app : React.App Model Msg := React.App.mk (Model.mk 0 1)
+  (fun m s => match m with
+    | .inc => React.setState Model.countL Nat.succ s
+    | .levelDown => React.setState Model.levelL (fun n => Nat.sub n 1) s)
+  view
+
+def m0 : Model := app.init
+def m1 : Model := React.App.dispatch app m0 0      -- the button (handler 0)
+def m2 : Model := React.App.dispatch app m1 1      -- the slider (handler 1)
+
+def jstr (s : String) : Json := Json.mkStr s
+
+def valueField : Option String → List (String × Json)
+  | .none => List.nil
+  | .some v => [Json.field "value" (jstr v)]
+
+def step (event : String) (index : Nat) (value : Option String)
+    (patch html : String) : Json :=
+  Json.mkObj
+    (List.append
+      [ Json.field "event" (jstr event)
+      , Json.field "index" (Json.ofNat index) ]
+      (List.append (valueField value)
+        [ Json.field "patch" (jstr patch)
+        , Json.field "html" (jstr html) ]))
+
+def steps : Json :=
+  Json.mkObj
+    [ Json.field "click" (step "click" 0 .none
+        (React.App.patches app m0 m1) (React.App.html app m1))
+    , Json.field "input" (step "input" 1 (.some "3")
+        (React.App.patches app m1 m2) (React.App.html app m2))
+    ]
+
+def fields : List (String × Json) :=
+  [ Json.field "target_name" (jstr "wiz.widget")
+  , Json.field "comm_id" (jstr "widget-1")
+  , Json.field "html" (jstr (React.App.html app m0))
+  , Json.field "handlers" (Json.ofNat (List.length (React.App.render app m0).handlers))
+  , Json.field "steps" steps
+  ]
+
+def main : IO Unit := do
+  IO.println (Json.render (Json.mkObj fields))

@@ -10,7 +10,9 @@ Python (standard library plus `pyzmq`), not Lean.
 tools/jupyter/
   wiz_kernel/            the kernel (wire protocol, drivers, magics)
   wiz-kernel/kernel.json the kernelspec template
+  static/                the notebook widget front end and its browser test
   tests/test_kernel.py   protocol-level tests (jupyter_client)
+  run-tests.sh           the test entry point (protocol, self-test, widget)
   README.md              a short pointer to this page
 ```
 
@@ -146,6 +148,37 @@ an executable the cell fails with `ename: ScryUnavailable` and an explanation.
 `%wiz CODE` force the Wiz driver for a cell whose first line would look like a
 magic. Unknown magics are an `UnknownMagic` error.
 
+## Widgets
+
+`static/widget.js` is the browser half of a notebook widget whose state is a
+`lib/Web/React.wiz` tree. It is a Jupyter comm client: the kernel sends the server-side
+rendered HTML in `comm_open` and a patch list (`React.patchesJson`) in `comm_msg`; the
+front end mounts the first render with `web/framework/runtime.js`'s patch applier,
+applies later patches, and sends DOM events back as `{event, index}` (with `value` for
+`input`/`change`). The front end does not need Jupyter's widget manager: it takes any
+object with `on_msg(fn)` and `send(data)`, which is also how `fake_comm.mjs` drives it
+in the test. The kernel's `comm_info_reply` is still empty (it opens no comms itself);
+connecting this front end to a kernel comm target is future work.
+
+The widget test is independent of Python, the kernel and a Wiz binary:
+
+```sh
+node tools/jupyter/static/widget_test.mjs [--browser PATH] [--no-browser]
+```
+
+It runs the fixture's SSR and patches twice: first through the Node DOM test double
+(`web/framework/minidom.mjs`, always available), then — when Chrome or Chromium is on
+`PATH` (or `$WIZ_WIDGET_BROWSER`/`--browser` names it) — in headless Chrome over the
+DevTools protocol, with the page served over HTTP. It dispatches a button click and a
+range-slider `input`, checks the comm payloads, and asserts the resulting DOM (element
+counts, text, attributes, `data-widget` ids). The goldens in `static/goldens/` are the
+serialised DOM after the first render and after each patch, plus the comm payloads, so a
+rendering regression is a unified diff; there is no screenshot. **When no browser is
+installed the browser run prints a skip and the process still exits 0 after the Node
+fallback passes.** A browser that is found but fails is an error. `--update` rewrites
+the goldens; `static/widget_gen.sh` regenerates the fixture from `widget_gen.wiz` (that
+step needs a `wiz` binary, the test does not).
+
 ## Limits
 
 * **Completion and inspection are empty.** `complete_request` returns no
@@ -160,8 +193,9 @@ magic. Unknown magics are an `UnknownMagic` error.
 * **No stdin.** The kernel never sends `input_request`; `allow_stdin` is
   ignored. Programs that read stdin in the REPL's `:run` are not supported.
 * **No rich display or debugger.** Output is streams, `execute_result` text/HTML
-  and errors. `display_data`, widgets, the debug protocol and `user_expressions`
-  (always `{}`) are not implemented.
+  and errors. `display_data`, the debug protocol and `user_expressions` (always
+  `{}`) are not implemented. The widget front end (`static/widget.js`) exists and is
+  tested, but the kernel opens no comm target, so no widget is emitted yet.
 * **Batch is O(cells²).** The fallback rechecks the notebook per cell; a long
   notebook is slow, and deleting a definition means restarting. A failed cell is
   kept in that accumulated source (as it would be in a file): later cells still
@@ -182,6 +216,9 @@ magic. Unknown magics are an `UnknownMagic` error.
 ## Tests
 
 ```sh
+# everything runnable here: protocol tests, kernel self-test, widget front end
+sh tools/jupyter/run-tests.sh
+
 # protocol-level: starts the kernel on a connection file and talks jupyter_client
 python3 -m unittest discover -s tools/jupyter/tests -v
 
@@ -190,6 +227,9 @@ WIZ_TEST_WIZ=/path/to/wiz python3 -m unittest discover -s tools/jupyter/tests -v
 
 # no Jupyter at all: wire + drivers + a raw-ZeroMQ kernel session
 PYTHONPATH=tools/jupyter python3 -m wiz_kernel --self-test [--wiz PATH]
+
+# the widget front end: Node fallback, then headless Chrome if installed
+node tools/jupyter/static/widget_test.mjs [--browser PATH] [--no-browser]
 ```
 
 The unittest module skips cleanly when `pyzmq` or `jupyter_client` is missing or
@@ -198,6 +238,15 @@ no `wiz` is found. `$WIZ_TEST_BACKEND` pins `repl`/`batch` (default `auto`);
 skips the live session without it); it prints PASS/FAIL/SKIP per check and exits
 1 on a failure.
 
+`run-tests.sh` prints a `skip:` line for each part whose dependency is absent and
+still exits 0 if everything that ran passed; it passes `--no-browser`/`--browser`
+through to the widget test. The widget test's Node fallback always runs, so the
+pure patcher is checked on a machine with no browser at all; the headless-browser
+step is skipped with a message when no Chrome/Chromium is on `PATH`. A skipped
+browser run is not a failed one, but a golden mismatch under the Node fallback is
+always a failure.
+
 The kernel is not hooked into `lake test` or the CI workflows; it needs no Lean
 build and only a `wiz` executable (whose `repl` subcommand is the stage 11 REPL,
-`docs/stages/11-tooling.md`).
+`docs/stages/11-tooling.md`). The widget front end's Node fallback needs only Node;
+its browser run needs a Chrome/Chromium binary and is skipped otherwise.
