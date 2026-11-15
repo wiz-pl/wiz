@@ -3,6 +3,8 @@
 #
 #   /index.html            the landing page (web/landing/)
 #   /landing.css
+#   /bench/                benchmarks, generated from the checked-in JSON
+#                          (web/build-bench.py → web/bench/index.html)
 #   /playground/           the static playground: web/playground.html and its scripts,
 #                          plus web/build-playground.sh's wiz-playground.mjs/.wasm
 #
@@ -17,10 +19,17 @@ set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SITE=${1:-$ROOT/doc-site}
 WEB=${2:-$ROOT/web/out}
-mkdir -p "$SITE/playground"
+mkdir -p "$SITE/playground" "$SITE/bench"
 
-# The landing page, at the site root. Its links are relative (docs/, playground/), so
-# the tree works at a domain root and under a project site's prefix alike.
+# The benchmark page is committed, so a JSON change that was not regenerated is a
+# visible diff. Refuse to publish a stale copy: the numbers on the page must be the
+# ones the checked-in JSON records.
+python3 "$ROOT/web/build-bench.py" --check
+cp "$ROOT/web/bench/index.html" "$SITE/bench/index.html"
+
+# The landing page, at the site root. Its links are relative (docs/, bench/,
+# playground/), so the tree works at a domain root and under a project site's prefix
+# alike.
 cp "$ROOT/web/landing/index.html" "$SITE/index.html"
 cp "$ROOT/web/landing/landing.css" "$SITE/landing.css"
 
@@ -41,4 +50,4 @@ for f in wiz-playground.mjs wiz-playground.wasm; do
   cp "$WEB/$f" "$SITE/playground/$f"
 done
 
-echo "site: landing at $SITE/index.html, playground at $SITE/playground/index.html"
+echo "site: landing at $SITE/index.html, docs at $SITE/docs, benchmarks at $SITE/bench/index.html, playground at $SITE/playground/index.html"

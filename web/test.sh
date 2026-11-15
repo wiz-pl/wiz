@@ -1,6 +1,7 @@
 #!/bin/sh
 # Smoke tests of the web infoview and the playground: build the pages (web/build.sh,
-# web/build-playground.sh); run the infoview's Wasm module under Node with
+# web/build-playground.sh); the generated benchmark page's fixtures and the site check
+# (web/test-bench.sh); run the infoview's Wasm module under Node with
 # infoview/stub_server.py (canned goals) as the server (web/node_test.mjs), and the
 # playground's under Node (web/playground_test.mjs); then serve the infoview with
 # web/bridge.sh in front of the real server (`wiz lsp --ws`, .lake/build/bin/wiz), load
@@ -18,6 +19,10 @@ WIZ=${WIZ:-$ROOT/.lake/build/bin/wiz}
 node "$ROOT/web/scroll-search_test.mjs" > "$OUT/search.txt"
 grep -qF 'scroll-search: all checks passed' "$OUT/search.txt" && echo "ok (search)" || {
   echo "FAIL (search)"; cat "$OUT/search.txt"; exit 1; }
+# (bench) the benchmark page's generator fixtures and the site check's rules for it
+"$ROOT/web/test-bench.sh" > "$OUT/bench.txt"
+grep -qF 'test-bench: ok' "$OUT/bench.txt" && echo "ok (bench page)" || {
+  echo "FAIL (bench page)"; cat "$OUT/bench.txt"; exit 1; }
 "$ROOT/web/build.sh" "$OUT" >/dev/null
 "$ROOT/web/build-playground.sh" "$OUT" >/dev/null
 node "$ROOT/web/node_test.mjs" "$OUT" python3 "$ROOT/infoview/stub_server.py" --stdio > "$OUT/node.txt"

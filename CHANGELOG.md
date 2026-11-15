@@ -33,6 +33,11 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   written (`Wiz/Compiler/WasmValidate.lean`); golden tests compare the module's result
   with the interpreter's. Limits and the 25-case `wasm` test group are in
   `docs/stages/08-backend/wasm.md`.
+* The published site has a `/bench/` page: standard-library timings (with the
+  interleaved A/B ratios and the spread of each run) and the Scry taint metrics,
+  rendered from the checked-in JSON by `web/build-bench.py`. The page is committed, so a
+  JSON change that was not regenerated is a diff, and the docs job refuses it
+  (`web/build-site.sh` runs the generator's `--check`).
 
 ## [0.1.0] - unreleased (draft)
 
