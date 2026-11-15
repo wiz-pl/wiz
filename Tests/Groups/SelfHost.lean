@@ -1019,6 +1019,77 @@ def namedArgCases : List (String × Nat) := [
   ("mixed (B := Bool) 3 .true", 3)]
 
 
+/-- (stage 30, C11) A header of our own for `Bytes`: a buffer function (`const void *buf,
+size_t n`, one `Bytes` argument on the Wiz side) and a struct with a byte-array field
+(`unsigned char data[4]`), with the types written out (the self-hosted compiler does not
+run the C preprocessor, so a header it reads must be self-contained). -/
+def bytesHeader : String :=
+  "#ifndef WIZ_BYTES_H\n#define WIZ_BYTES_H\n" ++
+  "static inline unsigned long wiz_sum_buf(const void *buf, unsigned long n) {\n" ++
+  "  const unsigned char *p = (const unsigned char *)buf;\n" ++
+  "  unsigned long s = 0;\n  for (unsigned long i = 0; i < n; i++) s += p[i];\n  return s;\n}\n" ++
+  "typedef struct { unsigned char data[4]; unsigned long n; } wiz_msg;\n" ++
+  "static inline wiz_msg wiz_msg_make(unsigned long n) {\n" ++
+  "  wiz_msg m;\n  m.data[0] = 'x'; m.data[1] = 'y'; m.data[2] = 0; m.data[3] = 'z'; m.n = n;\n  return m;\n}\n" ++
+  "static inline unsigned long wiz_msg_first(wiz_msg m) { return (unsigned long)m.data[0] + m.n; }\n" ++
+  "#endif\n"
+
+/-- Write `bytesHeader` to a fresh directory; its absolute path (both toolchains read the
+header from the file system: the Lean one when it preprocesses, the self-hosted one when
+the frontend asks for it). -/
+def writeBytesHeader : IO String := do
+  let dir ← IO.FS.createTempDir
+  let h := dir / "wiz_bytes.h"
+  IO.FS.writeFile h bytesHeader
+  pure h.toString
+
+/-- (stage 30, C11) The `Bytes` operations of `lib/IO.wiz` (`empty`, `push` and its
+in-place update, `size`, `get` past the end, `slice`, `take`, `drop`, `append`, `eq`,
+`isEmpty`, `at`, `ofString`/`toString`, `ofList`/`toList`/`singleton`/`show`), the same
+in both toolchains. Prints the list below. -/
+def bytesProgram : String :=
+  "import IO\ndef atShow (b : Bytes) (i : Nat) : String := match Bytes.at b i with\n  | .some n => Nat.toString n\n  | .none => \"none\"\ndef main : IO Unit := do\n" ++
+  "  let b := Bytes.ofList (List.cons 1 (List.cons 2 (List.cons 300 .nil)));\n" ++
+  "  IO.println (Bytes.show b);\n" ++
+  "  IO.println (Nat.toString (Bytes.size b));\n" ++
+  "  IO.println (Nat.toString (Bytes.get b 1));\n" ++
+  "  IO.println (Nat.toString (Bytes.get b 9));\n" ++
+  "  IO.println (if Bytes.isEmpty Bytes.empty then \"empty\" else \"no\");\n" ++
+  "  IO.println (Bytes.show (Bytes.slice b 1 2));\n" ++
+  "  IO.println (Bytes.show (Bytes.slice b 2 9));\n" ++
+  "  IO.println (Bytes.show (Bytes.singleton 7));\n" ++
+  "  IO.println (Bytes.show (Bytes.take b 1));\n" ++
+  "  IO.println (Bytes.show (Bytes.drop b 1));\n" ++
+  "  IO.println (Bytes.show (Bytes.append b (Bytes.singleton 4)));\n" ++
+  "  let c := Bytes.ofString \"AB\";\n" ++
+  "  IO.println (Bytes.toString c);\n" ++
+  "  IO.println (Nat.toString (Bytes.size c));\n" ++
+  "  IO.println (if Bytes.eq c (Bytes.ofString \"AB\") then \"eq\" else \"ne\");\n" ++
+  "  IO.println (if Bytes.eq c (Bytes.ofString \"ab\") then \"eq\" else \"ne\");\n" ++
+  "  IO.println (Bytes.show (Bytes.append c (Bytes.ofString \"c\")));\n" ++
+  "  IO.println (atShow (Bytes.ofList (List.cons 5 (List.cons 6 .nil))) 1);\n" ++
+  "  IO.println (atShow (Bytes.ofString \"a\") 7)\n"
+
+def bytesExpected : String :=
+  "[1, 2, 44]\n3\n2\n0\nempty\n[2, 44]\n[44]\n[7]\n[1]\n[2, 44]\n[1, 2, 44, 4]\nAB\n2\neq\nne\n[65, 66, 99]\n6\nnone\n"
+
+/-- (stage 30, C11) `Bytes` across the FFI: one `Bytes` argument for a buffer and its
+length (`C.wiz_sum_buf`), a struct with a byte-array field given to C and read back
+(`Msg.mk`, `C.wiz_msg_first`, `C.wiz_msg_make`). -/
+def bytesFfiProgram (header : String) : String :=
+  "import IO\n" ++
+  s!"c_struct \"wiz_msg\" (header := \"{header}\") Msg where\n  data : Bytes\n  n : Nat\n" ++
+  s!"import_c \"{header}\" (pure)\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (C.wiz_sum_buf (Bytes.ofString \"ABC\")));\n" ++
+  "  IO.println (Nat.toString (C.wiz_msg_first (Msg.mk (Bytes.ofString \"AB\") 5)));\n" ++
+  "  let m := C.wiz_msg_make 5;\n" ++
+  "  IO.println (Bytes.show m.data);\n" ++
+  "  IO.println (Nat.toString m.n)\n"
+
+def bytesFfiExpected : String := "198\n70\n[120, 121, 0, 122]\n5\n"
+
+
 def selfHostGroup : Group where
   name := "selfhost"
   exercise := "Stages 12b–14q"
@@ -1430,6 +1501,18 @@ def selfHostGroup : Group where
           "  IO.println (Nat.toString (twice 21));\n  IO.println (Nat.toString (square 7))"
         selfhostLinkRun [("main.wiz", prog), ("h.h", header)] "42\n42\n49\n"
         selfhostLinkRun [("main.wiz", prog), ("h.h", header)] "42\n42\n49\n" (flags := #["--rc"]) },
+    { name := "Bytes (C11): the type and its operations, in the Lean toolchain and the self-hosted one (stage 30)", run := fun _ =>
+        ffiAgrees bytesProgram bytesExpected },
+    { name := "Bytes: a buffer argument and a byte-array struct field through import_c (stage 30)", run := fun _ => do
+        let h ← writeBytesHeader
+        let prog := bytesFfiProgram h
+        ioRun prog bytesFfiExpected
+        selfhostCompileRun prog bytesFfiExpected
+        selfhostCompileRun prog bytesFfiExpected (flags := #["--rc"]) },
+    { name := "the self-hosted frontend: a Bytes c_struct field takes a header, as in the Lean frontend (stage 30)", run := fun _ =>
+        selfhostAgreesIO "" [
+          ("c_struct \"wiz_msg\" (header := \"wiz_bytes.h\") Msg where\n  data : Bytes\n  n : Nat\n", true),
+          ("c_struct \"struct b\" B where\n  data : Bytes\n", false)] },
     { name := "native representation: implemented_by mk/get on a sealed constructor (stage 30)", run := fun _ => do
         let prog := "import IO\n" ++
           "sealed inductive WA where\n  | private mk (xs : List Nat)\n" ++

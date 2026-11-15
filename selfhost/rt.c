@@ -896,6 +896,126 @@ NATIVE(StrMap_46_findD, 4,
 NATIVE(StrMap_46_size, 2, V n = BOX(((Map *)a[1])->count); dec(a[1]); return n;)
 #endif
 
+/* ---- byte buffers (`Bytes`, C11) ----
+   `wiz_bytes` as `runtime/wiz_rt.h`: functional, but `push` updates in place when the
+   buffer is unique (Perceus; under the collector nothing is freed, so it is always in
+   place, as in `runtime/wiz.c`). The Wiz side (`selfhost/Frontend.wiz`'s prelude)
+   declares the host's `lib/IO.wiz` operations as axioms and the backend calls them here
+   through the runtime ABI (`get_Bytes_46_…`), so a buffer a self-hosted program builds
+   and one the Lean toolchain builds have the same layout. */
+typedef struct { VHdr h; size_t len, cap; unsigned char *data; } wiz_bytes;
+_Static_assert(sizeof(wiz_bytes) == 40 && offsetof(wiz_bytes, len) == 16 && offsetof(wiz_bytes, data) == 32,
+               "wiz_bytes != runtime/wiz_rt.h");
+static wiz_bytes *bytesNew(size_t cap) {
+  wiz_bytes *b = (wiz_bytes *)MALLOC_OBJ(sizeof(wiz_bytes));
+  b->h.rc = 1; b->h.tag = T_BYTES; b->h.size = 0;
+  b->len = 0; b->cap = cap;
+  b->data = cap ? (unsigned char *)MALLOC_BUF(cap) : NULL;
+  if (cap && !b->data) die("out of memory");
+  return b;
+}
+static void bytesGrow(wiz_bytes *b, size_t need) {
+  size_t cap = b->cap ? b->cap : 8;
+  while (cap < need) cap *= 2;
+#ifdef WIZ_RC
+  b->data = (unsigned char *)realloc(b->data, cap);
+  if (!b->data) die("out of memory");
+#else
+  unsigned char *nd = (unsigned char *)MALLOC_BUF(cap);
+  if (!nd) die("out of memory");
+  if (b->len) memcpy(nd, b->data, b->len);
+  b->data = nd;
+#endif
+  b->cap = cap;
+}
+/* the buffer `v` (owned) to write in: itself if unique, else a copy (`v` released) */
+static wiz_bytes *bytesMut(V v) {
+#ifdef WIZ_RC
+  wiz_bytes *b = (wiz_bytes *)v;
+  if (RC(b) == 1) return b;
+  wiz_bytes *c = bytesNew(b->len);
+  c->len = b->len;
+  if (b->len) memcpy(c->data, b->data, b->len);
+  dec(v);
+  return c;
+#else
+  return (wiz_bytes *)v;
+#endif
+}
+/* a buffer argument the native is done with (nothing to do under the collector) */
+static inline void bdrop(V v) {
+#ifdef WIZ_RC
+  dec(v);
+#else
+  (void)v;
+#endif
+}
+/* `n` bytes at `p` as a new buffer (a `c_struct` field by value) */
+static V rt_bytes_new(const void *p, size_t n) {
+  wiz_bytes *b = bytesNew(n);
+  b->len = n;
+  if (n) { if (p) memcpy(b->data, p, n); else memset(b->data, 0, n); }
+  return (V)b;
+}
+V get_Bytes_46_empty(void) { return (V)bytesNew(0); }
+NATIVE(Bytes_46_push, 2,
+  wiz_bytes *b = bytesMut(a[0]);
+  if (b->len == b->cap) bytesGrow(b, b->len + 1);
+  b->data[b->len++] = (unsigned char)UNBOX(a[1]);
+  return (V)b;)
+NATIVE(Bytes_46_size, 1, V r = BOX(((wiz_bytes *)a[0])->len); bdrop(a[0]); return r;)
+NATIVE(Bytes_46_get, 2,
+  wiz_bytes *b = (wiz_bytes *)a[0];
+  uintptr_t i = UNBOX(a[1]);
+  V r = BOX(i < b->len ? b->data[i] : 0);
+  bdrop(a[0]);
+  return r;)
+/* the bytes of a string, through a C string: it stops at a NUL byte (as
+   `wiz_bytes_of_string`) */
+NATIVE(Bytes_46_ofString, 1,
+  char *s = cstr(a[0]);
+  wiz_bytes *b = bytesNew(0);
+  for (char *p = s; *p; p++) {
+    if (b->len == b->cap) bytesGrow(b, b->len + 1);
+    b->data[b->len++] = (unsigned char)*p;
+  }
+  FREE_BUF(s);
+  bdrop(a[0]);
+  return (V)b;)
+/* the bytes as a string, through a C string: it stops at a NUL byte, and UTF-8 is
+   decoded as `rt_out_str` does (as `wiz_bytes_to_string`) */
+NATIVE(Bytes_46_toString, 1,
+  wiz_bytes *b = (wiz_bytes *)a[0];
+  size_t n = 0;
+  while (n < b->len && b->data[n]) n++;
+  V r = wstr(b->data ? (const char *)b->data : "", n);
+  bdrop(a[0]);
+  return r;)
+NATIVE(Bytes_46_slice, 3,
+  wiz_bytes *b = (wiz_bytes *)a[0];
+  size_t s = UNBOX(a[1]) < b->len ? UNBOX(a[1]) : b->len;
+  size_t n = UNBOX(a[2]) < b->len - s ? UNBOX(a[2]) : b->len - s;
+  wiz_bytes *r = bytesNew(n);
+  r->len = n;
+  if (n) memcpy(r->data, b->data + s, n);
+  bdrop(a[0]);
+  return (V)r;)
+NATIVE(Bytes_46_append, 2,
+  wiz_bytes *y = (wiz_bytes *)a[1];
+  if (y->len == 0) { bdrop(a[1]); return a[0]; }
+  wiz_bytes *b = bytesMut(a[0]);
+  if (b->len + y->len > b->cap) bytesGrow(b, b->len + y->len);
+  memcpy(b->data + b->len, y->data, y->len);
+  b->len += y->len;
+  bdrop(a[1]);
+  return (V)b;)
+NATIVE(Bytes_46_eq, 2,
+  wiz_bytes *x = (wiz_bytes *)a[0], *y = (wiz_bytes *)a[1];
+  int e = x->len == y->len && (x->len == 0 || memcmp(x->data, y->data, x->len) == 0);
+  V r = boolv(e);
+  bdrop(a[0]); bdrop(a[1]);
+  return r;)
+
 #ifdef WIZ_RC
 /* ---- freeing: a worklist, not recursion (a list a million long is no deeper) ---- */
 
@@ -924,6 +1044,7 @@ static size_t rt_size(Obj *o) {
   case T_EXT: return sizeof(Ext);
   case T_STR: return sizeof(Str) + ((Str *)o)->len + 1;
   case T_ARR: return sizeof(Arr);
+  case T_BYTES: return sizeof(wiz_bytes);
   case T_MAP: return sizeof(Map);
   default: return sizeof(Obj) + SIZE(o) * sizeof(V);
   }
@@ -956,6 +1077,9 @@ static void rt_drain(void) {
       Arr *a = (Arr *)x;
       for (size_t i = 0; i < a->len; i++) rt_decChild(a->data[i]);
       free(a->data);
+    } else if (t == T_BYTES) {
+      /* a byte buffer: its bytes are not Wiz values, and its storage is malloc'd */
+      free(((wiz_bytes *)x)->data);
     } else if (t == T_MAP) {
       Map *m = (Map *)x;
       for (size_t i = 0; i < m->cap; i++) if (m->keys[i]) { rt_decChild(m->keys[i]); rt_decChild(m->vals[i]); }
