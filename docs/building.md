@@ -590,6 +590,28 @@ does not install a toolchain: it consumes the `nix build` outputs directly.
 file.wiz`. `packages.<system>.wiz-nvim` is the plugin alone, for a Neovim
 configuration in Nix.
 
+### The scry action
+
+`.github/workflows/scry.yml` dogfoods the composite action in
+`.github/actions/scry/` on pull requests that touch C. It builds scry from the pull
+request's tree, runs `scry taint --diff origin/<base>` on the changed `.c` files, and
+uploads the merged SARIF to code scanning, which needs `security-events: write` (and
+GitHub Advanced Security for a private repository). The job is advisory: it keeps
+pre-existing results as `baselineState: unchanged` and counts them, so it fails only on
+a result introduced on a changed line, and `fail-on-finding` is off here because the
+fixtures and corpus deliberately contain unsafe C. A consuming repository can use the
+action in one line after `actions/checkout` with `fetch-depth: 0`:
+
+```yaml
+- uses: wiz-pl/wiz/.github/actions/scry@master
+```
+
+The honest limit is documented in `.github/actions/scry/README.md`: the action reports
+**introduced** findings, not the absence of findings, and scry analyses C one
+translation unit at a time. `examples/scry-workflow.yml` is a complete consuming
+workflow, and `.github/actions/scry/DRY-RUN.md` records the local command-shape and
+tampered-SARIF checks.
+
 ## Merge order and stacked pull requests
 
 CI runs a limited number of jobs, so work lands in **stacks** rather than one pull

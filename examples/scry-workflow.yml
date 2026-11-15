@@ -1,0 +1,52 @@
+# Example: run scry on a C repository's pull requests.
+#
+# Copy this file into a consuming repository as .github/workflows/scry.yml. The action
+# builds scry from wiz-pl/wiz (cached), analyses the files the PR changes, uploads the
+# SARIF to code scanning, and writes a summary of introduced vs suppressed findings.
+#
+# What the repository must provide:
+#   * `permissions: security-events: write` for the SARIF upload (private repositories
+#     also need GitHub Advanced Security for code scanning);
+#   * `actions/checkout` with `fetch-depth: 0`, so the base branch is a local ref for
+#     `diff: auto` (the action falls back to the merge commit's first parent without it);
+#   * a pinned `scry-version` (and the action pinned by commit SHA) for a reproducible
+#     build. The first build is expensive; the action caches it per revision.
+#
+# The honest limit: this reports the findings a PR *introduces*. A green run means no
+# finding landed on a changed line, not that the repository has none. Pre-existing
+# findings stay in the SARIF with baselineState: unchanged and are counted in the
+# summary. scry analyses C (not C++) and one translation unit at a time.
+
+name: scry
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write # SARIF upload; fork PRs get a read-only token
+
+jobs:
+  scry:
+    name: scry (diff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # Pin the action to a commit SHA in a real repository:
+      #   uses: wiz-pl/wiz/.github/actions/scry@<40-hex sha>
+      - name: scry
+        uses: wiz-pl/wiz/.github/actions/scry@master
+        with:
+          paths: src
+          diff: auto
+          # true turns an introduced finding (or lowering/memory warning on a changed
+          # line) into a failing step. Suppressed, pre-existing results never fail.
+          fail-on-finding: "false"
+          scry-version: master
+          # Fork PRs cannot upload: the token is read-only there.
+          upload-sarif: ${{ github.event.pull_request.head.repo.fork == false }}

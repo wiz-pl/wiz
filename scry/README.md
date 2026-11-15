@@ -506,3 +506,23 @@ A concolic-witness slot is reserved for the future S6a slice
 `scry-workflow-witness/1` document only when its `authority` is L2/L3 and it is
 `validated`, uses its `input` as the deterministic input, and records its path condition
 and model. The prototype does **not** run symbolic execution.
+
+## GitHub Actions
+
+`.github/actions/scry/` is a composite action that runs `scry taint --diff` on the C
+files a pull request changes, uploads the SARIF to code scanning, and writes a summary
+of introduced and suppressed findings. It builds scry from a pinned wiz revision (cached
+per revision) when the consuming repository has no binary. A one-line step, after
+`actions/checkout` with `fetch-depth: 0`, is:
+
+```yaml
+- uses: wiz-pl/wiz/.github/actions/scry@master
+```
+
+The job needs `security-events: write` (and GitHub Advanced Security for code scanning
+on a private repository). The [action README](../.github/actions/scry/README.md) lists
+the inputs (`paths`, `diff`, `rules`, `fail-on-finding`, `sarif`, the build inputs), the
+consuming-repository requirements, and the honest limit: it reports **introduced**
+findings, not absence. Suppressed pre-existing results keep `baselineState: unchanged`
+in the upload and are counted in the summary. `examples/scry-workflow.yml` is a complete
+consuming workflow, and `.github/workflows/scry.yml` runs the action on this repository.

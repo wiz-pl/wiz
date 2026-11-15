@@ -1,0 +1,171 @@
+name: scry
+description: >
+  Run the scry C taint analyser over the files a pull request changes, upload the SARIF
+  to code scanning, and write a job summary of introduced vs suppressed findings.
+  scry must be built from the wiz repository (or supplied with scry-path); this action
+  caches that build. It reports findings the diff introduces, not the absence of
+  findings.
+author: wiz-pl
+
+branding:
+  icon: shield
+  color: purple
+
+inputs:
+  paths:
+    description: >
+      Whitespace-separated files, directories or git pathspecs to scan (default: the
+      whole repository). Only `.c` files are analysed; a header has no translation unit
+      of its own, so a header-only change analyses nothing and says so.
+    default: "."
+  diff:
+    description: >
+      Diff base for `scry taint --diff`: a git revision, "auto" for the pull request's
+      base branch, or "all" to analyse the whole tree without filtering. "auto" falls
+      back to the merge commit's first parent, then to "all" with a warning, so a
+      checkout with fetch-depth: 0 is recommended.
+    default: "auto"
+  rules:
+    description: >
+      A `.scry` rule pack. Empty uses lib/Scry/rules/default.scry from the scry source
+      tree; with a prebuilt binary and no source tree, pass a pack explicitly or scry's
+      own default lookup is used.
+    default: ""
+  fail-on-finding:
+    description: >
+      Fail the step when the diff introduces a finding, lowering warning or memory
+      warning. Suppressed results on unchanged lines never fail the step. The gate runs
+      after the SARIF upload, so a failing run still publishes its report.
+    default: "false"
+  sarif:
+    description: Where to write the merged SARIF 2.1.0 log, relative to the repository root.
+    default: "scry.sarif"
+  upload-sarif:
+    description: >
+      Upload the SARIF to GitHub code scanning. The job needs `security-events: write`;
+      fork pull requests have a read-only token, so gate this input on fork status.
+    default: "true"
+  category:
+    description: The code-scanning category for the upload.
+    default: "scry"
+  allow-errors:
+    description: >
+      Pass `--allow-errors` and analyse recovered trees with ERROR/MISSING nodes. The
+      summary reports how many recovered parse nodes were seen.
+    default: "false"
+  extra-args:
+    description: >
+      Extra whitespace-separated arguments appended to every `scry taint` invocation
+      (advanced: e.g. `--diff-context 3 --timeout 60`).
+    default: ""
+  scry-path:
+    description: >
+      A prebuilt scry executable. When empty the action uses `scry` from PATH, then
+      builds one from scry-source/scry-version into ~/.cache/scry and caches it.
+    default: ""
+  scry-source:
+    description: >
+      A wiz checkout (the directory containing scry/grail.wiz). Empty uses the action's
+      workspace when it has scry/grail.wiz (the dogfood case), else clones scry-repo at
+      scry-version.
+    default: ""
+  scry-repo:
+    description: The repository to clone when scry must be built and no source is present.
+    default: "wiz-pl/wiz"
+  scry-version:
+    description: >
+      The wiz revision (branch, tag or commit SHA) to build scry from. Pin a SHA for a
+      reproducible build and a stable cache; a moving branch reuses the last build under
+      the same key.
+    default: "master"
+  scry-cache:
+    description: Cache the built scry binary across runs, keyed by the scry source content.
+    default: "true"
+  working-directory:
+    description: >
+      A directory inside the repository checkout; git and scry run at its repository
+      root, and `paths`/`sarif` are relative to that root.
+    default: "."
+
+outputs:
+  sarif:
+    description: Absolute path of the merged SARIF log.
+    value: ${{ steps.scan.outputs.sarif }}
+  shown:
+    description: Findings whose sink or a path step is on a changed line (introduced).
+    value: ${{ steps.scan.outputs.shown }}
+  suppressed:
+    description: Findings on unchanged lines (pre-existing, kept with baselineState unchanged).
+    value: ${{ steps.scan.outputs.suppressed }}
+  gate:
+    description: >
+      Findings plus lowering/memory warnings on changed lines; the count
+      `fail-on-finding` gates on.
+    value: ${{ steps.scan.outputs.gate }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve scry
+      id: resolve
+      shell: bash
+      env:
+        INPUT_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        INPUT_SCRY_PATH: ${{ inputs.scry-path }}
+        INPUT_SCRY_SOURCE: ${{ inputs.scry-source }}
+        INPUT_SCRY_REPO: ${{ inputs.scry-repo }}
+        INPUT_SCRY_VERSION: ${{ inputs.scry-version }}
+        INPUT_RULES: ${{ inputs.rules }}
+      run: bash "$GITHUB_ACTION_PATH/resolve.sh"
+
+    # Only a source build needs Nix. Cachix lets a consuming repository substitute the
+    # wiz/grail build instead of compiling Lean for an hour.
+    - name: Install Nix
+      if: steps.resolve.outputs.needs-build == 'true'
+      uses: cachix/install-nix-action@v31
+    - name: Cachix (Wiz's public cache)
+      if: steps.resolve.outputs.needs-build == 'true'
+      uses: cachix/cachix-action@v16
+      with:
+        name: badlydrawnwizards
+        skipPush: true
+
+    - name: Cache the scry build
+      if: steps.resolve.outputs.needs-build == 'true' && inputs.scry-cache == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/scry/bin
+        key: scry-${{ runner.os }}-${{ runner.arch }}-${{ inputs.scry-version }}-${{ steps.resolve.outputs.source-key }}
+
+    - name: Build scry
+      if: steps.resolve.outputs.needs-build == 'true'
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/build.sh"
+
+    - name: Analyse the diff
+      id: scan
+      shell: bash
+      env:
+        INPUT_PATHS: ${{ inputs.paths }}
+        INPUT_DIFF: ${{ inputs.diff }}
+        INPUT_SARIF: ${{ inputs.sarif }}
+        INPUT_ALLOW_ERRORS: ${{ inputs.allow-errors }}
+        INPUT_EXTRA_ARGS: ${{ inputs.extra-args }}
+        INPUT_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+      run: bash "$GITHUB_ACTION_PATH/scan.sh"
+
+    - name: Upload SARIF
+      if: inputs.upload-sarif == 'true' && steps.scan.outputs.skip-upload != 'true'
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: ${{ steps.scan.outputs.sarif }}
+        category: ${{ inputs.category }}
+
+    # Applied after the upload: a failing gate must not suppress the report. The count
+    # is shown+unlocated and matches scry's own --fail-on-finding in diff mode.
+    - name: Fail on introduced findings
+      if: inputs.fail-on-finding == 'true' && steps.scan.outputs.gate != '0'
+      shell: bash
+      run: |
+        echo "::error::scry reported ${{ steps.scan.outputs.gate }} result(s) on changed lines"
+        exit 1

@@ -1,0 +1,92 @@
+# Dogfood: the distributed scry action on this repository's own C sources.
+#
+# It runs only in diff mode (the PR's base branch), so it reports the findings this pull
+# request introduces. Pre-existing findings are suppressed with a count and stay in the
+# SARIF with baselineState: unchanged. The job is advisory: `fail-on-finding` is false,
+# because scry/tests/fixtures and the corpus deliberately contain unsafe C, and a PR
+# that adds one should not be red. Consumers that want a gate set it to true; the action
+# applies it after the upload, so the report is published either way.
+#
+# No continue-on-error: a scan/setup failure is a real failure; only the SARIF upload is
+# gated, on the fork-PR case where the token is read-only.
+name: scry
+
+on:
+  pull_request:
+    branches: [master]
+    # Do not pay a cold scry build for a docs-only pull request. A PR that changes C,
+    # the scry sources or this action still runs; workflow_dispatch always does.
+    paths:
+      - "**/*.c"
+      - "**/*.h"
+      - "scry/**"
+      - "lib/Scry/**"
+      - "c/**"
+      - ".github/actions/scry/**"
+      - ".github/workflows/scry.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write # code-scanning upload
+
+env:
+  CACHIX_NAME: badlydrawnwizards
+
+concurrency:
+  group: scry-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  diff:
+    name: scry (diff)
+    runs-on: ubuntu-latest
+    # a cold nix build of wiz/grail is the same order as ci.yml's build job; Cachix
+    # usually substitutes it, and the .grail cache skips a repeat grail build
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # origin/master for `diff: auto`
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          lean: false
+
+      # Actions caches are branch-scoped: this speeds up reruns of the same PR, and a
+      # master cache would speed up every PR once one exists. Cachix carries the wiz and
+      # grail store paths across all runs either way.
+      - name: Cache the scry build
+        uses: actions/cache@v4
+        with:
+          path: |
+            scry/.grail
+            ~/.cache/scry
+          key: scry-build-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'lakefile.lean', 'lake-manifest.json', 'lib/Scry/**', 'scry/src/**', 'scry/native/**', 'scry/gen/**', 'scry/grail.wiz') }}
+          restore-keys: |
+            scry-build-${{ runner.os }}-
+
+      - name: Build scry
+        id: build
+        shell: nix develop --command bash -euo pipefail {0}
+        run: |
+          # the flake's wiz package contains grail; Cachix substitutes it
+          out=$(nix build --no-link --print-out-paths .#wiz)
+          cp grail.local.wiz scry/
+          cd scry
+          "$out/bin/grail" build scry
+          echo "path=$GITHUB_WORKSPACE/scry/.grail/bin/scry" >> "$GITHUB_OUTPUT"
+
+      - name: scry
+        uses: ./.github/actions/scry
+        with:
+          scry-path: ${{ steps.build.outputs.path }}
+          # all C in the repository: c/ runtime sources and scry's fixtures/corpus
+          paths: c scry
+          diff: auto
+          # fixtures include deliberately broken C; recover instead of failing the job
+          allow-errors: "true"
+          fail-on-finding: "false"
+          # fork PRs have a read-only token, so they analyse but do not upload
+          upload-sarif: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false }}
