@@ -88,8 +88,11 @@ def Scry.locationJson (m : Scry.OriginMap) (func : String) (point : Nat) : Json 
   | .none => Scry.logicalLocationJson func point
 
 def Scry.sinkListJson (r : Scry.TaintRule) : Json :=
-  Json.mkArr (List.map (fun s => Json.mkObj
-    [("name", Json.mkStr s.name), ("argument", Json.ofNat s.arg)]) r.sinks)
+  Json.mkArr (List.map (fun s => match s.arg with
+    | .one k => Json.mkObj
+        [("name", Json.mkStr s.name), ("argument", Json.ofNat k)]
+    | .any => Json.mkObj
+        [("name", Json.mkStr s.name), ("argument", Json.mkStr "any")]) r.sinks)
 
 def Scry.sourceListJson (r : Scry.TaintRule) : Json :=
   Json.mkArr (List.map (fun p => Json.mkObj

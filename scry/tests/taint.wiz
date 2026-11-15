@@ -120,6 +120,67 @@ def main : IO Unit := EIO.toIO (do
     check "chain: path ends in run" (String.eq (lastFunc f.path) "run")
   | .none => check "chain: finding exists" .false;
 
+  -- exec family: system and every exec variant is a command sink. execl/execlp are
+  -- variadic, so the tainted word is argument 3, not the program path at argument 0.
+  oE1 ← opts ["tests/fixtures/taint-exec-unsafe.c"];
+  repE1 ← Scry.analyzeFile oE1;
+  check "exec: eight findings" (Nat.beq (List.length repE1.findings) 8);
+  check "exec: every finding is command-injection"
+    (List.all (fun f => String.eq f.rule "command-injection") repE1.findings);
+  check "exec: every finding is checked" (List.all (fun b => b) repE1.checks);
+  check "exec: covers execl/execlp/execv/execvp/execve/posix_spawn/posix_spawnp/system"
+    (List.all (fun name => List.any (fun f => String.eq f.name name) repE1.findings)
+      ["execl", "execlp", "execv", "execvp", "execve", "posix_spawn", "posix_spawnp", "system"]);
+  check "exec: execl reports the tainted word at argument 3"
+    (List.any (fun f => Bool.and (String.eq f.name "execl") (Nat.beq f.arg 3))
+      repE1.findings);
+  check "exec: no memory warnings" (Nat.beq (List.length repE1.memory) 0);
+  let sarifExec := Scry.renderSarifWith "scry" repE1.origins repE1.pack
+    (Scry.zipFindings repE1.findings repE1.checks)
+    (List.map (fun b => Scry.boundaryResultJson b.rule b.origin b.func b.point b.message)
+      (List.append repE1.boundaries repE1.memory));
+  match Json.parse sarifExec with
+  | .error e => check ("exec sarif: parses (" ++ e ++ ")") .false
+  | .ok jE => do
+    let runE := nthJ (Json.getList jE "runs") 0;
+    let execResults := Json.getList runE "results";
+    check "exec sarif: eight command-injection results"
+      (Nat.beq (List.length (List.filter (fun r =>
+          String.eq (jStr r ["ruleId"]) "scry/c/command-injection") execResults)) 8);
+    check "exec sarif: namespaced command-injection id"
+      (String.eq (jStr (nthJ (Json.getList runE "results") 0) ["ruleId"])
+        "scry/c/command-injection");
+    check "exec sarif: execl descriptor has the any-argument selector"
+      (match List.find (fun r => String.eq (jStr r ["name"]) "command-injection")
+          (jList (jAt runE ["tool", "driver"]) ["rules"]) with
+        | .none => .false
+        | .some r => List.any (fun s =>
+            Bool.and (String.eq (jStr s ["name"]) "execl")
+              (String.eq (jStr s ["argument"]) "any"))
+            (jList (jAt r ["properties"]) ["sinks"]));
+
+  -- the same calls with a constant command: no source, no finding
+  oE2 ← opts ["tests/fixtures/taint-exec-safe.c"];
+  repE2 ← Scry.analyzeFile oE2;
+  check "exec-safe: zero findings" (Nat.beq (List.length repE2.findings) 0);
+
+  -- exported C-ABI entry: an external-linkage function with no caller in the unit has
+  -- attacker-controlled parameters, even though no getenv/recv appears in the file
+  oN1 ← opts ["tests/fixtures/taint-entry-unsafe.c"];
+  repN1 ← Scry.analyzeFile oN1;
+  checkOne "entry" repN1 "command-injection" "iv_spawn";
+  match firstFinding repN1 with
+  | .some f => do
+    check "entry: execl argument 3" (Bool.and (String.eq f.name "execl") (Nat.beq f.arg 3));
+    check "entry: path starts at a source" (pathHasKind f.path "source")
+  | .none => check "entry: finding exists" .false;
+
+  -- precision: an internally called function is not an entry, and a static function is
+  -- internal even when nothing calls it
+  oN2 ← opts ["tests/fixtures/taint-entry-safe.c"];
+  repN2 ← Scry.analyzeFile oN2;
+  check "entry-safe: zero findings" (Nat.beq (List.length repN2.findings) 0);
+
   -- clean: no source, no sink
   o4 ← opts ["tests/fixtures/taint-clean.c"];
   rep4 ← Scry.analyzeFile o4;

@@ -918,7 +918,9 @@ The S4 rule pack and interprocedural slice are separate modules:
 
 * `import Scry.Rules` — named rules with an id, severity and message, sources/sinks/
   sanitisers **per argument** (`source read arg 1`, `sanitise sanitize arg 0`), a textual
-  `.scry` block format (`Scry.parseRulePack`) and `*` function-name matching.
+  `.scry` block format (`Scry.parseRulePack`) and `*` function-name matching. A sink is
+  `sink NAME arg K` or `sink NAME args`; the latter checks every argument of a variadic
+  call (`execl`), while the finding still names the concrete tainted index.
   `lib/Scry/rules/default.scry` is the demo pack as a real spec file.
 * `import Scry.RuleTaint` — variable-indexed taint as Datalog over a rule pack; an
   argument source/sanitiser becomes an extra definition point, and a `gen` fact is the
@@ -943,7 +945,10 @@ The S4 rule pack and interprocedural slice are separate modules:
 * `import Scry.Interproc` — a direct- and resolved-indirect-call graph, argument ->
   parameter taint, return-value summaries and a summary fixpoint for recursion; an
   unresolved indirect call is recorded and warned about (`unknown-indirect`). Findings
-  carry their rule metadata and a stitched source -> sink path.
+  carry their rule metadata and a stitched source -> sink path. `Scry.analyzeC` applies
+  the C-ABI entry policy: a non-`static`, non-`main` function with no caller in the unit
+  and no address taken is an exported entry, and its parameters are sources
+  (`Scry.entrySources`); `Scry.analyze` keeps the policy-free library behaviour.
 * `import Scry.RuleTaint` also carries the memory rules: `mstore`/`mload`/`mtainted`
   make a `store` taint the locations it may alias and a later `load` receive it, with
   `store`/`load` path nodes. Diagnostics that are not findings (unknown memory, use after

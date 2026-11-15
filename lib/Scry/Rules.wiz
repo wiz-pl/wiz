@@ -35,6 +35,8 @@ end
 * `message TEXT` takes the rest of the line.
 * `source NAME result|arg K`, `sanitise NAME result|arg K` (also spelled `sanitize`),
   `sink NAME arg K`. `result` is the default when the argument selector is omitted.
+  `sink NAME args` checks every argument, for a variadic callee such as `execl`. A
+  finding still names the concrete argument index that carried the taint.
 * `call NAME` (§`kind forbidden` only) names a forbidden callee.
 * Blank lines and lines starting with `#` are comments; unknown keywords are ignored.
 
@@ -145,9 +147,20 @@ structure Scry.RuleFinding where
 
 -- ## The rules
 
+/-- Which argument(s) of a call a sink names. `one k` is the fixed index `k`; `any` is
+every argument, for a variadic callee such as `execl(path, arg0, …, NULL)` where any of
+the command-line words can carry attacker data. `any` is spelled `args` in the pack. -/
+inductive Scry.SinkArg where
+  | one (index : Nat)
+  | any
+
+def Scry.SinkArg.show : Scry.SinkArg → String
+  | .one k => Nat.repr k
+  | .any => "any"
+
 structure Scry.RuleSink where
   name : String
-  arg : Nat
+  arg : Scry.SinkArg
 
 structure Scry.TaintRule where
   id : String
@@ -274,13 +287,26 @@ def Scry.PackState.finish (st : Scry.PackState) : Scry.PackState :=
   | .none => st
   | .some r => Scry.PackState.mk .none (List.cons (Scry.PartialRule.finish r) st.rules)
 
+/-- Parse a sink's argument selector: `arg K` (the default) or `args` (every
+argument). -/
+def Scry.parseSinkArg (rest : List String) : Scry.SinkArg :=
+  match rest with
+  | .cons sel (.cons idx _) =>
+    if String.eq sel "args" then .any
+    else if String.eq sel "arg" then
+      match String.parseNat (String.trim idx) with
+      | .some n => .one n
+      | .none => .one 0
+    else .one 0
+  | .cons sel _ => if String.eq sel "args" then .any else .one 0
+  | .nil => .one 0
+
 def Scry.PartialRule.addSink (name : String) (rest : List String)
     (r : Scry.PartialRule) : Scry.PartialRule :=
   match rest with
-  | .cons _ (.cons idx _) => match String.parseNat (String.trim idx) with
-    | .some n => { r with sinks := List.cons (Scry.RuleSink.mk name n) r.sinks }
-    | .none => r
-  | _ => r
+  | .nil => r
+  | .cons _ _ => { r with sinks := List.cons
+      (Scry.RuleSink.mk name (Scry.parseSinkArg rest)) r.sinks }
 
 def Scry.PartialRule.addLine (words : List String) (r : Scry.PartialRule) : Scry.PartialRule :=
   match words with
@@ -359,7 +385,9 @@ def Scry.renderSourceLine (kw name : String) (ref : Scry.ArgRef) : String :=
       " arg ") (Nat.repr k)
 
 def Scry.RuleSink.render (s : Scry.RuleSink) : String :=
-  String.append (String.append (String.append "  sink " s.name) " arg ") (Nat.repr s.arg)
+  match s.arg with
+  | .one k => String.append (String.append (String.append "  sink " s.name) " arg ") (Nat.repr k)
+  | .any => String.append (String.append "  sink " s.name) " args"
 
 def Scry.PackRule.render (r : Scry.PackRule) : String :=
   match r with

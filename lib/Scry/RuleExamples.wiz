@@ -27,10 +27,10 @@ Hand-built Wil programs for the S4 rule pack and interprocedural engine
 Point numbering follows `Scry.Analysis` (statements then a terminator per block); the
 comments name the interesting ones.
 
-The rule pack is `Scry.demoPackText` / `Scry.demoRules`: command injection, format
-strings, `gets` and `strcpy`. `lib/Scry/rules/default.scry` is the same pack as a real
-spec file; `Scry.demoPackText` mirrors it so the tests exercise the parser without file
-IO.
+The rule pack is `Scry.demoPackText` / `Scry.demoRules`: command injection (including
+the `exec` family and the `sink … args` variadic selector), format strings, `gets` and
+`strcpy`. `lib/Scry/rules/default.scry` is the same pack as a real spec file;
+`Scry.demoPackText` mirrors it so the tests exercise the parser without file IO.
 -/
 
 def Scry.rtv (n : Nat) : Wil.Var := Wil.var n Wil.i32
@@ -50,6 +50,15 @@ def Scry.demoPackText : String :=
   "  sanitise sanitize arg 0\n" ++
   "  sink system arg 0\n" ++
   "  sink popen arg 0\n" ++
+  "  sink execl args\n" ++
+  "  sink execlp args\n" ++
+  "  sink execv arg 0\n" ++
+  "  sink execvp arg 0\n" ++
+  "  sink execve arg 0\n" ++
+  "  sink posix_spawn arg 1\n" ++
+  "  sink posix_spawn arg 4\n" ++
+  "  sink posix_spawnp arg 1\n" ++
+  "  sink posix_spawnp arg 4\n" ++
   "end\n" ++
   "rule format-string\n" ++
   "  kind taint\n" ++

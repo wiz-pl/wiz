@@ -14,6 +14,24 @@ chain: sink function run: ok
 chain: sink span known: ok
 chain: path starts in main: ok
 chain: path ends in run: ok
+exec: eight findings: ok
+exec: every finding is command-injection: ok
+exec: every finding is checked: ok
+exec: covers execl/execlp/execv/execvp/execve/posix_spawn/posix_spawnp/system: ok
+exec: execl reports the tainted word at argument 3: ok
+exec: no memory warnings: ok
+exec sarif: eight command-injection results: ok
+exec sarif: namespaced command-injection id: ok
+exec sarif: execl descriptor has the any-argument selector: ok
+exec-safe: zero findings: ok
+entry: one finding: ok
+entry: checked: ok
+entry: rule command-injection: ok
+entry: sink function iv_spawn: ok
+entry: sink span known: ok
+entry: execl argument 3: ok
+entry: path starts at a source: ok
+entry-safe: zero findings: ok
 clean: zero findings: ok
 clean: zero boundary warnings: ok
 boundary: zero findings: ok
