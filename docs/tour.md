@@ -20,7 +20,8 @@ Contents: [0 A program](#0-a-program) · [1 Values and functions](#1-values-and-
 [5 Dependent types](#5-dependent-types) · [6 Propositions and proofs](#6-propositions-and-proofs) ·
 [7 Quantities](#7-quantities-and-linear-resources) · [8 Codata](#8-codata) ·
 [9 The C FFI](#9-the-c-ffi) · [10 Hardware](#10-hardware) ·
-[11 Packages](#11-packages) · [Where next](#where-next)
+[11 Packages](#11-packages) · [12 Taint analysis with scry](#12-taint-analysis-with-scry) ·
+[Where next](#where-next)
 
 ## 0: a program
 
@@ -631,6 +632,29 @@ Modules are files: `import A.B` reads `A/B.wiz` from a module root (the standard
 library `lib/`, a package's `lib` directories, `-I DIR`). Wiz has no namespaces yet, so
 one name can be declared only once among everything a file imports. Mark helpers
 `private` to keep them out of other modules.
+
+## 12: taint analysis with scry
+
+`scry` is a program analyser whose library is Wiz: `lib/Scry/*` has the three-address IR
+(`Scry.Wil`), the CFG and reaching definitions (`Scry.Analysis`), and taint analysis as
+Datalog (`Scry.Taint`). A *source* call's result is attacker-controlled, a *sanitiser*
+cleans it, and a *sink* must not receive a tainted value:
+
+```
+import Scry.Taint
+import Scry.TaintExamples
+
+def spec : Scry.TaintSpec :=
+  Scry.parseTaintSpec "source getenv\nsanitise sanitize\nsink system 0"
+
+#eval Scry.alertsInFunc Scry.directFn spec      -- .cons (4, 0) .nil
+#eval Scry.alertsInFunc Scry.sanitisedFn spec   -- .nil
+```
+
+The first function copies and adds `getenv`'s result before passing it to `system`, so
+the analysis reports the sink and the argument; the second passes it through `sanitize`,
+which kills the flow. A finding also carries its source → sink path (`Scry.findings`).
+(`examples/tour/12-scry.wiz`; [libraries.md](libraries.md), "Scry".)
 
 ## Where next
 
