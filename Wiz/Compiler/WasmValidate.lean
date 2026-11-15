@@ -407,6 +407,18 @@ def beginFrame (s : VState) (kind : FrameKind) (startTypes endTypes : Array VT) 
   let f : Frame := { kind, startTypes, endTypes, height := s.stack.size }
   pure (pushTypes { s with frames := s.frames.push f } startTypes)
 
+/-! ## Proposal features
+
+The backend uses the **tail-call proposal** (`return_call`/`return_call_indirect`). There
+is no module-level feature flag in the binary format, so the validator carries the
+requirement explicitly: `validate` defaults to requiring tail calls, and a caller can
+turn them off to check that a module from an older encoder does not use them. -/
+
+structure Features where
+  /-- accept `return_call` and `return_call_indirect` (the tail-call proposal) -/
+  tailCalls : Bool := true
+  deriving Repr, BEq, Inhabited
+
 /-- The environment a function body is checked against. -/
 structure Env where
   types : Array FuncType
@@ -415,6 +427,7 @@ structure Env where
   tables : Array TableType
   memories : Array Limits
   globals : Array GlobalType
+  features : Features := {}
 
 /-- The numeric instructions (unary and binary operators). -/
 partial def checkNumeric (op : UInt8) (r : Rd) (s : VState) : Except String (Rd × VState) := do
@@ -530,6 +543,35 @@ partial def step (env : Env) (locals : Array VT) (op : UInt8) (r : Rd) (s : VSta
     let s ← s.popExpect .i32
     let s ← popTypes s ft.params
     pure (r, pushTypes s ft.results)
+  | 0x12 => do
+    -- (tail-call proposal) a call whose results are the current function's results
+    unless env.features.tailCalls do
+      throw "`return_call` needs the tail-call proposal, which is not enabled in this validator"
+    let (i, r) ← r.uleb
+    if i ≥ env.funcs.size then throw s!"return_call of function {i}, but there are {env.funcs.size}"
+    let ty := env.funcs[i]!
+    if ty ≥ env.types.size then throw s!"function {i} has type {ty}, which does not exist"
+    let ft := env.types[ty]!
+    let some f := s.frames[0]? | throw "`return_call` outside a function"
+    unless ft.results == f.endTypes do
+      throw s!"return_call of a function returning {ft.results.size} values in a function returning {f.endTypes.size}"
+    let s ← popTypes s ft.params
+    pure (r, s.makeUnreachable)
+  | 0x13 => do
+    -- (tail-call proposal) the indirect form: arguments, then the table index on top
+    unless env.features.tailCalls do
+      throw "`return_call_indirect` needs the tail-call proposal, which is not enabled in this validator"
+    let (ty, r) ← r.uleb
+    let (table, r) ← r.uleb
+    if ty ≥ env.types.size then throw s!"return_call_indirect names type {ty}, which does not exist"
+    if table ≥ env.tables.size then throw s!"return_call_indirect names table {table}, which does not exist"
+    let ft := env.types[ty]!
+    let some f := s.frames[0]? | throw "`return_call_indirect` outside a function"
+    unless ft.results == f.endTypes do
+      throw s!"return_call_indirect returns {ft.results.size} values in a function returning {f.endTypes.size}"
+    let s ← s.popExpect .i32
+    let s ← popTypes s ft.params
+    pure (r, s.makeUnreachable)
   | 0x1A => do
     let (_, s) ← s.pop
     pure (r, s)
@@ -693,7 +735,7 @@ def parseModule (bytes : ByteArray) : Except String Module := do
   unless version.toList == [0x01, 0x00, 0x00, 0x00] do throw "unsupported WebAssembly version"
   parseSections r {} 0
 
-def validate (bytes : ByteArray) : Except String Unit := do
+def validate (bytes : ByteArray) (features : Features := {}) : Except String Unit := do
   let m ← parseModule bytes
   -- (this backend imports only functions, so the index spaces are the imported
   -- functions followed by the defined ones)
@@ -754,6 +796,7 @@ def validate (bytes : ByteArray) : Except String Unit := do
     tables := m.tables
     memories := m.memories
     globals := m.globals.map (·.type)
+    features
   }
   for c in m.codes, i in [0:m.codes.size] do
     let ft ← funcTypeOf (importedFuncs + i)

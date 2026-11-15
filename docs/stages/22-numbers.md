@@ -117,7 +117,7 @@ as the runtime number itself, possibly big). **A word is its bits**:
 
 ## 22e: phantom parameters
 
-```
+```wiz no-check
 inductive UIntN (w : Nat) where
   | mk (toNat : Nat)                     -- no field mentions `w`
 def f (x : UIntN 8) : UIntN 16 := x      -- type mismatch
@@ -214,7 +214,7 @@ Two ways to prove `False` without writing `axiom` are closed.
 
 ## 22g: regions: borrow checking as typing
 
-```
+```wiz no-check
 def longest {ρa ρb : Region} (0 h : Outlives ρa ρb) (x : Shr ρa U64) (y : Shr ρb U64) : Result (Shr ρb U64) :=
   match U64.lt x.val y.val with
   | .true => .ok y
@@ -301,7 +301,7 @@ live on after the borrow), and with the second it also has to request the instan
 
 `BitVec n` (`lib/BitVec.wiz`) and `UIntN n` (`lib/Word.wiz`) are one type:
 
-```
+```wiz no-check
 inductive UIntN (w : Nat) where | mk (toNat : Nat)   -- lib/Word.wiz: the model + natives
 def BitVec (n : Nat) : Type := UIntN n               -- lib/BitVec.wiz: the HDL/proof names
 def BitVec.add {ω n : Nat} (a b : BitVec n) : BitVec n := UIntN.add a b
@@ -333,7 +333,7 @@ def w (x : U32) : BitVec 32 := BitVec.add x (BitVec.ofNat 32 1)   -- no conversi
 
 ## 22i: unboxed newtypes and `attribute [inline]`
 
-```
+```wiz no-check
 structure Uniq (ρ : Region) (A : Type) where
   val : A                                  -- at run time, a Uniq ρ A is its A
 attribute [inline] Uniq.borrow             -- compiled code runs the scope's body in place
@@ -408,7 +408,7 @@ design). The self-hosted toolchain doesn't have phantom tails at all yet.
 
 ## 22j: Feral, the surface language
 
-```
+```wiz no-check
 import FeralCore
 import Feral
 feral
@@ -440,7 +440,7 @@ loops, `?`, `U64`, and functions that return borrows.
   and elaborated like anything else. `#lower feral … end` also shows that text: the
   function above becomes
 
-  ```
+  ```wiz no-check
   def swap {ρa ρb : Region} (x : (Uniq ρa U64)) (y : (Uniq ρb U64)) : Result (Unit × ((Uniq ρa U64) × (Uniq ρb U64))) :=
     let t := x.val;
     let x := (Uniq.set x y.val);

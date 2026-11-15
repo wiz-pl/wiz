@@ -23,10 +23,11 @@
                                      that differ between BASE and HEAD (git diff
                                      BASE HEAD; CI: a PR's merge commit and its first
                                      parent) and prints GitHub outputs: code=true
-                                     unless only docs changed, and shards=[NAMES], the
-                                     shards of .github/test-shards.json to run (each
-                                     shard's "inputs", see `needed_shards`). `changes
-                                     --all` prints everything
+                                     unless only docs changed, docs=true when a doc
+                                     changed, and shards=[NAMES], the shards of
+                                     .github/test-shards.json to run (each shard's
+                                     "inputs", see `needed_shards`). `changes --all`
+                                     prints everything
   scripts/ci.py summary TITLE FILE.. a Markdown summary for $GITHUB_STEP_SUMMARY of
                                      `lake test` logs (*.log: pass/fail, failing cases)
                                      and `--timings` files (*.jsonl: a table of every
@@ -362,6 +363,7 @@ def changes(args):
     if args[:1] == ["--all"]:
         names = [s["name"] for s in shards()]
         print("code=true")
+        print("docs=true")
         print(f"shards={json.dumps(names)}")
         return 0
     base, head = args[0], (args[1] if len(args) > 1 else "HEAD")
@@ -370,9 +372,12 @@ def changes(args):
     files = [f for f in out.split("\n") if f]
     names = needed_shards(files)
     code = any(not matches(f, DOCS) for f in files)
+    docs = any(matches(f, DOCS) for f in files)
     print(f"code={'true' if code else 'false'}")
+    print(f"docs={'true' if docs else 'false'}")
     print(f"shards={json.dumps(names)}")
-    print(f"{len(files)} files changed; code: {code}; shards: {', '.join(names) or 'none'}", file=sys.stderr)
+    print(f"{len(files)} files changed; code: {code}; docs: {docs}; "
+          f"shards: {', '.join(names) or 'none'}", file=sys.stderr)
     return 0
 
 
