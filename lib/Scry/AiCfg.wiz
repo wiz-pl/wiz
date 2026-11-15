@@ -134,8 +134,8 @@ def Const.mulC (m : AiMach) : Const → Const → Const
   | _, _ => .unknown
 
 /-- Evaluate an expression abstractly. -/
-def AExpr.eval (m : AiMach) (env : Env) : AExpr → Value
-  | .var x => Env.getD env x Value.top
+def AExpr.eval (m : AiMach) (env : AiEnv) : AExpr → Value
+  | .var x => AiEnv.getD env x Value.top
   | .lit n => AiValue.word m n
   | .add a b =>
       let av := AExpr.eval m env a
@@ -156,59 +156,59 @@ def AExpr.eval (m : AiMach) (env : Env) : AExpr → Value
 -- ## Guard refinement
 
 /-- Refine the interval of `x` by intersecting it with `i`; keep the other components. -/
-def Env.refineItv (x : Nat) (i : Interval) (env : Env) : Env :=
-  let v := Env.getD env x Value.top
-  Env.set x (Value.norm (Value.mk (Interval.meet v.itv i) v.cst v.nul)) env
+def AiEnv.refineItv (x : Nat) (i : Interval) (env : AiEnv) : AiEnv :=
+  let v := AiEnv.getD env x Value.top
+  AiEnv.set x (Value.norm (Value.mk (Interval.meet v.itv i) v.cst v.nul)) env
 
 /-- Refine nullness of `x`, keeping its other components. -/
-def Env.refineNull (x : Nat) (n : Null) (env : Env) : Env :=
-  let v := Env.getD env x Value.top
-  Env.set x (Value.mk v.itv (match n with | .nul => .cbot | _ => v.cst) n) env
+def AiEnv.refineNull (x : Nat) (n : Null) (env : AiEnv) : AiEnv :=
+  let v := AiEnv.getD env x Value.top
+  AiEnv.set x (Value.mk v.itv (match n with | .nul => .cbot | _ => v.cst) n) env
 
 /-- Refine the environment by a guard. A guard whose right side is `Top` refines
 nothing numerically; one whose right side is `Bot` makes the edge unreachable
-(`Env` bottom, i.e. the variable set to `Value.bot`). -/
-def ACond.refine (m : AiMach) (env : Env) : ACond → Env
+(`AiEnv` bottom, i.e. the variable set to `Value.bot`). -/
+def ACond.refine (m : AiMach) (env : AiEnv) : ACond → AiEnv
   | .lt x e =>
       let ev := AExpr.eval m env e
       match ev.itv with
-      | .bot => Env.set x Value.bot env
+      | .bot => AiEnv.set x Value.bot env
       | .range _ eh => match Nat.beq eh 0 with
-        | .true => Env.set x Value.bot env
-        | .false => Env.refineItv x (.range 0 (Nat.sub eh 1)) env
-      | .top => Env.refineNull x .nonNull env
+        | .true => AiEnv.set x Value.bot env
+        | .false => AiEnv.refineItv x (.range 0 (Nat.sub eh 1)) env
+      | .top => AiEnv.refineNull x .nonNull env
   | .le x e =>
       let ev := AExpr.eval m env e
       match ev.itv with
-      | .bot => Env.set x Value.bot env
-      | .range _ eh => Env.refineItv x (.range 0 eh) env
-      | .top => Env.refineNull x .nonNull env
+      | .bot => AiEnv.set x Value.bot env
+      | .range _ eh => AiEnv.refineItv x (.range 0 eh) env
+      | .top => AiEnv.refineNull x .nonNull env
   | .gt x e =>
       let ev := AExpr.eval m env e
       match ev.itv with
-      | .bot => Env.set x Value.bot env
-      | .range el _ => Env.refineItv x (.range (Nat.succ el) (AiMach.maxVal m)) env
-      | .top => Env.refineNull x .nonNull env
+      | .bot => AiEnv.set x Value.bot env
+      | .range el _ => AiEnv.refineItv x (.range (Nat.succ el) (AiMach.maxVal m)) env
+      | .top => AiEnv.refineNull x .nonNull env
   | .ge x e =>
       let ev := AExpr.eval m env e
       match ev.itv with
-      | .bot => Env.set x Value.bot env
-      | .range el _ => Env.refineItv x (.range el (AiMach.maxVal m)) env
-      | .top => Env.refineNull x .nonNull env
+      | .bot => AiEnv.set x Value.bot env
+      | .range el _ => AiEnv.refineItv x (.range el (AiMach.maxVal m)) env
+      | .top => AiEnv.refineNull x .nonNull env
   | .eq x e =>
       let ev := AExpr.eval m env e
       match ev.itv with
-      | .bot => Env.set x Value.bot env
-      | _ => Env.refineItv x ev.itv env
+      | .bot => AiEnv.set x Value.bot env
+      | _ => AiEnv.refineItv x ev.itv env
   | .ne _ _ => env
-  | .isNull x => Env.refineNull x .nul env
-  | .notNull x => Env.refineNull x .nonNull env
+  | .isNull x => AiEnv.refineNull x .nul env
+  | .notNull x => AiEnv.refineNull x .nonNull env
 
 -- ## Statements, edges and CFGs
 
 /-- The abstract transfer function of a statement. -/
-def AStmt.transfer (m : AiMach) (env : Env) : AStmt → Env
-  | .assign x e => Env.set x (AExpr.eval m env e) env
+def AStmt.transfer (m : AiMach) (env : AiEnv) : AStmt → AiEnv
+  | .assign x e => AiEnv.set x (AExpr.eval m env e) env
   | .assume c => ACond.refine m env c
   | .skip => env
 
@@ -242,7 +242,7 @@ def ACfg.outEdges (cfg : ACfg) (p : Nat) : List AEdge :=
   List.filter (fun e => Nat.beq e.src p) cfg.edges
 
 /-- Transfer along an edge: the source state, refined by the edge's guard. -/
-def AEdge.transfer (m : AiMach) (env : Env) (e : AEdge) : Env :=
+def AEdge.transfer (m : AiMach) (env : AiEnv) (e : AEdge) : AiEnv :=
   match e.guard with
   | .none => env
   | .some c => ACond.refine m env c
@@ -253,9 +253,9 @@ def AEdge.transfer (m : AiMach) (env : Env) (e : AEdge) : Env :=
 in concrete state `c`, it is in `γ (eval env e).itv`. The concrete relation `den` is
 deliberately abstract here (it is Wil's semantics in S5); the statement records what S5
 must prove. -/
-def AExpr.eval_sound_stmt (C : Type) [AbsDomain C Env]
+def AExpr.eval_sound_stmt (C : Type) [AbsDomain C AiEnv]
     (den : AiMach → C → AExpr → Nat → Prop) : Prop :=
-  (m : AiMach) → (c : C) → (env : Env) → (e : AExpr) → (n : Nat) →
+  (m : AiMach) → (c : C) → (env : AiEnv) → (e : AExpr) → (n : Nat) →
     AbsDomain.gamma env c → den m c e n → Interval.contains (AExpr.eval m env e).itv n = .true
 
 /-- The width-aware addition never claims a value outside the machine range. -/
@@ -267,7 +267,7 @@ def Interval.add_range_stmt (m : AiMach) : Prop :=
 
 /-- Statement transfer soundness (the S5 obligation for `AStmt.transfer`), in the shape
 of `Transfer.sound_stmt`: γ before, concrete step, γ after. -/
-def AStmt.transfer_sound_stmt (m : AiMach) (C : Type) [AbsDomain C Env]
+def AStmt.transfer_sound_stmt (m : AiMach) (C : Type) [AbsDomain C AiEnv]
     (sem : AStmt → C → C → Prop) : Prop :=
-  (s : AStmt) → (a : Env) → (c c' : C) → AbsDomain.gamma a c → sem s c c' →
+  (s : AStmt) → (a : AiEnv) → (c c' : C) → AbsDomain.gamma a c → sem s c c' →
     AbsDomain.gamma (AStmt.transfer m a s) c'

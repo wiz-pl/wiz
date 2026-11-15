@@ -77,10 +77,11 @@ the artifact cache never serves a stale one. The only one today is the C runtime
 `runtime/WizRuntime.lean` (library `WizRuntime`, imported by `Wiz/Compiler/C.lean`); the
 parts are concatenated in the order of the old single file, so generated C is unchanged.
 A new `include_str` goes in such a library too, not in `Wiz` (a `needs` on `Wiz` would
-rebuild all of it); `scripts/test-embed.sh` checks the setup (CI runs it in the build
-job), and `scripts/test-runtime.sh` compiles the runtime alone with `cc -fsyntax-only
--Wall -Wextra`, with `WIZ_API=` and `WIZ_API=static` (the header's prototypes are checked
-against the parts).
+rebuild all of it); `scripts/test-embed.sh` checks the setup (a local
+`nix develop -c scripts/test-embed.sh` check, since it needs an incremental Lake build;
+CI runs only `scripts/test-runtime.sh`), and `scripts/test-runtime.sh` compiles the
+runtime alone with `cc -fsyntax-only -Wall -Wextra`, with `WIZ_API=` and `WIZ_API=static`
+(the header's prototypes are checked against the parts).
 
 ## Test layout
 
@@ -154,12 +155,41 @@ which grail and the test driver read (`Tests/Main.lean`; flags to `lake test -- 
 `wiz` takes flags. Nothing reads environment variables.
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on pushes and pull requests to
-`master`. Every job runs in that dev shell (with the Cachix cache, when
-one is configured); the elan toolchain and `.lake` (including Lake's artifact cache) are
-cached between runs.
+`master`. The toolchain is built **once**, with Nix: the `build` job runs
+`nix build .#wiz .#tests` (nixpkgs' Lean, no Lake artifact cache) and publishes the two
+store paths to Cachix with
 
-* **The test suite** runs in parallel shards, one job per entry of `.github/test-shards.json` (each entry
-  is a list of `lake test` selectors). A group that no shard's selectors pick runs in
+```sh
+nix shell nixpkgs#cachix -c cachix push badlydrawnwizards $(nix path-info .#wiz .#tests)
+```
+
+with `CACHIX_AUTH_TOKEN` (the repository secret) in that step's environment only. A Nix
+build has no Lake artifact cache: a commit's first build compiles every module in the
+sandbox (Lean comes from nixpkgs), and a rerun of the same commit substitutes the store
+paths. Pull requests from forks get no secret: they skip the push and their shards build
+the paths themselves. The `test`, `trust-ledger` and `docs` jobs pull from Cachix
+(`cachix-action` is set up for substitution only, `skipPush: true`); no job on the
+critical path runs `lake build` directly or saves a `.lake` Actions cache. The shards run the
+Nix-built test driver (`packages.tests`), not `lake test`, and symlink the store `wiz`
+and `grail` into the checkout's `.lake/build/bin`, which some cases and
+`scripts/trust-ledger.sh` name directly (the driver also carries the wrapped `wiz` and
+`grail` beside itself, which `Tests/Grail.lean` looks for). The dev shell (`nix develop`)
+is still what puts `cc`, `llc`, z3, cadical and Neovim on `PATH`, and it writes
+`grail.local.wiz` for the cases that compile C.
+
+The Nix build is about 353 MB for `wiz` (1.8 GB with its closure: Lean, GMP, Boehm GC,
+LLVM) and 165 MB for the test driver (2.0 GB with its closure, which includes the wrapped
+`wiz` it carries beside itself), so a shard's substitution is a download, not a compile. The store path is content-addressed: the same
+sources give the same path, and a shard on another architecture (the aarch64 caveat in
+[ci-runner.md](ci-runner.md)) has a different one and builds it there. The weekly
+bootstrap fixpoint, the release workflow and `scripts/test-embed.sh` still use Lake and
+the elan toolchain, so the setup action keeps the elan cache for those
+(`lean: true`); it is skipped in the Nix jobs (`lean: false`).
+
+* **The test suite** runs in parallel shards, one job per entry of
+  `.github/test-shards.json` (each entry is a list of test-driver selectors, the same
+  ones `lake test --` takes; the shards run the Nix-built `tests` binary). A group that
+  no shard's selectors pick runs in
   the shard its `Group.shard` names, else in the shard marked `"default": true`
   (`library`), so **a new group needs no edit there**; the build job checks that every
   case is in exactly one shard (`scripts/ci.py check-shards`, after splitting). See
@@ -175,12 +205,14 @@ cached between runs.
   (including docs-only ones), and `CI result` requires it. No code block is exempt; a
   reviewed exception goes in the script's `ALLOW` list with a reason.
 * **The documentation site** (the `docs` and `deploy-docs` jobs): on a push to `master`
-  only (not a pull request, the weekly run or a manual run), `docs` builds the
-  standard library's pages with `wiz doc --lib` (source links to the commit) and the Wasm
-  module that makes their signatures interactive, and uploads them as the artifact
-  `wiz-docs` (3 days, for debugging). `deploy-docs` then publishes that artifact to
-  GitHub Pages. Neither job is a required check, so a Pages outage does not fail the
-  suite. See "Documentation site" below.
+  only (not a pull request, the weekly run or a manual run), `docs` builds the two Wasm
+  modules (the infoview's and the playground's), the standard library's pages with
+  `wiz doc --lib` (source links to the commit) into `doc-site/docs`, and the landing page
+  and the static playground around them (`web/build-site.sh`); `web/check-site.sh`
+  checks that `/`, `/docs/` and `/playground/` exist and that the landing page's local
+  links resolve. It uploads the tree as the artifact `wiz-docs` (3 days, for debugging),
+  and `deploy-docs` publishes it to GitHub Pages. Neither job is a required check, so a
+  Pages outage does not fail the suite. See "Documentation site" below.
 * **Trust ledger** (the `trust-ledger` job): `scripts/trust-ledger.sh --check` runs the
   `--trust-ledger` mode of the test driver (`Tests/Native.lean`) over `lib/` and the
   axiom-free examples, and compares the sources of trust it finds with
@@ -201,10 +233,11 @@ cached between runs.
   in one part).
   `scripts/ci.py plan` shows the parts and their
   estimates. The heavy groups have dedicated shards of their own (`hdl-verified`,
-  `prop`, `audit`), so adding a slow case there does not unbalance `core`.
+  `hdl-uart-temporal`, `prop`, `audit`), so adding a slow case there does not unbalance
+  `core`.
   To refresh the baseline from a CI run:
   `gh run download RUN -n test-timings && scripts/ci.py baseline timings.jsonl > .github/test-timings.json`.
-* **`"jobs"`.** A shard may say `"jobs": N` to give `lake test` `--jobs N` (above): its
+* **`"jobs"`.** A shard may say `"jobs": N` to give the test driver `--jobs N` (above): its
   opted-in groups run N cases at a time. Only set it on a shard whose groups were
   verified (and opted in) to be safe in parallel; `core`, `library` and `backends` use
   4 on the 4-core hosted runner. A shard of one long case (`grail-selfhost`,
@@ -247,15 +280,17 @@ cached between runs.
   equals its stage-2 C) runs weekly on `master`, or from "Run workflow" with
   `fixpoint` ticked. It takes a long time; run it locally with `nix develop -c
   scripts/fixpoint.sh`.
-* **The Nix package** (the `nix package` job): `nix build .#wiz` builds `wiz` and
-  `grail` with Lake and nixpkgs' Lean (the flake checks that it is the version in
-  `lean-toolchain`), and wraps them with the toolchain as flags (`--cc`, `--cflags`,
-  `--ldflags`, `--llc`, `--gc-cflags`, `--gc-ldflags`; flags you pass come later and
-  win) and, for `wiz`, the packaged standard library as a module root after `./lib`. CI
-  pushes it to the public Cachix cache `badlydrawnwizards` on pushes and on pull
-  requests from this repository (which have the token). The tests still use Lake, whose
-  artifact cache rebuilds only what changed. `packages.tests` is the test driver
-  (`nix run .#tests -- --list`), from the same build, so building `wiz` builds it too.
+* **The Nix package** (the `build` job; the old separate `nix package` job is folded
+  into it): `nix build .#wiz .#tests` builds `wiz` and `grail` with Lake in the Nix
+  sandbox and nixpkgs' Lean (the flake checks that it is the version in `lean-toolchain`)
+  and the test driver from the same build, and wraps the binaries with the toolchain as
+  flags (`--cc`, `--cflags`, `--ldflags`, `--llc`, `--gc-cflags`, `--gc-ldflags`; flags
+  you pass come later and win) and, for `wiz`, the packaged standard library as a module
+  root after `./lib`. The job then checks the package from a directory with no checkout
+  (`nix run "$GITHUB_WORKSPACE#wiz" -- check/build …`, and `#grail` starts), so the
+  publication path is exercised before the push. It publishes to the public Cachix cache
+  `badlydrawnwizards` from `master` and from this repository's pull requests (which have
+  the token); `packages.tests` is `nix run .#tests -- --list`.
 * **The packaged read-only elaboration cache.** The `wiz` package prewarms the
   elaboration cache during its build and installs it at `$out/share/wiz/cache`: the
   `.wizc` effects and the `.wizm` seen markers, with no `bin/` memo and `a-w`
@@ -289,7 +324,7 @@ cached between runs.
   read-only in the store, so a miss (a user's own module) is elaborated and written to
   the write cache as usual.
 * **The Wiz build caches.** Each test shard keeps what the suite builds from Wiz
-  programs between runs: the elaboration cache (`lake test -- --cache ~/.cache/wiz …`),
+  programs between runs: the elaboration cache (`tests --cache ~/.cache/wiz …`),
   `.grail`, and the self-hosted checker and compiler that the tests compile
   (`/tmp/wiz-selfhost-*`). The cache key starts with a hash of everything the compiler
   is made of (the `.lean` files, Lean, `flake.lock`), and partial hits only come from the
@@ -300,12 +335,12 @@ cached between runs.
   can ship one in `$out/share/wiz/cache` for `--cache-ro $out/share/wiz/cache`, so CI and
   users share a warm cache without a writable store path; a run with no write cache
   hashes the wiz executable each time instead of remembering it under `bin/`.
-* **Storage.** The repository's Actions cache holds 10 GB and evicts the least recently
-  used entries, so pull requests don't keep big entries: the elan toolchain (~770 MB) is
-  saved only by `master` (pull requests restore master's), and a pull request's (or merge
-  queue entry's) `lake-*` and `exercises-*` entries (~500 MB each), saved only to hand
-  the build to its test shards, are deleted by the `CI result` job when the run ends
-  (not when it is cancelled). The next push restores master's build and catches up.
+* **Storage.** CI no longer stores the build in the Actions cache: the build lives in the
+  Nix store and is shared through Cachix (~350 MB for `wiz` plus its closure; the test
+  driver is ~165 MB, with `wiz` in its closure, on x86_64-linux). The Actions cache now
+  holds only the per-shard Wiz build caches (the elaboration cache, `.grail`,
+  `/tmp/wiz-selfhost-*`) and the elan toolchain (~770 MB, saved only by `master`; pull
+  requests restore master's entry), which only the fixpoint/release jobs still need.
   Artifacts are short-lived: test logs 3 days, `test-timings` 7 days on master (2
   elsewhere), `test-timings-baseline` 7 days, the release tarball 90 days for a tag,
   7 for a snapshot (both are also release assets) and 3 for a pull request.
@@ -342,23 +377,56 @@ cached between runs.
 
 ### Documentation site
 
-A push to `master` publishes the standard library's documentation from the `docs` job to
-GitHub Pages, at <https://wiz-pl.github.io/wiz/>. The tree is `wiz doc --lib`'s output
-plus the Wasm module (`web/build.sh`), exactly as the `wiz-docs` artifact holds it:
+A push to `master` publishes the site from the `docs` job to GitHub Pages, at
+<https://wiz-pl.github.io/wiz/>. The tree has three parts, and every link in it is
+relative, so the project-site prefix (or a custom domain root) works either way:
+
+| URL | what it is | built from |
+|---|---|---|
+| `/` | the landing page: introduction, features, quickstart | `web/landing/index.html`, `web/landing/landing.css` |
+| `/docs/` | the standard library's API documentation | `wiz doc --lib` |
+| `/playground/` | the static playground (stage 11ab) | `web/playground.*`, `web/build-playground.sh` |
+
+The `docs` job builds the two Wasm modules (`web/build.sh` for the documentation's
+interactive signatures, `web/build-playground.sh` for the playground), runs `wiz doc
+--lib -o doc-site/docs --web web/out` (source links to the commit), assembles the
+landing page and the playground with `web/build-site.sh doc-site web/out`, checks the
+result with `web/check-site.sh doc-site` (the three entry points exist and the landing
+page's local links resolve; no server), and uploads `doc-site` as the artifact
+`wiz-docs` (3 days, for debugging). `deploy-docs` then publishes that artifact.
 
 | path | what it is |
 |---|---|
-| `index.html` | the landing page: the documented modules and their summaries |
-| `A.B.html` | one page per module (its declarations, signatures, docs, source links) |
-| `A.B.json` | the same page's data, for the interactive signatures |
-| `search.js`, `scroll.css`, `scroll.js`, `tagged.js`, `scroll-search.js` | the site's scripts and styles |
-| `wiz-infoview.mjs`, `wiz-infoview.wasm` | the infoview's Wasm module, when `web/build.sh` built it |
+| `index.html`, `landing.css` | the landing page |
+| `docs/index.html` | the documentation index: the documented modules and their summaries |
+| `docs/api.html` | the API index: every module and declaration, with signatures and doc summaries |
+| `docs/api.json` | the same index as data, for tools |
+| `docs/A.B.html` | one page per module (its declarations, signatures, docs, source links) |
+| `docs/A.B.json` | the same page's data, for the interactive signatures |
+| `docs/search.js`, `docs/scroll.css`, `docs/scroll.js`, `docs/tagged.js`, `docs/scroll-search.js` | the documentation's scripts and styles (search covers names, doc comments and signatures) |
+| `docs/wiz-infoview.mjs`, `docs/wiz-infoview.wasm` | the infoview's Wasm module, when `web/build.sh` built it |
+| `playground/index.html` | the playground page |
+| `playground/playground.js`, `playground/playground.css`, `playground/playground-values.js` | the page's scripts and styles |
+| `playground/wiz-playground.mjs`, `playground/wiz-playground.wasm` | the playground's engine (the self-hosted checker), when `web/build-playground.sh` built it |
 
-All links in the pages are relative, so the `/wiz/` prefix of a project site works.
-`docs` and `deploy-docs` run only on `push` (`workflow_dispatch` runs do not publish).
-The artifact stays for 3 days for debugging; the site keeps the newest deployed tree
-until the next successful deployment, and `deploy-docs` serialises deployments
-(`concurrency: pages`, `cancel-in-progress: false`) so the site ends at the newest commit.
+To build the site locally from a checkout (after `nix develop` and `lake build wiz`):
+
+```sh
+sh web/build.sh web/out                         # the infoview module, scroll assets
+sh web/build-playground.sh web/out              # the playground module
+.lake/build/bin/wiz doc --lib -o doc-site/docs --web web/out
+sh web/build-site.sh doc-site web/out           # landing page and /playground/
+sh web/check-site.sh doc-site                   # the entry points and the links
+python3 -m http.server -d doc-site 8000         # then http://127.0.0.1:8000/
+```
+
+`web/build-playground.sh` compiles the self-hosted frontend to WebAssembly, so it is the
+slow part; without `emcc` on `PATH` the script runs Emscripten from nixpkgs. Without
+`--source-url`, the local documentation's source links are plain paths. `docs` and
+`deploy-docs` run only on `push` (`workflow_dispatch` runs do not publish). The artifact
+stays for 3 days for debugging; the site keeps the newest deployed tree until the next
+successful deployment, and `deploy-docs` serialises deployments (`concurrency: pages`,
+`cancel-in-progress: false`) so the site ends at the newest commit.
 
 **One-time repository setting.** Settings → Pages → Build and deployment → Source =
 "GitHub Actions". Without it `actions/configure-pages` has no site to configure and
@@ -382,10 +450,9 @@ the entire tree, so `deploy-docs` must stay the only Pages publisher. The perfor
 site (the `perf-site.yml` workflow when it lands) is designed to publish a
 self-contained dashboard; when it lands, it belongs *under* this deployment as
 `/perf/` — built into `doc-site/perf` before `upload-pages-artifact` — not in a second
-deploy job, which would replace the docs tree. Until then its own `deploy` job stays
-off (`PERF_SITE_DEPLOY` unset). Once `perf/` is there, link it from the site root (a
-step after `wiz doc` can add the link to its `index.html`, which is regenerated on every
-deploy).
+deploy job, which would replace the site. Until then its own `deploy` job stays
+off (`PERF_SITE_DEPLOY` unset). Once `perf/` is there, link it from the landing page
+(`web/landing/index.html`), which is a checked-in source file, not generated.
 
 To run Wiz without a checkout or a Lean toolchain, with the binaries from Cachix:
 
@@ -398,11 +465,63 @@ nix run --option extra-substituters https://badlydrawnwizards.cachix.org \
 or `cachix use badlydrawnwizards` once and then `nix run
 github:wiz-pl/wiz#wiz -- …` (`#grail` for grail; `wiz build FILE -o OUT`
 works out of the box). Without a branch the flake reference means the default branch,
-`master`, whose binaries are on Cachix once its `nix package` job has run. The
+`master`, whose binaries are on Cachix once its `build` job has pushed them. The
 `--option`s count only for a trusted Nix user (or with the cache in `nix.conf`);
 otherwise Nix builds wiz from source, which takes a few minutes.
+
+The same store path is a tower toolchain: `/share/wiz` has the layout tower accepts
+(`.lake/build/bin/wiz`, `bin/grail`, `lib/`). To use the build under a name:
+
+```sh
+wiz=$(nix build .#wiz --no-link --print-out-paths)
+tower toolchain link "ci-$(git rev-parse --short HEAD)" "$wiz/share/wiz"
+tower run "ci-$(git rev-parse --short HEAD)" -- wiz check hello.wiz
+tower run "ci-$(git rev-parse --short HEAD)" -- grail --version
+```
+
+`tower settings` can also take future toolchains from this flake rather than building
+them with Lake: `tower set source nix`, `tower set flake github:wiz-pl/wiz` (and
+`tower set releases wiz-pl/wiz` for the release source), then
+`tower toolchain install master@<sha> --source nix` substitutes the Cachix build. CI
+does not install a toolchain: it consumes the `nix build` outputs directly.
 
 `#nvim-wiz` is Neovim with the Wiz plugin (editors/nvim, docs/stages/11-tooling.md
 11p) and this wiz on `PATH`: `nix run github:wiz-pl/wiz#nvim-wiz --
 file.wiz`. `packages.<system>.wiz-nvim` is the plugin alone, for a Neovim
 configuration in Nix.
+
+## Merge order and stacked pull requests
+
+CI runs a limited number of jobs, so work lands in **stacks** rather than one pull
+request per topic. A stack branch merges several finished component branches in
+dependency order and is opened as one integration pull request; that PR is the unit
+of review, CI and merge. The component PRs are closed as folded, and their branches
+stay: the stack's ancestry is what makes the next restack cheap.
+
+* The first line of a stack PR is `Depends on: #a, #b`, naming every **unmerged** PR
+  whose commits the branch contains. The stack does not merge until each of them is
+  `MERGED`. A dependency that was closed because another PR superseded it is not
+  merged, so rewrite the line when that happens.
+* **One ready stack PR per dependency chain.** A dependent stack stays draft or
+  local until its base has merged and the branch has been restacked on `master`.
+  Opening it earlier only produces an unmergeable PR, and an unmergeable PR gets no
+  CI run at all.
+* Restack with `git merge origin/master` (or the dependency branch), never by
+  rebasing a shared branch. Merge a stack with a merge commit
+  (`gh pr merge N --merge`), not squash or rebase.
+* While a stack's CI is the critical path, no other top-level PR is opened; a
+  docs-only PR may follow the stack's run, not precede it.
+* Cancel only superseded runs of the same branch. A conflicting PR has no checks
+  to wait for, so restack it instead.
+
+A stack is ready to merge when its merge state is `CLEAN`, the required checks are
+green on the current head (not on a superseded one), every `Depends on:` PR is
+merged, its component PRs are closed, the test groups it touches have been run with
+counts in the PR body, the documentation style check passes, it is not a draft, and
+the restack plan for its dependents is written down.
+
+The queue order is kept in a ledger outside the checkout
+(`wiz-notes/stack-ledger.json`, or `$WIZ_STACK_LEDGER`). `scripts/stack-status.py
+--next 5` prints the next actions with their gates, `--check` rejects a ledger with
+two ready PRs in one chain or a ready PR with an unmerged dependency, and `--write`
+refreshes the ledger's facts from `gh` and `git`.

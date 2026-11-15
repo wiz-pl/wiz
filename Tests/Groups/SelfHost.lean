@@ -1740,7 +1740,9 @@ def selfHostGroup : Group where
     -- (L-2) the kernel checks the value of a `let` at 0 as an erased position, so the
     -- backend must not compile it (the frontend doesn't produce `letq` today)
     { name := "Backend.wiz erases the value of a let at 0, and keeps it at 1 and ω", run := fun _ => do
-        let src ← Selfhost.compilerFiles.mapM (fun (f : String) => IO.FS.readFile f)
+        -- the backend test does not need the CLI driver (which expects the generated
+        -- parser tables and toolchain constants): checker + Backend only
+        let src ← (Selfhost.checkerFiles ++ ["selfhost/Backend.wiz"]).mapM (fun (f : String) => IO.FS.readFile f)
         let show1 (q : String) := s!"(match eraseCheck empty (.letq {q} (.enum 2) (.tag 2 0) (.tag 2 1)) (.venum 2) with\n    | .ok e => showE e\n    | .err m => String.append \"error: \" m)"
         let prog := "import IO\nimport Std\n" ++ "\n".intercalate (src.map Selfhost.strip) ++ "\n" ++
           s!"def main : IO Unit := do\n  IO.println {show1 ".qz"};\n  IO.println {show1 ".qo"};\n  IO.println {show1 ".qw"}\n"

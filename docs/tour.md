@@ -20,7 +20,8 @@ Contents: [0 A program](#0-a-program) · [1 Values and functions](#1-values-and-
 [5 Dependent types](#5-dependent-types) · [6 Propositions and proofs](#6-propositions-and-proofs) ·
 [7 Quantities](#7-quantities-and-linear-resources) · [8 Codata](#8-codata) ·
 [9 The C FFI](#9-the-c-ffi) · [10 Hardware](#10-hardware) ·
-[11 Packages](#11-packages) · [Where next](#where-next)
+[11 Packages](#11-packages) · [12 Taint analysis with scry](#12-taint-analysis-with-scry) ·
+[Where next](#where-next)
 
 ## 0: a program
 
@@ -324,6 +325,25 @@ it gives the same thing at `b`. `congrSucc` uses it to show that equal numbers h
 equal successors. `#print axioms zero_add` says the proof `does not depend on any
 axioms`.
 
+Chains of relations have their own notation, **`calc`**. Adjacent steps compose through
+an instance of `Trans`, and the last step's relation is the result:
+
+```
+def lt_of_chain (a b c d : Nat) (h1 : a ≤ b) (h2 : b < c) (h3 : c ≤ d) : a < d :=
+  calc a ≤ b := h1
+       _ < c := h2
+       _ ≤ d := h3
+```
+
+`_` is the previous step's right endpoint (an explicit middle term must be the same).
+`Trans` instances for `=` and `↔` are in `lib/Logic.wiz`; `Nat`, `Int` and `Q` register
+`=`, `≤` and `<` (and `≈` at `Q`) in `lib/Nat.wiz`, `lib/IntOrder.wiz` and
+`lib/Rat.wiz`, and a program adds its own relation by declaring a `Trans` instance for
+it. A chain elaborates to nested `Trans.trans` applications, so it is checked like any
+other proof and names no axioms; a step whose proof has the wrong relation, or a pair of
+relations that no instance composes, is reported at that step.
+(`examples/tour/06b-calc.wiz`; [stages/13-language.md](stages/13-language.md), 13s.)
+
 Proofs can also be written with **tactics**, after `by`. `intro`, `exact`, `apply`,
 `assumption`, `rfl`, `rw` and `unfold` are in the Prelude, and since a tactic is a Wiz
 function, you can write your own (`examples/tactics.wiz`):
@@ -595,10 +615,46 @@ The tour's own examples are tests of exactly this kind. A `wiz-toolchain` file n
 [install.md](install.md#a-first-project-with-grail) walks through a first package;
 [stages/23-grail.md](stages/23-grail.md) has the rest.
 
+A new package starts with `grail new`:
+
+```
+$ grail new hello
+grail new: wrote hello (grail.wiz, src/Main.wiz, tests/hello.wiz, README.md, .gitignore)
+  cd hello && grail build && grail run hello
+```
+
+It writes a library, an executable and a golden test; `grail run hello` prints
+`hello from hello`, and the test checks the same line. An existing non-empty directory
+is refused, so `new` never overwrites work, and the name must start with a letter.
+([stages/23-grail.md](stages/23-grail.md), 23o.)
+
 Modules are files: `import A.B` reads `A/B.wiz` from a module root (the standard
 library `lib/`, a package's `lib` directories, `-I DIR`). Wiz has no namespaces yet, so
 one name can be declared only once among everything a file imports. Mark helpers
 `private` to keep them out of other modules.
+
+## 12: taint analysis with scry
+
+`scry` is a program analyser whose library is Wiz: `lib/Scry/*` has the three-address IR
+(`Scry.Wil`), the CFG and reaching definitions (`Scry.Analysis`), and taint analysis as
+Datalog (`Scry.Taint`). A *source* call's result is attacker-controlled, a *sanitiser*
+cleans it, and a *sink* must not receive a tainted value:
+
+```
+import Scry.Taint
+import Scry.TaintExamples
+
+def spec : Scry.TaintSpec :=
+  Scry.parseTaintSpec "source getenv\nsanitise sanitize\nsink system 0"
+
+#eval Scry.alertsInFunc Scry.directFn spec      -- .cons (4, 0) .nil
+#eval Scry.alertsInFunc Scry.sanitisedFn spec   -- .nil
+```
+
+The first function copies and adds `getenv`'s result before passing it to `system`, so
+the analysis reports the sink and the argument; the second passes it through `sanitize`,
+which kills the flow. A finding also carries its source → sink path (`Scry.findings`).
+(`examples/tour/12-scry.wiz`; [libraries.md](libraries.md), "Scry".)
 
 ## Where next
 
