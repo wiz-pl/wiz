@@ -501,8 +501,10 @@ jobs:
           check build "${{ needs.build.result }}" "$code"
           check test "${{ needs.test.result }}" "$want_tests"
 
-  # Stage-1 C of the toolchain = stage-2 C (scripts/fixpoint.sh). Scheduled runs use the
-  # default branch (master).
+  # The three-stage bootstrap fixpoint (scripts/fixpoint.sh): stage-1 C = stage-2 C =
+  # stage-3 C. Scheduled runs use the default branch (master). This weekly job stays on
+  # ubuntu-latest as the fallback; the nightly .github/workflows/fixpoint.yml is the
+  # opt-in one on the self-hosted runner.
   fixpoint:
     name: bootstrap fixpoint
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.fixpoint)
@@ -530,4 +532,4 @@ jobs:
         if: always()
         shell: bash
         run: |
-          { echo "### Bootstrap fixpoint"; echo; echo '```'; grep -E 'FIXPOINT|^==' fixpoint.log || echo "(no result)"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo "### Bootstrap fixpoint"; echo; echo '```'; grep -E 'FIXPOINT|^==|^stage [0-9]|^   |^total|^timings|^FAILED' fixpoint.log || echo "(no result)"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
