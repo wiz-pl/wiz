@@ -241,32 +241,37 @@ def Nat.lt_trans (a b c : Nat) (h : Nat.Lt a b) (h' : Nat.Lt b c) : Nat.Lt a c :
 
 -- ## `calc`: composing `=`, `≤` and `<`
 --
--- Adjacent `calc` steps compose through `Trans` (lib/Logic.wiz). The equation instances
+-- Adjacent `calc` steps compose through `Trans` (lib/Logic.wiz), whose arguments are
+-- relation functions (`Nat.Le`, `Nat.Lt`) and `Eqv Nat` for `=`. The equation instances
 -- transport a proof along `=`, so `a = b ≤ c` and `a ≤ b = c` both give `a ≤ c`.
-/-- `a = b → b ≤ c → a ≤ c`. -/
-instance {a b c : Nat} : Trans (a = b) (b ≤ c) (a ≤ c) :=
-  Trans.mk (fun e h => Eq.mp' (fun (x : Nat) => Nat.Le x c) (Eq.symm e) h)
-/-- `a ≤ b → b = c → a ≤ c`. -/
-instance {a b c : Nat} : Trans (a ≤ b) (b = c) (a ≤ c) :=
-  Trans.mk (fun h e => Eq.mp' (fun (x : Nat) => Nat.Le a x) e h)
-/-- `a = b → b < c → a < c`. -/
-instance {a b c : Nat} : Trans (a = b) (b < c) (a < c) :=
-  Trans.mk (fun e h => Eq.mp' (fun (x : Nat) => Nat.Lt x c) (Eq.symm e) h)
-/-- `a < b → b = c → a < c`. -/
-instance {a b c : Nat} : Trans (a < b) (b = c) (a < c) :=
-  Trans.mk (fun h e => Eq.mp' (fun (x : Nat) => Nat.Lt a x) e h)
+--
+-- `<` and `≤` are distinct relation *heads* here, even though `Nat.Lt a b` is
+-- `Nat.Le (succ a) b`: the `Trans` instance for `<` then `<` cannot also match a `<`
+-- then `≤` pair, so the pair has exactly one instance (no priority is needed).
 /-- `a ≤ b → b ≤ c → a ≤ c`. -/
-instance {a b c : Nat} : Trans (a ≤ b) (b ≤ c) (a ≤ c) :=
-  Trans.mk (fun h h' => Nat.le_trans a b c h h')
+instance : Trans Nat.Le Nat.Le Nat.Le :=
+  Trans.mk (fun a b c h h' => Nat.le_trans a b c h h')
 /-- `a ≤ b → b < c → a < c`. -/
-instance {a b c : Nat} : Trans (a ≤ b) (b < c) (a < c) :=
-  Trans.mk (fun h h' => Nat.lt_of_le_of_lt a b c h h')
+instance : Trans Nat.Le Nat.Lt Nat.Lt :=
+  Trans.mk (fun a b c h h' => Nat.lt_of_le_of_lt a b c h h')
 /-- `a < b → b ≤ c → a < c`. -/
-instance (priority := 1001) {a b c : Nat} : Trans (a < b) (b ≤ c) (a < c) :=
-  Trans.mk (fun h h' => Nat.lt_of_lt_of_le a b c h h')
+instance : Trans Nat.Lt Nat.Le Nat.Lt :=
+  Trans.mk (fun a b c h h' => Nat.lt_of_lt_of_le a b c h h')
 /-- `a < b → b < c → a < c`. -/
-instance {a b c : Nat} : Trans (a < b) (b < c) (a < c) :=
-  Trans.mk (fun h h' => Nat.lt_trans a b c h h')
+instance : Trans Nat.Lt Nat.Lt Nat.Lt :=
+  Trans.mk (fun a b c h h' => Nat.lt_trans a b c h h')
+/-- `a = b → b ≤ c → a ≤ c`. -/
+instance : Trans (Eqv Nat) Nat.Le Nat.Le :=
+  Trans.mk (fun a b c e h => Eq.mp' (fun (x : Nat) => Nat.Le x c) (Eq.symm e) h)
+/-- `a ≤ b → b = c → a ≤ c`. -/
+instance : Trans Nat.Le (Eqv Nat) Nat.Le :=
+  Trans.mk (fun a b c h e => Eq.mp' (fun (x : Nat) => Nat.Le a x) e h)
+/-- `a = b → b < c → a < c`. -/
+instance : Trans (Eqv Nat) Nat.Lt Nat.Lt :=
+  Trans.mk (fun a b c e h => Eq.mp' (fun (x : Nat) => Nat.Lt x c) (Eq.symm e) h)
+/-- `a < b → b = c → a < c`. -/
+instance : Trans Nat.Lt (Eqv Nat) Nat.Lt :=
+  Trans.mk (fun a b c h e => Eq.mp' (fun (x : Nat) => Nat.Lt a x) e h)
 /-- `a ≤ b` and `b < a` contradict each other. -/
 def Nat.not_lt_of_le (a b : Nat) (h : Nat.Le a b) (h' : Nat.Lt b a) : False :=
   Nat.lt_irrefl a (Nat.lt_of_le_of_lt a b a h h')

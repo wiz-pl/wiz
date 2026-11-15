@@ -1067,19 +1067,48 @@ def sameLit (a b : Syntax) : Bool :=
 def hasNamedArgs (stx : Syntax) : Bool :=
   stx.isOfKind "term.app" && (stx.getArg 1).args.any (·.isOfKind "term.namedArg")
 
-/-- The two endpoints of a relation proposition `r a b`: the last two arguments of its
-application spine (`a ≤ b` is `LE.le A inst a b`), or the sides of an equation. Returns
-`none` when `t` is not a relation between two terms. -/
-def calcEndpoints? (t : Term R) : Option (Term R × Term R) :=
+/-- The relation head and the two endpoints of a calc step's proposition `r a b`:
+`(r, a, b)`. `r` is the application of the proposition's spine to all but its last two
+arguments, so `a ≤ b` (elaborated as `LE.le A inst a b`) gives the relation function
+`LE.le A inst` (which evaluates to `Nat.Le` for `Nat`), and a program's `a ~ b` gives
+`~`. An equation `a = b` is the relation `Eqv A`: `=` is a primitive term former in
+Wiz, not a global relation function. Returns `none` when `t` is not one relation
+applied to two endpoint terms (a nullary or unary proposition, or an equality of types
+`eqTy`, which is not a relation between terms). -/
+def calcRel? (t : Term R) : Option (Term R × Term R × Term R) :=
   match t with
-  | .eq _ a b => some (a, b)
-  | .eqTy a b => some (a, b)
-  | .ann tm _ => calcEndpoints? tm
+  | .eq A a b => some (.app (.const "Eqv" []) A, a, b)
+  | .ann tm _ => calcRel? tm
   | _ =>
-    let (_, args) := Term.spine t
+    let (h, args) := Term.spine t
     match args.reverse with
-    | b :: a :: _ => some (a, b)
+    | b :: a :: rest => some (rest.reverse.foldl (fun f x => .app f x) h, a, b)
     | _ => none
+
+/-- The type of a complete term, as a term in `ctx`: the class `Trans` has the
+endpoint types `A B C` as parameters, and its `trans` projection takes them explicitly.
+A term whose type cannot be inferred here is one with an unsolved hole: `none`, and the
+caller uses a fresh metavariable (instance search and the kernel-checked term will solve
+it). -/
+def termType? (ctx : LocalCtx R) (t : Term R) : ElabM R (Option (Term R)) := do
+  let g ← getGlobals
+  let kctx : Ctx R :=
+    { globals := g, env := ctx.env, names := ctx.names,
+      qtys := ctx.names.map fun _ => QPoly.const QuantitySyntax.explicitDefault,
+      types := ctx.types, lvl := ctx.lvl }
+  match (← get).kernelInfer kctx t with
+  | .ok ty => pure (some (← zonk ctx.lvl (quote g ctx.lvl ty)))
+  | .error _ => pure none
+
+/-- `Trans.trans A B C r s t inst a b c h₁ h₂`, the term `calc` builds for one
+composition (`@Trans.trans` with every parameter written). -/
+def calcTransTm (A B C r s t inst a b c h₁ h₂ : Term R) : Term R :=
+  [A, B, C, r, s, t, inst, a, b, c, h₁, h₂].foldl
+    (fun f x => .app f x) (.const "Trans.trans" [])
+
+/-- `Trans A B C r s t`, the class goal `calc` solves for one composition. -/
+def calcTransClass (A B C r s t : Term R) : Term R :=
+  [A, B, C, r, s, t].foldl (fun f x => .app f x) (.const "Trans" [])
 
 mutual
 
@@ -1113,20 +1142,30 @@ partial def checkType (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × Lev
   | ty => throwAt (ctx.withInfo stx).info s!"type expected, got a term of type {← showVal ctx ty}" ErrorCode.typeExpected
 
 /-- Elaborate a `calc` chain (`term.calc`): each step is a relation between two terms and
-a proof of it. Adjacent steps compose with an instance of `Trans p q r` (`lib/Logic.wiz`;
+a proof of it. Adjacent steps compose with an instance of `Trans r s t` (`lib/Logic.wiz`;
 the last step's relation is the chain's), `_` is the previous step's right endpoint, and a
 step's left endpoint must be the previous right endpoint.
 
+The relations are relation *functions* (`Nat.Le`, `Nat.Lt`, `Eqv A`, a program's `~`),
+not propositions, so `<` and `≤` are different arguments even where their applications
+are convertible; the arguments are the head of each step's application spine (all but
+the last two arguments), and `=` is `Eqv A` (TT-02, stage 13s).
+
 The term is built left-associated, `Trans.trans (Trans.trans h₀ h₁) h₂ …`, as Lean does:
-after each composition `?r` is solved by instance search to the composite relation, which
-is the first relation of the next composition. -/
+after each composition `?t` is solved by instance search to the composite relation, which
+is the first relation of the next composition. When no relation-function instance
+composes the two steps, `calc` tries the compatibility layer (`TransProp`, the
+propositional class of calc v1) by reading each proposition as a constant relation
+`fun _ _ => p`; the instances for `Nat`, `Int`, `Q`, `=` and `↔` have migrated, so this
+path is for programs that still use `TransProp`. -/
 partial def elabCalc (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) := do
   let steps := (stx.getArg 1).args
   if steps.isEmpty then throwAt ctx.info "calc needs at least one step"
   let g ← getGlobals
-  unless g.contains "Trans" && g.contains "Trans.trans" do
-    throwAt ctx.info "calc needs the `Trans` class (`class Trans (p q r : Prop)`), which is in lib/Logic.wiz: `import Logic` (or any library that imports it)"
-  let mut result? : Option (Term R × Term R) := none   -- (proof, relation as a Term)
+  unless g.contains "Trans" && g.contains "Trans.trans" && g.contains "Eqv" do
+    throwAt ctx.info "calc needs the relation-function `Trans` class and `Eqv`, which are in lib/Logic.wiz: `import Logic` (or any library that imports it)"
+  -- (proof, relation head, left endpoint, right endpoint, proposition)
+  let mut result? : Option (Term R × Term R × Term R × Term R × Term R) := none
   let mut prevRhs? : Option (Term R) := none
   for step in steps do
     let propStx := step.getArg 0
@@ -1145,18 +1184,18 @@ partial def elabCalc (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy 
     -- nor the `Trans` search can meet it.
     synthDefaults
     let propZ0 ← zonk ctx'.lvl prop
-    let some (lhs, rhs) := calcEndpoints? propZ0
+    let some (_, lhs0, _) := calcRel? propZ0
       | throwAt propStx.info s!"calc: a step must be a relation between two terms, such as `a ≤ b`, not {← showTermM ctx' propZ0}"
     if let some prevRhs := prevRhs? then
       -- the middle endpoint: `_` is a hole, unified with the previous right endpoint;
       -- an explicit intermediate term must be the same
-      try unify ctx'.lvl (← evalIn ctx' lhs) (← evalIn ctx' prevRhs)
+      try unify ctx'.lvl (← evalIn ctx' lhs0) (← evalIn ctx' prevRhs)
       catch _ =>
-        let lhsS ← showTermM ctx' (← zonk ctx'.lvl lhs)
+        let lhsS ← showTermM ctx' (← zonk ctx'.lvl lhs0)
         let prevS ← showTermM ctx' (← zonk ctx'.lvl prevRhs)
         let propS ← showTermM ctx' (← zonk ctx'.lvl prop)
         let prevRelS ← match result? with
-          | some (_, resType) => showTermM ctx' (← zonk ctx'.lvl resType)
+          | some (_, _, _, _, resProp) => showTermM ctx' (← zonk ctx'.lvl resProp)
           | none => pure ""
         throwAt propStx.info s!"calc: the middle term does not match:\n  the previous relation is {prevRelS}\n  this step's relation is {propS}\n  this step starts at\n  {lhsS}\nbut the previous step ends at\n  {prevS}"
     -- The proof, against the step's own relation
@@ -1165,37 +1204,62 @@ partial def elabCalc (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy 
       catch e =>
         let relS ← showTermM ctx' (← zonk ctx'.lvl prop)
         let after ← match prevRhs?, result? with
-          | some m, some (_, resType) => do
+          | some m, some (_, _, _, _, resProp) => do
             let mS ← showTermM ctx' (← zonk ctx'.lvl m)
-            let prevS ← showTermM ctx' (← zonk ctx'.lvl resType)
+            let prevS ← showTermM ctx' (← zonk ctx'.lvl resProp)
             pure s!"\n(the step after `{prevS}`, meeting at `{mS}`)"
           | _, _ => pure ""
         throw { e with msg := s!"calc: the proof of `{relS}` has the wrong type:{after}\n{e.msg}" }
     -- what the proof solved (an endpoint, an instance argument) also belongs in the
-    -- relation the composition below starts from
+    -- relation and endpoints the composition below uses
     let propZ ← zonk ctx'.lvl prop
+    let some (sHead, lhs, rhs) := calcRel? propZ
+      | throwAt propStx.info s!"calc: a step must be a relation between two terms, such as `a ≤ b`, not {← showTermM ctx' propZ}"
     -- compose the accumulated relation with this step's, at their shared endpoint
     let next ← match result? with
-      | none => pure (proof, propZ)
-      | some (res, resType) => do
-        let meet := match prevRhs? with
-          | some m => m
-          | none => lhs
-        let rM ← freshMeta ctx "the relation this calc step composes to"
-        let goalTy : VTy R := vApp g (vApp g (vApp g (eval g [] (.const "Trans" []))
-          (← evalIn ctx resType)) propTy) (← evalIn ctx rM)
-        let some inst ← (try synthInstance ctx goalTy catch _ => pure none) | do
-          let resS ← showTermM ctx (← zonk ctx.lvl resType)
-          let propS ← showTermM ctx (← zonk ctx.lvl prop)
-          let meetS ← showTermM ctx (← zonk ctx.lvl meet)
-          throwAt propStx.info s!"calc: no `Trans` instance composes\n  {resS}\nwith\n  {propS}\nat the middle term\n  {meetS}\n(register one: `instance : Trans … … …`, or check that the middle terms agree)"
-        let r ← zonk ctx.lvl rM
-        let tm := .app (.app (.app (.app (.app (.app (.const "Trans.trans" [])
-          resType) propZ) r) inst) res) proof
-        pure (tm, r)
+      | none => pure (proof, sHead, lhs, rhs, propZ)
+      | some (res, resHead, resLhs, _, resProp) => do
+        -- the middle term is the step's left endpoint, already unified with the
+        -- previous step's right endpoint
+        let meet := lhs
+        -- the class's type parameters `A B C`: the endpoints' types when they can be
+        -- inferred; a hole at an endpoint leaves a fresh one for search to solve
+        let tyOf (t : Term R) (what : String) : ElabM R (Term R) := do
+          match ← termType? ctx' t with
+          | some ty => pure ty
+          | none => freshMeta ctx' s!"the type of the calc step's {what}"
+        let A ← tyOf resLhs "left endpoint"
+        let B ← tyOf meet "middle term"
+        let C ← tyOf rhs "right endpoint"
+        let tM ← freshMeta ctx' "the relation this calc step composes to"
+        let goal := calcTransClass A B C resHead sHead tM
+        let inst? ← (try synthInstance ctx' (← evalIn ctx' goal) catch _ => pure none)
+        match inst? with
+        | some inst => do
+          let t ← zonk ctx'.lvl tM
+          let inst ← zonk ctx'.lvl inst
+          let tm := calcTransTm A B C resHead sHead t inst resLhs meet rhs res proof
+          pure (tm, t, resLhs, rhs, .app (.app t resLhs) rhs)
+        | none => do
+          -- the compatibility layer: read both propositions as constant relations over
+          -- `Unit` (the bridge instance lifts a `TransProp` instance into `Trans`)
+          let unitTy : Term R := .unit 1
+          let constRel (p : Term R) : Term R := .lam "_" (.lam "_" p)
+          let tM ← freshMeta ctx' "the relation this calc step composes to"
+          let goal := calcTransClass unitTy unitTy unitTy (constRel resProp) (constRel propZ) tM
+          let some inst ← (try synthInstance ctx' (← evalIn ctx' goal) catch _ => pure none) | do
+            let resS ← showTermM ctx' (← zonk ctx'.lvl resProp)
+            let propS ← showTermM ctx' (← zonk ctx'.lvl propZ)
+            let meetS ← showTermM ctx' (← zonk ctx'.lvl meet)
+            throwAt propStx.info s!"calc: no `Trans` instance composes\n  {resS}\nwith\n  {propS}\nat the middle term\n  {meetS}\n(register one: `instance : Trans r s t`, or check that the middle terms agree)"
+          let t ← zonk ctx'.lvl tM
+          let inst ← zonk ctx'.lvl inst
+          let tm := calcTransTm unitTy unitTy unitTy (constRel resProp) (constRel propZ)
+            t inst .tt .tt .tt res proof
+          pure (tm, t, resLhs, rhs, .app (.app t .tt) .tt)
     result? := some next
-    prevRhs? := some (← zonk ctx.lvl rhs)
-  let some (t, ty) := result? | throwAt ctx.info "calc needs at least one step"
+    prevRhs? := some (← zonk ctx'.lvl rhs)
+  let some (t, _, _, _, ty) := result? | throwAt ctx.info "calc needs at least one step"
   pure (t, ← evalIn ctx ty)
 
 /-- `check` of a variable or an application against a glued definition `D a…` that

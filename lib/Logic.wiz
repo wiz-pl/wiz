@@ -229,39 +229,84 @@ def funext {A B : Type} {f g : A → B} (h : (x : A) → f x = g x) : f = g := h
 /-- Equal functions agree at every argument: from `f = g`, `f x = g x`. -/
 def congrFun {A B : Type} {f g : A → B} (e : f = g) (x : A) : f x = g x := e x
 
--- ## Composing relations: `Trans` and `calc`
+-- ## Composing relations: `Trans`, `Eqv` and `calc`
 
-/-- `Trans p q r`: a proof of `p` and one of `q` give one of `r`. `calc` (stage 13s)
-composes adjacent steps with an instance of it: the relations may differ (`a ≤ b` then
-`b < c` gives `a < c`), and the last step's relation is the chain's.
+/-- `Eqv A a b`: equality at `A`, as a relation *function*. `=` is a primitive term
+former in Wiz (`Term.eq`), not a global function, so `calc` (stage 13s) reads an
+equation step `a = b` as the relation `Eqv A` — the only place where a proposition
+that is not an application of a relation has to be given one. -/
+def Eqv (A : Type) : A → A → Prop := fun a b => a = b
 
-`r` is an `outParam`, so instance search finds it from `p` and `q`. A library registers
-a relation by adding instances (`lib/Nat.wiz`, `lib/IntOrder.wiz`, `lib/Rat.wiz`), and
-so can a program:
+/-- `Trans r s t`: relation functions `r : A → B → Prop`, `s : B → C → Prop` and
+`t : A → C → Prop`, with `trans` composing a proof of `r a b` and one of `s b c` into
+one of `t a c`. `calc` (stage 13s) composes adjacent steps with an instance of it: the
+relations may differ (`a ≤ b` then `b < c` gives `a < c`), and the last step's relation
+is the chain's.
+
+The arguments are the relations themselves, not propositions (Lean's design), so two
+different relations never collide just because they are convertible *at an endpoint*:
+`Nat.Lt` and `Nat.Le` are distinct heads, even though `a < b` and `a ≤ pred b` are the
+same proposition by computation.
+
+`t` is an `outParam`, so instance search computes the composite relation from `r` and
+`s`. A library registers a relation by adding instances (`lib/Nat.wiz`,
+`lib/IntOrder.wiz`, `lib/Rat.wiz`), and so can a program:
 
 ```
 def MyRel (a b : Nat) : Prop := a = b
 infix:50 " ~ " => MyRel
-instance {a b c : Nat} : Trans (a ~ b) (b ~ c) (a ~ c) := Trans.mk (fun h h' => Eq.trans h h')
+instance : Trans MyRel MyRel MyRel := Trans.mk (fun a b c h h' => Eq.trans h h')
 ``` -/
-class Trans (p q : Prop) (r : outParam Prop) where
-  /-- Compose a proof of `p` and one of `q` into a proof of `r`. -/
-  trans : p → q → r
+class Trans {A B C : Type} (r : A → B → Prop) (s : B → C → Prop)
+    (t : outParam (A → C → Prop)) where
+  /-- Compose a proof of `r a b` and one of `s b c` into one of `t a c`. -/
+  trans : (a : A) → (b : B) → (c : C) → r a b → s b c → t a c
 
-/-- `=` composes with itself. -/
-instance {A : Type} {a b c : A} : Trans (a = b) (b = c) (a = c) :=
-  Trans.mk (fun e₁ e₂ => Eq.trans e₁ e₂)
+/-- Equality composes with itself (`Eqv A` is the relation `calc` reads `=` as). -/
+instance {A : Type} : Trans (Eqv A) (Eqv A) (Eqv A) :=
+  Trans.mk (fun a b c h h' => transp (fun x _ => a = x) h h')
 /-- `=` between propositions is transitive. (The generic `Eq.trans` is at a `Type`, and
 `Prop` is a `Sort`, not a `Type`.) -/
 def Eq.transProp {P Q R : Prop} (e₁ : P = Q) (e₂ : Q = R) : P = R :=
   Iff.toEq (Iff.trans (Iff.ofEq e₁) (Iff.ofEq e₂))
-/-- `=` between propositions composes with itself. (The generic instance does not apply:
-equations of propositions live at `Prop`, not at a `Type`.) -/
-instance {P Q R : Prop} : Trans (P = Q) (Q = R) (P = R) :=
-  Trans.mk (fun e₁ e₂ => Eq.transProp e₁ e₂)
+/-- `=` between propositions composes with itself. (The generic `Eqv` instance does
+apply here — `Prop` is a `Type` — but `P = Q` *computes* to the pair of implications, so
+its composition is the propositional `Eq.transProp`, not the computed pair.) -/
+instance : Trans (Eqv Prop) (Eqv Prop) (Eqv Prop) :=
+  Trans.mk (fun P Q R e₁ e₂ => Eq.transProp e₁ e₂)
 /-- `↔` composes with itself. -/
-instance {P Q R : Prop} : Trans (P ↔ Q) (Q ↔ R) (P ↔ R) :=
-  Trans.mk (fun h₁ h₂ => Iff.trans h₁ h₂)
+instance : Trans Iff Iff Iff :=
+  Trans.mk (fun P Q R h₁ h₂ => Iff.trans h₁ h₂)
+
+-- ## Compatibility: the propositional `Trans` of calc v1
+
+/-- The propositional class `calc` used before relation functions (stage 13s, v1):
+`TransProp p q r` composes a proof of the proposition `p` with one of `q` into one of
+`r`. It is kept as a **compatibility layer** (TT-02): existing libraries define their
+relations this way, and the generic instance below lifts any such instance into the
+relation-function `Trans` that `calc` now uses, by reading each proposition as a
+constant relation (`fun _ _ => p`). New code should use `Trans`.
+
+To migrate an old instance, rename the class and turn the endpoints into the relations:
+
+```
+-- v1: instance {a b c : Nat} : Trans (a ≤ b) (b ≤ c) (a ≤ c) := …
+-- v2: instance : Trans Nat.Le Nat.Le Nat.Le := Trans.mk (fun a b c h h' => …)
+```
+
+Remove this class once the libraries in the wild have migrated. -/
+class TransProp (p q r : Prop) where
+  /-- Compose a proof of `p` and one of `q` into a proof of `r`. -/
+  trans : p → q → r
+
+/-- The compatibility bridge: a propositional `TransProp` instance composes the
+constant relations `fun _ _ => p` and `fun _ _ => q` in `calc`. The endpoints are
+`Unit`, since a constant relation ignores them; `calc` passes `()`, and the result is
+the proposition `r` itself. -/
+instance {p q r : Prop} [i : TransProp p q r] :
+    Trans (fun (_ : Unit) (_ : Unit) => p) (fun (_ : Unit) (_ : Unit) => q)
+          (fun (_ : Unit) (_ : Unit) => r) :=
+  Trans.mk (fun _ _ _ h h' => TransProp.trans h h')
 
 -- ## Booleans
 
