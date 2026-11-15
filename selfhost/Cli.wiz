@@ -860,6 +860,4 @@ def dispatch : List String → IO Unit
                       | .true => legacyCmd (.cons a rest)
                       | .false => usageError (String.append "unknown command " a)
 
-def main : IO Unit := do
-  args ← IO.args;
-  dispatch args
+-- (`main` is `selfhost/Main.wiz`: the entry point is a module of its own, last.)
