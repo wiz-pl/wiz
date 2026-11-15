@@ -15,7 +15,7 @@ columns; no `TSNode` crosses the FFI. `src/Scry/Native.wiz` exposes the columns 
 cd scry
 cp ../grail.local.wiz .         # this machine's toolchain (not committed)
 grail build                     # check src/gen, build .grail/bin/scry, run the commands
-grail test                      # schema, cst, native shim, codegen, CLI, parse --stats, taint
+grail test                      # schema, cst, native shim, codegen, CLI, parse --stats, taint, scale
 grail build schema              # regenerate gen/C/Schema.wiz from node-types.json
 grail build schema-check        # fail if the checked-in schema is stale
 grail run scry -- parse --stats fixtures/hello.c
@@ -145,6 +145,55 @@ column; a non-ASCII source would need an explicit conversion).
 A parser error is refused by default; `--allow-errors` analyses the recovered tree and
 reports the `ERROR`/`MISSING` count.
 
+## Large files: limits, progress and partial results
+
+The C → Wil → points-to → taint pipeline used to scale worse than linearly: the CST child
+lookup copied the whole child column per node, token text was sliced with
+`String.drop` (a `List Char`, so O(file) per identifier), and the origin map scanned the
+source from byte 0 for every program point. The vendored tree-sitter-c grammar
+(`native/tree-sitter-c/src/parser.c`, 3.9 MB, 1.1 M nodes) therefore never finished under
+a 300 s limit. The lookup, slice and line-table paths are now O(children), O(span) and
+O(points + lines); the fixpoint machinery is bounded and reports what it did.
+
+```sh
+grail run scry -- taint FILE.c --progress
+grail run scry -- taint FILE.c --progress --timeout 60 --max-nodes 200000 --max-rounds 8
+```
+
+| option | default | contract |
+|---|---|---|
+| `--timeout SECS` | 300 | hard wall-clock limit; `0` disables. On expiry the run stops with a message and exit **124**, never a silent hang |
+| `--max-nodes N` | 2 000 000 | refuse a CST larger than `N` *before* lowering, naming the count and the flag; `0` disables |
+| `--max-rounds N` | historical bound | cap the points-to **and** summary fixpoints; a capped run is a sound lower bound and is marked `truncated` |
+| `--progress` | off | one `scry: [stage] name elapsed=…` line per stage (and per ten functions in the summary fixpoint) on **stderr**; stdout stays the JSON/lines |
+
+`--json` carries the contract in a `budget` object (`nodes`, `truncated`,
+`pointsToRounds`, `pointsToComplete`, `summaryRounds`, `summaryComplete`, `notes`) next
+to the findings. A capped fixpoint adds a `scry/budget/points-to-incomplete` or
+`scry/budget/summaries-incomplete` diagnostic to the boundary list and SARIF, so a caller
+cannot mistake a truncated run for a complete one. Every reported finding is still a
+real derivation; only recall can be reduced.
+
+Measured on this machine (`grail` build, cold-ish cache; wall time, informational):
+
+| input | nodes | before | after | peak RSS |
+|---|---:|---:|---:|---:|
+| `tree-sitter-c/src/parser.c` (3.9 MB, generated tables) | 1 110 871 | **timeout at 300 s** | **≈ 1.2–2 s warm, 6–7.5 s cold** | ≈ 650 MiB |
+| `tree-sitter/lib/src/parser.c` (17 k nodes, one huge function) | 17 163 | 79 s | ≈ 48 s | ≈ 650 MiB |
+| `tree-sitter/lib/src/query.c` (34 k nodes, 113 functions) | 34 450 | 149 s | ≈ 35 s | ≈ 70 MiB |
+
+Parsing and building the store account for ≈ 1.7 s of the 3.9 MB case; the rest is the
+lowering walk. One generated grammar function dominates the two tree-sitter runtime
+files: rule evaluation of a single very large function is the remaining hot spot, and
+`--timeout` (or a smaller `--max-nodes`) is the escape hatch.
+
+`tests/scale.wiz` is the regression test: on a checkout with the vendored grammar it
+asserts the node count, that the run is complete under the default limit, that
+`--max-nodes` refuses cleanly, that `--max-rounds 1` returns a marked partial result, and
+that the CLI's `--timeout 1` exits 124 with the timeout message and no stdout. When
+`native/tree-sitter-c/src/parser.c` is absent it prints `scale: skip (… absent)` and
+passes, so a bare tree stays green.
+
 `tests/native.wiz` checks the shim on `fixtures/hello.c`: 55 nodes, 54 edges, the root
 span `[0,95)`, parent/child/next-sibling links, and that `fixtures/broken.c` is refused
 by `parseChecked` (tree-sitter's recovery tree has 2 `ERROR`/`MISSING` nodes).
@@ -186,6 +235,44 @@ is not a `perf-run` measurement, and the perf agent owns real numbers.
 missing-corpus skip, and that the corpus still matches `bench/baseline.json`. The corpus
 policy and the external-manifest hook are in `bench/corpus/README.md`.
 
+## Real C corpus
+
+`scripts/real-corpus.sh` runs `scry taint --json --allow-errors --sarif` over the C
+sources that are already on this machine (the Wiz C runtime/sockets/serial/infoview/
+self-hosted runtime, the `wiz-rv/sw` bare-metal programs, the vendored tree-sitter
+library, and two generated project files when present) and writes a per-file JSON,
+SARIF, runtime and warning summary. It skips missing external files, so it also runs on
+a bare checkout.
+
+```sh
+scry/scripts/real-corpus.sh                  # build/real-corpus/summary.{json,md}
+SCRY_LIMIT=300 SCRY_STRESS=1 scry/scripts/real-corpus.sh  # include the 3.8 MB parser
+```
+
+The checked-in result and the precision/false-positive follow-up list are in
+`bench/real-corpus.md` (raw machine record: `bench/real-corpus.json`). There are only
+two findings in 24 files and both are manually judged false positives; the report lists
+the parse-recovery, exec-sink, bounds, points-to-argument and warning-noise gaps.
+
 Limits: the shim is sequential (one parser, one tree, one file) and tree-sitter-c is the
 only grammar. Threads, a native store shared across files, and tree-sitter queries are
 the remaining S1 work.
+
+## Real CVE corpus (opt-in)
+
+`bench/cases/cve-*/` holds twelve reduced reproducers of historical CVEs (CWE-78/134/22/
+416/476/190/787/125), each with its upstream vulnerable revision, licence and expected
+result in `case.json`. `scripts/cve-bench.sh` compiles each one with a plain C compiler,
+runs `scry taint` per case with `--timeout`/`--max-nodes`, and records wall time, peak
+RSS, expected/matched findings and extras. It is **opt-in only**: it is not part of
+`scry bench`, `grail test`, the fast gate or CI, and one case takes about a minute.
+
+```sh
+cd scry
+scripts/cve-bench.sh                       # build/cve/summary.{json,md}
+scripts/cve-bench.sh --case cve-2020-1752  # one case
+```
+
+The checked-in table, the honest precision/recall (0/6 in-scope CVEs detected today),
+the per-case miss reasons and the top analysis gaps are in `bench/cve.md`. Treat the
+synthetic `scry bench` rates as a regression corpus, not as real-world recall.
