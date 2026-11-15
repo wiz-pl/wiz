@@ -263,12 +263,12 @@ class Client:
             if predicate(message):
                 return messages
 
-    def execute(self, code: str):
+    def execute(self, code: str, timeout: float = 120.0):
         msg_id = self.send("execute_request", {
             "code": code, "silent": False, "store_history": True,
             "user_expressions": {}, "allow_stdin": False, "stop_on_error": True})
-        reply = self.reply(msg_id)
-        return reply, self.iopub_until_idle(msg_id)
+        reply = self.reply(msg_id, timeout=timeout)
+        return reply, self.iopub_until_idle(msg_id, timeout=timeout)
 
     def close(self) -> None:
         self.shell.close(0)

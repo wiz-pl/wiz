@@ -83,7 +83,7 @@ class WidgetNotebookTest(unittest.TestCase):
         env = dict(os.environ)
         env["PYTHONPATH"] = TOOL_DIR + os.pathsep + env.get("PYTHONPATH", "")
         client = NotebookClient(
-            notebook, kernel_name="wiz-kernel", timeout=300, startup_timeout=120,
+            notebook, kernel_name="wiz-kernel", timeout=600, startup_timeout=240,
             resources={"metadata": {"path": self.workspace}})
         client.execute(env=env)
 

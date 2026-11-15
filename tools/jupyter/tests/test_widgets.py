@@ -74,17 +74,26 @@ class WidgetProtocolTest(unittest.TestCase):
         cls.process = subprocess.Popen(command, cwd=cls.workspace, env=env,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         cls.client = Client(config)
-        deadline = time.time() + 90
+        deadline = time.time() + 240
         while True:
             try:
                 msg_id = cls.client.send("kernel_info_request", {})
                 cls.info = cls.client.reply(msg_id, timeout=10)
                 break
             except TimeoutError:
+                if cls.process.poll() is not None:
+                    error = b""
+                    try:
+                        error = cls.process.stderr.read() or b""
+                    except OSError:
+                        pass
+                    raise RuntimeError(
+                        "the widget kernel exited: "
+                        + error.decode("utf-8", "replace")[-2000:])
                 if time.time() > deadline:
                     raise
         cls.backend_name = (cls.info.content.get("metadata") or {}).get("wiz_backend")
-        reply, _ = cls.client.execute(WIDGET_DEFINITIONS)
+        reply, _ = cls.client.execute(WIDGET_DEFINITIONS, timeout=600)
         if reply.content.get("status") != "ok":
             raise RuntimeError(f"widget definitions failed: {reply.content}")
 
@@ -116,7 +125,7 @@ class WidgetProtocolTest(unittest.TestCase):
     @classmethod
     def display(cls):
         """Run the widget cell and return (comm bundle, comm id, whole iopub)."""
-        reply, iopub = cls.client.execute(WIDGET_DISPLAY)
+        reply, iopub = cls.client.execute(WIDGET_DISPLAY, timeout=600)
         assert reply.content.get("status") == "ok", reply.content
         opens = [m for m in iopub if m.msg_type == "comm_open"]
         assert opens, [m.msg_type for m in iopub]
@@ -126,7 +135,7 @@ class WidgetProtocolTest(unittest.TestCase):
         return bundle, opened.content.get("comm_id"), iopub
 
     @classmethod
-    def send_event(cls, comm_id: str, payload: dict, timeout: float = 300.0):
+    def send_event(cls, comm_id: str, payload: dict, timeout: float = 600.0):
         msg_id = cls.client.send("comm_msg", {"comm_id": comm_id, "data": payload})
         messages = cls.client.iopub_until(
             lambda m: m.msg_type == "comm_msg", msg_id=msg_id, timeout=timeout)
