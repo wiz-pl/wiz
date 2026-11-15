@@ -1,0 +1,2 @@
+import Text
+def helloValue : Nat := textValue + 100

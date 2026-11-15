@@ -1,0 +1,5 @@
+import Grail
+def package : Package := Package.new "text"
+  |> Package.version "1.1.0"
+  |> Package.require "std" "^0.1"
+  |> Package.lib "text" "src"

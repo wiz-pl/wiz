@@ -21,7 +21,7 @@ controller. The libraries are described in [libraries.md](libraries.md) (section
 The state and the inputs are *bundles*: structures parameterised by the representation,
 so one definition is a simulation model (at `HwTy.El`, values) and a netlist (at `Wire`).
 
-```
+```wiz no-check
 structure Light (r : HwTy → Type) where
   phase : r B2
   waiting : r Bit

@@ -151,6 +151,98 @@ def wasmError (src : String) : IO String := do
   | .ok _ => throw (IO.userError "the Wasm backend accepted the program")
   | .error e => pure e
 
+/-- Run a compiled module under Node with `web/wasm-host.mjs` and return the printed result
+together with the module's peak linear memory in 64 KiB pages. The module's memory only
+grows, so its size after `wiz_main` is its peak: the collector's footprint, read from the
+host. -/
+def wasmPeakBytes (bytes : ByteArray) : IO (String × Nat) := do
+  let host ← IO.FS.realPath ("web" / "wasm-host.mjs")
+  let dir ← IO.FS.createTempDir
+  let file := dir / "wiz_main.wasm"
+  IO.FS.writeBinFile file bytes
+  let script := dir / "peak.mjs"
+  IO.FS.writeFile script <|
+    "import { instantiate, show } from \"" ++ host.toString ++ "\";\n" ++
+    "const ex = await instantiate(\"" ++ file.toString ++ "\");\n" ++
+    "const v = ex.wiz_main();\n" ++
+    "console.log(show(ex, v) + \" \" + String(ex.memory.buffer.byteLength / 65536));\n"
+  let out ← IO.Process.output
+    { cmd := "node", args := #[script.toString], env := #[("LD_LIBRARY_PATH", none)] }
+  if out.exitCode != 0 then
+    throw (IO.userError s!"the Wasm program failed ({out.exitCode}): {out.stderr.take 1500}")
+  match out.stdout.trimAscii.toString.splitOn " " |>.reverse with
+  | pages :: rest =>
+    match pages.toNat? with
+    | some n => pure (String.intercalate " " rest.reverse, n)
+    | none => throw (IO.userError s!"could not read the peak memory: {out.stdout}")
+  | [] => throw (IO.userError s!"could not read the peak memory: {out.stdout}")
+
+/-- Like `wasmRun`, and the module's peak linear memory must stay at most `maxPages` 64 KiB
+pages. A bump allocator's peak is everything the program allocated; the reference
+counting allocator's is its peak live set. -/
+def wasmRunPeak (src expected : String) (maxPages : Nat) : IO Unit := do
+  unless ← nodeAvailable do skip "no node"; return
+  let host : System.FilePath := "web" / "wasm-host.mjs"
+  unless ← host.pathExists do skip "no web/wasm-host.mjs"; return
+  let (s, ty, bytes) ← wasmCompile src
+  let (out, pages) ← wasmPeakBytes bytes
+  match Build.parseValue out with
+  | none => throw (IO.userError s!"could not read the result: {out}")
+  | some v => checkEq expected (readback s.globals s.builtins (eval s.globals [] ty) v).pretty
+  if pages > maxPages then
+    throw (IO.userError s!"peak linear memory was {pages} pages, over the {maxPages} bound")
+
+/-- Run a module twice under Node and return the printed result of the first run, the
+CAF build counter after each run. A cached closed definition is built exactly once, so
+the second run must not move the counter; a counter that is still 0 means the program
+under test had no CAF at all (not a useful test). -/
+def wasmCafRunTwice (bytes : ByteArray) : IO (String × Nat × Nat) := do
+  let host ← IO.FS.realPath ("web" / "wasm-host.mjs")
+  let dir ← IO.FS.createTempDir
+  let file := dir / "wiz_main.wasm"
+  IO.FS.writeBinFile file bytes
+  let script := dir / "caf.mjs"
+  IO.FS.writeFile script <|
+    "import { instantiate, show } from \"" ++ host.toString ++ "\";\n" ++
+    "const ex = await instantiate(\"" ++ file.toString ++ "\");\n" ++
+    "const v1 = ex.wiz_main();\n" ++
+    "const b1 = Number(ex.wiz_caf_builds.value);\n" ++
+    "const v2 = ex.wiz_main();\n" ++
+    "const b2 = Number(ex.wiz_caf_builds.value);\n" ++
+    "console.log(show(ex, v1) + \"\\n\" + b1 + \"\\n\" + b2);\n"
+  let out ← IO.Process.output
+    { cmd := "node", args := #[script.toString], env := #[("LD_LIBRARY_PATH", none)] }
+  if out.exitCode != 0 then
+    throw (IO.userError s!"the Wasm program failed ({out.exitCode}): {out.stderr.take 1500}")
+  match out.stdout.trimAscii.toString.splitOn "\n" with
+  | [v, b1, b2] =>
+    match b1.toNat?, b2.toNat? with
+    | some n1, some n2 => pure (v, n1, n2)
+    | _, _ => throw (IO.userError s!"could not read the CAF counter: {out.stdout}")
+  | _ => throw (IO.userError s!"could not read the CAF run: {out.stdout}")
+
+/-- A closed definition is evaluated once and shared: the module's CAF-build counter
+is non-zero after `main`, and running `main` a second time does not build it again. -/
+def wasmCafCached (src expected : String) : IO Unit := do
+  unless ← nodeAvailable do skip "no node"; return
+  let host : System.FilePath := "web" / "wasm-host.mjs"
+  unless ← host.pathExists do skip "no web/wasm-host.mjs"; return
+  let (s, ty, bytes) ← wasmCompile src
+  let (out, b1, b2) ← wasmCafRunTwice bytes
+  match Build.parseValue out with
+  | none => throw (IO.userError s!"could not read the result: {out}")
+  | some v => checkEq expected (readback s.globals s.builtins (eval s.globals [] ty) v).pretty
+  if b1 == 0 then throw (IO.userError "the program built no CAF, so the test proves nothing")
+  if b2 != b1 then
+    throw (IO.userError s!"a CAF was rebuilt on the second run ({b1} → {b2} builds)")
+
+/-- The same source must emit byte-identical modules, including the CAF global cells and
+the tail calls. -/
+def wasmDeterministic (src : String) : IO Unit := do
+  let (_, _, a) ← wasmCompile src
+  let (_, _, b) ← wasmCompile src
+  unless a == b do throw (IO.userError "two compilations of the same source differ")
+
 def wasmGroup : Group where
   name := "wasm"
   exercise := "Stage 8f"
@@ -214,13 +306,84 @@ def wasmGroup : Group where
     { name := "over-application of a memo thunk (arguments survive forcing)", run := fun _ =>
         wasmGolden ("import Prelude\ndef f : Unit → Nat → Nat := memo (fun _ => fun x => x + 1)\n" ++
           "def main : Nat := f () 41") },
-    { name := "closed definitions (recomputed, not cached)", run := fun _ =>
+    { name := "closed definitions (the value is shared when it does work)", run := fun _ =>
         wasmRun "import Prelude\ndef c : Nat := 7 * 2\ndef main : Nat := c + c" "28" },
     { name := "arrays (Std's Array externs)", run := fun _ =>
         wasmRun ("import Std\ndef arr : Array Nat := Array.push (Array.push (Array.empty) 1) 40\n" ++
           "def main : Nat := Array.getD arr 1 0 * 100 + Array.getD (Array.set arr 0 2) 0 0") "4002" },
     { name := "Int (constructors over Nat)", run := fun _ =>
         wasmRun "import Int\ndef main : Int := (3 : Int) * (4 : Int) - 5" "7" },
+    { name := "an allocation loop completes in bounded memory", run := fun _ =>
+        -- 800 trees of 4095 nodes: ~105 MB allocated, one tree live at a time. Under the
+        -- bump allocator this peak was every allocation (1600+ pages).
+        wasmRunPeak ("import Prelude\ninductive Tree where\n  | leaf\n  | node (l : Tree) (r : Tree)\n" ++
+          "def full : Nat → Tree\n  | .zero => Tree.leaf\n  | .succ k => Tree.node (full k) (full k)\n" ++
+          "def size : Tree → Nat\n  | .leaf => 1\n  | .node l r => size l + size r\n" ++
+          "partial def spin (i acc : Nat) : Nat := match i with\n" ++
+          "  | .zero => acc\n  | .succ j => spin j (acc + size (full 12))\n" ++
+          "def main : Nat := spin 800 0") "3276800" 8 },
+    { name := "alloc/free/realloc churn keeps the peak bounded", run := fun _ =>
+        -- lists of constructors with 0..3 fields (four size classes), rebuilt 200 times
+        wasmRunPeak ("import Prelude\ninductive Shape where\n  | dot\n  | lin (a : Nat)\n" ++
+          "  | quad (a b : Nat)\n  | hexa (a b c : Nat)\n" ++
+          "def mk : Nat → List Shape\n  | .zero => .nil\n  | .succ k => match Nat.mod k 4 with\n" ++
+          "    | .zero => .cons Shape.dot (mk k)\n    | .succ a => match a with\n" ++
+          "      | .zero => .cons (Shape.lin k) (mk k)\n      | .succ b => match b with\n" ++
+          "        | .zero => .cons (Shape.quad k k) (mk k)\n" ++
+          "        | .succ _ => .cons (Shape.hexa k k k) (mk k)\n" ++
+          "def weight : Shape → Nat\n  | .dot => 0\n  | .lin _ => 1\n  | .quad _ _ => 2\n" ++
+          "  | .hexa _ _ _ => 3\n" ++
+          "def total : List Shape → Nat\n  | .nil => 0\n  | .cons x xs => weight x + total xs\n" ++
+          "partial def loop (i acc : Nat) : Nat := match i with\n" ++
+          "  | .zero => acc\n  | .succ j => loop j (acc + total (mk 1500))\n" ++
+          "def main : Nat := loop 200 0") "450000" 8 },
+    { name := "closures and memo thunks are reclaimed in a loop", run := fun _ =>
+        wasmRunPeak ("import Prelude\ndef adder (k : Nat) : Nat → Nat := fun x => x + k\n" ++
+          "def applyTo (f : Nat → Nat) (x : Nat) : Nat := f x\n" ++
+          "partial def loop (i acc : Nat) : Nat := match i with\n" ++
+          "  | .zero => acc\n  | .succ j =>\n" ++
+          "    let f := adder i\n" ++
+          "    let g := memo (fun _ => applyTo f 1)\n" ++
+          "    loop j (acc + g ())\n" ++
+          "def main : Nat := loop 2000 0") "2003000" 8 },
+    { name := "functional updates reuse cells (reset/reuse)", run := fun _ =>
+        -- each `incAll` rebuilds the list; `reset`/`reuse` keep the cells, so the peak is
+        -- one list, and the result is the sum of (i + 1)
+        wasmRunPeak ("import Prelude\ndef mkList : Nat → List Nat\n  | .zero => .nil\n" ++
+          "  | .succ k => .cons k (mkList k)\n" ++
+          "def sumList : List Nat → Nat\n  | .nil => 0\n  | .cons x xs => x + sumList xs\n" ++
+          "def incAll : List Nat → List Nat\n  | .nil => .nil\n" ++
+          "  | .cons x xs => .cons (x + 1) (incAll xs)\n" ++
+          "partial def loop (i acc : Nat) : Nat := match i with\n" ++
+          "  | .zero => acc\n  | .succ j => loop j (acc + sumList (incAll (mkList 2000)))\n" ++
+          "def main : Nat := loop 300 0") "600300000" 8 },
+    { name := "deep mutual tail recursion completes (return_call)", run := fun _ =>
+        -- 200k frames: without tail calls this exhausts the engine's stack (as the
+        -- non-tail trap case below still does)
+        wasmRun ("import Prelude\nmutual\ndef even : Nat → Bool\n  | .zero => .true\n" ++
+          "  | .succ n => odd n\ndef odd : Nat → Bool\n  | .zero => .false\n" ++
+          "  | .succ n => even n\nend\n" ++
+          "def main : Nat := match even 200000 with | .true => 1 | .false => 0") "1" },
+    { name := "deep self tail recursion is a loop (jmp/return_call)", run := fun _ =>
+        wasmRun ("import Prelude\npartial def countdown (n acc : Nat) : Nat := match n with\n" ++
+          "  | .zero => acc\n  | .succ k => countdown k (acc + 1)\n" ++
+          "def main : Nat := countdown 200000 0") "200000" },
+    { name := "closed definitions are built once and shared (CAF cache)", run := fun _ =>
+        wasmCafCached ("import Prelude\ndef c : List Nat := .cons 1 (.cons 2 (.cons 3 .nil))\n" ++
+          "def sumList : List Nat → Nat\n  | .nil => 0\n  | .cons x xs => x + sumList xs\n" ++
+          "def main : Nat := sumList c + sumList c") "12" },
+    { name := "the emitted module bytes are deterministic", run := fun _ =>
+        wasmDeterministic ("import Prelude\ndef c : List Nat := .cons 1 (.cons 2 .nil)\n" ++
+          "partial def loop (n acc : Nat) : Nat := match n with\n" ++
+          "  | .zero => acc\n  | .succ k => loop k (acc + 1)\n" ++
+          "def main : Nat := loop 20 0 + (match c with | .nil => 0 | .cons x _ => x)") },
+    { name := "the validator requires the tail-call proposal", run := fun _ => do
+        let (_, _, bytes) ← wasmCompile ("import Prelude\npartial def loop (n : Nat) : Nat := match n with\n" ++
+          "  | .zero => 0\n  | .succ k => loop k\ndef main : Nat := loop 10")
+        match WasmValidate.validate bytes { tailCalls := false } with
+        | .ok () => throw (IO.userError "the validator accepted return_call with the tail-call feature off")
+        | .error e =>
+          unless (e.splitOn "tail-call").length > 1 do throw (IO.userError e) },
     { name := "trap: an `unreachable` entry fails under the host", run := fun _ =>
         wasmTrapIr "unreachable" },
     { name := "trap: deep non-tail recursion exhausts the engine's stack", run := fun _ =>
