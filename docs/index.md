@@ -85,6 +85,8 @@ line below.
 ### Numbers and libraries
 
 * [Stage 22: numbers for hardware and systems code](stages/22-numbers.md)
+* [The value-level semantics matrix](semantics-matrix.md): every numeric and textual
+  boundary, with the value the spec asks for and which backends were compared
 * [Stage 29: native data structures](stages/29-natives.md): word arrays, word maps, interned strings
 * [Libraries](libraries.md)
 

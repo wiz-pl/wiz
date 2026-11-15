@@ -1,0 +1,135 @@
+import Hdl.Core
+/-!
+# Hdl.Ddr
+
+The native port of a DDR3 controller, as a thin interface (`import Hdl.Ddr`), and a
+fixed-latency model of it for simulation. The real controller lives in the wiz-ddr3
+repository (`Ddr3.Ctrl`): importing it here would make this library depend on that
+repository's modules, so this module keeps only the part that is common to any
+controller -- the request/response handshake -- and documents the mapping.
+
+The interface (`Ddr.Req`/`Ddr.Resp`) is exactly the handshake of `Ddr3.Ctrl`'s `PortIn`/
+`PortOut` (a closed-page DDR3 controller with a 128-bit native port):
+
+| `Ddr.Req` | `Ddr3.Ctrl.PortIn` | meaning                                      |
+|-----------|--------------------|----------------------------------------------|
+| `valid`   | `valid`            | a request is presented                       |
+| `we`      | `we`               | 1: write, 0: read                            |
+| `addr`    | `addr` (24 bits)   | byte address                                 |
+| `wdata`   | `wdata` (128 bits) | the burst to write (BL8: `b*16 + j` is beat `b`, DQ `j`) |
+| `wmask`   | `wmask` (16 bits)  | which bytes to write: bit `b*2 + l` is byte `b` of lane `l` |
+
+| `Ddr.Resp` | `Ddr3.Ctrl.PortOut` | meaning                                    |
+|------------|---------------------|--------------------------------------------|
+| `ready`    | `ready`             | the controller can take a request this cycle |
+| `rvalid`   | `rvalid`            | a read burst is on `rdata` this cycle       |
+| `rdata`    | `rdata` (128 bits)  | the burst read                              |
+
+A request is transferred when `valid && ready`; a read's data comes back later with
+`rvalid` (the controller's own read latency, including the PHY). The controller's
+calibration outputs (`calDone`, `calFail`, the delay taps and slip maps) are board-level
+diagnostics and stay on the controller's port; the model here reports `ready` low until
+it has finished its one-cycle response instead.
+
+`Ddr.modelC`: a small single-ported model with the same handshake: `ready` is high unless
+a read response is in flight, a write is written at the clock edge with `wmask` applied
+byte by byte, and a read is accepted and answered in the next cycle from a 64K-word
+(1 MiB) memory. It is deliberately simple -- it is for simulating a system around the
+interface (a cache, a DMA engine, a memory test) and for checking the handshake, not for
+timing. Substitute the real controller's circuit when the repo is available; the rest of
+a design sees only `Ddr.Req`/`Ddr.Resp`.
+
+What remains (see `wiz-notes/rune.md`): the real controller's wrapper (hiding `PhyIn`/
+`Dfi`), timing parameters (`Ddr3.Timing`), and a clock-domain-crossing variant of the
+port for a design on another clock.
+-/
+
+def Ddr.Bit : HwTy := HwTy.bits 1
+def Ddr.Addr : HwTy := HwTy.bits 24
+def Ddr.MAddr : HwTy := HwTy.bits 16
+def Ddr.Word : HwTy := HwTy.bits 128
+def Ddr.Mask : HwTy := HwTy.bits 16
+
+/-- A request on the native port. -/
+structure Ddr.Req (r : HwTy → Type) where
+  valid : r Ddr.Bit
+  we : r Ddr.Bit
+  addr : r Ddr.Addr
+  wdata : r Ddr.Word
+  wmask : r Ddr.Mask
+  deriving Bundle
+
+/-- The response on the native port. -/
+structure Ddr.Resp (r : HwTy → Type) where
+  ready : r Ddr.Bit
+  rvalid : r Ddr.Bit
+  rdata : r Ddr.Word
+  deriving Bundle
+
+------------------------------------------------------------------------------------
+-- Byte masks. A write's `wmask` has one bit per byte of the 128-bit burst; the other
+-- bytes keep the word that was in the memory. The 16 bytes are separate slices and the
+-- word is put back together with concatenations, so the mask costs 16 multiplexers and
+-- no adder.
+
+/-- Byte `j` of the masked word: the new byte where `m`'s bit `j` is high, else the old
+one. -/
+def Ddr.byte {r : HwTy → Type} [Hw r] (j : Nat) (old new : r Ddr.Word) (m : r Ddr.Mask) :
+    r (HwTy.bits 8) :=
+  Hw.mux (Hw.slice j 1 m) (Hw.slice (8 * j) 8 new) (Hw.slice (8 * j) 8 old)
+
+/-- `new` where `m` is high, `old` where it is low, byte by byte. -/
+def Ddr.maskedWord {r : HwTy → Type} [Hw r] (old new : r Ddr.Word) (m : r Ddr.Mask) : r Ddr.Word :=
+  Hw.cat (Ddr.byte 15 old new m)
+    (Hw.cat (Ddr.byte 14 old new m)
+    (Hw.cat (Ddr.byte 13 old new m)
+    (Hw.cat (Ddr.byte 12 old new m)
+    (Hw.cat (Ddr.byte 11 old new m)
+    (Hw.cat (Ddr.byte 10 old new m)
+    (Hw.cat (Ddr.byte 9 old new m)
+    (Hw.cat (Ddr.byte 8 old new m)
+    (Hw.cat (Ddr.byte 7 old new m)
+    (Hw.cat (Ddr.byte 6 old new m)
+    (Hw.cat (Ddr.byte 5 old new m)
+    (Hw.cat (Ddr.byte 4 old new m)
+    (Hw.cat (Ddr.byte 3 old new m)
+    (Hw.cat (Ddr.byte 2 old new m)
+    (Hw.cat (Ddr.byte 1 old new m) (Ddr.byte 0 old new m)))))))))))))))
+
+------------------------------------------------------------------------------------
+-- The model controller.
+
+/-- The model's state: the memory, and the read response being returned. -/
+structure Ddr.Model (r : HwTy → Type) where
+  mem : r (HwTy.mem 16 128)
+  rv : r Ddr.Bit
+  rd : r Ddr.Word
+  deriving Bundle
+
+/-- A memory of zeros. -/
+def Ddr.zeroMem : HwTy.El (HwTy.mem 16 128) := fun (a : BitVec 16) => 0
+
+/-- The model at rest: an empty memory, no response. -/
+def Ddr.Model.init : Ddr.Model HwTy.El :=
+  Ddr.Model.mk Ddr.zeroMem (BitVec.ofNat 1 0) (BitVec.ofNat 128 0)
+
+/-- One cycle of the model: take at most one request when `ready`, write it or start a
+read response, and present the response. -/
+def Ddr.modelStep {r : HwTy → Type} [Hw r] (s : Ddr.Model r) (q : Ddr.Req r) :
+    r (HwTy.prod Ddr.Model.code Ddr.Resp.code) :=
+  let ready := ~~~s.rv;
+  let take := q.valid &&& ready;
+  let wr := take &&& q.we;
+  let re := take &&& ~~~q.we;
+  let a := Hw.slice 0 16 q.addr;
+  let old := Hw.memRead s.mem a;
+  let word := Ddr.maskedWord old q.wdata q.wmask;
+  let mem := Hw.memWrite s.mem wr a word;
+  let rd := if re then old else s.rd;
+  Hw.pair (Ddr.Model.pack (Ddr.Model.mk mem re rd))
+    (Ddr.Resp.pack (Ddr.Resp.mk ready s.rv s.rd))
+
+/-- The model as a circuit: `Ddr.Req` in, `Ddr.Resp` out. -/
+def Ddr.modelC : Circuit Ddr.Req.code Ddr.Resp.code :=
+  Circuit.bundled Ddr.Model.bundle Ddr.Req.bundle Ddr.Resp.bundle Ddr.Model.init
+    (fun s q => Ddr.modelStep s q)

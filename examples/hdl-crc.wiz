@@ -1,0 +1,77 @@
+-- The CRC-8/SMBUS library (`import Hdl.Crc`): the hardware step and the specification on
+-- numbers agree on every CRC value and every byte (65536 inputs), `Crc.hexDigit` agrees
+-- with `Crc.hex` on all 16 nibbles, the known answer for "123456789" is 0xF4, and the
+-- streaming circuit `Crc.crcC` gives that answer through the value simulation,
+-- `Netlist.simulate` and `Circuit.simFast` (`Hdl.Sim`). Run by the `bus-crc` test group.
+import Hdl.Core
+import Hdl.Sim
+import Hdl.Crc
+import IO
+
+def Bit : HwTy := HwTy.bits 1
+def B8 : HwTy := HwTy.bits 8
+
+def yes (b : Bool) : String := match b with
+  | .true => "yes"
+  | .false => "NO"
+
+def leavesEq : List (List Nat) → List (List Nat) → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
+  | _, _ => .false
+
+def agree {ω i o : HwTy} (c : Circuit i o) (ins : List (HwTy.El i)) : Bool :=
+  let ω v := Circuit.runLeaves c ins;
+  Bool.and (leavesEq v (Circuit.simFast c ins))
+    (Bool.and (leavesEq v (Circuit.simLeaves .true c ins)) (leavesEq v (Circuit.simLeaves .false c ins)))
+
+------------------------------------------------------------------------------------
+-- The hardware step at values against the specification on numbers.
+
+def hwStep (c d : Nat) : Nat :=
+  BitVec.toNat (@Crc.hwStep HwTy.El _ (BitVec.ofNat 8 c) (BitVec.ofNat 8 d))
+
+def hwHex (n : Nat) : Nat :=
+  BitVec.toNat (@Crc.hexDigit HwTy.El _ (BitVec.ofNat 4 n))
+
+-- the number of `(c, d)` with `c < cs`, `d < 256` where hardware and specification agree
+def agreeRow (c : Nat) : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ d, acc => agreeRow c d (acc + Nat.ofBool (Nat.beq (hwStep c d) (Crc.step c d)))
+def agreeAll : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ c, acc => agreeAll c (agreeRow c 256 acc)
+
+def hexAgree : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ n, acc => hexAgree n (acc + Nat.ofBool (Nat.beq (hwHex n) (Crc.hex n)))
+
+------------------------------------------------------------------------------------
+-- The streaming circuit on the ASCII bytes of "123456789".
+
+def inByte (d : Nat) : HwTy.El Crc.In.code :=
+  Bundle.toEl Crc.In.bundle (Crc.In.mk (BitVec.ofNat 1 1) (BitVec.ofNat 8 d))
+
+def streamIns : List (HwTy.El Crc.In.code) := Hdl.map inByte Crc.checkDigits
+
+def outCrc (p : HwTy.El Crc.Out.code) : Nat :=
+  BitVec.toNat (Crc.Out.unpack p).crc
+
+def lastNat : List Nat → Nat
+  | .nil => 0
+  | .cons x xs => match xs with
+    | .nil => x
+    | .cons _ _ => lastNat xs
+
+def streamCrc : Nat := lastNat (Hdl.map outCrc (Circuit.run Crc.crcC streamIns))
+
+------------------------------------------------------------------------------------
+
+def main : IO Unit := do
+  IO.println ("crc-8 step = spec: " <+> Hdl.show (agreeAll 256 0) <+> " of 65536 inputs");
+  IO.println ("hexDigit = Crc.hex: " <+> Hdl.show (hexAgree 16 0) <+> " of 16 inputs");
+  IO.println ("known answer: " <+> Hdl.show (Crc.ofList 0 Crc.checkDigits)
+    <+> " (0xF4 = " <+> Hdl.show Crc.checkValue <+> ")");
+  IO.println ("stream: value = simulate = simFast " <+> yes (agree Crc.crcC streamIns)
+    <+> ", crc " <+> Hdl.show streamCrc
+    <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "crc" Crc.crcC)))
