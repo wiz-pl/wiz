@@ -184,7 +184,7 @@ Nix-built test driver (`packages.tests`), not `lake test`, and symlink the store
 and `grail` into the checkout's `.lake/build/bin`, which some cases and
 `scripts/trust-ledger.sh` name directly (the driver also carries the wrapped `wiz` and
 `grail` beside itself, which `Tests/Grail.lean` looks for). The dev shell (`nix develop`)
-is still what puts `cc`, `llc`, z3, cadical and Neovim on `PATH`, and it writes
+is still what puts `cc`, `llc`, z3, cadical, Node and Neovim on `PATH`, and it writes
 `grail.local.wiz` for the cases that compile C.
 
 The Nix build is about 353 MB for `wiz` (1.8 GB with its closure: Lean, GMP, Boehm GC,

@@ -157,7 +157,8 @@ cover:
 The golden cases run the module under Node and compare the read-back value with the
 **interpreter's** result for the same source (`#eval main`), so a change in the encoder or
 the interpreter shows up as a mismatch. Each case skips (passes with a note) when `node`
-is not on the `PATH` or the host file is missing, as the C tests skip without GMP. The
+is not on the `PATH` or the host file is missing, as the C tests skip without GMP; the
+`nix develop` shell (and so CI's shards) puts `node` on the `PATH`, like `cc` and `llc`. The
 host is spawned without Lean's `LD_LIBRARY_PATH`, which `lake test` sets and which shadows
 the system's `libgcc` for Node. `Wiz.WasmValidate` runs without Node, so the structural
 checks are still exercised in that case.
