@@ -113,6 +113,10 @@ def brIf (d : Nat) : Code := #[0x0D] ++ uleb d
 def ret : Code := #[0x0F]
 def call (i : Nat) : Code := #[0x10] ++ uleb i
 def callIndirect (ty table : Nat) : Code := #[0x11] ++ uleb ty ++ uleb table
+/-- The tail-call proposal: call `i` and return its results from this function (the
+caller's frame is reused, so a tail-recursive chain does not grow the engine's stack). -/
+def returnCall (i : Nat) : Code := #[0x12] ++ uleb i
+def returnCallIndirect (ty table : Nat) : Code := #[0x13] ++ uleb ty ++ uleb table
 def drop : Code := #[0x1A]
 def select : Code := #[0x1B]
 def lg (i : Nat) : Code := #[0x20] ++ uleb i
@@ -1307,6 +1311,10 @@ def storeField (x : Nat) (i : Nat) : Code :=
 
 def boxNat (n : Nat) : Nat := 2 * n + 1
 
+/-- Load the arguments `as` in order. -/
+def emitArgs (c : Ctx) (as : Array Var) : Code :=
+  as.foldl (fun (code : Code) a => code ++ lg (c.var a)) #[]
+
 mutual
 
 partial def emitExpr (c : Ctx) (x : Var) : Expr → Code
@@ -1368,6 +1376,21 @@ partial def emitPrim (c : Ctx) (x : Var) (op : String) (as : Array Var) : Code :
     | none => unreachable
 
 partial def emitBody (c : Ctx) : Body → Code
+  -- A direct call immediately followed by returning its result is a tail call: the
+  -- caller's frame is reused instead of growing the engine's stack. (This is the shape
+  -- `Lower`+`RC` leave for a non-self tail call; a self call is already a join loop.)
+  | .vdecl x (.fap f as) (.ret y) =>
+    if x == y then emitArgs c as ++ returnCall (c.declIdx.getD f 0)
+    else emitExpr c x (.fap f as) ++ emitBody c (.ret y)
+  -- An application of a closure is a call of the runtime's `wiz_apply`, which returns
+  -- the value; tail-calling it releases the caller's frame (the runtime still does its
+  -- own cleanup after the actual call, so a chain through closures is not fully flat).
+  | .vdecl x (.ap f as) (.ret y) =>
+    if x == y then
+      as.toList.zipIdx.foldl (fun (code : Code) (a, i) =>
+        code ++ i32c (scratchBase + 8 * i) ++ lg (c.var a) ++ i64Store 3 0) #[] ++
+      lg (c.var f) ++ i32c as.size ++ i32c scratchBase ++ returnCall (rtIdx "wiz_apply")
+    else emitExpr c x (.ap f as) ++ emitBody c (.ret y)
   | .vdecl x e rest => emitExpr c x e ++ emitBody c rest
   | .case x alts =>
     lg (c.var x) ++ call (rtIdx "wiz_tag") ++ ls c.tmp ++ emitAlts c alts 0
@@ -1377,10 +1400,11 @@ partial def emitBody (c : Ctx) : Body → Code
     -- the fall-through path (the IR never takes it, but the C backend has it)
     emitBody c k ++
       ((c.joinParams.getD (c.owner, j) #[]).foldl
-        (fun (code : Code) p => code ++ lg (c.var p)) #[]) ++ call i ++ ret
+        (fun (code : Code) p => code ++ lg (c.var p)) #[]) ++ returnCall i
   | .jmp j as =>
-    as.foldl (fun (code : Code) a => code ++ lg (c.var a)) #[] ++
-    call ((c.joinIdx.get? (c.owner, j)).getD 0) ++ ret
+    -- a join is emitted as a Wasm function; jumping to it is a tail call, so a loop
+    -- expressed as a self tail call (`IR`'s `loopify`) is a real loop in Wasm
+    emitArgs c as ++ returnCall ((c.joinIdx.get? (c.owner, j)).getD 0)
   | .dup x b => lg (c.var x) ++ call (rtIdx "wiz_inc") ++ emitBody c b
   | .drop x b => lg (c.var x) ++ call (rtIdx "wiz_dec") ++ emitBody c b
   | .unreachable => unreachable
@@ -1401,6 +1425,10 @@ structure Built where
   heapStart : Nat
   data : Array (Nat × String)
   entry : Nat
+  /-- the number of CAF slot globals (starting at global 2) -/
+  cafCount : Nat := 0
+  /-- the `i32` global that counts CAF builds (after the slots) -/
+  cafBuildGlobal : Nat := 0
 
 def typeIndex (types : Array FnSig) (s : FnSig) : Nat := (types.findIdx? (· == s)).getD 0
 
@@ -1442,14 +1470,20 @@ def moduleBytes (b : Built) : ByteArray := Id.run do
   -- memory (one page; the allocator grows it)
   let minPages := max 1 ((b.heapStart + 65535) / 65536)
   let memSec := wasmSection 5 (uleb 1 ++ #[0x00] ++ uleb minPages)
-  -- globals: the bump pointer, and the release work list's head
-  let globSec := wasmSection 6 (uleb 2 ++
+  -- globals: the bump pointer, the release work list's head, one lazily filled `i64`
+  -- cell per CAF, and the CAF-build counter (exported so a test can observe caching)
+  let cafGlobals := (List.range b.cafCount).foldl (fun (acc : Code) _ =>
+    acc ++ #[0x7E, 0x01] ++ i64c 0 ++ #[0x0B]) #[]
+  let globSec := wasmSection 6 (uleb (2 + b.cafCount + 1) ++
     #[0x7F, 0x01] ++ i32c b.heapStart ++ #[0x0B] ++
+    #[0x7F, 0x01] ++ i32c 0 ++ #[0x0B] ++
+    cafGlobals ++
     #[0x7F, 0x01] ++ i32c 0 ++ #[0x0B])
   -- exports
   let exports : Array (String × Nat × Nat) :=
     #[("memory", 2, 0), ("wiz_main", 0, b.entry), ("wiz_value_tag", 0, rtIdx "wiz_tag"),
-      ("wiz_value_field", 0, rtIdx "wiz_proj"), ("wiz_big_digits", 0, rtIdx "wiz_big_digits")]
+      ("wiz_value_field", 0, rtIdx "wiz_proj"), ("wiz_big_digits", 0, rtIdx "wiz_big_digits"),
+      ("wiz_caf_builds", 3, b.cafBuildGlobal)]
   let exportSec := wasmSection 7 (vec (exports.map fun (n, kind, idx) =>
     nameBytes n ++ #[UInt8.ofNat kind] ++ uleb idx))
   -- element section: the table is exactly the boxed wrappers, from index 0
@@ -1500,6 +1534,24 @@ def program (decls : Array IR.Decl) (io : Bool := false) : Except String ByteArr
       m := m.insert d.name i
     return m
   let arities : Std.HashMap Name Nat := decls.foldl (fun m d => m.insert d.name d.params.size) {}
+  -- Closed definitions (`IR.cafs`) are evaluated at most once: each has an `i64` global
+  -- cell (0 means "not built yet"; no Wiz value is 0) holding the shared value, and a
+  -- separate build function that holds the body. The declaration itself becomes the
+  -- getter: one global load on the fast path, `wiz_inc` for the new reference.
+  let cafs := IR.cafs decls
+  let cafDecls := decls.filter (fun d => cafs.contains d.name)
+  let cafGlobal : Std.HashMap Name Nat := Id.run do
+    let mut m : Std.HashMap Name Nat := {}
+    for d in cafDecls, i in [0:cafDecls.size] do
+      m := m.insert d.name (2 + i)
+    return m
+  let cafBuildGlobal := 2 + cafDecls.size
+  let builderBase := hostSigs.size + runtimeNames.size + 2 * decls.size + joinList.size
+  let builderIdx : Std.HashMap Name Nat := Id.run do
+    let mut m : Std.HashMap Name Nat := {}
+    for d in cafDecls, i in [0:cafDecls.size] do
+      m := m.insert d.name (builderBase + i)
+    return m
   -- the boxed-wrapper signature is used by `call_indirect`
   let boxedSig : FnSig := { params := #[.i32], results := #[.i64] }
   let allSigs : Array FnSig :=
@@ -1511,25 +1563,40 @@ def program (decls : Array IR.Decl) (io : Bool := false) : Except String ByteArr
   let types := allSigs.foldl (fun (acc : Array FnSig) s => if acc.contains s then acc else acc.push s) #[]
   let boxedType := typeIndex types boxedSig
   let declFns := decls.map fun d =>
-    let extra := dedup ((bound d.body).filter (!d.params.contains ·))
-    let locals := extra.map fun _ => VT.i64
-    let nParams := d.params.size
-    let env : Std.HashMap Var Nat := Id.run do
-      let mut m : Std.HashMap Var Nat := {}
-      for p in d.params, i in [0:nParams] do m := m.insert p i
-      for x in extra, i in [0:extra.size] do m := m.insert x (nParams + i)
-      return m
-    let c : Ctx := {
-      owner := d.name, declIdx, joinIdx, joinParams, tableIdx, arities, lits := litTab, locals := env,
-      tmp := nParams + extra.size }
-    { name := d.name, params := d.params.map fun _ => .i64, results := #[.i64],
-      locals := locals ++ #[.i32], code := emitBody c d.body }
+    if cafs.contains d.name then
+      let cell := cafGlobal.getD d.name 0
+      let build := builderIdx.getD d.name 0
+      { name := d.name, params := #[], results := #[.i64], code :=
+          -- hit: share the value (a scalar is not affected by `wiz_inc`)
+          gg cell ++ i64c 0 ++ i64Ne ++ if_
+            ++ gg cell ++ call (rtIdx "wiz_inc") ++ gg cell ++ ret
+            ++ else_ ++
+            -- miss: count the build, run the body once, publish its value in the cell
+            -- (the cell keeps its reference, so the value is never freed)
+            gg cafBuildGlobal ++ i32c 1 ++ i32Add ++ gs cafBuildGlobal ++
+            call build ++ gs cell ++
+            gg cell ++ call (rtIdx "wiz_inc") ++ gg cell ++ ret
+          ++ end_ }
+    else
+      let extra := dedup ((bound d.body).filter (!d.params.contains ·))
+      let locals := extra.map fun _ => VT.i64
+      let nParams := d.params.size
+      let env : Std.HashMap Var Nat := Id.run do
+        let mut m : Std.HashMap Var Nat := {}
+        for p in d.params, i in [0:nParams] do m := m.insert p i
+        for x in extra, i in [0:extra.size] do m := m.insert x (nParams + i)
+        return m
+      let c : Ctx := {
+        owner := d.name, declIdx, joinIdx, joinParams, tableIdx, arities, lits := litTab, locals := env,
+        tmp := nParams + extra.size }
+      { name := d.name, params := d.params.map fun _ => .i64, results := #[.i64],
+        locals := locals ++ #[.i32], code := emitBody c d.body }
   let boxedFns := decls.map fun d =>
     let n := d.params.size
     let loads := (List.range n).foldl (fun (acc : Code) i =>
       acc ++ lg 0 ++ i64Load 3 (8 * i)) #[]
     { name := d.name ++ "_boxed", params := #[.i32], results := #[.i64], code :=
-      loads ++ call (declIdx.getD d.name 0) ++ ret }
+      loads ++ returnCall (declIdx.getD d.name 0) }
   let joinFns := joinList.map fun j =>
     let extra := dedup ((bound j.body).filter (!j.params.contains ·))
     let nParams := j.params.size
@@ -1543,10 +1610,23 @@ def program (decls : Array IR.Decl) (io : Bool := false) : Except String ByteArr
       tmp := nParams + extra.size }
     { name := s!"{j.owner}.j{j.id}", params := j.params.map fun _ => .i64, results := #[.i64],
       locals := (extra.map fun _ => VT.i64).push VT.i32, code := emitBody c j.body }
-  let funcs := runtimeDefs boxedType ++ declFns ++ boxedFns ++ joinFns
+  let builderFns := cafDecls.map fun d =>
+    let extra := dedup ((bound d.body).filter (!d.params.contains ·))
+    let nParams := d.params.size
+    let env : Std.HashMap Var Nat := Id.run do
+      let mut m : Std.HashMap Var Nat := {}
+      for p in d.params, i in [0:nParams] do m := m.insert p i
+      for x in extra, i in [0:extra.size] do m := m.insert x (nParams + i)
+      return m
+    let c : Ctx := {
+      owner := d.name, declIdx, joinIdx, joinParams, tableIdx, arities, lits := litTab, locals := env,
+      tmp := nParams + extra.size }
+    { name := d.name ++ ".build", params := d.params.map fun _ => .i64, results := #[.i64],
+      locals := (extra.map fun _ => VT.i64).push VT.i32, code := emitBody c d.body }
+  let funcs := runtimeDefs boxedType ++ declFns ++ boxedFns ++ joinFns ++ builderFns
   let entry := declIdx.getD "wiz.entry" 0
   let data := (lits.map fun n => match litTab.get? n with
     | some (off, _) => (off, toString n) | none => (0, "")).toList.toArray
-  pure (moduleBytes { types, funcs, tableSize := decls.size, heapStart, data, entry })
+  pure (moduleBytes { types, funcs, tableSize := decls.size, heapStart, data, entry, cafCount := cafDecls.size, cafBuildGlobal := cafBuildGlobal })
 
 end Wiz.Wasm
