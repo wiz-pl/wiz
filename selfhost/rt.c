@@ -897,9 +897,10 @@ NATIVE(StrMap_46_size, 2, V n = BOX(((Map *)a[1])->count); dec(a[1]); return n;)
 #endif
 
 /* ---- byte buffers (`Bytes`, C11) ----
-   `wiz_bytes` as `runtime/wiz_rt.h`: functional, but `push` updates in place when the
-   buffer is unique (Perceus; under the collector nothing is freed, so it is always in
-   place, as in `runtime/wiz.c`). The Wiz side (`selfhost/Frontend.wiz`'s prelude)
+   `wiz_bytes` as `runtime/wiz_rt.h`: functional, but under reference counting `push`
+   updates in place when the buffer is unique (Perceus). Under the collector a unique
+   buffer cannot be told from a shared one, so `bytesMut` copies (each `push` is O(n)
+   there; see `bytesMut`). The Wiz side (`selfhost/Frontend.wiz`'s prelude)
    declares the host's `lib/IO.wiz` operations as axioms and the backend calls them here
    through the runtime ABI (`get_Bytes_46_…`), so a buffer a self-hosted program builds
    and one the Lean toolchain builds have the same layout. */
