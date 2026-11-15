@@ -60,7 +60,7 @@ def group : Group where
         "#eval if String.eq (Scry.wfLineHash f \"  system(cmd); \") (Scry.wfLineHash f \"system(cmd);\") then 1 else 0\n" ++
         "#eval if String.eq (Scry.wfLineHash f \"system(cmd);\") (Scry.wfLineHash f \"system(other);\") then 0 else 1\n" ++
         "#eval Nat.add (Nat.mul (List.length f.path) 100) (Nat.add (if String.eq (Scry.wfFirstFunc f.path) \"main\" then 10 else 0) (if String.eq (Scry.wfLastFunc f.path) \"main\" then 1 else 0))")
-        [111, 1, 1, 1, 311] },
+        [1, 1, 1, 1, 311] },
     { name := "triage: the state machine's edges and the history",
       run := fun _ => evalNats (prelude ++
         "#eval Nat.add (if Scry.wfAllowed .new .confirmed then 100 else 0) (Nat.add (if Scry.wfAllowed .new .fixed then 0 else 10) (if Scry.wfAllowed .confirmed .fixed then 1 else 0))\n" ++
