@@ -133,7 +133,8 @@ jobs:
           lake build wiz
           [ -x .lake/build/bin/wiz ] || { echo "::error::.lake/build/bin/wiz is missing"; exit 1; }
       - name: Restore the docs examples cache
-        uses: actions/cache@v4
+        id: docs-cache
+        uses: actions/cache/restore@v4
         with:
           path: .lake/docs-examples
           key: docs-examples-${{ runner.os }}-${{ steps.key.outputs.compiler }}
@@ -207,7 +208,8 @@ jobs:
         # (a generated program); the header's prototypes are checked against the parts
         run: scripts/test-runtime.sh
       - name: Restore the docs examples cache
-        uses: actions/cache@v4
+        id: docs-cache
+        uses: actions/cache/restore@v4
         with:
           path: .lake/docs-examples
           key: docs-examples-${{ runner.os }}-${{ steps.key.outputs.compiler }}
@@ -219,6 +221,12 @@ jobs:
         run: |
           python3 scripts/check-docs-examples.py --self-test
           python3 scripts/check-docs-examples.py --wiz .lake/build/bin/wiz
+      - name: Save the docs examples cache (master)
+        if: steps.docs-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/cache/save@v4
+        with:
+          path: .lake/docs-examples
+          key: docs-examples-${{ runner.os }}-${{ steps.key.outputs.compiler }}
 
   test:
     name: test (${{ matrix.shard.name }})
