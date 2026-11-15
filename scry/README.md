@@ -23,7 +23,7 @@ cd scry
 cp ../grail.local.wiz .         # this machine's toolchain (not committed)
 grail build                     # check src/gen, build .grail/bin/scry, run the commands
 grail test                      # schema, cst, native shim, preproc, codegen, CLI, parse --stats,
-                                # taint, project, dynamic, fuzz spans, scale
+                                # taint, report, project, dynamic, fuzz spans, scale
 grail build schema              # regenerate gen/C/Schema.wiz from node-types.json
 grail build schema-check        # fail if the checked-in schema is stale
 grail run scry -- parse --stats fixtures/hello.c
@@ -39,7 +39,8 @@ a `scry-cst` spill, or a JSON store), `cst` (JSON store → spill), `taint` (C �
 Wil → taint → findings/SARIF), `dynamic` (compile/run under ASAN/UBSAN/coverage and
 correlate with the static findings), `bench` (run the checked-in taint corpus and compare
 findings with its manifest), `project` (a `compile_commands.json` multi-file C project:
-cross-TU call graph, project EDB, per-file findings/SARIF and a TU cache), and `fuzz-span`
+cross-TU call graph, project EDB, per-file findings/SARIF and a TU cache), `report`
+(one self-contained HTML page of the taint evidence), and `fuzz-span`
 (map a fuzz artifact to CST spans for the dynamic-evidence report). `parse --stats` prints
 counts only; the perf agent owns throughput numbers.
 
@@ -407,6 +408,57 @@ line-independent id built from the rule, normalized path, sink function/callee/a
 and path shape; moving a finding keeps the id, renaming the sink or changing the path
 shape creates a new one. Two identical sinks in one function with the same path shape can
 still collide (the id is a handle, not a proof of uniqueness).
+
+## `scry report`: one self-contained HTML page
+
+SARIF and JSON are for machines; a corpus review needs a page. `scry report` runs the
+same pipeline as `scry taint` and writes one HTML file with an inlined stylesheet, no
+JavaScript and no remote resource:
+
+```sh
+scry report FILE.c --out report.html
+scry report DIR --out report.html --allow-errors
+scry report FILE.c --diff origin/main --out review.html
+scry report DIR --changed-lines saved.patch --out review.html
+```
+
+The page has a summary table (files, findings, checked/unchecked, boundary and memory
+warnings, shown/suppressed), a sorted finding table, and one section per file. Each
+finding shows its rule, severity, CWE, the coarse chain (`source → flow → sink`, or
+`alloc → free → sink` for a use-after-free), its evidence (`static (L1)` plus
+`certificate (L2, checked)` or `(L0, unchecked)`), the source excerpt with the sink line
+highlighted and every path step numbered, and the diff verdict when filtering is on.
+A directory is a corpus of **independent translation units**, not a project; use
+`scry project DIR --taint` for a cross-TU call graph.
+
+**Escaping is the whole game.** The C source is escaped exactly once (`&`, `<`, `>`, `"`,
+`'`) into a text cell; there is no `innerHTML` and no script. A file containing
+`<script>alert(1)</script>` renders that text. `tests/report.wiz` uses a fixture with
+exactly that string, an ampersand and quotes, and asserts the raw tag is absent while
+`&lt;script&gt;` is present. The page also has no external URL, so it cannot phone home.
+
+**Deterministic output.** There is no timestamp, host name or elapsed time in the page.
+Files and findings are sorted, and every finding anchor is its semantic workflow id
+(`f_<16 hex>`, rule + normalized path + sink + path shape), never a line number, so two
+runs over the same input are byte-identical and a line move keeps the link. A genuine
+id collision (two identical sinks with the same path shape) gets a `-2`, `-3` anchor
+suffix; the displayed id stays the semantic id.
+
+`--diff BASE` is evaluated **per file**, so a directory page shows each file's own
+suppressed count. The wording and counts come from `Scry.TaintCmd`'s diff helpers, not a
+second filter. Suppressed findings and warnings stay on the page in a native `<details>`
+block; a filter is not a deletion.
+
+What the page does **not** claim: it is a rendering of one run's evidence, not a proof.
+A clean file is not a proof of absence, a boundary warning is a documented gap rather
+than a pass, and the page does not include dynamic evidence, SMT models or concolic
+witnesses (those live in a `scry findings` bundle). It is static evidence only, and it
+needs no JavaScript to read — so there is no client-side filtering, sorting or
+collapsing beyond the browser's native `<details>`.
+
+`tests/report.wiz` pins the tainted/safe/XSS fixtures, the sink and step spans, the
+suppressed-count line, finding-id anchors and two-run byte identity. The reusable
+renderer is `lib/Scry/Report.wiz`; the IO half is `scry/src/Scry/ReportCmd.wiz`.
 
 ## `scry dynamic`: observed execution evidence
 
