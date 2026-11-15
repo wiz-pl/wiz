@@ -1,8 +1,14 @@
 # Wiz documentation
 
 The standard library's API documentation is published from `master` at
-<https://wiz-pl.github.io/wiz/> (one page per module, with interactive signatures;
-docs/building.md, "Documentation site").
+<https://wiz-pl.github.io/wiz/docs/> (one page per module, with interactive signatures;
+the [API index](https://wiz-pl.github.io/wiz/docs/api.html) lists every module and
+declaration, and search covers names, doc comments and signatures; docs/building.md,
+"Documentation site"). The site's root is a landing page
+(<https://wiz-pl.github.io/wiz/>) and <https://wiz-pl.github.io/wiz/playground/> is a
+static playground that runs the self-hosted checker in the browser. This file indexes
+the repository's documentation; the published `/docs/` is generated from `lib/` by
+`wiz doc --lib`.
 
 * [install.md](install.md): installing Wiz with tower or Nix, editor setup, a first
   grail package, troubleshooting

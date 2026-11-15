@@ -205,12 +205,14 @@ the elan toolchain, so the setup action keeps the elan cache for those
   (including docs-only ones), and `CI result` requires it. No code block is exempt; a
   reviewed exception goes in the script's `ALLOW` list with a reason.
 * **The documentation site** (the `docs` and `deploy-docs` jobs): on a push to `master`
-  only (not a pull request, the weekly run or a manual run), `docs` builds the
-  standard library's pages with `wiz doc --lib` (source links to the commit) and the Wasm
-  module that makes their signatures interactive, and uploads them as the artifact
-  `wiz-docs` (3 days, for debugging). `deploy-docs` then publishes that artifact to
-  GitHub Pages. Neither job is a required check, so a Pages outage does not fail the
-  suite. See "Documentation site" below.
+  only (not a pull request, the weekly run or a manual run), `docs` builds the two Wasm
+  modules (the infoview's and the playground's), the standard library's pages with
+  `wiz doc --lib` (source links to the commit) into `doc-site/docs`, and the landing page
+  and the static playground around them (`web/build-site.sh`); `web/check-site.sh`
+  checks that `/`, `/docs/` and `/playground/` exist and that the landing page's local
+  links resolve. It uploads the tree as the artifact `wiz-docs` (3 days, for debugging),
+  and `deploy-docs` publishes it to GitHub Pages. Neither job is a required check, so a
+  Pages outage does not fail the suite. See "Documentation site" below.
 * **Trust ledger** (the `trust-ledger` job): `scripts/trust-ledger.sh --check` runs the
   `--trust-ledger` mode of the test driver (`Tests/Native.lean`) over `lib/` and the
   axiom-free examples, and compares the sources of trust it finds with
@@ -375,23 +377,56 @@ the elan toolchain, so the setup action keeps the elan cache for those
 
 ### Documentation site
 
-A push to `master` publishes the standard library's documentation from the `docs` job to
-GitHub Pages, at <https://wiz-pl.github.io/wiz/>. The tree is `wiz doc --lib`'s output
-plus the Wasm module (`web/build.sh`), exactly as the `wiz-docs` artifact holds it:
+A push to `master` publishes the site from the `docs` job to GitHub Pages, at
+<https://wiz-pl.github.io/wiz/>. The tree has three parts, and every link in it is
+relative, so the project-site prefix (or a custom domain root) works either way:
+
+| URL | what it is | built from |
+|---|---|---|
+| `/` | the landing page: introduction, features, quickstart | `web/landing/index.html`, `web/landing/landing.css` |
+| `/docs/` | the standard library's API documentation | `wiz doc --lib` |
+| `/playground/` | the static playground (stage 11ab) | `web/playground.*`, `web/build-playground.sh` |
+
+The `docs` job builds the two Wasm modules (`web/build.sh` for the documentation's
+interactive signatures, `web/build-playground.sh` for the playground), runs `wiz doc
+--lib -o doc-site/docs --web web/out` (source links to the commit), assembles the
+landing page and the playground with `web/build-site.sh doc-site web/out`, checks the
+result with `web/check-site.sh doc-site` (the three entry points exist and the landing
+page's local links resolve; no server), and uploads `doc-site` as the artifact
+`wiz-docs` (3 days, for debugging). `deploy-docs` then publishes that artifact.
 
 | path | what it is |
 |---|---|
-| `index.html` | the landing page: the documented modules and their summaries |
-| `A.B.html` | one page per module (its declarations, signatures, docs, source links) |
-| `A.B.json` | the same page's data, for the interactive signatures |
-| `search.js`, `scroll.css`, `scroll.js`, `tagged.js`, `scroll-search.js` | the site's scripts and styles |
-| `wiz-infoview.mjs`, `wiz-infoview.wasm` | the infoview's Wasm module, when `web/build.sh` built it |
+| `index.html`, `landing.css` | the landing page |
+| `docs/index.html` | the documentation index: the documented modules and their summaries |
+| `docs/api.html` | the API index: every module and declaration, with signatures and doc summaries |
+| `docs/api.json` | the same index as data, for tools |
+| `docs/A.B.html` | one page per module (its declarations, signatures, docs, source links) |
+| `docs/A.B.json` | the same page's data, for the interactive signatures |
+| `docs/search.js`, `docs/scroll.css`, `docs/scroll.js`, `docs/tagged.js`, `docs/scroll-search.js` | the documentation's scripts and styles (search covers names, doc comments and signatures) |
+| `docs/wiz-infoview.mjs`, `docs/wiz-infoview.wasm` | the infoview's Wasm module, when `web/build.sh` built it |
+| `playground/index.html` | the playground page |
+| `playground/playground.js`, `playground/playground.css`, `playground/playground-values.js` | the page's scripts and styles |
+| `playground/wiz-playground.mjs`, `playground/wiz-playground.wasm` | the playground's engine (the self-hosted checker), when `web/build-playground.sh` built it |
 
-All links in the pages are relative, so the `/wiz/` prefix of a project site works.
-`docs` and `deploy-docs` run only on `push` (`workflow_dispatch` runs do not publish).
-The artifact stays for 3 days for debugging; the site keeps the newest deployed tree
-until the next successful deployment, and `deploy-docs` serialises deployments
-(`concurrency: pages`, `cancel-in-progress: false`) so the site ends at the newest commit.
+To build the site locally from a checkout (after `nix develop` and `lake build wiz`):
+
+```sh
+sh web/build.sh web/out                         # the infoview module, scroll assets
+sh web/build-playground.sh web/out              # the playground module
+.lake/build/bin/wiz doc --lib -o doc-site/docs --web web/out
+sh web/build-site.sh doc-site web/out           # landing page and /playground/
+sh web/check-site.sh doc-site                   # the entry points and the links
+python3 -m http.server -d doc-site 8000         # then http://127.0.0.1:8000/
+```
+
+`web/build-playground.sh` compiles the self-hosted frontend to WebAssembly, so it is the
+slow part; without `emcc` on `PATH` the script runs Emscripten from nixpkgs. Without
+`--source-url`, the local documentation's source links are plain paths. `docs` and
+`deploy-docs` run only on `push` (`workflow_dispatch` runs do not publish). The artifact
+stays for 3 days for debugging; the site keeps the newest deployed tree until the next
+successful deployment, and `deploy-docs` serialises deployments (`concurrency: pages`,
+`cancel-in-progress: false`) so the site ends at the newest commit.
 
 **One-time repository setting.** Settings → Pages → Build and deployment → Source =
 "GitHub Actions". Without it `actions/configure-pages` has no site to configure and
@@ -415,10 +450,9 @@ the entire tree, so `deploy-docs` must stay the only Pages publisher. The perfor
 site (the `perf-site.yml` workflow when it lands) is designed to publish a
 self-contained dashboard; when it lands, it belongs *under* this deployment as
 `/perf/` — built into `doc-site/perf` before `upload-pages-artifact` — not in a second
-deploy job, which would replace the docs tree. Until then its own `deploy` job stays
-off (`PERF_SITE_DEPLOY` unset). Once `perf/` is there, link it from the site root (a
-step after `wiz doc` can add the link to its `index.html`, which is regenerated on every
-deploy).
+deploy job, which would replace the site. Until then its own `deploy` job stays
+off (`PERF_SITE_DEPLOY` unset). Once `perf/` is there, link it from the landing page
+(`web/landing/index.html`), which is a checked-in source file, not generated.
 
 To run Wiz without a checkout or a Lean toolchain, with the binaries from Cachix:
 
