@@ -257,10 +257,10 @@ the elan toolchain, so the setup action keeps the elan cache for those
   their output with the block beside them; a `wiz no-check` block is an explicit
   exception.
   Relative links and `examples/...` references must resolve. On a docs-only pull request
-  `docs_examples` restores the `.lake` build and elaborates only `wiz`; a pull request
-  that changes code runs the same check in `build`. Its cache
-  (`.lake/docs-examples`) is keyed by the Lean sources that build `wiz`, so a docs-only
-  run is seconds and a toolchain change invalidates it.
+  `docs_examples` substitutes the Nix-built `wiz` from Cachix (the same store path
+  `build` publishes); a pull request that changes code runs the same check in `build`.
+  Its cache (`.lake/docs-examples`) is keyed by the Lean sources that build `wiz`, so a
+  docs-only run is seconds and a toolchain change invalidates it.
 * **The documentation site** (the `docs` and `deploy-docs` jobs): on a push to `master`
   only (not a pull request, the weekly run or a manual run), `docs` builds the two Wasm
   modules (the infoview's and the playground's), the standard library's pages with
