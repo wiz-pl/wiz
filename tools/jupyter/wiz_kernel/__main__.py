@@ -42,12 +42,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--toolchain-arg", action="append", default=[], metavar="ARG",
                         help="an argument for the wiz command line, e.g. "
                              "--toolchain-arg=--no-cache (repeatable)")
+    parser.add_argument("--lsp-command", metavar="CMD",
+                        help="the language server command (default: `<wiz> -I <cwd> lsp`; "
+                             "also $WIZ_KERNEL_LSP)")
+    parser.add_argument("--no-lsp", action="store_true",
+                        help="do not start a language server; completion and inspection "
+                             "then answer empty/found=false with the reason in metadata")
     parser.add_argument("--version", action="version", version=f"wiz-kernel {__version__}")
     args = parser.parse_args(argv)
 
     from .kernel import Kernel
     kernel = Kernel(args.connection_file, backend=args.backend, wiz=args.wiz,
-                    cwd=args.cwd, toolchain_args=args.toolchain_arg)
+                    cwd=args.cwd, toolchain_args=args.toolchain_arg,
+                    lsp_command=args.lsp_command, lsp_enabled=not args.no_lsp)
 
     def terminate(signum, frame):  # noqa: ARG001
         kernel.running = False

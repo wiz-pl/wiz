@@ -19,6 +19,9 @@ import traceback
 from . import __version__
 from .backends import (Backend, BackendError, BackendUnavailable, CellResult,
                        ErrorReport, make_backend)
+from .lsp import (LspClient, LspError, LspUnavailable, Notebook,
+                  command_from_spec, completion_answer, hover_answer,
+                  lsp_command as default_lsp_command, notebook_uri)
 from .magics import handle_magic
 from .wire import Message, Session, WireError, iopub_topic
 
@@ -40,7 +43,9 @@ the cell's result.
 class Kernel:
     def __init__(self, connection_file: str, *, backend: str = "auto",
                  wiz: str | None = None, cwd: str | None = None,
-                 toolchain_args: list[str] | None = None):
+                 toolchain_args: list[str] | None = None,
+                 lsp_command: str | list[str] | None = None,
+                 lsp_enabled: bool = True):
         if zmq is None:
             raise RuntimeError("pyzmq is not installed (`pip install pyzmq`)")
         with open(connection_file, encoding="utf-8") as handle:
@@ -61,6 +66,16 @@ class Kernel:
         self._hb_thread: threading.Thread | None = None
         self._hb_stop = threading.Event()
         self.wiz_version = self._wiz_version()
+        # Completion and inspection: one lazily started `wiz lsp` child and the
+        # notebook source it sees.  A failure is remembered, never raised.
+        self.lsp_enabled = lsp_enabled
+        self.lsp_spec = lsp_command
+        self.lsp: LspClient | None = None
+        self.notebook = Notebook()
+        self._lsp_attempted = False
+        self._lsp_error: str | None = None
+        self._lsp_request_error: str | None = None
+        self._lsp_uri: str | None = None
         self.context = zmq.Context.instance()
         self.shell = self._socket(zmq.ROUTER)
         self.control = self._socket(zmq.ROUTER)
@@ -99,6 +114,87 @@ class Kernel:
             return text[0].strip() if text else "unknown"
         except (OSError, subprocess.SubprocessError):
             return "unknown"
+
+    # -- the language server --------------------------------------------
+
+    def _lsp_command_line(self) -> list[str] | None:
+        """`--lsp-command`, `$WIZ_KERNEL_LSP`, or `<wiz> … -I CWD lsp`."""
+        spec = self.lsp_spec
+        if spec is None:
+            spec = os.environ.get("WIZ_KERNEL_LSP")
+        if spec is not None:
+            command = command_from_spec(spec)
+            if not command:
+                raise LspUnavailable("the language server command is empty")
+            return command
+        from .backends import find_wiz
+        executable = find_wiz(self.wiz)
+        if executable is None:
+            raise LspUnavailable(
+                "no wiz executable: pass --wiz PATH, set $WIZ, or put wiz on PATH")
+        return default_lsp_command(executable, self.toolchain_args, self.cwd)
+
+    def _ensure_lsp(self) -> LspClient | None:
+        """Start `wiz lsp` once; return None (and a reason) when it cannot run."""
+        if not self.lsp_enabled:
+            self._lsp_attempted = True
+            self._lsp_error = "disabled (--no-lsp)"
+            return None
+        if self._lsp_attempted:
+            return self.lsp
+        self._lsp_attempted = True
+        try:
+            command = self._lsp_command_line()
+            if command is None:
+                raise LspUnavailable("no language server command")
+            client = LspClient(command, cwd=self.cwd)
+            client.start()
+        except (LspUnavailable, ValueError) as exc:
+            self._lsp_error = str(exc)
+            return None
+        try:
+            self._lsp_uri = notebook_uri(self.cwd)
+        except (OSError, ValueError) as exc:
+            client.close()
+            self._lsp_error = f"cannot name the notebook document: {exc}"
+            return None
+        self.lsp = client
+        return client
+
+    def lsp_metadata(self) -> dict:
+        """What the kernel can say about the language server (never starts it)."""
+        if not self.lsp_enabled:
+            available = False
+        elif not self._lsp_attempted:
+            available = None
+        else:
+            available = self.lsp.alive if self.lsp is not None else False
+        metadata = {
+            "enabled": self.lsp_enabled,
+            "available": available,
+            "started": self.lsp is not None,
+            "transport": "stdio",
+        }
+        reason = self._lsp_request_error or self._lsp_error
+        if self.lsp is not None and not self.lsp.alive and not reason:
+            reason = "the language server exited"
+        if reason:
+            metadata["reason"] = reason
+        if self.lsp is not None:
+            metadata["command"] = " ".join(self.lsp.command)
+        return metadata
+
+    def _lsp_summary(self) -> str:
+        if not self.lsp_enabled:
+            return "disabled (--no-lsp)"
+        if self.lsp is not None and self.lsp.alive:
+            return "connected (stdio; `wiz lsp`)"
+        reason = self._lsp_request_error or self._lsp_error
+        if self.lsp is not None and not self.lsp.alive and not reason:
+            reason = "the language server exited"
+        if reason:
+            return "unavailable: " + reason
+        return "not started (starts on the first completion or inspection)"
 
     # -- startup ---------------------------------------------------------
 
@@ -214,12 +310,9 @@ class Kernel:
         elif kind == "is_complete_request":
             self.handle_is_complete(socket, msg)
         elif kind == "complete_request":
-            self.reply(socket, msg, "complete_reply", {
-                "status": "ok", "matches": [], "cursor_start": msg.content.get("cursor_pos", 0),
-                "cursor_end": msg.content.get("cursor_pos", 0), "metadata": {}})
+            self.handle_complete(socket, msg)
         elif kind == "inspect_request":
-            self.reply(socket, msg, "inspect_reply",
-                       {"status": "ok", "found": False, "data": {}, "metadata": {}})
+            self.handle_inspect(socket, msg)
         elif kind == "history_request":
             self.reply(socket, msg, "history_reply", {"status": "ok", "history": []})
         elif kind == "comm_info_request":
@@ -253,6 +346,7 @@ class Kernel:
         backend_name = self.backend.name if self.backend is not None else "unavailable"
         banner = BANNER.format(version=__version__)
         banner += f"\nbackend: {backend_name}\n"
+        banner += f"lsp: {self._lsp_summary()}\n"
         if self.backend_error:
             banner += f"backend error: {self.backend_error}\n"
         self.reply(socket, msg, "kernel_info_reply", {
@@ -274,12 +368,82 @@ class Kernel:
                 {"text": "Jupyter kernel source",
                  "url": "https://github.com/wiz-pl/wiz/tree/master/tools/jupyter"},
             ],
-            "metadata": {"wiz_backend": backend_name},
+            "metadata": {"wiz_backend": backend_name, "wiz_lsp": self.lsp_metadata()},
         })
 
     def handle_is_complete(self, socket, msg: Message) -> None:
         code = msg.content.get("code", "")
         self.reply(socket, msg, "is_complete_reply", {"status": is_complete(code)})
+
+    # -- completion and inspection (`textDocument/completion`, `hover`) --
+
+    @staticmethod
+    def _cursor(content: dict, code: str) -> int:
+        cursor = content.get("cursor_pos")
+        if isinstance(cursor, bool) or not isinstance(cursor, int):
+            try:
+                cursor = int(cursor)
+            except (TypeError, ValueError):
+                cursor = len(code)
+        return max(0, min(cursor, len(code)))
+
+    def handle_complete(self, socket, msg: Message) -> None:
+        content = msg.content or {}
+        code = content.get("code") or ""
+        cursor = self._cursor(content, code)
+        client = self._ensure_lsp()
+        metadata = {"wiz_lsp": self.lsp_metadata()}
+        reply = {"status": "ok", "matches": [], "cursor_start": cursor,
+                 "cursor_end": cursor, "metadata": metadata}
+        if client is None:
+            self.reply(socket, msg, "complete_reply", reply)
+            return
+        document, start, line, character = self.notebook.position(code, cursor)
+        try:
+            result = client.completion(self._lsp_uri, document, line, character)
+        except LspError as exc:
+            self._lsp_request_error = str(exc)
+            metadata["wiz_lsp"] = self.lsp_metadata()
+            self.reply(socket, msg, "complete_reply", reply)
+            return
+        self._lsp_request_error = None
+        metadata["wiz_lsp"] = self.lsp_metadata()
+        metadata["wiz_lsp"]["cursor"] = {"line": line, "character": character}
+        answer = completion_answer(result, text=document, code=code,
+                                   cursor=cursor, cell_start=start)
+        metadata["wiz_lsp"]["isIncomplete"] = answer.is_incomplete
+        if answer.is_incomplete:
+            # There is no field for this in the Jupyter message; a frontend that
+            # understands metadata can re-ask, the others see the list anyway.
+            metadata["isIncomplete"] = True
+        reply.update(matches=answer.items, cursor_start=answer.cursor_start,
+                     cursor_end=answer.cursor_end)
+        self.reply(socket, msg, "complete_reply", reply)
+
+    def handle_inspect(self, socket, msg: Message) -> None:
+        content = msg.content or {}
+        code = content.get("code") or ""
+        cursor = self._cursor(content, code)
+        client = self._ensure_lsp()
+        metadata = {"wiz_lsp": self.lsp_metadata()}
+        reply = {"status": "ok", "found": False, "data": {}, "metadata": metadata}
+        if client is None:
+            self.reply(socket, msg, "inspect_reply", reply)
+            return
+        document, start, line, character = self.notebook.position(code, cursor)
+        try:
+            result = client.hover(self._lsp_uri, document, line, character)
+        except LspError as exc:
+            self._lsp_request_error = str(exc)
+            metadata["wiz_lsp"] = self.lsp_metadata()
+            self.reply(socket, msg, "inspect_reply", reply)
+            return
+        self._lsp_request_error = None
+        metadata["wiz_lsp"] = self.lsp_metadata()
+        metadata["wiz_lsp"]["cursor"] = {"line": line, "character": character}
+        answer = hover_answer(result)
+        reply.update(found=answer.found, data=answer.data)
+        self.reply(socket, msg, "inspect_reply", reply)
 
     # -- execution -------------------------------------------------------
 
@@ -299,6 +463,9 @@ class Kernel:
                 self._announced_backend = True
                 self.stream("stderr", self._backend_notice(), parent=parent)
         result = self._run_cell(code)
+        source = notebook_cell(code)
+        if source is not None and source.strip():
+            self.notebook.append(source)
         for stream in result.streams:
             self.stream(stream.name, stream.text, parent=parent)
         for error in result.errors:
@@ -329,7 +496,7 @@ class Kernel:
         notice = f"wiz kernel: backend {self.backend.name}"
         if self.fallback_reason:
             notice += f" (`wiz repl` unavailable: {self.fallback_reason})"
-        return notice + "\n"
+        return notice + f"\nlsp: {self._lsp_summary()}\n"
 
     def _run_cell(self, code: str) -> CellResult:
         if self.backend is None:
@@ -340,7 +507,8 @@ class Kernel:
                 ["no Wiz backend: " + message])])
         try:
             magic = handle_magic(code, self.backend, fallback_reason=self.fallback_reason,
-                                 cwd=self.cwd, wiz=self.wiz)
+                                 cwd=self.cwd, wiz=self.wiz,
+                                 lsp_status=self._lsp_summary())
             if magic is not None:
                 return magic
             return self.backend.execute(code)
@@ -357,6 +525,12 @@ class Kernel:
         self._hb_stop.set()
         if self._hb_thread is not None:
             self._hb_thread.join(timeout=2)
+        if self.lsp is not None:
+            try:
+                self.lsp.close()
+            except Exception:
+                traceback.print_exc()
+            self.lsp = None
         if self.backend is not None:
             try:
                 self.backend.close()
@@ -371,6 +545,27 @@ class Kernel:
             self.context.term()
         except Exception:
             pass
+
+
+def notebook_cell(code: str) -> str | None:
+    """The Wiz source a cell contributes to the notebook, or None for a magic.
+
+    ``%%wiz`` and ``%wiz`` contribute their body; a ``%%scry`` cell (C source)
+    and an unknown magic contribute nothing.  Completion and inspection must see
+    the same accumulated source the batch driver would check.
+    """
+    lines = code.splitlines()
+    if not lines:
+        return None
+    first = lines[0]
+    if re.match(r"^%%wiz(?:[ \t]+.*)?$", first):
+        return "\n".join(lines[1:])
+    match = re.match(r"^%wiz[ \t]+(.*)$", first)
+    if match and all(not line.strip() for line in lines[1:]):
+        return match.group(1)
+    if first.lstrip().startswith("%"):
+        return None
+    return code
 
 
 def is_complete(code: str) -> str:

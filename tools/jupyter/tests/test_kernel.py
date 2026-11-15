@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -227,6 +228,207 @@ class KernelProtocolTest(unittest.TestCase):
             cwd=TOOL_DIR, env=env, capture_output=True, text=True, timeout=300)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn("0 failed", done.stdout)
+
+
+@unittest.skipUnless(HAVE_JUPYTER, "pyzmq and jupyter_client are not installed")
+class _ExtraKernelTest(unittest.TestCase):
+    """Start a kernel with extra argv; the LSP tests need no wiz backend."""
+
+    extra_args: list[str] = []
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.mkdtemp(prefix="wiz-kernel-lsp-test-")
+        cls.workspace = os.path.join(cls.tmp, "ws")
+        os.makedirs(cls.workspace, exist_ok=True)
+        cls.connection_file, _ = write_connection_file(
+            os.path.join(cls.tmp, "connection.json"), ip="127.0.0.1")
+        cls.wiz = find_wiz(os.environ.get("WIZ_TEST_WIZ"))
+        command = [sys.executable, "-m", "wiz_kernel", "-f", cls.connection_file,
+                   "--backend", "auto", "--cwd", cls.workspace, *cls.extra_args]
+        if cls.wiz:
+            command += ["--wiz", cls.wiz]
+        env = dict(os.environ)
+        env["PYTHONPATH"] = TOOL_DIR + os.pathsep + env.get("PYTHONPATH", "")
+        cls.process = subprocess.Popen(command, cwd=cls.workspace, env=env,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        cls.client = BlockingKernelClient()
+        cls.client.load_connection_file(cls.connection_file)
+        cls.client.start_channels()
+        try:
+            cls.client.wait_for_ready(timeout=180)
+        except Exception:
+            cls.process.terminate()
+            cls.process.communicate(timeout=10)
+            raise
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        try:
+            cls.client.stop_channels()
+        except Exception:
+            pass
+        if cls.process.poll() is None:
+            cls.process.terminate()
+            try:
+                cls.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                cls.process.kill()
+        for pipe in (cls.process.stdout, cls.process.stderr):
+            try:
+                pipe.close()
+            except Exception:
+                pass
+        shutil.rmtree(getattr(cls, "tmp", ""), ignore_errors=True)
+
+    @classmethod
+    def _reply(cls, msg_id: str, timeout: float = 180):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            msg = cls.client.get_shell_msg(timeout=max(0.1, deadline - time.time()))
+            if msg.get("parent_header", {}).get("msg_id") == msg_id:
+                return msg
+        raise TimeoutError(f"no reply to {msg_id}")
+
+    @classmethod
+    def execute(cls, code: str):
+        msg_id = cls.client.execute(code)
+        reply = cls._reply(msg_id)
+        iopub = []
+        deadline = time.time() + 180
+        while time.time() < deadline:
+            msg = cls.client.get_iopub_msg(timeout=max(0.1, deadline - time.time()))
+            if msg.get("parent_header", {}).get("msg_id") != msg_id:
+                continue
+            iopub.append(msg)
+            if msg["msg_type"] == "status" and \
+                    msg["content"].get("execution_state") == "idle":
+                break
+        return reply, iopub
+
+    @staticmethod
+    def result(iopub) -> dict:
+        for msg in iopub:
+            if msg["msg_type"] == "execute_result":
+                return msg["content"].get("data", {})
+        return {}
+
+    def complete(self, code: str, cursor: int | None = None):
+        cursor = len(code) if cursor is None else cursor
+        return self._reply(self.client.complete(code, cursor))
+
+    def inspect(self, code: str, cursor: int | None = None):
+        cursor = len(code) if cursor is None else cursor
+        return self._reply(self.client.inspect(code, cursor, 0))
+
+
+@unittest.skipUnless(HAVE_JUPYTER, "pyzmq and jupyter_client are not installed")
+class MockLspKernelTest(_ExtraKernelTest):
+    """The kernel's completion/inspection against a mock language server."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.log_dir = tempfile.mkdtemp(prefix="wiz-kernel-mock-log-")
+        cls.log = os.path.join(cls.log_dir, "mock.jsonl")
+        command = " ".join(shlex.quote(part) for part in
+                           [sys.executable, "-m", "wiz_kernel.mock_lsp",
+                            "--log", cls.log])
+        cls.extra_args = ["--lsp-command", command]
+        super().setUpClass()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        super().tearDownClass()
+        shutil.rmtree(getattr(cls, "log_dir", ""), ignore_errors=True)
+
+    def test_complete_and_inspect_use_the_lsp(self):
+        self.execute("def previousAnswer : Nat := 41")
+        code = "def x : Nat := 1\n#eval moc"
+        reply = self.complete(code)
+        content = reply["content"]
+        self.assertEqual(content["status"], "ok", content)
+        matches = content.get("matches") or []
+        self.assertEqual([m["text"] for m in matches], ["mockValue", "mockFunction"])
+        self.assertEqual(matches[0]["type"], "text")
+        self.assertEqual(matches[1]["type"], "function")
+        self.assertEqual(matches[0]["signature"], "Nat")
+        self.assertIn("mock", matches[0]["documentation"].lower())
+        self.assertEqual(content["cursor_start"], code.index("moc"))
+        self.assertEqual(content["cursor_end"], len(code))
+        lsp = content["metadata"]["wiz_lsp"]
+        self.assertTrue(lsp["available"], lsp)
+        self.assertEqual(lsp["cursor"], {"line": 3, "character": 9}, lsp)
+
+        with open(self.log, encoding="utf-8") as handle:
+            messages = [json.loads(line) for line in handle if line.strip()]
+        opened = [m for m in messages if m.get("method") == "textDocument/didOpen"]
+        self.assertTrue(opened, "the kernel did not open a document")
+        text = opened[-1]["params"]["textDocument"]["text"]
+        self.assertIn("def previousAnswer : Nat := 41", text)
+        self.assertTrue(text.endswith(code), text[-80:])
+
+        hover = self.inspect("#eval mockHover", 8)
+        self.assertTrue(hover["content"]["found"], hover["content"])
+        data = hover["content"]["data"]
+        self.assertIn("mockHover", data["text/plain"])
+        self.assertIn("mockHover", data["text/markdown"])
+
+        empty = self.complete("MOCK_NONE")
+        self.assertEqual(empty["content"]["matches"], [])
+        missing = self.inspect("MOCK_NONE")
+        self.assertFalse(missing["content"]["found"])
+
+        incomplete = self.complete("MOCK_INCOMPLETE")
+        self.assertTrue(incomplete["content"]["metadata"].get("isIncomplete"),
+                        incomplete["content"]["metadata"])
+
+    def test_backend_magic_reports_the_lsp(self):
+        if self.wiz is None:
+            self.skipTest("no wiz executable")
+        reply, iopub = self.execute("%backend")
+        self.assertEqual(reply["content"]["status"], "ok", reply["content"])
+        self.assertIn("lsp:", self.result(iopub).get("text/plain", ""))
+
+
+@unittest.skipUnless(HAVE_JUPYTER, "pyzmq and jupyter_client are not installed")
+class NoLspKernelTest(_ExtraKernelTest):
+    """`--no-lsp`: empty answers, no error, and the reason in metadata."""
+
+    extra_args = ["--no-lsp"]
+
+    def test_completion_and_inspection_degrade(self):
+        reply = self.complete("anything")
+        content = reply["content"]
+        self.assertEqual(content["status"], "ok", content)
+        self.assertEqual(content["matches"], [])
+        self.assertFalse(content["metadata"]["wiz_lsp"]["enabled"])
+        self.assertFalse(content["metadata"]["wiz_lsp"]["available"])
+        self.assertIn("--no-lsp", content["metadata"]["wiz_lsp"]["reason"])
+
+        hover = self.inspect("anything")
+        self.assertEqual(hover["content"]["status"], "ok", hover["content"])
+        self.assertFalse(hover["content"]["found"])
+        self.assertFalse(hover["content"]["metadata"]["wiz_lsp"]["available"])
+
+
+@unittest.skipUnless(HAVE_JUPYTER, "pyzmq and jupyter_client are not installed")
+class MissingLspKernelTest(_ExtraKernelTest):
+    """A server that cannot start is a stated reason, not an error reply."""
+
+    extra_args = ["--lsp-command", "/nonexistent/wiz-kernel-no-such-lsp"]
+
+    def test_missing_server_degrades(self):
+        content = self.complete("anything")["content"]
+        self.assertEqual(content["status"], "ok", content)
+        self.assertEqual(content["matches"], [])
+        lsp = content["metadata"]["wiz_lsp"]
+        self.assertFalse(lsp["available"], lsp)
+        self.assertIn("reason", lsp)
+
+        content = self.inspect("anything")["content"]
+        self.assertEqual(content["status"], "ok", content)
+        self.assertFalse(content["found"])
+        self.assertFalse(content["metadata"]["wiz_lsp"]["available"])
 
 
 if __name__ == "__main__":

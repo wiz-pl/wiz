@@ -33,18 +33,22 @@ class MagicError(Exception):
         self.ename = ename
 
 
-def backend_summary(backend: Backend, fallback_reason: str | None) -> str:
+def backend_summary(backend: Backend, fallback_reason: str | None,
+                    lsp_status: str | None = None) -> str:
     lines = [f"backend: {backend.name}", backend.description]
     if fallback_reason:
         lines.append(f"(chosen because `wiz repl` was not available: {fallback_reason})")
     else:
         lines.append("(`wiz repl` is available: this is the stateful driver)")
+    if lsp_status is not None:
+        lines.append(f"lsp: {lsp_status}")
     return "\n".join(lines)
 
 
 def handle_magic(code: str, backend: Backend, *,
                  fallback_reason: str | None = None, cwd: str = ".",
-                 wiz: str | None = None) -> CellResult | None:
+                 wiz: str | None = None,
+                 lsp_status: str | None = None) -> CellResult | None:
     """Run a magic cell.  Returns None when the cell is ordinary Wiz code."""
     lines = code.splitlines()
     if not lines:
@@ -64,7 +68,7 @@ def handle_magic(code: str, backend: Backend, *,
     if match and all(not line.strip() for line in lines[1:]):
         name, rest = match.group("name"), (match.group("rest") or "").strip()
         if name in ("backend", "wiz_backend"):
-            return CellResult(result=backend_summary(backend, fallback_reason),
+            return CellResult(result=backend_summary(backend, fallback_reason, lsp_status),
                               backend=backend.name)
         if name == "wiz":
             return backend.execute(rest)

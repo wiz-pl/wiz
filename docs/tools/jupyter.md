@@ -8,7 +8,7 @@ Python (standard library plus `pyzmq`), not Lean.
 
 ```
 tools/jupyter/
-  wiz_kernel/            the kernel (wire protocol, drivers, magics)
+  wiz_kernel/            the kernel (wire protocol, drivers, magics, LSP client)
   wiz-kernel/kernel.json the kernelspec template
   tests/test_kernel.py   protocol-level tests (jupyter_client)
   README.md              a short pointer to this page
@@ -40,7 +40,7 @@ The kernel also runs without a kernelspec (as Jupyter starts it):
 ```sh
 PYTHONPATH=tools/jupyter python3 -m wiz_kernel -f /path/to/connection.json \
     [--wiz PATH] [--backend auto|repl|batch] [--cwd DIR] \
-    [--toolchain-arg=--no-cache]
+    [--toolchain-arg=--no-cache] [--lsp-command CMD | --no-lsp]
 ```
 
 The toolchain is found like this: `--wiz`, then `$WIZ`, then `wiz` on `PATH`,
@@ -60,8 +60,8 @@ or `ipykernel` is imported by the kernel. Every request is bracketed by iopub
 ## The two drivers
 
 The kernel chooses a driver at startup and says which one it is using in three
-places: the `kernel_info_reply` banner and `metadata.wiz_backend`, a one-line
-`stderr` notice before the first cell's output, and `%backend`.
+places: the `kernel_info_reply` banner and `metadata.wiz_backend`, a `stderr`
+notice before the first cell's output, and `%backend`.
 
 * **`repl` — a persistent `wiz repl` process.** This is the stateful driver:
   definitions, `syntax`, `macro`s, `instance`s and `import`s stay in scope for
@@ -106,6 +106,117 @@ start, as it does for a terminal session.
 * `is_complete_request` answers with a bracket/trailing-token heuristic (not a
   parser), so a frontend can decide whether Enter submits.
 
+## Completion and inspection (the language server)
+
+`complete_request` and `inspect_request` are answered by the Wiz language server
+(`wiz lsp`), not by a second implementation of inference. The kernel starts one
+`wiz lsp` child **lazily**, on the first completion or inspection, keeps it for
+the session and sends `didClose`/`shutdown`/`exit` when the kernel shuts down. The
+transport is stdio (`Content-Length`-framed JSON-RPC 2.0, the server's default);
+there is one child per kernel, in the kernel's working directory.
+
+```
+complete_request  → textDocument/didOpen or didChange (full text)
+                  → textDocument/completion
+inspect_request   → textDocument/hover
+```
+
+The server is found the same way as the toolchain: `--wiz`, `$WIZ`, `wiz` on
+`PATH`, then a checkout's `.lake/build/bin/wiz`. `--lsp-command CMD` (or
+`$WIZ_KERNEL_LSP`) replaces the whole command line, for a wrapper or a mock;
+`--no-lsp` turns completion and inspection into empty answers. The extra
+`-I <cwd>` argument the driver adds is there too, so a cell can `import` a
+module from the notebook's directory.
+
+### What the server sees
+
+The kernel keeps the executed cells (a `%%wiz`/`%wiz` cell contributes its body;
+`%%scry` and unknown magics contribute nothing) and, for a request, composes the
+document the batch driver would check:
+
+```
+import Prelude            ← unless some cell already imports Prelude
+<cell 1>\n
+<cell 2>\n
+<current cell>            ← the one Jupyter sent in complete_request
+```
+
+The document has a `file://` URI in the kernel's working directory
+(`.wiz-kernel-notebook.wiz`); it need not exist on disk, but its directory is
+where `include_str` resolves. A cell that does not parse does not stop the
+request: the server elaborates the commands it can and completion still sees
+the earlier definitions (the self-test checks this).
+
+### Positions: the cell's offset, in UTF-16
+
+Jupyter's `cursor_pos` is an index into the cell (a Python code-point index in
+the kernel). LSP wants 0-based lines and UTF-16 code units. The translation is
+done once, in `wiz_kernel/lsp.py`:
+
+1. Compose the document above and remember `start`, the **code-point** offset
+   where the current cell begins.
+2. Take `document[start + cursor_pos:]` as a prefix (Python slicing, so astral
+   characters count one here).
+3. Count `\n` in it for the line; convert the text after the last newline to
+   UTF-16 code units for the character (`a😀b` is four units, so a cursor after
+   `b` is at character 4).
+
+Never add the widths of previous cells: a line starts at character 0 again, and
+mixing UTF-16 widths with Python offsets misplaces the request. The reply's
+`textEdit.range` is mapped back the same way (LSP position → document offset →
+cell offset), so `cursor_start`/`cursor_end` replace exactly the word LSP meant.
+The Lean server counts Unicode scalar values, which agrees with UTF-16 for
+everything in the Basic Multilingual Plane (`docs/playground-lsp.md` has the
+same caveat); astral characters are the only difference.
+
+### The Jupyter shapes
+
+`complete_request` maps each LSP `CompletionItem` to Jupyter's
+`{text, type, signature, documentation}`:
+
+| LSP `kind` | Jupyter `type` |
+|---|---|
+| function, constructor | `function` |
+| method | `method` |
+| field, property | `property` |
+| class, interface, enum, struct | `class` |
+| module | `module` |
+| keyword | `keyword` |
+| variable, value, text, … | `text` |
+
+`text` is `textEdit.newText` (else `insertText`, else `label`), `signature` is
+the item's `detail` (the type), and `documentation` is its Markdown/text.
+`cursor_start`/`cursor_end` come from the edit range; a list with no edits falls
+back to the word around the cursor. The server's `isIncomplete` is not lost: it
+is reported as `metadata.isIncomplete` and `metadata.wiz_lsp.isIncomplete`, so a
+frontend that understands metadata can re-ask; the list is never truncated by
+the kernel.
+
+`inspect_request` calls `textDocument/hover` and answers `found: true` with the
+Markdown in `data['text/plain']` and, when the server sent Markdown (it does), a
+`data['text/markdown']` copy. A `null` hover, or one whose contents are blank,
+is `found: false` with `data: {}`. `detail_level` is ignored (the server has one
+hover).
+
+### Degrading, and what `%backend` says
+
+No `wiz`, no `lsp` subcommand, an initialization failure or a timeout is not a
+kernel error: the reply is still `status: ok` with no matches / `found: false`.
+The reason is in `metadata.wiz_lsp` (`enabled`, `available`, `started`,
+`transport`, `command` when running, and `reason` when not). The same state is
+in `kernel_info_reply.metadata.wiz_lsp`, in the banner, in the stderr notice
+before the first cell and in `%backend`:
+
+```
+backend: repl
+lsp: connected (stdio; `wiz lsp`)
+```
+
+Before the first completion the line says `lsp: not started (starts on the first
+completion or inspection)`; with `--no-lsp` it says `lsp: disabled (--no-lsp)`.
+A single failed request (a timeout, a server that exited) is remembered as the
+reason until the next request; it never turns into an `error` reply.
+
 ## Magics
 
 `%%scry` runs `scry taint --json` on the cell's **C source** and renders the
@@ -148,9 +259,25 @@ magic. Unknown magics are an `UnknownMagic` error.
 
 ## Limits
 
-* **Completion and inspection are empty.** `complete_request` returns no
-  matches and `inspect_request` answers `found: false`. The Wiz language server
-  (stage 11, `wiz lsp`) knows both; connecting it to the kernel is future work.
+* **Signature help and code actions are not wired into Jupyter messages.**
+  `wiz lsp` implements `textDocument/signatureHelp`, `textDocument/codeAction`
+  and the infoview (`wiz/*`), but Jupyter's completion/inspection protocol has
+  no place for them; a future rich-display or frontend extension would carry
+  them. Diagnostics are received (the client keeps the connection's stream in
+  order) but are not shown in a cell: the text is the accumulated source, so a
+  stale range would point at the wrong notebook line.
+* **Completion is against the accumulated source, not the REPL's live state.**
+  Every request sends the document composed from the executed cells, and the
+  server elaborates it from the top; editing an earlier cell after it ran does
+  not change the document, because the kernel records what was executed (a
+  `%%wiz` cell records its body). This is the same model as the batch driver,
+  and it is what makes the cell offset well-defined.
+* **A dead language server is not restarted.** If `wiz lsp` exits, later
+  requests answer empty/found=false with the exit in metadata until the kernel
+  is restarted (same policy as a dead `wiz repl`).
+* **The first completion pays the server's startup.** Later requests reuse the
+  child (and its query engine) and send `didChange` only when the document text
+  changed; moving the cursor alone does not re-elaborate.
 * **Interrupt is not implemented.** The kernelspec sets
   `"interrupt_mode": "message"`, so Jupyter sends `interrupt_request` on the
   control channel instead of a signal (a signal would kill the kernel and its
@@ -188,15 +315,27 @@ python3 -m unittest discover -s tools/jupyter/tests -v
 # the same, with a toolchain that has `wiz repl`
 WIZ_TEST_WIZ=/path/to/wiz python3 -m unittest discover -s tools/jupyter/tests -v
 
-# no Jupyter at all: wire + drivers + a raw-ZeroMQ kernel session
+# no Jupyter at all: wire + positions + mock LSP + drivers + a raw-ZeroMQ session
 PYTHONPATH=tools/jupyter python3 -m wiz_kernel --self-test [--wiz PATH]
 ```
 
 The unittest module skips cleanly when `pyzmq` or `jupyter_client` is missing or
 no `wiz` is found. `$WIZ_TEST_BACKEND` pins `repl`/`batch` (default `auto`);
-`$WIZ_SCRY` enables the `%%scry` cases. `--self-test` needs only `pyzmq` (and
-skips the live session without it); it prints PASS/FAIL/SKIP per check and exits
-1 on a failure.
+`$WIZ_SCRY` enables the `%%scry` cases. The mock-LSP classes need no Wiz build:
+they start the kernel with `--lsp-command` pointing at
+`python -m wiz_kernel.mock_lsp`, and a `--no-lsp` class and a missing-command
+class check the degraded answers.
+
+`--self-test` has a **mock LSP** section (`wiz_kernel/mock_lsp.py` is a real
+stdio server with fixed completions/hover and a JSON-lines request log): it
+checks the UTF-16 rules, the cell offset in a multi-cell notebook, that the
+exact position reached the server, the replacement range, the
+`isIncomplete` flag, the empty completion/hover, and `shutdown`/`exit` on close.
+Its **live LSP** section starts the real `wiz lsp` when a toolchain is found,
+completes a name defined in an earlier cell with an unparsable cell in between,
+and hovers a use; it skips cleanly when `wiz lsp` cannot start. `--self-test`
+needs only `pyzmq` for the live kernel session (the LSP sections need no ZeroMQ)
+and prints PASS/FAIL/SKIP per check and exits 1 on a failure.
 
 The kernel is not hooked into `lake test` or the CI workflows; it needs no Lean
 build and only a `wiz` executable (whose `repl` subcommand is the stage 11 REPL,

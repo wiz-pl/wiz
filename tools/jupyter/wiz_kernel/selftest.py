@@ -25,6 +25,9 @@ import uuid
 
 from . import __version__
 from .backends import (BackendUnavailable, CellResult, find_wiz, make_backend)
+from .lsp import (LspClient, LspUnavailable, Notebook, completion_answer,
+                  hover_answer, lsp_command, offset_to_position,
+                  position_to_offset, utf16_units)
 from .wire import Session, WireError
 
 TOOL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -136,7 +139,193 @@ def backend_checks(results: Results, wiz: str | None, backend: str, cwd: str) ->
         driver.close()
 
 
-# -- 3: the live protocol ----------------------------------------------
+# -- 3: completion and inspection (LSP) ---------------------------------
+
+def _mock_lsp_environment() -> dict:
+    env = dict(os.environ)
+    env["PYTHONPATH"] = TOOL_DIR + os.pathsep + env.get("PYTHONPATH", "")
+    return env
+
+
+def _read_json_lines(path: str) -> list[dict]:
+    messages = []
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if line:
+                    messages.append(json.loads(line))
+    except (OSError, json.JSONDecodeError):
+        pass
+    return messages
+
+
+def lsp_checks(results: Results, workspace: str) -> None:
+    """Positions, the notebook document, and the client against a mock server."""
+    try:
+        results.check("lsp: UTF-16 counts astral characters twice",
+                      utf16_units("a😀b") == 4 and utf16_units("abc") == 3)
+        text = "a😀b\nc"
+        results.check("lsp: offset -> position (UTF-16)",
+                      offset_to_position(text, 3) == (0, 4)
+                      and offset_to_position(text, 4) == (1, 0),
+                      repr((offset_to_position(text, 3), offset_to_position(text, 4))))
+        results.check("lsp: position -> offset (UTF-16)",
+                      position_to_offset(text, 0, 4) == 3
+                      and position_to_offset(text, 1, 0) == 4)
+
+        notebook = Notebook(["def prior😀 : Nat := 0"])
+        code = '#eval String.append "😀" an'
+        document, start, line, character = notebook.position(code, len(code))
+        results.check("lsp: the cell starts after the accumulated source",
+                      start == len(document) - len(code)
+                      and document.startswith("import Prelude\n")
+                      and document.endswith(code), repr((start, document[:40])))
+        results.check("lsp: the cursor is UTF-16 on its own line (astral before it)",
+                      line == 2 and character == len(code) + 1
+                      and character == utf16_units(code),
+                      f"line={line} character={character} utf16={utf16_units(code)}")
+
+        notebook2 = Notebook()
+        plain = "#eval ans"
+        document2, start2, line2, character2 = notebook2.position(plain, len(plain))
+        results.check("lsp: no prior cells, the cell is line 1",
+                      line2 == 1 and character2 == len(plain)
+                      and document2.startswith("import Prelude\n"))
+
+        notebook3 = Notebook(["import Prelude", "def a : Nat := 1"])
+        document3, _, _, _ = notebook3.position("def b : Nat := 2", 0)
+        results.check("lsp: an explicit import Prelude is not added twice",
+                      document3.count("import Prelude") == 1, document3[:40])
+        try:
+            LspClient(["/nonexistent/wiz-kernel-no-such-lsp"], cwd=workspace).start()
+            results.check("lsp: a missing server is unavailable, not an error", False,
+                          "start() did not fail")
+        except LspUnavailable:
+            results.check("lsp: a missing server is unavailable, not an error", True)
+    except Exception:
+        results.check("lsp: positions", False, traceback.format_exc())
+
+    log = os.path.join(workspace, "mock-lsp.jsonl")
+    client = None
+    started = False
+    try:
+        command = [sys.executable, "-m", "wiz_kernel.mock_lsp", "--log", log]
+        client = LspClient(command, cwd=workspace, timeout=10.0, start_timeout=20.0,
+                           env=_mock_lsp_environment())
+        client.start()
+        started = True
+        results.check("lsp: mock server initializes over stdio", True)
+        notebook = Notebook(["def prior : Nat := 0"])
+        code = '#eval String.append "😀" an'
+        document, start, line, character = notebook.position(code, len(code))
+        answer = completion_answer(
+            client.completion("file:///mock-notebook.wiz", document, line, character),
+            text=document, code=code, cursor=len(code), cell_start=start)
+        labels = [item["text"] for item in answer.items]
+        results.check("lsp: completion items are mapped for Jupyter",
+                      labels == ["mockValue", "mockFunction"]
+                      and answer.items[0]["type"] == "text"
+                      and answer.items[1]["type"] == "function"
+                      and answer.items[0]["signature"] == "Nat"
+                      and "mock" in answer.items[0]["documentation"].lower(),
+                      repr(answer.items))
+        results.check("lsp: the replacement range is the cell's word",
+                      answer.cursor_start == len(code) - 2
+                      and answer.cursor_end == len(code),
+                      f"start={answer.cursor_start} end={answer.cursor_end} "
+                      f"cursor={len(code)}")
+        messages = _read_json_lines(log)
+        completion_requests = [m for m in messages
+                               if m.get("method") == "textDocument/completion"]
+        sent = (completion_requests[-1].get("params", {}).get("position")
+                if completion_requests else None)
+        results.check("lsp: the cursor translation reaches the server (UTF-16)",
+                      sent == {"line": line, "character": character}
+                      and character == len(code) + 1,
+                      f"sent={sent!r} expected line={line} character={character}")
+
+        code2 = "def z : Nat := 0\nMOCK_INCOMPLETE"
+        document2, start2, line2, character2 = notebook.position(code2, len(code2))
+        answer2 = completion_answer(
+            client.completion("file:///mock-notebook.wiz", document2, line2, character2),
+            text=document2, code=code2, cursor=len(code2), cell_start=start2)
+        results.check("lsp: isIncomplete is carried through", answer2.is_incomplete,
+                      repr(answer2))
+
+        empty = "MOCK_NONE"
+        document3, start3, line3, character3 = notebook.position(empty, len(empty))
+        answer3 = completion_answer(
+            client.completion("file:///mock-notebook.wiz", document3, line3, character3),
+            text=document3, code=empty, cursor=len(empty), cell_start=start3)
+        results.check("lsp: an empty completion is an empty list, not an error",
+                      answer3.items == [] and answer3.available, repr(answer3))
+        hover3 = hover_answer(
+            client.hover("file:///mock-notebook.wiz", document3, line3, character3))
+        results.check("lsp: an empty hover is found=False",
+                      not hover3.found and hover3.data == {}, repr(hover3))
+
+        hover_doc, _, hover_line, hover_char = notebook.position("#eval mockHover",
+                                                                 len("#eval mockHover"))
+        hover = hover_answer(client.hover("file:///mock-notebook.wiz", hover_doc,
+                                          hover_line, hover_char))
+        results.check("lsp: hover markup is text/plain and text/markdown",
+                      hover.found
+                      and "mockHover" in hover.data.get("text/plain", "")
+                      and "mockHover" in hover.data.get("text/markdown", ""),
+                      repr(hover.data))
+    except Exception:
+        results.check("lsp: mock client", False, traceback.format_exc())
+    finally:
+        if client is not None:
+            client.close()
+            if started:
+                messages = _read_json_lines(log)
+                results.check("lsp: close sends shutdown and exit",
+                              any(m.get("method") == "shutdown" for m in messages)
+                              and any(m.get("method") == "exit" for m in messages),
+                              repr([m.get("method") for m in messages]))
+
+
+def live_lsp_checks(results: Results, wiz: str | None, workspace: str) -> None:
+    """Optional: the real `wiz lsp`, skipped cleanly when it cannot start."""
+    executable = find_wiz(wiz)
+    if executable is None:
+        results.skip("live lsp", "no wiz executable")
+        return
+    client = LspClient(lsp_command(executable, [], workspace), cwd=workspace,
+                       timeout=30.0, start_timeout=60.0)
+    try:
+        client.start()
+    except LspUnavailable as exc:
+        results.skip("live lsp: `wiz lsp`", str(exc))
+        return
+    try:
+        results.add("live lsp: `wiz lsp` initializes", PASS)
+        notebook = Notebook(["def notebookAnswer : Nat := 41",
+                             "def notebookBroken : Nat :="])
+        code = "#eval notebookAn"
+        document, start, line, character = notebook.position(code, len(code))
+        answer = completion_answer(
+            client.completion("file:///live-notebook.wiz", document, line, character),
+            text=document, code=code, cursor=len(code), cell_start=start)
+        labels = [item["text"] for item in answer.items]
+        results.check("live lsp: completion sees an earlier cell (unparsable cell tolerated)",
+                      "notebookAnswer" in labels, repr(labels[:20]))
+        hover_code = "#eval notebookAnswer"
+        hover_doc, _, hover_line, _ = notebook.position(hover_code, 8)
+        hover = hover_answer(client.hover("file:///live-notebook.wiz", hover_doc,
+                                          hover_line, 8))
+        results.check("live lsp: hover is found and describes the type",
+                      hover.found and "Nat" in hover.data.get("text/plain", ""),
+                      repr(hover.data))
+    except Exception:
+        results.check("live lsp", False, traceback.format_exc())
+    finally:
+        client.close()
+
+
+# -- 4: the live protocol ----------------------------------------------
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -394,8 +583,10 @@ def main(argv: list[str]) -> int:
     workspace = args.cwd or tempfile.mkdtemp(prefix="wiz-kernel-selftest-")
     try:
         wire_checks(results)
+        lsp_checks(results, workspace)
         backend_checks(results, args.wiz, args.backend, workspace)
         live_checks(results, args.wiz, args.backend, workspace)
+        live_lsp_checks(results, args.wiz, workspace)
     finally:
         if args.cwd is None:
             import shutil
