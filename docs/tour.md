@@ -330,7 +330,9 @@ Proofs can also be written with **tactics**, after `by`. `intro`, `exact`, `appl
 `assumption`, `rfl`, `rw` and `unfold` are in the Prelude, and since a tactic is a Wiz
 function, you can write your own (`examples/tactics.wiz`):
 
-```
+```wiz
+def double (n : Nat) : Nat := n + n
+
 def same_double (m n : Nat) (h : m = n) : double m = double n := by
   rw h
   rfl
