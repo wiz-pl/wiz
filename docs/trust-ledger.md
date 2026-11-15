@@ -81,7 +81,7 @@ accepted now, but will fail on 2027-05-14 unless individually reviewed or renewe
 ## Reducing the legacy rows
 
 The migration's 753 rows are not a renewal list: the reviewed base is now 676 rows
-(639 still carrying the migration marker), 77 fewer and just over a 10% reduction. The
+(349 still carrying the migration marker), 77 fewer and just over a 10% reduction. The
 removals are all structural, not a loosening of the gate:
 
 | what was removed | rows | why it was not trust |
@@ -97,8 +97,12 @@ The remaining rows fall into five groups, with the plan for each:
   function) and a `builtin extern:` row (the marshalling). These are the mechanical
   bulk and the next review unit: audit by C symbol against `runtime/` and `c/`, then
   replace the two `legacy:` rows with one reason naming the symbol and its contract.
-  Do not bulk-renew them. The numeric/container modules are done (see below); the OS
-  modules are the remaining unit.
+  Do not bulk-renew them. Both FFI audits are done: the OS/runtime modules (147
+  declarations, 290 rows) and the word/array/map modules (66 declarations, 198
+  rows) now carry symbol-specific reasons. `UInt64.ofNat` reduces mod 2^64 (the
+  marshalling used to panic above 2^64 while the doc promised modulo);
+  `Float64.ofNat` rounds for every `Nat` on another branch. The remaining legacy
+  rows are the mutual-recursion/`partial` group.
 * **Mutual recursion, 109 `partial` rows.** `Feral` (70), `Json` (9), `SatTactic` (7),
   `BvDecide` (6), `Tagged` (6), `Ring` (2) and the rest are compiled engines. Wiz's
   structural checker does not accept nested/mutual induction here, so they cannot be

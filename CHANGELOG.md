@@ -10,12 +10,18 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+<<<<<<< HEAD
 * `UInt64.ofNat` is total: it reduces the `Nat` modulo 2⁶⁴ in Wiz before the C call
   (`wiz_u64_id` takes a `uint64_t`, and the marshalling panicked above 2⁶⁴); the `ffi`
   group pins 2⁶⁴−1, 2⁶⁴ and 2⁶⁴+1 in C and LLVM. The trust ledger's numeric/container
   FFI rows (`Word`, `WordArray`, `WordMap`, `Intern`) are reviewed per C symbol, and
   `scripts/trust-ffi-audit.sh --check` compiles each extern's generated prototype
   against `runtime/wiz_rt.h` (9g, 22f).
+=======
+* runtime: `IO.arg` past the end returns `""` without the `i + 1` overflow at 2^64-1;
+  `Child.killGroup` after `Child.wait` is `ESRCH` instead of a signal to a possibly
+  reused process group; `Pty.name` uses a thread-local buffer (FFI audit).
+>>>>>>> origin/agent/ffi-audit-os
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to

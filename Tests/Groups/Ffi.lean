@@ -14,6 +14,8 @@ def ffiGroup : Group where
   cases := [
     { name := "IO actions run in order", run := fun _ =>
         ioRun "import IO\ndef main : IO Unit := do\n  IO.println \"one\";\n  IO.println \"two\"" "one\ntwo\n" },
+    { name := "IO.arg past the end is empty (no i+1 overflow at 2^64-1)", run := fun _ =>
+        ioRun "import IO\ndef main : IO Unit := do\n  a ← IO.arg 18446744073709551615;\n  IO.println a" "\n" },
     { name := "the world is linear: it can't be duplicated", run := fun _ =>
         ioFails "import IO\ndef bad (x : IO Unit) : IO Unit := fun w =>\n  let 1 (a, w') := x w; x w" "quantity 1" },
     { name := "linear sequencing: IO.bind, IO.then1 and do1 take an action and a continuation that use a linear value (L6)", run := fun _ => do
