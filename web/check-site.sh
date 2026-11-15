@@ -1,8 +1,8 @@
 #!/bin/sh
-# Check an assembled site without a server: the three entry points exist, the landing
-# page's local links resolve, and the playground's page and assets are all there.
-# External links (http, https, mailto, data) are not fetched. Run by CI after
-# web/build-site.sh, and usable locally on a `doc-site` tree.
+# Check an assembled site without a server: the four entry points exist, the landing
+# page's and the benchmark page's local links resolve, and the playground's page and
+# assets are all there. External links (http, https, mailto, data) are not fetched.
+# Run by CI after web/build-site.sh, and usable locally on a `doc-site` tree.
 #
 #   usage: web/check-site.sh [SITE]                (default: doc-site)
 set -u
@@ -16,9 +16,10 @@ need() {
   fi
 }
 
-# The site's three entry points and the documentation's scripts.
+# The site's four entry points and the documentation's scripts.
 need index.html
 need landing.css
+need bench/index.html
 need docs/index.html
 need docs/api.html
 need docs/api.json
@@ -91,12 +92,23 @@ check_links() {
 if [ -f "$SITE/index.html" ]; then
   check_links "$SITE/index.html" "$SITE"
 fi
+# The benchmark page must still be the generated one: a hand-written stub, a truncated
+# file or one that dropped the environment-dependence warning is not publishable.
+if [ -f "$SITE/bench/index.html" ]; then
+  for want in 'generated-bench-page' 'environment-dependent' 'How to reproduce'; do
+    if ! grep -qF "$want" "$SITE/bench/index.html"; then
+      echo "check-site: bench/index.html is not the generated page (missing '$want')" >&2
+      fail=1
+    fi
+  done
+  check_links "$SITE/bench/index.html" "$SITE/bench"
+fi
 if [ -f "$SITE/playground/index.html" ]; then
   check_links "$SITE/playground/index.html" "$SITE/playground"
 fi
 
 if [ "$fail" -eq 0 ]; then
-  echo "check-site: ok ($SITE: landing, docs, playground)"
+  echo "check-site: ok ($SITE: landing, docs, benchmarks, playground)"
 else
   echo "check-site: FAILED" >&2
 fi

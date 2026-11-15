@@ -6,9 +6,10 @@ the [API index](https://wiz-pl.github.io/wiz/docs/api.html) lists every module a
 declaration, and search covers names, doc comments and signatures; docs/building.md,
 "Documentation site"). The site's root is a landing page
 (<https://wiz-pl.github.io/wiz/>) and <https://wiz-pl.github.io/wiz/playground/> is a
-static playground that runs the self-hosted checker in the browser. This file indexes
-the repository's documentation; the published `/docs/` is generated from `lib/` by
-`wiz doc --lib`.
+static playground that runs the self-hosted checker in the browser;
+<https://wiz-pl.github.io/wiz/bench/> is the benchmark page, generated from the JSON
+checked into the repository. This file indexes the repository's documentation; the
+published `/docs/` is generated from `lib/` by `wiz doc --lib`.
 
 * [install.md](install.md): installing Wiz with tower or Nix, editor setup, a first
   grail package, troubleshooting
@@ -18,6 +19,12 @@ the repository's documentation; the published `/docs/` is generated from `lib/` 
 * [release.md](release.md): making a release (checklist, tagging, smoke test)
 * [CHANGELOG.md](../CHANGELOG.md)
 * [building.md](building.md)
+* [tools/wiz-mcp/README.md](../tools/wiz-mcp/README.md): a stdlib-only MCP server that
+  gives an MCP client (OpenCode, Claude Code, Zed) type checking, formatting, building,
+  and the language server's diagnostics, hover and tactic state
+* [bench/README.md](../bench/README.md): the standard-library benchmark harness, its
+  modes and how to compare two builds; the published page is generated from the JSON
+  the harness writes (web/build-bench.py)
 * [ci-runner.md](ci-runner.md): a self-hosted runner for the heavy CI shards
 * [exercises.md](exercises.md): generating the exercise tree from this one
 * [hardware.md](hardware.md): hardware in Wiz, from a circuit to a proved temporal property
@@ -26,6 +33,7 @@ the repository's documentation; the published `/docs/` is generated from `lib/` 
 * [dsls.md](dsls.md): the embedded languages (DSLs) in Wiz, and the conventions they follow
 * [error-codes.md](error-codes.md): the error codes and their quick fixes
 * [playground-lsp.md](playground-lsp.md): the playground's goals panel and the language-server contract a self-hosted `wiz lsp` must implement
+* [tools/jupyter.md](tools/jupyter.md): the opt-in Jupyter kernels for Wiz (`wiz repl` or a `wiz check` batch fallback) and the `%%scry` taint cell magic
 * [resources.md](resources.md): resources in Wiz: quantities, regions, optics, Feral and separation logic, with one running example
 * [ROADMAP.md](../ROADMAP.md)
 

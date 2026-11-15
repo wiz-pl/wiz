@@ -51,7 +51,7 @@ available only on unrestricted pairs**: `p.1` keeps one component and drops the 
 of an expression (`(act w).1` uses `w` ω times). A pair held at quantity 1 (or at a
 quantity variable) is taken apart with the split form, which binds both components:
 
-```
+```wiz no-check
 axiom Tok : Type
 def swap {A : Type} (1 p : A × Tok) : (1 t : Tok) × A := let 1 (a, t) := p; (t, a)
 def bad  {A : Type} (1 p : A × Tok) : A := p.1
@@ -172,7 +172,7 @@ Optional:
 Quantities are now **terms** of a primitive type `Qty`. A binder annotation is any
 quantity term: a literal (`1`, `ω`), or a variable written `%q`.
 
-```
+```wiz
 def app {A B : Type} {q : Qty} (f : (%q x : A) → B) (%q a : A) : B := f a
 ```
 
@@ -207,7 +207,7 @@ Optional:
 Inductive and coinductive types are **anonymous**: `μ D i` and `ν D i` for a
 *description* `D : Desc I`. Constructors are tags of a finite `Enum`:
 
-```
+```wiz no-check
 def NatD : Desc Unit :=
   Desc.arg 1 (Enum [zero, succ]) (fun t => ecase t [Desc.ret (), Desc.rec 1 () (Desc.ret ())])
 def Nat : Type := μ NatD ()
@@ -249,7 +249,7 @@ counting (`Nat`), only lets a method use local variables in erased positions. Er
 
 ## 4e (part 1): `inductive` and `structure`
 
-```
+```wiz
 inductive Vec (A : Type) : Nat → Type where
   | nil : Vec A .zero
   | cons {0 n : Nat} (x : A) (xs : Vec A n) : Vec A (.succ n)
@@ -322,7 +322,7 @@ positivity check applies unchanged).
 
 ## 4e (part 2): pattern matching and structural recursion
 
-```
+```wiz no-check
 def add : Nat → Nat → Nat
   | .zero, n => n
   | .succ m, n => .succ (add m n)
@@ -346,7 +346,7 @@ re-bound with `y := t`, and the branch is transported back along the equation wi
 
 Coinductive types and **copatterns**:
 
-```
+```wiz
 coinductive Stream (A : Type) where
   head : A
   tail : Stream A
@@ -368,7 +368,7 @@ A copattern definition with **no corecursive observation** is not recursive at a
 it compiles to `cocon`, one cell in front of the values given, and `f` may not occur
 on its right-hand sides. That is how a delay is written:
 
-```
+```wiz no-check
 def register {A : Type} (init : A) (s : Stream A) : Stream A
   | .head => init
   | .tail => s
@@ -432,7 +432,7 @@ your choice over `Acc`/`termination_by` and guarded recursion. `μ` and `ν` car
 
 Definitions with a sized signature use all of this automatically:
 
-```
+```wiz no-check
 def fib {i : Size} : Nat^i → Nat
   | .zero => .succ .zero
   | .succ .zero => .succ .zero
@@ -451,7 +451,7 @@ as-patterns (size-preserving functions like `minus` want `x@.zero`).
 
 ## 4g: equality of descriptions
 
-```
+```wiz no-check
 def refute (e : List Nat = List Bool) : Empty := absurd (((e.2.1.2 'cons).1).2.1.2 'succ)
 def ne (e : UIntN 8 = UIntN 16) : Empty := absurd ((e.1.1.2 16).1 (refl 16))
 #reduce fun (h : List A = List B) (x y : A) => (cast h [x, y] : List B)   -- [cast _ x, cast _ y]
@@ -519,7 +519,7 @@ design in `wiz-notes/linear-case-design.md`, K1 and the unit eliminator (K2a wit
   bound at 1 (the scrutinee is then bound at 1 too), and a field bound at 1 is linear
   again for a nested match.
 
-```
+```wiz no-check
 inductive Res1 (A : Type) where
   | ok (1 a : A)
   | err (e : Nat) (1 back : A)

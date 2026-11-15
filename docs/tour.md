@@ -25,7 +25,7 @@ Contents: [0 A program](#0-a-program) · [1 Values and functions](#1-values-and-
 
 ## 0: a program
 
-```
+```wiz run
 import IO
 
 def greet (name : String) : String := "hello, " ++ name
@@ -49,7 +49,7 @@ native code through C and runs it; `wiz build FILE -o OUT` keeps the executable.
 
 ## 1: values and functions
 
-```
+```wiz
 import Prelude
 
 def answer : Nat := 42
@@ -82,7 +82,7 @@ The Prelude has the usual types: `Nat` (arbitrary precision), `Bool`, `String`,
 `List`, `Option`, pairs `A × B`. It also has `let`, `if … then … else`, `++` and list
 literals:
 
-```
+```wiz
 def describe (n : Nat) : String :=
   let big := Nat.lt 100 n;
   if big then "big" else "small"
@@ -97,7 +97,7 @@ functions that return a `Bool` (`Nat.lt`, `Nat.le`, `Nat.beq`); there are no `<`
 
 ## 2: inductive types and pattern matching
 
-```
+```wiz
 inductive Shape where
   | circle (r : Nat)
   | rect (w h : Nat)
@@ -115,7 +115,7 @@ An `inductive` type lists its constructors, which live in its namespace:
 `match e with | … => …`. Types take parameters, and recursion is fine as long as it is
 on a smaller piece of the argument (it is *structural*, so the checker knows it stops):
 
-```
+```wiz
 inductive Tree (A : Type) where
   | leaf
   | node (l : Tree A) (x : A) (r : Tree A)
@@ -130,7 +130,7 @@ def t : Tree Nat := .node (.node .leaf 1 .leaf) 2 (.node .leaf 3 .leaf)
 
 Matching works on several values at once, with `_` for "anything", and patterns nest:
 
-```
+```wiz
 def zipWith {A B C : Type} (f : A → B → C) : List A → List B → List C
   | .cons a as, .cons b bs => .cons (f a b) (zipWith f as bs)
   | _, _ => .nil
@@ -178,7 +178,7 @@ Prop inductive may store a type of any universe; only its *elimination* is restr
 
 ## 3: structures
 
-```
+```wiz
 import Deriving
 
 structure Point where
@@ -209,7 +209,7 @@ with named arguments if you like.
 A field's type may mention earlier fields. Here the second field is a *proof* about the
 first (proofs are section 6):
 
-```
+```wiz
 structure Positive where
   n : Nat
   pos : Nat.lt 0 n = .true
@@ -222,7 +222,9 @@ second component's type depends on the first. (`examples/tour/03-structures.wiz`
 
 ## 4: type classes and numerals
 
-```
+```wiz
+import Text
+
 class Describe (A : Type) where
   describe : A → String
 
@@ -251,7 +253,7 @@ Arithmetic is built the same way. `a + b` is `Add.add a b`, and a numeral `5` at
 other than `Nat` is `OfNat.ofNat 5`, so the same syntax works at every numeric type
 that has instances:
 
-```
+```wiz
 import Int
 import Word
 
@@ -277,7 +279,7 @@ checker and in compiled code. (`examples/tour/04-classes.wiz`;
 A type can depend on a value. The classic example is the vector, a list whose type says
 how long it is:
 
-```
+```wiz
 inductive Vec (A : Type) : Nat → Type where
   | nil : Vec A .zero
   | cons {0 n : Nat} (x : A) (xs : Vec A n) : Vec A (.succ n)
@@ -316,7 +318,7 @@ The `0` in `{0 n : Nat}` is a **quantity**: the length is only used in types, so
 erased, and at run time a vector is just a list (section 7). Types can also be computed
 by ordinary functions:
 
-```
+```wiz
 def NTuple : Nat → Type
   | .zero => Unit
   | .succ n => Nat × NTuple n
@@ -332,7 +334,7 @@ Propositions are types, and a proof is a value of that type. `a = b` is the prop
 that `a` and `b` are equal, and `rfl` proves it when both sides compute to the same
 value:
 
-```
+```wiz
 import Logic
 
 def two_plus_two : 2 + 2 = 4 := rfl
@@ -345,7 +347,7 @@ A statement about every `n` is a function from `n` to a proof, and a proof by in
 is a recursive function. `zero_add` below recurses on `n`, and the case for `.succ n`
 uses the proof for `n`:
 
-```
+```wiz
 def congrSucc {a b : Nat} (e : a = b) : Nat.succ a = Nat.succ b :=
   transp (fun b _ => Nat.succ a = Nat.succ b) (refl (Nat.succ a)) e
 
@@ -382,7 +384,9 @@ Proofs can also be written with **tactics**, after `by`. `intro`, `exact`, `appl
 `assumption`, `rfl`, `rw` and `unfold` are in the Prelude, and since a tactic is a Wiz
 function, you can write your own (`examples/tactics.wiz`):
 
-```
+```wiz
+def double (n : Nat) : Nat := n + n
+
 def same_double (m n : Nat) (h : m = n) : double m = double n := by
   rw h
   rfl
@@ -404,7 +408,11 @@ h : m = n
 `lib/Logic.wiz` defines the connectives with Lean's names: `∧` (`And.intro`,
 `h.1`, `h.2`), `∨` (`Or.inl`, `Or.inr`, `Or.elim`), `¬`, `↔` and `∃`:
 
-```
+```wiz
+import Logic
+
+def double (n : Nat) : Nat := n + n
+
 def and_swap {P Q : Prop} (h : P ∧ Q) : Q ∧ P := And.intro h.2 h.1
 def exists_double : ∃ n, double n = 8 := Ex.intro (fun n => double n = 8) 4 rfl
 ```
@@ -413,7 +421,7 @@ Equality in Wiz is **observational**: `a = b` is not an inductive type but compu
 from the type of `a` and `b`. At a function type it is pointwise equality, so function
 extensionality is a definition, not an axiom:
 
-```
+```wiz
 def funext' {A B : Type} (f g : A → B) (h : (x : A) → f x = g x) : f = g := h
 ```
 
@@ -435,7 +443,7 @@ variable at run time:
 | `1` | exactly once: linear | resources: a file handle, a channel end, the world |
 | `ω` | any number of times | everything else; the default |
 
-```
+```wiz
 def id {0 A : Type} (1 x : A) : A := x
 def dup {0 A : Type} (x : A) : A × A := (x, x)
 ```
@@ -449,7 +457,7 @@ time.
 Quantity `1` gives you **linear** types: a value that must be used exactly once, never
 copied and never dropped. That is the right type for a resource:
 
-```
+```wiz
 import IO
 
 axiom Ticket : Type
@@ -465,7 +473,7 @@ def trip (1 t : Ticket) : IO Unit := do1
 (`axiom` declares a type or a function without defining it; a real library would
 implement them with `extern`, section 9.) Try to cheat and the checker stops you:
 
-```
+```wiz no-check
 def twice (1 t : Ticket) : IO Unit := do1
   Ticket.ride t;
   Ticket.ride t
@@ -482,7 +490,7 @@ Pairs can have linear components. A pair held linearly is taken apart with `let 
 which binds both components at once. A projection `p.1` would quietly drop the other
 component, so the checker refuses it on a linear pair:
 
-```
+```wiz no-check
 def swap {0 A : Type} (1 p : A × Ticket) : (1 t : Ticket) × A :=
   let 1 (a, t) := p;
   (t, a)
@@ -507,7 +515,7 @@ types.)
 An inductive type is defined by how you build its values, and a **coinductive** type by
 what you can observe of them. A stream has a head and a tail, forever:
 
-```
+```wiz
 coinductive Stream (A : Type) where
   head : A
   tail : Stream A
@@ -535,7 +543,7 @@ as every observation answers in finitely many steps (it is *productive*). The ch
 makes sure each `.tail` is a call of the function being defined, *guarded* by the
 observation. A definition that would spin forever is rejected:
 
-```
+```wiz no-check
 def stuck (n : Nat) : Stream Nat
   | .head => n
   | .tail => (stuck n).tail
@@ -547,7 +555,7 @@ types, [stages/04-data.md](stages/04-data.md).)
 
 ## 9: the C FFI
 
-```
+```wiz run
 -- test: run
 import IO
 
@@ -583,7 +591,7 @@ is a program, and its test (the first line, `-- test: run`) runs it.
 `lib/Hdl/Core.wiz` is a hardware description library: circuits are Wiz values,
 simulated by evaluation and turned into Verilog.
 
-```
+```wiz
 import Hdl.Core
 
 def B4 : HwTy := HwTy.bits 4
@@ -632,7 +640,7 @@ UART for a Lattice iCEstick FPGA board is written in it.
 A program bigger than one file is a **grail package**: a directory with a `grail.wiz`,
 which is itself Wiz:
 
-```
+```wiz
 import Grail
 def package : Package := Package.new "hello"
   |> Package.lib "greet" "src"           -- the modules under src/: `import Greet` is src/Greet.wiz
