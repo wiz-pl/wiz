@@ -270,6 +270,9 @@ def get (b : ByteArray) (i : Nat) : Nat := if h : i < b.size then (b[i]).toNat e
 /-- `Bytes.slice b start len`: from `start`, at most `len` bytes (both clamp). -/
 def slice (b : ByteArray) (start len : Nat) : ByteArray := b.extract start (start + len)
 
+/-- `Bytes.append a b`: the bytes of `a`, then `b`'s. -/
+def append (a b : ByteArray) : ByteArray := a.append b
+
 def toList (b : ByteArray) : List Nat := b.toList.map (·.toNat)
 
 /-- `b` as numbers, in `Bytes.show`'s spelling: `[1, 2, 255]`. -/
@@ -353,7 +356,7 @@ def bytesNative? (op : Name) (args : Array RVal) (num : Nat → Nat) : Option RV
       .obj 0 #[chars]
   | some "wiz_bytes_slice" => (bs 0).map fun b => .bytes (BytesModel.slice b (num 1) (num 2))
   | some "wiz_bytes_append" => (bs 0).map fun b => match bs 1 with
-    | some c => .bytes (b ++ c)
+    | some c => .bytes (BytesModel.append b c)
     | none => .erased
   | some "wiz_bytes_eq" => (bs 0).map fun b => match bs 1 with
     | some c => .obj (if b == c then 1 else 0) #[]

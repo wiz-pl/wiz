@@ -202,13 +202,13 @@ def nativeOp (op : Name) (args : Array IVal) : RunM IVal := do
     | _ => pure ()
     pure pv
   | _ =>
-    match RVal.ExternSig.ofKey? op |>.map (·.cname) with
+    match (RVal.ExternSig.ofKey? op).map (·.cname) with
     | some c =>
       let bs (i : Nat) : Option ByteArray := match args[i]? with
         | some (.bytes b) => some b
         | _ => none
       let r ← match c, bs 0, bs 1 with
-        | "wiz_bytes_empty", _, _ => pure (some (.bytes #[]))
+        | "wiz_bytes_empty", _, _ => pure (some (.bytes ByteArray.empty))
         | "wiz_bytes_push", some b, _ => pure (some (.bytes (BytesModel.push b (n 1))))
         | "wiz_bytes_size", some b, _ => pure (some (.num b.size))
         | "wiz_bytes_get", some b, _ => pure (some (.num (BytesModel.get b (n 1))))
@@ -218,7 +218,7 @@ def nativeOp (op : Name) (args : Array IVal) : RunM IVal := do
         | "wiz_bytes_to_string", some b, _ => do
           pure (some (← strIVal (BytesModel.toCString b)))
         | "wiz_bytes_slice", some b, _ => pure (some (.bytes (BytesModel.slice b (n 1) (n 2))))
-        | "wiz_bytes_append", some b, some c => pure (some (.bytes (b ++ c)))
+        | "wiz_bytes_append", some b, some c => pure (some (.bytes (BytesModel.append b c)))
         | "wiz_bytes_eq", some b, some c => pure (some (.tag (if b == c then 1 else 0)))
         | _, _, _ => pure none
       match r with
