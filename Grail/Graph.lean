@@ -32,10 +32,25 @@ done, so `-j 1` and `-j 8` print the same.
 namespace Grail
 open Wiz Cache
 
-/-- (9f) `link.txt`, beside `main.c`: one line per `link_c` file (`src PATH`) and
-`link_lib` library (`lib NAME`). -/
-def renderLink (l : Build.Link) : String :=
-  String.join (l.sources.toList.map (s!"src {·}\n")) ++ String.join (l.libs.toList.map (s!"lib {·}\n"))
+/-- `p` relative to `root`, or `p` itself when it is outside it (a `link_c` file may
+live outside the package). Relative paths keep `link.txt` — and, through it, the link
+job's key — independent of where the package is checked out. -/
+def relativeTo (root p : System.FilePath) : IO String := do
+  try
+    let r := (← IO.FS.realPath root).toString
+    let q := (← IO.FS.realPath p).toString
+    pure (if q.startsWith (r ++ "/") then (q.drop (r.length + 1)).toString else p.toString)
+  catch _ => pure p.toString
+
+/-- (9f) `link.txt`, beside `main.c`: one line per `link_c` file (`src PATH`, relative
+to the package when it is inside it) and `link_lib` library (`lib NAME`). -/
+def renderLink (dir : System.FilePath) (l : Build.Link) : IO String := do
+  let mut out := ""
+  for s in l.sources do
+    out := out ++ s!"src {← relativeTo dir (System.FilePath.mk s)}\n"
+  for lib in l.libs do
+    out := out ++ s!"lib {lib}\n"
+  pure out
 
 def readLink (f : System.FilePath) : IO Build.Link := do
   if !(← f.pathExists) then return {}
@@ -369,10 +384,15 @@ def Runner.prep (r : Runner) (update : Bool) (results : TestResults) (n : Node)
     let o := d 0
     -- (9f) the `link_c` files (compiled here, with `cflags`) and `link_lib` libraries
     let link ← readLink ((d 1).out / "link.txt")
+    -- (`link.txt` names a `link_c` file relative to the package, so the link key does not
+    -- depend on the checkout's absolute path; the compiler still needs a usable path)
+    let resolve (f : String) : System.FilePath :=
+      let p := System.FilePath.mk f
+      if p.isAbsolute then p else r.ctx.dir / p
     let mut contents : Array String := #[]
     for f in link.sources do
-      contents := contents.push (← try pure (toString (hash (← IO.FS.readBinFile f))) catch _ => pure "missing")
-    let srcArgs := if link.sources.isEmpty then #[] else #["-O2", "-w"] ++ link.sources ++ tc.cflags.toArray
+      contents := contents.push (← try pure (toString (hash (← IO.FS.readBinFile (resolve f)))) catch _ => pure "missing")
+    let srcArgs := if link.sources.isEmpty then #[] else #["-O2", "-w"] ++ link.sources.map (fun f => (resolve f).toString) ++ tc.cflags.toArray
     -- the output is `out/name`, so the name is part of what the job makes: two programs
     -- with the same object and link files (a test's `test-…` beside the exe it mirrors)
     -- must not share a directory and a key
@@ -685,13 +705,13 @@ def Runner.tests (r : Runner) (targets : List Target) (filters : List String) (u
 
 /-- The IR, C and link text of a checked program. One job writes all three, so a file
 is elaborated once instead of once per job. -/
-def writeCode (out : System.FilePath) (s : CommandState ZeroOneMany) : IO (Except String Unit) :=
+def writeCode (dir out : System.FilePath) (s : CommandState ZeroOneMany) : IO (Except String Unit) :=
   match mainDecls s with
   | .error e => pure (.error e)
   | .ok (ds, io) => do
     IO.FS.writeFile (out / "main.ir") ("\n".intercalate (ds.toList.map (·.toString)))
     IO.FS.writeFile (out / "main.c") (C.program ds io (Build.extraC s) s.globals.unboxStructs)
-    IO.FS.writeFile (out / "link.txt") (renderLink (Build.linkOf s))
+    IO.FS.writeFile (out / "link.txt") (← renderLink dir (Build.linkOf s))
     pure (.ok ())
 
 /-- Run one job (`(KIND ARGS…)`), writing into `out`. -/
@@ -713,8 +733,8 @@ def Runner.runJob (r : Runner) (out : System.FilePath) : Sx → IO (Except Strin
     if hasErrors s then return .error msgs
     IO.print msgs
     IO.FS.writeFile (out / "messages.txt") msgs
-    writeCode out s
-  | .l #[.a "ir", .a file] => do writeCode out (← r.elab file)
+    writeCode r.ctx.dir out s
+  | .l #[.a "ir", .a file] => do writeCode r.ctx.dir out (← r.elab file)
   | .l #[.a "run-on", .a exe, .a input, .a file] => do
     runOn exe (← IO.FS.readFile input) out file
   | .l #[.a "test", .a file, .a kind, .a exe] => do

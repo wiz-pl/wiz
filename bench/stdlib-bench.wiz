@@ -1,0 +1,334 @@
+import IO
+import Std
+import Text
+import Word
+import WordMap
+import Hdl.Core
+
+-- A small, deterministic benchmark of the standard library's hot data structures:
+-- `StrMap`, `Array`, `Bytes`, `String` (a `List Char`), the ordered read-back of
+-- `U64Map` (`toList` sorts), and `NatList.hash` (lib/Hdl/Core.wiz).
+--
+--   wiz build bench/stdlib-bench.wiz -o stdlib-bench
+--   ./stdlib-bench MODE N
+--
+-- Every mode prints one checksum of the work it did (so nothing is dead code); the
+-- harness `scripts/stdlib-bench.py` runs each mode a few times, takes the median and
+-- writes JSON. Sizes are the argument, so the same binary gives the same work on every
+-- run and on every machine.
+--
+-- Modes (the number in parentheses is the default N):
+--   strmap-insert (200000)  build N distinct `Str` keys, insert them all
+--   strmap-find   (200000)  build the map, 8 passes of N pseudo-random hits
+--   strmap-miss   (200000)  build the map, 8 passes of N misses
+--   strmap-iterate (200000) visit every entry by its key, 4 passes (the public API has
+--                           no fold, so iteration is lookups over the key array)
+--   array-push    (2000000) push N numbers
+--   array-index   (500000)  build, then 10 passes of N reads and writes
+--   array-map     (1000000) build, then map every element into a new array
+--   array-fold    (1000000) build, then fold every element
+--   bytes-append  (2000000) append a 16-byte chunk N times
+--   bytes-slice   (2000000) slice 64 bytes out of an 8 KiB buffer N times
+--   bytes-compare (2000000) compare two equal 4 KiB buffers N times
+--   text-split    (40000)   split an N-chunk string on ","
+--   text-replace  (40000)   replace every "," with "Z" in an N-chunk string
+--   text-trim     (40000)   trim an N-chunk string padded with spaces
+--   text-eq       (40000)   compare two equal N-chunk strings, 200 times
+--   text-suffix   (40000)   endsWith, stripSuffix and dropEnd on an N-chunk string
+--   sort          (100000)  insert N keys into `U64Map`, read them back sorted 8 times
+--   hash          (300000)  hash an 8-number list N times (different seeds)
+--
+-- (The harness passes a mode and size; with no arguments the program runs every mode at
+-- its default size and prints one checksum per line.)
+
+def next (x : Nat) : Nat := Nat.mod (x * 1103515245 + 12345) 2147483648
+def digest (acc x : Nat) : Nat := Nat.mod (acc * 131 + Nat.mod x 1000000007) 1000000007
+
+-- ## StrMap
+
+def emptyStr : Str := Str.ofString ""
+def keyOf (i : Nat) : Str := Str.ofString (String.append "key-" (Nat.toString i))
+def keysFrom (base n : Nat) : Nat → Array Str → Array Str
+  | .zero, a => a
+  | .succ k, a => keysFrom base n k (Array.push a (keyOf (Nat.add base (Nat.sub n (Nat.succ k)))))
+def keyArray (n : Nat) : Array Str := keysFrom 0 n n Array.empty
+def missKeyArray (n : Nat) : Array Str := keysFrom n n n Array.empty
+
+def mapInsert (keys : Array Str) (n : Nat) : Nat → StrMap Nat → StrMap Nat
+  | .zero, m => m
+  | .succ k, m =>
+    mapInsert keys n k (StrMap.insert m (Array.getD keys (Nat.sub n (Nat.succ k)) emptyStr) (Nat.sub n k))
+
+def mapFind (keys : Array Str) (m : StrMap Nat) (n : Nat) : Nat → Nat → Nat → Nat
+  | .zero, _, acc => acc
+  | .succ k, x, acc =>
+    let y := next x;
+    let i := Nat.mod y n;
+    mapFind keys m n k y (digest acc (StrMap.findD m (Array.getD keys i emptyStr) 0))
+
+def mapMiss (keys : Array Str) (m : StrMap Nat) (n : Nat) : Nat → Nat → Nat → Nat
+  | .zero, _, acc => acc
+  | .succ k, x, acc =>
+    let y := next x;
+    let i := Nat.mod y n;
+    mapMiss keys m n k y (digest acc (StrMap.findD m (Array.getD keys i emptyStr) 1))
+
+def runStrMapInsert (n : Nat) : Nat :=
+  let ks := keyArray n;
+  let m := mapInsert ks n n StrMap.empty;
+  let ω sz := StrMap.size m;
+  let ω a := StrMap.findD m (keyOf 0) 0;
+  let ω b := StrMap.findD m (keyOf (Nat.sub n 1)) 0;
+  let ω c := StrMap.findD m (keyOf (Nat.div n 2)) 0;
+  let ω missing := StrMap.findD m (keyOf (Nat.add n 1)) 1;
+  digest (digest (digest sz a) (digest b c)) missing
+
+def runStrMapFind (n : Nat) : Nat :=
+  let ks := keyArray n;
+  let m := mapInsert ks n n StrMap.empty;
+  let ω sz := StrMap.size m;
+  digest sz (mapFind ks m n (Nat.mul 8 n) 7 0)
+
+def mapIterate (keys : Array Str) (m : StrMap Nat) (n : Nat) : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ k, acc =>
+    let i := Nat.sub n (Nat.succ k);
+    mapIterate keys m n k (digest acc (StrMap.findD m (Array.getD keys i emptyStr) 0))
+def mapIteratePasses (keys : Array Str) (m : StrMap Nat) (n : Nat) : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ k, acc => mapIteratePasses keys m n k (mapIterate keys m n n acc)
+
+def runStrMapIterate (n : Nat) : Nat :=
+  let ks := keyArray n;
+  let m := mapInsert ks n n StrMap.empty;
+  let ω sz := StrMap.size m;
+  digest sz (mapIteratePasses ks m n 4 0)
+
+def runStrMapMiss (n : Nat) : Nat :=
+  let ks := keyArray n;
+  let misses := missKeyArray n;
+  let m := mapInsert ks n n StrMap.empty;
+  let ω sz := StrMap.size m;
+  digest sz (mapMiss misses m n (Nat.mul 8 n) 7 0)
+
+-- ## Array
+
+def arrayPush (n : Nat) : Nat → Array Nat → Array Nat
+  | .zero, a => a
+  | .succ k, a => arrayPush n k (Array.push a (Nat.mod (k * 7919) 1000000007))
+def arraySumSample (a : Array Nat) (n : Nat) : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ k, acc => arraySumSample a n k (digest acc (Array.getD a (Nat.sub n (Nat.succ k)) 0))
+
+def runArrayPush (n : Nat) : Nat :=
+  let a := arrayPush n n Array.empty;
+  let ω sz := Array.size a;
+  digest sz (arraySumSample a n 1000 0)
+
+def arrayIndexPass (n : Nat) : Nat → Array Nat → Nat → Array Nat × Nat
+  | .zero, a, acc => (a, acc)
+  | .succ i, a, acc =>
+    let j := Nat.mod (i * 7919) n;
+    let x := Array.getD a j 0;
+    arrayIndexPass n i (Array.set a i (Nat.mod (Nat.add x 1) 1000000000)) (digest acc x)
+def arrayIndexPasses (n : Nat) : Nat → Array Nat → Nat → Nat
+  | .zero, _, acc => acc
+  | .succ k, a, acc =>
+    let r := arrayIndexPass n n a acc;
+    arrayIndexPasses n k r.1 r.2
+
+def runArrayIndex (n : Nat) : Nat := arrayIndexPasses n 10 (arrayPush n n Array.empty) 0
+
+def arrayMapGo : Nat → Array Nat → Array Nat → Array Nat
+  | .zero, _, out => out
+  | .succ k, a, out =>
+    arrayMapGo k a (Array.push out (Nat.mod (Nat.add (Nat.mul (Array.getD a k 0) 3) 1) 1000000007))
+
+def runArrayMap (n : Nat) : Nat :=
+  let a := arrayPush n n Array.empty;
+  let b := arrayMapGo n a Array.empty;
+  let ω sz := Array.size b;
+  digest sz (arraySumSample b n 1000 0)
+
+def arrayFoldGo (a : Array Nat) : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ k, acc => arrayFoldGo a k (digest acc (Array.getD a k 0))
+
+def runArrayFold (n : Nat) : Nat :=
+  let a := arrayPush n n Array.empty;
+  arrayFoldGo a n 0
+
+-- ## Bytes
+
+def byteChunk : Bytes := Bytes.ofList [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+
+def bytesAppendGo (chunk : Bytes) : Nat → Bytes → Bytes
+  | .zero, b => b
+  | .succ k, b => bytesAppendGo chunk k (Bytes.append b chunk)
+
+def bytesSample (b : Bytes) (n : Nat) : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ k, acc =>
+    let i := Nat.mod (k * 7919) n;
+    bytesSample b n k (digest acc (Bytes.get b i))
+
+def runBytesAppend (n : Nat) : Nat :=
+  let b := bytesAppendGo byteChunk n Bytes.empty;
+  let ω sz := Bytes.size b;
+  digest sz (bytesSample b n 1000 0)
+
+def baseBytes : Bytes := Bytes.range 8192
+
+def bytesSliceGo (b : Bytes) : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ k, acc =>
+    let s := Bytes.slice b (Nat.mod (k * 7919) 8000) 64;
+    bytesSliceGo b k (digest (digest acc (Bytes.size s)) (Bytes.get s 0))
+
+def runBytesSlice (n : Nat) : Nat := bytesSliceGo baseBytes n 0
+
+def bytesCompareGo (a b : Bytes) : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ k, acc => bytesCompareGo a b k (digest acc (match Bytes.eq a b with
+    | .true => 1
+    | .false => 0))
+
+def runBytesCompare (n : Nat) : Nat := bytesCompareGo (Bytes.range 4096) (Bytes.range 4096) n 0
+
+-- ## String (a `List Char`)
+
+def chunk : String := "abcdefghij"
+def textChunks : Nat → List String → List String
+  | .zero, acc => acc
+  | .succ k, acc => textChunks k (.cons chunk acc)
+def textOf (n : Nat) : String := String.join (textChunks n .nil)
+
+def splitChunk : String := "abc,"
+def splitChunks : Nat → List String → List String
+  | .zero, acc => acc
+  | .succ k, acc => splitChunks k (.cons splitChunk acc)
+
+def splitLengths : List String → Nat → Nat
+  | .nil, acc => acc
+  | .cons s ss, acc => splitLengths ss (digest acc (String.length s))
+
+def comma : String := String.singleton (Char.mk 44)
+def splitPasses (s : String) : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ k, acc => splitPasses s k (digest acc (splitLengths (String.splitOn s comma) 0))
+
+def runTextSplit (n : Nat) : Nat := splitPasses (String.join (splitChunks n .nil)) 8 0
+
+def zRep : String := String.singleton (Char.mk 90)
+def replacePasses (s : String) : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ k, acc =>
+    let r := String.replace s comma zRep;
+    replacePasses s k (digest acc (digest (String.length r) (String.length (String.take 8 r))))
+
+def runTextReplace (n : Nat) : Nat := replacePasses (String.join (splitChunks n .nil)) 8 0
+
+def trimPasses (s : String) : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ k, acc =>
+    let r := String.trim s;
+    trimPasses s k (digest acc (digest (String.length r) (String.length (String.take 8 r))))
+
+def runTextTrim (n : Nat) : Nat :=
+  let s := String.join (splitChunks n .nil);
+  let padded := String.append "  " (String.append s "  ");
+  trimPasses padded 8 0
+
+def textEqGo (a b : String) : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ k, acc => textEqGo a b k (digest acc (match String.eq a b with
+    | .true => 1
+    | .false => 0))
+
+def runTextEq (n : Nat) : Nat :=
+  let a := textOf n;
+  let b := textOf n;
+  textEqGo a b 200 0
+
+def suffixPasses (s p : String) : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ k, acc =>
+    let e := String.endsWith s p;
+    let st := String.stripSuffix s p;
+    let d := String.dropEnd 10 s;
+    suffixPasses s p k (digest acc (digest (match e with
+      | .true => 1
+      | .false => 0) (digest (match st with
+        | .some r => String.length r
+        | .none => 0) (String.length d))))
+
+def runTextSuffix (n : Nat) : Nat := suffixPasses (textOf n) chunk 3 0
+
+-- ## sorting (the read-back of `U64Map`, whose keys are sorted)
+
+def sortKey (n y : Nat) : U64 := U64.ofNat (Nat.mod y (Nat.mul 4 n))
+def sortInsert (n : Nat) : Nat → Nat → U64Map Nat → U64Map Nat
+  | .zero, _, m => m
+  | .succ k, x, m =>
+    let y := next x;
+    sortInsert n k y (U64Map.insert m (sortKey n y) k)
+
+def digestPairs : List (U64 × Nat) → Nat → Nat
+  | .nil, acc => acc
+  | .cons e es, acc => digestPairs es (digest acc (Nat.add e.1.toNat e.2))
+
+def sortPasses (m : U64Map Nat) : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ k, acc => sortPasses m k (digest acc (digestPairs (U64Map.toList m) 0))
+
+def runSort (n : Nat) : Nat :=
+  let m := sortInsert n n 7 U64Map.empty;
+  digest (U64Map.size m) (sortPasses m 8 0)
+
+-- ## hashing
+
+def hashList (k : Nat) : List Nat :=
+  .cons k (.cons (Nat.add k 1) (.cons (Nat.add k 2) (.cons (Nat.add k 3) (.cons (Nat.add k 4) (.cons (Nat.add k 5) (.cons (Nat.add k 6) (.cons (Nat.add k 7) .nil)))))))
+
+def hashBase : List Nat := hashList 0
+def hashGo (l : List Nat) : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ k, acc => hashGo l k (digest acc (NatList.hash l (Nat.add k 7)))
+
+def runHash (n : Nat) : Nat := hashGo hashBase n 0
+
+-- ## driver
+
+def run (mode : String) (n : Nat) : Nat :=
+  if String.eq mode "strmap-insert" then runStrMapInsert n else if String.eq mode "strmap-find" then runStrMapFind n else if String.eq mode "strmap-miss" then runStrMapMiss n else if String.eq mode "strmap-iterate" then runStrMapIterate n else if String.eq mode "array-push" then runArrayPush n else if String.eq mode "array-index" then runArrayIndex n else if String.eq mode "array-map" then runArrayMap n else if String.eq mode "array-fold" then runArrayFold n else if String.eq mode "bytes-append" then runBytesAppend n else if String.eq mode "bytes-slice" then runBytesSlice n else if String.eq mode "bytes-compare" then runBytesCompare n else if String.eq mode "text-split" then runTextSplit n else if String.eq mode "text-replace" then runTextReplace n else if String.eq mode "text-trim" then runTextTrim n else if String.eq mode "text-eq" then runTextEq n else if String.eq mode "text-suffix" then runTextSuffix n else if String.eq mode "sort" then runSort n else if String.eq mode "hash" then runHash n else 0
+
+def argN : List String → Nat
+  | .cons _ (.cons s _) => match String.parseNat s with
+    | .some n => n
+    | .none => 1000
+  | _ => 1000
+def argMode : List String → String
+  | .cons m _ => m
+  | .nil => "all"
+
+def defaultN (mode : String) : Nat :=
+  if String.eq mode "strmap-insert" then 200000 else if String.eq mode "strmap-find" then 200000 else if String.eq mode "strmap-miss" then 200000 else if String.eq mode "strmap-iterate" then 200000 else if String.eq mode "array-push" then 2000000 else if String.eq mode "array-index" then 500000 else if String.eq mode "array-map" then 1000000 else if String.eq mode "array-fold" then 1000000 else if String.eq mode "bytes-append" then 2000000 else if String.eq mode "bytes-slice" then 2000000 else if String.eq mode "bytes-compare" then 2000000 else if String.eq mode "text-split" then 40000 else if String.eq mode "text-replace" then 40000 else if String.eq mode "text-trim" then 40000 else if String.eq mode "text-eq" then 40000 else if String.eq mode "text-suffix" then 40000 else if String.eq mode "sort" then 100000 else if String.eq mode "hash" then 300000 else 1000
+
+def modes : List String :=
+  .cons "strmap-insert" (.cons "strmap-find" (.cons "strmap-miss" (.cons "strmap-iterate" (.cons "array-push" (.cons "array-index" (.cons "array-map" (.cons "array-fold" (.cons "bytes-append" (.cons "bytes-slice" (.cons "bytes-compare" (.cons "text-split" (.cons "text-replace" (.cons "text-trim" (.cons "text-eq" (.cons "text-suffix" (.cons "sort" (.cons "hash" .nil)))))))))))))))))
+
+def printModes : List String → IO Unit
+  | .nil => IO.pure ()
+  | .cons m ms =>
+    IO.bind (IO.println (String.append (String.append m " ") (Nat.toString (run m (defaultN m))))) (fun _ =>
+      printModes ms)
+
+def printOne (m : String) (n : Nat) : IO Unit :=
+  IO.println (String.append (String.append m " ") (Nat.toString (run m n)))
+
+def main : IO Unit := IO.bind IO.args (fun as => match as with
+  | .nil => printModes modes
+  | .cons m (.cons s _) => match String.parseNat s with
+    | .some n => printOne m n
+    | .none => printOne m (defaultN m)
+  | .cons m .nil => printOne m (defaultN m))

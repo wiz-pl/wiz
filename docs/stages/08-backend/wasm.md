@@ -84,10 +84,23 @@ size}` (the C layout) and `i64` fields. Tags are the C runtime's (`0xFFFF0000` c
   This keeps the emitted code structured without a relooper; unlike a loop it does not
   reuse a stack frame, which is fine for the non-tail `case` continuations the lowerer
   produces.
-* **Memory**: addresses 8–2056 are a scratch buffer for call arguments (`pap`/`ap`), big
-  literals' decimal text starts at 4096, and the heap follows it. A bump allocator grows
-  memory a page at a time. `dup`/`drop` are no-ops: a run's peak memory is everything it
-  allocates.
+* **Memory and reclamation**: addresses 8–2056 are a scratch buffer for call arguments
+  (`pap`/`ap`), the free lists' heads follow it (one `i32` per size class, 2056–2396), big
+  literals' decimal text starts at 4096, and the heap follows it. Every object has a
+  16-byte header `{rc, tag, size, class}` and the header's fourth word is the block's size
+  class while it is live and the next free-list pointer while it is free. The IR's
+  `dup`/`drop` are `wiz_inc`/`wiz_dec`: **the last drop releases the object**, decrements
+  its fields (a closure's captured arguments, an array's live elements, a thunk's function
+  or value — a big number's field is a host handle, not a value, so it is skipped), and
+  returns the block to a **segregated free list** for its size class: exact sizes for
+  16…520 bytes, powers of two from 1 KiB to 64 MiB above that. `wiz_alloc_raw` pops a block
+  of the right class when one is free, and grows memory otherwise (a failed `memory.grow`
+  traps rather than spinning). `reset`/`reuse` keep a unique cell and refill it, exactly as
+  `runtime/rt_words.inc` does, so a functional update (`map` over a list you own) allocates
+  nothing. Freeing is **iterative**: a dead object's children that this drop kills are
+  threaded through the dead object's own header (the count becomes `-(class + 1)`, the
+  fourth word the link) and drained in a loop, so a long chain does not recurse on the
+  engine's stack. The peak is therefore the peak *live* set, not everything allocated.
 * **Big numbers**: a `Nat` above `2^62 - 1` is a `BIG` object whose single field is a
   host handle `2^63 | (index << 1)`. The host's `BigInt` table implements the operations
   (`big_op`), comparison (`big_cmp`), `log2`, decimal conversion, and construction from a
@@ -96,21 +109,33 @@ size}` (the C layout) and `i64` fields. Tags are the C runtime's (`0xFFFF0000` c
 
 The five host imports are `big_of_dec`, `big_op`, `big_cmp`, `big_log2` and
 `big_to_dec`; the module exports `memory`, `wiz_main` (the IR's `wiz.entry`) and three
-decoders (`wiz_value_tag`, `wiz_value_field`, `wiz_big_digits`). The Wasm runtime is 44
+decoders (`wiz_value_tag`, `wiz_value_field`, `wiz_big_digits`). The Wasm runtime is 47
 functions (`runtimeNames` in `Wiz/Compiler/Wasm.lean`).
 
 ## Limits and what remains
 
 These are deliberate for this target; none of them affects the C or LLVM backends.
 
-* **No reference counting.** `dup`/`drop` are no-ops and the allocator never frees;
-  memory grows with total allocation. A long-running or allocation-heavy program will
-  run out of linear memory (the module grows it until the engine's limit). This is the
-  main remaining piece for general use: a collector or a real `dup`/`drop` counter.
+* **Reclamation is reference counting, so cycles leak.** The lowering does not build
+  cycles (codata's `lazySet` overwrites a *shared* cell with its payload, and the payload's
+  corecursive fields are new cells), but a cycle built from constructors would keep its
+  blocks. The C runtime has the same property; there is no cycle collector in either.
+* **Memory is never returned to the engine.** `memory.grow` is one-way, so the peak is the
+  peak live set and stays there. Blocks above 64 MiB are not reused (they are bump
+  allocated), and a block that a `lazySet` shrinks is returned to a smaller class than its
+  capacity (safe — over-sized — but the capacity is not recovered).
+* **Big-number churn grows the host's table, not linear memory.** A freed `BIG` object's
+  block is reclaimed, but its `BigInt` stays in the JS host's append-only table (there is
+  no `big_free` import). A long loop over big numbers therefore grows the JS heap.
+* **No finalizers or foreign objects.** The subset has no FFI, and the C runtime's
+  `WIZ_TAG_EXT` (a pointer with a release function) has no Wasm equivalent: an `ext` value
+  cannot be built, so there is no finalizer to run. The tags that *can* appear are
+  constructors, closures, big numbers, arrays and thunks.
 * **No closed-definition caching.** A zero-argument definition (`def c : Nat := …`) is
   recomputed at each use rather than cached as the C runtime's CAF path does. It is pure,
   so the result is the same; only work and sharing differ (`memo` still shares inside one
-  use).
+  use). There are consequently no immortal objects (`rc == 0`): every object is owned by
+  exactly one reference and is freed by its last drop.
 * **No tail calls.** Deep *non-tail* recursion and join chains use the engine's stack;
   Node's default Wasm stack handles thousands of frames, not the C runtime's 1 GB. A
   self tail call in the IR is still a direct call here (there is no tail-call proposal in
@@ -135,9 +160,40 @@ These are deliberate for this target; none of them affects the C or LLVM backend
   (`web/wasm-host.mjs`); a browser or another host can instantiate the module itself by
   providing the five `env` functions.
 
+## Measurements
+
+`scripts/wasm-peak.mjs MODULE.wasm` prints a module's result, its peak linear memory and
+the time spent in `wiz_main`. The module's memory only grows, so its size after the call
+is the peak. `scripts/wasm-workload.wiz` is a fixed workload: `spin 20 18 0` builds and
+consumes a perfect binary tree of `2^18 - 1` constructors (32 bytes each) twenty times,
+about 5.2 million allocations, and never holds more than one tree.
+
+Node 26, one machine, best of five runs (the peak is exact and identical run to run):
+
+| workload | allocator | peak linear memory | `wiz_main` |
+| --- | --- | --- | --- |
+| `wasm-workload.wiz` (20 iterations, 160 MiB allocated) | bump | 160.1 MiB | 0.21 s |
+| | reference counting | 8.06 MiB | 0.14 s |
+| the same, 40 iterations (320 MiB allocated) | bump | 320.1 MiB | 0.27 s |
+| | reference counting | 8.06 MiB | 0.19 s |
+| the same, 1000 iterations (7.8 GiB allocated) | bump | impossible (over wasm32's 4 GiB) | — |
+| | reference counting | 8.06 MiB | 4.9 s |
+| churn: 2000 lists of 1500 constructors of four widths | bump | 160.2 MiB | 0.54 s |
+| | reference counting | 128 KiB | 0.12 s |
+| functional update: 2000 × `incAll` over a 2000-cell list | bump | 244.2 MiB | 0.73 s |
+| | reference counting | 128 KiB | 0.15 s |
+
+The peak with reference counting is one tree (resp. one list), as intended, and does not
+grow with the iteration count. The allocator is *faster* than the bump pointer here: it
+reuses blocks instead of growing memory (which zeroes new pages) and keeps the working set
+in cache, so the free list costs nothing at this scale. The four reclamation cases in the
+test group assert a peak of at most 8 pages (512 KiB) as well as the result, and the
+algorithms are checked against the module compiled by the previous backend and against the
+interpreter for every other case.
+
 ## Tests and counts
 
-`Tests/Groups/Wasm.lean` is the `wasm` group (`lake test -- wasm`): **25 cases**. They
+`Tests/Groups/Wasm.lean` is the `wasm` group (`lake test -- wasm`): **29 cases**. They
 cover:
 
 * **golden arithmetic** (small, big and saturating subtraction), **control flow** (nested
@@ -145,6 +201,12 @@ cover:
   over-application), **strings as algebraic data**, **codata** (`lazyTag`/`lazySet`),
   **generic data** (a recursive constructor built from variables, which uses
   `pack`/`mkObj`), `Array`, `Int`, `memo`, and closed definitions;
+* **reclamation**: an allocation loop that would need ~105 MB under the bump allocator
+  completes with a peak under 8 pages (512 KiB); a churn loop over constructors of four
+  widths (alloc/free/realloc) and a loop of functional list updates (`reset`/`reuse`) stay
+  under 8 pages too; a loop that builds, forces and drops closures and `memo` thunks keeps
+  its peak bounded. These read the peak from the host (`memory.buffer.byteLength`, which
+  only grows) and compare the result with `main`'s type, as the other run cases do;
 * **traps**: an IR-level `unreachable` entry, and deep non-tail recursion exhausting the
   engine's stack; both must fail under the host, not print a value;
 * the **validator**: a valid module passes, and bad magic, a truncated module and an
