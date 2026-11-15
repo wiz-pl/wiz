@@ -66,6 +66,10 @@ def List.getD_setAt {A : Type} (y d : A) : (l : List A) → (i : Nat) →
   | .nil, .succ _, h => absurd h.1
   | .cons _ _, .zero, _ => rfl
   | .cons _ xs, .succ i, h => List.getD_setAt y d xs i h
+def List.length_append {A : Type} : (l m : List A) →
+    List.length (List.append l m) = Nat.add (List.length l) (List.length m)
+  | .nil, _ => rfl
+  | .cons _ xs, m => Eq.congrArg Nat.succ (List.length_append xs m)
 
 -- ## U8Array
 
