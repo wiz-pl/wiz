@@ -144,7 +144,7 @@ partial def reflect (t : Term R) (depth : Nat) : StateM (Array (Term R × Nat)) 
   | .lam x b => pure (mkCon 4 [encodeString x, ← reflect b (depth + 1)])
   | .app f a => pure (mkCon 5 [← reflect f depth, ← reflect a depth])
   | .natLit n => pure (mkCon 6 [.nat n])
-  | .mu _ _ _ _ .szInf (some (T, _, args)) | .nu _ _ _ _ .szInf (some (T, _, args)) =>
+  | .mu _ _ _ _ .szInf (some (T, _, args)) _ | .nu _ _ _ _ .szInf (some (T, _, args)) =>
     args.foldlM (fun acc a => do pure (mkCon 5 [acc, ← reflect a depth])) (mkCon 1 [encodeString T])
   | _ => mkOpaque
 where
@@ -388,7 +388,7 @@ partial def reflectT (rc : RCtx R) (t : Term R) (ty? : Option (VTy R)) : ReflM R
       | .app .. => mkOpq  -- (not reached: `spine` strips every application)
       | h => reflectT rc h none
     reflectArgs rc rh (rc.headType? g h) args
-  | .mu _ _ _ _ .szInf (some (T, us, args)) | .nu _ _ _ _ .szInf (some (T, us, args)) =>
+  | .mu _ _ _ _ .szInf (some (T, us, args)) _ | .nu _ _ _ _ .szInf (some (T, us, args)) =>
     reflectArgs rc (mkCon 1 [encodeString T]) (rc.headType? (← globalsR) (.const T us)) args
   | .natOp op args =>
     let g ← globalsR
@@ -419,7 +419,7 @@ partial def reflectCtor (rc : RCtx R) (tag rest : Term R) (ty? : Option (VTy R))
   let some ty := ty? | return none
   let some (ls, i) := payloadTag? tag | return none
   let (T, us, targs) ← match ← forceR ty with
-    | .mu _ _ _ _ _ (some h) => pure h
+    | .mu _ _ _ _ _ (some h) _ => pure h
     | _ => return none
   let some c := ls[i]? | return none
   let g ← globalsR
@@ -587,7 +587,7 @@ the raw `ind … L n` of a definition by cases applied to a numeral. -/
 partial def forceRecursors (v : Val R) : ElabM R (Val R) := do
   match ← forceMeta v with
   | .unfold n us sp w => if isRecursor (← getGlobals) n then forceRecursors w.get else pure (.unfold n us sp w)
-  | .lazyInd _ _ _ _ _ _ _ _ _ w => forceRecursors w.get
+  | .lazyInd _ _ _ _ _ _ _ _ _ _ w => forceRecursors w.get
   | v => pure v
 
 /-- Unfold the head of a value until it is not a definition; also the definitions
@@ -596,7 +596,7 @@ partial def forceNames (v : Val R) (names : List Name := []) : ElabM R (Val R ×
   match ← forceMeta v with
   | .unfold n _ _ v =>
     forceNames v.get (if names.contains n || isRecursor (← getGlobals) n then names else names ++ [n])
-  | .lazyInd _ _ _ _ _ _ _ _ _ v => forceNames v.get names
+  | .lazyInd _ _ _ _ _ _ _ _ _ _ v => forceNames v.get names
   | v => pure (v, names)
 
 /-- The weak head normal form of `t`, with recursive calls folded back. -/

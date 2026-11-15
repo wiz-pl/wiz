@@ -215,7 +215,7 @@ def elimsAt (l k : Nat) : List (String × Term Q) :=
   let lams (xs : List Name) (b : Term Q) : Term Q := xs.foldr .lam b
   let P := lams ["i", "x"] (.unit 1)
   let S := lams ["i"] (.unit (Level.ofNat (l + 1)))
-  [("ind", .ind l' I uD 1 P (lams ["i", "xs", "ih"] .tt) .tt x),
+  [("ind", .ind l' I uD 1 P (lams ["i", "xs", "ih"] .tt) .tt x false),
    ("sfix", .sfix l' I uD 1 P (lams ["s", "rec", "i", "x"] .tt) .szInf .tt x),
    ("scase", .scase l' (.qlit .many) I uD 1 P (lams ["j", "i", "xs"] .tt) .szInf .tt x),
    ("coit", .coit l' I sD S (lams ["i", "s"] (.pair .tt (.pair .tt .tt))) .tt .tt),
@@ -248,7 +248,7 @@ def hintCase : IO Unit := do
     | .ok g => pure g
     | .error e => throw (IO.userError s!"setup rejected: {e}")
   let ty (former : Bool) (h : Name × List Level × List (Term Q)) : Term Q :=
-    if former then .mu 0 (.unit 1) (.dret .tt) .tt .szInf (some h) else .nu 0 (.unit 1) (.dret .tt) .tt .szInf (some h)
+    if former then .mu 0 (.unit 1) (.dret .tt) .tt .szInf (some h) false else .nu 0 (.unit 1) (.dret .tt) .tt .szInf (some h)
   let omega : Term Q := .app (.lam "x" (.app (.var 0) (.var 0))) (.lam "x" (.app (.var 0) (.var 0)))
   let bad : List (String × (Name × List Level × List (Term Q))) := [
     ("an application of tt (the evaluator would panic)", ("T", [], [.app .tt .tt])),

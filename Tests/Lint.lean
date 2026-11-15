@@ -220,9 +220,9 @@ def termTable : List TermRow := [
   ⟨"drec", [0, 0, 0], 0, fun c _ => .drec (c 0) (c 1) (c 2)⟩,
   ⟨"dhrec", [0, 0, 0, 0], 0, fun c _ => .dhrec (c 0) (c 1) (c 2) (c 3)⟩,
   ⟨"delim", [0, 0, 0, 0, 0, 0], 1, fun c l => .delim (l 0) (c 0) (c 1) (c 2) (c 3) (c 4) (c 5)⟩,
-  ⟨"mu", [0, 0, 0, 0, 0, 0], 3, fun c l => .mu (l 0) (c 0) (c 1) (c 2) (c 3) (some ("T", [l 1, l 2], [c 4, c 5]))⟩,
+  ⟨"mu", [0, 0, 0, 0, 0, 0], 3, fun c l => .mu (l 0) (c 0) (c 1) (c 2) (c 3) (some ("T", [l 1, l 2], [c 4, c 5])) false⟩,
   ⟨"con", [0], 0, fun c _ => .con (c 0)⟩,
-  ⟨"ind", [0, 0, 0, 0, 0, 0], 2, fun c l => .ind (l 0) (c 0) (c 1) (l 1) (c 2) (c 3) (c 4) (c 5)⟩,
+  ⟨"ind", [0, 0, 0, 0, 0, 0], 2, fun c l => .ind (l 0) (c 0) (c 1) (l 1) (c 2) (c 3) (c 4) (c 5) false⟩,
   ⟨"nu", [0, 0, 0, 0, 0, 0], 3, fun c l => .nu (l 0) (c 0) (c 1) (c 2) (c 3) (some ("T", [l 1, l 2], [c 4, c 5]))⟩,
   ⟨"out", [0], 0, fun c _ => .out (c 0)⟩,
   ⟨"size", [], 0, fun _ _ => .size⟩,
@@ -447,7 +447,7 @@ def valTable : List ValRow := [
   ⟨"darg", 3, [], 0, fun c _ _ => .darg (c 0) (c 1) (c 2)⟩,
   ⟨"drec", 3, [], 0, fun c _ _ => .drec (c 0) (c 1) (c 2)⟩,
   ⟨"dhrec", 4, [], 0, fun c _ _ => .dhrec (c 0) (c 1) (c 2) (c 3)⟩,
-  ⟨"mu", 6, [], 3, fun c _ l => .mu (l 0) (c 0) (c 1) (c 2) (c 3) (some ("T", [l 1, l 2], [c 4, c 5]))⟩,
+  ⟨"mu", 6, [], 3, fun c _ l => .mu (l 0) (c 0) (c 1) (c 2) (c 3) (some ("T", [l 1, l 2], [c 4, c 5])) false⟩,
   ⟨"con", 1, [], 0, fun c _ _ => .con (c 0)⟩,
   ⟨"nu", 6, [], 3, fun c _ l => .nu (l 0) (c 0) (c 1) (c 2) (c 3) (some ("T", [l 1, l 2], [c 4, c 5]))⟩,
   ⟨"size", 0, [], 0, fun _ _ _ => .size⟩,
@@ -495,7 +495,7 @@ def elimTable : List ElimRow := [
   -- one branch, `var 0`, in the environment `[c 0]`
   ⟨"ecase", 1, [1], 0, fun c k _ => .ecase "z" (k 0) [c 0] [.var 0]⟩,
   ⟨"delim", 5, [], 1, fun c _ l => .delim (l 0) (c 0) (c 1) (c 2) (c 3) (c 4)⟩,
-  ⟨"ind", 5, [], 2, fun c _ l => .ind (l 0) (c 0) (c 1) (l 1) (c 2) (c 3) (c 4)⟩,
+  ⟨"ind", 5, [], 2, fun c _ l => .ind (l 0) (c 0) (c 1) (l 1) (c 2) (c 3) (c 4) false⟩,
   ⟨"sfix", 6, [], 2, fun c _ l => .sfix (l 0) (c 0) (c 1) (l 1) (c 2) (c 3) (c 4) (c 5)⟩,
   ⟨"scase", 7, [], 2, fun c _ l => .scase (l 0) (c 0) (c 1) (c 2) (l 1) (c 3) (c 4) (c 5) (c 6)⟩,
   ⟨"out", 0, [], 0, fun _ _ _ => .out⟩,
@@ -917,7 +917,7 @@ def panicSites : List (String × Term R) := [
 def hintCarrier (X : Term R) : Decl R :=
   { name := "carrier", value := none
     type := .pi "x" .default (.qlit .one)
-      (.mu 0 (.unit 1) (.dret .tt) .tt .szInf (some ("hint", [], [X]))) (.unit 1) ⟨1, 1⟩ }
+      (.mu 0 (.unit 1) (.dret .tt) .tt .szInf (some ("hint", [], [X])) false) (.unit 1) ⟨1, 1⟩ }
 
 /-- `tests --panic-probe MODE SITE`: check `hintCarrier` of the site's term (`eval`: just
 evaluate `fst ()` and print the constructor of the value; `eval:SITE`: evaluate the site's

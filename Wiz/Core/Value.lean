@@ -70,6 +70,7 @@ inductive Val (R : Type) where
   | drec (q j D : Val R)
   | dhrec (q H j D : Val R)
   | mu (l : Level) (I D i : Val R) (sz : Val R) (hint : Option (Name × List Level × List (Val R)))
+      (prop : Bool)
   | con (x : Val R)
   | nu (l : Level) (I D i : Val R) (sz : Val R) (hint : Option (Name × List Level × List (Val R)))
   | size
@@ -96,7 +97,8 @@ inductive Val (R : Type) where
   the induction hypotheses of a numeral (so that `ind` on `1000000` doesn't compute a
   million of them first), applied to the eliminations `sp` (applications and
   projections, which stay lazy). `whnf` forces it; quoting keeps the folded form. -/
-  | lazyInd (l : Level) (I D : Val R) (v : Level) (P m i x : Val R) (sp : Array (Elim R)) (val : Thunk (Val R))
+  | lazyInd (l : Level) (I D : Val R) (v : Level) (P m i x : Val R) (prop : Bool) (sp : Array (Elim R))
+      (val : Thunk (Val R))
 
 /-- An elimination stuck on a neutral. -/
 inductive Elim (R : Type) where
@@ -109,7 +111,7 @@ inductive Elim (R : Type) where
   /-- the branches are evaluated in `env` only when the tag is known -/
   | ecase (z : Name) (motive : Closure R) (env : List (Val R)) (branches : List (Term R))
   | delim (v : Level) (P mret marg mrec mhrec : Val R)
-  | ind (l : Level) (I D : Val R) (v : Level) (P m i : Val R)
+  | ind (l : Level) (I D : Val R) (v : Level) (P m i : Val R) (prop : Bool)
   | sfix (l : Level) (I D : Val R) (v : Level) (P f s i : Val R)
   | scase (l : Level) (q : Val R) (I D : Val R) (v : Level) (P m s i : Val R)
   | out
@@ -140,7 +142,7 @@ instance {R : Type} : Inhabited (Val R) := ⟨.neutral (.global kernelPanicName 
 anything else (a stuck computation, or an elaborator metavariable). -/
 partial def Val.toPoly? {R : Type} [QRig R] [DecidableEq R] : Val R → Option (QPoly R)
   | .unfold _ _ _ v => Val.toPoly? v.get
-  | .lazyInd _ _ _ _ _ _ _ _ _ v => Val.toPoly? v.get
+  | .lazyInd _ _ _ _ _ _ _ _ _ _ v => Val.toPoly? v.get
   | .qlit r => some (QPoly.const r)
   | .neutral (.local l) #[] => some (QPoly.var l)
   | _ => none

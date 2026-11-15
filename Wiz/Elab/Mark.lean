@@ -118,8 +118,8 @@ partial def checkRest (ctx : Ctx R) (t : Term R) (ty : VTy R) : Term R :=
     let (H, _) := type ctx H
     .dhrec q H (check ctx j (.pi "h" .default (.qlit QuantitySyntax.explicitDefault) (ctx.eval H) (.mk [I] (.var 1)) ⟨.succ l, .succ l⟩))
       (check ctx D (.desc l I))
-  | .con x, .mu l I D i s _ => match sizePred? s with
-    | some s' => .con (check ctx x (vInterp g l I D (muFamilyAt l I D s') i))
+  | .con x, .mu l I D i s _ prop => match sizePred? s with
+    | some s' => .con (check ctx x (vInterp g l I D (muFamilyAt l I D s' prop) i))
     | none => t
   | .cocon x, .nu l I D i s _ => match sizePred? s with
     | some s' => .cocon (check ctx x (vInterp g l I D (nuFamilyAt l I D s') i))
@@ -297,26 +297,27 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : Term R × Option (VTy R) :=
       let (ta, tb, tc, th) := delimMethodTys g l v I vP w
       (.delim v P (check ctx a ta) (check ctx b tb) (check ctx c tc) (check ctx h th) D, some (vApp g vP (ctx.eval D)))
     | _ => (.delim v P a b c h D, none)
-  | .mu l I D i s h =>
+  | .mu l I D i s h prop =>
     let (I, _) := type ctx I
     let vI := ctx.eval I
-    (.mu l I (check ctx D (.desc l vI)) (check ctx i vI) s h, some (.sort (.succ l)))
+    (.mu l I (check ctx D (.desc l vI)) (check ctx i vI) s h prop,
+     some (if prop then .sort 0 else .sort (.succ l)))
   | .nu l I D i s h =>
     let (I, _) := type ctx I
     let vI := ctx.eval I
     (.nu l I (check ctx D (.desc l vI)) (check ctx i vI) s h, some (.sort (.succ l)))
-  | .ind l I D v P m i x =>
+  | .ind l I D v P m i x prop =>
     let (I, _) := type ctx I
     let vI := ctx.eval I
     let D := check ctx D (.desc l vI)
     let vD := ctx.eval D
-    let P := check ctx P (indMotiveTy g l v vI vD w)
+    let P := check ctx P (indMotiveTy g l v vI vD w prop)
     let vP := ctx.eval P
-    let m := check ctx m (indMethodTy g l v vI vD vP w)
+    let m := check ctx m (indMethodTy g l v vI vD vP w prop)
     let i := check ctx i vI
     let vi := ctx.eval i
-    let x := check ctx x (.mu l vI vD vi .szInf none)
-    (.ind l I D v P m i x, some (vApp g (vApp g vP vi) (ctx.eval x)))
+    let x := check ctx x (.mu l vI vD vi .szInf none prop)
+    (.ind l I D v P m i x prop, some (vApp g (vApp g vP vi) (ctx.eval x)))
   | .out x =>
     let (x, ty) := infer ctx x
     match ty.map whnf with
@@ -334,7 +335,7 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : Term R × Option (VTy R) :=
     let f := check ctx f (sfixFunTy g l v vI vD vP w)
     let i := check ctx i vI
     let vi := ctx.eval i
-    let x := check ctx x (.mu l vI vD vi (ctx.eval s) none)
+    let x := check ctx x (.mu l vI vD vi (ctx.eval s) none false)
     (.sfix l I D v P f s i x, some (vApp g (vApp g vP vi) (ctx.eval x)))
   | .scase l q I D v P m s i x =>
     let (I, _) := type ctx I
@@ -348,7 +349,7 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : Term R × Option (VTy R) :=
     let m := check ctx m (scaseMethodTy g l v vI vD vP vs (ctx.eval q))
     let i := check ctx i vI
     let vi := ctx.eval i
-    let x := check ctx x (.mu l vI vD vi vs none)
+    let x := check ctx x (.mu l vI vD vi vs none false)
     (.scase l q I D v P m s i x, some (vApp g (vApp g vP vi) (ctx.eval x)))
   | .scofix l I D A f s i a =>
     let (I, _) := type ctx I

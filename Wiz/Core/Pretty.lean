@@ -503,10 +503,10 @@ partial def printNode (env : Option (Globals R)) (names : List Name) (tys : List
   | .drec q j D => app (txt "Desc.rec") [q, j, D]
   | .dhrec q H j D => app (txt "Desc.hrec") [q, H, j, D]
   | .delim _ P a b c h D => app (txt "Desc.elim") [P, a, b, c, h, D]
-  | .mu _ _ _ _ s (some (n, _, as)) | .nu _ _ _ _ s (some (n, _, as)) =>
+  | .mu _ _ _ _ s (some (n, _, as)) _ | .nu _ _ _ _ s (some (n, _, as)) =>
     let head ← if s matches .szInf then pure (txt n) else pure (cat [txt s!"{n}^", ← sub 1024 s])
     if as.isEmpty then pure head else app head as
-  | .mu _ _ D i s none =>
+  | .mu _ _ D i s none _ =>
     app (← if s matches .szInf then pure (txt "μ") else pure (cat [txt "μ^", ← sub 1024 s])) [D, i]
   | .con (.pair (.tag ls i) rest) | .con (.pair (.up (.tag ls i)) rest) =>
     -- `.c f₁ … fₙ`: the payload ends with the index equation and `()`
@@ -516,7 +516,7 @@ partial def printNode (env : Option (Globals R)) (names : List Name) (tys : List
     let c := txt s!".{ctorShort (ls[i]?.getD s!"#{i}")}"
     if fields.isEmpty then pure c else app c fields
   | .con x => app (txt "con") [x]
-  | .ind _ _ _ _ P m i x => app (txt "ind") [P, m, i, x]
+  | .ind _ _ _ _ P m i x _ => app (txt "ind") [P, m, i, x]
   | .nu _ _ D i s none =>
     app (← if s matches .szInf then pure (txt "ν") else pure (cat [txt "ν^", ← sub 1024 s])) [D, i]
   | .out x => app (txt "out") [x]

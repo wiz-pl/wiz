@@ -282,6 +282,37 @@ containing such arguments are elaborated *expected type first* (`checkApp`), so
 `.cons .zero .nil : Vec Nat (.succ .zero)` resolves every constructor. Values print
 with their constructor names (`.cons .zero .zero .nil`, including erased fields).
 
+### Inductive propositions (issue #252)
+
+The result of an `inductive` may be `Prop`:
+
+```
+inductive Le : Nat → Nat → Prop where
+  | refl (n : Nat) : Le n n
+  | step {n m : Nat} (h : Le n m) : Le n (.succ m)
+```
+
+The description is built exactly as for a `Type` inductive (`Desc.{l} I`), but its
+least fixed point is a proposition: `μ` carries a `prop` flag, the kernel reads its sort
+as `Sort 0`, and `propSort?` returns `true` (so proof irrelevance applies). The
+elaborator infers the description level from the constructor fields and the index
+types, and `Le`'s recursive fields are proof arguments, not data.
+
+The eliminators keep Lean's **singleton elimination** rule: `ind` (and so `T.rec` /
+`T.casesOn`) may target any `Sort v` when the description is a subsingleton — no
+constructor, or one constructor whose fields are all (sub)singleton types — and only
+`Prop` otherwise. A non-singleton proposition's recursor therefore has its motive fixed
+to `Prop` (no `v` level parameter); a match that asks for another sort is rejected at
+the pattern ("large elimination from the inductive proposition"). `T.rec`/`T.casesOn`
+are generated as for data; `T.scasesOn`, `T.casesOnA` and `T.casesOn1` are not (sized
+and linear case analysis on a proof are not supported). `structure` and
+`coinductive` remain `Type`-only.
+
+Not allowed: deriving `BEq` or `Repr` for a proposition (proofs are not data; the
+deriver reports this), large elimination of a non-singleton, and using an inductive
+proposition as a recursive field whose type is not strictly positive (the existing
+positivity check applies unchanged).
+
 | #    | Where                  | What                                        |
 |------|------------------------|---------------------------------------------|
 | 4.21 | `Elab/Inductive.lean`  | `ctorDesc`: a constructor's description      |

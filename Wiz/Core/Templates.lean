@@ -38,11 +38,13 @@ private def pi (x : Name) (a b : Term R × Level) : Term R × Level :=
   (.pi x .default (.qlit QuantitySyntax.explicitDefault) a.1 b.1 ⟨a.2, b.2⟩, .imax a.2 b.2)
 
 /-- `fun I D X i => ⟦D⟧ X i` for `D : Desc.{l} I`. -/
-def interpTm (l : Level) : Term R :=
+def interpTm (l : Level) (prop : Bool := false) : Term R :=
   let l1 : Level := .succ l
+  let vX : Level := if prop then .zero else l1
   let tyL : Term R × Level := (.sort l1, .succ l1)
+  let tyX : Term R × Level := (.sort vX, .succ vX)
   -- ctx: D0 I1
-  let P := .lam "_" (pi "X" (pi "_" (v 2, l1) tyL) (pi "i" (v 3, l1) tyL)).1
+  let P := .lam "_" (pi "X" (pi "_" (v 2, l1) tyX) (pi "i" (v 3, l1) tyL)).1
   -- i0 X1 j2 D3 I4
   -- (the motive puts every method's result in `Sort (l+1)`; the components: an index
   -- equation in `Sort 0`, the fields `S`, `X j`, `(h : H) → X (j h)` and the rest in
@@ -51,25 +53,28 @@ def interpTm (l : Level) : Term R :=
   -- i0 X1 ih2 E3 S4 q5
   let marg := lams ["q", "S", "E", "ih", "X", "i"] (.sigma "s" (v 5) (v 4) (apps (v 3) [v 0, v 2, v 1]) ⟨l1, l1⟩)
   -- i0 X1 ih2 E3 j4 q5
-  let mrec := lams ["q", "j", "E", "ih", "X", "i"] (.sigma "_" (v 5) (.app (v 1) (v 4)) (apps (v 3) [v 2, v 1]) ⟨l1, l1⟩)
+  let mrec := lams ["q", "j", "E", "ih", "X", "i"] (.sigma "_" (v 5) (.app (v 1) (v 4)) (apps (v 3) [v 2, v 1]) ⟨vX, l1⟩)
   -- i0 X1 ih2 E3 j4 H5 q6
   let mhrec := lams ["q", "H", "j", "E", "ih", "X", "i"]
-    (.sigma "_" (v 6) (.pi "h" .default (.qlit QuantitySyntax.explicitDefault) (v 5) (.app (v 2) (.app (v 5) (v 0))) ⟨l1, l1⟩)
-      (apps (v 3) [v 2, v 1]) ⟨.imax l1 l1, l1⟩)
+    (.sigma "_" (v 6) (.pi "h" .default (.qlit QuantitySyntax.explicitDefault) (v 5) (.app (v 2) (.app (v 5) (v 0))) ⟨l1, vX⟩)
+      (apps (v 3) [v 2, v 1]) ⟨.imax l1 vX, l1⟩)
   lams ["I", "D"] (.delim (.succ (.succ l)) P mret marg mrec mhrec (v 0))
 
-private def interpApp (l : Level) (I E X i : Term R) : Term R := apps (interpTm l) [I, E, X, i]
+private def interpApp (l : Level) (prop : Bool) (I E X i : Term R) : Term R :=
+  apps (interpTm l prop) [I, E, X, i]
 
 /-- `fun I D X P i xs => All D X P i xs`: one `P`-proof per recursive field. -/
-def allTm (l v' : Level) : Term R :=
+def allTm (l v' : Level) (prop : Bool := false) : Term R :=
   --<sol
   let l1 : Level := .succ l
+  let vX : Level := if prop then .zero else l1
   let tyL : Term R × Level := (.sort l1, .succ l1)
+  let tyX : Term R × Level := (.sort vX, .succ vX)
   let allL : Level := .max l1 v'
   -- E0 D1 I2, then X, P, i, xs
-  let P := .lam "E" (pi "X" (pi "_" (v 2, l1) tyL)
-    (pi "P" (pi "i" (v 3, l1) (pi "_" (.app (v 1) (v 0), l1) (.sort v', .succ v')))
-      (pi "i" (v 4, l1) (pi "xs" (interpApp l (v 5) (v 3) (v 2) (v 0), l1) (.sort allL, .succ allL))))).1
+  let P := .lam "E" (pi "X" (pi "_" (v 2, l1) tyX)
+    (pi "P" (pi "i" (v 3, l1) (pi "_" (.app (v 1) (v 0), vX) (.sort v', .succ v')))
+      (pi "i" (v 4, l1) (pi "xs" (interpApp l prop (v 5) (v 3) (v 2) (v 0), l1) (.sort allL, .succ allL))))).1
   let mret := lams ["j", "X", "P", "i", "xs"] (.unit allL)
   -- xs0 i1 P2 X3 ih4 E5 S6 q7
   let marg := lams ["q", "S", "E", "ih", "X", "P", "i", "xs"] (apps (v 4) [.fst (v 0), v 3, v 2, v 1, .snd (v 0)])
@@ -90,16 +95,18 @@ def allTm (l v' : Level) : Term R :=
   --sol>
 
 /-- `fun I D X P f i xs => hyps …`: apply `f` to every recursive field. -/
-def hypsTm (l v' : Level) : Term R :=
+def hypsTm (l v' : Level) (prop : Bool := false) : Term R :=
   let l1 : Level := .succ l
+  let vX : Level := if prop then .zero else l1
   let tyL : Term R × Level := (.sort l1, .succ l1)
+  let tyX : Term R × Level := (.sort vX, .succ vX)
   let allL : Level := .max l1 v'
-  let allApp (I E X P i xs : Term R) : Term R := apps (allTm l v') [I, E, X, P, i, xs]
+  let allApp (I E X P i xs : Term R) : Term R := apps (allTm l v' prop) [I, E, X, P, i, xs]
   -- E0 D1 I2, then X, P, f, i, xs
-  let P := .lam "E" (pi "X" (pi "_" (v 2, l1) tyL)
-    (pi "P" (pi "i" (v 3, l1) (pi "_" (.app (v 1) (v 0), l1) (.sort v', .succ v')))
-      (pi "f" (pi "i" (v 4, l1) (pi "x" (.app (v 2) (v 0), l1) (apps (v 2) [v 1, v 0], v')))
-        (pi "i" (v 5, l1) (pi "xs" (interpApp l (v 6) (v 4) (v 3) (v 0), l1) (allApp (v 7) (v 5) (v 4) (v 3) (v 1) (v 0), allL)))))).1
+  let P := .lam "E" (pi "X" (pi "_" (v 2, l1) tyX)
+    (pi "P" (pi "i" (v 3, l1) (pi "_" (.app (v 1) (v 0), vX) (.sort v', .succ v')))
+      (pi "f" (pi "i" (v 4, l1) (pi "x" (.app (v 2) (v 0), vX) (apps (v 2) [v 1, v 0], v')))
+        (pi "i" (v 5, l1) (pi "xs" (interpApp l prop (v 6) (v 4) (v 3) (v 0), l1) (allApp (v 7) (v 5) (v 4) (v 3) (v 1) (v 0), allL)))))).1
   let mret := lams ["j", "X", "P", "f", "i", "xs"] .tt
   -- xs0 i1 f2 P3 X4 ih5 E6 S7 q8
   let marg := lams ["q", "S", "E", "ih", "X", "P", "f", "i", "xs"] (apps (v 5) [.fst (v 0), v 4, v 3, v 2, v 1, .snd (v 0)])
@@ -112,13 +119,15 @@ def hypsTm (l v' : Level) : Term R :=
   lams ["I", "D"] (.delim (.max (.succ (.succ l)) (.succ v')) P mret marg mrec mhrec (v 0))
 
 /-- `fun I D X Y f i xs => map …`: apply `f` to every recursive field. -/
-def mapTm (l : Level) : Term R :=
+def mapTm (l : Level) (prop : Bool := false) : Term R :=
   let l1 : Level := .succ l
+  let vX : Level := if prop then .zero else l1
   let tyL : Term R × Level := (.sort l1, .succ l1)
+  let tyX : Term R × Level := (.sort vX, .succ vX)
   -- E0 D1 I2, then X, Y, f, i, xs
-  let P := .lam "E" (pi "X" (pi "_" (v 2, l1) tyL) (pi "Y" (pi "_" (v 3, l1) tyL)
-    (pi "f" (pi "i" (v 4, l1) (pi "_" (.app (v 2) (v 0), l1) (.app (v 2) (v 1), l1)))
-      (pi "i" (v 5, l1) (pi "xs" (interpApp l (v 6) (v 4) (v 3) (v 0), l1) (interpApp l (v 7) (v 5) (v 3) (v 1), l1)))))).1
+  let P := .lam "E" (pi "X" (pi "_" (v 2, l1) tyX) (pi "Y" (pi "_" (v 3, l1) tyX)
+    (pi "f" (pi "i" (v 4, l1) (pi "_" (.app (v 2) (v 0), vX) (.app (v 2) (v 1), vX)))
+      (pi "i" (v 5, l1) (pi "xs" (interpApp l prop (v 6) (v 4) (v 3) (v 0), l1) (interpApp l prop (v 7) (v 5) (v 3) (v 1), l1)))))).1
   let mret := lams ["j", "X", "Y", "f", "i", "xs"] (v 0)
   -- xs0 i1 f2 Y3 X4 ih5 E6 S7 q8
   let marg := lams ["q", "S", "E", "ih", "X", "Y", "f", "i", "xs"]

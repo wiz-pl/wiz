@@ -12,8 +12,9 @@ Tests: `lake test -- seplogic`.
 
 ## 24a: propositional logic over `Prop`
 
-`lib/Logic.wiz` (`import Logic`). Wiz has no inductive propositions (`μ` always lives in
-`Type`), so the connectives are built from what the kernel has:
+`lib/Logic.wiz` (`import Logic`). Wiz has inductive propositions since #252, but the
+library keeps the Church encodings it already had (`μ` in `Type`), so the connectives
+are built from what the kernel had before that:
 
 | | definition | rules |
 |---|---|---|

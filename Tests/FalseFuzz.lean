@@ -76,7 +76,7 @@ def natD : Tm :=
   .darg qMany tEnum2
       (.lam "t" (.ecase "z" (.desc 0 tUnit1) (.var 0) [.dret .tt, .drec qMany .tt (.dret .tt)]))
 
-def natAt (s : Tm) : Tm := .mu 0 tUnit1 natD .tt s none
+def natAt (s : Tm) : Tm := .mu 0 tUnit1 natD .tt s none false
 
 def natZero : Tm := .con (.pair (tag2 0) retPayload)
 def natSucc (n : Tm) : Tm := .con (.pair (tag2 1) (.pair n retPayload))
@@ -96,7 +96,7 @@ def mutualD : Tm :=
           .dret (tag2 0),
           .drec qMany (tag2 0) (.dret (tag2 1))]))]))
 
-def mutualAt (i : Nat) (s : Tm := .szInf) : Tm := .mu 0 tEnum2 mutualD (tag2 i) s none
+def mutualAt (i : Nat) (s : Tm := .szInf) : Tm := .mu 0 tEnum2 mutualD (tag2 i) s none false
 
 def mutualA0 : Tm := .con (.pair (tag2 0) retPayload)
 def mutualA1 : Tm := .con (.pair (tag2 1) (.pair (tag2 0) retPayload))
@@ -167,18 +167,18 @@ def genDescParam : Gen (Tm × Tm) := do
     -- `(fun (A : Type) (a : A) => μ (arg A (ret ())) ()) A₀ a₀`
     let b ← pick #[pure tUnit1, pure tEnum2, pure tNat, pure tAxTy] (pure tUnit1)
     let D0 : Tm := .darg qMany (.var 1) (.lam "x" (.dret .tt))
-    let T0 : Tm := .mu 0 tUnit1 D0 .tt .szInf none
+    let T0 : Tm := .mu 0 tUnit1 D0 .tt .szInf none false
     let body : Tm := .con (.pair (.var 0) retPayload)
     let fnTy : Tm := .pi "A" .default qMany (.sort 1)
       (.pi "a" .default qMany (.var 0) T0 .hole) .hole
     let fn : Tm := .ann (.lam "A" (.lam "a" body)) fnTy
     let D : Tm := .darg qMany b (.lam "x" (.dret .tt))
-    let T : Tm := .mu 0 tUnit1 D .tt .szInf none
+    let T : Tm := .mu 0 tUnit1 D .tt .szInf none false
     let a ← leaf b 0
     pure (T, .app (.app fn b) a)
   else
     let D : Tm := .darg qMany A (.lam "a" (.dret .tt))
-    let T : Tm := .mu 0 tUnit1 D .tt .szInf none
+    let T : Tm := .mu 0 tUnit1 D .tt .szInf none false
     let a ← leaf A 1
     pure (T, .con (.pair a retPayload))
 
