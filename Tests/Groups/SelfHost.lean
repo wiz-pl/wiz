@@ -1567,6 +1567,18 @@ def selfHostGroup : Group where
           | pure ()
         for l in out.splitOn "\n" do
           if l.startsWith "error" || l.startsWith "parse error" then throw (IO.userError l) },
+    -- (agent/checker-mem) The grammar has no `if`: it is a flat application spine, so a
+    -- nested unparenthesised `if` in a then branch must take the first `else` (the
+    -- dangling else). Before the split fix the outer else was applied as a function
+    -- (`not a function: its type is μ0(…)`); the self-check hit this in CParse.wiz.
+    { name := "the self-hosted frontend: a nested if in a then branch (the dangling else)", run := fun _ => do
+        selfhostCheckFile ("import Prelude\n" ++
+          "def f (x : Nat) : Nat := x\n" ++
+          "def g (b1 b2 : Bool) : Nat :=\n  if b1 then\n    if b2 then (f 1)\n    else (f 2)\n  else (f 3)\n" ++
+          "def h (b1 b2 : Bool) : Nat :=\n  if (if b1 then b2 else b1) then (f 4) else (f 5)\n")
+          ("f : (x0 : Nat) → Nat\n" ++
+           "g : (x0 : Bool) → (x1 : Bool) → Nat\n" ++
+           "h : (x0 : Bool) → (x1 : Bool) → Nat\n") },
     { name := "the Wiz kernel agrees with the Lean kernel (400 random terms)", run := fun _ => do
         let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
         let mut terms : Array MTm := MTm.samples.toArray
