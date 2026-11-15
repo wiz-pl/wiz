@@ -2015,7 +2015,15 @@ proved**, and the D1 experiment shows checking can loop (Status.md).
   argument as `ind P M i x` and `ind P M' i x` (through `T.rec` and `T.casesOn`), convertible
   with `M'` replaced by `M`, and for each constructor tag `t` and a fresh payload
   `xs = (t, rest)`, `M j xs H ≡ M' j xs H` with `H` the hypotheses `ind` computes; by
-  induction on the scrutinee they agree on every closed argument (Status.md, T1). An
+  induction on the scrutinee they agree on every closed argument (Status.md, T1). The same
+  check also requires every call of the definition to be on a field of the constructor
+  matched by its method (`checkCallsOnFields`): then compiled code terminates as the
+  kernel's recursion does, and its result is the value's. A call on a computed argument,
+  on the scrutinee, or on a field of another column (which a lexicographic measure might
+  justify) is rejected with the method and the argument named. `partial` definitions and
+  every `mutual` block are the boundary: their bodies are checked against their type and
+  kept for the compiler, but they are opaque, need a witness, and are not checked for
+  termination (`docs/stages/13-language/termination.md`). An
   `implemented_by` constant is not checked this way (trusted, listed by `#print axioms`).
 * `Decl.inline` (evaluate eagerly) does not affect what the kernel accepts.
 

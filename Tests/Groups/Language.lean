@@ -230,6 +230,29 @@ def languageGroup : Group where
     { name := "a partial definition needs an inhabited type", run := fun _ =>
         failsLib "import Prelude\ninductive Void where\npartial def loop (n : Nat) : Void := loop n"
           "no witness found" },
+    -- (termination boundary) `mutual` and `partial` are the escape hatch: both are opaque
+    -- to the kernel and need a witness, and their compiled bodies are not checked for
+    -- termination. A `mutual` member is not made transparent by being structurally
+    -- recursive, and its recursion need not be structural (that is what `partial` means).
+    { name := "mutual: a member still needs an inhabited type, and the error says why", run := fun _ =>
+        failsLib ("import Prelude\ninductive Void where\nmutual\ndef f : Nat → Void\n  | .zero => f .zero\nend")
+          "each member is opaque to the kernel" },
+    { name := "mutual: recursion need not be structural (a partial definition's body may loop)", run := fun _ =>
+        okLib ("import Prelude\nmutual\n" ++
+          "def h : Nat → Nat\n  | .zero => 0\n  | .succ m => h (.succ m)\n" ++
+          "def k : Nat → Nat\n  | m => h m\nend\n" ++
+          "def uses : Nat → Nat := k\n#check uses")
+          ["uses : Nat → Nat"] },
+    { name := "partial: recursion need not decrease, and its body is not unfolded by the kernel", run := fun _ => do
+        okLib ("import Prelude\npartial def grow (n : Nat) : Nat := grow (.succ n)\n" ++
+          "def a : Nat := grow 0\n#check a")
+          ["a : Nat"] },
+    { name := "a nested or lexicographic call is rejected with the reason (no measure)", run := fun _ => do
+        failsLib ("import Prelude\ninductive Tr where\n  | leaf\n  | node (l : Tr) (r : Tr)\n" ++
+          "def nested : Tr → Nat\n  | .leaf => 0\n  | .node (.node a _) _ => nested a\n  | .node _ _ => 0")
+          "lexicographic or nested measure"
+        failsLib ("import Prelude\ndef lex (a : Nat) : Nat → Nat\n  | .zero => a\n  | .succ b => lex b b")
+          "lexicographic measure Wiz does not check" },
     { name := "match without an expected type", run := fun _ =>
         okLib ("import Prelude\ndef f (b : Bool) (n : Nat) : Nat :=\n  let k := match b with\n    | .true => n\n" ++
           "    | .false => 0;\n  Nat.add k 1\n#eval f .true 4") ["5"] },

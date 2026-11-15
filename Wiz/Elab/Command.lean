@@ -1730,7 +1730,13 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
         let w ← match runElab (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) g findW levelParams with
           | .ok (some w) => pure w
           | .ok none =>
-            report .error (d.getArg 1).info s!"partial definition {name}: no witness found for its type {ty.pretty [] (some s.globals)}; give one with `partial (default := w) def {name} …` (the kernel takes {name} only if its type is inhabited)"
+            -- (`mutual` blocks are compiled as partial definitions, so this message is
+            -- where their boundary shows: a member is opaque and needs an inhabited type,
+            -- whether or not its recursion would terminate)
+            report .error (d.getArg 1).info (s!"partial definition {name}: no witness found for its type {ty.pretty [] (some s.globals)}; give one with `partial (default := w) def {name} …` (the kernel takes {name} only if its type is inhabited)" ++
+              (if cmd.isOfKind "command.mutual" then
+                s!"\n  (`mutual` definitions are elaborated as partial definitions: each member is opaque to the kernel, so each needs an inhabited type; structural termination alone does not make them transparent)"
+               else ""))
             return
           | .error e => reportErr e; return
         let pd := Decl.withSorts g { name, levelParams, type := ty, value := none, witness := some w }

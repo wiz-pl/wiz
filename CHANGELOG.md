@@ -10,6 +10,12 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* kernel: the termination check on a definition's compiled equations reports the method
+  and the argument that is not a field (nested, growing, or lexicographic recursion) and
+  runs before the agreement comparison, so a hand-written loop is diagnosed as such; the
+  accepted set is unchanged. `mutual` blocks say that their members are partial
+  definitions and need an inhabited type. The boundary and the size/`μ` interaction are
+  in [docs/stages/13-language/termination.md](docs/stages/13-language/termination.md).
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to

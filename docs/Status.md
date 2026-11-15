@@ -513,7 +513,7 @@ set the status (open PRs in *italics*). Sections: §3 fixed, §4 open, §5 stuck
   every two values are convertible (`Unit`) it does not see the calls, and a call on
   a value convertible to a smaller one (`f (sup (λ _. g z))` for `f (g z)`) agrees and
   loops. So the kernel also checks, syntactically, that every call of the definition is
-  on a field of the constructor it is in (`callsOnFields`; t1-review M1): then it
+  on a field of the constructor it is in (`checkCallsOnFields`; t1-review M1): then it
   terminates as the kernel's recursion does. A proposition-valued definition is a proof:
   its value is suspended (P2), there is no split to compare, and any two proofs are
   convertible (proof irrelevance), so a well-typed implementation agrees with it (a proof
@@ -538,18 +538,21 @@ set the status (open PRs in *italics*). Sections: §3 fixed, §4 open, §5 stuck
   * *Recognised by syntax, still:* a call `f y` in `f`'s equations is the recursive call;
     a local variable named `f` in scope is now an **error** ("a local variable named f
     shadows the recursive definition f …; rename the local variable").
-  * **M1, open (medium, latent; not reachable from the surface).** The kernel accepts
-    hand-made implementations that agree with the value but **do not terminate**: for
-    `f : N → N | .z => .z | .s n => f n`, the implementation `.s n => f (.s n)` (the call
-    on the rebuilt scrutinee) passes the per-constructor check, and `λ x. f x` and
-    `const f` pass the conversion shortcut; compiled, they loop (`#eval f (.s .z)`
-    overflows the stack). Implementations that compute another value were all rejected.
-    So termination of compiled code rests on `deriveImpl` making calls on fields only, an
-    elaborator property. Fixes proposed: skip the shortcut when the implementation
-    mentions the definition (as in the impl-derive-perf work), and a syntactic guard
-    that every occurrence of `f` is applied to a field bound by the enclosing method.
-    Probes `soundness-probes/t1-kernel.lean`, `t1-kernel-run.lean`;
-    `wiz-notes/t1-review.md`.
+  * **M1, closed (t1-review).** The kernel used to accept hand-made implementations that
+    agree with the value but **do not terminate**: for `f : N → N | .z => .z | .s n => f n`,
+    the implementation `.s n => f (.s n)` (the call on the rebuilt scrutinee), and
+    `λ x. f x` or `const f`. `checkCallsOnFields` now rejects every implementation that
+    mentions the definition unless it is the definition's split and every call is on a
+    field of the method's constructor, and the conversion shortcut is only taken when the
+    implementation does not mention the definition (`checkImplAgrees`). The probes are in
+    `Tests/Groups/Trust.lean` ("recursive definitions: compiled equations whose calls are
+    not on fields are rejected", from `t1-review.md`); the rejection names the method and
+    the argument since the termination diagnostics were split out of the one
+    "not on a field" message. Termination of compiled code no longer rests only on
+    `deriveImpl`: the kernel checks the property itself for every derived
+    implementation. The residual is the boundary: a hand-written `implemented_by` is
+    trusted (listed by `#print axioms`), and a `partial`/`mutual` body may loop by
+    design (`docs/stages/13-language/termination.md`).
 * **The other places with a second term or a recognition by syntax** (each probed with
   the shadowing example; the kernel's value and the compiled result agree in all):
   sized definitions (one term, `sfix`; the definition's name is an ordinary local);

@@ -317,6 +317,32 @@ def trustGroup : Group where
           | _ => impl
         check (!(← verdict "u" (splitOfSucc "u"))) "u with a split of (.s x) was accepted"
         check (!(← verdict "f" (splitOfSucc "f"))) "f with a split of (.s x) was accepted" },
+    { name := "recursive definitions: a non-structural call says which method and argument (termination diagnostics)", run := fun _ => do
+        -- (the accepted set is the one the M1 probes already pin down: this case checks the
+        -- reason, so a failure is readable)
+        let src := "inductive N where\n  | z\n  | s (n : N)\n" ++
+          "def f : N → N\n  | .z => .z\n  | .s n => f n\n"
+        let s := runFrontend (R := ZeroOneMany) src {}
+        let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
+        unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+        let some d := s.globals.find? "f" | throw (IO.userError "f is missing")
+        let g0 : Globals ZeroOneMany := { s.globals with decls := s.globals.decls.erase "f" }
+        let err (impl : Term ZeroOneMany) : IO String :=
+          match addDecl g0 { d with impl := some impl } with
+          | .ok _ => pure "accepted"
+          | .error e => pure (toString e)
+        -- (inside the method for `N.s`, the argument is `N.s n`, not a field)
+        let e1 ← err ((wrapCalls "f" (fun a => .app (.const "N.s" []) a)) d.impl.get!)
+        for fragment in ["in the method for N.s", "computed argument (nested recursion)",
+            "not a field of N.s", "compiled code would loop"] do
+          check ((e1.splitOn fragment).length > 1) s!"'{fragment}' is missing from: {e1}"
+        -- (a direct call: there is no split to check, and the message says so)
+        let e2 ← err (.lam "n" (.app (.const "f" []) (.var 0)))
+        for fragment in ["not under a match", "there is no smaller field", "compiled code would loop"] do
+          check ((e2.splitOn fragment).length > 1) s!"'{fragment}' is missing from: {e2}"
+        -- (an implementation that is not even the definition's λ-prefix)
+        let e3 ← err (.const "f" [])
+        check ((e3.splitOn "fewer than 1 arguments").length > 1) s!"expected a binder-count error, got: {e3}" },
     { name := "O3: an unchecked registration is an axiom", run := fun _ => do
         let msgs ← messagesLib badAdd
         let expect := ["warning: builtin nat := N is not checked: it is an axiom of every declaration that depends on N (see `#print axioms`)",

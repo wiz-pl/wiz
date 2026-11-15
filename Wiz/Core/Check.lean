@@ -1176,10 +1176,25 @@ partial def replaceConstTo (c c' : Name) (t : Term R) : Term R := match t with
   | t => Id.run <| t.mapChildrenM pure (fun _ x => pure (replaceConstTo c c' x))
 
 /-- The constant `c` at the levels `us` replaced by a variable bound outside the term
-(`var 0` at the top). At other levels it stays (and `callsOnFields` rejects it). -/
+(`var 0` at the top). At other levels it stays (and `checkCallsOnFields` rejects it). -/
 partial def replaceConst (c : Name) (us : List Level) (t : Term R) (depth : Nat := 0) : Term R := match t with
   | .const n us' => if n == c && us' == us then .var depth else t
   | t => Id.run <| t.mapChildrenM pure (fun k x => pure (replaceConst c us x (depth + k)))
+
+/-- What a term that was passed as the structural argument of a recursive call looks like,
+for the termination error (a smaller description than the whole term: the kernel has no
+pretty printer here). -/
+private def structuralArgumentShape {R : Type} : Term R → String
+  | .var _ => "a variable that the enclosing method does not bind as a field (a parameter, the scrutinee, or a field of an enclosing match)"
+  | .app _ _ => "an application, i.e. a computed argument (nested recursion)"
+  | .fst _ | .snd _ => "a projection"
+  | .pair _ _ => "a pair"
+  | .ann _ _ => "an annotated term"
+  | .letE .. => "a let"
+  | .split .. => "a split"
+  | .const n _ => s!"the constant {n}"
+  | .sort _ => "a type"
+  | _ => "not a variable"
 
 /-- **Every call is on a field** (`checkImplAgrees`; termination of compiled code). The
 implementation is `[prf.{l}] λ a₀ … a_{k-1}. [let …] K Δ motive m₁ … mₙ ξ x …` for a `T.casesOn`
@@ -1192,9 +1207,15 @@ makes is on a strictly smaller value (a field of the scrutinee), so it terminate
 kernel's recursion does; the conversion check alone cannot see calls at types where every
 two values are convertible (`Unit`, propositions). (A `mutual` block's constructors are
 named by their member, `Ev.z`, so a case's method binder `m_Ev.z` already names the
-constant; otherwise it is the family's `T.c`.) -/
-partial def callsOnFields (g : Globals R) (fn : Name) (us : List Level) (k x : Nat) (ixL : Option (List Nat))
-    (impl : Term R) : Bool := Id.run do
+constant; otherwise it is the family's `T.c`.)
+
+`Except.error` names the first reason the implementation is not structurally recursive
+(the exported name is `checkCallsOnFields`): Callers report it instead of the old
+all-or-nothing "not on a field of the constructor of the split", so a nested, growing or
+lexicographic call says which one it is and in which method. The accepted set is the same
+as before: this is a diagnostic change. -/
+partial def checkCallsOnFields (g : Globals R) (fn : Name) (us : List Level) (k x : Nat)
+    (ixL : Option (List Nat)) (impl : Term R) : Except String Unit := do
   let rec peel : Nat → Term R → Option (Term R)
     | 0, t => some t
     | n + 1, .lam _ b => peel n b
@@ -1203,15 +1224,21 @@ partial def callsOnFields (g : Globals R) (fn : Name) (us : List Level) (k x : N
     -- indices are unchanged: look through it, as the agreement check does)
     | n + 1, .prf _ b => peel (n + 1) b
     | _, _ => none
-  let some body := peel k impl | return false
+  let some body := peel k impl
+    | throw s!"its implementation has fewer than {k} arguments (its value has {k})"
   let rec skipLets : Term R → Nat → Term R × Nat
     | .letE _ _ ty v b, n => if mentionsConst fn ty || mentionsConst fn v then (.tt, 0) else skipLets b (n + 1)
     | t, n => (t, n)
   let (body, nLets) := skipLets body 0
-  let (.const K _, args) := body.spine | return false
-  unless K.endsWith ".casesOn" || K.endsWith ".casesOnN" do return false
+  let notSplit : Except String Unit :=
+    if mentionsConst fn body then
+      throw s!"a call of {fn} is not under a match on the argument it recurses on, so there is no smaller field at its structural argument (compiled code would loop)"
+    else throw s!"its implementation is not its definition's split (a `T.casesOn`)"
+  let (.const K _, args) := body.spine | notSplit
+  unless K.endsWith ".casesOn" || K.endsWith ".casesOnN" do notSplit
   let T := String.ofList (K.toList.take (K.length - (if K.endsWith ".casesOnN" then 9 else 8)))
-  let (some Td, some descD, some kd) := (g.find? T, g.find? (T ++ ".desc"), g.find? K) | return false
+  let (some Td, some descD, some kd) := (g.find? T, g.find? (T ++ ".desc"), g.find? K)
+    | throw s!"internal error: the eliminator {K} is not the split of a declared data type"
   let rec pis : Term R → Nat
     | .pi _ _ _ _ b _ => pis b + 1
     | _ => 0
@@ -1227,36 +1254,57 @@ partial def callsOnFields (g : Globals R) (fn : Name) (us : List Level) (k x : N
   -- applied to `x` say, would make its "fields" `x` itself: t1-review M1c), at the index
   -- variables in mode A
   let ix (ℓ : Nat) : Term R := .var (nLets + k - 1 - ℓ)
-  unless args[nΔ + 1 + nc + nΞ]? == some (ix x) do return false
+  unless args[nΔ + 1 + nc + nΞ]? == some (ix x) do
+    throw s!"its split is not a match on the argument it recurses on (the column at position {x}); a match on a reconstructed value is not structural"
   if let some ls := ixL then
-    unless (args.drop (nΔ + 1 + nc)).take nΞ == ls.map ix do return false
+    unless (args.drop (nΔ + 1 + nc)).take nΞ == ls.map ix do
+      throw s!"its split's indices are not the definition's index variables"
   let outside := args.take (nΔ + 1) ++ args.drop (nΔ + 1 + nc)
-  if outside.any (mentionsConst fn ·) then return false
-  let methods := (args.drop (nΔ + 1)).take nc
-  let ok := (ctors.zip methods).all fun (c, m) => Id.run do
-    -- (a `mutual` block's constructors are named by their member, `Ev.z`, and so are the
-    -- case's method binders, `m_Ev.z`: `c` is then the constant itself; otherwise it is
-    -- the family's `T.c`)
-    let some cd := (if c.contains '.' then g.find? c else g.find? (T ++ "." ++ c)) | return false
-    let F := pis cd.type - nΔ
-    let some mb := peel F m | return !mentionsConst fn m
-    -- in `mb` under `dd` more binders, field `j` is `var (dd + F - 1 - j)`
-    return calls F 0 mb
-  return ok
-where
-  isField (F dd : Nat) (t : Term R) : Bool := match t with
+  if (outside.find? (mentionsConst fn ·)).isSome then
+    throw s!"{fn} occurs outside the methods (in the split's parameters, motive, indices or scrutinee); every call must be inside the method of a constructor, on one of its fields"
+  let rec isField (F dd : Nat) (t : Term R) : Bool := match t with
     | .var i => dd ≤ i && i < dd + F
     | .app f _ => isField F dd f
     | _ => false
-  calls (F dd : Nat) (t : Term R) : Bool :=
+  let rec calls (ctor : Name) (F dd : Nat) (t : Term R) : Except String Unit :=
     match t.spine with
     | (.const n us', as) =>
-      if n == fn then
-        us' == us && as.length > x && isField F dd as[x]! && as.all (calls F dd)
-      else as.all (calls F dd)
-    | (h, as@(_ :: _)) => calls F dd h && as.all (calls F dd)
-    | (t, []) => (t.forChildren (m := StateM Bool) (fun _ => pure ())
-        (fun k c => modify (· && calls F (dd + k) c)) |>.run true).2
+      if n == fn then do
+        if us' != us then
+          throw s!"a call of {fn} in the method for {ctor} is at different universe levels ({us'} vs {us})"
+        if as.length ≤ x then
+          throw s!"a call of {fn} in the method for {ctor} has {as.length} argument(s), so its structural argument (position {x + 1}) is missing or passed implicitly"
+        -- (`isField` looks through an infinitary field applied to arguments: `k h …` is a
+        -- field of the constructor, and smaller than the scrutinee)
+        unless isField F dd as[x]! do
+          throw s!"a call of {fn} in the method for {ctor} passes {structuralArgumentShape as[x]!} at its structural argument, not a field of {ctor} that the method binds"
+        for a in as do calls ctor F dd a
+      else for a in as do calls ctor F dd a
+    | (h, as@(_ :: _)) => do calls ctor F dd h; for a in as do calls ctor F dd a
+    | (t, []) => do
+      -- (all children, with the extra binders counted: a call under a λ/let is still a
+      -- call, and the fields it may mention keep their de Bruijn index plus `dd`)
+      let _ ← t.mapChildrenM (m := Except String) pure
+        (fun k c => do calls ctor F (dd + k) c; pure c)
+      pure ()
+  let methods := (args.drop (nΔ + 1)).take nc
+  for (c, m) in ctors.zip methods do
+    -- (a `mutual` block's constructors are named by their member, `Ev.z`, and so are the
+    -- case's method binders, `m_Ev.z`: `c` is then the constant itself; otherwise it is
+    -- the family's `T.c`; the messages show that name)
+    let cname := if c.contains '.' then c else T ++ "." ++ c
+    let some cd := (if c.contains '.' then g.find? c else g.find? (T ++ "." ++ c))
+      | throw s!"the constructor {cname} of the split is not declared"
+    let F := pis cd.type - nΔ
+    -- in `mb` under `dd` more binders, field `j` is `var (dd + F - 1 - j)`
+    match peel F m with
+    | some mb => calls cname F 0 mb
+    | none =>
+      -- (a method that does not bind its fields is only reached by a hand-made
+      -- implementation: a derived one always omits the hypotheses and binds the fields)
+      if mentionsConst fn m then
+        throw s!"the method for constructor {cname} does not bind its {F} fields, and calls {fn}"
+      else pure ()
 
 /-- **The bridge by shape** (`checkImplAgrees`). The value is
 `λ a₀ … a_{k-1}. r Δ motive methods ξ x [e] rs` for a recursor `r` (`T.rec`/`T.recN`),
@@ -1362,13 +1410,45 @@ partial def checkImplAgrees (g : Globals R) (d : Decl R) (value impl : Term R) :
   tys := tys.push ty0
   let args := (List.range k).map Val.var
   let a := whnf (args.foldl (vApp g) (eval g [] value))
+  let .neutral (.local x) sp := a
+    | fail "its value is not stuck on an argument (not a recursively defined value)"
+  let some (.ind l I D v P M i) := (sp[0]? : Option (Elim R))
+    | fail "its value is not an induction on an argument"
+  -- (the index variables of the split, if its index is made of them: mode A; needed by the
+  -- termination check below, and again for the bridge)
+  let rec comps : Nat → Val R → List (Val R)
+    | 0, _ => []
+    | n + 1, t => match whnf t with
+      | .pair c r => c :: comps n r
+      | _ => []
+  let iComps := comps 64 i
+  let ixL0? : Option (List Nat) := iComps.mapM fun c => match whnf c with
+    | .neutral (.local l) #[] => some l
+    | _ => none
+  -- (an index that is not made of distinct variables: mode B, the split's next argument
+  -- is the proof of its index equation, not a column)
+  let ixL0? := ixL0?.bind fun ls => if ls.eraseDups.length == ls.length && !ls.contains x then some ls else none
+  let rsArgs := (sp.extract 1 sp.size).toList
+  let rsArgs := if ixL0?.isSome then rsArgs else rsArgs.drop 1
+  let rsL? : Option (List Nat) := rsArgs.mapM fun e => match e with
+    | .app (.neutral (.local l) #[]) => some l
+    | _ => none
+  -- (an index variable that is also a column: no substitution of the index)
+  let ixL? := ixL0?.bind fun ls => if (rsL?.getD []).all (!ls.contains ·) then some ls else none
+  let modeA := ixL?.isSome
+  -- **Termination first**: the implementation's calls are checked against the value's
+  -- split column `x` before the two terms are compared, so an implementation that makes
+  -- a non-structural call (a hand-made one: `λ n. f (s n)`, or `λ n. f n`) is reported as
+  -- such, not as a shape mismatch (t1-review M1).
+  if let .error why := checkCallsOnFields g d.name (d.levelParams.map Level.param) k x ixL? impl then
+    fail s!"{why} (compiled code would loop)"
   -- (the implementation with `F` for the definition: everything it says but the calls is
   -- compared with `F` free, which is the more general statement)
   let b := whnf (args.foldl (vApp g) (eval g [fV] (replaceConst d.name (d.levelParams.map Level.param) impl)))
-  let (.neutral (.local x) sp, .neutral (.local x') sp') := (a, b)
-    | fail "the value or the implementation is not stuck on an argument"
-  let (some (Elim.ind l I D v P M i), some (Elim.ind l' I' D' v' P' MF i')) := ((sp[0]? : Option (Elim R)), (sp'[0]? : Option (Elim R)))
-    | fail "the value or the implementation is not an induction on an argument"
+  let .neutral (.local x') sp' := b
+    | fail "its implementation is not stuck on an argument (a derived one is its definition's split)"
+  let some (.ind l' I' D' v' P' MF i') := (sp'[0]? : Option (Elim R))
+    | fail s!"its implementation is not an induction on an argument (a derived one is its definition's split, a `T.casesOn`)"
   let MF? : Option (Val R) := some MF
   unless x == x' && sp.size == sp'.size do fail "they split different arguments"
   -- (the methods are checked below; here both are a fresh variable of the method type, so
@@ -1404,28 +1484,6 @@ partial def checkImplAgrees (g : Globals R) (d : Decl R) (value impl : Term R) :
   variables, and then only where `j` is that index). The per-constructor check below
   holds with `F` free, so also for `F := f`; with the bridge it holds for the kernel's
   hypotheses. -/
-  let rec comps : Nat → Val R → List (Val R)
-    | 0, _ => []
-    | n + 1, t => match whnf t with
-      | .pair c r => c :: comps n r
-      | _ => []
-  let iComps := comps 64 i
-  let ixL0? : Option (List Nat) := iComps.mapM fun c => match whnf c with
-    | .neutral (.local l) #[] => some l
-    | _ => none
-  -- (an index that is not made of distinct variables: mode B, the split's next argument
-  -- is the proof of its index equation, not a column)
-  let ixL0? := ixL0?.bind fun ls => if ls.eraseDups.length == ls.length && !ls.contains x then some ls else none
-  let rsArgs := (sp.extract 1 sp.size).toList
-  let rsArgs := if ixL0?.isSome then rsArgs else rsArgs.drop 1
-  let rsL? : Option (List Nat) := rsArgs.mapM fun e => match e with
-    | .app (.neutral (.local l) #[]) => some l
-    | _ => none
-  -- (an index variable that is also a column: no substitution of the index)
-  let ixL? := ixL0?.bind fun ls => if (rsL?.getD []).all (!ls.contains ·) then some ls else none
-  let modeA := ixL?.isSome
-  unless callsOnFields g d.name (d.levelParams.map Level.param) k x ixL? impl do
-    fail "a call of the definition is not on a field of the constructor of the split it is in (compiled code could loop)"
   let ixL := ixL?.getD []
   let hypCall (head j y : Val R) (rs : List Nat) (eqArg : Bool) : Val R :=
     let m := rs.length

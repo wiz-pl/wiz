@@ -59,6 +59,7 @@ line below.
 
 * [Stage 12: towards self-hosting](stages/12-towards-selfhosting.md)
 * [Stage 13: the language, for programs this size](stages/13-language.md)
+  * [Termination: structural recursion, `partial`, and sizes](stages/13-language/termination.md)
 * [Stage 14: the kernel in Wiz](stages/14-selfhost-kernel.md)
 * [Stage 15: performance for self-hosting](stages/15-performance.md)
 * [Stage 16: data in the self-hosted frontend](stages/16-selfhost-data.md)

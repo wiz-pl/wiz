@@ -548,6 +548,10 @@ structure RecCtx where
   /-- (#249) the matched arguments (in the definition's order) the hypothesis doesn't
   take: index variables generalised by the motive -/
   dropCols : List Nat := []
+  /-- the name of the scrutinee of the split the calls are checked against (the structural
+  argument at the top split): an error message can then say that a call on it is a call on
+  the scrutinee itself, not on a field -/
+  scrutName : Option Name := none
 
 /-- The constructors of the data type `T` (the tags of its description). -/
 def ctorNames (g : Globals R) (T : Name) : List Name :=
@@ -794,7 +798,8 @@ partial def rewriteRecCalls (g : Globals R) (rc : RecCtx) (binds : List (Name ×
       let ok := match args[i]? with
         | some a => a.isOfKind "term.ident" && (a.getArg 0).getId? == some p
         | none => false
-      unless ok do throw s!"recursive call of {rc.fn} must pass the parameter {p} unchanged"
+      unless ok do throw (s!"recursive call of {rc.fn} must pass the parameter {p} unchanged" ++
+        "\n  (structural recursion decreases on a matched argument; a call that changes a parameter is recursion on another argument, a lexicographic measure Wiz does not check: use `partial def`)")
     let given := args.extract np args.size
     -- (the old form, all columns given: keep the explicit columns' arguments, then any
     -- further arguments after the columns)
@@ -810,11 +815,21 @@ partial def rewriteRecCalls (g : Globals R) (rc : RecCtx) (binds : List (Name ×
     let (yStx, kargs) :=
       if a.isOfKind "term.app" then (a.getArg 0, (a.getArg 1).args) else (a, #[])
     let some y := (if yStx.isOfKind "term.ident" then (yStx.getArg 0).getId? else none)
-      | throw (s!"recursive call of {rc.fn} must be on a variable, not {a.reprint}" ++ "\n  (structural recursion: a recursive call must be on a field of the matched constructor, like n in `| .succ n => … f n …`; for any other recursion, use `partial def`)")
+      | throw (s!"recursive call of {rc.fn} must be on a variable, not {a.reprint}" ++
+          "\n  (structural recursion decreases on a field of the matched constructor, like n in `| .succ n => … f n …`; a call on a computed argument is nested recursion, which Wiz does not check: use `partial def`)")
     let some (_, _, .neutral (.local fl) #[]) := binds.find? (·.1 == y)
-      | throw (s!"recursive call of {rc.fn} on {a.reprint}, which is not a recursive field" ++ "\n  (structural recursion: a recursive call must be on a field of the matched constructor, like n in `| .succ n => … f n …`; for any other recursion, use `partial def`)")
+      | throw (s!"recursive call of {rc.fn} on {a.reprint}, which is not a recursive field" ++
+          (if rc.scrutName == some y then
+            "\n  (this is the scrutinee itself, which is not smaller; structural recursion decreases on a field of the matched constructor, like n in `| .succ n => … f n …`, and Wiz checks no measure: use `partial def`)"
+           else
+            "\n  (structural recursion decreases on a field of the constructor matched here; a parameter or a field of an enclosing match would be a lexicographic measure, which Wiz does not check: use `partial def`)"))
     let some (_, ihl) := rc.ihs.find? (·.1 == fl)
-      | throw (s!"recursive call of {rc.fn} on {a.reprint}, which is not structurally smaller" ++ "\n  (structural recursion: a recursive call must be on a field of the matched constructor, like n in `| .succ n => … f n …`; for any other recursion, use `partial def`)")
+      | if rc.scrutName == some y then
+          throw (s!"recursive call of {rc.fn} on {a.reprint}, the scrutinee itself, which is not smaller" ++
+            "\n  (structural recursion decreases on a field of the matched constructor, like n in `| .succ n => … f n …`; a call on the scrutinee itself does not decrease, and Wiz checks no measure: use `partial def`)")
+        else
+          throw (s!"recursive call of {rc.fn} on {a.reprint}, which is not structurally smaller" ++
+            "\n  (only a field of the constructor matched here has a hypothesis: a parameter, a field of an enclosing match, or a field of a nested split (like `| n + 2 => f n`) is not smaller by the structural order, and Wiz has no lexicographic or nested measure; use `partial def`)")
     let some ty := ihType ihl | throw "internal error: hypothesis without a type"
     -- a family matched at a concrete index: the hypothesis first wants the (trivial)
     -- proof that the field's index is that index
@@ -2896,7 +2911,11 @@ partial def compileMatch (ctx : LocalCtx R) (vars : List Lvl) (clauses : List (M
           throwAt ctx.info s!"missing case for constructor {c}: add an alternative for {pat}" "missing-case"
         -- reverted variables are re-introduced at new levels: their hypotheses follow them
         let moved := rs.zip rsLvls.toList
-        let rc := rc.map fun r => { r with ihs := r.ihs.map fun (a, b) => ((moved.lookup a).getD a, (moved.lookup b).getD b) }
+        let rc := rc.map fun r => { r with
+          ihs := r.ihs.map fun (a, b) => ((moved.lookup a).getD a, (moved.lookup b).getD b) }
+        -- (the top split is the one the definition recurses on: remember its scrutinee, so
+        -- that a call on it can be told from a call on a field in the error message)
+        let rc := if useRec then rc.map fun r => { r with scrutName := some (nameOf x) } else rc
         let rc' := rc.map fun r => { r with ihs := r.ihs ++ (if useRec then
           ((fieldLvls'.toList.zip (fieldInfos.map fun (f : Name × BinderInfo × Term R) => f.2.2)).filter
             (fun (_, A) => isRecField A)).map (·.1) |>.zip ihLvls.toList else []) }

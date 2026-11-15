@@ -440,6 +440,31 @@ def structGroup : Group where
         rejects (R := Unit) [Raw.defn "bad" (.empty 1) .tt] (fun _ => true) "an error" }
   ]
 
+/-- The `partial` boundary at the kernel (`addPartialDecl`, `addPartialImpl`): a partial
+definition is opaque, needs a witness, and its recursive body is never compared with a
+value (it is only what compiled code runs). -/
+def terminationGroup : Group where
+  name := "check: termination"
+  exercise := "Exercise 4.21"
+  cases := [
+    { name := "a partial declaration needs a witness; a witness makes it accepted", run := fun _ => do
+        let ty : Term Q := .unit 1
+        match addPartialDecl (R := Q) {} { name := "f", type := ty, value := none } with
+        | .error e => unless ((toString e).splitOn "needs a witness").length > 1 do
+            throw (IO.userError s!"expected the witness error, got: {e}")
+        | .ok _ => throw (IO.userError "a partial declaration without a witness was accepted")
+        check ((addPartialDecl (R := Q) {} { name := "f", type := ty, value := none, witness := some .tt }) matches .ok _)
+          "a partial declaration with a witness was rejected" },
+    { name := "only a partial declaration takes an implementation; an axiom does not", run := fun _ => do
+        let g ← match addDecl (R := Q) {} { name := "a", type := .unit 1, value := none } with
+          | .ok g => pure g
+          | .error e => throw (IO.userError s!"setup rejected: {e}")
+        match addPartialImpl g "a" .tt with
+        | .error e => unless ((toString e).splitOn "is not a partial definition").length > 1 do
+            throw (IO.userError s!"expected the partial-only error, got: {e}")
+        | .ok _ => throw (IO.userError "an axiom took a partial implementation") }
+  ]
+
 /-- This module's test groups, which `Tests/Main.lean` runs: one per line, in sorted
 order, so that branches adding groups rarely touch the same lines. A new group also
 needs a shard in `.github/test-shards.json` (CI checks). -/
@@ -447,6 +472,7 @@ def groups : List Group :=
   mlttGroup ::
   qttGroup ::
   structGroup ::
+  terminationGroup ::
   []
 
 end Tests.Check
