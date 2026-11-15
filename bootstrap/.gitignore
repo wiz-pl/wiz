@@ -1,0 +1,6 @@
+# Generated bootstrap artefacts: `make-seed.sh` writes seed.c, SEED, seed and the
+# check/DDC work directories here.  The repository policy is to commit the
+# generator (make-seed.sh) and the manifest template, not the generated 7-13 MB C
+# or a binary; a seed is published as a release artefact and rebuilt from the
+# fixpoint.  See README.md, "What is checked in".
+seed*/
