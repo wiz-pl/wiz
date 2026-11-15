@@ -1633,7 +1633,7 @@ def testRunnerGroup : Group where
 its `.expected`), in a package of its own so that only that file runs. -/
 def tourFiles : List String :=
   ["00-hello", "01-basics", "02-data", "03-structures", "04-classes", "05-vec", "06-proofs",
-   "07-quantities", "08-codata", "09-ffi", "10-hdl", "11-mistakes"]
+   "06b-calc", "07-quantities", "08-codata", "09-ffi", "10-hdl", "11-mistakes"]
 
 def tourCase (f : String) : Case :=
   { name := s!"examples/tour/{f}.wiz", run := fun _ => do

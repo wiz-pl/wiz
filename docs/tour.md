@@ -324,6 +324,25 @@ it gives the same thing at `b`. `congrSucc` uses it to show that equal numbers h
 equal successors. `#print axioms zero_add` says the proof `does not depend on any
 axioms`.
 
+Chains of relations have their own notation, **`calc`**. Adjacent steps compose through
+an instance of `Trans`, and the last step's relation is the result:
+
+```
+def lt_of_chain (a b c d : Nat) (h1 : a ≤ b) (h2 : b < c) (h3 : c ≤ d) : a < d :=
+  calc a ≤ b := h1
+       _ < c := h2
+       _ ≤ d := h3
+```
+
+`_` is the previous step's right endpoint (an explicit middle term must be the same).
+`Trans` instances for `=` and `↔` are in `lib/Logic.wiz`; `Nat`, `Int` and `Q` register
+`=`, `≤` and `<` (and `≈` at `Q`) in `lib/Nat.wiz`, `lib/IntOrder.wiz` and
+`lib/Rat.wiz`, and a program adds its own relation by declaring a `Trans` instance for
+it. A chain elaborates to nested `Trans.trans` applications, so it is checked like any
+other proof and names no axioms; a step whose proof has the wrong relation, or a pair of
+relations that no instance composes, is reported at that step.
+(`examples/tour/06b-calc.wiz`; [stages/13-language.md](stages/13-language.md), 13s.)
+
 Proofs can also be written with **tactics**, after `by`. `intro`, `exact`, `apply`,
 `assumption`, `rfl`, `rw` and `unfold` are in the Prelude, and since a tactic is a Wiz
 function, you can write your own (`examples/tactics.wiz`):
