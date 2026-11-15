@@ -1,4 +1,5 @@
 import Grail.Build
+import Grail.Signature
 
 /-!
 # Git dependencies and the lock file (stage 23h)
@@ -66,6 +67,8 @@ structure Lock where
   /-- (23m) where the versions came from, and the commit that was read -/
   indexUrl : String := ""
   indexCommit : String := ""
+  /-- (23m, Stage 1) the verified index signature; a later update must match it -/
+  indexSignature : Option Signature := none
   git : List Locked := []
   pkgs : List PkgLock := []
   overrides : List LockOverride := []
@@ -94,6 +97,9 @@ def render (l : Lock) : String :=
       ([str l.toolchain] ++ (if l.revision.isEmpty then [] else [str l.revision]))).render
   let idx := if l.indexUrl.isEmpty then "" else
     "\n  " ++ (node "index" [str l.indexUrl, str l.indexCommit]).render
+  let sig := match l.indexSignature with
+    | none => ""
+    | some s => "\n  " ++ (Signature.node s).render
   let git := if l.git.isEmpty then "" else
     "\n  " ++ "\n  ".intercalate ((l.git.toArray.qsort fun a b => a.name < b.name).toList.map fun d =>
       (node "dep" [str d.name, str d.url, str d.rev, str d.commit, str d.content]).render)
@@ -102,7 +108,7 @@ def render (l : Lock) : String :=
   let overrides := if l.overrides.isEmpty then "" else
     "\n  " ++ "\n  ".intercalate ((l.overrides.toArray.qsort fun a b => a.name < b.name).toList.map fun o =>
       (node "override" [str o.name, str o.path, str o.hash]).render)
-  "(lock" ++ version ++ toolchain ++ idx ++ git ++ pkgs ++ overrides ++ ")\n"
+  "(lock" ++ version ++ toolchain ++ idx ++ sig ++ git ++ pkgs ++ overrides ++ ")\n"
 
 /-- Decode the body of a `(deps …)`: v3 writes flat `"NAME REQ"` strings; v2 wrote
 `(dep "NAME" "REQ")` nodes, which stay accepted. -/
@@ -142,6 +148,8 @@ def parse (s : String) : Except String Lock := do
         l := { l with git := l.git ++ [{ name, url, rev, commit, content }] }
       | [.a "index", .a url, .a commit] =>
         l := { l with indexUrl := url, indexCommit := commit }
+      | .a "index-signature" :: _ =>
+        l := { l with indexSignature := some (← Signature.parse e) }
       | [.a "override", .a name, .a path, .a hash] =>
         l := { l with overrides := l.overrides ++ [{ name, path, hash }] }
       | .a "pkg" :: .a name :: .a version :: .a source :: .a sha256 :: rest =>

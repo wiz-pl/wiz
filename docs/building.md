@@ -137,8 +137,11 @@ Fetch verifies the SHA-256 **before** unpacking, into a temporary directory, and
 only after the hash matches, so a bad transfer leaves no partial tree. The archive layout
 is one `NAME-VERSION/` with `grail.wiz`; relative `source` paths in a local index are
 resolved against the index root (which is what makes the checked-in fixture usable
-offline). The index is not signed yet: SHA-256 and the lock give integrity, the index's
-git history and review give names, and building a package still runs its author's code.
+offline). An index may publish a signed `index/snapshot.sexpr` (+ `.sig`);
+`grail update --require-signature --allowed-signers FILE` verifies it offline and pins
+its key, sequence and digest in the lock, and `grail index verify` checks one without a
+network. SHA-256 and the lock still give integrity, the index's git history and review
+give names, and building a package still runs its author's code.
 
 `grail vendor [DIR]` (23n) copies the lock's registry archives into `DIR` (default
 `vendor/`) as `<sha256>.tar.gz` and writes `DIR/index.sexpr`; the lock is unchanged, so

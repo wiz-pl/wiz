@@ -12,6 +12,7 @@ entries/NAME.sexpr.in     the templates make.sh renders index/NAME.sexpr from
 sources/NAME-VERSION/     unpacked sources; the input to the generator
 packages/NAME-VERSION.tar.gz   deterministic release archives (checked in)
 make.sh                   generation: archives, hashes, index/*.sexpr, index.sexpr
+index/snapshot.sexpr      optional signed state (+ .sig), not generated here
 index.sexpr               every package in one document (a file index)
 ```
 
@@ -62,7 +63,10 @@ test), and `grail index check URL --fetch` validates it after cloning.
 
 This layout is deliberately static: a git repository of text files plus immutable
 tarballs. The archive SHA-256 in the index chains the bytes; the index's git history is
-the audit log. It is **not signed**: see
+the audit log. An index can also publish `index/snapshot.sexpr` and sign it with
+`ssh-keygen -Y sign -n grail-index`; `grail update --require-signature --allowed-signers
+FILE` verifies it offline and pins the key, sequence and digest in `grail.lock`. This
+example is **unsigned** (there is no key to commit): see
 [docs/stages/23-grail/index-repository.md](../../docs/stages/23-grail/index-repository.md)
-for the TUF/Sigsum staging (signed tags, a signed snapshot, a transparency log) and the
-remaining gaps. Do not describe a hash as authorship.
+for the format, the TUF/Sigsum staging and the remaining gaps (freshness, rotation, a
+transparency log). Do not describe a hash as authorship.

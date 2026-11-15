@@ -39,11 +39,17 @@ def usage : String := "usage:
   grail index resolve [--index URL] [--offline]
                           print the versions `grail update` would pick
   grail index show NAME   print a package's index entry
-  grail index check [INDEX] [--fetch]
+  grail index check [INDEX] [--fetch] [--require-signature]
                           validate an index repository offline (names, versions,
                           SHA-256s of local archives, semver ranges, module-prefix
-                          conflicts, index.wiz); --fetch downloads remote archives
-                          and clones a git index
+                          conflicts, index.wiz, a signed snapshot); --fetch downloads
+                          remote archives and clones a git index
+  grail index verify [INDEX] [--locked] [--allowed-signers FILE]
+                          verify the index's signed snapshot offline; --locked also
+                          requires it to match grail.lock (fingerprint, seq, digest)
+  grail index snapshot [INDEX] [--seq N] [--updated T] [--key FP] [--expires T]
+                          write index/snapshot.sexpr from the entries (then sign it
+                          with ssh-keygen -Y sign -n grail-index)
   grail publish ARCHIVE --source URL
                           hash a release archive and print its index entry (after
                           checking the manifest and the archive layout)
@@ -71,7 +77,10 @@ options: -C DIR (the package directory), --std DIR (the standard library),
   a read-only cache, searched in order after the write cache), --no-cache (both),
   --index URL (the package index: a directory, a file, or a git URL; default: the
   `index` setting of grail.wiz), --index-commit COMMIT (pin a git index),
-  --allow-rewind (accept a rewritten index history), --offline (never touch the network),
+  --require-signature (require a verified signed index snapshot), --allowed-signers FILE
+  (the trust root for the snapshot; default: the key a grail.lock pinned),
+  --allow-rewind (accept a rewritten index history or a lower snapshot seq),
+  --offline (never touch the network),
   --vendor DIR (a directory of vendored archives; default: the `vendor` setting),
   --source URL (grail publish: the archive's public URL),
   --trust-native (27a: allow `native_refl`, passed on to every check and to `wiz lsp`), --native-fuel N
@@ -95,8 +104,12 @@ structure Opts where
   index : Option String := none
   /-- (23m) pin a git index to one commit -/
   indexCommit : Option String := none
-  /-- (23m) accept a rewritten index history (R22) -/
+  /-- (23m) accept a rewritten index history (R22) or a lower signed snapshot sequence -/
   allowRewind : Bool := false
+  /-- (23m, Stage 1) require a verified signed snapshot of the index -/
+  requireSignature : Bool := false
+  /-- (23m, Stage 1) the allowed_signers file that authorises the index's key -/
+  allowedSigners : Option String := none
   /-- (23m) `grail index check`: also download remote archives and clone a git index -/
   fetch : Bool := false
   /-- (23m) never touch the network -/
@@ -120,6 +133,8 @@ partial def grailOpts (o : Opts) : List String → Opts × List String
   | "--index-commit" :: c :: rest => grailOpts { o with indexCommit := some c } rest
   | "--vendor" :: v :: rest => grailOpts { o with vendor := some v } rest
   | "--allow-rewind" :: rest => grailOpts { o with allowRewind := true } rest
+  | "--require-signature" :: rest => grailOpts { o with requireSignature := true } rest
+  | "--allowed-signers" :: f :: rest => grailOpts { o with allowedSigners := some f } rest
   | "--source" :: s :: rest => grailOpts { o with source := some s } rest
   | "--fetch" :: rest => grailOpts { o with fetch := true } rest
   | "--offline" :: rest => grailOpts { o with offline := true } rest
@@ -190,7 +205,7 @@ def cliMain (args : List String) : IO UInt32 := do
   -- (the index repository is not a package) and touches no network unless --fetch.
   if let "index" :: "check" :: rest := args then
     let spec := rest.find? (fun a => !a.startsWith "-") |>.getD (opts.index.getD dir.toString)
-    match ← checkDir cache flagged binId std spec opts.fetch with
+    match ← checkDir cache flagged binId std spec opts.fetch opts.requireSignature opts.allowedSigners with
     | .error e => IO.eprintln e; return 1
     | .ok r =>
       for line in r.lines do IO.println line
@@ -213,6 +228,74 @@ def cliMain (args : List String) : IO UInt32 := do
     | _ =>
       IO.eprintln "usage: grail cache [path|list|verify]"
       return 2
+
+  -- (23m, Stage 1) verify the index's signed snapshot offline; with --locked, against
+  -- the key/sequence/digest grail.lock recorded.
+  if let "index" :: "verify" :: rest := args then
+    let spec := rest.find? (fun a => !a.startsWith "-") |>.getD (opts.index.getD dir.toString)
+    let pinned ←
+      if opts.locked then
+        match ← Registry.lockSignature dir with
+        | some s => pure (some s)
+        | none => IO.eprintln "grail.lock has no index signature (run `grail update --require-signature`)"; return 1
+      else pure none
+    match ← Registry.loadIndex cache spec true "" opts.allowRewind true opts.allowedSigners pinned with
+    | .error e => IO.eprintln e; return 1
+    | .ok src =>
+      match src.signature with
+      | none => IO.eprintln "the index is not signed"; return 1
+      | some s =>
+        IO.println s!"signed by {s.identity} {s.fingerprint}"
+        IO.println s!"snapshot seq {s.seq}, updated {s.updated}, expires {s.expires}"
+        IO.println s!"snapshot sha256 {s.sha256}"
+        return 0
+  -- (23m, Stage 1) generate the unsigned snapshot; the maintainer then signs it with
+  -- `ssh-keygen -Y sign -n grail-index -f KEY index/snapshot.sexpr`.
+  if let "index" :: "snapshot" :: rest := args then
+    let spec := rest.find? (fun a => !a.startsWith "-") |>.getD (opts.index.getD dir.toString)
+    let rec flags (seq : Option Nat) (updated key expires : String) : List String → Option Nat × String × String × String
+      | "--seq" :: n :: t => flags (n.toNat?) updated key expires t
+      | "--updated" :: u :: t => flags seq u key expires t
+      | "--key" :: k :: t => flags seq updated k expires t
+      | "--expires" :: e :: t => flags seq updated key e t
+      | _ :: t => flags seq updated key expires t
+      | [] => (seq, updated, key, expires)
+    let (seqOpt, updatedOpt, key, expires) := flags none "" "" "" rest
+    let p : System.FilePath := spec
+    unless ← (p / "index").isDir do
+      IO.eprintln s!"grail index snapshot: {spec}: not a local index directory (it writes index/snapshot.sexpr)"
+      return 1
+    if key.isEmpty || expires.isEmpty then
+      IO.eprintln "grail index snapshot: --key FP and --expires T are required (a snapshot without them cannot be verified)"
+      return 1
+    if !Sign.validUtc expires then
+      IO.eprintln s!"grail index snapshot: --expires {expires} is not UTC (YYYY-MM-DDTHH:MM:SSZ)"
+      return 1
+    match ← Registry.readIndexDir p with
+    | .error e => IO.eprintln e; return 1
+    | .ok pkgs =>
+      let seq ← match seqOpt with | some n => pure n | none => Sign.nextSeq p
+      if seq == 0 then
+        IO.eprintln "grail index snapshot: --seq must be positive (rollback protection)"
+        return 1
+      let updated ← if !updatedOpt.isEmpty then pure updatedOpt else
+        match ← Sign.nowUtc with
+        | .ok t => pure t
+        | .error e => IO.eprintln e; return 1
+      if !Sign.validUtc updated then
+        IO.eprintln s!"grail index snapshot: --updated {updated} is not UTC (YYYY-MM-DDTHH:MM:SSZ)"
+        return 1
+      let name ← Sign.registryName p
+      let snap ← Sign.ofIndex p name pkgs seq updated key expires
+      let path := p / "index" / "snapshot.sexpr"
+      -- an old signature cannot cover the new bytes; remove it so the next sign cannot
+      -- leave a stale .sig in place
+      let oldSig : System.FilePath := System.FilePath.mk (path.toString ++ ".sig")
+      if ← oldSig.pathExists then IO.FS.removeFile oldSig
+      Cache.writeAtomic path (Snapshot.render snap)
+      IO.println s!"wrote {path} (seq {seq}, {snap.packages.length} packages)"
+      IO.println s!"sign it with: ssh-keygen -Y sign -n grail-index -f KEY {path}"
+      return 0
   match args with
   | ["clean"] =>
     -- (23i) the outputs grail installed in the package, unless they were changed since
@@ -331,13 +414,15 @@ def cliMain (args : List String) : IO UInt32 := do
       let noDeps := pkg.deps.isEmpty && pkg.requires.isEmpty && pkg.overrides.isEmpty
       match ← readLock with
       | .ok l =>
-        match Registry.checkLocked l pkg lockPin (strictOverride := opts.locked) with
+        match Registry.checkLocked l pkg lockPin (strictOverride := opts.locked)
+            (requireSignature := opts.requireSignature) with
         | .ok () => pure (.ok l)
         | .error e => pure (.error e)
       | .error e =>
         if noDeps then pure (.ok {})
         else if opts.locked then pure (.error e) else
-          match ← Registry.resolveLock cache indexSpec opts.offline readPkg dir pkg opts.allowRewind with
+          match ← Registry.resolveLock cache indexSpec opts.offline readPkg dir pkg opts.allowRewind
+              opts.requireSignature opts.allowedSigners with
           | .error e => pure (.error e)
           | .ok l =>
             Cache.writeAtomic (lockFile dir) (Lock.render l)
@@ -352,7 +437,8 @@ def cliMain (args : List String) : IO UInt32 := do
         match ← readLock with
         | .error e => if noDeps then pure 0 else IO.eprintln e; pure 1
         | .ok l =>
-          match Registry.checkLocked l pkg lockPin (strictOverride := true) with
+          match Registry.checkLocked l pkg lockPin (strictOverride := true)
+              (requireSignature := opts.requireSignature) with
           | .error e => IO.eprintln e; pure 1
           | .ok () =>
             for p in l.pkgs do IO.println s!"{p.name}\t{p.version}\t{p.source}"
@@ -360,7 +446,8 @@ def cliMain (args : List String) : IO UInt32 := do
             for o in l.overrides do IO.println s!"{o.name}\toverride {o.path}\t{o.hash}"
             pure 0
       else
-        match ← Registry.resolveLock cache indexSpec opts.offline readPkg dir pkg opts.allowRewind with
+        match ← Registry.resolveLock cache indexSpec opts.offline readPkg dir pkg opts.allowRewind
+            opts.requireSignature opts.allowedSigners with
         | .error e => IO.eprintln e; pure 1
         | .ok l =>
           let text := Lock.render l
@@ -400,7 +487,9 @@ def cliMain (args : List String) : IO UInt32 := do
       | .ok entry => IO.println entry; pure 0
     | "index" :: "resolve" :: _ =>
       if pkg.requires.isEmpty then pure 0 else
-        match ← Registry.loadIndex cache indexSpec opts.offline with
+        let pinned ← Registry.lockSignature dir
+        match ← Registry.loadIndex cache indexSpec opts.offline "" opts.allowRewind
+            opts.requireSignature opts.allowedSigners pinned with
       | .error e => IO.eprintln e; pure 1
       | .ok src =>
         match Resolve.resolve src.pkgs pkg.requires Wiz.version with
@@ -409,7 +498,9 @@ def cliMain (args : List String) : IO UInt32 := do
           for r in rs do IO.println s!"{r.name}\t{Version.render r.version}\t{r.sha256}\t{r.source}"
           pure 0
     | "index" :: "show" :: name :: _ =>
-      match ← Registry.loadIndex cache indexSpec opts.offline with
+      let pinned ← Registry.lockSignature dir
+      match ← Registry.loadIndex cache indexSpec opts.offline "" opts.allowRewind
+          opts.requireSignature opts.allowedSigners pinned with
       | .error e => IO.eprintln e; pure 1
       | .ok src =>
         match src.pkgs[name]? with

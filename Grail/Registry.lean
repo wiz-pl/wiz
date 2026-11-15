@@ -1,5 +1,6 @@
 import Grail.Deps
 import Grail.Index
+import Grail.Signature
 import Wiz.Version
 import Wiz.Smt.Sha256
 
@@ -375,7 +376,10 @@ def readIndexDir (dir : System.FilePath) : IO (Except String (Std.HashMap String
   let m ← IO.mkRef ({} : Std.HashMap String IxPackage)
   let rec visit (dir : System.FilePath) (scope : String) (depth : Nat) : IO (Except String Unit) := do
     for e in ← dir.readDir do
-      if e.fileName == "registry.sexpr" then continue
+      -- `registry.sexpr` is metadata; at the root, `snapshot.sexpr` is the signed state
+      -- (not a package). A scoped `@org/snapshot.sexpr` is still a package.
+      if e.fileName == "registry.sexpr" || (scope.isEmpty && e.fileName == "snapshot.sexpr") then
+        continue
       if e.fileName.endsWith ".sexpr" then
         match Index.parse (← IO.FS.readFile e.path) with
         | .error err => return .error s!"{e.path}: {err}"
@@ -401,15 +405,27 @@ def readIndexDir (dir : System.FilePath) : IO (Except String (Std.HashMap String
 structure Source where
   url : String
   commit : String := ""
+  /-- the verified `snapshot.sexpr`, when a signature was required or the lock pinned one -/
+  snapshot : Option Snapshot := none
+  /-- what was verified, for the lock -/
+  signature : Option Signature := none
   pkgs : Std.HashMap String IxPackage
 
 /-- Load the index from a directory, a file, or a git URL (cloned to the cache). A
 `URL#COMMIT` spec pins the index to one commit (the lock records it, so a project can
 commit both `grail.lock` and the pin); a plain directory or file has no commit.
 `previous` is the index commit the existing lock recorded: a URL index must move forward
-from it (a rewritten history is refused unless `allowRewind`, R22). -/
+from it (a rewritten history is refused unless `allowRewind`, R22).
+
+With `requireSignature` (or a `pinned` signature from the lock), the index must carry
+`index/snapshot.sexpr` and a valid detached SSH signature over it, with a `(seq)` not
+below the lock's, an unexpired `(expires)`, and entries that match the index exactly.
+`allowedSigners` is the trust root on first use; afterwards the lock's key is enough, so
+the check needs no network. -/
 def loadIndex (cache : System.FilePath) (spec : String) (offline : Bool)
-    (previous : String := "") (allowRewind : Bool := false) :
+    (previous : String := "") (allowRewind : Bool := false)
+    (requireSignature : Bool := false) (allowedSigners : Option String := none)
+    (pinned : Option Signature := none) :
     IO (Except String Source) := do
   let (spec, pin) := match spec.splitOn "#" with
     | [u, c] => (u, c)
@@ -422,7 +438,9 @@ def loadIndex (cache : System.FilePath) (spec : String) (offline : Bool)
     unless bare do
       if pin != "" then
         return .error s!"--index-commit: {spec} is a directory index, not a git URL to pin"
-      return (← readDir p spec)
+      match ← readDir p spec with
+      | .error e => return .error e
+      | .ok src => return (← finish p src)
   else
     if ← p.pathExists then
       if pin != "" then
@@ -431,8 +449,8 @@ def loadIndex (cache : System.FilePath) (spec : String) (offline : Bool)
       | .error e => return .error s!"{spec}: {e}"
       | .ok ps =>
         let base := p.parent.getD "."
-        return .ok { url := spec
-                     pkgs := ps.foldl (fun m p => m.insert p.name (IxPackage.resolveSources base p)) {} }
+        let pkgs := ps.foldl (fun m p => m.insert p.name (IxPackage.resolveSources base p)) {}
+        return (← finish base { url := spec, pkgs := pkgs })
   -- a URL: a git index cloned into the cache, at the tip of its default branch (or at
   -- the pinned commit)
   let dir := cache / "grail" / "index"
@@ -454,8 +472,23 @@ def loadIndex (cache : System.FilePath) (spec : String) (offline : Bool)
         return .error e
   let commit := (← git #["rev-parse", "HEAD"] (some dir)).toOption.getD ""
   if let .error e ← checkRewind dir previous commit allowRewind then return .error e
-  return (← readDir dir spec).map fun m => { m with commit }
+  match ← readDir dir spec with
+  | .error e => pure (.error e)
+  | .ok src => finish dir { src with commit }
 where
+  /-- Verify the signed snapshot when the caller demands one (or the lock already pins
+  one), and refuse an index whose entries differ from it. -/
+  finish (root : System.FilePath) (src : Source) : IO (Except String Source) := do
+    if !(requireSignature || pinned.isSome) then return .ok src
+    match ← Sign.verifySnapshot root (allowedSigners.map System.FilePath.mk) pinned allowRewind with
+    | .error e => pure (.error e)
+    | .ok (snap, sig) =>
+      let regName ← Sign.registryName root
+      if !regName.isEmpty && !snap.name.isEmpty && snap.name != regName then
+        return .error s!"the signed snapshot names {snap.name}, but registry.sexpr says {regName}"
+      match snap.covers src.pkgs with
+      | .error e => pure (.error e)
+      | .ok () => pure (.ok { src with snapshot := some snap, signature := some sig })
   /-- TUF's rollback protection over git's Merkle DAG: a lock's index commit must be an
   ancestor of the commit `grail update` would now read (fast-forward). A force-push that
   drops or rewrites a published entry is refused until the caller passes `--allow-rewind`
@@ -507,32 +540,37 @@ dependencies), and return the lock they give. Writes nothing. A `Package.overrid
 path and tree hash instead (v3, R37). -/
 def resolveLock (cache : System.FilePath) (indexSpec : String) (offline : Bool)
     (readPkg : System.FilePath → IO (Except String Package)) (dir : System.FilePath)
-    (pkg : Package) (allowRewind : Bool := false) : IO (Except String Lock) := do
+    (pkg : Package) (allowRewind : Bool := false) (requireSignature : Bool := false)
+    (allowedSigners : Option String := none) : IO (Except String Lock) := do
   let overridden := pkg.overrides.map (·.1)
   let requires := pkg.requires.filter fun r => !overridden.contains r.name
   let deps := pkg.deps.filter fun d => !overridden.contains d.name
   let overrides ← match ← resolveOverrides dir pkg with
     | .error e => return .error e
     | .ok os => pure os
-  -- the existing lock's index commit is the rollback baseline (R22); a directory or
-  -- file index has no commit and is not checked
-  let previous : String ←
+  -- the existing lock's index commit is the rollback baseline (R22), and its signature
+  -- (if any) is the key/sequence baseline for the signed snapshot
+  let old : Option Lock ←
     if ← (lockFile dir).pathExists then
       match Lock.parse (← IO.FS.readFile (lockFile dir)) with
-      | .ok l => pure l.indexCommit
-      | .error _ => pure ""
-    else pure ""
+      | .ok l => pure (some l)
+      | .error _ => pure none
+    else pure none
+  let previous : String := old.map (·.indexCommit) |>.getD ""
+  let pinned : Option Signature := old.bind (·.indexSignature)
   let src ←
     if requires.isEmpty then pure (.ok { url := "", pkgs := {} })
     else if indexSpec.isEmpty then
       pure (.error s!"{pkg.name} requires packages from the registry: give one with --index URL (or `Package.set \"index\" \"URL\"`)")
-    else loadIndex cache indexSpec offline previous allowRewind
+    else loadIndex cache indexSpec offline previous allowRewind requireSignature allowedSigners pinned
   match src with
   | .error e => pure (.error e)
   | .ok src =>
     match Resolve.resolve src.pkgs requires Wiz.version with
     | .error e => pure (.error e)
     | .ok resolved =>
+      if let some snap := src.snapshot then
+        if let .error e := snap.checkResolved resolved then return .error e
       match ← resolveDeps readPkg dir deps [] offline with
       | .error e => pure (.error e)
       | .ok git =>
@@ -542,7 +580,8 @@ def resolveLock (cache : System.FilePath) (indexSpec : String) (offline : Bool)
              deps := r.deps } : PkgLock)
         pure (.ok { format := 3, toolchain := Wiz.version,
                     revision := (← Wiz.revision?).getD "",
-                    indexUrl := src.url, indexCommit := src.commit, git := git,
+                    indexUrl := src.url, indexCommit := src.commit,
+                    indexSignature := src.signature, git := git,
                     pkgs := pkgs, overrides := overrides })
 
 /-- 64 lowercase hex digits: the shape of a SHA-256 in the index and the lock. -/
@@ -556,9 +595,11 @@ closure, so a `pkg` entry whose dependency is absent or not satisfied is a stale
 hand-edited lock. With `indexCommit` (or `Package.set "index-commit"`), the lock must
 also have been resolved from that index commit. `strictOverride` is `--locked`: a lock
 that records a machine-local override is refused rather than silently built from a path
-(R37). -/
+(R37). `requireSignature` is `--require-signature`: a registry lock must carry a verified
+index signature whose fields are well formed. -/
 def checkLocked (lock : Lock) (pkg : Package) (indexCommit : String := "")
-    (strictOverride : Bool := false) : Except String Unit := do
+    (strictOverride : Bool := false) (requireSignature : Bool := false) :
+    Except String Unit := do
   let pin := if indexCommit.isEmpty then
     (pkg.settings.find? (·.1 == "index-commit")).map (·.2) |>.getD ""
   else indexCommit
@@ -569,6 +610,12 @@ def checkLocked (lock : Lock) (pkg : Package) (indexCommit : String := "")
         " ".intercalate (pkg.overrides.map fun (n, p) => s!"{n} ({p})")
       else " ".intercalate (lock.overrides.map fun o => s!"{o.name} ({o.path})")
     throw s!"a machine-local override is in effect ({os}), but --locked refuses overrides: remove it from grail.local.wiz or run without --locked"
+  match lock.indexSignature with
+  | none =>
+    if requireSignature && !lock.indexUrl.isEmpty then
+      throw "grail.lock has no index signature: run `grail update --require-signature`"
+  | some sig =>
+    if let .error e := Signature.checkFields sig then throw s!"{e}: run `grail update --require-signature`"
   let overridden := pkg.overrides.map (·.1)
   let isOverride (n : String) : Bool := overridden.contains n
   for r in pkg.requires do
@@ -617,6 +664,14 @@ def checkLocked (lock : Lock) (pkg : Package) (indexCommit : String := "")
         let v ← Version.parse q.version
         if !Requirement.satisfies req v then
           throw s!"grail.lock has {q.name} {q.version}, but {p.name} asks for {d.req}: run `grail update`"
+
+/-- The signature a project's `grail.lock` pins, if it has one. (A missing or malformed
+lock has none; the caller decides whether that is an error.) -/
+def lockSignature (dir : System.FilePath) : IO (Option Signature) := do
+  if !(← (lockFile dir).pathExists) then return none
+  match Lock.parse (← IO.FS.readFile (lockFile dir)) with
+  | .ok l => pure l.indexSignature
+  | .error _ => pure none
 
 /-- `grail fetch`: make every package of the lock present and verified. Returns the
 lines to print. With `offline`, a missing archive or clone is an error (nothing is
