@@ -1,4 +1,4 @@
-scale: nodes=1110871 parseErrors=31 funcs=2 findings=0 boundary=12 memory=2 truncated=false pointsToRounds=2 summaryRounds=1
+scale: nodes=1110871 parseErrors=31 funcs=3 findings=0 boundary=13 memory=2 truncated=false pointsToRounds=3 summaryRounds=1
 scale: node count: ok
 scale: complete: ok
 scale: under default limit: ok

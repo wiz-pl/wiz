@@ -2195,10 +2195,29 @@ def Scry.externalOf (funcs : List Wil.Func) : List (String × String) :=
         | .some _ => .false
         | .none => .true) (Scry.dedup (Scry.calleesOf f)))) funcs)
 
+/-- The top-level items of a translation unit, descending through preprocessor
+conditionals and `extern "C"` linkage blocks. A real generated C file wraps its
+functions in `#ifdef __cplusplus … extern "C" { … }`, and a tree-sitter C parse nests
+them under `preproc_ifdef`/`linkage_specification`; looking only at the root's direct
+children lowered **zero** functions for `old-wizard.c`. All branches are visited (a may
+analysis; duplicate definitions keep the first). -/
+partial def Scry.topNodesGo (c : Scry.Cst) (n : Nat) : List Nat :=
+  List.concat (List.map (fun ch =>
+    if Scry.isK c ch "preproc_ifdef" then Scry.topNodesGo c ch
+    else if Scry.isK c ch "preproc_if" then Scry.topNodesGo c ch
+    else if Scry.isK c ch "preproc_else" then Scry.topNodesGo c ch
+    else if Scry.isK c ch "preproc_elif" then Scry.topNodesGo c ch
+    else if Scry.isK c ch "linkage_specification" then Scry.topNodesGo c ch
+    else if Scry.isK c ch "declaration_list" then Scry.topNodesGo c ch
+    else if Scry.isK c ch "ERROR" then Scry.topNodesGo c ch
+    else List.cons ch List.nil) (c.childrenOf n))
+
+def Scry.topNodes (c : Scry.Cst) : List Nat := Scry.topNodesGo c 0
+
 /-- Lower a translation unit's CST. The typedef/struct and function-symbol passes run
 first, so a call sees a definition that appears later in the file (C's rule). -/
 def Scry.lowerTU (path : String) (c : Scry.Cst) : Scry.TU :=
-  let top := c.childrenOf 0;
+  let top := Scry.topNodes c;
   let s1 := (Scry.runLM (Scry.scanTypes c top) Scry.emptyState).1;
   let s2 := (Scry.runLM (Scry.scanSyms c top) s1).1;
   let r := Scry.lowerFuncs c top s2 .nil;
