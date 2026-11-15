@@ -1,0 +1,5 @@
+stream pair: 8 beats period 1 yes, period 3 yes, period 2 yes, stable yes, value = simulate = simFast yes
+stream slice: order/no loss period 3 yes, period 2 yes, value = simulate = simFast yes
+stream upsize 8->16: grouping/keep/last yes, period 1 yes, value = simulate = simFast yes
+stream downsize 16->8: grouping/keep/last yes, period 1 yes, value = simulate = simFast yes
+stream bundles yes, well formed yes
