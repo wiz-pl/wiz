@@ -127,6 +127,54 @@ reports the `ERROR`/`MISSING` count.
 span `[0,95)`, parent/child/next-sibling links, and that `fixtures/broken.c` is refused
 by `parseChecked` (tree-sitter's recovery tree has 2 `ERROR`/`MISSING` nodes).
 
+## Diff-aware review (`--diff`, `--changed-lines`)
+
+PR review needs the findings on the changed lines, not the backlog. `scry taint` can
+filter against a unified diff:
+
+```sh
+scry taint FILE.c --diff origin/main                 # git diff -U0 origin/main -- FILE.c
+scry taint FILE.c --diff HEAD --diff-context 2       # two unchanged lines either side
+scry taint FILE.c --changed-lines saved.patch        # a saved unified diff (from a file)
+scry taint FILE.c --diff all                         # no filter (the full report)
+```
+
+A finding is shown when its **sink line** is on a changed line, or when a step of its
+source -> sink path is (a changed source/flow line keeps the finding visible). Everything
+else is suppressed **with a count**: the summary says how many findings and warnings were
+suppressed on unchanged lines. The default (no flag) is the full report, byte for byte;
+`--diff all` is the same but says so. `--fail-on-finding` gates on what the diff shows,
+so a pre-existing finding does not fail a PR; a finding with no origin ("unlocated") is
+shown and still fails, because the filter cannot prove it is unchanged.
+
+The mode is line-based and deliberately honest about what it cannot know:
+
+* a file with no diff entry is treated as unchanged (all its findings are suppressed with
+  a count, and the summary says the match failed; check the path spelling);
+* a rename is a rename only when the patch says so (`rename from`/`to`, or `git diff -M`,
+  which `--diff` passes); a pure rename has no changed lines;
+* a binary diff has no line mapping, so its findings are shown with a note;
+* an insertion that merely shifts a sink down one line does not mark the sink line as
+  changed (git reports the inserted line); a deleted-and-re-added sink does;
+* a path is a path of program points. A step in another function or hunk counts as a
+  changed step, but the filter does not prove the path is still *reachable*: it is a
+  review filter, not a new analysis. Losing a step (for example a source call removed)
+  suppresses the finding, not silently: the suppressed count grows.
+
+`--json` adds a `diff` object (mode, `filtered`, `file`, `matchedPath`, `matched`,
+hunks, `addedLines`, `changedRanges`, and `shown`/`suppressed`/`unlocated` counts for
+findings, boundary warnings and memory warnings); each shown finding/warning gets a `diff` verdict (`inChangedHunk`, `shown`,
+`matchedBy` sink/path, and the line). SARIF stays **complete** in diff mode: suppressed
+results are kept with `baselineState: "unchanged"` when the diff proves the line is
+unchanged, in-diff ones are `"new"`, and no state is claimed when the diff cannot decide
+(a binary file, no matching entry, a deleted file), so an upload diff never marks an
+untouched finding as fixed. Every result carries
+`partialFingerprints: {"scry/v1": "f_<16 hex>"}` (or `b_…` for a boundary warning), a
+line-independent id built from the rule, normalized path, sink function/callee/argument
+and path shape; moving a finding keeps the id, renaming the sink or changing the path
+shape creates a new one. Two identical sinks in one function with the same path shape can
+still collide (the id is a handle, not a proof of uniqueness).
+
 Limits: the shim is sequential (one parser, one tree, one file) and tree-sitter-c is the
 only grammar. Threads, a native store shared across files, and tree-sitter queries are
 the remaining S1 work.

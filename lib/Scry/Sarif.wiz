@@ -1,6 +1,7 @@
 import Json
 import Scry.Rules
 import Scry.Interproc
+import Scry.Diff
 import Text
 /-!
 # Scry.Sarif
@@ -55,6 +56,70 @@ def Scry.originAt (m : Scry.OriginMap) (func : String) (point : Nat) : Option Sc
   match List.find (fun e => Bool.and (String.eq e.func func) (Nat.beq e.point point)) m with
   | .none => .none
   | .some e => .some e.origin
+
+-- ## Baseline identity (`partialFingerprints`)
+
+/-- FNV-1a over a string's code points, modulo 2^64. Not cryptographic; the key is only
+a stable handle for diffing uploads. -/
+def Scry.fnvStep (h : Nat) (c : Char) : Nat :=
+  Nat.mod (Nat.add (Nat.mul h 1099511628211) (Char.code c)) (Nat.pow 2 64)
+
+def Scry.fnv (s : String) : Nat :=
+  List.foldl Scry.fnvStep 14695981039346656037 (String.chars s)
+
+partial def Scry.hexGo (n : Nat) (fuel : Nat) : List Char :=
+  match fuel with
+  | .zero => .nil
+  | .succ k =>
+    List.cons (Json.hexDigit (Nat.mod n 16)) (Scry.hexGo (Nat.div n 16) k)
+
+/-- 16 lower-case hex digits (64 bits). -/
+def Scry.hex16 (n : Nat) : String := String.ofChars (List.reverse (Scry.hexGo n 16))
+
+/-- The coarse role path (`source>flow>sink`). -/
+def Scry.pathShape (path : List Scry.PathNode) : String :=
+  String.intercalate ">" (List.map (fun p => Scry.PathKind.show p.kind) path)
+
+def Scry.firstFunc : List Scry.PathNode → String
+  | .nil => ""
+  | .cons p _ => p.func
+
+def Scry.lastFunc : List Scry.PathNode → String
+  | .nil => ""
+  | .cons p .nil => p.func
+  | .cons _ ps => Scry.lastFunc ps
+
+/-- The semantic identity inputs: rule, normalized path, sink function/callee/argument
+and the path shape. No line, column, program point or timestamp, so a moved finding keeps
+its id and a renamed sink/path gets a new one. -/
+def Scry.semanticKey (f : Scry.RuleFinding) (file : String) : String :=
+  String.intercalate "|"
+    [ String.append "scry/c/" f.rule
+    , Scry.diffNormPath file
+    , f.func
+    , f.name
+    , Nat.repr f.arg
+    , Scry.pathShape f.path
+    , Scry.firstFunc f.path
+    , Scry.lastFunc f.path ]
+
+/-- `f_<16 hex>`: the stable baseline id used in `partialFingerprints.scry/v1`. -/
+def Scry.semanticId (f : Scry.RuleFinding) (file : String) : String :=
+  String.append "f_" (Scry.hex16 (Scry.fnv (Scry.semanticKey f file)))
+
+/-- The file a finding's primary location names (empty when it has no origin). -/
+def Scry.findingFile (m : Scry.OriginMap) (f : Scry.RuleFinding) : String :=
+  match Scry.originAt m f.func f.sink with
+  | .some o => o.uri
+  | .none => ""
+
+/-- `b_<16 hex>`: the stable id of a boundary/memory warning. -/
+def Scry.boundaryId (rule file func message : String) : String :=
+  String.append "b_" (Scry.hex16 (Scry.fnv
+    (String.intercalate "|" [rule, Scry.diffNormPath file, func, message])))
+
+def Scry.partialFingerprintsJson (id : String) : Json :=
+  Json.mkObj [("scry/v1", Json.mkStr id)]
 
 -- ## JSON pieces
 
@@ -176,15 +241,20 @@ def Scry.derivationText (checked : Bool) : String :=
   | .true => "checked"
   | .false => "unchecked"
 
-def Scry.resultJsonWith (m : Scry.OriginMap) (pack : Scry.RulePack)
-    (f : Scry.RuleFinding) (checked : Bool) : Json :=
-  Json.mkObj
+/-- A finding result with its stable baseline fingerprint and, when a diff baseline is
+known, a SARIF `baselineState` (`new` for a result in the changed lines, `unchanged` for
+a suppressed pre-existing one). -/
+def Scry.resultJsonFull (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (f : Scry.RuleFinding) (checked : Bool) (baseline : Option String) : Json :=
+  let base :=
     [ ("ruleId", Json.mkStr (Scry.sarifRuleId f.rule))
     , ("ruleIndex", Json.ofNat (Scry.ruleIndexOf pack f.rule))
     , ("level", Json.mkStr (Scry.Severity.sarif f.severity))
     , ("message", Json.mkObj [("text", Json.mkStr f.message)])
     , ("locations", Json.mkArr [Scry.locationJson m f.func f.sink])
     , ("relatedLocations", Json.mkArr (Scry.relatedLocations m f.path))
+    , ("partialFingerprints", Scry.partialFingerprintsJson
+        (Scry.semanticId f (Scry.findingFile m f)))
     , ("properties", Json.mkObj
         [ ("kind", Json.mkStr (Scry.FindingKind.show f.kind))
         , ("function", Json.mkStr f.func)
@@ -193,7 +263,14 @@ def Scry.resultJsonWith (m : Scry.OriginMap) (pack : Scry.RulePack)
         , ("sinkArgument", Json.ofNat f.arg)
         , ("pathLength", Scry.pathLengthJson f.path)
         , ("derivation", Json.mkStr (Scry.derivationText checked))
-        , ("packRuleId", Json.mkStr f.rule) ]) ]
+        , ("packRuleId", Json.mkStr f.rule) ]) ];
+  Json.mkObj (List.append base (match baseline with
+    | .some b => List.cons ("baselineState", Json.mkStr b) .nil
+    | .none => .nil))
+
+def Scry.resultJsonWith (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (f : Scry.RuleFinding) (checked : Bool) : Json :=
+  Scry.resultJsonFull m pack f checked .none
 
 /-- A finding without a status (the default of `Scry.sarif`). -/
 def Scry.resultJson (m : Scry.OriginMap) (pack : Scry.RulePack)
@@ -204,26 +281,43 @@ def Scry.resultJson (m : Scry.OriginMap) (pack : Scry.RulePack)
 model: a havoc'd or skipped construct) or a points-to memory warning (`unknown-memory`,
 `use-after-free`, `unknown-indirect`). It has no rule descriptor; the location is the
 offending statement's span, or a logical location when no origin is known. -/
-def Scry.boundaryResultJson (rule : String) (origin : Option Scry.Origin) (func : String)
-    (point : Nat) (message : String) : Json :=
+def Scry.boundaryResultJsonFull (rule : String) (origin : Option Scry.Origin)
+    (func : String) (point : Nat) (message : String) (file : String)
+    (baseline : Option String) : Json :=
   let loc := match origin with
     | .some o => Scry.physicalLocationJson o
     | .none => Scry.logicalLocationJson func point;
-  Json.mkObj
+  let base :=
     [ ("ruleId", Json.mkStr rule)
     , ("level", Json.mkStr "warning")
     , ("message", Json.mkObj [("text", Json.mkStr message)])
     , ("locations", Json.mkArr [loc])
+    , ("partialFingerprints", Scry.partialFingerprintsJson
+        (Scry.boundaryId rule file func message))
     , ("properties", Json.mkObj
         [ ("kind", Json.mkStr "boundary")
         , ("function", Json.mkStr func)
         , ("programPoint", Json.ofNat point)
-        , ("derivation", Json.mkStr "unchecked") ]) ]
+        , ("derivation", Json.mkStr "unchecked") ]) ];
+  Json.mkObj (List.append base (match baseline with
+    | .some b => List.cons ("baselineState", Json.mkStr b) .nil
+    | .none => .nil))
+
+def Scry.boundaryResultJson (rule : String) (origin : Option Scry.Origin) (func : String)
+    (point : Nat) (message : String) : Json :=
+  Scry.boundaryResultJsonFull rule origin func point message "" .none
+
+/-- A finding result together with its checked status and, in diff mode, its SARIF
+`baselineState` (`new` or `unchanged`). -/
+structure Scry.SarifFinding where
+  finding : Scry.RuleFinding
+  checked : Bool
+  baseline : Option String
 
 /-- The SARIF log for findings with their derivation status, plus extra results
 (boundary warnings). `tool` names the driver ("scry"). -/
-def Scry.sarifWith (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
-    (findings : List (Scry.RuleFinding × Bool)) (extra : List Json) : Json :=
+def Scry.sarifWithBaselines (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (findings : List Scry.SarifFinding) (extra : List Json) : Json :=
   let rules := Json.mkArr (List.map Scry.ruleJson pack.rules);
   let driver := Json.mkObj [ ("name", Json.mkStr tool)
     , ("version", Json.mkStr "0.1.0")
@@ -231,7 +325,8 @@ def Scry.sarifWith (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
     , ("rules", rules) ];
   let toolObj := Json.mkObj [("driver", driver)];
   let results := Json.mkArr (List.append
-    (List.map (fun p => Scry.resultJsonWith m pack p.1 p.2) findings) extra);
+    (List.map (fun r => Scry.resultJsonFull m pack r.finding r.checked r.baseline)
+      findings) extra);
   /-- SARIF regions are 1-based line/column pairs; the default `columnKind` is UTF-16 code
   units. The C frontend's slice is ASCII (see `wiz-notes/scry-c2wil.md`), where a byte
   column is a UTF-16 column, so the declaration is exact for the supported subset; a
@@ -245,6 +340,12 @@ def Scry.sarifWith (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
     , ("version", Json.mkStr "2.1.0")
     , ("runs", Json.mkArr [run]) ]
 
+/-- `sarifWithBaselines` for `(finding, checked)` pairs (no baseline state). -/
+def Scry.sarifWith (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (findings : List (Scry.RuleFinding × Bool)) (extra : List Json) : Json :=
+  Scry.sarifWithBaselines tool m pack
+    (List.map (fun p => Scry.SarifFinding.mk p.1 p.2 .none) findings) extra
+
 /-- The SARIF log for these findings. `tool` names the driver ("scry"). -/
 def Scry.sarif (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
     (findings : List Scry.RuleFinding) : Json :=
@@ -254,6 +355,13 @@ def Scry.sarif (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
 def Scry.renderSarif (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
     (findings : List Scry.RuleFinding) : String :=
   Json.render (Scry.sarif tool m pack findings)
+
+/-- `Scry.renderSarif` with derivation statuses, SARIF baseline states and boundary
+results. -/
+def Scry.renderSarifWithBaselines (tool : String) (m : Scry.OriginMap)
+    (pack : Scry.RulePack) (findings : List Scry.SarifFinding)
+    (extra : List Json) : String :=
+  Json.render (Scry.sarifWithBaselines tool m pack findings extra)
 
 /-- `Scry.renderSarif` with derivation statuses and boundary results. -/
 def Scry.renderSarifWith (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
