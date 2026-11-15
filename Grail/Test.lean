@@ -72,8 +72,9 @@ def Runner.testOutput (r : Runner) (file : String) (kind : TestKind) (exe : Syst
     pure (.ok (render file l s))
   | .run =>
     let s ← r.elab file
-    let out ← IO.Process.output { cmd := "timeout", args := #["60", exe.toString] }
-    if out.exitCode == 124 then return .error "timed out (60 s)"
+    let secs := r.testTimeoutMs / 1000
+    let out ← IO.Process.output { cmd := "timeout", args := #[toString secs, exe.toString] }
+    if out.exitCode == 124 then return .error s!"timed out ({secs} s)"
     if out.exitCode != 0 then return .error s!"exited with {out.exitCode}: {out.stderr}"
     match Build.irProgram s "main" with
     | .error e => pure (.error e)
