@@ -19,7 +19,7 @@ Point numbering is the usual statement-then-terminator one.
 -/
 
 def Scry.uafPackText : String :=
-  "rule use-after-free\n" ++
+  "rule scry/memory/use-after-free\n" ++
   "  kind memory\n" ++
   "  severity error\n" ++
   "  message Memory is used after it was freed\n" ++
