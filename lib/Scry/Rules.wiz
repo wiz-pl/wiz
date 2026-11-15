@@ -202,6 +202,14 @@ def Scry.RulePack.forbiddenRules (p : Scry.RulePack) : List Scry.ForbiddenRule :
     | .taint _ => .nil
     | .forbidden f => List.cons f .nil) p.rules
 
+/-- Does the pack declare the C `argv` parameter as a source? The spelling is
+`source argv result`; it is not a call pattern (no call is named `argv`), it asks the
+interprocedural engine to seed `main`'s second parameter. The default pack does not use
+it, so `argv` taint is opt-in with the rule pack that needs it. -/
+def Scry.RulePack.sourcesArgv (p : Scry.RulePack) : Bool :=
+  List.any (fun r => List.any (fun pair => String.eq pair.1 "argv") r.sources)
+    (p.taintRules)
+
 -- ## Function-name matching
 
 /-- Glob matching with `*` as "any sequence": the character list form. -/

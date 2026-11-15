@@ -201,8 +201,9 @@ def Scry.resultJson (m : Scry.OriginMap) (pack : Scry.RulePack)
   Scry.resultJsonWith m pack f .false
 
 /-- A warning result with its own rule id: a lowering-boundary warning (what S2 could not
-model: a havoc'd or skipped construct) or a points-to memory warning (`unknown-memory`,
-`use-after-free`, `unknown-indirect`). It has no rule descriptor; the location is the
+model: a havoc'd or skipped construct) or a points-to/nullness memory warning
+(`unknown-memory`, `use-after-free`, `unknown-indirect`, `unmodelled-external`,
+`null-dereference`). It has no rule descriptor; the location is the
 offending statement's span, or a logical location when no origin is known. -/
 def Scry.boundaryResultJson (rule : String) (origin : Option Scry.Origin) (func : String)
     (point : Nat) (message : String) : Json :=

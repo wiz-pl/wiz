@@ -3,6 +3,7 @@ import Scry.Analysis
 import Scry.PointsTo
 import Scry.Rules
 import Scry.Models
+import Scry.Nullness
 import Text
 /-!
 # Scry.Interproc
@@ -181,11 +182,22 @@ which keeps the provenance — a fact seeded as EDB would shadow its derivation)
 def Scry.seedsFor (sums : List Scry.Summary) (func : String) : List Scry.MemSeed :=
   List.filter (fun m => Bool.not (String.eq m.func func)) (Scry.allMemSeeds sums)
 
+/-- The parameter positions a rule pack declares as sources regardless of the caller.
+Today one such policy exists: `source argv result` asks for `main`'s second parameter
+(the C `argv` array). The default pack does not declare it, so argv taint is opt-in. -/
+def Scry.argvParamsOf (pack : Scry.RulePack) (fn : Wil.Func) : List Nat :=
+  match Scry.RulePack.sourcesArgv pack, String.eq fn.name "main" with
+  | .true, .true => match Wil.listNth fn.params 1 with
+    | .some _ => List.cons 1 .nil
+    | .none => .nil
+  | _, _ => .nil
+
 def Scry.resultsWith (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
     (pt : Scry.PtResult) (sums : List Scry.Summary) : List Scry.FuncResult :=
   List.map (fun fn =>
-    Scry.evaluateFunc fn pack pt (Scry.seedsFor sums fn.name)
-      (Scry.summaryOf sums fn.name).params
+    let params := Scry.unionNat (Scry.summaryOf sums fn.name).params
+      (Scry.argvParamsOf pack fn);
+    Scry.evaluateFunc fn pack pt (Scry.seedsFor sums fn.name) params
       (Scry.retSeedsOf graph sums fn.name)) p.funcs
 
 /-- One summary round: evaluate every function under `prev`, then grow every summary
@@ -196,7 +208,8 @@ def Scry.stepSummaries (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.Ca
   let mems := Scry.dedupSeeds (Scry.concatLists (fun r => Scry.resultMemSeeds r) results);
   List.map (fun fn =>
     let old := Scry.summaryOf prev fn.name;
-    let contrib := Scry.paramContributions graph results fn.name;
+    let contrib := Scry.unionNat (Scry.paramContributions graph results fn.name)
+      (Scry.argvParamsOf pack fn);
     let ret := match List.find (fun r => String.eq r.fn.name fn.name) results with
       | .some r => Scry.returnsTainted r
       | .none => (.false : Bool);
@@ -268,7 +281,8 @@ def Scry.unmodelledWarningsOf (p : Wil.Program) (r : Scry.FuncResult) : List Scr
 summary fixpoint, then one final evaluation per function. The pack gains the missing
 model rule descriptors, so a model-only sink (`execl`, `sprintf`, `read`'s bound) has a
 rule id even when the textual pack does not repeat it. -/
-def Scry.analyze (p : Wil.Program) (pack0 : Scry.RulePack) : Scry.ProgramResult :=
+def Scry.analyzeCore (p : Wil.Program) (pack0 : Scry.RulePack) (withNull : Bool) :
+    Scry.ProgramResult :=
   let pack := Scry.RulePack.withModels pack0;
   let pt := Scry.pointsTo p;
   let graph := Scry.callGraph p pt;
@@ -277,10 +291,24 @@ def Scry.analyze (p : Wil.Program) (pack0 : Scry.RulePack) : Scry.ProgramResult 
     (Scry.ptLocCount pt));
   let sums := Scry.summaryLoop p pack graph pt fuel sums0;
   let results := Scry.resultsWith p pack graph pt sums;
-  let warnings := Scry.dedupWarnings (List.append
+  let base := List.append
     (Scry.concatLists (fun r => r.plan.memWarnings) results)
-    (Scry.concatLists (fun r => Scry.unmodelledWarningsOf p r) results));
+    (Scry.concatLists (fun r => Scry.unmodelledWarningsOf p r) results);
+  let nulls : List Scry.MemWarning := match withNull with
+    | .true => Scry.nullDerefWarnings p
+    | .false => .nil;
+  let warnings := Scry.dedupWarnings (List.append base nulls);
   Scry.ProgramResult.mk results sums graph pt warnings
+
+/-- Analyse a program with the default pack. The S5 null-dereference pass runs on by
+default (`Scry.Nullness`); `Scry.analyzeWithoutNull` omits it for callers that want only
+taint and points-to diagnostics. -/
+def Scry.analyze (p : Wil.Program) (pack0 : Scry.RulePack) : Scry.ProgramResult :=
+  Scry.analyzeCore p pack0 .true
+
+/-- The same analysis without the nullness pass. -/
+def Scry.analyzeWithoutNull (p : Wil.Program) (pack0 : Scry.RulePack) : Scry.ProgramResult :=
+  Scry.analyzeCore p pack0 .false
 
 -- ## Stitching paths across calls
 

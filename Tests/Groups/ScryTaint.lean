@@ -78,6 +78,8 @@ def ruleImports : String :=
   "import Scry.Models\n" ++
   "import Scry.RuleTaint\n" ++
   "import Scry.Interproc\n" ++
+  "import Scry.Nullness\n" ++
+  "import Scry.NullExamples\n" ++
   "import Scry.Sarif\n" ++
   "import Scry.Certify\n" ++
   "import Scry.RuleExamples\n" ++
@@ -337,7 +339,7 @@ def group : Group where
     { name := "memory: a store into one object is not a flow from another (known no-alias)",
       run := fun _ => evalRuleNats
         ("#eval Nat.add (Nat.mul (List.length (Scry.programFindings (Scry.analyze Scry.taintDistinct Scry.demoRules))) 10)\n" ++
-         "  (List.length (Scry.analyze Scry.taintDistinct Scry.demoRules).warnings)") [0] },
+         "  (List.length (Scry.analyzeWithoutNull Scry.taintDistinct Scry.demoRules).warnings)") [0] },
     { name := "memory: field sensitivity reaches cell 0 but not cell 1",
       run := fun _ => evalRuleNats (rulePrelude ++
         "def fieldFindings : List Scry.RuleFinding :=\n" ++
@@ -351,7 +353,7 @@ def group : Group where
         "#eval firstPt fieldPath") [1, 8, 0] },
     { name := "memory: an indirect call through a known function pointer propagates",
       run := fun _ => evalRuleNats (rulePrelude ++
-        "def prK : Scry.ProgramResult := Scry.analyze Scry.indirectKnownProgram Scry.demoRules\n" ++
+        "def prK : Scry.ProgramResult := Scry.analyzeWithoutNull Scry.indirectKnownProgram Scry.demoRules\n" ++
         "def kf : List Scry.RuleFinding := Scry.programFindings prK\n" ++
         "#eval List.length kf\n" ++
         "#eval List.length prK.warnings\n" ++
@@ -362,11 +364,11 @@ def group : Group where
         "  | .nil => 0") [1, 0, 1, 11] },
     { name := "memory: unresolved indirect calls are unknown and warned",
       run := fun _ => evalRuleNats
-        ("#eval Nat.add (Nat.mul (List.length (Scry.programFindings (Scry.analyze Scry.indirectProgram Scry.demoRules))) 10)\n" ++
-         "  (List.length (Scry.analyze Scry.indirectProgram Scry.demoRules).warnings)") [2] },
+        ("#eval Nat.add (Nat.mul (List.length (Scry.programFindings (Scry.analyzeWithoutNull Scry.indirectProgram Scry.demoRules))) 10)\n" ++
+         "  (List.length (Scry.analyzeWithoutNull Scry.indirectProgram Scry.demoRules).warnings)") [2] },
     { name := "memory: a location tainted in one function is read in another",
       run := fun _ => evalRuleNats (rulePrelude ++
-        "def prM : Scry.ProgramResult := Scry.analyze Scry.memAcrossProgram Scry.demoRules\n" ++
+        "def prM : Scry.ProgramResult := Scry.analyzeWithoutNull Scry.memAcrossProgram Scry.demoRules\n" ++
         "def mf : List Scry.RuleFinding := Scry.programFindings prM\n" ++
         "def mp : List Scry.PathNode := match mf with\n" ++
         "  | .cons f _ => f.path\n" ++
@@ -465,6 +467,38 @@ def group : Group where
           "#eval jStr (firstResult sar) \"level\"\n" ++
           "#eval match Json.parse (Scry.renderSarif \"scry\" originMap Scry.demoRules (Scry.programFindings prI)) with | .ok j => Json.getStr j \"version\" | .error e => e")
           ["\"2.1.0\"", "\"scry\"", "\"scry/c/command-injection\"", "\"error\"", "\"2.1.0\""] },
+    { name := "nullness: allocation, call and literal sources; the guard kills the null",
+      run := fun _ => evalRuleNats
+        ("#eval List.length (Scry.nullDerefWarnings Scry.nullAlloc)\n" ++
+         "#eval List.length (Scry.nullDerefWarnings Scry.nullChecked)\n" ++
+         "#eval List.length (Scry.nullDerefWarnings Scry.nullCall)\n" ++
+         "#eval List.length (Scry.nullDerefWarnings Scry.nullParam)\n" ++
+         "#eval List.length (Scry.nullDerefWarnings Scry.nullLiteral)\n" ++
+         "#eval if String.eq (Scry.MemWarnKind.show Scry.MemWarnKind.nullDereference) \"null-dereference\" then 1 else 0\n") [1, 0, 1, 0, 1, 1] },
+    { name := "nullness: a constant-false status guard makes the dereference unreachable",
+      run := fun _ => evalRuleNats
+        ("#eval List.length (Scry.nullDerefWarnings Scry.nullStatus)\n" ++
+         "#eval List.length (Scry.nullDerefWarnings Scry.nullStatusChecked)\n") [1, 0] },
+    { name := "nullness: the pass is wired into Scry.analyze and reports a memory diagnostic",
+      run := fun _ => do
+        evalRuleNats (rulePrelude ++
+          "def prN : Scry.ProgramResult := Scry.analyze Scry.nullAlloc Scry.demoRules\n" ++
+          "#eval List.length (Scry.programFindings prN)\n" ++
+          "#eval List.length (List.filter (fun w => String.eq (Scry.MemWarnKind.show w.kind) \"null-dereference\") prN.warnings)\n") [0, 1] },
+    { name := "path rule: opt-in pack, path sinks, the argv directive and the realpath sanitiser",
+      run := fun _ => do
+        let text ← IO.FS.readFile "lib/Scry/rules/path-traversal.scry"
+        let body :=
+          s!"def pathPackText : String := {wizStr text}\n" ++
+          "def pathPack : Scry.RulePack := Scry.parseRulePack pathPackText\n" ++
+          "#eval List.length pathPack.rules\n" ++
+          "#eval if Scry.RulePack.sourcesArgv pathPack then 1 else 0\n" ++
+          "#eval if Scry.RulePack.sourcesArgv Scry.demoRules then 1 else 0\n" ++
+          "#eval match Scry.RulePack.taintRuleById pathPack \"path-traversal\" with\n" ++
+          "  | .some r => List.length r.sinks\n" ++
+          "  | .none => 999\n" ++
+          "#eval List.length (Scry.Models.sansOf \"realpath\")\n"
+        checkEq ["5", "1", "0", "16", "2"] (← runProbe ruleImports body) },
     { name := "pipeline: C to Wil to rule pack, the CLI's path on a checked-in CST",
       run := fun _ => do
         let csrc ← IO.FS.readFile "scry/tests/fixtures/taint-unsafe.c"

@@ -78,6 +78,22 @@ def hasLocKind (rep : Scry.TaintReport) (k : String) : Bool :=
 def memKinds (rep : Scry.TaintReport) : List String :=
   List.map (fun b => b.rule) rep.memory
 
+def hasMemRule (rep : Scry.TaintReport) (rule : String) : Bool :=
+  List.any (fun b => String.eq b.rule rule) rep.memory
+
+def countMemRule (rep : Scry.TaintReport) (rule : String) : Nat :=
+  List.length (List.filter (fun b => String.eq b.rule rule) rep.memory)
+
+/-- The memory diagnostics other than the S5 null-dereference pass. The older
+points-to tests assert their own diagnostics; a null warning is a separate analysis and
+must not make those assertions fail. -/
+def nonNullMem (rep : Scry.TaintReport) : List Scry.BoundaryFinding :=
+  List.filter (fun b => Bool.not (String.eq b.rule "scry/memory/null-dereference"))
+    rep.memory
+
+def hasFindingRule (rep : Scry.TaintReport) (rule : String) : Bool :=
+  List.any (fun f => String.eq f.rule rule) rep.findings
+
 def firstFinding (rep : Scry.TaintReport) : Option Scry.RuleFinding :=
   match rep.findings with
   | .cons f _ => .some f
@@ -145,7 +161,7 @@ def main : IO Unit := EIO.toIO (do
   oM1 ← opts ["tests/fixtures/mem-slot.c"];
   repM1 ← Scry.analyzeFile oM1;
   checkOne "mem-slot" repM1 "command-injection" "main";
-  check "mem-slot: no memory warnings" (Nat.beq (List.length repM1.memory) 0);
+  check "mem-slot: no memory warnings" (Nat.beq (List.length (nonNullMem repM1)) 0);
   check "mem-slot: path goes through memory"
     (List.all (fun b => b) (List.map (fun f =>
       Bool.and (pathHasKind f.path "store") (pathHasKind f.path "load")) repM1.findings));
@@ -155,7 +171,7 @@ def main : IO Unit := EIO.toIO (do
   oM2 ← opts ["tests/fixtures/mem-distinct.c"];
   repM2 ← Scry.analyzeFile oM2;
   check "mem-distinct: zero findings" (Nat.beq (List.length repM2.findings) 0);
-  check "mem-distinct: zero memory warnings" (Nat.beq (List.length repM2.memory) 0);
+  check "mem-distinct: zero memory warnings" (Nat.beq (List.length (nonNullMem repM2)) 0);
   check "mem-distinct: two stack slots, no unknown"
     (Bool.and (Nat.beq (List.length (List.filter (fun i =>
         String.eq (Scry.locKindAt repM2.pointsTo i) "stack")
@@ -167,7 +183,7 @@ def main : IO Unit := EIO.toIO (do
   repM3 ← Scry.analyzeFile oM3;
   check "mem-struct: two findings (s.x and g.x)"
     (Nat.beq (List.length repM3.findings) 2);
-  check "mem-struct: no memory warnings" (Nat.beq (List.length repM3.memory) 0);
+  check "mem-struct: no memory warnings" (Nat.beq (List.length (nonNullMem repM3)) 0);
   check "mem-struct: both sinks are in main"
     (List.all (fun f => String.eq f.func "main") repM3.findings);
   check "mem-struct: field and global locations"
@@ -177,20 +193,20 @@ def main : IO Unit := EIO.toIO (do
   oM4 ← opts ["tests/fixtures/mem-array.c"];
   repM4 ← Scry.analyzeFile oM4;
   check "mem-array: one finding" (Nat.beq (List.length repM4.findings) 1);
-  check "mem-array: no memory warnings" (Nat.beq (List.length repM4.memory) 0);
+  check "mem-array: no memory warnings" (Nat.beq (List.length (nonNullMem repM4)) 0);
 
   -- memory: a heap object carries the flow, and free after the last use is clean
   oM5 ← opts ["tests/fixtures/mem-heap.c"];
   repM5 ← Scry.analyzeFile oM5;
   checkOne "mem-heap" repM5 "command-injection" "main";
-  check "mem-heap: no memory warnings" (Nat.beq (List.length repM5.memory) 0);
+  check "mem-heap: no memory warnings" (Nat.beq (List.length (nonNullMem repM5)) 0);
   check "mem-heap: a heap location" (hasLocKind repM5 "heap");
 
   -- memory: pointer-to-pointer
   oM6 ← opts ["tests/fixtures/mem-ptrptr.c"];
   repM6 ← Scry.analyzeFile oM6;
   checkOne "mem-ptrptr" repM6 "command-injection" "main";
-  check "mem-ptrptr: no memory warnings" (Nat.beq (List.length repM6.memory) 0);
+  check "mem-ptrptr: no memory warnings" (Nat.beq (List.length (nonNullMem repM6)) 0);
 
   -- memory: aliased parameters (both refer to main's x)
   oM7 ← opts ["tests/fixtures/mem-params.c"];
@@ -205,14 +221,13 @@ def main : IO Unit := EIO.toIO (do
   repM8 ← Scry.analyzeFile oM8;
   checkOne "mem-free" repM8 "command-injection" "main";
   check "mem-free: one use-after-free warning"
-    (Bool.and (Nat.beq (List.length repM8.memory) 1)
-      (List.all (fun s => String.eq s "scry/memory/use-after-free") (memKinds repM8)));
+    (Nat.beq (countMemRule repM8 "scry/memory/use-after-free") 1);
 
   -- memory: an indirect call with a known target propagates
   oM9 ← opts ["tests/fixtures/mem-indirect.c"];
   repM9 ← Scry.analyzeFile oM9;
   checkOne "mem-indirect" repM9 "command-injection" "tainted_sink";
-  check "mem-indirect: no memory warnings" (Nat.beq (List.length repM9.memory) 0);
+  check "mem-indirect: no memory warnings" (Nat.beq (List.length (nonNullMem repM9)) 0);
   match firstFinding repM9 with
   | .some f => check "mem-indirect: path starts in main"
       (String.eq (firstFunc f.path) "main")
@@ -222,14 +237,14 @@ def main : IO Unit := EIO.toIO (do
   oM11 ← opts ["tests/fixtures/mem-ret.c"];
   repM11 ← Scry.analyzeFile oM11;
   checkOne "mem-ret" repM11 "command-injection" "main";
-  check "mem-ret: no memory warnings" (Nat.beq (List.length repM11.memory) 0);
+  check "mem-ret: no memory warnings" (Nat.beq (List.length (nonNullMem repM11)) 0);
   check "mem-ret: a global location" (hasLocKind repM11 "global");
 
   -- memory: an external copy model (strcpy) taints the destination object only
   oM12 ← opts ["tests/fixtures/mem-external.c"];
   repM12 ← Scry.analyzeFile oM12;
   check "mem-external: one finding" (Nat.beq (List.length repM12.findings) 1);
-  check "mem-external: no memory warnings" (Nat.beq (List.length repM12.memory) 0);
+  check "mem-external: no memory warnings" (Nat.beq (List.length (nonNullMem repM12)) 0);
   check "mem-external: no lowering-boundary warning"
     (Nat.beq (List.length repM12.boundaries) 0);
 
@@ -237,7 +252,7 @@ def main : IO Unit := EIO.toIO (do
   oM13 ← opts ["tests/fixtures/mem-array-var.c"];
   repM13 ← Scry.analyzeFile oM13;
   check "mem-array-var: one finding" (Nat.beq (List.length repM13.findings) 1);
-  check "mem-array-var: no memory warnings" (Nat.beq (List.length repM13.memory) 0);
+  check "mem-array-var: no memory warnings" (Nat.beq (List.length (nonNullMem repM13)) 0);
 
   -- external models: exec family, sprintf/snprintf, strcpy family, read/recv, and alloc
   oModel1 ← opts ["tests/fixtures/model-exec.c"];
@@ -247,7 +262,7 @@ def main : IO Unit := EIO.toIO (do
   | .some f => check "model-exec: the variadic argv argument is the sink"
       (Bool.and (Nat.beq f.arg 3) (String.eq f.name "execl"))
   | .none => check "model-exec: finding exists" .false;
-  check "model-exec: no memory warnings" (Nat.beq (List.length repModel1.memory) 0);
+  check "model-exec: no memory warnings" (Nat.beq (List.length (nonNullMem repModel1)) 0);
 
   oModel2 ← opts ["tests/fixtures/model-exec-safe.c"];
   repModel2 ← Scry.analyzeFile oModel2;
@@ -307,12 +322,12 @@ def main : IO Unit := EIO.toIO (do
   oModel7 ← opts ["tests/fixtures/model-read.c"];
   repModel7 ← Scry.analyzeFile oModel7;
   checkOne "model-read" repModel7 "command-injection" "main";
-  check "model-read: no memory warnings" (Nat.beq (List.length repModel7.memory) 0);
+  check "model-read: no memory warnings" (Nat.beq (List.length (nonNullMem repModel7)) 0);
 
   oModel8 ← opts ["tests/fixtures/model-recv.c"];
   repModel8 ← Scry.analyzeFile oModel8;
   checkOne "model-recv" repModel8 "command-injection" "main";
-  check "model-recv: no memory warnings" (Nat.beq (List.length repModel8.memory) 0);
+  check "model-recv: no memory warnings" (Nat.beq (List.length (nonNullMem repModel8)) 0);
 
   oModel9 ← opts ["tests/fixtures/model-realloc.c"];
   repModel9 ← Scry.analyzeFile oModel9;
@@ -321,7 +336,7 @@ def main : IO Unit := EIO.toIO (do
       (List.all (fun f => Bool.or (String.eq f.rule "strcpy-overflow")
         (String.eq f.rule "command-injection")) repModel9.findings));
   check "model-realloc: no use-after-free from realloc"
-    (Nat.beq (List.length repModel9.memory) 0);
+    (Nat.beq (countMemRule repModel9 "scry/memory/use-after-free") 0);
 
   oModel10 ← opts ["tests/fixtures/model-sanitise.c"];
   repModel10 ← Scry.analyzeFile oModel10;
@@ -331,17 +346,15 @@ def main : IO Unit := EIO.toIO (do
   repModel11 ← Scry.analyzeFile oModel11;
   check "model-unknown: zero findings" (Nat.beq (List.length repModel11.findings) 0);
   check "model-unknown: an explicit unmodelled-external warning"
-    (Bool.and (Nat.beq (List.length repModel11.memory) 1)
-      (List.all (fun s => String.eq s "scry/memory/unmodelled-external") (memKinds repModel11)));
+    (Nat.beq (countMemRule repModel11 "scry/memory/unmodelled-external") 1);
 
   -- memory: an unmodelled external's pointer is unknown: taint flows, both accesses warn
   oM14 ← opts ["tests/fixtures/mem-unknown.c"];
   repM14 ← Scry.analyzeFile oM14;
   check "mem-unknown: one finding (the flow is kept)" (Nat.beq (List.length repM14.findings) 1);
   check "mem-unknown: two unknown-memory warnings and one explicit unmodelled call"
-    (Bool.and (Nat.beq (List.length repM14.memory) 3)
-      (Bool.and (List.any (fun s => String.eq s "scry/memory/unmodelled-external") (memKinds repM14))
-        (Nat.beq (List.length (List.filter (fun s => String.eq s "scry/memory/unknown-memory") (memKinds repM14))) 2)));
+    (Bool.and (Nat.beq (countMemRule repM14 "scry/memory/unknown-memory") 2)
+      (Nat.beq (countMemRule repM14 "scry/memory/unmodelled-external") 1));
   check "mem-unknown: an unknown location" (hasLocKind repM14 "unknown");
 
   -- memory: an unresolved indirect call is unknown and warned, not silently dropped
@@ -349,9 +362,87 @@ def main : IO Unit := EIO.toIO (do
   repM10 ← Scry.analyzeFile oM10;
   check "mem-indirect-unknown: zero findings" (Nat.beq (List.length repM10.findings) 0);
   check "mem-indirect-unknown: one unknown-indirect warning"
-    (Bool.and (Nat.beq (List.length repM10.memory) 1)
-      (List.all (fun s => String.eq s "scry/memory/unknown-indirect") (memKinds repM10)));
+    (Nat.beq (countMemRule repM10 "scry/memory/unknown-indirect") 1);
   check "mem-indirect-unknown: an unknown location" (hasLocKind repM10 "unknown");
+
+  -- path traversal: opt-in pack, a request buffer reaches open
+  let pathRules := "../lib/Scry/rules/path-traversal.scry";
+  oP1 ← opts ["tests/fixtures/path-unsafe.c", "--rules", pathRules];
+  repP1 ← Scry.analyzeFile oP1;
+  check "path-unsafe: one path-traversal finding"
+    (Bool.and (Nat.beq (List.length repP1.findings) 1)
+      (hasFindingRule repP1 "path-traversal"));
+  check "path-unsafe: the sink is open"
+    (match firstFinding repP1 with
+      | .some f => String.eq f.name "open"
+      | .none => .false);
+
+  oP2 ← opts ["tests/fixtures/path-safe-realpath.c", "--rules", pathRules];
+  repP2 ← Scry.analyzeFile oP2;
+  check "path-safe-realpath: zero findings" (Nat.beq (List.length repP2.findings) 0);
+
+  oP3 ← opts ["tests/fixtures/path-safe-realpath-result.c", "--rules", pathRules];
+  repP3 ← Scry.analyzeFile oP3;
+  check "path-safe-realpath-result: zero findings" (Nat.beq (List.length repP3.findings) 0);
+
+  oP4 ← opts ["tests/fixtures/path-unsafe-realpath-input.c", "--rules", pathRules];
+  repP4 ← Scry.analyzeFile oP4;
+  check "path-unsafe-realpath-input: realpath does not clean its input"
+    (Bool.and (Nat.beq (List.length repP4.findings) 1)
+      (hasFindingRule repP4 "path-traversal"));
+
+  oP5 ← opts ["tests/fixtures/path-unsafe-argv.c", "--rules", pathRules];
+  repP5 ← Scry.analyzeFile oP5;
+  check "path-unsafe-argv: argv is a source in the opt-in pack"
+    (Bool.and (Nat.beq (List.length repP5.findings) 1)
+      (hasFindingRule repP5 "path-traversal"));
+
+  -- null dereference: the S5 alarm, wired into the CLI as a memory diagnostic
+  oN1 ← opts ["tests/fixtures/null-unsafe-malloc.c"];
+  repN1 ← Scry.analyzeFile oN1;
+  check "null-unsafe-malloc: a null-dereference warning"
+    (Bool.and (Nat.beq (List.length repN1.findings) 0)
+      (hasMemRule repN1 "scry/memory/null-dereference"));
+
+  oN2 ← opts ["tests/fixtures/null-safe-malloc.c"];
+  repN2 ← Scry.analyzeFile oN2;
+  check "null-safe-malloc: the !p guard kills the warning"
+    (Bool.not (hasMemRule repN2 "scry/memory/null-dereference"));
+
+  oN3 ← opts ["tests/fixtures/null-unsafe-getenv.c"];
+  repN3 ← Scry.analyzeFile oN3;
+  check "null-unsafe-getenv: a null-dereference warning"
+    (hasMemRule repN3 "scry/memory/null-dereference");
+
+  oN4 ← opts ["tests/fixtures/null-safe-getenv.c"];
+  repN4 ← Scry.analyzeFile oN4;
+  check "null-safe-getenv: the p == 0 early return kills the warning"
+    (Bool.not (hasMemRule repN4 "scry/memory/null-dereference"));
+
+  oN5 ← opts ["tests/fixtures/null-unsafe-call.c"];
+  repN5 ← Scry.analyzeFile oN5;
+  check "null-unsafe-call: a call result that is not checked"
+    (hasMemRule repN5 "scry/memory/null-dereference");
+
+  oN6 ← opts ["tests/fixtures/null-safe-call.c"];
+  repN6 ← Scry.analyzeFile oN6;
+  check "null-safe-call: the !p guard kills the warning"
+    (Bool.not (hasMemRule repN6 "scry/memory/null-dereference"));
+
+  oN7 ← opts ["tests/fixtures/null-unsafe-status.c"];
+  repN7 ← Scry.analyzeFile oN7;
+  check "null-unsafe-status: the ignored failure status leaves req null"
+    (hasMemRule repN7 "scry/memory/null-dereference");
+
+  oN8 ← opts ["tests/fixtures/null-safe-status.c"];
+  repN8 ← Scry.analyzeFile oN8;
+  check "null-safe-status: the constant-false status guard is unreachable"
+    (Bool.not (hasMemRule repN8 "scry/memory/null-dereference"));
+
+  oN9 ← opts ["tests/fixtures/null-safe-param.c"];
+  repN9 ← Scry.analyzeFile oN9;
+  check "null-safe-param: a parameter is non-null at entry"
+    (Bool.not (hasMemRule repN9 "scry/memory/null-dereference"));
 
   -- parse errors: refused by default, recovered with --allow-errors
   o6 ← opts ["tests/fixtures/taint-macro-errors.c"];

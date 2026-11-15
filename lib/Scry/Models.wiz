@@ -409,6 +409,14 @@ def Scry.sanSanitizePath : Scry.FnModel :=
   Scry.FnModel.mk "sanitize_path" "policy" (List.cons (.sanitise .result) .nil)
     "returns a path with traversal components removed"
 
+/-- `realpath(path, resolved)` canonicalises the path. Only the **result** and the
+written destination (argument 1) are clean; the input argument is not, so
+`realpath(user, buf); open(user)` still reports. -/
+def Scry.sanRealpath : Scry.FnModel :=
+  Scry.FnModel.mk "realpath" "libc"
+    (List.cons (.sanitise .result) (List.cons (.sanitise (.arg 1)) .nil))
+    "canonicalises a path into its result and argument 1; the input is not cleaned"
+
 def Scry.sanConfinePath : Scry.FnModel :=
   Scry.FnModel.mk "confine_path" "policy" (List.cons (.sanitise .result) .nil)
     "confines a path to a base directory"
@@ -480,6 +488,7 @@ def Scry.libcModels : List Scry.FnModel :=
   , Scry.allocCalloc
   , Scry.allocRealloc
   , Scry.freeFree
+  , Scry.sanRealpath
   ]
 
 def Scry.policyModels : List Scry.FnModel :=

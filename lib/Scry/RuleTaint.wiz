@@ -145,12 +145,16 @@ inductive Scry.MemWarnKind where
   /-- A call to an external function with no model and a pointer result or argument:
   its result and memory effect are unknown, not silently assumed pure. -/
   | unmodelledExternal
+  /-- A load or store through a pointer that may be null on some path (S5's nullness
+  alarm, wired through `Scry.Nullness`). -/
+  | nullDereference
 
 def Scry.MemWarnKind.show : Scry.MemWarnKind → String
   | .unknownMemory => "unknown-memory"
   | .useAfterFree => "use-after-free"
   | .unknownIndirect => "unknown-indirect"
   | .unmodelledExternal => "unmodelled-external"
+  | .nullDereference => "null-dereference"
 
 /-- A memory diagnostic: a finding the taint rules cannot express, with the statement it
 belongs to. `detail` names the locations or the callee for a human. -/
@@ -526,6 +530,15 @@ def Scry.prepareFunc (fn : Wil.Func) (pack0 : Scry.RulePack) (pt : Scry.PtResult
   let taintRules := Scry.RulePack.taintRules pack;
   let forbidden := Scry.RulePack.forbiddenRules pack;
   let paramDefs := List.map (fun p => (Scry.entryNode g, p.2)) (Scry.paramMap 0 fn.params);
+  /-- `source argv result`: `main`'s second parameter (the C `argv` array) is
+  attacker-controlled. The pack opts in; the default pack does not. -/
+  let argvDefs : List (Nat × Nat) :=
+    match Scry.RulePack.sourcesArgv pack, String.eq fn.name "main" with
+    | .true, .true => match Wil.listNth fn.params 1 with
+      | .some v => List.cons (Scry.entryNode g, v.index) .nil
+      | .none => .nil
+    | _, _ => .nil;
+  let paramDefs := List.append paramDefs argvDefs;
   let scan := Scry.concatLists (fun n =>
     match Scry.nodeStmt g n with
     | .none => .nil

@@ -1536,6 +1536,11 @@ The S4 rule pack and interprocedural slice are separate modules:
   parameter taint, return-value summaries and a summary fixpoint for recursion; an
   unresolved indirect call is recorded and warned about (`unknown-indirect`). Findings
   carry their rule metadata and a stitched source -> sink path.
+* `import Scry.Nullness` — the S5 nullness alarm wired to Wil: a `load`/`store` through a
+  pointer that may be null (a failed allocation, a call result, a literal `NULL`) is a
+  `scry/memory/null-dereference` diagnostic, and a `p != NULL`/`!p` guard kills the null
+  value on the other edge. It reuses `Scry.AiFixpoint`'s worklist and `Alarm.nullDeref`;
+  `Scry.Interproc.analyze` runs it by default (`analyzeWithoutNull` opts out).
 * `import Scry.RuleTaint` also carries the memory rules: `mstore`/`mload`/`mtainted`
   make a `store` taint the locations it may alias and a later `load` receive it, with
   `store`/`load` path nodes. Diagnostics that are not findings (unknown memory, use after
@@ -1554,7 +1559,11 @@ The S4 rule pack and interprocedural slice are separate modules:
 `import Scry.RuleExamples` is the rule-pack/interprocedural corpus. The `scry` package's
 `scry taint` command wires the whole pipeline: S1's tree-sitter parse, S2's
 `Scry.Lower` (spans on every statement), these S4 modules with
-`lib/Scry/rules/default.scry`, and SARIF 2.1.0. Memory is modelled: structs, arrays,
+`lib/Scry/rules/default.scry`, and SARIF 2.1.0. `Scry.Nullness` adds the
+`scry/memory/null-dereference` diagnostic by default; the CWE-22 `path-traversal` rule is
+opt-in as `lib/Scry/rules/path-traversal.scry` (the default pack plus the rule, with
+`realpath` modelled as a sanitiser of its result and destination, not its input).
+Memory is modelled: structs, arrays,
 pointers, `&`/`*`, allocation and `free`, globals, function pointers and pointer returns
 are lowered to slots/heaps/`gep`/`load`/`store`, and points-to + the memory taint rules
 carry a flow through them. External calls have models (`Scry.Models`): `strcpy`'s copy,
