@@ -1,0 +1,5 @@
+heavy: memory budget 10G is reserved, waiting…
+Terminated                 sleep 3
+Terminated                 WIZ_LOCK_HELD=heavy flock -o -s "$L/busy" systemd-run --user --scope --quiet --expand-environment=no -p Slice=wiz-heavy.slice -p MemoryMax="$MEM" -p MemorySwapMax="$SWAP" -p OOMPolicy=stop -p IOAccounting=yes -p IOWeight="${WIZ_HEAVY_IO_WEIGHT:-50}" -p "IOWriteBandwidthMax=${WIZ_HEAVY_WRITE_DEV:-/dev/mapper/vg-root} ${WIZ_HEAVY_WRITE_MAX:-500M}" taskset -c 0-23 nice -n 5 "$@" 7>&-
+✔ [196/196] Built wiz:exe (5.6s)
+Build completed successfully (196 jobs).

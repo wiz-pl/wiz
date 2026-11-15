@@ -1,0 +1,15 @@
+✖ [465/467] Building Main (3.6s)
+trace: .> LEAN_PATH=/workspace/wt/doc-serve/.lake/build/lib/lean /home/reuben/.elan/toolchains/leanprover--lean4---v4.35.0/bin/lean /workspace/wt/doc-serve/Main.lean -o /workspace/wt/doc-serve/.lake/build/lib/lean/Main.olean -i /workspace/wt/doc-serve/.lake/build/lib/lean/Main.ilean -c /workspace/wt/doc-serve/.lake/build/ir/Main.c --setup /workspace/wt/doc-serve/.lake/build/ir/Main.setup.json --json
+error: Main.lean:393:13: Unknown identifier `Serve.Site`
+error: Main.lean:397:20: Unknown identifier `Serve.listen`
+error: Main.lean:397:20: Application type mismatch: The argument
+  pure __x✝
+has type
+  EarlyReturnT UInt32 IO ?m.408
+but is expected to have type
+  ExceptT ?ε ?m ?α
+in the application
+  ExceptT.run (pure __x✝)
+Some required targets logged failures:
+- Main
+error: build failed

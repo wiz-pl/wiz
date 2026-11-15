@@ -1,0 +1,7 @@
+light: this looks like a build — 100 of 177 memcg kills came from builds under the 2G cap; use heavy --mem 5G
+✖ [194/196] Building Main (1.7s)
+trace: .> LEAN_PATH=/workspace/wt/doc-serve/.lake/build/lib/lean /home/reuben/.elan/toolchains/leanprover--lean4---v4.35.0/bin/lean /workspace/wt/doc-serve/Main.lean -o /workspace/wt/doc-serve/.lake/build/lib/lean/Main.olean -i /workspace/wt/doc-serve/.lake/build/lib/lean/Main.ilean -c /workspace/wt/doc-serve/.lake/build/ir/Main.c --setup /workspace/wt/doc-serve/.lake/build/ir/Main.setup.json --json
+error: Main.lean:387:100: unexpected identifier; expected '}'
+Some required targets logged failures:
+- Main
+error: build failed

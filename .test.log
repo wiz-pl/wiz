@@ -1,0 +1,21 @@
+heavy: memory budget 10G is reserved, waiting…
+heavy: waited 1108s; starting above the 10G budget (hard ceiling 14G)
+── doc (Stage 11s (docs/stages/11-tooling.md))
+  ✓ doc comments are stored on declarations: commands, constructors, fields, mutual, private (0.680 s)
+  ✓ the cache replays doc comments (2.115 s)
+  ✓ Markdown: paragraphs, emphasis, code, lists, fences, links; HTML escaped (0.033 s)
+Terminated                 WIZ_LOCK_HELD=heavy flock -o -s "$L/busy" systemd-run --user --scope --quiet --expand-environment=no -p Slice=wiz-heavy.slice -p MemoryMax="$MEM" -p MemorySwapMax="$SWAP" -p OOMPolicy=stop -p IOAccounting=yes -p IOWeight="${WIZ_HEAVY_IO_WEIGHT:-50}" -p "IOWriteBandwidthMax=${WIZ_HEAVY_WRITE_DEV:-/dev/mapper/vg-root} ${WIZ_HEAVY_WRITE_MAX:-500M}" taskset -c 0-23 nice -n 5 "$@" 7>&-
+  ✓ wiz doc: a page per module, kinds, docs as HTML, source links, instances, index (304.742 s)
+  ✓ wiz doc: every cross-link resolves; every declaration is in the search index (2.387 s)
+  ✓ wiz doc: the API index and api.json list every module and declaration; search covers docs and signatures (2.656 s)
+  ✓ wiz doc: the pages are complete without JS (no module script without the Wasm); the data is there for it (1.421 s)
+  ✗ grail doc: the package's lib targets (0.033 s)
+      no such file or directory (error code: 2)
+        file: .lake/build/bin/grail
+  ✓ the doc page model (lib/Tagged.wiz, the Wasm module's) renders a page's JSON: hover, click, keys (299.801 s)
+  ✓ wiz doc --serve: the client is only in served pages, and the server serves the tree and its sources (3.487 s)
+  ✓ wiz doc --serve: --port and --lsp need --serve (0.595 s)
+  ✓ the core library is documented: a module doc and a doc comment on every public declaration (Prelude, Std, Vec, Word) (399.769 s)
+  (doc: 1017.732 s; cases 1017.719 s)
+
+11 passed, 1 failed

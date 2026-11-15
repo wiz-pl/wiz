@@ -1,0 +1,21 @@
+heavy: memory budget 10G is reserved, waiting…
+Terminated                 sleep 3
+heavy: waited 2552s; starting above the 10G budget (hard ceiling 14G)
+── doc (Stage 11s (docs/stages/11-tooling.md))
+  ✓ doc comments are stored on declarations: commands, constructors, fields, mutual, private (0.740 s)
+  ✓ the cache replays doc comments (2.110 s)
+  ✓ Markdown: paragraphs, emphasis, code, lists, fences, links; HTML escaped (0.030 s)
+  ✓ wiz doc: a page per module, kinds, docs as HTML, source links, instances, index (1.445 s)
+  ✓ wiz doc: every cross-link resolves; every declaration is in the search index (1.095 s)
+  ✓ wiz doc: the API index and api.json list every module and declaration; search covers docs and signatures (1.005 s)
+  ✓ wiz doc: the pages are complete without JS (no module script without the Wasm); the data is there for it (1.025 s)
+  ✗ grail doc: the package's lib targets (0.030 s)
+      no such file or directory (error code: 2)
+        file: .lake/build/bin/grail
+  ✓ the doc page model (lib/Tagged.wiz, the Wasm module's) renders a page's JSON: hover, click, keys (28.816 s)
+  ✓ wiz doc --serve: the client is only in served pages, and the server serves the tree and its sources (3.405 s)
+  ✓ wiz doc --serve: --port and --lsp need --serve (0.530 s)
+  ✓ the core library is documented: a module doc and a doc comment on every public declaration (Prelude, Std, Vec, Word) (185.822 s)
+  (doc: 226.063 s; cases 226.053 s)
+
+11 passed, 1 failed
