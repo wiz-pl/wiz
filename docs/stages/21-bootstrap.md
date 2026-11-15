@@ -762,3 +762,113 @@ checked once), a cycle, a missing module, a duplicate name across modules, a `-I
 and the cache key (stable for one graph, different when a module's text changes). `wiz
 check` of the generated self-hosted sources passes, and the self-hosted frontend still
 checks itself.
+
+## 21z: the proof surface in the self-hosted frontend (A16)
+
+The self-hosted frontend could define data and functions but not state or prove a
+proposition: `term.prop`, `term.sort`, `term.eq`, `term.refl`, `term.rfl`, `term.cast`
+and `term.transp` had no handlers (the parser already produced them, the kernel already
+had the forms). `Frontend.wiz` now elaborates them:
+
+* `Prop` is the kernel's `.prop` (`Sort 0`); `Sort l` is `.sortL l`, with the level
+  from U1's level elaborator (`levelArg`/`elabLevel`): numerals, `max`, `imax`, `+ n`,
+  the declaration's universe parameters (`Sort u` in a `.{u}` definition) and `_` level
+  metavariables. `Sort 0`, `Sort (max 1 2)` and (with U1) `Sort u` are the tests; `Type`
+  keeps its handler, and a level that is not in scope is an error naming it.
+* `a = b` is `.eq A a b` (`A` the inferred type of `a`, the result in `Prop`).
+* `refl a` is `.tyRefl a` when `a` is a type and `.eqRefl A a` otherwise; `rfl` is
+  checked against the expected equation (`.eqRefl`, `.tyRefl`, or the unit proof for an
+  equation that computed to `True`), and a non-equation expected type is an error.
+* `cast e t` is `.coe A B e t`, with `e : A ≡ B` (the equation's type must still show
+  its sides: a computed one is reported, as in the Lean frontend).
+* `transp P p e` is `.subst A a P p b e`, with `P : (b : A) → a = b → Prop` and
+  `p : P a (refl A a)`.
+* `True` and `False` are built-in names for `.ptrue`/`.pfalse` (like `Unit`).
+
+Nothing in `Kernel.wiz` changed for A16 (U1 changed it for levels): the kernel
+infers/checks and marks the terms like every other declaration. Types still have no
+`Eq` name (only the `a = b` form), and `by` (tactics, A13), macros/notation (A12) and
+`deriving` (A11) remain the next surface pieces.
+
+**Tests** (group `selfhost`): a file with `n = n` by `rfl`, a `Prop`-valued definition,
+`Prop`, `Sort 0`, `Sort (max 1 2)`, a `Sort`-typed definition, a polymorphic `cast`, a
+`transp` along an equality (its motive a proposition), `True`/`False`, four rejected
+proofs/types (a wrong equation by `rfl`, `Prop := Type`, `Sort 1 := Type 1`, `cast` on
+`False`) and an unknown-level error; a differential case with the same 12 declarations
+accepted/rejected by the Lean frontend and the self-hosted one; U1's own cases cover
+`Sort u`, `Type u` and level inference. `wiz check` of the generated self-hosted sources
+passes, and the self-hosted frontend still checks itself.
+
+## 21ab: named arguments (A9)
+
+`f a (x := e) b` now elaborates in the self-hosted frontend. The kernel's `Tm` and `Val`
+carry no binder names, so a `Global` keeps its parameters' names beside their implicit
+mask (`paramNames`, as `paramMask`; filled for definitions, axioms and partial
+definitions from their written binders; an `extern` writes no binders). An application
+with `term.namedArg`
+arguments is split into named and positional lists, in source order. A duplicate name is
+`argument 'x' was already given`. The telescope is then walked: a binder whose name has
+a named argument takes it (explicit, implicit or instance), otherwise an implicit binder
+gets a metavariable and an explicit binder takes the next positional argument. The
+result is a positional argument list (with `_` for each implicit binder passed over), so
+the existing `appArgsT` still inserts implicits, postpones constructor arguments and
+applies the expected type. A named argument that would have to cross an explicit
+parameter with no argument is `named argument 'y' comes after the explicit parameter
+'x', which has no argument`; a name no binder has is `no parameter named 'y'`, and a
+named argument outside an application is `a named argument `(x := e)` is only allowed as
+an argument of an application`. `@f` still makes every binder positional (named
+arguments still match by name), and `f (b := 1) 5` gives `a` the `5`.
+
+Named arguments work for a global function whose parameters are written as binders, or
+in the leading Π binders of its type (`axiom f : {A : Type} → …`, so `MVar.new
+(A := B)` is accepted; that also reads the names an `extern` writes in its type).
+A constructor's fields and a local variable's Π type keep no names yet, so a named
+argument there is rejected (a clear error, not a silent mismatch); class/instance
+binders will use the same path once A10 stores their names. An implicit parameter
+written only in a declaration's type is still not inserted positionally when it is
+omitted (A3); it can be supplied by name.
+
+**Tests** (group `selfhost`): explicit, implicit, reordered and interleaved named
+arguments, a named implicit, `@f` with a named implicit and with a named explicit, and
+implicit insertion around named arguments, checked against the Lean frontend; unknown,
+duplicate, ordering and bare named-argument errors; and the self-hosted frontend still
+checks itself.
+## 21aa: `import_c`, `glue` and native representations, self-hosted
+
+The self-hosted frontend now reads C headers (`selfhost/CParse.wiz`) and checks the C
+glue subset (`selfhost/CGlue.wiz`). The driver reads each `import_c "h"` header from the
+file system (the frontend is pure) and passes the texts in `Globals.headers`; there is
+no C preprocessor, so a header must be self-contained. `CParse` parses prototypes,
+typedefs and struct definitions. `import_c` binds the scalar prototypes it can marshal
+(`Nat`, `UInt64`, `Float64`, `String`, `Bool`, `Unit`, foreign pointers and declared
+`c_struct`s) as `C.name`, emits an implicit `#include`, and records the functions for
+`glue`; `(pure)`, `(no_auto)` and `(skip := "…")` are read as in the Lean frontend.
+`glue` checks numbers, strings, calls, assignments, `if`/`while` and struct field
+access, then emits a static C wrapper called by the backend's normal foreign path.
+
+`attribute [implemented_by mk get] T.mk` is accepted on a sealed constructor; the
+constructor's implementation is registered (`mk`), as is the representation. A type
+whose operations are all `implemented_by` runtime natives (the `U32Array`/`U64Map`
+pattern) therefore compiles to its natives. Direct pattern matching on a native value
+still needs `get` in erasure.
+
+**Not done.** No preprocessor, no automatic struct/pointer mapping from a header (declare
+a `c_struct`/`foreign_type`), no `Bytes`/buffer parameters, no `for` loops, struct locals
+or `&struct` in self-hosted glue, no rewriting of matches through `get`.
+
+**Tests** (group `selfhost`): an `import_c` header whose functions are called from Wiz
+and from `glue`, and a native representation on a sealed constructor that runs through
+`wiz_u32array_*`, in GC and RC modes.
+
+**ABI v1 (aligned with `wiz-notes/prior-art/compilers-runtime-ffi.md` §2.2, cheap
+parts only).** Kinds are explicit in every `Foreign.fn`: `n`/`u` are `uint64_t`, `f`
+is `double`, `s` is `const char *` (borrowed in, caller-owned out), `b` is `int`, `p`
+is `void *` (+1 wrapped, borrowed for a call), `w` is a Wiz `wiz_val` (+0 in, +1 out),
+and `e`/`v` are omitted from the C prototype. Structs by value go only through an
+explicit `c_struct`; a native representation is accepted only on a **sealed** type
+whose constructor's `mk`/`get` are registered, so values of the type are the runtime
+natives. The generated `--header` now defines `WIZ_ABI_MAJOR`/`WIZ_ABI_MINOR` (1/0)
+and carries the ownership table as comments. Deferred (documented, not implemented):
+a linked `wiz_abi_version` symbol, `_Static_assert`s for `c_struct` layouts, boxed
+`Nat`/`NatObj` by default, callback roots on both collectors, and the preprocessor or
+automatic struct/pointer import for `import_c`.
