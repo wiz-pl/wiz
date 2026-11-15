@@ -58,7 +58,25 @@ namespace Toolchain
 
 def words (s : String) : List String := (s.splitOn " ").filter (· ≠ "")
 
-/-- What identifies the generated code: compilers and flags (not the cache or roots). -/
+/-- The host target's strong name: the platform triple and pointer width. It is a SHA-256
+digest (not the 64-bit `id`) because it names a namespace: two data layouts must never
+share cache entries. A future `--target` replaces the triple and width. -/
+def targetTag (_t : Toolchain) : String :=
+  let triple := System.Platform.target
+  Smt.Sha256.hexFramed "wiz-target-id-v1" [if triple.isEmpty then "unknown" else triple,
+    toString System.Platform.numBits]
+
+/-- What identifies the generated code, as a SHA-256 digest of the target and the
+compilers/flags (not the cache or roots). `id` remains the fast 64-bit index for in-memory
+tables and job names; this is the strong namespace for manifests, regions and cache keys. -/
+def tag (t : Toolchain) : String :=
+  Smt.Sha256.hexFramed "wiz-toolchain-id-v1"
+    ([t.targetTag, t.cc, " ".intercalate t.cflags, " ".intercalate t.ldflags,
+      " ".intercalate t.libs, t.llc, " ".intercalate t.gmp,
+      " ".intercalate t.gcCflags, " ".intercalate t.gcLdflags])
+
+/-- What identifies the generated code: compilers and flags (not the cache or roots).
+Fast (64-bit) and for indexing only; `tag` is the SHA-256 namespace used by the cache. -/
 def id (t : Toolchain) : UInt64 :=
   hash (toString [t.cc, " ".intercalate t.cflags, " ".intercalate t.ldflags, " ".intercalate t.libs, t.llc, " ".intercalate t.gmp,
     " ".intercalate t.gcCflags, " ".intercalate t.gcLdflags])

@@ -10,8 +10,10 @@ import Wiz.Smt.Sha256
 The query engine's memo table, on disk: a command's **effect** (the declarations it
 adds, its messages, and its registrations) is stored in `<cache dir>/<key>.wizc` (`wiz --cache DIR`), where
 the key is the chained content hash of the command and everything before it (and a
-version salt). Elaboration is deterministic, so a shared directory is a shared cache:
-two machines elaborating the same text compute the same keys and the same effects.
+version salt). The 64-bit half is an index; a SHA-256 key (domain-separated and
+length-framed) names regions and manifests, so a collision cannot select another input's
+effect. Elaboration is deterministic, so a shared directory is a shared cache: two
+machines elaborating the same text compute the same keys and the same effects.
 
 Any number of directories may also be **read-only caches** (`wiz --cache-ro DIR`, in
 order): misses are looked up there after the write cache, and they are never written. A
@@ -564,39 +566,120 @@ def binaryId (dir : Option System.FilePath) : IO UInt64 := do
     writeAtomic f s!"{stamp}\n{h.toNat}"
   pure h
 
-/-- The key of every module reachable from `ms` (see above). `headers` gives the
-preprocessed text of a C header. Import cycles get key 0 on the back edge (the frontend
-reports them). A module's trust (`CommandState.trustedModule`: its `builtin`
-registrations are axioms or not) is part of its key, and so of its importers' keys:
-an effect elaborated with one trust status (its messages, `#print axioms`) is never
-replayed under the other. -/
-partial def moduleKeys (loader : Name → Option String) (headers : String → Option String) (toolchain : UInt64)
-    (ms : List Name) (memo : Std.HashMap Name UInt64 := {}) (trusted : Name → Bool := fun _ => false) :
-    Std.HashMap Name UInt64 :=
+/-- A cache key has a fast 64-bit index (for in-memory tables, file lookups and Lean's
+`HashMap`) and a **strong** SHA-256 content key (for manifests, regions and anything that
+crosses a trust boundary). The fast half is not a security digest; the strong half is
+domain-separated and length-framed, so two differently-shaped inputs cannot share a
+preimage. `toolchain` and `target` are the strong namespaces (`Toolchain.tag` and
+`Toolchain.targetTag`); they are kept out of `fast`, which stays exactly the old key. -/
+structure Key where
+  fast : UInt64 := 0
+  /-- the SHA-256 content key (empty: a legacy fast-only key) -/
+  strong : String := ""
+  /-- the strong toolchain namespace (`Toolchain.tag`) -/
+  toolchain : String := ""
+  /-- the strong target namespace (`Toolchain.targetTag`) -/
+  target : String := ""
+  /-- SHA-256 of the running executable (`toolchainTag`) -/
+  binary : String := ""
+  deriving Repr, Inhabited, BEq
+
+namespace Key
+
+def ofFast (k : UInt64) : Key := { fast := k }
+
+/-- One key's identity in a set or map keyed by both halves. (The fast half alone is not
+enough: two colliding inputs are different keys.) -/
+def id (k : Key) : String :=
+  if k.strong.isEmpty then toString k.fast else s!"{k.fast}:{k.strong}"
+
+/-- Chain one command's text into a key. The fast half is the old `mixHash`; the strong
+half hashes the previous strong key and the exact text under a command domain. -/
+def mixText (k : Key) (text : String) : Key :=
+  { k with fast := mixHash k.fast (hash text),
+           strong := Smt.Sha256.hexFramed "wiz-cache/command-v1" [k.strong, text] }
+
+/-- Chain an imported module's key into the importer's key. -/
+def mixKey (a b : Key) : Key :=
+  { a with fast := mixHash a.fast b.fast,
+           strong := Smt.Sha256.hexFramed "wiz-cache/import-v1" [a.strong, b.strong] }
+
+/-- Mix arbitrary extra inputs (a file's `link_c` table, solver settings) into a key with
+an explicit domain. -/
+def mixDomain (k : Key) (domain : String) (fields : List String) : Key :=
+  { k with strong := Smt.Sha256.hexFramed domain (k.strong :: fields) }
+
+end Key
+
+instance : Coe UInt64 Key := ⟨Key.ofFast⟩
+
+/-- The strong toolchain namespace with the elaboration options that change what a module
+means (`--term-info`, `--trust-native`/fuel, solver settings). The fast module key already
+mixes the same options; this is the SHA-256 version, so an option change cannot select a
+manifest or region by a 64-bit collision. -/
+def toolchainOptionsTag (strongToolchain : String) (termInfo trustNative : Bool)
+    (nativeFuel : Nat) (smt : Option UInt64) : String :=
+  Smt.Sha256.hexFramed "wiz-cache/toolchain-options-v1"
+    [strongToolchain, toString termInfo, toString trustNative, toString nativeFuel,
+     match smt with | some k => toString k | none => ""]
+
+/-- The strong key of every module reachable from `ms`, alongside its fast key. `headers`
+gives the preprocessed text of a C header. Import cycles get the fast key 0 on the back
+edge (the frontend reports them). A module's trust (`CommandState.trustedModule`) is part
+of both halves, and so of its importers' keys. -/
+partial def moduleKeysAll (loader : Name → Option String) (headers : String → Option String)
+    (toolchain : UInt64) (strongToolchain : String := "") (targetTag : String := "")
+    (ms : List Name) (memo : Std.HashMap Name Key := {}) (trusted : Name → Bool := fun _ => false) :
+    Std.HashMap Name Key :=
   ms.foldl (fun memo m => (go [] m memo).2) memo
 where
-  go (stack : List Name) (m : Name) (memo : Std.HashMap Name UInt64) : UInt64 × Std.HashMap Name UInt64 :=
+  go (stack : List Name) (m : Name) (memo : Std.HashMap Name Key) : Key × Std.HashMap Name Key :=
     match memo.get? m with
     | some k => (k, memo)
     | none =>
-      if stack.contains m then (0, memo) else
+      if stack.contains m then (Key.ofFast 0, memo) else
       match loader m with
-      | none => (0, memo)
+      | none => (Key.ofFast 0, memo)
       | some src =>
         -- (the name too: what a module elaborates to records it, in the sites of its
         -- declarations and in its private names)
         let k₀ := mixHash (mixHash (mixHash salt toolchain) (hash src)) (hash m)
         let k₀ := if trusted m then mixHash k₀ (hash "trusted") else k₀
         let k₀ := (Module.headersOf src).foldl (fun k h => mixHash k (hash ((headers h).getD ""))) k₀
+        -- (the strong half hashes the exact fields, each length-framed: not the 64-bit
+        -- hashes above, and not a concatenation that can be ambiguous)
+        let headerFields := (Module.headersOf src).flatMap fun h => [s!"header:{h}", (headers h).getD ""]
+        let k₀ : Key :=
+          { fast := k₀
+            strong := Smt.Sha256.hexFramed "wiz-cache/module-v1"
+              ([s!"salt:{salt}", s!"toolchain:{toolchain}", s!"toolchain-tag:{strongToolchain}",
+                s!"target-tag:{targetTag}", s!"module:{m}", s!"trusted:{trusted m}", "source", src] ++ headerFields)
+            toolchain := strongToolchain, target := targetTag }
         let (k, memo) := (Module.importsOf src).foldl (fun (k, memo) n =>
           let (kn, memo) := go (m :: stack) n memo
-          (mixHash k kn, memo)) (k₀, memo)
+          (k.mixKey kn, memo)) (k₀, memo)
         (k, memo.insert m k)
+
+/-- The key of every module reachable from `ms` (see above), as the fast 64-bit map used by
+in-memory tables and the old file names. -/
+def moduleKeys (loader : Name → Option String) (headers : String → Option String) (toolchain : UInt64)
+    (ms : List Name) (memo : Std.HashMap Name UInt64 := {}) (trusted : Name → Bool := fun _ => false) :
+    Std.HashMap Name UInt64 :=
+  let start := memo.toList.foldl (fun acc (n, k) => acc.insert n (Key.ofFast k)) {}
+  (moduleKeysAll loader headers toolchain "" "" ms start trusted).toList.foldl
+    (fun acc (n, k) => acc.insert n k.fast) {}
 
 /-- The key of one module. -/
 def moduleKey (loader : Name → Option String) (headers : String → Option String) (toolchain : UInt64) (m : Name)
     (trusted : Name → Bool := fun _ => false) : UInt64 :=
   ((moduleKeys loader headers toolchain [m] {} trusted).get? m).getD 0
+
+/-- The SHA-256 key of one module (the content key in manifests and region names). -/
+def moduleKeyStrong (loader : Name → Option String) (headers : String → Option String) (toolchain : UInt64)
+    (m : Name) (trusted : Name → Bool := fun _ => false)
+    (strongToolchain : String := "") (targetTag : String := "") : String :=
+  ((moduleKeysAll loader headers toolchain strongToolchain targetTag [m] {} trusted).get? m)
+    |>.map (·.strong) |>.getD ""
 
 /-- How a file's commands are being elaborated. -/
 inductive Mode where
@@ -612,21 +695,24 @@ Lean's `.olean` files are *compacted regions*: a byte image of a module's terms,
 base address derived from the module name, and read back with `mmap`
 (`Lean.CompactedRegion`). A Wiz `.wizc` entry is S-expression text, decoded and reallocated
 on every hit. A module's effects are plain data (no closures), so they can be saved as a
-region too: **one artifact per module**, `<cache>/<binary ⊕ module key>.wizr`, holding every
-cacheable command's `Effect` in command order. `--region-cache` serves those effects from the
-mapped region; the text entries stay in place, are the authority, and are the fallback.
+region too: **one artifact per module**, `<cache>/<fast key>.<SHA-256 key>.wizr`, holding
+every cacheable command's `Effect` in command order. `--region-cache` serves those effects
+from the mapped region; the text entries stay in place, are the authority, and are the
+fallback.
 
 `CompactedRegion.read` does not check the type it loads (`α` is erased at the boundary), so a
-file is guarded by its name (this binary's hash and the module's key), Lean's `.olean` header
-(magic and version), the payload's `magic`, `format`, `binary`, `salt`, `rig` and `key`, and
-— format 2 — a **payload checksum**: a `.wizs` sidecar holds the 8-byte hash of the whole
-image (`checksumFile`: one read, a 64-bit hash), checked before the image is mapped, so a
+file is guarded by its name (this binary's hash, the module's fast key and its SHA-256 key),
+Lean's `.olean` header (magic and version), the payload's `magic`, `format`, `binary`,
+`binarySha`, `salt`, `rig`, `key`, `keySha`, `toolchainSha` and `targetSha`, and — format 3
+— a **payload checksum**: a `.wizs` sidecar holds the 8-byte hash of the whole image
+(`checksumFile`: one read, a 64-bit hash), checked before the image is mapped, so a
 same-size bit flip (even one that would corrupt a pointer) is a miss and never reaches the
-type-erased reader. The check is one read and a `ByteArray.hash` pass, not a decode: a
-millisecond or two for a multi-MB region. Never content-address a region by its bytes: they
-are pointers, and not canonical. Bump `regionFormat` whenever `Effect`, `Decl`, `Term` or
-`Info` change shape, or the file framing changes; the format is disposable, never
-migrated.
+type-erased reader. The checksum catches corruption; the SHA-256 fields catch a name
+collision and a cross-toolchain/target swap (the 64-bit name is only an index). The check is
+one read and a `ByteArray.hash` pass, not a decode: a millisecond or two for a multi-MB
+region. Never content-address a region by its bytes: they are pointers, and not canonical.
+Bump `regionFormat` whenever `Effect`, `Decl`, `Term` or `Info` change shape, or the file
+framing changes; the format is disposable, never migrated.
 
 The artifact is a *projection*: `CommandState`/`Globals` carry closures (`loader`,
 `trustedModule`, `pp.run`, `metaCode`, `Budget.ref`) that the compactor refuses. Loading
@@ -637,14 +723,16 @@ counts: a state must not outlive the region it was built from). -/
 /-- Format of a `.wizr` file: bump it when `Effect`, `Decl`, `Term` or `Info` change shape
 (`salt` covers the same ground for the text entries), and when the file's framing changes.
 1: a bare `Lean.CompactedRegion` image. 2: the image and, beside it, a `.wizs` sidecar
-holding the image's 8-byte little-endian hash (`regionSumFile`). A file of the wrong format
+holding the image's 8-byte little-endian hash (`regionSumFile`). 3: the SHA-256 content,
+toolchain and target keys, and the strong key in the file name. A file of the wrong format
 (or without its sidecar) is a miss, never migrated (`RegionStore.layered`: the write cache
-drops and rewrites it, a read-only cache keeps it). -/
-def regionFormat : Nat := 2
+drops and rewrites it, a read-only cache keeps it). Old format-2 files are ignored by their
+old names too, so an old cache is a clean miss and regenerates with the new key. -/
+def regionFormat : Nat := 3
 
-/-- `"wizreg02"` (format 2): checked after a region is read (Lean's header is the first
-line). A format-1 file ("wizreg01") has no checksum and fails `fits`. -/
-def regionMagic : UInt64 := 0x77697A7265673032
+/-- `"wizreg03"` (format 3): checked after a region is read (Lean's header is the first
+line). A format-2 file ("wizreg02") has no SHA-256 key fields and fails `fits`. -/
+def regionMagic : UInt64 := 0x77697A7265673033
 
 /-- What one module contributes to an importer, as pure data. -/
 structure ModuleArtifact (R : Type) where
@@ -654,6 +742,8 @@ structure ModuleArtifact (R : Type) where
   format : Nat := regionFormat
   /-- the `wiz` binary that wrote it (`binaryId`; the file name has it too) -/
   binary : UInt64 := 0
+  /-- SHA-256 of the executable (a strong binary identity) -/
+  binarySha : String := ""
   /-- the text format's `salt`, in case the file name is reused -/
   textSalt : UInt64 := 0
   /-- the rig the effects were elaborated for (`RigTag.tag`) -/
@@ -662,6 +752,12 @@ structure ModuleArtifact (R : Type) where
   module : Name := ""
   /-- the module key (`moduleKey`: text, headers and imports) -/
   key : UInt64 := 0
+  /-- the strong module key (`moduleKeyStrong`) -/
+  keySha : String := ""
+  /-- the strong toolchain namespace (`Toolchain.tag`) -/
+  toolchainSha : String := ""
+  /-- the strong target namespace (`Toolchain.targetTag`) -/
+  targetSha : String := ""
   /-- every cacheable command's effect, in command order (`Effect.apply` in order) -/
   effects : Array (Effect R) := #[]
   /-- the chained key at each of those commands, in the same order: a replay checks its
@@ -676,10 +772,17 @@ structure ModuleArtifact (R : Type) where
   (commit 3) -/
   rerun : Array (Nat × Nat) := #[]
 
-/-- Does this artifact belong to module `key` of `binary`, under `rig`? -/
-def ModuleArtifact.fits (a : ModuleArtifact R) (binary key : UInt64) (rig : String) : Bool :=
+/-- Does this artifact belong to module `key` of `binary`, under `rig`, for this strong
+toolchain/target namespace? The 64-bit `key` is only the index; the SHA-256 fields are the
+identity. A legacy fast-only key (`strong = ""`) accepts the old tags, but new writers
+always fill them. -/
+def ModuleArtifact.fits (a : ModuleArtifact R) (binary : UInt64) (key : Key) (rig : String) : Bool :=
   a.magic == regionMagic && a.format == regionFormat && a.binary == binary &&
-  a.textSalt == salt && a.rig == rig && a.key == key
+  a.textSalt == salt && a.rig == rig && a.key == key.fast &&
+  (key.strong.isEmpty || a.keySha == key.strong) &&
+  (key.toolchain.isEmpty || a.toolchainSha == key.toolchain) &&
+  (key.target.isEmpty || a.targetSha == key.target) &&
+  (key.binary.isEmpty || a.binarySha == key.binary)
 
 /-- What `--region-stats` reports. -/
 structure RegionCounts where
@@ -700,8 +803,12 @@ structure RegionOptions where
   /-- where to count hits and misses, for `--region-stats` and tests -/
   stats : Option (IO.Ref RegionCounts) := none
 
-/-- The `.wizr` file for module `key` as `binary` (the same mix as `.wizc`). -/
-def regionFileName (binary key : UInt64) : String := s!"{mixHash binary key}.wizr"
+/-- The `.wizr` file for module `key` as `binary`. The fast half keeps the old shape; a
+key with a strong half adds it to the name, so two colliding fast keys never share a region
+file (and an old fast-only file is a miss, never read under the new key). -/
+def regionFileName (binary : UInt64) (key : Key) : String :=
+  if key.strong.isEmpty then s!"{mixHash binary key.fast}.wizr"
+  else s!"{mixHash binary key.fast}-{key.strong}.wizr"
 
 /-! ## Output manifests (`--cache-verify`)
 
@@ -722,18 +829,25 @@ per-layer generation index:
 <cache>/manifest.sexpr                            -- the layer's generation index
 ```
 
-A module manifest lists every cacheable command entry of that module and its region:
+A module manifest lists every cacheable command entry of that module and its region, with
+both the fast index and the SHA-256 input key:
 
 ```lisp
 (module-manifest
-  (format 1) (module "Data.Two") (key "1234") (binary "99")
-  (toolchain "sha256:…") (rig "zero-one-many")
-  (region (entry (kind wizr) (key "1234") (file "5678.wizr") (size 123)
-                 (sha256 "…") (format 2)))
-  (entries ((entry (kind wizc) (key "1235") (file "5679.wizc") (size 77)
-                   (sha256 "…") (format 1)) …))
+  (format 2) (module "Data.Two") (key "1234") (key-sha "…") (binary "99")
+  (toolchain "sha256:…") (toolchain-tag "…") (target-tag "…") (rig "zero-one-many")
+  (region (entry (kind wizr) (key "1234") (key-sha "…") (file "5678-….wizr")
+                 (size 123) (sha256 "…") (format 3)))
+  (entries ((entry (kind wizc) (key "1235") (key-sha "…") (file "5679.wizc")
+                   (size 77) (sha256 "…") (format 1)) …))
   (root "sha256:…"))
 ```
+
+The `key` is a fast index; `key-sha` is the SHA-256 key of the exact inputs (command text
+and its chain, or module text/headers/imports plus the toolchain/target namespaces). The
+manifest file name includes `key-sha`, and a lookup requires both halves, so a 64-bit
+collision is a miss, never another command's effect. A format-1 manifest (or a format-2
+region) is a miss and is regenerated; it is never read under a strong key.
 
 `root` is an RFC 6962-style Merkle root over the entries (`0x00` leaf, `0x01` node
 separation), so P3 can sign one value instead of every entry. `.wizc` bytes are canonical
@@ -744,10 +858,13 @@ The policy is `--cache-verify MODE`:
 
 * `off` — no manifests are written or read; the cache is byte-identical to the old one.
 * `warn` (the default) — if a manifest exists, every key it lists is served only after its
-  bytes match; a mismatch is a miss (the text path/elaboration answers). A key no manifest
-  lists falls back to the old unverified lookup, so an old read-only cache keeps working.
-* `strict` (alias `require`) — an entry without a manifest entry is a miss too. Manifests
-  are written to the write cache (never to a `--cache-ro` layer), so a cold run becomes
+  bytes match; a mismatch is a miss (the text path/elaboration answers). A new key has a
+  SHA-256 half, so a write-cache entry no manifest lists is a miss too: nothing else binds
+  its bytes to the strong input key (an old fast-only key still falls through, and
+  `--cache-verify off` restores the old unverified lookup). An old local cache is one cold
+  pass, then it is rewritten with manifests.
+* `strict` (alias `require`) — only manifested entries are used anywhere. Manifests are
+  written to the write cache (never to a `--cache-ro` layer), so a cold run becomes
   strict-warm after one pass.
 
 A bad manifest disables the entries it names (they miss); an absent manifest in `warn` is
@@ -779,8 +896,10 @@ def VerifyMode.render : VerifyMode → String
 structure ManifestEntry where
   /-- `wizc` (a command's effect text) or `wizr` (a module's region) -/
   kind : String := "wizc"
-  /-- the command key (`.wizc`) or module key (`.wizr`) -/
+  /-- the command key (`.wizc`) or module key (`.wizr`); a fast index -/
   key : UInt64 := 0
+  /-- the SHA-256 key of what the entry answers (the strong half; never the file name) -/
+  keySha : String := ""
   /-- the file name inside the layer (no path components) -/
   file : String := ""
   size : Nat := 0
@@ -792,6 +911,7 @@ structure ManifestEntry where
 
 def ManifestEntry.toSx (e : ManifestEntry) : Sx :=
   node "entry" [node "kind" [str e.kind], node "key" [str (toString e.key)],
+    node "key-sha" [str e.keySha],
     node "file" [str e.file], node "size" [nat e.size],
     node "sha256" [str e.sha256], node "format" [nat e.format]]
 
@@ -813,6 +933,9 @@ def ManifestEntry.ofSx? (x : Sx) : Option ManifestEntry := do
   let kind ← atom? kv
   let kv ← sxField? "key" x
   let key ← (← atom? kv).toNat?
+  let keySha ← match ← sxField? "key-sha" x with
+    | .a s => pure s
+    | _ => pure ""
   let fv ← sxField? "file" x
   let file ← atom? fv
   let sv ← sxField? "size" x
@@ -821,23 +944,27 @@ def ManifestEntry.ofSx? (x : Sx) : Option ManifestEntry := do
   let sha256 ← atom? hv
   let fv ← sxField? "format" x
   let format ← (← atom? fv).toNat?
-  pure { kind, key := key.toUInt64, file, size, sha256, format }
+  pure { kind, key := key.toUInt64, keySha, file, size, sha256, format }
 
 /-- The bytes an entry's digest covers: its canonical S-expression, with a newline. -/
 def ManifestEntry.canonical (e : ManifestEntry) : ByteArray := (e.toSx.render ++ "\n").toUTF8
 
 /-- The file an entry must name for `binary` (the same name the store uses). -/
 def ManifestEntry.expectedFile (binary : UInt64) (e : ManifestEntry) : String :=
-  if e.kind == "wizr" then regionFileName binary e.key else s!"{mixHash binary e.key}.wizc"
+  let key : Key := { fast := e.key, strong := e.keySha }
+  if e.kind == "wizr" then regionFileName binary key else s!"{mixHash binary e.key}.wizc"
 
 /-- A file name that stays inside the layer. -/
 def safeFileName (f : String) : Bool :=
   !f.isEmpty && !f.contains '/' && !f.contains '\\' && !f.contains ".."
 
+/-- A single entry's self-consistency: its format, safe name, expected name, and both
+digests (the output and the strong input key). -/
 def ManifestEntry.valid (binary : UInt64) (e : ManifestEntry) : Bool :=
   let formatOk := if e.kind == "wizr" then e.format == regionFormat
     else e.kind == "wizc" && e.format == salt.toNat
-  formatOk && safeFileName e.file && e.file == e.expectedFile binary && e.sha256.length == 64
+  formatOk && safeFileName e.file && e.file == e.expectedFile binary &&
+  e.sha256.length == 64 && e.keySha.length == 64
 
 /-! Merkle roots (RFC 6962 shapes: `SHA-256(0x00 || leaf)`, `SHA-256(0x01 || l || r)`). -/
 
@@ -863,15 +990,21 @@ partial def merkleRoot (hs : Array ByteArray) : ByteArray :=
 /-- One module's (or one root file's) manifest. It does not carry mtime, the cache path or
 any display field: two seals of the same entries render identically. -/
 structure ModuleManifest where
-  format : Nat := 1
+  format : Nat := 2
   /-- the module name; `""` for a root file -/
   module : Name := ""
-  /-- the module key (or the root file's chain key) -/
+  /-- the module key (or the root file's chain key); a fast index -/
   key : UInt64 := 0
+  /-- the SHA-256 module key (or root chain key) -/
+  keySha : String := ""
   /-- the `wiz` binary (`binaryId`) -/
   binary : UInt64 := 0
   /-- SHA-256 of the executable (a strong toolchain tag; P3 can sign it) -/
   toolchain : String := ""
+  /-- the strong toolchain namespace (`Toolchain.tag`: target, compiler, flags) -/
+  toolchainTag : String := ""
+  /-- the strong target namespace (`Toolchain.targetTag`: triple and word width) -/
+  targetTag : String := ""
   /-- the rig the region was saved for (`RigTag.tag`) -/
   rig : String := ""
   region : Option ManifestEntry := none
@@ -885,7 +1018,10 @@ structure ModuleManifest where
   root : String := ""
   deriving Inhabited
 
-def manifestFormat : Nat := 1
+/-- 1: fast-key-only manifests. 2: the SHA-256 input keys and target/toolchain namespace
+(`key-sha`, `target-tag`); a format-1 manifest is a miss and is regenerated, never read
+under a strong key. -/
+def manifestFormat : Nat := 2
 
 def ModuleManifest.allEntries (m : ModuleManifest) : Array ManifestEntry :=
   m.entries ++ m.region.toList.toArray
@@ -893,8 +1029,10 @@ def ModuleManifest.allEntries (m : ModuleManifest) : Array ManifestEntry :=
 /-- What a manifest says about itself (not its entries): this leaf is part of the root. -/
 def ModuleManifest.metaSx (m : ModuleManifest) : Sx :=
   node "manifest-meta" [node "format" [nat m.format], node "module" [str (toString m.module)],
-    node "key" [str (toString m.key)], node "binary" [str (toString m.binary)],
-    node "toolchain" [str m.toolchain], node "rig" [str m.rig],
+    node "key" [str (toString m.key)], node "key-sha" [str m.keySha],
+    node "binary" [str (toString m.binary)],
+    node "toolchain" [str m.toolchain], node "toolchain-tag" [str m.toolchainTag],
+    node "target-tag" [str m.targetTag], node "rig" [str m.rig],
     node "prev" [str m.prev], node "valid-until" [nat m.validUntil]]
 
 /-- The RFC 6962 root over the metadata leaf and the entries (sorted by their canonical
@@ -912,8 +1050,11 @@ def ModuleManifest.toSx (m : ModuleManifest) : Sx :=
     node "format" [nat m.format],
     node "module" [str (toString m.module)],
     node "key" [str (toString m.key)],
+    node "key-sha" [str m.keySha],
     node "binary" [str (toString m.binary)],
     node "toolchain" [str m.toolchain],
+    node "toolchain-tag" [str m.toolchainTag],
+    node "target-tag" [str m.targetTag],
     node "rig" [str m.rig],
     node "prev" [str m.prev],
     node "valid-until" [nat m.validUntil],
@@ -928,10 +1069,19 @@ def ModuleManifest.ofSx? (x : Sx) : Option ModuleManifest := do
   let module ← atom? v
   let v ← sxField? "key" x
   let key ← (← atom? v).toNat?
+  let keySha ← match ← sxField? "key-sha" x with
+    | .a s => pure s
+    | _ => pure ""
   let v ← sxField? "binary" x
   let binary ← (← atom? v).toNat?
   let v ← sxField? "toolchain" x
   let toolchain ← atom? v
+  let toolchainTag ← match ← sxField? "toolchain-tag" x with
+    | .a s => pure s
+    | _ => pure ""
+  let targetTag ← match ← sxField? "target-tag" x with
+    | .a s => pure s
+    | _ => pure ""
   let v ← sxField? "rig" x
   let rig ← atom? v
   let prev ← match ← sxField? "prev" x with
@@ -947,49 +1097,65 @@ def ModuleManifest.ofSx? (x : Sx) : Option ModuleManifest := do
   let entries ← (← items? v).mapM ManifestEntry.ofSx?
   let v ← sxField? "root" x
   let root ← atom? v
-  pure { format, module, key := key.toUInt64, binary := binary.toUInt64, toolchain, rig, region, entries, prev, validUntil, root }
+  pure { format, module, key := key.toUInt64, keySha, binary := binary.toUInt64, toolchain,
+         toolchainTag, targetTag, rig, region, entries, prev, validUntil, root }
 
 /-- Does this manifest belong to `key` of `binary`, under this toolchain and rig, and does
-its own root cover its entries? -/
-def ModuleManifest.valid (m : ModuleManifest) (key binary : UInt64) (toolchain rig : String) : Bool :=
-  m.format == manifestFormat && m.key == key && m.binary == binary &&
+its own root cover its entries? The fast key is an index; when `key.strong` (or its
+toolchain/target namespace) is known, it must match the manifest's SHA-256 fields, so a
+64-bit collision selects no entry. -/
+def ModuleManifest.valid (m : ModuleManifest) (key : Key) (binary : UInt64)
+    (toolchain rig : String) : Bool :=
+  m.format == manifestFormat && m.key == key.fast && m.keySha.length == 64 &&
+  (key.strong.isEmpty || m.keySha == key.strong) &&
+  (key.toolchain.isEmpty || m.toolchainTag == key.toolchain) &&
+  (key.target.isEmpty || m.targetTag == key.target) &&
+  m.binary == binary &&
   (toolchain == "" || m.toolchain == toolchain) &&
   (rig == "" || m.rig == rig) &&
   m.entries.all (fun e => e.kind == "wizc" && e.valid binary) &&
   (match m.region with
    | none => true
-   | some e => e.kind == "wizr" && e.key == key && e.valid binary) &&
+   | some e => e.kind == "wizr" && e.key == key.fast &&
+      (key.strong.isEmpty || e.keySha == key.strong) && e.valid binary) &&
   m.root == m.rootOf
 
 def parseManifest (text : String) : Option ModuleManifest :=
   (Sx.parse text).bind ModuleManifest.ofSx?
 
 /-- A manifest entry for an effect text (`.wizc`). -/
-def ManifestEntry.ofEffect (binary key : UInt64) (e : Effect R) : ManifestEntry :=
+def ManifestEntry.ofEffect (binary : UInt64) (key : Key) (e : Effect R) : ManifestEntry :=
   let text := e.toSx.render
-  { kind := "wizc", key, file := s!"{mixHash binary key}.wizc",
+  { kind := "wizc", key := key.fast, keySha := key.strong,
+    file := s!"{mixHash binary key.fast}.wizc",
     size := text.toUTF8.size, sha256 := Smt.Sha256.hexBytes text.toUTF8, format := salt.toNat }
 
 /-- A manifest entry for bytes read from `file` (a `.wizc` or `.wizr` a layer has). -/
-def ManifestEntry.ofBytes (kind : String) (key : UInt64) (file : String) (bytes : ByteArray) : ManifestEntry :=
-  { kind, key, file, size := bytes.size, sha256 := Smt.Sha256.hexBytes bytes,
+def ManifestEntry.ofBytes (kind : String) (key : Key) (file : String) (bytes : ByteArray) : ManifestEntry :=
+  { kind, key := key.fast, keySha := key.strong, file, size := bytes.size,
+    sha256 := Smt.Sha256.hexBytes bytes,
     format := if kind == "wizr" then regionFormat else salt.toNat }
 
-/-- The manifest file of module `key` in a layer. -/
+/-- The manifest file of module `key` in a layer. The strong half is in the name, so two
+colliding fast keys never overwrite each other; a fast-only (old) name is never looked up
+under a strong key, so an old cache is a clean miss and regenerates. -/
 def manifestDirName : String := "manifest.d"
 
-def manifestFileName (binary key : UInt64) : String := s!"{mixHash binary key}.wizmf"
+def manifestFileName (binary : UInt64) (key : Key) : String :=
+  if key.strong.isEmpty then s!"{mixHash binary key.fast}.wizmf"
+  else s!"{mixHash binary key.fast}-{key.strong}.wizmf"
 
-def manifestFile (dir : System.FilePath) (binary key : UInt64) : System.FilePath :=
+def manifestFile (dir : System.FilePath) (binary : UInt64) (key : Key) : System.FilePath :=
   dir / manifestDirName / manifestFileName binary key
 
 /-- The layer's generation index (P1): `manifest.sexpr`. -/
 def generationFile (dir : System.FilePath) : System.FilePath := dir / "manifest.sexpr"
 
-/-- One module record in a layer's generation index. -/
-def moduleRecord (x : UInt64 × String × String × String) : Sx :=
-  node "module" [node "key" [str (toString x.1)], node "name" [str x.2.1],
-    node "file" [str x.2.2.1], node "sha256" [str x.2.2.2]]
+/-- One module record in a layer's generation index: fast key, SHA-256 key, name,
+manifest file, and the manifest's own digest. -/
+def moduleRecord (x : UInt64 × String × String × String × String) : Sx :=
+  node "module" [node "key" [str (toString x.1)], node "key-sha" [str x.2.1],
+    node "name" [str x.2.2.1], node "file" [str x.2.2.2.1], node "sha256" [str x.2.2.2.2]]
 
 /-- The layer's `manifest.sexpr` (P1): a generation number, the previous index's root, an
 optional expiry, and one record per module manifest. The root covers the metadata and the
@@ -1000,31 +1166,31 @@ structure Generation where
   prev : String := ""
   /-- Unix seconds after which this generation must not be used (`0`: no expiry) -/
   validUntil : Nat := 0
-  /-- (module key, module name, manifest file, manifest SHA-256) -/
-  modules : Array (UInt64 × String × String × String) := #[]
+  /-- (fast module key, SHA-256 module key, module name, manifest file, manifest SHA-256) -/
+  modules : Array (UInt64 × String × String × String × String) := #[]
   root : String := ""
   deriving Inhabited
 
 def Generation.metaSx (g : Generation) : Sx :=
-  node "generation-meta" [node "format" [nat 1], node "generation" [nat g.generation],
+  node "generation-meta" [node "format" [nat 2], node "generation" [nat g.generation],
     node "prev" [str g.prev], node "valid-until" [nat g.validUntil]]
 
 def Generation.rootOf (g : Generation) : String :=
   let metaLeaf := leafHash "wiz-generation-v1" ((g.metaSx.render ++ "\n").toUTF8)
-  let mods := (g.modules.qsort fun a b => a.1 < b.1).map fun x =>
+  let mods := (g.modules.qsort fun a b => a.1 < b.1 || (a.1 == b.1 && a.2.1 < b.2.1)).map fun x =>
     leafHash "wiz-module-v1" (moduleRecord x).render.toUTF8
   Smt.Sha256.hexBytes (merkleRoot (#[metaLeaf] ++ mods))
 
 def Generation.toSx (g : Generation) : Sx :=
-  node "cache-manifest" [node "format" [nat 1], node "generation" [nat g.generation],
+  node "cache-manifest" [node "format" [nat 2], node "generation" [nat g.generation],
     node "prev" [str g.prev], node "valid-until" [nat g.validUntil],
-    node "modules" [list ((g.modules.qsort fun a b => a.1 < b.1).toList.map moduleRecord)],
+    node "modules" [list ((g.modules.qsort fun a b => a.1 < b.1 || (a.1 == b.1 && a.2.1 < b.2.1)).toList.map moduleRecord)],
     node "root" [str g.root]]
 
 def parseGeneration (text : String) : Option Generation := do
   let x ← Sx.parse text
   let v ← sxField? "format" x
-  unless (← atom? v) == "1" do none
+  unless (← atom? v) == "2" do none
   let v ← sxField? "generation" x
   let generation ← (← atom? v).toNat?
   let prev ← match ← sxField? "prev" x with | .a s => pure s | _ => pure ""
@@ -1033,10 +1199,11 @@ def parseGeneration (text : String) : Option Generation := do
   let mods ← match ← sxField? "modules" x with
     | .l xs => xs.filterMapM fun x => do
         let v ← sxField? "key" x; let key ← (← atom? v).toNat?
+        let v ← sxField? "key-sha" x; let keySha ← atom? v
         let v ← sxField? "name" x; let name ← atom? v
         let v ← sxField? "file" x; let file ← atom? v
         let v ← sxField? "sha256" x; let sha ← atom? v
-        pure (key.toUInt64, name, file, sha)
+        pure (key.toUInt64, keySha, name, file, sha)
     | _ => none
   let v ← sxField? "root" x
   let root ← atom? v
@@ -1074,19 +1241,20 @@ structure ManifestStore where
   toolchain : String
   rig : String
   mode : VerifyMode
-  loaded : IO.Ref (Std.HashSet UInt64)
-  /-- command key → (entry, layer), in layer order -/
-  entries : IO.Ref (Std.HashMap UInt64 (Array (ManifestEntry × System.FilePath)))
-  /-- module key → (region entry, layer), in layer order -/
-  regions : IO.Ref (Std.HashMap UInt64 (Array (ManifestEntry × System.FilePath)))
+  /-- `Key.id`s whose manifests have been loaded -/
+  loaded : IO.Ref (Std.HashSet String)
+  /-- `Key.id` → (entry, layer), in layer order -/
+  entries : IO.Ref (Std.HashMap String (Array (ManifestEntry × System.FilePath)))
+  /-- module `Key.id` → (region entry, layer), in layer order -/
+  regions : IO.Ref (Std.HashMap String (Array (ManifestEntry × System.FilePath)))
   /-- keys named by a manifest whose own root failed: always a miss -/
-  poisoned : IO.Ref (Std.HashSet UInt64)
+  poisoned : IO.Ref (Std.HashSet String)
   /-- module keys with a manifest file in some layer (valid or not) -/
-  present : IO.Ref (Std.HashSet UInt64)
+  present : IO.Ref (Std.HashSet String)
   /-- module keys whose manifest validated in some layer -/
-  valid : IO.Ref (Std.HashSet UInt64)
+  valid : IO.Ref (Std.HashSet String)
   /-- manifests written this process: (key, module, file, digest), for the generation index -/
-  written : IO.Ref (Array (UInt64 × Name × String × String))
+  written : IO.Ref (Array (Key × Name × String × String))
   /-- a layer's generation expiry, cached per layer -/
   expiry : IO.Ref (Std.HashMap String Nat)
   /-- read-only layers already warned about, so a missing manifest is reported once -/
@@ -1099,12 +1267,12 @@ def ManifestStore.create (write : Option System.FilePath) (reads : List System.F
     (binary : UInt64) (toolchain rig : String) (mode : VerifyMode)
     (stats : Option (IO.Ref VerifyCounts) := none) : IO ManifestStore := do
   pure { write, reads, binary, toolchain, rig, mode,
-         loaded := ← IO.mkRef ({} : Std.HashSet UInt64),
-         entries := ← IO.mkRef ({} : Std.HashMap UInt64 (Array (ManifestEntry × System.FilePath))),
-         regions := ← IO.mkRef ({} : Std.HashMap UInt64 (Array (ManifestEntry × System.FilePath))),
-         poisoned := ← IO.mkRef ({} : Std.HashSet UInt64),
-         present := ← IO.mkRef ({} : Std.HashSet UInt64),
-         valid := ← IO.mkRef ({} : Std.HashSet UInt64),
+         loaded := ← IO.mkRef ({} : Std.HashSet String),
+         entries := ← IO.mkRef ({} : Std.HashMap String (Array (ManifestEntry × System.FilePath))),
+         regions := ← IO.mkRef ({} : Std.HashMap String (Array (ManifestEntry × System.FilePath))),
+         poisoned := ← IO.mkRef ({} : Std.HashSet String),
+         present := ← IO.mkRef ({} : Std.HashSet String),
+         valid := ← IO.mkRef ({} : Std.HashSet String),
          written := ← IO.mkRef #[],
          expiry := ← IO.mkRef ({} : Std.HashMap String Nat),
          warnedRo := ← IO.mkRef ({} : Std.HashSet String),
@@ -1147,14 +1315,15 @@ def ManifestStore.inWrite (m : ManifestStore) (dir : System.FilePath) : Bool :=
 /-- Load (once) every layer's manifest for module key `key` and index its entries. A layer
 whose manifest exists but does not validate poisons the keys it names; it is never
 silently treated as authoritative. -/
-def ManifestStore.load (m : ManifestStore) (key : UInt64) : IO Unit := do
-  if (← m.loaded.get).contains key then return
-  m.loaded.modify (·.insert key)
+def ManifestStore.load (m : ManifestStore) (key : Key) : IO Unit := do
+  let id := Key.id key
+  if (← m.loaded.get).contains id then return
+  m.loaded.modify (·.insert id)
   let now ← unixNow
   for dir in m.dirs do
     let f := manifestFile dir m.binary key
     if ← f.pathExists then
-      m.present.modify (·.insert key)
+      m.present.modify (·.insert id)
       let text ← try pure ((String.fromUTF8? (← IO.FS.readBinFile f)).getD "") catch _ => pure ""
       match parseManifest text with
       | some man =>
@@ -1163,17 +1332,22 @@ def ManifestStore.load (m : ManifestStore) (key : UInt64) : IO Unit := do
         let expired := (man.validUntil != 0 && now > man.validUntil) ||
           (layerUntil != 0 && now > layerUntil)
         if !expired && man.valid key m.binary m.toolchain m.rig then
-          m.valid.modify (·.insert key)
+          m.valid.modify (·.insert id)
           m.bump fun c => { c with manifests := c.manifests + 1 }
           for e in man.entries do
-            m.entries.modify fun mp => mp.insert e.key (((mp[e.key]?).getD #[]).push (e, dir))
+            let eid := Key.id { fast := e.key, strong := e.keySha }
+            m.entries.modify fun mp => mp.insert eid (((mp[eid]?).getD #[]).push (e, dir))
           if let some e := man.region then
-            m.regions.modify fun mp => mp.insert key (((mp[key]?).getD #[]).push (e, dir))
+            m.regions.modify fun mp => mp.insert id (((mp[id]?).getD #[]).push (e, dir))
         else
-          -- (expired or not self-consistent: the entries it names are all misses)
+          -- (expired or not self-consistent: the entries it names are all misses, both
+          -- under its strong keys and under the fast-only compatibility key)
           if expired then
             IO.eprintln s!"cache verify: {dir}: manifest for module {man.module} expired (valid-until {man.validUntil})"
-          for e in man.allEntries do m.poisoned.modify (·.insert e.key)
+          for e in man.allEntries do
+            let eid := Key.id { fast := e.key, strong := e.keySha }
+            m.poisoned.modify (·.insert eid)
+            m.poisoned.modify (·.insert (Key.id (Key.ofFast e.key)))
       | none =>
         -- (unparsable: its keys are unknown; treat it as absent, as the old cache did)
         pure ()
@@ -1181,36 +1355,44 @@ def ManifestStore.load (m : ManifestStore) (key : UInt64) : IO Unit := do
       -- (warn only if this module was elaborated here; an empty layer or one that
       -- simply lacks the module is not a downgrade. The marker is named by the module
       -- key; the `.wizc` entries are named by command keys.)
-      let hasMarker ← (dir / s!"{mixHash m.binary key}.wizm").pathExists
+      let oldMarker := s!"{mixHash m.binary key.fast}.wizm"
+      let marker := if key.strong.isEmpty then oldMarker
+        else s!"{mixHash m.binary key.fast}-{key.strong}.wizm"
+      let oldRegion := s!"{mixHash m.binary key.fast}.wizr"
+      let hasMarker ← (dir / marker).pathExists
+      let hasOldMarker ← (dir / oldMarker).pathExists
       let hasRegion ← (dir / regionFileName m.binary key).pathExists
-      if hasMarker || hasRegion then m.warnMissingRo dir
+      let hasOldRegion ← (dir / oldRegion).pathExists
+      if hasMarker || hasOldMarker || hasRegion || hasOldRegion then m.warnMissingRo dir
 
-/-- The entries a manifest lists for command key `k` (none: unlisted). -/
-def ManifestStore.entryFor (m : ManifestStore) (k : UInt64) : IO (Option (Array (ManifestEntry × System.FilePath))) := do
-  pure ((← m.entries.get)[k]?)
+/-- The entries a manifest lists for command key `k` (none: unlisted). The strong half is
+part of the index, so a 64-bit collision finds no entry for the other input. -/
+def ManifestStore.entryFor (m : ManifestStore) (k : Key) : IO (Option (Array (ManifestEntry × System.FilePath))) := do
+  pure ((← m.entries.get)[Key.id k]?)
 
-def ManifestStore.regionFor (m : ManifestStore) (k : UInt64) : IO (Option (Array (ManifestEntry × System.FilePath))) := do
-  pure ((← m.regions.get)[k]?)
+def ManifestStore.regionFor (m : ManifestStore) (k : Key) : IO (Option (Array (ManifestEntry × System.FilePath))) := do
+  pure ((← m.regions.get)[Key.id k]?)
 
-def ManifestStore.poisonedFor (m : ManifestStore) (k : UInt64) : IO Bool := do
-  pure ((← m.poisoned.get).contains k)
+def ManifestStore.poisonedFor (m : ManifestStore) (k : Key) : IO Bool := do
+  pure ((← m.poisoned.get).contains (Key.id k))
 
-def ManifestStore.presentFor (m : ManifestStore) (k : UInt64) : IO Bool := do
-  pure ((← m.present.get).contains k)
+def ManifestStore.presentFor (m : ManifestStore) (k : Key) : IO Bool := do
+  pure ((← m.present.get).contains (Key.id k))
 
-def ManifestStore.validFor (m : ManifestStore) (k : UInt64) : IO Bool := do
-  pure ((← m.valid.get).contains k)
+def ManifestStore.validFor (m : ManifestStore) (k : Key) : IO Bool := do
+  pure ((← m.valid.get).contains (Key.id k))
 
 /-- Write module `key`'s manifest to the write cache (a no-op without one). `merge` keeps
 entries from an existing manifest (the root pseudo-module is shared by files with the same
 headers). The entries are also indexed for this process, so a key written now verifies on
 the next read. -/
-def ManifestStore.writeManifest (m : ManifestStore) (key : UInt64) (module : Name)
+def ManifestStore.writeManifest (m : ManifestStore) (key : Key) (module : Name)
     (entries : Array ManifestEntry) (region : Option ManifestEntry) (merge : Bool := false)
     (validUntil : Nat := 0) : IO Unit := do
   let some dir := m.write | return
   IO.FS.createDirAll (dir / manifestDirName)
   let f := manifestFile dir m.binary key
+  let id := Key.id key
   let oldRaw ← if ← f.pathExists then
       try pure (parseManifest ((String.fromUTF8? (← IO.FS.readBinFile f)).getD ""))
       catch _ => pure none
@@ -1218,23 +1400,27 @@ def ManifestStore.writeManifest (m : ManifestStore) (key : UInt64) (module : Nam
   let old := oldRaw.filter fun x => x.valid key m.binary m.toolchain m.rig
   let entries := match old with
     | some o => if merge then
-        entries.foldl (fun acc e => if acc.any (·.key == e.key) then acc else acc.push e) o.entries
+        entries.foldl (fun acc e =>
+          if acc.any (fun a => a.key == e.key && a.keySha == e.keySha) then acc else acc.push e) o.entries
       else entries
     | none => entries
   let prev := old.map (·.root) |>.getD ""
   let validUntil := if validUntil == 0 then (old.map (·.validUntil) |>.getD 0) else validUntil
-  let m0 : ModuleManifest := { module, key, binary := m.binary, toolchain := m.toolchain,
+  let m0 : ModuleManifest := { module, key := key.fast, keySha := key.strong,
+                               binary := m.binary, toolchain := m.toolchain,
+                               toolchainTag := key.toolchain, targetTag := key.target,
                                rig := m.rig, region, entries, prev, validUntil }
   let m0 := { m0 with root := m0.rootOf }
   let text := m0.toSx.render ++ "\n"
   writeAtomic f text
   -- (this process may read the entry back before the manifest is reloaded)
-  m.present.modify (·.insert key)
-  m.valid.modify (·.insert key)
+  m.present.modify (·.insert id)
+  m.valid.modify (·.insert id)
   for e in m0.entries do
-    m.entries.modify fun mp => mp.insert e.key (((mp[e.key]?).getD #[]).push (e, dir))
+    let eid := Key.id { fast := e.key, strong := e.keySha }
+    m.entries.modify fun mp => mp.insert eid (((mp[eid]?).getD #[]).push (e, dir))
   if let some e := m0.region then do
-    m.regions.modify fun mp => mp.insert key (((mp[key]?).getD #[]).push (e, dir))
+    m.regions.modify fun mp => mp.insert id (((mp[id]?).getD #[]).push (e, dir))
   m.written.modify (·.push (key, module, f.fileName.getD "", Smt.Sha256.hexBytes text.toUTF8))
 
 /-- Write or refresh the layer's `manifest.sexpr` (P1). It lists the per-module manifests
@@ -1247,7 +1433,8 @@ def ManifestStore.flush (m : ManifestStore) : IO Unit := do
   let old ← readGeneration dir
   let oldMods := old.map (·.modules) |>.getD #[]
   let mods := ws.foldl (fun acc (key, name, file, sha) =>
-    (acc.filter (·.1 != key)).push (key, toString name, file, sha)) oldMods
+    (acc.filter (fun x => x.1 != key.fast || x.2.1 != key.strong)).push
+      (key.fast, key.strong, toString name, file, sha)) oldMods
   let g0 := Generation.mk ((old.map (·.generation) |>.getD 0) + 1)
     (old.map (·.root) |>.getD "") (old.map (·.validUntil) |>.getD 0) mods ""
   let g := { g0 with root := g0.rootOf }
@@ -1300,7 +1487,8 @@ def verifyLayer (dir : System.FilePath) : IO LayerVerify := do
       if expired then
         c := { c with expired := c.expired + 1 }
         for ent in man.allEntries do named := named.insert ent.file
-      else if man.valid man.key man.binary "" "" then
+      else if man.valid { fast := man.key, strong := man.keySha,
+                           toolchain := man.toolchainTag, target := man.targetTag } man.binary "" "" then
         c := { c with modules := c.modules + 1 }
         for ent in man.allEntries do
           named := named.insert ent.file
@@ -1326,7 +1514,7 @@ def verifyLayer (dir : System.FilePath) : IO LayerVerify := do
 manifests, and report the counts. With `write = false` it only reports (a read-only layer
 is never written). -/
 def sealLayer (dir : System.FilePath) (write : Bool) (validUntil : Nat := 0) : IO (Nat × Nat) := do
-  let mut mods : Array (UInt64 × String × String × String) := #[]
+  let mut mods : Array (UInt64 × String × String × String × String) := #[]
   let mut entries := 0
   let mdir := dir / manifestDirName
   let files ← if ← mdir.pathExists then mdir.readDir else pure #[]
@@ -1335,14 +1523,16 @@ def sealLayer (dir : System.FilePath) (write : Bool) (validUntil : Nat := 0) : I
     let text ← try pure ((String.fromUTF8? (← IO.FS.readBinFile e.path)).getD "") catch _ => pure ""
     match parseManifest text with
     | some man =>
-      if man.valid man.key man.binary "" "" then
+      if man.valid { fast := man.key, strong := man.keySha,
+                     toolchain := man.toolchainTag, target := man.targetTag } man.binary "" "" then
         entries := entries + man.allEntries.size
-        mods := mods.push (man.key, (toString man.module), e.fileName, Smt.Sha256.hexBytes text.toUTF8)
+        mods := mods.push (man.key, man.keySha, (toString man.module), e.fileName,
+          Smt.Sha256.hexBytes text.toUTF8)
     | none => pure ()
   if write then
     let old ← readGeneration dir
     let mergedMods := (old.map (·.modules) |>.getD #[]).foldl (fun acc x =>
-      (acc.filter (·.1 != x.1)).push x) mods
+      (acc.filter (fun y => y.1 != x.1 || y.2.1 != x.2.1)).push x) mods
     let g0 := Generation.mk ((old.map (·.generation) |>.getD 0) + 1)
       (old.map (·.root) |>.getD "")
       (if validUntil == 0 then (old.map (·.validUntil) |>.getD 0) else validUntil) mergedMods ""
@@ -1389,7 +1579,7 @@ def readVerifiedEffect (f : System.FilePath) (e : ManifestEntry) : IO (Option (E
 /-- The module region cache: one artifact per module key, `get` treating any read error or
 mismatched tag as a miss (and dropping the file). -/
 structure RegionStore (R : Type) where
-  get : UInt64 → IO (Option (ModuleArtifact R))
+  get : Key → IO (Option (ModuleArtifact R))
   /-- write `a`; the store fills in `binary`, `salt` and `rig`, and returns the manifest
   entry (none without a write cache) -/
   put : ModuleArtifact R → IO (Option ManifestEntry)
@@ -1524,7 +1714,7 @@ def writeRegionFile (file : System.FilePath) (a : ModuleArtifact R) : IO (Option
     IO.FS.writeBinFile sumTmp (u64Bytes sum)
     IO.FS.rename tmp file
     IO.FS.rename sumTmp sumFile
-    pure (some { kind := "wizr", key := a.key, file := file.fileName.getD "",
+    pure (some { kind := "wizr", key := a.key, keySha := a.keySha, file := file.fileName.getD "",
                  size := bytes.size, sha256 := Smt.Sha256.hexBytes bytes, format := regionFormat })
   catch e =>
     removeQuietly tmp
@@ -1533,7 +1723,7 @@ def writeRegionFile (file : System.FilePath) (a : ModuleArtifact R) : IO (Option
 
 /-- Module `key`'s artifact, if it exists and its tags match; a bad file is dropped (a pure
 cache: the next run rewrites it). -/
-def readModuleRegion (dir : System.FilePath) (binary : UInt64) (rig : String) (key : UInt64) :
+def readModuleRegion (dir : System.FilePath) (binary : UInt64) (rig : String) (key : Key) :
     IO (Option (ModuleArtifact R)) := do
   let file := dir / regionFileName binary key
   match ← readRegionFile (R := R) file with
@@ -1545,11 +1735,12 @@ def readModuleRegion (dir : System.FilePath) (binary : UInt64) (rig : String) (k
       pure none
 
 /-- Write module `key`'s artifact (the tags are filled in here). -/
-def writeModuleRegion (dir : System.FilePath) (binary : UInt64) (rig : String) (key : UInt64)
+def writeModuleRegion (dir : System.FilePath) (binary : UInt64) (rig : String) (key : Key)
     (module : Name) (effects : Array (Effect R)) (keys : Array UInt64) (complete := false)
     (rerun : Array (Nat × Nat) := #[]) : IO (Option ManifestEntry) :=
   writeRegionFile (dir / regionFileName binary key)
-    { magic := regionMagic, format := regionFormat, binary, textSalt := salt, rig, module, key,
+    { magic := regionMagic, format := regionFormat, binary, textSalt := salt, rig, module,
+      key := key.fast, keySha := key.strong, toolchainSha := key.toolchain, targetSha := key.target,
       effects, keys, complete, rerun }
 
 /-- Where command effects are kept: a write directory and read-only directories (the
@@ -1558,13 +1749,13 @@ elaborated in isolation, so the cache on or off gives the same results). A store
 carry a module region cache (`--region-cache`): its regions live in the same directory
 layers, the text entries remain the authority, and `--cache-verify`'s manifests gate both. -/
 structure Store (R : Type) where
-  get : UInt64 → IO (Option (Effect R))
+  get : Key → IO (Option (Effect R))
   /-- like `get`, with the manifest entry that verified the bytes (for writing manifests) -/
-  getEntry : UInt64 → IO (Option (CacheHit R))
-  put : UInt64 → Effect R → IO Unit
+  getEntry : Key → IO (Option (CacheHit R))
+  put : Key → Effect R → IO Unit
   /-- has module `k` been elaborated in isolation? -/
-  seen : UInt64 → IO Bool
-  markSeen : UInt64 → Name → IO Unit
+  seen : Key → IO Bool
+  markSeen : Key → Name → IO Unit
   /-- the module region cache (`--region-cache`), when the store has one -/
   region : Option (RegionStore R) := none
   /-- the output manifests (`--cache-verify`) -/
@@ -1585,11 +1776,16 @@ old lookup in `warn` or misses in `strict`. -/
 def Store.layeredCore (write : Option System.FilePath) (reads : List System.FilePath)
     (binary : UInt64) (manifests : Option ManifestStore) : IO (Store R) := do
   if let some dir := write then IO.FS.createDirAll dir
-  let name (k : UInt64) := toString (mixHash binary k)
+  -- (`.wizc` names keep the old fast shape: a text entry is still found by old caches;
+  -- the manifest's SHA-256 key is what makes a colliding input a miss. A module marker
+  -- includes the strong key: a colliding module must not be "seen" by name alone.)
+  let entryName (k : Key) := toString (mixHash binary k.fast)
+  let markerName (k : Key) :=
+    if k.strong.isEmpty then entryName k else s!"{entryName k}-{k.strong}"
   let dirs := write.toList ++ reads
-  let seenInMemory ← IO.mkRef ({} : Std.HashSet UInt64)
-  let getEntry : UInt64 → IO (Option (CacheHit R)) := fun k => do
-    let file := s!"{name k}.wizc"
+  let seenInMemory ← IO.mkRef ({} : Std.HashSet String)
+  let getEntry : Key → IO (Option (CacheHit R)) := fun k => do
+    let file := s!"{entryName k}.wizc"
     match manifests with
     | none =>
       for dir in dirs do
@@ -1611,11 +1807,13 @@ def Store.layeredCore (write : Option System.FilePath) (reads : List System.File
         ms.broken.modify (· + 1)
         pure none
       | none =>
-        if ms.mode == .strict then pure none
+        -- (A new key has a SHA-256 half: without a manifest entry there is nothing that
+        -- binds the bytes to that input, so the write cache is a miss too. This is the
+        -- old-cache migration: one cold pass rewrites its entries with manifests.
+        -- `--cache-verify off` keeps the old unverified lookup; a fast-only legacy key
+        -- reached through the API may also fall through.)
+        if ms.mode == .strict || !k.strong.isEmpty then pure none
         else
-          -- (`warn`: no manifest lists this key. The write cache keeps the old,
-          -- unverified lookup; a `--cache-ro` layer does not: a read-only layer is only
-          -- trusted through its manifest, so deleting a manifest cannot downgrade it.)
           for dir in dirs do
             if ms.isRead dir then continue
             let f := dir / file
@@ -1630,16 +1828,16 @@ def Store.layeredCore (write : Option System.FilePath) (reads : List System.File
     getEntry
     get := fun k => return (← getEntry k).map (·.1)
     put := fun k e => match write with
-      | some dir => writeAtomic (dir / s!"{name k}.wizc") e.toSx.render
+      | some dir => writeAtomic (dir / s!"{entryName k}.wizc") e.toSx.render
       | none => pure ()
     seen := fun k => do
-      if (← seenInMemory.get).contains k then return true
+      if (← seenInMemory.get).contains (Key.id k) then return true
       for dir in dirs do
-        if ← (dir / s!"{name k}.wizm").pathExists then return true
+        if ← (dir / s!"{markerName k}.wizm").pathExists then return true
       pure false
     markSeen := fun k m => match write with
-      | some dir => writeAtomic (dir / s!"{name k}.wizm") m
-      | none => seenInMemory.modify (·.insert k)
+      | some dir => writeAtomic (dir / s!"{markerName k}.wizm") m
+      | none => seenInMemory.modify (·.insert (Key.id k))
     manifests
     binary }
 
@@ -1658,16 +1856,16 @@ def Store.disk (dir : System.FilePath) (binary : UInt64) : IO (Store R) :=
   Store.layered (some dir) [] binary
 
 def Store.memory : IO (Store R) := do
-  let effects ← IO.mkRef ({} : Std.HashMap UInt64 (Effect R))
-  let seen ← IO.mkRef ({} : Std.HashSet UInt64)
-  let getEntry : UInt64 → IO (Option (CacheHit R)) := fun k =>
-    return (← effects.get)[k]?.map fun e => (e, none)
+  let effects ← IO.mkRef ({} : Std.HashMap String (Effect R))
+  let seen ← IO.mkRef ({} : Std.HashSet String)
+  let getEntry : Key → IO (Option (CacheHit R)) := fun k =>
+    return (← effects.get)[Key.id k]?.map fun e => (e, none)
   pure {
     getEntry
-    get := fun k => return (← effects.get)[k]?
-    put := fun k e => effects.modify (·.insert k e)
-    seen := fun k => return (← seen.get).contains k
-    markSeen := fun k _ => seen.modify (·.insert k) }
+    get := fun k => return (← effects.get)[Key.id k]?
+    put := fun k e => effects.modify (·.insert (Key.id k) e)
+    seen := fun k => return (← seen.get).contains (Key.id k)
+    markSeen := fun k _ => seen.modify (·.insert (Key.id k)) }
 
 /-- A module's effects, collected while it is elaborated in isolation, to write its region
 and its output manifest. -/
@@ -1697,7 +1895,7 @@ def RegionStore.layered (write : Option System.FilePath) (reads : List System.Fi
   let dirs := write.toList ++ reads
   let inWrite (dir : System.FilePath) : Bool :=
     some dir.toString == write.map (·.toString)
-  let read (k : UInt64) : IO (Option (ModuleArtifact R)) := do
+  let read (k : Key) : IO (Option (ModuleArtifact R)) := do
     match manifests with
     | none =>
       for dir in dirs do
@@ -1750,12 +1948,15 @@ def RegionStore.layered (write : Option System.FilePath) (reads : List System.Fi
         -- (a pure cache: a region that cannot be written, say because `Effect` grew a
         -- closure, must not fail the run; the `.wizc` entries remain the authority)
         try
-          let e ← writeRegionFile (dir / regionFileName binary a.key)
+          let key : Key := { fast := a.key, strong := a.keySha, toolchain := a.toolchainSha,
+                             target := a.targetSha, binary := a.binarySha }
+          let e ← writeRegionFile (dir / regionFileName binary key)
             { a with binary := binary, textSalt := salt, rig := opts.rig }
           match manifests with
           | some ms =>
             for ent in e.toList do
-              ms.regions.modify fun mp => mp.insert a.key (((mp[a.key]?).getD #[]).push (ent, dir))
+              let id := Key.id key
+              ms.regions.modify fun mp => mp.insert id (((mp[id]?).getD #[]).push (ent, dir))
           | none => pure ()
           pure e
         catch _ => pure none
@@ -1866,7 +2067,7 @@ def pruneSummary (dir : System.FilePath) (days : Nat) (dryRun : Bool := false)
   pure ((← pruneCache dir days dryRun now).render days dryRun dir)
 
 /-- Module `key`'s artifact, if the region cache is on and the file matches. -/
-def Store.getRegion (s : Store R) (k : UInt64) : IO (Option (ModuleArtifact R)) :=
+def Store.getRegion (s : Store R) (k : Key) : IO (Option (ModuleArtifact R)) :=
   match s.region with
   | some r => r.get k
   | none => pure none
@@ -1906,10 +2107,12 @@ def smtKey (c : Smt.Config) : Option UInt64 :=
 /-- Elaborate `input` (like `Query.elaborate`), reading and writing `store`. Returns the
 final state and how many commands came from the store. `key₀` identifies what the
 file can see besides its imports (for example its C headers); `toolchain` is mixed into
-every module's key. -/
+every module's key. `strongToolchain`/`targetTag`/`rootTag`/`binaryTag` are the SHA-256
+namespaces a new manifest or region records; they do not change a fast key. -/
 partial def elaborateWith (store : Store R) (input : String) (init : CommandState R) (key₀ : UInt64)
-    (toolchain : UInt64 := 0) : IO (CommandState R × Nat) := do
-  let keys ← IO.mkRef ({} : Std.HashMap Name UInt64)
+    (toolchain : UInt64 := 0) (strongToolchain : String := "") (targetTag : String := "")
+    (rootTag : String := "") (binaryTag : String := "") : IO (CommandState R × Nat) := do
+  let keys ← IO.mkRef ({} : Std.HashMap Name Key)
   -- recording every term's expected type changes the effects: a different chain
   let salt' := if init.termInfo then mixHash salt 1 else salt
   -- (27a) so does `--trust-native` (and its fuel): a `native_refl` accepted with it is
@@ -1918,7 +2121,15 @@ partial def elaborateWith (store : Store R) (input : String) (init : CommandStat
   let salt' := if init.trustNative then mixHash salt' (nativeKey init) else salt'
   -- (28) and the solver settings (`--sat-solver`, `--solver-timeout`)
   let salt' := match smtKey init.smt with | some k => mixHash salt' k | none => salt'
-  let chainKey := mixHash salt' (mixHash toolchain key₀)
+  -- (the strong namespace carries the same options, so a manifest/region from one
+  -- option set is never accepted under another)
+  let strongToolchain' := toolchainOptionsTag strongToolchain init.termInfo init.trustNative
+    init.nativeFuel (smtKey init.smt)
+  let chainKey : Key :=
+    { fast := mixHash salt' (mixHash toolchain key₀)
+      strong := Smt.Sha256.hexFramed "wiz-cache/root-v1"
+        [toString salt', toString toolchain, strongToolchain', targetTag, toString key₀, rootTag]
+      toolchain := strongToolchain', target := targetTag, binary := binaryTag }
   -- (a root file's manifest is keyed by the chain key: the file is not an imported module)
   if let some ms := store.manifests then ms.load chainKey
   let rootSink : Option (RegionSink R) ← match store.manifests with
@@ -1928,17 +2139,19 @@ partial def elaborateWith (store : Store R) (input : String) (init : CommandStat
   go keys init [] input init chainKey .write none rootSink
 where
   nativeKey (s : CommandState R) : UInt64 := mixHash (hash "trust-native") (hash s.nativeFuel)
-  keyOf (keys : IO.Ref (Std.HashMap Name UInt64)) (m : Name) : IO UInt64 := do
+  keyOf (keys : IO.Ref (Std.HashMap Name Key)) (m : Name) : IO Key := do
     -- (term info changes what a module elaborates to, like the main file's chain)
     let tc := if init.termInfo then mixHash toolchain 1 else toolchain
     let tc := if init.trustNative then mixHash tc (nativeKey init) else tc
     let tc := match smtKey init.smt with | some k => mixHash tc k | none => tc
-    let memo := moduleKeys init.loader init.cHeaders tc [m] (← keys.get) init.trustedModule
+    let stc := toolchainOptionsTag strongToolchain init.termInfo init.trustNative
+      init.nativeFuel (smtKey init.smt)
+    let memo := moduleKeysAll init.loader init.cHeaders tc stc targetTag [m] (← keys.get) init.trustedModule
     keys.set memo
-    pure ((memo.get? m).getD 0)
+    pure ((memo.get? m).getD (Key.ofFast 0))
   /-- Bring module `m` into `s`: elaborate it in isolation first if the cache has not
   seen it, then replay it from the cache. -/
-  importModule (keys : IO.Ref (Std.HashMap Name UInt64)) (base : CommandState R) (stack : List Name)
+  importModule (keys : IO.Ref (Std.HashMap Name Key)) (base : CommandState R) (stack : List Name)
       (s : CommandState R) (m : Name) (src : String) : IO (CommandState R × Nat) := do
     let k ← keyOf keys m
     -- (the module's output manifest, if a layer has one: its entries gate the text and
@@ -1992,8 +2205,8 @@ where
       | none => pure ()
     -- after a fresh isolated run, the hits are that run's (the replay reads what it wrote)
     pure (s', fresh.getD h)
-  go (keys : IO.Ref (Std.HashMap Name UInt64)) (base : CommandState R) (stack : List Name) (input : String)
-      (s₀ : CommandState R) (key₀ : UInt64) (mode : Mode)
+  go (keys : IO.Ref (Std.HashMap Name Key)) (base : CommandState R) (stack : List Name) (input : String)
+      (s₀ : CommandState R) (key₀ : Key) (mode : Mode)
       (region : Option (ModuleArtifact R) := none) (sink : Option (RegionSink R) := none) :
       IO (CommandState R × Nat) := do
     let chars := input.toList.toArray
@@ -2019,13 +2232,13 @@ where
         break
       | .ok (cmd, stop) =>
         let text := String.ofList (chars.extract pos stop).toList
-        key := mixHash key (hash text)
+        key := key.mixText text
         if cmd.isOfKind "command.import" then
           allCacheable := false
           if let some sink := sink then sink.rerun.modify (·.push (pos, stop))
           let m := ((cmd.getArg 1).getId?).getD "_"
           -- what the rest of the file sees depends on the module's text, through its key
-          key := mixHash key (← keyOf keys m)
+          key := key.mixKey (← keyOf keys m)
           if stack.contains m then
             s := { s with messages := s.messages.push { info := cmd.info, severity := .error, text := s!"import cycle through {m}", code := ErrorCode.importCycle } }
           else if !s.imported.contains m then
@@ -2078,7 +2291,7 @@ where
               regionIdx.set (i + 1)
               match a.keys[i]?, a.effects[i]? with
               | some k', some e =>
-                if k' == key then do
+                if k' == key.fast then do
                   store.countRegionCommand
                   pure (some (e, none))
                 else
@@ -2089,11 +2302,13 @@ where
         | some (e, hit) =>
           if let some sink := sink then do
             sink.effects.modify (·.push e)
-            sink.keys.modify (·.push key)
+            sink.keys.modify (·.push key.fast)
             -- (a manifest entry from the write cache is local: the module manifest keeps it)
             if let some (ent, dir) := hit then
               match store.manifests with
-              | some ms => if ms.inWrite dir then sink.entries.modify (·.push ent)
+              -- (a legacy fast-only hit has no SHA-256 key to put in a format-2 manifest)
+              | some ms => if ms.inWrite dir && ent.keySha.length == 64 then
+                  sink.entries.modify (·.push ent)
               | none => pure ()
           s := e.apply s
           hits := hits + 1
@@ -2104,7 +2319,7 @@ where
             store.put key e
             if let some sink := sink then do
               sink.effects.modify (·.push e)
-              sink.keys.modify (·.push key)
+              sink.keys.modify (·.push key.fast)
               if store.manifests.isSome then
                 sink.entries.modify (·.push (ManifestEntry.ofEffect store.binary key e))
           s := s'
@@ -2115,7 +2330,10 @@ where
         let regionEntry ←
           if sink.region then
             store.putRegion { magic := regionMagic, format := regionFormat, module := sink.module,
-                              key := key₀, effects := ← sink.effects.get, keys := ← sink.keys.get,
+                              key := key₀.fast, keySha := key₀.strong,
+                              binarySha := key₀.binary, toolchainSha := key₀.toolchain,
+                              targetSha := key₀.target,
+                              effects := ← sink.effects.get, keys := ← sink.keys.get,
                               complete := allCacheable, rerun := ← sink.rerun.get }
           else pure none
         if let some ms := store.manifests then
@@ -2127,25 +2345,33 @@ where
 /-- `elaborateWith`, through the layered cache: `write` is the directory that is written
 (none: no writes), `reads` are read-only directories searched after it, in order. As this
 binary (`binaryId` of `write`) unless `binary` says otherwise (tests). With `region`, module
-effects are also served from `<dir>/<binary ⊕ module key>.wizr` (`--region-cache`): the
+effects are also served from `<dir>/<fast key>.<SHA-256 key>.wizr` (`--region-cache`): the
 regions live in the same layers, are read from the write cache first and then from the
 read-only caches, and are only written to the write cache. With `verify`, output manifests
-are written to the write cache and checked on load (`rig` is the rig's tag). -/
+are written to the write cache and checked on load (`rig` is the rig's tag).
+`strongToolchain`/`targetTag` are the SHA-256 namespaces (`Toolchain.tag`,
+`Toolchain.targetTag`); `rootTag` is a strong version of `key₀` (the root file's headers),
+so a root manifest is bound to its actual inputs too. -/
 def elaborateCached (write : Option System.FilePath) (reads : List System.FilePath)
     (input : String) (init : CommandState R) (key₀ : UInt64)
     (toolchain : UInt64 := 0) (binary : Option UInt64 := none)
     (region : Option RegionOptions := none) (verify : VerifyMode := .off) (rig : String := "")
-    (stats : Option (IO.Ref VerifyCounts) := none) : IO (CommandState R × Nat) := do
+    (stats : Option (IO.Ref VerifyCounts) := none)
+    (strongToolchain : String := "") (targetTag : String := "") (rootTag : String := "") :
+    IO (CommandState R × Nat) := do
   let binary ← match binary with | some b => pure b | none => binaryId write
+  let binaryTag ← if region.isSome || verify != .off then toolchainTag write else pure ""
   let store ← match region with
     | some opts => Store.layeredRegion write reads binary opts verify rig stats
     | none => Store.layered write reads binary verify rig stats
-  let result ← elaborateWith store input init key₀ toolchain
+  let result ← elaborateWith store input init key₀ toolchain strongToolchain targetTag rootTag binaryTag
   if let some ms := store.manifests then ms.flush
   pure result
 
 /-- `elaborateWith`, without a cache: modules are elaborated in isolation all the same. -/
-def elaborateUncached (input : String) (init : CommandState R) (toolchain : UInt64 := 0) : IO (CommandState R) := do
-  pure (← elaborateWith (← Store.memory) input init 0 toolchain).1
+def elaborateUncached (input : String) (init : CommandState R) (toolchain : UInt64 := 0)
+    (strongToolchain : String := "") (targetTag : String := "") (rootTag : String := "") :
+    IO (CommandState R) := do
+  pure (← elaborateWith (← Store.memory) input init 0 toolchain strongToolchain targetTag rootTag).1
 
 end Wiz.Cache

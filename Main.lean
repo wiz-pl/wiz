@@ -257,6 +257,8 @@ def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandSta
   if cacheOn && (tc.cacheDir.isSome || !tc.readCaches.isEmpty) then
     -- the key starts from the headers the file sees; modules enter it by their own keys
     let key₀ := hash (toString (headers.toList.map (·.2)))
+    let key₀Tag := Smt.Sha256.hexFramed "wiz-cache/root-headers-v1"
+      (headers.toList.flatMap fun (n, t) => [n, t])
     let region ← if ← regionCacheOpt.get then
         pure (some ({ rig := RigTag.tag (R := ZeroOneMany), stats := some regionStats } :
           Cache.RegionOptions))
@@ -264,7 +266,8 @@ def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandSta
     let verify := (Cache.VerifyMode.ofString? tc.cacheVerify).getD .warn
     pure (← Cache.elaborateCached tc.cacheDir tc.readCaches input init key₀ (region := region)
       (verify := verify) (rig := RigTag.tag (R := ZeroOneMany))
-      (stats := if verify == .off then none else some verifyStats)).1
+      (stats := if verify == .off then none else some verifyStats)
+      (strongToolchain := tc.tag) (targetTag := tc.targetTag) (rootTag := key₀Tag)).1
   else
     Cache.elaborateUncached input init
 /-- (27a) `--trust-native` and `--native-fuel N`. -/
