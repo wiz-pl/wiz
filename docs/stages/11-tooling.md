@@ -320,7 +320,9 @@ Tested in the `lsp-server` group and by wiz.nvim's tests (`nvim`).
 Terms print as the notation they were written with: `#check`, `#reduce`, `#eval`,
 messages (`type mismatch`, kernel errors), hovers and the infoview's goals.
 
-```
+```wiz
+import Logic
+
 #check fun (n : Nat) => n + 1        -- fun n => n + 1 : Nat → Nat
 #check [1, 2, 3]                     -- [1, 2, 3] : List Nat
 #check fun (b c : Bool) => b && !c   -- fun b c => b && !c : Bool → Bool → Bool

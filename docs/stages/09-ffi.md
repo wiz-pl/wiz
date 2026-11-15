@@ -96,7 +96,8 @@ value and more of a header's pointer types are 9i.
 
 ## 9e: linear sequencing
 
-```
+```wiz
+import IO
 axiom Tok : Type
 axiom Tok.close : (1 t : Tok) → IO Unit
 def finish (1 t : Tok) : IO Nat := do1

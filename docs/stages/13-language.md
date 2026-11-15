@@ -21,9 +21,11 @@ Writing the lexer and parser in Wiz showed what the language lacked:
 
 ## 13a: named arguments
 
-```
+```wiz
 class BitPack (A : Type) where
   width : Nat
+instance : BitPack Bool where
+  width := 1
 def bitWidth (0 A : Type) [BitPack A] : Nat := BitPack.width (A := A)
 def sub (a b : Nat) : Nat := Nat.sub a b
 #eval sub (b := 1) 5                    -- 4

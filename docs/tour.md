@@ -187,7 +187,9 @@ second component's type depends on the first. (`examples/tour/03-structures.wiz`
 
 ## 4: type classes and numerals
 
-```
+```wiz
+import Text
+
 class Describe (A : Type) where
   describe : A → String
 
@@ -350,7 +352,11 @@ h : m = n
 `lib/Logic.wiz` defines the connectives with Lean's names: `∧` (`And.intro`,
 `h.1`, `h.2`), `∨` (`Or.inl`, `Or.inr`, `Or.elim`), `¬`, `↔` and `∃`:
 
-```
+```wiz
+import Logic
+
+def double (n : Nat) : Nat := n + n
+
 def and_swap {P Q : Prop} (h : P ∧ Q) : Q ∧ P := And.intro h.2 h.1
 def exists_double : ∃ n, double n = 8 := Ex.intro (fun n => double n = 8) 4 rfl
 ```

@@ -65,8 +65,11 @@ complete terms; no default instances or coercions yet.
 
 ## 7c: command macros, reflection, `deriving`
 
-```
+```wiz
 import Deriving
+inductive Shape where
+  | circle
+  | square
 inductive Tree (A : Type) where
   | leaf
   | node (l : Tree A) (x : A) (r : Tree A)
