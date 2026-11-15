@@ -179,7 +179,10 @@ jobs:
         run: scripts/test-runtime.sh
       - name: The example index validates offline
         # stage 23m: entries, archive SHA-256s, semver ranges, module-prefix conflicts and
-        # index.wiz; no network (the sources are relative paths)
+        # index.wiz; no network (the sources are relative paths). `grail` comes from the
+        # store path this job built (the `build` job has no Lake and no PATH entry).
+        env:
+          GRAIL: ${{ steps.nix.outputs.wiz }}/bin/grail
         run: scripts/grail-index-check.sh examples/grail-index
       - name: The package checks, builds and runs a program outside the checkout
         # what the old `package` job tested, after the one build: a program is checked and
