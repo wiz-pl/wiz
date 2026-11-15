@@ -680,11 +680,13 @@ Lean kernel's verdicts.
 
 `import M` was silently the embedded Prelude: the self-hosted frontend had one module,
 the input file. The frontend now loads a module graph. A module's name is a path
-(`A.B` is `A/B.wiz`), resolved under the `-I` roots in order and then in the working
-directory; the root module is `Main` (the file `input.wiz`). `Prelude` is still the
-embedded `preludeText`: the self-hosted frontend cannot check `lib/Prelude.wiz` yet
-(A9-A23). The other library imports the corpus uses (`IO`, `Std`, `Sys`) are
-canonicalised to `Prelude` when imports are scanned, since the embedded prelude declares
+(`A.B.C` is `A/B/C.wiz`), resolved under the roots in order and then in the working
+directory; the root module is `Main` (the file `input.wiz`). A root is written `-I DIR`
+(or `-IDIR`) or `--include DIR` (or `--include=DIR`), and the first root with the file
+wins. `Prelude` is still the embedded `preludeText`: the self-hosted frontend cannot
+check `lib/Prelude.wiz` yet (A9-A23). The other library imports the corpus uses (`IO`,
+`Std`, `Sys`) are canonicalised to `Prelude` when imports are scanned, since the
+embedded prelude declares
 the `IO` names and no real `IO.wiz` is checkable yet (without it, every existing
 `import IO` program would be a missing module).
 
@@ -700,8 +702,9 @@ module that cannot be found is `error: cannot find module NAME`. Duplicate names
 rejected across modules as within one (the same `newDuplicate` check).
 
 The cache key (`moduleGraphKey`) is a rolling hash of the loaded modules' names and
-texts in load order; the checker prints it with `--key`. The real cache (D5) will key on
-it, plus the frontend's version.
+texts in load order; the checker prints it with `--key`. It follows a transitive change
+(a dependency's text) and ignores a file that no module imports. The real cache (D5)
+will key on it, plus the frontend's version.
 
 **Not done.** `private` is still private to one file only: hiding names across modules
 needs each name's module in `Globals` (21n). `namespace`/`open`/`section` are not parsed
@@ -711,12 +714,16 @@ classes/instances (A10), universe polymorphism (A15), the proof surface (A16), t
 (A13), macros (A12), `deriving` (A11) and the wider runtime (C11/C12); modules were the
 first dependency, not the last.
 
-**Tests** (group `selfhost`, eight cases): an imported module's declarations in scope, a
+**Tests** (group `selfhost`, sixteen cases): an imported module's declarations in scope, a
 transitive import (A→B→C) with a shared Prelude, a diamond (one module imported twice is
 checked once), a cycle, a missing module, a duplicate name across modules, a `-I` root,
-and the cache key (stable for one graph, different when a module's text changes). `wiz
-check` of the generated self-hosted sources passes, and the self-hosted frontend still
-checks itself.
+and the cache key (stable for one graph, different when a module's text changes); then
+dotted imports (`A.B.C` is `A/B/C.wiz`), `-I` order (the first root with the file wins,
+a root without it is skipped), a cycle through three modules, a duplicate name in two
+imported modules, a transitive cache-key change (and no change for an unimported file),
+`IO`/`Std`/`Sys` loading the embedded Prelude once, the CLI root spellings, and the
+compiler driver resolving its roots too. `wiz check` of the generated self-hosted
+sources passes, and the self-hosted frontend still checks itself.
 
 ## 21z: the proof surface in the self-hosted frontend (A16)
 
