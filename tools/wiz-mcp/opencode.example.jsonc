@@ -1,0 +1,31 @@
+{
+  // OpenCode V2: MCP is the route for Wiz; `lsp` is decoded but inert in 2.2.5.
+  // Copy this into the worktree's opencode config (or a global one).
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "timeout": { "startup": 30000, "catalog": 30000, "execution": 330000 },
+    "servers": {
+      "wiz": {
+        "type": "local",
+        // `cwd` defaults to the workspace directory. If your client does not
+        // resolve a relative command against it, use the absolute path to
+        // tools/wiz-mcp/wiz_mcp.py here.
+        "command": [
+          "python3",
+          "tools/wiz-mcp/wiz_mcp.py",
+          "--wiz",
+          "./.lake/build/bin/wiz",
+          "--idle",
+          "600",
+          "--timeout",
+          "300"
+        ],
+        "cwd": ".",
+        // Must be larger than the bridge's --timeout (300 s) so the bridge
+        // returns its own timeout error instead of being cut off.
+        "timeout": { "startup": 20000, "catalog": 10000, "execution": 330000 },
+        "codemode": true
+      }
+    }
+  }
+}

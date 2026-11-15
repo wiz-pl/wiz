@@ -1,0 +1,10 @@
+(index
+  (package "base"
+    (summary "A tiny base package for the index example")
+    (repo "https://example.org/wiz/base")
+    (version "0.1.0"
+      (source "packages/base-0.1.0.tar.gz")
+      (sha256 "90fab04256bfe9f97fd608786646e134976ba9a88b1e15d85fae18d89bfa1bc1")
+      (toolchain ">=0.1.0 <0.3.0")
+      (modules "Base" "Base.Value")
+      (deps))))
