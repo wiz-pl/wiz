@@ -12,14 +12,18 @@ python3 -m wiz_kernel install --user          # from this directory
 jupyter console --kernel wiz-kernel
 ```
 
-Install, backends, magics, limits and tests: **[docs/tools/jupyter.md](../../docs/tools/jupyter.md)**.
+Install, backends, magics, widgets, limits and tests: **[docs/tools/jupyter.md](../../docs/tools/jupyter.md)**.
 
 Quick tests:
 
 ```sh
+sh tools/jupyter/run-tests.sh                       # protocol, self-test, widget front end
 python3 -m unittest discover -s tools/jupyter/tests -v   # protocol (jupyter_client)
 PYTHONPATH=tools/jupyter python3 -m wiz_kernel --self-test
-WIZ=wiz web/widget/test.sh                               # widget VDOM + patches (Node)
+WIZ=wiz web/widget/test.sh                          # widget VDOM + patches (Node)
+node tools/jupyter/static/widget_test.mjs           # widget front end (headless Chrome if installed)
 ```
 
-Not part of the dev shell, `lake`, or CI's default test groups.
+Not part of the dev shell, `lake`, or CI's default test groups. The widget
+front-end test's Node fallback always runs; its headless-browser step is skipped
+with a message when no Chrome/Chromium is installed (and still exits 0).

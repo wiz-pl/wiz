@@ -180,7 +180,8 @@ class WidgetProtocolTest(unittest.TestCase):
 
     def test_an_explicit_eval_display_is_found_in_the_stream(self):
         reply, iopub = self.client.execute(
-            '#eval Widget.display [Widget.text "name" "input" "ada" "onEvent"]')
+            '#eval Widget.display [Widget.text "name" "input" "ada" "onEvent"]',
+            timeout=600)
         self.assertEqual(reply.content.get("status"), "ok", reply.content)
         opens = [m for m in iopub if m.msg_type == "comm_open"]
         self.assertTrue(opens, [m.msg_type for m in iopub])

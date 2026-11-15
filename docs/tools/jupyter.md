@@ -10,8 +10,9 @@ Python (standard library plus `pyzmq`), not Lean.
 tools/jupyter/
   wiz_kernel/            the kernel (wire protocol, drivers, magics, widget comms)
   wiz-kernel/kernel.json the kernelspec template
-  static/                widget.js (the front end) and loader.js (classic Notebook glue)
+  static/                widget.js, loader.js, the headless-browser test and goldens
   tests/                 protocol tests (test_kernel.py, test_widgets.py, test_notebook.py)
+  run-tests.sh           the test entry point (protocol, self-test, widget)
   README.md              a short pointer to this page
 ```
 
@@ -204,10 +205,31 @@ browser-held resource. The browser has **no local state and no hooks**: every ev
 a kernel round trip (with the batch driver, a `wiz check` of the whole notebook), and
 the front end adopts server-rendered DOM rather than hydrating state.
 
+**Events carry the value.** The raw React path (`React.on` → `delegate` →
+`React.App.event`) passes only `(event, handler index)`, so a slider's value is lost
+there. Widgets deliberately do not use that path: the front end sends `value`
+explicitly and `Widget.Callback` receives it in `Widget.Event`, so
+`Widget.setValue w e.value` sees the number (the protocol test pins this). The
+index-only gap remains for hand-written `React.on` handlers in `Web.React` apps; a
+widget uses the descriptor/comm path instead.
+
+**Front-end test.** `tools/jupyter/static/widget_test.mjs` runs the same scenario
+twice: the Node fallback (`web/framework/minidom.mjs`) always, and headless
+Chrome/Chromium when one is on `PATH` (or `--browser`/`$WIZ_WIDGET_BROWSER` names it).
+It mounts the `Widget.display` bundle through `WidgetView`, dispatches a real click and
+a range `input`, checks the comm payloads (`{method, widget_id, event, value}`), and
+applies the patches `Widget.handle` produced. The goldens in `static/goldens/` are the
+serialised DOM after the first render and each update plus the comm payloads;
+`--update` rewrites them. The browser run is what catches a `setAttribute("value")`
+only patch (the live DOM property); the Node test double cannot. `static/widget_gen.sh`
+regenerates the fixture from `widget_gen.wiz` (needs a `wiz` binary; the test does
+not). `web/widget/test.sh` is the Wiz-side golden (each widget kind, the display
+bundle, keyed diff and removal) with no browser at all.
+
 **Limits.** `plot` carries opaque JSON in `data-wiz-widget-data` and the front end
-draws a placeholder until a `Plot` module exists. Text/range values are patched as
-attributes, not DOM properties (React's documented limit), so a live input's property
-may not follow an attribute patch. There is no `display_data` stream and no debugger.
+draws a placeholder until a `Plot` module exists. `runtime.js` mirrors a `value` patch
+into the DOM property (so a live range/text control follows it), but `checked` is still
+attribute-only. There is no `display_data` stream and no debugger.
 
 ## Magics
 
@@ -286,6 +308,9 @@ magic. Unknown magics are an `UnknownMagic` error.
 ## Tests
 
 ```sh
+# everything runnable here: protocol tests, kernel self-test, widget front end
+sh tools/jupyter/run-tests.sh
+
 # protocol-level: starts the kernel on a connection file and talks jupyter_client
 python3 -m unittest discover -s tools/jupyter/tests -v
 
@@ -297,6 +322,9 @@ PYTHONPATH=tools/jupyter python3 -m wiz_kernel --self-test [--wiz PATH]
 
 # the widget VDOM and patches, no browser (Node + web/framework/minidom.mjs)
 WIZ=wiz web/widget/test.sh
+
+# the widget front end: Node fallback, then headless Chrome/Chromium if installed
+node tools/jupyter/static/widget_test.mjs [--browser PATH] [--no-browser]
 ```
 
 `tests/test_kernel.py` covers the kernel protocol, `tests/test_widgets.py` the widget
@@ -312,6 +340,17 @@ no `wiz` is found. `$WIZ_TEST_BACKEND` pins `repl`/`batch` (default `auto`);
 skips the live session without it); it prints PASS/FAIL/SKIP per check and exits
 1 on a failure.
 
+`run-tests.sh` prints a `skip:` line for each part whose dependency is absent and
+still exits 0 if everything that ran passed; it passes `--no-browser`/`--browser`
+through to the widget front-end test and runs `web/widget/test.sh` when a `wiz`
+binary is available. The front-end test's Node fallback always runs, so the pure
+patcher is checked on a machine with no browser at all; the headless-browser step
+is skipped with a message when no Chrome/Chromium is on `PATH`. A skipped browser
+run is not a failed one, but a golden mismatch under the Node fallback is always a
+failure. `tools/jupyter/static/widget_gen.sh` regenerates `widget_fixture.json` and
+the DOM goldens from `widget_gen.wiz` (it needs `wiz`; the test does not).
+
 The kernel is not hooked into `lake test` or the CI workflows; it needs no Lean
 build and only a `wiz` executable (whose `repl` subcommand is the stage 11 REPL,
-`docs/stages/11-tooling.md`).
+`docs/stages/11-tooling.md`). The widget front end's Node fallback needs only Node;
+its browser run needs a Chrome/Chromium binary and is skipped otherwise.

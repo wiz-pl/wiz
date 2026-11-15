@@ -213,4 +213,28 @@ ok("commById reads a Map or an object from a classic Notebook manager", () => {
   assert.equal(commById(null, "a"), null);
 });
 
+// -- the front end's own listener, and the runtime's value property ----------
+
+ok("a dispatched input reaches the listener and becomes a comm payload", () => {
+  const root = new DocumentFragment();
+  const sent = [];
+  const view = new WidgetView(root, { parse, send: (data) => sent.push(data) });
+  view.render(JSON.parse(fixture.display.slice("WIZ_WIDGET:".length)));
+  const input = root.childNodes[0].childNodes[0].childNodes[0];
+  input.value = "0.75";
+  input.dispatchEvent({ type: "input" });
+  assert.deepEqual(sent[0], { method: "event", widget_id: "gain", event: "input", value: "0.75" });
+});
+
+ok("setAttr value mirrors into the DOM property when the node has one", () => {
+  // minidom has no value property, so give this control one; a browser always has it.
+  const root = new Element("div");
+  const input = new Element("input");
+  input.value = "1";
+  root.appendChild(input);
+  applyPatches(root, [{ op: "setAttr", path: "0", name: "value", value: "2" }], parse);
+  assert.equal(input.getAttribute("value"), "2");
+  assert.equal(input.value, "2");
+});
+
 console.log(`\nwiz widgets: all ${checks} checks passed`);

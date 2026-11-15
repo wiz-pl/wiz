@@ -76,20 +76,23 @@ export function eventValue(target, event) {
  * `apply` replays a patch list; `handleEvent` turns a DOM event into the comm payload.
  */
 export class WidgetView {
-  constructor(root, { parse, send, onError } = {}) {
+  constructor(root, { parse, send, onError, events } = {}) {
     if (!root) throw new TypeError("WidgetView needs a root element");
     this.root = root;
     this.parse = parse || defaultParse;
     this.send = send || (() => {});
     this.onError = onError || ((message) => console.error("wiz widget:", message));
+    this.events = events || ["click", "input", "change"];
     this.comm = null;
     this.bundle = null;
+    this._listening = false;
   }
 
   /** Mount `bundle` (a display string or object), replacing the root's children. */
   render(bundle) {
     this.bundle = parseBundle(bundle);
     mount(this.root, this.bundle.html || "", this.parse);
+    this._listen();
     return this;
   }
 
@@ -97,7 +100,22 @@ export class WidgetView {
   adopt(bundle) {
     this.bundle = parseBundle(bundle);
     if (!this.root.firstChild) return this.render(this.bundle);
+    this._listen();
     return this;
+  }
+
+  /** Listen on the container once; an event bubbles from the control to its widget. */
+  _listen() {
+    if (this._listening || typeof this.root.addEventListener !== "function") return;
+    this._listening = true;
+    for (const type of this.events) {
+      this.root.addEventListener(type, (event) => {
+        if (!this.handleEvent(event)) return;
+        if ((type === "click" || type === "submit") && event.preventDefault) {
+          event.preventDefault();
+        }
+      }, false);
+    }
   }
 
   /** Apply an update: `data.patches` (preferred) or a full `bundle` with `html`. */

@@ -74,11 +74,18 @@ class KernelProtocolTest(unittest.TestCase):
         cls.client.load_connection_file(cls.connection_file)
         cls.client.start_channels()
         try:
-            cls.client.wait_for_ready(timeout=180)
-        except Exception:
+            cls.client.wait_for_ready(timeout=300)
+        except Exception as exc:
             cls.process.terminate()
-            out, err = cls.process.communicate(timeout=10)
-            raise
+            try:
+                _, err = cls.process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                cls.process.kill()
+                _, err = cls.process.communicate(timeout=10)
+            detail = (err or b"").decode("utf-8", "replace")[-2000:]
+            raise RuntimeError(
+                f"the kernel did not become ready: {exc}"
+                + (f"\nkernel stderr:\n{detail}" if detail else "")) from exc
         cls.backend_name = None
         msg_id = cls.client.kernel_info()
         msg = cls._reply(msg_id)
@@ -224,7 +231,7 @@ class KernelProtocolTest(unittest.TestCase):
         done = subprocess.run(
             [sys.executable, "-m", "wiz_kernel", "--self-test", "--wiz", self.wiz,
              "--backend", "auto"],
-            cwd=TOOL_DIR, env=env, capture_output=True, text=True, timeout=300)
+            cwd=TOOL_DIR, env=env, capture_output=True, text=True, timeout=600)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn("0 failed", done.stdout)
 

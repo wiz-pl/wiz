@@ -54,6 +54,11 @@ back is quoted as a Wiz string literal, so it cannot become source.
 * A widget tree has no typed handlers (`React.on`); the VDOM is monomorphic in
   `Widget.NoMsg`. Events travel over the comm because a Jupyter front end cannot
   dispatch a Wiz inductive anyway.
+* **Values reach the callback.** `Widget.Event` carries the browser's `value` and
+  `Widget.handle` passes it through, so a slider callback can read the new number.
+  This is deliberately not the `React.on` / `delegate` / `React.App.event` path,
+  which passes only `(event, handler index)` and loses a control's value; that
+  index-only dispatch remains a `Web.React` limitation, not a widget one.
 * `plot` carries opaque JSON in `data-wiz-widget-data`; there is no `Plot` module yet,
   so the front end renders a placeholder. When `Plot` lands, `Widget.plotOf` is the
   only function that changes.

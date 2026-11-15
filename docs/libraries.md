@@ -1399,7 +1399,8 @@ them with `web/framework/runtime.js` (no second renderer, no Wasm). Tests:
 `tools/jupyter/tests/test_widgets.py` (comm round trip) and `test_notebook.py`
 (`nbclient`). Limits: no client-side state (every event is a kernel round trip),
 `plot` data is opaque JSON until a `Plot` module lands, and `Owned` cannot be held
-across events.
+across events. The event's `value` (a slider's number) reaches `Widget.Callback`;
+the raw `React.on`/`React.App.event` path passes only a handler index.
 
 ## Numbers: classes, integers, words
 
