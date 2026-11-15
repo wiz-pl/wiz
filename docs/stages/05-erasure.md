@@ -1,6 +1,6 @@
 # Stage 5: erasure and the interpreter
 
-```
+```wiz no-check
 #eval fib (.succ (.succ (.succ (.succ (.succ .zero)))))   -- .succ (… 8 …)
 #erase Vec.cons                                          -- the erased code
 ```

@@ -1,0 +1,2 @@
+import Base
+def baseDouble : Nat := baseValue + baseValue
