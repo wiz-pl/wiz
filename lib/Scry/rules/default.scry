@@ -24,6 +24,7 @@ rule command-injection
   source recv result
   source read arg 1
   sanitise escape_shell result
+  sanitise shellescape result
   sanitise sanitize arg 0
   sink system arg 0
   sink popen arg 0

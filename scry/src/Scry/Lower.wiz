@@ -3,6 +3,7 @@ import Functor
 import WordArray
 import Scry.Wil
 import Scry.CstStore
+import Scry.Models
 /-!
 # Scry.Lower: C to Wil, with origins
 
@@ -22,12 +23,13 @@ The boundary is deliberate. What lowers:
 * direct calls to functions defined (or prototyped) in the translation unit;
 * **memory**: a struct/union local or an array is a stack slot (`Wil.Rhs.slot`) with a
   cell layout, so `p.x`, `a[0]`, `a[i]` and `*p` are `gep`/`gepVar` + `load`/`store`; an
-  address-taken scalar (`&x`) is a one-cell slot; `malloc`/`calloc` are `Wil.Rhs.alloc`,
-  `free` is `Wil.free`, a module global is `Wil.Rhs.globalRef`, a function used as a
-  value is `Wil.Rhs.fnptr`, and a call through a function pointer is
-  `Wil.Callee.indirect`;
+  address-taken scalar (`&x`) is a one-cell slot; `malloc`/`calloc`/`realloc` are
+  `Wil.Rhs.alloc` and `free` is `Wil.free`, both read from the external model table
+  (`Scry.Models`), a module global is `Wil.Rhs.globalRef`, a function used as a value is
+  `Wil.Rhs.fnptr`, and a call through a function pointer is `Wil.Callee.indirect`;
 * `strcpy`/`strncpy`/`strcat`/`memcpy`/`memmove` are ordinary external calls; the taint
-  layer models their memory effect (`Scry.RuleTaint.copyModel`).
+  layer models their memory effect from the same table (`Scry.Models.copyPairsOf`), so
+  `sprintf`'s formatted arguments are a copy too.
 
 Everything else is **havoc plus a warning**, never a silent wrong value: a cast, `?:`,
 `sizeof`, a string literal, `&&`/`||` as a value, an unknown identifier, an unmodelled
@@ -1928,55 +1930,67 @@ def Scry.lowerCall (c : Scry.Cst) (n : Nat) : Scry.LM Wil.Var := do
         | .false => Scry.directCall c n name argNodes
       | .none => Scry.directCall c n name argNodes
 
-/-- The name-based part of `Scry.lowerCall` (also the path for an external function). -/
+/-- An allocation call whose shape the external model table supplies. `malloc` is
+`(size, no count)`, `calloc` is `(size at 1, count at 0)` and `realloc` is `(size at 1)`.
+The size/count expressions are looked up in the *syntactic* argument list, so a model
+whose argument positions do not match the call is a havoc with a warning, not a silent
+misread. -/
+def Scry.allocCallByShape (c : Scry.Cst) (n : Nat) (name : String) (argNodes : List Nat)
+    (shape : Scry.AllocShape) : Scry.LM Wil.Var :=
+  match shape.sizeArg with
+  | .none => Scry.havocAt c n (Wil.Ty.ptr Wil.Ty.unknown) (name ++ " without a size model")
+  | .some si => match Wil.listNth argNodes si with
+    | .none => Scry.havocAt c n (Wil.Ty.ptr Wil.Ty.unknown)
+        (name ++ " without its size argument")
+    | .some sz =>
+      let count := match shape.countArg with
+        | .some ci => match Wil.listNth argNodes ci with
+          | .some cn => match Scry.constInt c cn with
+            | .some v => v
+            | .none => 1
+          | .none => 1
+        | .none => 1;
+      Scry.allocCall c n name sz count
+
+/-- The name-based part of `Scry.lowerCall` (also the path for an external function).
+Allocation and `free` are read from `Scry.Models`, so the lowering and the taint model
+agree on which names allocate and which free; every other call keeps its ordinary
+`Wil.call` and its result is the declared type (or `i32` when undeclared). -/
 def Scry.directCall (c : Scry.Cst) (n : Nat) (name : String) (argNodes : List Nat) :
     Scry.LM Wil.Var :=
-  match String.eq name "malloc" with
-  | .true => match argNodes with
-    | .cons sz _ => Scry.allocCall c n name sz 1
-    | .nil => Scry.havocAt c n (Wil.Ty.ptr Wil.Ty.unknown) "malloc without a size"
-  | .false => match String.eq name "calloc" with
-    | .true => match argNodes with
-      | .cons cnt (.cons sz _) =>
-        let k := match Scry.constInt c cnt with
-          | .some v => v
-          | .none => 1;
-        Scry.allocCall c n name sz k
-      | .cons sz _ => Scry.allocCall c n name sz 1
-      | .nil => Scry.havocAt c n (Wil.Ty.ptr Wil.Ty.unknown) "calloc without a size"
-    | .false => match String.eq name "free" with
-      | .true => do
-        v ← Scry.zeroAt c n Wil.i32;
-        match argNodes with
-        | .cons a _ => do
-          p ← Scry.lowerExpr c a;
-          Scry.emitAt c n (Wil.free p);
-          Scry.lret v
-        | .nil => do
-          Scry.warnAt c n "free without an argument";
-          Scry.lret v
-      | .false => match String.eq name "realloc" with
-        | .true => Scry.havocAt c n (Wil.Ty.ptr Wil.Ty.unknown) "realloc"
-        | .false => do
-          args ← Scry.lowerExprs c argNodes;
-          s ← Scry.get;
-          match List.find (fun y => String.eq y.name name) s.syms with
-          | .none => do
-            Scry.warnAt c n ("call to undeclared function " ++ name ++ " (external)");
-            r ← Scry.fresh Wil.i32;
-            Scry.emitAt c n (Wil.call (.some r) name args);
-            Scry.lret r
-          | .some sym => do
-            match Nat.beq (List.length args) sym.arity with
-            | .false => Scry.warnAt c n ("arity mismatch calling " ++ name ++ " ("
-                ++ Nat.repr (List.length args) ++ " vs " ++ Nat.repr sym.arity ++ ")")
-            | .true => Scry.lret ();
-            let qname := match sym.isStatic with
-              | .true => "static:" ++ name
-              | .false => name;
-            r ← Scry.fresh sym.ret;
-            Scry.emitAt c n (Wil.call (.some r) qname args);
-            Scry.lret r
+  match Scry.Models.allocOf name with
+  | .some shape => Scry.allocCallByShape c n name argNodes shape
+  | .none => match Scry.Models.freeArgOf name with
+    | .some ai => do
+      v ← Scry.zeroAt c n Wil.i32;
+      match Wil.listNth argNodes ai with
+      | .some a => do
+        p ← Scry.lowerExpr c a;
+        Scry.emitAt c n (Wil.free p);
+        Scry.lret v
+      | .none => do
+        Scry.warnAt c n (name ++ " without its pointer argument");
+        Scry.lret v
+    | .none => do
+      args ← Scry.lowerExprs c argNodes;
+      s ← Scry.get;
+      match List.find (fun y => String.eq y.name name) s.syms with
+      | .none => do
+        Scry.warnAt c n ("call to undeclared function " ++ name ++ " (external)");
+        r ← Scry.fresh Wil.i32;
+        Scry.emitAt c n (Wil.call (.some r) name args);
+        Scry.lret r
+      | .some sym => do
+        match Nat.beq (List.length args) sym.arity with
+        | .false => Scry.warnAt c n ("arity mismatch calling " ++ name ++ " ("
+            ++ Nat.repr (List.length args) ++ " vs " ++ Nat.repr sym.arity ++ ")")
+        | .true => Scry.lret ();
+        let qname := match sym.isStatic with
+          | .true => "static:" ++ name
+          | .false => name;
+        r ← Scry.fresh sym.ret;
+        Scry.emitAt c n (Wil.call (.some r) qname args);
+        Scry.lret r
 
 /-- A condition: a comparison is a `Wil.Cond` (no register), `&&`/`||` combine
 conditions, and anything else becomes `v != 0`. `&&`/`||` operands are lowered eagerly:

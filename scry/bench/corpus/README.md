@@ -1,6 +1,6 @@
 # Scry benchmark corpus
 
-This directory is the checked-in S0/S2 corpus for `scry bench`:
+This directory is the checked-in S0/S2 corpus (48 cases on `agent/scry-models`) for `scry bench`:
 
 * `manifest.json` — the cases: suite, CWE, file, `expect`, and the expected findings.
 * `cwe78/` — CWE-78 command injection.
@@ -9,6 +9,10 @@ This directory is the checked-in S0/S2 corpus for `scry bench`:
 * `cwe134/` — format strings.
 * `cwe242/` — `gets`.
 * `../../tests/fixtures/taint-*.c` — the S0 fixtures the taint test group already uses.
+* `../../tests/fixtures/model-*.c` — the external-model cases: the `exec*` variadic
+  argv, `sprintf`'s formatted destination and format argument, the `strcpy` copy, the
+  `read`/`recv` buffer source, `realloc`, a policy sanitiser, and the explicit
+  unmodelled-external warning. They are referenced from the manifest, not duplicated.
 
 The fixtures are deliberately small and hand-authored. They are a regression and
 debugging corpus, not evidence of real-world precision; S1/S3/S4 are optional external

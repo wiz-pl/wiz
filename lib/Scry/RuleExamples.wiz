@@ -46,6 +46,7 @@ def Scry.demoPackText : String :=
   "  source recv result\n" ++
   "  source read arg 1\n" ++
   "  sanitise escape_shell result\n" ++
+  "  sanitise shellescape result\n" ++
   "  sanitise sanitize arg 0\n" ++
   "  sink system arg 0\n" ++
   "  sink popen arg 0\n" ++
@@ -307,3 +308,21 @@ def Scry.indirectMainFn : Wil.Func :=
 
 def Scry.indirectProgram : Wil.Program :=
   Wil.program [Scry.indirectMainFn, Scry.indirectCalleeFn]
+
+-- ## External models
+
+/-- `main() { t = getenv(); execl(a, b, c, t) }`: only argument 3 carries taint, so the
+`execl` model must make it a command sink without making the clean arguments findings.
+Points: 0 source, 1 call, 2 return. -/
+def Scry.execModelFn : Wil.Func :=
+  let t := Scry.rtv 0;
+  let a := Wil.var 1 Wil.i32;
+  let b := Wil.var 2 Wil.i32;
+  let c := Wil.var 3 Wil.i32;
+  Wil.func "main" [] [t, a, b, c]
+    [ Wil.block
+        [ Wil.call (.some t) "getenv" []
+        , Wil.call .none "execl" [a, b, c, t] ]
+        (Wil.ret .none) ]
+
+def Scry.execModelProgram : Wil.Program := Wil.program [Scry.execModelFn]

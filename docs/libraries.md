@@ -923,6 +923,16 @@ The S4 rule pack and interprocedural slice are separate modules:
 * `import Scry.RuleTaint` — variable-indexed taint as Datalog over a rule pack; an
   argument source/sanitiser becomes an extra definition point, and a `gen` fact is the
   ordinary definition a statement's tainted input transfers to.
+* `import Scry.Models` — the external-function model table: `source`, `sink`, `sanitise`,
+  `copy`/`copyArgs`, `alloc`, `free` and `unknown` effects for libc/syscalls
+  (`getenv`, `read`/`recv`, the `exec*` family, `system`/`popen`, the
+  `printf`/`sprintf`/`snprintf` family, the `strcpy`/`memcpy` family,
+  `malloc`/`calloc`/`realloc`/`free`), the policy sanitisers, and the pure read-only
+  calls. Model source/sink/sanitiser facts are a deduplicated fallback after the pack;
+  model copy pairs become memory stores, model allocation/free drives the lowering, and
+  an unmodelled external with a pointer result/argument is an explicit
+  `unmodelled-external` warning (its result stays `Loc.unknown`). `RulePack.withModels`
+  supplies the model rule descriptors.
 * `import Scry.PointsTo` — a flow-insensitive, field-sensitive points-to analysis over
   the lowered Wil: the location lattice `Loc.stack/glob/heap/fn/field/anyOff/unknown`,
   per-register location sets (`Scry.ptIds`), per-location pointer contents (`mem`, for
@@ -955,9 +965,13 @@ The S4 rule pack and interprocedural slice are separate modules:
 `lib/Scry/rules/default.scry`, and SARIF 2.1.0. Memory is modelled: structs, arrays,
 pointers, `&`/`*`, allocation and `free`, globals, function pointers and pointer returns
 are lowered to slots/heaps/`gep`/`load`/`store`, and points-to + the memory taint rules
-carry a flow through them. What remains outside the model is listed in
-`wiz-notes/scry-taint.md` (heap shape, `realloc`, external memory effects beyond the copy
-model, context sensitivity, non-ASCII columns); the lowering still warns (havoc) for the
+carry a flow through them. External calls have models (`Scry.Models`): `strcpy`'s copy,
+`read`'s buffer source, the `exec*` argv sinks, `sprintf`'s formatted destination,
+`malloc`/`calloc`/`realloc` allocation and `free` are read from one table; an unmodelled
+external with a pointer result/argument is explicit (`unmodelled-external`), not silently
+pure. What remains outside the model is listed in `wiz-notes/scry-taint.md` (heap shape,
+`realloc`'s may-free, variadic arity beyond 8, allocation-size sinks after lowering,
+context sensitivity, non-ASCII columns); the lowering still warns (havoc) for the
 constructs it does not lower. `wiz-notes/scry-taint.md` has the design, the `.scry`
 format and the gaps.
 

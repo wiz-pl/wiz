@@ -99,10 +99,31 @@ Supported in memory: struct/union fields by constant offset, array elements by c
 index, a variable index (widened to the base object), `&x`/`*p`/`**pp`, pointer arithmetic
 by a constant or a variable index, `malloc`/`calloc`/`free`, globals, function pointers
 (assigned, copied, passed as an argument, stored in memory), pointer returns
-(`p = f()`), aliased parameters, and the `strcpy`-family copy model. Not modelled:
-`realloc`, external calls' memory effects outside that table, heap shape (a linked list
-through two allocation sites is two sets, not a shape), context sensitivity, and
-offsets past one `anyOff` level.
+(`p = f()`), aliased parameters, and the `strcpy`-family copy model. `malloc`/`calloc`/
+`realloc`/`free` are read from the external model table (`Scry.Models`), so `realloc` is
+an allocation effect rather than havoc. Not modelled: `realloc`'s may-free of the old
+object, external calls' memory effects outside the model table, heap shape (a linked list
+through two allocation sites is two sets), context sensitivity, and offsets past one
+`anyOff` level.
+
+## External function models
+
+`Scry.Models` is one table of libc/syscall effects: `source` (a written buffer or
+`getenv`'s result), `sink` (a command/format/length/size argument), `sanitise` (a policy
+sanitiser's result or in-place clean), `copy`/`copyArgs` (`strcpy`, `sprintf`'s formatted
+destination), `alloc`/`free` (`malloc`/`calloc`/`realloc`/`free`) and the explicit
+`unknown` fallback. A policy sanitiser is only applied when the pack names it
+(`RulePack.trustsSanitiser`), so a pack that omits `sanitize` keeps the no-sanitiser
+behaviour. The rule pack's own lines are applied first; model facts are a
+deduplicated fallback, so `system` is not reported twice. A model sink makes the
+`exec*` family's **variadic argv** a command sink (argument 3 of
+`execl("/bin/sh", "sh", "-c", cmd)`, not only the path), `sprintf`'s format argument a
+format-string sink, and `sprintf`'s formatted arguments a copy into the destination.
+
+An external call with a pointer result or argument and no model is an explicit
+`unmodelled-external` warning at the call point; its pointer result stays `Loc.unknown`,
+so a store/load through it still propagates and warns `unknown-memory`. Read-only calls
+(`strlen`, `strcmp`, …) have an empty effect list — modelled as pure, not unknown.
 
 Fixtures and their expected results are in `tests/fixtures/mem-*.c` and asserted by
 `tests/taint.wiz`: same-slot store/load (1 finding, path through `store`/`load`),
@@ -112,7 +133,7 @@ finding and no false positive on `b[i]`), heap (1), pointer-to-pointer (1), alia
 parameters (1 across two calls), `free` then use (1 finding + `use-after-free`), known
 indirect target (1), unknown indirect target (0 findings + `unknown-indirect`),
 returned pointer (1), `strcpy` into one array (1, the other array 0), and an unmodelled
-external's pointer (1 finding + two `unknown-memory` warnings).
+external's pointer (1 finding + two `unknown-memory` warnings and one `unmodelled-external`).
 
 **Boundary warnings now carry spans.** `Scry.Warning` has a `Wil.Span`, so a
 `lowering-boundary` result points at the construct (a cast, `sizeof`, a skipped `goto`, …)
@@ -132,10 +153,11 @@ by `parseChecked` (tree-sitter's recovery tree has 2 `ERROR`/`MISSING` nodes).
 
 `scry bench` runs the same pipeline as `scry taint` over `bench/corpus/manifest.json`,
 compares the findings with the manifest's expectations, and writes stable JSON and
-Markdown. The checked-in corpus is **S0/S2**: the existing `tests/fixtures/taint-*.c`
-goldens plus hand-authored safe/unsafe pairs for CWE-78 (command injection), CWE-134
-(format string), CWE-242 (`gets`) and CWE-120/121 (`strcpy`/`strcat`). S1/S3/S4 are
-optional external corpora (`--extra DIR`); no third-party corpus is checked in.
+Markdown. The checked-in corpus is **S0/S2** (48 cases on this branch): the existing
+`tests/fixtures/taint-*.c` goldens plus hand-authored safe/unsafe pairs for CWE-78
+(command injection), CWE-134 (format string), CWE-242 (`gets`) and CWE-120/121
+(`strcpy`/`strcat`), and the external-model cases. S1/S3/S4 are optional external
+corpora (`--extra DIR`); no third-party corpus is checked in.
 
 ```sh
 grail run scry -- bench                         # build/bench.json + build/bench.md
@@ -149,6 +171,9 @@ Reported per CWE and overall: TP/FN/TN/FP case counts, TPR, FPR, Youden's J, pre
 F1, macro averages, path validity (the path ends at the reported sink; a taint path also
 starts at a source), certificate (`checked`) coverage, boundary warnings, and runtime.
 The ratios are computed in integer basis points, so the checked-in baseline is stable.
+The checked-in baseline on this branch is **48 cases**: TP/FN 30/0, TN/FP 15/1,
+unknown 2, TPR 100.00%, FPR 6.25%, precision 96.77%, 35/35 valid paths and checked
+certificates, and 45 boundary warnings (4 blocking, 3 cases).
 
 Metrics are per **case**, not per alert. An `unsafe` case is TP only when every expected
 finding is matched with valid evidence and no extra finding appears; a `safe` case with a
