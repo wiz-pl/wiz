@@ -1,0 +1,358 @@
+import Sys
+import Json
+import Text
+import Scry.Workflow
+/-!
+# Scry.Repro: a deterministic reproducer for one finding
+
+A reproducer is **selected or generated**, never invented from the finding text:
+
+* the input is `--input FILE`, or a generated deterministic file (a run of `A`s for a
+  `gets` finding, empty otherwise);
+* the harness is `--harness FILE` (a shell script whose `$1` is the built binary), or a
+  generated `#!/bin/sh\nexec "$1"` script;
+* the compiler is `--cc` (default `cc`), and the sanitizer is `--sanitize`
+  (`address`, `undefined`, `both`, `none`).
+
+The module tries the requested sanitizer, falls back to an uninstrumented build if the
+compiler rejects it, records **both** attempts, and never turns a compile failure into a
+clean result. It stores the exact compile/run commands, the input and harness hashes, the
+exit status, the captured stdout/stderr, and the first sanitizer lines. That record is
+`dynamic.json`; the root bundle keeps it separate from `static.json`.
+-/
+
+structure Scry.ReproResult where
+  status : String
+  sanitizerUsed : String
+  compileOk : Bool
+  ran : Bool
+  crashed : Bool
+  sanitizerHit : Bool
+  exitKind : String
+  exitCode : Nat
+  signal : Nat
+  json : Json
+  logText : String
+  trace : List String
+
+structure Scry.ReproConfig where
+  /-- The C compiler (looked up in PATH). -/
+  cc : String
+  /-- `address`, `undefined`, `both` or `none`. -/
+  sanitize : String
+  /-- The harness shell script, if the caller supplied one. -/
+  harness : Option String
+  /-- The input file, if the caller supplied one. -/
+  input : Option String
+  /-- Generated input, when `input` is `none`. -/
+  generatedInput : String
+  timeoutSecs : Nat
+  /-- `(name, value)` pairs set in the child. -/
+  env : List (String × String)
+  /-- A stored concolic witness, if one was supplied (the slot is reserved; no engine). -/
+  witness : Option String
+  witnessStatus : String
+  witnessAuthority : String
+
+def Scry.defaultReproConfig : Scry.ReproConfig :=
+  Scry.ReproConfig.mk "cc" "both" .none .none "" 10 .nil .none "absent" "L0"
+
+def Scry.reproSanFlags (s : String) : List String :=
+  match s with
+  | "address" => ["-fsanitize=address"]
+  | "undefined" => ["-fsanitize=undefined"]
+  | "both" => ["-fsanitize=address,undefined"]
+  | _ => []
+
+def Scry.reproSanUsed (s : String) : String :=
+  match s with
+  | "address" => "address"
+  | "undefined" => "undefined"
+  | "both" => "address+undefined"
+  | _ => "none"
+
+/-- Single-quote a shell word. -/
+def Scry.wfShQuote (s : String) : String :=
+  let q := String.replace s "'" "'\\''";
+  String.append "'" (String.append q "'")
+
+def Scry.wfShWords (xs : List String) : String :=
+  String.intercalate " " (List.map Scry.wfShQuote xs)
+
+def Scry.wfListJson (xs : List String) : Json :=
+  Json.mkArr (List.map Json.mkStr xs)
+
+def Scry.wfExitJson (st : ExitStatus) : Json :=
+  match st with
+  | .exited c => Json.mkObj
+      [("kind", Json.mkStr "exited"), ("code", Json.ofNat c)]
+  | .signaled s => Json.mkObj
+      [("kind", Json.mkStr "signaled"), ("signal", Json.ofNat s)]
+
+def Scry.wfOutputJson (o : Output) : Json :=
+  Json.mkObj
+    [ ("status", Scry.wfExitJson o.status)
+    , ("stdout", Json.mkStr o.stdout)
+    , ("stderr", Json.mkStr o.stderr) ]
+
+/-- A child that could not even be started (missing compiler/harness) is `none`. -/
+def Scry.wfTryOutput (cmd : String) (args : List String) (input : String)
+    (o : SpawnOptions) : IO (Option Output) := do
+  r ← Process.outputWith cmd args input o;
+  IO.pure (match r with
+    | .ok out => .some out
+    | .error _ => .none)
+
+def Scry.wfWrite (p text : String) : EIO Unit := do
+  FS.writeFile p text
+
+def Scry.wfReadIf (p : String) : EIO (Option String) := do
+  ok ← EIO.lift (FS.exists p);
+  match ok with
+  | .true => do
+    t ← FS.readFile p;
+    EIO.pure (.some t)
+  | .false => EIO.pure .none
+
+/-- Recursively create `p` (an existing non-directory is an error). -/
+partial def Scry.wfEnsureDir (p : String) : EIO Unit :=
+  match String.eq p "" with
+  | .true => EIO.pure ()
+  | .false => do
+    ok ← EIO.lift (FS.exists p);
+    match ok with
+    | .true => do
+      dir ← EIO.lift (FS.isDir p);
+      match dir with
+      | .true => EIO.pure ()
+      | .false => EIO.fail (String.append p ": not a directory")
+    | .false => do
+      let parts := String.splitOn p "/";
+      let parent := match List.reverse parts with
+        | .nil => ""
+        | .cons _ rest => String.intercalate "/" (List.reverse rest);
+      sub1 ← Scry.wfEnsureDir parent;
+      FS.createDir p
+
+def Scry.wfReadOr (p fallback : String) : EIO String := do
+  t ← Scry.wfReadIf p;
+  EIO.pure (match t with | .some s => s | .none => fallback)
+
+def Scry.wfOrDefault (o : Option String) (d : String) : String :=
+  match o with | .some p => p | .none => d
+
+def Scry.wfDefaultHarnessText : String := "#!/bin/sh\nexec \"$1\"\n"
+
+def Scry.wfWriteIfMissing (o : Option String) (p text : String) : EIO Unit :=
+  match o with
+  | .some _ => EIO.pure ()
+  | .none => Scry.wfWrite p text
+
+/-- Read the input text for the child (text only; a binary input is out of scope). -/
+def Scry.wfCompileArgs (baseArgs san : List String) (bin source : String) : List String :=
+  List.append baseArgs (List.append san ["-o", bin, source])
+
+def Scry.reproInputText (cfg : Scry.ReproConfig) : EIO String :=
+  match cfg.input with
+  | .some p => Scry.wfReadOr p cfg.generatedInput
+  | .none => EIO.pure cfg.generatedInput
+
+/-- Write a repro record and return its fields. The `outDir` receives `repro.sh`,
+`harness.sh` (when generated), `input.txt` (when generated), `run.log`, `dynamic.json`. -/
+def Scry.wfPrepareRepro (cfg : Scry.ReproConfig) (outDir : String) :
+    EIO (String × String × String × String) :=
+  EIO.bind (Scry.wfEnsureDir outDir) (fun _ =>
+    let harnessPath := Scry.wfOrDefault cfg.harness (Path.join outDir "harness.sh");
+    let inputPath := Scry.wfOrDefault cfg.input (Path.join outDir "input.txt");
+    EIO.bind (Scry.wfWriteIfMissing cfg.harness harnessPath Scry.wfDefaultHarnessText) (fun _ =>
+      EIO.bind (Scry.wfWriteIfMissing cfg.input inputPath cfg.generatedInput) (fun _ =>
+        EIO.bind (Scry.reproInputText cfg) (fun text =>
+          EIO.bind (Scry.wfReadOr harnessPath "") (fun htext =>
+            EIO.pure (harnessPath, inputPath, text, Scry.wfHex (Scry.wfFnv htext)))))))
+
+def Scry.wfWriteOutputs (outDir logText reproText : String) : EIO Unit := do
+  s1 ← Scry.wfWrite (Path.join outDir "run.log") logText;
+  s2 ← Scry.wfWrite (Path.join outDir "repro.sh") reproText;
+  EIO.pure ()
+
+def Scry.wfReproScript (cc : String) (compileCmd : List String) (timedArgs : List String)
+    (inputPath : String) : String :=
+  String.append "#!/bin/sh\nset -eu\n"
+    (String.append (Scry.wfShWords (List.cons cc compileCmd))
+      (String.append "\n"
+        (String.append (Scry.wfShWords (List.cons "timeout" timedArgs))
+          (String.append " < " (String.append (Scry.wfShQuote inputPath) "\n")))))
+
+def Scry.wfRunDirect (harnessPath bin inputText : String) (envOpts : SpawnOptions) :
+    EIO (Output × List String × String) := do
+  let args := ["sh", harnessPath, bin];
+  o ← EIO.lift (Scry.wfTryOutput "sh" args inputText envOpts);
+  EIO.pure (match o with
+    | .some x => (x, args, "none")
+    | .none => (Output.mk (ExitStatus.exited 127) "" "harness not found", args, "none"))
+
+def Scry.wfRunRepro (compileOk : Bool) (timedArgs : List String) (harnessPath bin inputText : String)
+    (envOpts : SpawnOptions) (runArgsDirect : List String) : EIO (Output × List String × String) :=
+  match compileOk with
+  | .false => EIO.pure (Output.mk (ExitStatus.exited 127) "" "not run: compile failed", runArgsDirect, "none")
+  | .true => do
+    o ← EIO.lift (Scry.wfTryOutput "timeout" timedArgs inputText envOpts);
+    match o with
+    | .some x => EIO.pure (x, List.append ["timeout"] timedArgs, "timeout")
+    | .none => Scry.wfRunDirect harnessPath bin inputText envOpts
+
+structure Scry.CompileResult where
+  ccVersion : String
+  requested : String
+  used : String
+  fallback : String
+  compileOk : Bool
+  compileOut : Output
+  compileCmd : List String
+  opt1 : Option Output
+  opt2 : Option Output
+  sanArgs : List String
+  baseArgs : List String
+
+structure Scry.RunResult where
+  runOut : Output
+  runCmd : List String
+  timeoutUsed : String
+
+def Scry.wfCompile (cfg : Scry.ReproConfig) (source bin : String) : EIO Scry.CompileResult := do
+  ccOut ← EIO.lift (Scry.wfTryOutput cfg.cc ["--version"] "" SpawnOptions.default);
+  let ccVersion := match ccOut with
+    | .some o => Scry.wfFirstLine o.stdout
+    | .none => "";
+  let baseArgs := ["-std=c11", "-g", "-O0", "-fno-omit-frame-pointer", "-Wall", "-Wextra"];
+  let requested := cfg.sanitize;
+  let sanArgs := Scry.reproSanFlags requested;
+  opt1 ← EIO.lift (Scry.wfTryOutput cfg.cc (Scry.wfCompileArgs baseArgs sanArgs bin source) "" SpawnOptions.default);
+  let attempt1 := match opt1 with
+    | .none => "compiler-not-found"
+    | .some o => match o.status with | .exited c => if Nat.beq c 0 then "ok" else "failed" | _ => "failed";
+  let used1 := Scry.reproSanUsed requested;
+  let firstFailed := Bool.not (String.eq attempt1 "ok");
+  opt2 ← (match Bool.and firstFailed (Bool.not (String.eq requested "none")) with
+    | .true => EIO.lift (Scry.wfTryOutput cfg.cc (Scry.wfCompileArgs baseArgs .nil bin source) "" SpawnOptions.default)
+    | .false => EIO.pure (.none : Option Output));
+  let useSecond := match opt2 with | .some _ => (.true : Bool) | .none => (.false : Bool);
+  let compileOut := match opt2 with
+    | .some o => o
+    | .none => match opt1 with
+      | .some o => o
+      | .none => Output.mk (ExitStatus.exited 127) "" "compiler not found";
+  let used := match useSecond with | .true => "none" | .false => used1;
+  let fallback := match useSecond with
+    | .true => "requested sanitizer build failed; retried without a sanitizer"
+    | .false => "";
+  let compileOk := compileOut.status.success;
+  let compileCmd := match useSecond with
+    | .true => Scry.wfCompileArgs baseArgs .nil bin source
+    | .false => Scry.wfCompileArgs baseArgs sanArgs bin source;
+  EIO.pure (Scry.CompileResult.mk ccVersion requested used fallback compileOk compileOut
+    compileCmd opt1 opt2 sanArgs baseArgs)
+
+def Scry.wfExecute (cfg : Scry.ReproConfig) (compileOk : Bool) (harnessPath bin inputText : String)
+    : EIO Scry.RunResult := do
+  let envOpts := List.foldl (fun o kv => SpawnOptions.setEnv kv.1 kv.2 o)
+    SpawnOptions.default cfg.env;
+  let timeoutCmd := String.append (Nat.repr cfg.timeoutSecs) "s";
+  let timedArgs := [timeoutCmd, "sh", harnessPath, bin];
+  let runArgsDirect := ["sh", harnessPath, bin];
+  runResult ← Scry.wfRunRepro compileOk timedArgs harnessPath bin inputText envOpts runArgsDirect;
+  EIO.pure (Scry.RunResult.mk runResult.1 runResult.2.1 runResult.2.2)
+
+structure Scry.CompileRunResult where
+  compile : Scry.CompileResult
+  run : Scry.RunResult
+
+def Scry.wfCompileRun (cfg : Scry.ReproConfig) (source bin harnessPath inputText : String) :
+    EIO Scry.CompileRunResult := do
+  c ← Scry.wfCompile cfg source bin;
+  r ← Scry.wfExecute cfg c.compileOk harnessPath bin inputText;
+  EIO.pure (Scry.CompileRunResult.mk c r)
+
+def Scry.wfWriteReproArtifacts (outDir logText reproText : String) (dynamic : Json) : EIO Unit := do
+  a ← Scry.wfWrite (Path.join outDir "run.log") logText;
+  b ← Scry.wfWrite (Path.join outDir "repro.sh") reproText;
+  c ← Scry.wfWrite (Path.join outDir "dynamic.json") (String.append (Json.render dynamic) "\n");
+  EIO.pure ()
+
+def Scry.reproRun (cfg : Scry.ReproConfig) (source outDir : String) (tag : String) :
+    EIO Scry.ReproResult :=
+  EIO.bind (Scry.wfPrepareRepro cfg outDir) (fun p0 =>
+    let prepared := p0;
+    let bin := Path.join outDir "repro-bin";
+    EIO.bind (Scry.wfCompileRun cfg source bin prepared.1 prepared.2.2.1) (fun c0 =>
+      let cr := c0;
+      let comp := cr.compile;
+      let run := cr.run;
+      let harnessPath := prepared.1;
+      let rest := prepared.2;
+      let inputPath := rest.1;
+      let inputRest := rest.2;
+      let inputText := inputRest.1;
+      let harnessHash := inputRest.2;
+      let runOut := run.runOut;
+      let runCmd := run.runCmd;
+      let timeoutUsed := run.timeoutUsed;
+      let logText := String.append "--- stdout ---\n" (String.append runOut.stdout
+        (String.append "\n--- stderr ---\n" runOut.stderr));
+      let interesting := Scry.wfInteresting 12 (String.append runOut.stdout runOut.stderr);
+      let sanitizerHit := Bool.or (String.contains runOut.stderr "AddressSanitizer")
+        (Bool.or (String.contains runOut.stderr "UndefinedBehaviorSanitizer")
+          (String.contains runOut.stderr "runtime error:"));
+      let crashed := match runOut.status with
+        | .signaled _ => .true
+        | .exited c => Nat.lt 0 c;
+      let traceKind := match sanitizerHit with
+        | .true => "sanitizer"
+        | .false => match crashed with
+          | .true => "exit-or-signal"
+          | .false => "none";
+      let dynamic := Json.mkObj
+        [ ("schema", Json.mkStr "scry-workflow-dynamic/1")
+        , ("evidenceKind", Json.mkStr "dynamic")
+        , ("tag", Json.mkStr tag)
+        , ("status", Json.mkStr (match comp.compileOk with | .true => "ran" | .false => "compile-failed"))
+        , ("sanitizer", Json.mkObj
+            [ ("requested", Json.mkStr comp.requested)
+            , ("used", Json.mkStr comp.used)
+            , ("fallback", Json.mkStr comp.fallback) ])
+        , ("compiler", Json.mkObj
+            [ ("command", Json.mkStr cfg.cc)
+            , ("version", Json.mkStr comp.ccVersion) ])
+        , ("compile", Json.mkObj
+            [ ("command", Scry.wfListJson comp.compileCmd)
+            , ("result", Scry.wfOutputJson comp.compileOut) ])
+        , ("harness", Json.mkObj
+            [ ("path", Json.mkStr harnessPath)
+            , ("hash", Json.mkStr harnessHash) ])
+        , ("input", Json.mkObj
+            [ ("path", Json.mkStr inputPath)
+            , ("bytes", Json.ofNat (String.length inputText))
+            , ("hash", Json.mkStr (Scry.wfHex (Scry.wfFnv inputText))) ])
+        , ("run", Json.mkObj
+            [ ("command", Scry.wfListJson runCmd)
+            , ("timeout", Json.mkStr timeoutUsed)
+            , ("result", Scry.wfOutputJson runOut)
+            , ("sanitizerHit", Json.mkBool sanitizerHit)
+            , ("crashed", Json.mkBool crashed)
+            , ("traceKind", Json.mkStr traceKind)
+            , ("trace", Scry.wfListJson interesting)
+            , ("log", Json.mkStr (Path.join outDir "run.log")) ])
+        , ("limits", Json.mkArr (List.map Json.mkStr
+            [ "A run is evidence that this harness reached this exit status; it is not a proof of exploitability."
+            , "ASAN/UBSAN report memory/UB only; a control-flow bug such as command injection can run clean under them."
+            , "The compiler, sanitizer runtime and environment are recorded, not pinned or reproduced." ])) ];
+      let reproText := Scry.wfReproScript cfg.cc comp.compileCmd
+        (List.append [String.append (Nat.repr cfg.timeoutSecs) "s"] ["sh", harnessPath, bin]) inputPath;
+      EIO.bind (Scry.wfWriteReproArtifacts outDir logText reproText dynamic) (fun _ =>
+        EIO.pure (Scry.ReproResult.mk
+          (match comp.compileOk with | .true => "ran" | .false => "compile-failed")
+          comp.used comp.compileOk comp.compileOk crashed sanitizerHit
+          (match runOut.status with | .exited c => "exited" | .signaled _ => "signaled")
+          (match runOut.status with | .exited c => c | .signaled _ => 0)
+          (match runOut.status with | .exited _ => 0 | .signaled s => s)
+          dynamic logText interesting))))

@@ -982,3 +982,28 @@ expected `(rule, function, callee, argument)` tuples, and computes:
 (`scry/src/Scry/BenchCmd.wiz`); the S0/S2 corpus and its manifest are in
 `scry/bench/corpus/`, and the policy is in `scry/bench/corpus/README.md`.
 `wiz-notes/scry-bench.md` records the baseline, the corpus size and the limitations.
+
+## Scry: findings, triage and evidence bundles (`Scry.Workflow`)
+
+`import Scry.Workflow` is the pure workflow layer: a deterministic finding id
+(`f_<16 hex>`) over rule id, normalized path, function, sink callee/argument and coarse
+path shape; a separate primary-line hash; the `new -> triaged -> confirmed -> fixed`
+state machine (with `false-positive` and reopen edges); the local JSON record/store
+shape; and the CWE tier names from
+`wiz-notes/prior-art/symbolic-execution.md` §11.5.
+
+`scry/src/Scry/WorkflowCmd.wiz` is `scry findings scan|list|show|triage|repro|verify`.
+`scan` calls `Scry.analyzeFile` — the same pipeline as `scry taint`, no second analysis —
+and writes `scry-workflow/findings.json` plus `scry-workflow/<id>/` (`static.json`,
+certificate, assumptions, boundaries, `finding.json`). `repro`
+(`scry/src/Scry/Repro.wiz`) selects/generates an input and harness, builds under
+ASAN/UBSAN when available (recording a fallback), runs under `timeout`, and stores
+`dynamic.json`, `repro.sh` and `run.log`. `verify` re-runs the analysis and the repro and
+reports "not reported by this run" (never absence).
+
+The root bundle keeps `static`, `dynamic`, `verify` and `repro` separate and adds an
+`evidenceItems` array with `kind` (`static`, `dynamic-observed`, `smt-model`,
+`concolic-witness`, `certificate`) and `authority` (L0–L5). A future S6a witness can be
+attached with `repro --witness FILE` and is accepted only at L2/L3 with
+`validated=true`; the prototype does not run symbolic execution.
+`wiz-notes/scry-workflow.md` has the UX, artifact schema and limits.

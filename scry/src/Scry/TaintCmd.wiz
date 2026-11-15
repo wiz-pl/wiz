@@ -338,6 +338,8 @@ structure Scry.TaintReport where
   findings : List Scry.RuleFinding
   /-- One `checked` flag per finding, in order. -/
   checks : List Bool
+  /-- The certificates behind `checks` (the workflow bundle keeps them as evidence). -/
+  certificates : List (Option Scry.Certificate)
   origins : Scry.OriginMap
   boundaries : List Scry.BoundaryFinding
   /-- Points-to diagnostics: unknown memory, use after free, unresolved indirect calls. -/
@@ -345,6 +347,10 @@ structure Scry.TaintReport where
   /-- The points-to solution (locations and indirect targets), for `--origin-map`-style
   inspection and the tests. -/
   pointsTo : Scry.PtResult
+
+def Scry.certVerified : Option Scry.Certificate → Bool
+  | .some c => c.verified
+  | .none => .false
 
 /-- The pipeline up to the report: parse, lower, analyse, certify-status, locate. -/
 def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do
@@ -365,9 +371,10 @@ def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do
     let origins := Scry.originEntries o.file text tu.funcs;
     let boundaries := Scry.boundaryFindings o.file text tu;
     let memory := Scry.memoryFindings origins pr.warnings;
-    let checks := List.map (fun f => Scry.findingChecked pr f) findings;
-    EIO.pure (Scry.TaintReport.mk o.file errs pack tu findings checks origins boundaries
-      memory pr.pointsTo)
+    let certificates := List.map (fun f => Scry.certifyFinding pr f) findings;
+    let checks := List.map Scry.certVerified certificates;
+    EIO.pure (Scry.TaintReport.mk o.file errs pack tu findings checks certificates origins
+      boundaries memory pr.pointsTo)
 
 /-- `(finding, checked)` pairs in the findings' order. -/
 def Scry.zipFindings (fs : List Scry.RuleFinding) (cs : List Bool) :
