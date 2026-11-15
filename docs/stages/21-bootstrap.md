@@ -992,3 +992,76 @@ held by other agents' jobs (two long `wiz build scry/App.wiz` jobs and `=selfhos
 runs), so no local group or fixpoint run could be admitted. They remain to be run (CI
 runs `=selfhost` and `=selfhost-macro` on the `selfhost` shard; the fixpoint is the
 scheduled job).
+
+## 21ad: tactics in the self-hosted frontend (A13, core)
+
+`by` and `term.by` are now elaborated by the Wiz-hosted frontend, not rejected. The
+engine is the host's (`Wiz/Elab/Tactic.lean`, `Wiz/Elab/Term.lean` `runTac`) in the
+self-hosted surface: a goal is a context (`Cx`: names, types and values), an expected
+type (`Val`) and a hole (`Tm`, the `MVarId` analogue — goals are numbered by position,
+as in `TacState`), and a tactic script is an `STac` request tree (`op`, `seq`, `try`,
+`first`, `repeat`) interpreted against a goal list and an elaborator state.
+
+**Surface.** `by tac₁; tac₂ …` in a checking and in an inferring position. The core
+tactics are `intro`, `intros`, `exact`, `apply`, `assumption`, `rfl`, `rw`/`rw ←`
+(syntactic occurrence rewriting of the goal type, as the host's `abstractOcc`),
+`change`, `unfold f, g` (one unfolding per definition; fails when nothing changes),
+`calc`, `have`, `suffices`, `obtain ⟨x, y⟩ := e`, `constructor` (the first constructor
+of the goal's type whose application succeeds), and `try`/`first`/`repeat`/`(…; …)`.
+`constructor`'s siblings `cases`/`induction` are not in this milestone (they need the
+match compiler's motive/recursor surface exposed to tactics). The tactic grammar is
+built into the parser tables (`Wiz/Selfhost.lean` `selfhostTacticRules`, hence
+`selfhost/Tables.wiz`), because the host gets it from `syntax … : tactic` declarations
+in `lib/Prelude.wiz` and the self-hosted frontend does not run macro/tactic
+registrations yet (21ac).
+
+**Solved means solved.** A block makes one metavariable; a tactic's `exact`/`apply`/
+`assumption` either closes its goal (its hole zonks) or replaces it. At the end of the
+block the open list is filtered by zonk: a goal that a later argument's unification
+determined is not reported. If any goal is left the command fails with
+`unsolved goals:` and each goal's context, one hypothesis per line (`n : Nat`) and
+`⊢ type`; a failed tactic additionally appends `remaining goals:` and the state it
+failed in. A term `apply`/`assumption` assigns with holes is kept in an `unchecked`
+list and its type is inferred and compared with its goal at the end of the block (the
+host's `assign` path), so a hole cannot become a proof of the wrong thing; a solved
+block is handed to the kernel as an ordinary term and checked as usual.
+
+**Frequency in `lib/`.** A token scan of the `by` blocks in the 95 `lib/**/*.wiz` files
+at this commit (comments and strings excluded, equation bodies included) finds **40
+blocks / 47 tactic steps in 4 files**. The frequency order is:
+
+| tactic | steps | files | note |
+|---|---:|---:|---|
+| `xgo` | 12 | 3 | Hoare/Eff custom tactic (`syntax … : tactic`) |
+| `xstep` | 10 | 1 | custom |
+| `xunfold` | 8 | 1 | custom |
+| `xapp` | 5 | 1 | custom |
+| `unfold` | 4 | 1 | built in, implemented here |
+| `rw` | 4 | 1 | built in, implemented here |
+| `rfl` | 4 | 1 | built in, implemented here |
+
+The custom four are 35 of 47 steps and are declared with `syntax … : tactic` /
+`macro_rules` and registered with `attribute [tactic …]`; they need the
+elaboration-time evaluator that A12 has not ported, so they parse but have no meaning in
+the self-hosted frontend (the error names the syntax kind). The parity matrix's "46
+`lib` files use `by`" is a raw `\bby\b` grep that also matches the English word in
+comments; the real proof blocks are in `HoareExamples`, `HeapBorrow`, `EffHeap` and
+`ListLemmas`. That is why the top built-in form is `unfold`, and why it and `rw`/`rfl`
+were the first ones implemented; `calc`/`have`/`suffices`/`obtain` are included for the
+proof surface even though `lib/` does not use them as tactics yet.
+
+**Tests.** `=selfhost` gains four cases: a real block (`intro`/`apply`/`assumption`), the
+per-tactic cases (`intros`, `change`, `unfold`, `constructor`, `try`/`first`/`repeat`),
+unsolved goals with their context, and a tactic failure with the remaining goals. The
+differential case runs the same `ap` proof in the Lean and Wiz-hosted frontends, and the
+same failing `rw` in both, comparing verdicts and the error text
+(`rewrite: the goal does not mention c`). `=tactics` (the Lean host's group) is
+unchanged and remains the host-side regression.
+
+**Limits.** No `simp`/`simp`-set management, no decision procedures (`decide`,
+`omega`, `linarith`, `ring`, `bv_decide`), no `cases`/`induction` (and `constructor`
+covers ordinary inductives only), no rewriting in hypotheses, no
+`trace_state`/`rename_i`, no unfolding of a hypothesis, and no user tactic functions
+(A12's evaluator). The error position is
+the failed command, as for the rest of the self-hosted diagnostics (D6), and the host's
+multi-line expected/inferred blocks are not reproduced.
