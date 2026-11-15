@@ -130,11 +130,15 @@ regenerated; no unmigrated file is read under a strong key.
 A module manifest lists its `.wizc` entries and its `.wizr` region with `key`, `key-sha`,
 `file`, `size`, `sha256` and `format` (`salt` for text, `regionFormat` for a region), plus
 `module`, `binary` (`binaryId`), `toolchain` (SHA-256 of the executable), `toolchain-tag`,
-`target-tag`, `rig`, `prev` (the previous manifest root) and `valid-until`. Its `root` is
-an RFC 6962-style Merkle root over a metadata leaf and the entries, so editing
-`prev`/`valid-until` breaks the root too. `manifest.sexpr` records the generation number,
-the previous root, the optional expiry and one record per module (fast key, SHA-256 key,
-name, file, digest), with its own root. Only the write cache is ever written; a
+`target-tag`, `rig`, `prev` (the generation base an extended manifest started from) and
+`valid-until`. Its `root` is an RFC 6962-style Merkle root over a metadata leaf and the
+entries, so editing `prev`/`valid-until` breaks the root too. `manifest.sexpr` records the
+generation number, the previous root, the optional expiry and one record per module (fast
+key, SHA-256 key, name, file, digest), with its own root. A write-cache index is a
+**snapshot** of `manifest.d` — its generation is the module count and its `prev` is empty —
+because the number of writing processes (and `-j`) is not an input; a manifest that is
+extended keeps the base it started from rather than chaining to an intermediate partial
+write. Only the write cache is ever written; a
 `--cache-ro` layer is read and byte-identical after a run. The `.wizr` sidecar (`.wizs`) is
 still checked first: a corrupt region never reaches the type-erased reader even when no
 manifest exists.
