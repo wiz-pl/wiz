@@ -120,6 +120,11 @@ index URL and commit that produced it. A URL index must fast-forward from the lo
 commit: a force-pushed/rewritten history is refused unless `--allow-rewind` (TUF's
 rollback protection over git's DAG).
 
+`grail.lock` is v3: it records the resolving toolchain, each package's `(size …)`,
+`(tree …)` and `(commands …)` as well as its SHA-256, and any `Package.override` from
+`grail.local.wiz` (which `--locked` refuses). Entries are flat and sorted; a v1/v2 lock
+still parses and `grail update` upgrades it.
+
 Cache layout (under `--cache`, default `~/.cache/wiz`):
 
 | path | contents |
@@ -152,11 +157,12 @@ archive and checks every unpacked tree's stamp, and exits 1 on a corrupt entry.
 The hermetic fixture is `tests/fixtures/grail-index/` (`index/NAME.sexpr`,
 `packages/NAME-V.tar.gz`, `sources/` and `make.sh`); `=grail-deps` covers exact/range
 versions, the transitive closure, a missing package, a hash mismatch, stale locks,
-`fetch --locked` with cold/warm caches, scoped `index/@org/name.sexpr` files, and index
-rollback. `=grail-vendor` (five cases) covers vendoring, an offline `--locked` fetch
-from `vendor/` without a cache, the shared store and the cache commands. Rebuild the
-archives with `cd tests/fixtures/grail-index && ./make.sh`. There is no network in these
-tests.
+`fetch --locked` with cold/warm caches, scoped `index/@org/name.sexpr` files, index
+rollback, and lock v3 (round-trip, old locks, upgrade, `grail.local.wiz` overrides).
+`=grail-vendor` (five cases) covers vendoring, an offline `--locked` fetch from
+`vendor/` without a cache, the shared store and the cache commands. Rebuild the
+archives with `cd tests/fixtures/grail-index && ./make.sh`. There is no network in
+these tests.
 
 There is also a complete example **index repository** at `examples/grail-index/`
 (`index.wiz`, `registry.sexpr`, `index/`, `entries/`, `sources/`, `packages/`, `make.sh`)

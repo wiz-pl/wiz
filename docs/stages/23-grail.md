@@ -87,6 +87,9 @@ def settings : Settings := Settings.empty
   |> Settings.set "ldflags" "-L/nix/store/…-gmp-…/lib -Wl,-rpath,/nix/store/…-gmp-…/lib"
 ```
 
+For local co-development, the same file can override a registry dependency with a
+checkout: `|> Package.override "ddr3" "../wiz-ddr3"` (23m, lock v3).
+
 ## 23a: the toolchain as flags
 
 `wiz` reads no environment variables: the toolchain record (`Wiz/Toolchain.lean`: C
@@ -355,13 +358,20 @@ already uses for `grail.lock`):
     (version "1.2.0"
       (source "https://github.com/example/greet/releases/download/v1.2.0/greet-1.2.0.tar.gz")
       (sha256 "8a3349def55974e5cbc2eb530a2fc4fff48b292e7b81c6b6563da515f9cdc064")
+      (size 1042)
+      (tree "…")
+      (commands "…")
       (toolchain ">=0.1.0 <0.3.0")
       (deps (dep "std" "^0.1") (dep "text" "~1.0")))
     (yanked "1.2.1" "wrong tarball; use 1.2.2")))
 ```
 
 * `source` is the immutable archive (an `https`, `file://` or plain path URL);
-  `sha256` is the SHA-256 of its bytes. `deps` is **authoritative for resolution**; it
+  `sha256` is the SHA-256 of its bytes. `size` is the archive's byte length (R19), `tree`
+  the SHA-256 of its unpacked file tree (R20) and `commands` a digest of the package's
+  declared `Package.command` set (R36); `grail publish` writes all three and a lock v3
+  records them. Older entries have none of them.
+* `deps` is **authoritative for resolution**; it
   must agree with the published manifest, so a lock records the whole graph and a build
   never re-reads dependency manifests to resolve.
 * `yanked` stops new resolutions from choosing a version; a lock that already pins it
@@ -425,22 +435,50 @@ signal, not a security boundary. Prereleases only match a requirement that names
 `grail index resolve` prints the same choice without writing the lock;
 `grail index show NAME` prints a package's versions.
 
-### The lock (v2) and the commands
+### The lock (v3) and the commands
 
 `grail update` resolves the manifest's `require`s (and git `dep`s) and writes
-`grail.lock`, which is committed. Version 1 (23h) held git dependencies; version 2 adds
-the index and registry packages, and a package with only git dependencies keeps a v1
-lock:
+`grail.lock`, which is committed. Version 1 (23h) held git dependencies; version 2 added
+the index and registry packages; version 3 adds a schema header, the resolving toolchain,
+the index/integrity fields, flat sorted entries and machine-local overrides:
 
 ```lisp
 (lock
+  (version 3)
+  (toolchain 0.1.0-dev abcdef0)          -- Wiz.version and the release commit, when known
   (index "https://github.com/wiz-pl/grail-index" "885c4c903032ba188e1c819906ecad6c1912ab2f")
-  (dep "legacy" "https://example.org/legacy.git" "v2" "<commit>" "<content>")
-  (pkg "std" "0.1.1" "https://…/std-0.1.1.tar.gz" "<sha256>"
-    (deps (dep "text" "^1")))
-  (pkg "text" "1.2.0" "https://…/text-1.2.0.tar.gz" "<sha256>" (deps)))
+  (dep legacy "https://example.org/legacy.git" v2 "<commit>" "<content>")
+  (pkg std 0.1.1 "https://…/std-0.1.1.tar.gz" "<sha256>"
+    (size 1042) (tree "<sha256>") (commands "<sha256>")
+    (deps "text ^1"))
+  (pkg text 1.2.0 "https://…/text-1.2.0.tar.gz" "<sha256>"
+    (deps))
+  (override ddr3 "../wiz-ddr3" "<tree sha256>"))
 ```
 
+* **Compatibility.** A file without `(version …)` parses as v1 (only `dep` entries) or
+  v2 (with `index`/`pkg`) by inspection, so old locks keep working unchanged; a v1/v2
+  lock that is rendered back stays header-less. A `(version N)` newer than 3 is refused
+  with a clear message rather than partly understood: a lock is a local trust anchor.
+  `grail update` writes v3, which is the upgrade path; nothing rewrites a lock during a
+  build.
+* **Deterministic text.** Entries are one per line, sorted by name (git deps, packages
+  and overrides separately); package dependencies are a flat, sorted
+  `(deps "NAME REQ" …)` list rather than nested nodes (v2's nested
+  `(deps (dep "NAME" "REQ"))` is still read), so a resolution that changes nothing
+  writes nothing and a change is a one-line diff (R15).
+* **What v3 records.** `(toolchain VERSION [COMMIT])` is the grail that solved the lock
+  (R14); a build notes when the running one differs. `(size N)` is the archive's length
+  (R19), `(tree SHA256)` the hash of the unpacked tree (sorted paths and file hashes,
+  R20), checked after every unpack so a hand-edited file in `.grail/packages/NAME` is
+  refused, and `(commands SHA256)` a digest of the declared `Package.command` set (R36),
+  so a release that silently gains a build-time command is visible in the lock.
+* **Overrides.** `Package.override NAME PATH` in the uncommitted `grail.local.wiz` takes
+  `NAME` from `PATH` instead of the index/git (R37). `grail update` records it in the
+  `(override NAME PATH HASH)` section and leaves the package out of `pkg`/`dep`; a plain
+  build uses the path and prints `using override NAME from PATH`; `--locked` refuses a
+  lock that records one (it is machine-local, so it cannot be reproducible). An edited
+  override no longer matches the locked tree and is refused until `grail update`.
 * `grail update [--locked] [--offline]`: resolve and rewrite the lock. `--locked` is a
   **check, not a resolution**: it reads the existing lock, verifies that every
   requirement is pinned and satisfied, and never reads the index or touches the network,
@@ -449,7 +487,8 @@ lock:
   existing git clones. With no dependencies at all it succeeds and does nothing.
 * `grail fetch [--locked] [--offline]`: materialise the lock without building. A missing
   lock is created unless `--locked`; `--locked` never writes and fails when a
-  requirement is not pinned or is pinned to a version that does not satisfy it.
+  requirement is not pinned or is pinned to a version that does not satisfy it, or when
+  the lock records an override.
   `--offline` downloads nothing: the index, archives and git clones must be cached,
   otherwise it is an error. With no dependencies it succeeds and does nothing.
   `fetch --locked --offline` is the hermetic CI prelude (checked archives, no network).
@@ -471,10 +510,12 @@ lock:
   `.grail/packages/NAME/.grail-pkg` already equals the archive hash, done; otherwise
   find `<cache>/grail/downloads/SHA256`, verify it (re-download if corrupt), download
   and verify the hash **before** unpacking, unpack once into the shared store
-  `<cache>/grail/packages/SHA256` (a temporary directory and a rename), and link
-  `.grail/packages/NAME` to it. A second fetch is a few stat calls; a second project
-  reuses the unpacked tree (23n). `--vendor DIR` adds a first lookup by hash in a
-  vendored directory, which `grail fetch --locked --offline` can use with no cache.
+  `<cache>/grail/packages/SHA256` (a temporary directory with
+  `tar -xzf --strip-components=1 --no-same-owner`, the lock's `(tree …)` checked before
+  the stamp, then a rename), and link `.grail/packages/NAME` to it. A second fetch is a
+  few stat calls; a second project reuses the unpacked tree (23n). `--vendor DIR` adds a
+  first lookup by hash in a vendored directory, which
+  `grail fetch --locked --offline` can use with no cache.
 
 ### Publishing
 
@@ -514,8 +555,8 @@ path/list/verify` inspects the store.
 **Deferred:** a real `wiz-pl/grail-index` with CI naming rules and the first packages;
 signed index commits/tags and a signature in the lock (`--require-signature`);
 per-registry index caches and repeatable `--index` overlays; `grail update -p NAME` and
-`--minimal`; a tree hash for unpacked packages (lock v3) and a SHA-256 tree hash for git
-deps; private-index credential settings, binary artifacts, and automated
+`--minimal`; a SHA-256 tree hash for git deps (lock v3's `pkg` and override tree hashes
+are implemented); private-index credential settings, binary artifacts, and automated
 publish (a bot that verifies the artifact before merging). The reader understands the
 `index/@org/name.sexpr` layout, but scopes are not enforced in names or manifests yet.
 

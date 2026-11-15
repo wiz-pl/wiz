@@ -92,6 +92,9 @@ structure Package where
   toolchain : String := ""
   /-- (23m) registry dependencies -/
   requires : List Req := []
+  /-- (lock v3, R37) machine-local overrides from `grail.local.wiz`:
+  `Package.override NAME PATH` takes `NAME` from `PATH` instead of the registry -/
+  overrides : List (String × String) := []
   deriving Repr, Inhabited
 
 open Cache in
@@ -198,6 +201,12 @@ def evalBuildFile (tc : Toolchain) (salt : UInt64) (roots : List System.FilePath
     | some x => pure (.ok x)
     | none => pure (.error s!"{path}: could not read {str}")
 
+/-- `grail.local.wiz` names an override with `Package.override NAME PATH`, which renders as
+the setting `(set "override NAME" "PATH")`. These are not toolchain settings: they are
+removed from the settings list and recorded on the package (R37). -/
+def isOverrideKey (k : String) : Bool := k.startsWith "override "
+def overrideName (k : String) : String := (k.drop "override ".length).toString
+
 /-- Read `grail.wiz` (and `grail.local.wiz`, if there is one) in `dir`. -/
 def readConfig (tc : Toolchain) (salt : UInt64) (std dir : System.FilePath) :
     IO (Except String (Package × List (String × String))) := do
@@ -215,7 +224,12 @@ def readConfig (tc : Toolchain) (salt : UInt64) (std dir : System.FilePath) :
   | .error e => pure (.error e)
   | .ok x => match decodeSettings x with
     | .error e => pure (.error s!"{localFile}: {e}")
-    | .ok ss => pure (.ok (pkg, ss))
+    | .ok ss =>
+      -- (R37) overrides are machine-local and uncommitted, like the toolchain settings;
+      -- they are recorded on the package and in the lock, never treated as toolchain keys
+      let overrides := ss.filterMap fun (k, v) =>
+        if isOverrideKey k then some (overrideName k, v) else none
+      pure (.ok ({ pkg with overrides }, ss.filter fun (k, _) => !isOverrideKey k))
 
 /-- (23m) The manifest of a `grail-index` repository (`index.wiz`): the index's name,
 its format, and the packages it publishes. `Index.render` turns it into

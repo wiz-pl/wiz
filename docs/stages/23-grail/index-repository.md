@@ -55,6 +55,9 @@ index side adds two optional fields for module checking:
     (version "1.2.0"
       (source "packages/alpha-1.2.0.tar.gz")
       (sha256 "…")
+      (size 1042)
+      (tree "…")
+      (commands "…")
       (toolchain ">=0.1.0 <0.3.0")
       (modules "Alpha" "Alpha.Ctrl")
       (prefix "Alpha")
@@ -67,10 +70,13 @@ index side adds two optional fields for module checking:
   with any *other* package's module or prefix below it.
 * Both are optional and unknown to an older grail, which ignores them (R3). An entry with
   neither is accepted exactly as before; only entries that opt in are checked.
-
-`(size BYTES)` (the endless-data cap, R19) is **not** in this schema yet; the checker
-therefore trusts the local tar and `--fetch`'s `curl` with no maximum. That is a known gap
-(see "What is missing").
+* `(size BYTES)`, `(tree SHA256)` and `(commands SHA256)` are the integrity fields: the
+  archive's length (R19), the hash of its unpacked file tree (R20) and a digest of the
+  package's declared `Package.command` set (R36). `grail publish` computes all three and
+  records them in the lock (v3); older entries have none, which is accepted. A tree hash
+  is checked after every unpack and a hand-edited `.grail/packages/NAME` is refused.
+  The checker validates the shape of the hashes and `--fetch`'s download still has no
+  maximum (the size is recorded for the lock, not used as a cap yet).
 
 ## Generation rules
 
@@ -87,7 +93,8 @@ therefore trusts the local tar and `--fetch`'s `curl` with no maximum. That is a
    concatenates the package nodes into the single-file `index.sexpr`. To publish, add
    `sources/NAME-VERSION/` and a template, run `make.sh`, and open a pull request.
    `grail publish ARCHIVE --source URL` prints the `(version …)` node from the package's
-   manifest and archive, including `(modules …)`.
+   manifest and archive, including `(modules …)`, `(size …)`, `(tree …)` and
+   `(commands …)`.
 4. **`index.wiz` lists exactly the packages on disk.** `registry.sexpr` repeats the index
    name and format for non-Wiz readers.
 5. **`name@version` is immutable.** Edit neither a published `(version …)` nor its
@@ -129,7 +136,8 @@ The check **makes no network requests by default**. It validates:
   reader already accepts), and duplicate package entries (the reader refuses those);
 * every version parses and appears once; every `toolchain` and every `deps` requirement
   parses as a form of semver (the same parser the resolver uses);
-* every `sha256` is 64 lowercase hex digits;
+* every `sha256` is 64 lowercase hex digits (and, when present, so are `tree` and
+  `commands`);
 * every **local** archive (`packages/…`, a relative path or `file://`): it exists, its
   SHA-256 is recomputed and must equal the entry, and its layout is the fixed
   `NAME-VERSION/` with a `grail.wiz`;
@@ -232,9 +240,9 @@ What TUF calls out, mapped to this design:
 * The signed snapshot, its `(seq)`/`(updated)` policy, and key rotation.
 * A transparency log (Sigsum/Rekor) and a client that verifies inclusion; this is
   explicitly not implemented.
-* `(size BYTES)` and a download cap.
-* A tree hash of the unpacked package (lock v3, R20), so a hand-edited file in
-  `.grail/packages/NAME` is detected.
+* A download cap: `(size BYTES)` is recorded and checked for shape, but `curl` still has
+  no maximum (an endless-data attack is not prevented, only made visible).
+* A SHA-256 tree hash for git dependencies (registry packages have one in lock v3).
 * Automatic publish: the review is still the gate. A bot that rebuilds the archive from
   the tag and compares the hash would make rule 2 load-bearing rather than decorative.
 * A real hosted `wiz-pl/grail-index` with its first packages; the example here is the
@@ -247,6 +255,8 @@ The `=grail-index` group (seven cases) checks the example offline, the CLI's off
 default and its error exit, breaks an archive hash, a requirement and the manifest,
 proves a module-prefix conflict both in the checker and in the resolver, resolves the
 example as a directory, a single file and a `file://` git URL, and checks that `grail
-publish` records module names. The `=grail-deps` group keeps the registry correctness
-cases (caret bounds, retraction, `--locked` without re-resolution, rollback, index pins,
-archive verification).
+publish` records module names. The `=grail-deps` group (24 cases) keeps the registry
+correctness cases (caret bounds, retraction, `--locked` without re-resolution, rollback,
+index pins, archive verification) and adds four lock v3 cases: a deterministic
+round-trip, v1/v2 parsing and refusal of a newer format, an old lock upgraded by
+`update`, and a `grail.local.wiz` override that `--locked` refuses.
