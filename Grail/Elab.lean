@@ -57,7 +57,7 @@ def load (tc : Toolchain) (roots : List System.FilePath) (salt : UInt64) (src : 
       nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := ← tc.smt.resolve }
   let includesResolver := Module.includeResolver includes
   let key := Cache.moduleKey (fun n => if n == mainName then some src else loader n) (headers[·]?) salt mainName
-    own.contains (Module.includeResolver includes)
+    own.contains includesResolver
   let keyStrong := Cache.moduleKeyStrong (fun n => if n == mainName then some src else loader n)
     (headers[·]?) salt mainName own.contains (strongToolchain := tc.tag) (targetTag := tc.targetTag)
     (includes := includesResolver)
