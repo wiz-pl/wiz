@@ -1,0 +1,10 @@
+(index
+  (package "hello"
+    (summary "A greeter built on text")
+    (repo "https://example.org/wiz/hello")
+    (version "1.0.0"
+      (source "packages/hello-1.0.0.tar.gz")
+      (sha256 "6c8ecfcc3b725438192f65ab986644d84e2f4e808cf6d68bd23b0e352c65b4b2")
+      (toolchain ">=0.1.0 <0.3.0")
+      (modules "Hello.Main")
+      (deps (dep "text" "^1")))))
