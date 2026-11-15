@@ -50,7 +50,7 @@ structure Options where
   check : Bool := false
 
 /-- What `run` made: the site's pages, the reference files that are not up to date (with
-`--check`), and whether a reference page was written. -/
+`--check`), and the reference files it wrote. -/
 structure RunResult where
   pages : Nat
   /-- the reference manual files that differ from what the modules say (paths) -/

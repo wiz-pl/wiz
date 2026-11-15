@@ -24,8 +24,6 @@ declaration to its entry here.
 namespace Wiz.Doc
 namespace Reference
 
-open Lean (Json)
-
 /-- One row of the notation table. -/
 structure Op where
   /-- the operator as written, without the spaces of the declaration -/
@@ -76,7 +74,7 @@ own spelling, not a parse: enough to read what the operator expands to. -/
 partial def syntaxText : Syntax → String
   | .missing => "_"
   | .atom _ s => s
-  | .ident _ n => if n.isAnonymous then "_" else n.toString
+  | .ident _ n => n
   | .node _ "null" as => " ".intercalate (as.toList.map syntaxText)
   | .node _ "antiquot" as => match as.toList with
     | [_, x] => "$" ++ syntaxText x
@@ -98,8 +96,11 @@ def assocOf (prec : Nat) (l r : Nat) : String :=
   else if l == prec + 1 && r == prec then "right"
   else "none"
 
-/-- An operator-shaped rule: operator, fixity, precedence, associativity. -/
-def shapeOf (leading : Bool) (p : ParserDescr) (prec : Nat) : Option (String × String × Nat × String) :=
+/-- An operator-shaped rule: operator, fixity, precedence, associativity. A leading rule
+spells `op term`; a trailing one keeps its left operand out of the descriptor (`lhsPrec`
+has it), so an infix rule is `op term` and the other precedence is `lhsPrec`. -/
+def shapeOf (leading : Bool) (lhsPrec : Nat) (p : ParserDescr) (prec : Nat) :
+    Option (String × String × Nat × String) :=
   if leading then
     match p with
     | .seq ps => match ps.toList with
@@ -109,13 +110,17 @@ def shapeOf (leading : Bool) (p : ParserDescr) (prec : Nat) : Option (String × 
   else
     match p with
     | .seq ps => match ps.toList with
-      | [.cat _ l, .atom op, .cat _ r] =>
-        let a := assocOf prec l r
+      | [.atom op, .cat _ r] =>
+        let a := assocOf prec lhsPrec r
         some (opText op, (if a == "left" then "infixl" else if a == "right" then "infixr" else "infix"),
           prec, a)
-      | [.cat _ _, .atom op] => some (opText op, "postfix", prec, "—")
       | _ => none
+    | .atom op => some (opText op, "postfix", prec, "—")
     | _ => none
+
+/-- An operator is a symbol, not a word (`do` is notation too, but not an operator). -/
+def symbolOp (op : String) : Bool :=
+  op.toList.any fun c => !(c.isAlphanum || c == '_' || c.isWhitespace)
 
 /-- The macro rule of `kind`, from the module that declared it. -/
 def macroOf? (states : Array St) (kind : Name) : Option MacroRule :=
@@ -131,26 +136,28 @@ def collectOps (states : Array St) : Array Op := Id.run do
     let cat := st.tables.cats.getD "term" {}
     for t in cat.trailing do
       if seen.contains t.kind then continue
-      match shapeOf false t.p t.prec with
+      match shapeOf false t.lhsPrec t.p t.prec with
       | some (op, fixity, prec, assoc) =>
         seen := seen.insert t.kind
         let (expands, module) := match macroOf? states t.kind with
           | some r => (syntaxText r.template, r.module)
           | none => ("", "")
-        ops := ops.push { op, fixity, prec, assoc, expands, module, kind := t.kind }
+        if !module.isEmpty && symbolOp op then
+          ops := ops.push { op, fixity, prec, assoc, expands, module, kind := t.kind }
       | none => pure ()
     for l in cat.leading do
       if seen.contains l.kind then continue
-      match shapeOf true l.p l.prec with
+      match shapeOf true 0 l.p l.prec with
       | some (op, fixity, prec, assoc) =>
         seen := seen.insert l.kind
         let (expands, module) := match macroOf? states l.kind with
           | some r => (syntaxText r.template, r.module)
           | none => ("", "")
-        ops := ops.push { op, fixity, prec, assoc, expands, module, kind := l.kind }
+        if !module.isEmpty && symbolOp op then
+          ops := ops.push { op, fixity, prec, assoc, expands, module, kind := l.kind }
       | none => pure ()
   pure <| ops.qsort fun a b =>
-    a.prec > b.prec || (a.prec == b.prec && (a.op < b.op || (a.op == b.op && a.kind.toString < b.kind.toString)))
+    a.prec > b.prec || (a.prec == b.prec && (a.op < b.op || (a.op == b.op && a.kind < b.kind)))
 
 /-- Make the manual's data from the modules' pages. -/
 def collect (title : String) (sections : Array Section) (states : Array St) : Data := Id.run do
@@ -166,20 +173,20 @@ def collect (title : String) (sections : Array Section) (states : Array St) : Da
       if i.name.startsWith "_private." || instSeen.contains i.name then continue
       instSeen := instSeen.insert i.name
       if let some d := st.globals.find? i.name then
-        sigs := sigs.insert i.name (d.type.pretty [] d.type (some st.globals))
+        sigs := sigs.insert i.name (Term.pretty [] d.type (some st.globals))
         byClass := byClass.insert i.cls ((byClass.getD i.cls #[]).push i.name)
         for t in (instanceTypes d.type).eraseDups do
           byType := byType.insert t ((byType.getD t #[]).push i.name)
   for (_, es) in sections do
     for e in es do
-      names := names.insert e.name.toString
+      names := names.insert e.name
       declCount := declCount + 1
       sigCount := sigCount + 1
       for k in e.children do
-        names := names.insert k.name.toString
+        names := names.insert k.name
         sigCount := sigCount + 1
-  pure { title, sections, ops := collectOps states, names, byClass, byType, instanceSig := sigs,
-    moduleCount := sections.size, declCount, sigCount }
+  pure ⟨title, sections, collectOps states, names, byClass, byType, sigs, sections.size,
+    declCount, sigCount⟩
 
 /-- The instances of a class declaration, or the instances for a type one, from every
 documented module. -/
@@ -204,7 +211,9 @@ def Data.docHtml (d : Data) (doc : Option String) : String :=
 /-- A doc comment as inline HTML (for a constructor's or field's line). -/
 def Data.docInline (d : Data) (doc : Option String) : String :=
   match doc with
-  | some s => s!" — {inline (fun c => d.href? c) ((s.splitOn "\n\n").headD "").replace "\n" " "}"
+  | some s =>
+    let p := ((s.splitOn "\n\n").headD "").replace "\n" " "
+    s!" — {inline (fun c => d.href? c) p}"
   | none => ""
 
 def mdEscape (s : String) : String := (s.replace "|" "\\|").replace "\n" " "
@@ -263,7 +272,7 @@ module and a subsection per declaration. -/
 def markdown (d : Data) : String :=
   let toc := d.sections.toList.map fun (m, es) =>
     let summary := match moduleDocOf m.src with
-      | some s => s!" — {mdEscape ((s.splitOn "\n\n").headD "")}"
+      | some s => s!" — {mdEscape (docSummary (some s))}"
       | none => ""
     s!"- [{m.name}](#module-{m.name}) ({es.size} declaration{if es.size == 1 then "" else "s"}){summary}"
   let sections := d.sections.toList.map fun (m, es) =>
@@ -302,7 +311,7 @@ def refChildHtml (c : Ctx) (k : Entry) : String :=
     | none => k.name
   s!"<li class=\"{htmlEscape k.kind}\" id=\"{htmlEscape k.name}\">{sigBlock c k short}{docHtml c k.doc}</li>"
 
-def refInstancesHtml (c : Ctx) (d : Data) (e : Entry) : String :=
+def refInstancesHtml (_c : Ctx) (d : Data) (e : Entry) : String :=
   let is := d.instancesFor e
   if is.isEmpty then "" else
   let what := if e.kind == "class" then "Instances of this class" else "Instances for this type"

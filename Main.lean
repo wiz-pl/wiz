@@ -374,8 +374,8 @@ def docCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   let mut assets : Option System.FilePath := none
   for d in (web.toList ++ [base / "web", base / "share" / "wiz" / "web"]) do
     if assets.isNone && (← (d / "scroll.css").pathExists) then assets := some d
-  let o : Doc.Options := { out, sourceUrl := a.sourceUrl, title := a.title.getD "Wiz documentation", web, assets,
-    reference := a.reference.map System.FilePath.mk, check := a.check }
+  let title := a.title.getD (if a.reference.isSome then "Wiz standard library reference" else "Wiz documentation")
+  let o : Doc.Options := { out := out, sourceUrl := a.sourceUrl, title := title, web := web, assets := assets, reference := a.reference.map System.FilePath.mk, check := a.check }
   let r ← Doc.run (fun m => elaborate tc "<doc>" s!"import {m}\n") mods o
   IO.println s!"wiz doc: {r.pages} modules, {out}/index.html"
   for f in r.written do IO.println s!"wiz doc: wrote {f}"

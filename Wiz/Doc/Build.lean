@@ -13,6 +13,8 @@ names the reference files that differ (`--check`).
 
 namespace Wiz.Doc
 
+open Lean (Json)
+
 def run (elabMod : String → IO St) (mods : Array Module) (o : Options) : IO RunResult := do
   IO.FS.createDirAll o.out
   let names := mods.toList.map (·.name)
