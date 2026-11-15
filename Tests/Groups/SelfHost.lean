@@ -2388,7 +2388,7 @@ def selfHostGroup : Group where
         unless !selfBad.isEmpty do throw (IO.userError s!"the self-hosted frontend accepts the bad rewrite:\n{badOut}")
         let expected := "error: " ++ (leanBad.toList.head!).text
         unless selfBad.head! == expected do
-          throw (IO.userError s!"the error texts differ:\nLean: {expected}\nselfhost: {selfBad.head!}") }
+          throw (IO.userError s!"the error texts differ:\nLean: {expected}\nselfhost: {selfBad.head!}") },
     { name := "(A11) a rejected derivation is reported at the command's line and column", run := fun _ =>
         selfhostCheckFails selfhostDerivingSpan selfhostDerivingSpanExpected }
 
