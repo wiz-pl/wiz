@@ -1381,6 +1381,26 @@ no effects, and `value`/`checked` would need property patches. Tests: group `rea
 and `web/framework/test.sh` (Node DOM). Design, survey and migration analysis:
 `wiz-notes/react-framework.md`.
 
+## Web: interactive notebook widgets (`lib/Web/Widget.wiz`)
+
+`import Web.Widget` (over `Web.React`) turns a list of widget **descriptors** into a
+React VDOM fragment: `slider`/`sliderRange`, `button`/`buttonValue`, `text` and `plot`,
+each with an id, a DOM event, a value/label/data and a callback expression naming a
+`Widget.Callback` (`Widget.Event → List Widget.Widget → List Widget.Widget`).
+`Widget.display` returns `WIZ_WIDGET:` plus the rendered HTML and the descriptors;
+`Widget.handle` parses a previous bundle, runs the callback, re-renders both lists and
+returns a `WIZ_WIDGET:` bundle whose `patches` are
+`React.patchesJson (React.Rendered.diff old new)`. The Jupyter kernel
+(`tools/jupyter/wiz_kernel/widgets.py`) turns the display into
+`application/vnd.wiz.widget+json` and a comm, so a slider event re-enters the session
+and the new patches go back on the same comm; `tools/jupyter/static/widget.js` applies
+them with `web/framework/runtime.js` (no second renderer, no Wasm). Tests:
+`web/widget/test.sh` (golden VDOM and patch application under Node),
+`tools/jupyter/tests/test_widgets.py` (comm round trip) and `test_notebook.py`
+(`nbclient`). Limits: no client-side state (every event is a kernel round trip),
+`plot` data is opaque JSON until a `Plot` module lands, and `Owned` cannot be held
+across events.
+
 ## Numbers: classes, integers, words
 
 (Stage doc: docs/stages/07-type-classes.md, 7e and 7f.) The Prelude's `Add`, `Sub`, `Mul`,

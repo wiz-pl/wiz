@@ -8,9 +8,10 @@ Python (standard library plus `pyzmq`), not Lean.
 
 ```
 tools/jupyter/
-  wiz_kernel/            the kernel (wire protocol, drivers, magics)
+  wiz_kernel/            the kernel (wire protocol, drivers, magics, widget comms)
   wiz-kernel/kernel.json the kernelspec template
-  tests/test_kernel.py   protocol-level tests (jupyter_client)
+  static/                widget.js (the front end) and loader.js (classic Notebook glue)
+  tests/                 protocol tests (test_kernel.py, test_widgets.py, test_notebook.py)
   README.md              a short pointer to this page
 ```
 
@@ -106,6 +107,108 @@ start, as it does for a terminal session.
 * `is_complete_request` answers with a bracket/trailing-token heuristic (not a
   parser), so a frontend can decide whether Enter submits.
 
+## Widgets (interactive output)
+
+`lib/Web/Widget.wiz` builds a widget fragment out of **descriptors** and `Widget.display`
+returns it as a pure `String`. The kernel recognises the string, turns it into a
+notebook MIME bundle and opens a Jupyter **comm**; the browser applies the VDOM patches
+the kernel sends back. No Wasm is involved: the Wiz side runs in the kernel's native
+toolchain process, and the browser half is `web/framework/runtime.js`.
+
+```wiz
+import Web.Widget
+
+-- The callback is pure: it receives the event and the widget list as displayed last
+-- time, and returns the next list. The kernel re-evaluates it in the session.
+def onGain (e : Widget.Event) (ws : List Widget.Widget) : List Widget.Widget :=
+  List.map (fun w => match String.eq w.id e.widget with
+    | .true => Widget.setValue w e.value
+    | .false => w) ws
+
+Widget.display [
+  Widget.sliderRange "gain" "input" "0.50" "onGain" "0" "1" "0.05",
+  Widget.button "reset" "click" "Reset" "onGain",
+  Widget.text "name" "input" "ada" "onGain",
+  Widget.plot "trace" "click" "{\"points\":[1,2,3]}" "onGain"
+]
+```
+
+The constructors are `slider` (0–100, step 1) / `sliderRange`, `button` / `buttonValue`,
+`text` and `plot`; each takes an id, the DOM event it forwards, its initial
+value/label/data, and a **callback expression** naming a `Widget.Callback`
+(`Widget.Event → List Widget.Widget → List Widget.Widget`). A widget with an empty
+callback is display-only. `Widget.display` must be the cell's last expression (the
+kernel evaluates a bare final expression); `#eval Widget.display …` also works, and the
+kernel finds the prefixed line in the stream.
+
+The protocol, all of it on the shell/iopub sockets:
+
+* **display** — the string is `WIZ_WIDGET:` plus a JSON bundle
+  (`schema`, `html`, `widgets`, `count`). The kernel adds a `comm_id` and publishes
+  `comm_open` (`target_name: "wiz.widgets"`, `data` = the bundle) before the
+  `execute_result`. That result carries `application/vnd.wiz.widget+json` (the bundle),
+  `text/html` (the SSR fragment wrapped in
+  `<div class="wiz-widget-fragment" data-wiz-widget-comm="ID">`) and a `text/plain`
+  summary.
+* **event** — the front end sends a `comm_msg` with
+  `{method: "event", widget_id, event, value}`. The kernel looks the widget's callback
+  up in `comm_id -> widget id -> callback expression`, evaluates
+  `#eval Widget.handle (<callback>) "<previous bundle>" "<id>" "<event>" "<value>"` in
+  the notebook session, and publishes a `comm_msg` with
+  `{method: "update", bundle, patches}`. `patches` is `React.patchesJson
+  (React.Rendered.diff old new)`, so the browser applies it with the same patch applier
+  as the React framework. A failed callback is `{method: "error", error}`.
+* **close / info** — `comm_close` drops the registry entry (and is echoed on iopub);
+  `comm_info_request` lists the open widget comms. Shutdown sends `comm_close` for
+  each.
+
+The callback is the only thing spliced into the session (it is the notebook author's
+own code, with the authority of a cell); every value that comes back from the browser
+is quoted as a Wiz string literal. One display per cell is shown (the last); the
+bundle can hold any number of widgets.
+
+**Include path.** `Web.Widget` lives in a checkout's `lib/`, not in the toolchain's
+own library, so the kernel must be started with that directory as a module root:
+
+```sh
+PYTHONPATH=tools/jupyter python3 -m wiz_kernel -f connection.json \
+    --toolchain-arg=-I --toolchain-arg="$PWD/lib"
+```
+
+The same flag goes into a kernelspec's `argv` when installing from a branch. The
+tests pass it explicitly.
+
+**Front end.** `tools/jupyter/static/widget.js` is an ES module that imports
+`applyPatches`/`mount` from `web/framework/runtime.js` — there is no second renderer —
+and adds only event extraction (`data-wiz-widget`, `data-wiz-widget-input`,
+`data-wiz-widget-value`) and the comm binding. `loader.js` is the classic Notebook
+glue: it registers the `wiz.widgets` comm target, adopts the SSR fragment (no
+re-render flash) and scans output areas. Load it from `custom.js`:
+
+```js
+// custom.js (classic Notebook / nbclassic): the files are ES modules, so use import()
+import("https://…/tools/jupyter/static/loader.js").then((loader) => loader.install());
+```
+
+JupyterLab needs a mime-renderer extension for `application/vnd.wiz.widget+json` that
+calls `renderMime`; the extension is **not** included, so JupyterLab shows the SSR
+HTML without events.
+
+**What survives the split.** The keyed diff is computed in Wiz (`React.Rendered.diff`,
+`React.patchesJson`) and applied in JS (`move`/`insert`/`remove`/`text`/…), so keyed
+lists keep their identity and minimal moves. Lens state (`React.useState`/`setState`)
+is Wiz-side: the callback recomputes the new widget list from the previous one on every
+event. `React.Owned` is a Wiz typing property inside one evaluation; a linear token
+cannot be held across two `#eval`s or cross the comm, so it does not model a
+browser-held resource. The browser has **no local state and no hooks**: every event is
+a kernel round trip (with the batch driver, a `wiz check` of the whole notebook), and
+the front end adopts server-rendered DOM rather than hydrating state.
+
+**Limits.** `plot` carries opaque JSON in `data-wiz-widget-data` and the front end
+draws a placeholder until a `Plot` module exists. Text/range values are patched as
+attributes, not DOM properties (React's documented limit), so a live input's property
+may not follow an attribute patch. There is no `display_data` stream and no debugger.
+
 ## Magics
 
 `%%scry` runs `scry taint --json` on the cell's **C source** and renders the
@@ -159,9 +262,10 @@ magic. Unknown magics are an `UnknownMagic` error.
   the kernel (which kills the child).
 * **No stdin.** The kernel never sends `input_request`; `allow_stdin` is
   ignored. Programs that read stdin in the REPL's `:run` are not supported.
-* **No rich display or debugger.** Output is streams, `execute_result` text/HTML
-  and errors. `display_data`, widgets, the debug protocol and `user_expressions`
-  (always `{}`) are not implemented.
+* **No `display_data` or debugger.** Output is streams, one `execute_result` (text,
+  HTML or a widget bundle) and errors. Multiple displays per cell, the `display_data`
+  stream, the debug protocol and `user_expressions` (always `{}`) are not
+  implemented. Widgets are the one rich output; see above.
 * **Batch is O(cells²).** The fallback rechecks the notebook per cell; a long
   notebook is slow, and deleting a definition means restarting. A failed cell is
   kept in that accumulated source (as it would be in a file): later cells still
@@ -190,7 +294,17 @@ WIZ_TEST_WIZ=/path/to/wiz python3 -m unittest discover -s tools/jupyter/tests -v
 
 # no Jupyter at all: wire + drivers + a raw-ZeroMQ kernel session
 PYTHONPATH=tools/jupyter python3 -m wiz_kernel --self-test [--wiz PATH]
+
+# the widget VDOM and patches, no browser (Node + web/framework/minidom.mjs)
+WIZ=wiz web/widget/test.sh
 ```
+
+`tests/test_kernel.py` covers the kernel protocol, `tests/test_widgets.py` the widget
+comm round trip (display → `comm_open` → slider event → `comm_msg` with patches, plus
+`comm_info`/`comm_close`), and `tests/test_notebook.py` a real `nbclient` run of a
+notebook (skipped without `nbclient`/`nbformat`). `web/widget/test.sh` is the Wiz-side
+golden: each widget kind's VDOM, the display bundle, and the patches applied to
+minidom (a keyed rotation is moves; a slider change is a `text` patch on its output).
 
 The unittest module skips cleanly when `pyzmq` or `jupyter_client` is missing or
 no `wiz` is found. `$WIZ_TEST_BACKEND` pins `repl`/`batch` (default `auto`);
