@@ -26,12 +26,13 @@ skipped.
 
 Caching.  `--cache DIR` (default `.lake/docs-examples`) holds both Wiz's own
 content-addressed elaboration cache (`--cache DIR/wiz`) and the checker's record of
-blocks that passed, keyed by the block's text, its mode, the expected output and the
-toolchain's version (and size/mtime).  A docs-only change therefore rechecks only the
-snippets that changed; a toolchain change invalidates everything.  Successful results
-only are recorded.  On CI the whole directory is restored/saved under a key derived
-from the Lean sources that build `wiz` (see `.github/workflows/ci.yml`), so a docs-only
-run starts warm.
+blocks that passed, keyed by the block's text, its mode, the expected output, the
+toolchain's version (and size/mtime) and a digest of `lib/`, `runtime/`, `c/` and the
+checker.  A docs-only change therefore rechecks only the snippets that changed; a
+toolchain or library change invalidates everything.  Successful results only are
+recorded.  On CI the whole directory is restored/saved under a key derived from the
+Lean sources that build `wiz` (see `.github/workflows/ci.yml`), so a docs-only run
+starts warm.
 
 Limits.  One block is 64 KiB and 2000 lines at most (`wiz check` is not a fuzz target),
 and each command has a 120-second timeout; both are flags.  A block over a limit is a
@@ -303,11 +304,32 @@ def _toolchain_id(wiz: str) -> str:
     return hashlib.sha256(ident.encode()).hexdigest()
 
 
-def _cache_key(toolchain: str, mode: str, source: str, expected: str | None) -> str:
+def _cache_key(toolchain: str, sources: str, mode: str, source: str, expected: str | None) -> str:
     h = hashlib.sha256()
-    for part in (toolchain, mode, source, expected or ""):
+    for part in (toolchain, sources, mode, source, expected or ""):
         h.update(part.encode())
         h.update(b"\0")
+    return h.hexdigest()
+
+
+def _checkout_digest(root: Path) -> str:
+    """A digest of the Wiz sources a snippet is elaborated against.
+
+    The toolchain's version covers Lean changes; this covers the `.wiz` library, the
+    runtime and C sources (which `wiz run` compiles), and the checker itself.  Without
+    it a `lib/**` change would keep serving a snippet's cached pass.
+    """
+    h = hashlib.sha256()
+    patterns = ("lib/**/*.wiz", "runtime/**", "c/**", "grail.local.wiz",
+                "scripts/check-docs-examples.py")
+    for pattern in patterns:
+        for path in sorted(root.glob(pattern)):
+            if not path.is_file():
+                continue
+            h.update(path.relative_to(root).as_posix().encode())
+            h.update(b"\0")
+            h.update(path.read_bytes())
+            h.update(b"\0")
     return h.hexdigest()
 
 
@@ -364,6 +386,7 @@ def check_blocks(
     cache_dir: Path | None,
     timeout: int,
     toolchain: str,
+    sources: str,
 ) -> tuple[list[str], Report]:
     """Check every Wiz block; return problems and counts."""
     problems: list[str] = []
@@ -392,7 +415,7 @@ def check_blocks(
             continue
         body = fence.body if mode == "run" else _implicit_prelude(fence.body)
         expected, expected_line = expected_output(fences, fence) if mode == "run" else (None, None)
-        key = _cache_key(toolchain, mode, body, expected)
+        key = _cache_key(toolchain, sources, mode, body, expected)
         if use_cache and key in entries:
             report.checked += 1
             report.cached += 1
@@ -473,7 +496,8 @@ def run_check(
             continue  # reported by check_paths
         fences.extend(parse_fences(path, text))
     toolchain = _toolchain_id(wiz)
-    block_problems, report = check_blocks(root, fences, wiz, cache_dir, timeout, toolchain)
+    sources = _checkout_digest(root)
+    block_problems, report = check_blocks(root, fences, wiz, cache_dir, timeout, toolchain, sources)
     report.links = links
     report.refs = refs
     report.problems = path_problems + block_problems
