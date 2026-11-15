@@ -1,6 +1,7 @@
 import Tests.Harness
 import Tests.Grail
 import Wiz.Doc.Site
+import Wiz.Socket
 
 /-! # 11s: doc comments and `wiz doc` (scroll) -/
 
@@ -131,6 +132,36 @@ def runOut (cmd : String) (args : List String) (cwd : Option System.FilePath := 
   pure o.stdout
 
 def wiz : IO String := do pure (← IO.FS.realPath ".lake/build/bin/wiz").toString
+
+/-- A free TCP port on the loopback interface (bound and released: the server test's). -/
+def freePort : IO UInt16 := do
+  let (fd, p) ← Wiz.Socket.tcpListen Wiz.Socket.loopback 0
+  Wiz.Socket.closeFd fd
+  pure p
+
+/-- One HTTP/1.0 GET through already-connected handles; the whole response (the
+documentation server answers with `Connection: close`). -/
+def httpReq (r w : IO.FS.Handle) (path : String) : IO String := do
+  let rs := IO.FS.Stream.ofHandle r
+  let ws := IO.FS.Stream.ofHandle w
+  ws.putStr s!"GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n"
+  ws.flush
+  rs.readToEnd
+
+/-- One HTTP/1.0 GET to a local server. -/
+def httpGet (port : UInt16) (path : String) : IO String := do
+  let (r, w) ← Wiz.Socket.tcpConnect Wiz.Socket.loopback port
+  httpReq r w path
+
+/-- Connect to `port`, retrying while the server starts (about 10 s in all). -/
+def connectSoon (port : UInt16) : IO (Option (IO.FS.Handle × IO.FS.Handle)) := do
+  let rec go : Nat → IO (Option (IO.FS.Handle × IO.FS.Handle))
+    | 0 => pure none
+    | n + 1 => do
+      match ← (try some <$> Wiz.Socket.tcpConnect Wiz.Socket.loopback port catch _ => pure none) with
+      | some c => pure (some c)
+      | none => IO.sleep 25; go n
+  go 400
 
 /-- `wiz doc` on the package's source directory, plain (no Wasm). -/
 def makeSite (dir : System.FilePath) : IO System.FilePath := do
@@ -344,6 +375,51 @@ def docGroup : Group where
         -- the arrow key moves the selection to the next tag
         checkHas o.stdout "data-idx=\"1\" title=\"Shape\""
         check (lines.any (fun l => has l "sel\" data-ref" && has l "data-idx=\"1\"")) o.stdout },
+    { name := "wiz doc --serve: the client is only in served pages, and the server serves the tree and its sources", run := fun _ => do
+        let dir ← mkTree pkgFiles
+        -- (the static site: neither the live client nor the positions it needs)
+        let plain ← makeSite dir
+        let basic ← IO.FS.readFile (plain / "Shapes.Basic.html")
+        check (!has basic "doc-live.js") "a plain page carries the live client"
+        check (!has basic "wiz-doc-serve") "a plain page carries the live data"
+        check (!has basic "data-doc-line") "a plain page carries live positions"
+        -- (a served site: the page presents the client, and the server answers)
+        let port ← freePort
+        let out := dir / "live"
+        let child ← IO.Process.spawn
+          { cmd := ← wiz, args := #["doc", (dir / "src").toString, "-o", out.toString,
+              "--serve", "--port", toString port, "--lsp", "8765"], stdout := .null, stderr := .piped }
+        try
+          let some (r, w) ← connectSoon port | do
+            try child.kill catch _ => pure ()
+            let err ← child.stderr.readToEnd
+            IO.eprintln err
+            skip "the documentation server could not bind its port"
+            return
+          let index ← httpReq r w "/index.html"
+          check (has index "200 OK") s!"GET /index.html: {index.take 200}"
+          check (has index "<title>") index
+          let page ← httpGet port "/Shapes.Basic.html"
+          check (has page "200 OK") s!"GET /Shapes.Basic.html: {page.take 200}"
+          checkHas page "<script type=\"module\" src=\"doc-live.js\"></script>"
+          checkHas page "id=\"wiz-doc-serve\""
+          checkHas page "\"lsp\":\"ws://127.0.0.1:8765\""
+          checkHas page "data-doc-line="
+          -- (the module's source, for the client to open in the server)
+          let src ← httpGet port "/sources/Shapes.Basic.wiz"
+          check (has src "200 OK") s!"GET /sources: {src.take 200}"
+          checkHas src "structure Point"
+          -- (the landing and API pages stay static even when served)
+          check (!has (← httpGet port "/index.html") "doc-live.js") "the index carries the live client"
+          check (!has (← httpGet port "/api.html") "doc-live.js") "the API index carries the live client"
+          -- (no path escapes the generated tree)
+          check (has (← httpGet port "/../etc/passwd") "404") "a path above the site is served"
+        finally
+          try child.kill catch _ => pure () },
+    { name := "wiz doc --serve: --port and --lsp need --serve", run := fun _ => do
+        let o ← IO.Process.output { cmd := ← wiz, args := #["doc", "lib/Prelude.wiz", "-o", "/tmp/wiz-doc-noserve", "--lsp", "8765"] }
+        check (o.exitCode == 2) s!"exit {o.exitCode}"
+        checkHas o.stderr "need --serve" },
     libDocCase
   ]
 

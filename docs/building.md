@@ -520,6 +520,35 @@ sh web/test-bench.sh                            # the generator's fixtures and /
 python3 -m http.server -d doc-site 8000         # then http://127.0.0.1:8000/
 ```
 
+**Live documentation (`wiz doc --serve`).** The generated documentation is static by
+default; `--serve` additionally serves one output tree over HTTP on `127.0.0.1` (port
+8000, `--port N`; `0` takes a free one), and `--lsp PORT` makes the module pages ask a
+running `wiz lsp --ws PORT` for a declaration's real type and doc. The panel appears
+when the connection is up; hovering or clicking a signature shows
+
+* its type and doc comment (`textDocument/hover`, with the server's own doc comment),
+* the goals and expected type at the declaration (`wiz/interactiveGoals` /
+  `wiz/interactiveTermGoal`, with the `plainGoal` fallback), and
+* the document's diagnostics.
+
+The page fetches its module's source from the server (`/sources/A.B.wiz`) and opens it
+with `didOpen`, so the positions are the ones the page was generated from. Start the
+language server from the module root, or with `-I` roots, so its imports resolve:
+
+```sh
+.lake/build/bin/wiz lsp --ws 8765 --no-stdio -I lib &
+.lake/build/bin/wiz doc --lib -o doc-site/docs --web web/out --serve --lsp 8765
+# then http://127.0.0.1:8000/
+```
+
+`--serve` without `--lsp` writes the same documentation plus the inert client: there is
+no socket and no fetch, and the pages read without JavaScript. `?lsp=PORT` (or
+`?lsp=ws://HOST:PORT`, or `?lsp=off`) overrides the endpoint for one page. Only module
+pages carry the client; `index.html` and `api.html` stay static in either mode. The
+server is for development: loopback only, `GET` only, one request per connection, no
+TLS or authentication. Live search results and code actions are not part of it — those
+need an editor's document and its cursor.
+
 `web/build-playground.sh` compiles the self-hosted frontend to WebAssembly, so it is the
 slow part; without `emcc` on `PATH` the script runs Emscripten from nixpkgs. Without
 `--source-url`, the local documentation's source links are plain paths. `docs` and
