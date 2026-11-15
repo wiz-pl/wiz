@@ -318,7 +318,7 @@ def baseline_of(doc):
             for mode in MODES}
 
 
-def check(results, baseline, tolerance, quiet=False):
+def check(results, baseline, tolerance, quiet=False, compare_total=True):
     bad = []
     print(f"\nratio check (baseline × (1 + {tolerance:.0f}%))")
     print(f"{'mode':6s} {'file':28s} {'baseline':>9s} {'now':>9s} {'change':>9s}")
@@ -343,7 +343,8 @@ def check(results, baseline, tolerance, quiet=False):
                 bad.append(f"{mode} {path}: ratio {now:.2f} vs {before:.2f} "
                            f"({100 * change:+.1f}%)")
         before = base.get("total")
-        if before is not None:
+        # A partial run's total is not the corpus total; do not compare it with one.
+        if before is not None and compare_total:
             now = results[mode]["total"]["ratio"]
             change = (now - before) / before if before else 0.0
             mark = "  FAIL" if change * 100 > tolerance else ""
@@ -416,7 +417,7 @@ def main(argv=None):
     print_table(results)
 
     if args.check:
-        code = check(results, baseline, args.tolerance)
+        code = check(results, baseline, args.tolerance, compare_total=not args.only)
         if code:
             return code
 
