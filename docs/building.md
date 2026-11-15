@@ -71,6 +71,61 @@ groups that did not opt in, for auditing one group's isolation — not for CI. O
 runner `--jobs 4` is the useful setting; more jobs only add memory pressure (a case that
 compiles C can peak at a few hundred MB).
 
+### Flaky tests and the quarantine
+
+A failure in a CI shard does not say whether it is deterministic. `scripts/flaky.py`
+reruns the selected cases (or the cases a failed run reported) several times, with a seed
+matrix, and classifies each as **always pass**, **deterministic fail**, **flaky**,
+**always skip**, or **incomplete** (the rerun budget ran out). It also runs a failing
+case alone and then after a shuffled predecessor, so a case that only fails in sequence
+is reported as order dependent. The default budget is 600 seconds; run it under
+`heavy --mem 2G` locally.
+
+```sh
+scripts/flaky.py '=rig' '=toolchain' --repeats 10 --report flaky.json
+scripts/flaky.py --from-log logs/*.log --report flaky.json
+scripts/flaky.py --from-timings timings.jsonl --repeats 5
+scripts/flaky.py --shard library --order-check suspects
+```
+
+`scripts/flaky.py --self-test` exercises the classifier on deliberate fixtures (an
+alternating case, a deterministic failure, a skip, and a case that fails only after a
+predecessor); it needs no test driver and no build.
+
+The seed matrix (`--seeds 11,23,47` or `--seed-base`/`--repeats`) numbers the reruns,
+chooses the shuffled predecessor, and is exported as `FLAKY_SEED`. The order check runs
+a suspect alone and then after a predecessor from the same group by default
+(`--predecessor-scope selected|group|all`); a case that passes alone and fails in
+sequence is reported as order dependent and classified as flaky.
+
+The driver has no JUnit output: `--from-log` reads its stdout (the `test-log-*`
+artifacts) and `--from-timings` its `--timings` JSONL. `--from-junit` is accepted for a
+JUnit file produced elsewhere. A skip is not a pass; a timeout is recorded, never
+counted as a pass. A pass beside a timeout is flaky; a pass/skip mixture is incomplete.
+Exit status: 0 clean, 1 deterministic failure or expired quarantine, 2 usage/input
+error, 3 an unquarantined flaky case, 4 the budget ran out.
+
+Known flakes live in `.github/flaky-quarantine.json` (data only; no code). Every entry
+has a `group`, a `case`, a fixed `expires` date (`YYYY-MM-DD`) and a `reason`; `owner`,
+`issue` and `index` are optional:
+
+```json
+{
+  "version": 1,
+  "entries": [
+    {"group": "rig", "case": "a case name", "index": 3,
+     "expires": "2026-12-01", "reason": "intermittent, see the linked issue",
+     "owner": "the area's maintainer", "issue": "#123"}
+  ]
+}
+```
+
+`scripts/flaky.py --check-quarantine` exits 1 from the expiry date on, so a flake cannot
+be parked indefinitely. An active entry makes the verdict of a flaky case exit 0; it
+never turns a deterministic failure into a pass. Add an entry in a PR with a reason and
+an expiry that leaves time to fix or replace the test; refresh the date only with a new
+reason, never by deleting the entry silently.
+
 **Embedded files.** Lake does not track files a module reads with `include_str`, so each
 embedded file gets a library of its own whose `needs` names the file as an
 `input_file` (`lakefile.lean`): Lake mixes the file's content hash into that library's
