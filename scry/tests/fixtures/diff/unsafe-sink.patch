@@ -1,0 +1,7 @@
+diff --git a/tests/fixtures/taint-unsafe.c b/tests/fixtures/taint-unsafe.c
+index 3f16993..59b0553 100644
+--- a/tests/fixtures/taint-unsafe.c
++++ b/tests/fixtures/taint-unsafe.c
+@@ -7 +7 @@ int main(void) {
+-  system(cmd);
++  system(cmd); /* changed */

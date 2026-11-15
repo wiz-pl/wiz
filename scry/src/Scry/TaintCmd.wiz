@@ -10,6 +10,7 @@ import Scry.RuleTaint
 import Scry.Interproc
 import Scry.Sarif
 import Scry.Certify
+import Scry.Diff
 /-!
 # Scry.TaintCmd: the `scry taint` pipeline
 
@@ -19,6 +20,7 @@ SARIF 2.1.0. The command is the vertical slice the design's §7.1 CLI calls for:
 ```
 scry taint FILE.c [--rules FILE] [--sarif OUT] [--json]
                   [--allow-errors] [--fail-on-finding] [--origin-map]
+                  [--diff BASE|all] [--changed-lines FILE] [--diff-context N]
 ```
 
 * **parse.** `Scry.Native.parse`/`toCstStore` (S1). Tree-sitter recovers from syntax
@@ -44,6 +46,15 @@ scry taint FILE.c [--rules FILE] [--sarif OUT] [--json]
 warning is present, for use as a CI gate. Without it the exit status is 0 after a
 successful analysis. `--origin-map` prints the `(function, program point) -> span` table
 the analyser used, which is useful when a finding's span looks surprising.
+
+`--diff BASE` / `--changed-lines FILE` filter the human and JSON report to the findings
+whose sink line, or one of whose path steps, is on a changed line (`Scry.Diff`). A
+suppressed finding is counted in the summary, never dropped silently. `--diff all` is
+the unfiltered mode; without a diff flag the output is unchanged. SARIF is written
+complete: suppressed results keep `baselineState: unchanged` when the diff proves it and
+omit the state when it cannot decide (binary, no matching entry), so uploads can diff it
+without claiming an untouched finding was fixed. `partialFingerprints.scry/v1` is the
+line-independent baseline id.
 -/
 
 -- ## Options
@@ -63,9 +74,15 @@ structure Scry.TaintOpts where
   failOnFinding : Bool
   /-- `--origin-map`: print the point -> span table. -/
   showOriginMap : Bool
+  /-- `--diff BASE`: filter to the changed lines of `git diff -U0 BASE`, or `all`. -/
+  diff : Option String
+  /-- `--changed-lines FILE`: filter to the changed lines of a saved unified diff. -/
+  changedLines : Option String
+  /-- `--diff-context N`: widen the changed hunks by N lines either side. -/
+  diffContext : Option Nat
 
 def Scry.emptyTaintOpts (file : String) : Scry.TaintOpts :=
-  Scry.TaintOpts.mk file .none .none .false .false .false .false
+  Scry.TaintOpts.mk file .none .none .false .false .false .false .none .none .none
 
 /-- Print a line on stdout (the CLI's `say`; `Scry.say` lives in `Scry.Cli`, which
 imports this module, so it cannot be used here). -/
@@ -74,6 +91,7 @@ def Scry.taintSay (s : String) : EIO Unit := EIO.lift (IO.println s)
 def Scry.taintUsage : String :=
   "usage: scry taint FILE.c [--rules FILE] [--sarif OUT] [--json]\n"
   ++ "                      [--allow-errors] [--fail-on-finding] [--origin-map]\n"
+  ++ "                      [--diff BASE|all] [--changed-lines FILE] [--diff-context N]\n"
 
 /-- Parse the flags after `scry taint`. Flags may come in any order; the first
 non-flag argument is the C source. -/
@@ -93,6 +111,17 @@ partial def Scry.taintArgsGo (file : Option String) (o : Scry.TaintOpts) :
     | "--allow-errors" => Scry.taintArgsGo file { o with allowErrors := .true } rest
     | "--fail-on-finding" => Scry.taintArgsGo file { o with failOnFinding := .true } rest
     | "--origin-map" => Scry.taintArgsGo file { o with showOriginMap := .true } rest
+    | "--diff" => match rest with
+      | .cons p more => Scry.taintArgsGo file { o with diff := .some p } more
+      | .nil => .error "--diff needs a base revision or 'all'"
+    | "--changed-lines" => match rest with
+      | .cons p more => Scry.taintArgsGo file { o with changedLines := .some p } more
+      | .nil => .error "--changed-lines needs a unified-diff file"
+    | "--diff-context" => match rest with
+      | .cons p more => match String.parseNat p with
+        | .some n => Scry.taintArgsGo file { o with diffContext := .some n } more
+        | .none => .error ("--diff-context needs a number, not \"" ++ p ++ "\"")
+      | .nil => .error "--diff-context needs a number"
     | "--help" => .error Scry.taintUsage
     | _ => match String.startsWith a "--" with
       | .true => .error ("unknown flag " ++ a ++ "\n" ++ Scry.taintUsage)
@@ -101,7 +130,17 @@ partial def Scry.taintArgsGo (file : Option String) (o : Scry.TaintOpts) :
         | .none => Scry.taintArgsGo (.some a) o rest
 
 def Scry.taintArgs (args : List String) : Except String Scry.TaintOpts :=
-  Scry.taintArgsGo .none (Scry.emptyTaintOpts "") args
+  match Scry.taintArgsGo .none (Scry.emptyTaintOpts "") args with
+  | .error e => .error e
+  | .ok o => match o.diff, o.changedLines with
+    | .some _, .some _ => .error "--diff and --changed-lines are mutually exclusive"
+    | .some "all", .none => match o.diffContext with
+      | .some _ => .error "--diff-context has no effect with --diff all"
+      | .none => .ok o
+    | .none, .none => match o.diffContext with
+      | .some _ => .error "--diff-context needs --diff or --changed-lines"
+      | .none => .ok o
+    | _, _ => .ok o
 
 -- ## The rule pack
 
@@ -202,8 +241,6 @@ def Scry.locationText (m : Scry.OriginMap) (func : String) (point : Nat) : Strin
   | .some o => o.uri ++ ":" ++ Nat.repr o.line ++ ":" ++ Nat.repr o.column
   | .none => func ++ ":" ++ Nat.repr point
 
--- ## Lowering-boundary warnings
-
 /-- A non-finding diagnostic with a source location: a lowering-boundary warning (a
 construct S2 could not model; `rule` is `lowering-boundary`) or a memory warning from the
 points-to layer (`unknown-memory`, `use-after-free`, `unknown-indirect`,
@@ -217,6 +254,271 @@ structure Scry.BoundaryFinding where
   /-- The program point it belongs to (0 for a lowering warning). -/
   point : Nat
   origin : Option Scry.Origin
+
+-- ## Diff-aware review mode
+--
+-- `--diff BASE` / `--changed-lines FILE` report the findings whose sink line, or one of
+-- whose path steps, is on a changed line. Everything on an unchanged line is suppressed
+-- **with a count**, never silently: the human summary and the JSON `diff` object name
+-- the suppressed counts. A finding whose sink has no origin is shown (unlocated): the
+-- filter cannot prove it is unchanged. A finding in a file that has no diff entry is
+-- suppressed as unchanged, and the summary says the match failed.
+--
+-- SARIF stays complete even in diff mode (a suppressed result is `baselineState:
+-- unchanged`, an in-diff one `new`), so an upload diff never marks an untouched finding
+-- as fixed. `partialFingerprints.scry/v1` is the line-independent semantic id.
+
+structure Scry.DiffMode where
+  label : String
+  context : Nat
+  all : Bool
+  selection : Scry.DiffSelection
+  /-- The diff parsed to no files (the analysed file is unchanged). -/
+  emptyDiff : Bool
+  /-- How many files the diff mentioned (for the summary). -/
+  files : Nat
+
+structure Scry.DiffHit where
+  /-- Show it in the review output? -/
+  visible : Bool
+  /-- `sink`, `path`, `unlocated`, `binary`, `all`, `unchanged`, `no-entry`, `empty`,
+  `deleted`, `no-hunk`. -/
+  matchedBy : String
+  /-- The matching new-file line (0 when there is none). -/
+  line : Nat
+
+structure Scry.DiffTally where
+  shown : Nat
+  suppressed : Nat
+  unlocated : Nat
+
+/-- An empty selection (the `--diff all` mode still carries one for uniform rendering). -/
+def Scry.emptyDiffSelection : Scry.DiffSelection :=
+  Scry.DiffSelection.mk "" .false .false .false .false .none 0 .nil 0 0
+
+def Scry.loadDiffMode (o : Scry.TaintOpts) : EIO (Option Scry.DiffMode) :=
+  let context := match o.diffContext with
+    | .some n => n
+    | .none => 0;
+  match o.diff, o.changedLines with
+  | .none, .none => EIO.pure .none
+  | .some "all", .none => EIO.pure (.some (Scry.DiffMode.mk "--diff all" context
+      .true Scry.emptyDiffSelection .false 0))
+  | .some base, .none => do
+    out ← Process.output "git"
+      ["diff", "-U0", "--no-color", "-M", base, "--", o.file] "";
+    match out.status.success with
+    | .true =>
+      let fs := Scry.parseDiff out.stdout;
+      EIO.pure (.some (Scry.DiffMode.mk ("--diff " ++ base) context .false
+        (Scry.diffSelect o.file context fs) (List.isEmpty fs) (List.length fs)))
+    | .false => EIO.fail ("git diff " ++ base ++ " failed ("
+        ++ out.status.toString ++ ")" ++ match String.trim out.stderr with
+          | "" => ""
+          | e => ": " ++ e)
+  | .none, .some p => do
+    text ← FS.readFile p;
+    let fs := Scry.parseDiff text;
+    EIO.pure (.some (Scry.DiffMode.mk ("--changed-lines " ++ p) context .false
+      (Scry.diffSelect o.file context fs) (List.isEmpty fs) (List.length fs)))
+  | .some _, .some _ => EIO.fail "--diff and --changed-lines are mutually exclusive"
+
+/-- The first path step whose origin is on a changed line. -/
+def Scry.firstChangedPathLine (dm : Scry.DiffMode) (m : Scry.OriginMap) :
+    List Scry.PathNode → Option Nat
+  | .nil => .none
+  | .cons p rest => match Scry.originAt m p.func p.point with
+    | .some o => match Scry.diffLineInRanges o.line dm.selection.ranges with
+      | .true => .some o.line
+      | .false => Scry.firstChangedPathLine dm m rest
+    | .none => Scry.firstChangedPathLine dm m rest
+
+/-- Why the file as a whole cannot be filtered by lines, if it cannot. -/
+def Scry.diffFileVerdict (dm : Scry.DiffMode) : Option Scry.DiffHit :=
+  match dm.all with
+  | .true => .some (Scry.DiffHit.mk .true "all" 0)
+  | .false => match dm.selection.binary with
+    | .true => .some (Scry.DiffHit.mk .true "binary" 0)
+    | .false => match dm.emptyDiff with
+      | .true => .some (Scry.DiffHit.mk .false "empty" 0)
+      | .false => match dm.selection.matched with
+        | .false => .some (Scry.DiffHit.mk .false "no-entry" 0)
+        | .true => match dm.selection.deleted with
+          | .true => .some (Scry.DiffHit.mk .false "deleted" 0)
+          | .false => match dm.selection.hunks with
+            | .zero => .some (Scry.DiffHit.mk .false "no-hunk" 0)
+            | _ => .none
+
+def Scry.diffHitFinding (dm : Scry.DiffMode) (m : Scry.OriginMap)
+    (f : Scry.RuleFinding) : Scry.DiffHit :=
+  match Scry.diffFileVerdict dm with
+  | .some h => h
+  | .none => match Scry.originAt m f.func f.sink with
+    | .some o => match Scry.diffLineInRanges o.line dm.selection.ranges with
+      | .true => Scry.DiffHit.mk .true "sink" o.line
+      | .false => match Scry.firstChangedPathLine dm m f.path with
+        | .some line => Scry.DiffHit.mk .true "path" line
+        | .none => Scry.DiffHit.mk .false "unchanged" o.line
+    | .none => match Scry.firstChangedPathLine dm m f.path with
+      | .some line => Scry.DiffHit.mk .true "path" line
+      | .none => Scry.DiffHit.mk .true "unlocated" 0
+
+def Scry.diffHitBoundary (dm : Scry.DiffMode) (b : Scry.BoundaryFinding) : Scry.DiffHit :=
+  match Scry.diffFileVerdict dm with
+  | .some h => h
+  | .none => match b.origin with
+    | .some o => match Scry.diffLineInRanges o.line dm.selection.ranges with
+      | .true => Scry.DiffHit.mk .true "sink" o.line
+      | .false => Scry.DiffHit.mk .false "unchanged" o.line
+    | .none => Scry.DiffHit.mk .true "unlocated" 0
+
+def Scry.diffTally : List Scry.DiffHit → Scry.DiffTally
+  | .nil => Scry.DiffTally.mk 0 0 0
+  | .cons h rest =>
+    let t := Scry.diffTally rest;
+    match h.visible with
+    | .true => match String.eq h.matchedBy "unlocated" with
+      | .true => { t with unlocated := Nat.succ t.unlocated }
+      | .false => { t with shown := Nat.succ t.shown }
+    | .false => { t with suppressed := Nat.succ t.suppressed }
+
+-- ## Rendering the diff summary
+
+def Scry.diffLineText (h : Scry.DiffHit) : String :=
+  match h.matchedBy with
+  | "sink" => "diff: sink line " ++ Nat.repr h.line
+  | "path" => "diff: path step on line " ++ Nat.repr h.line
+  | "unlocated" => "diff: no source line (shown; cannot prove it is unchanged)"
+  | "binary" => "diff: binary file (shown; no line mapping)"
+  | _ => ""
+
+def Scry.diffHeaderLines (dm : Scry.DiffMode) : List String :=
+  match dm.all with
+  | .true => List.cons "diff: all findings (--diff all; no filtering)" .nil
+  | .false =>
+    let base := "diff: " ++ dm.label ++ "; " ++ Nat.repr dm.selection.hunks
+      ++ " hunk(s) in " ++ Nat.repr dm.files ++ " file(s), "
+      ++ Nat.repr dm.selection.addedLines ++ " added line(s), "
+      ++ Nat.repr dm.selection.changedLines ++ " line(s) in scope, context "
+      ++ Nat.repr dm.context
+      ++ (match dm.selection.renamedFrom with
+        | .some old => " (renamed from " ++ old ++ ")"
+        | .none => "");
+    let notes := List.append
+      (match dm.emptyDiff with
+        | .true => List.cons "  note: the diff is empty; the file is unchanged" .nil
+        | .false => match dm.selection.matched with
+          | .false => List.cons ("  note: no diff entry matches \"" ++ dm.selection.path
+              ++ "\"; treating it as unchanged (check the path spelling)") .nil
+          | .true => .nil)
+      (List.append
+        (match dm.selection.ambiguous with
+          | .true => List.cons "  note: several diff entries match; using their union" .nil
+          | .false => .nil)
+        (List.append
+          (match dm.selection.binary with
+            | .true => List.cons "  note: binary in the diff; no line mapping, findings are shown" .nil
+            | .false => .nil)
+          (match dm.selection.deleted with
+            | .true => List.cons "  note: deleted in the diff; there are no new lines" .nil
+            | .false => .nil)));
+    List.cons base notes
+
+def Scry.diffSummaryLines (dm : Scry.DiffMode) (f b mm : Scry.DiffTally) : List String :=
+  match dm.all with
+  | .true => .nil
+  | .false =>
+    let fLine := "diff: " ++ Nat.repr f.shown ++ " finding(s) shown, "
+      ++ Nat.repr f.suppressed ++ " suppressed on unchanged lines"
+      ++ (match f.unlocated with
+        | .zero => ""
+        | n => ", " ++ Nat.repr n ++ " unlocated (also shown)");
+    let bLine := match Nat.add b.shown b.suppressed with
+      | .zero => ""
+      | _ => "diff: " ++ Nat.repr b.shown ++ " boundary warning(s) shown, "
+        ++ Nat.repr b.suppressed ++ " suppressed on unchanged lines"
+        ++ (match b.unlocated with
+          | .zero => ""
+          | n => ", " ++ Nat.repr n ++ " unlocated (also shown)");
+    let mLine := match Nat.add mm.shown mm.suppressed with
+      | .zero => ""
+      | _ => "diff: " ++ Nat.repr mm.shown ++ " memory warning(s) shown, "
+        ++ Nat.repr mm.suppressed ++ " suppressed on unchanged lines"
+        ++ (match mm.unlocated with
+          | .zero => ""
+          | n => ", " ++ Nat.repr n ++ " unlocated (also shown)");
+    List.cons fLine (List.append
+      (match String.eq bLine "" with | .true => .nil | .false => List.cons bLine .nil)
+      (match String.eq mLine "" with | .true => .nil | .false => List.cons mLine .nil))
+
+-- ## JSON
+
+def Scry.diffTallyJson (t : Scry.DiffTally) : Json :=
+  Json.mkObj
+    [ ("shown", Json.ofNat t.shown)
+    , ("suppressed", Json.ofNat t.suppressed)
+    , ("unlocated", Json.ofNat t.unlocated) ]
+
+def Scry.diffRangesJson (rs : List (Nat × Nat)) : Json :=
+  Json.mkArr (List.map (fun p => Json.mkObj
+    [("start", Json.ofNat p.1), ("end", Json.ofNat p.2)]) rs)
+
+def Scry.diffJson (dm : Scry.DiffMode) (file : String) (f b mm : Scry.DiffTally) : Json :=
+  Json.mkObj
+    [ ("mode", Json.mkStr (match dm.all with | .true => "all" | .false => "changed"))
+    , ("argument", Json.mkStr dm.label)
+    , ("context", Json.ofNat dm.context)
+    , ("file", Json.mkStr file)
+    , ("filtered", Json.mkBool (Bool.not dm.all))
+    , ("matchedPath", Json.mkStr dm.selection.path)
+    , ("matched", Json.mkBool dm.selection.matched)
+    , ("ambiguous", Json.mkBool dm.selection.ambiguous)
+    , ("binary", Json.mkBool dm.selection.binary)
+    , ("deleted", Json.mkBool dm.selection.deleted)
+    , ("emptyDiff", Json.mkBool dm.emptyDiff)
+    , ("files", Json.ofNat dm.files)
+    , ("hunks", Json.ofNat dm.selection.hunks)
+    , ("addedLines", Json.ofNat dm.selection.addedLines)
+    , ("changedLines", Json.ofNat dm.selection.changedLines)
+    , ("changedRanges", Scry.diffRangesJson dm.selection.ranges)
+    , ("renamedFrom", match dm.selection.renamedFrom with
+        | .some p => Json.mkStr p
+        | .none => Json.mkNull)
+    , ("findings", Scry.diffTallyJson f)
+    , ("boundary", Scry.diffTallyJson b)
+    , ("memory", Scry.diffTallyJson mm)
+    , ("note", Json.mkStr (match dm.all with
+        | .true => "no filtering; the report is complete"
+        | .false => "findings on unchanged lines are suppressed with a count; SARIF keeps them with baselineState unchanged")) ]
+
+def Scry.diffHitJson (h : Scry.DiffHit) : Json :=
+  let inHunk := Bool.or (String.eq h.matchedBy "sink") (String.eq h.matchedBy "path");
+  Json.mkObj
+    [ ("inChangedHunk", Json.mkBool inHunk)
+    , ("shown", Json.mkBool h.visible)
+    , ("matchedBy", Json.mkStr h.matchedBy)
+    , ("line", Json.ofNat h.line) ]
+
+-- ## SARIF baseline state
+
+/-- In diff mode, an in-diff result is `new` and a finding the diff proves unchanged is
+`unchanged`. No state is claimed when the diff cannot decide (binary, no matching diff
+entry, a deleted file) or outside diff mode (`--diff all`, no flag). -/
+def Scry.baselineState (dm : Option Scry.DiffMode) (h : Scry.DiffHit) : Option String :=
+  match dm with
+  | .none => .none
+  | .some m => match m.all with
+    | .true => .none
+    | .false => match h.matchedBy with
+      | "sink" => .some "new"
+      | "path" => .some "new"
+      | "unlocated" => .some "new"
+      | "unchanged" => .some "unchanged"
+      | "empty" => .some "unchanged"
+      | "no-hunk" => .some "unchanged"
+      | _ => .none
+
+-- ## Lowering-boundary warnings
 
 def Scry.boundaryOfWarning (uri text : String) (w : Scry.Warning) : Scry.BoundaryFinding :=
   Scry.BoundaryFinding.mk "scry/lowering/boundary" w.message w.func 0
@@ -271,6 +573,75 @@ def Scry.renderOriginEntry (e : Scry.OriginEntry) : String :=
 def Scry.renderOriginMap (m : Scry.OriginMap) : String :=
   String.intercalate "\n" (List.map Scry.renderOriginEntry m)
 
+-- ## Diff-filtered output rows
+
+structure Scry.FindingRow where
+  f : Scry.RuleFinding
+  checked : Bool
+  hit : Option Scry.DiffHit
+
+structure Scry.WarnRow where
+  w : Scry.BoundaryFinding
+  hit : Option Scry.DiffHit
+
+partial def Scry.findingRows : List Scry.RuleFinding → List Bool → List Scry.DiffHit →
+    List Scry.FindingRow
+  | .nil, _, _ => .nil
+  | .cons f fs, .cons c cs, .cons h hs =>
+    List.cons (Scry.FindingRow.mk f c (.some h)) (Scry.findingRows fs cs hs)
+  | .cons f fs, .cons c cs, .nil =>
+    List.cons (Scry.FindingRow.mk f c .none) (Scry.findingRows fs cs .nil)
+  | .cons f fs, .nil, .cons h hs =>
+    List.cons (Scry.FindingRow.mk f .false (.some h)) (Scry.findingRows fs .nil hs)
+  | .cons f fs, .nil, .nil =>
+    List.cons (Scry.FindingRow.mk f .false .none) (Scry.findingRows fs .nil .nil)
+
+partial def Scry.warnRows : List Scry.BoundaryFinding → List Scry.DiffHit →
+    List Scry.WarnRow
+  | .nil, _ => .nil
+  | .cons w ws, .cons h hs =>
+    List.cons (Scry.WarnRow.mk w (.some h)) (Scry.warnRows ws hs)
+  | .cons w ws, .nil => List.cons (Scry.WarnRow.mk w .none) (Scry.warnRows ws .nil)
+
+def Scry.rowVisible (hit : Option Scry.DiffHit) : Bool :=
+  match hit with
+  | .none => .true
+  | .some h => h.visible
+
+def Scry.renderFindingHit (m : Scry.OriginMap) (row : Scry.FindingRow) : String :=
+  let base := Scry.renderFinding m row.f row.checked;
+  match row.hit with
+  | .none => base
+  | .some h => match String.eq (Scry.diffLineText h) "" with
+    | .true => base
+    | .false => base ++ "\n  " ++ Scry.diffLineText h
+
+def Scry.renderBoundaryHit (row : Scry.WarnRow) : String :=
+  let base := Scry.renderBoundary row.w;
+  match row.hit with
+  | .none => base
+  | .some h => match String.eq (Scry.diffLineText h) "" with
+    | .true => base
+    | .false => base ++ " [" ++ Scry.diffLineText h ++ "]"
+
+def Scry.printFindingRows (m : Scry.OriginMap) (rs : List Scry.FindingRow) : EIO Unit :=
+  match rs with
+  | .nil => EIO.pure ()
+  | .cons r rest => match Scry.rowVisible r.hit with
+    | .true => do
+      Scry.taintSay (Scry.renderFindingHit m r);
+      Scry.printFindingRows m rest
+    | .false => Scry.printFindingRows m rest
+
+def Scry.printWarnRows (rs : List Scry.WarnRow) : EIO Unit :=
+  match rs with
+  | .nil => EIO.pure ()
+  | .cons r rest => match Scry.rowVisible r.hit with
+    | .true => do
+      Scry.taintSay (Scry.renderBoundaryHit r);
+      Scry.printWarnRows rest
+    | .false => Scry.printWarnRows rest
+
 -- ## JSON
 
 def Scry.originJson (o : Scry.Origin) : Json :=
@@ -294,36 +665,52 @@ def Scry.pathNodeJson (p : Scry.PathNode) : Json :=
     , ("var", Json.ofNat p.var)
     , ("kind", Json.mkStr (Scry.PathKind.show p.kind)) ]
 
-def Scry.findingJson (m : Scry.OriginMap) (f : Scry.RuleFinding) (checked : Bool) : Json :=
-  Json.mkObj
-    [ ("rule", Json.mkStr f.rule)
-    , ("severity", Json.mkStr (Scry.Severity.show f.severity))
-    , ("kind", Json.mkStr (Scry.FindingKind.show f.kind))
-    , ("message", Json.mkStr f.message)
-    , ("function", Json.mkStr f.func)
-    , ("point", Json.ofNat f.sink)
-    , ("callee", Json.mkStr f.name)
-    , ("argument", Json.ofNat f.arg)
-    , ("derivation", Json.mkStr (Scry.statusText checked))
-    , ("location", Scry.tlocationJson m f.func f.sink)
-    , ("path", Json.mkArr (List.map Scry.pathNodeJson f.path)) ]
+def Scry.findingFields (m : Scry.OriginMap) (f : Scry.RuleFinding)
+    (checked : Bool) : List (String × Json) :=
+  [ ("rule", Json.mkStr f.rule)
+  , ("severity", Json.mkStr (Scry.Severity.show f.severity))
+  , ("kind", Json.mkStr (Scry.FindingKind.show f.kind))
+  , ("message", Json.mkStr f.message)
+  , ("function", Json.mkStr f.func)
+  , ("point", Json.ofNat f.sink)
+  , ("callee", Json.mkStr f.name)
+  , ("argument", Json.ofNat f.arg)
+  , ("derivation", Json.mkStr (Scry.statusText checked))
+  , ("location", Scry.tlocationJson m f.func f.sink)
+  , ("path", Json.mkArr (List.map Scry.pathNodeJson f.path)) ]
 
-def Scry.boundaryJson (b : Scry.BoundaryFinding) : Json :=
+def Scry.findingJson (m : Scry.OriginMap) (f : Scry.RuleFinding) (checked : Bool) : Json :=
+  Json.mkObj (Scry.findingFields m f checked)
+
+/-- A finding's JSON plus its diff verdict (only used in diff mode). -/
+def Scry.findingJsonHit (m : Scry.OriginMap) (f : Scry.RuleFinding) (checked : Bool)
+    (hit : Scry.DiffHit) : Json :=
+  Json.mkObj (List.append (Scry.findingFields m f checked)
+    (List.cons ("diff", Scry.diffHitJson hit) .nil))
+
+def Scry.boundaryFields (b : Scry.BoundaryFinding) : List (String × Json) :=
   let loc := match b.origin with
     | .some o => Scry.originJson o
     | .none => Json.mkObj [("function", Json.mkStr b.func), ("programPoint", Json.ofNat b.point)];
   let kindText := match String.startsWith b.rule "scry/memory/" with
     | .true => "memory"
     | .false => "boundary";
-  Json.mkObj
-    [ ("rule", Json.mkStr b.rule)
-    , ("severity", Json.mkStr "warning")
-    , ("kind", Json.mkStr kindText)
-    , ("message", Json.mkStr b.message)
-    , ("function", Json.mkStr b.func)
-    , ("point", Json.ofNat b.point)
-    , ("derivation", Json.mkStr "unchecked")
-    , ("location", loc) ]
+  [ ("rule", Json.mkStr b.rule)
+  , ("severity", Json.mkStr "warning")
+  , ("kind", Json.mkStr kindText)
+  , ("message", Json.mkStr b.message)
+  , ("function", Json.mkStr b.func)
+  , ("point", Json.ofNat b.point)
+  , ("derivation", Json.mkStr "unchecked")
+  , ("location", loc) ]
+
+def Scry.boundaryJson (b : Scry.BoundaryFinding) : Json :=
+  Json.mkObj (Scry.boundaryFields b)
+
+/-- A warning's JSON plus its diff verdict (only used in diff mode). -/
+def Scry.boundaryJsonHit (b : Scry.BoundaryFinding) (hit : Scry.DiffHit) : Json :=
+  Json.mkObj (List.append (Scry.boundaryFields b)
+    (List.cons ("diff", Scry.diffHitJson hit) .nil))
 
 def Scry.checkedCount (flags : List Bool) : Nat :=
   List.length (List.filter (fun b => b) flags)
@@ -423,9 +810,22 @@ def Scry.printBoundaries (bs : List Scry.BoundaryFinding) : EIO Unit :=
     Scry.taintSay (Scry.renderBoundary b);
     Scry.printBoundaries rest
 
+def Scry.printLines : List String → EIO Unit
+  | .nil => EIO.pure ()
+  | .cons s rest => do
+    Scry.taintSay s;
+    Scry.printLines rest
+
+def Scry.baselineOfRow (dm : Option Scry.DiffMode) (hit : Option Scry.DiffHit) :
+    Option String :=
+  match hit with
+  | .some h => Scry.baselineState dm h
+  | .none => .none
+
 /-- The whole pipeline for one file, rendered. Returns the process status. -/
 def Scry.runTaint (o : Scry.TaintOpts) : EIO Nat := do
   rep ← Scry.analyzeFile o;
+  dmOpt ← Scry.loadDiffMode o;
   let errs := rep.parseErrors;
   let findings := rep.findings;
   let checks := rep.checks;
@@ -435,29 +835,85 @@ def Scry.runTaint (o : Scry.TaintOpts) : EIO Nat := do
   let pack := rep.pack;
   let checked := Scry.checkedCount checks;
   let unchecked := Nat.sub (List.length findings) checked;
+  let fhits : List Scry.DiffHit := match dmOpt with
+    | .none => .nil
+    | .some dm => match dm.all with
+      | .true => .nil
+      | .false => List.map (fun f => Scry.diffHitFinding dm origins f) findings;
+  let bhits : List Scry.DiffHit := match dmOpt with
+    | .none => .nil
+    | .some dm => match dm.all with
+      | .true => .nil
+      | .false => List.map (fun b => Scry.diffHitBoundary dm b) boundaries;
+  let mhits : List Scry.DiffHit := match dmOpt with
+    | .none => .nil
+    | .some dm => match dm.all with
+      | .true => .nil
+      | .false => List.map (fun b => Scry.diffHitBoundary dm b) memory;
+  let frows := Scry.findingRows findings checks fhits;
+  let brows := Scry.warnRows boundaries bhits;
+  let mrows := Scry.warnRows memory mhits;
+  let ft := match dmOpt with
+    | .some dm => match dm.all with
+      | .true => Scry.DiffTally.mk (List.length findings) 0 0
+      | .false => Scry.diffTally fhits
+    | .none => Scry.diffTally fhits;
+  let bt := match dmOpt with
+    | .some dm => match dm.all with
+      | .true => Scry.DiffTally.mk (List.length boundaries) 0 0
+      | .false => Scry.diffTally bhits
+    | .none => Scry.diffTally bhits;
+  let mt := match dmOpt with
+    | .some dm => match dm.all with
+      | .true => Scry.DiffTally.mk (List.length memory) 0 0
+      | .false => Scry.diffTally mhits
+    | .none => Scry.diffTally mhits;
   unit1 ← (match o.json with
-  | .true => EIO.lift (IO.println (Json.render (Json.mkObj
+  | .true => EIO.lift (IO.println (Json.render (Json.mkObj (List.append
       [ ("tool", Json.mkStr "scry")
       , ("file", Json.mkStr o.file)
       , ("rules", Json.ofNat (List.length pack.rules))
       , ("parseErrors", Json.ofNat errs)
-      , ("findings", Json.mkArr (List.map (fun p => Scry.findingJson origins p.1 p.2)
-          (Scry.zipFindings findings checks)))
-      , ("boundary", Json.mkArr (List.map Scry.boundaryJson boundaries))
-      , ("memory", Json.mkArr (List.map Scry.boundaryJson memory))
+      , ("findings", Json.mkArr (List.map (fun r => match r.hit with
+          | .some h => Scry.findingJsonHit origins r.f r.checked h
+          | .none => Scry.findingJson origins r.f r.checked)
+          (List.filter (fun r => match dmOpt with
+            | .none => .true
+            | .some _ => Scry.rowVisible r.hit) frows)))
+      , ("boundary", Json.mkArr (List.map (fun r => match r.hit with
+          | .some h => Scry.boundaryJsonHit r.w h
+          | .none => Scry.boundaryJson r.w)
+          (List.filter (fun r => match dmOpt with
+            | .none => .true
+            | .some _ => Scry.rowVisible r.hit) brows)))
+      , ("memory", Json.mkArr (List.map (fun r => match r.hit with
+          | .some h => Scry.boundaryJsonHit r.w h
+          | .none => Scry.boundaryJson r.w)
+          (List.filter (fun r => match dmOpt with
+            | .none => .true
+            | .some _ => Scry.rowVisible r.hit) mrows)))
       , ("counts", Json.mkObj
           [ ("findings", Json.ofNat (List.length findings))
           , ("checked", Json.ofNat checked)
           , ("unchecked", Json.ofNat unchecked)
           , ("boundary", Json.ofNat (List.length boundaries))
-          , ("memory", Json.ofNat (List.length memory)) ]) ])))
+          , ("memory", Json.ofNat (List.length memory)) ]) ]
+      (match dmOpt with
+        | .none => .nil
+        | .some dm => List.cons ("diff", Scry.diffJson dm o.file ft bt mt) .nil)))))
   | .false => do
     Scry.taintSay ("taint: " ++ o.file ++ " (" ++ Nat.repr (List.length pack.rules) ++ " rules)");
     unit2 ← (match errs with
       | .zero => Scry.taintSay "parse: ok"
       | _ => Scry.taintSay ("parse: " ++ Nat.repr errs ++ " ERROR/MISSING node(s) recovered (--allow-errors)"));
-    Scry.printFindings origins findings checks;
-    Scry.printBoundaries (List.append boundaries memory);
+    unitD ← (match dmOpt with
+      | .none => EIO.pure ()
+      | .some dm => Scry.printLines (Scry.diffHeaderLines dm));
+    Scry.printFindingRows origins frows;
+    Scry.printWarnRows (List.append brows mrows);
+    unitS ← (match dmOpt with
+      | .none => EIO.pure ()
+      | .some dm => Scry.printLines (Scry.diffSummaryLines dm ft bt mt));
     Scry.taintSay ("taint: " ++ Nat.repr (List.length findings) ++ " finding(s), "
       ++ Nat.repr checked ++ " checked, " ++ Nat.repr unchecked ++ " unchecked, "
       ++ Nat.repr (List.length boundaries) ++ " boundary warning(s), "
@@ -468,18 +924,35 @@ def Scry.runTaint (o : Scry.TaintOpts) : EIO Nat := do
     EIO.pure ());
   unit4 ← (match o.sarif with
   | .some out => do
-    let sarifText := Scry.renderSarifWith "scry" origins pack
-      (Scry.zipFindings findings checks)
-      (List.map (fun b => Scry.boundaryResultJson b.rule b.origin b.func b.point b.message)
-        (List.append boundaries memory));
+    let sarifText := Scry.renderSarifWithBaselines "scry" origins pack
+      (List.map (fun r => Scry.SarifFinding.mk r.f r.checked
+        (Scry.baselineOfRow dmOpt r.hit)) frows)
+      (List.map (fun r => Scry.boundaryResultJsonFull r.w.rule r.w.origin r.w.func
+        r.w.point r.w.message o.file
+        (Scry.baselineOfRow dmOpt r.hit)) (List.append brows mrows));
     FS.writeFile out sarifText;
     EIO.lift (IO.ePrintln ("wrote SARIF 2.1.0: " ++ out ++ " ("
       ++ Nat.repr (List.length findings) ++ " result(s), "
-      ++ Nat.repr (List.length boundaries) ++ " boundary)"))
+      ++ Nat.repr (List.length boundaries) ++ " boundary"
+      ++ (match dmOpt with
+        | .none => ""
+        | .some dm => match dm.all with
+          | .true => "; diff: all"
+          | .false => "; diff: " ++ Nat.repr (Nat.add ft.shown ft.unlocated)
+            ++ " shown, " ++ Nat.repr ft.suppressed ++ " unchanged") ++ ")"))
   | .none => EIO.pure ());
+  let gateFindings := match dmOpt with
+    | .none => List.length findings
+    | .some _ => Nat.add ft.shown ft.unlocated;
+  let gateBoundary := match dmOpt with
+    | .none => List.length boundaries
+    | .some _ => Nat.add bt.shown bt.unlocated;
+  let gateMemory := match dmOpt with
+    | .none => List.length memory
+    | .some _ => Nat.add mt.shown mt.unlocated;
   let failing := Bool.and o.failOnFinding
-    (Bool.or (Nat.lt 0 (List.length findings))
-      (Bool.or (Nat.lt 0 (List.length boundaries)) (Nat.lt 0 (List.length memory))));
+    (Bool.or (Nat.lt 0 gateFindings)
+      (Bool.or (Nat.lt 0 gateBoundary) (Nat.lt 0 gateMemory)));
   match failing with
   | .true => EIO.pure 1
   | .false => EIO.pure 0

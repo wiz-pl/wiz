@@ -43,6 +43,7 @@ def Scry.usage : String :=
   ++ "  cst FILE OUT               convert a JSON fact store to scry-cst\n"
   ++ "  taint FILE.c [--rules FILE] [--sarif OUT] [--json] [--allow-errors]\n"
   ++ "              [--fail-on-finding] [--origin-map]\n"
+  ++ "              [--diff BASE|all] [--changed-lines FILE] [--diff-context N]\n"
   ++ "                             C -> Wil -> taint -> findings/SARIF\n"
   ++ "  bench [--corpus DIR] [--baseline FILE] [--extra DIR]... [--json OUT]\n"
   ++ "        [--markdown OUT] [--update-baseline FILE] [--no-timing] [--quiet]\n"
