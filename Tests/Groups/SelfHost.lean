@@ -1118,26 +1118,27 @@ def bytesFfiExpected : String := "198\n70\n[120, 121, 0, 122]\n5\n198\n"
 /-- (21ac) The encodings of `lib/IO.wiz`: `ofUtf8`/`toUtf8` (every character, NULs
 included; the decoder checks overlong forms and surrogates), `ofString`/`toString`
 (through a C string: they stop at a NUL) and `ofLatin1`/`toLatin1` (one byte per
-character, an error above 255). Prints the list below. -/
+character, an error above 255). The strings are observed through `Bytes` only (a text
+module is not in the self-hosted Prelude). Prints the list below. -/
 def bytesEncProgram : String :=
   "import Std\ndef main : IO Unit := do\n" ++
   "  let u := Bytes.ofUtf8 \"a\\x00b\";\n" ++
   "  IO.println (Nat.toString (Bytes.size u));\n" ++
   "  IO.println (Nat.toString (Bytes.size (Bytes.ofString \"a\\x00b\")));\n" ++
-  "  IO.println (Nat.toString (String.length (Bytes.toString u)));\n" ++
-  "  IO.println (Nat.toString (match Bytes.toUtf8 u with\n    | .ok t => String.length t\n    | .error _ => 999));\n" ++
+  "  IO.println (Bytes.show (Bytes.ofString (Bytes.toString u)));\n" ++
+  "  IO.println (if Bytes.eq (Bytes.ofString (Bytes.toString u)) (Bytes.ofList (List.cons 97 .nil)) then \"eq\" else \"ne\");\n" ++
   "  IO.println (Nat.toString (Bytes.size (Bytes.ofUtf8 \"𝄞\")));\n" ++
   "  IO.println (Nat.toString (Bytes.size (Bytes.ofString \"𝄞\")));\n" ++
-  "  IO.println (Nat.toString (match Bytes.toUtf8 (Bytes.ofUtf8 \"𝄞\") with\n    | .ok t => String.length t\n    | .error _ => 999));\n" ++
-  "  IO.println (Nat.toString (match Bytes.ofLatin1 \"é\" with\n    | .ok b => Bytes.size b\n    | .error _ => 999));\n" ++
-  "  IO.println (Nat.toString (String.length (Bytes.toLatin1 (Bytes.ofList (List.cons 233 .nil)))));\n" ++
+  "  IO.println (match Bytes.toUtf8 (Bytes.ofUtf8 \"𝄞\") with\n    | .ok t => if Bytes.eq (Bytes.ofUtf8 t) (Bytes.ofUtf8 \"𝄞\") then \"eq\" else \"ne\"\n    | .error _ => \"err\");\n" ++
+  "  IO.println (match Bytes.ofLatin1 \"é\" with\n    | .ok b => Bytes.show b\n    | .error _ => \"err\");\n" ++
+  "  IO.println (match Bytes.ofLatin1 (Bytes.toLatin1 (Bytes.ofList (List.cons 233 .nil))) with\n    | .ok b => Bytes.show b\n    | .error _ => \"err\");\n" ++
   "  IO.println (match Bytes.ofLatin1 \"\\u{100}\" with\n    | .ok _ => \"ok\"\n    | .error e => e);\n" ++
   "  IO.println (match Bytes.toUtf8 (Bytes.ofList (List.cons 128 .nil)) with\n    | .ok _ => \"ok\"\n    | .error e => e);\n" ++
   "  IO.println (match Bytes.toUtf8 (Bytes.ofList (List.cons 192 (List.cons 128 .nil))) with\n    | .ok _ => \"ok\"\n    | .error e => e);\n" ++
   "  IO.println (match Bytes.toUtf8 (Bytes.ofList (List.cons 237 (List.cons 160 (List.cons 128 .nil)))) with\n    | .ok _ => \"ok\"\n    | .error e => e)\n"
 
 def bytesEncExpected : String :=
-  "3\n1\n1\n3\n4\n4\n1\n1\n1\nnot Latin-1: character 0 is U+256\n" ++
+  "3\n1\n[97]\neq\n4\n4\neq\n[233]\n[233]\nnot Latin-1: character 0 is U+256\n" ++
   "invalid UTF-8 at byte 0\ninvalid UTF-8 at byte 0\ninvalid UTF-8 at byte 0\n"
 
 /-- (21ac) `Array ↔ Bytes` (`lib/Std.wiz`: `Bytes.ofArray`, `Bytes.toArray`) and the
@@ -1682,7 +1683,7 @@ def selfHostGroup : Group where
            "#reduce Nat.beq (Bytes.size (Bytes.ofString \"a\\x00b\")) 1\n" ++
            "#reduce Nat.beq (Bytes.size (Bytes.ofUtf8 \"a\\x00b\")) 3\n" ++
            "#reduce Bytes.ofList (List.cons 1 (List.cons 2 .nil))\n")
-          "@@REDUCE@@" },
+          "con((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (con((#0, (tt, tt))), (tt, tt))))), (tt, tt))))), (tt, tt))))\n" },
     { name := "Bytes (21ac): a c_struct with a Bytes field through glue, in both toolchains", run := fun _ => do
         let dir ← IO.FS.createTempDir
         let h := dir / "wiz_bytes2.h"

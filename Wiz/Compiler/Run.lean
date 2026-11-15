@@ -254,10 +254,10 @@ def nativeArity (key : Name) : Nat :=
 
 end RVal
 
-/-- The interpreters' model of `Bytes` (stage 21ac). `#eval` and `#run` cannot call C,
+/-! The interpreters' model of `Bytes` (stage 21ac). `#eval` and `#run` cannot call C,
 so the nine runtime natives (`runtime/rt_data.inc`, `runtime/rt_sys.inc`) are
 implemented here on a `ByteArray`, as `wiz_nat_show` already is; compiled code still
-calls the runtime. `ofString`/`toString` mirror the C boundary exactly: a `String` is
+calls the runtime. `ofCString`/`toCString` mirror the C boundary exactly: a `String` is
 encoded code point by code point (a surrogate or a value above `U+10FFFF` still takes
 three or four bytes, as `wiz_in_string` writes it), the C string stops at the first NUL,
 and the bytes come back as text by `wiz_out_string`'s lenient UTF-8 decode. -/
@@ -273,7 +273,7 @@ def slice (b : ByteArray) (start len : Nat) : ByteArray := b.extract start (star
 def toList (b : ByteArray) : List Nat := b.toList.map (·.toNat)
 
 /-- `b` as numbers, in `Bytes.show`'s spelling: `[1, 2, 255]`. -/
-def show (b : ByteArray) : String :=
+def render (b : ByteArray) : String :=
   let rec go : List Nat → String
     | [] => ""
     | [x] => toString x
@@ -295,13 +295,13 @@ def pushCp (b : ByteArray) (c : Nat) : ByteArray :=
 
 /-- The string's UTF-8 bytes up to the first NUL (a C string). -/
 def ofCString (s : String) : ByteArray :=
-  ((s.toList.foldl (fun (b : ByteArray) (c : Char) => pushCp b c.toNat) ByteArray.empty).toList.takeWhile
-    (· != 0)).toArray.toByteArray
+  ByteArray.mk (((s.toList.foldl (fun (b : ByteArray) (c : Char) => pushCp b c.toNat) ByteArray.empty).toList.takeWhile
+    (· != 0)).toArray)
 
 /-- The bytes up to the first NUL, decoded as `wiz_out_string` decodes UTF-8 (the
 sequence length comes from the leading byte; continuation bytes are not checked). -/
 def toCString (b : ByteArray) : String :=
-  let b := (b.toList.takeWhile (· != 0)).toArray.toByteArray
+  let b := ByteArray.mk ((b.toList.takeWhile (· != 0)).toArray)
   let rec go (i : Nat) (acc : String) : String :=
     if h : i < b.size then
       let c := (b[i]).toNat
@@ -340,7 +340,7 @@ def bytesNative? (op : Name) (args : Array RVal) (num : Nat → Nat) : Option RV
   let str (i : Nat) : Option String := match args[i]? with
     | some v => stringValue? v
     | none => none
-  match (ExternSig.ofKey? op).map (·.cname) with
+  match (RVal.ExternSig.ofKey? op).map (·.cname) with
   | some "wiz_bytes_empty" => some (.bytes ByteArray.empty)
   | some "wiz_bytes_push" => (bs 0).map fun b => .bytes (BytesModel.push b (num 1))
   | some "wiz_bytes_size" => (bs 0).map fun b => .nat b.size
@@ -560,7 +560,7 @@ partial def readback (g : Globals R) (builtins : List (Name × Name)) (ty : VTy 
       | _, _ => readbackData ty v
     else readbackData ty v
   | .neutral (.global "Bytes" _) sp, .bytes b =>
-    if sp.isEmpty then .const (BytesModel.show b) [] else readbackData ty v
+    if sp.isEmpty then .const (BytesModel.render b) [] else readbackData ty v
   | .sigma _ _ A B _, v =>
     -- the last field of a structure is unboxed (22i): `v` is the field itself
     if unboxedSigma g 1000000 ty then
