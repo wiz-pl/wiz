@@ -650,11 +650,12 @@ and stamp); `verify` re-hashes every archive and checks every stamp, exits 1 on 
 entry and does not repair it (the next fetch re-downloads a corrupt archive; a wrong
 stamp just causes an unpack). It needs no `grail.wiz`, so it works in an empty directory.
 
-The lock (v1/v2) and index formats are unchanged; `vendor/index.sexpr` is a separate,
-local file. Tests: group `grail-vendor` (five cases: content-addressed vendoring with a
-stable lock, an offline `--locked` fetch from the vendor directory through the shared
-store, one download and one unpack for two packages with the same archive, the cache
-commands with a corrupt entry, and the `vendor --locked`/`--offline` failures).
+Vendoring does not change the lock's meaning: the lock is still the v3 file above
+(`source` stays the published URL), and `vendor/index.sexpr` is a separate, local file.
+Tests: group `grail-vendor` (five cases: content-addressed vendoring with a stable lock,
+an offline `--locked` fetch from the vendor directory through the shared store, one
+download and one unpack for two packages with the same archive, the cache commands with
+a corrupt entry, and the `vendor --locked`/`--offline` failures).
 
 ## 23o: `grail new`
 

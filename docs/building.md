@@ -164,9 +164,12 @@ versions, the transitive closure, a missing package, a hash mismatch, stale lock
 `fetch --locked` with cold/warm caches, scoped `index/@org/name.sexpr` files, index
 rollback, and lock v3 (round-trip, old locks, upgrade, `grail.local.wiz` overrides).
 `=grail-vendor` (five cases) covers vendoring, an offline `--locked` fetch from
-`vendor/` without a cache, the shared store and the cache commands. Rebuild the
-archives with `cd tests/fixtures/grail-index && ./make.sh`. There is no network in
-these tests.
+`vendor/` without a cache, the shared store and the cache commands. `=grail-index`
+includes three signed-snapshot cases (a throwaway Ed25519 key via `ssh-keygen`; they
+skip when it is absent): the lock records the fingerprint/sequence, offline
+verification from the pinned key, and refusal of a tampered or re-signed snapshot, an
+expired key, a lower sequence and a same-sequence rewrite. Rebuild the archives with
+`cd tests/fixtures/grail-index && ./make.sh`. There is no network in these tests.
 
 There is also a complete example **index repository** at `examples/grail-index/`
 (`index.wiz`, `registry.sexpr`, `index/`, `entries/`, `sources/`, `packages/`, `make.sh`)
