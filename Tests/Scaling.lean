@@ -863,7 +863,8 @@ def probeReuse : IO UInt32 := do
       unless bad.isEmpty do failures := failures + 1
     catch e => IO.println s!"{m}: not compiled ({(toString e).take 120})"
   let srcs ← Selfhost.compilerFiles.mapM (fun (f : String) => IO.FS.readFile f)
-  for (what, prog) in [("selfhost checker", Selfhost.checkerSource (srcs.take 4)), ("selfhost compiler", Selfhost.compilerSource srcs)] do
+  let checkSrcs ← Selfhost.checkerFiles.mapM (fun (f : String) => IO.FS.readFile f)
+  for (what, prog) in [("selfhost checker", Selfhost.checkerSource checkSrcs), ("selfhost compiler", Selfhost.compilerSource srcs)] do
     let st := runFrontend (R := ZeroOneMany) prog { trustedModule := Tests.libModule, loader }
     let errs := (st.messages.filter (·.severity == .error)).map fun m => m.render prog
     unless errs.isEmpty do throw (IO.userError s!"{what}: unexpected errors:\n{"\n".intercalate (errs.toList.take 5)}")
