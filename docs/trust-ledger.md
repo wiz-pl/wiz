@@ -78,6 +78,42 @@ The migration gave the 753 pre-gate rows the reason `legacy: pre-gate baseline; 
 individually reviewed`, owner `unassigned`, and review date `2027-05-14`: they are
 accepted now, but will fail on 2027-05-14 unless individually reviewed or renewed.
 
+## Merging the ledger
+
+A key is `(module, declaration, item)`, and that is also the merge key: two branches
+that review different declarations are a union, even when their rows are adjacent. A
+git merge driver does that mechanically. `.gitattributes` names it, but a driver is
+local config (not cloned, and CI cannot set it), so each clone installs it once; the
+stored path is relative to the worktree root, so it serves every worktree:
+
+```sh
+scripts/setup-trust-merge.sh
+```
+
+The command stored is `merge.trust-ledger.driver`; `--show` prints it and `--unset`
+removes it. Without it git falls back to a line merge and is likely to conflict.
+
+The driver's rule (`scripts/trust-ledger-merge.sh`, inputs `%O %A %B`) is:
+
+* take the union of the rows of ours and theirs; a row deleted on one side stays
+  unless both sides deleted it;
+* keep header/comment lines once: the base's comments in order, then comments new
+  on either side;
+* sort the rows by key in byte order, the order `--update` writes;
+* for one key with different contents, take the row whose reason is not the
+  migration marker (`legacy:`);
+* if both rows are reasoned and differ, or both are still legacy and differ, the
+  merge is ambiguous: the driver exits 1, prints the keys, and does not write `%A`.
+  Choose one row by hand.
+
+The failure mode is deliberate: a reasoned row names who trusts what, so silently
+picking one of two reviewed rows would lose a review. Git reports the file as
+unmerged; edit `.github/trust-baseline.tsv` to keep one row per key, then run the gate.
+
+CI runs `scripts/trust-ledger.sh --check`, not a merge driver; a merge made without
+the local driver can leave a ledger that is textually merged but stale, duplicated or
+missing a source. After any merge of this file, run `scripts/trust-ledger.sh --check`.
+
 ## Reducing the legacy rows
 
 The migration's 753 rows are not a renewal list: the reviewed base is now 680 rows
@@ -199,6 +235,13 @@ not on any one function. `UInt64`/`Float64`/`Array`/`Str`/`StrMap` externs are i
 trees: a new axiom with no row, a row with no reason, an expired row, a renamed
 declaration, a legacy row, a clean tree, and `--update` with and without a reason. The
 `native` group runs it, so `lake test -- '=native'` covers it.
+
+`scripts/trust-ledger-merge_test.sh` checks the merge driver without a build: disjoint
+rows, the same row, a reasoned row against a legacy one, two reasoned rows (must
+refuse), comments, CRLF, and 100 pseudo-random rows. Its last case installs the driver
+with `scripts/setup-trust-merge.sh` in a throwaway repository and runs a real
+`git merge`, so it also checks the `.gitattributes` registration. CI runs it in the
+`trust-ledger` job.
 
 CI runs `scripts/trust-ledger.sh --check` (see the `trust-ledger` job in
 `.github/workflows/ci.yml`); the gate is inside `--check`, so no new flag is needed.

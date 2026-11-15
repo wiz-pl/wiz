@@ -1,0 +1,38 @@
+(index
+
+  (package "base"
+    (summary "A tiny base package for the index example")
+    (repo "https://example.org/wiz/base")
+    (version "0.1.0"
+      (source "packages/base-0.1.0.tar.gz")
+      (sha256 "90fab04256bfe9f97fd608786646e134976ba9a88b1e15d85fae18d89bfa1bc1")
+      (toolchain ">=0.1.0 <0.3.0")
+      (modules "Base" "Base.Value")
+      (deps)))
+
+  (package "hello"
+    (summary "A greeter built on text")
+    (repo "https://example.org/wiz/hello")
+    (version "1.0.0"
+      (source "packages/hello-1.0.0.tar.gz")
+      (sha256 "6c8ecfcc3b725438192f65ab986644d84e2f4e808cf6d68bd23b0e352c65b4b2")
+      (toolchain ">=0.1.0 <0.3.0")
+      (modules "Hello.Main")
+      (deps (dep "text" "^1"))))
+
+  (package "text"
+    (summary "Text helpers, built on base")
+    (repo "https://example.org/wiz/text")
+    (version "1.0.0"
+      (source "packages/text-1.0.0.tar.gz")
+      (sha256 "2173664ba28f8d384340617a34639e457b03a8f41a21b6a78b2d3fa2971fa8ab")
+      (toolchain ">=0.1.0 <0.3.0")
+      (modules "Text" "Text.Value")
+      (deps (dep "base" "^0.1")))
+    (version "1.1.0"
+      (source "packages/text-1.1.0.tar.gz")
+      (sha256 "76f76fb3161871c256e02634df98519b469ee54a59acae5cc589ab1cad54858d")
+      (toolchain ">=0.1.0 <0.3.0")
+      (modules "Text" "Text.Value")
+      (deps (dep "base" "^0.1"))))
+)
