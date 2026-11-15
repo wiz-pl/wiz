@@ -10,6 +10,15 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* `Float64.ofNat` rounds correctly for every `Nat`: it used to abort above `2^64`
+  ("a number is too big for a C integer"). The value-level semantics matrix
+  (`docs/semantics-matrix.md`, group `=semantics`) pins the numeric and textual
+  boundaries across `#eval`, `#run`, Lean → C and Wiz → C (22c).
+* Shifts agree for every `Nat` count. `UIntN.shiftLeft` caps the exponent at the
+  width (`Word.min k w`), so `k >= w` gives `0` without the model trying to build
+  `2^k` (which panicked at `k >= 2^32`); `a >> k` is `0` once `k` passes the bit
+  length of `a`. The matrix now pins `0, 1, w-1, w, w+1, 2^32-1, 2^32, 2^64-1`,
+  and the rotate composition for `k >= w` (22a, 22c).
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to
