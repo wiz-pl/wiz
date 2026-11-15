@@ -5,7 +5,9 @@ CI's test driver (``.lake/build/bin/tests``) runs every case in its own process 
 prints a line per case.  A failure is therefore indistinguishable from a flake unless
 the case is run again.  This tool does that rerun and classifies each case:
 
-  always pass          every attempt passed
+  always pass          every attempt passed (but a case that failed in the source run
+                       and passes every rerun is flaky: it did fail, the failure did not
+                       reproduce)
   deterministic fail   no attempt passed
   flaky                at least one pass and one fail
   always skip          every attempt was skipped (a skip is not a pass)
@@ -35,11 +37,14 @@ Usage
   scripts/flaky.py --check-quarantine            fail if an entry has expired
   scripts/flaky.py --self-test                   test the classifier on fixtures
   scripts/flaky.py --report f.json --json        machine-readable report
+  scripts/flaky.py --from-log f.log --summary-md s.md --label shard
+                                                a Markdown summary for CI
 
 The tool is cheap enough to run under ``heavy --mem 2G``; ``--budget`` (default 600 s)
 caps the total wall time.  Exit status: 0 clean (or only active quarantines), 1 a
-deterministic failure/expired quarantine, 2 usage or input error, 3 a flaky case that
-is not quarantined, 4 the budget ran out before the measurement finished.
+deterministic failure, an incomplete measurement, a source failure that only skips, or
+an expired quarantine, 2 usage or input error, 3 a flaky case that is not quarantined,
+4 the budget ran out before the measurement finished.
 
 Classifier details
   * A skip is not a pass.  It is counted apart; only a pass counts for ``passes``.
@@ -226,10 +231,12 @@ def driver_ok(driver: Path) -> bool:
     return driver.is_file() and os.access(driver, os.X_OK)
 
 
-def _driver_run(driver: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+def _driver_run(
+    driver: Path, args: list[str], driver_args: Iterable[str] = ()
+) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
-            [str(driver), *args],
+            [str(driver), *driver_args, *args],
             cwd=ROOT,
             text=True,
             errors="replace",
@@ -241,9 +248,11 @@ def _driver_run(driver: Path, args: list[str]) -> subprocess.CompletedProcess[st
         ) from e
 
 
-def list_cases(driver: Path, selectors: Iterable[str] = ()) -> list[CaseId]:
+def list_cases(
+    driver: Path, selectors: Iterable[str] = (), driver_args: Iterable[str] = ()
+) -> list[CaseId]:
     """The cases the driver's selectors pick, in the driver's execution order."""
-    p = _driver_run(driver, ["--list-cases", *selectors])
+    p = _driver_run(driver, ["--list-cases", *selectors], driver_args)
     if p.returncode != 0:
         msg = (p.stderr or p.stdout).strip()
         raise FlakyError(f"`{driver} --list-cases {' '.join(selectors)}` failed: {msg}")
@@ -285,8 +294,10 @@ FAIL_RE = re.compile(r"^  ✗ (.*?)(?: \([\d.]+ s\))?$")
 RUN_RESULT_RE = re.compile(r"^(.*) #(\d+): (FAILED|SKIPPED.*)$")
 
 
-def _case_maps(driver: Path) -> tuple[dict[tuple[str, str], CaseId], dict[tuple[str, int], CaseId]]:
-    all_cases = list_cases(driver)
+def _case_maps(
+    driver: Path, driver_args: Iterable[str] = ()
+) -> tuple[dict[tuple[str, str], CaseId], dict[tuple[str, int], CaseId]]:
+    all_cases = list_cases(driver, driver_args=driver_args)
     by_name: dict[tuple[str, str], CaseId] = {}
     by_index: dict[tuple[str, int], CaseId] = {}
     for c in all_cases:
@@ -295,9 +306,11 @@ def _case_maps(driver: Path) -> tuple[dict[tuple[str, str], CaseId], dict[tuple[
     return by_name, by_index
 
 
-def cases_from_logs(driver: Path, paths: Iterable[Path]) -> list[CaseId]:
+def cases_from_logs(
+    driver: Path, paths: Iterable[Path], driver_args: Iterable[str] = ()
+) -> list[CaseId]:
     """Failing cases in test-driver logs (the CI ``*.log`` artifacts)."""
-    by_name, by_index = _case_maps(driver)
+    by_name, by_index = _case_maps(driver, driver_args)
     found: list[CaseId] = []
     for path in paths:
         try:
@@ -334,9 +347,11 @@ def cases_from_logs(driver: Path, paths: Iterable[Path]) -> list[CaseId]:
     return _dedupe(found)
 
 
-def cases_from_timings(driver: Path, paths: Iterable[Path]) -> list[CaseId]:
+def cases_from_timings(
+    driver: Path, paths: Iterable[Path], driver_args: Iterable[str] = ()
+) -> list[CaseId]:
     """Failing cases in the driver's ``--timings`` JSONL."""
-    by_name, by_index = _case_maps(driver)
+    by_name, by_index = _case_maps(driver, driver_args)
     found: list[CaseId] = []
     for path in paths:
         try:
@@ -364,7 +379,9 @@ def cases_from_timings(driver: Path, paths: Iterable[Path]) -> list[CaseId]:
     return _dedupe(found)
 
 
-def cases_from_junit(driver: Path, paths: Iterable[Path]) -> list[CaseId]:
+def cases_from_junit(
+    driver: Path, paths: Iterable[Path], driver_args: Iterable[str] = ()
+) -> list[CaseId]:
     """Failing cases in a JUnit XML file, when one was produced by another tool.
 
     The Wiz test driver itself emits no JUnit; ``--from-log``/``--from-timings`` are the
@@ -373,7 +390,7 @@ def cases_from_junit(driver: Path, paths: Iterable[Path]) -> list[CaseId]:
     """
     import xml.etree.ElementTree as ET
 
-    by_name, by_index = _case_maps(driver)
+    by_name, by_index = _case_maps(driver, driver_args)
     found: list[CaseId] = []
     for path in paths:
         try:
@@ -453,6 +470,7 @@ def run_alone(
     seed: int,
     budget: Budget,
     timeout: float,
+    driver_args: Iterable[str] = (),
 ) -> Attempt:
     budget.check()
     env = os.environ.copy()
@@ -460,7 +478,7 @@ def run_alone(
     start = time.monotonic()
     try:
         p = subprocess.run(
-            [str(driver), "--run", case.group, str(case.index)],
+            [str(driver), *driver_args, "--run", case.group, str(case.index)],
             cwd=ROOT,
             text=True,
             errors="replace",
@@ -498,6 +516,7 @@ def run_sequence(
     seed: int,
     budget: Budget,
     timeout: float,
+    driver_args: Iterable[str] = (),
 ) -> Attempt:
     """Run `predecessor` and `target` in one driver process, in that order."""
     budget.check()
@@ -517,6 +536,7 @@ def run_sequence(
             p = subprocess.run(
                 [
                     str(driver),
+                    *driver_args,
                     "--jobs",
                     "1",
                     "--timings",
@@ -739,7 +759,13 @@ def check_quarantine(path: Path | None, today: dt.date, warn_days: int = 7) -> i
             extra += f" reason: {e.reason}"
         print(f"  {e.expires.isoformat()}  {state:<22}  {e.label()}{extra}", flush=True)
         if days <= 0:
-            _annotation("error", "Flaky quarantine", f"quarantined test expired: {e.label()} (was due {e.expires.isoformat()})")
+            owner = e.owner or "(no owner recorded)"
+            _annotation(
+                "error",
+                "Flaky quarantine",
+                f"quarantined test expired: {e.label()} "
+                f"(due {e.expires.isoformat()}; owner: {owner})",
+            )
         elif days <= warn_days:
             _annotation(
                 "warning",
@@ -752,6 +778,12 @@ def check_quarantine(path: Path | None, today: dt.date, warn_days: int = 7) -> i
             f"flaky quarantine: {len(q.expired)} expired entry(ies); fix or re-quarantine with a new expiry",
             file=sys.stderr,
         )
+        for e in q.expired:
+            print(
+                f"  expired: {e.label()} (owner: {e.owner or '(no owner recorded)'}, "
+                f"due {e.expires.isoformat()})",
+                file=sys.stderr,
+            )
         return 1
     if q.entries:
         nxt = min(e.expires for e in q.entries)
@@ -785,6 +817,8 @@ class AnalyzeOptions:
     source_keys: set[tuple[str, int]] = field(default_factory=set)
     today: dt.date = field(default_factory=dt.date.today)
     selectors: list[str] = field(default_factory=list)
+    driver_args: tuple[str, ...] = ()
+    label: str = ""
 
 
 def _predecessor(pool: list[CaseId], target: CaseId, seed: int) -> CaseId | None:
@@ -803,7 +837,7 @@ def analyze(driver: Path, cases: list[CaseId], opts: AnalyzeOptions) -> tuple[di
     universe: list[CaseId] | None = None
     positions: dict[tuple[str, int], int] = {}
     if opts.order_check != "off" and cases:
-        universe = list_cases(driver)
+        universe = list_cases(driver, driver_args=opts.driver_args)
         positions = {c.key: i for i, c in enumerate(universe)}
 
     results: list[dict] = []
@@ -817,13 +851,25 @@ def analyze(driver: Path, cases: list[CaseId], opts: AnalyzeOptions) -> tuple[di
                 exhausted = True
                 break
             try:
-                alone.append(run_alone(driver, case, seed, budget, opts.timeout))
+                alone.append(
+                    run_alone(
+                        driver, case, seed, budget, opts.timeout, opts.driver_args
+                    )
+                )
             except BudgetExceeded:
                 complete = False
                 exhausted = True
                 break
         classification = classify(alone, len(opts.seeds))
         counts = _counts(alone)
+        source_failure = case.key in opts.source_keys
+        # A case that failed in the source run and passed every rerun did fail: it is
+        # flaky (the failure did not reproduce), never "always pass".  This is what makes
+        # `--from-log` safe to gate a CI shard on.
+        did_not_reproduce = False
+        if source_failure and classification == "always pass":
+            classification = "flaky"
+            did_not_reproduce = True
 
         order: dict = {
             "checked": False,
@@ -877,7 +923,17 @@ def analyze(driver: Path, cases: list[CaseId], opts: AnalyzeOptions) -> tuple[di
                     break
                 preds.append(pred.label)
                 try:
-                    seq.append(run_sequence(driver, case, pred, seed, budget, opts.timeout))
+                    seq.append(
+                        run_sequence(
+                            driver,
+                            case,
+                            pred,
+                            seed,
+                            budget,
+                            opts.timeout,
+                            opts.driver_args,
+                        )
+                    )
                 except BudgetExceeded:
                     complete = False
                     exhausted = True
@@ -911,6 +967,8 @@ def analyze(driver: Path, cases: list[CaseId], opts: AnalyzeOptions) -> tuple[di
             "index": case.index,
             "name": case.name,
             "classification": classification,
+            "source_failure": source_failure,
+            "did_not_reproduce": did_not_reproduce,
             "passes": counts["pass"],
             "fails": counts["fail"],
             "skips": counts["skip"],
@@ -940,12 +998,21 @@ def analyze(driver: Path, cases: list[CaseId], opts: AnalyzeOptions) -> tuple[di
     elif expired:
         verdict_kind = "expired quarantine"
         code = 1
+    elif any(r["classification"] == "deterministic fail" for r in results):
+        # An active quarantine never masks a deterministic failure: the case failed on
+        # every rerun, so the code is broken, not flaky.
+        verdict_kind = "deterministic failure"
+        code = 1
+    elif any(r["classification"] == "incomplete" for r in results):
+        verdict_kind = "incomplete"
+        code = 1
     elif any(
-        r["classification"] in ("deterministic fail", "incomplete")
-        and r["quarantine"]["state"] != "active"
+        r["classification"] == "always skip" and r["source_failure"]
         for r in results
     ):
-        verdict_kind = "deterministic failure"
+        # The case failed in the shard and now only skips: a skip is not a pass, so the
+        # failure is still unexplained.
+        verdict_kind = "skipped after a failure"
         code = 1
     elif any(
         r["classification"] == "flaky" and r["quarantine"]["state"] != "active"
@@ -959,6 +1026,7 @@ def analyze(driver: Path, cases: list[CaseId], opts: AnalyzeOptions) -> tuple[di
         "version": TOOL_VERSION,
         "generated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "driver": str(driver),
+        "shard": opts.label,
         "selectors": opts.selectors,
         "repeats": opts.repeats,
         "seeds": opts.seeds,
@@ -1022,6 +1090,8 @@ def human_summary(report: dict, stream=sys.stdout) -> None:
                 counts += f", {c['errors']} errors"
             if c["failing_seeds"]:
                 counts += f"; failing seeds {', '.join(map(str, c['failing_seeds']))}"
+            if c.get("did_not_reproduce"):
+                counts += "; did not reproduce (it failed in the source run)"
             q = ""
             if c["quarantine"]["state"] == "active":
                 q = f" [quarantined until {c['quarantine']['expires']}]"
@@ -1054,6 +1124,76 @@ def human_summary(report: dict, stream=sys.stdout) -> None:
     else:
         print("  quarantine: no entries", file=stream)
     print(f"  verdict: {report['verdict']['kind']} (exit {report['verdict']['code']})", file=stream)
+
+
+def _md(text: object) -> str:
+    return str(text).replace("|", "\\|").replace("\n", " ")
+
+
+def markdown_summary(report: dict, stream=sys.stdout) -> None:
+    """A Markdown section for ``$GITHUB_STEP_SUMMARY``: one row per case with the shard,
+    case, class, seed(s) and the quarantine entry's expiry (the CI gate reads this)."""
+    cases = report["cases"]
+    shard = report.get("shard") or "(shard)"
+    print(f"### Flaky classification: {_md(shard)}", file=stream)
+    print(file=stream)
+    verdict = report["verdict"]
+    icon = "✅" if verdict["code"] == 0 else "❌"
+    print(f"{icon} **{_md(verdict['kind'])}** (exit {verdict['code']}).", file=stream)
+    budget = (
+        f"{report['budget_seconds']:.0f} s" if report["budget_seconds"] else "unlimited"
+    )
+    print(
+        f"{report['runs']} driver run{'s' if report['runs'] != 1 else ''}, "
+        f"{report['case_seconds']:.1f} s of case time, "
+        f"{report['elapsed_seconds']:.1f} s wall (budget {budget}).",
+        file=stream,
+    )
+    if not report["complete"]:
+        print(
+            "**INCOMPLETE:** the rerun budget ran out before every case was measured.",
+            file=stream,
+        )
+    print(file=stream)
+    print("| shard | case | class | seed(s) | quarantine |", file=stream)
+    print("|---|---|---|---|---|", file=stream)
+    seeds = report["seeds"]
+    for c in cases:
+        cls = c["classification"]
+        if c.get("did_not_reproduce"):
+            cls += " (not reproduced)"
+        if c["order"].get("order_dependent"):
+            cls += " (order dependent)"
+        if c["failing_seeds"]:
+            seed = ", ".join(str(s) for s in c["failing_seeds"])
+        elif seeds:
+            seed = f"{seeds[0]}–{seeds[-1]}" if len(seeds) > 1 else str(seeds[0])
+        else:
+            seed = "—"
+        q = c["quarantine"]
+        if q["state"] == "active":
+            quarantine = f"active until {q['expires']}"
+        elif q["state"] == "expired":
+            quarantine = f"**EXPIRED {q['expires']}**"
+        else:
+            quarantine = "—"
+        label = f"{c['group']} #{c['index']} {c['name']}"
+        print(
+            f"| {_md(shard)} | {_md(label)} | {_md(cls)} | {_md(seed)} | {quarantine} |",
+            file=stream,
+        )
+    q = report["quarantine"]
+    if q["expired"]:
+        print(file=stream)
+        print("**Expired quarantine entries:**", file=stream)
+        for e in q["expired"]:
+            owner = e.get("owner") or "(no owner recorded)"
+            print(
+                f"- {_md(e['group'])} {_md(e['case'])}: expired {e['expires']} "
+                f"(owner: {_md(owner)})",
+                file=stream,
+            )
+    print(file=stream)
 
 
 # ---------------------------------------------------------------------------
@@ -1124,6 +1264,11 @@ def run_case(group, index, name, kind, sequence):
 
 def main():
     args = sys.argv[1:]
+    # the real driver parses toolchain flags wherever they appear; these fixtures only
+    # need `--cache PATH` to be ignored (scripts/flaky.py --driver-arg=--cache ...)
+    while "--cache" in args:
+        i = args.index("--cache")
+        del args[i:i + 2]
     if args == ["--list"]:
         for g, _ in GROUPS:
             print(g)
@@ -1379,6 +1524,97 @@ def _self_test() -> int:
             rc = check_quarantine(fresh, today, warn_days=0)
         check(rc == 0, "--check-quarantine passes fresh entries")
 
+        def quarantine_file(name: str, entries: list[dict]) -> Path:
+            p = Path(td) / name
+            p.write_text(
+                json.dumps({"version": 1, "entries": entries}), encoding="utf-8"
+            )
+            return p
+
+        def log_file(name: str, case: str) -> Path:
+            p = Path(td) / name
+            p.write_text(
+                "\u2500\u2500 fixtures (fixtures)\n"
+                f"  \u2717 {case} (0.001 s)\n"
+                "      stub failure\n"
+                "\n0 passed, 1 failed\n",
+                encoding="utf-8",
+            )
+            return p
+
+        opts.order_check = "off"
+        opts.seeds = [1, 2, 3]
+        opts.repeats = 3
+        opts.order_repeats = 3
+        opts.budget = 120.0
+        opts.timeout = 20.0
+
+        # A deterministic failure is never masked by an active quarantine entry.
+        det_cases = cases_from_logs(driver, [log_file("deterministic.log", "always fails")])
+        det_q = quarantine_file(
+            "det-q.json",
+            [{"group": "fixtures", "case": "always fails", "expires": "2026-11-20",
+              "reason": "test", "owner": "Fixture owner"}],
+        )
+        opts.source_keys = {c.key for c in det_cases}
+        opts.quarantine = load_quarantine(det_q, today)
+        report, code = analyze(driver, det_cases, opts)
+        check(code == 1, f"an active quarantine does not mask a deterministic fail (got {code})")
+        check(report["cases"][0]["classification"] == "deterministic fail", "deterministic classification")
+        check(report["cases"][0]["quarantine"]["state"] == "active", "the entry still matches")
+
+        # A source failure that passes every rerun did fail: it is flaky, not always pass.
+        pass_cases = cases_from_logs(driver, [log_file("pass.log", "always passes")])
+        opts.source_keys = {c.key for c in pass_cases}
+        opts.quarantine = Quarantine()
+        report, code = analyze(driver, pass_cases, opts)
+        check(code == 3, f"an unreproduced source failure is flaky (got {code})")
+        check(report["cases"][0]["classification"] == "flaky", "unreproduced source failure classification")
+        check(report["cases"][0]["did_not_reproduce"] is True, "unreproduced source failure is marked")
+        pass_q = quarantine_file(
+            "pass-q.json",
+            [{"group": "fixtures", "case": "always passes", "expires": "2026-11-20",
+              "reason": "test"}],
+        )
+        opts.quarantine = load_quarantine(pass_q, today)
+        report, code = analyze(driver, pass_cases, opts)
+        check(code == 0, f"a quarantined unreproduced failure is green (got {code})")
+        check(report["cases"][0]["quarantine"]["state"] == "active", "unreproduced failure matched")
+        buf = io.StringIO()
+        markdown_summary(report, buf)
+        md = buf.getvalue()
+        check("| shard | case | class | seed(s) | quarantine |" in md, "Markdown summary table")
+        check("flaky (not reproduced)" in md, "Markdown summary shows the classification")
+        check("active until 2026-11-20" in md, "Markdown summary shows the expiry")
+
+        # A source failure that now only skips is not a pass, quarantined or not.
+        skip_cases = cases_from_logs(driver, [log_file("skip.log", "always skips")])
+        opts.source_keys = {c.key for c in skip_cases}
+        opts.quarantine = Quarantine()
+        report, code = analyze(driver, skip_cases, opts)
+        check(code == 1, f"a source failure that only skips fails (got {code})")
+        check(report["cases"][0]["classification"] == "always skip", "skip classification")
+        skip_q = quarantine_file(
+            "skip-q.json",
+            [{"group": "fixtures", "case": "always skips", "expires": "2026-11-20",
+              "reason": "test"}],
+        )
+        opts.quarantine = load_quarantine(skip_q, today)
+        report, code = analyze(driver, skip_cases, opts)
+        check(code == 1, f"a quarantine does not turn a skip into a pass (got {code})")
+
+        # The expiry message names the entry and its owner.
+        expired_owner = quarantine_file(
+            "expired-owner.json",
+            [{"group": "fixtures", "case": "always fails", "expires": "2026-11-14",
+              "reason": "old", "owner": "Fixture owner"}],
+        )
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+            rc = check_quarantine(expired_owner, today)
+        check(rc == 1, "expired entry with an owner fails")
+        check("Fixture owner" in buf.getvalue(), "the expiry message names the owner")
+
         bad = Path(td) / "bad.json"
         bad.write_text('{"entries": [{"group": "fixtures", "case": "x"}]}', encoding="utf-8")
         try:
@@ -1426,6 +1662,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument("selectors", nargs="*", help="test driver selectors (`=group#0,2`, `group`)")
     p.add_argument("--driver", type=Path, default=DEFAULT_DRIVER, help=f"test driver (default {DEFAULT_DRIVER})")
+    p.add_argument("--driver-arg", action="append", default=[], metavar="ARG", help="extra argument for every driver run (repeatable; use --driver-arg=--cache to pass a flag)")
     p.add_argument("--repeats", type=int, default=DEFAULT_REPEATS, help="reruns per case (default 5)")
     p.add_argument("--seeds", help="comma-separated seed list (default 1..repeats)")
     p.add_argument("--seed-base", type=int, default=1, help="first seed when --seeds is absent (default 1)")
@@ -1444,6 +1681,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--today", type=_date_arg, help="date for expiry checks (default today)")
     p.add_argument("--warn-days", type=int, default=7, help="warn when an entry is this close to expiry (default 7)")
     p.add_argument("--report", type=Path, metavar="FILE", help="write the machine-readable JSON report")
+    p.add_argument("--summary-md", type=Path, metavar="FILE", help="write a Markdown summary (for $GITHUB_STEP_SUMMARY)")
+    p.add_argument("--label", default="", metavar="NAME", help="shard label for the report (CI's shard name)")
     p.add_argument("--json", action="store_true", help="print the JSON report to stdout (human summary goes to stderr)")
     p.add_argument("--list", action="store_true", help="list the selected cases and exit")
     p.add_argument("--self-test", action="store_true", help="run the classifier's fixtures")
@@ -1472,19 +1711,23 @@ def selected_cases(args: argparse.Namespace, driver: Path) -> tuple[list[CaseId]
     cases: list[CaseId]
     if source:
         cases = []
-        cases += cases_from_logs(driver, _flatten(args.from_log))
-        cases += cases_from_timings(driver, _flatten(args.from_timings))
-        cases += cases_from_junit(driver, _flatten(args.from_junit))
+        cases += cases_from_logs(driver, _flatten(args.from_log), args.driver_arg)
+        cases += cases_from_timings(
+            driver, _flatten(args.from_timings), args.driver_arg
+        )
+        cases += cases_from_junit(driver, _flatten(args.from_junit), args.driver_arg)
         cases = _dedupe(cases)
         if selectors:
-            allowed = {c.key for c in list_cases(driver, selectors)}
+            allowed = {
+                c.key for c in list_cases(driver, selectors, args.driver_arg)
+            }
             cases = [c for c in cases if c.key in allowed]
     else:
         if not selectors:
             raise FlakyError(
                 "no cases selected: give test selectors (for example `=rig`) or --from-log/--from-timings"
             )
-        cases = list_cases(driver, selectors)
+        cases = list_cases(driver, selectors, args.driver_arg)
     return cases, selectors
 
 
@@ -1537,6 +1780,8 @@ def main(argv: list[str] | None = None) -> int:
             source_keys=q,
             today=today,
             selectors=selectors,
+            driver_args=tuple(args.driver_arg),
+            label=args.label,
         )
         report, code = analyze(args.driver, cases, opts)
         if args.report:
@@ -1545,6 +1790,10 @@ def main(argv: list[str] | None = None) -> int:
                 json.dumps(report, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
+        if args.summary_md:
+            args.summary_md.parent.mkdir(parents=True, exist_ok=True)
+            with args.summary_md.open("w", encoding="utf-8") as f:
+                markdown_summary(report, f)
         if args.json:
             print(json.dumps(report, ensure_ascii=False, indent=2))
             human_summary(report, sys.stderr)
