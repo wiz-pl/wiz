@@ -148,6 +148,15 @@ jobs:
           echo "wiz: $wiz"; echo "tests: $tests"
           du -sh "$wiz" "$tests"
           nix path-info -S "$wiz" "$tests" | sed 's/^/closure: /'
+      - name: The trusted base matches the baseline (before any shard runs)
+        # Fast fail: a ledger regression stops the run here, before the 1.8 GB Cachix
+        # push and before any test shard starts, and it reuses the store path this job
+        # already built instead of a separate job that builds again (~6 min).
+        run: |
+          mkdir -p .lake/build/bin
+          ln -sf "${{ steps.nix.outputs.tests }}/bin/tests" .lake/build/bin/tests
+          scripts/trust-ledger.sh --check
+          Tests/trust-ledger/run.sh
       - name: Publish the store paths to Cachix
         # The shards substitute from here. Explicit (not the action's post-step) so that
         # exactly this commit's build is published, with the token only in this step's
@@ -288,39 +297,6 @@ jobs:
           # always uploaded (the `CI result` job sums them up), but kept briefly
           retention-days: 3
 
-  # The trust ledger: every declaration of lib/ and of the axiom-free examples through
-  # `#print axioms` (Tests/Native.lean), compared with the checked-in
-  # .github/trust-baseline.tsv. A new axiom, `sorry`, native_refl or SMT axiom,
-  # implemented_by/repr, builtin registration or partial definition fails until it is
-  # reviewed and the baseline regenerated (scripts/trust-ledger.sh --update). The
-  # `native` and `hdl-verified` groups check their part of the ledger too; this job
-  # checks lib/ and the examples together, without a shard's path filter to skip it.
-  trust-ledger:
-    name: trust ledger
-    needs: [changes, build]
-    if: github.event_name != 'schedule' && needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v5
-      - uses: ./.github/actions/setup
-        with:
-          cachix-name: ${{ env.CACHIX_NAME }}
-          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          lean: false
-      - name: nix build (the test driver, from Cachix)
-        id: nix
-        run: |
-          tests=$(nix build .#tests --no-link --print-out-paths)
-          echo "tests=$tests" >> "$GITHUB_OUTPUT"
-          mkdir -p .lake/build/bin
-          ln -sf "$tests/bin/tests" .lake/build/bin/tests
-          du -sh "$tests"
-      - name: The trusted base matches the baseline
-        run: scripts/trust-ledger.sh --check
-      - name: The trust gate's fixtures
-        run: Tests/trust-ledger/run.sh
-
   # (11s) The published site, as the artifact `wiz-docs`: on master only (a push), kept
   # 3 days (artifact storage). The tree is the landing page at the root, the standard
   # library's documentation (`wiz doc`, scroll) under `docs/`, and the static playground
@@ -420,7 +396,7 @@ jobs:
   # One check for branch protection, and the whole suite's summary.
   result:
     name: CI result
-    needs: [changes, docs_style, build, test, trust-ledger]
+    needs: [changes, docs_style, build, test]
     if: always() && github.event_name != 'schedule'
     runs-on: ubuntu-latest
     permissions:
@@ -502,7 +478,6 @@ jobs:
         run: |
           echo "changes: ${{ needs.changes.result }} (code: ${{ needs.changes.outputs.code }}, shards: ${{ needs.changes.outputs.shards }})"
           echo "docs style: ${{ needs.docs_style.result }}"
-          echo "trust ledger: ${{ needs['trust-ledger'].result }}"
           echo "build: ${{ needs.build.result }}, test: ${{ needs.test.result }}"
           # the path filter must have run; a job it skipped is not a failure, but outside
           # pull requests (and whenever the filter wants them) every job must succeed
@@ -514,7 +489,6 @@ jobs:
             else [ "$2" = success ] || [ "$2" = skipped ] || { echo "$1: $2"; exit 1; }; fi
           }
           check "docs style" "${{ needs.docs_style.result }}" true
-          check "trust ledger" "${{ needs['trust-ledger'].result }}" "$code"
           check build "${{ needs.build.result }}" "$code"
           check test "${{ needs.test.result }}" "$want_tests"
 
