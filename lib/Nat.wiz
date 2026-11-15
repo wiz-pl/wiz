@@ -40,21 +40,21 @@ instance : LT Nat := LT.mk Nat.Lt
 -- ## Equality helpers
 
 /-- Applying `f` to equal arguments gives equal results. -/
-def congrArg.{u, v} {A : Type u} {B : Type v} (f : A → B) {a b : A} (e : a = b) : f a = f b :=
+def congrArg.{u, v} {0 A : Type u} {0 B : Type v} (f : A → B) {a b : A} (e : a = b) : f a = f b :=
   transp (fun b _ => f a = f b) (refl (f a)) e
 /-- `congrArg` for a function of two arguments. -/
-def congrArg2 {A B C : Type} (f : A → B → C) {a a' : A} {b b' : B} (e : a = a') (e' : b = b') :
+def congrArg2 {0 A B C : Type} (f : A → B → C) {a a' : A} {b b' : B} (e : a = a') (e' : b = b') :
     f a b = f a' b' :=
   Eq.trans (Eq.congrArg (fun x => f x b) e) (Eq.congrArg (f a') e')
 /-- Transport a proposition backwards along an equation: from `P b` and `a = b`, `P a`. -/
-def Eq.mpr' {A : Type} {a b : A} (0 P : A → Prop) (e : a = b) (h : P b) : P a :=
+def Eq.mpr' {0 A : Type} {a b : A} (0 P : A → Prop) (e : a = b) (h : P b) : P a :=
   Eq.substProp P (Eq.symm e) h
 /-- Transport a proposition along an equation: from `P a` and `a = b`, `P b`. -/
-def Eq.mp' {A : Type} {a b : A} (0 P : A → Prop) (e : a = b) (h : P a) : P b :=
+def Eq.mp' {0 A : Type} {a b : A} (0 P : A → Prop) (e : a = b) (h : P a) : P b :=
   Eq.substProp P e h
 /-- `Eq.trans` with the middle term written out, for chains whose steps need their
 equation as the expected type (`nat_ring!`, `int_ring!`). -/
-def Eq.via {A : Type} {a c : A} (b : A) (h1 : a = b) (h2 : b = c) : a = c := Eq.trans h1 h2
+def Eq.via {0 A : Type} {a c : A} (b : A) (h1 : a = b) (h2 : b = c) : a = c := Eq.trans h1 h2
 
 -- ## Addition
 

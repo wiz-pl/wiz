@@ -89,7 +89,7 @@ def Netlist.runGo_eq (n : Netlist) : (regs : List Nat) → (inputs : List (List 
     Netlist.runGo_eq n (Netlist.cycle n regs x).2 xs (List.cons (Netlist.cycle n regs x).1 acc)
 
 /-- `Hdl.rev [] xs = xs`. -/
-def Hdl.rev_nil {A : Type} (xs : List A) : Hdl.rev List.nil xs = xs := rfl
+def Hdl.rev_nil {0 A : Type} (xs : List A) : Hdl.rev List.nil xs = xs := rfl
 
 /-- A memory list with no memories: `NetMem.storeAll` leaves the (empty) memory state
 empty. -/

@@ -183,7 +183,7 @@ def Pipe.verilog {ω i o : HwTy} (name : String) (p : Pipe i o) : String :=
 -- definitional in the structure's semantics.
 
 /-- `Hdl.map` with the identity is the identity. -/
-def Hdl.map_id {A : Type} : (xs : List A) → Hdl.map (fun x => x) xs = xs
+def Hdl.map_id {0 A : Type} : (xs : List A) → Hdl.map (fun x => x) xs = xs
   | .nil => rfl
   | .cons x xs => Eq.congrArg (List.cons x) (Hdl.map_id xs)
 

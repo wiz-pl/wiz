@@ -61,7 +61,7 @@ def Display.flag (b : Bool) (yes no : Nat) : Nat := match b with
   | .false => no
 
 /-- `n` copies of `v` (a list of `n` zero bytes is a blank page). -/
-def Display.rep {A : Type} : Nat → A → List A → List A
+def Display.rep {0 A : Type} : Nat → A → List A → List A
   | .zero, _, acc => acc
   | .succ k, v, acc => Display.rep k v (List.cons v acc)
 

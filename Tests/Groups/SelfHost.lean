@@ -896,7 +896,7 @@ def classCore : String :=
 def classCoreExpected : String :=
   "Default : (x0 : U0) → U0\n" ++
   "Default.d : (x0 :0 U0) → (x1 : (Default x0)) → x0\n" ++
-  "(x0 : U0) → (x1 : (Default x0)) → x0\n" ++
+  "(x0 :0 U0) → (x1 : (Default x0)) → x0\n" ++
   "instDefaultNat : (Default Nat)\ninstDefaultBool : (Default Bool)\n" ++
   "get : (x0 : U0) → (x1 : (Default x0)) → x0\n" ++
   "(x0 : U0) → (x1 : (Default x0)) → x0\nseven : Nat\nyes : Bool\n" ++

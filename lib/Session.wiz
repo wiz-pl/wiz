@@ -81,7 +81,7 @@ def Proc (R : Type) : Proto → Type
 /-- Run two processes on the two ends of one channel (cut elimination, as a program),
 returning both results. Total: every exchange moves both to the continuation of the same
 constructor, so two processes on one channel can't get stuck. -/
-def link {A B : Type} : (p : Proto) → Proc A p → Proc B (Proto.dual p) → A × B
+def link {0 A B : Type} : (p : Proto) → Proc A p → Proc B (Proto.dual p) → A × B
   | .send T k => fun x f => link (k x.1) x.2 (f x.1)
   | .recv T k => fun f y => link (k y.1) (f y.1) y.2
   | .done => fun a b => (a, b)
@@ -105,7 +105,7 @@ inductive Msg (A : Type) where
   | val (a : A)
   | cancel
 /-- The protocol after a message: `k a` after `val a`, `done` after `cancel`. -/
-def Msg.next {A : Type} (k : A → Proto) : Msg A → Proto
+def Msg.next {0 A : Type} (k : A → Proto) : Msg A → Proto
   | .val a => k a
   | .cancel => .done
 /-- Send either a value (and continue with `k`) or `Msg.cancel` (and the channel is done). -/
@@ -139,27 +139,27 @@ Chan.fork (.send Nat (fun _ => .done))
   (fun c => Chan.recv c (fun n c' => Chan.close c' (IO.println "received")))
   (fun c => Chan.send c 42 (fun c' => Chan.close c' (IO.pure ())))
 ``` -/
-def Chan.fork {B : Type} (p : Proto) (1 child : (1 c : Chan (Proto.dual p)) → IO Unit)
+def Chan.fork {0 B : Type} (p : Proto) (1 child : (1 c : Chan (Proto.dual p)) → IO Unit)
     (1 parent : (1 c : Chan p) → IO B) : IO B := fun w =>
   let 1 (c, w') := Chan.forkRaw child w; parent c w'
 
 /-- Send `a`, then continue with the endpoint at `k a`. Sending never blocks (a channel
 buffers its messages). -/
-def Chan.send {A : Type} {k : A → Proto} {B : Type} (1 c : Chan (Proto.send A k)) (a : A)
+def Chan.send {0 A : Type} {k : A → Proto} {0 B : Type} (1 c : Chan (Proto.send A k)) (a : A)
     (1 next : (1 c' : Chan (k a)) → IO B) : IO B := fun w =>
   let 1 (c', w') := Chan.sendRaw c a w; next c' w'
 
 /-- Wait for a value, then continue with it and the endpoint at `k a`. -/
-def Chan.recv {A : Type} {k : A → Proto} {B : Type} (1 c : Chan (Proto.recv A k))
+def Chan.recv {0 A : Type} {k : A → Proto} {0 B : Type} (1 c : Chan (Proto.recv A k))
     (1 next : (a : A) → (1 c' : Chan (k a)) → IO B) : IO B := fun w =>
   let 1 (r, w') := Chan.recvRaw c w; next r.1 r.2 w'
 
 /-- A finished channel must be closed (it can't be dropped); then continue with `next`. -/
-def Chan.close {B : Type} (1 c : Chan Proto.done) (1 next : IO B) : IO B := fun w =>
+def Chan.close {0 B : Type} (1 c : Chan Proto.done) (1 next : IO B) : IO B := fun w =>
   let 1 (u, w') := Chan.closeRaw c w; next w'
 
 /-- Cancel at a send point of a cancellable protocol (`Proto.sendC`): tell the peer, and close. -/
-def Chan.cancel {A : Type} {k : A → Proto} {B : Type} (1 c : Chan (Proto.sendC A k))
+def Chan.cancel {0 A : Type} {k : A → Proto} {0 B : Type} (1 c : Chan (Proto.sendC A k))
     (1 next : IO B) : IO B :=
   Chan.send c Msg.cancel (fun c' => Chan.close c' next)
 
@@ -167,7 +167,7 @@ def Chan.cancel {A : Type} {k : A → Proto} {B : Type} (1 c : Chan (Proto.sendC
 
 /-- Run a pure process on an endpoint: the same `Proc` that `link` runs purely, step by
 step over a real channel. -/
-def Proc.run {R : Type} : (p : Proto) → Proc R p → (1 c : Chan p) → IO R
+def Proc.run {0 R : Type} : (p : Proto) → Proc R p → (1 c : Chan p) → IO R
   | .send A k => fun x c => Chan.send c x.1 (fun c' => Proc.run (k x.1) x.2 c')
   | .recv A k => fun f c => Chan.recv c (fun a c' => Proc.run (k a) (f a) c')
   | .done => fun r c => Chan.close c (IO.pure r)
@@ -177,11 +177,11 @@ the kernel, proofs, `#eval` and `#run` see) is `link`; compiled code runs the pe
 new thread over a real channel (`Proc.runLinkedThreads`, by `implemented_by`), so a
 compiled program that prints `Proc.runLinked`'s result is a differential test of the
 native channels against the pure semantics. -/
-def Proc.runLinked {A B : Type} (p : Proto) (a : Proc A p) (b : Proc B (Proto.dual p)) : IO (A × B) :=
+def Proc.runLinked {0 A B : Type} (p : Proto) (a : Proc A p) (b : Proc B (Proto.dual p)) : IO (A × B) :=
   IO.pure (link p a b)
 /-- The compiled implementation of `Proc.runLinked`: the peer runs in a new thread over a
 real channel, and its result comes back through an `MVar`, written once and read once. -/
-def Proc.runLinkedThreads {A B : Type} (p : Proto) (a : Proc A p) (b : Proc B (Proto.dual p)) : IO (A × B) :=
+def Proc.runLinkedThreads {0 A B : Type} (p : Proto) (a : Proc A p) (b : Proc B (Proto.dual p)) : IO (A × B) :=
   IO.bind (MVar.new (A := B)) (fun m =>
     Chan.fork p (fun c => IO.bind (Proc.run (Proto.dual p) b c) (fun y => MVar.put m y))
       (fun c => IO.bind (Proc.run p a c) (fun x => IO.bind (MVar.take m) (fun y => IO.pure (x, y)))))

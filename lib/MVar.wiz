@@ -51,7 +51,7 @@ extern "wiz_mvar_read" MVar.read : {0 A : Type} → (m : MVar A) → IO A
 
 /-- The obligation to refill `m`: no constructor, no ω producer, so a borrower must
 hand it to `MVar.fill` exactly once. -/
-axiom MVar.Hole : {A : Type} → MVar A → Type
+axiom MVar.Hole : {0 A : Type} → MVar A → Type
 private extern "wiz_mvar_take_hole" MVar.takeHole : {0 A : Type} → (m : MVar A) →
   IO ((a : A) × MVar.Hole m)
 private extern "wiz_mvar_fill" MVar.fillRaw : {0 A : Type} → (m : MVar A) →
@@ -63,14 +63,14 @@ private extern "wiz_mvar_fill" MVar.fillRaw : {0 A : Type} → (m : MVar A) →
 MVar.borrow m (fun a h => MVar.fill m h (Nat.succ a) (IO.pure a))
 ```
 -/
-def MVar.borrow {A B : Type} (m : MVar A) (1 k : (a : A) → (1 h : MVar.Hole m) → IO B) : IO B :=
+def MVar.borrow {0 A B : Type} (m : MVar A) (1 k : (a : A) → (1 h : MVar.Hole m) → IO B) : IO B :=
   fun w => let 1 (r, w') := MVar.takeHole m w; k r.1 r.2 w'
 /-- Fill the hole `h` with `a`, then continue with `next`. -/
-def MVar.fill {A B : Type} (m : MVar A) (1 h : MVar.Hole m) (a : A) (1 next : IO B) : IO B :=
+def MVar.fill {0 A B : Type} (m : MVar A) (1 h : MVar.Hole m) (a : A) (1 next : IO B) : IO B :=
   fun w => let 1 (u, w') := MVar.fillRaw m h a w; next w'
 /-- Replace the value by `f` of it, atomically with respect to other borrowers; returns
 the old value. -/
-def MVar.modify {A : Type} (m : MVar A) (f : A → A) : IO A :=
+def MVar.modify {0 A : Type} (m : MVar A) (f : A → A) : IO A :=
   MVar.borrow m (fun a h => MVar.fill m h (f a) (IO.pure a))
 
 -- ## Locks
@@ -86,11 +86,11 @@ private extern "wiz_lock_acquire" Lock.acquireRaw : (l : Lock) → IO (Lock.Guar
 private extern "wiz_lock_release" Lock.releaseRaw : (l : Lock) → (1 g : Lock.Guard l) → IO Unit
 
 /-- Wait for the lock; `k` holds it until it releases the guard with `Lock.release`. -/
-def Lock.acquire {B : Type} (l : Lock) (1 k : (1 g : Lock.Guard l) → IO B) : IO B :=
+def Lock.acquire {0 B : Type} (l : Lock) (1 k : (1 g : Lock.Guard l) → IO B) : IO B :=
   fun w => let 1 (g, w') := Lock.acquireRaw l w; k g w'
 /-- Release the lock (consuming its guard `g`), then continue with `next`. -/
-def Lock.release {B : Type} (l : Lock) (1 g : Lock.Guard l) (1 next : IO B) : IO B :=
+def Lock.release {0 B : Type} (l : Lock) (1 g : Lock.Guard l) (1 next : IO B) : IO B :=
   fun w => let 1 (u, w') := Lock.releaseRaw l g w; next w'
 /-- Run `body` holding the lock: `Lock.with l (IO.println "one line at a time")`. -/
-def Lock.with {B : Type} (l : Lock) (body : IO B) : IO B :=
+def Lock.with {0 B : Type} (l : Lock) (body : IO B) : IO B :=
   Lock.acquire l (fun g => fun w => let 1 (b, w') := body w; Lock.release l g (IO.pure b) w')

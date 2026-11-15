@@ -1,0 +1,67 @@
+=== 7 ===
+── selfhost (Stages 12b–14q)
+  ✓ a name is declared once: a second declaration is an error (it proved an empty type inhabited) (166.186 s)
+
+selfhost #7: passed
+=== 12 ===
+── selfhost (Stages 12b–14q)
+  ✓ parameterised inductive types, checked in Wiz (0.064 s)
+
+selfhost #12: passed
+=== 15 ===
+── selfhost (Stages 12b–14q)
+  ✓ implicit arguments, checked in Wiz (0.057 s)
+
+selfhost #15: passed
+=== 18 ===
+── selfhost (Stages 12b–14q)
+  ✓ the self-hosted frontend: a named argument for a binder written in the type (A9) (0.122 s)
+
+selfhost #18: passed
+=== 19 ===
+── selfhost (Stages 12b–14q)
+  ✓ constructors by their names (.c) and @f, checked in Wiz (0.052 s)
+
+selfhost #19: passed
+=== 21 ===
+── selfhost (Stages 12b–14q)
+  ✓ indexed families, checked in Wiz (0.053 s)
+
+selfhost #21: passed
+=== 23 ===
+── selfhost (Stages 12b–14q)
+  ✓ mutual inductive types, checked in Wiz (0.051 s)
+
+selfhost #23: passed
+=== 26 ===
+── selfhost (Stages 12b–14q)
+  ✓ structures and projections, checked in Wiz (0.047 s)
+
+selfhost #26: passed
+=== 31 ===
+── selfhost (Stages 12b–14q)
+  ✓ Syntax, StrMap and definitions as types, checked in Wiz (0.159 s)
+
+selfhost #31: passed
+=== 53 ===
+── selfhost (Stages 12b–14q)
+  ✓ the self-hosted frontend: foreign types are checked (21l) (0.126 s)
+
+selfhost #53: passed
+=== 143 ===
+── selfhost (Stages 12b–14q)
+  ✓ the proof surface: Prop, Sort, equality, refl/rfl, cast and transp, as in the Lean frontend (A16) (0.137 s)
+
+selfhost #143: passed
+=== 144 ===
+── selfhost (Stages 12b–14q)
+  ✓ the proof surface: the Lean and self-hosted frontends agree (A16) (1.762 s)
+
+selfhost #144: passed
+=== 145 ===
+no case 145 in selfhost: it has 145 (0 to 144; `tests --list-cases '=selfhost'`)
+=== 150 ===
+no case 150 in selfhost: it has 145 (0 to 144; `tests --list-cases '=selfhost'`)
+=== 151 ===
+no case 151 in selfhost: it has 145 (0 to 144; `tests --list-cases '=selfhost'`)
+DONE

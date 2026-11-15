@@ -110,7 +110,7 @@ instance : Div Int := Div.mk Int.div
 instance : Mod Int := Mod.mk Int.mod
 
 /-- `congrArg`, kept local to this module: equal arguments give equal results. -/
-def Int.congrArg {A B : Type} (f : A → B) {a b : A} (e : a = b) : f a = f b :=
+def Int.congrArg {0 A B : Type} (f : A → B) {a b : A} (e : a = b) : f a = f b :=
   transp (fun b _ => f a = f b) (refl (f a)) e
 /-- `n + 0 = n` for natural numbers (a helper for `Int.add_zero`). -/
 def Int.natAdd_zero : (n : Nat) → n + 0 = n

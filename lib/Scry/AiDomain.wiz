@@ -133,7 +133,7 @@ def Ai.memNat (x : Nat) : List Nat → Bool
     | .true => .true
     | .false => Ai.memNat x ys
 /-- Add a natural to the end of a list. -/
-def Ai.snoc {A : Type} (xs : List A) (x : A) : List A := List.append xs (.cons x .nil)
+def Ai.snoc {0 A : Type} (xs : List A) (x : A) : List A := List.append xs (.cons x .nil)
 
 -- ## Intervals
 

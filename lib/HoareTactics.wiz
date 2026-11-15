@@ -34,44 +34,44 @@ More in `HoareExamples`. -/
 -- ## Star lists
 
 /-- `H ⋆ (H₁ ⋆ … ⋆ Hₙ)` without a trailing `emp`: the non-empty case of `starL`. -/
-def starC {V : Type} : HProp V → List (HProp V) → HProp V
+def starC {0 V : Type} : HProp V → List (HProp V) → HProp V
   | H, .nil => H
   | H, .cons H' Hs => H ⋆ starC H' Hs
 /-- A star list: `starL [H₁, …, Hₙ]` is `H₁ ⋆ (… ⋆ Hₙ)` (and `starL [] = emp`). The tactics
 work on these, since list positions are easy to compute with. -/
-def starL {V : Type} : List (HProp V) → HProp V
+def starL {0 V : Type} : List (HProp V) → HProp V
   | .nil => emp
   | .cons H Hs => starC H Hs
 
 /-- Two-way entailment of heap predicates. -/
-def HEquiv {V : Type} (H H' : HProp V) : Prop := (H ⊢ H') ∧ (H' ⊢ H)
+def HEquiv {0 V : Type} (H H' : HProp V) : Prop := (H ⊢ H') ∧ (H' ⊢ H)
 /-- `HEquiv` is reflexive. -/
-def HEquiv.refl {V : Type} (0 H : HProp V) : HEquiv H H := (Entails.refl H, Entails.refl H)
+def HEquiv.refl {0 V : Type} (0 H : HProp V) : HEquiv H H := (Entails.refl H, Entails.refl H)
 /-- `HEquiv` is symmetric. -/
-def HEquiv.symm {V : Type} {0 H H' : HProp V} (e : HEquiv H H') : HEquiv H' H := (e.2, e.1)
+def HEquiv.symm {0 V : Type} {0 H H' : HProp V} (e : HEquiv H H') : HEquiv H' H := (e.2, e.1)
 /-- `HEquiv` is transitive. -/
-def HEquiv.trans {V : Type} {0 H₁ H₂ H₃ : HProp V} (a : HEquiv H₁ H₂) (b : HEquiv H₂ H₃) : HEquiv H₁ H₃ :=
+def HEquiv.trans {0 V : Type} {0 H₁ H₂ H₃ : HProp V} (a : HEquiv H₁ H₂) (b : HEquiv H₂ H₃) : HEquiv H₁ H₃ :=
   (Entails.trans a.1 b.1, Entails.trans b.2 a.2)
 /-- `HEquiv` is a congruence for `⋆`. -/
-def HEquiv.star {V : Type} {0 H₁ H₁' H₂ H₂' : HProp V} (a : HEquiv H₁ H₁') (b : HEquiv H₂ H₂') :
+def HEquiv.star {0 V : Type} {0 H₁ H₁' H₂ H₂' : HProp V} (a : HEquiv H₁ H₁') (b : HEquiv H₂ H₂') :
     HEquiv (H₁ ⋆ H₂) (H₁' ⋆ H₂') := (star.mono a.1 b.1, star.mono a.2 b.2)
 /-- `⋆` is associative, up to `HEquiv`. -/
-def HEquiv.assoc {V : Type} (0 H₁ H₂ H₃ : HProp V) : HEquiv ((H₁ ⋆ H₂) ⋆ H₃) (H₁ ⋆ (H₂ ⋆ H₃)) :=
+def HEquiv.assoc {0 V : Type} (0 H₁ H₂ H₃ : HProp V) : HEquiv ((H₁ ⋆ H₂) ⋆ H₃) (H₁ ⋆ (H₂ ⋆ H₃)) :=
   (star.assoc_l H₁ H₂ H₃, star.assoc_r H₁ H₂ H₃)
 /-- `A ⋆ (B ⋆ C)` and `B ⋆ (A ⋆ C)` are equivalent. -/
-def HEquiv.swap {V : Type} (0 A B C : HProp V) : HEquiv (A ⋆ (B ⋆ C)) (B ⋆ (A ⋆ C)) :=
+def HEquiv.swap {0 V : Type} (0 A B C : HProp V) : HEquiv (A ⋆ (B ⋆ C)) (B ⋆ (A ⋆ C)) :=
   (star.swap A B C, star.swap B A C)
 /-- `emp ⋆ H` is equivalent to `H`. -/
-def HEquiv.emp_l {V : Type} (0 H : HProp V) : HEquiv (emp ⋆ H) H := (star.emp_l_entails H, star.emp_l_intro H)
+def HEquiv.emp_l {0 V : Type} (0 H : HProp V) : HEquiv (emp ⋆ H) H := (star.emp_l_entails H, star.emp_l_intro H)
 /-- `H ⋆ emp` is equivalent to `H`. -/
-def HEquiv.emp_r {V : Type} (0 H : HProp V) : HEquiv (H ⋆ emp) H := (star.emp_r_entails H, star.emp_r_intro H)
+def HEquiv.emp_r {0 V : Type} (0 H : HProp V) : HEquiv (H ⋆ emp) H := (star.emp_r_entails H, star.emp_r_intro H)
 
 /-- `starL (H :: Hs)` is `H ⋆ starL Hs` (up to a trailing `emp`). -/
-def starL.cons {V : Type} (0 H : HProp V) : (Hs : List (HProp V)) → HEquiv (starL (.cons H Hs)) (H ⋆ starL Hs)
+def starL.cons {0 V : Type} (0 H : HProp V) : (Hs : List (HProp V)) → HEquiv (starL (.cons H Hs)) (H ⋆ starL Hs)
   | .nil => HEquiv.symm (HEquiv.emp_r H)
   | .cons H' Hs => HEquiv.refl (H ⋆ starC H' Hs)
 /-- `starL (Ls ++ Rs)` is `starL Ls ⋆ starL Rs`. -/
-def starL.append {V : Type} : (Ls : List (HProp V)) → (Rs : List (HProp V)) →
+def starL.append {0 V : Type} : (Ls : List (HProp V)) → (Rs : List (HProp V)) →
     HEquiv (starL (List.append Ls Rs)) (starL Ls ⋆ starL Rs)
   | .nil, Rs => HEquiv.symm (HEquiv.emp_l (starL Rs))
   | .cons H Ls, Rs => HEquiv.trans (starL.cons H (List.append Ls Rs))
@@ -80,18 +80,18 @@ def starL.append {V : Type} : (Ls : List (HProp V)) → (Rs : List (HProp V)) �
         (HEquiv.star (HEquiv.symm (starL.cons H Ls)) (HEquiv.refl (starL Rs)))))
 
 /-- The `n`th element of a star list (`emp` past the end). -/
-def starL.nth {V : Type} : Nat → List (HProp V) → HProp V
+def starL.nth {0 V : Type} : Nat → List (HProp V) → HProp V
   | _, .nil => emp
   | .zero, .cons H _ => H
   | .succ n, .cons _ Hs => starL.nth n Hs
 /-- The star list without its `n`th element. -/
-def starL.drop {V : Type} : Nat → List (HProp V) → List (HProp V)
+def starL.drop {0 V : Type} : Nat → List (HProp V) → List (HProp V)
   | _, .nil => .nil
   | .zero, .cons _ Hs => Hs
   | .succ n, .cons H Hs => .cons H (starL.drop n Hs)
 
 /-- Any element can be brought to the front: `starL Hs` is `nth n Hs ⋆ starL (drop n Hs)`. -/
-def starL.pick {V : Type} : (n : Nat) → (Hs : List (HProp V)) →
+def starL.pick {0 V : Type} : (n : Nat) → (Hs : List (HProp V)) →
     HEquiv (starL Hs) (starL.nth n Hs ⋆ starL (starL.drop n Hs))
   | _, .nil => HEquiv.symm (HEquiv.emp_l emp)
   | .zero, .cons H Hs => starL.cons H Hs
@@ -100,7 +100,7 @@ def starL.pick {V : Type} : (n : Nat) → (Hs : List (HProp V)) →
       (HEquiv.trans (HEquiv.swap H (starL.nth n Hs) (starL (starL.drop n Hs)))
         (HEquiv.star (HEquiv.refl (starL.nth n Hs)) (HEquiv.symm (starL.cons H (starL.drop n Hs))))))
 /-- `starL.pick` as a list: `starL Hs` and `starL (nth n Hs :: drop n Hs)`. -/
-def starL.pickL {V : Type} (n : Nat) (Hs : List (HProp V)) :
+def starL.pickL {0 V : Type} (n : Nat) (Hs : List (HProp V)) :
     HEquiv (starL Hs) (starL (.cons (starL.nth n Hs) (starL.drop n Hs))) :=
   HEquiv.trans (starL.pick n Hs) (HEquiv.symm (starL.cons (starL.nth n Hs) (starL.drop n Hs)))
 
@@ -113,17 +113,17 @@ inductive HTree (V : Type) where
   | emp
   | star (a : HTree V) (b : HTree V)
 /-- The heap predicate a tree stands for. -/
-def HTree.den {V : Type} : HTree V → HProp V
+def HTree.den {0 V : Type} : HTree V → HProp V
   | .atom H => H
   | .emp => emp
   | .star a b => HTree.den a ⋆ HTree.den b
 /-- The atoms of a tree, in order, as a star list. -/
-def HTree.flat {V : Type} : HTree V → List (HProp V)
+def HTree.flat {0 V : Type} : HTree V → List (HProp V)
   | .atom H => .cons H .nil
   | .emp => .nil
   | .star a b => List.append (HTree.flat a) (HTree.flat b)
 /-- A tree is equivalent to its flattening. -/
-def HTree.flat_eq {V : Type} : (t : HTree V) → HEquiv (HTree.den t) (starL (HTree.flat t))
+def HTree.flat_eq {0 V : Type} : (t : HTree V) → HEquiv (HTree.den t) (starL (HTree.flat t))
   | .atom H => HEquiv.refl H
   | .emp => HEquiv.refl emp
   | .star a b => HEquiv.trans (HEquiv.star (HTree.flat_eq a) (HTree.flat_eq b))
@@ -135,35 +135,35 @@ def HTree.flat_eq {V : Type} : (t : HTree V) → HEquiv (HTree.den t) (starL (HT
 
 /-- The steps of `xsimpl`, on star lists (each turns a goal `starL Ls ⊢ starL Rs` into a
 simpler one): flatten both sides. -/
-def xs.flat {V : Type} (tl tr : HTree V) (k : starL (HTree.flat tl) ⊢ starL (HTree.flat tr)) :
+def xs.flat {0 V : Type} (tl tr : HTree V) (k : starL (HTree.flat tl) ⊢ starL (HTree.flat tr)) :
     HTree.den tl ⊢ HTree.den tr :=
   Entails.trans (HTree.flat_eq tl).1 (Entails.trans k (HTree.flat_eq tr).2)
 /-- Bring the `i`th left atom to the front. -/
-def xs.pickL {V : Type} (i : Nat) (Ls : List (HProp V)) {0 R : HProp V}
+def xs.pickL {0 V : Type} (i : Nat) (Ls : List (HProp V)) {0 R : HProp V}
     (k : starL (.cons (starL.nth i Ls) (starL.drop i Ls)) ⊢ R) : starL Ls ⊢ R :=
   Entails.trans (starL.pickL i Ls).1 k
 /-- Bring the `j`th right atom to the front. -/
-def xs.pickR {V : Type} (j : Nat) (Rs : List (HProp V)) {0 L : HProp V}
+def xs.pickR {0 V : Type} (j : Nat) (Rs : List (HProp V)) {0 L : HProp V}
     (k : L ⊢ starL (.cons (starL.nth j Rs) (starL.drop j Rs))) : L ⊢ starL Rs :=
   Entails.trans k (starL.pickL j Rs).2
 /-- Cancel the two front atoms. -/
-def xs.cancel {V : Type} (0 H : HProp V) (Ls Rs : List (HProp V)) (k : starL Ls ⊢ starL Rs) :
+def xs.cancel {0 V : Type} (0 H : HProp V) (Ls Rs : List (HProp V)) (k : starL Ls ⊢ starL Rs) :
     starL (.cons H Ls) ⊢ starL (.cons H Rs) :=
   Entails.trans (starL.cons H Ls).1 (Entails.trans (star.mono_r H k) (starL.cons H Rs).2)
 /-- An existential on the right: give a witness. -/
-def xs.exists_r {V A : Type} (0 J : A → HProp V) (a : A) (Rs : List (HProp V)) {0 L : HProp V}
+def xs.exists_r {0 V A : Type} (0 J : A → HProp V) (a : A) (Rs : List (HProp V)) {0 L : HProp V}
     (k : L ⊢ starL (.cons (J a) Rs)) : L ⊢ starL (.cons (hexists J) Rs) :=
   Entails.trans k (Entails.trans (starL.cons (J a) Rs).1
     (Entails.trans (star.mono_l (starL Rs) (hexists.intro J a (Entails.refl (J a))))
       (starL.cons (hexists J) Rs).2))
 /-- A pure fact on the right: a side condition. -/
-def xs.pure_r {V : Type} {0 P : Prop} (p : P) (Rs : List (HProp V)) {0 L : HProp V}
+def xs.pure_r {0 V : Type} {0 P : Prop} (p : P) (Rs : List (HProp V)) {0 L : HProp V}
     (k : L ⊢ starL Rs) : L ⊢ starL (.cons (hpure P) Rs) :=
   Entails.trans (hpure.intro_r p k) (starL.cons (hpure P) Rs).2
 /-- `htop` on the right takes whatever is left. -/
-def xs.top_r {V : Type} (Ls : List (HProp V)) : starL Ls ⊢ @htop V := fun h _ => ()
+def xs.top_r {0 V : Type} (Ls : List (HProp V)) : starL Ls ⊢ @htop V := fun h _ => ()
 /-- A wand on the left, next to its premise: modus ponens. -/
-def xs.wand_l {V : Type} (H₁ : HProp V) (0 H₂ : HProp V) (Ls : List (HProp V)) {0 R : HProp V}
+def xs.wand_l {0 V : Type} (H₁ : HProp V) (0 H₂ : HProp V) (Ls : List (HProp V)) {0 R : HProp V}
     (k : starL (.cons H₂ Ls) ⊢ R) : starL (.cons (H₁ −∗ H₂) (.cons H₁ Ls)) ⊢ R :=
   Entails.trans (starL.cons (H₁ −∗ H₂) (.cons H₁ Ls)).1
     (Entails.trans (star.mono_r (H₁ −∗ H₂) (starL.cons H₁ Ls).1)
@@ -171,21 +171,21 @@ def xs.wand_l {V : Type} (H₁ : HProp V) (0 H₂ : HProp V) (Ls : List (HProp V
     (Entails.trans (star.mono_l (starL Ls) (Entails.trans (star.comm_entails (H₁ −∗ H₂) H₁) (wand.cancel H₁ H₂)))
     (Entails.trans (starL.cons H₂ Ls).2 k))))
 /-- A wand on the right: move its premise to the left. -/
-def xs.wand_r {V : Type} {0 L H₁ H₂ : HProp V} (k : L ⋆ H₁ ⊢ H₂) : L ⊢ H₁ −∗ H₂ := wand.intro k
+def xs.wand_r {0 V : Type} {0 L H₁ H₂ : HProp V} (k : L ⋆ H₁ ⊢ H₂) : L ⊢ H₁ −∗ H₂ := wand.intro k
 /-- The left side's front atom is a pure fact: a hypothesis. (The tactics read the premise
 back after introducing it: star lists are reflected as lists, stage 6g.) -/
-def xs.pure_l {V : Type} (0 P : Prop) (Ls : List (HProp V)) {0 R : HProp V} (k : P → (starL Ls ⊢ R)) :
+def xs.pure_l {0 V : Type} (0 P : Prop) (Ls : List (HProp V)) {0 R : HProp V} (k : P → (starL Ls ⊢ R)) :
     starL (.cons (hpure P) Ls) ⊢ R :=
   Entails.trans (starL.cons (hpure P) Ls).1 (hpure.elim_l k)
 /-- The left side's front atom is an existential: a variable. -/
-def xs.exists_l {V A : Type} (0 J : A → HProp V) (Ls : List (HProp V)) {0 R : HProp V}
+def xs.exists_l {0 V A : Type} (0 J : A → HProp V) (Ls : List (HProp V)) {0 R : HProp V}
     (k : (x : A) → (starL (.cons (J x) Ls) ⊢ R)) : starL (.cons (hexists J) Ls) ⊢ R :=
   Entails.trans (starL.cons (hexists J) Ls).1 (Entails.trans (star.exists_l_entails J (starL Ls))
     (hexists.elim (fun x => Entails.trans (starL.cons (J x) Ls).2 (k x))))
 /-- A universal on the right: introduce the variable. -/
-def xs.forall_r {V A : Type} (0 J : A → HProp V) (0 F : HProp V) (k : (x : A) → (F ⊢ J x)) : F ⊢ hforall J := hforall.intro k
+def xs.forall_r {0 V A : Type} (0 J : A → HProp V) (0 F : HProp V) (k : (x : A) → (F ⊢ J x)) : F ⊢ hforall J := hforall.intro k
 /-- Replace an atom on the left by one it entails. -/
-def xs.change_l {V : Type} (0 H₁ H₂ : HProp V) (e : H₁ ⊢ H₂) (Ls : List (HProp V)) {0 R : HProp V}
+def xs.change_l {0 V : Type} (0 H₁ H₂ : HProp V) (e : H₁ ⊢ H₂) (Ls : List (HProp V)) {0 R : HProp V}
     (k : starL (.cons H₂ Ls) ⊢ R) : starL (.cons H₁ Ls) ⊢ R :=
   Entails.trans (starL.cons H₁ Ls).1 (Entails.trans (star.mono_l (starL Ls) e) (Entails.trans (starL.cons H₂ Ls).2 k))
 
@@ -195,30 +195,30 @@ def xs.change_l {V : Type} (0 H₁ H₂ : HProp V) (e : H₁ ⊢ H₂) (Ls : Lis
 
 /-- The steps of the `x`-tactics, in weakest-precondition form (SLF's `xapp` lemmas); the
 precondition is a star list with the cell the command touches in front. A read. -/
-def xw.get {V A : Type} (l : Nat) (v : V) (Ls : List (HProp V)) (k : V → Prog V A) (0 Q : A → HProp V)
+def xw.get {0 V A : Type} (l : Nat) (v : V) (Ls : List (HProp V)) (k : V → Prog V A) (0 Q : A → HProp V)
     (m : starL (.cons (l ↦ v) Ls) ⊢ wp (k v) Q) : starL (.cons (l ↦ v) Ls) ⊢ wp (Prog.get l k) Q :=
   Entails.trans (starL.cons (l ↦ v) Ls).1
     (wp.get_intro l v (starL Ls) (fun (v' : V) => wp (k v') Q) (Entails.trans (starL.cons (l ↦ v) Ls).2 m))
 /-- A write, with the cell in front. -/
-def xw.set {V A : Type} (l : Nat) (w v : V) (Ls : List (HProp V)) (k : Prog V A) (0 Q : A → HProp V)
+def xw.set {0 V A : Type} (l : Nat) (w v : V) (Ls : List (HProp V)) (k : Prog V A) (0 Q : A → HProp V)
     (m : starL (.cons (l ↦ v) Ls) ⊢ wp k Q) : starL (.cons (l ↦ w) Ls) ⊢ wp (Prog.set l v k) Q :=
   Entails.trans (starL.cons (l ↦ w) Ls).1
     (wp.set_intro l w v (starL Ls) (wp k Q) (Entails.trans (starL.cons (l ↦ v) Ls).2 m))
 /-- An allocation: the new cell joins the precondition. -/
-def xw.alloc {V A : Type} (v : V) (0 F : HProp V) (k : Nat → Prog V A) (0 Q : A → HProp V)
+def xw.alloc {0 V A : Type} (v : V) (0 F : HProp V) (k : Nat → Prog V A) (0 Q : A → HProp V)
     (m : (l : Nat) → ((l ↦ v) ⋆ F ⊢ wp (k l) Q)) : F ⊢ wp (Prog.alloc v k) Q :=
   wp.alloc_intro v F (fun (l : Nat) => wp (k l) Q) m
 /-- A free, with the cell in front. -/
-def xw.free {V A : Type} (l : Nat) (w : V) (Ls : List (HProp V)) (k : Prog V A) (0 Q : A → HProp V)
+def xw.free {0 V A : Type} (l : Nat) (w : V) (Ls : List (HProp V)) (k : Prog V A) (0 Q : A → HProp V)
     (m : starL Ls ⊢ wp k Q) : starL (.cons (l ↦ w) Ls) ⊢ wp (Prog.free l k) Q :=
   Entails.trans (starL.cons (l ↦ w) Ls).1 (wp.free_intro l w (starL Ls) (wp k Q) m)
 /-- Sequencing: the first program's postcondition is the rest's precondition. -/
-def xw.bind {V A B : Type} (c : Prog V A) (f : A → Prog V B) (0 Q : B → HProp V) (0 L : HProp V)
+def xw.bind {0 V A B : Type} (c : Prog V A) (f : A → Prog V B) (0 Q : B → HProp V) (0 L : HProp V)
     (m : L ⊢ wp c (fun (a : A) => wp (f a) Q)) : L ⊢ wp (Prog.bind c f) Q :=
   Entails.trans m (wp.bind_r c f Q)
 /-- A call to a specified program, with the frame and the rest left to `xsimpl`: SLF's
 `xapp_lemma`, `H ⊢ P ⋆ (Q' −−∗ Q)`. -/
-def xw.app {V A : Type} (c : Prog V A) (0 P : HProp V) (0 Q' : A → HProp V) (t : Triple P c Q')
+def xw.app {0 V A : Type} (c : Prog V A) (0 P : HProp V) (0 Q' : A → HProp V) (t : Triple P c Q')
     (0 L : HProp V) (0 Q : A → HProp V)
     (m : L ⊢ P ⋆ hforall (fun (r : A) => Q' r −∗ Q r)) : L ⊢ wp c Q :=
   Entails.trans m (Entails.trans (star.mono_l (hforall (fun (r : A) => Q' r −∗ Q r)) t)
@@ -230,21 +230,21 @@ def xw.app {V A : Type} (c : Prog V A) (0 P : HProp V) (0 Q' : A → HProp V) (t
 /-- The parts of a command, read off the program as it is written: when what a program
 computes to can't be put in a proof term (see `XT.hasOpaque`), the x-tactics name its
 parts through these, and conversion computes them. -/
-def Prog.loc {V A : Type} : Prog V A → Nat
+def Prog.loc {0 V A : Type} : Prog V A → Nat
   | .get l _ => l
   | .set l _ _ => l
   | .free l _ => l
   | _ => 0
 /-- A `get`'s continuation, applied to the value (or the program itself). -/
-def Prog.getK {V A : Type} : Prog V A → V → Prog V A
+def Prog.getK {0 V A : Type} : Prog V A → V → Prog V A
   | .get _ k, v => k v
   | c, _ => c
 /-- The value a `set` writes (or `d`). -/
-def Prog.setV {V A : Type} (d : V) : Prog V A → V
+def Prog.setV {0 V A : Type} (d : V) : Prog V A → V
   | .set _ v _ => v
   | _ => d
 /-- The program after a `set` or a `free` (the rest, or the program itself). -/
-def Prog.next {V A : Type} : Prog V A → Prog V A
+def Prog.next {0 V A : Type} : Prog V A → Prog V A
   | .set _ _ k => k
   | .free _ k => k
   | c => c
@@ -272,25 +272,25 @@ def XT.appN (n : String) (k : Nat) (e : Expr) : Option (List Expr) := match Expr
   | .none => .none
 
 /-- The `i`th element of a list, or `d`. -/
-def XT.nth {A : Type} (d : A) : Nat → List A → A
+def XT.nth {0 A : Type} (d : A) : Nat → List A → A
   | _, .nil => d
   | .zero, .cons x _ => x
   | .succ n, .cons _ xs => XT.nth d n xs
 /-- The `i`th expression of a list. -/
 def XT.nthE (i : Nat) (es : List Expr) : Expr := XT.nth (Expr.lit 0) i es
 /-- The list without its `n`th element. -/
-def XT.drop {A : Type} : Nat → List A → List A
+def XT.drop {0 A : Type} : Nat → List A → List A
   | _, .nil => .nil
   | .zero, .cons _ xs => xs
   | .succ n, .cons x xs => .cons x (XT.drop n xs)
 /-- The first index (from `i`) whose element passes the test. -/
-def XT.findIx {A : Type} (p : A → Bool) : Nat → List A → Option Nat
+def XT.findIx {0 A : Type} (p : A → Bool) : Nat → List A → Option Nat
   | _, .nil => .none
   | i, .cons x xs => match p x with
     | .true => .some i
     | .false => XT.findIx p (Nat.succ i) xs
 /-- `if b then x else y`, as a function. -/
-def XT.sel {A : Type} (b : Bool) (x y : A) : A := match b with
+def XT.sel {0 A : Type} (b : Bool) (x y : A) : A := match b with
   | .true => x
   | .false => y
 
@@ -418,11 +418,11 @@ def XT.flatOf (e : Expr) : Option (List Expr) := match XT.view e with
 -- ## Tactics: building proofs
 
 /-- Tactics, building proofs: fail, saying why and showing the goal. -/
-def XT.failAt {A : Type} (g : Nat) (msg : String) : TacticM A := do
+def XT.failAt {0 A : Type} (g : Nat) (msg : String) : TacticM A := do
   s ← TacticM.ppGoal g;
   TacticM.fail (String.append msg (String.append "\n" s))
 /-- Fail, saying why and showing the goal and a term. -/
-def XT.failWith {A : Type} (g : Nat) (msg : String) (e : Expr) : TacticM A := do
+def XT.failWith {0 A : Type} (g : Nat) (msg : String) (e : Expr) : TacticM A := do
   s ← TacticM.ppExpr g e;
   XT.failAt g (String.append msg (String.append " " s))
 
@@ -495,7 +495,7 @@ def XT.introAs (g : Nat) (hint : String) : List String → TacticM (String × (N
     TacticM.pure (r.1, (r.2, .nil))
 
 /-- Reflexivity, through unification. -/
-def XT.refl {A : Type} (a : A) : a = a := refl a
+def XT.refl {0 A : Type} (a : A) : a = a := refl a
 /-- Run a tactic on goal `g` alone, catching its failure; did it close the goal? -/
 def XT.tryOn (g : Nat) (t : Syntax) : TacticM Bool := do
   gs ← TacticM.getGoals;

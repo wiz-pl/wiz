@@ -411,17 +411,17 @@ structure Wil.MemBlock where
 
 def Wil.Mem : Type := List Wil.MemBlock
 
-def Wil.listNth {A : Type} : List A → Nat → Option A
+def Wil.listNth {0 A : Type} : List A → Nat → Option A
   | .nil, _ => .none
   | .cons x _, .zero => .some x
   | .cons _ xs, .succ n => Wil.listNth xs n
 
-def Wil.listSetAt {A : Type} : List A → Nat → A → List A
+def Wil.listSetAt {0 A : Type} : List A → Nat → A → List A
   | .nil, _, _ => .nil
   | .cons _ xs, .zero, v => .cons v xs
   | .cons x xs, .succ n, v => .cons x (Wil.listSetAt xs n v)
 
-def Wil.replicate {A : Type} : Nat → A → List A
+def Wil.replicate {0 A : Type} : Nat → A → List A
   | .zero, _ => .nil
   | .succ n, v => .cons v (Wil.replicate n v)
 

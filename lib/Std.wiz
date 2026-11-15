@@ -23,17 +23,17 @@ def squares : Array Nat :=
 /-- Arrays of any values: a native buffer, indexed from 0. -/
 axiom Array : Type → Type
 /-- The empty array. -/
-extern "wiz_array_empty" Array.empty : {A : Type} → Array A
+extern "wiz_array_empty" Array.empty : {0 A : Type} → Array A
 /-- Add an element at the end (in place when the array is unique). -/
-extern "wiz_array_push" Array.push : {A : Type} → Array A → A → Array A
+extern "wiz_array_push" Array.push : {0 A : Type} → Array A → A → Array A
 /-- The number of elements. -/
-extern "wiz_array_size" Array.size : {A : Type} → Array A → Nat
+extern "wiz_array_size" Array.size : {0 A : Type} → Array A → Nat
 /-- `Array.getD a i d`: the element at index `i`, or the default `d` if `i` is out of
 range. -/
-extern "wiz_array_get" Array.getD : {A : Type} → Array A → Nat → A → A
+extern "wiz_array_get" Array.getD : {0 A : Type} → Array A → Nat → A → A
 /-- `Array.set a i x`: `a` with the element at `i` replaced by `x` (unchanged if `i` is
 out of range; in place when the array is unique). -/
-extern "wiz_array_set" Array.set : {A : Type} → Array A → Nat → A → Array A
+extern "wiz_array_set" Array.set : {0 A : Type} → Array A → Nat → A → Array A
 
 /-- UTF-8 text in a native buffer (unlike the Prelude's `String`, which is a value of
 the compiler's own). Sizes and indices count bytes. -/
@@ -59,14 +59,14 @@ extern "wiz_str_lt" Str.lt : Str → Str → Bool
 /-- Maps from text (`Str`) to values of type `V`. -/
 axiom StrMap : Type → Type
 /-- The empty map. -/
-extern "wiz_map_empty" StrMap.empty : {V : Type} → StrMap V
+extern "wiz_map_empty" StrMap.empty : {0 V : Type} → StrMap V
 /-- `StrMap.insert m k v`: `m` with the key `k` mapped to `v` (replacing any old value;
 in place when the map is unique). -/
-extern "wiz_map_insert" StrMap.insert : {V : Type} → StrMap V → Str → V → StrMap V
+extern "wiz_map_insert" StrMap.insert : {0 V : Type} → StrMap V → Str → V → StrMap V
 /-- `StrMap.findD m k d`: the value of key `k`, or the default `d` if there is none. -/
-extern "wiz_map_find" StrMap.findD : {V : Type} → StrMap V → Str → V → V
+extern "wiz_map_find" StrMap.findD : {0 V : Type} → StrMap V → Str → V → V
 /-- The number of keys. -/
-extern "wiz_map_size" StrMap.size : {V : Type} → StrMap V → Nat
+extern "wiz_map_size" StrMap.size : {0 V : Type} → StrMap V → Nat
 
 /-- `IO.writeFile path text`: write `text` to the file at `path`, replacing it. -/
 extern "wiz_io_write_file" IO.writeFile : String → String → IO Unit

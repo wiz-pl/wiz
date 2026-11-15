@@ -133,7 +133,7 @@ def Bit.and_or (x y z : BitVec 1) : x &&& (y ||| z) = (x &&& y) ||| (x &&& z) :=
 -- Multiplexers: the normal form `rfl` reduces
 
 /-- at any type, without the range: the select is a Boolean -/
-def Hdl.boolSame {A : Type} : (c : Bool) → (x : A) → (match c with | .true => x | .false => x) = x
+def Hdl.boolSame {0 A : Type} : (c : Bool) → (x : A) → (match c with | .true => x | .false => x) = x
   | .true, x => rfl
   | .false, x => rfl
 /-- `mux c x x = x`. -/

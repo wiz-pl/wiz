@@ -66,41 +66,41 @@ def main : IO Unit := IO.println (Verilog.emit (Circuit.netlist "counter" (Circu
 -- Small helpers (prefixed `Hdl.`, so that importers keep the general names)
 
 /-- `Hdl.rev xs acc`: `xs` reversed, in front of `acc`. -/
-def Hdl.rev {A : Type} : List A → List A → List A
+def Hdl.rev {0 A : Type} : List A → List A → List A
   | .nil, acc => acc
   | .cons x xs, acc => Hdl.rev xs (List.cons x acc)
 /-- A list reversed (`Hdl.reverse [1, 2, 3] = [3, 2, 1]`). -/
-def Hdl.reverse {A : Type} (xs : List A) : List A := Hdl.rev xs List.nil
+def Hdl.reverse {0 A : Type} (xs : List A) : List A := Hdl.rev xs List.nil
 
 /-- `f` applied to every element of a list. -/
-def Hdl.map {A B : Type} (f : A → B) : List A → List B
+def Hdl.map {0 A B : Type} (f : A → B) : List A → List B
   | .nil => .nil
   | .cons x xs => .cons (f x) (Hdl.map f xs)
 
 /-- `Hdl.nthD d xs k`: the `k`-th element of `xs` (from 0), or `d` if the list is shorter. -/
-def Hdl.nthD {A : Type} (d : A) : List A → Nat → A
+def Hdl.nthD {0 A : Type} (d : A) : List A → Nat → A
   | .nil, _ => d
   | .cons x _, .zero => x
   | .cons _ xs, .succ k => Hdl.nthD d xs k
 
 /-- Replace element `k` of a list (from 0); shorter lists are unchanged. -/
-def Hdl.setNth {A : Type} (d : A) : List A → Nat → List A
+def Hdl.setNth {0 A : Type} (d : A) : List A → Nat → List A
   | .nil, _ => .nil
   | .cons _ xs, .zero => .cons d xs
   | .cons x xs, .succ k => .cons x (Hdl.setNth d xs k)
 
 /-- `d` repeated `n` times. -/
-def Hdl.repeatD {A : Type} (d : A) : Nat → List A
+def Hdl.repeatD {0 A : Type} (d : A) : Nat → List A
   | .zero => .nil
   | .succ n => .cons d (Hdl.repeatD d n)
 /-- `xs` padded with `d` to at least `n` elements. -/
-def Hdl.padTo {A : Type} (d : A) (xs : List A) (n : Nat) : List A :=
+def Hdl.padTo {0 A : Type} (d : A) (xs : List A) (n : Nat) : List A :=
   match Nat.lt (List.length xs) n with
   | .true => List.append xs (Hdl.repeatD d (Nat.sub n (List.length xs)))
   | .false => xs
 /-- Replace element `k`, padding a shorter list with `d` (the default) so that element `k`
 exists. -/
-def Hdl.setNthPad {A : Type} (d v : A) (xs : List A) (k : Nat) : List A :=
+def Hdl.setNthPad {0 A : Type} (d v : A) (xs : List A) (k : Nat) : List A :=
   Hdl.setNth v (Hdl.padTo d xs (Nat.succ k)) k
 
 /-- Whether two lists of numbers are equal (the hash-consing table compares keys with it). -/
@@ -116,7 +116,7 @@ def Hdl.sum : List Nat → Nat
 
 /-- The elements with their indices, counting from `k`:
 `Hdl.indexed 0 [a, b] = [(0, a), (1, b)]`. -/
-def Hdl.indexed {A : Type} : Nat → List A → List (Nat × A)
+def Hdl.indexed {0 A : Type} : Nat → List A → List (Nat × A)
   | _, .nil => .nil
   | k, .cons x xs => .cons (k, x) (Hdl.indexed (Nat.succ k) xs)
 
@@ -167,7 +167,7 @@ def Hdl.sepBy (sep : String) : List String → String
   | .cons x .nil => x
   | .cons x xs => x <+> sep <+> Hdl.sepBy sep xs
 /-- The lists' elements, joined in order. -/
-def Hdl.concatLists {A : Type} : List (List A) → List A
+def Hdl.concatLists {0 A : Type} : List (List A) → List A
   | .nil => .nil
   | .cons xs xss => List.append xs (Hdl.concatLists xss)
 
@@ -854,14 +854,14 @@ inductive HTrie (V : Type) where
 def HTrie.depth : Nat := 20
 
 /-- Look a key up in a bucket. -/
-def HTrie.assoc {V : Type} (key : List Nat) : List (List Nat × V) → Option V
+def HTrie.assoc {0 V : Type} (key : List Nat) : List (List Nat × V) → Option V
   | .nil => .none
   | .cons kv kvs => match Hdl.natsEq key kv.1 with
     | .true => .some kv.2
     | .false => HTrie.assoc key kvs
 
 /-- `HTrie.find key h d t`: the value of `key` (hash `h`) in a trie of depth `d`. -/
-def HTrie.find {V : Type} (key : List Nat) (h : Nat) : Nat → HTrie V → Option V
+def HTrie.find {0 V : Type} (key : List Nat) (h : Nat) : Nat → HTrie V → Option V
   | _, .tip => .none
   | _, .bucket kvs => HTrie.assoc key kvs
   | .zero, .node _ _ => .none
@@ -871,7 +871,7 @@ def HTrie.find {V : Type} (key : List Nat) (h : Nat) : Nat → HTrie V → Optio
 
 /-- `HTrie.insert key v h d t`: `t` with `key` (hash `h`) bound to `v` (in front of any
 older binding). -/
-def HTrie.insert {V : Type} (key : List Nat) (v : V) (h : Nat) : Nat → HTrie V → HTrie V
+def HTrie.insert {0 V : Type} (key : List Nat) (v : V) (h : Nat) : Nat → HTrie V → HTrie V
   | .zero, .tip => .bucket (List.cons (key, v) List.nil)
   | .zero, .bucket kvs => .bucket (List.cons (key, v) kvs)
   | .zero, .node _ _ => .bucket (List.cons (key, v) List.nil)
@@ -884,15 +884,15 @@ def HTrie.insert {V : Type} (key : List Nat) (v : V) (h : Nat) : Nat → HTrie V
     | .false => .node (HTrie.insert key v h d l) r
 
 /-- The value of a key, if any (hashing it). -/
-def HTrie.get {V : Type} (key : List Nat) (t : HTrie V) : Option V :=
+def HTrie.get {0 V : Type} (key : List Nat) (t : HTrie V) : Option V :=
   HTrie.find key (NatList.hash key 7) HTrie.depth t
 /-- Bind a key to a value (hashing it). -/
-def HTrie.put {V : Type} (key : List Nat) (v : V) (t : HTrie V) : HTrie V :=
+def HTrie.put {0 V : Type} (key : List Nat) (v : V) (t : HTrie V) : HTrie V :=
   HTrie.insert key v (NatList.hash key 7) HTrie.depth t
 /-- `HTrie.get` for a key that is a single number. -/
-def HTrie.getN {V : Type} (k : Nat) (t : HTrie V) : Option V := HTrie.get (List.cons k List.nil) t
+def HTrie.getN {0 V : Type} (k : Nat) (t : HTrie V) : Option V := HTrie.get (List.cons k List.nil) t
 /-- `HTrie.put` for a key that is a single number. -/
-def HTrie.putN {V : Type} (k : Nat) (v : V) (t : HTrie V) : HTrie V := HTrie.put (List.cons k List.nil) v t
+def HTrie.putN {0 V : Type} (k : Nat) (v : V) (t : HTrie V) : HTrie V := HTrie.put (List.cons k List.nil) v t
 
 /-- The state of the netlist builder: the next node id, the nodes in reverse, the
 hash-consing table, whether to hash-cons at all (off only to measure what it saves),
@@ -914,9 +914,9 @@ def NetS.init (cse : Bool) : NetS := NetS.mk 0 List.nil HTrie.tip cse 0 List.nil
 /-- Building netlists: a state monad over `NetS`. -/
 def NetM (A : Type) : Type := NetS → A × NetS
 /-- `pure` of `NetM`. -/
-def NetM.pure {A : Type} (a : A) : NetM A := fun s => (a, s)
+def NetM.pure {0 A : Type} (a : A) : NetM A := fun s => (a, s)
 /-- `bind` of `NetM`. -/
-def NetM.bind {A B : Type} (x : NetM A) (f : A → NetM B) : NetM B := fun s =>
+def NetM.bind {0 A B : Type} (x : NetM A) (f : A → NetM B) : NetM B := fun s =>
   let r := x s
   f r.1 r.2
 /-- `NetM` is a monad, so builders are written with `do`. -/
@@ -1320,16 +1320,16 @@ Index 0 is the most recent element. A list of complete trees with their sizes. -
 def Hdl.RList (A : Type) : Type := List (Nat × Hdl.RTree A)
 
 /-- The empty random-access list. -/
-def Hdl.RList.nil {A : Type} : Hdl.RList A := List.nil
+def Hdl.RList.nil {0 A : Type} : Hdl.RList A := List.nil
 /-- An element in front (index 0), in O(1): two trees of equal size merge under it. -/
-def Hdl.RList.cons {A : Type} (x : A) (ts : Hdl.RList A) : Hdl.RList A := match (ts : List (Nat × Hdl.RTree A)) with
+def Hdl.RList.cons {0 A : Type} (x : A) (ts : Hdl.RList A) : Hdl.RList A := match (ts : List (Nat × Hdl.RTree A)) with
   | .cons p (.cons q rest) => (match Nat.beq p.1 q.1 with
     | .true => List.cons (Nat.succ (p.1 + q.1), Hdl.RTree.node x p.2 q.2) rest
     | .false => List.cons (1, Hdl.RTree.leaf x) (List.cons p (List.cons q rest)))
   | other => List.cons (1, Hdl.RTree.leaf x) other
 
 /-- `Hdl.RTree.get d w i t`: element `i` of a tree of size `w` (pre-order), or `d`. -/
-def Hdl.RTree.get {A : Type} (d : A) : Nat → Nat → Hdl.RTree A → A
+def Hdl.RTree.get {0 A : Type} (d : A) : Nat → Nat → Hdl.RTree A → A
   | _, _, .leaf x => x
   | w, i, .node x l r => match i with
     | .zero => x
@@ -1338,21 +1338,21 @@ def Hdl.RTree.get {A : Type} (d : A) : Nat → Nat → Hdl.RTree A → A
       | .false => Hdl.RTree.get d (Nat.div w 2) (j - Nat.div w 2) r)
 
 /-- Element `i` of a list of trees, or `d`. -/
-def Hdl.RList.getAux {A : Type} (d : A) : Nat → List (Nat × Hdl.RTree A) → A
+def Hdl.RList.getAux {0 A : Type} (d : A) : Nat → List (Nat × Hdl.RTree A) → A
   | _, .nil => d
   | i, .cons p ps => match Nat.lt i p.1 with
     | .true => Hdl.RTree.get d p.1 i p.2
     | .false => Hdl.RList.getAux d (i - p.1) ps
 /-- `Hdl.RList.get d i ts`: element `i` (0 the most recent), or `d` if there is none. -/
-def Hdl.RList.get {A : Type} (d : A) (i : Nat) (ts : Hdl.RList A) : A := Hdl.RList.getAux d i ts
+def Hdl.RList.get {0 A : Type} (d : A) (i : Nat) (ts : Hdl.RList A) : A := Hdl.RList.getAux d i ts
 
 /-- Push the elements of a list, in order (a list as a random-access list, reversed: see
 `Hdl.RList.ofList`). -/
-def Hdl.RList.ofListAux {A : Type} : List A → Hdl.RList A → Hdl.RList A
+def Hdl.RList.ofListAux {0 A : Type} : List A → Hdl.RList A → Hdl.RList A
   | .nil, acc => acc
   | .cons x xs, acc => Hdl.RList.ofListAux xs (Hdl.RList.cons x acc)
 /-- A list as a random-access list indexed like the list (element `k` at index `k`). -/
-def Hdl.RList.ofList {A : Type} (xs : List A) : Hdl.RList A := Hdl.RList.ofListAux (Hdl.reverse xs) Hdl.RList.nil
+def Hdl.RList.ofList {0 A : Type} (xs : List A) : Hdl.RList A := Hdl.RList.ofListAux (Hdl.reverse xs) Hdl.RList.nil
 
 /-- A growing vector: element `k` is the `k`-th pushed (`count` elements), on a random-access
 list. The netlist simulator keeps node values in one. (Not the length-indexed `Vec`
@@ -1361,17 +1361,17 @@ structure Hdl.Vec (A : Type) where
   count : Nat
   items : Hdl.RList A
 /-- The empty vector. -/
-def Hdl.Vec.empty {A : Type} : Hdl.Vec A := Hdl.Vec.mk 0 Hdl.RList.nil
+def Hdl.Vec.empty {0 A : Type} : Hdl.Vec A := Hdl.Vec.mk 0 Hdl.RList.nil
 /-- Append an element (it gets index `count`). -/
-def Hdl.Vec.push {A : Type} (v : Hdl.Vec A) (x : A) : Hdl.Vec A := Hdl.Vec.mk (Nat.succ v.count) (Hdl.RList.cons x v.items)
+def Hdl.Vec.push {0 A : Type} (v : Hdl.Vec A) (x : A) : Hdl.Vec A := Hdl.Vec.mk (Nat.succ v.count) (Hdl.RList.cons x v.items)
 /-- `Hdl.Vec.get d v k`: the `k`-th element pushed, or `d`. -/
-def Hdl.Vec.get {A : Type} (d : A) (v : Hdl.Vec A) (k : Nat) : A := Hdl.RList.get d (v.count - 1 - k) v.items
+def Hdl.Vec.get {0 A : Type} (d : A) (v : Hdl.Vec A) (k : Nat) : A := Hdl.RList.get d (v.count - 1 - k) v.items
 /-- Push the elements of a list, in order. -/
-def Hdl.Vec.ofListAux {A : Type} : List A → Hdl.Vec A → Hdl.Vec A
+def Hdl.Vec.ofListAux {0 A : Type} : List A → Hdl.Vec A → Hdl.Vec A
   | .nil, v => v
   | .cons x xs, v => Hdl.Vec.ofListAux xs (Hdl.Vec.push v x)
 /-- A list as a vector (element `k` at index `k`). -/
-def Hdl.Vec.ofList {A : Type} (xs : List A) : Hdl.Vec A := Hdl.Vec.ofListAux xs Hdl.Vec.empty
+def Hdl.Vec.ofList {0 A : Type} (xs : List A) : Hdl.Vec A := Hdl.Vec.ofListAux xs Hdl.Vec.empty
 
 ------------------------------------------------------------------------------------
 -- Netlist semantics: evaluate the nodes in order, once per clock cycle.
@@ -1878,24 +1878,24 @@ def Hw.regNext {r : HwTy → Type} [Hw r] {ω t : HwTy} (rst en : r HwTy.bit) (i
 -- What the combinators do to the semantics.
 
 /-- Pairs of corresponding elements (as long as the shorter list). -/
-def Hdl.zip {A B : Type} : List A → List B → List (A × B)
+def Hdl.zip {0 A B : Type} : List A → List B → List (A × B)
   | .cons a as, .cons b bs => .cons (a, b) (Hdl.zip as bs)
   | _, _ => .nil
 /-- `v`, then the list without its last element: what a delay does to a trace. -/
-def Hdl.shift {A : Type} : A → List A → List A
+def Hdl.shift {0 A : Type} : A → List A → List A
   | _, .nil => .nil
   | v, .cons x xs => .cons v (Hdl.shift x xs)
 /-- The first components of a list of pairs. -/
-def Hdl.fsts {A B : Type} : List (A × B) → List A
+def Hdl.fsts {0 A B : Type} : List (A × B) → List A
   | .nil => .nil
   | .cons p ps => .cons p.1 (Hdl.fsts ps)
 /-- The second components of a list of pairs. -/
-def Hdl.snds {A B : Type} : List (A × B) → List B
+def Hdl.snds {0 A B : Type} : List (A × B) → List B
   | .nil => .nil
   | .cons p ps => .cons p.2 (Hdl.snds ps)
 
 /-- Equal lists stay equal with the same head. -/
-def Hdl.consEq {A : Type} (x : A) {xs ys : List A} (e : xs = ys) : List.cons x xs = List.cons x ys :=
+def Hdl.consEq {0 A : Type} (x : A) {xs ys : List A} (e : xs = ys) : List.cons x xs = List.cons x ys :=
   Eq.congrArg (List.cons x) e
 
 /-- Combinational code at values. -/
@@ -2615,8 +2615,8 @@ def MultiS.init (clocks : List ClockDomain) : MultiS :=
 
 /-- Building a `Multi`: a state monad over `MultiS`. -/
 def MultiM (A : Type) : Type := MultiS → A × MultiS
-def MultiM.pure {A : Type} (a : A) : MultiM A := fun s => (a, s)
-def MultiM.bind {A B : Type} (x : MultiM A) (f : A → MultiM B) : MultiM B := fun s =>
+def MultiM.pure {0 A : Type} (a : A) : MultiM A := fun s => (a, s)
+def MultiM.bind {0 A B : Type} (x : MultiM A) (f : A → MultiM B) : MultiM B := fun s =>
   let r := x s
   f r.1 r.2
 instance : Monad MultiM where
@@ -2961,7 +2961,7 @@ def Verilog.reservedClocks : List ClockDomain → Hdl.Set → Hdl.Set
 def Verilog.reservedIn (clocks : List ClockDomain) : Hdl.Set := Verilog.reservedClocks clocks Verilog.reserved
 
 /-- The names of a list of things. -/
-def Hdl.names {A : Type} (f : A → String) (xs : List A) : List String := Hdl.map f xs
+def Hdl.names {0 A : Type} (f : A → String) (xs : List A) : List String := Hdl.map f xs
 
 /-- The Verilog identifiers of the inputs, outputs and registers, in that order, and all
 the names taken. -/
@@ -3369,7 +3369,7 @@ def HdlDerive.list : SyntaxF .false → List Syntax
   | .nil => .nil
   | .cons x xs => .cons x (HdlDerive.list xs)
 /-- A list without its last element. -/
-def HdlDerive.init {A : Type} : List A → List A
+def HdlDerive.init {0 A : Type} : List A → List A
   | .nil => .nil
   | .cons _ .nil => .nil
   | .cons x xs => .cons x (HdlDerive.init xs)

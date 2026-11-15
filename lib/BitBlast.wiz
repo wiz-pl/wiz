@@ -28,7 +28,7 @@ def Bits.cons (c : Bool) (r : Nat) : Nat := match c with
   | .true => .succ (Nat.mul 2 r)
   | .false => Nat.mul 2 r
 
-def Bits.congr {A B : Type} (f : A → B) {a b : A} (e : a = b) : f a = f b := Eq.congrArg f e
+def Bits.congr {0 A B : Type} (f : A → B) {a b : A} (e : a = b) : f a = f b := Eq.congrArg f e
 def Bits.add_succ : (m n : Nat) → Nat.add m (Nat.succ n) = Nat.succ (Nat.add m n)
   | .zero, _ => rfl
   | .succ m, n => Bits.congr Nat.succ (Bits.add_succ m n)
@@ -173,7 +173,7 @@ def Bits.bit_small : (i n : Nat) → Nat.le n i = .true → Bits.bit n i = .fals
 
 -- ## The bits of `Nat.bitwise` (and so of `land`, `lor`, `xor`)
 
-def Bits.congr2 {A B C : Type} (f : A → B → C) {a a' : A} {b b' : B} (e : a = a') (e' : b = b') : f a b = f a' b' :=
+def Bits.congr2 {0 A B C : Type} (f : A → B → C) {a a' : A} {b b' : B} (e : a = a') (e' : b = b') : f a b = f a' b' :=
   Eq.trans (Eq.congrArg (fun x => f x b) e) (Eq.congrArg (f a') e')
 def Bits.le_refl : (n : Nat) → Nat.le n n = .true
   | .zero => rfl

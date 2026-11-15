@@ -1,0 +1,184 @@
+⚠ [42/462] Replayed Wiz.Elab.ProcMacro
+warning: Wiz/Elab/ProcMacro.lean:244:3: `String.mk` has been deprecated: Use `String.ofList` instead
+
+Hint: Replace the deprecated name:
+  String.m̵k̵o̲f̲L̲i̲s̲t̲
+⚠ [45/462] Replayed Wiz.Smt.Translate
+warning: Wiz/Smt/Translate.lean:70:11: `String.mk` has been deprecated: Use `String.ofList` instead
+
+Hint: Replace the deprecated name:
+  String.m̵k̵o̲f̲L̲i̲s̲t̲
+⚠ [47/462] Replayed Wiz.Elab.Term
+warning: Wiz/Elab/Term.lean:434:24: Variable name `args` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _args
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [50/462] Replayed Wiz.Elab.Recursor
+warning: Wiz/Elab/Recursor.lean:72:11: Variable name `h` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _h
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [73/462] Replayed Wiz.Compiler.C
+warning: Wiz/Compiler/C.lean:23:42: `List.asString` has been deprecated: Use `String.ofList` instead
+
+Note: The updated constant is in a different namespace. Dot notation may need to be changed (e.g., from `x.asString` to `String.ofList x`).
+warning: Wiz/Compiler/C.lean:313:12: Variable name `cb` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _cb
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [81/462] Replayed Wiz.Compiler.Build
+warning: Wiz/Compiler/Build.lean:252:39: `String.mk` has been deprecated: Use `String.ofList` instead
+
+Hint: Replace the deprecated name:
+  String.m̵k̵o̲f̲L̲i̲s̲t̲
+✔ [226/462] Built Wiz.Rig.Instances (332ms)
+✔ [227/462] Built Wiz.Rig.Instances:c.o (167ms)
+✔ [228/462] Built Tests.Rig (446ms)
+✔ [230/462] Built WizMeta.Translate (477ms)
+✔ [232/462] Built WizMeta (173ms)
+✔ [234/462] Built Wiz.Frontend.Frontend (841ms)
+⚠ [236/462] Built Wiz.Query (432ms)
+warning: Wiz/Query.lean:44:11: Variable name `cmd` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _cmd
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+✔ [238/462] Built Wiz.Inlay (335ms)
+✔ [239/462] Built Wiz.Refs (357ms)
+✔ [242/462] Built Wiz.Semantic (443ms)
+✔ [243/462] Built Wiz.Signature (393ms)
+✔ [244/462] Built Wiz.Symbols (440ms)
+✔ [248/462] Built Wiz.Actions (717ms)
+✔ [250/462] Built Wiz.Completion (481ms)
+✔ [252/462] Built Wiz.Cache (2.8s)
+✔ [254/462] Built Wiz.Format (117s)
+✔ [256/462] Built Wiz.LSP (119s)
+✔ [258/462] Built Wiz (276ms)
+✔ [260/462] Built Tests.Format (386ms)
+✔ [261/462] Built Tests.Groups.ScryTaint (373ms)
+✔ [262/462] Built Tests.Groups.ScryWil (377ms)
+✔ [266/462] Built Wiz.Doc.Site (673ms)
+✔ [268/462] Built Tests.Allocs (508ms)
+✔ [270/462] Built Tests.Parser (890ms)
+✔ [272/462] Built Tests.Eval (1.3s)
+✔ [274/462] Built Grail.Elab (1.1s)
+✔ [275/462] Built Grail.Config (783ms)
+✔ [277/462] Built Tests.Lint (2.2s)
+✔ [279/462] Built Grail.New (324ms)
+✔ [281/462] Built Tests.Elab (2.6s)
+✔ [282/462] Built Grail.Build (417ms)
+✔ [283/462] Built Tests.LSP (2.6s)
+✔ [287/462] Built Grail.Selfhost (722ms)
+✔ [288/462] Built Grail.Test (880ms)
+✔ [289/462] Built Grail.Lsp (816ms)
+✔ [290/462] Built Tests.Groups.ScryAi (866ms)
+✔ [291/462] Built Tests.Groups.ScryCert (869ms)
+✔ [292/462] Built Tests.Groups.Serial (910ms)
+✔ [293/462] Built Tests.Groups.Scry (1.0s)
+✔ [294/462] Built Tests.Groups.Seplogic (1.1s)
+✔ [295/462] Built Tests.Groups.Sized (1.1s)
+✔ [296/462] Built Tests.Groups.Std (1.1s)
+✔ [297/462] Built Tests.Groups.Struct (1.1s)
+✔ [298/462] Built Tests.Groups.Sys (1.1s)
+✔ [299/462] Built Tests.Groups.Text (1.1s)
+✔ [300/462] Built Tests.Groups.Tactic (1.2s)
+✔ [301/462] Built Tests.Groups.Vec (1.2s)
+✔ [302/462] Built Grail.Command (1.2s)
+✔ [303/462] Built Tests.Groups.Word (1.3s)
+✔ [304/462] Built Tests.Smt (1.3s)
+✔ [305/462] Built Grail.Deps (1.4s)
+✔ [306/462] Built Tests.Groups.Run (844ms)
+✔ [307/462] Built Tests.Groups.Rune (797ms)
+✔ [308/462] Built Tests.Groups.SelfhostCli (1.6s)
+✔ [309/462] Built Tests.Feral (1.6s)
+✔ [310/462] Built Tests.Groups.Qty (687ms)
+✔ [311/462] Built Tests.Groups.ResultQ (820ms)
+✔ [312/462] Built Tests.Groups.Reuse (843ms)
+✔ [313/462] Built Tests.Groups.Semantics (1.7s)
+✔ [314/462] Built Tests.Groups.Wasm (1.7s)
+✔ [315/462] Built Tests.Groups.Llvm (666ms)
+✔ [316/462] Built Tests.Groups.Optic (656ms)
+✔ [317/462] Built Tests.Groups.Persistent (737ms)
+✔ [318/462] Built Tests.Groups.ListLemmas (766ms)
+✔ [319/462] Built Tests.Groups.Macro (707ms)
+✔ [320/462] Built Tests.Groups.Match (732ms)
+✔ [321/462] Built Tests.Groups.Regions (1.0s)
+✔ [322/462] Built Tests.Groups.Level (627ms)
+✔ [323/462] Built Tests.Groups.Lift (722ms)
+✔ [324/462] Built Tests.Groups.LinearCase (795ms)
+✔ [325/462] Built Tests.Groups.Natives (865ms)
+✔ [326/462] Built Tests.Groups.Ott (923ms)
+✔ [327/462] Built Tests.Groups.Repr (1.2s)
+✔ [328/462] Built Tests.Groups.Json (609ms)
+✔ [329/462] Built Tests.Groups.Phantom (1.1s)
+✔ [330/462] Built Tests.Groups.HdlTemporal (591ms)
+✔ [331/462] Built Tests.Groups.HdlBusCrc (632ms)
+✔ [332/462] Built Tests.Groups.Inductive (670ms)
+✔ [333/462] Built Tests.Groups.Infoview (693ms)
+✔ [334/462] Built Tests.Groups.Tooling (2.4s)
+✔ [383/462] Built Tests.Groups.Display (591ms)
+✔ [384/462] Built Tests.Groups.HdlBusLaw (718ms)
+✔ [385/462] Built Tests.Groups.HdlProtocol (746ms)
+✔ [389/462] Built Tests.Groups.Effects (626ms)
+✔ [390/462] Built Tests.Groups.Elab (747ms)
+✔ [393/462] Built Tests.Groups.Calc (588ms)
+✔ [394/462] Built Tests.Groups.Callbacks (578ms)
+✔ [395/462] Built Tests.Groups.Class (640ms)
+✔ [396/462] Built Tests.Groups.Coinductive (658ms)
+✔ [397/462] Built Tests.Groups.Conc (658ms)
+✔ [398/462] Built Tests.Groups.Data (662ms)
+✔ [399/462] Built Tests.Groups.Deriving (683ms)
+✔ [400/462] Built Tests.Groups.DescEq (716ms)
+✔ [401/462] Built Tests.Groups.FfiStruct (830ms)
+✔ [411/462] Built Tests.Groups.C (582ms)
+✔ [412/462] Built Tests.Groups.Language (1.3s)
+✔ [415/462] Built Tests.Groups.Builtin (662ms)
+✔ [417/462] Built Tests.Groups.Borrow (632ms)
+⚠ [418/462] Built Tests.Groups.Hdl (1.3s)
+warning: Tests/Groups/Hdl.lean:58:49: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+warning: Tests/Groups/Hdl.lean:100:49: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+warning: Tests/Groups/Hdl.lean:118:48: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+warning: Tests/Groups/Hdl.lean:171:49: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+warning: Tests/Groups/Hdl.lean:383:41: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+warning: Tests/Groups/Hdl.lean:396:53: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+✔ [419/462] Built Tests.Meta (2.0s)
+✔ [423/462] Built Tests.Groups.Audit (3.0s)
+✔ [424/462] Built Tests.Groups.Backend (731ms)
+✔ [425/462] Built Tests.Groups.Trust (3.1s)
+✔ [429/462] Built Tests.Groups.Ffi (1.4s)
+✔ [431/462] Built Tests.ElabFix (3.2s)
+✔ [433/462] Built Grail.Graph (1.8s)
+✔ [435/462] Built Tests.Groups.SelfHost (4.3s)
+⚠ [436/462] Built Tests.Scaling (1.1s)
+warning: Tests/Scaling.lean:556:105: `String.mk` has been deprecated: Use `String.ofList` instead
+
+Hint: Replace the deprecated name:
+  String.m̵k̵o̲f̲L̲i̲s̲t̲
+✔ [438/462] Built Grail.Cli (1.2s)
+✔ [440/462] Built Grail (216ms)
+✔ [442/462] Built Tests.Check (8.3s)
+✔ [444/462] Built Tests.Groups.Prop (6.4s)
+✔ [446/462] Built Tests.Native (937ms)
+✔ [448/462] Built Tests.FalseFuzz (939ms)
+✔ [450/462] Built Tests.Groups.FalseFuzz (223ms)
+✔ [452/462] Built Tests.Groups (280ms)
+✔ [454/462] Built Tests.Grail (3.5s)
+✔ [455/462] Built Tests.Doc (603ms)
+✔ [457/462] Built Tests.Main (567ms)
+✔ [459/462] Built Grail.Elab:c.o (11s)
+✔ [460/462] Built Tests.Groups.SelfHost:c.o (11s)
+✔ [461/462] Built Tests.Grail:c.o (24s)
+✔ [462/462] Built tests:exe (8.0s)
+Build completed successfully (462 jobs).
+── selfhost (Stages 12b–14q)
+  ✓ the self-hosted frontend: a class, instances for Nat and Bool, and a generic function (A10) (165.646 s)
+
+selfhost #136: passed
+EXIT:0

@@ -1,0 +1,114 @@
+=== 9 ===
+── selfhost (Stages 12b–14q)
+  ✓ a file of definitions, checked in Wiz (0.046 s)
+
+selfhost #9: passed
+=== 10 ===
+── selfhost (Stages 12b–14q)
+  ✓ inductive types, checked in Wiz (0.047 s)
+
+selfhost #10: passed
+=== 11 ===
+── selfhost (Stages 12b–14q)
+  ✓ pattern matching and structural recursion, checked in Wiz (0.054 s)
+
+selfhost #11: passed
+=== 13 ===
+── selfhost (Stages 12b–14q)
+  ✓ definitions by equations, checked in Wiz (0.048 s)
+
+selfhost #13: passed
+=== 14 ===
+── selfhost (Stages 12b–14q)
+  ✓ several scrutinees and nested patterns, checked in Wiz (0.064 s)
+
+selfhost #14: passed
+=== 20 ===
+── selfhost (Stages 12b–14q)
+  ✓ partial definitions and mutual blocks, checked in Wiz (0.046 s)
+
+selfhost #20: passed
+=== 25 ===
+── selfhost (Stages 12b–14q)
+  ✓ mutual types sharing a constructor name (Ev.s, Od.s), checked in Wiz (0.047 s)
+
+selfhost #25: passed
+=== 27 ===
+── selfhost (Stages 12b–14q)
+  ✓ numerals and match as a term, checked in Wiz (0.060 s)
+
+selfhost #27: passed
+=== 32 ===
+── selfhost (Stages 12b–14q)
+  ✓ function fields and catch-alls on mutual types, checked in Wiz (0.136 s)
+
+selfhost #32: passed
+=== 33 ===
+── selfhost (Stages 12b–14q)
+  ✓ recursion through function fields, reordered parameters, big numerals, checked in Wiz (0.206 s)
+
+selfhost #33: passed
+=== 59 ===
+── selfhost (Stages 12b–14q)
+  ✓ the self-hosted frontend: written quantities, as in the Lean frontend (21m, K10) (3.013 s)
+
+selfhost #59: passed
+=== 60 ===
+── selfhost (Stages 12b–14q)
+  ✓ Kernel.wiz quantity terms: the same variable is the same quantity, and a Σ at a stuck non-variable quantity is rejected, as in the Lean kernel (21x, review probes 7a, 15b) (80.669 s)
+
+selfhost #60: passed
+=== 61 ===
+── selfhost (Stages 12b–14q)
+  ✓ the self-hosted frontend: constructor field quantities (0, 1, ω) and implicit fields, as in the Lean frontend (21x) (3.095 s)
+
+selfhost #61: passed
+=== 62 ===
+── selfhost (Stages 12b–14q)
+  ✓ constructor field quantities and implicit fields: the Lean and the self-hosted compilers agree (21x) (183.515 s)
+
+selfhost #62: passed
+=== 136 ===
+── selfhost (Stages 12b–14q)
+  ✗ the self-hosted frontend: a class, instances for Nat and Bool, and a generic function (A10) (0.128 s)
+      expected Default : (x0 : U0) → U0
+      Default.d : (x0 :0 U0) → (x1 : (Default x0)) → x0
+      (x0 : U0) → (x1 : (Default x0)) → x0
+      instDefaultNat : (Default Nat)
+      instDefaultBool : (Default Bool)
+      get : (x0 : U0) → (x1 : (Default x0)) → x0
+      (x0 : U0) → (x1 : (Default x0)) → x0
+      seven : Nat
+      yes : Bool
+      con((#1, (tt, tt)))
+      con((#1, (tt, tt)))
+      
+            got Default : (x0 : U0) → U0
+      Default.d : (x0 :0 U0) → (x1 : (Default x0)) → x0
+      (x0 :0 U0) → (x1 : (Default x0)) → x0
+      instDefaultNat : (Default Nat)
+      instDefaultBool : (Default Bool)
+      get : (x0 : U0) → (x1 : (Default x0)) → x0
+      (x0 : U0) → (x1 : (Default x0)) → x0
+      seven : Nat
+      yes : Bool
+      con((#1, (tt, tt)))
+      con((#1, (tt, tt)))
+
+selfhost #136: FAILED
+=== 137 ===
+── selfhost (Stages 12b–14q)
+  ✓ the self-hosted frontend: `where` instances, a multi-method class, and a class with instance parameters (A10) (0.331 s)
+
+selfhost #137: passed
+=== 138 ===
+── selfhost (Stages 12b–14q)
+  ✓ the self-hosted frontend: a missing instance is an error naming the class (A10) (0.124 s)
+
+selfhost #138: passed
+=== 140 ===
+── selfhost (Stages 12b–14q)
+  ✓ type classes and instances agree with the Lean frontend (A10) (1.384 s)
+
+selfhost #140: passed
+DONE

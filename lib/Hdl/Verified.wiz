@@ -88,7 +88,7 @@ def norm2 {r : HwTy → Type} [Hw r] (a c : r D12) : r D12 :=
 ------------------------------------------------------------------------------------
 -- The smooth minimum (Blobs.wiz, sminK, Bl.corrT; Oled.wiz, Rom)
 
-def Hv.rep {A : Type} : Nat → A → List A → List A
+def Hv.rep {0 A : Type} : Nat → A → List A → List A
   | .zero, _, acc => acc
   | .succ k, v, acc => Hv.rep k v (List.cons v acc)
 def Rom.allEq (v : Nat) : List Nat → Bool

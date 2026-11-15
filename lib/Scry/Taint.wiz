@@ -256,10 +256,10 @@ def Scry.rowNat (row : List U64) (i : Nat) : Nat :=
 
 def Scry.singleNat (x : Nat) : List Nat := .cons x .nil
 
-def Scry.factNode {L : Type} (s : Scry.ProofStep L) : Nat := Scry.rowNat s.fact.args 0
+def Scry.factNode {0 L : Type} (s : Scry.ProofStep L) : Nat := Scry.rowNat s.fact.args 0
 
 /-- The premise id whose fact is in relation `rel`, if any. -/
-def Scry.premiseOfRel {L : Type} (st : Scry.State L) (step : Scry.ProofStep L)
+def Scry.premiseOfRel {0 L : Type} (st : Scry.State L) (step : Scry.ProofStep L)
     (rel : Nat) : Option Nat :=
   List.find (fun id => match Scry.stepByIdL st.nodes id with
     | .none => .false
@@ -267,7 +267,7 @@ def Scry.premiseOfRel {L : Type} (st : Scry.State L) (step : Scry.ProofStep L)
 
 /-- Walk a `tainted` derivation back to its source seed, collecting the definition
 points from source to the tainted definition (inclusive). -/
-partial def Scry.taintChain {L : Type} (st : Scry.State L) (id : Nat) : List Nat :=
+partial def Scry.taintChain {0 L : Type} (st : Scry.State L) (id : Nat) : List Nat :=
   match Scry.stepByIdL st.nodes id with
   | .none => .nil
   | .some step =>

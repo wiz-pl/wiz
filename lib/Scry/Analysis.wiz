@@ -78,11 +78,11 @@ def Scry.setEq (xs ys : List Nat) : Bool :=
   Bool.and (List.all (fun x => Scry.memNat x ys) xs)
            (List.all (fun y => Scry.memNat y xs) ys)
 
-def Scry.concatLists {A B : Type} (f : A → List B) : List A → List B
+def Scry.concatLists {0 A B : Type} (f : A → List B) : List A → List B
   | .nil => .nil
   | .cons x xs => List.append (f x) (Scry.concatLists f xs)
 
-def Scry.nthD {A : Type} (d : A) : List A → Nat → A
+def Scry.nthD {0 A : Type} (d : A) : List A → Nat → A
   | .nil, _ => d
   | .cons x _, .zero => x
   | .cons _ xs, .succ n => Scry.nthD d xs n

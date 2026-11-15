@@ -55,7 +55,7 @@ def Sys.lift (what : String) (x : IO Nat) : IO (Except String Unit) := do
   e ← x;
   IO.pure (Sys.status what e)
 /-- Run a foreign call that returns a value, and make it an error if the call set `Sys.errno`. -/
-def Sys.check {A : Type} (what : String) (x : IO A) : IO (Except String A) := do
+def Sys.check {0 A : Type} (what : String) (x : IO A) : IO (Except String A) := do
   a ← x;
   e ← Sys.errno;
   IO.pure (match Nat.beq e 0 with
@@ -66,9 +66,9 @@ def Sys.check {A : Type} (what : String) (x : IO A) : IO (Except String A) := do
 A `do` block in `EIO` stops at the first error. -/
 def EIO (A : Type) : Type := IO (Except String A)
 /-- Succeed with `a`. -/
-def EIO.pure {A : Type} (a : A) : EIO A := IO.pure (.ok a)
+def EIO.pure {0 A : Type} (a : A) : EIO A := IO.pure (.ok a)
 /-- Run `x`; if it succeeded, run `f` on its result; otherwise stop with its error. -/
-def EIO.bind {A B : Type} (x : EIO A) (f : A → EIO B) : EIO B :=
+def EIO.bind {0 A B : Type} (x : EIO A) (f : A → EIO B) : EIO B :=
   IO.bind x (fun r => match r with
     | .error e => IO.pure (.error e)
     | .ok a => f a)
@@ -77,9 +77,9 @@ instance : Monad EIO where
   pure := EIO.pure
   bind := EIO.bind
 /-- Fail with a message: `EIO.fail "no input"`. -/
-def EIO.fail {A : Type} (e : String) : EIO A := IO.pure (.error e)
+def EIO.fail {0 A : Type} (e : String) : EIO A := IO.pure (.error e)
 /-- An `IO` action that can't fail, as an `EIO` one (to use `IO.println` inside an `EIO` `do` block). -/
-def EIO.lift {A : Type} (x : IO A) : EIO A := IO.bind x (fun a => IO.pure (.ok a))
+def EIO.lift {0 A : Type} (x : IO A) : EIO A := IO.bind x (fun a => IO.pure (.ok a))
 
 -- Environment variables. (Setting them is not thread-safe in C: set them before
 -- starting threads.)
@@ -577,7 +577,7 @@ extern "wiz_sys_file_write_bytes" File.writeBytesRaw : File → Bytes → IO Nat
 /-- Raw `fseek`; use `File.seek`. -/
 extern "wiz_sys_file_seek" File.seekRaw : File → Nat → Nat → Bool → IO Nat
 /-- `Sys.check`, with the end of the file (errno 100000) as `none`. -/
-def Sys.checkEof {A : Type} (what : String) (x : IO A) : EIO (Option A) :=
+def Sys.checkEof {0 A : Type} (what : String) (x : IO A) : EIO (Option A) :=
   IO.bind x (fun a => IO.bind Sys.errno (fun e => IO.pure (match Nat.beq e 0 with
     | .true => .ok (.some a)
     | .false => match Nat.beq e 100000 with
@@ -702,7 +702,7 @@ def Fd.close (f : Fd) : EIO Unit := Sys.lift "close" (Fd.closeRaw f)
 /-- Run `k` on the descriptor's number (for C code: `link_c` shims), keeping the handle
 open until `k` is done. (A handle is closed after its last use; a bare `Fd.raw` number
 outlives that.) -/
-def Fd.withRaw {A : Type} (f : Fd) (k : Nat → IO A) : IO A := do
+def Fd.withRaw {0 A : Type} (f : Fd) (k : Nat → IO A) : IO A := do
   n ← Fd.raw f;
   a ← k n;
   Fd.keep f;
