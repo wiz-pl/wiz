@@ -43,6 +43,26 @@ is updated after review. The `native` group runs the `lib/` part in CI, the
 baseline (build the driver first). `--print` shows the recorded sources; the baseline's
 header explains the format.
 
+### Differential fuzzing (`--fuzz-diff`)
+
+`Tests/FuzzDiff.lean` is a deterministic fuzzer with a differential oracle: generated
+closed terms are judged by the Lean kernel and `selfhost/Kernel.wiz`, and generated
+programs are run through Lean→C, Wiz→C and the IR interpreter. A failure is shrunk by
+delta-debugging the generator's choice sequence; the printed replay command re-runs it.
+The fast subset is the `fuzz-diff` test group (a fixed seed, kernel terms and Lean→C vs
+the interpreter, about two minutes); the nightly workflow runs the full campaign with
+the date as the seed and Wiz→C. `Tests/FuzzDiff/corpus.tsv` pins the fast subset's choice
+sequences, and `.lake/fuzz-diff/corpus-cache.tsv` caches generated cases locally.
+
+```sh
+lake test -- '=fuzz-diff'
+tests --fuzz-diff --seed 20261115 --terms 8 --programs 16 [--wiz] [--shrink]
+tests --fuzz-diff --replay term 20261115 3 1,2,0,...
+scripts/fuzz-diff.sh --nightly
+```
+
+See `Tests/FuzzDiff/README.md` for the fragment and the false-difference rules.
+
 ### Running cases in parallel (`--jobs`)
 
 `lake test -- --jobs N` (default 1) runs the cases of a group that opted in N at a time, in

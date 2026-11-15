@@ -251,6 +251,7 @@ def main (args : List String) : IO UInt32 := do
   | "--false-fuzz" :: rest => FalseFuzz.main rest
   | "--false-fuzz-replay" :: rest => FalseFuzz.replayMain rest
   | "--false-fuzz-check" :: rest => FalseFuzz.checkMain rest
+  | "--fuzz-diff" :: rest => FuzzDiff.main rest
   | ["--prop-no-sizes"] => Prop.flagMain true false
   | ["--prop-trace"] => Prop.flagMain false true
   | ["--probe-reuse"] => Scaling.probeReuse

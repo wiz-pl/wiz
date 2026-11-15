@@ -1,0 +1,84 @@
+# The nightly differential fuzzer (Tests/FuzzDiff/README.md).
+#
+# The fast subset runs in the `fuzz-diff` test shard on every relevant pull request; this
+# workflow runs the full campaign with a seed derived from the date, so a failure is
+# replayable from the printed seed. It does not run on pull requests: a finding needs a
+# person, not a red required check on an unrelated change.
+name: fuzz-diff
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: Seed (empty: today's date, YYYYMMDD)
+        type: string
+        default: ""
+      terms:
+        description: Term cases
+        type: string
+        default: "16"
+      programs:
+        description: Program cases
+        type: string
+        default: "32"
+
+permissions:
+  contents: read
+
+env:
+  CACHIX_NAME: badlydrawnwizards
+  LAKE_CACHE_DIR: ${{ github.workspace }}/.lake/cache
+
+defaults:
+  run:
+    shell: nix develop --command bash -eo pipefail {0}
+
+jobs:
+  nightly:
+    name: nightly differential fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Cache the Lake build
+        uses: actions/cache@v4
+        with:
+          path: .lake
+          key: lake-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json', 'lakefile.lean', '**/*.lean') }}
+          restore-keys: lake-${{ runner.os }}-${{ runner.arch }}-
+      - name: lake build
+        run: lake build wiz grail tests
+      - name: fuzz-diff
+        env:
+          SEED: ${{ inputs.seed }}
+          TERMS: ${{ inputs.terms }}
+          PROGRAMS: ${{ inputs.programs }}
+        run: |
+          args="--nightly --report fuzz-diff-report.md --findings fuzz-diff-findings.tsv"
+          if [ -n "$SEED" ]; then args="$args --seed $SEED"; fi
+          if [ -n "$TERMS" ]; then args="$args --terms $TERMS"; fi
+          if [ -n "$PROGRAMS" ]; then args="$args --programs $PROGRAMS"; fi
+          # `--nightly` sets today's seed, terms and programs; later flags win.
+          scripts/fuzz-diff.sh $args 2>&1 | tee fuzz-diff.log
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f fuzz-diff-report.md ]; then
+            cat fuzz-diff-report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fuzz-diff
+          path: |
+            fuzz-diff-report.md
+            fuzz-diff-findings.tsv
+            fuzz-diff.log
+          if-no-files-found: ignore
+          retention-days: 14

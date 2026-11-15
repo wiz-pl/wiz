@@ -18,6 +18,12 @@
    "select": [
     "=grail-selfhost"
   ]},
+  {"name": "fuzz-diff", "jobs": 1,
+   "inputs": ["selfhost/Kernel.wiz", "selfhost/*", "Tests/FuzzDiff/*", "Tests/FuzzDiff.lean",
+              "Tests/Groups/FuzzDiff.lean", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz"],
+   "select": [
+    "=fuzz-diff"
+  ]},
   {"name": "backends", "jobs": 4, "select": [
     "backend",
     "borrow",
