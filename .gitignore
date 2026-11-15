@@ -23,3 +23,7 @@ __pycache__/
 
 # tower: a developer's own toolchain override (docs/stages/26-tower.md, 26a)
 wiz-toolchain.local
+
+# nightly benchmark outputs (artifacts; see .github/workflows/bench.yml)
+bench-out/
+bench/history.jsonl
