@@ -903,7 +903,9 @@ automatic struct/pointer import for `import_c`.
   a field (as in the Lean frontend) but sees a buffer function's two C parameters.
   An imported function's parameter keeps its own Wiz type name: a `c_struct`
   parameter gets the declared structure's name, not the C parameter's name (the C name
-  is only needed to recognize a buffer's length parameter).
+  is only needed to recognize a buffer's length parameter). Glue calls are also checked
+  in source order now (`CGlue.wiz` collected the argument types backwards, which only a
+  call with differently typed parameters, such as a buffer's pointer and length, shows).
 
 **Tests** (group `selfhost`): every operation, including sharing (a `push` or `append`
 that leaves the old buffer alone), compiled by the Lean toolchain and by the

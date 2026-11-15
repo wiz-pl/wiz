@@ -1508,14 +1508,17 @@ def selfHostGroup : Group where
         selfhostAgreesIO implHeader implDecls },
     { name := "import_c binds a header's functions and glue calls them (stage 30)", run := fun _ => do
         let header := "static inline unsigned long hdr_add(unsigned long a, unsigned long b) { return a + b; }\n" ++
-          "static inline unsigned long hdr_mul(unsigned long a, unsigned long b) { return a * b; }\n"
+          "static inline unsigned long hdr_mul(unsigned long a, unsigned long b) { return a * b; }\n" ++
+          "static inline unsigned long hdr_sub(unsigned long a, unsigned long b) { return a - b; }\n"
         let prog := "import IO\nimport_c \"h.h\" (pure)\n" ++
           "glue twice (n : Nat) : Nat := \"return hdr_add(n, n);\"\n" ++
           "glue square (n : Nat) : Nat := \"return hdr_mul(n, n);\"\n" ++
+          "glue sub (a b : Nat) : Nat := \"return hdr_sub(a, b);\"\n" ++
           "def main : IO Unit := do\n  IO.println (Nat.toString (C.hdr_add 20 22));\n" ++
-          "  IO.println (Nat.toString (twice 21));\n  IO.println (Nat.toString (square 7))"
-        selfhostLinkRun [("main.wiz", prog), ("h.h", header)] "42\n42\n49\n"
-        selfhostLinkRun [("main.wiz", prog), ("h.h", header)] "42\n42\n49\n" (flags := #["--rc"]) },
+          "  IO.println (Nat.toString (twice 21));\n  IO.println (Nat.toString (square 7));\n" ++
+          "  IO.println (Nat.toString (sub 40 10))"
+        selfhostLinkRun [("main.wiz", prog), ("h.h", header)] "42\n42\n49\n30\n"
+        selfhostLinkRun [("main.wiz", prog), ("h.h", header)] "42\n42\n49\n30\n" (flags := #["--rc"]) },
     { name := "Bytes (C11): the type and its operations, in the Lean toolchain and the self-hosted one (stage 30)", run := fun _ =>
         ffiAgrees bytesProgram bytesExpected },
     { name := "Bytes: a buffer argument and a byte-array struct field through import_c (stage 30)", run := fun _ => do
