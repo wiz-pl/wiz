@@ -10,6 +10,49 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* grail (23n): `grail vendor [DIR]` copies the lock's registry archives into a
+  content-addressed vendor directory (`<sha256>.tar.gz` plus `vendor/index.sexpr`) without
+  rewriting `grail.lock`; `--vendor DIR` (or `Package.set "vendor" "DIR"`) lets `fetch`, `build`,
+  `test`, `run`, `lsp` and `doc` resolve archives by SHA-256 before the cache or the
+  network, so `grail fetch --locked --offline --vendor vendor` is hermetic. Unpacked
+  registry packages now live in the shared, content-addressed store
+  `<cache>/grail/packages/<sha256>/`, linked from `.grail/packages/NAME`, so a second
+  project downloads and unpacks nothing; `grail cache path|list|verify` inspects the
+  store (`=grail-vendor`). The index and lock formats are unchanged.
+* grail (23m): a static package registry. `Package.version/toolchain/require`, an
+  S-expression index (`index/NAME.sexpr`, scoped `index/@org/NAME.sexpr`), semver ranges
+  (`^0`/`^0.0` included), a flat resolver that retracts constraints of replaced
+  versions, lock v2 (index URL+commit and `pkg` entries), `grail update/fetch
+  [--locked] [--offline]`, `--index URL#COMMIT`/`index-commit` pins, rollback protection
+  over the index's git history (`--allow-rewind`), SHA-256-before-unpack fetching with a
+  content-addressed archive cache, `grail publish`, and a hermetic `tests/fixtures/grail-index`
+  fixture (`=grail-deps`).
+* grail (23m): **lock v3**. `(version 3)` and the resolving `(toolchain …)`; package
+  `(size …)`, `(tree …)` (checked after every unpack) and `(commands …)` digests; flat,
+  sorted `(deps "NAME REQ" …)` entries; and `Package.override NAME PATH` in
+  `grail.local.wiz` (recorded as `(override NAME PATH HASH)`, refused by `--locked`, used
+  with a note by a plain build). v1/v2 locks still parse and render unchanged, and
+  `grail update` upgrades them. `grail publish` and the index schema record the size,
+  tree and command digest. Tests: the four new `=grail-deps` cases (round-trip, old
+  locks, upgrade, override).
+* grail (23m), the static index side: a `grail-index` repository layout (static
+  `index/NAME.sexpr`, deterministic `packages/NAME-VERSION.tar.gz`, `index.wiz` as the
+  index's Wiz manifest and generator templates), a complete `examples/grail-index/` with
+  three packages, `grail index check` / `scripts/grail-index-check.sh` (names, versions,
+  semver requirements, local archive SHA-256s and layouts, `index.wiz` completeness,
+  module-prefix conflicts; offline by default), `(modules …)`/`(prefix …)` in the index
+  schema, `grail publish` recording module names, and a resolve-time module-conflict
+  check (`=grail-index`). A signed index snapshot (`index/snapshot.sexpr` with
+  `(seq)`/`(updated)`/key fingerprint/`(expires)`, plus a detached SSH signature),
+  `grail update --require-signature --allowed-signers FILE`, the lock's
+  `(index-signature …)` fields (key, fingerprint, sequence, digest) and an offline
+  `grail index verify`; later updates re-verify from the pinned key and refuse tampering,
+  rollback, a same-sequence rewrite and an expired key. There is no transparency log;
+  the TUF/Sigsum staging, key rotation and the remaining gaps are in
+  `docs/stages/23-grail/index-repository.md`. `update --locked --require-signature`
+  refuses a registry lock with no `(index-signature …)` even when its `(index …)` line
+  is absent; `--locked` reads no index, so it checks the entry's shape only, and
+  `grail index verify --locked` is the command that re-verifies the signature.
 * selfhost: the parser tables are a checked-in Wiz source file (`selfhost/Tables.wiz`,
   rendered by `lake build genSelfhostTables`; the `selfhost` group checks that it is
   current and that its tables accept the same corpus as the Lean parser), and the
@@ -39,6 +82,11 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   written (`Wiz/Compiler/WasmValidate.lean`); golden tests compare the module's result
   with the interpreter's. Limits and the 29-case `wasm` test group are in
   `docs/stages/08-backend/wasm.md`.
+* The published site has a `/bench/` page: standard-library timings (with the
+  interleaved A/B ratios and the spread of each run) and the Scry taint metrics,
+  rendered from the checked-in JSON by `web/build-bench.py`. The page is committed, so a
+  JSON change that was not regenerated is a diff, and the docs job refuses it
+  (`web/build-site.sh` runs the generator's `--check`).
 * The WebAssembly target reclaims memory (8f): `dup`/`drop` maintain the object header's
   reference count, the last drop releases the fields and returns the block to a segregated
   free list, and `reset`/`reuse` refill a unique cell. A long-running program's peak is its
@@ -48,6 +96,13 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   with the same 8.1 MiB peak where the old allocator would have needed 7.8 GiB. Freeing is
   iterative (through the dead object's own header), so a long chain does not recurse on
   the engine's stack. `scripts/wasm-peak.mjs` reports a module's peak and time.
+* [`tools/wiz-mcp/`](tools/wiz-mcp/README.md) is a stdlib-only MCP server for the
+  toolchain: `version`, `check`, `parse`, `fmt`, `build`, and the language server's
+  `diagnostics`, `hover` and `goals` over MCP stdio, with one lazily started
+  `wiz lsp --ws` daemon per bridge and worktree (idle unload, a per-call deadline, and
+  no sharing between worktrees). It is opt-in (not in the dev shell), and
+  `.github/workflows/tools.yml` runs its unit tests on every change under `tools/`,
+  with the end-to-end smoke test on manual dispatch.
 
 ## [0.1.0] - unreleased (draft)
 

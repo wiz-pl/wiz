@@ -59,7 +59,8 @@ defaults:
 
 jobs:
   # Path filters: which jobs a pull request needs (scripts/ci.py changes; the shards'
-  # "inputs" in .github/test-shards.json). A docs-only PR builds and tests nothing; a PR
+  # "inputs" in .github/test-shards.json). A docs-only PR builds no shard and runs no
+  # test, but it does check the documentation's Wiz examples (docs_examples); a PR
   # touching only lib/ files no core test reads skips the core shard; the selfhost
   # shards run for selfhost/ and the lib/ files it imports. Everything but a
   # pull_request (pushes, the merge queue, manual runs) runs every job.
@@ -69,6 +70,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      docs: ${{ steps.filter.outputs.docs }}
       shards: ${{ steps.filter.outputs.shards }}
     steps:
       - uses: actions/checkout@v5
@@ -101,6 +103,49 @@ jobs:
         run: |
           python3 scripts/check-docs-style.py --self-test
           python3 scripts/check-docs-style.py
+
+  # The Wiz snippets in docs/**/*.md (scripts/check-docs-examples.py). A docs-only
+  # pull request has no `build` job, so this one substitutes `wiz` from Cachix (the
+  # same store path `build` publishes) and checks the snippets. A pull request that
+  # changes code runs the same check in `build`, after the build it already has.
+  docs_examples:
+    name: docs examples
+    needs: changes
+    if: github.event_name != 'schedule' && needs.changes.outputs.code == 'false' && needs.changes.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          lean: false
+      - name: Cache key
+        id: key
+        shell: bash
+        run: |
+          echo "compiler=${{ hashFiles('flake.lock', 'flake.nix', 'lean-toolchain', 'lake-manifest.json', 'lakefile.lean', '**/*.lean', 'runtime/**', 'c/**') }}" >> "$GITHUB_OUTPUT"
+      - name: nix build wiz (substituted from Cachix)
+        id: nix
+        shell: bash
+        run: |
+          nix build .#wiz --no-link -L
+          wiz=$(nix path-info .#wiz)
+          echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
+          "$wiz/bin/wiz" --version
+      - name: Restore the docs examples cache
+        id: docs-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .lake/docs-examples
+          key: docs-examples-${{ runner.os }}-${{ steps.key.outputs.compiler }}
+          restore-keys: docs-examples-${{ runner.os }}-
+      - name: Check the docs examples
+        # the default shell is the dev shell: `wiz run` blocks need `cc` and GMP
+        run: |
+          python3 scripts/check-docs-examples.py --self-test
+          python3 scripts/check-docs-examples.py --wiz "${{ steps.nix.outputs.wiz }}/bin/wiz"
 
   build:
     name: build
@@ -148,6 +193,16 @@ jobs:
           echo "wiz: $wiz"; echo "tests: $tests"
           du -sh "$wiz" "$tests"
           nix path-info -S "$wiz" "$tests" | sed 's/^/closure: /'
+      - name: The trusted base matches the baseline (before any shard runs)
+        # Fast fail: a ledger regression stops the run here, before the 1.8 GB Cachix
+        # push and before any test shard starts, and it reuses the store path this job
+        # already built instead of a separate job that builds again (~6 min).
+        run: |
+          mkdir -p .lake/build/bin
+          ln -sf "${{ steps.nix.outputs.tests }}/bin/tests" .lake/build/bin/tests
+          scripts/trust-ledger.sh --check
+          Tests/trust-ledger/run.sh
+          scripts/trust-ledger-merge_test.sh
       - name: Publish the store paths to Cachix
         # The shards substitute from here. Explicit (not the action's post-step) so that
         # exactly this commit's build is published, with the token only in this step's
@@ -177,6 +232,13 @@ jobs:
         # (`scripts/test-embed.sh`, which needs an incremental Lake build, is a local
         # dev-shell check now: `nix develop -c scripts/test-embed.sh`.)
         run: scripts/test-runtime.sh
+      - name: The example index validates offline
+        # stage 23m: entries, archive SHA-256s, semver ranges, module-prefix conflicts and
+        # index.wiz; no network (the sources are relative paths). `grail` comes from the
+        # store path this job built (the `build` job has no Lake and no PATH entry).
+        env:
+          GRAIL: ${{ steps.nix.outputs.wiz }}/bin/grail
+        run: scripts/grail-index-check.sh examples/grail-index
       - name: The package checks, builds and runs a program outside the checkout
         # what the old `package` job tested, after the one build: a program is checked and
         # built from a directory with no checkout, and grail starts
@@ -195,6 +257,26 @@ jobs:
           WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
           GRAIL: ${{ steps.nix.outputs.wiz }}/bin/grail
         run: scripts/check-repro.sh --json
+      - name: Restore the docs examples cache
+        id: docs-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .lake/docs-examples
+          key: docs-examples-${{ runner.os }}-${{ steps.key.outputs.compiler }}
+          restore-keys: docs-examples-${{ runner.os }}-
+      - name: Check the docs examples
+        # the Wiz blocks in docs/**/*.md; a code change can stale one even without a
+        # docs change, so every build checks them (seconds on a warm cache).  The
+        # default shell is the dev shell, which `wiz run` blocks need for `cc` and GMP.
+        run: |
+          python3 scripts/check-docs-examples.py --self-test
+          python3 scripts/check-docs-examples.py --wiz "${{ steps.nix.outputs.wiz }}/bin/wiz"
+      - name: Save the docs examples cache (master)
+        if: steps.docs-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/cache/save@v4
+        with:
+          path: .lake/docs-examples
+          key: docs-examples-${{ runner.os }}-${{ steps.key.outputs.compiler }}
 
   test:
     name: test (${{ matrix.shard.name }})
@@ -295,39 +377,6 @@ jobs:
           # always uploaded (the `CI result` job sums them up), but kept briefly
           retention-days: 3
 
-  # The trust ledger: every declaration of lib/ and of the axiom-free examples through
-  # `#print axioms` (Tests/Native.lean), compared with the checked-in
-  # .github/trust-baseline.tsv. A new axiom, `sorry`, native_refl or SMT axiom,
-  # implemented_by/repr, builtin registration or partial definition fails until it is
-  # reviewed and the baseline regenerated (scripts/trust-ledger.sh --update). The
-  # `native` and `hdl-verified` groups check their part of the ledger too; this job
-  # checks lib/ and the examples together, without a shard's path filter to skip it.
-  trust-ledger:
-    name: trust ledger
-    needs: [changes, build]
-    if: github.event_name != 'schedule' && needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v5
-      - uses: ./.github/actions/setup
-        with:
-          cachix-name: ${{ env.CACHIX_NAME }}
-          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          lean: false
-      - name: nix build (the test driver, from Cachix)
-        id: nix
-        run: |
-          tests=$(nix build .#tests --no-link --print-out-paths)
-          echo "tests=$tests" >> "$GITHUB_OUTPUT"
-          mkdir -p .lake/build/bin
-          ln -sf "$tests/bin/tests" .lake/build/bin/tests
-          du -sh "$tests"
-      - name: The trusted base matches the baseline
-        run: scripts/trust-ledger.sh --check
-      - name: The trust gate's fixtures
-        run: Tests/trust-ledger/run.sh
-
   # (11s) The published site, as the artifact `wiz-docs`: on master only (a push), kept
   # 3 days (artifact storage). The tree is the landing page at the root, the standard
   # library's documentation (`wiz doc`, scroll) under `docs/`, and the static playground
@@ -427,7 +476,7 @@ jobs:
   # One check for branch protection, and the whole suite's summary.
   result:
     name: CI result
-    needs: [changes, docs_style, build, test, trust-ledger]
+    needs: [changes, docs_style, docs_examples, build, test]
     if: always() && github.event_name != 'schedule'
     runs-on: ubuntu-latest
     permissions:
@@ -507,21 +556,25 @@ jobs:
       - name: Verdict
         shell: bash
         run: |
-          echo "changes: ${{ needs.changes.result }} (code: ${{ needs.changes.outputs.code }}, shards: ${{ needs.changes.outputs.shards }})"
+          echo "changes: ${{ needs.changes.result }} (code: ${{ needs.changes.outputs.code }}, docs: ${{ needs.changes.outputs.docs }}, shards: ${{ needs.changes.outputs.shards }})"
           echo "docs style: ${{ needs.docs_style.result }}"
-          echo "trust ledger: ${{ needs['trust-ledger'].result }}"
+          echo "docs examples: ${{ needs.docs_examples.result }}"
           echo "build: ${{ needs.build.result }}, test: ${{ needs.test.result }}"
           # the path filter must have run; a job it skipped is not a failure, but outside
           # pull requests (and whenever the filter wants them) every job must succeed
           [ "${{ needs.changes.result }}" = success ] || exit 1
           code="${{ needs.changes.outputs.code }}"
+          docs="${{ needs.changes.outputs.docs }}"
           want_tests=$([ "${{ needs.changes.outputs.shards }}" != "[]" ] && echo true || echo false)
+          # a docs-only change has no build job, so `docs_examples` builds wiz and checks
+          # the snippets; a code change runs the same check in `build`
+          want_docs_examples=$([ "$code" = false ] && [ "$docs" = true ] && echo true || echo false)
           check() { # NAME RESULT WANTED
             if [ "$3" = true ]; then [ "$2" = success ] || { echo "$1: $2 (needed)"; exit 1; }
             else [ "$2" = success ] || [ "$2" = skipped ] || { echo "$1: $2"; exit 1; }; fi
           }
           check "docs style" "${{ needs.docs_style.result }}" true
-          check "trust ledger" "${{ needs['trust-ledger'].result }}" "$code"
+          check "docs examples" "${{ needs.docs_examples.result }}" "$want_docs_examples"
           check build "${{ needs.build.result }}" "$code"
           check test "${{ needs.test.result }}" "$want_tests"
 

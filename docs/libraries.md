@@ -118,7 +118,7 @@ the board; its findings G1–G10 are the requirements). Design notes:
 `wiz-notes/hdl-usability.md`. Everything is in `lib/Hdl/Core.wiz`; examples and
 tests in `examples/hdl-compose.wiz` (group `hdl`) and in the `scaling` group.
 
-```
+```wiz no-check
 structure Tx (r : HwTy → Type) where      -- a bundle: a structure of signals
   line : r Bit
   left : r B4
@@ -241,7 +241,7 @@ SVA. `lib/Hdl/Temporal.wiz`, on the traces and Mealy machines of H14 C1 (`lib/Tr
 examples and tests in `examples/hdl-temporal.wiz` (group `hdl`). Survey and design:
 `wiz-notes/hdl-temporal.md`.
 
-```
+```wiz no-check
 def Uart.onlyThat_a5 :     -- the loopback reports byte 0xa5 and nothing else, for ever
     TL.always (TL.nowB (fun o => onlyByte 165 o.1 o.2)) (Mealy.obs loopM loopback.init (sendOnce 165)) 0 :=
   Mealy.always_settled_const loopM (onlyByte 165) loopback.init (sendOnce 165) quiet F (loopIdle 165)
@@ -612,7 +612,7 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
   width (a value, not an instance, as `Bundle`). For an **enumeration** (no parameters,
   constructors without fields) constructor `i` is the number `i` in
   `⌈log₂ #constructors⌉` bits (Clash's encoding):
-  ```
+  ```wiz no-check
   inductive Phase where | idle | start | data | stop  deriving BitPack
   -- Phase.width = 2, Phase.code = HwTy.bits 2, Phase.toNat, Phase.ofNat (out of range:
   -- the first constructor), Phase.pack : Phase → HwTy.El Phase.code, Phase.unpack,
@@ -648,7 +648,8 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
 
 Not done: a general bit-level round-trip lemma for bundles (above), `BitPack` for
 inductive types with fields (a tag and the widest constructor's fields), `!` on signals,
-`match` on an enumeration signal (staged `match`, hdl-staging-research S3), asynchronous
+`match` on an enumeration signal (a case tree over the `Hw` ops — wishful
+`hdl-match-signals`; the workaround is an `if` chain on `Phase.lit`), asynchronous
 reset.
 
 ## Xilinx 7-series pin constraints and the Arty A7 (`Hdl.Xdc`, `Hdl.Arty`)
@@ -1458,7 +1459,7 @@ and doc comments; std's tests check one example of each.
 | `lib/Rat.wiz` | `Q`: unreduced fractions with `≈`, an ordered field up to `≈` (`Q.inv`, `Q.mul_inv`, `Q.abs_add`, `Q.lt_ceil`); `q_ring! lhs ≈ rhs` |
 | `lib/RingTactic.wiz` | `by ring`: the three normalisers as a tactic that reads the goal |
 
-```
+```wiz
 import Rat
 
 def t (a b c : Nat) : (a + b) * c = c * b + a * c := nat_ring! (a + b) * c = c * b + a * c

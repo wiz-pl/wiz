@@ -2,7 +2,7 @@
 
 ## 9a: IO, machine types, foreign functions
 
-```
+```wiz
 import IO
 extern "strlen" (header := "string.h") strlen : String → Nat
 def main : IO Unit := do
@@ -96,7 +96,8 @@ value and more of a header's pointer types are 9i.
 
 ## 9e: linear sequencing
 
-```
+```wiz
+import IO
 axiom Tok : Type
 axiom Tok.close : (1 t : Tok) → IO Unit
 def finish (1 t : Tok) : IO Nat := do1
@@ -120,7 +121,7 @@ def finish (1 t : Tok) : IO Nat := do1
   expression `x w` and so `w`, ω times (stage 4b; CoreSpec §7.1, R1). The same goes for
   every function that hands a resource back in a pair (`B × Uniq ρ S` in
   `lib/Region.wiz`): a caller holding the pair linearly must split it.
-  ```
+  ```wiz no-check
   def peek {A : Type} (1 x : IO A) (1 w : World) : A := (x w).1
   -- error: cannot project (x w).1: a projection needs an unrestricted pair …,
   -- but this one uses w, which has quantity 1; take the pair apart with
@@ -168,7 +169,7 @@ Not done: `pkg-config` names (`link_pkg "gtk+-3.0"`) — for now, give their fla
 
 ## 9g: callbacks and exported functions
 
-```
+```wiz
 import IO
 -- C calls Wiz: a symbol for a definition
 def greet (who : String) : String := String.append "hello, " who
@@ -242,7 +243,7 @@ program linked with a `--lib` build, both backends), `web/test.sh`.
 
 ## 9h: system interfaces: processes, environment, files
 
-```
+```wiz
 import Sys
 def main : IO Unit := EIO.toIO (do
   o ← Process.output "cat" .nil "piped through cat\n";
@@ -387,7 +388,7 @@ opt-outs, and the glue checks).
 
 ## 9k: bytes on handles, time limits, spawn options, serial ports
 
-```
+```wiz
 import Serial
 def main : IO Unit := EIO.toIO (do
   port ← Serial.open "/dev/ttyUSB1" (SerialConfig.raw8N1 .b115200);
