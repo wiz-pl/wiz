@@ -1381,9 +1381,11 @@ def selfHostGroup : Group where
         selfhostCompileRun quantityProgram "6\n5\n9\n" (flags := #["--rc"]) },
     { name := "the self-hosted frontend: private declarations, constructors and fields, as in one Lean module (21n)", run := fun _ =>
         selfhostAgrees "" privateDecls },
+    -- (`attribute [macro …]`/`[tactic …]` are commands A12 now accepts; these are still
+    -- unknown to the frontend)
     { name := "the self-hosted frontend: an unknown command is an error naming it (21n)", run := fun _ =>
-        selfhostCheckFile "import Prelude\ndef f : Nat := 1\nattribute [macro f] f\nattribute [tactic f] f\ndef g : Nat := f\n"
-          "f : Nat\nerror: unsupported command command.attrMacro\nerror: unsupported command command.attrTactic\ng : Nat\n" },
+        selfhostCheckFile "import Prelude\ndef f : Nat := 1\n#print axioms f\n#erase f\ndef g : Nat := f\n"
+          "f : Nat\nerror: unsupported command command.printAxioms\nerror: unsupported command command.erase\ng : Nat\n" },
     { name := "the self-hosted frontend: #eval and attribute [inline], as in the Lean frontend (21u)", run := fun _ => do
         selfhostCheckFile "import Prelude\ndef f : Nat := 1\n#eval Nat.add f f\nattribute [inline] f\ndef g : Nat := f\n"
           "f : Nat\ncon((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\ng : Nat\n"

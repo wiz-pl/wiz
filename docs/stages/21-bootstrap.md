@@ -872,3 +872,100 @@ and carries the ownership table as comments. Deferred (documented, not implement
 a linked `wiz_abi_version` symbol, `_Static_assert`s for `c_struct` layouts, boxed
 `Nat`/`NatObj` by default, callback roots on both collectors, and the preprocessor or
 automatic struct/pointer import for `import_c`.
+
+## 21ac: notation and macros in the self-hosted frontend (A12, first milestone)
+
+The frontend had one form of notation (`infixl`/`infixr`, stage 19b) and expanded it
+with an ad-hoc `Note`; `syntax`, `notation`, `macro_rules` and the macro/tactic
+registrations were "unsupported command". `lib/` uses them: a scan of the 51 `lib/*.wiz`
+files (declarations on their own line, 2026-11-15) gives
+
+| form                            | declarations | files |
+|---------------------------------|-------------:|------:|
+| `syntax`                        | 122 | 13 |
+| `attribute [tactic …]`          |  38 |  5 |
+| `macro_rules`                   |  27 |  5 |
+| `infix` (plain)                 |  18 |  4 |
+| `attribute [macro …]`           |  13 |  6 |
+| `infixl`                        |  13 |  3 |
+| `infixr`                        |  13 |  6 |
+| `declare_syntax_cat`            |  14 |  3 |
+| `notation`                      |   7 |  4 |
+| `app_unexpander`                |   6 |  5 |
+| `attribute [app_unexpander …]`  |   2 |  1 |
+| `prefix` / `postfix`            |   0 | 0 |
+| `macro` (a declaration)         |   0 | 0 |
+
+`prefix`/`postfix` and a `macro` command do not exist in the Lean host either (a prefix
+operator is a `notation` whose first item is an atom; the host has only `macro_rules`),
+so there is nothing to mirror.
+
+**Implemented.** The frontend's `Note` is now a real macro rule — a node kind, a pattern
+tree, a template and the argument names `notation` binds — and:
+* `notation:p items => rhs` registers a leading rule (or, if the first item is an
+  argument with a precedence, a trailing one, the host's `notationRule`); the pattern
+  is the item list with `antiquot`s for the arguments, and the template substitutes them
+  (`term.ident x` nodes for a `notation`'s `vars`, `$x` nodes for a `macro_rules`).
+* `infixl`/`infixr`/`infix` build the same trailing rule and rule shape as the host
+  (`a op b => f a b`), with `p`/`p+1` operand precedences; the kind comes from the
+  host's `mkKindName` (`term.+`, `term.+_1`, …).
+* `declare_syntax_cat`, `syntax` (with `(name := …)`, `(priority := …)`, `p`, the `stx`
+  item grammar: atoms, categories with a precedence, `(...)`, `sepBy`/`sepBy1`,
+  `withPosition`, `* + ?`), the meta parsers (antiquotations and `` `(c| …) `` for a new
+  category) and `Wiz/Parser/SyntaxCmd.lean`'s leading/trailing split. Atoms are
+  unreserved outside `term`/`command`, and a rule's atoms are added to the token table
+  as the host's `ParserTables.addTokens` does.
+* `macro_rules` with quotations, `$x` pattern variables, structural matching and
+  hygiene: a template identifier the rule introduces gets a fresh `x✝N` scope, and
+  `Scope.lookupV` falls back to the scope-stripped name for a global (the host's
+  `stripScope`). The host has **no repetition** in patterns (`$[…]`), so neither has
+  this.
+* command macros written as `macro_rules` (a rule whose pattern is a `command` node
+  expands before dispatch, so `def_one x` can stand for a `def`).
+* `attribute [macro K] f` / `[tactic K] f` check that `f` is declared and record nothing
+  (see below); `app_unexpander`, `attribute [app_unexpander …]` and
+  `set_option pp.notation`/`pp.all` are parsed and accepted (their printing is the
+  remaining half).
+
+Expansion is outermost first: a node is rewritten to a fixed point (bounded per
+position), then its children are expanded, so an argument a rule splices is expanded
+like any other node. Tables change command by command, as they do in the host: the next
+command is parsed with the rules declared by the previous ones.
+
+**Not done.** The macro and tactic registrations name a *function* the host executes at
+elaboration time (`ListLit.expand`, `Ex.binderMacro`, ring reification, Feral's whole
+DSL). The self-hosted frontend has no elaborator-time evaluator, so it cannot run one:
+`lib/Prelude.wiz`'s list literals, `Logic`'s `∃` and the ring macros would elaborate to
+an "unsupported syntax" error. That is A12's other half, and it depends on the
+elaborator-time evaluation that A11 and A13 also need. Printing notation
+(`app_unexpander`) is accepted but `#check`/`#reduce` still print kernel terms; the
+host's notation-aware printer (`Wiz/Core/Pretty.lean`) is not ported. Keyword scopes
+(`declare_syntax_cat c (keywords := s)`) are accepted and the category is declared, but
+the scope's reserved words are not tracked (only `lib/Feral.wiz` uses them, with a
+procedural macro). `local notation`/`local macro_rules` are unwrapped and stay visible
+to importers (A14's module-local dropping is not wired to the new rules).
+
+**Tests** (new group `selfhost-macro`, 7 cases, added to the `selfhost` shard):
+* notation/infix differential: `selfhostSameNats` compares what the Lean frontend's
+  `#eval` and the self-hosted one's `#reduce` compute for `10 − 3 − 2` (5), `10 ⊖ 3 ⊖ 2`
+  (9), `1 ⊕ 2 * 3` (7), `⌜1 + 2⌝` (4) and `⌜⌜3⌝⌝` (5) — left/right associativity,
+  precedence and a leading notation with a default argument precedence.
+* `macro_rules` differential: a `syntax:lead` rule, pattern variables, hygiene (`under e`
+  = `let y := 3; e + y`, so `hyg 5` is 9 with hygiene and 7 without), a declared
+  category with a rule of its own (`get ⟨7⟩` = 70, via a second expansion), and a
+  command macro (`def_one one`).
+* pinned diagnostics: a malformed rule and an unknown syntax category.
+* the declarations a macro file produces in the self-hosted frontend (names and types).
+* `app_unexpander`/`set_option` accepted by both frontends; the macro/tactic
+  registrations accepted by the self-hosted one.
+* the same macro-using program compiled and run by **both** toolchains (`ioRun` and
+  `selfhostCompileRun`), printing the same five lines — the terms the macros desugar to
+  compute identically.
+
+The self-check (`=selfhost`, Lex/Parse/Kernel/CParse/CGlue/Frontend) is unchanged: the
+checker still checks itself (29.9 s, 1620 declaration lines, no error), and every
+`=selfhost` case passes: a full run of the group gave 142 passed and 1 failed only
+because case 67 pinned `attribute [macro]`/`[tactic]` as unknown commands (they are
+supported now; the case pins `#print axioms`/`#erase` instead), and that case passes on
+the updated suite.
+`scripts/fixpoint.sh` was run at `--mem 6G`: FIXPOINT_FILLIN.
