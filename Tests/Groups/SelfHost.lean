@@ -1546,13 +1546,27 @@ def selfHostGroup : Group where
             if n.isEmpty then none else some n
           else none
         let isProjection (l : String) : Bool := structs.any fun T => l.startsWith (T ++ ".")
-        let some out ← selfhostOutput ("import Prelude\n" ++ body) | pure ()
+        let some out ← selfhostOutputPeak ("import Prelude\n" ++ body) 4096 | pure ()
         let lines := (out.splitOn "\n").filter (· != "")
         for l in lines do
           if l.startsWith "error" || l.startsWith "parse error" then throw (IO.userError l)
         let projs := (lines.filter isProjection).length
         unless lines.length == decls.length + projs do
           throw (IO.userError s!"{lines.length} lines for {decls.length} declarations and {projs} projections") },
+    -- (agent/selfhost-memory) The parser's `mutual` block of partial definitions: the
+    -- checker used to retain an inlined value built with `tmSubst` at every constant use,
+    -- a tree copy of a shared term. The block peaks at ~3.2 GB before the `substIfAny`
+    -- fix (and the whole self-check at 10.7 GB); it is ~17 MB now. The bound is loose
+    -- enough for the compiler's own heap, and catches the exponential cache again.
+    { name := "the selfhost checker: the parser's mutual block stays under 512 MB", run := fun _ => do
+        let strip := fun (s : String) => "\n".intercalate ((s.splitOn "\n").filter (!·.startsWith "import"))
+        let lex ← IO.FS.readFile "selfhost/Lex.wiz"
+        let parse ← IO.FS.readFile "selfhost/Parse.wiz"
+        let parseHead := (parse.splitOn "\ndef sexpr").headD parse
+        let some out ← selfhostOutputPeak ("import Prelude\n" ++ strip lex ++ "\n" ++ strip parseHead) 512
+          | pure ()
+        for l in out.splitOn "\n" do
+          if l.startsWith "error" || l.startsWith "parse error" then throw (IO.userError l) },
     { name := "the Wiz kernel agrees with the Lean kernel (400 random terms)", run := fun _ => do
         let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
         let mut terms : Array MTm := MTm.samples.toArray
