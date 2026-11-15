@@ -739,7 +739,7 @@ Neovim shows them as `@lsp.type.keyword` (linked to `@keyword`) without configur
 
 ## 11aa: `wiz fmt`, a formatter
 
-    wiz fmt [FILE|-] [--check] [--width N] [--explain]
+    wiz fmt [FILE|-] [--check] [--width N] [--explain] [--self-test]
 
 Reprints a file from its syntax tree: each command is parsed with the tables that are in
 effect at it (imported `syntax` and `notation` included), printed from the tree with the
@@ -748,7 +748,9 @@ spacing like `" + "` and `noWs` are honoured), and laid out by a small pretty-pr
 document (`Wiz/Format.lean`: `group`/`line`/`nest`, strictly pretty). `FILE` alone prints
 to stdout, `-` (the default) reads stdin, `--check` changes nothing and exits 1 when the
 file differs, `--width` is the column budget (default 100), `--explain` prints what a
-refused command would have become.
+refused command would have become, and `--self-test` runs eight built-in fixtures
+(`let` without `;`, `calc`, a tactic with `[simp]`, attributes, patterns, structures and
+implicit binders, a string with comment markers, comments in odd places).
 
 * **Why reprint, not rewrite whitespace.** The parser is the single source of truth for
   the tokens and for precedence, so a reprint cannot disagree with it about `a + b` or
@@ -770,7 +772,9 @@ refused command would have become.
   a line — `withPosition` in `term.let` stays in force for the terms after it, so a
   `let` in the middle of a line would forbid its own body's continuation lines to its
   left. That is why `def f := let …` breaks after `:=` while `def f := match …` may stay
-  on one line.
+  on one line. A `calc`'s steps line up under its first relation (`Doc.atCol`), and a
+  trailing comment on a token stays on that token's line while the break it ends takes
+  the indentation of the construct that follows (no blank line is left).
 * **What is refused.** A kind with no grammar in the tables, something between tokens
   that is not a comment, or a reprint that does not parse back to the same tree. The
   check is what makes a prototype safe: across the library files tested (Prelude, Logic,
@@ -778,7 +782,10 @@ refused command would have become.
   Trace, Text, Sat, Hdl/Sim and two examples) the formatter changes no command it
   accepts, is idempotent on every file (formatting twice gives the same text), and
   refuses one command (`Fe.specLin` in `lib/Feral.wiz`: a `match` inside a `let` value,
-  see `wiz-notes/wiz-fmt.md`). 13 test cases in the `format` group.
+  see `wiz-notes/wiz-fmt.md`). The `format` group has the layout and comment cases
+  (25 cases); `wiz fmt --self-test` runs the fixtures, and the `fmt` gate group formats a
+  fixed six-file corpus twice (`lake test -- '=fmt'`, about 12 s) and requires an
+  idempotent reprint with no refused command. Both groups are in CI's `core` shard.
 * **Not done.** Signatures never break (a long header stays long: wrapping binder lists
   needs `fill`/alignment); a multi-line block comment keeps the indentation of its
   continuation lines; the self-hosted frontend has no formatter; and the LSP does not

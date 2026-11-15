@@ -41,9 +41,10 @@ def usage : String := "usage:
                                    also the reference manual (full signatures, doc comments,
                                    class instances, notation table) into DIR/index.md;
                                    --check: change nothing, exit 1 when DIR/index.md differs
-  wiz fmt [FILE|-] [--check] [--width N] [--explain]
+  wiz fmt [FILE|-] [--check] [--width N] [--explain] [--self-test]
                                    reprint a file from its syntax tree (stdin/stdout;
-                                   --check: change nothing, exit 1 when it differs)
+                                   --check: change nothing, exit 1 when it differs;
+                                   --self-test: run the built-in fixtures)
   wiz cache prune [--days N] [--dry-run]
                                     remove keyed cache files (.wizc/.wizm/.wizr) older than
                                     N days (default 30) from the write cache; a pruned file is
@@ -438,11 +439,13 @@ structure FmtArgs where
   check : Bool := false
   width : Nat := 100
   explain : Bool := false
+  selfTest : Bool := false
 
 def fmtArgs (a : FmtArgs) : List String → Except String FmtArgs
   | [] => pure a
   | "--check" :: rest => fmtArgs { a with check := true } rest
   | "--explain" :: rest => fmtArgs { a with explain := true } rest
+  | "--self-test" :: rest => fmtArgs { a with selfTest := true } rest
   | "--width" :: n :: rest => do
     let some w := n.toNat? | throw s!"wiz fmt: --width needs a number, not {n}"
     fmtArgs { a with width := w } rest
@@ -457,23 +460,31 @@ def fmtCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   let a ← match fmtArgs {} args with
     | .ok a => pure a
     | .error e => do IO.eprintln e; return 2
-  let path := a.input.getD "-"
-  let input ← if path == "-" then (← IO.getStdin).readToEnd else IO.FS.readFile path
-  let (init, _) ← initState tc (if path == "-" then "<stdin>" else path) input
-  let r := Fmt.run init input { width := a.width, explain := a.explain }
-  unless r.errors.isEmpty do
-    for e in r.errors do IO.eprintln s!"{path}:{e}"
-    IO.eprintln s!"wiz fmt: {path}: not formatted (the file did not parse)"
-    return 2
-  for m in r.refused do IO.eprintln s!"{path}:{m}"
-  if a.check then
-    if r.text == input then pure 0
-    else
-      IO.eprintln s!"wiz fmt: {path}: not formatted"
-      pure 1
+  if a.selfTest then
+    let bad := Fmt.selfTest
+    for b in bad do IO.eprintln s!"wiz fmt --self-test: {b}"
+    if bad.isEmpty then
+      IO.println s!"wiz fmt --self-test: {Fmt.selfTestFixtures.size} fixtures ok"
+      pure 0
+    else pure 1
   else
-    IO.print r.text
-    pure (if r.refused.isEmpty then 0 else 1)
+    let path := a.input.getD "-"
+    let input ← if path == "-" then (← IO.getStdin).readToEnd else IO.FS.readFile path
+    let (init, _) ← initState tc (if path == "-" then "<stdin>" else path) input
+    let r := Fmt.run init input { width := a.width, explain := a.explain }
+    unless r.errors.isEmpty do
+      for e in r.errors do IO.eprintln s!"{path}:{e}"
+      IO.eprintln s!"wiz fmt: {path}: not formatted (the file did not parse)"
+      return 2
+    for m in r.refused do IO.eprintln s!"{path}:{m}"
+    if a.check then
+      if r.text == input then pure 0
+      else
+        IO.eprintln s!"wiz fmt: {path}: not formatted"
+        pure 1
+    else
+      IO.print r.text
+      pure (if r.refused.isEmpty then 0 else 1)
 /-- `wiz cache prune [--days N] [--dry-run]`: remove keyed files older than N days (default
 30) from the write cache. Only the write cache: read-only layers are never touched. -/
 def cachePruneCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
