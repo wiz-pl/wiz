@@ -71,6 +71,21 @@ def toolingGroup : Group where
         let (_, h5) ← Cache.elaborateCached (some dir) [] src init 0 (binary := some me)
         checkEq 0 h4
         check (h5 > 0) "the default is not this binary's hash" },
+    { name := "a long list literal caches in linear time (its expansion is not reprinted exponentially)", run := fun _ => do
+        let wiz := ((← IO.appPath).parent.getD ".") / "wiz"
+        let dir ← IO.FS.createTempDir
+        let names := (List.range 40).map fun i => s!"name{i}"
+        let src := "import Prelude\nstructure M where\n  name : String\ndef mk (n : String) : M := M.mk n\n" ++
+          "def mapM {A B : Type} (f : A → B) : List A → List B\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (mapM f xs)\n" ++
+          "def xs : List M :=\n  mapM mk [ " ++ ", ".intercalate (names.map fun n => s!"\"{n}\"") ++ " ]\n"
+        let file := dir / "long-list.wiz"
+        IO.FS.writeFile file src
+        let start ← IO.monoMsNow
+        let out ← IO.Process.output { cmd := "timeout", args :=
+          #["20", wiz.toString, "check", "--cache", (dir / "cache").toString, file.toString] }
+        let ms := (← IO.monoMsNow) - start
+        check (out.exitCode == 0) s!"checking a 40-element list literal through the cache failed after {ms} ms: {out.stdout}{out.stderr}"
+        check (ms < 15000) s!"checking a 40-element list literal through the cache took {ms} ms" },
     { name := "terms survive the cache's format", run := fun _ => do
         let prelude ← IO.FS.readFile "lib/Prelude.wiz"
         let st := runFrontend (R := ZeroOneMany) "import Prelude" { trustedModule := Tests.libModule, loader := fun _ => some prelude }

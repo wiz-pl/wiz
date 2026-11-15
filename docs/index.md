@@ -74,6 +74,7 @@ line below.
 * [Stage 19: the frontend checks the self-hosted sources](stages/19-selfhost-checks-sources.md)
 * [Stage 20: the frontend checks itself, and gets faster](stages/20-selfhost-checks-itself.md)
 * [Stage 21: bootstrap](stages/21-bootstrap.md)
+* [Stage 30: type classes in the self-hosted toolchain](stages/30-selfhost-typeclasses.md)
 
 ### Tooling
 
@@ -84,6 +85,8 @@ line below.
 ### Numbers and libraries
 
 * [Stage 22: numbers for hardware and systems code](stages/22-numbers.md)
+* [The value-level semantics matrix](semantics-matrix.md): every numeric and textual
+  boundary, with the value the spec asks for and which backends were compared
 * [Stage 29: native data structures](stages/29-natives.md): word arrays, word maps, interned strings
 * [Libraries](libraries.md)
 

@@ -1,0 +1,224 @@
+import Hdl.Core
+/-!
+# Hdl.Netlist: the simulation theorem
+
+A `Circuit` (`Hdl.Core`) has two simulations: the value simulation `Circuit.run` (the
+Mealy step at `HwTy.El` values) and the netlist simulation `Netlist.simulate` (the
+synthesised netlist's nodes). They are different programs, so their agreement is a
+theorem, not a definition. This file proves it for the *Mealy core* subset:
+
+* one clock (`Netlist.clocks = [ClockDomain.sys]`),
+* no memories (`Netlist.mems = []`),
+* no multi-clock design (`Multi`/`Cdc`) and no primitive without a behavioural model,
+* the netlist's registers are exactly the state's leaves, in `HwTy.leaves` order.
+
+The proof is a cycle-indexed simulation relation, `Circuit.Simulates`, with one
+state-step obligation (`stepOk`). `Circuit.Simulates.runFrom` is the induction and
+`Circuit.Simulates.simulate_eq_run` is the theorem:
+
+```
+Netlist.simulate n (Hdl.map (HwTy.leaves i) xs) = Hdl.map (HwTy.leaves o) (Circuit.run c xs)
+```
+
+for every finite input list `xs`. The obligations are *discharged*, not assumed, for a
+synthesised design: `examples/hdl-sim-theorem.wiz` proves them by `rfl` for a one-bit
+delay (`Circuit.netlist "delay"`), i.e. by kernel evaluation of the netlist's nodes.
+
+`Netlist.simFast` is the compiled fast simulator (`Hdl.Sim`); it computes the same
+function as `Netlist.simulate` for a `Netlist.wellFormed` netlist (arguments to earlier
+nodes, registers/memories that exist, no primitive instances), and falls back to
+`Netlist.simulate` otherwise. That agreement is checked by the executable differential
+tests (`examples/hdl-sim.wiz`, the `hdl` group); it is not proved here because
+`Hdl.Sim` uses `Array`, which the kernel does not reduce.
+
+## Outside the theorem
+
+* **Multi-clock.** A `Multi` design, `ClockDomain.named` parts and `Cdc` cells have more
+  than one `always` block; `Netlist.simulate` is single-rate and `Netlist.domainRefusals`
+  refuses such a netlist (the event schedule, H10, is not implemented). Only the
+  `sys`/one-domain case is related here.
+* **Memories.** The theorem assumes `n.mems = []`. `Netlist.simulate` also handles
+  `NetMem` reads/writes (state `HTrie`s); proving their refinement needs the memory
+  contents in the relation and is left to the memory interface's own laws.
+* **Resets.** A synchronous reset is part of a step and may satisfy `stepOk` if the
+  netlist's `NetReg.rst` is what the step does; the theorem does not model reset
+  *domains*, asynchronous assertion, or `Cdc.resetSync`/`Cdc.resetBridge`. Async reset
+  crossings are outside.
+* **Uninterpreted primitives.** `NetPrim.eval` is the primitive's `model`, or a default
+  when `model = none`; a design whose primitive has no behavioural model is outside the
+  theorem (and `Netlist.simFast` falls back). Vendor cells with a model are in the
+  step relation only if `stepOk` is proved for them.
+* **`simFast`.** Covered by the executable differential tests and `Netlist.wellFormed`,
+  not by this proof (see above).
+-/
+
+--------------------------------------------------------------------------------
+-- A netlist cycle, from a register list (no memories)
+
+/-- One cycle of a memoryless netlist from a register list: the output leaves and the
+next register leaves. This is the step `Netlist.simulateGo` takes. -/
+def Netlist.cycle (n : Netlist) (regs : List Nat) (ins : List Nat) : List Nat × List Nat :=
+  let vals := SimNode.evalAll ins (Hdl.Vec.ofList regs) (Hdl.Vec.ofList ([] : List (HTrie Nat)))
+    (SimNode.ofNodes n.nodes Hdl.Vec.empty) Hdl.Vec.empty;
+  (Hdl.map (NetPort.read vals) n.outputs, NetReg.loadAll vals n.regs regs)
+
+/-- The outputs of a memoryless netlist from a register list (the structural run; compare
+`Circuit.runFrom`). -/
+def Netlist.runFrom (n : Netlist) : List Nat → List (List Nat) → List (List Nat)
+  | _, .nil => .nil
+  | regs, .cons x xs =>
+    let q := Netlist.cycle n regs x;
+    List.cons q.1 (Netlist.runFrom n q.2 xs)
+
+/-- `Netlist.runFrom` from the initial register values. -/
+def Netlist.run (n : Netlist) (inputs : List (List Nat)) : List (List Nat) :=
+  Netlist.runFrom n (Hdl.map (fun (r : NetReg) => r.init) n.regs) inputs
+
+/-- `Netlist.runFrom` with an accumulator (as `Circuit.runAcc`). -/
+def Netlist.runGo (n : Netlist) : List Nat → List (List Nat) → List (List Nat) → List (List Nat)
+  | _, .nil, acc => Hdl.reverse acc
+  | regs, .cons x xs, acc =>
+    let q := Netlist.cycle n regs x;
+    Netlist.runGo n q.2 xs (List.cons q.1 acc)
+
+/-- The accumulator run is the structural run behind `Hdl.rev`. -/
+def Netlist.runGo_eq (n : Netlist) : (regs : List Nat) → (inputs : List (List Nat)) → (acc : List (List Nat)) →
+    Netlist.runGo n regs inputs acc = Hdl.rev acc (Netlist.runFrom n regs inputs)
+  | regs, .nil, acc => rfl
+  | regs, .cons x xs, acc =>
+    Netlist.runGo_eq n (Netlist.cycle n regs x).2 xs (List.cons (Netlist.cycle n regs x).1 acc)
+
+/-- `Hdl.rev [] xs = xs`. -/
+def Hdl.rev_nil {A : Type} (xs : List A) : Hdl.rev List.nil xs = xs := rfl
+
+/-- A memory list with no memories: `NetMem.storeAll` leaves the (empty) memory state
+empty. -/
+def NetMem.storeAll_nil (vals : Hdl.Vec Nat) :
+    (mems : List NetMem) → mems = List.nil → NetMem.storeAll vals mems List.nil = List.nil
+  | .nil, h => rfl
+  | .cons m ms, h => absurd h.1
+
+/-- The initial memory state of a memoryless netlist is empty. -/
+def Netlist.mapMemInit_nil : (mems : List NetMem) → mems = List.nil →
+    Hdl.map (fun (m : NetMem) => Hdl.memOf m.init) mems = List.nil
+  | .nil, h => rfl
+  | .cons m ms, h => absurd h.1
+
+/-- `Netlist.simulate` is `Netlist.runGo` on the initial state, for a memoryless netlist.
+(The definitional unfolding lemma first: `Netlist.simulate` is not reducible as a *stuck*
+term, so the equation has to be named once.) -/
+def Netlist.simulate_eq_go (n : Netlist) (inputs : List (List Nat)) :
+    Netlist.simulate n inputs =
+      Netlist.simulateGo n (SimNode.ofNodes n.nodes Hdl.Vec.empty)
+        (Hdl.map (fun (r : NetReg) => r.init) n.regs)
+        (Hdl.map (fun (m : NetMem) => Hdl.memOf m.init) n.mems) inputs List.nil := rfl
+
+/-- `Netlist.simulateGo` with the initial state is `Netlist.runGo`, when there are no
+memories. -/
+def Netlist.simulateGo_eq_runGo (n : Netlist) (hm : n.mems = List.nil) :
+    (regs : List Nat) → (inputs : List (List Nat)) → (acc : List (List Nat)) →
+    Netlist.simulateGo n (SimNode.ofNodes n.nodes Hdl.Vec.empty) regs List.nil inputs acc =
+      Netlist.runGo n regs inputs acc
+  | regs, .nil, acc => rfl
+  | regs, .cons x xs, acc =>
+    let vals := SimNode.evalAll x (Hdl.Vec.ofList regs) (Hdl.Vec.ofList ([] : List (HTrie Nat)))
+      (SimNode.ofNodes n.nodes Hdl.Vec.empty) Hdl.Vec.empty;
+    let out := Hdl.map (NetPort.read vals) n.outputs;
+    let regs' := NetReg.loadAll vals n.regs regs;
+    Eq.trans
+      (Eq.congrArg (fun (ms : List (HTrie Nat)) =>
+        Netlist.simulateGo n (SimNode.ofNodes n.nodes Hdl.Vec.empty) regs' ms xs (List.cons out acc))
+        (NetMem.storeAll_nil vals n.mems hm))
+      (Netlist.simulateGo_eq_runGo n hm regs' xs (List.cons out acc))
+
+/-- `Netlist.simulate` is `Netlist.runFrom` from the initial registers, for a memoryless
+netlist. -/
+def Netlist.simulate_eq_runFrom (n : Netlist) (hm : n.mems = List.nil)
+    (inputs : List (List Nat)) :
+    Netlist.simulate n inputs =
+      Netlist.runFrom n (Hdl.map (fun (r : NetReg) => r.init) n.regs) inputs :=
+  Eq.trans (Eq.trans (Netlist.simulate_eq_go n inputs)
+    (Eq.congrArg (fun (ms : List (HTrie Nat)) =>
+        Netlist.simulateGo n (SimNode.ofNodes n.nodes Hdl.Vec.empty)
+          (Hdl.map (fun (r : NetReg) => r.init) n.regs) ms inputs List.nil)
+      (Netlist.mapMemInit_nil n.mems hm)))
+    (Eq.trans (Netlist.simulateGo_eq_runGo n hm
+        (Hdl.map (fun (r : NetReg) => r.init) n.regs) inputs List.nil)
+      (Eq.trans (Netlist.runGo_eq n (Hdl.map (fun (r : NetReg) => r.init) n.regs) inputs List.nil)
+        (Hdl.rev_nil (Netlist.runFrom n (Hdl.map (fun (r : NetReg) => r.init) n.regs) inputs))))
+
+/-- `Netlist.simulate = Netlist.run` for a memoryless netlist. -/
+def Netlist.run_eq_runFrom (n : Netlist) (inputs : List (List Nat)) :
+    Netlist.run n inputs = Netlist.runFrom n (Hdl.map (fun (r : NetReg) => r.init) n.regs) inputs := rfl
+
+/-- `Netlist.simulate = Netlist.run` for a memoryless netlist. -/
+def Netlist.simulate_eq_run (n : Netlist) (hm : n.mems = List.nil)
+    (inputs : List (List Nat)) : Netlist.simulate n inputs = Netlist.run n inputs :=
+  Eq.trans (Netlist.simulate_eq_runFrom n hm inputs) (Eq.symm (Netlist.run_eq_runFrom n inputs))
+
+--------------------------------------------------------------------------------
+-- The simulation relation between a circuit and its netlist
+
+/-- One step of the relation: on register leaves equal to the state's leaves, the netlist
+cycle gives the step's output leaves and next-state leaves. -/
+def Netlist.StepOk {ω i o : HwTy} (c : Circuit i o) (n : Netlist)
+    (s : HwTy.El c.st) (x : HwTy.El i) : Prop :=
+  let q := Netlist.cycle n (HwTy.leaves c.st s) (HwTy.leaves i x);
+  q.1 = HwTy.leaves o (Circuit.stepEl c s x).2 ∧
+    q.2 = HwTy.leaves c.st (Circuit.stepEl c s x).1
+
+/-- The smallest simulation relation for the single-clock, memoryless Mealy core: the
+netlist's initial register leaves are the circuit's initial state leaves, and one netlist
+cycle implements one `Circuit.stepEl`. -/
+structure Circuit.Simulates {ω i o : HwTy} (c : Circuit i o) (n : Netlist) where
+  /-- the netlist has one clock domain (`ClockDomain.sys`) -/
+  oneClock : n.clocks = List.cons ClockDomain.sys List.nil
+  /-- the netlist has no memories -/
+  memFree : n.mems = List.nil
+  /-- the initial registers are the initial state's leaves -/
+  initOk : Hdl.map (fun (r : NetReg) => r.init) n.regs = HwTy.leaves c.st c.init
+  /-- one netlist cycle is one circuit step -/
+  stepOk : (s : HwTy.El c.st) → (x : HwTy.El i) → Netlist.StepOk c n s x
+
+/-- The state-step lemma: if the relation holds, `Netlist.runFrom` from any state whose
+leaves are the state's leaves is the value run. -/
+def Circuit.Simulates.runFrom {ω i o : HwTy} {c : Circuit i o} {n : Netlist}
+    (h : Circuit.Simulates c n) :
+    (s : HwTy.El c.st) → (xs : List (HwTy.El i)) →
+    Netlist.runFrom n (HwTy.leaves c.st s) (Hdl.map (HwTy.leaves i) xs) =
+      Hdl.map (HwTy.leaves o) (Circuit.runFrom c s xs)
+  | s, .nil => rfl
+  | s, .cons x xs =>
+    let q := Netlist.cycle n (HwTy.leaves c.st s) (HwTy.leaves i x);
+    let p := h.stepOk s x;
+    Eq.trans
+      (Eq.congrArg (fun (r : List Nat) =>
+        List.cons q.1 (Netlist.runFrom n r (Hdl.map (HwTy.leaves i) xs))) p.2)
+      (Eq.trans
+        (Eq.congrArg (fun (y : List Nat) =>
+          List.cons y (Netlist.runFrom n (HwTy.leaves c.st (Circuit.stepEl c s x).1)
+            (Hdl.map (HwTy.leaves i) xs))) p.1)
+        (Eq.congrArg (fun (ys : List (List Nat)) =>
+          List.cons (HwTy.leaves o (Circuit.stepEl c s x).2) ys)
+          (Circuit.Simulates.runFrom h (Circuit.stepEl c s x).1 xs)))
+
+/-- **The simulation theorem.** For a circuit and a netlist in the Mealy-core subset
+(`Circuit.Simulates`), the netlist simulation of any finite input trace is the value
+simulation, cycle for cycle. -/
+def Circuit.Simulates.simulate_eq_run {ω i o : HwTy} {c : Circuit i o} {n : Netlist}
+    (h : Circuit.Simulates c n) (xs : List (HwTy.El i)) :
+    Netlist.simulate n (Hdl.map (HwTy.leaves i) xs) =
+      Hdl.map (HwTy.leaves o) (Circuit.run c xs) :=
+  Eq.trans (Netlist.simulate_eq_runFrom n h.memFree (Hdl.map (HwTy.leaves i) xs))
+    (Eq.trans
+      (Eq.congrArg (fun (r : List Nat) =>
+        Netlist.runFrom n r (Hdl.map (HwTy.leaves i) xs)) h.initOk)
+      (Eq.trans (Circuit.Simulates.runFrom h c.init xs)
+        (Eq.symm (Eq.congrArg (fun (ys : List (HwTy.El o)) =>
+          Hdl.map (HwTy.leaves o) ys) (Circuit.run_eq c xs)))))
+
+/-- The theorem on the leaf encoding `Circuit.runLeaves` (the form the `hdl` tests use). -/
+def Circuit.Simulates.simulate_eq_runLeaves {ω i o : HwTy} {c : Circuit i o} {n : Netlist}
+    (h : Circuit.Simulates c n) (xs : List (HwTy.El i)) :
+    Netlist.simulate n (Hdl.map (HwTy.leaves i) xs) = Circuit.runLeaves c xs :=
+  Circuit.Simulates.simulate_eq_run h xs

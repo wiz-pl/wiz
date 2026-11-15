@@ -46,7 +46,7 @@ def Rs.barrel5_toNat (fill : BitVec 1) (x : BitVec 32) :
 def Rs.barrel5 (fill : BitVec 1) (x : BitVec 32) :
     barrel (r := HwTy.El) (BitVec.ofNat 1 1) fill (BitVec.ofNat 5 5) x = BitVec.shl x 5 :=
   UIntN.ext (barrel (r := HwTy.El) (BitVec.ofNat 1 1) fill (BitVec.ofNat 5 5) x) (BitVec.shl x 5)
-    (Eq.trans (Rs.barrel5_toNat fill x) (Eq.symm (BitVec.shl_toNat 32 5 x)))
+    (Eq.trans (Rs.barrel5_toNat fill x) (Eq.symm (BitVec.shl_toNat_lt 32 5 x rfl)))
 
 -- The execute cycle, as `Pf.ok` needs it: the word is in `q`, the rest of the decode
 -- state is symbolic. The PC is `a.pc + 4`; the register value is the barrel's result,
