@@ -340,12 +340,14 @@ def cliDiffGroup : Group where
           cliDiffSame spec h s
           checkEq 2 s.code
           cliCheck s.err "unknown flag: " "unknown flag"
-        -- (toolchain flags alone: the host's usage, exit 0)
-        let spec : CliDiffSpec := { files := #[("x.wiz", cliGood)], args := #["--no-cache"] }
-        let (h, s) ← cliDiffBoth host exe spec
-        cliDiffSame spec h s
-        checkEq 0 s.code
-        checkEq 0 h.code },
+        -- (toolchain flags alone: the host's usage, exit 0; a value-taking flag's word
+        -- is its value, never a command)
+        for args in [#["--no-cache"], #["--cc", "cc"], #["-I", "."]] do
+          let spec : CliDiffSpec := { files := #[("x.wiz", cliGood)], args := args }
+          let (h, s) ← cliDiffBoth host exe spec
+          cliDiffSame spec h s
+          checkEq 0 s.code
+          checkEq 0 h.code },
     { name := "--target c: both accept it, before or after the command, and reject a bad name alike", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let files := #[("good.wiz", cliGood)]
@@ -389,13 +391,16 @@ def cliDiffGroup : Group where
           cliDiffSame spec h s
           checkEq 0 s.code
         -- (an unknown mode: the message and exit 2 agree; the host prints no usage, and
-        -- the driver's is not compared)
-        let spec : CliDiffSpec := { files := files, args := #["check", "cv.wiz", "--cache-verify", "bogus"] }
-        let (h, s) ← cliDiffBoth host exe spec
-        cliDiffSame spec h s
-        checkEq 2 s.code
-        checkEq 2 h.code
-        cliCheck s.err "--cache-verify: unknown mode bogus (off, warn, strict)" "the mode's error"
+        -- the driver's is not compared. Also with no command: the host validates the
+        -- mode before its usage, and a flag's word is its value, not a command.)
+        for args in [#["check", "cv.wiz", "--cache-verify", "bogus"],
+                     #["--cache-verify", "bogus"]] do
+          let spec : CliDiffSpec := { files := files, args := args }
+          let (h, s) ← cliDiffBoth host exe spec
+          cliDiffSame spec h s
+          checkEq 2 s.code
+          checkEq 2 h.code
+          cliCheck s.err "--cache-verify: unknown mode bogus (off, warn, strict)" "the mode's error"
         skip "cache verification: the host writes output manifests, so a second `--cache-verify strict` run is a hit there; the self-hosted cache has none, so strict never trusts an entry (a miss, same output, no saved work) (D5)" },
     { name := "flags: a backend flag is not a `check` option in either (exit 2)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost

@@ -1087,14 +1087,19 @@ partial def splitLeadGo (lead : List String) : List String → LeadSplit
         | .false => splitLeadGo (.cons a lead) rest
 
 -- a leading flag that neither the driver nor the backend knows: host `wiz` errors on
--- it; so does the driver (`unknown flag: …`, exit 2)
-def unknownTopFlag : List String → Option String
+-- it; so does the driver (`unknown flag: …`, exit 2). A value-taking flag's word is its
+-- value, not a flag (the host's `parseFlags` consumes it the same way).
+partial def unknownTopFlag : List String → Option String
   | .nil => .none
-  | .cons a rest => match knownTopFlag a with
-    | .true => unknownTopFlag rest
-    | .false => match isBackendFlag a with
+  | .cons a rest => match takesValueFlag a with
+    | .true => match rest with
+      | .nil => .none
+      | .cons _ r2 => unknownTopFlag r2
+    | .false => match knownTopFlag a with
       | .true => unknownTopFlag rest
-      | .false => .some a
+      | .false => match isBackendFlag a with
+        | .true => unknownTopFlag rest
+        | .false => .some a
 
 def hasBackendFlag : List String → Bool
   | .nil => .false
