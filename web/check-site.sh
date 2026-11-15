@@ -1,0 +1,84 @@
+#!/bin/sh
+# Check an assembled site without a server: the three entry points exist, the landing
+# page's local links resolve, and the playground's page and assets are all there.
+# External links (http, https, mailto, data) are not fetched. Run by CI after
+# web/build-site.sh, and usable locally on a `doc-site` tree.
+#
+#   usage: web/check-site.sh [SITE]                (default: doc-site)
+set -u
+SITE=${1:-doc-site}
+fail=0
+
+need() {
+  if [ ! -f "$SITE/$1" ]; then
+    echo "check-site: missing $SITE/$1" >&2
+    fail=1
+  fi
+}
+
+# The site's three entry points and the documentation's scripts.
+need index.html
+need landing.css
+need docs/index.html
+need docs/api.html
+need docs/api.json
+need docs/search.js
+need docs/scroll.css
+need playground/index.html
+need playground/playground.js
+need playground/playground.css
+need playground/playground-values.js
+need playground/wiz-playground.mjs
+need playground/wiz-playground.wasm
+
+# Every local href/src of FILE resolves under BASE (a directory → its index.html).
+# A link that starts with `/` is refused: it would break a project-site prefix.
+check_links() {
+  file=$1
+  base=$2
+  list=$(mktemp)
+  grep -o 'href="[^"]*"' "$file" > "$list" 2>/dev/null || true
+  grep -o 'src="[^"]*"' "$file" >> "$list" 2>/dev/null || true
+  sort -u "$list" -o "$list"
+  while IFS= read -r attr; do
+    link=${attr#*=}
+    link=${link#\"}
+    link=${link%\"}
+    case "$link" in
+      ''|'#'*|http://*|https://*|mailto:*|data:*|javascript:*) continue ;;
+    esac
+    path=${link%%#*}
+    path=${path%%\?*}
+    [ -n "$path" ] || continue
+    case "$path" in
+      /*)
+        echo "check-site: $file: absolute link '$link' (the site must stay relocatable)" >&2
+        fail=1
+        continue
+        ;;
+    esac
+    case "$path" in
+      */) target="$base/${path}index.html" ;;
+      *)  target="$base/$path" ;;
+    esac
+    if [ ! -f "$target" ]; then
+      echo "check-site: $file: link '$link' does not resolve to $target" >&2
+      fail=1
+    fi
+  done < "$list"
+  rm -f "$list"
+}
+
+if [ -f "$SITE/index.html" ]; then
+  check_links "$SITE/index.html" "$SITE"
+fi
+if [ -f "$SITE/playground/index.html" ]; then
+  check_links "$SITE/playground/index.html" "$SITE/playground"
+fi
+
+if [ "$fail" -eq 0 ]; then
+  echo "check-site: ok ($SITE: landing, docs, playground)"
+else
+  echo "check-site: FAILED" >&2
+fi
+exit "$fail"

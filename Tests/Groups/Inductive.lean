@@ -59,6 +59,21 @@ def inductiveGroup : Group where
         fails (qtyIndPrelude ++
           "def bad {q : Qty} {A : Type} (b : BoxQ q A) : A := match b with\n  | .mk a => a")
           "quantity" },
+    { name := "deriving DecidableEq for an enumeration and a single-constructor record", run := fun _ =>
+        okLibs ("import Deriving\ninductive Status where\n  | pending\n  | completed\n  deriving DecidableEq\n" ++
+          "structure Pt where\n  x : Nat\n  y : Bool\n  deriving DecidableEq\n" ++
+          "#eval DecidableEq.decide Status.completed Status.completed\n" ++
+          "#eval DecidableEq.decide Status.pending Status.completed\n" ++
+          "#eval DecidableEq.decide (Pt.mk 2 Bool.true) (Pt.mk 2 Bool.true)\n" ++
+          "#eval DecidableEq.decide (Pt.mk 2 Bool.true) (Pt.mk 2 Bool.false)\n" ++
+          "#check @instDecidableEqStatus")
+          [".true", ".false", ".true", ".false",
+           "instDecidableEqStatus : DecidableEq Status"] },
+    { name := "deriving DecidableEq is rejected for a recursive field or more than one constructor", run := fun _ => do
+        failsLibs ("import Deriving\ninductive Chain where\n  | mk (next : Chain)\n  deriving DecidableEq")
+          "DecidableEq is derived for an enumeration or a single-constructor record only"
+        failsLibs ("import Deriving\ninductive Tree where\n  | leaf\n  | node (l : Tree) (n : Nat) (r : Tree)\n  deriving DecidableEq")
+          "DecidableEq is derived for an enumeration or a single-constructor record only" },
     { name := "unknown constructor via dot", run := fun _ =>
         fails (indPrelude ++ "def bad : Nat := .three") "no constructor three" },
     -- (U2) a data type at a symbolic universe: its description's level is the declared

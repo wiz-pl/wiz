@@ -14,6 +14,7 @@ code, pre { font: 13.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 header { grid-column: 1 / -1; display: flex; gap: 16px; align-items: center; padding: 8px 16px;
          border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); z-index: 2; }
 header .site { font-weight: 600; color: var(--fg); }
+header .api-link { color: var(--dim); font-size: 13px; white-space: nowrap; }
 #search { flex: 1; max-width: 480px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px;
           background: var(--panel); color: var(--fg); font: inherit; }
 #results { position: absolute; top: 44px; left: 236px; width: min(640px, calc(100vw - 32px)); max-height: 70vh; overflow: auto;
@@ -21,6 +22,7 @@ header .site { font-weight: 600; color: var(--fg); }
 #results .hit { display: block; padding: 6px 12px; color: var(--fg); border-bottom: 1px solid var(--line); }
 #results .hit:hover { background: var(--hover); text-decoration: none; }
 #results .mod, #results .summary { color: var(--dim); font-size: 13px; }
+#results .where { font-variant: small-caps; color: var(--fg); }
 #results .nothing { padding: 8px 12px; color: var(--dim); }
 nav, aside.toc { padding: 12px 16px; font-size: 14px; position: sticky; top: 49px; max-height: calc(100vh - 49px); overflow: auto; align-self: start; }
 nav ul, aside.toc ul { list-style: none; margin: 0; padding: 0; }
@@ -32,6 +34,21 @@ h1 { font-size: 26px; margin: 12px 0 4px; }
 .module-src { font-size: 13px; color: var(--dim); margin-bottom: 12px; }
 ul.modules { list-style: none; padding: 0; } ul.modules li { padding: 6px 0; border-bottom: 1px solid var(--line); }
 ul.modules .summary { color: var(--dim); font-size: 14px; }
+main .lede { color: var(--dim); margin: 4px 0 14px; }
+/* the API index (api.html): every module and declaration, its signature and docs */
+section.api-module { margin-top: 26px; }
+section.api-module h2 { font-size: 18px; margin: 0 0 4px; padding-bottom: 4px; border-bottom: 1px solid var(--line); }
+section.api-module h2 a { color: var(--fg); }
+section.api-module .count { color: var(--dim); font-size: 12px; font-weight: normal; }
+table.api-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+table.api-table th { text-align: left; font: 600 12px system-ui, sans-serif; text-transform: uppercase; letter-spacing: .05em; color: var(--dim); padding: 4px 8px 2px 0; }
+table.api-table td { vertical-align: top; padding: 4px 8px 4px 0; border-top: 1px solid var(--line); }
+table.api-table .kind { color: var(--dim); font-size: 12px; white-space: nowrap; }
+table.api-table .name { white-space: nowrap; }
+table.api-table .api-sig { color: var(--fg); }
+table.api-table .summary { color: var(--dim); font-size: 13px; }
+table.api-table tr.child .name { padding-left: 14px; }
+table.api-table tr:target { background: linear-gradient(to right, var(--hover), transparent 60%); }
 .decl { border-top: 1px solid var(--line); padding: 14px 0 10px; scroll-margin-top: 56px; }
 .decl:target, .children li:target { background: linear-gradient(to right, var(--hover), transparent 60%); }
 .decl-head { display: flex; gap: 8px; align-items: baseline; }

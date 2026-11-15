@@ -1,0 +1,152 @@
+-- The display library (`import Hdl.Display`): the SSD1306/SSD1331 command and
+-- address-window layer extracted from the OLED project. Checked by the `display` test
+-- group: the command bytes, the init sequences and windows, the pixel/colour helpers,
+-- and the two writers (`Display.serC`, `Display.seqC`) whose emitted SPI pins are
+-- decoded back into command/data bytes; the value simulation, `Netlist.simulate` and
+-- `Hdl.Sim`'s `simFast` agree, and the netlists are well formed.
+import Hdl.Core
+import Hdl.Sim
+import Hdl.Display
+import IO
+
+def yes (b : Bool) : String := match b with
+  | .true => "yes"
+  | .false => "no"
+
+def shows : List Nat → String
+  | .nil => ""
+  | .cons x xs => Hdl.show x <+> " " <+> shows xs
+
+def showsB : List Bool → String
+  | .nil => ""
+  | .cons x xs => (match x with | .true => "1" | .false => "0") <+> " " <+> showsB xs
+
+def leavesEq : List (List Nat) → List (List Nat) → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
+  | _, _ => .false
+
+-- One command of the sequence writer: a start pulse in the first cycle, then idle.
+def startAt (k : Nat) : HwTy.El Display.QIn.code :=
+  Bundle.toEl Display.QIn.bundle
+    (Display.QIn.mk (BitVec.ofNat 1 (match Nat.beq k 0 with | .true => 1 | .false => 0)))
+
+def startIns (n : Nat) : List (HwTy.El Display.QIn.code) :=
+  Hdl.map (fun (k : Nat) => startAt k) (Hdl.upto n 0)
+
+-- The pins of `Display.QOut`/`Display.WOut` are, in leaf order: sclk, mosi, cs, dc,
+-- busy, done. Decode the bytes from the rising edges of sclk while cs is low; the D/C
+-- level is read with the last bit, and CS high clears a partial byte.
+def decGo : Nat → Nat → Nat → List (List Nat) → List Nat
+  | prev, n, acc, .nil => .nil
+  | prev, n, acc, .cons o os =>
+    let sclk := Hdl.nthD 0 o 0;
+    let mosi := Hdl.nthD 0 o 1;
+    let cs := Hdl.nthD 0 o 2;
+    let dc := Hdl.nthD 0 o 3;
+    let rise := Bool.and (Nat.beq prev 0) (Nat.beq sclk 1);
+    match Nat.beq cs 1 with
+    | .true => decGo sclk 0 0 os
+    | .false => match rise with
+      | .true => match Nat.beq n 7 with
+        | .true => List.cons (Nat.add (Nat.mul dc 256) (Nat.add (Nat.mul acc 2) mosi))
+            (decGo sclk 0 0 os)
+        | .false => decGo sclk (n + 1) (Nat.add (Nat.mul acc 2) mosi) os
+      | .false => decGo sclk n acc os
+
+def decoded (outs : List (List Nat)) : List Nat := decGo 0 0 0 outs
+
+def countDone : List (List Nat) → Nat
+  | .nil => 0
+  | .cons o os => match Nat.beq (Hdl.nthD 0 o 5) 1 with
+    | .true => Nat.succ (countDone os)
+    | .false => countDone os
+
+-- The two circuits and their checks: value simulation = `Netlist.simulate` = `simFast`.
+def runSeq (name : String) (xs : List Display.Byte) (cycles : Nat) : String :=
+  let c := Display.seqC xs;
+  let ins := startIns cycles;
+  let outs := Circuit.runLeaves c ins;
+  let got := decoded outs;
+  let want := Display.entries xs;
+  name <+> ": sim " <+> yes (leavesEq outs (Circuit.simLeaves .true c ins))
+    <+> " netlist " <+> yes (leavesEq outs (Circuit.simFast c ins))
+    <+> ", done " <+> Hdl.show (countDone outs)
+    <+> ", bytes " <+> Hdl.show (List.length got) <+> "/" <+> Hdl.show (List.length want)
+    <+> ", ok " <+> yes (Hdl.natsEq got want)
+    <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist name c))
+
+-- The byte writer, fed one byte every 20 cycles (16 for the transfer, 4 idle).
+def serIn (k : Nat) (dcs datas : List Nat) : HwTy.El Display.WIn.code :=
+  let i := Nat.div k 20;
+  let go := Nat.beq (Nat.mod k 20) 0;
+  Bundle.toEl Display.WIn.bundle
+    (Display.WIn.mk (BitVec.ofNat 1 (match go with | .true => 1 | .false => 0))
+      (BitVec.ofNat 1 (Hdl.nthD 0 dcs i)) (BitVec.ofNat 8 (Hdl.nthD 0 datas i)))
+
+def runSer : String :=
+  let dcs : List Nat := .cons 0 (.cons 1 (.cons 1 .nil));
+  let datas : List Nat := .cons 33 (.cons 128 (.cons 0 .nil));
+  let cycles := 3 * 20 + 4;
+  let c := Display.serC;
+  let ins := Hdl.map (fun (k : Nat) => serIn k dcs datas) (Hdl.upto cycles 0);
+  let outs := Circuit.runLeaves c ins;
+  let got := decoded outs;
+  let want : List Nat := .cons 33 (.cons 384 (.cons 256 .nil));
+  "serC: sim " <+> yes (leavesEq outs (Circuit.simLeaves .true c ins))
+    <+> " netlist " <+> yes (leavesEq outs (Circuit.simFast c ins))
+    <+> ", done " <+> Hdl.show (countDone outs)
+    <+> ", bytes " <+> shows got <+> ", ok " <+> yes (Hdl.natsEq got want)
+    <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "ser" c))
+
+def main : IO Unit := do
+  -- Command encodings, windows and init settings.
+  IO.println ("ssd columns: " <+> shows (Display.Ssd.bytes (Display.Ssd.columns 0 127))
+    <+> "pages 32: " <+> shows (Display.Ssd.bytes (Display.Ssd.pages 0 3))
+    <+> "pages 64: " <+> shows (Display.Ssd.bytes (Display.Ssd.pages 0 7)));
+  IO.println ("ssd window 32: " <+> shows (Display.Ssd.bytesOf (Display.Ssd.window 32))
+    <+> "window 64: " <+> shows (Display.Ssd.bytesOf (Display.Ssd.window 64)));
+  IO.println ("ssd init 32: len " <+> Hdl.show (List.length (Display.Ssd.bytesOf (Display.Ssd.init 32)))
+    <+> ", comPins " <+> shows (Display.Ssd.bytes (Display.Ssd.comPins .false))
+    <+> "pump " <+> shows (Display.Ssd.bytes (Display.Ssd.chargePump .true))
+    <+> "start len " <+> Hdl.show (List.length (Display.Ssd.bytesOf (Display.Ssd.start 32))));
+  IO.println ("s1331 columns: " <+> shows (Display.S1331.bytes (Display.S1331.columns 0 95))
+    <+> "rows: " <+> shows (Display.S1331.bytes (Display.S1331.rows 0 63))
+    <+> "init len " <+> Hdl.show (List.length (Display.S1331.bytesOf Display.S1331.init))
+    <+> ", start len " <+> Hdl.show (List.length (Display.S1331.bytesOf Display.S1331.start)));
+  -- Pixel and colour helpers.
+  IO.println ("rgb565: " <+> Hdl.show (BitVec.toNat (@Display.rgb565 HwTy.El _
+      (BitVec.ofNat 5 31) (BitVec.ofNat 6 63) (BitVec.ofNat 5 31)))
+    <+> " " <+> Hdl.show (BitVec.toNat (@Display.rgb565 HwTy.El _
+      (BitVec.ofNat 5 1) (BitVec.ofNat 6 2) (BitVec.ofNat 5 3)))
+    <+> ", fields "
+    <+> Hdl.show (BitVec.toNat (@Display.S1331.red HwTy.El _ (BitVec.ofNat 16 4660)))
+    <+> " " <+> Hdl.show (BitVec.toNat (@Display.S1331.green HwTy.El _ (BitVec.ofNat 16 4660)))
+    <+> " " <+> Hdl.show (BitVec.toNat (@Display.S1331.blue HwTy.El _ (BitVec.ofNat 16 4660))));
+  IO.println ("ssd pack: " <+> Hdl.show (Display.Ssd.packPage (.cons 1 (.cons 0 (.cons 0
+      (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 .nil)))))))))
+    <+> " " <+> Hdl.show (Display.Ssd.packPage (.cons 0 (.cons 0 (.cons 0 (.cons 0
+      (.cons 0 (.cons 0 (.cons 0 (.cons 1 .nil)))))))))
+    <+> ", unpack 129: " <+> shows (Display.Ssd.unpackPage 129));
+  let blank := Display.Ssd.blank 32;
+  let one := Display.Ssd.setPixel blank 3 10 1;
+  let rect := Display.Ssd.fillRect blank 0 0 2 2 1;
+  IO.println ("ssd pixels: set " <+> Hdl.show (Display.Ssd.pixel one 3 10)
+    <+> " " <+> Hdl.show (Display.Ssd.pixel one 4 10)
+    <+> ", byte " <+> Hdl.show (Hdl.nthD 0 one 131)
+    <+> ", rect " <+> Hdl.show (Display.Ssd.pixel rect 0 0)
+    <+> " " <+> Hdl.show (Display.Ssd.pixel rect 1 0)
+    <+> " " <+> Hdl.show (Display.Ssd.pixel rect 0 1)
+    <+> " " <+> Hdl.show (Display.Ssd.pixel rect 2 0));
+  -- The writers: an SSD1306 start sequence, a window plus two data bytes, and the
+  -- byte writer on its own.
+  let xs32 := Display.Ssd.startStream 32;
+  IO.println (runSeq "seq_ssd32" xs32 (List.length xs32 * 16 + 32));
+  let dataBytes : List Display.Byte :=
+    .cons (Display.Byte.mk .true 170) (.cons (Display.Byte.mk .true 85) .nil);
+  let xs := List.append (Display.Ssd.stream (Display.Ssd.window 32)) dataBytes;
+  IO.println (runSeq "seq_window_data" xs (List.length xs * 16 + 32));
+  IO.println ("dc flags: " <+> showsB (Hdl.map (fun (b : Display.Byte) => b.dc) xs));
+  let s1331 : List Display.Byte := .cons (Display.Byte.mk .false 0) Display.S1331.startStream;
+  IO.println (runSeq "seq_s1331" s1331 (List.length s1331 * 16 + 32));
+  IO.println runSer

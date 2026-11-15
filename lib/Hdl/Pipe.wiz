@@ -1,0 +1,377 @@
+import Hdl.Core
+/-!
+# Hdl.Pipe: pipelines as arrows
+
+An *arrow* language for pipelines over `Circuit` (`import Hdl.Pipe`). A `Pipe i o` is a
+`Circuit i o` with its latency in cycles; the combinators compose circuits and add the
+latencies. It is additive: `Hdl.Core`'s `Circuit`/`Multi` semantics are unchanged, and a
+`Pipe` lowers to a `Circuit` (`Pipe.circuit`), so `Circuit.run`, `Circuit.netlist`,
+`Netlist.simulate`, `Hdl.Sim`'s `simFast`, `Verilog.emit` and all the `Circuit` lemmas
+apply unchanged.
+
+Why an arrow and not a monad? A state monad over `NetM`/`MultiM` is the right shape for
+*building* a netlist (those monads accumulate nodes), but as the user-facing pipeline
+language it hides the state type and forces every sequential composition to agree on an
+existential state, which Wiz's dependent `HwTy` codes make unnecessarily awkward; an
+indexed monad would need a type-level latency *and* a type-level state to recover the
+`Circuit.seq`/`Circuit.par` lemmas that already exist. The arrow keeps the two type
+parameters (`i`, `o`) first-class, so `i` and `o` are ordinary `HwTy` codes, quantities
+(`ω`) stay where Core puts them, and every combinator is a thin wrapper around a `Circuit`
+combinator whose laws are already proved (`Circuit.run_seq`, `Circuit.run_par`,
+`Circuit.run_delay`, `Circuit.run_loop`). Explicit `Circuit.seq`/`par`/`loop` calls are
+the third option: they work, but a pipeline reads as a chain of stages, and the latency
+bookkeeping and the valid/ready discipline have nowhere to live.
+
+## The data path (`Pipe`)
+
+```
+def alu3 : Pipe (HwTy.bits 8) (HwTy.bits 8) :=
+  Pipe.pipe "alu3" (
+    Pipe.stage "add" 0 (fun x => x + 3) |>>
+    Pipe.stage "mul" 0 (fun x => x * 5) |>>
+    Pipe.stage "sub" 0 (fun x => x - 2))
+```
+
+`Pipe.stage name init f` is combinational `f` followed by one register (`latency 1`).
+`|>>` is `Pipe.seq`, `***` is `Pipe.par`, `&>` is `Pipe.fanout` (the arrow's `&&&`; the
+HDL already spells bitwise-and `&&&`, so this module keeps a distinct symbol). `Pipe.loop`
+(or `Pipe.feedback`) closes a feedback path through a register. `Pipe.pipe` names a whole
+chain. The symbols are declared at precedence 20 (`|>>`) and 30 (`***`, `&>`), below
+function application and above the signal operators, and print back as written.
+
+## The handshake path (`Flow`)
+
+A `Flow i o` is an elastic (valid/ready) pipeline stage with a separate *ready* function,
+so sequential composition connects the backward ready wire without a combinational loop:
+
+* input channel: `in_data`, `in_valid`, `out_ready`;
+* output channel: `out_data`, `out_valid`, `in_ready`;
+* `ready st out_ready` is the stage's `in_ready` (it does not depend on `in_data` or
+  `in_valid`, the AXI rule);
+* `step st in_data in_valid out_ready` gives the next state, `out_data` and `out_valid`.
+
+`Flow.seq` computes the downstream stage's ready first and feeds it to the upstream
+stage; `Flow.reg` is the one-register elastic buffer (`in_ready = ¬full ∨ out_ready`),
+and `Flow.stage name init f` is a combinational function followed by that register.
+`Flow.toCircuit` lowers a flow to an ordinary `Circuit` over `FlowIn`/`FlowOut`, so the
+same simulation, netlist, Verilog and temporal-logic tools apply.
+
+Not here yet: multi-clock flows (a `Flow` is one `Circuit`, one clock), memories in a
+flow, true fork/join of independent ready/valid channels (the data-path `Pipe` has
+`fanout`/`join`), and a proved throughput theorem (the latency is tracked; the
+one-item-per-cycle and no-loss properties are tested, and the `TL` protocol lemmas are
+the next step).
+-/
+
+------------------------------------------------------------------------------------
+-- The data-path arrow
+
+/-- A pipeline: a circuit and its latency in cycles. The circuit is the semantics; the
+latency is bookkeeping (it is what `Pipe.seq` adds and `Pipe.par` takes the maximum of). -/
+structure Pipe (i o : HwTy) where
+  circuit : Circuit i o
+  latency : Nat
+
+/-- Combinational identity (no hardware, no latency). -/
+def Comb.id {i : HwTy} : Comb i i := fun x => x
+
+/-- The identity pipeline: the same value, zero latency. -/
+def Pipe.id {ω i : HwTy} : Pipe i i := Pipe.mk (@Circuit.comb i i (Comb.id : Comb i i)) 0
+
+/-- Sequential composition: `a` then `b`; the latencies add. -/
+def Pipe.seq {ω i m o : HwTy} (a : Pipe i m) (b : Pipe m o) : Pipe i o :=
+  Pipe.mk (Circuit.seq a.circuit b.circuit) (a.latency + b.latency)
+
+/-- Parallel composition: `a` on the first half of the input, `b` on the second; the
+latency is the longer one. -/
+def Pipe.par {ω i1 o1 i2 o2 : HwTy} (a : Pipe i1 o1) (b : Pipe i2 o2) :
+    Pipe (HwTy.prod i1 i2) (HwTy.prod o1 o2) :=
+  Pipe.mk (Circuit.par a.circuit b.circuit) (Nat.max a.latency b.latency)
+
+/-- Combinational code before a pipeline. -/
+def Pipe.mapIn {ω i' i o : HwTy} (f : Comb i' i) (p : Pipe i o) : Pipe i' o :=
+  Pipe.mk (Circuit.mapIn f p.circuit) p.latency
+
+/-- Combinational code after a pipeline. -/
+def Pipe.mapOut {ω i o o' : HwTy} (f : Comb o o') (p : Pipe i o) : Pipe i o' :=
+  Pipe.mk (Circuit.mapOut f p.circuit) p.latency
+
+/-- The arrow's fanout (`&&&` in Hughes' arrows): the input goes to both pipelines and
+the outputs are paired. It costs no hardware beyond the shared wire. -/
+def Pipe.fanout {ω i o1 o2 : HwTy} (a : Pipe i o1) (b : Pipe i o2) :
+    Pipe i (HwTy.prod o1 o2) :=
+  Pipe.mapIn (fun x => Hw.pair x x) (Pipe.par a b)
+
+/-- Pair the outputs of two pipelines (`***` without a shared input). -/
+def Pipe.join {ω i1 o1 i2 o2 : HwTy} (a : Pipe i1 o1) (b : Pipe i2 o2) :
+    Pipe (HwTy.prod i1 i2) (HwTy.prod o1 o2) := Pipe.par a b
+
+/-- Merge two pipelines' outputs with a combinational choice `f` (the merge reads one of
+the two results). -/
+def Pipe.mergeWith {ω i1 i2 o : HwTy} (f : Comb (HwTy.prod o o) o)
+    (a : Pipe i1 o) (b : Pipe i2 o) : Pipe (HwTy.prod i1 i2) o :=
+  Pipe.mapOut f (Pipe.par a b)
+
+/-- One register: the output is the input of the previous cycle (`init` first); latency 1. -/
+def Pipe.reg (ω t : HwTy) (init : HwTy.El t) : Pipe t t :=
+  Pipe.mk (Circuit.delay t init) 1
+
+/-- `n` registers in a row; latency `n`. -/
+def Pipe.regN (ω t : HwTy) (n : Nat) (init : HwTy.El t) : Pipe t t :=
+  match n with
+  | .zero => Pipe.id
+  | .succ k => Pipe.seq (Pipe.reg t init) (Pipe.regN t k init)
+
+/-- Stateless combinational code as a pipeline (latency 0). -/
+def Pipe.comb {ω i o : HwTy} (f : Comb i o) : Pipe i o :=
+  Pipe.mk (Circuit.comb f) 0
+
+/-- A name for the state (its registers are `name_…`); it doesn't change the behaviour. -/
+def Pipe.named {ω i o : HwTy} (name : String) (p : Pipe i o) : Pipe i o :=
+  Pipe.mk (Circuit.named name p.circuit) p.latency
+
+/-- A named pipeline stage: combinational `f` then one register initialised to `init`.
+Latency 1; the stage's registers are named `name_…`. -/
+def Pipe.stage {ω i o : HwTy} (name : String) (init : HwTy.El o) (f : Comb i o) : Pipe i o :=
+  Pipe.named name (Pipe.seq (Pipe.comb f) (Pipe.reg o init))
+
+/-- Name a whole pipeline (the chain is one named state in the netlist). -/
+def Pipe.pipe {ω i o : HwTy} (name : String) (p : Pipe i o) : Pipe i o := Pipe.named name p
+
+/-- Feedback: `c`'s second output comes back as its second input through a register
+(`init` first); the forward latency is `c`'s. -/
+def Pipe.loop {ω i o f : HwTy} (c : Pipe (HwTy.prod i f) (HwTy.prod o f))
+    (init : HwTy.El f) : Pipe i o :=
+  Pipe.mk (Circuit.loop c.circuit init) c.latency
+
+/-- `Pipe.loop` under its TLA-ish name. -/
+def Pipe.feedback {ω i o f : HwTy} (c : Pipe (HwTy.prod i f) (HwTy.prod o f))
+    (init : HwTy.El f) : Pipe i o := Pipe.loop c init
+
+/-- `n` copies of a same-typed pipeline (a delay line, a repeated stage). -/
+def Pipe.iterate {ω t : HwTy} (n : Nat) (p : Pipe t t) : Pipe t t :=
+  match n with
+  | .zero => Pipe.id
+  | .succ k => Pipe.seq p (Pipe.iterate k p)
+
+------------------------------------------------------------------------------------
+-- Semantics of a `Pipe`: the circuit's, unchanged
+
+/-- Simulate a pipeline by values (`Circuit.run`). -/
+def Pipe.run {ω i o : HwTy} (p : Pipe i o) (xs : List (HwTy.El i)) : List (HwTy.El o) :=
+  Circuit.run p.circuit xs
+
+/-- Simulate a pipeline on bus encodings (`Circuit.runPacked`). -/
+def Pipe.runPacked {ω i o : HwTy} (p : Pipe i o) (xs : List Nat) : List Nat :=
+  Circuit.runPacked p.circuit xs
+
+/-- Simulate a pipeline's netlist on bus encodings (`Circuit.simNet`). -/
+def Pipe.simNet {ω i o : HwTy} (cse : Bool) (p : Pipe i o) (xs : List Nat) : List Nat :=
+  Circuit.simNet cse p.circuit xs
+
+/-- The pipeline's netlist. -/
+def Pipe.netlist {ω i o : HwTy} (name : String) (p : Pipe i o) : Netlist :=
+  Circuit.netlist name p.circuit
+
+/-- The pipeline's Verilog. -/
+def Pipe.verilog {ω i o : HwTy} (name : String) (p : Pipe i o) : String :=
+  Verilog.emit (Pipe.netlist name p)
+
+------------------------------------------------------------------------------------
+-- Laws: identity, associativity, parallel composition and registers. They are the
+-- corresponding `Circuit.run_*` lemmas through the `Pipe` projection, so they are
+-- definitional in the structure's semantics.
+
+/-- `Hdl.map` with the identity is the identity. -/
+def Hdl.map_id {A : Type} : (xs : List A) → Hdl.map (fun x => x) xs = xs
+  | .nil => rfl
+  | .cons x xs => Eq.congrArg (List.cons x) (Hdl.map_id xs)
+
+/-- A combinational pipeline maps its function over the trace. -/
+def Pipe.run_comb {ω i o : HwTy} (f : Comb i o) (xs : List (HwTy.El i)) :
+    Pipe.run (Pipe.comb f) xs = Hdl.map (Comb.el f) xs :=
+  Eq.trans (Circuit.run_eq (Circuit.comb f) xs)
+    (Circuit.runFrom_comb f (BitVec.ofNat 0 0) xs)
+
+/-- `Pipe.id` is the identity on values. -/
+def Pipe.run_id {ω i : HwTy} (xs : List (HwTy.El i)) : Pipe.run Pipe.id xs = xs :=
+  Eq.trans (@Pipe.run_comb i i (Comb.id : Comb i i) xs) (@Hdl.map_id (HwTy.El i) xs)
+
+/-- `Pipe.seq` runs the first pipeline, then the second on its outputs. -/
+def Pipe.run_seq {ω i m o : HwTy} (a : Pipe i m) (b : Pipe m o) (xs : List (HwTy.El i)) :
+    Pipe.run (Pipe.seq a b) xs = Pipe.run b (Pipe.run a xs) :=
+  Circuit.run_seq a.circuit b.circuit xs
+
+/-- Left identity: `Pipe.id |>> p` has `p`'s outputs. -/
+def Pipe.run_seq_id_left {ω i o : HwTy} (p : Pipe i o) (xs : List (HwTy.El i)) :
+    Pipe.run (Pipe.seq Pipe.id p) xs = Pipe.run p xs :=
+  Eq.trans (Pipe.run_seq Pipe.id p xs)
+    (Eq.congrArg (fun (ys : List (HwTy.El i)) => Pipe.run p ys) (Pipe.run_id xs))
+
+/-- Right identity: `p |>> Pipe.id` has `p`'s outputs. -/
+def Pipe.run_seq_id_right {ω i o : HwTy} (p : Pipe i o) (xs : List (HwTy.El i)) :
+    Pipe.run (Pipe.seq p Pipe.id) xs = Pipe.run p xs :=
+  Eq.trans (Pipe.run_seq p Pipe.id xs) (Pipe.run_id (Pipe.run p xs))
+
+/-- Associativity: `(a |>> b) |>> c` and `a |>> (b |>> c)` have the same outputs (their
+states are nested differently, which `Circuit.run` does not observe). -/
+def Pipe.run_seq_assoc {ω i a b c o : HwTy} (p : Pipe i a) (q : Pipe a b) (r : Pipe b o)
+    (xs : List (HwTy.El i)) :
+    Pipe.run (Pipe.seq (Pipe.seq p q) r) xs = Pipe.run (Pipe.seq p (Pipe.seq q r)) xs :=
+  Eq.trans
+    (Eq.trans (Pipe.run_seq (Pipe.seq p q) r xs)
+      (Eq.congrArg (fun (ys : List (HwTy.El b)) => Pipe.run r ys) (Pipe.run_seq p q xs)))
+    (Eq.symm (Eq.trans (Pipe.run_seq p (Pipe.seq q r) xs)
+      (Pipe.run_seq q r (Pipe.run p xs))))
+
+/-- Parallel composition: each pipeline runs on its half of the inputs, the outputs zip. -/
+def Pipe.run_par {ω i1 o1 i2 o2 : HwTy} (a : Pipe i1 o1) (b : Pipe i2 o2)
+    (xs : List (HwTy.El i1 × HwTy.El i2)) :
+    Pipe.run (Pipe.par a b) xs = Hdl.zip (Pipe.run a (Hdl.fsts xs)) (Pipe.run b (Hdl.snds xs)) :=
+  Circuit.run_par a.circuit b.circuit xs
+
+/-- A register shifts the trace by one, `init` first. -/
+def Pipe.run_reg {ω t : HwTy} (init : HwTy.El t) (xs : List (HwTy.El t)) :
+    Pipe.run (Pipe.reg t init) xs = Hdl.shift init xs :=
+  Circuit.run_delay init xs
+
+/-- The latency of a stage is one cycle. -/
+def Pipe.stage_latency {ω i o : HwTy} (name : String) (init : HwTy.El o) (f : Comb i o) :
+    (Pipe.stage name init f).latency = 1 := rfl
+
+/-- Latencies add in sequence. -/
+def Pipe.seq_latency {ω i m o : HwTy} (a : Pipe i m) (b : Pipe m o) :
+    (Pipe.seq a b).latency = a.latency + b.latency := rfl
+
+/-- The parallel latency is the longer one. -/
+def Pipe.par_latency {ω i1 o1 i2 o2 : HwTy} (a : Pipe i1 o1) (b : Pipe i2 o2) :
+    (Pipe.par a b).latency = Nat.max a.latency b.latency := rfl
+
+------------------------------------------------------------------------------------
+-- The handshake (valid/ready) path
+
+/-- A flow's input: `in_data`, `in_valid` (forward) and `out_ready` (backward from the
+consumer). -/
+structure FlowIn (i : HwTy) (r : HwTy → Type) where
+  in_data : r i
+  in_valid : r HwTy.bit
+  out_ready : r HwTy.bit
+  deriving Bundle
+
+/-- A flow's output: `out_data`, `out_valid` (forward) and `in_ready` (backward to the
+producer). -/
+structure FlowOut (o : HwTy) (r : HwTy → Type) where
+  out_data : r o
+  out_valid : r HwTy.bit
+  in_ready : r HwTy.bit
+  deriving Bundle
+
+/-- An elastic pipeline stage: state, a *ready* function (which does not depend on the
+input data or valid, the AXI rule) and a step function. The step sees the downstream
+`ready` and returns the upstream `valid`; `Flow.seq` connects the two without a
+combinational loop. -/
+structure Flow (i o : HwTy) where
+  st : HwTy
+  init : HwTy.El st
+  /-- The stage's `in_ready`, from the state and the downstream's `ready`. -/
+  ready : {r : HwTy → Type} → [Hw r] → r st → r HwTy.bit → r HwTy.bit
+  /-- One cycle: state, input data, input valid, downstream ready → next state, output
+  data, output valid. -/
+  step : {r : HwTy → Type} → [Hw r] → r st → r i → r HwTy.bit → r HwTy.bit →
+    r (HwTy.prod st (HwTy.prod o HwTy.bit))
+
+/-- The identity flow: passes data and valid straight through, ready straight back. -/
+def Flow.id {ω t : HwTy} : Flow t t :=
+  Flow.mk (HwTy.bits 0) (BitVec.ofNat 0 0)
+    (fun s rdown => rdown)
+    (fun s d vin rdown => Hw.pair s (Hw.pair d vin))
+
+/-- Combinational code in a flow: same handshake, `f` on the data. -/
+def Flow.comb {ω i o : HwTy} (f : Comb i o) : Flow i o :=
+  Flow.mk (HwTy.bits 0) (BitVec.ofNat 0 0)
+    (fun s rdown => rdown)
+    (fun s d vin rdown => Hw.pair s (Hw.pair (f d) vin))
+
+/-- One elastic register stage (`in_ready = ¬full ∨ out_ready`). It can take an item in
+the cycle it hands one on, and holds its data while the consumer is not ready. -/
+def Flow.reg (ω t : HwTy) (init : HwTy.El t) : Flow t t :=
+  Flow.mk (HwTy.prod t HwTy.bit) (init, BitVec.ofNat 1 0)
+    (fun s rdown => Hw.or (Hw.not (Hw.snd s)) rdown)
+    (fun s d vin rdown =>
+      let accept := Hw.or (Hw.not (Hw.snd s)) rdown;
+      Hw.pair (Hw.pair (Hw.mux accept d (Hw.fst s)) (Hw.mux accept vin (Hw.snd s)))
+        (Hw.pair (Hw.fst s) (Hw.snd s)))
+
+/-- A free-running source: it offers `s` with `valid` high for ever and advances to
+`next s` when the consumer takes it (`out_ready` high). Its input is the empty type
+`bits 0`; the state is the value offered. -/
+def Flow.source {ω t : HwTy} (init : HwTy.El t) (next : Comb t t) : Flow (HwTy.bits 0) t :=
+  Flow.mk t init
+    (fun s rdown => Hw.lit 1 1)
+    (fun s d vin rdown =>
+      Hw.pair (Hw.mux rdown (next s) s) (Hw.pair s (Hw.lit 1 1)))
+
+/-- Name a flow's state (`Flow.named`; no behavioural change). -/
+def Flow.named {ω i o : HwTy} (name : String) (p : Flow i o) : Flow i o :=
+  Flow.mk (HwTy.named name p.st) p.init
+    (fun s rdown => p.ready (Hw.untag s) rdown)
+    (fun s d vin rdown =>
+      let r := p.step (Hw.untag s) d vin rdown;
+      Hw.pair (Hw.tag name (Hw.fst r)) (Hw.snd r))
+
+/-- Sequential composition of flows. The downstream ready is computed first (it is a
+function of the downstream state and the outer ready only), so the upstream stage sees
+the correct backpressure in the same cycle. -/
+def Flow.seq {ω i m o : HwTy} (a : Flow i m) (b : Flow m o) : Flow i o :=
+  Flow.mk (HwTy.prod a.st b.st) (a.init, b.init)
+    (fun s rdown =>
+      let rb := b.ready (Hw.snd s) rdown;
+      a.ready (Hw.fst s) rb)
+    (fun s d vin rdown =>
+      let rb := b.ready (Hw.snd s) rdown;
+      let sa := a.step (Hw.fst s) d vin rb;
+      let sb := b.step (Hw.snd s) (Hw.fst (Hw.snd sa)) (Hw.snd (Hw.snd sa)) rdown;
+      Hw.pair (Hw.pair (Hw.fst sa) (Hw.fst sb))
+        (Hw.pair (Hw.fst (Hw.snd sb)) (Hw.snd (Hw.snd sb))))
+
+/-- A named flow stage: combinational `f` then an elastic register. -/
+def Flow.stage {ω i o : HwTy} (name : String) (init : HwTy.El o) (f : Comb i o) : Flow i o :=
+  Flow.named name (Flow.seq (Flow.comb f) (Flow.reg o init))
+
+/-- A flow's input value: data, valid, downstream ready. -/
+def Flow.inn {ω i : HwTy} (d : HwTy.El i) (v r : HwTy.El HwTy.bit) : HwTy.El (FlowIn.code i) :=
+  FlowIn.pack i (FlowIn.mk d v r)
+
+/-- A flow's output value: data, valid, upstream ready. -/
+def Flow.outt {ω o : HwTy} (d : HwTy.El o) (v r : HwTy.El HwTy.bit) : HwTy.El (FlowOut.code o) :=
+  FlowOut.pack o (FlowOut.mk d v r)
+
+/-- Lower a flow to an ordinary circuit over `FlowIn`/`FlowOut`. -/
+def Flow.toCircuit {ω i o : HwTy} (p : Flow i o) : Circuit (FlowIn.code i) (FlowOut.code o) :=
+  Circuit.mk p.st p.init (fun s x =>
+    let xi := FlowIn.unpack i x;
+    let rup := p.ready s xi.out_ready;
+    let r := p.step s xi.in_data xi.in_valid xi.out_ready;
+    Hw.pair (Hw.fst r)
+      (FlowOut.pack o (FlowOut.mk (Hw.fst (Hw.snd r)) (Hw.snd (Hw.snd r)) rup)))
+
+/-- Simulate a flow (`Circuit.run` on its lowering). -/
+def Flow.run {ω i o : HwTy} (p : Flow i o)
+    (xs : List (HwTy.El (FlowIn.code i))) : List (HwTy.El (FlowOut.code o)) :=
+  Circuit.run (Flow.toCircuit p) xs
+
+/-- A flow's netlist. -/
+def Flow.netlist {ω i o : HwTy} (name : String) (p : Flow i o) : Netlist :=
+  Circuit.netlist name (Flow.toCircuit p)
+
+/-- A flow's Verilog. -/
+def Flow.verilog {ω i o : HwTy} (name : String) (p : Flow i o) : String :=
+  Verilog.emit (Flow.netlist name p)
+
+------------------------------------------------------------------------------------
+-- Notation. `>>>` is the HDL's logical shift and `&&&` its bitwise and (H14 S2), so the
+-- pipeline arrow uses `|>>` and `&>`; `***` was free. They print back as written.
+
+infixr:20 " |>> " => Pipe.seq
+infixr:30 " *** " => Pipe.par
+infixr:30 " &> " => Pipe.fanout
