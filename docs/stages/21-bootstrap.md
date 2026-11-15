@@ -986,9 +986,8 @@ agree, including the compiled program's five output lines (`25 2 1 9 71`) from b
 toolchains. A full `=selfhost` run before the test-fixture change (the `selfhost/*.wiz`
 sources are the same) gave 143 passed, 0 failed; the one case this branch changed
 (`#67`, the unknown-command pin) was re-checked against its new expected output. The
-group runs and
-`scripts/fixpoint.sh --keep .lake/fixpoint-a12` are queued but had not started when
-this was written: for the whole session the heavy scheduler's 10 GiB reservation was
+group runs and `scripts/fixpoint.sh --keep .lake/fixpoint-a12` could not be started
+here: for the whole session the heavy scheduler's 10 GiB reservation was
 held by other agents' jobs (two long `wiz build scry/App.wiz` jobs and `=selfhost`
 runs), so no local group or fixpoint run could be admitted. They remain to be run (CI
 runs `=selfhost` and `=selfhost-macro` on the `selfhost` shard; the fixpoint is the
