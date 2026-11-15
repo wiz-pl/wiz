@@ -231,7 +231,8 @@ def Scry.dynStatusText (s : ExitStatus) : String := ExitStatus.toString s
 -- ## Source locations in sanitizer text
 
 /-- Parse `file:line:col` (the last two `:`-separated fields), if the line number is a
-number. -/
+number. A sanitizer may print only `file:line` (gcc's AddressSanitizer does); that is
+accepted with column 1, so a frame still resolves to the analysed file. -/
 def Scry.dynParseLoc (tok : String) : Option Scry.Origin :=
   let parts := List.reverse (String.splitOn (String.trim tok) ":");
   match parts with
@@ -242,6 +243,12 @@ def Scry.dynParseLoc (tok : String) : Option Scry.Origin :=
       | .false =>
         let file := String.intercalate ":" (List.reverse rest);
         .some (Scry.Origin.mk file line col line (Nat.add col 1))
+    | .some line, .none =>
+      match Nat.beq line 0 with
+      | .true => .none
+      | .false =>
+        let file := String.intercalate ":" (List.reverse (List.cons lineS rest));
+        .some (Scry.Origin.mk file line 1 line 2)
     | _, _ => .none
   | _ => .none
 

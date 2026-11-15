@@ -37,11 +37,18 @@ def firstFinding (rep : Scry.TaintReport) : Option Scry.RuleFinding :=
   | .cons f _ => .some f
   | .nil => .none
 
+/-- The memory diagnostics the lifetime rule itself leaves: every `scry/memory/*` rule
+except the explicit unmodelled-external report (a call the model table does not know,
+such as the `strdup` in the strdup fixture, is *supposed* to warn). -/
+def ruleWarnings (rep : Scry.TaintReport) : List Scry.BoundaryFinding :=
+  List.filter (fun b => Bool.not (String.eq b.rule "scry/memory/unmodelled-external"))
+    rep.memory
+
 def checkRule (label : String) (rep : Scry.TaintReport) : EIO Unit := do
   check (label ++ ": one memory rule in the pack")
     (Nat.beq (List.length (Scry.RulePack.memoryRules rep.pack)) 1);
   check (label ++ ": no leftover memory warning")
-    (Nat.beq (List.length rep.memory) 0)
+    (Nat.beq (List.length (ruleWarnings rep)) 0)
 
 /-- A vulnerable fixture: one finding, `memory` kind, an alloc -> free -> sink path, and
 the free is in `freeFunc` (the callee for an interprocedural/callback free). -/
