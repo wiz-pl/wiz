@@ -32,6 +32,7 @@ table lists exactly those. Messages not listed here have no code yet.
 | `binder-mismatch` | a `fun` binder whose quantity or implicitness differs from the expected type's | | |
 | `private` | a private name of another module, or a type whose constructors are private to it taken apart | | |
 | `duplicate-declaration` | a name declared twice (an import that would redeclare one is not brought in) | | |
+| `duplicate-hypothesis` | a `match` names its equation hypothesis twice | `match h : e, h : f with` | |
 | `duplicate-constructor` | a constructor declared twice in one `inductive` | | |
 | `shadowed-recursive` | a local variable shadows the recursive definition it is in | | |
 | `not-structural` | a recursive call that is not structural | `def f : Nat → Nat \| n => f n` | |

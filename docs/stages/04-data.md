@@ -297,6 +297,33 @@ def head {A : Type} {n : Nat} : Vec A (.succ n) → A
   | .cons x _ => x                      -- the `nil` case is impossible, so it's omitted
 ```
 
+`match h : e with | p => …` names the branch's equation: in the branch for `p`, the
+hypothesis `h : e = p` is in scope. This is what lets a split on a computed value
+(`match h : p n with`) be related back to `e`; a plain `match e with` still generalises
+`e` in the goal but gives the arm no equation. Each scrutinee may be named
+(`match h : e, k : f with`); the equation's name goes before its scrutinee, not in a
+pattern (`| h : .true => …` is an error).
+
+The elaborator binds each scrutinee to a variable `x` and gives the motive an extra
+argument `(h : e = x) → …`, then applies the whole match to `e` and to
+`rfl : e = e`. Branch `p` therefore sees `h : e = p`, with no index unification needed:
+the equation is a *reverted variable*, in the context before the motive is fixed. It
+works for a non-dependent match too (the goal need not mention `e`), since `h` is
+part of the motive's telescope. The equation is the language's observational equality,
+so it computes as usual (at a proposition it is `True`). A named match on an *indexed*
+value is rejected: the constructor split refines the index in the goal, but the
+scrutinee term keeps its outer index, so `e = p` would not be well typed (the plain
+`match e with` and a helper that takes the value and its equation still work). The same
+applies to a named scrutinee whose type mentions an earlier scrutinee that this match
+splits.
+
+```
+def keep (p : Nat → Bool) (n : Nat) : Nat :=
+  match h : p n with
+  | .true => n
+  | .false => 0
+```
+
 `match` and equation-style definitions compile to case trees over `T.casesOn`
 (`compileMatch` in `Elab/Term.lean`). Later match variables are reverted into the
 motive. Index *variables* are generalised by the motive, which is Cockx's solution

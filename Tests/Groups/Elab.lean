@@ -72,7 +72,36 @@ def group : Group where
     { name := "user syntax without an elaborator is reported", run := fun _ =>
         fails "syntax \"magic\" : term\ndef x : Type := magic" "the syntax term.magic has no meaning" },
     { name := "duplicate definition", run := fun _ =>
-        fails "def a : Type 1 := Type\ndef a : Type 1 := Type" "already been declared" }
+        fails "def a : Type 1 := Type\ndef a : Type 1 := Type" "already been declared" },
+    -- `match h : e with`: the equation in an inferred match, and in a tactic's goal
+    { name := "the equation of a match is a tactic hypothesis", run := fun _ =>
+        okLib "import Prelude
+def isZero (n : Nat) : Bool := match n with
+  | 0 => .true
+  | _ => .false
+def f (b : Bool) : Bool := match b with
+  | .true => .true
+  | .false => .false
+def g (n : Nat) : Bool := f (isZero n)
+def gEq (n : Nat) : g n = isZero n :=
+  match h : isZero n with
+  | .true => by unfold g; rw h; rfl
+  | .false => by unfold g; rw h; rfl
+" },
+    { name := "a named match can be inferred", run := fun _ =>
+        okLib "import Prelude
+def inferred (n : Nat) :=
+  match h : n with
+  | 0 => Nat.zero
+  | _ => Nat.succ Nat.zero
+def usesInferred (n : Nat) : Nat := inferred n
+" },
+    { name := "a match cannot name its equation twice (the second name is reported)", run := fun _ =>
+        fails "inductive Nat where\n  | zero\n  | succ (n : Nat)\n\ndef d (n m : Nat) : Nat :=\n  match h : n, h : m with\n  | _, _ => .zero\n"
+          "6:16: the equation hypothesis 'h' is named twice" },
+    { name := "the equation's name belongs before the scrutinee, not in a pattern", run := fun _ =>
+        fails "inductive Nat where\n  | zero\n  | succ (n : Nat)\n\ndef d (n : Nat) : Nat :=\n  match h : n with\n  | h : .zero => .zero\n  | _ => .zero\n"
+          "7:5: a pattern is expected here" }
   ]
 
 builtin_initialize registerGroup group

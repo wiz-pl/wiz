@@ -58,6 +58,8 @@ apart -/
 def private_ := "private"
 /-- a name declared twice -/
 def duplicateDeclaration := "duplicate-declaration"
+/-- a `match` that names its equation hypothesis twice (`match h : e, h : f with`) -/
+def duplicateHypothesis := "duplicate-hypothesis"
 /-- a constructor declared twice in one `inductive` -/
 def duplicateConstructor := "duplicate-constructor"
 /-- a local variable that shadows the recursive definition it is in -/
@@ -86,7 +88,7 @@ def all : List String :=
    missingCase, missingCopattern, missingField, typeMismatch, notDefeq, wrongArgumentCount,
    unknownParameter, namedArgument, unsolvedHole, unsolvedLevel, cannotInfer, unsolvedGoals,
    tacticFailed, typeExpected, binderMismatch, private_, duplicateDeclaration,
-   duplicateConstructor, shadowedRecursive, notStructural, unknownSyntax, unknownClass,
+   duplicateHypothesis, duplicateConstructor, shadowedRecursive, notStructural, unknownSyntax, unknownClass,
    unknownDeclaration, quantity, kernelRejected, parseError]
 
 /-- The code a message is reported with: internal codes become the public ones. -/
