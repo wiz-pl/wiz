@@ -89,13 +89,13 @@ partial def Scry.ProjectIO.firstExisting (dirs : List String) (path : String) :
     EIO (Option String) :=
   match String.startsWith path "/" with
   | .true => do
-    there ← EIO.lift (FS.exists path);
+    there ← EIO.lift (FS.isFile path);
     EIO.pure (match there with | .true => .some path | .false => .none)
   | .false => match dirs with
     | .nil => EIO.pure .none
     | .cons d rest => do
       let candidate := Scry.ProjectIO.resolvePath d path;
-      there ← EIO.lift (FS.exists candidate);
+      there ← EIO.lift (FS.isFile candidate);
       match there with
       | .true => EIO.pure (.some candidate)
       | .false => Scry.ProjectIO.firstExisting rest path
