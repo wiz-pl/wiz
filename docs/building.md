@@ -38,8 +38,11 @@ plain `lake build` does not, and a stale driver runs whichever case had that ind
 compares the trusted base it finds with the checked-in `.github/trust-baseline.tsv`: a
 new `axiom`, `sorry`, `native_refl` or SMT axiom, `implemented_by`/`repr:`
 implementation, `builtin` registration or `partial` definition fails until the baseline
-is updated after review. The `native` group runs the `lib/` part in CI, the
-`hdl-verified` group the example's; `scripts/trust-ledger.sh --update` regenerates the
+is updated after review. The `build` job runs the whole check right after the Nix
+build and before any shard starts (with `Tests/trust-ledger/run.sh`), so a ledger
+regression fails the run early; the `native` group also covers the `lib/` part and
+`hdl-verified` the example's inside the shards;
+`scripts/trust-ledger.sh --update` regenerates the
 baseline (build the driver first). `--print` shows the recorded sources; the baseline's
 header explains the format. Two branches that review different ledger rows need no
 hand merge: install the local git driver once per checkout with
@@ -470,26 +473,35 @@ the elan toolchain, so the setup action keeps the elan cache for those
 ### Documentation site
 
 A push to `master` publishes the site from the `docs` job to GitHub Pages, at
-<https://wiz-pl.github.io/wiz/>. The tree has three parts, and every link in it is
+<https://wiz-pl.github.io/wiz/>. The tree has four parts, and every link in it is
 relative, so the project-site prefix (or a custom domain root) works either way:
 
 | URL | what it is | built from |
 |---|---|---|
 | `/` | the landing page: introduction, features, quickstart | `web/landing/index.html`, `web/landing/landing.css` |
 | `/docs/` | the standard library's API documentation | `wiz doc --lib` |
+| `/bench/` | standard-library timings and the Scry taint corpus | `bench/*.json`, `scry/bench/baseline.json`, `web/build-bench.py` |
 | `/playground/` | the static playground (stage 11ab) | `web/playground.*`, `web/build-playground.sh` |
 
 The `docs` job builds the two Wasm modules (`web/build.sh` for the documentation's
 interactive signatures, `web/build-playground.sh` for the playground), runs `wiz doc
 --lib -o doc-site/docs --web web/out` (source links to the commit), assembles the
-landing page and the playground with `web/build-site.sh doc-site web/out`, checks the
-result with `web/check-site.sh doc-site` (the three entry points exist and the landing
-page's local links resolve; no server), and uploads `doc-site` as the artifact
-`wiz-docs` (3 days, for debugging). `deploy-docs` then publishes that artifact.
+landing page, the benchmark page and the playground with `web/build-site.sh doc-site
+web/out`, checks the result with `web/check-site.sh doc-site` (the four entry points
+exist and the landing page's and benchmark page's local links resolve; no server), and
+uploads `doc-site` as the artifact `wiz-docs` (3 days, for debugging). `deploy-docs`
+then publishes that artifact.
+
+The benchmark page is **generated, not written**: `web/build-bench.py` renders
+`web/bench/index.html` from the JSON, and `web/build-site.sh` runs its `--check` mode
+first, so a JSON change that was not regenerated fails the job (and is visible as a diff
+in the checked-in page). Regenerate it with `python3 web/build-bench.py`; the fixture
+tests and the site-check rules for it are in `web/test-bench.sh`.
 
 | path | what it is |
 |---|---|
 | `index.html`, `landing.css` | the landing page |
+| `bench/index.html` | the benchmark page (generated from the JSON in `bench/` and `scry/bench/`) |
 | `docs/index.html` | the documentation index: the documented modules and their summaries |
 | `docs/api.html` | the API index: every module and declaration, with signatures and doc summaries |
 | `docs/api.json` | the same index as data, for tools |
@@ -507,8 +519,9 @@ To build the site locally from a checkout (after `nix develop` and `lake build w
 sh web/build.sh web/out                         # the infoview module, scroll assets
 sh web/build-playground.sh web/out              # the playground module
 .lake/build/bin/wiz doc --lib -o doc-site/docs --web web/out
-sh web/build-site.sh doc-site web/out           # landing page and /playground/
+sh web/build-site.sh doc-site web/out           # landing page, /bench/ and /playground/
 sh web/check-site.sh doc-site                   # the entry points and the links
+sh web/test-bench.sh                            # the generator's fixtures and /bench/
 python3 -m http.server -d doc-site 8000         # then http://127.0.0.1:8000/
 ```
 

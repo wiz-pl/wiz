@@ -39,6 +39,11 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   written (`Wiz/Compiler/WasmValidate.lean`); golden tests compare the module's result
   with the interpreter's. Limits and the 29-case `wasm` test group are in
   `docs/stages/08-backend/wasm.md`.
+* The published site has a `/bench/` page: standard-library timings (with the
+  interleaved A/B ratios and the spread of each run) and the Scry taint metrics,
+  rendered from the checked-in JSON by `web/build-bench.py`. The page is committed, so a
+  JSON change that was not regenerated is a diff, and the docs job refuses it
+  (`web/build-site.sh` runs the generator's `--check`).
 * The WebAssembly target reclaims memory (8f): `dup`/`drop` maintain the object header's
   reference count, the last drop releases the fields and returns the block to a segregated
   free list, and `reset`/`reuse` refill a unique cell. A long-running program's peak is its
