@@ -4264,7 +4264,9 @@ end
 mutual
 def inlineTm (gs : Globals) : Tm → Tm
   | .const n ps ls _ _ => match Scope.find (Globals.scope gs) n with
-    | .some i => tmSubst ps ls (globalTm .true gs i)
+    -- (`substIfAny`: a monomorphic global's inlined value is shared, not copied at every
+    -- use; `tmSubst` rebuilt it, so a large definition's inlined form grew exponentially)
+    | .some i => substIfAny ps ls (globalTm .true gs i)
     | .none => .var 0
   | .pi q i j a b => .pi q i j (inlineTm gs a) (inlineTm gs b)
   | .lam b => .lam (inlineTm gs b)
