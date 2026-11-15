@@ -29,6 +29,10 @@ is a guess: the **first-order approximation** `?m a₁ … aₖ =?= f b₁ … b
 `?e =?= e`. A guess is right when nothing else will determine the hole, and wrong when
 something still to be elaborated would: the rule is to guess only when no more
 information is coming. `ElabState.approx` (`Approx`) says which guesses are allowed.
+A guess is only as good as the shapes it compares: it is not a typing. `Unify` records
+that one was used (`ElabState.unifyGuessed`), and the declaration is then checked where
+opaque types have no definition (`checkGuessedDecl`), so a guess cannot take a look-alike
+for a private type.
 
 | problem | example | Wiz | Lean 4 |
 |---|---|---|---|
@@ -669,6 +673,8 @@ partial def unify (l : Lvl) (t u : Val R) : ElabM R Unit := do
         try
           unifySpine l rest rest'
           unify l (.neutral (.mvar m) (sp.extract 0 k)) (.neutral (.mvar m') (sp'.extract 0 k'))
+          -- (the holes were made equal by shape, not by a type: see `unifyGuessed`)
+          modify fun st => { st with unifyGuessed := true }
         catch _ => set s; throw e'
   | .neutral (.mvar m) sp, t' =>
     if ← etaProjected m sp then unify l t u else solve l m sp t'
@@ -844,6 +850,9 @@ partial def unifyFirstOrder (l : Lvl) (m : Nat) (sp : Array (Elim R)) (v : Val R
       unify l a b
     let head ← rebuild (sp'.extract 0 (sp'.size - j))
     solve l m (sp.extract 0 k) head
+    -- (the solution was read off the shape of `v`, not checked against a type; a
+    -- declaration that used one is checked where opaque types have no definition)
+    modify fun st => { st with unifyGuessed := true }
     pure true
   catch e =>
     set s; keepLearnt e

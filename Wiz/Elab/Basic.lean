@@ -279,6 +279,11 @@ structure ElabState (R : Type) where
   never met one is final: no other order of unfolding can succeed (see `unifyGlued`).
   Unification's own backtracking keeps it (`keepLearnt`). -/
   unifySawMeta : Bool := false
+  /-- set when unification solved a hole by the first-order approximation (or the
+  flex-flex last resort): the solution was picked by shape, so it has not been typed by
+  the elaborator. The declaration is checked again where opaque types have no definition
+  (`privacyCheck`), which is what closes a shape-based forgery (`Unify.lean`). -/
+  unifyGuessed : Bool := false
   /-- comparisons of two glued values without metavariables that failed, with the failure's
   message: the two sides quoted (with levels for free variables), bucketed by their head. Valid
   while the globals stay as they are (the elaborator clears it when it changes them). -/

@@ -110,10 +110,10 @@ def group : Group where
       (prelude ++ "class C (A : Type) where\n  x : A\n" ++
        "instance : C Nat where\n  x := Bool.true\n")
       (some "type-mismatch") "Bool.true" "type mismatch",
-    xfail "instance: a field given twice is accepted"
+    rejected "instance: a field given twice"
       (prelude ++ "class C (A : Type) where\n  x : A\n" ++
        "instance : C Nat where\n  x := 1\n  x := 2\n")
-      "the second field silently wins; a field updated twice is `named-argument` (docs/error-codes.md)",
+      (some "named-argument") "x := 2" "already given",
     accepted "accept: a later instance wins"
       (prelude ++ "class Inhabited (A : Type) where\n  default : A\n" ++
        "instance : Inhabited Nat := Inhabited.mk 1\ninstance : Inhabited Nat := Inhabited.mk 2\n" ++
@@ -197,6 +197,11 @@ def group : Group where
     xfail "quantity: a linear value captured by an unrestricted closure"
       "import Prelude\ndef bad {A : Type} (1 x : A) : Unit → A := fun _ => x\n"
       "the closure's type is unrestricted, so it may be duplicated while the captured variable is linear; dropping it (`fun _ => ()`) is rejected, and `two (bad x)` is caught, but the definition is accepted",
+    rejected "quantity: duplicating a closure that captured a linear value"
+      ("import Prelude\ndef bad {A : Type} (1 x : A) : Unit → A := fun _ => x\n" ++
+       "def app2 {A : Type} (f : Unit → A) : A × A := (f (), f ())\n" ++
+       "def exploit {A : Type} (1 x : A) : A × A := app2 (bad x)\n")
+      (some "quantity") "def exploit" "used ω",
     rejected "quantity: an erased value is used at run time"
       "import Prelude\ndef leak {A : Type} (0 x : A) : A := x\n"
       (some "quantity") "def leak" "used 1",
@@ -315,16 +320,29 @@ def group : Group where
       ("import Priv\ninductive Fake where\n  | num (n : Nat)\n  | secret (n : Nat)\n" ++
        "def x : Tok := Fake.secret 1\n")
       (some "type-mismatch") "Fake.secret 1" "type mismatch" [("Priv", privMod)],
-    xfail "opaque: a first-order solution forges a private value"
+    rejected "opaque: a first-order solution cannot forge a private value"
       ("import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
        "inductive G : Look Nat → Type where\n  | mk (l : Look Nat) : G l\n" ++
        "def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p\n" ++
        "def forge (x : Look Nat) : Pos Nat := sel _ (G.mk x)\n" ++
        "#eval (forge (Look.mk 11)).val\n")
-      "a first-order solution (?F := G, ?p := x) is not type-checked; the kernel takes Look Nat for Pos Nat by shape (ElabFix's OPEN case)"
+      (some "private") "def forge" "hidden outside its module"
       [("Priv", privMod)],
     accepted "accept: a module's own private names, through its public API"
       ("import Priv\ndef x : Nat := Tok.value (Tok.hide 1)\n#eval x\n") [("Priv", privMod)] (cli := true),
+    rejected "opaque: a first-order solution in equations cannot forge either"
+      ("import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
+       "inductive G : Look Nat → Type where\n  | mk (l : Look Nat) : G l\n" ++
+       "def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p\n" ++
+       "def forge : Look Nat → Pos Nat\n  | x => sel _ (G.mk x)\n")
+      (some "private") "def forge" "hidden outside its module"
+      [("Priv", privMod)],
+    accepted "accept: a first-order solution that uses no opaque shape"
+      ("import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
+       "inductive G : Look Nat → Type where\n  | mk (l : Look Nat) : G l\n" ++
+       "def sel {F : Look Nat → Type} (p : Look Nat) (w : F p) : Look Nat := p\n" ++
+       "def forge (x : Look Nat) : Look Nat := sel _ (G.mk x)\n" ++
+       "#eval (forge (Look.mk 11)).val\n") [("Priv", privMod)] (cli := true),
     { name := "modules: two modules declaring one name"
       run := fun _ => do
         let dir ← IO.FS.createTempDir

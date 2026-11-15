@@ -22,7 +22,7 @@ table lists exactly those. Messages not listed here have no code yet.
 | `not-defeq` | `rfl` where the two sides are not definitionally equal | | |
 | `wrong-argument-count` | too many arguments (`function expected`), or a pattern or constructor with the wrong number of fields | `Nat.succ 1 2`, `myId Nat 1` | when the count is off by the implicit parameters: give them explicitly (`@myId Nat 1`) |
 | `unknown-parameter` | a named argument `(x := e)` for a parameter the function doesn't have | | |
-| `named-argument` | a named argument given twice, or after the explicit parameter it would follow; a field updated twice | | |
+| `named-argument` | a named argument given twice, or after the explicit parameter it would follow; a structure field updated twice, or an instance field given twice | | |
 | `unsolved-hole` | a hole nothing determines (`_`, an implicit argument, a binder's type) | `(fun (A : Type) => 0) _` | |
 | `unsolved-level` | a universe level nothing determines | | |
 | `cannot-infer` | an expression whose type can't be inferred without an ascription | | |

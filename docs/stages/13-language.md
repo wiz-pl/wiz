@@ -98,7 +98,7 @@ would still be accepted:
 | `refl X`, `cast e x`, `transp`, a tuple or look-alike against the type, `p.1` | closed (their types are unified in the elaborator's view) |
 | `exact`, `rfl` and other tactics that elaborate syntax; macros (they produce syntax) | closed (they go through the same rules) |
 | the tactic request `assign` with a term that still has holes | closed: such a term is kept in the tactic state and its type is inferred and compared with its goal at the end of the `by` block (it was a real bypass: `K x ?n : Look Nat` for a goal `Pos Nat`) |
-| a hole solved by unification: the solution is never type-checked by the elaborator | **OPEN, with a forgery**: `def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p` and `sel _ (G.mk x)` for `G : Look Nat → Type` solve `?F := G`, `?p := x`, and the kernel accepts `x : Look Nat` as a `Pos Nat` (test `elabfix`, "OPEN"; `wiz-notes/structural-probes/priv/forge-unify-first-order.wiz`) |
+| a hole solved by unification (the first-order approximation, or the flex-flex last resort) | closed: such a solution is picked by shape, not typed. `ElabState.unifyGuessed` records it, and a declaration whose elaboration used one is checked a second time against `Globals.elabView` (`checkGuessedDecl`, called by `elabDeclTerms`, `elabDefEqns` and `elabCopatterns`), so `def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p` and `sel _ (G.mk x)` for `G : Look Nat → Type` are rejected (the solution `?F := G` is `Look Nat → Type`, and `Pos` has no definition there), with `:=` or equations; tests `elabfix`, `reject` ("a first-order solution cannot forge a private value", "… in equations"). No other declaration pays for the check |
 | the self-hosted frontend (`selfhost/Frontend.wiz`) | open, tracked as a parity item: it parses `private` and ignores it |
 | `T.desc` of an inductive or coinductive type with private parts: `μ T.desc i` written out is the type with nothing hidden, and a raw `con` builds a value of it | closed: `T.desc` is private with the constructors and recursors (a structure has no description). Generic code over `Desc` in another module can't be pointed at such a type; it could not be applied to its values before either, since the type is opaque there. `deriving` reads the kernel's declarations, not the name, and is unaffected (a derived instance that matches on the type is refused as before) |
 | inside the declaring module | by design: there the look-alike is the same type |
@@ -110,8 +110,8 @@ type from its look-alike (`wiz-notes/structural-vs-nominal.md`, §6a).
 **`wiz --strict-privacy`** (off by default; an experiment to measure). Every declaration
 of a module that sees a type opaque to it is checked a second time, by the kernel's
 checker, against the elaborator's view (`privacyCheck`, `Elab/Command.lean`). A
-declaration that passes used no hidden shape, so this closes the open path too: the
-forgery above is rejected with "forge depends on the definition of Pos (module Priv),
+declaration that passes used no hidden shape, so this also rejects a forgery that some
+other rule left to the kernel: "forge depends on the definition of Pos (module Priv),
 which is hidden outside its module". It is not the default because it also rejects
 legitimate proofs that compute through a library operation on such a type: the
 elaborator quotes evaluated values into terms, and a raw pair or projection at a type
