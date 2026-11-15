@@ -1505,3 +1505,60 @@ provenance. `import Scry.TaintExamples` is the hand-built corpus used by the
 `scry-taint` group. This is the S4 intraprocedural prototype: no tree-sitter, no C
 lowering, no SARIF, and no interprocedural or memory modelling yet;
 `wiz-notes/scry-taint.md` has the design, the spec format and the gaps.
+
+## Plot: data plots as deterministic SVG (`lib/Plot.wiz`)
+
+`import Plot` draws a `Frame` of named `Series` (`line`, `scatter`, `bar`, `step`) and
+optional error `Band`s on a linear or base-10 log x/y scale, and returns one SVG
+document:
+
+```
+import Plot
+
+def sales : Plot.Frame := Plot.frame [
+  Plot.line "2024" [Plot.ptNat 0 12, Plot.ptNat 1 14, Plot.ptNat 2 15],
+  Plot.scatter "2025" [Plot.ptNat 0 12, Plot.ptNat 1 16, Plot.ptNat 2 17]]
+
+def chart : Plot.Chart :=
+  Plot.labels "quarter" "units" (Plot.size 480 300 (Plot.chart "Sales" sales))
+
+#eval Plot.svg chart                     -- the SVG document
+#eval Json.render (Plot.toJson chart)    -- data, domains and ticks for a JS renderer
+#eval Json.render (Plot.render chart)    -- a Jupyter mime bundle
+```
+
+`Plot.chart title frame` gives 640 × 400 with linear axes; `Plot.size`, `Plot.labels`
+and `Plot.scales Plot.Scale.linear Plot.Scale.log` set the fixed layout. Points are
+exact rationals: `Plot.frac 3 2` is 3/2, `Plot.fracInt (-1) 4` is −1/4, and `(3 : Q)`
+works too. `Plot.boundsOf`/`Plot.logBoundsOf` pad a domain by 5% (all-equal data, one
+point and zero are handled without a degenerate axis); `Plot.niceRange` widens a domain
+to whole multiples of its step, and `Plot.niceStep` / `Plot.linearTicks` /
+`Plot.logTicks` generate ticks of the form `1/2/5 × 10^k` inside the domain, increasing
+and integer multiples of the chosen step. (`Plot.svg` keeps the padded domain and draws
+the ticks inside it; a renderer that wants the axis to end exactly on a tick calls
+`Plot.niceRange`.)
+
+![A two-series plot with an error band, drawn by lib/Plot.wiz](assets/plot-example.svg)
+
+**Arithmetic and determinism.** The library is exact: `Q` from `lib/Rat.wiz` over
+`Int`, with every coordinate rounded once to an integer pixel (half away from zero).
+`Float64` is an axiom of `lib/IO.wiz` (opaque to the kernel and to `#eval`), so it is not
+used in the core: that is what lets the whole library be checked and `#eval`'d, and what
+makes the SVG byte-stable. There is no NaN or infinity in `Q`; log scales drop
+non-positive values (and fall back to `[1, 10]` when there is no positive data) rather
+than emitting a NaN coordinate. Log positions use a fixed-point `log10` (six decimals,
+an integer algorithm), not the host's `libm`. The SVG has no timestamps, ids or random
+values, a fixed attribute order, and the fixed sRGB palette in `Plot.colour`; the
+`plot` test group compares four drawings byte for byte (`Tests/data/plot/*.svg`).
+
+`Plot.toJson` is the renderer schema: `title`, `xlabel`, `ylabel`, `width`, `height`,
+`x` and `y` objects (`scale`, `domain` `{min, max}`, `ticks` of `{value, label}`),
+`series` (`label`, `mark`, `points` of `[x, y]`) and `bands` (`label`, `lower`,
+`upper`), all numbers as decimal strings. `Plot.render` returns
+`{"text/plain": …, "image/svg+xml": …, "text/html": …}` as a `Json` value; the Jupyter
+kernel calls `Json.render (Plot.render chart)` and uses the result as the cell's MIME
+bundle (the `tools/jupyter` hook), with no other coupling to this module.
+
+Deliberately not implemented: 3D, animation, colour spaces (the palette is sRGB hex),
+stacked bars (several bar series are drawn at the same positions; grouping is a layout
+policy), and text metrics (labels use fixed offsets, not measured widths).

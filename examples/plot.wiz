@@ -1,0 +1,23 @@
+import IO
+import Plot
+
+-- A two-series slope chart with an error band, the figure in docs/libraries.md.
+-- `wiz run examples/plot.wiz > docs/assets/plot-example.svg` regenerates the asset.
+
+def lower : List Plot.Point :=
+  [Plot.ptNat 0 10, Plot.ptNat 1 12, Plot.ptNat 2 13, Plot.ptNat 3 18]
+
+def upper : List Plot.Point :=
+  [Plot.ptNat 0 14, Plot.ptNat 1 17, Plot.ptNat 2 18, Plot.ptNat 3 24]
+
+def example : Plot.Chart :=
+  Plot.labels "quarter" "units"
+    (Plot.size 480 300
+      (Plot.chart "Sales"
+        (Plot.withBands [Plot.band "range" lower upper]
+          (Plot.frame [
+            Plot.line "2024" [Plot.ptNat 0 12, Plot.ptNat 1 14, Plot.ptNat 2 15, Plot.ptNat 3 21],
+            Plot.scatter "2025" [Plot.ptNat 0 12, Plot.ptNat 1 16, Plot.ptNat 2 17,
+              Plot.ptNat 3 23]]))))
+
+def main : IO Unit := IO.print (Plot.svg example)
