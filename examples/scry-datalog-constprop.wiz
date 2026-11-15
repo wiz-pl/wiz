@@ -1,0 +1,76 @@
+import Scry.Eval
+-- Constant propagation (`scry-datalog-constprop`): a flat lattice `Const` with
+-- `bot < cst n < top`. Copies pass a constant along, `add1` transfers `n` to `n + 1`,
+-- and a node reached with two different constants joins to `top` (not constant).
+
+inductive Cst where
+  | bot
+  | cst (n : Nat)
+  | top
+
+def Cst.join : Cst → Cst → Cst
+  | .bot, x => x
+  | x, .bot => x
+  | .top, _ => .top
+  | _, .top => .top
+  | .cst a, .cst b => if Nat.beq a b then .cst a else .top
+
+def Cst.eq : Cst → Cst → Bool
+  | .bot, .bot => .true
+  | .cst a, .cst b => Nat.beq a b
+  | .top, .top => .true
+  | _, _ => .false
+
+def cstOps : Scry.LatOps Cst := Scry.LatOps.mk .bot Cst.join Cst.eq
+
+def inc (c : Cst) : Cst := match c with
+  | .bot => .bot
+  | .top => .top
+  | .cst n => .cst (Nat.add n 1)
+
+-- 0 = assign (dst, src), 1 = add1 (dst, src), 2 = val (node) : Cst
+def seed0 : Scry.Rule Cst :=
+  Scry.Rule.mk (Scry.Head.lat 2 [Scry.Term.lit (U64.ofNat 0)] (Scry.LExpr.lit (.cst 7))) []
+def seed4 : Scry.Rule Cst :=
+  Scry.Rule.mk (Scry.Head.lat 2 [Scry.Term.lit (U64.ofNat 4)] (Scry.LExpr.lit (.cst 9))) []
+def copy : Scry.Rule Cst :=
+  Scry.Rule.mk (Scry.Head.lat 2 [Scry.Term.var 0] (Scry.LExpr.var 0))
+    [Scry.Atom.pos 0 [Scry.Term.var 0, Scry.Term.var 1],
+     Scry.Atom.lat 2 [Scry.Term.var 1] 0]
+def add1 : Scry.Rule Cst :=
+  Scry.Rule.mk (Scry.Head.lat 2 [Scry.Term.var 0] (Scry.LExpr.map 0 (Scry.LExpr.var 0)))
+    [Scry.Atom.pos 1 [Scry.Term.var 0, Scry.Term.var 1],
+     Scry.Atom.lat 2 [Scry.Term.var 1] 0]
+-- node 5 is reached from 0 (7) and 4 (9): the join is top.
+def mergeFrom0 : Scry.Rule Cst :=
+  Scry.Rule.mk (Scry.Head.lat 2 [Scry.Term.lit (U64.ofNat 5)] (Scry.LExpr.var 0))
+    [Scry.Atom.lat 2 [Scry.Term.lit (U64.ofNat 0)] 0]
+def mergeFrom4 : Scry.Rule Cst :=
+  Scry.Rule.mk (Scry.Head.lat 2 [Scry.Term.lit (U64.ofNat 5)] (Scry.LExpr.var 0))
+    [Scry.Atom.lat 2 [Scry.Term.lit (U64.ofNat 4)] 0]
+
+def constProg : Scry.Program Cst :=
+  Scry.Program.mk cstOps [2, 2, 1] [2] [inc]
+    [seed0, seed4, copy, add1, mergeFrom0, mergeFrom4]
+
+def u (n : Nat) : U64 := U64.ofNat n
+def constDb : Scry.State Cst :=
+  Scry.State.addTuple
+    (Scry.State.addTuple Scry.State.empty 0 [u 1, u 0]) 1 [u 2, u 1]
+
+def valOf (st : Scry.State Cst) (k : Nat) : Cst :=
+  match Scry.Db.findLat st.db 2 [u k] with
+  | .none => .bot
+  | .some v => v
+
+def code : Cst → Nat
+  | .bot => 100
+  | .cst n => n
+  | .top => 999
+
+def main : Nat :=
+  match Scry.eval constProg constDb with
+  | .none => 99999
+  | .some st =>
+    code (valOf st 1) * 1000000 + code (valOf st 2) * 10000 +
+      code (valOf st 5) * 10 + Scry.Db.latSize st.db 2

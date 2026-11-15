@@ -10,7 +10,9 @@
   `hoverAt`, `definitionAt` and `completionsAt`.
 * **`wiz lsp`** (`Wiz/LSP.lean`): the Language Server Protocol over stdio, with
   diagnostics as you type, hover types, go to definition (also into `lib/`), and
-  completion of global names. Each open document has its own query engine.
+  completion of global names. Each open document has its own query engine. A document's
+  `include_str` files are read from its own directory, as on the command line (see
+  [13-language/include-str.md](13-language/include-str.md), "Language server").
 
 ## 11c: a shared, content-addressed cache
 
@@ -117,7 +119,8 @@ tables, `.wizc` names and Lean's maps) and a SHA-256 half (used by region and ma
 manifest entries and verification). The SHA-256 half is domain-separated and
 length-prefixed (`Wiz.Smt.Sha256.framed`): `["ab", "c"]` and `["a", "bc"]`, or a module key
 and a toolchain id, cannot share a preimage. Module keys hash the exact text, headers,
-imports and trust flag; command keys chain the previous SHA-256 key and the command text;
+`include_str` contents (under an `includeKey-v1` domain), imports and trust flag; command
+keys chain the previous SHA-256 key and the command text;
 `Toolchain.tag` and `Toolchain.targetTag` are the strong toolchain and target namespaces
 (the 64-bit `Toolchain.id` remains the build/job index). A manifest or region requires both
 halves, so a 64-bit collision is a miss (the text path or elaboration answers), never a
@@ -485,10 +488,15 @@ package's `lib` targets with its module roots (dependencies included), into
   `Term.prettyTagged`, so notation-aware printing applies when it does), its doc, a
   source link, its constructors or fields, and the instances of a class or for a type;
   every constant in a signature links to where it is documented (the definition sites
-  the language server's go to definition uses, `declSites`). `search.js` is the
-  client-side index of every declaration (name, module, kind, summary), searched by
-  `scroll-search.js` (`/` focuses the box). The pages are complete HTML: they read
-  without JS, and the search works from `file://`.
+  the language server's go to definition uses, `declSites`). `api.html` is the
+  API/library index: every module with all its declarations, their kinds, signatures
+  (with the same cross-links) and doc summaries, each linking to its anchor on the
+  module page; `api.json` is the same index for tools. The header of every page links to
+  it. `search.js` is the client-side index of every module and declaration (name,
+  module, kind, doc summary, signature text and target), searched by `scroll-search.js`
+  (`/` focuses the box): names first, then doc comments, then signatures, and a hit
+  says which matched. The pages are complete HTML: they read without JS, and the
+  search works from `file://`.
 * **Interactive signatures, with the infoview's Wasm.** Each page carries its data as
   JSON (`<script id="wiz-doc-data">`, and `A.B.json`): per declaration the signature in
   the infoview protocol's tagged-text format and the table of its subterms, each a
@@ -511,7 +519,8 @@ package's `lib` targets with its module roots (dependencies included), into
   commit and the Wasm module, and uploads it as the artifact `wiz-docs` (3 days, for
   debugging); `deploy-docs` deploys that artifact to GitHub Pages at
   <https://wiz-pl.github.io/wiz/>. The docs pages are the site root (`index.html`,
-  `A.B.html`, `A.B.json`, `search.js` and the Wasm files) and every link is relative.
+  `api.html`, `api.json`, `A.B.html`, `A.B.json`, `search.js` and the Wasm files) and
+  every link is relative.
   A repository has one Pages site and each deployment replaces the whole tree, so a
   future performance site shares this deployment under `/perf/` rather than deploying
   separately. `docs/building.md`, "Documentation site", has the URL layout, the
@@ -519,10 +528,12 @@ package's `lib` targets with its module roots (dependencies included), into
 * **Tests**: the group `doc` (`Tests/Doc.lean`): doc comments stored and replayed by the
   cache; Markdown; `wiz doc` on a small package with doc comments (kinds, docs, source
   links, instances, the index); every cross-link resolves; every declaration is in the
-  search index; the pages without JS; `grail doc`; and the page model of the Wasm module
+  search index, with its doc summary and signature; the API index and `api.json` list
+  every module and declaration; the pages without JS; `grail doc`; and the page model of the Wasm module
   run natively on a page's JSON (hover, click, keys); and that the core library is
   documented (every public declaration of `Prelude`, `Std`, `Vec` and `Word` has a doc
-  comment, and each has a module doc).
+  comment, and each has a module doc). The search box's ranking and result rendering
+  have a browser-free test, `web/scroll-search_test.mjs`, run by `web/test.sh`.
 * **The library's documentation.** Every module in `lib/` has a `/-! … -/` module doc
   (what it is for, its main definitions, an example) and a `/-- … -/` doc comment on each
   public declaration; `--` comments are left for implementation notes. `wiz doc --lib -o
@@ -665,6 +676,52 @@ Neovim shows them as `@lsp.type.keyword` (linked to `@keyword`) without configur
   toolchain's library and a new name that isn't one. A use through generalised field
   notation (`p.norm` for `Point.norm`) is not edited.
 
+## 11aa: `wiz fmt`, a formatter
+
+    wiz fmt [FILE|-] [--check] [--width N] [--explain]
+
+Reprints a file from its syntax tree: each command is parsed with the tables that are in
+effect at it (imported `syntax` and `notation` included), printed from the tree with the
+grammar of every node kind (`PPFormat`, the table 11r's printer walks, so declared
+spacing like `" + "` and `noWs` are honoured), and laid out by a small pretty-printing
+document (`Wiz/Format.lean`: `group`/`line`/`nest`, strictly pretty). `FILE` alone prints
+to stdout, `-` (the default) reads stdin, `--check` changes nothing and exits 1 when the
+file differs, `--width` is the column budget (default 100), `--explain` prints what a
+refused command would have become.
+
+* **Why reprint, not rewrite whitespace.** The parser is the single source of truth for
+  the tokens and for precedence, so a reprint cannot disagree with it about `a + b` or
+  `(fun x => b) c`; user-declared `syntax` formats from its own grammar; and the output
+  can be **checked**: every command's reprint is parsed again with the same tables and
+  must give the same tree (`toSExpr`), or the command keeps its original text and is
+  reported (`line N: left as written (…)`, exit status 1). A token/whitespace rewriter
+  keeps comments for free but can never reindent, join or split lines, or drop
+  parentheses, and it has to reimplement every declared spacing rule anyway.
+* **Comments.** The tree drops them (`Token.skipWs`), so they are recovered from the
+  source: every leaf keeps its byte range, and the text between two leaves is a run of
+  comments. One written after a token, on its line, stays there (`;  -- note`); the rest
+  go on their own line before the token they precede. A comment makes a `def` body start
+  on its own line (below).
+* **Layout and the parser's columns.** `colGt`/`colGe` compare against a remembered
+  position (`withPosition`), so the layout has to respect it: a `match`'s alternatives
+  and a `by`'s tactics align with their construct's line (at 2 when it is inline, at the
+  line's indent when it starts one, deeper for nested matches), and a `let` always starts
+  a line — `withPosition` in `term.let` stays in force for the terms after it, so a
+  `let` in the middle of a line would forbid its own body's continuation lines to its
+  left. That is why `def f := let …` breaks after `:=` while `def f := match …` may stay
+  on one line.
+* **What is refused.** A kind with no grammar in the tables, something between tokens
+  that is not a comment, or a reprint that does not parse back to the same tree. The
+  check is what makes a prototype safe: across the library files tested (Prelude, Logic,
+  BitBlast, Deriving, Eff, Vec, EffHeap, Word, Grail, Feral, HeapBorrow, OpticDerive,
+  Trace, Text, Sat, Hdl/Sim and two examples) the formatter changes no command it
+  accepts, is idempotent on every file (formatting twice gives the same text), and
+  refuses one command (`Fe.specLin` in `lib/Feral.wiz`: a `match` inside a `let` value,
+  see `wiz-notes/wiz-fmt.md`). 13 test cases in the `format` group.
+* **Not done.** Signatures never break (a long header stays long: wrapping binder lists
+  needs `fill`/alignment); a multi-line block comment keeps the indentation of its
+  continuation lines; the self-hosted frontend has no formatter; and the LSP does not
+  offer `textDocument/formatting` yet (`Wiz/Format.lean` is that plumbing's core).
 ## 11ab: a static playground
 
 `web/playground.html`: a Wiz playground that runs entirely in the page. A text area

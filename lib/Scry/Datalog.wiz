@@ -1,0 +1,243 @@
+import Prelude
+import Word
+import Text
+import Scry.Store
+/-!
+# Scry.Datalog
+
+The **deep embedding** of scry's lattice-valued Datalog (`import Scry.Datalog`), with
+no surface syntax and no parser. A program is a value of `Program L`:
+
+* `Term` is a variable (`var n`) or a literal (`lit v`); every column is a `U64`, as in
+  `Scry.Store`;
+* `Atom` is a positive relation atom (`pos`), a negated one (`neg`), or a
+  lattice-valued atom (`lat rel key valueVar`, which reads the relation's value for a
+  key and binds it to lattice variable `valueVar`);
+* `Head` is a tuple head or a lattice head whose value is an `LExpr` (`lit`, a lattice
+  variable, `join`, or a Wiz function from `Program.funcs` applied to an expression);
+* a `Rule` is a head and a body; a `Program` adds the lattice operations, the arities,
+  which relations are lattice-valued, and the transfer-function table.
+
+`Program.check` is the macro's job done as a function of the deep embedding:
+**range restriction** (every head variable and every negated variable is bound by a
+positive body atom; every lattice head variable by a lattice body atom) and
+**stratification** (a negated atom's relation must be in a strictly lower stratum than
+the rule's head). `check` returns the stratum of every relation, or `.none`.
+
+The evaluator is in `Scry.Eval`. The theorems a later stage wants (`Program.sem` is the
+least fixpoint, `Derivation.check`) are not here: this stage is the executable
+semantics and its reference implementation.
+-/
+
+/-- A term: a variable or a column value. -/
+inductive Scry.Term where
+  | var (n : Nat)
+  | lit (v : U64)
+
+/-- A lattice's operations, as a record passed explicitly (no type-class search in the
+evaluator): bottom, join, and equality for deciding whether a value moved. `le` is
+derived (`join a b = b`), as with a partial order. -/
+structure Scry.LatOps (L : Type) where
+  bot : L
+  join : L → L → L
+  eq : L → L → Bool
+
+def Scry.LatOps.le {L : Type} (ops : Scry.LatOps L) (a b : L) : Bool :=
+  ops.eq (ops.join a b) b
+
+/-- A lattice expression: a constant, a body lattice variable, a join, or a function
+from the program's `funcs` table applied to an expression. -/
+inductive Scry.LExpr (L : Type) where
+  | lit (v : L)
+  | var (n : Nat)
+  | join (a b : Scry.LExpr L)
+  | map (f : Nat) (a : Scry.LExpr L)
+
+/-- A body atom. A lattice atom's `val` identifies the lattice variable its value is
+bound to; lattice variables and column variables are separate namespaces. -/
+inductive Scry.Atom where
+  | pos (rel : Nat) (args : List Scry.Term)
+  | neg (rel : Nat) (args : List Scry.Term)
+  | lat (rel : Nat) (key : List Scry.Term) (val : Nat)
+
+/-- A rule head. -/
+inductive Scry.Head (L : Type) where
+  | tuple (rel : Nat) (args : List Scry.Term)
+  | lat (rel : Nat) (key : List Scry.Term) (val : Scry.LExpr L)
+
+structure Scry.Rule (L : Type) where
+  head : Scry.Head L
+  body : List Scry.Atom
+
+structure Scry.Program (L : Type) where
+  ops : Scry.LatOps L
+  arities : List Nat
+  latRels : List Nat
+  funcs : List (L → L)
+  rules : List (Scry.Rule L)
+
+-- ## Small list helpers
+
+def Scry.natMem (n : Nat) (l : List Nat) : Bool := List.any (Nat.beq n) l
+
+def Scry.natSubset (xs ys : List Nat) : Bool :=
+  List.foldr (fun x acc => if Scry.natMem x ys then acc else .false) .true xs
+
+def Scry.concatMap {A B : Type} (f : A → List B) : List A → List B
+  | .nil => .nil
+  | .cons x xs => List.append (f x) (Scry.concatMap f xs)
+
+def Scry.zeros : Nat → List Nat
+  | .zero => .nil
+  | .succ n => .cons 0 (Scry.zeros n)
+
+def Scry.maxNat : List Nat → Nat
+  | .nil => 0
+  | .cons x xs => if Nat.lt (Scry.maxNat xs) x then x else Scry.maxNat xs
+
+-- ## Ranges, arities and stratification
+
+def Scry.Term.vars : Scry.Term → List Nat
+  | .var n => .cons n .nil
+  | .lit _ => .nil
+
+def Scry.termsVars (ts : List Scry.Term) : List Nat :=
+  List.foldr (fun t acc => List.append t.vars acc) .nil ts
+
+def Scry.Atom.rel : Scry.Atom → Nat
+  | .pos r _ => r
+  | .neg r _ => r
+  | .lat r _ _ => r
+
+/-- The variables a positive atom binds. A negation and a lattice value bind nothing
+(the negation's variables must already be bound). -/
+def Scry.Atom.posVars : Scry.Atom → List Nat
+  | .pos _ args => Scry.termsVars args
+  | .neg _ _ => .nil
+  | .lat _ key _ => Scry.termsVars key
+
+def Scry.Atom.negVars : Scry.Atom → List Nat
+  | .pos _ _ => .nil
+  | .neg _ args => Scry.termsVars args
+  | .lat _ _ _ => .nil
+
+def Scry.Atom.relOk {L : Type} (p : Scry.Program L) (a : Scry.Atom) : Bool :=
+  Nat.lt a.rel (List.length p.arities)
+
+/-- A `lat` atom names a lattice relation; a `pos`/`neg` atom names an ordinary one. -/
+def Scry.Atom.kindOk {L : Type} (p : Scry.Program L) (a : Scry.Atom) : Bool :=
+  match a with
+  | .lat r _ _ => Scry.natMem r p.latRels
+  | .pos r _ => if Scry.natMem r p.latRels then .false else .true
+  | .neg r _ => if Scry.natMem r p.latRels then .false else .true
+
+def Scry.Atom.arityOk {L : Type} (p : Scry.Program L) (a : Scry.Atom) : Bool :=
+  Nat.beq (List.length (match a with
+    | .pos _ args => args
+    | .neg _ args => args
+    | .lat _ key _ => key)) (List.getD p.arities a.rel 0)
+
+def Scry.LExpr.vars {L : Type} : Scry.LExpr L → List Nat
+  | .lit _ => .nil
+  | .var n => .cons n .nil
+  | .join a b => List.append (Scry.LExpr.vars a) (Scry.LExpr.vars b)
+  | .map _ a => Scry.LExpr.vars a
+
+def Scry.Atom.latVal : Scry.Atom → Option Nat
+  | .lat _ _ v => .some v
+  | _ => .none
+
+def Scry.Head.rel {L : Type} : Scry.Head L → Nat
+  | .tuple r _ => r
+  | .lat r _ _ => r
+
+def Scry.Program.arity {L : Type} (p : Scry.Program L) (r : Nat) : Nat :=
+  List.getD p.arities r 0
+def Scry.Program.isLat {L : Type} (p : Scry.Program L) (r : Nat) : Bool :=
+  Scry.natMem r p.latRels
+
+/-- Every head variable and every negated variable is bound by a positive body atom,
+every lattice head variable by a body lattice atom, and every atom has its declared
+arity. -/
+def Scry.Rule.rangeOk {L : Type} (p : Scry.Program L) (r : Scry.Rule L) : Bool :=
+  let bound : List Nat := List.foldr (fun (a : Scry.Atom) (acc : List Nat) => List.append a.posVars acc) List.nil r.body;
+  let latBound : List Nat := List.foldr (fun (a : Scry.Atom) (acc : List Nat) => match a.latVal with
+    | .none => acc
+    | .some v => List.cons v acc) List.nil r.body;
+  let headVars : List Nat := match r.head with
+    | .tuple _ args => Scry.termsVars args
+    | .lat _ key _ => Scry.termsVars key;
+  let latHeadVars : List Nat := match r.head with
+    | .tuple _ _ => .nil
+    | .lat _ _ val => val.vars;
+  let negOk : Bool := List.foldr (fun (a : Scry.Atom) (acc : Bool) =>
+    if Scry.natSubset a.negVars bound then acc else Bool.false) Bool.true r.body;
+  let arityOk : Bool := List.foldr (fun (a : Scry.Atom) (acc : Bool) =>
+    if Scry.Atom.relOk p a then
+      if Scry.Atom.kindOk p a then
+        if Scry.Atom.arityOk p a then acc else Bool.false
+      else Bool.false
+    else Bool.false) Bool.true r.body;
+  let headKindOk := match r.head with
+    | .tuple rel _ => if Scry.natMem rel p.latRels then Bool.false else Bool.true
+    | .lat rel _ _ => Scry.natMem rel p.latRels;
+  let headRelOk := Nat.lt r.head.rel (List.length p.arities);
+  let headArity := match r.head with
+    | .tuple _ args => List.length args
+    | .lat _ key _ => List.length key;
+  let headArityOk := Nat.beq headArity (p.arity r.head.rel);
+  if Scry.natSubset headVars bound then
+    if Scry.natSubset latHeadVars latBound then
+      if negOk then
+        if arityOk then
+          if headRelOk then
+            if headKindOk then
+              if headArityOk then .true else .false
+            else .false
+          else .false
+        else .false
+      else .false
+    else .false
+  else .false
+
+def Scry.Program.wellFormed {L : Type} (p : Scry.Program L) : Bool :=
+  List.foldr (fun (r : Scry.Rule L) (acc : Bool) => if Scry.Rule.rangeOk p r then acc else Bool.false) Bool.true p.rules
+
+/-- The least stratum a rule's head may have, given the strata of its body relations.
+A negated atom needs one more than its relation. -/
+def Scry.Atom.stratumReq (strata : List Nat) : Scry.Atom → Nat
+  | .pos r _ => List.getD strata r 0
+  | .neg r _ => Nat.succ (List.getD strata r 0)
+  | .lat r _ _ => List.getD strata r 0
+
+def Scry.Rule.stratumReq {L : Type} (strata : List Nat) (r : Scry.Rule L) : Nat :=
+  List.foldr (fun (a : Scry.Atom) (m : Nat) => if Nat.lt m (Scry.Atom.stratumReq strata a) then Scry.Atom.stratumReq strata a else m)
+    (0 : Nat) r.body
+
+/-- One relaxation pass over every rule: raise a head's stratum until it covers its
+body. The flag says whether anything moved. -/
+def Scry.Program.stratPass {L : Type} (p : Scry.Program L) (strata : List Nat) : List Nat × Bool :=
+  List.foldr (fun (r : Scry.Rule L) (acc : List Nat × Bool) =>
+    let need := Scry.Rule.stratumReq acc.1 r;
+    let hs := List.getD acc.1 r.head.rel 0;
+    if Nat.lt hs need then (List.setAt acc.1 r.head.rel need, Bool.true) else acc)
+    (strata, Bool.false) p.rules
+
+def Scry.Program.stratPasses {L : Type} (p : Scry.Program L) :
+    Nat → List Nat → List Nat × Bool
+  | .zero, strata => Scry.Program.stratPass p strata
+  | .succ n, strata => match Scry.Program.stratPass p strata with
+    | (strata', _) => Scry.Program.stratPasses p n strata'
+
+/-- Strata for every relation, or `.none` if a negative dependency is cyclic. A simple
+path has at most `#relations` edges, so `#relations + 1` passes suffice: if the last
+pass still moves something, a negation lies on a cycle. -/
+def Scry.Program.stratify {L : Type} (p : Scry.Program L) : Option (List Nat) :=
+  let strata := Scry.zeros (List.length p.arities);
+  match Scry.Program.stratPasses p (Nat.succ (List.length p.arities)) strata with
+  | (final, .true) => .none
+  | (final, .false) => .some final
+
+/-- Range restriction and stratification, the checks the surface macro will perform. -/
+def Scry.Program.check {L : Type} (p : Scry.Program L) : Option (List Nat) :=
+  if Scry.Program.wellFormed p then Scry.Program.stratify p else .none

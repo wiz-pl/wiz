@@ -1,0 +1,42 @@
+-- test: check
+import Scry.Facts
+import Scry.CstStore
+import C.Schema
+-- The native columns and the generated schema, on one inline store (corpus/hello's
+-- shape). The line prints: nodes, edges, relations, roots, max depth, errors, the CSR
+-- arc count, node 3's span/parent/children/next sibling, the store's kind names, then
+-- the generated schema's view of the same nodes (every node kind must be a C.Kind).
+def hello : String := "{\"format\":\"scry-facts\",\"version\":1,\"language\":\"c\",\"files\":[{\"id\":0,\"path\":\"hello.c\",\"bytes\":31}],\"nodes\":[{\"id\":0,\"kind\":\"translation_unit\",\"span\":[0,31]},{\"id\":1,\"kind\":\"function_definition\",\"parent\":0,\"span\":[0,30]},{\"id\":2,\"kind\":\"primitive_type\",\"parent\":1,\"field\":\"type\",\"span\":[0,3]},{\"id\":3,\"kind\":\"function_declarator\",\"parent\":1,\"field\":\"declarator\",\"span\":[4,13]},{\"id\":4,\"kind\":\"identifier\",\"parent\":3,\"field\":\"declarator\",\"span\":[4,8]},{\"id\":5,\"kind\":\"parameter_list\",\"parent\":3,\"field\":\"parameters\",\"span\":[8,13]},{\"id\":6,\"kind\":\"compound_statement\",\"parent\":1,\"field\":\"body\",\"span\":[14,30]},{\"id\":7,\"kind\":\"return_statement\",\"parent\":6,\"span\":[16,25]},{\"id\":8,\"kind\":\"number_literal\",\"parent\":7,\"span\":[23,24]}],\"edges\":[{\"id\":0,\"src\":0,\"dst\":1,\"label\":\"child\"},{\"id\":1,\"src\":1,\"dst\":2,\"label\":\"type\"},{\"id\":2,\"src\":1,\"dst\":3,\"label\":\"declarator\"},{\"id\":3,\"src\":3,\"dst\":4,\"label\":\"declarator\"},{\"id\":4,\"src\":3,\"dst\":5,\"label\":\"parameters\"},{\"id\":5,\"src\":1,\"dst\":6,\"label\":\"body\"},{\"id\":6,\"src\":6,\"dst\":7,\"label\":\"child\"},{\"id\":7,\"src\":7,\"dst\":8,\"label\":\"child\"}],\"relations\":[{\"id\":0,\"name\":\"cfg\",\"arity\":2,\"tuples\":[[1,6],[6,7],[7,8]]}]}"
+
+def showSpan (s : Scry.Span) : String :=
+  "[" ++ Nat.repr s.start ++ "," ++ Nat.repr s.stop ++ ")"
+
+def showOpt (o : Option Scry.NodeId) : String := match o with
+  | .none => "-"
+  | .some n => Nat.repr n.n
+
+def allKinds (s : Scry.CstStore) : Bool :=
+  List.all (fun i => match C.Kind.ofName (Scry.CstStore.kindName s i) with
+    | .some _ => .true
+    | .none => .false) (Scry.range (Scry.CstStore.nodeCount s))
+
+#eval match Scry.Facts.ofText hello with
+  | .error e => "error: " ++ e
+  | .ok f =>
+    let s := Scry.CstStore.ofFacts f;
+    let st := Scry.CstStore.statsOf s;
+    let typed := allKinds s;
+    let line := String.intercalate "," [
+      Nat.repr st.nodes, Nat.repr st.edges, Nat.repr st.relations, Nat.repr st.roots,
+      Nat.repr st.maxDepth, Nat.repr st.errors, Nat.repr (U32Array.size s.children),
+      Scry.CstStore.kindName s 3, showSpan (Scry.CstStore.spanOf s 3),
+      showOpt (Scry.CstStore.parentOf s 3),
+      Nat.repr (List.length (Scry.CstStore.childrenOf s 3)),
+      showOpt (Scry.CstStore.nextSiblingOf s 3),
+      (match typed with | .true => "typed" | .false => "UNKNOWN KIND"),
+      (match Scry.CstStore.toFacts s with
+        | .error e => "toFacts error: " ++ e
+        | .ok g => Nat.repr (Scry.statsOf g).maxDepth)];
+    line ++ "\n" ++ match Scry.CstStore.ofText (Scry.CstStore.render s) with
+      | .error e => "spill error: " ++ e
+      | .ok t => "spill: " ++ Nat.repr (Scry.CstStore.nodeCount t) ++ " nodes, ok"

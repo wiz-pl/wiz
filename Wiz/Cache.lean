@@ -623,13 +623,29 @@ def toolchainOptionsTag (strongToolchain : String) (termInfo trustNative : Bool)
     [strongToolchain, toString termInfo, toString trustNative, toString nativeFuel,
      match smt with | some k => toString k | none => ""]
 
-/-- The strong key of every module reachable from `ms`, alongside its fast key. `headers`
-gives the preprocessed text of a C header. Import cycles get the fast key 0 on the back
-edge (the frontend reports them). A module's trust (`CommandState.trustedModule`) is part
-of both halves, and so of its importers' keys. -/
+/-- The strong version of `Module.includesKey`: the contents (or error) of every
+`include_str` file of `src` under the `wiz-cache/include-v1` domain. Editing an included
+file changes this digest, and so the strong module key as well as the fast one. -/
+def includesKeyStrong (includes : String → String → Except String String)
+    (m : Name) (src : String) : String :=
+  Smt.Sha256.hexFramed "wiz-cache/include-v1"
+    ((Module.includesOf src).map fun rel =>
+      let body := match includes m rel with
+        | .ok text => "ok\x00" ++ text
+        | .error e => "error\x00" ++ e
+      s!"include:{rel}:" ++ body)
+
+/-- The key of every module reachable from `ms`, alongside its fast key. `headers` gives
+the preprocessed text of a C header. Import cycles get the fast key 0 on the back edge (the
+frontend reports them). A module's `include_str` files enter its key through `includes`
+(the resolver `CommandState.includes`; by default every include is an error, which the
+frontend reports), so editing an included file invalidates the module and its importers. A
+module's trust (`CommandState.trustedModule`) is part of both halves, and so of its
+importers' keys. -/
 partial def moduleKeysAll (loader : Name → Option String) (headers : String → Option String)
     (toolchain : UInt64) (strongToolchain : String := "") (targetTag : String := "")
-    (ms : List Name) (memo : Std.HashMap Name Key := {}) (trusted : Name → Bool := fun _ => false) :
+    (ms : List Name) (memo : Std.HashMap Name Key := {}) (trusted : Name → Bool := fun _ => false)
+    (includes : String → String → Except String String := fun _ rel => .error s!"include_str: no file {rel}") :
     Std.HashMap Name Key :=
   ms.foldl (fun memo m => (go [] m memo).2) memo
 where
@@ -646,6 +662,8 @@ where
         let k₀ := mixHash (mixHash (mixHash salt toolchain) (hash src)) (hash m)
         let k₀ := if trusted m then mixHash k₀ (hash "trusted") else k₀
         let k₀ := (Module.headersOf src).foldl (fun k h => mixHash k (hash ((headers h).getD ""))) k₀
+        -- (include-str) the contents of the files it includes (fast half unchanged)
+        let k₀ := mixHash k₀ (Module.includesKey includes m src)
         -- (the strong half hashes the exact fields, each length-framed: not the 64-bit
         -- hashes above, and not a concatenation that can be ambiguous)
         let headerFields := (Module.headersOf src).flatMap fun h => [s!"header:{h}", (headers h).getD ""]
@@ -653,7 +671,8 @@ where
           { fast := k₀
             strong := Smt.Sha256.hexFramed "wiz-cache/module-v1"
               ([s!"salt:{salt}", s!"toolchain:{toolchain}", s!"toolchain-tag:{strongToolchain}",
-                s!"target-tag:{targetTag}", s!"module:{m}", s!"trusted:{trusted m}", "source", src] ++ headerFields)
+                s!"target-tag:{targetTag}", s!"module:{m}", s!"trusted:{trusted m}", "source", src,
+                s!"includes:{includesKeyStrong includes m src}"] ++ headerFields)
             toolchain := strongToolchain, target := targetTag }
         let (k, memo) := (Module.importsOf src).foldl (fun (k, memo) n =>
           let (kn, memo) := go (m :: stack) n memo
@@ -663,22 +682,25 @@ where
 /-- The key of every module reachable from `ms` (see above), as the fast 64-bit map used by
 in-memory tables and the old file names. -/
 def moduleKeys (loader : Name → Option String) (headers : String → Option String) (toolchain : UInt64)
-    (ms : List Name) (memo : Std.HashMap Name UInt64 := {}) (trusted : Name → Bool := fun _ => false) :
+    (ms : List Name) (memo : Std.HashMap Name UInt64 := {}) (trusted : Name → Bool := fun _ => false)
+    (includes : String → String → Except String String := fun _ rel => .error s!"include_str: no file {rel}") :
     Std.HashMap Name UInt64 :=
   let start := memo.toList.foldl (fun acc (n, k) => acc.insert n (Key.ofFast k)) {}
-  (moduleKeysAll loader headers toolchain "" "" ms start trusted).toList.foldl
+  (moduleKeysAll loader headers toolchain "" "" ms start trusted includes).toList.foldl
     (fun acc (n, k) => acc.insert n k.fast) {}
 
 /-- The key of one module. -/
 def moduleKey (loader : Name → Option String) (headers : String → Option String) (toolchain : UInt64) (m : Name)
-    (trusted : Name → Bool := fun _ => false) : UInt64 :=
-  ((moduleKeys loader headers toolchain [m] {} trusted).get? m).getD 0
+    (trusted : Name → Bool := fun _ => false)
+    (includes : String → String → Except String String := fun _ rel => .error s!"include_str: no file {rel}") : UInt64 :=
+  ((moduleKeys loader headers toolchain [m] {} trusted includes).get? m).getD 0
 
 /-- The SHA-256 key of one module (the content key in manifests and region names). -/
 def moduleKeyStrong (loader : Name → Option String) (headers : String → Option String) (toolchain : UInt64)
     (m : Name) (trusted : Name → Bool := fun _ => false)
-    (strongToolchain : String := "") (targetTag : String := "") : String :=
-  ((moduleKeysAll loader headers toolchain strongToolchain targetTag [m] {} trusted).get? m)
+    (strongToolchain : String := "") (targetTag : String := "")
+    (includes : String → String → Except String String := fun _ rel => .error s!"include_str: no file {rel}") : String :=
+  ((moduleKeysAll loader headers toolchain strongToolchain targetTag [m] {} trusted includes).get? m)
     |>.map (·.strong) |>.getD ""
 
 /-- How a file's commands are being elaborated. -/
@@ -2121,14 +2143,19 @@ partial def elaborateWith (store : Store R) (input : String) (init : CommandStat
   let salt' := if init.trustNative then mixHash salt' (nativeKey init) else salt'
   -- (28) and the solver settings (`--sat-solver`, `--solver-timeout`)
   let salt' := match smtKey init.smt with | some k => mixHash salt' k | none => salt'
+  -- (include-str) the main file's included files enter its chain before its first command
+  let includes := init.includes.getD (fun _ rel => .error s!"include_str: no file {rel}")
+  let key₀Fast := mixHash (Module.includesKey includes "" input) key₀
+  let key₀Strong := includesKeyStrong includes "" input
   -- (the strong namespace carries the same options, so a manifest/region from one
   -- option set is never accepted under another)
   let strongToolchain' := toolchainOptionsTag strongToolchain init.termInfo init.trustNative
     init.nativeFuel (smtKey init.smt)
   let chainKey : Key :=
-    { fast := mixHash salt' (mixHash toolchain key₀)
+    { fast := mixHash salt' (mixHash toolchain key₀Fast)
       strong := Smt.Sha256.hexFramed "wiz-cache/root-v1"
-        [toString salt', toString toolchain, strongToolchain', targetTag, toString key₀, rootTag]
+        [toString salt', toString toolchain, strongToolchain', targetTag, toString key₀Fast,
+         rootTag, s!"includes:{key₀Strong}"]
       toolchain := strongToolchain', target := targetTag, binary := binaryTag }
   -- (a root file's manifest is keyed by the chain key: the file is not an imported module)
   if let some ms := store.manifests then ms.load chainKey
@@ -2146,7 +2173,9 @@ where
     let tc := match smtKey init.smt with | some k => mixHash tc k | none => tc
     let stc := toolchainOptionsTag strongToolchain init.termInfo init.trustNative
       init.nativeFuel (smtKey init.smt)
-    let memo := moduleKeysAll init.loader init.cHeaders tc stc targetTag [m] (← keys.get) init.trustedModule
+    let includes := init.includes.getD (fun _ rel => .error s!"include_str: no file {rel}")
+    let memo := moduleKeysAll init.loader init.cHeaders tc stc targetTag [m] (← keys.get)
+      init.trustedModule includes
     keys.set memo
     pure ((memo.get? m).getD (Key.ofFast 0))
   /-- Bring module `m` into `s`: elaborate it in isolation first if the cache has not

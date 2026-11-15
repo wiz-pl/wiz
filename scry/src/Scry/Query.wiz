@@ -1,0 +1,113 @@
+import Scry.Facts
+/-!
+# Scry.Query: a trivial query and `explain`
+
+The S1 skeleton has one traversal (`--kind`), one edge query (`--edge`) and one relation
+query (`--rel`); the real query language (traversals and Datalog, design §4.5) is S3.
+The point here is that the store's typed view and CSR adjacency answer queries without
+scanning object graphs: `--kind` filters the node column, `--edge` reads the edge
+columns, `--rel` projects a relation, and `explain` reads one node plus its CSR slices.
+
+`scry explain` is also where a finding's witness will go (S8): a node, its origin span,
+its incident arcs, and the relation tuples that mention it.
+-/
+
+/-- A span as `[start,stop)`. -/
+def Scry.renderSpan (s : Scry.Span) : String :=
+  "[" ++ Nat.repr s.start ++ "," ++ Nat.repr s.stop ++ ")"
+
+/-- One node as `id [start,stop) kind field:NAME`. -/
+def Scry.renderNodeLine (n : Scry.Node) : String :=
+  Nat.repr n.id.n ++ " " ++ Scry.renderSpan n.span ++ " " ++ n.kind
+  ++ (match String.isEmpty n.field with
+    | .true => ""
+    | .false => " field:" ++ n.field)
+  ++ (match n.isError with
+    | .true => " ERROR"
+    | .false => "")
+  ++ (match n.missing with
+    | .true => " MISSING"
+    | .false => "")
+
+/-- The nodes of kind `kind`, in id order. -/
+def Scry.queryKind (f : Scry.Facts) (kind : String) : List Scry.Node :=
+  List.filter (fun n => String.eq n.kind kind) f.nodes
+
+/-- The edges with label `label`, in id order. -/
+def Scry.queryEdge (f : Scry.Facts) (label : String) : List Scry.Edge :=
+  List.filter (fun e => String.eq e.label label) f.edges
+
+/-- A relation tuple as space-separated node ids. -/
+def Scry.renderTuple (t : List Nat) : String :=
+  String.intercalate " " (List.map Nat.repr t)
+
+/-- The lines of `scry query --kind K`. -/
+def Scry.renderQueryKind (f : Scry.Facts) (kind : String) : String :=
+  let ns := Scry.queryKind f kind;
+  "query kind " ++ kind ++ ": " ++ Nat.repr (List.length ns) ++ " match(es)"
+  ++ List.foldr (fun n acc => "\n  " ++ Scry.renderNodeLine n ++ acc) "" ns
+
+/-- The lines of `scry query --edge L`. -/
+def Scry.renderQueryEdge (f : Scry.Facts) (label : String) : String :=
+  let es := Scry.queryEdge f label;
+  "query edge " ++ label ++ ": " ++ Nat.repr (List.length es) ++ " match(es)"
+  ++ List.foldr (fun e acc => "\n  " ++ Nat.repr e.src.n ++ " -> " ++ Nat.repr e.dst.n
+      ++ " " ++ e.label ++ acc) "" es
+
+/-- The lines of `scry query --rel R`, or an error when the relation is absent. -/
+def Scry.renderQueryRel (f : Scry.Facts) (name : String) : Except String String :=
+  match Scry.findRelation f.relations name with
+  | .none => .error ("no relation \"" ++ name ++ "\" in the store")
+  | .some r => .ok ("query relation " ++ name ++ " (arity " ++ Nat.repr r.arity ++ "): "
+      ++ Nat.repr (List.length r.tuples) ++ " tuple(s)"
+      ++ List.foldr (fun t acc => "\n  " ++ Scry.renderTuple t ++ acc) "" r.tuples)
+
+/-- Whether a tuple has `id` in any column. -/
+def Scry.tupleHas (id : Scry.NodeId) (t : List Nat) : Bool :=
+  List.any (fun v => Nat.beq v id.n) t
+
+/-- The tuples of one relation that mention `id`, as `name tuple` lines. -/
+def Scry.relationHitsOne (name : String) (id : Scry.NodeId) :
+    List (List Nat) → List String
+  | .nil => .nil
+  | .cons t rest => match Scry.tupleHas id t with
+    | .true => .cons (name ++ " " ++ Scry.renderTuple t) (Scry.relationHitsOne name id rest)
+    | .false => Scry.relationHitsOne name id rest
+
+/-- The tuples of the store's relations that mention `id`, as `name tuple` lines. -/
+def Scry.relationHits (f : Scry.Facts) (id : Scry.NodeId) : List String :=
+  List.concat (List.map (fun r => Scry.relationHitsOne r.name id r.tuples) f.relations)
+
+/-- `scry explain ID`: the node, its parent and children, its CSR arcs, and the relation
+tuples that mention it. -/
+def Scry.explainNode (f : Scry.Facts) (id : Scry.NodeId) : Except String String :=
+  match Scry.findNode f.nodes id with
+  | .none => .error ("no node " ++ Nat.repr id.n ++ " (node count "
+      ++ Nat.repr (List.length f.nodes) ++ ")")
+  | .some n =>
+    let par := match n.parent with
+      | .none => "none (root)"
+      | .some p => Nat.repr p.n ++ (match Scry.findNode f.nodes p with
+        | .some q => " (" ++ q.kind ++ ")"
+        | .none => "");
+    let arcs := Scry.arcsAt f.out id.n;
+    let into := Scry.arcsAt f.incoming id.n;
+    let hits := Scry.relationHits f id;
+    .ok ("node " ++ Nat.repr n.id.n ++ ": " ++ n.kind ++ "\n"
+      ++ "  span: " ++ Scry.renderSpan n.span ++ "\n"
+      ++ "  field: " ++ (match String.isEmpty n.field with
+        | .true => "(none)"
+        | .false => n.field) ++ "\n"
+      ++ "  named/error/missing: " ++ (match n.named with | .true => "true" | .false => "false")
+      ++ "/" ++ (match n.isError with | .true => "true" | .false => "false")
+      ++ "/" ++ (match n.missing with | .true => "true" | .false => "false") ++ "\n"
+      ++ "  parent: " ++ par ++ "\n"
+      ++ "  children: " ++ Nat.repr (List.length arcs) ++ "\n"
+      ++ List.foldr (fun p acc => "    " ++ Nat.repr p.1.n ++ " " ++ p.2
+          ++ (match Scry.findNode f.nodes p.1 with
+            | .some c => " (" ++ c.kind ++ ")"
+            | .none => "") ++ "\n" ++ acc) "" arcs
+      ++ "  incoming: " ++ Nat.repr (List.length into) ++ "\n"
+      ++ List.foldr (fun p acc => "    " ++ Nat.repr p.1.n ++ " " ++ p.2 ++ "\n" ++ acc) "" into
+      ++ "  relations: " ++ Nat.repr (List.length hits) ++ "\n"
+      ++ List.foldr (fun h acc => "    " ++ h ++ "\n" ++ acc) "" hits)

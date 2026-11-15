@@ -1,0 +1,383 @@
+import Scry.Wil
+import Text
+import Word
+/-!
+# Scry.Analysis
+
+The **intraprocedural graph layer** over `Scry.Wil` (`import Scry.Analysis`): the CFG,
+dominators, reaching definitions, and the PDG's data-dependence (def-use) edges. There
+is no parser and no C lowering here; the input is a hand-built or lowered `Wil.Func`.
+
+## Program points
+
+A Wil function is a list of basic blocks. Analysis needs a *program point* for every
+statement **and** every terminator, so an empty block still has a place in the CFG:
+
+* block `b` with `n` statements owns points `base(b) … base(b)+n`; points `0 … n-1`
+  are its statements and point `n` (the terminator point) executes `blk.term`;
+* `base(b+1) = base(b) + n + 1`, so the points of a function are a contiguous range
+  `0 … count-1`;
+* a statement point steps to the next point; a terminator point steps to the first
+  point of each target block (`goto` one, `br` two, `ret`/`unreachable` none).
+
+This is the smallest encoding that keeps `br`/`goto` edges honest without inventing
+extra nodes per block.
+
+## What is computed
+
+* `Scry.cfgEdges` — the CFG as `(from, to)` pairs over program points.
+* `Scry.dominators` — the classic iterative dominator sets over the CFG. Unreachable
+  points get `{self}` by convention.
+* `Scry.rdIn` — **reaching definitions**: for each point, the set of definition points
+  that may reach it. A definition is a statement point that writes a register
+  (`assign` or a call's result variable). The transfer is `gen ∪ (in − kill)`, where
+  `kill` removes the other definitions of the variables this point writes.
+* `Scry.dataDeps` — flow-dependence edges `(defPoint, usePoint, var)`: a definition
+  point `d` reaches a use of `var` at `u`. These are the PDG data edges taint consumes.
+
+The fixpoints are ordinary `partial def` loops (the design's engine is deliberately
+executable, not proved here); the inputs are tiny per-function graphs. Anti-dependence,
+output-dependence and control-dependence edges are not computed: taint needs flow
+dependence only, and the rest belongs to the S4 remainder (`wiz-notes/scry-taint.md`).
+
+Every set is a `List Nat` with membership-based dedup, and every map is an association
+list, so the representation is the same as the rest of scry's pure list model.
+-/
+
+-- ## Set and map helpers
+
+/-- `n, n+1, …, n+k-1`. -/
+def Scry.rangeFrom : Nat → Nat → List Nat
+  | .zero, _ => .nil
+  | .succ k, n => .cons n (Scry.rangeFrom k (Nat.succ n))
+
+/-- `0, 1, …, n-1`. -/
+def Scry.range (n : Nat) : List Nat := Scry.rangeFrom n 0
+
+def Scry.memNat (x : Nat) (xs : List Nat) : Bool := List.any (Nat.beq x) xs
+
+def Scry.insertNat (x : Nat) (xs : List Nat) : List Nat :=
+  match Scry.memNat x xs with
+  | .true => xs
+  | .false => .cons x xs
+
+def Scry.unionNat (xs ys : List Nat) : List Nat :=
+  List.foldr (fun x acc => Scry.insertNat x acc) ys xs
+
+def Scry.interNat : List Nat → List Nat → List Nat
+  | .nil, _ => .nil
+  | .cons x xs, ys => match Scry.memNat x ys with
+    | .true => .cons x (Scry.interNat xs ys)
+    | .false => Scry.interNat xs ys
+
+def Scry.diffNat (xs ys : List Nat) : List Nat :=
+  List.filter (fun x => Bool.not (Scry.memNat x ys)) xs
+
+/-- Set equality: same members, ignoring order and multiplicity. -/
+def Scry.setEq (xs ys : List Nat) : Bool :=
+  Bool.and (List.all (fun x => Scry.memNat x ys) xs)
+           (List.all (fun y => Scry.memNat y xs) ys)
+
+def Scry.concatLists {A B : Type} (f : A → List B) : List A → List B
+  | .nil => .nil
+  | .cons x xs => List.append (f x) (Scry.concatLists f xs)
+
+def Scry.nthD {A : Type} (d : A) : List A → Nat → A
+  | .nil, _ => d
+  | .cons x _, .zero => x
+  | .cons _ xs, .succ n => Scry.nthD d xs n
+
+def Scry.lookupSet (m : List (Nat × List Nat)) (n : Nat) : List Nat :=
+  match List.find (fun p => Nat.beq p.1 n) m with
+  | .none => .nil
+  | .some p => p.2
+
+def Scry.lookupNatD (d : Nat) (m : List (Nat × Nat)) (n : Nat) : Nat :=
+  match List.find (fun p => Nat.beq p.1 n) m with
+  | .none => d
+  | .some p => p.2
+
+-- ## Flattening a function into program points
+
+structure Scry.Fn where
+  fn : Wil.Func
+  /-- `(block index, base point)` for every block. -/
+  bases : List (Nat × Nat)
+  /-- Number of program points (statements plus one terminator point per block). -/
+  count : Nat
+
+/-- The base of every block, and the total point count, in one pass. -/
+def Scry.blockBases : Nat → Nat → List Wil.Block → List (Nat × Nat) × Nat
+  | _, base, .nil => (.nil, base)
+  | i, base, .cons b bs =>
+    match Scry.blockBases (Nat.succ i) (Nat.add base (Nat.succ (List.length b.stmts))) bs with
+    | (rest, total) => (.cons (i, base) rest, total)
+
+def Scry.flatten (fn : Wil.Func) : Scry.Fn :=
+  match Scry.blockBases 0 0 fn.blocks with
+  | (bases, total) => Scry.Fn.mk fn bases total
+
+def Scry.baseOf (g : Scry.Fn) (b : Wil.BlockId) : Nat :=
+  Scry.lookupNatD 0 g.bases b.index
+
+def Scry.nodeOf (g : Scry.Fn) (b : Wil.BlockId) (pc : Nat) : Nat :=
+  Nat.add (Scry.baseOf g b) pc
+
+def Scry.entryNode (g : Scry.Fn) : Nat := Scry.nodeOf g g.fn.entry 0
+
+def Scry.blockAt (g : Scry.Fn) (b : Wil.BlockId) : Option Wil.Block :=
+  Wil.listNth g.fn.blocks b.index
+
+def Scry.blockLen (g : Scry.Fn) (b : Wil.BlockId) : Nat :=
+  match Scry.blockAt g b with
+  | .none => 0
+  | .some blk => List.length blk.stmts
+
+def Scry.stmtAt (g : Scry.Fn) (b : Wil.BlockId) (pc : Nat) : Option Wil.Stmt :=
+  match Scry.blockAt g b with
+  | .none => .none
+  | .some blk => Wil.listNth blk.stmts pc
+
+def Scry.locateBases : List Wil.Block → List (Nat × Nat) → Nat → Option (Wil.BlockId × Nat)
+  | .nil, _, _ => .none
+  | .cons blk bs, .cons (i, base) rest, n =>
+    let size := Nat.succ (List.length blk.stmts);
+    match Nat.le base n with
+    | .true => match Nat.lt n (Nat.add base size) with
+      | .true => .some (Wil.mkBlockId i, Nat.sub n base)
+      | .false => Scry.locateBases bs rest n
+    | .false => Scry.locateBases bs rest n
+  | .cons _ _, .nil, _ => .none
+
+def Scry.locate (g : Scry.Fn) (n : Nat) : Option (Wil.BlockId × Nat) :=
+  Scry.locateBases g.fn.blocks g.bases n
+
+/-- The statement at a point, or `none` at a terminator point. -/
+def Scry.nodeStmt (g : Scry.Fn) (n : Nat) : Option Wil.Stmt :=
+  match Scry.locate g n with
+  | .none => .none
+  | .some p => Scry.stmtAt g p.1 p.2
+
+-- ## The CFG
+
+def Scry.succs (g : Scry.Fn) (n : Nat) : List Nat :=
+  match Scry.locate g n with
+  | .none => .nil
+  | .some p =>
+    let b := p.1;
+    let pc := p.2;
+    match Nat.lt pc (Scry.blockLen g b) with
+    | .true => .cons (Nat.succ n) .nil
+    | .false => match Scry.blockAt g b with
+      | .none => .nil
+      | .some blk => match blk.term with
+        | .goto t => .cons (Scry.nodeOf g t 0) .nil
+        | .br _ t f => .cons (Scry.nodeOf g t 0) (.cons (Scry.nodeOf g f 0) .nil)
+        | .ret _ => .nil
+        | .unreachable => .nil
+
+def Scry.predsOf (g : Scry.Fn) (n : Nat) : List Nat :=
+  List.filter (fun m => Scry.memNat n (Scry.succs g m)) (Scry.range g.count)
+
+def Scry.cfgEdges (g : Scry.Fn) : List (Nat × Nat) :=
+  Scry.concatLists (fun n => List.map (fun m => (n, m)) (Scry.succs g n)) (Scry.range g.count)
+
+-- ## Definitions and uses
+
+def Scry.rhsUses : Wil.Rhs → List Nat
+  | .use v => .cons v.index .nil
+  | .cst _ => .nil
+  | .bin _ a b => .cons a.index (.cons b.index .nil)
+  | .un _ a => .cons a.index .nil
+  | .load p => .cons p.index .nil
+  | .gep p _ => .cons p.index .nil
+  | .alloc _ => .nil
+  | .havoc _ => .nil
+
+def Scry.condUses : Wil.Cond → List Nat
+  | .const _ => .nil
+  | .cmp _ a b => .cons a.index (.cons b.index .nil)
+  | .not c => Scry.condUses c
+  | .and a b => List.append (Scry.condUses a) (Scry.condUses b)
+  | .or a b => List.append (Scry.condUses a) (Scry.condUses b)
+
+/-- The registers a statement writes. -/
+def Scry.stmtDefs : Wil.Stmt → List Nat
+  | .assign x _ => .cons x.index .nil
+  | .call (.some r) _ _ => .cons r.index .nil
+  | _ => .nil
+
+/-- The registers a statement reads. -/
+def Scry.stmtUses : Wil.Stmt → List Nat
+  | .assign _ e => Scry.rhsUses e
+  | .assume c => Scry.condUses c
+  | .store p v => .cons p.index (.cons v.index .nil)
+  | .free p => .cons p.index .nil
+  | .call _ callee args =>
+    let argUses := List.map (fun v => v.index) args;
+    match callee with
+    | .direct _ => argUses
+    | .indirect f => .cons f.index argUses
+  | .nop => .nil
+
+/-- Every `(definition point, register)` in the function. -/
+def Scry.defsOf (g : Scry.Fn) : List (Nat × Nat) :=
+  Scry.concatLists (fun n =>
+    match Scry.nodeStmt g n with
+    | .none => .nil
+    | .some s => List.map (fun v => (n, v)) (Scry.stmtDefs s))
+    (Scry.range g.count)
+
+def Scry.defVarOf (defs : List (Nat × Nat)) (n : Nat) : Option Nat :=
+  match List.find (fun p => Nat.beq p.1 n) defs with
+  | .none => .none
+  | .some p => .some p.2
+
+/-- The registers a point writes. -/
+def Scry.defsAt (g : Scry.Fn) (n : Nat) : List Nat :=
+  match Scry.nodeStmt g n with
+  | .none => .nil
+  | .some s => Scry.stmtDefs s
+
+/-- The definitions a point kills: definitions of the registers it writes. -/
+def Scry.killOf (defs : List (Nat × Nat)) (g : Scry.Fn) (n : Nat) : List Nat :=
+  let vs := Scry.defsAt g n;
+  List.map (fun p => p.1) (List.filter (fun p => Scry.memNat p.2 vs) defs)
+
+/-- The definition a point generates, if it writes a register. -/
+def Scry.genOf (g : Scry.Fn) (n : Nat) : List Nat :=
+  match Scry.defsAt g n with
+  | .nil => .nil
+  | _ => .cons n .nil
+
+def Scry.mapSets (g : Scry.Fn) (f : Nat → List Nat) : List (Nat × List Nat) :=
+  List.map (fun n => (n, f n)) (Scry.range g.count)
+
+def Scry.mapsSetEq (g : Scry.Fn) (a b : List (Nat × List Nat)) : Bool :=
+  List.all (fun n => Scry.setEq (Scry.lookupSet a n) (Scry.lookupSet b n)) (Scry.range g.count)
+
+-- ## Reaching definitions
+
+def Scry.rdStep (defs : List (Nat × Nat)) (g : Scry.Fn) (n : Nat) (inp : List Nat) : List Nat :=
+  Scry.unionNat (Scry.genOf g n) (Scry.diffNat inp (Scry.killOf defs g n))
+
+partial def Scry.rdLoop (defs : List (Nat × Nat)) (g : Scry.Fn) (fuel : Nat)
+    (ins : List (Nat × List Nat)) : List (Nat × List Nat) :=
+  match fuel with
+  | .zero => ins
+  | .succ k =>
+    let outs := Scry.mapSets g (fun n => Scry.rdStep defs g n (Scry.lookupSet ins n));
+    let ins' := Scry.mapSets g (fun n =>
+      match Nat.beq n (Scry.entryNode g) with
+      | .true => .nil
+      | .false =>
+        List.foldr (fun p acc => Scry.unionNat (Scry.lookupSet outs p) acc) .nil
+          (Scry.predsOf g n));
+    match Scry.mapsSetEq g ins ins' with
+    | .true => ins'
+    | .false => Scry.rdLoop defs g k ins'
+
+/-- The reaching definitions at every point. -/
+def Scry.rdIn (g : Scry.Fn) (defs : List (Nat × Nat)) : List (Nat × List Nat) :=
+  Scry.rdLoop defs g (Nat.add (Nat.mul g.count g.count) 4)
+    (Scry.mapSets g (fun _ => .nil))
+
+-- ## Dominators
+
+def Scry.interAll : List (List Nat) → List Nat
+  | .nil => .nil
+  | .cons s rest => List.foldr (fun x acc => Scry.interNat x acc) s rest
+
+partial def Scry.domLoop (g : Scry.Fn) (fuel : Nat) (dom : List (Nat × List Nat)) :
+    List (Nat × List Nat) :=
+  match fuel with
+  | .zero => dom
+  | .succ k =>
+    let dom' := Scry.mapSets g (fun n =>
+      match Nat.beq n (Scry.entryNode g) with
+      | .true => .cons n .nil
+      | .false =>
+        let ps := Scry.predsOf g n;
+        match ps with
+        | .nil => .cons n .nil
+        | _ => Scry.insertNat n
+            (Scry.interAll (List.map (fun p => Scry.lookupSet dom p) ps)));
+    match Scry.mapsSetEq g dom dom' with
+    | .true => dom'
+    | .false => Scry.domLoop g k dom'
+
+/-- Dominator sets, `{n}` for unreachable points. -/
+def Scry.dominators (g : Scry.Fn) : List (Nat × List Nat) :=
+  let all := Scry.range g.count;
+  let init := Scry.mapSets g (fun n =>
+    match Nat.beq n (Scry.entryNode g) with
+    | .true => .cons n .nil
+    | .false => all);
+  Scry.domLoop g (Nat.add (Nat.mul g.count g.count) 4) init
+
+def Scry.dominates (g : Scry.Fn) (dom : List (Nat × List Nat)) (a b : Nat) : Bool :=
+  Scry.memNat a (Scry.lookupSet dom b)
+
+-- ## PDG data edges
+
+structure Scry.DataDep where
+  from : Nat
+  to : Nat
+  var : Nat
+
+def Scry.memDep (d : Scry.DataDep) (ds : List Scry.DataDep) : Bool :=
+  List.any (fun e => Bool.and (Nat.beq d.from e.from) (Nat.beq d.to e.to)) ds
+
+def Scry.insertDep (d : Scry.DataDep) (ds : List Scry.DataDep) : List Scry.DataDep :=
+  match Scry.memDep d ds with
+  | .true => ds
+  | .false => .cons d ds
+
+def Scry.depsAt (defs : List (Nat × Nat)) (g : Scry.Fn) (ins : List (Nat × List Nat))
+    (u : Nat) : List Scry.DataDep :=
+  match Scry.nodeStmt g u with
+  | .none => .nil
+  | .some s =>
+    Scry.concatLists (fun v =>
+      List.map (fun d => Scry.DataDep.mk d u v)
+        (List.filter (fun d => match Scry.defVarOf defs d with
+          | .none => .false
+          | .some w => Nat.beq v w) (Scry.lookupSet ins u)))
+      (Scry.stmtUses s)
+
+/-- Flow-dependence (def-use) edges, deduplicated. -/
+def Scry.dataDeps (g : Scry.Fn) (defs : List (Nat × Nat))
+    (ins : List (Nat × List Nat)) : List Scry.DataDep :=
+  List.foldr (fun d acc => Scry.insertDep d acc) .nil
+    (Scry.concatLists (fun u => Scry.depsAt defs g ins u) (Scry.range g.count))
+
+-- ## A function's analysis
+
+structure Scry.FnInfo where
+  g : Scry.Fn
+  defs : List (Nat × Nat)
+  rd : List (Nat × List Nat)
+  deps : List Scry.DataDep
+  dom : List (Nat × List Nat)
+
+def Scry.fnInfo (fn : Wil.Func) : Scry.FnInfo :=
+  let g := Scry.flatten fn;
+  let defs := Scry.defsOf g;
+  let rd := Scry.rdIn g defs;
+  let deps := Scry.dataDeps g defs rd;
+  let dom := Scry.dominators g;
+  Scry.FnInfo.mk g defs rd deps dom
+
+def Scry.flowPairs (info : Scry.FnInfo) : List (Nat × Nat) :=
+  List.map (fun d => (d.from, d.to)) info.deps
+
+/-- The reaching definitions of register `v` at point `n`. -/
+def Scry.rdForVar (defs : List (Nat × Nat)) (rd : List (Nat × List Nat))
+    (n v : Nat) : List Nat :=
+  List.filter (fun d => match Scry.defVarOf defs d with
+    | .none => .false
+    | .some w => Nat.beq v w) (Scry.lookupSet rd n)
+
+/-- Whether the PDG has a data edge from point `a` to point `b`. -/
+def Scry.flowHas (info : Scry.FnInfo) (a b : Nat) : Bool :=
+  List.any (fun d => Bool.and (Nat.beq d.from a) (Nat.beq d.to b)) info.deps

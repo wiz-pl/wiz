@@ -1,0 +1,8 @@
+-- test: run
+import Scry.Cli
+-- `parse --stats` reads each format from the text: two C files parse now through the
+-- tree-sitter shim (one valid, one malformed: the recovery tree is reported), and a
+-- JSON fact store and a `scry-cst` spill print the same stats shape. The last line is
+-- the corpus total.
+def main : IO Unit := Scry.mainArgs ["parse", "--stats",
+  "fixtures/hello.c", "fixtures/broken.c", "fixtures/demo.cst", "fixtures/demo.facts.json"]
