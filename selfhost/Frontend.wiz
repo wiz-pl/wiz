@@ -1945,18 +1945,39 @@ def isNilS : List Syntax → Bool
   | .cons _ _ => .false
 inductive Two where
   | mk (a b : List Syntax)
-def splitElse : List Syntax → List Syntax → Option Two
+-- the `else` of the `if` whose `then` has just been read. A nested unparenthesised
+-- `if … then … else …` in the then branch owns its `else` (the dangling else), so skip
+-- it: the flat application spine has no other nesting information.
+partial def splitElse (depth : Nat) : List Syntax → List Syntax → Option Two
   | .nil, _ => .none
-  | .cons x rest, acc => match strEq (identOf x) "else" with
-    | .true => .some (.mk (List.reverseOf acc .nil) rest)
-    | .false => splitElse rest (.cons x acc)
-def splitIf : List Syntax → List Syntax → Option IfParts
+  | .cons x rest, acc => match strEq (identOf x) "if" with
+    | .true => splitElse (depth + 1) rest (.cons x acc)
+    | .false => match strEq (identOf x) "else" with
+      | .true => match Nat.beq depth 0 with
+        | .true => .some (.mk (List.reverseOf acc .nil) rest)
+        | .false => splitElse (depth - 1) rest (.cons x acc)
+      | .false => splitElse depth rest (.cons x acc)
+-- the `then` of the `if` whose condition is being read: a nested `if … then … else …`
+-- in the condition is skipped whole
+partial def findThen (depth : Nat) : List Syntax → List Syntax → Option Two
   | .nil, _ => .none
   | .cons x rest, acc => match strEq (identOf x) "then" with
-    | .true => match splitElse rest .nil with
-      | .some (.mk a b) => .some (.mk (List.reverseOf acc .nil) a b)
-      | .none => .none
-    | .false => splitIf rest (.cons x acc)
+    | .true => match Nat.beq depth 0 with
+      | .true => .some (.mk (List.reverseOf acc .nil) rest)
+      | .false => findThen depth rest (.cons x acc)
+    | .false => match strEq (identOf x) "if" with
+      | .true => findThen (depth + 1) rest (.cons x acc)
+      | .false => match strEq (identOf x) "else" with
+        | .true => match Nat.beq depth 0 with
+          | .true => .none
+          | .false => findThen (depth - 1) rest (.cons x acc)
+        | .false => findThen depth rest (.cons x acc)
+def splitIf (tokens : List Syntax) : Option IfParts :=
+  match findThen 0 tokens .nil with
+  | .some (.mk cs rest) => match splitElse 0 rest .nil with
+    | .some (.mk a b) => .some (.mk cs a b)
+    | .none => .none
+  | .none => .none
 -- one term, or the application of the first to the rest
 def appOf : List Syntax → Syntax
   | .nil => .missing
@@ -1967,7 +1988,7 @@ def appOf : List Syntax → Syntax
 -- `match c with | .true => a | .false => b` (stage 19a)
 def ifMatch (s : Syntax) : Option Syntax := match Bool.and (strEq (kindOf s) "term.app") (strEq (identOf (kid s 0)) "if") with
   | .false => .none
-  | .true => match splitIf (kids (kid s 1)) .nil with
+  | .true => match splitIf (kids (kid s 1)) with
     | .some (.mk cs as bs) => match Bool.and (Bool.not (isNilS cs)) (Bool.and (Bool.not (isNilS as)) (Bool.not (isNilS bs))) with
       | .true =>
         let c := appOf cs;
