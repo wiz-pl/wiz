@@ -1,0 +1,65 @@
+import Scry.Optics
+import Scry.Wil
+import Scry.Analysis
+import Scry.PointsTo
+import Scry.Facts
+import Scry.CstStore
+/-!
+# Optic fixtures
+
+A small CST, a small Wil function and a small pointer program, used by `tests/optics.wiz`
+and the `scry-optics` test group. They are ordinary values; the optics in
+`Scry.Optics` read them without a second representation.
+-/
+
+/-- The fixture store from `fixtures/demo.facts.json`, inline so both test runners see
+the same bytes. -/
+def Scry.demoFactsText : String :=
+  "{\"format\":\"scry-facts\",\"version\":1,\"language\":\"c\",\"files\":[{\"id\":0,\"path\":\"demo.c\",\"bytes\":64}],\"nodes\":[{\"id\":0,\"kind\":\"translation_unit\",\"field\":\"\",\"span\":[0,64],\"named\":true},{\"id\":1,\"kind\":\"function_definition\",\"field\":\"\",\"parent\":0,\"span\":[0,30],\"named\":true},{\"id\":2,\"kind\":\"identifier\",\"field\":\"declarator\",\"parent\":1,\"span\":[5,9],\"named\":true},{\"id\":3,\"kind\":\"compound_statement\",\"field\":\"body\",\"parent\":1,\"span\":[12,30],\"named\":true},{\"id\":4,\"kind\":\"call_expression\",\"field\":\"\",\"parent\":3,\"span\":[14,24],\"named\":true},{\"id\":5,\"kind\":\"identifier\",\"field\":\"function\",\"parent\":4,\"span\":[14,17],\"named\":true},{\"id\":6,\"kind\":\"ERROR\",\"field\":\"\",\"parent\":0,\"span\":[40,44],\"named\":false,\"error\":true}],\"edges\":[{\"id\":0,\"src\":0,\"dst\":1,\"label\":\"child\"},{\"id\":1,\"src\":1,\"dst\":2,\"label\":\"declarator\"},{\"id\":2,\"src\":1,\"dst\":3,\"label\":\"body\"},{\"id\":3,\"src\":3,\"dst\":4,\"label\":\"child\"},{\"id\":4,\"src\":4,\"dst\":5,\"label\":\"function\"},{\"id\":5,\"src\":0,\"dst\":6,\"label\":\"child\"}],\"relations\":[{\"id\":0,\"name\":\"cfg\",\"arity\":2,\"tuples\":[[1,3],[3,4]]},{\"id\":1,\"name\":\"call\",\"arity\":2,\"tuples\":[[4,5]]}]}"
+
+/-- An empty store, so the fixture has a total fallback if the inline JSON is ever
+malformed. (The test also checks that it is not used.) -/
+def Scry.emptyFacts : Scry.Facts :=
+  Scry.Facts.mk "scry-facts" 1 "c" .nil .nil .nil .nil
+    (Scry.adjOf 0 .nil .true) (Scry.adjOf 0 .nil .false)
+
+/-- The small CST fixture. -/
+def Scry.demoFacts : Scry.Facts :=
+  match Scry.Facts.ofText Scry.demoFactsText with
+  | .ok f => f
+  | .error _ => Scry.emptyFacts
+
+/-- A two-block Wil function with explicit origins; the statements read `x`, write `y`
+and `z`, and return `z`. -/
+def Scry.demoWil : Wil.Func :=
+  let x := Wil.var 0 Wil.i32;
+  let y := Wil.var 1 Wil.i32;
+  let z := Wil.var 2 Wil.i32;
+  Wil.funcAt "f" [x] [y, z]
+    [ Wil.block
+        [ Wil.withOrigin (Wil.copy y x) (Wil.Span.mk 0 10 20 1)
+        , Wil.withOrigin (Wil.binop z .add y x) (Wil.Span.mk 0 30 40 2) ]
+        (Wil.withTermOrigin (Wil.retV z) (Wil.Span.mk 0 50 60 3))
+    , Wil.block
+        [ Wil.withOrigin (Wil.num y 0) (Wil.Span.mk 0 70 80 4) ]
+        (Wil.withTermOrigin (Wil.jump (Wil.mkBlockId 0)) (Wil.Span.mk 0 90 100 5)) ]
+    (Wil.Span.mk 0 0 110 7)
+
+/-- The analysis of `demoWil`: points, uses, definitions, dependence edges. -/
+def Scry.demoFnInfo : Scry.FnInfo := Scry.fnInfo Scry.demoWil
+
+/-- A tiny pointer program: two stack slots, `p = &x`, `*p = y`. -/
+def Scry.demoPtsFunc : Wil.Func :=
+  let x := Wil.var 0 Wil.i32;
+  let y := Wil.var 1 Wil.i32;
+  let p := Wil.var 2 (Wil.Ty.ptr Wil.i32);
+  Wil.func "main" [] [x, y, p]
+    [ Wil.block
+        [ Wil.slot x 1
+        , Wil.slot y 1
+        , Wil.gep p x 0
+        , Wil.store p y ]
+        (Wil.ret .none) ]
+
+/-- The points-to result of `demoPtsFunc`. -/
+def Scry.demoPt : Scry.PtResult := Scry.pointsTo (Wil.program [Scry.demoPtsFunc])
