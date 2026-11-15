@@ -616,7 +616,7 @@ partial def checkCore (ctx : Ctx R) (t : Term R) (ty : VTy R) : TCM (Usage R) :=
   | .con x, .mu l I D i s _ prop => do
     let some s' := sizePred? s
       | throw (.other s!"a constructor builds a value of size ↑s, not {ctx.showVal s}")
-    check ctx x (vInterp ctx.globals l I D (muFamilyAt l I D s' prop) i)
+    check ctx x (vInterp ctx.globals l I D (muFamilyAt l I D s' prop) i prop)
   | .cocon x, .nu l I D i s _ => do
     let some s' := sizePred? s
       | throw (.other s!"cocon builds a value of size ↑s, not {ctx.showVal s}")
@@ -625,7 +625,6 @@ partial def checkCore (ctx : Ctx R) (t : Term R) (ty : VTy R) : TCM (Usage R) :=
     -- (`inferCore`: the marker's requirement was tested above, at the expected type)
     let (ty', u) ← inferCore ctx t
     unless subTy ctx.globals ctx.tys ty' ty do
-      dbg_trace s!"mismatch term={ctx.showTerm t}\nexpected={ctx.showVal ty}\ninferred={ctx.showVal ty'}"
       throw (.typeMismatch (ctx.showVal ty) (ctx.showVal ty'))
     pure u
   --|ex
@@ -892,7 +891,6 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
     let .enum ls := whnf sty | throw (.typeMismatch "an enumeration" (ctx.showVal sty))
     unless bs.length == ls.length do throw (.other s!"ecase needs {ls.length} branches, got {bs.length}")
     let _ ← checkType (ctx.bind z [] sty) m
-    dbg_trace s!"ECASE {ctx.showTerm m}"
     let mc : Closure R := .mk ctx.env m
     let mut ub : Option (Usage R) := none
     for b in bs, k in [0:bs.length] do
@@ -954,6 +952,7 @@ stores data), so its eliminator can only target Prop")
     let w := QuantitySyntax.explicitDefault
     let _ ← check ctx P (indMotiveTy ctx.globals l v vI vD w prop)
     let vP := ctx.eval P
+    dbg_trace s!"IND M={ctx.showTerm m}"
     let um ← check ctx m (indMethodTy ctx.globals l v vI vD vP w prop)
     let _ ← check ctx i vI
     let vi := ctx.eval i

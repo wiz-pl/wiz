@@ -100,20 +100,6 @@ def peelPis : Term R → List (Name × BinderInfo × Term R × Term R) × Term R
   | .pi x bi q A b _ => let (bs, r) := peelPis b; ((x, bi, q, A) :: bs, r)
   | t => ([], t)
 
-/-- (debug) the motives of the `ecase`s in a term. -/
-partial def ecaseMotives (t : Term R) : List (Term R) :=
-  (match t with | .ecase _ m _ _ => [m] | _ => []) ++ Id.run do
-    let (_, out) := (t.forChildren (m := StateM (List (Term R)))
-      (fun _ => pure ()) (fun _ c => modify (· ++ ecaseMotives c))).run []
-    pure out
-
-/-- (debug) the `prop` flags of the `ind`s in a term. -/
-partial def indProps (t : Term R) : List Bool :=
-  (match t with | .ind _ _ _ _ _ _ _ _ p => [p] | _ => []) ++ Id.run do
-    let (_, out) := (t.forChildren (m := StateM (List Bool))
-      (fun _ => pure ()) (fun _ c => modify (· ++ indProps c))).run []
-    pure out
-
 /-- Does the inductive `T` have indices (beyond its parameters)? -/
 def isIndexed (g : Globals R) (T : Name) : Bool :=
   match g.find? T, g.find? (T ++ ".desc") with
@@ -323,7 +309,7 @@ def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (s
         match jv? with
         | some jv => .ann (.con (payload d)) (.mu l (Iv d) (Dv d) (idx d) (.szSuc (jv d)) none prop)
         | none => .con (payload d)
-      let interpOf (Dz : B R) : B R := fun d => betaApps (Templates.interpTm l (if T == "R" then true else prop)) [Iv d, Dz d, X d, i d]
+      let interpOf (Dz : B R) : B R := fun d => betaApps (Templates.interpTm l prop) [Iv d, Dz d, X d, i d]
       let allOf (Dz r : B R) : B R := fun d => betaApps (Templates.allTm l v prop) [Iv d, Dz d, X d, P d, i d, r d]
       let motiveZ : B R := fun d =>
         -- under the ecase binder `z`, which is variable `d - 1` at depth `d`

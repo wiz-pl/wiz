@@ -119,7 +119,7 @@ partial def checkRest (ctx : Ctx R) (t : Term R) (ty : VTy R) : Term R :=
     .dhrec q H (check ctx j (.pi "h" .default (.qlit QuantitySyntax.explicitDefault) (ctx.eval H) (.mk [I] (.var 1)) ⟨.succ l, .succ l⟩))
       (check ctx D (.desc l I))
   | .con x, .mu l I D i s _ prop => match sizePred? s with
-    | some s' => .con (check ctx x (vInterp g l I D (muFamilyAt l I D s' prop) i))
+    | some s' => .con (check ctx x (vInterp g l I D (muFamilyAt l I D s' prop) i prop))
     | none => t
   | .cocon x, .nu l I D i s _ => match sizePred? s with
     | some s' => .cocon (check ctx x (vInterp g l I D (nuFamilyAt l I D s') i))

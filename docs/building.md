@@ -120,6 +120,16 @@ licence, in `share/wiz/cc/LICENSES/lean4-LICENSES` with Lean's third-party licen
 not bundled). A checkout uses `cc` and the system's GMP unless you pass
 `--cc`/`--cflags`/`--ldflags` (the Nix dev shell writes them to `grail.local.wiz`).
 
+`wiz build FILE -o OUT --target wasm` is a third path (stage 8f,
+[08-backend/wasm.md](stages/08-backend/wasm.md)): it emits a binary WebAssembly module
+directly from the IR and does not invoke a C compiler, the C runtime or GMP. Values live
+in the module's linear memory; a small checked-in JS host (`web/wasm-host.mjs`) supplies
+big integers as `BigInt`s and prints the result. It runs IO-less `main`s over `Nat`/`Int`,
+closures, arrays and algebraic data; `wiz run FILE --target wasm` builds and runs it under
+Node. The subset boundary is checked at compile time and every module is structurally
+validated before it is written; the limits (no reference counting, no IO/FFI, no library
+target) are in that section. `--wasm` is the older spelling of the same target.
+
 **Licences of what is linked into your programs.** The Wiz Runtime Library Exception
 (COPYING.RUNTIME) lets you distribute programs compiled by Wiz under any terms, but it
 covers only Wiz's own runtime. Other libraries keep their licences:
@@ -145,11 +155,48 @@ A release toolchain's `share/wiz/NOTICE` says the same, and also lists the third
 code linked into `wiz`, `grail` and `tower` themselves; the licence texts are in
 `share/wiz/LICENSES/` and `share/wiz/cc/LICENSES/`.
 
+## Reproducible builds
+
+A build is reproducible when the same inputs give the same bytes, wherever the checkout
+lives. `scripts/check-repro.sh` tests that by building `Tests/ReproPaths` (pure code, IO,
+Unicode, a `link_c` shim, a `--split` build, a `-g` build, the LLVM backend and a grail
+package) under two absolute roots, `${TMPDIR}/…/a` and `${TMPDIR}/…/b`. The roots differ
+in `PWD`, `HOME`, `TMPDIR`, umask, locale, `TZ`, `SOURCE_DATE_EPOCH`, the cache directory
+and `grail -j`; the script compares the generated C, the executables, the `.grail` tree
+(including `link.txt`) and the cache entries (names and contents, not the `bin/` memo).
+
+```sh
+scripts/check-repro.sh                 # the corpus (needs .lake/build/bin/wiz)
+scripts/check-repro.sh --json          # one JSON object on stdout
+scripts/check-repro.sh --compiler      # also build wiz and grail under two paths
+scripts/check-repro.sh --compiler-a A --compiler-b B
+```
+
+It skips cleanly (exit 0, `status: skip`) when `wiz` is not built. The compiler comparison
+keeps `HOME` fixed: elan installs a Lean toolchain per `HOME`, so a different `HOME` is a
+different compiler input (and a different `RUNPATH` in the executable), not a path
+variation. `--compiler-olean` also compares `.olean` files; Lean stores the absolute
+source path in them, so they are expected to differ and are skipped by default.
+
+The cheap sources of non-determinism are fixed: `-g` builds map the generated C's
+directory and the compilation directory to `.` (`-ffile-prefix-map`, so debug info and
+`__FILE__` do not name the checkout); a grail `link_c` file is named relative to the
+package in `link.txt`, and its check key hashes its contents rather than its absolute
+path; directory walks are sorted; and `scripts/release-tarball.sh` writes a sorted
+archive with fixed owners, modes and `SOURCE_DATE_EPOCH`, through `gzip -n`.
+
+The remaining causes are inputs or metadata: diagnostics print the path they were given;
+Lean's `.olean`/`.ilean`/`.trace` files store absolute source paths; the Lean toolchain's
+`RUNPATH` stores where its libraries are installed; and a split build's parallel tasks
+report whichever error finishes first (artifacts are unaffected). The compiler binary,
+the generated C and the linked programs are compared byte for byte by the script.
+
 ## Continuous integration
 
 `nix develop` gives the toolchain the tests need besides Lean (see `flake.nix`): GMP and
 LLVM's `llc` for the C and LLVM backends, Boehm GC for the self-hosted backend, a C
-compiler, and elan, which installs the Lean in `lean-toolchain`. Entered at the
+compiler, yosys for synthesis, Node for the Wasm modules, and elan, which installs the
+Lean in `lean-toolchain`. Entered at the
 repository root, it writes this machine's paths to the uncommitted `grail.local.wiz`,
 which grail and the test driver read (`Tests/Main.lean`; flags to `lake test -- …` win);
 `wiz` takes flags. Nothing reads environment variables.
@@ -174,7 +221,7 @@ Nix-built test driver (`packages.tests`), not `lake test`, and symlink the store
 and `grail` into the checkout's `.lake/build/bin`, which some cases and
 `scripts/trust-ledger.sh` name directly (the driver also carries the wrapped `wiz` and
 `grail` beside itself, which `Tests/Grail.lean` looks for). The dev shell (`nix develop`)
-is still what puts `cc`, `llc`, z3, cadical and Neovim on `PATH`, and it writes
+is still what puts `cc`, `llc`, z3, cadical, yosys, Node and Neovim on `PATH`, and it writes
 `grail.local.wiz` for the cases that compile C.
 
 The Nix build is about 353 MB for `wiz` (1.8 GB with its closure: Lean, GMP, Boehm GC,
@@ -270,16 +317,56 @@ the elan toolchain, so the setup action keeps the elan cache for those
   limit cannot be split: `grail-selfhost` is one case of several minutes, and
   `scaling`'s sweep over `lib/` and `examples/` is one case of about 14 min (the
   `scaling` shard's other part holds its 26 shorter cases).
+* **Skips.** A green run must have run its cases: a skipped case is not a pass, and a
+  group that skipped wholesale means CI tested nothing there. The `CI result` job runs
+  `scripts/ci.py check-skips` on the shard logs and `--timings` files, and fails when
+  * a group's cases all skipped and the group is not in
+    `.github/skip-allowlist.json` (each entry names the group, the reason it may skip
+    for and an owner);
+  * a skip names a tool the dev shell must provide (`cc`, GMP, Boehm GC, yosys, Node,
+    nix, `llc`, z3, cadical, the `wiz`/`grail` binaries): that is a gap in `flake.nix`'s
+    `devShells.default`, not an environment skip, even for an allow-listed group. A tool
+    that is only needed on some machines (Icarus Verilog, an ARM toolchain) is excused by
+    the allow-list instead;
+  * a shard's unexplained skipped ratio is over 25% (`--max-ratio`).
+
+  Explained skips are reported in the summary (with the reason and the allow-list owner)
+  and give a warning annotation, never a failure. Skips that are not whole-group and stay
+  under the ratio also warn, so a few skipped cases are visible without blocking. The
+  step first runs `scripts/ci.py check-skips --self-test`, which checks the rule on
+  synthetic logs (all-skip, partial-skip, clean, an allow-listed group, a required tool)
+  without running the suite. Adding an allow-list entry needs a real reason: prefer
+  putting the tool in the dev shell.
 * **The exercise tree** is checked only for a release tag: the `exercise tree` job of
   `release.yml` generates it with `scripts/mkexercises.py` into a temporary directory
   and builds it (`lake build wiz grail tests`), and the tarball job (which publishes)
   waits for it. Pull requests and master pushes don't build it. It does not run the
   exercise tree's tests (almost all of them fail by design). See
   [exercises.md](exercises.md).
-* **The bootstrap fixpoint** (`scripts/fixpoint.sh`: the stage-1 C of the toolchain
-  equals its stage-2 C) runs weekly on `master`, or from "Run workflow" with
-  `fixpoint` ticked. It takes a long time; run it locally with `nix develop -c
-  scripts/fixpoint.sh`.
+* **The bootstrap fixpoint** (`scripts/fixpoint.sh`) runs **three stages** by default.
+  Stage 1 is the self-hosted compiler built by the Lean `wiz build`; it compiles the
+  whole toolchain to `self1.c`. Stage 2 is that C compiled with `selfhost/rt.c` and
+  Boehm GC, compiling the toolchain to `self2.c`, and stage 3 is `self2.c` compiled the
+  same way, compiling to `self3.c`. The script prints every stage's size and md5 and
+  marks each stage after the first PASS/FAIL against stage 1; all three C files must be
+  byte-identical (`--stages N` for more stages, 2 for the old two-stage check; `--keep`
+  keeps the C files and binaries, and `--compare-only` re-checks kept ones).
+  Stage 1 = stage 2 shows that the C emitted by the Lean-built compiler is reproduced by
+  the compiler that C builds. Stage 2 = stage 3 shows that reproduction is a fixed point
+  and not one coincident round. The comparison covers the generated `self.wiz` input in
+  the selected mode (`--rc` for reference counting): it shows that code generation is
+  deterministic and does not depend on whether the compiler came from Lean or from C. It
+  does not show that the C is correct (it is compiled with `-w`), that the compiled
+  toolchain behaves correctly (the test suite covers that), or anything about other
+  inputs, flags, C compilers or GC versions.
+  The self-compile peaks at 5.1–5.4 GiB (the three-stage run measured 5.4 GiB in stage 2
+  and 5.2 GiB in stage 3), so **reserve 6 GiB**; the script names that requirement if a
+  stage is killed for memory (exit 137). Run it locally with `nix develop -c
+  scripts/fixpoint.sh` and a 6 GiB reservation.
+  The weekly `fixpoint` job in `ci.yml` runs it on `ubuntu-latest`. The separate
+  `.github/workflows/fixpoint.yml` runs it nightly on `master` and from "Run workflow" on
+  the self-hosted runner named by `WIZ_RUNNER_HEAVY`; it checks for 6 GiB free, is skipped
+  when the variable is unset, and is not part of `CI result`.
 * **The Nix package** (the `build` job; the old separate `nix package` job is folded
   into it): `nix build .#wiz .#tests` builds `wiz` and `grail` with Lake in the Nix
   sandbox and nixpkgs' Lean (the flake checks that it is the version in `lean-toolchain`)
@@ -525,3 +612,43 @@ The queue order is kept in a ledger outside the checkout
 --next 5` prints the next actions with their gates, `--check` rejects a ledger with
 two ready PRs in one chain or a ready PR with an unmerged dependency, and `--write`
 refreshes the ledger's facts from `gh` and `git`.
+
+## Branch hygiene
+
+`scripts/branch-rot.py` makes branch hygiene a five-minute monthly task (Python 3,
+standard library only). It classifies every local branch, and with `--remote` every
+`origin/*` tracking ref, into four buckets:
+
+* **redundant** — the tip is an ancestor of `origin/master`, or every commit is
+  patch-equivalent to one upstream (`git cherry` reports no `+` lines). Branches with
+  merge commits are never called redundant: `git cherry` skips merges, and a merge
+  resolution can carry content that is not upstream.
+* **in-flight** — an open pull request exists for the branch. These are kept.
+* **attic** — unique commits, no open PR, and the tip is older than `--days`
+  (default 30).
+* **needs-pr** — unique commits and no open PR. This is the conservative default
+  whenever the script is unsure.
+
+Run it from a checkout:
+
+```sh
+scripts/branch-rot.py                  # table and counts
+scripts/branch-rot.py --limit 10       # show at most 10 rows per bucket
+scripts/branch-rot.py --json           # machine-readable, for a dashboard
+scripts/branch-rot.py --remote         # include origin/* tracking refs
+scripts/branch-rot.py --days 30        # attic threshold in days (default 30)
+```
+
+The classifier is read-only. Deleting redundant branches is explicit and needs both
+flags:
+
+```sh
+scripts/branch-rot.py --delete-redundant            # dry run: list what would go
+scripts/branch-rot.py --delete-redundant --apply    # actually delete
+```
+
+Deletion refuses the current branch, any branch checked out in a worktree (including
+another agent's), `master` and `main`, and any branch with an open PR or a PR state it
+could not read. `--no-gh` skips GitHub entirely (every PR state becomes unknown, so
+nothing is deleted); `--self-test` builds a throwaway repository with a merge, a
+cherry-pick, an unmerged branch and a worktree and checks the classification offline.

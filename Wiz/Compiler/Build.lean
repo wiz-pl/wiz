@@ -1,6 +1,8 @@
 import Wiz.Elab.Command
 import Wiz.Compiler.C
 import Wiz.Compiler.LLVM
+import Wiz.Compiler.Wasm
+import Wiz.Compiler.WasmValidate
 import Wiz.Compiler.Lower
 import Wiz.Toolchain
 
@@ -66,16 +68,37 @@ def cProgram (s : CommandState R) (n : Name) : Except String (String × Term R) 
 def words (s : Option String) : List String :=
   ((s.getD "").splitOn " ").filter (· ≠ "")
 
+/-- Is debug information requested (`-g`, `-g3`, `-ggdb`, `-gdwarf-5`, …)? The
+`-gc…` flags are not debug flags. -/
+def wantsDebug (cflags : List String) : Bool :=
+  cflags.any fun f => f == "-g" || (f.startsWith "-g" && !f.startsWith "-gc")
+
+/-- Keep debug information (and `__FILE__`) from naming the build directory: with
+`-g`, `cc` records the generated C file's absolute path and the compilation directory,
+so the same program built under two absolute paths would differ. `-ffile-prefix-map`
+maps both to `.` (`-g` without it is not reproducible; without `-g` the flag changes
+nothing and is not passed). -/
+def pathMapFlags (cflags : List String) (dir : System.FilePath) : IO (Array String) := do
+  if !wantsDebug cflags then return #[]
+  let abs ← IO.FS.realPath dir
+  -- the compilation directory (`DW_AT_comp_dir`) is the cwd, which is not the generated
+  -- C file's directory; map both
+  let cwd ← IO.currentDir
+  let maps := #[s!"-ffile-prefix-map={abs}=."]
+  pure (if cwd == abs then maps else maps.push s!"-ffile-prefix-map={cwd}=.")
+
 /-- Compile C source to an executable. -/
 def compileC (tc : Toolchain) (src : String) (exe : System.FilePath) (link : Link := {}) (lib : Bool := false) : IO (Except String Unit) := do
   let cFile := exe.withExtension "c"
   IO.FS.writeFile cFile src
   let cc := tc.cc
+  -- (debug info and `__FILE__` must not name the checkout; the generated C is beside OUT)
+  let map ← pathMapFlags tc.cflags (cFile.parent.getD ".")
   -- (9f) the `link_c` files are compiled with the program, with the same flags
   -- (9g: a library is an object file, linked by the C program that uses it, which
   -- also brings the `link_c` files and libraries)
-  let args := if lib then #["-O2", "-w", "-c", "-o", exe.toString, cFile.toString] ++ tc.cflags.toArray else
-    #["-O2", "-w", "-o", exe.toString, cFile.toString] ++ link.sources ++ tc.cflags.toArray ++
+  let args := if lib then #["-O2", "-w", "-c", "-o", exe.toString, cFile.toString] ++ tc.cflags.toArray ++ map else
+    #["-O2", "-w", "-o", exe.toString, cFile.toString] ++ link.sources ++ tc.cflags.toArray ++ map ++
     tc.gmp.toArray ++ tc.ldflags.toArray ++ tc.libs.toArray ++ link.libFlags
   try
     let out ← IO.Process.output { cmd := cc, args }
@@ -113,11 +136,12 @@ def compileDecls (tc : Toolchain) (decls : Array IR.Decl) (io : Bool) (extra : S
     parts.zipIdx.map fun (p : String × Nat) => (s!"part{p.2}", C.splitPartText header p.1, false)
   let cc := tc.cc
   let cflags := tc.cflags.toArray
+  let map ← pathMapFlags tc.cflags dir
   let keyOf (text : String) (api : Bool) : String :=
     toString (mixHash (hash text) (hash s!"{cc} {" ".intercalate tc.cflags} -O2 -w {api}"))
   let ccOne (file obj : String) (api : Bool) : IO (Except String Unit) :=
     runCC cc (#["-O2", "-w", "-c", "-o", (dir / obj).toString, (dir / file).toString] ++
-      (if api then #["-DWIZ_API="] else #[]) ++ cflags)
+      (if api then #["-DWIZ_API="] else #[]) ++ cflags ++ map)
   let err ← IO.mkRef (none : Option String)
   let mut todo : Array (String × Bool × String) := #[]
   for (name, text, api) in inputs do
@@ -155,6 +179,7 @@ def compileLLVM (tc : Toolchain) (ll : String) (exe : System.FilePath) (glue : S
   let cc := tc.cc
   let llc := tc.llc
   let cflags := tc.cflags.toArray
+  let map ← pathMapFlags tc.cflags (rtFile.parent.getD ".")
   let step (cmd : String) (args : Array String) : IO (Except String Unit) := do
     try
       let out ← IO.Process.output { cmd, args }
@@ -162,7 +187,7 @@ def compileLLVM (tc : Toolchain) (ll : String) (exe : System.FilePath) (glue : S
     catch e => pure (.error s!"{cmd}: {e}")
   let rtObj := exe.withFileName "wiz_runtime.o"
   let mainObj := if lib then exe.withFileName ((exe.fileStem.getD "wiz") ++ "_module.o") else exe.withExtension "o"
-  if let .error e ← step cc (#["-O2", "-w", "-c", "-DWIZ_API=", "-o", rtObj.toString, rtFile.toString] ++ cflags) then
+  if let .error e ← step cc (#["-O2", "-w", "-c", "-DWIZ_API=", "-o", rtObj.toString, rtFile.toString] ++ cflags ++ map) then
     return .error e
   if let .error e ← step llc #["-O2", "-filetype=obj", "-relocation-model=pic", "-o", mainObj.toString, llFile.toString] then
     return .error e
@@ -173,12 +198,33 @@ def compileLLVM (tc : Toolchain) (ll : String) (exe : System.FilePath) (glue : S
   step cc (#["-o", exe.toString, mainObj.toString, rtObj.toString] ++ srcArgs ++ tc.gmp.toArray ++
     tc.ldflags.toArray ++ tc.libs.toArray ++ link.libFlags)
 
-/-- Build the program computing `main`, through C or LLVM. With `lib`, the exports as
-an object file, with a header `OUT.h` for them; with `noMain`, the exports linked like
-a program but without a `main` (a Wasm module, a shared library: the toolchain's flags
-say which). -/
+/-- (8f) Write the WebAssembly module of the program to `out`. The JS host
+(`web/wasm-host.mjs`) prints its result; `runWasm` below uses it. The bytes are parsed
+and type-checked by `WasmValidate.validate` before they are written, so an encoder bug
+(or an instruction outside the supported subset) is a compile error, not a module that
+an engine rejects later. -/
+def compileWasm (decls : Array IR.Decl) (io : Bool) (out : System.FilePath) : IO (Except String Unit) := do
+  match Wasm.program decls io with
+  | .error e => pure (.error e)
+  | .ok bytes =>
+    match WasmValidate.validate bytes with
+    | .error e => pure (.error s!"internal error: the Wasm backend emitted an invalid module: {e}")
+    | .ok () =>
+      IO.FS.writeBinFile out bytes
+      pure (.ok ())
+
+/-- Build the program computing `main`, through C, LLVM, or WebAssembly. With `lib`, the
+exports as an object file, with a header `OUT.h` for them; with `noMain`, the exports
+linked like a program but without a `main` (a Wasm module, a shared library: the
+toolchain's flags say which). -/
 def build (tc : Toolchain) (s : CommandState R) (n : Name) (out : System.FilePath) (llvm lib : Bool)
-    (noMain : Bool := false) (split : Nat := 0) : IO (Except String (Term R)) := do
+    (noMain : Bool := false) (split : Nat := 0) (wasm : Bool := false) : IO (Except String (Term R)) := do
+  if wasm && llvm then
+    return .error "choose one backend: --target wasm, --target llvm, or --target c"
+  if wasm && (lib || noMain) then
+    return .error "the Wasm backend builds a `main`; `--lib` and `--no-main` are not supported (stage 8f)"
+  if wasm && split != 0 then
+    return .error "the Wasm backend has one module; `--split` does not apply (stage 8f)"
   let bare := lib || noMain
   match irProgram s n bare with
   | .error e => pure (.error e)
@@ -187,7 +233,8 @@ def build (tc : Toolchain) (s : CommandState R) (n : Name) (out : System.FilePat
     let ex := (exports s).map (·.1)
     let unbox := s.globals.unboxStructs
     if lib then IO.FS.writeFile (out.withExtension "h") (C.exportHeader ex)
-    let r ← if llvm then
+    let r ← if wasm then compileWasm decls io out
+      else if llvm then
         compileLLVM tc (LLVM.program decls io bare) out
           (extraC s ++ "\n" ++ C.glue (C.externs decls) (extraC s) unbox ++ "\n" ++ C.exportWrappers ex true) (linkOf s) lib
       else compileDecls tc decls io (extraC s) unbox ex (linkOf s) lib bare out split
@@ -236,6 +283,30 @@ def runGlobal (tc : Toolchain) (s : CommandState R) (n : Name) (dir : System.Fil
       if out.exitCode != 0 then return .error s!"the program failed ({out.exitCode}): {out.stderr}"
       -- an `IO` program prints for itself
       if io then return .ok out.stdout
+      match parseValue out.stdout with
+      | none => pure (.error s!"could not read the result: {out.stdout}")
+      | some v => pure (.ok (readback s.globals s.builtins (eval s.globals [] ty) v).pretty)
+
+/-- (8f) Build `main` as a WebAssembly module and run it under Node with the JS host
+(`web/wasm-host.mjs`), reading the printed result back with `main`'s type. -/
+def runWasmGlobal (s : CommandState R) (n : Name) (dir : System.FilePath) : IO (Except String String) := do
+  match irProgram s n with
+  | .error e => pure (.error e)
+  | .ok (decls, ty) =>
+    let wasmFile := dir / "wiz_main.wasm"
+    match ← compileWasm decls (isIO ty) wasmFile with
+    | .error e => pure (.error e)
+    | .ok () =>
+      let host : System.FilePath := "web" / "wasm-host.mjs"
+      unless ← host.pathExists do
+        return .error "web/wasm-host.mjs is missing (run from the Wiz checkout)"
+      let out ← try
+        -- (under `lake env`, Lean's LD_LIBRARY_PATH breaks Node's own library lookup)
+        IO.Process.output
+          { cmd := "node", args := #[host.toString, wasmFile.toString], env := #[("LD_LIBRARY_PATH", none)] }
+      catch e => return .error s!"node: {e}"
+      if out.exitCode != 0 then
+        return .error s!"the Wasm program failed ({out.exitCode}): {out.stderr.take 1000}"
       match parseValue out.stdout with
       | none => pure (.error s!"could not read the result: {out.stdout}")
       | some v => pure (.ok (readback s.globals s.builtins (eval s.globals [] ty) v).pretty)

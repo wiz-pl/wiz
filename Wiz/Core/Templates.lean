@@ -60,8 +60,16 @@ def interpTm (l : Level) (prop : Bool := false) : Term R :=
       (apps (v 3) [v 2, v 1]) ⟨.imax l1 vX, l1⟩)
   lams ["I", "D"] (.delim (.succ (.succ l)) P mret marg mrec mhrec (v 0))
 
-private def interpApp (l : Level) (prop : Bool) (I E X i : Term R) : Term R :=
-  apps (interpTm l prop) [I, E, X, i]
+/-- β-reduce a term applied to arguments, so that a template application in a *type* is
+inferable (a lambda has no inferable type). -/
+private partial def betaApps (t : Term R) : List (Term R) → Term R
+  | [] => t
+  | a :: as => match t with
+    | .lam _ b => betaApps (b.instantiateAt 0 a) as
+    | _ => (a :: as).foldl .app t
+
+def interpApp (l : Level) (prop : Bool) (I E X i : Term R) : Term R :=
+  betaApps (interpTm l prop) [I, E, X, i]
 
 /-- `fun I D X P i xs => All D X P i xs`: one `P`-proof per recursive field. -/
 def allTm (l v' : Level) (prop : Bool := false) : Term R :=

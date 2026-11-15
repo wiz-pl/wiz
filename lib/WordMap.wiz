@@ -80,20 +80,17 @@ def U64Map.keys {V : Type} (m : U64Map V) : List U64 := List.map (fun e => e.1) 
 extern "wiz_wmap_of_list" U64Map.ofListNative : {V : Type} → List (U64 × V) → U64Map V
 extern "wiz_wmap_to_list" U64Map.toListNative : {V : Type} → U64Map V → List (U64 × V)
 attribute [implemented_by U64Map.ofListNative U64Map.toListNative] U64Map.mk
-attribute [implemented_by U64Map.toListNative] U64Map.toList
 extern "wiz_wmap_empty" U64Map.emptyNative : {V : Type} → U64Map V
 extern "wiz_wmap_insert" U64Map.insertNative : {V : Type} → U64Map V → U64 → V → U64Map V
 extern "wiz_wmap_erase" U64Map.eraseNative : {V : Type} → U64Map V → U64 → U64Map V
 extern "wiz_wmap_find" U64Map.findNative : {V : Type} → U64Map V → U64 → Option V
 extern "wiz_wmap_find_d" U64Map.findDNative : {V : Type} → U64Map V → U64 → V → V
-extern "wiz_wmap_contains" U64Map.containsNative : {V : Type} → U64Map V → U64 → Bool
 extern "wiz_wmap_size" U64Map.sizeNative : {V : Type} → U64Map V → NatObj
 attribute [implemented_by U64Map.emptyNative] U64Map.empty
 attribute [implemented_by U64Map.insertNative] U64Map.insert
 attribute [implemented_by U64Map.eraseNative] U64Map.erase
 attribute [implemented_by U64Map.findNative] U64Map.find
 attribute [implemented_by U64Map.findDNative] U64Map.findD
-attribute [implemented_by U64Map.containsNative] U64Map.contains
 attribute [implemented_by U64Map.sizeNative] U64Map.size
 
 -- ## Laws (on the model; the natives are trusted to keep them). `find` after `erase`

@@ -97,7 +97,7 @@ def indMethodTy (g : Globals R) (l v : Level) (I D P : Val R) (w : R) (prop : Bo
   let X₁ : Term R := .lam "j" (.mu l (tv 4) (tv 3) (tv 0) .szInf none prop)
   let X₂ : Term R := .lam "j" (.mu l (tv 5) (tv 4) (tv 0) .szInf none prop)
   eval g [P, D, I] (spi 0 "i" (tv 2, l1)
-    (spi w "xs" (tapps (Templates.interpTm l prop) [tv 3, tv 2, X₁, tv 0], l1)
+    (spi w "xs" (Templates.interpApp l prop (tv 3) (tv 2) X₁ (tv 0), l1)
       (spi w "ih" (tapps (Templates.allTm l v prop) [tv 4, tv 3, X₂, tv 2, tv 1, tv 0], .max l1 v)
         (tapps (tv 3) [tv 2, .con (tv 1)], v)))).1
 
@@ -110,7 +110,7 @@ def coitStepTy (g : Globals R) (l : Level) (I D S : Val R) (w : R) : VTy R :=
   let l1 : Level := .succ l
   -- i0 S1 D2 I3 ; s0 i1 S2 D3 I4
   eval g [S, D, I] (spi w "i" (tv 2, l1)
-    (spi w "s" (.app (tv 1) (tv 0), l1) (tapps (Templates.interpTm l false) [tv 4, tv 3, tv 2, tv 1], l1))).1
+    (spi w "s" (.app (tv 1) (tv 0), l1) (Templates.interpApp l false (tv 4) (tv 3) (tv 2) (tv 1), l1))).1
 
 /-! ### Sizes
 

@@ -25,6 +25,7 @@ the repository's documentation; the published `/docs/` is generated from `lib/` 
 * [Status.md](Status.md)
 * [dsls.md](dsls.md): the embedded languages (DSLs) in Wiz, and the conventions they follow
 * [error-codes.md](error-codes.md): the error codes and their quick fixes
+* [playground-lsp.md](playground-lsp.md): the playground's goals panel and the language-server contract a self-hosted `wiz lsp` must implement
 * [resources.md](resources.md): resources in Wiz: quantities, regions, optics, Feral and separation logic, with one running example
 * [ROADMAP.md](../ROADMAP.md)
 
@@ -85,6 +86,8 @@ line below.
 ### Numbers and libraries
 
 * [Stage 22: numbers for hardware and systems code](stages/22-numbers.md)
+* [The value-level semantics matrix](semantics-matrix.md): every numeric and textual
+  boundary, with the value the spec asks for and which backends were compared
 * [Stage 29: native data structures](stages/29-natives.md): word arrays, word maps, interned strings
 * [Libraries](libraries.md)
 
