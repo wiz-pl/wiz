@@ -60,3 +60,10 @@ the changes, with both the samples and the interleaved `ab` ratios.  Absolute ti
 with machine load; use `--baseline-bin`, not two separate runs, to decide whether a
 change is a regression.  Regenerate the reference after a deliberate change and keep the
 old file.
+
+## Memory
+
+`../scripts/mem-bench.py` measures peak RSS (not time) of a fixed corpus: cold checks of
+`lib/`, the largest example, a `wiz build`, and the self-hosted checker. It records
+`mem-baseline.json`, gates a run at +25 % relative and at a per-invocation hard cap, and
+has a `--self-test` for the thresholds. See docs/building.md, "Memory budget".

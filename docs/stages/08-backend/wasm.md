@@ -38,8 +38,11 @@ programs are:
   `pow`, `land`, `lor`, `xor`, `shiftLeft`, `shiftRight`, `log2`, `beq`, `blt`;
 * constructors and fields, `case` on tags, `dup`/`drop`, `reset`/`reuse`, `dropMoved`;
 * direct calls, closures (`pap`/`ap`, partial and over-application), `memo`/thunks,
-  `lazyTag`/`lazySet` for codata;
-* **join points** (each join body becomes its own Wasm function taking its parameters);
+  `lazyTag`/`lazySet` for codata, **tail calls** (`return_call`/`return_call_indirect`
+  from the tail-call proposal), and **CAF caching** (a closed definition that does work
+  is built once and shared);
+* **join points** (each join body becomes its own Wasm function taking its parameters;
+  a `jmp` is a tail call, so a self tail call is a loop);
 * `Std`'s **`Array`** externs (`empty`, `push`, `size`, `getD`, `set`), functionally
   (updates copy, so sharing is unobservable).
 
@@ -58,8 +61,11 @@ parses the binary module (magic/version, section order and lengths, types, impor
 functions, tables, memories, globals, exports, elements, data, start), checks the
 cross-references and offsets, and type-checks every function body against an operand
 stack with `block`/`loop`/`if` frames, branch depths, locals, calls,
-`call_indirect`, memory accesses and alignment. It is an **encoder-side** validator: it
-knows the instruction subset this backend emits and rejects an unknown opcode.
+`call_indirect`, memory accesses and alignment. It knows the **tail-call proposal**
+(`return_call`/`return_call_indirect`: the callee's results must be the current
+function's results) and can be run with `Features.tailCalls := false` to prove that a
+module does not depend on it. It is an **encoder-side** validator: it knows the
+instruction subset this backend emits and rejects an unknown opcode.
 
 `Build.compileWasm` runs it on every module before writing the bytes, so an encoder bug
 is a compile error (`internal error: the Wasm backend emitted an invalid module: …`),
@@ -80,10 +86,25 @@ size}` (the C layout) and `i64` fields. Tags are the C runtime's (`0xFFFF0000` c
   application is partial, and `call_indirect`s the wrapper when it is complete (then
   applies any extra arguments). A thunk's arguments are copied out of the scratch area
   before it is forced, so a thunk body's own applications cannot overwrite them.
-* **Join points** are lifted: a `jmp` calls the join's function and returns its value.
-  This keeps the emitted code structured without a relooper; unlike a loop it does not
-  reuse a stack frame, which is fine for the non-tail `case` continuations the lowerer
-  produces.
+* **Join points** are lifted: a `jmp` tail-calls the join's function and returns its
+  value. This keeps the emitted code structured without a relooper; unlike a loop it does
+  not reuse a stack frame, which is fine for the non-tail `case` continuations the lowerer
+  produces. A `jmp` is a tail call, so `IR`'s `loopify` (a self tail call rewritten as a
+  join loop) is a real Wasm loop rather than a growing call chain.
+* **Tail calls**: a direct call immediately followed by returning its result is emitted
+  as `return_call`, and an application of a closure (the runtime's `wiz_apply`) in the
+  same position as `return_call` too. The boxed closure wrappers, `jmp`s and the
+  fall-through path of a `jdecl` are tail calls as well. This uses the Wasm **tail-call
+  proposal**; see "Limits" for the engine requirement.
+* **CAF caching**: a closed definition `IR.cafs` chooses (no parameters, and work worth
+  caching) gets a mutable `i64` global cell initialized to 0 (no Wiz value is 0) and a
+  separate build function holding its body. The declaration itself becomes a getter:
+  one global load on the hit path, `wiz_inc` for the new reference; on a miss it calls
+  the build function, publishes the value in the cell, and returns a reference. The cell
+  keeps its reference for the rest of the run, so the value (and everything it reaches)
+  is effectively immortal, exactly as the C runtime's `wiz_caf_init` path. No threads
+  are involved. The module exports `wiz_caf_builds`, an `i32` global that counts misses,
+  so a test can observe that a CAF is built once.
 * **Memory and reclamation**: addresses 8–2056 are a scratch buffer for call arguments
   (`pap`/`ap`), the free lists' heads follow it (one `i32` per size class, 2056–2396), big
   literals' decimal text starts at 4096, and the heap follows it. Every object has a
@@ -108,9 +129,10 @@ size}` (the C layout) and `i64` fields. Tags are the C runtime's (`0xFFFF0000` c
   is canonical.
 
 The five host imports are `big_of_dec`, `big_op`, `big_cmp`, `big_log2` and
-`big_to_dec`; the module exports `memory`, `wiz_main` (the IR's `wiz.entry`) and three
-decoders (`wiz_value_tag`, `wiz_value_field`, `wiz_big_digits`). The Wasm runtime is 47
-functions (`runtimeNames` in `Wiz/Compiler/Wasm.lean`).
+`big_to_dec`; the module exports `memory`, `wiz_main` (the IR's `wiz.entry`), three
+decoders (`wiz_value_tag`, `wiz_value_field`, `wiz_big_digits`) and the `i32` global
+`wiz_caf_builds` (the number of CAF misses, used by the caching test). The Wasm runtime
+is 47 functions (`runtimeNames` in `Wiz/Compiler/Wasm.lean`).
 
 ## Limits and what remains
 
@@ -131,16 +153,30 @@ These are deliberate for this target; none of them affects the C or LLVM backend
   `WIZ_TAG_EXT` (a pointer with a release function) has no Wasm equivalent: an `ext` value
   cannot be built, so there is no finalizer to run. The tags that *can* appear are
   constructors, closures, big numbers, arrays and thunks.
-* **No closed-definition caching.** A zero-argument definition (`def c : Nat := …`) is
-  recomputed at each use rather than cached as the C runtime's CAF path does. It is pure,
-  so the result is the same; only work and sharing differ (`memo` still shares inside one
-  use). There are consequently no immortal objects (`rc == 0`): every object is owned by
-  exactly one reference and is freed by its last drop.
-* **No tail calls.** Deep *non-tail* recursion and join chains use the engine's stack;
-  Node's default Wasm stack handles thousands of frames, not the C runtime's 1 GB. A
-  self tail call in the IR is still a direct call here (there is no tail-call proposal in
-  the module), so a loop written as tail recursion can overflow a deep input. A trap from
-  stack exhaustion is reported by the host as a failure, never as a value.
+* **CAF values are immortal, as in the C runtime.** A closed definition's value is held
+  by its global cell for the rest of the run (and is not counted against a free); this is
+  the sharing the native backends have, not a leak. A CAF that is never used is never
+  built (the cache is lazy). A CAF that re-enters itself while being built builds itself
+  again, and so diverges exactly as it did without the cache. A value that does no work
+  (a scalar, a call of another constant) is not cached, matching `IR.cafs`.
+* **The tail-call proposal is required.** Every module this backend emits uses
+  `return_call` (the tail position of a direct call, a closure application, a `jmp`, a
+  boxed wrapper and a `jdecl` fall-through) and the validator checks it. Node 26 and
+  current browsers implement it. On an engine without the proposal, instantiation fails
+  with a `CompileError`; `web/wasm-host.mjs` detects this with a tiny
+  `return_call` probe (`supportsTailCalls`, `WebAssembly.validate` of the smallest module
+  using the opcode) and reports that the engine lacks the feature instead of leaving a
+  bare compile error. There is no fallback encoding in a module that uses a tail call:
+  the module is written once and the engine is not known at `wiz build` time. Modules
+  emitted before this change (with no `return_call`) still run unchanged on such an
+  engine.
+* **Non-tail recursion still uses the engine's stack.** Deep *non-tail* recursion and
+  the non-tail case continuations use ordinary frames; Node's default Wasm stack handles
+  thousands of frames, not the C runtime's 1 GB. The trap case in the test group is
+  deliberately non-tail: it must still exhaust the stack and be reported as a failure,
+  never as a value. A tail-recursive chain through a *closure* (`ap`) also keeps one
+  `wiz_apply` frame per step, because that runtime function must free its argument
+  buffers after the call; a chain through direct calls and joins is fully flat.
 * **No IO, FFI, exceptions or host imports beyond big integers.** `main` must not be
   `IO`; foreign functions other than the five `Array` externs are compile errors. Native
   `String`/`Bytes`/`StrMap`/`WordArray`/`WordMap`/`Intern` operations, machine words,
@@ -191,9 +227,25 @@ test group assert a peak of at most 8 pages (512 KiB) as well as the result, and
 algorithms are checked against the module compiled by the previous backend and against the
 interpreter for every other case.
 
+Tail calls and CAF caching, Node 26, best of five runs:
+
+| workload | feature | peak linear memory | `wiz_main` |
+| --- | --- | --- | --- |
+| 10,000,000 mutual tail calls | `return_call` | 64 KiB (1 page) | 36.6 ms |
+| two live uses of a closed `Tree` of `2^20 - 1` nodes | CAF cached | 257 pages (16.1 MiB) | 23.0 ms |
+| the same two uses, with the tree rebuilt per use (unit argument) | no cache | 513 pages (32.1 MiB) | 44.4 ms |
+
+The tail workload is constant-stack: the engine's stack is not part of linear memory, and
+the 1-page peak is the runtime's scratch/free-list area. The same mutual recursion at
+200,000 (the test case) exhausts the engine's stack with the old non-tail encoding and
+completes with `return_call`. In the CAF row both uses are live at once (`size big +
+size big`), so caching halves the peak as well as removing one of the two builds; a loop
+that rebuilds the tree each iteration shows the same time difference without the peak
+change (`31.3 ms` cached vs `53.7 ms` rebuilt for twenty traversals of a depth-17 tree).
+
 ## Tests and counts
 
-`Tests/Groups/Wasm.lean` is the `wasm` group (`lake test -- wasm`): **29 cases**. They
+`Tests/Groups/Wasm.lean` is the `wasm` group (`lake test -- wasm`): **34 cases**. They
 cover:
 
 * **golden arithmetic** (small, big and saturating subtraction), **control flow** (nested
@@ -201,6 +253,14 @@ cover:
   over-application), **strings as algebraic data**, **codata** (`lazyTag`/`lazySet`),
   **generic data** (a recursive constructor built from variables, which uses
   `pack`/`mkObj`), `Array`, `Int`, `memo`, and closed definitions;
+* **tail calls**: 200,000-deep mutual tail recursion (a direct `return_call`) and a
+  200,000-step self tail call (`IR`'s join loop, `jmp`); both would exhaust the stack
+  under the old non-tail encoding. The module bytes from two compilations are compared,
+  and the validator is run with `tailCalls := false` to show that it requires the
+  proposal;
+* **CAF caching**: a closed `List Nat` is used twice; a module-level build counter
+  (`wiz_caf_builds`) is non-zero after `main` and does not move when `main` is run a
+  second time in the same instance;
 * **reclamation**: an allocation loop that would need ~105 MB under the bump allocator
   completes with a peak under 8 pages (512 KiB); a churn loop over constructors of four
   widths (alloc/free/realloc) and a loop of functional list updates (`reset`/`reuse`) stay
