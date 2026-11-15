@@ -1,0 +1,13 @@
+-- A path-reproducibility corpus program: Unicode literals and UTF-8 operations.
+import Prelude
+import IO
+import Text
+import Std
+
+def twice (f : Nat → Nat) (n : Nat) : Nat := f (f n)
+
+def main : IO Unit := do
+  IO.println "héllo, wörld — λx. 日本語";
+  IO.println (Nat.toString (twice (fun n => n * 3) 2));
+  IO.println (Nat.toString (String.length "αβγ"));
+  IO.println (Str.toString (Str.slice (Str.ofString "aλb") 1 3))

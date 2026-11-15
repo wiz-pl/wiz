@@ -55,9 +55,14 @@ def load (tc : Toolchain) (roots : List System.FilePath) (salt : UInt64) (src : 
       nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := ← tc.smt.resolve }
   let key := Cache.moduleKey (fun n => if n == mainName then some src else loader n) (headers[·]?) salt mainName
     own.contains (Module.includeResolver includes)
-  -- a `link_c` file that appears or disappears changes the check (its contents enter
-  -- only the link's key)
-  let key := mixHash key (hash (toString ((sources.toList.map fun (k, v) => k ++ "=" ++ v).toArray.qsort (· < ·))))
+  -- a `link_c` file that appears, disappears or changes changes the check. The key
+  -- names it by its module and path as written, and hashes its contents: never by its
+  -- resolved absolute path, which would make the key depend on where the checkout is.
+  let mut sourceKey := ""
+  for (k, v) in (sources.toList.toArray.qsort (fun a b => a.1 < b.1)) do
+    let h ← try pure (toString (hash (← IO.FS.readBinFile v))) catch _ => pure "missing"
+    sourceKey := sourceKey ++ k ++ "\x00" ++ h ++ "\x00"
+  let key := mixHash key (hash sourceKey)
   -- (27a) `--trust-native` changes what a check accepts: its jobs are others
   let key := if tc.trustNative then mixHash key (hash s!"trust-native {init.nativeFuel}") else key
   -- (28) so do the solver settings

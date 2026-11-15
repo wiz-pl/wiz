@@ -145,6 +145,42 @@ A release toolchain's `share/wiz/NOTICE` says the same, and also lists the third
 code linked into `wiz`, `grail` and `tower` themselves; the licence texts are in
 `share/wiz/LICENSES/` and `share/wiz/cc/LICENSES/`.
 
+## Reproducible builds
+
+A build is reproducible when the same inputs give the same bytes, wherever the checkout
+lives. `scripts/check-repro.sh` tests that by building `Tests/ReproPaths` (pure code, IO,
+Unicode, a `link_c` shim, a `--split` build, a `-g` build, the LLVM backend and a grail
+package) under two absolute roots, `${TMPDIR}/…/a` and `${TMPDIR}/…/b`. The roots differ
+in `PWD`, `HOME`, `TMPDIR`, umask, locale, `TZ`, `SOURCE_DATE_EPOCH`, the cache directory
+and `grail -j`; the script compares the generated C, the executables, the `.grail` tree
+(including `link.txt`) and the cache entries (names and contents, not the `bin/` memo).
+
+```sh
+scripts/check-repro.sh                 # the corpus (needs .lake/build/bin/wiz)
+scripts/check-repro.sh --json          # one JSON object on stdout
+scripts/check-repro.sh --compiler      # also build wiz and grail under two paths
+scripts/check-repro.sh --compiler-a A --compiler-b B
+```
+
+It skips cleanly (exit 0, `status: skip`) when `wiz` is not built. The compiler comparison
+keeps `HOME` fixed: elan installs a Lean toolchain per `HOME`, so a different `HOME` is a
+different compiler input (and a different `RUNPATH` in the executable), not a path
+variation. `--compiler-olean` also compares `.olean` files; Lean stores the absolute
+source path in them, so they are expected to differ and are skipped by default.
+
+The cheap sources of non-determinism are fixed: `-g` builds map the generated C's
+directory and the compilation directory to `.` (`-ffile-prefix-map`, so debug info and
+`__FILE__` do not name the checkout); a grail `link_c` file is named relative to the
+package in `link.txt`, and its check key hashes its contents rather than its absolute
+path; directory walks are sorted; and `scripts/release-tarball.sh` writes a sorted
+archive with fixed owners, modes and `SOURCE_DATE_EPOCH`, through `gzip -n`.
+
+The remaining causes are inputs or metadata: diagnostics print the path they were given;
+Lean's `.olean`/`.ilean`/`.trace` files store absolute source paths; the Lean toolchain's
+`RUNPATH` stores where its libraries are installed; and a split build's parallel tasks
+report whichever error finishes first (artifacts are unaffected). The compiler binary,
+the generated C and the linked programs are compared byte for byte by the script.
+
 ## Continuous integration
 
 `nix develop` gives the toolchain the tests need besides Lean (see `flake.nix`): GMP and
