@@ -651,9 +651,12 @@ partial def vNatOp (g : Globals R) (op : Name) (args : Array (Val R)) : Val R :=
   if let some v := natFast? g op args then v else
   -- the arguments as numerals, stopping at the first that isn't one: forcing the rest
   -- could run a numeral's recursion all the way down (`d * 2^64` is `d + d * (2^64 - 1)`,
-  -- whose second argument is the next step, and so on), or build a `Nat.pow` whose value is
-  -- astronomical
-  let lits : Option (Array Nat) := args.foldlM (init := #[]) fun acc a => match whnfNumeral g a with
+  -- whose second argument is the next step, and so on). The scan *does* force an expansive
+  -- `Nat.pow`/`Nat.shiftLeft` here (`whnf`, not `whnfNumeral`): every earlier argument is a
+  -- numeral, so this operation is about to compute its native result and really needs the
+  -- value. Refusing to force it here made `Nat.log2 (Nat.pow 2 5000)` unfold `log2`'s
+  -- definition instead of computing natively, and `rfl` on it ran for minutes.
+  let lits : Option (Array Nat) := args.foldlM (init := #[]) fun acc a => match whnf a with
     | .natLit n => some (acc.push n)
     | _ => none
   let d : Val R := match (g.builtins.lookup op).bind g.find? with

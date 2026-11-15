@@ -94,11 +94,16 @@ def builtinGroup : Group where
           "#print axioms t\n#print axioms u\n#print axioms v\n#print axioms s")
           ["'t' does not depend on any axioms", "'u' does not depend on any axioms",
            "'v' does not depend on any axioms", "'s' does not depend on any axioms"] },
-    { name := "a huge power is computed when the value is needed (#eval, #reduce)", run := fun _ =>
-        -- the glue is not a refusal: `#eval` (the IR interpreter) and `#reduce` (the eager
-        -- kernel, `g.eager` skips `natExpansive?`) both force the value. A modest huge power
-        -- is bounded, so ask for its bit length rather than printing 1506 digits.
-        okLib ("import Prelude\n#eval Nat.log2 (Nat.pow 2 5000)\n#reduce Nat.log2 (Nat.pow 2 5000)")
+    { name := "a huge power is computed when the value is needed (#eval, #reduce, the kernel)", run := fun _ =>
+        -- the glue is not a refusal: `#eval` (the IR interpreter), `#reduce` (the eager
+        -- kernel, `g.eager` skips `natExpansive?`) and a `refl` that needs the value all
+        -- force it. A modest huge power is bounded, so ask for its bit length rather than
+        -- printing 1506 digits. (`vNatOp`'s numeral scan must force it: refusing there made
+        -- `Nat.log2 (Nat.pow 2 5000)` unfold `log2`'s definition, and this `rfl` timed out.)
+        okLib ("import Prelude\n" ++
+          "def z : Nat.log2 (Nat.pow 2 5000) = 5000 := refl 5000\n" ++
+          "def z2 : Nat.pow 2 5000 = Nat.shiftLeft 1 5000 := rfl\n" ++
+          "#eval Nat.log2 (Nat.pow 2 5000)\n#reduce Nat.log2 (Nat.pow 2 5000)")
           ["5000", "5000"] },
     { name := "different huge powers are not equal", run := fun _ =>
         -- the arguments are compared first; they differ, so equality fails (cleanly, and
