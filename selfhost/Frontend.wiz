@@ -1136,6 +1136,16 @@ def tagTm (lv : Lvl) (k i : Nat) : Tm := match tagLifted lv with
 def tagValTm (lv : Lvl) (k i : Nat) : Val := match tagLifted lv with
   | .true => .vup (.vtag k i)
   | .false => .vtag k i
+-- (U2) the tag at a *use* of a data type is lifted iff the declaration lifted it: the
+-- description was built at the declaration's (symbolic) level, so a level expression
+-- that happens to be 0 after substitution (e.g. `max 0 u` at `u := 0`) still stores the
+-- lifted tag. The match compiler must follow the declaration, not the instantiation.
+def tagTmB (lifted : Bool) (k i : Nat) : Tm := match lifted with
+  | .true => .up (.tag k i)
+  | .false => .tag k i
+def tagValTmB (lifted : Bool) (k i : Nat) : Val := match lifted with
+  | .true => .vup (.vtag k i)
+  | .false => .vtag k i
 def addCtors (T : String) (us : List String) (lv : Lvl) (ps : List String) (pts : Tms) (nidx : Nat) (I : Tm) (Tc TcI : Tm) (k : Nat) (strct : Bool) : Globals → Nat → List Syntax → Added
   | gs, _, .nil => .ok gs .nil
   | gs, i, .cons c cs =>
@@ -4071,6 +4081,9 @@ def splitCtors (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Va
           let I := substIfAny lps lvs I0;
           let D := substIfAny lps lvs D0;
           let lv := substLvl lps lvs lv0;
+          -- (the description was built at the declaration's level, so its tag lift is
+          -- decided there, not at the instantiation)
+          let tagL := tagLifted lv0;
           let fam := substIfAny lps lvs fam0;
           -- the parameters and the index (`tt` without one) of the scrutinee's type
           let pargs := tmsTake np args;
@@ -4089,7 +4102,7 @@ def splitCtors (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Va
           let XAt := fun (dd : Nat) => (.lam (.mu lv (IAt (dd + 1)) (DAt (dd + 1)) (.var 0)) : Tm);
           -- the family at a size `s` (a term at depth `dd`)
           let XsAt := fun (dd : Nat) (s : Tm) => (.lam (.mus lv (IAt (dd + 1)) (DAt (dd + 1)) (.var 0) (shiftTm 1 0 s)) : Tm);
-          let DtAt := fun (dd t : Nat) => nfAt dd (.app (descFn (DAt dd)) (match tagLifted lv with
+          let DtAt := fun (dd t : Nat) => nfAt dd (.app (descFn (DAt dd)) (match tagL with
             | .true => .up (.var t)
             | .false => .var t));
           -- the motive's body (at depth `d + 2`): `R`, or at the structural split
@@ -4127,7 +4140,7 @@ def splitCtors (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Va
                 (piH (nfAt (d + 5) (tApps (allTm lv v) (args6 (IAt (d + 5)) (DtAt (d + 5) 1) (XAt (d + 5)) (PAt (d + 5)) (.var 4) (.var 0))))
                   (shiftTm 4 0 MB))
             | .false => piH (nfAt (e + 4) (interpApp lv (IAt (e + 4)) (DtAt (e + 4) 0) (XsAt (e + 4) (.var 4)) (.var 3)))
-                (piH (.unit (ln 1)) (.letE (.mus lv (IAt (e + 6)) (DAt (e + 6)) (.var 5) (.szSuc (.var 6))) (.con (.pair (match tagLifted lv with
+                (piH (.unit (ln 1)) (.letE (.mus lv (IAt (e + 6)) (DAt (e + 6)) (.var 5) (.szSuc (.var 6))) (.con (.pair (match tagL with
                   | .true => .up (.var 2)
                   | .false => .var 2) (.var 1)))
                   (nfAt (e + 7) (.app (.app (PAt (e + 7)) (.var 6)) (.var 0)))));
@@ -4147,10 +4160,10 @@ def splitCtors (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Va
             | .false => Cx.define cx2 "ih✝" .vtt (.vunit (ln 1));
           -- the motive's body as a value (it doesn't use `i` and `y`)
           let MBv := eval (.cons .vtt (.cons .vtt env)) MB;
-          match branches gs mc es cx3 expected cols top ihLvls cls k (.mk L ty tyI .qw) T np lv pargs nidxE I idx fam modeB MB0 MB MBv MT G b (lenL ctors) 0 ctors with
+          match branches gs mc es cx3 expected cols top ihLvls cls k (.mk L ty tyI .qw) T np tagL pargs nidxE I idx fam modeB MB0 MB MBv MT G b (lenL ctors) 0 ctors with
           | .err m => .err m
           | .ok bs es' =>
-            let convoyTag : Tm := match tagLifted lv with
+            let convoyTag : Tm := match tagL with
               | .true => .down (.fst (.var 1))
               | .false => .fst (.var 1);
             let convoy : Tm := .app (.app (.ecase MT convoyTag bs) (.snd (.var 1))) (.var 0);
@@ -4173,7 +4186,7 @@ def otherMember (idx res : Tm) : Bool := match idx with
 -- one branch per constructor, in the context of the method's binders (`cx3`, at depth
 -- `d + 3`): `fun rest ih => let fields; (let hyps; let cur✝; fun q =>) …`
 def branches (gs : Globals) (mc : MatchCtx) (es : ES) (cx3 : Cx) (expected : Val) (cols : List Col)
-    (top : Bool) (ihLvls : List Nat) (cls : List Clause) (k : Nat) (col : Col) (T : String) (np : Nat) (lv : Lvl)
+    (top : Bool) (ihLvls : List Nat) (cls : List Clause) (k : Nat) (col : Col) (T : String) (np : Nat) (lifted : Bool)
     (args : Tms) (nidx : Nat) (I idx fam : Tm) (modeB : Bool) (MB0 MB : Tm) (MBv : Val) (MT : Tm) (G b : Nat) (nc i : Nat) : List Ctor → BE
   | .nil => .ok .tnil es
   | .cons (.mk c fs res qs impl) rest =>
@@ -4181,7 +4194,7 @@ def branches (gs : Globals) (mc : MatchCtx) (es : ES) (cx3 : Cx) (expected : Val
     let d := Cx.lvl cx3 - 3;
     let d0 := d + 5;
     -- `rest` and `ih`: the convoy's motive at this constructor's tag
-    let bt := whnf (eval (.cons (tagValTm lv nc i) (TCtx.env (Cx.c cx3))) MT);
+    let bt := whnf (eval (.cons (tagValTmB lifted nc i) (TCtx.env (Cx.c cx3))) MT);
     let cx5 := match bt with
       | .vpi _ _ _ restTy e1 c1 =>
         let cx4 := Cx.bind cx3 "rest✝" restTy;
@@ -4189,7 +4202,7 @@ def branches (gs : Globals) (mc : MatchCtx) (es : ES) (cx3 : Cx) (expected : Val
         | .vpi _ _ _ ihTy _ _ => Cx.bind cx4 "ihs✝" ihTy
         | _ => Cx.bind cx4 "ihs✝" .vtt
       | _ => Cx.bind (Cx.bind cx3 "rest✝" .vtt) "ihs✝" .vtt;
-    let next := fun (es1 : ES) => branches gs mc es1 cx3 expected cols top ihLvls cls k col T np lv args nidx I idx fam modeB MB0 MB MBv MT G b nc (i + 1) rest;
+    let next := fun (es1 : ES) => branches gs mc es1 cx3 expected cols top ihLvls cls k col T np lifted args nidx I idx fam modeB MB0 MB MBv MT G b nc (i + 1) rest;
     -- the motive's body at the method's `i` (level `d`; the motive itself is over the
     -- context before the method's binders, and `j`)
     let MBi := eval (.cons .vtt (.cons (fresh d) (dropEnv (3 + b) (TCtx.env (Cx.c cx3))))) MB;
@@ -4225,7 +4238,7 @@ def branches (gs : Globals) (mc : MatchCtx) (es : ES) (cx3 : Cx) (expected : Val
                 | .mk L' _ _ _ => tApps fam (tmsAppend (shiftTms (base - L') args) (match nidx with
                   | .zero => .tnil
                   | .succ _ => .tcons (.var (base - 1 - d)) .tnil));
-              let curVal : Tm := .con (.pair (tagTm lv nc i) (.var (F + Rc + 1)));
+              let curVal : Tm := .con (.pair (tagTmB lifted nc i) (.var (F + Rc + 1)));
               let env7 := TCtx.env (Cx.c cx7);
               let top1 := match top with
                 | .true => 1

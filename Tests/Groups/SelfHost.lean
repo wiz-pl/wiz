@@ -2214,12 +2214,16 @@ def selfHostGroup : Group where
           "instance instInhabitedNat : Inhabited Nat where\n  default := 42\n" ++
           "def unbox.{u} {A : Type u} (b : Box A) : A := match b with\n  | .mk a => a\n" ++
           "def wget.{u} {A : Type u} (w : Wrap A) : A := w.val\n" ++
+          "def unboxNat (b : Box Nat) : Nat := match b with\n  | .mk a => a\n" ++
+          "def wgetNat (w : Wrap Nat) : Nat := match w with\n  | .mk a => a\n" ++
           "def reprWrap.{u} {A : Type u} [Repr A] (w : Wrap A) : Nat := Repr.repr w.val\n" ++
           "def defaultNat : Nat := Inhabited.default\n" ++
           "def natBox : Box Nat := Box.mk 7\n" ++
           "def w5 : Wrap Nat := Wrap.mk 5\n" ++
           "#reduce Nat.beq (unbox natBox) 7\n" ++
           "#reduce Nat.beq (wget w5) 5\n" ++
+          "#reduce Nat.beq (unboxNat natBox) 7\n" ++
+          "#reduce Nat.beq (wgetNat w5) 5\n" ++
           "#reduce Nat.beq (reprWrap w5) 5\n" ++
           "#reduce Nat.beq defaultNat 42\n")
           ("Box : (x0 : Sort((u)+1)) → Sort((u)+1)\n" ++
@@ -2233,11 +2237,14 @@ def selfHostGroup : Group where
            "instInhabitedNat : (Inhabited.{0} Nat)\n" ++
            "unbox : (x0 :0 Sort((u)+1)) → (x1 : (Box.{u} x0)) → x0\n" ++
            "wget : (x0 :0 Sort((u)+1)) → (x1 : (Wrap.{u} x0)) → x0\n" ++
+           "unboxNat : (x0 : (Box.{0} Nat)) → Nat\n" ++
+           "wgetNat : (x0 : (Wrap.{0} Nat)) → Nat\n" ++
            "reprWrap : (x0 :0 Sort((u)+1)) → (x1 : (Repr.{u} x0)) → (x2 : (Wrap.{u} x0)) → Nat\n" ++
            "defaultNat : Nat\n" ++
            "natBox : (Box.{0} Nat)\n" ++
            "w5 : (Wrap.{0} Nat)\n" ++
-           "con((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\n") },
+           "con((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\n" ++
+           "con((#1, (tt, tt)))\ncon((#1, (tt, tt)))\n") },
     { name := "U2: level mismatches in a symbolic data type are rejected, as in the Lean frontend (U2/A15)", run := fun _ =>
         selfhostAgrees ("inductive Box.{u} (A : Type u) : Type u where\n  | mk (a : A)\n" ++
           "structure Wrap.{u} (A : Type u) where\n  val : A\n" ++

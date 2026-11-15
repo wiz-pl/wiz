@@ -130,10 +130,15 @@ instead of `Nat`; the kernel compares them with `lvlEquiv` in `convTy`, `tmEq`,
 `delim*`, `ind*`, `sfix*`, `scase*`, `coit*`) build `lsucc`/`lmax`/`limax` levels.
 
 The frontend (`inductiveCmdL`, `dataLevel`) takes the declaration's universe parameter
-(or the largest `Type u` it mentions) as the description level. Above `Type 0` the
+(or the largest universe parameter a `Type u` in the declaration mentions) as the
+description level; a field that is itself `Type u` needs `u+1`, the gap below. Above `Type 0` the
 description's tag field is lifted (`ULift (Enum k)`, Q4), as in the Lean frontend: the
 constructor stores `up tag`, the description eliminates it through `down`, and match
 compilation lifts/downs the tag in the method type and the reconstructed constructor.
+The lift is decided at the declaration's (symbolic) level and carried into every
+instantiation: the stored description keeps its `ULift` even when the level substitutes
+to `0`, so a concrete match on `Box Nat` must follow the declaration, not the
+instantiated level (otherwise it reads the tag as an unlifted `Enum`).
 Level metavariables of a constant's instantiation are unified (`unifyHead`/`unifyLvls`)
 so `Box Nat` solves `Box.{?u} ?A` from the expected type. A class's method projections
 carry the class's `.{u}` parameters.
