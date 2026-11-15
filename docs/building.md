@@ -120,6 +120,16 @@ licence, in `share/wiz/cc/LICENSES/lean4-LICENSES` with Lean's third-party licen
 not bundled). A checkout uses `cc` and the system's GMP unless you pass
 `--cc`/`--cflags`/`--ldflags` (the Nix dev shell writes them to `grail.local.wiz`).
 
+`wiz build FILE -o OUT --target wasm` is a third path (stage 8f,
+[08-backend/wasm.md](stages/08-backend/wasm.md)): it emits a binary WebAssembly module
+directly from the IR and does not invoke a C compiler, the C runtime or GMP. Values live
+in the module's linear memory; a small checked-in JS host (`web/wasm-host.mjs`) supplies
+big integers as `BigInt`s and prints the result. It runs IO-less `main`s over `Nat`/`Int`,
+closures, arrays and algebraic data; `wiz run FILE --target wasm` builds and runs it under
+Node. The subset boundary is checked at compile time and every module is structurally
+validated before it is written; the limits (no reference counting, no IO/FFI, no library
+target) are in that section. `--wasm` is the older spelling of the same target.
+
 **Licences of what is linked into your programs.** The Wiz Runtime Library Exception
 (COPYING.RUNTIME) lets you distribute programs compiled by Wiz under any terms, but it
 covers only Wiz's own runtime. Other libraries keep their licences:
@@ -174,7 +184,7 @@ Nix-built test driver (`packages.tests`), not `lake test`, and symlink the store
 and `grail` into the checkout's `.lake/build/bin`, which some cases and
 `scripts/trust-ledger.sh` name directly (the driver also carries the wrapped `wiz` and
 `grail` beside itself, which `Tests/Grail.lean` looks for). The dev shell (`nix develop`)
-is still what puts `cc`, `llc`, z3, cadical and Neovim on `PATH`, and it writes
+is still what puts `cc`, `llc`, z3, cadical, Node and Neovim on `PATH`, and it writes
 `grail.local.wiz` for the cases that compile C.
 
 The Nix build is about 353 MB for `wiz` (1.8 GB with its closure: Lean, GMP, Boehm GC,

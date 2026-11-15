@@ -289,8 +289,9 @@
       devShells = forAll (pkgs: {
         default = pkgs.mkShell {
           # neovim: the `nvim` test group (editors/nvim); z3 and cadical: the `smt` and `sat` groups
-          # (stage 28b: `sat_decide` finds it on PATH)
-          packages = [ pkgs.elan pkgs.gmp pkgs.boehmgc pkgs.llvm pkgs.python3 pkgs.git pkgs.neovim pkgs.z3 pkgs.cadical ];
+          # (stage 28b: `sat_decide` finds it on PATH); nodejs: the `wasm` group runs its
+          # modules under Node with web/wasm-host.mjs (stage 8f) and skips without it
+          packages = [ pkgs.elan pkgs.gmp pkgs.boehmgc pkgs.llvm pkgs.python3 pkgs.git pkgs.neovim pkgs.z3 pkgs.cadical pkgs.nodejs ];
           # `wiz` and `grail` take the toolchain as flags (stage 23a); grail and the test
           # driver read this machine's paths from the uncommitted grail.local.wiz written
           # here (when run from the repository root). Nothing reads the environment.
