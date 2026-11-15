@@ -90,12 +90,12 @@ Feral	Fe.unify3	partial	legacy: pre-gate baseline; not individually reviewed	una
 Feral	Fe.unifyZ	partial	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Feral	Fe.varE	partial	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Feral	Fe.zonk	partial	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-Handle	Owned	axiom Owned	linear ownership token for an OS handle; minted and burned only by the private externs in lib/Handle.wiz	wiz-pl maintainers	2027-05-14
+Handle	Owned	axiom Owned	linear ownership token for an OS handle; minted and burned only by the private externs in lib/Handle.wiz	Reuben Steenekamp	2027-05-14
 Handle	_private.Handle._0.Owned.burn	axiom _private.Handle._0.Owned.burn	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Handle	_private.Handle._0.Owned.burn	builtin extern:wiz_handle_disown:eew:v:io:: := _private.Handle._0.Owned.burn	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Handle	_private.Handle._0.Owned.mint	axiom _private.Handle._0.Owned.mint	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Handle	_private.Handle._0.Owned.mint	builtin extern:wiz_handle_own:ee:w:io:: := _private.Handle._0.Owned.mint	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-IO	Bytes	axiom Bytes	runtime foreign byte buffer; its operations are externs in lib/IO.wiz	wiz-pl maintainers	2027-05-14
+IO	Bytes	axiom Bytes	runtime foreign byte buffer; its operations are externs in lib/IO.wiz	Reuben Steenekamp	2027-05-14
 IO	Bytes.append	axiom Bytes.append	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 IO	Bytes.append	builtin extern:wiz_bytes_append:ww:w:pure:: := Bytes.append	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 IO	Bytes.empty	axiom Bytes.empty	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -114,7 +114,7 @@ IO	Bytes.slice	axiom Bytes.slice	legacy: pre-gate baseline; not individually rev
 IO	Bytes.slice	builtin extern:wiz_bytes_slice:wnn:w:pure:: := Bytes.slice	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 IO	Bytes.toString	axiom Bytes.toString	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 IO	Bytes.toString	builtin extern:wiz_bytes_to_string:w:s:pure:: := Bytes.toString	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-IO	Float64	axiom Float64	runtime foreign type for C double; its operations are externs in lib/IO.wiz	wiz-pl maintainers	2027-05-14
+IO	Float64	axiom Float64	runtime foreign type for C double; its operations are externs in lib/IO.wiz	Reuben Steenekamp	2027-05-14
 IO	Float64.add	axiom Float64.add	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 IO	Float64.add	builtin extern:wiz_f64_add:ff:f:pure:: := Float64.add	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 IO	Float64.div	axiom Float64.div	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -142,7 +142,7 @@ IO	IO.readFile	builtin extern:wiz_io_read_file:s:s:io:: := IO.readFile	legacy: p
 IO	Nat.toString	partial	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 IO	Nat.toStringSmall	axiom Nat.toStringSmall	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 IO	Nat.toStringSmall	builtin extern:wiz_nat_show:n:s:pure:: := Nat.toStringSmall	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-IO	UInt64	axiom UInt64	runtime foreign type for C uint64_t; its operations are externs in lib/IO.wiz	wiz-pl maintainers	2027-05-14
+IO	UInt64	axiom UInt64	runtime foreign type for C uint64_t; its operations are externs in lib/IO.wiz	Reuben Steenekamp	2027-05-14
 IO	UInt64.add	axiom UInt64.add	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 IO	UInt64.add	builtin extern:wiz_u64_add:uu:u:pure:: := UInt64.add	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 IO	UInt64.div	axiom UInt64.div	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -161,7 +161,7 @@ IO	UInt64.sub	axiom UInt64.sub	legacy: pre-gate baseline; not individually revie
 IO	UInt64.sub	builtin extern:wiz_u64_sub:uu:u:pure:: := UInt64.sub	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 IO	UInt64.toNat	axiom UInt64.toNat	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 IO	UInt64.toNat	builtin extern:wiz_u64_id:u:n:pure:: := UInt64.toNat	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-IO	World	axiom World	linear world token for IO; erased scalar at runtime; no Wiz definition by design (lib/IO.wiz)	wiz-pl maintainers	2027-05-14
+IO	World	axiom World	linear world token for IO; erased scalar at runtime; no Wiz definition by design (lib/IO.wiz)	Reuben Steenekamp	2027-05-14
 Infoview	Infoview.htmlItems	partial	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Infoview	Infoview.itemsLines	partial	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Infoview	Infoview.splitHeader	partial	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -181,7 +181,7 @@ Intern	InternTable.lookupNative	builtin extern:wiz_itab_lookup:ww:w:pure:: := In
 Intern	InternTable.mk	native InternTable := InternTable.ofListNative/InternTable.toListNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Intern	InternTable.ofListNative	axiom InternTable.ofListNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Intern	InternTable.ofListNative	builtin extern:wiz_itab_of_list:w:w:pure:: := InternTable.ofListNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-Intern	InternTable.seal✝	axiom InternTable.seal✝	seal of a sealed type with a native representation; keeps the type opaque and distinct and has no computational content (generated by `sealed`)	wiz-pl maintainers	2027-05-14
+Intern	InternTable.seal✝	axiom InternTable.seal✝	seal of a sealed type with a native representation; keeps the type opaque and distinct and has no computational content (generated by `sealed`)	Reuben Steenekamp	2027-05-14
 Intern	InternTable.seal✝	builtin seal:InternTable := InternTable.seal✝	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Intern	InternTable.toListNative	axiom InternTable.toListNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Intern	InternTable.toListNative	builtin extern:wiz_itab_to_list:w:w:pure:: := InternTable.toListNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -193,14 +193,14 @@ Json	Json.emitRest	partial	legacy: pre-gate baseline; not individually reviewed	
 Json	Json.object	partial	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Json	Json.strBody	partial	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Json	Json.strEscape	partial	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-Json	Json.sub	partial	deliberately opaque subtraction: makes the elaborator leave Json.surrogate's arithmetic alone (see the note above it)	wiz-pl maintainers	2027-05-14
+Json	Json.sub	partial	deliberately opaque subtraction: makes the elaborator leave Json.surrogate's arithmetic alone (see the note above it)	Reuben Steenekamp	2027-05-14
 Json	Json.value	partial	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-MVar	Lock	axiom Lock	runtime mutex; its operations are externs in lib/MVar.wiz	wiz-pl maintainers	2027-05-14
-MVar	Lock.Guard	axiom Lock.Guard	linear lock ownership token; produced only by Lock.acquire	wiz-pl maintainers	2027-05-14
+MVar	Lock	axiom Lock	runtime mutex; its operations are externs in lib/MVar.wiz	Reuben Steenekamp	2027-05-14
+MVar	Lock.Guard	axiom Lock.Guard	linear lock ownership token; produced only by Lock.acquire	Reuben Steenekamp	2027-05-14
 MVar	Lock.new	axiom Lock.new	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 MVar	Lock.new	builtin extern:wiz_lock_new::w:io:: := Lock.new	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-MVar	MVar	axiom MVar	runtime MVar cell; its operations are externs in lib/MVar.wiz	wiz-pl maintainers	2027-05-14
-MVar	MVar.Hole	axiom MVar.Hole	linear refill obligation for MVar.borrow; no constructor, produced only by MVar.takeHole	wiz-pl maintainers	2027-05-14
+MVar	MVar	axiom MVar	runtime MVar cell; its operations are externs in lib/MVar.wiz	Reuben Steenekamp	2027-05-14
+MVar	MVar.Hole	axiom MVar.Hole	linear refill obligation for MVar.borrow; no constructor, produced only by MVar.takeHole	Reuben Steenekamp	2027-05-14
 MVar	MVar.new	axiom MVar.new	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 MVar	MVar.new	builtin extern:wiz_mvar_new:e:w:io:: := MVar.new	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 MVar	MVar.newFull	axiom MVar.newFull	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -219,7 +219,7 @@ MVar	_private.MVar._0.MVar.fillRaw	axiom _private.MVar._0.MVar.fillRaw	legacy: p
 MVar	_private.MVar._0.MVar.fillRaw	builtin extern:wiz_mvar_fill:ewww:v:io:: := _private.MVar._0.MVar.fillRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 MVar	_private.MVar._0.MVar.takeHole	axiom _private.MVar._0.MVar.takeHole	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 MVar	_private.MVar._0.MVar.takeHole	builtin extern:wiz_mvar_take_hole:ew:w:io:: := _private.MVar._0.MVar.takeHole	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-PMap	PMap.seal✝	axiom PMap.seal✝	seal of a sealed type with a native representation; keeps the type opaque and distinct and has no computational content (generated by `sealed`)	wiz-pl maintainers	2027-05-14
+PMap	PMap.seal✝	axiom PMap.seal✝	seal of a sealed type with a native representation; keeps the type opaque and distinct and has no computational content (generated by `sealed`)	Reuben Steenekamp	2027-05-14
 PMap	PMap.seal✝	builtin seal:PMap := PMap.seal✝	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Prelude	Nat	builtin nat := Nat	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Prelude	Nat.add	builtin nat.add := Nat.add	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -242,10 +242,10 @@ Prelude	Nat.zero	builtin nat.zero := Nat.zero	legacy: pre-gate baseline; not ind
 Prelude	String	builtin string := String	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Prelude	Syntax.decDigit	partial	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Prelude	Syntax.decPowers	partial	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-Prelude	castRefl	axiom castRefl	propositional regularity for casts at a type variable (CoreSpec 8.4a); consistent in the setoid model; no definitional regularity by design (D1); used by Vec.map_cons	wiz-pl maintainers	2027-05-14
+Prelude	castRefl	axiom castRefl	propositional regularity for casts at a type variable (CoreSpec 8.4a); consistent in the setoid model; no definitional regularity by design (D1); used by Vec.map_cons	Reuben Steenekamp	2027-05-14
 Prelude	memo	builtin memo := memo	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-Ref	Loc	axiom Loc	runtime reference location; its operations are externs in lib/Ref.wiz	wiz-pl maintainers	2027-05-14
-Ref	Pts	axiom Pts	points-to evidence for a reference location; opaque relation, no constructor	wiz-pl maintainers	2027-05-14
+Ref	Loc	axiom Loc	runtime reference location; its operations are externs in lib/Ref.wiz	Reuben Steenekamp	2027-05-14
+Ref	Pts	axiom Pts	points-to evidence for a reference location; opaque relation, no constructor	Reuben Steenekamp	2027-05-14
 Ref	_private.Ref._0.Ref.freeRaw	axiom _private.Ref._0.Ref.freeRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Ref	_private.Ref._0.Ref.freeRaw	builtin extern:wiz_ref_free:ewew:v:io:: := _private.Ref._0.Ref.freeRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Ref	_private.Ref._0.Ref.newRaw	axiom _private.Ref._0.Ref.newRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -254,12 +254,12 @@ Ref	_private.Ref._0.Ref.readRaw	axiom _private.Ref._0.Ref.readRaw	legacy: pre-ga
 Ref	_private.Ref._0.Ref.readRaw	builtin extern:wiz_ref_read:ewew:w:io:: := _private.Ref._0.Ref.readRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Ref	_private.Ref._0.Ref.writeRaw	axiom _private.Ref._0.Ref.writeRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Ref	_private.Ref._0.Ref.writeRaw	builtin extern:wiz_ref_write:ewwew:w:io:: := _private.Ref._0.Ref.writeRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-Region	Outlives	axiom Outlives	outlives relation between regions; opaque, with only the evidence axioms in lib/Region.wiz	wiz-pl maintainers	2027-05-14
-Region	Outlives.refl	axiom Outlives.refl	every region outlives itself; evidence constructor (lib/Region.wiz)	wiz-pl maintainers	2027-05-14
-Region	Outlives.static	axiom Outlives.static	'static outlives every region; evidence constructor (lib/Region.wiz)	wiz-pl maintainers	2027-05-14
-Region	Outlives.trans	axiom Outlives.trans	transitivity of outlives; evidence constructor (lib/Region.wiz)	wiz-pl maintainers	2027-05-14
-Region	Region	axiom Region	erased lifetime token for Feral lowering (lib/Region.wiz); no runtime content	wiz-pl maintainers	2027-05-14
-Region	Region.static	axiom Region.static	'static region constant (lib/Region.wiz)	wiz-pl maintainers	2027-05-14
+Region	Outlives	axiom Outlives	outlives relation between regions; opaque, with only the evidence axioms in lib/Region.wiz	Reuben Steenekamp	2027-05-14
+Region	Outlives.refl	axiom Outlives.refl	every region outlives itself; evidence constructor (lib/Region.wiz)	Reuben Steenekamp	2027-05-14
+Region	Outlives.static	axiom Outlives.static	'static outlives every region; evidence constructor (lib/Region.wiz)	Reuben Steenekamp	2027-05-14
+Region	Outlives.trans	axiom Outlives.trans	transitivity of outlives; evidence constructor (lib/Region.wiz)	Reuben Steenekamp	2027-05-14
+Region	Region	axiom Region	erased lifetime token for Feral lowering (lib/Region.wiz); no runtime content	Reuben Steenekamp	2027-05-14
+Region	Region.static	axiom Region.static	'static region constant (lib/Region.wiz)	Reuben Steenekamp	2027-05-14
 Ring	Ring.Reify.bin	partial	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Ring	Ring.Reify.go	partial	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 SatTactic	SatT.node	partial	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -288,9 +288,9 @@ Scry.Egraph	Scry.Pats.size	partial	legacy: pre-gate baseline; not individually r
 Scry.Eval	Scry.evalFrom	partial	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Scry.Eval	Scry.evalStratumLoop	partial	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Scry.Eval	Scry.reachSteps	partial	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-Scry.Store	Scry.LatRel.seal✝	axiom Scry.LatRel.seal✝	seal of a sealed type with a native representation; keeps the type opaque and distinct and has no computational content (generated by `sealed`)	wiz-pl maintainers	2027-05-14
+Scry.Store	Scry.LatRel.seal✝	axiom Scry.LatRel.seal✝	seal of a sealed type with a native representation; keeps the type opaque and distinct and has no computational content (generated by `sealed`)	Reuben Steenekamp	2027-05-14
 Scry.Store	Scry.LatRel.seal✝	builtin seal:Scry.LatRel := Scry.LatRel.seal✝	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-Scry.Store	Scry.TupleRel.seal✝	axiom Scry.TupleRel.seal✝	seal of a sealed type with a native representation; keeps the type opaque and distinct and has no computational content (generated by `sealed`)	wiz-pl maintainers	2027-05-14
+Scry.Store	Scry.TupleRel.seal✝	axiom Scry.TupleRel.seal✝	seal of a sealed type with a native representation; keeps the type opaque and distinct and has no computational content (generated by `sealed`)	Reuben Steenekamp	2027-05-14
 Scry.Store	Scry.TupleRel.seal✝	builtin seal:Scry.TupleRel := Scry.TupleRel.seal✝	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Scry.Taint	Scry.taintChain	partial	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Serial	Pty.nameRaw	axiom Pty.nameRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -307,7 +307,7 @@ Serial	Serial.getRaw	axiom Serial.getRaw	legacy: pre-gate baseline; not individu
 Serial	Serial.getRaw	builtin extern:wizser_get:n:n:io:: := Serial.getRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Serial	Serial.isTtyRaw	axiom Serial.isTtyRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Serial	Serial.isTtyRaw	builtin extern:wizser_isatty:n:n:io:: := Serial.isTtyRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-Session	Chan	axiom Chan	session-typed channel foreign type; its operations are externs in lib/Session.wiz	wiz-pl maintainers	2027-05-14
+Session	Chan	axiom Chan	session-typed channel foreign type; its operations are externs in lib/Session.wiz	Reuben Steenekamp	2027-05-14
 Session	Proc.runLinked	native Proc.runLinked := Proc.runLinkedThreads	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Session	_private.Session._0.Chan.closeRaw	axiom _private.Session._0.Chan.closeRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Session	_private.Session._0.Chan.closeRaw	builtin extern:wiz_chan_close:w:v:io:: := _private.Session._0.Chan.closeRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -317,7 +317,7 @@ Session	_private.Session._0.Chan.recvRaw	axiom _private.Session._0.Chan.recvRaw	
 Session	_private.Session._0.Chan.recvRaw	builtin extern:wiz_chan_recv:eew:w:io:: := _private.Session._0.Chan.recvRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Session	_private.Session._0.Chan.sendRaw	axiom _private.Session._0.Chan.sendRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Session	_private.Session._0.Chan.sendRaw	builtin extern:wiz_chan_send:eeww:w:io:: := _private.Session._0.Chan.sendRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-Std	Array	axiom Array	runtime array foreign type; its operations are externs in lib/Std.wiz	wiz-pl maintainers	2027-05-14
+Std	Array	axiom Array	runtime array foreign type; its operations are externs in lib/Std.wiz	Reuben Steenekamp	2027-05-14
 Std	Array.empty	axiom Array.empty	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Std	Array.empty	builtin extern:wiz_array_empty:e:w:pure:: := Array.empty	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Std	Array.getD	axiom Array.getD	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -330,7 +330,7 @@ Std	Array.size	axiom Array.size	legacy: pre-gate baseline; not individually revi
 Std	Array.size	builtin extern:wiz_array_size:ew:n:pure:: := Array.size	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Std	IO.writeFile	axiom IO.writeFile	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Std	IO.writeFile	builtin extern:wiz_io_write_file:ss:v:io:: := IO.writeFile	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-Std	Str	axiom Str	runtime string foreign type for C char*; its operations are externs in lib/Std.wiz	wiz-pl maintainers	2027-05-14
+Std	Str	axiom Str	runtime string foreign type for C char*; its operations are externs in lib/Std.wiz	Reuben Steenekamp	2027-05-14
 Std	Str.append	axiom Str.append	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Std	Str.append	builtin extern:wiz_str_append:ww:w:pure:: := Str.append	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Std	Str.byte	axiom Str.byte	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -347,7 +347,7 @@ Std	Str.slice	axiom Str.slice	legacy: pre-gate baseline; not individually review
 Std	Str.slice	builtin extern:wiz_str_slice:wnn:w:pure:: := Str.slice	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Std	Str.toString	axiom Str.toString	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Std	Str.toString	builtin extern:wiz_str_to_cstr:w:s:pure:: := Str.toString	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-Std	StrMap	axiom StrMap	runtime string-keyed map foreign type; its operations are externs in lib/Std.wiz	wiz-pl maintainers	2027-05-14
+Std	StrMap	axiom StrMap	runtime string-keyed map foreign type; its operations are externs in lib/Std.wiz	Reuben Steenekamp	2027-05-14
 Std	StrMap.empty	axiom StrMap.empty	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Std	StrMap.empty	builtin extern:wiz_map_empty:e:w:pure:: := StrMap.empty	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Std	StrMap.findD	axiom StrMap.findD	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -356,7 +356,7 @@ Std	StrMap.insert	axiom StrMap.insert	legacy: pre-gate baseline; not individuall
 Std	StrMap.insert	builtin extern:wiz_map_insert:ewww:w:pure:: := StrMap.insert	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Std	StrMap.size	axiom StrMap.size	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Std	StrMap.size	builtin extern:wiz_map_size:ew:n:pure:: := StrMap.size	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-Sys	Child	axiom Child	runtime child-process handle; its operations are externs in lib/Sys.wiz	wiz-pl maintainers	2027-05-14
+Sys	Child	axiom Child	runtime child-process handle; its operations are externs in lib/Sys.wiz	Reuben Steenekamp	2027-05-14
 Sys	Child.closeStdinRaw	axiom Child.closeStdinRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Sys	Child.closeStdinRaw	builtin extern:wiz_sys_child_close_stdin:p:n:io:: := Child.closeStdinRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Sys	Child.communicateRaw	axiom Child.communicateRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -425,7 +425,7 @@ Sys	FS.writeBytesRaw	axiom FS.writeBytesRaw	legacy: pre-gate baseline; not indiv
 Sys	FS.writeBytesRaw	builtin extern:wiz_sys_write_bytes:swb:n:io:: := FS.writeBytesRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Sys	FS.writeFileRaw	axiom FS.writeFileRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Sys	FS.writeFileRaw	builtin extern:wiz_sys_write_file:ssb:n:io:: := FS.writeFileRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-Sys	Fd	axiom Fd	runtime file-descriptor handle; its operations are externs in lib/Sys.wiz	wiz-pl maintainers	2027-05-14
+Sys	Fd	axiom Fd	runtime file-descriptor handle; its operations are externs in lib/Sys.wiz	Reuben Steenekamp	2027-05-14
 Sys	Fd.adopt	axiom Fd.adopt	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Sys	Fd.adopt	builtin extern:wiz_sys_fd_adopt:n:p:io::wiz_sys_fd_free := Fd.adopt	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Sys	Fd.closeRaw	axiom Fd.closeRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -454,7 +454,7 @@ Sys	Fd.waitRaw	axiom Fd.waitRaw	legacy: pre-gate baseline; not individually revi
 Sys	Fd.waitRaw	builtin extern:wiz_sys_fd_wait:pnbn:n:io:: := Fd.waitRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Sys	Fd.writeRaw	axiom Fd.writeRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Sys	Fd.writeRaw	builtin extern:wiz_sys_fd_write:pw:n:io:: := Fd.writeRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-Sys	File	axiom File	runtime stdio/file handle; its operations are externs in lib/Sys.wiz	wiz-pl maintainers	2027-05-14
+Sys	File	axiom File	runtime stdio/file handle; its operations are externs in lib/Sys.wiz	Reuben Steenekamp	2027-05-14
 Sys	File.closeRaw	axiom File.closeRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Sys	File.closeRaw	builtin extern:wiz_sys_file_close:p:n:io:: := File.closeRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Sys	File.flushRaw	axiom File.flushRaw	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -503,7 +503,7 @@ Text	Nat.reprGo	partial	legacy: pre-gate baseline; not individually reviewed	una
 Word	IntN.mk	native IntN := IntN.ofBits/IntN.toBits	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Word	IntN.ofBits	axiom IntN.ofBits	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Word	IntN.ofBits	builtin extern:wiz_word_of_bits:ewe:w:pure:: := IntN.ofBits	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-Word	IntN.seal✝	axiom IntN.seal✝	seal of a sealed type with a native representation; keeps the type opaque and distinct and has no computational content (generated by `sealed`)	wiz-pl maintainers	2027-05-14
+Word	IntN.seal✝	axiom IntN.seal✝	seal of a sealed type with a native representation; keeps the type opaque and distinct and has no computational content (generated by `sealed`)	Reuben Steenekamp	2027-05-14
 Word	IntN.seal✝	builtin seal:IntN := IntN.seal✝	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Word	IntN.toBits	axiom IntN.toBits	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Word	IntN.toBits	builtin extern:wiz_word_to_bits:ew:w:pure:: := IntN.toBits	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -549,7 +549,7 @@ Word	UIntN.ofNatNative	builtin extern:wiz_word_of_nat:nw:w:pure:: := UIntN.ofNat
 Word	UIntN.resize	native UIntN.resize := UIntN.resizeNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Word	UIntN.resizeNative	axiom UIntN.resizeNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Word	UIntN.resizeNative	builtin extern:wiz_word_zext:enw:w:pure:: := UIntN.resizeNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-Word	UIntN.seal✝	axiom UIntN.seal✝	seal of a sealed type with a native representation; keeps the type opaque and distinct and has no computational content (generated by `sealed`)	wiz-pl maintainers	2027-05-14
+Word	UIntN.seal✝	axiom UIntN.seal✝	seal of a sealed type with a native representation; keeps the type opaque and distinct and has no computational content (generated by `sealed`)	Reuben Steenekamp	2027-05-14
 Word	UIntN.seal✝	builtin seal:UIntN := UIntN.seal✝	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Word	UIntN.shiftLeft	native UIntN.shiftLeft := UIntN.shiftLeftNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Word	UIntN.shiftLeftNative	axiom UIntN.shiftLeftNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -568,7 +568,7 @@ Word	UIntN.toBits	builtin extern:wiz_word_to_bits:ew:w:pure:: := UIntN.toBits	le
 Word	UIntN.toIntN	native UIntN.toIntN := UIntN.toIntNNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Word	UIntN.toIntNNative	axiom UIntN.toIntNNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Word	UIntN.toIntNNative	builtin extern:wiz_word_cast:ew:w:pure:: := UIntN.toIntNNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-Word	UIntN.toNat	native UIntN.toNat := UIntN.toBits	native fast path for reading an unsigned word's bits; the repr: getter is the same field access and the word/native tests pin the IR	wiz-pl maintainers	2027-05-14
+Word	UIntN.toNat	native UIntN.toNat := UIntN.toBits	native fast path for reading an unsigned word's bits; the repr: getter is the same field access and the word/native tests pin the IR	Reuben Steenekamp	2027-05-14
 Word	UIntN.xor	native UIntN.xor := UIntN.xorNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Word	UIntN.xorNative	axiom UIntN.xorNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 Word	UIntN.xorNative	builtin extern:wiz_word_xor:eww:w:pure:: := UIntN.xorNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -590,7 +590,7 @@ WordArray	U32Array.popNative	builtin extern:wiz_warray_pop:w:w:pure:: := U32Arra
 WordArray	U32Array.push	native U32Array.push := U32Array.pushNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 WordArray	U32Array.pushNative	axiom U32Array.pushNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 WordArray	U32Array.pushNative	builtin extern:wiz_warray_push:ww:w:pure:: := U32Array.pushNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-WordArray	U32Array.seal✝	axiom U32Array.seal✝	seal of a sealed type with a native representation; keeps the type opaque and distinct and has no computational content (generated by `sealed`)	wiz-pl maintainers	2027-05-14
+WordArray	U32Array.seal✝	axiom U32Array.seal✝	seal of a sealed type with a native representation; keeps the type opaque and distinct and has no computational content (generated by `sealed`)	Reuben Steenekamp	2027-05-14
 WordArray	U32Array.seal✝	builtin seal:U32Array := U32Array.seal✝	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 WordArray	U32Array.set	native U32Array.set := U32Array.setNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 WordArray	U32Array.setNative	axiom U32Array.setNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -621,7 +621,7 @@ WordArray	U64Array.popNative	builtin extern:wiz_warray_pop:w:w:pure:: := U64Arra
 WordArray	U64Array.push	native U64Array.push := U64Array.pushNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 WordArray	U64Array.pushNative	axiom U64Array.pushNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 WordArray	U64Array.pushNative	builtin extern:wiz_warray_push:ww:w:pure:: := U64Array.pushNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-WordArray	U64Array.seal✝	axiom U64Array.seal✝	seal of a sealed type with a native representation; keeps the type opaque and distinct and has no computational content (generated by `sealed`)	wiz-pl maintainers	2027-05-14
+WordArray	U64Array.seal✝	axiom U64Array.seal✝	seal of a sealed type with a native representation; keeps the type opaque and distinct and has no computational content (generated by `sealed`)	Reuben Steenekamp	2027-05-14
 WordArray	U64Array.seal✝	builtin seal:U64Array := U64Array.seal✝	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 WordArray	U64Array.set	native U64Array.set := U64Array.setNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 WordArray	U64Array.setNative	axiom U64Array.setNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -652,7 +652,7 @@ WordArray	U8Array.popNative	builtin extern:wiz_warray_pop:w:w:pure:: := U8Array.
 WordArray	U8Array.push	native U8Array.push := U8Array.pushNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 WordArray	U8Array.pushNative	axiom U8Array.pushNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 WordArray	U8Array.pushNative	builtin extern:wiz_warray_push:ww:w:pure:: := U8Array.pushNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-WordArray	U8Array.seal✝	axiom U8Array.seal✝	seal of a sealed type with a native representation; keeps the type opaque and distinct and has no computational content (generated by `sealed`)	wiz-pl maintainers	2027-05-14
+WordArray	U8Array.seal✝	axiom U8Array.seal✝	seal of a sealed type with a native representation; keeps the type opaque and distinct and has no computational content (generated by `sealed`)	Reuben Steenekamp	2027-05-14
 WordArray	U8Array.seal✝	builtin seal:U8Array := U8Array.seal✝	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 WordArray	U8Array.set	native U8Array.set := U8Array.setNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 WordArray	U8Array.setNative	axiom U8Array.setNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
@@ -683,7 +683,7 @@ WordMap	U64Map.insertNative	builtin extern:wiz_wmap_insert:ewww:w:pure:: := U64M
 WordMap	U64Map.mk	native U64Map := U64Map.ofListNative/U64Map.toListNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 WordMap	U64Map.ofListNative	axiom U64Map.ofListNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 WordMap	U64Map.ofListNative	builtin extern:wiz_wmap_of_list:ew:w:pure:: := U64Map.ofListNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-WordMap	U64Map.seal✝	axiom U64Map.seal✝	seal of a sealed type with a native representation; keeps the type opaque and distinct and has no computational content (generated by `sealed`)	wiz-pl maintainers	2027-05-14
+WordMap	U64Map.seal✝	axiom U64Map.seal✝	seal of a sealed type with a native representation; keeps the type opaque and distinct and has no computational content (generated by `sealed`)	Reuben Steenekamp	2027-05-14
 WordMap	U64Map.seal✝	builtin seal:U64Map := U64Map.seal✝	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 WordMap	U64Map.size	native U64Map.size := U64Map.sizeNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 WordMap	U64Map.sizeNative	axiom U64Map.sizeNative	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
