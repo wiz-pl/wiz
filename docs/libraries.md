@@ -1302,11 +1302,11 @@ else`, short-circuiting `&&` and `||`, and `!` ([13c](stages/13-language.md)).
 
 ## 9j: text and lists (`lib/Text.wiz`)
 
-`import Text` (only `Prelude` and `Logic` underneath): the string and list functions a
-program needs, pure (so `#eval` runs them) and linear in their input.
+`import Text` (only `Prelude` underneath): the string and list functions a program needs,
+pure (so `#eval` runs them) and linear in their input.
 
 * **Lists**: `List.reverse`, `revApp`, `map`, `filter`, `foldl`, `foldr`, `any`, `all`,
-  `find`, `isEmpty`, `head`, `take`, `drop`, `concat`, and `length_append`.
+  `find`, `isEmpty`, `head`, `take`, `drop`, `concat`.
 * **Characters**: `Char.eq`, `isSpace` (ASCII), `isDigit`.
 * **Strings**: `chars`, `ofChars`, `singleton`, `length`, `isEmpty`, `eq` (also `beq`),
   `lt` (by code point), `startsWith`, `endsWith`, `stripPrefix`, `stripSuffix`
