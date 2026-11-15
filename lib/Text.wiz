@@ -1,5 +1,4 @@
 import Prelude
-import Logic
 /-!
 # Text
 
@@ -100,11 +99,6 @@ def List.drop {A : Type} : Nat → List A → List A
 def List.concat {A : Type} : List (List A) → List A
   | .nil => .nil
   | .cons x xs => List.append x (List.concat xs)
-/-- The length of an append is the sum of the lengths. -/
-def List.length_append {A : Type} : (l m : List A) →
-    List.length (l ++ m) = List.length l + List.length m
-  | .nil, _ => rfl
-  | .cons _ xs, m => Eq.congrArg Nat.succ (List.length_append xs m)
 
 -- ## Characters
 
