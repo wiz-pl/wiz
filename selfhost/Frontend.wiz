@@ -6533,6 +6533,12 @@ def modText : ModSrc → String
   | .mk _ _ t _ => t
 def modImports : ModSrc → List String
   | .mk _ _ _ is => is
+-- (the cache key) every module in the discovery table, by name. The table exists before
+-- elaboration, so a cache lookup can key on it; the elaboration order is only known
+-- after the modules have been checked.
+def tabNames : List ModSrc → List String
+  | .nil => .nil
+  | .cons (.mk n _ _ _) rest => .cons n (tabNames rest)
 -- the module `m` among `tab`, if present
 def modFind : List ModSrc → String → Option ModSrc
   | .nil, _ => .none

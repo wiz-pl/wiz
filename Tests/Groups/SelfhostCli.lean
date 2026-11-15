@@ -252,6 +252,23 @@ def cliGroup : Group where
         let (c, _, err) ← cliRun exe files2 #["check", "main.wiz", "--cache", cache, "-v"]
         checkEq 0 c
         cliCheck err "cache hit: " "good warm" },
+    { name := "the cache key covers an imported module's edit", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let cacheDir ← IO.FS.createTempDir
+        let cache := (cacheDir / "c").toString
+        -- the key is built from the discovery graph before elaboration, so a module's
+        -- text (not only the importer's) must invalidate the entry
+        let files := #[("A.wiz", "import Prelude\ndef a : Nat := 1\n"),
+                       ("main.wiz", "import Prelude\nimport A\ndef x : Nat := a\n")]
+        let (c, _, err) ← cliRun exe files #["check", "main.wiz", "--cache", cache, "-v"]
+        checkEq 0 c
+        cliCheck err "cache miss: " "cold"
+        let files2 := #[("A.wiz", "import Prelude\ndef a : Nat := nope\n"),
+                        ("main.wiz", "import Prelude\nimport A\ndef x : Nat := a\n")]
+        let (c, _, err) ← cliRun exe files2 #["check", "main.wiz", "--cache", cache, "-v"]
+        checkEq 1 c
+        cliCheck err "cache miss: " "invalidated by the imported edit"
+        cliCheck err "A.wiz:2:1: error: unknown identifier nope" "the module's error" },
     { name := "the one-shot mode (input.wiz to standard output) still works", run := fun _ =>
         withSelfhostCli fun exe => do
         let (c, out, _) ← cliRun exe #[("input.wiz", cliHello)] #[]
