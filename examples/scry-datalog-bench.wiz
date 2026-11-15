@@ -1,0 +1,139 @@
+import Prelude
+import IO
+import Sys
+import Text
+import Scry.Eval
+
+-- Datalog evaluator benchmark (`examples/scry-datalog-bench.wiz`). Two shapes:
+--
+--   chain N   taint-shaped: flow(i,i+1), src(0), sink(i,0), no sanitiser;
+--             derives N tainted and N alert facts (joins on bound columns).
+--             N = 1,100,000 is parser.c's CST node count (S1 parse stats).
+--   tc N     transitive closure on a layered DAG: layer i has 8 nodes, every node
+--             reaches every node one layer later, so the closure is quadratic.
+--
+--   wiz build examples/scry-datalog-bench.wiz -o bench --cflags "…" --ldflags "…"
+--   ./bench chain 1100000
+--   ./bench tc 100
+--
+-- The counts and the elapsed build/eval milliseconds are printed; counts are
+-- deterministic, timings are informational (see wiz-notes/scry-datalog.md §8).
+
+def u (n : Nat) : U64 := U64.ofNat n
+
+def irange : Nat → List Nat → List Nat
+  | .zero, acc => acc
+  | .succ n, acc => irange n (.cons n acc)
+
+def range (n : Nat) : List Nat := irange n .nil
+
+def benchOps : Scry.LatOps Nat :=
+  Scry.LatOps.mk 0 (fun a b => if Nat.lt a b then b else a) Nat.beq
+
+-- 0 flow/2, 1 src/1, 2 sink/2, 3 san/1, 4 tainted/1, 5 alert/2
+def benchSrc : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 4 [Scry.Term.var 0])
+    [Scry.Atom.pos 1 [Scry.Term.var 0]]
+def benchFlow : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 4 [Scry.Term.var 1])
+    [ Scry.Atom.pos 4 [Scry.Term.var 0]
+    , Scry.Atom.pos 0 [Scry.Term.var 0, Scry.Term.var 1]
+    , Scry.Atom.neg 3 [Scry.Term.var 1] ]
+def benchAlert : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 5 [Scry.Term.var 1, Scry.Term.var 2])
+    [ Scry.Atom.pos 4 [Scry.Term.var 0]
+    , Scry.Atom.pos 0 [Scry.Term.var 0, Scry.Term.var 1]
+    , Scry.Atom.pos 2 [Scry.Term.var 1, Scry.Term.var 2] ]
+def benchTaint : Scry.Program Nat :=
+  Scry.Program.mk benchOps [2, 1, 2, 1, 1, 2] [] [] [benchSrc, benchFlow, benchAlert]
+
+def benchTcBase : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 1 [Scry.Term.var 0, Scry.Term.var 1])
+    [Scry.Atom.pos 0 [Scry.Term.var 0, Scry.Term.var 1]]
+def benchTcStep : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 1 [Scry.Term.var 0, Scry.Term.var 2])
+    [ Scry.Atom.pos 1 [Scry.Term.var 0, Scry.Term.var 1]
+    , Scry.Atom.pos 0 [Scry.Term.var 1, Scry.Term.var 2] ]
+def benchTc : Scry.Program Nat :=
+  Scry.Program.mk benchOps [2, 2] [] [] [benchTcBase, benchTcStep]
+
+def addTuples (rel : Nat) (rows : List (List Nat)) (st : Scry.State Nat) : Scry.State Nat :=
+  List.foldr (fun row acc => Scry.State.addTuple acc rel (List.map u row)) st rows
+
+def chainDb (n : Nat) : Scry.State Nat :=
+  let flows := List.map (fun i => [i, Nat.succ i]) (range n);
+  let sinks := List.map (fun i => [i, 0]) (range n);
+  let st0 := Scry.State.empty;
+  let st1 := addTuples 0 flows st0;
+  let st2 := addTuples 1 [[0]] st1;
+  addTuples 2 sinks st2
+
+def tcDb (n : Nat) : Scry.State Nat :=
+  let width := 8;
+  let layer := fun (i j : Nat) => i * width + j;
+  let inner := range width;
+  let edgesL := List.concat
+    (List.map (fun i =>
+      List.concat
+        (List.map (fun j =>
+          List.map (fun k => [layer i j, layer (Nat.succ i) k]) inner) inner))
+      (range n));
+  let spine := List.map (fun i => [layer (Nat.succ i) 0, layer (Nat.succ (Nat.succ i)) 0])
+    (range n);
+  addTuples 0 (List.append edgesL spine) Scry.State.empty
+
+def count (st : Scry.State Nat) (rel : Nat) : Nat :=
+  Scry.Db.relSize st.db rel
+
+def ms (d : Duration) : Nat := Nat.div d.ns 1000000
+
+def runTaint (n : Nat) : IO Unit := do
+  tb0 ← Clock.monotonic;
+  let db := chainDb n;
+  tb1 ← Clock.monotonic;
+  t0 ← Clock.monotonic;
+  let r := Scry.eval benchTaint db;
+  t1 ← Clock.monotonic;
+  let tainted := match r with | .some st => count st 4 | .none => 0;
+  let alerts := match r with | .some st => count st 5 | .none => 0;
+  IO.println (String.append "taint n=" (Nat.repr n));
+  IO.println (String.append "tainted=" (Nat.repr tainted));
+  IO.println (String.append "alerts=" (Nat.repr alerts));
+  IO.println (String.append "build_ms=" (Nat.repr (ms (Duration.sub tb1 tb0))));
+  IO.println (String.append "eval_ms=" (Nat.repr (ms (Duration.sub t1 t0))))
+
+def runTc (n : Nat) : IO Unit := do
+  tb0 ← Clock.monotonic;
+  let db := tcDb n;
+  tb1 ← Clock.monotonic;
+  t0 ← Clock.monotonic;
+  let r := Scry.eval benchTc db;
+  t1 ← Clock.monotonic;
+  let reach := match r with | .some st => count st 1 | .none => 0;
+  IO.println (String.append "tc n=" (Nat.repr n));
+  IO.println (String.append "reach=" (Nat.repr reach));
+  IO.println (String.append "build_ms=" (Nat.repr (ms (Duration.sub tb1 tb0))));
+  IO.println (String.append "eval_ms=" (Nat.repr (ms (Duration.sub t1 t0))))
+
+
+def runInsert (n : Nat) : IO Unit := do
+  start ← Clock.monotonic;
+  let st := List.foldl (fun (acc : Scry.State Nat) (i : Nat) =>
+    (Scry.State.addDerivedTuple acc 0 List.nil 1 [u i]).1) Scry.State.empty (range n);
+  stop ← Clock.monotonic;
+  IO.println (String.append "insert n=" (Nat.repr n));
+  IO.println (String.append "rows=" (Nat.repr (count st 1)));
+  IO.println (String.append "eval_ms=" (Nat.repr (ms (Duration.sub stop start))))
+
+def parseArg : List String → Nat
+  | .cons s _ => match String.parseNat s with
+    | .some n => n
+    | .none => 1000
+  | .nil => 1000
+
+def main : IO Unit := IO.bind IO.args (fun as =>
+  match as with
+  | .cons "chain" rest => runTaint (parseArg rest)
+  | .cons "tc" rest => runTc (parseArg rest)
+  | .cons "ins" rest => runInsert (parseArg rest)
+  | _ => IO.println "usage: bench chain N | bench tc N")
