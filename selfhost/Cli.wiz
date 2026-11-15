@@ -203,9 +203,10 @@ def nonePrepared : IO (Option Prepared) := IO.pure (.none : Option Prepared)
 def prepare (roots : List String) (file : String) : IO (Option Prepared) :=
   IO.bind (readIf file) (fun t => match t with
     | .none => nonePrepared
-    | .some text => IO.bind (moduleRootSourcesAs cats tokens roots "Main" file text) (fun tab =>
-        match modCheckRun cats tokens tab (.cons "Main" .nil) with
-        | .mk run _ _ order => somePrepared (Prepared.mk tab run order)))
+    | .some text => IO.bind (moduleHeaderTexts text) (fun hs =>
+        IO.bind (moduleRootSourcesAs cats tokens roots "Main" file text) (fun tab =>
+          match modCheckRunH cats tokens hs tab (.cons "Main" .nil) with
+          | .mk run _ _ order => somePrepared (Prepared.mk tab run order))))
 
 -- the module `name`'s path (for a diagnostic; the name itself when there is no entry)
 def modFile (tab : List ModSrc) (name : String) : String := match modFind tab name with
@@ -810,8 +811,9 @@ def legacyFinish (args : List String) (text : String) (lines : List String) (gs 
 
 def legacyCmd (args : List String) : IO Unit := do
   text ← IO.readFile "input.wiz";
+  hs ← moduleHeaderTexts text;
   tab ← moduleRootSources cats tokens (modRoots args) text;
-  match modCheckRun cats tokens tab (.cons "Main" .nil) with
+  match modCheckRunH cats tokens hs tab (.cons "Main" .nil) with
   | .mk run _ _ _ => legacyFinish args text (linesOf run) (Run.gs run)
 
 -- ------------------------------------------------------------------------------------
@@ -858,6 +860,4 @@ def dispatch : List String → IO Unit
                       | .true => legacyCmd (.cons a rest)
                       | .false => usageError (String.append "unknown command " a)
 
-def main : IO Unit := do
-  args ← IO.args;
-  dispatch args
+-- (`main` is `selfhost/Main.wiz`: the entry point is a module of its own, last.)
