@@ -80,8 +80,8 @@ accepted now, but will fail on 2027-05-14 unless individually reviewed or renewe
 
 ## Reducing the legacy rows
 
-The migration's 753 rows are not a renewal list: the reviewed base is now 676 rows
-(349 still carrying the migration marker), 77 fewer and just over a 10% reduction. The
+The migration's 753 rows are not a renewal list: the reviewed base is now 674 rows
+(26 still carrying the migration marker), 79 fewer and just over a 10% reduction. The
 removals are all structural, not a loosening of the gate:
 
 | what was removed | rows | why it was not trust |
@@ -90,6 +90,7 @@ removals are all structural, not a loosening of the gate:
 | `toList`/`ofList` projections on arrays, maps and intern tables | 8 | the constructor's `repr:` registration already gives the native representation; the separate projection registration proved nothing new |
 | `InternTable.empty`/`size` and `U64Map.contains` natives | 9 | their Wiz bodies are `.mk .nil`, a length and a match on the (still native) `find`/`toList`; all are cheaper to review than to trust twice |
 | `partial` definitions that the kernel accepts as total | 2 | `Json.digits` recurses on the list tail, `Ring.synEq` on the syntax tree (`Json.sub` stays partial as an elaboration fence and is now reasoned) |
+| `Scry.rdLoop` and `Scry.domLoop` fuel loops | 2 | their only recursive argument is `fuel`, a `Nat` predecessor, so removing `partial` is checked structural recursion (see the group below) |
 
 The remaining rows fall into five groups, with the plan for each:
 
@@ -102,16 +103,23 @@ The remaining rows fall into five groups, with the plan for each:
   rows) now carry symbol-specific reasons. `UInt64.ofNat` reduces mod 2^64 (the
   marshalling used to panic above 2^64 while the doc promised modulo);
   `Float64.ofNat` rounds for every `Nat` on another branch. The remaining legacy
-  rows are the mutual-recursion/`partial` group.
-* **Mutual recursion, 109 `partial` rows.** `Feral` (70), `Json` (9), `SatTactic` (7),
-  `BvDecide` (6), `Tagged` (6), `Ring` (2) and the rest are compiled engines. Wiz's
-  structural checker does not accept nested/mutual induction here, so they cannot be
-  made total mechanically; the plan is to de-mutualise or size-index the few that are
-  worth it, and otherwise review them as intentionally compiled-only engines.
-* **Explicit `partial`, 25 rows (27 before this pass; two are now total).** The rest are fuel loops
-  (`Scry.*`, `Text`, `IO`, `Prelude`) or recurse through a helper (`stripPrefix`,
-  `Nat.div`); they need a structurally recursive variant or an individual review, not
-  a blind renewal.
+  rows are outside the `partial` group (below).
+* **Mutual recursion and `partial`, 132 rows (109 in `mutual` blocks, 23 standalone
+  `partial`).** The blocks are `Feral` (70: 67 mutual plus `Fe.core`/`Fe.tyStr`/
+  `Fe.zonk`), `Json` (9 mutual plus the deliberately opaque `Json.sub`), the `Scry`
+  engines (18), `SatTactic` (7), `BvDecide` (6), `Tagged` (6), `Infoview` (7), `Ring`
+  (2), `Prelude` (2), `Text` (3) and `IO` (1). Wiz's kernel treats a `partial`
+  definition as opaque: the definition is justified by an inhabited witness of its
+  type (22f), never by a termination proof, so a row is not a claim that the recursion
+  terminates. The 134 rows are accepted as one reviewed group, deliberately not
+  de-mutualised: each reason names its block and what would remove the row —
+  de-mutualising into structural recursion over the syntax or data tree, or a checked
+  measure (fuel, a decreasing counter, or a worklist/visited-set measure). Two small
+  fuel loops are structural and are now total (`Scry.rdLoop`, `Scry.domLoop`: the only
+  recursive argument is the `Nat` predecessor of `fuel`), so 2 rows are gone and 132
+  remain. A `mutual`/`partial` row is therefore a documented design choice, not an
+  unreviewed gap: a new one still needs a reason, and `--strict-legacy` still lists any
+  that has not been through this review.
 * **`implemented_by`, 54 rows.** The remaining ones are the performance-critical
   `UIntN`, array, map, intern and channel fast paths. They are covered by the
   differential `=word`/`=natives` tests; review each against the C function it names.
@@ -122,11 +130,24 @@ The remaining rows fall into five groups, with the plan for each:
 
 The 35 pure axioms (the foreign types, the seals, `Region`'s `Outlives` evidence and
 `Prelude.castRefl`) now carry a specific reason and the owner `wiz-pl maintainers`; so
-does the kept `UIntN.toNat` native (the word tests pin it in the compiled IR). The
-engine rows and the OS-surface FFI rows still say `legacy:`; `--strict-legacy` lists
-them, and the 2027-05-14 expiry is the deadline for the per-engine and per-symbol review
-above. `Json.sub` is partial by intent (it is an elaboration fence, not recursion) and
-now has a reason.
+does the kept `UIntN.toNat` native (the word tests pin it in the compiled IR). The 26
+rows that still say `legacy:` are outside the group: `Float64.ofNat`, the twenty
+`Prelude` numeral/`memo` registrations, the `PMap`/`Scry` seals, and
+`Proc.runLinked`. `--strict-legacy` lists them, and the 2027-05-14 expiry is their
+deadline. `Json.sub` is partial by intent (it is an elaboration fence, not recursion)
+and has a reason.
+
+### `partial` and `mutual`: a reviewed design choice
+
+A `mutual … end` block of definitions and an explicit `partial def` are the same
+source of trust: the kernel records the declaration with no value, checks an inhabited
+witness of its type (22f), and treats the compiled body as opaque. The ledger row says
+so; it does not say the recursion terminates, and the kernel makes no such claim. The
+reason on every such row names the block, calls it compiled-only general recursion, and
+states the removal path. De-mutualising is not a blanket goal: for the parser core,
+`Feral`, `Json`, `SatTactic`, `BvDecide`, `Tagged` and the `Scry` engines the mutual
+shape is the readable form of the algorithm, and a checked measure or a structural
+rewrite is worthwhile only for a block that is small and hot.
 
 ### The numeric/container FFI audit
 
