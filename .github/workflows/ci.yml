@@ -318,6 +318,8 @@ jobs:
           du -sh "$tests"
       - name: The trusted base matches the baseline
         run: scripts/trust-ledger.sh --check
+      - name: The trust gate's fixtures
+        run: Tests/trust-ledger/run.sh
 
   # (11s) The published site, as the artifact `wiz-docs`: on master only (a push), kept
   # 3 days (artifact storage). The tree is the landing page at the root, the standard
