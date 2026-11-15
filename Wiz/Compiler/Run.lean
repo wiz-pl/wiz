@@ -301,25 +301,29 @@ def ofCString (s : String) : ByteArray :=
   ByteArray.mk (((s.toList.foldl (fun (b : ByteArray) (c : Char) => pushCp b c.toNat) ByteArray.empty).toList.takeWhile
     (· != 0)).toArray)
 
-/-- The bytes up to the first NUL, decoded as `wiz_out_string` decodes UTF-8 (the
-sequence length comes from the leading byte; continuation bytes are not checked). -/
+/-- The code point `cp` with the continuation bytes `j … len - 1` of a UTF-8
+sequence folded in, as `wiz_out_string` reads them (a helper of `decodeFrom`). -/
+partial def decodeCont (b : ByteArray) (i len j cp : Nat) : Nat :=
+  if j < len && i + j < b.size then
+    decodeCont b i len (j + 1) ((cp <<< 6) ||| ((b.get! (i + j)).toNat &&& 0x3F))
+  else cp
+
+/-- The bytes from offset `i` decoded as `wiz_out_string` decodes UTF-8 (the sequence
+length comes from the leading byte; continuation bytes are not checked). -/
+partial def decodeFrom (b : ByteArray) (i : Nat) (acc : String) : String :=
+  if h : i < b.size then
+    let c := (b[i]).toNat
+    let (cp, len) :=
+      if c < 0x80 then (c, 1)
+      else if c >>> 5 == 6 then (c &&& 0x1F, 2)
+      else if c >>> 4 == 14 then (c &&& 0x0F, 3)
+      else (c &&& 0x07, 4)
+    decodeFrom b (i + len) (acc.push (Char.ofNat (decodeCont b i len 1 cp)))
+  else acc
+
+/-- The bytes up to the first NUL, decoded as text. -/
 def toCString (b : ByteArray) : String :=
-  let b := ByteArray.mk ((b.toList.takeWhile (· != 0)).toArray)
-  let rec go (i : Nat) (acc : String) : String :=
-    if h : i < b.size then
-      let c := (b[i]).toNat
-      let (cp, len) :=
-        if c < 0x80 then (c, 1)
-        else if c >>> 5 == 6 then (c &&& 0x1F, 2)
-        else if c >>> 4 == 14 then (c &&& 0x0F, 3)
-        else (c &&& 0x07, 4)
-      let rec cont (j : Nat) (cp : Nat) : Nat :=
-        if j < len && i + j < b.size then
-          cont (j + 1) ((cp <<< 6) ||| ((b.get! (i + j)).toNat &&& 0x3F))
-        else cp
-      go (i + len) (acc.push (Char.ofNat (cont 1 cp)))
-    else acc
-  go 0 ""
+  decodeFrom (ByteArray.mk ((b.toList.takeWhile (· != 0)).toArray)) 0 ""
 
 end BytesModel
 
