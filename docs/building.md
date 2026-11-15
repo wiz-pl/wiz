@@ -38,8 +38,11 @@ plain `lake build` does not, and a stale driver runs whichever case had that ind
 compares the trusted base it finds with the checked-in `.github/trust-baseline.tsv`: a
 new `axiom`, `sorry`, `native_refl` or SMT axiom, `implemented_by`/`repr:`
 implementation, `builtin` registration or `partial` definition fails until the baseline
-is updated after review. The `native` group runs the `lib/` part in CI, the
-`hdl-verified` group the example's; `scripts/trust-ledger.sh --update` regenerates the
+is updated after review. The `build` job runs the whole check right after the Nix
+build and before any shard starts (with `Tests/trust-ledger/run.sh`), so a ledger
+regression fails the run early; the `native` group also covers the `lib/` part and
+`hdl-verified` the example's inside the shards;
+`scripts/trust-ledger.sh --update` regenerates the
 baseline (build the driver first). `--print` shows the recorded sources; the baseline's
 header explains the format.
 
