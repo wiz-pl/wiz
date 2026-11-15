@@ -1,0 +1,4 @@
+import Prelude
+
+/-- A fixture axiom: the gate must see it as a source of trust. -/
+axiom bad : Nat

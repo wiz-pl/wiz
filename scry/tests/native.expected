@@ -1,0 +1,19 @@
+nodes: 55
+edges: 54
+roots: 1
+errors: 0
+max depth: 7
+root kind: translation_unit
+root span: [0,95)
+node 1 kind: function_definition
+node 1 parent: 0
+node 1 children: 3
+node 1 next sibling: 25
+node 2 kind: primitive_type
+node 2 field: type
+node 2 span: [0,3)
+node 2 parent: 1
+csr offsets: 56
+csr arcs: 54
+root first child: 2
+malformed: fixtures/broken.c: 2 ERROR/MISSING node(s); the file is not valid C

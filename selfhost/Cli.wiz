@@ -1,0 +1,865 @@
+-- The self-hosted toolchain's driver (stage 21, gaps D2-D7 of
+-- `wiz-notes/selfhost-parity.md`). It replaces the generated `def main` strings of
+-- `Wiz/Selfhost.lean` with a real command line:
+--
+--   wiz-selfhost check FILE            elaborate and type check; diagnostics, exit 1
+--   wiz-selfhost build FILE -o OUT     write the generated C to OUT
+--   wiz-selfhost run FILE [ARG…]       compile `main` and run it (also `eval`)
+--   wiz-selfhost version | help
+--   options: -I DIR (module root, repeatable), -o OUT, --cache DIR, --no-cache,
+--            -v (cache hits/misses), --types (print each declaration's type),
+--            --cc, --rt, --cflags, --ldflags (the C toolchain for `run`),
+--            --rc | --rc-owned | --gc | --lib | --no-main | --header (the backend),
+--            --version, -h | --help
+--   exit codes: 0 ok, 1 user error (no file, the frontend's errors, cc, the program),
+--               2 usage (unknown command or option, missing argument)
+--
+-- Without a subcommand it is the tool it was: `input.wiz` in the working directory to
+-- standard output (the fixpoint and the selfhost tests use that), and the first argument
+-- may start with `-` (the backend's flags).
+--
+-- Modules: the frontend's loader (A14, `moduleCheck`) does the work. `import M` is
+-- `M.wiz` under each `-I` root in order, then the working directory (dotted names are
+-- directories); the root module is `Main`, its path the FILE named. `Prelude` is the
+-- embedded prelude and `IO`/`Std`/`Sys` are canonicalised to it. The driver reads the
+-- files (`moduleRootSourcesAs`) and names the root; dependencies are elaborated once,
+-- before their importers, into the same globals and tables.
+--
+-- Diagnostics: the frontend reports one line per command, prefixed with the offset of
+-- its command (`@N text`, `atLine` in `Frontend.wiz`), and the loader names the module
+-- (`@NAME:N text`); the driver turns that into `file:line:col: severity: message [code]`,
+-- with the Lean frontend's error code where the message names the same mistake
+-- (`ErrorCode.lean`). A stack trace is never printed: every failure is one line, and a
+-- missing file is checked with `access` first.
+--
+-- Cache: `--cache DIR` (default `.wiz-cache`) keys an entry by the toolchain id
+-- (`toolchainId`, injected by `Wiz/Selfhost.lean` from the selfhost sources and the
+-- version), the subcommand's backend flags, the loader's module graph key (every
+-- module's name and text, in load order) and the modules' paths. A `.check` entry is the
+-- tagged lines and the exit status; a `.c` entry is the C `run` would print, so a warm
+-- run skips elaboration and code generation.
+
+-- ------------------------------------------------------------------------------------
+-- Options
+
+structure Opts where
+  roots : List String
+  cache : Option String
+  out : Option String
+  verbose : Bool
+  types : Bool
+  cc : String
+  rt : String
+  cflags : List String
+  ldflags : List String
+  backend : List String
+
+def optsDefault : Opts :=
+  Opts.mk .nil (.some ".wiz-cache") .none .false .false "cc" "selfhost" .nil .nil .nil
+
+-- ------------------------------------------------------------------------------------
+-- The file system (whole-file read and write, directories; `access` is `Backend.wiz`'s
+-- `cAccessFails`)
+
+extern "wiz_sys_write_file" cWriteFile : String → String → Nat → IO Nat
+extern "mkdir" (header := "sys/stat.h") cMkdir : String → Nat → IO Nat
+extern "rename" (header := "stdio.h") cRename : String → String → IO Nat
+extern "system" (header := "stdlib.h") cSystem : String → IO Nat
+
+def pathExists (p : String) : IO Bool :=
+  IO.bind (cAccessFails p 0) (fun bad => IO.pure (Bool.not bad))
+
+-- `some`/`none` in `IO ... (Option ...)` need their type written out: inside a bound
+-- lambda the frontend has no expected type for a bare constructor (gap A18)
+def someIO (t : String) : IO (Option String) := IO.pure (.some t)
+def noneIO : IO (Option String) := IO.pure (.none : Option String)
+
+def readIf (p : String) : IO (Option String) :=
+  IO.bind (pathExists p) (fun ok => match ok with
+    | .false => noneIO
+    | .true => IO.bind (IO.readFile p) (fun t => someIO t))
+
+def writeFile (p text : String) : IO Bool :=
+  IO.bind (cWriteFile p text 0) (fun st => IO.pure (Nat.beq st 0))
+
+-- ------------------------------------------------------------------------------------
+-- Strings and lists (the Prelude has few)
+
+def charsOf (s : String) : List Char := match s with
+  | .mk cs => cs
+def ch (n : Nat) : Char := Char.mk n
+def strEqC (c : Char) (n : Nat) : Bool := Nat.beq (Char.code c) n
+
+-- (the compiler source has no `List.map`: the Prelude's is in `preludeText`, for the
+-- programs it compiles)
+def mapS (f : String → String) : List String → List String
+  | .nil => .nil
+  | .cons s rest => .cons (f s) (mapS f rest)
+def mapChars (f : List Char → String) : List (List Char) → List String
+  | .nil => .nil
+  | .cons cs rest => .cons (f cs) (mapChars f rest)
+
+def takeN : List Char → Nat → List Char
+  | .nil, _ => .nil
+  | _, .zero => .nil
+  | .cons c cs, .succ k => .cons c (takeN cs k)
+
+def joinWithNl : List (List Char) → List Char
+  | .nil => .nil
+  | .cons l rest => match rest with
+    | .nil => l
+    | .cons _ _ => List.append l (.cons (ch 10) (joinWithNl rest))
+
+-- the lines of a text, each without its newline (a final newline adds no empty line)
+def splitLinesGo : List Char → List Char → List (List Char)
+  | .nil, acc => .cons (List.reverseOf acc .nil) .nil
+  | .cons c cs, acc => match strEqC c 10 with
+    | .true => .cons (List.reverseOf acc .nil) (splitLinesGo cs .nil)
+    | .false => splitLinesGo cs (.cons c acc)
+def splitLines (s : String) : List (List Char) := match s with
+  | .mk cs => match cs with
+    | .nil => .nil
+    | .cons _ _ => splitLinesGo cs .nil
+
+def charsOfLine : List String → List (List Char)
+  | .nil => .nil
+  | .cons s rest => .cons (charsOf s) (charsOfLine rest)
+
+-- the cache payload of the frontend's lines: one line each, newline-separated
+def linesPayload (lines : List String) : String :=
+  String.mk (joinWithNl (charsOfLine lines))
+
+-- drop leading spaces
+def ltrim : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => match strEqC c 32 with
+    | .true => ltrim cs
+    | .false => .cons c cs
+
+-- the text after `p`, if `p` is its prefix
+def stripPrefix (p s : String) : Option String := match p with
+  | .mk ps => match s with
+    | .mk ss => match dropPrefix ps ss with
+      | .some rest => .some (String.mk rest)
+      | .none => .none
+
+-- `sub` occurs in `s`
+def occursFromSub (pat : List Char) : List Char → Bool
+  | .nil => .false
+  | .cons c cs => match charsPrefix pat (.cons c cs) with
+    | .true => .true
+    | .false => occursFromSub pat cs
+def occursSub (s sub : String) : Bool := match sub with
+  | .mk ps => match s with
+    | .mk ss => occursFromSub ps ss
+
+-- `A.B` is `A/B.wiz`
+def singleton (s : String) : List String := .cons s .nil
+
+def joinSpaces : List String → String
+  | .nil => ""
+  | .cons s rest => match rest with
+    | .nil => s
+    | .cons _ _ => String.append s (String.append " " (joinSpaces rest))
+
+def spacesOf : List String → String
+  | .nil => ""
+  | .cons s rest => String.append " " (String.append s (spacesOf rest))
+
+def docText : Doc → String
+  | .t s => s
+  | .c a b => String.append (docText a) (docText b)
+
+def docsText : List Doc → String
+  | .nil => ""
+  | .cons d rest => String.append (docText d) (String.append "\n" (docsText rest))
+
+-- the frontend's output as C comments, before the program (as the one-shot mode prints
+-- it, so `-o` is the one-shot output)
+def commentLine (l : String) : String := String.append "/* " (String.append l " */")
+
+def commentsOf (lines : List String) : String :=
+  match lines with
+  | .nil => ""
+  | .cons _ _ => String.append (linesPayload (mapS commentLine lines)) "\n"
+
+-- ------------------------------------------------------------------------------------
+-- Modules and the prepared source
+
+-- a prepared program: the loader's module table (root `Main` last), the run it produced
+-- (output lines tagged with their module, globals, tables) and the load order
+structure Prepared where
+  tab : List ModSrc
+  run : Run
+  order : List String
+
+-- (`some`/`none` in `IO ... (Option ...)` need their type written out: inside a bound
+-- lambda the frontend has no expected type for a bare constructor, gap A18)
+def somePrepared (p : Prepared) : IO (Option Prepared) := IO.pure (.some p)
+def nonePrepared : IO (Option Prepared) := IO.pure (.none : Option Prepared)
+
+-- the frontend's loader (A14): `import M` is `M.wiz` under the `-I` roots, then the
+-- working directory; the root module is `Main`, its path the FILE the user named
+def prepare (roots : List String) (file : String) : IO (Option Prepared) :=
+  IO.bind (readIf file) (fun t => match t with
+    | .none => nonePrepared
+    | .some text => IO.bind (moduleHeaderTexts text) (fun hs =>
+        IO.bind (moduleRootSourcesAs cats tokens roots "Main" file text) (fun tab =>
+          match modCheckRunH cats tokens hs tab (.cons "Main" .nil) with
+          | .mk run _ _ order => somePrepared (Prepared.mk tab run order))))
+
+-- the module `name`'s path (for a diagnostic; the name itself when there is no entry)
+def modFile (tab : List ModSrc) (name : String) : String := match modFind tab name with
+  | .some (.mk _ p _ _) => match strEq p "" with
+    | .true => name
+    | .false => p
+  | .none => name
+
+def modTextOf (tab : List ModSrc) (name : String) : Option String := match modFind tab name with
+  | .some (.mk _ _ t _) => .some t
+  | .none => .none
+
+def modTextOr (tab : List ModSrc) (name dflt : String) : String := match modTextOf tab name with
+  | .some t => t
+  | .none => dflt
+
+-- the load order's module paths, in order (the cache key: a module found under another
+-- root is another module for diagnostics)
+def modPathsOf (tab : List ModSrc) : List String → List String
+  | .nil => .nil
+  | .cons n ns => .cons (modFile tab n) (modPathsOf tab ns)
+
+-- ------------------------------------------------------------------------------------
+-- Positions
+
+inductive Pos where
+  | mk (line : Nat) (col : Nat)
+
+def lineColGo : List Char → Nat → Nat → Nat → Nat → Pos
+  | .nil, _, _, ln, col => Pos.mk ln col
+  | .cons c cs, i, off, ln, col => match Nat.lt i off with
+    | .false => Pos.mk ln col
+    | .true => match strEqC c 10 with
+      | .true => lineColGo cs (Nat.succ i) off (Nat.succ ln) 1
+      | .false => lineColGo cs (Nat.succ i) off ln (Nat.succ col)
+
+-- the 1-based line and column of a 0-based offset in a text
+def lineCol (text : String) (off : Nat) : Pos := match text with
+  | .mk cs => lineColGo cs 0 off 1 1
+
+-- ------------------------------------------------------------------------------------
+-- Diagnostics
+
+inductive Sev where
+  | error
+  | warning
+  | info
+
+inductive Diag where
+  | mk (sev : Sev) (file : String) (line : Nat) (col : Nat) (msg : String) (code : String)
+
+def sevName : Sev → String
+  | .error => "error"
+  | .warning => "warning"
+  | .info => "info"
+
+inductive NumRest where
+  | mk (n : Nat) (rest : List Char)
+
+-- the number at the start of `cs`, and the rest
+def readNat : List Char → Nat → NumRest
+  | .nil, acc => NumRest.mk acc .nil
+  | .cons c cs, acc => match isDigitC (Char.code c) with
+    | .true => readNat cs (Nat.add (Nat.mul acc 10) (Nat.sub (Char.code c) 48))
+    | .false => NumRest.mk acc (.cons c cs)
+
+inductive SplitAt where
+  | mk (off : Nat) (text : String)
+
+-- `@OFFSET text` → (offset, text); `(0, l)` for a line without the prefix
+def splitAtLine (l : String) : SplitAt := match l with
+  | .mk cs => match cs with
+    | .nil => SplitAt.mk 0 l
+    | .cons c rest => match strEqC c 64 with
+      | .false => SplitAt.mk 0 l
+      | .true => match rest with
+        | .nil => SplitAt.mk 0 l
+        | .cons d ds => match isDigitC (Char.code d) with
+          | .false => SplitAt.mk 0 l
+          | .true => match readNat (.cons d ds) 0 with
+            | .mk n after => match after with
+              | .cons sp r => match strEqC sp 32 with
+                | .true => SplitAt.mk n (String.mk r)
+                | .false => SplitAt.mk 0 l
+              | .nil => SplitAt.mk 0 l
+
+-- `error 12: expected …` → `expected …` (the parser's message, without its offset)
+def afterColonSp : List Char → String
+  | .nil => ""
+  | .cons c cs => match strEqC c 58 with
+    | .true => match cs with
+      | .cons _ r => String.mk r
+      | .nil => ""
+    | .false => String.mk (.cons c cs)
+
+def parseDetail (s : String) : String := match stripPrefix "parse " s with
+  | .none => s
+  | .some t => match stripPrefix "error " t with
+    | .none => s
+    | .some u => match u with
+      | .mk us => match readNat us 0 with
+        | .mk _ after => afterColonSp after
+
+def sevOf (s : String) : Sev := match stripPrefix "error: " s with
+  | .some _ => .error
+  | .none => match strStarts "parse error" s with
+    | .true => .error
+    | .false => match stripPrefix "warning: " s with
+      | .some _ => .warning
+      | .none => .info
+
+def msgOf (s : String) : String := match stripPrefix "error: " s with
+  | .some m => m
+  | .none => match strStarts "parse error" s with
+    | .true => parseDetail s
+    | .false => match stripPrefix "warning: " s with
+      | .some m => m
+      | .none => s
+
+-- the Lean frontend's code (`ErrorCode.lean`), where the message names the same mistake
+-- the Lean frontend's code (`ErrorCode.lean`) for a message, where it names the same
+-- mistake: a table of (text, code), in order, then the loader's and the parser's own
+inductive CodeEntry where
+  | mk (key : String) (code : String)
+
+def codeEntry (m : String) (e : CodeEntry) : Option String := match e with
+  | .mk k v => match occursSub m k with
+    | .true => .some v
+    | .false => .none
+
+def codeLookup (m : String) : List CodeEntry → String
+  | .nil => ""
+  | .cons e rest => match codeEntry m e with
+    | .some v => v
+    | .none => codeLookup m rest
+
+def codeTable : List CodeEntry :=
+  .cons (.mk "has already been declared" "duplicate-declaration")
+  (.cons (.mk "unknown identifier" "unknown-identifier")
+  (.cons (.mk "is private to module" "private")
+  (.cons (.mk "type mismatch" "type-mismatch")
+  (.cons (.mk "no field " "no-such-field")
+  (.cons (.mk "cannot infer" "cannot-infer")
+  (.cons (.mk "unknown declaration" "unknown-declaration")
+  (.cons (.mk "unsupported command " "unknown-syntax")
+  (.cons (.mk "unsupported syntax " "unknown-syntax") .nil))))))))
+
+def codeOf (s : String) : String := match stripPrefix "error: " s with
+  | .none => match strStarts "parse error" s with
+    | .true => "parse-error"
+    | .false => ""
+  | .some m => match strStarts "cannot find module " m with
+    | .true => "unknown-module"
+    | .false => match strStarts "import cycle" m with
+      | .true => "import-cycle"
+      | .false => codeLookup m codeTable
+
+-- a line's tag: the module it came from and its offset in that module's text
+inductive Tagged where
+  | mk (mod : String) (off : Nat) (text : String)
+
+inductive NameRest where
+  | mk (name : List Char) (rest : List Char)
+
+def readToColon : List Char → List Char → NameRest
+  | acc, .nil => NameRest.mk .nil .nil
+  | acc, .cons c cs => match strEqC c 58 with
+    | .true => NameRest.mk (List.reverseOf acc .nil) cs
+    | .false => match strEqC c 32 with
+      | .true => NameRest.mk .nil .nil
+      | .false => readToColon (.cons c acc) cs
+
+-- `@NAME:OFFSET text` (the loader's) or `@OFFSET text` (one file) or no tag
+def taggedOf (l : String) : Tagged := match l with
+  | .mk cs => match cs with
+    | .nil => Tagged.mk "Main" 0 l
+    | .cons c rest => match strEqC c 64 with
+      | .false => Tagged.mk "Main" 0 l
+      | .true => match readToColon .nil rest with
+        | .mk name after =>
+          let nameStr := String.mk name;
+          match strEq nameStr "" with
+          | .true => match splitAtLine l with
+            | .mk off text => Tagged.mk "Main" off text
+          | .false => match readNat after 0 with
+            | .mk off afterNum => match afterNum with
+              | .cons sp r => match strEqC sp 32 with
+                | .true => Tagged.mk nameStr off (String.mk r)
+                | .false => Tagged.mk "Main" 0 l
+              | .nil => Tagged.mk "Main" 0 l
+
+def diagOf (tab : List ModSrc) (l : String) : Diag := match taggedOf l with
+  | .mk m off rest => match modTextOf tab m with
+    | .none => Diag.mk (sevOf rest) (modFile tab m) 1 1 (msgOf rest) (codeOf rest)
+    | .some t => match lineCol t off with
+      | .mk ln col => Diag.mk (sevOf rest) (modFile tab m) ln col (msgOf rest) (codeOf rest)
+
+def diagsOf (tab : List ModSrc) : List String → List Diag
+  | .nil => .nil
+  | .cons l rest => .cons (diagOf tab l) (diagsOf tab rest)
+
+def hasError : List Diag → Bool
+  | .nil => .false
+  | .cons (.mk sev _ _ _ _ _) rest => match sev with
+    | .error => .true
+    | _ => hasError rest
+
+def codeSuffix (c : String) : String := match strEq c "" with
+  | .true => ""
+  | .false => String.append " [" (String.append c "]")
+
+def diagLine (d : Diag) : String := match d with
+  | .mk sev f ln col msg code =>
+    String.append (String.append f ":") (String.append (Nat.toString ln) (String.append ":"
+      (String.append (Nat.toString col) (String.append ": " (String.append (sevName sev)
+        (String.append ": " (String.append msg (codeSuffix code))))))))
+
+def emitDiag (o : Opts) (d : Diag) : IO Unit := match d with
+  | .mk sev _ _ _ _ _ => match sev with
+    | .info => match o.types with
+      | .true => IO.println (diagLine d)
+      | .false => IO.pure ()
+    | _ => IO.ePrintln (diagLine d)
+
+def emitDiags (o : Opts) : List Diag → IO Unit
+  | .nil => IO.pure ()
+  | .cons d rest => IO.bind (emitDiag o d) (fun u => emitDiags o rest)
+
+def ePrintAll : List String → IO Unit
+  | .nil => IO.pure ()
+  | .cons s ss => IO.bind (IO.ePrintln s) (fun u => ePrintAll ss)
+
+-- ------------------------------------------------------------------------------------
+-- Directories
+
+def splitSegsGo : List Char → List Char → List (List Char)
+  | .nil, acc => .cons (List.reverseOf acc .nil) .nil
+  | .cons c cs, acc => match strEqC c 47 with
+    | .true => .cons (List.reverseOf acc .nil) (splitSegsGo cs .nil)
+    | .false => splitSegsGo cs (.cons c acc)
+
+def splitSegs (p : String) : List (List Char) := match p with
+  | .mk cs => splitSegsGo cs .nil
+
+-- make a directory and its parents (`mkdir` errors — an existing one — are ignored)
+def mkdirsGo : List (List Char) → String → IO Unit
+  | .nil, _ => IO.pure ()
+  | .cons seg rest, acc =>
+    let s := String.mk seg;
+    let acc' := match strEq acc "" with
+      | .true => match strEq s "" with
+        | .true => "/"
+        | .false => s
+      | .false => String.append acc (String.append "/" s);
+    IO.bind (cMkdir acc' 493) (fun st => mkdirsGo rest acc')
+
+def ensureDir (p : String) : IO Unit := mkdirsGo (splitSegs p) ""
+
+-- ------------------------------------------------------------------------------------
+-- The cache
+
+def hashStep : List Char → Nat → Nat
+  | .nil, h => h
+  | .cons c cs, h => hashStep cs (Nat.mod (Nat.add (Nat.mul h 16777619) (Char.code c)) 4294967291)
+
+def hashParts : List String → Nat → Nat
+  | .nil, h => h
+  | .cons s rest, h => hashParts rest (hashStep (charsOf s) (Nat.mod (Nat.add (Nat.mul h 16777619) 31) 4294967291))
+
+def keyOf (o : Opts) (kind : String) (p : Prepared) : String :=
+  Nat.toString (hashParts (.cons kind (.cons toolchainId
+    (.cons (Nat.toString (moduleGraphKey p.order p.tab))
+      (List.append o.backend (modPathsOf p.tab p.order))))) 2166136261)
+
+def cachePath (dir key ext : String) : String :=
+  String.append dir (String.append "/" (String.append key ext))
+
+inductive FirstLine where
+  | mk (line : List Char) (rest : String)
+
+def splitFirstLineGo : List Char → List Char → FirstLine
+  | .nil, acc => FirstLine.mk (List.reverseOf acc .nil) ""
+  | .cons c cs, acc => match strEqC c 10 with
+    | .true => FirstLine.mk (List.reverseOf acc .nil) (String.mk cs)
+    | .false => splitFirstLineGo cs (.cons c acc)
+
+def splitFirstLine (s : String) : FirstLine := match s with
+  | .mk cs => splitFirstLineGo cs .nil
+
+inductive Cached where
+  | mk (status : Nat) (payload : String)
+
+-- `s12 payload` → the status and the payload
+def entryOf (text : String) : Option Cached := match splitFirstLine text with
+  | .mk line payload => match stripPrefix "s" (String.mk line) with
+    | .none => .none
+    | .some num => match num with
+      | .mk ns => match readNat ns 0 with
+        | .mk st _ => .some (Cached.mk st payload)
+
+-- a cache entry: `s<status>` on the first line, then the payload
+def someCached (c : Cached) : IO (Option Cached) := IO.pure (.some c)
+def noneCached : IO (Option Cached) := IO.pure (.none : Option Cached)
+
+def cacheRead (o : Opts) (key ext : String) : IO (Option Cached) := match o.cache with
+  | .none => noneCached
+  | .some dir => IO.bind (readIf (cachePath dir key ext)) (fun t => match t with
+    | .none => noneCached
+    | .some text => match entryOf text with
+      | .none => noneCached
+      | .some c => someCached c)
+
+def cacheWriteDo (dir key ext : String) (status : Nat) (payload : String) : IO Bool := do
+  ensureDir dir;
+  let p := cachePath dir key ext;
+  let tmp := String.append p ".tmp";
+  ok ← writeFile tmp (String.append "s" (String.append (Nat.toString status) (String.append "\n" payload)));
+  match ok with
+  | .false => IO.pure (Bool.false)
+  | .true => IO.bind (cRename tmp p) (fun st => IO.pure (Nat.beq st 0))
+
+def cacheWrite (o : Opts) (key ext : String) (status : Nat) (payload : String) : IO Bool := match o.cache with
+  | .none => IO.pure (Bool.false)
+  | .some dir => cacheWriteDo dir key ext status payload
+
+-- ------------------------------------------------------------------------------------
+-- The command line
+
+inductive Arg where
+  | ok (o : Opts) (file : String) (extra : List String)
+  | err (msg : String)
+  | version
+  | help
+
+inductive Kind where
+  | check
+  | build
+  | run
+  | eval
+
+def isBackendFlag (a : String) : Bool :=
+  Bool.or (strEq a "--rc") (Bool.or (strEq a "--rc-owned") (Bool.or (strEq a "--gc")
+    (Bool.or (strEq a "--lib") (Bool.or (strEq a "--no-main") (strEq a "--header")))))
+
+-- options may come before or after FILE; after FILE, a non-option is a program
+-- argument (`run FILE ARG…`), and `--` makes everything after it an argument
+partial def parseOptsGo : List String → Opts → Option String → List String → Arg
+  | .nil, o, file, extra => match file with
+    | .none => .err "no FILE (try `wiz-selfhost help`)"
+    | .some f => .ok o f (List.reverseOf extra .nil)
+  | .cons a rest, o, file, extra => match strEq a "--" with
+    | .true => match file with
+      | .none => match rest with
+        | .nil => .err "no FILE after --"
+        | .cons f r2 => .ok o f r2
+      | .some f => .ok o f (List.append (List.reverseOf extra .nil) rest)
+    | .false => match strEq a "-I" with
+      | .true => match rest with
+        | .nil => .err "-I needs a directory"
+        | .cons d r2 => parseOptsGo r2 { o with roots := List.append o.roots (singleton d) } file extra
+      | .false => match strEq a "--include" with
+        | .true => match rest with
+          | .nil => .err "--include needs a directory"
+          | .cons d r2 => parseOptsGo r2 { o with roots := List.append o.roots (singleton d) } file extra
+        | .false => match strEq a "-o" with
+          | .true => match rest with
+            | .nil => .err "-o needs a file"
+            | .cons p r2 => parseOptsGo r2 { o with out := .some p } file extra
+          | .false => match strEq a "--cache" with
+            | .true => match rest with
+              | .nil => .err "--cache needs a directory"
+              | .cons d r2 => parseOptsGo r2 { o with cache := .some d } file extra
+            | .false => match strEq a "--no-cache" with
+              | .true => parseOptsGo rest { o with cache := .none } file extra
+              | .false => match strEq a "-v" with
+                | .true => parseOptsGo rest { o with verbose := .true } file extra
+                | .false => match strEq a "--verbose" with
+                  | .true => parseOptsGo rest { o with verbose := .true } file extra
+                  | .false => match strEq a "--types" with
+                    | .true => parseOptsGo rest { o with types := .true } file extra
+                    | .false => match strEq a "--cc" with
+                      | .true => match rest with
+                        | .nil => .err "--cc needs a command"
+                        | .cons c r2 => parseOptsGo r2 { o with cc := c } file extra
+                      | .false => match strEq a "--rt" with
+                        | .true => match rest with
+                          | .nil => .err "--rt needs a directory (the selfhost runtime, rt.c)"
+                          | .cons d r2 => parseOptsGo r2 { o with rt := d } file extra
+                        | .false => match strEq a "--cflags" with
+                          | .true => match rest with
+                            | .nil => .err "--cflags needs flags"
+                            | .cons f r2 => parseOptsGo r2 { o with cflags := List.append o.cflags (singleton f) } file extra
+                          | .false => match strEq a "--ldflags" with
+                            | .true => match rest with
+                              | .nil => .err "--ldflags needs flags"
+                              | .cons f r2 => parseOptsGo r2 { o with ldflags := List.append o.ldflags (singleton f) } file extra
+                            | .false => match strEq a "--version" with
+                              | .true => .version
+                              | .false => match strEq a "--help" with
+                                | .true => .help
+                                | .false => match strEq a "-h" with
+                                  | .true => .help
+                                  | .false => match isBackendFlag a with
+                                    | .true => parseOptsGo rest { o with backend := List.append o.backend (singleton a) } file extra
+                                    | .false => match strStarts "-" a with
+                                      | .true => .err (String.append "unknown option " a)
+                                      | .false => match file with
+                                        | .none => parseOptsGo rest o (.some a) extra
+                                        | .some _ => parseOptsGo rest o file (.cons a extra)
+
+def parseOpts (args : List String) (o : Opts) : Arg := parseOptsGo args o .none .nil
+
+def usageText : String :=
+  "usage: wiz-selfhost COMMAND FILE [OPTIONS]\n" +++
+  "\n" +++
+  "  wiz-selfhost check FILE         elaborate and type check FILE (diagnostics on\n" +++
+  "                                  standard error; exit 1 if it has errors)\n" +++
+  "  wiz-selfhost build FILE -o OUT  write the generated C to OUT\n" +++
+  "  wiz-selfhost run FILE [ARG]...  compile `main` and run it (also `eval`)\n" +++
+  "  wiz-selfhost version            print the version (also --version)\n" +++
+  "  wiz-selfhost help               this text (also -h, --help)\n" +++
+  "\n" +++
+  "options: -I DIR (a module root, repeatable; an `import M` is M.wiz there, then\n" +++
+  "  in the working directory),\n" +++
+  "  -o OUT (the C `run` compiles, kept), --cache DIR (default .wiz-cache),\n" +++
+  "  --no-cache, -v (cache hits and misses), --types (each declaration's type),\n" +++
+  "  --cc CMD, --rt DIR (the selfhost runtime, default selfhost), --cflags FLAGS,\n" +++
+  "  --ldflags FLAGS; backend: --rc, --rc-owned, --gc, --lib, --no-main, --header\n" +++
+  "\n" +++
+  "without a command: input.wiz in the working directory to standard output\n"
+
+def versionText : String := String.append "wiz-selfhost " wizVersion
+
+def usageError (msg : String) : IO Unit := do
+  IO.ePrintln (String.append "wiz-selfhost: " msg);
+  IO.ePrintln "usage: wiz-selfhost help";
+  Process.exit 2
+
+-- ------------------------------------------------------------------------------------
+-- check
+
+def statusOf (ds : List Diag) : Nat := match hasError ds with
+  | .true => 1
+  | .false => 0
+
+def linesOf (r : Run) : List String := List.reverseOf (Run.out r) .nil
+
+def checkPrepared (o : Opts) (p : Prepared) : IO Unit := do
+  let key := keyOf o "check" p;
+  cached ← cacheRead o key ".check";
+  match cached with
+  | .some (.mk st payload) => do
+    if o.verbose then IO.ePrintln (String.append "cache hit: " key) else IO.pure ();
+    let ds := diagsOf p.tab (mapChars (fun cs => String.mk cs) (splitLines payload));
+    emitDiags o ds;
+    match Nat.beq st 0 with
+    | .true => IO.pure ()
+    | .false => Process.exit 1
+  | .none => do
+    if o.verbose then IO.ePrintln (String.append "cache miss: " key) else IO.pure ();
+    let lines := linesOf p.run;
+    let ds := diagsOf p.tab lines;
+    let st := statusOf ds;
+    cacheWrite o key ".check" st (linesPayload lines);
+    emitDiags o ds;
+    match Nat.beq st 0 with
+    | .true => IO.pure ()
+    | .false => Process.exit 1
+
+def missingFile (file : String) : IO Unit := do
+  IO.ePrintln (diagLine (Diag.mk .error file 1 1 "no such file" ""));
+  Process.exit 1
+
+def checkCmd (o : Opts) (file : String) : IO Unit := do
+  prep ← prepare o.roots file;
+  match prep with
+  | .none => missingFile file
+  | .some p => checkPrepared o p
+
+-- ------------------------------------------------------------------------------------
+-- build: the C, to OUT
+
+def cOf (o : Opts) (p : Prepared) : IO (Option String) := do
+  let lines := linesOf p.run;
+  let ds := diagsOf p.tab lines;
+  match hasError ds with
+  | .true => IO.bind (emitDiags o ds) (fun u => noneIO)
+  | .false => IO.bind (missingLinks (List.reverseOf (Globals.ffi (Run.gs p.run)) .nil)) (fun missing => match missing with
+    | .cons _ _ => IO.bind (ePrintAll missing) (fun u => noneIO)
+    | .nil => someIO (String.append (commentsOf (mapS (fun l => stripAt l) lines))
+        (docsText (genProgramArgs o.backend (modTextOr p.tab "Main" "") (Run.gs p.run)))))
+
+def buildWith (o : Opts) (out : String) (p : Prepared) : IO Unit := do
+  c ← cOf o p;
+  match c with
+  | .none => Process.exit 1
+  | .some ctext => do
+    ok ← writeFile out ctext;
+    match ok with
+    | .true => IO.pure ()
+    | .false => do IO.ePrintln (String.append "error: cannot write " out); Process.exit 1
+
+def buildCmd (o : Opts) (file : String) : IO Unit :=
+  match o.out with
+  | .none => usageError "build needs -o OUT"
+  | .some out => do
+    prep ← prepare o.roots file;
+    match prep with
+    | .none => missingFile file
+    | .some p => buildWith o out p
+
+-- ------------------------------------------------------------------------------------
+-- run / eval
+
+def ccCommand (o : Opts) (src prog : String) : String :=
+  String.append o.cc (String.append " -O2 -w -I" (String.append o.rt (String.append (spacesOf o.cflags)
+    (String.append " " (String.append src (String.append " -o " (String.append prog (spacesOf o.ldflags))))))))
+
+def exitCodeOf (st : Nat) : Nat := Nat.div st 256
+
+def compileAndRun (o : Opts) (key : String) (ctext : String) (extra : List String) : IO Unit := do
+  let dir := String.append "/tmp/wiz-selfhost-" key;
+  ensureDir dir;
+  let src := String.append dir "/main.c";
+  ok ← writeFile src ctext;
+  match ok with
+  | .false => do IO.ePrintln (String.append "error: cannot write " src); Process.exit 1
+  | .true => do
+    match o.out with
+    | .some p => do kept ← writeFile p ctext; IO.pure ()
+    | .none => IO.pure ();
+    let prog := String.append dir "/prog";
+    let cmd := ccCommand o src prog;
+    st ← cSystem cmd;
+    match Nat.beq st 0 with
+    | .false => do
+      IO.ePrintln (String.append "error: the C compiler failed (the C is " (String.append src "):"));
+      IO.ePrintln cmd;
+      Process.exit 1
+    | .true => do
+      st2 ← cSystem (String.append prog (spacesOf extra));
+      match Nat.beq (exitCodeOf st2) 0 with
+      | .true => IO.pure ()
+      | .false => do
+        IO.ePrintln (String.append "error: the program exited with code " (Nat.toString (exitCodeOf st2)));
+        Process.exit 1
+
+def runPrepared (o : Opts) (p : Prepared) (extra : List String) : IO Unit := do
+  let key := keyOf o "c" p;
+  cached ← cacheRead o key ".c";
+  match cached with
+  | .some (.mk st ctext) => do
+    if o.verbose then IO.ePrintln (String.append "cache hit: " key) else IO.pure ();
+    compileAndRun o key ctext extra
+  | .none => do
+    if o.verbose then IO.ePrintln (String.append "cache miss: " key) else IO.pure ();
+    let lines := linesOf p.run;
+    let ds := diagsOf p.tab lines;
+    let st := statusOf ds;
+    cacheWrite o (keyOf o "check" p) ".check" st (linesPayload lines);
+    match Nat.beq st 0 with
+    | .false => do emitDiags o ds; Process.exit 1
+    | .true => do
+      missing ← missingLinks (List.reverseOf (Globals.ffi (Run.gs p.run)) .nil);
+      match missing with
+      | .cons _ _ => do ePrintAll missing; Process.exit 1
+      | .nil => do
+        let ctext := String.append (commentsOf (mapS (fun l => stripAt l) lines))
+          (docsText (genProgramArgs o.backend (modTextOr p.tab "Main" "") (Run.gs p.run)));
+        cacheWrite o key ".c" 0 ctext;
+        compileAndRun o key ctext extra
+
+def runCmd (o : Opts) (file : String) (extra : List String) : IO Unit := do
+  prep ← prepare o.roots file;
+  match prep with
+  | .none => missingFile file
+  | .some p => runPrepared o p extra
+
+-- ------------------------------------------------------------------------------------
+-- the one-shot mode: input.wiz → standard output (the fixpoint and the tests), the
+-- module loader with `-I` roots and the embedded Prelude
+
+def commentLines : List String → List String
+  | .nil => .nil
+  | .cons l rest => .cons (String.append "/* " (String.append l " */")) (commentLines rest)
+
+def errLines : List String → List String
+  | .nil => .nil
+  | .cons l rest => match strStarts "error" (stripAt l) with
+    | .true => .cons (stripAt l) (errLines rest)
+    | .false => errLines rest
+
+def legacyFinish (args : List String) (text : String) (lines : List String) (gs : Globals) : IO Unit := do
+  missing ← missingLinks (List.reverseOf (Globals.ffi gs) .nil);
+  match List.append (errLines lines) missing with
+  | .nil => do
+    printAll (commentLines (mapS (fun l => stripAt l) lines));
+    printDocs (genProgramArgs args text gs)
+  | .cons e es => do
+    ePrintAll (.cons e es);
+    Process.exit 1
+
+def legacyCmd (args : List String) : IO Unit := do
+  text ← IO.readFile "input.wiz";
+  hs ← moduleHeaderTexts text;
+  tab ← moduleRootSources cats tokens (modRoots args) text;
+  match modCheckRunH cats tokens hs tab (.cons "Main" .nil) with
+  | .mk run _ _ _ => legacyFinish args text (linesOf run) (Run.gs run)
+
+-- ------------------------------------------------------------------------------------
+-- dispatch
+
+def parseThen (k : Kind) (args : List String) : IO Unit :=
+  match parseOpts args optsDefault with
+  | .version => IO.println versionText
+  | .help => IO.println usageText
+  | .err msg => usageError msg
+  | .ok o file extra => match k with
+    | .check => match extra with
+      | .nil => match o.out with
+        | .some _ => usageError "check does not write an output file (-o)"
+        | .none => checkCmd o file
+      | .cons _ _ => usageError (String.append "check takes one FILE, not " (joinSpaces (.cons file extra)))
+    | .build => match extra with
+      | .nil => buildCmd o file
+      | .cons _ _ => usageError (String.append "build takes one FILE, not " (joinSpaces (.cons file extra)))
+    | .run => runCmd o file extra
+    | .eval => runCmd o file extra
+
+def dispatch : List String → IO Unit
+  | .nil => legacyCmd .nil
+  | .cons a rest => match strEq a "check" with
+    | .true => parseThen .check rest
+    | .false => match strEq a "build" with
+      | .true => parseThen .build rest
+      | .false => match strEq a "run" with
+        | .true => parseThen .run rest
+        | .false => match strEq a "eval" with
+          | .true => parseThen .eval rest
+          | .false => match strEq a "version" with
+            | .true => IO.println versionText
+            | .false => match strEq a "help" with
+              | .true => IO.println usageText
+              | .false => match strEq a "--version" with
+                | .true => IO.println versionText
+                | .false => match strEq a "--help" with
+                  | .true => IO.println usageText
+                  | .false => match strEq a "-h" with
+                    | .true => IO.println usageText
+                    | .false => match strStarts "-" a with
+                      | .true => legacyCmd (.cons a rest)
+                      | .false => usageError (String.append "unknown command " a)
+
+def main : IO Unit := do
+  args ← IO.args;
+  dispatch args
