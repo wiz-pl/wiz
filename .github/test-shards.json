@@ -33,10 +33,14 @@
     "wasm"
   ]},
   {"name": "library", "split": 6, "jobs": 4, "default": true, "select": [
+    "=bus-crc",
+    "=bus-law",
+    "=bus-protocol",
     "builtins",
     "calc",
     "classes",
     "deriving",
+    "=display",
     "=doc",
     "=feral",
     "=grail",
@@ -64,6 +68,7 @@
     "=linear-case",
     "repr",
     "result-q",
+    "=rune",
     "seplogic",
     "=sat",
     "=scry-datalog",

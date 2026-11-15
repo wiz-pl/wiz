@@ -1,0 +1,183 @@
+import Hdl.Bus
+/-!
+# Hdl.Apb
+
+A thin AMBA APB bridge for `Hdl.Bus` (`import Hdl.Apb`). `Bus` is the internal
+single-outstanding, AXI4-Lite-shaped valid/ready bus (`Bus.ReqW` with byte strobes);
+this file does not add a fourth protocol, it maps that bus onto the APB signal set,
+in both directions:
+
+* `Apb.busToApbC aw dw`: a `Bus.ReqW` master on an APB slave. The bridge runs APB's
+  two phases (SETUP: `PSEL` high, `PENABLE` low; ACCESS: `PSEL` and `PENABLE` high until
+  `PREADY`), captures the request when it starts SETUP so the APB fields are stable for
+  the whole transfer, and answers the bus at the end of ACCESS. `PADDR`, `PWDATA`,
+  `PWRITE` and `PSTRB` come from `Bus.ReqW` (`PSTRB` is zero on reads, as APB requires);
+  `PRDATA` and `PSLVERR` become `rdata`/`err`. One bus request is one APB transfer, so
+  responses come back in request order. The bridge returns to IDLE for at least one
+  cycle between transfers (APB's SETUP phase).
+* `Apb.apbToBusC aw dw`: an APB master on a `Bus.ReqW` slave. It is combinational:
+  APB's ACCESS phase (`PSEL && PENABLE`) is the bus `valid`, `PWRITE` is `we`,
+  `PADDR`/`PWDATA`/`PSTRB` are the payload, and the bus's `ready`/`rvalid`/`rdata`/`err`
+  drive `PREADY`/`PRDATA`/`PSLVERR`. SETUP is not a bus request; the APB master holds
+  the fields through ACCESS until `PREADY`, which is exactly the bus source obligation.
+
+Both directions pass every byte strobe through unchanged and never generate a response
+without a request. `examples/hdl-protocols.wiz` (test group `bus-protocol`) checks the
+stability, response-order and strobe laws over generated traces, and compares the value
+simulation, `Netlist.simulate` and `Circuit.simFast` cycle for cycle.
+
+APB is ARM IHI 0024; this is the APB4 subset (byte strobes, `PSLVERR`) with one
+outstanding transfer and no `PWAKEUP`/`PPROT`/`PSTRB`-less variants.
+-/
+
+/-- An APB request (the master-to-slave signals). `psel` starts a transfer, `penable`
+marks its ACCESS phase, `pwrite` is a write when high, `pstrb` has one bit per byte of
+`pwdata` (low byte first) and must be zero on a read. -/
+structure Apb.Req (aw dw : Nat) (r : HwTy → Type) where
+  psel : r Bus.Bit
+  penable : r Bus.Bit
+  pwrite : r Bus.Bit
+  paddr : r (HwTy.bits aw)
+  pwdata : r (HwTy.bits dw)
+  pstrb : r (HwTy.bits (Nat.div dw 8))
+  deriving Bundle
+
+/-- An APB response: `pready` ends the ACCESS phase, `prdata` is a read's data and
+`pslverr` marks a failed transfer. -/
+structure Apb.Resp (dw : Nat) (r : HwTy → Type) where
+  pready : r Bus.Bit
+  prdata : r (HwTy.bits dw)
+  pslverr : r Bus.Bit
+  deriving Bundle
+
+/-- A quiet APB response (`pready` low, zero data, no error). -/
+def Apb.noResp {r : HwTy → Type} [Hw r] {ω dw : Nat} : Apb.Resp dw r :=
+  Apb.Resp.mk (Hw.lit 1 0) (Hw.lit dw 0) (Hw.lit 1 0)
+
+/-- A quiet APB request (`PSEL` and `PENABLE` low, zero payload). -/
+def Apb.noReq {r : HwTy → Type} [Hw r] {ω aw dw : Nat} : Apb.Req aw dw r :=
+  Apb.Req.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 1 0)
+    (Hw.lit aw 0) (Hw.lit dw 0) (Hw.lit (Nat.div dw 8) 0)
+
+------------------------------------------------------------------------------------
+-- Bus master -> APB slave: the full two-phase bridge
+
+/-- The bridge's state: the APB phase (0 IDLE, 1 SETUP, 2 ACCESS) and the request
+captured at the start of SETUP. Capturing it is what makes the APB fields stable for
+the whole transfer without relying on the bus master for APB's timing rule. -/
+structure Apb.St (aw dw : Nat) (r : HwTy → Type) where
+  phase : r (HwTy.bits 2)
+  pwrite : r Bus.Bit
+  paddr : r (HwTy.bits aw)
+  pwdata : r (HwTy.bits dw)
+  pstrb : r (HwTy.bits (Nat.div dw 8))
+  deriving Bundle
+
+/-- The bridge at rest: IDLE with a quiet captured request. -/
+def Apb.stInit (aw dw : Nat) : Apb.St aw dw HwTy.El :=
+  Apb.St.mk (BitVec.ofNat 2 0) (BitVec.ofNat 1 0) (BitVec.ofNat aw 0)
+    (BitVec.ofNat dw 0) (BitVec.ofNat (Nat.div dw 8) 0)
+
+/-- The APB signals for the current state. IDLE drives `PSEL` low (the captured payload
+is ignored there); SETUP drives `PSEL` high and `PENABLE` low; ACCESS drives both high.
+`PSTRB` is zero for reads, as APB4 requires. -/
+def Apb.reqOf {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (s : Apb.St aw dw r) :
+    Apb.Req aw dw r :=
+  let idle := Bus.isK s.phase 0;
+  let access := Bus.isK s.phase 2;
+  Apb.Req.mk
+    (Hw.not idle)
+    access
+    s.pwrite
+    s.paddr
+    s.pwdata
+    (Hw.mux s.pwrite s.pstrb (Hw.lit (Nat.div dw 8) 0))
+
+/-- The bridge's input: the bus request and the APB slave's answer. -/
+structure Apb.In (aw dw : Nat) (r : HwTy → Type) where
+  req : Bus.ReqW aw dw r
+  slave : Apb.Resp dw r
+  deriving Bundle
+
+/-- The bridge's output: the APB master signals and the bus answer. -/
+structure Apb.Out (aw dw : Nat) (r : HwTy → Type) where
+  req : Apb.Req aw dw r
+  resp : Bus.Resp dw r
+  deriving Bundle
+
+/-- One cycle of the bus-to-APB bridge. A request is captured on IDLE -> SETUP; SETUP
+always becomes ACCESS; ACCESS ends on `PREADY` and answers the bus in that same cycle
+(`ready` for both kinds, `rvalid` only for a read). A bus master that drops `valid` in
+IDLE starts nothing; one that violates the bus obligation mid-transfer cannot shorten
+the APB transfer, which completes normally. -/
+def Apb.step {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (s : Apb.St aw dw r)
+    (i : Apb.In aw dw r) : r (HwTy.prod (Apb.St.code aw dw) (Apb.Out.code aw dw)) :=
+  let q := i.req;
+  let idle := Bus.isK s.phase 0;
+  let setup := Bus.isK s.phase 1;
+  let access := Bus.isK s.phase 2;
+  let start := Hw.and idle q.valid;
+  -- the APB transfer completes even if the bus source misbehaves, but the bus is only
+  -- answered while the request is still present (no response without a request)
+  let done := Hw.and (Hw.and access i.slave.pready) q.valid;
+  let s' := Apb.St.mk
+    (Hw.mux idle
+      (Hw.mux q.valid (Hw.lit 2 1) (Hw.lit 2 0))
+      (Hw.mux setup (Hw.lit 2 2)
+        (Hw.mux i.slave.pready (Hw.lit 2 0) (Hw.lit 2 2))))
+    (Hw.mux start q.we s.pwrite)
+    (Hw.mux start q.addr s.paddr)
+    (Hw.mux start q.wdata s.pwdata)
+    (Hw.mux start q.wstrb s.pstrb);
+  let o := Apb.Out.mk
+    (Apb.reqOf s)
+    (Bus.Resp.mk done (Hw.and done (Hw.not s.pwrite)) i.slave.prdata
+      (Hw.and done i.slave.pslverr));
+  Hw.pair (Apb.St.pack aw dw s') (Apb.Out.pack aw dw o)
+
+/-- The bus-to-APB bridge as a circuit. -/
+def Apb.busToApbC (aw dw : Nat) : Circuit (Apb.In.code aw dw) (Apb.Out.code aw dw) :=
+  Circuit.bundled (Apb.St.bundle aw dw) (Apb.In.bundle aw dw) (Apb.Out.bundle aw dw)
+    (Apb.stInit aw dw) (fun s i => Apb.step s i)
+
+------------------------------------------------------------------------------------
+-- APB master -> Bus slave: the combinational direction
+
+/-- The bridge's input: the APB master signals and the bus slave's answer. -/
+structure Apb.ToBusIn (aw dw : Nat) (r : HwTy → Type) where
+  apb : Apb.Req aw dw r
+  slave : Bus.Resp dw r
+  deriving Bundle
+
+/-- The bridge's output: the bus request and the APB answer. -/
+structure Apb.ToBusOut (aw dw : Nat) (r : HwTy → Type) where
+  req : Bus.ReqW aw dw r
+  apb : Apb.Resp dw r
+  deriving Bundle
+
+/-- The bus request an APB ACCESS phase makes. SETUP (`PENABLE` low) is not a bus
+request, so the bus sees `valid` only in ACCESS and the APB master holds the fields
+until `PREADY` (the bus source obligation). -/
+def Apb.toBusReq {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (p : Apb.Req aw dw r) :
+    Bus.ReqW aw dw r :=
+  Bus.ReqW.mk (Hw.and p.psel p.penable) p.pwrite p.paddr p.pwdata p.pstrb
+
+/-- The APB answer for a bus answer: `PREADY` only in ACCESS and only when the bus
+answered, `PRDATA` is the bus data and `PSLVERR` the bus error. -/
+def Apb.respOfBus {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (p : Apb.Req aw dw r)
+    (b : Bus.Resp dw r) : Apb.Resp dw r :=
+  let access := Hw.and p.psel p.penable;
+  let ack := Hw.and access (Hw.or b.ready b.rvalid);
+  Apb.Resp.mk ack b.rdata (Hw.and ack b.err)
+
+/-- The combinational APB-to-bus adapter. -/
+def Apb.apbToBusComb (aw dw : Nat) {r : HwTy → Type} [Hw r]
+    (x : r (Apb.ToBusIn.code aw dw)) : r (Apb.ToBusOut.code aw dw) :=
+  let i := Apb.ToBusIn.unpack aw dw x;
+  Apb.ToBusOut.pack aw dw (Apb.ToBusOut.mk
+    (Apb.toBusReq i.apb)
+    (Apb.respOfBus i.apb i.slave))
+
+/-- The APB-to-bus adapter as a circuit (no state). -/
+def Apb.apbToBusC (aw dw : Nat) : Circuit (Apb.ToBusIn.code aw dw) (Apb.ToBusOut.code aw dw) :=
+  Circuit.comb (Apb.apbToBusComb aw dw)
