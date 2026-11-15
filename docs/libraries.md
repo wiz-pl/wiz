@@ -648,7 +648,8 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
 
 Not done: a general bit-level round-trip lemma for bundles (above), `BitPack` for
 inductive types with fields (a tag and the widest constructor's fields), `!` on signals,
-`match` on an enumeration signal (staged `match`, hdl-staging-research S3), asynchronous
+`match` on an enumeration signal (a case tree over the `Hw` ops — wishful
+`hdl-match-signals`; the workaround is an `if` chain on `Phase.lit`), asynchronous
 reset.
 
 ## Xilinx 7-series pin constraints and the Arty A7 (`Hdl.Xdc`, `Hdl.Arty`)
