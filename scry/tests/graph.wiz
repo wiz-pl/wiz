@@ -1,0 +1,100 @@
+-- test: run
+import Sys
+import Text
+import Scry.Graph
+import Scry.GraphCmd
+import Scry.TaintCmd
+import Scry.Native
+import Scry.CstStore
+-- `scry graph` end to end over `fixtures/graph-chain.c`:
+--
+--   call chain  main -> pass -> sink -> system
+--   taint path  getenv in main -> parameter of pass -> system in sink
+--
+-- The checks are deliberately structural (does the DOT contain this edge/label), not a
+-- golden file: the DOT is the artefact and the point is that its shape and escaping are
+-- stable. The last check runs the CLI twice and compares the two DOT files byte for byte.
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+def main : IO Unit := EIO.toIO (do
+  let file := "tests/fixtures/graph-chain.c";
+  rep ← Scry.analyzeFile
+    (Scry.TaintOpts.mk file .none .none .false .false .false .false);
+  check "findings: one tainted path" (Nat.beq (List.length rep.findings) 1);
+
+  -- (a) call graph: defs in source order (sink, pass, main), then externals sorted
+  let cg := Scry.callGraphDotOf rep;
+  check "call graph: main -> pass" (String.contains cg "n2 -> n1");
+  check "call graph: pass -> sink" (String.contains cg "n1 -> n0");
+  check "call graph: sink -> system" (String.contains cg "n0 -> n4");
+  check "call graph: call-site line" (String.contains cg "line 6");
+  check "call graph: function names" (Bool.and (String.contains cg "main")
+    (Bool.and (String.contains cg "pass") (String.contains cg "sink")));
+  check "call graph: external is marked" (String.contains cg "external");
+  check "call graph: C string quote is escaped" (String.contains cg "system(\\\"");
+  check "call graph: the raw C call is not in the DOT"
+    (Bool.not (String.contains cg "system(\"echo \\\"hi\\\"\")"));
+
+  -- (c) taint path: source and sink are nodes, the intermediate step an edge label
+  let pd := Scry.pathsDotOf rep;
+  check "path: source label" (String.contains pd "source");
+  check "path: source is in main" (String.contains pd "source\\nmain:");
+  check "path: intermediate step is an edge label" (String.contains pd "parameter@pass:");
+  check "path: sink label" (String.contains pd "sink");
+  check "path: sink callee" (String.contains pd "system");
+  check "path: one cluster" (String.contains pd "subgraph cluster_0");
+
+  match Scry.findingDotOf rep 0 with
+  | .ok d => check "finding 0: renders a sink" (String.contains d "sink")
+  | .error _ => check "finding 0: renders a sink" .false;
+  match Scry.findingDotOf rep 1 with
+  | .error _ => check "finding 1: out of range is an error" .true
+  | .ok _ => check "finding 1: out of range is an error" .false;
+
+  -- escaping: a quote, a backslash and a newline in one label
+  check "escape: quote, backslash and newline"
+    (String.eq (Scry.dotEscape "a\"b\\c\nd") "a\\\"b\\\\c\\nd");
+  -- a synthetic name is the only way to get a quote into a C function label (an
+  -- identifier cannot contain one); the renderer must not let it break the DOT
+  let weird := "f\"q\\x\ny";
+  let wdot := Scry.callGraphDot
+    (List.cons (Scry.CallVertex.mk weird 7 .false) .nil)
+    (List.cons (Scry.CallArc.mk weird "g\"z" 8 "call(\"q\")") .nil);
+  check "escape: quoted function name" (String.contains wdot "f\\\"q");
+  check "escape: backslash in function name" (String.contains wdot "\\\\x");
+  check "escape: newline in function name" (String.contains wdot "\\ny");
+
+  -- (b) CST neighbourhood of the translation unit
+  text ← FS.readFile file;
+  st ← Scry.Native.parseFile file;
+  store ← EIO.lift (Scry.Native.toCstStore file st);
+  match Scry.cstDotOf text store 0 1 with
+  | .ok d => do
+    check "cst: root kind" (String.contains d "translation_unit");
+    check "cst: function definition" (String.contains d "function_definition");
+    check "cst: parent -> child edge" (String.contains d " -> c");
+    check "cst: line label" (String.contains d "line 1")
+  | .error _ => check "cst: renders" .false;
+  match Scry.cstDotOf text store 999999 1 with
+  | .error _ => check "cst: out-of-range node is an error" .true
+  | .ok _ => check "cst: out-of-range node is an error" .false;
+
+  -- the CLI writes the DOT; two runs are byte-identical (no timestamp, stable order)
+  hasBuild ← EIO.lift (FS.exists "build");
+  unit1 ← (match hasBuild with
+    | .true => EIO.pure ()
+    | .false => FS.createDir "build");
+  r1 ← Scry.graphCmd (List.cons file
+    (List.cons "--paths" (List.cons "--out" (List.cons "build/graph-a.dot" .nil))));
+  check "cli: first DOT run" (Nat.beq r1 0);
+  r2 ← Scry.graphCmd (List.cons file
+    (List.cons "--paths" (List.cons "--out" (List.cons "build/graph-b.dot" .nil))));
+  check "cli: second DOT run" (Nat.beq r2 0);
+  a ← FS.readFile "build/graph-a.dot";
+  b ← FS.readFile "build/graph-b.dot";
+  check "determinism: the two runs are byte-identical" (String.eq a b))

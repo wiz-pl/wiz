@@ -186,6 +186,42 @@ is not a `perf-run` measurement, and the perf agent owns real numbers.
 missing-corpus skip, and that the corpus still matches `bench/baseline.json`. The corpus
 policy and the external-manifest hook are in `bench/corpus/README.md`.
 
+## `scry graph`: looking at the facts
+
+`scry graph` renders the graph the analyser already built; it adds no analysis, and the
+DOT file is the artefact.
+
+```sh
+grail run scry -- graph tests/fixtures/graph-chain.c --out graph.dot
+grail run scry -- graph tests/fixtures/graph-chain.c --paths --out paths.dot
+grail run scry -- graph tests/fixtures/graph-chain.c --finding 0 --out finding.dot
+grail run scry -- graph tests/fixtures/graph-chain.c --node 12 --depth 2 --out cst.dot
+grail run scry -- graph tests/fixtures/graph-chain.c --paths --out paths.dot --format svg
+```
+
+`--call-graph` (the default) draws defined functions and external callees, with each call
+site's line and expression on the edge. `--paths` draws every finding, one cluster each;
+`--finding N` draws one (the index in the sorted `programFindings` order). `--node N
+--depth D` draws the CST neighbourhood `D` parent/child edges from node `N`. `--format`
+runs `dot` when it is on `PATH` and otherwise prints a skip; the DOT file is written
+either way.
+
+Labels quote everything that comes from the source, so a string literal with `"`, `\` or
+a newline in a call cannot break the file. Nodes and edges follow source or sorted order,
+and there are no timestamps, so two runs over the same input are byte-identical.
+
+![the call graph of the graph fixture](docs/scry-call-graph.svg)
+
+![the taint path of the graph fixture](docs/scry-taint-path.svg)
+
+This is a **view of the facts, not a proof**. The call graph is translation-unit scope,
+flow-insensitive and context-insensitive; an unresolved indirect call is not drawn. A
+path is the first provenance walk the engine found, not every path, and DOT does not
+encode the `checked`/`unchecked` derivation status. A `free`/use-after-free and
+`unknown-memory` are memory diagnostics, not taint path steps, so the path view does not
+invent a `free` node for them; the CST view is syntactic and depth-limited (no types, no
+CFG).
+
 Limits: the shim is sequential (one parser, one tree, one file) and tree-sitter-c is the
 only grammar. Threads, a native store shared across files, and tree-sitter queries are
 the remaining S1 work.

@@ -1,0 +1,406 @@
+import Text
+import Scry.Schema
+import Scry.Lower
+import Scry.Rules
+/-!
+# Scry.Graph: Graphviz DOT views of the facts
+
+`scry graph` has three views, all built from the same fact store the analyser already
+computes:
+
+* **call graph** — one node per function (and per external callee), one edge per call
+  site, labelled with the source line and the call expression;
+* **CST neighbourhood** — the nodes within `--depth` parent/child edges of `--node`,
+  with the grammar kind, field and source line on every node;
+* **taint path** — a finding's source and sink as labelled nodes, and each intermediate
+  program point as an edge label (the path is the engine's provenance, not a proof).
+
+Everything here is pure and takes line numbers from the caller, so the output depends
+only on the facts and the input order. There are no timestamps, random ids or map
+iterations: two runs over the same store are byte-identical.
+
+## Escaping
+
+Labels are quoted DOT strings. `dotEscape` turns `"` into `\"`, `\` into `\\`, and a
+newline/tab/CR into `\n`/`\t`/`\r`; other control characters become a space. A C string
+literal (or a function name built by a test) therefore cannot close the quoted label or
+inject a DOT statement.
+
+## What this view cannot show
+
+DOT is a rendering of one fact set, not a proof. The call graph is translation-unit
+scope and context-insensitive (an unresolved indirect call is absent); the path is one
+provenance walk (the first derivation the engine found, not every path); the CST
+neighbourhood is a depth-limited syntactic slice with no types or CFG. A finding's
+`checked`/`unchecked` derivation status is not encoded here — `scry taint` and SARIF
+carry it.
+-/
+
+-- ## Escaping and label text
+
+/-- One character as the body of a DOT quoted string. -/
+def Scry.dotEscapeChar (c : Char) : String :=
+  if Nat.beq (Char.code c) 34 then "\\\""
+  else if Nat.beq (Char.code c) 92 then "\\\\"
+  else if Nat.beq (Char.code c) 10 then "\\n"
+  else if Nat.beq (Char.code c) 9 then "\\t"
+  else if Nat.beq (Char.code c) 13 then "\\r"
+  else if Nat.lt (Char.code c) 32 then " "
+  else String.singleton c
+
+/-- Escape a string for a DOT quoted label (quotes, backslash and newlines at least). -/
+def Scry.dotEscape (s : String) : String :=
+  String.join (List.map Scry.dotEscapeChar (String.chars s))
+
+/-- A DOT quoted string. -/
+def Scry.dotQuote (s : String) : String := "\"" ++ Scry.dotEscape s ++ "\""
+
+/-- Collapse runs of ASCII white space to one space and keep at most `max` characters.
+Call-site and CST labels use this so a multi-line C statement stays one readable line;
+the escaping still runs afterwards. -/
+def Scry.dotCollapseSpace : List Char → Bool → List Char
+  | .nil, _ => .nil
+  | .cons c cs, prevSpace =>
+    match Char.isSpace c with
+    | .true =>
+      match prevSpace with
+      | .true => Scry.dotCollapseSpace cs .true
+      | .false => .cons (Char.mk 32) (Scry.dotCollapseSpace cs .true)
+    | .false => .cons c (Scry.dotCollapseSpace cs .false)
+
+/-- Trim, collapse white space, and truncate to `max` characters. -/
+def Scry.dotCollapse (s : String) (max : Nat) : String :=
+  String.take max (String.ofChars (Scry.dotCollapseSpace (String.chars (String.trim s)) .false))
+
+-- ## Small list helpers (names local to this module)
+
+/-- `(index, value)` pairs in source order. -/
+def Scry.graphIndexedAux {A : Type} : List A → Nat → List (Nat × A)
+  | .nil, _ => .nil
+  | .cons x xs, n => .cons (n, x) (Scry.graphIndexedAux xs (Nat.succ n))
+
+/-- `(0, x), (1, y), …` in source order. -/
+def Scry.graphIndexed {A : Type} (xs : List A) : List (Nat × A) :=
+  Scry.graphIndexedAux xs 0
+
+/-- `f` over `l`, dropping the `none`s. -/
+def Scry.graphMapSome {A B : Type} (f : A → Option B) : List A → List B
+  | .nil => .nil
+  | .cons x xs => match f x with
+    | .some y => .cons y (Scry.graphMapSome f xs)
+    | .none => Scry.graphMapSome f xs
+
+/-- Insert a string into an ascending list (stable). -/
+def Scry.graphInsertString (s : String) : List String → List String
+  | .nil => .cons s .nil
+  | .cons x xs =>
+    match String.lt s x with
+    | .true => .cons s (.cons x xs)
+    | .false => .cons x (Scry.graphInsertString s xs)
+
+/-- Sort strings by code point, ascending. -/
+def Scry.graphSortStrings (xs : List String) : List String :=
+  List.foldr (fun s acc => Scry.graphInsertString s acc) .nil xs
+
+/-- Deduplicate strings, keeping first occurrences. -/
+def Scry.graphDedupStrings : List String → List String
+  | .nil => .nil
+  | .cons x xs =>
+    match List.any (String.eq x) xs with
+    | .true => Scry.graphDedupStrings xs
+    | .false => .cons x (Scry.graphDedupStrings xs)
+
+/-- The `n`th element, if any. -/
+def Scry.graphNth {A : Type} : List A → Nat → Option A
+  | .nil, _ => .none
+  | .cons x _, .zero => .some x
+  | .cons _ xs, .succ n => Scry.graphNth xs n
+
+/-- The last element, if any. -/
+def Scry.graphLast {A : Type} : List A → Option A
+  | .nil => .none
+  | .cons x .nil => .some x
+  | .cons _ xs => Scry.graphLast xs
+
+/-- All but the last element. -/
+def Scry.graphInit {A : Type} : List A → List A
+  | .nil => .nil
+  | .cons _ .nil => .nil
+  | .cons x xs => .cons x (Scry.graphInit xs)
+
+/-- Join DOT lines, each with its own newline. -/
+def Scry.dotText (lines : List String) : String :=
+  String.join (List.map (fun l => l ++ "\n") lines)
+
+-- ## Call graph
+
+structure Scry.CallVertex where
+  /-- The function's (possibly `static:`-qualified) name. -/
+  name : String
+  /-- The definition's source line (0 when unknown). -/
+  line : Nat
+  /-- A callee with no definition in this translation unit. -/
+  isExternal : Bool
+
+structure Scry.CallArc where
+  caller : String
+  callee : String
+  /-- The call site's source line (0 when unknown). -/
+  line : Nat
+  /-- The call expression's source text, whitespace-collapsed. -/
+  text : String
+
+/-- `a` sorts before `b`: line, then caller, callee and text (a total order, so the
+insertion sort below is deterministic). -/
+def Scry.callArcLess (a b : Scry.CallArc) : Bool :=
+  if Nat.lt a.line b.line then .true
+  else if Nat.lt b.line a.line then .false
+  else if String.lt a.caller b.caller then .true
+  else if String.lt b.caller a.caller then .false
+  else if String.lt a.callee b.callee then .true
+  else if String.lt b.callee a.callee then .false
+  else String.lt a.text b.text
+
+def Scry.insertCallArc (a : Scry.CallArc) : List Scry.CallArc → List Scry.CallArc
+  | .nil => .cons a .nil
+  | .cons x xs =>
+    match Scry.callArcLess a x with
+    | .true => .cons a (.cons x xs)
+    | .false => .cons x (Scry.insertCallArc a xs)
+
+def Scry.sortCallArcs (as : List Scry.CallArc) : List Scry.CallArc :=
+  List.foldr (fun a acc => Scry.insertCallArc a acc) .nil as
+
+def Scry.callVertexIndexGo (name : String) : Nat → List Scry.CallVertex → Option Nat
+  | _, .nil => .none
+  | i, .cons v rest =>
+    match String.eq v.name name with
+    | .true => .some i
+    | .false => Scry.callVertexIndexGo name (Nat.succ i) rest
+
+def Scry.callVertexIndex (vs : List Scry.CallVertex) (name : String) : Option Nat :=
+  Scry.callVertexIndexGo name 0 vs
+
+def Scry.callVertexLabel (v : Scry.CallVertex) : String :=
+  let loc := match Nat.lt 0 v.line with
+    | .true => "\nline " ++ Nat.repr v.line
+    | .false => "";
+  let ext := match v.isExternal with
+    | .true => "\nexternal"
+    | .false => "";
+  v.name ++ loc ++ ext
+
+def Scry.callVertexLine (v : Scry.CallVertex) (i : Nat) : String :=
+  "  n" ++ Nat.repr i ++ " [label=" ++ Scry.dotQuote (Scry.callVertexLabel v)
+  ++ (match v.isExternal with
+    | .true => ", style=dashed"
+    | .false => "") ++ "];"
+
+def Scry.callArcLabel (a : Scry.CallArc) : String :=
+  let head := "line " ++ Nat.repr a.line;
+  match String.isEmpty (String.trim a.text) with
+  | .true => head
+  | .false => head ++ ": " ++ a.text
+
+def Scry.callArcLine (vs : List Scry.CallVertex) (a : Scry.CallArc) : Option String :=
+  match Scry.callVertexIndex vs a.caller with
+  | .none => .none
+  | .some i => match Scry.callVertexIndex vs a.callee with
+    | .none => .none
+    | .some j => .some ("  n" ++ Nat.repr i ++ " -> n" ++ Nat.repr j
+        ++ " [label=" ++ Scry.dotQuote (Scry.callArcLabel a) ++ "];")
+
+/-- A call graph as DOT. Vertices stay in the caller's order (defined functions in
+source order, then externals sorted); arcs are sorted by line and name. -/
+def Scry.callGraphDot (vs : List Scry.CallVertex) (as : List Scry.CallArc) : String :=
+  let nodeLines := List.map (fun p => Scry.callVertexLine p.2 p.1) (Scry.graphIndexed vs);
+  let arcLines := Scry.graphMapSome (Scry.callArcLine vs) (Scry.sortCallArcs as);
+  Scry.dotText (List.concat [
+    [ "digraph scry_call_graph {"
+    , "  graph [rankdir=LR, bgcolor=\"white\", label=\"call graph\", labelloc=t];"
+    , "  node [shape=box, fontname=\"monospace\", fontsize=10];"
+    , "  edge [fontname=\"monospace\", fontsize=9];" ]
+    , nodeLines
+    , arcLines
+    , [ "}" ] ])
+
+-- ## Taint paths
+
+/-- `function:line` (the line is omitted when unknown). -/
+def Scry.pathLoc (lineOf : String → Nat → Nat) (p : Scry.PathNode) : String :=
+  let line := lineOf p.func p.point;
+  p.func ++ (match Nat.lt 0 line with
+    | .true => ":" ++ Nat.repr line
+    | .false => "")
+
+/-- An intermediate step as an edge label: `kind@function:line (vREG)`. -/
+def Scry.pathStepLabel (lineOf : String → Nat → Nat) (p : Scry.PathNode) : String :=
+  Scry.PathKind.show p.kind ++ "@" ++ Scry.pathLoc lineOf p
+  ++ " (v" ++ Nat.repr p.var ++ ")"
+
+def Scry.pathNodeLine (id label : String) : String :=
+  "  " ++ id ++ " [shape=box, label=" ++ Scry.dotQuote label ++ "];"
+
+def Scry.pathWaypointLine (id : String) : String :=
+  "  " ++ id ++ " [shape=point, width=0.08, label=\"\"];"
+
+/-- The waypoints and labelled edges for the steps between source and sink. Returns
+the lines and the id of the last waypoint (the source id when there are no steps). -/
+def Scry.pathWaypoints (prefix : String) (lineOf : String → Nat → Nat)
+    (steps : List Scry.PathNode) (prev : String) (i : Nat) : List String × String :=
+  match steps with
+  | .nil => (.nil, prev)
+  | .cons s rest =>
+    let id := prefix ++ "w" ++ Nat.repr i;
+    let node := Scry.pathWaypointLine id;
+    let edge := "  " ++ prev ++ " -> " ++ id ++ " [label="
+      ++ Scry.dotQuote (Scry.pathStepLabel lineOf s) ++ "];";
+    match Scry.pathWaypoints prefix lineOf rest id (Nat.succ i) with
+    | (lines, last) => (.cons node (.cons edge lines), last)
+
+/-- A finding as source and sink nodes plus one edge per intermediate statement. A path
+of only a sink (a forbidden call) is a single node; a direct path is one `direct` edge. -/
+def Scry.findingLines (prefix : String) (lineOf : String → Nat → Nat)
+    (f : Scry.RuleFinding) : List String :=
+  match f.path with
+  | .nil =>
+    List.cons (Scry.pathNodeLine (prefix ++ "k") ("sink\n" ++ f.func ++ "\n" ++ f.rule)) .nil
+  | .cons first rest =>
+    match Scry.graphLast f.path with
+    | .none => .nil
+    | .some last => match rest with
+      | .nil =>
+        List.cons (Scry.pathNodeLine (prefix ++ "k")
+          (Scry.PathKind.show first.kind ++ "\n" ++ Scry.pathLoc lineOf first
+            ++ "\n" ++ f.rule)) .nil
+      | .cons _ _ =>
+        let sid := prefix ++ "s";
+        let kid := prefix ++ "k";
+        let sourceLabel := Scry.PathKind.show first.kind ++ "\n" ++ Scry.pathLoc lineOf first;
+        let sinkLabel := "sink\n" ++ Scry.pathLoc lineOf last ++ "\n" ++ f.name
+          ++ " arg " ++ Nat.repr f.arg ++ "\n" ++ f.rule;
+        let intermediate := Scry.graphInit rest;
+        let chain := Scry.pathWaypoints prefix lineOf intermediate sid 0;
+        let lastId := chain.2;
+        let sinkEdge := "  " ++ lastId ++ " -> " ++ kid ++ " [label="
+          ++ Scry.dotQuote (match List.isEmpty intermediate with
+            | .true => "direct"
+            | .false => "to sink") ++ "];";
+        List.append
+          (List.append
+            (List.cons (Scry.pathNodeLine sid sourceLabel) chain.1)
+            (List.cons (Scry.pathNodeLine kid sinkLabel) .nil))
+          (List.cons sinkEdge .nil)
+
+/-- One finding in a DOT cluster, with its index for stable ids. -/
+def Scry.findingClusterLines (i : Nat) (lineOf : String → Nat → Nat)
+    (f : Scry.RuleFinding) : List String :=
+  let prefix := "f" ++ Nat.repr i ++ "_";
+  List.concat [
+    [ "  subgraph cluster_" ++ Nat.repr i ++ " {"
+    , "    label=" ++ Scry.dotQuote ("finding " ++ Nat.repr i ++ ": " ++ f.rule) ++ ";"
+    , "    color=\"lightgrey\";" ]
+    , Scry.findingLines prefix lineOf f
+    , [ "  }" ] ]
+
+/-- All findings as one DOT graph, one cluster each. `--finding N` uses a one-element
+list and this same renderer, so the two modes cannot drift apart. -/
+def Scry.pathsDotWithTitle (title : String) (lineOf : String → Nat → Nat)
+    (fs : List Scry.RuleFinding) : String :=
+  let body := match fs with
+    | .nil => List.cons "  none [shape=note, label=\"no findings\"];" .nil
+    | .cons _ _ => List.concat (List.map (fun p =>
+        Scry.findingClusterLines p.1 lineOf p.2) (Scry.graphIndexed fs));
+  Scry.dotText (List.concat [
+    [ "digraph scry_taint_paths {"
+    , "  graph [rankdir=LR, bgcolor=\"white\", label=" ++ Scry.dotQuote title
+      ++ ", labelloc=t];"
+    , "  node [shape=box, fontname=\"monospace\", fontsize=10];"
+    , "  edge [fontname=\"monospace\", fontsize=9];" ]
+    , body
+    , [ "}" ] ])
+
+def Scry.pathsDot (lineOf : String → Nat → Nat) (fs : List Scry.RuleFinding) : String :=
+  Scry.pathsDotWithTitle ("taint paths (" ++ Nat.repr (List.length fs) ++ " finding(s))")
+    lineOf fs
+
+/-- `--finding N`: the `N`th finding in the deterministic `programFindings` order. -/
+def Scry.findingDot (lineOf : String → Nat → Nat) (fs : List Scry.RuleFinding)
+    (i : Nat) : Except String String :=
+  match Scry.graphNth fs i with
+  | .none => .error ("no finding " ++ Nat.repr i ++ " (the file has "
+      ++ Nat.repr (List.length fs) ++ " finding(s))")
+  | .some f => .ok (Scry.pathsDotWithTitle
+      ("finding " ++ Nat.repr i ++ ": " ++ f.rule) lineOf (List.cons f .nil))
+
+-- ## CST neighbourhood
+
+def Scry.graphMemNat (x : Nat) (xs : List Nat) : Bool := List.any (Nat.beq x) xs
+
+def Scry.graphDedupNat (xs : List Nat) : List Nat :=
+  List.foldl (fun acc x => match List.any (Nat.beq x) acc with
+    | .true => acc
+    | .false => List.append acc (.cons x .nil)) .nil xs
+
+/-- The parent and children of a CST node (the edges the neighbourhood walks). -/
+def Scry.graphCstNeighbours (c : Scry.Cst) (n : Nat) : List Nat :=
+  match c.parentOf n with
+  | .none => c.childrenOf n
+  | .some p => .cons p (c.childrenOf n)
+
+/-- Breadth-first, `depth` parent/child edges out from `frontier`, accumulating `seen`. -/
+def Scry.graphCstBfs (c : Scry.Cst) (depth : Nat) (frontier seen : List Nat) : List Nat :=
+  match depth with
+  | .zero => seen
+  | .succ d =>
+    let next := Scry.graphDedupNat
+      (List.concat (List.map (Scry.graphCstNeighbours c) frontier));
+    let fresh := List.filter (fun n => Bool.not (Scry.graphMemNat n seen)) next;
+    match fresh with
+    | .nil => seen
+    | .cons _ _ => Scry.graphCstBfs c d fresh (List.append seen fresh)
+
+/-- A CST node label: kind, field, source line, and a short whitespace-collapsed text. -/
+def Scry.graphCstNodeLabel (c : Scry.Cst) (lineAt : Nat → Nat) (i : Nat) : String :=
+  let kind := c.kindOf i;
+  let field := c.fieldOf i;
+  let sp := c.spanOf i;
+  let txt := Scry.dotCollapse (Scry.Cst.textOf c i) 32;
+  kind
+  ++ (match String.isEmpty field with
+    | .true => ""
+    | .false => " (" ++ field ++ ")")
+  ++ "\nline " ++ Nat.repr (lineAt sp.start)
+  ++ (match String.isEmpty txt with
+    | .true => ""
+    | .false => "\n" ++ txt)
+
+/-- The CST neighbourhood of `root` at `depth`, as DOT. Nodes are emitted in node-id
+order and edges parent-before-child, so the file is stable. -/
+def Scry.graphCstDot (c : Scry.Cst) (lineAt : Nat → Nat) (root depth : Nat) : String :=
+  let seen := Scry.graphCstBfs c depth (List.cons root .nil) (List.cons root .nil);
+  let selected := List.filter (fun n => Scry.graphMemNat n seen) (Scry.range c.count);
+  let nodeLines := List.map (fun i =>
+    "  c" ++ Nat.repr i ++ " [label="
+      ++ Scry.dotQuote (Scry.graphCstNodeLabel c lineAt i) ++ "];") selected;
+  let edgeLines := List.concat (List.map (fun i =>
+    match c.parentOf i with
+    | .none => .nil
+    | .some p => match Scry.graphMemNat p selected with
+      | .false => .nil
+      | .true =>
+        let label := match String.isEmpty (c.fieldOf i) with
+          | .true => "child"
+          | .false => c.fieldOf i;
+        List.cons ("  c" ++ Nat.repr p ++ " -> c" ++ Nat.repr i
+          ++ " [label=" ++ Scry.dotQuote label ++ "];") .nil) selected);
+  Scry.dotText (List.concat [
+    [ "digraph scry_cst {"
+    , "  graph [rankdir=TB, bgcolor=\"white\", label="
+      ++ Scry.dotQuote ("CST neighbourhood of node " ++ Nat.repr root
+        ++ " (depth " ++ Nat.repr depth ++ ")") ++ ", labelloc=t];"
+    , "  node [shape=box, fontname=\"monospace\", fontsize=10];"
+    , "  edge [fontname=\"monospace\", fontsize=9];" ]
+    , nodeLines
+    , edgeLines
+    , [ "}" ] ])

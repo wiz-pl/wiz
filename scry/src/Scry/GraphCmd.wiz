@@ -1,0 +1,261 @@
+import Sys
+import Text
+import Scry.Native
+import Scry.CstStore
+import Scry.Lower
+import Scry.TaintCmd
+import Scry.Graph
+import Scry.Interproc
+/-!
+# Scry.GraphCmd: the `scry graph` command
+
+```
+scry graph FILE.c --out graph.dot [--call-graph | --paths | --finding N
+                                   | --node N [--depth D]]
+                 [--format svg|png] [--allow-errors]
+```
+
+`FILE.c` is parsed and lowered with the same S1/S2 frontend as `scry taint`; `--paths`
+and `--finding` also run the taint analysis, because a path is the analyser's
+provenance. The DOT text is written to `--out` (stdout when it is omitted). `--format`
+is a convenience: it writes the DOT either way and runs `dot` only when it is on
+`PATH`; when `dot` is absent the command prints a skip and exits 0.
+
+The builders (`callGraphDotOf`, `pathsDotOf`, `findingDotOf`, `cstDotOf`) are pure and
+take an `Scry.TaintReport`, so the tests and the CLI use exactly the same renderer. See
+`Scry.Graph` for the escaping and determinism rules and for what the view cannot show.
+-/
+
+-- ## Options
+
+inductive Scry.GraphMode where
+  /-- Functions and their call sites (the default). -/
+  | callGraph
+  /-- Every finding's source -> sink path. -/
+  | paths
+  /-- One finding's path, by its index in `programFindings`. -/
+  | finding
+  /-- A CST neighbourhood. -/
+  | cst
+
+structure Scry.GraphOpts where
+  file : String
+  /-- `--out FILE`; `none` prints the DOT on stdout. -/
+  out : Option String
+  mode : Scry.GraphMode
+  /-- `--node N`: the CST root of a neighbourhood. -/
+  node : Option Nat
+  /-- `--depth D`: parent/child edges to walk from `--node` (default 2). -/
+  depth : Nat
+  /-- `--finding N`: the index in `programFindings`. -/
+  finding : Option Nat
+  /-- `--format svg|png`, or `none` for DOT only. -/
+  format : Option String
+  /-- `--allow-errors`: draw a recovered tree with `ERROR`/`MISSING` nodes. -/
+  allowErrors : Bool
+
+def Scry.emptyGraphOpts (file : String) : Scry.GraphOpts :=
+  Scry.GraphOpts.mk file .none .callGraph .none 2 .none .none .false
+
+def Scry.graphUsage : String :=
+  "usage: scry graph FILE.c --out FILE\n"
+  ++ "                    [--call-graph | --paths | --finding N\n"
+  ++ "                     | --node N [--depth D]]\n"
+  ++ "                    [--format svg|png] [--allow-errors]\n"
+
+/-- Parse the flags after `scry graph`. Flags may come in any order; the first non-flag
+argument is the C source. -/
+partial def Scry.graphArgsGo (file : Option String) (o : Scry.GraphOpts) :
+    List String → Except String Scry.GraphOpts
+  | .nil => match file with
+    | .some f => .ok { o with file := f }
+    | .none => .error Scry.graphUsage
+  | .cons a rest => match a with
+    | "--call-graph" => Scry.graphArgsGo file { o with mode := .callGraph } rest
+    | "--paths" => Scry.graphArgsGo file { o with mode := .paths } rest
+    | "--finding" => match rest with
+      | .cons v more => match String.parseNat v with
+        | .some n => Scry.graphArgsGo file
+            { o with mode := .finding, finding := .some n } more
+        | .none => .error ("--finding needs a number, got \"" ++ v ++ "\"")
+      | .nil => .error "--finding needs a number"
+    | "--node" => match rest with
+      | .cons v more => match String.parseNat v with
+        | .some n => Scry.graphArgsGo file { o with mode := .cst, node := .some n } more
+        | .none => .error ("--node needs a number, got \"" ++ v ++ "\"")
+      | .nil => .error "--node needs a number"
+    | "--depth" => match rest with
+      | .cons v more => match String.parseNat v with
+        | .some n => Scry.graphArgsGo file { o with depth := n } more
+        | .none => .error ("--depth needs a number, got \"" ++ v ++ "\"")
+      | .nil => .error "--depth needs a number"
+    | "--out" => match rest with
+      | .cons p more => Scry.graphArgsGo file { o with out := .some p } more
+      | .nil => .error "--out needs a file"
+    | "--format" => match rest with
+      | .cons v more =>
+        if String.eq v "svg" then
+          Scry.graphArgsGo file { o with format := .some "svg" } more
+        else if String.eq v "png" then
+          Scry.graphArgsGo file { o with format := .some "png" } more
+        else .error ("--format is svg or png, got \"" ++ v ++ "\"")
+      | .nil => .error "--format needs svg or png"
+    | "--allow-errors" => Scry.graphArgsGo file { o with allowErrors := .true } rest
+    | "--help" => .error Scry.graphUsage
+    | _ => match String.startsWith a "--" with
+      | .true => .error ("unknown flag " ++ a ++ "\n" ++ Scry.graphUsage)
+      | .false => match file with
+        | .some _ => .error ("unexpected argument " ++ a ++ "\n" ++ Scry.graphUsage)
+        | .none => Scry.graphArgsGo (.some a) o rest
+
+def Scry.graphArgs (args : List String) : Except String Scry.GraphOpts :=
+  Scry.graphArgsGo .none (Scry.emptyGraphOpts "") args
+
+-- ## Data from a report
+
+/-- The function with this name, if the unit defines it. -/
+def Scry.graphFindFunc (fs : List Wil.Func) (name : String) : Option Wil.Func :=
+  List.find (fun f => String.eq f.name name) fs
+
+/-- The 1-based line of a span (0 when the origin is synthetic). -/
+def Scry.graphLineAtSpan (files : List String) (sp : Wil.Span) : Nat :=
+  match List.getD files sp.file "" with
+  | text => (Scry.lineColAt text sp.start).1
+
+/-- A call site's line and whitespace-collapsed source text, from its owning function. -/
+def Scry.graphCallArc (tu : Scry.TU) (s : Scry.CallSite) : Scry.CallArc :=
+  match Scry.graphFindFunc tu.funcs s.caller with
+  | .none => Scry.CallArc.mk s.caller s.callee 0 ""
+  | .some fn => match Scry.nodeStmt (Scry.flatten fn) s.node with
+    | .none => Scry.CallArc.mk s.caller s.callee 0 ""
+    | .some st =>
+      let sp := Wil.stmtOrigin st;
+      Scry.CallArc.mk s.caller s.callee
+        (Scry.graphLineAtSpan tu.files sp)
+        (Scry.dotCollapse (Scry.spanText tu.files sp) 60)
+
+/-- Defined functions in source order, then external callees sorted by name. -/
+def Scry.graphCallVertices (tu : Scry.TU) (sites : List Scry.CallSite) :
+    List Scry.CallVertex :=
+  let defs := List.map (fun fn =>
+    Scry.CallVertex.mk fn.name (Scry.graphLineAtSpan tu.files fn.origin) .false) tu.funcs;
+  let externalNames := Scry.graphSortStrings (Scry.graphDedupStrings
+    (List.map (fun s => s.callee)
+      (List.filter (fun s => match Scry.graphFindFunc tu.funcs s.callee with
+        | .none => .true
+        | .some _ => .false) sites)));
+  List.append defs (List.map (fun n => Scry.CallVertex.mk n 0 .true) externalNames)
+
+/-- The call graph DOT of an analysed file. -/
+def Scry.callGraphDotOf (rep : Scry.TaintReport) : String :=
+  let sites := (Scry.callGraph (Wil.program rep.tu.funcs) rep.pointsTo).sites;
+  let vs := Scry.graphCallVertices rep.tu sites;
+  let as := List.map (Scry.graphCallArc rep.tu) sites;
+  Scry.callGraphDot vs as
+
+def Scry.graphPathLine (rep : Scry.TaintReport) : String → Nat → Nat :=
+  fun func point => match Scry.originAt rep.origins func point with
+    | .some o => o.line
+    | .none => 0
+
+/-- Every finding's path, as DOT. -/
+def Scry.pathsDotOf (rep : Scry.TaintReport) : String :=
+  Scry.pathsDot (Scry.graphPathLine rep) rep.findings
+
+/-- One finding's path, as DOT. -/
+def Scry.findingDotOf (rep : Scry.TaintReport) (i : Nat) : Except String String :=
+  Scry.findingDot (Scry.graphPathLine rep) rep.findings i
+
+/-- A CST neighbourhood, as DOT. -/
+def Scry.cstDotOf (text : String) (store : Scry.CstStore) (root depth : Nat) :
+    Except String String :=
+  match Nat.lt root (Scry.CstStore.nodeCount store) with
+  | .false => .error ("no CST node " ++ Nat.repr root ++ " (node count "
+      ++ Nat.repr (Scry.CstStore.nodeCount store) ++ ")")
+  | .true => .ok (Scry.graphCstDot (Scry.Cst.ofStore text store)
+      (fun off => (Scry.lineColAt text off).1) root depth)
+
+-- ## Writing and rendering
+
+def Scry.graphSay (s : String) : EIO Unit := EIO.lift (IO.println s)
+
+/-- `graph.dot` -> `graph.svg` (or `.png`); a path without `.dot` gets the suffix. -/
+def Scry.graphImagePath (p ext : String) : String :=
+  match String.endsWith p ".dot" with
+  | .true => String.dropEnd 4 p ++ "." ++ ext
+  | .false => p ++ "." ++ ext
+
+/-- Run `dot` only when it is on `PATH`; the DOT file is already written either way. -/
+def Scry.renderGraphImage (dotPath fmt : String) : EIO Nat := do
+  probe ← Process.output "/bin/sh" (List.cons "-c" (List.cons "command -v dot" .nil)) "";
+  match ExitStatus.success probe.status with
+  | .false => do
+    EIO.lift (IO.ePrintln ("scry graph: dot not found; wrote DOT to " ++ dotPath
+      ++ " (skipped " ++ fmt ++ ")"));
+    EIO.pure 0
+  | .true => do
+    let img := Scry.graphImagePath dotPath fmt;
+    r ← Process.output "dot"
+      (List.cons ("-T" ++ fmt)
+        (List.cons "-o" (List.cons img (List.cons dotPath .nil)))) "";
+    match ExitStatus.success r.status with
+    | .true => do
+      Scry.graphSay ("wrote " ++ img);
+      EIO.pure 0
+    | .false => EIO.fail ("dot -T" ++ fmt ++ " failed: " ++ String.trim r.stderr)
+
+/-- Write the DOT (or print it), then optionally render an image. -/
+def Scry.writeGraph (o : Scry.GraphOpts) (dot : String) : EIO Nat :=
+  match o.format with
+  | .some fmt => match o.out with
+    | .none => EIO.fail "--format svg|png needs --out FILE"
+    | .some p => do
+      FS.writeFile p dot;
+      Scry.graphSay ("wrote DOT: " ++ p);
+      Scry.renderGraphImage p fmt
+  | .none => do
+    unit1 ← (match o.out with
+      | .none => EIO.lift (IO.print dot)
+      | .some p => do
+        FS.writeFile p dot;
+        Scry.graphSay ("wrote DOT: " ++ p));
+    EIO.pure 0
+
+-- ## The command
+
+def Scry.analyzeGraph (o : Scry.GraphOpts) : EIO Scry.TaintReport :=
+  Scry.analyzeFile (Scry.TaintOpts.mk o.file .none .none .false o.allowErrors .false .false)
+
+def Scry.runCstGraph (o : Scry.GraphOpts) (root : Nat) : EIO Nat := do
+  text ← FS.readFile o.file;
+  st ← Scry.Native.parse "c" text;
+  cst ← EIO.lift (Scry.Native.toCstStore o.file st);
+  let errs := Scry.CstStore.errorCount cst;
+  match Bool.and (Nat.lt 0 errs) (Bool.not o.allowErrors) with
+  | .true => EIO.fail (o.file ++ ": " ++ Nat.repr errs
+      ++ " parse error node(s); pass --allow-errors to draw the recovered tree")
+  | .false => match Scry.cstDotOf text cst root o.depth with
+    | .error e => EIO.fail e
+    | .ok dot => Scry.writeGraph o dot
+
+/-- `scry graph …`. -/
+def Scry.graphCmd (args : List String) : EIO Nat :=
+  match Scry.graphArgs args with
+  | .error e => EIO.fail e
+  | .ok o => match o.mode with
+    | .cst => match o.node with
+      | .none => EIO.fail "--node N is required for a CST neighbourhood"
+      | .some n => Scry.runCstGraph o n
+    | .callGraph => do
+      rep ← Scry.analyzeGraph o;
+      Scry.writeGraph o (Scry.callGraphDotOf rep)
+    | .paths => do
+      rep ← Scry.analyzeGraph o;
+      Scry.writeGraph o (Scry.pathsDotOf rep)
+    | .finding => match o.finding with
+      | .none => EIO.fail "--finding N is required"
+      | .some i => do
+        rep ← Scry.analyzeGraph o;
+        match Scry.findingDotOf rep i with
+        | .error e => EIO.fail e
+        | .ok dot => Scry.writeGraph o dot
