@@ -1,0 +1,28 @@
+import Sys
+import Scry.Native
+import Scry.CstStore
+/-!
+# scry-cst: spill a C file's CST
+
+`scry-cst FILE` parses `FILE` with the S1 tree-sitter shim (`Scry.Native`) and prints
+its `scry-cst 1` spill format on stdout. It is the checked-in-fixture generator for the
+C-to-Wil lowering (`corpus/c2wil/*.cst`, see `wiz-notes/scry-c2wil.md`):
+
+    .grail/bin/scry-cst corpus/c2wil/straight.c > corpus/c2wil/straight.cst
+
+The tests read the checked-in spill, so they need no tree-sitter build. Regenerate a
+spill only when its `.c` fixture changes; the test checks that the spill's function
+spans point into the source text it embeds.
+-/
+
+/-- Parse `path` and print its columns' spill format. -/
+def Scry.spill (path : String) : EIO Unit := do
+  st ← Scry.Native.parseChecked path;
+  store ← EIO.lift (Scry.Native.toCstStore path st);
+  EIO.lift (IO.print (Scry.CstStore.render store))
+
+/-- `scry-cst FILE`. -/
+def main : IO Unit := IO.bind IO.args (fun args => match args with
+  | .cons path .nil => EIO.toIO (Scry.spill path)
+  | _ => IO.bind (IO.ePrintln "usage: scry-cst FILE   (print FILE's scry-cst spill)")
+      (fun _ => Process.exit 2))

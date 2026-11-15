@@ -2,6 +2,8 @@ import Sys
 import Scry.Query
 import Scry.Parse
 import Scry.CstStore
+import Scry.TaintCmd
+import Scry.BenchCmd
 /-!
 # Scry.Cli: the `scry` command line
 
@@ -36,6 +38,13 @@ def Scry.usage : String :=
   ++ "  explain FILE NODE          one node: span, parent, children, arcs, relations\n"
   ++ "  parse FILE… --stats        stats of JSON or scry-cst stores (S1)\n"
   ++ "  cst FILE OUT               convert a JSON fact store to scry-cst\n"
+  ++ "  taint FILE.c [--rules FILE] [--sarif OUT] [--json] [--allow-errors]\n"
+  ++ "              [--fail-on-finding] [--origin-map]\n"
+  ++ "                             C -> Wil -> taint -> findings/SARIF\n"
+  ++ "  bench [--corpus DIR] [--baseline FILE] [--extra DIR]... [--json OUT]\n"
+  ++ "        [--markdown OUT] [--update-baseline FILE] [--no-timing] [--quiet]\n"
+  ++ "        [--fail-on-regression]\n"
+  ++ "                             run the taint corpus and compare with expectations\n"
   ++ "  help, --help               this text\n"
   ++ "  --version                  the version\n"
 
@@ -154,6 +163,8 @@ def Scry.dispatch (args : List String) : EIO Nat := match args with
   | .cons "cst" rest => match rest with
     | .cons file (.cons out .nil) => Scry.cstCmd file out
     | _ => EIO.fail "usage: scry cst FILE OUT"
+  | .cons "taint" rest => Scry.taintCmd rest
+  | .cons "bench" rest => Scry.benchCmd rest
   | .cons cmd rest => EIO.fail ("unknown command \"" ++ cmd ++ "\" (see scry help)")
 
 /-- `main`: run a command and exit with its status (1 with a `scry: …` message on an

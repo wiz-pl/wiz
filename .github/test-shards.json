@@ -63,6 +63,7 @@
     "phantom",
     "regions",
     "=scry-wil",
+    "=scry-c2wil",
     "=scry-ai",
     "=scry-taint",
     "=linear-case",

@@ -8,7 +8,7 @@ compound_statement
 call_expression
 ERROR
 fields	5
--
+<>
 declarator
 body
 function

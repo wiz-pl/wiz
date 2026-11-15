@@ -1,0 +1,606 @@
+import Scry.Wil
+import Scry.Analysis
+import Text
+/-!
+# Scry.PointsTo
+
+**Flow-insensitive, field-sensitive points-to over the lowered Wil** (`import
+Scry.PointsTo`): the memory model S4's taint layer consumes. It answers three questions:
+
+* *where may this pointer point?* (`Scry.ptIds`), an abstract location set;
+* *do these two accesses alias?* (`Scry.locOverlap`), so a `store` and a later `load`
+  meet only when they may be the same cell;
+* *which functions may an indirect call reach?* (`Scry.indirectAt`), so function
+  pointers are resolved when their value is known and stay **unknown** (with a warning)
+  when it is not.
+
+## The location lattice
+
+An abstract location is a finite set of:
+
+| constructor | meaning |
+|---|---|
+| `Loc.stack f p` | a **stack slot** allocated at point `p` of function `f` (an address-taken local, or an aggregate local: `Wil.Rhs.slot`) |
+| `Loc.glob n` | the module-level global `n` (`Wil.Rhs.globalRef`) |
+| `Loc.heap f p` | the **heap object** allocated at point `p` of `f` (`malloc`/`calloc`, `Wil.Rhs.alloc`) |
+| `Loc.fn n` | the address of function `n` (`Wil.Rhs.fnptr`) |
+| `Loc.field b k` | cell `k` of `b` (a struct field, an array element, or pointer arithmetic by a constant) |
+| `Loc.anyOff b` | *some* cell of `b`: a subscript or pointer step with a variable index (`Wil.Rhs.gepVar`) |
+| `Loc.unknown` | memory the analysis could not determine (a havoc'd pointer, an unresolved function pointer, a parameter with no caller) — **one** merged location, so unknown stores and loads meet |
+
+Offset `0` is the identity (`gep p 0` is `p`, so `*p` and `p[0]` are the same cell), so
+field sensitivity never splits a base from itself. `Loc.anyOff b` overlaps `b` itself and
+every `field b k`: an unknown index may be any index, including 0.
+
+**No alias is different from unknown.** An empty location set means the pointer is
+`null`/a constant (no target, no flow, no warning). A set containing `Loc.unknown` means
+the analysis *failed* to bound the target: the taint layer still propagates (a may
+analysis) and reports an `unknown-memory` warning at each such store/load.
+
+## The constraints
+
+Every statement contributes monotone constraints over `(function, register)` sets and a
+per-location "pointer contents" set (`mem`), the classic Andersen-style inclusion
+constraints:
+
+```
+x = &y         pt(x) ⊇ {loc(y)}            (slot/global/fnptr/allocation, by the Rhs)
+x = y          pt(x) ⊇ pt(y)
+x = p + k      pt(x) ⊇ {addOff k l | l ∈ pt(p)}
+x = p[i]       pt(x) ⊇ {anyOff l | l ∈ pt(p)}
+x = *p         pt(x) ⊇ ⋃ { mem(l) | l ∈ pt(p) }
+*p = y         mem(l) ⊇ pt(y)              for every l ∈ pt(p)   (y a pointer)
+free(p)        freed ⊇ pt(p)
+f(a…)          pt(param i of f) ⊇ pt(ai)   for every resolved direct/indirect target
+r = f(a…)      pt(r) ⊇ pt(ret x of f)      for every `ret x` of a resolved target
+```
+
+`pt` is keyed by `(function, register)`, not by program point: the analysis is
+**flow-insensitive** (`p = &x; p = &y` gives `{x, y}`), which is the usual sound choice
+for a taint consumer and keeps the lattice finite. `mem` is per abstract location, which
+is what makes pointer-to-pointer (`*pp = &x; **pp = v`) and a stored function pointer
+work. Parameters are seeded from call sites and return values from `ret` registers, so
+the whole program is one fixpoint: context-insensitive and field-sensitive.
+
+## What is precise, what is not
+
+* Constant field offsets (`p.x`, `a[0]`, `p + 1`) are exact cells.
+* A variable index (`a[i]`) keeps the base object but loses the element
+  (`anyOff base`); two different arrays never alias through it.
+* Structs and arrays are local **slots** (`slot`), heap objects are `heap`. A struct
+  field of a heap object is `field (heap …) k`, so the two spaces stay apart.
+* A function pointer is a value (`fnptr`); it can be copied, passed to a function and
+  stored in memory, and the resolution follows the pointer sets.
+* Not modelled: interprocedural *heap shape* (a linked list through two allocation
+  sites is one set per site, not a shape), external call effects (`strcpy` writing
+  through its argument), `realloc`, and offsets beyond one `anyOff` level. Those widen
+  to `Loc.unknown` where the lowering cannot express them, never to a wrong exact cell.
+-/
+
+-- ## Keys and locations
+
+/-- A memory variable: register `var` of function `func`. Registers are per function and
+not in SSA form, which is why the analysis is flow-insensitive. -/
+structure Scry.VarKey where
+  func : String
+  var : Nat
+
+def Scry.vk (func : String) (var : Nat) : Scry.VarKey := Scry.VarKey.mk func var
+
+def Scry.vkEq (a b : Scry.VarKey) : Bool :=
+  Bool.and (String.eq a.func b.func) (Nat.beq a.var b.var)
+
+def Scry.vkShow (a : Scry.VarKey) : String :=
+  String.append a.func (String.append ":" (Nat.repr a.var))
+
+/-- An abstract memory location. -/
+inductive Scry.Loc where
+  /-- A stack slot (an address-taken local or an aggregate local). -/
+  | stack (func : String) (site : Nat)
+  /-- A module-level global. -/
+  | glob (name : String)
+  /-- A heap object (an allocation). -/
+  | heap (func : String) (site : Nat)
+  /-- The address of a function. -/
+  | fn (name : String)
+  /-- A cell of a base location: a field, an array element, or pointer arithmetic. -/
+  | field (base : Scry.Loc) (off : Nat)
+  /-- Some cell of a base location (a variable index). -/
+  | anyOff (base : Scry.Loc)
+  /-- Memory the analysis could not determine (one merged location). -/
+  | unknown
+
+def Scry.locEq : Scry.Loc → Scry.Loc → Bool
+  | .stack f s, .stack g t => Bool.and (String.eq f g) (Nat.beq s t)
+  | .glob a, .glob b => String.eq a b
+  | .heap f s, .heap g t => Bool.and (String.eq f g) (Nat.beq s t)
+  | .fn a, .fn b => String.eq a b
+  | .field a i, .field b j => Bool.and (Scry.locEq a b) (Nat.beq i j)
+  | .anyOff a, .anyOff b => Scry.locEq a b
+  | .unknown, .unknown => .true
+  | _, _ => .false
+
+def Scry.locShow : Scry.Loc → String
+  | .stack f s => String.append "stack:" (String.append f (String.append "@" (Nat.repr s)))
+  | .glob n => String.append "global:" n
+  | .heap f s => String.append "heap:" (String.append f (String.append "@" (Nat.repr s)))
+  | .fn n => String.append "fn:" n
+  | .field b k => String.append (Scry.locShow b) (String.append "." (Nat.repr k))
+  | .anyOff b => String.append (Scry.locShow b) "[*]"
+  | .unknown => "unknown"
+
+/-- The kind of a location, for findings and tests: `stack`, `global`, `heap`,
+`function`, `field`, `array`, `unknown`. -/
+def Scry.locKind : Scry.Loc → String
+  | .stack _ _ => "stack"
+  | .glob _ => "global"
+  | .heap _ _ => "heap"
+  | .fn _ => "function"
+  | .field _ _ => "field"
+  | .anyOff _ => "array"
+  | .unknown => "unknown"
+
+/-- Is this the merged unknown location? -/
+/-- The singleton set of the unknown location (a may-location and a warning). -/
+def Scry.unknownLocs : List Scry.Loc := List.cons Scry.Loc.unknown List.nil
+
+def Scry.locUnknown : Scry.Loc → Bool
+  | .unknown => .true
+  | _ => .false
+
+/-- Offset 0 is the identity: `*p` and `p[0]` are the same cell. An offset into an
+`anyOff` stays that `anyOff` (one wildcard level is enough: the base is what matters). -/
+def Scry.addOff : Scry.Loc → Nat → Scry.Loc
+  | l, .zero => l
+  | .unknown, _ => .unknown
+  | .anyOff b, _ => .anyOff b
+  | l, k => .field l k
+
+/-- Do two abstract locations possibly overlap? Constant offsets differ only when both
+are constant; `anyOff b` overlaps `b` and every `field b k`. -/
+def Scry.locOverlap (a b : Scry.Loc) : Bool :=
+  match a, b with
+  | .anyOff x, .anyOff y => Scry.locEq x y
+  | .anyOff x, .field y _ => Scry.locEq x y
+  | .field x _, .anyOff y => Scry.locEq x y
+  | .anyOff x, _ => Scry.locEq x b
+  | _, .anyOff y => Scry.locEq a y
+  | _, _ => Scry.locEq a b
+
+-- ## Location sets
+
+def Scry.locMem (l : Scry.Loc) (ls : List Scry.Loc) : Bool := List.any (Scry.locEq l) ls
+
+def Scry.locInsert (l : Scry.Loc) (ls : List Scry.Loc) : List Scry.Loc :=
+  match Scry.locMem l ls with
+  | .true => ls
+  | .false => .cons l ls
+
+def Scry.locUnion (a b : List Scry.Loc) : List Scry.Loc :=
+  List.foldr (fun l acc => Scry.locInsert l acc) b a
+
+def Scry.locSetEq (a b : List Scry.Loc) : Bool :=
+  Bool.and (List.all (fun l => Scry.locMem l b) a) (List.all (fun l => Scry.locMem l a) b)
+
+-- ## The abstract state
+
+/-- The points-to state: `pt` maps a register to its abstract locations, `mem` maps a
+location to the *pointer* values stored in it (for pointer-to-pointer and stored
+function pointers), `freed` collects the locations `free` was called on. -/
+structure Scry.PtState where
+  pt : List (Scry.VarKey × List Scry.Loc)
+  mem : List (Scry.Loc × List Scry.Loc)
+  freed : List Scry.Loc
+
+def Scry.ptEmpty : Scry.PtState := Scry.PtState.mk .nil .nil .nil
+
+def Scry.ptGet (st : Scry.PtState) (k : Scry.VarKey) : List Scry.Loc :=
+  match List.find (fun p => Scry.vkEq p.1 k) st.pt with
+  | .none => .nil
+  | .some p => p.2
+
+def Scry.ptPut (st : Scry.PtState) (k : Scry.VarKey) (ls : List Scry.Loc) : Scry.PtState :=
+  match List.find (fun p => Scry.vkEq p.1 k) st.pt with
+  | .none => { st with pt := .cons (k, ls) st.pt }
+  | .some _ => { st with pt := List.map (fun q => if Scry.vkEq q.1 k then (q.1, ls) else q) st.pt }
+
+/-- Union `ls` into the set of `k`. -/
+def Scry.ptAdd (st : Scry.PtState) (k : Scry.VarKey) (ls : List Scry.Loc) : Scry.PtState :=
+  Scry.ptPut st k (Scry.locUnion ls (Scry.ptGet st k))
+
+def Scry.memGet (st : Scry.PtState) (l : Scry.Loc) : List Scry.Loc :=
+  match List.find (fun p => Scry.locEq p.1 l) st.mem with
+  | .none => .nil
+  | .some p => p.2
+
+def Scry.memAdd (st : Scry.PtState) (l : Scry.Loc) (ls : List Scry.Loc) : Scry.PtState :=
+  match List.find (fun p => Scry.locEq p.1 l) st.mem with
+  | .none => { st with mem := .cons (l, ls) st.mem }
+  | .some p =>
+    { st with mem := List.map (fun q => if Scry.locEq q.1 l then (q.1, Scry.locUnion ls q.2) else q)
+        st.mem }
+
+def Scry.freedAdd (st : Scry.PtState) (ls : List Scry.Loc) : Scry.PtState :=
+  { st with freed := Scry.locUnion ls st.freed }
+
+def Scry.ptLookup (m : List (Scry.VarKey × List Scry.Loc)) (k : Scry.VarKey) : List Scry.Loc :=
+  match List.find (fun p => Scry.vkEq p.1 k) m with
+  | .none => .nil
+  | .some p => p.2
+
+def Scry.memLookup (m : List (Scry.Loc × List Scry.Loc)) (l : Scry.Loc) : List Scry.Loc :=
+  match List.find (fun p => Scry.locEq p.1 l) m with
+  | .none => .nil
+  | .some p => p.2
+
+/-- Set equality of two states: every key of either side has the same set. -/
+def Scry.stateEq (a b : Scry.PtState) : Bool :=
+  Bool.and (List.foldr (fun p acc =>
+      if acc then Scry.locSetEq p.2 (Scry.ptLookup b.pt p.1) else .false) .true a.pt)
+    (Bool.and (List.foldr (fun p acc =>
+        if acc then Scry.locSetEq p.2 (Scry.memLookup b.mem p.1) else .false) .true a.mem)
+      (Bool.and (List.foldr (fun p acc =>
+          if acc then Scry.locSetEq p.2 (Scry.memLookup a.mem p.1) else .false) .true b.mem)
+        (Bool.and (List.foldr (fun p acc =>
+            if acc then Scry.locSetEq p.2 (Scry.ptLookup a.pt p.1) else .false) .true b.pt)
+          (Scry.locSetEq a.freed b.freed))))
+
+/-- `ptFilter` over `option`s: the defined results (the list library has no `filterMap`,
+and Lower's copy is not importable from `lib/`). -/
+def Scry.ptFilterMap {A B : Type} (f : A → Option B) : List A → List B
+  | .nil => .nil
+  | .cons x rest => match f x with
+    | .some y => .cons y (Scry.ptFilterMap f rest)
+    | .none => Scry.ptFilterMap f rest
+
+/-- `(0, a), (1, b), …`. -/
+def Scry.ptIndexed {A : Type} : List A → Nat → List (Nat × A)
+  | .nil, _ => .nil
+  | .cons x xs, i => .cons (i, x) (Scry.ptIndexed xs (Nat.succ i))
+
+-- ## Types and function facts
+
+/-- A type whose values are pointers (or an unknown type that may be one). -/
+def Scry.ptrLike : Wil.Ty → Bool
+  | .ptr _ => .true
+  | .dyn => .true
+  | .unknown => .true
+  | _ => .false
+
+def Scry.fnParam (fn : Wil.Func) (i : Nat) : Option Nat :=
+  match Wil.listNth fn.params i with
+  | .some v => .some v.index
+  | .none => .none
+
+/-- Every register a function returns (`ret (some x)`), through its flattened points. -/
+def Scry.fnRetVars (fn : Wil.Func) : List Nat :=
+  let g := Scry.flatten fn;
+  Scry.concatLists (fun n =>
+    match Scry.nodeTerm g n with
+    | .none => .nil
+    | .some t => match t with
+      | .ret (.some v) _ => .cons v.index .nil
+      | _ => .nil) (Scry.range g.count)
+
+/-- The functions a location set resolves to. -/
+def Scry.fnNames (ls : List Scry.Loc) : List String :=
+  Scry.ptFilterMap (fun l => match l with
+    | .fn n => .some n
+    | _ => .none) ls
+
+/-- Whether a location set has a member that is not a function (so the target is not
+fully known). -/
+def Scry.hasNonFn (ls : List Scry.Loc) : Bool :=
+  List.any (fun l => match l with
+    | .fn _ => .false
+    | _ => .true) ls
+
+/-- An indirect call's resolved targets: the function names it may reach, and whether
+the set is incomplete (no known target at all, or a non-function/unknown location). -/
+structure Scry.IndirectTargets where
+  names : List String
+  unknown : Bool
+
+def Scry.targetsOf (ls : List Scry.Loc) : Scry.IndirectTargets :=
+  Scry.IndirectTargets.mk (Scry.fnNames ls)
+    (Bool.or (List.isEmpty (Scry.fnNames ls)) (Scry.hasNonFn ls))
+
+def Scry.directTargets (name : String) (p : Wil.Program) : Scry.IndirectTargets :=
+  match Wil.findFunc p name with
+  | .some _ => Scry.IndirectTargets.mk (.cons name .nil) .false
+  | .none => Scry.IndirectTargets.mk .nil .false
+
+/-- The targets of one call: a direct name resolves if it is defined here; an indirect
+value resolves through its points-to set. -/
+def Scry.callTargets (p : Wil.Program) (st : Scry.PtState) (func : String)
+    (callee : Wil.Callee) : Scry.IndirectTargets :=
+  match callee with
+  | .direct name => Scry.directTargets name p
+  | .indirect v => Scry.targetsOf (Scry.ptGet st (Scry.vk func v.index))
+
+-- ## One statement's constraints
+
+/-- The abstract locations an assignment gives `x`. -/
+def Scry.rhsLocs (st : Scry.PtState) (func : String) (point : Nat) (x : Wil.Var)
+    (e : Wil.Rhs) : List Scry.Loc :=
+  match e with
+  | .use v => Scry.ptGet st (Scry.vk func v.index)
+  | .cst _ => .nil
+  | .bin _ _ _ => match Scry.ptrLike x.ty with
+    | .true => Scry.unknownLocs
+    | .false => .nil
+  | .un _ _ => match Scry.ptrLike x.ty with
+    | .true => Scry.unknownLocs
+    | .false => .nil
+  | .load p => Scry.concatLists (fun l => Scry.memGet st l)
+      (Scry.ptGet st (Scry.vk func p.index))
+  | .gep p k => List.map (fun l => Scry.addOff l k) (Scry.ptGet st (Scry.vk func p.index))
+  | .gepVar p _ _ => List.map Scry.Loc.anyOff (Scry.ptGet st (Scry.vk func p.index))
+  | .alloc _ => .cons (.heap func point) .nil
+  | .slot _ => .cons (.stack func point) .nil
+  | .globalRef n => .cons (.glob n) .nil
+  | .fnptr n => .cons (.fn n) .nil
+  | .havoc _ => match Scry.ptrLike x.ty with
+    | .true => Scry.unknownLocs
+    | .false => .nil
+
+/-- One statement's contribution: register targets, memory contents, freed locations,
+and whether it is an indirect call with incomplete targets. -/
+structure Scry.Contrib where
+  vars : List (Scry.VarKey × List Scry.Loc)
+  mems : List (Scry.Loc × List Scry.Loc)
+  frees : List Scry.Loc
+
+def Scry.noContrib : Scry.Contrib := Scry.Contrib.mk .nil .nil .nil
+
+/-- The pointer contents a store of `v` writes into every location `p` may point to. -/
+def Scry.storeMems (st : Scry.PtState) (func : String) (p v : Wil.Var) :
+    List (Scry.Loc × List Scry.Loc) :=
+  match Scry.ptrLike v.ty with
+  | .false => .nil
+  | .true => List.map (fun l => (l, Scry.ptGet st (Scry.vk func v.index)))
+      (Scry.ptGet st (Scry.vk func p.index))
+
+/-- Parameter and result flow of one call into the given `Contrib`. -/
+def Scry.callContrib (p : Wil.Program) (st : Scry.PtState) (func : String)
+    (r : Option Wil.Var) (callee : Wil.Callee) (args : List Wil.Var) : Scry.Contrib :=
+  let targets := Scry.callTargets p st func callee;
+  /-- A **direct** call to a function outside the unit: its result is `unknown` when it is
+  a pointer (the unit has no body to analyse), never "no alias". -/
+  let externalResult : List (Scry.VarKey × List Scry.Loc) := match callee with
+    | .indirect _ => .nil
+    | .direct name => match Wil.findFunc p name with
+      | .some _ => .nil
+      | .none => match r with
+        | .none => .nil
+        | .some rv => match Scry.ptrLike rv.ty with
+          | .false => .nil
+          | .true => .cons (Scry.vk func rv.index, Scry.unknownLocs) .nil;
+  let perTarget := Scry.concatLists (fun name =>
+    match Wil.findFunc p name with
+    | .none => .nil
+    | .some fn =>
+      let params := Scry.concatLists (fun i =>
+        match Scry.fnParam fn i.1 with
+        | .some pv => .cons (Scry.vk name pv, Scry.ptGet st (Scry.vk func i.2.index)) .nil
+        | .none => .nil) (Scry.ptIndexed args 0);
+      let rets : List (Scry.VarKey × List Scry.Loc) := match r with
+        | .none => .nil
+        | .some rv => List.map (fun rvv => (Scry.vk func rv.index, Scry.ptGet st (Scry.vk name rvv)))
+            (Scry.fnRetVars fn);
+      List.append params rets) targets.names;
+  let unknownResult : List (Scry.VarKey × List Scry.Loc) := match callee with
+    | .direct _ => .nil
+    | .indirect _ => match targets.unknown with
+      | .false => .nil
+      | .true => match r with
+        | .none => .nil
+        | .some rv => match Scry.ptrLike rv.ty with
+          | .false => .nil
+          | .true => .cons (Scry.vk func rv.index, Scry.unknownLocs) .nil;
+  Scry.Contrib.mk (List.append externalResult (List.append perTarget unknownResult))
+    .nil .nil
+
+/-- The constraints one call adds (see `Scry.callContrib`). -/
+def Scry.stmtContrib (p : Wil.Program) (st : Scry.PtState) (func : String) (point : Nat)
+    (s : Wil.Stmt) : Scry.Contrib :=
+  match s with
+  | .assign x e _ =>
+    Scry.Contrib.mk (.cons (Scry.vk func x.index, Scry.rhsLocs st func point x e) .nil)
+      .nil .nil
+  | .store ptr v _ =>
+    Scry.Contrib.mk .nil (Scry.storeMems st func ptr v) .nil
+  | .free ptr _ =>
+    Scry.Contrib.mk .nil .nil (Scry.ptGet st (Scry.vk func ptr.index))
+  | .call r callee args _ => Scry.callContrib p st func r callee args
+  | _ => Scry.noContrib
+
+-- ## The fixpoint
+
+/-- Fold one function's statements into the state. -/
+def Scry.fnStep (p : Wil.Program) (fn : Wil.Func) (st : Scry.PtState) : Scry.PtState :=
+  let g := Scry.flatten fn;
+  List.foldr (fun n acc =>
+    match Scry.nodeStmt g n with
+    | .none => acc
+    | .some s =>
+      let c := Scry.stmtContrib p st fn.name n s;
+      let acc1 := List.foldr (fun kv a => Scry.ptAdd a kv.1 kv.2) acc c.vars;
+      let acc2 := List.foldr (fun m a => Scry.memAdd a m.1 m.2) acc1 c.mems;
+      Scry.freedAdd acc2 c.frees) st (Scry.range g.count)
+
+/-- One round over the whole program. -/
+def Scry.ptStep (p : Wil.Program) (st : Scry.PtState) : Scry.PtState :=
+  List.foldr (fun fn acc => Scry.fnStep p fn acc) st p.funcs
+
+/-- The number of program points of a program (the fixpoint's fuel bound). -/
+def Scry.totalPoints (p : Wil.Program) : Nat :=
+  List.foldr (fun fn acc => Nat.add acc (Scry.flatten fn).count) 0 p.funcs
+
+partial def Scry.ptLoop (p : Wil.Program) (fuel : Nat) (st : Scry.PtState) : Scry.PtState :=
+  match fuel with
+  | .zero => st
+  | .succ k =>
+    let st' := Scry.ptStep p st;
+    match Scry.stateEq st st' with
+    | .true => st'
+    | .false => Scry.ptLoop p k st'
+
+/-- The registers a function's statements define (assignments and call results). -/
+def Scry.fnDefVars (fn : Wil.Func) : List Nat :=
+  let g := Scry.flatten fn;
+  List.map (fun p => p.2) (Scry.defsOf g)
+
+/-- Seed `unknown` for a pointer register whose set is still empty. -/
+def Scry.seedUnknown (st : Scry.PtState) (func : String) (v : Wil.Var) : Scry.PtState :=
+  match Scry.ptrLike v.ty with
+  | .false => st
+  | .true => match List.isEmpty (Scry.ptGet st (Scry.vk func v.index)) with
+    | .false => st
+    | .true => Scry.ptAdd st (Scry.vk func v.index) (Scry.unknownLocs)
+
+/-- The locations the analysis **cannot** know, seeded once after the inclusion fixpoint:
+a pointer parameter no call site passes anything to (the function may be called from
+outside the unit), and a pointer local no statement defines (an undefined value). A
+pointer explicitly assigned `null` keeps an **empty** set — that is a *known* no-alias,
+not an unknown one, and is the distinction the taint layer reports. -/
+def Scry.ptSeeds (p : Wil.Program) (st : Scry.PtState) : Scry.PtState :=
+  List.foldr (fun fn acc =>
+    let defs := Scry.fnDefVars fn;
+    let acc1 := List.foldr (fun v a => Scry.seedUnknown a fn.name v) acc fn.params;
+    List.foldr (fun v a => match List.any (Nat.beq v.index) defs with
+      | .true => a
+      | .false => Scry.seedUnknown a fn.name v) acc1 fn.locals) st p.funcs
+
+/-- The flow-insensitive solution. Each round is monotone, so the loop terminates; the
+fuel is twice the program's point count plus a constant (a safety bound, not a proof).
+The unknown seeds are added after the inclusion fixpoint and the loop is run once more so
+they propagate through copies and calls. -/
+def Scry.ptSolve (p : Wil.Program) : Scry.PtState :=
+  let fuel := Nat.add 8 (Nat.mul 2 (Scry.totalPoints p));
+  let st := Scry.ptLoop p fuel Scry.ptEmpty;
+  let st2 := Scry.ptSeeds p st;
+  match Scry.stateEq st st2 with
+  | .true => st
+  | .false => Scry.ptLoop p fuel st2
+
+-- ## The location table and ids
+
+/-- Every location the solution mentions, deduplicated. -/
+def Scry.locTable (st : Scry.PtState) : List Scry.Loc :=
+  let fromPt := List.concat (List.map (fun p => p.2) st.pt);
+  let fromMem := List.concat (List.map (fun m => .cons m.1 m.2) st.mem);
+  List.foldr (fun l acc => Scry.locInsert l acc) .nil
+    (List.append (List.append fromPt fromMem) st.freed)
+
+/-- Insertion sort by `locShow`, so ids are deterministic (goldens and tests). -/
+def Scry.locSortInsert (l : Scry.Loc) : List Scry.Loc → List Scry.Loc
+  | .nil => .cons l .nil
+  | .cons x xs => match String.lt (Scry.locShow l) (Scry.locShow x) with
+    | .true => .cons l (.cons x xs)
+    | .false => .cons x (Scry.locSortInsert l xs)
+
+def Scry.locSort (ls : List Scry.Loc) : List Scry.Loc :=
+  List.foldr (fun l acc => Scry.locSortInsert l acc) .nil ls
+
+def Scry.locIdFrom (l : Scry.Loc) : Nat → List Scry.Loc → Option Nat
+  | _, .nil => .none
+  | i, .cons x xs => match Scry.locEq l x with
+    | .true => .some i
+    | .false => Scry.locIdFrom l (Nat.succ i) xs
+
+structure Scry.CallKey where
+  func : String
+  point : Nat
+
+def Scry.ckEq (a b : Scry.CallKey) : Bool :=
+  Bool.and (String.eq a.func b.func) (Nat.beq a.point b.point)
+
+/-- The points-to result: the solution, the deterministic location table, and every
+indirect call's resolution. -/
+structure Scry.PtResult where
+  state : Scry.PtState
+  locs : List Scry.Loc
+  indirect : List (Scry.CallKey × Scry.IndirectTargets)
+
+def Scry.locId (r : Scry.PtResult) (l : Scry.Loc) : Option Nat := Scry.locIdFrom l 0 r.locs
+
+def Scry.idLoc (r : Scry.PtResult) (i : Nat) : Option Scry.Loc := Wil.listNth r.locs i
+
+/-- The raw location ids of a register. -/
+def Scry.ptIds (r : Scry.PtResult) (func : String) (var : Nat) : List Nat :=
+  Scry.ptFilterMap (fun l => Scry.locId r l) (Scry.ptGet r.state (Scry.vk func var))
+
+/-- The locations of a register, as locations (tests and messages). -/
+def Scry.ptLocs (r : Scry.PtResult) (func : String) (var : Nat) : List Scry.Loc :=
+  Scry.ptGet r.state (Scry.vk func var)
+
+def Scry.idOverlap (r : Scry.PtResult) (i j : Nat) : Bool :=
+  match Scry.idLoc r i, Scry.idLoc r j with
+  | .some a, .some b => Scry.locOverlap a b
+  | _, _ => .false
+
+/-- Every table id that may alias one of `ids` (the alias closure). A store and a load
+meet when their closures intersect, which is how `field b 0` meets `anyOff b`. -/
+def Scry.expandIds (r : Scry.PtResult) (ids : List Nat) : List Nat :=
+  Scry.ptFilterMap (fun i =>
+    if List.any (fun j => Scry.idOverlap r i j) ids then .some i else .none)
+    (Scry.range (List.length r.locs))
+
+def Scry.unknownId (r : Scry.PtResult) : List Nat :=
+  Scry.ptFilterMap (fun l => match l with
+    | .unknown => Scry.locId r l
+    | _ => .none) r.locs
+
+/-- The freed locations as ids. -/
+def Scry.freedIds (r : Scry.PtResult) : List Nat :=
+  Scry.ptFilterMap (fun l => Scry.locId r l) r.state.freed
+
+/-- The locations of a register, closed under aliasing, as ids. -/
+def Scry.ptClosure (r : Scry.PtResult) (func : String) (var : Nat) : List Nat :=
+  Scry.expandIds r (Scry.ptIds r func var)
+
+def Scry.ptUnknown (r : Scry.PtResult) (func : String) (var : Nat) : Bool :=
+  List.any (fun i => List.any (Nat.beq i) (Scry.unknownId r)) (Scry.ptIds r func var)
+
+def Scry.locText (r : Scry.PtResult) (i : Nat) : String :=
+  match Scry.idLoc r i with
+  | .some l => Scry.locShow l
+  | .none => String.append "loc" (Nat.repr i)
+
+def Scry.locKindAt (r : Scry.PtResult) (i : Nat) : String :=
+  match Scry.idLoc r i with
+  | .some l => Scry.locKind l
+  | .none => "none"
+
+-- ## Queries
+
+/-- The resolution of the indirect call at `point` of `func`. A call with no entry (not
+indirect) resolves to nothing; an unrecorded target means unknown. -/
+def Scry.indirectAt (r : Scry.PtResult) (func : String) (point : Nat) : Scry.IndirectTargets :=
+  match List.find (fun p => Scry.ckEq p.1 (Scry.CallKey.mk func point)) r.indirect with
+  | .none => Scry.IndirectTargets.mk .nil .false
+  | .some p => p.2
+
+/-- How many registers have a non-empty location set. -/
+def Scry.ptVarCount (r : Scry.PtResult) : Nat :=
+  List.length (List.filter (fun p => Bool.not (List.isEmpty p.2)) r.state.pt)
+
+def Scry.ptLocCount (r : Scry.PtResult) : Nat := List.length r.locs
+
+/-- The whole analysis: solve, build the table, resolve the indirect calls. -/
+def Scry.pointsTo (p : Wil.Program) : Scry.PtResult :=
+  let st := Scry.ptSolve p;
+  let locs := Scry.locSort (Scry.locTable st);
+  let indirect := Scry.concatLists (fun fn =>
+    let g := Scry.flatten fn;
+    Scry.concatLists (fun n =>
+      match Scry.nodeStmt g n with
+      | .none => .nil
+      | .some s => match s with
+        | .call _ callee _ _ => match callee with
+          | .direct _ => .nil
+          | .indirect v => .cons (Scry.CallKey.mk fn.name n,
+              Scry.targetsOf (Scry.ptGet st (Scry.vk fn.name v.index))) .nil
+        | _ => .nil) (Scry.range g.count)) p.funcs;
+  Scry.PtResult.mk st locs indirect

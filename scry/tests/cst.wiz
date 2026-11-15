@@ -18,7 +18,7 @@ def showOpt (o : Option Scry.NodeId) : String := match o with
 def allKinds (s : Scry.CstStore) : Bool :=
   List.all (fun i => match C.Kind.ofName (Scry.CstStore.kindName s i) with
     | .some _ => .true
-    | .none => .false) (Scry.range (Scry.CstStore.nodeCount s))
+    | .none => .false) (Scry.schemaRange (Scry.CstStore.nodeCount s))
 
 #eval match Scry.Facts.ofText hello with
   | .error e => "error: " ++ e
