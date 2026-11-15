@@ -183,18 +183,25 @@ numbers.
 
 | process | RSS |
 | --- | --- |
-| bridge, no daemon | ~17 MB |
+| bridge, no daemon | ~27 MB |
 | bridge with a daemon | ~28 MB |
-| `wiz lsp` daemon, just started (measured) | ~89 MB |
-| daemon with one small document (`import Prelude`) | ~89–117 MB |
+| `wiz lsp` daemon, just started | ~70 MB |
+| daemon with one small document (`import Prelude`) | ~90–113 MB |
 | daemon with a handful of documents | ~120 MB |
 | daemon with 30 documents | ~134 MB |
 
+Re-measured 2026-11-15 on this tree (bridge on Python 3.14): nine smoke runs
+put a daemon with one small document at 90–113 MB, and a direct
+`wiz lsp --ws` at 93–96 MB with the document open and 69–72 MB just started.
+The study's 87–117 MB daemon range still holds; its 17 MB idle-bridge figure
+does not reproduce here, so plan with 27 MB.
+
 Plan on **~0.5 GB per active location** for capacity (bridge + daemon + a
 `wiz check` running during a call, with headroom); the steady state is much
-smaller. The study's **~0.5 GB figure is 30 idle bridges** (17 MB each), not
-one daemon — do not read it as 0.5 GB per daemon. With idle unload, 30
-worktrees cost ~0.5 GB of bridges plus 0–8 daemons (0–1.6 GB), not 30 daemons.
+smaller. The study's **~0.5 GB figure is 30 idle bridges**, not one daemon —
+do not read it as 0.5 GB per daemon. At 27 MB per bridge, 30 idle worktrees
+are ~0.8 GB; with idle unload they cost that much of bridges plus 0–8 daemons
+(0–1.6 GB), not 30 daemons.
 
 ## Tests
 
