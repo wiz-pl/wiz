@@ -13,6 +13,8 @@ module roots, `-o`, a cache, positioned diagnostics, exit codes). The tests
 
 namespace Wiz.Selfhost
 
+open ParserDescr
+
 /-- A Wiz string literal. -/
 def wizLit (s : String) : String :=
   "\"" ++ String.join (s.toList.map fun c => if c == '"' then "\\\"" else if c == '\\' then "\\\\" else if c == '\n' then "\\n" else c.toString) ++ "\""
@@ -61,9 +63,39 @@ def wizTables (t : ParserTables) : String := Id.run do
 def strip (f : String) : String :=
   "\n".intercalate ((f.splitOn "\n").filter (!·.startsWith "import"))
 
+/-- (A13) The core tactic grammar, for the self-hosted frontend. The host reads tactics
+from `syntax … : tactic` declarations in `lib/Prelude.wiz`; the self-hosted frontend has no
+macro or `syntax` command, so the same shapes are built into the tables it is given. -/
+def selfhostTacticRules : List LeadingParser :=
+  [ { kind := "tactic.intro", prec := maxPrec, p := Builtin.seqs ["intro", ident] },
+    { kind := "tactic.intros", prec := maxPrec, p := Builtin.seqs ["intros"] },
+    { kind := "tactic.exact", prec := maxPrec, p := Builtin.seqs ["exact", cat "term" 0] },
+    { kind := "tactic.apply", prec := maxPrec, p := Builtin.seqs ["apply", cat "term" 0] },
+    { kind := "tactic.assumption", prec := maxPrec, p := Builtin.seqs ["assumption"] },
+    { kind := "tactic.rfl", prec := maxPrec, p := Builtin.seqs ["rfl"] },
+    { kind := "tactic.change", prec := maxPrec, p := Builtin.seqs ["change", cat "term" 0] },
+    { kind := "tactic.rw", prec := maxPrec, p := Builtin.seqs ["rw", cat "term" 0] },
+    { kind := "tactic.rwBack", prec := maxPrec, p := Builtin.seqs ["rw", "←", cat "term" 0] },
+    { kind := "tactic.calc", prec := maxPrec,
+      p := Builtin.seqs [nonReserved "calc", withPosition (many1 (Builtin.seqs [colGe, Builtin.calcStep]))] },
+    { kind := "tactic.have", prec := maxPrec,
+      p := Builtin.seqs ["have", ident, ":", cat "term" 0, optional (Builtin.seqs [":=", cat "term" 0])] },
+    { kind := "tactic.suffices", prec := maxPrec, p := Builtin.seqs ["suffices", ident, ":", cat "term" 0] },
+    { kind := "tactic.obtain", prec := maxPrec,
+      p := Builtin.seqs ["obtain", "⟨", ident, ",", ident, "⟩", ":=", cat "term" 0] },
+    { kind := "tactic.try", prec := maxPrec, p := Builtin.seqs ["try", cat "tactic" 0] },
+    { kind := "tactic.first", prec := maxPrec,
+      p := Builtin.seqs ["first", "|", cat "tactic" 0, "|", cat "tactic" 0] },
+    { kind := "tactic.repeat", prec := maxPrec, p := Builtin.seqs ["repeat", cat "tactic" 0] },
+    { kind := "tactic.paren", prec := maxPrec,
+      p := Builtin.seqs ["(", sepBy (cat "tactic" 0) ";" true, ")"] } ]
+
+def selfhostTables : ParserTables :=
+  selfhostTacticRules.foldl (fun t lp => t.addLeading "tactic" lp) Builtin.tables
+
 /-- The tables and the token list, as Wiz. -/
 def tablesSource : String :=
-  let t := Builtin.tables
+  let t := selfhostTables
   wizTables t ++ s!"def tokens : List String := {wizList (t.tokens.toList.map wizLit)}\n"
 
 def checkerFiles : List String :=
