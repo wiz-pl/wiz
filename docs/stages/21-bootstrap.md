@@ -1050,18 +1050,30 @@ comments; the real proof blocks are in `HoareExamples`, `HeapBorrow`, `EffHeap` 
 were the first ones implemented; `calc`/`have`/`suffices`/`obtain` are included for the
 proof surface even though `lib/` does not use them as tactics yet.
 
-**Tests.** `=selfhost` gains four cases: a real block (`intro`/`apply`/`assumption`), the
+**Tests.** `=selfhost` gains five cases: a real block (`intro`/`apply`/`assumption`), the
 per-tactic cases (`intros`, `change`, `unfold`, `constructor`, `try`/`first`/`repeat`),
-unsolved goals with their context, and a tactic failure with the remaining goals. The
-differential case runs the same `ap` proof in the Lean and Wiz-hosted frontends, and the
-same failing `rw` in both, comparing verdicts and the error text
+unsolved goals with their context, a tactic failure with the remaining goals, and the
+differential. The differential case runs the same `ap` proof in the Lean and Wiz-hosted
+frontends, and the same failing `rw` in both, comparing verdicts and the error text
 (`rewrite: the goal does not mention c`). `=tactics` (the Lean host's group) is
 unchanged and remains the host-side regression.
+
+**Verification on this branch** (A12+A11+A13 merged; the self-hosted compiler built from
+the current `selfhost/*.wiz`): all five A13 cases pass (`=selfhost` #147–#151), and
+`=tactics` is 28/28. A full `=selfhost` run reached **112 cases, 0 failures** (and
+#112–#114 also passed) before the machine restarted; the remaining tail was being
+re-run when it restarted again, and the A13 cases were then re-checked individually. The
+fixpoint was not run: `selfhost/*.wiz` does not use `by` yet, and the 6 GiB heavy slot
+was not available; a fixpoint run is the remaining gate for the compiler's own sources.
 
 **Limits.** No `simp`/`simp`-set management, no decision procedures (`decide`,
 `omega`, `linarith`, `ring`, `bv_decide`), no `cases`/`induction` (and `constructor`
 covers ordinary inductives only), no rewriting in hypotheses, no
 `trace_state`/`rename_i`, no unfolding of a hypothesis, and no user tactic functions
-(A12's evaluator). The error position is
-the failed command, as for the rest of the self-hosted diagnostics (D6), and the host's
-multi-line expected/inferred blocks are not reproduced.
+(A12's evaluator). `unfold` replaces syntactic occurrences that are still in the goal
+type (e.g. `List (F Nat)`); it cannot find one whose equation the kernel has already
+whnf'd (the selfhost `vEq` reduces the sides of an equation where the host keeps the
+written ones), so the exact `unfold List.filter` steps of `lib/ListLemmas` are not
+guaranteed to match the host. The error position is the failed command, as for the rest
+of the self-hosted diagnostics (D6), and the host's multi-line expected/inferred blocks
+are not reproduced.
