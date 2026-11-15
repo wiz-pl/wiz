@@ -21,6 +21,14 @@ def usage : String := "usage:
                                    (say, a Wasm module: --cc emcc --ldflags --no-entry)
   wiz run FILE [--target c|llvm|wasm]  build and run `main`, printing its value
                                    (`--llvm` and `--wasm` are aliases)
+  wiz repl [--llvm] [--prelude MODULE] [--script FILE] [--init CMD]
+                                   read one command per line, keeping definitions (`:help`;
+                                   a pipe: one command per line, no prompt; `:type EXPR`,
+                                   `:load FILE`); --prelude imports MODULE first,
+                                   --script reads the commands from FILE, --init runs CMD
+                                   before the first input
+  wiz test-driver [GROUPS…] [--jobs N] [--list]
+                                   run the test driver (`.lake/build/bin/tests`, or WIZ_TESTS)
   wiz doc [MODULE|FILE|DIR…] -o OUT [--lib] [--source-url URL] [--title T] [--web DIR]
                                    documentation: a static site (one page per module,
                                    index, search); --lib: the toolchain's library;
@@ -563,6 +571,176 @@ def kernelOpt : List String → Except String (Regularity × Bool × List String
     return (r, p, a :: rest)
   | [] => return (.off, false, [])
 
+/-- The modules the REPL can import, and the hooks the frontend needs: every module under
+the roots (so a `:reset` need not read them again), its C headers and `link_c` files. -/
+def replInit (tc : Toolchain) (prelude : Option String) : IO (CommandState ZeroOneMany) := do
+  let roots ← moduleRoots tc
+  let all ← Module.loadAll roots
+  let lib : Std.HashMap Name String := all.fold (fun m n (_, src) => m.insert n src) {}
+  let headers ← Build.preprocessHeaders tc (String.join (all.values.map (·.2)))
+  let sources ← Module.cSourceTable "." "" all
+  let includes ← Module.includeTable "." "" all
+  let (regularity, predicativeProp) ← kernelOpts.get
+  let lazyProofs ← lazyProofsOpt.get
+  let inertReg ← inertOpt.get
+  let (proofSteps, traceProofSteps) ← proofStepsOpt.get
+  let unboxStructs ← unboxOpt.get
+  let own := Module.fromFirstRoot roots all
+  let strictP ← strictPrivacyOpt.get
+  let useNotation := !(← ppAllOpt.get)
+  let smt ← tc.smt.resolve
+  let pp : PPTable := { useNotation := useNotation }
+  let init : CommandState ZeroOneMany :=
+    { loader := fun n => lib[n]?,
+      cHeaders := fun h => headers[h]?,
+      cSources := some (Module.cSourceResolver sources),
+      includes := some (Module.includeResolver includes),
+      messages := #[],
+      globals := { regularity, predicativeProp, lazyProofs, inertReg, unboxStructs, proofSteps, traceProofSteps,
+                   strictPrivacy := strictP, pp := pp },
+      trustedModule := own.contains, trustNative := tc.trustNative,
+      nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := smt }
+  pure init
+
+structure ReplOpts where
+  llvm : Bool := false
+  prelude : Option String := none
+  script : Option String := none
+  init : List String := []
+
+def replOpts : List String → Except String ReplOpts
+  | [] => .ok {}
+  | "--llvm" :: rest => do let o ← replOpts rest; pure { o with llvm := true }
+  | "--prelude" :: m :: rest => do let o ← replOpts rest; pure { o with prelude := some m }
+  | "--script" :: f :: rest => do let o ← replOpts rest; pure { o with script := some f }
+  | "--init" :: c :: rest => do let o ← replOpts rest; pure { o with init := o.init ++ [c] }
+  | a :: _ => throw s!"wiz repl: unknown option {a}"
+
+/-- `wiz repl [--llvm] [--prelude MODULE] [--script FILE] [--init CMD]`: read one command
+per line and elaborate it against the accumulated `CommandState` (definitions persist),
+print its messages and go on after an error. `:quit`/EOF exit, `:reset` forgets every
+definition, `:help` lists the commands; `:type EXPR` prints a type and `:load FILE`
+elaborates a file into the session. With `--llvm`, `:run NAME` builds through LLVM
+instead of C. `--prelude MODULE` imports MODULE (after the Prelude) at the start, which
+is how `scry repl` gets `Scry.Repl`.
+
+The base state stays pristine, so an `import` is checked in isolation as in a file, then
+elaborated into the session's state. A pipe has one command per line and no prompt. -/
+def replCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
+  let o ← match replOpts args with
+    | .ok o => pure o
+    | .error e => do IO.eprintln e; return 2
+  let base ← replInit tc o.prelude
+  let stdin ← IO.getStdin
+  let stdout ← IO.getStdout
+  let stderr ← IO.getStderr
+  let tty ← stdin.isTty
+  let help := "commands:\n" ++
+    "  LINE          elaborate a command (`def`, `#check`, `#eval`, `import`, …)\n" ++
+    "  :type EXPR    print the type of EXPR (like #check)\n" ++
+    "  :load FILE    elaborate FILE into this session (its definitions stay)\n" ++
+    "  :run NAME     build and run the definition NAME (" ++ (if o.llvm then "LLVM" else "C") ++ ")\n" ++
+    "  :reset        forget every definition\n" ++
+    "  :help         this list\n" ++
+    "  :quit         leave (EOF does too)\n" ++
+    "The Prelude is imported at the start; errors are reported and the session goes on."
+  let report (before : Nat) (s' : CommandState ZeroOneMany) (input : String)
+      (path? : Option String) : IO Unit := do
+    for m in s'.messages.extract before s'.messages.size do
+      let text := match path? with
+        | some p => s!"{p}:{m.render input}"
+        | none => m.render input
+      if m.severity == .error then stderr.putStrLn text else stdout.putStrLn text
+  -- Prelude, then the optional prelude module, as a file's first lines would import them
+  let mut preloaded := base
+  for m in ["Prelude"] ++ o.prelude.toList do
+    let text := s!"import {m}"
+    let before := preloaded.messages.size
+    let s' := runFrontend.go text base text.toList.toArray 0 preloaded
+    report before s' text none
+    preloaded := { s' with messages := #[] }
+  let rec process (state : CommandState ZeroOneMany) (line : String) :
+      IO (Option (CommandState ZeroOneMany)) := do
+    let line := line.trimAscii.toString
+    if line.isEmpty then pure (some state) else
+    match line with
+    | ":quit" | ":q" => pure none
+    | ":help" | ":h" | ":?" => do stdout.putStrLn help; stdout.flush; pure (some state)
+    | ":reset" => do state := preloaded; stdout.putStrLn "reset"; stdout.flush; pure (some state)
+    | c =>
+      if c.startsWith ":" then
+        if c == ":type" then
+          stderr.putStrLn "usage: :type EXPR"
+          pure (some state)
+        else if c.startsWith ":type " then
+          let text := s!"#check {(c.drop 6).trimAscii.toString}"
+          let s' := runFrontend.go text base text.toList.toArray 0 state
+          report state.messages.size s' text none
+          pure (some { s' with messages := #[] })
+        else if c == ":load" then
+          stderr.putStrLn "usage: :load FILE"
+          pure (some state)
+        else if c.startsWith ":load " then
+          let path := (c.drop 6).trimAscii.toString
+          let text? ← try
+            pure (some (← IO.FS.readFile path))
+          catch e =>
+            stderr.putStrLn s!"cannot read {path}: {e}"
+            pure none
+          match text? with
+          | none => pure (some state)
+          | some text =>
+            let s' := runFrontend.go text base text.toList.toArray 0 state
+            report state.messages.size s' text (some path)
+            pure (some { s' with messages := #[] })
+        else
+          match c.splitOn " " with
+          | [":run", name] =>
+            let dir ← IO.FS.createTempDir
+            match ← Build.runGlobal tc state name dir o.llvm with
+            | .error e => stderr.putStrLn e
+            | .ok v => stdout.putStr (if v.endsWith "\n" then v else v ++ "\n")
+            stdout.flush
+            pure (some state)
+          | _ => stderr.putStrLn s!"unknown command {c} (`:help`)"; pure (some state)
+      else
+        let s' := runFrontend.go line base line.toList.toArray 0 state
+        report state.messages.size s' line none
+        stdout.flush
+        stderr.flush
+        pure (some { s' with messages := #[] })
+  let mut state := preloaded
+  let mut quitted := false
+  for c in o.init do
+    if !quitted then
+      match ← process state c with
+      | some s => state := s
+      | none => quitted := true
+  match o.script with
+  | some f => do
+    let text ← IO.FS.readFile f
+    for line in text.splitOn "\n" do
+      if !quitted then
+        match ← process state line with
+        | some s => state := s
+        | none => quitted := true
+    pure 0
+  | none => do
+    let mut reading := !quitted
+    while reading do
+      if tty then
+        stdout.putStr "wiz> "
+        stdout.flush
+      let raw ← stdin.getLine
+      if raw.isEmpty then
+        if tty then IO.println ""
+        reading := false
+      else
+        match ← process state raw with
+        | some s => state := s
+        | none => reading := false
+    pure 0
+
 def main (args : List String) : IO UInt32 := do
   -- (after the toolchain flags: the tarball's and tower's wrappers put `-I LIB` and
   -- their flags before the user's arguments)
@@ -634,6 +812,7 @@ def main (args : List String) : IO UInt32 := do
   | "doc" :: rest => docCmd tc rest
   | "fmt" :: rest => fmtCmd tc rest
   | ["run", path] => runCmd tc path target (split := split)
+  | "repl" :: rest => replCmd tc rest
   | "lsp" :: opts => do
     match lspOptions opts with
     | none => IO.println usage; pure 2
