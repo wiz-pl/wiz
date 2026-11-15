@@ -1,4 +1,4 @@
-taint: tests/fixtures/taint-unsafe.c (4 rules)
+taint: tests/fixtures/taint-unsafe.c (6 rules)
 parse: ok
 diff: --changed-lines tests/fixtures/diff/unsafe-sink.patch; 1 hunk(s) in 1 file(s), 1 added line(s), 1 line(s) in scope, context 0
 tests/fixtures/taint-unsafe.c:7:3: error: command-injection: Attacker-controlled data reaches a command interpreter [main] (checked)
@@ -7,13 +7,13 @@ tests/fixtures/taint-unsafe.c:7:3: error: command-injection: Attacker-controlled
 diff: 1 finding(s) shown, 0 suppressed on unchanged lines
 taint: 1 finding(s), 1 checked, 0 unchecked, 0 boundary warning(s), 0 memory warning(s)
 diff sink: exit 1: ok
-taint: tests/fixtures/taint-unsafe.c (4 rules)
+taint: tests/fixtures/taint-unsafe.c (6 rules)
 parse: ok
 diff: --changed-lines tests/fixtures/diff/unsafe-other.patch; 1 hunk(s) in 1 file(s), 1 added line(s), 1 line(s) in scope, context 0
 diff: 0 finding(s) shown, 1 suppressed on unchanged lines
 taint: 1 finding(s), 1 checked, 0 unchecked, 0 boundary warning(s), 0 memory warning(s)
 diff unchanged: exit 0: ok
-taint: tests/fixtures/taint-unsafe.c (4 rules)
+taint: tests/fixtures/taint-unsafe.c (6 rules)
 parse: ok
 diff: --changed-lines tests/fixtures/diff/unsafe-source.patch; 1 hunk(s) in 1 file(s), 1 added line(s), 1 line(s) in scope, context 0
 tests/fixtures/taint-unsafe.c:7:3: error: command-injection: Attacker-controlled data reaches a command interpreter [main] (checked)
@@ -22,7 +22,7 @@ tests/fixtures/taint-unsafe.c:7:3: error: command-injection: Attacker-controlled
 diff: 1 finding(s) shown, 0 suppressed on unchanged lines
 taint: 1 finding(s), 1 checked, 0 unchecked, 0 boundary warning(s), 0 memory warning(s)
 diff path step: exit 1: ok
-taint: tests/fixtures/taint-moved.c (4 rules)
+taint: tests/fixtures/taint-moved.c (6 rules)
 parse: ok
 diff: --changed-lines tests/fixtures/diff/unsafe-moved.patch; 2 hunk(s) in 1 file(s), 2 added line(s), 2 line(s) in scope, context 0
 tests/fixtures/taint-moved.c:11:3: error: command-injection: Attacker-controlled data reaches a command interpreter [main] (checked)
@@ -33,7 +33,7 @@ diff: 1 finding(s) shown, 0 suppressed on unchanged lines
 diff: 1 boundary warning(s) shown, 1 suppressed on unchanged lines
 taint: 1 finding(s), 1 checked, 0 unchecked, 2 boundary warning(s), 0 memory warning(s)
 diff moved sink: exit 1: ok
-taint: tests/fixtures/taint-added.c (4 rules)
+taint: tests/fixtures/taint-added.c (6 rules)
 parse: ok
 diff: --changed-lines tests/fixtures/diff/unsafe-added.patch; 1 hunk(s) in 1 file(s), 1 added line(s), 1 line(s) in scope, context 0
 tests/fixtures/taint-added.c:8:3: error: command-injection: Attacker-controlled data reaches a command interpreter [main] (checked)
@@ -42,7 +42,7 @@ tests/fixtures/taint-added.c:8:3: error: command-injection: Attacker-controlled 
 diff: 1 finding(s) shown, 1 suppressed on unchanged lines
 taint: 2 finding(s), 2 checked, 0 unchecked, 0 boundary warning(s), 0 memory warning(s)
 diff added sink: exit 1: ok
-taint: tests/fixtures/taint-unsafe.c (4 rules)
+taint: tests/fixtures/taint-unsafe.c (6 rules)
 parse: ok
 diff: --changed-lines tests/fixtures/diff/unsafe-other.patch; 1 hunk(s) in 1 file(s), 1 added line(s), 3 line(s) in scope, context 1
 tests/fixtures/taint-unsafe.c:7:3: error: command-injection: Attacker-controlled data reaches a command interpreter [main] (checked)
@@ -51,7 +51,7 @@ tests/fixtures/taint-unsafe.c:7:3: error: command-injection: Attacker-controlled
 diff: 1 finding(s) shown, 0 suppressed on unchanged lines
 taint: 1 finding(s), 1 checked, 0 unchecked, 0 boundary warning(s), 0 memory warning(s)
 diff context 1: exit 1: ok
-taint: tests/fixtures/taint-unsafe.c (4 rules)
+taint: tests/fixtures/taint-unsafe.c (6 rules)
 parse: ok
 diff: all findings (--diff all; no filtering)
 tests/fixtures/taint-unsafe.c:7:3: error: command-injection: Attacker-controlled data reaches a command interpreter [main] (checked)
@@ -61,14 +61,14 @@ diff all: exit 1: ok
 flags: --diff and --changed-lines conflict: ok
 flags: --diff-context needs a diff: ok
 flags: --diff all has no context: ok
-taint: tests/fixtures/taint-unsafe.c (4 rules)
+taint: tests/fixtures/taint-unsafe.c (6 rules)
 parse: ok
 diff: --changed-lines tests/fixtures/diff/unsafe-moved.patch; 0 hunk(s) in 1 file(s), 0 added line(s), 0 line(s) in scope, context 0
   note: no diff entry matches "tests/fixtures/taint-unsafe.c"; treating it as unchanged (check the path spelling)
 diff: 0 finding(s) shown, 1 suppressed on unchanged lines
 taint: 1 finding(s), 1 checked, 0 unchecked, 0 boundary warning(s), 0 memory warning(s)
 diff no entry: exit 0: ok
-taint: tests/fixtures/taint-unsafe.c (4 rules)
+taint: tests/fixtures/taint-unsafe.c (6 rules)
 parse: ok
 diff: --changed-lines tests/fixtures/diff/unsafe-other.patch; 1 hunk(s) in 1 file(s), 1 added line(s), 1 line(s) in scope, context 0
 diff: 0 finding(s) shown, 1 suppressed on unchanged lines
@@ -77,7 +77,7 @@ sarif unchanged: exit 0: ok
 sarif unchanged: the result is kept: ok
 sarif unchanged: baselineState unchanged: ok
 sarif unchanged: partialFingerprints: ok
-taint: tests/fixtures/taint-unsafe.c (4 rules)
+taint: tests/fixtures/taint-unsafe.c (6 rules)
 parse: ok
 diff: --changed-lines tests/fixtures/diff/unsafe-sink.patch; 1 hunk(s) in 1 file(s), 1 added line(s), 1 line(s) in scope, context 0
 tests/fixtures/taint-unsafe.c:7:3: error: command-injection: Attacker-controlled data reaches a command interpreter [main] (checked)
