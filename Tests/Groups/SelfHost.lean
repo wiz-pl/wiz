@@ -190,6 +190,20 @@ def selfhostCompileFails (file : String) (errors : String) : IO Unit := do
     checkEq errors out.stderr
     checkEq "" out.stdout
 
+/-- (D6, A11) The self-hosted CLI's `check` subcommand reports a frontend error with the
+command's `file:line:col`, and prints no C. -/
+def selfhostCheckFails (file expected : String) : IO Unit := do
+  match ← selfhostCompiler with
+  | .error e =>
+    if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+  | .ok exe =>
+    let dir ← IO.FS.createTempDir
+    IO.FS.writeFile (dir / "input.wiz") file
+    let out ← IO.Process.output { cmd := "timeout", args := #["300", exe.toString, "check", "input.wiz"], cwd := dir }
+    checkEq (1 : UInt32) out.exitCode
+    checkEq expected out.stderr
+    checkEq "" out.stdout
+
 /-- (21l) A program with foreign functions gives the same output compiled by the Lean
 compiler and by the self-hosted one (with the collector unless `gc := false`, and with
 reference counting, which also checks that every object was freed). -/
@@ -1081,6 +1095,14 @@ def selfhostDerivingBad : String :=
 
 def selfhostDerivingBadExpected : String :=
   "BEq : (x0 : U0) → U0\nBEq.beq : (x0 :0 U0) → (x1 : (BEq x0)) → (x2 : x0) → (x3 : x0) → Bool\nerror: failed to synthesize an instance of (BEq ((((((((((((((((((?m0 x✝0) x✝1) j✝) i✝) xs✝) ih✝) rest✝) ihs✝) _) j✝) i✝) xs✝) ih✝) rest✝) ihs✝) _) a✝0) b✝0))\nSize : (x0 : U0) → U0\nSize.size : (x0 :0 U0) → (x1 : (Size x0)) → (x2 : x0) → Nat\nerror: cannot derive Size for Nat: no deriver for class Size (the self-hosted frontend derives BEq and Repr)\n"
+
+/-- (A11) A rejected derivation is the command's diagnostic, with its source position, in
+the driver (`file:line:col`): `deriving instance Size for Nat` on line 4 is rejected. -/
+def selfhostDerivingSpan : String :=
+  "import Prelude\nclass Size (A : Type) where\n  size : A → Nat\nderiving instance Size for Nat\n"
+
+def selfhostDerivingSpanExpected : String :=
+  "input.wiz:4:1: error: cannot derive Size for Nat: no deriver for class Size (the self-hosted frontend derives BEq and Repr)\n"
 
 def selfHostGroup : Group where
   name := "selfhost"
@@ -2367,6 +2389,8 @@ def selfHostGroup : Group where
         let expected := "error: " ++ (leanBad.toList.head!).text
         unless selfBad.head! == expected do
           throw (IO.userError s!"the error texts differ:\nLean: {expected}\nselfhost: {selfBad.head!}") }
+    { name := "(A11) a rejected derivation is reported at the command's line and column", run := fun _ =>
+        selfhostCheckFails selfhostDerivingSpan selfhostDerivingSpanExpected }
 
   ]
 
