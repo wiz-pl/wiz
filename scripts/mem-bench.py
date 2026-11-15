@@ -104,6 +104,24 @@ def git(*args):
         return ""
 
 
+def wiz_identity(wiz):
+    """What compiler the numbers came from: version, size, mtime (not a gate)."""
+    try:
+        r = subprocess.run([wiz, "--version"], capture_output=True, text=True, timeout=30)
+        version = (r.stdout or r.stderr).strip().split("\n")[0]
+    except (OSError, subprocess.SubprocessError):
+        version = ""
+    try:
+        st = os.stat(wiz)
+        mtime = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(st.st_mtime))
+        size = st.st_size
+    except OSError:
+        mtime, size = "", 0
+    return {"version": version, "size": size, "mtime": mtime,
+            "path": os.path.relpath(wiz, ROOT) if os.path.isabs(wiz) and
+            os.path.commonpath([os.path.abspath(wiz), ROOT]) == ROOT else wiz}
+
+
 def default_wiz():
     p = os.path.join(ROOT, ".lake", "build", "bin", "wiz")
     return p if os.path.exists(p) else "wiz"
@@ -438,7 +456,7 @@ def load_json(path):
         return json.load(f)
 
 
-def compare(results, baseline, tolerance, args):
+def compare(results, baseline, tolerance):
     """Compare a run with the baseline; return (rows, failed)."""
     rows = []
     failed = False
@@ -495,7 +513,7 @@ def print_table(rows, tol):
           f"(max of its samples); hard caps are per invocation")
 
 
-def markdown_table(rows, tol, baseline_path):
+def markdown_table(rows, tol):
     out = [f"### Peak RSS (relative limit +{tol:g} %, per-invocation caps)", ""]
     out.append("| invocation | peak MiB | baseline MiB | delta | cap MiB | status |")
     out.append("|---|---:|---:|---:|---:|---|")
@@ -556,15 +574,15 @@ def self_test():
     results = {"x": {"peak_mib": 100.0, "cap_mib": 1000, "argv": ["wiz"], "exit": 0}}
     good = {"invocations": {"x": {"peak_mib": 80.0, "cap_mib": 1000, "argv": ["wiz"]}},
             "tolerance_pct": 25}
-    rows, failed, _ = compare(results, good, None, None)
+    rows, failed, _ = compare(results, good, None)
     check("ok run passes", failed, False)
-    rows, failed, _ = compare(results, {"invocations": {}}, None, None)
+    rows, failed, _ = compare(results, {"invocations": {}}, None)
     check("missing baseline fails", failed, True)
     check("missing baseline status", rows[0]["status"], "baseline-missing")
     bad_cap = {"invocations": {"x": {"peak_mib": 80.0, "cap_mib": 90, "argv": ["wiz"]}},
                "tolerance_pct": 25}
     rows, failed, _ = compare({"x": {"peak_mib": 100.0, "cap_mib": 90, "argv": ["wiz"],
-                                     "exit": 0}}, bad_cap, None, None)
+                                     "exit": 0}}, bad_cap, None)
     check("over cap fails", rows[0]["status"], "over-cap")
 
     if failures:
@@ -684,6 +702,7 @@ def main(argv=None):
         "commit": git("rev-parse", "HEAD"),
         "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
         "wiz": args.wiz,
+        "wiz_info": wiz_identity(args.wiz),
         "checker": how,
         "reps": args.reps,
         "interval_s": args.interval,
@@ -700,7 +719,7 @@ def main(argv=None):
         if not os.path.exists(args.baseline):
             raise SystemExit(f"--check: no baseline at {args.baseline} (run --update)")
         baseline = load_json(args.baseline)
-        rows, failed, tol = compare(results, baseline, args.tolerance, args)
+        rows, failed, tol = compare(results, baseline, args.tolerance)
         record["tolerance_pct"] = tol
         record["baseline"] = os.path.abspath(args.baseline)
         record["comparison"] = rows
@@ -709,7 +728,7 @@ def main(argv=None):
             print_table(rows, tol)
         if args.markdown:
             with open(args.markdown, "a", encoding="utf-8") as f:
-                f.write(markdown_table(rows, tol, args.baseline))
+                f.write(markdown_table(rows, tol))
 
     if not args.quiet:
         if not args.check:

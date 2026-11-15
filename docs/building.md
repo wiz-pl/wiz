@@ -258,14 +258,27 @@ host with about twenty concurrent agents, so the relative limit and the caps are
 decision, not the absolute numbers. Re-record with `--update` after a deliberate
 change (a new corpus entry, a new allocator), and keep the old baseline in the PR.
 
-Today's numbers (2026-11-15, 27 GiB host, GCC 16.2, Boehm GC, ~20 agents sharing
-the machine; peak of the recorded samples, ±5 %):
+Today's numbers (2026-11-15, 27 GiB host, 32 CPUs, Linux 7.3.3, GCC 16.2,
+Boehm GC, about twenty agents sharing the machine; `wiz` built from `627b48f6`,
+peak of the recorded samples, ±5 %):
 
-TODAY_TABLE
+| invocation | peak RSS | cap | wall (median) |
+|---|---:|---:|---:|
+| `check-prelude` | 99 MiB | 1 GiB | 1.1 s |
+| `check-std` | 104 MiB | 1 GiB | 1.7 s |
+| `check-text` | 104 MiB | 1 GiB | 1.5 s |
+| `check-json` | 105 MiB | 1 GiB | 2.3 s |
+| `check-example-hdl` | 140 MiB | 2 GiB | 35 s |
+| `build-stdlib-bench` | 222 MiB | 2 GiB | 146 s |
+| `selfhost-checker` | 413 MiB | 1 GiB | 31 s |
 
-The worst offender is the cold check of the largest example; everything else is
-under a few hundred MiB. The self-hosted checker is the entry to watch: it was
-10.7 GB before the `inlineTm` fix and is the reason the 1 GiB cap exists.
+The worst offender is the self-hosted checker at 413 MiB: it is 40 % of its 1 GiB
+cap and an order of magnitude above the module checks, which is why it has its own
+entry. It was 10.7 GB before the `inlineTm` fix and is the reason the cap exists.
+The stdlib build is the slow entry (146 s; two samples, because the peak is stable),
+not the largest peak. The 167 KiB `hdl-uart-temporal` example is not in the corpus:
+a cold check takes over four minutes on this host, so the corpus uses
+`hdl-temporal` (294 lines, 35 s cold) instead and keeps the nightly bounded.
 
 The nightly `.github/workflows/bench.yml` runs this as a second job
 (`mem`, after the timing jobs) with `--check --markdown "$GITHUB_STEP_SUMMARY"`;
