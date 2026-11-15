@@ -1022,7 +1022,7 @@ group has two cases (the APB/Wishbone/AXI4-Lite one and this one).
 ## CRC-8/SMBUS (`lib/Hdl/Crc.wiz`)
 
 `lib/Hdl/Crc.wiz` (`import Hdl.Crc`) is the iCEstick CRC
-(`/workspace/wiz-icestick-uart/src/Icestick/Crc.wiz`) without the board vocabulary:
+(the iCEstick project's `src/Icestick/Crc.wiz`) without the board vocabulary:
 polynomial `x^8 + x^2 + x + 1` (`0x07`), initial value 0, MSB first, no reflection and
 no final xor. The specification is on numbers (`Crc.bit`, `Crc.iter`, `Crc.step`,
 `Crc.ofList`, `Crc.hex`, `Crc.reply`); the hardware is `Crc.hwBit`, `Crc.hwIter` and
