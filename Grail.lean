@@ -8,4 +8,5 @@ import Grail.Command
 import Grail.Graph
 import Grail.Deps
 import Grail.Cli
+import Grail.IndexCheck
 import Grail.Lsp
