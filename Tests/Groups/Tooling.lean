@@ -153,19 +153,20 @@ def toolingGroup : Group where
         check ((err.splitOn "cannot read").length > 1) s!"a missing file was not reported:\n{err}" },
     { name := "wiz repl: --prelude imports a module before the first input (-I, -p, missing)", run := fun _ => do
         let dir ← IO.FS.createTempDir
-        IO.FS.writeFile (dir / "Pre.wiz") "def preValue : Nat := 40 + 2\n"
+        -- a prelude module is an ordinary module: it imports the Prelude itself
+        IO.FS.writeFile (dir / "Pre.wiz") "import Prelude\ndef preValue : Nat := 40 + 2\n"
         -- `--prelude M` (with `-I DIR`) is an implicit `import M` before the session
         let (code, out, err) := ← runRepl "#eval preValue + 1\n#check preValue\n:quit\n"
-          #["-I", dir.toString, "--prelude", "Pre"]
+          ["-I", dir.toString, "--prelude", "Pre"]
         checkEq 0 code
         check ((out.splitOn "43").length > 1) s!"the prelude's value is not in scope:\n{out}\n{err}"
         check ((out.splitOn "preValue : Nat").length > 1) s!"the prelude's definition is not in scope:\n{out}\n{err}"
         -- `-p` is the short form
-        let (code, out, err) := ← runRepl "#eval preValue\n:quit\n" #["-I", dir.toString, "-p", "Pre"]
+        let (code, out, err) := ← runRepl "#eval preValue\n:quit\n" ["-I", dir.toString, "-p", "Pre"]
         checkEq 0 code
         check ((out.splitOn "42").length > 1) s!"`-p` did not import the module:\n{out}\n{err}"
         -- a missing module is an error at startup, before any input is read
-        let (code, out, err) := ← runRepl "#eval 1\n" #["--prelude", "NoSuchPrelude"]
+        let (code, out, err) := ← runRepl "#eval 1\n" ["--prelude", "NoSuchPrelude"]
         checkEq 2 code
         check ((err.splitOn "unknown module NoSuchPrelude").length > 1)
           s!"no clear missing-module error:\n{out}\n{err}"
