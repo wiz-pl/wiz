@@ -1,0 +1,2 @@
+light: this looks like a build — 100 of 177 memcg kills came from builds under the 2G cap; use heavy --mem 5G
+light: timed out after 300s (use heavy for this job)

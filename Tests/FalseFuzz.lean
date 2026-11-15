@@ -207,7 +207,7 @@ def genScaseQ : Gen (Tm × Tm) := do
   let (dt, idx) ← pick #[pure (tNat, Term.tt), pure (mutualAt 0, tag2 0),
     pure (mutualAt 1, tag2 1)] (pure (tNat, Term.tt))
   match cx0.whq dt with
-  | .mu ld I D _ _ _ =>
+  | .mu ld I D _ _ _ _ =>
     let T ← pick #[pure tUnit0, pure tUnit1, pure tNat, pure tEnum2] (pure tUnit1)
     let some vT := cx0.lvlOf T | pure (T, .tt)
     let P : Tm := .lam "i" (.lam "x" (liftT 2 T))
@@ -403,7 +403,7 @@ where
     | .scofix .. => add "scofix"
     | .out _ => add "out"
     | .sfix _ _ _ _ _ _ s _ _ => add (if s == .szInf then "sfix at ∞" else "sfix at a size")
-    | .mu _ _ _ _ s _ => add (if s == .szInf then "μ at ∞" else "μ at a size")
+    | .mu _ _ _ _ s _ _ => add (if s == .szInf then "μ at ∞" else "μ at a size")
     | .nu _ _ _ _ s _ => add (if s == .szInf then "ν at ∞" else "ν at a size")
     | .size => add "Size"
     | .sizeLt _ => add "Size<"

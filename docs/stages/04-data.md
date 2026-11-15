@@ -301,7 +301,10 @@ types, and `Le`'s recursive fields are proof arguments, not data.
 The eliminators keep Lean's **singleton elimination** rule: `ind` (and so `T.rec` /
 `T.casesOn`) may target any `Sort v` when the description is a subsingleton — no
 constructor, or one constructor whose fields are all (sub)singleton types — and only
-`Prop` otherwise. A non-singleton proposition's recursor therefore has its motive fixed
+`Prop` otherwise. The test is syntactic (`descSingleton` in `Eval.lean`): it sees a
+field's type is a proposition when it is `Prop` by shape, not when it is a *parameter*
+known to be a proposition in the context, so a type like `AndP (A B : Prop)` is
+singleton-eliminated only into `Prop` (conservative, never unsound). A non-singleton proposition's recursor therefore has its motive fixed
 to `Prop` (no `v` level parameter); a match that asks for another sort is rejected at
 the pattern ("large elimination from the inductive proposition"). `T.rec`/`T.casesOn`
 are generated as for data; `T.scasesOn`, `T.casesOnA` and `T.casesOn1` are not (sized

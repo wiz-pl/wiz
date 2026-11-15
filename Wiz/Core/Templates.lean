@@ -69,7 +69,10 @@ private partial def betaApps (t : Term R) : List (Term R) → Term R
     | _ => (a :: as).foldl .app t
 
 def interpApp (l : Level) (prop : Bool) (I E X i : Term R) : Term R :=
-  betaApps (interpTm l prop) [I, E, X, i]
+  -- (a `Type` application is left as it was: the kernel's own read-back handles it;
+  -- a proposition's uses a `Prop` family, so beta-reduce it here to keep it inferable)
+  if prop then betaApps (interpTm l prop) [I, E, X, i]
+  else apps (interpTm l prop) [I, E, X, i]
 
 /-- `fun I D X P i xs => All D X P i xs`: one `P`-proof per recursive field. -/
 def allTm (l v' : Level) (prop : Bool := false) : Term R :=

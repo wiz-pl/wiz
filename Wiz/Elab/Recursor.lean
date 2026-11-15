@@ -309,12 +309,12 @@ def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (s
         match jv? with
         | some jv => .ann (.con (payload d)) (.mu l (Iv d) (Dv d) (idx d) (.szSuc (jv d)) none prop)
         | none => .con (payload d)
-      let interpOf (Dz : B R) : B R := fun d => betaApps (Templates.interpTm l prop) [Iv d, Dz d, X d, i d]
-      let allOf (Dz r : B R) : B R := fun d => betaApps (Templates.allTm l v prop) [Iv d, Dz d, X d, P d, i d, r d]
+      let interpOf (Dz : B R) : B R := app (closed (Templates.interpTm l prop)) [Iv, Dz, X, i]
+      let allOf (Dz r : B R) : B R := app (closed (Templates.allTm l v prop)) [Iv, Dz, X, P, i, r]
       let motiveZ : B R := fun d =>
         -- under the ecase binder `z`, which is variable `d - 1` at depth `d`
         let z := bvar (d - 1)
-        let Dz : B R := fun d' => betaApps (Fv d') [upTag z d']
+        let Dz : B R := if prop then (fun d' => betaApps (Fv d') [upTag z d']) else app Fv [upTag z]
         -- normalise only the template parts: evaluation would drop `conAt`'s annotation
         (B.piS "rest" .default (qlit (if linear then 1 else w))
           (norm g (interpOf Dz)) l1 (fun r =>

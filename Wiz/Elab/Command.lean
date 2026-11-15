@@ -1181,11 +1181,15 @@ members may have constructors of the same name, and `.c` at an expected `A` is `
 partial def mutualInductive (tables : ParserTables) (defs : Array Syntax) : Except String (List Syntax) := do
   let names := defs.map fun d => ((d.getArg 1).getId?).getD "_"
   for d in defs do
-    unless (d.getArg 2).args.isEmpty && (d.getArg 3).args.isEmpty && (d.getArg 4).args.isEmpty do
-      throw "mutual inductive types may not have universe parameters, parameters or indices (yet)"
+    unless (d.getArg 2).args.isEmpty && (d.getArg 3).args.isEmpty do
+      throw "mutual inductive types may not have universe parameters or parameters (yet)"
+    -- (issue #252) a member may say `: Prop`; any other signature would be indices
+    let sig := d.getArg 4
+    unless sig.args.isEmpty || sig.args.any (·.isOfKind "term.prop") do
+      throw "mutual inductive types may not have indices (yet)"
   let fam := "_".intercalate names.toList
   -- (issue #252) a block of inductive propositions is one propositional family
-  let isPropCmd (d : Syntax) : Bool := ((d.child "sig").args[1]?).bind Syntax.getId? == some "Prop"
+  let isPropCmd (d : Syntax) : Bool := (d.getArg 4).args.any (·.isOfKind "term.prop")
   let anyProp := defs.any isPropCmd
   let allProp := defs.all isPropCmd
   if anyProp && !allProp then

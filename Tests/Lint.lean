@@ -461,7 +461,7 @@ def valTable : List ValRow := [
   ⟨"ulift", 1, [], 2, fun c _ l => .ulift (l 0) (l 1) (c 0)⟩,
   ⟨"up", 1, [], 0, fun c _ _ => .up (c 0)⟩,
   ⟨"unfold", 0, [], 2, fun _ _ l => .unfold "f" [l 0, l 1] #[] (thunk stuck)⟩,
-  ⟨"lazyInd", 6, [], 2, fun c _ l => .lazyInd (l 0) (c 0) (c 1) (l 1) (c 2) (c 3) (c 4) (c 5) #[] (thunk stuck)⟩
+  ⟨"lazyInd", 6, [], 2, fun c _ l => .lazyInd (l 0) (c 0) (c 1) (l 1) (c 2) (c 3) (c 4) (c 5) false #[] (thunk stuck)⟩
 ]
 
 def headTable : List ValRow := [
@@ -907,7 +907,7 @@ def panicSites : List (String × Term R) := [
   ("vEcase", .ecase "z" .tt .tt []),
   ("vEcase-tag", .ecase "z" .tt (.tag [] 0) []),
   ("vDelim", .delim .zero .tt .tt .tt .tt .tt .tt),
-  ("vInd", .ind .zero .tt .tt .zero .tt .tt .tt .tt),
+  ("vInd", .ind .zero .tt .tt .zero .tt .tt .tt .tt false),
   ("vSfix", .sfix .zero .tt .tt .zero .tt .tt .tt .tt .tt),
   ("vScase", .scase .zero .tt .tt .tt .zero .tt .tt .tt .tt .tt),
   ("vOut", .out .tt),
@@ -997,7 +997,7 @@ def lintGroup : Group where
           -- a lazyInd's spine is read back only for app/fst/snd/down (`quote`'s default
           -- arm drops the rest): so no eliminator may push anything else onto it. Apply
           -- each elimination to a lazyInd, as the evaluator does, and read the result back.
-          let lz : Val R := .lazyInd .zero plainV plainV .zero plainV plainV plainV plainV #[] (thunk stuck)
+          let lz : Val R := .lazyInd .zero plainV plainV .zero plainV plainV plainV plainV false #[] (thunk stuck)
           checkValRows "Elim (applied to a lazyInd)" (elimTable.map (·.toValRow fun e => vElims (semGlobals false) lz #[e])) },
     { name := "type equality: `T = T` never computes to False, for any value constructor", run := fun _ =>
         -- (`vEqType`'s last case answers `False` for two canonical types that no case

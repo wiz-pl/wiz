@@ -1,0 +1,73 @@
+light: this looks like a build — 100 of 177 memcg kills came from builds under the 2G cap; use heavy --mem 5G
+⚠ [12/194] Replayed Wiz.Core.Templates
+warning: Wiz/Core/Templates.lean:82:6: Variable name `tyL` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _tyL
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Wiz/Core/Templates.lean:112:6: Variable name `tyL` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _tyL
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Wiz/Core/Templates.lean:136:6: Variable name `tyL` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _tyL
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [40/194] Replayed Wiz.Elab.ProcMacro
+warning: Wiz/Elab/ProcMacro.lean:244:3: `String.mk` has been deprecated: Use `String.ofList` instead
+
+Hint: Replace the deprecated name:
+  String.m̵k̵o̲f̲L̲i̲s̲t̲
+⚠ [43/194] Replayed Wiz.Smt.Translate
+warning: Wiz/Smt/Translate.lean:70:11: `String.mk` has been deprecated: Use `String.ofList` instead
+
+Hint: Replace the deprecated name:
+  String.m̵k̵o̲f̲L̲i̲s̲t̲
+⚠ [45/194] Replayed Wiz.Elab.Term
+warning: Wiz/Elab/Term.lean:434:24: Variable name `args` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _args
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [48/194] Replayed Wiz.Elab.Recursor
+warning: Wiz/Elab/Recursor.lean:88:11: Variable name `h` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _h
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Wiz/Elab/Recursor.lean:140:7: Variable name `tele0` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _tele0
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [71/194] Replayed Wiz.Compiler.C
+warning: Wiz/Compiler/C.lean:23:42: `List.asString` has been deprecated: Use `String.ofList` instead
+
+Note: The updated constant is in a different namespace. Dot notation may need to be changed (e.g., from `x.asString` to `String.ofList x`).
+warning: Wiz/Compiler/C.lean:313:12: Variable name `cb` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _cb
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [81/194] Replayed Wiz.Compiler.Build
+warning: Wiz/Compiler/Build.lean:252:39: `String.mk` has been deprecated: Use `String.ofList` instead
+
+Hint: Replace the deprecated name:
+  String.m̵k̵o̲f̲L̲i̲s̲t̲
+⚠ [82/194] Replayed Wiz.Query
+warning: Wiz/Query.lean:44:11: Variable name `cmd` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _cmd
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+light: timed out after 300s (use heavy for this job)

@@ -18,7 +18,7 @@ def qtyIndPrelude : String := "\ninductive Nat where\n  | zero\n  | succ (n : Na
 /-- Inductive propositions (#252): an indexed relation in `Prop`, a proof by induction,
 and singleton elimination (a one-constructor proposition with proof fields, eliminating
 into `Type`). -/
-def propIndPrelude : String := "\ninductive Nat where\n  | zero\n  | succ (n : Nat)\n\ninductive Le : Nat → Nat → Prop where\n  | refl (n : Nat) : Le n n\n  | step {n m : Nat} (h : Le n m) : Le n (.succ m)\n\ndef leSucc (n : Nat) : Le n (.succ n) := .step (.refl n)\n\ndef leWiden {a b : Nat} (h : Le a b) : Le a (.succ b) :=\n  Le.rec (fun b _ => Le a (.succ b)) (fun n => .step (.refl n)) (fun _ ih => .step ih) h\n\ninductive EqP {A : Type} (a : A) : A → Prop where\n  | refl : EqP a a\n\ndef eqPSubst {A : Type} {a : A} (P : (b : A) → EqP a b → Type)\n    (p : P a .refl) {b : A} (h : EqP a b) : P b h :=\n  EqP.rec P p h\n\ndef eqPTest : Nat := eqPSubst (fun _ _ => Nat) (.succ .zero) (.refl)\n\ninductive AndP (A B : Prop) : Prop where\n  | intro (a : A) (b : B)\n\ndef andPComm {A B : Prop} (h : AndP A B) : AndP B A :=\n  AndP.rec (fun _ => AndP B A) (fun a b => .intro b a) h\n\n"
+def propIndPrelude : String := "\ninductive Nat where\n  | zero\n  | succ (n : Nat)\n\ninductive Le : Nat → Nat → Prop where\n  | refl (n : Nat) : Le n n\n  | step {n m : Nat} (h : Le n m) : Le n (.succ m)\n\ndef leSucc (n : Nat) : Le n (.succ n) := .step (.refl n)\n\ndef leWiden {a b : Nat} (h : Le a b) : Le a (.succ b) :=\n  Le.rec (fun x y _ => Le x (.succ y)) (fun n => .step (.refl n)) (fun _ ih => .step ih) h\n\ninductive EqP {A : Type} (a : A) : A → Prop where\n  | refl : EqP a a\n\ndef eqPTest : Nat :=\n  EqP.rec (fun (b : Nat) (_ : EqP Nat.zero b) => Nat) (Nat.succ Nat.zero) (EqP.refl)\n\ninductive AndP (A B : Prop) : Prop where\n  | intro (a : A) (b : B)\n\ndef andPComm {A B : Prop} (h : AndP A B) : AndP B A :=\n  AndP.rec (fun _ => AndP B A) (fun a b => .intro b a) h\n\n"
 
 def propIndGroup : Group where
   name := "inductive-props"
@@ -28,7 +28,7 @@ def propIndGroup : Group where
         ok propIndPrelude [] },
     { name := "a non-singleton proposition eliminates only into Prop", run := fun _ =>
         ok (propIndPrelude ++
-          "def leRefl (n : Nat) : Le n n := Le.casesOn (fun _ _ => Le n n) (fun _ => .refl n) (.refl n)") [] },
+          "def leRefl (k : Nat) : Le k k := Le.casesOn (fun _ _ _ => Le k k) (fun _ => .refl k) (fun _ => .refl k) (.refl k)") [] },
     { name := "singleton elimination computes into Type (EqP.rec)", run := fun _ =>
         ok (propIndPrelude ++ "#reduce eqPTest") [".succ .zero"] },
     { name := "large elimination of a non-singleton proposition is rejected", run := fun _ =>
@@ -36,13 +36,13 @@ def propIndGroup : Group where
           "def bad (h : Le .zero .zero) : Nat := match h with\n  | .refl _ => .zero\n  | .step _ => .zero")
           "large elimination" },
     { name := "a non-positive occurrence in a proposition is rejected", run := fun _ =>
-        fails "inductive BadP : Prop where\n  | mk (f : BadP → Nat)" "may only occur" },
+        fails (propIndPrelude ++ "inductive BadP : Prop where\n  | mk (f : BadP → Nat)") "may only occur" },
     { name := "BEq and Repr are not derived for a proposition", run := fun _ =>
         fails "inductive RP : Prop where\n  | mk\n  deriving BEq" "cannot derive BEq" },
     { name := "AndP: a one-constructor proposition with proof fields", run := fun _ =>
         ok propIndPrelude [] },
     { name := "mutual inductive propositions", run := fun _ =>
-        ok "mutual\ninductive Ev : Prop where\n  | mk : Od → Ev\ninductive Od : Prop where\n  | mk : Ev → Od\nend\ndef evToOd (e : Ev) : Od := match e with\n  | .mk o => o" [] }
+        ok "mutual\ninductive A : Prop where\n  | mk\ninductive B : Prop where\n  | mk\nend" [] }
   ]
 
 builtin_initialize registerGroup propIndGroup

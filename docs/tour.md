@@ -156,8 +156,10 @@ inductive Le : Nat → Nat → Prop where
   | refl (n : Nat) : Le n n
   | step {n m : Nat} (h : Le n m) : Le n (.succ m)
 
-def Le.trans {a b c : Nat} (h₁ : Le a b) (h₂ : Le b c) : Le a c :=
-  Le.rec (fun b _ => Le a c) (fun n => h₂) (fun _ ih => .step ih) h₁
+def Le.widen {a b : Nat} (h : Le a b) : Le a (.succ b) :=
+  Le.rec (fun x y _ => Le x (.succ y))
+    (fun n => .step (.refl n))
+    (fun _ ih => .step ih) h
 ```
 
 A proof of an inductive proposition is erased and **proof-irrelevant**: any two

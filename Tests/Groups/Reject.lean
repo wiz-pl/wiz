@@ -325,6 +325,13 @@ def group : Group where
       [("Priv", privMod)],
     accepted "accept: a module's own private names, through its public API"
       ("import Priv\ndef x : Nat := Tok.value (Tok.hide 1)\n#eval x\n") [("Priv", privMod)] (cli := true),
+    rejected "inductive props: large elimination of a non-singleton proposition"
+      (prelude ++ "inductive Le : Nat → Nat → Prop where\n  | refl (n : Nat) : Le n n\n  | step {n m : Nat} (h : Le n m) : Le n (.succ m)\n" ++
+       "def bad (h : Le 0 0) : Nat := match h with\n  | .refl _ => 0\n  | .step _ => 0\n")
+      none ".refl _" "large elimination",
+    accepted "accept: singleton elimination of an inductive proposition"
+      (prelude ++ "inductive EqP {A : Type} (a : A) : A → Prop where\n  | refl : EqP a a\n" ++
+       "def out {A : Type} {a : A} (h : EqP a a) : Nat :=\n  EqP.rec (fun _ _ => Nat) 3 h\n#eval out (A := Nat) (a := 0) EqP.refl\n"),
     { name := "modules: two modules declaring one name"
       run := fun _ => do
         let dir ← IO.FS.createTempDir

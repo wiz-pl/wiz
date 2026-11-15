@@ -952,7 +952,6 @@ stores data), so its eliminator can only target Prop")
     let w := QuantitySyntax.explicitDefault
     let _ ← check ctx P (indMotiveTy ctx.globals l v vI vD w prop)
     let vP := ctx.eval P
-    dbg_trace s!"IND M={ctx.showTerm m}"
     let um ← check ctx m (indMethodTy ctx.globals l v vI vD vP w prop)
     let _ ← check ctx i vI
     let vi := ctx.eval i

@@ -1,0 +1,83 @@
+⚠ [17/121] Replayed Wiz.Core.Templates
+warning: Wiz/Core/Templates.lean:82:6: Variable name `tyL` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _tyL
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Wiz/Core/Templates.lean:112:6: Variable name `tyL` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _tyL
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Wiz/Core/Templates.lean:136:6: Variable name `tyL` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _tyL
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [43/121] Replayed Wiz.Elab.ProcMacro
+warning: Wiz/Elab/ProcMacro.lean:244:3: `String.mk` has been deprecated: Use `String.ofList` instead
+
+Hint: Replace the deprecated name:
+  String.m̵k̵o̲f̲L̲i̲s̲t̲
+⚠ [46/121] Replayed Wiz.Smt.Translate
+warning: Wiz/Smt/Translate.lean:70:11: `String.mk` has been deprecated: Use `String.ofList` instead
+
+Hint: Replace the deprecated name:
+  String.m̵k̵o̲f̲L̲i̲s̲t̲
+⚠ [48/121] Replayed Wiz.Elab.Term
+warning: Wiz/Elab/Term.lean:434:24: Variable name `args` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _args
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [51/121] Replayed Wiz.Elab.Recursor
+warning: Wiz/Elab/Recursor.lean:88:11: Variable name `h` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _h
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Wiz/Elab/Recursor.lean:140:7: Variable name `tele0` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _tele0
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [74/121] Replayed Wiz.Compiler.C
+warning: Wiz/Compiler/C.lean:23:42: `List.asString` has been deprecated: Use `String.ofList` instead
+
+Note: The updated constant is in a different namespace. Dot notation may need to be changed (e.g., from `x.asString` to `String.ofList x`).
+warning: Wiz/Compiler/C.lean:313:12: Variable name `cb` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _cb
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [83/121] Replayed Wiz.Compiler.Build
+warning: Wiz/Compiler/Build.lean:252:39: `String.mk` has been deprecated: Use `String.ofList` instead
+
+Hint: Replace the deprecated name:
+  String.m̵k̵o̲f̲L̲i̲s̲t̲
+⚠ [84/121] Replayed Wiz.Query
+warning: Wiz/Query.lean:44:11: Variable name `cmd` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _cmd
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [126/367] Replayed Tests.Groups.Hdl
+warning: Tests/Groups/Hdl.lean:58:49: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+warning: Tests/Groups/Hdl.lean:100:49: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+warning: Tests/Groups/Hdl.lean:118:48: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+warning: Tests/Groups/Hdl.lean:171:49: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+warning: Tests/Groups/Hdl.lean:383:41: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+warning: Tests/Groups/Hdl.lean:396:53: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+⚠ [227/367] Replayed Tests.Scaling
+warning: Tests/Scaling.lean:556:105: `String.mk` has been deprecated: Use `String.ofList` instead
+
+Hint: Replace the deprecated name:
+  String.m̵k̵o̲f̲L̲i̲s̲t̲

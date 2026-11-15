@@ -1,0 +1,207 @@
+⚠ [11/177] Replayed Wiz.Core.Templates
+warning: Wiz/Core/Templates.lean:82:6: Variable name `tyL` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _tyL
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Wiz/Core/Templates.lean:112:6: Variable name `tyL` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _tyL
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Wiz/Core/Templates.lean:136:6: Variable name `tyL` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _tyL
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [39/177] Replayed Wiz.Elab.ProcMacro
+warning: Wiz/Elab/ProcMacro.lean:244:3: `String.mk` has been deprecated: Use `String.ofList` instead
+
+Hint: Replace the deprecated name:
+  String.m̵k̵o̲f̲L̲i̲s̲t̲
+⚠ [42/177] Replayed Wiz.Smt.Translate
+warning: Wiz/Smt/Translate.lean:70:11: `String.mk` has been deprecated: Use `String.ofList` instead
+
+Hint: Replace the deprecated name:
+  String.m̵k̵o̲f̲L̲i̲s̲t̲
+⚠ [44/177] Replayed Wiz.Elab.Term
+warning: Wiz/Elab/Term.lean:434:24: Variable name `args` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _args
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [47/177] Replayed Wiz.Elab.Recursor
+warning: Wiz/Elab/Recursor.lean:88:11: Variable name `h` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _h
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Wiz/Elab/Recursor.lean:140:7: Variable name `tele0` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _tele0
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [70/177] Replayed Wiz.Compiler.C
+warning: Wiz/Compiler/C.lean:23:42: `List.asString` has been deprecated: Use `String.ofList` instead
+
+Note: The updated constant is in a different namespace. Dot notation may need to be changed (e.g., from `x.asString` to `String.ofList x`).
+warning: Wiz/Compiler/C.lean:313:12: Variable name `cb` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _cb
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [80/177] Replayed Wiz.Compiler.Build
+warning: Wiz/Compiler/Build.lean:252:39: `String.mk` has been deprecated: Use `String.ofList` instead
+
+Hint: Replace the deprecated name:
+  String.m̵k̵o̲f̲L̲i̲s̲t̲
+⚠ [81/177] Replayed Wiz.Query
+warning: Wiz/Query.lean:44:11: Variable name `cmd` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _cmd
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+✔ [254/469] Built Wiz.Format (312s)
+✔ [255/469] Built Wiz.LSP (704s)
+✔ [256/469] Built Wiz (766ms)
+✔ [258/469] Built Wiz.Doc.Site (1.6s)
+✔ [260/469] Built Tests.Format (845ms)
+✔ [261/469] Built Tests.Groups.ScryTaint (876ms)
+✔ [264/469] Built Tests.Groups.ScryWil (939ms)
+✔ [266/469] Built Tests.Parser (1.2s)
+✔ [267/469] Built Tests.Allocs (1.2s)
+✖ [270/469] Building Tests.Reject (2.1s)
+trace: .> LEAN_PATH=/workspace/wt/host-indpro/.lake/build/lib/lean /home/reuben/.elan/toolchains/leanprover--lean4---v4.35.0/bin/lean /workspace/wt/host-indpro/Tests/Reject.lean -o /workspace/wt/host-indpro/.lake/build/lib/lean/Tests/Reject.olean -i /workspace/wt/host-indpro/.lake/build/lib/lean/Tests/Reject.ilean -c /workspace/wt/host-indpro/.lake/build/ir/Tests/Reject.c --setup /workspace/wt/host-indpro/.lake/build/ir/Tests/Reject.setup.json --json
+error: no such file or directory (error code: 2)
+  file: /workspace/wt/host-indpro/.lake/build/lib/lean/Tests/Reject.olean
+✔ [274/469] Built Grail.Elab (2.1s)
+✔ [276/469] Built Tests.Eval (2.4s)
+✔ [277/469] Built Grail.Config (2.6s)
+✔ [279/469] Built Tests.Lint (4.7s)
+✔ [281/469] Built Main (4.1s)
+✔ [283/469] Built Tests.Elab (6.5s)
+✔ [284/469] Built Tests.LSP (6.5s)
+✔ [286/469] Built Tests.Groups.Match (569s)
+✔ [287/469] Built Tests.Groups.ResultQ (569s)
+✔ [288/469] Built Tests.Groups.Run (569s)
+✔ [289/469] Built Tests.Groups.Scry (569s)
+✔ [290/469] Built Tests.Groups.ScryAi (569s)
+✔ [291/469] Built Tests.Groups.ScryCert (569s)
+✔ [292/469] Built Tests.Groups.Serial (569s)
+✔ [293/469] Built Tests.Groups.Sized (569s)
+✔ [294/469] Built Tests.Groups.Std (569s)
+✔ [295/469] Built Tests.Groups.Struct (569s)
+✔ [296/469] Built Grail.New (571s)
+✔ [297/469] Built Tests.Groups.Natives (569s)
+✔ [298/469] Built Tests.Groups.Qty (569s)
+✔ [299/469] Built Tests.Groups.Regions (569s)
+✔ [300/469] Built Tests.Groups.Seplogic (569s)
+✔ [301/469] Built Tests.Groups.Sys (569s)
+✔ [302/469] Built Tests.Groups.Text (569s)
+✔ [303/469] Built Tests.Groups.Tactic (569s)
+✔ [304/469] Built Grail.Build (571s)
+✔ [305/469] Built Tests.Smt (570s)
+✔ [306/469] Built Tests.Groups.Effects (828ms)
+✔ [307/469] Built Tests.Groups.FfiStruct (897ms)
+✔ [308/469] Built Tests.Groups.HdlBusLaw (864ms)
+✔ [309/469] Built Tests.Groups.Inductive (889ms)
+✔ [310/469] Built Tests.Groups.Lift (915ms)
+✔ [311/469] Built Tests.Groups.Persistent (759ms)
+✔ [312/469] Built Tests.Groups.Semantics (570s)
+✔ [313/469] Built Tests.Groups.Wasm (570s)
+✔ [314/469] Built Tests.Feral (570s)
+✔ [315/469] Built Tests.Groups.Data (764ms)
+✔ [316/469] Built Tests.Groups.HdlBusCrc (762ms)
+✔ [317/469] Built Tests.Groups.HdlProtocol (991ms)
+✔ [318/469] Built Tests.Groups.Macro (824ms)
+✔ [319/469] Built Tests.Groups.Ott (1.0s)
+✔ [320/469] Built Tests.Groups.Phantom (1.1s)
+✔ [321/469] Built Tests.Groups.Rune (899ms)
+✔ [322/469] Built Tests.Groups.Reuse (1.1s)
+✔ [323/469] Built Tests.Groups.SelfhostCli (1.1s)
+✔ [324/469] Built Tests.Groups.Json (839ms)
+✔ [325/469] Built Tests.Groups.LinearCase (1.1s)
+✔ [326/469] Built Tests.Groups.Tooling (570s)
+✔ [327/469] Built Tests.Groups.Class (723ms)
+✔ [328/469] Built Tests.Groups.C (535ms)
+✔ [329/469] Built Tests.Groups.HdlTemporal (520ms)
+✔ [330/469] Built Tests.Groups.Coinductive (535ms)
+✔ [331/469] Built Tests.Groups.Display (627ms)
+✔ [332/469] Built Tests.Groups.Infoview (661ms)
+✔ [333/469] Built Tests.Groups.Optic (638ms)
+✔ [381/469] Built Tests.Groups.Callbacks (693ms)
+✔ [382/469] Built Tests.Groups.Conc (615ms)
+✔ [383/469] Built Tests.Groups.Elab (649ms)
+✔ [384/469] Built Tests.Groups.Language (1.6s)
+✔ [385/469] Built Tests.Groups.Llvm (496ms)
+✔ [393/469] Built Tests.Groups.Calc (570ms)
+✔ [394/469] Built Tests.Groups.Level (659ms)
+✔ [395/469] Built Tests.Groups.ListLemmas (742ms)
+✔ [399/469] Built Tests.Groups.Borrow (763ms)
+✔ [400/469] Built Tests.Groups.Builtin (916ms)
+✔ [401/469] Built Tests.Groups.DescEq (769ms)
+✔ [402/469] Built Tests.Groups.Repr (1.1s)
+✔ [407/469] Built Tests.Groups.Deriving (725ms)
+✔ [409/469] Built Tests.Groups.Vec (841ms)
+✔ [410/469] Built Grail.Selfhost (625ms)
+✔ [413/469] Built Tests.Groups.Ffi (2.2s)
+✔ [414/469] Built Tests.Groups.Trust (571s)
+✔ [415/469] Built Tests.Groups.Word (765ms)
+✔ [416/469] Built Grail.Test (708ms)
+✔ [417/469] Built Grail.Lsp (596ms)
+✔ [418/469] Built Tests.Meta (571s)
+✔ [425/469] Built Tests.Groups.Backend (1.1s)
+⚠ [426/469] Built Tests.Groups.Hdl (1.3s)
+warning: Tests/Groups/Hdl.lean:58:49: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+warning: Tests/Groups/Hdl.lean:100:49: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+warning: Tests/Groups/Hdl.lean:118:48: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+warning: Tests/Groups/Hdl.lean:171:49: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+warning: Tests/Groups/Hdl.lean:383:41: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+warning: Tests/Groups/Hdl.lean:396:53: `String.Slice.dropRight` has been deprecated: Use `String.Slice.dropEnd` instead
+✔ [427/469] Built Grail.Command (824ms)
+✔ [428/469] Built Grail.Deps (873ms)
+✔ [433/469] Built Tests.ElabFix (3.3s)
+✔ [434/469] Built Tests.Groups.Audit (2.3s)
+✔ [436/469] Built Tests.Groups.SelfHost (573s)
+✔ [438/469] Built Grail.Graph (2.2s)
+⚠ [440/469] Built Tests.Scaling (1.9s)
+warning: Tests/Scaling.lean:556:105: `String.mk` has been deprecated: Use `String.ofList` instead
+
+Hint: Replace the deprecated name:
+  String.m̵k̵o̲f̲L̲i̲s̲t̲
+✖ [442/469] Building Tests.Check (581s)
+trace: .> LEAN_PATH=/workspace/wt/host-indpro/.lake/build/lib/lean /home/reuben/.elan/toolchains/leanprover--lean4---v4.35.0/bin/lean /workspace/wt/host-indpro/Tests/Check.lean -o /workspace/wt/host-indpro/.lake/build/lib/lean/Tests/Check.olean -i /workspace/wt/host-indpro/.lake/build/lib/lean/Tests/Check.ilean -c /workspace/wt/host-indpro/.lake/build/ir/Tests/Check.c --setup /workspace/wt/host-indpro/.lake/build/ir/Tests/Check.setup.json --json
+error: Tests/Check.lean:466:40: Application type mismatch: The argument
+  propMu twoCtorDesc
+has type
+  Term Q
+but is expected to have type
+  Raw ?m.10
+in the application
+  defn "P" (sort 0) (propMu twoCtorDesc)
+error: Tests/Check.lean:468:40: Application type mismatch: The argument
+  propMu twoCtorDesc
+has type
+  Term Q
+but is expected to have type
+  Raw ?m.28
+in the application
+  defn "P" (sort 1) (propMu twoCtorDesc)
+✔ [444/469] Built Grail.Cli (2.1s)
+✔ [446/469] Built Tests.Groups.Prop (576s)
+✔ [447/469] Built Grail (292ms)
+✔ [450/469] Built Tests.FalseFuzz (1.3s)
+✔ [452/469] Built Tests.Native (1.4s)
+✔ [454/469] Built Tests.Groups.FalseFuzz (303ms)
+✔ [458/469] Built Tests.Grail (5.9s)
+✔ [460/469] Built Tests.Doc (1.8s)
+✔ [464/469] Built Tests.Eval:c.o (592s)
+✔ [465/469] Built Tests.ElabFix:c.o (376s)
