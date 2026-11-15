@@ -764,6 +764,14 @@ laws), `lib/Hoare.wiz` (`wp`, triples, the frame rule, adequacy for an interpret
 `lib/HoareExamples.wiz` (verified swap, list reversal, counter, list length, in-place map,
 freeing a list). See [stage 24](stages/24-separation-logic.md).
 
+`lib/Logic.wiz` also has the Boolean algebra: commutativity, associativity, identity and
+absorption of `Bool.and`/`Bool.or`, `Bool.not_not`, De Morgan (`Bool.not_and`,
+`Bool.not_or`), and the bridges from a Boolean to a proposition — `Bool.and_eq_true`,
+`Bool.and_eq_false`, `Bool.or_eq_true`, `Bool.or_eq_false`, `Bool.not_eq_true`, and
+`Bool.eq_true_iff`
+(`b = true ↔ ¬ (b = false)`). Wiz has no `simp`, so the lemmas carry no `[simp]`
+attribute; they are stated left to right for `rw`.
+
 `lib/EffHeap.wiz` connects the effects library ([stage 10](stages/10-effects.md)) to
 these heap programs. `Cell V l` is a state effect on the cell at location `l`, and
 `Eff.toProg` interprets a program over cells as a `Prog V` (with `interpret` and a
@@ -885,6 +893,34 @@ use its helpers (`String.eq`, `String.chars`, `String.beq`, `Nat.repr`, `Nat.rep
 error at import). Feral keeps only what Text lacks (`Fe.split`, `Fe.nth`, `Fe.memNat`);
 `Fe.split` and `Fe.wordsOf` keep a reversed accumulator and reverse it once, so they run
 in linear time.
+
+## 9j: list lemmas (`lib/ListLemmas.wiz`)
+
+`import ListLemmas` (over `Text`, `Logic` and `Nat`): the laws a proof about lists needs,
+so a user proof is not a hand induction every time.
+
+* **Membership**: `List.Mem` (`x ∈ l`) is a proposition, with the binder notation
+  `∀ x ∈ l, P x` and `List.All P l`. `List.mem_append`, `List.mem_map` (with
+  `mem_map_of_mem`/`mem_of_mem_map`), `List.mem_reverse`, `List.mem_filter`,
+  `not_mem_nil`, `mem_cons_self`/`mem_cons_of_mem`/`mem_cons_iff`.
+* **`map`**: `map_id`, `map_map` (fusion: `map f (map g l) = map (f ∘ g) l`),
+  `map_append`, `map_reverse`, `length_map`.
+* **`append`/`reverse`/`length`**: `append_assoc`, `append_nil`, `nil_append`,
+  `length_append_eq`, `reverse_append`, `reverse_reverse`, `reverse_cons`,
+  `length_reverse`, and the `revApp` lemmas behind them.
+* **`filter`**: `filter_cons_true`/`filter_cons_false`, soundness (`filter_sound`: what
+  survives was in the list and satisfies the predicate) and completeness
+  (`filter_complete`), `mem_filter`, `filter_map` and `filter_filter`.
+* **`any`/`all`**: `any_eq_true` (`any p l = true ↔ ∃ x, x ∈ l ∧ p x = true`),
+  `all_eq_true` (`all p l = true ↔ ∀ x ∈ l, p x = true`), `any_append`/`all_append`,
+  and the `cons` equations `any_cons_true`/`any_cons_false`/`all_cons_true`/
+  `all_cons_false`.
+
+All are structural recursions: no axiom, no `sorry`, so `lib/ListLemmas.wiz` leaves the
+trust ledger unchanged. Wiz has no `simp` and no `[simp]` attribute, so they are stated
+left to right for `rw` (and `rw` does not close a goal: finish with `rfl`). The
+`list-lemmas` test group checks them, including `map` fusion and `filter`
+soundness/completeness in proofs and the `#check`/`#eval` behaviour.
 
 ## Numbers: classes, integers, words
 
