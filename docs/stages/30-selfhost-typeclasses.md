@@ -24,7 +24,8 @@ quantity 0, so they are erased.
   (`class Commute (e₁ e₂) (m) [i : Monad m] …`) inserts that problem at every use of
   `C e₁ e₂ m`, as in Lean.
   Rejected: private fields (a class's fields are its methods), and (by the elaborator's
-  ordinary errors) `outParam`, universe-polymorphic classes, `deriving`.
+  ordinary errors) `outParam`, `deriving`. A class at universe parameters
+  (`class Repr.{u} (A : Type u)`) works since U2 (30d).
 * `instance [priority] [name] {ps} : C a… := v` (or `where f := v …`) is an ordinary
   definition whose type is checked to be a class application (`C` must be a class). For
   `where` the body is `C.mk f₁ … fₙ` in the class's field order; a missing, duplicated
@@ -115,5 +116,35 @@ with the new code, still checks itself.
 * `attribute [default_instance]`, `attribute [binop]`, `binop%`;
 * dictionary unboxing and projection inlining in the backend (performance, not
   semantics);
-* universe-polymorphic classes (`class Repr.{u} …`), which need A15's level parameters
-  and U2's symbolic descriptions.
+* `outParam` rewriting and default instances (above); universe-polymorphic classes
+  landed with U2 (30d).
+
+## 30d: symbolic levels in descriptions (U2)
+
+A data type at a universe parameter (`inductive Box.{u} (A : Type u) : Type u`,
+`structure Wrap.{u} (A : Type u)`, `class Repr.{u} (A : Type u)`) has no closed
+description level. `Tm.descr`, `delim`, `mu`/`mus`, `nu`, `sfix`/`scase`, `scofix`,
+`coit`, `ind`, `ulift`, `unit`/`empty` and their `Val` counterparts now carry `Lvl`
+instead of `Nat`; the kernel compares them with `lvlEquiv` in `convTy`, `tmEq`,
+`ground*` and `subTy`, and the templates (`interpTm`, `allTm`, `hypsTm`, `mapTm`,
+`delim*`, `ind*`, `sfix*`, `scase*`, `coit*`) build `lsucc`/`lmax`/`limax` levels.
+
+The frontend (`inductiveCmdL`, `dataLevel`) takes the declaration's universe parameter
+(or the largest `Type u` it mentions) as the description level. Above `Type 0` the
+description's tag field is lifted (`ULift (Enum k)`, Q4), as in the Lean frontend: the
+constructor stores `up tag`, the description eliminates it through `down`, and match
+compilation lifts/downs the tag in the method type and the reconstructed constructor.
+Level metavariables of a constant's instantiation are unified (`unifyHead`/`unifyLvls`)
+so `Box Nat` solves `Box.{?u} ?A` from the expected type. A class's method projections
+carry the class's `.{u}` parameters.
+
+Tests (`=selfhost`): a polymorphic `inductive`/`structure`/`class` with `Repr` and
+`Inhabited` instances and compiled reductions; verdict parity on level mismatches,
+an undeclared universe and a field above the data type's universe; and a positioned
+diagnostic for `inductive Bad : Type u`. The fixpoint and `=check`/`=elab`/
+`=inductive`/`=sized types` remain the regression evidence.
+
+Not implemented: inferring the result universe of a data type whose *field* is itself a
+`Type u` (that needs `u+1`, and is rejected with the kernel's ULift message); a general
+level solver; level-polymorphic data types with smaller fields beyond the tag (the
+frontend does not synthesize field lifts).

@@ -323,6 +323,9 @@ partial def levelSyntax (s : Syntax) : Lvl :=
             | .false => match strEq k "level.add" with
               | .true => addLvlSyntax (levelSyntax (kid s 0)) (lvlNumSyntax (kid s 2))
               | .false => .lnum 0
+def lvlArgs : List String → List Lvl
+  | .nil => .nil
+  | .cons u us => .cons (.lparam u) (lvlArgs us)
 def levelArgSyntax (s : Syntax) (dflt : Lvl) : Lvl := match kids (kid s 1) with
   | .nil => dflt
   | .cons l _ => levelSyntax l
@@ -335,7 +338,7 @@ def elab : Scope → Syntax → Elab
     | .ok i => .ok (.var i)
     | .privTo m => .err (("'" +++ privBase n) +++ "' is private to module " +++ m)
     | .missing => match strEq n "Unit" with
-      | .true => .ok (.unit 0)
+      | .true => .ok (.unit (ln 1))
       | .false => .err ("unknown identifier " +++ n)
   | names, s => match strEq (kindOf s) "term.ident" with
     | .true => elab names (kid s 0)
@@ -475,7 +478,7 @@ inductive CField where
 inductive Ctor where
   | mk (name : String) (fields : List CField) (res : Tm) (qs : List Q) (impl : List Bool)
 inductive IndInfo where
-  | mk (np : Nat) (I D DI : Tm) (ctors : List Ctor) (fixed : Option Tm) (fam : Tm)
+  | mk (np : Nat) (lv : Lvl) (I D DI : Tm) (ctors : List Ctor) (fixed : Option Tm) (fam : Tm)
 structure Header where
   name : String
   text : String
@@ -1075,7 +1078,7 @@ def phantomDom (c : TCtx) (np k : Nat) (A : Tm) : Option Tm :=
       | .false => .some (sigmaTm .qz P (.eq (shiftTm 1 0 P) (.var 0) (shiftTm 1 0 p)));
   match D with
   | .none => .none
-  | .some D' => match inferUniv c (sortsTyIn c (piTm .qz D' (.unit 0))) with
+  | .some D' => match inferUniv c (sortsTyIn c (piTm .qz D' (.unit (ln 1)))) with
     | .ok ty _ => match ty with
       | .vsort l => match lvlEquiv l (.lnum 1) with
         | .true => .some D'
@@ -1094,7 +1097,7 @@ def phantomDoms (c : TCtx) (np : Nat) (used : Nat → Bool) : Nat → Tms → Tm
       | .none => more
 -- the tail `(0 _ : D₁) → … → Unit` (the `i` domains before already bound)
 def phantomTy : Nat → Tms → Tm
-  | _, .tnil => .unit 0
+  | _, .tnil => .unit (ln 1)
   | i, .tcons D rest => piTm .qz (shiftTm i 0 D) (phantomTy (i + 1) rest)
 -- the index of a type without indices: the tail's value `fun _ … _ => tt` (`tt` for `Unit`)
 partial def phantomVal (I : Tm) : Tm := match I with
@@ -1121,7 +1124,19 @@ def structBindQs : List Q → List Q
   | .cons q rest => .cons (match q with
     | .qz => .qz
     | _ => .qw) (structBindQs rest)
-def addCtors (T : String) (ps : List String) (pts : Tms) (nidx : Nat) (I : Tm) (Tc TcI : Tm) (k : Nat) (strct : Bool) : Globals → Nat → List Syntax → Added
+-- (U2/Q4) a data type above `Type 0` has its tag in `Sort 1`, so the description's tag
+-- field is lifted to the type's universe (`ULift (Enum k)`), as in the Lean frontend
+def tagLifted (lv : Lvl) : Bool := Bool.not (lvlEquiv (lsucc lv) (ln 1))
+def tagFieldTy (lv : Lvl) (k : Nat) : Tm := match tagLifted lv with
+  | .true => .ulift (ln 1) (lsucc lv) (.enum k)
+  | .false => .enum k
+def tagTm (lv : Lvl) (k i : Nat) : Tm := match tagLifted lv with
+  | .true => .up (.tag k i)
+  | .false => .tag k i
+def tagValTm (lv : Lvl) (k i : Nat) : Val := match tagLifted lv with
+  | .true => .vup (.vtag k i)
+  | .false => .vtag k i
+def addCtors (T : String) (us : List String) (lv : Lvl) (ps : List String) (pts : Tms) (nidx : Nat) (I : Tm) (Tc TcI : Tm) (k : Nat) (strct : Bool) : Globals → Nat → List Syntax → Added
   | gs, _, .nil => .ok gs .nil
   | gs, i, .cons c cs =>
     let n := List.length (ctorFields c);
@@ -1141,10 +1156,10 @@ def addCtors (T : String) (ps : List String) (pts : Tms) (nidx : Nat) (I : Tm) (
             | .unit _ => .star
             | _ => .eqRefl (shiftTm n 0 I) (phantomVal I);
         -- (the index equation's proof gets its marker, P2)
-        let v := markClosed (tLams (np + n) (.con (.pair (.tag k i) (payloadP proof n (n - 1))))) ty;
+        let v := markClosed (tLams (np + n) (.con (.pair (tagTm lv k i) (payloadP proof n (n - 1))))) ty;
         match check empty v (eval .nil ty) with
         | .err _ => .err
-        | .ok _ _ => match addCtors T ps pts nidx I Tc TcI k strct (Globals.add gs (.mk (String.append (String.append T ".") (ctorName c)) .nil ty v v
+        | .ok _ _ => match addCtors T us lv ps pts nidx I Tc TcI k strct (Globals.add gs (.mk (String.append (String.append T ".") (ctorName c)) us ty v v
           (List.append (impls np) (fieldKinds (fieldImpl (ctorFields c)))) .nil)) (i + 1) cs with
         | .ok gs' rest => .ok gs' (.cons (.mk (ctorName c) fs (match ics with
           | .tcons ic _ => ic
@@ -1165,6 +1180,10 @@ inductive Sig where
   | plain
   | indexed (I : Syntax)
   | bad
+-- (U2) the universe written in a signature's result (`Type <l>`)
+def typeLevel (t : Syntax) : Option Lvl := match strEq (kindOf t) "term.type" with
+  | .true => .some (levelArgSyntax t (.lnum 0))
+  | .false => .none
 def sigOf (stx : Syntax) : Sig := match kids (kid stx 4) with
   | .cons _ (.cons ty _) => match strEq (kindOf ty) "term.type" with
     | .true => .plain
@@ -1180,6 +1199,24 @@ def sigOf (stx : Syntax) : Sig := match kids (kid stx 4) with
           | .none => .bad
         | .false => .bad
   | _ => .plain
+def sigLevel (stx : Syntax) : Option Lvl := match kids (kid stx 4) with
+  | .cons _ (.cons ty _) => match sigOf stx with
+    | .plain => typeLevel ty
+    | .indexed _ => typeLevel (kid ty 2)
+    | .bad => .none
+  | _ => .none
+-- (U2) without a written result universe the data type's level is the largest one a
+-- `Type u` in the declaration mentions (as Lean infers it); a closed one is `0`
+partial def maxTypeLvl (acc : Lvl) (ws : List Syntax) : Lvl := match ws with
+  | .nil => acc
+  | .cons s rest => match s with
+    | .node k args => match strEq k "term.type" with
+      | .true => maxTypeLvl (.lmax acc (levelArgSyntax s (.lnum 0))) rest
+      | .false => maxTypeLvl acc (List.append (argsOf args) rest)
+    | _ => maxTypeLvl acc rest
+def dataLevel (stx : Syntax) : Lvl := match sigLevel stx with
+  | .some l => l
+  | .none => maxTypeLvl (.lnum 0) (.cons stx .nil)
 -- in an indexed family `T : I → Type`, an index `.c` (the last argument of `T …` in the
 -- constructors) is `I.c`: the constructors are scope-checked, not typed (stage 19d)
 def takeS : Nat → List Syntax → List Syntax
@@ -1240,7 +1277,7 @@ def isStructCmd (stx : Syntax) : Bool := match kid stx 7 with
   | .atom _ => .true
   | _ => .false
 -- (`seal`: the seal axiom of a `sealed inductive`, 22k, the first domain of the index tail)
-def inductiveCmdS0 (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := match ctorQtyErr (kids (kid stx0 3)) (kids (kid stx0 6)) with
+def inductiveCmdL (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := match ctorQtyErr (kids (kid stx0 3)) (kids (kid stx0 6)) with
   | .some m => errStep gs m
   | .none => match kid stx0 1 with
   | .ident T =>
@@ -1258,6 +1295,8 @@ def inductiveCmdS0 (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := m
     let nidx := match sig with
       | .indexed _ => 1
       | _ => 0;
+    let us := univParamsOf stx0;
+    let lv := dataLevel stx0;
     match elabTele gs (Globals.scope gs) 0 params with
     | .err m => errStep gs m
     | .ok pts =>
@@ -1266,7 +1305,7 @@ def inductiveCmdS0 (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := m
         | .indexed I => match elab (bindAll (Globals.scope gs) ps) I with
           | .ok t => .ok (closeG .false gs np t)
           | e => e
-        | .plain => .ok (.unit 0)
+        | .plain => .ok (.unit (lsucc lv))
         | .bad => .err "an inductive type's signature must be Type or I → Type";
       match Ir with
       | .err m => errStep gs m
@@ -1294,19 +1333,21 @@ def inductiveCmdS0 (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := m
               | .tnil => dsI0
               | .tcons _ _ => retailTms tl dsI0;
             -- (the motive is under the tag's binder and its own)
-            let mkD := fun (ds : Tms) => (.darg (.qlit .qw) (.enum k) (.lam (.ecase (.descr 0 (shiftTm 2 0 I)) (.var 0) ds)) : Tm);
+            let mkD := fun (ds : Tms) => (.darg (.qlit .qw) (tagFieldTy lv k) (.lam (.ecase (.descr lv (shiftTm 2 0 I)) (match tagLifted lv with
+              | .true => .down (.var 0)
+              | .false => .var 0) ds)) : Tm);
             match Bool.and (Nat.beq nidx 1) (Bool.not (Nat.beq (tmsLenF doms) 0)) with
             | .true => errStep gs "a parameter that no constructor mentions (a phantom parameter) of an indexed family is not supported by the self-hosted frontend"
             | .false =>
               -- `fun ps => μ D tt`, or `fun ps i => μ D i`
               let body := fun (D : Tm) => (match sig with
-                | .indexed _ => .lam (.mu 0 (shiftTm 1 0 I) (nfAt (np + 1) (tApps (tLams np D) (pvars np (np + 1)))) (.var 0))
-                | _ => .mu 0 I D tl : Tm);
+                | .indexed _ => .lam (.mu lv (shiftTm 1 0 I) (nfAt (np + 1) (tApps (tLams np D) (pvars np (np + 1)))) (.var 0))
+                | _ => .mu lv I D tl : Tm);
               let ty := sortTy (piTeleQ (match binderQs (kids (kid stx 3)) with
                 | .some qs => qs
                 | .none => .nil) pts (match sig with
-                | .indexed _ => piH I (.univ 0)
-                | _ => .univ 0));
+                | .indexed _ => piH I (.sortL (lsucc lv))
+                | _ => .sortL (lsucc lv)));
               let val := markClosed (tLams np (body (mkD ds))) ty;
               match check empty val (eval .nil ty) with
               | .err m => errStep gs m
@@ -1315,22 +1356,26 @@ def inductiveCmdS0 (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := m
                 -- (stage 21n: a private declaration's kernel name, in the terms it is
                 -- built into)
                 let Tn := Globals.declName gs T;
-                let gs1 := Globals.add gs (.mk T .nil ty val valI .nil .nil);
-                match addCtors T ps pts nidx I (.const Tn .nil .nil val ty) valI k (isStructCmd stx0) gs1 0 ctors with
+                let gs1 := Globals.add gs (.mk T us ty val valI .nil .nil);
+                let Tc : Tm := .const Tn us (lvlArgs us) val ty;
+                match addCtors T us lv ps pts nidx I Tc valI k (isStructCmd stx0) gs1 0 ctors with
                 | .err => errStep gs "ill-typed constructor"
                 | .ok gs2 cs => .mk (String.append T (String.append " : " (show .nil 0 ty)))
-                    (Globals.addInd gs2 T (.mk np I (mkD ds) (mkD dsI) cs .none (.const Tn .nil .nil val ty)))
-                | .err => errStep gs "ill-typed constructor"
-                | .ok gs2 cs => .mk (String.append T (String.append " : " (show .nil 0 ty)))
-                    (Globals.addInd gs2 T (.mk np I (mkD ds) (mkD dsI) cs .none (.const Tn .nil .nil val ty)))
+                    (Globals.addInd gs2 T (.mk np lv I (mkD ds) (mkD dsI) cs .none Tc))
   | _ => errStep gs "an inductive type needs a name"
 
--- (U1) a data type's universe lives in its description (`descr l` takes a number), so
--- level-polymorphic data types wait for U2 (symbolic levels in descriptions)
+-- (U2) symbolic levels in a data type's description: `inductive T.{u} (A : Type u) : Type u`
+def inductiveCmdS0 (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step :=
+  let us := univParamsOf stx0;
+  let lv := dataLevel stx0;
+  match lvlDeclared us lv with
+  | .false => errStep gs (String.append (String.append "the data type's universe must be a declared universe parameter, not " (lvlShow lv))
+      (match us with
+       | .nil => " (declare one: `inductive T.{u}`)"
+       | .cons _ _ => ""))
+  | .true => inductiveCmdL gs stx0 seal
 def inductiveCmdS (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step :=
-  match hasUnivParams (univParamsOf stx0) with
-  | .true => errStep gs "a universe-polymorphic data type needs symbolic levels in its description (U2)"
-  | .false => inductiveCmdS0 gs stx0 seal
+  inductiveCmdS0 gs stx0 seal
 
 def sndN : Nat → Tm → Tm
   | .zero, t => t
@@ -1486,6 +1531,21 @@ partial def unifyLevel (es : ES) (a b : Lvl) : Option ES :=
           | .some y => unifyLevel es x y
           | .none => .none
         | .none => .none
+-- (U2) unify two level lists (a constant's instantiation), left to right
+def unifyLvls : List Lvl → List Lvl → ES → Option ES
+  | .nil, .nil, es => .some es
+  | .cons a as, .cons b bs, es => match unifyLevel es a b with
+    | .some es' => unifyLvls as bs es'
+    | .none => .none
+  | _, _, _ => .none
+-- (U2) two stuck heads, solving the level metavariables of constants
+def unifyHead (es : ES) (c : TCtx) : Head → Head → Option ES
+  | .hconst n _ ls _ _, .hconst n' _ ls' _ _ => match kStrEq n n' with
+    | .true => unifyLvls ls ls' es
+    | .false => .none
+  | a, b => match convHead c a b with
+    | .true => .some es
+    | .false => .none
 -- `l + n`
 def addLvl : Lvl → Nat → Lvl
   | l, .zero => l
@@ -1723,13 +1783,13 @@ def unify (es : ES) (cx : Cx) (a b : Val) : Option ES :=
     | .none => unifyW es cx a' b'
 def unifyW (es : ES) (cx : Cx) (a b : Val) : Option ES := match a with
   | .vglued h sp va => match b with
-    | .vglued h' sp' vb => match convHead (Cx.c cx) h h' with
-      | .true => match unifySpine es cx sp sp' with
+    | .vglued h' sp' vb => match unifyHead es (Cx.c cx) h h' with
+      | .some es0 => match unifySpine es0 cx sp sp' with
         | .some es' => .some es'
-        | .none => unifyS es cx (whnf a) (whnf b)
+        | .none => unifyS es0 cx (whnf a) (whnf b)
       -- different definitions: unfold one step while one side unfolds to another
       -- definition (`Syntax` is `SyntaxF .true`: stage 19d)
-      | .false => match va () with
+      | .none => match va () with
         | .vglued _ _ _ => unifyW es cx (va ()) b
         | _ => match vb () with
           | .vglued _ _ _ => unifyW es cx a (vb ())
@@ -2422,7 +2482,7 @@ def explicitUpTo : List BKind → Nat → Nat
 -- what a match needs: the function's name, parameters and structural position, the
 -- result type `R` (over the `n` parameters), the motive's universe `v`
 inductive MatchCtx where
-  | mk (f : String) (params : List String) (p n v : Nat) (R RI : Tm) (pts ptsI : Tms) (mask : List BKind)
+  | mk (f : String) (params : List String) (p n : Nat) (v : Lvl) (R RI : Tm) (pts ptsI : Tms) (mask : List BKind)
 mutual
 -- replace the recursive calls `f …` by hypotheses
 def rewriteRec (mc : MatchCtx) (binds : List Bind) (ihs : List IHName) (stx : Syntax) : Syntax :=
@@ -2449,12 +2509,12 @@ def rewriteArgs (mc : MatchCtx) (binds : List Bind) (ihs : List IHName) : Syntax
   | .cons s rest => .cons (rewriteRec mc binds ihs s) (rewriteArgs mc binds ihs rest)
 end
 
--- a type's head constant and arguments
+-- a type's head constant, its level instantiation (U2) and arguments
 inductive TyHead where
-  | mk (name : String) (args : Tms)
+  | mk (name : String) (levels : List Lvl) (args : Tms)
   | none
 def headOf : Tm → Tms → TyHead
-  | .const n _ _ _ _, acc => .mk n acc
+  | .const n _ ls _ _, acc => .mk n ls acc
   | .app f a, acc => headOf f (.tcons a acc)
   | _, _ => .none
 def headTm : Tm → Tm
@@ -2629,8 +2689,8 @@ def ihLetsB (gs : Globals) (MB0 MB : Tm) (md d0 F np L : Nat) (args : Tms) (I id
     -- the field's index, at depth `D` (a function field's under its binder `h`, a member's
     -- tag)
     let jD : Tm := match headOf fty .tnil with
-      | .mk nm as => match Globals.ind gs nm with
-        | .some (.mk _ _ _ _ _ (.some f) _) => f
+      | .mk nm _ as => match Globals.ind gs nm with
+        | .some (.mk _ _ _ _ _ _ (.some f) _) => f
         | _ => lastTm (shiftTms (D - l) as)
       | .none => .star;
     let ID := nfAt D (tApps (tLams np I) (shiftTms (D - L) args));
@@ -2795,7 +2855,7 @@ def litClauses (l : Syntax) (k : Nat) : List Clause → List Clause
 def colsInsert (k : Nat) (c : Col) (cols : List Col) : List Col := List.append (takeL k cols) (.cons c (dropL k cols))
 -- the type `T` of `T.beq` for a column's type (at depth `d`)
 partial def beqHead (gs : Globals) (d : Nat) (ty : Tm) : Option String := match headOf ty .tnil with
-  | .mk T args => match Scope.lookup (Globals.scope gs) (String.append T ".beq") with
+  | .mk T _ args => match Scope.lookup (Globals.scope gs) (String.append T ".beq") with
     | .some _ => .some T
     | .none => match Globals.ind gs T with
       | .some _ => .none
@@ -2837,7 +2897,7 @@ def cfieldNames : List CField → List String
   | .nil => .nil
   | .cons (.mk x _ _ _) rest => .cons x (cfieldNames rest)
 def structFieldsOf (info : IndInfo) : Option (List String) := match info with
-  | .mk _ _ _ _ ctors _ _ => match ctors with
+  | .mk _ _ _ _ _ ctors _ _ => match ctors with
     | .cons (.mk _ fs _ _ _) _ => .some (cfieldNames fs)
     | .nil => .some .nil
 -- a structure's fields; `T` is a source name, or a term's kernel name (then its module
@@ -3240,7 +3300,7 @@ def identHead (gs : Globals) (es : ES) (cx : Cx) (n : String) : HE :=
       | e => e
     | .none => match strEq n "Unit" with
       -- (built in, like `Type`, `True` and `False`: the kernel's `unit`, `ptrue`, `pfalse`)
-      | .true => .ok (.unit 0) (.vsort (.lnum 1)) es .nil
+      | .true => .ok (.unit (ln 1)) (.vsort (.lnum 1)) es .nil
       | .false => match strEq n "True" with
         | .true => .ok .ptrue (.vsort (.lnum 0)) es .nil
         | .false => match strEq n "False" with
@@ -3417,7 +3477,7 @@ def inferT1 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
     | .false => match strEq k "term.str" with
     | .true => stringLit gs es cx (strValue s)
     | .false => match strEq k "term.unitVal" with
-    | .true => .ok .star (.vunit 1) es
+    | .true => .ok .star (.vunit (ln 1)) es
     | .false => match strEq k "term.type" with
     | .true => match levelArg es s (.lnum 0) with
       | .err m => .err m
@@ -3574,7 +3634,7 @@ def forallNames (gs : Globals) (es : ES) (cx : Cx) (q : Q) (xs : List String) (a
     | e => e
 -- `(a, b, c)` without an expected type: `A × (B × C)`
 def inferTuple (gs : Globals) (es : ES) (cx : Cx) (items : List Syntax) : TE := match items with
-  | .nil => .ok .star (.vunit 1) es
+  | .nil => .ok .star (.vunit (ln 1)) es
   | .cons a .nil => inferT gs es cx a
   | .cons a rest => match inferT gs es cx a with
     | .ok ta A es1 => match inferTuple gs es1 cx rest with
@@ -3811,9 +3871,7 @@ def termMatch (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
     let d := Cx.lvl cx';
     match sortOf (Cx.c cx') ty with
     | .none => .err "the type of a match must be a type"
-    | .some l => match lvlClosed l with
-      | .none => .err "the universe of a match's type must be a number"
-      | .some v =>
+    | .some v =>
         let R := quote d ty;
         let mc := MatchCtx.mk "" .nil 0 d v R R .tnil .tnil .nil;
         match compileM gs mc es1 cx' ty cols .false .nil (clausesOf (kids (kid s 3))) with
@@ -3914,7 +3972,7 @@ def colIndex (l : Nat) : List Col → Nat → Nat → Nat
 -- a type whose head is a definition, unfolded (at depth `d`) until it is an inductive
 -- type's (stage 19d)
 def unfoldTy (gs : Globals) (d : Nat) (ty : Tm) : Tm := match headOf ty .tnil with
-  | .mk T args => match Globals.ind gs T with
+  | .mk T _ args => match Globals.ind gs T with
     | .some _ => ty
     | .none => match headTm ty with
       | .const _ _ _ v _ => unfoldTy gs d (nfAt d (tApps v args))
@@ -3938,7 +3996,7 @@ def splitCol (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val)
   let lit := Bool.or (isLitPat p0) (isPlusPat p0);
   match nthCol cols k with
   | .mk L ty0 _ _ => match headOf (unfoldTy gs L ty0) .tnil with
-    | .mk T _ => match Bool.and lit (Bool.not (strEq T "Nat")) with
+    | .mk T _ _ => match Bool.and lit (Bool.not (strEq T "Nat")) with
       | .true => litTest gs mc es cx expected cols top ihLvls cls k
       | .false => match Globals.ind gs T with
         | .some _ => match litSplitErr T k cls with
@@ -4001,10 +4059,19 @@ def splitCtors (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Va
     let ty := unfoldTy gs L ty0;
     match headOf ty .tnil with
     | .none => .err "a pattern on a value that isn't of an inductive type"
-    | .mk T args => match Globals.ind gs T with
+    | .mk T lvs args => match Globals.ind gs T with
       | .none => .err (String.append "not an inductive type: " T)
-      | .some (.mk np I D _ ctors fixed fam) => match mc with
+      | .some (.mk np lv0 I0 D0 _ ctors fixed fam0) => match mc with
         | .mk _ params p n v R _ pts _ _ =>
+          -- (U2) the family at the scrutinee's level instantiation: its description and
+          -- index type have the declaration's level parameters substituted
+          let lps : List String := match Scope.lookup (Globals.scope gs) T with
+            | .some j => globalParams gs j
+            | .none => .nil;
+          let I := substIfAny lps lvs I0;
+          let D := substIfAny lps lvs D0;
+          let lv := substLvl lps lvs lv0;
+          let fam := substIfAny lps lvs fam0;
           -- the parameters and the index (`tt` without one) of the scrutinee's type
           let pargs := tmsTake np args;
           let idx := match fixed with
@@ -4019,10 +4086,12 @@ def splitCtors (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Va
           -- the description and index type with the parameters, at depth `dd`
           let DAt := fun (dd : Nat) => nfAt dd (tApps (tLams np D) (shiftTms (dd - L) pargs));
           let IAt := fun (dd : Nat) => nfAt dd (tApps (tLams np I) (shiftTms (dd - L) pargs));
-          let XAt := fun (dd : Nat) => (.lam (.mu 0 (IAt (dd + 1)) (DAt (dd + 1)) (.var 0)) : Tm);
+          let XAt := fun (dd : Nat) => (.lam (.mu lv (IAt (dd + 1)) (DAt (dd + 1)) (.var 0)) : Tm);
           -- the family at a size `s` (a term at depth `dd`)
-          let XsAt := fun (dd : Nat) (s : Tm) => (.lam (.mus 0 (IAt (dd + 1)) (DAt (dd + 1)) (.var 0) (shiftTm 1 0 s)) : Tm);
-          let DtAt := fun (dd t : Nat) => nfAt dd (.app (descFn (DAt dd)) (.var t));
+          let XsAt := fun (dd : Nat) (s : Tm) => (.lam (.mus lv (IAt (dd + 1)) (DAt (dd + 1)) (.var 0) (shiftTm 1 0 s)) : Tm);
+          let DtAt := fun (dd t : Nat) => nfAt dd (.app (descFn (DAt dd)) (match tagLifted lv with
+            | .true => .up (.var t)
+            | .false => .var t));
           -- the motive's body (at depth `d + 2`): `R`, or at the structural split
           -- `(q : …) → R` over the parameters after the structural one
           let G := match top with
@@ -4054,11 +4123,13 @@ def splitCtors (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Va
           -- (in case analysis the payload is at `μ^j`, and the motive is applied to
           -- `y := con (tag, rest) : μ^{↑j} D i`, below `μ D i`)
           let MT : Tm := match top with
-            | .true => piH (nfAt (d + 4) (interpApp 0 (IAt (d + 4)) (DtAt (d + 4) 0) (XAt (d + 4)) (.var 3)))
-                (piH (nfAt (d + 5) (tApps (allTm 0 v) (args6 (IAt (d + 5)) (DtAt (d + 5) 1) (XAt (d + 5)) (PAt (d + 5)) (.var 4) (.var 0))))
+            | .true => piH (nfAt (d + 4) (interpApp lv (IAt (d + 4)) (DtAt (d + 4) 0) (XAt (d + 4)) (.var 3)))
+                (piH (nfAt (d + 5) (tApps (allTm lv v) (args6 (IAt (d + 5)) (DtAt (d + 5) 1) (XAt (d + 5)) (PAt (d + 5)) (.var 4) (.var 0))))
                   (shiftTm 4 0 MB))
-            | .false => piH (nfAt (e + 4) (interpApp 0 (IAt (e + 4)) (DtAt (e + 4) 0) (XsAt (e + 4) (.var 4)) (.var 3)))
-                (piH (.unit 0) (.letE (.mus 0 (IAt (e + 6)) (DAt (e + 6)) (.var 5) (.szSuc (.var 6))) (.con (.pair (.var 2) (.var 1)))
+            | .false => piH (nfAt (e + 4) (interpApp lv (IAt (e + 4)) (DtAt (e + 4) 0) (XsAt (e + 4) (.var 4)) (.var 3)))
+                (piH (.unit (ln 1)) (.letE (.mus lv (IAt (e + 6)) (DAt (e + 6)) (.var 5) (.szSuc (.var 6))) (.con (.pair (match tagLifted lv with
+                  | .true => .up (.var 2)
+                  | .false => .var 2) (.var 1)))
                   (nfAt (e + 7) (.app (.app (PAt (e + 7)) (.var 6)) (.var 0)))));
           -- the method's binders (`j`), `i`, `xs`, `ih`, in the context
           let env := TCtx.env (Cx.c cx);
@@ -4069,20 +4140,23 @@ def splitCtors (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Va
           let Xm := match top with
             | .true => XAt (e + 1)
             | .false => XsAt (e + 1) (.var 1);
-          let cx2 := Cx.bind cx1 "xs✝" (eval (TCtx.env (Cx.c cx1)) (interpApp 0 (IAt (e + 1)) (DAt (e + 1)) Xm (.var 0)));
+          let cx2 := Cx.bind cx1 "xs✝" (eval (TCtx.env (Cx.c cx1)) (interpApp lv (IAt (e + 1)) (DAt (e + 1)) Xm (.var 0)));
           let cx3 := match top with
             | .true => Cx.bind cx2 "ih✝" (eval (TCtx.env (Cx.c cx2))
-                (tApps (allTm 0 v) (args6 (IAt (d + 2)) (DAt (d + 2)) (XAt (d + 2)) (PAt (d + 2)) (.var 1) (.var 0))))
-            | .false => Cx.define cx2 "ih✝" .vtt (.vunit 1);
+                (tApps (allTm lv v) (args6 (IAt (d + 2)) (DAt (d + 2)) (XAt (d + 2)) (PAt (d + 2)) (.var 1) (.var 0))))
+            | .false => Cx.define cx2 "ih✝" .vtt (.vunit (ln 1));
           -- the motive's body as a value (it doesn't use `i` and `y`)
           let MBv := eval (.cons .vtt (.cons .vtt env)) MB;
-          match branches gs mc es cx3 expected cols top ihLvls cls k (.mk L ty tyI .qw) T np pargs nidxE I idx fam modeB MB0 MB MBv MT G b (lenL ctors) 0 ctors with
+          match branches gs mc es cx3 expected cols top ihLvls cls k (.mk L ty tyI .qw) T np lv pargs nidxE I idx fam modeB MB0 MB MBv MT G b (lenL ctors) 0 ctors with
           | .err m => .err m
           | .ok bs es' =>
-            let convoy : Tm := .app (.app (.ecase MT (.fst (.var 1)) bs) (.snd (.var 1))) (.var 0);
+            let convoyTag : Tm := match tagLifted lv with
+              | .true => .down (.fst (.var 1))
+              | .false => .fst (.var 1);
+            let convoy : Tm := .app (.app (.ecase MT convoyTag bs) (.snd (.var 1))) (.var 0);
             let indT : Tm := match top with
-              | .true => .ind 0 (IAt d) (DAt d) v (PAt d) (.lam (.lam (.lam convoy))) (shiftTm (d - L) 0 idx) (.var (d - 1 - L))
-              | .false => .scase 0 .qw (IAt d) (DAt d) v (PAt d) (.lam (.lam (.lam (.letE (.unit 0) .star convoy)))) .szInf
+              | .true => .ind lv (IAt d) (DAt d) v (PAt d) (.lam (.lam (.lam convoy))) (shiftTm (d - L) 0 idx) (.var (d - 1 - L))
+              | .false => .scase lv .qw (IAt d) (DAt d) v (PAt d) (.lam (.lam (.lam (.letE (.unit (ln 1)) .star convoy)))) .szInf
                   (shiftTm (d - L) 0 idx) (.var (d - 1 - L));
             let withE : Tm := match modeB with
               | .true => .app indT (.eqRefl (IAt d) (shiftTm (d - L) 0 idx))
@@ -4099,7 +4173,7 @@ def otherMember (idx res : Tm) : Bool := match idx with
 -- one branch per constructor, in the context of the method's binders (`cx3`, at depth
 -- `d + 3`): `fun rest ih => let fields; (let hyps; let cur✝; fun q =>) …`
 def branches (gs : Globals) (mc : MatchCtx) (es : ES) (cx3 : Cx) (expected : Val) (cols : List Col)
-    (top : Bool) (ihLvls : List Nat) (cls : List Clause) (k : Nat) (col : Col) (T : String) (np : Nat)
+    (top : Bool) (ihLvls : List Nat) (cls : List Clause) (k : Nat) (col : Col) (T : String) (np : Nat) (lv : Lvl)
     (args : Tms) (nidx : Nat) (I idx fam : Tm) (modeB : Bool) (MB0 MB : Tm) (MBv : Val) (MT : Tm) (G b : Nat) (nc i : Nat) : List Ctor → BE
   | .nil => .ok .tnil es
   | .cons (.mk c fs res qs impl) rest =>
@@ -4107,7 +4181,7 @@ def branches (gs : Globals) (mc : MatchCtx) (es : ES) (cx3 : Cx) (expected : Val
     let d := Cx.lvl cx3 - 3;
     let d0 := d + 5;
     -- `rest` and `ih`: the convoy's motive at this constructor's tag
-    let bt := whnf (eval (.cons (.vtag nc i) (TCtx.env (Cx.c cx3))) MT);
+    let bt := whnf (eval (.cons (tagValTm lv nc i) (TCtx.env (Cx.c cx3))) MT);
     let cx5 := match bt with
       | .vpi _ _ _ restTy e1 c1 =>
         let cx4 := Cx.bind cx3 "rest✝" restTy;
@@ -4115,7 +4189,7 @@ def branches (gs : Globals) (mc : MatchCtx) (es : ES) (cx3 : Cx) (expected : Val
         | .vpi _ _ _ ihTy _ _ => Cx.bind cx4 "ihs✝" ihTy
         | _ => Cx.bind cx4 "ihs✝" .vtt
       | _ => Cx.bind (Cx.bind cx3 "rest✝" .vtt) "ihs✝" .vtt;
-    let next := fun (es1 : ES) => branches gs mc es1 cx3 expected cols top ihLvls cls k col T np args nidx I idx fam modeB MB0 MB MBv MT G b nc (i + 1) rest;
+    let next := fun (es1 : ES) => branches gs mc es1 cx3 expected cols top ihLvls cls k col T np lv args nidx I idx fam modeB MB0 MB MBv MT G b nc (i + 1) rest;
     -- the motive's body at the method's `i` (level `d`; the motive itself is over the
     -- context before the method's binders, and `j`)
     let MBi := eval (.cons .vtt (.cons (fresh d) (dropEnv (3 + b) (TCtx.env (Cx.c cx3))))) MB;
@@ -4151,7 +4225,7 @@ def branches (gs : Globals) (mc : MatchCtx) (es : ES) (cx3 : Cx) (expected : Val
                 | .mk L' _ _ _ => tApps fam (tmsAppend (shiftTms (base - L') args) (match nidx with
                   | .zero => .tnil
                   | .succ _ => .tcons (.var (base - 1 - d)) .tnil));
-              let curVal : Tm := .con (.pair (.tag nc i) (.var (F + Rc + 1)));
+              let curVal : Tm := .con (.pair (tagTm lv nc i) (.var (F + Rc + 1)));
               let env7 := TCtx.env (Cx.c cx7);
               let top1 := match top with
                 | .true => 1
@@ -4386,9 +4460,7 @@ def matchDefCmd (gs : Globals) (stx : Syntax) : Step := match kid stx 1 with
             match peelCtx n empty (eval .nil tyT) with
               | .mk c Rv => match sortOf c Rv with
                 | .none => errStep gs "the result is not a type"
-                | .some l => match lvlClosed l with
-                  | .none => errStep gs "the result's universe must be a number"
-                  | .some v =>
+                | .some v =>
                     let cls := clausesOf (kids (kid body 3));
                     -- the structural parameter: the leftmost one a clause splits
                     let p := match structuralCol cls (lenL cols) 0 with
@@ -4586,7 +4658,7 @@ def addMCtors (members ps : List String) (pts : Tms) (m k : Nat) : Globals → N
           | e => e
 def addMemberInds (np : Nat) (I D DI : Tm) (cs : List Ctor) (fam : Tm) (m : Nat) : Globals → Nat → List String → Globals
   | gs, _, .nil => gs
-  | gs, j, .cons n rest => addMemberInds np I D DI cs fam m (Globals.addInd gs n (.mk np I D DI cs (.some (.tag m j)) fam)) (j + 1) rest
+  | gs, j, .cons n rest => addMemberInds np I D DI cs fam m (Globals.addInd gs n (.mk np (.lnum 0) I D DI cs (.some (.tag m j)) fam)) (j + 1) rest
 def memberLines (ty : String) : List String → String
   | .nil => ""
   | .cons n rest => match rest with
@@ -4609,7 +4681,7 @@ def mutualInductiveCmd0 (gs : Globals) (defs : List Syntax) : Step := match mutu
   let ps := fieldNames params;
   let np := List.length ps;
   let I : Tm := .enum m;
-  let mkD := fun (ds : Tms) => (.darg (.qlit .qw) (.enum k) (.lam (.ecase (.descr 0 I) (.var 0) ds)) : Tm);
+  let mkD := fun (ds : Tms) => (.darg (.qlit .qw) (.enum k) (.lam (.ecase (.descr (.lnum 0) I) (.var 0) ds)) : Tm);
   match elabTele gs (Globals.scope gs) 0 params with
   | .err e => errStep gs e
   | .ok pts => match mdescs .false gs members ps m mcs with
@@ -4618,7 +4690,7 @@ def mutualInductiveCmd0 (gs : Globals) (defs : List Syntax) : Step := match mutu
       | .err e => errStep gs e
       | .ok dsI =>
         -- `fun ps i => μ D i` (the description moved under `i`)
-        let body := fun (D : Tm) => tLams np (.lam (.mu 0 I (nfAt (np + 1) (tApps (tLams np D) (pvars np (np + 1)))) (.var 0)));
+        let body := fun (D : Tm) => tLams np (.lam (.mu (.lnum 0) I (nfAt (np + 1) (tApps (tLams np D) (pvars np (np + 1)))) (.var 0)));
         let fty := sortTy (piTele pts (piH I (.univ 0)));
         let fval := markClosed (body (mkD ds)) fty;
         match check empty fval (eval .nil fty) with
@@ -5001,7 +5073,7 @@ partial def hypWit (c : TCtx) (ty : Val) (tys : Env) (i : Nat) : Option Tm := ma
 def sortWit (l : Lvl) : Option Tm := match l with
   | .lnum n => match n with
     | .zero => .some .ptrue
-    | .succ m => .some (.unit m)
+    | .succ _ => .some (.unit l)
   | _ => .none
 -- the witness search's view of the globals: all of them, and by the head of their
 -- conclusion (built once per partial definition, so the search doesn't scan every
@@ -5574,18 +5646,18 @@ def fieldIdents : List Syntax → List Syntax
 def erasedField (f : Syntax) : Bool := match writtenQ (kid f 1) with
   | .is q => qEq q .qz
   | _ => .false
-def projections (T : String) (bs : List Syntax) (sTy pat : Syntax) : List Syntax → List Syntax
+def projections (T : String) (us : Syntax) (bs : List Syntax) (sTy pat : Syntax) : List Syntax → List Syntax
   | .nil => .nil
   | .cons f rest => match erasedField f with
-  | .true => projections T bs sTy pat rest
+  | .true => projections T us bs sTy pat rest
   | .false =>
     let alt := mkNode "match.alt" (.cons (.atom "|") (.cons (mkNull (one pat)) (.cons (.atom "=>") (one (identStx (fieldName f))))));
     let body := mkNode "term.match" (.cons (.atom "match") (.cons (mkNull (one (identStx "s✝")))
       (.cons (.atom "with") (one (mkNull (one alt))))));
     let d := mkNode "command.def" (.cons (.atom "def") (.cons (.ident (String.append (String.append T ".") (fieldName f)))
-      (.cons (mkNull .nil) (.cons (mkNull (List.append (implicitBinders bs) (one (binderStx "(" ")" "s✝" sTy))))
+      (.cons us (.cons (mkNull (List.append (implicitBinders bs) (one (binderStx "(" ")" "s✝" sTy))))
         (.cons (mkNull (.cons (.atom ":") (one (kid f 4)))) (.cons (.atom ":=") (one body)))))));
-    .cons d (projections T bs sTy pat rest)
+    .cons d (projections T us bs sTy pat rest)
 def strIdents : List String → List Syntax
   | .nil => .nil
   | .cons x rest => .cons (identStx x) (strIdents rest)
@@ -5601,7 +5673,7 @@ def structCmd (gs : Globals) (stx : Syntax) : Step :=
   let ind := mkNode "command.inductive" (.cons (.atom "inductive") (.cons (kid stx 1) (.cons (kid stx 2) (.cons (kid stx 3)
     (.cons (kid stx 4) (.cons (.atom "where") (.cons (mkNull (one ctor)) (one (.atom "structure")))))))));
   let pat := mkNode "term.app" (.cons (mkNode "term.dotIdent" (.cons (.atom ".") (one (.ident "mk")))) (one (mkNull (fieldIdents fs))));
-  match defsSteps gs (.cons ind (projections T bs sTy pat fs)) with
+  match defsSteps gs (.cons ind (projections T (kid stx 2) bs sTy pat fs)) with
   | .mk out gs' => .mk out (Globals.markStruct gs' T)
 
 -- (A10) Type classes. `class C (ps) where f₁ : A₁ …` is the structure `C (ps) where
@@ -5615,8 +5687,9 @@ def structCmd (gs : Globals) (stx : Syntax) : Step :=
 -- that problem at each use of `C e₁ e₂ m`); the methods' parameters are implicit.
 --
 -- Not supported (errors): private fields, `outParam` (no rewrite of an output
--- parameter's type), `attribute [default_instance]`/`[binop]`, universe-polymorphic
--- classes, and `deriving` on a class.
+-- parameter's type), `attribute [default_instance]`/`[binop]`, and `deriving` on a
+-- class. A class at universe parameters (`class Repr.{u} (A : Type u)`) works: its
+-- methods carry the class's universe parameters (U2).
 def classFieldNames : List Syntax → List String
   | .nil => .nil
   | .cons f rest => .cons (fieldName f) (classFieldNames rest)
@@ -5627,18 +5700,18 @@ def classMethBinders : List Syntax → List Syntax
       | .true => List.cons b .nil
       | .false => implicitBinders (List.cons b .nil)) (classMethBinders rest)
 -- the projections with an instance `self` (a class's methods)
-def instProjections (T : String) (bs : List Syntax) (sTy pat : Syntax) : List Syntax → List Syntax
+def instProjections (T : String) (us : Syntax) (bs : List Syntax) (sTy pat : Syntax) : List Syntax → List Syntax
   | .nil => .nil
   | .cons f rest => match erasedField f with
-  | .true => instProjections T bs sTy pat rest
+  | .true => instProjections T us bs sTy pat rest
   | .false =>
     let alt := mkNode "match.alt" (.cons (.atom "|") (.cons (mkNull (one pat)) (.cons (.atom "=>") (one (identStx (fieldName f))))));
     let body := mkNode "term.match" (.cons (.atom "match") (.cons (mkNull (one (identStx "self✝")))
       (.cons (.atom "with") (one (mkNull (one alt))))));
     let d := mkNode "command.def" (.cons (.atom "def") (.cons (.ident (String.append (String.append T ".") (fieldName f)))
-      (.cons (mkNull .nil) (.cons (mkNull (List.append (classMethBinders bs) (one (binderStx "[" "]" "self✝" sTy))))
+      (.cons us (.cons (mkNull (List.append (classMethBinders bs) (one (binderStx "[" "]" "self✝" sTy))))
         (.cons (mkNull (.cons (.atom ":") (one (kid f 4)))) (.cons (.atom ":=") (one body)))))));
-    .cons d (instProjections T bs sTy pat rest)
+    .cons d (instProjections T us bs sTy pat rest)
 -- (an optional wraps its item in a `null` node: `["private"]` is `null [atom "private"]`)
 partial def hasPrivate (s : Syntax) : Bool := match s with
   | .atom a => strEq a "private"
@@ -5667,7 +5740,7 @@ def classCmd (gs : Globals) (stx : Syntax) : Step :=
     let ind := mkNode "command.inductive" (.cons (.atom "inductive") (.cons (kid stx 1) (.cons (kid stx 2) (.cons (kid stx 3)
       (.cons (kid stx 4) (.cons (.atom "where") (.cons (mkNull (one ctor)) (one (.atom "structure")))))))));
     let pat := mkNode "term.app" (.cons (mkNode "term.dotIdent" (.cons (.atom ".") (one (.ident "mk")))) (one (mkNull (fieldIdents fs))));
-    match defsSteps gs (.cons ind (instProjections T bs sTy pat fs)) with
+    match defsSteps gs (.cons ind (instProjections T (kid stx 2) bs sTy pat fs)) with
     -- (the class type former keeps its binders' kinds: an instance parameter of the
     -- class is a class problem at every use, `MyCommute e₁ e₂ m`)
     | .mk out gs' => .mk out (Globals.addClass (Globals.setMask (Globals.markStruct gs' T) T (paramMask bs))
@@ -5923,7 +5996,7 @@ def namedConst (gs : Globals) (n : String) : Tm :=
   | .none => .const n .nil .nil (.axiomC n (.univ 0)) (.univ 0)
 def kindTy2 (gs : Globals) (k n : String) : Tm :=
   if strEq k "b" then namedConst gs "Bool"
-  else if strEq k "v" then .unit 0
+  else if strEq k "v" then .unit (ln 1)
   else namedConst gs n
 
 def kindTy (gs : Globals) (k n : String) : Tm :=

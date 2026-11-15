@@ -1066,7 +1066,7 @@ def selfHostGroup : Group where
           "  IO.println (typeOf (.app idTm cnat));\n  IO.println (typeOf (.app (.app add two) two));\n" ++
           "  IO.println (normalize (.app (.app add two) two));\n  IO.println (typeOf (.app (.univ 0) (.univ 0)));\n" ++
           -- a variable out of scope is an error (it was `Sort 0`, as a type and as a value: `Prop : Prop`)
-          "  IO.println (typeOf (.var 0));\n  IO.println (typeOf (.ann (.lam (.var 3)) (piH (.unit 0) .prop)))\n"
+          "  IO.println (typeOf (.var 0));\n  IO.println (typeOf (.ann (.lam (.var 3)) (piH (.unit (ln 1)) .prop)))\n"
         ioRun (kernel ++ "\n" ++ defs ++ main) ("(x0 : U0) → (x1 : x0) → x0\n(x0 : U0) → (x1 : x0) → x0\n" ++
           "error: type mismatch: expected U0, got U1\n(x0 : U0) → (x1 : (x1 : x0) → x0) → (x2 : x0) → x0\n" ++
           "λx0. λx1. λx2. (x1 (x1 (x1 (x1 x2))))\nerror: not a function: its type is U1\n" ++
@@ -1117,7 +1117,7 @@ def selfHostGroup : Group where
         let src ← Selfhost.checkerFiles.mapM (fun (f : String) => IO.FS.readFile f)
         let body := "\n".intercalate (src.map fun f => "\n".intercalate ((f.splitOn "\n").filter (!·.startsWith "import")))
         let prog := "import IO\nimport Std\n" ++ body ++ "\n" ++
-          "def gTy (X : Tm) : Tm := piH X (.unit 0)\n" ++
+          "def gTy (X : Tm) : Tm := piH X (.unit (ln 1))\n" ++
           "def eqn (s : Bool) : Tm := match s with\n" ++
           "  | .true => .eqTy (sortTy (gTy .ptrue)) (sortTy (gTy (piH .ptrue .ptrue)))\n" ++
           "  | .false => .eqTy (gTy .ptrue) (gTy (piH .ptrue .ptrue))\n" ++
@@ -1356,10 +1356,10 @@ def selfHostGroup : Group where
         -- (mandatory sorts: the sorts pass fills the `Π`s' holes, as the frontend runs it)
         let verdict := "def piW (a b : Tm) : Tm := .pi .qw .lhole .lhole a b\n" ++
           "def verdict (t : Tm) : String := match infer empty (sortsInfer t) with\n  | .ok _ _ => \"ok\"\n  | .err _ => \"error\"\n"
-        let dq := "(.ann (.darg (.var 0) (.unit 0) (.lam (.dret .star))) (.descr 0 (.unit 0)))"
-        let p7a := s!"(.ann (.lam (.lam (.letq .qz (.eqTy (.unit 0) (.unit 0)) (.fst (.var 0)) .star))) (piW .qty (piW (.eq (.descr 0 (.unit 0)) {dq} {dq}) (.unit 0))))"
-        let p15b := "(.ann (.lam (.con (.pair .star (.pair .star .star)))) (piW (piW (.unit 0) .qty) (.mu 0 (.unit 0) " ++
-          "(.app (.ann (.lam (.darg (.var 0) (.unit 0) (.lam (.dret .star)))) (piW .qty (.descr 0 (.unit 0)))) (.app (.var 0) .star)) .star)))"
+        let dq := "(.ann (.darg (.var 0) (.unit (ln 1)) (.lam (.dret .star))) (.descr (ln 0) (.unit (ln 1))))"
+        let p7a := s!"(.ann (.lam (.lam (.letq .qz (.eqTy (.unit (ln 1)) (.unit (ln 1))) (.fst (.var 0)) .star))) (piW .qty (piW (.eq (.descr (ln 0) (.unit (ln 1))) {dq} {dq}) (.unit (ln 1)))))"
+        let p15b := "(.ann (.lam (.con (.pair .star (.pair .star .star)))) (piW (piW (.unit (ln 1)) .qty) (.mu (ln 0) (.unit (ln 1)) " ++
+          "(.app (.ann (.lam (.darg (.var 0) (.unit (ln 1)) (.lam (.dret .star)))) (piW .qty (.descr (ln 0) (.unit (ln 1))))) (.app (.var 0) .star)) .star)))"
         ioRun (kernel ++ "\n" ++ verdict ++ s!"def main : IO Unit := do\n  IO.println (verdict {p7a});\n  IO.println (verdict {p15b})\n")
           "ok\nerror\n" },
     { name := "the self-hosted frontend: constructor field quantities (0, 1, ω) and implicit fields, as in the Lean frontend (21x)", run := fun _ =>
@@ -1770,13 +1770,13 @@ def selfHostGroup : Group where
         let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
         let main := "def shape (v : Val) : String := match whnf v with\n  | .vne (.hcast _ _ _ _) .snil => \"stuck\"\n  | .vlam _ _ => \"lam\"\n  | .vpair _ _ => \"pair\"\n  | _ => \"other\"\n" ++
           "def okT (t : Tm) : String := match infer empty t with\n  | .ok _ _ => \"ok\"\n  | .err m => m\n" ++
-          "def FP : Val := eval .nil (.pi .qw (.lnum 1) (.lnum 0) (.unit 0) .ptrue)\n" ++
-          "def U : Val := eval .nil (.pi .qw (.lnum 1) (.lparam \"u\") (.unit 0) (.unit 0))\n" ++
-          "def G : Val := eval .nil (.pi .qw (.lnum 1) (.lnum 1) (.unit 0) (.unit 0))\n" ++
-          "def S : Val := eval .nil (.sigma .qw (.lnum 0) (.lparam \"u\") .ptrue (.unit 0))\n" ++
-          "def S1 : Val := eval .nil (.sigma .qw (.lnum 0) (.lnum 1) .ptrue (.unit 0))\n" ++
+          "def FP : Val := eval .nil (.pi .qw (.lnum 1) (.lnum 0) (.unit (ln 1)) .ptrue)\n" ++
+          "def U : Val := eval .nil (.pi .qw (.lnum 1) (.lparam \"u\") (.unit (ln 1)) (.unit (ln 1)))\n" ++
+          "def G : Val := eval .nil (.pi .qw (.lnum 1) (.lnum 1) (.unit (ln 1)) (.unit (ln 1)))\n" ++
+          "def S : Val := eval .nil (.sigma .qw (.lnum 0) (.lparam \"u\") .ptrue (.unit (ln 1)))\n" ++
+          "def S1 : Val := eval .nil (.sigma .qw (.lnum 0) (.lnum 1) .ptrue (.unit (ln 1)))\n" ++
           "def main : IO Unit := do\n" ++
-          "  IO.println (okT (.pi .qw .lhole .lhole (.unit 0) .ptrue));\n" ++
+          "  IO.println (okT (.pi .qw .lhole .lhole (.unit (ln 1)) .ptrue));\n" ++
           "  IO.println (shape (vCast FP FP (fresh 0) (fresh 1)));\n" ++
           "  IO.println (shape (vCast U U (fresh 0) (fresh 1)));\n" ++
           "  IO.println (shape (vCast S S (fresh 0) (.vpair .vtt .vtt)));\n" ++
@@ -2200,8 +2200,70 @@ def selfHostGroup : Group where
           ("def badEq {A : Type} (x y : A) : x = y := rfl\n", false),
           ("def badProp : Prop := Type\n", false),
           ("def badSort : Sort 1 := Type 1\n", false),
-          ("def badCast (e : False) (n : Nat) : Nat := cast e n\n", false)] }
-
+          ("def badCast (e : False) (n : Nat) : Nat := cast e n\n", false)] },
+    -- (U2) symbolic levels in an inductive description: the description's level is the
+    -- declaration's universe parameter (no closed numeral), which `Repr.{u}`/`Inhabited.{u}`
+    -- need (Q4 lifts the tag into the data type's universe)
+    { name := "U2: symbolic levels in inductive descriptions (U2/A15): a polymorphic data type, structure and classes", run := fun _ =>
+        selfhostCheckFile ("import Prelude\n" ++
+          "inductive Box.{u} (A : Type u) : Type u where\n  | mk (a : A)\n" ++
+          "structure Wrap.{u} (A : Type u) where\n  val : A\n" ++
+          "class Repr.{u} (A : Type u) where\n  repr : A → Nat\n" ++
+          "instance instReprNat : Repr Nat where\n  repr := fun n => n\n" ++
+          "class Inhabited.{u} (A : Type u) where\n  default : A\n" ++
+          "instance instInhabitedNat : Inhabited Nat where\n  default := 42\n" ++
+          "def unbox.{u} {A : Type u} (b : Box A) : A := match b with\n  | .mk a => a\n" ++
+          "def wget.{u} {A : Type u} (w : Wrap A) : A := w.val\n" ++
+          "def reprWrap.{u} {A : Type u} [Repr A] (w : Wrap A) : Nat := Repr.repr w.val\n" ++
+          "def defaultNat : Nat := Inhabited.default\n" ++
+          "def natBox : Box Nat := Box.mk 7\n" ++
+          "def w5 : Wrap Nat := Wrap.mk 5\n" ++
+          "#reduce Nat.beq (unbox natBox) 7\n" ++
+          "#reduce Nat.beq (wget w5) 5\n" ++
+          "#reduce Nat.beq (reprWrap w5) 5\n" ++
+          "#reduce Nat.beq defaultNat 42\n")
+          ("Box : (x0 : Sort((u)+1)) → Sort((u)+1)\n" ++
+           "Wrap : (x0 : Sort((u)+1)) → Sort((max(0, u))+1)\n" ++
+           "Wrap.val : (x0 :0 Sort((u)+1)) → (x1 : (Wrap.{u} x0)) → x0\n" ++
+           "Repr : (x0 : Sort((u)+1)) → Sort((max(0, u))+1)\n" ++
+           "Repr.repr : (x0 :0 Sort((u)+1)) → (x1 : (Repr.{u} x0)) → (x2 : x0) → Nat\n" ++
+           "instReprNat : (Repr.{0} Nat)\n" ++
+           "Inhabited : (x0 : Sort((u)+1)) → Sort((max(0, u))+1)\n" ++
+           "Inhabited.default : (x0 :0 Sort((u)+1)) → (x1 : (Inhabited.{u} x0)) → x0\n" ++
+           "instInhabitedNat : (Inhabited.{0} Nat)\n" ++
+           "unbox : (x0 :0 Sort((u)+1)) → (x1 : (Box.{u} x0)) → x0\n" ++
+           "wget : (x0 :0 Sort((u)+1)) → (x1 : (Wrap.{u} x0)) → x0\n" ++
+           "reprWrap : (x0 :0 Sort((u)+1)) → (x1 : (Repr.{u} x0)) → (x2 : (Wrap.{u} x0)) → Nat\n" ++
+           "defaultNat : Nat\n" ++
+           "natBox : (Box.{0} Nat)\n" ++
+           "w5 : (Wrap.{0} Nat)\n" ++
+           "con((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\n") },
+    { name := "U2: level mismatches in a symbolic data type are rejected, as in the Lean frontend (U2/A15)", run := fun _ =>
+        selfhostAgrees ("inductive Box.{u} (A : Type u) : Type u where\n  | mk (a : A)\n" ++
+          "structure Wrap.{u} (A : Type u) where\n  val : A\n" ++
+          "class Repr.{u} (A : Type u) where\n  repr : A → Nat\n" ++
+          "instance instReprNat : Repr Nat where\n  repr := fun n => n\n") [
+          ("def ok.{u} (A : Type u) (a : A) : Box.{u} A := Box.mk a\n", true),
+          ("def ok2.{u} (A : Type u) (w : Wrap A) : A := w.val\n", true),
+          ("def ok3 : Wrap Nat := Wrap.mk 3\n", true),
+          ("def ok4 : Nat := Repr.repr 5\n", true),
+          ("def bad1 : Box.{1} Nat := Box.mk 7\n", false),
+          ("def bad2.{u} : Wrap.{u} Nat := Wrap.mk 7\n", false),
+          ("def bad3.{u} : Box.{u} Nat := Box.mk 7\n", false),
+          ("def bad4.{u} (A : Type u) : Box A := Box.mk A\n", false),
+          -- an undeclared universe, and a field type above the data type's universe
+          ("inductive Bad : Type u where\n  | mk\n", false),
+          ("inductive Bad.{u} : Type u where\n  | mk (a : Type u)\n", false)] },
+    { name := "U2: an undeclared universe in a data type is a positioned error (U2/A15)", run := fun _ => do
+        match ← selfhostCompiler with
+        | .error e => if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+        | .ok exe =>
+          let dir ← IO.FS.createTempDir
+          IO.FS.writeFile (dir / "bad.wiz") "import Prelude\ninductive Bad : Type u where\n  | mk\n"
+          let out ← IO.Process.output { cmd := "timeout", args := #["120", exe.toString, "check", "bad.wiz"], cwd := dir }
+          checkEq (1 : UInt32) out.exitCode
+          checkEq "" out.stdout
+          checkEq ("bad.wiz:2:1: error: the data type's universe must be a declared universe parameter, not u (declare one: `inductive T.{u}`)\n") out.stderr }
   ]
 
 builtin_initialize registerGroup selfHostGroup

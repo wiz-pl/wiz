@@ -60,7 +60,17 @@ def inductiveGroup : Group where
           "def bad {q : Qty} {A : Type} (b : BoxQ q A) : A := match b with\n  | .mk a => a")
           "quantity" },
     { name := "unknown constructor via dot", run := fun _ =>
-        fails (indPrelude ++ "def bad : Nat := .three") "no constructor three" }
+        fails (indPrelude ++ "def bad : Nat := .three") "no constructor three" },
+    -- (U2) a data type at a symbolic universe: its description's level is the declared
+    -- universe parameter, not a closed numeral (`Repr.{u}` needs this)
+    { name := "U2: data at a symbolic universe, with a Sort u field", run := fun _ =>
+        ok (indPrelude ++ "inductive Box.{u} (A : Type u) : Type u where\n  | mk (a : A)\n" ++
+          "structure Wrap.{u} (A : Type u) where\n  val : A\n" ++
+          "structure UBox.{u} where\n  ty : Type u\n" ++
+          "def unbox.{u} {A : Type u} (b : Box A) : A := match b with\n  | .mk a => a\n" ++
+          "def wget.{u} {A : Type u} (w : Wrap A) : A := w.val\n" ++
+          "def n : Nat := unbox (Box.mk (Nat.succ (Nat.succ (Nat.succ Nat.zero))))\n" ++
+          "def m : Nat := wget (Wrap.mk (Nat.succ (Nat.succ (Nat.succ (Nat.succ Nat.zero)))))\n") }
   ]
 
 builtin_initialize registerGroup inductiveGroup
