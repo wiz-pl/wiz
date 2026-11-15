@@ -76,6 +76,89 @@ groups that did not opt in, for auditing one group's isolation — not for CI. O
 runner `--jobs 4` is the useful setting; more jobs only add memory pressure (a case that
 compiles C can peak at a few hundred MB).
 
+### Flaky tests and the quarantine
+
+A failure in a CI shard does not say whether it is deterministic. `scripts/flaky.py`
+reruns the selected cases (or the cases a failed run reported) several times, with a seed
+matrix, and classifies each as **always pass**, **deterministic fail**, **flaky**,
+**always skip**, or **incomplete** (the rerun budget ran out). It also runs a failing
+case alone and then after a shuffled predecessor, so a case that only fails in sequence
+is reported as order dependent. The default budget is 600 seconds; run it under
+`heavy --mem 2G` locally.
+
+```sh
+scripts/flaky.py '=rig' '=toolchain' --repeats 10 --report flaky.json
+scripts/flaky.py --from-log logs/*.log --report flaky.json
+scripts/flaky.py --from-timings timings.jsonl --repeats 5
+scripts/flaky.py --shard library --order-check suspects
+```
+
+`scripts/flaky.py --self-test` exercises the classifier on deliberate fixtures (an
+alternating case, a deterministic failure, a skip, and a case that fails only after a
+predecessor); it needs no test driver and no build. `scripts/flaky-ci.sh self-test`
+does the same for the CI gate: a synthetic failing log against the fixture driver,
+including a quarantined flake, a deterministic failure, an unreproduced failure, a
+skip, an expired entry, an exhausted budget, and the job verdict.
+
+The seed matrix (`--seeds 11,23,47` or `--seed-base`/`--repeats`) numbers the reruns,
+chooses the shuffled predecessor, and is exported as `FLAKY_SEED`. The order check runs
+a suspect alone and then after a predecessor from the same group by default
+(`--predecessor-scope selected|group|all`); a case that passes alone and fails in
+sequence is reported as order dependent and classified as flaky.
+
+The driver has no JUnit output: `--from-log` reads its stdout (the `test-log-*`
+artifacts) and `--from-timings` its `--timings` JSONL. `--from-junit` is accepted for a
+JUnit file produced elsewhere. A skip is not a pass; a timeout is recorded, never
+counted as a pass. A pass beside a timeout is flaky; a pass/skip mixture is incomplete.
+A case that failed in the source run and passes every rerun is **flaky** (the failure
+did not reproduce), never "always pass"; a source failure that now only skips stays a
+failure. Exit status: 0 clean (or only active quarantines), 1 a deterministic failure,
+an incomplete measurement, a source failure that only skips, or an expired quarantine,
+2 usage/input error, 3 an unquarantined flaky case, 4 the budget ran out.
+
+Known flakes live in `.github/flaky-quarantine.json` (data only; no code). Every entry
+has a `group`, a `case`, a fixed `expires` date (`YYYY-MM-DD`) and a `reason`; `owner`,
+`issue` and `index` are optional:
+
+```json
+{
+  "version": 1,
+  "entries": [
+    {"group": "rig", "case": "a case name", "index": 3,
+     "expires": "2026-12-01", "reason": "intermittent, see the linked issue",
+     "owner": "the area's maintainer", "issue": "#123"}
+  ]
+}
+```
+
+`scripts/flaky.py --check-quarantine` exits 1 from the expiry date on, so a flake cannot
+be parked indefinitely. An active entry makes the verdict of a flaky case exit 0; it
+never turns a deterministic failure into a pass. Add an entry in a PR with a reason and
+an expiry that leaves time to fix or replace the test; refresh the date only with a new
+reason, never by deleting the entry silently.
+
+**In CI.** The test shard's `tests` step has `continue-on-error: true`, so a failed
+shard reaches the classifier instead of ending the job. `scripts/flaky-ci.sh shard`
+runs `scripts/flaky.py --from-log logs/<shard>.log` with `--budget 600`, writes
+`logs/<shard>-flaky.json` (uploaded with the `test-log-*` artifact) and a Markdown
+section in the run summary, and exits 0 only when every failure is an active quarantine
+entry. The last step, `scripts/flaky-ci.sh verdict`, then makes the job green only when
+the tests passed or the classifier cleared the failure; a deterministic failure, an
+incomplete measurement, a source failure that only skips, or a flaky case with no active
+entry keeps the job red. `scripts/flaky-ci.sh expiry` runs in the `result` job with
+`if: always()` and fails it (naming the entry and its owner) from the entry's expiry
+date on. The `shard` mode prints the shard, case, class, seed(s) and quarantine expiry
+in one table.
+
+**What a failed shard costs.** The classifier reruns each failing case five times alone
+and a suspect five more times after a predecessor: about ten driver runs per failing
+case, plus two `--list-cases` calls. The whole classification is capped at 600 seconds
+of wall time per failed shard (exit 4 if it runs out, which keeps the shard red). It
+runs in the same job as the shard, so it uses that job's store paths, `~/.cache/wiz`
+(the helper passes it as `--cache`) and `.grail`; on the self-hosted runner this is the
+same incremental path, while a cold cache pays elaboration again for every rerun. A
+green shard pays nothing: the classifier only runs after `tests` fails.
+
 **Embedded files.** Lake does not track files a module reads with `include_str`, so each
 embedded file gets a library of its own whose `needs` names the file as an
 `input_file` (`lakefile.lean`): Lake mixes the file's content hash into that library's
@@ -271,6 +354,99 @@ Lean's `.olean`/`.ilean`/`.trace` files store absolute source paths; the Lean to
 `RUNPATH` stores where its libraries are installed; and a split build's parallel tasks
 report whichever error finishes first (artifacts are unaffected). The compiler binary,
 the generated C and the linked programs are compared byte for byte by the script.
+
+## Memory budget
+
+Time is not the only way a build dies. A run that peaks at 5 GiB is killed by a
+4 GiB memory cgroup whatever its wall time was, and the self-hosted checker once
+retained 10.7 GB after a `mutual`/`partial` inline-cache change (the `inlineTm` fix
+brought its self-check down to 413 MiB). `scripts/mem-bench.py` measures the peak
+resident set of a fixed corpus and gates it two ways:
+
+```sh
+python3 scripts/mem-bench.py                 # run, write bench/mem-bench.json
+python3 scripts/mem-bench.py --check         # exit 1 on a regression or a cap
+python3 scripts/mem-bench.py --update        # re-record bench/mem-baseline.json
+python3 scripts/mem-bench.py --self-test     # the thresholds on synthetic series
+python3 scripts/mem-bench.py --from-json bench/mem-bench.json --check  # re-check a saved run
+```
+
+| invocation | what it measures | cap |
+|---|---|---:|
+| `check-prelude` | `wiz check --no-cache lib/Prelude.wiz` | 1 GiB |
+| `check-std` | `wiz check --no-cache lib/Std.wiz` | 1 GiB |
+| `check-text` | `wiz check --no-cache lib/Text.wiz` | 1 GiB |
+| `check-json` | `wiz check --no-cache lib/Json.wiz` | 1 GiB |
+| `check-example-hdl` | `wiz check --no-cache examples/hdl-temporal.wiz` (a large temporal-properties example) | 2 GiB |
+| `build-stdlib-bench` | `wiz build --no-cache bench/stdlib-bench.wiz` (elaborate, lower, C, `cc`) | 2 GiB |
+| `selfhost-checker` | the self-hosted checker checking the whole frontend | 1 GiB |
+
+The checks are cold (`--no-cache`): a warm content-addressed cache hides the
+elaboration a CI runner does on every build. Peak RSS is sampled every 20 ms as the
+sum of the process tree's RSS, plus the root's `VmHWM` on every sample, because a
+build fans out into `cc`, `as` and `ld`; `ru_maxrss` of the root is the floor for a
+process that starts and exits inside one interval. A sampling peak can miss a spike
+shorter than the interval: treat a number as ±5 % (the same caveat as the fixpoint's
+timings). The self-hosted checker is built once as preparation (`wiz build` of the
+concatenated `selfhost/*.wiz`, kept under `bench/.build/mem/`); its *run* is the
+corpus entry. `--phases` adds the only phase profiler that exists today: after the
+corpus, it runs the test driver's `--probe-checker`, which prints the checker
+*build*'s RSS and `VmHWM` after each compiler phase (frontend, erasure, lowering,
+hoisting, optimisation, C emission). That breakdown is recorded in the JSON but is
+not part of the gate; with a future `wiz build --profile`, the same slot can carry a
+per-phase split. It needs the test driver (`lake build tests`) and about 6 GiB for
+the in-process checker build, so the nightly job does not pass `--phases`.
+
+There are two limits, and both are failures:
+
+* **relative** — a peak above the baseline's peak by more than 25 % (the baseline
+  records the limit; `--tolerance` overrides it for one run). RSS is noisier than
+  time, so this is looser than the timing gate's 10 %.
+* **hard cap** — the per-invocation budget in the table. `--scope` also wraps each
+  invocation in `systemd-run --user --scope -p MemoryMax=<cap>`, so the kernel
+  enforces the cap live and an over-cap run exits 137 instead of merely failing
+  afterwards. Without `--scope` the measured peak is compared with the cap.
+
+The baseline is `bench/mem-baseline.json`; the run record is `bench/mem-bench.json`.
+`--check` also fails when an invocation is missing from the baseline, when the
+corpus changed its arguments or cap, or when an invocation exits nonzero — a stale
+baseline cannot silently stop checking an entry. `--markdown FILE` appends the table
+to a CI step summary.
+
+Absolute RSS depends on the C compiler, the GC version, the page size and what else
+shares the machine; the checked-in baseline was recorded on the 27 GiB development
+host with about twenty concurrent agents, so the relative limit and the caps are the
+decision, not the absolute numbers. Re-record with `--update` after a deliberate
+change (a new corpus entry, a new allocator), and keep the old baseline in the PR.
+
+Today's numbers (2026-11-15, 27 GiB host, 32 CPUs, Linux 7.3.3, GCC 16.2,
+Boehm GC, about twenty agents sharing the machine; `wiz` built from `627b48f6`,
+peak of the recorded samples, ±5 %):
+
+| invocation | peak RSS | cap | wall (median) |
+|---|---:|---:|---:|
+| `check-prelude` | 99 MiB | 1 GiB | 1.1 s |
+| `check-std` | 104 MiB | 1 GiB | 1.7 s |
+| `check-text` | 104 MiB | 1 GiB | 1.5 s |
+| `check-json` | 105 MiB | 1 GiB | 2.3 s |
+| `check-example-hdl` | 140 MiB | 2 GiB | 35 s |
+| `build-stdlib-bench` | 222 MiB | 2 GiB | 146 s |
+| `selfhost-checker` | 413 MiB | 1 GiB | 31 s |
+
+The worst offender is the self-hosted checker at 413 MiB: it is 40 % of its 1 GiB
+cap and an order of magnitude above the module checks, which is why it has its own
+entry. It was 10.7 GB before the `inlineTm` fix and is the reason the cap exists.
+The stdlib build is the slow entry (146 s; two samples, because the peak is stable),
+not the largest peak. The 167 KiB `hdl-uart-temporal` example is not in the corpus:
+a cold check takes over four minutes on this host, so the corpus uses
+`hdl-temporal` (294 lines, 35 s cold) instead and keeps the nightly bounded.
+
+The nightly `.github/workflows/bench.yml` runs this as a second job
+(`mem`, after the timing jobs) with `--check --markdown "$GITHUB_STEP_SUMMARY"`;
+`bench.yml` is owned by its own PR, so the exact diff is in
+`bench/mem-bench.bench.yml.diff` for the coordinator to apply after that lands. The
+job declares 6 GiB (the preparation builds the checker) and uploads
+`bench-out/mem-bench.json` as an artifact.
 
 ## Continuous integration
 
