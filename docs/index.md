@@ -29,6 +29,7 @@ published `/docs/` is generated from `lib/` by `wiz doc --lib`.
 * [Status.md](Status.md)
 * [dsls.md](dsls.md): the embedded languages (DSLs) in Wiz, and the conventions they follow
 * [error-codes.md](error-codes.md): the error codes and their quick fixes
+* [playground-lsp.md](playground-lsp.md): the playground's goals panel and the language-server contract a self-hosted `wiz lsp` must implement
 * [resources.md](resources.md): resources in Wiz: quantities, regions, optics, Feral and separation logic, with one running example
 * [ROADMAP.md](../ROADMAP.md)
 

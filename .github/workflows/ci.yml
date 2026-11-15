@@ -188,6 +188,13 @@ jobs:
           nix run "$GITHUB_WORKSPACE#wiz" -- build io.wiz -o io
           ./io | head -3
           nix run "$GITHUB_WORKSPACE#grail" -- 2>&1 | head -2
+      - name: Reproducibility (two absolute paths)
+        # generated C, binaries, .split/, -g debug info, LLVM output and the .grail tree
+        # must be byte-identical under different PWD/HOME/TMPDIR/umask/locale/epoch/-j.
+        env:
+          WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
+          GRAIL: ${{ steps.nix.outputs.wiz }}/bin/grail
+        run: scripts/check-repro.sh --json
 
   test:
     name: test (${{ matrix.shard.name }})

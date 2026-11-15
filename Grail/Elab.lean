@@ -61,9 +61,11 @@ def load (tc : Toolchain) (roots : List System.FilePath) (salt : UInt64) (src : 
   let keyStrong := Cache.moduleKeyStrong (fun n => if n == mainName then some src else loader n)
     (headers[·]?) salt mainName own.contains (strongToolchain := tc.tag) (targetTag := tc.targetTag)
     (includes := includesResolver)
-  -- a `link_c` file that appears or disappears changes the check (its contents enter
-  -- only the link's key)
-  let sourceTag := toString ((sources.toList.map fun (k, v) => k ++ "=" ++ v).toArray.qsort (· < ·))
+  -- a `link_c` file that appears or disappears changes the check: the key names it by
+  -- its module name as written. Its contents do not enter the check (they cannot change
+  -- the elaborated result; the link job's key hashes them), and its resolved absolute
+  -- path does not either (that would tie the key to where the checkout is).
+  let sourceTag := toString ((sources.toList.map (·.1)).toArray.qsort (· < ·))
   let key := mixHash key (hash sourceTag)
   let keyStrong := Smt.Sha256.hexFramed "wiz-cache/grail-link-v1" [keyStrong, sourceTag]
   -- (27a) `--trust-native` changes what a check accepts: its jobs are others

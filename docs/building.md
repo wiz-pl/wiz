@@ -155,6 +155,42 @@ A release toolchain's `share/wiz/NOTICE` says the same, and also lists the third
 code linked into `wiz`, `grail` and `tower` themselves; the licence texts are in
 `share/wiz/LICENSES/` and `share/wiz/cc/LICENSES/`.
 
+## Reproducible builds
+
+A build is reproducible when the same inputs give the same bytes, wherever the checkout
+lives. `scripts/check-repro.sh` tests that by building `Tests/ReproPaths` (pure code, IO,
+Unicode, a `link_c` shim, a `--split` build, a `-g` build, the LLVM backend and a grail
+package) under two absolute roots, `${TMPDIR}/…/a` and `${TMPDIR}/…/b`. The roots differ
+in `PWD`, `HOME`, `TMPDIR`, umask, locale, `TZ`, `SOURCE_DATE_EPOCH`, the cache directory
+and `grail -j`; the script compares the generated C, the executables, the `.grail` tree
+(including `link.txt`) and the cache entries (names and contents, not the `bin/` memo).
+
+```sh
+scripts/check-repro.sh                 # the corpus (needs .lake/build/bin/wiz)
+scripts/check-repro.sh --json          # one JSON object on stdout
+scripts/check-repro.sh --compiler      # also build wiz and grail under two paths
+scripts/check-repro.sh --compiler-a A --compiler-b B
+```
+
+It skips cleanly (exit 0, `status: skip`) when `wiz` is not built. The compiler comparison
+keeps `HOME` fixed: elan installs a Lean toolchain per `HOME`, so a different `HOME` is a
+different compiler input (and a different `RUNPATH` in the executable), not a path
+variation. `--compiler-olean` also compares `.olean` files; Lean stores the absolute
+source path in them, so they are expected to differ and are skipped by default.
+
+The cheap sources of non-determinism are fixed: `-g` builds map the generated C's
+directory and the compilation directory to `.` (`-ffile-prefix-map`, so debug info and
+`__FILE__` do not name the checkout); a grail `link_c` file is named relative to the
+package in `link.txt`, and its check key hashes its contents rather than its absolute
+path; directory walks are sorted; and `scripts/release-tarball.sh` writes a sorted
+archive with fixed owners, modes and `SOURCE_DATE_EPOCH`, through `gzip -n`.
+
+The remaining causes are inputs or metadata: diagnostics print the path they were given;
+Lean's `.olean`/`.ilean`/`.trace` files store absolute source paths; the Lean toolchain's
+`RUNPATH` stores where its libraries are installed; and a split build's parallel tasks
+report whichever error finishes first (artifacts are unaffected). The compiler binary,
+the generated C and the linked programs are compared byte for byte by the script.
+
 ## Continuous integration
 
 `nix develop` gives the toolchain the tests need besides Lean (see `flake.nix`): GMP and
@@ -586,3 +622,43 @@ The queue order is kept in a ledger outside the checkout
 --next 5` prints the next actions with their gates, `--check` rejects a ledger with
 two ready PRs in one chain or a ready PR with an unmerged dependency, and `--write`
 refreshes the ledger's facts from `gh` and `git`.
+
+## Branch hygiene
+
+`scripts/branch-rot.py` makes branch hygiene a five-minute monthly task (Python 3,
+standard library only). It classifies every local branch, and with `--remote` every
+`origin/*` tracking ref, into four buckets:
+
+* **redundant** — the tip is an ancestor of `origin/master`, or every commit is
+  patch-equivalent to one upstream (`git cherry` reports no `+` lines). Branches with
+  merge commits are never called redundant: `git cherry` skips merges, and a merge
+  resolution can carry content that is not upstream.
+* **in-flight** — an open pull request exists for the branch. These are kept.
+* **attic** — unique commits, no open PR, and the tip is older than `--days`
+  (default 30).
+* **needs-pr** — unique commits and no open PR. This is the conservative default
+  whenever the script is unsure.
+
+Run it from a checkout:
+
+```sh
+scripts/branch-rot.py                  # table and counts
+scripts/branch-rot.py --limit 10       # show at most 10 rows per bucket
+scripts/branch-rot.py --json           # machine-readable, for a dashboard
+scripts/branch-rot.py --remote         # include origin/* tracking refs
+scripts/branch-rot.py --days 30        # attic threshold in days (default 30)
+```
+
+The classifier is read-only. Deleting redundant branches is explicit and needs both
+flags:
+
+```sh
+scripts/branch-rot.py --delete-redundant            # dry run: list what would go
+scripts/branch-rot.py --delete-redundant --apply    # actually delete
+```
+
+Deletion refuses the current branch, any branch checked out in a worktree (including
+another agent's), `master` and `main`, and any branch with an open PR or a PR state it
+could not read. `--no-gh` skips GitHub entirely (every PR state becomes unknown, so
+nothing is deleted); `--self-test` builds a throwaway repository with a merge, a
+cherry-pick, an unmerged branch and a worktree and checks the classification offline.

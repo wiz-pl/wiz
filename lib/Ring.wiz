@@ -289,7 +289,7 @@ def NatExpr.prove (ρ : List Nat) (a b : NatExpr) (h : NatPoly.beq (NatExpr.norm
 
 /-- Equality of syntax trees, ignoring positions: two atoms are the same when
 their syntax is. -/
-partial def Ring.synEq : {ω b c : Bool} → SyntaxF b → SyntaxF c → Bool
+def Ring.synEq : {ω b c : Bool} → SyntaxF b → SyntaxF c → Bool
   | _, _, .missing, .missing => .true
   | _, _, .atom x, .atom y => Expr.nameEq x y
   | _, _, .ident x, .ident y => Expr.nameEq x y
