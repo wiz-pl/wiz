@@ -9,16 +9,18 @@ def usage : String := "usage:
   wiz parse FILE          print the syntax tree of every command
   wiz check [-I DIR] FILE elaborate and type check (quantities: 0, 1, ω); -I DIR: another
                           module root (a package's src/), before or after FILE
-  wiz build FILE -o OUT [--llvm]   compile the definition `main` to an executable (via C or LLVM)
+  wiz build FILE -o OUT [--target c|llvm|wasm]  compile the definition `main` to an
+                                   executable (C or LLVM) or a WebAssembly module (stage
+                                   8f: no IO, Nat/Int, closures, arrays; run it with
+                                   web/wasm-host.mjs). `--llvm` and `--wasm` still work.
   wiz build FILE -o OUT [--split N]  compile the program as N C units in parallel
                                    (default 1: one unit; a split build is faster but the
                                    generated program runs somewhat slower, stage 15k)
-  wiz build FILE -o OUT --wasm     … or a WebAssembly module (prototype, stage 8f: no IO,
-                                   Nat/Int, closures, arrays; run it with web/wasm-host.mjs)
   wiz build FILE -o OUT --lib      … or the exported functions to an object file, with OUT.h
   wiz build FILE -o OUT --no-main  … or the exported functions, linked without a `main`
                                    (say, a Wasm module: --cc emcc --ldflags --no-entry)
-  wiz run FILE [--llvm|--wasm]     build and run `main`, printing its value
+  wiz run FILE [--target c|llvm|wasm]  build and run `main`, printing its value
+                                   (`--llvm` and `--wasm` are aliases)
   wiz doc [MODULE|FILE|DIR…] -o OUT [--lib] [--source-url URL] [--title T] [--web DIR]
                                    documentation: a static site (one page per module,
                                    index, search); --lib: the toolchain's library;
@@ -429,18 +431,47 @@ def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOne
     if m.severity == .error then IO.eprintln s!"{path}:{m.render input}"
   pure (if s.messages.any (·.severity == .error) then none else some s)
 
-def buildCmd (tc : Toolchain) (path out : String) (llvm : Bool) (lib : Bool := false) (noMain : Bool := false)
-    (split : Nat := 0) (wasm : Bool := false) : IO UInt32 := do
+/-- The backend names `wiz build --target` accepts. -/
+def targets : List String := ["c", "llvm", "wasm"]
+
+/-- Take `--target NAME`, `--llvm` and `--wasm` out of the arguments; return the selected
+backend and the rest. A flag and a conflicting `--target` are an error, as is two
+different targets. -/
+def takeTarget : List String → Except String (Option String × List String)
+  | [] => pure (none, [])
+  | "--target" :: [] => throw "--target needs c, llvm or wasm"
+  | "--target" :: t :: rest => do
+    unless targets.contains t do throw s!"unknown target {t} (choose c, llvm or wasm)"
+    let (other, rest) ← takeTarget rest
+    match other with
+    | some u => if u != t then throw s!"two targets: {t} and {u}" else pure (some t, rest)
+    | none => pure (some t, rest)
+  | "--llvm" :: rest => do
+    let (other, rest) ← takeTarget rest
+    match other with
+    | some u => if u != "llvm" then throw s!"two targets: llvm and {u}" else pure (some "llvm", rest)
+    | none => pure (some "llvm", rest)
+  | "--wasm" :: rest => do
+    let (other, rest) ← takeTarget rest
+    match other with
+    | some u => if u != "wasm" then throw s!"two targets: wasm and {u}" else pure (some "wasm", rest)
+    | none => pure (some "wasm", rest)
+  | a :: rest => do
+    let (t, rest) ← takeTarget rest
+    pure (t, a :: rest)
+
+def buildCmd (tc : Toolchain) (path out : String) (target : String) (lib : Bool := false)
+    (noMain : Bool := false) (split : Nat := 0) : IO UInt32 := do
   let some s ← elabFile tc path | pure 1
-  match ← Build.build tc s "main" out llvm lib noMain split wasm with
+  match ← Build.build tc s "main" out (target == "llvm") lib noMain split (target == "wasm") with
   | .error e => IO.eprintln e; pure 1
   | .ok _ => pure 0
 
-def runCmd (tc : Toolchain) (path : String) (llvm : Bool) (split : Nat := 0) (wasm : Bool := false) : IO UInt32 := do
+def runCmd (tc : Toolchain) (path : String) (target : String) (split : Nat := 0) : IO UInt32 := do
   let some s ← elabFile tc path | pure 1
   let dir ← IO.FS.createTempDir
-  let r ← if wasm then Build.runWasmGlobal s "main" dir
-    else Build.runGlobal tc s "main" dir llvm (split := split)
+  let r ← if target == "wasm" then Build.runWasmGlobal s "main" dir
+    else Build.runGlobal tc s "main" dir (target == "llvm") (split := split)
   match r with
   | .error e => IO.eprintln e; pure 1
   | .ok v => IO.print (if v.endsWith "\n" then v else v ++ "\n"); pure 0
@@ -510,24 +541,21 @@ def main (args : List String) : IO UInt32 := do
   if let some days ← cachePruneOpt.get then
     if let some dir := tc.cacheDir then IO.eprintln (← Cache.pruneSummary dir days)
   let split ← splitOpt.get
+  let (target?, args) ← match takeTarget args with
+    | .ok r => pure r
+    | .error e => do IO.eprintln e; return 1
+  let target := target?.getD "c"
   match args with
   | ["parse", path] => parseCmd path
   | "cache" :: "prune" :: rest => cachePruneCmd tc rest
   | ["check", path] => checkCmd tc path
-  | ["build", path, "-o", out] => buildCmd tc path out false (split := split)
-  | ["build", path, "-o", out, "--llvm"] => buildCmd tc path out true (split := split)
-  | ["build", path, "-o", out, "--lib"] => buildCmd tc path out false true (split := split)
-  | ["build", path, "-o", out, "--lib", "--llvm"] | ["build", path, "-o", out, "--llvm", "--lib"] =>
-    buildCmd tc path out true true (split := split)
-  | ["build", path, "-o", out, "--no-main"] => buildCmd tc path out false false true (split := split)
-  | ["build", path, "-o", out, "--no-main", "--llvm"] | ["build", path, "-o", out, "--llvm", "--no-main"] =>
-    buildCmd tc path out true false true (split := split)
-  | ["build", path, "-o", out, "--wasm"] => buildCmd tc path out false (wasm := true)
+  | ["build", path, "-o", out] => buildCmd tc path out target (split := split)
+  | ["build", path, "-o", out, "--lib"] => buildCmd tc path out target true (split := split)
+  | ["build", path, "-o", out, "--no-main"] =>
+    buildCmd tc path out target (noMain := true) (split := split)
   | "doc" :: rest => docCmd tc rest
   | "fmt" :: rest => fmtCmd tc rest
-  | ["run", path] => runCmd tc path false (split := split)
-  | ["run", path, "--llvm"] => runCmd tc path true (split := split)
-  | ["run", path, "--wasm"] => runCmd tc path false (wasm := true)
+  | ["run", path] => runCmd tc path target (split := split)
   | "lsp" :: opts => do
     match lspOptions opts with
     | none => IO.println usage; pure 2

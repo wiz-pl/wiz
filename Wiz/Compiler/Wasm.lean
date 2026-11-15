@@ -387,12 +387,23 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
         ++ -- object: a thunk is forced first
         lg 0 ++ i32WrapI64 ++ i32Load 2 4 ++ ls 5 ++
         lg 5 ++ i32c tagThunk ++ i32Eq ++ if_
-          ++ lg 0 ++ i32WrapI64 ++ i64Load 3 16 ++ ls 11 ++
+          -- (copy the arguments before forcing: the thunk's body may apply other
+          -- closures, which use the scratch area)
+          ++ lg 1 ++ i32c 8 ++ i32Mul ++ call (rt "wiz_alloc_raw") ++ ls 3 ++
+          i32c 0 ++ ls 4 ++
+          block ++ loop ++
+            lg 4 ++ lg 1 ++ i32GeU ++ brIf 1 ++
+            lg 3 ++ lg 4 ++ i32c 8 ++ i32Mul ++ i32Add ++
+            lg 2 ++ lg 4 ++ i32c 8 ++ i32Mul ++ i32Add ++ i64Load 3 0 ++ i64Store 3 0 ++
+            lg 4 ++ i32c 1 ++ i32Add ++ ls 4 ++ br 0 ++
+          end_ ++ end_ ++
+          lg 3 ++ ls 2 ++
+          lg 0 ++ i32WrapI64 ++ i64Load 3 16 ++ ls 11 ++
           lg 11 ++ i64c 1 ++ i64Eq ++ if_
             ++ lg 0 ++ i32WrapI64 ++ i64Load 3 24 ++ ls 12
             ++ else_ ++
             lg 0 ++ i32WrapI64 ++ i64c 1 ++ i64Store 3 16 ++
-            lg 11 ++ i32c 1 ++ i32c scratchBase ++ call (rt "wiz_apply") ++ ls 12 ++
+            lg 11 ++ i32c 1 ++ lg 2 ++ call (rt "wiz_apply") ++ ls 12 ++
             lg 0 ++ i32WrapI64 ++ lg 12 ++ i64Store 3 24
             ++ end_ ++
           lg 1 ++ i32c 1 ++ i32GtU ++ if_
@@ -498,7 +509,8 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
       lg 0 ++ call (rt "wiz_tag") ++ ls 3 ++
       i32c 0 ++ ls 4 ++ lg 1 ++ ls 5 ++
       block ++ loop ++
-        lg 5 ++ i64c 1 ++ i64And ++ i64Eqz ++ i32Eqz ++ brIf 1 ++
+        -- (a nested pair is an object: continue while the list cell is not a scalar)
+        lg 5 ++ i64c 1 ++ i64And ++ i64c 1 ++ i64Eq ++ brIf 1 ++
         lg 4 ++ i32c 1 ++ i32Add ++ ls 4 ++
         lg 5 ++ i32WrapI64 ++ i64Load 3 24 ++ ls 5 ++ br 0 ++
       end_ ++ end_ ++
@@ -506,7 +518,7 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
       lg 3 ++ lg 4 ++ call (rt "wiz_ctor_new") ++ ls 2 ++
       i32c 0 ++ ls 6 ++ lg 1 ++ ls 5 ++
       block ++ loop ++
-        lg 5 ++ i64c 1 ++ i64And ++ i64Eqz ++ i32Eqz ++ brIf 1 ++
+        lg 5 ++ i64c 1 ++ i64And ++ i64c 1 ++ i64Eq ++ brIf 1 ++
         lg 2 ++ i32WrapI64 ++ i32c 32 ++ i32Add ++ lg 6 ++ i32c 8 ++ i32Mul ++ i32Add ++
         lg 5 ++ i32WrapI64 ++ i64Load 3 16 ++ i64Store 3 0 ++
         lg 5 ++ i32WrapI64 ++ i64Load 3 24 ++ ls 5 ++
@@ -873,26 +885,70 @@ partial def checkBody : Body → Except String Unit
     if as.size > maxCallArgs then
       .error s!"the Wasm backend holds at most {maxCallArgs} call arguments (calling `{f}` with {as.size})"
     else checkBody b
+  | .vdecl _ (.ctor t _) b | .vdecl _ (.reuse _ t _) b =>
+    -- Tags are written as `i32`; a tag that does not fit would be silently truncated.
+    if t ≥ 2 ^ 32 then
+      .error s!"the Wasm backend writes a constructor tag as an `i32` (tag {t} is too large)"
+    else checkBody b
   | .vdecl _ _ b | .dup _ b | .drop _ b => checkBody b
   | .case _ alts => alts.foldl (fun r a => r.bind fun _ => checkBody a) (.ok ())
   | .jdecl _ _ jb k => checkBody jb >>= fun _ => checkBody k
   | _ => .ok ()
 
-/-- Every direct call and closure names a declaration in this module. -/
-partial def checkCalls (names : Std.HashSet Name) : Body → Except String Unit
-  | .vdecl _ (.fap f _) b | .vdecl _ (.pap f _) b =>
-    if names.contains f then checkCalls names b
-    else .error s!"the Wasm backend has no function `{f}` (an unresolved call)"
-  | .vdecl _ _ b | .dup _ b | .drop _ b => checkCalls names b
-  | .case _ alts => alts.foldl (fun r a => r.bind fun _ => checkCalls names a) (.ok ())
-  | .jdecl _ _ jb k => checkCalls names jb >>= fun _ => checkCalls names k
+/-- Every direct call and closure names a declaration in this module, and its arity
+matches (a direct call is full application; a `pap` may be partial). Without this a
+wrong arity would be emitted as a `call` with the wrong number of operands. -/
+partial def checkCalls (names : Std.HashSet Name) (arities : Std.HashMap Name Nat) :
+    Body → Except String Unit
+  | .vdecl _ (.fap f as) b =>
+    if !names.contains f then .error s!"the Wasm backend has no function `{f}` (an unresolved call)"
+    else if as.size != arities.getD f 0 then
+      .error s!"the Wasm backend calls `{f}` with {as.size} arguments, but it takes {arities.getD f 0}"
+    else checkCalls names arities b
+  | .vdecl _ (.pap f as) b =>
+    if !names.contains f then .error s!"the Wasm backend has no function `{f}` (an unresolved call)"
+    else if as.size > arities.getD f 0 then
+      .error s!"the Wasm backend partially applies `{f}` with {as.size} arguments, but it takes {arities.getD f 0}"
+    else checkCalls names arities b
+  | .vdecl _ _ b | .dup _ b | .drop _ b => checkCalls names arities b
+  | .case _ alts => alts.foldl (fun r a => r.bind fun _ => checkCalls names arities a) (.ok ())
+  | .jdecl _ _ jb k => checkCalls names arities jb >>= fun _ => checkCalls names arities k
   | _ => .ok ()
 
-/-- An unsupported prim (or too many call arguments, or an unresolved call) anywhere in
-the program, as an error. -/
+/-- Every variable a body uses is one of its parameters or is bound in it. A variable
+outside that scope would silently read Wiz local 0 in `Ctx.var`. -/
+def checkScope (params : Array Var) (b : Body) : Except String Unit := do
+  let allowed : Std.HashSet Var :=
+    (bound b).foldl (fun s x => s.insert x) (params.foldl (fun s x => s.insert x) {})
+  for x in b.freeVars.toArray do
+    unless allowed.contains x do
+      throw s!"the Wasm backend cannot find Wiz local x{x} (an out-of-scope variable)"
+
+/-- Every `jmp` names a join point in scope. -/
+partial def checkJumps (known : Std.HashSet JoinId) : Body → Except String Unit
+  | .jdecl j _ jb k =>
+    checkJumps (known.insert j) jb >>= fun _ => checkJumps (known.insert j) k
+  | .jmp j _ =>
+    if known.contains j then .ok () else .error s!"the Wasm backend has no join point j{j}"
+  | .vdecl _ _ b | .dup _ b | .drop _ b => checkJumps known b
+  | .case _ alts => alts.foldl (fun r a => r.bind fun _ => checkJumps known a) (.ok ())
+  | _ => .ok ()
+
+/-- An unsupported prim (or too many call arguments, an unresolved call, an out-of-scope
+variable or a missing join point) anywhere in the program, as an error. -/
 def check (decls : Array IR.Decl) : Except String Unit :=
   let names : Std.HashSet Name := decls.foldl (fun s d => s.insert d.name) {}
-  decls.foldl (fun r d => r.bind fun _ => checkBody d.body >>= fun _ => checkCalls names d.body) (.ok ())
+  let arities : Std.HashMap Name Nat :=
+    decls.foldl (fun m d => m.insert d.name d.params.size) {}
+  decls.foldl (fun r d => r.bind fun _ =>
+    checkBody d.body >>= fun _ =>
+    checkCalls names arities d.body >>= fun _ =>
+    checkScope d.params d.body >>= fun _ =>
+    checkJumps {} d.body >>= fun _ =>
+    -- a join body is compiled as a function of its parameters and its own locals; it
+    -- may not read an outer variable
+    (joinsOf d.name d.body).foldl (fun r j => r.bind fun _ =>
+      checkScope j.params j.body) (.ok ())) (.ok ())
 
 /-! ## Code generation -/
 
@@ -1073,8 +1129,11 @@ def moduleBytes (b : Built) : ByteArray := Id.run do
 def program (decls : Array IR.Decl) (io : Bool := false) : Except String ByteArray := do
   if io then throw "the Wasm backend runs only IO-less `main`"
   check decls
-  if !decls.any (·.name == "wiz.entry") then
-    throw "the Wasm backend needs the `wiz.entry` function (no `main`?)"
+  match decls.find? (·.name == "wiz.entry") with
+  | none => throw "the Wasm backend needs the `wiz.entry` function (no `main`?)"
+  | some d =>
+    if !d.params.isEmpty then
+      throw "the Wasm backend's `main` must not take arguments (it is called with none)"
   let lits := dedup (decls.foldl (fun acc d => bigLitsOf d.body acc) #[])
   let (litTab, dataSize) := litTable lits
   let heapStart := align8 (dataBase + dataSize)
