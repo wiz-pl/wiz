@@ -9,6 +9,7 @@ import Wiz.Completion
 import Wiz.Signature
 import Wiz.Refs
 import Wiz.Symbols
+import Wiz.Diagnostics
 import Wiz.Socket
 import Wiz.WebSocket
 import Std.Sync.Channel
@@ -139,12 +140,10 @@ structure Server where
   with their info trees: by module, with the hash of the source they were made from -/
   modules : Std.HashMap String (UInt64 × St) := {}
 
-/-- Line and column (0-based) of a character offset. -/
+/-- Line and column (0-based) of a character offset (`Diagnostics.positionJson`: the
+conversion `wiz check --json` uses too). -/
 def toPos (text : String) (off : Nat) : Json :=
-  let pre := (text.toList.take off)
-  let line := pre.count '\n'
-  let col := (pre.reverse.takeWhile (· != '\n')).length
-  Json.mkObj [("line", line), ("character", col)]
+  positionJson text off
 
 /-- The character offset of an LSP position. -/
 def ofPos (text : String) (line col : Nat) : Nat := Id.run do
@@ -157,7 +156,7 @@ def ofPos (text : String) (line col : Nat) : Nat := Id.run do
   pure (i + col)
 
 def range (text : String) (info : SourceInfo) : Json :=
-  Json.mkObj [("start", toPos text info.start), ("end", toPos text (max info.stop (info.start + 1)))]
+  sourceRangeJson text info
 
 /-! ## `include_str` (include-str): the document's path and its includes
 
@@ -272,12 +271,10 @@ def completion (srv : Server) (doc : Doc) (off : Nat) : Json :=
   Json.mkObj [("isIncomplete", r.incomplete), ("items", Json.arr items)]
 
 def diagnostic (srv : Server) (doc : Doc) (m : Msg) : Json :=
-  let code := if m.code.isEmpty then [] else
-    [("code", Json.str m.code),
-     ("data", Json.mkObj ((Actions.messageData doc.state m doc.text srv.importable).map fun (k, vs) =>
-        (k, if k == "name" then Json.str (vs.headD "") else Json.arr (vs.map Json.str).toArray)))]
+  let data := diagnosticDataJson (Actions.messageData doc.state m doc.text srv.importable)
+  let code := if m.code.isEmpty then [] else [("code", Json.str m.code), ("data", data)]
   Json.mkObj ([("range", range doc.text m.info),
-               ("severity", (match m.severity with | .error => 1 | .warning => 2 | .info => 3 : Nat)),
+               ("severity", lspSeverity m.severity),
                ("source", "wiz"), ("message", m.text)] ++ code)
 
 def diagnostics (srv : Server) (uri : String) (doc : Doc) : Json :=

@@ -10,6 +10,10 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* `wiz check --json` (and `wiz build --json`) writes one versioned, machine-readable
+  diagnostics document on stdout: stable field names and order, a schema
+  ([docs/schema/check-json-v1.json](docs/schema/check-json-v1.json)) and a golden test
+  ([docs/check-json.md](docs/check-json.md)). `wiz check` also takes several files now.
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to

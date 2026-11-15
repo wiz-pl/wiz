@@ -7,9 +7,14 @@ open Wiz
 def usage : String := "usage:
   wiz --version           print the version (and, for a release, its commit)
   wiz parse FILE          print the syntax tree of every command
-  wiz check [-I DIR] FILE elaborate and type check (quantities: 0, 1, ω); -I DIR: another
-                          module root (a package's src/), before or after FILE
-  wiz build FILE -o OUT [--llvm]   compile the definition `main` to an executable (via C or LLVM)
+  wiz check [-I DIR] [--json [--json-version N]] FILE...
+                          elaborate and type check (quantities: 0, 1, ω); several FILEs
+                          are checked in one run; -I DIR: another module root (a package's
+                          src/), before or after FILE; --json: one machine-readable
+                          document on stdout (docs/schema/check-json-v1.json; diagnostics
+                          also go to stderr), --json-version 1: the same, explicitly
+  wiz build FILE -o OUT [--llvm] [--json]   compile the definition `main` to an executable
+                                   (via C or LLVM)
   wiz build FILE -o OUT [--split N]  compile the program as N C units in parallel
                                    (default 1: one unit; a split build is faster but the
                                    generated program runs somewhat slower, stage 15k)
@@ -90,6 +95,13 @@ def loadLibraryPaths (tc : Toolchain) : IO (Std.HashMap String (String × String
   for (n, p, src) in (← Module.loadAll (← moduleRoots tc)).toList do
     m := m.insert n ((← IO.FS.realPath p).toString, src)
   pure m
+
+/-- The modules `import` can reach, with their sources: the same list the language
+server gives its quick fixes (`Server.importable`), for "add the missing import" and
+"did you mean" on an `import`. -/
+def importableModules (tc : Toolchain) : IO (List (String × String)) := do
+  let all ← Module.loadAll (← moduleRoots tc)
+  pure (all.toList.map fun (n, (_, src)) => (n, src))
 
 /-- `wiz lsp`'s options: `--infoview SOCK`, `--ws [ADDR:]PORT`, `--no-stdio`. -/
 def lspOptions : List String → Option (LSP.Listen × Bool)
@@ -253,9 +265,12 @@ def initState (tc : Toolchain) (path : String) (input : String) :
       nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := smt }
   pure (init, headers)
 
-/-- Elaborate a file, through the toolchain's cache (if any). -/
-def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandState ZeroOneMany) := do
-  let (init, headers) ← initState tc path input
+/-- Elaborate a file with `termInfo` (the language server's setting: the info tree the
+quick fixes read). `wiz check --json` asks for it, so its `fixes` are the editor's. -/
+def elaborateWith (tc : Toolchain) (path : String) (input : String) (termInfo : Bool) :
+    IO (CommandState ZeroOneMany) := do
+  let (init₀, headers) ← initState tc path input
+  let init := { init₀ with termInfo }
   let (regularity, predicativeProp) ← kernelOpts.get
   let lazyProofs ← lazyProofsOpt.get
   let inertReg ← inertOpt.get
@@ -274,6 +289,11 @@ def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandSta
     pure (← Cache.elaborateCached tc.cacheDir tc.readCaches input init key₀ (region := region)).1
   else
     Cache.elaborateUncached input init
+
+/-- Elaborate a file, through the toolchain's cache (if any), without the language
+server's info tree. -/
+def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandState ZeroOneMany) :=
+  elaborateWith tc path input false
 /-- (27a) `--trust-native` and `--native-fuel N`. -/
 def nativeOpts (tc : Toolchain) : Bool × Nat := (tc.trustNative, tc.nativeFuel.getD NativeRun.defaultFuel)
 
@@ -409,16 +429,146 @@ def cachePruneCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   | none => do IO.eprintln "cache prune: no write cache (--cache DIR)"; pure 1
   | some dir => do IO.println (← Cache.pruneSummary dir days dry); pure 0
 
-def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
-  let input ← IO.FS.readFile path
-  let s ← elaborate tc path input
+/-- One diagnostic, with the keys the stable order uses: file, offset, code (then end and
+message, so the order is total and reproducible). -/
+structure OrderedDiag where
+  file : String
+  start : Nat
+  stop : Nat
+  code : String
+  message : String
+  json : Lean.Json
+
+/-- The stable order of `wiz check --json` and `wiz build --json`: (file, offset, code),
+then the end offset and the message. -/
+def OrderedDiag.before (a b : OrderedDiag) : Bool :=
+  decide (a.file < b.file) ||
+  (a.file == b.file && (decide (a.start < b.start) ||
+   (a.start == b.start && (decide (a.code < b.code) ||
+    (a.code == b.code && (decide (a.stop < b.stop) ||
+     (a.stop == b.stop && decide (a.message < b.message))))))))
+
+/-- The `tool` object of the JSON document: the command's name, its version, and the
+commit of a release toolchain (`null` in a checkout, where `REVISION` is absent). -/
+def toolJson : IO Lean.Json := do
+  let commit ← revision?
+  pure (Lean.Json.mkObj [
+    ("name", Lean.Json.str "wiz"),
+    ("version", Lean.Json.str version),
+    ("commit", match commit with | some c => Lean.Json.str c | none => Lean.Json.null)])
+
+/-- The one document of `wiz check --json` / `wiz build --json` (version 1; the schema is
+`docs/schema/check-json-v1.json`). `artifacts` lists the files `build` wrote, and is empty
+for `check` (it is always present, so the document's shape does not depend on success). -/
+def jsonDocument (command : String) (files : Array String) (diags : Array Lean.Json)
+    (ok : Bool) (artifacts : Array String := #[]) : IO Lean.Json := do
+  pure (Lean.Json.mkObj [
+    ("version", (1 : Nat)),
+    ("command", Lean.Json.str command),
+    ("tool", ← toolJson),
+    ("files", Lean.Json.arr (files.map Lean.Json.str)),
+    ("ok", ok),
+    ("diagnostics", Lean.Json.arr diags),
+    ("artifacts", Lean.Json.arr (artifacts.map Lean.Json.str))])
+
+/-- A diagnostic for a file the driver could not read or elaborate (no source span to
+point at: offset 0, `start == end`). -/
+def fileErrorJson (file message : String) : Lean.Json :=
+  Lean.Json.mkObj [
+    ("severity", Lean.Json.str "error"),
+    ("code", Lean.Json.null),
+    ("message", Lean.Json.str message),
+    ("span", sourceSpanJson file "" {}),
+    ("related", Lean.Json.arr #[]),
+    ("notes", Lean.Json.arr #[]),
+    ("data", Lean.Json.null),
+    ("fixes", Lean.Json.arr #[])]
+
+/-- A quick fix as JSON: its title and kind, and its edits (each an empty-or-not span and
+the replacement text). These are the same actions the language server offers;
+`Actions.actionsAt` computes them. -/
+def actionJson (file text : String) (a : Actions.Action) : Lean.Json :=
+  Lean.Json.mkObj [
+    ("title", Lean.Json.str a.title),
+    ("kind", Lean.Json.str a.kind),
+    ("edits", Lean.Json.arr (a.edits.map fun e =>
+      Lean.Json.mkObj [
+        ("span", editSpanJson file text e.start e.stop),
+        ("newText", Lean.Json.str e.text)]))]
+
+/-- One message as the JSON diagnostic: the LSP core fields (severity, code, message,
+span), the code-action `data` the LSP sends, and the code actions for this message's
+span (`textDocument/codeAction`'s answer; refactor actions, such as filling a hole, have
+no message index but are offered for the same range). `related` and `notes` are reserved
+(the LSP sends neither `relatedInformation` nor a separate note text today). -/
+def messageJson (modules : List (String × String)) (file text : String)
+    (s : CommandState ZeroOneMany) (m : Msg) : Lean.Json :=
+  let fields := Actions.messageData s m text modules
+  -- (no code: the message has no quick-fix family, so skip the scan)
+  let fixes := if m.code.isEmpty then #[] else
+    (Actions.actionsAt s text m.info.start m.info.stop modules).map (actionJson file text)
+  Lean.Json.mkObj [
+    ("severity", Lean.Json.str (severityName m.severity)),
+    ("code", if m.code.isEmpty then Lean.Json.null else Lean.Json.str m.code),
+    ("message", Lean.Json.str m.text),
+    ("span", sourceSpanJson file text m.info),
+    ("related", Lean.Json.arr #[]),
+    ("notes", Lean.Json.arr #[]),
+    ("data", if fields.isEmpty then Lean.Json.null else diagnosticDataJson fields),
+    ("fixes", Lean.Json.arr fixes)]
+
+/-- Every message of a checked file as an ordered JSON diagnostic. -/
+def diagnosticsJson (modules : List (String × String)) (file text : String)
+    (s : CommandState ZeroOneMany) : Array OrderedDiag := Id.run do
+  let mut out : Array OrderedDiag := #[]
   for m in s.messages do
-    let line := s!"{path}:{m.render input}"
-    if m.severity == .error then IO.eprintln line else IO.println line
+    out := out.push { file, start := m.info.start, stop := max m.info.stop m.info.start,
+                      code := m.code, message := m.text, json := messageJson modules file text s m }
+  return out
+
+/-- Read and elaborate a file, reporting an IO error as an `Except` (so `--json` can
+still write its document). -/
+def readAndElaborate (tc : Toolchain) (path : String) (termInfo : Bool := false) :
+    IO (Except String (String × CommandState ZeroOneMany)) := do
+  try
+    let input ← IO.FS.readFile path
+    pure (.ok (input, ← elaborateWith tc path input termInfo))
+  catch e => pure (.error e.toString)
+
+def checkCmd (tc : Toolchain) (paths : List String) (json : Bool) : IO UInt32 := do
+  if paths.isEmpty then
+    IO.eprintln "wiz check: no file"
+    return 2
+  if let some p := paths.find? (fun p => p.startsWith "-" && p != "-") then
+    IO.eprintln s!"wiz check: unknown flag {p}"
+    return 2
+  let mut files : Array String := #[]
+  let mut diags : Array OrderedDiag := #[]
+  let mut hasError := false
+  let modules ← if json then importableModules tc else pure []
+  for path in paths do
+    files := files.push path
+    match ← readAndElaborate tc path (termInfo := json) with
+    | .error e => do
+      hasError := true
+      IO.eprintln s!"wiz check: {path}: {e}"
+      if json then
+        diags := diags.push { file := path, start := 0, stop := 0, code := "", message := e,
+                              json := fileErrorJson path e }
+    | .ok (input, s) => do
+      for m in s.messages do
+        let line := s!"{path}:{m.render input}"
+        -- (`--json`: the document is the only stdout; people still read the messages)
+        if json || m.severity == .error then IO.eprintln line else IO.println line
+        if m.severity == .error then hasError := true
+      if json then diags := diags ++ diagnosticsJson modules path input s
+  if json then
+    let ds := diags.qsort OrderedDiag.before
+    IO.println (← jsonDocument "check" files (ds.map (·.json)) (!hasError)).compress
   if ← regionStatsOpt.get then
     let c ← regionStats.get
     IO.eprintln s!"region cache: {c.hits} modules from a region, {c.misses} without, {c.commands} commands"
-  pure (if s.messages.any (·.severity == .error) then 1 else 0)
+  pure (if hasError then 1 else 0)
 
 def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOneMany)) := do
   let input ← IO.FS.readFile path
@@ -428,11 +578,39 @@ def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOne
   pure (if s.messages.any (·.severity == .error) then none else some s)
 
 def buildCmd (tc : Toolchain) (path out : String) (llvm : Bool) (lib : Bool := false) (noMain : Bool := false)
-    (split : Nat := 0) : IO UInt32 := do
-  let some s ← elabFile tc path | pure 1
-  match ← Build.build tc s "main" out llvm lib noMain split with
-  | .error e => IO.eprintln e; pure 1
-  | .ok _ => pure 0
+    (split : Nat := 0) (json : Bool := false) : IO UInt32 := do
+  let modules ← if json then importableModules tc else pure []
+  match ← readAndElaborate tc path (termInfo := json) with
+  | .error e =>
+    IO.eprintln e
+    if json then
+      IO.println (← jsonDocument "build" #[path] #[fileErrorJson path e] false).compress
+    pure 1
+  | .ok (input, s) =>
+    for m in s.messages do
+      let line := s!"{path}:{m.render input}"
+      if json || m.severity == .error then IO.eprintln line
+    let hasError := s.messages.any (·.severity == .error)
+    if hasError then
+      if json then
+        let ds := (diagnosticsJson modules path input s).qsort OrderedDiag.before
+        IO.println (← jsonDocument "build" #[path] (ds.map (·.json)) false).compress
+      pure 1
+    else
+      match ← Build.build tc s "main" out llvm lib noMain split with
+      | .error e =>
+        IO.eprintln e
+        if json then
+          let d : OrderedDiag := { file := path, start := 0, stop := 0, code := "", message := e,
+                                    json := fileErrorJson path e }
+          IO.println (← jsonDocument "build" #[path] #[d.json] false).compress
+        pure 1
+      | .ok _ =>
+        if json then
+          let ds := (diagnosticsJson modules path input s).qsort OrderedDiag.before
+          let artifacts := if lib then #[out, (System.FilePath.mk out).withExtension "h" |>.toString] else #[out]
+          IO.println (← jsonDocument "build" #[path] (ds.map (·.json)) true artifacts).compress
+        pure 0
 
 def runCmd (tc : Toolchain) (path : String) (llvm : Bool) (split : Nat := 0) : IO UInt32 := do
   let some s ← elabFile tc path | pure 1
@@ -456,6 +634,22 @@ def kernelOpt : List String → Except String (Regularity × Bool × List String
     let (r, p, rest) ← kernelOpt rest
     return (r, p, a :: rest)
   | [] => return (.off, false, [])
+
+/-- `--json` and `--json-version N` (for `check` and `build`). `--json-version N` also
+selects JSON, so that a caller can pin the format without repeating `--json`; this build
+speaks version 1 only (checked by `main`). -/
+def takeJsonOpts : List String → Except String (Bool × Option Nat × List String)
+  | "--json" :: rest => do
+    let (_, v, rest) ← takeJsonOpts rest
+    return (true, v, rest)
+  | "--json-version" :: n :: rest => do
+    let some v := n.toNat? | throw s!"--json-version needs a number, not {n}"
+    let (_, _, rest) ← takeJsonOpts rest
+    return (false, some v, rest)
+  | a :: rest => do
+    let (j, v, rest) ← takeJsonOpts rest
+    return (j, v, a :: rest)
+  | [] => return (false, none, [])
 
 def main (args : List String) : IO UInt32 := do
   -- (after the toolchain flags: the tarball's and tower's wrappers put `-I LIB` and
@@ -498,6 +692,20 @@ def main (args : List String) : IO UInt32 := do
       if let some k := k then cachePruneOpt.set (some k)
       pure a
     | .error e => do IO.eprintln e; return 1
+  let (jsonFlag, jsonVersion, args) ← match takeJsonOpts args with
+    | .ok r => pure r
+    | .error e => do IO.eprintln e; return 2
+  if let some v := jsonVersion then
+    unless v == 1 do
+      IO.eprintln s!"wiz: unsupported --json-version {v} (this wiz speaks version 1)"
+      return 2
+  let wantJson := jsonFlag || jsonVersion.isSome
+  if wantJson then
+    match args with
+    | "check" :: _ | "build" :: _ => pure ()
+    | _ => do
+      IO.eprintln "wiz: --json is only supported by `wiz check` and `wiz build`"
+      return 2
   -- a `panic!` (a kernel-internal failure) ends a batch command with status 1 instead of
   -- going on with a default value; the language server keeps running
   unless args.head? == some "lsp" do exitOnPanic
@@ -509,15 +717,15 @@ def main (args : List String) : IO UInt32 := do
   match args with
   | ["parse", path] => parseCmd path
   | "cache" :: "prune" :: rest => cachePruneCmd tc rest
-  | ["check", path] => checkCmd tc path
-  | ["build", path, "-o", out] => buildCmd tc path out false (split := split)
-  | ["build", path, "-o", out, "--llvm"] => buildCmd tc path out true (split := split)
-  | ["build", path, "-o", out, "--lib"] => buildCmd tc path out false true (split := split)
+  | "check" :: paths => checkCmd tc paths wantJson
+  | ["build", path, "-o", out] => buildCmd tc path out false (split := split) (json := wantJson)
+  | ["build", path, "-o", out, "--llvm"] => buildCmd tc path out true (split := split) (json := wantJson)
+  | ["build", path, "-o", out, "--lib"] => buildCmd tc path out false true (split := split) (json := wantJson)
   | ["build", path, "-o", out, "--lib", "--llvm"] | ["build", path, "-o", out, "--llvm", "--lib"] =>
-    buildCmd tc path out true true (split := split)
-  | ["build", path, "-o", out, "--no-main"] => buildCmd tc path out false false true (split := split)
+    buildCmd tc path out true true (split := split) (json := wantJson)
+  | ["build", path, "-o", out, "--no-main"] => buildCmd tc path out false false true (split := split) (json := wantJson)
   | ["build", path, "-o", out, "--no-main", "--llvm"] | ["build", path, "-o", out, "--llvm", "--no-main"] =>
-    buildCmd tc path out true false true (split := split)
+    buildCmd tc path out true false true (split := split) (json := wantJson)
   | "doc" :: rest => docCmd tc rest
   | "fmt" :: rest => fmtCmd tc rest
   | ["run", path] => runCmd tc path false (split := split)

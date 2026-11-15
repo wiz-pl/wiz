@@ -99,6 +99,7 @@ failure) in every 0.1.z:
 | `wiz --version` | prints `wiz VERSION`, and for a release `(COMMIT)` |
 | `wiz parse FILE` | parses `FILE` and prints its syntax tree |
 | `wiz check FILE` | elaborates and checks `FILE` and the modules it imports |
+| `wiz check --json FILE` | the same, as the versioned document of [check-json.md](check-json.md) |
 | `wiz build FILE -o OUT [--llvm]` | compiles `main` to an executable |
 | `wiz build FILE -o OUT --lib [--llvm]` | compiles the exported functions to an object file and `OUT.h` |
 | `wiz build FILE -o OUT --no-main [--llvm]` | links the exported functions without a `main` |
@@ -116,6 +117,8 @@ Not covered:
   and any flag the usage text marks experimental. These may change or go away in a patch
   release.
 * What the commands print: error messages, the syntax tree, warnings. Do not parse them.
+  The exception is `--json` (`wiz check --json`, `wiz build … --json`): its version 1
+  document is the stable, documented format of [check-json.md](check-json.md).
 * Which programs check. That is the language (below).
 * `wiz lsp --infoview SOCK`, `--ws`, `--no-stdio`, and the protocol behind them.
 

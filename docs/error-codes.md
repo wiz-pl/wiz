@@ -2,10 +2,11 @@
 
 Every common error carries a stable **code**: a short name for the kind of mistake. The
 language server sends it as the diagnostic's `code` (with the data its quick fixes use,
-such as `suggestions`) and keys its code actions on it (`Wiz/Actions.lean`). The wording
-of a message may change; its code does not. The codes are defined in
-`Wiz/Core/ErrorCode.lean` (`ErrorCode.all`); the `lsp-server` test group checks that this
-table lists exactly those. Messages not listed here have no code yet.
+such as `suggestions`), `wiz check --json` sends it in its diagnostics
+([check-json.md](check-json.md)), and the server keys its code actions on it
+(`Wiz/Actions.lean`). The wording of a message may change; its code does not. The codes
+are defined in `Wiz/Core/ErrorCode.lean` (`ErrorCode.all`); the `lsp-server` test group
+checks that this table lists exactly those. Messages not listed here have no code yet.
 
 | code | the error | example | quick fixes |
 |---|---|---|---|

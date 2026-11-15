@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wiz-pl.github.io/wiz/schema/check-json-v1.json",
+  "title": "wiz check --json, version 1",
+  "description": "One JSON document written by `wiz check --json` (and `wiz build --json`), described in docs/check-json.md. Compatibility: fields may be added in version 1; never change the meaning of an existing field without a version bump. Removing a field, changing its type, changing the diagnostic sort order, or changing offsets from Unicode scalar values is version 2. Consumers ignore fields they do not know.",
+  "type": "object",
+  "required": ["version", "command", "tool", "files", "ok", "diagnostics", "artifacts"],
+  "properties": {
+    "version": {
+      "description": "The format version. This schema is version 1.",
+      "const": 1
+    },
+    "command": {
+      "description": "The command that wrote the document.",
+      "enum": ["check", "build"]
+    },
+    "tool": {
+      "description": "The toolchain that wrote the document.",
+      "type": "object",
+      "required": ["name", "version", "commit"],
+      "properties": {
+        "name": { "const": "wiz" },
+        "version": { "type": "string", "description": "For example 0.1.0-dev." },
+        "commit": {
+          "description": "The release commit, or null in a checkout (where the toolchain has no REVISION file).",
+          "type": ["string", "null"]
+        }
+      },
+      "additionalProperties": true
+    },
+    "files": {
+      "description": "The files named on the command line, in that order, as written (not resolved).",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "ok": {
+      "description": "True when no diagnostic has severity error.",
+      "type": "boolean"
+    },
+    "diagnostics": {
+      "description": "The messages, sorted by (span.file, span.start, code), then span.end and message.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/diagnostic" }
+    },
+    "artifacts": {
+      "description": "The files build wrote; always empty for check (it is present in both, so the shape does not depend on the command).",
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "span": {
+      "description": "A place in a source file. start and end are zero-based character offsets (Unicode scalar values, not UTF-8 bytes or UTF-16 code units); end >= start and may equal start for a point. line and col are the one-based line and column of start, also counting characters.",
+      "type": "object",
+      "required": ["file", "start", "end", "line", "col"],
+      "properties": {
+        "file": { "type": "string" },
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 },
+        "line": { "type": "integer", "minimum": 1 },
+        "col": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": true
+    },
+    "diagnostic": {
+      "type": "object",
+      "required": ["severity", "code", "message", "span", "related", "notes", "data", "fixes"],
+      "properties": {
+        "severity": { "enum": ["error", "warning", "info"] },
+        "code": {
+          "description": "A stable error code from docs/error-codes.md, or null when the message has none.",
+          "type": ["string", "null"]
+        },
+        "message": { "type": "string" },
+        "span": { "$ref": "#/$defs/span" },
+        "related": {
+          "description": "Related locations, like LSP relatedInformation. Always empty in version 1: publishDiagnostics sends none yet. Reserved for additive use.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/related" }
+        },
+        "notes": {
+          "description": "Extra notes. Always empty in version 1: hints are part of message. Reserved for additive use.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "data": {
+          "description": "The quick-fix payload the language server puts in a diagnostic (for example name and suggestions), or null when there is none.",
+          "type": ["object", "null"]
+        },
+        "fixes": {
+          "description": "Code actions for this message's span, computed by the same code that answers textDocument/codeAction (quick fixes, and refactors such as filling a hole). Empty for a message without a code.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/fix" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "related": {
+      "type": "object",
+      "required": ["message", "span"],
+      "properties": {
+        "message": { "type": "string" },
+        "span": { "$ref": "#/$defs/span" }
+      },
+      "additionalProperties": true
+    },
+    "fix": {
+      "type": "object",
+      "required": ["title", "kind", "edits"],
+      "properties": {
+        "title": { "type": "string" },
+        "kind": { "type": "string", "description": "For example quickfix or refactor.rewrite." },
+        "edits": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/edit" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "edit": {
+      "type": "object",
+      "required": ["span", "newText"],
+      "properties": {
+        "span": {
+          "description": "The range to replace; start == end is an insertion.",
+          "$ref": "#/$defs/span"
+        },
+        "newText": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

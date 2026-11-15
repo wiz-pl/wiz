@@ -19,6 +19,8 @@ docs/building.md, "Documentation site").
 * [Status.md](Status.md)
 * [dsls.md](dsls.md): the embedded languages (DSLs) in Wiz, and the conventions they follow
 * [error-codes.md](error-codes.md): the error codes and their quick fixes
+* [check-json.md](check-json.md): `wiz check --json`, the stable machine-readable
+  diagnostics document (schema: [schema/check-json-v1.json](schema/check-json-v1.json))
 * [resources.md](resources.md): resources in Wiz: quantities, regions, optics, Feral and separation logic, with one running example
 * [ROADMAP.md](../ROADMAP.md)
 
