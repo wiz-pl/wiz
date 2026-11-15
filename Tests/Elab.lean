@@ -1924,6 +1924,48 @@ def selfhostOutput (file : String) : IO (Option String) := do
     unless out.exitCode == 0 do throw (IO.userError s!"the checker failed ({out.exitCode}): {out.stderr}")
     pure (some out.stdout)
 
+/-- The self-hosted checker's output for `file`, and its child process's peak resident set
+size in MB; fails if that exceeds `boundMB`. The checker holds the elaborated globals for
+the whole input, so a regression in retention (the `mutual`/`partial` inline cache made
+the self-check pass 10 GB) is caught here rather than by a CI OOM. -/
+def selfhostOutputPeak (file : String) (boundMB : Nat) : IO (Option String) := do
+  match ← selfhostChecker with
+  | .error e =>
+    if (e.splitOn "gmp.h").length > 1 then
+      skip "no toolchain"
+      pure none
+    else throw (IO.userError e)
+  | .ok exe =>
+    let dir ← IO.FS.createTempDir
+    IO.FS.writeFile (dir / "input.wiz") file
+    let outFile := dir / "out"
+    let errFile := dir / "err"
+    let child ← IO.Process.spawn
+      { cmd := "sh",
+        args := #["-c", "exec \"$0\" > \"$1\" 2> \"$2\"", exe.toString, outFile.toString, errFile.toString],
+        cwd := dir, stdout := .null, stderr := .null }
+    let mut code : Option UInt32 := none
+    let mut peak := 0
+    while code.isNone do
+      match ← child.tryWait with
+      | some c => code := some c
+      | none =>
+        try
+          let s ← IO.FS.readFile s!"/proc/{child.pid}/status"
+          for l in s.splitOn "\n" do
+            if l.startsWith "VmHWM:" then
+              let kb := ((l.drop 6).trimAscii.toString.takeWhile Char.isDigit).toNat!
+              peak := max peak (kb / 1024)
+        catch _ => pure ()
+        IO.sleep 20
+    let exitCode := code.getD 1
+    let out ← IO.FS.readFile outFile
+    let err ← IO.FS.readFile errFile
+    unless exitCode == 0 do throw (IO.userError s!"the checker failed ({exitCode}): {err}")
+    unless peak ≤ boundMB do
+      throw (IO.userError s!"the checker used {peak} MB (bound: {boundMB} MB)")
+    pure (some out)
+
 /-- (A14) The self-hosted checker's output for a set of module files: `input.wiz` is the
 root module, the others are modules (written beside it, subdirectories included). `args`
 go to the checker (`-I DIR`, `--key`). -/

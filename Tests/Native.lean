@@ -14,8 +14,9 @@ The group also checks the **trust ledger** (`scripts/trust-ledger.sh`,
 `.github/trust-baseline.tsv`): every declaration of `lib/` is run through
 `#print axioms`, and a source of trust that is not in the checked-in baseline — an
 axiom, `sorry`, `native_refl`, `implemented_by`/`repr:`, SMT or `builtin`
-registration, or a `partial` definition — fails until it is reviewed and the baseline
-is regenerated. The `hdl-verified` group checks the axiom-free example the same way.
+registration, or a `partial` definition — fails until it is reviewed and given a ledger
+row with a reason, an owner and a review date; rows expire. The `hdl-verified` group
+checks the axiom-free example the same way.
 -/
 
 open Wiz
@@ -252,116 +253,383 @@ def rejectSorry (files : List System.FilePath) : IO Unit := do
     | [] => pure ()
     | off :: _ => throw (IO.userError s!"{f}:{lineOf src off}: `sorry` is not checked by the kernel; it is never allowed in the trusted base")
 
-/-- The ledger's lines: `module<TAB>declaration<TAB>item`, sorted and deduplicated. With
-`includeExamples`, the axiom-free examples' own declarations are included too. -/
-def ledgerLines (includeExamples : Bool) : IO (List String) := do
-  let libFiles ← wizFiles "lib"
-  rejectSorry libFiles
-  let s ← libTrustState
-  noTrustErrors "the library" s
-  check (s.globals.order.size > 1000) s!"only {s.globals.order.size} library declarations"
-  let libLabel (n : Name) : String := trustModuleOf s.globals n
-  let libSources := trustSources s.globals libLabel
-  checkCovered s.globals libSources
-  let mut sources := libSources
-  if includeExamples then
-    for path in trustLedgerExamples do
-      rejectSorry [path]
-      let es ← exampleTrustState path
-      noTrustErrors path es
-      let own (n : Name) : Bool := es.globals.declModule[n]?.isNone
-      let labelOf (n : Name) : String := if own n then path else ""
-      let ownSources := (trustSources es.globals labelOf own)
-      -- an example's declarations may depend on the library's trusted base, so the
-      -- walk checks against both; its own sources are what the baseline would gain
-      checkCovered es.globals (libSources ++ ownSources) own
-      sources := sources ++ ownSources
-  let lines := (sources.map TrustSource.line).toArray.qsort (· ≤ ·) |>.toList.eraseDups
-  pure lines
+/-- The ledger's sources: `module<TAB>declaration<TAB>item`, sorted and deduplicated.
+With `includeExamples`, the axiom-free examples' own declarations are included too.
+`root` is for the fixture trees under `Tests/trust-ledger/` (a directory of `.wiz`
+modules); it is not part of the checked-in ledger. -/
+def ledgerSources (includeExamples : Bool) (root : Option String := none) : IO (List TrustSource) := do
+  match root with
+  | some dir =>
+    -- A fixture tree: elaborate its modules with the library importable, but count only
+    -- its own declarations (as the examples are counted).
+    rejectSorry (← wizFiles dir)
+    let mods ← Wiz.Module.listRoot dir
+    let input := String.join (mods.toList.map fun (n, _) => s!"import {n}\n")
+    let all ← Wiz.Module.loadAll ["lib", dir]
+    let loader (n : Name) : Option String := all[n]?.map (·.2)
+    let s := runFrontend (R := ZeroOneMany) input
+      { loader, trustedModule := Tests.libModule, trustNative := true, smt := { trust := true } }
+    noTrustErrors dir s
+    let ownModules := mods.toList.map fun (n, _) => n
+    let own (n : Name) : Bool :=
+      match s.globals.declModule[n]? with
+      | some m => ownModules.contains m
+      | none => false
+    let label (n : Name) : String := trustModuleOf s.globals n
+    let sources := trustSources s.globals label own
+    checkCovered s.globals sources own
+    pure (sources.eraseDups.toArray.qsort (fun a b => TrustSource.line a ≤ TrustSource.line b) |>.toList)
+  | none =>
+    let libFiles ← wizFiles "lib"
+    rejectSorry libFiles
+    let s ← libTrustState
+    noTrustErrors "the library" s
+    check (s.globals.order.size > 1000) s!"only {s.globals.order.size} library declarations"
+    let libLabel (n : Name) : String := trustModuleOf s.globals n
+    let libSources := trustSources s.globals libLabel
+    checkCovered s.globals libSources
+    let mut sources := libSources
+    if includeExamples then
+      for path in trustLedgerExamples do
+        rejectSorry [path]
+        let es ← exampleTrustState path
+        noTrustErrors path es
+        let own (n : Name) : Bool := es.globals.declModule[n]?.isNone
+        let labelOf (n : Name) : String := if own n then path else ""
+        let ownSources := (trustSources es.globals labelOf own)
+        -- an example's declarations may depend on the library's trusted base, so the
+        -- walk checks against both; its own sources are what the baseline would gain
+        checkCovered es.globals (libSources ++ ownSources) own
+        sources := sources ++ ownSources
+    pure (sources.eraseDups.toArray.qsort (fun a b => TrustSource.line a ≤ TrustSource.line b) |>.toList)
+
+/-- The ledger's lines, sorted and deduplicated (what `--print` prints). -/
+def ledgerLines (includeExamples : Bool) (root : Option String := none) : IO (List String) := do
+  pure ((← ledgerSources includeExamples root).map TrustSource.line)
 
 def trustBaseline : System.FilePath := ".github/trust-baseline.tsv"
 
 def trustBaselineHeader : String :=
   "# The Wiz trust ledger: the trusted base of lib/ (and the axiom-free examples).\n" ++
-  "# One line per source of trust: module<TAB>declaration<TAB>item.  `item` is the wording\n" ++
-  "# of `#print axioms` (`axiom X`, `native f := g` for implemented_by, `native T := mk/get`\n" ++
-  "# for a repr registration, `native_refl X.native✝`, `smt X.smt✝…`, `builtin k := n`), or\n" ++
-  "# `partial` for a partial definition (its body is compiled, not unfolded).\n" ++
+  "# One row per source of trust, tab-separated:\n" ++
+  "#   module, declaration, item, reason, owner, review\n" ++
+  "# `item` is the wording of `#print axioms`: `axiom X`, `native f := g` for\n" ++
+  "# implemented_by, `native T := mk/get` for a repr registration, `native_refl\n" ++
+  "# X.native✝` (compiled evaluation, the analogue of Lean's native_decide), `smt\n" ++
+  "# X.smt✝…`, `builtin k := n` (including `extern:`/FFI registrations), or `partial`.\n" ++
   "# `builtin inline` (a compiler hint) and `builtin int` (how values print) are not\n" ++
-  "# trust and are not listed. A new line fails the `native` group (and\n" ++
-  "# scripts/trust-ledger.sh): review it, then regenerate this file with\n" ++
-  "# `scripts/trust-ledger.sh --update`.\n"
+  "# trust and are not listed.\n" ++
+  "# Every row needs a non-empty reason, owner and review date (YYYY-MM-DD); a row\n" ++
+  "# is expired when its review date is before today. Rows from the migration still\n" ++
+  "# say `legacy: pre-gate baseline; not individually reviewed` and owner\n" ++
+  "# `unassigned`: they are only counted (and --strict-legacy fails on them).\n" ++
+  "# A new source fails the `native` group and scripts/trust-ledger.sh --check; add a\n" ++
+  "# reviewed row with:\n" ++
+  "#   scripts/trust-ledger.sh --update --reason \"why it is trusted\" --owner \"who\"\n"
 
-def readTrustBaseline : IO (List String) := do
-  unless ← trustBaseline.pathExists do
-    throw (IO.userError s!"no {trustBaseline}: run scripts/trust-ledger.sh --update")
-  let text ← IO.FS.readFile trustBaseline
-  pure (text.splitOn "\n" |>.map (·.trimAsciiEnd.toString) |>.filter fun l => !l.isEmpty && !l.startsWith "#")
+/-- The kind of a ledger `item`: `axiom`, `native_refl`, `smt`, `native`, `builtin` or
+`partial`. Used to explain a renamed declaration (a new name with the old one still in
+the ledger), not to accept it. -/
+def trustItemKind (item : String) : String :=
+  match item.splitOn " " with
+  | k :: _ => k
+  | [] => item
 
-/-- The baseline lines in the scope of `includeExamples`: without examples, the lines
-labelled with an example path are left out (the `native` group checks `lib/` alone; the
-`hdl-verified` group checks the example in its own heavy case). -/
-def baselineFor (lines : List String) (includeExamples : Bool) : List String :=
-  if includeExamples then lines
-  else lines.filter fun l => !(((l.splitOn "\t").headD "").startsWith "examples/")
+/-- A ledger row: a source plus the review metadata. `reason`, `owner` and `review` are
+all required; a row from before the gate has the reason `legacy: pre-gate baseline;
+not individually reviewed` and the owner `unassigned`, and is counted as legacy. -/
+structure TrustRow where
+  module : String
+  name : String
+  item : String
+  reason : String := ""
+  owner : String := ""
+  review : String := ""
+  deriving Repr, BEq, Inhabited
 
-/-- Compare `actual` with `baseline`, failing on either a new trust (the security
-relevant direction) or a stale baseline entry. -/
-def compareTrust (what : String) (actual baseline : List String) : IO Nat := do
-  let added := actual.filter fun l => !baseline.contains l
-  let removed := baseline.filter fun l => !actual.contains l
-  if !added.isEmpty || !removed.isEmpty then
-    let fmt (sign : String) (ls : List String) : String :=
-      "\n" ++ "\n".intercalate (ls.map fun l => s!"  {sign} {l.replace "\t" " | "}")
-    let parts :=
-      (if added.isEmpty then "" else s!"\nnew trust ({added.length}):{fmt "+" added}") ++
-      (if removed.isEmpty then "" else s!"\nstale baseline ({removed.length}; regenerate the file):{fmt "-" removed}")
-    throw (IO.userError s!"{what} changed ({actual.length} items, baseline {baseline.length}):{parts}\n\nreview each new trust, then run scripts/trust-ledger.sh --update")
-  pure baseline.length
+/-- A row that still has the migration's sentinel reason/owner (it has not been
+individually reviewed). -/
+def TrustRow.isLegacy (r : TrustRow) : Bool :=
+  r.reason.startsWith "legacy:" || r.owner == "unassigned"
 
-/-- Check the ledger against `.github/trust-baseline.tsv`; returns its item count. -/
-def checkTrustLedger (includeExamples : Bool := true) : IO Nat := do
-  let actual ← ledgerLines includeExamples
-  compareTrust "the trust ledger" actual (baselineFor (← readTrustBaseline) includeExamples)
+def TrustRow.key (r : TrustRow) : String :=
+  s!"{r.module}\t{r.name}\t{r.item}"
 
-/-- Check one axiom-free example's own declarations against its part of the baseline,
-from the state a case already elaborated (no second elaboration). -/
-def checkExampleTrustLedger (path : String) (g : Globals ZeroOneMany) : IO Nat := do
+def TrustRow.line (r : TrustRow) : String :=
+  s!"{r.key}\t{r.reason}\t{r.owner}\t{r.review}"
+
+def TrustRow.ofLine (l : String) : Except String TrustRow :=
+  match l.splitOn "\t" with
+  | [module, name, item] => .ok { module, name, item }
+  | [module, name, item, _reason] =>
+    .error s!"row {module} | {name} | {item}: a reason needs an owner and a review date (columns: module, declaration, item, reason, owner, review)"
+  | [module, name, item, _reason, _owner] =>
+    .error s!"row {module} | {name} | {item}: missing the review date (columns: module, declaration, item, reason, owner, review)"
+  | [module, name, item, reason, owner, review] =>
+    .ok { module, name, item, reason, owner, review }
+  | fields =>
+    .error s!"expected 3 or 6 tab-separated columns, got {fields.length}: {l}"
+
+def readTrustRows (path : System.FilePath) : IO (List TrustRow) := do
+  unless ← path.pathExists do
+    throw (IO.userError s!"no {path}: run scripts/trust-ledger.sh --update")
+  let text ← IO.FS.readFile path
+  let lines := text.splitOn "\n" |>.map fun l =>
+    if l.endsWith "\r" then (l.dropEnd 1).toString else l
+  let mut rows : List TrustRow := []
+  for l in lines do
+    if l.isEmpty || l.startsWith "#" then continue
+    match TrustRow.ofLine l with
+    | .ok r => rows := rows ++ [r]
+    | .error e => throw (IO.userError s!"{path}: {e}")
+  let keys := rows.map TrustRow.key
+  if keys.eraseDups.length != keys.length then
+    let dup := keys.find? fun k => keys.count k > 1
+    throw (IO.userError s!"{path}: duplicate ledger row: {dup.getD "?"}")
+  pure rows
+
+def isDateDigits (s : String) : Bool :=
+  !s.isEmpty && s.toList.all fun c => c.isDigit
+
+/-- `YYYY-MM-DD`, with a real month and day number. (Lexicographic order is date order.) -/
+def validDate (s : String) : Bool :=
+  match s.splitOn "-" with
+  | [y, m, d] =>
+    y.length == 4 && m.length == 2 && d.length == 2 &&
+    isDateDigits y && isDateDigits m && isDateDigits d &&
+    (match m.toNat?, d.toNat? with
+     | some mi, some di => 1 ≤ mi && mi ≤ 12 && 1 ≤ di && di ≤ 31
+     | _, _ => false)
+  | _ => false
+
+def leapYear (y : Nat) : Bool :=
+  y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
+
+def daysInMonth (y m : Nat) : Nat :=
+  match m with
+  | 1 | 3 | 5 | 7 | 8 | 10 | 12 => 31
+  | 4 | 6 | 9 | 11 => 30
+  | 2 => if leapYear y then 29 else 28
+  | _ => 0
+
+/-- `date` plus `n` days, as `YYYY-MM-DD` (an unparseable date is returned unchanged). -/
+def addDays (date : String) (n : Nat) : String :=
+  match date.splitOn "-" with
+  | [ys, ms, ds] =>
+    match ys.toNat?, ms.toNat?, ds.toNat? with
+    | some y, some m, some d =>
+      let (y, m, d) := (List.range n).foldl (fun (y, m, d) _ =>
+        if d < daysInMonth y m then (y, m, d + 1)
+        else if m < 12 then (y, m + 1, 1)
+        else (y + 1, 1, 1)) (y, m, d)
+      s!"{y}-{if m < 10 then "0" else ""}{m}-{if d < 10 then "0" else ""}{d}"
+    | _, _, _ => date
+  | _ => date
+
+/-- Today (UTC), for expiry. `--today` overrides it (tests use a fixed date). -/
+def currentDate : IO String := do
+  let out ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%d"] }
+  let s := out.stdout.trimAscii.toString
+  pure (if out.exitCode == 0 && validDate s then s else "1970-01-01")
+
+def defaultOwner : IO String := do
+  let out ← IO.Process.output { cmd := "git", args := #["config", "--get", "user.name"] }
+  let s := out.stdout.trimAscii.toString
+  if out.exitCode == 0 && !s.isEmpty then return s
+  match ← IO.getEnv "USER" with
+  | some u => if u.isEmpty then pure "unowned" else pure u
+  | none => pure "unowned"
+
+def missingMetadata (r : TrustRow) : List String :=
+  (if r.reason.trimAscii.toString.isEmpty then ["a reason"] else []) ++
+  (if r.owner.trimAscii.toString.isEmpty then ["an owner"] else []) ++
+  (if r.review.trimAscii.toString.isEmpty then ["a review date"] else [])
+
+structure TrustReport where
+  count : Nat
+  legacy : Nat
+
+/-- Compare the actual sources with the ledger rows. Fails on a new source (the security
+relevant direction), a stale row, an incomplete row (a reason, owner and review date are
+all required once any is present), an invalid or expired review date, and — with
+`strictLegacy` — a row still carrying the migration reason/owner. -/
+def compareTrust (what : String) (actual : List TrustSource) (rows : List TrustRow)
+    (today : String) (strictLegacy : Bool := false) : IO TrustReport := do
+  let actualLines := actual.map TrustSource.line
+  let rowLines := rows.map TrustRow.key
+  let added := actual.filter fun s => !rowLines.contains (TrustSource.line s)
+  let removed := rows.filter fun r => !actualLines.contains (TrustRow.key r)
+  let mut problems : List String := []
+  let legacy := rows.filter TrustRow.isLegacy |>.length
+  for r in rows do
+    if r.reason.trimAscii.toString.isEmpty && r.owner.trimAscii.toString.isEmpty &&
+        r.review.trimAscii.toString.isEmpty then
+      problems := problems ++ [s!"{TrustRow.key r}: missing a reason, an owner and a review date (new rows need all three)"]
+    else
+      let miss := missingMetadata r
+      if !miss.isEmpty then
+        problems := problems ++ [s!"{TrustRow.key r}: missing {" and ".intercalate miss}"]
+      else if !validDate r.review then
+        problems := problems ++ [s!"{TrustRow.key r}: review date '{r.review}' is not YYYY-MM-DD"]
+      else if r.review < today then
+        problems := problems ++ [s!"{TrustRow.key r}: expired on {r.review} (today {today}; owner {r.owner})"]
+  if strictLegacy && legacy > 0 then
+    problems := problems ++ [s!"{legacy} legacy rows still have the pre-gate reason/owner (review them, or run without --strict-legacy)"]
+  if added.isEmpty && removed.isEmpty && problems.isEmpty then
+    return { count := actual.length, legacy }
+  let fmt (sign : String) (ls : List String) : String :=
+    "\n" ++ "\n".intercalate (ls.map fun l => s!"  {sign} {l}")
+  let renames := added.filterMap fun a =>
+    match removed.find? (fun r => r.module == a.module && trustItemKind r.item == trustItemKind a.item) with
+    | some r => some s!"  {a.module} | {r.name} -> {a.name} ({a.item})"
+    | none => none
+  let parts :=
+    (if problems.isEmpty then "" else
+      s!"\nrows that need review ({problems.length}):\n" ++ "\n".intercalate (problems.map fun p => s!"  ! {p}")) ++
+    (if added.isEmpty then "" else
+      s!"\nnew source of trust ({added.length}): each needs a reviewed row (reason, owner, review date):" ++
+      fmt "+" (added.map TrustSource.line)) ++
+    (if removed.isEmpty then "" else
+      s!"\nstale ledger row ({removed.length}): regenerate the ledger:" ++
+      fmt "-" (removed.map TrustRow.key)) ++
+    (if renames.isEmpty then "" else
+      s!"\nrenamed declaration ({renames.length}):" ++ "\n" ++ "\n".intercalate renames)
+  throw (IO.userError s!"{what} changed ({actual.length} sources, {rows.length} ledger rows):{parts}\n\nreview each new trust, then run:\n  scripts/trust-ledger.sh --update --reason \"why it is trusted\" --owner \"who reviewed it\"")
+
+/-- Check the ledger (`.github/trust-baseline.tsv` by default); returns its source count
+and its legacy-row count. -/
+def checkTrustLedger (includeExamples : Bool := true) (root : Option String := none)
+    (ledger : System.FilePath := trustBaseline) (today : String := "")
+    (strictLegacy : Bool := false) : IO TrustReport := do
+  let today ← if today.isEmpty then currentDate else pure today
+  let actual ← ledgerSources includeExamples root
+  let rows ← readTrustRows ledger
+  -- `--lib-only` (the `native` group) leaves the examples' rows out, as before.
+  let rows := if includeExamples then rows else rows.filter fun r => !r.module.startsWith "examples/"
+  compareTrust "the trust ledger" actual rows today strictLegacy
+
+/-- Check one axiom-free example's own declarations against its part of the ledger, from
+the state a case already elaborated (no second elaboration). -/
+def checkExampleTrustLedger (path : String) (g : Globals ZeroOneMany)
+    (today : String := "") : IO TrustReport := do
+  let today ← if today.isEmpty then currentDate else pure today
   let own (n : Name) : Bool := g.declModule[n]?.isNone
   let libLabel (n : Name) : String := trustModuleOf g n
   let libSources := trustSources g libLabel (fun n => !own n)
   let labelOf (n : Name) : String := if own n then path else ""
   let ownSources := trustSources g labelOf own
   checkCovered g (libSources ++ ownSources) own
-  let actual := (ownSources.map TrustSource.line).toArray.qsort (· ≤ ·) |>.toList.eraseDups
-  let baseline := (← readTrustBaseline).filter fun l => ((l.splitOn "\t").headD "") == path
-  compareTrust path actual baseline
+  let actual := ownSources.eraseDups.toArray.qsort (fun a b => TrustSource.line a ≤ TrustSource.line b) |>.toList
+  let rows := (← readTrustRows trustBaseline).filter fun r => r.module == path
+  compareTrust path actual rows today
 
-def updateTrustLedger (includeExamples : Bool) : IO Unit := do
-  let lines ← ledgerLines includeExamples
-  IO.FS.writeFile trustBaseline (trustBaselineHeader ++ "\n".intercalate lines ++ "\n")
-  IO.println s!"wrote {trustBaseline} ({lines.length} items)"
-
-/-- `tests --trust-ledger [--check|--update|--print] [--lib-only]` (`scripts/trust-ledger.sh`). -/
-def trustLedgerMain (args : List String) : IO UInt32 := do
-  let known := ["--check", "--update", "--print", "--lib-only"]
-  let bad := args.filter fun a => !known.contains a
-  unless bad.isEmpty do
-    IO.eprintln s!"usage: tests --trust-ledger [--check|--update|--print] [--lib-only] (unknown: {" ".intercalate bad})"
+/-- `--update`: regenerate the ledger, preserving the metadata of rows that stay. A row
+that appears for the first time is refused unless `reason` is non-empty; the new row
+gets `owner` (or the git user) and `review` (or today + 180 days). An explicit `review`
+also renews rows that still carry the migration marker. -/
+def updateTrustLedger (includeExamples : Bool) (root : Option String) (ledger : System.FilePath)
+    (reason owner review today : String) (reviewGiven : Bool := false) : IO UInt32 := do
+  let today ← if today.isEmpty then currentDate else pure today
+  let actual ← ledgerSources includeExamples root
+  let old ← readTrustRows ledger
+  let oldKeys := old.map TrustRow.key
+  let newSources := actual.filter fun s => !oldKeys.contains (TrustSource.line s)
+  let reason := reason.trimAscii.toString
+  if !newSources.isEmpty && reason.isEmpty then
+    let fmt := "\n" ++ "\n".intercalate (newSources.map fun s => s!"  + {TrustSource.line s}")
+    IO.eprintln s!"trust-ledger: refusing to add {newSources.length} new row(s) without a reason:{fmt}\n\nA reviewed row needs a reason, an owner and a review date. Run again with:\n  scripts/trust-ledger.sh --update --reason \"why it is trusted\" --owner \"who reviewed it\""
     return 2
-  let includeExamples := !args.contains "--lib-only"
-  if args.contains "--update" then
-    if !includeExamples then
+  if reason.toList.any fun c => c == '\t' || c == '\n' then
+    IO.eprintln "trust-ledger: --reason must be one line, without tabs"
+    return 2
+  let owner ← if owner.trimAscii.toString.isEmpty then defaultOwner else pure owner.trimAscii.toString
+  let review := if review.trimAscii.toString.isEmpty then addDays today 180 else review.trimAscii.toString
+  unless validDate review do
+    IO.eprintln s!"trust-ledger: --review must be YYYY-MM-DD (got '{review}')"
+    return 2
+  if review < today then
+    IO.eprintln s!"trust-ledger: --review {review} is before today ({today}); a new row cannot be expired already"
+    return 2
+  let actualKeys := actual.map TrustSource.line
+  let kept := old.filterMap fun r =>
+    if !actualKeys.contains (TrustRow.key r) then none
+    -- An explicit --review renews the rows that still carry the migration marker.
+    else if reviewGiven && r.isLegacy then some { r with review }
+    else some r
+  let renewed := if reviewGiven then (old.filter fun r => r.isLegacy && actualKeys.contains (TrustRow.key r)).length else 0
+  let newRows := newSources.map fun s =>
+    { module := s.module, name := s.name, item := s.item, reason, owner, review : TrustRow }
+  let rows := (kept ++ newRows).toArray.qsort (fun a b => TrustRow.key a ≤ TrustRow.key b) |>.toList
+  IO.FS.writeFile ledger (trustBaselineHeader ++ "\n".intercalate (rows.map TrustRow.line) ++ "\n")
+  IO.println s!"wrote {ledger} ({rows.length} rows: {newRows.length} new, {old.length - kept.length} removed, {renewed} legacy renewed)"
+  return 0
+
+/-- The options of `tests --trust-ledger` (`scripts/trust-ledger.sh`). -/
+structure TrustArgs where
+  check : Bool := false
+  update : Bool := false
+  printLedger : Bool := false
+  libOnly : Bool := false
+  strictLegacy : Bool := false
+  help : Bool := false
+  reason : String := ""
+  owner : String := ""
+  review : String := ""
+  reviewGiven : Bool := false
+  today : String := ""
+  root : Option String := none
+  ledger : Option String := none
+
+def trustLedgerUsage : String :=
+  "usage: tests --trust-ledger [--check|--update|--print] [--lib-only]\n" ++
+  "       [--reason STR] [--owner STR] [--review YYYY-MM-DD] [--today YYYY-MM-DD]\n" ++
+  "       [--tree DIR] [--ledger FILE] [--strict-legacy]"
+
+def parseTrustArgs (args : List String) : Except String TrustArgs :=
+  let rec go (a : TrustArgs) : List String → Except String TrustArgs
+    | [] => .ok a
+    | "--check" :: rest => go { a with check := true } rest
+    | "--update" :: rest => go { a with update := true } rest
+    | "--print" :: rest => go { a with printLedger := true } rest
+    | "--lib-only" :: rest => go { a with libOnly := true } rest
+    | "--strict-legacy" :: rest => go { a with strictLegacy := true } rest
+    | "--help" :: rest => go { a with help := true } rest
+    | "--reason" :: v :: rest => go { a with reason := v } rest
+    | "--owner" :: v :: rest => go { a with owner := v } rest
+    | "--review" :: v :: rest => go { a with review := v, reviewGiven := true } rest
+    | "--today" :: v :: rest => go { a with today := v } rest
+    | "--tree" :: v :: rest => go { a with root := some v } rest
+    | "--ledger" :: v :: rest => go { a with ledger := some v } rest
+    | "--reason" :: [] | "--owner" :: [] | "--review" :: [] | "--today" :: []
+    | "--tree" :: [] | "--ledger" :: [] =>
+      .error "an option needs a value"
+    | f :: _ => .error s!"unknown option: {f}"
+  go {} args
+
+/-- `tests --trust-ledger [--check|--update|--print] [--lib-only]` (`scripts/trust-ledger.sh`).
+`--tree` and `--ledger` point at a fixture tree (Tests/trust-ledger/); `--today` fixes the
+date for the expiry tests. -/
+def trustLedgerMain (args : List String) : IO UInt32 := do
+  let a ← match parseTrustArgs args with
+    | .ok a => pure a
+    | .error e => IO.eprintln s!"trust-ledger: {e}\n{trustLedgerUsage}"; return 2
+  if a.help then IO.println trustLedgerUsage; return 0
+  if !a.today.isEmpty && !validDate a.today then
+    IO.eprintln s!"trust-ledger: --today must be YYYY-MM-DD (got '{a.today}')"
+    return 2
+  let includeExamples := a.root.isNone && !a.libOnly
+  let ledger := System.FilePath.mk (a.ledger.getD trustBaseline.toString)
+  if a.update then
+    if a.root.isNone && !includeExamples then
       IO.eprintln "trust-ledger: --update always includes the examples (they are part of the ledger)"
       return 2
-    updateTrustLedger true
-    return 0
-  if args.contains "--print" then
-    for l in ← ledgerLines includeExamples do IO.println l
+    return ← updateTrustLedger includeExamples a.root ledger a.reason a.owner a.review a.today a.reviewGiven
+  if a.printLedger then
+    for l in ← ledgerLines includeExamples a.root do IO.println l
     return 0
   try
-    let n ← checkTrustLedger includeExamples
-    IO.println s!"trust ledger: OK ({n} sources in the checked scope)"
+    let r ← checkTrustLedger includeExamples a.root ledger a.today a.strictLegacy
+    IO.println s!"trust ledger: OK ({r.count} sources in the checked scope; {r.legacy} legacy rows (pre-gate reason/owner))"
     return 0
   catch e =>
     IO.eprintln e
@@ -527,7 +795,15 @@ def group : Group where
         -- source (axiom, `sorry`, native_refl, implemented_by, SMT, builtin, partial)
         -- fails. The examples that must be axiom-free are checked in `hdl-verified`.
         let _ ← checkTrustLedger (includeExamples := false)
-        pure () }
+        pure () },
+    { name := "the trust gate: fixture trees, exit codes and messages (Tests/trust-ledger/)", run := fun _ => do
+        -- The gate itself is checked against small trees: a new axiom with no row, a
+        -- row with no reason, an expired row, a renamed declaration, and a clean tree.
+        -- The script checks the CLI's exit codes and messages, not the library (the
+        -- cases above do that).
+        let out ← IO.Process.output { cmd := "sh", args := #["Tests/trust-ledger/run.sh"] }
+        unless out.exitCode == 0 do
+          throw (IO.userError s!"Tests/trust-ledger/run.sh failed (exit {out.exitCode}):\n{out.stdout}\n{out.stderr}") }
   ]
 
 /-- H14 V1 (docs/libraries.md): the OLED demo's arithmetic units, against their Nat

@@ -1,0 +1,4 @@
+import Prelude
+
+/-- A renamed fixture axiom: the ledger still has the old name. -/
+axiom renamedNew : Nat

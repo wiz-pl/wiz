@@ -389,7 +389,10 @@ for linear structures). Like 13h it reads the fields through `structLayout?`, an
 refused for a structure that is opaque in the current module.
 
 Syntax: `term.structUpdate`, `"{" term "with" (ident ":=" term),+ "}"`. No new reserved
-word (`with` already is one). Tests: `language` ("structure update …"), `parser: terms`.
+word (`with` already is one). An updated field's value may itself be an update
+(`{ s with inner := { t with x := 1 } }`); that is a term nested in the update, not a
+field path (13p). Tests: `language` ("structure update …"), `elab` ("structure update
+{ s with f := v } …"), `parser: terms`.
 
 ## 13j: keyword scopes
 
