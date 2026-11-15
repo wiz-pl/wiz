@@ -912,7 +912,12 @@ data edges, so return values are modelled. `import Scry.Taint` feeds those edges
 Datalog engine (`lib/Scry/Datalog.wiz`, `lib/Scry/Eval.wiz`) with a `TaintSpec` of
 source, sanitiser and sink calls; the source -> sink path of each finding comes from the
 engine's provenance. `import Scry.TaintExamples` is the hand-built corpus used by the
-`scry-taint` group.
+`scry-taint` group. `Scry.Store` keeps the authoritative insertion-ordered rows and, above
+24 rows, a hashed dedup index plus `(column, value)` join indexes; `Scry.Eval` matches an
+atom through the shortest bound-column bucket, skips a delta-loop variant whose anchor
+relation did not move, and indexes provenance by fact hash. The semantics and findings
+are unchanged; `examples/scry-datalog-bench.wiz` is the benchmark and
+`wiz-notes/scry-datalog.md` §8 has the measurements and limits.
 
 The S4 rule pack and interprocedural slice are separate modules:
 
