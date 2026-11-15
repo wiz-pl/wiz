@@ -37,13 +37,13 @@ def Scry.demoWil : Wil.Func :=
   let z := Wil.var 2 Wil.i32;
   Wil.funcAt "f" [x] [y, z]
     [ Wil.block
-        [ Wil.withOrigin (Wil.copy y x) (Wil.Span.mk 0 10 20 1)
-        , Wil.withOrigin (Wil.binop z .add y x) (Wil.Span.mk 0 30 40 2) ]
-        (Wil.withTermOrigin (Wil.retV z) (Wil.Span.mk 0 50 60 3))
+        [ Wil.withOrigin (Wil.copy y x) (Wil.Span.mk 0 10 20 1 0 0)
+        , Wil.withOrigin (Wil.binop z .add y x) (Wil.Span.mk 0 30 40 2 0 0) ]
+        (Wil.withTermOrigin (Wil.retV z) (Wil.Span.mk 0 50 60 3 0 0))
     , Wil.block
-        [ Wil.withOrigin (Wil.num y 0) (Wil.Span.mk 0 70 80 4) ]
-        (Wil.withTermOrigin (Wil.jump (Wil.mkBlockId 0)) (Wil.Span.mk 0 90 100 5)) ]
-    (Wil.Span.mk 0 0 110 7)
+        [ Wil.withOrigin (Wil.num y 0) (Wil.Span.mk 0 70 80 4 0 0) ]
+        (Wil.withTermOrigin (Wil.jump (Wil.mkBlockId 0)) (Wil.Span.mk 0 90 100 5 0 0)) ]
+    (Wil.Span.mk 0 0 110 7 0 0)
 
 /-- The analysis of `demoWil`: points, uses, definitions, dependence edges. -/
 def Scry.demoFnInfo : Scry.FnInfo := Scry.fnInfo Scry.demoWil

@@ -420,6 +420,7 @@ def Scry.benchValidPath (f : Scry.RuleFinding) : Bool :=
   Bool.and (Scry.benchPathReachesSink f)
     (match f.kind with
       | .forbidden => .true
+      | .memory => .true
       | .taint => Scry.benchPathStartsAtSource f)
 
 /-- The line of the first path node, if the origin map has it. -/
@@ -662,8 +663,9 @@ def Scry.benchRunCase (measure : Bool) (c : Scry.BenchCase) : EIO Scry.BenchCase
         r.boundaries);
       let v := Scry.benchOutcome c.expect c.findings actual blocking;
       let taint := List.length (List.filter (fun f => match f.kind with
-        | .taint => .true | .forbidden => .false) actual);
-      let forbidden := Nat.sub (List.length actual) taint;
+        | .taint => .true | .forbidden => .false | .memory => .false) actual);
+      let forbidden := List.length (List.filter (fun f => match f.kind with
+        | .forbidden => .true | _ => .false) actual);
       let valid := List.length (List.filter (fun f => f.validPath) actual);
       let reach := List.length (List.filter (fun f => f.reachSink) actual);
       let checked := List.length (List.filter (fun f => f.checked) actual);

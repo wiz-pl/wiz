@@ -72,25 +72,25 @@ def showTuples (ts : List (List Nat)) : String :=
 
 -- 8. Lens and Traversal laws, on the fixture and on the canonical list traversal.
 #eval "lens-id " ++ (match Scry.Lens.over Scry.Wil.stmtOriginL (fun sp => sp) 
-  (Wil.withOrigin (Wil.copy (Wil.var 1 Wil.i32) (Wil.var 0 Wil.i32)) (Wil.Span.mk 0 3 4 1)) with
+  (Wil.withOrigin (Wil.copy (Wil.var 1 Wil.i32) (Wil.var 0 Wil.i32)) (Wil.Span.mk 0 3 4 1 0 0)) with
   | .assign x e o => Nat.repr o.start
   | _ => "other")
 #eval "lens-getOver " ++ (match Scry.Lens.over Scry.Wil.stmtOriginL
-    (fun sp => Wil.Span.mk sp.file (Nat.add sp.start 5) sp.stop sp.node)
-    (Wil.withOrigin (Wil.copy (Wil.var 1 Wil.i32) (Wil.var 0 Wil.i32)) (Wil.Span.mk 0 3 4 1)) with
+    (fun sp => Wil.Span.mk sp.file (Nat.add sp.start 5) sp.stop sp.node sp.line sp.col)
+    (Wil.withOrigin (Wil.copy (Wil.var 1 Wil.i32) (Wil.var 0 Wil.i32)) (Wil.Span.mk 0 3 4 1 0 0)) with
   | .assign x e o => Nat.repr (Wil.stmtOrigin (.assign x e o)).start
   | _ => "other")
 #eval "lens-overOver " ++ (match Scry.Lens.over Scry.Wil.stmtOriginL
-    (fun sp => Wil.Span.mk sp.file (Nat.add sp.start 1) sp.stop sp.node)
+    (fun sp => Wil.Span.mk sp.file (Nat.add sp.start 1) sp.stop sp.node sp.line sp.col)
     (Scry.Lens.over Scry.Wil.stmtOriginL
-      (fun sp => Wil.Span.mk sp.file (Nat.add sp.start 2) sp.stop sp.node)
-      (Wil.withOrigin (Wil.copy (Wil.var 1 Wil.i32) (Wil.var 0 Wil.i32)) (Wil.Span.mk 0 3 4 1))) with
+      (fun sp => Wil.Span.mk sp.file (Nat.add sp.start 2) sp.stop sp.node sp.line sp.col)
+      (Wil.withOrigin (Wil.copy (Wil.var 1 Wil.i32) (Wil.var 0 Wil.i32)) (Wil.Span.mk 0 3 4 1 0 0))) with
   | .assign x e o => Nat.repr o.start
   | _ => "other")
 #eval "origins-law " ++ spanStarts (Scry.Fold.toList
   (Scry.Traversal.toFold Scry.Wil.funcStmtOriginsT)
   (Scry.Traversal.over Scry.Wil.funcStmtOriginsT
-    (fun sp => Wil.Span.mk sp.file (Nat.add sp.start 7) sp.stop sp.node) Scry.demoWil))
+    (fun sp => Wil.Span.mk sp.file (Nat.add sp.start 7) sp.stop sp.node sp.line sp.col) Scry.demoWil))
 #eval "traversal-list " ++ showNats
   (Scry.Traversal.over Scry.Traversal.list (fun n => Nat.add n 1) [1, 2, 3])
 #eval "traversal-list-id " ++ showNats

@@ -478,7 +478,8 @@ semantics unchanged. This is the rewrite shape optics are good at: a path to a s
 part, a local pure update. -/
 def Scry.Optics.shiftStmtOrigins (d : Nat) (fn : Wil.Func) : Wil.Func :=
   Scry.Traversal.over Scry.Wil.funcStmtOriginsT
-    (fun sp => Wil.Span.mk sp.file (Nat.add sp.start d) (Nat.add sp.stop d) sp.node) fn
+    (fun sp => Wil.Span.mk sp.file (Nat.add sp.start d) (Nat.add sp.stop d) sp.node
+      sp.line sp.col) fn
 
 
 /-- Rename the register of every data-dependence edge, pure. -/

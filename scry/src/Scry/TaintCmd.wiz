@@ -239,18 +239,18 @@ def Scry.loadTaintPack (rules : Option String) : EIO Scry.RulePack :=
 /-- The byte offsets where each line starts (`0`, then one past every `\n`). Built once
 per file: the old `lineColAt` walked the source from byte 0 for **every** origin entry,
 which is O(points × file) and dominated the report on a real file. -/
-def Scry.lineStartsGo (b : Bytes) (n : Nat) : Nat → U32Array → U32Array
+def Scry.lineStartsBytesGo (b : Bytes) (n : Nat) : Nat → U32Array → U32Array
   | .zero, acc => acc
   | .succ k, acc =>
     let i := Nat.sub n (Nat.succ k);
     let acc' := match Nat.beq (Bytes.get b i) 10 with
       | .true => U32Array.push acc (U32.ofNat (Nat.succ i))
       | .false => acc;
-    Scry.lineStartsGo b n k acc'
+    Scry.lineStartsBytesGo b n k acc'
 
 def Scry.lineStartsOf (text : String) : U32Array :=
   let b := Bytes.ofString text;
-  Scry.lineStartsGo b (Bytes.size b) (Bytes.size b) (U32Array.ofList (List.cons (U32.ofNat 0) .nil))
+  Scry.lineStartsBytesGo b (Bytes.size b) (Bytes.size b) (U32Array.ofList (List.cons (U32.ofNat 0) .nil))
 
 /-- Binary search for the largest line-start index whose offset is `<= off`. -/
 partial def Scry.lineIndexGo (starts : U32Array) (off : Nat) (lo hi : Nat) : Nat :=
@@ -955,7 +955,7 @@ def Scry.parseRecoveryFindings (uri text : String) (cst : Scry.CstStore) (errs :
     let origin : Option Scry.Origin := match Scry.CstStore.firstError cst with
       | .some i =>
         let sp := Scry.CstStore.spanOf cst i;
-        .some (Scry.originOfSpan uri text (Wil.Span.mk 0 sp.start sp.stop i))
+        .some (Scry.originOfSpan uri text (Wil.Span.mk 0 sp.start sp.stop i 0 0))
       | .none => .none
     .cons (Scry.BoundaryFinding.mk "scry/lowering/parse-recovery" message "<unit>" 0 origin) .nil
 
