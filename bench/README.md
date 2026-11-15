@@ -103,3 +103,10 @@ multiplies by `1 + tolerance`; absolute seconds differ between machines, the rat
 not.  `--check` exits 1 when a file or the total is worse than that, and also when a
 file the baseline checked is rejected now.  Update `baseline_ratios` only for a
 deliberate change (a new corpus entry, a changed prelude), not to make a run green.
+
+## Memory
+
+`../scripts/mem-bench.py` measures peak RSS (not time) of a fixed corpus: cold checks of
+`lib/`, the largest example, a `wiz build`, and the self-hosted checker. It records
+`mem-baseline.json`, gates a run at +25 % relative and at a per-invocation hard cap, and
+has a `--self-test` for the thresholds. See docs/building.md, "Memory budget".
