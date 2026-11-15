@@ -67,7 +67,8 @@ def tablesSource : String :=
   wizTables t ++ s!"def tokens : List String := {wizList (t.tokens.toList.map wizLit)}\n"
 
 def checkerFiles : List String :=
-  ["selfhost/Lex.wiz", "selfhost/Parse.wiz", "selfhost/Kernel.wiz", "selfhost/Frontend.wiz"]
+  ["selfhost/Lex.wiz", "selfhost/Parse.wiz", "selfhost/Kernel.wiz", "selfhost/CParse.wiz",
+   "selfhost/CGlue.wiz", "selfhost/Frontend.wiz"]
 
 /-- The driver (stage 21 D2-D7): the command line, as real Wiz source rather than
 generated strings. It is the last of `compilerFiles`, so `compilerSource` can put it
