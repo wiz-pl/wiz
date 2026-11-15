@@ -21,10 +21,17 @@ def usage : String := "usage:
                                    documentation: a static site (one page per module,
                                    index, search); --lib: the toolchain's library;
                                    source links are URL + path in its root + #L<line>
+  wiz fmt [FILE|-] [--check] [--width N] [--explain]
+                                   reprint a file from its syntax tree (stdin/stdout;
+                                   --check: change nothing, exit 1 when it differs)
   wiz cache prune [--days N] [--dry-run]
                                     remove keyed cache files (.wizc/.wizm/.wizr) older than
                                     N days (default 30) from the write cache; a pruned file is
                                     just a miss, and --cache-ro layers are never touched
+  wiz cache verify [--strict]        check every cache entry against its output manifest
+                                    (a full scan); exit 1 on a mismatch or missing file
+  wiz cache manifest                 rebuild the write cache's manifest.sexpr generation
+                                    index from its per-module manifests
   wiz lsp                          a language server on stdin/stdout
   wiz lsp --infoview SOCK          … and for infoviews on the Unix socket SOCK
   wiz lsp --ws [ADDR:]PORT         … and on a WebSocket (127.0.0.1 unless ADDR is given;
@@ -41,6 +48,9 @@ after the write cache and never written, as in a Nix package's share/wiz/cache),
   --region-cache (experimental: also serve cached modules from mmap'ed .wizr regions,
   read from the same caches and written to the write cache), --region-stats (print what
   the regions served, with --region-cache)
+--cache-verify off|warn|strict (default warn: check an entry's bytes against its output
+  manifest before using it; strict: only manifested entries; --cache-verify=strict works
+  too), --cache-verify-stats (print what the manifests verified)
 trust: --trust-native (27a: `def X : a = b := native_refl` is decided by running a and b;
 the kernel does not check it, `#print axioms` lists it), --native-fuel N (its step limit)
 experimental kernel options (D1, they turn the cache off): --regularity off|full (full:
@@ -163,6 +173,12 @@ initialize regionStatsOpt : IO.Ref Bool ← IO.mkRef false
 /-- `--region-stats`' counters (per process). -/
 initialize regionStats : IO.Ref Cache.RegionCounts ← IO.mkRef {}
 
+/-- `--cache-verify`'s counters (per process). -/
+initialize verifyStats : IO.Ref Cache.VerifyCounts ← IO.mkRef {}
+
+/-- `--cache-verify-stats`: print what output manifests verified (to stderr). -/
+initialize verifyStatsOpt : IO.Ref Bool ← IO.mkRef false
+
 /-- `--cache-prune DAYS`: remove keyed files older than DAYS days from the write cache
 before the run (never from `--cache-ro`; a pruned file is just a miss). -/
 initialize cachePruneOpt : IO.Ref (Option Nat) ← IO.mkRef none
@@ -208,10 +224,11 @@ def takeInertOpt : List String → Except String (Option InertReg × List String
     return (r, a :: rest)
   | [] => return (none, [])
 
-/-- Elaborate a file, through the toolchain's cache (if any). -/
-def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandState ZeroOneMany) := do
-  -- every module the file can reach (`import A.B` is `A/B.wiz` under a root), read up
-  -- front: the frontend is pure
+/-- The initial state the frontend runs from: the module loader (every module the file can
+reach, `import A.B` is `A/B.wiz` under a root, read up front: the frontend is pure), the
+C headers and `link_c` sources, and the kernel/printing options. -/
+def initState (tc : Toolchain) (path : String) (input : String) :
+    IO (CommandState ZeroOneMany × Std.HashMap String String) := do
   let roots ← moduleRoots tc
   let closure ← Module.loadClosure roots input
   let lib : Std.HashMap Name String := closure.fold (fun m n (_, src) => m.insert n src) {}
@@ -219,6 +236,8 @@ def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandSta
   let headers ← Build.preprocessHeaders tc (String.join (input :: lib.values))
   -- (9f) the `link_c` files, each relative to its own file
   let sources ← Module.cSourceTable ((System.FilePath.mk path).parent.getD ".") input closure
+  -- (include-str) the `include_str` files, each relative to its own file
+  let includes ← Module.includeTable ((System.FilePath.mk path).parent.getD ".") input closure
   let (regularity, predicativeProp) ← kernelOpts.get
   let lazyProofs ← lazyProofsOpt.get
   let inertReg ← inertOpt.get
@@ -231,24 +250,47 @@ def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandSta
   let shadow := (← Module.shadowed roots closure).map fun (n, p) =>
     ({ info := {}, severity := .warning,
        text := s!"{p} is ignored: module {n} is the toolchain's own ({roots.head!}), which a module root cannot replace" } : Msg)
+  let strictP ← strictPrivacyOpt.get
+  let useNotation := !(← ppAllOpt.get)
+  let smt ← tc.smt.resolve
+  let pp : PPTable := { useNotation := useNotation }
+  let loader := fun n => lib[n]?
+  let cHeaders := fun h => headers[h]?
   let init : CommandState ZeroOneMany :=
-    { loader := (lib[·]?), cHeaders := (headers[·]?), cSources := some (Module.cSourceResolver sources),
+    { loader := loader, cHeaders := cHeaders, cSources := some (Module.cSourceResolver sources),
+      includes := some (Module.includeResolver includes),
       messages := shadow.toArray,
       globals := { regularity, predicativeProp, lazyProofs, inertReg, unboxStructs, proofSteps, traceProofSteps,
-                   strictPrivacy := ← strictPrivacyOpt.get, pp := { useNotation := !(← ppAllOpt.get) } },
+                   strictPrivacy := strictP, pp := pp },
       trustedModule := own.contains, trustNative := tc.trustNative,
-      nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := ← tc.smt.resolve }
+      nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := smt }
+  pure (init, headers)
+
+/-- Elaborate a file, through the toolchain's cache (if any). -/
+def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandState ZeroOneMany) := do
+  let (init, headers) ← initState tc path input
+  let (regularity, predicativeProp) ← kernelOpts.get
+  let lazyProofs ← lazyProofsOpt.get
+  let inertReg ← inertOpt.get
+  let (proofSteps, traceProofSteps) ← proofStepsOpt.get
+  let unboxStructs ← unboxOpt.get
   -- the cache doesn't know the experimental options
   let cacheOn := regularity == .off && !predicativeProp && lazyProofs && inertReg == .conv && !unboxStructs &&
       proofSteps == Budget.defaultSteps && !traceProofSteps && !(← strictPrivacyOpt.get) && !(← ppAllOpt.get)
   if cacheOn && (tc.cacheDir.isSome || !tc.readCaches.isEmpty) then
     -- the key starts from the headers the file sees; modules enter it by their own keys
     let key₀ := hash (toString (headers.toList.map (·.2)))
+    let key₀Tag := Smt.Sha256.hexFramed "wiz-cache/root-headers-v1"
+      (headers.toList.flatMap fun (n, t) => [n, t])
     let region ← if ← regionCacheOpt.get then
         pure (some ({ rig := RigTag.tag (R := ZeroOneMany), stats := some regionStats } :
           Cache.RegionOptions))
       else pure none
-    pure (← Cache.elaborateCached tc.cacheDir tc.readCaches input init key₀ (region := region)).1
+    let verify := (Cache.VerifyMode.ofString? tc.cacheVerify).getD .warn
+    pure (← Cache.elaborateCached tc.cacheDir tc.readCaches input init key₀ (region := region)
+      (verify := verify) (rig := RigTag.tag (R := ZeroOneMany))
+      (stats := if verify == .off then none else some verifyStats)
+      (strongToolchain := tc.tag) (targetTag := tc.targetTag) (rootTag := key₀Tag)).1
   else
     Cache.elaborateUncached input init
 /-- (27a) `--trust-native` and `--native-fuel N`. -/
@@ -324,6 +366,48 @@ def docCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   if web.isNone then IO.println "wiz doc: no Wasm module (web/build.sh): the pages are plain HTML"
   pure 0
 
+/-- (11aa) `wiz fmt`'s options: the file (or stdin), `--check`, `--width`. -/
+structure FmtArgs where
+  input : Option String := none
+  check : Bool := false
+  width : Nat := 100
+  explain : Bool := false
+
+def fmtArgs (a : FmtArgs) : List String → Except String FmtArgs
+  | [] => pure a
+  | "--check" :: rest => fmtArgs { a with check := true } rest
+  | "--explain" :: rest => fmtArgs { a with explain := true } rest
+  | "--width" :: n :: rest => do
+    let some w := n.toNat? | throw s!"wiz fmt: --width needs a number, not {n}"
+    fmtArgs { a with width := w } rest
+  | x :: rest =>
+    if x.startsWith "-" && x != "-" then throw s!"wiz fmt: unknown option {x}"
+    else match a.input with
+      | some _ => throw "wiz fmt: one file at a time (and `-` for stdin)"
+      | none => fmtArgs { a with input := some x } rest
+
+/-- (11aa) `wiz fmt`: reprint a file from its syntax tree (stdin/stdout). -/
+def fmtCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
+  let a ← match fmtArgs {} args with
+    | .ok a => pure a
+    | .error e => do IO.eprintln e; return 2
+  let path := a.input.getD "-"
+  let input ← if path == "-" then (← IO.getStdin).readToEnd else IO.FS.readFile path
+  let (init, _) ← initState tc (if path == "-" then "<stdin>" else path) input
+  let r := Fmt.run init input { width := a.width, explain := a.explain }
+  unless r.errors.isEmpty do
+    for e in r.errors do IO.eprintln s!"{path}:{e}"
+    IO.eprintln s!"wiz fmt: {path}: not formatted (the file did not parse)"
+    return 2
+  for m in r.refused do IO.eprintln s!"{path}:{m}"
+  if a.check then
+    if r.text == input then pure 0
+    else
+      IO.eprintln s!"wiz fmt: {path}: not formatted"
+      pure 1
+  else
+    IO.print r.text
+    pure (if r.refused.isEmpty then 0 else 1)
 /-- `wiz cache prune [--days N] [--dry-run]`: remove keyed files older than N days (default
 30) from the write cache. Only the write cache: read-only layers are never touched. -/
 def cachePruneCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
@@ -344,6 +428,54 @@ def cachePruneCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   | none => do IO.eprintln "cache prune: no write cache (--cache DIR)"; pure 1
   | some dir => do IO.println (← Cache.pruneSummary dir days dry); pure 0
 
+/-- `wiz cache verify`: check every manifest in each cache layer against the bytes beside
+it (a full scan; normal runs verify only what they read). Exit 1 on a mismatch or a missing
+file, and in `strict`/`--strict` also on an unmanifested keyed file. -/
+def cacheVerifyCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
+  let strict := tc.cacheVerify == "strict" || args.contains "--strict" || !tc.readCaches.isEmpty
+  for a in args do
+    unless a == "--strict" do
+      IO.eprintln s!"cache verify: unknown argument {a}"
+      return 2
+  let dirs := tc.cacheDir.toList ++ tc.readCaches
+  if dirs.isEmpty then
+    IO.eprintln "cache verify: no cache (--cache DIR, --cache-ro DIR)"
+    return 2
+  let mut bad := 0
+  for dir in dirs do
+    let c ← Cache.verifyLayer dir
+    IO.println (s!"cache verify: {dir}: {c.modules} modules, {c.entries} entries, {c.regions} regions, " ++
+      s!"{c.mismatches} mismatched, {c.missing} missing, {c.expired} expired, {c.unmanifested} unmanifested")
+    if c.mismatches + c.missing + c.expired > 0 || (strict && c.unmanifested > 0) then bad := bad + 1
+  pure (if bad == 0 then 0 else 1)
+
+/-- `wiz cache manifest`: rebuild (or, for a read-only layer, report) the generation index
+`manifest.sexpr` from a layer's per-module manifests. -/
+def cacheManifestCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
+  let rec parse (days : Option Nat) : List String → Except String (Option Nat)
+    | [] => pure days
+    | "--valid-days" :: n :: rest => do
+      let some k := n.toNat? | throw s!"--valid-days needs a number, not {n}"
+      if k == 0 then throw "--valid-days must be at least 1"
+      parse (some k) rest
+    | a :: _ => throw s!"cache manifest: unknown argument {a}"
+  let days ← match parse none args with
+    | .ok d => pure d
+    | .error e => do IO.eprintln e; return 2
+  let validUntil ← match days with
+    | some d => do pure ((← Cache.unixNow) + d * 86400)
+    | none => pure 0
+  let dirs := tc.cacheDir.toList ++ tc.readCaches
+  if dirs.isEmpty then
+    IO.eprintln "cache manifest: no cache (--cache DIR, --cache-ro DIR)"
+    return 2
+  for dir in dirs do
+    let write := some dir.toString == tc.cacheDir.map (·.toString)
+    let (mods, entries) ← Cache.sealLayer dir write validUntil
+    let what := if write then "generation written" else "read-only"
+    IO.println s!"cache manifest: {dir}: {mods} modules, {entries} entries ({what})"
+  pure 0
+
 def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
   let input ← IO.FS.readFile path
   let s ← elaborate tc path input
@@ -353,6 +485,10 @@ def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
   if ← regionStatsOpt.get then
     let c ← regionStats.get
     IO.eprintln s!"region cache: {c.hits} modules from a region, {c.misses} without, {c.commands} commands"
+  if ← verifyStatsOpt.get then
+    let c ← verifyStats.get
+    IO.eprintln (s!"cache verify: {c.manifests} manifests, {c.hits} entries, {c.regions} regions, " ++
+      s!"{c.mismatches} mismatches, {c.unverified} unverified")
   pure (if s.messages.any (·.severity == .error) then 1 else 0)
 
 def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOneMany)) := do
@@ -411,6 +547,11 @@ def main (args : List String) : IO UInt32 := do
   let args := args.filter (· != "--unbox-structs")
   regionStatsOpt.set (args.contains "--region-stats")
   let args := args.filter (· != "--region-stats")
+  verifyStatsOpt.set (args.contains "--cache-verify-stats")
+  let args := args.filter (· != "--cache-verify-stats")
+  if (Cache.VerifyMode.ofString? tc.cacheVerify).isNone then
+    IO.eprintln s!"--cache-verify: unknown mode {tc.cacheVerify} (off, warn, strict)"
+    return 2
   lazyProofsOpt.set (!args.contains "--eager-proofs")
   let args := args.filter (· != "--eager-proofs")
   let args ← match takeProofSteps args with
@@ -444,6 +585,8 @@ def main (args : List String) : IO UInt32 := do
   match args with
   | ["parse", path] => parseCmd path
   | "cache" :: "prune" :: rest => cachePruneCmd tc rest
+  | "cache" :: "verify" :: rest => cacheVerifyCmd tc rest
+  | "cache" :: "manifest" :: rest => cacheManifestCmd tc rest
   | ["check", path] => checkCmd tc path
   | ["build", path, "-o", out] => buildCmd tc path out false (split := split)
   | ["build", path, "-o", out, "--llvm"] => buildCmd tc path out true (split := split)
@@ -454,6 +597,7 @@ def main (args : List String) : IO UInt32 := do
   | ["build", path, "-o", out, "--no-main", "--llvm"] | ["build", path, "-o", out, "--llvm", "--no-main"] =>
     buildCmd tc path out true false true (split := split)
   | "doc" :: rest => docCmd tc rest
+  | "fmt" :: rest => fmtCmd tc rest
   | ["run", path] => runCmd tc path false (split := split)
   | ["run", path, "--llvm"] => runCmd tc path true (split := split)
   | "lsp" :: opts => do

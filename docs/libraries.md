@@ -1,5 +1,9 @@
 # Libraries
 
+The generated [API index](https://wiz-pl.github.io/wiz/docs/api.html) lists every library
+module and declaration, with signatures and doc summaries, and searches names, doc
+comments and signatures.
+
 ## H0c: vectors and bit vectors
 
 `lib/Vec.wiz` (`import Vec`): `Fin n` (a `Nat` with an erased proof `Nat.lt val n = .true`;
@@ -1261,6 +1265,24 @@ File.withOwned p "w" (fun f o => do1
 `IO` is unchanged and so is lib/Sys.wiz's ω API; only the owned variants are `IO1`.
 Acquisition stays in continuation style until linear `match` lands (linear-case stage 2).
 
+## Quantity-polymorphic results (`lib/Result.wiz`, `lib/Region.wiz`)
+
+`ResultQ q A` is `Result` with its success value at quantity `q`: `ok` carries the value at
+`%q`, `err` only the `Error` (no payload). `ResultQ ω A` and `Result A` are the same type
+definitionally (`Result.toResultQ`/`ResultQ.toResult` are the identity), and at `q = 1`
+the success value is linear. `ResultQ.bind` threads the success value to its continuation
+at `q` and can change the result quantity; `ResultQ.map` and `ResultQ.elim` stay at `q`.
+At `q = 0` the value is erased: it cannot be used by a consumer, only ignored.
+
+`ResultH q B H` is the same generalization of `Result1`: the handle `H` is on both
+branches, at `%q`, and the value `B` is unrestricted. `ResultH 1 B H` and `Result1 B H`
+are definitionally equal (`Result1.toResultH`/`ResultH.toResult1` are the identity);
+`ResultH.bind` sequences handle-threading results and `ResultH.map` maps the value,
+keeping the handle. `Result1` stays the linear resource result: `ResultQ`'s error branch
+has no value, so a handle cannot be threaded through it, and `ResultH`'s only useful
+instance is `q = 1` (at `q = ω` the handle is droppable, at `q = 0` unusable).
+Details and the `q = 0` representation caveat: `wiz-notes/result-q.md`.
+
 ## Functors and Booleans
 
 `lib/Functor.wiz` (`import Functor`): `Functor`, `Applicative`, `<$>`, `<*>`; every `Monad`
@@ -1395,3 +1417,54 @@ def v (p q : Q) : (p + q) * (p + q) ≈ p * p + 2 * p * q + q * q :=
 `lib/WordArray.wiz` (`U8Array`, `U32Array`, `U64Array`), `lib/WordMap.wiz` (`U64Map V`)
 and `lib/Intern.wiz` (`InternTable`, ids as `U32`): list models with laws, run natively
 in compiled code, updated in place when unique. See `docs/stages/29-natives.md`.
+
+## Persistent data structures: maps and sets
+
+`lib/PMap.wiz` (`import PMap`): `PMap K V` and `PSet K` (a `PMap K Unit`), immutable and
+structurally shared. A map is a size-balanced (weight-balanced, Adams scheme) binary
+search tree; every update returns a new map and leaves the old one valid, copying only
+the O(log n) nodes on the path to the change (plus O(1) for a rebalancing rotation).
+`empty`, `insert`, `erase`, `find`/`findD`, `contains`, `size`, `toList`, `keys`,
+`fromList`/`ofList`, `foldl` and `height`; sets have `empty`, `insert`, `erase`,
+`contains`, `size`, `toList`, `fromList` and `foldl`. `toList` and `foldl` go in
+increasing key order, and `fromList` accepts entries in any order (a later duplicate
+wins).
+
+Keys are ordered by a `Compare` instance (`compare : K → K → Ordering`), with instances
+for `Nat` (through the native `Nat.lt`/`Nat.beq`) and `U64` (`U64.cmp`, unsigned);
+define one instance to use any other key type. `PSet` and the map
+algorithms are key-generic, unlike `U64Map`. `size` and the balance checks are O(1) (the
+subtree size is stored in each node), so `insert`, `erase`, `find` and `contains` are
+O(log n) worst case, `toList`, `keys` and `foldl` are O(n), and `fromList` is
+O(n log n) for a list in arbitrary order.
+
+Only `find_empty` and `size_empty` are proved on the definitions; `find_insert`,
+`find_erase` and `size_insert` (and the sortedness and balance invariants across
+rotations) are checked by the tests rather than proved. Examples: `examples/persistent.wiz`
+(the checks, group `persistent`) and `examples/persistent-bench.wiz`. The representation,
+complexity, persistence guarantees, benchmark plan and the migration path for replacing
+`U64Map` with a pure model plus a native backend are in
+`wiz-notes/persistent-data.md`.
+
+## Scry: Wil, the analysis IR (`lib/Scry/Wil.wiz`)
+
+`import Scry.Wil` is the small three-address IR of the `scry` analyser
+(`wiz-notes/code-analysis-design.md` §4.3): typed variables and ids, `Rhs`/`Stmt`/
+`Term`, basic blocks and functions over a CompCert-style block memory, and a concrete,
+fuel-bounded small-step semantics (`Wil.step`, `Wil.Step`, `Wil.run`). `import
+Scry.WilExamples` is the hand-built golden corpus (`Scry.arith`, `Scry.sumTo`,
+`Scry.facLoop`, …) used by the `scry-wil` test group. There is no parser or C lowering
+in this stage; `wiz-notes/scry-wil.md` has the grammar, the rules, the corpus and what
+S2 still needs.
+
+## Scry: CFG, reaching definitions and taint (`lib/Scry/Analysis.wiz`, `lib/Scry/Taint.wiz`)
+
+`import Scry.Analysis` numbers a Wil function's statements and terminators as program
+points and computes the CFG, dominators, reaching definitions and the PDG's def-use
+(flow-dependence) edges. `import Scry.Taint` feeds those edges to the Datalog engine
+(`lib/Scry/Datalog.wiz`, `lib/Scry/Eval.wiz`) with a `TaintSpec` of source, sanitiser
+and sink calls; the source -> sink path of each finding comes from the engine's
+provenance. `import Scry.TaintExamples` is the hand-built corpus used by the
+`scry-taint` group. This is the S4 intraprocedural prototype: no tree-sitter, no C
+lowering, no SARIF, and no interprocedural or memory modelling yet;
+`wiz-notes/scry-taint.md` has the design, the spec format and the gaps.

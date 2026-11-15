@@ -391,7 +391,7 @@ def elabInductive (cmd : Syntax) (levelParams : List Name) : ElabM R (List (Decl
     let lifts := descFieldLifts D
     -- occurrences of the local `T` (already applied to the parameters) become the global
     let Tc : Term R := .const T us
-    let fsTy := fs.zipIdx.map fun ((x, bi, q, A), k) => (x, bi, q, A.instantiateAt k Tc)
+    let fsTy := fs.zipIdx.map fun ((x, bi, q, A), k) => (x, bi, q.instantiateAt k Tc, A.instantiateAt k Tc)
     let resTy := js.foldl (fun acc j => .app acc (j.instantiateAt n Tc)) ((telescopeVars nΔ n).foldl .app Tc)
     let some js' := js.mapM (·.strengthen? n)
       | fail cmd s!"constructor {cname}: its indices may not mention {T}"

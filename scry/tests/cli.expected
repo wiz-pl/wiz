@@ -1,0 +1,24 @@
+format: scry-facts v1
+language: c
+files: 1
+nodes: 7
+edges: 6
+relations: 2
+tuples: 3
+roots: 1
+max depth: 4
+errors: 1
+kinds:
+  translation_unit 1
+  function_definition 1
+  identifier 2
+  compound_statement 1
+  call_expression 1
+  ERROR 1
+edge labels:
+  child 3
+  declarator 1
+  body 1
+  function 1
+csr out: 8 offsets, 6 arcs
+csr in: 8 offsets, 6 arcs

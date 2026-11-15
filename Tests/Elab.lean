@@ -454,7 +454,8 @@ def ioFails (src : String) (fragment : String) : IO Unit := do
   unless (errs[0]!.splitOn fragment).length > 1 do throw (IO.userError s!"error does not mention '{fragment}':\n{errs[0]!}")
 
 /-- (9f) Elaborate `main.wiz` in a fresh directory holding `files` (modules under it are
-importable), resolving `link_c` files as `wiz` does, relative to each file. -/
+importable), resolving `link_c` files as `wiz` does, relative to each file, and
+(include_str) `include_str` files too. -/
 def elabTree (files : List (String × String)) : IO (CommandState ZeroOneMany × String × System.FilePath) := do
   let dir ← IO.FS.createTempDir
   for (p, text) in files do
@@ -464,8 +465,10 @@ def elabTree (files : List (String × String)) : IO (CommandState ZeroOneMany ×
   let src ← IO.FS.readFile (dir / "main.wiz")
   let mods ← Module.loadClosure ["lib", dir] src
   let sources ← Module.cSourceTable dir src mods
+  let includes ← Module.includeTable dir src mods
   let s := runFrontend (R := ZeroOneMany) src
-    { loader := fun m => (mods[m]?).map (·.2), cSources := some (Module.cSourceResolver sources) }
+    { loader := fun m => (mods[m]?).map (·.2), cSources := some (Module.cSourceResolver sources),
+      includes := some (Module.includeResolver includes) }
   pure (s, src, dir)
 
 /-- `elabTree`, then build and run `main` (through C, or LLVM) and compare its output. -/

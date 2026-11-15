@@ -229,6 +229,40 @@ def funext {A B : Type} {f g : A → B} (h : (x : A) → f x = g x) : f = g := h
 /-- Equal functions agree at every argument: from `f = g`, `f x = g x`. -/
 def congrFun {A B : Type} {f g : A → B} (e : f = g) (x : A) : f x = g x := e x
 
+-- ## Composing relations: `Trans` and `calc`
+
+/-- `Trans p q r`: a proof of `p` and one of `q` give one of `r`. `calc` (stage 13s)
+composes adjacent steps with an instance of it: the relations may differ (`a ≤ b` then
+`b < c` gives `a < c`), and the last step's relation is the chain's.
+
+`r` is an `outParam`, so instance search finds it from `p` and `q`. A library registers
+a relation by adding instances (`lib/Nat.wiz`, `lib/IntOrder.wiz`, `lib/Rat.wiz`), and
+so can a program:
+
+```
+def MyRel (a b : Nat) : Prop := a = b
+infix:50 " ~ " => MyRel
+instance {a b c : Nat} : Trans (a ~ b) (b ~ c) (a ~ c) := Trans.mk (fun h h' => Eq.trans h h')
+``` -/
+class Trans (p q : Prop) (r : outParam Prop) where
+  /-- Compose a proof of `p` and one of `q` into a proof of `r`. -/
+  trans : p → q → r
+
+/-- `=` composes with itself. -/
+instance {A : Type} {a b c : A} : Trans (a = b) (b = c) (a = c) :=
+  Trans.mk (fun e₁ e₂ => Eq.trans e₁ e₂)
+/-- `=` between propositions is transitive. (The generic `Eq.trans` is at a `Type`, and
+`Prop` is a `Sort`, not a `Type`.) -/
+def Eq.transProp {P Q R : Prop} (e₁ : P = Q) (e₂ : Q = R) : P = R :=
+  Iff.toEq (Iff.trans (Iff.ofEq e₁) (Iff.ofEq e₂))
+/-- `=` between propositions composes with itself. (The generic instance does not apply:
+equations of propositions live at `Prop`, not at a `Type`.) -/
+instance {P Q R : Prop} : Trans (P = Q) (Q = R) (P = R) :=
+  Trans.mk (fun e₁ e₂ => Eq.transProp e₁ e₂)
+/-- `↔` composes with itself. -/
+instance {P Q R : Prop} : Trans (P ↔ Q) (Q ↔ R) (P ↔ R) :=
+  Trans.mk (fun h₁ h₂ => Iff.trans h₁ h₂)
+
 -- ## Booleans
 
 /-- Every boolean is `.true` or `.false`. -/

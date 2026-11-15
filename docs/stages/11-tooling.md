@@ -10,7 +10,9 @@
   `hoverAt`, `definitionAt` and `completionsAt`.
 * **`wiz lsp`** (`Wiz/LSP.lean`): the Language Server Protocol over stdio, with
   diagnostics as you type, hover types, go to definition (also into `lib/`), and
-  completion of global names. Each open document has its own query engine.
+  completion of global names. Each open document has its own query engine. A document's
+  `include_str` files are read from its own directory, as on the command line (see
+  [13-language/include-str.md](13-language/include-str.md), "Language server").
 
 ## 11c: a shared, content-addressed cache
 
@@ -94,6 +96,82 @@ counts and prints (`cache prune: would remove 12 files (… .wizc, … .wizm, �
 … .wizs), 3 GiB older than 7 days in …`). A pruned entry is just a miss: the next run elaborates and rewrites it. N must
 be at least 1, and a read-only layer cannot be pruned even if it is passed with `--cache-ro`
 (the command says so).
+
+**Output manifests (`--cache-verify`, integrity only).** A cache key is an *input* hash;
+until this stage the bytes an entry returns (its *output*) were trusted because they were
+in the cache. `wiz` now writes a manifest with a SHA-256 of each entry's bytes and checks
+it before applying the effect: a truncated, rewritten or swapped entry is a **miss** (the
+text entry, the next layer, or re-elaboration answers), never a wrong result. There is no
+signature yet — see P3 below.
+
+The layout is one manifest per module (the note's P2) plus a per-layer generation index
+(P1):
+
+```
+<cache>/manifest.d/<binary ⊕ fast key>-<sha256 key>.wizmf   -- one module, or one root file
+<cache>/manifest.sexpr                                      -- generation index for the layer
+<cache>/<binary ⊕ fast key>-<sha256 key>.wizr               -- one module's region
+```
+
+**Strong cache keys.** The 64-bit `hash`/`mixHash` keys are indexes, not collision-resistant
+digests. A `Cache.Key` therefore carries a fast half (the old key, used by in-memory
+tables, `.wizc` names and Lean's maps) and a SHA-256 half (used by region and manifest names,
+manifest entries and verification). The SHA-256 half is domain-separated and
+length-prefixed (`Wiz.Smt.Sha256.framed`): `["ab", "c"]` and `["a", "bc"]`, or a module key
+and a toolchain id, cannot share a preimage. Module keys hash the exact text, headers,
+`include_str` contents (under an `includeKey-v1` domain), imports and trust flag; command
+keys chain the previous SHA-256 key and the command text;
+`Toolchain.tag` and `Toolchain.targetTag` are the strong toolchain and target namespaces
+(the 64-bit `Toolchain.id` remains the build/job index). A manifest or region requires both
+halves, so a 64-bit collision is a miss (the text path or elaboration answers), never a
+wrong effect. Format 1 manifests and format 2 regions are ignored by the new names and
+regenerated; no unmigrated file is read under a strong key.
+
+A module manifest lists its `.wizc` entries and its `.wizr` region with `key`, `key-sha`,
+`file`, `size`, `sha256` and `format` (`salt` for text, `regionFormat` for a region), plus
+`module`, `binary` (`binaryId`), `toolchain` (SHA-256 of the executable), `toolchain-tag`,
+`target-tag`, `rig`, `prev` (the previous manifest root) and `valid-until`. Its `root` is
+an RFC 6962-style Merkle root over a metadata leaf and the entries, so editing
+`prev`/`valid-until` breaks the root too. `manifest.sexpr` records the generation number,
+the previous root, the optional expiry and one record per module (fast key, SHA-256 key,
+name, file, digest), with its own root. Only the write cache is ever written; a
+`--cache-ro` layer is read and byte-identical after a run. The `.wizr` sidecar (`.wizs`) is
+still checked first: a corrupt region never reaches the type-erased reader even when no
+manifest exists.
+
+The policy is `--cache-verify off|warn|strict` (`--cache-verify=MODE` also works):
+
+* `off` — no manifests are read or written; the cache is exactly as before.
+* `warn` (default) — a manifested key is served only if its bytes match. A new key has a
+  SHA-256 half, so an unlisted write-cache entry is a miss (nothing binds its bytes to the
+  strong input key); an old fast-only key still falls through, and `--cache-verify off`
+  restores the old lookup. An old local cache is one cold pass, then it is rewritten with
+  manifests. A `--cache-ro` layer is **strict**: an entry there is used only through a
+  manifest, so deleting a manifest cannot downgrade a read-only layer to unverified. When
+  a read-only layer has bytes for a module but no manifest, `wiz` warns once per layer (an
+  empty layer is silent).
+* `strict` (alias `require`) — only manifested entries are used anywhere; an unlisted key
+  is a miss. A cold run writes the manifests, so it becomes strict-warm in one pass.
+
+A manifest whose root does not validate, whose `valid-until` (or whose layer generation's)
+has passed, or whose entry digest does not match is a miss: it is not repaired in a
+read-only layer. `wiz cache verify [--strict]` scans every layer's manifests against the
+bytes (exit 1 on a mismatch, a missing file, an expired manifest, or — with
+`--strict`/`--cache-ro` — an unmanifested keyed file); `wiz cache manifest [--valid-days N]` rebuilds the generation
+index (`prev` chains it to the old one) and can set its expiry. `--cache-verify-stats`
+prints the per-run counts (manifests, verified entries/regions, mismatches, unverified).
+
+Compatibility default: with no manifest (or `--cache-verify off`) existing caches keep
+their old behaviour; the write cache's old unverified path is still available in `warn`.
+Manifests are additive files — `.wizc`, `.wizr` and `.wizs` keep their names and bytes,
+so an unmanifested cache is byte-identical and no key or salt changes.
+
+**Not signatures (P3).** An unsigned manifest detects corruption and a mirror that swaps
+a listed entry, but a writer who controls the manifest can rewrite both it and the bytes,
+and can delete it (in `warn`, for the write cache). The missing half is an external
+signature over the manifest (DSSE/minisign/`ssh-keygen -Y sign`), a key-id policy with
+revocation, and a witnessed log; the attestation prior-art note calls this E2/P3. So do
+not read these manifests as provenance: they are integrity, not authenticity.
 
 Next: finer dependencies (re-elaborate only what an edit affects, not everything
 after it).
@@ -410,10 +488,15 @@ package's `lib` targets with its module roots (dependencies included), into
   `Term.prettyTagged`, so notation-aware printing applies when it does), its doc, a
   source link, its constructors or fields, and the instances of a class or for a type;
   every constant in a signature links to where it is documented (the definition sites
-  the language server's go to definition uses, `declSites`). `search.js` is the
-  client-side index of every declaration (name, module, kind, summary), searched by
-  `scroll-search.js` (`/` focuses the box). The pages are complete HTML: they read
-  without JS, and the search works from `file://`.
+  the language server's go to definition uses, `declSites`). `api.html` is the
+  API/library index: every module with all its declarations, their kinds, signatures
+  (with the same cross-links) and doc summaries, each linking to its anchor on the
+  module page; `api.json` is the same index for tools. The header of every page links to
+  it. `search.js` is the client-side index of every module and declaration (name,
+  module, kind, doc summary, signature text and target), searched by `scroll-search.js`
+  (`/` focuses the box): names first, then doc comments, then signatures, and a hit
+  says which matched. The pages are complete HTML: they read without JS, and the
+  search works from `file://`.
 * **Interactive signatures, with the infoview's Wasm.** Each page carries its data as
   JSON (`<script id="wiz-doc-data">`, and `A.B.json`): per declaration the signature in
   the infoview protocol's tagged-text format and the table of its subterms, each a
@@ -433,10 +516,13 @@ package's `lib` targets with its module roots (dependencies included), into
   plain HTML (and `wiz doc` says so).
 * **CI** builds the library's documentation on `master` and publishes it: the `docs` job
   runs `wiz doc --lib` on a push (never a pull request), with source links to the
-  commit and the Wasm module, and uploads it as the artifact `wiz-docs` (3 days, for
-  debugging); `deploy-docs` deploys that artifact to GitHub Pages at
-  <https://wiz-pl.github.io/wiz/>. The docs pages are the site root (`index.html`,
-  `A.B.html`, `A.B.json`, `search.js` and the Wasm files) and every link is relative.
+  commit and the Wasm module, into `doc-site/docs`, assembles the landing page at the
+  site root and the static playground (11ab) under `doc-site/playground`
+  (`web/build-site.sh`), checks the tree (`web/check-site.sh`), and uploads it as the
+  artifact `wiz-docs` (3 days, for debugging); `deploy-docs` deploys that artifact to
+  GitHub Pages. The URLs are `/` (the landing page), `/docs/` (the docs pages:
+  `index.html`, `api.html`, `api.json`, `A.B.html`, `A.B.json`, `search.js` and the Wasm
+  files) and `/playground/`; every link is relative.
   A repository has one Pages site and each deployment replaces the whole tree, so a
   future performance site shares this deployment under `/perf/` rather than deploying
   separately. `docs/building.md`, "Documentation site", has the URL layout, the
@@ -444,10 +530,12 @@ package's `lib` targets with its module roots (dependencies included), into
 * **Tests**: the group `doc` (`Tests/Doc.lean`): doc comments stored and replayed by the
   cache; Markdown; `wiz doc` on a small package with doc comments (kinds, docs, source
   links, instances, the index); every cross-link resolves; every declaration is in the
-  search index; the pages without JS; `grail doc`; and the page model of the Wasm module
+  search index, with its doc summary and signature; the API index and `api.json` list
+  every module and declaration; the pages without JS; `grail doc`; and the page model of the Wasm module
   run natively on a page's JSON (hover, click, keys); and that the core library is
   documented (every public declaration of `Prelude`, `Std`, `Vec` and `Word` has a doc
-  comment, and each has a module doc).
+  comment, and each has a module doc). The search box's ranking and result rendering
+  have a browser-free test, `web/scroll-search_test.mjs`, run by `web/test.sh`.
 * **The library's documentation.** Every module in `lib/` has a `/-! … -/` module doc
   (what it is for, its main definitions, an example) and a `/-- … -/` doc comment on each
   public declaration; `--` comments are left for implementation notes. `wiz doc --lib -o
@@ -590,6 +678,52 @@ Neovim shows them as `@lsp.type.keyword` (linked to `@keyword`) without configur
   toolchain's library and a new name that isn't one. A use through generalised field
   notation (`p.norm` for `Point.norm`) is not edited.
 
+## 11aa: `wiz fmt`, a formatter
+
+    wiz fmt [FILE|-] [--check] [--width N] [--explain]
+
+Reprints a file from its syntax tree: each command is parsed with the tables that are in
+effect at it (imported `syntax` and `notation` included), printed from the tree with the
+grammar of every node kind (`PPFormat`, the table 11r's printer walks, so declared
+spacing like `" + "` and `noWs` are honoured), and laid out by a small pretty-printing
+document (`Wiz/Format.lean`: `group`/`line`/`nest`, strictly pretty). `FILE` alone prints
+to stdout, `-` (the default) reads stdin, `--check` changes nothing and exits 1 when the
+file differs, `--width` is the column budget (default 100), `--explain` prints what a
+refused command would have become.
+
+* **Why reprint, not rewrite whitespace.** The parser is the single source of truth for
+  the tokens and for precedence, so a reprint cannot disagree with it about `a + b` or
+  `(fun x => b) c`; user-declared `syntax` formats from its own grammar; and the output
+  can be **checked**: every command's reprint is parsed again with the same tables and
+  must give the same tree (`toSExpr`), or the command keeps its original text and is
+  reported (`line N: left as written (…)`, exit status 1). A token/whitespace rewriter
+  keeps comments for free but can never reindent, join or split lines, or drop
+  parentheses, and it has to reimplement every declared spacing rule anyway.
+* **Comments.** The tree drops them (`Token.skipWs`), so they are recovered from the
+  source: every leaf keeps its byte range, and the text between two leaves is a run of
+  comments. One written after a token, on its line, stays there (`;  -- note`); the rest
+  go on their own line before the token they precede. A comment makes a `def` body start
+  on its own line (below).
+* **Layout and the parser's columns.** `colGt`/`colGe` compare against a remembered
+  position (`withPosition`), so the layout has to respect it: a `match`'s alternatives
+  and a `by`'s tactics align with their construct's line (at 2 when it is inline, at the
+  line's indent when it starts one, deeper for nested matches), and a `let` always starts
+  a line — `withPosition` in `term.let` stays in force for the terms after it, so a
+  `let` in the middle of a line would forbid its own body's continuation lines to its
+  left. That is why `def f := let …` breaks after `:=` while `def f := match …` may stay
+  on one line.
+* **What is refused.** A kind with no grammar in the tables, something between tokens
+  that is not a comment, or a reprint that does not parse back to the same tree. The
+  check is what makes a prototype safe: across the library files tested (Prelude, Logic,
+  BitBlast, Deriving, Eff, Vec, EffHeap, Word, Grail, Feral, HeapBorrow, OpticDerive,
+  Trace, Text, Sat, Hdl/Sim and two examples) the formatter changes no command it
+  accepts, is idempotent on every file (formatting twice gives the same text), and
+  refuses one command (`Fe.specLin` in `lib/Feral.wiz`: a `match` inside a `let` value,
+  see `wiz-notes/wiz-fmt.md`). 13 test cases in the `format` group.
+* **Not done.** Signatures never break (a long header stays long: wrapping binder lists
+  needs `fill`/alignment); a multi-line block comment keeps the indentation of its
+  continuation lines; the self-hosted frontend has no formatter; and the LSP does not
+  offer `textDocument/formatting` yet (`Wiz/Format.lean` is that plumbing's core).
 ## 11ab: a static playground
 
 `web/playground.html`: a Wiz playground that runs entirely in the page. A text area
@@ -619,8 +753,14 @@ page runs.
   keeping the raw form in the line's tooltip. Anything else is shown as it comes.
 * **Build and serve** (from a checkout after `lake build wiz`):
 
-      web/build-playground.sh                  # → web/out/wiz-playground.mjs (+ the page)
-      python3 -m http.server -d web/out 8000   # then http://127.0.0.1:8000/playground.html
+      web/build-playground.sh web/out             # → web/out/wiz-playground.mjs (+ the page)
+      python3 -m http.server -d web/out 8000      # then http://127.0.0.1:8000/playground.html
+
+  The published site puts it at `/playground/`: `web/build-site.sh doc-site web/out`
+  copies the page (as `playground/index.html`), its scripts and the module there, beside
+  the landing page at `/` and the documentation at `/docs/` (11s; docs/building.md,
+  "Documentation site"). The page's own links to the rest of the site are relative, so
+  serving `doc-site` (`python3 -m http.server -d doc-site 8000`) shows the whole tree.
 
   `WIZ=...` picks another toolchain; `--gmp-src` is `web/build.sh`'s option for builds
   without nix. The script writes `web/out/playground.wiz` (the assembled engine source)

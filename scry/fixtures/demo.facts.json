@@ -1,0 +1,29 @@
+{
+  "format": "scry-facts",
+  "version": 1,
+  "language": "c",
+  "files": [
+    { "id": 0, "path": "demo.c", "bytes": 64 }
+  ],
+  "nodes": [
+    { "id": 0, "kind": "translation_unit", "field": "", "span": [0, 64], "named": true },
+    { "id": 1, "kind": "function_definition", "field": "", "parent": 0, "span": [0, 30], "named": true },
+    { "id": 2, "kind": "identifier", "field": "declarator", "parent": 1, "span": [5, 9], "named": true },
+    { "id": 3, "kind": "compound_statement", "field": "body", "parent": 1, "span": [12, 30], "named": true },
+    { "id": 4, "kind": "call_expression", "field": "", "parent": 3, "span": [14, 24], "named": true },
+    { "id": 5, "kind": "identifier", "field": "function", "parent": 4, "span": [14, 17], "named": true },
+    { "id": 6, "kind": "ERROR", "field": "", "parent": 0, "span": [40, 44], "named": false, "error": true }
+  ],
+  "edges": [
+    { "id": 0, "src": 0, "dst": 1, "label": "child" },
+    { "id": 1, "src": 1, "dst": 2, "label": "declarator" },
+    { "id": 2, "src": 1, "dst": 3, "label": "body" },
+    { "id": 3, "src": 3, "dst": 4, "label": "child" },
+    { "id": 4, "src": 4, "dst": 5, "label": "function" },
+    { "id": 5, "src": 0, "dst": 6, "label": "child" }
+  ],
+  "relations": [
+    { "id": 0, "name": "cfg", "arity": 2, "tuples": [[1, 3], [3, 4]] },
+    { "id": 1, "name": "call", "arity": 2, "tuples": [[4, 5]] }
+  ]
+}

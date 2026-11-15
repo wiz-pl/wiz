@@ -30,22 +30,119 @@ def indexOf : List String → String → Nat → Option Nat
     | .true => .some i
     | .false => indexOf ns x (i + 1)
 
--- the names in scope: the local binders (innermost first, with their number) and the
--- globals, by name (each with its position plus one; there are `count`)
+-- (stage 21n) `private` names are module-scoped. A private declaration `x` of module
+-- `M` gets the kernel name `_private.M._0.x` (as the Lean toolchain names them), so two
+-- modules' private `x`s are different constants (the kernel compares constants by
+-- name) and never clash; a source name is resolved to the current module's private
+-- declaration first, then to a public one. `privSplit` reads such a kernel name back.
+def matchPrefix : List Char → List Char → Option (List Char)
+  | .nil, rest => .some rest
+  | .cons a as, .cons b bs => match Nat.beq (Char.code a) (Char.code b) with
+    | .true => matchPrefix as bs
+    | .false => .none
+  | _, .nil => .none
+def reverseChars : List Char → List Char → List Char
+  | .nil, acc => acc
+  | .cons c cs, acc => reverseChars cs (.cons c acc)
+-- a kernel name's module and source name
+inductive Mangled where
+  | mk (mod base : String)
+def privPrefixChars : List Char := match "_private." with
+  | .mk cs => cs
+def dotZeroChars : List Char := match "._0." with
+  | .mk cs => cs
+-- the rest after `._0.`, as (module, base)
+def spliceDotZero : List Char → List Char → Option Mangled
+  | _, .nil => .none
+  | acc, .cons c cs => match matchPrefix dotZeroChars (.cons c cs) with
+    | .some after => .some (.mk (String.mk (reverseChars acc .nil)) (String.mk after))
+    | .none => spliceDotZero (.cons c acc) cs
+def privSplit (x : String) : Option Mangled := match x with
+  | .mk cs => match matchPrefix privPrefixChars cs with
+    | .some rest => spliceDotZero .nil rest
+    | .none => .none
+-- the kernel name of a private declaration `x` of module `m`
+def privName (m x : String) : String := "_private." +++ m +++ "._0." +++ x
+-- (`privBase`, a kernel name's source name, is in `Kernel.wiz`: `show` needs it)
+-- the module a private kernel name belongs to
+def privMod (x : String) : Option String := match privSplit x with
+  | .some (.mk m _) => .some m
+  | .none => .none
+
+-- a private declaration, for the "private to module" diagnostic: its source name and
+-- its module
+inductive PrivName where
+  | mk (name mod : String)
+-- a name's resolution: found (an index), not declared, or another module's private name
+inductive Lookup where
+  | ok (i : Nat)
+  | missing
+  | privTo (mod : String)
+-- the names in scope: the local binders (innermost first, with their number), the
+-- globals by kernel name (each with its position plus one; there are `count`), a marker
+-- for every source name declared in each module (a source name is declared at most once
+-- per module, private or not: `Scope.declaredIn`), the private declarations (for the
+-- diagnostic), and the module being checked (`Scope.cur`)
 inductive Scope where
-  | mk (locals : List String) (depth : Nat) (globals : StrMap Nat) (count : Nat)
-def Scope.empty : Scope := .mk .nil 0 StrMap.empty 0
+  | mk (locals : List String) (depth : Nat) (globals : StrMap Nat) (names : StrMap Nat)
+      (privs : List PrivName) (cur : String) (count : Nat)
+def Scope.empty : Scope := .mk .nil 0 StrMap.empty StrMap.empty .nil "" 0
 def Scope.bind (sc : Scope) (x : String) : Scope := match sc with
-  | .mk ls d gs n => .mk (.cons x ls) (d + 1) gs n
-def Scope.addGlobal (sc : Scope) (x : String) : Scope := match sc with
-  | .mk ls d gs n => .mk ls d (StrMap.insert gs (Str.ofString x) (n + 1)) (n + 1)
--- a name's index: a local binder's, or past them a global's (the latest is the nearest)
-def Scope.lookup (sc : Scope) (x : String) : Option Nat := match sc with
-  | .mk ls d gs n => match indexOf ls x 0 with
-    | .some i => .some i
-    | .none => match StrMap.findD gs (Str.ofString x) 0 with
-      | .zero => .none
-      | .succ p => .some (d + (n - 1 - p))
+  | .mk ls d gs nms pvs cur n => .mk (.cons x ls) (d + 1) gs nms pvs cur n
+-- the module being checked (`private` is module-scoped)
+def Scope.setModule (sc : Scope) (m : String) : Scope := match sc with
+  | .mk ls d gs nms pvs _ n => .mk ls d gs nms pvs m n
+def Scope.cur : Scope → String
+  | .mk _ _ _ _ _ c _ => c
+def nameKey (m x : String) : String := "module:" +++ m +++ ":" +++ x
+-- whether the source name `x` was declared in the module `m`
+def Scope.declaredIn (sc : Scope) (m x : String) : Bool := match sc with
+  | .mk _ _ _ nms _ _ _ => match StrMap.findD nms (Str.ofString (nameKey m x)) 0 with
+    | .zero => .false
+    | _ => .true
+-- `key` is the kernel name (mangled when private), `x` the source name
+def Scope.addGlobal (sc : Scope) (key x : String) (m : String) (priv : Bool) : Scope := match sc with
+  | .mk ls d gs nms pvs cur n =>
+    let pvs' := match priv with
+      | .true => .cons (.mk x m) pvs
+      | .false => pvs;
+    .mk ls d (StrMap.insert gs (Str.ofString key) (n + 1))
+      (StrMap.insert nms (Str.ofString (nameKey m x)) 1) pvs' cur (n + 1)
+-- the global with the kernel name `key` (a closed scope, like `Globals.scope`), by its
+-- position from the latest: for the internals that read a term's constant name
+def Scope.find (sc : Scope) (key : String) : Option Nat := match sc with
+  | .mk _ _ gs _ _ _ n => match StrMap.findD gs (Str.ofString key) 0 with
+    | .zero => .none
+    | .succ p => .some (n - 1 - p)
+-- a private declaration of `x` in a module other than `cur`
+def privOwner : List PrivName → String → String → Option String
+  | .nil, _, _ => .none
+  | .cons (.mk y m) rest, x, cur => match Bool.and (strEq y x) (Bool.not (strEq m cur)) with
+    | .true => .some m
+    | .false => privOwner rest x cur
+-- a name as written: a local binder, else the current module's private declaration of
+-- it, else the public one (so a public name shadows another module's private name).
+-- A kernel name written out (`_private.M._0.x`, from a term's constant) is visible only
+-- to module M.
+def Scope.lookupV (sc : Scope) (x : String) : Lookup := match sc with
+  | .mk ls d gs _ pvs cur n => match indexOf ls x 0 with
+    | .some i => .ok i
+    | .none => match StrMap.findD gs (Str.ofString (privName cur x)) 0 with
+      | .succ p => .ok (d + (n - 1 - p))
+      | .zero => match StrMap.findD gs (Str.ofString x) 0 with
+        | .succ p => match privMod x with
+          | .some m => match strEq m cur with
+            | .true => .ok (d + (n - 1 - p))
+            | .false => .privTo m
+          | .none => .ok (d + (n - 1 - p))
+        | .zero => match privOwner pvs x cur with
+          | .some m => .privTo m
+          | .none => .missing
+-- a name's index (none for another module's private name): a local binder's, or past
+-- them a global's (the latest is the nearest)
+def Scope.lookup (sc : Scope) (x : String) : Option Nat := match Scope.lookupV sc x with
+  | .ok i => .some i
+  | _ => .none
 
 inductive Elab where
   | ok (t : Tm)
@@ -153,9 +250,10 @@ def univLevel (s : Syntax) : Nat := match kids (kid s 1) with
 mutual
 def elab : Scope → Syntax → Elab
   --<sol
-  | names, .ident n => match Scope.lookup names n with
-    | .some i => .ok (.var i)
-    | .none => match strEq n "Unit" with
+  | names, .ident n => match Scope.lookupV names n with
+    | .ok i => .ok (.var i)
+    | .privTo m => .err (("'" +++ privBase n) +++ "' is private to module " +++ m)
+    | .missing => match strEq n "Unit" with
       | .true => .ok (.unit 0)
       | .false => .err ("unknown identifier " +++ n)
   | names, s => match strEq (kindOf s) "term.ident" with
@@ -292,29 +390,61 @@ inductive Foreign where
   -- (stage 21t) `attribute [implemented_by g] f`: compiled code runs `g` for `f`
   | impl (name target : String)
 -- the globals so far: by position (the first is `0`), their names in scope, the
--- inductive types by name, and the foreign declarations
+-- inductive types by name (kernel names, like the globals'), the foreign declarations,
+-- and whether the command being elaborated is `private` (stage 21n: its declarations
+-- get the current module's kernel names; `stepCommand` clears the flag after each
+-- command)
 inductive Globals where
   | mk (all : Array Global) (scope : Scope) (inds : StrMap (Option IndInfo)) (ffi : List Foreign)
-def Globals.empty : Globals := .mk Array.empty Scope.empty StrMap.empty .nil
+      (priv : Bool)
+def Globals.empty : Globals := .mk Array.empty Scope.empty StrMap.empty .nil .false
 def Globals.scope : Globals → Scope
-  | .mk _ sc _ _ => sc
+  | .mk _ sc _ _ _ => sc
+-- the module whose commands are being elaborated (`private` is module-scoped)
+def Globals.setModule (gs : Globals) (m : String) : Globals := match gs with
+  | .mk all sc inds ffi p => .mk all (Scope.setModule sc m) inds ffi p
+def Globals.setPrivate (gs : Globals) (p : Bool) : Globals := match gs with
+  | .mk all sc inds ffi _ => .mk all sc inds ffi p
+-- the kernel name a declaration `x` of the command being elaborated gets
+def Globals.declName (gs : Globals) (x : String) : String := match gs with
+  | .mk _ sc _ _ p => match p with
+    | .true => privName (Scope.cur sc) x
+    | .false => x
 def Globals.add (gs : Globals) (g : Global) : Globals := match gs with
-  | .mk all sc inds ffi => match g with
-    | .mk x _ _ _ _ => .mk (Array.push all g) (Scope.addGlobal sc x) inds ffi
+  | .mk all sc inds ffi p => match g with
+    | .mk x ty v iv im =>
+      let k := match p with
+        | .true => privName (Scope.cur sc) x
+        | .false => x;
+      .mk (Array.push all (.mk k ty v iv im)) (Scope.addGlobal sc k x (Scope.cur sc) p) inds ffi p
 def Globals.addInd (gs : Globals) (T : String) (info : IndInfo) : Globals := match gs with
-  | .mk all sc inds ffi => .mk all sc (StrMap.insert inds (Str.ofString T) (.some info)) ffi
+  | .mk all sc inds ffi p =>
+    let k := match p with
+      | .true => privName (Scope.cur sc) T
+      | .false => T;
+    .mk all sc (StrMap.insert inds (Str.ofString k) (.some info)) ffi p
+-- an inductive type by its name (`T`, a source name, or a term's kernel name)
 def Globals.ind (gs : Globals) (T : String) : Option IndInfo := match gs with
-  | .mk _ _ inds _ => StrMap.findD inds (Str.ofString T) .none
+  | .mk _ sc inds _ _ => match StrMap.findD inds (Str.ofString (privName (Scope.cur sc) T)) .none with
+    | .some info => .some info
+    | .none => StrMap.findD inds (Str.ofString T) .none
 def Globals.ffi : Globals → List Foreign
-  | .mk _ _ _ ffi => ffi
+  | .mk _ _ _ ffi _ => ffi
 def Globals.addFFI (gs : Globals) (f : Foreign) : Globals := match gs with
-  | .mk all sc inds ffi => .mk all sc inds (.cons f ffi)
+  | .mk all sc inds ffi p => .mk all sc inds (.cons f ffi) p
 -- the global at index `i` (the latest is `0`): a constant, or its value inlined
 def globalTm (inline : Bool) (gs : Globals) (i : Nat) : Tm := match gs with
-  | .mk all _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .star .star .star .nil) with
+  | .mk all _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .star .star .star .nil) with
     | .mk n ty v iv _ => match inline with
       | .true => iv
       | .false => .const n .nil .nil v ty
+-- the kernel name of a declaration by its source name (`Foreign` records these, and a
+-- term's constants carry them: stage 21n)
+def globalKeyOf (gs : Globals) (f : String) : String := match Scope.lookup (Globals.scope gs) f with
+  | .none => f
+  | .some i => match gs with
+    | .mk all _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .star .star .star .nil) with
+      | .mk k _ _ _ _ => k
 -- close a scope-checked term: the variables beyond the `d` binders it is under are
 -- globals (each command is checked in the empty context, so usage vectors and lookups
 -- don't grow with the number of globals)
@@ -341,7 +471,7 @@ inductive Step where
 -- added may be in scope before it, or twice among them. One exception: a partial
 -- definition's signature (an axiom) is followed, once, by its body under the same name.
 def Globals.all : Globals → Array Global
-  | .mk all _ _ _ => all
+  | .mk all _ _ _ _ => all
 inductive Seen where
   | mk (name : String) (axiomOnly : Bool)
 def isAxiomTm : Tm → Bool
@@ -353,17 +483,28 @@ def seenAs : List Seen → String → Option Bool
   | .cons (.mk n ax) rest, x => match strEq n x with
     | .true => .some ax
     | .false => seenAs rest x
--- the first name declared twice among the globals `i, i + 1, …` (`fuel` of them)
+-- the first name declared twice among the globals `i, i + 1, …` (`fuel` of them).
+-- Kernel names are compared (so two modules' private `x`s are different names), and a
+-- source name may be declared only once per module (`Scope.declaredIn`: a private `x`
+-- and a public `x` in the same module clash, as in the Lean frontend); other modules'
+-- declarations of the name do not count.
 def dupFrom (old : Scope) (all : Array Global) : Nat → Nat → List Seen → Option String
   | .zero, _, _ => .none
   | .succ fuel, i, seen => match Array.getD all i (.mk "?" .star .star .star .nil) with
-    | .mk x _ v _ _ => match Scope.lookup old x with
-      | .some _ => .some x
-      | .none => match seenAs seen x with
-        | .none => dupFrom old all fuel (i + 1) (.cons (.mk x (isAxiomTm v)) seen)
-        | .some ax => match Bool.and ax (Bool.not (isAxiomTm v)) with
-          | .true => dupFrom old all fuel (i + 1) (.cons (.mk x .false) seen)
-          | .false => .some x
+    | .mk x _ v _ _ =>
+      let base := privBase x;
+      let owner := match privMod x with
+        | .some m => m
+        | .none => Scope.cur old;
+      match Scope.find old x with
+      | .some _ => .some base
+      | .none => match Scope.declaredIn old owner base with
+        | .true => .some base
+        | .false => match seenAs seen x with
+          | .none => dupFrom old all fuel (i + 1) (.cons (.mk x (isAxiomTm v)) seen)
+          | .some ax => match Bool.and ax (Bool.not (isAxiomTm v)) with
+            | .true => dupFrom old all fuel (i + 1) (.cons (.mk x .false) seen)
+            | .false => .some base
 def newDuplicate (gs gs' : Globals) : Option String :=
   let n := Array.size (Globals.all gs);
   dupFrom (Globals.scope gs) (Globals.all gs') (Array.size (Globals.all gs') - n) n .nil
@@ -979,11 +1120,14 @@ def inductiveCmdS (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := ma
               | .err m => errStep gs m
               | .ok _ _ =>
                 let valI := markClosed (tLams np (body (mkD dsI))) ty;
+                -- (stage 21n: a private declaration's kernel name, in the terms it is
+                -- built into)
+                let Tn := Globals.declName gs T;
                 let gs1 := Globals.add gs (.mk T ty val valI .nil);
-                match addCtors T ps pts nidx I (.const T .nil .nil val ty) valI k (isStructCmd stx0) gs1 0 ctors with
+                match addCtors T ps pts nidx I (.const Tn .nil .nil val ty) valI k (isStructCmd stx0) gs1 0 ctors with
                 | .err => errStep gs "ill-typed constructor"
                 | .ok gs2 cs => .mk (String.append T (String.append " : " (show .nil 0 ty)))
-                    (Globals.addInd gs2 T (.mk np I (mkD ds) (mkD dsI) cs .none (.const T .nil .nil val ty)))
+                    (Globals.addInd gs2 T (.mk np I (mkD ds) (mkD dsI) cs .none (.const Tn .nil .nil val ty)))
   | _ => errStep gs "an inductive type needs a name"
 
 def sndN : Nat → Tm → Tm
@@ -1647,7 +1791,7 @@ def tailBools : List Bool → List Bool
   | .nil => .nil
   | .cons _ rest => rest
 def scopeNames : Scope → List String
-  | .mk ls _ _ _ => List.reverseOf ls .nil
+  | .mk ls _ _ _ _ _ _ => List.reverseOf ls .nil
 
 -- the result of elaborating a term: the term, its type, the metavariables
 inductive TE where
@@ -1655,7 +1799,7 @@ inductive TE where
   | err (msg : String)
 -- a global's implicit parameters (by its index from the latest)
 def globalMask (gs : Globals) (i : Nat) : List Bool := match gs with
-  | .mk all _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .star .star .star .nil) with
+  | .mk all _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .star .star .star .nil) with
     | .mk _ _ _ _ m => m
 -- Pattern matching in definitions (stages 16b, 16e): `def f (ps) : R := match x, y with
 -- | p₁, q₁ => rhs₁ …`, the scrutinees parameters and `R` not mentioning them, is
@@ -1698,7 +1842,8 @@ def dropPrefix : List Char → List Char → Option (List Char)
     | .true => dropPrefix as bs
     | .false => .none
   | _, .nil => .none
-def ctorOfName (T n : String) : Option String := match String.append T "." with
+-- (`T` may be a term's kernel name: compare the source name)
+def ctorOfName (T n : String) : Option String := match String.append (privBase T) "." with
   | .mk ts => match n with
     | .mk ns => match dropPrefix ts ns with
       | .some c => .some (.mk c)
@@ -2268,12 +2413,21 @@ def Globals.markStruct (gs : Globals) (T : String) : Globals := match Globals.in
 def cfieldNames : List CField → List String
   | .nil => .nil
   | .cons (.mk x _ _ _) rest => .cons x (cfieldNames rest)
-def Globals.structFields (gs : Globals) (T : String) : Option (List String) :=
-  match Globals.ind gs (String.append "structure " T) with
-  | .some (.mk _ _ _ _ ctors _ _) => match ctors with
+def structFieldsOf (info : IndInfo) : Option (List String) := match info with
+  | .mk _ _ _ _ ctors _ _ => match ctors with
     | .cons (.mk _ fs _ _ _) _ => .some (cfieldNames fs)
     | .nil => .some .nil
-  | .none => .none
+-- a structure's fields; `T` is a source name, or a term's kernel name (then its module
+-- is the marker's too, stage 21n)
+def Globals.structFields (gs : Globals) (T : String) : Option (List String) := match privSplit T with
+  | .some (.mk m base) => match gs with
+    | .mk _ _ inds _ _ =>
+      match StrMap.findD inds (Str.ofString (privName m ("structure " +++ base))) .none with
+      | .some info => structFieldsOf info
+      | .none => .none
+  | .none => match Globals.ind gs (String.append "structure " T) with
+    | .some info => structFieldsOf info
+    | .none => .none
 -- the structure a type is (a definition is unfolded, as `structHead?` does)
 partial def structOf (gs : Globals) (es : ES) (ty : Val) : Option String := match force es ty with
   | .vglued (.hconst T _ _ _ _) _ v => match Globals.structFields gs T with
@@ -2391,8 +2545,9 @@ def inferHead (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : HE :=
         | .err m => HE.err m
 def identHead (gs : Globals) (es : ES) (cx : Cx) (n : String) : HE :=
   let d := Cx.lvl cx;
-  match Scope.lookup (Cx.sc cx) n with
-  | .none => match splitLast n with
+  match Scope.lookupV (Cx.sc cx) n with
+  | .privTo m => .err (("'" +++ privBase n) +++ "' is private to module " +++ m)
+  | .missing => match splitLast n with
     -- `x.f`: the projection `T.f x`, for `x : T …`
     | .some (.mk base f) => match identHead gs es cx base with
       | .ok bt bty es1 m => match insertImplicits gs es1 cx bt bty m with
@@ -2405,7 +2560,7 @@ def identHead (gs : Globals) (es : ES) (cx : Cx) (n : String) : HE :=
       -- (built in, like `Type`)
       | .true => .ok (.unit 0) (.vsort (.lnum 1)) es .nil
       | .false => .err (String.append "unknown identifier " n)
-  | .some i => match Nat.lt i d with
+  | .ok i => match Nat.lt i d with
     | .true => .ok (.var i) (lookup (TCtx.types (Cx.c cx)) i) es .nil
     | .false => match globalTm .false gs (i - d) with
       | .const nm ps ls v ty => .ok (.const nm ps ls v ty) (eval .nil ty) es (globalMask gs (i - d))
@@ -3261,7 +3416,9 @@ end
 -- `quote` doesn't unfold constants)
 mutual
 def inlineTm (gs : Globals) : Tm → Tm
-  | .const n _ _ _ _ => match Scope.lookup (Globals.scope gs) n with
+  -- (a kernel name: another module's private constant in a public definition's body
+  -- is inlined too, stage 21n)
+  | .const n _ _ _ _ => match Scope.find (Globals.scope gs) n with
     | .some i => globalTm .true gs i
     | .none => .var 0
   | .pi q i j a b => .pi q i j (inlineTm gs a) (inlineTm gs b)
@@ -3618,8 +3775,9 @@ def mutualInductiveCmd (gs : Globals) (defs : List Syntax) : Step := match mutua
         | .err e => errStep gs e
         | .ok _ _ =>
           let fvalI := markClosed (body (mkD dsI)) fty;
+          let Fn := Globals.declName gs F;
           let gs1 := Globals.add gs (.mk F fty fval fvalI .nil);
-          let Fc : Tm := .const F .nil .nil fval fty;
+          let Fc : Tm := .const Fn .nil .nil fval fty;
           let gs2 := addMembers Fc fvalI np pts m gs1 0 members;
           match addMCtors members ps pts m k gs2 0 mcs with
           | .err e => errStep gs e
@@ -3864,7 +4022,8 @@ def sealedCmd (gs : Globals) (stx : Syntax) : Step :=
   | .true => match kid inner 1 with
     | .ident T =>
       let K := String.append T ".seal✝";
-      let ax : Tm := .axiomC K (.univ 0);
+      let Kn := Globals.declName gs K;
+      let ax : Tm := .axiomC Kn (.univ 0);
       inductiveCmdS (Globals.add gs (.mk K (.univ 0) ax ax .nil)) inner (.some ax)
     | _ => errStep gs "an inductive type needs a name"
 -- one definition (or inductive type), by its form
@@ -4002,7 +4161,7 @@ partial def headIndex (all : Array Global) (i : Nat) (m : StrMap (List Nat)) : S
     | .none => m
     | .some h => StrMap.insert m (Str.ofString h) (.cons j (StrMap.findD m (Str.ofString h) .nil)))
 def WEnv.of (gs : Globals) : WEnv := match gs with
-  | .mk all _ _ _ => .mk all (headIndex all (Array.size all) StrMap.empty)
+  | .mk all _ _ _ _ => .mk all (headIndex all (Array.size all) StrMap.empty)
 def WEnv.global (we : WEnv) (i : Nat) : Global := match we with
   | .mk all _ => Array.getD all i (.mk "?" .star .star .star .nil)
 def WEnv.cands (we : WEnv) (h : HeadArgs) : List Nat := match we with
@@ -4087,7 +4246,9 @@ def addAxioms : Globals → List Syntax → AxR
   | gs, .nil => .ok gs
   | gs, .cons d rest => match sigType gs d with
     | .err m => .err m
-    | .ok f ty => addAxioms (Globals.add gs (.mk f ty (.axiomC f ty) (.axiomC f ty) (paramMask (kids (kid d 3))))) rest
+    | .ok f ty =>
+      let fn := Globals.declName gs f;
+      addAxioms (Globals.add gs (.mk f ty (.axiomC fn ty) (.axiomC fn ty) (paramMask (kids (kid d 3))))) rest
 -- a member of a partial group: `def …`, or `partial (default := w) def …`
 def unwrapDef (d : Syntax) : Syntax := match strEq (kindOf d) "command.partial" with
   | .true => kid d 2
@@ -4120,7 +4281,9 @@ def addPartials : Globals → List Syntax → AxR
       | .err m => .err m
       | .ok _ w => match checkPartial ty (markClosed w ty) with
         | .err m => .err (String.append (String.append "the witness of " f) (String.append ": " m))
-        | .ok _ _ => addPartials (Globals.add gs (.mk f ty (.axiomC f ty) (.axiomC f ty) (paramMask (kids (kid (unwrapDef d) 3))))) rest
+        | .ok _ _ =>
+          let fn := Globals.declName gs f;
+          addPartials (Globals.add gs (.mk f ty (.axiomC fn ty) (.axiomC fn ty) (paramMask (kids (kid (unwrapDef d) 3))))) rest
 -- `axiom f (bs) : T` (stage 19c), printed like a definition
 def axiomCmd (gs : Globals) (stx : Syntax) : Step := match addAxioms gs (one stx) with
   | .err m => errStep gs m
@@ -4338,23 +4501,24 @@ def externCmd (gs : Globals) (stx : Syntax) : Step :=
   match axiomCmd gs (mkNode "command.axiom" (.cons (.atom "axiom") (.cons (kid stx 3)
       (.cons (mkNull .nil) (.cons (mkNull .nil) (one (mkNull (.cons (.atom ":") (one (kid stx 5)))))))))) with
   | .mk line gs' => match gs' with
-    | .mk all _ _ _ => match Nat.beq (Array.size all) (match gs with
-      | .mk all0 _ _ _ => Array.size all0) with
+    | .mk all _ _ _ _ => match Nat.beq (Array.size all) (match gs with
+      | .mk all0 _ _ _ _ => Array.size all0) with
       | .true => .mk line gs'
       | .false => match Array.getD all (Array.size all - 1) (.mk "?" .star .star .star .nil) with
         | .mk _ ty _ _ _ => match ffiSig (Globals.ffi gs) (isNativeC cname) ty with
           | .bad => errStep gs "a foreign function's arguments and result must be Nat, UInt64, Float64, String, Bool, Unit, a c_struct, a Wiz data type or a function of those (a callback; the result may be in IO)"
           | .mk ks r io fin => match Bool.and (Bool.not io) (ioCallback ks) with
             | .true => errStep gs "a foreign function that takes a callback in IO must be in IO itself"
-            | .false => .mk line (Globals.addFFI gs' (.fn name cname header ks r io fin))
+            | .false => .mk line (Globals.addFFI gs' (.fn (globalKeyOf gs' name) cname header ks r io fin))
 -- `foreign_type T (finalizer := "f")`: an opaque type (an axiom `T : Type`) of C pointers,
 -- released with `f`
 def foreignTypeCmd (gs : Globals) (stx : Syntax) : Step := match kid stx 1 with
   | .ident T => match Scope.lookup (Globals.scope gs) T with
     | .some _ => errStep gs (String.append (String.append "'" T) "' has already been declared")
     | .none =>
-      let gs' := Globals.add gs (.mk T (.univ 0) (.axiomC T (.univ 0)) (.axiomC T (.univ 0)) .nil);
-      .mk (String.append T " : U0") (Globals.addFFI gs' (.ty T (strValue (kid (kid stx 2) 3))))
+      let Tn := Globals.declName gs T;
+      let gs' := Globals.add gs (.mk T (.univ 0) (.axiomC Tn (.univ 0)) (.axiomC Tn (.univ 0)) .nil);
+      .mk (String.append T " : U0") (Globals.addFFI gs' (.ty (globalKeyOf gs' T) (strValue (kid (kid stx 2) 3))))
   | _ => errStep gs "a foreign type needs a name"
 -- (stage 21o) `link_c` and `link_lib`, as `command.linkC`/`linkLib` in the Lean
 -- frontend: recorded once each, for the backend, which names them in the C it prints
@@ -4405,7 +4569,7 @@ def exportedAs (cname : String) : List Foreign → Bool
 def globalTyOf (gs : Globals) (f : String) : Option Tm := match Scope.lookup (Globals.scope gs) f with
   | .none => .none
   | .some i => match gs with
-    | .mk all _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .star .star .star .nil) with
+    | .mk all _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .star .star .star .nil) with
       | .mk _ ty _ _ _ => .some ty
 -- `export "c_name" f (: T)?` (stage 21o, as `command.export` in the Lean frontend)
 def exportCmd (gs : Globals) (stx : Syntax) : LinkR :=
@@ -4433,7 +4597,7 @@ def exportCmd (gs : Globals) (stx : Syntax) : LinkR :=
         | .true => err (String.append cname " is exported already")
         -- (the kinds of a function C calls: as a callback's, `callSig`)
         | .false => match callSig (Globals.ffi gs) ty with
-          | .mk ks r io => LinkR.mk .none (Globals.addFFI gs (.exported f cname ks r io))
+          | .mk ks r io => LinkR.mk .none (Globals.addFFI gs (.exported (globalKeyOf gs f) cname ks r io))
           | .bad => err "an exported function's arguments must be Nat, UInt64, Float64, String, Bool, a foreign pointer or a Wiz data type, and its result one of those (not a foreign pointer) or Unit, maybe in IO"
 -- (stage 21t) `attribute [implemented_by g] f` (`command.attrImplementedBy`): compiled
 -- code runs `g` wherever it would run `f`; the kernel keeps `f`'s definition. The Lean
@@ -4475,7 +4639,7 @@ def implementedByCmd (gs : Globals) (stx : Syntax) : LinkR :=
             | .false => err (String.append (String.append (String.append g " can't implement ") f)
                 (String.append (String.append ": its type " (show .nil 0 tyG)) (String.append (String.append " is not " f)
                 (String.append "'s type " (show .nil 0 tyF)))))
-            | .true => LinkR.mk .none (Globals.addFFI gs (.impl f g))
+            | .true => LinkR.mk .none (Globals.addFFI gs (.impl (globalKeyOf gs f) (globalKeyOf gs g)))
 def joinLines : List String → String
   | .nil => ""
   | .cons l rest => match rest with
@@ -4643,7 +4807,7 @@ def cStructCmd (gs : Globals) (stx : Syntax) : Step :=
           match structCmd gs st with
           | .mk line gs' => match hasErrLine line with
             | .true => .mk line gs'
-            | .false => .mk line (Globals.addFFI gs' (.cstruct T ctype header names ks))
+            | .false => .mk line (Globals.addFFI gs' (.cstruct (globalKeyOf gs' T) ctype header names ks))
 
 -- The self-hosted frontend's Prelude (stage 19a), read by `import Prelude`: numbers,
 -- Booleans, lists, options, pairs, characters (by their code) and strings.
@@ -4797,13 +4961,21 @@ def Run.addLine (r : Run) (l : String) : Run := match r with
 inductive StepR where
   | done
   | next (line : Option String) (stop : Nat) (gs : Globals) (cats : List Cat) (tokens : List String) (notes : List Note)
+-- (D6) every output line names the offset of the command that produced it, as
+-- `@OFFSET text`; the driver (`selfhost/Cli.wiz`) turns that into `file:line:col`, and
+-- `checkFile` strips it again, so `checkFile`'s output is unchanged. (The one place a
+-- line leaves `stepCommand`: the driver entry.)
+def atLine (start : Nat) (l : Option String) : Option String := match l with
+  | .none => .none
+  | .some s => .some (String.append (String.append "@" (Nat.toString start)) (String.append " " s))
 mutual
 def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) (notes : List Note)
     (input : Array Nat) (pos : Nat) (gs : Globals) : StepR :=
-  match Nat.lt (skipWs input pos) (Array.size input) with
+  let start := skipWs input pos;
+  match Nat.lt start (Array.size input) with
   | .false => .done
   | .true => match parseCommandAt cats tokens input pos with
-    | .err m => .next (.some (String.append "parse " m)) (Array.size input) gs cats tokens notes
+    | .err m => .next (atLine start (.some (String.append "parse " m))) (Array.size input) gs cats tokens notes
     | .ok stx0 stop => match strEq (kindOf stx0) "command.import" with
     -- (A14) with the module loader (`inlineImports = false`) the import was loaded
     -- before the file: skip it (only the Prelude, when checking one file, is inline)
@@ -4818,41 +4990,43 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
       let stx1 := match notes with
         | .nil => stx0
         | _ => expandNotes notes stx0;
-      -- (stage 21n) `private` declares the same names: privacy is per module, and the
-      -- self-hosted toolchain has one module (docs/stages/21-bootstrap.md, 21n)
+      -- (stage 21n) `private def …` declares the same names in the current module, and
+      -- they are private to it: `Globals.add` gives them the module's kernel names
+      -- (`privName`), and `stepCommand` clears the flag again after this command
       let stx := unwrapPrivate stx1;
-      match linkStep gs stx with
+      let gs0 := Globals.setPrivate gs (strEq (kindOf stx1) "command.private");
+      match linkStep gs0 stx with
       | .some r => (match r with
-        | LinkR.mk line gs' => StepR.next line stop gs' cats tokens notes)
+        | LinkR.mk line gs' => StepR.next (atLine start line) stop (Globals.setPrivate gs' .false) cats tokens notes)
       | .none =>
       let step := match strEq (kindOf stx) "command.partial" with
-        | .true => partialCmd gs (one stx)
+        | .true => partialCmd gs0 (one stx)
         | .false => match strEq (kindOf stx) "command.mutual" with
           | .true => match strEq (kindOf (nthSyntax (nonAtoms (kids (kid stx 1))) 0)) "command.inductive" with
-            | .true => mutualInductiveCmd gs (nonAtoms (kids (kid stx 1)))
-            | .false => partialCmd gs (nonAtoms (kids (kid stx 1)))
+            | .true => mutualInductiveCmd gs0 (nonAtoms (kids (kid stx 1)))
+            | .false => partialCmd gs0 (nonAtoms (kids (kid stx 1)))
           | .false => match strEq (kindOf stx) "command.structure" with
-            | .true => structCmd gs stx
+            | .true => structCmd gs0 stx
             | .false => match strEq (kindOf stx) "command.axiom" with
-              | .true => axiomCmd gs stx
+              | .true => axiomCmd gs0 stx
               | .false => match strEq (kindOf stx) "command.extern" with
                 -- (to the checker, a foreign function is an axiom)
-                | .true => externCmd gs stx
+                | .true => externCmd gs0 stx
                 | .false => match strEq (kindOf stx) "command.foreignType" with
-                  | .true => foreignTypeCmd gs stx
+                  | .true => foreignTypeCmd gs0 stx
                   | .false => match strEq (kindOf stx) "command.cStruct" with
-                  | .true => cStructCmd gs stx
+                  | .true => cStructCmd gs0 stx
                   | .false => match strEq (kindOf stx) "command.sealed" with
-                    | .true => sealedCmd gs stx
+                    | .true => sealedCmd gs0 stx
                     | .false => match knownCommand (kindOf stx) with
-                      | .true => defStep gs stx
+                      | .true => defStep gs0 stx
                       -- (an unknown command, or a modifier this frontend doesn't know, is
                       -- an error naming it, never ignored)
-                      | .false => errStep gs (String.append "unsupported command " (kindOf stx));
+                      | .false => errStep gs0 (String.append "unsupported command " (kindOf stx));
       match step with
       | .mk line gs' => match newDuplicate gs gs' with
-        | .some x => .next (.some (String.append (String.append "error: '" x) "' has already been declared")) stop gs cats tokens notes
-        | .none => .next (.some line) stop gs' cats tokens notes
+        | .some x => .next (atLine start (.some (String.append (String.append "error: '" x) "' has already been declared"))) stop gs cats tokens notes
+        | .none => .next (atLine start (.some line)) stop (Globals.setPrivate gs' .false) cats tokens notes
 def runCommands (inlineImports : Bool) (cats : List Cat) (tokens : List String) (notes : List Note)
     (input : Array Nat) (pos : Nat) (gs : Globals) (out : List String) : Run :=
   match stepCommand inlineImports cats tokens notes input pos gs with
@@ -4862,11 +5036,73 @@ def runCommands (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
     | .none => out)
 end
 
+-- (D6) a line's tag: `@NAME:OFFSET text` for a module of the loader's graph, `@OFFSET
+-- text` for the one-file path; `stripAt` drops it, `tagLine` adds the name. The driver
+-- (`selfhost/Cli.wiz`) turns the tag into `file:line:col`; `stripAt` keeps the checker's
+-- own output as it was.
+def stripAtDigits : List Char → Option (List Char)
+  | .nil => .none
+  | .cons c cs => match Nat.beq (Char.code c) 32 with
+    | .true => .some cs
+    | .false => match isDigitC (Char.code c) with
+      | .true => stripAtDigits cs
+      | .false => .none
+
+-- after `NAME:` (a module name), the same digits and space
+def skipModName : List Char → Option (List Char)
+  | .nil => .none
+  | .cons c cs => match Nat.beq (Char.code c) 58 with
+    | .true => .some cs
+    | .false => match Nat.beq (Char.code c) 32 with
+      | .true => .none
+      | .false => skipModName cs
+
+def stripAfterAt : List Char → Option (List Char)
+  | .nil => .none
+  | .cons c cs => match isDigitC (Char.code c) with
+    | .true => stripAtDigits (.cons c cs)
+    | .false => match skipModName cs with
+      | .none => .none
+      | .some rest => stripAtDigits rest
+
+def stripAt : String → String
+  | .mk cs => .mk (match cs with
+    | .nil => .nil
+    | .cons c rest => match Nat.beq (Char.code c) 64 with
+      | .false => cs
+      | .true => match stripAfterAt rest with
+        | .some out => out
+        | .none => cs)
+
+def stripAts : List String → List String
+  | .nil => .nil
+  | .cons l rest => .cons (stripAt l) (stripAts rest)
+
+-- `@NAME:OFFSET text`, the loader's tag for a module's line (a line without an offset —
+-- a loader error — is `@NAME:0 text`)
+def tagLine (name : String) (s : String) : String := match s with
+  | .mk cs => match cs with
+    | .cons c rest => match Nat.beq (Char.code c) 64 with
+      | .true => String.append "@" (String.append name (String.append ":" (String.mk rest)))
+      | .false => String.append "@" (String.append name (String.append ":0 " s))
+    | .nil => s
+
+-- tag the first `k` lines of `out` (the ones a module just added: `Run.out` is consed)
+def tagFirst (name : String) : Nat → List String → List String
+  | .zero, out => out
+  | .succ j, .nil => .nil
+  | .succ j, .cons l rest => .cons (tagLine name l) (tagFirst name j rest)
+
+def tagOne (name : String) (off : Nat) (s : String) : String :=
+  String.append "@" (String.append name (String.append ":" (String.append (Nat.toString off) (String.append " " s))))
+
 -- (A14) one file, with each `import` loading the embedded Prelude inline (the compiler
--- driver and `checkFile` keep this path; the module loader is `moduleCheck` below)
+-- driver and `checkFile` keep this path; the module loader is `moduleCheck` below).
+-- (21n) the one-shot file is one module, `input`: a `private` name is private to it (and
+-- so visible throughout the file, as in the Lean frontend's single-file mode).
 def checkFile (cats : List Cat) (tokens : List String) (text : String) : List String :=
-  match runCommands .true cats tokens .nil (String.codes text) 0 Globals.empty .nil with
-  | .mk out _ _ _ _ => List.reverseOf out .nil
+  match runCommands .true cats tokens .nil (String.codes text) 0 (Globals.setModule Globals.empty "input") .nil with
+  | .mk out _ _ _ _ => stripAts (List.reverseOf out .nil)
 
 -- (A14) Modules. `import M` loads the module `M`: the file `M.wiz` under the first `-I`
 -- root that has it, else in the working directory (`A.B` is `A/B.wiz`). Each module is
@@ -4879,9 +5115,13 @@ def checkFile (cats : List Cat) (tokens : List String) (text : String) : List St
 --
 -- The loader is pure: the driver reads the files (moduleRootSources) and `moduleCheck`
 -- builds the dependency graph from the sources. A cycle is an error naming the cycle, and
--- a module that cannot be found is an error naming it. `private` is still private to one
--- file only: hiding names across modules needs each name's module in `Globals`
--- (docs/stages/21-bootstrap.md, 21n); until then a private name is visible project-wide.
+-- a module that cannot be found is an error naming it. (stage 21n) `private` is
+-- module-scoped: `modRunBody` sets the module being checked (`Globals.setModule`), a
+-- private declaration's kernel name carries its module (`privName`), and a lookup from
+-- another module is `'x' is private to module M` (`Scope.lookupV`); a module's exported
+-- set is every public name it declares, so a private name is not re-exported through a
+-- module that imports it. The one-shot path (`checkFile`, `--oneshot`) is one module,
+-- `input` (docs/stages/21-bootstrap.md, 21n).
 
 -- a module's source: its name (`B`), the path it was read from ("" when missing), its
 -- text, and the modules it imports (in source order)
@@ -4954,6 +5194,32 @@ partial def modImportsAt (cats : List Cat) (tokens : List String) (input : Array
 def moduleImports (cats : List Cat) (tokens : List String) (text : String) : List String :=
   modImportsAt cats tokens (String.codes text) 0
 
+-- the module an import is written in (the head of the loader's stack; `Main` at the top)
+def modImporting : List String → String
+  | .nil => "Main"
+  | .cons x _ => x
+
+-- the offset of the `import M` command that named `name` (0 when it is not found: the
+-- loader's own errors — a missing module, a cycle — are reported at that import, D6)
+partial def modImportAt (cats : List Cat) (tokens : List String) (input : Array Nat) (pos : Nat)
+    (name : String) : Nat :=
+  match Nat.lt (skipWs input pos) (Array.size input) with
+  | .false => 0
+  | .true => match parseCommandAt cats tokens input pos with
+    | .err _ => 0
+    | .ok stx stop => match strEq (kindOf stx) "command.import" with
+      | .true => match strEq (modCanonical (identOf'' (kid stx 1))) name with
+        | .true => skipWs input pos
+        | .false => modImportAt cats tokens input stop name
+      | .false => modImportAt cats tokens input stop name
+
+-- the offset of the import of `name` in the module at the head of the loader's stack
+def modImportOffset (tab : List ModSrc) (run : Run) (stack : List String) (name : String) : Nat :=
+  match modFind tab (modImporting stack) with
+  | .none => 0
+  | .some (.mk _ _ t _) =>
+    modImportAt (Run.catsOf run) (Run.tokensOf run) (String.codes t) 0 name
+
 -- (the cache key) the modules in load order: each module's name and text, mixed into a
 -- number (a rolling hash; the real cache, D5, also keys on the frontend's version)
 def modOrder : List String → List ModSrc → List ModSrc
@@ -5009,27 +5275,38 @@ inductive ModLoad where
 
 -- one module's commands, its imports already loaded (skipped); the Prelude needs the `do`
 -- grammar and the `←` token, as the inline import did, and its output is silent (it
--- declares the ambient names, it is not part of the program's output)
+-- declares the ambient names, it is not part of the program's output). A module's lines
+-- are tagged with its name (`tagFirst`, D6), so a driver can put each diagnostic in the
+-- file it came from; `stripAt` removes the tag for the checker's own output.
 def modRunBody (r : Run) (name : String) (text : String) : Run :=
-  match strEq name "Prelude" with
-  | .true => match runCommands .false (doCats (Run.catsOf r)) (.cons "←" (.cons "do" (Run.tokensOf r)))
-      (Run.notesOf r) (String.codes text) 0 (Run.gs r) .nil with
-    | .mk _ gs' cats' tokens' notes' => .mk (Run.out r) gs' cats' tokens' notes'
-  | .false => runCommands .false (Run.catsOf r) (Run.tokensOf r) (Run.notesOf r)
-      (String.codes text) 0 (Run.gs r) (Run.out r)
+  -- (21n) the module's commands run with `name` as the current module: its `private`
+  -- declarations are private to it, and every name it declares is marked in its name
+  let gs0 := Globals.setModule (Run.gs r) name;
+  let r' := match strEq name "Prelude" with
+    | .true => match runCommands .false (doCats (Run.catsOf r)) (.cons "←" (.cons "do" (Run.tokensOf r)))
+        (Run.notesOf r) (String.codes text) 0 gs0 .nil with
+      | .mk _ gs' cats' tokens' notes' => .mk (Run.out r) gs' cats' tokens' notes'
+    | .false => runCommands .false (Run.catsOf r) (Run.tokensOf r) (Run.notesOf r)
+        (String.codes text) 0 gs0 (Run.out r);
+  match r' with
+  | .mk out gs' cats' tokens' notes' =>
+    .mk (tagFirst name (Nat.sub (List.length out) (List.length (Run.out r))) out) gs' cats' tokens' notes'
 
 mutual
 def modLoadOne (tab : List ModSrc) (l : ModLoad) (name : String) : ModLoad :=
   match l with
   | .mk run vis stack order => match modStateOf vis name with
     | .loaded => l
-    | .loading => .mk (Run.addLine run (modCycleMsg stack name)) vis stack order
+    | .loading => .mk (Run.addLine run (tagOne (modImporting stack) (modImportOffset tab run stack name)
+          (modCycleMsg stack name))) vis stack order
     | .unseen => match modFind tab name with
-      | .none => .mk (Run.addLine run (String.append "error: cannot find module " name))
+      | .none => .mk (Run.addLine run (tagOne (modImporting stack) (modImportOffset tab run stack name)
+            (String.append "error: cannot find module " name)))
           (modMark vis name 2) stack order
       | .some (.mk n p t is) => match modEmpty p with
         -- the driver found no file: a `ModSrc` with path "" (or the caller had no entry)
-        | .true => .mk (Run.addLine run (String.append "error: cannot find module " n))
+        | .true => .mk (Run.addLine run (tagOne (modImporting stack) (modImportOffset tab run stack name)
+              (String.append "error: cannot find module " n)))
             (modMark vis name 2) stack order
         | .false =>
           let l1 : ModLoad := .mk run (modMark vis name 1) (.cons name stack) order;
@@ -5045,10 +5322,11 @@ end
 -- output lines, globals and tables (the load order is in `order`)
 def modCheckRun (cats : List Cat) (tokens : List String) (tab : List ModSrc) (roots : List String) : ModLoad :=
   modLoadAll tab (.mk (Run.mk .nil Globals.empty cats tokens .nil) StrMap.empty .nil .nil) roots
--- the output lines of the graph (each module's `#check`s and errors, in load order)
+-- the output lines of the graph (each module's `#check`s and errors, in load order),
+-- untagged: the checker's own output
 def moduleCheck (cats : List Cat) (tokens : List String) (tab : List ModSrc) (roots : List String) : List String :=
   match modCheckRun cats tokens tab roots with
-  | .mk run _ _ _ => List.reverseOf (Run.out run) .nil
+  | .mk run _ _ _ => stripAts (List.reverseOf (Run.out run) .nil)
 
 -- the driver: the `-I` roots and `--key` among the command-line arguments
 partial def modRoots : List String → List String
@@ -5086,17 +5364,23 @@ partial def modDiscover (cats : List Cat) (tokens : List String) (roots : List S
       | .true => modDiscover cats tokens roots (.cons m tab) rest
       | .false => modDiscover cats tokens roots (.cons m tab) (List.append rest (modImports m))
 
--- the root module (`Main` is the file `input.wiz`) and, from it, the modules it imports
-def moduleRootSources (cats : List Cat) (tokens : List String) (roots : List String)
-    (text : String) : IO (List ModSrc) := do
-  let root : ModSrc := ModSrc.mk "Main" "input.wiz" text (moduleImports cats tokens text);
+-- the root module and, from it, the modules it imports: its name and the path its
+-- diagnostics are reported at (the driver's FILE; the checker's `input.wiz`)
+def moduleRootSourcesAs (cats : List Cat) (tokens : List String) (roots : List String)
+    (name path text : String) : IO (List ModSrc) := do
+  let root : ModSrc := ModSrc.mk name path text (moduleImports cats tokens text);
   let tab0 : List ModSrc := .cons (ModSrc.mk "Prelude" "prelude" preludeText .nil) (.cons root .nil);
   modDiscover cats tokens roots tab0 (modImports root)
+
+-- the root module (`Main` is the file `input.wiz`) and, from it, the modules it imports
+def moduleRootSources (cats : List Cat) (tokens : List String) (roots : List String)
+    (text : String) : IO (List ModSrc) :=
+  moduleRootSourcesAs cats tokens roots "Main" "input.wiz" text
 
 partial def modPrint : List String → IO Unit
   | .nil => IO.pure ()
   | .cons s ss => do
-    IO.println s;
+    IO.println (stripAt s);
     modPrint ss
 
 -- (A14) the checker's driver: read `input.wiz` and its modules (with `-I` roots), check
@@ -5105,7 +5389,11 @@ def moduleMain (cats : List Cat) (tokens : List String) : IO Unit := do
   args ← IO.args;
   text ← IO.readFile "input.wiz";
   tab ← moduleRootSources cats tokens (modRoots args) text;
-  match modCheckRun cats tokens tab (.cons "Main" .nil) with
-  | .mk run _ _ order => match modHasFlag args "--key" with
-    | .true => IO.println (Nat.toString (moduleGraphKey order tab))
-    | .false => modPrint (List.reverseOf (Run.out run) .nil)
+  match modHasFlag args "--oneshot" with
+  -- (21n) the one-shot path (`checkFile`: the embedded Prelude inline, one module
+  -- `input`), kept reachable for the checker's own tests; the loader is the default
+  | .true => modPrint (checkFile cats tokens text)
+  | .false => match modCheckRun cats tokens tab (.cons "Main" .nil) with
+    | .mk run _ _ order => match modHasFlag args "--key" with
+      | .true => IO.println (Nat.toString (moduleGraphKey order tab))
+      | .false => modPrint (List.reverseOf (Run.out run) .nil)
