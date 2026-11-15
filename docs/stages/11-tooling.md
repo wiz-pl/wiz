@@ -788,6 +788,18 @@ page runs.
   definition, a `#check`, `#eval twice 21` (the value renders as `42`), a Bool and an
   error. `web/test.sh` now builds both Wasm modules and runs this test beside the
   infoview's Node and Chromium tests.
+* **Goals, optionally.** With `?lsp=ws://host:port` the page is also a language client:
+  `web/lsp-client.js` speaks JSON-RPC 2.0 over a WebSocket (one message per text frame,
+  no `Content-Length`), and `web/playground-lsp.js` shows the tactic state in a Goals
+  pane beside the output (`web/goals.js` renders the tagged text with the infoview's
+  markup). It asks `wiz/interactiveGoals`/`wiz/interactiveTermGoal` at the caret, falls
+  back to `wiz/plainGoal`/`wiz/plainTermGoal`, and keeps the Wasm checker working with
+  no endpoint or a failed connection. Clicking a hypothesis or subterm selects its source
+  span; `web/tagged.js`'s `delegate` is the infoview's highlighting code. The protocol a
+  server must serve — methods, UTF-16 positions, fallbacks and the optional fields that
+  make highlighting precise — is [playground-lsp.md](../playground-lsp.md). The mock
+  server (`web/mock_lsp_server.mjs`) and `node web/playground_lsp_test.mjs` test it with
+  no Wiz build.
 * **Limits.** The evaluator has no fuel: a non-terminating `#eval` blocks the tab (the
   call into Wasm is synchronous). Only the embedded Prelude exists, not the library's
   modules or `IO`/`#run`; the page is a checker, not a REPL with a filesystem.
