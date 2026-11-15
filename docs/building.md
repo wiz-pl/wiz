@@ -344,6 +344,15 @@ the elan toolchain, so the setup action keeps the elan cache for those
   7 for a snapshot (both are also release assets) and 3 for a pull request.
   To see the usage: `gh api repos/wiz-pl/wiz/actions/cache/usage` and
   `gh cache list -R wiz-pl/wiz -S size_in_bytes`.
+  CI publishes **only** the two package outputs (`.#wiz`, `.#tests`): the push step
+  measures their union closure and refuses one over 2560 MiB (about 1.9 GiB today), so
+  a flake change that pulls the dev shell or `nvim-wiz` into the closure cannot grow the
+  cache silently. Cachix has no expiry: a published path stays until it is deleted with
+  the cache's token, so what CI pushes *is* the retention policy. Old revisions'
+  `wiz-0.1.0` paths remain downloadable (that is what `tower toolchain install
+  master@<sha>` uses) and cost Cachix storage, not the local store — local builds of
+  them become dead paths and the report below collects them. See "Store and cache
+  hygiene" below.
 
 * **Path filters.** On a pull request the `changes` job (`scripts/ci.py changes`) reads
   the files the PR changes and decides what runs: nothing but `changes`, `docs_style`
@@ -372,6 +381,83 @@ the elan toolchain, so the setup action keeps the elan cache for those
   queue run that fails drops that PR from the queue and rebuilds the ones behind it
   without it. Without a queue (a user-owned repository), `--auto` waits for the required
   check and merges, and "require branches to be up to date" serialises merges instead.
+
+### Store and cache hygiene
+
+A machine that builds a fleet of branches fills two places: `/nix/store` (each revision's
+Nix build, plus every `nix develop`, `nix run` and one-off flake evaluation) and each
+worktree's `.lake` (Lake's build and its artifact cache). Measured on 2026-11-15 with
+about 240 linked worktrees: the store held 54,500 paths and 108 GiB (96 GiB free of
+603 GiB), and the `.lake` directories 81 GiB. The store had grown by 88 GiB in the six
+days of the fleet (43 GiB on 9 November and 35 GiB on 14 November alone), so at that
+rate the free space was about a week. Almost all of it was **dead**: about 15,000 paths
+and 40 GiB were not reachable from any GC root, and 35 GiB of those had been registered
+the same day — a build's output is dead as soon as the build ends without a root (a
+`nix build` of a revision nobody links, a `nix develop` that wrote nothing, a `nix run`).
+
+`scripts/nix-store-report` measures both and is a dry run unless `--apply` is given:
+
+```sh
+scripts/nix-store-report                 # the whole report (about 15 s with 240 worktrees)
+scripts/nix-store-report --store-only    # just the store
+scripts/nix-store-report --lake-only     # just the worktrees
+scripts/nix-store-report --apply         # delete what the report listed
+```
+
+The policy is deliberately narrower than `nix-collect-garbage`:
+
+* **Store.** Only paths `nix-store --gc --print-dead` names, registered more than
+  `--min-age-days` (default 1) ago, deleted with `nix-store --delete` in batches. A path
+  that became live in between is refused by Nix and nothing else is touched; a path a
+  build produced but has not rooted yet, or one a process is still running from, is
+  younger than the guard. `--min-age-days 0` turns the guard off (for a drained machine
+  and a probe).
+* **Worktrees.** Only the `.lake` of a worktree whose branch is merged into
+  `origin/master` and whose working tree is clean. The invoking checkout and the
+  `master` checkout are never touched; neither is a dirty or unmerged worktree.
+* **GC roots.** The script never deletes a root or a path that is one, and it protects
+  the invoking checkout's roots and every linked tower toolchain
+  (`~/.tower/toolchains/*/nix`, `/nix/var/nix/gcroots/tower/*`) explicitly. `--protect
+  PATH` adds another path that must never be deleted; `--only PATH` restricts a run to
+  named paths (a probe).
+* **Permissions.** Deleting a store path needs write access to `/nix/store`, so run the
+  store half as root (or a trusted user); the `.lake` half needs only the worktree's
+  owner: `sudo scripts/nix-store-report --store-only --apply`, then
+  `scripts/nix-store-report --lake-only --apply`.
+
+Profile generations are the other half: `sudo nix-collect-garbage --delete-older-than
+14d` drops all but the last generation of every profile and collects everything
+unreachable from a root. It is coarser than the report (it does not list first), so run
+the report first and keep the generation command for the system profile after a
+`nixos-rebuild` spree.
+
+Weekly, the `Store report` workflow (`.github/workflows/store-report.yml`) runs the
+report on the self-hosted runner when `WIZ_RUNNER_HEAVY` is set, and a manual run can
+tick `apply`. It is not a CI check: no push or pull request runs it, and `CI result`
+does not wait for it. On the workstation, a user timer does the same, dry run:
+
+```ini
+# ~/.config/systemd/user/nix-store-report.service
+[Unit]
+Description=Report the Wiz store and .lake growth
+[Service]
+Type=oneshot
+WorkingDirectory=%h/wiz
+ExecStart=%h/wiz/scripts/nix-store-report --store-only
+
+# ~/.config/systemd/user/nix-store-report.timer
+[Unit]
+Description=Weekly Wiz store report
+[Timer]
+OnCalendar=Mon 04:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+```
+
+`systemctl --user enable --now nix-store-report.timer`; the output is in the journal.
+The timer does not delete: `--apply` stays a decision someone makes after reading a
+report.
 
 ### Documentation site
 

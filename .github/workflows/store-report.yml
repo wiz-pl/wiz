@@ -1,0 +1,41 @@
+# A weekly, read-only report of the disk a persistent builder leaves behind, plus an
+# opt-in `--apply` (workflow_dispatch, `apply` ticked). It is not part of CI: no pull
+# request or push runs it, and it is not in `CI result`.
+#
+# The machine that needs it is the one that builds the fleet — a workstation with the
+# Nix store and one worktree per branch. GitHub's runners are thrown away after the job,
+# so a report there says nothing and the job is skipped unless a persistent runner is
+# configured: set the repository variable WIZ_RUNNER_HEAVY to its label
+# (docs/ci-runner.md). On a workstation, the same command runs from a user timer
+# (docs/building.md, "Store and cache hygiene").
+#
+# scripts/nix-store-report protects the invoking checkout and the linked tower toolchain
+# and only deletes dead store paths older than a day, and the `.lake` of worktrees whose
+# branch is merged and whose tree is clean.
+name: Store report
+
+on:
+  schedule:
+    - cron: "41 3 * * 1" # Mondays, after the bootstrap fixpoint run starts
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Delete what the report lists (dead store paths older than a day; merged, clean worktrees' .lake)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    name: nix store report
+    if: vars.WIZ_RUNNER_HEAVY != ''
+    runs-on: ${{ vars.WIZ_RUNNER_HEAVY }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Report (dry run unless `apply` was ticked)
+        shell: bash
+        run: |
+          scripts/nix-store-report --top 20 ${{ inputs.apply && '--apply' || '' }}

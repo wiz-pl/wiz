@@ -1,0 +1,449 @@
+#!/usr/bin/env python3
+"""Report, and optionally reclaim, the disk the Wiz fleet leaves behind.
+
+Two things fill the machine a fleet of checkouts builds on: the Nix store
+(the `.#wiz` closure of every revision that was built, plus the toolchains)
+and each worktree's `.lake` (Lake's build plus its artifact cache). Neither
+shrinks by itself. This script measures both and, with `--apply`, removes
+what it listed:
+
+  store   dead Nix store paths (`nix-store --gc --print-dead`) that are older
+          than --min-age-days, deleted one batch at a time with
+          `nix-store --delete` (never `nix-collect-garbage`), so only what the
+          report listed is removed and Nix still refuses a path that became
+          live in between;
+  lake    the `.lake` directory of a worktree whose branch is merged into
+          origin/master and whose working tree is clean (never the invoking
+          worktree, never a dirty or unmerged one).
+
+It is a dry run unless `--apply` is given. It never deletes a GC root or a
+path that is one, and it protects the invoking checkout's roots and every
+linked tower toolchain explicitly (see `protected`).
+
+Usage
+  scripts/nix-store-report                 report only (dry run)
+  scripts/nix-store-report --store-only    skip the worktree scan (fast)
+  scripts/nix-store-report --lake-only
+  scripts/nix-store-report --only PATH     restrict store candidates to PATH
+                                           (repeatable; for a probe)
+  scripts/nix-store-report --only-worktree DIR
+                                           restrict .lake candidates to DIR
+  scripts/nix-store-report --apply         delete what the report listed
+  scripts/nix-store-report --apply --min-age-days 0   (the age guard off)
+
+Exit status: 0 on a report, 0 on a successful --apply, 1 if an --apply step
+failed. A report never fails on a full disk: it is a measurement, not a gate.
+
+Why an age guard. `nix-store --gc --print-dead` answers from the roots that
+exist now. A path a build has just produced but not yet rooted (or one a
+process is still executing from) is dead by that answer, so the default is to
+delete only paths registered more than a day ago. `nix-store --delete` also
+refuses a path that is alive at deletion time; the guard covers the window
+where a path is not yet live, and that is all it covers.
+
+The fleet policy (docs/building.md, "Store and cache hygiene"): run this
+weekly, first without --apply and read the numbers, then with --apply when
+the difference is understood. `nix-collect-garbage --delete-older-than 14d`
+is the complementary tool for profile generations (it collects everything
+unreachable, not just the paths this report listed); the report prints it.
+"""
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+GIB = 1024**3
+MIB = 1024**2
+BATCH = 500
+
+
+def run(cmd, cwd=None, check=False):
+    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    if check and p.returncode != 0:
+        raise RuntimeError(f"{' '.join(cmd)}: {p.stderr.strip()}")
+    return p
+
+
+def human(n):
+    return f"{n / GIB:.1f} GiB" if n >= GIB else f"{n / MIB:.0f} MiB"
+
+
+def git(args, cwd=ROOT, check=False):
+    p = run(["git", *args], cwd=cwd)
+    if check and p.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)}: {p.stderr.strip()}")
+    return p
+
+
+# --- the store ---------------------------------------------------------------
+
+def store_paths_by_size(paths):
+    """{path: (narSize, registrationTime)} for paths, in argv-sized batches.
+    `nix path-info` is the only reader of the store database used here."""
+    info = {}
+
+    def query(batch):
+        p = run(["nix", "path-info", "--json", "--json-format", "1", *batch])
+        if p.returncode == 0:
+            for path, v in json.loads(p.stdout or "{}").items():
+                if not v:
+                    continue  # the path is gone (or has no info): not in the store
+                info[path] = (v.get("narSize") or 0, v.get("registrationTime") or 0)
+        elif len(batch) > 1:
+            # a path can disappear between listing and querying it; ask one at a
+            # time rather than losing the batch
+            for path in batch:
+                query([path])
+        else:
+            print(f"warning: nix path-info: {p.stderr.strip()}", file=sys.stderr)
+
+    for i in range(0, len(paths), BATCH):
+        query(paths[i:i + BATCH])
+    return info
+
+
+def dead_paths():
+    p = run(["nix-store", "--gc", "--print-dead"])
+    if p.returncode != 0:
+        raise RuntimeError(f"nix-store --gc --print-dead: {p.stderr.strip()}")
+    return [l for l in p.stdout.splitlines() if l.startswith("/nix/store/")]
+
+
+def protected(checkout):
+    """Store paths that must never be deleted: every GC root's target, the
+    pinned toolchain (the tower toolchain links and `/nix/var/nix/gcroots/tower`),
+    and the invoking checkout's own roots. `nix-store --gc --print-dead` should
+    never name one of these; checking turns a bug or a race into a refusal."""
+    paths = set()
+    p = run(["nix-store", "--gc", "--print-roots"])
+    for line in p.stdout.splitlines():
+        _, _, target = line.partition(" -> ")
+        target = target.strip().strip('"')
+        if target.startswith("/nix/store/"):
+            paths.add(target)
+    home = os.path.expanduser("~")
+    import glob
+    for pattern in (
+        os.path.join(home, ".tower", "toolchains", "*", "nix"),
+        "/nix/var/nix/gcroots/tower/*",
+        os.path.join(checkout, ".devenv", "gc"),
+        os.path.join(checkout, ".devenv", "profile"),
+        os.path.join(checkout, "result"),
+    ):
+        for link in glob.glob(pattern):
+            real = os.path.realpath(link)
+            if real.startswith("/nix/store/"):
+                paths.add(real)
+    return paths
+
+
+def store_report(args, out):
+    if not os.path.isdir("/nix/store"):
+        out("No `/nix/store` on this machine: nothing to report (a hosted runner's")
+        out("store is thrown away with the machine).")
+        return None
+    df = os.statvfs("/nix/store")
+    free = df.f_bavail * df.f_frsize
+    total = df.f_blocks * df.f_frsize
+    used = total - df.f_bfree * df.f_frsize
+
+    all_dead = dead_paths()
+    info = store_paths_by_size(all_dead)
+    now = time.time()
+    cutoff = now - args.min_age_days * 86400
+    old = {p: v for p, v in info.items() if v[1] <= cutoff}
+    young = {p: v for p, v in info.items() if v[1] > cutoff}
+    guard = protected(os.path.abspath(args.checkout or ROOT))
+    guard |= {os.path.realpath(p) for p in args.protect if p.startswith("/nix/store/")}
+    blocked = {p for p in old if p in guard}
+
+    if args.only:
+        wanted = {os.path.realpath(p) for p in args.only}
+        listed = {p: v for p, v in old.items() if p in wanted and p not in blocked}
+        refused = wanted & blocked
+        missing = wanted - set(info) - refused
+    else:
+        listed = {p: v for p, v in old.items() if p not in blocked}
+        refused = set()
+        missing = set()
+
+    out(f"## Nix store: {len(info):,} dead paths, {human(sum(v[0] for v in info.values()))}")
+    out("")
+    out(f"`/nix/store`: {human(used)} used of {human(total)}, {human(free)} free.")
+    out("")
+    out("| dead paths | count | NAR size | what |")
+    out("|---|---:|---:|---|")
+    out(f"| older than {args.min_age_days:g} day(s) | {len(old):,} | {human(sum(v[0] for v in old.values()))} | reclaimable |")
+    out(f"| younger (a build may still need them) | {len(young):,} | {human(sum(v[0] for v in young.values()))} | wait |")
+    if blocked:
+        out(f"| GC roots (never deleted) | {len(blocked):,} | "
+            f"{human(sum(old[p][0] for p in blocked))} | kept |")
+    out("")
+    if args.only:
+        out(f"Restricted to {len(listed)} of {len(args.only)} named path(s): "
+            f"{human(sum(v[0] for v in listed.values()))}.")
+        for p in sorted(refused):
+            out(f"  refused by the GC-root guard: {p}")
+        for p in sorted(missing):
+            out(f"  not dead or not in the store: {p}")
+    else:
+        out(f"**Reclaimable now: {len(listed):,} paths, "
+            f"{human(sum(v[0] for v in listed.values()))}.**")
+    if listed:
+        out("")
+        out("Largest listed paths:")
+        out("")
+        out("| NAR size | registered | path |")
+        out("|---:|---|---|")
+        for p, (size, reg) in sorted(listed.items(), key=lambda kv: -kv[1][0])[:args.top]:
+            out(f"| {human(size)} | {time.strftime('%Y-%m-%d', time.localtime(reg))} | `{p}` |")
+    return listed
+
+
+def apply_store(listed, out):
+    deleted = errors = 0
+    paths = sorted(listed)
+    for i in range(0, len(paths), BATCH):
+        batch = paths[i:i + BATCH]
+        p = run(["nix-store", "--delete", *batch])
+        if p.returncode == 0:
+            deleted += len(batch)
+            continue
+        # one path in the batch became live (or vanished): retry it one by one,
+        # so a race costs one path and not the batch
+        for path in batch:
+            q = run(["nix-store", "--delete", path])
+            if q.returncode == 0:
+                deleted += 1
+            else:
+                errors += 1
+                if len(listed) == 1:
+                    out(f"not deleted: {path}: {q.stderr.strip()}")
+    out("")
+    out(f"Deleted {deleted:,} dead store path(s), {errors:,} refused "
+        f"(alive at deletion time, or gone).")
+    return errors
+
+
+# --- the worktrees -----------------------------------------------------------
+
+def worktrees():
+    p = git(["worktree", "list", "--porcelain"], check=True)
+    out, cur = [], {}
+    for line in p.stdout.splitlines():
+        if not line.strip():
+            if cur:
+                out.append(cur)
+                cur = {}
+            continue
+        key, _, value = line.partition(" ")
+        if key == "worktree":
+            cur = {"path": value, "head": None, "branch": None, "detached": False}
+        elif key == "HEAD":
+            cur["head"] = value
+        elif key == "branch":
+            cur["branch"] = value
+        elif key == "detached":
+            cur["detached"] = True
+        elif key == "prunable":
+            cur["prunable"] = True
+    if cur:
+        out.append(cur)
+    return out
+
+
+def dir_size(path):
+    p = run(["du", "-sb", path])
+    if p.returncode != 0 or not p.stdout.strip():
+        return 0
+    return int(p.stdout.split()[0])
+
+
+def merged_base():
+    for ref in ("origin/master", "master", "HEAD"):
+        if git(["rev-parse", "--verify", "--quiet", ref]).returncode == 0:
+            return ref
+    return None
+
+
+def lake_report(args, out):
+    base = merged_base()
+    current = os.path.realpath(args.checkout or ROOT)
+    rows = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        sizes = {}
+        future = {}
+        for w in worktrees():
+            lake = os.path.join(w["path"], ".lake")
+            if os.path.isdir(lake):
+                future[pool.submit(dir_size, lake)] = w["path"]
+        for f in concurrent.futures.as_completed(future):
+            sizes[future[f]] = f.result()
+
+    for w in worktrees():
+        path = w["path"]
+        size = sizes.get(path, 0)
+        if not size:
+            continue
+        if w.get("prunable") or not os.path.isdir(path):
+            state = ("prunable", "dead")
+        else:
+            p = git(["merge-base", "--is-ancestor", w.get("head") or "HEAD", base], cwd=path) if base else None
+            merged = p is not None and p.returncode == 0
+            status = git(["status", "--porcelain", "--untracked-files=normal"], cwd=path)
+            # a failed status (e.g. "dubious ownership" as root) counts as dirty: refuse
+            dirty = status.returncode != 0 or bool(status.stdout.strip())
+            state = ("merged" if merged else "unmerged", "dirty" if dirty else "clean")
+        rows.append({"path": path, "size": size, "state": state,
+                     "branch": w.get("branch") or ("detached" if w.get("detached") else "?")})
+
+    def can_delete(r):
+        # never the invoking checkout, never the master (integration) checkout: its
+        # build is the one every other worktree's incremental build starts from
+        return (r["state"][0] == "merged" and r["state"][1] == "clean"
+                and r["branch"] != "refs/heads/master"
+                and os.path.realpath(r["path"]) != current)
+
+    total = sum(r["size"] for r in rows)
+    reclaim = [r for r in rows if can_delete(r)]
+    if args.only_worktree:
+        wanted = {os.path.realpath(p) for p in args.only_worktree}
+        reclaim = [r for r in reclaim if os.path.realpath(r["path"]) in wanted]
+    out(f"## Worktrees: {len(rows)} with a `.lake`, {human(total)} total")
+    out("")
+    out("| state | worktrees | `.lake` |")
+    out("|---|---:|---:|")
+    for state in (("merged", "clean"), ("merged", "dirty"),
+                  ("unmerged", "clean"), ("unmerged", "dirty"), ("prunable", "dead")):
+        rs = [r for r in rows if r["state"] == state]
+        if rs:
+            out(f"| {state[0]}, {state[1]} | {len(rs)} | {human(sum(r['size'] for r in rs))} |")
+    out("")
+    out(f"**Reclaimable: {len(reclaim)} merged, clean worktree(s), "
+        f"{human(sum(r['size'] for r in reclaim))}** (the invoking checkout is never one).")
+    if reclaim:
+        out("")
+        out("| `.lake` | branch | worktree |")
+        out("|---:|---|---|")
+        for r in sorted(reclaim, key=lambda r: -r["size"])[:args.top]:
+            out(f"| {human(r['size'])} | `{r['branch']}` | `{r['path']}` |")
+    return reclaim
+
+
+def apply_lake(reclaim, out, current, base):
+    deleted = 0
+    for r in reclaim:
+        lake = os.path.realpath(os.path.join(r["path"], ".lake"))
+        # The only directory this script ever removes: <worktree>/.lake. Re-check the
+        # two facts the report used: a branch can be checked out elsewhere, or an edit
+        # can land, between the scan and the deletion.
+        status = git(["status", "--porcelain", "--untracked-files=normal"], cwd=r["path"])
+        merged = base and git(["merge-base", "--is-ancestor", "HEAD", base], cwd=r["path"]).returncode == 0
+        if (os.path.basename(lake) != ".lake"
+                or not lake.startswith(os.path.realpath(r["path"]) + os.sep)
+                or os.path.realpath(r["path"]) == current
+                or status.returncode != 0 or status.stdout.strip()
+                or not merged):
+            out(f"skipped (changed since the report): {lake}")
+            continue
+        p = run(["rm", "-rf", "--", lake])
+        if p.returncode == 0:
+            deleted += 1
+        else:
+            out(f"could not remove {lake}: {p.stderr.strip()}")
+    out("")
+    out(f"Removed {deleted} `.lake` director{'y' if deleted == 1 else 'ies'}.")
+    return deleted
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(
+        prog="nix-store-report",
+        description="Report (and with --apply, reclaim) dead Nix store paths and "
+                    "the .lake of merged, clean worktrees. Dry run by default.")
+    ap.add_argument("--apply", action="store_true",
+                    help="delete what the report listed (default: report only)")
+    ap.add_argument("--min-age-days", type=float, default=1.0, metavar="N",
+                    help="only delete dead store paths registered more than N days "
+                         "ago (default 1; 0 disables the guard)")
+    ap.add_argument("--store-only", action="store_true", help="skip the worktree scan")
+    ap.add_argument("--lake-only", action="store_true", help="skip the store scan")
+    ap.add_argument("--only", action="append", metavar="PATH",
+                    help="restrict store candidates to PATH (repeatable)")
+    ap.add_argument("--only-worktree", action="append", metavar="PATH",
+                    help="restrict .lake candidates to the worktree PATH (repeatable)")
+    ap.add_argument("--protect", action="append", default=[], metavar="PATH",
+                    help="a store path never to delete (repeatable)")
+    ap.add_argument("--checkout", default=None,
+                    help="the checkout whose roots are protected (default: this one)")
+    ap.add_argument("--top", type=int, default=20, help="rows in the size tables")
+    args = ap.parse_args(argv)
+    args.checkout = os.path.realpath(args.checkout or ROOT)
+    if args.store_only and args.lake_only:
+        ap.error("--store-only and --lake-only are exclusive")
+    if args.only and args.lake_only:
+        ap.error("--only is a store filter; it needs the store scan")
+
+    lines = []
+
+    def out(line=""):
+        print(line)
+        lines.append(line)
+
+    mode = "applying" if args.apply else "dry run"
+    out(f"# Nix store report ({mode}), {time.strftime('%Y-%m-%d %H:%M')}")
+    out("")
+    out(f"checkout: `{args.checkout}`; protecting its GC roots and the linked "
+        f"tower toolchain.")
+    out("")
+
+    listed = None
+    reclaim = None
+    if not args.lake_only:
+        listed = store_report(args, out)
+    if not args.store_only:
+        out("")
+        reclaim = lake_report(args, out)
+
+    status = 0
+    if args.apply:
+        if listed is not None:
+            out("")
+            status |= 1 if apply_store(listed, out) else 0
+        if reclaim is not None:
+            out("")
+            apply_lake(reclaim, out, os.path.realpath(args.checkout), merged_base())
+
+    out("")
+    out("### Next")
+    out("")
+    if listed is not None and not args.apply:
+        out(f"- Dead store paths: `scripts/nix-store-report --apply"
+            f"{f' --min-age-days {args.min_age_days:g}' if args.min_age_days != 1 else ''}`"
+            f" (would delete {len(listed):,} path(s), "
+            f"{human(sum(v[0] for v in listed.values()))}).")
+    if reclaim is not None and not args.apply:
+        out(f"- Merged worktrees: `scripts/nix-store-report --apply` would remove "
+            f"{len(reclaim)} `.lake`, {human(sum(r['size'] for r in reclaim))}.")
+    out("- Profile generations: `sudo nix-collect-garbage --delete-older-than 14d` collects")
+    out("  everything unreachable from a root, one older generation kept per profile.")
+    out("  It is coarser than this script; run it on the machine, not in CI.")
+    if not args.apply:
+        out("")
+        out("Nothing was deleted (dry run; add --apply to delete the listed paths).")
+
+    if os.environ.get("GITHUB_STEP_SUMMARY") and not args.apply:
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    return status
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

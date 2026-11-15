@@ -152,16 +152,28 @@ jobs:
         # The shards substitute from here. Explicit (not the action's post-step) so that
         # exactly this commit's build is published, with the token only in this step's
         # environment; fork pull requests have no secret and skip it (their shards build).
+        # The closure is measured first: `.#wiz` plus `.#tests` is ~1.9 GiB of NAR today
+        # (the driver shares wiz's closure). A flake change that pulls the dev shell,
+        # `nvim-wiz` or another toolchain into it must not reach the cache silently, so
+        # the step stops above CACHIX_MAX_MIB instead of publishing it.
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          CACHIX_MAX_MIB: 2560
         run: |
           if [ -z "$CACHIX_AUTH_TOKEN" ]; then
             echo "::warning title=Cachix::no CACHIX_AUTH_TOKEN: the store paths are not published"
             exit 0
           fi
-          nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" \
-            $(nix path-info .#wiz .#tests)
+          paths=$(nix path-info .#wiz .#tests)
+          mib=$(nix path-info --json --json-format 1 -r $paths |
+            python3 -c 'import json, sys; print(sum((v or {}).get("narSize", 0) for v in json.load(sys.stdin).values()) // 2**20)')
+          echo "closure: ${mib} MiB of NAR for .#wiz .#tests (cap ${CACHIX_MAX_MIB} MiB)"
+          if [ "$mib" -gt "$CACHIX_MAX_MIB" ]; then
+            echo "::error title=Cachix cap::the .#wiz .#tests closure is ${mib} MiB, over the ${CACHIX_MAX_MIB} MiB cap; not publishing. Check what the flake's runtime closure gained (the dev shell? nvim-wiz? a second toolchain?)."
+            exit 1
+          fi
+          nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" $paths
       - name: Every test case is in exactly one shard
         run: python3 scripts/ci.py check-shards "${{ steps.nix.outputs.tests }}/bin/tests"
       - name: Shards
