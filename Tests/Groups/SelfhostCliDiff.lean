@@ -321,6 +321,18 @@ def cliDiffGroup : Group where
         checkEq 1 s3.code
         cliCheck s3.err "tm.wiz:2:1: error: type mismatch" "type mismatch"
         skip "column: the host reports the failing term and the declared name; the self-hosted frontend reports the command's start (D6)" },
+    { name := "prelude surface: `import Prelude` alone carries `IO` in the self-hosted toolchain only", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        -- (the selfhost loader canonicalises `IO`/`Std`/`Sys` to its one embedded prelude,
+        -- so `IO.println` resolves without `import IO`; the host has a module for it)
+        let src := "import Prelude\ndef main : IO Unit := do\n  IO.println \"hi\"\n"
+        let spec : CliDiffSpec := { files := #[("p.wiz", src)], args := #["check", "p.wiz"] }
+        let (h, s) ← cliDiffBoth host exe spec
+        checkEq 1 h.code
+        cliCheck h.err "unknown identifier 'IO'" "the host's Prelude"
+        checkEq 0 s.code
+        checkEq "" s.err
+        skip "prelude: the self-hosted Prelude is one embedded module that includes the IO natives, and `import IO` is canonicalised to it; the host's `lib/Prelude.wiz` has no `IO`, so a file that omits `import IO` compiles only there (A14/C12)" },
     { name := "usage: a missing FILE, extra arguments and an unknown command agree (exit 2)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         for args in [#["check"], #["nonsense"], #["check", "--bogus", "x.wiz"],
@@ -567,14 +579,19 @@ def cliDiffGroup : Group where
     { name := "build --llvm: the host has it, the self-hosted backend is C only (C5)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let tc ← cliDiffHostToolchain
-        let spec : CliDiffSpec := { files := #[("good.wiz", cliHello)]
+        let spec : CliDiffSpec := { files := #[("good.wiz", cliDiffHello)]
                                     args := #["build", "good.wiz", "-o", "out", "--llvm"]
                                     hostArgs := tc }
         let (h, s) ← cliDiffBoth host exe spec
-        if h.code != 0 then skip "no LLVM toolchain for the host (`llc`)" else do
-          checkEq 2 s.code
-          cliCheck s.err "unknown flag: --llvm" "the driver's rejection"
-          skip "backend: the host builds through textual LLVM IR (`--llvm`); the self-hosted backend is C only (C5)" },
+        -- (the driver has no LLVM path at all: it always refuses the flag, C5)
+        checkEq 2 s.code
+        cliCheck s.err "unknown flag: --llvm" "the driver's rejection"
+        if h.code == 0 then do
+          check (← cliDiffExists h "out") "the host's LLVM build wrote no artifact"
+          skip "backend: the host builds through textual LLVM IR (`--llvm`); the self-hosted backend is C only (C5)"
+        else do
+          let why := " ".intercalate ((cliDiffNormal false h.err).splitOn "\n")
+          skip s!"backend: --llvm selects the host's LLVM path (exit {h.code} here: {why}); the self-hosted backend is C only (C5)" },
     { name := "extensions: --include, --types and -v are the driver's own (the host rejects them)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let files := #[("good.wiz", cliGood)]
