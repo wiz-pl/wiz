@@ -398,48 +398,48 @@ def main : IO Unit := EIO.toIO (do
       (hasFindingRule repP5 "path-traversal"));
 
   -- null dereference: the S5 alarm, wired into the CLI as a memory diagnostic
-  oN1 ← opts ["tests/fixtures/null-unsafe-malloc.c"];
+  oN1 ← opts ["tests/fixtures/null-unsafe-malloc.c", "--null-deref"];
   repN1 ← Scry.analyzeFile oN1;
   check "null-unsafe-malloc: a null-dereference warning"
     (Bool.and (Nat.beq (List.length repN1.findings) 0)
       (hasMemRule repN1 "scry/memory/null-dereference"));
 
-  oN2 ← opts ["tests/fixtures/null-safe-malloc.c"];
+  oN2 ← opts ["tests/fixtures/null-safe-malloc.c", "--null-deref"];
   repN2 ← Scry.analyzeFile oN2;
   check "null-safe-malloc: the !p guard kills the warning"
     (Bool.not (hasMemRule repN2 "scry/memory/null-dereference"));
 
-  oN3 ← opts ["tests/fixtures/null-unsafe-getenv.c"];
+  oN3 ← opts ["tests/fixtures/null-unsafe-getenv.c", "--null-deref"];
   repN3 ← Scry.analyzeFile oN3;
   check "null-unsafe-getenv: a null-dereference warning"
     (hasMemRule repN3 "scry/memory/null-dereference");
 
-  oN4 ← opts ["tests/fixtures/null-safe-getenv.c"];
+  oN4 ← opts ["tests/fixtures/null-safe-getenv.c", "--null-deref"];
   repN4 ← Scry.analyzeFile oN4;
   check "null-safe-getenv: the p == 0 early return kills the warning"
     (Bool.not (hasMemRule repN4 "scry/memory/null-dereference"));
 
-  oN5 ← opts ["tests/fixtures/null-unsafe-call.c"];
+  oN5 ← opts ["tests/fixtures/null-unsafe-call.c", "--null-deref"];
   repN5 ← Scry.analyzeFile oN5;
   check "null-unsafe-call: a call result that is not checked"
     (hasMemRule repN5 "scry/memory/null-dereference");
 
-  oN6 ← opts ["tests/fixtures/null-safe-call.c"];
+  oN6 ← opts ["tests/fixtures/null-safe-call.c", "--null-deref"];
   repN6 ← Scry.analyzeFile oN6;
   check "null-safe-call: the !p guard kills the warning"
     (Bool.not (hasMemRule repN6 "scry/memory/null-dereference"));
 
-  oN7 ← opts ["tests/fixtures/null-unsafe-status.c"];
+  oN7 ← opts ["tests/fixtures/null-unsafe-status.c", "--null-deref"];
   repN7 ← Scry.analyzeFile oN7;
   check "null-unsafe-status: the ignored failure status leaves req null"
     (hasMemRule repN7 "scry/memory/null-dereference");
 
-  oN8 ← opts ["tests/fixtures/null-safe-status.c"];
+  oN8 ← opts ["tests/fixtures/null-safe-status.c", "--null-deref"];
   repN8 ← Scry.analyzeFile oN8;
   check "null-safe-status: the constant-false status guard is unreachable"
     (Bool.not (hasMemRule repN8 "scry/memory/null-dereference"));
 
-  oN9 ← opts ["tests/fixtures/null-safe-param.c"];
+  oN9 ← opts ["tests/fixtures/null-safe-param.c", "--null-deref"];
   repN9 ← Scry.analyzeFile oN9;
   check "null-safe-param: a parameter is non-null at entry"
     (Bool.not (hasMemRule repN9 "scry/memory/null-dereference"));

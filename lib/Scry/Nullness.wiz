@@ -522,8 +522,8 @@ def Scry.dedupNullWarnings (ws : List Scry.MemWarning) : List Scry.MemWarning :=
     | .true => acc
     | .false => List.append acc (List.cons w .nil)) .nil ws
 
-/-- Every null-dereference warning of a program. The pass is on by default in
-`Scry.Interproc`; `Scry.analyzeWithoutNull` omits it. -/
+/-- Every null-dereference warning of a program. `Scry.analyzeWithNull` runs it; the
+default `Scry.analyze` does not (the CLI flag is `--null-deref`). -/
 def Scry.nullDerefWarnings (p : Wil.Program) : List Scry.MemWarning :=
   let tab := Scry.retConstTable p;
   Scry.dedupNullWarnings

@@ -300,13 +300,18 @@ def Scry.analyzeCore (p : Wil.Program) (pack0 : Scry.RulePack) (withNull : Bool)
   let warnings := Scry.dedupWarnings (List.append base nulls);
   Scry.ProgramResult.mk results sums graph pt warnings
 
-/-- Analyse a program with the default pack. The S5 null-dereference pass runs on by
-default (`Scry.Nullness`); `Scry.analyzeWithoutNull` omits it for callers that want only
-taint and points-to diagnostics. -/
+/-- Analyse a program with the default pack and the points-to/taint stages only. The S5
+null-dereference pass is **opt-in** (`Scry.analyzeWithNull`, or `scry taint
+--null-deref`): it is a memory diagnostic with a different precision trade-off from the
+taint rules, and the default pack's results stay pinned. -/
 def Scry.analyze (p : Wil.Program) (pack0 : Scry.RulePack) : Scry.ProgramResult :=
+  Scry.analyzeCore p pack0 .false
+
+/-- The same analysis with the S5 nullness pass appended to the memory diagnostics. -/
+def Scry.analyzeWithNull (p : Wil.Program) (pack0 : Scry.RulePack) : Scry.ProgramResult :=
   Scry.analyzeCore p pack0 .true
 
-/-- The same analysis without the nullness pass. -/
+/-- The default analysis; kept as the historical name. -/
 def Scry.analyzeWithoutNull (p : Wil.Program) (pack0 : Scry.RulePack) : Scry.ProgramResult :=
   Scry.analyzeCore p pack0 .false
 

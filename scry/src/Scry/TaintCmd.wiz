@@ -31,7 +31,8 @@ scry taint FILE.c [--rules FILE] [--sarif OUT] [--json]
   silent false negative.
 * **analyse.** `Scry.analyze` (`Scry.Interproc`): the default pack is
   `lib/Scry/rules/default.scry`, or `--rules FILE`; the intraprocedural engine is
-  `Scry.RuleTaint`, and direct-call summaries stitch the paths.
+  `Scry.RuleTaint`, and direct-call summaries stitch the paths. `--null-deref` adds the
+  S5 nullness pass (`Scry.analyzeWithNull` / `Scry.Nullness`); it is off by default.
 * **derive.** `Scry.Certify.certifyFinding` checks each alert's derivation against the
   function's EDB. A finding is `checked` when its certificate verifies and `unchecked`
   otherwise (e.g. no provenance), and the status is printed and put in SARIF.
@@ -61,9 +62,12 @@ structure Scry.TaintOpts where
   failOnFinding : Bool
   /-- `--origin-map`: print the point -> span table. -/
   showOriginMap : Bool
+  /-- `--null-deref`: run the S5 nullness pass and add
+  `scry/memory/null-dereference` diagnostics. Off by default. -/
+  nullDeref : Bool
 
 def Scry.emptyTaintOpts (file : String) : Scry.TaintOpts :=
-  Scry.TaintOpts.mk file .none .none .false .false .false .false
+  Scry.TaintOpts.mk file .none .none .false .false .false .false .false
 
 /-- Print a line on stdout (the CLI's `say`; `Scry.say` lives in `Scry.Cli`, which
 imports this module, so it cannot be used here). -/
@@ -72,6 +76,7 @@ def Scry.taintSay (s : String) : EIO Unit := EIO.lift (IO.println s)
 def Scry.taintUsage : String :=
   "usage: scry taint FILE.c [--rules FILE] [--sarif OUT] [--json]\n"
   ++ "                      [--allow-errors] [--fail-on-finding] [--origin-map]\n"
+  ++ "                      [--null-deref]\n"
 
 /-- Parse the flags after `scry taint`. Flags may come in any order; the first
 non-flag argument is the C source. -/
@@ -91,6 +96,7 @@ partial def Scry.taintArgsGo (file : Option String) (o : Scry.TaintOpts) :
     | "--allow-errors" => Scry.taintArgsGo file { o with allowErrors := .true } rest
     | "--fail-on-finding" => Scry.taintArgsGo file { o with failOnFinding := .true } rest
     | "--origin-map" => Scry.taintArgsGo file { o with showOriginMap := .true } rest
+    | "--null-deref" => Scry.taintArgsGo file { o with nullDeref := .true } rest
     | "--help" => .error Scry.taintUsage
     | _ => match String.startsWith a "--" with
       | .true => .error ("unknown flag " ++ a ++ "\n" ++ Scry.taintUsage)
@@ -362,7 +368,9 @@ def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do
     let c := Scry.Cst.ofStore text cst;
     let tu := Scry.lowerTU o.file c;
     let prog := Wil.program tu.funcs;
-    let pr := Scry.analyze prog pack;
+    let pr := match o.nullDeref with
+      | .true => Scry.analyzeWithNull prog pack
+      | .false => Scry.analyze prog pack;
     let findings := Scry.programFindings pr;
     let origins := Scry.originEntries o.file text tu.funcs;
     let boundaries := Scry.boundaryFindings o.file text tu;

@@ -106,7 +106,7 @@ object, external calls' memory effects outside the model table, heap shape (a li
 through two allocation sites is two sets), context sensitivity, and offsets past one
 `anyOff` level.
 
-## Null dereference (S5 alarm, on by default)
+## Null dereference (S5 alarm, opt-in)
 
 `Scry.Nullness` wires the S5 abstract-interpretation alarm (`Scry.AiFixpoint`'s
 `Alarm.nullDeref`) to Wil and therefore to `scry taint`. It builds the `ACfg` of each
@@ -127,12 +127,13 @@ path that reaches the dereference. A constant-false branch is pruned before alar
 read (the fixed CVE-2017-7659 control: the helper always returns `APR_ENOMEM`, so
 `if (status == APR_SUCCESS) { req->method; }` is unreachable).
 
-**Decision: on by default.** The pass is a memory diagnostic, like `use-after-free`, not
-a taint rule; it needs no pack and it is the CVE-476 coverage the v2 corpus asks for.
-`Scry.analyzeWithoutNull` is the library opt-out (`Scry.analyze` runs it).
-Functions longer than `Scry.maxNullPoints` (300 program points) are skipped: the
-list-based worklist is a prototype and the pass must not turn a one-minute CVE analysis
-into a ten-minute one.
+**Decision: opt-in.** `scry taint --null-deref` runs it (`Scry.analyzeWithNull` in the
+library); the default `scry taint` does not. Unchecked allocations are common in real C,
+so the pass adds a warning on every `p = malloc(...); p->x`; keeping it off preserves the
+default pack's pinned results and lets a user choose the diagnostic. The CVE-476
+measurement below runs with the flag. Functions longer than `Scry.maxNullPoints` (300
+program points) are skipped: the list-based worklist is a prototype and the pass must not
+turn a one-minute CVE analysis into a ten-minute one.
 
 ## Path traversal (opt-in pack)
 
