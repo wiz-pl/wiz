@@ -115,6 +115,79 @@ Adding a test group touches no shared file:
   deterministically; a branch that still edits the old file replays its changes with it
   (AGENTS.md, "Test layout").
 
+## The grail package registry (23m)
+
+`grail update` resolves `Package.require` lines through a **static index** (a directory,
+one S-expression file, or a git repository) and writes `grail.lock`; `grail fetch
+--locked` materialises that lock and `grail build/test/run/lsp/doc` read only the lock.
+`grail update --locked` is a check, not a resolution: it reads the lock, verifies that
+the manifest's requirements are pinned, and never reads the index (so a new publication
+cannot break CI). `--offline` makes `update`, `fetch` and builds use cached index clones
+and archives only; a missing item is an error, never a download. `--index URL#COMMIT`
+(or `Package.set "index-commit"`) pins the index revision; the lock also records the
+index URL and commit that produced it. A URL index must fast-forward from the lock's
+commit: a force-pushed/rewritten history is refused unless `--allow-rewind` (TUF's
+rollback protection over git's DAG).
+
+`grail.lock` is v3: it records the resolving toolchain, each package's `(size …)`,
+`(tree …)` and `(commands …)` as well as its SHA-256, and any `Package.override` from
+`grail.local.wiz` (which `--locked` refuses). Entries are flat and sorted; a v1/v2 lock
+still parses and `grail update` upgrades it.
+
+Cache layout (under `--cache`, default `~/.cache/wiz`):
+
+| path | contents |
+|---|---|
+| `grail/downloads/<sha256>` | content-addressed release archives; re-hashed on every use, re-downloaded when corrupt |
+| `grail/packages/<sha256>/` | unpacked packages (23n), stamped `.grail-pkg`; `.grail/packages/<name>` links to one |
+| `grail/index/` | the cached clone of a URL index (one clone; a directory index is read in place) |
+
+Fetch verifies the SHA-256 **before** unpacking, into a temporary directory, and renames
+only after the hash matches, so a bad transfer leaves no partial tree. The archive layout
+is one `NAME-VERSION/` with `grail.wiz`; relative `source` paths in a local index are
+resolved against the index root (which is what makes the checked-in fixture usable
+offline). An index may publish a signed `index/snapshot.sexpr` (+ `.sig`);
+`grail update --require-signature --allowed-signers FILE` verifies it offline and pins
+its key, sequence and digest in the lock, and `grail index verify` checks one without a
+network. SHA-256 and the lock still give integrity, the index's git history and review
+give names, and building a package still runs its author's code.
+
+`grail vendor [DIR]` (23n) copies the lock's registry archives into `DIR` (default
+`vendor/`) as `<sha256>.tar.gz` and writes `DIR/index.sexpr`; the lock is unchanged, so
+the same lock works with or without it. `--vendor DIR` (or `Package.set "vendor" "DIR"`) makes
+`fetch`/`build`/`test`/`run`/`lsp`/`doc` look archives up by hash in that directory
+before the cache or the network. The hermetic CI prelude is:
+
+```sh
+grail fetch --locked --offline --vendor vendor   # after `grail vendor` once, committed
+grail build
+```
+
+`grail cache path|list|verify` inspects the shared cache; `verify` re-hashes every
+archive and checks every unpacked tree's stamp, and exits 1 on a corrupt entry.
+
+The hermetic fixture is `tests/fixtures/grail-index/` (`index/NAME.sexpr`,
+`packages/NAME-V.tar.gz`, `sources/` and `make.sh`); `=grail-deps` covers exact/range
+versions, the transitive closure, a missing package, a hash mismatch, stale locks,
+`fetch --locked` with cold/warm caches, scoped `index/@org/name.sexpr` files, index
+rollback, and lock v3 (round-trip, old locks, upgrade, `grail.local.wiz` overrides).
+`=grail-vendor` (five cases) covers vendoring, an offline `--locked` fetch from
+`vendor/` without a cache, the shared store and the cache commands. `=grail-index`
+includes three signed-snapshot cases (a throwaway Ed25519 key via `ssh-keygen`; they
+skip when it is absent): the lock records the fingerprint/sequence, offline
+verification from the pinned key, and refusal of a tampered or re-signed snapshot, an
+expired key, a lower sequence and a same-sequence rewrite. Rebuild the archives with
+`cd tests/fixtures/grail-index && ./make.sh`. There is no network in these tests.
+
+There is also a complete example **index repository** at `examples/grail-index/`
+(`index.wiz`, `registry.sexpr`, `index/`, `entries/`, `sources/`, `packages/`, `make.sh`)
+and a checker: `scripts/grail-index-check.sh DIR` (also `grail index check DIR`) validates
+names, versions, semver requirements, local archive SHA-256s and layouts, `index.wiz`
+against the files on disk, and module-prefix conflicts, **offline by default**. CI runs it
+on the example; `=grail-index` covers its failure modes. The index repository's layout,
+generation rules and the signing/hosting plan (TUF stages; no transparency log yet) are in
+`docs/stages/23-grail/index-repository.md`.
+
 ## What `wiz build` links
 
 `wiz build` turns a program into C (or LLVM IR) and hands it to a C compiler with the
