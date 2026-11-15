@@ -61,7 +61,7 @@ with machine load; use `--baseline-bin`, not two separate runs, to decide whethe
 change is a regression.  Regenerate the reference after a deliberate change and keep the
 old file.
 
-# Self-hosted performance (host vs self-hosted)
+## Self-hosted performance (host vs self-hosted)
 
 `selfhost-bench.py` answers the *performance* half of replacement parity: on the same
 files, with the same flags, how much slower and larger is the Wiz-hosted frontend than
