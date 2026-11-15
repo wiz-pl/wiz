@@ -120,7 +120,11 @@ def Scry.ruleJson (r : Scry.PackRule) : Json :=
     | .forbidden f =>
       Json.mkObj
         [ ("kind", Json.mkStr "forbidden")
-        , ("calls", Scry.callListJson f) ];
+        , ("calls", Scry.callListJson f) ]
+    | .memory m =>
+      Json.mkObj
+        [ ("kind", Json.mkStr "memory")
+        , ("check", Json.mkStr m.check) ];
   Json.mkObj
     [ ("id", Json.mkStr (Scry.sarifRuleId (Scry.PackRule.id r)))
     , ("name", Json.mkStr (Scry.PackRule.id r))

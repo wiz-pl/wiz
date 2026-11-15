@@ -145,7 +145,7 @@ def rulePrelude : String := prelude ++
   "  match k with\n" ++
   "  | .source => 1 | .param => 2 | .call => 3 | .returnSeed => 4\n" ++
   "  | .returnValue => 5 | .flow => 6 | .sink => 7 | .recursion => 8 | .assumed => 9\n" ++
-  "  | .store => 10 | .load => 11\n" ++
+  "  | .store => 10 | .load => 11 | .alloc => 12 | .free => 13\n" ++
   "def kindsCode : List Scry.PathNode → Nat\n" ++
   "  | .nil => 0\n" ++
   "  | .cons p ps => Nat.add (Nat.mul 10 (kindsCode ps)) (kindCode p.kind)\n" ++

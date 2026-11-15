@@ -1,0 +1,14 @@
+# scry's memory-lifetime rule pack (CWE-416)
+#
+# A `kind memory` rule names the analysis with `check`; the analysis itself supplies
+# the evidence path (allocation -> free -> use). Keep this pack separate from
+# default.scry so enabling a lifetime claim is an explicit opt-in:
+#
+#   scry taint FILE.c --rules lib/Scry/rules/uaf.scry
+
+rule use-after-free
+  kind memory
+  severity error
+  message Memory is used after it was freed
+  check use-after-free
+end

@@ -59,23 +59,28 @@ def Scry.assumptionsOf (f : Scry.RuleFinding) : List String :=
 provenance. -/
 def Scry.certifyFinding (pr : Scry.ProgramResult) (f : Scry.RuleFinding) :
     Option Scry.Certificate :=
-  match Scry.findResult pr f.func with
-  | .none => .none
-  | .some fr =>
-    match fr.state with
+  match f.kind with
+  | .memory => .none
+  | _ =>
+    match Scry.findResult pr f.func with
     | .none => .none
-    | .some st =>
-      let row := match f.kind with
-        | .taint => [U64.ofNat f.sink, U64.ofNat f.arg]
-        | .forbidden => [U64.ofNat f.sink];
-      let rel := match f.kind with
-        | .taint => Scry.rtAlert
-        | .forbidden => Scry.rtBadAlert;
-      match Scry.State.explainTuple Scry.ruleTaintProgram fr.edb.db st rel row with
+    | .some fr =>
+      match fr.state with
       | .none => .none
-      | .some d =>
-        let verified := Scry.Derivation.check Scry.ruleTaintProgram fr.edb.db d;
-        .some (Scry.Certificate.mk f d (Scry.renderAxioms d) (Scry.assumptionsOf f) verified)
+      | .some st =>
+        let row := match f.kind with
+          | .taint => [U64.ofNat f.sink, U64.ofNat f.arg]
+          | .forbidden => [U64.ofNat f.sink]
+          | .memory => (.nil : List U64);
+        let rel := match f.kind with
+          | .taint => Scry.rtAlert
+          | .forbidden => Scry.rtBadAlert
+          | .memory => Scry.rtAlert;
+        match Scry.State.explainTuple Scry.ruleTaintProgram fr.edb.db st rel row with
+        | .none => .none
+        | .some d =>
+          let verified := Scry.Derivation.check Scry.ruleTaintProgram fr.edb.db d;
+          .some (Scry.Certificate.mk f d (Scry.renderAxioms d) (Scry.assumptionsOf f) verified)
 
 /-- Certify every finding of a program. -/
 def Scry.certifyAll (pr : Scry.ProgramResult) : List Scry.Certificate :=
