@@ -1,6 +1,7 @@
 import Lean.Data.Json
 import Wiz.Query
 import Wiz.Rig.Instances
+import Wiz.Position
 import Wiz.Infoview
 import Wiz.Actions
 import Wiz.Extensions
@@ -30,15 +31,22 @@ line (`includeTable`; docs/stages/13-language/include-str.md).
 With `--infoview SOCK` it also serves infoviews on a Unix socket, and with `--ws PORT` on
 a WebSocket (`serveWith`).
 
-Positions: LSP counts lines and UTF-16 code units; we count Unicode characters, which
-agree except for characters outside the Basic Multilingual Plane.
+Positions: the server negotiates UTF-16 or UTF-8 with the client (`capabilities.general.
+positionEncodings`, LSP 3.17; UTF-16 when the client omits it) and converts at every LSP
+boundary. Offsets inside the server are Unicode character offsets, which agree with both
+encodings inside the Basic Multilingual Plane; astral characters are two UTF-16 code
+units or four UTF-8 bytes.
 -/
 
 namespace Wiz.LSP
 
 open Lean (Json)
+open Wiz.PositionEncoding
 
 abbrev St := CommandState ZeroOneMany
+
+/-- An LSP position encoding (`Wiz/Position.lean`). -/
+abbrev PositionEncoding := Wiz.PositionEncoding
 
 /-- The JSON value at `path`, if it is there (`get? msg ["params", "textDocument", "uri"]`). -/
 def get? (j : Json) (path : List String) : Option Json :=
@@ -53,6 +61,14 @@ def getNat (j : Json) (path : List String) : Nat :=
   match get? j path with
   | some j => (j.getNat?.toOption).getD 0
   | none => 0
+
+/-- The client's `general.positionEncodings`, in its order (`[]` when it omits it). -/
+def offeredEncodings (msg : Json) : List String :=
+  match get? msg ["params", "capabilities", "general", "positionEncodings"] with
+  | some (.arr xs) => xs.toList.filterMap fun
+    | .str s => some s
+    | _ => none
+  | _ => []
 
 /-! ## Paths: the file a document URI names
 
@@ -142,26 +158,36 @@ structure Server where
   /-- (references, rename) the library modules that aren't the toolchain's, elaborated
   with their info trees: by module, with the hash of the source they were made from -/
   modules : Std.HashMap String (UInt64 × St) := {}
+  /-- the LSP position encoding negotiated in `initialize` (UTF-16 by default) -/
+  positionEncoding : PositionEncoding := .utf16
 
-/-- Line and column (0-based) of a character offset. -/
-def toPos (text : String) (off : Nat) : Json :=
+/-- Line and column (0-based) of a character offset, counting the column in `enc`. -/
+def toPos (text : String) (off : Nat) (enc : PositionEncoding := .utf16) : Json :=
   let pre := (text.toList.take off)
   let line := pre.count '\n'
-  let col := (pre.reverse.takeWhile (· != '\n')).length
+  let col := widths enc (pre.reverse.takeWhile (· != '\n'))
   Json.mkObj [("line", line), ("character", col)]
 
-/-- The character offset of an LSP position. -/
-def ofPos (text : String) (line col : Nat) : Nat := Id.run do
+/-- The character offset of an LSP position, whose column counts in `enc`. A column
+inside the line's last character (a broken surrogate or UTF-8 sequence) gives that
+character's start; a column past the line's end gives the line's end. -/
+def ofPos (text : String) (line col : Nat) (enc : PositionEncoding := .utf16) : Nat := Id.run do
   let cs := text.toList
   let mut l := 0
   let mut i := 0
   while l < line && i < cs.length do
     if cs[i]! == '\n' then l := l + 1
     i := i + 1
-  pure (i + col)
+  let mut j := 0
+  let mut w := 0
+  while i + j < cs.length && cs[i + j]! != '\n' &&
+      w + width enc cs[i + j]! ≤ col do
+    w := w + width enc cs[i + j]!
+    j := j + 1
+  pure (i + j)
 
-def range (text : String) (info : SourceInfo) : Json :=
-  Json.mkObj [("start", toPos text info.start), ("end", toPos text (max info.stop (info.start + 1)))]
+def range (text : String) (info : SourceInfo) (enc : PositionEncoding := .utf16) : Json :=
+  Json.mkObj [("start", toPos text info.start enc), ("end", toPos text (max info.stop (info.start + 1)) enc)]
 
 /-! ## `include_str` (include-str): the document's path and its includes
 
@@ -256,31 +282,12 @@ def elaborate (srv : Server) (doc : Doc) : IO Doc := do
 def Server.importable (srv : Server) : List (String × String) :=
   srv.libs.toList.map fun (n, (_, src)) => (n, src)
 
-/-- `textDocument/completion` (`Completion.lean`): a `CompletionList`. Patched copies of
-the document are elaborated with its engine (the commands before the cursor are reused)
-and then forgotten. -/
-def completion (srv : Server) (doc : Doc) (off : Nat) : Json :=
-  let r := Completion.complete
-    { text := doc.text, off, state := doc.state, elabText := fun t => (elabText srv doc.engine doc.includes t).1,
-      modules := (srv.libs.toList.map (·.1)).toArray.qsort (· < ·) }
-  let items := r.items.map fun (i : Completion.Item) =>
-    Json.mkObj ([("label", Json.str i.label), ("kind", i.kind), ("sortText", Json.str (i.sortText ++ i.label)),
-                 ("filterText", Json.str i.label),
-                 ("textEdit", Json.mkObj [("range", Json.mkObj [("start", toPos doc.text i.start), ("end", toPos doc.text off)]),
-                                          ("newText", Json.str i.insert)])] ++
-                (if i.detail.isEmpty then [] else [("detail", Json.str i.detail)]) ++
-                -- (11s) the global's doc comment
-                (match i.global.bind doc.state.docOf? with
-                 | some d => [("documentation", Json.mkObj [("kind", "markdown"), ("value", Json.str d)])]
-                 | none => []))
-  Json.mkObj [("isIncomplete", r.incomplete), ("items", Json.arr items)]
-
 def diagnostic (srv : Server) (doc : Doc) (m : Msg) : Json :=
   let code := if m.code.isEmpty then [] else
     [("code", Json.str m.code),
      ("data", Json.mkObj ((Actions.messageData doc.state m doc.text srv.importable).map fun (k, vs) =>
         (k, if k == "name" then Json.str (vs.headD "") else Json.arr (vs.map Json.str).toArray)))]
-  Json.mkObj ([("range", range doc.text m.info),
+  Json.mkObj ([("range", range doc.text m.info srv.positionEncoding),
                ("severity", (match m.severity with | .error => 1 | .warning => 2 | .info => 3 : Nat)),
                ("source", "wiz"), ("message", m.text)] ++ code)
 
@@ -293,8 +300,10 @@ def infoviewMethods : List String :=
   ["wiz/plainGoal", "wiz/plainTermGoal", "wiz/interactiveGoals", "wiz/interactiveTermGoal", "wiz/subtermInfo",
    "wiz/interactiveInfo"]
 
-def capabilities : Json :=
+def capabilities (enc : PositionEncoding := .utf16) : Json :=
   Json.mkObj [("capabilities", Json.mkObj [
+    -- (3.17) the encoding this server picked from the client's `general.positionEncodings`
+    ("positionEncoding", enc.toString),
     ("textDocumentSync", (1 : Nat)), ("hoverProvider", true), ("definitionProvider", true),
     ("declarationProvider", true),
     -- (also so that editors report cursor moves, for `--infoview`)
@@ -353,9 +362,9 @@ def tracesAt (st : St) (info : SourceInfo) : Array String :=
 /-- Where a library module's source is, as a URI. -/
 def location (srv : Server) (uri : String) (doc : Doc) (n : Name) : Json :=
   match doc.state.declSites.get? n with
-  | some (info, "") => Json.mkObj [("uri", uri), ("range", range doc.text info)]
+  | some (info, "") => Json.mkObj [("uri", uri), ("range", range doc.text info srv.positionEncoding)]
   | some (info, m) => match srv.libs.get? m with
-    | some (path, src) => Json.mkObj [("uri", "file://" ++ path), ("range", range src info)]
+    | some (path, src) => Json.mkObj [("uri", "file://" ++ path), ("range", range src info srv.positionEncoding)]
     | none => Json.null
   | none => Json.null
 
@@ -368,10 +377,10 @@ def moduleSource (srv : Server) (uri : String) (doc : Doc) (m : String) : Option
 /-- A target (`Query.Target`) as an LSP `Location`. -/
 def targetJson (srv : Server) (uri : String) (doc : Doc) : Query.Target → Json
   | .site info m => match moduleSource srv uri doc m with
-    | some (u, src) => Json.mkObj [("uri", u), ("range", range src info)]
+    | some (u, src) => Json.mkObj [("uri", u), ("range", range src info srv.positionEncoding)]
     | none => Json.null
   | .module m => match srv.libs.get? m with
-    | some (path, _) => Json.mkObj [("uri", "file://" ++ path), ("range", range "" {})]
+    | some (path, _) => Json.mkObj [("uri", "file://" ++ path), ("range", range "" {} srv.positionEncoding)]
     | none => Json.null
 
 /-- Where a target is, for people: `this file, line 3` or `Prelude, line 212`. -/
@@ -534,10 +543,10 @@ def subtermType (g : Globals ZeroOneMany) (sub : Subterm ZeroOneMany) : Option (
 /-- A tactic's widget as the infoview's JSON (11af): a plain-text title, static sanitized
 HTML, its range and the goals open when it was emitted (plain goal text, as in
 `wiz/plainGoal`). -/
-def widgetJson (doc : Doc) (st : St) (w : Info ZeroOneMany) : Json :=
+def widgetJson (doc : Doc) (enc : PositionEncoding) (st : St) (w : Info ZeroOneMany) : Json :=
   match w with
   | .widget r title html gs =>
-    Json.mkObj [("title", title), ("html", sanitizeWidgetHtml html), ("range", range doc.text r),
+    Json.mkObj [("title", title), ("html", sanitizeWidgetHtml html), ("range", range doc.text r enc),
       ("goals", Json.arr (gs.map fun g => Json.str (g.show (some st.globals))))]
   | _ => Json.null
 
@@ -545,7 +554,7 @@ def widgetJson (doc : Doc) (st : St) (w : Info ZeroOneMany) : Json :=
 def infoview (srv : Server) (uri : String) (doc : Doc) (method : String) (msg : Json) :
     Except (Int × String) (Doc × Json) := do
   let st := doc.state
-  let off := ofPos doc.text (getNat msg ["params", "position", "line"]) (getNat msg ["params", "position", "character"])
+  let off := ofPos doc.text (getNat msg ["params", "position", "line"]) (getNat msg ["params", "position", "character"]) srv.positionEncoding
   let memo (key : String) (x : Doc × Json) : Doc × Json :=
     match doc.memo.get? key with
     | some j => (doc, j)
@@ -557,29 +566,29 @@ def infoview (srv : Server) (uri : String) (doc : Doc) (method : String) (msg : 
       | none => Json.null)
   | "wiz/plainTermGoal" =>
     pure (doc, match Query.termGoalAt st off with
-      | some (info, g) => Json.mkObj [("goal", g.show (some st.globals)), ("range", range doc.text info)]
+      | some (info, g) => Json.mkObj [("goal", g.show (some st.globals)), ("range", range doc.text info srv.positionEncoding)]
       | none => Json.null)
   | "wiz/interactiveGoals" =>
     match Query.goalsAt st off with
     | none => pure (doc, Json.null)
     | some (key, info, gs) =>
       let k (tgs : Array TaggedGoal) (tj : TT → Json) : Json :=
-        Json.mkObj [("goals", Json.arr (tgs.map (goalJson · tj))), ("range", range doc.text info),
+        Json.mkObj [("goals", Json.arr (tgs.map (goalJson · tj))), ("range", range doc.text info srv.positionEncoding),
                     ("session", doc.session), ("messages", Json.arr ((tracesAt st info).map Json.str)),
-                    ("widgets", Json.arr ((Query.widgetsAt st info).map (widgetJson doc st)))]
+                    ("widgets", Json.arr ((Query.widgetsAt st info).map (widgetJson doc srv.positionEncoding st)))]
       pure (memo s!"goals {key}" (withTable doc (gs.mapM (·.tagged (some st.globals))) k))
   | "wiz/interactiveTermGoal" =>
     match Query.termGoalAt st off with
     | none => pure (doc, Json.null)
     | some (info, g) =>
       let k (tg : TaggedGoal) (tj : TT → Json) : Json :=
-        Json.mkObj [("goal", goalJson tg tj), ("range", range doc.text info), ("session", doc.session)]
+        Json.mkObj [("goal", goalJson tg tj), ("range", range doc.text info srv.positionEncoding), ("session", doc.session)]
       pure (memo s!"term {info.start} {info.stop}" (withTable doc (g.tagged (some st.globals)) k))
   | "wiz/interactiveInfo" =>
     let k (items : Array (String × SourceInfo × String × Option String × Option TT × Json)) (tj : TT → Json) : Json :=
       if items.isEmpty then Json.null else
       Json.mkObj [("items", Json.arr (items.map fun (kind, r, title, text, ty, loc) => Json.mkObj [
-          ("kind", kind), ("range", range doc.text r), ("title", title),
+          ("kind", kind), ("range", range doc.text r srv.positionEncoding), ("title", title),
           ("text", match text with | some t => Json.str t | none => Json.null),
           ("type", match ty with | some t => tj t | none => Json.null),
           ("location", loc)])),
@@ -609,17 +618,20 @@ def codeAction (srv : Server) (uri : String) (doc : Doc) (a : Actions.Action) (r
     | some k => [("data", Json.mkObj [("uri", uri), ("session", doc.session), ("id", k)])]
     | none =>
       let edits := a.edits.map fun e =>
-        Json.mkObj [("range", Json.mkObj [("start", toPos doc.text e.start), ("end", toPos doc.text e.stop)]),
+        Json.mkObj [("range", Json.mkObj [("start", toPos doc.text e.start srv.positionEncoding),
+                                         ("end", toPos doc.text e.stop srv.positionEncoding)]),
                     ("newText", e.text)]
       [("edit", Json.mkObj [("changes", Json.mkObj [(uri, Json.arr edits)])])]
   Json.mkObj ([("title", Json.str a.title), ("kind", Json.str a.kind)] ++ diags ++ rest)
 
-/-! ## User-defined extensions (11ae)
+/-! ## User-defined extensions (11ae/11ag)
 
-`attribute [codeAction k] f` and `attribute [hover k] f` (see `Extensions.lean`): the
-function is compiled for the interpreter once per document (`Doc.extCode`) and run on the
-innermost parsed node of kind `k` at the cursor. A function that does not compile, fails,
-or returns malformed JSON is ignored: an extension never takes the server down. -/
+`attribute [codeAction k] f`, `attribute [hover k] f` and `attribute [completion k] f`
+(see `Extensions.lean`): the function is compiled for the interpreter once per document
+(`Doc.extCode`) and run on the innermost parsed node of kind `k` at the cursor. A
+function that does not compile, fails, or returns malformed JSON is ignored: an
+extension never takes the server down. Completion is on a keystroke path, so it also has
+a handler and an item budget (`Extensions.handlerBudget`/`itemBudget`). -/
 
 /-- The compiled code of an extension function, built once per document. -/
 def extCodeOf (doc : Doc) (f : Name) : Doc × Except String Code :=
@@ -661,6 +673,70 @@ def extensionHover (doc : Doc) (off : Nat) : Doc × Option String := Id.run do
     if let some t := res then
       if !t.isEmpty then parts := parts.push t
   (doc, if parts.isEmpty then none else some ("\n\n".intercalate parts.toList))
+
+/-- The completion items the document's `completion` extensions add at `off`. The node
+is the innermost parsed node of the registered kind under the cursor. While a word is
+half-written the command does not parse, so the word is replaced by a hole `_` and the
+node found at its start; the items replace that word. -/
+def extensionCompletions (doc : Doc) (off : Nat) : Doc × Array Completion.Item := Id.run do
+  let hs := Extensions.completionHandlers doc.state
+  if hs.isEmpty then return (doc, #[])
+  let chars := doc.text.toList.toArray
+  let off := min off chars.size
+  let ws := Completion.wordStart chars off
+  let we := Completion.wordEnd chars off
+  let patched := if we == ws then none else
+    some (String.ofList ((chars.extract 0 ws).toList ++ ('_' :: (chars.extract we chars.size).toList)))
+  -- (parse each text once, not once per handler)
+  let rawCmd := Extensions.commandAt doc.state.tables chars 0 off
+  let patchedCmd := patched.bind fun t => Extensions.commandAt doc.state.tables t.toList.toArray 0 ws
+  let node (k : Name) : Option Syntax :=
+    match rawCmd.bind (Extensions.find k off) with
+    | some stx => some stx
+    | none => patchedCmd.bind (Extensions.find k ws)
+  let mut doc := doc
+  let mut out : Array Completion.Item := #[]
+  let mut doneFns : Std.HashSet Name := {}
+  let mut handlers := 0
+  for h in hs do
+    if handlers ≥ Extensions.handlerBudget || out.size ≥ Extensions.itemBudget then break
+    let some stx := node h.kind | continue
+    -- (one function may be registered for several kinds; run it once)
+    if doneFns.contains h.fn then continue
+    doneFns := doneFns.insert h.fn
+    handlers := handlers + 1
+    let (d, res) := runExtension doc h stx
+    doc := d
+    let some text := res | continue
+    for it in Extensions.parseItems text ws do
+      if out.size ≥ Extensions.itemBudget then break
+      out := out.push it
+  (doc, out)
+
+/-- `textDocument/completion` (`Completion.lean`): a `CompletionList`. Patched copies of
+the document are elaborated with its engine (the commands before the cursor are reused)
+and then forgotten. The items the document's `completion` extensions add are merged in:
+the built-in item wins a shared label, and the client's position encoding is used for the
+edit ranges. -/
+def completion (srv : Server) (doc : Doc) (off : Nat) : Doc × Json :=
+  let r := Completion.complete
+    { text := doc.text, off, state := doc.state, elabText := fun t => (elabText srv doc.engine doc.includes t).1,
+      modules := (srv.libs.toList.map (·.1)).toArray.qsort (· < ·) }
+  let (doc, ext) := extensionCompletions doc off
+  let r := Completion.merge r ext (Completion.wordAt doc.text off)
+  let items := r.items.map fun (i : Completion.Item) =>
+    Json.mkObj ([("label", Json.str i.label), ("kind", i.kind), ("sortText", Json.str (i.sortText ++ i.label)),
+                 ("filterText", Json.str i.label),
+                 ("textEdit", Json.mkObj [("range", Json.mkObj [("start", toPos doc.text i.start srv.positionEncoding),
+                                                               ("end", toPos doc.text off srv.positionEncoding)]),
+                                          ("newText", Json.str i.insert)])] ++
+                (if i.detail.isEmpty then [] else [("detail", Json.str i.detail)]) ++
+                -- (11s) the global's doc comment
+                (match i.global.bind doc.state.docOf? with
+                 | some d => [("documentation", Json.mkObj [("kind", "markdown"), ("value", Json.str d)])]
+                 | none => []))
+  (doc, Json.mkObj [("isIncomplete", r.incomplete), ("items", Json.arr items)])
+
 
 /-! ## References and rename (11x) -/
 
@@ -704,11 +780,11 @@ def inToolchain (srv : Server) (doc : Doc) (n : Name) : Bool :=
   | none => true
 /-! ## Symbols and folding (11v) -/
 
-partial def symbolJson (doc : Doc) (sym : Symbols.Symbol) : Json :=
-  Json.mkObj ([("name", Json.str sym.name), ("kind", sym.kind), ("range", range doc.text sym.range),
-               ("selectionRange", range doc.text sym.range)] ++
+partial def symbolJson (doc : Doc) (enc : PositionEncoding) (sym : Symbols.Symbol) : Json :=
+  Json.mkObj ([("name", Json.str sym.name), ("kind", sym.kind), ("range", range doc.text sym.range enc),
+               ("selectionRange", range doc.text sym.range enc)] ++
               (if sym.detail.isEmpty then [] else [("detail", Json.str sym.detail)]) ++
-              (if sym.children.isEmpty then [] else [("children", Json.arr (sym.children.map (symbolJson doc)))]))
+              (if sym.children.isEmpty then [] else [("children", Json.arr (sym.children.map (symbolJson doc enc)))]))
 
 /-- `workspace/symbol`: the declarations of the open documents and their imports whose
 name contains `query` (ignoring case), at most 300. -/
@@ -765,7 +841,10 @@ def handle (srv : Server) (msg : Json) : IO (Server × Array Json) := do
       | _ => false
     let named := foldersOf msg
     let folders := if named.isEmpty then srv.folders else named
-    pure ({ srv with elaboratedNotes := wants, resolveEdits := resolve, folders }, #[reply capabilities])
+    -- (3.17) the first offered encoding we support; UTF-16 if it offered none
+    let enc := negotiate (offeredEncodings msg)
+    pure ({ srv with elaboratedNotes := wants, resolveEdits := resolve, folders, positionEncoding := enc },
+     #[reply (capabilities enc)])
   | "shutdown" => pure (srv, #[reply Json.null])
   | "textDocument/didOpen" | "textDocument/didChange" =>
     let text := if method == "textDocument/didOpen" then getStr msg ["params", "textDocument", "text"]
@@ -787,19 +866,20 @@ def handle (srv : Server) (msg : Json) : IO (Server × Array Json) := do
   | "textDocument/didClose" => pure ({ srv with docs := srv.docs.erase uri }, #[])
   | "textDocument/inlayHint" =>
     let some doc := srv.docs.get? uri | return (srv, #[reply (Json.arr #[])])
-    let pos (k : String) := ofPos doc.text (getNat msg ["params", "range", k, "line"]) (getNat msg ["params", "range", k, "character"])
+    let pos (k : String) := ofPos doc.text (getNat msg ["params", "range", k, "line"]) (getNat msg ["params", "range", k, "character"]) srv.positionEncoding
     let hs := (Inlay.hintsIn doc.state doc.text (pos "start") (pos "end")).map fun h =>
-      Json.mkObj [("position", toPos doc.text h.at_), ("label", Json.str h.label), ("kind", (1 : Nat))]
+      Json.mkObj [("position", toPos doc.text h.at_ srv.positionEncoding), ("label", Json.str h.label), ("kind", (1 : Nat))]
     pure (srv, #[reply (Json.arr hs)])
   | "textDocument/semanticTokens/full" =>
     let some doc := srv.docs.get? uri | return (srv, #[reply Json.null])
-    let data := Semantic.encode doc.text (Semantic.keywords doc.state doc.text)
+    let data := Semantic.encode doc.text (Semantic.keywords doc.state doc.text) srv.positionEncoding
     pure (srv, #[reply (Json.mkObj [("data", Json.arr (data.map fun (n : Nat) => (n : Json)))])])
   | "textDocument/references" | "textDocument/documentHighlight" | "textDocument/prepareRename" | "textDocument/rename" =>
     let some doc := srv.docs.get? uri | return (srv, #[reply Json.null])
-    let off := ofPos doc.text (getNat msg ["params", "position", "line"]) (getNat msg ["params", "position", "character"])
+    let off := ofPos doc.text (getNat msg ["params", "position", "line"]) (getNat msg ["params", "position", "character"]) srv.positionEncoding
     let rangeIn (text : String) (r : SourceInfo) : Json :=
-      Json.mkObj [("start", toPos text r.start), ("end", toPos text r.stop)]
+      Json.mkObj [("start", toPos text r.start srv.positionEncoding),
+                  ("end", toPos text r.stop srv.positionEncoding)]
     match method with
     | "textDocument/documentHighlight" =>
       match Refs.targetAt doc.state off with
@@ -842,7 +922,7 @@ def handle (srv : Server) (msg : Json) : IO (Server × Array Json) := do
       | none => pure (srv, #[replyError (-32602) "nothing to rename here"])
   | "textDocument/documentSymbol" =>
     let some doc := srv.docs.get? uri | return (srv, #[reply (Json.arr #[])])
-    pure (srv, #[reply (Json.arr ((Symbols.documentSymbols doc.state).map (symbolJson doc)))])
+    pure (srv, #[reply (Json.arr ((Symbols.documentSymbols doc.state).map (symbolJson doc srv.positionEncoding)))])
   | "textDocument/foldingRange" =>
     let some doc := srv.docs.get? uri | return (srv, #[reply (Json.arr #[])])
     let rs := (Symbols.foldingRanges doc.state doc.text).map fun (a, b, k) =>
@@ -851,7 +931,7 @@ def handle (srv : Server) (msg : Json) : IO (Server × Array Json) := do
   | "workspace/symbol" => pure (srv, #[reply (workspaceSymbols srv (getStr msg ["params", "query"]))])
   | "textDocument/codeAction" =>
     let some doc := srv.docs.get? uri | return (srv, #[reply (Json.arr #[])])
-    let pos (k : String) := ofPos doc.text (getNat msg ["params", "range", k, "line"]) (getNat msg ["params", "range", k, "character"])
+    let pos (k : String) := ofPos doc.text (getNat msg ["params", "range", k, "line"]) (getNat msg ["params", "range", k, "character"]) srv.positionEncoding
     let acts := Actions.actionsAt doc.state doc.text (pos "start") (pos "end") srv.importable
     -- (11ae) the actions the document's own extensions add
     let (doc, extActs) := extensionActions doc (pos "start") (pos "end")
@@ -875,7 +955,7 @@ def handle (srv : Server) (msg : Json) : IO (Server × Array Json) := do
     | .error (c, m) => pure (srv, #[replyError c m])
   | "textDocument/signatureHelp" =>
     let some doc := srv.docs.get? uri | return (srv, #[reply Json.null])
-    let off := ofPos doc.text (getNat msg ["params", "position", "line"]) (getNat msg ["params", "position", "character"])
+    let off := ofPos doc.text (getNat msg ["params", "position", "line"]) (getNat msg ["params", "position", "character"]) srv.positionEncoding
     match Signature.helpAt doc.state doc.text off (fun t => (elabText srv doc.engine doc.includes t).1) with
     | some h =>
       let ps := h.params.map fun (a, b) => Json.mkObj [("label", Json.arr #[(a : Nat), (b : Nat)])]
@@ -887,7 +967,7 @@ def handle (srv : Server) (msg : Json) : IO (Server × Array Json) := do
     | none => pure (srv, #[reply Json.null])
   | "textDocument/hover" | "textDocument/definition" | "textDocument/declaration" | "textDocument/completion" =>
     let some doc := srv.docs.get? uri | return (srv, #[reply Json.null])
-    let off := ofPos doc.text (getNat msg ["params", "position", "line"]) (getNat msg ["params", "position", "character"])
+    let off := ofPos doc.text (getNat msg ["params", "position", "line"]) (getNat msg ["params", "position", "character"]) srv.positionEncoding
     match method with
     | "textDocument/hover" =>
       let (doc, ext) := extensionHover doc off
@@ -917,7 +997,10 @@ def handle (srv : Server) (msg : Json) : IO (Server × Array Json) := do
         | .null => none
         | j => some j
       pure (srv, #[reply (if ts.size == 1 then ts[0]! else if ts.isEmpty then Json.null else Json.arr ts)])
-    | _ => pure (srv, #[reply (completion srv doc off)])
+    | _ =>
+      -- (the extension completion may compile functions: keep the document's code)
+      let (doc, j) := completion srv doc off
+      pure ({ srv with docs := srv.docs.insert uri doc }, #[reply j])
   | _ => pure (srv, if id.isSome then #[reply Json.null] else #[])
 
 /-! ## The infoview socket (`wiz lsp --infoview SOCK`, protocol §8)
@@ -978,7 +1061,7 @@ def handleInfoview (srv : Server) (msg : Json) : IO (Server × Array Json) := do
   | some id =>
     if infoviewMethods.contains method then handle srv msg
     else if method == "initialize" || method == "shutdown" then
-      pure (srv, #[Json.mkObj [("jsonrpc", "2.0"), ("id", id), ("result", if method == "initialize" then capabilities else Json.null)]])
+      pure (srv, #[Json.mkObj [("jsonrpc", "2.0"), ("id", id), ("result", if method == "initialize" then capabilities srv.positionEncoding else Json.null)]])
     else pure (srv, #[Json.mkObj [("jsonrpc", "2.0"), ("id", id),
       ("error", Json.mkObj [("code", (-32601 : Int)), ("message", s!"{method} is not available on the infoview socket")])]])
 

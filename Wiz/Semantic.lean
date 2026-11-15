@@ -1,4 +1,5 @@
 import Wiz.Query
+import Wiz.Position
 
 /-!
 # Semantic tokens
@@ -96,8 +97,11 @@ def keywords (s : CommandState R) (text : String) : Array (Nat × Nat) := Id.run
   out.qsort (·.1 < ·.1)
 
 /-- The LSP encoding: per token, the line and start deltas, the length, the type (0,
-`keyword`) and no modifiers. -/
-def encode (text : String) (toks : Array (Nat × Nat)) : Array Nat := Id.run do
+`keyword`) and no modifiers. Positions and lengths count in `enc` (the negotiated
+`positionEncoding`), not characters, so astral characters are two UTF-16 code units or
+four UTF-8 bytes. -/
+def encode (text : String) (toks : Array (Nat × Nat)) (enc : PositionEncoding := .utf16) :
+    Array Nat := Id.run do
   let chars := text.toList.toArray
   let mut out : Array Nat := #[]
   let mut line := 0
@@ -107,9 +111,12 @@ def encode (text : String) (toks : Array (Nat × Nat)) : Array Nat := Id.run do
   let mut pc := 0
   for (a, len) in toks do
     while i < a && i < chars.size do
-      if chars[i]! == '\n' then line := line + 1; col := 0 else col := col + 1
+      if chars[i]! == '\n' then line := line + 1; col := 0
+      else col := col + PositionEncoding.width enc chars[i]!
       i := i + 1
-    out := out ++ #[line - pl, if line == pl then col - pc else col, len, 0, 0]
+    let lenW := (chars.extract a (min (a + len) chars.size)).foldl
+      (fun n c => n + PositionEncoding.width enc c) 0
+    out := out ++ #[line - pl, if line == pl then col - pc else col, lenW, 0, 0]
     pl := line; pc := col
   out
 

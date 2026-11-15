@@ -46,6 +46,7 @@ import Wiz.Compiler.Build
 import Wiz.FFI.CParse
 import Wiz.FFI.CGlue
 import Wiz.Query
+import Wiz.Position
 import Wiz.Infoview
 import Wiz.Actions
 import Wiz.Extensions

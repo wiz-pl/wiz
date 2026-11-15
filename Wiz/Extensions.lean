@@ -1,5 +1,6 @@
 import Wiz.Query
 import Wiz.Actions
+import Wiz.Completion
 import Lean.Data.Json
 
 /-!
@@ -15,6 +16,9 @@ declares:
     def doubleHover (stx : Syntax) : String := …
     attribute [hover term.double] doubleHover
 
+    def doubleNames (stx : Syntax) : String := "[\"two\", \"twice\"]"
+    attribute [completion term.double] doubleNames
+
 The registered function is a **pure Wiz function** `Syntax → String`, type-checked at the
 attribute like a macro (`Elab/Command.lean`, `command.attrCodeAction`). For `hover` the
 string is Markdown. For `codeAction` it is JSON — one object or an array of them:
@@ -25,6 +29,18 @@ string is Markdown. For `codeAction` it is JSON — one object or an array of th
 action's edit is exactly that node's range); `kind` defaults to `refactor.rewrite`.
 Malformed JSON, or a function that does not return a string, is ignored: the server must
 not fail because of an extension.
+
+For `completion` the string is a JSON array of items; a bare string is a label, and an
+object has `label` (required), `insert` (default: the label), `detail` and `kind`
+(`keyword`, `function`, `variable`, `module`, `field`, `constructor`):
+
+    ["when", {"label": "otherwise", "insert": "otherwise ", "detail": "a branch"}]
+
+Malformed JSON, or an object without a label, is skipped. The host filters the items by
+the word at the cursor and merges them with its own (a shared label keeps the built-in
+item), so only the names matter. At most 50 items per function, 100 extension items and
+8 handlers per request: completion is on a keystroke path, so it has a budget where the
+other hooks have none.
 
 The host bridges the JSON: the Wiz side only builds a string, which keeps the signature
 portable (the self-hosted toolchain can run the same functions; it does not yet parse the
@@ -66,6 +82,10 @@ def codeActionHandlers (s : CommandState R) : Array Handler :=
 /-- `attribute [hover k] f` registrations, latest first. -/
 def hoverHandlers (s : CommandState R) : Array Handler :=
   s.extHovers.toArray.map fun (k, f) => { kind := k, fn := f }
+
+/-- (11ag) `attribute [completion k] f` registrations, latest first. -/
+def completionHandlers (s : CommandState R) : Array Handler :=
+  s.extCompletions.toArray.map fun (k, f) => { kind := k, fn := f }
 
 /-! ## The parsed syntax at a position -/
 
@@ -164,5 +184,49 @@ def ExtAction.toAction (a : ExtAction) (r : SourceInfo) : Actions.Action :=
     edits := match a.text with
       | some t => #[{ start := r.start, stop := r.stop, text := t }]
       | none => #[] }
+
+/-! ## Completion items from the extension's JSON -/
+
+/-- At most this many items from one function (`completion` runs on a keystroke path). -/
+def maxItems : Nat := 50
+
+/-- At most this many extension items in one response. -/
+def itemBudget : Nat := 100
+
+/-- At most this many handlers run for one request. -/
+def handlerBudget : Nat := 8
+
+/-- The LSP `CompletionItemKind` a name means (the language server's `Completion.kind…`). -/
+def itemKind (s : String) : Nat :=
+  match s with
+  | "function" => Completion.kindFunction
+  | "constructor" => Completion.kindConstructor
+  | "field" => Completion.kindField
+  | "variable" => Completion.kindVariable
+  | "module" => Completion.kindModule
+  | _ => Completion.kindKeyword
+
+/-- Read the JSON a completion extension returned: an array of strings and/or objects
+(see the module docs). Anything malformed, and an object without a nonempty `label`, is
+left out; at most `maxItems` are kept. `start` is where the word at the cursor starts. -/
+def parseItems (out : String) (start : Nat) : Array Completion.Item :=
+  let one (j : Json) : Option Completion.Item := do
+    let (label, insert, detail, kind) := match j with
+      | .str s => (s, s, "", Completion.kindKeyword)
+      | _ =>
+        let label := match j.getObjVal? "label" with
+          | .ok (.str s) => s
+          | _ => ""
+        let str (k : String) (dflt : String) : String :=
+          match j.getObjVal? k with
+          | .ok (.str s) => s
+          | _ => dflt
+        (label, str "insert" label, str "detail" "", itemKind (str "kind" "keyword"))
+    if label.isEmpty then none
+    pure { label, kind, detail, insert, sortText := "1", start }
+  match Json.parse out with
+  | .ok (.arr xs) => (xs.filterMap one).extract 0 maxItems
+  | .ok j => (one j).toArray
+  | .error _ => #[]
 
 end Wiz.Extensions

@@ -37,6 +37,10 @@ def termGoalText (s : St) (off : Nat) : String :=
 
 def req (s : String) : Lean.Json := (Lean.Json.parse s).toOption.get!
 
+/-- An `initialize` request with the client capabilities object `caps`. -/
+def initCaps (caps : String) : Lean.Json :=
+  req s!"\{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":\{\"capabilities\":{caps}}}"
+
 def server : IO LSP.Server := do
   pure { libs := ({} : Std.HashMap String (String × String)).insert "Prelude" ("lib/Prelude.wiz", ← prelude),
          trusted := ["Prelude"] }
@@ -45,9 +49,8 @@ def lineCol (src : String) (off : Nat) : Nat × Nat :=
   let pre := src.toList.take off
   (pre.count '\n', (pre.reverse.takeWhile (· != '\n')).length)
 
-def posJson (src : String) (off : Nat) : String :=
-  let (l, c) := lineCol src off
-  s!"\{\"line\":{l},\"character\":{c}}"
+def posJson (src : String) (off : Nat) (enc : LSP.PositionEncoding := .utf16) : String :=
+  (LSP.toPos src off enc).compress
 
 /-- Open `src` as `file:///t.wiz`; returns the server and the messages it sent. -/
 def openDoc (src : String) (init : Lean.Json := req "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{}}")
@@ -58,8 +61,9 @@ def openDoc (src : String) (init : Lean.Json := req "{\"jsonrpc\":\"2.0\",\"id\"
   LSP.handle srv msg
 
 /-- A request at a position; returns the server and the reply's `result` (or `error`). -/
-def ask (srv : LSP.Server) (method : String) (src : String) (off : Nat) : IO (LSP.Server × Lean.Json) := do
-  let (srv, out) ← LSP.handle srv (req s!"\{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"{method}\",\"params\":\{\"textDocument\":\{\"uri\":\"file:///t.wiz\"},\"position\":{posJson src off}}}")
+def ask (srv : LSP.Server) (method : String) (src : String) (off : Nat)
+    (enc : LSP.PositionEncoding := .utf16) : IO (LSP.Server × Lean.Json) := do
+  let (srv, out) ← LSP.handle srv (req s!"\{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"{method}\",\"params\":\{\"textDocument\":\{\"uri\":\"file:///t.wiz\"},\"position\":{posJson src off enc}}}")
   pure (srv, result out[0]!)
 where
   result (j : Lean.Json) : Lean.Json :=
@@ -325,6 +329,20 @@ def completions (srv : LSP.Server) (src : String) (off : Nat) : IO (Array (Strin
   | _ => pure #[]
 
 def labels (cs : Array (String × String × String)) : List String := cs.toList.map (·.1)
+
+/-- The completion items (as JSON) at an offset, and the server (it keeps the compiled
+extension code). -/
+def completionItems (srv : LSP.Server) (src : String) (off : Nat)
+    (enc : LSP.PositionEncoding := .utf16) : IO (LSP.Server × Array Lean.Json) := do
+  let (srv, r) ← ask srv "textDocument/completion" src off enc
+  match LSP.get? r ["items"] with
+  | some (.arr is) => pure (srv, is)
+  | _ => pure (srv, #[])
+
+/-- `(label, kind, detail, newText)` of a completion item. -/
+def item (j : Lean.Json) : String × Nat × String × String :=
+  (LSP.getStr j ["label"], LSP.getNat j ["kind"], LSP.getStr j ["detail"],
+   LSP.getStr j ["textEdit", "newText"])
 
 /-- The source of the completion cases. -/
 def completionSrc : String :=
@@ -1236,6 +1254,67 @@ def two : Nat := 2
 def four : Nat := twice two
 "#
 
+/-! ### Completion extensions (11ag) -/
+
+/-- A keyword-scoped DSL with a completion hook. The items exercise a JSON string item,
+an object with `insert`/`detail`, a label the built-in completion also has (`Nat`), and a
+malformed item (a number) that is skipped. -/
+def compSrc : String := r#"import Prelude
+syntax (name := when) "when" ident "yes" term "no" term : term
+macro_rules
+  | `(term| when $n yes $a no $b) => `(term| Nat.add $a $b)
+def whenNames (stx : Syntax) : String :=
+  "[\"yes\", \"no\", {\"label\": \"Nat\", \"insert\": \"Nat\", \"kind\": \"keyword\"}, {\"label\": \"twice\", \"insert\": \"twice \", \"detail\": \"DSL branch\"}, 3]"
+attribute [completion term.when] whenNames
+def n : Nat := 1
+def g : Nat := when n yes 1 no 2
+"#
+
+/-- The same source with a prefix (`y`) at the cursor, so the item list is filtered. -/
+def compPartialSrc : String := compSrc.replace "when n yes 1 no 2" "when n yes y no 2"
+
+/-- The same source with an astral block comment before the command: a client column
+counts it as two UTF-16 code units or four UTF-8 bytes, not one character. -/
+def compAstralSrc : String :=
+  compPartialSrc.replace "def g : Nat := when" "def g : Nat := /- 𝕏😀 -/ when"
+
+def compBadJsonSrc : String := r#"import Prelude
+syntax (name := when) "when" ident "yes" term "no" term : term
+macro_rules
+  | `(term| when $n yes $a no $b) => `(term| Nat.add $a $b)
+def badComp (stx : Syntax) : String := "not json"
+attribute [completion term.when] badComp
+def n : Nat := 1
+def g : Nat := when n yes 1 no 2
+"#
+
+def compBadRegSrc : String := r#"import Prelude
+syntax (name := when) "when" ident "yes" term "no" term : term
+macro_rules
+  | `(term| when $n yes $a no $b) => `(term| Nat.add $a $b)
+def badCompReg : Nat := 0
+attribute [completion term.when] badCompReg
+def n : Nat := 1
+def g : Nat := when n yes 1 no 2
+"#
+
+/-- A module whose completion registration is `local`: it applies in the module, and the
+importer must not get it (`CommandState.endModule`). -/
+def compLocalMod : String := r#"import Prelude
+syntax (name := choose) "choose" term:max : term
+macro_rules
+  | `(term| choose $x) => `(term| Nat.add $x 0)
+def chooseNames (stx : Syntax) : String := "[\"alpha\"]"
+local attribute [completion term.choose] chooseNames
+def base : Nat := 1
+def localUse : Nat := choose base
+"#
+
+/-- The importer of `compLocalMod` (the kind `term.choose` is imported; the registration
+is not). -/
+def compLocalImport : String :=
+  "import Prelude\nimport Comp\ndef use2 : Nat := choose base\n"
+
 def extGroup : Group where
   name := "lsp-ext"
   exercise := "Stage 11 (user-defined LSP extensions)"
@@ -1278,7 +1357,89 @@ def extGroup : Group where
         let (srv, out) ← openDoc extBadJsonSrc
         check (!(has out[0]! "severity\":1")) s!"unexpected error: {out[0]!.compress}"
         let (_, as) ← codeActions srv extBadJsonSrc (offAfter extBadJsonSrc "twice two" (-2))
-        check as.isEmpty s!"actions: {as.map (·.compress)}" }
+        check as.isEmpty s!"actions: {as.map (·.compress)}" },
+    { name := "11ag: a registered completion appears at its node, merged and deduplicated", run := fun _ => do
+        let (srv, out) ← openDoc compSrc
+        check (!(has out[0]! "severity\":1")) s!"unexpected error: {out[0]!.compress}"
+        let (_, is) ← completionItems srv compSrc (offAfter compSrc "when n yes ")
+        let is := is.toList.map item
+        for l in ["yes", "no"] do
+          check (is.any fun (l', _, _, _) => l' == l) s!"no extension item {l}: {is}"
+        -- the object form: insert and detail, and the number is skipped
+        check (is.any fun (l, _, d, i) => l == "twice" && d == "DSL branch" && i == "twice ")
+          s!"the `twice` item: {is}"
+        check (!(is.any fun (l, _, _, _) => l == "3")) s!"a number became an item: {is}"
+        -- merged with the built-in `Nat`: one item, and it is the built-in one
+        let nats := is.filter fun (l, _, _, _) => l == "Nat"
+        checkEq 1 nats.length
+        checkEq 3 nats.head!.2.1
+        -- no node of the kind at the cursor: the extension adds nothing
+        let (_, is2) ← completionItems srv compSrc (offAfter compSrc "def n : Nat := ")
+        check (!(is2.toList.map item).any fun (l, _, _, _) => ["yes", "no", "twice"].contains l)
+          s!"extension items away from the node: {is2.toList.map item}" },
+    { name := "11ag: the word at the cursor filters the extension's items", run := fun _ => do
+        let (srv, _) ← openDoc compPartialSrc
+        let (_, is) ← completionItems srv compPartialSrc (offAfter compPartialSrc "when n yes y")
+        let ls := (is.toList.map item).map (·.1)
+        check (ls.contains "yes") s!"no `yes` for prefix y: {ls}"
+        check (!(ls.contains "no")) s!"`no` for prefix y: {ls}"
+        check (!(ls.contains "twice")) s!"`twice` for prefix y: {ls}" },
+    { name := "11ag: astral characters count in the client's position encoding", run := fun _ => do
+        let off := offAfter compAstralSrc "when n yes y"
+        let col (enc : LSP.PositionEncoding) (o : Nat) : Nat :=
+          LSP.getNat (LSP.toPos compAstralSrc o enc) ["character"]
+        -- UTF-16 (the default): each astral character is two code units
+        let (srv16, init16) ← LSP.handle (← server) (initCaps "{}")
+        checkEq "utf-16" (LSP.getStr init16[0]! ["result", "capabilities", "positionEncoding"])
+        let (srv16, _) ← openDoc compAstralSrc (initCaps "{}") (some srv16)
+        let (_, is16) ← completionItems srv16 compAstralSrc off .utf16
+        let some y16 := is16.find? fun j => LSP.getStr j ["label"] == "yes"
+          | throw (IO.userError s!"no `yes` at an astral UTF-16 position: {is16.toList.map item}")
+        checkEq (col .utf16 (off - 1)) (LSP.getNat y16 ["textEdit", "range", "start", "character"])
+        checkEq (col .utf16 off) (LSP.getNat y16 ["textEdit", "range", "end", "character"])
+        -- UTF-8: each astral character is four bytes
+        let init8 := initCaps "{\"general\":{\"positionEncodings\":[\"utf-8\"]}}"
+        let (srv8, init8out) ← LSP.handle (← server) init8
+        checkEq "utf-8" (LSP.getStr init8out[0]! ["result", "capabilities", "positionEncoding"])
+        let (srv8, _) ← openDoc compAstralSrc init8 (some srv8)
+        let (_, is8) ← completionItems srv8 compAstralSrc off .utf8
+        let some y8 := is8.find? fun j => LSP.getStr j ["label"] == "yes"
+          | throw (IO.userError s!"no `yes` at an astral UTF-8 position: {is8.toList.map item}")
+        checkEq (col .utf8 (off - 1)) (LSP.getNat y8 ["textEdit", "range", "start", "character"])
+        checkEq (col .utf8 off) (LSP.getNat y8 ["textEdit", "range", "end", "character"]) },
+    { name := "11ag: a malformed completion result is ignored, without an error", run := fun _ => do
+        let (srv, out) ← openDoc compBadJsonSrc
+        check (!(has out[0]! "severity\":1")) s!"unexpected error: {out[0]!.compress}"
+        let (_, is) ← completionItems srv compBadJsonSrc (offAfter compBadJsonSrc "when n yes ")
+        check (!(is.toList.map item).any fun (l, _, _, _) => ["yes", "no", "twice"].contains l)
+          s!"items from malformed JSON: {is.toList.map item}" },
+    { name := "11ag: a completion function of the wrong type is not registered", run := fun _ => do
+        let (srv, out) ← openDoc compBadRegSrc
+        check (has out[0]! "not a language-server extension") s!"no diagnostic: {out[0]!.compress}"
+        let (_, is) ← completionItems srv compBadRegSrc (offAfter compBadRegSrc "when n yes ")
+        check (!(is.toList.map item).any fun (l, _, _, _) => ["yes", "no", "twice"].contains l)
+          s!"items from a bad registration: {is.toList.map item}" },
+    { name := "11ag: a local completion registration stays in its module", run := fun _ => do
+        -- in the module itself the registration applies
+        let (srv, _) ← openDoc compLocalMod
+        let (_, is) ← completionItems srv compLocalMod (offAfter compLocalMod "localUse : Nat := choose ")
+        check ((is.toList.map item).any fun (l, _, _, _) => l == "alpha")
+          s!"no local item in the module: {is.toList.map item}"
+        -- and its importer does not get it (the kind is imported; the handler is not)
+        let libs := (← server).libs.insert "Comp" ("lib/Comp.wiz", compLocalMod)
+        let srv := { (← server) with libs }
+        let (srv, out) ← openDoc compLocalImport (srv? := some srv)
+        check (!(has out[0]! "severity\":1")) s!"import errors: {out[0]!.compress}"
+        let (_, is2) ← completionItems srv compLocalImport (offAfter compLocalImport "use2 : Nat := choose ")
+        check (!(is2.toList.map item).any fun (l, _, _, _) => l == "alpha")
+          s!"the local item escaped its module: {is2.toList.map item}" },
+    { name := "11ag: the completion item budget and malformed items", run := fun _ => do
+        let js := "[" ++ String.intercalate "," ((List.range 60).map fun i => "\"n" ++ toString i ++ "\"") ++ "]"
+        checkEq 50 (Extensions.parseItems js 0).size
+        checkEq 0 (Extensions.parseItems "{\"label\": \"\"}" 0).size
+        checkEq 1 (Extensions.parseItems "[3, {\"label\": \"\", \"insert\": \"x\"}, {\"label\": \"ok\"}]" 0).size
+        let it := (Extensions.parseItems "[{\"label\": \"ok\", \"detail\": \"d\", \"insert\": \"o\"}]" 0)[0]!
+        checkEq ("ok", "d", "o") (it.label, it.detail, it.insert) }
   ]
 
 /-- This module's test groups, which `Tests/Main.lean` runs: one per line, in sorted

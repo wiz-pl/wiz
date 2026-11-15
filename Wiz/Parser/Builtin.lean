@@ -289,6 +289,7 @@ continue onto a line starting at the command's column.
 | `command.attrDeriver`        | "attribute" "[" "deriver" ident "]" ident |
 | `command.attrCodeAction`     | "attribute" "[" "codeAction" ident "]" ident (11ae) |
 | `command.attrHover`          | "attribute" "[" "hover" ident "]" ident (11ae) |
+| `command.attrCompletion`     | "attribute" "[" "completion" ident "]" ident (11ag) |
 | `command.attrInline`         | "attribute" "[" "inline" "]" ident |
 | `command.attrDefaultInstance`| "attribute" "[" "default_instance" [num] "]" ident (7f) |
 | `command.attrBinop`          | "attribute" "[" "binop" "]" ident (7f) |
@@ -381,6 +382,9 @@ def commandLeading : List LeadingParser := [
     p := seqs ["attribute", "[", nonReserved "codeAction", ident, "]", ident] },
   { kind := "command.attrHover", prec := maxPrec,
     p := seqs ["attribute", "[", nonReserved "hover", ident, "]", ident] },
+  -- (11ag) `attribute [completion k] f`: completion items at nodes of kind `k`
+  { kind := "command.attrCompletion", prec := maxPrec,
+    p := seqs ["attribute", "[", nonReserved "completion", ident, "]", ident] },
   { kind := "command.deriving", prec := maxPrec,
     p := seqs ["deriving", "instance", sepBy1 ident ",", nonReserved "for", sepBy1 ident ","] },
   { kind := "command.declareSyntaxCat", prec := maxPrec, p := seqs ["declare_syntax_cat", ident, optional (seqs ["(", nonReserved "keywords", ":=", ident, ")"])] },

@@ -771,3 +771,51 @@ extension's Markdown under the ordinary syntax hover. Both hooks use the same re
   ignore them, as it does `inline`/`implemented_by`. Design notes:
   `wiz-notes/lsp-extensions.md`; tested in the `lsp-ext` group. Next: a term-aware hook
   (the info tree at the node), completion items, and infoview widgets.
+
+## 11ag: completion from a syntax kind
+
+The third hook of 11ae is `completion`: a DSL can name the words its own nodes admit.
+
+```wiz
+syntax (name := when) "when" ident "yes" term "no" term : term
+def whenNames (stx : Syntax) : String :=
+  "[\"yes\", \"no\", {\"label\": \"twice\", \"insert\": \"twice \", \"detail\": \"a branch\"}]"
+attribute [completion term.when] whenNames
+```
+
+`textDocument/completion` inside a `when …` node merges those items with the built-in
+completion of the position. The function has the same `Syntax → String` signature and
+registry shape as the other hooks (`CommandState.extCompletions`,
+`Extensions.completionHandlers`); the string is JSON — an array whose elements are a
+string (a label and its insert text) or an object with `label` (required), `insert`
+(default: the label), `detail` and `kind` (`keyword` by default; `function`, `variable`,
+`module`, `field`, `constructor` map to the LSP kinds).
+
+* **Dispatch**: the innermost parsed node of the registered kind under the cursor, as in
+  11ae. While a word is half-written the command need not parse, so the server also
+  parses a copy with the word replaced by `_` and looks for the node at the word's
+  start. One function registered for several kinds runs once.
+* **Merge and dedup**: extension items are filtered by the word at the cursor and merged
+  with `Completion.merge`; the built-in item wins a shared label (so a DSL can rename an
+  existing name), the result keeps the usual sort order and 300-item cap, and the edit
+  range is the current word.
+* **Budget**: completion runs on a keystroke path, so it has the budget the other hooks
+  lack: at most 50 items from one function, 100 extension items and 8 handlers per
+  request (`Extensions.maxItems`/`itemBudget`/`handlerBudget`). A malformed result (bad
+  JSON, an object without a label, a non-string/non-object element) is skipped; it is
+  not a diagnostic, because the file is not semantically wrong.
+* **`local`**: `local attribute [completion k] f` is allowed (the other two hooks' local
+  form is still a follow-up). `CommandState.endModule` drops the registration when the
+  module's import ends, so an importer sees the kind but not the hook
+  (`localExtComps`, numbered from the oldest like the other `local` tables).
+* **Position encoding**: the server negotiates UTF-16 or UTF-8 from the client's
+  `general.positionEncodings` (LSP 3.17, UTF-16 by default) and converts at every LSP
+  boundary (`Wiz/Position.lean`). Completion items' `textEdit` ranges therefore count
+  astral characters as two UTF-16 code units or four UTF-8 bytes, and the request's
+  position is decoded the same way.
+
+Seven cases in the `lsp-ext` group: a DSL keyword hook merged and deduplicated with the
+built-in `Nat`, prefix filtering, astral UTF-16 and UTF-8 positions, a malformed result,
+a malformed registration, a `local` registration staying in its module, and the item
+budget. The self-hosted frontend does not parse the attribute yet; as with 11ae, parity
+is to check and ignore it. Design notes: `wiz-notes/lsp-extensions.md`.

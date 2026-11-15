@@ -72,6 +72,18 @@ def lineStart (chars : Array Char) (off : Nat) : Nat := Id.run do
   while i > 0 && chars[i - 1]! != '\n' do i := i - 1
   pure i
 
+/-- The end of the (possibly dotted) word containing `off`. -/
+def wordEnd (chars : Array Char) (off : Nat) : Nat := Id.run do
+  let mut i := min off chars.size
+  while i < chars.size && isIdChar chars[i]! do i := i + 1
+  pure i
+
+/-- The word ending at `off` (the completion prefix). -/
+def wordAt (text : String) (off : Nat) : String :=
+  let chars := text.toList.toArray
+  let off := min off chars.size
+  String.ofList (chars.extract (wordStart chars off) off).toList
+
 /-- The end of the command around `off`: the next line (after `off`'s) that starts in
 column 0 with something other than a comment, or the end. -/
 def commandEnd (chars : Array Char) (off : Nat) : Nat := Id.run do
@@ -166,6 +178,13 @@ def finish (items : Array Item) (pre : String) (limit : Nat) : Result :=
     else (seen.insert i.label, acc.push i)) (seen, #[])
   let sorted := keep.qsort fun a b => a.sortText < b.sortText || (a.sortText == b.sortText && a.label < b.label)
   { items := sorted.extract 0 limit, incomplete := sorted.size > limit }
+
+/-- Merge the items an extension added into the built-in result. Built-in items come
+first, so a shared label keeps the built-in one; the merged list is filtered by the
+prefix, sorted and cut to `limit` exactly as `finish` does. -/
+def merge (r : Result) (extra : Array Item) (pre : String) (limit : Nat := 300) : Result :=
+  let res := finish (r.items ++ extra) pre limit
+  { res with incomplete := res.incomplete || r.incomplete }
 
 /-- The completions at `inp.off`. -/
 def complete (inp : Input R) : Result := Id.run do

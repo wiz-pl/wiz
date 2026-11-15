@@ -102,6 +102,9 @@ structure CommandState (R : Type) where
   extCodeActions : List (Name × Name) := []
   /-- (11ae) `attribute [hover k] f`: the same, for the hover at a node of kind `k` -/
   extHovers : List (Name × Name) := []
+  /-- (11ag) `attribute [completion k] f`: Wiz functions that complete at nodes of
+  syntax kind `k` (a `Syntax → String` of JSON items), latest first -/
+  extCompletions : List (Name × Name) := []
   /-- (HD8) `attribute [macro k] f` for `f : CommandMacro`, and `attribute [deriver C] f`,
   latest first -/
   cmdMacros : List (Name × Name) := []
@@ -183,6 +186,8 @@ structure CommandState (R : Type) where
   localCats : List Name := []
   localRules : List Nat := []
   localProcs : List Nat := []
+  /-- (11ag) `local attribute [completion k] f` registrations, numbered from the oldest -/
+  localExtComps : List Nat := []
   /-- (11w) `local instance`s: their positions in `instances` (numbered from the oldest) -/
   localInsts : List Nat := []
 
@@ -1341,16 +1346,17 @@ def CommandState.endModule (inner outer : CommandState R) : CommandState R :=
   let rules := inner.localRules.take (inner.localRules.length - outer.localRules.length)
   let procs := inner.localProcs.take (inner.localProcs.length - outer.localProcs.length)
   let insts := inner.localInsts.take (inner.localInsts.length - outer.localInsts.length)
+  let comps := inner.localExtComps.take (inner.localExtComps.length - outer.localExtComps.length)
   let pps := inner.localPP.take (inner.localPP.length - outer.localPP.length)
   -- (11r) `set_option pp.…` is the module's own
   let reset := { inner with localKinds := outer.localKinds, localCats := outer.localCats,
                             localRules := outer.localRules, localProcs := outer.localProcs,
-                            localInsts := outer.localInsts, localPP := outer.localPP,
+                            localInsts := outer.localInsts, localExtComps := outer.localExtComps, localPP := outer.localPP,
                             globals := { inner.globals with pp := { inner.globals.pp with useNotation := outer.globals.pp.useNotation } } }
   -- (11w) a `local instance` is found only in its module (its definition stays: a name)
   let reset := if insts.isEmpty then reset else
     { reset with instances := (reset.instances.zipIdx.filter fun (_, i) => !insts.contains i).map (·.1) }
-  if kinds.isEmpty && cats.isEmpty && rules.isEmpty && procs.isEmpty && pps.isEmpty then reset else
+  if kinds.isEmpty && cats.isEmpty && rules.isEmpty && procs.isEmpty && comps.isEmpty && pps.isEmpty then reset else
   let t := inner.tables
   let cats' := t.cats.fold (init := ({} : Std.HashMap Name Category)) fun acc c cat =>
     if cats.contains c then acc else
@@ -1369,6 +1375,7 @@ def CommandState.endModule (inner outer : CommandState R) : CommandState R :=
     procMacros := keep (·.1) inner.procMacros procs
     tactics := inner.tactics.filter (!kinds.contains ·.1)
     cmdMacros := inner.cmdMacros.filter (!kinds.contains ·.1)
+    extCompletions := keep (·.1) inner.extCompletions comps
     ppUser := keep (·.head) inner.ppUser pps }
   s'.refreshPP
 
@@ -1615,8 +1622,8 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
     -- (13m) grammar that stays in this module: remember what the command adds
     let inner := cmd.getArg 1
     unless ["command.syntax", "command.declareSyntaxCat", "command.notation", "command.infix",
-            "command.macroRules", "command.attrMacro", "command.instance", "command.appUnexpander", "command.attrUnexpander"].contains inner.kind do
-      report .error cmd.info "only `syntax`, `declare_syntax_cat`, `notation`, `infixl`/`infixr`/`infix`, `macro_rules`, `attribute [macro …]`, `instance` and unexpanders can be `local`"
+            "command.macroRules", "command.attrMacro", "command.attrCompletion", "command.instance", "command.appUnexpander", "command.attrUnexpander"].contains inner.kind do
+      report .error cmd.info "only `syntax`, `declare_syntax_cat`, `notation`, `infixl`/`infixr`/`infix`, `macro_rules`, `attribute [macro …]`, `attribute [completion …]`, `instance` and unexpanders can be `local`"
       return
     let before ← get
     elabCommand inner
@@ -1627,6 +1634,7 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
                localRules := (List.range' before.macros.length (s.macros.length - before.macros.length)).reverse ++ s.localRules
                localProcs := (List.range' before.procMacros.length (s.procMacros.length - before.procMacros.length)).reverse ++ s.localProcs
                localInsts := (List.range' before.instances.size (s.instances.size - before.instances.size)).reverse ++ s.localInsts
+               localExtComps := (List.range' before.extCompletions.length (s.extCompletions.length - before.extCompletions.length)).reverse ++ s.localExtComps
                localPP := (List.range' before.ppUser.length (s.ppUser.length - before.ppUser.length)).reverse ++ s.localPP }
   | "command.def" | "command.axiom" =>
     let name := ((cmd.getArg 1).getId?).getD "_"
@@ -2647,12 +2655,14 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
     | .ok () =>
       modify fun s => { s with tactics := (k, f) :: s.tactics }
       remakeMetaCode
-  | "command.attrCodeAction" | "command.attrHover" =>
-    -- (11ae) `attribute [codeAction k] f` / `attribute [hover k] f`: a Wiz function the
-    -- language server runs on nodes of syntax kind `k`. It is pure and small on purpose:
-    -- `Syntax → String` (for `codeAction`, the string is JSON; the host bridges it).
+  | "command.attrCodeAction" | "command.attrHover" | "command.attrCompletion" =>
+    -- (11ae/11ag) `attribute [codeAction k] f` / `attribute [hover k] f` /
+    -- `attribute [completion k] f`: a Wiz function the language server runs on nodes of
+    -- syntax kind `k`. It is pure and small on purpose: `Syntax → String` (for
+    -- `codeAction` and `completion`, the string is JSON; the host bridges it).
     let isAction := cmd.kind == "command.attrCodeAction"
-    let what := if isAction then "codeAction" else "hover"
+    let isHover := cmd.kind == "command.attrHover"
+    let what := if isAction then "codeAction" else if isHover then "hover" else "completion"
     let k := ((cmd.getArg 3).getId?).getD "_"
     let f0 := ((cmd.getArg 5).getId?).getD "_"
     let expected : Term R := .pi "_" .default (.qlit QuantitySyntax.explicitDefault)
@@ -2673,7 +2683,8 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
       else
         modify fun s =>
           if isAction then { s with extCodeActions := (k, f) :: s.extCodeActions }
-          else { s with extHovers := (k, f) :: s.extHovers }
+          else if isHover then { s with extHovers := (k, f) :: s.extHovers }
+          else { s with extCompletions := (k, f) :: s.extCompletions }
   | "command.attrImplementedBy" =>
     -- `attribute [implemented_by g] f`: compiled code runs `g` wherever it would run `f`
     -- (erasure takes `g`'s code for `f`); the kernel and proofs keep `f`'s definition. So
