@@ -2,6 +2,7 @@ import Scry.RuleTaint
 import Scry.Analysis
 import Scry.PointsTo
 import Scry.Rules
+import Scry.Models
 import Text
 /-!
 # Scry.Interproc
@@ -237,9 +238,38 @@ def Scry.dedupWarnings (ws : List Scry.MemWarning) : List Scry.MemWarning :=
     | .true => acc
     | .false => List.append acc (.cons w .nil)) .nil ws
 
+/-- One unmodelled-external diagnostic for a call: an external the unit does not define,
+with no model entry, and with a pointer result or argument, so its memory effect is
+genuinely unknown. The warning is attached to the call point. A call to a function the
+unit defines is not external (`Wil.findFunc` is the discriminator), and a modelled call
+has a known effect, so neither warns here. -/
+def Scry.unmodelledWarningsOf (p : Wil.Program) (r : Scry.FuncResult) : List Scry.MemWarning :=
+  let g := r.plan.info.g;
+  Scry.rulePackConcat (fun n =>
+    match Scry.nodeStmt g n with
+    | .some (.call res (.direct name) args _) =>
+      match Wil.findFunc p name with
+      | .some _ => .nil
+      | .none =>
+        if Scry.Models.isModelled name then .nil
+        else
+          let pointerArg := List.any (fun v => Scry.ptrLike v.ty) args;
+          let pointerRet := match res with
+            | .some v => Scry.ptrLike v.ty
+            | .none => (.false : Bool);
+          match Bool.or pointerArg pointerRet with
+          | .false => .nil
+          | .true => List.cons (Scry.memWarning Scry.MemWarnKind.unmodelledExternal
+              r.fn.name n ("call to unmodelled external " ++ name
+                ++ ": result and memory effects are unknown")) .nil
+    | _ => .nil) (Scry.range g.count)
+
 /-- Analyse a program: points-to first (the memory model every later stage uses), then the
-summary fixpoint, then one final evaluation per function. -/
-def Scry.analyze (p : Wil.Program) (pack : Scry.RulePack) : Scry.ProgramResult :=
+summary fixpoint, then one final evaluation per function. The pack gains the missing
+model rule descriptors, so a model-only sink (`execl`, `sprintf`, `read`'s bound) has a
+rule id even when the textual pack does not repeat it. -/
+def Scry.analyze (p : Wil.Program) (pack0 : Scry.RulePack) : Scry.ProgramResult :=
+  let pack := Scry.RulePack.withModels pack0;
   let pt := Scry.pointsTo p;
   let graph := Scry.callGraph p pt;
   let sums0 := List.map (fun fn => Scry.Summary.mk fn.name .nil .false .nil) p.funcs;
@@ -247,7 +277,9 @@ def Scry.analyze (p : Wil.Program) (pack : Scry.RulePack) : Scry.ProgramResult :
     (Scry.ptLocCount pt));
   let sums := Scry.summaryLoop p pack graph pt fuel sums0;
   let results := Scry.resultsWith p pack graph pt sums;
-  let warnings := Scry.dedupWarnings (Scry.concatLists (fun r => r.plan.memWarnings) results);
+  let warnings := Scry.dedupWarnings (List.append
+    (Scry.concatLists (fun r => r.plan.memWarnings) results)
+    (Scry.concatLists (fun r => Scry.unmodelledWarningsOf p r) results));
   Scry.ProgramResult.mk results sums graph pt warnings
 
 -- ## Stitching paths across calls
