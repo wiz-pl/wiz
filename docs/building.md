@@ -465,6 +465,50 @@ the elan toolchain, so the setup action keeps the elan cache for those
   without it. Without a queue (a user-owned repository), `--auto` waits for the required
   check and merges, and "require branches to be up to date" serialises merges instead.
 
+### Golden diffs
+
+A golden failure in CI is a test case whose output no longer matches its `.expected`
+file (`grail test`, stage 23f). The `golden-diff` workflow
+(`.github/workflows/golden-diff.yml`) runs after a failed `CI` run whose test shard
+failed, and makes the diff the artifact a reviewer needs:
+
+* it downloads the run's `test-log-*` artifacts (the shards' `*.log` and `*.jsonl`);
+* it checks out the failing commit, builds `grail` from the public Cachix cache (a fork
+  pull request has no published store path and builds it instead), and runs
+  `scripts/golden-diff.py`;
+* the script re-runs **only the failing golden cases** with `grail test --update` in a
+  temporary copy of the checkout, then prints a one-line-per-case summary and a unified
+  diff of every changed `.expected` file (a new `.expected` shows as `/dev/null`);
+* the diff job writes that report to the run summary and uploads it as the
+  `golden-diff` artifact; on a pull request, a second job posts it as one
+  (`pull-requests: write`) comment, replacing that job's earlier comment on a rerun.
+
+The job has two permissions levels on purpose. The `diff` job runs the pull request's
+code and its flake, so it has `contents: read` and `actions: read` only and uses no
+secrets (Cachix is read anonymously). The `comment` job has
+`pull-requests: write` but runs no pull request code; it only posts the uploaded
+Markdown.
+
+**What it will not do.** The script never modifies the checkout, commits, or pushes;
+the workflow has no write permission outside the comment job. It re-runs only cases
+whose name (or failure output) is a `.wiz` under a `Package.tests` root, at most 12
+files with a 300 s limit each, and it reports a case that fails for another reason
+(a build error, a timeout, a missing toolchain) as "not diffed" instead of writing a
+`.expected` file: `grail test --update` never records a failure either. The diff is
+**advisory** — it is what `--update` would write, not evidence that the new output is
+correct.
+
+Locally, after a failing `lake test` run:
+
+```sh
+python3 scripts/golden-diff.py logs/shard.log logs/shard.jsonl
+python3 scripts/golden-diff.py --case 'tour:examples/tour/00-hello.wiz'
+python3 scripts/golden-diff.py --self-test   # the diff engine's synthetic fixtures
+```
+
+The script uses `.lake/build/bin/grail` (or `$GRAIL`, or `--grail PATH`); `--keep` keeps
+the temporary copy, and `--out FILE` writes the report.
+
 ### Documentation site
 
 A push to `master` publishes the site from the `docs` job to GitHub Pages, at
