@@ -1,0 +1,473 @@
+import Prelude
+import Word
+import Text
+import Scry.Store
+import Scry.Datalog
+/-!
+# Scry.Eval
+
+A semi-naive evaluator for `Scry.Datalog.Program` (`import Scry.Eval`), with a delta
+loop and provenance.
+
+* **Strata are evaluated in order**, so a negated atom reads a relation that is already
+  complete (that is what `Program.check`'s stratification buys). Within one stratum
+  every rule is evaluated once without a delta if none of its body atoms is in the
+  stratum, then a delta loop runs the rules that are recursive in the stratum: for each
+  body position in the stratum, that atom is matched against the previous round's
+  delta and the other atoms against the current database. A round's new tuples, and
+  the keys whose lattice value moved, become the next delta; the loop stops when the
+  delta is empty.
+* **Lattice relations** keep one value per key. A key that is absent has `bot`; a new
+  value is `join`ed in, and the key joins the delta only when the joined value differs.
+  Values must therefore move up a finite lattice (the engine is a `partial def`: it
+  does not prove termination, and a non-monotone transfer function can loop, as the
+  design intends for an untrusted fast engine).
+* **Provenance** is a flat heap of `ProofStep`s: each step has an id, the fact it
+  derived, the rule (`.none` for an EDB fact), and the ids of the premises it used.
+  `State.whyTuple`/`State.whyLat` return a fact's step, and `State.expandWitness`
+  unfolds it into the reachable steps (a derivation tree with sharing). A negation has
+  no premise id: the witness certifies the positive part of the derivation; an absence
+  certificate is future work (`wiz-notes/code-analysis-design.md` §5.1).
+-/
+
+/-- A fact: relation number and columns. `lat` is `.some v` for a lattice fact. -/
+structure Scry.PFact (L : Type) where
+  rel : Nat
+  args : List U64
+  lat : Option L
+
+/-- One node of the provenance: `id`, the fact, the rule that derived it (`.none` for
+EDB), and the ids of the premises. Flat, so the mutual positivity checker is happy and
+the heap is a DAG; `expandWitness` turns a node into a tree. -/
+structure Scry.ProofStep (L : Type) where
+  id : Nat
+  fact : Scry.PFact L
+  rule : Option Nat
+  premises : List Nat
+
+/-- A derivation: a root step plus the steps reachable from it (a tree with sharing). -/
+structure Scry.Witness (L : Type) where
+  root : Scry.ProofStep L
+  steps : List (Scry.ProofStep L)
+
+/-- The engine's state: the database, the provenance heap (newest first), and the next
+step id. -/
+structure Scry.State (L : Type) where
+  db : Scry.Db L
+  nodes : List (Scry.ProofStep L)
+  next : Nat
+
+def Scry.State.empty {L : Type} : Scry.State L :=
+  Scry.State.mk (Scry.Db.empty) List.nil 0
+
+def Scry.optEq {L : Type} (eqL : L → L → Bool) : Option L → Option L → Bool
+  | .none, .none => .true
+  | .none, .some _ => .false
+  | .some _, .none => .false
+  | .some a, .some b => eqL a b
+
+def Scry.pfactEq {L : Type} (eqL : L → L → Bool) (a b : Scry.PFact L) : Bool :=
+  if Nat.beq a.rel b.rel then
+    if Scry.rowEq a.args b.args then Scry.optEq eqL a.lat b.lat else .false
+  else .false
+
+def Scry.findStepL {L : Type} (eqL : L → L → Bool) (fact : Scry.PFact L) :
+    List (Scry.ProofStep L) → Option (Scry.ProofStep L)
+  | .nil => .none
+  | .cons s rest => if Scry.pfactEq eqL fact s.fact then .some s else Scry.findStepL eqL fact rest
+
+def Scry.State.findStep {L : Type} (st : Scry.State L) (ops : Scry.LatOps L)
+    (fact : Scry.PFact L) : Option (Scry.ProofStep L) :=
+  Scry.findStepL ops.eq fact st.nodes
+
+/-- The projection of a step's fact. -/
+def Scry.ProofStep.rel {L : Type} (s : Scry.ProofStep L) : Nat := s.fact.rel
+
+def Scry.State.premiseTuple {L : Type} (st : Scry.State L) (ops : Scry.LatOps L)
+    (rel : Nat) (row : List U64) : List Nat :=
+  match st.findStep ops (Scry.PFact.mk rel row .none) with
+  | .some s => .cons s.id .nil
+  | .none => .nil
+
+def Scry.State.premiseLat {L : Type} (st : Scry.State L) (ops : Scry.LatOps L)
+    (rel : Nat) (key : List U64) (v : L) : List Nat :=
+  match st.findStep ops (Scry.PFact.mk rel key (.some v)) with
+  | .some s => .cons s.id .nil
+  | .none => .nil
+
+-- ## Adding facts
+
+/-- Add an EDB tuple (no rule), recording its provenance step. -/
+def Scry.State.addTuple {L : Type} (st : Scry.State L) (rel : Nat) (row : List U64) : Scry.State L :=
+  match st.db.insertTuple rel row with
+  | (db', .true) =>
+    Scry.State.mk db'
+      (.cons (Scry.ProofStep.mk st.next (Scry.PFact.mk rel row .none) .none .nil) st.nodes)
+      (Nat.succ st.next)
+  | (db', .false) => Scry.State.mk db' st.nodes st.next
+
+/-- Add an EDB lattice fact (no rule): join its value in and record a step when the value
+moves. -/
+def Scry.State.addLatFact {L : Type} (st : Scry.State L) (ops : Scry.LatOps L)
+    (rel : Nat) (key : List U64) (v : L) : Scry.State L :=
+  let old := match Scry.Db.findLat st.db rel key with
+    | .none => ops.bot
+    | .some x => x;
+  let nv := ops.join old v;
+  if ops.eq nv old then st
+  else
+    let db' := Scry.Db.setLat st.db rel key nv;
+    Scry.State.mk db'
+      (.cons (Scry.ProofStep.mk st.next (Scry.PFact.mk rel key (.some nv)) .none .nil) st.nodes)
+      (Nat.succ st.next)
+
+/-- A derived tuple. The flag says whether it was new. -/
+def Scry.State.addDerivedTuple {L : Type} (st : Scry.State L) (rule : Nat) (premises : List Nat)
+    (rel : Nat) (row : List U64) : Scry.State L × Bool :=
+  match st.db.insertTuple rel row with
+  | (db', .true) =>
+    (Scry.State.mk db'
+      (.cons (Scry.ProofStep.mk st.next (Scry.PFact.mk rel row .none) (.some rule) premises) st.nodes)
+      (Nat.succ st.next), .true)
+  | (db', .false) => (Scry.State.mk db' st.nodes st.next, .false)
+
+/-- A derived lattice value: join it in and record a step if the value moved. -/
+def Scry.State.addDerivedLat {L : Type} (st : Scry.State L) (ops : Scry.LatOps L)
+    (rule : Nat) (premises : List Nat) (rel : Nat) (key : List U64) (v : L) : Scry.State L × Bool :=
+  let old := match Scry.Db.findLat st.db rel key with
+    | .none => ops.bot
+    | .some x => x;
+  let nv := ops.join old v;
+  if ops.eq nv old then (st, .false)
+  else
+    let db' := Scry.Db.setLat st.db rel key nv;
+    (Scry.State.mk db'
+      (.cons (Scry.ProofStep.mk st.next (Scry.PFact.mk rel key (.some nv)) (.some rule) premises) st.nodes)
+      (Nat.succ st.next), .true)
+
+-- ## Environments
+
+structure Scry.Env (L : Type) where
+  vals : List (Nat × U64)
+  lats : List (Nat × L)
+
+def Scry.envGet {A : Type} (n : Nat) : List (Nat × A) → Option A
+  | .nil => .none
+  | .cons e rest => if Nat.beq n e.1 then .some e.2 else Scry.envGet n rest
+
+def Scry.Env.bindVal {L : Type} (env : Scry.Env L) (n : Nat) (v : U64) : Option (Scry.Env L) :=
+  match Scry.envGet n env.vals with
+  | .none => .some (Scry.Env.mk (.cons (n, v) env.vals) env.lats)
+  | .some old => if Scry.eqU64 old v then .some env else .none
+
+def Scry.Env.bindLat {L : Type} (env : Scry.Env L) (ops : Scry.LatOps L) (n : Nat) (v : L) :
+    Option (Scry.Env L) :=
+  match Scry.envGet n env.lats with
+  | .none => .some (Scry.Env.mk env.vals (.cons (n, v) env.lats))
+  | .some old => if ops.eq old v then .some env else .none
+
+def Scry.Env.empty {L : Type} : Scry.Env L := Scry.Env.mk .nil .nil
+
+-- ## Term and lattice-expression evaluation
+
+def Scry.Term.eval (env : List (Nat × U64)) : Scry.Term → U64
+  | .var n => match Scry.envGet n env with
+    | .none => U64.ofNat 0
+    | .some v => v
+  | .lit v => v
+
+def Scry.LExpr.eval {L : Type} (ops : Scry.LatOps L) (funcs : List (L → L)) :
+    Scry.LExpr L → List (Nat × L) → L
+  | .lit v, _ => v
+  | .var n, env => match Scry.envGet n env with
+    | .none => ops.bot
+    | .some v => v
+  | .join a b, env =>
+    ops.join (Scry.LExpr.eval ops funcs a env) (Scry.LExpr.eval ops funcs b env)
+  | .map i a, env =>
+    match List.getD funcs i (fun (x : L) => x) with
+    | f => f (Scry.LExpr.eval ops funcs a env)
+
+-- ## Matching a body
+
+def Scry.unifyTerms {L : Type} (ops : Scry.LatOps L) :
+    List Scry.Term → List U64 → Scry.Env L → Option (Scry.Env L)
+  | .nil, .nil, env => .some env
+  | .nil, .cons _ _, _ => .none
+  | .cons _ _, .nil, _ => .none
+  | .cons t ts, .cons v vs, env =>
+    match t with
+    | .lit c => if Scry.eqU64 c v then Scry.unifyTerms ops ts vs env else .none
+    | .var n => match env.bindVal n v with
+      | .none => .none
+      | .some env' => Scry.unifyTerms ops ts vs env'
+
+/-- Match a positive tuple atom against a list of rows. -/
+def Scry.matchRows {L : Type} (ops : Scry.LatOps L) (st : Scry.State L) (rel : Nat)
+    (args : List Scry.Term) : List (List U64) → Scry.Env L → List (Scry.Env L × List Nat)
+  | .nil, _ => .nil
+  | .cons row rows, env =>
+    match Scry.unifyTerms ops args row env with
+    | .none => Scry.matchRows ops st rel args rows env
+    | .some env' =>
+      .cons (env', st.premiseTuple ops rel row) (Scry.matchRows ops st rel args rows env)
+
+/-- Match a lattice atom against `(key, value)` entries. -/
+def Scry.matchLatEntries {L : Type} (ops : Scry.LatOps L) (st : Scry.State L) (rel : Nat)
+    (keyTerms : List Scry.Term) (vvar : Nat) :
+    List (List U64 × L) → Scry.Env L → List (Scry.Env L × List Nat)
+  | .nil, _ => .nil
+  | .cons e rest, env =>
+    match Scry.unifyTerms ops keyTerms e.1 env with
+    | .none => Scry.matchLatEntries ops st rel keyTerms vvar rest env
+    | .some env' => match env'.bindLat ops vvar e.2 with
+      | .none => Scry.matchLatEntries ops st rel keyTerms vvar rest env
+      | .some env'' =>
+        .cons (env'', st.premiseLat ops rel e.1 e.2)
+          (Scry.matchLatEntries ops st rel keyTerms vvar rest env)
+
+def Scry.Atom.matches {L : Type} (ops : Scry.LatOps L) (st : Scry.State L) (a : Scry.Atom)
+    (env : Scry.Env L) : List (Scry.Env L × List Nat) :=
+  match a with
+  | .pos rel args =>
+    Scry.matchRows ops st rel args (Scry.Db.tupleAt st.db rel).toList env
+  | .neg rel args =>
+    match Scry.matchRows ops st rel args (Scry.Db.tupleAt st.db rel).toList env with
+    | .nil => .cons (env, .nil) .nil
+    | .cons _ _ => .nil
+  | .lat rel key vv =>
+    Scry.matchLatEntries ops st rel key vv (Scry.Db.latAt st.db rel).toList env
+
+/-- `atoms` against the whole database: every match and the premise ids it used. -/
+def Scry.evalAtoms {L : Type} (ops : Scry.LatOps L) (st : Scry.State L) :
+    List Scry.Atom → Scry.Env L → List (Scry.Env L × List Nat)
+  | .nil, env => .cons (env, .nil) .nil
+  | .cons a rest, env =>
+    Scry.concatMap (fun m =>
+      List.map (fun m' => (m'.1, List.append m.2 m'.2)) (Scry.evalAtoms ops st rest m.1))
+      (Scry.Atom.matches ops st a env)
+
+-- ## Delta matching
+
+/-- A round's new facts: tuples, and lattice keys whose value moved. -/
+structure Scry.Delta (L : Type) where
+  tuples : List (Scry.PFact L)
+  lats : List (Nat × List U64)
+
+def Scry.Delta.empty {L : Type} : Scry.Delta L := Scry.Delta.mk .nil .nil
+
+def Scry.Delta.isEmpty {L : Type} (d : Scry.Delta L) : Bool :=
+  if List.isEmpty d.tuples then List.isEmpty d.lats else .false
+
+def Scry.deltaRows {L : Type} (d : Scry.Delta L) (rel : Nat) : List (List U64) :=
+  List.foldr (fun f acc => if Nat.beq f.rel rel then .cons f.args acc else acc) .nil d.tuples
+
+def Scry.deltaLatEntries {L : Type} (st : Scry.State L) (d : Scry.Delta L) (rel : Nat) :
+    List (List U64 × L) :=
+  List.foldr (fun e acc =>
+    if Nat.beq e.1 rel then
+      match Scry.Db.findLat st.db rel e.2 with
+      | .none => acc
+      | .some v => .cons (e.2, v) acc
+    else acc) .nil d.lats
+
+def Scry.Atom.matchesDelta {L : Type} (ops : Scry.LatOps L) (st : Scry.State L)
+    (d : Scry.Delta L) (a : Scry.Atom) (env : Scry.Env L) : List (Scry.Env L × List Nat) :=
+  match a with
+  | .pos rel args => Scry.matchRows ops st rel args (Scry.deltaRows d rel) env
+  | .lat rel key vv =>
+    Scry.matchLatEntries ops st rel key vv (Scry.deltaLatEntries st d rel) env
+  | .neg _ _ => Scry.Atom.matches ops st a env
+
+/-- `evalAtoms`, with the atom at index `anchor` matched against the delta. -/
+def Scry.evalAtomsD {L : Type} (ops : Scry.LatOps L) (st : Scry.State L) (d : Scry.Delta L)
+    (anchor : Nat) : List Scry.Atom → Nat → Scry.Env L → List (Scry.Env L × List Nat)
+  | .nil, _, env => .cons (env, .nil) .nil
+  | .cons a rest, i, env =>
+    Scry.concatMap (fun m =>
+      List.map (fun m' => (m'.1, List.append m.2 m'.2))
+        (Scry.evalAtomsD ops st d anchor rest (Nat.succ i) m.1))
+      (if Nat.beq i anchor then Scry.Atom.matchesDelta ops st d a env
+       else Scry.Atom.matches ops st a env)
+
+-- ## Applying a rule
+
+/-- The result of one round (or of the initial non-recursive pass): the state and the
+new tuple facts and lattice keys. -/
+structure Scry.Round (L : Type) where
+  st : Scry.State L
+  newTuples : List (Scry.PFact L)
+  newLats : List (Nat × List U64)
+
+def Scry.Round.empty {L : Type} (st : Scry.State L) : Scry.Round L :=
+  Scry.Round.mk st .nil .nil
+
+/-- Apply one rule's matches: derive each head and record what is new. -/
+def Scry.applyMatches {L : Type} (p : Scry.Program L) (ri : Nat) (rule : Scry.Rule L) :
+    List (Scry.Env L × List Nat) → Scry.Round L → Scry.Round L
+  | .nil, acc => acc
+  | .cons m ms, acc =>
+    match rule.head with
+    | .tuple rel args =>
+      let row := List.map (fun t => Scry.Term.eval m.1.vals t) args;
+      match acc.st.addDerivedTuple ri m.2 rel row with
+      | (st', .true) =>
+        Scry.applyMatches p ri rule ms
+          (Scry.Round.mk st' (.cons (Scry.PFact.mk rel row .none) acc.newTuples) acc.newLats)
+      | (st', .false) =>
+        Scry.applyMatches p ri rule ms (Scry.Round.mk st' acc.newTuples acc.newLats)
+    | .lat rel key val =>
+      let k := List.map (fun t => Scry.Term.eval m.1.vals t) key;
+      let v := Scry.LExpr.eval p.ops p.funcs val m.1.lats;
+      match acc.st.addDerivedLat p.ops ri m.2 rel k v with
+      | (st', .true) =>
+        Scry.applyMatches p ri rule ms
+          (Scry.Round.mk st' acc.newTuples (.cons (rel, k) acc.newLats))
+      | (st', .false) =>
+        Scry.applyMatches p ri rule ms (Scry.Round.mk st' acc.newTuples acc.newLats)
+
+-- ## Stratum evaluation
+
+def Scry.inStratum (strat : List Nat) (s rel : Nat) : Bool :=
+  Nat.beq (List.getD strat rel 0) s
+
+def Scry.Atom.inStratum (strat : List Nat) (s : Nat) (a : Scry.Atom) : Bool :=
+  Scry.inStratum strat s a.rel
+
+/-- The body positions whose relation is in stratum `s`. -/
+def Scry.positionsIn (strat : List Nat) (s : Nat) : List Scry.Atom → Nat → List Nat
+  | .nil, _ => .nil
+  | .cons a rest, i =>
+    let rest' := Scry.positionsIn strat s rest (Nat.succ i);
+    if Scry.inStratum strat s a.rel then .cons i rest' else rest'
+
+def Scry.Rule.positionsIn {L : Type} (strat : List Nat) (s : Nat) (r : Scry.Rule L) : List Nat :=
+  Scry.positionsIn strat s r.body 0
+
+/-- Every fact currently in a relation of stratum `s` (the initial delta of the stratum). -/
+def Scry.initialDeltaTuples {L : Type} (strat : List Nat) (s : Nat) :
+    List (Nat × Scry.TupleRel) → List (Scry.PFact L)
+  | .nil => .nil
+  | .cons e rest =>
+    if Scry.inStratum strat s e.1 then
+      List.append (List.map (fun row => Scry.PFact.mk e.1 row .none) e.2.toList)
+        (Scry.initialDeltaTuples strat s rest)
+    else Scry.initialDeltaTuples strat s rest
+
+def Scry.initialDeltaLats {L : Type} (strat : List Nat) (s : Nat) :
+    List (Nat × Scry.LatRel L) → List (Nat × List U64)
+  | .nil => .nil
+  | .cons e rest =>
+    if Scry.inStratum strat s e.1 then
+      List.append (List.map (fun kv => (e.1, kv.1)) e.2.toList)
+        (Scry.initialDeltaLats strat s rest)
+    else Scry.initialDeltaLats strat s rest
+
+def Scry.initialDelta {L : Type} (st : Scry.State L) (strat : List Nat) (s : Nat) : Scry.Delta L :=
+  Scry.Delta.mk (Scry.initialDeltaTuples strat s st.db.tuples)
+    (Scry.initialDeltaLats strat s st.db.lats)
+
+/-- Rules with no body atom in the stratum are evaluated once, before the delta loop. -/
+def Scry.evalNonRecursive {L : Type} (p : Scry.Program L) (strat : List Nat) (s : Nat)
+    (rules : List (Scry.Rule L)) (i : Nat) (st : Scry.State L) : Scry.State L :=
+  match rules with
+  | .nil => st
+  | .cons rule rest =>
+    let st' :=
+      if Scry.inStratum strat s rule.head.rel then
+        if List.isEmpty (Scry.Rule.positionsIn strat s rule) then
+          (Scry.applyMatches p i rule
+            (Scry.evalAtoms p.ops st rule.body Scry.Env.empty) (Scry.Round.empty st)).st
+        else st
+      else st;
+    Scry.evalNonRecursive p strat s rest (Nat.succ i) st'
+
+/-- One round: every rule recursive in the stratum, once per recursive body position. -/
+def Scry.evalRound {L : Type} (p : Scry.Program L) (strat : List Nat) (s : Nat)
+    (d : Scry.Delta L) (st : Scry.State L) (rules : List (Scry.Rule L)) (i : Nat)
+    (acc : Scry.Round L) : Scry.Round L :=
+  match rules with
+  | .nil => acc
+  | .cons rule rest =>
+    let acc' :=
+      if Scry.inStratum strat s rule.head.rel then
+        List.foldr (fun pos r =>
+          Scry.applyMatches p i rule
+            (Scry.evalAtomsD p.ops r.st d pos rule.body 0 Scry.Env.empty) r)
+          (Scry.Round.mk acc.st acc.newTuples acc.newLats)
+          (Scry.Rule.positionsIn strat s rule)
+      else acc;
+    Scry.evalRound p strat s d st rest (Nat.succ i) acc'
+
+partial def Scry.evalStratumLoop {L : Type} (p : Scry.Program L) (strat : List Nat) (s : Nat)
+    (d : Scry.Delta L) (st : Scry.State L) : Scry.State L :=
+  if Scry.Delta.isEmpty d then st
+  else
+    let r := Scry.evalRound p strat s d st p.rules 0 (Scry.Round.empty st);
+    Scry.evalStratumLoop p strat s (Scry.Delta.mk r.newTuples r.newLats) r.st
+
+def Scry.evalStratum {L : Type} (p : Scry.Program L) (strat : List Nat) (s : Nat)
+    (st : Scry.State L) : Scry.State L :=
+  let st1 := Scry.evalNonRecursive p strat s p.rules 0 st;
+  Scry.evalStratumLoop p strat s (Scry.initialDelta st1 strat s) st1
+
+partial def Scry.evalFrom {L : Type} (p : Scry.Program L) (strat : List Nat) (s : Nat)
+    (max : Nat) (st : Scry.State L) : Scry.State L :=
+  if Nat.lt max s then st
+  else Scry.evalFrom p strat (Nat.succ s) max (Scry.evalStratum p strat s st)
+
+/-- The least fixpoint, if the program passes `Program.check` (range restriction and
+stratification); otherwise `.none`. EDB facts come from `State.addTuple` and
+`State.addLatFact`. -/
+def Scry.eval {L : Type} (p : Scry.Program L) (st : Scry.State L) : Option (Scry.State L) :=
+  match p.check with
+  | .none => .none
+  | .some strat => .some (Scry.evalFrom p strat 0 (Scry.maxNat strat) st)
+
+-- ## Provenance queries
+
+def Scry.State.whyTuple {L : Type} (st : Scry.State L) (ops : Scry.LatOps L)
+    (rel : Nat) (row : List U64) : Option (Scry.ProofStep L) :=
+  st.findStep ops (Scry.PFact.mk rel row .none)
+
+def Scry.State.whyLat {L : Type} (st : Scry.State L) (ops : Scry.LatOps L)
+    (rel : Nat) (key : List U64) : Option (Scry.ProofStep L) :=
+  match Scry.Db.findLat st.db rel key with
+  | .none => .none
+  | .some v => st.findStep ops (Scry.PFact.mk rel key (.some v))
+
+/-- A step by id. -/
+def Scry.stepByIdL {L : Type} (nodes : List (Scry.ProofStep L)) (id : Nat) :
+    Option (Scry.ProofStep L) :=
+  match nodes with
+  | .nil => .none
+  | .cons s rest => if Nat.beq s.id id then .some s else Scry.stepByIdL rest id
+
+/-- The steps reachable from these premise ids. -/
+partial def Scry.reachSteps {L : Type} (nodes : List (Scry.ProofStep L)) (ids : List Nat) :
+    List (Scry.ProofStep L) :=
+  match ids with
+  | .nil => .nil
+  | .cons id rest =>
+    match Scry.stepByIdL nodes id with
+    | .none => Scry.reachSteps nodes rest
+    | .some s => .cons s (Scry.reachSteps nodes (List.append s.premises rest))
+
+def Scry.State.expandWitness {L : Type} (st : Scry.State L) (root : Scry.ProofStep L) :
+    Scry.Witness L :=
+  Scry.Witness.mk root (Scry.reachSteps st.nodes root.premises)
+
+def Scry.Witness.size {L : Type} (w : Scry.Witness L) : Nat := Nat.succ (List.length w.steps)
+
+/-- Whether the witness has a step with this id (the root or one of the expanded steps). -/
+def Scry.Witness.hasStep {L : Type} (w : Scry.Witness L) (id : Nat) : Bool :=
+  List.any (fun s => Nat.beq s.id id) (.cons w.root w.steps)
+
+/-- Every premise of every step has a smaller id and is present in the witness, so the
+witness is acyclic and can be read as a tree (with sharing). -/
+def Scry.Witness.wellFormed {L : Type} (w : Scry.Witness L) : Bool :=
+  List.foldr (fun s acc =>
+    List.foldr (fun id acc' =>
+      if Nat.lt id s.id then (if w.hasStep id then acc' else .false) else .false)
+      acc s.premises)
+    .true (.cons w.root w.steps)

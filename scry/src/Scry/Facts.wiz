@@ -1,0 +1,268 @@
+import Json
+import Functor
+import Scry.Schema
+/-!
+# Scry.Facts: loading and checking a fact store
+
+`Scry.Facts.ofText` parses a JSON fact store, validates it and builds the CSR adjacency
+(design: `wiz-notes/code-analysis-design.md` §4.4, `wiz-notes/scry-package.md`). The
+format is documented on `Scry.Schema`; S1 replaces the hand-written JSON with the
+tree-sitter shim's output, and the string kinds and fields with generated `C.Kind`s.
+
+What the loader checks, so that a native store can trust its columns:
+
+* `format` is `"scry-facts"` and `version` is 1;
+* node ids are `0 … n-1` in order, edge ids `0 … m-1`, relation ids `0 … r-1`;
+* every parent, edge endpoint and relation value is a node id in range;
+* `start ≤ stop` for every span and every tuple has exactly `arity` values.
+
+The checks are pure and the error strings name the offending row. `ofText` is what the
+tests and `scry parse` use; a future `ofNative` reads the C `CstStore` (S1).
+-/
+
+-- ## JSON helpers
+
+/-- A required natural-number field. -/
+def Scry.reqNat (j : Json) (key : String) : Except String Nat := match Json.get j key with
+  | .some v => match Json.asNat v with
+    | .some n => .ok n
+    | .none => .error ("field \"" ++ key ++ "\": expected a natural number")
+  | .none => .error ("missing field \"" ++ key ++ "\"")
+
+/-- A required string field. -/
+def Scry.reqStr (j : Json) (key : String) : Except String String := match Json.get j key with
+  | .some (.str s) => .ok s
+  | .some _ => .error ("field \"" ++ key ++ "\": expected a string")
+  | .none => .error ("missing field \"" ++ key ++ "\"")
+
+/-- A required array field, as a list. -/
+def Scry.reqArr (j : Json) (key : String) : Except String (List Json) := match Json.get j key with
+  | .some (.arr xs) => .ok (Jsons.toList xs)
+  | .some _ => .error ("field \"" ++ key ++ "\": expected an array")
+  | .none => .error ("missing field \"" ++ key ++ "\"")
+
+/-- An optional array field (`[]` when missing). -/
+def Scry.optArr (j : Json) (key : String) : List Json := match Json.get j key with
+  | .some (.arr xs) => Jsons.toList xs
+  | _ => .nil
+
+/-- A string field with a default. -/
+def Scry.strD (j : Json) (key : String) (d : String) : String := match Json.get j key with
+  | .some (.str s) => s
+  | _ => d
+
+/-- A natural-number field with a default. -/
+def Scry.natD (j : Json) (key : String) (d : Nat) : Nat := match Json.get j key with
+  | .some v => match Json.asNat v with
+    | .some n => n
+    | .none => d
+  | .none => d
+
+/-- A boolean field with a default. -/
+def Scry.boolD (j : Json) (key : String) (d : Bool) : Bool := match Json.get j key with
+  | .some (.bool b) => b
+  | _ => d
+
+/-- Map a decoder over an array's elements, stopping at the first error. -/
+def Scry.decodeAll {A : Type} (f : Json → Except String A) : List Json → Except String (List A)
+  | .nil => .ok .nil
+  | .cons j rest => Except.bind (f j) (fun a => Except.bind (Scry.decodeAll f rest)
+      (fun as => .ok (.cons a as)))
+
+-- ## Rows
+
+/-- The span of a node: `"span": [start, stop]`. -/
+def Scry.decodeSpan (j : Json) : Except String Scry.Span := match Json.get j "span" with
+  | .some (.arr xs) => match Jsons.toList xs with
+    | .cons a (.cons b .nil) => match Json.asNat a, Json.asNat b with
+      | .some s, .some t => .ok (Scry.Span.mk s t)
+      | _, _ => .error "field \"span\": expected two natural numbers"
+    | _ => .error "field \"span\": expected [start, stop]"
+  | .some _ => .error "field \"span\": expected an array"
+  | .none => .error "missing field \"span\""
+
+/-- The optional parent of a node: a node index, `null`, or absent. -/
+def Scry.decodeParent (j : Json) : Except String (Option Scry.NodeId) :=
+  match Json.get j "parent" with
+  | .none => .ok .none
+  | .some .null => .ok .none
+  | .some v => match Json.asNat v with
+    | .some n => .ok (.some (Scry.nodeId n))
+    | .none => .error "field \"parent\": expected a node id or null"
+
+/-- One node row. -/
+def Scry.decodeNode (j : Json) : Except String Scry.Node :=
+  Except.bind (Scry.reqNat j "id") (fun id =>
+  Except.bind (Scry.reqStr j "kind") (fun kind =>
+  Except.bind (Scry.decodeParent j) (fun parent =>
+  Except.bind (Scry.decodeSpan j) (fun span =>
+  .ok (Scry.Node.mk (Scry.nodeId id) kind (Scry.strD j "field" "") parent span
+    (Scry.boolD j "named" .true) (Scry.boolD j "error" .false)
+    (Scry.boolD j "missing" .false))))))
+
+/-- One edge row. -/
+def Scry.decodeEdge (j : Json) : Except String Scry.Edge :=
+  Except.bind (Scry.reqNat j "id") (fun id =>
+  Except.bind (Scry.reqNat j "src") (fun src =>
+  Except.bind (Scry.reqNat j "dst") (fun dst =>
+  Except.bind (Scry.reqStr j "label") (fun label =>
+  .ok (Scry.Edge.mk (Scry.edgeId id) (Scry.nodeId src) (Scry.nodeId dst) label)))))
+
+/-- One tuple's values (natural numbers). -/
+def Scry.decodeTuple (j : Json) : Except String (List Nat) :=
+  Scry.decodeAll (fun v => match Json.asNat v with
+    | .some n => .ok n
+    | .none => .error "relation tuple: expected a natural number") (Json.asList j)
+
+/-- One relation row. -/
+def Scry.decodeRelation (j : Json) : Except String Scry.Relation :=
+  Except.bind (Scry.reqNat j "id") (fun id =>
+  Except.bind (Scry.reqStr j "name") (fun name =>
+  Except.bind (Scry.reqNat j "arity") (fun arity =>
+  Except.bind (Scry.decodeAll Scry.decodeTuple (Scry.optArr j "tuples")) (fun tuples =>
+  .ok (Scry.Relation.mk (Scry.Id.mk id) name arity tuples)))))
+
+/-- One source-file row. -/
+def Scry.decodeFile (j : Json) : Except String Scry.SourceFile :=
+  Except.bind (Scry.reqNat j "id") (fun id =>
+  Except.bind (Scry.reqStr j "path") (fun path =>
+  .ok (Scry.SourceFile.mk id path (Scry.natD j "bytes" 0))))
+
+-- ## Validation
+
+/-- The source-file rows: ids in order. -/
+def Scry.checkFiles : Nat → List Scry.SourceFile → Except String Unit
+  | _, .nil => .ok ()
+  | i, .cons f rest => match Nat.beq f.id i with
+    | .true => Scry.checkFiles (Nat.succ i) rest
+    | .false => .error ("file id " ++ Nat.repr f.id ++ " at row " ++ Nat.repr i
+        ++ " (ids must be 0, 1, 2, … in order)")
+
+/-- The node rows: ids in order, parent in range, `start ≤ stop`. -/
+def Scry.checkNodes (total : Nat) : Nat → List Scry.Node → Except String Unit
+  | _, .nil => .ok ()
+  | i, .cons n rest =>
+    match Nat.beq n.id.n i with
+    | .false => .error ("node id " ++ Nat.repr n.id.n ++ " at row " ++ Nat.repr i
+        ++ " (ids must be 0, 1, 2, … in order)")
+    | .true => match Nat.le n.span.start n.span.stop with
+      | .false => .error ("node " ++ Nat.repr i ++ ": span start "
+          ++ Nat.repr n.span.start ++ " is after stop " ++ Nat.repr n.span.stop)
+      | .true => match n.parent with
+        | .none => Scry.checkNodes total (Nat.succ i) rest
+        | .some p => match Nat.lt p.n total with
+          | .true => Scry.checkNodes total (Nat.succ i) rest
+          | .false => .error ("node " ++ Nat.repr i ++ ": parent " ++ Nat.repr p.n
+              ++ " is not a node id (node count " ++ Nat.repr total ++ ")")
+
+/-- The edge rows: ids in order, both endpoints in range. -/
+def Scry.checkEdges (total : Nat) : Nat → List Scry.Edge → Except String Unit
+  | _, .nil => .ok ()
+  | i, .cons e rest =>
+    match Nat.beq e.id.n i with
+    | .false => .error ("edge id " ++ Nat.repr e.id.n ++ " at row " ++ Nat.repr i
+        ++ " (ids must be 0, 1, 2, … in order)")
+    | .true => match Nat.lt e.src.n total with
+      | .false => .error ("edge " ++ Nat.repr i ++ ": source " ++ Nat.repr e.src.n
+          ++ " is not a node id (node count " ++ Nat.repr total ++ ")")
+      | .true => match Nat.lt e.dst.n total with
+        | .false => .error ("edge " ++ Nat.repr i ++ ": target " ++ Nat.repr e.dst.n
+            ++ " is not a node id (node count " ++ Nat.repr total ++ ")")
+        | .true => Scry.checkEdges total (Nat.succ i) rest
+
+/-- One tuple: each value is a node id (`arity` is checked before this). -/
+def Scry.checkTuple (total : Nat) (rid : Nat) (row : Nat) : List Nat → Except String Unit
+  | .nil => .ok ()
+  | .cons v rest => match Nat.lt v total with
+    | .false => .error ("relation " ++ Nat.repr rid ++ " tuple " ++ Nat.repr row
+        ++ ": " ++ Nat.repr v ++ " is not a node id (node count " ++ Nat.repr total ++ ")")
+    | .true => Scry.checkTuple total rid row rest
+
+/-- The tuples of a relation, each checked (`row` is the tuple's index, for messages). -/
+def Scry.checkTupleRows (total : Nat) (rid : Nat) :
+    List (List Nat) → Nat → Except String Unit
+  | .nil, _ => .ok ()
+  | .cons t rest, row => Except.bind (Scry.checkTuple total rid row t)
+      (fun _ => Scry.checkTupleRows total rid rest (Nat.succ row))
+
+/-- Every tuple of a relation has `arity` values (and its row id is its index). -/
+def Scry.checkRelation (total : Nat) (i : Nat) (r : Scry.Relation) : Except String Unit :=
+  match Nat.beq r.id.n i with
+  | .false => .error ("relation id " ++ Nat.repr r.id.n ++ " at row " ++ Nat.repr i
+      ++ " (ids must be 0, 1, 2, … in order)")
+  | .true => match List.find (fun t => Bool.not (Nat.beq (List.length t) r.arity)) r.tuples with
+    | .some _ => .error ("relation " ++ Nat.repr i ++ " (" ++ r.name ++ "): a tuple's length is not arity "
+        ++ Nat.repr r.arity)
+    | .none => Scry.checkTupleRows total r.id.n r.tuples 0
+
+/-- The relation rows, each checked. -/
+def Scry.checkRelations (total : Nat) : Nat → List Scry.Relation → Except String Unit
+  | _, .nil => .ok ()
+  | i, .cons r rest => Except.bind (Scry.checkRelation total i r)
+      (fun _ => Scry.checkRelations total (Nat.succ i) rest)
+
+-- ## Loading
+
+/-- Check a decoded store and derive its adjacency. -/
+def Scry.finishFacts (format : String) (version : Nat) (language : String)
+    (files : List Scry.SourceFile) (nodes : List Scry.Node) (edges : List Scry.Edge)
+    (rels : List Scry.Relation) : Except String Scry.Facts :=
+  match Nat.beq version 1 with
+  | .false => .error ("unsupported version " ++ Nat.repr version ++ " (this loader reads 1)")
+  | .true => match String.eq format "scry-facts" with
+    | .false => .error ("format \"" ++ format ++ "\" is not \"scry-facts\"")
+    | .true => Except.bind (Scry.checkFiles 0 files) (fun _ =>
+      Except.bind (Scry.checkNodes (List.length nodes) 0 nodes) (fun _ =>
+      Except.bind (Scry.checkEdges (List.length nodes) 0 edges) (fun _ =>
+      Except.bind (Scry.checkRelations (List.length nodes) 0 rels) (fun _ =>
+      .ok (Scry.Facts.mk format version language files nodes edges rels
+        (Scry.adjOf (List.length nodes) edges .true)
+        (Scry.adjOf (List.length nodes) edges .false))))))
+
+/-- Load a fact store from a JSON value. -/
+def Scry.Facts.ofJson (j : Json) : Except String Scry.Facts :=
+  Except.bind (Scry.reqStr j "format") (fun format =>
+  Except.bind (Scry.reqNat j "version") (fun version =>
+  Except.bind (Scry.decodeAll Scry.decodeFile (Scry.optArr j "files")) (fun files =>
+  Except.bind (Scry.reqArr j "nodes") (fun nodeJs =>
+  Except.bind (Scry.decodeAll Scry.decodeNode nodeJs) (fun nodes =>
+  Except.bind (Scry.reqArr j "edges") (fun edgeJs =>
+  Except.bind (Scry.decodeAll Scry.decodeEdge edgeJs) (fun edges =>
+  Except.bind (Scry.decodeAll Scry.decodeRelation (Scry.optArr j "relations")) (fun rels =>
+  Scry.finishFacts format version (Scry.strD j "language" "unknown") files nodes edges rels))))))))
+
+/-- Load a fact store from JSON text. -/
+def Scry.Facts.ofText (text : String) : Except String Scry.Facts :=
+  match Json.parse text with
+  | .error e => .error ("invalid JSON: " ++ e)
+  | .ok j => Scry.Facts.ofJson j
+
+-- ## Printing
+
+/-- Counts as `title:` and one indented `key count` line each. -/
+def Scry.renderCounts (title : String) (cs : List Scry.Count) : String :=
+  title ++ ":\n" ++ List.foldr (fun c acc => "  " ++ c.key ++ " " ++ Nat.repr c.count ++ "\n" ++ acc) "" cs
+
+/-- The stats block `scry facts` and `scry parse --stats` print. Everything is a count:
+the skeleton makes no timing claims (AGENTS.md). -/
+def Scry.renderStats (s : Scry.Stats) : String :=
+  "files: " ++ Nat.repr s.files ++ "\n"
+  ++ "nodes: " ++ Nat.repr s.nodes ++ "\n"
+  ++ "edges: " ++ Nat.repr s.edges ++ "\n"
+  ++ "relations: " ++ Nat.repr s.relations ++ "\n"
+  ++ "tuples: " ++ Nat.repr s.tuples ++ "\n"
+  ++ "roots: " ++ Nat.repr s.roots ++ "\n"
+  ++ "max depth: " ++ Nat.repr s.maxDepth ++ "\n"
+  ++ "errors: " ++ Nat.repr s.errors ++ "\n"
+  ++ Scry.renderCounts "kinds" s.kinds
+  ++ Scry.renderCounts "edge labels" s.edgeLabels
+
+/-- The `scry facts` report: the store's identity, its stats, and the CSR row counts. -/
+def Scry.renderFacts (f : Scry.Facts) : String :=
+  "format: " ++ f.format ++ " v" ++ Nat.repr f.version ++ "\n"
+  ++ "language: " ++ f.language ++ "\n"
+  ++ Scry.renderStats (Scry.statsOf f)
+  ++ "csr out: " ++ Nat.repr (List.length f.out.offsets) ++ " offsets, "
+  ++ Nat.repr (List.length f.out.targets) ++ " arcs\n"
+  ++ "csr in: " ++ Nat.repr (List.length f.incoming.offsets) ++ " offsets, "
+  ++ Nat.repr (List.length f.incoming.targets) ++ " arcs"

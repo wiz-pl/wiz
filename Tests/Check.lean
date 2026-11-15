@@ -9,9 +9,17 @@ open Wiz Raw ZeroOneMany
 
 namespace Tests.Check
 
+/-- `addDecl` after the elaborator's sorts pass (mandatory sorts): `Raw` terms are built
+with holes for the `Π`/`Σ` sorts, which the pass fills (`Decl.withSorts`). -/
+def addDeclS {R : Type} [QRig R] [DecidableEq R] [ToString R] [QuantitySyntax R] (g : Globals R) (d : Decl R) : TCM (Globals R) :=
+  addDecl g (Decl.withSorts g d)
+
+def addDeclsS {R : Type} [QRig R] [DecidableEq R] [ToString R] [QuantitySyntax R] (g : Globals R) (ds : List (Decl R)) : TCM (Globals R) :=
+  ds.foldlM addDeclS g
+
 /-- Expect a list of declarations to check. -/
 def accepts {R : Type} [QRig R] [DecidableEq R] [ToString R] [QuantitySyntax R] (ds : List (Decl R)) : IO Unit :=
-  match addDecls {} ds with
+  match addDeclsS {} ds with
   | .ok _ => pure ()
   | .error e => throw (IO.userError s!"rejected: {e}")
 
@@ -19,10 +27,10 @@ def accepts {R : Type} [QRig R] [DecidableEq R] [ToString R] [QuantitySyntax R] 
 All earlier declarations must check. -/
 def rejects {R : Type} [QRig R] [DecidableEq R] [ToString R] [QuantitySyntax R]
     (ds : List (Decl R)) (p : TypeError → Bool) (what : String) : IO Unit := do
-  let g ← match addDecls {} ds.dropLast with
+  let g ← match addDeclsS {} ds.dropLast with
     | .ok g => pure g
     | .error e => throw (IO.userError s!"setup declaration rejected: {e}")
-  match addDecl g ds.getLast! with
+  match addDeclS g ds.getLast! with
   | .ok _ => throw (IO.userError s!"accepted, but expected {what}")
   | .error e => unless p e do throw (IO.userError s!"expected {what}, got: {e}")
 
@@ -80,7 +88,7 @@ def mlttGroup : Group where
           | .other m => (m.splitOn "out of scope").length > 1
           | _ => false
         let d (ty : Term Unit) (v : Option (Term Unit)) : Decl Unit := { name := "d", type := ty, value := v }
-        let fnTy : Term Unit := Term.pi "x" .default (.qlit ()) (.sort 1) (.sort 0) none
+        let fnTy : Term Unit := Term.pi "x" .default (.qlit ()) (.sort 1) (.sort 0) ⟨2, 1⟩
         rejects [d (.sort 0) (some (.var 0))] outOfScope "an out-of-scope variable"
         rejects [d fnTy (some (.lam "x" (.var 3)))] outOfScope "an out-of-scope variable"
         rejects [d (.var 2) none] outOfScope "an out-of-scope variable" },
@@ -121,13 +129,13 @@ an eliminator, which runs once per node, may not use a runtime variable. Here `c
 step uses `y`: `bad` declares `y` linear (rejected: each `out` reruns the step), `good`
 declares it erased and the step only passes it to an erased argument. -/
 def natRigCoit (q : Nat) (name : Name) : List (Decl Nat) :=
-  let pi (x : Name) (q : Nat) (a b : Term Nat) : Term Nat := .pi x .default (.qlit q) a b none
+  let pi (x : Name) (q : Nat) (a b : Term Nat) : Term Nat := .pi x .default (.qlit q) a b .hole
   let U : Term Nat := .unit 1
   let D : Term Nat := .dret .tt
   -- a global state family: `fun _ => Unit` would drop its linear argument
   let S : Term Nat := .const s!"{name}S" []
   -- ⟦ret tt⟧ S i = (0 _ : tt = i) × Unit
-  let stepTy := pi "i" 1 U (pi "s" 1 (.app S (.var 0)) (pi "y" q U (.sigma "_" (.qlit 0) (.eq U .tt (.var 2)) (.unit 1) none)))
+  let stepTy := pi "i" 1 U (pi "s" 1 (.app S (.var 0)) (pi "y" q U (.sigma "_" (.qlit 0) (.eq U .tt (.var 2)) (.unit 1) .hole)))
   [{ name := s!"{name}S", type := pi "i" 1 U (.sort 1), value := none },
    { name := s!"{name}S0", type := .app S .tt, value := none },
    { name := s!"{name}Step", type := stepTy, value := none },
@@ -234,7 +242,7 @@ def elimsAccepted (l : Nat) : IO Unit :=
 would make the evaluator panic or loop, or instantiate a constant at the wrong number of
 levels, are rejected (both formers); well-typed hints are accepted. -/
 def hintCase : IO Unit := do
-  let pi (a b : Term Q) : Term Q := .pi "x" .default (.qlit .many) a b none
+  let pi (a b : Term Q) : Term Q := .pi "x" .default (.qlit .many) a b ⟨1, 2⟩  -- (`Unit → Type`)
   let g ← match addDecls (R := Q) {} [{ name := "T", type := pi (.unit 1) (.sort 1), value := none },
       { name := "P", levelParams := ["u"], type := pi (.unit 1) (.sort 1), value := none }] with
     | .ok g => pure g
@@ -259,11 +267,78 @@ def hintCase : IO Unit := do
       if let .error e := infer (R := Q) { globals := g } (ty former h) then
         throw (IO.userError s!"a well-typed hint was rejected: {e}")
 
+/-- `t` with every occurrence of the closed subterm `target` replaced by `c`. -/
+partial def replaceClosed (target c : Term Q) (t : Term Q) : Term Q :=
+  if t == target then c else Id.run (t.mapChildrenM pure fun _ x => pure (replaceClosed target c x))
+
+/-- (Mandatory sorts; review F3) The description templates (`Templates.lean`) carry
+hand-written component sorts, which the kernel trusts when it evaluates them: kernel-check
+each template term against its type, at closed levels and at level parameters, so that a
+wrong leaf is caught mechanically (the kernel checks every written sort of a term). -/
+def templatesCheck : IO Unit := do
+  let ω : Term Q := .qlit .many
+  let v (i : Nat) : Term Q := .var i
+  let pi (a b : Term Q) : Term Q := .pi "x" .default ω a b .hole
+  let apps (f : Term Q) (as : List (Term Q)) : Term Q := as.foldl .app f
+  for (l, w, ps) in [(Level.ofNat 0, Level.ofNat 0, []), (Level.ofNat 0, Level.ofNat 1, []), (Level.ofNat 1, Level.ofNat 2, []),
+                     (Level.ofNat 2, Level.ofNat 0, []), (Level.param "u", Level.param "v", ["u", "v"])] do
+    let l1 : Level := .succ l
+    -- (the templates applied inside the types are constants declared first: the sorts pass
+    -- types the `Π`s it fills, and a bare template is an unannotated `λ`)
+    let us : List Level := ps.map .param
+    let interp (I D X i : Term Q) : Term Q := apps (.const "interpTm" us) [I, D, X, i]
+    -- I : Sort (l+1), D : Desc I, X : I → Sort (l+1)
+    let pre (rest : Term Q) : Term Q := pi (.sort l1) (pi (.desc l (v 0)) (pi (pi (v 1) (.sort l1)) rest))
+    let interpTy := pre (pi (v 2) (.sort l1))
+    -- P : (i : I) → X i → Sort w (ctx X0 D1 I2)
+    let Pty : Term Q := pi (v 2) (pi (.app (v 1) (v 0)) (.sort w))
+    let allTy := pre (pi Pty (pi (v 3) (pi (interp (v 4) (v 3) (v 2) (v 0)) (.sort (.max l1 w)))))
+    -- f : (i : I) → (x : X i) → P i x (ctx P0 X1 D2 I3)
+    let fTy : Term Q := pi (v 3) (pi (.app (v 2) (v 0)) (apps (v 2) [v 1, v 0]))
+    let hypsTy := pre (pi Pty (pi fTy (pi (v 4) (pi (interp (v 5) (v 4) (v 3) (v 0))
+      (apps (.const "allTm" us) [v 6, v 5, v 4, v 3, v 1, v 0])))))
+    -- Y : I → Sort (l+1) (ctx X0 D1 I2); f : (i : I) → X i → Y i (ctx Y0 X1 D2 I3)
+    let mapTy := pre (pi (pi (v 2) (.sort l1)) (pi (pi (v 3) (pi (.app (v 2) (v 0)) (.app (v 2) (v 1))))
+      (pi (v 4) (pi (interp (v 5) (v 4) (v 3) (v 0)) (interp (v 6) (v 5) (v 3) (v 1))))))
+    let mut g : Globals Q := {}
+    -- (a template applies the ones before it as closed `λ`s, which the kernel can't infer
+    -- a type for: they are replaced by the constants just checked)
+    let byName (t : Term Q) : Term Q :=
+      replaceClosed (Templates.interpTm l) (.const "interpTm" us) (replaceClosed (Templates.allTm l w) (.const "allTm" us) t)
+    let allBody := replaceClosed (Templates.interpTm l) (.const "interpTm" us) (Templates.allTm l w)
+    for (n, ty, t) in [("interpTm", interpTy, Templates.interpTm l), ("allTm", allTy, allBody),
+                       ("hypsTm", hypsTy, byName (Templates.hypsTm l w)), ("mapTm", mapTy, byName (Templates.mapTm l))] do
+      -- (checked in an erased position: a template's quantities are variables, `q`, so its
+      -- projections are of pairs at quantity `q`; then inserted, for the next)
+      let d := Decl.withSorts g { name := n, levelParams := ps, type := ty, value := some t }
+      let ctx : Ctx Q := { globals := g, erased := true }
+      let r : TCM Unit := do
+        let _ ← Wiz.checkType ctx d.type
+        -- (with the proof markers the kernel requires at `v = 0`: the pass adds them)
+        let _ ← Wiz.check ctx ((d.withMarks g).value.getD .tt) (ctx.eval d.type)
+      if let .error e := r then throw (IO.userError s!"{n} at l = {l}, v = {w}: {e}")
+      -- (inserted unchecked, with its value: it was just checked, erased)
+      g := g.insert d
+
 def structGroup : Group where
   name := "check: structural types"
   parallel := true
   exercise := "Exercise 4.7"
   cases := [
+    { name := "mandatory sorts: every description template is a well-typed term of its type, its written sorts included", run := fun _ => templatesCheck },
+    -- (`Globals.sortHolesOk` is for elaboration-time checks only: the declaration check
+    -- rejects a hole whatever the flag says, `checkHeader`)
+    { name := "mandatory sorts: a declaration with a sort hole is rejected, even with sortHolesOk set", run := fun _ => do
+        let holed : Term Q := .pi "x" .default (.qlit .many) (.unit 1) (.unit 1) .hole
+        for flag in [false, true] do
+          let g : Globals Q := { sortHolesOk := flag }
+          for d in [({ name := "a", type := holed, value := none } : Decl Q),
+                    { name := "b", type := .sort 1, value := some holed },
+                    { name := "c", type := .unit 1, value := some .tt, impl := some (.letE "T" (.qlit .zero) (.sort 1) holed .tt) }] do
+            match addDecl g d with
+            | .ok _ => throw (IO.userError s!"{d.name} (sortHolesOk := {flag}): accepted with a hole")
+            | .error e => unless ((toString e).splitOn "without its sort").length > 1 do
+                throw (IO.userError s!"{d.name}: {e}") },
     { name := "the hint of μ/ν is checked before it is evaluated (a panicking or a looping hint is rejected)", run := fun _ => hintCase },
     { name := "transp at a proposition is rejected, at a type accepted (as eq and refl)", run := fun _ => do
         let P : Term Q := .lam "b" (.lam "e" (.unit 0))

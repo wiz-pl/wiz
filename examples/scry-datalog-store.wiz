@@ -1,0 +1,26 @@
+import Scry.Store
+-- The relation store's pure list model (`scry-datalog-store`): tuple relations dedup
+-- and grow by relation number, lattice relations keep one value per key, and a lattice
+-- key that was never set reads as the caller's bottom. `main` is the digest.
+
+def u (n : Nat) : U64 := U64.ofNat n
+
+def main : Nat :=
+  let r0 := Scry.TupleRel.insert Scry.TupleRel.empty [u 1, u 2];
+  let r1 := Scry.TupleRel.insert r0.1 [u 1, u 2];
+  let r2 := Scry.TupleRel.insert r1.1 [u 3, u 4];
+  let r3 := Scry.TupleRel.insert r2.1 [u 1, u 3];
+  let db0 := Scry.Db.insertTuple Scry.Db.empty 5 [u 7];
+  let db1 := Scry.Db.setLat db0.1 2 [u 9] 42;
+  let db2 := Scry.Db.setLat db1 2 [u 9] 7;
+  let seen := if Scry.Db.memTuple db2 5 [u 7] then 100 else 0;
+  let hidden := if Scry.Db.memTuple db2 5 [u 8] then 1000 else 0;
+  let v := match Scry.Db.findLat db2 2 [u 9] with
+    | .none => 999
+    | .some x => x;
+  let absent := match Scry.Db.findLat db2 2 [u 10] with
+    | .none => 10000
+    | .some _ => 0;
+  (if r1.2 then 1000000 else 0) + (if r2.2 then 100000 else 0) +
+    (if r3.2 then 10000 else 0) + Scry.TupleRel.size r3.1 * 1000 +
+    seen + hidden + v * 10 + absent

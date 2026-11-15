@@ -65,10 +65,13 @@ partial def zonk (l : Lvl) (t : Term R) : ElabM R (Term R) := do
     return args.foldl .app h
   | _ =>
     let h' ← h.mapChildrenM instLevel (fun k c => zonk (l + k) c)
-    -- a `Π`/`Σ`'s sort that stays unknown is dropped (type equality then waits)
+    -- a `Π`/`Σ`'s (or a `ULift`'s) sort that stays unknown becomes a hole, which the sorts
+    -- pass fills before the kernel (`Decl.withSorts`)
+    let unknown (k : Level) : Level := if k.hasMVar then .hole else k
     let h' := match h' with
-      | .pi x bi q a b (some s) => if s.hasMVar then .pi x bi q a b none else h'
-      | .sigma x q a b (some s) => if s.hasMVar then .sigma x q a b none else h'
+      | .pi x bi q a b σ => .pi x bi q a b ⟨unknown σ.dom, unknown σ.cod⟩
+      | .sigma x q a b σ => .sigma x q a b ⟨unknown σ.dom, unknown σ.cod⟩
+      | .ulift k l a => .ulift (unknown k) l a
       | _ => h'
     return (← args.mapM (zonk l)).foldl .app h'
 where

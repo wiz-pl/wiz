@@ -246,6 +246,9 @@ structure Ctx (R : Type) where
   is not `0`), or the body of such a `fun`: it is exempt from the marker's requirement.
   Reset below it. -/
   marked : Bool := false
+  /-- (the elaborator's sorts pass, `Wiz/Elab/Mark.lean`; not read by the kernel) fill
+  the holes in the `Π`/`Σ`/`ULift` sorts only, placing no proof markers -/
+  sortsOnly : Bool := false
 
 namespace Ctx
 
@@ -317,12 +320,17 @@ def popUsage (x : Name) (q : QPoly R) : Usage R → TCM (Usage R)
   --| | u => sorry
   --sol>
 
-/-- A `Π`/`Σ`'s sort, when it gives one, must be its sort: type equality trusts it to
-tell propositions from other types. -/
-def checkSortNote (s : Option Level) (l : Level) : TCM Unit := do
-  if let some s := s then
-    unless s.equiv l do
-      throw (.other s!"internal error: a type marked as in sort {s} is in sort {l}")
+/-- (Mandatory sorts) A component sort written on a `Π`/`Σ` (or a `ULift`'s content's sort)
+must be the sort the component is in: `inferred` is what `checkType` found for it. Type
+equality and `cast` trust it to tell propositions from other types, and the cast rules
+compare it (D2). Structural: each component on its own, never a combination. A hole (a
+sort the elaborator's sorts pass did not fill) is rejected. -/
+def checkComponentSort (what : String) (written inferred : Level) (holesOk : Bool := false) : TCM Unit := do
+  if written.hasHole then
+    if holesOk then return
+    throw (.other s!"internal error: a {what} without its sort (the sorts pass did not fill it)")
+  unless written == inferred || written.equiv inferred do
+    throw (.other s!"internal error: a {what} marked as in Sort {written} is in Sort {inferred}")
 
 /-- The usage of an eliminator's methods (`ind`, `Desc.elim`, `sfix`, `scofix`, `coit`),
 which run once per node: any number of times. Also the usage of what these eliminators
@@ -430,8 +438,9 @@ def Ctx.sortOf? (ctx : Ctx R) (ty : VTy R) : Option Level :=
   | .qty | .enum _ | .size | .sizeLt _ => some 1
   | .desc l _ => some (.succ (.succ l))
   | .mu l .. | .nu l .. => some (.succ l)
-  | .unit l | .empty l | .ulift l _ => some l
-  | .pi _ _ _ _ _ (some s) | .sigma _ _ _ _ (some s) => some s
+  | .unit l | .empty l | .ulift _ l _ => some l
+  | .pi _ _ _ _ _ σ => if σ.hasHole then typeSort? ctx.globals ctx.tys ty else some σ.piSort
+  | .sigma _ _ _ _ σ => if σ.hasHole then typeSort? ctx.globals ctx.tys ty else some σ.sigmaSort
   | ty => typeSort? ctx.globals ctx.tys ty
 
 /-- The sort of a type the checker is working at. It is computable for a well-typed type;
@@ -551,7 +560,7 @@ partial def checkCore (ctx : Ctx R) (t : Term R) (ty : VTy R) : TCM (Usage R) :=
   -- evaluator suspends the term, and conversion takes any two suspended proofs as equal
   | .prf l t, _ => do check (← ctx.underMarker l ty) t ty
   -- (given) Q4
-  | .up a, .ulift _ A => check ctx a A
+  | .up a, .ulift _ _ A => check ctx a A
   --<sol
   | .lam x body, .pi _ _ q dom cod _ => do
     let q ← qtyPoly ctx q
@@ -588,7 +597,7 @@ partial def checkCore (ctx : Ctx R) (t : Term R) (ty : VTy R) : TCM (Usage R) :=
     -- from (Q4: universes aren't cumulative; the elaborator lifts smaller fields)
     unless lS.equiv (.succ l) do
       throw (.other s!"a description's field type must be in Sort {(Level.succ l).format}, not Sort {lS.format} (lift it with ULift)")
-    check ctx D (.pi "s" .default (.qlit QuantitySyntax.explicitDefault) (ctx.eval S) (.mk [I] (.desc l (.var 1))) none)
+    check ctx D (.pi "s" .default (.qlit QuantitySyntax.explicitDefault) (ctx.eval S) (.mk [I] (.desc l (.var 1))) ⟨.succ l, .succ (.succ l)⟩)
   | .drec q j D, .desc l I => do
     let _ ← checkQty ctx q
     let uj ← check ctx j I
@@ -600,7 +609,7 @@ partial def checkCore (ctx : Ctx R) (t : Term R) (ty : VTy R) : TCM (Usage R) :=
     let lH ← checkType ctx H
     unless lH.equiv (.succ l) do
       throw (.other s!"a description's branching type must be in Sort {(Level.succ l).format}, not Sort {lH.format} (lift it with ULift)")
-    let uj ← check ctx j (.pi "h" .default (.qlit QuantitySyntax.explicitDefault) (ctx.eval H) (.mk [I] (.var 1)) none)
+    let uj ← check ctx j (.pi "h" .default (.qlit QuantitySyntax.explicitDefault) (ctx.eval H) (.mk [I] (.var 1)) ⟨.succ l, .succ l⟩)
     let uD ← check ctx D (.desc l I)
     pure (uj + uD)
   | .con x, .mu l I D i s _ => do
@@ -668,8 +677,9 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
     | none => throw (.other "numerals need `builtin nat := …`")
   | .natOp .. => throw (.cannotInfer (ctx.showTerm t))
   -- (given) Q4: lifting
-  | .ulift l A => do
+  | .ulift k' l A => do
     let k ← checkType ctx A
+    checkComponentSort "lifted type (ULift)" k' k ctx.globals.sortHolesOk
     unless Level.le k l do
       throw (.other s!"ULift.{l.format} can't lift {ctx.showTerm A}, which is in Sort {k.format}")
     pure (.sort l, Usage.zeros ctx.lvl)
@@ -677,7 +687,7 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
   | .down x => do
     let (ty, u) ← infer ctx x
     match whnf ty with
-    | .ulift _ A => pure (A, u)
+    | .ulift _ _ A => pure (A, u)
     | _ => throw (.typeMismatch "a lifted type (ULift)" (ctx.showVal ty))
   --<sol
   -- (an index beyond the context is an error: `[ix]!` would panic and go on with the
@@ -692,16 +702,17 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
       pure (Wiz.eval ctx.globals [] (d.type.instLevels d.levelParams us), Usage.zeros ctx.lvl)
     | none => throw (.unboundGlobal n)
   | .sort l => pure (.sort (.succ l), Usage.zeros ctx.lvl)
-  | .pi x _ q dom cod s => do
+  | .pi x _ q dom cod σ => do
     let q ← checkQty ctx q
     let i ← checkType ctx dom
+    checkComponentSort "Π's domain" σ.dom i ctx.globals.sortHolesOk
     let j ← checkType (ctx.bind x q (ctx.eval dom)) cod
+    checkComponentSort "Π's codomain" σ.cod j ctx.globals.sortHolesOk
     -- (D1 experiment, off by default) predicative `Prop`: no quantifying over a universe
     -- into `Prop`
     if ctx.globals.predicativeProp && j.equiv 0 && largeDomain ctx (ctx.eval dom) ctx.lvl then
       throw (.other s!"impredicative Π (into Prop over {ctx.showTerm dom}) under predicative Prop")
-    checkSortNote s (.imax i j)
-    pure (.sort (.imax i j), Usage.zeros ctx.lvl)
+    pure (.sort (if σ.hasHole then .imax i j else σ.piSort), Usage.zeros ctx.lvl)
   --|ex
   --| | .var ix => sorry
   --| | .const n us => sorry
@@ -744,12 +755,13 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
     let vty := ctx.eval tty
     let u ← check ctx tm vty
     pure (vty, u)
-  | .sigma x q a b s => do
+  | .sigma x q a b σ => do
     let q ← checkQty ctx q
     let i ← checkType ctx a
+    checkComponentSort "Σ's first component" σ.dom i ctx.globals.sortHolesOk
     let j ← checkType (ctx.bind x q (ctx.eval a)) b
-    checkSortNote s (.max i j)
-    pure (.sort (.max i j), Usage.zeros ctx.lvl)
+    checkComponentSort "Σ's second component" σ.cod j ctx.globals.sortHolesOk
+    pure (.sort (if σ.hasHole then .max i j else σ.sigmaSort), Usage.zeros ctx.lvl)
   | .fst t => do
     let (ty, u) ← infer ctx t
     match whnf ty with
@@ -853,7 +865,7 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
     let va := ctx.evalAt a vA
     -- (b :0 A) → (_ :0 a = b) → Prop, with env [a, A]
     let motiveTy : Val R := .pi "b" .default (.qlit 0) vA
-      (.mk [va, vA] (.pi "_" .default (.qlit 0) (.eq (.var 2) (.var 1) (.var 0)) (.sort 0) none)) none
+      (.mk [va, vA] (.pi "_" .default (.qlit 0) (.eq (.var 2) (.var 1) (.var 0)) (.sort 0) ⟨0, 1⟩)) ⟨l, .imax 0 1⟩
     let _ ← check ctx P motiveTy
     let vP := ctx.eval P
     let g := ctx.globals
@@ -899,7 +911,7 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
     let w := QuantitySyntax.explicitDefault
     let _ ← check ctx P (delimMotiveTy l v I w)
     let vP := ctx.eval P
-    let (ta, tb, tc, th) := delimMethodTys ctx.globals l I vP w
+    let (ta, tb, tc, th) := delimMethodTys ctx.globals l v I vP w
     let ua ← check ctx a ta
     let ub ← check ctx b tb
     let uc ← check ctx c tc
@@ -941,7 +953,7 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
     let w := QuantitySyntax.explicitDefault
     let _ ← check ctx P (indMotiveTy ctx.globals l v vI vD w)
     let vP := ctx.eval P
-    let uf ← check ctx f (sfixFunTy ctx.globals l vI vD vP w)
+    let uf ← check ctx f (sfixFunTy ctx.globals l v vI vD vP w)
     let _ ← check { ctx with erased := true } s .size
     let _ ← check ctx i vI
     let ux ← check ctx x (.mu l vI vD (ctx.eval i) (ctx.eval s) none)
@@ -972,7 +984,7 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
     let vP := ctx.eval P
     let _ ← check { ctx with erased := true } s .size
     let vs := ctx.eval s
-    let um ← check ctx m (scaseMethodTy ctx.globals l vI vD vP vs (ctx.eval q))
+    let um ← check ctx m (scaseMethodTy ctx.globals l v vI vD vP vs (ctx.eval q))
     let _ ← check ctx i vI
     let ux ← check (ctx.erasedAt qp) x (.mu l vI vD (ctx.eval i) vs none)
     pure (vApp ctx.globals (vApp ctx.globals vP (ctx.eval i)) (ctx.eval x), um + qp • ux)
@@ -1100,12 +1112,15 @@ end
 predicativity of its outer `Π`s: a theorem quantifying over types is fine in a predicative
 `Prop` too (in a bigger `Prop` or in `Type`; the theorem itself is never used as a proof
 of a proposition at level 0). -/
-partial def declTypeSpine (ctx : Ctx R) : Term R → TCM Unit
-  | .pi x _ q dom cod _ => do
+partial def declTypeSpine (ctx : Ctx R) : Term R → TCM Level
+  | .pi x _ q dom cod σ => do
     let q ← checkQty ctx q
-    let _ ← checkType ctx dom
-    declTypeSpine (ctx.bind x q (ctx.eval dom)) cod
-  | t => do let _ ← checkType ctx t
+    let i ← checkType ctx dom
+    checkComponentSort "Π's domain" σ.dom i ctx.globals.sortHolesOk
+    let j ← declTypeSpine (ctx.bind x q (ctx.eval dom)) cod
+    checkComponentSort "Π's codomain" σ.cod j ctx.globals.sortHolesOk
+    pure (if σ.hasHole then .imax i j else σ.piSort)
+  | t => checkType ctx t
 
 /-- The checks every declaration's header gets: a new name, its level parameters, and
 its type is a type. -/
@@ -1115,6 +1130,13 @@ def checkHeader (g : Globals R) (d : Decl R) : TCM Unit := do
   -- same stuck constant
   if g.budget.isSome then throw (.other "internal error: the kernel was called inside a proof's read-back (a step budget is set)")
   if g.contains d.name then throw (.duplicateDecl d.name)
+  -- (mandatory sorts) **no hole reaches the kernel**: every `Π`/`Σ`/`ULift` of a checked
+  -- declaration has its sorts. Formation rejects a hole too, at every `Π`/`Σ`/`ULift` it
+  -- checks; this says it once for the whole declaration (its implementation and witness
+  -- included), so that `sameSort`'s tolerance of holes (for the elaborator) is never used
+  -- on a term the kernel accepted
+  if d.type.hasHole || d.value.any (·.hasHole) || d.impl.any (·.hasHole) || d.witness.any (·.hasHole) then
+    throw (.other s!"internal error: a Π/Σ/ULift in {d.name} without its sorts (the sorts pass did not fill it)")
   unless d.levelParams.eraseDups.length == d.levelParams.length do
     throw (.other s!"duplicate universe level parameter in {d.name}")
   let used := d.type.levelParamsUsed ++ (d.value.map Term.levelParamsUsed).getD [] ++
@@ -1122,7 +1144,7 @@ def checkHeader (g : Globals R) (d : Decl R) : TCM Unit := do
   if let some u := used.find? (!d.levelParams.contains ·) then
     throw (.other s!"unknown universe level parameter {u} in {d.name}")
   let ctx : Ctx R := { globals := g }
-  if g.predicativeProp then declTypeSpine ctx d.type
+  if g.predicativeProp then discard <| declTypeSpine ctx d.type
   else discard <| checkType ctx d.type
 
 /-- A definition's **implementation for the compiler** (`Decl.impl`): the term compiled
@@ -1361,7 +1383,7 @@ partial def checkImplAgrees (g : Globals R) (d : Decl R) (value impl : Term R) :
   let .darg _ S Fd := whnf D | fail "the description does not start with a tag"
   let (ls, lifted) ← match whnf S with
     | .enum ls => pure (ls, false)
-    | .ulift _ A => match whnf A with
+    | .ulift _ _ A => match whnf A with
       | .enum ls => pure (ls, true)
       | _ => fail "the description does not start with a tag"
     | _ => fail "the description does not start with a tag"

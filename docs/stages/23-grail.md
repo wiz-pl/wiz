@@ -98,8 +98,9 @@ compiles. Its compiler fields are its `id`, which enters grail's keys.
 ## 23e: the self-hosted toolchain as targets
 
 `Package.selfhost NAME ROLE` builds the self-hosted programs from `selfhost/*.wiz`
-(`Wiz/Selfhost.lean` generates their sources, parser tables included, for grail and the
-tests alike): `checker`, `compiler`, and `bootstrap`, the fixpoint check of
+(`Wiz/Selfhost.lean` concatenates their sources — the parser tables are the checked-in
+`selfhost/Tables.wiz` — for grail and the tests alike): `checker`, `compiler`, and
+`bootstrap`, the fixpoint check of
 `scripts/fixpoint.sh` as jobs (generate the source, build stage 1, `self1.c`, stage 2,
 `self2.c`, compare). `grail build bootstrap` runs it (minutes); run again, it runs
 nothing unless a source, `rt.c`, the toolchain or grail changed. `grail build` alone
@@ -133,6 +134,14 @@ hangs fails instead of hanging the run). A failed job is reported and the jobs t
 on it are skipped; the others still run. Each job's output is buffered and printed in the
 graph's order, so `-j 1` and `-j 8` print the same report, and a second build still runs
 no jobs.
+
+`--region-cache` (11c) is part of the toolchain record (`Toolchain.regionCache`, or the
+`region-cache` setting of `grail.wiz`), so `grail config` shows it and every job gets it
+through `Toolchain.toFlags`. A job then serves its imported modules' cached effects from
+the `.wizr` regions in the same cache layers as the `.wizc` entries: the write cache is
+searched first, then the `--cache-ro` caches (which are never written), and a missing,
+truncated or mistagged region falls back to the text entries. Since job keys are unchanged,
+a warm region build and a text build produce the same outputs.
 
 ## 23h: git dependencies and a lock file
 
@@ -305,3 +314,35 @@ workspace root.
 The server reads the package's modules when it starts, as before: an edit to a module
 is seen by the files that import it after a restart (`:WizLspRestart`), and so is an
 edit to `grail.wiz`.
+
+## 23o: `grail new`
+
+`grail new NAME [--dir DIR]` writes the smallest package that builds, runs and tests:
+
+```
+grail.wiz        Package.new "NAME"
+                   |> Package.lib "NAME-lib" "src"
+                   |> Package.exe "NAME" "src/Main.wiz"
+                   |> Package.tests "tests" "tests"
+src/Main.wiz     import Std; def main : IO Unit := IO.println "hello from NAME"
+tests/hello.wiz  a `-- test: run` golden test, with hello.expected
+README.md        how to build, run and test it
+.gitignore       .grail/
+```
+
+It goes into `DIR` — `./NAME` by default, `DIR/NAME` with `-C DIR` — and an existing
+non-empty directory is refused, so `new` never overwrites work. The name must be a
+letter followed by letters, digits, `_` or `-` (at most 64 characters); it is the
+package's name, its targets' names and the greeting. Inside the new directory
+`grail build`, `grail run NAME` and `grail test` work as they do here; the second build
+runs nothing.
+
+`grail new` found a link-key bug: a link job's key did not include the name of the
+binary it makes, so a test whose program compiles to the same C as an `exe` (the
+generated test and `src/Main.wiz` print the same line) was "up to date" from the exe's
+link directory and the test ran a binary that was not there. The key now includes the
+output's name (and whether it is installed in `.grail/bin`), so two programs with the
+same object and link files no longer share a directory.
+
+Tests: `grail-commands`, "new: the generated package builds, runs and tests; a
+non-empty directory is refused" (also covers the refusal and the name check).

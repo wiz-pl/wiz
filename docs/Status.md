@@ -54,9 +54,11 @@ status and PR, and section 9 lists what open PRs will change here when they merg
   kernels suspend the proofs of `cast` and `transp`, a cast between propositions is
   stuck, and every other proof in an evaluated position must carry a **proof marker**
   that the kernel verifies and requires (CoreSpec §8.6a). That is the algorithm the
-  published decidability results are about ([PT23], [PLT25]). Open: a `Π`/`Σ` without a
-  sort annotation (U5), and the elaborator's own evaluation of terms it has not marked
-  yet (bounded where it reads proofs back, by a step budget; P2 below).
+  published decidability results are about ([PT23], [PLT25]). Open: the elaborator's own
+  evaluation of terms it has not marked yet (bounded where it reads proofs back, by a step
+  budget; P2 below). (U5, a `Π`/`Σ` without its sort, is closed by **mandatory sorts**:
+  every `Π`/`Σ` carries its two components' sorts and every `ULift` its content's, and the
+  kernel checks each, CoreSpec §2.)
 * **Four proofs of `False` in the kernel have been found and fixed** (propositions
   compared by shape; `∞ < ∞`; quantities that differ only by a variable, F6; a syntactic
   comparison that missed a variable, F7), each with regression tests. A failure of
@@ -827,9 +829,9 @@ does not do this (`Size` is not `canonical` in `Eval.lean:572`; the equation is 
     shortcut, `sameVal`, `lvlBound` and `freeVarsAt` are deleted from both kernels, and
     with them the D1 modes `nonprop` and `refl`. `--regularity full` is Cast-Refl at
     every type, in conversion only (an experiment).
-  * **Open.** `inertTy` reads a `Σ`'s optional sort annotation, so conversion with this
-    rule is not transitive at types that differ only in that annotation (not unsound;
-    it goes with mandatory sorts). Completeness of "strip when possible, else
+  * **Closed by mandatory sorts**: `inertTy` read a `Σ`'s optional sort annotation, so
+    conversion with this rule was not transitive at types that differed only in that
+    annotation. The sorts are now mandatory and conversion compares them. **Open.** Completeness of "strip when possible, else
     congruence" against [PLT25]'s backtracking algorithm is argued, not proved. The
     theorem behind the rule covers Π, ℕ, ⊥, `Prop`, ∃, not Wiz's data types
     (`wiz-notes/conv-regularity.md`).
@@ -882,13 +884,13 @@ does not do this (`Size` is not `canonical` in `Eval.lean:572`; the equation is 
     does not cover general inductive types, and so not Wiz's descriptions, `μ`/`ν`,
     sizes, quantities or `ULift`. Wiz's statement stays "the published algorithm,
     extended; unproved for the extension".
-  * **Open gap 1: sorts that are not written (U5).** The requirement asks for the sort of
-    a type. For a `Π`/`Σ` without an annotation it is computed from the parts; where that
-    fails the kernel rejects the term (it does not guess). The `Π`/`Σ` types the kernel's
-    own templates build carry no annotation, so type equality can be stuck on them where
-    an annotated convertible type computes. Options: mandatory sorts (the marking pass
-    already fills in every sort it can compute, and the templates need theirs written),
-    then relevance marks on binders (`prf-marker.md` §8).
+  * **Gap 1, sorts that are not written (U5): closed by mandatory sorts**
+    (`wiz-notes/mandatory-sorts.md`). Every `Π`/`Σ` carries its components' sorts
+    `⟨dom, cod⟩` (`BinderSorts`; `Kernel.wiz`: `pi q i j`, `sigma q i j`), the kernel's own
+    templates included, and each is checked against the inferred sort of its own
+    component; `ULift` carries its content's sort. The elaborator writes what it knows and
+    one total pass fills the rest (`Decl.withSorts`, inside proofs too); a hole that reaches
+    the kernel is rejected. Next: relevance marks on binders (`prf-marker.md` §8).
   * **U5b (found by the property harness, fixed).** `cast` at a `Π`/`Σ` whose sort is not
     known (no annotation, or a level with parameters) used to compute by the `Π`/`Σ` rule,
     projecting a proof `e` whose own type, the equation between the two types, is stuck
@@ -896,19 +898,17 @@ does not do this (`Size` is not `canonical` in `Eval.lean:572`; the equation is 
     instance `0` evaluation did not commute with instantiation. Now the cast is stuck
     exactly when the equation is, in both kernels (test "U5b: …"); `Kernel.wiz`'s payload
     types and the `hrec` field's `Π` carry their sorts so that casts on data compute as
-    before. No verdict in `lib/`, `examples/` or `selfhost/` changes.
-  * **D2 (found by the meta-review): open, needs mandatory sorts.** The `Π`, `Σ` and
-    `ULift` casts compute with no check on their components' sorts. So the kernel accepts
-    `λ e t. cast (Unit₁ → Type) (Unit₂ → Type) e t` and rejects its normal form ("cast
-    between different universes"): subject reduction fails. No verdict change is known.
-    Two gates were tried and failed:
-    * Gating on the sorts read off the heads is too weak. A type variable's sort is not
-      known there, and `lib/Vec`'s payload casts got stuck.
-    * Computing unless the sorts are known and different is unstable under substitution
-      (computes ⟶ stuck).
-
-    The fix needs the component sorts in the term (`wiz-notes/prf-marker.md` §8.1, item 6).
-    The pinned test "D2 (known gap, pinned): …" flips when it lands.
+    before. No verdict in `lib/`, `examples/` or `selfhost/` changes. With mandatory sorts
+    "not known" means only "depends on a level parameter".
+  * **D2 (found by the meta-review): closed by mandatory sorts.** The `Π`, `Σ` and `ULift`
+    casts computed with no check on their components' sorts, so the kernel accepted
+    `λ e t. cast (Unit₁ → Type) (Unit₂ → Type) e t` and rejected its normal form ("cast
+    between different universes"): subject reduction failed. The casts now compute only
+    when the two domains (contents) are in one sort and the two codomains are, read off the
+    sorts written in the terms: decided by the terms, and stable under level substitution
+    (`≡` holds at every instance). Otherwise they are stuck (meta-review decision 1:
+    stuck, as WizMeta's `Pi.cast`). The test "D2 (closed by mandatory sorts): …" checks
+    the four probes in both kernels.
   * **Open gap 2: the elaborator.** It evaluates terms it has not marked yet, and it
     evaluates a suspended proof when it reads a value back into a term (the kernel must
     be able to check that term again). The read-back runs within a **step budget**
@@ -1185,11 +1185,10 @@ invariant the kernel cannot see. Closed by stage 2 of the linear-case plan
 These are places where the kernel deliberately does **not** compute, so some true
 equations are not provable by computation. They are incompleteness, not unsoundness.
 
-* **Π/Σ without a sort annotation.** Type equality and `cast` need to know whether a type
-  is a proposition (§8.3). Without an annotation the equation stays stuck. The
-  elaborator annotates the Π/Σ it builds using the kernel's `typeSort?` (merged with PR #8), except "a Π/Σ under a `fun` whose variable's type isn't written
-  down, or one that still mentions a metavariable" ([stages/04-data.md](stages/04-data.md), 4c);
-  the kernel's own templates write none (U5, §4). Mandatory sorts (§9) remove the case.
+* **A Π/Σ whose component sort depends on a level parameter** that may be `0`: type
+  equality and `cast` need to know whether a type is a proposition (§8.3), and stay stuck.
+  (A Π/Σ without a sort annotation, which used to be stuck too, no longer exists:
+  mandatory sorts.)
 * **Neutral types**: `a =_X b` and `cast X Y e t` for a variable `X` are stuck.
 * **`μ ≡ μ`, `ν ≡ ν`** are stuck when the levels are not known equivalent or the sizes
   are not equal as conversion sees them (`∞` against `↑s`, two different size variables). Since 4g
@@ -1206,11 +1205,10 @@ equations are not provable by computation. They are incompleteness, not unsoundn
   *conversion* (InReg_conv, D1). A cast at a type that is not inert (a type variable, a
   type with a `Prop` field or a function) stays; `castRefl` proves that equation
   propositionally.
-* **The sort annotation decides between rules** (P1 inventory, U5). `propSort?` reads a
-  Π/Σ's optional annotation, so an unannotated type and a convertible annotated one are
-  treated differently by type equality and `cast` (stuck against computing). That is a
-  side condition which is not invariant under conversion. No bad consequence is known
-  (the stuck side proves nothing); it is listed in `wiz-notes/p1-stable.md`.
+* **The sorts decide between rules** (P1 inventory, U5). `propSort?` reads a Π/Σ's
+  component sorts. They are mandatory and conversion compares them, so convertible types
+  are treated alike (before, an unannotated type and a convertible annotated one were
+  treated differently; `wiz-notes/p1-stable.md`).
 * **Conversion is incomplete** where proof irrelevance meets computation (e.g. a `split`
   stuck on one proof and computing on another). Incompleteness only.
 
@@ -1350,7 +1348,7 @@ that checks everything. Wiz's situation:
   with regularity ([PLT25], Theorem 5.6, for Π, ℕ, ⊥, `Ω`, ∃) are proved for algorithms
   that never normalise proofs, so a Wiz version of those theorems could be about this
   kernel. What stands between: Wiz's data types are not in the fragment those theorems
-  cover (D1, P2), and sorts are not mandatory (U5). In [PT23]'s words (§6.1): "we never
+  cover (D1, P2). (Sorts are mandatory since the mandatory-sorts change, closing U5.) In [PT23]'s words (§6.1): "we never
   perform reduction in the proof-irrelevant layer".
   (`wiz-notes/p2-proofs.md`, `prf-marker.md`, `plt-vs-inert.md` §6.)
 

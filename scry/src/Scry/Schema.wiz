@@ -1,0 +1,284 @@
+import Text
+/-!
+# Scry.Schema: the fact-store schema
+
+The shape of a scry fact store (S1 skeleton; design:
+`wiz-notes/code-analysis-design.md` §4, `wiz-notes/scry-package.md`). A store is one
+JSON document: source files, CST nodes, edges and relations. The loader
+(`Scry.Facts.ofJson`) checks it and derives the CSR adjacency; `Scry.Facts.renderStats`
+prints it.
+
+* **Typed ids.** `Id k` is an index whose *kind* is part of its type (`Id .node`,
+  `Id .edge`, `Id .rel`; phantom parameters, docs/stages/22-numbers.md 22e): a node id
+  cannot be passed where an edge id is wanted, and nothing of the index reaches run time.
+* **Spans.** `Span.start` and `Span.stop` are byte offsets into the file (`stop` is
+  exclusive). The store is UTF-8; S1's tree-sitter shim keeps the same convention.
+* **Columns, not objects.** This Wiz model is the *checkable* view. S1's native store
+  (`native/ts_shim.c`) keeps the same columns in C (a struct of arrays) and exposes them as
+  `foreign_type`; the model here is what the loader tests against it.
+* **CSR adjacency.** `Adj` is compressed sparse row: node `i`'s outgoing arcs are
+  `targets[offsets[i] .. offsets[i+1]]`, with parallel `labels`. `Facts.out` and
+  `Facts.incoming` are built from the edge list, so a traversal never scans all edges.
+
+Kinds and field names are strings until S1 generates an `inductive C.Kind` from a
+grammar's `node-types.json` (schema codegen, design §4.2). Edges are labelled arcs
+(`child`, `next_sibling`, …) and relations are `u32` tuples over node ids (the EDB that
+the Datalog layer will consume, §4.5).
+-/
+
+/-- What an `Id` counts: a node, an edge, or a relation. Phantom: it is in the type only. -/
+inductive Scry.IdKind where
+  | node
+  | edge
+  | rel
+
+/-- An index of kind `k`. The kind is a phantom parameter (22e): `Id .node` and
+`Id .edge` are different types, and `n` is a plain number at run time. -/
+structure Scry.Id (k : Scry.IdKind) where
+  /-- The index in its column. -/
+  n : Nat
+
+/-- A node id: an index into `Facts.nodes`. -/
+def Scry.NodeId : Type := Scry.Id .node
+/-- An edge id: an index into `Facts.edges`. -/
+def Scry.EdgeId : Type := Scry.Id .edge
+/-- A relation id: an index into `Facts.relations`. -/
+def Scry.RelId : Type := Scry.Id .rel
+
+/-- A byte range in a source file: `[start, stop)`. -/
+structure Scry.Span where
+  /-- The first byte of the range (inclusive). -/
+  start : Nat
+  /-- One past the last byte of the range (exclusive). -/
+  stop : Nat
+
+/-- One CST node (a row of the store's node columns). `field` is tree-sitter's field
+name on the parent arc (`""` when the arc has none); `parent` is `none` for a root. -/
+structure Scry.Node where
+  /-- This node's id (its index in `Facts.nodes`, checked at load time). -/
+  id : Scry.NodeId
+  /-- The grammar's node kind (`call_expression`, `identifier`, …). -/
+  kind : String
+  /-- The field name on the parent arc, or `""`. -/
+  field : String
+  /-- The parent node, `none` for a root. -/
+  parent : Option Scry.NodeId
+  /-- Its byte range in the file. -/
+  span : Scry.Span
+  /-- tree-sitter's `is_named`. -/
+  named : Bool
+  /-- tree-sitter's `is_error` (`ERROR` nodes). -/
+  isError : Bool
+  /-- tree-sitter's `is_missing` (`MISSING` nodes). -/
+  missing : Bool
+
+/-- One edge of the CST (a row of the edge columns). -/
+structure Scry.Edge where
+  /-- This edge's id (its index in `Facts.edges`). -/
+  id : Scry.EdgeId
+  /-- The source node. -/
+  src : Scry.NodeId
+  /-- The target node. -/
+  dst : Scry.NodeId
+  /-- The arc's label (`child`, `next_sibling`, …). -/
+  label : String
+
+/-- A relation (an EDB table): `arity`-tuples of node ids, e.g. `cfg` or `call`. -/
+structure Scry.Relation where
+  /-- This relation's id (its index in `Facts.relations`). -/
+  id : Scry.RelId
+  /-- The relation's name. -/
+  name : String
+  /-- The number of columns of each tuple. -/
+  arity : Nat
+  /-- The tuples, each a list of `arity` node indices. -/
+  tuples : List (List Nat)
+
+/-- One source file of the store. -/
+structure Scry.SourceFile where
+  /-- The file's index in `Facts.files`. -/
+  id : Nat
+  /-- Its path, as given to the parser. -/
+  path : String
+  /-- Its size in bytes. -/
+  bytes : Nat
+
+/-- Compressed sparse row adjacency: node `i`'s arcs are
+`targets[offsets[i] … offsets[i+1]]` (with the same slice of `labels`). -/
+structure Scry.Adj where
+  /-- `n + 1` offsets; the last one is the number of arcs. -/
+  offsets : List Nat
+  /-- The target of each arc, grouped by source in edge order. -/
+  targets : List Scry.NodeId
+  /-- The label of each arc, parallel to `targets`. -/
+  labels : List String
+
+/-- A count of one string (`kinds`, `edgeLabels`). -/
+structure Scry.Count where
+  /-- The string counted. -/
+  key : String
+  /-- How often it occurs. -/
+  count : Nat
+
+/-- What `scry facts` and `scry parse --stats` print: the store's shape, with no
+timing claims. -/
+structure Scry.Stats where
+  /-- The number of source files. -/
+  files : Nat
+  /-- The number of nodes. -/
+  nodes : Nat
+  /-- The number of edges. -/
+  edges : Nat
+  /-- The number of relations. -/
+  relations : Nat
+  /-- The total number of relation tuples. -/
+  tuples : Nat
+  /-- Nodes without a parent. -/
+  roots : Nat
+  /-- The longest parent chain (0 for a single root). -/
+  maxDepth : Nat
+  /-- `ERROR` or `MISSING` nodes. -/
+  errors : Nat
+  /-- Node kinds and how often they occur, in first-appearance order. -/
+  kinds : List Scry.Count
+  /-- Edge labels and how often they occur, in first-appearance order. -/
+  edgeLabels : List Scry.Count
+
+/-- A loaded, validated fact store. `out` and `incoming` are derived from `edges`. -/
+structure Scry.Facts where
+  /-- The format tag (`"scry-facts"`). -/
+  format : String
+  /-- The schema version (1). -/
+  version : Nat
+  /-- The source language (`"c"` in the skeleton). -/
+  language : String
+  /-- The source files. -/
+  files : List Scry.SourceFile
+  /-- The CST nodes, by id. -/
+  nodes : List Scry.Node
+  /-- The edges, by id. -/
+  edges : List Scry.Edge
+  /-- The relations. -/
+  relations : List Scry.Relation
+  /-- Outgoing arcs, by source node. -/
+  out : Scry.Adj
+  /-- Incoming arcs, by target node. -/
+  incoming : Scry.Adj
+
+-- ## Small helpers
+
+/-- Whether two node ids are the same index. -/
+def Scry.NodeId.eq (a b : Scry.NodeId) : Bool := Nat.beq a.n b.n
+/-- Whether two edge ids are the same index. -/
+def Scry.EdgeId.eq (a b : Scry.EdgeId) : Bool := Nat.beq a.n b.n
+/-- The node id for `n` (unchecked: the loader checks bounds). -/
+def Scry.nodeId (n : Nat) : Scry.NodeId := Scry.Id.mk n
+/-- The edge id for `n` (unchecked: the loader checks bounds). -/
+def Scry.edgeId (n : Nat) : Scry.EdgeId := Scry.Id.mk n
+/-- `[0, 1, …, n-1]`, accumulated from `n - 1` down (`acc` is the list so far). -/
+def Scry.rangeFrom : Nat → List Nat → List Nat
+  | .zero, acc => acc
+  | .succ n, acc => Scry.rangeFrom n (.cons n acc)
+/-- `[0, 1, …, n-1]`. -/
+def Scry.range (n : Nat) : List Nat := Scry.rangeFrom n .nil
+
+/-- The larger of the two (for `maxDepth`). -/
+def Scry.bumpMax (n m : Nat) : Nat := Nat.max n m
+/-- The node with id `id`, if any. -/
+def Scry.findNode (nodes : List Scry.Node) (id : Scry.NodeId) : Option Scry.Node :=
+  List.find (fun n => Scry.NodeId.eq n.id id) nodes
+/-- The relation with name `name`, if any. -/
+def Scry.findRelation (rels : List Scry.Relation) (name : String) : Option Scry.Relation :=
+  List.find (fun r => String.eq r.name name) rels
+
+-- ## Derived views
+
+/-- Add one occurrence of `key` to a count list, keeping first-appearance order. -/
+def Scry.bumpCount (key : String) : List Scry.Count → List Scry.Count
+  | .nil => .cons (Scry.Count.mk key 1) .nil
+  | .cons c rest => match String.eq c.key key with
+    | .true => .cons (Scry.Count.mk c.key (Nat.succ c.count)) rest
+    | .false => .cons c (Scry.bumpCount key rest)
+
+/-- Count the keys, in first-appearance order. -/
+def Scry.countKeys (keys : List String) : List Scry.Count :=
+  List.foldl (fun acc k => Scry.bumpCount k acc) .nil keys
+
+/-- The parent chain length of `id` (0 for a root); `fuel` cuts a cycle, which the loader
+refuses anyway. -/
+def Scry.depthOf (nodes : List Scry.Node) : Nat → Scry.NodeId → Nat
+  | .zero, _ => 0
+  | .succ fuel, id => match Scry.findNode nodes id with
+    | .none => 0
+    | .some n => match n.parent with
+      | .none => 0
+      | .some p => Nat.succ (Scry.depthOf nodes fuel p)
+
+/-- The largest `depthOf` over the nodes (0 for an empty store). -/
+def Scry.maxDepthOf (nodes : List Scry.Node) (fuel : Nat) : Nat :=
+  List.foldl (fun m n => Scry.bumpMax m (Scry.depthOf nodes fuel n.id)) 0 nodes
+
+/-- Nodes with no parent. -/
+def Scry.countRoots (nodes : List Scry.Node) : Nat :=
+  List.length (List.filter (fun n => match n.parent with
+    | .none => .true
+    | .some _ => .false) nodes)
+
+/-- `ERROR` or `MISSING` nodes. -/
+def Scry.countErrors (nodes : List Scry.Node) : Nat :=
+  List.length (List.filter (fun n => Bool.or n.isError n.missing) nodes)
+
+/-- The total number of relation tuples. -/
+def Scry.countTuples (rels : List Scry.Relation) : Nat :=
+  List.foldl (fun acc r => Nat.add acc (List.length r.tuples)) 0 rels
+
+/-- The edges whose source is `i`, in edge order. -/
+def Scry.edgesFrom (edges : List Scry.Edge) (i : Nat) : List Scry.Edge :=
+  List.filter (fun e => Nat.beq e.src.n i) edges
+
+/-- The edges whose target is `i`, in edge order. -/
+def Scry.edgesInto (edges : List Scry.Edge) (i : Nat) : List Scry.Edge :=
+  List.filter (fun e => Nat.beq e.dst.n i) edges
+
+/-- Prefix sums: `[c0, c1, …]` gives `[0, c0, c0+c1, …]` (`n + 1` entries). -/
+def Scry.offsetsOf : List Nat → Nat → List Nat
+  | .nil, acc => .cons acc .nil
+  | .cons c rest, acc => .cons acc (Scry.offsetsOf rest (Nat.add acc c))
+
+/-- The edge rows of the CSR adjacency: by source (`bySource`) or by target. -/
+def Scry.adjRow (edges : List Scry.Edge) (bySource : Bool) (i : Nat) : List Scry.Edge :=
+  match bySource with
+  | .true => Scry.edgesFrom edges i
+  | .false => Scry.edgesInto edges i
+
+/-- The CSR adjacency of `edges` over `n` nodes, grouping by source (`bySource`) or by
+target. The arcs of a node keep the edge order. -/
+def Scry.adjOf (n : Nat) (edges : List Scry.Edge) (bySource : Bool) : Scry.Adj :=
+  let rows := List.map (Scry.adjRow edges bySource) (Scry.range n);
+  let counts := List.map List.length rows;
+  let arcs := List.concat rows;
+  Scry.Adj.mk (Scry.offsetsOf counts 0)
+    (List.map (fun e => match bySource with | .true => e.dst | .false => e.src) arcs)
+    (List.map (fun e => e.label) arcs)
+
+/-- Pair up an adjacency's targets and labels. -/
+def Scry.pairArcs : List Scry.NodeId → List String → List (Scry.NodeId × String)
+  | .cons n ns, .cons l ls => .cons (n, l) (Scry.pairArcs ns ls)
+  | _, _ => .nil
+
+/-- Node `i`'s arcs from a CSR adjacency: `(target, label)` in edge order. -/
+def Scry.arcsAt (a : Scry.Adj) (i : Nat) : List (Scry.NodeId × String) :=
+  match List.drop i a.offsets with
+  | .cons lo (.cons hi _) =>
+    let k := Nat.sub hi lo;
+    Scry.pairArcs (List.take k (List.drop lo a.targets)) (List.take k (List.drop lo a.labels))
+  | _ => .nil
+
+/-- The stats of a store. -/
+def Scry.statsOf (f : Scry.Facts) : Scry.Stats :=
+  Scry.Stats.mk (List.length f.files) (List.length f.nodes) (List.length f.edges)
+    (List.length f.relations) (Scry.countTuples f.relations)
+    (Scry.countRoots f.nodes) (Scry.maxDepthOf f.nodes (Nat.succ (List.length f.nodes)))
+    (Scry.countErrors f.nodes)
+    (Scry.countKeys (List.map (fun n => n.kind) f.nodes))
+    (Scry.countKeys (List.map (fun e => e.label) f.edges))

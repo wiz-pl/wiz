@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wiz playground</title>
+<link rel="stylesheet" href="playground.css">
+</head>
+<body>
+<header>
+  <a class="home" href="../">&larr; Wiz</a>
+  <strong>Playground</strong>
+  <span class="dim">the self-hosted checker, compiled to WebAssembly &mdash; goals from an optional language server</span>
+  <nav class="pagenav" aria-label="Site"><a href="../docs/">Docs</a></nav>
+  <span id="status" class="status" role="status">loading the engine&hellip;</span>
+</header>
+<main>
+  <section class="pane">
+    <div class="pane-head"><label for="editor">Program</label><span class="hint">Ctrl/&#8984;+Enter runs</span></div>
+    <textarea id="editor" spellcheck="false">import Prelude
+
+-- Everything here runs in the page: the self-hosted Wiz frontend and kernel
+-- (selfhost/*.wiz, stage 11ab), compiled to WebAssembly by web/build-playground.sh.
+-- With ?lsp=ws://127.0.0.1:8765 the goals pane shows a language server's state
+-- (for example: def k : Nat → Bool → Nat := by / intro n / intro b / exact n).
+def twice (n : Nat) : Nat := n + n
+
+#check twice
+#eval twice 21
+</textarea>
+    <div class="actions">
+      <button id="run" type="button" disabled>Run</button>
+      <span id="count" class="dim"></span>
+    </div>
+  </section>
+  <section class="pane side">
+    <div class="pane-head"><span>Goals</span><span class="hint">from <code>?lsp=ws://host:port</code></span></div>
+    <div id="goals" class="goals" tabindex="0" aria-live="polite"></div>
+    <div class="pane-head"><span>Output</span><span class="hint">one line per command; <code>#eval</code> is the kernel's normal form</span></div>
+    <div id="output" class="output" aria-live="polite"></div>
+  </section>
+</main>
+<footer>
+  <span id="engine" class="dim">engine: loading</span>
+  <span class="dim">A definition prints its signature, <code>#check</code> a type, <code>#eval</code> a value (shown raw if it is not a Nat, Bool or list).</span>
+</footer>
+<script type="module" src="playground.js"></script>
+</body>
+</html>

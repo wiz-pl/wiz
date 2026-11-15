@@ -37,6 +37,45 @@ inductive BinderInfo where
   | instImplicit
   deriving Repr, BEq, DecidableEq, Inhabited
 
+/-- (Mandatory sorts) The sorts of a `Π`/`Σ`'s two components: the domain (first
+component) is in `Sort dom`, the codomain (second component, under the binder) in
+`Sort cod`. The `Π` is in `Sort (imax dom cod)` (`piSort`), the `Σ` in
+`Sort (max dom cod)` (`sigmaSort`). The kernel checks each against the inferred sort of
+its component (rules *pi* and *sigma*, `docs/CoreSpec.md` §6, §7.1) and reads them to
+decide whether the type is a proposition (`propSort?`) and whether a cast computes
+(`vCast`, D2). A `Level.hole` is a sort the elaborator has not written yet: the sorts
+pass fills every one, and the kernel rejects one. -/
+structure BinderSorts where
+  dom : Level
+  cod : Level
+  deriving Repr, Inhabited, BEq, Hashable
+
+namespace BinderSorts
+
+/-- Both sorts still to be filled (elaborator only). -/
+def hole : BinderSorts := ⟨.hole, .hole⟩
+
+/-- The sort of the `Π`. -/
+def piSort (σ : BinderSorts) : Level := .imax σ.dom σ.cod
+
+/-- The sort of the `Σ`. -/
+def sigmaSort (σ : BinderSorts) : Level := .max σ.dom σ.cod
+
+def hasHole (σ : BinderSorts) : Bool := σ.dom.hasHole || σ.cod.hasHole
+
+def mapM {m : Type → Type} [Monad m] (f : Level → m Level) (σ : BinderSorts) : m BinderSorts :=
+  return ⟨← f σ.dom, ← f σ.cod⟩
+
+/-- Componentwise equivalence (`Level.equiv`). -/
+def equiv (σ τ : BinderSorts) : Bool := σ.dom.equiv τ.dom && σ.cod.equiv τ.cod
+
+/-- Fill the holes of `σ` with the sorts `dom?`/`cod?`, where known. -/
+def fill (σ : BinderSorts) (dom? cod? : Option Level) : BinderSorts :=
+  ⟨if σ.dom.hasHole then dom?.getD σ.dom else σ.dom,
+   if σ.cod.hasHole then cod?.getD σ.cod else σ.cod⟩
+
+end BinderSorts
+
 inductive Term (R : Type) where
   /-- de Bruijn index -/
   | var (ix : Nat)
@@ -46,10 +85,10 @@ inductive Term (R : Type) where
   `Sort l : Sort (l+1)` only. -/
   | sort (level : Level)
   /-- `(q x : dom) → cod` (or `{q x : dom} → cod`), where `cod` lives under one extra
-  binder. `s`, when given, is the sort of the whole type (`imax` of the parts'): type
+  binder. `σ` gives the sorts of `dom` and `cod` (mandatory sorts, `BinderSorts`): type
   equality compares propositions by logical equivalence, other types by their parts,
-  and needs to know which is which (the kernel checks `s`) -/
-  | pi (x : Name) (bi : BinderInfo) (q : Term R) (dom cod : Term R) (s : Option Level)
+  and needs to know which is which (the kernel checks `σ`, component by component) -/
+  | pi (x : Name) (bi : BinderInfo) (q : Term R) (dom cod : Term R) (σ : BinderSorts)
   /-- `λ x. body`, where `body` lives under one extra binder -/
   | lam (x : Name) (body : Term R)
   | app (fn arg : Term R)
@@ -60,8 +99,8 @@ inductive Term (R : Type) where
   /-- metavariable number `id` (elaborator only) -/
   | mvar (id : Nat)
   -- Stage 4: structural types. `sigma` binder names double as field names.
-  /-- `(q x : A) × B`: the first component may be used `q` times; `s` as for `pi` -/
-  | sigma (x : Name) (q : Term R) (fst snd : Term R) (s : Option Level)
+  /-- `(q x : A) × B`: the first component may be used `q` times; `σ` as for `pi` -/
+  | sigma (x : Name) (q : Term R) (fst snd : Term R) (σ : BinderSorts)
   | pair (a b : Term R)
   | fst (t : Term R)
   | snd (t : Term R)
@@ -167,8 +206,9 @@ inductive Term (R : Type) where
   universes up. Description fields must live exactly in `Sort (l+1)`, so the elaborator
   wraps smaller ones (proof fields, and fields of a level-polymorphic type whose level
   is a `max`). A lifted proposition (`l ≠ 0`) is not a proposition: its inhabitants are
-  boxed proofs, all equal by η. Erased at run time. -/
-  | ulift (l : Level) (A : Term R)
+  boxed proofs, all equal by η. Erased at run time. `k` is `A`'s sort (mandatory sorts:
+  the kernel checks it, and the equation and cast at `ULift` read it). -/
+  | ulift (k l : Level) (A : Term R)
   /-- `up a : ULift A` for `a : A` (checked only) -/
   | up (a : Term R)
   /-- `down t : A` for `t : ULift A`; `down (up a) ↦ a`, and `t ≡ up (down t)` (η) -/
@@ -280,7 +320,7 @@ don't need a case per constructor. -/
     return .scofix (← fl l) (← f 0 I) (← f 0 D) (← f 0 A) (← f 0 g) (← f 0 s) (← f 0 i) (← f 0 a)
   | .coit l I D S st i s =>
     return .coit (← fl l) (← f 0 I) (← f 0 D) (← f 0 S) (← f 0 st) (← f 0 i) (← f 0 s)
-  | .ulift l A => return .ulift (← fl l) (← f 0 A)
+  | .ulift k l A => return .ulift (← fl k) (← fl l) (← f 0 A)
   | .up a => return .up (← f 0 a)
   | .down t => return .down (← f 0 t)
   | .prf l t => return .prf (← fl l) (← f 0 t)
@@ -361,6 +401,15 @@ partial def hasVar (ix : Nat) : Term R → Bool
   | t => (t.forChildren (m := StateM Bool) (fun _ => pure ())
       (fun k c => modify (· || c.hasVar (ix + k))) |>.run false).2
 
+/-- (Mandatory sorts) Does the term contain a `Level.hole` (a `Π`/`Σ` or `ULift` sort the
+sorts pass has not filled yet)? -/
+partial def hasHole (t : Term R) : Bool :=
+  (go t |>.run false).2
+where
+  go (t : Term R) : StateM Bool Unit := do
+    if ← get then return
+    t.forChildren (fun l => modify (· || l.hasHole)) (fun _ c => go c)
+
 /-- All level parameter names mentioned in a term. -/
 partial def levelParamsUsed (t : Term R) : List Name :=
   (go t |>.run []).2
@@ -375,7 +424,7 @@ data type above `Type`, `Desc.arg q (ULift (Enum ls)) F` (Q4: the tag is lifted 
 type's universe). Returns the labels, whether the tag is lifted, and `F`. -/
 def Term.descTag? {R : Type} : Term R → Option (List Name × Bool × Term R)
   | .darg _ (.enum ls) F => some (ls, false, F)
-  | .darg _ (.ulift _ (.enum ls)) F => some (ls, true, F)
+  | .darg _ (.ulift _ _ (.enum ls)) F => some (ls, true, F)
   | _ => none
 
 /-- The constant of the constructor with tag `c` of the data type `T`: `T.c`. A `mutual`
@@ -560,13 +609,10 @@ structure Globals (R : Type) where
   budget : Option Budget := none
   /-- (P2, `--trace-proof-steps`) print the steps each read-back of a proof took (stderr) -/
   traceProofSteps : Bool := false
-  /-- (for the step to mandatory sorts; off) the marking pass also writes the sort of
-  every `Π`/`Σ` it can compute. **Off, because it is only safe when it is complete**: the
-  pass does not go inside proofs, and a type with its sort and the same type without are
-  not interchangeable in an equation between types (`propSort?`, U5): with the endpoints
-  of a `cast` annotated and the `reflTy` that proves them equal not, a valid term was
-  rejected (found by the differential test). -/
-  fillSorts : Bool := false
+  /-- (tests only; off) the checker skips a hole in a `Π`/`Σ`/`ULift` sort instead of
+  rejecting it: for the differential tests' pre-check of a raw random term, which must be
+  known to be well typed before the sorts pass (which evaluates it) may run on it -/
+  sortHolesOk : Bool := false
   /-- (P2, internal) `quote` writes every suspended proof as `()` instead of evaluating
   it: set by the kernel's own comparisons (`sameVal`), which must not run proofs -/
   quoteErasesProofs : Bool := false

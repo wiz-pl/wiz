@@ -1,0 +1,1 @@
+tests/cst.wiz:23:1: info: "9,8,1,1,4,0,8,function_declarator,[4,13),1,2,6,typed,4\nspill: 9 nodes, ok"

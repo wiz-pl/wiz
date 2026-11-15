@@ -57,12 +57,22 @@ def arch : IO String := do
 
 def tarballName (a : String) : String := s!"wiz-{a}-linux.tar.gz"
 
-/-- Is there an executable `cmd` on `PATH`? -/
-def have? (cmd : String) (args : List String := ["--version"]) : IO Bool := do
+/-- Is there an executable `cmd` on `PATH`? (Run in `cwd`, when given.) -/
+def have? (cmd : String) (args : List String := ["--version"])
+    (cwd : Option System.FilePath := none) : IO Bool := do
   try
-    let o ← IO.Process.output { cmd, args := args.toArray }
+    let o ← IO.Process.output { cmd, args := args.toArray, cwd }
     pure (o.exitCode == 0)
   catch _ => pure false
+
+/-- Can `lake` build a project outside this checkout? A source install clones an upstream
+and runs `lake build` in it, where nothing names a `lean-toolchain`: elan needs a default
+toolchain for that. The Nix CI restores elan's toolchains but not a default, so `lake`
+works only in this checkout ("no default toolchain configured"); there the source case
+skips. A dev machine (`elan default`), or a job that configures one, runs it. -/
+def lakeForSource? : IO Bool := do
+  let neutral ← IO.FS.createTempDir
+  have? "lake" (cwd := some neutral)
 
 /-- An upstream: a Lake project with `wiz` and `grail` executables, tagged `v1` (version
 1) and with `main` at version 2. (bare repository, work tree) -/
@@ -231,6 +241,13 @@ def cases (impl : IO Impl) : List Case := [
           -- toolchain list still works
           tower e ["toolchain", "list"] proj },
     { name := "from source: install, channels, update, shims, +SPEC, run", run := fun _ => do
+        -- tower probes `lake` in the directory it clones into (no `lean-toolchain` of
+        -- ours): without an elan default toolchain that probe fails, so the install and
+        -- the nightly auto-install after it cannot run. The Nix CI has none (only this
+        -- checkout's toolchain: docs/ci-runner.md), so skip rather than fail.
+        unless ← lakeForSource? do
+          skip "no source toolchain: `lake` has no toolchain outside a checkout (elan has no default)"
+          return
         let (bare, work) ← upstream
         let e ← mkEnv (← impl)
         tower e ["set", "git", bare.toString]

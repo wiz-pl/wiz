@@ -290,24 +290,61 @@ type or structure) was an error here ("unsupported syntax command.def"); private
 constructors (`| private c`), private fields and `private mk ::` were parsed and ignored.
 Now `private` before a command declares the same names as without it.
 
-**Privacy is not enforced, because nothing can reach it.** In the Lean toolchain a private
-name is private to its *module*: another module gets "'x' is private to module M", and
-there a type with private parts is opaque (it equals only itself, isn't matched, isn't
-built by tuples or look-alike types; its recursors are private). The module itself sees
-everything as usual. The self-hosted toolchain has exactly one module, the input file:
-every `import` loads the frontend's own Prelude (`preludeText`), which declares nothing
-private. So every check of 13b is about a use from another module, and in a one-module
-world each of them holds vacuously; treating `private` as public there is exactly the
-Lean frontend's behaviour inside the declaring module. Mirrored: the syntax in every
-position, and the in-module meaning. Not mirrored, and unreachable: the "private to
-module" errors, the opacity of types with private constructors or fields outside the
-module, private recursors. PR #79's `T.desc` and `--strict-privacy` are the same (module
-crossing). **The day the self-hosted toolchain gets modules**, privacy must come with them:
-`Globals` needs each name's module (and whether it is private); `Scope.lookup` from
-another module must reject a private name; a type with a private constructor or field
-must become an opaque constant outside its module (no unfolding of its `μ` in the
-frontend's conversion, no `match`, `.1` or constructor through the Σ), while the kernel
-keeps checking against the full definition, as 13b's elaborator view does.
+**Privacy is now module-scoped** (with the module loader, A14). In the Lean toolchain a
+private name is private to its *module*: another module gets "'x' is private to module
+M", and there a type with private parts is opaque (it equals only itself, isn't
+matched, isn't built by tuples or look-alike types; its recursors are private). The
+self-hosted frontend does the first of those, and only for the ordinary declarations
+(this slice):
+
+* **Representation.** A private declaration `x` of module `M` gets the kernel name
+  `_private.M._0.x` (the Lean frontend's `Globals.privateName` format), so two modules'
+  private `x`s are different constants (`Globals.declName`, `privName`); a public
+  declaration keeps its name. `Globals` carries the module being checked
+  (`Globals.setModule`; the loader sets it per module, `modRunBody`) and whether the
+  current command is `private` (`Globals.setPrivate`; `stepCommand` clears it after each
+  command). The scope maps a written name to the current module's private declaration
+  first (`privName M.cur x`), then to a public one, and otherwise — if the name is
+  private to another module — reports `Scope.privTo`; `Scope.find` is the raw
+  kernel-name lookup the internals use (`inlineTm`, the duplicate check). Messages and
+  `show` print the source name (`privBase`, also in `Kernel.wiz`, as Lean's
+  `Globals.privateBase`).
+* **Resolution.** Every path that resolves a written name goes through
+  `Scope.lookupV`: term elaboration (`elab`, `identHead`, so `@f`, `f` and `.c`/`T.c`
+  resolutions too), constructor-head detection (`ctorHead`), `beqHead` (a literal
+  pattern's `T.beq`), induction (`useInd`), structures (`structOf`/`structFields`, with
+  the private `structure T` marker under the same module prefix), `#check`/`#reduce`,
+  the extern/`c_struct`/`foreign_type` checks and `attribute [inline]`. A private name
+  used in the same module still resolves, including in the type or body of a public
+  definition (the compiled module references the private constant, which stays
+  inlinable: `inlineTm` reads the raw kernel name); an importer gets
+  `'x' is private to module A`, not "unknown identifier". `#print` by name is left on
+  the kernel-name lookup it needs (a debugging surface, and the frontend has no `#print`
+  of its own).
+* **Duplicates.** Kernel names are unique (`dupFrom` compares them), so two modules'
+  private `x`s are allowed, while a *source name* is declared once per module: a private
+  `x` and a public `x` in the same module clash (`Scope.declaredIn`), as they do in Lean,
+  and a public name declared in two modules still clashes. A public name shadows another
+  module's private one of the same spelling (the private one is invisible outside).
+* **Re-export is not attempted.** A module's public names are its exported set; a
+  private name is never visible through an importer, nor through a public definition that
+  mentions it (the imported *term* works, the name does not).
+* **One-shot mode.** `checkFile` (the checker's `--oneshot`, and the old single-file
+  behaviour) is one module, `input`: private names are visible throughout the file.
+* **Cache.** A module's elaborated output is unchanged, so the cache's module key/graph
+  key (`moduleGraphKey`, a hash of the modules' names and texts) stays as it is; the
+  visibility check is a lookup on every elaboration, so a warm cache hit can only replay
+  the diagnostics of the same graph (the key covers every module's text, and the toolchain
+  id every selfhost source).
+
+**Left for later slices.** Constructor- and field-level `private` (`| private c`,
+`private f : T`, `private mk ::`) is still parsed and *stripped*: it is not a
+module-scoped declaration of its own here. Nor is the opacity of a type with private
+parts outside its module (no un-unfoldable `μ`, no refusal to `match` or project), private
+recursors (the self-hosted frontend has none: matches are built directly), or private
+`deriving`. A private `extern`'s argument-count hint and `attribute [implemented_by]`
+on a private declaration are not resolved to its module name (the FFI records the
+kernel name; both are reachable only from the declaring module).
 
 An unknown command, or a modifier the frontend doesn't know (`sealed`, `noncomputable`
 when the grammar gets them), is an error naming it ("unsupported command
@@ -348,7 +385,13 @@ foreign function's Nat does not fit in 63 bits" (exit code 3). The Lean toolchai
 UInt64 is unaffected (its large values are objects).
 
 **Tests** (group `selfhost`): `private` in every position both frontends take it, and
-`private` inside `mutual` rejected by both; unknown commands named in the error; the
+`private` inside `mutual` rejected by both; module-scoped privacy through the self-hosted
+checker: a private name used in its module and rejected in an importer (naming the
+module), a private type and constructor rejected in an importer, two modules' private
+names of one spelling allowed, a source name declared once per module (private or
+public), a public name shadowing another module's private one, and the one-shot
+`checkFile` path; group `selfhost-cli`: a private diagnostic cold and warm in the
+driver's cache; unknown commands named in the error; the
 `export`/`link_lib` checks (9 declarations, same verdicts); one program with exports
 (numbers, strings both ways, `Bool`, `IO`) called from a `link_c` file and `link_lib
 "m"`, run by the Lean compiler and by the self-hosted one in both modes, same output;
@@ -505,7 +548,178 @@ take it.
 List, an indexed family, nested matches, `let 1`; dropping the variable in one branch, or
 using it twice or under an ω argument, rejected); a compiled program with additive matches.
 
-## 21x: modules and imports (A14, first milestone)
+## 21w: one value representation for the two runtimes
+
+The Lean toolchain's C/LLVM runtimes (`runtime/wiz.c`) and the self-hosted backend's
+runtime (`selfhost/rt.c`) had grown two different value representations: 62-bit scalars
+with GMP numbers against 63-bit wrapping ones, different special-tag numbers, an 8-/16-byte
+header against `wiz_hdr`'s fixed 16 bytes, a two-argument closure calling convention
+against `wiz_apply`'s argument array, and a treap/offset-chain layout against flat
+constructors. That is the obstacle in front of moving runtime leaves into Wiz
+(`wiz-notes/runtime-in-wiz.md`, decision D5): a Wiz module would have to be written twice
+or know which runtime it is running on. This section records the first step: `rt.c` now
+uses `wiz.c`'s representation for everything the self-hosted backend needs. (The Lean
+runtime's file was split into `runtime/wiz_rt.h` and the `runtime/rt_*.inc` area files
+after this section was written; "`wiz.c`" below means that runtime, whose header is now
+`wiz_rt.h`.)
+
+**What now agrees** (checked by `_Static_assert`s in `rt.c`):
+
+* **Scalars and tags.** `BOX`/`UNBOX`/`ISBOX` are `wiz.c`'s, and the special tags are its
+  numbers: `T_CLO = 0xFFFF0000`, `T_RAW = …0002`, `T_EXT = …0003`, `T_ARR = …0005`,
+  `T_STR = …0006`, `T_MAP = …0007`, `T_THUNK = …0008` (the unused `T_BIG`, `T_BYTES`,
+  `T_WARRAY`, `T_WMAP`, `T_ITAB` keep their `wiz.c` numbers too).
+* **The header.** Every object starts with `wiz_hdr`: `int64_t rc`, `uint32_t tag`,
+  `uint32_t size` (16 bytes). `size` means fields for constructors, captured arguments for
+  closures, 0 for text/arrays/maps/foreign pointers.
+* **Layouts.** Constructors (`wiz_ctor`), closures (`wiz_clo`: `fn`, `arity`, captured
+  arguments), thunks (`wiz_thunk`: `fn`/`val`), foreign pointers (`wiz_ext`), text
+  (`wiz_str`: `len`, inline UTF-8), arrays (`wiz_array`: `len`, `cap`, `data`) and text
+  maps (`wiz_map`: open addressing, `count`, `cap`, `keys`, `vals`) are the same structs,
+  field for field. (How a *constructor value* is encoded still differs; see below.)
+* **Closure ABI.** A closure's `fn` now takes the whole argument array (`V *a`), captured
+  arguments first, exactly like `wiz_boxed_fn`; `arity` counts captured and applied
+  arguments. The generated functions (`static V lamN(V *a)`) were already of that shape,
+  so `Backend.wiz` did not change. The runtime's own suspensions (`ind`'s hypotheses) were
+  rewritten from `fn(env, arg)` to the same array convention.
+* **Suspensions.** `memo` and the backend's suspended `let`s are `T_THUNK` objects with
+  `wiz.c`'s force protocol (`fn` cleared after the first force, `val` kept), instead of
+  closures with a mutable environment.
+* **Count rules.** `inc`/`dec` implement `wiz.c`'s rules: `rc > 0` owned by one thread,
+  `rc < 0` shared (atomic), `rc == 0` immortal (the static `(k, ◾)` values are now
+  `rc == 0`, not a large count). Reuse and drop specialisation use the same `rc == 1`
+  tests.
+* **Data structures.** Under reference counting, arrays are `wiz_array` (updated in place
+  when unique, else copied) and `StrMap` is `wiz_map` (open addressing, linear probing),
+  not the Baker array and treap. Text is `wiz_str` in both.
+
+**What is still self-hosted only** (and why it can wait):
+
+* **The constructor payload encoding.** `wiz.c` has flat constructors: an object's tag
+  is the constructor index, `size` its number of fields, and a nullary constructor is the
+  scalar `BOX(k)`. The self-hosted backend erases a value of `μ D i` to its *payload*
+  `(tag, fields…)`: a tag-0 object whose first field is the constructor tag, the rest the
+  fields (flattened as a chain), and a match switches on `tagof(fld(x, 0))`. The `Obj`
+  struct and the special tag numbers agree, but a constructor value is not interpretable
+  by the other runtime until this encoding goes. It goes with the offset chains (below).
+* **Offset chains.** A flat pair chain `(e₀, (e₁, … t))` is one tag-0 object, and a tail is
+  the same pointer with an index in bits 1–3. `wiz.c` has flat constructors only. Removing
+  the chains changes `Backend.wiz`'s object generation and projection code (and costs
+  memory and allocations), so it is the next representation step, not this one.
+* **63-bit `Nat`.** `rt.c`'s numbers are 63-bit words with wrapping arithmetic; `wiz.c`
+  has 62-bit scalars and `T_BIG` GMP objects. The self-hosted tests rely on `2^63 - 1`
+  (`=selfhost` case 36), so this cannot change without either GMP in every self-hosted
+  program or a deliberate smaller `Nat`.
+* **`T_HYP = 0xFFFF000C`.** `ind`'s lazily computed hypotheses have no `wiz.c` counterpart
+  (it computes them in compiled Wiz, `PrimCode.lean`). It is the next free special tag;
+  it must be added to the shared header before a value can cross runtimes.
+* **Boehm mode.** With `WIZ_RC` off, `rt.c` still uses the collector and its persistent
+  Baker arrays and treap map. The RC mode is the converged one; retiring Boehm removes
+  this branch.
+* **Allocation strategy.** `rt.c` allocates small objects from 16-byte size-class free
+  lists carved from 1 MB blocks; `wiz.c` calls `malloc` per object. This is not part of
+  the ABI, and the self-hosted compiler's measurements depend on it.
+* **Data structures missing in `rt.c`.** `Bytes`, `WordArray`, `WordMap`, `Intern` and
+  GMP numbers exist only in `wiz.c`; the self-hosted frontend's native list does not name
+  them. Adding them is where the first shared Wiz leaves will land.
+* **FFI marshalling.** The generated wrappers call `rt_in_nat`/`rt_out_nat`,
+  `rt_in_str`/`rt_out_str`, `rt_in_bool`, `rt_in_u64`/`rt_out_u64` and so on; `wiz.c`'s
+  ABI names are `wiz_in_nat`, `wiz_out_nat`, `wiz_in_string`, `wiz_out_string`,
+  `wiz_in_bool`, `wiz_in_u64`, … The raw `UInt64`/`Float64` boxes and foreign pointers
+  already agree; `Nat` is 63-bit here, and a `Bool` result is the constructor payload
+  above, not `wiz.c`'s scalar constructor.
+* **`lib/Sys` marshalling and threads.** `wiz.c` exports the `wiz_sys_*`, channel, MVar,
+  lock and ref entry points; `rt.c` has only the `rt_*` FFI marshalling that `Backend.wiz`
+  emits, no POSIX layer and no thread library (the `rc < 0` rule is implemented but never
+  used). `wiz_live` and the proof budget are globals, not `__thread`.
+* **Leak check exit code.** `wiz.c` reports leaks with exit code 2; the self-hosted
+  runtime exits 4 (and only in RC mode), which the `=selfhost` cases test.
+
+**Path to one runtime.**
+
+1. **Land the `runtime/wiz_rt.h` split** (header + area files) so the shared definitions
+   have one home. Then replace the top of `selfhost/rt.c` with `#include "wiz_rt.h"` (the
+   inline part only) and keep the self-hosted extensions in a small `selfhost/rt_ext.h`.
+   The `_Static_assert`s above are the acceptance test.
+2. **Flatten constructors.** In `Backend.wiz` and `rt.c`, drop the payload encoding
+   (`mkobj(k, fields…)`, match on `tagof(x)`) and the offset chains, then delete
+   `OBJ`/`OFF`. This is the last layout difference; after it a constructor value built by
+   either backend is the same object.
+3. **Retire Boehm** (D2): make `WIZ_RC` unconditional in the self-hosted backend, delete
+   the Baker array and treap map, and move the GC cases in `=selfhost` to RC.
+4. **Share the leaf layer.** Implement the library-facing `wiz_*` ABI (`wiz_in_string`,
+   `wiz_map_*`, `wiz_array_*`, `wiz_str_*`, `wiz_bytes_*`, `wiz_itab_*`, `wiz_sys_*`) in
+   `rt.c`, and move the marshalling leaves (`Text`, `Sys`, `Print`, `Intern`) into
+   `lib/Runtime/*.wiz` once, compiled by both toolchains (`wiz-notes/runtime-in-wiz.md`,
+   option (a)). The self-hosted backend's own `mkobj`/`mkclo`/`apn` can stay: they are the
+   backend ABI, not the shared value ABI.
+5. **Decide the number story** (D7's sibling): either give the self-hosted runtime GMP
+   `T_BIG` objects (one `Nat` representation at last, at a cost), or accept 63-bit `Nat`
+   in the self-hosted backend and keep `T_BIG` a Lean-runtime detail. The closure of this
+   choice is what lets a *single* runtime object serve both compilers.
+6. **Threads last.** Port `wiz_mark_mt`, thunk locking and the channel/MVar/lock/ref
+   entry points to `rt.c` (or move the Wiz-side `Session`/`Conc` layer to the shared
+   runtime); the `rc < 0` rules are already in place.
+7. **Then the runtime is one object**: `wiz_rt.h` + `wiz_rt.c`, `-DWIZ_API=` for the
+   object build, embedded inline for the default; the self-hosted compiler links the same
+   object, and the fixpoint test checks that both compilers' C output is identical.
+## 21x: constructor field quantities and implicit constructor fields, self-hosted
+
+The last two frontend differences of 21m. `Kernel.wiz`'s descriptions now carry each
+field's quantity as the Lean kernel's do (`Desc.arg q S D`, CoreSpec §9.1):
+
+* **Quantity terms.** `Tm.qty` (`Qty : U 0`) and `Tm.qlit q` (`vqty`, `vqlit`). Binder
+  quantities stay literals (`Q`); a `Qty` term is only a description field's quantity, or
+  the first argument of a `Desc.elim` method (`qTy`, which was `Unit`). `qtyOk` is
+  `checkQty`: checked erased, and its value must be a literal or a variable.
+* **Descriptions.** `darg q S D`, `drec q j D`, `dhrec q H j D` (and `vdarg q S E` …). The
+  methods receive `q` (`vDelim`; before, `tt`), and the method types say so.
+* **The template `⟦D⟧`** (`interpTm`) builds the field's `Σ` at the method's `q`, with the
+  new `sigmaQ l q A B`: a `vsigma` at a literal; at a stuck quantity (a description whose
+  field quantity is a variable) a neutral, `Spine.ssigq`, which quotes back to `sigmaQ`,
+  is a type in `U l` (`typeOfNe`, `propSort`) and is compared part by part (`convSpine`).
+  The Lean kernel builds a Σ at a polynomial quantity there; this kernel has no
+  quantity variables on binders, so such a Σ stays stuck, with the rules of a Σ at an
+  unknown quantity (at a bare variable only, as `qtyPoly` allows; `cast`, `eqTy` and `eq`
+  at it stay stuck, where the Lean kernel computes them): its projections in erased positions (`fst` at run time is rejected,
+  as `1 ≤ q` fails at `q = 0`), `snd` at ω, η in conversion, and a pair's first part
+  counted ω times. This is not hypothetical: the frontend's `match` hands the kernel
+  normal forms of `All`/`⟦D⟧` at a description stuck on a tag, whose `Desc.elim` methods
+  project such a Σ (in a type).
+* `vEqDesc` (equal quantities ↦ on, two different literals ↦ `False`, else stuck:
+  `qtySame`, as `sameQty`/`qtyApart`: the same variable is equal to itself), conversion (`conv` at `Qty`, and the quantities of
+  two descriptions), `castDesc`, `groundEqDesc`, `eqPayload`, `quote` and `show`
+  (`arg(0 Nat, …)`; nothing is printed at ω) follow the Lean kernel.
+
+`Frontend.wiz`: a field's quantity is read as `elabQuantity` reads it (ω explicit, 0
+implicit; `2` and `%t` are errors), kept in `Field` (now `mk name q impl ty`), and goes
+into the description (`ctorDesc`, `mctorDesc`) and the constructor's type (`ctorType`).
+An implicit field (`| cons {n : Nat} …`) is an implicit argument of the constructor
+(`Global.implicits`), so a call leaves it out, and patterns name only the explicit
+fields (`explicitPats`, as `explicitIdx`). A match binds each field at its quantity
+(`fieldCols`, `bindLetsT`: `letTm`; `Col` and `Ctor` carry the quantities), as
+`T.casesOn`'s method takes it: a field at 0 can't be used at run time, a linear one must
+be used once. A structure (a data type here, 18e) binds a linear field at ω (the Lean
+elaborator takes a structure apart by projections at ω), and a field at 0 has no
+projection function (`classMethods` makes none). `Backend.wiz` needed nothing new: a
+payload's field at 0 is the first part of a `Σ` at 0, erased already.
+
+A `match` on a structure that has a field at 0 was a difference until #217 (the Lean
+elaborator projected the erased field at ω); both now bind it at 0, so no difference is
+pinned any more and the 21m test of pinned differences is gone.
+
+**Shapes changed** (selfhost/*.wiz): `Tm.darg/drec/dhrec` and `Val.vdarg/vdrec/vdhrec` take
+the quantity first; new `Tm.qty`, `Tm.qlit`, `Tm.sigmaQ`, `Val.vqty`, `Val.vqlit`,
+`Spine.ssigq`. Frontend: `Field.mk` has 4 fields, `Ctor.mk` 5, `Col.mk` 4;
+`ctorType`, `fieldCols`, `specialize`, `addCtors` take one more argument.
+
+**Tests** (group `selfhost`): field quantities 0/1/ω and implicit fields, the same verdicts
+in both frontends (`fieldQtyDecls`); a program with them, compiled by the Lean compiler and
+by the self-hosted one (both collectors); the differential test's `MTm` descriptions carry
+a quantity (ω in the existing terms); two core terms from the review of this stage
+(`wiz-notes/fieldq-review.md, probes 7a and 15b) checked by Kernel.wiz with the
+Lean kernel's verdicts.
+## 21y: modules and imports (A14, first milestone)
 
 `import M` was silently the embedded Prelude: the self-hosted frontend had one module,
 the input file. The frontend now loads a module graph. A module's name is a path
@@ -530,10 +744,12 @@ rejected across modules as within one (the same `newDuplicate` check).
 
 The cache key (`moduleGraphKey`) is a rolling hash of the loaded modules' names and
 texts in load order; the checker prints it with `--key`. The real cache (D5) will key on
-it, plus the frontend's version.
+it, plus the frontend's version. The checker's `--oneshot` runs the pre-loader
+single-file path (`checkFile`) instead, for the old behaviour's own tests.
 
-**Not done.** `private` is still private to one file only: hiding names across modules
-needs each name's module in `Globals` (21n). `namespace`/`open`/`section` are not parsed
+**Not done.** `private` is module-scoped now (21n), but only at the declaration level:
+constructor- and field-level `private` is stripped, and a type with private parts is not
+opaque outside its module. `namespace`/`open`/`section` are not parsed
 (A23). The compiler driver accepts modules for checking, but `link_c` paths and the
 `-- wiz: rc` pragma are read from the root file only. Compiling `lib/` still needs
 classes/instances (A10), universe polymorphism (A15), the proof surface (A16), tactics
@@ -546,3 +762,113 @@ checked once), a cycle, a missing module, a duplicate name across modules, a `-I
 and the cache key (stable for one graph, different when a module's text changes). `wiz
 check` of the generated self-hosted sources passes, and the self-hosted frontend still
 checks itself.
+
+## 21z: the proof surface in the self-hosted frontend (A16)
+
+The self-hosted frontend could define data and functions but not state or prove a
+proposition: `term.prop`, `term.sort`, `term.eq`, `term.refl`, `term.rfl`, `term.cast`
+and `term.transp` had no handlers (the parser already produced them, the kernel already
+had the forms). `Frontend.wiz` now elaborates them:
+
+* `Prop` is the kernel's `.prop` (`Sort 0`); `Sort l` is `.sortL l`, with the level
+  from U1's level elaborator (`levelArg`/`elabLevel`): numerals, `max`, `imax`, `+ n`,
+  the declaration's universe parameters (`Sort u` in a `.{u}` definition) and `_` level
+  metavariables. `Sort 0`, `Sort (max 1 2)` and (with U1) `Sort u` are the tests; `Type`
+  keeps its handler, and a level that is not in scope is an error naming it.
+* `a = b` is `.eq A a b` (`A` the inferred type of `a`, the result in `Prop`).
+* `refl a` is `.tyRefl a` when `a` is a type and `.eqRefl A a` otherwise; `rfl` is
+  checked against the expected equation (`.eqRefl`, `.tyRefl`, or the unit proof for an
+  equation that computed to `True`), and a non-equation expected type is an error.
+* `cast e t` is `.coe A B e t`, with `e : A ≡ B` (the equation's type must still show
+  its sides: a computed one is reported, as in the Lean frontend).
+* `transp P p e` is `.subst A a P p b e`, with `P : (b : A) → a = b → Prop` and
+  `p : P a (refl A a)`.
+* `True` and `False` are built-in names for `.ptrue`/`.pfalse` (like `Unit`).
+
+Nothing in `Kernel.wiz` changed for A16 (U1 changed it for levels): the kernel
+infers/checks and marks the terms like every other declaration. Types still have no
+`Eq` name (only the `a = b` form), and `by` (tactics, A13), macros/notation (A12) and
+`deriving` (A11) remain the next surface pieces.
+
+**Tests** (group `selfhost`): a file with `n = n` by `rfl`, a `Prop`-valued definition,
+`Prop`, `Sort 0`, `Sort (max 1 2)`, a `Sort`-typed definition, a polymorphic `cast`, a
+`transp` along an equality (its motive a proposition), `True`/`False`, four rejected
+proofs/types (a wrong equation by `rfl`, `Prop := Type`, `Sort 1 := Type 1`, `cast` on
+`False`) and an unknown-level error; a differential case with the same 12 declarations
+accepted/rejected by the Lean frontend and the self-hosted one; U1's own cases cover
+`Sort u`, `Type u` and level inference. `wiz check` of the generated self-hosted sources
+passes, and the self-hosted frontend still checks itself.
+
+## 21ab: named arguments (A9)
+
+`f a (x := e) b` now elaborates in the self-hosted frontend. The kernel's `Tm` and `Val`
+carry no binder names, so a `Global` keeps its parameters' names beside their implicit
+mask (`paramNames`, as `paramMask`; filled for definitions, axioms and partial
+definitions from their written binders; an `extern` writes no binders). An application
+with `term.namedArg`
+arguments is split into named and positional lists, in source order. A duplicate name is
+`argument 'x' was already given`. The telescope is then walked: a binder whose name has
+a named argument takes it (explicit, implicit or instance), otherwise an implicit binder
+gets a metavariable and an explicit binder takes the next positional argument. The
+result is a positional argument list (with `_` for each implicit binder passed over), so
+the existing `appArgsT` still inserts implicits, postpones constructor arguments and
+applies the expected type. A named argument that would have to cross an explicit
+parameter with no argument is `named argument 'y' comes after the explicit parameter
+'x', which has no argument`; a name no binder has is `no parameter named 'y'`, and a
+named argument outside an application is `a named argument `(x := e)` is only allowed as
+an argument of an application`. `@f` still makes every binder positional (named
+arguments still match by name), and `f (b := 1) 5` gives `a` the `5`.
+
+Named arguments work for a global function whose parameters are written as binders, or
+in the leading Π binders of its type (`axiom f : {A : Type} → …`, so `MVar.new
+(A := B)` is accepted; that also reads the names an `extern` writes in its type).
+A constructor's fields and a local variable's Π type keep no names yet, so a named
+argument there is rejected (a clear error, not a silent mismatch); class/instance
+binders will use the same path once A10 stores their names. An implicit parameter
+written only in a declaration's type is still not inserted positionally when it is
+omitted (A3); it can be supplied by name.
+
+**Tests** (group `selfhost`): explicit, implicit, reordered and interleaved named
+arguments, a named implicit, `@f` with a named implicit and with a named explicit, and
+implicit insertion around named arguments, checked against the Lean frontend; unknown,
+duplicate, ordering and bare named-argument errors; and the self-hosted frontend still
+checks itself.
+## 21aa: `import_c`, `glue` and native representations, self-hosted
+
+The self-hosted frontend now reads C headers (`selfhost/CParse.wiz`) and checks the C
+glue subset (`selfhost/CGlue.wiz`). The driver reads each `import_c "h"` header from the
+file system (the frontend is pure) and passes the texts in `Globals.headers`; there is
+no C preprocessor, so a header must be self-contained. `CParse` parses prototypes,
+typedefs and struct definitions. `import_c` binds the scalar prototypes it can marshal
+(`Nat`, `UInt64`, `Float64`, `String`, `Bool`, `Unit`, foreign pointers and declared
+`c_struct`s) as `C.name`, emits an implicit `#include`, and records the functions for
+`glue`; `(pure)`, `(no_auto)` and `(skip := "…")` are read as in the Lean frontend.
+`glue` checks numbers, strings, calls, assignments, `if`/`while` and struct field
+access, then emits a static C wrapper called by the backend's normal foreign path.
+
+`attribute [implemented_by mk get] T.mk` is accepted on a sealed constructor; the
+constructor's implementation is registered (`mk`), as is the representation. A type
+whose operations are all `implemented_by` runtime natives (the `U32Array`/`U64Map`
+pattern) therefore compiles to its natives. Direct pattern matching on a native value
+still needs `get` in erasure.
+
+**Not done.** No preprocessor, no automatic struct/pointer mapping from a header (declare
+a `c_struct`/`foreign_type`), no `Bytes`/buffer parameters, no `for` loops, struct locals
+or `&struct` in self-hosted glue, no rewriting of matches through `get`.
+
+**Tests** (group `selfhost`): an `import_c` header whose functions are called from Wiz
+and from `glue`, and a native representation on a sealed constructor that runs through
+`wiz_u32array_*`, in GC and RC modes.
+
+**ABI v1 (aligned with `wiz-notes/prior-art/compilers-runtime-ffi.md` §2.2, cheap
+parts only).** Kinds are explicit in every `Foreign.fn`: `n`/`u` are `uint64_t`, `f`
+is `double`, `s` is `const char *` (borrowed in, caller-owned out), `b` is `int`, `p`
+is `void *` (+1 wrapped, borrowed for a call), `w` is a Wiz `wiz_val` (+0 in, +1 out),
+and `e`/`v` are omitted from the C prototype. Structs by value go only through an
+explicit `c_struct`; a native representation is accepted only on a **sealed** type
+whose constructor's `mk`/`get` are registered, so values of the type are the runtime
+natives. The generated `--header` now defines `WIZ_ABI_MAJOR`/`WIZ_ABI_MINOR` (1/0)
+and carries the ownership table as comments. Deferred (documented, not implemented):
+a linked `wiz_abi_version` symbol, `_Static_assert`s for `c_struct` layouts, boxed
+`Nat`/`NatObj` by default, callback roots on both collectors, and the preprocessor or
+automatic struct/pointer import for `import_c`.

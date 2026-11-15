@@ -1,0 +1,293 @@
+import Hdl.Core
+/-!
+# Hdl.Uart
+
+A reusable 8N1 UART (`import Hdl.Uart`): a baud generator, a transmitter and a receiver
+with a configurable number of clock cycles per bit, and a loopback circuit that wires the
+transmitter's line into the receiver. It is the UART of the iCEstick project
+(`/workspace/wiz-icestick-uart/src/Icestick/Uart.wiz`) with the board-specific parts
+removed, so that other designs can instantiate it: every part is a `Circuit` over bundles,
+polymorphic in the representation like the rest of the HDL, so the same definition
+simulates at values and synthesises to a netlist.
+
+Layout of one frame, least significant data bit first, line idle high:
+
+```
+idle  start  d0  d1  d2  d3  d4  d5  d6  d7  stop  idle
+ 1      0     …                                  1     1
+```
+
+`n` is the number of clock cycles per bit, a meta-level `Nat` (1 … 2^w): it only ends up
+in the netlist as the constants the counters are compared with. `w` is the width of the
+clocks-per-bit counter: the default `Uart.cntW` is 16 bits, so `n` ranges over
+1 … 65536; `Uart.cntW7` (7 bits, 1 … 128) is the iCEstick's counter and `Uart.cntW10`
+(10 bits, 1 … 1024) is the Arty's and the OLED designs'. The `…w` circuits take the width
+as their first argument; the named configurations (`Uart.tx7C`, `Uart.tx10C`, …) fix it.
+The counter is the only width that changes: the phase, the bit periods left and the shift
+registers are the same in every configuration. `n = 104` turns the iCEstick's 12 MHz
+clock into 115384.6 baud (0.16 % above 115200); the Arty's 100 MHz clock with `n = 866`
+gives 115473.4 baud (0.006 % above 115200).
+
+Clock domains: the receiver's input goes through two flip-flops inside the receiver (the
+`Rx` state's `ff1`/`ff2`), so a pin in another clock domain is synchronised before any
+logic looks at it. The transmitter's line is a register of its own, so the pin cannot
+glitch. Both parts are ordinary synchronous circuits with a plain state, so
+`Circuit.withReset` and `Circuit.withResetEnable` put a reset (and an enable) around an
+instantiation without changing it; the example simulates the receiver under a reset with
+a line whose phase is not aligned to the local clock. Use `n ≥ 5`: the two synchroniser
+flip-flops delay the start edge by two cycles, and the receiver samples at the middle of
+each bit (see `Uart.rxStep`).
+
+The width families:
+
+* `Uart.baudCw w n` / `Uart.txCw w n` / `Uart.rxCw w n` / `Uart.loopbackCw w n`: the
+  generic circuits, for a counter of `w` bits and `1 ≤ n ≤ 2^w`;
+* `Uart.baudC n`, `Uart.txC n`, `Uart.rxC n`, `Uart.loopbackC n`: the 16-bit defaults
+  (`Uart.cntW`, 1 … 65536), the original rune configuration;
+* `Uart.baud7C n`, `Uart.tx7C n`, `Uart.rx7C n`, `Uart.loop7C n`: the iCEstick's 7-bit
+  counter (`Uart.cntW7`, 1 … 128);
+* `Uart.baud10C n`, `Uart.tx10C n`, `Uart.rx10C n`, `Uart.loop10C n`: the 10-bit counter
+  (`Uart.cntW10`, 1 … 1024) of the Arty and the OLED designs.
+
+The parts:
+
+* `Uart.baudCw w n`: a free-running baud generator (input `ce`, output `tick`) whose tick
+  is high one cycle in every `n`;
+* `Uart.txCw w n`: input `start`/`data`, output `line`/`busy`, 8N1, `start` taken when
+  idle;
+* `Uart.rxCw w n`: input `line`, output `valid`/`data`/`busy`; `valid` is high for one
+  cycle at the sample of a stop bit that is high, with the byte in `data`;
+* `Uart.loopbackCw w n`: `txCw` and `rxCw` with the line wired from the transmitter to
+  the receiver (the loopback example), input `start`/`data`, output `busy`/`valid`/`data`.
+-/
+
+def Uart.Bit : HwTy := HwTy.bits 1
+def Uart.B4 : HwTy := HwTy.bits 4
+def Uart.B8 : HwTy := HwTy.bits 8
+def Uart.B9 : HwTy := HwTy.bits 9
+
+/-- The default width of the clocks-per-bit counter: 16 bits (1 … 65536 cycles per bit). -/
+def Uart.cntW : Nat := 16
+/-- The iCEstick's 7-bit clocks-per-bit counter (1 … 128 cycles per bit). -/
+def Uart.cntW7 : Nat := 7
+/-- The 10-bit clocks-per-bit counter of the Arty and the OLED designs (1 … 1024). -/
+def Uart.cntW10 : Nat := 10
+
+------------------------------------------------------------------------------------
+-- Bit-level vocabulary (the same as the iCEstick project's `Icestick.Gates`).
+
+/-- The 9-bit shift register of a frame: the stop bit on top of the data. -/
+def Uart.frame9 {r : HwTy → Type} [Hw r] (d : r Uart.B8) : r Uart.B9 :=
+  Hw.cat (Hw.lit 1 1) d
+/-- Shift a bit in at the top of a 9-bit register (data goes out at the bottom). -/
+def Uart.shiftIn9 {r : HwTy → Type} [Hw r] (x : r Uart.B9) (b : r Uart.Bit) : r Uart.B9 :=
+  Hw.cat b (Hw.slice 1 8 x)
+/-- Shift a bit in at the top of an 8-bit register (data goes out at the bottom). -/
+def Uart.shiftIn8 {r : HwTy → Type} [Hw r] (x : r Uart.B8) (b : r Uart.Bit) : r Uart.B8 :=
+  Hw.cat b (Hw.slice 1 7 x)
+
+------------------------------------------------------------------------------------
+-- The baud generator: a `w`-bit counter that counts 0 … n-1; `tick` is high in the last
+-- cycle of each period, and only while `ce` is high (for a clock enable).
+
+/-- The baud generator's state: a `w`-bit counter. -/
+structure Uart.Baud (w : Nat) (r : HwTy → Type) where
+  cnt : r (HwTy.bits w)
+  deriving Bundle
+
+/-- The baud generator at rest (count 0). -/
+def Uart.Baud.init (w : Nat) : Uart.Baud w HwTy.El :=
+  Uart.Baud.mk (BitVec.ofNat w 0)
+
+/-- One cycle of the baud generator: count while `ce`, tick at `n - 1`, wrap to 0, hold
+when `ce` is low. -/
+def Uart.baudStep (w n : Nat) {r : HwTy → Type} [Hw r] (s : Uart.Baud w r) (ce : r Uart.Bit) :
+    r (HwTy.prod (Uart.Baud.code w) Uart.Bit) :=
+  let last := s.cnt === Hw.ofNat (n - 1);
+  let tick := ce &&& last;
+  let next := if tick then 0 else if ce then s.cnt + 1 else s.cnt;
+  Hw.pair (Uart.Baud.pack w (Uart.Baud.mk next)) tick
+
+/-- A baud generator as a circuit: input `ce`, output `tick`, with a `w`-bit counter. -/
+def Uart.baudCw (w n : Nat) : Circuit Uart.Bit Uart.Bit :=
+  Circuit.mk (Uart.Baud.code w) (Bundle.toEl (Uart.Baud.bundle w) (Uart.Baud.init w))
+    (fun s ce => Uart.baudStep w n (Uart.Baud.unpack w s) ce)
+
+/-- A baud generator with the default 16-bit counter. -/
+def Uart.baudC (n : Nat) : Circuit Uart.Bit Uart.Bit := Uart.baudCw Uart.cntW n
+
+------------------------------------------------------------------------------------
+-- The transmitter. State: the line (a register of its own, so the pin is driven by a
+-- flip-flop and cannot glitch), the number of bit periods left (0: idle), the baud
+-- counter, and a 9-bit shift register (stop bit on top of the data, least significant
+-- bit first; ones are shifted in). `start` with `data` is taken when idle and ignored
+-- otherwise.
+
+/-- The transmitter's state. -/
+structure Uart.Tx (w : Nat) (r : HwTy → Type) where
+  line : r Uart.Bit
+  left : r Uart.B4
+  cnt : r (HwTy.bits w)
+  sh : r Uart.B9
+  deriving Bundle
+
+/-- The transmitter at rest: the line high, no bit periods left. -/
+def Uart.Tx.init (w : Nat) : Uart.Tx w HwTy.El :=
+  Uart.Tx.mk (BitVec.ofNat 1 1) (BitVec.ofNat 4 0) (BitVec.ofNat w 0) (BitVec.ofNat 9 511)
+
+/-- The transmitter's input: a start pulse and the byte to send. -/
+structure Uart.TxIn (r : HwTy → Type) where
+  start : r Uart.Bit
+  data : r Uart.B8
+  deriving Bundle
+
+/-- The transmitter's output: the line and whether a frame is in progress. -/
+structure Uart.TxOut (r : HwTy → Type) where
+  line : r Uart.Bit
+  busy : r Uart.Bit
+  deriving Bundle
+
+/-- One cycle of the transmitter. -/
+def Uart.txStep (w n : Nat) {r : HwTy → Type} [Hw r] (s : Uart.Tx w r) (x : Uart.TxIn r) :
+    r (HwTy.prod (Uart.Tx.code w) Uart.TxOut.code) :=
+  let idle := s.left === 0;
+  let go := idle &&& x.start;
+  let b := Uart.baudStep w n (Uart.Baud.mk s.cnt) (Hw.lit 1 1);
+  let nb := Uart.Baud.unpack w (Hw.fst b);
+  let tick := ~~~idle &&& Hw.snd b;
+  let line := if go then 0 else if tick then Hw.slice 0 1 s.sh else s.line;
+  let left := if go then 10 else if tick then s.left - 1 else s.left;
+  let cnt := if go then 0 else nb.cnt;
+  let sh := if go then Uart.frame9 x.data else if tick then Uart.shiftIn9 s.sh (Hw.lit 1 1) else s.sh;
+  Hw.pair (Uart.Tx.pack w (Uart.Tx.mk line left cnt sh))
+    (Uart.TxOut.pack (Uart.TxOut.mk s.line (Hw.not idle)))
+
+/-- A transmitter as a circuit (8N1, `n` clocks per bit, `w`-bit counter). -/
+def Uart.txCw (w n : Nat) : Circuit Uart.TxIn.code Uart.TxOut.code :=
+  Circuit.bundled (Uart.Tx.bundle w) Uart.TxIn.bundle Uart.TxOut.bundle (Uart.Tx.init w)
+    (fun s x => Uart.txStep w n s x)
+
+/-- A transmitter with the default 16-bit counter. -/
+def Uart.txC (n : Nat) : Circuit Uart.TxIn.code Uart.TxOut.code := Uart.txCw Uart.cntW n
+
+------------------------------------------------------------------------------------
+-- The receiver. State: the phase (0: idle, 10: in the start bit, 9 … 2: data bits,
+-- 1: stop bit), the baud counter, the shift register, and the input synchroniser's two
+-- flip-flops. A low line when idle starts a frame; half a bit later the line must still
+-- be low (otherwise it was a glitch), and from there the line is sampled once per bit
+-- period, i.e. in the middle of each bit. `valid` is high for one cycle, at the sample of
+-- a stop bit that is high, and `data` is the byte then.
+
+/-- The receiver's state. -/
+structure Uart.Rx (w : Nat) (r : HwTy → Type) where
+  ph : r Uart.B4
+  cnt : r (HwTy.bits w)
+  sh : r Uart.B8
+  ff1 : r Uart.Bit
+  ff2 : r Uart.Bit
+  deriving Bundle
+
+/-- The receiver at rest, with its synchroniser idle high. -/
+def Uart.Rx.init (w : Nat) : Uart.Rx w HwTy.El :=
+  Uart.Rx.mk (BitVec.ofNat 4 0) (BitVec.ofNat w 0) (BitVec.ofNat 8 0)
+    (BitVec.ofNat 1 1) (BitVec.ofNat 1 1)
+
+/-- The receiver's input: the line (an asynchronous pin is fine: it is synchronised). -/
+structure Uart.RxIn (r : HwTy → Type) where
+  line : r Uart.Bit
+  deriving Bundle
+
+/-- The receiver's output: a one-cycle `valid` and the byte, and whether a frame is in
+progress. -/
+structure Uart.RxOut (r : HwTy → Type) where
+  valid : r Uart.Bit
+  data : r Uart.B8
+  busy : r Uart.Bit
+  deriving Bundle
+
+/-- One cycle of the receiver. -/
+def Uart.rxStep (w n : Nat) {r : HwTy → Type} [Hw r] (s : Uart.Rx w r) (x : Uart.RxIn r) :
+    r (HwTy.prod (Uart.Rx.code w) Uart.RxOut.code) :=
+  let idle := s.ph === 0;
+  let inStart := s.ph === 10;
+  let inStop := s.ph === 1;
+  let fall := idle &&& ~~~s.ff2;
+  let startTick := inStart &&& s.cnt === Hw.ofNat (Nat.div n 2 - 1);
+  let tick := ~~~idle &&& (~~~inStart &&& s.cnt === Hw.ofNat (n - 1));
+  let ph := if fall then 10
+    else if startTick then (if s.ff2 then 0 else 9)
+    else if tick then s.ph - 1 else s.ph;
+  let cnt := if fall ||| (startTick ||| tick) then 0 else s.cnt + 1;
+  let sh := if tick &&& ~~~inStop then Uart.shiftIn8 s.sh s.ff2 else s.sh;
+  Hw.pair (Uart.Rx.pack w (Uart.Rx.mk ph cnt sh x.line s.ff1))
+    (Uart.RxOut.pack (Uart.RxOut.mk (tick &&& (inStop &&& s.ff2)) s.sh (Hw.not idle)))
+
+/-- A receiver as a circuit (8N1, `n` clocks per bit, `w`-bit counter, with a
+two-flip-flop input synchroniser). -/
+def Uart.rxCw (w n : Nat) : Circuit Uart.RxIn.code Uart.RxOut.code :=
+  Circuit.bundled (Uart.Rx.bundle w) Uart.RxIn.bundle Uart.RxOut.bundle (Uart.Rx.init w)
+    (fun s x => Uart.rxStep w n s x)
+
+/-- A receiver with the default 16-bit counter. -/
+def Uart.rxC (n : Nat) : Circuit Uart.RxIn.code Uart.RxOut.code := Uart.rxCw Uart.cntW n
+
+------------------------------------------------------------------------------------
+-- The loopback example: the transmitter's line into the receiver, so a byte written comes
+-- back one frame later. Both parts keep their own state; the line is the only connection.
+
+/-- The loopback's state: a transmitter and a receiver. -/
+structure Uart.Loop (w : Nat) (r : HwTy → Type) where
+  tx : Uart.Tx w r
+  rx : Uart.Rx w r
+  deriving Bundle
+
+/-- The loopback's output. -/
+structure Uart.LoopOut (r : HwTy → Type) where
+  busy : r Uart.Bit
+  valid : r Uart.Bit
+  data : r Uart.B8
+  deriving Bundle
+
+/-- One cycle of the loopback: run the transmitter, feed its line to the receiver. -/
+def Uart.loopStep (w n : Nat) {r : HwTy → Type} [Hw r] (s : Uart.Loop w r) (x : Uart.TxIn r) :
+    r (HwTy.prod (Uart.Loop.code w) Uart.LoopOut.code) :=
+  let t := Circuit.inst (Uart.txCw w n) (Uart.Tx.pack w s.tx) (Uart.TxIn.pack x);
+  let to := Uart.TxOut.unpack (Hw.snd t);
+  let r := Circuit.inst (Uart.rxCw w n) (Uart.Rx.pack w s.rx) (Uart.RxIn.pack (Uart.RxIn.mk to.line));
+  let ro := Uart.RxOut.unpack (Hw.snd r);
+  Hw.pair
+    (Uart.Loop.pack w (Uart.Loop.mk (Uart.Tx.unpack w (Hw.fst t)) (Uart.Rx.unpack w (Hw.fst r))))
+    (Uart.LoopOut.pack (Uart.LoopOut.mk to.busy ro.valid ro.data))
+
+/-- The loopback as a circuit: input `start`/`data`, output `busy`/`valid`/`data`, with a
+`w`-bit counter. -/
+def Uart.loopbackCw (w n : Nat) : Circuit Uart.TxIn.code Uart.LoopOut.code :=
+  Circuit.bundled (Uart.Loop.bundle w) Uart.TxIn.bundle Uart.LoopOut.bundle
+    (Uart.Loop.mk (Uart.Tx.init w) (Uart.Rx.init w)) (fun s x => Uart.loopStep w n s x)
+
+/-- The loopback with the default 16-bit counter. -/
+def Uart.loopbackC (n : Nat) : Circuit Uart.TxIn.code Uart.LoopOut.code :=
+  Uart.loopbackCw Uart.cntW n
+
+------------------------------------------------------------------------------------
+-- The named configurations. `…7C` is the iCEstick's 7-bit counter and `…10C` the 10-bit
+-- counter of the Arty and OLED designs; the unnamed circuits above are the 16-bit
+-- default.
+
+/-- The iCEstick's baud generator (7-bit counter, 1 … 128 cycles per bit). -/
+def Uart.baud7C (n : Nat) : Circuit Uart.Bit Uart.Bit := Uart.baudCw Uart.cntW7 n
+/-- The iCEstick's transmitter (7-bit counter, 1 … 128 cycles per bit). -/
+def Uart.tx7C (n : Nat) : Circuit Uart.TxIn.code Uart.TxOut.code := Uart.txCw Uart.cntW7 n
+/-- The iCEstick's receiver (7-bit counter, 1 … 128 cycles per bit). -/
+def Uart.rx7C (n : Nat) : Circuit Uart.RxIn.code Uart.RxOut.code := Uart.rxCw Uart.cntW7 n
+/-- The iCEstick's loopback (7-bit counter, 1 … 128 cycles per bit). -/
+def Uart.loop7C (n : Nat) : Circuit Uart.TxIn.code Uart.LoopOut.code := Uart.loopbackCw Uart.cntW7 n
+
+/-- The Arty/OLED baud generator (10-bit counter, 1 … 1024 cycles per bit). -/
+def Uart.baud10C (n : Nat) : Circuit Uart.Bit Uart.Bit := Uart.baudCw Uart.cntW10 n
+/-- The Arty/OLED transmitter (10-bit counter, 1 … 1024 cycles per bit). -/
+def Uart.tx10C (n : Nat) : Circuit Uart.TxIn.code Uart.TxOut.code := Uart.txCw Uart.cntW10 n
+/-- The Arty/OLED receiver (10-bit counter, 1 … 1024 cycles per bit). -/
+def Uart.rx10C (n : Nat) : Circuit Uart.RxIn.code Uart.RxOut.code := Uart.rxCw Uart.cntW10 n
+/-- The Arty/OLED loopback (10-bit counter, 1 … 1024 cycles per bit). -/
+def Uart.loop10C (n : Nat) : Circuit Uart.TxIn.code Uart.LoopOut.code := Uart.loopbackCw Uart.cntW10 n

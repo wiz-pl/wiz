@@ -69,16 +69,16 @@ partial def erasable (c : TCtx) (ty : Val) : Bool := match whnf ty with
   | .vsort _ => .true
   | .vsize => .true
   | .vsizeLt _ => .true
-  | .vulift _ A => erasable c A
+  | .vulift _ _ A => erasable c A
   | t => isProp c t
 
 -- Is this `μ` shaped like the natural numbers? Its values are numbers at runtime.
 def isNatDesc (D : Val) : Bool := match whnf D with
-  | .vdarg S F => match whnf S with
+  | .vdarg _ S F => match whnf S with
     | .venum k => match Nat.beq k 2 with
       | .true => match whnf (vapp F (.vtag 2 0)) with
         | .vdret _ => match whnf (vapp F (.vtag 2 1)) with
-          | .vdrec _ E => match whnf E with
+          | .vdrec _ _ E => match whnf E with
             | .vdret _ => .true
             | _ => .false
           | _ => .false
@@ -105,19 +105,19 @@ partial def quickType (c : TCtx) (t : Tm) : Option Val := match t with
   | .app f a => match quickType c f with
     | .some fty => match whnf fty with
       -- (the argument evaluated only if the codomain mentions it, as in the kernel)
-      | .vpi _ _ env cod _ => .some (eval (.cons (match usesVar 0 cod with
+      | .vpi _ _ _ _ env cod => .some (eval (.cons (match usesVar 0 cod with
           | .true => eval (TCtx.env c) a
           | .false => .vtt) env) cod)
       | _ => inferTy c t
     | .none => .none
   | .fst p => match quickType c p with
     | .some pty => match whnf pty with
-      | .vsigma _ A _ _ _ => .some A
+      | .vsigma _ _ _ A _ _ => .some A
       | _ => inferTy c t
     | .none => .none
   | .snd p => match quickType c p with
     | .some pty => match whnf pty with
-      | .vsigma _ _ env B _ => .some (eval (.cons (vfst (eval (TCtx.env c) p)) env) B)
+      | .vsigma _ _ _ _ env B => .some (eval (.cons (vfst (eval (TCtx.env c) p)) env) B)
       | _ => inferTy c t
     | .none => .none
   | .ann _ ty => .some (eval (TCtx.env c) ty)
@@ -135,7 +135,7 @@ partial def quickType (c : TCtx) (t : Tm) : Option Val := match t with
   | .letUnit _ b => quickType c b
   | .down x => match quickType c x with
     | .some xty => match whnf xty with
-      | .vulift _ A => .some A
+      | .vulift _ _ A => .some A
       | _ => inferTy c t
     | .none => .none
   | _ => inferTy c t
@@ -184,12 +184,12 @@ def eraseCheck (c : TCtx) (t : Tm) (ty : Val) : ER := match erasable c ty with
   --<sol
   match t with
   | .lam b => match whnf ty with
-    | .vpi _ dom env cod _ => match eraseCheck (TCtx.bind c dom) b (eval (.cons (fresh (TCtx.lvl c)) env) cod) with
+    | .vpi _ _ _ dom env cod => match eraseCheck (TCtx.bind c dom) b (eval (.cons (fresh (TCtx.lvl c)) env) cod) with
       | .ok b' => .ok (.lam b')
       | e => e
     | _ => eraseInfer c t
   | .pair a b => match whnf ty with
-    | .vsigma q A env B _ =>
+    | .vsigma q _ _ A env B =>
       let ar : ER := match q with
         | .qz => .ok .erased
         | _ => eraseCheck c a A;
@@ -211,20 +211,20 @@ def eraseCheck (c : TCtx) (t : Tm) (ty : Val) : ER := match erasable c ty with
       | .ok i' => .ok (.obj 0 (etms1 i'))
       | e => e
     | _ => eraseInfer c t
-  | .darg S D => match whnf ty with
-    | .vdesc l I => match eraseCheck c D (.vpi .qw (eval (TCtx.env c) S) (.cons I .nil) (.descr l (.var 1)) .none) with
+  | .darg _ S D => match whnf ty with
+    | .vdesc l I => match eraseCheck c D (.vpi .qw (ln (l + 1)) (ln (l + 2)) (eval (TCtx.env c) S) (.cons I .nil) (.descr l (.var 1))) with
       | .ok D' => .ok (.obj 1 (etms2 .erased D'))
       | e => e
     | _ => eraseInfer c t
-  | .drec j D => match whnf ty with
+  | .drec _ j D => match whnf ty with
     | .vdesc _ I => match eraseCheck c j I with
       | .ok j' => match eraseCheck c D ty with
         | .ok D' => .ok (.obj 2 (etms2 j' D'))
         | e => e
       | e => e
     | _ => eraseInfer c t
-  | .dhrec H j D => match whnf ty with
-    | .vdesc _ I => match eraseCheck c j (.vpi .qw (eval (TCtx.env c) H) (.cons I .nil) (.var 1) .none) with
+  | .dhrec _ H j D => match whnf ty with
+    | .vdesc l I => match eraseCheck c j (.vpi .qw (ln (l + 1)) (ln (l + 1)) (eval (TCtx.env c) H) (.cons I .nil) (.var 1)) with
       | .ok j' => match eraseCheck c D ty with
         | .ok D' => .ok (.obj 3 (.cons .erased (etms2 j' D')))
         | e => e
@@ -237,7 +237,7 @@ def eraseCheck (c : TCtx) (t : Tm) (ty : Val) : ER := match erasable c ty with
     | .false => eraseCheck c x ty
   -- (Q4) `ULift` has no runtime content
   | .up a => match whnf ty with
-    | .vulift _ A => eraseCheck c a A
+    | .vulift _ _ A => eraseCheck c a A
     | _ => eraseInfer c t
   | .letE A v b =>
     let vA := eval (TCtx.env c) A;
@@ -317,7 +317,7 @@ def eraseInfer (c : TCtx) (t : Tm) : ER := match quickType c t with
         -- `m ◾ i payload` (K1: a case at 0 has an erased scrutinee, whose payload is ◾)
         let vI := eval (TCtx.env c) I;
         let vD := eval (TCtx.env c) D;
-        match eraseCheck c m (scaseMethodTy l q vI vD (eval (TCtx.env c) P) (eval (TCtx.env c) sz)) with
+        match eraseCheck c m (scaseMethodTy l v q vI vD (eval (TCtx.env c) P) (eval (TCtx.env c) sz)) with
         | .ok m' => match eraseCheck c i vI with
           | .ok i' => match q with
             | .qz => .ok (eapps m' (.cons .erased (etms2 i' .erased)))
@@ -345,7 +345,7 @@ def eraseApp (c : TCtx) (t : Tm) : ER := match quickType c (spineHead t) with
 def eraseArgs (c : TCtx) (f : ETm) (fty : Val) : List Tm → ER
   | .nil => .ok f
   | .cons a rest => match whnf fty with
-    | .vpi q dom env cod _ =>
+    | .vpi q _ _ dom env cod =>
       let ar : ER := match q with
         | .qz => .ok .erased
         | _ => eraseCheck c a dom;
@@ -1824,8 +1824,8 @@ def implOf (n : String) : List Foreign → Option String
     | _ => implOf n rest
 partial def eraseGlobals (sl : Bool) (ffi : List Foreign) (all : Array Global) (seen : List String) (acc : List Erased) : Nat → EraseR
   | .zero => .ok acc
-  | .succ k => match Array.getD all k (.mk "?" .star .star .star .nil) with
-    | .mk n ty v _ _ => match Bool.or (elemStr n seen) (isNative n) with
+  | .succ k => match Array.getD all k (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk n _ ty v _ _ _ => match Bool.or (elemStr n seen) (isNative n) with
       | .true => eraseGlobals sl ffi all seen acc k
       -- (an implemented definition's code is its implementation's)
       | .false => match implOf n ffi with
@@ -2144,6 +2144,7 @@ partial def ffiDecls (ffi : List Foreign) (seen : List String) : List Foreign �
       | .false => match elemS header seen with
         | .true => List.append helpers (ffiDecls ffi seen rest)
         | .false => .cons (.t ("#include <" +++ header +++ ">")) (List.append helpers (ffiDecls ffi (.cons header seen) rest))
+    | .code text => .cons (.t text) (ffiDecls ffi seen rest)
     | _ => ffiDecls ffi seen rest
 -- (stage 21q) A C function that applies the Wiz closure `f` (an owned value) to its C
 -- arguments `c0 …` of kinds `ps` (C values become Wiz values: `Nat`/`UInt64` from
@@ -2281,10 +2282,7 @@ def headerProtos : List Foreign → List Doc
         | .cons _ _ => commaSep ps') +++ ");")) (headerProtos rest)
     | _ => headerProtos rest
 def headerDocs (ffi : List Foreign) : List Doc :=
-  .cons (.t "/* generated by wiz build --lib: the functions the Wiz program exports (stage 9g) */")
-  (.cons (.t "#include <stdint.h>") (.cons (.t "#ifndef WIZ_VAL_DEFINED") (.cons (.t "#define WIZ_VAL_DEFINED")
-  (.cons (.t "typedef uintptr_t wiz_val;") (.cons (.t "#endif") (.cons (.t "void wiz_release(void *v);")
-  (.cons (.t "void wiz_retain(void *v);") (.cons (.t "long wiz_live_objects(void);") (headerProtos (List.reverseOf ffi .nil))))))))))
+  (.cons (.t "/* generated by wiz build --lib: the functions the Wiz program exports (stage 9g) */") (.cons (.t "/* ABI v1 (wiz-notes/prior-art/compilers-runtime-ffi.md, 2.2): kinds are explicit.") (.cons (.t "   n/u=uint64_t, f=double, s=const char* (borrowed in, caller-owned out), b=int,") (.cons (.t "   p=void* (+1 wrapped, borrowed for a call), w=wiz_val (+0 in, +1 out); e/v are omitted.") (.cons (.t "   Structs by value only through c_struct; native reps only on sealed types. */") (.cons (.t "#define WIZ_ABI_MAJOR 1") (.cons (.t "#define WIZ_ABI_MINOR 0") (.cons (.t "#include <stdint.h>") (.cons (.t "#ifndef WIZ_VAL_DEFINED") (.cons (.t "#define WIZ_VAL_DEFINED") (.cons (.t "typedef uintptr_t wiz_val;") (.cons (.t "#endif") (.cons (.t "void wiz_release(void *v);") (.cons (.t "void wiz_retain(void *v);") (.cons (.t "long wiz_live_objects(void);") (headerProtos (List.reverseOf ffi .nil)))))))))))))))))
 -- the C of a program's foreign functions (after the runtime)
 def ffiDocs (rc : Bool) (ffi : List Foreign) : List Doc :=
   let fs := List.reverseOf ffi .nil;
@@ -2337,7 +2335,7 @@ def mainDocs (lib : Bool) (m : String) : List Doc := match lib with
   | .false => .cons (.t m) .nil
 -- the program's C text, one `Doc` per line
 def genProgram (lib : Bool) (gs : Globals) : List Doc := match gs with
-  | .mk all _ _ ffi => match eraseGlobals .false ffi all .nil .nil (Array.size all) with
+  | .mk all _ _ ffi _ _ _ _ => match eraseGlobals .false ffi all .nil .nil (Array.size all) with
     | .err m => .cons (.t ("#error " +++ m)) .nil
     | .ok es0 =>
       -- (applications pushed into `case`s, as under reference counting: a match is then
@@ -2855,7 +2853,7 @@ def genCodeRC (sigs : StrMap (List Bool)) : CG → List Doc → List Doc → Lis
              "V get_" +++ g +++ "(void) { static V c = 0; if (!c) { c = native(w_" +++ g +++ ", " +++ Nat.toString k +++
              "); rt_root(&c); } inc(c); return c; }")) defs)) rest
 def genProgramRC (lib : Bool) (borrow : Bool) (gs : Globals) : List Doc := match gs with
-  | .mk all _ _ ffi => match eraseGlobals .true ffi all .nil .nil (Array.size all) with
+  | .mk all _ _ ffi _ _ _ _ => match eraseGlobals .true ffi all .nil .nil (Array.size all) with
     | .err m => .cons (.t ("#error " +++ m)) .nil
     | .ok es0 =>
       let es1 := pushGlobals es0;

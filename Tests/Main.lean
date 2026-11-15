@@ -1,5 +1,6 @@
 import Tests.Rig
 import Tests.Eval
+import Tests.Format
 import Tests.Check
 import Tests.Parser
 import Tests.Elab
@@ -11,6 +12,7 @@ import Tests.Meta
 import Tests.Lint
 import Tests.Allocs
 import Tests.Scaling
+import Tests.FalseFuzz
 import Tests.Feral
 import Tests.Tower
 import Tests.Native
@@ -30,6 +32,7 @@ def moduleGroups : List Group :=
   Doc.groups ++
   ElabFix.groups ++
   Feral.groups ++
+  Format.groups ++
   Eval.groups ++
   Grail.groups ++
   Lint.groups ++
@@ -247,6 +250,9 @@ def main (args : List String) : IO UInt32 := do
   -- the property harness's long run (`Tests/Groups/Prop.lean`)
   | "--prop-long" :: rest => Prop.longMain rest
   | "--prop-replay" :: rest => Prop.replayMain rest
+  | "--false-fuzz" :: rest => FalseFuzz.main rest
+  | "--false-fuzz-replay" :: rest => FalseFuzz.replayMain rest
+  | "--false-fuzz-check" :: rest => FalseFuzz.checkMain rest
   | ["--prop-no-sizes"] => Prop.flagMain true false
   | ["--prop-trace"] => Prop.flagMain false true
   | ["--probe-reuse"] => Scaling.probeReuse

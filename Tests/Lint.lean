@@ -177,7 +177,7 @@ def termClassify : String → Option (List Nat)
   | "Term R" => some [1, 0]
   | "List (Term R)" | "Array (Term R)" => some [2, 0]
   | "Level" | "Option Level" => some [0, 1]
-  | "List Level" => some [0, 2]
+  | "List Level" | "BinderSorts" => some [0, 2]
   | "Option (Name × List Level × List (Term R))" => some [2, 2]
   | "Name" | "Nat" | "BinderInfo" | "R" | "List Name" => some [0, 0]
   | _ => none
@@ -187,13 +187,13 @@ def termTable : List TermRow := [
   ⟨"var", [], 0, fun _ _ => .var 0⟩,
   ⟨"const", [], 2, fun _ l => .const "c" [l 0, l 1]⟩,
   ⟨"sort", [], 1, fun _ l => .sort (l 0)⟩,
-  ⟨"pi", [0, 0, 1], 1, fun c l => .pi "x" .default (c 0) (c 1) (c 2) (some (l 0))⟩,
+  ⟨"pi", [0, 0, 1], 2, fun c l => .pi "x" .default (c 0) (c 1) (c 2) ⟨l 0, l 1⟩⟩,
   ⟨"lam", [1], 0, fun c _ => .lam "x" (c 0)⟩,
   ⟨"app", [0, 0], 0, fun c _ => .app (c 0) (c 1)⟩,
   ⟨"letE", [0, 0, 0, 1], 0, fun c _ => .letE "x" (c 0) (c 1) (c 2) (c 3)⟩,
   ⟨"ann", [0, 0], 0, fun c _ => .ann (c 0) (c 1)⟩,
   ⟨"mvar", [], 0, fun _ _ => .mvar 0⟩,
-  ⟨"sigma", [0, 0, 1], 1, fun c l => .sigma "x" (c 0) (c 1) (c 2) (some (l 0))⟩,
+  ⟨"sigma", [0, 0, 1], 2, fun c l => .sigma "x" (c 0) (c 1) (c 2) ⟨l 0, l 1⟩⟩,
   ⟨"pair", [0, 0], 0, fun c _ => .pair (c 0) (c 1)⟩,
   ⟨"fst", [0], 0, fun c _ => .fst (c 0)⟩,
   ⟨"snd", [0], 0, fun c _ => .snd (c 0)⟩,
@@ -236,7 +236,7 @@ def termTable : List TermRow := [
   ⟨"coit", [0, 0, 0, 0, 0, 0], 1, fun c l => .coit (l 0) (c 0) (c 1) (c 2) (c 3) (c 4) (c 5)⟩,
   ⟨"natLit", [], 0, fun _ _ => .natLit 3⟩,
   ⟨"natOp", [0, 0], 0, fun c _ => .natOp "nat.add" #[c 0, c 1]⟩,
-  ⟨"ulift", [0], 1, fun c l => .ulift (l 0) (c 0)⟩,
+  ⟨"ulift", [0], 2, fun c l => .ulift (l 0) (l 1) (c 0)⟩,
   ⟨"up", [0], 0, fun c _ => .up (c 0)⟩,
   ⟨"down", [0], 0, fun c _ => .down (c 0)⟩,
   ⟨"prf", [0], 1, fun c l => .prf (l 0) (c 0)⟩
@@ -416,7 +416,7 @@ def valClassify : String → Option (List Nat)
   | "Val R" | "List (Val R)" => some [1, 0, 0]
   | "Closure R" => some [0, 1, 0]
   | "Level" | "Option Level" => some [0, 0, 1]
-  | "List Level" => some [0, 0, 2]
+  | "List Level" | "BinderSorts" => some [0, 0, 2]
   | "Option (Name × List Level × List (Val R))" => some [2, 0, 2]
   -- a head and a spine have their own tables; a thunk is the value of what the other
   -- fields describe (an unfolding, a proof's value); an `ecase`'s branches and a
@@ -431,9 +431,9 @@ def stuck : Val R := .neutral (.global "stuck" []) #[]
 def valTable : List ValRow := [
   ⟨"neutral", 0, [], 0, fun _ _ _ => .neutral (.global "h" []) #[]⟩,
   ⟨"sort", 0, [], 1, fun _ _ l => .sort (l 0)⟩,
-  ⟨"pi", 2, [1], 1, fun c k l => .pi "x" .default (c 0) (c 1) (k 0) (some (l 0))⟩,
+  ⟨"pi", 2, [1], 2, fun c k l => .pi "x" .default (c 0) (c 1) (k 0) ⟨l 0, l 1⟩⟩,
   ⟨"lam", 0, [1], 0, fun _ k _ => .lam "x" (k 0)⟩,
-  ⟨"sigma", 2, [1], 1, fun c k l => .sigma "x" (c 0) (c 1) (k 0) (some (l 0))⟩,
+  ⟨"sigma", 2, [1], 2, fun c k l => .sigma "x" (c 0) (c 1) (k 0) ⟨l 0, l 1⟩⟩,
   ⟨"pair", 2, [], 0, fun c _ _ => .pair (c 0) (c 1)⟩,
   ⟨"unit", 0, [], 1, fun _ _ l => .unit (l 0)⟩,
   ⟨"tt", 0, [], 0, fun _ _ _ => .tt⟩,
@@ -458,7 +458,7 @@ def valTable : List ValRow := [
   ⟨"scofix", 7, [], 1, fun c _ l => .scofix (l 0) (c 0) (c 1) (c 2) (c 3) (c 4) (c 5) (c 6)⟩,
   ⟨"coit", 6, [], 1, fun c _ l => .coit (l 0) (c 0) (c 1) (c 2) (c 3) (c 4) (c 5)⟩,
   ⟨"natLit", 0, [], 0, fun _ _ _ => .natLit 3⟩,
-  ⟨"ulift", 1, [], 1, fun c _ l => .ulift (l 0) (c 0)⟩,
+  ⟨"ulift", 1, [], 2, fun c _ l => .ulift (l 0) (l 1) (c 0)⟩,
   ⟨"up", 1, [], 0, fun c _ _ => .up (c 0)⟩,
   ⟨"unfold", 0, [], 2, fun _ _ l => .unfold "f" [l 0, l 1] #[] (thunk stuck)⟩,
   ⟨"lazyInd", 6, [], 2, fun c _ l => .lazyInd (l 0) (c 0) (c 1) (l 1) (c 2) (c 3) (c 4) (c 5) #[] (thunk stuck)⟩
@@ -576,12 +576,13 @@ def levelTable : List LevelRow := [
   ⟨"max", 2, fun c => .max (c 0) (c 1)⟩,
   ⟨"imax", 2, fun c => .imax (c 0) (c 1)⟩,
   ⟨"param", 0, fun _ => .param "p"⟩,
-  ⟨"mvar", 0, fun _ => .mvar 0⟩
+  ⟨"mvar", 0, fun _ => .mvar 0⟩,
+  ⟨"hole", 0, fun _ => .hole⟩
 ]
 
 def levelCtorName : Level → String
   | .zero => "zero" | .succ _ => "succ" | .max .. => "max" | .imax .. => "imax"
-  | .param _ => "param" | .mvar _ => "mvar"
+  | .param _ => "param" | .mvar _ => "mvar" | .hole => "hole"
 
 def checkLevels : Failures Unit := do
   for row in levelTable do
@@ -862,6 +863,12 @@ def wizFns : List WizFn := [
     exempt := closedConst "constants are compared by name" },
   { fn := "spineSame", ty := "Spine", arg := 1, binary := true, defaultOk := true },
   { fn := "valSame", ty := "Val", arg := 1, binary := true, defaultOk := true },
+  -- (mandatory sorts) the sorts pass skips a term without holes: a hole missed here is
+  -- one the pass does not fill (a kernel error, never unsoundness)
+  { fn := "tmHasHole", ty := "Tm", arg := 0, childTys := ["Tm", "Tms", "Lvl"],
+    exempt := closedConst "a constant's value and type are closed and were filled when it was declared" ++
+      [("const", "levels", "a constant's levels are never holes")] },
+  { fn := "lvlHasHole", ty := "Lvl", arg := 0, childTys := ["Lvl"] },
 ]
 
 /-! ## The lint against a broken traversal
@@ -910,7 +917,7 @@ def panicSites : List (String × Term R) := [
 def hintCarrier (X : Term R) : Decl R :=
   { name := "carrier", value := none
     type := .pi "x" .default (.qlit .one)
-      (.mu 0 (.unit 1) (.dret .tt) .tt .szInf (some ("hint", [], [X]))) (.unit 1) none }
+      (.mu 0 (.unit 1) (.dret .tt) .tt .szInf (some ("hint", [], [X]))) (.unit 1) ⟨1, 1⟩ }
 
 /-- `tests --panic-probe MODE SITE`: check `hintCarrier` of the site's term (`eval`: just
 evaluate `fst ()` and print the constructor of the value; `eval:SITE`: evaluate the site's
