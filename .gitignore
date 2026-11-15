@@ -13,6 +13,7 @@ devenv.local.yaml
 .lake
 .wiz-cache/
 web/out/
+doc-site/
 
 # grail
 .grail/

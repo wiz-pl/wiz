@@ -1,0 +1,102 @@
+-- The DDR interface (`import Hdl.Ddr`) against the model controller: the native port's
+-- handshake (valid/ready for requests, rvalid/rdata for reads), a byte-masked write, and
+-- the value and fast netlist simulations agreeing. Checked by the `rune` test group.
+--
+-- The requests are fixed at meta level: writes are accepted on consecutive cycles (the
+-- model has no read response in flight), and each read is followed by an idle cycle
+-- because `ready` is low while the read response is presented.
+import Hdl.Core
+import Hdl.Sim
+import Hdl.Ddr
+import IO
+
+def Bit : HwTy := HwTy.bits 1
+
+def yes (b : Bool) : String := match b with
+  | .true => "yes"
+  | .false => "no"
+
+def leavesEq : List (List Nat) → List (List Nat) → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
+  | _, _ => .false
+
+def shows : List Nat → String
+  | .nil => ""
+  | .cons x xs => Hdl.show x <+> " " <+> shows xs
+
+-- 128-bit patterns: all ones less `k`
+def word (k : Nat) : Nat := Nat.pow 2 128 - 1 - k
+
+def req (valid we addr wdata wmask : Nat) : HwTy.El Ddr.Req.code :=
+  Bundle.toEl Ddr.Req.bundle
+    (Ddr.Req.mk (BitVec.ofNat 1 valid) (BitVec.ofNat 1 we) (BitVec.ofNat 24 addr)
+      (BitVec.ofNat 128 wdata) (BitVec.ofNat 16 wmask))
+
+def idle : HwTy.El Ddr.Req.code := req 0 0 0 0 0
+
+-- four full writes, then two masked writes to the same address (bytes 0-7, then 8-15)
+def writes : List (HwTy.El Ddr.Req.code) :=
+  .cons (req 1 1 256 (word 1) 65535)
+  (.cons (req 1 1 257 (word 2) 65535)
+  (.cons (req 1 1 258 (word 3) 65535)
+  (.cons (req 1 1 259 (word 4) 65535)
+  (.cons (req 1 1 512 (word 0) 255)
+  (.cons (req 1 1 512 0 65280) .nil)))))
+
+-- five reads, each with an idle cycle while its response is presented
+def reads : List (HwTy.El Ddr.Req.code) :=
+  .cons (req 1 0 256 0 0)
+  (.cons idle
+  (.cons (req 1 0 257 0 0)
+  (.cons idle
+  (.cons (req 1 0 258 0 0)
+  (.cons idle
+  (.cons (req 1 0 259 0 0)
+  (.cons idle
+  (.cons (req 1 0 512 0 0)
+  (.cons idle
+  (.cons idle .nil))))))))))
+
+def ins : List (HwTy.El Ddr.Req.code) := List.append writes reads
+
+def responses : List (List Nat) → List Nat
+  | .nil => .nil
+  | .cons o os => match Nat.beq (Hdl.nthD 0 o 1) 1 with
+    | .true => List.cons (Hdl.nthD 0 o 2) (responses os)
+    | .false => responses os
+
+def countReadyLow : List (List Nat) → Nat
+  | .nil => 0
+  | .cons o os => match Nat.beq (Hdl.nthD 0 o 0) 0 with
+    | .true => Nat.succ (countReadyLow os)
+    | .false => countReadyLow os
+
+def countRvalid : List (List Nat) → Nat
+  | .nil => 0
+  | .cons o os => match Nat.beq (Hdl.nthD 0 o 1) 1 with
+    | .true => Nat.succ (countRvalid os)
+    | .false => countRvalid os
+
+-- a valid request in a cycle where the controller is ready
+def accepted : List (HwTy.El Ddr.Req.code) → List (List Nat) → Nat
+  | .cons q qs, .cons o os =>
+    let v := Hdl.nthD 0 (HwTy.leaves Ddr.Req.code q) 0;
+    match Bool.and (Nat.beq v 1) (Nat.beq (Hdl.nthD 0 o 0) 1) with
+    | .true => Nat.succ (accepted qs os)
+    | .false => accepted qs os
+  | _, _ => 0
+
+def expect : List Nat :=
+  .cons (word 1) (.cons (word 2) (.cons (word 3) (.cons (word 4) (.cons (Nat.pow 2 64 - 1) .nil))))
+
+def main : IO Unit := do
+  let c := Ddr.modelC;
+  let outs := Circuit.runLeaves c ins;
+  let got := responses outs;
+  IO.println ("ddr: sim " <+> yes (leavesEq outs (Circuit.simFast c ins))
+    <+> ", accepted " <+> Hdl.show (accepted ins outs)
+    <+> ", ready-low " <+> Hdl.show (countReadyLow outs)
+    <+> ", rvalid " <+> Hdl.show (countRvalid outs)
+    <+> ", values " <+> yes (Hdl.natsEq got expect)
+    <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "ddr" c)))
