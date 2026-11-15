@@ -232,3 +232,22 @@ the parse-recovery, exec-sink, bounds, points-to-argument and warning-noise gaps
 Limits: the shim is sequential (one parser, one tree, one file) and tree-sitter-c is the
 only grammar. Threads, a native store shared across files, and tree-sitter queries are
 the remaining S1 work.
+
+## Real CVE corpus (opt-in)
+
+`bench/cases/cve-*/` holds twelve reduced reproducers of historical CVEs (CWE-78/134/22/
+416/476/190/787/125), each with its upstream vulnerable revision, licence and expected
+result in `case.json`. `scripts/cve-bench.sh` compiles each one with a plain C compiler,
+runs `scry taint` per case with `--timeout`/`--max-nodes`, and records wall time, peak
+RSS, expected/matched findings and extras. It is **opt-in only**: it is not part of
+`scry bench`, `grail test`, the fast gate or CI, and one case takes about a minute.
+
+```sh
+cd scry
+scripts/cve-bench.sh                       # build/cve/summary.{json,md}
+scripts/cve-bench.sh --case cve-2020-1752  # one case
+```
+
+The checked-in table, the honest precision/recall (0/6 in-scope CVEs detected today),
+the per-case miss reasons and the top analysis gaps are in `bench/cve.md`. Treat the
+synthetic `scry bench` rates as a regression corpus, not as real-world recall.
