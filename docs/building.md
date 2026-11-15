@@ -44,7 +44,12 @@ regression fails the run early; the `native` group also covers the `lib/` part a
 `hdl-verified` the example's inside the shards;
 `scripts/trust-ledger.sh --update` regenerates the
 baseline (build the driver first). `--print` shows the recorded sources; the baseline's
-header explains the format.
+header explains the format. Two branches that review different ledger rows need no
+hand merge: install the local git driver once per checkout with
+`scripts/setup-trust-merge.sh` (the committed `.gitattributes` selects it for this
+file; the rule and its ambiguity failure are in `docs/trust-ledger.md`). A local
+driver is not cloned and CI cannot set it, so run `scripts/trust-ledger.sh --check`
+after a merge; `scripts/trust-ledger-merge_test.sh` tests the driver without a build.
 
 ### Running cases in parallel (`--jobs`)
 
