@@ -35,6 +35,10 @@ structure Toolchain where
   regionCache : Bool := false
   /-- module roots searched after the standard library -/
   searchPath : List System.FilePath := []
+  /-- `--cache-verify off|warn|strict`: check cache output against its manifest (and
+  write manifests to the write cache); default `warn`. It is not in `Toolchain.id` (a
+  policy change must not invalidate entries). -/
+  cacheVerify : String := "warn"
   /-- (27a) `--trust-native`: `native_refl` may decide equations by running them -/
   trustNative : Bool := false
   /-- (27a) `--native-fuel N`: the interpreter steps one `native_refl` may take (none: the
@@ -54,7 +58,25 @@ namespace Toolchain
 
 def words (s : String) : List String := (s.splitOn " ").filter (· ≠ "")
 
-/-- What identifies the generated code: compilers and flags (not the cache or roots). -/
+/-- The host target's strong name: the platform triple and pointer width. It is a SHA-256
+digest (not the 64-bit `id`) because it names a namespace: two data layouts must never
+share cache entries. A future `--target` replaces the triple and width. -/
+def targetTag (_t : Toolchain) : String :=
+  let triple := System.Platform.target
+  Smt.Sha256.hexFramed "wiz-target-id-v1" [if triple.isEmpty then "unknown" else triple,
+    toString System.Platform.numBits]
+
+/-- What identifies the generated code, as a SHA-256 digest of the target and the
+compilers/flags (not the cache or roots). `id` remains the fast 64-bit index for in-memory
+tables and job names; this is the strong namespace for manifests, regions and cache keys. -/
+def tag (t : Toolchain) : String :=
+  Smt.Sha256.hexFramed "wiz-toolchain-id-v1"
+    ([t.targetTag, t.cc, " ".intercalate t.cflags, " ".intercalate t.ldflags,
+      " ".intercalate t.libs, t.llc, " ".intercalate t.gmp,
+      " ".intercalate t.gcCflags, " ".intercalate t.gcLdflags])
+
+/-- What identifies the generated code: compilers and flags (not the cache or roots).
+Fast (64-bit) and for indexing only; `tag` is the SHA-256 namespace used by the cache. -/
 def id (t : Toolchain) : UInt64 :=
   hash (toString [t.cc, " ".intercalate t.cflags, " ".intercalate t.ldflags, " ".intercalate t.libs, t.llc, " ".intercalate t.gmp,
     " ".intercalate t.gcCflags, " ".intercalate t.gcLdflags])
@@ -73,6 +95,7 @@ def set (t : Toolchain) (key value : String) : Option Toolchain :=
   | "gc-ldflags" => some { t with gcLdflags := words value }
   | "cache" => some { t with cacheDir := some (System.FilePath.mk value) }
   | "cache-ro" => some { t with readCaches := t.readCaches ++ [System.FilePath.mk value] }
+  | "cache-verify" => some { t with cacheVerify := value }
   | "region-cache" => some { t with regionCache := value == "true" }
   | "root" => some { t with searchPath := t.searchPath ++ [System.FilePath.mk value] }
   | "native-fuel" => value.toNat?.map fun n => { t with nativeFuel := some n }
@@ -87,6 +110,7 @@ no read caches; a later `--cache` or `--cache-ro` adds one again), `-I DIR`, (27
 `--trust-native`, `--native-fuel N`, (28b) `--sat-solver CMD`, `--solver-timeout MS`,
 (28a) `--trust-smt`, `--smt-solver CMD` (flags only, not settings of a grail file). -/
 partial def parseFlags (t : Toolchain) : List String → Toolchain × List String
+  | "--cache-verify" :: mode :: rest => parseFlags { t with cacheVerify := mode } rest
   | "--no-cache" :: rest => parseFlags { t with cacheDir := none, readCaches := [] } rest
   | "--region-cache" :: rest => parseFlags { t with regionCache := true } rest
   | "--trust-native" :: rest => parseFlags { t with trustNative := true } rest
@@ -98,6 +122,9 @@ partial def parseFlags (t : Toolchain) : List String → Toolchain × List Strin
     | none => let (t, r) := parseFlags t rest; (t, "--solver-timeout" :: ms :: r)
   | "-I" :: dir :: rest => parseFlags { t with searchPath := t.searchPath ++ [System.FilePath.mk dir] } rest
   | flag :: v :: rest =>
+    if flag.startsWith "--cache-verify=" then
+      parseFlags { t with cacheVerify := (flag.drop 15).toString } (v :: rest)
+    else
     match (if flag.startsWith "--" then t.set (flag.drop 2).toString v else none) with
     | some t' => parseFlags t' rest
     | none => let (t, r) := parseFlags t (v :: rest); (t, flag :: r)
@@ -117,6 +144,7 @@ def toFlags (t : Toolchain) : List String :=
    | some d => reads ++ ["--cache", d.toString]
    | none => if t.readCaches.isEmpty then ["--no-cache"] else "--no-cache" :: reads) ++
   (if t.regionCache then ["--region-cache"] else []) ++
+  (if t.cacheVerify == "warn" then [] else ["--cache-verify", t.cacheVerify]) ++
   t.searchPath.flatMap (fun d => ["-I", d.toString]) ++
   (if t.trustNative then ["--trust-native"] else []) ++
   (match t.nativeFuel with | some n => ["--native-fuel", toString n] | none => []) ++
@@ -154,7 +182,8 @@ def render (t : Toolchain) : String :=
   s!"gc-cflags {" ".intercalate t.gcCflags}\ngc-ldflags {" ".intercalate t.gcLdflags}\n" ++
   String.join (t.readCaches.map fun d => s!"cache-ro {d}\n") ++
   s!"cache {(t.cacheDir.map toString).getD "(off)"}\nregion-cache {t.regionCache}\n" ++
-  s!"roots {" ".intercalate (t.searchPath.map toString)}\n"
+  s!"roots {" ".intercalate (t.searchPath.map toString)}\n" ++
+  s!"cache-verify {t.cacheVerify}\n"
 
 end Toolchain
 end Wiz

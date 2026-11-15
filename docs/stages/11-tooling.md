@@ -97,6 +97,82 @@ counts and prints (`cache prune: would remove 12 files (… .wizc, … .wizm, �
 be at least 1, and a read-only layer cannot be pruned even if it is passed with `--cache-ro`
 (the command says so).
 
+**Output manifests (`--cache-verify`, integrity only).** A cache key is an *input* hash;
+until this stage the bytes an entry returns (its *output*) were trusted because they were
+in the cache. `wiz` now writes a manifest with a SHA-256 of each entry's bytes and checks
+it before applying the effect: a truncated, rewritten or swapped entry is a **miss** (the
+text entry, the next layer, or re-elaboration answers), never a wrong result. There is no
+signature yet — see P3 below.
+
+The layout is one manifest per module (the note's P2) plus a per-layer generation index
+(P1):
+
+```
+<cache>/manifest.d/<binary ⊕ fast key>-<sha256 key>.wizmf   -- one module, or one root file
+<cache>/manifest.sexpr                                      -- generation index for the layer
+<cache>/<binary ⊕ fast key>-<sha256 key>.wizr               -- one module's region
+```
+
+**Strong cache keys.** The 64-bit `hash`/`mixHash` keys are indexes, not collision-resistant
+digests. A `Cache.Key` therefore carries a fast half (the old key, used by in-memory
+tables, `.wizc` names and Lean's maps) and a SHA-256 half (used by region and manifest names,
+manifest entries and verification). The SHA-256 half is domain-separated and
+length-prefixed (`Wiz.Smt.Sha256.framed`): `["ab", "c"]` and `["a", "bc"]`, or a module key
+and a toolchain id, cannot share a preimage. Module keys hash the exact text, headers,
+`include_str` contents (under an `includeKey-v1` domain), imports and trust flag; command
+keys chain the previous SHA-256 key and the command text;
+`Toolchain.tag` and `Toolchain.targetTag` are the strong toolchain and target namespaces
+(the 64-bit `Toolchain.id` remains the build/job index). A manifest or region requires both
+halves, so a 64-bit collision is a miss (the text path or elaboration answers), never a
+wrong effect. Format 1 manifests and format 2 regions are ignored by the new names and
+regenerated; no unmigrated file is read under a strong key.
+
+A module manifest lists its `.wizc` entries and its `.wizr` region with `key`, `key-sha`,
+`file`, `size`, `sha256` and `format` (`salt` for text, `regionFormat` for a region), plus
+`module`, `binary` (`binaryId`), `toolchain` (SHA-256 of the executable), `toolchain-tag`,
+`target-tag`, `rig`, `prev` (the previous manifest root) and `valid-until`. Its `root` is
+an RFC 6962-style Merkle root over a metadata leaf and the entries, so editing
+`prev`/`valid-until` breaks the root too. `manifest.sexpr` records the generation number,
+the previous root, the optional expiry and one record per module (fast key, SHA-256 key,
+name, file, digest), with its own root. Only the write cache is ever written; a
+`--cache-ro` layer is read and byte-identical after a run. The `.wizr` sidecar (`.wizs`) is
+still checked first: a corrupt region never reaches the type-erased reader even when no
+manifest exists.
+
+The policy is `--cache-verify off|warn|strict` (`--cache-verify=MODE` also works):
+
+* `off` — no manifests are read or written; the cache is exactly as before.
+* `warn` (default) — a manifested key is served only if its bytes match. A new key has a
+  SHA-256 half, so an unlisted write-cache entry is a miss (nothing binds its bytes to the
+  strong input key); an old fast-only key still falls through, and `--cache-verify off`
+  restores the old lookup. An old local cache is one cold pass, then it is rewritten with
+  manifests. A `--cache-ro` layer is **strict**: an entry there is used only through a
+  manifest, so deleting a manifest cannot downgrade a read-only layer to unverified. When
+  a read-only layer has bytes for a module but no manifest, `wiz` warns once per layer (an
+  empty layer is silent).
+* `strict` (alias `require`) — only manifested entries are used anywhere; an unlisted key
+  is a miss. A cold run writes the manifests, so it becomes strict-warm in one pass.
+
+A manifest whose root does not validate, whose `valid-until` (or whose layer generation's)
+has passed, or whose entry digest does not match is a miss: it is not repaired in a
+read-only layer. `wiz cache verify [--strict]` scans every layer's manifests against the
+bytes (exit 1 on a mismatch, a missing file, an expired manifest, or — with
+`--strict`/`--cache-ro` — an unmanifested keyed file); `wiz cache manifest [--valid-days N]` rebuilds the generation
+index (`prev` chains it to the old one) and can set its expiry. `--cache-verify-stats`
+prints the per-run counts (manifests, verified entries/regions, mismatches, unverified).
+
+Compatibility default: with no manifest (or `--cache-verify off`) existing caches keep
+their old behaviour; the write cache's old unverified path is still available in `warn`.
+Manifests are additive files — `.wizc`, `.wizr` and `.wizs` keep their names and bytes,
+so an unmanifested cache is byte-identical and no key or salt changes.
+
+**Not signatures (P3).** An unsigned manifest detects corruption and a mirror that swaps
+a listed entry, but a writer who controls the manifest can rewrite both it and the bytes,
+and can delete it (in `warn`, for the write cache). The missing half is an external
+signature over the manifest (DSSE/minisign/`ssh-keygen -Y sign`), a key-id policy with
+revocation, and a witnessed log; the attestation prior-art note calls this E2/P3. So do
+not read these manifests as provenance: they are integrity, not authenticity.
+
 Next: finer dependencies (re-elaborate only what an edit affects, not everything
 after it).
 
