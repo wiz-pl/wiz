@@ -167,9 +167,14 @@ def preludeLoader : IO (Name → Option String) := do
   let functor ← IO.FS.readFile "lib/Functor.wiz"
   let logic ← IO.FS.readFile "lib/Logic.wiz"
   let text ← IO.FS.readFile "lib/Text.wiz"
+  -- (`IO`, `Std` and `Sys`: `#eval`/`#run` of a `Bytes` value needs `lib/IO.wiz`)
+  let io ← IO.FS.readFile "lib/IO.wiz"
+  let std ← IO.FS.readFile "lib/Std.wiz"
+  let sys ← IO.FS.readFile "lib/Sys.wiz"
   pure fun m => if m == "Prelude" then some prelude else if m == "Word" then some word
     else if m == "Functor" then some functor else if m == "Logic" then some logic
-    else if m == "Text" then some text else none
+    else if m == "Text" then some text else if m == "IO" then some io
+    else if m == "Std" then some std else if m == "Sys" then some sys else none
 
 /-- `ok`, with `lib/` available to `import` (the tests run from the package root). -/
 

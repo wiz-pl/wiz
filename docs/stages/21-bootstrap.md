@@ -913,8 +913,26 @@ self-hosted one (collector and reference counting, which also checks for leaks);
 `import_c` with a buffer argument and a struct with a byte-array field passed to C and
 read back; and a `Bytes` `c_struct` field without a header rejected by both frontends.
 
-**Not done:** `Bytes` in `#eval`/`#reduce` (the self-hosted evaluator has no runtime),
-the encodings (`ofUtf8`/`toUtf8`, `ofLatin1`/`toLatin1` need `Except` in the Prelude),
-`Bytes.ofU8s`/`toU8s` (`lib/WordBytes.wiz`), byte I/O on files and descriptors
-(`FS.readBytes`, `File.readBytes`, `Fd.read`), and the rest of the native surface
-(22l/29).
+**Then** (the same stage, extended): the encodings (`ofUtf8`/`toUtf8`, `ofLatin1`/`toLatin1`,
+with `Except` added to the Prelude), `ofString`/`toString` with the C-string rule,
+`Bytes.ofArray`/`toArray` (in `Std`, where `Array` is) and a **model** for `#reduce`:
+`Bytes` is a private constructor over a `List Nat` in the Prelude, so `#reduce
+Bytes.size (Bytes.ofList …)`, `Bytes.eq`, `Bytes.get`, `Bytes.slice` and `Bytes.toList`
+compute and print in the checker's usual constructor style; the nine names are still in
+`nativeNames`, so compiled code is unchanged (the definitions' bodies are never
+compiled, and no constructor value can be built outside them). A buffer pointer may also
+be spelled `char *` (with a length), `unsigned char *` or `signed char *`/`uint8_t *`
+(typedef-resolved), and a `c_struct` parameter is now a `gstruct` in `glueGtyOfKind`
+(it was `.gint`, so glue could take a struct but the C parameter was wrong). The
+borrowed/owned rule and the struct-field copy are in `docs/stages/09-ffi.md` 9l.
+
+**Tests** (group `selfhost`): the encodings, `Array ↔ Bytes` and the
+slice/append/eq boundaries, a `char *`/`uint8_t *`/`unsigned char *` buffer argument
+(borrowed: the buffer is used after the call) and a `Bytes` `c_struct` field through
+`glue` (passed to C and returned), each compiled by the Lean toolchain and by the
+self-hosted one (collector and reference counting); `=ffi` has `#eval`/`#run` of the
+operations in the host interpreters.
+
+**Not done:** `Bytes.ofU8s`/`toU8s` (`lib/WordBytes.wiz`, no `U8` in the Prelude),
+`U8Array ↔ Bytes` (29), byte I/O on files and descriptors (`FS.readBytes`,
+`File.readBytes`, `Fd.read`), and the rest of the native surface (22l/29).

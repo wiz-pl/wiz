@@ -1115,6 +1115,112 @@ def bytesFfiProgram (header : String) : String :=
 
 def bytesFfiExpected : String := "198\n70\n[120, 121, 0, 122]\n5\n198\n"
 
+/-- (21ac) The encodings of `lib/IO.wiz`: `ofUtf8`/`toUtf8` (every character, NULs
+included; the decoder checks overlong forms and surrogates), `ofString`/`toString`
+(through a C string: they stop at a NUL) and `ofLatin1`/`toLatin1` (one byte per
+character, an error above 255). Prints the list below. -/
+def bytesEncProgram : String :=
+  "import Std\ndef main : IO Unit := do\n" ++
+  "  let u := Bytes.ofUtf8 \"a\\x00b\";\n" ++
+  "  IO.println (Nat.toString (Bytes.size u));\n" ++
+  "  IO.println (Nat.toString (Bytes.size (Bytes.ofString \"a\\x00b\")));\n" ++
+  "  IO.println (Nat.toString (String.length (Bytes.toString u)));\n" ++
+  "  IO.println (Nat.toString (match Bytes.toUtf8 u with\n    | .ok t => String.length t\n    | .error _ => 999));\n" ++
+  "  IO.println (Nat.toString (Bytes.size (Bytes.ofUtf8 \"𝄞\")));\n" ++
+  "  IO.println (Nat.toString (Bytes.size (Bytes.ofString \"𝄞\")));\n" ++
+  "  IO.println (Nat.toString (match Bytes.toUtf8 (Bytes.ofUtf8 \"𝄞\") with\n    | .ok t => String.length t\n    | .error _ => 999));\n" ++
+  "  IO.println (Nat.toString (match Bytes.ofLatin1 \"é\" with\n    | .ok b => Bytes.size b\n    | .error _ => 999));\n" ++
+  "  IO.println (Nat.toString (String.length (Bytes.toLatin1 (Bytes.ofList (List.cons 233 .nil)))));\n" ++
+  "  IO.println (match Bytes.ofLatin1 \"\\u{100}\" with\n    | .ok _ => \"ok\"\n    | .error e => e);\n" ++
+  "  IO.println (match Bytes.toUtf8 (Bytes.ofList (List.cons 128 .nil)) with\n    | .ok _ => \"ok\"\n    | .error e => e);\n" ++
+  "  IO.println (match Bytes.toUtf8 (Bytes.ofList (List.cons 192 (List.cons 128 .nil))) with\n    | .ok _ => \"ok\"\n    | .error e => e);\n" ++
+  "  IO.println (match Bytes.toUtf8 (Bytes.ofList (List.cons 237 (List.cons 160 (List.cons 128 .nil)))) with\n    | .ok _ => \"ok\"\n    | .error e => e)\n"
+
+def bytesEncExpected : String :=
+  "3\n1\n1\n3\n4\n4\n1\n1\n1\nnot Latin-1: character 0 is U+256\n" ++
+  "invalid UTF-8 at byte 0\ninvalid UTF-8 at byte 0\ninvalid UTF-8 at byte 0\n"
+
+/-- (21ac) `Array ↔ Bytes` (`lib/Std.wiz`: `Bytes.ofArray`, `Bytes.toArray`) and the
+`Bytes.slice`/`append`/`eq`/`get`/`push` boundaries the semantics matrix pins: a slice
+past the end clamps, a drop past the end is empty, a read past the end is 0, a pushed
+number keeps its low eight bits, and equality is byte for byte, length included. -/
+def bytesArrayProgram : String :=
+  "import Std\ndef main : IO Unit := do\n" ++
+  "  let a := Array.push (Array.push (Array.push Array.empty 1) 2) 300;\n" ++
+  "  let b := Bytes.ofArray a;\n" ++
+  "  IO.println (Bytes.show b);\n" ++
+  "  IO.println (Nat.toString (Array.size (Bytes.toArray b)));\n" ++
+  "  IO.println (Nat.toString (Array.getD (Bytes.toArray b) 2 0));\n" ++
+  "  IO.println (Bytes.show (Bytes.ofArray (Bytes.toArray b)));\n" ++
+  "  let c := Bytes.ofList (List.cons 1 (List.cons 2 (List.cons 3 .nil)));\n" ++
+  "  IO.println (Bytes.show (Bytes.slice c 2 99));\n" ++
+  "  IO.println (Nat.toString (Bytes.size (Bytes.drop c 5)));\n" ++
+  "  IO.println (Bytes.show (Bytes.take c 9));\n" ++
+  "  IO.println (Bytes.show (Bytes.append (Bytes.ofList (List.cons 1 .nil)) (Bytes.ofList (List.cons 2 (List.cons 3 .nil)))));\n" ++
+  "  IO.println (if Bytes.eq c (Bytes.ofList (List.cons 1 (List.cons 2 (List.cons 3 .nil)))) then \"eq\" else \"ne\");\n" ++
+  "  IO.println (if Bytes.eq (Bytes.ofList (List.cons 1 .nil)) c then \"eq\" else \"ne\");\n" ++
+  "  IO.println (if Bytes.eq (Bytes.ofList (List.cons 2 .nil)) (Bytes.ofList (List.cons 1 .nil)) then \"eq\" else \"ne\");\n" ++
+  "  IO.println (Nat.toString (Bytes.get (Bytes.ofList (List.cons 7 .nil)) 9));\n" ++
+  "  IO.println (Bytes.show (Bytes.ofList (List.cons 256 (List.cons 257 .nil))));\n" ++
+  "  IO.println (Bytes.show (Bytes.slice (Bytes.ofList (List.cons 1 .nil)) 9 2))\n"
+
+def bytesArrayExpected : String :=
+  "[1, 2, 44]\n3\n44\n[1, 2, 44]\n[3]\n0\n[1, 2, 3]\n[1, 2, 3]\neq\nne\nne\n0\n[0, 1]\n[]\n"
+
+/-- (21ac) A header for a buffer pointer written three ways: `const char *`,
+`uint8_t *` (a typedef for `unsigned char`) and `unsigned char *`, each followed by its
+length, which the frontends fold into one `Bytes` parameter (kind `y`). -/
+def bytesPtrHeader : String :=
+  "#ifndef WIZ_BYTES2_H\n#define WIZ_BYTES2_H\n" ++
+  "typedef unsigned char uint8_t;\n" ++
+  "static inline unsigned long wiz_sum_chars(const char *buf, unsigned long n) {\n" ++
+  "  unsigned long s = 0; for (unsigned long i = 0; i < n; i++) s += (unsigned char)buf[i]; return s;\n}\n" ++
+  "static inline unsigned long wiz_sum_u8(const uint8_t *buf, unsigned long n) {\n" ++
+  "  unsigned long s = 0; for (unsigned long i = 0; i < n; i++) s += buf[i]; return s;\n}\n" ++
+  "static inline unsigned long wiz_sum_u8c(unsigned char *buf, unsigned long n) {\n" ++
+  "  unsigned long s = 0; for (unsigned long i = 0; i < n; i++) s += buf[i]; return s;\n}\n" ++
+  "typedef struct { unsigned char data[4]; unsigned long n; } wiz_byte_msg;\n" ++
+  "static inline wiz_byte_msg wiz_byte_msg_make(unsigned long n) {\n" ++
+  "  wiz_byte_msg m;\n  m.data[0] = 'x'; m.data[1] = 'y'; m.data[2] = 0; m.data[3] = 'z'; m.n = n;\n  return m;\n}\n" ++
+  "static inline unsigned long wiz_byte_msg_first(wiz_byte_msg m) { return (unsigned long)m.data[0] + m.n; }\n" ++
+  "#endif\n"
+
+/-- (21ac) A C function taking a `char *`/`uint8_t *`/`unsigned char *` and its length,
+called with one `Bytes` argument; the buffer is **borrowed** for the call (C may read it
+and must not keep it), so the same Wiz buffer is usable after the call. Prints
+`198 258 198 [65, 66, 67] 3`. -/
+def bytesPtrProgram (header : String) : String :=
+  "import IO\n" ++
+  s!"import_c \"{header}\" (pure)\n" ++
+  "def main : IO Unit := do\n" ++
+  "  let b := Bytes.ofString \"ABC\";\n" ++
+  "  IO.println (Nat.toString (C.wiz_sum_chars b));\n" ++
+  "  IO.println (Nat.toString (C.wiz_sum_u8 (Bytes.ofList (List.cons 1 (List.cons 2 (List.cons 255 .nil))))));\n" ++
+  "  IO.println (Nat.toString (C.wiz_sum_u8c b));\n" ++
+  "  IO.println (Bytes.show b);\n" ++
+  "  IO.println (Nat.toString (Bytes.size b))\n"
+
+def bytesPtrExpected : String := "198\n258\n198\n[65, 66, 67]\n3\n"
+
+/-- (21ac) A `c_struct` with a `Bytes` field through `glue`: the struct goes to C by
+value and comes back by value (the field is copied into the C array and out of it), and
+glue may pass the struct on but not read the buffer field (`glueDeclFields` leaves it
+out, as the Lean frontend does). Prints `70`, the field's bytes, `7`, `127`. -/
+def bytesGlueProgram (header : String) : String :=
+  "import IO\n" ++
+  s!"c_struct \"wiz_byte_msg\" (header := \"{header}\") Msg where\n  data : Bytes\n  n : Nat\n" ++
+  s!"import_c \"{header}\" (pure)\n" ++
+  "glue msgFirst (m : Msg) : Nat := \"return wiz_byte_msg_first(m);\"\n" ++
+  "glue msgMake (k : Nat) : Msg := \"return wiz_byte_msg_make(k);\"\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (msgFirst (Msg.mk (Bytes.ofString \"AB\") 5)));\n" ++
+  "  let m := msgMake 7;\n" ++
+  "  IO.println (Bytes.show m.data);\n" ++
+  "  IO.println (Nat.toString m.n);\n" ++
+  "  IO.println (Nat.toString (C.wiz_byte_msg_first m))\n"
+
+def bytesGlueExpected : String := "70\n[120, 121, 0, 122]\n7\n127\n"
+
 
 def selfHostGroup : Group where
   name := "selfhost"
@@ -1551,6 +1657,40 @@ def selfHostGroup : Group where
         ioRun prog bytesFfiExpected
         selfhostCompileRun prog bytesFfiExpected
         selfhostCompileRun prog bytesFfiExpected (flags := #["--rc"]) },
+    { name := "Bytes (21ac): the encodings (ofUtf8/toUtf8, ofString/toString, ofLatin1/toLatin1), in both toolchains", run := fun _ =>
+        ffiAgrees bytesEncProgram bytesEncExpected },
+    { name := "Bytes (21ac): Array ↔ Bytes and the slice/append/eq boundaries, in both toolchains", run := fun _ =>
+        ffiAgrees bytesArrayProgram bytesArrayExpected },
+    { name := "Bytes (21ac): a char*/uint8_t*/unsigned char* buffer and its length, borrowed for the call, in both toolchains", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        let h := dir / "wiz_bytes2.h"
+        IO.FS.writeFile h bytesPtrHeader
+        let prog := bytesPtrProgram h.toString
+        ioRun prog bytesPtrExpected
+        selfhostCompileRun prog bytesPtrExpected
+        selfhostCompileRun prog bytesPtrExpected (flags := #["--rc"]) },
+    { name := "Bytes (21ac): #reduce in the self-hosted checker (the Prelude's Bytes model)", run := fun _ =>
+        selfhostCheckFile
+          ("import Prelude\n" ++
+           "#reduce Nat.beq (Bytes.size (Bytes.ofList (List.cons 1 (List.cons 2 (List.cons 300 .nil))))) 3\n" ++
+           "#reduce Nat.beq (Bytes.get (Bytes.ofList (List.cons 7 (List.cons 8 .nil))) 1) 8\n" ++
+           "#reduce Nat.beq (Bytes.get (Bytes.ofList (List.cons 7 .nil)) 9) 0\n" ++
+           "#reduce Bytes.eq (Bytes.ofList (List.cons 1 .nil)) (Bytes.ofList (List.cons 1 .nil))\n" ++
+           "#reduce Bytes.eq (Bytes.ofList (List.cons 1 .nil)) (Bytes.ofList (List.cons 2 .nil))\n" ++
+           "#reduce Nat.beq (Bytes.size (Bytes.slice (Bytes.ofList (List.cons 1 (List.cons 2 (List.cons 3 .nil)))) 2 9)) 1\n" ++
+           "#reduce Nat.beq (Bytes.size (Bytes.append (Bytes.ofList (List.cons 1 .nil)) (Bytes.ofList (List.cons 2 .nil)))) 2\n" ++
+           "#reduce Nat.beq (Bytes.size (Bytes.ofString \"a\\x00b\")) 1\n" ++
+           "#reduce Nat.beq (Bytes.size (Bytes.ofUtf8 \"a\\x00b\")) 3\n" ++
+           "#reduce Bytes.ofList (List.cons 1 (List.cons 2 .nil))\n")
+          "@@REDUCE@@" },
+    { name := "Bytes (21ac): a c_struct with a Bytes field through glue, in both toolchains", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        let h := dir / "wiz_bytes2.h"
+        IO.FS.writeFile h bytesPtrHeader
+        let prog := bytesGlueProgram h.toString
+        ioRun prog bytesGlueExpected
+        selfhostCompileRun prog bytesGlueExpected
+        selfhostCompileRun prog bytesGlueExpected (flags := #["--rc"]) },
     { name := "the self-hosted frontend: a Bytes c_struct field takes a header, as in the Lean frontend (stage 30)", run := fun _ =>
         selfhostAgreesIO "" [
           ("c_struct \"wiz_byte_msg\" (header := \"wiz_bytes.h\") Msg where\n  data : Bytes\n  n : Nat\n", true),

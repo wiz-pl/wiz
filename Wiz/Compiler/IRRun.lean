@@ -19,6 +19,8 @@ inductive IVal where
   | num (n : Nat)
   | tag (t : Nat)
   | erased
+  /-- a byte buffer (`Bytes`, stage 21ac): a scalar, like a number -/
+  | bytes (data : ByteArray)
   | ptr (id : Nat)
   deriving Inhabited, BEq, Repr
 
@@ -47,6 +49,30 @@ def getObj (id : Nat) : RunM (Nat × Obj) := do
   match (← get).objs.get? id with
   | some o => pure o
   | none => throw s!"use of a freed object (#{id})"
+
+/-- An IR value as an interpreter value, for `readback` (and for the model of a
+`Bytes` operation that takes or returns text, stage 21ac). -/
+partial def toRVal (h : Heap) : IVal → RVal
+  | .num n => .nat n
+  | .tag t => .obj t #[]
+  | .erased => .erased
+  | .bytes b => .bytes b
+  | .ptr id => match h.objs.get? id with
+    | some (_, .ctor 1000 _) => .coit .erased .erased .erased .erased
+    | some (_, .ctor 1001 _) => .scofix .erased .erased .erased
+    | some (_, .ctor 1002 _) => .coit .erased .erased .erased .erased
+    | some (_, .ctor t fs) => .obj t (fs.map (toRVal h))
+    | some (_, .clo _ _) => .clo [] .erased
+    | some (_, .token _) => .erased
+    | none => .erased
+
+/-- A `String` (as `wiz_out_string` builds it) in the IR's heap. -/
+def strIVal (s : String) : RunM IVal := do
+  let mut l : IVal := .tag 0
+  for c in s.toList.reverse do
+    let ch ← alloc (.ctor 0 #[.num c.toNat])
+    l ← alloc (.ctor 1 #[ch, l])
+  alloc (.ctor 0 #[l])
 
 def dupV : IVal → RunM Unit
   | .ptr id => do
@@ -175,7 +201,30 @@ def nativeOp (op : Name) (args : Array IVal) : RunM IVal := do
       | _ => dropV x
     | _ => pure ()
     pure pv
-  | _ => throw s!"{op}: foreign functions only run in compiled code (wiz run)"
+  | _ =>
+    match RVal.ExternSig.ofKey? op |>.map (·.cname) with
+    | some c =>
+      let bs (i : Nat) : Option ByteArray := match args[i]? with
+        | some (.bytes b) => some b
+        | _ => none
+      let r ← match c, bs 0, bs 1 with
+        | "wiz_bytes_empty", _, _ => pure (some (.bytes #[]))
+        | "wiz_bytes_push", some b, _ => pure (some (.bytes (BytesModel.push b (n 1))))
+        | "wiz_bytes_size", some b, _ => pure (some (.num b.size))
+        | "wiz_bytes_get", some b, _ => pure (some (.num (BytesModel.get b (n 1))))
+        | "wiz_bytes_of_string", _, _ => do
+          let s := (toRVal (← get) (args[0]?.getD .erased)).toString?
+          pure (s.map fun s => .bytes (BytesModel.ofCString s))
+        | "wiz_bytes_to_string", some b, _ => do
+          pure (some (← strIVal (BytesModel.toCString b)))
+        | "wiz_bytes_slice", some b, _ => pure (some (.bytes (BytesModel.slice b (n 1) (n 2))))
+        | "wiz_bytes_append", some b, some c => pure (some (.bytes (b ++ c)))
+        | "wiz_bytes_eq", some b, some c => pure (some (.tag (if b == c then 1 else 0)))
+        | _, _, _ => pure none
+      match r with
+      | some v => do args.forM dropV; pure v
+      | none => throw s!"{op}: foreign functions only run in compiled code (wiz run)"
+    | none => throw s!"{op}: foreign functions only run in compiled code (wiz run)"
 
 mutual
 
@@ -273,6 +322,7 @@ partial def run (prog : Std.HashMap Name Decl) (env : Std.HashMap Var IVal)
         | .ctor t _ => pure t
         | _ => throw "case on a closure or token"
       | .erased => throw "case on ◾"
+      | .bytes _ => throw "case on a byte buffer"
     match alts[t]? with
     | some alt => run prog env joins alt
     | none => throw s!"no branch for tag {t}"
@@ -287,20 +337,6 @@ partial def run (prog : Std.HashMap Name Decl) (env : Std.HashMap Var IVal)
   | .unreachable => throw "reached an impossible case"
 
 end
-
-/-- An IR value as an interpreter value, for `readback`. -/
-partial def toRVal (h : Heap) : IVal → RVal
-  | .num n => .nat n
-  | .tag t => .obj t #[]
-  | .erased => .erased
-  | .ptr id => match h.objs.get? id with
-    | some (_, .ctor 1000 _) => .coit .erased .erased .erased .erased
-    | some (_, .ctor 1001 _) => .scofix .erased .erased .erased
-    | some (_, .ctor 1002 _) => .coit .erased .erased .erased .erased
-    | some (_, .ctor t fs) => .obj t (fs.map (toRVal h))
-    | some (_, .clo _ _) => .clo [] .erased
-    | some (_, .token _) => .erased
-    | none => .erased
 
 /-- Run `main`; returns the result (as an interpreter value), the number of objects
 allocated, and an error if anything leaked. -/

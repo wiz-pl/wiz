@@ -70,3 +70,31 @@ extern "wiz_map_size" StrMap.size : {V : Type} → StrMap V → Nat
 
 /-- `IO.writeFile path text`: write `text` to the file at `path`, replacing it. -/
 extern "wiz_io_write_file" IO.writeFile : String → String → IO Unit
+
+-- ## Bytes and arrays
+
+-- `Bytes` (`lib/IO.wiz`) is a native buffer and `Array` is a native array of boxed
+-- values, so the conversion is a loop of `Bytes.push`/`Array.getD` (`Bytes` holds
+-- numbers below 256; `Bytes.push` keeps the low eight bits). `Array` lives here rather
+-- than in `IO`, which is why the conversions are in this module.
+
+/-- `Bytes.ofArrayAux a i acc`: `acc` with the elements of `a` from `i` on pushed (a
+helper of `Bytes.ofArray`). -/
+def Bytes.ofArrayAux (a : Array Nat) (i : Nat) (acc : Bytes) : Bytes :=
+  match Nat.lt i (Array.size a) with
+  | .true => Bytes.ofArrayAux a (Nat.succ i) (Bytes.push acc (Array.getD a i 0))
+  | .false => acc
+
+/-- The bytes of an array of numbers, each mod 256: `Bytes.ofArray squares`. -/
+def Bytes.ofArray (a : Array Nat) : Bytes := Bytes.ofArrayAux a 0 Bytes.empty
+
+/-- `Bytes.toArrayAux b a i`: `a` with the bytes of `b` from `i` on pushed (a helper of
+`Bytes.toArray`). -/
+def Bytes.toArrayAux (b : Bytes) (a : Array Nat) (i : Nat) : Array Nat :=
+  match Nat.lt i (Bytes.size b) with
+  | .true => Bytes.toArrayAux b (Array.push a (Bytes.get b i)) (Nat.succ i)
+  | .false => a
+
+/-- The bytes as an array of numbers: `Bytes.toArray (Bytes.ofArray a)` has the
+elements of `a`, each mod 256. -/
+def Bytes.toArray (b : Bytes) : Array Nat := Bytes.toArrayAux b Array.empty 0

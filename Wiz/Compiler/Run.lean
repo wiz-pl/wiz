@@ -48,6 +48,9 @@ inductive RVal where
   | pap (op : PapOp) (args : Array RVal)
   /-- a natural number of a type registered with `builtin nat` -/
   | nat (n : Nat)
+  /-- a byte buffer (the interpreters' model of `Bytes`, stage 21ac): the runtime
+  natives are implemented on it here, since the interpreters cannot call C -/
+  | bytes (data : ByteArray)
   /-- a native operation waiting for arguments -/
   | native (op : Name) (args : Array RVal)
   /-- lazy coinductive values -/
@@ -251,6 +254,112 @@ def nativeArity (key : Name) : Nat :=
 
 end RVal
 
+/-- The interpreters' model of `Bytes` (stage 21ac). `#eval` and `#run` cannot call C,
+so the nine runtime natives (`runtime/rt_data.inc`, `runtime/rt_sys.inc`) are
+implemented here on a `ByteArray`, as `wiz_nat_show` already is; compiled code still
+calls the runtime. `ofString`/`toString` mirror the C boundary exactly: a `String` is
+encoded code point by code point (a surrogate or a value above `U+10FFFF` still takes
+three or four bytes, as `wiz_in_string` writes it), the C string stops at the first NUL,
+and the bytes come back as text by `wiz_out_string`'s lenient UTF-8 decode. -/
+namespace BytesModel
+
+def push (b : ByteArray) (x : Nat) : ByteArray := b.push (UInt8.ofNat x)
+
+def get (b : ByteArray) (i : Nat) : Nat := if h : i < b.size then (b[i]).toNat else 0
+
+/-- `Bytes.slice b start len`: from `start`, at most `len` bytes (both clamp). -/
+def slice (b : ByteArray) (start len : Nat) : ByteArray := b.extract start (start + len)
+
+def toList (b : ByteArray) : List Nat := b.toList.map (·.toNat)
+
+/-- `b` as numbers, in `Bytes.show`'s spelling: `[1, 2, 255]`. -/
+def show (b : ByteArray) : String :=
+  let rec go : List Nat → String
+    | [] => ""
+    | [x] => toString x
+    | x :: xs => toString x ++ ", " ++ go xs
+  "[" ++ go (toList b) ++ "]"
+
+/-- One code point as UTF-8, as `wiz_in_string` writes it (no scalar-value check). -/
+def pushCp (b : ByteArray) (c : Nat) : ByteArray :=
+  if c < 0x80 then b.push (UInt8.ofNat c)
+  else if c < 0x800 then
+    (b.push (UInt8.ofNat (0xC0 ||| (c >>> 6)))).push (UInt8.ofNat (0x80 ||| (c &&& 0x3F)))
+  else if c < 0x10000 then
+    ((b.push (UInt8.ofNat (0xE0 ||| (c >>> 12)))).push
+      (UInt8.ofNat (0x80 ||| ((c >>> 6) &&& 0x3F)))).push (UInt8.ofNat (0x80 ||| (c &&& 0x3F)))
+  else
+    (((b.push (UInt8.ofNat (0xF0 ||| (c >>> 18)))).push
+      (UInt8.ofNat (0x80 ||| ((c >>> 12) &&& 0x3F)))).push
+      (UInt8.ofNat (0x80 ||| ((c >>> 6) &&& 0x3F)))).push (UInt8.ofNat (0x80 ||| (c &&& 0x3F)))
+
+/-- The string's UTF-8 bytes up to the first NUL (a C string). -/
+def ofCString (s : String) : ByteArray :=
+  ((s.toList.foldl (fun (b : ByteArray) (c : Char) => pushCp b c.toNat) ByteArray.empty).toList.takeWhile
+    (· != 0)).toArray.toByteArray
+
+/-- The bytes up to the first NUL, decoded as `wiz_out_string` decodes UTF-8 (the
+sequence length comes from the leading byte; continuation bytes are not checked). -/
+def toCString (b : ByteArray) : String :=
+  let b := (b.toList.takeWhile (· != 0)).toArray.toByteArray
+  let rec go (i : Nat) (acc : String) : String :=
+    if h : i < b.size then
+      let c := (b[i]).toNat
+      let (cp, len) :=
+        if c < 0x80 then (c, 1)
+        else if c >>> 5 == 6 then (c &&& 0x1F, 2)
+        else if c >>> 4 == 14 then (c &&& 0x0F, 3)
+        else (c &&& 0x07, 4)
+      let rec cont (j : Nat) (cp : Nat) : Nat :=
+        if j < len && i + j < b.size then
+          cont (j + 1) ((cp <<< 6) ||| ((b.get! (i + j)).toNat &&& 0x3F))
+        else cp
+      go (i + len) (acc.push (Char.ofNat (cont 1 cp)))
+    else acc
+  go 0 ""
+
+end BytesModel
+
+/-- The characters of a Wiz `String` value (`String.mk (List Char)`, the form
+`wiz_nat_show` builds), for a `Bytes` native that takes text. Defined here rather than
+reused from `RVal.toString?` because the `Bytes` dispatch is above it. -/
+partial def stringChars? (l : RVal) (acc : String) (fuel : Nat) : Option String := do
+  if fuel == 0 || RVal.tagOf l == 0 then return acc
+  let c ← ((l.field 0).field 0).toNat?
+  stringChars? (l.field 1) (acc.push (Char.ofNat c)) (fuel - 1)
+
+partial def stringValue? (v : RVal) : Option String := stringChars? (v.field 0) "" 1000000
+
+/-- The `Bytes` native operations (stage 21ac), by the C name the runtime exports.
+`none` for every other native, and for a `Bytes` operation whose arguments are not
+what the compiler passes (the model stops there instead of inventing a value). -/
+def bytesNative? (op : Name) (args : Array RVal) (num : Nat → Nat) : Option RVal :=
+  let bs (i : Nat) : Option ByteArray := match args[i]? with
+    | some (.bytes b) => some b
+    | _ => none
+  let str (i : Nat) : Option String := match args[i]? with
+    | some v => stringValue? v
+    | none => none
+  match (ExternSig.ofKey? op).map (·.cname) with
+  | some "wiz_bytes_empty" => some (.bytes ByteArray.empty)
+  | some "wiz_bytes_push" => (bs 0).map fun b => .bytes (BytesModel.push b (num 1))
+  | some "wiz_bytes_size" => (bs 0).map fun b => .nat b.size
+  | some "wiz_bytes_get" => (bs 0).map fun b => .nat (BytesModel.get b (num 1))
+  | some "wiz_bytes_of_string" => (str 0).map fun s => .bytes (BytesModel.ofCString s)
+  | some "wiz_bytes_to_string" => (bs 0).map fun b =>
+      -- (the string a Wiz `String` is: `String.mk (List Char)`, as `wiz_nat_show` builds)
+      let chars := (BytesModel.toCString b).toList.foldr
+        (fun (c : Char) (t : RVal) => RVal.obj 1 #[.obj 0 #[.nat c.toNat], t]) (.obj 0 #[])
+      .obj 0 #[chars]
+  | some "wiz_bytes_slice" => (bs 0).map fun b => .bytes (BytesModel.slice b (num 1) (num 2))
+  | some "wiz_bytes_append" => (bs 0).map fun b => match bs 1 with
+    | some c => .bytes (b ++ c)
+    | none => .erased
+  | some "wiz_bytes_eq" => (bs 0).map fun b => match bs 1 with
+    | some c => .obj (if b == c then 1 else 0) #[]
+    | none => .erased
+  | _ => none
+
 /-- Erased global definitions, by name. -/
 abbrev Code := Std.HashMap Name ETerm
 
@@ -266,7 +375,9 @@ partial def run (code : Code) (env : List RVal) : ETerm → RVal
   | .global n => match code[n]? with
     | some (.prim .unreachable #[.global op]) =>
       -- a definition registered as a native operation (`builtin`)
-      if RVal.nativeArity op == 0 then .nat 0 else .native op #[]
+      match bytesNative? op #[] (fun _ => 0) with
+      | some v => v
+      | none => if RVal.nativeArity op == 0 then .nat 0 else .native op #[]
     | some t => run code [] t
     | none => panic! s!"no code for {n}"
   | .lam _ b => .clo env b
@@ -310,9 +421,11 @@ partial def fireNative (op : Name) (args : Array RVal) : RVal :=
   | "memo" => args[1]?.getD .erased
   -- a few pure foreign functions the interpreter knows itself
   | "extern:wiz_nat_show:n:s:pure::" =>
-    let chars := (toString (n 0)).toList.foldr (fun c t => RVal.obj 1 #[.obj 0 #[.nat c.toNat], t]) (.obj 0 #[])
+    let chars := (toString (n 0)).toList.foldr (fun (c : Char) (t : RVal) => RVal.obj 1 #[.obj 0 #[.nat c.toNat], t]) (.obj 0 #[])
     .obj 0 #[chars]
-  | _ => panic! s!"{op}: foreign functions only run in compiled code (wiz run)"
+  | _ => match bytesNative? op args n with
+    | some v => v
+    | none => panic! s!"{op}: foreign functions only run in compiled code (wiz run)"
 
 partial def applyN (code : Code) (f : RVal) (as : List RVal) : RVal := as.foldl (apply code) f
 
@@ -446,6 +559,8 @@ partial def readback (g : Globals R) (builtins : List (Name × Name)) (ty : VTy 
       | some 1, some n => .const s!"-{n + 1}" []
       | _, _ => readbackData ty v
     else readbackData ty v
+  | .neutral (.global "Bytes" _) sp, .bytes b =>
+    if sp.isEmpty then .const (BytesModel.show b) [] else readbackData ty v
   | .sigma _ _ A B _, v =>
     -- the last field of a structure is unboxed (22i): `v` is the field itself
     if unboxedSigma g 1000000 ty then
