@@ -103,7 +103,7 @@ static wiz_val wiz_bytes_unique(wiz_val v) {
   wiz_bytes *c = (wiz_bytes *)wiz_bytes_empty();
   c->len = c->cap = b->len;
   c->data = (unsigned char *)malloc(b->len ? b->len : 1);
-  memcpy(c->data, b->data, b->len);
+  if (b->len) memcpy(c->data, b->data, b->len);
   wiz_dec(v);
   return (wiz_val)c;
 }
@@ -127,11 +127,15 @@ WIZ_API wiz_val wiz_bytes_of_string(const char *s) {
   return v;
 }
 static __thread char *wiz_scratch = NULL;
+/* the per-thread result buffer above: freed when the program finishes
+   (`wiz_finish`, `wiz_finish_io`) or its worker thread ends (`wiz_thread_main`), so a
+   program does not end with an allocation that no one owns */
+static void wiz_scratch_free(void) { free(wiz_scratch); wiz_scratch = NULL; }
 WIZ_API const char *wiz_bytes_to_string(wiz_val v) {
   wiz_bytes *b = (wiz_bytes *)v;
   free(wiz_scratch);
   wiz_scratch = (char *)malloc(b->len + 1);
-  memcpy(wiz_scratch, b->data, b->len);
+  if (b->len) memcpy(wiz_scratch, b->data, b->len);
   wiz_scratch[b->len] = 0;
   wiz_dec(v);
   return wiz_scratch;

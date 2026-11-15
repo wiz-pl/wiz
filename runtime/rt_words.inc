@@ -292,7 +292,9 @@ static void wiz_word_mpz(mpz_t z, wiz_val v) {
 static wiz_val wiz_word_of_mpz(mpz_t z) {
   if (mpz_sizeinbase(z, 2) <= 64) { uint64_t b = mpz_get_ui(z); mpz_clear(z); return wiz_word_out(b); }
   wiz_big *o = (wiz_big *)wiz_alloc(sizeof(wiz_big), WIZ_TAG_BIG, 0);
-  memcpy(o->z, z, sizeof(mpz_t));
+  mpz_init(o->z);
+  mpz_swap(o->z, z);
+  mpz_clear(z);
   return (wiz_val)o;
 }
 /* the model's constructor: a number below 2^w (a Nat) as a word */

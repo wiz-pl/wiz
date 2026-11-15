@@ -40,11 +40,13 @@ test per `inc`/`dec`. The rest follows from that invariant:
   per thread.
 
 A spawned thread has a 256 MB stack (`WIZ_THREAD_STACK_MB`). The interpreters (`#eval`,
-`#run`) don't run threads. Checked with ThreadSanitizer (`--cflags -fsanitize=thread`) on
-the `conc` programs; the cost for single-threaded programs is queued for measurement
-(`perf-queue.md`). Not yet: `selfhost/rt.c` (the self-hosted backend's runtime, under
-Boehm it needs `GC_THREADS`), shared lazy cells that keep their payload (a CAS to a
-blackhole), and `rc == -1` counting as unique.
+`#run`) don't run threads. Checked with ThreadSanitizer on the `conc` programs
+(`--cflags -fsanitize=thread`) and on `runtime/corpus/threads.c` (the `tsan` case of
+`scripts/test-sanitizers.sh`, also an opt-in CI job: docs/building.md, "Sanitizers");
+the cost for single-threaded programs is queued for measurement (`perf-queue.md`). Not
+yet: `selfhost/rt.c` (the self-hosted backend's runtime, under Boehm it needs
+`GC_THREADS`), shared lazy cells that keep their payload (a CAS to a blackhole), and
+`rc == -1` counting as unique.
 
 An `extern` bound to a runtime native (a C name starting `wiz_`) now takes and returns any
 Wiz value as it is (an opaque type's, a closure, a Σ pair), so the natives below are
