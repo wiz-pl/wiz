@@ -854,7 +854,7 @@ still needs `get` in erasure.
 
 **Not done.** No preprocessor, no automatic struct/pointer mapping from a header (declare
 a `c_struct`/`foreign_type`), no `for` loops, struct locals or `&struct` in self-hosted
-glue, no rewriting of matches through `get` (buffer parameters came in 21ab).
+glue, no rewriting of matches through `get` (buffer parameters came in 21ac).
 
 **Tests** (group `selfhost`): an `import_c` header whose functions are called from Wiz
 and from `glue`, and a native representation on a sealed constructor that runs through
@@ -864,7 +864,7 @@ and from `glue`, and a native representation on a sealed constructor that runs t
 parts only).** Kinds are explicit in every `Foreign.fn`: `n`/`u` are `uint64_t`, `f`
 is `double`, `s` is `const char *` (borrowed in, caller-owned out), `b` is `int`, `p`
 is `void *` (+1 wrapped, borrowed for a call), `w` is a Wiz `wiz_val` (+0 in, +1 out),
-and `e`/`v` are omitted from the C prototype (`y`, a byte buffer, is 21ab: the buffer's
+and `e`/`v` are omitted from the C prototype (`y`, a byte buffer, is 21ac: the buffer's
 pointer and length). Structs by value go only through an
 explicit `c_struct`; a native representation is accepted only on a **sealed** type
 whose constructor's `mk`/`get` are registered, so values of the type are the runtime
@@ -874,7 +874,7 @@ a linked `wiz_abi_version` symbol, `_Static_assert`s for `c_struct` layouts, box
 `Nat`/`NatObj` by default, callback roots on both collectors, and the preprocessor or
 automatic struct/pointer import for `import_c`.
 
-## 21ab: `Bytes`, self-hosted (C11)
+## 21ac: `Bytes`, self-hosted (C11)
 
 `Bytes` (9d/9k, `lib/IO.wiz`) now checks and compiles in the self-hosted toolchain.
 
