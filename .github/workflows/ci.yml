@@ -447,6 +447,23 @@ jobs:
           # all shards' case times in one file, for `scripts/ci.py baseline`
           mkdir -p timings
           cat logs/*.jsonl > timings/timings.jsonl 2>/dev/null || true
+      # A green run must have tested something. Fails when a group skipped wholesale
+      # (unless .github/skip-allowlist.json allows it, with a reason and an owner), when
+      # a skip names a tool the dev shell must provide (cc, GMP, GC, yosys, node, nix,
+      # …), or when a shard's unexplained skipped ratio is over 25%. The self-test runs
+      # first, so the rule itself is checked on synthetic logs without the suite.
+      - name: Skips are explained
+        if: needs.test.result != 'skipped'
+        shell: bash
+        run: |
+          python3 scripts/ci.py check-skips --self-test
+          shopt -s nullglob
+          logs=(logs/*.log logs/*.jsonl)
+          if [ ${#logs[@]} -eq 0 ]; then
+            echo "::error title=Skips::no test logs: a green run that wrote no test log tested nothing"
+            exit 1
+          fi
+          python3 scripts/ci.py check-skips "${logs[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: needs.test.result != 'skipped' # no shard ran: nothing to sum up
         with:

@@ -123,8 +123,8 @@ IO	Float64.lt	axiom Float64.lt	legacy: pre-gate baseline; not individually revie
 IO	Float64.lt	builtin extern:wiz_f64_lt:ff:b:pure:: := Float64.lt	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 IO	Float64.mul	axiom Float64.mul	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 IO	Float64.mul	builtin extern:wiz_f64_mul:ff:f:pure:: := Float64.mul	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-IO	Float64.ofNat	axiom Float64.ofNat	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
-IO	Float64.ofNat	builtin extern:wiz_f64_of_nat:n:f:pure:: := Float64.ofNat	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
+IO	Float64.ofNatU64	axiom Float64.ofNatU64	now-renamed native: Float64.ofNat rounds in Wiz for every Nat and delegates here for the <=2^64 case; wiz_f64_of_nat converts an exact u64	Reuben Steenekamp	2027-05-14
+IO	Float64.ofNatU64	builtin extern:wiz_f64_of_nat:n:f:pure:: := Float64.ofNatU64	now-renamed native: Float64.ofNat rounds in Wiz for every Nat and delegates here for the <=2^64 case; wiz_f64_of_nat converts an exact u64	Reuben Steenekamp	2027-05-14
 IO	Float64.sub	axiom Float64.sub	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 IO	Float64.sub	builtin extern:wiz_f64_sub:ff:f:pure:: := Float64.sub	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14
 IO	Float64.toString	axiom Float64.toString	legacy: pre-gate baseline; not individually reviewed	unassigned	2027-05-14

@@ -91,8 +91,9 @@ deriving instance Repr for Shape             -- after the fact
 * **Deriving.** `inductive … deriving C₁, C₂` (also `structure`) and
   `deriving instance C₁, C₂ for T₁, T₂` run C's **deriver**, a Wiz function
   `Deriver := String → MacroM (List Syntax)` registered with `attribute [deriver C] f`.
-  `lib/Deriving.wiz` defines `Inhabited`, `BEq` and `Repr` (`reprPrec : A → Nat →
-  String`), their derivers, and instances for `Nat`, `String`, `Bool`, `Option`, `List`.
+  `lib/Deriving.wiz` defines `Inhabited`, `BEq`, `Repr` (`reprPrec : A → Nat → String`) and
+  `DecidableEq` (`decide : A → A → Bool`), their derivers, and instances for `Nat`,
+  `String`, `Bool`, `Option`, `List`.
   A derived instance has type `{A : Type} → [C A] → … → C (T A …)` (an instance argument
   for each `Type` parameter) and eliminates with `T.rec`, so recursion needs no
   termination check; a structure uses its projections.
@@ -105,11 +106,11 @@ deriving instance Repr for Shape             -- after the fact
 |-----|--------------------|--------------------------------------------------|
 | 7.2 | `lib/Deriving.wiz` | `Derive.firstPlain`: the constructor `Inhabited` uses |
 
-Limitations: `BEq` and `Inhabited` reject indexed families (`Repr` handles them, and
-so mutual types); no `DecidableEq` (it needs no-confusion proofs); quotations can't
-splice lists (`$xs*`), so derivers fold one-element quotations and use
-`Syntax.mkApp`; the self-hosted frontend has no macros yet. `Repr String` doesn't
-escape.
+Limitations: `BEq`, `Inhabited` and `DecidableEq` reject indexed families (`Repr` handles
+them, and so mutual types); `DecidableEq` is derived only for enumerations and
+single-constructor records (7g); quotations can't splice lists (`$xs*`), so derivers fold
+one-element quotations and use `Syntax.mkApp`; the self-hosted frontend has no macros yet.
+`Repr String` doesn't escape.
 
 ## 7d: deriving with proof fields and in any universe
 
@@ -269,3 +270,31 @@ the homogeneous classes of 7e, whose instances are unchanged. `^` is `HPow A B C
 * **HDL signals** (lib/Hdl/Core.wiz) have homogeneous instances `Add (r (bits n))`; through
   `instHAdd` they are the signals' `+` with no change, and `x + 1` at a signal puts the
   numeral at the signal's width.
+
+## 7g: `DecidableEq`, equality as a `Bool`
+
+```
+import Deriving
+inductive Status where
+  | pending
+  | completed
+  deriving DecidableEq
+structure Pt where
+  x : Nat
+  y : Bool
+  deriving DecidableEq
+#eval DecidableEq.decide Status.pending Status.completed   -- .false
+#eval DecidableEq.decide (Pt.mk 1 Bool.true) (Pt.mk 1 Bool.true)   -- .true
+```
+
+`class DecidableEq (A : Type u) where decide : A → A → Bool`. It is the comparison Lean's
+`DecidableEq` gives `=`, under the name the machine models use; Wiz has no `Decidable`
+proof object, so `decide` is the `Bool` itself (what `if` and `&&` test), not a witness.
+The deriver (`deriveDecidableEq`) accepts an enumeration (every constructor is a
+constant) and a single-constructor record (no recursive field): an enum compares
+constructors, a record compares its explicit data fields with their instances and ignores
+proof fields, as `BEq` does. A recursive field or a second constructor is an error,
+because the comparison would need the instance being defined. Instances: `Nat`, `String`,
+`Bool` (derived), and `Option`/`List` from an element instance. Tests: `elab` ("deriving
+DecidableEq …"), `inductive` ("deriving DecidableEq for …", "deriving DecidableEq is
+rejected …").
