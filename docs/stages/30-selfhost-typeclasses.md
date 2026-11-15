@@ -151,5 +151,35 @@ diagnostic for `inductive Bad : Type u`. The fixpoint and `=check`/`=elab`/
 
 Not implemented: inferring the result universe of a data type whose *field* is itself a
 `Type u` (that needs `u+1`, and is rejected with the kernel's ULift message); a general
-level solver; level-polymorphic data types with smaller fields beyond the tag (the
-frontend does not synthesize field lifts).
+level solver. Smaller non-tag fields landed in 30e.
+
+## 30e: fields at another level (U2b)
+
+`inductive Duo.{u, v} (A : Type u) (B : Type v) : Type (max u v)` has no field whose
+type lives in `Sort (max u v + 1)`: `A` lives in `Sort (u+1)` and `B` in `Sort (v+1)`,
+and universes are not cumulative, so the description's `darg` field types must be lifted.
+As in the Lean frontend's `FieldLift`/`descFieldLifts` (`Inductive.lean`), `ctorDesc`
+reads each non-recursive field's sort in a kernel context of the parameters and the
+fields before it (`paramCtx` + `TCtx.bind`, `sortOf`) and, when the sort is not
+`Sort (lv+1)`, wraps the field type in `ULift.{lv+1}`. The continuation is rewritten with
+`downVar0` (later fields that mention the field see it at its own type), and the
+constructor's payload boxes the value (`up x`, `payloadPL`); the constructor's *type*
+still takes the field itself, so source code is unchanged. `Ctor.lifts` records the
+flags, and the match compiler reads a lifted field back with `down` (`fieldCols`), the
+same `wrap`/`unwrap` shape as the host. A field whose sort is *above* `Sort (lv+1)` is
+lifted too, so the kernel rejects it with the host's message
+(`ULift.{l} can't lift A, which is in Sort k`).
+
+Tests (`=selfhost`): `structure Box.{u} (A : Type u)` and `Box.{1} (Type 0)`; `Duo` at
+`Nat`/`String` with reductions through `unbox`/`duoSnd`; generic instances
+`instance {A : Type} [Repr A] : Repr (List A)` and `Inhabited` for `Option`/`List`; a
+level escape, a `max`/`imax` mismatch and a too-large field (positioned, same line and
+message as the Lean frontend); and a differential that compiles and runs the same
+polymorphic program with the host and the self-hosted compiler (GC and RC).
+
+Still missing: `instance` has no universe parameters in either frontend's grammar, so a
+generic instance such as `Repr (List A)` is at `Type 0` (the class may be
+`Repr.{u}`); an indexed family whose index expression mentions a lifted field is not
+unwrapped in `absurdBranch`; mutual inductives still reject universe parameters
+(`mutualInductiveCmd`); and the result universe of a data type whose field is itself
+`Type u` is not inferred.

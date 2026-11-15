@@ -474,9 +474,10 @@ inductive Global where
 -- each constructor's fields: name, whether recursive, and type (over the fields before)
 inductive CField where
   | mk (name : String) (isRec : Bool) (ty tyI : Tm)
--- (21x) and each field's quantity, and whether it is implicit
+-- (21x) and each field's quantity, and whether it is implicit; (U2b) and which fields
+-- the description lifted (`ULift`, read back with `down`)
 inductive Ctor where
-  | mk (name : String) (fields : List CField) (res : Tm) (qs : List Q) (impl : List Bool)
+  | mk (name : String) (fields : List CField) (res : Tm) (qs : List Q) (impl : List Bool) (lifts : List Bool)
 inductive IndInfo where
   | mk (np : Nat) (lv : Lvl) (I D DI : Tm) (ctors : List Ctor) (fixed : Option Tm) (fam : Tm)
 structure Header where
@@ -630,6 +631,32 @@ def closeG (inline : Bool) (gs : Globals) : Nat → Tm → Tm
   | d, .ann t ty => .ann (closeG inline gs d t) (closeG inline gs d ty)
   | _, t => t
 
+def tmsToList : Tms → List Tm
+  | .tnil => .nil
+  | .tcons t rest => .cons t (tmsToList rest)
+
+def mapL {A B : Type} (f : A → B) : List A → List B
+  | .nil => .nil
+  | .cons x xs => .cons (f x) (mapL f xs)
+
+-- (U2b) whether each field of a constructor's description is a lifted one (`darg` at a
+-- `ULift`, or an infinitary field at a lifted domain): `FieldLift`/`descFieldLifts`
+def descLifts : Tm → List Bool
+  | .darg _ S (.lam D) => .cons (match S with
+      | .ulift _ _ _ => .true
+      | _ => .false) (descLifts D)
+  | .drec _ _ D => .cons .false (descLifts D)
+  | .dhrec _ H _ D => .cons (match H with
+      | .ulift _ _ _ => .true
+      | _ => .false) (descLifts D)
+  | _ => .nil
+
+-- (U2b) the lifted fields of every constructor, from the data type's description
+-- (`darg tag (lam (ecase … D₁ … Dₙ))`)
+def descLiftsAll (D : Tm) : List (List Bool) := match D with
+  | .darg _ _ (.lam (.ecase _ _ ds)) => mapL (fun d => descLifts d) (tmsToList ds)
+  | _ => .nil
+
 -- the output of a command, and the globals after it
 inductive Step where
   | mk (out : String) (gs : Globals)
@@ -774,6 +801,11 @@ def freshEnv : Nat → Env
   | .zero => .nil
   | .succ k => .cons (fresh k) (freshEnv k)
 def nfAt (d : Nat) (t : Tm) : Tm := quote d (eval (freshEnv d) t)
+-- (U2b) replace the innermost variable (0) by `down 0`, in a term with `n` free
+-- variables: the body of a lifted description field, whose dependencies were elaborated
+-- at the field's own type (`FieldLift`/`downVar0` in `Inductive.lean`)
+def downVar0 (n : Nat) (D : Tm) : Tm :=
+  quote n (eval (.cons (vdown (fresh (n - 1))) (freshEnv (n - 1))) D)
 def identOf (s : Syntax) : String := match strEq (kindOf s) "term.ident" with
   | .true => match kid s 0 with
     | .ident n => n
@@ -874,7 +906,16 @@ def idxTm (inline : Bool) (gs : Globals) (sc : Scope) (d : Nat) : Option Syntax 
 -- field binds no variable. `sc` is the scope (the globals, then the parameters, `t✝`
 -- and the fields so far that are bound) and `d` the number of those binders, for
 -- closing a field's type over the globals (`closeG inline gs d`).
-def ctorDesc (inline : Bool) (gs : Globals) (T : String) (ps : List String) (nidx : Nat) (res : Option Syntax) : Scope → Nat → List Field → Elab
+--
+-- (U2b) A field must live exactly in `Sort (lv+1)`, where `lv` is the description's
+-- level (universes aren't cumulative). A field in a smaller universe — a proof field of a
+-- type in `Type`, or `B : Type v` of a type in `Type (max u v)` — is wrapped in
+-- `ULift.{lv+1}` as in the Lean frontend (`FieldLift` in `Inductive.lean`); the
+-- constructor still takes the field itself (it puts `up x` in the payload), and the
+-- match compiler reads it back with `down` (`fieldCols`). `c` is the kernel context of
+-- the parameters and the fields so far, to read a field's sort.
+def ctorDesc (inline : Bool) (gs : Globals) (T : String) (ps : List String) (nidx : Nat) (res : Option Syntax)
+    (lv : Lvl) (c : TCtx) : Scope → Nat → List Field → Elab
   --<sol
   | sc, d, .nil => match idxTm inline gs sc d res with
     | .ok i => .ok (.dret i)
@@ -882,14 +923,24 @@ def ctorDesc (inline : Bool) (gs : Globals) (T : String) (ps : List String) (nid
   | sc, d, .cons (.mk x q _ ty) rest => match recField T ps nidx ty with
     | .yes j => match idxTm inline gs sc d j with
       | .err m => .err m
-      | .ok jt => match ctorDesc inline gs T ps nidx res sc d rest with
+      | .ok jt => match ctorDesc inline gs T ps nidx res lv c sc d rest with
         | .ok D => .ok (.drec (.qlit q) jt D)
         | e => e
     | .no => match elab sc ty with
       | .err m => .err m
-      | .ok A => match ctorDesc inline gs T ps nidx res (Scope.bind sc x) (d + 1) rest with
-        | .ok D => .ok (.darg (.qlit q) (closeG inline gs d A) (.lam D))
-        | e => e
+      | .ok A =>
+        let Acl : Tm := closeG .false gs d A;
+        let k : Option Lvl := sortOf c (eval (TCtx.env c) Acl);
+        let lifted : Bool := match k with
+          | .some k' => Bool.not (lvlEquiv k' (lsucc lv))
+          | .none => .false;
+        match ctorDesc inline gs T ps nidx res lv (TCtx.bind c (eval (TCtx.env c) Acl)) (Scope.bind sc x) (d + 1) rest with
+        | .err m => .err m
+        | .ok D => match lifted with
+          | .true => .ok (.darg (.qlit q) (.ulift (match k with
+              | .some k' => k'
+              | .none => .lhole) (lsucc lv) (closeG inline gs d A)) (.lam (downVar0 (d + 1) D)))
+          | .false => .ok (.darg (.qlit q) (closeG inline gs d A) (.lam D))
   --|ex
   --| | _, _, _ => .err "not implemented"
   --sol>
@@ -904,11 +955,11 @@ def ctorRes (nidx : Nat) (c : Syntax) : Option Syntax := match nidx with
 inductive Descs where
   | ok (ds : Tms)
   | err (msg : String)
-def ctorDescs (inline : Bool) (gs : Globals) (T : String) (ps : List String) (nidx : Nat) : List Syntax → Descs
+def ctorDescs (inline : Bool) (gs : Globals) (T : String) (ps : List String) (nidx : Nat) (lv : Lvl) (cx : TCtx) : List Syntax → Descs
   | .nil => .ok .tnil
-  | .cons c cs => match ctorDesc inline gs T ps nidx (ctorRes nidx c) (Scope.bind (bindAll (Globals.scope gs) ps) "t✝") (List.length ps + 1) (ctorFields c) with
+  | .cons c cs => match ctorDesc inline gs T ps nidx (ctorRes nidx c) lv cx (Scope.bind (bindAll (Globals.scope gs) ps) "t✝") (List.length ps + 1) (ctorFields c) with
     | .err m => .err m
-    | .ok D => match ctorDescs inline gs T ps nidx cs with
+    | .ok D => match ctorDescs inline gs T ps nidx lv cx cs with
       | .ok ds => .ok (.tcons D ds)
       | e => e
 -- a constructor's fields with their types, every field bound in the later ones
@@ -960,6 +1011,26 @@ inductive Added where
 def payloadP (p : Tm) : Nat → Nat → Tm
   | .zero, _ => .pair p .star
   | .succ r, i => .pair (.var i) (payloadP p r (i - 1))
+-- (U2b) the same, with the lifted fields boxed (`up x`, `FieldLift.wrap`)
+def upIf (b : Bool) (t : Tm) : Tm := match b with
+  | .true => .up t
+  | .false => t
+def payloadPL (p : Tm) : List Bool → Nat → Nat → Tm
+  | .nil, .zero, _ => .pair p .star
+  | .cons b bs, .succ r, i => .pair (upIf b (.var i)) (payloadPL p bs r (i - 1))
+  | _, _, _ => .pair p .star
+def liftHead : List (List Bool) → List Bool
+  | .nil => .nil
+  | .cons l _ => l
+def liftTail : List (List Bool) → List (List Bool)
+  | .nil => .nil
+  | .cons _ r => r
+def headB : List Bool → Bool
+  | .nil => .false
+  | .cons b _ => b
+def tailB : List Bool → List Bool
+  | .nil => .nil
+  | .cons _ r => r
 -- A type with the sorts of the `Π`/`Σ` in its spine filled in where they are known
 -- (`Sorts.type` in the Lean elaborator), and its sort: the types of declarations are
 -- built without them (telescopes, constructor types), and type equality waits on a
@@ -1146,9 +1217,10 @@ def tagTmB (lifted : Bool) (k i : Nat) : Tm := match lifted with
 def tagValTmB (lifted : Bool) (k i : Nat) : Val := match lifted with
   | .true => .vup (.vtag k i)
   | .false => .vtag k i
-def addCtors (T : String) (us : List String) (lv : Lvl) (ps : List String) (pts : Tms) (nidx : Nat) (I : Tm) (Tc TcI : Tm) (k : Nat) (strct : Bool) : Globals → Nat → List Syntax → Added
+def addCtors (T : String) (us : List String) (lv : Lvl) (ps : List String) (pts : Tms) (nidx : Nat) (I : Tm) (Tc TcI : Tm) (k : Nat) (strct : Bool) (lifts : List (List Bool)) : Globals → Nat → List Syntax → Added
   | gs, _, .nil => .ok gs .nil
   | gs, i, .cons c cs =>
+    let ls := liftHead lifts;
     let n := List.length (ctorFields c);
     let np := List.length ps;
     let scF := bindAll (bindAll (Globals.scope gs) ps) (fieldNames (ctorFields c));
@@ -1166,16 +1238,16 @@ def addCtors (T : String) (us : List String) (lv : Lvl) (ps : List String) (pts 
             | .unit _ => .star
             | _ => .eqRefl (shiftTm n 0 I) (phantomVal I);
         -- (the index equation's proof gets its marker, P2)
-        let v := markClosed (tLams (np + n) (.con (.pair (tagTm lv k i) (payloadP proof n (n - 1))))) ty;
+        let v := markClosed (tLams (np + n) (.con (.pair (tagTm lv k i) (payloadPL proof ls n (n - 1))))) ty;
         match check empty v (eval .nil ty) with
         | .err _ => .err
-        | .ok _ _ => match addCtors T us lv ps pts nidx I Tc TcI k strct (Globals.add gs (.mk (String.append (String.append T ".") (ctorName c)) us ty v v
+        | .ok _ _ => match addCtors T us lv ps pts nidx I Tc TcI k strct (liftTail lifts) (Globals.add gs (.mk (String.append (String.append T ".") (ctorName c)) us ty v v
           (List.append (impls np) (fieldKinds (fieldImpl (ctorFields c)))) .nil)) (i + 1) cs with
         | .ok gs' rest => .ok gs' (.cons (.mk (ctorName c) fs (match ics with
           | .tcons ic _ => ic
           | .tnil => .star) (match strct with
             | .true => structBindQs qs
-            | .false => qs) (fieldImpl (ctorFields c))) rest)
+            | .false => qs) (fieldImpl (ctorFields c)) ls) rest)
         | .err => .err
 -- the types of a telescope, each over the ones before
 def elabTele (gs : Globals) : Scope → Nat → List Field → TmsR
@@ -1320,9 +1392,12 @@ def inductiveCmdL (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := ma
       match Ir with
       | .err m => errStep gs m
       | .ok I0 =>
-        match ctorDescs .false gs T ps nidx ctors with
+        -- (U2b) the context of the parameters and the tag binder `t✝` (which `ctorDesc`
+        -- is under: its var 0), for reading a field's sort
+        let cxP := TCtx.bind (paramCtx empty pts) (.vunit (ln 1));
+        match ctorDescs .false gs T ps nidx lv cxP ctors with
         | .err m => errStep gs m
-        | .ok ds0 => match ctorDescs .true gs T ps nidx ctors with
+        | .ok ds0 => match ctorDescs .true gs T ps nidx lv cxP ctors with
           | .err m => errStep gs m
           | .ok dsI0 =>
             -- phantom parameters: those that neither a constructor nor the index type
@@ -1368,7 +1443,9 @@ def inductiveCmdL (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := ma
                 let Tn := Globals.declName gs T;
                 let gs1 := Globals.add gs (.mk T us ty val valI .nil .nil);
                 let Tc : Tm := .const Tn us (lvlArgs us) val ty;
-                match addCtors T us lv ps pts nidx I Tc valI k (isStructCmd stx0) gs1 0 ctors with
+                -- (U2b) which fields the description lifted
+                let lifts := descLiftsAll (mkD ds);
+                match addCtors T us lv ps pts nidx I Tc valI k (isStructCmd stx0) lifts gs1 0 ctors with
                 | .err => errStep gs "ill-typed constructor"
                 | .ok gs2 cs => .mk (String.append T (String.append " : " (show .nil 0 ty)))
                     (Globals.addInd gs2 T (.mk np lv I (mkD ds) (mkD dsI) cs .none Tc))
@@ -2581,14 +2658,18 @@ inductive Lets where
   | mk (wrap : Tm → Tm) (cols : List Col) (recs : List Nat) (cx : Cx)
 -- (21x) a field is bound at its quantity (`T.casesOn`'s method takes it so: `letTm`), and
 -- so is a pattern variable that names it (`bindLetsT`)
-def fieldCols (np L d0 : Nat) (args : Tms) : Cx → Nat → List Q → List CField → Lets
+def fieldCols (np L d0 : Nat) (args : Tms) (lifts : List Bool) : Cx → Nat → List Q → List CField → Lets
   | cx, _, _, .nil => .mk (fun b => b) .nil .nil cx
   | cx, j, qs, .cons (.mk _ isRec A _) rest =>
     let d := d0 + j;
     let ty := nfAt d (tApps (tLams np (tLams j A)) (tmsAppend (shiftTms (d - L) args) (fvars j)));
-    let val : Tm := .fst (sndN j (.var (1 + j)));
+    -- (U2b) a lifted field is read back from the payload with `down` (`FieldLift.unwrap`)
+    let raw : Tm := .fst (sndN j (.var (1 + j)));
+    let val : Tm := match headB lifts with
+      | .true => .down raw
+      | .false => raw;
     let env := TCtx.env (Cx.c cx);
-    match fieldCols np L d0 args (Cx.define cx "_" (eval env val) (eval env ty)) (j + 1) (tailQ qs) rest with
+    match fieldCols np L d0 args (tailB lifts) (Cx.define cx "_" (eval env val) (eval env ty)) (j + 1) (tailQ qs) rest with
     | .mk wrap cols recs cx' => .mk (fun b => letTm (headQ qs) ty val (wrap b)) (.cons (.mk d ty ty (headQ qs)) cols) (match isRec with
         | .true => .cons d recs
         | .false => recs) cx'
@@ -4189,7 +4270,7 @@ def branches (gs : Globals) (mc : MatchCtx) (es : ES) (cx3 : Cx) (expected : Val
     (top : Bool) (ihLvls : List Nat) (cls : List Clause) (k : Nat) (col : Col) (T : String) (np : Nat) (lifted : Bool)
     (args : Tms) (nidx : Nat) (I idx fam : Tm) (modeB : Bool) (MB0 MB : Tm) (MBv : Val) (MT : Tm) (G b : Nat) (nc i : Nat) : List Ctor → BE
   | .nil => .ok .tnil es
-  | .cons (.mk c fs res qs impl) rest =>
+  | .cons (.mk c fs res qs impl ls) rest =>
     let F := lenL fs;
     let d := Cx.lvl cx3 - 3;
     let d0 := d + 5;
@@ -4207,7 +4288,7 @@ def branches (gs : Globals) (mc : MatchCtx) (es : ES) (cx3 : Cx) (expected : Val
     -- context before the method's binders, and `j`)
     let MBi := eval (.cons .vtt (.cons (fresh d) (dropEnv (3 + b) (TCtx.env (Cx.c cx3))))) MB;
     match col with
-    | .mk L _ _ _ => match fieldCols np L d0 args cx5 0 qs fs with
+    | .mk L _ _ _ => match fieldCols np L d0 args ls cx5 0 qs fs with
       | .mk wrap fcols recs cx6 =>
         let cls' := specialize T c k F impl col cls;
         match Bool.and modeB (Bool.or (isNilCl cls') (otherMember idx res)) with
@@ -4667,7 +4748,7 @@ def addMCtors (members ps : List String) (pts : Tms) (m k : Nat) : Globals → N
         | .err e => .err e
         | .ok _ _ => match addMCtors members ps pts m k (Globals.add gs (.mk (String.append (String.append T ".") (ctorName c)) .nil ty v v
             (List.append (impls np) (fieldKinds (fieldImpl fs0))) .nil)) (ci + 1) rest with
-          | .ok gs' cs => .ok gs' (.cons (.mk (ctorName c) fs (.tag m j) (fieldQs fs0) (fieldImpl fs0)) cs)
+          | .ok gs' cs => .ok gs' (.cons (.mk (ctorName c) fs (.tag m j) (fieldQs fs0) (fieldImpl fs0) .nil) cs)
           | e => e
 def addMemberInds (np : Nat) (I D DI : Tm) (cs : List Ctor) (fam : Tm) (m : Nat) : Globals → Nat → List String → Globals
   | gs, _, .nil => gs

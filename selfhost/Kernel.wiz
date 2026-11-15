@@ -3328,7 +3328,9 @@ def inferW : TCtx → Tm → TyRes
       | .some m => .err m
       | .none => match lvlLe k l with
         | .true => .ok (.vsort l) (uZeros (TCtx.lvl c))
-        | .false => .err "ULift can only lift a type to a universe at least as big"
+        -- (the Lean kernel's message, `Check.lean`; U2b)
+        | .false => .err (String.append (String.append (String.append "ULift." (lvlShow l)) " can't lift ")
+            (String.append (showVal c (eval (TCtx.env c) A)) (String.append ", which is in Sort " (lvlShow k))))
     | r => r
   | _, .up _ => .err "cannot infer the type of up; add a type ascription"
   | c, .down t => match infer c t with

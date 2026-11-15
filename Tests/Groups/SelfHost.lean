@@ -1030,6 +1030,79 @@ def parseDiffCorpus : List (Name × String) := [
   ("command", "#eval f 41"), ("command", "def f : Nat → Nat\n  | .zero => 0\n  | .succ n => n")]
 
 
+/-- (U2b) Polymorphic declarations: a structure at a level parameter, an inductive whose
+fields are at two different level parameters, a class at a level parameter, and generic
+instances for `List` and `Option`. The `Duo` fields are in smaller universes than
+`Type (max u v)`, so their description fields are `ULift`ed (Q4), as in the Lean
+frontend. -/
+def u2bDecls : String :=
+  "structure Box.{u} (A : Type u) where\n  val : A\n" ++
+  "inductive Duo.{u, v} (A : Type u) (B : Type v) : Type (max u v) where\n  | mk (a : A) (b : B)\n" ++
+  "def unbox.{u} {A : Type u} (b : Box A) : A := b.val\n" ++
+  "def duoSnd.{u, v} {A : Type u} {B : Type v} (d : Duo A B) : B := match d with\n  | .mk _ b => b\n" ++
+  "def duoUp : Duo.{1, 0} (Type 0) Nat := Duo.mk Nat 5\n" ++
+  "def duoBUp : Nat := duoSnd duoUp\n" ++
+  "class Repr.{u} (A : Type u) where\n  repr : A → Nat\n" ++
+  "instance instReprNat : Repr Nat where\n  repr := fun n => n\n" ++
+  "instance instReprType : Repr (Type 0) where\n  repr := fun _ => 0\n" ++
+  "def typeRepr : Nat := Repr.repr Nat\n" ++
+  "def sumRepr {A : Type} [Repr A] : List A → Nat\n" ++
+  "  | .nil => 0\n  | .cons x xs => Repr.repr x + sumRepr xs\n" ++
+  "instance instReprList {A : Type} [Repr A] : Repr (List A) where\n  repr := fun xs => sumRepr xs\n" ++
+  "class Inhabited.{u} (A : Type u) where\n  default : A\n" ++
+  "instance instInhabitedNat : Inhabited Nat where\n  default := 42\n" ++
+  "instance instInhabitedOption {A : Type} [Inhabited A] : Inhabited (Option A) where\n" ++
+  "  default := Option.some Inhabited.default\n" ++
+  "instance instInhabitedList {A : Type} [Inhabited A] : Inhabited (List A) where\n" ++
+  "  default := List.cons Inhabited.default List.nil\n" ++
+  "def duoVal : Duo Nat String := Duo.mk 9 \"xy\"\n" ++
+  "def boxVal : Box Nat := Box.mk 7\n" ++
+  "def optDefault : Nat := match (Inhabited.default : Option Nat) with\n  | .some n => n\n  | .none => 0\n" ++
+  "def listDefault : Nat := match (Inhabited.default : List Nat) with\n  | .cons n _ => n\n  | .nil => 0\n"
+
+/-- (U2b) A program with the polymorphic declarations (`u2bDecls`), printing
+`3 xy 42 42 7`: the generic `Repr (List A)` and `Inhabited (Option/List A)` instances,
+a `Duo` at two level parameters, and a `Box` structure. -/
+def u2bProgram : String := "import IO\n" ++ u2bDecls ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (Repr.repr (List.cons 1 (List.cons 2 List.nil))));\n" ++
+  "  IO.println (duoSnd duoVal);\n" ++
+  "  IO.println (Nat.toString optDefault);\n" ++
+  "  IO.println (Nat.toString listDefault);\n" ++
+  "  IO.println (Nat.toString (unbox boxVal))\n"
+
+/-- (U2b) Each declaration after `import Prelude` is a level mistake: both frontends
+reject it on the same line, the Lean one's message contains `phrase`, and the
+self-hosted one is a positioned `file:line:col: error:` line whose message contains the
+same `phrase`. (The self-hosted position is the command's, not the offending token's:
+D6.) -/
+def selfhostLevelErrors (decls : List (String × String)) : IO Unit := do
+  let loader ← preludeLoader
+  match ← selfhostCompiler with
+  | .error e => if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+  | .ok exe =>
+    for (d, phrase) in decls do
+      let src := "import Prelude\n" ++ d
+      let s := runFrontend (R := ZeroOneMany) src { loader, trustedModule := Tests.libModule }
+      let hostErrs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
+      let some hostErr := hostErrs[0]? | throw (IO.userError s!"the Lean frontend accepts:\n{d}")
+      unless (hostErr.splitOn phrase).length > 1 do
+        throw (IO.userError s!"the Lean frontend's message does not say {repr phrase}:\n{hostErr}")
+      let hostLine := hostErr.takeWhile (· != ':')
+      let dir ← IO.FS.createTempDir
+      IO.FS.writeFile (dir / "bad.wiz") src
+      let out ← IO.Process.output { cmd := "timeout", args := #["120", exe.toString, "check", "bad.wiz"], cwd := dir }
+      checkEq (1 : UInt32) out.exitCode
+      checkEq "" out.stdout
+      let lines := (out.stderr.splitOn "\n").filter (!·.isEmpty)
+      let some line := lines[0]? | throw (IO.userError s!"the self-hosted frontend accepts:\n{d}")
+      unless line.startsWith "bad.wiz:" do
+        throw (IO.userError s!"the self-hosted diagnostic has no span:\n{line}")
+      let rest := (line.drop "bad.wiz:".length)
+      checkEq hostLine (rest.takeWhile (· != ':'))
+      unless (line.splitOn phrase).length > 1 do
+        throw (IO.userError s!"the self-hosted message does not say {repr phrase}:\n{line}")
+
 def selfHostGroup : Group where
   name := "selfhost"
   exercise := "Stages 12b–14q"
@@ -2294,7 +2367,46 @@ def selfHostGroup : Group where
           let out ← IO.Process.output { cmd := "timeout", args := #["120", exe.toString, "check", "bad.wiz"], cwd := dir }
           checkEq (1 : UInt32) out.exitCode
           checkEq "" out.stdout
-          checkEq ("bad.wiz:2:1: error: the data type's universe must be a declared universe parameter, not u (declare one: `inductive T.{u}`)\n") out.stderr }
+          checkEq ("bad.wiz:2:1: error: the data type's universe must be a declared universe parameter, not u (declare one: `inductive T.{u}`)\n") out.stderr },
+    -- (U2b) a field at another level: `Duo`'s fields live in `Type u`/`Type v`, below
+    -- `Type (max u v)`, so the description lifts them (Q4); a `structure` at a level
+    -- parameter (the `Box.{u}` shape) and a `Box.{1}` instance
+    { name := "U2b: a structure at a level parameter, and an inductive whose fields are at different levels (U2/A15)", run := fun _ =>
+        selfhostCheckFile ("import Prelude\n" ++ u2bDecls ++
+          "def boxOfType : Box.{1} (Type 0) := Box.mk Nat\n" ++
+          "#check Box\n#check Duo\n#check unbox\n#check duoSnd\n#check boxOfType\n" ++
+          "#reduce Nat.beq (unbox boxVal) 7\n" ++
+          "#reduce Nat.beq (String.length (duoSnd duoVal)) 2\n" ++
+          "#reduce Nat.beq (String.length (duoSnd (Duo.mk 1 \"abc\"))) 3\n" ++
+          "#reduce Nat.beq duoBUp 5\n")
+          "U2B_LEVEL_EXPECTED" },
+    -- (U2b) a polymorphic class and generic instances: `Repr (List A)` from `[Repr A]`,
+    -- and `Inhabited` for `Option`/`List` from `[Inhabited A]` (the resolution is at
+    -- level metavariables, U2)
+    { name := "U2b: a polymorphic class and generic instances (Repr (List A), Inhabited for Option/List) (U2/A15)", run := fun _ =>
+        selfhostCheckFile ("import Prelude\n" ++ u2bDecls ++
+          "#check instReprList\n#check instInhabitedOption\n#check instInhabitedList\n" ++
+          "#check instReprType\n#check typeRepr\n" ++
+          "#reduce Nat.beq (Repr.repr (List.cons 1 (List.cons 2 List.nil))) 3\n" ++
+          "#reduce Nat.beq (Repr.repr (List.nil : List Nat)) 0\n" ++
+          "#reduce Nat.beq optDefault 42\n" ++
+          "#reduce Nat.beq listDefault 42\n" ++
+          "#reduce Nat.beq typeRepr 0\n")
+          "U2B_CLASS_EXPECTED" },
+    -- (U2b) the level mistakes the Lean frontend rejects, with the same message and a
+    -- positioned diagnostic (`selfhostLevelErrors`)
+    { name := "U2b: a level escape, a max/imax mismatch and a universe inconsistency are rejected like the Lean frontend (U2/A15)", run := fun _ =>
+        selfhostLevelErrors [
+          ("def bad.{v} (A : Type u) : Type u := A\n", "unknown universe level 'u'"),
+          ("def bad.{u, v} (A : Sort (max u v)) : Sort (imax u v) := A\n", "type mismatch"),
+          ("inductive Bad.{u} : Type u where\n  | mk (a : Sort (u+1))\n", "can't lift")] },
+    -- (U2b) differential: the same polymorphic program (structure, two-level inductive,
+    -- generic class instances) is compiled by the Lean host and by the self-hosted
+    -- compiler (GC and RC) and prints the same values
+    { name := "U2b: the same polymorphic program compiles and runs in both toolchains (U2/A15)", run := fun _ => do
+        ioRun u2bProgram "3\nxy\n42\n42\n7\n"
+        selfhostCompileRun u2bProgram "3\nxy\n42\n42\n7\n"
+        selfhostCompileRun u2bProgram "3\nxy\n42\n42\n7\n" (flags := #["--rc"]) }
   ]
 
 builtin_initialize registerGroup selfHostGroup
