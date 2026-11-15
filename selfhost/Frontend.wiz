@@ -6085,9 +6085,6 @@ def isBufferPair (t : CTy) (rest : List CTy) (names : List String) (noAuto : Boo
   match rest, names with
   | .cons l _, .cons ln _ => Bool.and (Bool.not noAuto) (Bool.and (isBufTy t) (Bool.and (isLenTy l) (elemStr ln lenParamNames)))
   | _, _ => .false
-def firstName : List String → String
-  | .nil => "_"
-  | .cons n _ => n
 def restNames : List String → List String
   | .nil => .nil
   | .cons _ ns => ns
@@ -6100,13 +6097,15 @@ partial def kindListBuf (gs : Globals) (noAuto : Bool) (skips : List String) : L
     | .true => match ts, restNames names with
       | .cons _ ts2, .cons _ ns2 => match kindListBuf gs noAuto skips ts2 ns2 with
         | .kerr => .kerr
-        | .kok ks ns gs1 => .kok (.cons "y" ks) (.cons (firstName names) ns) gs1
+        | .kok ks ns gs1 => .kok (.cons "y" ks) (.cons "" ns) gs1
       | _, _ => .kerr
     | .false => match kindOfCTy .false t gs noAuto skips 8 with
       | .kerr => .kerr
-      | .kok k _ gs1 => match kindListBuf gs1 noAuto skips ts (restNames names) with
+      -- (the kind's own Wiz name: a `c_struct` or foreign pointer type, not the C
+      -- parameter's name, which only `y` and the scalars have no use for)
+      | .kok k kn gs1 => match kindListBuf gs1 noAuto skips ts (restNames names) with
         | .kerr => .kerr
-        | .kok ks ns gs2 => .kok (.cons k ks) (.cons (firstName names) ns) gs2
+        | .kok ks ns gs2 => .kok (.cons k ks) (.cons kn ns) gs2
 partial def importFuncs (gs : Globals) (header : String) (noAuto : Bool) (skips : List String) (isPure : Bool) : List CFn → Globals
   | .nil => gs
   | .cons (.mk name ret ps variadic pnames) rest =>

@@ -887,9 +887,11 @@ automatic struct/pointer import for `import_c`.
 * **Runtime** (`rt.c`). `wiz_bytes` with `runtime/wiz_rt.h`'s layout (the header, then
   `len`, `cap`, `data`; a static assert keeps them equal), the nine `get_Bytes_46_*`
   natives, and `rt_bytes_new` for a struct field. `push` and `append` update in place
-  when the buffer is unique (reference counting) and always under the collector, as
-  `runtime/wiz.c` does; the storage is freed with the object, and the bytes are not Wiz
-  values (the collector and the leak check ignore them).
+  when the buffer is unique (reference counting), as `runtime/wiz.c` does; under the
+  collector there is no reference count, so they copy instead (a shared buffer must not
+  change: `Bytes` is functional). The storage is freed with the object (a copy's old
+  buffer becomes garbage), and the bytes are not Wiz values (the collector and the leak
+  check ignore them).
 * **`import_c` and `glue`** (`Frontend.wiz`, `Backend.wiz`). A C `const void *buf,
   size_t n` (or `const unsigned char *` and a length parameter named `n`, `__n`, `len`,
   `__len`, `nbytes`, `__nbytes`, `length` or `__length`) is one `Bytes` parameter (FFI
@@ -899,9 +901,13 @@ automatic struct/pointer import for `import_c`.
   `wiz_sin_*` copies the buffer into the C array (cut or zero-padded to the array's
   size) and `wiz_sout_*` makes a `Bytes` of the array's size. `glue` does not see such
   a field (as in the Lean frontend) but sees a buffer function's two C parameters.
+  An imported function's parameter keeps its own Wiz type name: a `c_struct`
+  parameter gets the declared structure's name, not the C parameter's name (the C name
+  is only needed to recognize a buffer's length parameter).
 
-**Tests** (group `selfhost`): every operation, compiled by the Lean toolchain and by
-the self-hosted one (collector and reference counting, which also checks for leaks);
+**Tests** (group `selfhost`): every operation, including sharing (a `push` or `append`
+that leaves the old buffer alone), compiled by the Lean toolchain and by the
+self-hosted one (collector and reference counting, which also checks for leaks);
 `import_c` with a buffer argument and a struct with a byte-array field passed to C and
 read back; and a `Bytes` `c_struct` field without a header rejected by both frontends.
 

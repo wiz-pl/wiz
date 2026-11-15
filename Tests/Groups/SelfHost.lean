@@ -1028,10 +1028,12 @@ def bytesHeader : String :=
   "static inline unsigned long wiz_sum_buf(const void *buf, unsigned long n) {\n" ++
   "  const unsigned char *p = (const unsigned char *)buf;\n" ++
   "  unsigned long s = 0;\n  for (unsigned long i = 0; i < n; i++) s += p[i];\n  return s;\n}\n" ++
-  "typedef struct { unsigned char data[4]; unsigned long n; } wiz_msg;\n" ++
-  "static inline wiz_msg wiz_msg_make(unsigned long n) {\n" ++
-  "  wiz_msg m;\n  m.data[0] = 'x'; m.data[1] = 'y'; m.data[2] = 0; m.data[3] = 'z'; m.n = n;\n  return m;\n}\n" ++
-  "static inline unsigned long wiz_msg_first(wiz_msg m) { return (unsigned long)m.data[0] + m.n; }\n" ++
+  "typedef struct { unsigned char data[4]; unsigned long n; } wiz_byte_msg;\n" ++
+  "static inline wiz_byte_msg wiz_byte_msg_make(unsigned long n) {\n" ++
+  "  wiz_byte_msg m;\n  m.data[0] = 'x'; m.data[1] = 'y'; m.data[2] = 0; m.data[3] = 'z'; m.n = n;\n  return m;\n}\n" ++
+  "static inline unsigned long wiz_byte_msg_first(wiz_byte_msg m) { return (unsigned long)m.data[0] + m.n; }\n" ++
+  "static unsigned char wiz_static_buf[3] = {65, 66, 67};\n" ++
+  "static inline const void *wiz_get_buf(void) { return wiz_static_buf; }\n" ++
   "#endif\n"
 
 /-- Write `bytesHeader` to a fresh directory; its absolute path (both toolchains read the
@@ -1061,6 +1063,14 @@ def bytesProgram : String :=
   "  IO.println (Bytes.show (Bytes.take b 1));\n" ++
   "  IO.println (Bytes.show (Bytes.drop b 1));\n" ++
   "  IO.println (Bytes.show (Bytes.append b (Bytes.singleton 4)));\n" ++
+  "  let a := Bytes.ofString \"AB\";\n" ++
+  "  let p := Bytes.push a 67;\n" ++
+  "  IO.println (Bytes.toString a);\n" ++
+  "  IO.println (Bytes.toString p);\n" ++
+  "  let q := Bytes.append a (Bytes.singleton 68);\n" ++
+  "  IO.println (Bytes.toString a);\n" ++
+  "  IO.println (Bytes.toString q);\n" ++
+  "  IO.println (Bytes.show (Bytes.range 4));\n" ++
   "  let c := Bytes.ofString \"AB\";\n" ++
   "  IO.println (Bytes.toString c);\n" ++
   "  IO.println (Nat.toString (Bytes.size c));\n" ++
@@ -1071,23 +1081,28 @@ def bytesProgram : String :=
   "  IO.println (atShow (Bytes.ofString \"a\") 7)\n"
 
 def bytesExpected : String :=
-  "[1, 2, 44]\n3\n2\n0\nempty\n[2, 44]\n[44]\n[7]\n[1]\n[2, 44]\n[1, 2, 44, 4]\nAB\n2\neq\nne\n[65, 66, 99]\n6\nnone\n"
+  "[1, 2, 44]\n3\n2\n0\nempty\n[2, 44]\n[44]\n[7]\n[1]\n[2, 44]\n[1, 2, 44, 4]\nAB\nABC\nAB\nABD\n[0, 1, 2, 3]\nAB\n2\neq\nne\n[65, 66, 99]\n6\nnone\n"
 
 /-- (stage 30, C11) `Bytes` across the FFI: one `Bytes` argument for a buffer and its
 length (`C.wiz_sum_buf`), a struct with a byte-array field given to C and read back
-(`Msg.mk`, `C.wiz_msg_first`, `C.wiz_msg_make`). -/
+(`Msg.mk`, `C.wiz_byte_msg_first`, `C.wiz_byte_msg_make`). -/
 def bytesFfiProgram (header : String) : String :=
   "import IO\n" ++
-  s!"c_struct \"wiz_msg\" (header := \"{header}\") Msg where\n  data : Bytes\n  n : Nat\n" ++
+  s!"c_struct \"wiz_byte_msg\" (header := \"{header}\") Msg where\n  data : Bytes\n  n : Nat\n" ++
   s!"import_c \"{header}\" (pure)\n" ++
+  s!"foreign_type BUF\n" ++
+  s!"extern \"wiz_get_buf\" (header := \"{header}\") getBuf : IO BUF\n" ++
+  "glue sumBuf (p : BUF) (n : Nat) : Nat := \"return wiz_sum_buf(p, n);\"\n" ++
   "def main : IO Unit := do\n" ++
   "  IO.println (Nat.toString (C.wiz_sum_buf (Bytes.ofString \"ABC\")));\n" ++
-  "  IO.println (Nat.toString (C.wiz_msg_first (Msg.mk (Bytes.ofString \"AB\") 5)));\n" ++
-  "  let m := C.wiz_msg_make 5;\n" ++
+  "  IO.println (Nat.toString (C.wiz_byte_msg_first (Msg.mk (Bytes.ofString \"AB\") 5)));\n" ++
+  "  let m := C.wiz_byte_msg_make 5;\n" ++
   "  IO.println (Bytes.show m.data);\n" ++
-  "  IO.println (Nat.toString m.n)\n"
+  "  IO.println (Nat.toString m.n);\n" ++
+  "  b ← getBuf;\n" ++
+  "  IO.println (Nat.toString (sumBuf b 3))\n"
 
-def bytesFfiExpected : String := "198\n70\n[120, 121, 0, 122]\n5\n"
+def bytesFfiExpected : String := "198\n70\n[120, 121, 0, 122]\n5\n198\n"
 
 
 def selfHostGroup : Group where
@@ -1511,7 +1526,7 @@ def selfHostGroup : Group where
         selfhostCompileRun prog bytesFfiExpected (flags := #["--rc"]) },
     { name := "the self-hosted frontend: a Bytes c_struct field takes a header, as in the Lean frontend (stage 30)", run := fun _ =>
         selfhostAgreesIO "" [
-          ("c_struct \"wiz_msg\" (header := \"wiz_bytes.h\") Msg where\n  data : Bytes\n  n : Nat\n", true),
+          ("c_struct \"wiz_byte_msg\" (header := \"wiz_bytes.h\") Msg where\n  data : Bytes\n  n : Nat\n", true),
           ("c_struct \"struct b\" B where\n  data : Bytes\n", false)] },
     { name := "native representation: implemented_by mk/get on a sealed constructor (stage 30)", run := fun _ => do
         let prog := "import IO\n" ++

@@ -928,18 +928,27 @@ static void bytesGrow(wiz_bytes *b, size_t need) {
 #endif
   b->cap = cap;
 }
-/* the buffer `v` (owned) to write in: itself if unique, else a copy (`v` released) */
-static wiz_bytes *bytesMut(V v) {
+/* a copy of `b` with room for `need` bytes (its length is kept) */
+static wiz_bytes *bytesCopyOf(wiz_bytes *b, size_t need) {
+  wiz_bytes *c = bytesNew(need);
+  c->len = b->len;
+  if (b->len) memcpy(c->data, b->data, b->len);
+  return c;
+}
+/* the buffer `v` (owned) to write in, with room for `need` bytes: itself if unique,
+   else a copy (`v` released). Under the collector there is no reference count, so a
+   shared buffer cannot be told from a unique one and it is always copied: `Bytes` is
+   functional, and in-place update of a shared buffer would be observably different
+   (the reference-counted compiler updates in place only when unique, as the host). */
+static wiz_bytes *bytesMut(V v, size_t need) {
 #ifdef WIZ_RC
   wiz_bytes *b = (wiz_bytes *)v;
   if (RC(b) == 1) return b;
-  wiz_bytes *c = bytesNew(b->len);
-  c->len = b->len;
-  if (b->len) memcpy(c->data, b->data, b->len);
+  wiz_bytes *c = bytesCopyOf(b, need);
   dec(v);
   return c;
 #else
-  return (wiz_bytes *)v;
+  return bytesCopyOf((wiz_bytes *)v, need);
 #endif
 }
 /* a buffer argument the native is done with (nothing to do under the collector) */
@@ -959,7 +968,7 @@ static V rt_bytes_new(const void *p, size_t n) {
 }
 V get_Bytes_46_empty(void) { return (V)bytesNew(0); }
 NATIVE(Bytes_46_push, 2,
-  wiz_bytes *b = bytesMut(a[0]);
+  wiz_bytes *b = bytesMut(a[0], ((wiz_bytes *)a[0])->len + 1);
   if (b->len == b->cap) bytesGrow(b, b->len + 1);
   b->data[b->len++] = (unsigned char)UNBOX(a[1]);
   return (V)b;)
@@ -1003,7 +1012,7 @@ NATIVE(Bytes_46_slice, 3,
 NATIVE(Bytes_46_append, 2,
   wiz_bytes *y = (wiz_bytes *)a[1];
   if (y->len == 0) { bdrop(a[1]); return a[0]; }
-  wiz_bytes *b = bytesMut(a[0]);
+  wiz_bytes *b = bytesMut(a[0], ((wiz_bytes *)a[0])->len + y->len);
   if (b->len + y->len > b->cap) bytesGrow(b, b->len + y->len);
   memcpy(b->data + b->len, y->data, y->len);
   b->len += y->len;
