@@ -18,10 +18,10 @@ provides
 
 The representation is the C runtime's: a value is an `i64`; scalars (small numbers, tags,
 `◾`) have bit 0 set, objects are pointers into linear memory with a header `{rc, tag,
-size}` (16 bytes) and `i64` fields. Reference counts are not maintained in this
-prototype: `dup`/`drop` are no-ops and the allocator never reuses memory, so a program's
-peak memory is everything it allocates. (`reset`/`reuse` therefore allocate a fresh
-cell, which is observably the same.)
+size, class}` (16 bytes) and `i64` fields. The reference counts the IR's `dup`/`drop`
+insert are maintained: the last `drop` releases an object's fields and returns its block
+to a **segregated free list**, so peak memory is the peak *live* set, not the total
+allocated. `reset`/`reuse` keep and refill a unique cell, as the C runtime does.
 
 Limits and the reason for them are in `docs/stages/08-backend/wasm.md`.
 -/
@@ -118,8 +118,10 @@ def select : Code := #[0x1B]
 def lg (i : Nat) : Code := #[0x20] ++ uleb i
 def ls (i : Nat) : Code := #[0x21] ++ uleb i
 def lt (i : Nat) : Code := #[0x22] ++ uleb i
-def gg0 : Code := #[0x23, 0x00]
-def gs0 : Code := #[0x24, 0x00]
+def gg (i : Nat) : Code := #[0x23] ++ uleb i
+def gs (i : Nat) : Code := #[0x24] ++ uleb i
+def gg0 : Code := gg 0
+def gs0 : Code := gs 0
 /-- `i32.const`, wrapping a tag (such as `0xFFFF0000`) to its signed 32-bit value. -/
 def i32c (n : Nat) : Code :=
   #[0x41] ++ slebInt (if n < 2 ^ 31 then Int.ofNat n else Int.ofNat n - 2 ^ 32)
@@ -134,8 +136,11 @@ def i32Eq : Code := #[0x46]
 def i32Ne : Code := #[0x47]
 def i32LtS : Code := #[0x48]
 def i32LtU : Code := #[0x49]
+def i32GtS : Code := #[0x4A]
 def i32GtU : Code := #[0x4B]
+def i32LeU : Code := #[0x4D]
 def i32GeU : Code := #[0x4F]
+def i32Clz : Code := #[0x67]
 def i32Add : Code := #[0x6A]
 def i32Sub : Code := #[0x6B]
 def i32Mul : Code := #[0x6C]
@@ -144,6 +149,8 @@ def i32RemU : Code := #[0x70]
 def i32And : Code := #[0x71]
 def i32Or : Code := #[0x72]
 def i32Xor : Code := #[0x73]
+def i32Shl : Code := #[0x74]
+def i32ShrU : Code := #[0x76]
 
 def i64Eqz : Code := #[0x50]
 def i64Eq : Code := #[0x51]
@@ -176,6 +183,10 @@ def scratchBase : Nat := 8
 def maxCallArgs : Nat := 256
 /-- Big literals' decimal text starts here. -/
 def dataBase : Nat := 4096
+/-- The free lists' heads: one `i32` per size class, just above the argument scratch. -/
+def bucketBase : Nat := scratchBase + 8 * maxCallArgs
+/-- The global holding the head of the release work list (global 0 is the bump pointer). -/
+def deadHeadGlobal : Nat := 1
 /-- The tag of a closure (as in `runtime/wiz_rt.h`). -/
 def tagClo : Nat := 0xFFFF0000
 def tagBig : Nat := 0xFFFF0001
@@ -222,8 +233,9 @@ def boxI64 : Code := i64c 1 ++ i64Shl ++ i64c 1 ++ i64Or
 
 /-- The runtime functions, in function-index order (right after the five imports). -/
 def runtimeNames : Array String := #[
-  "wiz_alloc_raw", "wiz_alloc_obj", "wiz_ctor_new", "wiz_set", "wiz_tag", "wiz_proj",
-  "wiz_inc", "wiz_dec", "wiz_reset", "wiz_drop_moved", "wiz_clo_new", "wiz_apply",
+  "wiz_alloc_raw", "wiz_alloc_obj", "wiz_free_raw", "wiz_claim", "wiz_drain",
+  "wiz_ctor_new", "wiz_set", "wiz_tag", "wiz_proj", "wiz_inc", "wiz_dec", "wiz_reset",
+  "wiz_reuse", "wiz_drop_moved", "wiz_clo_new", "wiz_apply",
   "wiz_memo", "wiz_lazy_tag", "wiz_lazy_set", "wiz_tag_of", "wiz_nat_tag",
   "wiz_field_at", "wiz_mk_obj", "wiz_nat_norm", "wiz_big_handle", "wiz_big_small",
   "wiz_nat_add", "wiz_nat_sub", "wiz_nat_mul", "wiz_nat_div", "wiz_nat_mod",
@@ -239,6 +251,9 @@ def rtIdx (name : String) : Nat :=
 def runtimeSigs : Array FnSig := #[
   { params := #[.i32], results := #[.i32] },                          -- alloc_raw
   { params := #[.i32, .i32], results := #[.i32] },                    -- alloc_obj
+  { params := #[.i32], results := #[] },                              -- free_raw
+  { params := #[.i32], results := #[] },                              -- claim
+  { params := #[], results := #[] },                                  -- drain
   { params := #[.i32, .i32], results := #[.i64] },                    -- ctor_new
   { params := #[.i64, .i32, .i64], results := #[] },                  -- set
   { params := #[.i64], results := #[.i32] },                          -- tag
@@ -246,6 +261,7 @@ def runtimeSigs : Array FnSig := #[
   { params := #[.i64], results := #[] },                              -- inc
   { params := #[.i64], results := #[] },                              -- dec
   { params := #[.i64], results := #[.i64] },                          -- reset
+  { params := #[.i64, .i32, .i32], results := #[.i64] },              -- reuse
   { params := #[.i64, .i64], results := #[.i64] },                    -- drop_moved
   { params := #[.i32, .i32, .i32, .i32], results := #[.i64] },        -- clo_new
   { params := #[.i64, .i32, .i32], results := #[.i64] },              -- apply
@@ -286,22 +302,57 @@ def runtimeSigs : Array FnSig := #[
 def runtimeSig (name : String) : FnSig :=
   runtimeSigs.getD ((runtimeNames.findIdx? (· == name)).getD 0) { params := #[], results := #[] }
 
-/-- The runtime's function bodies. -/
+/-- The runtime's function bodies.
+
+Every object is reference counted: a header `{rc, tag, size, class}` (the fourth word is
+the block's size class while it is live, and the next pointer while it is free) and `i64`
+fields. `dup`/`drop` are `wiz_inc`/`wiz_dec`; the last drop releases the object's fields
+and returns its block to a segregated free list, so memory is bounded by the peak live
+set, not by the total allocated. -/
 def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
   let mut out : Array FnDef := #[]
   let rt := rtIdx
-  -- `wiz_alloc_raw(bytes)`: bump allocation, growing memory as needed.
+  -- `wiz_alloc_raw(bytes)`: a block of at least `bytes` bytes, from the free list of its
+  -- size class or from the bump pointer. The block's class is kept at offset 12.
   out := out.push {
-    name := "wiz_alloc_raw", params := #[.i32], results := #[.i32], locals := #[.i32, .i32]
+    name := "wiz_alloc_raw", params := #[.i32], results := #[.i32]
+    locals := #[.i32, .i32, .i32, .i32, .i32]
     code :=
-      -- locals: p=1, need=2
-      gg0 ++ ls 1 ++ lg 1 ++ lg 0 ++ i32Add ++ ls 2 ++
-      block ++ loop ++
-        memSize ++ i32c 65536 ++ i32Mul ++ lg 2 ++ i32GeU ++ brIf 1 ++
-        i32c 1 ++ memGrow ++ drop ++ br 0 ++
-      end_ ++ end_ ++
-      lg 1 ++ lg 2 ++ gs0 ++ lg 1 ++ ret }
-  -- `wiz_alloc_obj(tag, n)`: a header and `n` fields (16 bytes, 8-aligned).
+      -- locals: need=1, k=2, p=3, cap=4, grew=5
+      lg 0 ++ i32c 7 ++ i32Add ++ i32c 0xFFFFFFF8 ++ i32And ++ ls 1 ++
+      lg 1 ++ i32c 16 ++ i32LtU ++ if_ ++ i32c 16 ++ ls 1 ++ end_ ++
+      -- (a single block is at most 1 GiB: beyond that the module traps, it does not
+      -- silently wrap the class index)
+      lg 1 ++ i32c 0x40000000 ++ i32GtU ++ if_ ++ unreachable ++ end_ ++
+      -- k: fields 0..63 are exact sizes (16+8k bytes), then powers of two from 1 KiB
+      lg 1 ++ i32c 521 ++ i32LtU ++ if_
+        ++ lg 1 ++ i32c 16 ++ i32Sub ++ i32c 3 ++ i32ShrU ++ ls 2
+        ++ else_ ++ lg 1 ++ i32c 1 ++ i32Sub ++ i32Clz ++ i32c 86 ++ i32Sub ++ ls 2 ++ end_ ++
+      -- p = free[k]
+      lg 2 ++ i32c 4 ++ i32Mul ++ i32c bucketBase ++ i32Add ++ i32Load 2 0 ++ ls 3 ++
+      lg 3 ++ if_
+        ++ -- pop: free[k] = p.next
+        lg 2 ++ i32c 4 ++ i32Mul ++ i32c bucketBase ++ i32Add ++
+           lg 3 ++ i32Load 2 12 ++ i32Store 2 0
+        ++ else_ ++
+        -- bump: p = top; cap = cap(k); top += cap
+        gg0 ++ ls 3 ++
+        lg 2 ++ i32c 63 ++ i32LeU ++ if_
+          ++ lg 2 ++ i32c 8 ++ i32Mul ++ i32c 16 ++ i32Add ++ ls 4
+          ++ else_ ++ i32c 1 ++ lg 2 ++ i32c 54 ++ i32Sub ++ i32Shl ++ ls 4 ++ end_ ++
+        block ++ loop ++
+          memSize ++ i32c 65536 ++ i32Mul ++ lg 3 ++ lg 4 ++ i32Add ++ i32GeU ++ brIf 1 ++
+          i32c 1 ++ memGrow ++ ls 5 ++
+          -- (a failed grow is a trap, not a spin: the engine's limit is reached)
+          lg 5 ++ i32c 0xFFFFFFFF ++ i32Eq ++ if_ ++ unreachable ++ end_ ++
+          br 0 ++
+        end_ ++ end_ ++
+        lg 3 ++ lg 4 ++ i32Add ++ gs0
+        ++ end_ ++
+      -- p.class = k
+      lg 3 ++ lg 2 ++ i32Store 2 12 ++
+      lg 3 ++ ret }
+  -- `wiz_alloc_obj(tag, n)`: a header (rc 1) and `n` fields (16 bytes, 8-aligned).
   out := out.push {
     name := "wiz_alloc_obj", params := #[.i32, .i32], results := #[.i32], locals := #[.i32, .i32]
     code :=
@@ -312,7 +363,74 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
       lg 3 ++ lg 0 ++ i32Store 2 4 ++
       lg 3 ++ lg 1 ++ i32Store 2 8 ++
       lg 3 ++ ret }
-  -- `wiz_ctor_new(tag, n)`: the fields start as `◾`.
+  -- `wiz_free_raw(p)`: the block of `p` back to its class's free list (no fields are
+  -- released: the caller did that, or there are none).
+  out := out.push {
+    name := "wiz_free_raw", params := #[.i32], results := #[], locals := #[.i32]
+    code :=
+      -- locals: k=1
+      lg 0 ++ i32Load 2 12 ++ ls 1 ++
+      lg 0 ++ lg 1 ++ i32c 4 ++ i32Mul ++ i32c bucketBase ++ i32Add ++ i32Load 2 0
+        ++ i32Store 2 12 ++
+      lg 1 ++ i32c 4 ++ i32Mul ++ i32c bucketBase ++ i32Add ++ lg 0 ++ i32Store 2 0 ++
+      ret }
+  -- `wiz_claim(p)`: `p`'s count has reached 0: mark it dead (a negative count) and thread
+  -- it on the release work list of the global at index 1, so a long chain is freed
+  -- iteratively, not on the engine's stack.
+  out := out.push {
+    name := "wiz_claim", params := #[.i32], results := #[], locals := #[.i32]
+    code :=
+      -- locals: k=1
+      lg 0 ++ i32Load 2 12 ++ ls 1 ++
+      lg 0 ++ i32c 0xFFFFFFFF ++ lg 1 ++ i32Sub ++ i32Store 2 0 ++
+      lg 0 ++ gg deadHeadGlobal ++ i32Store 2 12 ++
+      lg 0 ++ gs deadHeadGlobal ++
+      ret }
+  -- `wiz_drain()`: free every object on the work list: release its fields (claiming each
+  -- child whose count drops to 0) and put its block back in its size class's free list.
+  out := out.push {
+    name := "wiz_drain", params := #[], results := #[]
+    locals := #[.i32, .i32, .i32, .i32, .i32, .i32, .i64, .i32, .i32]
+    code :=
+      -- locals: q=0, k=1, i=2, last=3, n=4, tag=5, c=6, cp=7, rc=8
+      block ++ loop ++
+        gg deadHeadGlobal ++ i32Eqz ++ brIf 1 ++
+        gg deadHeadGlobal ++ ls 0 ++
+        lg 0 ++ i32Load 2 12 ++ gs deadHeadGlobal ++
+        -- k was stored as `-(k+1)` in the count of a dead object
+        i32c 0xFFFFFFFF ++ lg 0 ++ i32Load 2 0 ++ i32Sub ++ ls 1 ++
+        lg 0 ++ i32Load 2 8 ++ ls 4 ++
+        lg 0 ++ i32Load 2 4 ++ ls 5 ++
+        -- the fields that hold references: a closure's skip its table and arity, an
+        -- array's are its live elements only, a big number's one field is a host handle
+        i32c 0 ++ ls 2 ++ lg 4 ++ ls 3 ++
+        lg 5 ++ i32c tagClo ++ i32Eq ++ if_ ++ i32c 2 ++ ls 2 ++ end_ ++
+        lg 5 ++ i32c tagArray ++ i32Eq ++ if_
+          ++ lg 0 ++ i64Load 3 16 ++ i64c 1 ++ i64ShrU ++ i32WrapI64 ++ i32c 2 ++ i32Add ++ ls 3
+          ++ end_ ++
+        lg 5 ++ i32c tagBig ++ i32Eq ++ if_ ++ i32c 0 ++ ls 3 ++ end_ ++
+        block ++ loop ++
+          lg 2 ++ lg 3 ++ i32GeU ++ brIf 1 ++
+          lg 0 ++ i32c 16 ++ i32Add ++ lg 2 ++ i32c 8 ++ i32Mul ++ i32Add ++ i64Load 3 0 ++ ls 6 ++
+          lg 6 ++ i64c 1 ++ i64And ++ i64Eqz ++ if_
+            ++ lg 6 ++ i32WrapI64 ++ ls 7 ++
+               lg 7 ++ i32Load 2 0 ++ ls 8 ++
+               lg 8 ++ i32c 1 ++ i32GtU ++ if_
+                 ++ lg 7 ++ lg 8 ++ i32c 1 ++ i32Sub ++ i32Store 2 0
+                 ++ else_ ++ lg 8 ++ i32c 1 ++ i32Eq ++ if_
+                    ++ lg 7 ++ call (rt "wiz_claim") ++ end_
+                 ++ end_
+            ++ end_ ++
+          lg 2 ++ i32c 1 ++ i32Add ++ ls 2 ++ br 0 ++
+        end_ ++ end_ ++
+        -- put q's block back in the free list of its class
+        lg 0 ++ lg 1 ++ i32c 4 ++ i32Mul ++ i32c bucketBase ++ i32Add ++ i32Load 2 0
+          ++ i32Store 2 12 ++
+        lg 1 ++ i32c 4 ++ i32Mul ++ i32c bucketBase ++ i32Add ++ lg 0 ++ i32Store 2 0 ++
+        br 0 ++
+      end_ ++ end_ ++
+      ret }
+  -- `wiz_ctor_new(tag, n)`: the fields start as `◾` (owned by nobody yet).
   out := out.push {
     name := "wiz_ctor_new", params := #[.i32, .i32], results := #[.i64], locals := #[.i32, .i32]
     code :=
@@ -325,13 +443,13 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
         lg 3 ++ i32c 1 ++ i32Add ++ ls 3 ++ br 0 ++
       end_ ++ end_ ++
       lg 2 ++ i64ExtendI32U ++ ret }
-  -- `wiz_set(o, i, v)`.
+  -- `wiz_set(o, i, v)`: the field of a fresh cell (its old value is `◾`).
   out := out.push {
     name := "wiz_set", params := #[.i64, .i32, .i64], results := #[]
     code :=
       lg 0 ++ i32WrapI64 ++ i32c 16 ++ i32Add ++ lg 1 ++ i32c 8 ++ i32Mul ++ i32Add ++
       lg 2 ++ i64Store 3 0 ++ ret }
-  -- `wiz_tag(v)`: a scalar's value, or an object's tag.
+  -- `wiz_tag(v)`: a scalar's value, or an object's tag (borrows `v`).
   out := out.push {
     name := "wiz_tag", params := #[.i64], results := #[.i32], locals := #[.i32]
     code :=
@@ -358,11 +476,121 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
             ++ i64c 1 ++ ls 2 ++ else_ ++ i64c 3 ++ ls 2 ++ end_ ++ lg 2 ++ ret
           ++ else_ ++ unreachable ++ end_
         ++ end_ }
-  out := out.push { name := "wiz_inc", params := #[.i64], results := #[], code := ret }
-  out := out.push { name := "wiz_dec", params := #[.i64], results := #[], code := ret }
-  out := out.push { name := "wiz_reset", params := #[.i64], results := #[.i64], code := i64c 1 ++ ret }
-  out := out.push { name := "wiz_drop_moved", params := #[.i64, .i64], results := #[.i64], code := i64c 1 ++ ret }
-  -- `wiz_clo_new(table, arity, n, args)`.
+  -- `wiz_inc(v)`: one more reference to `v` (a scalar is free).
+  out := out.push {
+    name := "wiz_inc", params := #[.i64], results := #[], locals := #[.i32, .i32]
+    code :=
+      -- locals: p=1, rc=2
+      lg 0 ++ i64c 1 ++ i64And ++ i64Eqz ++ if_
+        ++ lg 0 ++ i32WrapI64 ++ ls 1 ++
+           lg 1 ++ i32Load 2 0 ++ ls 2 ++
+           lg 2 ++ i32c 0 ++ i32GtU ++ if_
+             ++ lg 1 ++ lg 2 ++ i32c 1 ++ i32Add ++ i32Store 2 0
+           ++ end_
+        ++ end_ ++ ret }
+  -- `wiz_dec(v)`: drop a reference; the last one releases the object.
+  out := out.push {
+    name := "wiz_dec", params := #[.i64], results := #[], locals := #[.i32, .i32]
+    code :=
+      -- locals: p=1, rc=2
+      lg 0 ++ i64c 1 ++ i64And ++ i64Eqz ++ if_
+        ++ lg 0 ++ i32WrapI64 ++ ls 1 ++
+           lg 1 ++ i32Load 2 0 ++ ls 2 ++
+           lg 2 ++ i32c 1 ++ i32GtU ++ if_
+             ++ lg 1 ++ lg 2 ++ i32c 1 ++ i32Sub ++ i32Store 2 0
+             ++ else_ ++ lg 2 ++ i32c 1 ++ i32Eq ++ if_
+               ++ lg 1 ++ call (rt "wiz_claim") ++ call (rt "wiz_drain")
+               ++ end_
+             ++ end_
+        ++ end_ ++ ret }
+  -- `wiz_reset(x)`: drop `x`, keeping its cell as a token when it is a unique
+  -- constructor (its fields are released here; `reuse` refills it).
+  out := out.push {
+    name := "wiz_reset", params := #[.i64], results := #[.i64]
+    locals := #[.i32, .i32, .i32, .i32, .i32]
+    code :=
+      -- locals: p=1, rc=2, tag=3, n=4, i=5
+      lg 0 ++ i64c 1 ++ i64And ++ i64Eqz ++ if_
+        ++ lg 0 ++ i32WrapI64 ++ ls 1 ++
+           lg 1 ++ i32Load 2 0 ++ ls 2 ++
+           lg 1 ++ i32Load 2 4 ++ ls 3 ++
+           lg 2 ++ i32c 1 ++ i32Eq ++ lg 3 ++ i32c tagClo ++ i32LtU ++ i32And ++ if_
+             ++ lg 1 ++ i32Load 2 8 ++ ls 4 ++
+                i32c 0 ++ ls 5 ++
+                block ++ loop ++
+                  lg 5 ++ lg 4 ++ i32GeU ++ brIf 1 ++
+                  lg 1 ++ i32c 16 ++ i32Add ++ lg 5 ++ i32c 8 ++ i32Mul ++ i32Add ++
+                  i64Load 3 0 ++ call (rt "wiz_dec") ++
+                  lg 5 ++ i32c 1 ++ i32Add ++ ls 5 ++ br 0 ++
+                end_ ++ end_ ++
+                lg 0 ++ ret
+             ++ else_ ++ lg 0 ++ call (rt "wiz_dec") ++ i64c 1 ++ ret ++ end_
+        ++ end_ ++
+      i64c 1 ++ ret }
+  -- `wiz_reuse(tok, tag, n)`: `ctor tag n`, in the token's cell when its size matches.
+  out := out.push {
+    name := "wiz_reuse", params := #[.i64, .i32, .i32], results := #[.i64]
+    code :=
+      lg 0 ++ i64c 1 ++ i64And ++ i64Eqz ++ if_
+        ++ lg 0 ++ i32WrapI64 ++ i32Load 2 8 ++ lg 2 ++ i32Eq ++ if_
+          ++ lg 0 ++ i32WrapI64 ++ lg 1 ++ i32Store 2 4 ++ lg 0 ++ ret
+          ++ else_ ++ lg 0 ++ i32WrapI64 ++ call (rt "wiz_free_raw") ++ end_
+        ++ end_ ++
+      lg 2 ++ i32Eqz ++ if_ ++ lg 1 ++ boxI32 ++ ret ++ end_ ++
+      lg 1 ++ lg 2 ++ call (rt "wiz_ctor_new") ++ ret }
+  -- `wiz_drop_moved(x, mask)`: drop `x`, whose fields in `mask` moved out (a unique
+  -- cell's others are released and the cell freed; a shared one lends them a reference).
+  out := out.push {
+    name := "wiz_drop_moved", params := #[.i64, .i64], results := #[.i64]
+    locals := #[.i32, .i32, .i32, .i32, .i32, .i64, .i32]
+    code :=
+      -- locals: p=2, tag=3, rc=4, n=5, i=6, m=7, keep=8
+      lg 0 ++ i64c 1 ++ i64And ++ i64Eqz ++ if_
+        ++ lg 0 ++ i32WrapI64 ++ ls 2 ++
+           lg 2 ++ i32Load 2 4 ++ ls 3 ++
+           lg 3 ++ i32c tagClo ++ i32GeU ++ if_
+             ++ lg 0 ++ call (rt "wiz_dec")
+             ++ else_ ++
+                lg 2 ++ i32Load 2 0 ++ ls 4 ++
+                lg 2 ++ i32Load 2 8 ++ ls 5 ++
+                lg 1 ++ i64c 1 ++ i64ShrU ++ ls 7 ++
+                lg 4 ++ i32c 1 ++ i32Eq ++ if_
+                  ++ i32c 0 ++ ls 6 ++
+                     block ++ loop ++
+                       lg 6 ++ lg 5 ++ i32GeU ++ brIf 1 ++
+                       i32c 0 ++ ls 8 ++
+                       lg 6 ++ i32c 62 ++ i32LtU ++ if_
+                         ++ lg 7 ++ lg 6 ++ i64ExtendI32U ++ i64ShrU ++ i64c 1 ++
+                            i64And ++ i32WrapI64 ++ ls 8
+                         ++ end_ ++
+                       lg 8 ++ i32Eqz ++ if_
+                         ++ lg 2 ++ i32c 16 ++ i32Add ++ lg 6 ++ i32c 8 ++ i32Mul ++
+                            i32Add ++ i64Load 3 0 ++ call (rt "wiz_dec")
+                         ++ end_ ++
+                       lg 6 ++ i32c 1 ++ i32Add ++ ls 6 ++ br 0 ++
+                     end_ ++ end_ ++
+                     lg 2 ++ call (rt "wiz_free_raw")
+                  ++ else_ ++
+                     i32c 0 ++ ls 6 ++
+                     block ++ loop ++
+                       lg 6 ++ lg 5 ++ i32GeU ++ brIf 1 ++
+                       i32c 0 ++ ls 8 ++
+                       lg 6 ++ i32c 62 ++ i32LtU ++ if_
+                         ++ lg 7 ++ lg 6 ++ i64ExtendI32U ++ i64ShrU ++ i64c 1 ++
+                            i64And ++ i32WrapI64 ++ ls 8
+                         ++ end_ ++
+                       lg 8 ++ if_
+                         ++ lg 2 ++ i32c 16 ++ i32Add ++ lg 6 ++ i32c 8 ++ i32Mul ++
+                            i32Add ++ i64Load 3 0 ++ call (rt "wiz_inc")
+                         ++ end_ ++
+                       lg 6 ++ i32c 1 ++ i32Add ++ ls 6 ++ br 0 ++
+                     end_ ++ end_ ++
+                     lg 0 ++ call (rt "wiz_dec")
+                  ++ end_
+             ++ end_
+        ++ end_ ++
+      i64c 1 ++ ret }
+  -- `wiz_clo_new(table, arity, n, args)`: a closure owning the `n` arguments.
   out := out.push {
     name := "wiz_clo_new", params := #[.i32, .i32, .i32, .i32], results := #[.i64], locals := #[.i64, .i32]
     code :=
@@ -377,135 +605,191 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
         lg 3 ++ lg 5 ++ i32c 8 ++ i32Mul ++ i32Add ++ i64Load 3 0 ++ i64Store 3 0 ++
         lg 5 ++ i32c 1 ++ i32Add ++ ls 5 ++ br 0 ++
       end_ ++ end_ ++ lg 4 ++ ret }
-  -- `wiz_apply(f, n, args)`: copy, maybe force a thunk, partial/over-application.
+  -- `wiz_apply(f, n, args)`: apply (owned) `f` to `n` (owned) arguments: force a thunk,
+  -- combine with a closure's captured arguments, then call, partially apply, or apply the
+  -- result again. The argument buffers are returned to the free list.
   out := out.push {
     name := "wiz_apply", params := #[.i64, .i32, .i32], results := #[.i64]
-    locals := #[.i32, .i32, .i32, .i32, .i32, .i32, .i32, .i64, .i64, .i64]
+    locals := #[.i32, .i32, .i32, .i32, .i32, .i32, .i32, .i64, .i64, .i32, .i32]
     code :=
-      -- locals: buf=3, i=4, tag=5, m=6, arity=7, total=8, buf2=9, r=10, fn=11, val=12
-      lg 0 ++ i64c 1 ++ i64And ++ i64Eqz ++ if_
-        ++ -- object: a thunk is forced first
+      -- locals: buf=3, i=4, tag=5, m=6, arity=7, total=8, buf2=9, r=10, fn=11,
+      --         table=12, rc=13
+      lg 1 ++ i32c 8 ++ i32Mul ++ call (rt "wiz_alloc_raw") ++ ls 3 ++
+      i32c 0 ++ ls 4 ++
+      block ++ loop ++
+        lg 4 ++ lg 1 ++ i32GeU ++ brIf 1 ++
+        lg 3 ++ lg 4 ++ i32c 8 ++ i32Mul ++ i32Add ++
+        lg 2 ++ lg 4 ++ i32c 8 ++ i32Mul ++ i32Add ++ i64Load 3 0 ++ i64Store 3 0 ++
+        lg 4 ++ i32c 1 ++ i32Add ++ ls 4 ++ br 0 ++
+      end_ ++ end_ ++
+      lg 0 ++ i64c 1 ++ i64And ++ i64c 1 ++ i64Eq ++ if_
+        ++ -- a scalar: `◾` applied is `◾` (its arguments are dropped)
+        lg 0 ++ i64c 1 ++ i64Eq ++ if_
+          ++ lg 3 ++ call (rt "wiz_free_raw") ++ i64c 1 ++ ret
+          ++ end_ ++
+        unreachable
+        ++ else_ ++
         lg 0 ++ i32WrapI64 ++ i32Load 2 4 ++ ls 5 ++
         lg 5 ++ i32c tagThunk ++ i32Eq ++ if_
-          -- (copy the arguments before forcing: the thunk's body may apply other
-          -- closures, which use the scratch area)
-          ++ lg 1 ++ i32c 8 ++ i32Mul ++ call (rt "wiz_alloc_raw") ++ ls 3 ++
+          ++ -- a thunk: force it, store the value, and hand out a reference
+          lg 0 ++ i32WrapI64 ++ i64Load 3 16 ++ ls 11 ++
+          lg 11 ++ i64c 1 ++ i64Eq ++ if_
+            ++ -- already forced: the first argument (the unit) is dropped
+            lg 3 ++ i64Load 3 0 ++ call (rt "wiz_dec") ++
+            lg 0 ++ i32WrapI64 ++ i64Load 3 24 ++ ls 10
+            ++ else_ ++
+            -- blackhole while forcing (a recursive thunk re-enters its body, as before)
+            lg 0 ++ i32WrapI64 ++ i64c 1 ++ i64Store 3 16 ++
+            lg 11 ++ i32c 1 ++ lg 3 ++ call (rt "wiz_apply") ++ ls 10 ++
+            lg 0 ++ i32WrapI64 ++ lg 10 ++ i64Store 3 24
+            ++ end_ ++
+          lg 10 ++ call (rt "wiz_inc") ++
+          lg 0 ++ call (rt "wiz_dec") ++
+          lg 1 ++ i32c 1 ++ i32GtU ++ if_
+            ++ lg 10 ++ lg 1 ++ i32c 1 ++ i32Sub ++ lg 3 ++ i32c 8 ++ i32Add ++
+               call (rt "wiz_apply") ++ ls 10
+            ++ end_ ++
+          lg 3 ++ call (rt "wiz_free_raw") ++
+          lg 10 ++ ret
+          ++ else_ ++
+          lg 5 ++ i32c tagClo ++ i32Ne ++ if_ ++ unreachable ++ end_ ++
+          lg 0 ++ i32WrapI64 ++ i64Load 3 16 ++ i64c 1 ++ i64ShrU ++ i32WrapI64 ++ ls 12 ++
+          lg 0 ++ i32WrapI64 ++ i64Load 3 24 ++ i64c 1 ++ i64ShrU ++ i32WrapI64 ++ ls 7 ++
+          lg 0 ++ i32WrapI64 ++ i32Load 2 8 ++ i32c 2 ++ i32Sub ++ ls 6 ++
+          lg 6 ++ lg 1 ++ i32Add ++ ls 8 ++
+          lg 8 ++ i32c 8 ++ i32Mul ++ call (rt "wiz_alloc_raw") ++ ls 9 ++
+          -- the captured arguments
+          i32c 0 ++ ls 4 ++
+          block ++ loop ++
+            lg 4 ++ lg 6 ++ i32GeU ++ brIf 1 ++
+            lg 9 ++ lg 4 ++ i32c 8 ++ i32Mul ++ i32Add ++
+            lg 0 ++ i32WrapI64 ++ i32c 32 ++ i32Add ++ lg 4 ++ i32c 8 ++ i32Mul ++ i32Add ++
+            i64Load 3 0 ++ i64Store 3 0 ++
+            lg 4 ++ i32c 1 ++ i32Add ++ ls 4 ++ br 0 ++
+          end_ ++ end_ ++
+          -- the given arguments
           i32c 0 ++ ls 4 ++
           block ++ loop ++
             lg 4 ++ lg 1 ++ i32GeU ++ brIf 1 ++
-            lg 3 ++ lg 4 ++ i32c 8 ++ i32Mul ++ i32Add ++
-            lg 2 ++ lg 4 ++ i32c 8 ++ i32Mul ++ i32Add ++ i64Load 3 0 ++ i64Store 3 0 ++
+            lg 9 ++ lg 6 ++ lg 4 ++ i32Add ++ i32c 8 ++ i32Mul ++ i32Add ++
+            lg 3 ++ lg 4 ++ i32c 8 ++ i32Mul ++ i32Add ++ i64Load 3 0 ++ i64Store 3 0 ++
             lg 4 ++ i32c 1 ++ i32Add ++ ls 4 ++ br 0 ++
           end_ ++ end_ ++
-          lg 3 ++ ls 2 ++
-          lg 0 ++ i32WrapI64 ++ i64Load 3 16 ++ ls 11 ++
-          lg 11 ++ i64c 1 ++ i64Eq ++ if_
-            ++ lg 0 ++ i32WrapI64 ++ i64Load 3 24 ++ ls 12
+          -- the closure itself: a unique one's arguments move into `buf2`, a shared
+          -- one's are shared and the closure is dropped
+          lg 0 ++ i32WrapI64 ++ i32Load 2 0 ++ ls 13 ++
+          lg 13 ++ i32c 1 ++ i32Eq ++ if_
+            ++ lg 0 ++ i32WrapI64 ++ call (rt "wiz_free_raw")
             ++ else_ ++
-            lg 0 ++ i32WrapI64 ++ i64c 1 ++ i64Store 3 16 ++
-            lg 11 ++ i32c 1 ++ lg 2 ++ call (rt "wiz_apply") ++ ls 12 ++
-            lg 0 ++ i32WrapI64 ++ lg 12 ++ i64Store 3 24
+               i32c 0 ++ ls 4 ++
+               block ++ loop ++
+                 lg 4 ++ lg 6 ++ i32GeU ++ brIf 1 ++
+                 lg 9 ++ lg 4 ++ i32c 8 ++ i32Mul ++ i32Add ++ i64Load 3 0 ++
+                 call (rt "wiz_inc") ++
+                 lg 4 ++ i32c 1 ++ i32Add ++ ls 4 ++ br 0 ++
+               end_ ++ end_ ++
+               lg 0 ++ call (rt "wiz_dec")
             ++ end_ ++
-          lg 1 ++ i32c 1 ++ i32GtU ++ if_
-            ++ lg 12 ++ lg 1 ++ i32c 1 ++ i32Sub ++ lg 2 ++ i32c 8 ++ i32Add
-               ++ call (rt "wiz_apply") ++ ret
-            ++ else_ ++ lg 12 ++ ret ++ end_
-          ++ end_ ++
-        lg 5 ++ i32c tagClo ++ i32Ne ++ if_ ++ unreachable ++ end_ ++
-        -- buf = alloc_raw(n * 8), then copy the given arguments
-        lg 1 ++ i32c 8 ++ i32Mul ++ call (rt "wiz_alloc_raw") ++ ls 3 ++
-        i32c 0 ++ ls 4 ++
-        block ++ loop ++
-          lg 4 ++ lg 1 ++ i32GeU ++ brIf 1 ++
-          lg 3 ++ lg 4 ++ i32c 8 ++ i32Mul ++ i32Add ++
-          lg 2 ++ lg 4 ++ i32c 8 ++ i32Mul ++ i32Add ++ i64Load 3 0 ++ i64Store 3 0 ++
-          lg 4 ++ i32c 1 ++ i32Add ++ ls 4 ++ br 0 ++
-        end_ ++ end_ ++
-        -- m, arity, total
-        lg 0 ++ i32WrapI64 ++ i32Load 2 8 ++ i32c 2 ++ i32Sub ++ ls 6 ++
-        lg 0 ++ i32WrapI64 ++ i64Load 3 24 ++ i64c 1 ++ i64ShrU ++ i32WrapI64 ++ ls 7 ++
-        lg 6 ++ lg 1 ++ i32Add ++ ls 8 ++
-        lg 8 ++ i32c 8 ++ i32Mul ++ call (rt "wiz_alloc_raw") ++ ls 9 ++
-        -- copy captured arguments
-        i32c 0 ++ ls 4 ++
-        block ++ loop ++
-          lg 4 ++ lg 6 ++ i32GeU ++ brIf 1 ++
-          lg 9 ++ lg 4 ++ i32c 8 ++ i32Mul ++ i32Add ++
-          lg 0 ++ i32WrapI64 ++ i32c 32 ++ i32Add ++ lg 4 ++ i32c 8 ++ i32Mul ++ i32Add ++
-          i64Load 3 0 ++ i64Store 3 0 ++
-          lg 4 ++ i32c 1 ++ i32Add ++ ls 4 ++ br 0 ++
-        end_ ++ end_ ++
-        -- copy the given arguments
-        i32c 0 ++ ls 4 ++
-        block ++ loop ++
-          lg 4 ++ lg 1 ++ i32GeU ++ brIf 1 ++
-          lg 9 ++ lg 6 ++ lg 4 ++ i32Add ++ i32c 8 ++ i32Mul ++ i32Add ++
-          lg 3 ++ lg 4 ++ i32c 8 ++ i32Mul ++ i32Add ++ i64Load 3 0 ++ i64Store 3 0 ++
-          lg 4 ++ i32c 1 ++ i32Add ++ ls 4 ++ br 0 ++
-        end_ ++ end_ ++
-        -- partial application, or a call (and over-application)
-        lg 8 ++ lg 7 ++ i32LtU ++ if_
-          ++ lg 0 ++ i32WrapI64 ++ i64Load 3 16 ++ i64c 1 ++ i64ShrU ++ i32WrapI64 ++
-             lg 7 ++ lg 8 ++ lg 9 ++ call (rt "wiz_clo_new") ++ ret
-          ++ else_ ++
-          lg 9 ++
-          lg 0 ++ i32WrapI64 ++ i64Load 3 16 ++ i64c 1 ++ i64ShrU ++ i32WrapI64 ++
-          callIndirect boxedType 0 ++ ls 10 ++
-          lg 8 ++ lg 7 ++ i32Eq ++ if_ ++ lg 10 ++ ret ++ end_ ++
-          lg 10 ++ lg 8 ++ lg 7 ++ i32Sub ++ lg 9 ++ lg 7 ++ i32c 8 ++ i32Mul ++ i32Add
-            ++ call (rt "wiz_apply") ++ ret
+          lg 8 ++ lg 7 ++ i32LtU ++ if_
+            ++ lg 12 ++ lg 7 ++ lg 8 ++ lg 9 ++ call (rt "wiz_clo_new") ++ ls 10
+            ++ else_ ++
+               lg 9 ++ lg 12 ++ callIndirect boxedType 0 ++ ls 10 ++
+               lg 8 ++ lg 7 ++ i32GtU ++ if_
+                 ++ lg 10 ++ lg 8 ++ lg 7 ++ i32Sub ++
+                    lg 9 ++ lg 7 ++ i32c 8 ++ i32Mul ++ i32Add ++
+                    call (rt "wiz_apply") ++ ls 10
+                 ++ end_
+            ++ end_ ++
+          lg 3 ++ call (rt "wiz_free_raw") ++
+          lg 9 ++ call (rt "wiz_free_raw") ++
+          lg 10 ++ ret
           ++ end_
-        ++ else_ ++
-        -- a scalar: `◾` applied is `◾`
-        lg 0 ++ i64c 1 ++ i64Eq ++ if_ ++ i64c 1 ++ ret ++ end_ ++
-        unreachable
         ++ end_ }
-  -- `wiz_memo(ty, f)`: a fresh, unforced suspension.
+  -- `wiz_memo(ty, f)`: a fresh, unforced suspension that owns `f`.
   out := out.push {
     name := "wiz_memo", params := #[.i64, .i64], results := #[.i64], locals := #[.i64]
     code :=
+      lg 0 ++ call (rt "wiz_dec") ++
       i32c tagThunk ++ i32c 2 ++ call (rt "wiz_ctor_new") ++ ls 2 ++
       lg 2 ++ i32WrapI64 ++ lg 1 ++ i64Store 3 16 ++
       lg 2 ++ i32WrapI64 ++ i64c 1 ++ i64Store 3 24 ++
       lg 2 ++ ret }
-  -- `wiz_lazy_tag(v)`.
+  -- `wiz_lazy_tag(v)`: the observation of a codata value (it consumes `v`).
   out := out.push {
     name := "wiz_lazy_tag", params := #[.i64], results := #[.i64], locals := #[.i32, .i64]
     code :=
+      -- locals: tag=1, r=2
+      i32c 0 ++ ls 1 ++
       lg 0 ++ i64c 1 ++ i64And ++ i64Eqz ++ if_
-        ++ lg 0 ++ i32WrapI64 ++ i32Load 2 4 ++ ls 1 ++
-        i64c 1 ++ ls 2 ++
-        lg 1 ++ i32c 1000 ++ i32Eq ++ if_ ++ i64c 3 ++ ls 2 ++ end_ ++
-        lg 1 ++ i32c 1001 ++ i32Eq ++ if_ ++ i64c 5 ++ ls 2 ++ end_ ++
-        lg 1 ++ i32c 1002 ++ i32Eq ++ if_ ++ i64c 7 ++ ls 2 ++ end_
-        ++ else_ ++ i64c 1 ++ ls 2 ++ end_ ++
+        ++ lg 0 ++ i32WrapI64 ++ i32Load 2 4 ++ ls 1 ++ end_ ++
+      lg 0 ++ call (rt "wiz_dec") ++
+      i64c 1 ++ ls 2 ++
+      lg 1 ++ i32c 1000 ++ i32Eq ++ if_ ++ i64c 3 ++ ls 2 ++ end_ ++
+      lg 1 ++ i32c 1001 ++ i32Eq ++ if_ ++ i64c 5 ++ ls 2 ++ end_ ++
+      lg 1 ++ i32c 1002 ++ i32Eq ++ if_ ++ i64c 7 ++ ls 2 ++ end_ ++
       lg 2 ++ ret }
+  -- `wiz_lazy_set(x, p)`: a shared cell is overwritten with ⟨1002 p⟩, so its other
+  -- references do not unfold it again; `x` and `p` are consumed.
   out := out.push {
     name := "wiz_lazy_set", params := #[.i64, .i64], results := #[.i64]
-    code := lg 1 ++ ret }
-  -- `wiz_tag_of(v)`: the tag as a scalar.
-  out := out.push {
-    name := "wiz_tag_of", params := #[.i64], results := #[.i64]
-    code := lg 0 ++ call (rt "wiz_tag") ++ boxI32 ++ ret }
-  out := out.push {
-    name := "wiz_nat_tag", params := #[.i64], results := #[.i64]
+    locals := #[.i32, .i32, .i32, .i32]
     code :=
-      lg 0 ++ i64c 1 ++ i64And ++ i64Eqz ++ if_
-        ++ i64c 3 ++ ret
-        ++ else_ ++ lg 0 ++ i64c 1 ++ i64Eq ++ if_ ++ i64c 1 ++ ret ++ end_ ++ i64c 3 ++ ret
-        ++ end_ }
+      -- locals: rc=2, tag=3, n=4, i=5
+      lg 0 ++ i64c 1 ++ i64And ++ i64c 1 ++ i64Eq ++ if_
+        ++ lg 0 ++ call (rt "wiz_dec") ++ lg 1 ++ ret ++ end_ ++
+      lg 0 ++ i32WrapI64 ++ i32Load 2 0 ++ ls 2 ++
+      lg 0 ++ i32WrapI64 ++ i32Load 2 4 ++ ls 3 ++
+      lg 2 ++ i32c 1 ++ i32LeU ++ if_
+        ++ lg 0 ++ call (rt "wiz_dec") ++ lg 1 ++ ret ++ end_ ++
+      lg 3 ++ i32c 1000 ++ i32Eq ++ lg 3 ++ i32c 1001 ++ i32Eq ++ i32Or ++ i32Eqz ++ if_
+        ++ lg 0 ++ call (rt "wiz_dec") ++ lg 1 ++ ret ++ end_ ++
+      lg 0 ++ i32WrapI64 ++ i32Load 2 8 ++ ls 4 ++
+      i32c 0 ++ ls 5 ++
+      block ++ loop ++
+        lg 5 ++ lg 4 ++ i32GeU ++ brIf 1 ++
+        lg 0 ++ i32WrapI64 ++ i32c 16 ++ i32Add ++ lg 5 ++ i32c 8 ++ i32Mul ++ i32Add ++
+        i64Load 3 0 ++ call (rt "wiz_dec") ++
+        lg 5 ++ i32c 1 ++ i32Add ++ ls 5 ++ br 0 ++
+      end_ ++ end_ ++
+      lg 0 ++ i32WrapI64 ++ i32c 1002 ++ i32Store 2 4 ++
+      lg 0 ++ i32WrapI64 ++ i32c 1 ++ i32Store 2 8 ++
+      lg 1 ++ call (rt "wiz_inc") ++
+      lg 0 ++ i32WrapI64 ++ lg 1 ++ i64Store 3 16 ++
+      lg 0 ++ i32WrapI64 ++ lg 2 ++ i32c 1 ++ i32Sub ++ i32Store 2 0 ++
+      lg 1 ++ ret }
+  -- `wiz_tag_of(v)`: the tag as a scalar (it consumes `v`).
   out := out.push {
-    name := "wiz_field_at", params := #[.i64, .i64], results := #[.i64]
+    name := "wiz_tag_of", params := #[.i64], results := #[.i64], locals := #[.i32]
     code :=
+      lg 0 ++ call (rt "wiz_tag") ++ ls 1 ++
+      lg 0 ++ call (rt "wiz_dec") ++
+      lg 1 ++ boxI32 ++ ret }
+  out := out.push {
+    name := "wiz_nat_tag", params := #[.i64], results := #[.i64], locals := #[.i32]
+    code :=
+      -- locals: z=1
+      i32c 1 ++ ls 1 ++
+      lg 0 ++ i64c 1 ++ i64And ++ i64c 1 ++ i64Eq ++ if_
+        ++ lg 0 ++ i64c 1 ++ i64ShrU ++ i64Eqz ++ if_ ++ i32c 0 ++ ls 1 ++ end_
+        ++ end_ ++
+      lg 0 ++ call (rt "wiz_dec") ++
+      lg 1 ++ boxI32 ++ ret }
+  out := out.push {
+    name := "wiz_field_at", params := #[.i64, .i64], results := #[.i64], locals := #[.i64]
+    code :=
+      -- locals: f=2
       lg 0 ++ i32WrapI64 ++ i32c 16 ++ i32Add ++
       lg 1 ++ i64c 1 ++ i64ShrU ++ i32WrapI64 ++ i32c 8 ++ i32Mul ++ i32Add ++
-      i64Load 3 0 ++ ret }
+      i64Load 3 0 ++ ls 2 ++
+      lg 2 ++ call (rt "wiz_inc") ++
+      lg 0 ++ call (rt "wiz_dec") ++
+      lg 2 ++ ret }
   -- `wiz_mk_obj(t, l)`: an object with the tag of `t` and the fields of nested pairs.
   out := out.push {
     name := "wiz_mk_obj", params := #[.i64, .i64], results := #[.i64]
-    locals := #[.i64, .i32, .i32, .i64, .i32]
+    locals := #[.i64, .i32, .i32, .i64, .i32, .i64]
     code :=
-      -- locals: p=2, tag=3, n=4, c=5, i=6
+      -- locals: p=2, tag=3, n=4, c=5, i=6, f=7
       lg 0 ++ call (rt "wiz_tag") ++ ls 3 ++
       i32c 0 ++ ls 4 ++ lg 1 ++ ls 5 ++
       block ++ loop ++
@@ -514,16 +798,20 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
         lg 4 ++ i32c 1 ++ i32Add ++ ls 4 ++
         lg 5 ++ i32WrapI64 ++ i64Load 3 24 ++ ls 5 ++ br 0 ++
       end_ ++ end_ ++
-      lg 4 ++ i32Eqz ++ if_ ++ lg 3 ++ boxI32 ++ ret ++ end_ ++
+      lg 0 ++ call (rt "wiz_dec") ++
+      lg 4 ++ i32Eqz ++ if_ ++ lg 1 ++ call (rt "wiz_dec") ++ lg 3 ++ boxI32 ++ ret ++ end_ ++
       lg 3 ++ lg 4 ++ call (rt "wiz_ctor_new") ++ ls 2 ++
       i32c 0 ++ ls 6 ++ lg 1 ++ ls 5 ++
       block ++ loop ++
         lg 5 ++ i64c 1 ++ i64And ++ i64c 1 ++ i64Eq ++ brIf 1 ++
+        lg 5 ++ i32WrapI64 ++ i64Load 3 16 ++ ls 7 ++
         lg 2 ++ i32WrapI64 ++ i32c 32 ++ i32Add ++ lg 6 ++ i32c 8 ++ i32Mul ++ i32Add ++
-        lg 5 ++ i32WrapI64 ++ i64Load 3 16 ++ i64Store 3 0 ++
+        lg 7 ++ i64Store 3 0 ++
+        lg 7 ++ call (rt "wiz_inc") ++
         lg 5 ++ i32WrapI64 ++ i64Load 3 24 ++ ls 5 ++
         lg 6 ++ i32c 1 ++ i32Add ++ ls 6 ++ br 0 ++
-      end_ ++ end_ ++ lg 2 ++ ret }
+      end_ ++ end_ ++
+      lg 1 ++ call (rt "wiz_dec") ++ lg 2 ++ ret }
   -- `wiz_nat_norm(r)`: a host result (scalar or handle) as a Wiz value.
   out := out.push {
     name := "wiz_nat_norm", params := #[.i64], results := #[.i64], locals := #[.i64]
@@ -544,7 +832,8 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
       lg 0 ++ i64c 1 ++ i64And ++ i64Eqz ++ if_
         ++ i64c 0 ++ ret
         ++ else_ ++ lg 0 ++ i64c 1 ++ i64ShrU ++ ret ++ end_ }
-  -- Nat operations: a fast path on small scalars, then the host's `BigInt`.
+  -- Nat operations: a fast path on small scalars, then the host's `BigInt`. Every
+  -- operation except the comparisons consumes its arguments (as in `runtime/rt_num.inc`).
   out := out.push {
     name := "wiz_nat_add", params := #[.i64, .i64], results := #[.i64], locals := #[.i64]
     code :=
@@ -555,6 +844,7 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
         ++ end_ ++
       i32c 0 ++ lg 0 ++ call (rt "wiz_big_handle") ++ lg 0 ++ call (rt "wiz_big_small") ++
       lg 1 ++ call (rt "wiz_big_handle") ++ lg 1 ++ call (rt "wiz_big_small") ++
+      lg 0 ++ call (rt "wiz_dec") ++ lg 1 ++ call (rt "wiz_dec") ++
       call iBigOp ++ call (rt "wiz_nat_norm") ++ ret }
   out := out.push {
     name := "wiz_nat_sub", params := #[.i64, .i64], results := #[.i64], locals := #[.i64]
@@ -568,6 +858,7 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
         ++ end_ ++
       i32c 1 ++ lg 0 ++ call (rt "wiz_big_handle") ++ lg 0 ++ call (rt "wiz_big_small") ++
       lg 1 ++ call (rt "wiz_big_handle") ++ lg 1 ++ call (rt "wiz_big_small") ++
+      lg 0 ++ call (rt "wiz_dec") ++ lg 1 ++ call (rt "wiz_dec") ++
       call iBigOp ++ call (rt "wiz_nat_norm") ++ ret }
   out := out.push {
     name := "wiz_nat_mul", params := #[.i64, .i64], results := #[.i64], locals := #[.i64]
@@ -585,6 +876,7 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
         ++ end_ ++
       i32c 2 ++ lg 0 ++ call (rt "wiz_big_handle") ++ lg 0 ++ call (rt "wiz_big_small") ++
       lg 1 ++ call (rt "wiz_big_handle") ++ lg 1 ++ call (rt "wiz_big_small") ++
+      lg 0 ++ call (rt "wiz_dec") ++ lg 1 ++ call (rt "wiz_dec") ++
       call iBigOp ++ call (rt "wiz_nat_norm") ++ ret }
   out := out.push {
     name := "wiz_nat_div", params := #[.i64, .i64], results := #[.i64]
@@ -597,6 +889,7 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
         ++ end_ ++
       i32c 3 ++ lg 0 ++ call (rt "wiz_big_handle") ++ lg 0 ++ call (rt "wiz_big_small") ++
       lg 1 ++ call (rt "wiz_big_handle") ++ lg 1 ++ call (rt "wiz_big_small") ++
+      lg 0 ++ call (rt "wiz_dec") ++ lg 1 ++ call (rt "wiz_dec") ++
       call iBigOp ++ call (rt "wiz_nat_norm") ++ ret }
   out := out.push {
     name := "wiz_nat_mod", params := #[.i64, .i64], results := #[.i64], locals := #[.i64]
@@ -611,6 +904,7 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
         ++ end_ ++
       i32c 4 ++ lg 0 ++ call (rt "wiz_big_handle") ++ lg 0 ++ call (rt "wiz_big_small") ++
       lg 1 ++ call (rt "wiz_big_handle") ++ lg 1 ++ call (rt "wiz_big_small") ++
+      lg 0 ++ call (rt "wiz_dec") ++ lg 1 ++ call (rt "wiz_dec") ++
       call iBigOp ++ call (rt "wiz_nat_norm") ++ ret }
   out := out.push {
     name := "wiz_nat_land", params := #[.i64, .i64], results := #[.i64]
@@ -620,6 +914,7 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
         ++ end_ ++
       i32c 5 ++ lg 0 ++ call (rt "wiz_big_handle") ++ lg 0 ++ call (rt "wiz_big_small") ++
       lg 1 ++ call (rt "wiz_big_handle") ++ lg 1 ++ call (rt "wiz_big_small") ++
+      lg 0 ++ call (rt "wiz_dec") ++ lg 1 ++ call (rt "wiz_dec") ++
       call iBigOp ++ call (rt "wiz_nat_norm") ++ ret }
   out := out.push {
     name := "wiz_nat_lor", params := #[.i64, .i64], results := #[.i64]
@@ -629,6 +924,7 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
         ++ end_ ++
       i32c 6 ++ lg 0 ++ call (rt "wiz_big_handle") ++ lg 0 ++ call (rt "wiz_big_small") ++
       lg 1 ++ call (rt "wiz_big_handle") ++ lg 1 ++ call (rt "wiz_big_small") ++
+      lg 0 ++ call (rt "wiz_dec") ++ lg 1 ++ call (rt "wiz_dec") ++
       call iBigOp ++ call (rt "wiz_nat_norm") ++ ret }
   out := out.push {
     name := "wiz_nat_xor", params := #[.i64, .i64], results := #[.i64]
@@ -638,59 +934,73 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
         ++ end_ ++
       i32c 7 ++ lg 0 ++ call (rt "wiz_big_handle") ++ lg 0 ++ call (rt "wiz_big_small") ++
       lg 1 ++ call (rt "wiz_big_handle") ++ lg 1 ++ call (rt "wiz_big_small") ++
+      lg 0 ++ call (rt "wiz_dec") ++ lg 1 ++ call (rt "wiz_dec") ++
       call iBigOp ++ call (rt "wiz_nat_norm") ++ ret }
   out := out.push {
     name := "wiz_nat_shiftLeft", params := #[.i64, .i64], results := #[.i64], locals := #[.i64]
     code :=
       -- locals: k=2
-      lg 0 ++ i64c 1 ++ i64And ++ i64Eqz ++ if_
-        ++ i64c 1 ++ ret
-        ++ else_ ++
-        lg 1 ++ i64c 1 ++ i64And ++ i64c 1 ++ i64Eq ++ if_
-          ++ lg 1 ++ i64c 1 ++ i64ShrU ++ ls 2 ++
-          lg 2 ++ i64c 62 ++ i64LtU ++ if_
-            ++ lg 0 ++ i64c 1 ++ i64ShrU ++ i64c maxSmall ++ lg 2 ++ i64ShrU ++ i64LeU ++ if_
-              ++ lg 0 ++ i64c 1 ++ i64ShrU ++ lg 2 ++ i64Shl ++ boxI64 ++ ret
-              ++ end_
-            ++ end_
-          ++ end_
-        ++ end_ ++
+      -- 0 shifted is 0, whatever the shift (which is dropped)
+      lg 0 ++ i64c 1 ++ i64And ++ i64c 1 ++ i64Eq ++
+      lg 0 ++ i64c 1 ++ i64ShrU ++ i64Eqz ++ i32And ++ if_
+        ++ lg 1 ++ call (rt "wiz_dec") ++ lg 0 ++ ret ++ end_ ++
+      -- a big shift of a nonzero number has no representation (as the C runtime panics)
+      lg 1 ++ i64c 1 ++ i64And ++ i64c 1 ++ i64Eq ++ i32Eqz ++ if_ ++ unreachable ++ end_ ++
+      lg 1 ++ i64c 1 ++ i64ShrU ++ ls 2 ++
+      lg 0 ++ i64c 1 ++ i64And ++ i64c 1 ++ i64Eq ++
+      lg 2 ++ i64c 62 ++ i64LtU ++ i32And ++
+      lg 0 ++ i64c 1 ++ i64ShrU ++ i64c maxSmall ++ lg 2 ++ i64ShrU ++ i64LeU ++ i32And ++
+      if_ ++ lg 0 ++ i64c 1 ++ i64ShrU ++ lg 2 ++ i64Shl ++ boxI64 ++ ret ++ end_ ++
       i32c 8 ++ lg 0 ++ call (rt "wiz_big_handle") ++ lg 0 ++ call (rt "wiz_big_small") ++
       lg 1 ++ call (rt "wiz_big_handle") ++ lg 1 ++ call (rt "wiz_big_small") ++
+      lg 0 ++ call (rt "wiz_dec") ++
       call iBigOp ++ call (rt "wiz_nat_norm") ++ ret }
   out := out.push {
     name := "wiz_nat_shiftRight", params := #[.i64, .i64], results := #[.i64], locals := #[.i64]
     code :=
       -- locals: k=2
-      lg 0 ++ i64c 1 ++ i64And ++ i64Eqz ++ if_
-        ++ i32c 9 ++ lg 0 ++ call (rt "wiz_big_handle") ++ lg 0 ++ call (rt "wiz_big_small") ++
-           lg 1 ++ call (rt "wiz_big_handle") ++ lg 1 ++ call (rt "wiz_big_small") ++
-           call iBigOp ++ call (rt "wiz_nat_norm") ++ ret
-        ++ else_ ++
-        lg 1 ++ i64c 1 ++ i64ShrU ++ ls 2 ++
-        lg 2 ++ i64c 64 ++ i64GeU ++ if_ ++ i64c 1 ++ ret ++ end_ ++
+      lg 1 ++ i64c 1 ++ i64And ++ i64c 1 ++ i64Eq ++ i32Eqz ++ if_
+        ++ lg 0 ++ call (rt "wiz_dec") ++ lg 1 ++ call (rt "wiz_dec") ++ i64c 1 ++ ret
+        ++ end_ ++
+      lg 1 ++ i64c 1 ++ i64ShrU ++ ls 2 ++
+      lg 0 ++ i64c 1 ++ i64And ++ i64c 1 ++ i64Eq ++ if_
+        ++ lg 2 ++ i64c 64 ++ i64GeU ++ if_ ++ i64c 1 ++ ret ++ end_ ++
         lg 0 ++ i64c 1 ++ i64ShrU ++ lg 2 ++ i64ShrU ++ boxI64 ++ ret
-        ++ end_ }
+        ++ end_ ++
+      i32c 9 ++ lg 0 ++ call (rt "wiz_big_handle") ++ lg 0 ++ call (rt "wiz_big_small") ++
+      lg 1 ++ call (rt "wiz_big_handle") ++ lg 1 ++ call (rt "wiz_big_small") ++
+      lg 0 ++ call (rt "wiz_dec") ++
+      call iBigOp ++ call (rt "wiz_nat_norm") ++ ret }
   out := out.push {
     name := "wiz_nat_pow", params := #[.i64, .i64], results := #[.i64]
     code :=
+      lg 0 ++ i64c 1 ++ i64And ++ i64c 1 ++ i64Eq ++
+      lg 0 ++ i64c 1 ++ i64ShrU ++ i64c 1 ++ i64LeU ++ i32And ++ if_
+        ++ lg 1 ++ i64c 1 ++ i64ShrU ++ i64Eqz ++ if_
+          ++ lg 1 ++ call (rt "wiz_dec") ++ i64c 3 ++ ret
+          ++ else_ ++ lg 1 ++ call (rt "wiz_dec") ++ lg 0 ++ ret ++ end_
+        ++ end_ ++
+      lg 1 ++ i64c 1 ++ i64And ++ i64c 1 ++ i64Eq ++ i32Eqz ++ if_ ++ unreachable ++ end_ ++
       i32c 10 ++ lg 0 ++ call (rt "wiz_big_handle") ++ lg 0 ++ call (rt "wiz_big_small") ++
       lg 1 ++ call (rt "wiz_big_handle") ++ lg 1 ++ call (rt "wiz_big_small") ++
+      lg 0 ++ call (rt "wiz_dec") ++
       call iBigOp ++ call (rt "wiz_nat_norm") ++ ret }
   out := out.push {
     name := "wiz_nat_log2", params := #[.i64], results := #[.i64], locals := #[.i64]
     code :=
-      lg 0 ++ i64c 1 ++ i64And ++ i64Eqz ++ if_
-        ++ lg 0 ++ call (rt "wiz_big_handle") ++ lg 0 ++ call (rt "wiz_big_small") ++
-           call iBigLog2 ++ ret
-        ++ else_ ++
-        lg 0 ++ i64c 1 ++ i64ShrU ++ ls 1 ++
+      lg 0 ++ i64c 1 ++ i64And ++ i64c 1 ++ i64Eq ++ if_
+        ++ lg 0 ++ i64c 1 ++ i64ShrU ++ ls 1 ++
         lg 1 ++ i64Eqz ++ if_ ++ i64c 1 ++ ret ++ end_ ++
         i64c 63 ++ lg 1 ++ i64Clz ++ i64Sub ++ boxI64 ++ ret
+        ++ else_ ++
+        lg 0 ++ call (rt "wiz_big_handle") ++ lg 0 ++ call (rt "wiz_big_small") ++
+        lg 0 ++ call (rt "wiz_dec") ++
+        call iBigLog2 ++ ret
         ++ end_ }
   out := out.push {
     name := "wiz_nat_beq", params := #[.i64, .i64], results := #[.i64], locals := #[.i64]
     code :=
+      -- (the comparisons borrow their arguments: the caller keeps its references)
       lg 0 ++ i64c 1 ++ i64And ++ lg 1 ++ i64c 1 ++ i64And ++ i64And ++ i64c 1 ++ i64Eq ++ if_
         ++ lg 0 ++ lg 1 ++ i64Eq ++ if_ ++ i64c 3 ++ ret ++ else_ ++ i64c 1 ++ ret ++ end_
         ++ else_ ++
@@ -709,7 +1019,7 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
         call iBigCmp ++ i32c 0 ++ i32LtS
         ++ if_ ++ i64c 3 ++ ret ++ else_ ++ i64c 1 ++ ret ++ end_
         ++ end_ }
-  -- arrays: fields [0] = length, [1] = capacity, then the elements.
+  -- arrays: fields [0] = length, [1] = capacity, then the elements (owned).
   out := out.push {
     name := "wiz_array_new", params := #[.i32], results := #[.i64], locals := #[.i64]
     code :=
@@ -722,62 +1032,88 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
     code := i32c 0 ++ call (rt "wiz_array_new") ++ ret }
   out := out.push {
     name := "wiz_array_push", params := #[.i64, .i64], results := #[.i64]
-    locals := #[.i32, .i32, .i32, .i64, .i32]
+    locals := #[.i32, .i32, .i32, .i64, .i32, .i64]
     code :=
-      -- locals: len=2, cap=3, newcap=4, p=5, i=6
+      -- locals: len=2, cap=3, newcap=4, p=5, i=6, f=7
       lg 0 ++ i32WrapI64 ++ i64Load 3 16 ++ i64c 1 ++ i64ShrU ++ i32WrapI64 ++ ls 2 ++
       lg 0 ++ i32WrapI64 ++ i64Load 3 24 ++ i64c 1 ++ i64ShrU ++ i32WrapI64 ++ ls 3 ++
-      lg 2 ++ lg 3 ++ i32LtU ++ if_
-        ++ lg 3 ++ ls 4
-        ++ else_ ++ lg 3 ++ i32c 2 ++ i32Mul ++ i32c 8 ++ i32Add ++ ls 4 ++ end_ ++
-      lg 4 ++ call (rt "wiz_array_new") ++ ls 5 ++
-      i32c 0 ++ ls 6 ++
-      block ++ loop ++
-        lg 6 ++ lg 2 ++ i32GeU ++ brIf 1 ++
-        lg 5 ++ i32WrapI64 ++ i32c 32 ++ i32Add ++ lg 6 ++ i32c 8 ++ i32Mul ++ i32Add ++
-        lg 0 ++ i32WrapI64 ++ i32c 32 ++ i32Add ++ lg 6 ++ i32c 8 ++ i32Mul ++ i32Add ++
-        i64Load 3 0 ++ i64Store 3 0 ++
-        lg 6 ++ i32c 1 ++ i32Add ++ ls 6 ++ br 0 ++
-      end_ ++ end_ ++
+      lg 2 ++ lg 3 ++ i32LtU ++
+      lg 0 ++ i32WrapI64 ++ i32Load 2 0 ++ i32c 1 ++ i32Eq ++ i32And ++ if_
+        ++ lg 0 ++ ls 5
+        ++ else_ ++
+        lg 2 ++ lg 3 ++ i32LtU ++ if_
+          ++ lg 3 ++ ls 4
+          ++ else_ ++ lg 3 ++ i32c 2 ++ i32Mul ++ i32c 8 ++ i32Add ++ ls 4 ++ end_ ++
+        lg 4 ++ call (rt "wiz_array_new") ++ ls 5 ++
+        i32c 0 ++ ls 6 ++
+        block ++ loop ++
+          lg 6 ++ lg 2 ++ i32GeU ++ brIf 1 ++
+          lg 0 ++ i32WrapI64 ++ i32c 32 ++ i32Add ++ lg 6 ++ i32c 8 ++ i32Mul ++ i32Add ++
+          i64Load 3 0 ++ ls 7 ++
+          lg 7 ++ call (rt "wiz_inc") ++
+          lg 5 ++ i32WrapI64 ++ i32c 32 ++ i32Add ++ lg 6 ++ i32c 8 ++ i32Mul ++ i32Add ++
+          lg 7 ++ i64Store 3 0 ++
+          lg 6 ++ i32c 1 ++ i32Add ++ ls 6 ++ br 0 ++
+        end_ ++ end_ ++
+        lg 5 ++ i32WrapI64 ++ lg 2 ++ boxI32 ++ i64Store 3 16 ++
+        lg 0 ++ call (rt "wiz_dec")
+        ++ end_ ++
       lg 5 ++ i32WrapI64 ++ i32c 32 ++ i32Add ++ lg 2 ++ i32c 8 ++ i32Mul ++ i32Add ++
       lg 1 ++ i64Store 3 0 ++
       lg 5 ++ i32WrapI64 ++ lg 2 ++ i32c 1 ++ i32Add ++ boxI32 ++ i64Store 3 16 ++
       lg 5 ++ ret }
   out := out.push {
-    name := "wiz_array_size", params := #[.i64], results := #[.i64]
-    code := lg 0 ++ i32WrapI64 ++ i64Load 3 16 ++ ret }
+    name := "wiz_array_size", params := #[.i64], results := #[.i64], locals := #[.i64]
+    code :=
+      -- locals: n=1
+      lg 0 ++ i32WrapI64 ++ i64Load 3 16 ++ ls 1 ++
+      lg 0 ++ call (rt "wiz_dec") ++
+      lg 1 ++ ret }
   out := out.push {
     name := "wiz_array_get", params := #[.i64, .i64, .i64], results := #[.i64]
-    locals := #[.i32, .i32]
+    locals := #[.i32, .i32, .i64]
     code :=
-      -- locals: i=3, len=4
+      -- locals: i=3, len=4, r=5
       lg 1 ++ i64c 1 ++ i64ShrU ++ i32WrapI64 ++ ls 3 ++
       lg 0 ++ i32WrapI64 ++ i64Load 3 16 ++ i64c 1 ++ i64ShrU ++ i32WrapI64 ++ ls 4 ++
       lg 3 ++ lg 4 ++ i32LtU ++ if_
         ++ lg 0 ++ i32WrapI64 ++ i32c 32 ++ i32Add ++ lg 3 ++ i32c 8 ++ i32Mul ++ i32Add ++
-           i64Load 3 0 ++ ret
-        ++ else_ ++ lg 2 ++ ret ++ end_ }
+           i64Load 3 0 ++ ls 5 ++
+           lg 5 ++ call (rt "wiz_inc") ++
+           lg 2 ++ call (rt "wiz_dec")
+        ++ else_ ++ lg 2 ++ ls 5 ++ end_ ++
+      lg 0 ++ call (rt "wiz_dec") ++
+      lg 5 ++ ret }
   out := out.push {
     name := "wiz_array_set", params := #[.i64, .i64, .i64], results := #[.i64]
-    locals := #[.i32, .i32, .i32, .i64, .i32]
+    locals := #[.i32, .i32, .i32, .i64, .i32, .i64]
     code :=
-      -- locals: i=3, len=4, cap=5, p=6, k=7
+      -- locals: i=3, len=4, cap=5, p=6, k=7, f=8
       lg 1 ++ i64c 1 ++ i64ShrU ++ i32WrapI64 ++ ls 3 ++
       lg 0 ++ i32WrapI64 ++ i64Load 3 16 ++ i64c 1 ++ i64ShrU ++ i32WrapI64 ++ ls 4 ++
-      lg 3 ++ lg 4 ++ i32GeU ++ if_ ++ lg 0 ++ ret ++ end_ ++
+      lg 3 ++ lg 4 ++ i32GeU ++ if_ ++ lg 2 ++ call (rt "wiz_dec") ++ lg 0 ++ ret ++ end_ ++
       lg 0 ++ i32WrapI64 ++ i64Load 3 24 ++ i64c 1 ++ i64ShrU ++ i32WrapI64 ++ ls 5 ++
-      lg 5 ++ call (rt "wiz_array_new") ++ ls 6 ++
-      i32c 0 ++ ls 7 ++
-      block ++ loop ++
-        lg 7 ++ lg 4 ++ i32GeU ++ brIf 1 ++
-        lg 6 ++ i32WrapI64 ++ i32c 32 ++ i32Add ++ lg 7 ++ i32c 8 ++ i32Mul ++ i32Add ++
-        lg 0 ++ i32WrapI64 ++ i32c 32 ++ i32Add ++ lg 7 ++ i32c 8 ++ i32Mul ++ i32Add ++
-        i64Load 3 0 ++ i64Store 3 0 ++
-        lg 7 ++ i32c 1 ++ i32Add ++ ls 7 ++ br 0 ++
-      end_ ++ end_ ++
+      lg 0 ++ i32WrapI64 ++ i32Load 2 0 ++ i32c 1 ++ i32Eq ++ if_
+        ++ lg 0 ++ ls 6
+        ++ else_ ++
+        lg 5 ++ call (rt "wiz_array_new") ++ ls 6 ++
+        i32c 0 ++ ls 7 ++
+        block ++ loop ++
+          lg 7 ++ lg 4 ++ i32GeU ++ brIf 1 ++
+          lg 0 ++ i32WrapI64 ++ i32c 32 ++ i32Add ++ lg 7 ++ i32c 8 ++ i32Mul ++ i32Add ++
+          i64Load 3 0 ++ ls 8 ++
+          lg 8 ++ call (rt "wiz_inc") ++
+          lg 6 ++ i32WrapI64 ++ i32c 32 ++ i32Add ++ lg 7 ++ i32c 8 ++ i32Mul ++ i32Add ++
+          lg 8 ++ i64Store 3 0 ++
+          lg 7 ++ i32c 1 ++ i32Add ++ ls 7 ++ br 0 ++
+        end_ ++ end_ ++
+        lg 6 ++ i32WrapI64 ++ lg 4 ++ boxI32 ++ i64Store 3 16 ++
+        lg 0 ++ call (rt "wiz_dec")
+        ++ end_ ++
+      lg 6 ++ i32WrapI64 ++ i32c 32 ++ i32Add ++ lg 3 ++ i32c 8 ++ i32Mul ++ i32Add ++
+      i64Load 3 0 ++ call (rt "wiz_dec") ++
       lg 6 ++ i32WrapI64 ++ i32c 32 ++ i32Add ++ lg 3 ++ i32c 8 ++ i32Mul ++ i32Add ++
       lg 2 ++ i64Store 3 0 ++
-      lg 6 ++ i32WrapI64 ++ lg 4 ++ boxI32 ++ i64Store 3 16 ++
       lg 6 ++ ret }
   out := out.push {
     name := "wiz_big_to_string", params := #[.i64, .i32], results := #[.i32]
@@ -790,7 +1126,6 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
       lg 0 ++ i32WrapI64 ++ i64Load 3 16 ++ lg 1 ++ call iBigToDec ++ ls 2 ++
       lg 1 ++ i64ExtendI32U ++ i64c 32 ++ i64Shl ++ lg 2 ++ i64ExtendI32U ++ i64Or ++ ret }
   return out
-
 /-! ## Collecting a program -/
 
 /-- The variables a body binds (as `C.bound`). -/
@@ -1001,10 +1336,12 @@ partial def emitExpr (c : Ctx) (x : Var) : Expr → Code
       code ++ i32c (scratchBase + 8 * i) ++ lg (c.var a) ++ i64Store 3 0) #[] ++
     lg (c.var f) ++ i32c as.size ++ i32c scratchBase ++ call (rtIdx "wiz_apply") ++ ls (c.var x)
   | .reset y => lg (c.var y) ++ call (rtIdx "wiz_reset") ++ ls (c.var x)
-  | .reuse _ t as =>
-    if as.isEmpty then i64c (boxNat t) ++ ls (c.var x)
+  | .reuse tok t as =>
+    if as.isEmpty then
+      -- (a token with no fields frees its cell; the value is the scalar tag)
+      lg (c.var tok) ++ call (rtIdx "wiz_dec") ++ i64c (boxNat t) ++ ls (c.var x)
     else
-      i32c t ++ i32c as.size ++ call (rtIdx "wiz_ctor_new") ++ ls (c.var x) ++
+      lg (c.var tok) ++ i32c t ++ i32c as.size ++ call (rtIdx "wiz_reuse") ++ ls (c.var x) ++
       as.toList.zipIdx.foldl (fun (code : Code) (a, i) =>
         code ++ storeField (c.var x) i ++ lg (c.var a) ++ i64Store 3 0) #[]
   | .prim op as => emitPrim c x op as
@@ -1044,7 +1381,8 @@ partial def emitBody (c : Ctx) : Body → Code
   | .jmp j as =>
     as.foldl (fun (code : Code) a => code ++ lg (c.var a)) #[] ++
     call ((c.joinIdx.get? (c.owner, j)).getD 0) ++ ret
-  | .dup _ b | .drop _ b => emitBody c b
+  | .dup x b => lg (c.var x) ++ call (rtIdx "wiz_inc") ++ emitBody c b
+  | .drop x b => lg (c.var x) ++ call (rtIdx "wiz_dec") ++ emitBody c b
   | .unreachable => unreachable
 
 partial def emitAlts (c : Ctx) (alts : Array Body) (i : Nat) : Code :=
@@ -1104,8 +1442,10 @@ def moduleBytes (b : Built) : ByteArray := Id.run do
   -- memory (one page; the allocator grows it)
   let minPages := max 1 ((b.heapStart + 65535) / 65536)
   let memSec := wasmSection 5 (uleb 1 ++ #[0x00] ++ uleb minPages)
-  -- the bump pointer
-  let globSec := wasmSection 6 (uleb 1 ++ #[0x7F, 0x01] ++ i32c b.heapStart ++ #[0x0B])
+  -- globals: the bump pointer, and the release work list's head
+  let globSec := wasmSection 6 (uleb 2 ++
+    #[0x7F, 0x01] ++ i32c b.heapStart ++ #[0x0B] ++
+    #[0x7F, 0x01] ++ i32c 0 ++ #[0x0B])
   -- exports
   let exports : Array (String × Nat × Nat) :=
     #[("memory", 2, 0), ("wiz_main", 0, b.entry), ("wiz_value_tag", 0, rtIdx "wiz_tag"),
