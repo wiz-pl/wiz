@@ -1,0 +1,407 @@
+import Json
+import Text
+import Functor
+import Scry.Project
+import Scry.ProjectCache
+import Scry.TaintCmd
+import Scry.Sarif
+import Scry.Certify
+/-!
+# Scry.ProjectTaint: whole-project findings, per-file reports and SARIF
+
+The pure analysis and rendering half of `scry project --taint`. `Scry.Project` has
+already qualified static names (`static:<tu>:<name>`), so the flattened program is a
+single name space and the existing points-to, summary fixpoint and taint rules run across
+translation-unit boundaries without a second engine. A finding's primary span is mapped
+back through its own unit's `Scry.Preprocessed` table, so a result in a header points at
+the header.
+
+Three views are produced from one `Scry.ProjectReport`:
+
+* human lines (`scry project --taint`), grouped by file;
+* JSON (`--json`), with a `files` array carrying each file's findings, boundary warnings
+  and memory warnings, plus project counts and the cache stats;
+* SARIF 2.1.0 (`--sarif`), with `artifacts` whose URIs are relative to the project root,
+  `uriBaseId: "%SRCROOT%"`, and an `index` on every physical location. This is the
+  multi-file difference from the single-file writer (`Scry.renderSarifWith`), which is
+  intentionally left unchanged.
+-/
+
+/-- Counts for one source file. -/
+structure Scry.ProjectFile where
+  path : String
+  findings : Nat
+  checked : Nat
+  boundary : Nat
+  memory : Nat
+
+/-- Everything `scry project --taint` computes. -/
+structure Scry.ProjectReport where
+  project : Scry.Project
+  pack : Scry.RulePack
+  findings : List Scry.RuleFinding
+  /-- One status per finding, in the same order. -/
+  checks : List Bool
+  origins : Scry.OriginMap
+  boundaries : List Scry.BoundaryFinding
+  memory : List Scry.BoundaryFinding
+  pointsTo : Scry.PtResult
+  cache : Scry.CacheStats
+
+-- ## Origins
+
+/-- The original file and text of a span, using its own unit's file table. -/
+def Scry.Project.spanFile (p : Scry.Project) (u : Scry.ProjectUnit) (sp : Wil.Span) :
+    String × String :=
+  let uri := List.getD u.tu.paths sp.file u.path;
+  let text := List.getD u.tu.files sp.file "";
+  (uri, text)
+
+/-- The origin of a span; when the original text is unavailable (a missing system
+header), keep the line/column the preprocessor already mapped instead of recomputing
+them from an empty string. -/
+def Scry.Project.originOf (p : Scry.Project) (u : Scry.ProjectUnit) (sp : Wil.Span) :
+    Scry.Origin :=
+  let ft := p.spanFile u sp;
+  match String.isEmpty ft.2 with
+  | .true => Scry.Origin.mk ft.1 sp.line sp.col sp.line (Nat.add sp.col 1)
+  | .false => Scry.originOfSpan ft.1 ft.2 sp
+
+/-- Every `(function, program point) -> origin` entry, with **project-qualified** names
+and each span mapped through its own unit. -/
+partial def Scry.Project.originsOfGo (p : Scry.Project) (i : Nat) (funcs : List Wil.Func)
+    (acc : Scry.OriginMap) : Scry.OriginMap :=
+  match funcs with
+  | .nil => List.reverse acc
+  | .cons f rest => match Scry.nthOpt p.units (List.getD p.funcTu i 0) with
+    | .none => Scry.Project.originsOfGo p (Nat.succ i) rest acc
+    | .some u =>
+      let g := Scry.flatten f;
+      let entries := Scry.filterMapOpt (fun n => match Scry.spanAtPoint g n with
+        | .none => .none
+        | .some sp => .some (Scry.OriginEntry.mk f.name n (p.originOf u sp)))
+        (Scry.schemaRange g.count);
+      Scry.Project.originsOfGo p (Nat.succ i) rest
+        (List.append (List.reverse entries) acc)
+
+def Scry.Project.origins (p : Scry.Project) : Scry.OriginMap :=
+  Scry.Project.originsOfGo p 0 p.funcs .nil
+
+-- ## Lowering-boundary warnings
+
+def Scry.Project.boundaryOfFunc (p : Scry.Project) (u : Scry.ProjectUnit)
+    (w : Scry.Warning) : Scry.BoundaryFinding :=
+  Scry.BoundaryFinding.mk "scry/lowering/boundary" w.message w.func 0
+    (.some (p.originOf u w.span))
+
+/-- Every unit's lowering warnings, located in the original file. -/
+partial def Scry.Project.boundariesGo (p : Scry.Project) (units : List Scry.ProjectUnit)
+    (acc : List Scry.BoundaryFinding) : List Scry.BoundaryFinding :=
+  match units with
+  | .nil => List.reverse acc
+  | .cons u rest =>
+    let ws := List.map (Scry.Project.boundaryOfFunc p u) u.tu.warnings;
+    Scry.Project.boundariesGo p rest (List.append (List.reverse ws) acc)
+
+def Scry.Project.boundaries (p : Scry.Project) : List Scry.BoundaryFinding :=
+  Scry.Project.boundariesGo p p.units .nil
+
+-- ## The report
+
+/-- Analyse the whole project: points-to, cross-TU summaries, rules, certificates,
+origins and per-unit boundary warnings. -/
+def Scry.analyzeProject (p : Scry.Project) (pack : Scry.RulePack) (cache : Scry.CacheStats) :
+    Scry.ProjectReport :=
+  let pr := Scry.analyze p.program pack;
+  let findings := Scry.programFindings pr;
+  let checks := List.map (fun f => Scry.findingChecked pr f) findings;
+  let origins := p.origins;
+  let boundaries := p.boundaries;
+  let memory := Scry.memoryFindings origins pr.warnings;
+  Scry.ProjectReport.mk p pack findings checks origins boundaries memory pr.pointsTo cache
+
+/-- The origin URI of a finding's sink (`""` when the point has no physical origin). -/
+def Scry.ProjectReport.findingFile (r : Scry.ProjectReport) (f : Scry.RuleFinding) : String :=
+  match Scry.originAt r.origins f.func f.sink with
+  | .some o => o.uri
+  | .none => ""
+
+def Scry.boundaryFile (b : Scry.BoundaryFinding) : String :=
+  match b.origin with
+  | .some o => o.uri
+  | .none => ""
+
+/-- The `checked` flag of a finding (`false` when the check list is shorter). -/
+def Scry.ProjectReport.checkedOf (r : Scry.ProjectReport) (i : Nat) : Bool :=
+  match Scry.nthOpt r.checks i with
+  | .some b => b
+  | .none => .false
+
+def Scry.ProjectReport.checkedCount (r : Scry.ProjectReport) : Nat :=
+  List.length (List.filter (fun b => b) r.checks)
+
+/-- Counts for one file. -/
+def Scry.ProjectReport.fileOf (r : Scry.ProjectReport) (path : String) : Scry.ProjectFile :=
+  let pairs := Scry.zipIdx r.findings 0;
+  let here := List.filter (fun p => String.eq (r.findingFile p.2) path) pairs;
+  let checkedHere := List.length (List.filter (fun p => r.checkedOf p.1) here);
+  Scry.ProjectFile.mk path (List.length here) checkedHere
+    (List.length (List.filter (fun b => String.eq (Scry.boundaryFile b) path) r.boundaries))
+    (List.length (List.filter (fun b => String.eq (Scry.boundaryFile b) path) r.memory))
+
+/-- Counts for every real project file, in project order. -/
+def Scry.ProjectReport.fileCounts (r : Scry.ProjectReport) : List Scry.ProjectFile :=
+  List.map (fun path => r.fileOf path) r.project.realPaths
+
+-- ## JSON
+
+def Scry.ProjectFile.json (f : Scry.ProjectFile) : Json :=
+  Json.mkObj
+    [ ("file", Json.mkStr f.path)
+    , ("findings", Json.ofNat f.findings)
+    , ("checked", Json.ofNat f.checked)
+    , ("boundary", Json.ofNat f.boundary)
+    , ("memory", Json.ofNat f.memory) ]
+
+def Scry.ProjectReport.findingJsonAt (r : Scry.ProjectReport) (path : String) : List Json :=
+  let indexed := Scry.zipIdx r.findings 0;
+  List.map (fun p => Scry.findingJson r.origins p.2 (r.checkedOf p.1))
+    (List.filter (fun p => String.eq (r.findingFile p.2) path) indexed)
+
+def Scry.ProjectReport.boundaryJsonAt (r : Scry.ProjectReport) (path : String) : List Json :=
+  List.map Scry.boundaryJson
+    (List.filter (fun b => String.eq (Scry.boundaryFile b) path) r.boundaries)
+
+def Scry.ProjectReport.memoryJsonAt (r : Scry.ProjectReport) (path : String) : List Json :=
+  List.map Scry.boundaryJson
+    (List.filter (fun b => String.eq (Scry.boundaryFile b) path) r.memory)
+
+def Scry.ProjectReport.fileJson (r : Scry.ProjectReport) (path : String) : Json :=
+  let c := r.fileOf path;
+  Json.mkObj
+    [ ("file", Json.mkStr path)
+    , ("counts", Scry.ProjectFile.json c)
+    , ("findings", Json.mkArr (r.findingJsonAt path))
+    , ("boundary", Json.mkArr (r.boundaryJsonAt path))
+    , ("memory", Json.mkArr (r.memoryJsonAt path)) ]
+
+def Scry.ProjectReport.unresolvedJson (r : Scry.ProjectReport) : Json :=
+  Json.mkArr (List.map (fun p => Json.mkObj
+    [ ("caller", Json.ofNat p.1), ("callee", Json.mkStr p.2) ]) r.project.unresolved)
+
+def Scry.ProjectReport.dupsJson (r : Scry.ProjectReport) : Json :=
+  Json.mkArr (List.map (fun p => Json.mkObj
+    [ ("name", Json.mkStr p.1), ("definitions", Json.ofNat (List.length p.2)) ])
+    r.project.dups)
+
+/-- The `--json` report. `files` carries each file's own findings, so a caller does not
+have to partition a flat list. -/
+def Scry.ProjectReport.json (r : Scry.ProjectReport) : Json :=
+  let p := r.project;
+  Json.mkObj
+    [ ("tool", Json.mkStr "scry")
+    , ("project", Json.mkStr p.root)
+    , ("units", Json.ofNat (List.length p.units))
+    , ("functions", Json.ofNat (List.length p.funcs))
+    , ("analyzed", Json.ofNat (List.length p.analyzed))
+    , ("symbols", Json.ofNat (List.length p.symbols))
+    , ("counts", Json.mkObj
+        [ ("findings", Json.ofNat (List.length r.findings))
+        , ("checked", Json.ofNat (r.checkedCount))
+        , ("unchecked", Json.ofNat (Nat.sub (List.length r.findings) r.checkedCount))
+        , ("boundary", Json.ofNat (List.length r.boundaries))
+        , ("memory", Json.ofNat (List.length r.memory)) ])
+    , ("cache", Scry.CacheStats.json r.cache)
+    , ("files", Json.mkArr (List.map r.fileJson p.realPaths))
+    , ("callgraph", Json.mkObj
+        [ ("edges", Json.ofNat (List.length p.callGraph))
+        , ("unresolved", r.unresolvedJson)
+        , ("duplicates", r.dupsJson) ])
+    , ("skipped", Json.mkArr (List.map (fun x => Json.mkObj
+        [ ("file", Json.mkStr x.1), ("reason", Json.mkStr x.2) ]) p.skipped)) ]
+
+def Scry.renderProjectJson (r : Scry.ProjectReport) : String :=
+  Json.render r.json
+
+-- ## Human output
+
+def Scry.ProjectFile.line (f : Scry.ProjectFile) : String :=
+  "  " ++ f.path ++ ": " ++ Nat.repr f.findings ++ " finding(s), "
+    ++ Nat.repr f.checked ++ " checked, " ++ Nat.repr f.boundary ++ " boundary, "
+    ++ Nat.repr f.memory ++ " memory"
+
+def Scry.ProjectReport.human (r : Scry.ProjectReport) : String :=
+  let p := r.project;
+  let header := p.summary;
+  let taint := "taint: " ++ Nat.repr (List.length r.findings) ++ " finding(s), "
+    ++ Nat.repr (r.checkedCount) ++ " checked, "
+    ++ Nat.repr (Nat.sub (List.length r.findings) r.checkedCount) ++ " unchecked, "
+    ++ Nat.repr (List.length r.boundaries) ++ " boundary, "
+    ++ Nat.repr (List.length r.memory) ++ " memory\n";
+  let files := String.join (List.map (fun f => f.line ++ "\n") r.fileCounts);
+  let unresolved := match p.unresolved with
+    | .nil => ""
+    | _ => String.join (List.map (fun u => "unresolved: " ++ u.2 ++ " in function #"
+        ++ Nat.repr u.1 ++ "\n") p.unresolved);
+  let dups := String.join (List.map (fun d => "duplicate: " ++ d.1 ++ " ("
+      ++ Nat.repr (List.length d.2) ++ " definitions; first is analysed)\n") p.dups);
+  let skipped := String.join (List.map (fun x => "skipped: " ++ x.1 ++ " (" ++ x.2 ++ ")\n")
+    p.skipped);
+  let cacheLine := match r.cache.enabled with
+    | .true => Scry.CacheStats.line r.cache ++ "\n"
+    | .false => "";
+  String.append header (String.append taint (String.append files
+    (String.append unresolved (String.append dups (String.append skipped cacheLine)))))
+
+-- ## SARIF
+
+/-- One uppercase hexadecimal digit. -/
+def Scry.hexDigit (n : Nat) : Char :=
+  match Nat.lt n 10 with
+  | .true => Char.mk (Nat.add 48 n)
+  | .false => Char.mk (Nat.add 55 n)
+
+/-- A percent escape for a byte value. -/
+def Scry.pct (n : Nat) : List Char :=
+  [Char.mk 37, Scry.hexDigit (Nat.div n 16), Scry.hexDigit (Nat.mod n 16)]
+
+/-- Percent-encode the characters SARIF URIs cannot carry literally (space, `%`, `#`,
+`?`, control). The supported C slice is ASCII; a non-ASCII path would need UTF-8 bytes,
+which is a documented gap. -/
+def Scry.uriEscape (s : String) : String :=
+  String.ofChars (List.concat (List.map (fun c =>
+    let n := Char.code c;
+    let keep := Bool.and (Nat.le 33 n) (Nat.lt n 127);
+    let bad := Bool.or (Nat.beq n 37) (Bool.or (Nat.beq n 35) (Nat.beq n 63));
+    match Bool.and keep (Bool.not bad) with
+    | .true => [c]
+    | .false => Scry.pct n) (String.chars s)))
+
+/-- The artifact URI of a path, relative to the project root and percent-encoded. -/
+def Scry.Project.artifactUri (p : Scry.Project) (path : String) : String :=
+  Scry.uriEscape (p.relativePath path)
+
+/-- The 0-based index of `path` in a list (the SARIF `artifacts` index). -/
+partial def Scry.indexOfStringGo (path : String) (i : Nat) : List String → Option Nat
+  | .nil => .none
+  | .cons x rest => match String.eq x path with
+    | .true => .some i
+    | .false => Scry.indexOfStringGo path (Nat.succ i) rest
+
+/-- The project's SARIF artifact table: real files, in project order. -/
+def Scry.Project.artifactPaths (p : Scry.Project) : List String :=
+  p.realPaths
+
+/-- The 0-based `artifacts` index of a path, when it is a real project file. -/
+def Scry.Project.artifactIndex (p : Scry.Project) (path : String) : Option Nat :=
+  Scry.indexOfStringGo path 0 (p.artifactPaths)
+
+/-- An artifactLocation with its index and URI base. -/
+def Scry.Project.artifactLocationJson (p : Scry.Project) (path : String) : Json :=
+  let base := [("uri", Json.mkStr (p.artifactUri path)), ("uriBaseId", Json.mkStr "%SRCROOT%")];
+  let withIdx := match p.artifactIndex path with
+    | .some i => List.append base [("index", Json.ofNat i)]
+    | .none => base;
+  Json.mkObj withIdx
+
+/-- A physical location whose artifact is in the run's `artifacts` table. -/
+def Scry.Project.physicalJson (p : Scry.Project) (o : Scry.Origin) : Json :=
+  Json.mkObj
+    [ ("physicalLocation", Json.mkObj
+        [ ("artifactLocation", Scry.Project.artifactLocationJson p o.uri)
+        , ("region", Scry.regionJson o) ]) ]
+
+def Scry.Project.locationJsonAt (p : Scry.Project) (m : Scry.OriginMap) (func : String)
+    (point : Nat) : Json :=
+  match Scry.originAt m func point with
+  | .some o => Scry.Project.physicalJson p o
+  | .none => Scry.logicalLocationJson func point
+
+partial def Scry.Project.relatedJsonGo (p : Scry.Project) (m : Scry.OriginMap) :
+    List Scry.PathNode → Nat → List Json
+  | .nil, _ => .nil
+  | .cons n rest, i => match Scry.originAt m n.func n.point with
+    | .none => Scry.Project.relatedJsonGo p m rest (Nat.succ i)
+    | .some o => List.cons (Json.mkObj
+        [ ("id", Json.ofNat i)
+        , ("message", Json.mkObj [("text", Json.mkStr
+            (String.append (String.append (Scry.PathKind.show n.kind) " in ") n.func))])
+        , ("physicalLocation", Json.mkObj
+            [ ("artifactLocation", Scry.Project.artifactLocationJson p o.uri)
+            , ("region", Scry.regionJson o) ])
+        , ("properties", Json.mkObj
+            [ ("programPoint", Json.ofNat n.point), ("function", Json.mkStr n.func) ]) ])
+        (Scry.Project.relatedJsonGo p m rest (Nat.succ i))
+
+def Scry.Project.relatedJsonAt (p : Scry.Project) (m : Scry.OriginMap)
+    (path : List Scry.PathNode) : List Json :=
+  Scry.Project.relatedJsonGo p m (Scry.dropLast path) 1
+
+def Scry.Project.resultJsonAt (p : Scry.Project) (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (f : Scry.RuleFinding) (checked : Bool) : Json :=
+  Json.mkObj
+    [ ("ruleId", Json.mkStr (Scry.sarifRuleId f.rule))
+    , ("ruleIndex", Json.ofNat (Scry.ruleIndexOf pack f.rule))
+    , ("level", Json.mkStr (Scry.Severity.sarif f.severity))
+    , ("message", Json.mkObj [("text", Json.mkStr f.message)])
+    , ("locations", Json.mkArr [Scry.Project.locationJsonAt p m f.func f.sink])
+    , ("relatedLocations", Json.mkArr (Scry.Project.relatedJsonAt p m f.path))
+    , ("properties", Json.mkObj
+        [ ("kind", Json.mkStr (Scry.FindingKind.show f.kind))
+        , ("function", Json.mkStr f.func)
+        , ("sink", Json.ofNat f.sink)
+        , ("callee", Json.mkStr f.name)
+        , ("sinkArgument", Json.ofNat f.arg)
+        , ("pathLength", Json.ofNat (List.length f.path))
+        , ("derivation", Json.mkStr (Scry.derivationText checked))
+        , ("packRuleId", Json.mkStr f.rule) ]) ]
+
+def Scry.Project.boundaryResultJsonAt (p : Scry.Project) (b : Scry.BoundaryFinding) : Json :=
+  let loc := match b.origin with
+    | .some o => Scry.Project.physicalJson p o
+    | .none => Scry.logicalLocationJson b.func b.point;
+  let kind := match String.startsWith b.rule "scry/memory/" with
+    | .true => "memory"
+    | .false => "boundary";
+  Json.mkObj
+    [ ("ruleId", Json.mkStr b.rule)
+    , ("level", Json.mkStr "warning")
+    , ("message", Json.mkObj [("text", Json.mkStr b.message)])
+    , ("locations", Json.mkArr [loc])
+    , ("properties", Json.mkObj
+        [ ("kind", Json.mkStr kind)
+        , ("function", Json.mkStr b.func)
+        , ("programPoint", Json.ofNat b.point)
+        , ("derivation", Json.mkStr "unchecked") ]) ]
+
+/-- The project SARIF log: run `artifacts` are the real project files (relative URIs,
+`%SRCROOT%`), and every result's `artifactLocation` names its index. -/
+def Scry.ProjectReport.sarifJson (r : Scry.ProjectReport) : Json :=
+  let p := r.project;
+  let artifacts := Json.mkArr (List.map (fun path =>
+    Json.mkObj [("location", Scry.Project.artifactLocationJson p path)])
+    p.artifactPaths);
+  let rules := Json.mkArr (List.map Scry.ruleJson r.pack.rules);
+  let driver := Json.mkObj
+    [ ("name", Json.mkStr "scry")
+    , ("version", Json.mkStr "0.1.0")
+    , ("informationUri", Json.mkStr "https://github.com/wiz-pl/wiz")
+    , ("rules", rules) ];
+  let findingResults := List.map (fun pair =>
+    Scry.Project.resultJsonAt p r.origins r.pack pair.1 pair.2)
+    (Scry.zipFindings r.findings r.checks);
+  let extra := List.append
+    (List.map (Scry.Project.boundaryResultJsonAt p) r.boundaries)
+    (List.map (Scry.Project.boundaryResultJsonAt p) r.memory);
+  let run := Json.mkObj
+    [ ("tool", Json.mkObj [("driver", driver)])
+    , ("columnKind", Json.mkStr "utf16CodeUnits")
+    , ("artifacts", artifacts)
+    , ("results", Json.mkArr (List.append findingResults extra)) ];
+  Json.mkObj
+    [ ("$schema", Json.mkStr "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json")
+    , ("version", Json.mkStr "2.1.0")
+    , ("runs", Json.mkArr [run]) ]
+
+def Scry.renderProjectSarif (r : Scry.ProjectReport) : String :=
+  Json.render r.sarifJson

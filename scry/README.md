@@ -136,6 +136,60 @@ reports the `ERROR`/`MISSING` count.
 span `[0,95)`, parent/child/next-sibling links, and that `fixtures/broken.c` is refused
 by `parseChecked` (tree-sitter's recovery tree has 2 `ERROR`/`MISSING` nodes).
 
+## `scry project`: multi-file C projects
+
+`scry project DIR` builds a project from `DIR/compile_commands.json` (or `--compdb
+FILE`), or from every `*.c` under `DIR` when no database exists. Each translation unit is
+preprocessed with **its own** `-I`/`-D`/`-U`/`-include` flags, parsed, line-mapped and
+lowered; the units are then merged:
+
+* the project file table dedupes a shared header by path and keeps each unit's line map;
+* `static` functions are qualified `static:<tu>:<name>`, so two units' helpers never
+  collide; a call inside a TU resolves to that TU's helper;
+* a non-`static` symbol resolves to the first definition in project order; a second
+  definition is reported in `duplicates`, not silently merged, and is not analysed;
+* a call with no definition anywhere is `unresolved` and its callee is `0` in the EDB.
+
+```sh
+grail run scry -- project corpus/project
+grail run scry -- project corpus/project --facts -          # project EDB
+grail run scry -- project query corpus/project --rel symbols
+grail run scry -- project query corpus/project --rel callgraph
+grail run scry -- project corpus/project/taint --taint --json
+grail run scry -- project corpus/project/taint --taint --sarif out.sarif
+grail run scry -- project corpus/project/taint --taint --json --cache --cache-stats
+```
+
+`--taint` runs the same points-to → summaries → rule pack → certificates pipeline over
+the whole project (the functions are one Wil program, so a finding can cross a TU
+boundary). The JSON has project counts, a `files` array with each file's findings,
+boundary warnings and memory warnings, the unresolved/duplicate call lists, and the cache
+stats. Human output groups the same counts by file.
+
+SARIF is the multi-file writer: `runs[0].artifacts` lists the real project files with
+URIs relative to the project root and `uriBaseId: "%SRCROOT%"`; every result's
+`artifactLocation` carries the matching `index`, so a result in a header points at the
+header. The single-file `scry taint` SARIF writer is unchanged.
+
+`--cache[=DIR]` (default `.scry-project-cache`) caches each TU's `scry-cst 1` store. The
+key covers the source path/text and flags; the entry is validated against a digest of the
+**actual preprocessed text**, so a changed header or macro is a miss, not a stale hit.
+`--cache-stats` adds hit/miss/write/corrupt counts and implies `--cache`.
+`--fail-on-finding` returns exit 1 when a finding or boundary warning is reported.
+`--skip-broken` records a TU whose `cc -E`/parse fails in the `skipped` list and analyses
+the rest, which is how a real repository with optional platform headers stays usable;
+without it the first broken TU is a hard error.
+
+System-header bodies (`/usr/…`, `/nix/store/…`, the toolchain includes) are blanked after
+`cc -E` by default: the line map and offsets stay valid, but the analyser sees the
+project's code rather than glibc inline bodies. `--keep-system-headers` analyses them at
+full fidelity (much slower on real code). Calls into those headers remain direct calls;
+unresolved externals carry the usual warning.
+
+The deliberate limits are stated in `src/Scry/Project.wiz`: no link-time alias analysis,
+no global initialisers, no interprocedural memory beyond the existing points-to model, and
+function pointers resolve only through the points-to analysis.
+
 ## `scry bench`: the taint corpus and metrics
 
 `scry bench` runs the same pipeline as `scry taint` over `bench/corpus/manifest.json`,
@@ -187,6 +241,14 @@ The checked-in result and the precision/false-positive follow-up list are in
 `bench/real-corpus.md` (raw machine record: `bench/real-corpus.json`). There are only
 two findings in 24 files and both are manually judged false positives; the report lists
 the parse-recovery, exec-sink, bounds, points-to-argument and warning-noise gaps.
+
+`scripts/project-corpus.sh` is the multi-file counterpart: it generates a
+`compile_commands.json` for the synthetic `corpus/project/taint` project and each real
+group, runs `scry project --taint` with the cache, and writes
+`build/project-corpus/summary.{json,md}`. The synthetic ground truth is
+`bench/project-corpus.truth.json`; the checked-in result is
+`bench/project-corpus.{json,md}`. The real groups have no independent labels, so their
+findings are a manual spot-check, not a precision/recall claim.
 
 Limits: the shim is sequential (one parser, one tree, one file) and tree-sitter-c is the
 only grammar. Threads, a native store shared across files, and tree-sitter queries are

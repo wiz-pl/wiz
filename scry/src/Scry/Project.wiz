@@ -14,8 +14,10 @@ the project-level front end:
 
 * `Scry.CompileCommand` is one entry of a `compile_commands.json` (its directory, source
   file and preprocessing flags); `Scry.parseCompdb` reads the JSON and
-  `Scry.parseCompdbFlags` keeps the `-I`/`-D`/`-U`/`-include` flags, dropping the
-  compiler, the source and output/dependency options.
+  `Scry.parseCompdbFlags` keeps the `-I`/`-D`/`-U`/`-include`/`-isystem` flags, dropping
+  the compiler, the source and output/dependency options. `Scry.ProjectIO` resolves a
+  relative `directory` against the database file and keeps `file` relative to it, which
+  is how `cc -E` sees the entry.
 * `Scry.ProjectUnit` pairs a TU's `Scry.Preprocessed` line map, `Scry.Cst` and lowered
   `Scry.TU`. The IO driver in `Scry.ProjectIO` builds one per source file with that
   file's own flags. Origins stay in the **original** file/line/column (`Scry.mapSpan`).
@@ -26,13 +28,16 @@ the project-level front end:
 
 ## Call resolution policy
 
-* A `static` function is lowered as `static:<name>` and is resolved **only inside its own
-  translation unit**. Two units' statics are distinct nodes and never collide.
+* A `static` function is lowered as `static:<name>` and is then qualified
+  `static:<tu>:<name>` at project scope, so it is resolved **only inside its own
+  translation unit**. Two units' helpers are distinct Wil functions, points-to locations
+  and call-graph nodes and never collide.
 * A non-`static` function is a link-time symbol. Calls resolve to the first definition in
   project order (translation units in command-line / compile-database order, functions in
   source order). If the name is defined more than once, the duplicate is reported in
-  `Scry.Project.dups` and the first definition is used, so analysis stays total and
-  deterministic.
+  `Scry.Project.dups`; the first is analysed and later definitions are kept in `funcs`
+  (so the symbol table is complete) but excluded from `analyzed`, so analysis stays total
+  and deterministic.
 * A call with no definition anywhere is **unresolved**: it is recorded in
   `Scry.Project.unresolved` and the EDB `call` row's callee column is `0`.
 
@@ -41,18 +46,20 @@ the project-level front end:
 `assign`, `def`, `use`, `span` and `cfg` are the per-TU relations with global site ids
 and, for `span`, project file indices. `call` rows are `[site, callee + 1]`, where
 `callee` is the 0-based project function index and `0` means unresolved/external. The
-`callgraph` relation is the 0-based `[caller, callee]` view of the resolved edges.
+`callgraph` relation is the 0-based `[caller, callee]` view of the resolved edges;
+`symbols` lists every definition with its unit, kind and qualified name.
 
 ## The taint pipeline
 
-This module is the data the taint CLI consumes: `Scry.Project.units` keeps each TU's
-`Scry.Preprocessed` (so a finding can be mapped back to an original file and line),
-`Scry.Project.funcs` is one `Wil.Program` across TU boundaries, and `Scry.Project.edb`
-is the project EDB. A `scry project --taint` command is a follow-up; it must not grow a
-second taint CLI.
+This module is the data `Scry.ProjectTaint` and `scry project --taint` consume:
+`Scry.Project.units` keeps each TU's `Scry.Preprocessed` (so a finding can be mapped back
+to its own original file and line, including a real header), `Scry.Project.program` is
+one `Wil.Program` across TU boundaries for the existing points-to/summary/taint engine,
+and `Scry.Project.edb` is the project EDB. The single-file `scry taint` path is unchanged.
 
-The limits are deliberate: there is no link-time alias/points-to model, no global
-initializers, and no interprocedural memory. Function pointers are not resolved.
+The limits are deliberate: no link-time alias model beyond points-to, no global
+initialisers, and no context-sensitive heap. Function pointers resolve only when
+points-to has a target; an unresolved indirect call is a warning, not a drop.
 -/
 
 -- ## compile_commands.json
@@ -74,6 +81,34 @@ def Scry.baseNameGo : List String → String
   | .cons _ rest => Scry.baseNameGo rest
 
 def Scry.baseName (p : String) : String := Scry.baseNameGo (String.splitOn p "/")
+
+/-- Normalise `.` and `..` segments in a path (`a/./b`, `a/x/../b`). The compiler's line
+markers sometimes spell the same file two ways; the project file table and SARIF must see
+one path. An absolute path keeps its leading `/`. -/
+partial def Scry.normSegsGo (abs : Bool) : List String → List String → List String
+  | .nil, out => List.reverse out
+  | .cons s rest, out =>
+    match s with
+    | "" => Scry.normSegsGo abs rest out
+    | "." => Scry.normSegsGo abs rest out
+    | ".." => match out with
+      | .nil => match abs with
+        | .true => Scry.normSegsGo abs rest out
+        | .false => Scry.normSegsGo abs rest (List.cons ".." out)
+      | .cons last tail => match String.eq last ".." with
+        | .true => Scry.normSegsGo abs rest (List.cons ".." out)
+        | .false => Scry.normSegsGo abs rest tail
+    | _ => Scry.normSegsGo abs rest (List.cons s out)
+
+def Scry.normalisePath (p : String) : String :=
+  match String.isEmpty p with
+  | .true => p
+  | .false =>
+    let abs := String.startsWith p "/";
+    let joined := String.intercalate "/" (Scry.normSegsGo abs (String.splitOn p "/") .nil);
+    match Bool.and abs (Bool.not (String.eq joined "/")) with
+    | .true => String.append "/" joined
+    | .false => joined
 
 /-- Whether `arg` names the source file `file` (exact, a bare basename, or `…/file`). -/
 def Scry.isSourceArg (file arg : String) : Bool :=
@@ -242,25 +277,51 @@ partial def Scry.buildFilesGo (ft : Scry.FileTable) (units : List Scry.ProjectUn
 
 -- ## The project
 
+/-- One link-time symbol: the source name, the project-qualified name (`static:<tu>:name`
+for a TU-local function), its unit and function index. -/
+structure Scry.Symbol where
+  /-- The name as written in C (`helper`, without the `static:` qualifier). -/
+  name : String
+  /-- The unique name used by the project analysis (`static:1:helper`). -/
+  qualified : String
+  /-- The translation-unit index. -/
+  tu : Nat
+  /-- The global function index. -/
+  func : Nat
+  /-- Whether the definition is `static`. -/
+  isStatic : Bool
+
 /-- A multi-file C project. `funcs` is every unit's functions in project order;
 `funcTu` is the parallel translation-unit index. -/
 structure Scry.Project where
   /-- The units, in project order. -/
   units : List Scry.ProjectUnit
+  /-- The project root (`""` for a bare in-memory project). SARIF artifact URIs are
+  relative to it. -/
+  root : String
   /-- The project file table's paths (shared headers dedupe). -/
   paths : List String
   /-- The parallel source texts. -/
   files : List String
-  /-- Every function, unit after unit, source order within a unit. -/
+  /-- Every function, unit after unit, source order within a unit. `static` functions are
+  qualified `static:<tu>:<name>` so two units' helpers never collide. -/
   funcs : List Wil.Func
   /-- The translation-unit index of each function. -/
   funcTu : List Nat
+  /-- The link-time symbol table, in project order. -/
+  symbols : List Scry.Symbol
+  /-- The global function indices analysed: the first definition of each non-static
+  symbol plus every `static` function. A duplicate later definition is kept in `funcs`
+  (and reported in `dups`) but not analysed. -/
+  analyzed : List Nat
   /-- Resolved direct calls: `(caller global index, callee global index)`. -/
   callGraph : List (Nat × Nat)
   /-- Calls with no definition anywhere: `(caller global index, callee name)`. -/
   unresolved : List (Nat × String)
   /-- Non-static names defined more than once: `(name, global indices)`. -/
   dups : List (String × List Nat)
+  /-- TUs skipped by `--skip-broken`: `(path, reason)`. -/
+  skipped : List (String × String)
   /-- The project-level facts EDB. -/
   edb : Scry.Edb
 
@@ -269,6 +330,72 @@ def Scry.repeat {A : Type} (n : Nat) (x : A) : List A :=
   match n with
   | .zero => .nil
   | .succ k => List.cons x (Scry.repeat k x)
+
+-- ## Static-symbol qualification
+
+/-- Rename a direct callee or a function value, leaving every other name alone. -/
+def Scry.renameSymbol (rename : String → String) (n : String) : String := rename n
+
+/-- The project-qualified name of a function in unit `tu`: a `static:` function becomes
+`static:<tu>:<name>`, so two units' `helper`s are distinct program nodes. -/
+def Scry.qualifyName (tu : Nat) (n : String) : String :=
+  match String.startsWith n "static:" with
+  | .true => "static:" ++ Nat.repr tu ++ ":" ++ String.drop 7 n
+  | .false => n
+
+/-- Rewrite function-valued names in a right-hand side. -/
+def Scry.renameRhs (rename : String → String) : Wil.Rhs → Wil.Rhs
+  | .use v => .use v
+  | .cst v => .cst v
+  | .bin op a b => .bin op a b
+  | .un op a => .un op a
+  | .load p => .load p
+  | .gep p k => .gep p k
+  | .gepVar p i k => .gepVar p i k
+  | .alloc n => .alloc n
+  | .havoc t => .havoc t
+  | .slot n => .slot n
+  | .globalRef n => .globalRef n
+  | .fnptr n => .fnptr (rename n)
+
+/-- Rewrite the direct-call target of a statement (a `fnptr` address is rewritten too, so
+points-to resolves a static function pointer inside its own unit). -/
+def Scry.renameStmt (rename : String → String) : Wil.Stmt → Wil.Stmt
+  | .assign x e o => .assign x (Scry.renameRhs rename e) o
+  | .assume c o => .assume c o
+  | .store p v o => .store p v o
+  | .free p o => .free p o
+  | .call r (.direct n) args o => .call r (.direct (rename n)) args o
+  | .call r c args o => .call r c args o
+  | .nop o => .nop o
+
+/-- Rewrite a block's statements. -/
+def Scry.renameBlock (rename : String → String) (b : Wil.Block) : Wil.Block :=
+  Wil.Block.mk (List.map (Scry.renameStmt rename) b.stmts) b.term
+
+/-- Rewrite a function's own name and every direct call/fnptr name it contains. -/
+def Scry.renameFunc (tu : Nat) (f : Wil.Func) : Wil.Func :=
+  let rename := Scry.qualifyName tu;
+  Wil.Func.mk (rename f.name) f.params f.locals f.entry
+    (List.map (Scry.renameBlock rename) f.blocks) f.origin
+
+/-- Rename a warning's function name to its qualified name. -/
+def Scry.renameWarning (tu : Nat) (w : Scry.Warning) : Scry.Warning :=
+  Scry.Warning.mk (Scry.qualifyName tu w.func) w.message w.span
+
+/-- Qualify every function and warning of one unit. -/
+def Scry.qualifyUnit (tu : Nat) (u : Scry.ProjectUnit) : Scry.ProjectUnit :=
+  let funcs := List.map (Scry.renameFunc tu) u.tu.funcs;
+  let tu2 := Scry.TU.mk u.tu.path u.tu.files u.tu.paths funcs
+    (List.map (Scry.renameWarning tu) u.tu.warnings) u.tu.externalCalls;
+  Scry.ProjectUnit.mk u.path u.pre u.cst tu2 u.errors
+
+/-- Qualify every unit, in project order (the unit's index is its TU index). -/
+partial def Scry.qualifyUnitsGo (units : List Scry.ProjectUnit) (i : Nat) :
+    List Scry.ProjectUnit :=
+  match units with
+  | .nil => .nil
+  | .cons u rest => List.cons (Scry.qualifyUnit i u) (Scry.qualifyUnitsGo rest (Nat.succ i))
 
 /-- Flatten the units' functions and the parallel TU-index list. -/
 partial def Scry.flattenGo (units : List Scry.ProjectUnit) (uIdx : Nat)
@@ -347,7 +474,7 @@ partial def Scry.dupScan (all : List Wil.Func) (i : Nat)
   match all with
   | .nil => List.reverse acc
   | .cons f rest => match Scry.isStaticName f.name with
-    | .true => Scry.dupScan all (Nat.succ i) acc
+    | .true => Scry.dupScan rest (Nat.succ i) acc
     | .false =>
       let ids := Scry.idsNamed f.name 0 all;
       match Bool.and (Nat.lt 1 (List.length ids)) (Scry.hasDupName f.name acc) with
@@ -429,8 +556,47 @@ partial def Scry.projectEdbGo (funcs : List Wil.Func) (funcTu : List Nat)
       nextSite;
     Scry.projectEdbGo funcs funcTu maps rest (Nat.succ uIdx) nextFunc nextSite acc2
 
-/-- Build the project from its units. -/
-def Scry.projectOfUnits (units : List Scry.ProjectUnit) : Scry.Project :=
+/-- The source name of a qualified function (`static:1:helper` -> `helper`). -/
+def Scry.sourceName (q : String) : String :=
+  match String.startsWith q "static:" with
+  | .false => q
+  | .true => match String.splitOn (String.drop 7 q) ":" with
+    | .cons _ (.cons rest _) => rest
+    | _ => String.drop 7 q
+
+/-- One function's symbol row. -/
+def Scry.symbolOf (funcTu : List Nat) (i : Nat) (f : Wil.Func) : Scry.Symbol :=
+  let tu := List.getD funcTu i 0;
+  let st := String.startsWith f.name "static:";
+  Scry.Symbol.mk (Scry.sourceName f.name) f.name tu i st
+
+/-- The symbol table, in project order (duplicates included, so `dups` can name them). -/
+partial def Scry.symbolsGo (funcTu : List Nat) (i : Nat) (acc : List Scry.Symbol) :
+    List Wil.Func → List Scry.Symbol
+  | .nil => List.reverse acc
+  | .cons f rest => Scry.symbolsGo funcTu (Nat.succ i)
+      (List.cons (Scry.symbolOf funcTu i f) acc) rest
+
+def Scry.symbolsOf (funcs : List Wil.Func) (funcTu : List Nat) : List Scry.Symbol :=
+  Scry.symbolsGo funcTu 0 .nil funcs
+
+/-- The analysed function indices: every `static` function and the first definition of
+each non-static symbol. A duplicate is reported, not silently merged into the first. -/
+partial def Scry.analyzedGo (funcs : List Wil.Func) (i : Nat) (seen : List String)
+    (acc : List Nat) : List Nat :=
+  match funcs with
+  | .nil => List.reverse acc
+  | .cons f rest => match String.startsWith f.name "static:" with
+    | .true => Scry.analyzedGo rest (Nat.succ i) seen (List.cons i acc)
+    | .false => match List.any (String.eq f.name) seen with
+      | .true => Scry.analyzedGo rest (Nat.succ i) seen acc
+      | .false => Scry.analyzedGo rest (Nat.succ i) (List.cons f.name seen)
+          (List.cons i acc)
+
+/-- Build the project and record any TUs `--skip-broken` left out. -/
+def Scry.projectOfUnitsWith (root : String) (units0 : List Scry.ProjectUnit)
+    (skipped : List (String × String)) : Scry.Project :=
+  let units := Scry.qualifyUnitsGo units0 0;
   let ft := Scry.buildFilesGo (Scry.FileTable.mk .nil .nil) units .nil;
   let fr := Scry.flattenGo units 0 .nil .nil;
   let cs := Scry.resolveAllGo fr.1 fr.2 0 (Scry.CallSet.mk .nil .nil) fr.1;
@@ -439,8 +605,14 @@ def Scry.projectOfUnits (units : List Scry.ProjectUnit) : Scry.Project :=
   let edb := Scry.Edb.mk (List.reverse parts.assigns) (List.reverse parts.cfgs)
     (List.reverse parts.calls) (List.reverse parts.defs) (List.reverse parts.uses)
     (List.reverse parts.spans) parts.sites;
-  Scry.Project.mk units ft.1.paths ft.1.texts fr.1 fr.2 (List.reverse cs.edges)
-    (List.reverse cs.unresolved) (Scry.dupScan fr.1 0 .nil) edb
+  Scry.Project.mk units root ft.1.paths ft.1.texts fr.1 fr.2
+    (Scry.symbolsOf fr.1 fr.2) (Scry.analyzedGo fr.1 0 .nil .nil)
+    (List.reverse cs.edges) (List.reverse cs.unresolved)
+    (Scry.dupScan fr.1 0 .nil) skipped edb
+
+/-- Build the project from its units, with `root` as the SARIF URI base. -/
+def Scry.projectOfUnits (root : String) (units0 : List Scry.ProjectUnit) : Scry.Project :=
+  Scry.projectOfUnitsWith root units0 .nil
 
 -- ## Queries and rendering
 
@@ -452,9 +624,46 @@ partial def Scry.nthOpt {A : Type} (l : List A) (i : Nat) : Option A :=
     | .true => .some x
     | .false => Scry.nthOpt rest (Nat.sub i 1)
 
-/-- The real source files (pseudo paths like `<built-in>` dropped). -/
+/-- A pseudo or system file: `<built-in>`, or an absolute path under a standard
+toolchain prefix. Those lines are blanked before parsing and are not project sources,
+so they are not per-file report rows or SARIF artifacts. -/
+def Scry.Project.isSystemPath (p : String) : Bool :=
+  Bool.or (String.startsWith p "<") (Bool.or (String.startsWith p "/usr/")
+    (Bool.or (String.startsWith p "/nix/store/") (Bool.or (String.startsWith p "/lib/")
+      (Bool.or (String.startsWith p "/lib64/") (Bool.or (String.startsWith p "/opt/")
+        (String.startsWith p "/System/"))))))
+
+/-- The real source files (pseudo/system paths dropped, unless the system-looking path is
+the project root itself). -/
 def Scry.Project.realPaths (p : Scry.Project) : List String :=
-  List.filter (fun s => Bool.not (String.startsWith s "<")) p.paths
+  List.filter (fun s => match Scry.Project.isSystemPath s with
+    | .false => .true
+    | .true => Bool.and (Bool.not (String.isEmpty p.root)) (String.startsWith s p.root)) p.paths
+
+/-- The unit that defines global function `i`. -/
+def Scry.Project.funcUnit (p : Scry.Project) (i : Nat) : Option Scry.ProjectUnit :=
+  Scry.nthOpt p.units (List.getD p.funcTu i 0)
+
+/-- The functions the project analysis sees (first definitions plus every static). -/
+def Scry.Project.analyzedFuncs (p : Scry.Project) : List Wil.Func :=
+  Scry.filterMapOpt (fun i => Scry.nthOpt p.funcs i) p.analyzed
+
+/-- The whole-project Wil program. Static names are already unit-qualified, so a callee
+name is unique across translation units. -/
+def Scry.Project.program (p : Scry.Project) : Wil.Program := Wil.program p.analyzedFuncs
+
+/-- `path` relative to `root` (for a SARIF artifact URI); leaves an outside/absolute path
+alone. -/
+def Scry.Project.relativePath (p : Scry.Project) (path : String) : String :=
+  match String.isEmpty p.root with
+  | .true => path
+  | .false =>
+    let prefix := String.append p.root "/";
+    match String.startsWith path prefix with
+    | .true => String.drop (String.length prefix) path
+    | .false => match String.eq path p.root with
+      | .true => Scry.baseName path
+      | .false => path
 
 /-- Total lowering warnings. -/
 def Scry.Project.warnings (p : Scry.Project) : Nat :=
@@ -464,13 +673,23 @@ def Scry.Project.warnings (p : Scry.Project) : Nat :=
 def Scry.Project.errors (p : Scry.Project) : Nat :=
   List.foldl (fun acc u => Nat.add acc u.errors) 0 p.units
 
-/-- A function's global index by name (the first occurrence). -/
+/-- A function's global index by its source name or qualified name (the first
+occurrence). -/
 def Scry.Project.funcIndex (p : Scry.Project) (name : String) : Option Nat :=
-  Scry.findFuncGo (fun _ f => String.eq f.name name) 0 p.funcs
+  Scry.findFuncGo (fun _ f => Bool.or (String.eq f.name name)
+    (String.eq (Scry.sourceName f.name) name)) 0 p.funcs
 
-/-- Every global index whose function is named `name` (duplicates included). -/
+/-- Every global index whose function is named `name` (source or qualified; duplicates
+included). -/
+partial def Scry.funcIndicesGo (name : String) (i : Nat) : List Wil.Func → List Nat
+  | .nil => .nil
+  | .cons f rest => match Bool.or (String.eq f.name name)
+      (String.eq (Scry.sourceName f.name) name) with
+    | .true => List.cons i (Scry.funcIndicesGo name (Nat.succ i) rest)
+    | .false => Scry.funcIndicesGo name (Nat.succ i) rest
+
 def Scry.Project.funcIndices (p : Scry.Project) (name : String) : List Nat :=
-  Scry.idsNamed name 0 p.funcs
+  Scry.funcIndicesGo name 0 p.funcs
 
 /-- A function's original path, line and column. -/
 def Scry.Project.funcSite (p : Scry.Project) (i : Nat) : Option (String × Nat × Nat) :=
@@ -489,9 +708,12 @@ def Scry.Project.summary (p : Scry.Project) : String :=
       ++ Nat.repr (List.length p.funcs) ++ " function(s), "
       ++ Nat.repr p.edb.siteCount ++ " site(s)",
     "files: " ++ Nat.repr real ++ " real, " ++ Nat.repr total ++ " total",
+    "symbols: " ++ Nat.repr (List.length p.symbols) ++ " definition(s), "
+      ++ Nat.repr (List.length p.analyzed) ++ " analysed",
     "call graph: " ++ Nat.repr (List.length p.callGraph) ++ " edge(s), "
       ++ Nat.repr (List.length p.unresolved) ++ " unresolved call(s)",
     "duplicate symbols: " ++ Nat.repr (List.length p.dups),
+    "skipped TUs: " ++ Nat.repr (List.length p.skipped),
     "warnings: " ++ Nat.repr p.warnings ++ ", lowering errors: " ++ Nat.repr p.errors];
   let units := List.map (fun pair =>
     let u := pair.2;
@@ -536,27 +758,45 @@ def Scry.Project.relation (p : Scry.Project) (name : String) : Except String Str
                 | .false => match String.eq name "dup" with
                   | .true => .ok (String.join (List.map (fun r =>
                       "dup\t" ++ r.1 ++ "\t" ++ Nat.repr (List.length r.2) ++ "\n") p.dups))
-                  | .false => match String.eq name "files" with
-                    | .true => .ok (String.join (List.map (fun pair =>
-                        "file\t" ++ Nat.repr pair.1 ++ "\t" ++ pair.2 ++ "\n")
-                        (Scry.zipIdx p.paths 0)))
-                    | .false => match String.eq name "funcs" with
+                  | .false => match String.eq name "symbols" with
+                    | .true => .ok (String.join (List.map (fun s =>
+                        "symbol\t" ++ s.qualified ++ "\t" ++ Nat.repr s.tu ++ "\t"
+                          ++ Nat.repr s.func ++ "\t"
+                          ++ (match s.isStatic with | .true => "static" | .false => "global")
+                          ++ "\n") p.symbols))
+                    | .false => match String.eq name "skipped" with
+                      | .true => .ok (String.join (List.map (fun x =>
+                          "skipped\t" ++ x.1 ++ "\t" ++ x.2 ++ "\n") p.skipped))
+                      | .false => match String.eq name "files" with
                       | .true => .ok (String.join (List.map (fun pair =>
-                          "function\t" ++ Nat.repr pair.1 ++ "\t" ++ pair.2.name ++ "\t"
-                            ++ Nat.repr (List.getD p.funcTu pair.1 0) ++ "\n")
-                          (Scry.zipIdx p.funcs 0)))
-                      | .false => .error ("unknown relation \"" ++ name
-                          ++ "\" (assign, cfg, call, def, use, span, callgraph, unresolved, dup, files, funcs)")
+                          "file\t" ++ Nat.repr pair.1 ++ "\t" ++ pair.2 ++ "\n")
+                          (Scry.zipIdx p.paths 0)))
+                      | .false => match String.eq name "funcs" with
+                        | .true => .ok (String.join (List.map (fun pair =>
+                            "function\t" ++ Nat.repr pair.1 ++ "\t" ++ pair.2.name ++ "\t"
+                              ++ Nat.repr (List.getD p.funcTu pair.1 0) ++ "\n")
+                            (Scry.zipIdx p.funcs 0)))
+                        | .false => .error ("unknown relation \"" ++ name
+                            ++ "\" (assign, cfg, call, def, use, span, callgraph, unresolved, dup, symbols, skipped, files, funcs)")
 
 /-- The EDB as a facts file: metadata, the function table and every relation. -/
 def Scry.renderProjectEdb (p : Scry.Project) : String :=
   let meta := "# scry-project facts 1\nunits\t" ++ Nat.repr (List.length p.units)
+    ++ "\nroot\t" ++ p.root
     ++ "\nfiles\t" ++ Nat.repr (List.length p.paths)
     ++ "\nfuncs\t" ++ Nat.repr (List.length p.funcs)
+    ++ "\nanalyzed\t" ++ Nat.repr (List.length p.analyzed)
+    ++ "\nsymbols\t" ++ Nat.repr (List.length p.symbols)
     ++ "\nsites\t" ++ Nat.repr p.edb.siteCount ++ "\n";
   let funcs := String.join (List.map (fun pair =>
     "function\t" ++ Nat.repr pair.1 ++ "\t" ++ pair.2.name ++ "\t"
       ++ Nat.repr (List.getD p.funcTu pair.1 0) ++ "\n") (Scry.zipIdx p.funcs 0));
+  let syms := String.join (List.map (fun s =>
+    "symbol\t" ++ s.qualified ++ "\t" ++ Nat.repr s.tu ++ "\t" ++ Nat.repr s.func
+      ++ "\t" ++ (match s.isStatic with | .true => "static" | .false => "global")
+      ++ "\n") p.symbols);
+  let skipped := String.join (List.map (fun x =>
+    "skipped\t" ++ x.1 ++ "\t" ++ x.2 ++ "\n") p.skipped);
   let files := String.join (List.map (fun pair =>
     "file\t" ++ Nat.repr pair.1 ++ "\t" ++ pair.2 ++ "\n") (Scry.zipIdx p.paths 0));
   let tail := Scry.renderRel "assign" p.edb.assigns
@@ -570,4 +810,4 @@ def Scry.renderProjectEdb (p : Scry.Project) : String :=
         "unresolved\t" ++ Nat.repr r.1 ++ "\t" ++ r.2 ++ "\n") p.unresolved)
     ++ String.join (List.map (fun r =>
         "dup\t" ++ r.1 ++ "\t" ++ Nat.repr (List.length r.2) ++ "\n") p.dups);
-  meta ++ files ++ funcs ++ tail
+  meta ++ files ++ funcs ++ syms ++ skipped ++ tail
