@@ -16,7 +16,7 @@ The cases cover:
   same program without the sanitiser), no flow, a branch merge, a loop fixpoint, the
   false-positive/false-negative pair, the spec parser, the sink argument index, CFG
   edges, dominators, reaching definitions, PDG edges and stratification;
-* the `.scry` rule pack: four rules, per-argument sources/sinks, severities, kinds and
+* the `.scry` rule pack: five rules, per-argument sources/sinks, severities, kinds and
   function-name matching;
 * interprocedural flow: argument -> parameter, return-value summaries, and a recursive
   parameter fixpoint, with the stitched source -> sink paths;
@@ -264,7 +264,7 @@ def group : Group where
           "#eval Nat.add (Nat.mul (List.length Scry.demoRules.rules) 10000) (Nat.add (Nat.mul (List.length (Scry.RulePack.taintRules Scry.demoRules)) 1000) (Nat.add (Nat.mul (List.length (Scry.RulePack.forbiddenRules Scry.demoRules)) 100) (Nat.add (Nat.mul (totalSinks (Scry.RulePack.taintRules Scry.demoRules)) 10) (totalSources (Scry.RulePack.taintRules Scry.demoRules)))))\n" ++
           "#eval if Scry.nameMatches \"mem*\" \"memcpy\" then 1 else 0\n" ++
           "#eval if Scry.nameMatches \"strcpy*\" \"astrcpy\" then 1 else 0\n" ++
-          "#eval match Scry.Program.check Scry.ruleTaintProgram with | .none => 999 | .some st => List.length st") [42245, 1, 0, 14]
+          "#eval match Scry.Program.check Scry.ruleTaintProgram with | .none => 999 | .some st => List.length st") [53245, 1, 0, 14]
         evalRuleTexts (rulePrelude ++
           "#eval ruleSev Scry.demoRules.rules \"gets-overflow\"\n" ++
           "#eval ruleKind Scry.demoRules.rules \"gets-overflow\"")
@@ -272,7 +272,7 @@ def group : Group where
         let text ← IO.FS.readFile "lib/Scry/rules/default.scry"
         let lit := (text.replace "\\" "\\\\").replace "\"" "\\\"" |>.replace "\n" "\\n"
         evalRuleNats (rulePrelude ++
-          s!"#eval List.length (Scry.parseRulePack \"{lit}\").rules") [4] },
+          s!"#eval List.length (Scry.parseRulePack \"{lit}\").rules") [5] },
     { name := "interprocedural: argument taint crosses a direct call to the callee's sink",
       run := fun _ => do
         evalRuleNats (rulePrelude ++
@@ -334,6 +334,14 @@ def group : Group where
         "#eval List.length memPath\n" ++
         "#eval kindsCode memPath\n" ++
         "#eval lastPt memPath") [1, 4, 8201, 4] },
+    { name := "lifetime: a null-after-free is not a use-after-free (reaching definitions)",
+      run := fun _ => evalRuleNats (rulePrelude ++
+        "def uafWarnings : Nat :=\n" ++
+        "  List.length (Scry.analyze Scry.freedUse Scry.demoRules).warnings\n" ++
+        "def nullWarnings : Nat :=\n" ++
+        "  List.length (Scry.analyze Scry.freedNull Scry.demoRules).warnings\n" ++
+        "#eval uafWarnings\n" ++
+        "#eval nullWarnings") [1, 0] },
     { name := "memory: a store into one object is not a flow from another (known no-alias)",
       run := fun _ => evalRuleNats
         ("#eval Nat.add (Nat.mul (List.length (Scry.programFindings (Scry.analyze Scry.taintDistinct Scry.demoRules))) 10)\n" ++
@@ -455,7 +463,7 @@ def group : Group where
           "#eval Json.getNat (firstResult sar) \"ruleIndex\"\n" ++
           "#eval match Json.getList (firstResult sar) \"locations\" with | .cons loc _ => (match Json.get loc \"physicalLocation\" with | .some _ => 1 | .none => 0) | .nil => 9\n" ++
           "#eval match Json.getList (firstResult sarNo) \"locations\" with | .cons loc _ => (match Json.get loc \"physicalLocation\" with | .some _ => 1 | .none => 0) | .nil => 9\n" ++
-          "#eval match Json.getList (firstResult sarNo) \"locations\" with | .cons loc _ => (match Json.get loc \"logicalLocations\" with | .some _ => 1 | .none => 0) | .nil => 9") [1, 4, 1, 1, 3, 0, 1, 0, 1]
+          "#eval match Json.getList (firstResult sarNo) \"locations\" with | .cons loc _ => (match Json.get loc \"logicalLocations\" with | .some _ => 1 | .none => 0) | .nil => 9") [1, 5, 1, 1, 3, 0, 1, 0, 1]
         evalRuleTexts (rulePrelude ++
           "def prI : Scry.ProgramResult := Scry.analyze Scry.interprocProgram Scry.demoRules\n" ++
           "def sar : Json := Scry.sarif \"scry\" originMap Scry.demoRules (Scry.programFindings prI)\n" ++

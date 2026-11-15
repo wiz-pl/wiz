@@ -139,7 +139,7 @@ macro errors: recovered with --allow-errors: ok
 sarif: version 2.1.0: ok
 sarif: one run: ok
 sarif: driver name: ok
-sarif: six rule descriptors (four pack rules and two model rules): ok
+sarif: six rule descriptors (five pack rules and one model rule): ok
 sarif: one result: ok
 sarif: rule id: ok
 sarif: namespaced rule descriptor: ok

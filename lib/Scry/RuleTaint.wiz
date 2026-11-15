@@ -363,15 +363,58 @@ def Scry.fnFrees (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn) : List (Nat 
     | .some (.free p _) => .cons (n, Scry.ptClosure pt fn.name p.index) acc
     | _ => acc) .nil (Scry.range g.count)
 
+/-- Does the definition at `d` replace the access register with a value that cannot alias
+the freed locations `locs`? A literal (`p = 0`, `p = NULL`) never aliases a heap object; a
+fresh allocation or a newly taken address *after* the free is a different object. A copy
+of another pointer is a kill only when that pointer has a known, non-overlapping target:
+an `unknown` pointer may be the freed object, so it is not a kill. A load or a derived
+pointer (`p + k`) can reproduce the alias and is never a kill. -/
+def Scry.defKillsAlias (pt : Scry.PtResult) (info : Scry.FnInfo) (f d : Nat)
+    (locs : List Nat) : Bool :=
+  let func := info.g.fn.name;
+  match Scry.nodeStmt info.g d with
+  | .some (.assign _ (.cst _) _) => .true
+  | .some (.assign _ (.havoc _) _) => .true
+  | .some (.assign _ (.bin _ _ _) _) => .true
+  | .some (.assign _ (.un _ _) _) => .true
+  | .some (.assign _ (.alloc _) _) => Nat.lt f d
+  | .some (.assign _ (.slot _) _) => Nat.lt f d
+  | .some (.assign _ (.globalRef _) _) => Nat.lt f d
+  | .some (.assign _ (.fnptr _) _) => Nat.lt f d
+  | .some (.assign _ (.use q) _) =>
+    Bool.and (Nat.lt f d)
+      (Bool.and (Bool.not (Scry.ptUnknown pt func q.index))
+        (match Scry.memInter (Scry.ptClosure pt func q.index) locs with
+          | .nil => .true
+          | _ => .false))
+  | _ => .false
+
+/-- Is the value of register `v` at point `n` still possibly the object a free at `f`
+released? This is the flow-sensitive part of the freed diagnostic: every definition of
+`v` reaching `n` must be a kill (`Scry.defKillsAlias`). With no reaching definition the
+answer is "may" (a conservative boundary). The points-to table itself stays
+flow-insensitive; this only refines the *use* test, so `free(p); p = 0; *p` is not a
+use-after-free, while `free(p); q = p; *q` and the loop back edge still are. -/
+def Scry.stillDangling (pt : Scry.PtResult) (info : Scry.FnInfo) (f n v : Nat)
+    (locs : List Nat) : Bool :=
+  let ds := Scry.rdForVar info.defs info.rd n v;
+  match ds with
+  | .nil => .true
+  | _ => Bool.not (List.all (fun d => Scry.defKillsAlias pt info f d locs) ds)
+
 /-- The free points that reach `n` and may free one of `locs` (an empty list: no
-use-after-free on any path to this access). -/
-def Scry.freedHit (g : Scry.Fn) (frees : List (Nat × List Nat)) (n : Nat) (locs : List Nat) :
-    List Nat :=
+use-after-free on any path to this access). A free is dropped when the register's
+reaching definitions all overwrite the dangling value (null-after-free, reassignment to
+a fresh allocation, a copy from a known non-overlapping pointer). -/
+def Scry.freedHit (pt : Scry.PtResult) (info : Scry.FnInfo) (frees : List (Nat × List Nat))
+    (n v : Nat) (locs : List Nat) : List Nat :=
   Scry.ptFilterMap (fun f =>
     match Scry.memInter f.2 locs with
     | .nil => .none
-    | _ => match Scry.cfgReaches g f.1 n with
-      | .true => .some f.1
+    | _ => match Scry.cfgReaches info.g f.1 n with
+      | .true => match Scry.stillDangling pt info f.1 n v locs with
+        | .true => .some f.1
+        | .false => .none
       | .false => .none) frees
 
 /-- Deduplicate `(point, register)` facts, keeping the first (the pack's own fact before a
@@ -452,10 +495,12 @@ def Scry.modelSinkFactsAt (n : Nat) (name : String) (args : List Wil.Var)
     (Scry.Models.sinksOf name)
 
 /-- One access's freed-location diagnostic: a free that reaches the access and may free
-one of its locations. -/
-def Scry.freedWarning (g : Scry.Fn) (frees : List (Nat × List Nat)) (func : String)
-    (n : Nat) (locs : List Nat) (what : String) : List Scry.MemWarning :=
-  match Scry.freedHit g frees n locs with
+one of its locations. `v` is the register the access goes through, so the reaching
+definitions can kill a nulled or reallocated pointer before the access. -/
+def Scry.freedWarning (pt : Scry.PtResult) (info : Scry.FnInfo)
+    (frees : List (Nat × List Nat)) (func : String) (n : Nat) (v : Nat)
+    (locs : List Nat) (what : String) : List Scry.MemWarning :=
+  match Scry.freedHit pt info frees n v locs with
   | .nil => .nil
   | .cons h _ => .cons (Scry.memWarning Scry.MemWarnKind.useAfterFree func n
       (what ++ " to a location freed by free at point " ++ Nat.repr h)) .nil
@@ -464,8 +509,9 @@ def Scry.freedWarning (g : Scry.Fn) (frees : List (Nat × List Nat)) (func : Str
 `copyArgs` effect (a format call) against the actual arity, so every formatted argument
 is a source of the destination object. An unmodelled external has no copy rows; its
 result stays unknown via the points-to external rule and it is warned about explicitly. -/
-def Scry.copyScan (pt : Scry.PtResult) (g : Scry.Fn) (frees : List (Nat × List Nat))
-    (func : String) (n : Nat) (name : String) (args : List Wil.Var) : Scry.MemScan :=
+def Scry.copyScan (pt : Scry.PtResult) (info : Scry.FnInfo)
+    (frees : List (Nat × List Nat)) (func : String) (n : Nat) (name : String)
+    (args : List Wil.Var) : Scry.MemScan :=
   List.foldr (fun dstsrc acc =>
     match Wil.listNth args dstsrc.1, Wil.listNth args dstsrc.2 with
     | .some dst, .some src =>
@@ -475,11 +521,13 @@ def Scry.copyScan (pt : Scry.PtResult) (g : Scry.Fn) (frees : List (Nat × List 
         | locs => List.cons (Scry.MemOp.mk n src.index locs) .nil;
       Scry.MemScan.mk (List.append op acc.stores) acc.loads
         (List.append (List.append r.2
-          (Scry.freedWarning g frees func n r.1 ("external " ++ name))) acc.warnings)
+          (Scry.freedWarning pt info frees func n dst.index r.1
+            ("external " ++ name))) acc.warnings)
     | _, _ => acc) (Scry.MemScan.mk .nil .nil .nil)
     (Scry.Models.copyPairsOf name (List.length args))
 
-def Scry.memScan (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn) : Scry.MemScan :=
+def Scry.memScan (pt : Scry.PtResult) (fn : Wil.Func) (info : Scry.FnInfo) : Scry.MemScan :=
+  let g := info.g;
   let frees := Scry.fnFrees pt fn g;
   List.foldr (fun n acc =>
     match Scry.nodeStmt g n with
@@ -492,7 +540,7 @@ def Scry.memScan (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn) : Scry.MemSc
           | locs => .cons (Scry.MemOp.mk n v.index locs) .nil;
         Scry.MemScan.mk (List.append op acc.stores) acc.loads
           (List.append (List.append r.2
-            (Scry.freedWarning g frees fn.name n r.1 "store")) acc.warnings)
+            (Scry.freedWarning pt info frees fn.name n p.index r.1 "store")) acc.warnings)
       | .assign x (.load p) _ =>
         let r := Scry.ptrAccess pt fn.name n p.index "load";
         let op : List Scry.MemOp := match r.1 with
@@ -500,9 +548,9 @@ def Scry.memScan (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn) : Scry.MemSc
           | locs => .cons (Scry.MemOp.mk n x.index locs) .nil;
         Scry.MemScan.mk acc.stores (List.append op acc.loads)
           (List.append (List.append r.2
-            (Scry.freedWarning g frees fn.name n r.1 "load")) acc.warnings)
+            (Scry.freedWarning pt info frees fn.name n p.index r.1 "load")) acc.warnings)
       | .call _ (.direct name) args _ =>
-        let cs := Scry.copyScan pt g frees fn.name n name args;
+        let cs := Scry.copyScan pt info frees fn.name n name args;
         Scry.MemScan.mk (List.append cs.stores acc.stores)
           (List.append cs.loads acc.loads) (List.append cs.warnings acc.warnings)
       | .call _ (.indirect fv) _ _ =>
@@ -563,7 +611,7 @@ def Scry.prepareFunc (fn : Wil.Func) (pack0 : Scry.RulePack) (pt : Scry.PtResult
   let sans := Scry.rulePackConcat (fun p => p.sans) scan;
   let sinks := Scry.rulePackConcat (fun p => p.sinks) scan;
   let bads := Scry.rulePackConcat (fun p => p.bads) scan;
-  let mem := Scry.memScan pt fn g;
+  let mem := Scry.memScan pt fn info;
   Scry.FuncPlan.mk info (Scry.entryNode g) (Scry.paramMap 0 fn.params)
     (Scry.retPoints g) sources sans sinks bads
     mem.stores mem.loads mem.warnings .nil

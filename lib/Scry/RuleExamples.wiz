@@ -47,6 +47,7 @@ def Scry.demoPackText : String :=
   "  source read arg 1\n" ++
   "  sanitise escape_shell result\n" ++
   "  sanitise shellescape result\n" ++
+  "  sanitise quote_arg result\n" ++
   "  sanitise sanitize arg 0\n" ++
   "  sink system arg 0\n" ++
   "  sink popen arg 0\n" ++
@@ -58,6 +59,7 @@ def Scry.demoPackText : String :=
   "  source getenv result\n" ++
   "  source recv result\n" ++
   "  sanitise escape_shell result\n" ++
+  "  sanitise sanitize_format result\n" ++
   "  sink printf arg 0\n" ++
   "  sink fprintf arg 1\n" ++
   "end\n" ++
@@ -73,6 +75,13 @@ def Scry.demoPackText : String :=
   "  message strcpy does not bound the copy; use strlcpy or a checked length\n" ++
   "  call strcpy\n" ++
   "  call strcat\n" ++
+  "end\n" ++
+  "rule buffer-overflow\n" ++
+  "  kind taint\n" ++
+  "  severity warning\n" ++
+  "  message Attacker-controlled length reaches a copy or read; the destination can overflow\n" ++
+  "  sanitise clamp_len result\n" ++
+  "  sanitise checked_size result\n" ++
   "end\n"
 
 def Scry.demoRules : Scry.RulePack := Scry.parseRulePack Scry.demoPackText

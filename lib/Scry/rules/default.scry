@@ -25,6 +25,7 @@ rule command-injection
   source read arg 1
   sanitise escape_shell result
   sanitise shellescape result
+  sanitise quote_arg result
   sanitise sanitize arg 0
   sink system arg 0
   sink popen arg 0
@@ -37,6 +38,7 @@ rule format-string
   source getenv result
   source recv result
   sanitise escape_shell result
+  sanitise sanitize_format result
   sink printf arg 0
   sink fprintf arg 1
 end
@@ -54,4 +56,12 @@ rule strcpy-overflow
   message strcpy does not bound the copy; use strlcpy or a checked length
   call strcpy
   call strcat
+end
+
+rule buffer-overflow
+  kind taint
+  severity warning
+  message Attacker-controlled length reaches a copy or read; the destination can overflow
+  sanitise clamp_len result
+  sanitise checked_size result
 end
