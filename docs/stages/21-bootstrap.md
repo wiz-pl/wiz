@@ -979,16 +979,9 @@ to importers (A14's module-local dropping is not wired to the new rules).
   `selfhostCompileRun`), printing the same five lines — the terms the macros desugar to
   compute identically.
 
-**Verification.** Every case was exercised in both frontends from this worktree: the
-Lean frontend with `wiz check`/`wiz run`, and the Wiz-hosted frontend with the checker
-and compiler built from the current `selfhost/*.wiz` by the test driver. All 13 cases
-agree, including the compiled program's five output lines (`25 2 1 9 71`) from both
-toolchains. A full `=selfhost` run before the test-fixture change (the `selfhost/*.wiz`
-sources are the same) gave 143 passed, 0 failed; the one case this branch changed
-(`#67`, the unknown-command pin) was re-checked against its new expected output. The
-group runs and `scripts/fixpoint.sh --keep .lake/fixpoint-a12` could not be started
-here: for the whole session the heavy scheduler's 10 GiB reservation was
-held by other agents' jobs (two long `wiz build scry/App.wiz` jobs and `=selfhost`
-runs), so no local group or fixpoint run could be admitted. They remain to be run (CI
-runs `=selfhost` and `=selfhost-macro` on the `selfhost` shard; the fixpoint is the
-scheduled job).
+**Verification (2026-11-15).** The groups run on these sources: `=selfhost-macro`
+**13 passed, 0 failed** (417 s) and `=selfhost` **143 passed, 0 failed** (2195 s),
+including the self-check (28.3 s) and the repinned `#67`, which matches its new
+expected output. The same cases were also exercised case by case with light probes
+(`wiz check`/`wiz run` for the Lean frontend, the checker and compiler for the
+Wiz-hosted one), and the macro-using program prints `25 2 1 9 71` from both toolchains.
