@@ -820,7 +820,10 @@ page runs.
   pristine, so an `import` is first checked in isolation, exactly as in a file, and then
   elaborated into the session. With no terminal on stdin there is no prompt, so a pipe is
   a script: one command per line. `:run NAME` builds and runs the definition `NAME` (C,
-  or LLVM with `--llvm`); `--llvm` affects only that.
+  or LLVM with `--llvm`); `--llvm` affects only that. `--prelude MODULE` imports MODULE
+  after the Prelude (this is how `scry repl` gets `Scry.Repl`), `--script FILE` reads the
+  commands from a file instead of stdin, and `--init CMD` elaborates CMD before the first
+  input.
 
   `:type EXPR` prints `EXPR`'s type (it is `#check EXPR` in the session), and
   `:load FILE` elaborates a file's commands into the session, so its definitions stay in

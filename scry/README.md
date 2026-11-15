@@ -31,6 +31,74 @@ Wil → taint → findings/SARIF), and `bench` (run the checked-in taint corpus 
 findings with its manifest). `parse --stats` prints counts only; the perf agent owns
 throughput numbers.
 
+## `scry repl`: the Wiz REPL with `Scry.Repl` preloaded
+
+`scry repl` is not a second shell. It is the ordinary **`wiz repl`** with `Scry.Repl`
+imported as a prelude, so `:type`, `:load`, errors and EOF behave exactly as in the Wiz
+REPL, and the Scry surface is ordinary Wiz definitions you can `#check`, compose and
+wrap:
+
+```sh
+cd scry
+scry repl                       # = wiz repl --prelude Scry.Repl -I src -I ../lib
+scry repl tests/fixtures/taint-unsafe.c   # load the file before the first prompt
+scry repl --script tests/repl.session     # one command per line, for tests/CI
+```
+
+The module is `scry/src/Scry/Repl.wiz`, imported as `Scry.Repl`. Its state is a small
+cache under `.scry-repl/` (`state.json`, the cached CST columns `uN.cst`, `findings.json`,
+`taint.json`, `config.json`). `load` parses a C file with tree-sitter **once** and writes
+the columns; `facts`, `queryKind`/`queryEdge`/`queryRel`/`queryEdgeSrc`, `functions`,
+`calls` and `callers` read those columns and never re-parse the C. `taint` lowers the
+cached columns once and records the findings; `taintPaths`, `findings`, `show`, `triage`
+and `repro` read that record. A second `load` replaces the session (the previous unit is
+forgotten); `loadDir` loads every `.c` under a directory and the accessors concatenate
+their results.
+
+Because the REPL is ordinary Wiz, effects run with `:run` (the Wiz REPL's compiled
+runner), and the values are ordinary `List`/`Option` results:
+
+```
+wiz> #check Scry.Repl.load
+Scry.Repl.load : String → IO Unit
+wiz> def u := Scry.Repl.load "tests/fixtures/taint-unsafe.c"
+wiz> :run u
+loaded tests/fixtures/taint-unsafe.c (1 unit; use facts/query/functions)
+wiz> def fns := Scry.Repl.functions
+wiz> :run fns
+functions: 1
+  main
+wiz> def cs := Scry.Repl.calls "system"
+wiz> :run cs
+calls system: 1
+  main:6:3  system(cmd)
+wiz> def t := Scry.Repl.taint
+wiz> :run t
+...
+wiz> def ps := Scry.Repl.taintPaths
+wiz> :run ps
+...
+wiz> def fs := Scry.Repl.findings
+wiz> :run fs
+f_0123456789abcdef  new  command-injection  system  tests/fixtures/taint-unsafe.c
+wiz> def tr := Scry.Repl.triage "f_0123456789abcdef" "confirmed"
+wiz> :run tr
+f_0123456789abcdef: new -> confirmed
+```
+
+`facts` returns `List Scry.Stats`, `functions` `List String`, `calls` `List
+Scry.Repl.CallSite`, `taintPaths` `List Scry.Repl.Finding`, `findings` `List String` and
+`taint` the finding count, so a session can `List.filter`/`map`/`foldl` them, or define a
+new helper. `jsonOn`/`jsonOff` switch the printed form to one JSON object per call (the
+same schema names as `scry taint`/`scry findings`). `diff "BASE"` keeps the findings whose
+sink line is in `git diff -U0 BASE`; `repro ID` runs a recorded finding under the
+workflow reproducer.
+
+Errors are printed and the session continues: a missing file, a parse error, a bad rule
+pack or an unknown Wiz name does not end the REPL. `loadDir`/`--project` load several
+units, but a query and the taint record are still per active unit; cross-file points-to
+and a single project-wide store are the remaining work.
+
 ## `scry taint`: C → Wil → taint → findings/SARIF
 
 `scry taint` is the S2 + S4 pipeline end to end:

@@ -3,3 +3,5 @@
 /build/
 
 /scry-workflow/
+
+/.scry-repl/

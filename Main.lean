@@ -574,33 +574,11 @@ def kernelOpt : List String → Except String (Regularity × Bool × List String
 /-- The modules the REPL can import, and the hooks the frontend needs: every module under
 the roots (so a `:reset` need not read them again), its C headers and `link_c` files. -/
 def replInit (tc : Toolchain) (prelude : Option String) : IO (CommandState ZeroOneMany) := do
-  let roots ← moduleRoots tc
-  let all ← Module.loadAll roots
-  let lib : Std.HashMap Name String := all.fold (fun m n (_, src) => m.insert n src) {}
-  let headers ← Build.preprocessHeaders tc (String.join (all.values.map (·.2)))
-  let sources ← Module.cSourceTable "." "" all
-  let includes ← Module.includeTable "." "" all
-  let (regularity, predicativeProp) ← kernelOpts.get
-  let lazyProofs ← lazyProofsOpt.get
-  let inertReg ← inertOpt.get
-  let (proofSteps, traceProofSteps) ← proofStepsOpt.get
-  let unboxStructs ← unboxOpt.get
-  let own := Module.fromFirstRoot roots all
-  let strictP ← strictPrivacyOpt.get
-  let useNotation := !(← ppAllOpt.get)
-  let smt ← tc.smt.resolve
-  let pp : PPTable := { useNotation := useNotation }
-  let init : CommandState ZeroOneMany :=
-    { loader := fun n => lib[n]?,
-      cHeaders := fun h => headers[h]?,
-      cSources := some (Module.cSourceResolver sources),
-      includes := some (Module.includeResolver includes),
-      messages := #[],
-      globals := { regularity, predicativeProp, lazyProofs, inertReg, unboxStructs, proofSteps, traceProofSteps,
-                   strictPrivacy := strictP, pp := pp },
-      trustedModule := own.contains, trustNative := tc.trustNative,
-      nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := smt }
-  pure init
+  let input := "import Prelude\n" ++ (match prelude with
+    | some m => s!"import {m}\n"
+    | none => "")
+  let (s, _) ← initState tc "." input
+  pure s
 
 structure ReplOpts where
   llvm : Bool := false
@@ -666,7 +644,7 @@ def replCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
     match line with
     | ":quit" | ":q" => pure none
     | ":help" | ":h" | ":?" => do stdout.putStrLn help; stdout.flush; pure (some state)
-    | ":reset" => do state := preloaded; stdout.putStrLn "reset"; stdout.flush; pure (some state)
+    | ":reset" => do stdout.putStrLn "reset"; stdout.flush; pure (some preloaded)
     | c =>
       if c.startsWith ":" then
         if c == ":type" then

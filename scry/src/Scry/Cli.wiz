@@ -1,10 +1,12 @@
 import Sys
+import Json
 import Scry.Query
 import Scry.Parse
 import Scry.CstStore
 import Scry.TaintCmd
 import Scry.BenchCmd
 import Scry.WorkflowCmd
+import Scry.Repl
 /-!
 # Scry.Cli: the `scry` command line
 
@@ -46,6 +48,9 @@ def Scry.usage : String :=
   ++ "        [--markdown OUT] [--update-baseline FILE] [--no-timing] [--quiet]\n"
   ++ "        [--fail-on-regression]\n"
   ++ "                             run the taint corpus and compare with expectations\n"
+  ++ "  repl [FILE.c] [--script FILE] [--init CMD] [--llvm]\n"
+  ++ "                             the Wiz REPL with Scry.Repl preloaded (load once,\n"
+  ++ "                             then query it as ordinary Wiz values)\n"
   ++ "  findings scan|list|show|triage|repro|verify …\n"
   ++ "                             finding identity, triage and evidence bundles\n"
   ++ "  help, --help               this text\n"
@@ -139,6 +144,59 @@ def Scry.cstCmd (file : String) (out : String) : EIO Nat := do
     ++ Nat.repr (Scry.CstStore.relationCount s) ++ " relations to " ++ out);
   EIO.pure 0
 
+/-- The `wiz` executable: a sibling of this binary, else `wiz` on PATH. -/
+partial def Scry.wizExeGo : List String → IO String
+  | .nil => IO.pure "wiz"
+  | .cons p rest => do
+    ok ← FS.exists p;
+    match ok with | .true => IO.pure p | .false => Scry.wizExeGo rest
+
+def Scry.wizExeDefault : IO String := do
+  app ← IO.appPath;
+  let here := match List.reverse (String.splitOn app "/") with
+    | .cons _ rest => String.intercalate "/" (List.reverse rest)
+    | .nil => ".";
+  Scry.wizExeGo [Path.join here "wiz", "../.lake/build/bin/wiz",
+    "../../.lake/build/bin/wiz", ".lake/build/bin/wiz"]
+
+def Scry.wizExe : IO String := do
+  env ← IO.getEnv "WIZ";
+  match env with
+  | .some p => do
+    ok ← FS.exists p;
+    match ok with | .true => IO.pure p | .false => Scry.wizExeDefault
+  | .none => Scry.wizExeDefault
+
+/-- The module roots `Scry.Repl` needs, from the repository root or from `scry/`. -/
+partial def Scry.replRootsGo (acc : List String) : List String → IO (List String)
+  | .nil => IO.pure (List.reverse acc)
+  | .cons p rest => do
+    ok ← FS.isDir p;
+    match ok with | .true => Scry.replRootsGo (List.cons p acc) rest | .false => Scry.replRootsGo acc rest
+
+def Scry.replRoots : IO (List String) :=
+  Scry.replRootsGo .nil ["lib", "src", "../lib", "../scry/src"]
+
+/-- `scry repl [FILE]`: literally `wiz repl --prelude Scry.Repl -I …`, with `FILE`
+loaded through `Scry.Repl.load` before the first input. -/
+def Scry.replCmd (args : List String) : EIO Nat := do
+  roots ← EIO.lift Scry.replRoots;
+  wiz ← EIO.lift Scry.wizExe;
+  let rootArgs := List.concat (List.map (fun r => ["-I", r]) roots);
+  let (file, rest) := match args with
+    | .cons a more => match String.startsWith a "--" with
+      | .true => (.none, args)
+      | .false => (.some a, more)
+    | .nil => (.none, .nil);
+  loadStep ← (match file with
+    | .some f => do
+      _ ← EIO.lift (Scry.Repl.load f);
+      EIO.pure ()
+    | .none => EIO.pure ());
+  st ← Process.run wiz (List.append ["repl", "--prelude", "Scry.Repl"]
+    (List.append rootArgs rest)) SpawnOptions.default;
+  EIO.pure (match st with | .exited n => n | _ => 1)
+
 /-- Run one command; the result is the exit status or an error message. -/
 def Scry.dispatch (args : List String) : EIO Nat := match args with
   | .nil => do
@@ -168,6 +226,7 @@ def Scry.dispatch (args : List String) : EIO Nat := match args with
     | _ => EIO.fail "usage: scry cst FILE OUT"
   | .cons "taint" rest => Scry.taintCmd rest
   | .cons "bench" rest => Scry.benchCmd rest
+  | .cons "repl" rest => Scry.replCmd rest
   | .cons "findings" rest => Scry.findingsCmd rest
   | .cons cmd rest => EIO.fail ("unknown command \"" ++ cmd ++ "\" (see scry help)")
 
