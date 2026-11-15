@@ -68,16 +68,37 @@ def cProgram (s : CommandState R) (n : Name) : Except String (String × Term R) 
 def words (s : Option String) : List String :=
   ((s.getD "").splitOn " ").filter (· ≠ "")
 
+/-- Is debug information requested (`-g`, `-g3`, `-ggdb`, `-gdwarf-5`, …)? The
+`-gc…` flags are not debug flags. -/
+def wantsDebug (cflags : List String) : Bool :=
+  cflags.any fun f => f == "-g" || (f.startsWith "-g" && !f.startsWith "-gc")
+
+/-- Keep debug information (and `__FILE__`) from naming the build directory: with
+`-g`, `cc` records the generated C file's absolute path and the compilation directory,
+so the same program built under two absolute paths would differ. `-ffile-prefix-map`
+maps both to `.` (`-g` without it is not reproducible; without `-g` the flag changes
+nothing and is not passed). -/
+def pathMapFlags (cflags : List String) (dir : System.FilePath) : IO (Array String) := do
+  if !wantsDebug cflags then return #[]
+  let abs ← IO.FS.realPath dir
+  -- the compilation directory (`DW_AT_comp_dir`) is the cwd, which is not the generated
+  -- C file's directory; map both
+  let cwd ← IO.currentDir
+  let maps := #[s!"-ffile-prefix-map={abs}=."]
+  pure (if cwd == abs then maps else maps.push s!"-ffile-prefix-map={cwd}=.")
+
 /-- Compile C source to an executable. -/
 def compileC (tc : Toolchain) (src : String) (exe : System.FilePath) (link : Link := {}) (lib : Bool := false) : IO (Except String Unit) := do
   let cFile := exe.withExtension "c"
   IO.FS.writeFile cFile src
   let cc := tc.cc
+  -- (debug info and `__FILE__` must not name the checkout; the generated C is beside OUT)
+  let map ← pathMapFlags tc.cflags (cFile.parent.getD ".")
   -- (9f) the `link_c` files are compiled with the program, with the same flags
   -- (9g: a library is an object file, linked by the C program that uses it, which
   -- also brings the `link_c` files and libraries)
-  let args := if lib then #["-O2", "-w", "-c", "-o", exe.toString, cFile.toString] ++ tc.cflags.toArray else
-    #["-O2", "-w", "-o", exe.toString, cFile.toString] ++ link.sources ++ tc.cflags.toArray ++
+  let args := if lib then #["-O2", "-w", "-c", "-o", exe.toString, cFile.toString] ++ tc.cflags.toArray ++ map else
+    #["-O2", "-w", "-o", exe.toString, cFile.toString] ++ link.sources ++ tc.cflags.toArray ++ map ++
     tc.gmp.toArray ++ tc.ldflags.toArray ++ tc.libs.toArray ++ link.libFlags
   try
     let out ← IO.Process.output { cmd := cc, args }
@@ -115,11 +136,12 @@ def compileDecls (tc : Toolchain) (decls : Array IR.Decl) (io : Bool) (extra : S
     parts.zipIdx.map fun (p : String × Nat) => (s!"part{p.2}", C.splitPartText header p.1, false)
   let cc := tc.cc
   let cflags := tc.cflags.toArray
+  let map ← pathMapFlags tc.cflags dir
   let keyOf (text : String) (api : Bool) : String :=
     toString (mixHash (hash text) (hash s!"{cc} {" ".intercalate tc.cflags} -O2 -w {api}"))
   let ccOne (file obj : String) (api : Bool) : IO (Except String Unit) :=
     runCC cc (#["-O2", "-w", "-c", "-o", (dir / obj).toString, (dir / file).toString] ++
-      (if api then #["-DWIZ_API="] else #[]) ++ cflags)
+      (if api then #["-DWIZ_API="] else #[]) ++ cflags ++ map)
   let err ← IO.mkRef (none : Option String)
   let mut todo : Array (String × Bool × String) := #[]
   for (name, text, api) in inputs do
@@ -157,6 +179,7 @@ def compileLLVM (tc : Toolchain) (ll : String) (exe : System.FilePath) (glue : S
   let cc := tc.cc
   let llc := tc.llc
   let cflags := tc.cflags.toArray
+  let map ← pathMapFlags tc.cflags (rtFile.parent.getD ".")
   let step (cmd : String) (args : Array String) : IO (Except String Unit) := do
     try
       let out ← IO.Process.output { cmd, args }
@@ -164,7 +187,7 @@ def compileLLVM (tc : Toolchain) (ll : String) (exe : System.FilePath) (glue : S
     catch e => pure (.error s!"{cmd}: {e}")
   let rtObj := exe.withFileName "wiz_runtime.o"
   let mainObj := if lib then exe.withFileName ((exe.fileStem.getD "wiz") ++ "_module.o") else exe.withExtension "o"
-  if let .error e ← step cc (#["-O2", "-w", "-c", "-DWIZ_API=", "-o", rtObj.toString, rtFile.toString] ++ cflags) then
+  if let .error e ← step cc (#["-O2", "-w", "-c", "-DWIZ_API=", "-o", rtObj.toString, rtFile.toString] ++ cflags ++ map) then
     return .error e
   if let .error e ← step llc #["-O2", "-filetype=obj", "-relocation-model=pic", "-o", mainObj.toString, llFile.toString] then
     return .error e

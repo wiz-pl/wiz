@@ -38,8 +38,11 @@ plain `lake build` does not, and a stale driver runs whichever case had that ind
 compares the trusted base it finds with the checked-in `.github/trust-baseline.tsv`: a
 new `axiom`, `sorry`, `native_refl` or SMT axiom, `implemented_by`/`repr:`
 implementation, `builtin` registration or `partial` definition fails until the baseline
-is updated after review. The `native` group runs the `lib/` part in CI, the
-`hdl-verified` group the example's; `scripts/trust-ledger.sh --update` regenerates the
+is updated after review. The `build` job runs the whole check right after the Nix
+build and before any shard starts (with `Tests/trust-ledger/run.sh`), so a ledger
+regression fails the run early; the `native` group also covers the `lib/` part and
+`hdl-verified` the example's inside the shards;
+`scripts/trust-ledger.sh --update` regenerates the
 baseline (build the driver first). `--print` shows the recorded sources; the baseline's
 header explains the format.
 
@@ -154,6 +157,42 @@ covers only Wiz's own runtime. Other libraries keep their licences:
 A release toolchain's `share/wiz/NOTICE` says the same, and also lists the third-party
 code linked into `wiz`, `grail` and `tower` themselves; the licence texts are in
 `share/wiz/LICENSES/` and `share/wiz/cc/LICENSES/`.
+
+## Reproducible builds
+
+A build is reproducible when the same inputs give the same bytes, wherever the checkout
+lives. `scripts/check-repro.sh` tests that by building `Tests/ReproPaths` (pure code, IO,
+Unicode, a `link_c` shim, a `--split` build, a `-g` build, the LLVM backend and a grail
+package) under two absolute roots, `${TMPDIR}/…/a` and `${TMPDIR}/…/b`. The roots differ
+in `PWD`, `HOME`, `TMPDIR`, umask, locale, `TZ`, `SOURCE_DATE_EPOCH`, the cache directory
+and `grail -j`; the script compares the generated C, the executables, the `.grail` tree
+(including `link.txt`) and the cache entries (names and contents, not the `bin/` memo).
+
+```sh
+scripts/check-repro.sh                 # the corpus (needs .lake/build/bin/wiz)
+scripts/check-repro.sh --json          # one JSON object on stdout
+scripts/check-repro.sh --compiler      # also build wiz and grail under two paths
+scripts/check-repro.sh --compiler-a A --compiler-b B
+```
+
+It skips cleanly (exit 0, `status: skip`) when `wiz` is not built. The compiler comparison
+keeps `HOME` fixed: elan installs a Lean toolchain per `HOME`, so a different `HOME` is a
+different compiler input (and a different `RUNPATH` in the executable), not a path
+variation. `--compiler-olean` also compares `.olean` files; Lean stores the absolute
+source path in them, so they are expected to differ and are skipped by default.
+
+The cheap sources of non-determinism are fixed: `-g` builds map the generated C's
+directory and the compilation directory to `.` (`-ffile-prefix-map`, so debug info and
+`__FILE__` do not name the checkout); a grail `link_c` file is named relative to the
+package in `link.txt`, and its check key hashes its contents rather than its absolute
+path; directory walks are sorted; and `scripts/release-tarball.sh` writes a sorted
+archive with fixed owners, modes and `SOURCE_DATE_EPOCH`, through `gzip -n`.
+
+The remaining causes are inputs or metadata: diagnostics print the path they were given;
+Lean's `.olean`/`.ilean`/`.trace` files store absolute source paths; the Lean toolchain's
+`RUNPATH` stores where its libraries are installed; and a split build's parallel tasks
+report whichever error finishes first (artifacts are unaffected). The compiler binary,
+the generated C and the linked programs are compared byte for byte by the script.
 
 ## Continuous integration
 
@@ -331,6 +370,22 @@ the elan toolchain, so the setup action keeps the elan cache for those
   `.github/workflows/fixpoint.yml` runs it nightly on `master` and from "Run workflow" on
   the self-hosted runner named by `WIZ_RUNNER_HEAVY`; it checks for 6 GiB free, is skipped
   when the variable is unset, and is not part of `CI result`.
+* **The nightly benchmarks** (`.github/workflows/bench.yml`) also run only on
+  `master` and from "Run workflow", on the `WIZ_RUNNER_HEAVY` runner (a clean skip
+  when it is unset). They use the Nix-built `wiz`/`grail` and need 6 GiB free (the fixpoint's
+  reservation; a Cachix miss compiles the toolchain). The
+  standard-library A/B (`scripts/stdlib-bench.py --baseline-bin`) alternates one run of
+  the previous green night's executable, restored from the Actions cache, with tonight's
+  build; the per-mode sizes come from `bench/stdlib-baseline.json`, and the measurement
+  is pinned with `taskset` to `WIZ_BENCH_CPUSET` (otherwise two CPUs are left free).
+  `scripts/bench-threshold.py` gates on the **median paired ratio** (default 10%, at
+  least 5 pairs per mode), not on absolute time, and writes the table to the job
+  summary; the run JSON records the machine id, CPU set and CPU model. `scry bench
+  --no-timing --fail-on-regression` is the second, deterministic corpus gate. On a
+  green night the current executable becomes the next A side; the first run compares
+  the build with itself, and "Run workflow" with `bootstrap: true` does that again
+  after a deliberate change to the benchmark program. The JSONs, `bench/history.jsonl`
+  (one line per run) and the baseline executable are artifacts, not committed files.
 * **The Nix package** (the `build` job; the old separate `nix package` job is folded
   into it): `nix build .#wiz .#tests` builds `wiz` and `grail` with Lake in the Nix
   sandbox and nixpkgs' Lean (the flake checks that it is the version in `lean-toolchain`)
@@ -426,29 +481,82 @@ the elan toolchain, so the setup action keeps the elan cache for those
   without it. Without a queue (a user-owned repository), `--auto` waits for the required
   check and merges, and "require branches to be up to date" serialises merges instead.
 
+### Golden diffs
+
+A golden failure in CI is a test case whose output no longer matches its `.expected`
+file (`grail test`, stage 23f). The `golden-diff` workflow
+(`.github/workflows/golden-diff.yml`) runs after a failed `CI` run whose test shard
+failed, and makes the diff the artifact a reviewer needs:
+
+* it downloads the run's `test-log-*` artifacts (the shards' `*.log` and `*.jsonl`);
+* it checks out the failing commit, builds `grail` from the public Cachix cache (a fork
+  pull request has no published store path and builds it instead), and runs
+  `scripts/golden-diff.py`;
+* the script re-runs **only the failing golden cases** with `grail test --update` in a
+  temporary copy of the checkout, then prints a one-line-per-case summary and a unified
+  diff of every changed `.expected` file (a new `.expected` shows as `/dev/null`);
+* the diff job writes that report to the run summary and uploads it as the
+  `golden-diff` artifact; on a pull request, a second job posts it as one
+  (`pull-requests: write`) comment, replacing that job's earlier comment on a rerun.
+
+The job has two permissions levels on purpose. The `diff` job runs the pull request's
+code and its flake, so it has `contents: read` and `actions: read` only and uses no
+secrets (Cachix is read anonymously). The `comment` job has
+`pull-requests: write` but runs no pull request code; it only posts the uploaded
+Markdown.
+
+**What it will not do.** The script never modifies the checkout, commits, or pushes;
+the workflow has no write permission outside the comment job. It re-runs only cases
+whose name (or failure output) is a `.wiz` under a `Package.tests` root, at most 12
+files with a 300 s limit each, and it reports a case that fails for another reason
+(a build error, a timeout, a missing toolchain) as "not diffed" instead of writing a
+`.expected` file: `grail test --update` never records a failure either. The diff is
+**advisory** — it is what `--update` would write, not evidence that the new output is
+correct.
+
+Locally, after a failing `lake test` run:
+
+```sh
+python3 scripts/golden-diff.py logs/shard.log logs/shard.jsonl
+python3 scripts/golden-diff.py --case 'tour:examples/tour/00-hello.wiz'
+python3 scripts/golden-diff.py --self-test   # the diff engine's synthetic fixtures
+```
+
+The script uses `.lake/build/bin/grail` (or `$GRAIL`, or `--grail PATH`); `--keep` keeps
+the temporary copy, and `--out FILE` writes the report.
+
 ### Documentation site
 
 A push to `master` publishes the site from the `docs` job to GitHub Pages, at
-<https://wiz-pl.github.io/wiz/>. The tree has three parts, and every link in it is
+<https://wiz-pl.github.io/wiz/>. The tree has four parts, and every link in it is
 relative, so the project-site prefix (or a custom domain root) works either way:
 
 | URL | what it is | built from |
 |---|---|---|
 | `/` | the landing page: introduction, features, quickstart | `web/landing/index.html`, `web/landing/landing.css` |
 | `/docs/` | the standard library's API documentation | `wiz doc --lib` |
+| `/bench/` | standard-library timings and the Scry taint corpus | `bench/*.json`, `scry/bench/baseline.json`, `web/build-bench.py` |
 | `/playground/` | the static playground (stage 11ab) | `web/playground.*`, `web/build-playground.sh` |
 
 The `docs` job builds the two Wasm modules (`web/build.sh` for the documentation's
 interactive signatures, `web/build-playground.sh` for the playground), runs `wiz doc
 --lib -o doc-site/docs --web web/out` (source links to the commit), assembles the
-landing page and the playground with `web/build-site.sh doc-site web/out`, checks the
-result with `web/check-site.sh doc-site` (the three entry points exist and the landing
-page's local links resolve; no server), and uploads `doc-site` as the artifact
-`wiz-docs` (3 days, for debugging). `deploy-docs` then publishes that artifact.
+landing page, the benchmark page and the playground with `web/build-site.sh doc-site
+web/out`, checks the result with `web/check-site.sh doc-site` (the four entry points
+exist and the landing page's and benchmark page's local links resolve; no server), and
+uploads `doc-site` as the artifact `wiz-docs` (3 days, for debugging). `deploy-docs`
+then publishes that artifact.
+
+The benchmark page is **generated, not written**: `web/build-bench.py` renders
+`web/bench/index.html` from the JSON, and `web/build-site.sh` runs its `--check` mode
+first, so a JSON change that was not regenerated fails the job (and is visible as a diff
+in the checked-in page). Regenerate it with `python3 web/build-bench.py`; the fixture
+tests and the site-check rules for it are in `web/test-bench.sh`.
 
 | path | what it is |
 |---|---|
 | `index.html`, `landing.css` | the landing page |
+| `bench/index.html` | the benchmark page (generated from the JSON in `bench/` and `scry/bench/`) |
 | `docs/index.html` | the documentation index: the documented modules and their summaries |
 | `docs/api.html` | the API index: every module and declaration, with signatures and doc summaries |
 | `docs/api.json` | the same index as data, for tools |
@@ -466,8 +574,9 @@ To build the site locally from a checkout (after `nix develop` and `lake build w
 sh web/build.sh web/out                         # the infoview module, scroll assets
 sh web/build-playground.sh web/out              # the playground module
 .lake/build/bin/wiz doc --lib -o doc-site/docs --web web/out
-sh web/build-site.sh doc-site web/out           # landing page and /playground/
+sh web/build-site.sh doc-site web/out           # landing page, /bench/ and /playground/
 sh web/check-site.sh doc-site                   # the entry points and the links
+sh web/test-bench.sh                            # the generator's fixtures and /bench/
 python3 -m http.server -d doc-site 8000         # then http://127.0.0.1:8000/
 ```
 
@@ -576,3 +685,43 @@ The queue order is kept in a ledger outside the checkout
 --next 5` prints the next actions with their gates, `--check` rejects a ledger with
 two ready PRs in one chain or a ready PR with an unmerged dependency, and `--write`
 refreshes the ledger's facts from `gh` and `git`.
+
+## Branch hygiene
+
+`scripts/branch-rot.py` makes branch hygiene a five-minute monthly task (Python 3,
+standard library only). It classifies every local branch, and with `--remote` every
+`origin/*` tracking ref, into four buckets:
+
+* **redundant** — the tip is an ancestor of `origin/master`, or every commit is
+  patch-equivalent to one upstream (`git cherry` reports no `+` lines). Branches with
+  merge commits are never called redundant: `git cherry` skips merges, and a merge
+  resolution can carry content that is not upstream.
+* **in-flight** — an open pull request exists for the branch. These are kept.
+* **attic** — unique commits, no open PR, and the tip is older than `--days`
+  (default 30).
+* **needs-pr** — unique commits and no open PR. This is the conservative default
+  whenever the script is unsure.
+
+Run it from a checkout:
+
+```sh
+scripts/branch-rot.py                  # table and counts
+scripts/branch-rot.py --limit 10       # show at most 10 rows per bucket
+scripts/branch-rot.py --json           # machine-readable, for a dashboard
+scripts/branch-rot.py --remote         # include origin/* tracking refs
+scripts/branch-rot.py --days 30        # attic threshold in days (default 30)
+```
+
+The classifier is read-only. Deleting redundant branches is explicit and needs both
+flags:
+
+```sh
+scripts/branch-rot.py --delete-redundant            # dry run: list what would go
+scripts/branch-rot.py --delete-redundant --apply    # actually delete
+```
+
+Deletion refuses the current branch, any branch checked out in a worktree (including
+another agent's), `master` and `main`, and any branch with an open PR or a PR state it
+could not read. `--no-gh` skips GitHub entirely (every PR state becomes unknown, so
+nothing is deleted); `--self-test` builds a throwaway repository with a merge, a
+cherry-pick, an unmerged branch and a worktree and checks the classification offline.

@@ -10,6 +10,12 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* selfhost: the parser tables are a checked-in Wiz source file (`selfhost/Tables.wiz`,
+  rendered by `lake build genSelfhostTables`; the `selfhost` group checks that it is
+  current and that its tables accept the same corpus as the Lean parser), and the
+  compiler's entry point is `selfhost/Main.wiz` (the checker's is
+  `selfhost/Check.wiz`). The fixpoint's input is `selfhost/*.wiz` with no generated Wiz
+  text in it: only the build identity (`wizVersion`, `toolchainId`) is passed in (23e).
 * `Float64.ofNat` rounds correctly for every `Nat`: it used to abort above `2^64`
   ("a number is too big for a C integer"). The value-level semantics matrix
   (`docs/semantics-matrix.md`, group `=semantics`) pins the numeric and textual
@@ -31,8 +37,22 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   C and LLVM are unchanged, and `--llvm`/`--wasm` remain aliases. The subset boundary is
   checked at compile time and every module is parsed and type-checked before it is
   written (`Wiz/Compiler/WasmValidate.lean`); golden tests compare the module's result
-  with the interpreter's. Limits and the 25-case `wasm` test group are in
+  with the interpreter's. Limits and the 29-case `wasm` test group are in
   `docs/stages/08-backend/wasm.md`.
+* The published site has a `/bench/` page: standard-library timings (with the
+  interleaved A/B ratios and the spread of each run) and the Scry taint metrics,
+  rendered from the checked-in JSON by `web/build-bench.py`. The page is committed, so a
+  JSON change that was not regenerated is a diff, and the docs job refuses it
+  (`web/build-site.sh` runs the generator's `--check`).
+* The WebAssembly target reclaims memory (8f): `dup`/`drop` maintain the object header's
+  reference count, the last drop releases the fields and returns the block to a segregated
+  free list, and `reset`/`reuse` refill a unique cell. A long-running program's peak is its
+  peak live set, not everything it allocated: the fixed workload in
+  `scripts/wasm-workload.wiz` (320 MiB under the bump allocator, 40 iterations) drops from
+  320 MiB to 8.1 MiB of linear memory in 0.6× the time, and a 1000-iteration run completes
+  with the same 8.1 MiB peak where the old allocator would have needed 7.8 GiB. Freeing is
+  iterative (through the dead object's own header), so a long chain does not recurse on
+  the engine's stack. `scripts/wasm-peak.mjs` reports a module's peak and time.
 
 ## [0.1.0] - unreleased (draft)
 

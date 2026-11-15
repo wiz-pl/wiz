@@ -36,7 +36,9 @@ self-hosted runner executes that pull request's code on the machine. So:
   There is no `.lake` build any more. The opt-in nightly fixpoint
   (`.github/workflows/fixpoint.yml`) needs **6 GiB free** (the self-compiles peak near
   5.4 GiB); it checks `MemAvailable` before the run and fails clearly on a smaller
-  runner.
+  runner. The nightly benchmarks (`.github/workflows/bench.yml`) need **6 GiB free**,
+  and pin the measurement to `WIZ_BENCH_CPUSET` when that variable is set (otherwise
+  to all but two CPUs).
 * **Nix** (multi-user), with flakes, and the Cachix cache as a substituter. The workflow
   does not install Nix on a self-hosted runner (`.github/actions/setup`: only on GitHub's
   runners); `cachix-action` adds the cache per job, but configuring it system-wide means
