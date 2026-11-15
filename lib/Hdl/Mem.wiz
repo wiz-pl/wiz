@@ -163,16 +163,16 @@ def Mem.byteDisabled {ω aw : Nat} (m : Mem.ByteStore aw) (a : BitVec aw) (d : B
 -- Byte enables in a word: a mask and a read-modify-write
 
 /-- The mask of one strobe bit: `0xff` in a word when the bit is high, else `0`. -/
-def Mem.maskByte {r : HwTy → Type} [Hw r] {ω dw : Nat} (b : r Mem.Bit) : r (HwTy.bits dw) :=
+def Mem.maskByte {0 r : HwTy → Type} [Hw r] {ω dw : Nat} (b : r Mem.Bit) : r (HwTy.bits dw) :=
   Hw.mux b (Hw.lit dw 255) (Hw.lit dw 0)
 
 /-- Strobe bit `i` (one bit of an `nb`-bit strobe). -/
-def Mem.byteBit {r : HwTy → Type} [Hw r] {ω nb : Nat} (i : Nat)
+def Mem.byteBit {0 r : HwTy → Type} [Hw r] {ω nb : Nat} (i : Nat)
     (strb : r (HwTy.bits nb)) : r Mem.Bit :=
   @Hw.slice r _ i 1 nb strb
 
 /-- The mask of the first `fuel` byte strobes, lane 0 in the low bits. -/
-def Mem.byteMaskAux {r : HwTy → Type} [Hw r] (dw nb : Nat) :
+def Mem.byteMaskAux {0 r : HwTy → Type} [Hw r] (dw nb : Nat) :
     (fuel i : Nat) → r (HwTy.bits nb) → r (HwTy.bits dw)
   | .zero, _, _ => Hw.lit dw 0
   | .succ fuel, i, strb =>
@@ -182,19 +182,19 @@ def Mem.byteMaskAux {r : HwTy → Type} [Hw r] (dw nb : Nat) :
 
 /-- `Mem.byteMask dw nb strb`: a `dw`-bit mask with byte `k` set to `0xff` when strobe
 bit `k` is, and to 0 otherwise. `nb` is `dw / 8` for a word bus. -/
-def Mem.byteMask {r : HwTy → Type} [Hw r] {ω dw nb : Nat}
+def Mem.byteMask {0 r : HwTy → Type} [Hw r] {ω dw nb : Nat}
     (strb : r (HwTy.bits nb)) : r (HwTy.bits dw) :=
   Mem.byteMaskAux dw nb nb 0 strb
 
 /-- The read-modify-write value: the old word in the bytes whose mask bit is 0, the new
 word in the bytes whose mask bit is set. -/
-def Mem.merge {r : HwTy → Type} [Hw r] {ω dw : Nat}
+def Mem.merge {0 r : HwTy → Type} [Hw r] {ω dw : Nat}
     (old new mask : r (HwTy.bits dw)) : r (HwTy.bits dw) :=
   Hw.or (Hw.and old (Hw.not mask)) (Hw.and new mask)
 
 /-- A word write with byte strobes: the enabled bytes come from `d`, the others keep the
 old word. -/
-def Mem.writeBytes {r : HwTy → Type} [Hw r] {ω aw dw nb : Nat}
+def Mem.writeBytes {0 r : HwTy → Type} [Hw r] {ω aw dw nb : Nat}
     (m : r (HwTy.mem aw dw)) (we : r Mem.Bit) (a : r (HwTy.bits aw))
     (d : r (HwTy.bits dw)) (strb : r (HwTy.bits nb)) : r (HwTy.mem aw dw) :=
   let old := Hw.memRead m a;
@@ -254,34 +254,34 @@ def Mem.ramInit (ab dw : Nat) : Mem.Ram ab dw HwTy.El :=
   Mem.Ram.mk (fun (a : BitVec ab) => BitVec.ofNat dw 0) (BitVec.ofNat 2 0)
 
 /-- An idle request. -/
-def Mem.noReq {r : HwTy → Type} [Hw r] {ω aw dw : Nat} : Mem.Req aw dw r :=
+def Mem.noReq {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat} : Mem.Req aw dw r :=
   Mem.Req.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit aw 0) (Hw.lit dw 0)
 
 /-- An idle byte-enabled request: no byte written. -/
-def Mem.noReqW {r : HwTy → Type} [Hw r] {ω aw dw : Nat} : Mem.ReqW aw dw r :=
+def Mem.noReqW {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat} : Mem.ReqW aw dw r :=
   Mem.ReqW.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit aw 0) (Hw.lit dw 0) (Hw.lit (Nat.div dw 8) 0)
 
 /-- A response that is not answering anything. -/
-def Mem.noResp {r : HwTy → Type} [Hw r] {ω dw : Nat} : Mem.Resp dw r :=
+def Mem.noResp {0 r : HwTy → Type} [Hw r] {ω dw : Nat} : Mem.Resp dw r :=
   Mem.Resp.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit dw 0)
 
 /-- `x === k`, as one bit (for the two-cycle counter). -/
-def Mem.isK {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) (k : Nat) : r Mem.Bit :=
+def Mem.isK {0 r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) (k : Nat) : r Mem.Bit :=
   Hw.eq x (Hw.lit n k)
 
 /-- The word index of a request: the `ab` bits of `addr` from bit `shift`. -/
-def Mem.index {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab : Nat)
+def Mem.index {0 r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab : Nat)
     (addr : r (HwTy.bits aw)) : r (HwTy.bits ab) :=
   @Hw.slice r _ shift ab aw addr
 
 /-- The lane of a byte address: its low `shift` bits (`shift = 2` for a 32-bit
 byte-addressed bus). -/
-def Mem.lane {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift : Nat)
+def Mem.lane {0 r : HwTy → Type} [Hw r] {ω aw : Nat} (shift : Nat)
     (addr : r (HwTy.bits aw)) : r (HwTy.bits shift) :=
   @Hw.slice r _ 0 shift aw addr
 
 /-- Byte `i` of a word (lane 0 is the low byte). -/
-def Mem.wordByte {r : HwTy → Type} [Hw r] {ω dw : Nat} (i : Nat)
+def Mem.wordByte {0 r : HwTy → Type} [Hw r] {ω dw : Nat} (i : Nat)
     (w : r (HwTy.bits dw)) : r (HwTy.bits 8) :=
   @Hw.slice r _ (Nat.mul 8 i) 8 dw w
 
@@ -289,25 +289,25 @@ def Mem.wordByte {r : HwTy → Type} [Hw r] {ω dw : Nat} (i : Nat)
 in this cycle sees the old word. `we` is the write enable of the RAM itself, so it may be
 held high with `valid` low (the one-cycle variant is an ordinary synchronous RAM; the
 two-cycle variant gates the write with `valid`). -/
-def Mem.ramNext1 {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
+def Mem.ramNext1 {0 r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
     (s : Mem.Ram ab dw r) (q : Mem.Req aw dw r) : Mem.Ram ab dw r :=
   Mem.Ram.mk (Hw.memWrite s.cells q.we (Mem.index shift ab q.addr) q.wdata) (Hw.lit 2 0)
 
 /-- The answer of the one-cycle RAM: the request is taken and a read returns its word in
 the same cycle. -/
-def Mem.ramOut1 {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
+def Mem.ramOut1 {0 r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
     (s : Mem.Ram ab dw r) (q : Mem.Req aw dw r) : Mem.Resp dw r :=
   Mem.Resp.mk q.valid (Hw.and q.valid (Hw.not q.we)) (Hw.memRead s.cells (Mem.index shift ab q.addr))
 
 /-- One cycle of the one-cycle RAM. -/
-def Mem.ramStep1 {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
+def Mem.ramStep1 {0 r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
     (s : Mem.Ram ab dw r) (q : Mem.Req aw dw r) :
     r (HwTy.prod (Mem.Ram.code ab dw) (Mem.Resp.code dw)) :=
   Hw.pair (Mem.Ram.pack ab dw (Mem.ramNext1 shift ab dw s q))
     (Mem.Resp.pack dw (Mem.ramOut1 shift ab dw s q))
 
 /-- The next state of the two-cycle RAM: after two cycles of `valid`, the write lands. -/
-def Mem.ramNext2 {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
+def Mem.ramNext2 {0 r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
     (s : Mem.Ram ab dw r) (q : Mem.Req aw dw r) : Mem.Ram ab dw r :=
   let go := Hw.and q.valid (Mem.isK s.wait 2);
   Mem.Ram.mk
@@ -316,13 +316,13 @@ def Mem.ramNext2 {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
 
 /-- The answer of the two-cycle RAM: `go` is high in the answering cycle, and a read
 returns the old word. -/
-def Mem.ramOut2 {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
+def Mem.ramOut2 {0 r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
     (s : Mem.Ram ab dw r) (q : Mem.Req aw dw r) : Mem.Resp dw r :=
   let go := Hw.and q.valid (Mem.isK s.wait 2);
   Mem.Resp.mk go (Hw.and go (Hw.not q.we)) (Hw.memRead s.cells (Mem.index shift ab q.addr))
 
 /-- One cycle of the two-cycle RAM. -/
-def Mem.ramStep2 {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
+def Mem.ramStep2 {0 r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
     (s : Mem.Ram ab dw r) (q : Mem.Req aw dw r) :
     r (HwTy.prod (Mem.Ram.code ab dw) (Mem.Resp.code dw)) :=
   Hw.pair (Mem.Ram.pack ab dw (Mem.ramNext2 shift ab dw s q))
@@ -331,7 +331,7 @@ def Mem.ramStep2 {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
 /-- One cycle of the byte-enabled one-cycle RAM: the word written is `wdata` in the
 enabled bytes and the old word in the others. As `ramStep1`, `we` is the RAM's write
 enable and is not gated by `valid`. -/
-def Mem.ramWStep1 {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
+def Mem.ramWStep1 {0 r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
     (s : Mem.Ram ab dw r) (q : Mem.ReqW aw dw r) :
     r (HwTy.prod (Mem.Ram.code ab dw) (Mem.Resp.code dw)) :=
   let ix := Mem.index shift ab q.addr;
@@ -343,7 +343,7 @@ def Mem.ramWStep1 {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
     (Mem.Resp.pack dw (Mem.Resp.mk q.valid (Hw.and q.valid (Hw.not q.we)) old))
 
 /-- One cycle of the byte-enabled two-cycle RAM (the `Bus.ramWC` shape). -/
-def Mem.ramWStep2 {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
+def Mem.ramWStep2 {0 r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
     (s : Mem.Ram ab dw r) (q : Mem.ReqW aw dw r) :
     r (HwTy.prod (Mem.Ram.code ab dw) (Mem.Resp.code dw)) :=
   let go := Hw.and q.valid (Mem.isK s.wait 2);

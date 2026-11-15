@@ -23,10 +23,10 @@ def X7.B1 : HwTy := HwTy.bits 1
 def X7.bitsT : Nat → HwTy
   | .zero => X7.B1
   | .succ n => HwTy.prod X7.B1 (X7.bitsT n)
-def X7.spread {r : HwTy → Type} [Hw r] {ω w : Nat} (x : r (HwTy.bits w)) : (ω k n : Nat) → r (X7.bitsT n)
+def X7.spread {0 r : HwTy → Type} [Hw r] {ω w : Nat} (x : r (HwTy.bits w)) : (ω k n : Nat) → r (X7.bitsT n)
   | k, .zero => Hw.slice k 1 x
   | k, .succ n => Hw.pair (Hw.slice k 1 x) (X7.spread x (Nat.succ k) n)
-def X7.gather {r : HwTy → Type} [Hw r] : (ω n : Nat) → r (X7.bitsT n) → r (HwTy.bits (Nat.succ n))
+def X7.gather {0 r : HwTy → Type} [Hw r] : (ω n : Nat) → r (X7.bitsT n) → r (HwTy.bits (Nat.succ n))
   | .zero, x => Hw.slice 0 1 x
   | .succ n, x => Hw.slice 0 (Nat.succ (Nat.succ n)) (Hw.cat (X7.gather n (Hw.snd x)) (Hw.fst x))
 def X7.names (pre : String) : Nat → Nat → List String
@@ -57,24 +57,24 @@ def X7.iobufdsP : Prim (HwTy.prod X7.B1 X7.B1) (HwTy.prod X7.B1 (HwTy.prod (HwTy
 def X7.bufgP : Prim HwTy.clock HwTy.clock :=
   Prim.decl "BUFG" .nil (.cons "I" .nil) (.cons "O" .nil) (Option.some (fun (x : HwTy.El HwTy.clock) => x))
 
-def X7.obuf {r : HwTy → Type} [Hw r] (x : r X7.B1) : r (HwTy.pad 1) := Hw.prim X7.obufP x
-def X7.ibuf {r : HwTy → Type} [Hw r] (x : r (HwTy.pad 1)) : r X7.B1 := Hw.prim X7.ibufP x
+def X7.obuf {0 r : HwTy → Type} [Hw r] (x : r X7.B1) : r (HwTy.pad 1) := Hw.prim X7.obufP x
+def X7.ibuf {0 r : HwTy → Type} [Hw r] (x : r (HwTy.pad 1)) : r X7.B1 := Hw.prim X7.ibufP x
 -- a bidirectional pin: drives `o` while `oe`, reads back on the first component
-def X7.iobuf {r : HwTy → Type} [Hw r] (o oe : r X7.B1) : r (HwTy.prod X7.B1 (HwTy.inout 1)) :=
+def X7.iobuf {0 r : HwTy → Type} [Hw r] (o oe : r X7.B1) : r (HwTy.prod X7.B1 (HwTy.inout 1)) :=
   Hw.prim X7.iobufP (Hw.pair o (Hw.not oe))
 -- the same with the buffer's own T (high: tristate), e.g. an OSERDESE2's TQ
-def X7.iobufT {r : HwTy → Type} [Hw r] (o t : r X7.B1) : r (HwTy.prod X7.B1 (HwTy.inout 1)) :=
+def X7.iobufT {0 r : HwTy → Type} [Hw r] (o t : r X7.B1) : r (HwTy.prod X7.B1 (HwTy.inout 1)) :=
   Hw.prim X7.iobufP (Hw.pair o t)
-def X7.iobufdsT {r : HwTy → Type} [Hw r] (o t : r X7.B1) : r (HwTy.prod X7.B1 (HwTy.prod (HwTy.inout 1) (HwTy.inout 1))) :=
+def X7.iobufdsT {0 r : HwTy → Type} [Hw r] (o t : r X7.B1) : r (HwTy.prod X7.B1 (HwTy.prod (HwTy.inout 1) (HwTy.inout 1))) :=
   Hw.prim X7.iobufdsP (Hw.pair o t)
-def X7.obufds {r : HwTy → Type} [Hw r] (x : r X7.B1) : r (HwTy.prod (HwTy.pad 1) (HwTy.pad 1)) := Hw.prim X7.obufdsP x
-def X7.iobufds {r : HwTy → Type} [Hw r] (o oe : r X7.B1) : r (HwTy.prod X7.B1 (HwTy.prod (HwTy.inout 1) (HwTy.inout 1))) :=
+def X7.obufds {0 r : HwTy → Type} [Hw r] (x : r X7.B1) : r (HwTy.prod (HwTy.pad 1) (HwTy.pad 1)) := Hw.prim X7.obufdsP x
+def X7.iobufds {0 r : HwTy → Type} [Hw r] (o oe : r X7.B1) : r (HwTy.prod X7.B1 (HwTy.prod (HwTy.inout 1) (HwTy.inout 1))) :=
   Hw.prim X7.iobufdsP (Hw.pair o (Hw.not oe))
-def X7.bufg {r : HwTy → Type} [Hw r] (c : r HwTy.clock) : r HwTy.clock := Hw.prim X7.bufgP c
+def X7.bufg {0 r : HwTy → Type} [Hw r] (c : r HwTy.clock) : r HwTy.clock := Hw.prim X7.bufgP c
 /-- A BUFG on domain `d`'s clock net whose output is that same domain (`outDom`), so a
 synchroniser can be clocked by `X7.bufgIn d` rather than by `Hw.clockOf d`. The emitted
 cell is the same `BUFG`; the domain marker is what the checker reads. -/
-def X7.bufgIn {r : HwTy → Type} [Hw r] (d : ClockDomain) : r HwTy.clock :=
+def X7.bufgIn {0 r : HwTy → Type} [Hw r] (d : ClockDomain) : r HwTy.clock :=
   Hw.prim (Prim.withOutDom X7.bufgP d.name) (Hw.clockOf d)
 
 ------------------------------------------------------------------------------------
@@ -86,7 +86,7 @@ def X7.oddrP : Prim X7.oddrIn X7.B1 :=
   Prim.decl "ODDR" (.cons ("DDR_CLK_EDGE", PrimParam.str "SAME_EDGE") (.cons ("INIT", PrimParam.bits 1 0)
       (.cons ("SRTYPE", PrimParam.str "SYNC") .nil)))
     (.cons "C" (.cons "CE" (.cons "D1" (.cons "D2" (.cons "R" (.cons "S" .nil)))))) (.cons "Q" .nil) Option.none
-def X7.oddr {r : HwTy → Type} [Hw r] (c : r HwTy.clock) (d1 d2 : r X7.B1) : r X7.B1 :=
+def X7.oddr {0 r : HwTy → Type} [Hw r] (c : r HwTy.clock) (d1 d2 : r X7.B1) : r X7.B1 :=
   Hw.prim X7.oddrP (Hw.pair c (Hw.pair (Hw.lit 1 1) (Hw.pair d1 (Hw.pair d2 (Hw.pair (Hw.lit 1 0) (Hw.lit 1 0))))))
 
 ------------------------------------------------------------------------------------
@@ -103,7 +103,7 @@ def X7.oserdesP : Prim X7.oserdesIn (HwTy.prod X7.B1 X7.B1) :=
     (.cons "CLK" (.cons "CLKDIV" (List.append (X7.names "D" 1 8) (.cons "OCE" (.cons "RST" (.cons "T1" (.cons "TCE" .nil)))))))
     (.cons "OQ" (.cons "TQ" .nil)) Option.none
 -- (OQ, TQ)
-def X7.oserdes {r : HwTy → Type} [Hw r] (clk clkdiv : r HwTy.clock) (rst : r X7.B1) (d : r (HwTy.bits 8)) (t : r X7.B1) :
+def X7.oserdes {0 r : HwTy → Type} [Hw r] (clk clkdiv : r HwTy.clock) (rst : r X7.B1) (d : r (HwTy.bits 8)) (t : r X7.B1) :
     r (HwTy.prod X7.B1 X7.B1) :=
   -- leaves D1 … D8 (bits 0 … 7 of `d`), then OCE = 1, RST, T1, TCE = 1, each its own leaf
   -- (a bus `cat`ed together once put them in the wrong order and held RST high)
@@ -126,7 +126,7 @@ def X7.iserdesP : Prim X7.iserdesIn (X7.bitsT 7) :=
     (X7.names "Q" 1 8) Option.none
 -- (the instance is let-bound, so that it is one instance: `X7.gather` reads it eight
 -- times, and an argument is a computation that would build the cell each time)
-def X7.iserdes {r : HwTy → Type} [Hw r] (clk clkdiv : r HwTy.clock) (rst : r X7.B1) (ddly : r X7.B1) : r (HwTy.bits 8) :=
+def X7.iserdes {0 r : HwTy → Type} [Hw r] (clk clkdiv : r HwTy.clock) (rst : r X7.B1) (ddly : r X7.B1) : r (HwTy.bits 8) :=
   let q := Hw.prim X7.iserdesP (Hw.pair clk (Hw.pair clk (Hw.pair clkdiv
     (Hw.pair ddly (Hw.pair (Hw.lit 1 1) (Hw.pair rst (Hw.lit 1 0)))))));
   X7.gather 7 q
@@ -146,7 +146,7 @@ def X7.idelayP : Prim X7.idelayIn (HwTy.prod X7.B1 (HwTy.bits 5)) :=
     (.cons "C" (.cons "CE" (.cons "INC" (.cons "LD" (.cons "CNTVALUEIN" (.cons "IDATAIN" .nil))))))
     (.cons "DATAOUT" (.cons "CNTVALUEOUT" .nil)) Option.none
 -- (DATAOUT, CNTVALUEOUT); on the implicit clock
-def X7.idelay {r : HwTy → Type} [Hw r] (ce inc ld : r X7.B1) (value : r (HwTy.bits 5)) (x : r X7.B1) :
+def X7.idelay {0 r : HwTy → Type} [Hw r] (ce inc ld : r X7.B1) (value : r (HwTy.bits 5)) (x : r X7.B1) :
     r (HwTy.prod X7.B1 (HwTy.bits 5)) :=
   Hw.prim X7.idelayP (Hw.pair Hw.clock (Hw.pair ce (Hw.pair inc (Hw.pair ld (Hw.pair value x)))))
 
@@ -155,7 +155,7 @@ def X7.idelay {r : HwTy → Type} [Hw r] (ce inc ld : r X7.B1) (value : r (HwTy.
 def X7.idelayctrlP : Prim (HwTy.prod HwTy.clock X7.B1) X7.B1 :=
   Prim.decl "IDELAYCTRL" .nil (.cons "REFCLK" (.cons "RST" .nil)) (.cons "RDY" .nil)
     (Option.some (fun (x : HwTy.El (HwTy.prod HwTy.clock X7.B1)) => BitVec.ofNat 1 1))
-def X7.idelayctrl {r : HwTy → Type} [Hw r] (refclk : r HwTy.clock) (rst : r X7.B1) : r X7.B1 :=
+def X7.idelayctrl {0 r : HwTy → Type} [Hw r] (refclk : r HwTy.clock) (rst : r X7.B1) : r X7.B1 :=
   Hw.prim X7.idelayctrlP (Hw.pair refclk rst)
 
 ------------------------------------------------------------------------------------

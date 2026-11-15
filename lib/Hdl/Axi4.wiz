@@ -191,29 +191,29 @@ structure Axi4.MasterIn (aw dw idw : Nat) (r : HwTy → Type) where
   deriving Bundle
 
 /-- A quiet write address (`valid` low, zero payload). -/
-def Axi4.noAw {r : HwTy → Type} [Hw r] {ω aw idw : Nat} : Axi4.Aw aw idw r :=
+def Axi4.noAw {0 r : HwTy → Type} [Hw r] {ω aw idw : Nat} : Axi4.Aw aw idw r :=
   Axi4.Aw.mk (Hw.lit idw 0) (Hw.lit aw 0) (Hw.lit Axi4.lenW 0)
     (Hw.lit Axi4.sizeW 0) (Hw.lit Axi4.burstW 0) (Hw.lit 1 0)
 
 /-- A quiet write data beat (`valid` low, no strobes, not last). -/
-def Axi4.noW {r : HwTy → Type} [Hw r] {ω dw : Nat} : Axi4.W dw r :=
+def Axi4.noW {0 r : HwTy → Type} [Hw r] {ω dw : Nat} : Axi4.W dw r :=
   Axi4.W.mk (Hw.lit dw 0) (Hw.lit (Nat.div dw 8) 0) (Hw.lit 1 0) (Hw.lit 1 0)
 
 /-- A quiet write response. -/
-def Axi4.noB {r : HwTy → Type} [Hw r] {ω idw : Nat} : Axi4.B idw r :=
+def Axi4.noB {0 r : HwTy → Type} [Hw r] {ω idw : Nat} : Axi4.B idw r :=
   Axi4.B.mk (Hw.lit idw 0) (Hw.lit Axi4.respW 0) (Hw.lit 1 0)
 
 /-- A quiet read address (`valid` low, zero payload). -/
-def Axi4.noAr {r : HwTy → Type} [Hw r] {ω aw idw : Nat} : Axi4.Ar aw idw r :=
+def Axi4.noAr {0 r : HwTy → Type} [Hw r] {ω aw idw : Nat} : Axi4.Ar aw idw r :=
   Axi4.Ar.mk (Hw.lit idw 0) (Hw.lit aw 0) (Hw.lit Axi4.lenW 0)
     (Hw.lit Axi4.sizeW 0) (Hw.lit Axi4.burstW 0) (Hw.lit 1 0)
 
 /-- A quiet read response. -/
-def Axi4.noR {r : HwTy → Type} [Hw r] {ω dw idw : Nat} : Axi4.R dw idw r :=
+def Axi4.noR {0 r : HwTy → Type} [Hw r] {ω dw idw : Nat} : Axi4.R dw idw r :=
   Axi4.R.mk (Hw.lit idw 0) (Hw.lit dw 0) (Hw.lit Axi4.respW 0) (Hw.lit 1 0) (Hw.lit 1 0)
 
 /-- `SLVERR` for a bus error, `OKAY` otherwise. -/
-def Axi4.respOfErr {r : HwTy → Type} [Hw r] (err : r Bus.Bit) : r (HwTy.bits Axi4.respW) :=
+def Axi4.respOfErr {0 r : HwTy → Type} [Hw r] (err : r Bus.Bit) : r (HwTy.bits Axi4.respW) :=
   Hw.mux err (Hw.lit Axi4.respW Axi4.slverr) (Hw.lit Axi4.respW Axi4.okay)
 
 ------------------------------------------------------------------------------------
@@ -222,17 +222,17 @@ def Axi4.respOfErr {r : HwTy → Type} [Hw r] (err : r Bus.Bit) : r (HwTy.bits A
 
 /-- Zero-extend (or truncate) a signal to `n` bits, at elaboration time. The `slice`
 fixes the result width, so the `cat`'s `Nat.add` never has to reduce definitionally. -/
-def Axi4.zext {r : HwTy → Type} [Hw r] {ω m n : Nat} (x : r (HwTy.bits m)) :
+def Axi4.zext {0 r : HwTy → Type} [Hw r] {ω m n : Nat} (x : r (HwTy.bits m)) :
     r (HwTy.bits n) :=
   Hw.slice 0 n (Hw.cat (Hw.lit (Nat.sub n m) 0) x)
 
 /-- `2^SIZE`, at the address width. -/
-def Axi4.stride {r : HwTy → Type} [Hw r] {ω aw : Nat}
+def Axi4.stride {0 r : HwTy → Type} [Hw r] {ω aw : Nat}
     (size : r (HwTy.bits Axi4.sizeW)) : r (HwTy.bits aw) :=
   Hw.shlBy (Hw.lit aw 1) size
 
 /-- The WRAP window's low-bit mask: `(LEN + 1) * 2^SIZE - 1`. -/
-def Axi4.wrapMask {r : HwTy → Type} [Hw r] {ω aw : Nat}
+def Axi4.wrapMask {0 r : HwTy → Type} [Hw r] {ω aw : Nat}
     (len : r (HwTy.bits Axi4.lenW)) (size : r (HwTy.bits Axi4.sizeW)) :
     r (HwTy.bits aw) :=
   let n := Axi4.zext (Hw.add len (Hw.lit Axi4.lenW 1));
@@ -240,13 +240,13 @@ def Axi4.wrapMask {r : HwTy → Type} [Hw r] {ω aw : Nat}
 
 /-- The next WRAP address: keep the aligned high bits of `cur` and add the stride into
 the low (window) bits, wrapping at the window end. -/
-def Axi4.wrapNext {r : HwTy → Type} [Hw r] {ω aw : Nat}
+def Axi4.wrapNext {0 r : HwTy → Type} [Hw r] {ω aw : Nat}
     (cur stride mask : r (HwTy.bits aw)) : r (HwTy.bits aw) :=
   Hw.or (Hw.and cur (Hw.not mask)) (Hw.and (Hw.add cur stride) mask)
 
 /-- The next beat address: `cur + stride` for INCR/FIXED, the windowed `wrapNext` for
 WRAP. -/
-def Axi4.nextAddr {r : HwTy → Type} [Hw r] {ω aw : Nat}
+def Axi4.nextAddr {0 r : HwTy → Type} [Hw r] {ω aw : Nat}
     (burst : r (HwTy.bits Axi4.burstW)) (cur stride mask : r (HwTy.bits aw)) :
     r (HwTy.bits aw) :=
   Hw.mux (Hw.eq burst (Hw.lit Axi4.burstW Axi4.wrap))
@@ -303,7 +303,7 @@ fields); each `W` beat is consumed exactly when the bus answers that beat's `Bus
 phase, where `BVALID` is held until `BREADY`. A bus error on any beat of the burst makes
 `BRESP` `SLVERR`. `WLAST` is not trusted to end the burst: `LEN` says how many beats
 there are (a mismatched `WLAST` is an input violation, checked by the laws). -/
-def Axi4.wrStep {r : HwTy → Type} [Hw r] {ω aw dw idw : Nat} (s : Axi4.WrSt aw dw idw r)
+def Axi4.wrStep {0 r : HwTy → Type} [Hw r] {ω aw dw idw : Nat} (s : Axi4.WrSt aw dw idw r)
     (i : Axi4.WriteIn aw dw idw r) :
     r (HwTy.prod (Axi4.WrSt.code aw dw idw) (Axi4.WriteOut.code aw dw idw)) :=
   let idle := Hw.eq s.phase (Hw.lit 2 0);
@@ -398,7 +398,7 @@ structure Axi4.ReadOut (aw dw idw : Nat) (r : HwTy → Type) where
 captured as one `R` beat and held until `RREADY`, then the next beat is issued (so the
 bus never sees two reads at once and no read data is dropped under backpressure).
 `RLAST` is the beat index's `LEN`, and the ID is the captured `ARID`. -/
-def Axi4.rdStep {r : HwTy → Type} [Hw r] {ω aw dw idw : Nat} (s : Axi4.RdSt aw dw idw r)
+def Axi4.rdStep {0 r : HwTy → Type} [Hw r] {ω aw dw idw : Nat} (s : Axi4.RdSt aw dw idw r)
     (i : Axi4.ReadIn aw dw idw r) :
     r (HwTy.prod (Axi4.RdSt.code aw dw idw) (Axi4.ReadOut.code aw dw idw)) :=
   let idle := Hw.eq s.phase (Hw.lit 2 0);

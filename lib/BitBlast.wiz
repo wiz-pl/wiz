@@ -28,7 +28,7 @@ def Bits.cons (c : Bool) (r : Nat) : Nat := match c with
   | .true => .succ (Nat.mul 2 r)
   | .false => Nat.mul 2 r
 
-def Bits.congr {0 A B : Type} (f : A → B) {a b : A} (e : a = b) : f a = f b := Eq.congrArg f e
+def Bits.congr {0 A B : Type} (f : A → B) {0 a b : A} (e : a = b) : f a = f b := Eq.congrArg f e
 def Bits.add_succ : (m n : Nat) → Nat.add m (Nat.succ n) = Nat.succ (Nat.add m n)
   | .zero, _ => rfl
   | .succ m, n => Bits.congr Nat.succ (Bits.add_succ m n)
@@ -173,7 +173,7 @@ def Bits.bit_small : (i n : Nat) → Nat.le n i = .true → Bits.bit n i = .fals
 
 -- ## The bits of `Nat.bitwise` (and so of `land`, `lor`, `xor`)
 
-def Bits.congr2 {0 A B C : Type} (f : A → B → C) {a a' : A} {b b' : B} (e : a = a') (e' : b = b') : f a b = f a' b' :=
+def Bits.congr2 {0 A B C : Type} (f : A → B → C) {0 a a' : A} {0 b b' : B} (e : a = a') (e' : b = b') : f a b = f a' b' :=
   Eq.trans (Eq.congrArg (fun x => f x b) e) (Eq.congrArg (f a') e')
 def Bits.le_refl : (n : Nat) → Nat.le n n = .true
   | .zero => rfl
@@ -224,7 +224,7 @@ def Bits.xor_bit (a b i : Nat) : Bits.bit (Nat.xor a b) i = Bool.xor (Bits.bit a
 
 -- ## `land a b ≤ a` (Word's `land` keeps the smaller of the two: it is `land a b`)
 
-def Bits.le_congr {a a' b b' : Nat} (ea : a = a') (eb : b = b') (h : Nat.le a b = .true) : Nat.le a' b' = .true :=
+def Bits.le_congr {0 a a' b b' : Nat} (ea : a = a') (eb : b = b') (h : Nat.le a b = .true) : Nat.le a' b' = .true :=
   transp (fun t _ => Nat.le t b' = .true) (transp (fun t _ => Nat.le a t = .true) h eb) ea
 def Bits.le2 : (R A : Nat) → Nat.le R A = .true → Nat.le (Nat.mul 2 R) (Nat.mul 2 A) = .true
   | .zero, _, _ => rfl
@@ -263,17 +263,17 @@ def Bits.min_of_le : (L a : Nat) → Nat.le L a = .true → Word.min L a = L
   | .succ L, .succ a, h => Eq.trans (Bits.pick_succ (Nat.lt L a) L a) (Bits.congr Nat.succ (Bits.min_of_le L a h))
 
 -- the bits of the bitwise operations on words
-def Bits.wland_bit {w : Nat} (x y : UIntN w) (i : Nat) :
+def Bits.wland_bit {0 w : Nat} (x y : UIntN w) (i : Nat) :
     Bits.bit (UIntN.toNat (UIntN.land x y)) i = Bool.and (Bits.bit (UIntN.toNat x) i) (Bits.bit (UIntN.toNat y) i) :=
   Eq.trans
     (Bits.congr (fun t => Bits.bit t i)
       (Bits.min_of_le (Nat.land (UIntN.toNat x) (UIntN.toNat y)) (UIntN.toNat x)
         (Bits.land_le (Nat.add (UIntN.toNat x) (UIntN.toNat y)) (UIntN.toNat x) (UIntN.toNat y))))
     (Bits.land_bit (UIntN.toNat x) (UIntN.toNat y) i)
-def Bits.wlor_bit {w : Nat} (x y : UIntN w) (i : Nat) :
+def Bits.wlor_bit {0 w : Nat} (x y : UIntN w) (i : Nat) :
     Bits.bit (UIntN.toNat (UIntN.lor x y)) i = Bool.or (Bits.bit (UIntN.toNat x) i) (Bits.bit (UIntN.toNat y) i) :=
   Bits.lor_bit (UIntN.toNat x) (UIntN.toNat y) i
-def Bits.wxor_bit {w : Nat} (x y : UIntN w) (i : Nat) :
+def Bits.wxor_bit {0 w : Nat} (x y : UIntN w) (i : Nat) :
     Bits.bit (UIntN.toNat (UIntN.xor x y)) i = Bool.xor (Bits.bit (UIntN.toNat x) i) (Bits.bit (UIntN.toNat y) i) :=
   Bits.xor_bit (UIntN.toNat x) (UIntN.toNat y) i
 
@@ -296,7 +296,7 @@ def Bits.eqUpTo_bits (a b : Nat) : (k : Nat) → Bits.eqUpTo a b k = .true → (
         (Eq.symm e))
 
 -- two numbers below `2^w` with the same bits below `w` are equal
-def Bits.lt_congr {a a' b b' : Nat} (ea : a = a') (eb : b = b') (h : Nat.lt a b = .true) : Nat.lt a' b' = .true :=
+def Bits.lt_congr {0 a a' b b' : Nat} (ea : a = a') (eb : b = b') (h : Nat.lt a b = .true) : Nat.lt a' b' = .true :=
   transp (fun t _ => Nat.lt t b' = .true) (transp (fun t _ => Nat.lt a t = .true) h eb) ea
 def Bits.lt2 : (h P : Nat) → Nat.lt (Nat.mul 2 h) (Nat.mul 2 P) = .true → Nat.lt h P = .true
   | _, .zero, e => absurd (Sat.contra (Nat.lt (Nat.mul 2 _) 0) e (Bits.ltz (Nat.mul 2 _)))
@@ -637,7 +637,7 @@ def Bits.lt_add_right : (k j w : Nat) → Nat.lt (Nat.add k j) w = .true → Nat
     Bits.lt_add_right k j w
       (Bits.lt_of_succ_lt (Nat.add k j) w (Bits.lt_congr (Nat.add_succ k j) (refl w) h))
 -- `i` is below the capped exponent when it is below both `k` and `w`
-def Bits.lt_min {i k w : Nat} (hk : Nat.lt i k = .true) (hi : Nat.lt i w = .true) :
+def Bits.lt_min {0 i k w : Nat} (hk : Nat.lt i k = .true) (hi : Nat.lt i w = .true) :
     Nat.lt i (Word.min k w) = .true :=
   Or.elim (Bool.cases (Nat.lt k w))
     (fun ht => transp (fun t _ => Nat.lt i t = .true) hk (Word.symm (Word.min_left ht)))
@@ -680,10 +680,10 @@ def Bits.bit_ge : (w A m : Nat) → Nat.lt A (Nat.pow 2 w) = .true → Nat.le w 
   | .succ w, A, .succ m, ha, h =>
     Bits.bit_ge w (Nat.div A 2) m
       (transp (fun t _ => Nat.lt t (Nat.pow 2 w) = .true) (Bits.half_lt A (Nat.pow 2 w) ha) (Eq.symm (Bits.div2 A))) h
-def Bits.wshr_val {w : Nat} (x : UIntN w) (k : Nat) : UIntN.toNat (UIntN.shiftRight x k) = Bits.high k (UIntN.toNat x) :=
+def Bits.wshr_val {0 w : Nat} (x : UIntN w) (k : Nat) : UIntN.toNat (UIntN.shiftRight x k) = Bits.high k (UIntN.toNat x) :=
   Eq.trans (Bits.congr (fun t => Word.min t (UIntN.toNat x)) (Bits.div_pow k (UIntN.toNat x)))
     (Bits.min_of_le (Bits.high k (UIntN.toNat x)) (UIntN.toNat x) (Bits.high_le k (UIntN.toNat x)))
-def Bits.wshr_in {w : Nat} (x : UIntN w) (k j : Nat) :
+def Bits.wshr_in {0 w : Nat} (x : UIntN w) (k j : Nat) :
     Bits.bit (UIntN.toNat (UIntN.shiftRight x k)) j = Bool.and (Bits.bit (UIntN.toNat x) (Nat.add k j)) (Bits.bit (UIntN.toNat x) (Nat.add k j)) :=
   Eq.trans (Bits.congr (fun t => Bits.bit t j) (Bits.wshr_val x k))
     (Eq.trans (Bits.high_bit k (UIntN.toNat x) j) (Eq.symm (Bits.and_self (Bits.bit (UIntN.toNat x) (Nat.add k j)))))

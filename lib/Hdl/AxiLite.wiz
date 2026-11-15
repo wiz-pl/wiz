@@ -106,16 +106,16 @@ structure AxiLite.MasterIn (aw dw : Nat) (r : HwTy → Type) where
 
 /-- The `Bus.ReqW` of an AXI4-Lite write when both address and data are presented
 (`awvalid && wvalid`); this is the subset `Bus` supports, not a general AXI slave. -/
-def AxiLite.writeOf {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (a : AxiLite.Aw aw r)
+def AxiLite.writeOf {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat} (a : AxiLite.Aw aw r)
     (w : AxiLite.W dw r) : Bus.ReqW aw dw r :=
   Bus.ReqW.mk (Hw.and a.valid w.valid) (Hw.lit 1 1) a.addr w.data w.strb
 
 /-- The `Bus.ReqW` of an AXI4-Lite read: one beat, no burst fields. -/
-def AxiLite.readOf {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (a : AxiLite.Ar aw r) :
+def AxiLite.readOf {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat} (a : AxiLite.Ar aw r) :
     Bus.ReqW aw dw r :=
   Bus.ReqW.mk a.valid (Hw.lit 1 0) a.addr (Hw.lit dw 0) (Hw.lit (Nat.div dw 8) 0)
 
 /-- `err` is high for any response other than `OKAY` (`SLVERR` or `DECERR`). -/
-def AxiLite.errOf {r : HwTy → Type} [Hw r] (resp : r (HwTy.bits AxiLite.respW)) :
+def AxiLite.errOf {0 r : HwTy → Type} [Hw r] (resp : r (HwTy.bits AxiLite.respW)) :
     r Bus.Bit :=
   Hw.not (Hw.eq resp (Hw.lit AxiLite.respW AxiLite.okay))

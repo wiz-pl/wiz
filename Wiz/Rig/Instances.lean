@@ -67,16 +67,17 @@ instance : QRig Nat where
   add_le_add _ _ _ _ h₁ h₂ := by simp_all
   mul_le_mul _ _ _ _ h₁ h₂ := by simp_all
 
-/-- There is no ω in `Nat`, so both explicit and implicit binders default to exactly
-once (the closest default to the unrestricted ω of the main rig). -/
+/-- There is no ω in `Nat`, so explicit binders default to exactly once. Implicit
+binders stay at 0: in exact counting a default of 1 would reject every implicit that is
+used only in types, and there is no unrestricted quantity to default to. -/
 instance : QuantitySyntax Nat where
   ofLiteral := String.toNat?
   explicitDefault := 1
-  implicitDefault := 1
+  implicitDefault := 0
   display := toString
 
 instance : RigTag Nat where
-  tag := "nat-implicit-one"
+  tag := "nat"
 
 /-! ## `ZeroOneMany`: Idris 2's quantities -/
 

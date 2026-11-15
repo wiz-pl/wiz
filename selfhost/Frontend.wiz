@@ -1197,8 +1197,8 @@ def lastIdx : List Syntax → Nat → Nat
     | .nil => i
     | .cons _ _ => lastIdx rest (i + 1)
 -- (stage 21m, 21x) A constructor field's quantity is its description's (`darg q S D`,
--- `Desc.arg q S D` in the Lean kernel): written, or by default ω for an explicit field
--- and 0 for an implicit one (`{n : Nat}`), as `elabQuantity` gives it. A bad quantity
+-- `Desc.arg q S D` in the Lean kernel): written, or by default ω for an explicit and an
+-- implicit field alike (`{n : Nat}`; `{0 n : Nat}` erases it), as `elabQuantity` gives it. A bad quantity
 -- (`2`, `%t`) on a field or a parameter is an error.
 def fieldQtyErr : List Syntax → Option String
   | .nil => .none

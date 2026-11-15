@@ -40,21 +40,21 @@ instance : LT Nat := LT.mk Nat.Lt
 -- ## Equality helpers
 
 /-- Applying `f` to equal arguments gives equal results. -/
-def congrArg.{u, v} {0 A : Type u} {0 B : Type v} (f : A → B) {a b : A} (e : a = b) : f a = f b :=
+def congrArg.{u, v} {0 A : Type u} {0 B : Type v} (f : A → B) {0 a b : A} (e : a = b) : f a = f b :=
   transp (fun b _ => f a = f b) (refl (f a)) e
 /-- `congrArg` for a function of two arguments. -/
-def congrArg2 {0 A B C : Type} (f : A → B → C) {a a' : A} {b b' : B} (e : a = a') (e' : b = b') :
+def congrArg2 {0 A B C : Type} (f : A → B → C) {0 a a' : A} {0 b b' : B} (e : a = a') (e' : b = b') :
     f a b = f a' b' :=
   Eq.trans (Eq.congrArg (fun x => f x b) e) (Eq.congrArg (f a') e')
 /-- Transport a proposition backwards along an equation: from `P b` and `a = b`, `P a`. -/
-def Eq.mpr' {0 A : Type} {a b : A} (0 P : A → Prop) (e : a = b) (h : P b) : P a :=
+def Eq.mpr' {0 A : Type} {0 a b : A} (0 P : A → Prop) (e : a = b) (h : P b) : P a :=
   Eq.substProp P (Eq.symm e) h
 /-- Transport a proposition along an equation: from `P a` and `a = b`, `P b`. -/
-def Eq.mp' {0 A : Type} {a b : A} (0 P : A → Prop) (e : a = b) (h : P a) : P b :=
+def Eq.mp' {0 A : Type} {0 a b : A} (0 P : A → Prop) (e : a = b) (h : P a) : P b :=
   Eq.substProp P e h
 /-- `Eq.trans` with the middle term written out, for chains whose steps need their
 equation as the expected type (`nat_ring!`, `int_ring!`). -/
-def Eq.via {0 A : Type} {a c : A} (b : A) (h1 : a = b) (h2 : b = c) : a = c := Eq.trans h1 h2
+def Eq.via {0 A : Type} {0 a c : A} (b : A) (h1 : a = b) (h2 : b = c) : a = c := Eq.trans h1 h2
 
 -- ## Addition
 
@@ -88,9 +88,9 @@ def Nat.add_left_comm (a b c : Nat) : a + (b + c) = b + (a + c) :=
 def Nat.add_one (n : Nat) : n + 1 = Nat.succ n :=
   Eq.trans (Nat.add_succ n 0) (congrArg Nat.succ (Nat.add_zero n))
 /-- `succ` is injective (an equation of constructors computes to one of their fields). -/
-def Nat.succ_inj {m n : Nat} (e : Nat.succ m = Nat.succ n) : m = n := e
+def Nat.succ_inj {0 m n : Nat} (e : Nat.succ m = Nat.succ n) : m = n := e
 /-- Cancel a summand on the left: `k + m = k + n → m = n`. -/
-def Nat.add_left_cancel : (k : Nat) → {m n : Nat} → k + m = k + n → m = n
+def Nat.add_left_cancel : (k : Nat) → {0 m n : Nat} → k + m = k + n → m = n
   | .zero, _, _, e => e
   | .succ k, _, _, e => @Nat.add_left_cancel k _ _ e
 /-- Cancel a summand on the right: `m + k = n + k → m = n`. -/
@@ -253,28 +253,28 @@ def Nat.lt_trans (a b c : Nat) (h : Nat.Lt a b) (h' : Nat.Lt b c) : Nat.Lt a c :
 -- Adjacent `calc` steps compose through `Trans` (lib/Logic.wiz). The equation instances
 -- transport a proof along `=`, so `a = b ≤ c` and `a ≤ b = c` both give `a ≤ c`.
 /-- `a = b → b ≤ c → a ≤ c`. -/
-instance {a b c : Nat} : Trans (a = b) (b ≤ c) (a ≤ c) :=
+instance {0 a b c : Nat} : Trans (a = b) (b ≤ c) (a ≤ c) :=
   Trans.mk (fun e h => Eq.mp' (fun (x : Nat) => Nat.Le x c) (Eq.symm e) h)
 /-- `a ≤ b → b = c → a ≤ c`. -/
-instance {a b c : Nat} : Trans (a ≤ b) (b = c) (a ≤ c) :=
+instance {0 a b c : Nat} : Trans (a ≤ b) (b = c) (a ≤ c) :=
   Trans.mk (fun h e => Eq.mp' (fun (x : Nat) => Nat.Le a x) e h)
 /-- `a = b → b < c → a < c`. -/
-instance {a b c : Nat} : Trans (a = b) (b < c) (a < c) :=
+instance {0 a b c : Nat} : Trans (a = b) (b < c) (a < c) :=
   Trans.mk (fun e h => Eq.mp' (fun (x : Nat) => Nat.Lt x c) (Eq.symm e) h)
 /-- `a < b → b = c → a < c`. -/
-instance {a b c : Nat} : Trans (a < b) (b = c) (a < c) :=
+instance {0 a b c : Nat} : Trans (a < b) (b = c) (a < c) :=
   Trans.mk (fun h e => Eq.mp' (fun (x : Nat) => Nat.Lt a x) e h)
 /-- `a ≤ b → b ≤ c → a ≤ c`. -/
-instance {a b c : Nat} : Trans (a ≤ b) (b ≤ c) (a ≤ c) :=
+instance {0 a b c : Nat} : Trans (a ≤ b) (b ≤ c) (a ≤ c) :=
   Trans.mk (fun h h' => Nat.le_trans a b c h h')
 /-- `a ≤ b → b < c → a < c`. -/
-instance {a b c : Nat} : Trans (a ≤ b) (b < c) (a < c) :=
+instance {0 a b c : Nat} : Trans (a ≤ b) (b < c) (a < c) :=
   Trans.mk (fun h h' => Nat.lt_of_le_of_lt a b c h h')
 /-- `a < b → b ≤ c → a < c`. -/
-instance (priority := 1001) {a b c : Nat} : Trans (a < b) (b ≤ c) (a < c) :=
+instance (priority := 1001) {0 a b c : Nat} : Trans (a < b) (b ≤ c) (a < c) :=
   Trans.mk (fun h h' => Nat.lt_of_lt_of_le a b c h h')
 /-- `a < b → b < c → a < c`. -/
-instance {a b c : Nat} : Trans (a < b) (b < c) (a < c) :=
+instance {0 a b c : Nat} : Trans (a < b) (b < c) (a < c) :=
   Trans.mk (fun h h' => Nat.lt_trans a b c h h')
 /-- `a ≤ b` and `b < a` contradict each other. -/
 def Nat.not_lt_of_le (a b : Nat) (h : Nat.Le a b) (h' : Nat.Lt b a) : False :=

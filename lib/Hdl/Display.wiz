@@ -73,24 +73,24 @@ def Display.ones (bits : Nat) : Nat := Nat.pow 2 bits - 1
 
 /-- RGB 565: red 5 bits, green 6, blue 5 (the SSD1331's 16-bit colour, high byte
 first on the wire). -/
-def Display.rgb565 {r : HwTy → Type} [Hw r] (red : r Display.B5) (green : r Display.B6)
+def Display.rgb565 {0 r : HwTy → Type} [Hw r] (red : r Display.B5) (green : r Display.B6)
     (blue : r Display.B5) : r Display.B16 :=
   Hw.cat red (Hw.cat green blue)
 
 /-- The red field of an RGB 565 colour (bits 15 … 11). -/
-def Display.S1331.red {r : HwTy → Type} [Hw r] (c : r Display.B16) : r Display.B5 :=
+def Display.S1331.red {0 r : HwTy → Type} [Hw r] (c : r Display.B16) : r Display.B5 :=
   Hw.slice 11 5 c
 /-- The green field of an RGB 565 colour (bits 10 … 5). -/
-def Display.S1331.green {r : HwTy → Type} [Hw r] (c : r Display.B16) : r Display.B6 :=
+def Display.S1331.green {0 r : HwTy → Type} [Hw r] (c : r Display.B16) : r Display.B6 :=
   Hw.slice 5 6 c
 /-- The blue field of an RGB 565 colour (bits 4 … 0). -/
-def Display.S1331.blue {r : HwTy → Type} [Hw r] (c : r Display.B16) : r Display.B5 :=
+def Display.S1331.blue {0 r : HwTy → Type} [Hw r] (c : r Display.B16) : r Display.B5 :=
   Hw.slice 0 5 c
 /-- The high byte of a colour (sent first). -/
-def Display.S1331.highByte {r : HwTy → Type} [Hw r] (c : r Display.B16) : r Display.B8 :=
+def Display.S1331.highByte {0 r : HwTy → Type} [Hw r] (c : r Display.B16) : r Display.B8 :=
   Hw.slice 8 8 c
 /-- The low byte of a colour. -/
-def Display.S1331.lowByte {r : HwTy → Type} [Hw r] (c : r Display.B16) : r Display.B8 :=
+def Display.S1331.lowByte {0 r : HwTy → Type} [Hw r] (c : r Display.B16) : r Display.B8 :=
   Hw.slice 0 8 c
 
 /-- The SSD1306's page byte for eight pixel bits: the first bit is the top row of the
@@ -406,7 +406,7 @@ def Display.romGo : Nat → List Nat → Display.RomT
 def Display.romBuild (k : Nat) (es : List Nat) : Display.RomT :=
   Display.romGo k (List.append es (Display.rep (Nat.pow 2 k) 0 .nil))
 
-def Display.romAt {r : HwTy → Type} [Hw r] (w : Nat) {ω n : Nat}
+def Display.romAt {0 r : HwTy → Type} [Hw r] (w : Nat) {ω n : Nat}
     (a : r (HwTy.bits n)) : Display.RomT → r (HwTy.bits w)
   | .leaf v => Hw.lit w v
   | .node k hi lo => Hw.mux (Hw.slice k 1 a) (Display.romAt w a hi) (Display.romAt w a lo)
@@ -438,10 +438,10 @@ structure Display.Ser (r : HwTy → Type) where
 def Display.Ser.init : Display.Ser HwTy.El :=
   Display.Ser.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 7 0) (BitVec.ofNat 4 0)
 
-def Display.serReady {r : HwTy → Type} [Hw r] (s : Display.Ser r) : r HwTy.bit :=
+def Display.serReady {0 r : HwTy → Type} [Hw r] (s : Display.Ser r) : r HwTy.bit :=
   s.cnt === 0
 
-def Display.serStep {r : HwTy → Type} [Hw r] (s : Display.Ser r) (load : r HwTy.bit)
+def Display.serStep {0 r : HwTy → Type} [Hw r] (s : Display.Ser r) (load : r HwTy.bit)
     (d : r Display.B8) : r Display.Ser.code :=
   let busy := ~~~ (Display.serReady s);
   let go := Display.serReady s &&& load;
@@ -485,7 +485,7 @@ structure Display.WSt (r : HwTy → Type) where
 def Display.WSt.init : Display.WSt HwTy.El :=
   Display.WSt.mk Display.Ser.init (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)
 
-def Display.wStep {r : HwTy → Type} [Hw r] (s : Display.WSt r) (x : Display.WIn r) :
+def Display.wStep {0 r : HwTy → Type} [Hw r] (s : Display.WSt r) (x : Display.WIn r) :
     r (HwTy.prod Display.WSt.code Display.WOut.code) :=
   let ready := Display.serReady s.ser;
   let go := ready &&& x.valid;
@@ -544,7 +544,7 @@ def Display.QSt.init (pw : Nat) : Display.QSt pw HwTy.El :=
     Display.Ser.init (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)
 
 /-- One cycle of the sequence writer. -/
-def Display.qStep (pw n : Nat) (rom : Display.RomT) {r : HwTy → Type} [Hw r]
+def Display.qStep (pw n : Nat) (rom : Display.RomT) {0 r : HwTy → Type} [Hw r]
     (s : Display.QSt pw r) (x : Display.QIn r) :
     r (HwTy.prod (Display.QSt.code pw) Display.QOut.code) :=
   let ready := Display.serReady s.ser;

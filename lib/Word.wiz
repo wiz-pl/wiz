@@ -34,10 +34,10 @@ import Word
 -- this module imports only the Prelude).
 
 /-- `Nat.succ a = Nat.succ b` from `a = b`. -/
-def Word.congrSucc {a b : Nat} (e : a = b) : Nat.succ a = Nat.succ b :=
+def Word.congrSucc {0 a b : Nat} (e : a = b) : Nat.succ a = Nat.succ b :=
   transp (fun t _ => Nat.succ a = Nat.succ t) (refl (Nat.succ a)) e
 /-- `b = a` from `a = b`. -/
-def Word.symm {a b : Nat} (e : a = b) : b = a := transp (fun t _ => t = a) (refl a) e
+def Word.symm {0 a b : Nat} (e : a = b) : b = a := transp (fun t _ => t = a) (refl a) e
 /-- `m + succ n = succ (m + n)` (the form `Nat.lt` reduces on). -/
 def Word.add_succ : (m n : Nat) → Nat.add m (Nat.succ n) = Nat.succ (Nat.add m n)
   | .zero, _ => rfl
@@ -88,11 +88,11 @@ def Word.pick : Bool → Nat → Nat → Nat
 /-- The smaller of two numbers. -/
 def Word.min (x y : Nat) : Nat := Word.pick (Nat.lt x y) x y
 /-- `Word.min x y` is `x` when `x < y` (the `Bool` comparison is true). -/
-def Word.min_left {x y : Nat} (h : Nat.lt x y = .true) : Word.min x y = x :=
+def Word.min_left {0 x y : Nat} (h : Nat.lt x y = .true) : Word.min x y = x :=
   transp (fun b _ => Word.pick (Nat.lt x y) x y = Word.pick b x y)
     (refl (Word.pick (Nat.lt x y) x y)) h
 /-- `Word.min x y` is `y` when `x < y` is false. -/
-def Word.min_right {x y : Nat} (h : Nat.lt x y = .false) : Word.min x y = y :=
+def Word.min_right {0 x y : Nat} (h : Nat.lt x y = .false) : Word.min x y = y :=
   transp (fun b _ => Word.pick (Nat.lt x y) x y = Word.pick b x y)
     (refl (Word.pick (Nat.lt x y) x y)) h
 /-- `Word.pick` of two numbers below `y + 1` is below `y + 1`. -/

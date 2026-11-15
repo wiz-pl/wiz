@@ -27,17 +27,17 @@ inductive CellOp (V : Type) (l : Nat) where
   | get
   | put (v : V)
 /-- The type of the answer a `CellOp` gives: `V` for `get`, `Unit` for `put`. -/
-def CellOp.ret {ω V : Type} {l : Nat} : CellOp V l → Type
+def CellOp.ret {ω V : Type} {0 l : Nat} : CellOp V l → Type
   | .get => V
   | .put _ => Unit
 /-- The state effect on the cell at `l` (a `State V` with the location in its type). -/
 def Cell (V : Type) (l : Nat) : Effect := Effect.mk (CellOp V l) CellOp.ret
 
 /-- Read the cell at `l` (a `get` request in the effect row `r`). -/
-def Cell.get {0 V : Type} (l : Nat) {r : Row} [Member (Cell V l) r] : Eff r V :=
+def Cell.get {0 V : Type} (l : Nat) {0 r : Row} [Member (Cell V l) r] : Eff r V :=
   send (Cell V l) (@CellOp.get V l)
 /-- Write `v` to the cell at `l` (a `put` request in the effect row `r`). -/
-def Cell.put {0 V : Type} (l : Nat) {r : Row} [Member (Cell V l) r] (v : V) : Eff r Unit :=
+def Cell.put {0 V : Type} (l : Nat) {0 r : Row} [Member (Cell V l) r] (v : V) : Eff r Unit :=
   send (Cell V l) (@CellOp.put V l v)
 
 -- ## The effect observation: cells are heap cells
@@ -51,7 +51,7 @@ instance {0 V : Type} {ω l : Nat} : Handler (Cell V l) (Prog V) where
   handle := fun o => Cell.handle l o
 
 /-- an `Eff` program over cells, as a heap program -/
-def Eff.toProg {0 V : Type} {r : Row} [hs : Handlers r (Prog V)] {0 A : Type} (c : Eff r A) : Prog V A :=
+def Eff.toProg {0 V : Type} {0 r : Row} [hs : Handlers r (Prog V)] {0 A : Type} (c : Eff r A) : Prog V A :=
   @interpret r (Prog V) _ hs A c
 
 -- ## The interpretation is a monad morphism
@@ -68,7 +68,7 @@ def Prog.bind_assoc {0 V A B C : Type} : (c : Prog V A) → (f : A → Prog V B)
 
 /-- running `c >>= f` on the heap is running `c`, then `f` of its answer (DM4All's
 morphism law for the effect observation, on the computational side) -/
-def Eff.toProg_bind {0 V : Type} {r : Row} [hs : Handlers r (Prog V)] {0 A B : Type} :
+def Eff.toProg_bind {0 V : Type} {0 r : Row} [hs : Handlers r (Prog V)] {0 A B : Type} :
     (c : Eff r A) → (f : A → Eff r B) →
     @Eff.toProg V r hs B (Eff.bind c f) = Prog.bind (@Eff.toProg V r hs A c) (fun a => @Eff.toProg V r hs B (f a))
   | .pure a, f => refl (@Eff.toProg V r hs B (f a))
@@ -78,14 +78,14 @@ def Eff.toProg_bind {0 V : Type} {r : Row} [hs : Handlers r (Prog V)] {0 A B : T
       (Eq.symm (Prog.bind_assoc (@Handlers.handleU r (Prog V) hs o)
         (fun x => @Eff.toProg V r hs A (k x)) (fun a => @Eff.toProg V r hs B (f a))))
 /-- `Eff.pure` is `Prog.ret`: the interpretation takes a pure value to a pure program. -/
-def Eff.toProg_pure {0 V : Type} {r : Row} [hs : Handlers r (Prog V)] {0 A : Type} (a : A) :
+def Eff.toProg_pure {0 V : Type} {0 r : Row} [hs : Handlers r (Prog V)] {0 A : Type} (a : A) :
     @Eff.toProg V r hs A (Eff.pure a) = Prog.ret a := refl (@Prog.ret V A a)
 
 /-- the same law for specifications: a triple for `c >>= f` from triples of `c` and the
 rest (with the `x`-tactics: `Triple.effBind (by xapp …)`, so that a verified `Eff`
 program can be called as `xapp t` instead of being stepped through again) -/
-def Triple.effBind {0 V : Type} {r : Row} [hs : Handlers r (Prog V)] {0 A B : Type} {P : HProp V}
-    {ω c : Eff r A} {ω f : A → Eff r B} {Q : B → HProp V}
+def Triple.effBind {0 V : Type} {0 r : Row} [hs : Handlers r (Prog V)] {0 A B : Type} {0 P : HProp V}
+    {ω c : Eff r A} {ω f : A → Eff r B} {0 Q : B → HProp V}
     (t : Triple P (Prog.bind (@Eff.toProg V r hs A c) (fun a => @Eff.toProg V r hs B (f a))) Q) :
     Triple P (@Eff.toProg V r hs B (Eff.bind c f)) Q :=
   Eq.substProp (fun (x : Prog V B) => Triple P x Q) (Eq.symm (@Eff.toProg_bind V r hs A B c f)) t

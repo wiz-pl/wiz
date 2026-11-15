@@ -39,7 +39,7 @@ def Cdc.sync2P : Prim Cdc.sync2In HwTy.bit :=
   Prim.declSync "wiz_sync2" .nil (.cons "clk" (.cons "d" .nil)) (.cons "q" .nil) .none
 /-- `Cdc.sync2 dst d`: `d` (a signal of another clock domain) through two flops clocked by
 `dst`. The result is in `dst`'s domain, two `dst` edges later. -/
-def Cdc.sync2 {r : HwTy → Type} [Hw r] (dst : r HwTy.clock) (d : r HwTy.bit) : r HwTy.bit :=
+def Cdc.sync2 {0 r : HwTy → Type} [Hw r] (dst : r HwTy.clock) (d : r HwTy.bit) : r HwTy.bit :=
   Hw.prim Cdc.sync2P (Hw.pair dst d)
 /-- A top-level `Multi` wire through `Cdc.sync2` into domain `dst`: the destination part's
 input `dstName` is the synchronised source `src` (two flops in `dst`). -/

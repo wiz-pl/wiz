@@ -33,10 +33,18 @@ def group : Group where
     { name := "class instance binders are ω by default: the dictionary can be used twice", run := fun _ =>
         okLib ("import Prelude\nclass Twice (A : Type) where\n  val : A\ninstance : Twice Nat where\n  val := 7\n" ++
           "def addIt {A : Type} [c : Twice A] : A := c.val\ndef twice [c : Twice Nat] : Nat := Nat.add c.val c.val") },
-    { name := "an unused implicit erases: a {n : Nat} used only in a type leaves no runtime use", run := fun _ =>
+    -- Erasure is type-directed, so a type or a proof is `◾` at any quantity; a data
+    -- implicit used only in types is erased only when written `{0 n}`: a bare `{n}` (ω)
+    -- is passed and computed at runtime (here `Nat.add k 5`).
+    { name := "erasure of implicits: a type is ◾ at ω, a data index is ◾ only when written {0 n}", run := fun _ =>
         okLib ("import Prelude\ninductive V (A : Type) : Nat → Type where\n  | nil : V A .zero\n" ++
-          "def onlyType {n : Nat} (v : V Nat n) (x : Nat) : Nat := x\n#erase onlyType")
-          ["onlyType := (λn. (λv. (λx. #0)))"] },
+          "def onlyType {n : Nat} (v : V Nat n) (x : Nat) : Nat := x\n" ++
+          "def onlyType0 {0 n : Nat} (v : V Nat n) (x : Nat) : Nat := x\n" ++
+          "def tyArg {A : Type} (x : A) : A := x\n" ++
+          "def caller (k : Nat) (v : V Nat (Nat.add k 5)) : Nat := Nat.add (onlyType v 1) (onlyType0 v 1)\n" ++
+          "def caller2 : Nat := tyArg (A := Nat) 3\n#erase caller\n#erase caller2")
+          ["caller := (λk. (λv. ((Nat.add (((onlyType ((Nat.add #1) 5)) #0) 1)) (((onlyType0 ◾) #0) 1))))",
+           "caller2 := ((tyArg ◾) 3)"] },
     { name := "return type inferred", run := fun _ =>
         ok "def ap (A B : Type) (f : A → B) (a : A) := f a\n#check ap"
           ["ap : (A : Type) → (B : Type) → (A → B) → A → B"] },

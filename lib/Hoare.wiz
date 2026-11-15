@@ -265,10 +265,10 @@ def Triple.bind {0 V A B : Type} {0 P : HProp V} {ω c : Prog V A} {ω f : A →
     {0 R : B → HProp V} (t : Triple P c Q) (k : (a : A) → Triple (Q a) (f a) R) : Triple P (Prog.bind c f) R :=
   Entails.trans t (Entails.trans (wp.mono c Q (fun a => wp (f a) R) k) (wp.bind_r c f R))
 /-- Extract an existential from the precondition. -/
-def Triple.exists {0 V A X : Type} {0 J : X → HProp V} {c : Prog V A} {0 Q : A → HProp V}
+def Triple.exists {0 V A X : Type} {0 J : X → HProp V} {0 c : Prog V A} {0 Q : A → HProp V}
     (k : (x : X) → Triple (J x) c Q) : Triple (hexists J) c Q := hexists.elim k
 /-- Extract a pure fact from the precondition. -/
-def Triple.pure {0 V A : Type} {0 P : Prop} {0 H : HProp V} {c : Prog V A} {0 Q : A → HProp V}
+def Triple.pure {0 V A : Type} {0 P : Prop} {0 H : HProp V} {0 c : Prog V A} {0 Q : A → HProp V}
     (k : P → Triple H c Q) : Triple (hpure P ⋆ H) c Q := hpure.elim_l k
 
 /-- The small-footprint specification of `Prog.read` (SLF, WPsem: `triple_get`): the result
@@ -376,11 +376,11 @@ def Prog.PostCase {0 V A B : Type} (Q : A → HProp V) (r : B → Option (A × H
 
 
 /-- Transport at `Nat` (so that the motive's type is known when it is elaborated). -/
-def Nat.substP (0 P : Nat → Prop) {a b : Nat} (e : a = b) (p : P a) : P b := @Eq.substProp Nat P a b e p
+def Nat.substP (0 P : Nat → Prop) {0 a b : Nat} (e : a = b) (p : P a) : P b := @Eq.substProp Nat P a b e p
 /-- Transport at `Bool`. -/
-def Bool.substP (0 P : Bool → Prop) {a b : Bool} (e : a = b) (p : P a) : P b := @Eq.substProp Bool P a b e p
+def Bool.substP (0 P : Bool → Prop) {0 a b : Bool} (e : a = b) (p : P a) : P b := @Eq.substProp Bool P a b e p
 /-- Transport at `Option V`. -/
-def Option.substP {0 V : Type} (0 P : Option V → Prop) {a b : Option V} (e : a = b) (p : P a) : P b :=
+def Option.substP {0 V : Type} (0 P : Option V → Prop) {0 a b : Option V} (e : a = b) (p : P a) : P b :=
   @Eq.substProp (Option V) P a b e p
 
 

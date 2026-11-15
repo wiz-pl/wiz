@@ -80,8 +80,7 @@ class RigTag (R : Type) where
 Binders without a quantity get a default. Both explicit and implicit binders default to
 the rig's unrestricted quantity (ω): an implicit argument is inferred and may be used
 freely, so `fun {n} => …` can use `n` as data without writing `{ω n}`. A rig without an
-unrestricted quantity (`Nat`, exact counting) uses its explicit default for implicit
-binders too. Write `{0 x}`, `{1 x}` or `{ω x}` to override the default. The pretty printer
+unrestricted quantity (`Nat`, exact counting) keeps 0 for implicit binders. Write `{0 x}`, `{1 x}` or `{ω x}` to override the default. The pretty printer
 omits a quantity equal to the default. -/
 class QuantitySyntax (R : Type) where
   /-- parse a quantity literal such as `0`, `1` or `ω` -/

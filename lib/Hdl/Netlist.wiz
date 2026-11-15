@@ -182,7 +182,7 @@ structure Circuit.Simulates {ω i o : HwTy} (c : Circuit i o) (n : Netlist) wher
 
 /-- The state-step lemma: if the relation holds, `Netlist.runFrom` from any state whose
 leaves are the state's leaves is the value run. -/
-def Circuit.Simulates.runFrom {ω i o : HwTy} {c : Circuit i o} {n : Netlist}
+def Circuit.Simulates.runFrom {ω i o : HwTy} {0 c : Circuit i o} {0 n : Netlist}
     (h : Circuit.Simulates c n) :
     (s : HwTy.El c.st) → (xs : List (HwTy.El i)) →
     Netlist.runFrom n (HwTy.leaves c.st s) (Hdl.map (HwTy.leaves i) xs) =
@@ -205,7 +205,7 @@ def Circuit.Simulates.runFrom {ω i o : HwTy} {c : Circuit i o} {n : Netlist}
 /-- **The simulation theorem.** For a circuit and a netlist in the Mealy-core subset
 (`Circuit.Simulates`), the netlist simulation of any finite input trace is the value
 simulation, cycle for cycle. -/
-def Circuit.Simulates.simulate_eq_run {ω i o : HwTy} {c : Circuit i o} {n : Netlist}
+def Circuit.Simulates.simulate_eq_run {ω i o : HwTy} {0 c : Circuit i o} {0 n : Netlist}
     (h : Circuit.Simulates c n) (xs : List (HwTy.El i)) :
     Netlist.simulate n (Hdl.map (HwTy.leaves i) xs) =
       Hdl.map (HwTy.leaves o) (Circuit.run c xs) :=
@@ -218,7 +218,7 @@ def Circuit.Simulates.simulate_eq_run {ω i o : HwTy} {c : Circuit i o} {n : Net
           Hdl.map (HwTy.leaves o) ys) (Circuit.run_eq c xs)))))
 
 /-- The theorem on the leaf encoding `Circuit.runLeaves` (the form the `hdl` tests use). -/
-def Circuit.Simulates.simulate_eq_runLeaves {ω i o : HwTy} {c : Circuit i o} {n : Netlist}
+def Circuit.Simulates.simulate_eq_runLeaves {ω i o : HwTy} {0 c : Circuit i o} {0 n : Netlist}
     (h : Circuit.Simulates c n) (xs : List (HwTy.El i)) :
     Netlist.simulate n (Hdl.map (HwTy.leaves i) xs) = Circuit.runLeaves c xs :=
   Circuit.Simulates.simulate_eq_run h xs

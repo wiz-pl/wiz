@@ -17,7 +17,7 @@ binder.implicit   := "{" [quantity] [names+] [":" type] "}"
 ```
 
 Quantities follow Idris 2: `(1 x : A)`, `{0 A : Type}`. An omitted quantity means ω
-on explicit binders and 0 on implicit ones.
+on explicit and implicit binders alike (write `{0 A : Type}` to erase one).
 -/
 
 namespace Wiz.Builtin
