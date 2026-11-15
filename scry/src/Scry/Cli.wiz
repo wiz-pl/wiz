@@ -4,6 +4,7 @@ import Scry.Parse
 import Scry.CstStore
 import Scry.TaintCmd
 import Scry.BenchCmd
+import Scry.ProjectIO
 /-!
 # Scry.Cli: the `scry` command line
 
@@ -47,6 +48,14 @@ def Scry.usage : String :=
   ++ "        [--markdown OUT] [--update-baseline FILE] [--no-timing] [--quiet]\n"
   ++ "        [--fail-on-regression]\n"
   ++ "                             run the taint corpus and compare with expectations\n"
+  ++ "  project DIR [--compdb FILE] [--cc CMD] [--allow-errors] [--facts OUT]\n"
+  ++ "              [--taint] [--rules FILE] [--json] [--sarif OUT]\n"
+  ++ "              [--cache[=DIR]] [--cache-stats] [--fail-on-finding]\n"
+  ++ "              [--keep-system-headers] [--skip-broken]\n"
+  ++ "                              preprocess and lower a multi-file C project;\n"
+  ++ "                              --taint reports cross-TU findings/SARIF\n"
+  ++ "  project query DIR --rel NAME | --func NAME\n"
+  ++ "                              a project relation (symbols, callgraph, …) or function table\n"
   ++ "  help, --help               this text\n"
   ++ "  --version                  the version\n"
 
@@ -165,6 +174,9 @@ def Scry.dispatch (args : List String) : EIO Nat := match args with
     | .cons file (.cons node .nil) => Scry.explainCmd file node
     | _ => EIO.fail "usage: scry explain FILE NODE"
   | .cons "parse" rest => Scry.parseCmd rest
+  | .cons "project" rest => match rest with
+    | .cons "query" more => Scry.ProjectIO.run .true more
+    | _ => Scry.ProjectIO.run .false rest
   | .cons "cst" rest => match rest with
     | .cons file (.cons out .nil) => Scry.cstCmd file out
     | _ => EIO.fail "usage: scry cst FILE OUT"

@@ -11,11 +11,18 @@ columns; no `TSNode` crosses the FFI. `src/Scry/Native.wiz` exposes the columns 
 `U32Array`/`U64Array` and builds the `Scry.CstStore` model. The JSON fact store and the
 `scry-cst 1` spill format remain for the synthetic corpus and for differential tests.
 
+S2's C→Wil lowering is `src/Scry/Lower.wiz` (see `wiz-notes/scry-c2wil.md`), and
+`src/Scry/Preproc.wiz` is its preprocessing entry point: `Scry.preprocess` parses
+`cc -E` line markers, blanks them (so tree-sitter never sees a directive and every
+offset is unchanged), and maps each node's preprocessed span back to the original
+file/line/column in `Wil.Span`. `scry-cst -E [-D…] [-I…] FILE` runs `cc -E` and spills
+the blanked text, which is how `corpus/c2wil/preproc/main.i.cst` was generated.
+
 ```sh
 cd scry
 cp ../grail.local.wiz .         # this machine's toolchain (not committed)
 grail build                     # check src/gen, build .grail/bin/scry, run the commands
-grail test                      # schema, cst, native shim, codegen, CLI, parse --stats, taint
+grail test                      # schema, cst, native shim, preproc, codegen, CLI, parse --stats, taint, project
 grail build schema              # regenerate gen/C/Schema.wiz from node-types.json
 grail build schema-check        # fail if the checked-in schema is stale
 grail run scry -- parse --stats fixtures/hello.c
@@ -27,9 +34,10 @@ grail run scry -- explain fixtures/demo.facts.json 4
 
 Commands: `facts`, `query --kind|--edge|--edge-src|--rel`, `explain`, `parse --stats` (a C source,
 a `scry-cst` spill, or a JSON store), `cst` (JSON store → spill), `taint` (C →
-Wil → taint → findings/SARIF), and `bench` (run the checked-in taint corpus and compare
-findings with its manifest). `parse --stats` prints counts only; the perf agent owns
-throughput numbers.
+Wil → taint → findings/SARIF), `bench` (run the checked-in taint corpus and compare
+findings with its manifest), and `project` (a `compile_commands.json` multi-file C
+project: cross-TU call graph, project EDB, per-file findings/SARIF and a TU cache).
+`parse --stats` prints counts only; the perf agent owns throughput numbers.
 
 ## Optics and accessors
 
@@ -181,6 +189,60 @@ silent empty result.
 span `[0,95)`, parent/child/next-sibling links, and that `fixtures/broken.c` is refused
 by `parseChecked` (tree-sitter's recovery tree has 2 `ERROR`/`MISSING` nodes).
 
+## `scry project`: multi-file C projects
+
+`scry project DIR` builds a project from `DIR/compile_commands.json` (or `--compdb
+FILE`), or from every `*.c` under `DIR` when no database exists. Each translation unit is
+preprocessed with **its own** `-I`/`-D`/`-U`/`-include` flags, parsed, line-mapped and
+lowered; the units are then merged:
+
+* the project file table dedupes a shared header by path and keeps each unit's line map;
+* `static` functions are qualified `static:<tu>:<name>`, so two units' helpers never
+  collide; a call inside a TU resolves to that TU's helper;
+* a non-`static` symbol resolves to the first definition in project order; a second
+  definition is reported in `duplicates`, not silently merged, and is not analysed;
+* a call with no definition anywhere is `unresolved` and its callee is `0` in the EDB.
+
+```sh
+grail run scry -- project corpus/project
+grail run scry -- project corpus/project --facts -          # project EDB
+grail run scry -- project query corpus/project --rel symbols
+grail run scry -- project query corpus/project --rel callgraph
+grail run scry -- project corpus/project/taint --taint --json
+grail run scry -- project corpus/project/taint --taint --sarif out.sarif
+grail run scry -- project corpus/project/taint --taint --json --cache --cache-stats
+```
+
+`--taint` runs the same points-to → summaries → rule pack → certificates pipeline over
+the whole project (the functions are one Wil program, so a finding can cross a TU
+boundary). The JSON has project counts, a `files` array with each file's findings,
+boundary warnings and memory warnings, the unresolved/duplicate call lists, and the cache
+stats. Human output groups the same counts by file.
+
+SARIF is the multi-file writer: `runs[0].artifacts` lists the real project files with
+URIs relative to the project root and `uriBaseId: "%SRCROOT%"`; every result's
+`artifactLocation` carries the matching `index`, so a result in a header points at the
+header. The single-file `scry taint` SARIF writer is unchanged.
+
+`--cache[=DIR]` (default `.scry-project-cache`) caches each TU's `scry-cst 1` store. The
+key covers the source path/text and flags; the entry is validated against a digest of the
+**actual preprocessed text**, so a changed header or macro is a miss, not a stale hit.
+`--cache-stats` adds hit/miss/write/corrupt counts and implies `--cache`.
+`--fail-on-finding` returns exit 1 when a finding or boundary warning is reported.
+`--skip-broken` records a TU whose `cc -E`/parse fails in the `skipped` list and analyses
+the rest, which is how a real repository with optional platform headers stays usable;
+without it the first broken TU is a hard error.
+
+System-header bodies (`/usr/…`, `/nix/store/…`, the toolchain includes) are blanked after
+`cc -E` by default: the line map and offsets stay valid, but the analyser sees the
+project's code rather than glibc inline bodies. `--keep-system-headers` analyses them at
+full fidelity (much slower on real code). Calls into those headers remain direct calls;
+unresolved externals carry the usual warning.
+
+The deliberate limits are stated in `src/Scry/Project.wiz`: no link-time alias analysis,
+no global initialisers, no interprocedural memory beyond the existing points-to model, and
+function pointers resolve only through the points-to analysis.
+
 ## `scry bench`: the taint corpus and metrics
 
 `scry bench` runs the same pipeline as `scry taint` over `bench/corpus/manifest.json`,
@@ -217,6 +279,33 @@ is not a `perf-run` measurement, and the perf agent owns real numbers.
 `tests/bench.wiz` checks the metric formulas, the boundary/path/outcome rules, the
 missing-corpus skip, and that the corpus still matches `bench/baseline.json`. The corpus
 policy and the external-manifest hook are in `bench/corpus/README.md`.
+
+## Real C corpus
+
+`scripts/real-corpus.sh` runs `scry taint --json --allow-errors --sarif` over the C
+sources that are already on this machine (the Wiz C runtime/sockets/serial/infoview/
+self-hosted runtime, the `wiz-rv/sw` bare-metal programs, the vendored tree-sitter
+library, and two generated project files when present) and writes a per-file JSON,
+SARIF, runtime and warning summary. It skips missing external files, so it also runs on
+a bare checkout.
+
+```sh
+scry/scripts/real-corpus.sh                  # build/real-corpus/summary.{json,md}
+SCRY_LIMIT=300 SCRY_STRESS=1 scry/scripts/real-corpus.sh  # include the 3.8 MB parser
+```
+
+The checked-in result and the precision/false-positive follow-up list are in
+`bench/real-corpus.md` (raw machine record: `bench/real-corpus.json`). There are only
+two findings in 24 files and both are manually judged false positives; the report lists
+the parse-recovery, exec-sink, bounds, points-to-argument and warning-noise gaps.
+
+`scripts/project-corpus.sh` is the multi-file counterpart: it generates a
+`compile_commands.json` for the synthetic `corpus/project/taint` project and each real
+group, runs `scry project --taint` with the cache, and writes
+`build/project-corpus/summary.{json,md}`. The synthetic ground truth is
+`bench/project-corpus.truth.json`; the checked-in result is
+`bench/project-corpus.{json,md}`. The real groups have no independent labels, so their
+findings are a manual spot-check, not a precision/recall claim.
 
 Limits: the shim is sequential (one parser, one tree, one file) and tree-sitter-c is the
 only grammar. Threads, a native store shared across files, and tree-sitter queries are
