@@ -10,7 +10,10 @@ test it is (default `check`):
 * `-- test: check`: the messages of elaborating the file, as `wiz check` prints them
   (`path:line:col: severity: text`, the path relative to the package);
 * `-- test: run`: what `main` prints, compiled through C (an `IO` program's output, or
-  `main`'s value read back with its type, as `wiz run` prints it).
+  `main`'s value read back with its type, as `wiz run` prints it);
+* `-- test: skip REASON`: not run (an example that needs a flag `grail test` does not
+  pass, or costs too much for the package-wide run); it is reported as skipped and needs
+  no `.expected` file. The reason is shown with the skip.
 
 A test is a job like any other (`Grail/Graph.lean`), run in its own process with a time
 limit: its key covers the file's key (its text and its imports'), the kind, the toolchain
@@ -25,6 +28,8 @@ open Wiz
 inductive TestKind where
   | check
   | run
+  /-- not run: an example that `grail test` cannot check (a flag, a cost), with the why -/
+  | skip (reason : String)
   deriving BEq, Repr
 
 def TestKind.ofSource (src : String) : Except String TestKind :=
@@ -33,7 +38,10 @@ def TestKind.ofSource (src : String) : Except String TestKind :=
   match ((first.drop 8).trimAscii.toString) with
   | "check" => .ok .check
   | "run" => .ok .run
-  | k => .error s!"unknown test kind {k} (check, run)"
+  | k =>
+    if k == "skip" then .ok (.skip "")
+    else if k.startsWith "skip " then .ok (.skip (k.drop 5).trimAscii.toString)
+    else .error s!"unknown test kind {k} (check, run, skip REASON)"
 
 /-- What a failing test without a `-- test:` line is told (it was taken for a `check`,
 which compares the messages of elaborating the file: a program's output never shows up). -/
@@ -43,13 +51,15 @@ def TestKind.defaultNote (src : String) : String :=
   "messages of checking the file; for what `main` prints, make `-- test: run` the first line)"
 
 def TestKind.name : TestKind → String
-  | .check => "check" | .run => "run"
+  | .check => "check" | .run => "run" | .skip _ => "skip"
 
 structure TestResult where
   file : String
   ok : Bool
   /-- came from a recorded pass -/
   cached : Bool := false
+  /-- reported as skipped (`-- test: skip`), not run -/
+  skipped : Bool := false
   message : String := ""
 
 /-- The first line where two texts differ, for the report. -/
@@ -66,6 +76,7 @@ def firstDifference (expected actual : String) : String := Id.run do
 def Runner.testOutput (r : Runner) (file : String) (kind : TestKind) (exe : System.FilePath) :
     IO (Except String String) := do
   match kind with
+  | .skip _ => pure (.ok "")
   | .check =>
     let l ← r.load file
     let s ← r.elab file

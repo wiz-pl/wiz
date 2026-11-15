@@ -1,3 +1,4 @@
+-- test: skip needs --trust-native; the `hdl-verified` test group runs it
 -- Verified circuit optimisation, the full-width checks (docs/libraries.md, H14 V1).
 --
 -- TRUST NOTE: every `native_refl` below is accepted only with --trust-native and is NOT

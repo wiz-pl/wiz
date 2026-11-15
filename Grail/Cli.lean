@@ -250,10 +250,12 @@ def cliMain (args : List String) : IO UInt32 := do
       let some roots ← depRoots | return 1
       let r ← mkRunner { dir, std, tc, binId, libRoots := libRootsOf dir pkg.targets ++ roots }
       let results ← r.tests pkg.targets filters update
-      let passed := results.filter (·.ok) |>.size
+      let skipped := results.filter (·.skipped) |>.size
+      let passed := results.filter (fun x => x.ok && !x.skipped) |>.size
+      let failed := results.size - passed - skipped
       let cached := results.filter (·.cached) |>.size
-      IO.println s!"{passed} passed, {results.size - passed} failed ({cached} recorded passes)"
-      pure (if passed == results.size then 0 else 1)
+      IO.println s!"{passed} passed, {failed} failed{if skipped > 0 then s!", {skipped} skipped" else ""} ({cached} recorded passes)"
+      pure (if failed == 0 then 0 else 1)
     | ["run", name] =>
       let some t := pkg.targets.find? (·.name == name) | IO.eprintln s!"no target {name}"; return 1
       let some roots ← depRoots | return 1
