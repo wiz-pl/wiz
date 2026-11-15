@@ -1,0 +1,189 @@
+import Sys
+import Text
+import Functor
+import WordArray
+import Scry.CstStore
+import Json
+/-!
+# Scry.ProjectCache: the per-translation-unit parse cache
+
+The project driver's expensive step is tree-sitter parsing plus the native-store copy
+(`Scry.Native.parse` → `Scry.CstStore`); `cc -E` and lowering are comparatively cheap.
+This module caches the **`scry-cst 1` store** per translation unit, keyed by the source
+path, its text and the preprocessing flags, and validates the entry against a digest of
+the *actual preprocessed text*. That second check is what makes the cache safe when a
+header or a macro changes: a stale entry does not match the digest and is a miss, even if
+the outer key did not change. A stale hit therefore cannot silently reuse a tree from
+different code.
+
+The cache is a separate directory (`--cache[=DIR]`, default `.scry-project-cache`). Each
+entry is `DIR/<key>.tu`, written through a sibling `.tmp` and renamed. A malformed,
+truncated or key/pre-digest-mismatched entry is `corrupt`: it is recomputed and rewritten.
+
+The store format (`native/store.c`, `scry-cst 1`) is unchanged. This cache stores the
+same text the `scry cst` command writes; it does not add a second serialisation of the
+CST.
+-/
+
+/-- Cache policy: off, or a directory. `--cache-stats` implies enabled. -/
+structure Scry.CacheOpts where
+  enabled : Bool
+  dir : String
+
+def Scry.CacheOpts.none : Scry.CacheOpts := Scry.CacheOpts.mk .false ".scry-project-cache"
+
+/-- Cache policy and statistics. `reason` is `cold`, `hit`, `miss`, `corrupt` or
+`disabled` (the first event of the last TU, for the human line). -/
+structure Scry.CacheStats where
+  enabled : Bool
+  dir : String
+  hit : Nat
+  miss : Nat
+  write : Nat
+  corrupt : Nat
+  /-- TUs examined (hit + miss). -/
+  files : Nat
+  reason : String
+
+def Scry.CacheStats.empty : Scry.CacheStats :=
+  Scry.CacheStats.mk .false "" 0 0 0 0 0 "disabled"
+
+def Scry.CacheStats.enabledWith (dir : String) : Scry.CacheStats :=
+  Scry.CacheStats.mk .true dir 0 0 0 0 0 "cold"
+
+def Scry.CacheStats.hitOne (s : Scry.CacheStats) : Scry.CacheStats :=
+  Scry.CacheStats.mk s.enabled s.dir (Nat.succ s.hit) s.miss s.write s.corrupt
+    (Nat.succ s.files) "hit"
+
+def Scry.CacheStats.missOne (s : Scry.CacheStats) (reason : String) : Scry.CacheStats :=
+  let corrupt := match String.eq reason "corrupt" with
+    | .true => Nat.succ s.corrupt
+    | .false => s.corrupt;
+  Scry.CacheStats.mk s.enabled s.dir s.hit (Nat.succ s.miss) s.write corrupt
+    (Nat.succ s.files) reason
+
+def Scry.CacheStats.writeOne (s : Scry.CacheStats) : Scry.CacheStats :=
+  Scry.CacheStats.mk s.enabled s.dir s.hit s.miss (Nat.succ s.write) s.corrupt s.files
+    s.reason
+
+/-- FNV-1a 64 over a string's chars (ASCII for C sources and flags). -/
+def Scry.fnv1a (s : String) : Nat :=
+  let h := List.foldl (fun h c =>
+    Nat.mod (Nat.add (Nat.mul h 1099511628211) (Char.code c)) 18446744073709551616)
+    14695981039346656037 (String.chars s);
+  h
+
+/-- A cache key: the salt, source path, source text, flags and error mode. -/
+def Scry.cacheKey (path text : String) (flags : List String) (allowErrors : Bool) : String :=
+  let body := String.intercalate "\u{0}" (List.append ["scry-project-tu-1", path, text]
+    (List.append flags [match allowErrors with | .true => "allow-errors" | .false => "strict"]));
+  Nat.repr (Scry.fnv1a body)
+
+/-- The validation digest: the preprocessed text (so header/macro changes invalidate an
+entry even when the key is unchanged). -/
+def Scry.preDigest (pre : String) : String := Nat.repr (Scry.fnv1a pre)
+
+/-- Create a directory and its missing parents. -/
+partial def Scry.mkdirp (dir : String) : EIO Unit :=
+  match String.isEmpty dir with
+  | .true => EIO.pure ()
+  | .false => do
+    there ← EIO.lift (FS.exists dir);
+    match there with
+    | .true => EIO.pure ()
+    | .false => do
+      let parent := match String.splitOn dir "/" with
+        | .nil => ""
+        | .cons _ .nil => ""
+        | parts => String.intercalate "/" (List.dropLast parts);
+      Scry.mkdirp parent;
+      FS.createDir dir
+
+/-- The entry path for a key. -/
+def Scry.cachePath (dir key : String) : String :=
+  String.append dir (String.append "/" (String.append key ".tu"))
+
+/-- The cache entry text. -/
+def Scry.cacheEntryText (key pre errors cst : String) : String :=
+  "scry-project-tu 1\nkey " ++ key ++ "\npre " ++ pre ++ "\nerrors " ++ errors
+    ++ "\nbytes " ++ Nat.repr (String.length cst) ++ "\n" ++ cst
+
+/-- Parse a cache entry. Returns `(store, errors)` or a reason (`corrupt`/`miss`). -/
+def Scry.cacheEntryOf (key pre text : String) :
+    Except String (Scry.CstStore × Nat) :=
+  match String.splitOn text "\n" with
+  | .cons magic (.cons keyLine (.cons preLine (.cons errLine (.cons bytesLine rest)))) =>
+    match String.eq magic "scry-project-tu 1" with
+    | .false => .error "corrupt"
+    | .true => match String.startsWith keyLine "key " with
+      | .false => .error "corrupt"
+      | .true => match String.startsWith preLine "pre " with
+        | .false => .error "corrupt"
+        | .true => match String.startsWith errLine "errors " with
+          | .false => .error "corrupt"
+          | .true => match String.startsWith bytesLine "bytes " with
+            | .false => .error "corrupt"
+            | .true =>
+              let k := String.drop 4 keyLine;
+              let p := String.drop 4 preLine;
+              let es := String.drop 7 errLine;
+              let bs := String.drop 6 bytesLine;
+              let cst := String.intercalate "\n" rest;
+              match Bool.and (String.eq k key) (String.eq p pre) with
+              | .false => .error "miss"
+              | .true => match String.parseNat bs with
+                | .none => .error "corrupt"
+                | .some n => match Nat.beq n (String.length cst) with
+                  | .false => .error "corrupt"
+                  | .true => match String.parseNat es with
+                    | .none => .error "corrupt"
+                    | .some e => match Scry.CstStore.ofText cst with
+                      | .error _ => .error "corrupt"
+                      | .ok st => .ok (st, e)
+  | _ => .error "corrupt"
+
+/-- Read a cache entry; `none` is a cold miss, `error reason` a corrupt/mismatched one. -/
+def Scry.cacheLoad (dir key pre : String) : EIO (Except String (Scry.CstStore × Nat)) := do
+  let p := Scry.cachePath dir key;
+  there ← EIO.lift (FS.exists p);
+  match there with
+  | .false => EIO.pure (.error "cold")
+  | .true => do
+    text ← FS.readFile p;
+    EIO.pure (Scry.cacheEntryOf key pre text)
+
+/-- Write a cache entry atomically (sibling `.tmp`, then rename over the target). -/
+def Scry.cacheSave (dir key pre errors cst : String) : EIO Unit := do
+  Scry.mkdirp dir;
+  let p := Scry.cachePath dir key;
+  let tmp := String.append p ".tmp";
+  FS.writeFile tmp (Scry.cacheEntryText key pre errors cst);
+  FS.rename tmp p
+
+/-- Overwrite every entry in `dir` with a malformed body (the corruption test). -/
+partial def Scry.corruptCacheEntries (dir : String) : List String → EIO Unit
+  | .nil => EIO.pure ()
+  | .cons name rest => do
+    FS.writeFile (String.append dir (String.append "/" name)) "not a cache entry\n";
+    Scry.corruptCacheEntries dir rest
+
+/-- The human cache line (`cache: hit=… miss=… …`). -/
+def Scry.CacheStats.line (s : Scry.CacheStats) : String :=
+  match s.enabled with
+  | .false => "cache: disabled"
+  | .true => "cache: hit=" ++ Nat.repr s.hit ++ " miss=" ++ Nat.repr s.miss
+      ++ " write=" ++ Nat.repr s.write ++ " corrupt=" ++ Nat.repr s.corrupt
+      ++ " files=" ++ Nat.repr s.files ++ " reason=" ++ s.reason
+      ++ " dir=" ++ s.dir
+
+/-- The JSON object for `--json`/`--cache-stats`. -/
+def Scry.CacheStats.json (s : Scry.CacheStats) : Json :=
+  Json.mkObj
+    [ ("enabled", Json.mkBool s.enabled)
+    , ("dir", Json.mkStr s.dir)
+    , ("hit", Json.ofNat s.hit)
+    , ("miss", Json.ofNat s.miss)
+    , ("write", Json.ofNat s.write)
+    , ("corrupt", Json.ofNat s.corrupt)
+    , ("files", Json.ofNat s.files)
+    , ("reason", Json.mkStr s.reason) ]

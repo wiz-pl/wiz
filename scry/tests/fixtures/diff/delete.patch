@@ -1,0 +1,6 @@
+diff --git a/src/ctx.c b/src/ctx.c
+index a82bf91..8d3b4dd 100644
+--- a/src/ctx.c
++++ b/src/ctx.c
+@@ -6 +5,0 @@ line5
+-line6

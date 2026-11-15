@@ -1,0 +1,4 @@
+diff --git a/src/old.c b/src/new.c
+similarity index 100%
+rename from src/old.c
+rename to src/new.c
