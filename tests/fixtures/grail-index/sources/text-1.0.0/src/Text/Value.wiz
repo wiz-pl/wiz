@@ -1,0 +1,2 @@
+import Prelude
+def textValue : Nat := 10

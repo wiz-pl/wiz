@@ -1,0 +1,4 @@
+import Grail
+def package : Package := Package.new "std"
+  |> Package.version "0.1.0"
+  |> Package.lib "std" "src"
