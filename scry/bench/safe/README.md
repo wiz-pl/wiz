@@ -55,7 +55,7 @@ The table is generated from `scripts/safe-measure.sh`; "before" is the base comm
 | `cmd/quote-arg.c` | 1 | 0 | missing sanitiser trust (policy model) — fixed |
 | `copy/memcpy-literal.c` | 0 | 0 | — |
 | `copy/read-checked.c` | 1 | 1 | missing path correlation (bounds check) — pinned |
-| `copy/read-clamped.c` | 1 | 0 | missing sanitiser trust (`clamp_len`) — fixed |
+| `copy/read-clamped.c` | 1 | 0 | missing sanitiser semantics (`clamp_len` was trusted but `retsrc` bypassed the kill) — fixed |
 | `copy/snprintf-clamped.c` | 1 | 1 | missing path correlation (bounds check) — pinned |
 | `copy/strcpy-literal.c` | 1 | 1 | blanket rule (`strcpy` is forbidden whenever it appears) — pinned |
 | `copy/strlcpy-sized.c` | 0 | 0 | — |
@@ -77,24 +77,37 @@ The table is generated from `scripts/safe-measure.sh`; "before" is the base comm
 warnings.** The pack fix removes 3 findings and the lifetime fix removes 2 warnings;
 the 4 remaining findings are the S6/alias/blanket backlog, each with its reason.
 
-The pack-only "after" is measured end to end with the base model binary and this
-branch's `lib/Scry/rules/default.scry` (the pack is runtime data; `scripts/cve-bench.sh`
-and `grail test taint` do the same). The lifetime rows' "0 warnings" are verified by the
-`scry-taint` case **lifetime: a null-after-free is not a use-after-free** (37 passed,
-0 failed) and by a standalone probe over the same `freedHit`/`stillDangling` code that
-prints `direct: 1`, `null-after: 0`. A fresh C CLI build is blocked by the
-`Models.wiz` checker timeout in this environment (see `scry/bench/cve.md`); the C gate
-`grail test safe` is ready to run as soon as a binary built from this branch exists.
+The "after" column is a composite of three measurements, because a fresh C CLI build
+is blocked by the `Models.wiz` checker timeout in this environment (see
+`scry/bench/cve.md`):
+
+* `quote-arg` and `sanitised-format` are measured end to end with the base model binary
+  and this branch's `lib/Scry/rules/default.scry` (the pack is runtime data);
+* `read-clamped` also needs the `rtRuleRetSrc`/`!san` engine fix, verified by the
+  `scry-taint` case **return-value summary: a pack sanitiser kills a unit-defined
+  callee's return** (0 findings with the sanitiser pack, 1 without);
+* the lifetime rows' "0 warnings" are verified by the `scry-taint` case
+  **lifetime: a null-after-free is not a use-after-free** and by a standalone probe over
+  the same `freedHit`/`stillDangling` code that prints `direct: 1`, `null-after: 0`.
+
+The full group is **38 passed, 0 failed**. The C gate `grail test safe` is ready to run
+as soon as a binary built from this branch exists; `scry/scripts/safe-measure.sh` and
+`scry bench --corpus bench/safe` produce the same table from any binary.
 
 ## False-positive causes and fixes
 
-* **Missing sanitiser trust (fixed).** `quote_arg`, `sanitize_format` and `clamp_len`
-  were already policy models (`Scry.Models.policyModels`), but the default pack did not
-  name them, and a model sanitiser only applies when the pack trusts it. The pack now
-  names them: `quote_arg` on the command rule, `sanitize_format` on the format rule, and
+* **Missing sanitiser trust and a seed bypass (fixed).** `quote_arg`,
+  `sanitize_format` and `clamp_len` were already policy models
+  (`Scry.Models.policyModels`), but the default pack did not name them, and a model
+  sanitiser only applies when the pack trusts it. The pack now names them: `quote_arg`
+  on the command rule, `sanitize_format` on the format rule, and
   `clamp_len`/`checked_size` on a `buffer-overflow` rule. The last block is placed after
   `strcpy-overflow` so `withModels` appends `integer-overflow` in the same order as
-  before (the SARIF rule indices are stable).
+  before (the SARIF rule indices are stable). `clamp_len` is a **unit-defined** helper
+  whose body returns its input, so the callee-return summary seeded the call result
+  through `retsrc` and the propagation rule's `!san` never saw it; `rtRuleRetSrc` now
+  carries `!san` too. A result sanitiser therefore kills a tainted return from a
+  unit-defined callee as well as an external one.
 * **Flow-insensitivity of the freed set (fixed).** `Scry.freedWarning` asked only
   whether a free reaches the access and the (flow-insensitive) location set overlaps.
   `free(p); p = 0; *p` and `free(p); p = malloc(...); *p` therefore warned. The use test

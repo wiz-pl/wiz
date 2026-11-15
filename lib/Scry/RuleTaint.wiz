@@ -629,9 +629,15 @@ def Scry.rtRuleParam : Scry.Rule Nat :=
   Scry.Rule.mk (Scry.Head.tuple 4 [Scry.Term.var 0, Scry.Term.var 1])
     [Scry.Atom.pos 6 [Scry.Term.var 0, Scry.Term.var 1]]
 
+/-- A callee's tainted return seeds the caller's call result. A pack sanitiser that names
+the callee kills that seed too: the propagation rule's `!san` only guards the *derived*
+taint, and a unit-defined sanitiser returns its argument through `retsrc`, so without
+this negation a `clamp_len(n)`/`my_sanitize(x)` whose body returns its input would stay
+tainted. -/
 def Scry.rtRuleRetSrc : Scry.Rule Nat :=
   Scry.Rule.mk (Scry.Head.tuple 4 [Scry.Term.var 0, Scry.Term.var 1])
-    [Scry.Atom.pos 7 [Scry.Term.var 0, Scry.Term.var 1]]
+    [ Scry.Atom.pos 7 [Scry.Term.var 0, Scry.Term.var 1]
+    , Scry.Atom.neg 3 [Scry.Term.var 0, Scry.Term.var 1] ]
 
 /-- Taint transfer: a tainted definition reaching a use at `n` taints every ordinary
 definition `w` at `n` (an assignment's target, or a call's result). An argument source

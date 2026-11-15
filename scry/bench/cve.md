@@ -311,11 +311,14 @@ branch changes the **false-positive** side only:
 1. the default pack now trusts the shipped policy sanitisers `quote_arg`,
    `sanitize_format` and `clamp_len`/`checked_size`; and
 2. the points-to freed diagnostic asks the **reaching definitions** of the access
-   register, so a pointer cleared or re-allocated after `free` is not a use-after-free.
+   register, so a pointer cleared or re-allocated after `free` is not a use-after-free;
+3. a pack sanitiser also kills a **unit-defined** callee's tainted return
+   (`rtRuleRetSrc` carries `!san`), which is what makes a `clamp_len` helper work.
 
-Neither change adds or removes a source, sink or forbidden call, and the second only
-**filters** `scry/memory/use-after-free` warnings (it never creates a finding). The CVE
-corpus is therefore a control: it must not move. The run below used the base model
+None of the three adds or removes a source, sink or forbidden call; the second only
+**filters** `scry/memory/use-after-free` warnings (it never creates a finding), and no
+CVE reproducer calls a sanitiser name. The CVE corpus is therefore a control: it must
+not move. The run below used the base model
 binary with the branch's `lib/Scry/rules/default.scry` (the pack is loaded from the
 working tree), because a fresh `scry` build is blocked by the `Models.wiz` checker
 timeout recorded below.

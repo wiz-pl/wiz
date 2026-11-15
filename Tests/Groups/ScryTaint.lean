@@ -292,6 +292,13 @@ def group : Group where
           "#eval match Scry.programFindings (Scry.analyze Scry.returnProgram Scry.demoRules) with | .cons f _ => firstFn f.path | .nil => \"\"\n" ++
           "#eval match Scry.programFindings (Scry.analyze Scry.returnProgram Scry.demoRules) with | .cons f _ => lastFn f.path | .nil => \"\"")
           ["\"retCallee\"", "\"retMain\""] },
+    { name := "return-value summary: a pack sanitiser kills a unit-defined callee's return",
+      run := fun _ => do
+        let packText := "rule r\n  kind taint\n  severity error\n  message m\n  source getenv result\n  sanitise retCallee result\n  sink system arg 0\nend\n"
+        evalRuleNats (rulePrelude ++
+          s!"def sanPack : Scry.RulePack := Scry.parseRulePack {wizStr packText}\n" ++
+          "#eval List.length (Scry.programFindings (Scry.analyze Scry.returnProgram sanPack))\n" ++
+          "#eval List.length (Scry.programFindings (Scry.analyze Scry.returnProgram Scry.demoRules))") [0, 1] },
     { name := "recursion: the parameter fixpoint marks x (position 1) tainted",
       run := fun _ => do
         evalRuleNats (rulePrelude ++
