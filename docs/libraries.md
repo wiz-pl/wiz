@@ -118,7 +118,7 @@ the board; its findings G1–G10 are the requirements). Design notes:
 `wiz-notes/hdl-usability.md`. Everything is in `lib/Hdl/Core.wiz`; examples and
 tests in `examples/hdl-compose.wiz` (group `hdl`) and in the `scaling` group.
 
-```
+```wiz no-check
 structure Tx (r : HwTy → Type) where      -- a bundle: a structure of signals
   line : r Bit
   left : r B4
@@ -241,7 +241,7 @@ SVA. `lib/Hdl/Temporal.wiz`, on the traces and Mealy machines of H14 C1 (`lib/Tr
 examples and tests in `examples/hdl-temporal.wiz` (group `hdl`). Survey and design:
 `wiz-notes/hdl-temporal.md`.
 
-```
+```wiz no-check
 def Uart.onlyThat_a5 :     -- the loopback reports byte 0xa5 and nothing else, for ever
     TL.always (TL.nowB (fun o => onlyByte 165 o.1 o.2)) (Mealy.obs loopM loopback.init (sendOnce 165)) 0 :=
   Mealy.always_settled_const loopM (onlyByte 165) loopback.init (sendOnce 165) quiet F (loopIdle 165)
@@ -612,7 +612,7 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
   width (a value, not an instance, as `Bundle`). For an **enumeration** (no parameters,
   constructors without fields) constructor `i` is the number `i` in
   `⌈log₂ #constructors⌉` bits (Clash's encoding):
-  ```
+  ```wiz no-check
   inductive Phase where | idle | start | data | stop  deriving BitPack
   -- Phase.width = 2, Phase.code = HwTy.bits 2, Phase.toNat, Phase.ofNat (out of range:
   -- the first constructor), Phase.pack : Phase → HwTy.El Phase.code, Phase.unpack,
@@ -648,7 +648,8 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
 
 Not done: a general bit-level round-trip lemma for bundles (above), `BitPack` for
 inductive types with fields (a tag and the widest constructor's fields), `!` on signals,
-`match` on an enumeration signal (staged `match`, hdl-staging-research S3), asynchronous
+`match` on an enumeration signal (a case tree over the `Hw` ops — wishful
+`hdl-match-signals`; the workaround is an `if` chain on `Phase.lit`), asynchronous
 reset.
 
 ## Xilinx 7-series pin constraints and the Arty A7 (`Hdl.Xdc`, `Hdl.Arty`)
@@ -1413,7 +1414,7 @@ and doc comments; std's tests check one example of each.
 | `lib/Rat.wiz` | `Q`: unreduced fractions with `≈`, an ordered field up to `≈` (`Q.inv`, `Q.mul_inv`, `Q.abs_add`, `Q.lt_ceil`); `q_ring! lhs ≈ rhs` |
 | `lib/RingTactic.wiz` | `by ring`: the three normalisers as a tactic that reads the goal |
 
-```
+```wiz
 import Rat
 
 def t (a b c : Nat) : (a + b) * c = c * b + a * c := nat_ring! (a + b) * c = c * b + a * c
@@ -1504,13 +1505,20 @@ data edges, so return values are modelled. `import Scry.Taint` feeds those edges
 Datalog engine (`lib/Scry/Datalog.wiz`, `lib/Scry/Eval.wiz`) with a `TaintSpec` of
 source, sanitiser and sink calls; the source -> sink path of each finding comes from the
 engine's provenance. `import Scry.TaintExamples` is the hand-built corpus used by the
-`scry-taint` group.
+`scry-taint` group. `Scry.Store` keeps the authoritative insertion-ordered rows and, above
+24 rows, a hashed dedup index plus `(column, value)` join indexes; `Scry.Eval` matches an
+atom through the shortest bound-column bucket, skips a delta-loop variant whose anchor
+relation did not move, and indexes provenance by fact hash. The semantics and findings
+are unchanged; `examples/scry-datalog-bench.wiz` is the benchmark and
+`wiz-notes/scry-datalog.md` §8 has the measurements and limits.
 
 The S4 rule pack and interprocedural slice are separate modules:
 
 * `import Scry.Rules` — named rules with an id, severity and message, sources/sinks/
   sanitisers **per argument** (`source read arg 1`, `sanitise sanitize arg 0`), a textual
-  `.scry` block format (`Scry.parseRulePack`) and `*` function-name matching.
+  `.scry` block format (`Scry.parseRulePack`) and `*` function-name matching. A sink is
+  `sink NAME arg K` or `sink NAME args`; the latter checks every argument of a variadic
+  call (`execl`), while the finding still names the concrete tainted index.
   `lib/Scry/rules/default.scry` is the demo pack as a real spec file.
 * `import Scry.RuleTaint` — variable-indexed taint as Datalog over a rule pack; an
   argument source/sanitiser becomes an extra definition point, and a `gen` fact is the
@@ -1535,7 +1543,10 @@ The S4 rule pack and interprocedural slice are separate modules:
 * `import Scry.Interproc` — a direct- and resolved-indirect-call graph, argument ->
   parameter taint, return-value summaries and a summary fixpoint for recursion; an
   unresolved indirect call is recorded and warned about (`unknown-indirect`). Findings
-  carry their rule metadata and a stitched source -> sink path.
+  carry their rule metadata and a stitched source -> sink path. `Scry.analyzeC` applies
+  the C-ABI entry policy: a non-`static`, non-`main` function with no caller in the unit
+  and no address taken is an exported entry, and its parameters are sources
+  (`Scry.entrySources`); `Scry.analyze` keeps the policy-free library behaviour.
 * `import Scry.RuleTaint` also carries the memory rules: `mstore`/`mload`/`mtainted`
   make a `store` taint the locations it may alias and a later `load` receive it, with
   `store`/`load` path nodes. Diagnostics that are not findings (unknown memory, use after
@@ -1544,8 +1555,9 @@ The S4 rule pack and interprocedural slice are separate modules:
 * `import Scry.Sarif` — SARIF 2.1.0 JSON with rule metadata, primary and related
   locations from an `OriginMap` (S2's `Wil.Span` supplies the entries; a finding's
   `properties.derivation` is `checked`/`unchecked`), namespaced rule ids
-  (`scry/c/<rule>`, `scry/lowering/boundary`, `scry/memory/<kind>`) and
-  `columnKind: utf16CodeUnits`; `Scry.boundaryResultJson` emits a warning result whose
+  (`scry/c/<rule>`, `scry/lowering/boundary`, `scry/lowering/parse-recovery`,
+  `scry/memory/<kind>`) and `columnKind: utf16CodeUnits`;
+  `Scry.boundaryResultJson` emits a warning result whose
   location is the offending statement's span.
 * `import Scry.Certify` — a finding as a `Scry.Derivation` checked by `Scry.Cert`
   against the function's EDB, reporting its axioms and the interprocedural assumptions
@@ -1613,3 +1625,49 @@ The root bundle keeps `static`, `dynamic`, `verify` and `repro` separate and add
 attached with `repro --witness FILE` and is accepted only at L2/L3 with
 `validated=true`; the prototype does not run symbolic execution.
 `wiz-notes/scry-workflow.md` has the UX, artifact schema and limits.
+
+## Scry: dynamic execution evidence (`scry/src/Scry/Dynamic.wiz`)
+
+`import Scry.Dynamic` is the dynamic-evidence layer, not a second analyser. `scry dynamic
+FILE.c` probes a compiler (AddressSanitizer, then UndefinedBehaviorSanitizer), compiles
+and runs the file, parses the sanitizer stream into `crash`/`ub`/`leak` events, resolves
+the first target-file frame to a `Scry.Origin`, and links the event to the static
+findings/memory warnings at the same source line (else the same function). LLVM coverage
+(`llvm-profdata` + `llvm-cov`) reports which lines executed and whether each static
+site's line was reached.
+
+The evidence is deliberately separate from a finding: `properties.kind = dynamic`,
+`evidenceKind = dynamic`, `claim = none`, and `Scry.DynReport.status` is `ok`/`skipped`/
+`error`. A `validated` event has a recognised sanitizer signature *and* a frame in the
+analysed file; an event without one is kept as `unvalidated`. A clean run says "no event
+on this input" and never proves absence. The small corpus (`scry/bench/dynamic/`) covers
+the prior-art tiers T1 CWE-78/134, T2 CWE-416/476 and T3 CWE-190/787/121, plus a leak;
+`scry bench --dynamic` reports it separately from the static TPR/FPR baseline. CWE-120/
+242/362 are out of scope for a witness (the call is the bug, or concurrency is unmodelled).
+
+The optional `--witness FILE` is a data contract for the future S6a concolic slice
+(`Trace` + `PathCond` + `Flip` + `Witness`): the file supplies input, validation label,
+path condition, model, assumptions and budget, and this command records it with
+`revalidated: false` and `claim: none`. It does not solve, prune or promote anything; no
+solver plumbing lives in the dynamic layer. `wiz-notes/scry-dynamic.md` has the design,
+the trust boundary, the counts and the remaining work.
+## Scry: fuzzing the C front end (`scry/fuzz`, `scry/src/Scry/Fuzz.wiz`)
+
+`scry/fuzz/run.py` is a coverage-guided bug search over the vendored C shim and
+tree-sitter, not another analysis. It builds `fuzz/ts_shim_fuzz.c` with clang's
+`-fsanitize=fuzzer,address,undefined`, seeds from `scry/bench/corpus/**/*.c` and the
+taint fixtures, and checks the struct-of-arrays contract the Wiz side reads (preorder
+ids, one root, parent/CSR/edge agreement, in-range kind/field ids, spans inside the
+input, `ERROR`/`MISSING` flags). ASan, UBSan and invariant failures are minimised with
+libFuzzer and deduplicated by a normalised stack signature.
+
+`Scry.Fuzz` (`scry fuzz-span FILE [--offset N] [--json]`) maps an artifact to the same
+`start`/`stop` span shape as a static finding: the root span, every `ERROR`/`MISSING`
+node (up to 64) with line/column, and the smallest CST node containing a byte offset (an
+invariant failure prints `input_offset=N`). `Scry.fuzzInputJsonAt` is the stable JSON;
+`scry/fuzz/run.py` embeds it in `build/fuzz/dynamic.json` beside the static
+`scry bench` report and its 34-case corpus sweep. A missing clang/libFuzzer is a clean
+skip (exit 0); a bounded run with no crash is explicit dynamic evidence, not a safety
+claim, and the target covers the parser boundary rather than the Wiz lowering/taint
+pipeline. `scry/fuzz/README.md` has the command, schema, counts and limits, and
+`wiz-notes/scry-fuzz.md` records the branch results.

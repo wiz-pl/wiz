@@ -449,7 +449,8 @@ partial def Scry.wfScanPairs (o : Scry.ScanOpts) (st : Scry.WfStore) (file rules
 
 def Scry.wfScanOne (o : Scry.ScanOpts) (st : Scry.WfStore) (file rulesPath rulesText : String)
     (now : Nat) : EIO Scry.WfStore := do
-  let opts := Scry.TaintOpts.mk file o.rules .none .false o.allowErrors .false .false;
+  let opts := { Scry.emptyTaintOpts file with
+    rules := o.rules, allowErrors := o.allowErrors };
   started ← EIO.lift Clock.monotonic;
   rep ← Scry.analyzeFile opts;
   finished ← EIO.lift Clock.monotonic;
@@ -947,7 +948,8 @@ def Scry.verifyCmd (args : List String) : EIO Nat :=
       match fileOk with
       | .false => EIO.fail (String.append "source not found: " rec0.source)
       | .true => do
-        let opts := Scry.TaintOpts.mk rec0.source rec0.rules .none .false rec0.allowErrors .false .false;
+        let opts := { Scry.emptyTaintOpts rec0.source with
+          rules := rec0.rules, allowErrors := rec0.allowErrors };
         rep ← Scry.analyzeFile opts;
         let ids := List.map (fun f => Scry.wfId f rec0.source) rep.findings;
         let present := List.any (fun x => String.eq x rec0.id) ids;

@@ -1,0 +1,83 @@
+-- test: run
+import Sys
+import Scry.Diff
+-- The pure diff mapping: added lines vs context, moved code, deletions, renames,
+-- binary files, CRLF patches and path suffix matching. The fixtures are real
+-- `git diff` output (see fixtures/diff/*.patch).
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+def ranges (s : Scry.DiffSelection) : String := Scry.diffRenderRanges s.ranges
+
+def main : IO Unit := EIO.toIO (do
+  ta ← FS.readFile "tests/fixtures/diff/added.patch";
+  let a := Scry.diffSelect "src/a.c" 0 (Scry.parseDiff ta);
+  check "added: matched" a.matched;
+  check "added: one hunk" (Nat.beq a.hunks 1);
+  check "added: two changed lines" (Nat.beq a.changedLines 2);
+  check "added: ranges 6-7" (String.eq (ranges a) "6-7");
+  check "added: line 6 changed" (Scry.diffLineInRanges 6 a.ranges);
+  check "added: line 8 unchanged" (Bool.not (Scry.diffLineInRanges 8 a.ranges));
+
+  tc ← FS.readFile "tests/fixtures/diff/context.patch";
+  let c0 := Scry.diffSelect "src/ctx.c" 0 (Scry.parseDiff tc);
+  check "context: only the + line" (String.eq (ranges c0) "6-6");
+  check "context: a context line is unchanged" (Bool.not (Scry.diffLineInRanges 5 c0.ranges));
+  let c2 := Scry.diffSelect "src/ctx.c" 2 (Scry.parseDiff tc);
+  check "context 2: expanded either side" (String.eq (ranges c2) "4-8");
+
+  td ← FS.readFile "tests/fixtures/diff/delete.patch";
+  let d0 := Scry.diffSelect "src/ctx.c" 0 (Scry.parseDiff td);
+  check "delete: no new line is changed" (Nat.beq d0.changedLines 0);
+  let d1 := Scry.diffSelect "src/ctx.c" 1 (Scry.parseDiff td);
+  check "delete context 1: both sides of the gap" (String.eq (ranges d1) "5-6");
+
+  tdc ← FS.readFile "tests/fixtures/diff/delete-context.patch";
+  let dc0 := Scry.diffSelect "src/del.c" 0 (Scry.parseDiff tdc);
+  check "delete with context: no + line, no change" (Nat.beq dc0.changedLines 0);
+  let dc1 := Scry.diffSelect "src/del.c" 1 (Scry.parseDiff tdc);
+  check "delete with context: the anchor is the last consumed line"
+    (String.eq (ranges dc1) "5-6");
+
+  tr ← FS.readFile "tests/fixtures/diff/rename-only.patch";
+  let r := Scry.diffSelect "src/new.c" 0 (Scry.parseDiff tr);
+  check "rename: new path matched" r.matched;
+  check "rename: old path recorded" (match r.renamedFrom with
+    | .some p => String.eq p "src/old.c"
+    | .none => .false);
+  check "rename: no changed lines" (Nat.beq r.changedLines 0);
+  check "rename: the old path also matches"
+    (Scry.diffSelect "src/old.c" 0 (Scry.parseDiff tr)).matched;
+
+  tre ← FS.readFile "tests/fixtures/diff/rename-edit.patch";
+  let re := Scry.diffSelect "src/renamed.c" 0 (Scry.parseDiff tre);
+  check "rename+edit: matched" re.matched;
+  check "rename+edit: one hunk" (Nat.beq re.hunks 1);
+  check "rename+edit: line 13" (String.eq (ranges re) "13-13");
+
+  tb ← FS.readFile "tests/fixtures/diff/binary.patch";
+  let b := Scry.diffSelect "data.bin" 0 (Scry.parseDiff tb);
+  check "binary: marked" b.binary;
+  let bt := Scry.diffSelect "src/ctx.c" 0 (Scry.parseDiff tb);
+  check "binary: the text file after it still parses"
+    (Bool.and bt.matched (Scry.diffLineInRanges 13 bt.ranges));
+
+  tcr ← FS.readFile "tests/fixtures/diff/crlf.patch";
+  let cr := Scry.diffSelect "src/crlf.c" 0 (Scry.parseDiff tcr);
+  check "crlf: matched" cr.matched;
+  check "crlf: one added line at 3" (String.eq (ranges cr) "3-3");
+
+  check "paths: a suffix matches from a subdirectory"
+    (Scry.diffSelect "scry/src/a.c" 0 (Scry.parseDiff ta)).matched;
+  let deep := "diff --git a/scry/src/a.c b/scry/src/a.c\n--- a/scry/src/a.c\n+++ b/scry/src/a.c\n@@ -1,0 +2 @@\n+int x;\n";
+  check "paths: a short URI matches a deep diff path"
+    (Scry.diffSelect "src/a.c" 0 (Scry.parseDiff deep)).matched;
+  check "paths: no false suffix"
+    (Bool.not (Scry.diffSelect "src/ba.c" 0 (Scry.parseDiff ta)).matched);
+  let amb := Scry.diffSelect "src/a.c" 0 (List.append (Scry.parseDiff ta) (Scry.parseDiff ta));
+  check "paths: duplicate entries are ambiguous" (Bool.and amb.matched amb.ambiguous);
+  check "paths: no match is reported" (Bool.not (Scry.diffSelect "src/none.c" 0 (Scry.parseDiff ta)).matched)
+)

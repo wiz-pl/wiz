@@ -149,7 +149,7 @@ def rulePrelude : String := prelude ++
   "  match k with\n" ++
   "  | .source => 1 | .param => 2 | .call => 3 | .returnSeed => 4\n" ++
   "  | .returnValue => 5 | .flow => 6 | .sink => 7 | .recursion => 8 | .assumed => 9\n" ++
-  "  | .store => 10 | .load => 11\n" ++
+  "  | .store => 10 | .load => 11 | .alloc => 12 | .free => 13\n" ++
   "def kindsCode : List Scry.PathNode → Nat\n" ++
   "  | .nil => 0\n" ++
   "  | .cons p ps => Nat.add (Nat.mul 10 (kindsCode ps)) (kindCode p.kind)\n" ++
@@ -264,7 +264,7 @@ def group : Group where
           "#eval Nat.add (Nat.mul (List.length Scry.demoRules.rules) 10000) (Nat.add (Nat.mul (List.length (Scry.RulePack.taintRules Scry.demoRules)) 1000) (Nat.add (Nat.mul (List.length (Scry.RulePack.forbiddenRules Scry.demoRules)) 100) (Nat.add (Nat.mul (totalSinks (Scry.RulePack.taintRules Scry.demoRules)) 10) (totalSources (Scry.RulePack.taintRules Scry.demoRules)))))\n" ++
           "#eval if Scry.nameMatches \"mem*\" \"memcpy\" then 1 else 0\n" ++
           "#eval if Scry.nameMatches \"strcpy*\" \"astrcpy\" then 1 else 0\n" ++
-          "#eval match Scry.Program.check Scry.ruleTaintProgram with | .none => 999 | .some st => List.length st") [42245, 1, 0, 14]
+          "#eval match Scry.Program.check Scry.ruleTaintProgram with | .none => 999 | .some st => List.length st") [42335, 1, 0, 14]
         evalRuleTexts (rulePrelude ++
           "#eval ruleSev Scry.demoRules.rules \"gets-overflow\"\n" ++
           "#eval ruleKind Scry.demoRules.rules \"gets-overflow\"")

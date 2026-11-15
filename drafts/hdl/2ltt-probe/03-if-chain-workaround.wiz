@@ -1,0 +1,22 @@
+import Hdl.Core
+
+def B8 : HwTy := HwTy.bits 8
+
+inductive Phase where
+  | idle | start | data | stop
+  deriving BitPack
+
+-- the workaround today: comparisons + `if` (H14 S2)
+def phaseName {r : HwTy → Type} [Hw r] (p : r Phase.code) : r B8 :=
+  if p === Phase.lit .idle then 0
+  else if p === Phase.lit .start then 1
+  else if p === Phase.lit .data then 2
+  else 3
+
+def c : Circuit Phase.code B8 := Circuit.comb (fun p => phaseName p)
+#eval Hdl.map (HwTy.pack B8) (Circuit.run c (Hdl.map (fun (p : Phase) => Phase.pack p) (List.cons .idle (List.cons .start (List.cons .data (List.cons .stop List.nil))))))
+#eval Netlist.size (Circuit.netlist "c" c)
+#check fun (p : Wire Phase.code) => phaseName p
+
+-- the netlist, for the node accounting in wishful/hdl-match-signals.md
+#eval Verilog.emit (Circuit.netlist "c" c)

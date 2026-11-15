@@ -161,14 +161,23 @@ def Scry.zipU32 : List U32 → List U32 → List (U32 × U32)
   | .cons a as, .cons b bs => .cons (a, b) (Scry.zipU32 as bs)
   | _, _ => .nil
 
+/-- `(children, childField)` rows `lo … hi-1` as a list, reading the arrays by index.
+The obvious `U32Array.toList` + `List.drop` version is **O(nodes)** per call (it copies
+the whole column), which made lowering the 1.1 M-node `parser.c` quadratic; this walk is
+O(children). -/
+partial def Scry.CstStore.arcsFrom (s : Scry.CstStore) (lo hi : Nat) :
+    List (Scry.NodeId × U32) :=
+  match Nat.lt lo hi with
+  | .false => .nil
+  | .true => List.cons
+      (Scry.nodeId (UIntN.toNat (U32Array.get s.children lo)), U32Array.get s.childField lo)
+      (Scry.CstStore.arcsFrom s (Nat.succ lo) hi)
+
 /-- Node `i`'s children, in tree order, with their field ids. -/
 def Scry.CstStore.childArcs (s : Scry.CstStore) (i : Nat) : List (Scry.NodeId × U32) :=
   let lo := UIntN.toNat (U32Array.get s.childOff i);
   let hi := UIntN.toNat (U32Array.get s.childOff (Nat.succ i));
-  let k := Nat.sub hi lo;
-  let ids := List.take k (List.drop lo (U32Array.toList s.children));
-  let fs := List.take k (List.drop lo (U32Array.toList s.childField));
-  List.map (fun p => (Scry.nodeId (UIntN.toNat p.1), p.2)) (Scry.zipU32 ids fs)
+  Scry.CstStore.arcsFrom s lo hi
 
 /-- Node `i`'s children, in tree order. -/
 def Scry.CstStore.childrenOf (s : Scry.CstStore) (i : Nat) : List Scry.NodeId :=
@@ -297,6 +306,10 @@ def Scry.CstStore.filesOf (s : Scry.CstStore) : List Scry.SourceFile :=
   List.map (fun i => Scry.SourceFile.mk i (InternTable.lookup s.paths (U32.ofNat i))
     (UIntN.toNat (U64Array.get s.bytes i))) (Scry.schemaRange (InternTable.size s.paths))
 
+/-- File `i`'s path (the interned path table; `""` when it is not there). -/
+def Scry.CstStore.pathName (s : Scry.CstStore) (i : Nat) : String :=
+  InternTable.lookup s.paths (U32.ofNat i)
+
 /-- The model view of the columns, checked by `Scry.Facts.finishFacts` (ids in order,
 endpoints and parents in range, spans ordered, tuple lengths = arity). -/
 def Scry.CstStore.toFacts (s : Scry.CstStore) : Except String Scry.Facts :=
@@ -326,6 +339,12 @@ def Scry.CstStore.maxDepth (s : Scry.CstStore) : Nat :=
 def Scry.CstStore.rootCount (s : Scry.CstStore) : Nat :=
   List.length (List.filter (fun i => Nat.beq (Scry.parentIdx s i) 0)
     (Scry.schemaRange (Scry.CstStore.nodeCount s)))
+
+/-- The first `ERROR`/`MISSING` node, in node (source) order. A recovery diagnostic
+points here when the whole translation unit is partial. -/
+def Scry.CstStore.firstError (s : Scry.CstStore) : Option Nat :=
+  List.find (fun i => Bool.or (Scry.CstStore.errorOf s i)
+    (Scry.CstStore.missingOf s i)) (Scry.schemaRange (Scry.CstStore.nodeCount s))
 
 /-- `ERROR` or `MISSING` nodes. -/
 def Scry.CstStore.errorCount (s : Scry.CstStore) : Nat :=
