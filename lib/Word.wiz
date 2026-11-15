@@ -541,6 +541,12 @@ extern "wiz_word_msb" UIntN.msbNative : {ω w : Nat} → UIntN w → Bool
 extern "wiz_word_zext" UIntN.resizeNative : {w : Nat} → (ω v : Nat) → UIntN w → UIntN v
 /-- The native `UIntN.toIntN` for compiled code (`wiz_word_cast`, runtime/). -/
 extern "wiz_word_cast" UIntN.toIntNNative : {w : Nat} → UIntN w → IntN w
+/-- The native `IntN.shiftRight` for compiled code (`wiz_word_ashr`, runtime/): its Wiz
+body allocates through `IntN.not`/`IntN.below`. -/
+extern "wiz_word_ashr" IntN.shiftRightNative : {ω w : Nat} → IntN w → NatObj → IntN w
+/-- The native `IntN.lt` for compiled code (`wiz_word_slt`, runtime/): its Wiz body
+allocates through `IntN.isNeg`/`IntN.toNat`. -/
+extern "wiz_word_slt" IntN.ltNative : {ω w : Nat} → IntN w → IntN w → Bool
 attribute [implemented_by UIntN.ofNatNative] UIntN.ofNat
 attribute [implemented_by UIntN.addNative] UIntN.add
 attribute [implemented_by UIntN.subNative] UIntN.sub
@@ -560,3 +566,6 @@ attribute [implemented_by UIntN.testBitNative] UIntN.testBit
 attribute [implemented_by UIntN.msbNative] UIntN.msb
 attribute [implemented_by UIntN.resizeNative] UIntN.resize
 attribute [implemented_by UIntN.toIntNNative] UIntN.toIntN
+-- The signed operations whose Wiz bodies allocate: keep the native instructions.
+attribute [implemented_by IntN.shiftRightNative] IntN.shiftRight
+attribute [implemented_by IntN.ltNative] IntN.lt
