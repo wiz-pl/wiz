@@ -142,8 +142,10 @@ def ffiGroup : Group where
           "#run Bytes.eq (Bytes.ofString \"ab\") (Bytes.ofString \"ab\")\n" ++
           "#run Bytes.toString (Bytes.ofUtf8 \"é\")\n" ++
           "#run Bytes.size (Bytes.ofUtf8 \"𝄞\")\n")
-          ["[1, 2, 44]", "1", "0", ".true", ".false", "\"A\"", "1", "[1, 255]", "[2, 3]",
-           "[1, 2, 44]", ".true", "\"é\"", "4"] },
+          -- (`Bytes.show` is a `String`, so `#eval`/`#run` print it quoted, as they print
+          -- `Bytes.toString`'s; a `Bytes` value itself prints as `[1, 255]`, unquoted)
+          ["\"[1, 2, 44]\"", "1", "0", ".true", ".false", "\"A\"", "1", "[1, 255]", "\"[2, 3]\"",
+           "\"[1, 2, 44]\"", ".true", "\"é\"", "4"] },
     { name := "foreign types are checked", run := fun _ =>
         ioFails "import IO\nextern \"f\" f : ((Nat → Nat) → Nat) → Nat" "foreign function" },
     { name := "link_c: a C file and a library linked with the program (C backend)", run := fun _ =>
