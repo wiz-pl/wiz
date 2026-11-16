@@ -23,7 +23,10 @@ The module also asks each kernel for the normal form of the equation `T = Empty 
 run compares verdicts *and* normal forms even when neither kernel accepts anything.
 
 `tests --false-fuzz N SEED` runs the campaign; `tests --false-fuzz-replay SHAPE C…` runs
-one sample again.  See `/workspace/wiz-notes/false-fuzz.md`.
+one sample again.  The group `false-fuzz` is a bounded run (20 samples per shape).  A
+campaign of 1000 samples per shape (seed 20261114, 2026-11-14) found no accepted closed
+`Empty` in either kernel, and no verdict or normal-form difference apart from the known K1
+observations (quantity-only `Σ` pairs).
 -/
 
 set_option compiler.extract_closed false
