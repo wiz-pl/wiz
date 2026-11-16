@@ -93,6 +93,9 @@
               cp -r ${fs.toSource { root = ./lib; fileset = ./lib; }} $share/lib
               # the marker editors look for (editors/nvim: a library file is served by its toolchain's wiz)
               echo 'A Wiz toolchain: lib/ is its standard library, .lake/build/bin/ its binaries, ../../bin/ its commands (editors use this file to find them).' > $share/TOOLCHAIN
+              # the commit, as the release tarball writes it (scripts/release-tarball.sh;
+              # `wiz --version` reads it, Wiz/Version.lean); "dirty" for an uncommitted tree
+              echo ${lib.escapeShellArg (self.rev or "dirty")} > $share/REVISION
               cp ${unwrapped}/bin/wiz ${unwrapped}/bin/grail $share/.lake/build/bin/
               # The packaged read-only elaboration cache: elaborate every module of the
               # standard library once, with the binary the wrapper runs (the same bytes,
