@@ -1,0 +1,94 @@
+import Scry.Cert
+import Scry.Interproc
+import Scry.RuleTaint
+import Scry.Rules
+import Text
+/-!
+# Scry.Certify
+
+**Findings as checked derivations** (`import Scry.Certify`): every taint finding's
+`alert` fact is turned into a `Scry.Derivation` from the evaluator's provenance and
+checked by `Scry.Derivation.check` against the function's EDB. The certificate's EDB
+leaves are reported as the finding's axioms.
+
+## What is proved, and what is evidence
+
+The Datalog rules (`Scry.RuleTaint.ruleTaintProgram`) are the proof: a checked
+derivation says "given these EDB facts, `alert(sink, arg)` is entailed". The EDB
+includes `param` and `retsrc` seeds, which are *assumptions* about callers and callees.
+The interprocedural path walk in `Scry.Interproc` is the evidence behind those seeds;
+until S8/S7 wires the call graph into the derivation itself, a `param` axiom is reported
+as an assumption (which caller passed taint, and along which path) and the walk is not
+part of the proof. The derivation of the intraprocedural part is never the path walk.
+
+A forbidden-call finding is certified too: `badalert` has the single rule
+`badalert n :- badcall n`, so the certificate is that rule instance with the `badcall`
+EDB fact as its axiom.
+-/
+
+structure Scry.Certificate where
+  finding : Scry.RuleFinding
+  derivation : Scry.Derivation Nat
+  /-- The EDB facts the derivation uses, rendered (`r1(0,2)`, …). -/
+  axioms : List String
+  /-- Interprocedural assumptions the path walk supplies (a `param`/`retsrc` seed). -/
+  assumptions : List String
+  verified : Bool
+
+def Scry.edbFactsOf (d : Scry.Derivation Nat) : List (Scry.PFact Nat) :=
+  List.foldr (fun (n : Scry.ProofNode Nat) (acc : List (Scry.PFact Nat)) => match n.kind with
+    | .edb => List.cons n.fact acc
+    | _ => acc) .nil d.nodes
+
+def Scry.renderAxioms (d : Scry.Derivation Nat) : List String :=
+  List.map (Scry.renderFact (fun n => Nat.repr n)) (Scry.edbFactsOf d)
+
+/-- The interprocedural assumptions of a finding's path: a parameter seed and a
+callee-return seed are the two points where the intraprocedural proof rests on a call. -/
+def Scry.assumptionsOf (f : Scry.RuleFinding) : List String :=
+  List.foldr (fun p acc => match p.kind with
+    | .param =>
+      List.cons (String.append (String.append "parameter taint seeded in " p.func)
+        (String.append " at point " (Nat.repr p.point))) acc
+    | .returnSeed =>
+      List.cons (String.append (String.append "return taint seeded at the call in " p.func)
+        (String.append " point " (Nat.repr p.point))) acc
+    | _ => acc) .nil f.path
+
+/-- Certify one finding, if its function has an evaluated state and its alert fact has
+provenance. -/
+def Scry.certifyFinding (pr : Scry.ProgramResult) (f : Scry.RuleFinding) :
+    Option Scry.Certificate :=
+  match f.kind with
+  | .memory => .none
+  | _ =>
+    match Scry.findResult pr f.func with
+    | .none => .none
+    | .some fr =>
+      match fr.state with
+      | .none => .none
+      | .some st =>
+        let row := match f.kind with
+          | .taint => [U64.ofNat f.sink, U64.ofNat f.arg]
+          | .forbidden => [U64.ofNat f.sink]
+          | .memory => (.nil : List U64);
+        let rel := match f.kind with
+          | .taint => Scry.rtAlert
+          | .forbidden => Scry.rtBadAlert
+          | .memory => Scry.rtAlert;
+        match Scry.State.explainTuple Scry.ruleTaintProgram fr.edb.db st rel row with
+        | .none => .none
+        | .some d =>
+          let verified := Scry.Derivation.check Scry.ruleTaintProgram fr.edb.db d;
+          .some (Scry.Certificate.mk f d (Scry.renderAxioms d) (Scry.assumptionsOf f) verified)
+
+/-- Certify every finding of a program. -/
+def Scry.certifyAll (pr : Scry.ProgramResult) : List Scry.Certificate :=
+  List.foldr (fun f acc =>
+    match Scry.certifyFinding pr f with
+    | .some c => List.cons c acc
+    | .none => acc) .nil (Scry.programFindings pr)
+
+/-- The number of certified findings. -/
+def Scry.certificateCount (pr : Scry.ProgramResult) : Nat :=
+  List.length (Scry.certifyAll pr)

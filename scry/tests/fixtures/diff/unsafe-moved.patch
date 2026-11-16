@@ -1,0 +1,10 @@
+diff --git a/tests/fixtures/taint-moved.c b/tests/fixtures/taint-moved.c
+index 3813693..fd3e32b 100644
+--- a/tests/fixtures/taint-moved.c
++++ b/tests/fixtures/taint-moved.c
+@@ -6 +6 @@ void run(char *cmd) {
+-  system(cmd);
++  (void)cmd;
+@@ -11 +11 @@ int main(void) {
+-  run(cmd);
++  system(cmd);

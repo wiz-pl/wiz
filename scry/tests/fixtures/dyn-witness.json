@@ -1,0 +1,11 @@
+{
+  "witness": {
+    "input": "SCRY_DYNAMIC_CMD=/bin/true",
+    "validation": "pcChecked",
+    "pathCond": "(and (= cmd 1) (not (= cmd 0)))",
+    "model": "cmd = 1",
+    "assumptions": ["external call system", "getenv is unconstrained"],
+    "solver": "fake-solver 0.1",
+    "budget": "maxFlips 8, maxSolverCalls 16"
+  }
+}

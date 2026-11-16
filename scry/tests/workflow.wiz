@@ -1,0 +1,140 @@
+-- test: run
+import Sys
+import Json
+import Text
+import Scry.Workflow
+import Scry.WorkflowCmd
+
+-- Workflow tests: identity, the triage machine, the store, witness validation, and a
+-- reproducer run through a fake compiler (so the test needs no C toolchain).
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+def path (k : Scry.PathKind) (f : String) (p : Nat) : List Scry.PathNode :=
+  [Scry.PathNode.mk f p 0 k]
+
+def taintFinding (rule : String) (path : List Scry.PathNode) : Scry.RuleFinding :=
+  Scry.RuleFinding.mk rule Scry.Severity.error "m" Scry.FindingKind.taint "main" 3 "system" 0 path
+
+def lineFinding : Scry.RuleFinding :=
+  Scry.RuleFinding.mk "gets-overflow" Scry.Severity.error "m" Scry.FindingKind.forbidden
+    "main" 2 "gets" 0 (path Scry.PathKind.sink "main" 2)
+
+def main : IO Unit := EIO.toIO (do
+  -- identity: line moves and whitespace keep the id; the line hash sees content
+  let f := taintFinding "command-injection"
+    [Scry.PathNode.mk "main" 1 0 Scry.PathKind.source,
+     Scry.PathNode.mk "main" 2 0 Scry.PathKind.flow,
+     Scry.PathNode.mk "main" 3 0 Scry.PathKind.sink];
+  let idA := Scry.wfId f "src/a.c";
+  let idB := Scry.wfId f "./src/a.c";
+  check "identity: a ./ prefix is normalized" (String.eq idA idB);
+  let idC := Scry.wfId (taintFinding "format-string" f.path) "src/a.c";
+  check "identity: the rule is part of the id" (Bool.not (String.eq idA idC));
+  let fMem := taintFinding "command-injection"
+    [Scry.PathNode.mk "main" 1 0 Scry.PathKind.source,
+     Scry.PathNode.mk "main" 2 0 Scry.PathKind.store,
+     Scry.PathNode.mk "main" 3 0 Scry.PathKind.load,
+     Scry.PathNode.mk "main" 4 0 Scry.PathKind.sink];
+  check "identity: a path-shape change is a new id"
+    (Bool.not (String.eq idA (Scry.wfId fMem "src/a.c")));
+  check "identity: the line hash ignores whitespace"
+    (String.eq (Scry.wfLineHash f "  system(cmd); ")
+      (Scry.wfLineHash f "system(cmd);"));
+  check "identity: the line hash sees a content change"
+    (Bool.not (String.eq (Scry.wfLineHash f "system(cmd);")
+      (Scry.wfLineHash f "system(other);")));
+
+  -- triage machine
+  check "triage: new -> confirmed" (Scry.wfAllowed .new .confirmed);
+  check "triage: new -> fixed is refused" (Bool.not (Scry.wfAllowed .new .fixed));
+  check "triage: confirmed -> fixed" (Scry.wfAllowed .confirmed .fixed);
+  check "triage: false-positive can reopen" (Scry.wfAllowed .falsePositive .triaged);
+  check "triage: fixed can reopen on a regression" (Scry.wfAllowed .fixed .triaged);
+  check "triage: new -> confirmed -> fixed"
+    (match Scry.wfTriage
+      (Scry.WfRecord.mk "f_x" "k" "h" .new .nil "src/a.c" .none .false Json.mkNull
+        "art" .none .none .none 1 1)
+      .confirmed "tester" "seen" 2 with
+      | .ok r => match Scry.wfTriage r .fixed "tester" "patched" 3 with
+        | .ok r2 => Bool.and (String.eq (Scry.WfState.show r2.state) "fixed")
+            (Nat.beq (List.length r2.history) 2)
+        | .error _ => .false
+      | .error _ => .false);
+
+  -- store round trip
+  let r := Scry.WfRecord.mk "f_x" "k" "h" .confirmed
+    [Scry.WfHistory.mk .new 1 "scry" "seen", Scry.WfHistory.mk .confirmed 2 "tester" "ok"]
+    "src/a.c" .none .false (Json.mkObj [("rule", Json.mkStr "gets-overflow")])
+    "art" (.some "static.json") .none .none 1 2;
+  let st := Scry.wfUpsert Scry.wfEmptyStore r;
+  match Scry.wfStoreOfText (Scry.wfStoreText st) with
+  | .error e => EIO.fail e
+  | .ok st2 => do
+    check "store: round-trips one record"
+      (match Scry.wfFind st2 "f_x" with
+        | .some x => Bool.and (String.eq (Scry.WfState.show x.state) "confirmed")
+            (Nat.beq (List.length x.history) 2)
+        | .none => .false);
+    check "store: an unknown schema is refused"
+      (match Scry.wfStoreOfText "{\"schema\":\"other\",\"findings\":[]}" with
+        | .error _ => .true
+        | .ok _ => .false);
+
+  -- CWE tiers (symbolic-execution note §11.5)
+  check "tier: command injection is T1" (String.eq (Scry.wfCweTier "command-injection") "T1");
+  check "tier: use-after-free is T2" (String.eq (Scry.wfCweTier "use-after-free") "T2");
+  check "tier: buffer overflow is T3" (String.eq (Scry.wfCweTier "buffer-overflow") "T3");
+  check "tier: gets is N/A" (String.eq (Scry.wfCweTier "gets-overflow") "N/A");
+
+  -- witness slot: a future concolic witness is accepted only when it says L2/L3 and
+  -- validated; the prototype does not produce one.
+  dir ← FS.createTempDir;
+  let wpath := Path.join dir "witness.json";
+  step1 ← FS.writeFile wpath
+    "{\"schema\":\"scry-workflow-witness/1\",\"authority\":\"L3\",\"validated\":true,\"input\":{\"text\":\"ABC\"},\"env\":[{\"name\":\"SCRY_X\",\"value\":\"1\"}],\"pathCondition\":\"x = 1\",\"model\":{\"x\":1}}";
+  wi ← Scry.wfPrepareWitness (.some wpath) dir;
+  check "witness: L3 validated is accepted" (String.eq wi.status "accepted");
+  match wi.input with
+  | .some p => do
+    wt ← FS.readFile p;
+    check "witness: input text becomes a deterministic file"
+      (Bool.and (Nat.beq (String.length wt) 3) (Nat.beq (List.length wi.env) 1))
+  | .none => check "witness: input text becomes a deterministic file" .false;
+  step2 ← FS.writeFile wpath
+    "{\"schema\":\"scry-workflow-witness/1\",\"authority\":\"L0\",\"validated\":true,\"input\":{\"text\":\"ABC\"}}";
+  wi2 ← Scry.wfPrepareWitness (.some wpath) dir;
+  check "witness: an unvalidated/L0 witness is rejected" (String.eq wi2.status "rejected");
+
+  -- repro plumbing through a fake compiler: the command/output is recorded, and the
+  -- dynamic result is separate from the static evidence.
+  let fake := Path.join dir "fake-cc.sh";
+  step3 ← FS.writeFile fake
+    "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fake-cc 1; exit 0; fi\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"-o\" ]; then shift; out=\"$1\"; fi\n  shift\ndone\nprintf '#!/bin/sh\\ncat >/dev/null\\nexit 0\\n' > \"$out\"\nchmod +x \"$out\"\nexit 0\n";
+  step4 ← FS.setMode fake 493;
+  let out := Path.join dir "repro";
+  let cfg := Scry.ReproConfig.mk fake "none" .none .none "" 5 .nil .none "absent" "L0";
+  res ← Scry.reproRun cfg "tests/fixtures/workflow-gets.c" out "test";
+  check "repro: the fake compiler builds and the harness runs" res.ran;
+  check "repro: no sanitizer is reported" (Bool.not res.sanitizerHit);
+  dyn ← FS.readFile (Path.join out "dynamic.json");
+  check "repro: dynamic.json records the compile command and exit"
+    (match Json.parse dyn with
+      | .ok j =>
+        let compile := match Json.getPath j ["compile"] with
+          | .some c => c
+          | .none => Json.mkNull;
+        let run := match Json.getPath j ["run"] with
+          | .some r => r
+          | .none => Json.mkNull;
+        Bool.and (String.eq (Json.getStr j "evidenceKind") "dynamic")
+          (Bool.and (Nat.beq (List.length (Json.getList compile "command")) 9)
+            (Bool.not (String.eq (Json.getStr run "traceKind") "")))
+      | .error _ => .false);
+  check "verify: clean/not-reported is an accepted exit" (Nat.beq (Scry.wfVerdictExit "not-reported-and-repro-clean") 0);
+  check "verify: still-reported is a failing exit" (Nat.beq (Scry.wfVerdictExit "still-reported") 1);
+  FS.removeAll dir)

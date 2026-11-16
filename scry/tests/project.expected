@@ -1,0 +1,36 @@
+path: a/x/../b.c normalises to a/b.c: ok
+path: absolute normalisation keeps the root: ok
+uri: a space is percent-encoded: ok
+compdb: two entries: ok
+compdb: -I and -D kept, -c/-o/-MMD dropped: ok
+compdb: command form keeps -Iinc2 and -DBAR=2: ok
+duplicate: two units: ok
+duplicate: one duplicate name: ok
+duplicate: both definitions in symbols: ok
+duplicate: only first definition analysed: ok
+duplicate: call resolves to first definition: ok
+unresolved: one call: ok
+unresolved: callee name: ok
+project: three real files: ok
+project: shared header appears once: ok
+project: static helper is unit-qualified: ok
+project: three direct-call edges: ok
+project: no duplicates: ok
+skip-broken: one unit: ok
+skip-broken: one skipped TU: ok
+taint: two findings: ok
+taint: both checked: ok
+taint: finding in io.c: ok
+taint: finding in util.c: ok
+taint: no finding in app.c: ok
+taint: path crosses the TU boundary: ok
+taint: app.c and io.c helpers stay distinct: ok
+sarif: four artifacts: ok
+sarif: first artifact is app.c: ok
+sarif: one result per finding and warning: ok
+sarif: result artifact has uriBaseId and index: ok
+cache: cold miss for every TU: ok
+cache: warm hit for every TU: ok
+cache: corrupt entries are recomputed: ok
+cache: warm again after corruption: ok
+cache: cleanup: ok

@@ -1,0 +1,341 @@
+import Text
+import Functor
+import WordArray
+import Scry.Wil
+import Scry.CstStore
+/-!
+# Scry.Preproc: `cc -E` line markers, and origins back in the original file
+
+`cc -E` (or any C preprocessor, GCC and Clang alike) emits a *line marker* before each
+run of lines that came from one place:
+
+```
+# 1 "main.c"
+int main(void) {
+# 1 "inc.h" 1
+static int bump(int x) { return x + 1; }
+# 2 "main.c" 2
+  int a = ((3) * 2);
+```
+
+The standard forms are `# <line> "<file>" [flags…]` and `#line <line> ["<file>"]`; the
+flags say `1` start of a new file, `2` return to a file, `3` a system header, `4` an
+`extern "C"` block. The preprocessed text is what tree-sitter sees, but every node's
+byte range is an offset into *that* text. This module turns those offsets back into
+`Wil.Span` origins in the original file: file index, byte range, line and column.
+
+Two steps, both pure:
+
+* `Scry.preprocess defaultPath raw texts` scans the marker lines, returns the text with
+  the marker lines *blanked* (replaced by spaces of the same length, so every offset is
+  unchanged — tree-sitter never sees a directive) and a `Scry.Preprocessed` line map;
+* `Scry.mapSpan pre node start stop` maps one preprocessed span, and
+  `Scry.Cst.ofPreprocessed pre store` builds the `Scry.Cst` view the lowering walks, so
+  `Scry.lowerTU` is unchanged.
+
+The map is exact when the span's preprocessed text is byte-identical to the original
+text at the mapped position (the common case: headers, plain statements). When a macro
+expansion, a removed comment or a conditional changed the text, the origin is the whole
+original *line* at the call site (trimmed), because the marker tells us the line but not
+which characters of the expansion came from where; `spanText` then still returns the
+line the user wrote, never the preprocessed expansion. A file whose text the caller does
+not supply (an unreadable system header, say) still maps to the right file/line/column;
+its byte range is empty (there is no text to index).
+
+The fixtures are ASCII, so byte offsets and character indices coincide (noted in
+`wiz-notes/scry-c2wil.md`).
+-/
+
+-- ## Line markers
+
+/-- One preprocessor line marker. `path = none` is `#line 7` (the current file stays).
+`flags` is the bit mask of the numeric flags after the quoted path, and `system` is
+whether flag `3` (a system header) was among them. -/
+structure Scry.Marker where
+  /-- The original line number the *next* line has. -/
+  line : Nat
+  /-- The file the next lines come from (`none`: the current one). -/
+  path : Option String
+  /-- The flags after the path, as a bit mask (`1` new file, `2` returning, `3` system
+  header, `4` `extern "C"`; `7` sets bits 1, 2 and 4). -/
+  flags : Nat
+  /-- Flag `3`: a system header. -/
+  system : Bool
+
+/-- Read decimal digits at the front of `cs`, starting from `acc`; the rest is returned
+after the digits. -/
+partial def Scry.digitsGo (acc : Nat) : List Char → Nat × List Char
+  | .nil => (acc, .nil)
+  | .cons c rest => match Char.isDigit c with
+    | .true => Scry.digitsGo (Nat.add (Nat.mul acc 10) (Nat.sub (Char.code c) 48)) rest
+    | .false => (acc, .cons c rest)
+
+/-- The characters up to the next `"`, and the rest after it. -/
+partial def Scry.untilQuote : List Char → List Char → String × List Char
+  | .nil, acc => (String.ofChars (List.reverse acc), .nil)
+  | .cons c rest, acc => match Char.eq c (Char.mk 34) with
+    | .true => (String.ofChars (List.reverse acc), rest)
+    | .false => Scry.untilQuote rest (.cons c acc)
+
+/-- The numbers in a marker's flag list (`"1 3 4"` → `[1, 3, 4]`). -/
+def Scry.flagNumbers (s : String) : List Nat :=
+  List.filter (fun n => Nat.lt 0 n)
+    (List.map (fun w => match String.parseNat (String.trim w) with
+      | .some n => n
+      | .none => 0) (String.splitOn s " "))
+
+/-- `2ⁿ`. Named to avoid a name clash with the library's bit operations. -/
+def Scry.pow2 (n : Nat) : Nat := match n with
+  | .zero => 1
+  | .succ k => Nat.mul 2 (Scry.pow2 k)
+
+/-- The flag mask (`1` and `2` set → 3) and whether flag `3` (system header) is present. -/
+def Scry.flagMask (ns : List Nat) : Nat :=
+  List.foldl (fun acc n => Nat.add acc (Scry.pow2 (Nat.sub n 1))) 0 ns
+
+/-- The body of a marker after its `#` (and optional `line` word). -/
+def Scry.markerFrom (r : String) : Option Scry.Marker :=
+  match String.chars r with
+  | .nil => .none
+  | .cons c rest => match Char.isDigit c with
+    | .false => .none
+    | .true =>
+      let d := Scry.digitsGo (Nat.sub (Char.code c) 48) rest;
+      let after := String.trimLeft (String.ofChars d.2);
+      match String.chars after with
+      | .nil => .some (Scry.Marker.mk d.1 .none 0 .false)
+      | .cons q rest2 => match Char.eq q (Char.mk 34) with
+        | .true =>
+          let qp := Scry.untilQuote rest2 .nil;
+          let ns := Scry.flagNumbers (String.ofChars qp.2);
+          .some (Scry.Marker.mk d.1 (.some qp.1) (Scry.flagMask ns)
+            (List.any (Nat.beq 3) ns))
+        | .false => .some (Scry.Marker.mk d.1 .none 0 .false)
+
+/-- A preprocessor line marker (`# 12 "a.c" 1 3`, `#line 12 "a.c"`, `#line 12`), or
+`none` for an ordinary line (including `#pragma`, which is not a marker and is left for
+tree-sitter). -/
+def Scry.markerOf (l : String) : Option Scry.Marker :=
+  match String.chars (String.trimLeft l) with
+  | .nil => .none
+  | .cons c rest => match Char.eq c (Char.mk 35) with
+    | .false => .none
+    | .true =>
+      let after := String.trimLeft (String.ofChars rest);
+      let r := match String.stripPrefix after "line" with
+        | .some x => String.trimLeft x
+        | .none => after;
+      Scry.markerFrom r
+
+-- ## The line map
+
+/-- The line-start offsets of `s`: the offset of the first character of each line. A
+trailing newline yields a last, empty line. -/
+partial def Scry.lineStartsGo : Nat → List String → List Nat
+  | _, .nil => .nil
+  | off, .cons l rest =>
+    .cons off (Scry.lineStartsGo (Nat.add (Nat.add off (String.length l)) 1) rest)
+
+/-- The line-start offsets of `s`. -/
+def Scry.lineStarts (s : String) : List Nat := Scry.lineStartsGo 0 (String.splitOn s "\n")
+
+/-- Line `i` (0-based) of `s`, without its newline. -/
+def Scry.lineText (s : String) (starts : List Nat) (i : Nat) : String :=
+  let lo := List.getD starts i (String.length s);
+  let nxt := List.getD starts (Nat.succ i) (Nat.succ (String.length s));
+  let hi := match Nat.le nxt (String.length s) with
+    | .true => Nat.sub nxt 1
+    | .false => String.length s;
+  String.take (Nat.sub hi lo) (String.drop lo s)
+
+/-- The first file index whose path is `p`, if any. -/
+def Scry.pathIndexFrom (p : String) : Nat → List String → Option Nat
+  | _, .nil => .none
+  | i, .cons q rest => match String.eq p q with
+    | .true => .some i
+    | .false => Scry.pathIndexFrom p (Nat.succ i) rest
+
+/-- The index of path `p` in the table. -/
+def Scry.pathIndex (p : String) (l : List String) : Option Nat := Scry.pathIndexFrom p 0 l
+
+/-- The text supplied for path `p` (`""` when the caller did not supply one). -/
+def Scry.textOfPaths (files : List (String × String)) (p : String) : String :=
+  match List.find (fun q => String.eq q.1 p) files with
+  | .some q => q.2
+  | .none => ""
+
+/-- A blanked line: the same number of characters, all spaces. Marker lines are blanked
+so tree-sitter never sees a directive, while every later offset stays correct. -/
+def Scry.blankLine (l : String) : String :=
+  String.ofChars (List.map (fun _ => (Char.mk 32)) (String.chars l))
+
+/-- The scan state: the file tables, the per-preprocessed-line origin, and the output
+lines, all accumulated in reverse (paths and texts in order). -/
+structure Scry.ScanState where
+  paths : List String
+  texts : List String
+  lineStart : List Nat
+  lineFile : List Nat
+  lineOrig : List Nat
+  out : List String
+  offset : Nat
+  curFile : Nat
+  curLine : Nat
+  markers : Nat
+  systemMarkers : Nat
+
+/-- A preprocessed translation unit: the blanked text tree-sitter parses, the original
+files and their texts, and the map from a preprocessed offset to its original line. -/
+structure Scry.Preprocessed where
+  /-- The preprocessed text with marker lines blanked (same length as the input). -/
+  text : String
+  /-- Original file paths, by file index (0 is the unit's own path). -/
+  paths : List String
+  /-- Original file texts, by file index (`""` when not supplied). -/
+  texts : List String
+  /-- Per preprocessed line: the offset of its first character. -/
+  lineStart : List Nat
+  /-- Per preprocessed line: the original file index. -/
+  lineFile : List Nat
+  /-- Per preprocessed line: the original line number (1-based; markers may say 0). -/
+  lineOrig : List Nat
+  /-- Per original file: its line-start offsets. -/
+  fileLines : List (List Nat)
+  /-- The number of marker lines seen. -/
+  markers : Nat
+  /-- The number of markers that named a system header (flag `3`). -/
+  systemMarkers : Nat
+
+/-- One line of the scan: record the line's origin, then a marker changes the state for
+the lines after it. -/
+def Scry.scanLine (files : List (String × String)) (st : Scry.ScanState)
+    (l : String) : Scry.ScanState :=
+  let st1 := { st with
+    lineStart := .cons st.offset st.lineStart,
+    lineFile := .cons st.curFile st.lineFile,
+    lineOrig := .cons st.curLine st.lineOrig };
+  match Scry.markerOf l with
+  | .none => { st1 with
+      out := .cons l st1.out,
+      offset := Nat.add (Nat.add st1.offset (String.length l)) 1,
+      curLine := Nat.succ st1.curLine }
+  | .some m =>
+    let add : List String × List String × Nat := match m.path with
+      | .none => (st1.paths, st1.texts, st1.curFile)
+      | .some p => match Scry.pathIndex p st1.paths with
+        | .some i => (st1.paths, st1.texts, i)
+        | .none => (List.append st1.paths (.cons p .nil),
+            List.append st1.texts (.cons (Scry.textOfPaths files p) .nil),
+            List.length st1.paths);
+    { st1 with
+      paths := add.1,
+      texts := add.2.1,
+      curFile := add.2.2,
+      curLine := m.line,
+      out := .cons (Scry.blankLine l) st1.out,
+      offset := Nat.add (Nat.add st1.offset (String.length l)) 1,
+      markers := Nat.succ st1.markers,
+      systemMarkers := match m.system with
+        | .true => Nat.succ st1.systemMarkers
+        | .false => st1.systemMarkers }
+
+/-- Walk every preprocessed line. -/
+partial def Scry.scanLines (files : List (String × String)) : List String → Scry.ScanState → Scry.ScanState
+  | .nil, st => st
+  | .cons l rest, st => Scry.scanLines files rest (Scry.scanLine files st l)
+
+/-- The starting state: one file (`defaultPath`) with its supplied text, at line 1. -/
+def Scry.scanStart (files : List (String × String)) (defaultPath : String) : Scry.ScanState :=
+  Scry.ScanState.mk (.cons defaultPath .nil) (.cons (Scry.textOfPaths files defaultPath) .nil)
+    .nil .nil .nil .nil 0 0 1 0 0
+
+/-- Preprocess `raw` from `defaultPath`: parse its line markers, blank them, and build
+the line map. `files` supplies the original text of a path the markers name (a missing
+path maps by line and column with an empty byte range). -/
+def Scry.preprocess (defaultPath : String) (raw : String)
+    (files : List (String × String)) : Scry.Preprocessed :=
+  let st := Scry.scanLines files (String.splitOn raw "\n") (Scry.scanStart files defaultPath);
+  Scry.Preprocessed.mk (String.intercalate "\n" (List.reverse st.out))
+    st.paths st.texts
+    (List.reverse st.lineStart) (List.reverse st.lineFile) (List.reverse st.lineOrig)
+    (List.map Scry.lineStarts st.texts) st.markers st.systemMarkers
+
+/-- The paths a preprocessor output names, in first-seen order (with `defaultPath`
+first). The caller reads these and passes the association back to `Scry.preprocess`. -/
+def Scry.markerPaths (defaultPath : String) (raw : String) : List String :=
+  (Scry.preprocess defaultPath raw .nil).paths
+
+/-- The plain (not preprocessed) map for one file: what `Scry.Cst.ofStore` uses, so even
+a direct CST gets line and column origins. -/
+def Scry.Preprocessed.plain (path : String) (text : String) : Scry.Preprocessed :=
+  Scry.preprocess path text (.cons (path, text) .nil)
+
+-- ## Mapping an offset
+
+/-- The last line index whose start is at or before `off`. -/
+partial def Scry.lineIndexFrom (off : Nat) : Nat → Nat → List Nat → Nat
+  | _, best, .nil => best
+  | i, best, .cons s rest => match Nat.le s off with
+    | .true => Scry.lineIndexFrom off (Nat.succ i) i rest
+    | .false => best
+
+/-- A mapped position: the original file, 1-based line and column, and the byte offset
+those index in the original file's text. -/
+structure Scry.Pos where
+  file : Nat
+  line : Nat
+  col : Nat
+  off : Nat
+
+/-- Map a preprocessed byte offset to its original position. The line is exact (from the
+markers); the column is the offset within the preprocessed line, which equals the
+original column when nothing on the line changed (the span check in `Scry.mapSpan`
+decides that). -/
+def Scry.posOf (pre : Scry.Preprocessed) (off : Nat) : Scry.Pos :=
+  let i := Scry.lineIndexFrom off 0 0 pre.lineStart;
+  let file := List.getD pre.lineFile i 0;
+  let line0 := List.getD pre.lineOrig i 0;
+  let line := match Nat.beq line0 0 with
+    | .true => 1
+    | .false => line0;
+  let lo := List.getD pre.lineStart i 0;
+  let col := Nat.add (Nat.sub off lo) 1;
+  let text := List.getD pre.texts file "";
+  let starts := List.getD pre.fileLines file .nil;
+  let lineOff := List.getD starts (Nat.sub line 1) 0;
+  let off2 := Nat.add lineOff (Nat.sub col 1);
+  let off3 := match Nat.le off2 (String.length text) with
+    | .true => off2
+    | .false => String.length text;
+  Scry.Pos.mk file line col off3
+
+/-- The origin for a position that cannot be mapped exactly: the whole original line at
+`p.line`, trimmed (leading whitespace skipped so `spanText` starts with the statement). -/
+def Scry.lineOrigin (pre : Scry.Preprocessed) (p : Scry.Pos) (node : Nat) : Wil.Span :=
+  let text := List.getD pre.texts p.file "";
+  let starts := List.getD pre.fileLines p.file .nil;
+  let l := Scry.lineText text starts (Nat.sub p.line 1);
+  let lead := Nat.sub (String.length l) (String.length (String.trimLeft l));
+  let len := String.length (String.trim l);
+  let lo := Nat.add (List.getD starts (Nat.sub p.line 1) 0) lead;
+  let hi := Nat.add lo len;
+  Wil.Span.mk p.file lo hi node p.line (Nat.add lead 1)
+
+/-- Map a preprocessed span to an original `Wil.Span`. If the span's preprocessed text
+equals the original text at the mapped range, the range is exact; otherwise (a macro
+expansion, a removed comment, a conditional) it is the original line of its start. -/
+def Scry.mapSpan (pre : Scry.Preprocessed) (node start stop : Nat) : Wil.Span :=
+  let a := Scry.posOf pre start;
+  let b := Scry.posOf pre stop;
+  let ppTxt := String.take (Nat.sub stop start) (String.drop start pre.text);
+  let origTxt := List.getD pre.texts a.file "";
+  let cand := String.take (Nat.sub b.off a.off) (String.drop a.off origTxt);
+  let exact : Bool := match Nat.beq a.file b.file with
+    | .false => .false
+    | .true => match Nat.le a.off b.off with
+      | .false => .false
+      | .true => String.eq ppTxt cand;
+  match exact with
+  | .true => Wil.Span.mk a.file a.off b.off node a.line a.col
+  | .false => Scry.lineOrigin pre a node
+

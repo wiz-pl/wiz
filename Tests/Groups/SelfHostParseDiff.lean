@@ -51,6 +51,7 @@ def afterPrefix (p s : String) : Option String :=
 characters, so the two strings are directly comparable). -/
 def escapeLines (s : String) : String :=
   ((s.replace "\\" "\\\\").replace "\n" "\\n").replace "\r" "\\r" |>.replace "\t" "\\t"
+    |>.replace "\x00" "\\0"
 
 /-- The position in a driver/host error message (`error <pos>: …`), for treating two
 rejections at the same offset as agreement even when the lexer's words differ. -/
@@ -86,6 +87,8 @@ def selfhostParser (t : ParserTables) : IO (Except String System.FilePath) := do
     "    | 10 => .cons (Char.mk 92) (.cons (Char.mk 110) (escChars rest))\n" ++
     "    | 13 => .cons (Char.mk 92) (.cons (Char.mk 114) (escChars rest))\n" ++
     "    | 9 => .cons (Char.mk 92) (.cons (Char.mk 116) (escChars rest))\n" ++
+    -- (a NUL, as in `"\\u{0}"`, would end the printed line in the C runtime)
+    "    | 0 => .cons (Char.mk 92) (.cons (Char.mk 48) (escChars rest))\n" ++
     "    | _ => .cons c (escChars rest)\n" ++
     "def esc (s : String) : String := match s with\n  | .mk cs => .mk (escChars cs)\n" ++
     "def cmdLine (stx : Syntax) : String := String.append \"C\\t\" (esc (sexpr stx))\n" ++
