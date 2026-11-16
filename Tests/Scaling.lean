@@ -528,6 +528,19 @@ def recordEqEta : String :=
   "def tSlow (xs : Trace (Bool × Bits8)) (t : Nat) :\n" ++
   "    Mealy.stateAt spec s0 xs (Nat.succ t) = (spec (Mealy.stateAt spec s0 xs t) (xs t)).1 := rfl\n"
 
+/-- `SyntaxF`'s shape without the library: a family over `B`, a function on `F .f` with
+recursive calls in two branches of a nested `match`, and `#eval` of it on 40 elements
+(80 cells: 2^80 calls when each call site computed its own hypothesis). -/
+def indexMatch : String :=
+  natDecl ++
+  "inductive B where\n  | t\n  | f\n" ++
+  "inductive F : B → Type where\n  | sep : F .t\n  | leaf (n : N) : F .t\n" ++
+  "  | node (args : F .f) : F .t\n  | nil : F .f\n  | cons (h : F .t) (t : F .f) : F .f\n" ++
+  "def count : F .f → N\n  | .cons x rest => match x with\n    | .sep => count rest\n" ++
+  "    | _ => N.s (count rest)\n  | .nil => N.z\n" ++
+  "def input : N → F .f\n  | .z => .nil\n  | .s m => .cons (.leaf m) (.cons .sep (input m))\n" ++
+  s!"#eval count (input {String.join ((List.range 40).map fun _ => "(N.s ")}N.z{String.mk (List.replicate 40 ')')})\n"
+
 def group : Group where
   name := "scaling"
   exercise := "super-linear time and memory"
@@ -555,6 +568,11 @@ def group : Group where
           "def blow : N → N × N\n  | .z => (N.z, N.z)\n  | .s n => let (a, b) := blow n; let (c, d) := blow n; (a, d)\n" ++
           s!"def big : N × (N × N) := (N.z, blow {String.join ((List.range 40).map fun _ => "(N.s ")}N.z{String.mk (List.replicate 40 ')')})\n" ++
           "def y : N := big.1\n") },
+    -- equations on a family at a concrete index (`F .f`, as `SyntaxF .false`) bound a
+    -- `let _ih_rest := ih proof` per recursive call, and `#eval` (strict) ran every one:
+    -- with calls in two branches, 2 per list cell (12 elements of `SyntaxF` took 7 s)
+    { name := "#eval of a function on a family at a fixed index, recursing in two branches, is linear (was exponential)", run := fun _ =>
+        checksWithin 60 indexMatch },
     { name := "a 20000-character string literal is checked and erased in linear time", run := fun _ =>
         longLiteral 20000 60 },
     -- reuse across `case` (`reuseAcross`) tried a drop it could not pair again from each

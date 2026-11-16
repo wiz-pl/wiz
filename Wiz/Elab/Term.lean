@@ -2702,7 +2702,17 @@ partial def compileMatch (ctx : LocalCtx R) (vars : List Lvl) (clauses : List (M
     if let some rc := rc then
       let ihType (l : Lvl) : Option (VTy R) := ctx.types[ctx.lvl - l - 1]?
       match rewriteRecCalls g rc binds ihType ctx.lvl ctx.types.reverse.toArray cl.rhs with
-      | .ok (r, extra) => rhs := r; binds := binds ++ extra
+      | .ok (r, extra) =>
+        rhs := r
+        -- one binding per hypothesis name: the calls find `_ih_y` by name, so only the
+        -- last binding of a name is used. Kept for every call site, a family matched at
+        -- a concrete index (whose hypothesis `ih proof` is a `let`, not substituted)
+        -- computes it once per call site, and a strict evaluator runs all of them:
+        -- exponential when two branches recurse on the same field (Tests/Scaling.lean,
+        -- `indexMatch`)
+        let lastOf := extra.zipIdx.filter fun ((n, _, _), i) =>
+          !(extra.drop (i + 1)).any (·.1 == n)
+        binds := binds ++ lastOf.map (·.1)
       | .error e => throwAt cl.rhs.info e ErrorCode.notStructural
     let mut ctx' := ctx
     for (n, ty, val) in binds do
