@@ -213,6 +213,16 @@ inductive Approx where
   | none | default | last
   deriving BEq, Inhabited
 
+/-- (6h S2) A lemma registered for `simp`'s default set: its name, its priority (higher
+is tried first; 1000 unless given), and whether it is used right to left. The lemmas
+are registered by `attribute [simp]`; the set itself is Wiz data, read with
+`Tac.getSimpLemmas`. -/
+structure SimpLemma where
+  name : Name
+  priority : Nat := 1000
+  rtl : Bool := false
+  deriving Repr, Inhabited
+
 structure ElabState (R : Type) where
   globals : Globals R
   metas : Array (MetaEntry R) := #[]
@@ -249,6 +259,9 @@ structure ElabState (R : Type) where
     fun _ _ _ => (#[], .error "procedural macros can't run here")
   /-- tactics: node kind and the Wiz function that runs it, latest first -/
   tactics : List (Name × Name) := []
+  /-- (6h S2) the `[simp]` lemmas, latest first (`Tac.getSimpLemmas`; the Wiz driver
+  owns the order, the priority and the policy) -/
+  simpLemmas : List SimpLemma := []
   /-- erase what is reachable from these globals, for the interpreter (supplied by the
   command elaborator) -/
   compileCode : List Name → Except String Code := fun _ => .error "tactics can't run here"

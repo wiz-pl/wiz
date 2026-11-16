@@ -572,9 +572,30 @@ partial def unify (l : Lvl) (t u : Val R) : ElabM R Unit := do
     | t, u => pure (t, u)
   -- an equation against something that isn't one: it may compute further
   let isEq (v : Val R) : Bool := v matches .neutral (.eq ..) _
+  -- a data type's computed equation carries its original sides on its payload Σ
+  -- (`markDataEq`, #256): against a stuck equation, unify those sides, so a hole in the
+  -- stuck equation learns the side the computation hid (`Eq.trans h e1`: the expected
+  -- `L = ?c` against `e1`'s computed `L = L2`, #257). Equal sides make the stuck equation
+  -- compute to the same Σ (`vEq` is a function of them), so this is the equation's
+  -- congruence; a failure undoes and falls through to the general comparison.
+  let eqSides (eq : Val R) (v : Val R) : ElabM R Bool := do
+    let .neutral (.eq A a b) #[] := eq | return false
+    let some (A', a', b') := eqDataSides? v | return false
+    let s ← get
+    try
+      unify l A A'
+      unify l a a'
+      unify l b b'
+      pure true
+    catch _ =>
+      set s
+      pure false
   if isEq t != isEq u then
     if let some t' ← recomputeEq? t then return ← unify l t' u
     if let some u' ← recomputeEq? u then return ← unify l t u'
+    if isEq t then
+      if ← eqSides t u then return ()
+    else if ← eqSides u t then return ()
   -- a stuck `cast A B e x` (computed while a hole in `A` or `B` was unsolved) against
   -- something else: if `A` and `B` are now the same (equal without solving anything),
   -- it is `x` (regularity; evaluated again, it would compute to `x`)
