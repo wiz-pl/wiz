@@ -71,6 +71,36 @@ def toolingGroup : Group where
         let (_, h5) ← Cache.elaborateCached (some dir) [] src init 0 (binary := some me)
         checkEq 0 h4
         check (h5 > 0) "the default is not this binary's hash" },
+    { name := "22m: the target is part of the cache key (--target/--ptr-bits/--endian)", run := fun _ => do
+        let t0 : Toolchain := {}
+        let t1 : Toolchain := { t0 with target := "aarch64-unknown-linux-gnu" }
+        let t2 : Toolchain := { t0 with ptrBits := 32 }
+        let t3 : Toolchain := { t0 with endian := "big" }
+        check (t0.id != t1.id && t0.id != t2.id && t0.id != t3.id) "the target is not in the toolchain id"
+        check (t0.targetId != t1.targetId && t0.targetId != t2.targetId && t0.targetId != t3.targetId)
+          "the target id does not change"
+        -- the flags set the fields, and round-trip
+        let (t, rest) := t0.parseFlags ["--target", "aarch64-unknown-linux-gnu", "--ptr-bits", "32",
+          "--endian", "big", "check", "f.wiz"]
+        checkEq ["check", "f.wiz"] rest
+        checkEq "aarch64-unknown-linux-gnu" t.target
+        checkEq 32 t.ptrBits
+        checkEq "big" t.endian
+        check (t.toFlags.contains "--target" && (t.toFlags.contains "32") && (t.toFlags.contains "big"))
+          s!"the flags do not round-trip: {t.toFlags}"
+        check (((t.render).splitOn "target aarch64-unknown-linux-gnu").length > 1) "render has no target"
+        check ((t0.set "ptr-bits" "48").isNone) "a 48-bit pointer width was accepted"
+        -- two targets in one cache directory do not share entries
+        let prelude ← IO.FS.readFile "lib/Prelude.wiz"
+        let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := fun m => if m == "Prelude" then some prelude else none }
+        let src := "import Prelude\ndef two : Nat := 1 + 1\n#eval two\n"
+        let dir ← IO.FS.createTempDir
+        let (_, h1) ← Cache.elaborateCached (some dir) [] src init 0 (toolchain := t0.id)
+        let (_, h2) ← Cache.elaborateCached (some dir) [] src init 0 (toolchain := t0.id)
+        let (_, h3) ← Cache.elaborateCached (some dir) [] src init 0 (toolchain := t1.id)
+        checkEq 0 h1
+        check (h2 > 0) "the same target got nothing from the cache"
+        checkEq 0 h3 },
     { name := "terms survive the cache's format", run := fun _ => do
         let prelude ← IO.FS.readFile "lib/Prelude.wiz"
         let st := runFrontend (R := ZeroOneMany) "import Prelude" { trustedModule := Tests.libModule, loader := fun _ => some prelude }

@@ -366,7 +366,7 @@ def cRun (src : String) (expected : String) (llvm : Bool := false) (split : Nat 
   match ← Build.runGlobal (← toolchain) s "main" dir llvm (split := split) with
   | .ok v => checkEq expected v
   | .error e =>
-    let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
+    let missing := noToolchain e
     if missing then skip "no toolchain" else throw (IO.userError e)
 
 /-- (15f) Build `main` with the C compiler's optimiser off (`-O0`: it does no tail calls of
@@ -387,7 +387,7 @@ def cRunSmallStack (src : String) (expected : String) (llvm : Bool := false) : I
     else Build.compileC tc (C.program decls false (Build.extraC s)) exe
   match built with
   | .error e =>
-    let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
+    let missing := noToolchain e
     if missing then skip "no toolchain" else throw (IO.userError e)
   | .ok () =>
     let out ← IO.Process.output { cmd := exe.toString, env := #[("WIZ_STACK_MB", some "1")] }
@@ -434,7 +434,7 @@ def ioRunWith (src : String) (k : String → IO Unit) (args : Array String := #[
   match ← Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm (timeout := some 120) (args := args) with
   | .ok v => k v
   | .error e =>
-    let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
+    let missing := noToolchain e
     if missing then skip "no toolchain" else throw (IO.userError e)
 
 /-- Build `main : IO _` with the C backend (and the `IO` library) and compare its output. -/
@@ -534,7 +534,7 @@ def ioRunC (src csrc expected : String) (fails : Option String := none) : IO Uni
     match ← Build.runGlobal tc s "main" dir llvm (timeout := some 120) with
     | .ok v => if fails.isSome then throw (IO.userError s!"expected a failure, got {v}") else checkEq expected v
     | .error e =>
-      if ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1 then
+      if noToolchain e then
         skip "no toolchain"
       else match fails with
         | some frag => unless (e.splitOn frag).length > 1 do throw (IO.userError s!"error does not mention '{frag}':\n{e}")
@@ -549,7 +549,7 @@ def libRunC (src csrc expected : String) : IO Unit := do
     let tc ← toolchain
     match ← Build.build tc s "main" (dir / "lib.o") llvm true with
     | .error e =>
-      if ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1 then
+      if noToolchain e then
         skip "no toolchain"
       else throw (IO.userError s!"{if llvm then "(llvm) " else ""}{e}")
     | .ok _ =>
@@ -2010,7 +2010,7 @@ def cRunLibs (src : String) (expected : String) (llvm : Bool := false) : IO Unit
   match ← Build.runGlobal (← toolchain) s "main" dir llvm (timeout := some 120) with
   | .ok v => checkEq expected v
   | .error e =>
-    if ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1 then skip "no toolchain"
+    if noToolchain e then skip "no toolchain"
     else throw (IO.userError e)
 
 /-- Build and run `main` with the whole library (`IO` …), through C or LLVM. -/
@@ -2022,7 +2022,7 @@ def cRunIO (src : String) (expected : String) (llvm : Bool := false) : IO Unit :
   match ← Build.runGlobal (← toolchain) s "main" dir llvm with
   | .ok v => checkEq expected v
   | .error e =>
-    let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
+    let missing := noToolchain e
     if missing then skip "no toolchain" else throw (IO.userError e)
 
 /-- Reads of a wide structure's fields through shared projection prefixes (15j), where

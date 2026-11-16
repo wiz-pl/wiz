@@ -615,3 +615,72 @@ used to be out of range). The kernel compares erased fields like any other, so e
 is built through one private constructor whose proof is canonical (`Word.canon`: for
 closed numbers it computes to `refl`), and two closed words with the same bits are equal
 by `rfl` however their range was proved. Groups `word`, `vec`.
+
+## 22m: representations and layouts checked at build time; the target
+
+Stages 22d and 22k trust a native representation and a `c_struct` layout. A trusted
+registration that no longer matches its type, or a C ABI that differs from the one the
+marshalling assumes, would not be caught by the kernel: it would compile and read the
+wrong bytes. This stage makes both loud.
+
+**The seal is mandatory, at every layer.**
+
+* The registration (`attribute [implemented_by mk get] T.mk`) requires
+  `sealed inductive T`, a private constructor, and — since 22m — that erasure's own
+  lookup can find the representation: the seal `T.seal✝` is in the **index of `T`'s
+  type** (`sealedInTail`), not merely a key in the environment. A `repr:` registration
+  without that can never be found (`nativeTy?` searches the seal), so it is refused
+  rather than silently left as the model's object.
+* Every build re-derives each registration (`Build.reprCoherence`, called by
+  `irProgram`, so `wiz build`, `wiz run`, `#eval`'s compiled path and `wiz repr` agree):
+  the seal key exists and is in the type's index; `mk` and `get` exist and `get`'s arity
+  is the recorded one; and the erased constructor's shape — one runtime field, its tag,
+  field count, `mk` arity and the argument that carries the field (`ctorReprShape?`,
+  shared with the registration) — is the one the `repr:` key records. A stale or
+  hand-made key (a cache from another compiler is already excluded by the binary hash)
+  is a build error, not a miscompilation. Erasing the constructor for this check is done
+  **without** any `repr:` key, because with its own key erasure builds `mk` instead of
+  the model object the shape describes.
+* The interpreters and `native_refl` read a native value through the same seal
+  (`reprOfTy?`), never through the `μ`'s display hint: conversion ignores the hint, so it
+  could not be what decides a representation (R3).
+
+**Generated layout checks (`_Static_assert`).** Every generated C program (both
+backends; the LLVM backend compiles the runtime and glue with the C compiler too) now
+carries, after the struct definitions and includes:
+
+* the target's scalar widths — `uint64_t`/`double` 8 bytes with 8-byte alignment, `int`
+  4 (`Bool`), `wiz_val` one pointer — its pointer width (`sizeof(void *) * 8`), and its
+  byte order (`__BYTE_ORDER__` against `--endian`), where the compiler defines them;
+* one assertion and a comment per native representation: it is a single `wiz_val`
+  (`mk`/`get`, tag, field count and runtime field are named), the model's object is
+  never built;
+* for every `c_struct` passed **by value** (an extern's or an export's, nested structs
+  included): for a struct Wiz **generates** (no header), the size, alignment and the
+  offset of every field, computed from the ABI model in `Compiler/C.lean`
+  (`abiSize`/`cStructAbi`: fields in declaration order at the next multiple of their
+  alignment, the size rounded to the struct's alignment); for a struct a **header**
+  defines, only that each named field exists and lies inside it — the header is
+  authoritative and may add, reorder or pack fields, and its C types may be narrower than
+  the Wiz kind (an `int` field read as `Nat` converts). So the documented
+  `c_struct "div_t" (header := "stdlib.h")` still builds, while a generated struct whose
+  layout Wiz got wrong fails at the `_Static_assert` that names it.
+
+**The target is in the cache key.** `Toolchain` gained `target` (a triple), `ptrBits` and
+`endian`, set by `--target TRIPLE`, `--ptr-bits 32|64` and `--endian little|big` (and in a
+grail file by `set target …`). They do not select a compiler — `--cc`/`--cflags` still do
+— they name the target for the cache and the asserts. `Toolchain.id` (and `targetId`)
+include them; `wiz` mixes the id into every module's elaboration key and grail mixes it
+into `cacheSalt`, so one cache never serves the layouts of another target (the open
+R11 of the research note). Defaults (no triple, 64-bit, little-endian) add no flags to
+`Toolchain.toFlags`, so an older `wiz`/`grail` invoked by a new grail still parses them.
+
+**`wiz repr FILE`** prints the same table the asserts check: the target and the ABI
+assumptions, every native representation (type, `mk`/`get`, tag, fields, runtime field,
+one word), and every `c_struct` (C type, header or generated, field kinds and, for a
+generated struct, sizes and offsets), then the coherence errors if any (exit 1). It is
+the quick answer to "what layout did I just build?". Tests: group `repr` (the report,
+the generated asserts for a 32-bit/big-endian target, nested generated structs, coherence
+refusals, a `div_t` program compiled by both backends), group `tooling` (the target in
+the cache key, the flags round-trip), groups `c`, `llvm`, `natives`, `ffi-structs` and
+`word` for the compile paths.

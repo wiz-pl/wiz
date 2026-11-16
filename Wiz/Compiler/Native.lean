@@ -55,8 +55,10 @@ partial def nativeReadback (g : Globals R) (builtins : List (Name × Name)) (ty 
       | v => match v.toNat? with
         | some n => return .natLit n
         | none => throw "a number was expected"
-    -- a native value (stage 22d): the model's object around it
-    let v := match v, hint.bind fun (T, _, _) => reprOf? builtins T with
+    -- a native value (stage 22d): the model's object around it. Found by the type's
+    -- seal (`reprOfTy?`), as erasure does — never by the `μ`'s display hint, which
+    -- conversion ignores
+    let v := match v, reprOfTy? { g with builtins := builtins } ty with
       | .nat n, some ri => RVal.obj ri.tag ((List.range ri.nfields).toArray.map fun k =>
           if k == ri.r then .nat n else .erased)
       | v, _ => v

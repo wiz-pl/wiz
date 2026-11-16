@@ -453,6 +453,32 @@ def nativeTy? (g : Globals R) (ty : Val R) : Option (Name × ReprInfo) :=
 /-- The native representation of a `μ` type, if it has one. -/
 def reprOfTy? (g : Globals R) (ty : Val R) : Option ReprInfo := (nativeTy? g ty).map (·.2)
 
+/-- The value of the constant `T` applied to fresh variables (`T`'s type has leading
+Πs): the `μ` of an inductive family at its parameters. Neutral in the parameters, which
+is all the seal lookup needs. -/
+def appliedType? (g : Globals R) (T : Name) : Option (Val R) :=
+  match g.find? T with
+  | none => none
+  | some d =>
+    let rec nPis : Term R → Nat
+      | .pi _ _ _ _ b _ => nPis b + 1
+      | _ => 0
+    let n := nPis d.type
+    some (eval g [] ((List.range n).foldl (fun t i => .app t (.var i)) (.const T [])))
+
+/-- Is the seal of `T` in the index of `T`'s own type? This is what makes `sealed`
+**mandatory** for a native representation, not merely a registration: `nativeTy?` finds a
+representation only by a seal in the type's index tail, so a `repr:` registration for a
+type without one is unreachable. The elaborator checks it (with the other registration
+conditions); `reprCoherence` checks the same property at build time, on whatever the
+environment holds (a replayed cache included). -/
+def sealedInTail (g : Globals R) (T : Name) : Bool :=
+  match appliedType? g T with
+  | some ty => match whnf ty with
+    | .mu _ I _ _ _ _ => sealedIx? g I == some T
+    | _ => false
+  | none => false
+
 /-- The start of the message with which erasure refuses a description whose first field
 has an abstract type (`neutralFieldTy`). Unlike a term erasure can't handle yet, this is
 never turned into a run-time error (`compileReachableE`). -/
@@ -1056,5 +1082,26 @@ def eraseDecl (g : Globals R) (d : Decl R) : TCM ETerm := do
   -- (P2: the markers of level-generic terms mark nothing at this instance)
   let e ← eraseTop ctx (v.instLevels d.levelParams us).stripMarks (ctx.eval (d.type.instLevels d.levelParams us)) (isNuDesc g d)
   return if derived then e.inlineCalls d.name else e
+
+/-- The shape of a constructor's erased code, for a **type-level** native representation:
+`(tag, fields, runtime field, mk arity, runtime argument)`. It is `none` unless the
+constructor has exactly one runtime field: erasure must build it as `⟨tag f₀ … fₙ₋₁⟩`
+with one live `fᵣ` (a variable bound by the erased code), which `mk` receives as argument
+`p`. One definition, used by the registration (`attribute [implemented_by mk get] T.mk`)
+and by the build-time coherence check (`Build.reprCoherence`), so the two cannot drift. -/
+def ctorReprShape? (g : Globals R) (d : Decl R) : Option (Nat × Nat × Nat × Nat × Nat) := do
+  -- the **model's** constructor: erase it without any native representation (with its
+  -- own, erasure would build `mk` instead of the object this shape describes; the
+  -- registration is made before the key exists, so the check must reproduce that state)
+  let g := { g with builtins := g.builtins.filter fun (k, _) => !k.startsWith "repr:" }
+  let .ok e := eraseDecl g d | none
+  let rec peel : ETerm → Nat × ETerm
+    | .lam _ b => let (n, b) := peel b; (n + 1, b)
+    | t => (0, t)
+  let (n, .obj t fs) := peel e | none
+  let live := (List.range fs.size).filter fun k => !(fs[k]! matches .erased)
+  let [r] := live | none
+  let .var j := fs[r]! | none
+  pure (t, fs.size, r, n, n - 1 - j)
 
 end Wiz

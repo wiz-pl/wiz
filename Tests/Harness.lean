@@ -53,6 +53,12 @@ that imports the group (a plain `initialize` would, and in the exercise tree, wh
 code under test has `sorry`s, that is an error). -/
 def registerGroup (g : Group) : IO Unit := groupRegistry.modify (·.push g)
 
+/-- Is a build error "there is no C toolchain here" (no `cc`/`llc`, no GMP), rather than
+the program's? The suite skips those cases (`no toolchain`) instead of failing them, so a
+sandbox without a compiler still runs the interpreter-only cases. -/
+def noToolchain (e : String) : Bool :=
+  ["gmp.h", "llc:", "No such file", "could not execute external process"].any fun m => (e.splitOn m).length > 1
+
 def check (cond : Bool) (msg : String) : IO Unit :=
   unless cond do throw (IO.userError msg)
 

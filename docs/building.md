@@ -119,6 +119,16 @@ licence, in `share/wiz/cc/LICENSES/lean4-LICENSES` with Lean's third-party licen
 not bundled). A checkout uses `cc` and the system's GMP unless you pass
 `--cc`/`--cflags`/`--ldflags` (the Nix dev shell writes them to `grail.local.wiz`).
 
+**The target (22m).** `--target TRIPLE`, `--ptr-bits 32|64` and `--endian little|big`
+say what the C compiler builds for; they do not choose a compiler (`--cc` and
+`--cflags` do: `--cflags "--target=aarch64-unknown-linux-gnu --sysroot=…"`). Wiz mixes
+the target into every cache key, so a build for one target never replays another's
+modules, and writes `_Static_assert`s of the pointer width, the byte order, the scalar
+widths and every `c_struct` layout into the generated C. `wiz repr FILE` prints that
+table (the native representations, the C structs, the target and the coherence of each
+`repr:` registration); a target whose ABI does not match the model fails the build at
+the assert that names it, instead of reading the wrong bytes.
+
 **Licences of what is linked into your programs.** The Wiz Runtime Library Exception
 (COPYING.RUNTIME) lets you distribute programs compiled by Wiz under any terms, but it
 covers only Wiz's own runtime. Other libraries keep their licences:
@@ -284,8 +294,10 @@ cached between runs.
   Flags parse left to right: a later `--no-cache` turns both the packaged cache and the
   write cache off, and a user's `--cache-ro DIR` appends another read-only layer
   (`--cache-ro` is repeatable and searched in the order given). The entries are keyed
-  by the packaged binary's hash (its bytes) and by `lib`'s text and module names, so
-  the Nix build invalidates them automatically; there is no manual invalidation and a
+  by the packaged binary's hash (its bytes), by `lib`'s text and module names, and by
+  the toolchain's id — compilers, flags and target (22m) — so another `--cc`, `--cflags`
+  or `--target` is a different key rather than a replay of another target's layouts;
+  the Nix build invalidates them automatically, there is no manual invalidation, and a
   stale store path is never reused (a new build gets new keys). The cache is
   read-only in the store, so a miss (a user's own module) is elaborated and written to
   the write cache as usual.

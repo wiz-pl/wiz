@@ -113,7 +113,7 @@ def nativesGroup : Group where
           match ← Build.runGlobal { tc with libs := tc.libs ++ [(dir / "helper.c").toString] } s "main" dir llvm (timeout := some 120) with
           | .ok v => checkEq "285000012884901896" v
           | .error e =>
-            if ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1 then skip "no toolchain"
+            if noToolchain e then skip "no toolchain"
             else throw (IO.userError s!"{if llvm then "(llvm) " else ""}{e}") },
     { name := "shared between threads: each thread's update copies, nothing leaks (C, LLVM)", run := fun _ => do
         cRunLibs nativesThreads "624250724249\n"

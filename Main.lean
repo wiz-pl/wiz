@@ -17,6 +17,8 @@ def usage : String := "usage:
   wiz build FILE -o OUT --no-main  … or the exported functions, linked without a `main`
                                    (say, a Wasm module: --cc emcc --ldflags --no-entry)
   wiz run FILE [--llvm]            build and run `main`, printing its value
+  wiz repr FILE                    the native representations and C struct layouts the file
+                                   declares, and the ABI checks its build generates (22m)
   wiz doc [MODULE|FILE|DIR…] -o OUT [--lib] [--source-url URL] [--title T] [--web DIR]
                                    documentation: a static site (one page per module,
                                    index, search); --lib: the toolchain's library;
@@ -48,7 +50,11 @@ unboxed; not stable under substitution, so off by default)
   the definitions of other modules' types with private parts hidden
 --pp-all (11r; turns the cache off): print terms without notation (as `set_option pp.all true`)
 toolchain: --cc X (default: a release's own share/wiz/cc, else cc), --cflags \"…\" --ldflags \"…\" (where GMP lives),
-  --libs \"…\" (say -lm), --gmp \"…\" (default -lgmp), --llc X (default llc)"
+  --libs \"…\" (say -lm), --gmp \"…\" (default -lgmp), --llc X (default llc)
+target (22m): --target TRIPLE (the triple the C compiler builds for; empty: the host's),
+  --ptr-bits 32|64 and --endian little|big (defaults 64 and little). They name the target in
+  the cache, and the build asserts the compiler agrees (sizeof, offsets, byte order);
+  make cc build for the target with --cc/--cflags (say --cflags \"--target=… --sysroot=…\")"
 
 def parseCmd (path : String) : IO UInt32 := do
   let input ← IO.FS.readFile path
@@ -224,9 +230,11 @@ def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandSta
         pure (some ({ rig := RigTag.tag (R := ZeroOneMany), stats := some regionStats } :
           Cache.RegionOptions))
       else pure none
-    pure (← Cache.elaborateCached tc.cacheDir tc.readCaches input init key₀ (region := region)).1
+    -- (22m) the toolchain's id (compilers, flags, target) is part of every module's key:
+    -- a build for one target never replays another's layouts
+    pure (← Cache.elaborateCached tc.cacheDir tc.readCaches input init key₀ (toolchain := tc.id) (region := region)).1
   else
-    Cache.elaborateUncached input init
+    Cache.elaborateUncached input init (toolchain := tc.id)
 /-- (27a) `--trust-native` and `--native-fuel N`. -/
 def nativeOpts (tc : Toolchain) : Bool × Nat := (tc.trustNative, tc.nativeFuel.getD NativeRun.defaultFuel)
 
@@ -318,6 +326,16 @@ def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOne
     if m.severity == .error then IO.eprintln s!"{path}:{m.render input}"
   pure (if s.messages.any (·.severity == .error) then none else some s)
 
+/-- (22m) `wiz repr FILE`: the native representations and C struct layouts the file
+declares, the target's ABI, and the coherence check the build applies (a `repr:`
+registration without a seal, or one that disagrees with its constructor, is an error). -/
+def reprCmd (tc : Toolchain) (path : String) : IO UInt32 := do
+  let some s ← elabFile tc path | pure 1
+  IO.print (Build.reprReport tc s)
+  let errs := Build.reprCoherence s
+  for e in errs do IO.eprintln s!"repr: {e}"
+  pure (if errs.isEmpty then 0 else 1)
+
 def buildCmd (tc : Toolchain) (path out : String) (llvm : Bool) (lib : Bool := false) (noMain : Bool := false)
     (split : Nat := 0) : IO UInt32 := do
   let some s ← elabFile tc path | pure 1
@@ -392,6 +410,7 @@ def main (args : List String) : IO UInt32 := do
   match args with
   | ["parse", path] => parseCmd path
   | ["check", path] => checkCmd tc path
+  | ["repr", path] => reprCmd tc path
   | ["build", path, "-o", out] => buildCmd tc path out false (split := split)
   | ["build", path, "-o", out, "--llvm"] => buildCmd tc path out true (split := split)
   | ["build", path, "-o", out, "--lib"] => buildCmd tc path out false true (split := split)

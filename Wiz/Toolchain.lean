@@ -24,6 +24,17 @@ structure Toolchain where
   /-- the Boehm collector, for the self-hosted runtime -/
   gcCflags : List String := []
   gcLdflags : List String := []
+  /-- (22m) the target the C compiler builds for: a triple such as
+  `aarch64-unknown-linux-gnu` (empty: the host's). It does not select a compiler: `cc`
+  and its flags do. It names the target in the cache and in `wiz repr`, so that one cache
+  never serves the layout of another target. -/
+  target : String := ""
+  /-- (22m) the target's pointer width in bits, as the generated ABI checks assert it
+  (`--ptr-bits`; 64 by default). A cross build for a 32-bit target passes 32. -/
+  ptrBits : Nat := 64
+  /-- (22m) the target's byte order, `little` or `big` (`--endian`). The generated C
+  asserts the compiler agrees (`__BYTE_ORDER__`). -/
+  endian : String := "little"
   /-- the elaboration cache that is also written (none: no writes) -/
   cacheDir : Option System.FilePath := none
   /-- (23c) read-only elaboration caches, searched in order after `cacheDir` and never
@@ -50,10 +61,18 @@ namespace Toolchain
 
 def words (s : String) : List String := (s.splitOn " ").filter (· ≠ "")
 
-/-- What identifies the generated code: compilers and flags (not the cache or roots). -/
+/-- What identifies the generated code: compilers, flags and the target (not the cache or
+roots). A cache key mixes this in, so a build for one target never replays another's
+layouts (`wiz-notes/prior-art/compilers-runtime-ffi.md`, R11). -/
 def id (t : Toolchain) : UInt64 :=
-  hash (toString [t.cc, " ".intercalate t.cflags, " ".intercalate t.ldflags, " ".intercalate t.libs, t.llc, " ".intercalate t.gmp,
-    " ".intercalate t.gcCflags, " ".intercalate t.gcLdflags])
+  hash (toString [t.cc, " ".intercalate t.cflags, " ".intercalate t.ldflags, " ".intercalate t.libs, t.llc,
+    " ".intercalate t.gmp, " ".intercalate t.gcCflags, " ".intercalate t.gcLdflags,
+    t.target, toString t.ptrBits, t.endian])
+
+/-- (22m) The target part of `id`: the triple, the pointer width and the byte order.
+Separate from it so `wiz repr` and tests can compare targets without the compilers. -/
+def targetId (t : Toolchain) : UInt64 :=
+  hash (toString [t.target, toString t.ptrBits, t.endian])
 
 /-- Set one field by its name (as in `grail.local.wiz` and the flags); `false` if unknown.
 Flag lists replace the field's words; `cache-ro` appends to the read-only caches. -/
@@ -67,6 +86,9 @@ def set (t : Toolchain) (key value : String) : Option Toolchain :=
   | "gmp" => some { t with gmp := words value }
   | "gc-cflags" => some { t with gcCflags := words value }
   | "gc-ldflags" => some { t with gcLdflags := words value }
+  | "target" => some { t with target := value }
+  | "ptr-bits" => (if value == "32" || value == "64" then value.toNat? else none).map fun n => { t with ptrBits := n }
+  | "endian" => if value == "little" || value == "big" then some { t with endian := value } else none
   | "cache" => some { t with cacheDir := some (System.FilePath.mk value) }
   | "cache-ro" => some { t with readCaches := t.readCaches ++ [System.FilePath.mk value] }
   | "root" => some { t with searchPath := t.searchPath ++ [System.FilePath.mk value] }
@@ -77,9 +99,12 @@ def set (t : Toolchain) (key value : String) : Option Toolchain :=
 `--ldflags "…"`, `--libs "…"`, `--gmp "…"`, `--llc X`, `--gc-cflags "…"`,
 `--gc-ldflags "…"`, `--cache DIR` (the cache written to), `--cache-ro DIR` (repeatable:
 a read-only cache, searched in the order given), `--no-cache` (both: no write cache and no
-read caches; a later `--cache` or `--cache-ro` adds one again), `-I DIR`, (27a)
-`--trust-native`, `--native-fuel N`, (28b) `--sat-solver CMD`, `--solver-timeout MS`,
-(28a) `--trust-smt`, `--smt-solver CMD` (flags only, not settings of a grail file). -/
+read caches; a later `--cache` or `--cache-ro` adds one again), `-I DIR`, (22m)
+`--target TRIPLE`, `--ptr-bits 32|64`, `--endian little|big` (the target the C compiler
+builds for: they name it in the cache and the ABI checks; the compiler is still `cc` with
+its flags), (27a) `--trust-native`, `--native-fuel N`, (28b) `--sat-solver CMD`,
+`--solver-timeout MS`, (28a) `--trust-smt`, `--smt-solver CMD` (flags only, not settings
+of a grail file). -/
 partial def parseFlags (t : Toolchain) : List String → Toolchain × List String
   | "--no-cache" :: rest => parseFlags { t with cacheDir := none, readCaches := [] } rest
   | "--trust-native" :: rest => parseFlags { t with trustNative := true } rest
@@ -105,6 +130,11 @@ def toFlags (t : Toolchain) : List String :=
   ["--cc", t.cc, "--cflags", " ".intercalate t.cflags, "--ldflags", " ".intercalate t.ldflags,
    "--libs", " ".intercalate t.libs, "--gmp", " ".intercalate t.gmp, "--llc", t.llc, "--gc-cflags", " ".intercalate t.gcCflags,
    "--gc-ldflags", " ".intercalate t.gcLdflags] ++
+  (if t.target.isEmpty then [] else ["--target", t.target]) ++
+  -- (only when not the defaults, as the solver settings: the flags of a default toolchain
+  -- stay what an older `wiz`/`grail` understands)
+  (if t.ptrBits == 64 then [] else ["--ptr-bits", toString t.ptrBits]) ++
+  (if t.endian == "little" then [] else ["--endian", t.endian]) ++
   (let reads := t.readCaches.flatMap fun d => ["--cache-ro", d.toString]
    match t.cacheDir with
    | some d => reads ++ ["--cache", d.toString]
@@ -144,6 +174,7 @@ the written cache or `(off)`). -/
 def render (t : Toolchain) : String :=
   s!"cc {t.cc}\ncflags {" ".intercalate t.cflags}\nldflags {" ".intercalate t.ldflags}\nlibs {" ".intercalate t.libs}\ngmp {" ".intercalate t.gmp}\nllc {t.llc}\n" ++
   s!"gc-cflags {" ".intercalate t.gcCflags}\ngc-ldflags {" ".intercalate t.gcLdflags}\n" ++
+  s!"target {t.target}\nptr-bits {t.ptrBits}\nendian {t.endian}\n" ++
   String.join (t.readCaches.map fun d => s!"cache-ro {d}\n") ++
   s!"cache {(t.cacheDir.map toString).getD "(off)"}\nroots {" ".intercalate (t.searchPath.map toString)}\n"
 

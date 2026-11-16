@@ -116,6 +116,7 @@ set the status (open PRs in *italics*). Sections: §3 fixed, §4 open, §5 stuck
 | F12 / IS | two imported modules declaring one name: `Empty` | **fixed** | #104; private names per module #109, #132 | §3 |
 | F13 / NU-TRANSP | ill-typed equations at a Σ with a visible proof component | **fixed** (visible); neutral case **open issue** (pinned) | #123; regression fix *#130* | §3, §4 |
 | F14 / R5, R3 open 2 | native representation by display name; out-of-range `.mk` word | **fixed** | #119 (seal) | §3, §4 R3 |
+| F15 / R7, R11 | `c_struct`/native layouts unasserted; cache key had no target or toolchain id | **fixed** | 22m | §3, §7.0 |
 | T1 | compiled equations of recursive definitions | **fixed**, partial correctness (M1 open, low); L1 doc fixed here | #82, #98, #126 | §3 |
 | T1-L2 | `#print axioms` names only the first link of an `implemented_by` chain | **open issue** (low) | fix in *#129* | §4 |
 | O1 | `Kernel.wiz` `Size ≡ Size` was `False` | **fixed** | (`c079d1b`) | §4 |
@@ -684,6 +685,40 @@ set the status (open PRs in *italics*). Sections: §3 fixed, §4 open, §5 stuck
   group *selfhost*: "the self-hosted frontend: a sealed type has no look-alikes, as in
   the Lean frontend (22k)". Probes `a2-r5-word-out-of-range.wiz`,
   `r3-native-lookalike.wiz` (both rejected now).
+
+### F15. Layouts trusted without a check; the cache key had no toolchain (R7, R11) — **fixed** (stage 22m)
+
+* **The gaps.** A native representation and a `c_struct`'s C layout are trusted (the
+  kernel never runs them). Nothing re-checked a `repr:` registration against the type it
+  names, so a stale or hand-made key (from a cache, a bug, an older compiler) would
+  compile; the registry only had the elaborator's checks at the moment of registration.
+  And `Toolchain.id` existed for compilers and flags but was not mixed into any cache
+  key, so two builds with different `--cc`/`--cflags` — and no notion of `--target` at
+  all — shared elaboration entries and each other's generated-code assumptions (R11).
+  A cross target could differ from the host in pointer width, byte order, alignment or a
+  header struct's field widths, and a wrong layout is a silent misread, not a type error
+  (R7).
+* **The fix.** (1) The seal is mandatory at every layer: the elaborator requires it and
+  checks that it is in `T`'s index (`sealedInTail`), and every build re-derives each
+  `repr:` registration (`Build.reprCoherence`): seal and index, `mk`/`get` and arity,
+  and the erased constructor's shape, through the same `ctorReprShape?` the registration
+  used. (2) The generated C asserts the target's scalar widths, pointer width and byte
+  order, and each `c_struct` passed by value — full size/alignment/offsets for a
+  generated struct, field-existence for a header's. (3) `Toolchain` has `target`/
+  `ptrBits`/`endian` (`--target`, `--ptr-bits`, `--endian`), they are in `Toolchain.id`
+  and `targetId`, and `wiz` and grail mix the id into every module key. (4) `wiz repr
+  FILE` prints the table and the coherence result.
+* **What remains.** The ABI model covers the targets Wiz builds for (8-byte
+  `uint64_t`/`double`, 4-byte `int`, pointer width 32 or 64); a target whose alignment
+  differs fails the assert that names it rather than being supported. `--target` is
+  metadata: `cc`/`--cflags` still have to build for it (a first-class target that drives
+  the sysroot is future work). The seal remains an axiom (kernel brands would replace
+  it, `structural-vs-nominal.md` §6b).
+* **Tests.** Group *repr*: "22m: wiz repr …", "22m: the build's `_Static_assert`s …",
+  "22m: a `repr:` without a seal, or one whose shape changed, is refused …", "22m: a
+  `c_struct` program is compiled with its layout asserts (C, LLVM)"; group *tooling*:
+  "22m: the target is part of the cache key". Groups `c`, `llvm`, `natives`,
+  `ffi-structs`, `word` cover the generated asserts on both backends.
 
 ---
 
@@ -1254,11 +1289,11 @@ on it. Details in §7.1 and CoreSpec §16.
 | templates and kernel-built types | `Templates.lean`, method/motive types, the terms built in `vEq`/`vEqType`/`vCast` | — | type-checked by audit-2's tests (#120, open), not by the kernel |
 | axioms | `axiom`, `extern`/`C.*` functions, `foreign` types; the Prelude's `castRefl`; each sealed type's `T.seal✝ : Type` (#119) | yes | a seal is an inhabitant of `Type`, harmless |
 | `builtin` registrations | `nat.*` of the toolchain's `lib/Prelude.wiz` (reviewed, §7.1), `memo`, `string` | library: no; elsewhere: yes (an axiom) | one registration per key (T14) |
-| native implementations | `implemented_by` functions, native representations (`repr:`, sealed types only since #119), the word natives in `runtime/` | yes, as `native f := g`; **first link of a chain only** (L2, §4) | the kernel never runs them; `UIntN.ofBitsTrusted` (O4) is an unchecked builder until #145 |
+| native implementations | `implemented_by` functions, native representations (`repr:`, sealed types only since #119), the word natives in `runtime/` | yes, as `native f := g`; **first link of a chain only** (L2, §4) | the kernel never runs them; `UIntN.ofBitsTrusted` (O4) is an unchecked builder until #145; each `repr:` registration is re-derived at every build (22m: seal in the type's index, erased shape, erasure's lookup) |
 | compiled equations (`Decl.impl`) | **not** trusted for their value since #126; trusted to **terminate** (M1, §3 T1) | no | |
 | erasure and the backends | `Compiler/Erase.lean`, `Compiler/Push.lean` (rewrites 1, 2 re-checked for typing only; `inlineCalls` not checked), the IR, RC, the C and LLVM backends, `runtime/`, the C compiler, the eliminators' code (`PrimCode.lean`, the runtime's `ind`) | — | erasure relies on QTT (a 0-quantity value is never needed): not proved |
 | partial definitions | the body (opaque to the kernel; a witness of the type is checked) | no | compiled code runs the body; it may loop |
-| the elaboration cache | replayed declarations are not checked again; an entry is keyed by the binary, the source text and (since #104) the module name; a replay refuses a name already declared (F12) | — | `~/.cache/wiz` |
+| the elaboration cache | replayed declarations are not checked again; an entry is keyed by the binary, the source text, (since #104) the module name and (22m) the toolchain's id — compilers, flags and target; a replay refuses a name already declared (F12) | — | `~/.cache/wiz` |
 | library invariants behind private constructors | `lib/Word.wiz` keeps `toNat < 2^w` (until #145 makes it a field), `lib/Region.wiz` handles (linear handles, §4) | — | privacy is the elaborator's (13b) plus erasure's layer 3 (#119); the kernel does not see it |
 | non-default kernel flags | `--regularity full`, `--eager-proofs`, `--inert`, `--predicative-prop`, `--unbox-structs`, `--strict-privacy` | — | experiments: nothing on this page is claimed for them |
 | trust extensions (not on master) | `--trust-native` / `native_refl` (#129), `--trust-smt` (#144) | yes (each use an axiom) | §9 |

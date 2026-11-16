@@ -93,7 +93,10 @@ def settings : Settings := Settings.empty
 compiler and flags, `llc`, the collector's flags, the cache, module roots) comes from
 `--cc`, `--cflags`, `--ldflags`, `--libs`, `--llc`, `--cache DIR`/`--cache-ro DIR`/`--no-cache` and
 `-I DIR` (which replaces `$WIZ_PATH`), and is passed explicitly to everything that
-compiles. Its compiler fields are its `id`, which enters grail's keys.
+compiles. Its compiler fields, flags and target are its `id`, which enters grail's keys
+(22m): a check, a module replayed from the elaboration cache and a build for one target
+are never reused for another (`Grail.Elab.cacheSalt` mixes the id into the main file's
+key and into every module key).
 
 ## 23e: the self-hosted toolchain as targets
 

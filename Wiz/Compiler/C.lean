@@ -117,6 +117,134 @@ def fieldPath (v : String) (i n : Nat) (unbox : Bool := false) : String :=
     | k + 1, e => seconds k s!"wiz_field_ref({e}, 1)"
   if unbox && i + 1 == n then seconds i v else s!"wiz_field_ref({seconds i v}, 0)"
 
+/-! ### The ABI's layout, and the asserts that check it (22m)
+
+The C compiler decides a struct's layout (padding, alignment, the AAPCS64/SysV
+differences); Wiz's marshalling must agree with it. Pure Wiz code only ever uses fields
+by name, but three things do assume a layout: a **native representation** is one
+`wiz_val`, a **generated `c_struct`** is laid out by the model below (`abiSize` /
+`cStructAbi`), and the scalar widths are the `uint64_t`/`double`/`int` of the FFI kinds.
+`layoutAsserts` writes `_Static_assert`s for all three into the generated C, and
+`wiz repr` prints the same table. A target where the model does not hold fails the build
+with the assert that names it, instead of reading the wrong bytes. -/
+
+/-- The layout of the fields of a C struct named by a `c_struct` (or an imported header):
+the named fields in declaration order, each field's width, and — for a struct **Wiz
+generates** (no header: its layout is ours) — its size, alignment and the offset of each
+field. A header struct may have fields the `c_struct` does not name and may be packed, so
+only its fields' widths are known here. -/
+structure CStructAbi where
+  ctype : String
+  header : String
+  fields : List (String × FKind)
+  /-- each named field's width in bytes (`none`: a byte array, whose size is the header's) -/
+  bytes : List (String × Option Nat) := []
+  /-- the size of the whole struct (generated structs only) -/
+  size : Option Nat := none
+  /-- the alignment of the whole struct (generated structs only) -/
+  align : Option Nat := none
+  /-- each named field's offset (generated structs only) -/
+  offsets : List (String × Nat) := []
+  deriving Repr, Inhabited
+
+private def alignUp (off align : Nat) : Nat := if align <= 1 then off else ((off + align - 1) / align) * align
+
+mutual
+
+/-- The size and alignment in bytes a field kind stands for, under the ABI model: `Nat`
+and `UInt64` are 8/8, `Float64` 8/8, `Bool` an `int` 4/4, strings, pointers and
+`wiz_val`s one pointer, a byte array (`Bytes`, `char f[N]`) has no size of its own (the
+header decides), a nested struct its own layout. -/
+partial def abiSize (ptrBytes : Nat) : FKind → Option (Nat × Nat)
+  | .k 'n' | .k 'u' | .k 'f' => some (8, 8)
+  | .k 'b' => some (4, 4)
+  | .k 's' | .k 'p' | .k 'w' | .callback .. => some (ptrBytes, ptrBytes)
+  | .k 'e' => some (0, 1)
+  | .k 'y' => none
+  | .k _ => none
+  | .struct c h fs =>
+    let a := cStructAbi ptrBytes c h fs
+    match a.size, a.align with
+    | some s, some al => some (s, al)
+    | _, _ => none
+
+/-- The C layout of a struct, by the model above: each field at the next multiple of its
+alignment, the size rounded to the struct's alignment (the rules of the Itanium C++ ABI
+and of C on the targets Wiz builds for; the generated asserts check them). -/
+partial def cStructAbi (ptrBytes : Nat) (ctype header : String) (fs : List (String × FKind)) : CStructAbi :=
+  let fs := fs.filter fun (_, k) => k != .k 'e'
+  let bytes := fs.map fun (f, k) => (f, (abiSize ptrBytes k).map (·.1))
+  if header != "" then { ctype, header, fields := fs, bytes } else
+  let rec walk (off align : Nat) (offs : List (String × Nat)) : List (String × FKind) → Option (Nat × Nat × List (String × Nat))
+    | [] => some (alignUp off align, align, offs.reverse)
+    | (f, k) :: rest => do
+      let (sz, al) ← abiSize ptrBytes k
+      let off := alignUp off al
+      walk (off + sz) (max align al) ((f, off) :: offs) rest
+  match walk 0 1 [] fs with
+  | some (size, align, offsets) => { ctype, header, fields := fs, bytes, size := some size, align := some align, offsets }
+  | none => { ctype, header, fields := fs, bytes }
+
+end
+
+/-- Every struct kind in a list, nested ones first, without duplicates (by C type and
+header: a typedef or `struct` spelling). -/
+partial def structKinds (ks : List FKind) : List FKind :=
+  (ks.flatMap fun k => match k with
+    | .struct _ _ fs => structKinds (fs.map (·.2)) ++ [k]
+    | _ => []).foldl (fun acc k => if acc.any (fun k' => k'.toKey == k.toKey) then acc else acc ++ [k]) []
+
+/-- The `_Static_assert`s of a program's ABI (22m): the target's scalar widths, pointer
+width and byte order; the single word of each native representation; and every C struct
+by value — its fields' widths, and, for a struct Wiz generates, its size, alignment and
+field offsets. Compiled by the C compiler of the build (both backends: the LLVM backend
+compiles the runtime and the glue with it), so a target the model does not describe is a
+build error, not a silent misread. -/
+def layoutAsserts (ptrBits : Nat) (endian : String) (ks : List FKind) (natives : List (Name × ReprInfo)) : String := Id.run do
+  let ptrBytes := ptrBits / 8
+  let mut out := "\n/* ---- wiz repr: target and ABI checks (22m) ---- */\n#include <stddef.h>\n#include <limits.h>\n"
+  out := out ++ "_Static_assert(CHAR_BIT == 8, \"wiz: a byte is 8 bits\");\n"
+  out := out ++ "_Static_assert(sizeof(uint64_t) == 8, \"wiz: uint64_t is 8 bytes (Nat, UInt64)\");\n"
+  out := out ++ "_Static_assert(_Alignof(uint64_t) == 8, \"wiz: uint64_t is 8-byte aligned (Nat, UInt64)\");\n"
+  out := out ++ "_Static_assert(sizeof(double) == 8 && _Alignof(double) == 8, \"wiz: double is 8 bytes (Float64)\");\n"
+  out := out ++ "_Static_assert(sizeof(int) == 4, \"wiz: int is 4 bytes (Bool)\");\n"
+  out := out ++ s!"_Static_assert(sizeof(void *) * 8 == {ptrBits}, \"wiz: the target's pointers are {ptrBits}-bit (--ptr-bits)\");\n"
+  out := out ++ s!"_Static_assert(sizeof(wiz_val) == sizeof(uintptr_t), \"wiz: a Wiz value is one pointer\");\n"
+  out := out ++ (if endian == "big" then
+      "#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__)\n" ++
+      "_Static_assert(__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__, \"wiz: the target is big-endian (--endian)\");\n#endif\n"
+    else
+      "#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__)\n" ++
+      "_Static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, \"wiz: the target is little-endian (--endian)\");\n#endif\n")
+  -- a native representation is one `wiz_val` (the runtime's word: a scalar, a raw box or
+  -- a GMP number); the model's object is never built
+  for (T, ri) in natives do
+    out := out ++ s!"/* native {T}: {ri.mkImpl} / {ri.getImpl}, tag {ri.tag}, {ri.nfields} fields, runtime field {ri.r} (one word) */\n"
+    out := out ++ s!"_Static_assert(sizeof(wiz_val) == sizeof(uintptr_t), \"wiz: a native {T} is one word\");\n"
+  let structs := structKinds ks
+  for k in structs do
+    let .struct c h fs := k | continue
+    let a := cStructAbi ptrBytes c h fs
+    out := out ++ s!"/* c_struct {c}{if h.isEmpty then " (generated)" else s!" (header {h})"}: {fs.length} fields */\n"
+    if h.isEmpty then
+      -- Wiz generates the struct: its layout is ours, so assert all of it
+      if let some sz := a.size then
+        out := out ++ s!"_Static_assert(sizeof({c}) == {sz}, \"c_struct {c}: size {sz}\");\n"
+      if let some al := a.align then
+        out := out ++ s!"_Static_assert(_Alignof({c}) == {al}, \"c_struct {c}: alignment {al}\");\n"
+      for (f, off) in a.offsets do
+        out := out ++ s!"_Static_assert(offsetof({c}, {f}) == {off}, \"c_struct {c} field {f}: offset {off}\");\n"
+      for (f, sz?) in a.bytes do
+        if let some sz := sz? then
+          out := out ++ s!"_Static_assert(sizeof((({c} *)0)->{f}) == {sz}, \"c_struct {c} field {f}: {sz} bytes\");\n"
+    else
+      -- a header defines the struct (and may add, reorder or pack fields): the C
+      -- compiler is authoritative. Assert only that each named field exists and fits
+      -- (a marshalling helper reading a field the header does not have would fail here).
+      for (f, _) in a.fields do
+        out := out ++ s!"_Static_assert(offsetof({c}, {f}) + sizeof((({c} *)0)->{f}) <= sizeof({c}), \"c_struct {c} field {f}: inside the header's struct\");\n"
+  pure out
+
 /-- (9i) Marshalling helpers for the structs a program passes by value: `wiz_sin_N(&c, v)`
 fills `c` from the (borrowed) Wiz value `v`, `wiz_sfree_N(&c)` frees what that allocated
 (strings), `wiz_sout_N(c)` makes a Wiz value. Nested structs get their own helpers,

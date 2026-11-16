@@ -2604,17 +2604,6 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
     let getStx? := (cmd.getArg 4).args[0]?
     let fStx := cmd.getArg 6
     let f := (fStx.getId?).getD "_"
-    -- the constructor's erased code `λ…. ⟨t f₀ … fₙ₋₁⟩`, with one runtime field `var j`
-    let ctorShape? (d : Decl R) : Option (Nat × Nat × Nat × Nat × Nat) := do
-      let .ok e := eraseDecl s.globals d | none
-      let rec peel : ETerm → Nat × ETerm
-        | .lam _ b => let (n, b) := peel b; (n + 1, b)
-        | t => (0, t)
-      let (n, .obj t fs) := peel e | none
-      let live := (List.range fs.size).filter fun k => !(fs[k]! matches .erased)
-      let [r] := live | none
-      let .var j := fs[r]! | none
-      pure (t, fs.size, r, n, n - 1 - j)
     -- the name of the `μ` type at the end of a Π type, and the number of its binders
     let rec target (g : Globals R) (lvl : Nat) : Val R → Nat → Option Name × Nat
       | ty, fuel + 1 => match whnf ty with
@@ -2642,7 +2631,7 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
         let get := (getStx.getId?).getD "_"
         let g := s.globals
         let (T?, _) := target g 0 (eval g [] df.type) 1000
-        match s.globals.find? get, ctorShape? df, T? with
+        match s.globals.find? get, ctorReprShape? g df, T? with
         | none, _, _ => reportC getStx.info s!"unknown declaration '{get}'" ErrorCode.unknownDeclaration
         | _, none, _ | _, _, none =>
           report .error fStx.info s!"{f} is not a constructor with exactly one runtime field"
@@ -2661,6 +2650,12 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
           -- module (R5: the module keeps the invariant the natives rely on)
           else if !s.builtins.any (·.1 == sealKey T) then
             report .error fStx.info s!"a native representation needs `sealed inductive {T}`: a look-alike of an unsealed type is the same type"
+          -- (22m) not only a seal registered: the seal must be in the index of `T`
+          -- itself, which is where erasure (`nativeTy?`) finds the representation. A
+          -- `sealed` marker with no seal in the type would register a representation
+          -- that nothing could ever find (or worse, a look-alike's).
+          else if !sealedInTail s.globals T then
+            report .error fStx.info s!"a native representation needs the seal in {T}'s index: erasure finds it there, never by the type's name"
           else if (s.globals.privates.get? f) != some s.module then
             report .error fStx.info s!"a native representation needs a private constructor (`| private {(f.splitOn ".").getLast!} …`): {T}'s module keeps the invariant its natives rely on"
           else

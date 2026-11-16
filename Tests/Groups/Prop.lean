@@ -2172,7 +2172,7 @@ def wizRun (src : String) : IO (Option String) := do
   match ← Build.runGlobal (← toolchain) s "main" dir false (timeout := some 900) with
   | .ok v => pure (some v)
   | .error e =>
-    let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
+    let missing := noToolchain e
     if missing then pure none else throw (IO.userError e)
 
 /-- Pinned queries, asked first: what each probes, whether its normal form is asked, the

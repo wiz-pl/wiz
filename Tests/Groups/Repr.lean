@@ -32,7 +32,7 @@ def reprAll (src expected : String) (unbox : Bool := false) (libs : Bool := fals
     match ← Build.runGlobal (← toolchain) s "main" dir llvm with
     | .ok v => checkEq expected v
     | .error e =>
-      let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
+      let missing := noToolchain e
       if missing then skip "no toolchain" else throw (IO.userError e)
 
 /-- The audit's probe: a hand-written Σ of a structure's shape, converted both ways. -/
@@ -210,6 +210,38 @@ def sealLayer3 (bad : Decl ZeroOneMany) (fragment : Option String) : IO Unit := 
   | .error e, some f => check ((e.splitOn f).length > 1) e
   | .error e, none => throw (IO.userError s!"{bad.name} was refused: {e}")
 
+/-- A state with every library module and `Nat8` importable, from `src`, no errors. -/
+def reprState (src : String) : IO (CommandState ZeroOneMany) := do
+  let loader ← libLoader
+  let s := runFrontend (R := ZeroOneMany) src
+    { trustedModule := Tests.libModule, loader := fun m => sealLoader m <|> loader m }
+  let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
+  unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+  pure s
+
+/-- Replace every `repr:` key with a wrong tag (a stale or hand-made registration). -/
+def staleReprs (s : CommandState ZeroOneMany) : CommandState ZeroOneMany :=
+  let bump (k : Name) (v : Name) : Name × Name :=
+    match ReprInfo.parse? k with
+    | some (T, ri) => (ReprInfo.key T { ri with tag := ri.tag + 7 }, v)
+    | none => (k, v)
+  { s with builtins := s.builtins.map (fun (k, v) => bump k v),
+           globals := { s.globals with builtins := s.globals.builtins.map (fun (k, v) => bump k v) } }
+
+/-- Drop every seal registration (an environment a `sealed` marker never reached). -/
+def unsealed (s : CommandState ZeroOneMany) : CommandState ZeroOneMany :=
+  { s with builtins := s.builtins.filter fun (k, _) => !k.startsWith "seal:",
+           globals := { s.globals with builtins := s.globals.builtins.filter fun (k, _) => !k.startsWith "seal:" } }
+
+def cStructSrc : String := "import Nat8
+import IO
+c_struct \"struct pair\" Pair where
+  a : Nat
+  b : UInt64
+extern \"nop\" nop : Pair → Nat
+def main : Nat := nop (Pair.mk 1 2)
+"
+
 def reprGroup : Group where
   name := "repr"
   exercise := "Representations and conversion (R3)"
@@ -300,7 +332,83 @@ def reprGroup : Group where
         -- the seal as a term outside a `μ`
         sealLayer3 { name := "leak", type := .sort (.succ .zero), value := some (.const (sealName "W") []) } (some "has a native representation (it is a sealed type)")
         -- and the module's own functions are fine
-        sealLayer3 { name := "fine", type := .const "Nat" [], value := some (.app (.const "W.get" []) (.app (.const "W.of" []) (.const "ok" []))) } none }
+        sealLayer3 { name := "fine", type := .const "Nat" [], value := some (.app (.const "W.get" []) (.app (.const "W.of" []) (.const "ok" []))) } none },
+    { name := "22m: wiz repr prints the target, the natives and the C struct layouts", run := fun _ => do
+        let s ← reprState cStructSrc
+        let tc : Toolchain := { target := "aarch64-unknown-linux-gnu", ptrBits := 64, endian := "little" }
+        let r := Build.reprReport tc s
+        for line in ["target: aarch64-unknown-linux-gnu (64-bit pointers, little-endian)",
+            "native representations (3):",
+            "W: W.ofBits / W.toBits on W.mk, tag 0, 1 fields, runtime field 0 (one word)",
+            "UIntN: UIntN.ofBits / UIntN.toBits on UIntN.mk, tag 0, 2 fields, runtime field 0 (one word)",
+            "struct pair (generated): 2 fields, size 16, align 8",
+            "a: Nat, 8 bytes, offset 0", "b: UInt64, 8 bytes, offset 8"] do
+          check ((r.splitOn line).length > 1) s!"no '{line}' in:\n{r}"
+        -- the default target is the host's, named
+        check (((Build.reprReport {} s).splitOn "target: (the host) (64-bit pointers, little-endian)").length > 1)
+          "the default target is not the host"
+        -- and the CLI prints it, if the binary is built
+        let wiz := ((← IO.appPath).parent.getD ".") / "wiz"
+        unless ← wiz.pathExists do
+          skip "no wiz binary"
+          return
+        let dir ← IO.FS.createTempDir
+        -- (the CLI sees `lib/` only: `Nat8` is this suite's module)
+        IO.FS.writeFile (dir / "main.wiz") "import Word\nimport IO\nc_struct \"struct pair\" Pair where\n  a : Nat\n  b : UInt64\ndef main : Nat := UIntN.toNat (UIntN.ofNat 8 1)\n"
+        let out ← IO.Process.output { cmd := wiz.toString, args := #["repr", (dir / "main.wiz").toString] }
+        checkEq 0 out.exitCode
+        for line in ["native representations (2):", "UIntN: UIntN.ofBits / UIntN.toBits", "struct pair (generated): 2 fields, size 16, align 8"] do
+          check ((out.stdout.splitOn line).length > 1) s!"no '{line}' in:\n{out.stdout}{out.stderr}" },
+    { name := "22m: the build's _Static_asserts check the target and the struct layout", run := fun _ => do
+        let s ← reprState cStructSrc
+        let some c := (Build.cProgram s "main").toOption.map (·.1) | throw (IO.userError "the program did not compile")
+        for line in ["_Static_assert(sizeof(uint64_t) == 8", "_Static_assert(_Alignof(uint64_t) == 8",
+            "_Static_assert(sizeof(void *) * 8 == 64", "__ORDER_LITTLE_ENDIAN__",
+            "_Static_assert(sizeof(struct pair) == 16", "_Static_assert(_Alignof(struct pair) == 8",
+            "offsetof(struct pair, a) == 0", "offsetof(struct pair, b) == 8",
+            "/* native W: W.ofBits / W.toBits, tag 0, 1 fields, runtime field 0 (one word) */"] do
+          check ((c.splitOn line).length > 1) s!"no '{line}' in the generated C:\n{c.take 4000}"
+        -- a 32-bit or big-endian target asserts what it was told
+        let c32 := (Build.cProgram s "main" ({ ptrBits := 32, endian := "big" } : Toolchain)).toOption.map (·.1)
+        match c32 with
+        | none => throw (IO.userError "the 32-bit build did not compile")
+        | some c32 =>
+          check ((c32.splitOn "sizeof(void *) * 8 == 32").length > 1) "no 32-bit pointer assert"
+          check ((c32.splitOn "__ORDER_BIG_ENDIAN__").length > 1) "no big-endian assert"
+        -- a generated struct nested in another: the model's offsets and size, checked
+        let nested ← reprState ("import IO\nc_struct \"struct inner\" Inner where\n  x : UInt64\n" ++
+          "c_struct \"struct outer\" Outer where\n  a : Nat\n  b : Inner\n  c : UInt64\n" ++
+          "extern \"nop\" nop : Outer → Nat\ndef main : Nat := nop (Outer.mk 1 (Inner.mk 2) 3)\n")
+        let some nc := (Build.cProgram nested "main").toOption.map (·.1) | throw (IO.userError "the nested program did not compile")
+        for line in ["_Static_assert(sizeof(struct inner) == 8", "_Static_assert(sizeof(struct outer) == 24",
+            "offsetof(struct outer, b) == 8", "offsetof(struct outer, c) == 16"] do
+          check ((nc.splitOn line).length > 1) s!"no '{line}' in:\n{nc.take 4000}" },
+    { name := "22m: a repr: without a seal, or one whose shape changed, is refused by the build (coherence)", run := fun _ => do
+        let src := "import Word\ndef main : Nat := UIntN.toNat (UIntN.ofNat 8 3)\n"
+        let s ← reprState src
+        checkEq #[] (Build.reprCoherence s).toArray
+        -- the seal is what the registration is found by: without it, no build
+        let s' := unsealed s
+        check ((Build.reprCoherence s').any fun e => (e.splitOn "not `sealed`").length > 1)
+          s!"no seal error: {Build.reprCoherence s'}"
+        match Build.irProgram s' "main" with
+        | .error e => check ((e.splitOn "not `sealed`").length > 1) s!"the build error: {e}"
+        | .ok _ => throw (IO.userError "an unsealed representation compiled")
+        -- a registration that disagrees with the constructor is refused, not compiled
+        let sBad := staleReprs s
+        check ((Build.reprCoherence sBad).any fun e => (e.splitOn "disagrees with UIntN.mk's erased shape").length > 1)
+          s!"no shape error: {Build.reprCoherence sBad}"
+        match Build.irProgram sBad "main" with
+        | .error e => check ((e.splitOn "disagrees with").length > 1) s!"the build error: {e}"
+        | .ok _ => throw (IO.userError "a stale representation compiled") },
+    { name := "22m: a c_struct program is compiled with its layout asserts (C, LLVM)", run := fun _ => do
+        -- `div_t` is the header's struct: the asserts check the fields exist in it, and the
+        -- target's ABI (both backends compile the program, so the C compiler runs them)
+        let src := "import IO\nc_struct \"div_t\" (header := \"stdlib.h\") DivT where\n  quot : Nat\n  rem : Nat\n" ++
+          "extern \"div\" (header := \"stdlib.h\") cdiv : Nat → Nat → DivT\n" ++
+          "def main : Nat := (cdiv 47 5).quot + 10 * (cdiv 47 5).rem\n"
+        cRunLibs src "29"
+        cRunLibs src "29" (llvm := true) }
   ]
 
 builtin_initialize registerGroup reprGroup

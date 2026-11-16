@@ -418,7 +418,7 @@ def compiled (src : String) (llvm : Bool) : IO (Option String) := do
   match ← Build.runGlobal (← toolchain) s "main" dir llvm (timeout := some 300) with
   | .ok v => pure (some v)
   | .error e =>
-    let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
+    let missing := noToolchain e
     if missing then IO.println "    (skipped: no toolchain)"; pure none
     else throw (IO.userError e)
 

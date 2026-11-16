@@ -345,6 +345,14 @@ c_struct "struct pair" Pair where     -- no header: the C definition is generate
   `wiz_sout_N(c)` (build the structure; strings are copied, a NULL one becomes `""`; a
   pointer field coming back has no finalizer). The extern key carries the layout,
   `<ctype|header|f=k,…>`, so the wrappers need nothing else.
+* **Layout checks (22m).** Each generated C program asserts the target's ABI
+  (`uint64_t`/`double`/`int` widths and alignment, pointer width, byte order) and, for
+  every struct passed by value, its layout: a struct **generated** from the fields (no
+  header) gets `_Static_assert`s for its size, alignment and every field's offset (from
+  the model in `Compiler/C.lean`); a **header's** struct, whose layout (and can be
+  narrower C types) the header owns, gets one that each named field exists and lies
+  inside it. `wiz repr FILE` prints the same table plus the native representations and
+  the target, and re-runs the coherence check of the `repr:` registrations.
 * **LLVM backend**: the foreign wrappers are C in both backends (the LLVM module calls
   `wiz_ext_…` on `wiz_val`s), so a by-value struct is lowered by the C compiler, which
   follows the x86-64 SysV ABI (registers or memory, by size and class). The LLVM IR never

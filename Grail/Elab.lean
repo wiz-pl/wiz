@@ -36,6 +36,11 @@ structure Loaded where
 /-- The name a file that isn't itself imported goes by in the key computation. -/
 def mainName : Name := "main✝"
 
+/-- (22m) grail's cache salt: the running binary's hash (passed in) and the toolchain's
+id (compilers, flags, target). One cache never replays a module elaborated with another
+compiler, flags or target (`Toolchain.id`). -/
+def cacheSalt (tc : Toolchain) (salt : UInt64) : UInt64 := mixHash salt tc.id
+
 def load (tc : Toolchain) (roots : List System.FilePath) (salt : UInt64) (src : String)
     (dir : System.FilePath := ".") : IO Loaded := do
   let closure ← Module.loadClosure roots src
@@ -50,8 +55,8 @@ def load (tc : Toolchain) (roots : List System.FilePath) (salt : UInt64) (src : 
     { loader, cHeaders := (headers[·]?), cSources := some (Module.cSourceResolver sources),
       trustedModule := own.contains, trustNative := tc.trustNative,
       nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := ← tc.smt.resolve }
-  let key := Cache.moduleKey (fun n => if n == mainName then some src else loader n) (headers[·]?) salt mainName
-    own.contains
+  let key := Cache.moduleKey (fun n => if n == mainName then some src else loader n) (headers[·]?)
+    (cacheSalt tc salt) mainName own.contains
   -- a `link_c` file that appears or disappears changes the check (its contents enter
   -- only the link's key)
   let key := mixHash key (hash (toString ((sources.toList.map fun (k, v) => k ++ "=" ++ v).toArray.qsort (· < ·))))
@@ -65,8 +70,8 @@ def load (tc : Toolchain) (roots : List System.FilePath) (salt : UInt64) (src : 
 any read-only ones). -/
 def elaborate (tc : Toolchain) (salt : UInt64) (l : Loaded) : IO (CommandState ZeroOneMany) := do
   match tc.cacheDir, tc.readCaches with
-  | none, [] => Cache.elaborateUncached l.src l.init salt
-  | write, reads => pure (← Cache.elaborateCached write reads l.src l.init l.key salt).1
+  | none, [] => Cache.elaborateUncached l.src l.init (cacheSalt tc salt)
+  | write, reads => pure (← Cache.elaborateCached write reads l.src l.init l.key (cacheSalt tc salt)).1
 
 /-- The messages of a state, rendered `path:line:col: severity: text`. -/
 def render (path : String) (l : Loaded) (s : CommandState ZeroOneMany) : String :=

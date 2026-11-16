@@ -10,6 +10,17 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* representations and layouts are checked at build time (22m): a native
+  representation needs a seal in the type's index (not just a registration), and every
+  build re-derives each `repr:` registration (seal, `mk`/`get`, erased shape); the
+  generated C asserts the target's scalar widths, pointer width and byte order, and each
+  `c_struct`'s layout (size/offsets for a generated struct, field existence for a
+  header's). New `wiz repr FILE` prints the native representations, the C structs and
+  the ABI table.
+* the target is part of the cache: `--target TRIPLE`, `--ptr-bits 32|64`,
+  `--endian little|big` (and `set target …` in a grail file) are in `Toolchain.id`,
+  which `wiz` and grail mix into every module's key, so one cache never serves another
+  target's layouts (22m). Defaults add no flags to the toolchain `toFlags` output.
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to
