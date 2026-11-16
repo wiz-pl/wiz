@@ -6,7 +6,8 @@ Run from the repository root:
     python3 -m unittest discover -s tools/wiz-mcp/tests -p 'test_*.py' -v
 
 These tests never need a built `wiz`: the subprocess tests use tiny shell
-scripts, and the daemon tests use a stand-in WebSocket object.
+scripts, and the daemon tests use pipes, a stand-in connection and a small fake
+stdio language server.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from __future__ import annotations
 import io
 import json
 import os
-import struct
+import threading
 import sys
 import tempfile
 import time
@@ -34,26 +35,8 @@ def write_exe(directory: str, name: str, body: str) -> str:
     return str(path)
 
 
-def decode_client_frame(frame: bytes) -> tuple[int, bytes]:
-    """Decode the frames `ws_frame` produces (always FIN + mask)."""
-    first, second = frame[0], frame[1]
-    length = second & 0x7F
-    offset = 2
-    if length == 126:
-        length = struct.unpack("!H", frame[offset : offset + 2])[0]
-        offset += 2
-    elif length == 127:
-        length = struct.unpack("!Q", frame[offset : offset + 8])[0]
-        offset += 8
-    assert second & 0x80, "client frames must be masked"
-    mask = frame[offset : offset + 4]
-    payload = frame[offset + 4 :]
-    assert len(payload) == length
-    return first & 0x0F, bytes(byte ^ mask[i % 4] for i, byte in enumerate(payload))
-
-
-class DeadWebSocket:
-    """A stand-in that records sends and never answers."""
+class DeadConn:
+    """A stand-in connection that records sends and never answers."""
 
     def __init__(self) -> None:
         self.sent: list[str] = []
@@ -138,19 +121,6 @@ class FramingTests(unittest.TestCase):
         messages = list(wiz_mcp.iter_messages(io.StringIO("[1,2]\nnull\n{\"id\":3}\n")))
         self.assertEqual(messages, [{"id": 3}])
 
-    def test_ws_accept_key_matches_rfc_6455(self) -> None:
-        self.assertEqual(
-            wiz_mcp.ws_accept_key("dGhlIHNhbXBsZSBub25jZQ=="),
-            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=",
-        )
-
-    def test_frame_encoding_for_each_length_form(self) -> None:
-        for size in (0, 5, 125, 126, 65535, 65536):
-            payload = bytes(range(256)) * (size // 256) + bytes(range(size % 256))
-            op, decoded = decode_client_frame(wiz_mcp.ws_frame(0x1, payload))
-            self.assertEqual(op, 1)
-            self.assertEqual(decoded, payload)
-
 
 class DispatchTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -232,7 +202,7 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(envelope["exit"], 0)
         self.assertEqual(envelope["stdout"], "wiz 9.9.9\n")
         # Text tools must not start the language server.
-        self.assertIsNone(self.server.daemon.ws)
+        self.assertIsNone(self.server.daemon.conn)
         self.assertIsNone(self.server.daemon.proc)
 
     def test_missing_wiz_is_a_clear_error_envelope(self) -> None:
@@ -327,18 +297,18 @@ class DaemonTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_request_without_a_reply_hits_the_deadline_and_closes(self) -> None:
-        ws = DeadWebSocket()
-        self.daemon.ws = ws
+        conn = DeadConn()
+        self.daemon.conn = conn
         self.daemon.dead = False
         started = time.monotonic()
         with self.assertRaises(wiz_mcp.LSPTimeout):
             self.daemon.request("textDocument/hover", {}, time.monotonic() + 0.2)
         self.assertLess(time.monotonic() - started, 2.0)
-        self.assertTrue(ws.closed)
-        self.assertIsNone(self.daemon.ws)
+        self.assertTrue(conn.closed)
+        self.assertIsNone(self.daemon.conn)
 
     def test_wait_diagnostics_matches_the_uri(self) -> None:
-        self.daemon.ws = DeadWebSocket()
+        self.daemon.conn = DeadConn()
         self.daemon.dead = False
         self.daemon.inbox = [
             {"method": "textDocument/publishDiagnostics", "params": {"uri": "file:///other", "diagnostics": [1]}},
@@ -347,7 +317,7 @@ class DaemonTests(unittest.TestCase):
         self.assertEqual(self.daemon.wait_diagnostics("file:///mine", time.monotonic() + 1), [2])
 
     def test_wait_diagnostics_times_out_without_a_push(self) -> None:
-        self.daemon.ws = DeadWebSocket()
+        self.daemon.conn = DeadConn()
         self.daemon.dead = False
         with self.assertRaises(wiz_mcp.LSPTimeout):
             self.daemon.wait_diagnostics("file:///mine", time.monotonic() + 0.1)
@@ -360,6 +330,221 @@ class DaemonTests(unittest.TestCase):
             self.assertEqual(command[-2:], ["/x/wiz", "lsp"])
         else:
             self.assertEqual(command, ["/x/wiz", "lsp"])
+
+
+def frame(payload: object) -> bytes:
+    body = json.dumps(payload).encode("utf-8")
+    return b"Content-Length: %d\r\n\r\n" % len(body) + body
+
+
+class StdioTransportTests(unittest.TestCase):
+    """`StdioLSP` over a pair of OS pipes, as it is used on the daemon's stdin/stdout."""
+
+    def setUp(self) -> None:
+        to_daemon_r, to_daemon_w = os.pipe()
+        from_daemon_r, from_daemon_w = os.pipe()
+        self.daemon_in = os.fdopen(to_daemon_r, "rb", buffering=0)
+        self.daemon_out = os.fdopen(from_daemon_w, "wb", buffering=0)
+        self.client_read = os.fdopen(from_daemon_r, "rb", buffering=0)
+        self.conn = wiz_mcp.StdioLSP(os.fdopen(to_daemon_w, "wb", buffering=0), self.client_read.fileno())
+
+    def tearDown(self) -> None:
+        self.conn.close()
+        for stream in (self.daemon_in, self.daemon_out, self.client_read):
+            stream.close()
+
+    def test_send_frames_with_a_byte_length(self) -> None:
+        self.conn.send_text('{"x":"λ"}', time.monotonic() + 1)
+        self.assertEqual(self.daemon_in.read(64), b'Content-Length: 10\r\n\r\n{"x":"\xce\xbb"}')
+
+    def test_two_messages_in_one_write(self) -> None:
+        self.daemon_out.write(frame({"id": 1}) + frame({"id": 2, "s": "λ"}))
+        self.assertEqual(json.loads(self.conn.recv_text(time.monotonic() + 1)), {"id": 1})
+        self.assertEqual(json.loads(self.conn.recv_text(time.monotonic() + 1)), {"id": 2, "s": "λ"})
+
+    def test_a_message_split_across_writes(self) -> None:
+        data = b"Content-Type: x\r\n" + frame({"method": "m", "params": {"k": "v" * 5000}})
+
+        def dribble() -> None:
+            for i in range(0, len(data), 7):
+                self.daemon_out.write(data[i : i + 7])
+
+        writer = threading.Thread(target=dribble)
+        writer.start()
+        message = json.loads(self.conn.recv_text(time.monotonic() + 5))
+        writer.join()
+        self.assertEqual(message["params"]["k"], "v" * 5000)
+
+    def test_a_header_without_content_length_is_an_error(self) -> None:
+        self.daemon_out.write(b"X-Other: 1\r\n\r\n{}")
+        with self.assertRaises(wiz_mcp.LSPError):
+            self.conn.recv_text(time.monotonic() + 1)
+
+    def test_a_bad_content_length_is_an_error(self) -> None:
+        self.daemon_out.write(b"Content-Length: lots\r\n\r\n{}")
+        with self.assertRaises(wiz_mcp.LSPError):
+            self.conn.recv_text(time.monotonic() + 1)
+
+    def test_eof_is_closed(self) -> None:
+        self.daemon_out.close()
+        with self.assertRaises(wiz_mcp.LSPClosed):
+            self.conn.recv_text(time.monotonic() + 1)
+
+    def test_a_silent_daemon_hits_the_read_deadline(self) -> None:
+        started = time.monotonic()
+        with self.assertRaises(wiz_mcp.LSPTimeout):
+            self.conn.recv_text(time.monotonic() + 0.2)
+        self.assertLess(time.monotonic() - started, 2.0)
+
+    def test_a_daemon_that_does_not_read_hits_the_write_deadline(self) -> None:
+        started = time.monotonic()
+        with self.assertRaises(wiz_mcp.LSPTimeout):
+            self.conn.send_text("x" * (4 * 1024 * 1024), time.monotonic() + 0.3)
+        self.assertLess(time.monotonic() - started, 2.0)
+
+    def test_send_after_close_is_closed_and_close_is_idempotent(self) -> None:
+        self.conn.close()
+        self.conn.close()
+        with self.assertRaises(wiz_mcp.LSPClosed):
+            self.conn.send_text("{}", time.monotonic() + 1)
+
+    def test_a_dead_reader_is_closed(self) -> None:
+        self.daemon_in.close()
+        with self.assertRaises(wiz_mcp.LSPClosed):
+            self.conn.send_text("{}", time.monotonic() + 1)
+
+
+#: A stand-in `wiz lsp`: Content-Length LSP on stdio, as the real one speaks it.
+FAKE_LSP = r'''
+import json, os, sys
+inp, out = sys.stdin.buffer, sys.stdout.buffer
+
+def send(message):
+    body = json.dumps(message).encode()
+    out.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+    out.flush()
+
+def read():
+    length = None
+    while True:
+        line = inp.readline()
+        if not line:
+            return None
+        line = line.strip()
+        if not line:
+            break
+        name, _, value = line.decode().partition(":")
+        if name.lower() == "content-length":
+            length = int(value)
+    return json.loads(inp.read(length))
+
+if sys.argv[1:2] != ["lsp"]:
+    print("not lsp:", sys.argv[1:]); sys.exit(0)
+if os.environ.get("FAKE_LSP_MODE") == "mute":
+    while read() is not None:
+        pass
+    sys.exit(0)
+# A server-to-client request the bridge never answers must not confuse it.
+send({"jsonrpc": "2.0", "id": "s1", "method": "window/workDoneProgress/create", "params": {"token": "t"}})
+while True:
+    message = read()
+    if message is None:
+        break
+    method, mid = message.get("method"), message.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"capabilities": {}}})
+    elif method == "textDocument/didOpen":
+        doc = message["params"]["textDocument"]
+        diags = [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
+                  "severity": 1, "message": "fake: %d chars" % len(doc["text"])}]
+        send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+              "params": {"uri": doc["uri"], "diagnostics": diags}})
+    elif method == "textDocument/hover":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"contents": "Nat"}})
+    elif method == "fake/selfcheck":
+        links = []
+        for fd in os.listdir("/proc/self/fd"):
+            try:
+                links.append(os.readlink("/proc/self/fd/" + fd))
+            except OSError:
+                pass
+        send({"jsonrpc": "2.0", "id": mid, "result": {"argv": sys.argv[1:], "fds": links,
+              "token_env": sorted(k for k in os.environ if "TOKEN" in k)}})
+    elif mid is not None:
+        send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": method}})
+'''
+
+
+class StdioDaemonTests(unittest.TestCase):
+    """The bridge against a fake stdio language server: the whole LSP path, no socket."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="wiz-mcp-stdio-")
+        self.workspace = os.path.realpath(self.tmp.name)
+        self.script = os.path.join(self.workspace, "fake_lsp.py")
+        Path(self.script).write_text(FAKE_LSP, encoding="utf-8")
+        self.wiz = write_exe(self.workspace, "wiz", f'exec "{sys.executable}" "{self.script}" "$@"')
+        Path(self.workspace, "probe.wiz").write_text("def x : Nat := 1\n")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def server(self, wiz: str = "", timeout: float = 10) -> wiz_mcp.Server:
+        config = wiz_mcp.Config(workspace=self.workspace, wiz=wiz or self.wiz, idle=0, timeout=timeout)
+        server = wiz_mcp.Server(config)
+        self.addCleanup(server.close)
+        return server
+
+    def test_diagnostics_and_hover_over_stdio(self) -> None:
+        server = self.server()
+        envelope = server.call_tool("diagnostics", {"path": "probe.wiz", "text": "abc"})
+        self.assertTrue(envelope["ok"], envelope)
+        self.assertEqual(envelope["result"][0]["message"], "fake: 3 chars")
+        proc = server.daemon.proc
+        envelope = server.call_tool("hover", {"path": "probe.wiz", "line": 0, "character": 4})
+        self.assertTrue(envelope["ok"], envelope)
+        self.assertEqual(envelope["result"], {"contents": "Nat"})
+        self.assertIs(server.daemon.proc, proc)  # one daemon served both calls
+
+    @unittest.skipUnless(os.path.isdir("/proc/self/fd"), "needs /proc")
+    def test_the_daemon_listens_on_no_socket_and_gets_no_tokens(self) -> None:
+        saved = os.environ.get("GH_TOKEN")
+        os.environ["GH_TOKEN"] = "do-not-leak"
+
+        def restore() -> None:
+            if saved is None:
+                os.environ.pop("GH_TOKEN", None)
+            else:
+                os.environ["GH_TOKEN"] = saved
+
+        self.addCleanup(restore)
+        server = self.server()
+        deadline = time.monotonic() + 10
+        server.daemon.ensure(deadline)
+        result = server.daemon.request("fake/selfcheck", {}, deadline)["result"]
+        self.assertEqual(result["argv"], ["lsp"])
+        self.assertFalse([link for link in result["fds"] if link.startswith("socket:")], result["fds"])
+        self.assertEqual(result["token_env"], [])
+
+    def test_close_stops_the_daemon(self) -> None:
+        server = self.server()
+        self.assertTrue(server.call_tool("hover", {"path": "probe.wiz", "line": 0, "character": 0})["ok"])
+        proc = server.daemon.proc
+        assert proc is not None
+        server.close()
+        self.assertIsNotNone(proc.poll())
+        self.assertIsNone(server.daemon.conn)
+
+    def test_a_daemon_that_never_answers_initialize_times_out(self) -> None:
+        # The child environment is filtered, so the mode is set in the wrapper itself.
+        mute = write_exe(self.workspace, "mute-wiz", f'FAKE_LSP_MODE=mute exec "{sys.executable}" "{self.script}" "$@"')
+        server = self.server(wiz=mute, timeout=0.5)
+        started = time.monotonic()
+        envelope = server.call_tool("diagnostics", {"path": "probe.wiz"})
+        self.assertLess(time.monotonic() - started, 5.0)
+        self.assertFalse(envelope["ok"])
+        self.assertEqual(envelope["error"]["kind"], "timeout")
+        self.assertIsNone(server.daemon.proc)
 
 
 class ArgumentTests(unittest.TestCase):

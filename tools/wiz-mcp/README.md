@@ -152,7 +152,11 @@ which clients use for their permission prompts.
   `PRIVATE`, `CREDENTIAL`, `COOKIE`, `SESSION`) never passes, even when named
   with `--pass-env`; that covers `GH_TOKEN`, `CACHIX_AUTH_TOKEN`,
   `WIZ_NTFY_TOKEN_FILE` and `SSH_AUTH_SOCK`.
-* **No network.** No tool takes a URL; the daemon listens on 127.0.0.1 only.
+* **No network, no socket.** No tool takes a URL, and the daemon speaks LSP
+  on its own stdin/stdout: it listens on nothing, so no other process can
+  reach it. (Until 2026-11-17 it was `wiz lsp --ws 127.0.0.1:0`, whose port had
+  no authentication; `wiz lsp --infoview SOCK` was not an option because its
+  clients may only pull, not open documents.)
 
 What the bridge does not control: the files `wiz` itself opens while checking
 (imports from its module roots, `import_c` headers) and the processes it starts
@@ -193,17 +197,18 @@ does not restart a crashed local MCP server).
 `diagnostics`, `hover` and `goals` share **one** lazily started process:
 
 ```sh
-wiz lsp --ws 127.0.0.1:0 --no-stdio
+wiz lsp          # LSP on its stdin/stdout, Content-Length framing; no socket
 ```
 
 * It starts on the first LSP-backed call, not at `initialize`, and is killed
   after `--idle` seconds without one (default **600**).
-* Every call has a deadline (`--timeout`, default **300 s**). On expiry the
+* Every call has a deadline (`--timeout`, default **300 s**), on reads *and*
+  writes (a daemon that stops reading its input cannot block a call). On expiry the
   daemon is killed and the call returns `error.kind = "timeout"`; the next call
   starts a fresh daemon. This is the mitigation for `wiz lsp` having no request
   timeout of its own.
 * On `shutdown`/`exit`, EOF, or SIGTERM/SIGINT/SIGHUP the bridge closes the
-  WebSocket and terminates the daemon (SIGTERM, then SIGKILL after 5 s). On
+  daemon's stdin and terminates it (SIGTERM, then SIGKILL after 5 s). On
   Linux the daemon also gets `PR_SET_PDEATHSIG`, so even a SIGKILLed bridge
   cannot leave an orphan.
 * Calls are handled one at a time. That is the queue bound: a burst of tool
@@ -243,7 +248,8 @@ numbers.
 
 Re-measured 2026-11-15 on this tree (bridge on Python 3.14): nine smoke runs
 put a daemon with one small document at 90–113 MB, and a direct
-`wiz lsp --ws` at 93–96 MB with the document open and 69–72 MB just started.
+`wiz lsp --ws` at 93–96 MB with the document open and 69–72 MB just started;
+on stdio (2026-11-17) the smoke test's daemon was 117 MB, the same range.
 The study's 87–117 MB daemon range still holds; its 17 MB idle-bridge figure
 does not reproduce here, so plan with 27 MB.
 
@@ -256,8 +262,8 @@ are ~0.8 GB; with idle unload they cost that much of bridges plus 0–8 daemons
 
 ## Tests
 
-The unit tests need no `wiz` (they use tiny shell scripts and a stand-in
-WebSocket):
+The unit tests need no `wiz` (they use tiny shell scripts, OS pipes and a
+fake stdio language server):
 
 ```sh
 python3 -m unittest discover -s tools/wiz-mcp/tests -p 'test_*.py' -v
@@ -265,7 +271,8 @@ python3 -m unittest discover -s tools/wiz-mcp/tests -p 'test_*.py' -v
 
 The end-to-end smoke test needs a built toolchain. It starts the bridge, runs
 `diagnostics` then `hover` (so the real daemon starts), records the daemon's
-RSS, shuts down, and checks that the daemon is gone:
+RSS, checks that it holds no socket, shuts down, and checks that the daemon is
+gone:
 
 ```sh
 python3 tools/wiz-mcp/tests/smoke.py --wiz ./.lake/build/bin/wiz
@@ -304,9 +311,9 @@ All logs go to stderr; stdout is the MCP transport.
 * **`wiz_not_found`** — the workspace has no `./.lake/build/bin/wiz`. Run
   `lake build wiz` there, or pass `--wiz` explicitly. A bare name is looked up
   on `PATH`; a path with a slash is relative to the workspace.
-* **`lsp_startup`** — the daemon exited before printing `WebSocket on port`.
-  The error includes the tail of its stderr. Check that `wiz lsp --ws 0
-  --no-stdio` works by hand in that worktree.
+* **`lsp_startup`** — the daemon exited before answering `initialize`. The
+  error includes its exit status and the tail of its stderr. Check that
+  `wiz lsp` starts by hand in that worktree (it waits on stdin).
 * **`path_denied`** — the path resolves outside the workspace and the
   toolchain library. Use a path inside the worktree, or start the server with
   `--allow-root DIR` for a read-only extra directory.

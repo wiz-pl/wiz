@@ -222,6 +222,19 @@ def run(argv: list[str]) -> int:
                 raise RuntimeError("no `wiz lsp` child appeared after the first LSP call")
             rss = rss_kib(daemons[0])
             print(f"daemon: pid {daemons[0]}, RSS {rss / 1024:.1f} MiB" if rss else f"daemon: pid {daemons[0]}")
+            # The daemon speaks LSP on its own pipes and must listen on nothing.
+            fd_dir = Path(f"/proc/{daemons[0]}/fd")
+            if fd_dir.is_dir():
+                sockets = []
+                for fd in fd_dir.iterdir():
+                    try:
+                        if os.readlink(fd).startswith("socket:"):
+                            sockets.append(fd.name)
+                    except OSError:
+                        pass
+                if sockets:
+                    raise RuntimeError(f"the daemon has socket descriptors {sockets}; it should use stdio only")
+                print("daemon: no sockets (stdio only)")
 
             started = time.monotonic()
             hover = envelope_of(
