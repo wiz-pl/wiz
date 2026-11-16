@@ -1,0 +1,757 @@
+import Logic
+import Nat
+import HProp
+import SepAlg
+/-!
+# GhostState
+
+Ghost state for concurrent separation logic: `import GhostState` (stage 24h,
+docs/stages/24-separation-logic.md, 24h; plan stage S-b). Builds on the separation
+algebras of lib/SepAlg.wiz (24g).
+
+Ghost state is resource that exists only in the proof: a thread owns a piece of some
+algebra, and changes it by frame-preserving updates, so that what other threads own stays
+valid. This file gives the logic of such changes and the algebras that make them useful.
+
+Main definitions:
+
+* the **update modality** `RProp.bupd M P` (Iris's `|==> P`, written `|==>[M] P`): the
+  resource can be updated, keeping every frame valid, to one satisfying `P`. Its laws:
+  `bupd_intro`, `bupd_mono`, `bupd_trans`, `bupd_frame_r`/`bupd_frame_l`, `bupd_star`,
+  `own_update` (a frame-preserving update `a ~~> b` gives `own a ⊢ |==> own b`), and
+  `bupd_elim` (on a valid resource, `|==> P` gives a valid resource with `P`);
+* **ghost names**: `optPCM M` (the option lifting) and `gmapPCM M`, families of resources
+  indexed by names `γ : Nat` with finitely many names in use, so a fresh one always
+  exists; `ownG M γ a` owns `a` at name `γ`, splits (`ownG_op`), updates (`ownG_update`),
+  and is **allocated** fresh by `ghost_alloc` (`⊢ |==> ∃ γ, ownG γ a`);
+* the **agreement** algebra `agreePCM A` (sets of values, valid when they agree):
+  `Agree.ag a` is duplicable (`own_ag_dup`), two of them agree (`Agree.ag_agree`), and
+  cannot be updated to another value (`Agree.no_update`);
+* the **authoritative** algebra `authPCM M` (`●a` the authority, `◯b` a fragment):
+  `●a ⋅ ◯b` is valid exactly when `b ≼ a` and `a` is valid (`Auth.valid_auth_frag`), two
+  authorities clash, and a **local update** `(a, b) ~l~> (a', b')` lifts to a
+  frame-preserving update `●a ⋅ ◯b ~~> ●a' ⋅ ◯b'` (`Auth.update`); local updates by
+  adding (`PCM.local_update_op`) and of exclusive values (`Excl.local_update`), and for
+  exclusive values the fragment agrees with the authority (`Auth.excl_agree`);
+* a **ghost counter** (section 6): an MVar holds the counter and the authorities, one per
+  thread; thread `t` holds the fragment that counts its own increments. Along any trace of
+  increments by any interleaving of threads, the ghost resource stays valid (each step is
+  a frame-preserving update of the stepping thread's own coordinate), and the counter
+  equals the sum of the threads' fragments, which is the number of increments
+  (`Ctr.run_counts`).
+
+Everything is proved; nothing here is an axiom. The algebras are discrete (no step
+index), and an `RProp` is any predicate (not required to be upward closed): the laws above
+hold without it.
+
+```
+-- owning ◯2 and ●5 together: the fragment is included in the authority
+def incl (v : (authPCM natAdd).valid ((authPCM natAdd).op (Auth.auth natAdd 5) (Auth.frag 2))) :
+    PCM.Incl natAdd 2 5 :=
+  Auth.included natAdd v
+-- an authority over a counter and a fragment step up together
+def bump (n k : Nat) : PCM.Update (authPCM natAdd)
+    ((authPCM natAdd).op (Auth.auth natAdd n) (Auth.frag k))
+    ((authPCM natAdd).op (Auth.auth natAdd (n + 1)) (Auth.frag (k + 1))) :=
+  Auth.update natAdd (PCM.local_update_op natAdd n k 1 ())
+```
+-/
+
+-- ## 1. The update modality
+
+/-- The basic update modality `|==> P` over the algebra `M`: for every frame `f` that is
+compatible with the resource `r`, there is a resource `r'`, still compatible with `f`,
+that satisfies `P`. Other owners (the frame) are never invalidated. -/
+def RProp.bupd {A : Type} (M : PCM A) (P : RProp A) : RProp A := fun r =>
+  (f : A) → M.valid (M.op r f) → Ex (fun (r' : A) => M.valid (M.op r' f) ∧ P r')
+
+notation:40 "|==>[" M "] " p:40 => RProp.bupd M p
+
+/-- Introduction: `P ⊢ |==> P` (update to oneself). -/
+def RProp.bupd_intro {A : Type} (M : PCM A) (0 P : RProp A) : RProp.Entails P (RProp.bupd M P) :=
+  fun r p f v => Ex.intro (fun (r' : A) => M.valid (M.op r' f) ∧ P r') r (v, p)
+
+/-- Monotonicity: `P ⊢ Q` gives `|==> P ⊢ |==> Q`. -/
+def RProp.bupd_mono {A : Type} (M : PCM A) {0 P Q : RProp A} (h : RProp.Entails P Q) :
+    RProp.Entails (RProp.bupd M P) (RProp.bupd M Q) :=
+  fun r b f v => Ex.imp (fun r' q => (q.1, h r' q.2)) (b f v)
+
+/-- Transitivity: two updates in a row are one update, `|==> |==> P ⊢ |==> P`. -/
+def RProp.bupd_trans {A : Type} (M : PCM A) (0 P : RProp A) :
+    RProp.Entails (RProp.bupd M (RProp.bupd M P)) (RProp.bupd M P) :=
+  fun r b f v => Ex.elim (b f v) (fun r' q => q.2 f q.1)
+
+/-- The frame rule: `(|==> P) ⋆ Q ⊢ |==> (P ⋆ Q)`. The update of the left part sees the
+right part as part of its frame. -/
+def RProp.bupd_frame_r {A : Type} (M : PCM A) (0 P Q : RProp A) :
+    RProp.Entails (RProp.star M (RProp.bupd M P) Q) (RProp.bupd M (RProp.star M P Q)) :=
+  fun r h f v => Ex.elim h (fun s p =>
+    Ex.elim (p.2.1 (M.op s.2 f)
+        (Eq.substProp M.valid (Eq.trans (Eq.congrArg (fun x => M.op x f) p.1) (M.assoc s.1 s.2 f)) v))
+      (fun r₁ q =>
+        Ex.intro (fun (r' : A) => M.valid (M.op r' f) ∧ RProp.star M P Q r') (M.op r₁ s.2)
+          (Eq.substProp M.valid (Eq.symm (M.assoc r₁ s.2 f)) q.1,
+           Ex.intro (fun (t : A × A) => M.op r₁ s.2 = M.op t.1 t.2 ∧ P t.1 ∧ Q t.2) (r₁, s.2)
+             (rfl, (q.2, p.2.2)))))
+
+/-- The frame rule on the other side: `Q ⋆ (|==> P) ⊢ |==> (Q ⋆ P)`. -/
+def RProp.bupd_frame_l {A : Type} (M : PCM A) (0 P Q : RProp A) :
+    RProp.Entails (RProp.star M Q (RProp.bupd M P)) (RProp.bupd M (RProp.star M Q P)) :=
+  RProp.entails_trans (RProp.star_comm M Q (RProp.bupd M P))
+    (RProp.entails_trans (RProp.bupd_frame_r M P Q)
+      (RProp.bupd_mono M (RProp.star_comm M P Q)))
+
+/-- Two updates side by side: `(|==> P) ⋆ (|==> Q) ⊢ |==> (P ⋆ Q)`. -/
+def RProp.bupd_star {A : Type} (M : PCM A) (0 P Q : RProp A) :
+    RProp.Entails (RProp.star M (RProp.bupd M P) (RProp.bupd M Q)) (RProp.bupd M (RProp.star M P Q)) :=
+  RProp.entails_trans (RProp.bupd_frame_r M P (RProp.bupd M Q))
+    (RProp.entails_trans (RProp.bupd_mono M (RProp.bupd_frame_l M Q P))
+      (RProp.bupd_trans M (RProp.star M P Q)))
+
+/-- A frame-preserving update of owned resource: `a ~~> b` gives `own a ⊢ |==> own b`. -/
+def RProp.own_update {A : Type} (M : PCM A) {a b : A} (u : PCM.Update M a b) :
+    RProp.Entails (RProp.own M a) (RProp.bupd M (RProp.own M b)) :=
+  fun r h f v => Ex.elim h (fun c e =>
+    Ex.intro (fun (r' : A) => M.valid (M.op r' f) ∧ RProp.own M b r') (M.op b c)
+      (Eq.substProp M.valid (Eq.symm (M.assoc b c f))
+         (u (M.op c f) (Eq.substProp M.valid (Eq.trans (Eq.congrArg (fun x => M.op x f) e) (M.assoc a c f)) v)),
+       PCM.incl_op_l M b c))
+
+/-- Running an update: on a valid resource, `|==> P` gives a valid resource satisfying
+`P` (take the unit as the frame). -/
+def RProp.bupd_elim {A : Type} (M : PCM A) {0 P : RProp A} {r : A} (b : RProp.bupd M P r) (v : M.valid r) :
+    Ex (fun (r' : A) => M.valid r' ∧ P r') :=
+  Ex.imp (fun r' q => (Eq.substProp M.valid (PCM.unit_r M r') q.1, q.2))
+    (b M.unit (Eq.substProp M.valid (Eq.symm (PCM.unit_r M r)) v))
+
+-- ## 2. Ghost names and allocation
+
+/-- The option lifting: `none` is the unit, `some a ⋅ some b = some (a ⋅ b)`. A family of
+these, one per name, is a set of ghost cells, `none` where a name is unused. -/
+def Option.opLift {A : Type} (M : PCM A) : Option A → Option A → Option A
+  | .none, y => y
+  | .some a, .none => .some a
+  | .some a, .some b => .some (M.op a b)
+/-- `none` is valid, `some a` when `a` is. -/
+def Option.validLift {A : Type} (M : PCM A) : Option A → Prop
+  | .none => True
+  | .some a => M.valid a
+
+/-- `Option.opLift` is associative. -/
+def Option.opLift_assoc {A : Type} (M : PCM A) : (x y z : Option A) →
+    Option.opLift M (Option.opLift M x y) z = Option.opLift M x (Option.opLift M y z)
+  | .none, y, z => rfl
+  | .some a, .none, z => rfl
+  | .some a, .some b, .none => rfl
+  | .some a, .some b, .some c => Eq.congrArg Option.some (M.assoc a b c)
+/-- `Option.opLift` is commutative. -/
+def Option.opLift_comm {A : Type} (M : PCM A) : (x y : Option A) →
+    Option.opLift M x y = Option.opLift M y x
+  | .none, .none => rfl
+  | .none, .some b => rfl
+  | .some a, .none => rfl
+  | .some a, .some b => Eq.congrArg Option.some (M.comm a b)
+/-- A valid composite has a valid left part. -/
+def Option.validLift_l {A : Type} (M : PCM A) : (x y : Option A) →
+    Option.validLift M (Option.opLift M x y) → Option.validLift M x
+  | .none, y, v => ()
+  | .some a, .none, v => v
+  | .some a, .some b, v => M.valid_l a b v
+/-- A composite is `none` only if its left part is. -/
+def Option.opLift_none_l {A : Type} (M : PCM A) : (x y : Option A) →
+    Option.opLift M x y = .none → x = .none
+  | .none, y, e => rfl
+  | .some a, .none, e => absurd e.1
+  | .some a, .some b, e => absurd e.1
+
+/-- The option lifting as an algebra. -/
+def optPCM {A : Type} (M : PCM A) : PCM (Option A) :=
+  PCM.mk (Option.opLift M) .none (Option.validLift M) (Option.opLift_assoc M) (Option.opLift_comm M)
+    (fun x => rfl) () (Option.validLift_l M)
+
+/-- Only finitely many names are in use: every name from `n` on is unused. -/
+def GMap.Bounded {A : Type} (g : Nat → Option A) : Prop :=
+  Ex (fun (n : Nat) => (i : Nat) → Nat.Le n i → g i = .none)
+
+/-- Ghost cells: a resource of `M` at each name `γ : Nat`, `none` at all but finitely many
+(Iris's `gmap gname M`). Valid when every cell is valid and finitely many are in use, so
+that whatever the frame owns, a fresh name is left (`ghost_alloc`). -/
+def gmapPCM {A : Type} (M : PCM A) : PCM (Nat → Option A) :=
+  PCM.mk (fun f g i => Option.opLift M (f i) (g i)) (fun i => .none)
+    (fun g => GMap.Bounded g ∧ ((i : Nat) → Option.validLift M (g i)))
+    (fun f g h => funext (fun i => Option.opLift_assoc M (f i) (g i) (h i)))
+    (fun f g => funext (fun i => Option.opLift_comm M (f i) (g i)))
+    (fun f => funext (fun i => rfl))
+    (Ex.intro (fun (n : Nat) => (i : Nat) → Nat.Le n i → Option.none (A := A) = .none) 0 (fun i h => rfl),
+     fun i => ())
+    (fun f g v =>
+      (Ex.elim v.1 (fun n b =>
+         Ex.intro (fun (n : Nat) => (i : Nat) → Nat.Le n i → f i = .none) n
+           (fun i h => Option.opLift_none_l M (f i) (g i) (b i h))),
+       fun i => Option.validLift_l M (f i) (g i) (v.2 i)))
+
+/-- `n < i` means `i` is not `n`. -/
+def Nat.beq_false_of_lt (n i : Nat) (h : Nat.Lt n i) : Nat.beq i n = .false :=
+  Or.elim (Bool.cases (Nat.beq i n))
+    (fun e => absurd (Nat.lt_irrefl n (Eq.substProp (fun j => Nat.Lt n j) (Nat.beq_eq i n e) h)))
+    (fun e => e)
+
+/-- `x` if the test holds, `none` otherwise. -/
+def GMap.pick {A : Type} : Bool → Option A → Option A
+  | .true, x => x
+  | .false, x => .none
+
+/-- Picking with a true test. -/
+def GMap.pick_true {A : Type} (x : Option A) : (b : Bool) → b = .true → GMap.pick b x = x
+  | .true, h => rfl
+  | .false, h => absurd h.1
+/-- Picking with a false test. -/
+def GMap.pick_false {A : Type} (x : Option A) : (b : Bool) → b = .false → GMap.pick b x = .none
+  | .true, h => absurd h.1
+  | .false, h => rfl
+
+/-- The cell `x` at name `γ`, nothing elsewhere. -/
+def GMap.single {A : Type} (γ : Nat) (x : Option A) : Nat → Option A :=
+  fun i => GMap.pick (Nat.beq i γ) x
+/-- At `γ` itself. -/
+def GMap.single_at {A : Type} (γ : Nat) (x : Option A) (i : Nat) (h : Nat.beq i γ = .true) :
+    GMap.single γ x i = x :=
+  GMap.pick_true x (Nat.beq i γ) h
+/-- Away from `γ`. -/
+def GMap.single_off {A : Type} (γ : Nat) (x : Option A) (i : Nat) (h : Nat.beq i γ = .false) :
+    GMap.single γ x i = .none :=
+  GMap.pick_false x (Nat.beq i γ) h
+
+/-- Owning `a` at the ghost name `γ` (Iris's `own γ a`). -/
+def ownG {A : Type} (M : PCM A) (γ : Nat) (a : A) : RProp (Nat → Option A) :=
+  RProp.own (gmapPCM M) (GMap.single γ (.some a))
+
+/-- Picking commutes with composing. -/
+def GMap.pick_op {A : Type} (M : PCM A) (a b : A) : (x : Bool) →
+    GMap.pick x (.some (M.op a b)) = Option.opLift M (GMap.pick x (.some a)) (GMap.pick x (.some b))
+  | .true => rfl
+  | .false => rfl
+/-- Composing two singletons at one name composes their contents. -/
+def GMap.single_op {A : Type} (M : PCM A) (γ : Nat) (a b : A) :
+    GMap.single γ (.some (M.op a b)) = (gmapPCM M).op (GMap.single γ (.some a)) (GMap.single γ (.some b)) :=
+  funext (fun i => GMap.pick_op M a b (Nat.beq i γ))
+
+/-- `ownG γ (a ⋅ b)` is `ownG γ a ⋆ ownG γ b`. -/
+def ownG_op {A : Type} (M : PCM A) (γ : Nat) (a b : A) :
+    ownG M γ (M.op a b) = RProp.star (gmapPCM M) (ownG M γ a) (ownG M γ b) :=
+  Eq.trans (Eq.congrArg (RProp.own (gmapPCM M)) (GMap.single_op M γ a b))
+    (RProp.own_op (gmapPCM M) (GMap.single γ (.some a)) (GMap.single γ (.some b)))
+
+/-- An update of `M` is an update of the lifted algebra. -/
+def Option.update_lift {A : Type} (M : PCM A) {a b : A} (u : PCM.Update M a b) :
+    PCM.Update (optPCM M) (.some a) (.some b)
+  | .none, v => PCM.update_valid M u v
+  | .some c, v => u c v
+
+/-- `some a ⋅ y` is never `none`. -/
+def Option.opLift_some_ne {A : Type} (M : PCM A) (a : A) : (y : Option A) →
+    Option.opLift M (.some a) y = .none → False
+  | .none, e => absurd e.1
+  | .some b, e => absurd e.1
+
+/-- A composite with a singleton, at the singleton's name. -/
+def GMap.op_single_on {A : Type} (M : PCM A) (γ : Nat) (x : Option A) (c : Nat → Option A) (i : Nat)
+    (h : Nat.beq i γ = .true) : (gmapPCM M).op (GMap.single γ x) c i = Option.opLift M x (c i) :=
+  Eq.congrArg (fun y => Option.opLift M y (c i)) (GMap.single_at γ x i h)
+/-- A composite with a singleton, away from the singleton's name: the frame alone. -/
+def GMap.op_single_off {A : Type} (M : PCM A) (γ : Nat) (x : Option A) (c : Nat → Option A) (i : Nat)
+    (h : Nat.beq i γ = .false) : (gmapPCM M).op (GMap.single γ x) c i = c i :=
+  Eq.congrArg (fun y => Option.opLift M y (c i)) (GMap.single_off γ x i h)
+
+/-- An update of `M` at one name is a frame-preserving update of the ghost cells. -/
+def GMap.single_update {A : Type} (M : PCM A) (γ : Nat) {a b : A} (u : PCM.Update M a b) :
+    PCM.Update (gmapPCM M) (GMap.single γ (.some a)) (GMap.single γ (.some b)) :=
+  fun c v =>
+    (Ex.elim v.1 (fun n bd =>
+       Ex.intro (fun (n : Nat) => (i : Nat) → Nat.Le n i → (gmapPCM M).op (GMap.single γ (.some b)) c i = .none) n
+         (fun i h => Or.elim (Bool.cases (Nat.beq i γ))
+           (fun e => absurd (Option.opLift_some_ne M a (c i)
+              (Eq.trans (Eq.symm (GMap.op_single_on M γ (.some a) c i e)) (bd i h))))
+           (fun e => Eq.trans (GMap.op_single_off M γ (.some b) c i e)
+              (Eq.trans (Eq.symm (GMap.op_single_off M γ (.some a) c i e)) (bd i h))))),
+     fun i => Or.elim (Bool.cases (Nat.beq i γ))
+       (fun e => Eq.substProp (Option.validLift M) (Eq.symm (GMap.op_single_on M γ (.some b) c i e))
+          (Option.update_lift M u (c i)
+             (Eq.substProp (Option.validLift M) (GMap.op_single_on M γ (.some a) c i e) (v.2 i))))
+       (fun e => Eq.substProp (Option.validLift M) (Eq.symm (GMap.op_single_off M γ (.some b) c i e))
+          (Eq.substProp (Option.validLift M) (GMap.op_single_off M γ (.some a) c i e) (v.2 i))))
+
+/-- Updating owned ghost state: `a ~~> b` gives `ownG γ a ⊢ |==> ownG γ b`. -/
+def ownG_update {A : Type} (M : PCM A) (γ : Nat) {a b : A} (u : PCM.Update M a b) :
+    RProp.Entails (ownG M γ a) (RProp.bupd (gmapPCM M) (ownG M γ b)) :=
+  RProp.own_update (gmapPCM M) (GMap.single_update M γ u)
+
+/-- Adding a cell at a name beyond every used one keeps a composite valid (and still
+finitely used). -/
+def GMap.alloc_valid {A : Type} (M : PCM A) (n : Nat) {a : A} (va : M.valid a) (h : Nat → Option A)
+    (bd : (i : Nat) → Nat.Le n i → h i = .none) (vh : (i : Nat) → Option.validLift M (h i)) :
+    (gmapPCM M).valid ((gmapPCM M).op (GMap.single n (.some a)) h) :=
+  (Ex.intro (fun (m : Nat) => (i : Nat) → Nat.Le m i → (gmapPCM M).op (GMap.single n (.some a)) h i = .none)
+     (Nat.succ n)
+     (fun i hi => Eq.trans (GMap.op_single_off M n (.some a) h i (Nat.beq_false_of_lt n i hi))
+        (bd i (Nat.le_of_lt n i hi))),
+   fun i => Or.elim (Bool.cases (Nat.beq i n))
+     (fun e => Eq.substProp (Option.validLift M) (Eq.symm (GMap.op_single_on M n (.some a) h i e))
+        (Eq.substProp (A := Option A) (fun (y : Option A) => Option.validLift M (Option.opLift M (.some a) y))
+           (a := .none) (b := h i) (Eq.symm (bd i (Eq.substProp (A := Nat) (fun (j : Nat) => Nat.Le j i) (a := i) (b := n) (Nat.beq_eq i n e) (Nat.le_refl i))))
+           va))
+     (fun e => Eq.substProp (Option.validLift M) (Eq.symm (GMap.op_single_off M n (.some a) h i e)) (vh i)))
+
+/-- **Ghost allocation**: any valid `a` can be put at a fresh name, next to whatever is
+owned already, `P ⊢ |==> (∃ γ, ownG γ a) ⋆ P`. The name is one no frame uses: past the
+bound of the composite with the frame. -/
+def ghost_alloc {A : Type} (M : PCM A) {a : A} (va : M.valid a) (0 P : RProp (Nat → Option A)) :
+    RProp.Entails P
+      (RProp.bupd (gmapPCM M) (RProp.star (gmapPCM M) (fun r => Ex (fun (γ : Nat) => ownG M γ a r)) P)) :=
+  fun r p f v => Ex.elim v.1 (fun n bd =>
+    Ex.intro
+      (fun (r' : Nat → Option A) => (gmapPCM M).valid ((gmapPCM M).op r' f) ∧
+         RProp.star (gmapPCM M) (fun r => Ex (fun (γ : Nat) => ownG M γ a r)) P r')
+      ((gmapPCM M).op (GMap.single n (.some a)) r)
+      (Eq.substProp (gmapPCM M).valid (Eq.symm (A := Nat → Option A)
+           (a := (gmapPCM M).op ((gmapPCM M).op (GMap.single n (.some a)) r) f)
+           (b := (gmapPCM M).op (GMap.single n (.some a)) ((gmapPCM M).op r f))
+           ((gmapPCM M).assoc (GMap.single n (.some a)) r f))
+         (GMap.alloc_valid M n va ((gmapPCM M).op r f) bd v.2),
+       Ex.intro
+         (fun (s : (Nat → Option A) × (Nat → Option A)) =>
+            (gmapPCM M).op (GMap.single n (.some a)) r = (gmapPCM M).op s.1 s.2 ∧
+            Ex (fun (γ : Nat) => ownG M γ a s.1) ∧ P s.2)
+         (GMap.single n (.some a), r)
+         (rfl, (Ex.intro (fun (γ : Nat) => ownG M γ a (GMap.single n (.some a))) n
+                  (PCM.incl_refl (gmapPCM M) (GMap.single n (.some a))), p))))
+
+/-- Ghost allocation from nothing: `⊢ |==> ∃ γ, ownG γ a`. -/
+def ghost_alloc_new {A : Type} (M : PCM A) {a : A} (va : M.valid a) (r : Nat → Option A) :
+    RProp.bupd (gmapPCM M) (fun r' => Ex (fun (γ : Nat) => ownG M γ a r')) r :=
+  RProp.bupd_mono (gmapPCM M)
+    (fun r' h => Ex.elim h (fun s q => Ex.elim q.2.1 (fun γ o =>
+       Ex.intro (fun (γ : Nat) => ownG M γ a r') γ
+         (PCM.incl_trans (gmapPCM M) o (Eq.substProp (A := Nat → Option A) (fun x => PCM.Incl (gmapPCM M) s.1 x)
+            (a := (gmapPCM M).op s.1 s.2) (b := r') (Eq.symm (A := Nat → Option A) (a := r') (b := (gmapPCM M).op s.1 s.2) q.1)
+            (PCM.incl_op_l (gmapPCM M) s.1 s.2))))))
+    r (ghost_alloc M va (fun r => True) r ())
+
+-- ## 3. Agreement
+
+/-- The agreement algebra over `A` (discrete): a set of values, composed by union, valid
+when all its values are equal. `Agree.ag a` is the knowledge "the value is `a`", which
+anyone may copy and which two owners must agree on. -/
+def Agree (A : Type) : Type := A → Prop
+/-- Union of two sets of values. -/
+def Agree.op {A : Type} (x y : Agree A) : Agree A := fun v => x v ∨ y v
+/-- All the values agree. -/
+def Agree.Valid {A : Type} (x : Agree A) : Prop := (v w : A) → x v → x w → v = w
+/-- The single value `a`. -/
+def Agree.ag {A : Type} (a : A) : Agree A := fun v => v = a
+
+/-- Union is associative. -/
+def Agree.op_assoc {A : Type} (x y z : Agree A) : Agree.op (Agree.op x y) z = Agree.op x (Agree.op y z) :=
+  funext (f := Agree.op (Agree.op x y) z) (g := Agree.op x (Agree.op y z)) (fun v => Iff.toEq (Iff.intro
+    (fun h => Or.elim h (fun h' => Or.elim h' (fun p => Or.inl p) (fun q => Or.inr (Or.inl q)))
+      (fun r => Or.inr (Or.inr r)))
+    (fun h => Or.elim h (fun p => Or.inl (Or.inl p))
+      (fun h' => Or.elim h' (fun q => Or.inl (Or.inr q)) (fun r => Or.inr r)))))
+/-- Union is commutative. -/
+def Agree.op_comm {A : Type} (x y : Agree A) : Agree.op x y = Agree.op y x :=
+  funext (f := Agree.op x y) (g := Agree.op y x) (fun v => Iff.toEq (Iff.intro (fun h => Or.symm h) (fun h => Or.symm h)))
+/-- The empty set is the unit. -/
+def Agree.unit_l {A : Type} (x : Agree A) : Agree.op (fun v => False) x = x :=
+  funext (f := Agree.op (fun v => False) x) (g := x) (fun v => Iff.toEq (Iff.intro
+    (fun h => Or.elim h (fun (f : False) => absurd f) (fun p => p)) (fun p => Or.inr p)))
+
+/-- The agreement algebra. -/
+def agreePCM (A : Type) : PCM (Agree A) :=
+  PCM.mk Agree.op (fun v => False) Agree.Valid Agree.op_assoc Agree.op_comm Agree.unit_l
+    (fun v w f g => absurd f) (fun x y vv v w p q => vv v w (Or.inl p) (Or.inl q))
+
+/-- A single value is valid. -/
+def Agree.valid_ag {A : Type} (a : A) : (agreePCM A).valid (Agree.ag a) :=
+  fun v w p q => Eq.trans p (Eq.symm q)
+/-- Two valid copies agree: `✓(ag a ⋅ ag b) → a = b`. -/
+def Agree.ag_agree {A : Type} {a b : A} (v : (agreePCM A).valid ((agreePCM A).op (Agree.ag a) (Agree.ag b))) :
+    a = b :=
+  v a b (Or.inl rfl) (Or.inr rfl)
+/-- A value composed with itself is itself: agreement is idempotent. -/
+def Agree.ag_idem {A : Type} (a : A) : (agreePCM A).op (Agree.ag a) (Agree.ag a) = Agree.ag a :=
+  funext (f := Agree.op (Agree.ag a) (Agree.ag a)) (g := Agree.ag a) (fun v => Iff.toEq (Iff.intro
+    (fun h => Or.elim h (fun p => p) (fun p => p)) (fun p => Or.inl p)))
+
+/-- Knowledge of the value is duplicable: `own (ag a) ⊢ own (ag a) ⋆ own (ag a)`. -/
+def RProp.own_ag_dup {A : Type} (a : A) :
+    RProp.Entails (RProp.own (agreePCM A) (Agree.ag a))
+      (RProp.star (agreePCM A) (RProp.own (agreePCM A) (Agree.ag a)) (RProp.own (agreePCM A) (Agree.ag a))) :=
+  fun r h => RProp.own_split (agreePCM A) (Agree.ag a) (Agree.ag a) r
+    (Eq.substProp (A := Agree A) (fun x => RProp.own (agreePCM A) x r) (a := Agree.ag a)
+       (b := (agreePCM A).op (Agree.ag a) (Agree.ag a)) (Eq.symm (A := Agree A) (a := (agreePCM A).op (Agree.ag a) (Agree.ag a)) (b := Agree.ag a) (Agree.ag_idem a)) h)
+/-- Two owners of agreement on a valid resource hold the same value. -/
+def RProp.own_ag_agree {A : Type} {a b : A} (r : Agree A)
+    (h : RProp.star (agreePCM A) (RProp.own (agreePCM A) (Agree.ag a)) (RProp.own (agreePCM A) (Agree.ag b)) r)
+    (v : (agreePCM A).valid r) : a = b :=
+  Agree.ag_agree (RProp.own_valid (agreePCM A) (RProp.own_join (agreePCM A) (Agree.ag a) (Agree.ag b) r h) v)
+/-- Agreement can't be changed: `ag a ~~> ag b` only when `a = b` (the frame may hold
+another copy of `ag a`). -/
+def Agree.no_update {A : Type} {a b : A} (ne : ¬ a = b) : ¬ PCM.Update (agreePCM A) (Agree.ag a) (Agree.ag b) :=
+  fun u => ne (Eq.symm (Agree.ag_agree (u (Agree.ag a)
+    (Eq.substProp (A := Agree A) (agreePCM A).valid (a := Agree.ag a)
+       (b := (agreePCM A).op (Agree.ag a) (Agree.ag a)) (Eq.symm (A := Agree A) (a := (agreePCM A).op (Agree.ag a) (Agree.ag a)) (b := Agree.ag a) (Agree.ag_idem a)) (Agree.valid_ag a)))))
+
+-- ## 4. The authoritative algebra
+
+/-- The authoritative algebra over `M` (discrete): an optional exclusive **authority**
+`●a` (the whole of the state) and a **fragment** `◯b` (a part of it that someone owns). -/
+def Auth (A : Type) : Type := Excl A × A
+
+/-- Validity: a lone fragment must be valid; with the authority `a`, the fragments must be
+included in it and `a` valid; two authorities are invalid. -/
+def Auth.Valid {A : Type} (M : PCM A) : Excl A → A → Prop
+  | .none, b => M.valid b
+  | .ex a, b => PCM.Incl M b a ∧ M.valid a
+  | .bot, b => False
+
+/-- A valid composite has a valid left part. -/
+def Auth.valid_l' {A : Type} (M : PCM A) : (e₁ e₂ : Excl A) → (b₁ b₂ : A) →
+    Auth.Valid M (Excl.op e₁ e₂) (M.op b₁ b₂) → Auth.Valid M e₁ b₁
+  | .none, .none, b₁, b₂, v => M.valid_l b₁ b₂ v
+  | .none, .ex a, b₁, b₂, v => PCM.valid_incl M (PCM.incl_trans M (PCM.incl_op_l M b₁ b₂) v.1) v.2
+  | .none, .bot, b₁, b₂, v => absurd v
+  | .ex a, .none, b₁, b₂, v => (PCM.incl_trans M (PCM.incl_op_l M b₁ b₂) v.1, v.2)
+  | .ex a, .ex c, b₁, b₂, v => absurd v
+  | .ex a, .bot, b₁, b₂, v => absurd v
+  | .bot, e₂, b₁, b₂, v => absurd v
+
+/-- The authoritative algebra: componentwise composition. -/
+def authPCM {A : Type} (M : PCM A) : PCM (Auth A) :=
+  PCM.mk (fun x y => (Excl.op x.1 y.1, M.op x.2 y.2)) (Excl.none, M.unit) (fun x => Auth.Valid M x.1 x.2)
+    (fun x y z => congrArg2 (fun p q => (p, q)) (Excl.assoc x.1 y.1 z.1) (M.assoc x.2 y.2 z.2))
+    (fun x y => congrArg2 (fun p q => (p, q)) (Excl.comm x.1 y.1) (M.comm x.2 y.2))
+    (fun x => congrArg2 (fun p q => (p, q)) (a := x.1) (a' := x.1) rfl (M.unit_l x.2))
+    M.valid_unit
+    (fun x y v => Auth.valid_l' M x.1 y.1 x.2 y.2 v)
+
+/-- The authority `●a`. -/
+def Auth.auth {A : Type} (M : PCM A) (a : A) : Auth A := (Excl.ex a, M.unit)
+/-- The fragment `◯b`. -/
+def Auth.frag {A : Type} (b : A) : Auth A := (Excl.none, b)
+
+/-- `●a ⋅ ◯b` is valid exactly when `b ≼ a` and `a` is valid. -/
+def Auth.valid_auth_frag {A : Type} (M : PCM A) (a b : A) :
+    (authPCM M).valid ((authPCM M).op (Auth.auth M a) (Auth.frag b)) ↔ PCM.Incl M b a ∧ M.valid a :=
+  Iff.intro
+    (fun (v : PCM.Incl M (M.op M.unit b) a ∧ M.valid a) =>
+       (Eq.substProp (A := A) (fun x => PCM.Incl M x a) (a := M.op M.unit b) (b := b) (M.unit_l b) v.1, v.2))
+    (fun h => ((Eq.substProp (A := A) (fun x => PCM.Incl M x a) (a := b) (b := M.op M.unit b)
+       (Eq.symm (M.unit_l b)) h.1, h.2) : PCM.Incl M (M.op M.unit b) a ∧ M.valid a))
+/-- A fragment next to the authority is included in it. -/
+def Auth.included {A : Type} (M : PCM A) {a b : A}
+    (v : (authPCM M).valid ((authPCM M).op (Auth.auth M a) (Auth.frag b))) : PCM.Incl M b a :=
+  (Iff.mp (Auth.valid_auth_frag M a b) v).1
+/-- Allocation: a valid `a` gives the authority together with all of it as a fragment. -/
+def Auth.valid_auth_self {A : Type} (M : PCM A) {a : A} (va : M.valid a) :
+    (authPCM M).valid ((authPCM M).op (Auth.auth M a) (Auth.frag a)) :=
+  Iff.mpr (Auth.valid_auth_frag M a a) (PCM.incl_refl M a, va)
+/-- A lone fragment is valid when its contents are. -/
+def Auth.valid_frag {A : Type} (M : PCM A) (b : A) : (authPCM M).valid (Auth.frag b) ↔ M.valid b :=
+  Iff.refl (M.valid b)
+/-- Two authorities clash. -/
+def Auth.auth_clash {A : Type} (M : PCM A) (a a' : A) :
+    ¬ (authPCM M).valid ((authPCM M).op (Auth.auth M a) (Auth.auth M a')) :=
+  fun v => v
+/-- Fragments compose by composing their contents. -/
+def Auth.frag_op {A : Type} (M : PCM A) (b₁ b₂ : A) :
+    Auth.frag (M.op b₁ b₂) = (authPCM M).op (Auth.frag b₁) (Auth.frag b₂) :=
+  rfl
+
+/-- A **local update** `(a, b) ~l~> (a', b')`: whatever frame `c` completes `b` to the valid
+`a` also completes `b'` to the valid `a'`. -/
+def PCM.LocalUpdate {A : Type} (M : PCM A) (a b a' b' : A) : Prop :=
+  (c : A) → M.valid a → a = M.op b c → M.valid a' ∧ a' = M.op b' c
+
+/-- The update lemma's core: a frame `(e, d)` beside `●a ⋅ ◯b` stays valid beside
+`●a' ⋅ ◯b'`. -/
+def Auth.update_frame {A : Type} (M : PCM A) {a b a' b' : A} (lu : PCM.LocalUpdate M a b a' b') :
+    (e : Excl A) → (d : A) → Auth.Valid M (Excl.op (.ex a) e) (M.op (M.op M.unit b) d) →
+    Auth.Valid M (Excl.op (.ex a') e) (M.op (M.op M.unit b') d)
+  | .none, d, v => Ex.elim v.1 (fun g h =>
+      let r := lu (M.op d g) v.2
+        (Eq.trans h (Eq.trans (Eq.congrArg (fun x => M.op (M.op x d) g) (M.unit_l b)) (M.assoc b d g)));
+      (Ex.intro (fun (x : A) => a' = M.op (M.op (M.op M.unit b') d) x) g
+         (Eq.trans r.2 (Eq.symm (Eq.trans (Eq.congrArg (fun x => M.op (M.op x d) g) (M.unit_l b')) (M.assoc b' d g)))),
+       r.1))
+  | .ex c, d, v => absurd v
+  | .bot, d, v => absurd v
+
+/-- **The authoritative update**: a local update `(a, b) ~l~> (a', b')` is a
+frame-preserving update `●a ⋅ ◯b ~~> ●a' ⋅ ◯b'`. -/
+def Auth.update {A : Type} (M : PCM A) {a b a' b' : A} (lu : PCM.LocalUpdate M a b a' b') :
+    PCM.Update (authPCM M) ((authPCM M).op (Auth.auth M a) (Auth.frag b))
+      ((authPCM M).op (Auth.auth M a') (Auth.frag b')) :=
+  fun c v => Auth.update_frame M lu c.1 c.2 v
+
+/-- Adding `n` to both the authority and a fragment is a local update. -/
+def PCM.local_update_op {A : Type} (M : PCM A) (a b n : A) (v : M.valid (M.op a n)) :
+    PCM.LocalUpdate M a b (M.op a n) (M.op b n) :=
+  fun c va e => (v, Eq.trans (Eq.congrArg (fun x => M.op x n) e)
+    (Eq.trans (M.assoc b c n) (Eq.trans (Eq.congrArg (fun x => M.op b x) (M.comm c n)) (Eq.symm (M.assoc b n c)))))
+
+/-- The core of `Excl.local_update`: beside a whole value, the frame is empty. -/
+def Excl.local_update' {A : Type} (x y z : A) : (c : Excl A) → Excl.Valid (Excl.ex x) →
+    Excl.ex x = Excl.op (Excl.ex y) c → Excl.Valid (Excl.ex z) ∧ Excl.ex z = Excl.op (Excl.ex z) c
+  | .none, v, e => (rfl, rfl)
+  | .ex w, v, e => absurd e.1
+  | .bot, v, e => absurd e.1
+/-- An exclusive authority and fragment may be set together to any value. -/
+def Excl.local_update {A : Type} (x y z : A) :
+    PCM.LocalUpdate (exclPCM A) (Excl.ex x) (Excl.ex y) (Excl.ex z) (Excl.ex z) :=
+  Excl.local_update' x y z
+
+/-- The value of a whole exclusive element (`d` otherwise). -/
+def Excl.getD {A : Type} : Excl A → A → A
+  | .none, d => d
+  | .ex a, d => a
+  | .bot, d => d
+/-- A whole value included in a whole value is that value. -/
+def Excl.eq_of_incl {A : Type} (a b : A) : (c : Excl A) → Excl.ex a = Excl.op (Excl.ex b) c → a = b
+  | .none, e => Eq.congrArg (fun x => Excl.getD x a) e
+  | .ex w, e => absurd e.1
+  | .bot, e => absurd e.1
+/-- **Agreement of an exclusive fragment with its authority**: `✓(●(ex a) ⋅ ◯(ex b))`
+gives `a = b`. -/
+def Auth.excl_agree {A : Type} {a b : A}
+    (v : (authPCM (exclPCM A)).valid
+           ((authPCM (exclPCM A)).op (Auth.auth (exclPCM A) (Excl.ex a)) (Auth.frag (Excl.ex b)))) : a = b :=
+  Ex.elim (Auth.included (exclPCM A) v) (fun c e => Excl.eq_of_incl a b c e)
+
+-- ## 5. Families: updating one coordinate, and sums
+
+/-- `x` if the test holds, `y` otherwise. -/
+def Fam.pick {A : Type} : Bool → A → A → A
+  | .true, x, y => x
+  | .false, x, y => y
+/-- Picking with a true test. -/
+def Fam.pick_true {A : Type} (x y : A) : (b : Bool) → b = .true → Fam.pick b x y = x
+  | .true, h => rfl
+  | .false, h => absurd h.1
+/-- Picking with a false test. -/
+def Fam.pick_false {A : Type} (x y : A) : (b : Bool) → b = .false → Fam.pick b x y = y
+  | .true, h => absurd h.1
+  | .false, h => rfl
+
+/-- `f` with coordinate `t` replaced by `v`. -/
+def Fam.set {A : Type} (f : Nat → A) (t : Nat) (v : A) : Nat → A := fun i => Fam.pick (Nat.beq i t) v (f i)
+/-- At `t`, the new value. -/
+def Fam.set_at {A : Type} (f : Nat → A) (t : Nat) (v : A) (i : Nat) (h : Nat.beq i t = .true) :
+    Fam.set f t v i = v :=
+  Fam.pick_true v (f i) (Nat.beq i t) h
+/-- Away from `t`, the old one. -/
+def Fam.set_off {A : Type} (f : Nat → A) (t : Nat) (v : A) (i : Nat) (h : Nat.beq i t = .false) :
+    Fam.set f t v i = f i :=
+  Fam.pick_false v (f i) (Nat.beq i t) h
+
+/-- An update at one coordinate is a frame-preserving update of the whole family: what the
+frame owns at the other coordinates is untouched. -/
+def funPCM.update_at {A : Type} (M : PCM A) (t : Nat) {g g' : Nat → A}
+    (same : (i : Nat) → Nat.beq i t = .false → g' i = g i) (u : PCM.Update M (g t) (g' t)) :
+    PCM.Update (funPCM Nat M) g g' :=
+  fun c v i => Or.elim (Bool.cases (Nat.beq i t))
+    (fun e => Eq.substProp (A := Nat) (fun j => M.valid (M.op (g' j) (c j))) (a := t) (b := i)
+       (Eq.symm (Nat.beq_eq i t e)) (u (c t) (v t)))
+    (fun e => Eq.substProp (A := A) (fun x => M.valid (M.op x (c i))) (a := g i) (b := g' i)
+       (Eq.symm (same i e)) (v i))
+
+/-- `i < t` means `i` is not `t`. -/
+def Nat.beq_false_of_gt (i t : Nat) (h : Nat.Lt i t) : Nat.beq i t = .false :=
+  Or.elim (Bool.cases (Nat.beq i t))
+    (fun e => absurd (Nat.lt_irrefl t (Eq.substProp (A := Nat) (fun (j : Nat) => Nat.Lt j t) (a := i) (b := t) (Nat.beq_eq i t e) h)))
+    (fun e => e)
+/-- `t ≤ m` and `m ≠ t` give `t < m`. -/
+def Nat.lt_of_le_of_beq_false : (t m : Nat) → Nat.Le t m → Nat.beq m t = .false → Nat.Lt t m
+  | .zero, .zero, h, e => absurd e.1
+  | .zero, .succ m, h, e => rfl
+  | .succ t, .zero, h, e => absurd (Nat.not_succ_le_zero t h)
+  | .succ t, .succ m, h, e => Nat.lt_of_le_of_beq_false t m h e
+
+/-- `(a + b) + c = (a + c) + b`. -/
+def Nat.add_right_comm (a b c : Nat) : a + b + c = a + c + b :=
+  Eq.trans (Nat.add_assoc a b c) (Eq.trans (Eq.congrArg (fun x => a + x) (Nat.add_comm b c))
+    (Eq.symm (Nat.add_assoc a c b)))
+
+/-- `f 0 + … + f (m - 1)`. -/
+def Nat.sumBelow (f : Nat → Nat) : Nat → Nat
+  | .zero => 0
+  | .succ m => Nat.sumBelow f m + f m
+
+/-- Sums below `m` only see the coordinates below `m`. -/
+def Nat.sumBelow_ext (f g : Nat → Nat) : (m : Nat) → ((i : Nat) → Nat.Lt i m → f i = g i) →
+    Nat.sumBelow f m = Nat.sumBelow g m
+  | .zero, h => rfl
+  | .succ m, h => congrArg2 (fun x y => x + y)
+      (Nat.sumBelow_ext f g m (fun i hi => h i (Nat.lt_trans i m (Nat.succ m) hi (Nat.lt_succ_self m))))
+      (h m (Nat.lt_succ_self m))
+/-- The sum of zeros. -/
+def Nat.sumBelow_zero : (m : Nat) → Nat.sumBelow (fun i => 0) m = 0
+  | .zero => rfl
+  | .succ m => Eq.trans (Nat.add_zero (Nat.sumBelow (fun i => 0) m)) (Nat.sumBelow_zero m)
+/-- Setting a coordinate at or beyond `m` doesn't change the sum below `m`. -/
+def Nat.sumBelow_set_ge (f : Nat → Nat) (t v : Nat) (m : Nat) (h : Nat.Le m t) :
+    Nat.sumBelow (Fam.set f t v) m = Nat.sumBelow f m :=
+  Nat.sumBelow_ext (Fam.set f t v) f m (fun i hi =>
+    Fam.set_off f t v i (Nat.beq_false_of_gt i t (Nat.lt_of_lt_of_le i m t hi h)))
+/-- Setting coordinate `t < m` from `f t` to `v` changes the sum by the difference. -/
+def Nat.sumBelow_set (f : Nat → Nat) (t v : Nat) : (m : Nat) → Nat.Lt t m →
+    Nat.sumBelow (Fam.set f t v) m + f t = Nat.sumBelow f m + v
+  | .zero, h => absurd (Nat.not_succ_le_zero t h)
+  | .succ m, h => Or.elim (Bool.cases (Nat.beq m t))
+      (fun e =>
+        let mt : m = t := Nat.beq_eq m t e;
+        Eq.trans
+          (Eq.congrArg (fun x => x + f t)
+            (congrArg2 (fun x y => x + y)
+              (Nat.sumBelow_set_ge f t v m (Eq.substProp (A := Nat) (fun (j : Nat) => Nat.Le m j) (a := m) (b := t) mt (Nat.le_refl m)))
+              (Fam.set_at f t v m e)))
+          (Eq.trans (Nat.add_right_comm (Nat.sumBelow f m) v (f t))
+            (Eq.congrArg (fun x => Nat.sumBelow f m + x + v) (Eq.symm (Eq.congrArg f mt)))))
+      (fun e =>
+        Eq.trans
+          (Eq.congrArg (fun x => Nat.sumBelow (Fam.set f t v) m + x + f t) (Fam.set_off f t v m e))
+          (Eq.trans (Nat.add_right_comm (Nat.sumBelow (Fam.set f t v) m) (f m) (f t))
+            (Eq.trans
+              (Eq.congrArg (fun x => x + f m) (Nat.sumBelow_set f t v m (Nat.lt_of_le_of_beq_false t m h e)))
+              (Nat.add_right_comm (Nat.sumBelow f m) v (f m)))))
+/-- Bumping coordinate `t < m` bumps the sum below `m`. -/
+def Nat.sumBelow_bump (f : Nat → Nat) (t m : Nat) (h : Nat.Lt t m) :
+    Nat.sumBelow (Fam.set f t (f t + 1)) m = Nat.sumBelow f m + 1 :=
+  Nat.add_right_cancel (k := f t)
+    (Eq.trans (Nat.sumBelow_set f t (f t + 1) m h)
+      (Eq.trans (Eq.congrArg (fun x => Nat.sumBelow f m + x) (Nat.add_comm (f t) 1))
+        (Eq.symm (Nat.add_assoc (Nat.sumBelow f m) 1 (f t)))))
+
+-- ## 6. A ghost counter
+
+/-! Threads `0 … m-1` each increment a shared counter, an MVar, any number of times, in any
+interleaving. Each increment is one atomic `MVar.Inv.modify` (lib/MVarInv.wiz): the
+thread borrows the value with what the MVar holds, puts back the value plus one, and
+updates the ghost state. The ghost state has one coordinate per thread, in
+`authPCM (exclPCM Nat)`:
+
+* the MVar holds the **authorities** `●(ex aᵢ)`, one per thread, and its invariant is
+  `cell = a₀ + … + a_{m-1}`;
+* thread `i` holds the **fragment** `◯(ex kᵢ)`, the number of increments it has done.
+
+A thread knows only its own fragment. When it increments, it learns from validity that
+the MVar's `aₜ` is its `kₜ` (`Auth.excl_agree`), sets both to `kₜ + 1` by a frame-preserving
+update of its own coordinate (`Auth.update` with `Excl.local_update`, framed by
+`funPCM.update_at`: no other thread's fragment changes), and so re-establishes the
+MVar's invariant with `cell + 1`. At the end the fragments sum to the number of
+increments, and validity makes the counter equal to that sum (`Ctr.run_counts`). -/
+
+/-- The counter's ghost algebra: an authority and a fragment of an exclusive number for
+each thread. -/
+def ctrPCM : PCM (Nat → Auth (Excl Nat)) := funPCM Nat (authPCM (exclPCM Nat))
+
+/-- The state of a run: the MVar's contents, and the ghost numbers recorded by the MVar's
+authorities and by the threads' fragments. -/
+structure Ctr where
+  cell : Nat
+  auth : Nat → Nat
+  frag : Nat → Nat
+
+/-- One thread's coordinate: `●(ex a) ⋅ ◯(ex k)`. -/
+def Ctr.ghost (a k : Nat) : Auth (Excl Nat) :=
+  (authPCM (exclPCM Nat)).op (Auth.auth (exclPCM Nat) (Excl.ex a)) (Auth.frag (Excl.ex k))
+/-- The ghost resource of the whole system. -/
+def Ctr.res (s : Ctr) : Nat → Auth (Excl Nat) := fun i => Ctr.ghost (s.auth i) (s.frag i)
+/-- What the MVar holds: the authorities. -/
+def Ctr.mvarRes (s : Ctr) : Nat → Auth (Excl Nat) := fun i => Auth.auth (exclPCM Nat) (Excl.ex (s.auth i))
+/-- What the threads hold: thread `i` the fragment at coordinate `i`. -/
+def Ctr.threadRes (s : Ctr) : Nat → Auth (Excl Nat) := fun i => Auth.frag (Excl.ex (s.frag i))
+/-- The system's resource is the MVar's composed with the threads'. -/
+def Ctr.res_split (s : Ctr) : Ctr.res s = ctrPCM.op (Ctr.mvarRes s) (Ctr.threadRes s) :=
+  funext (f := Ctr.res s) (g := ctrPCM.op (Ctr.mvarRes s) (Ctr.threadRes s)) (fun i => rfl)
+
+/-- Thread `t` increments: the cell goes up by one, and the thread sets its fragment and
+the MVar's authority for it to its own count plus one. -/
+def Ctr.step (t : Nat) (s : Ctr) : Ctr :=
+  Ctr.mk (s.cell + 1) (Fam.set s.auth t (s.frag t + 1)) (Fam.set s.frag t (s.frag t + 1))
+/-- Run a trace: the threads' increments in the order they happened. -/
+def Ctr.run : List Nat → Ctr → Ctr
+  | .nil, s => s
+  | .cons t ts, s => Ctr.run ts (Ctr.step t s)
+
+/-- A step is a frame-preserving update of the ghost state: only coordinate `t` changes. -/
+def Ctr.step_update (t : Nat) (s : Ctr) : PCM.Update ctrPCM (Ctr.res s) (Ctr.res (Ctr.step t s)) :=
+  funPCM.update_at (authPCM (exclPCM Nat)) t
+    (fun i e => congrArg2 Ctr.ghost (Fam.set_off s.auth t (s.frag t + 1) i e)
+       (Fam.set_off s.frag t (s.frag t + 1) i e))
+    (Eq.substProp (A := Auth (Excl Nat))
+       (fun x => PCM.Update (authPCM (exclPCM Nat)) (Ctr.res s t) x)
+       (a := Ctr.ghost (s.frag t + 1) (s.frag t + 1)) (b := Ctr.res (Ctr.step t s) t)
+       (Eq.symm (congrArg2 Ctr.ghost (Fam.set_at s.auth t (s.frag t + 1) t (Nat.beq_refl t))
+          (Fam.set_at s.frag t (s.frag t + 1) t (Nat.beq_refl t))))
+       (Auth.update (exclPCM Nat) (Excl.local_update (s.auth t) (s.frag t) (s.frag t + 1))))
+/-- The same, in the logic: `own (res s) ⊢ |==> own (res (step t s))`. -/
+def Ctr.step_bupd (t : Nat) (s : Ctr) :
+    RProp.Entails (RProp.own ctrPCM (Ctr.res s)) (RProp.bupd ctrPCM (RProp.own ctrPCM (Ctr.res (Ctr.step t s)))) :=
+  RProp.own_update ctrPCM (Ctr.step_update t s)
+
+/-- On a valid resource, every thread's fragment agrees with the MVar's authority. -/
+def Ctr.agree (s : Ctr) (v : ctrPCM.valid (Ctr.res s)) (i : Nat) : s.auth i = s.frag i :=
+  Auth.excl_agree (v i)
+
+/-- The invariant: the ghost resource is valid, and the MVar's contents are the sum of its
+authorities over the threads `0 … m-1`. -/
+def Ctr.Inv (m : Nat) (s : Ctr) : Prop := ctrPCM.valid (Ctr.res s) ∧ s.cell = Nat.sumBelow s.auth m
+
+/-- Every thread in the trace is one of `0 … m-1`. -/
+def Ctr.AllBelow (m : Nat) : List Nat → Prop
+  | .nil => True
+  | .cons t ts => Nat.Lt t m ∧ Ctr.AllBelow m ts
+
+/-- A step keeps the invariant. -/
+def Ctr.step_inv (m t : Nat) (s : Ctr) (ht : Nat.Lt t m) (inv : Ctr.Inv m s) : Ctr.Inv m (Ctr.step t s) :=
+  (PCM.update_valid ctrPCM (Ctr.step_update t s) inv.1,
+   Eq.trans (Eq.congrArg (fun x => x + 1) inv.2)
+     (Eq.symm (Eq.substProp (A := Nat)
+        (fun x => Nat.sumBelow (Fam.set s.auth t (x + 1)) m = Nat.sumBelow s.auth m + 1)
+        (a := s.auth t) (b := s.frag t) (Ctr.agree s inv.1 t)
+        (Nat.sumBelow_bump s.auth t m ht))))
+
+/-- **The invariant holds along every trace**, whatever the interleaving. -/
+def Ctr.run_inv (m : Nat) : (ts : List Nat) → (s : Ctr) → Ctr.AllBelow m ts → Ctr.Inv m s →
+    Ctr.Inv m (Ctr.run ts s)
+  | .nil, s, h, inv => inv
+  | .cons t ts, s, h, inv => Ctr.run_inv m ts (Ctr.step t s) h.2 (Ctr.step_inv m t s h.1 inv)
+
+/-- Each increment adds one to one thread's fragment: the fragments count the increments. -/
+def Ctr.run_frag (m : Nat) : (ts : List Nat) → (s : Ctr) → Ctr.AllBelow m ts →
+    Nat.sumBelow (Ctr.run ts s).frag m = Nat.sumBelow s.frag m + List.length ts
+  | .nil, s, h => Eq.symm (Nat.add_zero (Nat.sumBelow s.frag m))
+  | .cons t ts, s, h =>
+      Eq.trans (Ctr.run_frag m ts (Ctr.step t s) h.2)
+        (Eq.trans (Eq.congrArg (fun x => x + List.length ts) (Nat.sumBelow_bump s.frag t m h.1))
+          (Nat.add_assoc (Nat.sumBelow s.frag m) 1 (List.length ts)))
+
+/-- No thread has started: the counter is 0 and every ghost number is 0. -/
+def Ctr.init : Ctr := Ctr.mk 0 (fun i => 0) (fun i => 0)
+/-- The invariant holds at the start (the ghost state is allocated as `●(ex 0) ⋅ ◯(ex 0)`
+at every coordinate, `Auth.valid_auth_self`). -/
+def Ctr.init_inv (m : Nat) : Ctr.Inv m Ctr.init :=
+  (fun i => Auth.valid_auth_self (exclPCM Nat) (a := Excl.ex 0) rfl, Eq.symm (Nat.sumBelow_zero m))
+
+/-- **The ghost counter theorem.** After any trace of increments by threads `0 … m-1`, in
+any interleaving, the counter equals the sum of the threads' fragments, and that is the
+number of increments. -/
+def Ctr.run_counts (m : Nat) (ts : List Nat) (h : Ctr.AllBelow m ts) :
+    (Ctr.run ts Ctr.init).cell = Nat.sumBelow (Ctr.run ts Ctr.init).frag m ∧
+    (Ctr.run ts Ctr.init).cell = List.length ts :=
+  let inv := Ctr.run_inv m ts Ctr.init h (Ctr.init_inv m);
+  let sum := Eq.trans inv.2 (Nat.sumBelow_ext (Ctr.run ts Ctr.init).auth (Ctr.run ts Ctr.init).frag m
+    (fun i hi => Ctr.agree (Ctr.run ts Ctr.init) inv.1 i));
+  (sum,
+   Eq.trans sum (Eq.trans (Ctr.run_frag m ts Ctr.init h)
+     (Eq.congrArg (fun x => x + List.length ts) (Nat.sumBelow_zero m))))

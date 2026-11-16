@@ -279,3 +279,58 @@ the laws are plain equations.
 Every law is proved, with no axiom. Equations of functions and of propositions compute
 (observational equality), so `funPCM`'s laws are `funext` of the pointwise ones and
 `own_op` is a pair of entailments. Tests: group `verif`.
+
+## 24h: ghost state
+
+```wiz no-check
+import GhostState
+def RProp.bupd (M : PCM A) (P : RProp A) : RProp A := fun r =>
+  (f : A) → M.valid (M.op r f) → ∃ r', M.valid (M.op r' f) ∧ P r'   -- written |==>[M] P
+```
+
+`lib/GhostState.wiz` adds the ghost state of concurrent separation logic on top of the
+algebras of 24g (plan stage S-b): resources that exist only in the proof, which threads
+change by frame-preserving updates. All of it is proved, with no axiom.
+
+* **The update modality** `|==>[M] P` (Iris's basic update): the resource can be changed
+  into one satisfying `P` without invalidating any frame. The laws are `bupd_intro`
+  (`P ⊢ |==> P`), `bupd_mono`, `bupd_trans` (`|==> |==> P ⊢ |==> P`), `bupd_frame_r`/`_l`
+  (`(|==> P) ⋆ Q ⊢ |==> (P ⋆ Q)`), `bupd_star`, `own_update` (an update `a ~~> b` of 24g
+  gives `own a ⊢ |==> own b`), and `bupd_elim` (on a valid resource, `|==> P` yields a valid
+  resource satisfying `P`).
+* **Ghost names and allocation.** `optPCM M` lifts `M` with `none` as the unit, and
+  `gmapPCM M` is a family of ghost cells `Nat → Option A` that is valid when every cell is
+  valid and finitely many names are in use. `ownG M γ a` owns `a` at the name `γ`. It splits
+  (`ownG_op`) and updates (`ownG_update`), and `ghost_alloc` makes a new name:
+  `P ⊢ |==> (∃ γ, ownG γ a) ⋆ P` for any valid `a`. The name is chosen past the bound of
+  the resource composed with the frame, so whatever the frame owns, the name is free.
+* **Agreement** `agreePCM A`: a set of values, composed by union, valid when all its values
+  are equal. `Agree.ag a` is duplicable (`own_ag_dup`), two valid copies agree
+  (`ag_agree`, `own_ag_agree`), and `ag a ~~> ag b` holds only when `a = b`
+  (`Agree.no_update`). The algebra is discrete, and it needs no decidable equality on `A`
+  because union of predicates is an equation by propext.
+* **The authoritative algebra** `authPCM M`: an exclusive authority `●a` (`Auth.auth`) and
+  fragments `◯b` (`Auth.frag`). `●a ⋅ ◯b` is valid exactly when `b ≼ a` and `a` is valid
+  (`valid_auth_frag`, `included`). Two authorities clash (`auth_clash`), and fragments
+  compose (`frag_op`). A **local update** `(a, b) ~l~> (a', b')` (`PCM.LocalUpdate`) lifts
+  to the frame-preserving update `●a ⋅ ◯b ~~> ●a' ⋅ ◯b'` (`Auth.update`). Adding the same
+  element to both sides is a local update (`PCM.local_update_op`, which covers counters),
+  and so is setting an exclusive authority and fragment to any value
+  (`Excl.local_update`). Over `exclPCM`, the fragment equals the authority
+  (`Auth.excl_agree`).
+* **A ghost counter** (section 6). Threads `0 … m-1` increment a shared MVar in any
+  interleaving, each increment being one atomic `MVar.Inv.modify` (25h). The ghost state
+  `ctrPCM = funPCM Nat (authPCM (exclPCM Nat))` has one coordinate per thread. The MVar
+  holds the authorities `●(ex aᵢ)`, with the invariant `cell = Σ aᵢ`, and thread `i` holds
+  `◯(ex kᵢ)`, its own count. An increment by thread `t` is a frame-preserving update of
+  coordinate `t` only (`Ctr.step_update`, built from `funPCM.update_at`, `Auth.update` and
+  `Excl.local_update`). Validity tells the thread that `aₜ = kₜ`, which re-establishes the
+  MVar's invariant after the increment (`Ctr.step_inv`). `Ctr.run_counts` is the trace
+  theorem, in the style of `Op.run_holds` (25h): after any trace of increments by threads
+  below `m`, the counter equals the sum of the fragments, and that sum is the number of
+  increments.
+
+What is not here yet: a step-indexed model (no later modality, no impredicative
+invariants), invariants and fancy updates, and a connection to the scheduler semantics of
+32a (the counter's trace is a list of thread ids, not a run of `Conc`). Those belong to the
+rest of S-b. Tests: group `verif-ghost`.
