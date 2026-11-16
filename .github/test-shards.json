@@ -114,6 +114,7 @@
     "elab",
     "eval",
     "format",
+    "=fmt",
     "inductive",
     "lexer",
     "lift",

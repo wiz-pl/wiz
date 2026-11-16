@@ -29,9 +29,10 @@ are recovered from the source: every leaf keeps its byte range (`SourceInfo`), s
 text between two consecutive leaves is a run of comments. One written at the end of a
 token's line stays there (`let x := 1; -- one`); the others go on their own line before
 the leaf they precede. Layout-sensitive constructs (`match`'s alternatives, `by`'s
-tactics, `let`'s chains) are printed with the breaks the parser's `colGe`/`colGt` rules
-need: one alternative or tactic per line at the construct's indent, a `let` on a line of
-its own (its `withPosition` stays in force for the terms after it).
+tactics, `calc`'s steps, `let`'s chains) are printed with the breaks the parser's
+`colGe`/`colGt` rules need: one alternative, tactic or calc step per line at the
+construct's indent, a step under the first relation, and a `let` on a line of its own
+(its `withPosition` stays in force for the terms after it).
 
 ## The fragment
 
@@ -50,7 +51,9 @@ namespace Fmt
 Strictly pretty (Lindig): `group` decides, by measuring the flat rendering against the
 remaining width, whether the `line`s inside it are spaces or newlines. `line true` always
 breaks. A `group` is measured together with the text that follows on the line, so a break
-is only taken when it is needed. -/
+is only taken when it is needed. A `fill` (a sequence of individually grouped breaks) goes
+one step further: each break is decided on its own, so a long binder or argument list uses
+as few continuation lines as fit. -/
 
 inductive Doc where
   | nil
@@ -62,6 +65,16 @@ inductive Doc where
   when the construct starts its line, else two columns deeper (`match`'s alternatives,
   `by`'s tactics) -/
   | align (d : Doc)
+  /-- indent what follows at the column it starts at: a `calc`'s steps line up under its
+  first step, wherever the `calc` itself starts -/
+  | atCol (d : Doc)
+  /-- indent what follows at an absolute column (`deriving` under the construct's fields) -/
+  | atIndent (n : Int) (d : Doc)
+  /-- remember the indentation of the line this construct starts on (an `if`, whose
+  `else` returns to it after a wrapped branch) -/
+  | scope (d : Doc)
+  /-- indent what follows at the line indentation remembered by the nearest `scope` -/
+  | atScope (d : Doc)
   | group (d : Doc)
   deriving Inhabited
 
@@ -70,14 +83,27 @@ namespace Doc
 partial def first? : Doc → Option Char
   | .txt s => s.toList.head?
   | .cat ds => ds.toList.findSome? first?
-  | .nest _ d | .group d | .align d => first? d
+  | .nest _ d | .group d | .align d | .atCol d | .atIndent _ d | .scope d | .atScope d => first? d
   | _ => none
 
 partial def last? : Doc → Option Char
   | .txt s => s.toList.getLast?
   | .cat ds => ds.toList.reverse.findSome? last?
-  | .nest _ d | .group d | .align d => last? d
+  | .nest _ d | .group d | .align d | .atCol d | .atIndent _ d | .scope d | .atScope d => last? d
   | _ => none
+
+/-- Does the document end by ending its line (a hard break, or text with a newline)? A
+child that does has already moved to the next line, so its parent must not add a space or
+another break in front of the next token. -/
+partial def endsHard : Doc → Bool
+  | .nil => false
+  | .txt s => s.endsWith "\n"
+  | .line _ => true
+  | .nest _ d | .group d | .align d | .atCol d | .atIndent _ d | .scope d | .atScope d => endsHard d
+  | .cat ds =>
+    match ds.toList.reverse.find? (fun d => !(d matches .nil)) with
+    | some d => endsHard d
+    | none => false
 
 /-- The column after printing `s`, starting at `col` (text may contain newlines). -/
 def colAfter (col : Int) (s : String) : Int :=
@@ -85,15 +111,61 @@ def colAfter (col : Int) (s : String) : Int :=
   | [one] => col + one.length
   | lines => (lines.getLast!).length
 
+/-- Remove trailing hard breaks from a document: the parent's own break will end the line
+at the parent's indentation, so the child's break would only add a blank line (or leave the
+next token at the child's indentation). -/
+partial def dropTrailingLine : Doc → Doc
+  | .line _ => .nil
+  | .nil => .nil
+  | .txt s => .txt s
+  | .nest n d =>
+    match dropTrailingLine d with
+    | .nil => .nil
+    | d => .nest n d
+  | .align d =>
+    match dropTrailingLine d with
+    | .nil => .nil
+    | d => .align d
+  | .atCol d =>
+    match dropTrailingLine d with
+    | .nil => .nil
+    | d => .atCol d
+  | .atIndent n d =>
+    match dropTrailingLine d with
+    | .nil => .nil
+    | d => .atIndent n d
+  | .scope d =>
+    match dropTrailingLine d with
+    | .nil => .nil
+    | d => .scope d
+  | .atScope d =>
+    match dropTrailingLine d with
+    | .nil => .nil
+    | d => .atScope d
+  | .group d =>
+    match dropTrailingLine d with
+    | .nil => .nil
+    | d => .group d
+  | .cat ds =>
+    let rec fix (a : Array Doc) : Array Doc :=
+      if a.isEmpty then a
+      else
+        match dropTrailingLine a.back! with
+        | .nil => fix a.pop
+        | d => a.set! (a.size - 1) d
+    .cat (fix ds)
+
 end Doc
 
 open Doc
 
-/-- A document, the indentation of its line, and whether it is flat. -/
+/-- A document, the indentation of its line, whether it is flat, and the line indents
+remembered by enclosing `scope`s. -/
 structure Cmd where
   indent : Int
   flat : Bool
   doc : Doc
+  scopes : List Int := []
 
 /-- Does the flat rendering of these commands fit in `w` columns? A break in non-flat
 mode ends the measurement (`true`: it fits up to there). -/
@@ -109,6 +181,9 @@ partial def fits (w : Int) : List Cmd → Bool
     | .cat ds => fits w (ds.toList.map (fun d => { c with doc := d }) ++ rest)
     | .nest _ d => fits w ({ c with doc := d } :: rest)
     | .align d => fits w ({ c with doc := d } :: rest)
+    | .atCol d => fits w ({ c with doc := d } :: rest)
+    | .atIndent _ d => fits w ({ c with doc := d } :: rest)
+    | .scope d | .atScope d => fits w ({ c with doc := d } :: rest)
     | .group d => fits w ({ c with flat := true, doc := d } :: rest)
     | .line hard =>
       -- a hard break ends the line the group is measured on
@@ -123,30 +198,47 @@ column: a `match` in `def f := match x with` puts its alternatives at 2, and the
 `match` on a line already indented by 2 puts them at 4. That is the house layout, and it
 is what the parser's `colGe` rules accept. -/
 partial def render (width : Nat) (d : Doc) : String :=
-  let rec go (out : String) (col lineIndent : Int) : List Cmd → String
+  let rec go (out : String) (col lineIndent : Int) (empty : Bool) : List Cmd → String
     | [] => out
     | c :: rest =>
       match c.doc with
-      | .nil => go out col lineIndent rest
-      | .txt s => go (out ++ s) (Doc.colAfter col s) lineIndent rest
-      | .cat ds => go out col lineIndent (ds.toList.map (fun d => { c with doc := d }) ++ rest)
-      | .nest n d => go out col lineIndent ({ c with indent := lineIndent + n, doc := d } :: rest)
+      | .nil => go out col lineIndent empty rest
+      | .txt s =>
+        -- a token may itself end a line (a multi-line block comment)
+        let empty := if s.isEmpty then empty else s.endsWith "\n"
+        go (out ++ s) (Doc.colAfter col s) lineIndent empty rest
+      | .cat ds =>
+        go out col lineIndent empty (ds.toList.map (fun d => { c with doc := d }) ++ rest)
+      | .nest n d =>
+        go out col lineIndent empty ({ c with indent := lineIndent + n, doc := d } :: rest)
       | .align d =>
         let ind := if col == lineIndent then col else lineIndent + 2
-        go out col lineIndent ({ c with indent := ind, doc := d } :: rest)
+        go out col lineIndent empty ({ c with indent := ind, doc := d } :: rest)
+      | .atCol d =>
+        -- the construct's lines are indented at the column the construct starts at
+        -- (`col` may be past the line's indentation: the line is not empty)
+        go out col col empty ({ c with indent := col, doc := d } :: rest)
+      | .atIndent n d =>
+        go out col lineIndent empty ({ c with indent := n, doc := d } :: rest)
+      | .scope d =>
+        -- remember the indentation of the line the construct starts on; only `d` sees it
+        go out col lineIndent empty ({ c with doc := d, scopes := lineIndent :: c.scopes } :: rest)
+      | .atScope d =>
+        let ind := c.scopes.headD lineIndent
+        go out col lineIndent empty ({ c with indent := ind, doc := d } :: rest)
       | .group d =>
         let flat := fits (Int.ofNat width - col) ({ c with flat := true, doc := d } :: rest)
-        go out col lineIndent ({ c with flat, doc := d } :: rest)
+        go out col lineIndent empty ({ c with flat, doc := d } :: rest)
       | .line hard =>
         if hard || !c.flat then
           let ind := if c.indent < 0 then 0 else c.indent
           -- nothing on this line yet: the break is already taken (a comment ends its line,
           -- then the layout asks for one as well)
-          if col == lineIndent then go out col lineIndent rest
-          else go (out ++ "\n" ++ String.ofList (List.replicate ind.toNat ' ')) ind ind rest
-        else if col == lineIndent then go out col lineIndent rest
-        else go (out ++ " ") (col + 1) lineIndent rest
-  go "" 0 0 [{ indent := 0, flat := false, doc := d }]
+          if empty then go out col lineIndent empty rest
+          else go (out ++ "\n" ++ String.ofList (List.replicate ind.toNat ' ')) ind ind true rest
+        else if empty then go out col lineIndent empty rest
+        else go (out ++ " ") (col + 1) lineIndent false rest
+  go "" 0 0 true [{ indent := 0, flat := false, doc := d }]
 
 /-! ### Chunks: tokens, and the spacing the grammar asks for
 
@@ -162,10 +254,19 @@ inductive Chunk where
   | text (doc : Doc) (first last : Option Char) (raw : Option String) (sep : Bool := false)
       (start stop : Nat := 0)
   | brk (hard : Bool)
+  /-- a break that is taken only when the rest of the line does not fit: a `fill`, where
+  every break is decided on its own (unlike a `group`, whose breaks are all taken together) -/
+  | fillBrk
   /-- nest what follows in this node (a negative number dedents) -/
   | nest (n : Int)
   /-- indent what follows like its construct (`match`'s alternatives, `by`'s tactics) -/
   | align
+  /-- indent what follows at its current column (`calc`'s steps) -/
+  | atCol
+  /-- indent what follows at an absolute column (`deriving`, `mutual`'s `end`) -/
+  | atIndent (n : Int)
+  /-- indent what follows at the line indentation remembered by the nearest `scope` -/
+  | atScope
   /-- no space before the next token (`noWs`) -/
   | glue
   /-- a comment, and whether it starts on the same source line as the token before it
@@ -247,21 +348,41 @@ def trimLast : List Chunk → List Chunk
 /-- Join chunks: the tokens with their spacing, the breaks and nests as they come. -/
 partial def joinChunks (cs : List Chunk) : Doc :=
   let cs := trimLast (trimFirst (commentsToText (attachTrailing cs)))
+  let endsHard? : Option Chunk → Bool
+    | some (.text d ..) => d.endsHard
+    | _ => false
   let rec go (cs : List Chunk) (prev : Option Chunk) (glue : Bool) (out : Array Doc) : Doc :=
     match cs with
     | [] => .cat out
     | .glue :: rest => go rest prev true out
     | .brk h :: rest =>
-      -- two breaks in a row would be a blank line (a comment already ends the line)
+      -- a child whose last token carried a trailing comment already ended its line:
+      -- drop that break and take this one, at the parent's indentation
+      let out :=
+        if endsHard? prev then
+          match out.back? with
+          | some d => (out.pop).push d.dropTrailingLine
+          | none => out
+        else out
       let rest := rest.dropWhile (fun c => c matches .brk _)
       go rest none true (out.push (.line h))
+    | .fillBrk :: rest =>
+      -- a `fill` break: group the rest of this run on its own, so this break is taken
+      -- (and the run re-measured) only when the text after it does not fit. A child
+      -- whose trailing comment already ended the line needs no break.
+      let rest := rest.dropWhile (fun c => c matches .brk _ || c matches .fillBrk)
+      if endsHard? prev then go rest none false out
+      else .cat (out.push (.group (.cat #[.line false, go rest none false #[]])))
     | .nest n :: rest => .cat (out.push (.nest n (go rest prev glue #[])))
     | .align :: rest => .cat (out.push (.align (go rest prev glue #[])))
+    | .atCol :: rest => .cat (out.push (.atCol (go rest prev glue #[])))
+    | .atIndent n :: rest => .cat (out.push (.atIndent n (go rest prev glue #[])))
+    | .atScope :: rest => .cat (out.push (.atScope (go rest prev glue #[])))
     -- (comments are turned into text before the loop; this keeps the match total)
     | .comment s _ :: rest => go (mkChunk (.txt s) none :: rest) prev glue out
     | c@(.text ..) :: rest =>
       let sp := match prev with
-        | some p => !glue && needSpace p c
+        | some p => !(endsHard? (some p)) && !glue && needSpace p c
         | none => false
       let out := if sp then out.push (.txt " ") else out
       let d := match c with | .text d .. => d | _ => .nil
@@ -292,6 +413,16 @@ def layoutAfter (kind : Name) (tok : String) : List Chunk :=
   | "command.def", ":=" => [.nest 2, .brk false]
   | "term.fun", "=>" | "term.fun", "↦" => [.nest 2, .brk false]
   | "match.alt", "=>" => [.nest 2, .brk false]
+  -- an `if` branch goes under its `then`/`else` when it does not fit; the `else` itself
+  -- returns to the `if`'s indentation (the `then` branch's nest is the outer one here)
+  | "term.ite", "then" => [.nest 2, .brk false]
+  | "term.ite", "else" => [.nest 2, .brk false]
+  -- the first `calc` step follows the keyword on its line; the rest line up under it
+  -- (a space of its own: the step's column is the alignment, whether or not the generic
+  -- spacing would have put one there)
+  | "term.calc", "calc" => [.glue, mkChunk (.txt " ") (some " "), .atCol]
+  -- a step's proof stays on its relation's line unless the step is too long for one
+  | "calc.step", ":=" => [.brk false]
   -- a `let` starts a line: the parser remembers its column (`withPosition`) for the
   -- terms after it, so a `let` in the middle of a line would forbid the continuation
   -- lines (of the `let`'s own body) to its left
@@ -302,9 +433,11 @@ def layoutAfter (kind : Name) (tok : String) : List Chunk :=
 /-- Chunks to insert before the atom `tok` of a node of kind `kind`. -/
 def layoutBefore (kind : Name) (tok : String) : List Chunk :=
   match kind, tok with
-  | "command.mutual", "end" => [.nest (-2), .brk true]
+  | "command.mutual", "end" => [.atIndent 0, .brk true]
   | "command.inductive", "deriving" | "command.structure", "deriving" | "command.cStruct", "deriving" =>
-    [.brk true]
+    [.atIndent 2, .brk true]
+  -- the `then` branch nested by 2; `else` comes back to the `if`'s line indent
+  | "term.ite", "else" => [.atScope, .brk false]
   | _, _ => []
 
 /-- Chunks to insert after a child node of kind `child` inside a node of kind `kind`. -/
@@ -321,6 +454,19 @@ partial def hardItems : ParserDescr → Bool
   | .sepBy p _ _ | .sepBy1 p _ _ => hardItems p
   | .orelse p q => hardItems p || hardItems q
   | _ => false
+
+/-- A declaration whose binder list is a signature: it is laid out with `fill` and its
+continuation lines are indented by 4 (the house layout of a long `def`). -/
+def signatureKind (kind : Name) : Bool :=
+  kind == "command.def" || kind == "command.defEqns" || kind == "command.axiom" ||
+  kind == "command.inductive" || kind == "command.structure" || kind == "command.class" ||
+  kind == "command.coinductive" || kind == "command.instance" || kind == "command.glue"
+
+/-- A comma-separated list of terms (a tuple, an anonymous constructor, a list literal, a
+record update, or an argument list of user syntax) may break at its commas. Header lists
+(`.{u, v}`, `deriving`, imports) and feral DSL blocks are left alone. -/
+def fillSep (kind : Name) (sep : String) : Bool :=
+  sep == "," && (kind.startsWith "term." || kind.startsWith "tactic.")
 
 /-! ### Walking the grammar -/
 
@@ -394,16 +540,18 @@ def leafText (ctx : Ctx) (s : Syntax) : String :=
     | .node _ "str" #[.atom _ v] => v.quote
     | _ => ""
 
-/-- Does this syntax contain a `let` chain or a comment? Then a construct that
+/-- Does this syntax contain a `let` chain, a `calc`, or a comment? Then a construct that
 `withPosition` (a `let`, see `Parser/Builtin.lean`) must not be started in the middle of
 a line: its own continuation lines would be left of the column its `colGt` rules saved,
 and the reprint would not parse back. So a `def`'s body, an alternative's or a `fun`'s
-body is put on its own line in that case. -/
+body is put on its own line in that case. (`calc` aligns its own steps, but starting it
+on its own line keeps that alignment at the construct's indent, as the stage docs show.) -/
 partial def needsOwnLine (ctx : Ctx) (s : Syntax) : Bool :=
   match s with
   | .atom i _ | .ident i _ => !(ctx.comments.getD i.start #[]).isEmpty
   | .node i k as =>
-    k.startsWith "term.let" || !(ctx.comments.getD i.start #[]).isEmpty || as.any (needsOwnLine ctx)
+    k.startsWith "term.let" || k == "term.calc" ||
+      !(ctx.comments.getD i.start #[]).isEmpty || as.any (needsOwnLine ctx)
   | _ => false
 
 /-- The chunks for a leaf: the comments in front of it (each on its own line), then the
@@ -418,6 +566,38 @@ def leafChunks (ctx : Ctx) (s : Syntax) (raw : Option String) : Array Chunk := I
   for c in ctx.trailing.getD s.info.stop #[] do
     out := out.push (.comment c true) |>.push (.brk true)
   out
+
+/-- Insert layout chunks right after the token of a leaf's chunks. A trailing comment
+comes after the token, so layout that must surround every line of the construct (the
+`calc` alignment) has to go between the two. -/
+def insertAfterToken (cs extra : Array Chunk) : Array Chunk := Id.run do
+  let mut out : Array Chunk := #[]
+  let mut done := false
+  for c in cs do
+    out := out.push c
+    if !done && c matches .text .. then
+      out := out ++ extra
+      done := true
+  pure out
+
+/-- Insert the layout that follows an atom (`nest` then a break) before the break that the
+trailing comment already put there, so the comment stays on the token's line and the break
+it ends takes the new indentation. The atom's own break is not added again. -/
+def insertLayoutAfterToken (cs after : Array Chunk) : Array Chunk := Id.run do
+  let mut commentAt : Option Nat := none
+  for (c, i) in cs.toList.zipIdx do
+    if commentAt.isNone && (c matches .comment _ true) then commentAt := some i
+  let some ci := commentAt | return cs ++ after
+  let extra := after.filter fun c => !(c matches .brk _)
+  if extra.isEmpty then return cs
+  let mut out : Array Chunk := #[]
+  let mut done := false
+  for (c, i) in cs.toList.zipIdx do
+    if !done && i > ci && (c matches .brk _) then
+      out := out ++ extra
+      done := true
+    out := out.push c
+  if done then out else out ++ extra
 
 /-- `$x` or `$x:cat` inside a quotation (both antiquot shapes share the kind
 `antiquot`, so the grammar in the table is only one of them). -/
@@ -449,7 +629,9 @@ partial def fmtNode (ctx : Ctx) (s : Syntax) (cat : Name) (_prec : Nat) : EM Doc
       let (cs, j) ← walk ctx cat k f args 0 f.p
       if j != args.size then throw s!"{k}: its children don't fit its grammar"
       let cs := if k == "term.match" || k == "term.by" then #[.align] ++ cs else cs
-      pure (.group (joinChunks cs.toList))
+      let body := .group (joinChunks cs.toList)
+      -- an `if` records its line's indentation so `else` can return to it
+      pure (if k == "term.ite" then .group (.scope body) else body)
     else
       let some lhs := args[0]? | throw s!"{k}: no left-hand side"
       let ld ← fmtNode ctx lhs f.cat f.lhsPrec
@@ -478,7 +660,12 @@ partial def walk (ctx : Ctx) (cat : Name) (kind : Name) (f : PPFormat) (args : A
             else layoutAfter kind tok
           | none => layoutAfter kind tok
         else layoutAfter kind tok
-      pure ((layoutBefore kind tok).toArray ++ cs ++ after.toArray, i + 1)
+      -- a `calc`'s alignment has to enclose its trailing comment as well; for the
+      -- other atoms a trailing comment keeps the layout's break (at its new indent)
+      let cs := if kind == "term.calc" && tok == "calc"
+        then insertAfterToken cs after.toArray
+        else insertLayoutAfterToken cs after.toArray
+      pure ((layoutBefore kind tok).toArray ++ cs, i + 1)
     | _ => throw s!"{kind}: expected '{tok}'"
   | .ident =>
     match args[i]? with
@@ -532,20 +719,46 @@ partial def walk (ctx : Ctx) (cat : Name) (kind : Name) (f : PPFormat) (args : A
     | some (.node _ "null" es) =>
       if d matches .many1 _ && es.isEmpty then throw s!"{kind}: expected one more item"
       let hard := hardItems p
-      let mut acc : Array Chunk := #[]
-      -- (`match` and `by` already set their own alignment at the node)
-      if hard && !es.isEmpty && kind != "term.match" && kind != "term.by" then
-        acc := acc.push (.nest 2)
-      for e in es do
-        if hard then acc := acc.push (.brk true)
-        let xs ← iter ctx cat kind f p e
-        acc := acc ++ xs
-      pure (acc, i + 1)
+      -- `calc`'s first step stays on the keyword's line (its alignment is an `atCol`
+      -- from the keyword); the rest go one per line under it
+      let isCalc := kind == "term.calc"
+      -- `match` and `by` align their own lines; other hard item lists (constructors,
+      -- fields, mutual members) are one block indented by two, so the nest must end with
+      -- the list and not reach the `deriving`/`end` that follows it
+      let aligned := kind == "term.match" || kind == "term.by" || isCalc
+      -- long signatures fill their binders (at 4); applications fill their arguments
+      -- (at 2). Both are scoped to this list, so the nest ends with it.
+      if !hard && (signatureKind kind || kind == "term.app") && es.size > 1 then
+        let mut cs : Array Chunk := #[]
+        for (e, k) in es.toList.zipIdx do
+          if k > 0 then cs := cs.push (.fillBrk)
+          cs := cs ++ (← iter ctx cat kind f p e)
+        let ind : Int := if kind == "term.app" then 2 else 4
+        pure (#[mkChunk (.nest ind (joinChunks cs.toList)) none], i + 1)
+      else if hard && !aligned && !es.isEmpty then
+        let mut cs : Array Chunk := #[]
+        for e in es do
+          cs := cs.push (.brk true)
+          cs := cs ++ (← iter ctx cat kind f p e)
+        pure (#[mkChunk (.nest 2 (joinChunks cs.toList)) none], i + 1)
+      else
+        let mut acc : Array Chunk := #[]
+        for (e, k) in es.toList.zipIdx do
+          if isCalc then
+            if k > 0 then acc := acc.push (.brk true)
+          else if hard then acc := acc.push (.brk true)
+          acc := acc ++ (← iter ctx cat kind f p e)
+        pure (acc, i + 1)
     | _ => throw s!"{kind}: expected a list"
   | .optional p =>
     match args[i]? with
     | some (.node _ "null" es) =>
-      if es.isEmpty then pure (#[], i + 1)
+      if es.isEmpty then
+        -- a `let` without a `;` still puts its body on its own line; otherwise the body
+        -- would be read as one more argument of the value (`let r := x s f r`)
+        if kind.startsWith "term.let" && (match p with | .atom ";" => true | _ => false) then
+          pure (#[.brk true], i + 1)
+        else pure (#[], i + 1)
       else
         let (xs, j) ← walk ctx cat kind f es 0 p
         if j != es.size then throw s!"{kind}: an optional part doesn't fit"
@@ -555,19 +768,20 @@ partial def walk (ctx : Ctx) (cat : Name) (kind : Name) (f : PPFormat) (args : A
     match args[i]? with
     | some (.node _ "null" es) =>
       if d matches .sepBy1 .. && es.isEmpty then throw s!"{kind}: expected one more item"
-      -- (breaking a separated list at its separators is only useful where the
-      -- separators are data, as in a tuple: in a binder list it would break the header)
-      let breaks := kind == "term.tuple" || kind == "term.anon"
+      -- comma-separated terms fill at their separators, indented by two; a list that
+      -- belongs to a header (binders, universe parameters, deriving, imports) does not.
+      let fill := fillSep kind sep
       let mut acc : Array Chunk := #[]
       for (e, k) in es.toList.zipIdx do
         if k % 2 == 1 then
           unless e matches .atom .. do throw s!"{kind}: expected a separator"
           acc := acc.push (mkChunk (.txt sep) none (sep := true))
-          if breaks then acc := acc.push (.brk false)
+          if fill then acc := acc.push (.fillBrk)
         else
           let xs ← iter ctx cat kind f p e
           acc := acc ++ xs
-      pure (acc, i + 1)
+      if fill then pure (#[mkChunk (.nest 2 (joinChunks acc.toList)) none], i + 1)
+      else pure (acc, i + 1)
     | _ => throw s!"{kind}: expected a list"
 
 /-- One iteration of `many`/`sepBy`: a single item stays as it is, several are a `null`
@@ -732,6 +946,63 @@ partial def run (init : CommandState ZeroOneMany) (input : String) (opts : Optio
         go s' stop stop (out ++ gap ++ original) (refused.push s!"line {lineNo}: left as written ({why}){note}")
       | .ok text => go s' stop stop (out ++ gap ++ text) refused
   go init 0 0 "" #[]
+
+/-! ### `--self-test`: small fixtures that exercise the constructs the formatter lays out
+
+The fixtures are self-contained (the builtin tables only), so this is a quick check that a
+change to the formatter did not break `let`, `calc`, tactics, attributes, patterns,
+structures, implicit binders, long applications, strings, or comments. `wiz fmt
+--self-test` runs them and prints any fixture that is not idempotent or that loses a
+comment. -/
+
+structure Fixture where
+  name : String
+  src : String
+  /-- text that must still appear in the reprint (a comment marker, say) -/
+  marks : Array String := #[]
+
+def selfTestFixtures : Array Fixture := #[
+  { name := "let without a semicolon", src :=
+      "def bind (x : Nat) (f : Nat → Nat) : Nat := fun s =>\n  let r := x\n  f r\n" },
+  { name := "calc with comments", marks := #["-- chain", "-- middle", "-- last"], src :=
+      "infix:50 \" ≤ \" => Nat.le\ninfix:50 \" < \" => Nat.lt\ndef t (a b c : Nat) (h1 : a ≤ b) (h2 : b < c) : a < c :=\n  -- chain\n  calc a ≤ b := h1 -- first\n       -- middle\n       _ < c := h2 -- last\n" },
+  { name := "tactic with an argument list", src :=
+      "syntax \"simp\" \"[\" term \"]\" : tactic\ndef t (a b : Nat) (h : a = b) : a = b := by\n  simp [h]\n" },
+  { name := "attributes", src :=
+      "def f : Nat := 1\nattribute [inline] f\nattribute [deriver Foo] d\nlocal attribute [macro term.x] m\n" },
+  { name := "match and patterns", src :=
+      "inductive T where\n  | a\n  | b (n : Nat) (m : T)\ndef f (t : T) : Nat :=\n  match t with\n  | .a => 0\n  | .b n .a => n\n  | .b n (.b m r) => match n with\n    | 0 => 1\n    | _ => 2\n" },
+  { name := "structure, implicit binders, long application", src :=
+      "structure P where\n  x : Nat\n  y : Nat\ndef p : P := ⟨1, 2⟩\ndef im {α : Type} [Inhabited α] (x : α) : α := x\ndef long : Nat := Nat.add (Nat.add (Nat.add 1 2) (Nat.add 3 4)) (Nat.add (Nat.add 5 6) (Nat.add 7 8))\n" },
+  { name := "long signature, binders and arguments fill", src :=
+      "def longSignature (alpha beta gamma delta : Type) (a : alpha) (b : beta) (c : gamma) (d : delta) : Nat := Nat.add (Nat.add (Nat.add a a) (Nat.add b b)) (Nat.add (Nat.add c c) (Nat.add d d))\n" },
+  { name := "string literals are not comments", marks := #["\"a -- not a comment /- nor this -/ b\""], src :=
+      "def s : String := \"a -- not a comment /- nor this -/ b\"\n" },
+  { name := "comments in odd places", marks := #["-- after let", "-- after value", "-- before body", "-- after body"], src :=
+      "def f (x : Nat) : Nat :=\n  let -- after let\n    y := x -- after value\n  -- before body\n  y -- after body\n" }
+]
+
+def selfTest : Array String := Id.run do
+  let mut bad : Array String := #[]
+  for f in selfTestFixtures do
+    let init : CommandState ZeroOneMany := {}
+    let r := run init f.src {}
+    if !r.errors.isEmpty then
+      bad := bad.push s!"{f.name}: parse error: {" ".intercalate r.errors.toList}"
+    else if !r.refused.isEmpty then
+      bad := bad.push s!"{f.name}: refused: {" ".intercalate r.refused.toList}"
+    else
+      let r2 := run init r.text {}
+      if !r2.errors.isEmpty then
+        bad := bad.push s!"{f.name}: the reprint does not parse: {" ".intercalate r2.errors.toList}"
+      else if !r2.refused.isEmpty then
+        bad := bad.push s!"{f.name}: the reprint is refused: {" ".intercalate r2.refused.toList}"
+      else if r2.text != r.text then
+        bad := bad.push s!"{f.name}: formatting is not idempotent"
+      else
+        for m in f.marks do
+          unless r.text.contains m do bad := bad.push s!"{f.name}: lost the comment {m}"
+  bad
 
 end Fmt
 end Wiz

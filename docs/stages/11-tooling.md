@@ -698,16 +698,19 @@ Neovim shows them as `@lsp.type.keyword` (linked to `@keyword`) without configur
 
 ## 11aa: `wiz fmt`, a formatter
 
-    wiz fmt [FILE|-] [--check] [--width N] [--explain]
+    wiz fmt [FILE|-] [--check] [--width N] [--explain] [--self-test]
 
 Reprints a file from its syntax tree: each command is parsed with the tables that are in
 effect at it (imported `syntax` and `notation` included), printed from the tree with the
 grammar of every node kind (`PPFormat`, the table 11r's printer walks, so declared
 spacing like `" + "` and `noWs` are honoured), and laid out by a small pretty-printing
-document (`Wiz/Format.lean`: `group`/`line`/`nest`, strictly pretty). `FILE` alone prints
+document (`Wiz/Format.lean`: `group`/`line`/`fill`/`nest`, strictly pretty). `FILE` alone prints
 to stdout, `-` (the default) reads stdin, `--check` changes nothing and exits 1 when the
 file differs, `--width` is the column budget (default 100), `--explain` prints what a
-refused command would have become.
+refused command would have become, and `--self-test` runs the built-in fixtures
+(`let` without `;`, `calc`, a tactic with `[simp]`, attributes, patterns, structures and
+implicit binders, a long signature and application, a string with comment markers, and
+comments in odd places).
 
 * **Why reprint, not rewrite whitespace.** The parser is the single source of truth for
   the tokens and for precedence, so a reprint cannot disagree with it about `a + b` or
@@ -729,7 +732,25 @@ refused command would have become.
   a line — `withPosition` in `term.let` stays in force for the terms after it, so a
   `let` in the middle of a line would forbid its own body's continuation lines to its
   left. That is why `def f := let …` breaks after `:=` while `def f := match …` may stay
-  on one line.
+  on one line. A `calc`'s steps line up under its first relation (`Doc.atCol`), and a
+  trailing comment on a token stays on that token's line while the break it ends takes
+  the indentation of the construct that follows (no blank line is left).
+* **Width and `fill`.** A command is laid out to `--width` columns (default 100). A long
+  line breaks only where it has to, at a `fill` point, and each point is re-measured on
+  its own: a signature fills its binder list (continuation lines at 4), an application
+  fills between arguments (at 2), and a comma-separated term or tactic list (a tuple,
+  `⟨…⟩`, a list literal, a record update, `simp [h₁, …]`) fills at its commas (at 2). A
+  `match` alternative's body that does not fit starts under its `=>` (at 2), and an `if`
+  branch starts under its `then`/`else` (at 2) with `else` back at the `if`'s indent.
+  Text after the last break is measured too, so a break is taken only when the rest of
+  the line really does not fit; re-measuring each suffix is what keeps the result
+  idempotent (formatting twice gives the same text).
+* **Deliberately not wrapped.** `calc` chains and tactic blocks keep their own
+  one-per-line layout and are not reflowed; feral DSL blocks are copied verbatim; a
+  multi-line block comment keeps the indentation of its continuation lines; and a single
+  token, a long name, or an unbreakable bracket group may still exceed the width.
+  Header lists (`.{u, v}`, `deriving`, imports) do not break, and a `def`'s type after
+  `:` is not given a break of its own (its binders and term arguments can still fill).
 * **What is refused.** A kind with no grammar in the tables, something between tokens
   that is not a comment, or a reprint that does not parse back to the same tree. The
   check is what makes a prototype safe: across the library files tested (Prelude, Logic,
@@ -737,11 +758,13 @@ refused command would have become.
   Trace, Text, Sat, Hdl/Sim and two examples) the formatter changes no command it
   accepts, is idempotent on every file (formatting twice gives the same text), and
   refuses one command (`Fe.specLin` in `lib/Feral.wiz`: a `match` inside a `let` value,
-  see `wiz-notes/wiz-fmt.md`). 13 test cases in the `format` group.
-* **Not done.** Signatures never break (a long header stays long: wrapping binder lists
-  needs `fill`/alignment); a multi-line block comment keeps the indentation of its
-  continuation lines; the self-hosted frontend has no formatter; and the LSP does not
-  offer `textDocument/formatting` yet (`Wiz/Format.lean` is that plumbing's core).
+  see `wiz-notes/wiz-fmt.md`). The `format` group has the layout and comment cases
+  (25 cases); `wiz fmt --self-test` runs the fixtures, and the `fmt` gate group formats a
+  fixed six-file corpus twice (`lake test -- '=fmt'`, about 12 s) and requires an
+  idempotent reprint with no refused command. Both groups are in CI's `core` shard.
+* **Not done.** A multi-line block comment keeps the indentation of its continuation
+  lines; the self-hosted frontend has no formatter; and the LSP does not offer
+  `textDocument/formatting` yet (`Wiz/Format.lean` is that plumbing's core).
 ## 11ab: a static playground
 
 `web/playground.html`: a Wiz playground that runs entirely in the page. A text area
