@@ -44,6 +44,10 @@ inductive Outcome where
   /-- the kernel rejects for a usage (quantity) reason, which the reference checker does
   not look at, and the reference checker accepts -/
   | usage
+  /-- the kernel rejects an unguarded `μ` description (`descGuarded`, TT-06: a recursive
+  field with no `arg` field before it, `μ X. X`), a size side condition the reference
+  checker does not implement (it has no sizes), and the reference checker accepts -/
+  | guard
   | fuel
   | disagree (what : String)
   deriving Repr, BEq
@@ -85,6 +89,7 @@ def vote (g : Globals ZeroOneMany) (sg : Sig) (t : MTm) (opts : Opts := kernelOp
       let m := toString e
       if has m "declared with quantity" || has m "cannot project the field" || has m "cannot discard" ||
           has m "a projection needs an unrestricted pair" then .usage
+      else if has m unguardedDescription then .guard
       else .disagree s!"the reference checker accepts, the kernel rejects: {m}"
     | .error _, .error (.fail _) => .reject
 
@@ -105,12 +110,13 @@ structure Tally where
   acceptUncompared : Nat := 0
   reject : Nat := 0
   usage : Nat := 0
+  guard : Nat := 0
   fuel : Nat := 0
   disagree : List (Nat × String × String) := []
 
 def Tally.summary (t : Tally) : String :=
   s!"accept {t.accept} (+{t.acceptUncompared} with the type not compared), reject {t.reject}, " ++
-  s!"usage-only {t.usage}, out of fuel {t.fuel}, outside the fragment {t.outside}, disagree {t.disagree.length}"
+  s!"usage-only {t.usage}, guard-only {t.guard}, out of fuel {t.fuel}, outside the fragment {t.outside}, disagree {t.disagree.length}"
 
 def tally (terms : Array MTm) (opts : Opts := kernelOpts) : Except String Tally := do
   let sg ← refSig opts
@@ -124,6 +130,7 @@ def tally (terms : Array MTm) (opts : Opts := kernelOpts) : Except String Tally 
     | .acceptUncompared => t := { t with acceptUncompared := t.acceptUncompared + 1 }
     | .reject => t := { t with reject := t.reject + 1 }
     | .usage => t := { t with usage := t.usage + 1 }
+    | .guard => t := { t with guard := t.guard + 1 }
     | .fuel => t := { t with fuel := t.fuel + 1 }
     | .disagree w => t := { t with disagree := t.disagree ++ [(i, w, tm.pretty 0)] }
     i := i + 1
