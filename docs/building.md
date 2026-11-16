@@ -220,9 +220,6 @@ Adding a test group touches no shared file:
 * The older modules (`Tests/Grail.lean`, `Tests/Lint.lean`, …) still list their groups
   (`groups` at their end, concatenated by `Tests/Main.lean`); a new group goes in
   `Tests/Groups/` all the same.
-* `scripts/migrate-tests.py` made this layout from the old single `Tests/Elab.lean`,
-  deterministically; a branch that still edits the old file replays its changes with it
-  (AGENTS.md, "Test layout").
 
 ### The rejection corpus (`=reject`)
 
@@ -299,7 +296,7 @@ grail build
 `grail cache path|list|verify` inspects the shared cache; `verify` re-hashes every
 archive and checks every unpacked tree's stamp, and exits 1 on a corrupt entry.
 
-The hermetic fixture is `tests/fixtures/grail-index/` (`index/NAME.sexpr`,
+The hermetic fixture is `Tests/fixtures/grail-index/` (`index/NAME.sexpr`,
 `packages/NAME-V.tar.gz`, `sources/` and `make.sh`); `=grail-deps` covers exact/range
 versions, the transitive closure, a missing package, a hash mismatch, stale locks,
 `fetch --locked` with cold/warm caches, scoped `index/@org/name.sexpr` files, index
@@ -310,7 +307,7 @@ includes three signed-snapshot cases (a throwaway Ed25519 key via `ssh-keygen`; 
 skip when it is absent): the lock records the fingerprint/sequence, offline
 verification from the pinned key, and refusal of a tampered or re-signed snapshot, an
 expired key, a lower sequence and a same-sequence rewrite. Rebuild the archives with
-`cd tests/fixtures/grail-index && ./make.sh`. There is no network in these tests.
+`cd Tests/fixtures/grail-index && ./make.sh`. There is no network in these tests.
 
 There is also a complete example **index repository** at `examples/grail-index/`
 (`index.wiz`, `registry.sexpr`, `index/`, `entries/`, `sources/`, `packages/`, `make.sh`)
@@ -500,7 +497,8 @@ job declares 6 GiB (the preparation builds the checker) and uploads
 
 ## Continuous integration
 
-`nix develop` gives the toolchain the tests need besides Lean (see `flake.nix`): GMP and
+`nix develop` (or direnv: `.envrc` is `use flake`) gives the toolchain the tests need
+besides Lean (see `flake.nix`): GMP and
 LLVM's `llc` for the C and LLVM backends, Boehm GC for the self-hosted backend, a C
 compiler, yosys for synthesis, Node for the Wasm modules, and elan, which installs the
 Lean in `lean-toolchain`. Entered at the

@@ -42,7 +42,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   versions, lock v2 (index URL+commit and `pkg` entries), `grail update/fetch
   [--locked] [--offline]`, `--index URL#COMMIT`/`index-commit` pins, rollback protection
   over the index's git history (`--allow-rewind`), SHA-256-before-unpack fetching with a
-  content-addressed archive cache, `grail publish`, and a hermetic `tests/fixtures/grail-index`
+  content-addressed archive cache, `grail publish`, and a hermetic `Tests/fixtures/grail-index`
   fixture (`=grail-deps`).
 * grail (23m): **lock v3**. `(version 3)` and the resolving `(toolchain …)`; package
   `(size …)`, `(tree …)` (checked after every unpack) and `(commands …)` digests; flat,

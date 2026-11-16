@@ -32,7 +32,7 @@ should use absolute `https://` (or `file://`) URLs.
 at run time (a normal `tar -xzf` is still used by `grail fetch`):
 
 ```sh
-cd tests/fixtures/grail-index && ./make.sh
+cd Tests/fixtures/grail-index && ./make.sh
 ```
 
 The archive layout is the fixed one: one top-level `NAME-VERSION/` with `grail.wiz`.
