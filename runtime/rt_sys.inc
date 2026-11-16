@@ -632,6 +632,8 @@ WIZ_API uint64_t wiz_sys_child_try_wait(void *p) {
 /* a signal to the process group the child leads (spawned with a new group or session) */
 WIZ_API uint64_t wiz_sys_child_kill_group(void *p, uint64_t sig) {
   wiz_sys_child *c = (wiz_sys_child *)p;
+  /* the pid (and so the group id) may be reused after wait: as wiz_sys_child_kill */
+  if (c->waited) return ESRCH;
   return wiz_sys_status(kill(-c->pid, (int)sig));
 }
 /* take our end of pipe i (0 stdin, 1 stdout, 2 stderr) out of the child, as a
