@@ -8,9 +8,12 @@ Python (standard library plus `pyzmq`), not Lean.
 
 ```
 tools/jupyter/
-  wiz_kernel/            the kernel (wire protocol, drivers, magics, progress)
+  wiz_kernel/            the kernel (wire protocol, drivers, magics, progress, exporter)
   wiz-kernel/kernel.json the kernelspec template
   tests/test_kernel.py   protocol-level tests (jupyter_client)
+  tests/test_export.py   exporter tests (fixtures, no kernel)
+  wiz-nb                 the exporter command (`wiz-nb export FILE.ipynb`)
+  export.py              the same, runnable from a checkout (`python3 tools/jupyter/export.py`)
   README.md              a short pointer to this page
 ```
 
@@ -237,6 +240,84 @@ non-blank stderr line is forwarded, and a `3/12` or `25%` in it becomes a
 fraction. A `scry` without `--progress` rejects the flag and the cell reports a
 `ScryError`; use plain `%%scry` there.
 
+## Exporting a notebook
+
+A notebook is only useful outside Jupyter if its output survives the trip. The
+exporter renders the file — markdown cells, code and the outputs already stored
+in it — into **one self-contained HTML page** (small inline stylesheet, no
+JavaScript, no CDN, no network) or a plain Markdown file:
+
+```sh
+tools/jupyter/wiz-nb export docs/notebooks/tour.ipynb            # → tour.html
+tools/jupyter/wiz-nb export FILE.ipynb --to md --out notes.md
+python3 -m wiz_kernel.export export FILE.ipynb                   # the same
+```
+
+`--to html|md` picks the format (default `html`, or inferred from `--out`'s
+suffix); `--out FILE` names the output (default: the notebook's name with
+`.html`/`.md`); `--out -` writes to stdout. The built-in `wiz` binary is Lean
+and does not dispatch to `tools/jupyter/`, so the command is the wrapper above
+(the alias `wiz nb export` is not installed).
+
+The output is **deterministic**: no timestamps, no random ids and no absolute
+paths are added, so an exported page can be committed and diffed. `--check`
+renders the notebook in memory and exits 1 when the committed file differs
+(printing a short unified diff); it is how the docs notebook is kept from
+rotting:
+
+```sh
+tools/jupyter/wiz-nb export docs/notebooks/tour.ipynb --check
+tools/jupyter/check-notebooks.sh          # every docs/notebooks/*.ipynb
+```
+
+The example is `docs/notebooks/tour.ipynb` with its page `tour.html`; both are
+checked in, and the docs site copies the HTML to `/notebooks/` (see
+`web/build-site.sh`). The fixture notebooks in `tools/jupyter/tests/fixtures/`
+cover markdown, stdout, `execute_result`, errors, widgets and a cell with no
+output.
+
+### What is rendered
+
+* Markdown cells become a small HTML subset (headings, paragraphs, emphasis,
+  inline code, fenced code, lists, quotes, links, images). Tables, footnotes
+  and math are not interpreted.
+* Code cells keep their source and execution count (`In [n]:`) and every stored
+  output: `stdout`/`stderr` streams (consecutive streams are merged), an
+  `execute_result` (`text/html`, `text/markdown`, `text/plain`, `image/png`,
+  `image/jpeg`, `image/gif`, `image/webp`, SVG or `application/json`; HTML is
+  sanitised, images become `data:` URLs) and errors (`ename`, `evalue` and the
+  traceback).
+* Raw cells are shown verbatim.
+* Output HTML is treated as untrusted, as a viewer treats a notebook: scripts,
+  styles, frames, event handlers and active URLs are removed; an embedded frame
+  with `srcdoc` is unwrapped and sanitised in place, so a widget does not become
+  a broken frame.
+* **Widgets.** An `application/vnd.wiz.widget+json` output (the infoview's
+  `{title, html, goals}` protocol) becomes its static HTML plus the goal
+  snapshot. A Jupyter widget view
+  (`application/vnd.jupyter.widget-view+json`) becomes a note that it is
+  interactive-only, unless the bundle carries a `text/html` fallback, which is
+  exported. Widget state lives in the kernel and is never in the file.
+
+### What is lost
+
+* **Interactivity.** A widget, a live output or a kernel-driven display cannot
+  be reproduced; at best its static HTML fallback is exported, and otherwise the
+  page says so.
+* **Kernel state.** Definitions, imports, `syntax`, `macro`s and `instance`s
+  live in the kernel, not in the notebook's outputs. The exported page is a
+  snapshot: its code is not run, and a reader must open the notebook and run the
+  cells to get a session.
+* **Freshness of outputs.** `--check` re-exports the stored outputs; it does not
+  re-run the notebook. An output that was already stale in the `.ipynb` stays
+  stale in the page. Re-run the notebook (Jupyter or the kernel's tests) before
+  exporting when the code changed.
+* **Nothing outside the file.** `display_data` keys the exporter does not know,
+  widgets without a static fallback, `stderr` from the kernel itself and
+  anything produced after the last saved output are not invented.
+* Execution counts and output order are kept as stored; the exporter does not
+  renumber cells.
+
 ## Limits
 
 * **Completion and inspection are empty.** `complete_request` returns no
@@ -284,6 +365,9 @@ WIZ_TEST_WIZ=/path/to/wiz python3 -m unittest discover -s tools/jupyter/tests -v
 
 # no Jupyter at all: wire + drivers + magics + a raw-ZeroMQ kernel session
 PYTHONPATH=tools/jupyter python3 -m wiz_kernel --self-test [--wiz PATH]
+
+# the exporter alone (pure Python; fixtures plus the docs notebook's --check)
+python3 -m unittest discover -s tools/jupyter/tests -p 'test_export.py' -v
 ```
 
 The unittest module skips cleanly when `pyzmq` or `jupyter_client` is missing or
@@ -297,7 +381,9 @@ forwarding is tested without a real `scry` (or a `--progress` implementation).
 prints PASS/FAIL/SKIP per check and exits 1 on a failure. It covers, besides the
 wire and the drivers: `%%sh` stream order and exit status (0 and non-zero), the
 `%%time` line (present, plausible wall, RSS field), `%%wiz` against a plain cell,
-`%%scry --progress` ordering, and the same four cells through a live kernel.
+`%%scry --progress` ordering, and the same four cells through a live kernel. `test_export.py` needs
+neither `pyzmq` nor a toolchain: it renders the checked-in fixture notebooks and
+runs `--check` on the example.
 
 The kernel is not hooked into `lake test` or the CI workflows; it needs no Lean
 build and only a `wiz` executable (whose `repl` subcommand is the stage 11 REPL,
