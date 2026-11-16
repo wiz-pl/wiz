@@ -29,7 +29,7 @@ def cIf : Circuit Phase.code B8 := Circuit.comb (fun p => phaseNameIf p)
 #eval Hdl.map (HwTy.pack B8) (Circuit.run cMatch (Hdl.map Phase.pack phases))
 #eval Hdl.map (HwTy.pack B8) (Circuit.run cIf (Hdl.map Phase.pack phases))
 -- the netlist is the same: same node count, byte-identical Verilog
-#eval (Netlist.size (Circuit.netlist "phase" cMatch), Netlist.size (Circuit.netlist "phase" cIf))
+#eval ((Netlist.size (Circuit.netlist "phase" cMatch), Netlist.size (Circuit.netlist "phase" cIf)) : Nat × Nat)
 #eval Hdl.strEq (Verilog.emit (Circuit.netlist "phase" cMatch)) (Verilog.emit (Circuit.netlist "phase" cIf))
 
 -- `Bool` on a one-bit signal: two constructors, `true` (1) and `false` (0); a `_` branch
