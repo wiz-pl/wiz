@@ -642,7 +642,8 @@ def mapL {A B : Type} (f : A → B) : List A → List B
 -- (U2b) whether each field of a constructor's description is a lifted one (`darg` at a
 -- `ULift`, or an infinitary field at a lifted domain): `FieldLift`/`descFieldLifts`
 def descLifts : Tm → List Bool
-  | .darg _ S (.lam D) => .cons (match S with
+  | .lam D => descLifts D
+  | .darg _ S D => .cons (match S with
       | .ulift _ _ _ => .true
       | _ => .false) (descLifts D)
   | .drec _ _ D => .cons .false (descLifts D)
@@ -915,12 +916,12 @@ def idxTm (inline : Bool) (gs : Globals) (sc : Scope) (d : Nat) : Option Syntax 
 -- match compiler reads it back with `down` (`fieldCols`). `c` is the kernel context of
 -- the parameters and the fields so far, to read a field's sort.
 def ctorDesc (inline : Bool) (gs : Globals) (T : String) (ps : List String) (nidx : Nat) (res : Option Syntax)
-    (lv : Lvl) (c : TCtx) : Scope → Nat → List Field → Elab
+    (lv : Lvl) : TCtx → Scope → Nat → List Field → Elab
   --<sol
-  | sc, d, .nil => match idxTm inline gs sc d res with
+  | _, sc, d, .nil => match idxTm inline gs sc d res with
     | .ok i => .ok (.dret i)
     | e => e
-  | sc, d, .cons (.mk x q _ ty) rest => match recField T ps nidx ty with
+  | c, sc, d, .cons (.mk x q _ ty) rest => match recField T ps nidx ty with
     | .yes j => match idxTm inline gs sc d j with
       | .err m => .err m
       | .ok jt => match ctorDesc inline gs T ps nidx res lv c sc d rest with
@@ -942,7 +943,7 @@ def ctorDesc (inline : Bool) (gs : Globals) (T : String) (ps : List String) (nid
               | .none => .lhole) (lsucc lv) (closeG inline gs d A)) (.lam (downVar0 (d + 1) D)))
           | .false => .ok (.darg (.qlit q) (closeG inline gs d A) (.lam D))
   --|ex
-  --| | _, _, _ => .err "not implemented"
+  --| | _, _, _, _ => .err "not implemented"
   --sol>
 -- a constructor's index: the last argument of its result type `T ps i`
 def ctorRes (nidx : Nat) (c : Syntax) : Option Syntax := match nidx with
@@ -1012,12 +1013,12 @@ def payloadP (p : Tm) : Nat → Nat → Tm
   | .zero, _ => .pair p .star
   | .succ r, i => .pair (.var i) (payloadP p r (i - 1))
 -- (U2b) the same, with the lifted fields boxed (`up x`, `FieldLift.wrap`)
-def upIf (b : Bool) (t : Tm) : Tm := match b with
+def upIfT (b : Bool) (t : Tm) : Tm := match b with
   | .true => .up t
   | .false => t
 def payloadPL (p : Tm) : List Bool → Nat → Nat → Tm
   | .nil, .zero, _ => .pair p .star
-  | .cons b bs, .succ r, i => .pair (upIf b (.var i)) (payloadPL p bs r (i - 1))
+  | .cons b bs, .succ r, i => .pair (upIfT b (.var i)) (payloadPL p bs r (i - 1))
   | _, _, _ => .pair p .star
 def liftHead : List (List Bool) → List Bool
   | .nil => .nil
@@ -1217,9 +1218,9 @@ def tagTmB (lifted : Bool) (k i : Nat) : Tm := match lifted with
 def tagValTmB (lifted : Bool) (k i : Nat) : Val := match lifted with
   | .true => .vup (.vtag k i)
   | .false => .vtag k i
-def addCtors (T : String) (us : List String) (lv : Lvl) (ps : List String) (pts : Tms) (nidx : Nat) (I : Tm) (Tc TcI : Tm) (k : Nat) (strct : Bool) (lifts : List (List Bool)) : Globals → Nat → List Syntax → Added
-  | gs, _, .nil => .ok gs .nil
-  | gs, i, .cons c cs =>
+def addCtors (T : String) (us : List String) (lv : Lvl) (ps : List String) (pts : Tms) (nidx : Nat) (I : Tm) (Tc TcI : Tm) (k : Nat) (strct : Bool) : List (List Bool) → Globals → Nat → List Syntax → Added
+  | _, gs, _, .nil => .ok gs .nil
+  | lifts, gs, i, .cons c cs =>
     let ls := liftHead lifts;
     let n := List.length (ctorFields c);
     let np := List.length ps;
@@ -2658,9 +2659,9 @@ inductive Lets where
   | mk (wrap : Tm → Tm) (cols : List Col) (recs : List Nat) (cx : Cx)
 -- (21x) a field is bound at its quantity (`T.casesOn`'s method takes it so: `letTm`), and
 -- so is a pattern variable that names it (`bindLetsT`)
-def fieldCols (np L d0 : Nat) (args : Tms) (lifts : List Bool) : Cx → Nat → List Q → List CField → Lets
-  | cx, _, _, .nil => .mk (fun b => b) .nil .nil cx
-  | cx, j, qs, .cons (.mk _ isRec A _) rest =>
+def fieldCols (np L d0 : Nat) (args : Tms) : List Bool → Cx → Nat → List Q → List CField → Lets
+  | _, cx, _, _, .nil => .mk (fun b => b) .nil .nil cx
+  | lifts, cx, j, qs, .cons (.mk _ isRec A _) rest =>
     let d := d0 + j;
     let ty := nfAt d (tApps (tLams np (tLams j A)) (tmsAppend (shiftTms (d - L) args) (fvars j)));
     -- (U2b) a lifted field is read back from the payload with `down` (`FieldLift.unwrap`)
@@ -2989,7 +2990,7 @@ def cfieldNames : List CField → List String
   | .cons (.mk x _ _ _) rest => .cons x (cfieldNames rest)
 def structFieldsOf (info : IndInfo) : Option (List String) := match info with
   | .mk _ _ _ _ _ ctors _ _ => match ctors with
-    | .cons (.mk _ fs _ _ _) _ => .some (cfieldNames fs)
+    | .cons (.mk _ fs _ _ _ _) _ => .some (cfieldNames fs)
     | .nil => .some .nil
 -- a structure's fields; `T` is a source name, or a term's kernel name (then its module
 -- is the marker's too, stage 21n)

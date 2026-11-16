@@ -1419,12 +1419,7 @@ def capUses (bor : List Nat) (names : List String) (d : Nat) (live : List Nat) :
     | .mk rc rl => match Bool.or (lvMem (d - 1 - c) live) (lvMem (d - 1 - c) bor) with
       | .true => .mk (.t ("inc(" +++ nthName' names c +++ "); ") ⧺ rc) rl
       | .false => .mk rc (lvIns (d - 1 - c) rl)
-def headB : List Bool → Bool
-  | .nil => .false
-  | .cons b _ => b
-def tailB : List Bool → List Bool
-  | .nil => .nil
-  | .cons _ rest => rest
+-- (`headB`/`tailB` are in Frontend.wiz, U2b)
 -- the owned variables (levels) passed in borrowed positions: lent to the call
 def lentVars (bor : List Nat) (d : Nat) : List Bool → List ETm → List Nat
   | _, .nil => .nil
