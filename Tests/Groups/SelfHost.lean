@@ -460,6 +460,27 @@ def absurdUnitDecls : List (String × Bool) := [
   ("def u1 : Unit := ()\n", true),
   ("def b1 : Nat := ()\n", false)]
 
+/-- Dependent pattern matching (`lib/Word.wiz`, `lib/Vec.wiz`): a split refines the
+expected type and the columns whose types mention the scrutinee, as the Lean frontend's
+motive does. -/
+def depMatchDecls : List (String × Bool) := [
+  ("def h0 (n : Nat) : Nat.lt n 1 = Nat.beq n 0 := match n with\n  | .zero => rfl\n  | .succ m => rfl\n", true),
+  ("def h1 (n : Nat) : Nat.lt n 1 = .true := match n with\n  | .zero => rfl\n  | .succ m => rfl\n", false),
+  ("def lts : (n : Nat) → Nat.lt n (Nat.succ n) = .true\n  | .zero => rfl\n  | .succ n => lts n\n", true),
+  ("def ltsm (n : Nat) : Nat.le n n = .true := match n with\n  | .zero => rfl\n  | .succ m => ltsm m\n", true),
+  ("def ltS : (i n : Nat) → Nat.lt i n = .true → Nat.lt i (Nat.succ n) = .true\n" ++
+    "  | .zero, .zero, h => absurd h.1\n  | .zero, .succ _, _ => rfl\n" ++
+    "  | .succ _, .zero, h => absurd h.1\n  | .succ i, .succ n, h => ltS i n h\n", true),
+  ("def ltLe : (a b c : Nat) → Nat.lt a (Nat.succ b) = .true → Nat.lt b c = .true → Nat.lt a c = .true\n" ++
+    "  | _, .zero, .zero, _, h => absurd h.1\n  | _, .succ _, .zero, _, h => absurd h.1\n" ++
+    "  | .zero, _, .succ _, _, _ => rfl\n  | .succ .zero, .zero, .succ _, h, _ => absurd h.1\n" ++
+    "  | .succ (.succ _), .zero, .succ _, h, _ => absurd h.1\n" ++
+    "  | .succ a, .succ b, .succ c, h1, h2 => ltLe a b c h1 h2\n", true),
+  ("def ltBad : (i n : Nat) → Nat.lt i n = .true → Nat.lt i (Nat.succ n) = .true\n" ++
+    "  | .zero, .zero, h => absurd h.1\n  | .zero, .succ _, _ => rfl\n" ++
+    "  | .succ _, .zero, h => rfl\n  | .succ i, .succ n, h => ltBad i n h\n", false),
+  ("def bz (b : Bool) : Bool.and b .false = .false := match b with\n  | .true => rfl\n  | .false => rfl\n", true)]
+
 /-- (stage 21x) Constructor fields with quantities (`Desc.arg q S D`) and implicit
 constructor fields (at 0, filled in at the call, not named by patterns): the same
 verdicts in both frontends. -/
@@ -1675,6 +1696,16 @@ def selfHostGroup : Group where
         selfhostAgrees "" eqnsMultiDecls },
     { name := "the self-hosted frontend: absurd, and () against True (lib/Word.wiz, lib/Logic.wiz)", run := fun _ =>
         selfhostAgrees "" absurdUnitDecls },
+    { name := "the self-hosted frontend: dependent pattern matching (lib/Word.wiz, lib/Vec.wiz)", run := fun _ =>
+        selfhostAgrees "" depMatchDecls },
+    { name := "the self-hosted frontend: lib/Word.wiz's Nat lemmas (proofs by equations), as in the Lean frontend", run := fun _ => do
+        let src ← IO.FS.readFile "lib/Word.wiz"
+        -- (from the first lemma to the word types, which need more than the Prelude)
+        let after := (src.splitOn "/-- `Nat.succ a = Nat.succ b`").getD 1 ""
+        let block := (after.splitOn "/-- `UIntN w`").getD 0 ""
+        unless (block.splitOn "def Word.").length > 20 do
+          throw (IO.userError "lib/Word.wiz: the lemma block was not found")
+        selfhostAgrees "" [("/-- `Nat.succ a = Nat.succ b`" ++ block, true)] },
     { name := "Kernel.wiz quantity terms: the same variable is the same quantity, and a Σ at a stuck non-variable quantity is rejected, as in the Lean kernel (21x, review probes 7a, 15b)", run := fun _ => do
         -- (`MTm` has no `Qty` terms; the Lean kernel's verdicts are in
         -- wiz-notes/fieldq-review-probes: 7a accepted, 15b rejected by `qtyPoly`)
