@@ -134,11 +134,14 @@ A module manifest lists its `.wizc` entries and its `.wizr` region with `key`, `
 `valid-until`. Its `root` is an RFC 6962-style Merkle root over a metadata leaf and the
 entries, so editing `prev`/`valid-until` breaks the root too. `manifest.sexpr` records the
 generation number, the previous root, the optional expiry and one record per module (fast
-key, SHA-256 key, name, file, digest), with its own root. A write-cache index is a
-**snapshot** of `manifest.d` — its generation is the module count and its `prev` is empty —
+key, SHA-256 key, name, file, digest), with its own root. The index is written only by
+`wiz cache manifest`, not by every run: rebuilding it means reading and re-validating every
+manifest in the layer, which made each writing run O(cache) (about 55 s on a shared cache
+of 5,700 manifests), and no run reads its module list — only its expiry, which a run never
+changes. The index is a **snapshot** of `manifest.d` (its generation is the module count),
 because the number of writing processes (and `-j`) is not an input; a manifest that is
 extended keeps the base it started from rather than chaining to an intermediate partial
-write. Only the write cache is ever written; a
+write. The Nix package seals its read-only cache this way after warming it. Only the write cache is ever written; a
 `--cache-ro` layer is read and byte-identical after a run. The `.wizr` sidecar (`.wizs`) is
 still checked first: a corrupt region never reaches the type-erased reader even when no
 manifest exists.

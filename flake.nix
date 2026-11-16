@@ -130,6 +130,9 @@
                 '  |> Package.check "std" "main.wiz"' > "$warm/grail.wiz"
               printf 'import Std\n' > "$warm/main.wiz"
               .lake/build/bin/grail -C "$warm" --cache "$cache" build
+              # A run does not refresh the layer's generation index (manifest.sexpr; that
+              # would be O(cache) per run): seal the finished cache once.
+              .lake/build/bin/wiz cache manifest --cache "$cache"
               # The binary's memo names the build-time executable path in its stamp; it
               # is for the write cache, so the store ships none.
               rm -rf "$cache/bin"

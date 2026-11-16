@@ -1279,8 +1279,6 @@ structure ManifestStore where
   present : IO.Ref (Std.HashSet String)
   /-- module keys whose manifest validated in some layer -/
   valid : IO.Ref (Std.HashSet String)
-  /-- manifests written this process: (key, module, file, digest), for the generation index -/
-  written : IO.Ref (Array (Key × Name × String × String))
   /-- a layer's generation expiry, cached per layer -/
   expiry : IO.Ref (Std.HashMap String Nat)
   /-- read-only layers already warned about, so a missing manifest is reported once -/
@@ -1299,7 +1297,6 @@ def ManifestStore.create (write : Option System.FilePath) (reads : List System.F
          poisoned := ← IO.mkRef ({} : Std.HashSet String),
          present := ← IO.mkRef ({} : Std.HashSet String),
          valid := ← IO.mkRef ({} : Std.HashSet String),
-         written := ← IO.mkRef #[],
          expiry := ← IO.mkRef ({} : Std.HashMap String Nat),
          warnedRo := ← IO.mkRef ({} : Std.HashSet String),
          broken := ← IO.mkRef 0, stats }
@@ -1449,7 +1446,8 @@ def ManifestStore.writeManifest (m : ManifestStore) (key : Key) (module : Name)
     return
   -- (a rewrite keeps the generation base the manifest started from: the number of
   -- rewrites depends on which commands were cache hits, not on the module's inputs.
-  -- The layer's `manifest.sexpr` is a snapshot for the same reason.)
+  -- `wiz cache manifest` writes the layer's `manifest.sexpr` as a snapshot for the
+  -- same reason.)
   let prev := old.map (·.prev) |>.getD ""
   let m0 : ModuleManifest := { module, key := key.fast, keySha := key.strong,
                                binary := m.binary, toolchain := m.toolchain,
@@ -1466,39 +1464,6 @@ def ManifestStore.writeManifest (m : ManifestStore) (key : Key) (module : Name)
     m.entries.modify fun mp => mp.insert eid (((mp[eid]?).getD #[]).push (e, dir))
   if let some e := m0.region then do
     m.regions.modify fun mp => mp.insert id (((mp[id]?).getD #[]).push (e, dir))
-  m.written.modify (·.push (key, module, f.fileName.getD "", Smt.Sha256.hexBytes text.toUTF8))
-
-/-- Write or refresh the layer's `manifest.sexpr` (P1). It lists the per-module manifests
-this process wrote (merged with an existing index), with a generation number and a Merkle
-root over the module records. Best-effort: it is an index, not a lock. -/
-def ManifestStore.flush (m : ManifestStore) : IO Unit := do
-  let some dir := m.write | return
-  let ws ← m.written.get
-  if ws.isEmpty then return
-  let old ← readGeneration dir
-  -- (the index is a snapshot of every valid module manifest in the layer, not just the
-  -- ones this process wrote: with `-j` the jobs write their manifests concurrently, and
-  -- a last-writer index of only its own writes would miss the others.)
-  let mdir := dir / manifestDirName
-  let files ← if ← mdir.pathExists then mdir.readDir else pure #[]
-  let mut mods : Array (UInt64 × String × String × String × String) := #[]
-  for e in files do
-    if !e.fileName.endsWith ".wizmf" then continue
-    let text ← try pure ((String.fromUTF8? (← IO.FS.readBinFile e.path)).getD "") catch _ => pure ""
-    match parseManifest text with
-    | some man =>
-      if man.valid { fast := man.key, strong := man.keySha,
-                     toolchain := man.toolchainTag, target := man.targetTag } man.binary "" "" then
-        mods := mods.push (man.key, man.keySha, (toString man.module), e.fileName,
-          Smt.Sha256.hexBytes text.toUTF8)
-    | none => pure ()
-  -- (a write-cache index is a snapshot, not a log: its generation and previous root
-  -- cannot record how many processes or `-j` jobs wrote it, or the cache bytes would
-  -- depend on scheduling.)
-  let g0 := Generation.mk (max 1 mods.size) ""
-    (old.map (·.validUntil) |>.getD 0) mods ""
-  let g := { g0 with root := g0.rootOf }
-  writeAtomic (generationFile dir) (g.toSx.render ++ "\n")
 
 /-- Verify the keyed files of one layer against its manifests (the full-scan tool). This
 is what `wiz cache verify` reports; normal runs verify only what they read. -/
@@ -2430,9 +2395,11 @@ def elaborateCached (write : Option System.FilePath) (reads : List System.FilePa
   let store ← match region with
     | some opts => Store.layeredRegion write reads binary opts verify rig stats
     | none => Store.layered write reads binary verify rig stats
-  let result ← elaborateWith store input init key₀ toolchain strongToolchain targetTag rootTag binaryTag
-  if let some ms := store.manifests then ms.flush
-  pure result
+  -- (the layer's `manifest.sexpr` is not refreshed here: rebuilding it reads and
+  -- re-validates every manifest in the layer, which is O(cache) per run — about 55 s on
+  -- a shared cache of 5,700 manifests. Nothing a run does reads its module list (only
+  -- its expiry, which a run never changes); `wiz cache manifest` rebuilds it.)
+  elaborateWith store input init key₀ toolchain strongToolchain targetTag rootTag binaryTag
 
 /-- `elaborateWith`, without a cache: modules are elaborated in isolation all the same. -/
 def elaborateUncached (input : String) (init : CommandState R) (toolchain : UInt64 := 0)
