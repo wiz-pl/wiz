@@ -1,0 +1,24 @@
+smt: query is QF_LIA: ok
+smt: query declares len: ok
+smt: query has the lower bound: ok
+smt: query asks for the model: ok
+smt: bounds conflict is a checked unsat: ok
+smt: equality and disequality conflict is checked: ok
+smt: a valid witness is accepted: ok
+smt: an out-of-range witness is rejected: ok
+smt: a model for a contradictory obligation is rejected: ok
+smt: solver sat with a validated model: ok
+smt: solver sat with a tampered model is rejected: ok
+smt: solver unsat is trusted only with a local certificate: ok
+smt: a solver unsat outside the local fragment is untrusted: ok
+smt: a missing solver is a clean skip: ok
+smt: exclusive branch: Datalog still reports 1: ok
+smt: exclusive branch: filter prunes it: ok
+smt: exclusive branch: the refutation is checked: ok
+smt: exclusive branch: one path was refuted: ok
+smt: the exclusive path condition is a checked solver refutation: ok
+smt: positive control: Datalog reports 1: ok
+smt: positive control: the finding is kept: ok
+smt: unsupported guard: the finding is kept: ok
+smt: unsupported guard: a boundary is reported: ok
+smt: a path budget is a boundary: ok

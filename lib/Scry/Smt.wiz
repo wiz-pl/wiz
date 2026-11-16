@@ -1,0 +1,1056 @@
+import Int
+import Text
+import Sys
+import Scry.Analysis
+import Scry.Rules
+/-!
+# Scry.Smt
+
+A small, **trust-aware** SMT interaction for Scry (`import Scry.Smt`).
+
+The design is the one-way flow of `wiz-notes/analysis-optics-decisions.md` O7/O8/O9/O10/
+O14:
+
+    Datalog facts  ->  path condition  ->  validated model / checked refutation
+                   ->  filtered facts (the Datalog findings stay authoritative)
+
+It is deliberately not a CEGAR loop, and it does not put SMT in the kernel. There are
+two layers:
+
+* the **pure core** here: a tiny linear-integer formula language, a SMT-LIB 2 renderer,
+  a parser for the solver's answer and model, a **model validator** (`sat` is only
+  accepted when the assignment satisfies every fact and the variable ranges), and a
+  **local refutation checker** for the fragment (`unsat` is only a certificate when
+  `checkLits` finds a contradiction or a bounds conflict). A solver's `unsat` is
+  otherwise recorded as `.untrustedUnsat` and never used to prune a finding;
+* `Smt.solveIO`/`Smt.solveDefaultIO`: an external process call (`z3` by default) that
+  is attempted only when the command answers `--version`. A missing solver is
+  `.skipped`, not an error; an unknown answer is a boundary for the filter. The solver
+  is untrusted:
+  its `sat` model is validated before it is attached, and its `unsat` only *hints* at a
+  refutation that the local checker must confirm.
+
+A **prune is per reported path**: the certificate says the finding's evidence path (the
+points in its `RuleFinding.path`) is infeasible, not that no other derivation exists.
+The Datalog finding is still in `FilterResult.findings`; the `kept`/`pruned` split is a
+view, and the docs never claim soundness for absence.
+
+The prototype's fragment is equality/disequality and integer bounds over program-point
+variables, the shape a branch guard and a length/offset obligation have. Anything else
+(in particular `or` under a path condition and arithmetic in a guard) is left
+**untranslated**, and the filter keeps the finding with a boundary result rather than
+silently dropping it. That is the same "unknown is visible" rule as the rest of scry.
+-/
+
+-- ## A tiny formula language
+
+/-- A linear integer expression over program-point variables. -/
+inductive Scry.Smt.Expr where
+  | var (name : String)
+  | int (n : Int)
+  | add (a b : Scry.Smt.Expr)
+  | sub (a b : Scry.Smt.Expr)
+  | mul (a b : Scry.Smt.Expr)
+
+/-- A comparison. -/
+inductive Scry.Smt.Cmp where
+  | eq | ne | lt | le | gt | ge
+
+/-- A literal: a comparison, a boolean atom (positive or negative), or a constant. -/
+inductive Scry.Smt.Lit where
+  | cmp (op : Scry.Smt.Cmp) (a b : Scry.Smt.Expr)
+  | bool (name : String) (value : Bool)
+  | const (value : Bool)
+
+/-- A propositional formula over literals. It is used for a branch obligation before it
+is flattened into the conjunctive fragment `checkLits` can certify. -/
+inductive Scry.Smt.Formula where
+  | lit (l : Scry.Smt.Lit)
+  | and (a b : Scry.Smt.Formula)
+  | or (a b : Scry.Smt.Formula)
+  | not (a : Scry.Smt.Formula)
+  | truth
+  | falsity
+
+/-- The name a program point's register gets in SMT-LIB. -/
+def Scry.Smt.varName (i : Nat) : String := String.append "v" (Nat.repr i)
+
+/-- `v0 = 3`. -/
+def Scry.Smt.vEq (i : Nat) (n : Int) : Scry.Smt.Lit :=
+  .cmp .eq (.var (Scry.Smt.varName i)) (.int n)
+
+/-- `v0 ≠ 3`. -/
+def Scry.Smt.vNe (i : Nat) (n : Int) : Scry.Smt.Lit :=
+  .cmp .ne (.var (Scry.Smt.varName i)) (.int n)
+
+/-- `v0 ≤ n`. -/
+def Scry.Smt.vLe (i : Nat) (n : Int) : Scry.Smt.Lit :=
+  .cmp .le (.var (Scry.Smt.varName i)) (.int n)
+
+/-- `v0 ≥ n`. -/
+def Scry.Smt.vGe (i : Nat) (n : Int) : Scry.Smt.Lit :=
+  .cmp .ge (.var (Scry.Smt.varName i)) (.int n)
+
+/-- `v0 < n`. -/
+def Scry.Smt.vLt (i : Nat) (n : Int) : Scry.Smt.Lit :=
+  .cmp .lt (.var (Scry.Smt.varName i)) (.int n)
+
+/-- The negation of a literal (De Morgan is only needed for formulas, below). -/
+def Scry.Smt.Lit.neg : Scry.Smt.Lit → Scry.Smt.Lit
+  | .cmp .eq a b => .cmp .ne a b
+  | .cmp .ne a b => .cmp .eq a b
+  | .cmp .lt a b => .cmp .ge a b
+  | .cmp .le a b => .cmp .gt a b
+  | .cmp .gt a b => .cmp .le a b
+  | .cmp .ge a b => .cmp .lt a b
+  | .bool n v => .bool n (Bool.not v)
+  | .const v => .const (Bool.not v)
+
+/-- The literal in SMT-LIB text. -/
+def Scry.Smt.Expr.smt : Scry.Smt.Expr → String
+  | .var n => n
+  | .int n =>
+    match Int.isNeg n with
+    | .true => String.append "(- " (String.append (Nat.repr (Int.natAbs n)) ")")
+    | .false => Nat.repr (Int.natAbs n)
+  | .add a b => String.append "(+ " (String.append (Scry.Smt.Expr.smt a)
+      (String.append " " (String.append (Scry.Smt.Expr.smt b) ")")))
+  | .sub a b => String.append "(- " (String.append (Scry.Smt.Expr.smt a)
+      (String.append " " (String.append (Scry.Smt.Expr.smt b) ")")))
+  | .mul a b => String.append "(* " (String.append (Scry.Smt.Expr.smt a)
+      (String.append " " (String.append (Scry.Smt.Expr.smt b) ")")))
+
+/-- The comparison's SMT-LIB operator. -/
+def Scry.Smt.Cmp.smt : Scry.Smt.Cmp → String
+  | .eq => "="
+  | .ne => "distinct"
+  | .lt => "<"
+  | .le => "<="
+  | .gt => ">"
+  | .ge => ">="
+
+/-- The literal in SMT-LIB text. -/
+def Scry.Smt.Lit.smt : Scry.Smt.Lit → String
+  | .cmp op a b => String.append "(" (String.append (Scry.Smt.Cmp.smt op)
+      (String.append " " (String.append (Scry.Smt.Expr.smt a)
+        (String.append " " (String.append (Scry.Smt.Expr.smt b) ")")))))
+  | .bool n v => match v with
+    | .true => n
+    | .false => String.append "(not " (String.append n ")")
+  | .const v => match v with
+    | .true => "true"
+    | .false => "false"
+
+/-- The formula in SMT-LIB text (the fragment is a conjunction of literals in practice). -/
+def Scry.Smt.Formula.smt : Scry.Smt.Formula → String
+  | .lit l => Scry.Smt.Lit.smt l
+  | .and a b => String.append "(and " (String.append (Scry.Smt.Formula.smt a)
+      (String.append " " (String.append (Scry.Smt.Formula.smt b) ")")))
+  | .or a b => String.append "(or " (String.append (Scry.Smt.Formula.smt a)
+      (String.append " " (String.append (Scry.Smt.Formula.smt b) ")")))
+  | .not a => String.append "(not " (String.append (Scry.Smt.Formula.smt a) ")")
+  | .truth => "true"
+  | .falsity => "false"
+
+def Scry.Smt.Formula.ofLits : List Scry.Smt.Lit → Scry.Smt.Formula
+  | .nil => .truth
+  | .cons l rest => .and (.lit l) (Scry.Smt.Formula.ofLits rest)
+
+-- ## Evaluation and model validation
+
+/-- Look up a name in an association list. -/
+def Scry.Smt.lookup {A : Type} (k : String) : List (String × A) → Option A
+  | .nil => .none
+  | .cons (n, v) rest => match String.eq k n with
+    | .true => .some v
+    | .false => Scry.Smt.lookup k rest
+
+/-- Evaluate an expression in a model; `none` when a free variable is unassigned. -/
+def Scry.Smt.Expr.eval (m : List (String × Int)) : Scry.Smt.Expr → Option Int
+  | .var n => Scry.Smt.lookup n m
+  | .int n => .some n
+  | .add a b => match Scry.Smt.Expr.eval m a, Scry.Smt.Expr.eval m b with
+    | .some x, .some y => .some (Int.add x y)
+    | _, _ => .none
+  | .sub a b => match Scry.Smt.Expr.eval m a, Scry.Smt.Expr.eval m b with
+    | .some x, .some y => .some (Int.sub x y)
+    | _, _ => .none
+  | .mul a b => match Scry.Smt.Expr.eval m a, Scry.Smt.Expr.eval m b with
+    | .some x, .some y => .some (Int.mul x y)
+    | _, _ => .none
+
+/-- Evaluate a comparison. -/
+def Scry.Smt.Cmp.eval (op : Scry.Smt.Cmp) (x y : Int) : Bool :=
+  match op with
+  | .eq => Int.beq x y
+  | .ne => Bool.not (Int.beq x y)
+  | .lt => Int.lt x y
+  | .le => Int.le x y
+  | .gt => Int.lt y x
+  | .ge => Int.le y x
+
+/-- Evaluate a literal; `none` when a free variable is unassigned. -/
+def Scry.Smt.Lit.eval (m : List (String × Int)) : Scry.Smt.Lit → Option Bool
+  | .cmp op a b => match Scry.Smt.Expr.eval m a, Scry.Smt.Expr.eval m b with
+    | .some x, .some y => .some (Scry.Smt.Cmp.eval op x y)
+    | _, _ => .none
+  | .bool n v => .some v
+  | .const v => .some v
+
+/-- Evaluate a formula; `none` when a free variable is unassigned. -/
+def Scry.Smt.Formula.eval (m : List (String × Int)) : Scry.Smt.Formula → Option Bool
+  | .lit l => Scry.Smt.Lit.eval m l
+  | .and a b => match Scry.Smt.Formula.eval m a, Scry.Smt.Formula.eval m b with
+    | .some x, .some y => .some (Bool.and x y)
+    | _, _ => .none
+  | .or a b => match Scry.Smt.Formula.eval m a with
+    | .some .true => .some .true
+    | .some .false => Scry.Smt.Formula.eval m b
+    | .none => match Scry.Smt.Formula.eval m b with
+      | .some .true => .some .true
+      | _ => .none
+  | .not a => match Scry.Smt.Formula.eval m a with
+    | .some x => .some (Bool.not x)
+    | .none => .none
+  | .truth => .some .true
+  | .falsity => .some .false
+
+/-- A declared variable: an `Int` with an inclusive lower and exclusive upper bound.
+The bounds are what make a word value stay in its range; without them a model could
+satisfy a guard with a number the program cannot hold. -/
+structure Scry.Smt.Decl where
+  name : String
+  lo : Int
+  hi : Int
+
+/-- The range facts for a declaration (`lo ≤ x ∧ x < hi`). -/
+def Scry.Smt.Decl.rangeLits (d : Scry.Smt.Decl) : List Scry.Smt.Lit :=
+  [ .cmp .le (.int d.lo) (.var d.name), .cmp .lt (.var d.name) (.int d.hi) ]
+
+/-- `2^n` as an `Int` (a bound). -/
+def Scry.Smt.powInt (n : Nat) : Int := Int.ofNat (Nat.pow 2 n)
+
+/-- The declaration of a Wil variable. Integers get their exact width; other values are
+treated as unsigned 64-bit numbers, which is enough for a bounds obligation and is
+stricter than an unconstrained `Int`. -/
+def Scry.Smt.declOfVar (v : Wil.Var) : Scry.Smt.Decl :=
+  match v.ty with
+  | .int w signed => match signed with
+    | .true =>
+      if Nat.beq w 0 then Scry.Smt.Decl.mk (Scry.Smt.varName v.index) 0 1
+      else Scry.Smt.Decl.mk (Scry.Smt.varName v.index)
+        (Int.negOfNat (Nat.sub (Nat.pow 2 (Nat.sub w 1)) 1))
+        (Scry.Smt.powInt (Nat.sub w 1))
+    | .false => Scry.Smt.Decl.mk (Scry.Smt.varName v.index) 0 (Scry.Smt.powInt w)
+  | _ => Scry.Smt.Decl.mk (Scry.Smt.varName v.index) 0 (Scry.Smt.powInt 64)
+
+/-- The declarations of a function's parameters and locals, first occurrence winning. -/
+def Scry.Smt.declsOfFunc (fn : Wil.Func) : List Scry.Smt.Decl :=
+  let add := fun (d : Scry.Smt.Decl) (acc : List Scry.Smt.Decl) =>
+    match List.find (fun e => String.eq e.name d.name) acc with
+    | .some _ => acc
+    | .none => List.append acc (List.cons d .nil);
+  List.foldl (fun acc v => add (Scry.Smt.declOfVar v) acc) .nil
+    (List.append fn.params fn.locals)
+
+/-- `concatMap` under a local name (`Scry.concatMap` in `Scry.Analysis` is not imported
+here to keep this module's dependency small). -/
+def Scry.concatMapList {A B : Type} (f : A → List B) : List A → List B
+  | .nil => .nil
+  | .cons x xs => List.append (f x) (Scry.concatMapList f xs)
+
+/-- The range facts of every declaration. -/
+def Scry.Smt.Decls.rangeLits (ds : List Scry.Smt.Decl) : List Scry.Smt.Lit :=
+  Scry.concatMapList (fun d => Scry.Smt.Decl.rangeLits d) ds
+
+/-- A model is accepted only when every declaration is assigned and the assignment
+satisfies the ranges and every fact. This is the check that makes `sat` useful: the
+solver's answer is evidence only after it passes here. -/
+def Scry.Smt.validateModel (ds : List Scry.Smt.Decl) (lits : List Scry.Smt.Lit)
+    (m : List (String × Int)) : Bool :=
+  let allAssigned := List.all (fun d => match Scry.Smt.lookup d.name m with
+    | .some _ => .true
+    | .none => .false) ds;
+  let okLit : Scry.Smt.Lit → Bool := fun (l : Scry.Smt.Lit) => match Scry.Smt.Lit.eval m l with
+    | .some .true => .true
+    | _ => .false;
+  Bool.and allAssigned (List.all okLit (List.append (Scry.Smt.Decls.rangeLits ds) lits))
+
+-- ## The local refutation checker (the `unsat` trust anchor)
+
+-- ## Certificates
+
+/-- Why a check says what it says. `model` carries the validated witness; the checked
+`unsat` reasons are `contradiction` and `bounds`; a solver's bare `unsat` is
+`solverUnsat` and is explicitly untrusted. -/
+inductive Scry.Smt.Justification where
+  | model (values : List (String × Int))
+  | contradiction (reason : String)
+  | bounds (reason : String)
+  | solverUnsat (version : String)
+  | solverUnknown (text : String)
+  | skipped (reason : String)
+  | invalidModel (reason : String)
+
+/-- The status of an obligation. `untrustedUnsat` is separate from `unsatisfiable` so a
+caller cannot accidentally treat a solver's word as a proof. -/
+inductive Scry.Smt.Status where
+  | satisfiable
+  | unsatisfiable
+  | unknown
+  | untrustedUnsat
+  | skipped
+
+/-- A check result: the status, the justification/witness, and whether it is trusted. -/
+structure Scry.Smt.Check where
+  status : Scry.Smt.Status
+  justification : Scry.Smt.Justification
+  trusted : Bool
+
+
+/-- One variable's accumulated bounds; `lower`/`upper` are inclusive, `excluded` lists
+values a disequality forbids. -/
+structure Scry.Smt.Bound where
+  lower : Option Int
+  upper : Option Int
+  excluded : List Int
+
+def Scry.Smt.Bound.empty : Scry.Smt.Bound := Scry.Smt.Bound.mk .none .none .nil
+
+def Scry.Smt.Bound.withLower (c : Int) (b : Scry.Smt.Bound) : Scry.Smt.Bound :=
+  match b.lower with
+  | .none => { b with lower := .some c }
+  | .some d => match Int.lt d c with
+    | .true => { b with lower := .some c }
+    | .false => b
+
+def Scry.Smt.Bound.withUpper (c : Int) (b : Scry.Smt.Bound) : Scry.Smt.Bound :=
+  match b.upper with
+  | .none => { b with upper := .some c }
+  | .some d => match Int.lt c d with
+    | .true => { b with upper := .some c }
+    | .false => b
+
+def Scry.Smt.Bound.exclude (c : Int) (b : Scry.Smt.Bound) : Scry.Smt.Bound :=
+  match List.any (Int.beq c) b.excluded with
+  | .true => b
+  | .false => { b with excluded := List.cons c b.excluded }
+
+/-- One entry of a variable -> bounds map. -/
+structure Scry.Smt.BoundEntry where
+  name : String
+  bound : Scry.Smt.Bound
+
+def Scry.Smt.boundFor (n : String) (bs : List Scry.Smt.BoundEntry) : Scry.Smt.Bound :=
+  match List.find (fun b => String.eq b.name n) bs with
+  | .some b => b.bound
+  | .none => Scry.Smt.Bound.empty
+
+def Scry.Smt.putBound (n : String) (b : Scry.Smt.Bound) (bs : List Scry.Smt.BoundEntry)
+    : List Scry.Smt.BoundEntry :=
+  match List.find (fun e => String.eq e.name n) bs with
+  | .some _ => List.map (fun e => match String.eq e.name n with
+      | .true => Scry.Smt.BoundEntry.mk e.name b
+      | .false => e) bs
+  | .none => List.append bs (List.cons (Scry.Smt.BoundEntry.mk n b) .nil)
+
+/-- Update a named variable's bounds. -/
+def Scry.Smt.updateBound (n : String) (f : Scry.Smt.Bound → Scry.Smt.Bound)
+    (bs : List Scry.Smt.BoundEntry) : List Scry.Smt.BoundEntry :=
+  Scry.Smt.putBound n (f (Scry.Smt.boundFor n bs)) bs
+
+/-- `a - 1`, `a + 1`: the strict-bound arithmetic. -/
+def Scry.Smt.predI (a : Int) : Int := Int.sub a (Int.ofNat 1)
+def Scry.Smt.succI (a : Int) : Int := Int.add a (Int.ofNat 1)
+
+/-- Add one comparison's bounds to the map. Only `variable vs constant` is interpreted;
+a comparison between two variables stays an uninterpreted literal (and is not a
+certificate). -/
+def Scry.Smt.addCmpBounds (op : Scry.Smt.Cmp) (a b : Scry.Smt.Expr)
+    (bs : List Scry.Smt.BoundEntry) : List Scry.Smt.BoundEntry :=
+  match a, b with
+  | .var n, .int c => match op with
+    | .eq => Scry.Smt.updateBound n (fun x => Scry.Smt.Bound.withLower c
+        (Scry.Smt.Bound.withUpper c x)) bs
+    | .ne => Scry.Smt.updateBound n (fun x => Scry.Smt.Bound.exclude c x) bs
+    | .lt => Scry.Smt.updateBound n (fun x => Scry.Smt.Bound.withUpper (Scry.Smt.predI c) x) bs
+    | .le => Scry.Smt.updateBound n (fun x => Scry.Smt.Bound.withUpper c x) bs
+    | .gt => Scry.Smt.updateBound n (fun x => Scry.Smt.Bound.withLower (Scry.Smt.succI c) x) bs
+    | .ge => Scry.Smt.updateBound n (fun x => Scry.Smt.Bound.withLower c x) bs
+  | .int c, .var n => match op with
+    | .eq => Scry.Smt.updateBound n (fun x => Scry.Smt.Bound.withLower c
+        (Scry.Smt.Bound.withUpper c x)) bs
+    | .ne => Scry.Smt.updateBound n (fun x => Scry.Smt.Bound.exclude c x) bs
+    | .lt => Scry.Smt.updateBound n (fun x => Scry.Smt.Bound.withLower (Scry.Smt.succI c) x) bs
+    | .le => Scry.Smt.updateBound n (fun x => Scry.Smt.Bound.withLower c x) bs
+    | .gt => Scry.Smt.updateBound n (fun x => Scry.Smt.Bound.withUpper (Scry.Smt.predI c) x) bs
+    | .ge => Scry.Smt.updateBound n (fun x => Scry.Smt.Bound.withUpper c x) bs
+  | _, _ => bs
+
+def Scry.Smt.boundsOf (lits : List Scry.Smt.Lit) : List Scry.Smt.BoundEntry :=
+  List.foldl (fun bs l => match l with
+    | .cmp op a b => Scry.Smt.addCmpBounds op a b bs
+    | _ => bs) .nil lits
+
+/-- An integer for a diagnostic, with its sign. -/
+def Scry.Smt.intText (n : Int) : String :=
+  match Int.isNeg n with
+  | .true => String.append "-" (Nat.repr (Int.natAbs n))
+  | .false => Nat.repr (Int.natAbs n)
+
+/-- A reason a variable's bounds cannot be met, if any. -/
+def Scry.Smt.Bound.conflict (n : String) (b : Scry.Smt.Bound) : Option String :=
+  match b.lower with
+  | .none => .none
+  | .some l =>
+    match b.upper with
+    | .none => .none
+    | .some u =>
+      match Int.lt u l with
+      | .true =>
+        .some (String.append n (String.append " has lower bound "
+          (String.append (Scry.Smt.intText l) (String.append " above upper bound "
+            (Scry.Smt.intText u)))))
+      | .false =>
+        match Int.beq l u with
+        | .true =>
+          match List.any (Int.beq l) b.excluded with
+          | .true => .some (String.append n (String.append " is constrained to "
+              (String.append (Scry.Smt.intText l) " and also excluded")))
+          | .false => .none
+        | .false => .none
+
+/-- Undirected neighbours of a variable in a list of equalities. -/
+def Scry.Smt.neighbours (x : String) : List (String × String) → List String
+  | .nil => .nil
+  | .cons (a, b) rest =>
+    if String.eq a x then List.cons b (Scry.Smt.neighbours x rest)
+    else if String.eq b x then List.cons a (Scry.Smt.neighbours x rest)
+    else Scry.Smt.neighbours x rest
+
+/-- Reachability in the equality graph (a small union-find for the checker). -/
+partial def Scry.Smt.reachGo (pairs : List (String × String)) (seen : List String)
+    (todo : List String) (target : String) : Bool :=
+  match todo with
+  | .nil => .false
+  | .cons x rest =>
+    if String.eq x target then .true
+    else if List.any (String.eq x) seen then Scry.Smt.reachGo pairs seen rest target
+    else Scry.Smt.reachGo pairs (List.cons x seen)
+      (List.append (Scry.Smt.neighbours x pairs) rest) target
+
+/-- Whether two variables are in the same equality class. -/
+def Scry.Smt.sameClass (a b : String) (pairs : List (String × String)) : Bool :=
+  Scry.Smt.reachGo pairs .nil [a] b
+
+/-- The variable-variable equalities of a conjunction. -/
+def Scry.Smt.eqPairs : List Scry.Smt.Lit → List (String × String)
+  | .nil => .nil
+  | .cons l rest => match l with
+    | .cmp .eq (.var a) (.var b) => List.cons (a, b) (Scry.Smt.eqPairs rest)
+    | _ => Scry.Smt.eqPairs rest
+
+/-- A disequality of two variables that the equalities force to be equal: the
+`r == 0` / `r != 0` shape of a branch, expressed over variables rather than literals. -/
+def Scry.Smt.eqNeConflict (lits : List Scry.Smt.Lit) : Option String :=
+  let eqs := Scry.Smt.eqPairs lits;
+  match List.find (fun l => match l with
+    | .cmp .ne (.var a) (.var b) => Scry.Smt.sameClass a b eqs
+    | .cmp .ne (.int a) (.int b) => Int.beq a b
+    | _ => .false) lits with
+  | .some _ => .some "two variables (or constants) are equal and distinct"
+  | .none => .none
+
+/-- Check a conjunction of literals for an **unconditional** contradiction. `some j` is a
+certificate for `unsat`; `none` means "no refutation found in this fragment", not "sat".
+The checker is the trust anchor, so it only claims what it can see: a positive and a
+negative boolean, two equalities of one variable to different constants, an equality to
+a value a disequality excludes, or crossing/forbidden integer bounds. -/
+def Scry.Smt.checkLits (lits : List Scry.Smt.Lit) : Option Scry.Smt.Justification :=
+  match List.find (fun l => match l with | .const .false => .true | _ => .false) lits with
+  | .some _ => .some (.contradiction "the path condition contains false")
+  | .none =>
+    match List.find (fun l => match l with
+      | .bool n v => List.any (fun k => match k with
+        | .bool m w => Bool.and (String.eq n m) (Bool.xor v w)
+        | _ => .false) lits
+      | _ => .false) lits with
+    | .some (.bool n _) => .some (.contradiction (String.append "boolean " (String.append n
+        " and its negation")))
+    | _ =>
+      match Scry.Smt.eqNeConflict lits with
+      | .some r => .some (.contradiction r)
+      | .none =>
+      let bs := Scry.Smt.boundsOf lits;
+      match List.find (fun e => match Scry.Smt.Bound.conflict e.name e.bound with
+        | .some _ => .true
+        | .none => .false) bs with
+      | .some e => match Scry.Smt.Bound.conflict e.name e.bound with
+        | .some r => .some (.bounds r)
+        | .none => .none
+      | .none =>
+        match List.find (fun l => match l with
+          | .cmp .ne (.var n) (.int c) => match Scry.Smt.boundFor n bs with
+            | b => match b.lower, b.upper with
+              | .some l, .some u => Bool.and (Int.beq l c) (Int.beq u c)
+              | _, _ => .false
+          | .cmp .ne (.int c) (.var n) => match Scry.Smt.boundFor n bs with
+            | b => match b.lower, b.upper with
+              | .some l, .some u => Bool.and (Int.beq l c) (Int.beq u c)
+              | _, _ => .false
+          | _ => .false) lits with
+        | .some _ => .some (.contradiction "a variable is fixed and excluded")
+        | .none => .none
+
+-- ## SMT-LIB queries
+
+/-- One `declare-const` line. -/
+def Scry.Smt.declLine (d : Scry.Smt.Decl) : String :=
+  String.append "(declare-const " (String.append d.name " Int)\n")
+
+/-- One `assert` line. -/
+def Scry.Smt.assertLine (l : Scry.Smt.Lit) : String :=
+  String.append "(assert " (String.append (Scry.Smt.Lit.smt l) ")\n")
+
+/-- Render a query. The range facts are asserted too, so a model is only a model of a
+value the program can hold. `(get-value (...))` asks for exactly the declared names,
+which makes the answer parser small. -/
+def Scry.Smt.renderQuery (ds : List Scry.Smt.Decl) (lits : List Scry.Smt.Lit) : String :=
+  let declares := String.join (List.map Scry.Smt.declLine ds);
+  let allLits := List.append (Scry.Smt.Decls.rangeLits ds) lits;
+  let asserts := String.join (List.map Scry.Smt.assertLine allLits);
+  let names := String.intercalate " " (List.map (fun d => d.name) ds);
+  String.append "(set-logic QF_LIA)\n" (String.append "(set-option :produce-models true)\n"
+    (String.append declares (String.append asserts (String.append "(check-sat)\n"
+      (String.append "(get-value (" (String.append names "))\n"))))))
+
+-- ## Reading the solver's answer
+
+def Scry.Smt.isSpace (c : Char) : Bool :=
+  Bool.or (Char.isSpace c) (Bool.or (Char.eq c (Char.mk 10)) (Char.eq c (Char.mk 13)))
+
+/-- The characters of an atom (up to whitespace or a parenthesis), and the rest. -/
+def Scry.Smt.atomChars : List Char → List Char × List Char
+  | .nil => (.nil, .nil)
+  | .cons c rest =>
+    if Bool.or (Char.eq c (Char.mk 40)) (Bool.or (Char.eq c (Char.mk 41)) (Scry.Smt.isSpace c)) then
+      (.nil, .cons c rest)
+    else
+      match Scry.Smt.atomChars rest with
+      | (a, r) => (.cons c a, r)
+
+/-- Split solver output into `(`, `)` and atom tokens. That is all the `get-value`
+answer needs. -/
+partial def Scry.Smt.tokens : List Char → List String
+  | .nil => .nil
+  | .cons c rest =>
+    if Scry.Smt.isSpace c then Scry.Smt.tokens rest
+    else if Char.eq c (Char.mk 40) then List.cons "(" (Scry.Smt.tokens rest)
+    else if Char.eq c (Char.mk 41) then List.cons ")" (Scry.Smt.tokens rest)
+    else
+      match Scry.Smt.atomChars (.cons c rest) with
+      | (a, r) => List.cons (String.ofChars a) (Scry.Smt.tokens r)
+
+/-- A `get-value` value: `5`, or `(- 5)`. -/
+def Scry.Smt.parseModelValue : List String → Option (Int × List String)
+  | .nil => .none
+  | .cons t rest =>
+    if String.eq t "(" then
+      match rest with
+      | .cons sign r2 =>
+        if String.eq sign "-" then
+          match r2 with
+          | .cons n r3 => match String.parseNat n with
+            | .some k => match r3 with
+              | .cons close r4 => if String.eq close ")" then .some (Int.negOfNat k, r4) else .none
+              | .nil => .none
+            | .none => .none
+          | .nil => .none
+        else .none
+      | .nil => .none
+    else match String.parseNat t with
+      | .some k => .some (Int.ofNat k, rest)
+      | .none => .none
+
+/-- The pairs of a `get-value` answer: `((v0 5) (v1 (- 3)))`. -/
+partial def Scry.Smt.parseModelPairs : List String → List (String × Int) → Option (List (String × Int))
+  | .nil, _ => .none
+  | .cons t rest, acc =>
+    if String.eq t ")" then .some (List.reverse acc)
+    else if String.eq t "(" then
+      match rest with
+      | .cons name r2 => match Scry.Smt.parseModelValue r2 with
+        | .some (v, r3) => match r3 with
+          | .cons close r4 =>
+            if String.eq close ")" then
+              Scry.Smt.parseModelPairs r4 (List.cons (name, v) acc)
+            else .none
+          | .nil => .none
+        | .none => .none
+      | .nil => .none
+    else .none
+
+/-- Parse the model text (the first `(` list). -/
+def Scry.Smt.parseModelTokens : List String → Option (List (String × Int))
+  | .nil => .none
+  | .cons t rest =>
+    if String.eq t "(" then Scry.Smt.parseModelPairs rest .nil else .none
+
+/-- What the solver said. -/
+inductive Scry.Smt.Answer where
+  | sat (model : List (String × Int))
+  | unsat
+  | unknown (text : String)
+  | malformed (text : String)
+
+/-- Find the status line and the text after it. -/
+def Scry.Smt.answerParts : List String → Option (String × String)
+  | .nil => .none
+  | .cons line rest =>
+    let t := String.trim line;
+    if String.eq t "sat" then .some ("sat", String.intercalate "\n" rest)
+    else if String.eq t "unsat" then .some ("unsat", String.intercalate "\n" rest)
+    else if String.eq t "unknown" then .some ("unknown", String.intercalate "\n" rest)
+    else Scry.Smt.answerParts rest
+
+/-- Parse `sat`, `unsat` or `unknown`, and on `sat` the `get-value` answer. A model that
+does not parse is `malformed`, never a trusted answer. -/
+def Scry.Smt.parseAnswer (text : String) : Scry.Smt.Answer :=
+  match Scry.Smt.answerParts (String.splitOn text "\n") with
+  | .none => .malformed text
+  | .some (status, rest) =>
+    if String.eq status "unsat" then .unsat
+    else if String.eq status "unknown" then .unknown text
+    else match Scry.Smt.parseModelTokens (Scry.Smt.tokens (String.chars rest)) with
+      | .some m => .sat m
+      | .none => .malformed text
+
+def Scry.Smt.Check.show (c : Scry.Smt.Check) : String :=
+  let st := match c.status with
+    | .satisfiable => "sat"
+    | .unsatisfiable => "unsat"
+    | .unknown => "unknown"
+    | .untrustedUnsat => "unsat (untrusted)"
+    | .skipped => "skipped";
+  let why := match c.justification with
+    | .model _ => "validated model"
+    | .contradiction r => String.append "contradiction: " r
+    | .bounds r => String.append "bounds: " r
+    | .solverUnsat v => String.append (String.append "solver said unsat (" v) "), not checked"
+    | .solverUnknown t => String.append "solver unknown: " t
+    | .skipped r => String.append "skipped: " r
+    | .invalidModel r => String.append "invalid model: " r;
+  String.append st (String.append " (" (String.append why ")"))
+
+/-- Trusted `unsat` from the local checker. -/
+def Scry.Smt.checkLocally (lits : List Scry.Smt.Lit) : Scry.Smt.Check :=
+  match Scry.Smt.checkLits lits with
+  | .some j => Scry.Smt.Check.mk .unsatisfiable j .true
+  | .none => Scry.Smt.Check.mk .unknown (.skipped "no local refutation") .false
+
+/-- A solver answer plus the facts: `sat` is validated, `unsat` is only trusted with a
+local certificate, and a parse failure is `unknown`. This function is pure, so the same
+policy is used with a hand model in tests and with z3's model at run time. -/
+def Scry.Smt.checkAnswer (version : String) (ds : List Scry.Smt.Decl)
+    (lits : List Scry.Smt.Lit) (a : Scry.Smt.Answer) : Scry.Smt.Check :=
+  match a with
+  | .sat m => match Scry.Smt.validateModel ds lits m with
+    | .true => Scry.Smt.Check.mk .satisfiable (.model m) .true
+    | .false => Scry.Smt.Check.mk .unknown (.invalidModel "the solver model does not satisfy the facts") .false
+  | .unsat => match Scry.Smt.checkLits lits with
+    | .some j => Scry.Smt.Check.mk .unsatisfiable j .true
+    | .none => Scry.Smt.Check.mk .untrustedUnsat (.solverUnsat version) .false
+  | .unknown t => Scry.Smt.Check.mk .unknown (.solverUnknown t) .false
+  | .malformed t => Scry.Smt.Check.mk .unknown (.solverUnknown t) .false
+
+-- ## Running a solver (only if it is there)
+
+structure Scry.Smt.Solver where
+  cmd : String
+  args : List String
+  timeoutMs : Nat
+
+/-- The default: z3 on `PATH`, in SMT-LIB mode, with a 5 s solver timeout. -/
+def Scry.Smt.defaultSolver : Scry.Smt.Solver :=
+  Scry.Smt.Solver.mk "z3" ["-in"] 5000
+
+/-- The command to use: `$SCRY_SMT_SOLVER`, or `z3`. -/
+def Scry.Smt.solverCmd : IO String :=
+  IO.bind (Env.get "SCRY_SMT_SOLVER") (fun r => IO.pure (match r with
+    | .some c => c
+    | .none => "z3"))
+
+/-- Try `cmd --version`. `none` means the command is not available; no exception escapes
+this probe, so a missing solver is a clean skip. -/
+def Scry.Smt.probe (cmd : String) : IO (Option String) :=
+  IO.bind (Process.output cmd ["--version"] "") (fun r => IO.pure (match r with
+    | .ok o => match o.status with
+      | .exited code => if Nat.beq code 0 then .some (String.trim o.stdout) else .none
+      | .signaled _ => .none
+    | .error _ => .none))
+
+/-- Ask a solver. A solver error is `unknown`; a timeout is a boundary result. The query
+includes `:timeout` so the process itself gives up. -/
+def Scry.Smt.solveIO (s : Scry.Smt.Solver) (ds : List Scry.Smt.Decl)
+    (lits : List Scry.Smt.Lit) : IO Scry.Smt.Check :=
+  IO.bind (Scry.Smt.probe s.cmd) (fun ver =>
+    match ver with
+    | .none => IO.pure (Scry.Smt.Check.mk .skipped
+        (.skipped (String.append s.cmd " not found on PATH")) .false)
+    | .some v =>
+      let timeout := String.append "(set-option :timeout " (String.append (Nat.repr s.timeoutMs) ")\n");
+      let query := String.append timeout (Scry.Smt.renderQuery ds lits);
+      IO.bind (Process.output s.cmd s.args query) (fun r =>
+        match r with
+        | .error e => IO.pure (Scry.Smt.Check.mk .unknown (.skipped e) .false)
+        | .ok out =>
+          let text := String.append out.stdout out.stderr;
+          IO.pure (Scry.Smt.checkAnswer v ds lits (Scry.Smt.parseAnswer text))))
+
+/-- Ask `$SCRY_SMT_SOLVER` (or `z3`) with the default arguments. -/
+def Scry.Smt.solveDefaultIO (ds : List Scry.Smt.Decl) (lits : List Scry.Smt.Lit)
+    : IO Scry.Smt.Check :=
+  IO.bind Scry.Smt.solverCmd (fun cmd =>
+    Scry.Smt.solveIO (Scry.Smt.Solver.mk cmd ["-in"] 5000) ds lits)
+
+-- ## Path conditions from a Wil CFG
+
+/-- Map a Wil comparison to the formula's comparison. -/
+def Scry.Smt.cmpOfWil : Wil.Op → Option Scry.Smt.Cmp
+  | .eq => .some .eq
+  | .ne => .some .ne
+  | .lt => .some .lt
+  | .le => .some .le
+  | .gt => .some .gt
+  | .ge => .some .ge
+  | _ => .none
+
+mutual
+/-- A guard as a list of literals, or `none` for a shape the local checker does not
+handle (`or`, a negated conjunction). `assume`/`br` conditions are conjunctions of these
+in the corpus. -/
+def Scry.Smt.condLits : Wil.Cond → Option (List Scry.Smt.Lit)
+  | .const b => .some [.const b]
+  | .cmp op a b => match Scry.Smt.cmpOfWil op with
+    | .some c => .some [.cmp c (.var (Scry.Smt.varName a.index)) (.var (Scry.Smt.varName b.index))]
+    | .none => .none
+  | .not c => Scry.Smt.negCondLits c
+  | .and a b => match Scry.Smt.condLits a, Scry.Smt.condLits b with
+    | .some x, .some y => .some (List.append x y)
+    | _, _ => .none
+  | .or _ _ => .none
+
+/-- The negation of a guard, for the false edge of a branch. -/
+def Scry.Smt.negCondLits : Wil.Cond → Option (List Scry.Smt.Lit)
+  | .const b => .some [.const (Bool.not b)]
+  | .cmp op a b => match Scry.Smt.cmpOfWil op with
+    | .some c => .some [Scry.Smt.Lit.neg (.cmp c (.var (Scry.Smt.varName a.index))
+        (.var (Scry.Smt.varName b.index)))]
+    | .none => .none
+  | .not c => Scry.Smt.condLits c
+  | .and _ _ => .none
+  | .or _ _ => .none
+end
+
+/-- The condition on the CFG edge `a → b`: a branch's true/false arm and an `assume` are
+filters; a plain statement or `goto` has none. -/
+def Scry.Smt.edgeLits (g : Scry.Fn) (a b : Nat) : Option (List Scry.Smt.Lit) :=
+  match Scry.nodeTerm g a with
+  | .some (.br c t f _) =>
+    if Nat.beq (Scry.nodeOf g t 0) b then Scry.Smt.condLits c
+    else if Nat.beq (Scry.nodeOf g f 0) b then Scry.Smt.negCondLits c
+    else .some .nil
+  | _ =>
+    match Scry.nodeStmt g a with
+    | .some (.assume c _) => Scry.Smt.condLits c
+    | _ => .some .nil
+
+/-- The conjunction of a path's edge conditions, or `none` if any edge is outside the
+fragment. This is the "facts -> path condition" step. -/
+partial def Scry.Smt.pathLits (g : Scry.Fn) : List Nat → Option (List Scry.Smt.Lit)
+  | .nil => .some .nil
+  | .cons _ .nil => .some .nil
+  | .cons a (.cons b rest) => match Scry.Smt.edgeLits g a b, Scry.Smt.pathLits g (.cons b rest) with
+    | .some x, .some y => .some (List.append x y)
+    | _, _ => .none
+
+-- ## Bounded simple-path search
+
+/-- A bounded search result: the simple paths found, the steps spent, and whether the
+budget stopped the search (a boundary, not a silent empty result). -/
+structure Scry.Smt.Paths where
+  found : List (List Nat)
+  steps : Nat
+  exhausted : Bool
+
+/-- Depth-first simple-path enumeration with an explicit step budget and a path-length
+cap. `visited` keeps the paths simple, which is enough for the branch/merge shapes the
+filter consumes. -/
+partial def Scry.Smt.walkPaths (g : Scry.Fn) (to : Nat) (maxLen : Nat) (fuel : Nat)
+    (visited : List Nat) (rev : List Nat) : Scry.Smt.Paths :=
+  match fuel with
+  | .zero => Scry.Smt.Paths.mk .nil 0 .true
+  | .succ f =>
+    if List.isEmpty rev then Scry.Smt.Paths.mk .nil 0 .false
+    else
+      let cur := match rev with
+        | .cons x _ => x
+        | .nil => 0;
+      if Nat.beq cur to then
+        Scry.Smt.Paths.mk [List.reverse rev] 1 .false
+      else if Nat.beq (List.length rev) maxLen then
+        Scry.Smt.Paths.mk .nil 1 .true
+      else
+        let step := fun (acc : Scry.Smt.Paths) (n : Nat) =>
+          match Scry.memNat n visited with
+          | .true => acc
+          | .false =>
+            let r := Scry.Smt.walkPaths g to maxLen f (List.cons n visited) (List.cons n rev);
+            Scry.Smt.Paths.mk (List.append acc.found r.found) (Nat.add acc.steps r.steps)
+              (Bool.or acc.exhausted r.exhausted);
+        List.foldl step (Scry.Smt.Paths.mk .nil 0 .false) (Scry.succs g cur)
+
+/-- Enumerate simple paths from `from` to `to` under a budget. -/
+def Scry.Smt.pathsFromTo (g : Scry.Fn) (from to : Nat) (maxPaths maxLen maxSteps : Nat)
+    : Scry.Smt.Paths :=
+  let r := Scry.Smt.walkPaths g to maxLen maxSteps [from] [from];
+  match Nat.le (List.length r.found) maxPaths with
+  | .true => r
+  | .false => Scry.Smt.Paths.mk (List.take maxPaths r.found) r.steps .true
+
+/-- The maximum path length checked. -/
+def Scry.Smt.defaultMaxLen : Nat := 48
+
+/-- The step budget of one finding. It is a **budget**, not a proof: when it runs out the
+filter keeps the finding and reports a boundary. -/
+def Scry.Smt.defaultSteps : Nat := 512
+
+/-- The number of paths kept per finding. -/
+def Scry.Smt.defaultPaths : Nat := 24
+
+-- ## Filtering findings (Datalog stays authoritative)
+
+/-- The boundary of an SMT-assisted filter: a timeout, an unsupported guard, a missing
+solver, or a budget. It is reported next to the (unchanged) findings rather than
+dropped. -/
+structure Scry.Smt.Boundary where
+  rule : String
+  func : String
+  sink : Nat
+  kind : String
+  detail : String
+
+/-- A pruned finding: the finding, the checked refutation, and the path that supplied
+the condition. The Datalog finding is still in `FilterResult.findings`. -/
+structure Scry.Smt.Pruned where
+  finding : Scry.RuleFinding
+  check : Scry.Smt.Check
+  path : List Nat
+
+inductive Scry.Smt.Verdict where
+  | keep
+  | prune (check : Scry.Smt.Check) (path : List Nat)
+  | unknown (check : Scry.Smt.Check)
+
+/-- One finding's filter result. -/
+structure Scry.Smt.FindingFilter where
+  verdict : Scry.Smt.Verdict
+  boundaries : List Scry.Smt.Boundary
+  pathsChecked : Nat
+  pathsInfeasible : Nat
+
+/-- The filter over a whole program. `findings` is exactly the input list: the Datalog
+facts stay authoritative. `kept` and `pruned` are a *view* for a report, and every pruned
+entry carries a checked certificate. -/
+structure Scry.Smt.FilterResult where
+  findings : List Scry.RuleFinding
+  kept : List Scry.RuleFinding
+  pruned : List Scry.Smt.Pruned
+  boundaries : List Scry.Smt.Boundary
+  pathsChecked : Nat
+  pathsInfeasible : Nat
+
+/-- The points a finding's path visits in its sink's function. The sink itself is not a
+required waypoint (it is the endpoint). -/
+def Scry.Smt.requiredPoints (f : Scry.RuleFinding) : List Nat :=
+  List.foldr (fun p acc =>
+    if Bool.and (String.eq p.func f.func) (Bool.not (Nat.beq p.point f.sink)) then
+      match Scry.memNat p.point acc with
+      | .true => acc
+      | .false => List.cons p.point acc
+    else acc) .nil f.path
+
+/-- The first same-function point of a finding, or `none`. -/
+def Scry.Smt.startPoint (f : Scry.RuleFinding) : Option Nat :=
+  match List.find (fun p => String.eq p.func f.func) f.path with
+  | .some p => .some p.point
+  | .none => .none
+
+/-- The boundary for a finding whose condition cannot be translated. -/
+def Scry.Smt.boundaryOf (f : Scry.RuleFinding) (kind detail : String) : Scry.Smt.Boundary :=
+  Scry.Smt.Boundary.mk f.rule f.func f.sink kind detail
+
+/-- Bounded reachability in the CFG (a helper for the cycle guard). -/
+partial def Scry.Smt.reachFrom (g : Scry.Fn) (fuel : Nat) (seen : List Nat)
+    (cur target : Nat) : Bool :=
+  match fuel with
+  | .zero => .false
+  | .succ f =>
+    if Nat.beq cur target then .true
+    else if List.any (Nat.beq cur) seen then .false
+    else List.any (fun n => Scry.Smt.reachFrom g f (List.cons cur seen) n target)
+      (Scry.succs g cur)
+
+/-- Whether `from` reaches `to` (bounded by the number of points). -/
+def Scry.Smt.reaches (g : Scry.Fn) (from to : Nat) : Bool :=
+  Scry.Smt.reachFrom g (Nat.succ g.count) .nil from to
+
+/-- Whether the CFG has a cycle. A cyclic function is outside the simple-path filter:
+the filter keeps rather than prune, because a loop path may be feasible where every
+simple path is not. -/
+def Scry.Smt.hasCycle (g : Scry.Fn) : Bool :=
+  List.any (fun n =>
+    List.any (fun m =>
+      Bool.or (Nat.beq n m)
+        (Bool.and (Scry.Smt.reaches g n m) (Scry.Smt.reaches g m n)))
+      (Scry.succs g n)) (Scry.range g.count)
+
+/-- A path condition ready for a solver: the function's declarations, the conjunction
+of the path's guards, and the path itself. `none` means the finding's points are not on a
+simple path or a guard is outside the fragment. -/
+structure Scry.Smt.Obligation where
+  decls : List Scry.Smt.Decl
+  lits : List Scry.Smt.Lit
+  path : List Nat
+
+/-- The first candidate path of a finding as a solver obligation. The filter checks
+every candidate; this helper is for a caller that wants one witness/refutation. -/
+def Scry.Smt.findingObligationWith (maxPaths maxLen maxSteps : Nat)
+    (p : Wil.Program) (f : Scry.RuleFinding) : Option Scry.Smt.Obligation :=
+  match Wil.findFunc p f.func with
+  | .none => .none
+  | .some fn =>
+    match Scry.Smt.startPoint f with
+    | .none => .none
+    | .some start =>
+      let g := Scry.flatten fn;
+      let search := Scry.Smt.pathsFromTo g start f.sink maxPaths maxLen maxSteps;
+      let req := Scry.Smt.requiredPoints f;
+      match List.find (fun path => List.all (fun q => Scry.memNat q path) req) search.found with
+      | .some path => match Scry.Smt.pathLits g path with
+        | .some lits => .some (Scry.Smt.Obligation.mk (Scry.Smt.declsOfFunc fn) lits path)
+        | .none => .none
+      | .none => .none
+
+/-- `findingObligationWith` at the defaults. -/
+def Scry.Smt.findingObligation (p : Wil.Program) (f : Scry.RuleFinding)
+    : Option Scry.Smt.Obligation :=
+  Scry.Smt.findingObligationWith Scry.Smt.defaultPaths Scry.Smt.defaultMaxLen
+    Scry.Smt.defaultSteps p f
+
+/-- Filter one finding from its CFG paths with explicit budgets. `filterFinding` uses
+the defaults. -/
+def Scry.Smt.filterFindingWith (maxPaths maxLen maxSteps : Nat)
+    (p : Wil.Program) (f : Scry.RuleFinding) : Scry.Smt.FindingFilter :=
+  match Wil.findFunc p f.func with
+  | .none => Scry.Smt.FindingFilter.mk .keep
+      [Scry.Smt.boundaryOf f "missing-function" "the sink's function is not in the program"] 0 0
+  | .some fn =>
+    let g := Scry.flatten fn;
+    let cyclic := Scry.Smt.hasCycle g;
+    match Scry.Smt.startPoint f with
+    | .none => Scry.Smt.FindingFilter.mk .keep
+        [Scry.Smt.boundaryOf f "missing-path" "the finding has no point in its sink's function"] 0 0
+    | .some start =>
+      let req := Scry.Smt.requiredPoints f;
+      let search := Scry.Smt.pathsFromTo g start f.sink maxPaths maxLen maxSteps;
+      let candidates := List.filter (fun path =>
+        List.all (fun q => Scry.memNat q path) req) search.found;
+      let budgetBoundary : List Scry.Smt.Boundary := List.append
+        (match search.exhausted with
+          | .true => [Scry.Smt.boundaryOf f "path-budget" "the path search hit its budget"]
+          | .false => .nil)
+        (match cyclic with
+          | .true => [Scry.Smt.boundaryOf f "loop" "the CFG has a cycle; simple paths are not a proof"]
+          | .false => .nil);
+      match candidates with
+      | .nil => Scry.Smt.FindingFilter.mk .keep
+          (List.append budgetBoundary
+            [Scry.Smt.boundaryOf f "no-path" "no simple CFG path visits the finding's path points"])
+          0 0
+      | .cons first rest =>
+        let checkOne := fun (path : List Nat) =>
+          match Scry.Smt.pathLits g path with
+          | .some lits => Scry.Smt.checkLocally lits
+          | .none => Scry.Smt.Check.mk .unknown (.skipped "guard outside the fragment") .false;
+        let checks := List.map (fun path => (path, checkOne path)) candidates;
+        let infeasible := List.filter (fun pc => match pc.2.status with
+          | .unsatisfiable => .true
+          | _ => .false) checks;
+        let feasible := List.filter (fun pc => match pc.2.status with
+          | .unsatisfiable => .false
+          | _ => .true) checks;
+        let unsupported := List.filter (fun pc => match pc.2.justification with
+          | .skipped r => String.eq r "guard outside the fragment"
+          | _ => .false) checks;
+        let untrusted := List.filter (fun pc => match pc.2.status with
+          | .untrustedUnsat => .true
+          | _ => .false) checks;
+        let extra : List Scry.Smt.Boundary := List.append
+          (match unsupported with
+            | .cons _ _ => [Scry.Smt.boundaryOf f "unsupported-guard"
+                "a guard is outside the conjunction/comparison fragment; the finding is kept"]
+            | .nil => .nil)
+          (match untrusted with
+            | .cons _ _ => [Scry.Smt.boundaryOf f "untrusted-unsat"
+                "the solver said unsat without a checked certificate; the finding is kept"]
+            | .nil => .nil);
+        let allBoundaries := List.append budgetBoundary extra;
+        let n := List.length checks;
+        let bad := List.length infeasible;
+        match feasible with
+        | .cons _ _ => Scry.Smt.FindingFilter.mk .keep allBoundaries n bad
+        | .nil =>
+          -- An incomplete search may have missed a feasible path: prune only when the
+          -- enumeration is complete. A budget is a boundary, never a proof of absence.
+          match Bool.or search.exhausted cyclic with
+          | .true => Scry.Smt.FindingFilter.mk .keep allBoundaries n bad
+          | .false => match infeasible with
+            | .cons (path, c) _ => Scry.Smt.FindingFilter.mk (.prune c path) allBoundaries n bad
+            | .nil => Scry.Smt.FindingFilter.mk .keep allBoundaries n bad
+
+/-- Filter one finding with the default budgets. -/
+def Scry.Smt.filterFinding (p : Wil.Program) (f : Scry.RuleFinding) : Scry.Smt.FindingFilter :=
+  Scry.Smt.filterFindingWith Scry.Smt.defaultPaths Scry.Smt.defaultMaxLen Scry.Smt.defaultSteps p f
+
+/-- Filter a whole finding list. Use `result.findings` as the authoritative list; use
+`result.kept`/`result.pruned` only to render or count. -/
+def Scry.Smt.filterFindings (p : Wil.Program) (fs : List Scry.RuleFinding) : Scry.Smt.FilterResult :=
+  let step := fun (acc : Scry.Smt.FilterResult) (f : Scry.RuleFinding) =>
+    let one := Scry.Smt.filterFinding p f;
+    let kept := match one.verdict with
+      | .prune _ _ => acc.kept
+      | _ => List.append acc.kept [f];
+    let pruned := match one.verdict with
+      | .prune c path => List.append acc.pruned [Scry.Smt.Pruned.mk f c path]
+      | _ => acc.pruned;
+    Scry.Smt.FilterResult.mk (List.append acc.findings [f]) kept pruned
+      (List.append acc.boundaries one.boundaries)
+      (Nat.add acc.pathsChecked one.pathsChecked)
+      (Nat.add acc.pathsInfeasible one.pathsInfeasible);
+  List.foldl step (Scry.Smt.FilterResult.mk .nil .nil .nil .nil 0 0) fs
+
+-- ## Bounds obligations
+
+/-- A length/offset obligation: `lo ≤ x < hi`. The caller can add a required lower or
+upper bound (for example `hi ≤ x` from a use) and ask the checker. -/
+def Scry.Smt.boundsObligation (name : String) (lo hi : Int) : List Scry.Smt.Lit :=
+  [ .cmp .le (.int lo) (.var name), .cmp .lt (.var name) (.int hi) ]
+
+/-- A requirement that `x` is at least `n`. -/
+def Scry.Smt.atLeast (name : String) (n : Int) : Scry.Smt.Lit :=
+  .cmp .le (.int n) (.var name)
+
+/-- A requirement that `x` is below `n`. -/
+def Scry.Smt.below (name : String) (n : Int) : Scry.Smt.Lit :=
+  .cmp .lt (.var name) (.int n)

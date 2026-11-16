@@ -1,0 +1,155 @@
+-- test: run
+import Sys
+import Scry.Smt
+import Scry.SmtExamples
+import Scry.Interproc
+import Scry.Rules
+import Scry.RuleExamples
+-- The SMT prototype end to end:
+--
+--   * the SMT-LIB rendering (QF_LIA, declarations, range facts, bounds);
+--   * the local, checked `unsat` fragment (a bounds conflict and a variable equality
+--     that a disequality denies);
+--   * model validation: a good model is accepted, a tampered one is rejected;
+--   * the process/parse/validate path through a deterministic fake solver (so the test
+--     needs no z3), including a solver `unsat` without a local certificate, which must
+--     stay **untrusted**;
+--   * a missing solver is a clean skip, and the path-feasibility filter prunes the
+--     mutually exclusive branch while keeping the positive control and reporting an
+--     unsupported guard as a boundary.
+--
+-- Every line is deterministic; `tests/smt.expected` is the golden.
+
+def check (label : String) (ok : Bool) : IO Unit :=
+  match ok with
+  | .true => IO.println (label ++ ": ok")
+  | .false => IO.bind (IO.println (label ++ ": FAILED"))
+      (fun _ => Process.exit 1)
+
+def statusName (c : Scry.Smt.Check) : String :=
+  match c.status with
+  | .satisfiable => "sat"
+  | .unsatisfiable => "unsat"
+  | .unknown => "unknown"
+  | .untrustedUnsat => "untrusted"
+  | .skipped => "skip"
+
+def checked (c : Scry.Smt.Check) : Bool :=
+  match c.status, c.trusted with
+  | .satisfiable, .true => .true
+  | .unsatisfiable, .true => .true
+  | _, _ => .false
+
+def fakeSolver (answer : String) : Scry.Smt.Solver :=
+  Scry.Smt.Solver.mk "tests/fixtures/fake-smt.sh" [answer] 1000
+
+def noFinding : Scry.RuleFinding :=
+  Scry.RuleFinding.mk "" .warning "" .taint "" 0 "" 0 .nil
+
+def headFinding : List Scry.RuleFinding → Scry.RuleFinding
+  | .nil => noFinding
+  | .cons f _ => f
+
+def firstBoundaryKind (r : Scry.Smt.FilterResult) : String :=
+  match r.boundaries with
+  | .cons b _ => b.kind
+  | .nil => "none"
+
+def main : IO Unit := do
+  -- Rendering: the query is QF_LIA, declares the variable, asserts its range and the
+  -- obligation, and asks for exactly that variable's value.
+  let q := Scry.Smt.renderQuery [Scry.smtLenDecl] Scry.smtBoundsNeed;
+  check "smt: query is QF_LIA" (String.contains q "QF_LIA");
+  check "smt: query declares len" (String.contains q "(declare-const len Int)");
+  check "smt: query has the lower bound" (String.contains q "(assert (<= 16 len))");
+  check "smt: query asks for the model" (String.contains q "(get-value (len))");
+
+  -- The local checker is the trust anchor: crossing bounds and a denied fixed value.
+  check "smt: bounds conflict is a checked unsat"
+    (match Scry.Smt.checkLits Scry.smtBoundsNeed with
+      | .some (.bounds _) => .true
+      | _ => .false);
+  check "smt: equality and disequality conflict is checked"
+    (match Scry.Smt.checkLits
+        [Scry.Smt.vEq 0 (Int.ofNat 0), Scry.Smt.vNe 0 (Int.ofNat 0)] with
+      | .some _ => .true
+      | .none => .false);
+
+  -- A witness is accepted only when it satisfies the ranges and the facts.
+  check "smt: a valid witness is accepted"
+    (Scry.Smt.validateModel [Scry.smtLenDecl] Scry.smtBoundsLits [("len", Int.ofNat 3)]);
+  check "smt: an out-of-range witness is rejected"
+    (Bool.not (Scry.Smt.validateModel [Scry.smtLenDecl] Scry.smtBoundsLits
+      [("len", Int.ofNat 20)]));
+  check "smt: a model for a contradictory obligation is rejected"
+    (Bool.not (Scry.Smt.validateModel [Scry.smtLenDecl] Scry.smtBoundsNeed
+      [("len", Int.ofNat 3)]));
+
+  -- The fake solver exercises the same process/parse/validate path as z3.
+  satC ← Scry.Smt.solveIO (fakeSolver "sat") [Scry.smtLenDecl] Scry.smtBoundsLits;
+  check "smt: solver sat with a validated model"
+    (Bool.and (String.eq (statusName satC) "sat") (checked satC));
+  badC ← Scry.Smt.solveIO (fakeSolver "sat-bad") [Scry.smtLenDecl] Scry.smtBoundsLits;
+  check "smt: solver sat with a tampered model is rejected"
+    (match badC.status, badC.trusted with
+      | .unknown, .false => .true
+      | _, _ => .false);
+  unsatC ← Scry.Smt.solveIO (fakeSolver "unsat") [Scry.smtLenDecl] Scry.smtBoundsNeed;
+  check "smt: solver unsat is trusted only with a local certificate"
+    (Bool.and (String.eq (statusName unsatC) "unsat") (checked unsatC));
+  let order : List Scry.Smt.Lit :=
+    [.cmp .lt (.var "x") (.var "y"), .cmp .lt (.var "y") (.var "x")];
+  untrusted ← Scry.Smt.solveIO (fakeSolver "unsat")
+    [Scry.Smt.Decl.mk "x" (Int.ofNat 0) (Int.ofNat 10),
+     Scry.Smt.Decl.mk "y" (Int.ofNat 0) (Int.ofNat 10)] order;
+  check "smt: a solver unsat outside the local fragment is untrusted"
+    (match untrusted.status, untrusted.trusted with
+      | .untrustedUnsat, .false => .true
+      | _, _ => .false);
+  skipC ← Scry.Smt.solveIO (Scry.Smt.Solver.mk "definitely-not-a-solver" [] 1000)
+    [Scry.smtLenDecl] Scry.smtBoundsLits;
+  check "smt: a missing solver is a clean skip"
+    (match skipC.status with | .skipped => .true | _ => .false);
+
+  -- The path-feasibility filter: the Datalog finding list is unchanged; only the
+  -- filtered view drops the mutually exclusive branch.
+  let excl := Scry.programFindings (Scry.analyze Scry.exclusiveProgram Scry.demoRules);
+  let exclR := Scry.Smt.filterFindings Scry.exclusiveProgram excl;
+  check "smt: exclusive branch: Datalog still reports 1"
+    (Nat.beq (List.length exclR.findings) 1);
+  check "smt: exclusive branch: filter prunes it"
+    (Bool.and (Nat.beq (List.length exclR.kept) 0) (Nat.beq (List.length exclR.pruned) 1));
+  check "smt: exclusive branch: the refutation is checked"
+    (match exclR.pruned with
+      | .cons p _ => checked p.check
+      | .nil => .false);
+  check "smt: exclusive branch: one path was refuted"
+    (Nat.beq exclR.pathsInfeasible 1);
+
+  match Scry.Smt.findingObligation Scry.exclusiveProgram (headFinding excl) with
+  | .some o => do
+    pathC ← Scry.Smt.solveIO (fakeSolver "unsat") o.decls o.lits;
+    check "smt: the exclusive path condition is a checked solver refutation" (checked pathC)
+  | .none => check "smt: exclusive path obligation exists" .false;
+
+  let direct := Scry.programFindings (Scry.analyze Scry.smtDirectProgram Scry.demoRules);
+  let directR := Scry.Smt.filterFindings Scry.smtDirectProgram direct;
+  check "smt: positive control: Datalog reports 1"
+    (Nat.beq (List.length directR.findings) 1);
+  check "smt: positive control: the finding is kept"
+    (Bool.and (Nat.beq (List.length directR.kept) 1) (Nat.beq (List.length directR.pruned) 0));
+
+  let orFindings := Scry.programFindings (Scry.analyze Scry.smtOrProgram Scry.demoRules);
+  let orR := Scry.Smt.filterFindings Scry.smtOrProgram orFindings;
+  check "smt: unsupported guard: the finding is kept"
+    (Bool.and (Nat.beq (List.length orR.kept) 1) (Nat.beq (List.length orR.pruned) 0));
+  check "smt: unsupported guard: a boundary is reported"
+    (String.eq (firstBoundaryKind orR) "unsupported-guard");
+
+  -- A budget is a boundary, never a silent "safe".
+  let directF := headFinding direct;
+  let bounded := Scry.Smt.filterFindingWith 24 48 1 Scry.smtDirectProgram directF;
+  check "smt: a path budget is a boundary"
+    (match bounded.boundaries with
+      | .cons b _ => String.eq b.kind "path-budget"
+      | .nil => .false)

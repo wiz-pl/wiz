@@ -29,7 +29,12 @@ The cases cover:
 * certificates: a finding's derivation checks, reports its axioms and assumptions, and a
   tampered derivation is rejected;
 * SARIF 2.1.0 shape, locations from an origin map, related locations, and the JSON
-  round-trip through `Json.parse`.
+  round-trip through `Json.parse`;
+* the trust-aware SMT prototype: SMT-LIB rendering, a checked bounds refutation, a
+  validated model (and a rejected tampered one), the untrusted solver-only `unsat`, the
+  mutually exclusive branch false positive pruned with a certificate while the Datalog
+  finding count stays 1, and the kept positive control with its `unsupported-guard` and
+  `path-budget` boundaries.
 
 The prototype cases import only the old modules (so they stay cheap); the rule-pack
 cases import the whole taint stack.
@@ -88,6 +93,37 @@ def pipelineImports : String :=
   "import Scry.CstStore\n"
 
 
+/-- The SMT core and its fixtures (the external solver is exercised by `scry/tests/smt.wiz`
+through a deterministic fake solver; these cases stay pure). -/
+def smtImports : String :=
+  "import Scry.Smt\n" ++
+  "import Scry.SmtExamples\n" ++
+  "import Scry.Interproc\n" ++
+  "import Scry.Rules\n" ++
+  "import Scry.RuleExamples\n" ++
+  "import Text\n"
+
+/-- Status/trust/boundary codes, so a case compares `Nat`s without printing records. -/
+def smtPrelude : String :=
+  "def smtStatus (c : Scry.Smt.Check) : Nat :=\n" ++
+  "  match c.status with\n" ++
+  "  | .satisfiable => 1\n" ++
+  "  | .unsatisfiable => 2\n" ++
+  "  | .unknown => 3\n" ++
+  "  | .untrustedUnsat => 4\n" ++
+  "  | .skipped => 5\n" ++
+  "def smtTrusted (c : Scry.Smt.Check) : Nat := if c.trusted then 1 else 0\n" ++
+  "def smtBoundaryCode (r : Scry.Smt.FilterResult) : Nat :=\n" ++
+  "  match r.boundaries with\n" ++
+  "  | .cons b _ => if String.eq b.kind \"unsupported-guard\" then 1\n" ++
+  "      else if String.eq b.kind \"path-budget\" then 2 else 3\n" ++
+  "  | .nil => 0\n" ++
+  "def smtFindingBoundaryCode (r : Scry.Smt.FindingFilter) : Nat :=\n" ++
+  "  match r.boundaries with\n" ++
+  "  | .cons b _ => if String.eq b.kind \"unsupported-guard\" then 1\n" ++
+  "      else if String.eq b.kind \"path-budget\" then 2 else 3\n" ++
+  "  | .nil => 0\n"
+
 /-- Run `body` with `imports` prepended and return the `#eval` message texts. -/
 def runProbe (imports body : String) : IO (List String) := do
   let src := imports ++ body ++ "\n"
@@ -105,6 +141,10 @@ def evalNats (body : String) (expected : List Nat) : IO Unit := do
 /-- The same with the whole rule-pack stack importable. -/
 def evalRuleNats (body : String) (expected : List Nat) : IO Unit := do
   checkEq (expected.map toString) (← runProbe ruleImports body)
+
+/-- The SMT cases, importing only the SMT core and its fixtures. -/
+def evalSmtNats (body : String) (expected : List Nat) : IO Unit := do
+  checkEq (expected.map toString) (← runProbe smtImports body)
 
 /-- `body`'s `#eval` messages are exactly `expected` (e.g. quoted strings). -/
 def evalRuleTexts (body : String) (expected : List String) : IO Unit := do
@@ -422,6 +462,56 @@ def group : Group where
           "#eval jStr (firstResult sar) \"level\"\n" ++
           "#eval match Json.parse (Scry.renderSarif \"scry\" originMap Scry.demoRules (Scry.programFindings prI)) with | .ok j => Json.getStr j \"version\" | .error e => e")
           ["\"2.1.0\"", "\"scry\"", "\"scry/c/command-injection\"", "\"error\"", "\"2.1.0\""] },
+    { name := "smt: SMT-LIB query, bounds certificate and model validation",
+      run := fun _ => evalSmtNats (smtPrelude ++
+        "#eval if String.contains (Scry.Smt.renderQuery [Scry.smtLenDecl] Scry.smtBoundsNeed) \"QF_LIA\" then 1 else 0\n" ++
+        "#eval match Scry.Smt.checkLits Scry.smtBoundsNeed with | .some (.bounds _) => 1 | _ => 0\n" ++
+        "#eval if Scry.Smt.validateModel [Scry.smtLenDecl] Scry.smtBoundsLits [(\"len\", Int.ofNat 3)] then 1 else 0\n" ++
+        "#eval if Scry.Smt.validateModel [Scry.smtLenDecl] Scry.smtBoundsLits [(\"len\", Int.ofNat 20)] then 1 else 0\n")
+        [1, 1, 1, 0] },
+    { name := "smt: solver models are validated and unsat without a certificate is untrusted",
+      run := fun _ => evalSmtNats (smtPrelude ++
+        "def dLen := [Scry.smtLenDecl]\n" ++
+        "def good := Scry.Smt.checkAnswer \"fake\" dLen Scry.smtBoundsLits (Scry.Smt.parseAnswer \"sat\\n((len 3))\")\n" ++
+        "def bad := Scry.Smt.checkAnswer \"fake\" dLen Scry.smtBoundsLits (Scry.Smt.parseAnswer \"sat\\n((len 20))\")\n" ++
+        "def unsatC := Scry.Smt.checkAnswer \"fake\" dLen Scry.smtBoundsNeed (Scry.Smt.parseAnswer \"unsat\")\n" ++
+        "def order := [Scry.Smt.Decl.mk \"x\" (Int.ofNat 0) (Int.ofNat 10), Scry.Smt.Decl.mk \"y\" (Int.ofNat 0) (Int.ofNat 10)]\n" ++
+        "def untrusted := Scry.Smt.checkAnswer \"fake\" order [.cmp .lt (.var \"x\") (.var \"y\"), .cmp .lt (.var \"y\") (.var \"x\")] (Scry.Smt.parseAnswer \"unsat\")\n" ++
+        "#eval Nat.add (Nat.mul (smtStatus good) 10) (smtTrusted good)\n" ++
+        "#eval Nat.add (Nat.mul (smtStatus bad) 10) (smtTrusted bad)\n" ++
+        "#eval Nat.add (Nat.mul (smtStatus unsatC) 10) (smtTrusted unsatC)\n" ++
+        "#eval Nat.add (Nat.mul (smtStatus untrusted) 10) (smtTrusted untrusted)\n")
+        [11, 30, 21, 40] },
+    { name := "smt: mutually exclusive branch FP is pruned with a checked certificate",
+      run := fun _ => evalSmtNats (smtPrelude ++
+        "def fs := Scry.programFindings (Scry.analyze Scry.exclusiveProgram Scry.demoRules)\n" ++
+        "def r := Scry.Smt.filterFindings Scry.exclusiveProgram fs\n" ++
+        "#eval List.length r.findings\n" ++
+        "#eval List.length r.kept\n" ++
+        "#eval List.length r.pruned\n" ++
+        "#eval r.pathsInfeasible\n" ++
+        "#eval match r.pruned with | .cons p _ => smtStatus p.check | .nil => 0\n" ++
+        "#eval match r.pruned with | .cons p _ => smtTrusted p.check | .nil => 0\n")
+        [1, 0, 1, 1, 2, 1] },
+    { name := "smt: path filter keeps a real path, reports an unsupported guard and a budget",
+      run := fun _ => evalSmtNats (smtPrelude ++
+        "def direct := Scry.programFindings (Scry.analyze Scry.smtDirectProgram Scry.demoRules)\n" ++
+        "def dr := Scry.Smt.filterFindings Scry.smtDirectProgram direct\n" ++
+        "#eval List.length dr.findings\n" ++
+        "#eval List.length dr.kept\n" ++
+        "#eval List.length dr.pruned\n" ++
+        "def orfs := Scry.programFindings (Scry.analyze Scry.smtOrProgram Scry.demoRules)\n" ++
+        "def orr := Scry.Smt.filterFindings Scry.smtOrProgram orfs\n" ++
+        "#eval List.length orr.kept\n" ++
+        "#eval smtBoundaryCode orr\n" ++
+        "def df := match direct with | .cons f _ => f | .nil => Scry.RuleFinding.mk \"\" .warning \"\" .taint \"\" 0 \"\" 0 .nil\n" ++
+        "def br := Scry.Smt.filterFindingWith 24 48 1 Scry.smtDirectProgram df\n" ++
+        "#eval smtFindingBoundaryCode br\n" ++
+        "def lp := Scry.programFindings (Scry.analyze Scry.taintLoop Scry.demoRules)\n" ++
+        "def lpr := Scry.Smt.filterFindings Scry.taintLoop lp\n" ++
+        "#eval List.length lpr.kept\n" ++
+        "#eval if List.any (fun b => String.eq b.kind \"loop\") lpr.boundaries then 1 else 0\n")
+        [1, 1, 0, 1, 1, 2, 1, 1] },
     { name := "pipeline: C to Wil to rule pack, the CLI's path on a checked-in CST",
       run := fun _ => do
         let csrc ← IO.FS.readFile "scry/tests/fixtures/taint-unsafe.c"

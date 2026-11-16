@@ -273,3 +273,148 @@ definitions, so the first check's axiom is normally `sat3.native✝`.
 with the axiom that `#print axioms` lists (for the definition and for a use); a 4-bit
 carry chain over definitions (the same goal as 28c, with the check run compiled instead
 of by the kernel); and a false goal, still the solver's counterexample.
+
+## 28f: Scry's trust-aware SMT interaction (prototype)
+
+    import Scry.Smt
+    # Scry.Smt.checkLits [Scry.Smt.vEq 0 0, Scry.Smt.vNe 0 0]  -- some (.bounds …)
+
+`lib/Scry/Smt.wiz` is a deliberately small SMT boundary for Scry's path-feasibility
+work. It is **not** a kernel tactic and it adds no axiom: it is the one-way flow
+`wiz-notes/analysis-optics-decisions.md` asks for (O7/O8/O9/O10/O14):
+
+    Datalog facts -> path condition -> validated model / checked refutation -> filtered facts
+
+The Datalog findings remain authoritative. `Scry.Smt.filterFindings` returns the input
+list unchanged in `.findings`; `.kept` and `.pruned` are a view, and a pruned finding
+carries the checked certificate that removed it. A prune is **per reported path**: it
+certifies that the finding's evidence path (the points in its `RuleFinding.path`) is
+infeasible, not that no other derivation exists. Absence is not claimed.
+
+### What is turned into SMT-LIB
+
+`Scry.Smt` has a tiny linear-integer expression/literal/formula language
+(`Expr`, `Lit`, `Formula`) and `renderQuery` emits SMT-LIB 2 `QF_LIA`:
+
+* one `declare-const NAME Int` per Wil parameter/local, with the variable's width as
+  an asserted range fact (a signed `i32` is `-2³¹ ≤ x < 2³¹`, an unsigned `u32` is
+  `0 ≤ x < 2³²`), so a model is a model of a value the program can hold;
+* the **path condition**: `Scry.Smt.pathLits` walks the CFG and conjoins a branch's
+  `br` guard on the taken arm (negated on the other), and an `assume` on its outgoing
+  edge. The prototype fragment is a conjunction of equality/disequality and integer
+  comparisons over variables; `or` and a negated conjunction are **untranslated**;
+* a **bounds obligation**: `Scry.Smt.boundsObligation "len" lo hi` is `lo ≤ len < hi`;
+  `Scry.Smt.atLeast`/`below` add a use's requirement;
+* `Scry.Smt.findingObligation` returns the first candidate CFG path the filter
+  considers, as declarations + literals + path.
+
+`renderQuery` also asks for exactly the declared names with `(get-value (...))`, which
+keeps the answer parser to a few tokens. `parseAnswer` handles `sat`, `unsat`,
+`unknown` and a `((v0 3) (v1 (- 2)))` model; a malformed answer is never trusted.
+
+### The trust boundary
+
+* **The solver is untrusted.** `Scry.Smt.solveIO` probes `cmd --version` first. A
+  missing command is `.skipped` ("… not found on PATH"), not an error; an unknown answer
+  is `.unknown`; a timeout is a boundary result, never a silent "safe". The default is
+  `z3 -in` with a 5 s `:timeout`; `$SCRY_SMT_SOLVER` overrides the command.
+* **`sat` is validated.** `checkAnswer` accepts a solver model only through
+  `validateModel`: every declaration is assigned, every range fact holds, and every path
+  literal holds. The accepted assignment is attached as `Justification.model`, and the
+  `Check` is trusted. A tampered or out-of-range model is `.unknown` with
+  `invalidModel`, and the finding is kept.
+* **`unsat` is a hint unless checked.** `checkLits` is the local trust anchor. It
+  certifies a contradiction only when it can see one in the fragment: `true`/`false`,
+  a boolean and its negation, a variable fixed to two values, a variable fixed to a
+  value a disequality excludes, a variable-variable equality that a disequality denies,
+  or crossing/forbidden integer bounds. A checked result is `.unsatisfiable` with
+  `Justification.contradiction` or `.bounds` and `trusted = true`; a solver's bare
+  `unsat` is `.untrustedUnsat` with `Justification.solverUnsat` and `trusted = false`.
+  Only a trusted refutation prunes a finding.
+* **Datalog stays authoritative.** A pruned entry keeps the original `RuleFinding` in
+  `.pruned` and in `.findings`; `kept`/`pruned` are a rendering view. There is no
+  feedback loop, no CEGAR, and no claim of soundness for absence.
+
+### Budgets and boundaries
+
+`Scry.Smt.filterFindingWith` takes `maxPaths`/`maxLen`/`maxSteps` (defaults 24/48/512)
+and enumerates **simple** CFG paths (a budget, not a proof). A budget hit, an
+unsupported guard, no simple path through the finding's points, a missing function, or a
+solver's unchecked `unsat` all produce a `Scry.Smt.Boundary` and keep the finding:
+
+| kind | meaning |
+|---|---|
+| `path-budget` | the bounded path search stopped early |
+| `loop` | the CFG has a cycle; simple paths are not a proof, so nothing is pruned |
+| `unsupported-guard` | a guard is `or`/a negated conjunction, outside the fragment |
+| `no-path` | no simple path visits the finding's points |
+| `untrusted-unsat` | the solver said unsat without a local certificate |
+| `missing-function` / `missing-path` | the finding's function/path is not in the program |
+
+### The precision case
+
+`lib/Scry/SmtExamples.wiz` has `exclusiveFn`:
+
+```
+r = getenv(); z = 0; one = 1;
+if (r == z) { x = r } else { x = one }
+if (r != z) { system(x) }
+```
+
+Reaching definitions is a may analysis, so the tainted `x = r` definition reaches the
+sink and the rule pack reports one `command-injection` finding — the false positive in
+`wiz-notes/scry-bench.md` (`cwe78/infeasible-safe.c`). The only CFG path that carries the
+tainted definition to the sink needs `r == z` at the first branch and `r != z` at the
+second: the local checker sees the equality and the disequality and produces a checked
+refutation. `filterFindings` leaves `.findings` at one and moves the finding to
+`.pruned` with `trusted = true`. The positive control (`Scry.taintDirect`) is kept. A
+disjunction guard (`smtOrFn`) and a one-step budget are kept with the corresponding
+boundary.
+
+### Tests, counts and a benchmark note
+
+* `Tests/Groups/ScryTaint.lean` grew from 33 to **37** cases (four new): the rendering,
+  local certificate and model validation; solver-answer validation and the untrusted
+  `unsat`; the exclusive-branch prune with its certificate while the Datalog finding
+  count stays 1; and the kept positive control plus the `unsupported-guard`/`path-budget`
+  boundaries. The four new cases pass individually (`scry-taint` #32–#35, 27–53 s each
+  on the loaded shared machine; not a `perf-run` measurement).
+* `scry/tests/smt.wiz` is the runtime test: **23 checks** through a deterministic fake
+  solver (`scry/tests/fixtures/fake-smt.sh`), so the process/parse/validate path and the
+  clean-skip path are covered without a solver on the machine. It checks a validated
+  `sat` model, a rejected tampered model, a trusted local `unsat`, an untrusted
+  solver-only `unsat`, a missing-solver skip, and the exclusive path condition through
+  `solveIO`. `grail test` is **9 passed, 0 failed**.
+* A real `z3 5.1.0` probe (the Nix store binary, not a `perf-run` measurement):
+  `0 ≤ len < 16` → `sat (validated model)`;
+  `0 ≤ len < 16 ∧ len ≥ 16` → `unsat (bounds: len has lower bound 16 above upper bound
+  15)`; `x < y ∧ y < x` → `unsat (untrusted)` because the local checker does not do
+  variable-variable ordering; a nonexistent command → `skipped`.
+* **Benchmark note:** the prototype adds no timing claim. The group and runtime tests
+  are correctness gates; the path search and local checker are linear in the tiny
+  corpus. A real measurement (path count, solver calls, wall clock on the 51-case bench
+  corpus) belongs in the perf queue once this branch is restacked with `agent/scry-bench`
+  and `agent/scry-rules`.
+
+### Limits (the prototype's fragment, not a soundness claim)
+
+1. **No CEGAR/interpolants and no feedback loop.** One direction only, per O14.
+2. **Integer linear fragment only.** No bit-vector exactness, arrays, pointers, heap
+   shape or function summaries; `or` and a negated conjunction are untranslated. A
+   guard outside it is a boundary, not a silent drop.
+3. **Simple paths, bounded.** Loops are cut by the visited set and the step/path caps;
+   the enumeration is exponential in the worst case and therefore budgeted.
+4. **The local checker is incomplete by design.** It certifies the shapes it can see;
+   anything else stays `.untrustedUnsat` and keeps the finding. That is the trust
+   boundary, not a bug. A checked prune is still only per `RuleFinding.path`: another
+   Datalog derivation of the same sink could be feasible, which is why the original
+   finding list is kept and absence is not claimed. An incomplete path search never
+   prunes (a budget is a boundary).
+5. **No solver installation or bundling.** The default is `z3` on `PATH`; a release
+   would need a pinned solver identity in the cache/report (the kernel `smt` stage has
+   that machinery; this prototype does not). The process call relies on the solver's
+   own `:timeout`; a solver that ignores it can still block the caller, so an outer
+   wall-clock kill is future work.
+6. **The Datalog certificate and the SMT certificate are separate evidence.** A pruned
+   finding keeps its Datalog derivation plus the SMT refutation; the SARIF/CLI does not
+   yet render the SMT certificate.

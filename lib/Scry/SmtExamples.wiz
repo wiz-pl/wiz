@@ -1,0 +1,88 @@
+import Scry.Analysis
+import Scry.Interproc
+import Scry.Rules
+import Scry.RuleExamples
+import Scry.TaintExamples
+import Scry.Smt
+/-!
+# SMT/path-feasibility fixtures
+
+Two hand-built Wil functions and a bounds obligation for the `scry-taint` group:
+
+* `exclusiveFn` is the **mutually exclusive branch** false positive. `r = getenv()` is
+  the source; one arm copies `r` to `x`, the other copies `1`; after the merge a second
+  guard `r != 0` protects the sink. Reaching definitions is a may analysis, so both `x`
+  definitions reach the sink and the taint rule reports the finding. The only CFG path
+  that carries the tainted definition to the sink requires `r == 0` at the first branch
+  and `r != 0` at the second: a checked contradiction, not a heuristic.
+* `taintDirect` (from `Scry.TaintExamples`) is the positive control: the same source and
+  sink with no contradictory guard, so the path-feasibility filter must keep it.
+* `smtOrFn` guards a sink with `r == 0 || r == 1`: the disjunction is outside the local
+  fragment, so the filter keeps the finding and reports an `unsupported-guard` boundary.
+* `boundsObligation`/`atLeast` are a length obligation: `0 ≤ len < 16` and `len ≥ 16`.
+  The local checker reports a bounds conflict; a hand model `len = 3` is a validated
+  witness for the satisfiable side.
+
+These are fixtures, not a new analysis: the Datalog findings are still the input and the
+output (`Scry.Smt.FilterResult.findings` is the input list unchanged). -/
+
+/-- `r != z`, the negative branch guard. -/
+def Scry.smtCondNe (a b : Wil.Var) : Wil.Cond := .cmp .ne a b
+
+/-- `r = getenv(); z = 0; one = 1;
+    if (r == z) { x = r } else { x = one }
+    if (r != z) { system(x) }`.
+Points: 0 source, 1 `z = 0`, 2 `one = 1`, 3 branch; 4 tainted copy, 5 goto; 6 clean
+copy, 7 goto; 8 second branch; 9 sink, 10 return; 11 return. -/
+def Scry.exclusiveFn : Wil.Func :=
+  let r := Wil.var 0 Wil.i32;
+  let z := Wil.var 1 Wil.i32;
+  let one := Wil.var 2 Wil.i32;
+  let x := Wil.var 3 Wil.i32;
+  Wil.func "exclusive" [] [r, z, one, x]
+    [ Wil.block
+        [ Wil.call (.some r) "getenv" []
+        , Wil.num z 0
+        , Wil.num one 1 ]
+        (Wil.branch (Wil.condEq r z) (Wil.mkBlockId 1) (Wil.mkBlockId 2))
+    , Wil.block [ Wil.copy x r ] (Wil.jump (Wil.mkBlockId 3))
+    , Wil.block [ Wil.copy x one ] (Wil.jump (Wil.mkBlockId 3))
+    , Wil.block [] (Wil.branch (Scry.smtCondNe r z) (Wil.mkBlockId 4) (Wil.mkBlockId 5))
+    , Wil.block [ Wil.call .none "system" [x] ] (Wil.ret .none)
+    , Wil.block [] (Wil.ret .none) ]
+
+def Scry.exclusiveProgram : Wil.Program := Wil.program [Scry.exclusiveFn]
+
+/-- `r = getenv(); z = 0; one = 1;
+    if (r == z || r == one) { system(r) }`.
+The guard is a disjunction, which is outside the local refutation fragment. The filter
+must keep the finding and report an `unsupported-guard` boundary, not silently drop it.
+Points: 0 source, 1 `z = 0`, 2 `one = 1`, 3 branch; 4 sink, 5 return; 6 return. -/
+def Scry.smtOrFn : Wil.Func :=
+  let r := Wil.var 0 Wil.i32;
+  let z := Wil.var 1 Wil.i32;
+  let one := Wil.var 2 Wil.i32;
+  Wil.func "disjunction" [] [r, z, one]
+    [ Wil.block
+        [ Wil.call (.some r) "getenv" []
+        , Wil.num z 0
+        , Wil.num one 1 ]
+        (Wil.branch (.or (Wil.condEq r z) (Wil.condEq r one))
+          (Wil.mkBlockId 1) (Wil.mkBlockId 2))
+    , Wil.block [ Wil.call .none "system" [r] ] (Wil.ret .none)
+    , Wil.block [] (Wil.ret .none) ]
+
+def Scry.smtOrProgram : Wil.Program := Wil.program [Scry.smtOrFn]
+
+/-- The positive control: `getenv` → copy → `system` (a real path). -/
+def Scry.smtDirectProgram : Wil.Program := Scry.taintDirect
+
+/-- `0 ≤ len < 16`: a bounds obligation. -/
+def Scry.smtBoundsLits : List Scry.Smt.Lit := Scry.Smt.boundsObligation "len" (Int.ofNat 0) (Int.ofNat 16)
+
+/-- The use requires `len ≥ 16`, so the obligation is unsatisfiable. -/
+def Scry.smtBoundsNeed : List Scry.Smt.Lit :=
+  List.cons (Scry.Smt.atLeast "len" (Int.ofNat 16)) Scry.smtBoundsLits
+
+/-- A declaration for the bounds witness (the same range as the obligation). -/
+def Scry.smtLenDecl : Scry.Smt.Decl := Scry.Smt.Decl.mk "len" (Int.ofNat 0) (Int.ofNat 16)

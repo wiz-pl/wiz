@@ -948,6 +948,17 @@ The S4 rule pack and interprocedural slice are separate modules:
 * `import Scry.Certify` — a finding as a `Scry.Derivation` checked by `Scry.Cert`
   against the function's EDB, reporting its axioms and the interprocedural assumptions
   the path walk supplies.
+* `import Scry.Smt` — a small, trust-aware SMT interaction: a linear-integer formula
+  language, SMT-LIB 2 rendering, a model validator, a local refutation checker for the
+  equality/bounds fragment, and a bounded CFG path-condition filter. A solver (`z3` by
+  default, `$SCRY_SMT_SOLVER` to override) is invoked only when it answers `--version`;
+  a missing solver is a clean skip and a timeout is a boundary. `sat` is accepted only
+  after `Scry.Smt.validateModel` checks the assignment against the range facts and the
+  path condition; `unsat` is a hint unless `Scry.Smt.checkLits` produces a checked
+  `contradiction`/`bounds` certificate. The Datalog finding list stays authoritative:
+  `Scry.Smt.filterFindings` returns it unchanged plus the `kept`/`pruned` view.
+  `import Scry.SmtExamples` has the mutually exclusive branch fixture, the positive
+  control and the bounds obligation.
 
 `import Scry.RuleExamples` is the rule-pack/interprocedural corpus. The `scry` package's
 `scry taint` command wires the whole pipeline: S1's tree-sitter parse, S2's
