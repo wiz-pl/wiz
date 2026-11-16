@@ -10,6 +10,10 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* LSP: two one-shot requests that need no session or ref: `wiz/typeAt` (the innermost
+  elaborated term at a position, its type and range) and `wiz/coreTerm` (a
+  declaration's type and value as core terms, its kind, native implementation and
+  axioms); both are infoview methods too (11, #435).
 * `UInt64.ofNat` is total: it reduces the `Nat` modulo 2⁶⁴ in Wiz before the C call
   (`wiz_u64_id` takes a `uint64_t`, and the marshalling panicked above 2⁶⁴); the `ffi`
   group pins 2⁶⁴−1, 2⁶⁴ and 2⁶⁴+1 in C and LLVM. The trust ledger's numeric/container

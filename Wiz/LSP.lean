@@ -287,7 +287,7 @@ def diagnostics (srv : Server) (uri : String) (doc : Doc) : Json :=
 
 def infoviewMethods : List String :=
   ["wiz/plainGoal", "wiz/plainTermGoal", "wiz/interactiveGoals", "wiz/interactiveTermGoal", "wiz/subtermInfo",
-   "wiz/interactiveInfo"]
+   "wiz/interactiveInfo", "wiz/typeAt", "wiz/coreTerm"]
 
 def capabilities : Json :=
   Json.mkObj [("capabilities", Json.mkObj [
@@ -537,6 +537,72 @@ def subtermType (g : Globals ZeroOneMany) (sub : Subterm ZeroOneMany) : Option (
   | .ok (ty, _) => some (quote g ctx.lvl ty)
   | .error _ => none
 
+/-! ## One-shot requests (#435): the type at a position, a declaration's core term
+
+Neither needs a session or a ref, so a client without an interactive table (an agent, a
+script) can ask them directly. -/
+
+/-- `wiz/typeAt`: the innermost term at `off` that the elaborator checked (an application,
+a `match`, a literal, a hole) or the identifier it resolved there, as the source wrote
+it (`term`, on one line), its type (`type`: the type it was checked against, which its
+own type is equal to, or an identifier's type), its range, and what it is (`kind`:
+`const`, `local`, `term` or `hole`; `name` for an identifier). The same place as
+`wiz/plainTermGoal`, without the hypotheses. `null` where nothing was elaborated. -/
+def typeAtJson (doc : Doc) (off : Nat) : Json :=
+  let st := doc.state
+  match Query.termGoalAt st off with
+  | none => Json.null
+  | some (r, g) =>
+    let same (r' : SourceInfo) := r'.start == r.start && r'.stop == r.stop
+    let ident := match Query.identAt st off with
+      | some (.ident r' n isLocal _ _) => if same r' then some (n, isLocal) else none
+      | _ => none
+    let hole := st.infos.any fun | .term r' _ true => same r' | _ => false
+    let kind := match ident with
+      | some (_, true) => "local"
+      | some (_, false) => "const"
+      | none => if hole then "hole" else "term"
+    let name : List (String × Json) := match ident with
+      | some (n, _) => [("name", Json.str n)]
+      | none => []
+    Json.mkObj ([("term", Json.str (rangeText doc r)), ("type", Json.str (g.target.pretty g.names (some st.globals))),
+                 ("range", range doc.text r), ("kind", Json.str kind)] ++ name)
+
+/-- The declaration `wiz/coreTerm` asks about at `off` when it names none: the global
+the identifier there resolves to, else the (first) declaration of the command there. -/
+def coreTermTarget (st : St) (off : Nat) : Option Name :=
+  match Query.identAt st off with
+  | some (.ident _ n false _ _) => some n
+  | _ => (Query.declsAt st off).find? (!auxiliaryDecl ·)
+
+/-- `wiz/coreTerm`: the declaration `n` as the kernel has it, after elaboration (macros
+expanded): its type and value printed as core terms (`notation`: with the notation in
+scope, as hovers print), what it is (`kind`: `definition`; `opaque` for one with no value
+the kernel may unfold (an axiom, a constructor, an inductive type, an `extern`), which
+is said rather than unfolded; `partial` for a partial definition, opaque with a
+witness), `native` (the implementation compiled code runs instead, if any), its universe
+parameters, where it is declared, the axioms it depends on (unless `axioms` is false),
+and (`raw`) the core syntax trees. `null` for an unknown name. -/
+def coreTermJson (srv : Server) (uri : String) (doc : Doc) (n : Name) (notation raw axioms : Bool) : Json :=
+  let st := doc.state
+  match st.globals.find? n with
+  | none => Json.null
+  | some d =>
+    let pp (t : Term ZeroOneMany) : String := t.pretty [] (if notation then some st.globals else none)
+    let kind := if d.value.isSome then "definition" else if d.witness.isSome then "partial" else "opaque"
+    let native : List (String × Json) := match d.nativeImpl? with
+      | some g => [("native", Json.str g)]
+      | none => []
+    let ax : List (String × Json) :=
+      if axioms then [("axioms", Json.arr ((st.globals.axiomsOf n).map Json.str).toArray)] else []
+    let rawF : List (String × Json) :=
+      if raw then [("raw", Json.mkObj [("type", Json.str (reprStr d.type)),
+        ("value", match d.value with | some v => Json.str (reprStr v) | none => Json.null)])] else []
+    Json.mkObj ([("name", Json.str n), ("type", Json.str (pp d.type)),
+      ("value", match d.value with | some v => Json.str (pp v) | none => Json.null),
+      ("kind", Json.str kind), ("levelParams", Json.arr (d.levelParams.map Json.str).toArray),
+      ("location", location srv uri doc n)] ++ native ++ ax ++ rawF)
+
 /-- Answer an infoview request on an open document. -/
 def infoview (srv : Server) (uri : String) (doc : Doc) (method : String) (msg : Json) :
     Except (Int × String) (Doc × Json) := do
@@ -580,6 +646,18 @@ def infoview (srv : Server) (uri : String) (doc : Doc) (method : String) (msg : 
           ("location", loc)])),
         ("session", doc.session)]
     pure (memo s!"info {off}" (withTable doc (infoItems srv uri doc off) k))
+  | "wiz/typeAt" => pure (memo s!"typeAt {off}" (doc, typeAtJson doc off))
+  | "wiz/coreTerm" =>
+    let flag (k : String) : Option Bool := match get? msg ["params", k] with
+      | some (.bool b) => some b
+      | _ => none
+    let (notation, raw, axioms) := ((flag "notation").getD false, (flag "raw").getD false, (flag "axioms").getD true)
+    let name := match get? msg ["params", "name"] with
+      | some (.str n) => some n
+      | _ => if (get? msg ["params", "position"]).isSome then coreTermTarget st off else none
+    match name with
+    | none => pure (doc, Json.null)
+    | some n => pure (memo s!"core {n} {notation} {raw} {axioms}" (doc, coreTermJson srv uri doc n notation raw axioms))
   | _ => -- wiz/subtermInfo
     let some session := (get? msg ["params", "session"]).bind (·.getNat?.toOption) | throw (-32602, "missing session")
     let some r := (get? msg ["params", "ref"]).bind (·.getNat?.toOption) | throw (-32602, "missing ref")
@@ -812,7 +890,7 @@ def handle (srv : Server) (msg : Json) : IO (Server × Array Json) := do
     let some a := doc.actions[k]? | return (srv, #[replyError (-32801) "unknown action"])
     pure (srv, #[reply (codeAction srv auri doc a none)])
   | "wiz/plainGoal" | "wiz/plainTermGoal" | "wiz/interactiveGoals" | "wiz/interactiveTermGoal" | "wiz/subtermInfo"
-  | "wiz/interactiveInfo" =>
+  | "wiz/interactiveInfo" | "wiz/typeAt" | "wiz/coreTerm" =>
     let some doc := srv.docs.get? uri | return (srv, #[replyError (-32602) s!"unknown document {uri}"])
     match infoview srv uri doc method msg with
     | .ok (doc, j) => pure ({ srv with docs := srv.docs.insert uri doc }, #[reply j])

@@ -403,6 +403,22 @@ def four : Nat := twice two
   sections under the goals, and `gd` on an item jumps to it. `#check`, `#eval`,
   `#reduce`, `#run`, `inductive` and `structure` now keep their info trees, so hovers
   work inside them too.
+* **One-shot requests** (#435), for clients without an interactive table (no session, no
+  ref): `wiz/typeAt {textDocument, position}` answers the innermost elaborated term there
+  (an application, a `match`, a literal, a hole, or an identifier) as `{term, type,
+  range, kind, name?}`: the source text, the type it was checked against (an
+  identifier's own type), the range, and `const`/`local`/`term`/`hole`; it is the place
+  `wiz/plainTermGoal` picks, without the hypotheses. The info tree records no core term
+  per range, so `term` is what the source says there. `wiz/coreTerm {textDocument, name}`
+  (or `position`: the global under the cursor, else the declaration of the command
+  there) answers `{name, type, value, kind, levelParams, location, native?, axioms,
+  raw?}`: the declaration as the kernel has it, printed as core terms (macros and
+  notation expanded; `notation: true` prints with notation, as hovers do), `kind`
+  `definition`, `opaque` (no value to unfold: an axiom, a constructor, an `extern`; the
+  value is `null` rather than unfolded) or `partial`, the native implementation if
+  there is one, `#print axioms`'s list (`axioms: false` skips it), and with `raw: true`
+  the core syntax trees. Both are in `infoviewMethods`, so infoviews on the Unix socket
+  may ask them. Tests: `lsp-server`, "#435: wiz/typeAt and wiz/coreTerm".
 
 Not covered: hovers inside tactic arguments (a tactic gets its syntax without ranges),
 a procedural macro's output (it has no ranges of the user's), the arguments of
