@@ -7,9 +7,12 @@ import Scry.Preproc
 
 `scry-cst FILE` parses `FILE` with the S1 tree-sitter shim (`Scry.Native`) and prints
 its `scry-cst 1` spill format on stdout. It is the checked-in-fixture generator for the
-C-to-Wil lowering (`corpus/c2wil/*.cst`, see `wiz-notes/scry-c2wil.md`):
+C-to-Wil lowering (`corpus/c2wil/*.cst`, see `wiz-notes/scry-c2wil.md`) and for the C#
+frontend (`corpus/csharp/**/*.cst`, see `CSHARP.md`); a `*.cs` file is parsed with
+tree-sitter-c-sharp, anything else with tree-sitter-c:
 
     .grail/bin/scry-cst corpus/c2wil/straight.c > corpus/c2wil/straight.cst
+    .grail/bin/scry-cst corpus/csharp/lower/basic.cs > corpus/csharp/lower/basic.cst
 
 `scry-cst -E [-DFOO=1] [-I dir]… FILE` runs the toolchain's preprocessor (`cc -E
 -ffreestanding FILE …`), blanks its line markers with `Scry.Preproc`, parses the
@@ -23,7 +26,7 @@ spill only when its `.c` fixture changes; the test checks that the spill's funct
 spans point into the source text it embeds.
 -/
 
-/-- Parse `path` and print its columns' spill format. -/
+/-- Parse `path` (C, or C# for `*.cs`) and print its columns' spill format. -/
 def Scry.spill (path : String) : EIO Unit := do
   st ← Scry.Native.parseChecked path;
   store ← EIO.lift (Scry.Native.toCstStore path st);

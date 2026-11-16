@@ -6,7 +6,7 @@ import HoareTactics
 Heap cells as an effect (lib/Eff.wiz) interpreted into the heap programs of separation
 logic (lib/Hoare.wiz): the effect observation of plan S7 for state, and the reason
 `Commute` is not needed for state on different cells. docs/resources.md tells how this
-fits with Feral and the optics; /workspace/wiz-notes/cohesion-resources.md, M3.
+fits with Feral and the optics; wiz-notes/cohesion-resources.md, M3.
 
 * `Cell V l` is a state effect on the cell at location `l` (`State V` with the location
   in its type, so a row can hold several cells and `Member` tells them apart).

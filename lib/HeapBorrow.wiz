@@ -6,7 +6,7 @@ import Optic
 Feral's borrows on heap cells: the bridge between the functional model of owned data
 (lib/Region.wiz, lib/Optic.wiz: a `&mut A` is a value handed in and handed back) and the
 model heap of separation logic (lib/HProp.wiz, lib/Hoare.wiz: an owned cell is `l ↦ v`).
-docs/resources.md tells the whole story; /workspace/wiz-notes/cohesion-resources.md has
+docs/resources.md tells the whole story; wiz-notes/cohesion-resources.md has
 the design.
 
 A Feral function taking `&mut A` lowers to a function of the value, `A → Result (B × A)`
