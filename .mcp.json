@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "wiz": {
+      "type": "stdio",
+      "command": "sh",
+      "args": ["tools/wiz-mcp/wiz-mcp.sh", "--idle", "600", "--timeout", "300"],
+      "env": {}
+    }
+  }
+}
