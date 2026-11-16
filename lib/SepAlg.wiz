@@ -1,0 +1,362 @@
+import Logic
+import Nat
+import HProp
+/-!
+# SepAlg
+
+Separation algebras: `import SepAlg` (stage 24g, docs/stages/24-separation-logic.md; plan
+stage S-a). The resource algebras that concurrent separation logic (plan S-b) puts its
+ghost state in, and that the deadlock-freedom proof (plan D4) splits its resources with.
+
+A `PCM A` is a commutative monoid `(A, op, unit)` with a validity predicate closed under
+taking parts (`valid (a ⋅ b) → valid a`): Iris's unital resource algebras, without the
+core and with a discrete (equality) order. Composition is total; an invalid composite
+(two owners of one heap cell) is ruled out by `valid` instead of by partiality, so `op` is
+an ordinary function and its laws are equations.
+
+Main definitions:
+
+* `PCM`, and its derived laws: `PCM.unit_r`, `PCM.valid_r`, `PCM.left_comm`, `PCM.swap4`;
+* inclusion `PCM.Incl a b` (`b = a ⋅ c` for some frame `c`), a preorder with the unit at
+  the bottom; `PCM.valid_incl`;
+* frame-preserving updates `PCM.Update a b` (every frame compatible with `a` is
+  compatible with `b`): reflexive, transitive, closed under framing, and allowed from any
+  exclusive element (`PCM.update_exclusive`);
+* instances: `unitPCM`, `natAdd` (counting), `exclPCM A` (`Excl A`: exclusive ownership of
+  a value), `prodPCM`, `funPCM` (pointwise), and `heapPCM V`, the heaps of lib/HProp.wiz:
+  `Heap.toExcl` sends `Heap.union` of disjoint heaps to `op`, and `valid` of the
+  composite is exactly `Heap.Disj` (`Heap.toExcl_union`, `Heap.valid_iff_disj`);
+* resource predicates `RProp A := A → Prop` with the separating conjunction `RProp.star`
+  and ownership `RProp.own`: `⋆` is commutative, associative and monotone, and
+  `own (a ⋅ b)` is `own a ⋆ own b` (`RProp.own_op`).
+
+Every law is proved; nothing here is an axiom.
+
+```
+-- two holders of 2 and 3 tickets together hold 5
+def tickets : RProp.Entails (RProp.star natAdd (RProp.own natAdd 2) (RProp.own natAdd 3))
+    (RProp.own natAdd 5) :=
+  RProp.own_join natAdd 2 3
+-- an exclusive value can be replaced by any other: no frame can hold a part of it
+def swapEx (a b : Nat) : PCM.Update (exclPCM Nat) (Excl.ex a) (Excl.ex b) := Excl.update a b
+```
+-/
+
+-- ## 1. Separation algebras
+
+/-- A separation algebra (a unital resource algebra with a discrete order): a commutative
+monoid `(A, op, unit)` with a predicate `valid` that holds of the unit and of every part
+of a valid element. -/
+structure PCM (A : Type) where
+  op : A → A → A
+  unit : A
+  valid : A → Prop
+  assoc : (a b c : A) → op (op a b) c = op a (op b c)
+  comm : (a b : A) → op a b = op b a
+  unit_l : (a : A) → op unit a = a
+  valid_unit : valid unit
+  valid_l : (a b : A) → valid (op a b) → valid a
+
+/-- The unit is a right unit too. -/
+def PCM.unit_r {A : Type} (M : PCM A) (a : A) : M.op a M.unit = a :=
+  Eq.trans (M.comm a M.unit) (M.unit_l a)
+/-- A valid composite has a valid right part. -/
+def PCM.valid_r {A : Type} (M : PCM A) (a b : A) (v : M.valid (M.op a b)) : M.valid b :=
+  M.valid_l b a (Eq.substProp M.valid (M.comm a b) v)
+/-- `a ⋅ (b ⋅ c) = b ⋅ (a ⋅ c)`. -/
+def PCM.left_comm {A : Type} (M : PCM A) (a b c : A) : M.op a (M.op b c) = M.op b (M.op a c) :=
+  Eq.trans (Eq.symm (M.assoc a b c))
+    (Eq.trans (Eq.congrArg (fun x => M.op x c) (M.comm a b)) (M.assoc b a c))
+/-- `(a ⋅ c) ⋅ (b ⋅ d) = (a ⋅ b) ⋅ (c ⋅ d)`: regroup two pairs. -/
+def PCM.swap4 {A : Type} (M : PCM A) (a b c d : A) :
+    M.op (M.op a c) (M.op b d) = M.op (M.op a b) (M.op c d) :=
+  Eq.trans (M.assoc a c (M.op b d))
+    (Eq.trans (Eq.congrArg (fun x => M.op a x) (PCM.left_comm M c b d))
+      (Eq.symm (M.assoc a b (M.op c d))))
+
+-- ## 2. Inclusion
+
+/-- `a` is included in `b`: `b` is `a` and some frame `c`. -/
+def PCM.Incl {A : Type} (M : PCM A) (a b : A) : Prop := Ex (fun (c : A) => b = M.op a c)
+
+/-- Inclusion is reflexive (the frame is the unit). -/
+def PCM.incl_refl {A : Type} (M : PCM A) (a : A) : PCM.Incl M a a :=
+  Ex.intro (fun (c : A) => a = M.op a c) M.unit (Eq.symm (PCM.unit_r M a))
+/-- Inclusion is transitive (the frames compose). -/
+def PCM.incl_trans {A : Type} (M : PCM A) {a b d : A} (h₁ : PCM.Incl M a b) (h₂ : PCM.Incl M b d) :
+    PCM.Incl M a d :=
+  Ex.elim h₁ (fun c e₁ => Ex.elim h₂ (fun f e₂ =>
+    Ex.intro (fun (x : A) => d = M.op a x) (M.op c f)
+      (Eq.trans e₂ (Eq.trans (Eq.congrArg (fun x => M.op x f) e₁) (M.assoc a c f)))))
+/-- A part is included in the whole (left). -/
+def PCM.incl_op_l {A : Type} (M : PCM A) (a b : A) : PCM.Incl M a (M.op a b) :=
+  Ex.intro (fun (c : A) => M.op a b = M.op a c) b rfl
+/-- A part is included in the whole (right). -/
+def PCM.incl_op_r {A : Type} (M : PCM A) (a b : A) : PCM.Incl M b (M.op a b) :=
+  Ex.intro (fun (c : A) => M.op a b = M.op b c) a (M.comm a b)
+/-- The unit is included in everything. -/
+def PCM.unit_incl {A : Type} (M : PCM A) (a : A) : PCM.Incl M M.unit a :=
+  Ex.intro (fun (c : A) => a = M.op M.unit c) a (Eq.symm (M.unit_l a))
+/-- A part of a valid element is valid. -/
+def PCM.valid_incl {A : Type} (M : PCM A) {a b : A} (h : PCM.Incl M a b) (v : M.valid b) : M.valid a :=
+  Ex.elim h (fun c e => M.valid_l a c (Eq.substProp M.valid e v))
+
+-- ## 3. Frame-preserving updates
+
+/-- `a` may be replaced by `b`: every frame `c` compatible with `a` is compatible with `b`,
+so other owners' resources stay valid (Iris's `a ~~> b`, deterministic and discrete). -/
+def PCM.Update {A : Type} (M : PCM A) (a b : A) : Prop :=
+  (c : A) → M.valid (M.op a c) → M.valid (M.op b c)
+
+/-- Updating to oneself. -/
+def PCM.update_refl {A : Type} (M : PCM A) (a : A) : PCM.Update M a a := fun c v => v
+/-- Updates compose. -/
+def PCM.update_trans {A : Type} (M : PCM A) {a b c : A} (u₁ : PCM.Update M a b) (u₂ : PCM.Update M b c) :
+    PCM.Update M a c :=
+  fun f v => u₂ f (u₁ f v)
+/-- The frame rule for updates: an update of a part is an update of the whole. -/
+def PCM.update_frame {A : Type} (M : PCM A) {a b : A} (u : PCM.Update M a b) (f : A) :
+    PCM.Update M (M.op a f) (M.op b f) :=
+  fun c v => Eq.substProp M.valid (Eq.symm (M.assoc b f c))
+    (u (M.op f c) (Eq.substProp M.valid (M.assoc a f c) v))
+/-- An update keeps validity (take the unit as the frame). -/
+def PCM.update_valid {A : Type} (M : PCM A) {a b : A} (u : PCM.Update M a b) (v : M.valid a) : M.valid b :=
+  Eq.substProp M.valid (PCM.unit_r M b)
+    (u M.unit (Eq.substProp M.valid (Eq.symm (PCM.unit_r M a)) v))
+
+/-- `a` is exclusive: the only frame compatible with it is the unit. -/
+def PCM.Exclusive {A : Type} (M : PCM A) (a : A) : Prop :=
+  (c : A) → M.valid (M.op a c) → c = M.unit
+/-- An exclusive element may be updated to any valid one: no frame can observe it. -/
+def PCM.update_exclusive {A : Type} (M : PCM A) {a b : A} (x : PCM.Exclusive M a) (vb : M.valid b) :
+    PCM.Update M a b :=
+  fun c v => Eq.substProp (fun y => M.valid (M.op b y)) (Eq.symm (x c v))
+    (Eq.substProp M.valid (Eq.symm (PCM.unit_r M b)) vb)
+
+-- ## 4. Instances
+
+/-- The trivial algebra. -/
+def unitPCM : PCM Unit :=
+  PCM.mk (fun a b => ()) () (fun a => True) (fun a b c => rfl) (fun a b => rfl) (fun a => rfl)
+    () (fun a b v => ())
+
+/-- Counting: natural numbers under addition, all valid (tickets, ghost counters). -/
+def natAdd : PCM Nat :=
+  PCM.mk (fun a b => a + b) 0 (fun a => True) Nat.add_assoc Nat.add_comm (fun a => rfl)
+    () (fun a b v => ())
+
+/-- Exclusive ownership of an `A`: nothing (`none`), the whole value (`ex a`), or the
+invalid result of two owners (`bot`). -/
+inductive Excl (A : Type) where
+  | none
+  | ex (a : A)
+  | bot
+
+/-- Composition: `none` is the unit; two values clash. -/
+def Excl.op {A : Type} : Excl A → Excl A → Excl A
+  | .none, y => y
+  | .ex a, .none => .ex a
+  | .ex a, _ => .bot
+  | .bot, _ => .bot
+/-- Whether an element is valid (not `bot`). -/
+def Excl.ok {A : Type} : Excl A → Bool
+  | .bot => .false
+  | _ => .true
+/-- An element is valid. -/
+def Excl.Valid {A : Type} (x : Excl A) : Prop := Excl.ok x = .true
+
+/-- `Excl.op` is associative. -/
+def Excl.assoc {A : Type} : (x y z : Excl A) → Excl.op (Excl.op x y) z = Excl.op x (Excl.op y z)
+  | .none, y, z => rfl
+  | .ex a, .none, z => rfl
+  | .ex a, .ex b, .none => rfl
+  | .ex a, .ex b, .ex c => rfl
+  | .ex a, .ex b, .bot => rfl
+  | .ex a, .bot, z => rfl
+  | .bot, y, z => rfl
+/-- `Excl.op` is commutative. -/
+def Excl.comm {A : Type} : (x y : Excl A) → Excl.op x y = Excl.op y x
+  | .none, .none => rfl
+  | .none, .ex b => rfl
+  | .none, .bot => rfl
+  | .ex a, .none => rfl
+  | .ex a, .ex b => rfl
+  | .ex a, .bot => rfl
+  | .bot, .none => rfl
+  | .bot, .ex b => rfl
+  | .bot, .bot => rfl
+/-- A valid composite has a valid left part. -/
+def Excl.valid_l {A : Type} : (x y : Excl A) → Excl.Valid (Excl.op x y) → Excl.Valid x
+  | .none, y, v => rfl
+  | .ex a, y, v => rfl
+  | .bot, y, v => v
+
+/-- The exclusive algebra over `A`. -/
+def exclPCM (A : Type) : PCM (Excl A) :=
+  PCM.mk Excl.op Excl.none Excl.Valid Excl.assoc Excl.comm (fun x => rfl) rfl Excl.valid_l
+
+/-- `false = true` is absurd. -/
+def Bool.falseNeTrue {0 R : Prop} (e : Bool.false = Bool.true) : R :=
+  False.elim (Bool.trueNeFalse (Eq.symm e))
+
+/-- A whole value is exclusive. -/
+def Excl.exclusive {A : Type} (a : A) :
+    (c : Excl A) → Excl.Valid (Excl.op (Excl.ex a) c) → c = Excl.none
+  | .none, v => rfl
+  | .ex b, v => Bool.falseNeTrue v
+  | .bot, v => Bool.falseNeTrue v
+/-- The owner of a whole value may replace it by any other. -/
+def Excl.update {A : Type} (a b : A) : PCM.Update (exclPCM A) (Excl.ex a) (Excl.ex b) :=
+  PCM.update_exclusive (exclPCM A) (a := Excl.ex a) (Excl.exclusive a) rfl
+/-- Two whole values never compose validly. -/
+def Excl.clash {A : Type} (a b : A) : ¬ Excl.Valid (Excl.op (Excl.ex a) (Excl.ex b)) :=
+  fun v => Bool.falseNeTrue v
+
+/-- Pairs, componentwise: owning a pair is owning both components. -/
+def prodPCM {A B : Type} (M : PCM A) (N : PCM B) : PCM (A × B) :=
+  PCM.mk (fun x y => (M.op x.1 y.1, N.op x.2 y.2)) (M.unit, N.unit)
+    (fun x => M.valid x.1 ∧ N.valid x.2)
+    (fun x y z => congrArg2 (fun p q => (p, q)) (M.assoc x.1 y.1 z.1) (N.assoc x.2 y.2 z.2))
+    (fun x y => congrArg2 (fun p q => (p, q)) (M.comm x.1 y.1) (N.comm x.2 y.2))
+    (fun x => congrArg2 (fun p q => (p, q)) (M.unit_l x.1) (N.unit_l x.2))
+    (M.valid_unit, N.valid_unit)
+    (fun x y v => (M.valid_l x.1 y.1 v.1, N.valid_l x.2 y.2 v.2))
+
+/-- Functions into an algebra, pointwise: a family of resources indexed by `I`
+(locations, channel names, thread ids). -/
+def funPCM (I : Type) {A : Type} (M : PCM A) : PCM (I → A) :=
+  PCM.mk (fun f g i => M.op (f i) (g i)) (fun i => M.unit) (fun f => (i : I) → M.valid (f i))
+    (fun f g h => funext (fun i => M.assoc (f i) (g i) (h i)))
+    (fun f g => funext (fun i => M.comm (f i) (g i)))
+    (fun f => funext (fun i => M.unit_l (f i)))
+    (fun i => M.valid_unit)
+    (fun f g v i => M.valid_l (f i) (g i) (v i))
+
+-- ## 5. Heaps are a separation algebra
+
+/-- Heaps as resources: each location owned exclusively, or not at all. -/
+def heapPCM (V : Type) : PCM (Nat → Excl V) := funPCM Nat (exclPCM V)
+
+/-- A location's contents as an exclusive resource. -/
+def Option.toExcl {V : Type} : Option V → Excl V
+  | .none => .none
+  | .some v => .ex v
+/-- A heap of lib/HProp.wiz as a resource of `heapPCM`. -/
+def Heap.toExcl {V : Type} (h : Heap V) : Nat → Excl V := fun l => Option.toExcl (h l)
+
+/-- At one location: the union of disjoint contents is their composite. -/
+def Option.toExcl_union {V : Type} : (o₁ o₂ : Option V) → (Option.Free o₁ ∨ Option.Free o₂) →
+    Option.toExcl (Option.orElse o₁ o₂) = Excl.op (Option.toExcl o₁) (Option.toExcl o₂)
+  | .none, o₂, d => rfl
+  | .some v, .none, d => rfl
+  | .some v, .some w, d => Or.elim d (fun f => Bool.falseNeTrue f) (fun f => Bool.falseNeTrue f)
+/-- At one location: a valid composite means one side is free. -/
+def Option.free_of_valid {V : Type} : (o₁ o₂ : Option V) →
+    Excl.Valid (Excl.op (Option.toExcl o₁) (Option.toExcl o₂)) → Option.Free o₁ ∨ Option.Free o₂
+  | .none, o₂, v => Or.inl rfl
+  | .some v, .none, ok => Or.inr rfl
+  | .some v, .some w, ok => Bool.falseNeTrue ok
+/-- At one location: if one side is free, the composite is valid. -/
+def Option.valid_of_free {V : Type} : (o₁ o₂ : Option V) → (Option.Free o₁ ∨ Option.Free o₂) →
+    Excl.Valid (Excl.op (Option.toExcl o₁) (Option.toExcl o₂))
+  | .none, .none, d => rfl
+  | .none, .some w, d => rfl
+  | .some v, .none, d => rfl
+  | .some v, .some w, d => Or.elim d (fun f => Bool.falseNeTrue f) (fun f => Bool.falseNeTrue f)
+
+/-- The union of disjoint heaps is their composite in `heapPCM`. -/
+def Heap.toExcl_union {V : Type} (h₁ h₂ : Heap V) (d : Heap.Disj h₁ h₂) :
+    Heap.toExcl (Heap.union h₁ h₂) = (heapPCM V).op (Heap.toExcl h₁) (Heap.toExcl h₂) :=
+  funext (fun l => Option.toExcl_union (h₁ l) (h₂ l) (d l))
+/-- Two heaps compose validly exactly when they are disjoint. -/
+def Heap.valid_iff_disj {V : Type} (h₁ h₂ : Heap V) :
+    (heapPCM V).valid ((heapPCM V).op (Heap.toExcl h₁) (Heap.toExcl h₂)) ↔ Heap.Disj h₁ h₂ :=
+  Iff.intro (fun v l => Option.free_of_valid (h₁ l) (h₂ l) (v l))
+    (fun d l => Option.valid_of_free (h₁ l) (h₂ l) (d l))
+
+-- ## 6. Resource predicates
+
+/-- A predicate on resources: the assertions of a separation logic over `M`. -/
+def RProp (A : Type) : Type := A → Prop
+
+/-- `P` entails `Q`: every resource satisfying `P` satisfies `Q`. -/
+def RProp.Entails {A : Type} (P Q : RProp A) : Prop := (r : A) → P r → Q r
+
+/-- The separating conjunction: the resource splits as `r₁ ⋅ r₂` with `P r₁` and `Q r₂`. -/
+def RProp.star {A : Type} (M : PCM A) (P Q : RProp A) : RProp A := fun r =>
+  Ex (fun (s : A × A) => r = M.op s.1 s.2 ∧ P s.1 ∧ Q s.2)
+
+/-- Owning (at least) `a`. -/
+def RProp.own {A : Type} (M : PCM A) (a : A) : RProp A := fun r => PCM.Incl M a r
+
+/-- Entailment is reflexive. -/
+def RProp.entails_refl {A : Type} (0 P : RProp A) : RProp.Entails P P := fun r p => p
+/-- Entailment is transitive. -/
+def RProp.entails_trans {A : Type} {0 P Q R : RProp A} (a : RProp.Entails P Q) (b : RProp.Entails Q R) :
+    RProp.Entails P R :=
+  fun r p => b r (a r p)
+
+/-- `⋆` is commutative. -/
+def RProp.star_comm {A : Type} (M : PCM A) (0 P Q : RProp A) :
+    RProp.Entails (RProp.star M P Q) (RProp.star M Q P) := fun r h =>
+  Ex.elim h (fun s p =>
+    Ex.intro (fun (t : A × A) => r = M.op t.1 t.2 ∧ Q t.1 ∧ P t.2) (s.2, s.1)
+      (Eq.trans p.1 (M.comm s.1 s.2), (p.2.2, p.2.1)))
+
+/-- `⋆` is associative (left to right). -/
+def RProp.star_assoc_l {A : Type} (M : PCM A) (0 P Q R : RProp A) :
+    RProp.Entails (RProp.star M (RProp.star M P Q) R) (RProp.star M P (RProp.star M Q R)) := fun r h =>
+  Ex.elim h (fun s p => Ex.elim p.2.1 (fun t q =>
+    Ex.intro (fun (u : A × A) => r = M.op u.1 u.2 ∧ P u.1 ∧ RProp.star M Q R u.2)
+      (t.1, M.op t.2 s.2)
+      (Eq.trans p.1 (Eq.trans (Eq.congrArg (fun x => M.op x s.2) q.1) (M.assoc t.1 t.2 s.2)),
+       (q.2.1,
+        Ex.intro (fun (u : A × A) => M.op t.2 s.2 = M.op u.1 u.2 ∧ Q u.1 ∧ R u.2) (t.2, s.2)
+          (rfl, (q.2.2, p.2.2))))))
+
+/-- `⋆` is associative (right to left). -/
+def RProp.star_assoc_r {A : Type} (M : PCM A) (0 P Q R : RProp A) :
+    RProp.Entails (RProp.star M P (RProp.star M Q R)) (RProp.star M (RProp.star M P Q) R) := fun r h =>
+  Ex.elim h (fun s p => Ex.elim p.2.2 (fun t q =>
+    Ex.intro (fun (u : A × A) => r = M.op u.1 u.2 ∧ RProp.star M P Q u.1 ∧ R u.2)
+      (M.op s.1 t.1, t.2)
+      (Eq.trans p.1 (Eq.trans (Eq.congrArg (fun x => M.op s.1 x) q.1) (Eq.symm (M.assoc s.1 t.1 t.2))),
+       (Ex.intro (fun (u : A × A) => M.op s.1 t.1 = M.op u.1 u.2 ∧ P u.1 ∧ Q u.2) (s.1, t.1)
+          (rfl, (p.2.1, q.2.1)),
+        q.2.2))))
+
+/-- `⋆` is monotone (the frame rule for entailment). -/
+def RProp.star_mono {A : Type} (M : PCM A) {0 P P' Q Q' : RProp A}
+    (a : RProp.Entails P P') (b : RProp.Entails Q Q') :
+    RProp.Entails (RProp.star M P Q) (RProp.star M P' Q') := fun r h =>
+  Ex.elim h (fun s p =>
+    Ex.intro (fun (t : A × A) => r = M.op t.1 t.2 ∧ P' t.1 ∧ Q' t.2) s
+      (p.1, (a s.1 p.2.1, b s.2 p.2.2)))
+
+/-- Owning `a ⋅ b` splits into owning `a` and owning `b`. -/
+def RProp.own_split {A : Type} (M : PCM A) (a b : A) :
+    RProp.Entails (RProp.own M (M.op a b)) (RProp.star M (RProp.own M a) (RProp.own M b)) := fun r h =>
+  Ex.elim h (fun c e =>
+    Ex.intro (fun (t : A × A) => r = M.op t.1 t.2 ∧ RProp.own M a t.1 ∧ RProp.own M b t.2)
+      (a, M.op b c)
+      (Eq.trans e (M.assoc a b c), (PCM.incl_refl M a, PCM.incl_op_l M b c)))
+/-- Owning `a` and owning `b` separately is owning `a ⋅ b`. -/
+def RProp.own_join {A : Type} (M : PCM A) (a b : A) :
+    RProp.Entails (RProp.star M (RProp.own M a) (RProp.own M b)) (RProp.own M (M.op a b)) := fun r h =>
+  Ex.elim h (fun s p => Ex.elim p.2.1 (fun c ec => Ex.elim p.2.2 (fun d ed =>
+    Ex.intro (fun (x : A) => r = M.op (M.op a b) x) (M.op c d)
+      (Eq.trans p.1 (Eq.trans (congrArg2 M.op ec ed) (PCM.swap4 M a b c d))))))
+/-- `own (a ⋅ b)` and `own a ⋆ own b` are the same assertion. -/
+def RProp.own_op {A : Type} (M : PCM A) (a b : A) :
+    RProp.own M (M.op a b) = RProp.star M (RProp.own M a) (RProp.own M b) :=
+  funext (fun r => Iff.toEq (Iff.intro (RProp.own_split M a b r) (RProp.own_join M a b r)))
+/-- Everything owns the unit. -/
+def RProp.own_unit {A : Type} (M : PCM A) (r : A) : RProp.own M M.unit r := PCM.unit_incl M r
+/-- What a valid resource owns is valid. -/
+def RProp.own_valid {A : Type} (M : PCM A) {a r : A} (h : RProp.own M a r) (v : M.valid r) : M.valid a :=
+  PCM.valid_incl M h v
+/-- Two owners of whole exclusive values can't share a valid resource. -/
+def RProp.own_excl_clash {A : Type} (a b : A) (r : Excl A)
+    (h : RProp.star (exclPCM A) (RProp.own (exclPCM A) (Excl.ex a)) (RProp.own (exclPCM A) (Excl.ex b)) r)
+    (v : Excl.Valid r) : False :=
+  Excl.clash a b (RProp.own_valid (exclPCM A) (RProp.own_join (exclPCM A) (Excl.ex a) (Excl.ex b) r h) v)

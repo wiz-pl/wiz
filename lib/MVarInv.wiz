@@ -1,0 +1,167 @@
+import IO
+import MVar
+import Logic
+import Nat
+/-!
+# MVarInv
+
+MVars with invariants: `import MVarInv` (stage 25h, docs/stages/25-concurrency.md). The
+first concurrent specifications (plan stage S-c).
+
+`MVar.Inv I` is an `MVar` (lib/MVar.wiz) whose contents always satisfy the invariant
+`I : A → Prop`. `put` asks for a proof that the value satisfies `I`, and `take`, `read`
+and `borrow` hand one back. The proofs are **ghost** (quantity 0, as Verus's `ghost`):
+they are checked by the kernel and erased by the compiler, so an `MVar.Inv I` costs what
+an `MVar` costs, and runs on the same natives.
+
+Why this is sound under any interleaving of threads: the invariant is a property of a
+value, values are immutable, and every value that enters the cell carries its proof (the
+cell's element type is `Good I`, a value paired with a proof of `I`). So whichever thread
+puts last, the cell holds a value satisfying `I`, and whichever thread takes gets one.
+`Model` (section 3) states this for the erased cells too, as a theorem over every trace of
+operations: if every `put` in the trace puts a value satisfying `I`, every `take` and
+`read` sees one. The natives' atomicity (each operation is one step of the trace) is
+the trusted claim lib/MVar.wiz already makes; this file adds no axiom and no native.
+
+What it does not give: deadlock freedom (a `take` still waits for a `put`) and relational
+invariants between several cells (that is concurrent separation logic, plan stage S-b).
+
+```
+-- a counter that never drops below 3: `put` and `modify` must prove it
+def AtLeast3 (n : Nat) : Prop := Nat.Le 3 n
+def grow (m : MVar.Inv AtLeast3) : IO Nat :=
+  MVar.Inv.modify m Nat.succ (fun n h => Nat.le_trans 3 n (Nat.succ n) h (Nat.le_succ n))
+```
+-/
+
+-- ## 1. Ghost proofs
+
+/-- A proof of `P` held at quantity 0: a value of `Ghost P` carries no data at run time.
+Its proof can be read only in erased positions (another ghost argument, a type). -/
+def Ghost (P : Prop) : Type := (0 _ : P) × Unit
+/-- Wrap a ghost proof. -/
+def Ghost.mk {P : Prop} (0 p : P) : Ghost P := (p, ())
+/-- Use a ghost proof of `P` to build a ghost proof of `Q`. -/
+def Ghost.map {P Q : Prop} (0 f : P → Q) (g : Ghost P) : Ghost Q := Ghost.mk (f g.1)
+
+/-- A value of `A` that satisfies `I`, with the (ghost) proof. -/
+def Good {A : Type} (I : A → Prop) : Type := (a : A) × Ghost (I a)
+/-- Pair a value with a ghost proof that it satisfies `I`. -/
+def Good.mk {A : Type} {0 I : A → Prop} (a : A) (0 ok : I a) : Good I := (a, Ghost.mk ok)
+/-- The value. -/
+def Good.val {A : Type} {I : A → Prop} (g : Good I) : A := g.1
+
+-- ## 2. MVars with invariants
+
+/-- A cell shared between threads, empty or holding an `A` that satisfies `I`. -/
+def MVar.Inv {A : Type} (I : A → Prop) : Type := MVar (Good I)
+
+/-- A new, empty cell. -/
+def MVar.Inv.new {A : Type} {I : A → Prop} : IO (MVar.Inv I) := MVar.new (A := Good I)
+/-- A new cell holding `a`, which satisfies `I`. -/
+def MVar.Inv.newFull {A : Type} {I : A → Prop} (a : A) (0 ok : I a) : IO (MVar.Inv I) :=
+  MVar.newFull (Good.mk a ok)
+/-- Wait until the cell is empty, and fill it with `a`, which satisfies `I`. -/
+def MVar.Inv.put {A : Type} {I : A → Prop} (m : MVar.Inv I) (a : A) (0 ok : I a) : IO Unit :=
+  MVar.put m (Good.mk a ok)
+/-- Wait until the cell is full, and empty it: the value, with a ghost proof that it
+satisfies `I` (`r.1` is the value; `r.2.1`, in an erased position, the proof). -/
+def MVar.Inv.take {A : Type} {I : A → Prop} (m : MVar.Inv I) : IO (Good I) := MVar.take m
+/-- Wait until the cell is full, and read it without emptying it. -/
+def MVar.Inv.read {A : Type} {I : A → Prop} (m : MVar.Inv I) : IO (Good I) := MVar.read m
+
+/-- Take the value out of `m`; `k` gets it, a ghost proof that it satisfies `I`, and the
+hole it must refill (linearly, with `MVar.Inv.fill`). -/
+def MVar.Inv.borrow {A B : Type} {I : A → Prop} (m : MVar.Inv I)
+    (1 k : (a : A) → (0 ok : I a) → (1 h : MVar.Hole m) → IO B) : IO B :=
+  MVar.borrow m (fun g h => k g.1 g.2.1 h)
+/-- Refill the hole `h` with `a`, which satisfies `I`, then continue with `next`. -/
+def MVar.Inv.fill {A B : Type} {I : A → Prop} (m : MVar.Inv I) (1 h : MVar.Hole m) (a : A)
+    (0 ok : I a) (1 next : IO B) : IO B :=
+  MVar.fill m h (Good.mk a ok) next
+/-- Replace the value by `f` of it, atomically with respect to other borrowers; `pres`
+says `f` keeps the invariant. Returns the old value. -/
+def MVar.Inv.modify {A : Type} {I : A → Prop} (m : MVar.Inv I) (f : A → A)
+    (0 pres : (a : A) → I a → I (f a)) : IO A :=
+  MVar.Inv.borrow m (fun a ok h => MVar.Inv.fill m h (f a) (pres a ok) (IO.pure a))
+/-- Weaken the invariant: a cell whose contents satisfy `I` is read as one whose contents
+satisfy any `J` that `I` implies. Only reading: a `put` through the weaker view could
+break `I`, so this gives a function that reads, not a cell. -/
+def MVar.Inv.readAs {A : Type} {I J : A → Prop} (0 w : (a : A) → I a → J a) (m : MVar.Inv I) :
+    IO (Good J) :=
+  IO.bind (MVar.Inv.read m) (fun g => IO.pure (Good.mk (I := J) g.1 (w g.1 g.2.1)))
+
+-- ## 3. The model: the invariant holds along every trace
+
+/-- One atomic step on an erased cell (an `MVar A` with no proofs). A concurrent run is a
+trace of these steps in the order the natives performed them (each native operation is
+atomic under the cell's mutex: lib/MVar.wiz's trusted claim). -/
+inductive Op (A : Type) where
+  | put (a : A)
+  | take
+  | read
+
+/-- The cell's contents satisfy `I` (an empty cell satisfies every invariant). -/
+def Holds {A : Type} (I : A → Prop) : Option A → Prop
+  | .none => True
+  | .some a => I a
+
+/-- The trace's precondition: every value put satisfies `I`. -/
+def PutsOk {A : Type} (I : A → Prop) : List (Op A) → Prop
+  | .nil => True
+  | .cons (.put a) ops => I a ∧ PutsOk I ops
+  | .cons .take ops => PutsOk I ops
+  | .cons .read ops => PutsOk I ops
+
+/-- One step of the erased cell: the new contents and what a `take`/`read` returned.
+A step the native would block on (a `put` on a full cell, a `take` on an empty one) is
+not in any trace: there it leaves the cell as it is and returns nothing. -/
+def Op.step {A : Type} : Op A → Option A → Option A × Option A
+  | .put a, .none => (.some a, .none)
+  | .put a, .some b => (.some b, .none)
+  | .take, c => (.none, c)
+  | .read, c => (c, c)
+
+/-- Run a trace: the values every `take`/`read` returned, in order. -/
+def Op.run {A : Type} : List (Op A) → Option A → List (Option A)
+  | .nil, c => .nil
+  | .cons op ops, c => .cons (Op.step op c).2 (Op.run ops (Op.step op c).1)
+
+/-- Every element of a list of observations satisfies `I`. -/
+def AllHold {A : Type} (I : A → Prop) : List (Option A) → Prop
+  | .nil => True
+  | .cons o os => Holds I o ∧ AllHold I os
+
+/-- One step keeps the invariant, and what it returns satisfies it. -/
+def Op.step_holds {A : Type} (I : A → Prop) :
+    (op : Op A) → (c : Option A) → (PutsOk I (.cons op .nil)) → Holds I c →
+    Holds I (Op.step op c).1 ∧ Holds I (Op.step op c).2
+  | .put a, .none, p, h => (p.1, ())
+  | .put a, .some b, p, h => (h, ())
+  | .take, c, p, h => ((), h)
+  | .read, c, p, h => (h, h)
+
+/-- The tail of a trace whose puts are all good has good puts. -/
+def PutsOk.tail {A : Type} (I : A → Prop) : (op : Op A) → (ops : List (Op A)) →
+    PutsOk I (.cons op ops) → PutsOk I ops
+  | .put a, ops, p => p.2
+  | .take, ops, p => p
+  | .read, ops, p => p
+
+/-- The head of a trace whose puts are all good is a good put. -/
+def PutsOk.head {A : Type} (I : A → Prop) : (op : Op A) → (ops : List (Op A)) →
+    PutsOk I (.cons op ops) → PutsOk I (.cons op .nil)
+  | .put a, ops, p => (p.1, ())
+  | .take, ops, p => ()
+  | .read, ops, p => ()
+
+/-- **The invariant theorem.** Started from contents that satisfy `I`, a trace whose
+puts all satisfy `I` returns only values that satisfy `I`, whatever the order of the
+operations (that is, whatever the threads' interleaving). `MVar.Inv` makes the premise
+true by typing: its `put`, `newFull` and `fill` need a proof. -/
+def Op.run_holds {A : Type} (I : A → Prop) : (ops : List (Op A)) → (c : Option A) →
+    PutsOk I ops → Holds I c → AllHold I (Op.run ops c)
+  | .nil, c, p, h => ()
+  | .cons op ops, c, p, h =>
+      let s := Op.step_holds I op c (PutsOk.head I op ops p) h;
+      (s.2, Op.run_holds I ops (Op.step op c).1 (PutsOk.tail I op ops p) s.1)
