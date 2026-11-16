@@ -439,4 +439,45 @@ by bytes that do not match the pin.
 
 Run on x86_64 Linux (NixOS, gcc 16.2.0, nixpkgs `02c087f3`), 2026-11-16.
 
-(Filled in from the runs; see the end of this section.)
+### Reproducibility of the fixpoint (collector mode), across two builds
+
+`heavy --mem 6G bash scripts/repro-fixpoint.sh --stages 2 --keep`, two copies of
+master `d23473da` plus this branch's `scripts/`:
+
+| | build A | build B |
+|---|---|---|
+| directory | `…/repro/a/wiz` | `…/repro/b-a-longer-directory-name/src/wiz` |
+| `TMPDIR`, `HOME` | `tmp-a`, `home-a` | `tmp-b-longer/x`, `home-b-longer` |
+| locale, time zone, umask | `C`, `UTC`, 022 | `C.UTF-8`, `Asia/Kathmandu`, 077 |
+| `SOURCE_DATE_EPOCH` | unset | 1234567890 |
+| parallelism | `GC_MARKERS=1`, `LEAN_NUM_THREADS=1`, `-j1`, all allowed CPUs | collector and Lean defaults, `-j8`, `taskset -c 0,1` |
+| environment | `env -i` plus the toolchain | the same plus `USER`/`LOGNAME` changed and an unrelated variable |
+
+| artifact | sha256 (both builds) | result |
+|---|---|---|
+| `compiler.wiz` | `4a1ff239…3fe1` | same |
+| `self.wiz` | `9aacf779…7dad` | same |
+| `compiler` (stage 1, built by the Lean `wiz`) | `6bdebfac…e0a7` | same |
+| `self1.c` | `88e12067…d8d7` (8,299,762 B) | same |
+| `stage2` (cc of `self1.c`) | `5707cfcf…2d86` | same |
+| `self2.c` | `88e12067…d8d7` (= `self1.c`) | same |
+
+**6 of 6 byte-identical**, and each build reached the fixpoint (`self1.c = self2.c`).
+Per build: Lean `wiz build` of the compiler 199–204 s (2.6 GB), stage 1's self-compile
+40–45 s (0.7 GB), cc 150–175 s (2.6 GB), stage 2's self-compile 825–834 s with a
+**peak of 6.3 GB**. Declare **7G** for a fixpoint job, not 6G (the scripts' comments
+and `fixpoint.yml` still say 6).
+
+Caveats: both builds ran on one machine as one user (the Nix sandbox build below
+varies the user), and build B's Lake step replayed modules from the shared Lake cache
+that build A had filled, so the Lean host was not built twice: the comparison covers
+everything from the generated sources on. `scripts/check-repro.sh --compiler` is the
+check for the Lean host's own reproducibility.
+
+**Nondeterminism found and fixed:** cc writes the source's base name into the
+executable's symbol table, so stage executables compiled from `self1.c` and `self2.c`
+differed although the C was identical. `scripts/fixpoint.sh` and the Nix stages now
+compile a copy named `wizc.c`. **Found and not fixed:** an executable built in the
+dev environment carries that environment's RUNPATH (the cc wrapper adds the Nix
+profile's library directories), so a dev-shell build and a sandbox build of the same C
+differ; the chain uses only the Nix build, and the static release has no RUNPATH.

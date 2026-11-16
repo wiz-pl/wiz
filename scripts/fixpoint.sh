@@ -21,7 +21,7 @@
 #   OUTDIR          default .lake/fixpoint
 #
 # It prints each step's wall time and peak RSS (the self-compile stages need about
-# 6 GiB; they have peaked near 5.4 GiB), and each stage's C size and md5 with PASS/FAIL.
+# 7 GiB; stage 2 peaked at 6.3 GiB on 2026-11-16), and each stage's C size and md5 with PASS/FAIL.
 # A stage killed by the OOM killer or a memory cgroup (exit 137) fails with a hint.
 # Slow: two or more compilations of the whole toolchain (CI runs it on a schedule).
 set -euo pipefail
@@ -161,8 +161,8 @@ run_step() {
     echo "FAILED: '$label' exited $rc after ${secs}s (peak $((kb / 1024)) MiB)." >&2
     if [ "$rc" -eq 137 ] || [ "$rc" -eq 9 ]; then
       echo "It was killed (SIGKILL), which is how the OOM killer and a memory cgroup end a run." >&2
-      echo "The fixpoint needs about 6 GiB: the self-compiles peak near 5.4 GiB (stage 2 has reached 5.5 GiB)." >&2
-      echo "Reserve it (e.g. 'heavy --mem 6G scripts/fixpoint.sh') and give the runner >= 6 GiB free." >&2
+      echo "The fixpoint needs about 7 GiB: the stage-2 self-compile has peaked at 6.3 GiB." >&2
+      echo "Reserve it (e.g. 'heavy --mem 7G scripts/fixpoint.sh') and give the runner >= 7 GiB free." >&2
     fi
     echo "Artifacts are in $out (run/ and the files already produced)." >&2
     exit 1

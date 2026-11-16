@@ -33,8 +33,8 @@
 #                kept .lake/fixpoint and a Nix build's output); files present in both
 #                are compared, by name
 #
-# The fixpoint needs about 6 GiB and the two builds run one after the other:
-#   heavy --mem 6G timeout 6000 bash scripts/repro-fixpoint.sh
+# The fixpoint needs about 7 GiB (6.3 GiB peak) and the two builds run one after the other:
+#   heavy --mem 7G timeout 6000 bash scripts/repro-fixpoint.sh
 #
 # Output: one line per artifact (sha256 of each side, SAME or DIFFERENT), and for the
 # first differing artifact the first differing byte or line, the ELF sections that
