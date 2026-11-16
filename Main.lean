@@ -21,9 +21,11 @@ def usage : String := "usage:
                                    (say, a Wasm module: --cc emcc --ldflags --no-entry)
   wiz run FILE [--target c|llvm|wasm]  build and run `main`, printing its value
                                    (`--llvm` and `--wasm` are aliases)
-  wiz repl [--llvm] [--prelude M]  read one command per line, keeping definitions (`:help`;
+  wiz repl [--llvm] [--prelude M] [--script FILE] [--init CMD]
+                                   read one command per line, keeping definitions (`:help`;
                                    a pipe: one command per line, no prompt; `:type EXPR`,
-                                   `:load FILE`; `--prelude M` imports M at the start)
+                                   `:load FILE`; `--prelude M` imports M at the start,
+                                   `--script` reads FILE, `--init` runs CMD first)
   wiz test-driver [--driver PATH] [GROUPS…] [--jobs N] [--list]
                                    run the test driver (`.lake/build/bin/tests`, or PATH)
   wiz doc [MODULE|FILE|DIR…] -o OUT [--lib] [--source-url URL] [--title T] [--web DIR]
@@ -581,7 +583,8 @@ resolve is reported at startup (exit 2), not on the first input.
 
 The base state stays pristine, so an `import` is checked in isolation as in a file, then
 elaborated into the session's state. A pipe has one command per line and no prompt. -/
-def replCmd (tc : Toolchain) (llvm : Bool) (preludes : List String := []) : IO UInt32 := do
+def replCmd (tc : Toolchain) (llvm : Bool) (preludes : List String := [])
+    (script : Option String := none) (init : List String := []) : IO UInt32 := do
   let base ← replInit tc
   let stdin ← IO.getStdin
   let stdout ← IO.getStdout
@@ -630,8 +633,79 @@ def replCmd (tc : Toolchain) (llvm : Bool) (preludes : List String := []) : IO U
         | some p => s!"{p}:{m.render input}"
         | none => m.render input
       if m.severity == .error then stderr.putStrLn text else stdout.putStrLn text
+  -- one input line: `none` when it ends the session (`:quit`), else the next state
+  let process (state : CommandState ZeroOneMany) (raw : String) :
+      IO (Option (CommandState ZeroOneMany)) := do
+    let line := raw.trimAscii.toString
+    if line.isEmpty then return some state
+    match line with
+    | ":quit" | ":q" => return none
+    | ":help" | ":h" | ":?" => stdout.putStrLn help; stdout.flush; return some state
+    | ":reset" => stdout.putStrLn "reset"; stdout.flush; return some preloaded
+    | c =>
+      if c.startsWith ":" then
+        if c == ":type" then
+          stderr.putStrLn "usage: :type EXPR"
+          return some state
+        else if c.startsWith ":type " then
+          let text := s!"#check {(c.drop 6).trimAscii.toString}"
+          let s' := runFrontend.go text base text.toList.toArray 0 state
+          report state.messages.size s' text none
+          return some { s' with messages := #[] }
+        else if c == ":load" then
+          stderr.putStrLn "usage: :load FILE"
+          return some state
+        else if c.startsWith ":load " then
+          let path := (c.drop 6).trimAscii.toString
+          let text? ← try
+            pure (some (← IO.FS.readFile path))
+          catch e =>
+            stderr.putStrLn s!"cannot read {path}: {e}"
+            pure none
+          match text? with
+          | none => return some state
+          | some text =>
+            let s' := runFrontend.go text base text.toList.toArray 0 state
+            report state.messages.size s' text (some path)
+            return some { s' with messages := #[] }
+        else
+          match c.splitOn " " with
+          | [":run", name] =>
+            let dir ← IO.FS.createTempDir
+            match ← Build.runGlobal tc state name dir llvm with
+            | .error e => stderr.putStrLn e
+            | .ok v => stdout.putStr (if v.endsWith "\n" then v else v ++ "\n")
+            stdout.flush
+            return some state
+          | _ => stderr.putStrLn s!"unknown command {c} (`:help`)"; return some state
+      else
+        -- the line is one command: elaborate it into the session, from the pristine base
+        let s' := runFrontend.go line base line.toList.toArray 0 state
+        report state.messages.size s' line none
+        stdout.flush
+        stderr.flush
+        return some { s' with messages := #[] }
   let mut state := preloaded
   let mut reading := true
+  -- `--init CMD`s first, then `--script FILE`'s lines (instead of stdin)
+  for c in init do
+    if reading then
+      match ← process state c with
+      | some s => state := s
+      | none => reading := false
+  if let some f := script then
+    let text? ← try
+      pure (some (← IO.FS.readFile f))
+    catch e =>
+      stderr.putStrLn s!"wiz repl: cannot read {f}: {e}"
+      pure none
+    let some text := text? | return 2
+    for raw in text.splitOn "\n" do
+      if reading then
+        match ← process state raw with
+        | some s => state := s
+        | none => reading := false
+    return 0
   while reading do
     if tty then
       stdout.putStr "wiz> "
@@ -642,54 +716,9 @@ def replCmd (tc : Toolchain) (llvm : Bool) (preludes : List String := []) : IO U
       if tty then IO.println ""
       reading := false
     else
-      let line := raw.trimAscii.toString
-      unless line.isEmpty do
-        match line with
-        | ":quit" | ":q" => reading := false
-        | ":help" | ":h" | ":?" => stdout.putStrLn help; stdout.flush
-        | ":reset" =>
-          state := preloaded
-          stdout.putStrLn "reset"; stdout.flush
-        | c =>
-          if c.startsWith ":" then
-            if c == ":type" then
-              stderr.putStrLn "usage: :type EXPR"
-            else if c.startsWith ":type " then
-              let text := s!"#check {(c.drop 6).trimAscii.toString}"
-              let s' := runFrontend.go text base text.toList.toArray 0 state
-              report state.messages.size s' text none
-              state := { s' with messages := #[] }
-            else if c == ":load" then
-              stderr.putStrLn "usage: :load FILE"
-            else if c.startsWith ":load " then
-              let path := (c.drop 6).trimAscii.toString
-              let text? ← try
-                pure (some (← IO.FS.readFile path))
-              catch e =>
-                stderr.putStrLn s!"cannot read {path}: {e}"
-                pure none
-              match text? with
-              | none => pure ()
-              | some text =>
-                let s' := runFrontend.go text base text.toList.toArray 0 state
-                report state.messages.size s' text (some path)
-                state := { s' with messages := #[] }
-            else
-              match c.splitOn " " with
-              | [":run", name] =>
-                let dir ← IO.FS.createTempDir
-                match ← Build.runGlobal tc state name dir llvm with
-                | .error e => stderr.putStrLn e
-                | .ok v => stdout.putStr (if v.endsWith "\n" then v else v ++ "\n")
-                stdout.flush
-              | _ => stderr.putStrLn s!"unknown command {c} (`:help`)"
-          else
-            -- the line is one command: elaborate it into the session, from the pristine base
-            let s' := runFrontend.go line base line.toList.toArray 0 state
-            report state.messages.size s' line none
-            state := { s' with messages := #[] }
-            stdout.flush
-            stderr.flush
+      match ← process state raw with
+      | some s => state := s
+      | none => reading := false
   return 0
 
 /-- `--prelude MODULE` / `-p MODULE` (`--prelude=MODULE` too; repeatable and
@@ -707,6 +736,23 @@ def takePrelude : List String → Except String (List String × List String)
     else if a.startsWith "-p" && a.length > 2 && !(a.startsWith "--") then
       pure ((a.drop 2).toString :: ps, rest)
     else pure (ps, a :: rest)
+
+/-- `--script FILE` (the commands, one per line, from FILE instead of stdin) and
+`--init CMD` (repeatable: run before the first input) for `wiz repl`, taken out of the
+arguments. -/
+def takeReplScript : List String → Except String (Option String × List String × List String)
+  | [] => pure (none, [], [])
+  | "--script" :: [] => throw "--script needs a file"
+  | "--init" :: [] => throw "--init needs a command"
+  | "--script" :: f :: rest => do
+    let (_, init, rest) ← takeReplScript rest
+    pure (some f, init, rest)
+  | "--init" :: c :: rest => do
+    let (script, init, rest) ← takeReplScript rest
+    pure (script, c :: init, rest)
+  | a :: rest => do
+    let (script, init, rest) ← takeReplScript rest
+    pure (script, init, a :: rest)
 
 /-- The test driver: the `--driver PATH` flag (when it is a file), else beside this
 binary (a checkout's `.lake/build/bin/tests`), else `.lake/build/bin/tests` under the
@@ -834,10 +880,12 @@ def main (args : List String) : IO UInt32 := do
       pure 2
     else match takePrelude rest with
       | .error e => IO.eprintln e; pure 2
-      | .ok (preludes, []) => replCmd tc (target == "llvm") preludes
-      | .ok (_, a :: _) =>
-        IO.eprintln s!"wiz repl: unknown argument {a}"
-        pure 2
+      | .ok (preludes, rest) => match takeReplScript rest with
+        | .error e => IO.eprintln e; pure 2
+        | .ok (script, init, []) => replCmd tc (target == "llvm") preludes script init
+        | .ok (_, _, a :: _) =>
+          IO.eprintln s!"wiz repl: unknown argument {a}"
+          pure 2
   | "test-driver" :: rest => testDriverCmd rest
   | "lsp" :: opts => do
     match lspOptions opts with

@@ -824,7 +824,9 @@ page runs.
   a file, and then elaborated into the session. With no terminal on stdin there is no
   prompt, so a pipe is a script: one command per line. `:run NAME` builds and runs the
   definition `NAME` (C, or LLVM with `--llvm`; `--target llvm` is the same flag);
-  `--llvm` affects only that.
+  `--llvm` affects only that. `--script FILE` reads the commands from FILE instead of
+  stdin (one per line; for tests and CI), and `--init CMD` (repeatable) runs CMD before
+  the first input.
 
   `:type EXPR` prints `EXPR`'s type (it is `#check EXPR` in the session), and
   `:load FILE` elaborates a file's commands into the session, so its definitions stay in
