@@ -608,6 +608,35 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
   `AndOp.and a b` / `OrOp.or a b` at the condition's type, so they print as `&&&`/`|||`
   and have the Verilog of those. On `Bool` they are unchanged (`!` is still `Bool.not`
   only: use `~~~` on a signal).
+* **`match` on a signal.** A `match` whose scrutinee is a signal (`r T` with an
+  `[Hw r]` instance) is a **case tree**, not an elimination: each nullary constructor
+  pattern `.c` becomes the comparator `Hw.eq x (T.lit c)`, the branches become a
+  right-nested `Hw.mux` spine in constructor order (the last constructor, or a `_`
+  branch, is the final else), and the scrutinee is shared once with `Hw.share`. A
+  single-constructor type needs no test: its one branch is the result. The result is
+  any `r U`; no wire becomes a `Nat` or a `Bool`, so the `Hw` invariant is kept.
+  `Bool` (`r HwTy.bit`, patterns `.true`/`.false`) is the two-constructor case of the
+  same tree; a nullary two-constructor `BitPack` enumeration (an `Option`-shaped code)
+  takes the ordinary enumeration path. On a one-bit signal an unqualified `.true` or
+  `.false` means `Bool`; an enumeration that also names constructors that way is
+  selected by qualifying it (`Toggle.true`).
+  ```
+  def phaseName {r : HwTy → Type} [Hw r] (p : r Phase.code) : r B8 :=
+    match p with
+    | .idle => 0
+    | .start => 1
+    | .data => 2
+    | .stop => 3
+  ```
+  The lowering is exactly the `if` chain on `T.lit` (the same comparators, in the same
+  order, with the same right-nested mux association), so the netlist and its node count
+  are identical (`examples/hdl-match.wiz` checks both, and that the Verilog text is
+  byte-identical). Exhaustiveness is checked as the ordinary matcher checks it: a missing
+  constructor on a multi-constructor signal is a spanned error, not a silent
+  fall-through. Not covered: a constructor pattern that binds fields (a wire has no
+  projection), literal patterns on `bits n` (a `Nat` signal is out of scope: compare with
+  `===` and `if`), a concrete `Wire` scrutinee (write the function generically), and a
+  `match` that would return meta data (there is no eliminator for a wire).
 * **`deriving BitPack`.** `structure BitPack A` is a type's values as bit vectors of one
   width (a value, not an instance, as `Bundle`). For an **enumeration** (no parameters,
   constructors without fields) constructor `i` is the number `i` in
@@ -648,8 +677,8 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
 
 Not done: a general bit-level round-trip lemma for bundles (above), `BitPack` for
 inductive types with fields (a tag and the widest constructor's fields), `!` on signals,
-`match` on an enumeration signal (a case tree over the `Hw` ops — wishful
-`hdl-match-signals`; the workaround is an `if` chain on `Phase.lit`), asynchronous
+`match` on a signal with field-binding or literal (`Nat` on `bits n`) patterns (see the
+`match` bullet above; `match` on an enumeration signal itself is done), asynchronous
 reset.
 
 ## Xilinx 7-series pin constraints and the Arty A7 (`Hdl.Xdc`, `Hdl.Arty`)
@@ -1452,6 +1481,26 @@ left to right for `rw` (and `rw` does not close a goal: finish with `rfl`). The
 `list-lemmas` test group checks them, including `map` fusion and `filter`
 soundness/completeness in proofs and the `#check`/`#eval` behaviour.
 
+## Web: a React-style UI framework (`lib/Web/React.wiz`)
+
+`import Web.React` (over `Json`, `Optic` and `Tagged`): components, local state,
+typed event handlers, keyed lists, a pure virtual DOM, deterministic server-side
+rendering and a keyed diff to DOM patches. Nodes are `React.VNode M` (`text`, `raw`,
+`el`, keyed `el`, `on`), built with `React.el`/`React.text`/`React.on`/`React.keyed`;
+`React.render` gives `{tree, html, handlers}` (`React.toHtml` is the SSR string) and
+`React.Rendered.diff` a `List React.Patch` (`replace`, `text`, `setAttr`,
+`removeAttr`, `insert`, `remove`, `move`) that `React.patchesJson` hands to
+`web/framework/runtime.js`. An app is `React.App S M` (`init`, `update`, `view`); a
+component is `React.Component P S M`. Local state is a lens into the app state
+(`React.useState`/`setState`/`useReducer` over `Optic`'s `Lens`, so disjoint slices
+commute), and a one-shot resource is `React.Owned S`, a quantity-1 token the kernel
+makes you use exactly once (`new`, `read`, `peek`, `update`, `set`, `end`). `raw` is
+the only trust boundary (and must be one element); all other text and attribute values
+are escaped by `Tagged.esc`. There is no hydration yet (SSR then a re-render/mount),
+no effects, and `value`/`checked` would need property patches. Tests: group `react`
+and `web/framework/test.sh` (Node DOM). Design, survey and migration analysis:
+`wiz-notes/react-framework.md`.
+
 ## Numbers: classes, integers, words
 
 (Stage doc: docs/stages/07-type-classes.md, 7e and 7f.) The Prelude's `Add`, `Sub`, `Mul`,
@@ -1848,3 +1897,60 @@ skip (exit 0); a bounded run with no crash is explicit dynamic evidence, not a s
 claim, and the target covers the parser boundary rather than the Wiz lowering/taint
 pipeline. `scry/fuzz/README.md` has the command, schema, counts and limits, and
 `wiz-notes/scry-fuzz.md` records the branch results.
+
+## Plot: data plots as deterministic SVG (`lib/Plot.wiz`)
+
+`import Plot` draws a `Frame` of named `Series` (`line`, `scatter`, `bar`, `step`) and
+optional error `Band`s on a linear or base-10 log x/y scale, and returns one SVG
+document:
+
+```
+import Plot
+
+def sales : Plot.Frame := Plot.frame [
+  Plot.line "2024" [Plot.ptNat 0 12, Plot.ptNat 1 14, Plot.ptNat 2 15],
+  Plot.scatter "2025" [Plot.ptNat 0 12, Plot.ptNat 1 16, Plot.ptNat 2 17]]
+
+def chart : Plot.Chart :=
+  Plot.labels "quarter" "units" (Plot.size 480 300 (Plot.chart "Sales" sales))
+
+#eval Plot.svg chart                     -- the SVG document
+#eval Json.render (Plot.toJson chart)    -- data, domains and ticks for a JS renderer
+#eval Json.render (Plot.render chart)    -- a Jupyter mime bundle
+```
+
+`Plot.chart title frame` gives 640 × 400 with linear axes; `Plot.size`, `Plot.labels`
+and `Plot.scales Plot.Scale.linear Plot.Scale.log` set the fixed layout. Points are
+exact rationals: `Plot.frac 3 2` is 3/2, `Plot.fracInt (-1) 4` is −1/4, and `(3 : Q)`
+works too. `Plot.boundsOf`/`Plot.logBoundsOf` pad a domain by 5% (all-equal data, one
+point and zero are handled without a degenerate axis); `Plot.niceRange` widens a domain
+to whole multiples of its step, and `Plot.niceStep` / `Plot.linearTicks` /
+`Plot.logTicks` generate ticks of the form `1/2/5 × 10^k` inside the domain, increasing
+and integer multiples of the chosen step. (`Plot.svg` keeps the padded domain and draws
+the ticks inside it; a renderer that wants the axis to end exactly on a tick calls
+`Plot.niceRange`.)
+
+![A two-series plot with an error band, drawn by lib/Plot.wiz](assets/plot-example.svg)
+
+**Arithmetic and determinism.** The library is exact: `Q` from `lib/Rat.wiz` over
+`Int`, with every coordinate rounded once to an integer pixel (half away from zero).
+`Float64` is an axiom of `lib/IO.wiz` (opaque to the kernel and to `#eval`), so it is not
+used in the core: that is what lets the whole library be checked and `#eval`'d, and what
+makes the SVG byte-stable. There is no NaN or infinity in `Q`; log scales drop
+non-positive values (and fall back to `[1, 10]` when there is no positive data) rather
+than emitting a NaN coordinate. Log positions use a fixed-point `log10` (six decimals,
+an integer algorithm), not the host's `libm`. The SVG has no timestamps, ids or random
+values, a fixed attribute order, and the fixed sRGB palette in `Plot.colour`; the
+`plot` test group compares four drawings byte for byte (`Tests/data/plot/*.svg`).
+
+`Plot.toJson` is the renderer schema: `title`, `xlabel`, `ylabel`, `width`, `height`,
+`x` and `y` objects (`scale`, `domain` `{min, max}`, `ticks` of `{value, label}`),
+`series` (`label`, `mark`, `points` of `[x, y]`) and `bands` (`label`, `lower`,
+`upper`), all numbers as decimal strings. `Plot.render` returns
+`{"text/plain": …, "image/svg+xml": …, "text/html": …}` as a `Json` value; the Jupyter
+kernel calls `Json.render (Plot.render chart)` and uses the result as the cell's MIME
+bundle (the `tools/jupyter` hook), with no other coupling to this module.
+
+Deliberately not implemented: 3D, animation, colour spaces (the palette is sRGB hex),
+stacked bars (several bar series are drawn at the same positions; grouping is a layout
+policy), and text metrics (labels use fixed offsets, not measured widths).

@@ -226,7 +226,7 @@ def ofNatLit? (ctx : LocalCtx R) (n : Nat) (A : VTy R) : ElabM R (Option (Term R
   -- a numeral that doesn't fit a fixed-width word of lib/Word.wiz wraps around: say so
   -- (outside lib/Word.wiz the word types are opaque, 13b/22k: a constant applied to `w`)
   let word? : Option (Name × Val R) := match ← force A with
-    | .mu _ _ _ _ _ (some (T, _, w :: _)) => some (T, w)
+    | .mu _ _ _ _ _ (some (T, _, w :: _)) _ => some (T, w)
     | .neutral (.global T _) #[.app w] => some (T, w)
     | _ => none
   if let some (T, w) := word? then
@@ -429,7 +429,7 @@ partial def elabFields (ctx : LocalCtx R) (t : Term R) (ty : VTy R) (fields : Li
   | f :: rest =>
     -- generalised field notation: `t.f` is `T.f t` for a nominal type `T`
     let hint? : Option (Name × List Level × List (Val R)) := match ← force ty with
-      | .mu _ _ _ _ _ h | .nu _ _ _ _ _ h => h
+      | .mu _ _ _ _ _ h _ | .nu _ _ _ _ _ h => h
       | _ => none
     if let some (T, us, args) := hint? then
       let Tf := (← getGlobals).resolve (T ++ "." ++ f)
@@ -876,7 +876,7 @@ partial def rewriteRecCalls (g : Globals R) (rc : RecCtx) (binds : List (Name ×
 column: which constructors have a case, and where the alternatives are. -/
 def recordMatch (info : SourceInfo) (alts : Array Syntax) (clauses : List (MClause R)) (ty : VTy R)
     (tys : Array (VTy R)) : ElabM R Unit := do
-  let .mu _ _ _ _ _ (some (T, _, _)) ← force ty | return
+  let .mu _ _ _ _ _ (some (T, _, _)) _ ← force ty | return
   let (some first, some last) := (alts[0]?, alts.back?) | return
   let g ← getGlobals
   let firsts := clauses.filterMap (·.pats.head?)
@@ -1021,7 +1021,7 @@ partial def rflProof (ctx : LocalCtx R) (ty : VTy R) : ElabM R (Option (Term R))
 def isNatType (ty : VTy R) : ElabM R Bool := do
   let some N := (← get).builtins.lookup "nat" | return false
   match ← force ty with
-  | .mu _ _ _ _ _ (some (T, _, _)) => return T == N
+  | .mu _ _ _ _ _ (some (T, _, _)) _ => return T == N
   | _ => return false
 
 /-- (13q) Numeral patterns at `Nat` (the data type `T`), one constructor at a time: `0` is
@@ -1051,7 +1051,7 @@ where natPatLimit : Nat := 256
 chain of definitions `ty` unfolds through that has a `T.beq` (`BitVec 8`, then `UIntN 8`). -/
 partial def beqHead? (g : Globals R) : Val R → Option Name
   | .unfold S _ _ v => if g.contains (S ++ ".beq") then some S else beqHead? g v.get
-  | .mu _ _ _ _ _ (some (T, _, _)) => if g.contains (T ++ ".beq") then some T else none
+  | .mu _ _ _ _ _ (some (T, _, _)) _ => if g.contains (T ++ ".beq") then some T else none
   | .neutral (.global S _) _ => if g.contains (S ++ ".beq") then some S else none
   | _ => none
 
@@ -1080,6 +1080,51 @@ def calcEndpoints? (t : Term R) : Option (Term R × Term R) :=
     match args.reverse with
     | b :: a :: _ => some (a, b)
     | _ => none
+
+/-- One branch of a `match` on a signal, as `matchMux?` reads it: the constructor tag of
+the pattern (`none` for the default `_`), the type the pattern named (`Phase.idle` names
+`Phase`; a bare `.idle` names none), the branch body, and the pattern's position. -/
+structure HdlBranch where
+  ctor : Option Name
+  ty : Option Name
+  rhs : Syntax
+  info : SourceInfo
+
+/-- The syntax builders `matchMux?` uses to lower a `match` on a signal. -/
+def hdlIdent (i : SourceInfo) (n : Name) : Syntax := .node i "term.ident" #[.ident i n]
+/-- `n` as a numeral. -/
+def hdlNum (i : SourceInfo) (n : Nat) : Syntax :=
+  .node i "term.num" #[.node i "num" #[.atom i (toString n)]]
+/-- `f a₁ … aₙ`. -/
+def hdlApp (i : SourceInfo) (f : Syntax) (args : List Syntax) : Syntax :=
+  if args.isEmpty then f else .node i "term.app" #[f, .node i "null" args.toArray]
+/-- `fun x => body`. -/
+def hdlFun (i : SourceInfo) (x : Name) (body : Syntax) : Syntax :=
+  .node i "term.fun" #[.atom i "fun", .node i "null" #[.ident i x], .atom i "=>", body]
+
+/-- The enumeration a signal's code names, when the argument is literally `T.code`
+(`Phase.code`): the code `T` before `.code`. `none` for `HwTy.bit`, `HwTy.bits n` or a
+code held in a variable. -/
+def hdlCodeEnum? (code : Val R) : Option Name :=
+  let n? : Option Name := match code with
+    | .unfold n _ _ _ => some n
+    | .neutral (.global n _) _ => some n
+    | _ => none
+  n?.bind fun n => if n.endsWith ".code" then some ((n.dropEnd 5).toString) else none
+
+/-- The enumerations (with a `deriving BitPack` code) that have a constructor named `c`,
+in declaration order. -/
+def hdlEnumCandidates (g : Globals R) (c : Name) : List Name := Id.run do
+  let mut out : List Name := []
+  for n in g.order do
+    let parts := n.splitOn "."
+    if let some c' := parts.getLast? then
+      if c' == c then
+        let T := ".".intercalate parts.dropLast
+        if g.contains (T ++ ".code") && g.contains (T ++ ".lit") &&
+            (ctorNames g T).any (ctorSelects c ·) && !out.contains T then
+          out := out ++ [T]
+  return out
 
 mutual
 
@@ -1275,7 +1320,7 @@ where
       let n := (stx.getArg 0).getNat?.getD 0
       match ← force expected with
       | .qty => elabQtyLit ctx stx (((stx.getArg 0).getNat?.map toString).getD "?")
-      | .mu _ _ _ _ _ (some (T, _, _)) =>
+      | .mu _ _ _ _ _ (some (T, _, _)) _ =>
         -- a numeral of the `builtin nat` type: `succ (… (succ zero))` (the kernel's Nat
         -- is unary; the runtime uses native numbers)
         let s ← get
@@ -1304,7 +1349,7 @@ where
         | none => let (t, ty) ← infer ctx stx; unifyAt ctx stx expected ty; pure t
     | "term.str" =>
       match ← force expected with
-      | .mu _ _ _ _ _ (some (T, us, _)) =>
+      | .mu _ _ _ _ _ (some (T, us, _)) _ =>
         -- a string of the `builtin string` type: `String.mk [Char.mk n, …]`
         let s ← get
         match s.builtins.lookup "string" with
@@ -1469,7 +1514,7 @@ partial def checkData? (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) :
     | _ => none
   if let some (h, c) := dot? then
     match expected with
-    | .mu l I D i sz (some (T, us, args)) =>
+    | .mu l I D i sz (some (T, us, args)) prop =>
       let some cn := dotCtor? g ctx.types.reverse.toArray T c expected
         | throwFix h.info s!"{← if (ctorNames g T).any (·.contains '.') then showVal ctx expected else pure T} has no constructor {c}"
             ErrorCode.unknownConstructor [("name", [c]), ("type", [T])]
@@ -1486,11 +1531,11 @@ partial def checkData? (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) :
       if stx.isOfKind "term.app" then
         for a in (stx.getArg 1).args do
           let some (_, aty) ← tryCatch (some <$> infer ctx a) (fun _ => pure none) | continue
-          if let .mu _ _ _ _ asz (some (T', _, _)) ← force aty then
+          if let .mu _ _ _ _ asz (some (T', _, _)) _ ← force aty then
             if T' == T then unifyAt ctx a vm asz
       let (t, _) ← infer ctx stx'
       let payload := quote g ctx.lvl (← evalIn ctx t)
-      let ty : Val R := .mu l I D i (.szSuc vm) (some (T, us, args))
+      let ty : Val R := .mu l I D i (.szSuc vm) (some (T, us, args)) prop
       unifyAt ctx stx expected ty
       return some (.ann payload (q ty))
     | .neutral (.global T _) _ =>
@@ -1547,7 +1592,7 @@ partial def checkData? (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) :
     unifyLevel lH (.succ l)
     let jTy : VTy R := ctx.sortVal g (.pi "h" .default (.qlit w) (← evalIn ctx H') (.mk ctx.env (quote g (ctx.lvl + 1) I)) ⟨.succ l, .succ l⟩)
     return some (.dhrec (← check ctx qs .qty) H' (← check ctx j jTy) (← check ctx D (.desc l I)))
-  | "con", #[x], .mu l I D i _ _ => return some (.con (← check ctx x (vInterp g l I D (muFamily l I D) i)))
+  | "con", #[x], .mu l I D i _ _ prop => return some (.con (← check ctx x (vInterp g l I D (muFamily l I D prop) i prop)))
   | "coit", #[S, st, s], .nu l I D i _ _ =>
     let S' ← check ctx S (coitStateTy l I w)
     let vS ← evalIn ctx S'
@@ -1585,7 +1630,9 @@ partial def inferData? (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Option (Term
   | "μ", #[D, i] | "ν", #[D, i] =>
     let (D', l, I) ← descOf D
     let i' ← check ctx i I
-    return some ((if n == "μ" then Term.mu else Term.nu) l (q I) D' i' .szInf none, .sort (.succ l))
+    let d : Term R := if n == "μ" then Term.mu l (q I) D' i' .szInf none false
+      else Term.nu l (q I) D' i' .szInf none
+    return some (d, .sort (.succ l))
   | "Desc.elim", #[P, a, b, c, h, D] =>
     let (D', l, I) ← descOf D
     let v ← freshLevelMeta
@@ -1616,12 +1663,12 @@ partial def inferData? (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Option (Term
     return some (q all, .sort (.max (.succ l) v))
   | "ind", #[P, m, x] =>
     let (x', xty) ← infer ctx x
-    let .mu l I D i _ _ ← force xty | throwAt ctx.info s!"ind expects an inductive value, got {← showVal ctx xty}"
+    let .mu l I D i _ _ prop ← force xty | throwAt ctx.info s!"ind expects an inductive value, got {← showVal ctx xty}"
     let v ← freshLevelMeta
-    let P' ← check ctx P (indMotiveTy g l v I D w)
+    let P' ← check ctx P (indMotiveTy g l v I D w prop)
     let vP ← evalIn ctx P'
-    let m' ← check ctx m (indMethodTy g l v I D vP w)
-    return some (.ind l (q I) (q D) v P' m' (q i) x', vApp g (vApp g vP i) (← evalIn ctx x'))
+    let m' ← check ctx m (indMethodTy g l v I D vP w prop)
+    return some (.ind l (q I) (q D) v P' m' (q i) x' prop, vApp g (vApp g vP i) (← evalIn ctx x'))
   | "out", #[x] =>
     let (x', xty) ← infer ctx x
     let .nu l I D i _ _ ← force xty | throwAt ctx.info s!"out expects a coinductive value, got {← showVal ctx xty}"
@@ -1817,7 +1864,7 @@ partial def elabAnon (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Elab
     | .sigma .. =>
       unless args.size ≥ 2 do throwAt ctx.info "an anonymous constructor of a pair has at least two components"
       checkTuple ctx args.toList expected
-    | .mu _ _ _ _ _ (some (T, _, _)) =>
+    | .mu _ _ _ _ _ (some (T, _, _)) _ =>
       let [c] := ctorNames g T
         | throwAt ctx.info s!"an anonymous constructor ⟨…⟩ needs a type with one constructor, and {T} has {(ctorNames g T).length}"
       check ctx (app (.node i "term.dotIdent" #[.atom i ".", .ident i c])) expected
@@ -2520,7 +2567,7 @@ partial def structPattern? (ctx : LocalCtx R) (vars : List Lvl) (clauses : List 
           pure (some (.node p.info "term.tuple" #[.atom {} "(", a, .atom {} ",",
             .node {} "null" (#[b] ++ sep.toArray), .atom {} ")"]))
         | _ => throwAt p.info "an anonymous constructor pattern on a pair has at least two components"
-    | .mu _ _ _ _ _ (some (T, _, _)) =>
+    | .mu _ _ _ _ _ (some (T, _, _)) _ =>
       let [c] := ctorNames g T
         | throwAt p0.info s!"an anonymous constructor pattern ⟨…⟩ needs a type with one constructor, and {T} has {(ctorNames g T).length}"
       some <$> rewrite fun p v => do
@@ -2594,7 +2641,7 @@ partial def compileMatch (ctx : LocalCtx R) (vars : List Lvl) (clauses : List (M
     let noCtor : Syntax := .node {} "term.dotIdent" #[.atom {} ".", .ident {} "✝none"]
     let mut firstErr : Option (ElabError R) := none
     for x in vars, k in [0:vars.length] do
-      if let .mu _ _ _ _ _ (some _) ← force (typeOf x) then
+      if let .mu _ _ _ _ _ (some _) _ ← force (typeOf x) then
         let pats := (List.range vars.length).map fun i => if i == k then noCtor else holeStx
         try
           return ← compileMatch ctx vars [{ pats, rhs := holeStx }] goal rc top
@@ -2727,7 +2774,7 @@ partial def compileMatch (ctx : LocalCtx R) (vars : List Lvl) (clauses : List (M
   let x := vars[k]!
   let rsAll := vars.drop (k + 1)
   let xty ← force (typeOf x)
-  let .mu _ _ _ ξi xsz (some (T, us, args)) := xty
+  let .mu _ _ _ ξi xsz (some (T, us, args)) _prop := xty
     | if let some (T, m) := g.opaqueHere? xty then
         throwAt (cl.pats[k]!).info (s!"cannot match on a value of type {← showVal ctx xty}: {T} is opaque " ++
           s!"outside module {m} (it has private constructors or fields)") "private"
@@ -2815,7 +2862,7 @@ partial def compileMatch (ctx : LocalCtx R) (vars : List Lvl) (clauses : List (M
     else
       if G.hasVar (ctx.lvl - x - 1) then
         throwAt (cl.pats[k]!).info "this match needs index unification whose goal depends on the scrutinee; not supported yet"
-      let .mu _ I _ _ _ _ := xty | unreachable!
+      let .mu _ I _ _ _ _ _ := xty | unreachable!
       -- the tuple ends like the scrutinee's index: `()`, or a phantom tail's value
       let tail := q ((List.range nΞ).foldl (fun v _ => vSnd v) ξi)
       let lhs : Term R := (List.range nΞ).foldr (fun k acc => .pair (.var (nΞ - k)) acc) (tail.lift (nΞ + 1))
@@ -2831,11 +2878,20 @@ partial def compileMatch (ctx : LocalCtx R) (vars : List Lvl) (clauses : List (M
   let elimName := T ++ (if linear then ".casesOn1" else if additive then ".casesOnA" else if sized then ".scasesOn" else if useRec then ".rec" else ".casesOn") ++
     (if nondep then "N" else "")
   let some ed := g.find? elimName | throwAt ctx.info s!"{elimName} is missing"
-  let elimHead : Term R := .const elimName (us ++ [v])
+  -- (issue #252) a non-singleton inductive proposition's eliminator has no motive level
+  -- parameter (its motive is a proposition). A match that wants another sort is the
+  -- large elimination the kernel forbids: say so here, at the pattern.
+  let hasV := ed.levelParams.length == us.length + 1
+  if !hasV && !v.isZero then
+    throwAt (cl.pats[k]!).info s!"large elimination from the inductive proposition {T}: \
+this type is not a singleton (it has more than one constructor, or a field that stores \
+data), so its eliminator can only target Prop"
+  let levels := if hasV then us ++ [v] else us
+  let elimHead : Term R := .const elimName levels
   let sizeArgs : List (Val R) := if sized then [xsz] else []
   let mut f : Term R := ((Δargs ++ sizeArgs).map q).foldl .app elimHead |>.app motive
   -- the eliminator's type, instantiated with the parameters (size) and the motive
-  let mut fty : VTy R := eval g [] (ed.type.instLevels ed.levelParams (us ++ [v]))
+  let mut fty : VTy R := eval g [] (ed.type.instLevels ed.levelParams levels)
   for a in Δargs ++ sizeArgs ++ [← evalIn ctx motive] do
     let .pi _ _ _ _ cod _ ← force fty | throwAt ctx.info "internal error: eliminator type"
     fty ← instM cod a
@@ -3073,7 +3129,7 @@ partial def compileMatch (ctx : LocalCtx R) (vars : List Lvl) (clauses : List (M
   for vξ in ξ do f := .app f (q vξ)
   f := .app f (varTm x)
   if !modeA then
-    let .mu _ I _ _ _ _ := xty | unreachable!
+    let .mu _ I _ _ _ _ _ := xty | unreachable!
     f := .app f (.refl (q I) (q ξi))
   for r in rs do f := .app f (varTm r)
   pure f
@@ -3140,6 +3196,161 @@ partial def ifMux? (ctx : LocalCtx R) (alts : Array Syntax) (c : Term R) (C expe
   let At := quote (← getGlobals) ctx.lvl expected
   return some (.app (.app (.app (.app (.app (.app (.const "Mux.mux" []) Ct) At) inst) c) t) e)
 
+/-- `r T` where `r` is a local with an instance `Hw r`: a signal. Returns `(r, T)`. -/
+partial def hdlSignal? (ctx : LocalCtx R) (ty : VTy R) : ElabM R (Option (Val R × Val R)) := do
+  let ty ← force ty
+  match ty with
+  | .neutral (.local l) sp =>
+    match sp with
+    | #[.app C] =>
+      let g ← getGlobals
+      let r := Val.var l
+      let some _ ← (try synthInstance ctx (vApp g (eval g [] (.const "Hw" [])) r) catch _ => pure none)
+        | return none
+      return some (r, C)
+    | _ => return none
+  | _ => return none
+
+/-- (HDL) `match x with | .c => … | _ => …` where `x : r T` is a signal: lower it to a
+case tree over the constructors of an enumeration `T` with `deriving BitPack` (`T.lit c`
+is the constructor's code), or of `Bool` (a `r HwTy.bit` signal).
+
+The scrutinee is shared once (`Hw.share`), each constructor pattern is the comparator
+`Hw.eq x (T.lit c)`, and the branches are a right-nested `Hw.mux` spine in constructor
+order (the last constructor, or the `_` default, is the final else). This is exactly the
+`if` chain on `T.lit`, so it has the same netlist and node count: no eliminator is used,
+and the `Hw` invariant is kept (no wire becomes a `Nat`).
+
+Rejected, with a spanned error: a non-exhaustive match on a multi-constructor signal, a
+constructor pattern that binds fields (a wire has no projection), a literal (`Nat` on
+`bits n`) pattern, and an `as`/tuple pattern. `match` on a `Nat` signal is out of scope;
+compare with `===` and `if` instead. -/
+partial def matchMux? (ctx : LocalCtx R) (stx : Syntax) (alts : Array Syntax) (scrut : Syntax)
+    (scrutTy expected : VTy R) : ElabM R (Option (Term R)) := do
+  let g ← getGlobals
+  let some (_, code) ← hdlSignal? ctx scrutTy | return none
+  unless g.contains "Hw.eq" && g.contains "Hw.mux" && g.contains "Hw.share" do return none
+  unless alts.size > 0 do return none
+  let atInfo := if stx.info.stop > 0 && !stx.info.synthetic then stx.info else ctx.info
+  let mut branches : List HdlBranch := []
+  for a in alts do
+    let ps := (a.getArg 1).args.filter (!· matches .atom ..)
+    let some p0 := ps[0]? | return none
+    let p ← expandPattern p0
+    let rhs := a.getArg 3
+    match patView g p with
+    | .ok (.ctor T c args) =>
+      unless args.isEmpty do
+        throwAt p.info s!"a match on a signal cannot bind the fields of the constructor .{c}: a wire has no projection (this is a case tree over `Hw.eq` and `Hw.mux`)"
+      branches := branches.concat { ctor := some c, ty := T, rhs, info := p.info }
+    | .ok .wild => branches := branches.concat { ctor := none, ty := none, rhs, info := p.info }
+    | .ok (.var n) =>
+      if n == "_" then branches := branches.concat { ctor := none, ty := none, rhs, info := p.info }
+      else throwAt p.info s!"a match on a signal cannot bind the whole wire (`{n}`): write `_` for the default branch"
+    | .ok (.lit _) | .ok (.plusK ..) =>
+      throwAt p.info "a match on a signal with literal patterns (`Nat` on `bits n`) is not supported yet: compare with `===` and `if`"
+    | .ok (.as n _) => throwAt p.info s!"an as-pattern (`{n}@…`) on a signal is not supported"
+    | .ok (.anon _) | .ok (.tuple ..) =>
+      throwAt p.info "a match on a signal takes constructor patterns (`.idle`) or `_`"
+    | .error e => throwAt p.info e
+  let ctorBranches := branches.filterMap fun b => b.ctor.map fun c => (c, b.rhs)
+  -- a match that is only `_`: no test, and nothing observes the signal
+  if ctorBranches.isEmpty then
+    match branches with
+    | [b] => return some (← check ctx b.rhs expected)
+    | _ => throwAt atInfo "a match on a signal needs at least one constructor pattern"
+  let tys ← zonkedTypes ctx
+  let hwTyVal := eval g [] (.const "HwTy" [])
+  let bitCode ← evalIn ctx (.app (.const "HwTy.bits" []) (.natLit 1))
+  let isBit := conv g tys hwTyVal (← force code) (← force bitCode)
+  let ctorNames' := ctorBranches.map (·.1)
+  -- `Bool` is the special two-constructor one-bit type: its bit is `Bool.toBits`, so
+  -- `.true` is `Hw.lit 1 1` and `.false` is `Hw.lit 1 0`
+  let boolLike := isBit && ctorNames'.all fun c => c == "true" || c == "false"
+  let explicitT := branches.findSome? (·.ty)
+  let codeEnum? := hdlCodeEnum? code
+  let candidates : List Name := match explicitT with
+    | some T => [T]
+    | none =>
+      match codeEnum? with
+      | some T => [T]
+      | none =>
+        match ctorBranches with
+        | (c, _) :: _ =>
+          (hdlEnumCandidates g c).filter fun T =>
+            ctorNames'.all fun c' => (ctorNames g T).any (ctorSelects c' ·)
+        | [] => []
+  let mut enums : List Name := []
+  for T in candidates do
+    unless g.contains (T ++ ".code") && g.contains (T ++ ".lit") do continue
+    let codeV ← evalIn ctx (.const (T ++ ".code") [])
+    if conv g tys hwTyVal (← force codeV) (← force code) then
+      unless enums.contains T do enums := enums ++ [T]
+  -- `Bool` is the canonical one-bit type: an unqualified `.true`/`.false` on a one-bit
+  -- signal is `Bool`, even when a user enumeration also has constructors with those
+  -- names (qualify it, `Toggle.true`, to select the enumeration). `Bool` has no
+  -- `BitPack` derivation, so it is not in `enums`.
+  let boolSignal := boolLike && codeEnum?.isNone && (explicitT.isNone || explicitT == some "Bool")
+  let (enumT, boolLike) ← if boolSignal then pure ("Bool", true)
+    else match enums with
+      | [T] => pure (T, false)
+      | [] =>
+        match explicitT with
+        | some T =>
+          throwAt atInfo s!"a match on a signal cannot use the constructors of {T}: its `.code` is not the signal's type, or it has no `.lit` (an enumeration with `deriving BitPack` has both)"
+        | none =>
+          match ctorBranches with
+          | (c, _) :: _ =>
+            throwAt atInfo s!"cannot lower this match on a signal: no enumeration with constructor .{c} and a `deriving BitPack` code matches the signal's type"
+          | [] => throwAt atInfo "internal error: empty constructor list in a signal match"
+      | _ =>
+        throwAt atInfo s!"ambiguous match on a signal: the constructors {", ".intercalate (ctorNames'.map (s!".{·}"))} belong to several enumerations with this code; qualify them (Phase.idle)"
+  let ctors := if boolLike then ["true", "false"] else ctorNames g enumT
+  for b in branches do
+    if let some c := b.ctor then
+      unless ctors.any (ctorSelects c ·) do
+        throwAt b.info s!"{enumT} has no constructor .{c} (its constructors: {", ".intercalate (ctors.map (s!".{·}"))})"
+  let allCovered := ctors.all fun c => ctorBranches.any fun (c', _) => ctorSelects c' c
+  let defaultRhs := (branches.find? fun b => b.ctor.isNone).map (·.rhs)
+  if !allCovered && defaultRhs.isNone then
+    let missing := ctors.filter fun c => !(ctorBranches.any fun (c', _) => ctorSelects c' c)
+    throwAt atInfo s!"this match on a signal is not exhaustive: no branch for {", ".intercalate (missing.map (s!".{·}"))} (add the missing constructors or a `_` branch)"
+  let litOf (c : Name) : Syntax :=
+    if boolLike then
+      -- (`Bool` is not a `BitPack` enumeration: its bit is `Bool.toBits`, `.true` = 1)
+      hdlApp atInfo (hdlIdent atInfo "Hw.lit") [hdlNum atInfo 1, hdlNum atInfo (if c == "true" then 1 else 0)]
+    else
+      hdlApp atInfo (hdlIdent atInfo (enumT ++ ".lit")) [hdlIdent atInfo (ctorConst enumT c)]
+  let x : Name := "s✝"
+  let test (c : Name) (rhs acc : Syntax) : Syntax :=
+    hdlApp atInfo (hdlIdent atInfo "Hw.mux")
+      [hdlApp atInfo (hdlIdent atInfo "Hw.eq") [hdlIdent atInfo x, litOf c], rhs, acc]
+  -- the single-constructor case observes nothing: no test, no share
+  if ctors.length ≤ 1 then do
+    let rhs := if allCovered then (ctorBranches.head!).2 else defaultRhs.get!
+    return some (← check ctx rhs expected)
+  -- (all constructors covered: the last constructor is the final else; otherwise the
+  -- default branch is. Either way the chain is right-nested, exactly the `if` chain.)
+  let body ← if allCovered then
+      let ordered := ctors.filterMap fun c =>
+        (ctorBranches.find? fun (c', _) => ctorSelects c' c).map fun (_, rhs) => (c, rhs)
+      match ordered.reverse with
+      | [] => throwAt atInfo "internal error: no branch for an exhaustive signal match"
+      | (_, lastRhs) :: revInit =>
+        let mut acc : Syntax := lastRhs
+        for (c, rhs) in revInit do acc := test c rhs acc
+        pure acc
+    else
+      let some d := defaultRhs | throwAt atInfo "internal error: no default branch"
+      -- the explicit constructors in declaration order, then the default as the else
+      let ordered := ctors.filterMap fun c =>
+        (ctorBranches.find? fun (c', _) => ctorSelects c' c).map fun (_, rhs) => (c, rhs)
+      let mut acc : Syntax := d
+      for (c, rhs) in ordered.reverse do acc := test c rhs acc
+      pure acc
+  let shareApp := hdlApp atInfo (hdlIdent atInfo "Hw.share") [scrut, hdlFun atInfo x body]
+  return some (← check ctx shareApp expected)
+
 /-- Elaborate `match e₁, …, eₙ with | p₁, …, pₙ => rhs …` against `expected`. -/
 partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : ElabM R (Term R) := do
   let g ← getGlobals
@@ -3162,10 +3373,12 @@ partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Ela
     -- (H14 S2) a signal as the condition of `if`: a multiplexer
     if scruts.size == 1 then
       if let some m ← ifMux? ctx alts t ty expected then return m
+      -- (H14 S4) `match` on a signal: a case tree over `Hw.eq` and `Hw.mux`
+      if let some m ← matchMux? ctx stx alts s ty expected then return m
     -- (only a data type with `T.casesOn1`, at size ∞: anything else would bind the
     -- scrutinee at 1 and then take it apart at ω)
     let hasCases1 := match ← force ty with
-      | .mu _ _ _ _ .szInf (some (T, _, _)) => (g.find? (T ++ ".casesOn1")).isSome
+      | .mu _ _ _ _ .szInf (some (T, _, _)) _ => (g.find? (T ++ ".casesOn1")).isSome
       | _ => false
     linearScruts := linearScruts.push (hasCases1 && ctx.linearLvls.any fun l => t.hasVar (ctx.lvl - l - 1))
     -- an inaccessible name, so the user's own `x` isn't shadowed
@@ -3412,7 +3625,7 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
     let q := quote g ctx.lvl
     let qh (h : Option (Name × List Level × List (Val R))) := h.map fun (n, us, as) => (n, us, as.map q)
     match ← force (← evalIn ctx T) with
-    | .mu l I D i _ h => return (.mu l (q I) (q D) (q i) s (qh h), ty)
+    | .mu l I D i _ h prop => return (.mu l (q I) (q D) (q i) s (qh h) prop, ty)
     | .nu l I D i _ h => return (.nu l (q I) (q D) (q i) s (qh h), ty)
     | v => throwAt ctx.info s!"only inductive and coinductive types have sizes, not {← showVal ctx v}"
   | "term.field" =>
@@ -3493,7 +3706,7 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
     | some N =>
       let ty := eval (← getGlobals) ctx.env (.const N [])
       -- (`check` comes back here unless the type is the data type `N`: don't loop)
-      unless (← force ty) matches .mu _ _ _ _ _ (some _) do
+      unless (← force ty) matches .mu _ _ _ _ _ (some _) _ do
         throwAt ctx.info s!"numerals need `builtin nat :=` a data type, and {N} is not one"
       return (← check ctx stx ty, ty)
     | none => throwAt ctx.info "numerals need `builtin nat := …` or a type ascription"
