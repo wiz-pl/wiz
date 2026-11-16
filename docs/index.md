@@ -102,6 +102,9 @@ line below.
   `result/semantics-matrix.md` and `.html`
 * [Stage 29: native data structures](stages/29-natives.md): word arrays, word maps, interned strings
 * [Libraries](libraries.md)
+* [Reference manual](https://wiz-pl.github.io/wiz/docs/reference.html): every
+  standard-library declaration with its full signature, doc comment and class instances,
+  and the notation table (generated, not committed: `nix build .#reference`)
 
 ### Verification
 

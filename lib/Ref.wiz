@@ -4,7 +4,7 @@ import IO
 # Ref
 
 Mutable cells owned by linear points-to tokens (`import Ref`; plan CS7b/S4, cohesion
-step M5, /workspace/wiz-notes/cohesion-resources.md; docs/resources.md).
+step M5, wiz-notes/cohesion-resources.md; docs/resources.md).
 
 A location `l : Loc V` is an ordinary (ω) value: it can be copied, stored in data, and
 sent anywhere. Owning the cell is a separate value, the token `Pts l v`: "`l` holds
