@@ -305,6 +305,11 @@ structure ElabState (R : Type) where
   /-- (28) axioms a tactic added: already in `globals`, and added to the
   command's globals before the definition that uses them -/
   sideDecls : Array (Decl R) := #[]
+  /-- set while a `let`'s body is elaborated again with the value bound, after the
+  attempt with the variable opaque failed (`elabLet`): the `let`s inside it bind their
+  values at once, so a failure deep in a chain of `let`s is retried once per level, not
+  at every level of every retry -/
+  eagerLets : Bool := false
 
 structure ElabError (R : Type) where
   info : SourceInfo

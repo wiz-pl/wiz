@@ -2006,7 +2006,31 @@ partial def autoShare? (ctx : LocalCtx R) (A B : VTy R) : ElabM R (Option (Term 
   let some inst ← (try synthInstance ctx goalTy catch _ => pure none) | return none
   return some (.app (.app (.app (.const "ShareLet.share" []) At) Bt) inst)
 
-/-- `let` in either mode. -/
+/-- (elab-lazy-let) Does evaluating `t` cost no more than building its value? A variable, a
+constant (glued), a binder or a literal does; an application or an eliminator may run
+the program (an eliminator forces its scrutinee, a `Nat` operation its arguments). -/
+def Term.evalIsCheap : Term R → Bool
+  | .var _ | .const .. | .sort _ | .pi .. | .lam .. | .sigma .. | .unit _ | .tt | .empty _
+  | .qty | .qlit _ | .mvar _ | .natLit _ => true
+  | .ann t _ | .fst t | .snd t => t.evalIsCheap
+  | .pair a b => a.evalIsCheap && b.evalIsCheap
+  | _ => false
+
+/-- `let` in either mode.
+
+(elab-lazy-let) The value of a `let` is a term the program computes when it runs, and the
+evaluator is strict: binding it evaluated it, so `let x := match <closed> with …` (or
+`let ok := Nat.beq <closed> 5`: a `Nat` operation forces its arguments) ran the program
+while checking it. So, unless evaluating the value is cheap or the value is a type, a
+function or a proof, the body is elaborated first with `x` **opaque** (bound, as a
+`fun`'s parameter): what elaborates there is well-typed for every value of `x`, so for
+this one too, and the value is evaluated only if the body's type mentions `x` (as
+`instArgM`). If that attempt fails (the body needed the value: `Vec n` against `Vec 3`),
+or leaves an instance problem or a hole in its type that mentions `x` (solved later, when
+the `let` is gone), the body is elaborated again with `x` bound to its value, as before.
+Not a variable-headed glued value (the self-hosted frontend's `Cx.defineL`): a type that
+leaves the `let`'s scope (`infer`) could carry it out, naming a variable that is no
+longer there (wiz-notes/kernel-lazy-let.md, "Rejected"). -/
 partial def elabLet (ctx : LocalCtx R) (stx : Syntax) (expected : Option (VTy R)) :
     ElabM R (Term R × VTy R) := do
   let x := ((stx.getArg 2).getId?).getD "_"
@@ -2018,33 +2042,71 @@ partial def elabLet (ctx : LocalCtx R) (stx : Syntax) (expected : Option (VTy R)
     | none =>
       let (val, vty) ← infer ctx (stx.getArg 5)
       pure (quote (← getGlobals) ctx.lvl vty, val)
+  let vTy ← evalIn ctx ty
+  recordBinder ctx (stx.getArg 2).info x vTy
+  let body := stx.getArg 7
+  -- auto-share (HDL stage S0): with no explicit quantity, a `let` whose value type `A`
+  -- and body type `B` have an instance `ShareLet A B` becomes `ShareLet.share v (fun x
+  -- => body)`; the body sees `x` as a variable, not a definition.
+  if let some e := expected then
+    if (stx.getArg 1).args.isEmpty then
+      if let some share ← autoShare? ctx vTy e then
+        let b ← check (ctx.bind x vTy) body e
+        return (.app (.app share val) (.lam x b), e)
+  let g ← getGlobals
   -- (P2) a `let`-bound proof is bound suspended, as the kernel binds it: the elaborator
   -- does not run it either (a proof need not have a normal form, and a short one can
   -- take a tower of exponentials of steps)
-  let vTy ← evalIn ctx ty
-  recordBinder ctx (stx.getArg 2).info x vTy
-  let g ← getGlobals
-  let vVal ← if g.lazyProofs && isProp g ctx.types.reverse.toArray vTy then pure (suspend g ctx.env val)
-    else evalIn ctx val
-  let ctx' := ctx.define x vTy vVal
+  let proof := g.lazyProofs && isProp g ctx.types.reverse.toArray vTy
   -- (21v) a linear `let` makes later `match`es additive (`LocalCtx.linearLvls`)
-  let ctx' := match q with
-    | .qlit r => if r != 0 && QRig.many? != some r then { ctx' with linearLvls := ctx.lvl :: ctx'.linearLvls } else ctx'
-    | _ => ctx'
-  let body := stx.getArg 7
-  match expected with
-  | some e =>
-    -- auto-share (HDL stage S0): with no explicit quantity, a `let` whose value type `A`
-    -- and body type `B` have an instance `ShareLet A B` becomes `ShareLet.share v (fun x
-    -- => body)`; the body sees `x` as a variable, not a definition.
-    if (stx.getArg 1).args.isEmpty then
-      if let some share ← autoShare? ctx (← evalIn ctx ty) e then
-        let b ← check (ctx.bind x (← evalIn ctx ty)) body e
-        return (.app (.app share val) (.lam x b), e)
-    return (.letE x q ty val (← check ctx' body e), e)
-  | none =>
-    let (b, bty) ← infer ctx' body
-    return (.letE x q ty val b, bty)
+  let linear (c : LocalCtx R) : LocalCtx R := match q with
+    | .qlit r => if r != 0 && QRig.many? != some r then { c with linearLvls := ctx.lvl :: c.linearLvls } else c
+    | _ => c
+  let eager : ElabM R (Term R × VTy R) := do
+    let vVal ← if proof then pure (suspend g ctx.env val) else evalIn ctx val
+    let ctx' := linear (ctx.define x vTy vVal)
+    match expected with
+    | some e => return (.letE x q ty val (← check ctx' body e), e)
+    | none =>
+      let (b, bty) ← infer ctx' body
+      return (.letE x q ty val b, bty)
+  let lazyOk ← do
+    if proof || val.evalIsCheap || (← get).eagerLets then pure false else
+    -- a type or a function costs nothing to evaluate, and a type is what the body is
+    -- most likely to need the value of (`let T := Nat`)
+    match ← force vTy with
+    | .sort _ | .pi .. | .qty => pure false
+    | .neutral (.mvar _) _ => pure false
+    | _ => pure true
+  unless lazyOk do return ← eager
+  let retry : ElabM R Unit := throwAt ctx.info "internal: a lazy `let` needs its value"
+  let lazy : ElabM R (Term R × VTy R) := do
+    let inst0 := (← get).nextInst
+    let ctx' := linear (ctx.bind x vTy)
+    let (b, bty) ← match expected with
+      | some e => pure (← check ctx' body e, e)
+      | none => infer ctx' body
+    let g ← getGlobals
+    -- an instance problem left for later that mentions `x`: it would be solved with `x`
+    -- opaque, after the `let` (no retry then)
+    for (i, p) in (← get).pendingInsts do
+      if i ≥ inst0 && p.ctx.lvl > ctx.lvl &&
+          (quote g p.ctx.lvl p.ty).hasVar (p.ctx.lvl - ctx.lvl - 1) then retry
+    match expected with
+    | some e => return (.letE x q ty val b, e)
+    | none =>
+      -- the body's type, out of the `let`'s scope: `x` is its value, evaluated only if
+      -- the type mentions it
+      let btyT := quote g (ctx.lvl + 1) bty
+      if btyT.hasVar 0 && !btyT.mvars.isEmpty then retry
+      return (.letE x q ty val b, ← instArgM ctx (.mk ctx.env btyT) val)
+  try lazy
+  catch _ =>
+    -- (the state is the one before the attempt)
+    modify fun s => { s with eagerLets := true }
+    let r ← eager
+    modify fun s => { s with eagerLets := false }
+    return r
 
 /-- A Π telescope `b₁ → … → bₙ → body` (used by `depArrow` and `∀`). -/
 partial def elabPis (ctx : LocalCtx R) (bs : List BinderView) (body : Syntax) :

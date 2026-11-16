@@ -528,6 +528,37 @@ def recordEqEta : String :=
   "def tSlow (xs : Trace (Bool × Bits8)) (t : Nat) :\n" ++
   "    Mealy.stateAt spec s0 xs (Nat.succ t) = (spec (Mealy.stateAt spec s0 xs t) (xs t)).1 := rfl\n"
 
+/-- (elab-lazy-let) `fib k n` doubles `n` `k` times by recursion (2^k calls). -/
+def lazyLetFib : String := "import Prelude\n" ++
+  "def fib : Nat → Nat → Nat\n  | .zero, n => n\n  | .succ k, n => Nat.add (fib k n) (fib k n)\n"
+
+/-- `let`s whose values are 2^30 steps away, never needed for typing. -/
+def lazyLetSrc : String := lazyLetFib ++
+  "#check (let x := match Nat.beq (fib 30 1) 0 with\n  | .true => \"z\"\n  | .false => \"nz\"\n  x)\n" ++
+  "def big : Nat := fib 30 1\n" ++
+  "#check (let ok := Nat.beq big 5; \"a\")\n" ++
+  "#check (let ok : Bool := Nat.beq big 5; \"a\")\n" ++
+  "#check (let n := Nat.add big 5; \"a\")\n"
+
+/-- The body needs the value (`rfl`, `Vec n` against `Vec 2`, a chain of `let`s), its type
+mentions it (`#check`), or the `let` binds a type or a function (bound at once). -/
+def lazyLetSemSrc : String := "import Vec\n" ++
+  "def needs : Vec Nat 2 := let n := Nat.add 1 1; (Vec.replicate n 0 : Vec Nat 2)\n" ++
+  "def needsRfl : Nat.add 1 1 = 2 := let n := Nat.add 1 1; (rfl : n = 2)\n" ++
+  "#check (let n := Nat.add 1 1; Vec.replicate n 0)\n" ++
+  "def nested : Vec Nat 3 := let a := Nat.add 1 1; let b := Nat.add a 1; Vec.replicate b 0\n" ++
+  "def tyLet : Nat := let T := Nat; let f := fun (x : T) => x; f 3\n" ++
+  "def deep : Vec Nat 2 :=\n" ++
+  "  let a := Nat.add 0 0; let b := Nat.add a 0; let c := Nat.add b 0; let d := Nat.add c 0\n" ++
+  "  let n := Nat.add 1 1; Vec.replicate n d\n" ++
+  "def inst : Nat := let n := Nat.add 1 1; n + 1\n"
+
+/-- A body that fails with every `let` bound: the error is the eager one. -/
+def lazyLetErrSrc : String := "import Vec\n" ++
+  "def bad : Vec Nat 3 :=\n" ++
+  "  let a := Nat.add 1 1; let b := Nat.add a 0; let c := Nat.add b 0; let d := Nat.add c 0\n" ++
+  "  Vec.replicate d 0\n"
+
 def group : Group where
   name := "scaling"
   exercise := "super-linear time and memory"
@@ -791,7 +822,19 @@ def group : Group where
         let loader ← Tests.Elab.preludeLoader
         let st := runFrontend (R := ZeroOneMany)
           "import Prelude\ndef w (h : Nat → Nat × Nat) (k : Nat × Nat → Type) (x : k (h 0)) : k (h 1) := x\n" { loader }
-        check (st.messages.any (·.severity == .error)) "two different stuck pairs were taken as equal" }]
+        check (st.messages.any (·.severity == .error)) "two different stuck pairs were taken as equal" },
+    -- (elab-lazy-let) the elaborator bound a `let`'s value by evaluating it, so
+    -- `let x := match <closed> with …` ran the match's scrutinee while elaborating, and
+    -- `let ok := Nat.beq big 5` ran `big` (a builtin `Nat` operation forces its arguments:
+    -- wiz-rv FINDINGS L8). `fib 30 1` is 2^30 calls. `#check` runs the elaborator alone:
+    -- as `def`s these still take the kernel's time, whose `let` is still eager
+    -- (wiz-notes/kernel-lazy-let.md).
+    { name := "elaborating a `let` does not run its value (closed match on fib 30, L8's closed Bool)", run := fun _ =>
+        checksLibsWithin 60 lazyLetSrc },
+    { name := "a lazy `let` still gives the body its value when typing needs it", run := fun _ =>
+        Tests.Elab.okLibs lazyLetSemSrc ["let n : Nat := Nat.add 1 1; Vec.replicate Nat n 0 : Vec Nat 2"] },
+    { name := "a lazy `let` whose body fails reports the error it reported before", run := fun _ =>
+        Tests.Elab.failsLibs lazyLetErrSrc "inferred: Vec ?m0 2" }]
 
 
 /-! ### A probe (`tests --probe-checker [unbox] [rc]`): where building the self-hosted checker spends
