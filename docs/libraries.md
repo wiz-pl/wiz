@@ -881,7 +881,8 @@ parameters and no memory map:
   two cycles after the request (golem's `GBus.ramStep` latency). `shift` selects the word
   index inside `addr`: 0 for a word-addressed bus, 2 for a 32-bit byte-addressed one.
   `Bus.ramWC shift aw ab dw` is the same RAM on `Bus.ReqW`: a write is a read-modify-write
-  of the enabled bytes.
+  of the enabled bytes. The RAM is `Hdl.Mem`'s (`Mem.ramC2`/`Mem.ramWC2`, `H14 C5`): the
+  bus wrappers add its record shape and `err` (low), so there is one RAM model, not two.
 
 `lib/Hdl/BusLaw.wiz` (`import Hdl.BusLaw`) states the protocol laws over value traces:
 `Stable`/`ValidStable`/`PayloadStable`/`AddressStable` (the source holds `valid` and the

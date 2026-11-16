@@ -1,4 +1,5 @@
 import Hdl.Core
+import Hdl.Mem
 import Vec
 /-!
 # Hdl.Bus
@@ -37,9 +38,11 @@ The parts:
   (golem's `GBus.route`, without golem's memory map);
 * `Bus.ramC shift aw ab dw`: a behavioural RAM with `2^ab` words of `dw` bits, a
   `shift`-bit word offset inside `addr` (0 for a word-addressed bus, 2 for a 32-bit
-  byte-addressed one) and a two-cycle answer;
+  byte-addressed one) and a two-cycle answer; it is `Hdl.Mem`'s two-cycle RAM
+  (`Mem.ramC2`) with the bus's request/response records and `err` low, so `Hdl.Mem` is
+  the library's one memory model;
 * `Bus.ramWC shift aw ab dw`: the same RAM with byte enables (`Bus.ReqW`), a
-  read-modify-write on the addressed word.
+  read-modify-write on the addressed word (`Mem.ramWC2`);
 
 All parts are plain `Circuit`s or step functions over bundles, polymorphic in the
 representation, so the same definitions simulate at values, simulate as a netlist and
@@ -102,21 +105,11 @@ def Bus.ReqW.ofReq {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (q : Bus.Req aw d
   Bus.ReqW.mk q.valid q.we q.addr q.wdata
     (Hw.lit (Nat.div dw 8) (Nat.sub (Nat.pow 2 (Nat.div dw 8)) 1))
 
-/-- The byte mask of a strobe: bit `8 * k` through `8 * k + 7` are set when strobe bit
-`k` is. Built with slices, a byte-wide `mux` and a constant shift, so it is in the same
-synthesisable subset as the rest of `Hdl.Bus` (no loops over widths at run time). -/
-def Bus.byteMaskAux {r : HwTy → Type} [Hw r] (dw nb : Nat) : (fuel i : Nat) → r (HwTy.bits nb) → r (HwTy.bits dw)
-  | .zero, _, _ => Hw.lit dw 0
-  | .succ fuel, i, strb =>
-    let bit := Hw.slice i 1 strb;
-    let byte := Hw.mux bit (Hw.lit dw 255) (Hw.lit dw 0);
-    let shifted := Hw.shlBy byte (Hw.lit dw (8 * i));
-    Hw.or shifted (Bus.byteMaskAux dw nb fuel (Nat.succ i) strb)
-
 /-- `Bus.byteMask dw nb strb`: a `dw`-bit mask from `nb` byte strobes (`nb = dw / 8`
-for a bus). -/
+for a bus). This is `Hdl.Mem`'s mask (`Mem.byteMask`), the one byte-enable construction
+in the HDL library; the masking law and its closed cases live with it. -/
 def Bus.byteMask {r : HwTy → Type} [Hw r] {ω dw nb : Nat} (strb : r (HwTy.bits nb)) : r (HwTy.bits dw) :=
-  Bus.byteMaskAux dw nb nb 0 strb
+  Mem.byteMask (r := r) (dw := dw) (nb := nb) strb
 
 /-- A response that is not answering anything. -/
 def Bus.noResp {r : HwTy → Type} [Hw r] {ω dw : Nat} : Bus.Resp dw r :=
@@ -496,8 +489,14 @@ def Bus.routeC (aw dw base size : Nat) : Circuit (Bus.RouteIn.code aw dw) (Bus.R
 -- this cycle's write; `ready`/`rvalid` are high in the answering cycle. `dw` should be a
 -- whole number of bytes for a byte-addressed bus. This word-level model has no strobes;
 -- `Bus.ramWC` is the same RAM on `Bus.ReqW`.
+--
+-- The RAM itself is `Hdl.Mem`'s: `Bus.ramStep`/`Bus.ramWStep` adapt `Mem.ramStep2`/
+-- `Mem.ramWStep2` to the bus's request/response records (adding `err = 0`), so there is
+-- one RAM model in the library, with one set of memory laws (`Hdl.Mem`), and the bus
+-- only chooses the record shape and the `shift`/`err` convention.
 
-/-- The RAM's state: the cells and the number of cycles since the request. -/
+/-- The RAM's state: the cells and the number of cycles since the request. It is
+`Mem.Ram`'s shape (`cells`, `wait`), kept as a bus name for the `Bus` API. -/
 structure Bus.Ram (ab dw : Nat) (r : HwTy → Type) where
   cells : r (HwTy.mem ab dw)
   wait : r (HwTy.bits 2)
@@ -509,18 +508,17 @@ def Bus.ramInit (ab dw : Nat) : Bus.Ram ab dw HwTy.El :=
 
 /-- One cycle of the RAM: after two cycles of `valid` the request is answered; a write
 is applied then, a read returns the old word. The request must be held until the answer
-(the usual valid/ready rule). -/
+(the usual valid/ready rule). `Bus.Ram`/`Bus.Req` and `Mem.Ram`/`Mem.Req` are the same
+structures (the same fields), so the state and request pass to `Mem.ramStep2`; the
+response gets the bus's `err` bit, low. -/
 def Bus.ramStep {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
     (s : Bus.Ram ab dw r) (q : Bus.Req aw dw r) :
     r (HwTy.prod (Bus.Ram.code ab dw) (Bus.Resp.code dw)) :=
-  let go := Hw.and q.valid (Bus.isK s.wait 2);
-  let ix : r (HwTy.bits ab) := Hw.slice shift ab q.addr;
-  let old := Hw.memRead s.cells ix;
-  Hw.pair
-    (Bus.Ram.pack ab dw (Bus.Ram.mk
-      (Hw.memWrite s.cells (Hw.and go q.we) ix q.wdata)
-      (Hw.mux q.valid (Hw.mux go (Hw.lit 2 0) (Hw.add s.wait (Hw.lit 2 1))) (Hw.lit 2 0))))
-    (Bus.Resp.pack dw (Bus.Resp.mk go (Hw.and go (Hw.not q.we)) old (Hw.lit 1 0)))
+  let o := Mem.ramStep2 shift ab dw s q;
+  let st := Mem.Ram.unpack ab dw (Hw.fst o);
+  let rs := Mem.Resp.unpack dw (Hw.snd o);
+  Hw.pair (Bus.Ram.pack ab dw (Bus.Ram.mk st.cells st.wait))
+    (Bus.Resp.pack dw (Bus.Resp.mk rs.ready rs.rvalid rs.rdata (Hw.lit 1 0)))
 
 /-- The RAM as a circuit: input `req`, output `resp`. -/
 def Bus.ramC (shift aw ab dw : Nat) : Circuit (Bus.Req.code aw dw) (Bus.Resp.code dw) :=
@@ -529,20 +527,16 @@ def Bus.ramC (shift aw ab dw : Nat) : Circuit (Bus.Req.code aw dw) (Bus.Resp.cod
 
 /-- One cycle of the byte-enabled RAM. It is `Bus.ramStep` with a write mask: the word
 written is `wdata` in the enabled bytes and the old word in the others. Reads answer with
-the old word (the store lands at the clock edge, after this cycle's read). -/
+the old word (the store lands at the clock edge, after this cycle's read). It adapts
+`Mem.ramWStep2`, the one byte-enabled RAM model. -/
 def Bus.ramWStep {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
     (s : Bus.Ram ab dw r) (q : Bus.ReqW aw dw r) :
     r (HwTy.prod (Bus.Ram.code ab dw) (Bus.Resp.code dw)) :=
-  let go := Hw.and q.valid (Bus.isK s.wait 2);
-  let ix : r (HwTy.bits ab) := Hw.slice shift ab q.addr;
-  let old := Hw.memRead s.cells ix;
-  let mask := Bus.byteMask (dw := dw) (nb := Nat.div dw 8) q.wstrb;
-  let merged := Hw.or (Hw.and old (Hw.not mask)) (Hw.and q.wdata mask);
-  Hw.pair
-    (Bus.Ram.pack ab dw (Bus.Ram.mk
-      (Hw.memWrite s.cells (Hw.and go q.we) ix merged)
-      (Hw.mux q.valid (Hw.mux go (Hw.lit 2 0) (Hw.add s.wait (Hw.lit 2 1))) (Hw.lit 2 0))))
-    (Bus.Resp.pack dw (Bus.Resp.mk go (Hw.and go (Hw.not q.we)) old (Hw.lit 1 0)))
+  let o := Mem.ramWStep2 shift ab dw s q;
+  let st := Mem.Ram.unpack ab dw (Hw.fst o);
+  let rs := Mem.Resp.unpack dw (Hw.snd o);
+  Hw.pair (Bus.Ram.pack ab dw (Bus.Ram.mk st.cells st.wait))
+    (Bus.Resp.pack dw (Bus.Resp.mk rs.ready rs.rvalid rs.rdata (Hw.lit 1 0)))
 
 /-- The byte-enabled RAM as a circuit. -/
 def Bus.ramWC (shift aw ab dw : Nat) : Circuit (Bus.ReqW.code aw dw) (Bus.Resp.code dw) :=

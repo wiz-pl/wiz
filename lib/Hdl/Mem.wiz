@@ -29,6 +29,10 @@ instead of re-deriving them per instruction or per RAM:
   `Circuit`s over bundles, so they simulate at values and synthesise like any other
   circuit; `ramC2` has the same state and timing as `Bus.ramC`/`Bus.ramWC` (the one-cycle
   RAM takes `we` as its write enable; the two-cycle RAM gates the write with `valid`).
+  `Bus.ramC`/`Bus.ramWC` are adapters over `Mem.ramC2`/`Mem.ramWC2` (they add the bus's
+  `err` bit, low), so these circuits are the library's one RAM implementation; the
+  request and response records are shared by structure (`Mem.Req` and `Bus.Req` have the
+  same fields).
 
 The word and byte laws are proved; the byte-enable *mask* is a wiring function whose
 32-bit closed cases are proved and whose strobe patterns are checked exhaustively in
