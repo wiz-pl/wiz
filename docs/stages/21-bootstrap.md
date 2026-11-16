@@ -1083,3 +1083,46 @@ written ones), so the exact `unfold List.filter` steps of `lib/ListLemmas` are n
 guaranteed to match the host. The error position is the failed command, as for the rest
 of the self-hosted diagnostics (D6), and the host's multi-line expected/inferred blocks
 are not reproduced.
+
+## 21af: the real Prelude, opt-in (`--prelude-from-roots`)
+
+`import Prelude` in the self-hosted frontend has meant the embedded `preludeText` (21y).
+With `--prelude-from-roots` (the checker, and every driver command: `check`, `build`,
+`run`, and the no-command mode) the names `Prelude`, `IO`, `Std` and `Sys` are resolved
+through the `-I` roots like any other module, so `-I lib` loads `lib/Prelude.wiz`, as
+the host does. A name the roots do not have falls back to the embedded prelude:
+`Prelude` is `preludeText`, and `IO`/`Std`/`Sys` are modules whose only command is
+`import Prelude`, so a program that imports all four still loads one prelude, once. The
+embedded prelude keeps its special case (the `do` grammar, no output); a prelude read
+from a root is an ordinary module.
+
+Without the flag nothing changes, and the bootstrap (which never passes it) compiles the
+same compiler. The default stays the embedded prelude until `lib/Prelude.wiz` checks
+without errors here; the Backend also does not yet know `lib/`'s externs and builtins,
+so `build` on the real Prelude is for checking the loader, not for running programs.
+
+`lib/Prelude.wiz` uses three registrations the frontend now checks and records:
+
+- `builtin KEY := C`, with the host's checks: a known key, each key and each constant
+  registered once, `C` declared, and the operation's shape (an inductive type for
+  `nat`/`string`/`int`; for the operations, a definition over the registered `nat`
+  type, `nat.zero`/`nat.succ` its constructors). This kernel never computes with a
+  registration (numerals stay `Nat.zero`/`Nat.succ` terms), so a registration assumes
+  nothing here and adds nothing to the trusted base.
+- `attribute [default_instance p] i` (p 1000 by default; `i` must be an instance). A
+  class problem stuck on an unknown argument waits when its class has default
+  instances; when only waiting problems are left, the first gets its class's defaults,
+  highest priority first (as the host's `applyDefaultInstance`), and then resolution
+  goes on. A class without default instances is stuck at once, as before. This is what
+  `a + b` at `Nat` needs with the real Prelude (`HAdd ?A ?B ?C` takes `instHAdd`).
+- `attribute [binop] C.f` is checked (`C.f` is a class method) and recorded. Numerals
+  are `Nat` terms here (equivalent to the default `instOfNatNat`), so it does not change
+  elaboration yet.
+
+**Not done.** Numerals at another type (`OfNat`), `outParam` and binop numeral
+unification. `lib/Prelude.wiz` itself still has errors here under the flag, from three
+gaps in inductive and structure elaboration: a constructor field of function type
+returning the type being defined (`| fresh (k : Nat → T)`, which `Tac` and so every
+tactic declaration needs), `×` in a constructor field (`SatAnswer`), and a structure or
+class whose fields live in `Type 1` (`class Monad`). Turning the flag into the default
+depends on those.
