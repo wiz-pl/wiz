@@ -255,3 +255,60 @@ output is byte-identical on all 105 C fixtures, and `scry project` (with and wit
 Note: after lowering, the summary stage of `ts_lex` still takes minutes on master; that
 is the per-function analysis that `agent/scry-scale` `eeb1b172` linearised and that had
 not landed.
+
+## Restack measurements (2026-11-16, `agent/scry-linearise`)
+
+`eeb1b172` restacked onto master (after #376) and stacked on the span-index fix above.
+Light-slot wall clock, `scry taint FILE --json --allow-errors`, whole pipeline;
+**informational**, not a `perf-run` measurement. "master" is `d23473da`.
+
+| input | master | linearise only | linearise + span index | peak (stacked) |
+|---|---:|---:|---:|---:|
+| `tree-sitter/lib/src/parser.c` (17 163 nodes) | 69.4 s | 2.47 s | 0.27 s | 73 MiB |
+| `tree-sitter/lib/src/query.c` (34 450 nodes) | 19.2 s | 7.31 s | 0.34 s | 88 MiB |
+| ladder `ts_lex` 40 cases | > 180 s (killed in summaries) | | 0.18 s | 58 MiB |
+| ladder `ts_lex` 324 cases | | | 2.95 s | 614 MiB |
+| generated `tree-sitter-c/src/parser.c` | not measurable under light | | 6.70 s | 1.16 GiB |
+
+The original claim (runtime `parser.c` 25.2 s → 0.12–0.23 s) holds in shape: 69.4 s →
+0.27 s on today's master, which has grown more per-node work since. Without the span
+index the restacked analysis alone gets the runtime `parser.c` to 2.5 s; the rest was
+lowering. Stage profile of the generated grammar (stacked): parse 0.9 s, lower 1.6 s,
+points-to 0.5 s, **plans 2.9 s** (the next hot spot: preparing `ts_lex`'s plan), summaries
+and origins < 0.1 s.
+
+Restacked onto `ba1834a7`, #438's bounds rules read `rd`/`dom` from the plan's
+`Scry.FnInfo`, which the linearised engine builds flow-only (both empty), so they found
+nothing (`tests/oob.wiz` failed). `Scry.boundsReaching` now answers reaching definitions
+from the def-use index (every query is at a use), and `Scry.boundsOfFunc` computes a
+function's dominators only when it has a candidate finding (guards only remove findings).
+
+Output changes against the base (`agent/scry-scale-lower` `ba1834a7`: master `5522efd4`
+with #438 and the span index; 114 C fixtures under each of the default, `oob` and `uaf`
+rule packs, JSON/SARIF/origin map/stderr): origin maps and stderr are identical
+everywhere; findings, boundary and memory lists are identical everywhere except one
+witness: under the `uaf` pack, `tests/fixtures/uaf-loop.c`'s single use-after-free
+(same rule, point, location, free and sink) names the loop-entry `malloc` (point 0) as its
+`alloc` node instead of the in-loop one (point 10). Both allocations reach the free; the
+witness is the first location of `p`'s points-to set, whose order follows the order the
+solver discovers locations in (source order now). That is also the only SARIF change. The JSON differs only in `budget`: `pointsToRounds` drops on 71
+files (3 → 2 on 31, 4 → 2 on 29, 4 → 3 on 7, 5 → 2 on 2, 6 → 3, 7 → 4: the source-order
+Gauss–Seidel solver needs fewer rounds) and rises on none, and `summaryRounds` rises on
+two project files (`math.c`, `taint/io.c`: 2 → 3). (The first restack also raised
+`pointsToRounds` 1 → 2 on pointer-free units: the hash-map state compared key counts, so
+the empty entries the first round inserts counted as a change. `Scry.locMapEq` and
+`Scry.memMapEq` now read a missing key as the empty set, as master's list state did.)
+For `math.c` and `io.c` the extra summary round is real: both have a `static helper`
+(`return x + 1`) called from an exported function with its tainted parameter; the
+restacked analysis records that `helper` then returns a tainted value (round 2 adds it,
+round 3 confirms), which the base's summaries never record. No finding depends on it in
+the corpus.
+
+Generated grammar on the stack (light probe, informational): 6.1 s, 1.19 GiB peak
+(points-to 0.5 s, plans 2.7 s, summaries < 0.1 s); `agent/scry-scale-lower` alone spends
+24.5 s in points-to and is still in `ts_lex`'s summaries after 270 s, so the scale test
+belongs on this branch. `tests/scale.expected` was stale on master since #376 (it still
+said 12 boundary and 2 memory warnings, 2 points-to rounds); the CLI on this branch reports
+8 063, 36 and 3 (the lowering's 8 062 boundary warnings already appear on
+`agent/scry-scale-lower` and on `a0938b97`), and the expected line says so; the pending
+heavy `grail test scale` run confirms it.
