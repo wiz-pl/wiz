@@ -2,14 +2,16 @@
 
 The generated [API index](https://wiz-pl.github.io/wiz/docs/api.html) lists every library
 module and declaration, with signatures and doc summaries, and searches names, doc
-comments and signatures. The [reference manual](reference/index.md) is the library as one
+comments and signatures. The
+[reference manual](https://wiz-pl.github.io/wiz/docs/reference.html) is the library as one
 document: per module, every public declaration's full signature (implicit arguments
 included), its doc comment, the instances of each class (and for each type), and a
 notation table with each operator's precedence and associativity and what it expands to.
-It is generated from the elaborated modules
-(`wiz doc --lib --reference docs/reference`); CI's `docs` job runs the same command with
-`--check`, which fails when the committed copy is stale. The published site has the same
-manual at `/docs/reference.html`, and every module page links to it.
+It is generated from the elaborated modules and not committed: the flake's `reference`
+package runs `wiz doc --lib --reference` with the packaged `wiz` (`nix build .#reference`;
+`result/index.md` is the Markdown, a Cachix hit while the compiler and `lib/` are
+unchanged), and the published site has it as `/docs/reference.html` (every module page
+links to it) and `/docs/reference.md`.
 
 ## H0c: vectors and bit vectors
 
@@ -1025,7 +1027,54 @@ interleaved completions. The `SlaveIn`/`SlaveOut` bundles round-trip through
 agree cycle for cycle, the two adapter netlists are `Netlist.wellFormed`, and yosys
 `check -assert`/`synth_ice40` runs on their Verilog when yosys is on PATH; without yosys
 the case is marked skipped with the reason `no yosys`, never silently passed. The test
-group has two cases (the APB/Wishbone/AXI4-Lite one and this one).
+group has four cases: APB/Wishbone/AXI4-Lite, AXI4 bursts, AXI4-Stream and SPI (the
+last two run their value/netlist checks even when yosys is absent, and add the yosys
+check when it is on PATH).
+
+## AXI4-Stream (`lib/Hdl/AxiStream.wiz`)
+
+`lib/Hdl/AxiStream.wiz` (`import Hdl.AxiStream`) is the AXI4-Stream handshake subset: a
+beat is `tdata`, `tvalid`, `tlast`, `tkeep`, `tuser` and `tready`, width-parameterised by
+`dw`, with one `tkeep` bit per byte (`AxiStream.keepW dw = dw / 8`). `AxiStream.Beat dw`
+is the full bundle, `AxiStream.Tx dw` the source-driven half (no `tready`), and
+`AxiStream.noTx`/`AxiStream.beatOf` build quiet beats. A beat is accepted exactly in a
+cycle with `tvalid && tready`; `AxiStream.Law.accepted` is the resulting payload
+sequence.
+
+* `AxiStream.sourceC dw n` emits `n` beats (data `0 … n-1`, `tlast` on the last, all
+  keeps set) and advances only on an accepted beat; `AxiStream.sinkC dw period` is a sink
+  whose `tready` is one cycle in `period` (`AxiStream.readySinkC` is always ready).
+  `AxiStream.pairC dw n period` closes the loop between them.
+* `AxiStream.sliceC dw` is a one-beat register slice with full throughput: an empty
+  buffer passes a beat through, a stalled output buffers one beat, and a buffered beat
+  leaving the same cycle a new one arrives is replaced without a bubble.
+* `AxiStream.upC dw ratio` groups `ratio` beats of `dw` bits into one beat of
+  `dw * ratio` bits (the first narrow beat is the high part) and
+  `AxiStream.downC dw ratio` splits one `dw * ratio`-bit beat into `ratio` narrow beats
+  (low part first). Both preserve `tkeep` bit for bit; upsize ORs the group's `tlast`
+  and `tuser`, downsize raises `tlast` on the group's last beat and repeats `tuser`.
+  `AxiStream.sliceInReady`, `AxiStream.upInReady` and `AxiStream.downInReady` expose the
+  input-ready term to wire back to a source.
+
+`lib/Hdl/AxiStreamLaw.wiz` (`import Hdl.AxiStreamLaw`) is the obligation set:
+`AxiStream.Law.Stable` (a stalled beat is held unchanged and stays valid),
+`NoLoss`/`NoDup`/`Order` (the accepted output payloads are exactly the accepted input
+payloads: same count, each once, in order), `Backpressure` (the three together) and
+`SliceNoLoss`. The kernel checks the small facts (`accepted_nil`,
+`keepW_8`, the slice/source/sink initial values); the rest are Boolean checks over
+generated traces, **tested, not proved**.
+
+`examples/hdl-stream.wiz` (test group `bus-protocol`) runs the source/sink pair with an
+always-ready, a 2-cycle and a 3-cycle stall pattern, the slice with a stalling sink
+(10 beats, checking that the accepted sequence is exactly `0 … 9`), and 8→16 and 16→8
+conversion with the grouping, `tkeep` split/merge and `tlast` placement checked against
+the expected payloads. Every circuit's value simulation, `Netlist.simulate` and
+`Circuit.simFast` agree cycle for cycle, and the netlists are `Netlist.wellFormed`; yosys
+runs on the emitted Verilog when it is on PATH. **Limits:** the converters group a fixed
+`ratio` of beats (no early flush of a short packet when `tlast` arrives before the group
+is full, and a downsize always emits all `ratio` narrow beats), `tuser` is carried but
+never interpreted, there are no `TID`/`TDEST`/`TSTRB` attributes or null-byte
+suppression, and the slice is one beat deep (compose slices for a deeper pipeline).
 
 ## CRC-8/SMBUS (`lib/Hdl/Crc.wiz`)
 
@@ -1122,7 +1171,7 @@ repository's controller are the origins, with the board-specific parts removed.
 | module | what | configuration |
 |---|---|---|
 | `Hdl.Uart` | `Uart.baudC n` (counter, `ce` in, `tick` out), `Uart.txC n` (8N1, `start`/`data` in, `line`/`busy` out), `Uart.rxC n` (`line` in, `valid`/`data`/`busy` out, two-flip-flop input synchroniser), `Uart.loopbackC n` (the line wired from TX to RX); the `…w` forms (`Uart.baudCw`, `Uart.txCw`, `Uart.rxCw`, `Uart.loopbackCw`, whose first argument is the counter width) and the named 7-bit (`Uart.tx7C`, …) and 10-bit (`Uart.tx10C`, …) configurations | `n` clocks per bit, 1 … 2^w; the default `Uart.cntW` is 16 bits (1 … 65536), `Uart.cntW7` is the iCEstick's 7 bits (1 … 128), `Uart.cntW10` is the Arty/OLED 10 bits (1 … 1024) |
-| `Hdl.Spi` | `Spi.masterC div` (mode 0, CPOL = 0, CPHA = 0: sample on the rising edge, shift on the falling edge), `Spi.loopC div` (`mosi` wired to `miso`); the generic `Spi.masterCW w cw ncs div` / `Spi.loopCW w cw ncs div` (`w`-bit transfer, `cw`-bit half-period counter, `ncs` chip selects, input `sel`), and `Spi.master8C` / `Spi.loop8C` for 8 bits with the default counter | `div` clocks per half period, 1 … 2^`cw` (the original is `cw = 16`); `w ≥ 1` bits a transfer; `ncs ≥ 1` selects |
+| `Hdl.Spi` | `Spi.masterC div`/`Spi.loopC div` (the original mode 0, 8 bits, one select); the generic `Spi.masterCW w cw ncs div`/`Spi.loopCW w cw ncs div`; the all-modes `Spi.masterModeCW w cw ncs mode div`, `Spi.masterModeC mode div`, `Spi.masterPhaseStepW`, `Spi.loopModeCW`/`Spi.loopModeC` (`mode = 0 … 3`, the CPOL/CPHA table below); the mock slave `Spi.slaveCW w mode`/`Spi.slaveC mode` (samples `mosi`, shifts out a `reply` byte) and the master+slave link `Spi.linkCW w cw mode div`/`Spi.linkC mode div`; the byte-level models `Spi.bitsOf`, `Spi.receiveBits`, `Spi.transfer`, `Spi.transferLoop` | `div` clocks per half period, 1 … 2^`cw` (the original is `cw = 16`); `w ≥ 1` bits a transfer; `ncs ≥ 1` selects; mode 0 … 3 |
 | `Hdl.Ddr` | the native port of a DDR3 controller (`Ddr.Req`: `valid`/`we`/`addr` 24/`wdata` 128/`wmask` 16; `Ddr.Resp`: `ready`/`rvalid`/`rdata` 128), and `Ddr.modelC`, a 64K-word model with the same valid/ready handshake and byte-masked writes | the real controller is `Ddr3.Ctrl` in wiz-ddr3 (see the module header for the field mapping) |
 
 The UART counter width is a meta-level parameter: only the clocks-per-bit counter (and
@@ -1133,7 +1182,8 @@ because its two synchroniser flip-flops delay the start edge. Both UART parts ar
 synchronous circuits with a plain state, so `Circuit.withReset`/`Circuit.withResetEnable`
 wrap an instantiation unchanged (the example runs the receiver under a reset with a line
 whose phase is not aligned to the clock). The SPI master's pins are registers (no
-glitches), and its first (most significant) bit is on `mosi` in the cycle `cs` goes low.
+glitches); in CPHA = 0 its first (most significant) bit is on `mosi` in the cycle `cs`
+goes low, and in CPHA = 1 it is driven on the first leading edge.
 The DDR module is a documented stub for the handshake: it has no timing parameters and no
 PHY, and a design on another clock needs a CDC wrapper around the port.
 
@@ -1144,8 +1194,30 @@ output `Spi.OutW.cs` is `ncs` lines, all high when idle and bit `sel` low while 
 transfer runs. `Spi.StW`/`Spi.InW`/`Spi.OutW`/`Spi.CmdW` are the generic bundles;
 `Spi.master8C` and `Spi.loop8C` fix `w = 8` and `cw = Spi.cntW = 16`. The original
 `Spi.masterC`/`Spi.loopC` (8 bits, 16-bit counter, one select, `Spi.In`/`Spi.Out`) keep
-their names and definitions, and the example checks the generic master against them
-cycle for cycle. Both receivers now shift most significant bit first (`x << 1 | b`):
+their names and definitions, and the example checks the generic mode-0 master against
+them cycle for cycle.
+
+All four CPOL/CPHA modes share `Spi.masterPhaseStepW`: `sclk` idles at CPOL, the first
+half of each bit is at CPOL and the second at `1 - CPOL`; CPHA = 0 samples on the leading
+edge and shifts on the trailing one, CPHA = 1 shifts on the leading edge and samples on
+the trailing one. The divider and bit counter are unchanged, so every mode takes exactly
+`2 * div * w` cycles for a `w`-bit transfer.
+
+| mode | CPOL | CPHA | sample edge | shift edge |
+|---|---|---|---|---|
+| 0 | 0 | 0 | leading (rising) | trailing (falling) |
+| 1 | 0 | 1 | trailing (falling) | leading (rising) |
+| 2 | 1 | 0 | leading (falling) | trailing (rising) |
+| 3 | 1 | 1 | trailing (rising) | leading (falling) |
+
+`Spi.sampleLevel cpol cpha` and `Spi.shiftLevel cpol cpha` are the levels of those
+edges. `Spi.slaveCW w mode` is a mock slave for tests: a `cs` falling edge captures
+`reply`, sample edges shift `mosi` into its received byte, shift edges move `reply` out
+(MSB first, with the first leading edge of CPHA = 1 already presenting the MSB), and it
+reports `done`/`busy`/`data`. `Spi.linkCW` wires one master to it, one select, so a byte
+round-trips through the pins without a board. `Spi.transfer mode tx miso` is the
+byte-level model (the first eight `miso` bits, MSB first) and `Spi.transferLoop mode tx`
+is its loopback: `tx` again, in every mode. Both receivers now shift most significant bit first (`x << 1 | b`):
 `Spi.shiftIn8` had shifted the other way (`cat b (slice 1 7 x)`), which reversed the
 received byte, but its old loopback data (0xA5, 0x3C) were palindromes and hid it. The
 fix is intentional and changes only the two receive-shift wires in the Verilog of
@@ -1161,9 +1233,29 @@ counter, and three chip selects selecting slaves 0, 1 and 2), `examples/rune-ddr
 value simulation = `Netlist.simFast`, the loopback bytes, the SPI shift order and edges,
 the chip-select patterns, the DDR handshake and masked write.
 
-What remains is in `wiz-notes/rune.md`: SPI modes 1 … 3 and a chip-select decoder or
-per-slave timing, the real DDR controller's wrapper and timing, and clock-domain
-crossing for the ports.
+`lib/Hdl/SpiLaw.wiz` (`import Hdl.SpiLaw`) states the SPI obligations over link traces:
+`Spi.Law.SampleStable` (`mosi` does not change on a sample edge),
+`Spi.Law.MosiOnShift` (after the start cycle it changes only on a shift edge),
+`Spi.Law.SampleCount` (eight samples per transfer), `Spi.Law.Divider` (`done` exactly
+`16 * div` cycles after `start`), and `Spi.Law.ByteRoundTrip` (the master receives the
+reply and the slave the sent byte). The mode table, the sample/shift levels, `divN` and
+concrete loopback bytes are kernel-checked; the trace laws are **tested, not proved**.
+`examples/hdl-spi.wiz` runs all four modes, a divider sweep `1 … 8`, the loopback and
+the mock-slave link, checks the timing and divider laws, exercises `Spi.transferLoop` on
+all 256 bytes in every mode, and compares the value simulation, `Netlist.simulate` and
+`Circuit.simFast`; its netlists are `Netlist.wellFormed` and yosys runs on the emitted
+Verilog when it is on PATH.
+
+**Limits.** The master selects one slave at a time (`sel` is a one-hot index over the
+`ncs` chip selects): there is no multi-slave arbitration, no per-slave timing/baud and no
+queued transfers. There is no DMA engine and no FIFO: the CPU (or another circuit) must
+write `start`/`data` and read `done`/`data`. The mock slave is a test part, not a
+full SPI peripheral (no command decoding or memory); a real `miso` from another clock
+domain still needs a two-flip-flop synchroniser before the master, and the divider's
+`div` is a meta-level constant, not a run-time register.
+
+What remains is in `wiz-notes/rune.md`: a chip-select decoder or per-slave timing, the
+real DDR controller's wrapper and timing, and clock-domain crossing for the ports.
 
 ## Hdl.Display: the OLED command, data and window layer
 

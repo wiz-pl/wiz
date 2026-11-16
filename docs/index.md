@@ -14,7 +14,8 @@ published `/docs/` is generated from `lib/` by `wiz doc --lib`.
 * [install.md](install.md): installing Wiz with tower or Nix, editor setup, a first
   grail package, troubleshooting
 * [tour.md](tour.md): a tour of the language for people who know a little functional
-  programming
+  programming; [`notebooks/tour.ipynb`](notebooks/tour.ipynb)
+  ([exported page](notebooks/tour.html)) is the same tour as a runnable notebook
 * [stability.md](stability.md): what a release promises (0.1.z)
 * [release.md](release.md): making a release (checklist, tagging, smoke test)
 * [CHANGELOG.md](../CHANGELOG.md)
@@ -33,7 +34,7 @@ published `/docs/` is generated from `lib/` by `wiz doc --lib`.
 * [dsls.md](dsls.md): the embedded languages (DSLs) in Wiz, and the conventions they follow
 * [error-codes.md](error-codes.md): the error codes and their quick fixes
 * [playground-lsp.md](playground-lsp.md): the playground's goals panel and the language-server contract a self-hosted `wiz lsp` must implement
-* [tools/jupyter.md](tools/jupyter.md): the opt-in Jupyter kernels for Wiz (`wiz repl` or a `wiz check` batch fallback) and the `%%scry` taint cell magic
+* [tools/jupyter.md](tools/jupyter.md): the opt-in Jupyter kernels for Wiz (`wiz repl` or a `wiz check` batch fallback), the `%%scry` taint cell magic, and the deterministic notebook exporter (`wiz-nb export`)
 * [resources.md](resources.md): resources in Wiz: quantities, regions, optics, Feral and separation logic, with one running example
 * [ROADMAP.md](../ROADMAP.md)
 
@@ -98,9 +99,9 @@ line below.
   boundary, with the value the spec asks for and which backends were compared
 * [Stage 29: native data structures](stages/29-natives.md): word arrays, word maps, interned strings
 * [Libraries](libraries.md)
-* [Reference manual](reference/index.md): every standard-library declaration with its
-  full signature, doc comment and class instances, and the notation table (generated;
-  `wiz doc --lib --reference docs/reference`, checked in CI with `--check`)
+* [Reference manual](https://wiz-pl.github.io/wiz/docs/reference.html): every
+  standard-library declaration with its full signature, doc comment and class instances,
+  and the notation table (generated, not committed: `nix build .#reference`)
 
 ### Verification
 

@@ -460,11 +460,12 @@ which grail and the test driver read (`Tests/Main.lean`; flags to `lake test -- 
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on pushes and pull requests to
 `master`. The toolchain is built **once**, with Nix: the `build` job runs
-`nix build .#wiz .#tests` (nixpkgs' Lean, no Lake artifact cache) and publishes the two
+`nix build .#wiz .#tests .#reference` (nixpkgs' Lean, no Lake artifact cache; `reference`
+is the standard library's reference manual, made with that `wiz`) and publishes the three
 store paths to Cachix with
 
 ```sh
-nix shell nixpkgs#cachix -c cachix push badlydrawnwizards $(nix path-info .#wiz .#tests)
+nix shell nixpkgs#cachix -c cachix push badlydrawnwizards $(nix path-info .#wiz .#tests .#reference)
 ```
 
 with `CACHIX_AUTH_TOKEN` (the repository secret) in that step's environment only. A Nix
@@ -660,7 +661,8 @@ the elan toolchain, so the setup action keeps the elan cache for those
   (`nix run "$GITHUB_WORKSPACE#wiz" -- check/build …`, and `#grail` starts), so the
   publication path is exercised before the push. It publishes to the public Cachix cache
   `badlydrawnwizards` from `master` and from this repository's pull requests (which have
-  the token); `packages.tests` is `nix run .#tests -- --list`.
+  the token); `packages.tests` is `nix run .#tests -- --list`, and `packages.reference` is
+the generated reference manual (`result/index.md`, and `result/site`).
 * **The packaged read-only elaboration cache.** The `wiz` package prewarms the
   elaboration cache during its build and installs it at `$out/share/wiz/cache`: the
   `.wizc` effects and the `.wizm` seen markers, with no `bin/` memo and `a-w`
@@ -745,6 +747,49 @@ the elan toolchain, so the setup action keeps the elan cache for those
   without it. Without a queue (a user-owned repository), `--auto` waits for the required
   check and merges, and "require branches to be up to date" serialises merges instead.
 
+### Before you push
+
+`scripts/pre-commit.sh` runs the cheap gates CI would run first, in one command, so a
+formatting, ledger or docs problem is found in seconds instead of in CI. It needs no
+build for the fast tier:
+
+```sh
+scripts/pre-commit.sh --fast           # before a commit
+scripts/pre-commit.sh --full           # before a push
+scripts/pre-commit.sh --fast --staged  # only the files in `git diff --cached`
+scripts/pre-commit.sh --self-test      # the tiers on a throwaway repository
+```
+
+| tier | checks |
+|---|---|
+| `--fast` | docs style (`scripts/check-docs-style.py`), `wiz fmt --check` on the changed `.wiz` files, the trust ledger's fixtures (`Tests/trust-ledger/run.sh`), `scripts/ci.py check-skips --self-test`, and a parse of every YAML file under `.github/` |
+| `--full` | everything in `--fast`, then `scripts/trust-ledger.sh --check`, `scripts/check-repro.sh` when a compiler is built, and the formatter's test group (`=fmt`, or `=format` on a tree from before that group was renamed) |
+
+Without `--staged`, the changed files are what the branch adds since its merge base with
+`origin/master` plus the working tree's unstaged, staged and untracked files. `--staged`
+restricts the file-driven checks (`wiz fmt`) to the index. The docs-style check, the
+fixture suites and the ledger are repo-wide either way.
+
+Every check whose tool is missing is skipped with a reason: no `python3`, no PyYAML, no
+`wiz` (or an older `wiz` without `fmt --check`), no test driver, no `cc`. A skip is not a
+pass. The last line is one summary line. The exit status is 0 when at least one check ran
+and none failed, 1 on a real failure, and 3 when every check was skipped (so a hook can
+tell "nothing could run" from "all good"). The fast tier took about 6 s on a warm
+checkout with the test driver built and one `.wiz` file changed (under 1 s with nothing
+built); `--full` took about 8 minutes, almost all of it `check-repro.sh`.
+
+`scripts/install-hooks.sh` writes `.git/hooks/pre-commit` (fast tier, staged files) and
+`.git/hooks/pre-push` (full tier); both call the script from the work tree, so editing
+the tiers needs no reinstall. It never overwrites a different hook without `--force`, and
+running it twice leaves the hooks byte-for-byte unchanged. The same two hooks are
+available to the pre-commit framework as the `wiz-fast` and `wiz-full` entries in
+`.pre-commit-hooks.yaml`.
+
+What it cannot check: the test suite beyond the formatter group, generated C or LLVM
+outside the reproducibility corpus, the docs site, the release workflow, sharding
+(`scripts/ci.py check-shards`), or behaviour on another OS or architecture. It is a
+local subset of CI, not a replacement for it.
+
 ### Golden diffs
 
 A golden failure in CI is a test case whose output no longer matches its `.expected`
@@ -804,8 +849,10 @@ relative, so the project-site prefix (or a custom domain root) works either way:
 
 The `docs` job builds the two Wasm modules (`web/build.sh` for the documentation's
 interactive signatures, `web/build-playground.sh` for the playground), runs `wiz doc
---lib -o doc-site/docs --web web/out --reference docs/reference --check` (source links to
-the commit; the last two flags check the committed reference manual), assembles the
+--lib -o doc-site/docs --web web/out` (source links to the commit), copies the
+reference manual's Markdown from the flake's `reference` package (`nix build
+.#reference`, a Cachix hit when the build job already built it) to
+`doc-site/docs/reference.md`, assembles the
 landing page, the benchmark page and the playground with `web/build-site.sh doc-site
 web/out`, checks the result with `web/check-site.sh doc-site` (the four entry points
 exist and the landing page's and benchmark page's local links resolve; no server), and
@@ -825,10 +872,10 @@ tests and the site-check rules for it are in `web/test-bench.sh`.
 | `docs/index.html` | the documentation index: the documented modules and their summaries |
 | `docs/api.html` | the API index: every module and declaration, with signatures and doc summaries |
 | `docs/api.json` | the same index as data, for tools |
-| `docs/reference.html` | the reference manual: full signatures, doc comments, class instances, the notation table (same data as `docs/reference/index.md`) |
+| `docs/reference.html` | the reference manual: full signatures, doc comments, class instances, the notation table (same data as `docs/reference.md`) |
 | `docs/A.B.html` | one page per module (its declarations, signatures, docs, source links) |
 | `docs/A.B.json` | the same page's data, for the interactive signatures |
-| `docs/reference/index.md` | the reference manual as committed Markdown (in the checkout, not the published tree) |
+| `docs/reference.md` | the reference manual as Markdown (`nix build .#reference`'s `index.md`; generated, not committed) |
 | `docs/search.js`, `docs/scroll.css`, `docs/scroll.js`, `docs/tagged.js`, `docs/scroll-search.js` | the documentation's scripts and styles (search covers names, doc comments and signatures) |
 | `docs/wiz-infoview.mjs`, `docs/wiz-infoview.wasm` | the infoview's Wasm module, when `web/build.sh` built it |
 | `playground/index.html` | the playground page |
@@ -840,7 +887,8 @@ To build the site locally from a checkout (after `nix develop` and `lake build w
 ```sh
 sh web/build.sh web/out                         # the infoview module, scroll assets
 sh web/build-playground.sh web/out              # the playground module
-.lake/build/bin/wiz doc --lib -o doc-site/docs --web web/out --reference docs/reference --check
+.lake/build/bin/wiz doc --lib -o doc-site/docs --web web/out
+cp "$(nix build .#reference --no-link --print-out-paths)/index.md" doc-site/docs/reference.md
 sh web/build-site.sh doc-site web/out           # landing page, /bench/ and /playground/
 sh web/check-site.sh doc-site                   # the entry points and the links
 sh web/test-bench.sh                            # the generator's fixtures and /bench/

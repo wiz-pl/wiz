@@ -15,36 +15,80 @@ fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 n=0
-out=$tmp/out
-err=$tmp/err
-all=$tmp/all
+cur=0
+: >"$tmp/pids"
+: >"$tmp/expect"
 
-fail () {
+fail () { # MESSAGE [CASE-NUMBER]
+  _f_id=${2:-$cur}
   echo "trust-ledger fixtures: $1" >&2
   echo "--- stdout ---" >&2
-  cat "$out" 2>/dev/null >&2 || true
+  cat "$tmp/$_f_id.out" 2>/dev/null >&2 || true
   echo "--- stderr ---" >&2
-  cat "$err" 2>/dev/null >&2 || true
+  cat "$tmp/$_f_id.err" 2>/dev/null >&2 || true
   exit 1
 }
 
-# `run EXPECTED_STATUS NAME ARGS...`: run the gate, keep stdout/stderr in $out/$err.
+# `run EXPECTED_STATUS NAME ARGS...`: launch the gate, keeping this case's stdout,
+# stderr and status in $tmp/N.*.  The cases are independent (each has its own tree and
+# ledger), so they run at once: the 140 MB driver takes about a second to start, and
+# serially the fixtures took ~14 s.  `barrier` waits for everything launched so far;
+# a case that reads a file another one writes is placed after it.
+run_one () { # ID ARGS...
+  _r_id=$1
+  shift
+  set +e
+  (
+    cd "$root" && "$bin" --trust-ledger "$@"
+  ) >"$tmp/$_r_id.out" 2>"$tmp/$_r_id.err"
+  _r_status=$?
+  set -e
+  printf '%s' "$_r_status" >"$tmp/$_r_id.code"
+}
+
 run () {
   want=$1
   name=$2
   shift 2
   n=$((n + 1))
-  set +e
-  ( cd "$root" && "$bin" --trust-ledger "$@" ) >"$out" 2>"$err"
-  got=$?
-  set -e
-  cat "$out" "$err" >"$all"
-  [ "$got" -eq "$want" ] || fail "$name: expected exit $want, got $got"
+  id=$n
+  eval "want_$id=\$want"
+  eval "name_$id=\$name"
+  run_one "$id" "$@" &
+  printf '%s\n' "$!" >>"$tmp/pids"
+  cur=$id
 }
 
-# Some line of stdout/stderr contains the literal fragment.
+barrier () {
+  while IFS= read -r _b_pid; do
+    [ -n "$_b_pid" ] || continue
+    wait "$_b_pid" 2>/dev/null || true
+  done <"$tmp/pids"
+  : >"$tmp/pids"
+}
+
+# Some line of stdout/stderr of the current case contains the literal fragment; the
+# fragment is checked once every case has finished (the output may not exist yet).
 has () {
-  grep -Fq -- "$1" "$all" || fail "$2: no message contains '$1'"
+  printf '%s\t%s\t%s\n' "$cur" "$1" "$2" >>"$tmp/expect"
+}
+
+finish () {
+  barrier
+  _fi=1
+  while [ "$_fi" -le "$n" ]; do
+    eval "_f_want=\$want_$_fi"
+    eval "_f_name=\$name_$_fi"
+    _f_got=$(cat "$tmp/$_fi.code" 2>/dev/null || printf 99)
+    [ "$_f_got" -eq "$_f_want" ] ||
+      fail "$_f_name: expected exit $_f_want, got $_f_got" "$_fi"
+    _fi=$((_fi + 1))
+  done
+  while IFS="$(printf '\t')" read -r _f_id _f_frag _f_name; do
+    grep -Fq -- "$_f_frag" "$tmp/$_f_id.out" "$tmp/$_f_id.err" ||
+      fail "$_f_name: no message contains '$_f_frag'" "$_f_id"
+  done <"$tmp/expect"
+  echo "trust-ledger fixtures: OK ($n checks)"
 }
 
 # --- the fixtures -----------------------------------------------------------------
@@ -98,6 +142,7 @@ cp "$root/Tests/trust-ledger/legacy/ledger.tsv" "$renew"
 run 0 renew --update --tree "$root/Tests/trust-ledger/legacy/tree" \
   --ledger "$renew" --review 2028-01-01 --today 2026-11-15
 has "1 legacy renewed" renew
+barrier # renew writes $renew, which the grep and the next case read
 grep -Fq "2028-01-01" "$renew" || fail "renew: the review date was not updated"
 run 0 renew-check --check --tree "$root/Tests/trust-ledger/legacy/tree" \
   --ledger "$renew" --today 2027-10-01
@@ -105,16 +150,20 @@ has "1 legacy rows" renew-check
 
 # --- --update ----------------------------------------------------------------------
 # A tree with a new axiom and an empty ledger: --update refuses without a reason.
+# Separate files, so the refusal and the accepted update do not race.
 ledger=$tmp/ledger.tsv
+ledger_no=$tmp/ledger-no.tsv
 printf '# fixture ledger for --update\n' >"$ledger"
+printf '# fixture ledger for --update\n' >"$ledger_no"
 run 2 update-no-reason --update --tree "$root/Tests/trust-ledger/new/tree" \
-  --ledger "$ledger" --today "$today"
+  --ledger "$ledger_no" --today "$today"
 has "refusing to add 1 new row(s) without a reason" update-no-reason
 
 # With a reason (and owner/date), it writes a reviewed row that --check accepts.
 run 0 update --update --reason "fixture: reviewed by the gate test" --owner "gate-fixture" \
   --review 2027-06-30 --tree "$root/Tests/trust-ledger/new/tree" --ledger "$ledger" --today "$today"
 has "1 new, 0 removed, 0 legacy renewed" update
+barrier # the greps and update-check read the ledger update wrote
 grep -Fq "fixture: reviewed by the gate test" "$ledger" || fail "update: the reason is not in the ledger"
 grep -Fq "gate-fixture" "$ledger" || fail "update: the owner is not in the ledger"
 grep -Fq "2027-06-30" "$ledger" || fail "update: the review date is not in the ledger"
@@ -122,4 +171,4 @@ run 0 update-check --check --tree "$root/Tests/trust-ledger/new/tree" \
   --ledger "$ledger" --today "$today"
 has "0 legacy rows" update-check
 
-echo "trust-ledger fixtures: OK ($n checks)"
+finish
