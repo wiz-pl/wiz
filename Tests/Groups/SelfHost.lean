@@ -1327,6 +1327,163 @@ def selfhostDerivingBad : String :=
 def selfhostDerivingBadExpected : String :=
   "BEq : (x0 : U0) → U0\nBEq.beq : (x0 :0 U0) → (x1 : (BEq x0)) → (x2 : x0) → (x3 : x0) → Bool\nerror: failed to synthesize an instance of (BEq ((((((((((((((((((?m0 x✝0) x✝1) j✝) i✝) xs✝) ih✝) rest✝) ihs✝) _) j✝) i✝) xs✝) ih✝) rest✝) ihs✝) _) a✝0) b✝0))\nSize : (x0 : U0) → U0\nSize.size : (x0 :0 U0) → (x1 : (Size x0)) → (x2 : x0) → Nat\nerror: no deriver for Size (register one with `attribute [deriver Size] f`)\n"
 
+/-- (E-K) A natural-number type for `Kernel.wiz`'s number literals, written as kernel terms:
+`N` (the description `arg Enum2 [ret, rec ret]`), its constructors, and definitions by
+`ind` (`N.pred`, `N.add`, `N.sub`, `N.mul`, `N.isZero`, `N.beq`, `N.blt`; `N.div` and
+`N.mod` are axioms, which an operation may be). `lit n` is a literal of the registration
+`nb`, `unary n` is `N.succ` applied `n` times, `op o` is the registered operation `o`. -/
+def ekNatDefs : String :=
+  "def uT : Tm := .unit (ln 1)\n" ++
+  "def eT : Tm := .lam (.ecase (.descr (ln 0) uT) (.var 0) (.tcons (.dret .star) (.tcons (.drec (.qlit .qw) .star (.dret .star)) .tnil)))\n" ++
+  "def dT : Tm := .darg (.qlit .qw) (.enum 2) eT\n" ++
+  "def mkC (n : String) (v ty : Tm) : Tm := .const n .nil .nil (markClosed v (sortsTy ty)) (sortsTy ty)\n" ++
+  "def nC : Tm := mkC \"N\" (.mu (ln 0) uT dT .star) (.univ 0)\n" ++
+  "def zC : Tm := mkC \"N.zero\" (.ann (.con (.pair (.tag 2 0) (.pair .star .star))) nC) nC\n" ++
+  "def sC : Tm := mkC \"N.succ\" (.lam (.con (.pair (.tag 2 1) (.pair (.var 0) (.pair .star .star))))) (piH nC nC)\n" ++
+  "def nb : NatB := .mk nC zC sC\n" ++
+  "def lit (n : Nat) : Tm := .nlit (knOfNat n) nb\n" ++
+  "def litS (s : String) : Tm := .nlit (knOfDigits s) nb\n" ++
+  "def unary : Nat → Tm\n" ++
+  "  | .zero => zC\n" ++
+  "  | .succ k => .app sC (unary k)\n" ++
+  "def famX : Tm := .lam (.mu (ln 0) uT dT (.var 0))\n" ++
+  "def motN : Tm := .lam (.lam nC)\n" ++
+  "def recMot : Tm := .pi .qw .lhole .lhole (interpApp (ln 0) uT (.app eT (.var 0)) famX .star)\n" ++
+  "  (.pi .qw .lhole .lhole (tApps (allTm (ln 0) (ln 1)) (args6 uT dT famX motN .star (.pair (.var 1) (.var 0)))) nC)\n" ++
+  "def iter (z : Tm) (s : Tm → Tm → Tm) (x : Tm) : Tm :=\n" ++
+  "  .ind (ln 0) uT dT (ln 1) motN (.lam (.lam (.lam (.app (.app (.ecase recMot (.fst (.var 1))\n" ++
+  "    (.tcons (.lam (.lam z)) (.tcons (.lam (.lam (s (.fst (.var 1)) (.fst (.var 0))))) .tnil))) (.snd (.var 1))) (.var 0))))) .star x\n" ++
+  "def n2n : Tm := piH nC nC\n" ++
+  "def n3n : Tm := piH nC (piH nC nC)\n" ++
+  "def app2 (f a b : Tm) : Tm := .app (.app f a) b\n" ++
+  "def predC : Tm := mkC \"N.pred\" (.lam (iter zC (fun f _ => f) (.var 0))) n2n\n" ++
+  "def addC : Tm := mkC \"N.add\" (.lam (.lam (iter (.var 5) (fun _ ih => .app sC ih) (.var 1)))) n3n\n" ++
+  "def subC : Tm := mkC \"N.sub\" (.lam (.lam (iter (.var 6) (fun _ ih => .app predC ih) (.var 0)))) n3n\n" ++
+  "def mulC : Tm := mkC \"N.mul\" (.lam (.lam (iter zC (fun _ ih => app2 addC (.var 5) ih) (.var 1)))) n3n\n" ++
+  "def isZeroC : Tm := mkC \"N.isZero\" (.lam (.ind (ln 0) uT dT (ln 1) (.lam (.lam (.enum 2))) (.lam (.lam (.lam (.fst (.var 1))))) .star (.var 0))) (piH nC (.enum 2))\n" ++
+  "def beqC : Tm := mkC \"N.beq\" (.lam (.lam (.app isZeroC (app2 addC (app2 subC (.var 1) (.var 0)) (app2 subC (.var 0) (.var 1)))))) (piH nC (piH nC (.enum 2)))\n" ++
+  "def bltC : Tm := mkC \"N.blt\" (.lam (.lam (.app isZeroC (app2 subC (.app sC (.var 1)) (.var 0))))) (piH nC (piH nC (.enum 2)))\n" ++
+  "def divC : Tm := .axiomC \"N.div\" (sortsTy n3n)\n" ++
+  "def modC : Tm := .axiomC \"N.mod\" (sortsTy n3n)\n" ++
+  "def op (o : NatOp) : Tm := match o with\n" ++
+  "  | .nsucc => .natFn o nb sC\n" ++
+  "  | .npred => .natFn o nb predC\n" ++
+  "  | .nadd => .natFn o nb addC\n" ++
+  "  | .nsub => .natFn o nb subC\n" ++
+  "  | .nmul => .natFn o nb mulC\n" ++
+  "  | .ndiv => .natFn o nb divC\n" ++
+  "  | .nmod => .natFn o nb modC\n" ++
+  "  | .nbeq => .natFn o nb beqC\n" ++
+  "  | .nblt => .natFn o nb bltC\n" ++
+  "def op2 (o : NatOp) (a b : Tm) : Tm := app2 (op o) a b\n" ++
+  "def verdict (r : TyRes) : String := match r with\n" ++
+  "  | .ok ty _ => show .nil 0 (quote 0 ty)\n" ++
+  "  | .err m => String.append \"error: \" m\n" ++
+  "def okErr (r : TyRes) : String := match r with\n" ++
+  "  | .ok _ _ => \"ok\"\n" ++
+  "  | .err _ => \"error\"\n" ++
+  "def tyOf (t : Tm) : String := verdict (infer empty (sortsInfer t))\n" ++
+  "def prfOk (t : Tm) : String := verdict (infer (TCtx.inProof empty) (sortsInfer t))\n" ++
+  "def nf (t : Tm) : String := match infer empty (sortsInfer t) with\n" ++
+  "  | .ok _ _ => normalize t\n" ++
+  "  | .err m => String.append \"error: \" m\n" ++
+  "def hnf (t : Tm) : String := match infer empty (sortsInfer t) with\n" ++
+  "  | .ok _ _ => show .nil 0 (quote 0 (whnf (eval .nil (sortsInfer t))))\n" ++
+  "  | .err m => String.append \"error: \" m\n" ++
+  "def eqN (a b : Tm) : Tm := .ann (.eqRefl nC a) (.eq nC a b)\n" ++
+  "def vecC : Tm := .axiomC \"Vec\" (sortsTy (piH nC (.univ 0)))\n" ++
+  "def vecId (a b : Tm) : Tm := .ann (.lam (.var 0)) (piH (.app vecC a) (.app vecC b))\n" ++
+  "def printAll : List String → IO Unit\n" ++
+  "  | .nil => IO.pure ()\n" ++
+  "  | .cons s ss => do\n" ++
+  "    IO.println s;\n" ++
+  "    printAll ss\n"
+
+/-- (E-K) A `main` printing each Wiz expression (a `String`) of `calls`. -/
+def ekMain (calls : List String) : String :=
+  "def main : IO Unit := printAll " ++ calls.foldr (fun c acc => s!"(.cons ({c}) {acc})") ".nil" ++ "\n"
+
+/-- (E-K) Literal arithmetic by reduction: the registered operations on literals, natively
+(exact past 64 bits), the zero shortcuts, the stuck applications. -/
+def ekArithCalls : List String :=
+    ["tyOf (lit 5)",
+     "nf (op2 .nadd (lit 2) (lit 3))",
+     "nf (op2 .nmul (lit 6) (lit 7))",
+     "nf (op2 .nsub (lit 3) (lit 5))",
+     "nf (op2 .nsub (lit 10) (lit 4))",
+     "nf (op2 .ndiv (lit 17) (lit 5))",
+     "nf (op2 .nmod (lit 17) (lit 5))",
+     "nf (op2 .ndiv (lit 7) (lit 0))",
+     "nf (op2 .nmod (lit 7) (lit 0))",
+     "nf (op2 .nbeq (lit 4) (lit 4))",
+     "nf (op2 .nbeq (lit 4) (lit 5))",
+     "nf (op2 .nblt (lit 3) (lit 4))",
+     "nf (op2 .nblt (lit 4) (lit 3))",
+     "nf (.app (op .nsucc) (lit 9))",
+     "nf (.app (op .npred) (lit 0))",
+     "nf (op2 .nmul (lit 4294967296) (lit 4294967296))",
+     "nf (op2 .nsub (litS \"18446744073709551616\") (lit 1))",
+     "nf (op2 .nmul (litS \"123456789012345678901234567890\") (litS \"987654321098765432109876543210\"))",
+     "nf (op2 .ndiv (litS \"121932631137021795226185032733622923332237463801111263526900\") (litS \"987654321098765432109876543210\"))",
+     "nf (op2 .nmod (litS \"121932631137021795226185032733622923332237463801111263526901\") (litS \"987654321098765432109876543210\"))",
+     "nf (op2 .nmul (lit 0) (unary 2))",
+     "nf (op2 .nadd (lit 0) (unary 2))",
+     "nf (op2 .nsub (unary 2) (lit 0))",
+     "nf (op2 .nadd (unary 2) (lit 3))",
+     "nf (.app (op .nsucc) (unary 1))",
+     "nf (.app (op .nadd) (lit 2))",
+     "nf (.ann (.lam (op2 .nsub (.var 0) (lit 3))) n2n)"]
+def ekArithExpected : String := "N\n5\n42\n0\n6\n3\n2\n0\n7\n#0\n#1\n#0\n#1\n10\n0\n18446744073709551616\n18446744073709551615\n121932631137021795226185032733622923332237463801111263526900\n123456789012345678901234567890\n1\n0\n(N.succ (N.succ N.zero))\n(N.succ (N.succ N.zero))\n((N.add (N.succ (N.succ N.zero))) 3)\ncon((#1, ((N.succ N.zero), (tt, tt))))\n(N.add 2)\nλx0. ((N.sub x0) 3)\n"
+
+/-- (E-K) Literals and unary numerals are convertible both ways: the equation, conversion
+(a neutral `Vec n`), and the eliminators looking inside a literal. -/
+def ekConvCalls : List String :=
+    ["prfOk (eqN (lit 3) (unary 3))",
+     "prfOk (eqN (unary 3) (lit 3))",
+     "prfOk (eqN (op2 .nadd (lit 2) (lit 3)) (unary 5))",
+     "prfOk (eqN (app2 addC (unary 2) (lit 3)) (lit 5))",
+     "prfOk (eqN (app2 mulC (lit 3) (lit 4)) (lit 12))",
+     "prfOk (eqN (lit 0) zC)",
+     "tyOf (vecId (lit 3) (unary 3))",
+     "tyOf (vecId (unary 3) (lit 3))",
+     "tyOf (vecId (op2 .nadd (lit 1) (lit 2)) (.app sC (lit 2)))",
+     "tyOf (vecId (app2 subC (lit 5) (lit 2)) (lit 3))",
+     "hnf (.app isZeroC (lit 0))",
+     "hnf (.app isZeroC (lit 7))",
+     "hnf (.app predC (lit 10))"]
+def ekConvExpected : String := "True\nTrue\nTrue\nTrue\nTrue\nTrue\n(x0 : (Vec 3)) → (Vec (N.succ (N.succ (N.succ N.zero))))\n(x0 : (Vec (N.succ (N.succ (N.succ N.zero))))) → (Vec 3)\n(x0 : (Vec 3)) → (Vec (N.succ 2))\n(x0 : (Vec ((N.sub 5) 2))) → (Vec 3)\n#0\n#1\n9\n"
+
+/-- (E-K) Rejections: different numbers, a literal at another type, an ill-typed
+registration, an operation registered at the wrong type or with a non-constant. -/
+def ekRejectCalls : List String :=
+    ["okErr (infer (TCtx.inProof empty) (sortsInfer (eqN (lit 3) (unary 4))))",
+     "okErr (infer (TCtx.inProof empty) (sortsInfer (eqN (unary 4) (lit 3))))",
+     "okErr (infer (TCtx.inProof empty) (sortsInfer (eqN (op2 .nadd (lit 2) (lit 2)) (lit 5))))",
+     "okErr (infer empty (sortsInfer (vecId (lit 3) (unary 4))))",
+     "okErr (infer empty (sortsInfer (vecId (lit 2) (lit 3))))",
+     "tyOf (.ann (lit 3) (.enum 2))",
+     "tyOf (.nlit (knOfNat 1) (.mk nC sC sC))",
+     "tyOf (.nlit (knOfNat 1) (.mk nC zC zC))",
+     "tyOf (.nlit (knOfNat 1) (.mk (.univ 0) zC sC))",
+     "tyOf (.natFn .nadd nb predC)",
+     "tyOf (.natFn .nadd nb (lit 3))"]
+def ekRejectExpected : String := "error\nerror\nerror\nerror\nerror\nerror: type mismatch: expected Enum2, got N\nerror: the registered nat.zero is not a N\nerror: the registered nat.succ is not a function from and to N\nerror: numerals need `builtin nat`, `builtin nat.zero` and `builtin nat.succ` registered as definitions\nerror: nat.add is registered with a constant of the wrong type: N.pred\nerror: nat.add is registered with a term that is not a constant\n"
+
+/-- (E-K) The cost literals remove (`wiz-notes/elab-evaluator-plan.md` §3.5: the hygiene
+mark `✝` is code 10013): the equation `77 * 130 + 3 = 10013`, once with the registered
+operations on literals and once with the definitions on unary numerals. Prints both
+verdicts and the two times in nanoseconds. -/
+def ekTimingMain : String :=
+  "def unaryWork : Tm := eqN (app2 addC (app2 mulC (unary 77) (unary 130)) (unary 3)) (unary 10013)\n" ++
+  "def litWork : Tm := eqN (op2 .nadd (op2 .nmul (lit 77) (lit 130)) (lit 3)) (lit 10013)\n" ++
+  "def main : IO Unit := do\n" ++
+  "  t0 ← Clock.monotonic;\n" ++
+  "  IO.println (prfOk litWork);\n" ++
+  "  t1 ← Clock.monotonic;\n" ++
+  "  IO.println (prfOk unaryWork);\n" ++
+  "  t2 ← Clock.monotonic;\n" ++
+  "  IO.println (String.append (Nat.toString (Duration.sub t1 t0).ns) (String.append \" \" (Nat.toString (Duration.sub t2 t1).ns)))\n"
+
 def selfHostGroup : Group where
   name := "selfhost"
   exercise := "Stages 12b–14q"
@@ -2811,7 +2968,39 @@ def selfHostGroup : Group where
           ("mutual\ninductive A where\n  | a\ninductive B where\n  | b (x : A)\n  deriving BEq\nend\n", false)] },
 
     { name := "(A11) a rejected derivation is reported at the command's line and column (D6)", run := fun _ =>
-        selfhostCheckFails selfhostDerivingSpan selfhostDerivingSpanExpected }
+        selfhostCheckFails selfhostDerivingSpan selfhostDerivingSpanExpected },
+
+    -- (E-K) number literals in `Kernel.wiz` (`Tm.nlit`, `Tm.natFn`): the Lean kernel's
+    -- `natLit`/`natOp` rules, on hand-written terms (the frontend does not emit literals yet)
+    { name := "(E-K) Kernel.wiz literals: the registered operations compute natively on literals (exact past 64 bits), with the zero shortcuts and the stuck applications of the Lean kernel", run := fun _ => do
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        ioRun (kernel ++ "\n" ++ ekNatDefs ++ ekMain ekArithCalls) ekArithExpected },
+
+    { name := "(E-K) Kernel.wiz literals: a literal and its unary numeral are convertible both ways (the equation, conversion, ind looking inside a literal)", run := fun _ => do
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        ioRun (kernel ++ "\n" ++ ekNatDefs ++ ekMain ekConvCalls) ekConvExpected },
+
+    { name := "(E-K) Kernel.wiz literals: different numbers, a literal at another type and ill-typed registrations are rejected", run := fun _ => do
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        ioRun (kernel ++ "\n" ++ ekNatDefs ++ ekMain ekRejectCalls) ekRejectExpected },
+
+    { name := "(E-K) Kernel.wiz literals: 77 * 130 + 3 = 10013 by literals is at least 10 times faster than by unary numerals", run := fun _ => do
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        ioRunWith ("import Sys\n" ++ kernel ++ "\n" ++ ekNatDefs ++ ekTimingMain) fun out => do
+          match out.splitOn "\n" with
+          | l :: u :: t :: _ =>
+            unless l == "True" && u == "True" do
+              throw (IO.userError s!"the equation was not decided True both ways: {l} / {u}")
+            match t.splitOn " " with
+            | [a, b] => match a.toNat?, b.toNat? with
+              | some lit, some unary =>
+                -- (a generous bound: a light probe measured about 64 µs against 1.2 s; the
+                -- ratio, not the times, is the claim, and the machine is shared)
+                unless lit * 10 < unary do
+                  throw (IO.userError s!"literals were not 10 times faster: {lit} ns against {unary} ns")
+              | _, _ => throw (IO.userError s!"unexpected timing line: {t}")
+            | _ => throw (IO.userError s!"unexpected timing line: {t}")
+          | _ => throw (IO.userError s!"unexpected output: {out}") }
 
   ]
 

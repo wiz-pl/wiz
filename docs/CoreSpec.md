@@ -1620,7 +1620,8 @@ operations compute natively on two literals and otherwise use their definitions
 (`Eval.lean:516`). `ind` on a numeral is glued (`Val.lazyInd`) so that it computes lazily.
 **Nothing checks that a registration is correct** (that `N` is a natural-number type and
 that the native operation agrees with the registered definition). The registrations are
-trusted like axioms (§13, Status.md, O3).
+trusted like axioms (§13, Status.md, O3). `Kernel.wiz` has the same rules (E-K, §15);
+there a literal carries its registration and the kernel checks that it is well typed.
 
 ---
 
@@ -2094,7 +2095,7 @@ Each item says what the code does; the code is what the kernel checks.
 | `scase` at a quantity (K1) | `q` a quantity term | `q` a literal (`Tm.scase l q …`, `Spine.sscase`); the same rule, `U_m + q·U_x`, payload at `q` |
 | the unit eliminator `let () := u; b` | `Term.letUnit`, `checkUnit`; erasure evaluates `u` | `Tm.letUnit`, `checkUnit`, the same rule; `Backend.wiz` refuses it (lazy `let`s), the frontend never produces it |
 | `split` (`let (x, y)`) | yes | **no**. Projections need an unrestricted pair in both kernels (§7.1, R1), so a pair held at quantity 1 cannot be consumed in Kernel.wiz's fragment, nor at all in the self-hosted language (no `let (x, y)`; its `IO` and `Prod` are at ω): every term that projects one is rejected by both kernels, and terms with `split` are outside the fragment (the differential test's term type `MTm` has no `split`) |
-| numerals, `natOp` | yes | no |
+| numerals, `natOp` | yes | **yes since E-K** (`Tm.nlit`, `Tm.natFn`, `Val.vnat`, `Val.vnatfn`): a literal carries its registration (`NatB`: the `nat`, `nat.zero`, `nat.succ` constants; there is no table), which `natBOk` checks where it is used (`zero : nat`, `succ : nat → nat`), so a literal is always a well-typed `succⁿ zero`. Numbers are exact (`KNat`, 24-bit limbs; not `rt.c`'s 63-bit words). The same rules as `vNatOp`/`vNatView`/`vEq`/`conv` for `succ`, `pred`, `add`, `sub`, `mul`, `div`, `mod`, `beq`, `blt` (the `natFast` shortcuts and the stuck `x - n` included); **not yet**: `pow`, the bitwise operations, shifts and `log2` (their constants unfold), the conversion-side `vNatStep`, and `Val.lazyInd` (`ind` on a literal computes its hypotheses eagerly, as on any constructor). The frontend does not emit literals yet (its hook: `natLitDigits`, `natRegistered`) |
 | levels of data | `Level` | closed numerals (`descr l`, `mu l`, `ulift l`) |
 | `ULift` (Q4) | `ulift k l`/`up`/`down`, `cast` needs a level never `0` and `k ≡ k'` | `ulift k l`/`up`/`down` at closed levels (`vulift`, `vup`, `sdown`); the same rules |
 | component sorts (mandatory sorts) | `BinderSorts ⟨dom, cod⟩` on `pi`/`sigma`, `Level`s; a hole is `Level.hole` | `pi q i j`, `sigma q i j` (`Lvl`; `piq`, `sigmaq`, `sorted` are gone); a hole is `Lvl.lhole`. The templates write closed numerals. The frontend fills holes with the sorts pass (`sortsTy`, `sortsClosed`: the marking pass at `TCtx.pm` 4/5, no markers) |

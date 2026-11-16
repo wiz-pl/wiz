@@ -5,9 +5,10 @@ import IO
 -- analysis (stage 14f), `Prop` with proof irrelevance (stage 14g), observational
 -- equality (stage 14h), descriptions and data (stage 14i), induction (stage 14j),
 -- global constants (stage 14k) and universe-polymorphic ones (stage 14l), quantities
--- (stage 14m), sizes and subtyping (stage 14n), sized recursion (stage 14o), `let`, and
--- type ascriptions. Normalisation by evaluation, as in `Eval.lean`: terms evaluate to values
--- with closures (an environment and a body), values quote back to normal forms, and
+-- (stage 14m), sizes and subtyping (stage 14n), sized recursion (stage 14o), `let`,
+-- type ascriptions, and number literals (lane E-K). Normalisation by evaluation, as in
+-- `Eval.lean`: terms evaluate to values with closures (an environment and a body),
+-- values quote back to normal forms, and
 -- conversion compares values at their types (with η, and all proofs of a proposition
 -- equal). Values carry `Sort` levels: `Prop` is `Sort 0`, and `U n` is `Sort (n + 1)`.
 --
@@ -42,6 +43,214 @@ inductive Lvl where
   -- it by unification and substitutes it before the kernel sees a declaration (like a
   -- term metavariable, an unsolved one is an error)
   | lmvar (id : Nat)
+
+-- **Number literals** (lane E-K; `Term.natLit` in the Lean kernel). A literal is a number
+-- of the type registered as `builtin nat`: it means `succ (… (succ zero))`, and it unfolds
+-- one step at a time when something looks inside it (`natView`). The registered
+-- operations (`builtin nat.add := Nat.add`, …) compute on literals natively (`vNatOp`),
+-- as the Lean kernel's `natNative?` does.
+--
+-- The numbers are **exact**, as the Lean kernel's are. They are not `Nat`: in the
+-- self-hosted compiler's runtime (`selfhost/rt.c`) a `Nat` is a 63-bit word that wraps
+-- (C13). So the kernel has its own bignum, `KNat`: little-endian limbs of 24 bits each, held
+-- in `Nat`s. Every intermediate value (a limb product plus a carry) stays below `2^49`,
+-- so the limb arithmetic is exact under either runtime, and nothing here depends on
+-- `rt.c` or GMP. A `KNat` is normalised: no zero limb at the top, and `0` is no limbs.
+inductive KNat where
+  | mk (limbs : List Nat)
+-- the limb base, `2^24` (written as a product: a big literal in the selfhost sources is
+-- built by halving, `wiz-language-pitfalls`)
+def knBase : Nat := Nat.mul 4096 4096
+-- drop zero limbs at the top
+def knTrim : List Nat → List Nat
+  | .nil => .nil
+  | .cons x xs => match knTrim xs with
+    | .nil => match Nat.beq x 0 with
+      | .true => .nil
+      | .false => .cons x .nil
+    | r => .cons x r
+def knLimbs : KNat → List Nat
+  | .mk ls => ls
+def knZero : KNat := .mk .nil
+def knIsZero : KNat → Bool
+  | .mk .nil => .true
+  | _ => .false
+-- a machine number as a `KNat` (exact for any `Nat` the runtime holds)
+partial def knLimbsOf (n : Nat) : List Nat := match Nat.beq n 0 with
+  | .true => .nil
+  | .false => .cons (Nat.mod n knBase) (knLimbsOf (Nat.div n knBase))
+def knOfNat (n : Nat) : KNat := .mk (knLimbsOf n)
+-- a's limbs plus b's, plus a carry
+partial def knAddL (a b : List Nat) (carry : Nat) : List Nat := match a with
+  | .nil => match b with
+    | .nil => match Nat.beq carry 0 with
+      | .true => .nil
+      | .false => .cons carry .nil
+    | .cons y ys =>
+      let s := y + carry;
+      .cons (Nat.mod s knBase) (knAddL .nil ys (Nat.div s knBase))
+  | .cons x xs => match b with
+    | .nil =>
+      let s := x + carry;
+      .cons (Nat.mod s knBase) (knAddL xs .nil (Nat.div s knBase))
+    | .cons y ys =>
+      let s := x + y + carry;
+      .cons (Nat.mod s knBase) (knAddL xs ys (Nat.div s knBase))
+def knAdd (a b : KNat) : KNat := .mk (knAddL (knLimbs a) (knLimbs b) 0)
+-- `a - b` for `a ≥ b`, with a borrow (the result may have zero limbs at the top)
+def knTail : List Nat → List Nat
+  | .nil => .nil
+  | .cons _ xs => xs
+partial def knSubL (a b : List Nat) (borrow : Nat) : List Nat := match a with
+  | .nil => .nil
+  | .cons x xs =>
+    let y := (match b with
+      | .nil => 0
+      | .cons y _ => y) + borrow;
+    let rest := knTail b;
+    match Nat.lt x y with
+    | .true => .cons (x + knBase - y) (knSubL xs rest 1)
+    | .false => .cons (x - y) (knSubL xs rest 0)
+def knLen : List Nat → Nat
+  | .nil => 0
+  | .cons _ xs => knLen xs + 1
+def knRev : List Nat → List Nat → List Nat
+  | .nil, acc => acc
+  | .cons x xs, acc => knRev xs (.cons x acc)
+-- most significant limb first, the same length: 0 less, 1 equal, 2 greater
+def knCmpRev : List Nat → List Nat → Nat
+  | .nil, _ => 1
+  | .cons x xs, ys => match ys with
+    | .nil => 1
+    | .cons y ys' => match Nat.lt x y with
+      | .true => 0
+      | .false => match Nat.lt y x with
+        | .true => 2
+        | .false => knCmpRev xs ys'
+-- compare: 0 less, 1 equal, 2 greater (normalised limbs: the longer one is greater)
+def knCmp (a b : KNat) : Nat :=
+  let la := knLen (knLimbs a);
+  let lb := knLen (knLimbs b);
+  match Nat.lt la lb with
+  | .true => 0
+  | .false => match Nat.lt lb la with
+    | .true => 2
+    | .false => knCmpRev (knRev (knLimbs a) .nil) (knRev (knLimbs b) .nil)
+def knEq (a b : KNat) : Bool := Nat.beq (knCmp a b) 1
+def knLt (a b : KNat) : Bool := Nat.beq (knCmp a b) 0
+-- truncated subtraction, as `Nat.sub`: `a - b = 0` when `a ≤ b`
+def knSub (a b : KNat) : KNat := match Nat.beq (knCmp a b) 2 with
+  | .true => .mk (knTrim (knSubL (knLimbs a) (knLimbs b) 0))
+  | .false => knZero
+def knOne : KNat := .mk (.cons 1 .nil)
+def knSucc (a : KNat) : KNat := knAdd a knOne
+def knPred (a : KNat) : KNat := knSub a knOne
+-- the limbs times a small number `m < 2^24`, plus a carry
+partial def knMulSmallL (a : List Nat) (m carry : Nat) : List Nat := match a with
+  | .nil => match Nat.beq carry 0 with
+    | .true => .nil
+    | .false => .cons (Nat.mod carry knBase) (knMulSmallL .nil m (Nat.div carry knBase))
+  | .cons x xs =>
+    let p := Nat.mul x m + carry;
+    .cons (Nat.mod p knBase) (knMulSmallL xs m (Nat.div p knBase))
+-- schoolbook multiplication, one limb of `a` at a time
+def knMulL : List Nat → List Nat → List Nat
+  | .nil, _ => .nil
+  | .cons x xs, b => knAddL (knMulSmallL b x 0) (.cons 0 (knMulL xs b)) 0
+def knMul (a b : KNat) : KNat := .mk (knTrim (knMulL (knLimbs a) (knLimbs b)))
+-- the quotient's limbs (least significant first) and the remainder of the limbs (most
+-- significant first) by a small divisor `0 < d < 2^24`
+inductive KNatQ where
+  | mk (q : List Nat) (r : Nat)
+def knDivSmallRev : List Nat → Nat → Nat → List Nat → KNatQ
+  | .nil, _, r, acc => .mk acc r
+  | .cons x xs, d, r, acc =>
+    let cur := Nat.mul r knBase + x;
+    knDivSmallRev xs d (Nat.mod cur d) (.cons (Nat.div cur d) acc)
+-- the bits of the limbs, most significant first: `k` bits of `x` from bit `k - 1` down
+def knBitsOf : Nat → Nat → List Nat → List Nat
+  | _, .zero, acc => acc
+  | x, .succ k, acc => knBitsOf (Nat.div x 2) k (.cons (Nat.mod x 2) acc)
+def knBitsRev : List Nat → List Nat
+  | .nil => .nil
+  | .cons x xs => List.append (knBitsOf x 24 .nil) (knBitsRev xs)
+inductive KNatD where
+  | mk (q r : KNat)
+-- binary long division, one bit at a time (the remainder stays below the divisor)
+def knDivBits : List Nat → KNat → KNat → KNat → KNatD
+  | .nil, _, q, r => .mk q r
+  | .cons bit bits, d, q, r =>
+    let r2 := KNat.mk (knTrim (knAddL (knAddL (knLimbs r) (knLimbs r) 0) (knLimbsOf bit) 0));
+    let q2 := knAdd q q;
+    match knLt r2 d with
+    | .true => knDivBits bits d q2 r2
+    | .false => knDivBits bits d (knSucc q2) (knSub r2 d)
+-- `a / b` and `a % b`, as `Nat.div`/`Nat.mod`: `a / 0 = 0`, `a % 0 = a`
+def knDivMod (a b : KNat) : KNatD := match knLimbs b with
+  | .nil => .mk knZero a
+  | .cons d .nil => match knDivSmallRev (knRev (knLimbs a) .nil) d 0 .nil with
+    | .mk q r => .mk (.mk (knTrim q)) (knOfNat r)
+  | _ => knDivBits (knBitsRev (knRev (knLimbs a) .nil)) b knZero knZero
+def knDiv (a b : KNat) : KNat := match knDivMod a b with
+  | .mk q _ => q
+def knMod (a b : KNat) : KNat := match knDivMod a b with
+  | .mk _ r => r
+-- a small `KNat` as a machine number (the caller knows it is small)
+def knToNatL : List Nat → Nat
+  | .nil => 0
+  | .cons x xs => x + Nat.mul knBase (knToNatL xs)
+-- in decimal, one digit at a time
+partial def knDigits (a : List Nat) (acc : List Char) : List Char := match knTrim a with
+  | .nil => acc
+  | ls => match knDivSmallRev (knRev ls .nil) 10 0 .nil with
+    | .mk q r => knDigits q (.cons (Char.mk (r + 48)) acc)
+def knShow (a : KNat) : String := match knLimbs a with
+  | .nil => "0"
+  | ls => String.mk (knDigits ls .nil)
+-- (the frontend's hook) a numeral's digits, exactly: a numeral in the source may be past
+-- the runtime's 63 bits
+def knOfDigitsL : List Char → KNat → KNat
+  | .nil, acc => acc
+  | .cons c cs, acc => knOfDigitsL cs (.mk (knAddL (knMulSmallL (knLimbs acc) 10 0) (knLimbsOf (Char.code c - 48)) 0))
+def knOfDigits (s : String) : KNat := match s with
+  | .mk cs => knOfDigitsL cs knZero
+-- the registered operations on numbers that the kernel computes natively (the Lean
+-- kernel's `natNative?` for these keys, and its comparisons `nat.beq`/`nat.blt`)
+inductive NatOp where
+  | nsucc
+  | npred
+  | nadd
+  | nsub
+  | nmul
+  | ndiv
+  | nmod
+  | nbeq
+  | nblt
+def natOpCode : NatOp → Nat
+  | .nsucc => 0
+  | .npred => 1
+  | .nadd => 2
+  | .nsub => 3
+  | .nmul => 4
+  | .ndiv => 5
+  | .nmod => 6
+  | .nbeq => 7
+  | .nblt => 8
+def natOpEq (a b : NatOp) : Bool := Nat.beq (natOpCode a) (natOpCode b)
+def natOpArity : NatOp → Nat
+  | .nsucc => 1
+  | .npred => 1
+  | _ => 2
+def natOpKey : NatOp → String
+  | .nsucc => "nat.succ"
+  | .npred => "nat.pred"
+  | .nadd => "nat.add"
+  | .nsub => "nat.sub"
+  | .nmul => "nat.mul"
+  | .ndiv => "nat.div"
+  | .nmod => "nat.mod"
+  | .nbeq => "nat.beq"
+  | .nblt => "nat.blt"
 
 mutual
 inductive Tm where
@@ -147,9 +356,24 @@ inductive Tm where
   -- suspends it and never looks at it. Outside a proof, `infer` and `check` require every
   -- term whose sort may be `0` to be marked or neutral-shaped ("the proof marker", below).
   | prf (l : Lvl) (t : Tm)
+  -- (E-K) a number literal of the registered `nat` type (`Term.natLit`): it means
+  -- `succ (… (succ zero))` with `n` `succ`s. It carries the registration it needs (this
+  -- kernel has no table of globals): the type and its two constructors, as constants
+  | nlit (n : KNat) (nb : NatB)
+  -- (E-K) a registered operation on numbers (`builtin nat.add := Nat.add`; the value the
+  -- Lean kernel's `vBuiltin?` gives such a constant): the constant `d` (its definition),
+  -- which computes natively once its arguments are literals (`vNatOp`)
+  | natFn (op : NatOp) (nb : NatB) (d : Tm)
 inductive Tms where
   | tnil
   | tcons (t : Tm) (rest : Tms)
+-- (E-K) the registration of numbers: the constants `nat`, `nat.zero` and `nat.succ`
+-- (`builtin nat := Nat`, …). The checker checks it wherever a literal or an operation is
+-- used (`natBOk`), so a literal is always a well-typed `succ (… zero)`; what is trusted
+-- is only that each registered operation agrees with its definition (the trust ledger's
+-- `builtin` rows, as for the Lean kernel)
+inductive NatB where
+  | mk (nat zero succ : Tm)
 end
 
 mutual
@@ -196,6 +420,12 @@ inductive Val where
   | vup (a : Val)
   -- a stuck head and the eliminations applied to it
   | vne (head : Head) (spine : Spine)
+  -- (E-K) a number literal (`Val.natLit`): `whnf` leaves it as it is, and `natView`
+  -- shows it as a constructor, one step deep
+  | vnat (n : KNat) (nb : NatB)
+  -- (E-K) a registered operation applied to the arguments `args` (the last one first),
+  -- fewer than it takes: `vapp` collects them, and the last one runs `vNatOp`
+  | vnatfn (op : NatOp) (nb : NatB) (d : Tm) (args : Env)
 inductive Env where
   | nil
   | cons (v : Val) (rest : Env)
@@ -566,6 +796,8 @@ def tmSubst (ps : List String) (ls : List Lvl) : Tm → Tm
   | .down t => .down (tmSubst ps ls t)
   -- (the marker's level is substituted: `prf u t` is a suspended proof at `u := 0`)
   | .prf l t => .prf (substLvl ps ls l) (tmSubst ps ls t)
+  -- (E-K) the operation's constant is closed, with no level parameters
+  | .natFn op nb d => .natFn op nb d
   | t => t
 def tmsSubst (ps : List String) (ls : List Lvl) : Tms → Tms
   | .tnil => .tnil
@@ -790,11 +1022,17 @@ def tmEq : Tm → Tm → Bool
   | .prf l a, .prf l' b => Bool.and (lvlEquiv l l') (tmEq a b)
   | .ind l a b v c d e f, .ind l' a' b' v' c' d' e' f' => Bool.and (lvlEquiv l l') (Bool.and (lvlEquiv v v')
       (Bool.and (tmEq a a') (Bool.and (tmEq b b') (Bool.and (tmEq c c') (Bool.and (tmEq d d') (Bool.and (tmEq e e') (tmEq f f')))))))
+  -- (E-K) literals by their number and registration, operations by their key and constant
+  | .nlit n nb, .nlit n' nb' => Bool.and (knEq n n') (natBEq nb nb')
+  | .natFn o nb d, .natFn o' nb' d' => Bool.and (natOpEq o o') (Bool.and (natBEq nb nb') (tmEq d d'))
   | _, _ => .false
 def tmsEq : Tms → Tms → Bool
   | .tnil, .tnil => .true
   | .tcons a r, .tcons b r' => Bool.and (tmEq a b) (tmsEq r r')
   | _, _ => .false
+-- (E-K) the same registration of numbers (constants: by name)
+def natBEq : NatB → NatB → Bool
+  | .mk n z s, .mk n' z' s' => Bool.and (tmEq n n') (Bool.and (tmEq z z') (tmEq s s'))
 end
 
 -- The templates of `Templates.lean`, as terms (the same de Bruijn layout; quantity
@@ -1042,6 +1280,8 @@ def usesVar : Nat → Tm → Bool
   | i, .qty => .false
   | i, .qlit _ => .false
   | i, .prf _ t => usesVar i t
+  | i, .nlit _ _ => .false
+  | i, .natFn _ _ d => usesVar i d
   | _, _ => .true
 
 mutual
@@ -1122,6 +1362,9 @@ def eval : Env → Tm → Val
   | _, .sortL l => .vsort l
   | _, .const n ps ls v ty => .vglued (.hconst n ps ls v ty) .snil (memo (fun _ => eval .nil (substIfAny ps ls v)))
   | _, .axiomC n ty => .vne (.haxiom n ty) .snil
+  -- (E-K) a literal is a value; an operation collects its arguments (`vapp`)
+  | _, .nlit n nb => .vnat n nb
+  | _, .natFn op nb d => .vnatfn op nb d .nil
   | env, .ulift k l A => .vulift k l (eval env A)
   | env, .up a => .vup (eval env a)
   | env, .down t => vdown (eval env t)
@@ -1216,6 +1459,7 @@ def vapp : Val → Val → Val
   --<sol
   | .vlam env b, a => instC env a b
   | .vne h sp, a => .vne h (.sapp sp a)
+  | .vnatfn op nb d args, a => vNatFnApp op nb d (.cons a args)
   | v, _ => v
   --|ex
   --| | v, _ => v
@@ -1244,6 +1488,109 @@ def vdown : Val → Val
   | .vup a => a
   | .vne h sp => .vne h (.sdown sp)
   | v => v
+-- **(E-K) Registered operations on numbers** (`vNatOp` in `Eval.lean`). An operation
+-- applied to all its arguments computes natively when they are literals (of its own
+-- registration), else it is its definition's application, glued under its name. The rules
+-- are the Lean kernel's, for the keys this kernel computes (`NatOp`):
+-- * `natFast`: `Nat.mul 0 x ↦ 0`, `Nat.add 0 x ↦ x`, `Nat.sub x 0 ↦ x`, without forcing `x`;
+-- * on literals: `succ`, `pred`, `add`, `sub` (truncated), `mul`, `div` (`n / 0 = 0`),
+--   `mod` (`n % 0 = n`) natively; `beq a b` and `blt a b` are the definition's own result
+--   at small literals: `d 0 (if a = b then 0 else 1)`, `d 0 (if a < b then 1 else 0)`;
+-- * otherwise the definition: `succ` applied (a constructor, not glued), `x - n` with `x`
+--   stuck and `n ≥ 1` a literal stays a stuck application (`Nat.subFrom` would build `n`
+--   `pred`s), and anything else is the glued application.
+-- the operation once it has its last argument (the arguments in `args`, the last first)
+def vNatFnApp (op : NatOp) (nb : NatB) (d : Tm) (args : Env) : Val := match args with
+  | .cons b rest => match Nat.beq (natOpArity op) 1 with
+    | .true => vNatOp1 op nb d b
+    | .false => match rest with
+      | .cons a .nil => vNatOp2 op nb d a b
+      | _ => .vnatfn op nb d args
+  | .nil => .vnatfn op nb d args
+-- the literal's number, if `v` is a literal of this registration
+def natLitOf (nb : NatB) (v : Val) : Option KNat := match whnf v with
+  | .vnat n nb' => match natBEq nb nb' with
+    | .true => .some n
+    | .false => .none
+  | _ => .none
+def natIsZeroLit (nb : NatB) (v : Val) : Bool := match natLitOf nb v with
+  | .some n => knIsZero n
+  | .none => .false
+-- the definition applied (glued under the constant's name)
+def natDefApp (d : Tm) (a : Val) : Val := vapp (eval .nil d) a
+def vNatOp1 (op : NatOp) (nb : NatB) (d : Tm) (a : Val) : Val := match natLitOf nb a with
+  | .some n => match op with
+    | .nsucc => .vnat (knSucc n) nb
+    | .npred => .vnat (knPred n) nb
+    | _ => natDefApp d a
+  | .none => match op with
+    -- (`succ` is a constructor: its definition applied, not glued)
+    | .nsucc => vapp (whnf (eval .nil d)) a
+    | _ => natDefApp d a
+def vNatOp2 (op : NatOp) (nb : NatB) (d : Tm) (a b : Val) : Val := match natFast op nb a b with
+  | .some v => v
+  | .none => match natLitOf nb a with
+    | .some x => match natLitOf nb b with
+      | .some y => natNative op nb d x y
+      | .none => natUnfold op nb d a b
+    | .none => natUnfold op nb d a b
+-- `Nat.mul 0 x ↦ 0`, `Nat.add 0 x ↦ x`, `Nat.sub x 0 ↦ x` (`natFast?`)
+def natFast (op : NatOp) (nb : NatB) (a b : Val) : Option Val := match op with
+  | .nmul => match natIsZeroLit nb a with
+    | .true => .some (.vnat knZero nb)
+    | .false => .none
+  | .nadd => match natIsZeroLit nb a with
+    | .true => .some b
+    | .false => .none
+  | .nsub => match natIsZeroLit nb b with
+    | .true => .some a
+    | .false => .none
+  | _ => .none
+def natNative (op : NatOp) (nb : NatB) (d : Tm) (x y : KNat) : Val := match op with
+  | .nadd => .vnat (knAdd x y) nb
+  | .nsub => .vnat (knSub x y) nb
+  | .nmul => .vnat (knMul x y) nb
+  | .ndiv => .vnat (knDiv x y) nb
+  | .nmod => .vnat (knMod x y) nb
+  | .nbeq => whnf (vapp (natDefApp d (.vnat knZero nb)) (.vnat (match knEq x y with
+      | .true => knZero
+      | .false => knOne) nb))
+  | .nblt => whnf (vapp (natDefApp d (.vnat knZero nb)) (.vnat (match knLt x y with
+      | .true => knOne
+      | .false => knZero) nb))
+  | _ => vapp (natDefApp d (.vnat x nb)) (.vnat y nb)
+def natUnfold (op : NatOp) (nb : NatB) (d : Tm) (a b : Val) : Val := match natStuckSub op nb a b with
+  | .true => (match d with
+    | .const n ps ls v ty => .vne (.hconst n ps ls v ty) (.sapp (.sapp .snil a) b)
+    | _ => vapp (natDefApp d a) b)
+  | .false => vapp (natDefApp d a) b
+-- `x - n`, `x` stuck and `n ≥ 1` a literal
+def natStuckSub (op : NatOp) (nb : NatB) (a b : Val) : Bool := match op with
+  | .nsub => match whnf a with
+    | .vne _ _ => match natLitOf nb b with
+      | .some n => Bool.not (knIsZero n)
+      | .none => .false
+    | _ => .false
+  | _ => .false
+-- **(E-K) A literal as a constructor**, one step deep (`vNatView`): `0 ↦ zero`,
+-- `n + 1 ↦ succ n`, by the constructors' definitions (not their registered values). Other
+-- values are as they are. The argument is in weak head normal form, and so is the result.
+def natView (v : Val) : Val := match v with
+  | .vnat n nb => match nb with
+    | .mk _ z sc => match knIsZero n with
+      | .true => whnf (eval .nil z)
+      | .false => whnf (vapp (eval .nil sc) (.vnat (knPred n) nb))
+  | _ => v
+-- `whnf`, a literal shown as a constructor
+def whnfView (v : Val) : Val := natView (whnf v)
+-- two literals of one registration: equal when their numbers are (`.none`: not two such)
+def natLitsEq (a b : Val) : Option Bool := match a with
+  | .vnat n nb => match b with
+    | .vnat m nb' => match natBEq nb nb' with
+      | .true => .some (knEq n m)
+      | .false => .none
+    | _ => .none
+  | _ => .none
 -- `up` when `lifted` (a lifted tag, Q4)
 def upIf (lifted : Bool) (v : Val) : Val := match lifted with
   | .true => .vup v
@@ -1270,7 +1617,7 @@ def vDelimW : Lvl → Val → Val → Val → Val → Val → Val → Val
   | _, _, _, _, _, _, d => d
 -- induction (`vInd` in `Eval.lean`): on a constructor, the method applied to the payload
 -- and its hypotheses (`ind` at each recursive field)
-def vInd (l : Lvl) (I D : Val) (v : Lvl) (P m i x : Val) : Val := vIndW l I D v P m i (whnf x)
+def vInd (l : Lvl) (I D : Val) (v : Lvl) (P m i x : Val) : Val := vIndW l I D v P m i (whnfView x)
 def vIndW : Lvl → Val → Val → Lvl → Val → Val → Val → Val → Val
   | l, I, D, v, P, m, i, .vcon xs =>
     -- fun j y => ind … j y;  inside: y0 j1 m2 P3 D4 I5
@@ -1281,7 +1628,7 @@ def vIndW : Lvl → Val → Val → Lvl → Val → Val → Val → Val → Val
   | l, I, D, v, P, m, i, .vne h sp => .vne h (.sind sp l I D v P m i)
   | _, _, _, _, _, _, _, x => x
 -- sized recursion (`vSfix`): on a constructor, `f ∞ rec i x`, where `rec j i y` recurses
-def vSfix (l : Lvl) (I D : Val) (v : Lvl) (P f sz i x : Val) : Val := match whnf x with
+def vSfix (l : Lvl) (I D : Val) (v : Lvl) (P f sz i x : Val) : Val := match whnfView x with
   | .vcon xs =>
     -- inside: y0 i1 j2 f3 P4 D5 I6
     let rec_ : Val := .vlam (.cons f (.cons P (.cons D (.cons I .nil))))
@@ -1290,7 +1637,7 @@ def vSfix (l : Lvl) (I D : Val) (v : Lvl) (P f sz i x : Val) : Val := match whnf
   | .vne h sp => .vne h (.ssfix sp l I D v P f sz i)
   | x' => x'
 -- sized case analysis (`vScase`): `m ∞ i xs` (the quantity plays no part)
-def vScase (l : Lvl) (q : Q) (I D : Val) (v : Lvl) (P m sz i x : Val) : Val := match whnf x with
+def vScase (l : Lvl) (q : Q) (I D : Val) (v : Lvl) (P m sz i x : Val) : Val := match whnfView x with
   | .vcon xs => vapp (vapp (vapp m .vszInf) i) xs
   | .vne h sp => .vne h (.sscase sp l q I D v P m sz i)
   | x' => x'
@@ -1326,13 +1673,26 @@ def nuFamilyAt (l : Lvl) (I D sz : Val) : Val :=
 -- `a = b` at `A`, by `A` (`vEq` in `Eval.lean`; the closures are the same templates)
 -- at a proposition, `True` (proof irrelevance: the equation would be ill typed, and two
 -- proofs are always convertible); otherwise by `A`
-def vEq (A a b : Val) : Val :=
-  let A' := whnf A;
-  match propSort A' with
-  | .some p => match p with
+def vEq (A a b : Val) : Val := vEqLit A (whnf a) (whnf b)
+-- (E-K) two literals: decided by their numbers (`True` or `False`), as in the Lean kernel
+def vEqLit (A a b : Val) : Val := match natLitsEq a b with
+  | .some r => match r with
     | .true => .vunit (ln 0)
-    | .false => vEqW A' (whnf a) (whnf b)
-  | .none => vEqW A' (whnf a) (whnf b)
+    | .false => .vempty (ln 0)
+  | .none =>
+    let A' := whnf A;
+    match propSort A' with
+    | .some p => match p with
+      | .true => .vunit (ln 0)
+      | .false => vEqNat A' a b
+    | .none => vEqNat A' a b
+-- (E-K) a literal side one step inside (`vNatView`) when both sides are then constructors;
+-- a stuck equation keeps its sides as they were
+def vEqNat (A a b : Val) : Val := match natView a with
+  | .vcon x => match natView b with
+    | .vcon y => vEqW A (.vcon x) (.vcon y)
+    | _ => vEqW A a b
+  | _ => vEqW A a b
 def vEqW : Val → Val → Val → Val
   | .vpi _ i _ a1 env b1, a, b => .vpi .qz i (ln 0) a1 (.cons b (.cons a (.cons (.vlam env b1) .nil)))
       (.eq (.app (.var 3) (.var 0)) (.app (.var 2) (.var 0)) (.app (.var 1) (.var 0)))
@@ -1628,7 +1988,11 @@ def groundTags (d : Nat) (I E E' : Val) (lifted : Bool) (k i : Nat) : Bool := ma
   | .true => match groundEqDesc (Nat.succ d) I (vapp E (upIf lifted (.vtag k i))) (vapp E' (upIf lifted (.vtag k i))) with
     | .true => groundTags d I E E' lifted k (Nat.succ i)
     | .false => .false
-def groundEqVal (T a b : Val) : Bool := groundValP (whnf T) (whnf a) (whnf b)
+def groundEqVal (T a b : Val) : Bool := groundValN (whnf T) (whnf a) (whnf b)
+-- (E-K) two literals by their numbers, else one step inside (`vNatView`)
+def groundValN (T a b : Val) : Bool := match natLitsEq a b with
+  | .some r => r
+  | .none => groundValP T (natView a) (natView b)
 def groundValP (T a b : Val) : Bool := match propSort T with
   | .some p => match p with
     | .true => .true
@@ -1769,7 +2133,7 @@ def famPayloadW (nu : Bool) (l : Lvl) (I D i s : Val) (l' : Lvl) (I' D' i' s' e 
         (.lam (.eqTy (.var 2) (interpApp l (.fst (.var 1)) (.fst (.snd (.var 1)))
           (.lam (famTm nu l (.fst (.var 2)) (.fst (.snd (.var 2))) (.var 0) (.var 4))) (.snd (.snd (.var 1))))));
       .some (.mk Xi Xi' (.vne (.htransp (famCodeTy l) (.vpair I (.vpair D i)) P (.vne (.hreflTy Xi) .snil) (.vpair I' (.vpair D' i')) e) .snil))
-def castMu (A B e t : Val) : Val := match whnf t with
+def castMu (A B e t : Val) : Val := match whnfView t with
   | .vcon x => match famPayload A B e with
     | .some p => match p with
       | .mk Xi Xi' e' => .vcon (vCast Xi Xi' e' x)
@@ -1867,9 +2231,17 @@ def quoteM (qm : Bool) : Nat → Val → Tm
   | l, .vglued h sp _ => quoteSpine qm l (quoteHead qm l h) sp
   | l, .vulift k u A => .ulift k u (quoteM qm l A)
   | l, .vup a => .up (quoteM qm l a)
+  -- (E-K) a literal reads back as itself; an operation short of arguments as the
+  -- operation applied to them
+  | _, .vnat n nb => .nlit n nb
+  | l, .vnatfn op nb d args => quoteNatArgs qm l (.natFn op nb d) args
   --|ex
   --| | _, _ => .univ 0
   --sol>
+-- (E-K) `h` applied to the arguments (the last one first)
+def quoteNatArgs (qm : Bool) (l : Nat) (h : Tm) : Env → Tm
+  | .nil => h
+  | .cons a rest => .app (quoteNatArgs qm l h rest) (quoteM qm l a)
 def quoteSpine (qm : Bool) : Nat → Tm → Spine → Tm
   | _, h, .snil => h
   | l, h, .sapp sp a => .app (quoteSpine qm l h sp) (quoteM qm l a)
@@ -2063,6 +2435,9 @@ def show (names : List String) : Nat → Tm → String
       (String.append ", " (show names l s))) (String.append (showBranches names l bs) ")")
   | _, .qty => "Qty"
   | _, .qlit q => qLit q
+  -- (E-K) a literal in decimal; an operation by its constant
+  | _, .nlit n _ => knShow n
+  | l, .natFn _ _ d => show names l d
   | l, .sigmaQ q _ _ a b => String.append (String.append (String.append "(%" (show names l q))
       (String.append (String.append " " (nameAt names l)) (String.append " : " (show names l a)))) (String.append ") × " (show names (l + 1) b))
 
@@ -2550,6 +2925,12 @@ def valSame : Nat → Val → Val → Option Nat
     | .vszInf => match b with
       | .vszInf => .some n
       | _ => .none
+    -- (E-K) two literals of one registration
+    | .vnat k nb => match b with
+      | .vnat k' nb' => match Bool.and (knEq k k') (natBEq nb nb') with
+        | .true => .some n
+        | .false => .none
+      | _ => .none
     | _ => .none
 def envSame : Nat → Env → Env → Option Nat
   | .zero, _, _ => .none
@@ -2642,11 +3023,7 @@ def conv : TCtx → Val → Val → Val → Bool
       | .vqty => match qtySame a b with
         | .some r => r
         | .none => convNe c a b
-      | .vmu l I D i _ => match whnf a with
-        | .vcon x => match whnf b with
-          | .vcon y => conv c (vInterp l I D (muFamily l I D) i) x y
-          | _ => convNe c a b
-        | _ => convNe c a b
+      | .vmu l I D i _ => convMu c l I D i (whnf a) (whnf b)
       | .vnu l I D i _ => match whnf a with
         | .vcocon x => match whnf b with
           | .vcocon y => conv c (vInterp l I D (nuFamily l I D) i) x y
@@ -2664,6 +3041,15 @@ def conv : TCtx → Val → Val → Val → Bool
   --|ex
   --| | _, _, _, _ => .false
   --sol>
+-- at a data type: two literals by their numbers, else (E-K: a literal one step inside,
+-- `vNatView`) two constructors by their payloads
+def convMu (c : TCtx) (l : Lvl) (I D i a b : Val) : Bool := match natLitsEq a b with
+  | .some r => r
+  | .none => match natView a with
+    | .vcon x => match natView b with
+      | .vcon y => conv c (vInterp l I D (muFamily l I D) i) x y
+      | _ => convNe c a b
+    | _ => convNe c a b
 def convTy (c : TCtx) (a b : Val) : Bool := match lazyDelta c a b with
   | .true => .true
   | .false => let a := whnf a; let b := whnf b; convTyGate c a b
@@ -2713,6 +3099,8 @@ def convNe (c : TCtx) (a b : Val) : Bool := match lazyDelta c a b with
   | .false => convNeW c (whnf a) (whnf b)
 def convNeW : TCtx → Val → Val → Bool
   | _, .vtag _ i, .vtag _ j => Nat.beq i j
+  -- (E-K) two literals of one registration
+  | _, .vnat n nb, .vnat m nb' => Bool.and (knEq n m) (natBEq nb nb')
   | _, .vtt, .vtt => .true
   -- **Regularity, decided by conversion** (InReg_conv; `unCast` in `Conv.lean`): a stuck
   -- cast between convertible types (inert ones) is its argument, on either side, with the
@@ -2900,6 +3288,8 @@ def neutralShaped : Tm → Bool
   | .eqRefl _ _ => .true
   | .tyRefl _ => .true
   | .subst _ _ _ _ _ _ => .true
+  -- (E-K) an operation is a constant
+  | .natFn _ _ _ => .true
   | _ => .false
 -- the requirement on `t`, found at the type `ty`: `.none`, or the error
 def requireMarker (c : TCtx) (t : Tm) (ty : Val) : Option String := match TCtx.pm c with
@@ -2958,6 +3348,64 @@ def modeIf (c : TCtx) (isProof : Bool) : TCtx := match inProofMode c with
 def evalAt (c : TCtx) (t : Tm) (ty : Val) : Val := match Bool.and (inProofMode c) (isProofTy c ty) with
   | .true => suspend (TCtx.env c) t
   | .false => eval (TCtx.env c) t
+
+-- **(E-K) Typing literals and operations.** A literal `n` is of the registered type `nat`
+-- (`Term.natLit` in `Check.lean`). Its registration is checked where it is used: `nat`,
+-- `nat.zero` and `nat.succ` are constants, `zero : nat` and `succ : nat → nat`. So a
+-- literal is always the well-typed `succ (… zero)` it means, and conversion and the
+-- eliminators can look inside it (`natView`). (The Lean kernel looks the registration up
+-- in its table and requires both constructors to be defined; this kernel has no table.)
+def natTyOf (nb : NatB) : Val := match nb with
+  | .mk n _ _ => eval .nil n
+def natArrowTm (n : Tm) : Nat → Tm
+  | .zero => n
+  | .succ k => .pi .qw .lhole .lhole n (natArrowTm n k)
+-- `nat → nat` and `nat → nat → nat`
+def natArrow (nb : NatB) (k : Nat) : Val := match nb with
+  | .mk n _ _ => match k with
+    | .zero => eval .nil n
+    | .succ k' => .vpi .qw .lhole .lhole (eval .nil n) .nil (natArrowTm n k')
+-- a constant's type (`.none`: not a constant). (An operation may be an axiom: computed
+-- natively on literals, stuck otherwise.)
+def natFnTyOf (d : Tm) : Option Val := match d with
+  | .const _ ps ls _ ty => .some (eval .nil (substIfAny ps ls ty))
+  | .axiomC _ ty => .some (eval .nil ty)
+  | _ => .none
+def isConstTm (t : Tm) : Bool := match t with
+  | .const _ _ _ _ _ => .true
+  | _ => .false
+def natBOk (c : TCtx) (nb : NatB) : Option String := match nb with
+  | .mk n z sc => match Bool.and (isConstTm n) (Bool.and (isConstTm z) (isConstTm sc)) with
+    | .false => .some "numerals need `builtin nat`, `builtin nat.zero` and `builtin nat.succ` registered as definitions"
+    | .true => match natFnTyOf z with
+      | .none => .some "numerals need `builtin nat.zero := …`"
+      | .some zty => match convTy c zty (natTyOf nb) with
+        | .false => .some (String.append "the registered nat.zero is not a " (show .nil 0 n))
+        | .true => match natFnTyOf sc with
+          | .none => .some "numerals need `builtin nat.succ := …`"
+          | .some sty => match convTy c sty (natArrow nb 1) with
+            | .true => .none
+            | .false => .some (String.append "the registered nat.succ is not a function from and to " (show .nil 0 n))
+def natCmpTyOk (c : TCtx) (nb : NatB) (ty : Val) : Bool := match whnf ty with
+  | .vpi _ _ _ dom env cod => match convTy c dom (natTyOf nb) with
+    | .true => match whnf (eval (.cons (fresh (TCtx.lvl c)) env) cod) with
+      | .vpi _ _ _ dom2 _ _ => convTy (TCtx.bind c dom) dom2 (natTyOf nb)
+      | _ => .false
+    | .false => .false
+  | _ => .false
+def natFnTyOk (c : TCtx) (op : NatOp) (nb : NatB) (ty : Val) : Bool := match op with
+  | .nbeq => natCmpTyOk c nb ty
+  | .nblt => natCmpTyOk c nb ty
+  | _ => convTy c ty (natArrow nb (natOpArity op))
+
+-- an operation's constant has the type its key says: `nat → nat` (`succ`, `pred`),
+-- `nat → nat → nat` (arithmetic), `nat → nat → B` for some `B` (`beq`, `blt`: the result
+-- is the definition's own, at two small literals)
+def natFnOk (c : TCtx) (op : NatOp) (nb : NatB) (d : Tm) : Option String := match natFnTyOf d with
+  | .none => .some (String.append (natOpKey op) " is registered with a term that is not a constant")
+  | .some ty => match natFnTyOk c op nb ty with
+    | .true => .none
+    | .false => .some (String.append (String.append (natOpKey op) " is registered with a constant of the wrong type: ") (show .nil 0 d))
 
 mutual
 -- (given) `infer`, with the proof marker's requirement
@@ -3342,6 +3790,16 @@ def inferW : TCtx → Tm → TyRes
   | c, .axiomC n ty => match kStrEq n proofStub with
     | .true => .err proofStub
     | .false => .ok (eval .nil ty) (uZeros (TCtx.lvl c))
+  -- (E-K) a literal, at the registered type; a registered operation, at its constant's
+  -- type (both with their registration checked)
+  | c, .nlit _ nb => match natBOk c nb with
+    | .some m => .err m
+    | .none => .ok (natTyOf nb) (uZeros (TCtx.lvl c))
+  | c, .natFn op nb d => match natBOk c nb with
+    | .some m => .err m
+    | .none => match natFnOk c op nb d with
+      | .some m => .err m
+      | .none => infer c d
   | c, .ulift k0 l A => match inferUniv c A with
     | .ok (.vsort k) _ => match componentSort "lifted type (ULift)" k0 k with
       | .some m => .err m
@@ -3701,6 +4159,9 @@ def tmHasLvlWith (p : Lvl → Bool) : Tm → Bool
   | .qty => .false
   | .qlit _ => .false
   | .axiomC _ _ => .false
+  -- (E-K) closed constants, without level parameters
+  | .nlit _ _ => .false
+  | .natFn _ _ d => tmHasLvlWith p d
 def tmsHasLvlWith (p : Lvl → Bool) : Tms → Bool
   | .tnil => .false
   | .tcons t rest => Bool.or (tmHasLvlWith p t) (tmsHasLvlWith p rest)
@@ -3836,6 +4297,8 @@ def tmHasHole : Tm → Bool
   | .qlit _ => .false
   | .const _ _ _ _ _ => .false
   | .axiomC _ _ => .false
+  | .nlit _ _ => .false
+  | .natFn _ _ d => tmHasHole d
 def tmsHasHole : Tms → Bool
   | .tnil => .false
   | .tcons t rest => Bool.or (tmHasHole t) (tmsHasHole rest)
@@ -4174,6 +4637,9 @@ def markInferW : TCtx → Tm → MR
     .mk (.coit l I' D' S' st' i' x') (.some (.vnu l vI vD vi .vszInf))
   | _, .const n ps ls v ty => .mk (.const n ps ls v ty) (.some (eval .nil (substIfAny ps ls ty)))
   | _, .axiomC n ty => .mk (.axiomC n ty) (.some (eval .nil ty))
+  -- (E-K) a literal is of the registered type; an operation of its constant's type
+  | _, .nlit n nb => .mk (.nlit n nb) (.some (natTyOf nb))
+  | _, .natFn op nb d => .mk (.natFn op nb d) (natFnTyOf d)
   | c, .ulift k l A => .mk (.ulift k l (markTy c A)) (.some (.vsort l))
   | c, .down t => match markInfer c t with
     | .mk t' tt => .mk (.down t') (match knownW tt with
@@ -4270,3 +4736,39 @@ def checkMarkingParams (ps : List String) (v0 ty : Tm) : Checked :=
   | .false => match checkDeclParams ps ty .none with
     | .err m => .bad m
     | .ok _ _ => checkMarking v0 ty
+
+-- **(E-K) The frontend's hook for numbers.** The frontend makes literals only once the
+-- Prelude's `builtin` registrations reach it (lane P0-RPREL); until then nothing below is
+-- called, and numerals stay `binNat` terms. The wiring (a follow-up in the Frontend, not
+-- here): from the registrations `builtin nat`, `nat.zero`, `nat.succ` build one `NatB` of
+-- the three constants (as `identHead` makes them); a numeral is `natLitDigits nb digits`
+-- (exact, from the token's text), a character code `natLitTm nb code`; and a use of a
+-- registered constant `c` under the key `k` is `natRegistered nb k c` (the operation, the
+-- literal `0` for `nat.zero`, else `c` itself). The registration's own constants (inside
+-- `nb`) stay plain constants: `natView` unfolds a literal by their definitions.
+def natOpOfKey (k : String) : Option NatOp := match kStrEq k "nat.succ" with
+  | .true => .some .nsucc
+  | .false => match kStrEq k "nat.pred" with
+    | .true => .some .npred
+    | .false => match kStrEq k "nat.add" with
+      | .true => .some .nadd
+      | .false => match kStrEq k "nat.sub" with
+        | .true => .some .nsub
+        | .false => match kStrEq k "nat.mul" with
+          | .true => .some .nmul
+          | .false => match kStrEq k "nat.div" with
+            | .true => .some .ndiv
+            | .false => match kStrEq k "nat.mod" with
+              | .true => .some .nmod
+              | .false => match kStrEq k "nat.beq" with
+                | .true => .some .nbeq
+                | .false => match kStrEq k "nat.blt" with
+                  | .true => .some .nblt
+                  | .false => .none
+def natLitTm (nb : NatB) (n : Nat) : Tm := .nlit (knOfNat n) nb
+def natLitDigits (nb : NatB) (digits : String) : Tm := .nlit (knOfDigits digits) nb
+def natRegistered (nb : NatB) (key : String) (c : Tm) : Tm := match natOpOfKey key with
+  | .some op => .natFn op nb c
+  | .none => match kStrEq key "nat.zero" with
+    | .true => .nlit knZero nb
+    | .false => c
