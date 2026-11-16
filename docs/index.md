@@ -33,7 +33,7 @@ published `/docs/` is generated from `lib/` by `wiz doc --lib`.
 * [Status.md](Status.md)
 * [dsls.md](dsls.md): the embedded languages (DSLs) in Wiz, and the conventions they follow
 * [error-codes.md](error-codes.md): the error codes and their quick fixes
-* [playground-lsp.md](playground-lsp.md): the playground's goals panel and the language-server contract a self-hosted `wiz lsp` must implement
+* [playground-lsp.md](playground-lsp.md): the language-server protocol (`wiz/*` methods, capabilities, error codes), the playground's goals panel, and where the self-hosted servers differ from `wiz lsp`
 * [tools/jupyter.md](tools/jupyter.md): the opt-in Jupyter kernels for Wiz (`wiz repl` or a `wiz check` batch fallback), the `%%scry` taint cell magic, and the deterministic notebook exporter (`wiz-nb export`)
 * [resources.md](resources.md): resources in Wiz: quantities, regions, optics, Feral and separation logic, with one running example
 * [ROADMAP.md](../ROADMAP.md)

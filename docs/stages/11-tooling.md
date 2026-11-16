@@ -195,7 +195,7 @@ after it).
   `wiz/plainGoal`, `wiz/plainTermGoal`, `wiz/interactiveGoals`,
   `wiz/interactiveTermGoal` and `wiz/subtermInfo` (a subterm's type, from the kernel,
   and where a constant was declared); the protocol is in
-  `wiz-notes/infoview-protocol.md`.
+  [playground-lsp.md](../playground-lsp.md).
 * **Code actions** (`Wiz/Actions.lean`): diagnostics carry a code and data; the server
   offers *did you mean* (edit distance ≤ 2 over locals and globals), *add missing cases*
   (`| .c x y => ?c` per missing constructor) and *add type ascription* to a `def` without
@@ -227,7 +227,7 @@ Lean's library has no Unix sockets, so `c/sockets.c` (compiled into the executab
 the linker, `moreLinkObjs` in the lakefile) listens, accepts, and turns a connection
 into two ordinary Lean handles. The server's state stays single-threaded: a reader
 thread per connection feeds one channel, and one loop answers in order. Protocol §8 of
-`wiz-notes/infoview-protocol.md`; tested in-process (the `lsp-server` group: the editor
+[playground-lsp.md](../playground-lsp.md); tested in-process (the `lsp-server` group: the editor
 on a socket pair, an infoview on the socket).
 
 ## 11m–n: the infoview, in a terminal and in a browser
@@ -395,7 +395,7 @@ def four : Nat := twice two
   context of its arm.
 * **`import M`**: hover shows the module's file, go to definition opens it.
 * **Commands, instances and messages: `wiz/interactiveInfo`**, a new infoview request
-  (protocol in `wiz-notes/infoview-protocol.md`, §4), lists what else is at the cursor:
+  (protocol in [playground-lsp.md](../playground-lsp.md), §4), lists what else is at the cursor:
   the syntax and expansion, the import, the instances found at the innermost
   application (`instance … : Mul Nat`, at `2 * 3`), the declarations of the command
   (a `structure`: its type, constructor and fields, with their types; an `inductive`:
