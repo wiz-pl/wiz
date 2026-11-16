@@ -95,10 +95,11 @@ line below.
 ### Numbers and libraries
 
 * [Stage 22: numbers for hardware and systems code](stages/22-numbers.md)
-* The value-level semantics matrix: every numeric and textual boundary, with the value
-  the spec asks for and which backends were compared (test `=semantics`). It is
-  generated, not committed: `nix build .#semantics-matrix` writes
-  `result/semantics-matrix.md` (or run `python3 scripts/gen-semantics-matrix.py --out DIR`)
+* [The value-level semantics matrix](https://wiz-pl.github.io/wiz/semantics/): every
+  numeric and textual boundary, with the value the spec asks for and which backends were
+  compared (test `=semantics`). It is generated, not committed: the site renders it with
+  `scripts/gen-semantics-matrix.py --html`, and `nix build .#semantics-matrix` writes
+  `result/semantics-matrix.md` and `.html`
 * [Stage 29: native data structures](stages/29-natives.md): word arrays, word maps, interned strings
 * [Libraries](libraries.md)
 

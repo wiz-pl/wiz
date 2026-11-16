@@ -7,11 +7,13 @@ type: the expected column is computed here, from the definitions in the stage do
 (not from the implementation), so a bug shared by the model and the natives is not
 hidden.  Neither output is committed: the test generates the TSV when it runs, and
 `nix build .#semantics-matrix` builds both (`result/cells.tsv`,
-`result/semantics-matrix.md`).
+`result/semantics-matrix.md`, and the page `result/semantics-matrix.html` the site
+publishes at `/semantics/`).
 
     python3 scripts/gen-semantics-matrix.py --out DIR     # DIR/cells.tsv, DIR/semantics-matrix.md
     python3 scripts/gen-semantics-matrix.py --tsv -       # the TSV on stdout (the test)
     python3 scripts/gen-semantics-matrix.py --md FILE     # the document only
+    python3 scripts/gen-semantics-matrix.py --html FILE   # the site's page (web/build-site.sh)
 
 Cell channels:
   nat  -- a Wiz expression of type `Nat` (the value is observed directly)
@@ -912,7 +914,7 @@ def gen_docs():
     w("")
     w("After those fixes every cell that a backend can express agrees; the run report")
     w("is `7 passed, 0 failed` (`#eval`, `#run`, Lean → C, `Float64`, Wiz → C and the")
-    w("kernel` on this machine).")
+    w("kernel on this machine).")
     w("")
     w("## Coverage")
     w("")
@@ -1024,6 +1026,147 @@ def gen_docs():
     return "\n".join(lines) + "\n"
 
 
+# -- The site's page (`--html`): the document above as one self-contained HTML page. --
+# A converter for exactly the Markdown gen_docs writes (headings, paragraphs, bullet
+# lists with continuation lines, pipe tables, fenced code, `code`, **bold**, *italic*,
+# [links](url)), so the page needs no Markdown tool and stays deterministic.
+
+PAGE_STYLE = """\
+:root { color-scheme: light dark; --paper: #fdfdfb; --ink: #1d1d1b;
+  --muted: #666; --accent: #7a3e00; --line: #d9d9d4; --code: #f1f0ea; }
+@media (prefers-color-scheme: dark) {
+  :root { --paper: #1d1d1b; --ink: #fdfdfb; --muted: #aaa;
+    --accent: #ffb86b; --line: #3a3a36; --code: #2a2a27; }
+}
+body { margin: 0; background: var(--paper); color: var(--ink);
+  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 72rem; margin: 0 auto; padding: 3rem 1.25rem; }
+h1 { margin-top: 0; }
+a { color: var(--accent); }
+code, pre { font: 0.9em/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+code { background: var(--code); padding: 0 0.2em; border-radius: 3px; }
+pre { background: var(--code); padding: 0.75rem 1rem; overflow-x: auto; }
+pre code { padding: 0; }
+.table { overflow-x: auto; margin: 1rem 0; }
+table { border-collapse: collapse; font-size: 0.85em; }
+th, td { border: 1px solid var(--line); padding: 0.2em 0.5em; text-align: left;
+  vertical-align: top; }
+th { position: sticky; top: 0; background: var(--paper); }
+"""
+
+
+def _esc(text):
+    return (text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace('"', "&quot;"))
+
+
+def _inline(text):
+    """`code` (its contents are literal), then **bold**, *italic* and [a](b) around it."""
+    import re
+    codes = []
+
+    def stash(m):
+        codes.append("<code>" + _esc(m.group(1)) + "</code>")
+        return "\x00%d\x00" % (len(codes) - 1)
+
+    text = _esc(re.sub(r"`([^`]*)`", stash, text))
+    text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
+    text = re.sub(r"(?<![*\w])\*(?!\s)(.+?)(?<!\s)\*(?![*\w])", r"<em>\1</em>", text)
+    text = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", r'<a href="\2">\1</a>', text)
+    return re.sub("\x00(\\d+)\x00", lambda m: codes[int(m.group(1))], text)
+
+
+def _cells(row):
+    """A table row's cells; a `|` inside `code`, or written `\\|`, does not split."""
+    row = row.strip()
+    if row.startswith("|"):
+        row = row[1:]
+    if row.endswith("|"):
+        row = row[:-1]
+    cells, cur, tick = [], "", False
+    row = row.replace("\\|", "\x01")
+    for ch in row:
+        if ch == "`":
+            tick = not tick
+        if ch == "|" and not tick:
+            cells.append(cur.strip())
+            cur = ""
+        else:
+            cur += ch
+    cells.append(cur.strip())
+    return [c.replace("\x01", "|") for c in cells]
+
+
+def markdown_to_html(md):
+    import re
+    lines = md.split("\n")
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip():
+            i += 1
+        elif line.startswith("<!--"):
+            while "-->" not in lines[i]:
+                i += 1
+            i += 1
+        elif line.startswith("```"):
+            body = []
+            i += 1
+            while not lines[i].startswith("```"):
+                body.append(lines[i])
+                i += 1
+            i += 1
+            out.append("<pre><code>" + _esc("\n".join(body)) + "</code></pre>")
+        elif re.match(r"#{1,6} ", line):
+            level = len(line) - len(line.lstrip("#"))
+            text = line[level + 1:]
+            slug = re.sub(r"[^a-z0-9]+", "-", re.sub(r"`", "", text.lower())).strip("-")
+            out.append('<h%d id="%s">%s</h%d>' % (level, slug, _inline(text), level))
+            i += 1
+        elif line.startswith("|"):
+            rows = []
+            while i < len(lines) and lines[i].startswith("|"):
+                rows.append(_cells(lines[i]))
+                i += 1
+            head, body = rows[0], [r for r in rows[1:]
+                                   if not all(re.fullmatch(r":?-+:?", c) for c in r)]
+            out.append('<div class="table"><table><thead><tr>'
+                       + "".join("<th>%s</th>" % _inline(c) for c in head)
+                       + "</tr></thead><tbody>")
+            for r in body:
+                out.append("<tr>" + "".join("<td>%s</td>" % _inline(c) for c in r) + "</tr>")
+            out.append("</tbody></table></div>")
+        elif line.startswith("* "):
+            items = []
+            while i < len(lines) and (lines[i].startswith("* ")
+                                      or (items and lines[i].startswith("  ")
+                                          and lines[i].strip())):
+                if lines[i].startswith("* "):
+                    items.append(lines[i][2:])
+                else:
+                    items[-1] += " " + lines[i].strip()
+                i += 1
+            out.append("<ul>" + "".join("<li>%s</li>" % _inline(t) for t in items) + "</ul>")
+        else:
+            para = []
+            while (i < len(lines) and lines[i].strip()
+                   and not re.match(r"(#{1,6} |\* |\||```|<!--)", lines[i])):
+                para.append(lines[i].strip())
+                i += 1
+            out.append("<p>" + _inline(" ".join(para)) + "</p>")
+    return "\n".join(out) + "\n"
+
+
+def gen_html(md):
+    return ("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+            "<meta name=\"generator\" content=\"scripts/gen-semantics-matrix.py\">\n"
+            "<title>Value-level semantics matrix — Wiz</title>\n<style>\n" + PAGE_STYLE
+            + "</style>\n</head>\n<body>\n<main>\n" + markdown_to_html(md)
+            + "</main>\n</body>\n</html>\n")
+
+
 def gen_tsv():
     out = ["id\tfamily\twidth\top\tlabel\texpr\texpected\tchannel\tinterp\tprelude\tnote"]
     for c in cells:
@@ -1049,11 +1192,13 @@ def main(argv=None):
                         help="write DIR/cells.tsv and DIR/semantics-matrix.md")
     parser.add_argument("--tsv", metavar="FILE", help="write the TSV (- for stdout)")
     parser.add_argument("--md", metavar="FILE", help="write the document (- for stdout)")
+    parser.add_argument("--html", metavar="FILE",
+                        help="write the document as an HTML page (- for stdout; the site's copy)")
     args = parser.parse_args(argv)
-    if not (args.out or args.tsv or args.md):
-        parser.error("nothing to write: give --out DIR, --tsv FILE or --md FILE")
-    if args.tsv == "-" and args.md == "-":
-        parser.error("--tsv - and --md - cannot both write to stdout")
+    if not (args.out or args.tsv or args.md or args.html):
+        parser.error("nothing to write: give --out DIR, --tsv FILE, --md FILE or --html FILE")
+    if [args.tsv, args.md, args.html].count("-") > 1:
+        parser.error("only one of --tsv, --md and --html can write to stdout")
     uintn_cells()
     intn_cells()
     nat_cells()
@@ -1064,10 +1209,13 @@ def main(argv=None):
     if args.out:
         write(Path(args.out) / "cells.tsv", tsv)
         write(Path(args.out) / "semantics-matrix.md", md)
+        write(Path(args.out) / "semantics-matrix.html", gen_html(md))
     if args.tsv:
         write(args.tsv, tsv)
     if args.md:
         write(args.md, md)
+    if args.html:
+        write(args.html, gen_html(md))
     fams = {}
     for c in cells:
         fams[c["family"]] = fams.get(c["family"], 0) + 1
