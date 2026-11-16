@@ -11,6 +11,15 @@ plus the results of the probes listed in the "Probes" section. The page was firs
 written at `9717950` (2026-11-09); the [ledger](#0-ledger) lists every item with its
 status and PR, and section 9 lists what open PRs will change here when they merge.
 
+> **Not yet refreshed for later merges.** Checked against `master` at `d23473da`
+> (2026-11-16): every PR that section 9 lists as open has since been decided. #120, #121,
+> #128, #129, #130, #135, #136, #138 and #145 merged (2026-11-11 to 11-13), mandatory
+> sorts merged as #203 (2026-11-14), and #144 was closed without merging. Their
+> paragraphs in section 9 have not been folded into the sections they name yet, so ledger
+> rows that cite those PRs in *italics* or mark O4, U5, U5b and D2 (meta-review) as open
+> issues, and the summary's O4 bullet, describe the state before those merges. The
+> refresh is queued behind the soundness branches that edit this page.
+
 > **How to keep this page current.**
 > * A PR that fixes, finds or changes the status of a soundness item edits this page in
 >   the same PR: its row in the [ledger](#0-ledger) (status, PR number), and its section
