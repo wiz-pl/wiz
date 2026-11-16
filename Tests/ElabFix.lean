@@ -196,10 +196,10 @@ def group : Group where
           "def t (y : List Nat) (h : y = L) : y = L2 := Eq.trans h e1\n" ++
           "def t2 (y : List Nat) (h : y = L) : y = L2 := Eq.trans h (refl L)")
         -- the issue's own reproducer: a lemma's equation (data `Int`) computed first
-        okLib ("import Int\nimport Logic\n" ++
+        okLibs ("import Int\nimport Logic\n" ++
           "def c2 (a : Nat) : Int.ofNat a + 0 = Int.ofNat a := Eq.trans (Int.add_zero (Int.ofNat a)) rfl")
         -- only the sides that unify are accepted
-        failsLib (pre ++ "def L3 : List Nat := .cons 1 (.cons 3 .nil)\n" ++
+        failsLibW (pre ++ "def L3 : List Nat := .cons 1 (.cons 3 .nil)\n" ++
           "def bad (y : List Nat) (h : y = L) : y = L3 := Eq.trans h e1") "type mismatch" },
     -- agent/elab-stretch
     { name := "numerals and notation in class field types (numerals-in-class-decls)", run := fun _ =>
