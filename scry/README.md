@@ -18,6 +18,13 @@ offset is unchanged), and maps each node's preprocessed span back to the origina
 file/line/column in `Wil.Span`. `scry-cst -E [-D…] [-I…] FILE` runs `cc -E` and spills
 the blanked text, which is how `corpus/c2wil/preproc/main.i.cst` was generated.
 
+The C# frontend's first slice (design: `CSHARP.md`) parses with
+tree-sitter-c-sharp (fetched by Nix; `native/README.md`) through the same shim (`scry-cst FILE.cs` spills it);
+`src/Scry/CsCst.wiz` views the store as a `Scry.Cst` and `src/Scry/CsLower.wiz` lowers
+methods to Wil (receiver as argument 0, `using`-resolved BCL names). Its fixtures, their
+spills and the rule pack are in `corpus/csharp/`; the tests are the `scry-csharp` group
+(`tests =scry-csharp`).
+
 ```sh
 cd scry
 cp ../grail.local.wiz .         # this machine's toolchain (not committed)
