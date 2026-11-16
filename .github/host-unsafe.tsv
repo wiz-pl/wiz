@@ -1,0 +1,48 @@
+# The host-side unsafe ledger: every escape from Lean's guarantees in the Lean that
+# implements Wiz (Wiz/, Tests/, Grail/, the root .lean files). The Wiz sources of lib/ are
+# in the trust ledger (.github/trust-baseline.tsv) instead.
+# One row per use, tab-separated:
+#   file, declaration, constructs (sorted, comma-separated), invariant (one line)
+# A use is a declaration whose code (not comments or strings) has `unsafe`,
+# `unsafeBaseIO`, `unsafeIO`, `unsafeEIO`, `unsafeCast`, or an `implemented_by` or
+# `extern` attribute. The invariant says why it can't change a result it must not
+# (what is accepted, rechecked or cached).
+# scripts/host-unsafe-ledger.py --check fails on an unlisted use, a stale row or a row
+# without an invariant; --print lists the uses found.
+Grail/Exec.lean	exitNow	extern	c/proc.c `_exit(code)`: ends the supervisor process; touches no Lean object, runs only as the job's last action
+Grail/Exec.lean	pathClear	extern	c/proc.c: clears the C path buffer; IO, single-threaded use by `isExecutable` (documented not thread-safe)
+Grail/Exec.lean	pathPush	extern	c/proc.c: appends one byte to the C path buffer; IO, no Lean object crosses the boundary
+Grail/Exec.lean	pathExecutableRaw	extern	c/proc.c `stat` of the buffered path: returns a Bool through the exported `grail_ok_bool`; IO, reads only the file's mode
+Tests/Groups/Prop.lean	memoFind	implemented_by	opaque over memoFindImpl: a miss is always a correct answer (the interpreter and kernel see one), so the memo can only save work
+Tests/Groups/Prop.lean	memoFindImpl	unsafe,unsafeBaseIO	reads the test memo: keys compared structurally (BEq on the full key), reset per case, so a hit equals recomputing; test driver only
+Tests/Groups/Prop.lean	memoPut	implemented_by	opaque over memoPutImpl: returns its argument unchanged, the write only fills the memo
+Tests/Groups/Prop.lean	memoPutImpl	unsafe,unsafeBaseIO	stores (key, answer) computed by the pure marker; bounded window, reset per case; test driver only
+Wiz/Cache.lean	regionRead	implemented_by	opaque over regionReadImpl: a region is read only under a key and type tag the store checked before the read
+Wiz/Cache.lean	regionReadImpl	unsafe	CompactedRegion.read erases α: the caller loads with the type it saved (checked by the store's tags); regions are kept until exit, as their objects are not RC'd
+Wiz/Cache.lean	regionSave	implemented_by	opaque over regionSaveImpl: IO write of a module artifact under its key
+Wiz/Cache.lean	regionSaveImpl	unsafe	CompactedRegion.save erases α: the value saved is a ModuleArtifact, read back only as one (key and type tags)
+Wiz/Core/Term.lean	run	implemented_by	opaque over runImpl: the result is f's, the count is deterministic (steps, not time), the same on every machine and run
+Wiz/Core/Term.lean	runImpl	unsafe,unsafeBaseIO	a fresh counter per read-back, used only by the evaluation it starts and disarmed after; never in the kernel (Globals.budget = none)
+Wiz/Core/Term.lean	tick	implemented_by	opaque over tickImpl: decrements this read-back's own counter; same sequence of answers on every run
+Wiz/Core/Term.lean	tickImpl	unsafe,unsafeBaseIO	mutates only the counter of the budget it is given (owned by one Budget.run); never_extract/noinline keep each tick
+Wiz/Core/Value.lean	memoThunk	implemented_by	opaque over memoThunkImpl: a Thunk whose value is f (); memoisation only saves recomputation
+Wiz/Core/Value.lean	memoThunkImpl	unsafe,unsafeBaseIO	the cell is owned by one thunk and f is pure over persistent Globals, so forcing it twice gives the same value
+Wiz/Frontend/Frontend.lean	isoGet	implemented_by	opaque over isoGetImpl: a hit is what elaborating again gives (the key determines the module's elaboration), so runFrontend stays a function of its arguments
+Wiz/Frontend/Frontend.lean	isoGetImpl	unsafe,unsafeBaseIO	reads the per-process isolation memo (per rig), keyed by isoKey, which hashes everything a module's elaboration depends on
+Wiz/Frontend/Frontend.lean	isoPut	implemented_by	opaque over isoPutImpl: returns v unchanged; the write only fills the memo
+Wiz/Frontend/Frontend.lean	isoPutImpl	unsafe,unsafeBaseIO	stores an isolated module under its isoKey (bounded table, cleared when full); never changes a result
+Wiz/Smt/Process.lean	runSolver	implemented_by	opaque over runSolverImpl: sat_decide checks the LRAT proof in the kernel; the trusted smt (28a) is in the trust ledger and its cache keyed by SHA-256 of solver identity, args and input
+Wiz/Smt/Process.lean	runSolverImpl	unsafe,unsafeBaseIO	runs an external solver from the pure elaborator; answers are replayed from a content-addressed cache that stores and compares all of identity, arguments and input
+Wiz/Socket.lean	accept	extern	c/sockets.c accept(2): blocking IO; results built only through the exported wiz_sock_* constructors
+Wiz/Socket.lean	closeFd	extern	c/sockets.c close(2) of a TCP listener: IO, no Lean object crosses the boundary
+Wiz/Socket.lean	closeRaw	extern	c/sockets.c: close and unlink the socket path set by setPath: IO only
+Wiz/Socket.lean	connectRaw	extern	c/sockets.c connect(2) to the buffered path: IO; handles come back through wiz_sock_ok_handles
+Wiz/Socket.lean	exitOnPanicRaw	extern	c/sockets.c: sets the process-wide exit-on-panic flag, so a panic fails the process instead of returning a default; makes failures louder, never hides one
+Wiz/Socket.lean	listenRaw	extern	c/sockets.c bind/listen on the buffered path: IO; the descriptor comes back through wiz_sock_ok_fd
+Wiz/Socket.lean	pair	extern	c/sockets.c socketpair(2): IO; handles come back through wiz_sock_ok_pair
+Wiz/Socket.lean	pathClear	extern	c/sockets.c: clears the C path buffer; IO, used only inside setPath
+Wiz/Socket.lean	pathPush	extern	c/sockets.c: appends one byte to the C path buffer; IO, used only inside setPath
+Wiz/Socket.lean	shutdown	extern	c/sockets.c shutdown(2): IO on a descriptor the caller owns
+Wiz/Socket.lean	tcpConnect	extern	c/sockets.c connect(2) over TCP: IO; handles through wiz_sock_ok_handles
+Wiz/Socket.lean	tcpListenRaw	extern	c/sockets.c bind/listen over TCP: IO; the descriptor through wiz_sock_ok_fd
+Wiz/Socket.lean	tcpPortRaw	extern	c/sockets.c getsockname(2): IO; the port through wiz_sock_ok_fd
