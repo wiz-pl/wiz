@@ -961,10 +961,14 @@ with `didOpen`, so the positions are the ones the page was generated from. Start
 language server from the module root, or with `-I` roots, so its imports resolve:
 
 ```sh
-.lake/build/bin/wiz lsp --ws 8765 --no-stdio -I lib &
+.lake/build/bin/wiz lsp --ws 8765 --no-stdio -I lib --token-file lsp-token &
 .lake/build/bin/wiz doc --lib -o doc-site/docs --web web/out --serve --lsp 8765
-# then http://127.0.0.1:8000/
+# then http://127.0.0.1:8000/?token=T, with T from lsp-token
 ```
+
+The language server lets in only clients that present its token (`?token=` in the
+page's URL is passed on to the socket; docs/playground-lsp.md, "The token"); the pages
+never carry it themselves.
 
 `--serve` without `--lsp` writes the same documentation plus the inert client: there is
 no socket and no fetch, and the pages read without JavaScript. `?lsp=PORT` (or

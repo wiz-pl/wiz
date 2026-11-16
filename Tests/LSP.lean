@@ -410,11 +410,15 @@ WebSocket clients, one of which edits a document of its own. -/
 def wsCase : IO Unit := do
         let ((srvIn, srvOut), (edIn, edOut)) ← Socket.pair
         let (ed, edW) := (IO.FS.Stream.ofHandle edIn, IO.FS.Stream.ofHandle edOut)
-        let port ← IO.Promise.new
+        let ready ← IO.Promise.new
         let done ← IO.asTask (prio := .dedicated)
           (LSP.serveWith (← server).libs (some (IO.FS.Stream.ofHandle srvIn, IO.FS.Stream.ofHandle srvOut))
-            { ws := some (Socket.loopback, 0) } (fun p => port.resolve p) ["Prelude"])
-        let port := port.result!.get
+            { ws := some (Socket.loopback, 0) } (fun p t => ready.resolve (p, t)) ["Prelude"])
+        let (port, token) := ready.result!.get
+        -- (#430) a fresh token for this launch: 128 bits in hex
+        let some token := token | throw (IO.userError "no token without --ws-insecure")
+        check (token.length == 32) s!"token: {token}"
+        let path := s!"/?token={token}"
         let next (h : IO.FS.Stream) : IO Lean.Json := do
           let some j ← LSP.readMessage h | throw (IO.userError "the stream ended")
           pure j
@@ -428,11 +432,30 @@ def wsCase : IO Unit := do
           match Lean.Json.parse t with
           | .ok j => pure j
           | .error e => throw (IO.userError s!"not JSON ({e}): {t}")
-        -- a page from another site is refused; so is a plain HTTP request
+        -- a page from another site is refused (even with the token); so is a plain HTTP request
         let (r, w) ← tcp
-        match ← WebSocket.connect r w s!"127.0.0.1:{port}" (origin := some "https://example.com") with
+        match ← WebSocket.connect r w s!"127.0.0.1:{port}" path (origin := some "https://example.com") with
         | .ok () => throw (IO.userError "a foreign origin was let in")
         | .error e => check ((e.splitOn "403").length > 1) s!"refused how: {e}"
+        -- (#430) a local program (no `Origin`) without the token, or with a wrong one, is
+        -- refused with 401 before any 101; so is a local page without it
+        let refused (what : String) (path : String) (origin : Option String := none) (bearer : Option String := none) : IO Unit := do
+          let (r, w) ← tcp
+          match ← WebSocket.connect r w s!"127.0.0.1:{port}" path origin bearer with
+          | .ok () => throw (IO.userError s!"{what}: let in")
+          | .error e => check ((e.splitOn "401").length > 1) s!"{what}: refused how: {e}"
+        refused "no token, no origin" "/"
+        refused "no token, a local page" "/" (origin := some s!"http://127.0.0.1:{port + 1}")
+        let wrong := toString (token.dropEnd 1) ++ (if token.endsWith "0" then "1" else "0")
+        refused "a wrong token" s!"/?token={wrong}"
+        refused "an empty token" "/?token="
+        refused "a token of another length" s!"/?token={token}0"
+        refused "a wrong bearer" "/" (bearer := some "0123456789abcdef0123456789abcdef")
+        -- the token as `Authorization: Bearer` (a program's way) is let in
+        let (r, w) ← tcp
+        match ← WebSocket.connect r w s!"127.0.0.1:{port}" "/" (bearer := some token) with
+        | .ok () => send w (req "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}")
+        | .error e => throw (IO.userError s!"bearer handshake: {e}")
         let (r, w) ← tcp
         w.putStr "GET / HTTP/1.1\r\nHost: x\r\n\r\n"; w.flush
         check (((← r.getLine).splitOn "426").length > 1) "a plain GET was not refused"
@@ -445,7 +468,7 @@ def wsCase : IO Unit := do
         let _ ← next ed
         -- a local page connects and is told where the cursor is
         let (iv, ivW) ← tcp
-        match ← WebSocket.connect iv ivW s!"127.0.0.1:{port}" (origin := some s!"http://127.0.0.1:{port + 1}") with
+        match ← WebSocket.connect iv ivW s!"127.0.0.1:{port}" s!"/?port={port}&token={token}&follow=1" (origin := some s!"http://127.0.0.1:{port + 1}") with
         | .ok () => pure ()
         | .error e => throw (IO.userError s!"handshake: {e}")
         let c ← recv iv ivW
@@ -506,7 +529,7 @@ def wsCase : IO Unit := do
         checkEq "3" (LSP.get? (← next ed) ["id"]).get!.compress
         -- a second page connects and hears of the cursor too
         let (iv2, iv2W) ← tcp
-        match ← WebSocket.connect iv2 iv2W s!"localhost:{port}" with
+        match ← WebSocket.connect iv2 iv2W s!"localhost:{port}" path with
         | .ok () => pure ()
         | .error e => throw (IO.userError s!"handshake: {e}")
         checkEq "file:///w.wiz" (LSP.getStr (← recv iv2 iv2W) ["params", "textDocument", "uri"])
@@ -1124,11 +1147,11 @@ def serverGroup : Group where
         IO.FS.writeFile (dir / "infoview.html") "<p>page</p>"
         IO.FS.writeFile (dir / "secret.txt") "no"
         -- one request, through `accept`, on a socket pair: the answer's text
-        let ask (req : String) (web : Option String := some dir.toString) : IO (Bool × String) := do
+        let ask (req : String) (web : Option String := some dir.toString) (token : Option String := some "s3cr3t") : IO (Bool × String) := do
           let ((r, w), (r', w')) ← Socket.pair
           let (r, w, r', w') := (IO.FS.Stream.ofHandle r, IO.FS.Stream.ofHandle w, IO.FS.Stream.ofHandle r', IO.FS.Stream.ofHandle w')
           w.putStr req; w.flush
-          let ok ← WebSocket.accept r' w' web
+          let ok ← WebSocket.accept r' w' token web
           let mut out := ""
           for _ in [0:20] do
             let l ← r.getLine
@@ -1146,7 +1169,34 @@ def serverGroup : Group where
         check ((out.splitOn "403").length > 1) s!"foreign origin: {out}"
         -- without the directory (plain `--ws`): no files at all
         let (_, out) ← ask "GET /infoview.html HTTP/1.1\r\n\r\n" none
-        check ((out.splitOn "426").length > 1) s!"no web directory: {out}" },
+        check ((out.splitOn "426").length > 1) s!"no web directory: {out}"
+        -- (#430) the page's URL carries the token for its WebSocket: the query does not
+        -- change which file is served (nor is a token needed for the files, which are the
+        -- toolchain's own); the token is checked on the upgrade only
+        let (ok, out) ← ask "GET /infoview.html?port=1&token=s3cr3t&follow=1 HTTP/1.1\r\n\r\n"
+        check (!ok && (out.splitOn "200 OK").length > 1 && (out.splitOn "text/html").length > 1) s!"page with token: {out}"
+        check ((out.splitOn "s3cr3t").length == 1) s!"the token is echoed: {out}"
+        let (_, out) ← ask "GET /secret.txt?token=s3cr3t HTTP/1.1\r\n\r\n"
+        check ((out.splitOn "404").length > 1) s!"a token opens no other file: {out}"
+        let upgrade (target : String) (extra : String := "") :=
+          s!"GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" ++
+          s!"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{extra}\r\n"
+        for (what, target, extra) in [("no token", "/", ""), ("wrong token", "/?token=s3cr3x", ""),
+            ("token prefix", "/?token=s3cr", ""), ("token as another parameter", "/?xtoken=s3cr3t", ""),
+            ("wrong bearer", "/", "Authorization: Bearer nope\r\n")] do
+          let (ok, out) ← ask (upgrade target extra)
+          check (!ok && (out.splitOn "401 Unauthorized").length > 1 && (out.splitOn "101").length == 1) s!"{what}: {out}"
+        for (what, target, extra) in [("query", "/?token=s3cr3t", ""), ("query among others", "/?port=1&token=s3cr3t&follow=1", ""),
+            ("bearer", "/", "Authorization: Bearer s3cr3t\r\n")] do
+          let (ok, out) ← ask (upgrade target extra)
+          check (ok && (out.splitOn "101 Switching Protocols").length > 1) s!"{what}: {out}"
+        -- `--ws-insecure` (no token): any local client
+        let (ok, _) ← ask (upgrade "/") (token := none)
+        check ok "insecure: refused"
+        -- the comparison
+        check (WebSocket.constantTimeEq "abc" "abc" && !WebSocket.constantTimeEq "abc" "abd" &&
+          !WebSocket.constantTimeEq "abc" "ab" && !WebSocket.constantTimeEq "" "a") "constantTimeEq"
+        check ((← WebSocket.freshToken) != (← WebSocket.freshToken)) "two launches, one token" },
     { name := "WebSocket transport (--ws): infoview requests, editing, origins", run := fun _ => do
         let _ ← IO.asTask (prio := .dedicated) (do IO.sleep 60000; IO.eprintln "timed out"; IO.Process.exit 3 : IO Unit)
         try wsCase; IO.Process.exit 0

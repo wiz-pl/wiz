@@ -280,7 +280,8 @@ repository and are not in the release tarball:
   the editor (or `wiz-infoview --file F.wiz --at LINE:COL` on its own);
 * **in a browser**: `web/build.sh` (needs Emscripten; `nix develop` has it), then
   `web/bridge.sh`, which starts `wiz lsp --ws` and serves the page; open the address it
-  prints. The page edits its own documents, and when your editor's server runs with
+  prints (it carries the server's token: `wiz lsp --ws` refuses a client without it).
+  The page edits its own documents, and when your editor's server runs with
   `--ws` it also follows that editor's cursor.
 
 Details: [stages/11-tooling.md](stages/11-tooling.md), 11l–11o.
