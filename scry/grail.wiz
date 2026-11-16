@@ -67,3 +67,14 @@ def package : Package := Package.new "scry"
        |> Command.arg "ci-store"
        |> Command.input "fixtures/ci/gh-safe.yml"
        |> Command.stdout "build/ci-store.txt")
+  -- The JSON findings output and the artifact/cache flow fixture (spans, derivation
+  -- summaries, the artifact-poisoning rule).
+  |> Package.command (Command.new "ci-json" (Tool.exe "scry")
+       |> Command.arg "ci"
+       |> Command.arg "--json"
+       |> Command.input "fixtures/ci/gh-unsafe.yml"
+       |> Command.stdout "build/ci-json.txt")
+  |> Package.command (Command.new "ci-artifact" (Tool.exe "scry")
+       |> Command.arg "ci"
+       |> Command.input "fixtures/ci/gh-artifact-unsafe.yml"
+       |> Command.stdout "build/ci-artifact.txt")

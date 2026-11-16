@@ -38,6 +38,7 @@ def Scry.usage : String :=
   ++ "  parse FILE… --stats        stats of JSON or scry-cst stores (S1)\n"
   ++ "  cst FILE OUT               convert a JSON fact store to scry-cst\n"
   ++ "  ci FILE… --github|--azure [--explain]  analyse CI files\n"
+  ++ "  ci FILE… --json|--sarif               findings as JSON / SARIF\n"
   ++ "  ci-store FILE… --github|--azure       print the CI graph summary\n"
   ++ "  help, --help               this text\n"
   ++ "  --version                  the version\n"

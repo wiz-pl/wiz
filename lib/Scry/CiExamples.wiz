@@ -94,6 +94,189 @@ def Scry.ciGhOnScalar : String := "on: push\njobs: {}\n"
 def Scry.ciGhOnSeq : String := "on: [push, pull_request]\njobs: {}\n"
 def Scry.ciGhOnMap : String := "on:\n  push: {}\n  workflow_dispatch:\njobs: {}\n"
 
+-- ## Per-event trust fixtures
+
+/-- `github.event.pull_request.title` under `push`: the context is absent, and a push
+ref is not attacker-controlled, so the expression is not tainted. -/
+def Scry.ciGhEventPush : String :=
+  "on: push\n" ++
+  "jobs:\n" ++
+  "  build:\n" ++
+  "    runs-on: ubuntu-latest\n" ++
+  "    steps:\n" ++
+  "      - run: echo \"${{ github.event.pull_request.title }}\"\n"
+
+/-- The same context under `pull_request`: the PR title is attacker text. -/
+def Scry.ciGhEventPr : String :=
+  "on: pull_request\n" ++
+  "jobs:\n" ++
+  "  build:\n" ++
+  "    runs-on: ubuntu-latest\n" ++
+  "    steps:\n" ++
+  "      - run: echo \"${{ github.event.pull_request.title }}\"\n"
+
+/-- `github.event.issue.title` under `pull_request_target`: the payload has no `issue`,
+so it is not tainted there. -/
+def Scry.ciGhEventIssueTarget : String :=
+  "on: pull_request_target\n" ++
+  "jobs:\n" ++
+  "  build:\n" ++
+  "    runs-on: ubuntu-latest\n" ++
+  "    steps:\n" ++
+  "      - run: echo \"${{ github.event.issue.title }}\"\n"
+
+/-- The same context under `issue_comment`: tainted. -/
+def Scry.ciGhEventIssueComment : String :=
+  "on: issue_comment\n" ++
+  "jobs:\n" ++
+  "  build:\n" ++
+  "    runs-on: ubuntu-latest\n" ++
+  "    steps:\n" ++
+  "      - run: echo \"${{ github.event.issue.title }}\"\n"
+
+/-- `github.ref` under `pull_request_target`: GitHub generates the ref, so it is trusted
+for script injection (it is still a checkout target, a different question). -/
+def Scry.ciGhRefTrusted : String :=
+  "on: pull_request_target\n" ++
+  "jobs:\n" ++
+  "  build:\n" ++
+  "    runs-on: ubuntu-latest\n" ++
+  "    steps:\n" ++
+  "      - run: echo \"${{ github.ref }} ${{ github.ref_name }}\"\n"
+
+/-- `github.head_ref` under `pull_request`: the branch name comes from the fork, so
+the string is attacker-controlled even though the run is read-only. -/
+def Scry.ciGhHeadRef : String :=
+  "on: pull_request\n" ++
+  "jobs:\n" ++
+  "  build:\n" ++
+  "    runs-on: ubuntu-latest\n" ++
+  "    steps:\n" ++
+  "      - run: echo \"${{ github.head_ref }}\"\n"
+
+/-- The PR head SHA under `pull_request`: attacker-controlled *code*, but its text is a
+hex digest, so it is not a script-injection source. -/
+def Scry.ciGhHeadShaText : String :=
+  "on: pull_request\n" ++
+  "jobs:\n" ++
+  "  build:\n" ++
+  "    runs-on: ubuntu-latest\n" ++
+  "    steps:\n" ++
+  "      - run: echo \"${{ github.event.pull_request.head.sha }}\"\n"
+
+/-- A workflow input under `workflow_dispatch`: the caller chooses it. -/
+def Scry.ciGhInputsDispatch : String :=
+  "on: workflow_dispatch\n" ++
+  "jobs:\n" ++
+  "  build:\n" ++
+  "    runs-on: ubuntu-latest\n" ++
+  "    steps:\n" ++
+  "      - run: echo \"${{ inputs.name }}\"\n"
+
+/-- The same input expression under `push`: no inputs exist, no taint. -/
+def Scry.ciGhInputsPush : String :=
+  "on: push\n" ++
+  "jobs:\n" ++
+  "  build:\n" ++
+  "    runs-on: ubuntu-latest\n" ++
+  "    steps:\n" ++
+  "      - run: echo \"${{ inputs.name }}\"\n"
+
+-- ## Artifact and cache flows
+
+/-- Unsafe: a `pull_request_target` workflow checks out the PR head in `build` (an
+untrusted producer) and a privileged `deploy` job that `needs: build` downloads the
+artifact and restores the cache. Two flows, one artifact and one cache. -/
+def Scry.ciGhArtifactUnsafe : String :=
+  "name: ci\n" ++
+  "on:\n" ++
+  "  pull_request_target:\n" ++
+  "permissions:\n" ++
+  "  contents: write\n" ++
+  "jobs:\n" ++
+  "  build:\n" ++
+  "    runs-on: ubuntu-latest\n" ++
+  "    steps:\n" ++
+  "      - uses: actions/checkout@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5\n" ++
+  "        with:\n" ++
+  "          ref: ${{ github.event.pull_request.head.sha }}\n" ++
+  "      - uses: actions/upload-artifact@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5\n" ++
+  "        with:\n" ++
+  "          name: drop\n" ++
+  "      - uses: actions/cache@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5\n" ++
+  "        with:\n" ++
+  "          key: node-cache\n" ++
+  "  deploy:\n" ++
+  "    needs: build\n" ++
+  "    runs-on: ubuntu-latest\n" ++
+  "    steps:\n" ++
+  "      - uses: actions/download-artifact@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5\n" ++
+  "        with:\n" ++
+  "          name: drop\n" ++
+  "      - uses: actions/cache@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5\n" ++
+  "        with:\n" ++
+  "          key: node-cache\n" ++
+  "      - run: echo deploy\n"
+
+/-- Safe: the same artifact/cache flow, but the producer checks out the base (it is
+trusted), so a privileged consumer is fine. -/
+def Scry.ciGhArtifactSafe : String :=
+  "name: ci\n" ++
+  "on:\n" ++
+  "  pull_request_target:\n" ++
+  "permissions:\n" ++
+  "  contents: write\n" ++
+  "jobs:\n" ++
+  "  build:\n" ++
+  "    runs-on: ubuntu-latest\n" ++
+  "    steps:\n" ++
+  "      - uses: actions/checkout@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5\n" ++
+  "      - uses: actions/upload-artifact@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5\n" ++
+  "        with:\n" ++
+  "          name: drop\n" ++
+  "      - uses: actions/cache@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5\n" ++
+  "        with:\n" ++
+  "          key: node-cache\n" ++
+  "  deploy:\n" ++
+  "    needs: build\n" ++
+  "    runs-on: ubuntu-latest\n" ++
+  "    steps:\n" ++
+  "      - uses: actions/download-artifact@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5\n" ++
+  "        with:\n" ++
+  "          name: drop\n" ++
+  "      - uses: actions/cache@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5\n" ++
+  "        with:\n" ++
+  "          key: node-cache\n" ++
+  "      - run: echo deploy\n"
+
+/-- Safe: an untrusted producer and a privileged consumer, but no `needs` edge (the
+jobs are parallel), so there is no guaranteed artifact flow. -/
+def Scry.ciGhArtifactNoDep : String :=
+  "name: ci\n" ++
+  "on:\n" ++
+  "  pull_request:\n" ++
+  "permissions:\n" ++
+  "  contents: write\n" ++
+  "jobs:\n" ++
+  "  build:\n" ++
+  "    runs-on: ubuntu-latest\n" ++
+  "    steps:\n" ++
+  "      - uses: actions/checkout@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5\n" ++
+  "        with:\n" ++
+  "          ref: ${{ github.event.pull_request.head.sha }}\n" ++
+  "      - uses: actions/upload-artifact@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5\n" ++
+  "        with:\n" ++
+  "          name: drop\n" ++
+  "  deploy:\n" ++
+  "    runs-on: ubuntu-latest\n" ++
+  "    steps:\n" ++
+  "      - uses: actions/download-artifact@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5\n" ++
+  "        with:\n" ++
+  "          name: drop\n" ++
+  "      - run: echo deploy\n"
+
+-- ## Azure secret groups
+
 -- ## Azure Pipelines
 
 /-- Unsafe: `System.AccessToken` in a script, a floating task version, and template
@@ -151,6 +334,32 @@ def Scry.ciAzResourceFile : String :=
   "steps:\n" ++
   "- script: echo hi\n"
 
+/-- An opaque variable group with one undeclared reference (`DB_PASSWORD`), one
+declared non-secret variable (`greeting`) and one predefined variable
+(`Build.BuildId`): only the first is a finding. -/
+def Scry.ciAzGroupOpaque : String :=
+  "trigger: none\n" ++
+  "variables:\n" ++
+  "- group: prod-secrets\n" ++
+  "- name: greeting\n" ++
+  "  value: hello\n" ++
+  "jobs:\n" ++
+  "- job: build\n" ++
+  "  steps:\n" ++
+  "  - script: echo $(DB_PASSWORD)\n" ++
+  "  - script: echo $(greeting)\n" ++
+  "  - script: echo $(Build.BuildId)\n"
+
+/-- Only a predefined variable under an opaque group: clean. -/
+def Scry.ciAzGroupPredefined : String :=
+  "trigger: none\n" ++
+  "variables:\n" ++
+  "- group: prod-secrets\n" ++
+  "jobs:\n" ++
+  "- job: build\n" ++
+  "  steps:\n" ++
+  "  - script: echo $(Build.BuildId) $(System.JobId)\n"
+
 -- ## Models
 
 /-- One unsafe GitHub workflow. -/
@@ -198,3 +407,85 @@ def Scry.ciModelAll : Scry.CiModel :=
   | .ok gh => match Scry.ciParseModel "azure-pipelines.yml" Scry.ciAzUnsafe with
     | .error _ => gh
     | .ok az => Scry.ciAddWorkflow gh (Scry.ciWorkflowFirst az)
+
+/-- Parse a fixture into a model, defaulting to the empty model on a parse error (a
+fixture that fails to parse shows up as a failing test, not a crash). -/
+def Scry.ciModelOf (path text : String) : Scry.CiModel :=
+  match Scry.ciParseModel path text with
+  | .ok m => m
+  | .error _ => Scry.ciEmptyModel
+
+/-- A group description for the model overlay. -/
+def Scry.ciGroupOf (name : String) (members : List String) (known : Bool) (line : Nat) :
+    Scry.CiGroup :=
+  Scry.CiGroup.mk name members known line
+
+-- The per-event trust fixtures.
+def Scry.ciModelGhEventPush : Scry.CiModel :=
+  Scry.ciModelOf ".github/workflows/ev.yml" Scry.ciGhEventPush
+def Scry.ciModelGhEventPr : Scry.CiModel :=
+  Scry.ciModelOf ".github/workflows/ev.yml" Scry.ciGhEventPr
+def Scry.ciModelGhEventIssueTarget : Scry.CiModel :=
+  Scry.ciModelOf ".github/workflows/ev.yml" Scry.ciGhEventIssueTarget
+def Scry.ciModelGhEventIssueComment : Scry.CiModel :=
+  Scry.ciModelOf ".github/workflows/ev.yml" Scry.ciGhEventIssueComment
+def Scry.ciModelGhRefTrusted : Scry.CiModel :=
+  Scry.ciModelOf ".github/workflows/ev.yml" Scry.ciGhRefTrusted
+def Scry.ciModelGhHeadRef : Scry.CiModel :=
+  Scry.ciModelOf ".github/workflows/ev.yml" Scry.ciGhHeadRef
+def Scry.ciModelGhHeadShaText : Scry.CiModel :=
+  Scry.ciModelOf ".github/workflows/ev.yml" Scry.ciGhHeadShaText
+def Scry.ciModelGhInputsDispatch : Scry.CiModel :=
+  Scry.ciModelOf ".github/workflows/ev.yml" Scry.ciGhInputsDispatch
+def Scry.ciModelGhInputsPush : Scry.CiModel :=
+  Scry.ciModelOf ".github/workflows/ev.yml" Scry.ciGhInputsPush
+
+-- The artifact/cache fixtures.
+def Scry.ciModelGhArtifactUnsafe : Scry.CiModel :=
+  Scry.ciModelOf ".github/workflows/artifact.yml" Scry.ciGhArtifactUnsafe
+def Scry.ciModelGhArtifactSafe : Scry.CiModel :=
+  Scry.ciModelOf ".github/workflows/artifact.yml" Scry.ciGhArtifactSafe
+def Scry.ciModelGhArtifactNoDep : Scry.CiModel :=
+  Scry.ciModelOf ".github/workflows/artifact.yml" Scry.ciGhArtifactNoDep
+
+-- The Azure secret-group fixtures.
+def Scry.ciModelAzGroupOpaque : Scry.CiModel :=
+  Scry.ciModelOf "azure-pipelines.yml" Scry.ciAzGroupOpaque
+def Scry.ciModelAzGroupPredefined : Scry.CiModel :=
+  Scry.ciModelOf "azure-pipelines.yml" Scry.ciAzGroupPredefined
+def Scry.ciModelAzGroupKnown : Scry.CiModel :=
+  Scry.ciAddGroup Scry.ciModelAzGroupOpaque
+    (Scry.ciGroupOf "prod-secrets" ["DB_PASSWORD"] .true 2)
+def Scry.ciModelAzGroupKnownMiss : Scry.CiModel :=
+  Scry.ciAddGroup Scry.ciModelAzGroupOpaque
+    (Scry.ciGroupOf "prod-secrets" ["OTHER_SECRET"] .true 2)
+
+/-- Add a parsed workflow to a model under `path`, or keep the model on a parse error. -/
+def Scry.ciAddParsed (m : Scry.CiModel) (path text : String) : Scry.CiModel :=
+  match Scry.ciParseModel path text with
+  | .ok x => Scry.ciAddWorkflow m (Scry.ciWorkflowFirst x)
+  | .error _ => m
+
+/-- The per-event trust fixtures under distinct paths, so one analysis tells the whole
+matrix apart (a finding's `path` names its workflow). The remaining context classes
+(head SHA, inputs) are covered by the `ciCtxTaint` table test and the `ciGhCtxTag`
+classification test. -/
+def Scry.ciModelGhEvents : Scry.CiModel :=
+  let m := Scry.ciAddParsed Scry.ciEmptyModel "ev/push.yml" Scry.ciGhEventPush;
+  let m := Scry.ciAddParsed m "ev/pr.yml" Scry.ciGhEventPr;
+  let m := Scry.ciAddParsed m "ev/issue-target.yml" Scry.ciGhEventIssueTarget;
+  let m := Scry.ciAddParsed m "ev/issue-comment.yml" Scry.ciGhEventIssueComment;
+  let m := Scry.ciAddParsed m "ev/ref.yml" Scry.ciGhRefTrusted;
+  Scry.ciAddParsed m "ev/head-ref.yml" Scry.ciGhHeadRef
+
+/-- The artifact fixtures under distinct paths (one analysis). -/
+def Scry.ciModelGhArtifacts : Scry.CiModel :=
+  let m := Scry.ciAddParsed Scry.ciEmptyModel "art/unsafe.yml" Scry.ciGhArtifactUnsafe;
+  let m := Scry.ciAddParsed m "art/safe.yml" Scry.ciGhArtifactSafe;
+  Scry.ciAddParsed m "art/nodep.yml" Scry.ciGhArtifactNoDep
+
+/-- The two opaque-group fixtures (both have group `prod-secrets`, whose members the
+model does not know), under distinct paths. -/
+def Scry.ciModelAzGroupsOpaque : Scry.CiModel :=
+  let m := Scry.ciAddParsed Scry.ciEmptyModel "az/opaque.yml" Scry.ciAzGroupOpaque;
+  Scry.ciAddParsed m "az/predefined.yml" Scry.ciAzGroupPredefined

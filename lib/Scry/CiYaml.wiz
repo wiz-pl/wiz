@@ -429,9 +429,10 @@ partial def Scry.yBlockJoin (folded : Bool) : List String → String
     String.append x (String.append sep (Scry.yBlockJoin folded (.cons y rest)))
 
 /-- Build a block scalar from its indicator (`|`, `>`, with `-`/`+`) and the lines after
-the key line. -/
+the key line. Returns the text, the content indentation (the column its lines start at,
+used for finding spans) and the lines after the scalar. -/
 def Scry.yBlockScalar (indicator : String) (parent : Scry.YLine) (rest : List Scry.YLine) :
-    String × List Scry.YLine :=
+    String × Nat × List Scry.YLine :=
   let cs := String.chars indicator;
   let folded := match cs with
     | .cons c _ => Nat.beq (Char.code c) 62
@@ -445,7 +446,7 @@ def Scry.yBlockScalar (indicator : String) (parent : Scry.YLine) (rest : List Sc
     | .none => Nat.succ parent.indent;
   let body := Scry.yBlockJoin folded (Scry.yBlockLines contentIndent lines);
   let text := if strip then body else String.append body "\n";
-  (text, consumed.2)
+  (text, contentIndent, consumed.2)
 
 -- ## Flow values
 
@@ -607,11 +608,13 @@ partial def Scry.yFlowMap : List Char → List (String × Scry.Yaml) → Except 
             | .nil => .error "unterminated flow mapping"
 end
 
-/-- A whole inline value on one line (`[…]`, `{…}`, quoted scalar, plain scalar). -/
-partial def Scry.yInline (s : String) (line : Nat) : Except String Scry.Yaml :=
+/-- A whole inline value on one line (`[…]`, `{…}`, quoted scalar, plain scalar). `col`
+is the column the scalar starts at (0 when the caller does not know it), so findings can
+carry a column as well as a line. -/
+partial def Scry.yInline (s : String) (line col : Nat) : Except String Scry.Yaml :=
   let t := String.trim s;
   match String.chars t with
-  | .nil => .ok (.scalar "" line 0)
+  | .nil => .ok (.scalar "" line col)
   | .cons c rest =>
     if Bool.or (Nat.beq (Char.code c) 91) (Nat.beq (Char.code c) 123) then
       match Scry.yFlowValue (.cons c rest) with
@@ -623,19 +626,19 @@ partial def Scry.yInline (s : String) (line : Nat) : Except String Scry.Yaml :=
     else if Bool.or (Nat.beq (Char.code c) 39) (Nat.beq (Char.code c) 34) then
       match Scry.yFlowQuoted (.cons c rest) with
       | .some (v, after) => match Scry.yFlowSkip after with
-        | .nil => .ok (.scalar v line 0)
+        | .nil => .ok (.scalar v line col)
         | .cons c2 _ => .error ("trailing characters after quoted scalar at line " ++ Nat.repr line
             ++ " (near '" ++ String.singleton c2 ++ "')")
       | .none => .error ("unterminated quoted scalar at line " ++ Nat.repr line)
     else if Nat.beq (Char.code c) 38 then
       let p := Scry.yFlowNameGo .nil rest;
-      match Scry.yInline (String.ofChars p.2) line with
+      match Scry.yInline (String.ofChars p.2) line col with
       | .error e => .error e
-      | .ok v => .ok (.anchored p.1 v line 0)
+      | .ok v => .ok (.anchored p.1 v line col)
     else if Nat.beq (Char.code c) 42 then
       let p := Scry.yFlowNameGo .nil rest;
-      .ok (.alias p.1 line 0)
-    else .ok (.scalar t line 0)
+      .ok (.alias p.1 line col)
+    else .ok (.scalar t line col)
 
 -- ## Block structure
 
@@ -667,6 +670,9 @@ partial def Scry.yEntry (l : Scry.YLine) (rest : List Scry.YLine) :
   | .some (k, v0) =>
     let key := Scry.yUnquote k;
     let v := String.trim v0;
+    -- the column the value starts at (`l.text` is the comment-stripped, trimmed line and
+    -- `v` its suffix, so the difference is the offset of the value text)
+    let vcol := Nat.add l.indent (Nat.sub (String.length l.text) (String.length v));
     if String.isEmpty v then
       match Scry.ySkipBlank rest with
       | .cons n ns =>
@@ -678,10 +684,10 @@ partial def Scry.yEntry (l : Scry.YLine) (rest : List Scry.YLine) :
       | .nil => .ok (key, .scalar "" l.num l.indent, rest)
     else if String.startsWith v "|" then
       let p := Scry.yBlockScalar v l rest;
-      .ok (key, .scalar p.1 l.num l.indent, p.2)
+      .ok (key, .scalar p.1 l.num p.2.1, p.2.2)
     else if String.startsWith v ">" then
       let p := Scry.yBlockScalar v l rest;
-      .ok (key, .scalar p.1 l.num l.indent, p.2)
+      .ok (key, .scalar p.1 l.num p.2.1, p.2.2)
     else if String.startsWith v "&" then
       let p := Scry.yFlowNameGo .nil (String.chars (String.drop 1 v));
       let name := p.1;
@@ -696,11 +702,11 @@ partial def Scry.yEntry (l : Scry.YLine) (rest : List Scry.YLine) :
           else .ok (key, .anchored name (.scalar "" l.num l.indent) l.num l.indent, rest)
         | .nil => .ok (key, .anchored name (.scalar "" l.num l.indent) l.num l.indent, rest)
       else
-        match Scry.yInline tail l.num with
+        match Scry.yInline tail l.num vcol with
         | .error e => .error e
         | .ok v2 => .ok (key, .anchored name v2 l.num l.indent, rest)
     else
-      match Scry.yInline v l.num with
+      match Scry.yInline v l.num vcol with
       | .error e => .error e
       | .ok v2 => .ok (key, v2, rest)
 
@@ -753,7 +759,7 @@ partial def Scry.ySeqFrom (indent : Nat) (startLine : Nat) (acc : List Scry.Yaml
       else if String.startsWith r "-" then
         .error ("nested inline sequences are not supported at line " ++ Nat.repr l.num)
       else if Bool.or (String.startsWith r "[") (String.startsWith r "{") then
-        match Scry.yInline r l.num with
+        match Scry.yInline r l.num (Nat.add indent (Nat.sub (String.length l.text) (String.length r))) with
         | .error e => .error e
         | .ok v => Scry.ySeqFrom indent startLine (.cons v acc) rest
       else match Scry.ySplitKey r with
@@ -763,7 +769,7 @@ partial def Scry.ySeqFrom (indent : Nat) (startLine : Nat) (acc : List Scry.Yaml
           | .error e => .error e
           | .ok (v, rest2) => Scry.ySeqFrom indent startLine (.cons v acc) rest2
         | .none =>
-          match Scry.yInline r l.num with
+          match Scry.yInline r l.num (Nat.add indent (Nat.sub (String.length l.text) (String.length r))) with
           | .error e => .error e
           | .ok v => Scry.ySeqFrom indent startLine (.cons v acc) rest
 

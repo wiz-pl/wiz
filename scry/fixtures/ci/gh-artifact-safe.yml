@@ -1,0 +1,27 @@
+name: ci
+on:
+  pull_request_target:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5
+      - uses: actions/upload-artifact@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5
+        with:
+          name: drop
+      - uses: actions/cache@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5
+        with:
+          key: node-cache
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5
+        with:
+          name: drop
+      - uses: actions/cache@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5
+        with:
+          key: node-cache
+      - run: echo deploy

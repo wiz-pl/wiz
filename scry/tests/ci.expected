@@ -1,9 +1,9 @@
 findings: 9
-  gh-script-injection  step "greet" line 12 detail "github.event.issue.title" cert 4
+  gh-script-injection  step "greet" line 12 detail "github.event.issue.title" cert 7
   gh-unpinned-action  step "actions/checkout@v4" line 11 detail "actions/checkout@v4" cert 3
   gh-unpinned-action  step "some-org/some-action@v1" line 14 detail "some-org/some-action@v1" cert 3
   gh-unpinned-action  step "checkout head" line 15 detail "actions/checkout@v4" cert 3
-  gh-untrusted-checkout  step "checkout head" line 15 detail "ci" cert 4
+  gh-untrusted-checkout  step "checkout head" line 15 detail "ci" cert 5
   az-token-in-script  step "script" line 11 detail "System.AccessToken" cert 4
   az-unpinned-task  step "PublishBuildArtifacts@1" line 10 detail "PublishBuildArtifacts@1" cert 3
   az-template-injection  step "bash" line 12 detail "parameters.name" cert 3
@@ -22,3 +22,11 @@ kinds:
   script 1
   expression 1
   permission 1
+{"tool":"scry-ci","version":1,"certificates":"checked","findings":[{"rule":"gh-script-injection","severity":"error","message":"attacker-controlled expression \"github.event.issue.title\" is interpolated into a script","path":"fixtures/ci/gh-unsafe.yml","span":{"start":{"line":12,"column":8},"end":{"line":12,"column":8}},"node":"greet","detail":"github.event.issue.title","derivation":{"checked":true,"size":7,"leaves":[{"rel":"event","row":[1,4]},{"rel":"inWorkflow","row":[8,1]},{"rel":"script","row":[8,9]},{"rel":"exprIn","row":[9,10]},{"rel":"exprRead","row":[10,0,2]},{"rel":"ctxTaint","row":[2,4]}]}},{"rule":"gh-unpinned-action","severity":"warning","message":"action \"actions/checkout@v4\" is not pinned to a 40-hex commit","path":"fixtures/ci/gh-unsafe.yml","span":{"start":{"line":11,"column":8},"end":{"line":11,"column":8}},"node":"actions/checkout@v4","detail":"actions/checkout@v4","derivation":{"checked":true,"size":3,"leaves":[{"rel":"uses","row":[6,7]},{"rel":"unpinned","row":[7]}]}},{"rule":"gh-unpinned-action","severity":"warning","message":"action \"some-org/some-action@v1\" is not pinned to a 40-hex commit","path":"fixtures/ci/gh-unsafe.yml","span":{"start":{"line":14,"column":8},"end":{"line":14,"column":8}},"node":"some-org/some-action@v1","detail":"some-org/some-action@v1","derivation":{"checked":true,"size":3,"leaves":[{"rel":"uses","row":[11,12]},{"rel":"unpinned","row":[12]}]}},{"rule":"gh-unpinned-action","severity":"warning","message":"action \"actions/checkout@v4\" is not pinned to a 40-hex commit","path":"fixtures/ci/gh-unsafe.yml","span":{"start":{"line":15,"column":8},"end":{"line":15,"column":8}},"node":"checkout head","detail":"actions/checkout@v4","derivation":{"checked":true,"size":3,"leaves":[{"rel":"uses","row":[13,15]},{"rel":"unpinned","row":[15]}]}},{"rule":"gh-untrusted-checkout","severity":"error","message":"step \"checkout head\" checks out the pull-request head under a privileged fork-capable event","path":"fixtures/ci/gh-unsafe.yml","span":{"start":{"line":15,"column":8},"end":{"line":15,"column":8}},"node":"checkout head","detail":"ci","derivation":{"checked":true,"size":5,"leaves":[{"rel":"forkCap","row":[1]},{"rel":"attackerRef","row":[1]},{"rel":"inWorkflow","row":[13,1]},{"rel":"checkoutHead","row":[13]}]}}]}
+findings: 3
+  gh-untrusted-checkout  step "actions/checkout@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5" line 10 detail "ci" cert 5
+  gh-artifact-poisoning  step "actions/download-artifact@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5" line 23 detail "artifact:drop" cert 9
+  gh-artifact-poisoning  step "actions/cache@9c091f2e5f7f4b0f44f0d9a6c5c6e8a1b2c3d4e5" line 26 detail "cache:node-cache" cert 9
+certificates: checked
+findings: 0
+certificates: checked

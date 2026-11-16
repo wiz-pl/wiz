@@ -1,12 +1,17 @@
 -- test: run
 import Sys
 import Scry.Cli
--- End to end: the CI frontend over the four fixtures. The first command analyses both
--- unsafe files together (a GitHub workflow and an Azure pipeline: one cross-platform
--- report); the second prints the graph summary of the safe GitHub workflow, whose
--- findings are empty. `grail build` runs the same commands as the `ci` and `ci-store`
--- targets.
+-- End to end: the CI frontend over the fixtures. The first command analyses both unsafe
+-- files together (a GitHub workflow and an Azure pipeline: one cross-platform report);
+-- the second prints the graph summary of the safe GitHub workflow, whose findings are
+-- empty. The third is the same unsafe GitHub file as a JSON findings document (rule,
+-- severity, path, span and derivation summary); the fourth analyses the artifact/cache
+-- flow fixture and the fifth its safe counterpart. `grail build` runs the same commands
+-- as the `ci`, `ci-store`, `ci-json` and `ci-artifact` targets.
 def main : IO Unit := do
   r1 ← Scry.dispatch ["ci", "fixtures/ci/gh-unsafe.yml", "fixtures/ci/azure-unsafe.yml"];
   r2 ← Scry.dispatch ["ci-store", "fixtures/ci/gh-safe.yml"];
+  r3 ← Scry.dispatch ["ci", "--json", "fixtures/ci/gh-unsafe.yml"];
+  r4 ← Scry.dispatch ["ci", "fixtures/ci/gh-artifact-unsafe.yml"];
+  r5 ← Scry.dispatch ["ci", "fixtures/ci/gh-artifact-safe.yml"];
   Process.exit 0
