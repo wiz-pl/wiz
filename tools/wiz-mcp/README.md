@@ -107,7 +107,7 @@ claude -p 'call mcp__wiz__version' --mcp-config .mcp.json --strict-mcp-config \
 | `check` (`wiz_check`) | `path` | `wiz check PATH`; the workhorse |
 | `parse` (`wiz_parse`) | `path` | `wiz parse PATH` |
 | `fmt` (`wiz_fmt`) | `path`, `check?`, `width?` | `wiz fmt PATH [--check] [--width N]` |
-| `build` (`wiz_build`) | `path`, `out`, `lib?` | `wiz build PATH -o OUT [--lib]` |
+| `build` (`wiz_build`) | `path`, `out`, `lib?` | `wiz build PATH -o OUT [--lib]`; **only with `--allow-build`** |
 | `diagnostics` (`wiz_diagnostics`) | `path`, `text?` | `didOpen` → `publishDiagnostics` → `didClose` |
 | `hover` (`wiz_hover`) | `path`, `text?`, `line`, `character` | `textDocument/hover` |
 | `goals` (`wiz_goals`) | `path`, `text?`, `line`, `character` | `wiz/interactiveGoals` |
@@ -125,6 +125,40 @@ module roots are found beside the binary). `build` additionally needs the host
 C toolchain (`cc`, GMP) on the environment the bridge inherits; start the MCP
 client from the dev shell (`nix develop`) or an equivalent shell if you use it.
 The bridge does not invent compiler flags.
+
+## Safety
+
+The default server is read-only: it reads files and writes nothing but the
+content-addressed `wiz` cache. Every tool carries MCP `annotations`
+(`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint: false`),
+which clients use for their permission prompts.
+
+* **Paths are confined.** A `path` is resolved against the workspace and then
+  through every symlink; the real path must lie inside the workspace, the
+  toolchain's library (`PREFIX/share/wiz` of a release or Nix toolchain, or
+  `CHECKOUT/lib` of a checkout build) or an `--allow-root` directory. An
+  absolute path elsewhere, a `..` escape and a symlink out of the workspace are
+  refused with `error.kind = "path_denied"` before `wiz` runs or the daemon
+  starts.
+* **`build` is gated.** It writes a file and runs the host C toolchain, so it is
+  not listed unless the server is started with `--allow-build`; a call without
+  it returns `not_enabled`. Its `out` must resolve inside the workspace (never
+  the toolchain or an `--allow-root` directory) and may not be a symlink.
+* **Children get an allowlisted environment.** `wiz` and the daemon see `PATH`,
+  `HOME`, the user and locale variables, temp and cache directories, the C
+  compiler variables (`CC`, `CFLAGS`, `CPATH`, `LD_LIBRARY_PATH`, …) and every
+  `WIZ_*`, `NIX_*` and `LC_*` variable, plus `--pass-env` names. A name that
+  looks like a credential (`TOKEN`, `SECRET`, `PASSW`, `AUTH`, `API_KEY`,
+  `PRIVATE`, `CREDENTIAL`, `COOKIE`, `SESSION`) never passes, even when named
+  with `--pass-env`; that covers `GH_TOKEN`, `CACHIX_AUTH_TOKEN`,
+  `WIZ_NTFY_TOKEN_FILE` and `SSH_AUTH_SOCK`.
+* **No network.** No tool takes a URL; the daemon listens on 127.0.0.1 only.
+
+What the bridge does not control: the files `wiz` itself opens while checking
+(imports from its module roots, `import_c` headers) and the processes it starts
+(an SMT solver, `cc -E`). The check happens before the call, so a symlink
+swapped in between the check and the open is not caught; the workspace is the
+agent's own, so this is a guard against mistakes, not a sandbox.
 
 ## Output shape
 
@@ -145,8 +179,9 @@ failure:
   `{"_truncated": true, "bytes": N, "preview": "…"}`.
 * MCP `isError` is true exactly when `ok` is false. The text content and
   `structuredContent` carry the same object.
-* `error.kind` is one of `invalid_args`, `wiz_not_found`, `io_error`,
-  `timeout`, `lsp_startup`, `lsp_closed`, `lsp_error`, `internal`.
+* `error.kind` is one of `invalid_args`, `path_denied`, `not_enabled`,
+  `wiz_not_found`, `io_error`, `timeout`, `lsp_startup`, `lsp_closed`,
+  `lsp_error`, `internal`.
 
 No `wiz` in the workspace is a normal error envelope, not a broken server:
 `initialize` still succeeds, the tools return `wiz_not_found` with the path it
@@ -255,6 +290,10 @@ sh tools/wiz-mcp/run-tests.sh
                   (default: wiz's own ~/.cache/wiz)
 --idle SECONDS    unload an idle daemon; 0 keeps it (default: 600)
 --timeout SECONDS per-call deadline; also the daemon's startup budget (default: 300)
+--allow-build     list and allow `build` (off by default)
+--allow-root DIR  another directory tools may read (repeatable; never written)
+--pass-env NAME   pass another variable to wiz (repeatable; credential-like names
+                  are still dropped)
 ```
 
 Environment: `WIZ_BIN` is the default for `--wiz`; `WIZ_MCP_CACHE` for `--cache`.
@@ -268,6 +307,12 @@ All logs go to stderr; stdout is the MCP transport.
 * **`lsp_startup`** — the daemon exited before printing `WebSocket on port`.
   The error includes the tail of its stderr. Check that `wiz lsp --ws 0
   --no-stdio` works by hand in that worktree.
+* **`path_denied`** — the path resolves outside the workspace and the
+  toolchain library. Use a path inside the worktree, or start the server with
+  `--allow-root DIR` for a read-only extra directory.
+* **`not_enabled`** — `build` needs `--allow-build` on the server command.
+* **`build` cannot find `cc` flags** — they come from the environment; a
+  variable outside the allowlist needs `--pass-env NAME`.
 * **First LSP call is slow** — the daemon elaborates imported modules. With a
   cold `~/.cache/wiz` this can take several seconds; later calls are fast.
 * **A daemon lingers after a crashed test** — the bridge kills it on exit and
@@ -285,6 +330,6 @@ All logs go to stderr; stdout is the MCP transport.
   given and shells out to `wiz fmt`.
 * Calls are sequential; MCP cancellation notifications cannot interrupt a call
   in flight. The per-call deadline is the bound.
-* No resources or prompts; only the eight tools above.
+* No resources or prompts; only the tools above (seven, eight with `--allow-build`).
 * The daemon's cache is content-addressed and safe to share, but cold worktrees
   duplicate elaboration work. A warm `~/.cache/wiz` avoids most of it.

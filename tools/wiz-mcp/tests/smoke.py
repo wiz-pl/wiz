@@ -200,7 +200,8 @@ def run(argv: list[str]) -> int:
             print(f"initialize: {info['name']} {info['version']}")
             bridge.notify("notifications/initialized")
             tools = {tool["name"] for tool in bridge.rpc("tools/list", {})["result"]["tools"]}
-            expected = {"version", "check", "parse", "fmt", "build", "diagnostics", "hover", "goals"}
+            # `build` is listed only with --allow-build; the smoke test runs the default (read-only) server.
+            expected = {"version", "check", "parse", "fmt", "diagnostics", "hover", "goals"}
             if tools != expected:
                 raise RuntimeError(f"tools/list mismatch: {sorted(tools)}")
             print(f"tools: {len(tools)} listed")
