@@ -1,0 +1,2 @@
+import Prelude
+def greetValue : Nat := 120

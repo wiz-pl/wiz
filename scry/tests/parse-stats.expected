@@ -1,0 +1,135 @@
+parse: tree-sitter (vendored 0.27.2, tree-sitter-c 0.24.2) native cst
+format: scry-cst v1 (native columns)
+language: c
+bytes: 95
+files: 1
+nodes: 55
+edges: 54
+relations: 0
+tuples: 0
+roots: 1
+max depth: 7
+errors: 0
+kinds:
+  translation_unit 1
+  function_definition 2
+  primitive_type 6
+  function_declarator 2
+  identifier 9
+  parameter_list 2
+  ( 3
+  parameter_declaration 3
+  , 2
+  ) 3
+  compound_statement 2
+  { 2
+  return_statement 2
+  return 2
+  binary_expression 1
+  + 1
+  ; 3
+  } 2
+  declaration 1
+  init_declarator 1
+  = 1
+  call_expression 1
+  argument_list 1
+  number_literal 2
+edge labels:
+  child 30
+  type 6
+  declarator 8
+  parameters 2
+  body 2
+  left 1
+  operator 1
+  right 1
+  value 1
+  function 1
+  arguments 1
+csr out: 56 offsets, 54 arcs
+csr in: (not stored: the shim's tree walk is outward)
+
+parse: tree-sitter (vendored 0.27.2, tree-sitter-c 0.24.2) native cst
+format: scry-cst v1 (native columns)
+language: c
+bytes: 34
+files: 1
+nodes: 14
+edges: 13
+relations: 0
+tuples: 0
+roots: 1
+max depth: 4
+errors: 2
+kinds:
+  translation_unit 1
+  ERROR 2
+  primitive_type 2
+  identifier 3
+  ( 1
+  parameter_declaration 1
+  { 1
+  return 1
+  + 1
+  } 1
+edge labels:
+  child 10
+  type 2
+  declarator 1
+csr out: 15 offsets, 13 arcs
+csr in: (not stored: the shim's tree walk is outward)
+
+parse: native cst store (scry-cst spill format)
+format: scry-cst v1
+language: c
+files: 1
+nodes: 7
+edges: 6
+relations: 2
+tuples: 2
+roots: 1
+max depth: 4
+errors: 1
+kinds:
+  translation_unit 1
+  function_definition 1
+  identifier 2
+  compound_statement 1
+  call_expression 1
+  ERROR 1
+edge labels:
+  child 3
+  declarator 1
+  body 1
+  function 1
+csr out: 8 offsets, 6 arcs
+csr in: (not stored: the shim's tree walk is outward)
+
+parse: JSON facts store
+note: --stats reads the store's columns; no source file was parsed now
+format: scry-facts v1
+language: c
+files: 1
+nodes: 7
+edges: 6
+relations: 2
+tuples: 3
+roots: 1
+max depth: 4
+errors: 1
+kinds:
+  translation_unit 1
+  function_definition 1
+  identifier 2
+  compound_statement 1
+  call_expression 1
+  ERROR 1
+edge labels:
+  child 3
+  declarator 1
+  body 1
+  function 1
+csr out: 8 offsets, 6 arcs
+csr in: 8 offsets, 6 arcs
+total: 4 store(s), 83 nodes, 79 edges, 4 relations, 5 tuples, 4 roots, 4 errors, max depth 7

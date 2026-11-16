@@ -1,0 +1,172 @@
+import IO
+import Sys
+import Word
+import WordArray
+import Intern
+import Scry.CstStore
+/-!
+# Scry.Native: tree-sitter through one C shim
+
+S1's parser (design §4.1). `native/ts_shim.c` parses one file with the vendored
+tree-sitter runtime and tree-sitter-c grammar, walks the tree with a `TSTreeCursor` and
+bulk-loads it into struct-of-arrays columns. No `TSNode` crosses the FFI by value: Wiz
+sees a `ScryStore` handle and the columns, copied into `U32Array`/`U64Array` by
+`wiz_warray_of_c` (the C interface of `lib/WordArray.wiz`).
+
+The columns (preorder ids, root 0) are the ones `Scry.CstStore` keeps:
+
+* `kind` — compact kind id; `kindName`/`kindSymbol` name the table entry;
+* `field` — compact field id of the parent arc (0 = none);
+* `flags` — bit 0 named, bit 1 `ERROR`, bit 2 `MISSING`;
+* `parent` — parent id + 1 (0 = root);
+* `span` — `start << 32 | stop`, byte offsets;
+* `firstChild`/`nextSibling` — child id + 1 (0 = none/last);
+* `childOff`/`children`/`childField` — the child CSR;
+* `edgeSrc`/`edgeDst`/`edgeLabel` — one edge per child arc.
+
+`toCstStore` turns the handle into the model `Scry.CstStore` (used by `parse --stats`);
+`parseChecked` additionally refuses a file with `ERROR`/`MISSING` nodes, which is how a
+test sees a malformed input as an error (tree-sitter itself always returns a tree, with
+recovery nodes).
+
+The shim is sequential: one parser, one tree, one file. Threads are S1's next step.
+-/
+
+link_c "../../native/ts_shim.c"
+link_c "../../native/tree-sitter/lib/src/lib.c"
+link_c "../../native/tree-sitter-c/src/parser.c"
+
+/-- A parsed file's native store. The shim returns one `calloc` block, so the finalizer
+is plain `free` (no prototype of our own needed in the generated C). -/
+foreign_type ScryStore (finalizer := "free")
+
+-- ## The shim's scalar interface
+
+/-- Parse `src` (byte length `len`) as language `lang`; the store says whether it worked. -/
+extern "scry_parse" Scry.Native.parseRaw : String → String → Nat → IO ScryStore
+/-- 1 when the parse succeeded, 0 when `storeError` says why. -/
+extern "scry_store_ok" Scry.Native.storeOk : ScryStore → Nat
+/-- The shim's error message (`""` after a good parse). -/
+extern "scry_store_error" Scry.Native.storeError : ScryStore → String
+/-- The source size in bytes. -/
+extern "scry_store_bytes" Scry.Native.storeBytes : ScryStore → Nat
+/-- The number of nodes (root 0, preorder). -/
+extern "scry_node_count" Scry.Native.nodeCount : ScryStore → Nat
+/-- The number of edges (one per child arc). -/
+extern "scry_edge_count" Scry.Native.edgeCount : ScryStore → Nat
+/-- The number of nodes without a parent. -/
+extern "scry_root_count" Scry.Native.rootCount : ScryStore → Nat
+/-- The number of distinct node kinds. -/
+extern "scry_kind_count" Scry.Native.kindCount : ScryStore → Nat
+/-- The number of field names, including the empty name at id 0. -/
+extern "scry_field_count" Scry.Native.fieldCount : ScryStore → Nat
+/-- `ERROR` or `MISSING` nodes. -/
+extern "scry_error_count" Scry.Native.errorCount : ScryStore → Nat
+/-- The grammar name of compact kind `i`. -/
+extern "scry_kind_name" Scry.Native.kindName : ScryStore → Nat → String
+/-- tree-sitter's symbol id of compact kind `i`. -/
+extern "scry_kind_symbol" Scry.Native.kindSymbol : ScryStore → Nat → Nat
+/-- The tree-sitter name of compact field `i` (`""` for id 0). -/
+extern "scry_field_name" Scry.Native.fieldName : ScryStore → Nat → String
+/-- tree-sitter's field id of compact field `i`. -/
+extern "scry_field_symbol" Scry.Native.fieldSymbol : ScryStore → Nat → Nat
+
+-- ## The columns (owned word arrays, copied from the shim)
+
+/-- Node kind ids (`U32Array`). -/
+extern "scry_kind_column" Scry.Native.kindColumn : ScryStore → IO U32Array
+/-- Node field ids (`U32Array`). -/
+extern "scry_field_column" Scry.Native.fieldColumn : ScryStore → IO U32Array
+/-- Node flags (`U32Array`). -/
+extern "scry_flags_column" Scry.Native.flagsColumn : ScryStore → IO U32Array
+/-- Parent entries, parent + 1 (`U32Array`). -/
+extern "scry_parent_column" Scry.Native.parentColumn : ScryStore → IO U32Array
+/-- Packed spans (`U64Array`). -/
+extern "scry_span_column" Scry.Native.spanColumn : ScryStore → IO U64Array
+/-- First-child entries, child + 1 (`U32Array`). -/
+extern "scry_first_child_column" Scry.Native.firstChildColumn : ScryStore → IO U32Array
+/-- Next-sibling entries, sibling + 1 (`U32Array`). -/
+extern "scry_next_sibling_column" Scry.Native.nextSiblingColumn : ScryStore → IO U32Array
+/-- The child CSR's offsets (`n + 1`). -/
+extern "scry_child_off_column" Scry.Native.childOffColumn : ScryStore → IO U32Array
+/-- The child CSR's node ids. -/
+extern "scry_children_column" Scry.Native.childrenColumn : ScryStore → IO U32Array
+/-- The child CSR's field ids. -/
+extern "scry_child_field_column" Scry.Native.childFieldColumn : ScryStore → IO U32Array
+/-- Edge sources. -/
+extern "scry_edge_src_column" Scry.Native.edgeSrcColumn : ScryStore → IO U32Array
+/-- Edge targets. -/
+extern "scry_edge_dst_column" Scry.Native.edgeDstColumn : ScryStore → IO U32Array
+/-- Edge labels (field ids). -/
+extern "scry_edge_label_column" Scry.Native.edgeLabelColumn : ScryStore → IO U32Array
+
+-- ## Parsing
+
+/-- The UTF-8 byte length of `s` (tree-sitter's offsets are bytes). -/
+def Scry.Native.byteLength (s : String) : Nat := Bytes.size (Bytes.ofUtf8 s)
+
+/-- Parse `src` as `lang`, or fail with the shim's message. -/
+def Scry.Native.parse (lang : String) (src : String) : EIO ScryStore := do
+  st ← EIO.lift (Scry.Native.parseRaw lang src (Scry.Native.byteLength src));
+  match Nat.beq (Scry.Native.storeOk st) 1 with
+  | .true => EIO.pure st
+  | .false => EIO.fail (Scry.Native.storeError st)
+
+/-- Parse a C file. -/
+def Scry.Native.parseFile (path : String) : EIO ScryStore := do
+  text ← FS.readFile path;
+  Scry.Native.parse "c" text
+
+/-- `parseFile`, refusing a file with `ERROR`/`MISSING` nodes: the "malformed input is
+an error" view (the stats view keeps the recovery tree; tree-sitter always returns one). -/
+def Scry.Native.parseChecked (path : String) : EIO ScryStore := do
+  st ← Scry.Native.parseFile path;
+  match Nat.beq (Scry.Native.errorCount st) 0 with
+  | .true => EIO.pure st
+  | .false => EIO.fail (path ++ ": " ++ Nat.repr (Scry.Native.errorCount st)
+      ++ " ERROR/MISSING node(s); the file is not valid C")
+
+-- ## Names and columns into the model store
+
+/-- `f 0, f 1, … f (n - 1)`. -/
+def Scry.Native.namesFrom (f : Nat → String) : Nat → Nat → List String
+  | .zero, _ => .nil
+  | .succ k, i => List.cons (f i) (Scry.Native.namesFrom f k (Nat.succ i))
+
+/-- The `scry-cst` model store for the shim's columns. One file (`path`); no relations
+(the CST layer has none). Edge labels are the field names, with `child` for an arc that
+has no field, matching `Scry.CstStore.ofFacts`'s label convention. -/
+def Scry.Native.toCstStore (path : String) (st : ScryStore) : IO Scry.CstStore := do
+  let n := Scry.Native.nodeCount st;
+  let nk := Scry.Native.kindCount st;
+  let nf := Scry.Native.fieldCount st;
+  let kinds := (InternTable.internAll InternTable.empty
+    (Scry.Native.namesFrom (Scry.Native.kindName st) nk 0)).1;
+  let fields0 := (InternTable.internAll InternTable.empty
+    (Scry.Native.namesFrom (Scry.Native.fieldName st) nf 0)).1;
+  let fp := InternTable.intern fields0 "child";
+  let fields := fp.1;
+  let childId := fp.2;
+  let paths := (InternTable.intern InternTable.empty path).1;
+  kindCol ← Scry.Native.kindColumn st;
+  fieldCol ← Scry.Native.fieldColumn st;
+  flags ← Scry.Native.flagsColumn st;
+  parent ← Scry.Native.parentColumn st;
+  spans ← Scry.Native.spanColumn st;
+  nextSib ← Scry.Native.nextSiblingColumn st;
+  childOff ← Scry.Native.childOffColumn st;
+  children ← Scry.Native.childrenColumn st;
+  childField ← Scry.Native.childFieldColumn st;
+  edgeSrc ← Scry.Native.edgeSrcColumn st;
+  edgeDst ← Scry.Native.edgeDstColumn st;
+  edgeLabel0 ← Scry.Native.edgeLabelColumn st;
+  let edgeLabel := U32Array.ofList (List.map (fun x =>
+    match UIntN.beq x (U32.ofNat 0) with
+    | .true => childId
+    | .false => x) (U32Array.toList edgeLabel0));
+  let bytes := U64Array.ofList
+    (List.cons (U64.ofNat (Scry.Native.storeBytes st)) .nil);
+  IO.pure (Scry.CstStore.mk "c" kinds fields paths kindCol fieldCol flags parent spans
+    (U32Array.replicate n (U32.ofNat 0)) nextSib childOff children childField
+    edgeSrc edgeDst edgeLabel bytes InternTable.empty U32Array.empty
+    (U32Array.ofList (List.cons (U32.ofNat 0) .nil)) U32Array.empty)

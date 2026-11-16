@@ -107,6 +107,47 @@ inductive Result1 (B H : Type) where
   | ok (b : B) (1 h : H)
   | err (e : Error) (1 h : H)
 
+/-- The quantity-polymorphic form of `Result1`: the handle `H` is carried on **both**
+branches at `%q`, and the value `B` is unrestricted. At `q = 1` this is exactly `Result1`
+(definitionally; `Result1.toResultH`/`ResultH.toResult1` are the identity), which is the
+only useful instance: at `q = ω` the handle may be dropped or duplicated, and at `q = 0`
+it cannot be handed back. Use `q = 1` for the scope discipline, or `Result1` directly.
+The ordinary `Result` is not an instance: its `err` has no handle.
+`wiz-notes/result-q.md`. -/
+inductive ResultH (q : Qty) (B H : Type) where
+  | ok (b : B) (%q h : H)
+  | err (e : Error) (%q h : H)
+
+/-- `Result1 B H` as a `ResultH 1 B H` (the identity: the two types are definitionally
+equal, both elaborating to the same description). -/
+def Result1.toResultH {B H : Type} (1 x : Result1 B H) : ResultH 1 B H := x
+/-- `ResultH 1 B H` as a `Result1 B H` (the identity). -/
+def ResultH.toResult1 {B H : Type} (1 x : ResultH 1 B H) : Result1 B H := x
+
+/-- Map the value, keeping the handle on both branches. The mapping function is
+unrestricted because the `err` branch drops it; the handle itself stays at `q`. -/
+def ResultH.map {q : Qty} {A B H : Type} (f : A → B) (1 x : ResultH q A H) : ResultH q B H :=
+  match x with
+  | .ok a h => .ok (f a) h
+  | .err e h => .err e h
+/-- Sequence two handle-threading results: on success, `f` gets the value and the handle
+at `%q` and returns the next result; on error the handle is returned unchanged. The
+handle stays at the same quantity `q` (it cannot move to a different one), and `f` is
+unrestricted because the error branch drops it, so it must not capture a linear
+resource: thread resources through the handle, as `Result1` does. -/
+def ResultH.bind {q : Qty} {A B H : Type} (1 x : ResultH q A H)
+    (f : (a : A) → (%q h : H) → ResultH q B H) : ResultH q B H := match x with
+  | .ok a h => f a h
+  | .err e h => .err e h
+/-- Case analysis that hands the handle to the chosen branch at `%q`; both branches are
+unrestricted (each is dropped on the other path), so they must consume the handle. -/
+def ResultH.elim {q : Qty} {A H C : Type}
+    (onOk : (a : A) → (%q h : H) → C)
+    (onErr : (e : Error) → (%q h : H) → C)
+    (1 x : ResultH q A H) : C := match x with
+  | .ok a h => onOk a h
+  | .err e h => onErr e h
+
 /-- `*r`: the value, and the handle back -/
 def Uniq.read {ρ : Region} {A B : Type} (1 r : Uniq ρ A) (1 k : (a : A) → (1 r : Uniq ρ A) → B) : B :=
   match r with

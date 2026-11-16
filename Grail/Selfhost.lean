@@ -13,8 +13,8 @@ import Grail.Build
   (`self2.c`). The two must be equal.
 
 Each step is a job (`Grail/Graph.lean`): the generated source (keyed by the
-`selfhost/*.wiz` texts and this binary, which holds the parser tables; installed as
-`.grail/gen/ROLE.wiz`), then the executable as for any `exe`, then
+`selfhost/*.wiz` texts — the tables are `selfhost/Tables.wiz`, so this binary only names
+them — installed as `.grail/gen/ROLE.wiz`), then the executable as for any `exe`, then
 `self1.c` (keyed by the stage-1 binary and its input), stage 2 (by `self1.c`, `rt.c`,
 the compiler and the collector's flags) and `self2.c`. Run again, the check runs nothing
 unless something it depends on changed.

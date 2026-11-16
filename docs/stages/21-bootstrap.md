@@ -290,24 +290,61 @@ type or structure) was an error here ("unsupported syntax command.def"); private
 constructors (`| private c`), private fields and `private mk ::` were parsed and ignored.
 Now `private` before a command declares the same names as without it.
 
-**Privacy is not enforced, because nothing can reach it.** In the Lean toolchain a private
-name is private to its *module*: another module gets "'x' is private to module M", and
-there a type with private parts is opaque (it equals only itself, isn't matched, isn't
-built by tuples or look-alike types; its recursors are private). The module itself sees
-everything as usual. The self-hosted toolchain has exactly one module, the input file:
-every `import` loads the frontend's own Prelude (`preludeText`), which declares nothing
-private. So every check of 13b is about a use from another module, and in a one-module
-world each of them holds vacuously; treating `private` as public there is exactly the
-Lean frontend's behaviour inside the declaring module. Mirrored: the syntax in every
-position, and the in-module meaning. Not mirrored, and unreachable: the "private to
-module" errors, the opacity of types with private constructors or fields outside the
-module, private recursors. PR #79's `T.desc` and `--strict-privacy` are the same (module
-crossing). **The day the self-hosted toolchain gets modules**, privacy must come with them:
-`Globals` needs each name's module (and whether it is private); `Scope.lookup` from
-another module must reject a private name; a type with a private constructor or field
-must become an opaque constant outside its module (no unfolding of its `μ` in the
-frontend's conversion, no `match`, `.1` or constructor through the Σ), while the kernel
-keeps checking against the full definition, as 13b's elaborator view does.
+**Privacy is now module-scoped** (with the module loader, A14). In the Lean toolchain a
+private name is private to its *module*: another module gets "'x' is private to module
+M", and there a type with private parts is opaque (it equals only itself, isn't
+matched, isn't built by tuples or look-alike types; its recursors are private). The
+self-hosted frontend does the first of those, and only for the ordinary declarations
+(this slice):
+
+* **Representation.** A private declaration `x` of module `M` gets the kernel name
+  `_private.M._0.x` (the Lean frontend's `Globals.privateName` format), so two modules'
+  private `x`s are different constants (`Globals.declName`, `privName`); a public
+  declaration keeps its name. `Globals` carries the module being checked
+  (`Globals.setModule`; the loader sets it per module, `modRunBody`) and whether the
+  current command is `private` (`Globals.setPrivate`; `stepCommand` clears it after each
+  command). The scope maps a written name to the current module's private declaration
+  first (`privName M.cur x`), then to a public one, and otherwise — if the name is
+  private to another module — reports `Scope.privTo`; `Scope.find` is the raw
+  kernel-name lookup the internals use (`inlineTm`, the duplicate check). Messages and
+  `show` print the source name (`privBase`, also in `Kernel.wiz`, as Lean's
+  `Globals.privateBase`).
+* **Resolution.** Every path that resolves a written name goes through
+  `Scope.lookupV`: term elaboration (`elab`, `identHead`, so `@f`, `f` and `.c`/`T.c`
+  resolutions too), constructor-head detection (`ctorHead`), `beqHead` (a literal
+  pattern's `T.beq`), induction (`useInd`), structures (`structOf`/`structFields`, with
+  the private `structure T` marker under the same module prefix), `#check`/`#reduce`,
+  the extern/`c_struct`/`foreign_type` checks and `attribute [inline]`. A private name
+  used in the same module still resolves, including in the type or body of a public
+  definition (the compiled module references the private constant, which stays
+  inlinable: `inlineTm` reads the raw kernel name); an importer gets
+  `'x' is private to module A`, not "unknown identifier". `#print` by name is left on
+  the kernel-name lookup it needs (a debugging surface, and the frontend has no `#print`
+  of its own).
+* **Duplicates.** Kernel names are unique (`dupFrom` compares them), so two modules'
+  private `x`s are allowed, while a *source name* is declared once per module: a private
+  `x` and a public `x` in the same module clash (`Scope.declaredIn`), as they do in Lean,
+  and a public name declared in two modules still clashes. A public name shadows another
+  module's private one of the same spelling (the private one is invisible outside).
+* **Re-export is not attempted.** A module's public names are its exported set; a
+  private name is never visible through an importer, nor through a public definition that
+  mentions it (the imported *term* works, the name does not).
+* **One-shot mode.** `checkFile` (the checker's `--oneshot`, and the old single-file
+  behaviour) is one module, `input`: private names are visible throughout the file.
+* **Cache.** A module's elaborated output is unchanged, so the cache's module key/graph
+  key (`moduleGraphKey`, a hash of the modules' names and texts) stays as it is; the
+  visibility check is a lookup on every elaboration, so a warm cache hit can only replay
+  the diagnostics of the same graph (the key covers every module's text, and the toolchain
+  id every selfhost source).
+
+**Left for later slices.** Constructor- and field-level `private` (`| private c`,
+`private f : T`, `private mk ::`) is still parsed and *stripped*: it is not a
+module-scoped declaration of its own here. Nor is the opacity of a type with private
+parts outside its module (no un-unfoldable `μ`, no refusal to `match` or project), private
+recursors (the self-hosted frontend has none: matches are built directly), or private
+`deriving`. A private `extern`'s argument-count hint and `attribute [implemented_by]`
+on a private declaration are not resolved to its module name (the FFI records the
+kernel name; both are reachable only from the declaring module).
 
 An unknown command, or a modifier the frontend doesn't know (`sealed`, `noncomputable`
 when the grammar gets them), is an error naming it ("unsupported command
@@ -348,7 +385,13 @@ foreign function's Nat does not fit in 63 bits" (exit code 3). The Lean toolchai
 UInt64 is unaffected (its large values are objects).
 
 **Tests** (group `selfhost`): `private` in every position both frontends take it, and
-`private` inside `mutual` rejected by both; unknown commands named in the error; the
+`private` inside `mutual` rejected by both; module-scoped privacy through the self-hosted
+checker: a private name used in its module and rejected in an importer (naming the
+module), a private type and constructor rejected in an importer, two modules' private
+names of one spelling allowed, a source name declared once per module (private or
+public), a public name shadowing another module's private one, and the one-shot
+`checkFile` path; group `selfhost-cli`: a private diagnostic cold and warm in the
+driver's cache; unknown commands named in the error; the
 `export`/`link_lib` checks (9 declarations, same verdicts); one program with exports
 (numbers, strings both ways, `Bool`, `IO`) called from a `link_c` file and `link_lib
 "m"`, run by the Lean compiler and by the self-hosted one in both modes, same output;
@@ -701,10 +744,12 @@ rejected across modules as within one (the same `newDuplicate` check).
 
 The cache key (`moduleGraphKey`) is a rolling hash of the loaded modules' names and
 texts in load order; the checker prints it with `--key`. The real cache (D5) will key on
-it, plus the frontend's version.
+it, plus the frontend's version. The checker's `--oneshot` runs the pre-loader
+single-file path (`checkFile`) instead, for the old behaviour's own tests.
 
-**Not done.** `private` is still private to one file only: hiding names across modules
-needs each name's module in `Globals` (21n). `namespace`/`open`/`section` are not parsed
+**Not done.** `private` is module-scoped now (21n), but only at the declaration level:
+constructor- and field-level `private` is stripped, and a type with private parts is not
+opaque outside its module. `namespace`/`open`/`section` are not parsed
 (A23). The compiler driver accepts modules for checking, but `link_c` paths and the
 `-- wiz: rc` pragma are read from the root file only. Compiling `lib/` still needs
 classes/instances (A10), universe polymorphism (A15), the proof surface (A16), tactics
@@ -717,3 +762,226 @@ checked once), a cycle, a missing module, a duplicate name across modules, a `-I
 and the cache key (stable for one graph, different when a module's text changes). `wiz
 check` of the generated self-hosted sources passes, and the self-hosted frontend still
 checks itself.
+
+## 21z: the proof surface in the self-hosted frontend (A16)
+
+The self-hosted frontend could define data and functions but not state or prove a
+proposition: `term.prop`, `term.sort`, `term.eq`, `term.refl`, `term.rfl`, `term.cast`
+and `term.transp` had no handlers (the parser already produced them, the kernel already
+had the forms). `Frontend.wiz` now elaborates them:
+
+* `Prop` is the kernel's `.prop` (`Sort 0`); `Sort l` is `.sortL l`, with the level
+  from U1's level elaborator (`levelArg`/`elabLevel`): numerals, `max`, `imax`, `+ n`,
+  the declaration's universe parameters (`Sort u` in a `.{u}` definition) and `_` level
+  metavariables. `Sort 0`, `Sort (max 1 2)` and (with U1) `Sort u` are the tests; `Type`
+  keeps its handler, and a level that is not in scope is an error naming it.
+* `a = b` is `.eq A a b` (`A` the inferred type of `a`, the result in `Prop`).
+* `refl a` is `.tyRefl a` when `a` is a type and `.eqRefl A a` otherwise; `rfl` is
+  checked against the expected equation (`.eqRefl`, `.tyRefl`, or the unit proof for an
+  equation that computed to `True`), and a non-equation expected type is an error.
+* `cast e t` is `.coe A B e t`, with `e : A ≡ B` (the equation's type must still show
+  its sides: a computed one is reported, as in the Lean frontend).
+* `transp P p e` is `.subst A a P p b e`, with `P : (b : A) → a = b → Prop` and
+  `p : P a (refl A a)`.
+* `True` and `False` are built-in names for `.ptrue`/`.pfalse` (like `Unit`).
+
+Nothing in `Kernel.wiz` changed for A16 (U1 changed it for levels): the kernel
+infers/checks and marks the terms like every other declaration. Types still have no
+`Eq` name (only the `a = b` form), and `by` (tactics, A13), macros/notation (A12) and
+`deriving` (A11) remain the next surface pieces.
+
+**Tests** (group `selfhost`): a file with `n = n` by `rfl`, a `Prop`-valued definition,
+`Prop`, `Sort 0`, `Sort (max 1 2)`, a `Sort`-typed definition, a polymorphic `cast`, a
+`transp` along an equality (its motive a proposition), `True`/`False`, four rejected
+proofs/types (a wrong equation by `rfl`, `Prop := Type`, `Sort 1 := Type 1`, `cast` on
+`False`) and an unknown-level error; a differential case with the same 12 declarations
+accepted/rejected by the Lean frontend and the self-hosted one; U1's own cases cover
+`Sort u`, `Type u` and level inference. `wiz check` of the generated self-hosted sources
+passes, and the self-hosted frontend still checks itself.
+
+## 21ab: named arguments (A9)
+
+`f a (x := e) b` now elaborates in the self-hosted frontend. The kernel's `Tm` and `Val`
+carry no binder names, so a `Global` keeps its parameters' names beside their implicit
+mask (`paramNames`, as `paramMask`; filled for definitions, axioms and partial
+definitions from their written binders; an `extern` writes no binders). An application
+with `term.namedArg`
+arguments is split into named and positional lists, in source order. A duplicate name is
+`argument 'x' was already given`. The telescope is then walked: a binder whose name has
+a named argument takes it (explicit, implicit or instance), otherwise an implicit binder
+gets a metavariable and an explicit binder takes the next positional argument. The
+result is a positional argument list (with `_` for each implicit binder passed over), so
+the existing `appArgsT` still inserts implicits, postpones constructor arguments and
+applies the expected type. A named argument that would have to cross an explicit
+parameter with no argument is `named argument 'y' comes after the explicit parameter
+'x', which has no argument`; a name no binder has is `no parameter named 'y'`, and a
+named argument outside an application is `a named argument `(x := e)` is only allowed as
+an argument of an application`. `@f` still makes every binder positional (named
+arguments still match by name), and `f (b := 1) 5` gives `a` the `5`.
+
+Named arguments work for a global function whose parameters are written as binders, or
+in the leading Π binders of its type (`axiom f : {A : Type} → …`, so `MVar.new
+(A := B)` is accepted; that also reads the names an `extern` writes in its type).
+A constructor's fields and a local variable's Π type keep no names yet, so a named
+argument there is rejected (a clear error, not a silent mismatch); class/instance
+binders will use the same path once A10 stores their names. An implicit parameter
+written only in a declaration's type is still not inserted positionally when it is
+omitted (A3); it can be supplied by name.
+
+**Tests** (group `selfhost`): explicit, implicit, reordered and interleaved named
+arguments, a named implicit, `@f` with a named implicit and with a named explicit, and
+implicit insertion around named arguments, checked against the Lean frontend; unknown,
+duplicate, ordering and bare named-argument errors; and the self-hosted frontend still
+checks itself.
+## 21aa: `import_c`, `glue` and native representations, self-hosted
+
+The self-hosted frontend now reads C headers (`selfhost/CParse.wiz`) and checks the C
+glue subset (`selfhost/CGlue.wiz`). The driver reads each `import_c "h"` header from the
+file system (the frontend is pure) and passes the texts in `Globals.headers`; there is
+no C preprocessor, so a header must be self-contained. `CParse` parses prototypes,
+typedefs and struct definitions. `import_c` binds the scalar prototypes it can marshal
+(`Nat`, `UInt64`, `Float64`, `String`, `Bool`, `Unit`, foreign pointers and declared
+`c_struct`s) as `C.name`, emits an implicit `#include`, and records the functions for
+`glue`; `(pure)`, `(no_auto)` and `(skip := "…")` are read as in the Lean frontend.
+`glue` checks numbers, strings, calls, assignments, `if`/`while` and struct field
+access, then emits a static C wrapper called by the backend's normal foreign path.
+
+`attribute [implemented_by mk get] T.mk` is accepted on a sealed constructor; the
+constructor's implementation is registered (`mk`), as is the representation. A type
+whose operations are all `implemented_by` runtime natives (the `U32Array`/`U64Map`
+pattern) therefore compiles to its natives. Direct pattern matching on a native value
+still needs `get` in erasure.
+
+**Not done.** No preprocessor, no automatic struct/pointer mapping from a header (declare
+a `c_struct`/`foreign_type`), no `Bytes`/buffer parameters, no `for` loops, struct locals
+or `&struct` in self-hosted glue, no rewriting of matches through `get`.
+
+**Tests** (group `selfhost`): an `import_c` header whose functions are called from Wiz
+and from `glue`, and a native representation on a sealed constructor that runs through
+`wiz_u32array_*`, in GC and RC modes.
+
+**ABI v1 (aligned with `wiz-notes/prior-art/compilers-runtime-ffi.md` §2.2, cheap
+parts only).** Kinds are explicit in every `Foreign.fn`: `n`/`u` are `uint64_t`, `f`
+is `double`, `s` is `const char *` (borrowed in, caller-owned out), `b` is `int`, `p`
+is `void *` (+1 wrapped, borrowed for a call), `w` is a Wiz `wiz_val` (+0 in, +1 out),
+and `e`/`v` are omitted from the C prototype. Structs by value go only through an
+explicit `c_struct`; a native representation is accepted only on a **sealed** type
+whose constructor's `mk`/`get` are registered, so values of the type are the runtime
+natives. The generated `--header` now defines `WIZ_ABI_MAJOR`/`WIZ_ABI_MINOR` (1/0)
+and carries the ownership table as comments. Deferred (documented, not implemented):
+a linked `wiz_abi_version` symbol, `_Static_assert`s for `c_struct` layouts, boxed
+`Nat`/`NatObj` by default, callback roots on both collectors, and the preprocessor or
+automatic struct/pointer import for `import_c`.
+
+## 21ac: notation and macros in the self-hosted frontend (A12, first milestone)
+
+The frontend had one form of notation (`infixl`/`infixr`, stage 19b) and expanded it
+with an ad-hoc `Note`; `syntax`, `notation`, `macro_rules` and the macro/tactic
+registrations were "unsupported command". `lib/` uses them: counting declarations at the
+start of a line in the 78 `lib/**/*.wiz` files (comments skipped, including `lib/Hdl/`,
+2026-11-15 at `24218ce4`) gives
+
+| form                            | declarations | files |
+|---------------------------------|-------------:|------:|
+| `syntax`                        | 123 | 13 |
+| `attribute [tactic …]`          |  37 |  5 |
+| `macro_rules`                   |  27 |  5 |
+| `infix` (plain)                 |  18 |  4 |
+| `infixr`                        |  17 |  8 |
+| `infixl`                        |  13 |  3 |
+| `declare_syntax_cat`            |  14 |  3 |
+| `attribute [macro …]`           |  11 |  6 |
+| `notation`                      |   9 |  4 |
+| `app_unexpander`                |   6 |  5 |
+| `attribute [app_unexpander …]`  |   2 |  1 |
+| `prefix` / `postfix`            |   0 | 0 |
+| `macro` (a declaration)         |   0 | 0 |
+
+17 files use at least one of the forms (12 use `macro_rules`/`notation`/
+`attribute [macro]`; 15 without the plain infix operators). The `syntax` rules target
+`tactic` 39 times, `term` 19, `doSeq` 9, `command` 3, `exBinder` 2 and 49 Feral DSL
+categories. `prefix`/`postfix` and a `macro` command do not exist in the Lean host
+either (a prefix operator is a `notation` whose first item is an atom; the host has only
+`macro_rules`), so there is nothing to mirror.
+
+**Implemented.** The frontend's `Note` is now a real macro rule — a node kind, a pattern
+tree, a template and the argument names `notation` binds — and:
+* `notation:p items => rhs` registers a leading rule (or, if the first item is an
+  argument with a precedence, a trailing one, the host's `notationRule`); the pattern
+  is the item list with `antiquot`s for the arguments, and the template substitutes them
+  (`term.ident x` nodes for a `notation`'s `vars`, `$x` nodes for a `macro_rules`).
+* `infixl`/`infixr`/`infix` build the same trailing rule and rule shape as the host
+  (`a op b => f a b`), with `p`/`p+1` operand precedences; the kind comes from the
+  host's `mkKindName` (`term.+`, `term.+_1`, …).
+* `declare_syntax_cat`, `syntax` (with `(name := …)`, `(priority := …)`, `p`, the `stx`
+  item grammar: atoms, categories with a precedence, `(...)`, `sepBy`/`sepBy1`,
+  `withPosition`, `* + ?`), the meta parsers (antiquotations and `` `(c| …) `` for a new
+  category) and `Wiz/Parser/SyntaxCmd.lean`'s leading/trailing split. Atoms are
+  unreserved outside `term`/`command`, and a rule's atoms are added to the token table
+  as the host's `ParserTables.addTokens` does.
+* `macro_rules` with quotations, `$x` pattern variables, structural matching and
+  hygiene: a template identifier the rule introduces gets a fresh `x✝N` scope, and
+  `Scope.lookupV` falls back to the scope-stripped name for a global (the host's
+  `stripScope`). The host has **no repetition** in patterns (`$[…]`), so neither has
+  this.
+* command macros written as `macro_rules` (a rule whose pattern is a `command` node
+  expands before dispatch, so `def_one x` can stand for a `def`).
+* `attribute [macro K] f` / `[tactic K] f` check that `f` is declared and record nothing
+  (see below); `app_unexpander`, `attribute [app_unexpander …]` and
+  `set_option pp.notation`/`pp.all` are parsed and accepted (their printing is the
+  remaining half).
+
+Expansion is outermost first: a node is rewritten to a fixed point (bounded per
+position), then its children are expanded, so an argument a rule splices is expanded
+like any other node. Tables change command by command, as they do in the host: the next
+command is parsed with the rules declared by the previous ones.
+
+**Not done.** The macro and tactic registrations name a *function* the host executes at
+elaboration time (`ListLit.expand`, `Ex.binderMacro`, ring reification, Feral's whole
+DSL). The self-hosted frontend has no elaborator-time evaluator, so it cannot run one:
+`lib/Prelude.wiz`'s list literals, `Logic`'s `∃` and the ring macros would elaborate to
+an "unsupported syntax" error. That is A12's other half, and it depends on the
+elaborator-time evaluation that A11 and A13 also need. Printing notation
+(`app_unexpander`) is accepted but `#check`/`#reduce` still print kernel terms; the
+host's notation-aware printer (`Wiz/Core/Pretty.lean`) is not ported. Keyword scopes
+(`declare_syntax_cat c (keywords := s)`) are accepted and the category is declared, but
+the scope's reserved words are not tracked (only `lib/Feral.wiz` uses them, with a
+procedural macro). `local notation`/`local macro_rules` are unwrapped and stay visible
+to importers (A14's module-local dropping is not wired to the new rules).
+
+**Tests** (new group `selfhost-macro`, 13 cases, added to the `selfhost` shard):
+* notation/infix differential: `selfhostSameNats` compares what the Lean frontend's
+  `#eval` and the self-hosted one's `#reduce` compute for `10 − 3 − 2` (5), `10 ⊖ 3 ⊖ 2`
+  (9), `1 ⊕ 2 * 3` (7), `⌜1 + 2⌝` (4), `⌜⌜3⌝⌝` (5), the postfix `5 !` (10) and
+  `5 ! !` (20), and the prefix `~3` (2) and `~ ~3` (3) — left/right associativity,
+  precedence, a leading notation with a default and with an explicit argument
+  precedence, and a trailing (postfix) rule.
+* `macro_rules` differential: a `syntax:lead` rule, pattern variables, hygiene (`under e`
+  = `let y := 3; e + y`, so `hyg 5` is 9 with hygiene and 7 without), a declared
+  category with a rule of its own (`get ⟨7⟩` = 70, via a second expansion), and a
+  command macro (`def_one one`).
+* a `syntax` rule whose items are a `sepBy(term, ",")` and the macro rule that matches
+  the `null` node and splices both elements (`pair(1, 2)` = 3).
+* `syntax ... : tactic` rules (39 of the 123 in `lib/` target `tactic`), a `tactic`
+  reference and a `(keywords := …)` category, accepted by both frontends.
+* a second `infixl` on the Prelude's `+`: a fresh kind (`term.+_1`), and the later rule
+  wins (`3 + 1` is 2 both places); `infix` (both operands `p + 1`) does not parse a
+  chain (`1 ? 2 ? 3`) in either frontend.
+* pinned diagnostics: a malformed rule, an unknown syntax category and an unknown
+  registration name.
+* the declarations a macro file produces in the self-hosted frontend (names and types).
+* `app_unexpander`/`set_option` accepted by both frontends; the macro/tactic
+  registrations accepted by the self-hosted one.
+* two pinned differences (`selfhostVerdicts`): the host rejects a registration whose
+  function has the wrong type and an unexpander whose pattern is not an application,
+  while the self-hosted frontend only checks that the name exists.
+* the same macro-using program compiled and run by **both** toolchains (`ioRun` and
+  `selfhostCompileRun`), printing the same five lines — the terms the macros desugar to
+  compute identically.
+
+**Verification (2026-11-15).** The groups run on these sources: `=selfhost-macro`
+**13 passed, 0 failed** (417 s) and `=selfhost` **143 passed, 0 failed** (2195 s),
+including the self-check (28.3 s) and the repinned `#67`, which matches its new
+expected output. The same cases were also exercised case by case with light probes
+(`wiz check`/`wiz run` for the Lean frontend, the checker and compiler for the
+Wiz-hosted one), and the macro-using program prints `25 2 1 9 71` from both toolchains.

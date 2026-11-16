@@ -1082,6 +1082,20 @@ def sameLit (a b : Syntax) : Bool :=
 def hasNamedArgs (stx : Syntax) : Bool :=
   stx.isOfKind "term.app" && (stx.getArg 1).args.any (·.isOfKind "term.namedArg")
 
+/-- The two endpoints of a relation proposition `r a b`: the last two arguments of its
+application spine (`a ≤ b` is `LE.le A inst a b`), or the sides of an equation. Returns
+`none` when `t` is not a relation between two terms. -/
+def calcEndpoints? (t : Term R) : Option (Term R × Term R) :=
+  match t with
+  | .eq _ a b => some (a, b)
+  | .eqTy a b => some (a, b)
+  | .ann tm _ => calcEndpoints? tm
+  | _ =>
+    let (_, args) := Term.spine t
+    match args.reverse with
+    | b :: a :: _ => some (a, b)
+    | _ => none
+
 mutual
 
 /-- A binder's quantity: the default, a literal (`0`, `1`, `ω`), or (stage 4d)
@@ -1112,6 +1126,82 @@ partial def checkType (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × Lev
     unifyAt ctx stx (.sort u) ty
     pure (t, u)
   | ty => throwAt (ctx.withInfo stx).info s!"type expected, got a term of type {← showVal ctx ty}" ErrorCode.typeExpected
+
+/-- Elaborate a `calc` chain (`term.calc`): each step is a relation between two terms and
+a proof of it. Adjacent steps compose with an instance of `Trans p q r` (`lib/Logic.wiz`;
+the last step's relation is the chain's), `_` is the previous step's right endpoint, and a
+step's left endpoint must be the previous right endpoint.
+
+The term is built left-associated, `Trans.trans (Trans.trans h₀ h₁) h₂ …`, as Lean does:
+after each composition `?r` is solved by instance search to the composite relation, which
+is the first relation of the next composition. -/
+partial def elabCalc (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) := do
+  let steps := (stx.getArg 1).args
+  if steps.isEmpty then throwAt ctx.info "calc needs at least one step"
+  let g ← getGlobals
+  unless g.contains "Trans" && g.contains "Trans.trans" do
+    throwAt ctx.info "calc needs the `Trans` class (`class Trans (p q r : Prop)`), which is in lib/Logic.wiz: `import Logic` (or any library that imports it)"
+  let mut result? : Option (Term R × Term R) := none   -- (proof, relation as a Term)
+  let mut prevRhs? : Option (Term R) := none
+  for step in steps do
+    let propStx := step.getArg 0
+    let proofStx := step.getArg 2
+    let ctx' := ctx.withInfo propStx
+    -- the step as a proposition
+    let (prop, lvl) ← checkType ctx' propStx
+    unless lvl == .zero do
+      try unify ctx'.lvl (.sort lvl) (.sort .zero)
+      catch _ => throwAt propStx.info "a calc step must be a proposition, `a ≤ b` (or another relation to a proposition)"
+    let some (lhs, rhs) := calcEndpoints? prop
+      | throwAt propStx.info s!"calc: a step must be a relation between two terms, such as `a ≤ b`, not {← showTermM ctx' prop}"
+    if let some prevRhs := prevRhs? then
+      -- the middle endpoint: `_` is a hole, unified with the previous right endpoint;
+      -- an explicit intermediate term must be the same
+      try unify ctx'.lvl (← evalIn ctx' lhs) (← evalIn ctx' prevRhs)
+      catch _ =>
+        let lhsS ← showTermM ctx' (← zonk ctx'.lvl lhs)
+        let prevS ← showTermM ctx' (← zonk ctx'.lvl prevRhs)
+        let propS ← showTermM ctx' (← zonk ctx'.lvl prop)
+        let prevRelS ← match result? with
+          | some (_, resType) => showTermM ctx' (← zonk ctx'.lvl resType)
+          | none => pure ""
+        throwAt propStx.info s!"calc: the middle term does not match:\n  the previous relation is {prevRelS}\n  this step's relation is {propS}\n  this step starts at\n  {lhsS}\nbut the previous step ends at\n  {prevS}"
+    -- the proof, against the step's own relation
+    let propTy ← evalIn ctx' prop
+    let proof ← try check ctx' proofStx propTy
+      catch e =>
+        let relS ← showTermM ctx' (← zonk ctx'.lvl prop)
+        let after ← match prevRhs?, result? with
+          | some m, some (_, resType) => do
+            let mS ← showTermM ctx' (← zonk ctx'.lvl m)
+            let prevS ← showTermM ctx' (← zonk ctx'.lvl resType)
+            pure s!"\n(the step after `{prevS}`, meeting at `{mS}`)"
+          | _, _ => pure ""
+        throw { e with msg := s!"calc: the proof of `{relS}` has the wrong type:{after}\n{e.msg}" }
+    let propZ ← zonk ctx'.lvl prop
+    -- compose the accumulated relation with this step's, at their shared endpoint
+    let next ← match result? with
+      | none => pure (proof, propZ)
+      | some (res, resType) => do
+        let meet := match prevRhs? with
+          | some m => m
+          | none => lhs
+        let rM ← freshMeta ctx "the relation this calc step composes to"
+        let goalTy : VTy R := vApp g (vApp g (vApp g (eval g [] (.const "Trans" []))
+          (← evalIn ctx resType)) propTy) (← evalIn ctx rM)
+        let some inst ← (try synthInstance ctx goalTy catch _ => pure none) | do
+          let resS ← showTermM ctx (← zonk ctx.lvl resType)
+          let propS ← showTermM ctx (← zonk ctx.lvl prop)
+          let meetS ← showTermM ctx (← zonk ctx.lvl meet)
+          throwAt propStx.info s!"calc: no `Trans` instance composes\n  {resS}\nwith\n  {propS}\nat the middle term\n  {meetS}\n(register one: `instance : Trans … … …`, or check that the middle terms agree)"
+        let r ← zonk ctx.lvl rM
+        let tm := .app (.app (.app (.app (.app (.app (.const "Trans.trans" [])
+          resType) propZ) r) inst) res) proof
+        pure (tm, r)
+    result? := some next
+    prevRhs? := some (← zonk ctx.lvl rhs)
+  let some (t, ty) := result? | throwAt ctx.info "calc needs at least one step"
+  pure (t, ← evalIn ctx ty)
 
 /-- `check` of a variable or an application against a glued definition `D a…` that
 unfolds to an implicit or instance Π: if the term's own type is `D b…` too, unify the
@@ -1191,6 +1281,10 @@ where
       let u ← check ctx (stx.getArg 4) (.unit (.succ .zero))
       return .letUnit u (← check ctx (stx.getArg 6) expected)
     | "term.match" => elabMatch ctx stx expected
+    | "term.calc" => do
+      let (t, ty) ← elabCalc ctx stx
+      unifyAt ctx stx expected ty
+      pure t
     | "term.by" => elabBy ctx stx expected
     | "term.num" =>
       let n := (stx.getArg 0).getNat?.getD 0
@@ -3397,6 +3491,7 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
     let ctx' := { ctx with bound := ctx.bound.zipIdx.map fun (b, i) => b && !hidden.contains i }
     let ty ← evalIn ctx (← freshMeta ctx' "the type of this match")
     return (← check ctx stx ty, ty)
+  | "term.calc" => elabCalc ctx stx
   | "term.letPair" | "term.letTuple" | "term.absurd" | "term.rfl" =>
     throwAt ctx.info "cannot infer the type of this expression; add a type ascription" ErrorCode.cannotInfer
   | "term.letUnit" => do
