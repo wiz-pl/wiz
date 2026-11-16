@@ -187,7 +187,7 @@ def Proc.runLinkedThreads {A B : Type} (p : Proto) (a : Proc A p) (b : Proc B (P
       (fun c => IO.bind (Proc.run p a c) (fun x => IO.bind (MVar.take m) (fun y => IO.pure (x, y)))))
 attribute [implemented_by Proc.runLinkedThreads] Proc.runLinked
 
--- ## 4. Direct style (stage 25i, plan D1)
+-- ## 4. Direct style (stage 25g, plan D1)
 --
 -- The same channels, with the endpoint handed back as the result of an `IO1` action
 -- instead of to a continuation. Sequence the steps with `do1`: `c ⇐ Chan.sendD c a;`

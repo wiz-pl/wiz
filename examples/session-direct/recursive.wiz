@@ -1,0 +1,139 @@
+import IO
+import Session
+import SessionRec
+
+/-!
+Recursive protocols (docs/stages/25-concurrency.md, 25i): a ping-pong of many rounds, a
+calculator server that serves requests until the client quits, and a stream the
+consumer pulls from. Each channel is made with a bound on its rounds (`Chan.forkLoop`),
+and both sides loop structurally on it. Compiled, `main` prints `5`, `[7, 12, 1]` and
+`45` (`0 + 1 + … + 9`).
+-/
+
+-- ## Ping-pong for `n` rounds
+
+def Ping : Unit → RProto Unit := fun _ => .send Nat (fun _ => .recv Nat (fun _ => .jump ()))
+
+def pongLoop : (n : Nat) → (1 c : Chan (Proto.loop (RProto.dualSys Ping) n ())) → IO Unit
+  | .zero => fun c => Chan.closeD c
+  | .succ n => fun c => do1
+      (x, c) ⇐ Chan.recvD c;
+      c ⇐ Chan.sendD c (x + 1);
+      pongLoop n c
+
+def pingLoop : (n : Nat) → (x : Nat) → (1 c : Chan (Proto.loop Ping n ())) → IO Nat
+  | .zero, x => fun c => do1
+      Chan.closeD c;
+      IO.pure x
+  | .succ n, x => fun c => do1
+      c ⇐ Chan.sendD c x;
+      (y, c) ⇐ Chan.recvD c;
+      pingLoop n y c
+
+def pingRounds (n : Nat) : IO Nat := do1
+  c ⇐ Chan.forkLoop Ping n () (pongLoop n);
+  pingLoop n 0 c
+
+-- ## A calculator server: requests until the client says stop
+
+inductive Op where
+  | add
+  | mul
+  | sub
+
+def Op.eval : Op → Nat → Nat → Nat
+  | .add, x, y => x + y
+  | .mul, x, y => x * y
+  | .sub, x, y => x - y
+
+/-- One request (an operation, two numbers, the answer back) and round again. -/
+def Request : RProto Unit :=
+  .send Op (fun _ => .send Nat (fun _ => .send Nat (fun _ => .recv Nat (fun _ => .jump ()))))
+/-- What follows the client's choice: a request on `true`, the end on `false`. -/
+def CalcStep : Bool → RProto Unit
+  | .true => Request
+  | .false => .done
+def Calc : Unit → RProto Unit := fun _ => .send Bool CalcStep
+
+def calcLoop : (n : Nat) → (1 c : Chan (Proto.loop (RProto.dualSys Calc) n ())) → IO Unit
+  | .zero => fun c => Chan.closeD c
+  | .succ n => fun c => do1
+      (b, c) ⇐ Chan.recvD c;
+      (match b with
+        | .false => fun c => Chan.closeD c
+        | .true => fun c => do1
+            (op, c) ⇐ Chan.recvD c;
+            (x, c) ⇐ Chan.recvD c;
+            (y, c) ⇐ Chan.recvD c;
+            c ⇐ Chan.sendD c (Op.eval op x y);
+            calcLoop n c : (1 c : Chan (RProto.close (Proto.loop (RProto.dualSys Calc) n) (RProto.dual (CalcStep b)))) → IO Unit) c
+
+/-- The client: each request in turn, then stop (or run out of rounds). -/
+def ask : (n : Nat) → List (Op × Nat × Nat) → List Nat → (1 c : Chan (Proto.loop Calc n ())) → IO (List Nat)
+  | .zero, _, acc => fun c => do1
+      Chan.closeD c;
+      IO.pure acc
+  | .succ n, .nil, acc => fun c => do1
+      c ⇐ Chan.sendD c Bool.false;
+      Chan.closeD c;
+      IO.pure acc
+  | .succ n, .cons (op, x, y) rs, acc => fun c => do1
+      c ⇐ Chan.sendD c Bool.true;
+      c ⇐ Chan.sendD c op;
+      c ⇐ Chan.sendD c x;
+      c ⇐ Chan.sendD c y;
+      (r, c) ⇐ Chan.recvD c;
+      ask n rs (List.append acc [r]) c
+
+def calcRounds (rs : List (Op × Nat × Nat)) : IO (List Nat) := do1
+  c ⇐ Chan.forkLoop Calc 10 () (calcLoop 10);
+  ask 10 rs [] c
+
+-- ## A stream the consumer pulls from: `true` asks for the next number, `false` stops
+
+def PullStep : Bool → RProto Unit
+  | .true => .recv Nat (fun _ => .jump ())
+  | .false => .done
+def Pull : Unit → RProto Unit := fun _ => .send Bool PullStep
+
+/-- The producer: `k`, `k + 1`, … for as long as the consumer pulls. -/
+def produce : (n : Nat) → (k : Nat) → (1 c : Chan (Proto.loop (RProto.dualSys Pull) n ())) → IO Unit
+  | .zero, k => fun c => Chan.closeD c
+  | .succ n, k => fun c => do1
+      (b, c) ⇐ Chan.recvD c;
+      (match b with
+        | .false => fun c => Chan.closeD c
+        | .true => fun c => do1
+            c ⇐ Chan.sendD c k;
+            produce n (k + 1) c : (1 c : Chan (RProto.close (Proto.loop (RProto.dualSys Pull) n) (RProto.dual (PullStep b)))) → IO Unit) c
+
+/-- The consumer: pull `m` numbers and sum them. -/
+def consume : (n : Nat) → (m : Nat) → (acc : Nat) → (1 c : Chan (Proto.loop Pull n ())) → IO Nat
+  | .zero, m, acc => fun c => do1
+      Chan.closeD c;
+      IO.pure acc
+  | .succ n, .zero, acc => fun c => do1
+      c ⇐ Chan.sendD c Bool.false;
+      Chan.closeD c;
+      IO.pure acc
+  | .succ n, .succ m, acc => fun c => do1
+      c ⇐ Chan.sendD c Bool.true;
+      (x, c) ⇐ Chan.recvD c;
+      consume n m (acc + x) c
+
+def pullSum (m : Nat) : IO Nat := do1
+  c ⇐ Chan.forkLoop Pull 100 () (produce 100 0);
+  consume 100 m 0 c
+
+def showList : List Nat → String
+  | .nil => ""
+  | .cons x .nil => Nat.toString x
+  | .cons x xs => String.append (Nat.toString x) (String.append ", " (showList xs))
+
+def main : IO Unit := do1
+  a ← pingRounds 5;
+  IO.println (Nat.toString a);
+  rs ← calcRounds [(Op.add, 3, 4), (Op.mul, 3, 4), (Op.sub, 3, 2)];
+  IO.println (String.append "[" (String.append (showList rs) "]"));
+  s ← pullSum 10;
+  IO.println (Nat.toString s)

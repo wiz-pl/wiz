@@ -3,10 +3,10 @@ import Session
 /-!
 # SessionRec
 
-Recursive protocols (stage 25j) and delegation (stage 25k) on top of `Session`'s
+Recursive protocols (stage 25i) and delegation (stage 25j) on top of `Session`'s
 channels: `import SessionRec` (docs/stages/25-concurrency.md). Neither needs a new
 native or a new trusted claim: both are ordinary `Proto`s, so `Chan`, `Proc`, `link` and
-both API styles (CPS, 25c, and direct, 25i) work on them unchanged, and so does the
+both API styles (CPS, 25c, and direct, 25g) work on them unchanged, and so does the
 deadlock-freedom argument of 25c.
 
 **Recursive protocols.** A recursive protocol is a system of equations: a body `σ s` for
@@ -62,7 +62,7 @@ def Proto.dual_dual : (p : Proto) → Proto.dual (Proto.dual p) = p
 /-- Move an endpoint along an equation of protocols (linear, `Eq.subst`). -/
 def Chan.retype {p q : Proto} (0 e : p = q) (1 c : Chan p) : Chan q := Eq.subst (fun r => Chan r) e c
 
--- ## 1. Recursive protocols (25j)
+-- ## 1. Recursive protocols (25i)
 
 /-- A protocol body whose leaves may jump to a state of `S`. -/
 inductive RProto (S : Type) : Type 1 where
@@ -120,7 +120,7 @@ def Chan.forkLoop {S : Type} (σ : S → RProto S) (n : Nat) (s : S)
     (1 child : (1 c : Chan (Proto.loop (RProto.dualSys σ) n s)) → IO Unit) : IO1 (Chan (Proto.loop σ n s)) :=
   Chan.forkD (Proto.loop σ n s) (fun c => child (Chan.retype (Proto.dual_loop σ n s) c))
 
--- ## 2. Delegation (25k)
+-- ## 2. Delegation (25j)
 
 /-- `p`, then `q` where `p` ends. -/
 def Proto.then (q : Proto) : Proto → Proto

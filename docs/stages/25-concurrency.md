@@ -139,8 +139,8 @@ protocol (`Chan.send c a next` with `c : Chan (Proto.dual Q)`): `Proto`'s field
 `?k (down h)` as a pattern (plan gap 7). `match` uses its branches at ω, so pass endpoints
 into a branch as arguments (`| .val x => fun c => …`) instead of capturing them. `Proto.dual`
 is an involution only propositionally; `Eq.cast` at quantity 1 (9e) can move an endpoint
-along a proof. Direct style (`send : (1 c) → A → IO (Chan (k a))`) waits for linear Σ
-fields (plan L3).
+along a proof (`Proto.dual_dual` is proved in lib/SessionRec.wiz, 25j). Direct style
+is 25g.
 
 ## 25d: MVars and locks
 
@@ -174,3 +174,112 @@ differential test; structured scopes (C4); a concurrency effect with a pure sche
 (C5, needs one-shot continuations); recursive protocols over ν with sizes; delegation
 (sending endpoints) with protocol-level linear payloads; a mechanised deadlock-freedom
 proof (C7); `selfhost/rt.c` threads.
+
+## 25g: direct-style channels
+
+```
+Chan.forkD  : (p : Proto) → (1 child : (1 c : Chan (Proto.dual p)) → IO Unit) → IO1 (Chan p)
+Chan.sendD  : (1 c : Chan (.send A k)) → (a : A) → IO1 (Chan (k a))
+Chan.recvD  : (1 c : Chan (.recv A k)) → IO1 ((a : A) × Chan (k a))
+Chan.closeD : (1 c : Chan .done) → IO Unit
+Chan.cancelD : (1 c : Chan (Proto.sendC A k)) → IO Unit
+```
+
+The operations of 25c with the endpoint *returned*, at quantity 1, from an `IO1` action
+(9e) instead of passed to a continuation, so a protocol reads top to bottom in `do1`:
+
+```wiz no-check
+def ponger (1 c : Chan (Proto.dual PingPong)) : IO Unit := do1
+  (n, c) ⇐ Chan.recvD c;
+  c ⇐ Chan.sendD c (n + 1);
+  Chan.closeD c
+```
+
+A pair held at quantity 1 splits into its first field at that field's quantity (ω: the
+value received) and its second at 1 (the endpoint), so `recvD` needs no linear Σ field
+syntax. They are in lib/Session.wiz (section 4) because they use its private natives;
+the endpoints are the same `Chan p`, so the two styles mix on one channel (a direct client
+against `Proc.run`, `examples/session-direct/finite.wiz`), and the guarantees and the
+deadlock-freedom claim of 25c cover both. `Proc.runD` runs a pure process in direct style.
+
+**Translating between the styles.** CPS from direct is one bind:
+`Chan.send c a k = IO1.bindIO (Chan.sendD c a) k`, and likewise for `recv` and `fork`.
+Direct from CPS can't be written outside lib/Session.wiz: a CPS continuation returns
+`IO B`, whose result is unrestricted, so it can't hand a linear endpoint back out; that
+is why `IO1` exists. Inside the module both are thin wrappers over the same natives.
+
+Examples (group `conc-sessions`): ping-pong, a calculator whose operation decides how many
+arguments follow, a stream whose length is sent first. Rejected: an endpoint used twice
+or dropped ("quantity 1"), a receive where the protocol sends, a wrong message type, a
+child on the same protocol instead of the dual ("type mismatch"), the raw natives
+("private").
+
+## 25i: recursive protocols
+
+```
+inductive RProto (S : Type) : Type 1   -- send, recv, done, and jump (s : S)
+Proto.loop      : (σ : S → RProto S) → Nat → S → Proto
+Proto.dual_loop : Proto.dual (Proto.loop σ n s) = Proto.loop (RProto.dualSys σ) n s
+Chan.forkLoop   : (σ) → (n : Nat) → (s : S) → (1 child : (1 c : Chan (Proto.loop (RProto.dualSys σ) n s)) → IO Unit)
+                → IO1 (Chan (Proto.loop σ n s))
+```
+
+`import SessionRec`. A recursive protocol is a system of equations: a body `σ s` for each
+state `s`, whose leaves may `.jump` to a state (a recursion variable). Its meaning is the
+infinite unfolding, the greatest fixed point. A channel follows a finite approximation:
+`Proto.loop σ n s` takes at most `n` jumps, and a jump past the bound ends the session.
+The bound is the session's size, fixed when the channel is made and visible to both ends,
+so each side loops structurally on it and servers are total (no `partial`); a side that
+wants to stop earlier says so with a choice in the body. Unrolling is definitional
+(`Proto.loop σ (n + 1) s` reduces to the body of `s`), so it costs nothing at run time,
+and recursive protocols are ordinary `Proto`s: `Chan`, both API styles, `Proc` and `link`
+work on them unchanged, and so does 25c's deadlock-freedom argument. `Chan.forkLoop`
+gives the child its end at the dual system, cast along `Proto.dual_loop`, which is proved
+(by induction on the bound, with `RProto.dual_close` by induction on the body; function
+extensionality is definitional). The same cast lets the pure model run a loop: `link`
+of a client and a server written against the dual system gives the client's result.
+
+Why a `Nat` and not a `Size`, and why a bound at all: a size is erased, but the side that
+doesn't choose has to compute on the bound to know when the protocol ends. A truly
+unbounded server (a loop at `∞` whose termination comes from its client's totality)
+would need a native that unrolls an endpoint and returns a smaller size *existentially*;
+that is a new trusted claim, and stated for every size it is false (sizes are well
+founded), so it would have to live under `IO` only. It is not done here.
+
+Examples: a ping-pong of `n` rounds, a calculator server that serves requests until the
+client says stop, a stream the consumer pulls from (`true` for the next number, `false`
+to stop). Rejected: an endpoint used for two rounds at once or dropped mid-loop ("quantity
+1"), a send past the bound, a child written against the system instead of its dual
+("type mismatch").
+
+## 25j: delegation
+
+```
+Proto.sendCh P k : Proto      -- hand the peer an endpoint following P, then k
+Proto.recvCh P k : Proto      -- receive one following P, then k
+Proto.dual_sendCh : Proto.dual (Proto.sendCh P k) = Proto.recvCh P (Proto.dual k)
+Chan.delegate : (P : Proto) → (1 d : Chan P) → (1 c : Chan (Proto.sendCh P k)) → IO1 (Chan k)
+Chan.forkSendCh : (P k : Proto) → (1 child : (1 c : Chan (Proto.recvCh P (Proto.dual k))) → IO Unit)
+                → IO1 (Chan (Proto.sendCh P k))
+```
+
+A thread hands an endpoint it holds to the thread at the other end of a channel.
+`Chan.delegate` does it by forwarding: it relays each message of `P` between the endpoint
+`d` and the channel (structural on `P`), closes `d` when `P` ends, and returns the
+channel at `k`. The receiving side uses its own end of the channel as the delegated
+endpoint (`recvCh P k` is `P` followed by `k`), then goes on with `k`. `d` is consumed,
+so the delegating side can't use it again; no new channel is made, so the channel graph
+stays a forest and the deadlock-freedom argument holds as in 25c. `Proto.dual_sendCh`
+(proved, from `Proto.dual_dual` and `Proto.dual_then`) is the cast `forkSendCh` uses.
+
+What forwarding gives up: the receiver finishes `P` before it goes on with `k` (it can't
+interleave the two), and the delegating thread relays every message of `P`. Moving the
+endpoint itself (a message that is a linear value) needs a native send that takes its
+payload at quantity 1, plus a protocol constructor whose payload is an endpoint; the
+runtime's `wiz_chan_send` would carry one as it is (it marks the payload shared), but the
+binding is a new trusted claim and is not added here.
+
+Examples: a ping-pong, a recursive calculator and a pulled stream, each delegated to a
+worker that reports a number back. Rejected: the delegated endpoint used after the
+handover, a worker that drops what it was handed ("quantity 1"), delegating the dual end
+instead, a worker that uses the delegated session out of order ("type mismatch").

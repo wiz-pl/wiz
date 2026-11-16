@@ -2,7 +2,7 @@ import IO
 import Session
 
 /-!
-Direct-style sessions over finite protocols (docs/stages/25-concurrency.md, 25i):
+Direct-style sessions over finite protocols (docs/stages/25-concurrency.md, 25g):
 ping-pong, a calculator server, and a stream whose length is sent first. Compiled,
 `main` prints `42`, `[7, 12, 8]`, `5050` and `2`; each child thread runs on its own end.
 -/

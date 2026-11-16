@@ -1,0 +1,133 @@
+import IO
+import Session
+import SessionRec
+
+/-!
+Delegation (docs/stages/25-concurrency.md, 25j): a thread hands an endpoint it holds to
+another thread, which uses it and reports back. A ping-pong session, a recursive
+calculator session and a pulled stream are each delegated to a worker. Compiled, `main`
+prints `42`, `18` (`3 * 4 + 2 * 3`) and `45`.
+-/
+
+-- The worker's report: one number back to the delegating thread.
+def Report : Proto := .recv Nat (fun _ => .done)
+
+def report (1 c : Chan (Proto.dual Report)) (r : Nat) : IO Unit := do1
+  c ⇐ Chan.sendD c r;
+  Chan.closeD c
+
+def collect (1 c : Chan Report) : IO Nat := do1
+  (r, c) ⇐ Chan.recvD c;
+  Chan.closeD c;
+  IO.pure r
+
+-- ## Ping-pong, delegated
+
+def PingPong : Proto := .send Nat (fun _ => .recv Nat (fun _ => .done))
+
+def ponger (1 c : Chan (Proto.dual PingPong)) : IO Unit := do1
+  (n, c) ⇐ Chan.recvD c;
+  c ⇐ Chan.sendD c (n + 1);
+  Chan.closeD c
+
+/-- The worker plays the client of the delegated session, then reports. -/
+def pingWorker (1 c : Chan (Proto.recvCh PingPong (Proto.dual Report))) : IO Unit := do1
+  c ⇐ Chan.sendD c 41;
+  (m, c) ⇐ Chan.recvD c;
+  report c m
+
+def pingDelegated : IO Nat := do1
+  d ⇐ Chan.forkD PingPong ponger;
+  c ⇐ Chan.forkSendCh PingPong Report pingWorker;
+  c ⇐ Chan.delegate PingPong d c;
+  collect c
+
+-- ## A recursive calculator session, delegated
+
+def Request : RProto Unit :=
+  .send Nat (fun _ => .send Nat (fun _ => .recv Nat (fun _ => .jump ())))
+def CalcStep : Bool → RProto Unit
+  | .true => Request
+  | .false => .done
+/-- Each round multiplies two numbers, until the client says stop. -/
+def Calc : Unit → RProto Unit := fun _ => .send Bool CalcStep
+
+def calcLoop : (n : Nat) → (1 c : Chan (Proto.loop (RProto.dualSys Calc) n ())) → IO Unit
+  | .zero => fun c => Chan.closeD c
+  | .succ n => fun c => do1
+      (b, c) ⇐ Chan.recvD c;
+      (match b with
+        | .false => fun c => Chan.closeD c
+        | .true => fun c => do1
+            (x, c) ⇐ Chan.recvD c;
+            (y, c) ⇐ Chan.recvD c;
+            c ⇐ Chan.sendD c (x * y);
+            calcLoop n c : (1 c : Chan (RProto.close (Proto.loop (RProto.dualSys Calc) n) (RProto.dual (CalcStep b)))) → IO Unit) c
+
+/-- The worker's side of a calculator session followed by `q`: ask `(3, 4)` then
+`(2, 3)` (if the bound allows), stop, and hand back the sum of the answers. -/
+def asks {q : Proto} : (n : Nat) → List (Nat × Nat) → (acc : Nat) →
+    (1 c : Chan (Proto.then q (Proto.loop Calc n ()))) → IO1 ((r : Nat) × Chan q)
+  | .zero, _, acc => fun c => IO1.pure (acc, c)
+  | .succ n, .nil, acc => fun c => IO1.bind (Chan.sendD c Bool.false) (fun c => IO1.pure (acc, c))
+  | .succ n, .cons (x, y) rs, acc => fun c =>
+      IO1.bind (Chan.sendD c Bool.true) (fun c =>
+      IO1.bind (Chan.sendD c x) (fun c =>
+      IO1.bind (Chan.sendD c y) (fun c =>
+      IO1.bind (Chan.recvD c) (fun r => let 1 (z, c) := r;
+      asks n rs (acc + z) c))))
+
+def calcWorker (1 c : Chan (Proto.recvCh (Proto.loop Calc 10 ()) (Proto.dual Report))) : IO Unit := do1
+  (r, c) ⇐ asks 10 [(3, 4), (2, 3)] 0 c;
+  report c r
+
+def calcDelegated : IO Nat := do1
+  d ⇐ Chan.forkLoop Calc 10 () (calcLoop 10);
+  c ⇐ Chan.forkSendCh (Proto.loop Calc 10 ()) Report calcWorker;
+  c ⇐ Chan.delegate (Proto.loop Calc 10 ()) d c;
+  collect c
+
+-- ## A pulled stream, delegated
+
+def PullStep : Bool → RProto Unit
+  | .true => .recv Nat (fun _ => .jump ())
+  | .false => .done
+def Pull : Unit → RProto Unit := fun _ => .send Bool PullStep
+
+def produce : (n : Nat) → (k : Nat) → (1 c : Chan (Proto.loop (RProto.dualSys Pull) n ())) → IO Unit
+  | .zero, k => fun c => Chan.closeD c
+  | .succ n, k => fun c => do1
+      (b, c) ⇐ Chan.recvD c;
+      (match b with
+        | .false => fun c => Chan.closeD c
+        | .true => fun c => do1
+            c ⇐ Chan.sendD c k;
+            produce n (k + 1) c : (1 c : Chan (RProto.close (Proto.loop (RProto.dualSys Pull) n) (RProto.dual (PullStep b)))) → IO Unit) c
+
+/-- Pull `m` numbers from a stream followed by `q`, and hand back their sum. -/
+def consume {q : Proto} : (n : Nat) → (m : Nat) → (acc : Nat) →
+    (1 c : Chan (Proto.then q (Proto.loop Pull n ()))) → IO1 ((r : Nat) × Chan q)
+  | .zero, m, acc => fun c => IO1.pure (acc, c)
+  | .succ n, .zero, acc => fun c => IO1.bind (Chan.sendD c Bool.false) (fun c => IO1.pure (acc, c))
+  | .succ n, .succ m, acc => fun c =>
+      IO1.bind (Chan.sendD c Bool.true) (fun c =>
+      IO1.bind (Chan.recvD c) (fun r => let 1 (x, c) := r;
+      consume n m (acc + x) c))
+
+def pullWorker (1 c : Chan (Proto.recvCh (Proto.loop Pull 100 ()) (Proto.dual Report))) : IO Unit := do1
+  (r, c) ⇐ consume 100 10 0 c;
+  report c r
+
+def pullDelegated : IO Nat := do1
+  d ⇐ Chan.forkLoop Pull 100 () (produce 100 0);
+  c ⇐ Chan.forkSendCh (Proto.loop Pull 100 ()) Report pullWorker;
+  c ⇐ Chan.delegate (Proto.loop Pull 100 ()) d c;
+  collect c
+
+def main : IO Unit := do1
+  a ← pingDelegated;
+  IO.println (Nat.toString a);
+  b ← calcDelegated;
+  IO.println (Nat.toString b);
+  s ← pullDelegated;
+  IO.println (Nat.toString s)
