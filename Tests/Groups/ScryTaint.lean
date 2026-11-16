@@ -544,6 +544,16 @@ def group : Group where
       run := fun _ => evalRuleNats
         ("#eval List.length (Scry.nullDerefWarnings Scry.nullStatus)\n" ++
          "#eval List.length (Scry.nullDerefWarnings Scry.nullStatusChecked)\n") [1, 0] },
+    { name := "nullness: reachability fuel exhaustion is conservative (every point reachable)",
+      -- `nullStatusChecked` is clean only because the constant-false guard prunes the
+      -- dereference. With fuel 0 or 1 the walk stops early and must answer "reachable",
+      -- so the warning comes back; the computed fuel is at least the edge count and the
+      -- walk finishes (no warning).
+      run := fun _ => evalRuleNats
+        ("#eval List.length (Scry.nullDerefWarningsFuel Scry.nullStatusChecked 0)\n" ++
+         "#eval List.length (Scry.nullDerefWarningsFuel Scry.nullStatusChecked 1)\n" ++
+         "#eval List.length (Scry.nullDerefWarnings Scry.nullStatusChecked)\n" ++
+         "#eval match Scry.nullStatusChecked.funcs with | .cons fn _ => (let g := Scry.flatten fn; if Nat.le (Nat.succ g.count) (Scry.nReachFuel g (List.cons (Scry.entryNode g) .nil)) then 1 else 0) | .nil => 0\n") [1, 1, 0, 1] },
     { name := "nullness: opt-in via Scry.analyzeWithNull and reported as a memory diagnostic",
       run := fun _ => do
         evalRuleNats (rulePrelude ++

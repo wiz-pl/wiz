@@ -466,13 +466,15 @@ def Scry.translate (fn : Wil.Func) (tab : List (String × Nat)) : Scry.NCfg :=
 -- ## Reachability and alarms
 
 /-- The reachable Wil points under the post-fixpoint state. A branch whose condition is
-constant-false only keeps the other target, so a guarded block is not alarmed. The fuel
-bounds the worklist pops: each point is expanded once and pushes at most two successors,
-so `|work| + 2 * count` pops always finish (`Scry.nReach` passes that); it is a total
-definition, not a trusted `partial` one. -/
+constant-false only keeps the other target, so a guarded block is not alarmed.
+
+The fuel bounds the worklist pops, so this is a total definition, not a trusted `partial`
+one. Running out answers **every point is reachable** (`Scry.range g.count`): that is the
+conservative side for an alarm pass, since it can only add null-dereference warnings, never
+hide one. `Scry.nReachFuel` sizes the fuel so that it cannot run out on a finite graph. -/
 def Scry.nReachGo (g : Scry.Fn) (ncfg : Scry.NCfg) (st : AState) :
     Nat → List Nat → List Nat → List Nat
-  | 0, _, seen => seen
+  | 0, _, _ => Scry.range g.count
   | .succ fuel, work, seen =>
   match work with
   | .nil => seen
@@ -491,6 +493,13 @@ def Scry.nReachGo (g : Scry.Fn) (ncfg : Scry.NCfg) (st : AState) :
           | .none => succs
         | _ => succs;
       Scry.nReachGo g ncfg st fuel (List.append rest next) seen'
+
+/-- Enough fuel for `Scry.nReachGo` never to run out: each point is expanded at most once
+and pushes its CFG successors (a pruned branch pushes fewer), so the pops are at most the
+initial worklist plus the graph's edge count; one more for the final empty-worklist step. -/
+def Scry.nReachFuel (g : Scry.Fn) (work : List Nat) : Nat :=
+  Nat.succ (List.foldl (fun acc p => Nat.add acc (List.length (Scry.succs g p)))
+    (List.length work) (Scry.range g.count))
 
 /-- The warning detail for a block: a load or a store through a possibly-null register. -/
 def Scry.nullDetail (b : Scry.NBlock) : String :=
@@ -517,17 +526,27 @@ def Scry.nullWarningsOfCfg (fnName : String) (ncfg : Scry.NCfg) (st : AState)
       List.map (fun _ => Scry.memWarning Scry.MemWarnKind.nullDereference fnName point "dereference"
         (Scry.nullDetail b.2)) nulls) ncfg.blocks
 
-/-- The null-dereference warnings of one function. -/
-def Scry.nullWarningsOfFunc (fn : Wil.Func) (tab : List (String × Nat)) : List Scry.MemWarning :=
+/-- The null-dereference warnings of one function, with an explicit reachability fuel
+(`.none`: `Scry.nReachFuel`, which never runs out). A smaller fuel is only for testing the
+exhaustion answer. -/
+def Scry.nullWarningsOfFuncFuel (fn : Wil.Func) (tab : List (String × Nat))
+    (fuel : Option Nat) : List Scry.MemWarning :=
   let g := Scry.flatten fn;
   match Nat.le g.count Scry.maxNullPoints with
   | .false => .nil
   | .true =>
     let ncfg := Scry.translate fn tab;
     let st := fixpointFrom (AiMach.mk 64) ncfg.cfg (Scry.nEntryEnv fn);
-    let reach := Scry.nReachGo g ncfg st (Nat.add 2 (Nat.mul 2 g.count))
-      (List.cons (Scry.entryNode g) .nil) .nil;
+    let work := List.cons (Scry.entryNode g) .nil;
+    let f := match fuel with
+      | .some n => n
+      | .none => Scry.nReachFuel g work;
+    let reach := Scry.nReachGo g ncfg st f work .nil;
     Scry.nullWarningsOfCfg fn.name ncfg st reach
+
+/-- The null-dereference warnings of one function. -/
+def Scry.nullWarningsOfFunc (fn : Wil.Func) (tab : List (String × Nat)) : List Scry.MemWarning :=
+  Scry.nullWarningsOfFuncFuel fn tab .none
 
 /-- Deduplicate null warnings by function and point (one per memory access). -/
 def Scry.dedupNullWarnings (ws : List Scry.MemWarning) : List Scry.MemWarning :=
@@ -543,3 +562,9 @@ def Scry.nullDerefWarnings (p : Wil.Program) : List Scry.MemWarning :=
   let tab := Scry.retConstTable p;
   Scry.dedupNullWarnings
     (Scry.concatLists (fun fn => Scry.nullWarningsOfFunc fn tab) p.funcs)
+
+/-- `Scry.nullDerefWarnings` with a fixed reachability fuel (tests only). -/
+def Scry.nullDerefWarningsFuel (p : Wil.Program) (fuel : Nat) : List Scry.MemWarning :=
+  let tab := Scry.retConstTable p;
+  Scry.dedupNullWarnings
+    (Scry.concatLists (fun fn => Scry.nullWarningsOfFuncFuel fn tab (.some fuel)) p.funcs)
