@@ -28,6 +28,7 @@
     "effects",
     "ffi",
     "llvm",
+    "profile",
     "reuse",
     "serial",
     "sys",

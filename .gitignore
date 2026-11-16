@@ -26,3 +26,5 @@ wiz-toolchain.local
 
 # benchmark build outputs
 bench/.build/
+# `scripts/profile-build.sh`'s merged JSON (a run of this machine, not a source file)
+bench/.profile/

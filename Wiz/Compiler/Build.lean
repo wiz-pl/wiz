@@ -5,6 +5,7 @@ import Wiz.Compiler.Wasm
 import Wiz.Compiler.WasmValidate
 import Wiz.Compiler.Lower
 import Wiz.Toolchain
+import Wiz.Profile
 
 /-!
 # Building executables
@@ -36,9 +37,20 @@ def irProgram (s : CommandState R) (n : Name) (lib : Bool := false) : Except Str
     else do
       let some d := s.globals.find? n | throw s!"no definition {n}"
       pure ([n], ETerm.global n, d.type)
+  -- (`--profile`: three IR phases; no clock is read when profiling is off)
+  let t0 := if s.profile then Profile.nowNanos () else 0
   let code ← (compileReachable s.globals s.builtins (roots ++ ex.map (·.2))).mapError toString
+  let t1 := if s.profile then Profile.nowNanos () else 0
   let decls ← IR.lowerProgram code main (ex.toArray.map fun (sig, f) => (C.exportEntry sig.cname, .global f))
-  pure (IR.optimizeProgram (IR.hoistConsts decls), ty)
+  let t2 := if s.profile then Profile.nowNanos () else 0
+  let decls := IR.optimizeProgram (IR.hoistConsts decls)
+  let t3 := if s.profile then Profile.nowNanos () else 0
+  -- (`recordPhase` returns its first argument: the result depends on the recording)
+  let decls := if s.profile then
+      Profile.recordPhase (Profile.recordPhase (Profile.recordPhase decls "ir" (t1 - t0))
+        "lower" (t2 - t1)) "optimize" (t3 - t2)
+    else decls
+  pure (decls, ty)
 
 /-- Header includes and glue functions, in order. -/
 def extraC (s : CommandState R) : String := "\n".intercalate s.cCode.toList
@@ -100,10 +112,27 @@ def compileC (tc : Toolchain) (src : String) (exe : System.FilePath) (link : Lin
   let args := if lib then #["-O2", "-w", "-c", "-o", exe.toString, cFile.toString] ++ tc.cflags.toArray ++ map else
     #["-O2", "-w", "-o", exe.toString, cFile.toString] ++ link.sources ++ tc.cflags.toArray ++ map ++
     tc.gmp.toArray ++ tc.ldflags.toArray ++ tc.libs.toArray ++ link.libFlags
-  try
-    let out ← IO.Process.output { cmd := cc, args }
-    if out.exitCode == 0 then pure (.ok ()) else pure (.error s!"{cc} failed:\n{out.stderr}")
-  catch e => pure (.error s!"{cc}: {e}")
+  -- (`--profile`: compile to an object and link it in two invocations, so the table can
+  -- separate `object` from `link`; the generated C and the executable are unchanged)
+  if ← Profile.enabled then
+    let objDir ← IO.FS.createTempDir
+    let obj := (objDir / "generated.o").toString
+    let compile := if lib then
+        Profile.phase "object" (runCC cc (#["-O2", "-w", "-c", "-o", exe.toString, cFile.toString] ++
+          tc.cflags.toArray ++ map))
+      else Profile.phase "object" (runCC cc (#["-O2", "-w", "-c", "-o", obj, cFile.toString] ++
+          tc.cflags.toArray ++ map))
+    match ← compile with
+    | .error e => pure (.error e)
+    | .ok () =>
+      if lib then pure (.ok ()) else
+      Profile.phase "link" (runCC cc (#["-o", exe.toString, obj] ++ link.sources ++
+        tc.cflags.toArray ++ map ++ tc.gmp.toArray ++ tc.ldflags.toArray ++ tc.libs.toArray ++ link.libFlags))
+  else
+    try
+      let out ← IO.Process.output { cmd := cc, args }
+      if out.exitCode == 0 then pure (.ok ()) else pure (.error s!"{cc} failed:\n{out.stderr}")
+    catch e => pure (.error s!"{cc}: {e}")
 
 /-- Run a C compiler; its output as an error when it fails. -/
 def runCC (cmd : String) (args : Array String) : IO (Except String Unit) := do
@@ -120,7 +149,7 @@ inline across unit boundaries, so the generated program runs slower (see 15k). -
 def compileDecls (tc : Toolchain) (decls : Array IR.Decl) (io : Bool) (extra : String)
     (unbox : Bool) (exports : List RVal.ExternSig) (link : Link) (lib noMain : Bool)
     (out : System.FilePath) (split : Nat := 0) : IO (Except String Unit) := do
-  let src := C.program decls io extra unbox exports noMain
+  let src ← Profile.phase "codegen" (pure (C.program decls io extra unbox exports noMain))
   let n := split
   if lib || n < 2 || decls.size < 2 then
     return ← compileC tc src out link lib
@@ -152,6 +181,9 @@ def compileDecls (tc : Toolchain) (decls : Array IR.Decl) (io : Bool) (extra : S
     unless hit do
       IO.FS.writeFile (dir / (name ++ ".c")) text
       todo := todo.push (name, api, stamp)
+  -- (`--profile`: the parallel object compiles are one phase, wall time of the group)
+  let profiling ← Profile.enabled
+  let t0 ← if profiling then IO.monoNanosNow else pure 0
   let tasks ← todo.mapM fun (name, api, stamp) =>
     IO.asTask (prio := .dedicated) do
       match ← ccOne (name ++ ".c") (name ++ ".o") api with
@@ -163,11 +195,13 @@ def compileDecls (tc : Toolchain) (decls : Array IR.Decl) (io : Bool) (extra : S
     | .ok (.error e) => if (← err.get).isNone then err.set (some e)
     | .error e => if (← err.get).isNone then err.set (some (toString e))
   for t in tasks do collect t
+  if profiling then Profile.phaseIO "object" ((← IO.monoNanosNow) - t0)
   if let some e ← err.get then return .error e
   let objs := inputs.map fun (name, _, _) => (dir / (name ++ ".o")).toString
   let srcArgs := if link.sources.isEmpty then #[] else #["-O2", "-w"] ++ link.sources ++ cflags
-  runCC cc (#["-o", out.toString] ++ objs ++ srcArgs ++ tc.gmp.toArray ++ tc.ldflags.toArray ++
-    tc.libs.toArray ++ link.libFlags)
+  let linkArgs := #["-o", out.toString] ++ objs ++ srcArgs ++ tc.gmp.toArray ++ tc.ldflags.toArray ++
+    tc.libs.toArray ++ link.libFlags
+  if profiling then Profile.phase "link" (runCC cc linkArgs) else runCC cc linkArgs
 
 /-- Compile an LLVM module to an executable: `llc` (the toolchain's) for the module, the C
 compiler for the runtime (exported with `-DWIZ_API=`), and the C compiler to link. -/
@@ -187,15 +221,19 @@ def compileLLVM (tc : Toolchain) (ll : String) (exe : System.FilePath) (glue : S
     catch e => pure (.error s!"{cmd}: {e}")
   let rtObj := exe.withFileName "wiz_runtime.o"
   let mainObj := if lib then exe.withFileName ((exe.fileStem.getD "wiz") ++ "_module.o") else exe.withExtension "o"
-  if let .error e ← step cc (#["-O2", "-w", "-c", "-DWIZ_API=", "-o", rtObj.toString, rtFile.toString] ++ cflags ++ map) then
+  -- (`--profile`: the runtime and the module are `object`, the linker `link`)
+  let profile ← Profile.enabled
+  let stepP (phase : String) (cmd : String) (args : Array String) : IO (Except String Unit) :=
+    if profile then Profile.phase phase (step cmd args) else step cmd args
+  if let .error e ← stepP "object" cc (#["-O2", "-w", "-c", "-DWIZ_API=", "-o", rtObj.toString, rtFile.toString] ++ cflags ++ map) then
     return .error e
-  if let .error e ← step llc #["-O2", "-filetype=obj", "-relocation-model=pic", "-o", mainObj.toString, llFile.toString] then
+  if let .error e ← stepP "object" llc #["-O2", "-filetype=obj", "-relocation-model=pic", "-o", mainObj.toString, llFile.toString] then
     return .error e
   -- (9g: a library is the two objects as one, `-r`)
-  if lib then return ← step cc #["-r", "-o", exe.toString, mainObj.toString, rtObj.toString]
+  if lib then return ← stepP "link" cc #["-r", "-o", exe.toString, mainObj.toString, rtObj.toString]
   -- (9f) the `link_c` files are compiled by the linking step, with the C flags
   let srcArgs := if link.sources.isEmpty then #[] else #["-O2", "-w"] ++ link.sources ++ cflags
-  step cc (#["-o", exe.toString, mainObj.toString, rtObj.toString] ++ srcArgs ++ tc.gmp.toArray ++
+  stepP "link" cc (#["-o", exe.toString, mainObj.toString, rtObj.toString] ++ srcArgs ++ tc.gmp.toArray ++
     tc.ldflags.toArray ++ tc.libs.toArray ++ link.libFlags)
 
 /-- (8f) Write the WebAssembly module of the program to `out`. The JS host
@@ -204,10 +242,11 @@ and type-checked by `WasmValidate.validate` before they are written, so an encod
 (or an instruction outside the supported subset) is a compile error, not a module that
 an engine rejects later. -/
 def compileWasm (decls : Array IR.Decl) (io : Bool) (out : System.FilePath) : IO (Except String Unit) := do
-  match Wasm.program decls io with
+  -- (`--profile`: the encoder is `codegen`, validation and the write are `object`)
+  match ← Profile.phase "codegen" (pure (Wasm.program decls io)) with
   | .error e => pure (.error e)
   | .ok bytes =>
-    match WasmValidate.validate bytes with
+    match ← Profile.phase "object" (pure (WasmValidate.validate bytes)) with
     | .error e => pure (.error s!"internal error: the Wasm backend emitted an invalid module: {e}")
     | .ok () =>
       IO.FS.writeBinFile out bytes
@@ -234,8 +273,9 @@ def build (tc : Toolchain) (s : CommandState R) (n : Name) (out : System.FilePat
     let unbox := s.globals.unboxStructs
     if lib then IO.FS.writeFile (out.withExtension "h") (C.exportHeader ex)
     let r ← if wasm then compileWasm decls io out
-      else if llvm then
-        compileLLVM tc (LLVM.program decls io bare) out
+      else if llvm then do
+        let ll ← Profile.phase "codegen" (pure (LLVM.program decls io bare))
+        compileLLVM tc ll out
           (extraC s ++ "\n" ++ C.glue (C.externs decls) (extraC s) unbox ++ "\n" ++ C.exportWrappers ex true) (linkOf s) lib
       else compileDecls tc decls io (extraC s) unbox ex (linkOf s) lib bare out split
     pure (r.map fun () => ty)

@@ -10,6 +10,10 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* `wiz build --profile` (and `--profile-json FILE`) times a build: per declaration and
+  per imported module, the IR passes, code generation, the object file, the link, cache
+  hits and misses, and the total; `scripts/profile-build.sh` profiles a fixed corpus and
+  prints the top 20 (docs/building.md, "Profiling a build").
 * selfhost: the parser tables are a checked-in Wiz source file (`selfhost/Tables.wiz`,
   rendered by `lake build genSelfhostTables`; the `selfhost` group checks that it is
   current and that its tables accept the same corpus as the Lean parser), and the

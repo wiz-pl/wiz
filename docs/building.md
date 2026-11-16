@@ -158,6 +158,72 @@ A release toolchain's `share/wiz/NOTICE` says the same, and also lists the third
 code linked into `wiz`, `grail` and `tower` themselves; the licence texts are in
 `share/wiz/LICENSES/` and `share/wiz/cc/LICENSES/`.
 
+## Profiling a build
+
+`wiz build --profile` answers "where did the time go?" for one build:
+
+```sh
+wiz build examples/effects.wiz -o /tmp/effects --profile
+wiz build examples/effects.wiz -o /tmp/effects --profile-json /tmp/effects.json
+scripts/profile-build.sh                 # a fixed corpus, top 20
+scripts/profile-build.sh --top 40 --json /tmp/p.json
+scripts/profile-build.sh --baseline /tmp/p.json   # the same corpus, compared
+```
+
+`--profile` prints a table sorted by cost with each row's percentage of the total:
+
+* **declarations** — per command (its kind and the declaration it added), in the file
+  and in every imported module. A `mutual` block or a structure appears as one row,
+  labelled with its first declaration and a `(+N)` count.
+* **module checks** — the wall time of each `import`, marked `hit` (its commands came
+  from the cache) or `miss` (it was checked now). A module's span includes the
+  declarations inside it, so these rows overlap the declaration rows.
+* **backend phases** — `ir` (erasure and reachability), `lower` (IR lowering),
+  `optimize` (constant hoisting and the IR optimiser), `codegen` (C, LLVM or Wasm text),
+  `object` (the C compiler's `-c`, `llc`, or Wasm validation) and `link` (the linker).
+  With `--profile` the C backend compiles to an object and links it in two invocations,
+  so the two can be timed apart; the generated C and the executable are byte-identical
+  either way (`Tests/Groups/Profile.lean` checks both).
+* **cache** — how many commands were served from the cache and how many were elaborated.
+
+`--profile-json FILE` writes the same numbers as JSON for tooling: `total_ns`,
+`elaboration_ns`, `declarations[]` (`name`, `kind`, `module`, `ns`), `modules[]`
+(`name`, `status`, `ns`), `backend` (the six phases, always present, `0` when not run)
+and `cache` (`hits`, `misses`). All times are nanoseconds of wall time.
+
+Instrumentation is off by default: the frontend tests one `Bool` per command
+(`CommandState.profile`) and reads the clock only when it is set, and each backend
+phase is one branch in `Profile.phase` (`Wiz/Profile.lean`). A `--profile` build
+therefore generates the same C and the same executable as a plain one; only the
+timing and the extra temporary object file (outside the output directory) differ.
+
+`scripts/profile-build.sh` profiles a fixed corpus — a driver importing `Prelude`,
+`Text`, `Nat`, `ListLemmas` and `Json`, plus `examples/effects.wiz` — each with a fresh
+cache directory (a warm cache would report hits instead of declaration times). It
+prints the top 20 costs and writes the merged JSON (default
+`bench/.profile/profile-build.json`); `--baseline` compares two merged runs entry by
+entry. This is the comparable shape: run it before and after a change on the same
+machine, in the same session.
+
+**What is not attributed:** process start-up, parsing (beyond a command's own
+elaboration), option handling, garbage collection, file-system I/O inside a phase, the
+C compiler's internal parallelism, and OS scheduling. The numbers are wall time on a
+machine shared with other work, so a single run is not a benchmark; use `--baseline`
+with interleaved runs for a regression, or ask for a quiet measurement window.
+
+One run on 2026-11-15 (NixOS, `wiz` built by Lake, `cc` from the dev shell; the machine
+was shared, so treat the numbers as a shape, not a baseline):
+
+| what | time | share |
+|---|---:|---:|
+| total | TBD | 100% |
+| `optimize` (IR) | TBD | TBD |
+| `ir` (erasure + reachability) | TBD | TBD |
+| `link` | TBD | TBD |
+| `object` (`cc -c`) | TBD | TBD |
+| `codegen` | TBD | TBD |
+| elaboration | TBD | TBD |
+
 ## Reproducible builds
 
 A build is reproducible when the same inputs give the same bytes, wherever the checkout

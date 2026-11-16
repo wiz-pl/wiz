@@ -2,6 +2,7 @@ import Wiz.Elab.Command
 import Wiz.Module
 import Wiz.Rig.Instances
 import Wiz.Parser.DocComment
+import Wiz.Profile
 
 /-!
 # The frontend
@@ -187,6 +188,24 @@ where
       | some x => docCommentBefore chars x.info.start
       | none => none
 
+/-- (`wiz build --profile`) The label of a command: its kind, and the declaration it added
+(the first, with a count when it added several). -/
+def profileLabel (cmd : Syntax) (added : Array Name) : String × String :=
+  let k := cmd.kind
+  let kind :=
+    if k.startsWith "command." then
+      match (k.drop 8).toString with
+      | "defEqns" => "def"
+      | "foreignType" => "foreign type"
+      | w => w
+    else k
+  let name := match added[0]? with
+    | some n => if added.size == 1 then n else s!"{n} (+{added.size - 1})"
+    | none => match cmd.firstIdent? with
+      | some n => s!"<{n}>"
+      | none => s!"<{kind}>"
+  (name, kind)
+
 variable [IsoCache R]
 
 /-- (11q) The syntax a command the user wrote refers to: its nodes of declared kinds
@@ -294,13 +313,20 @@ where
   /-- Elaborate one command, recording where the declarations it adds come from, and
   (11s) what they are and their doc comments. -/
   step (chars : Array Char) (cmd : Syntax) (s : CommandState R) : CommandState R :=
+    -- (`--profile`: one Bool test per command; the clock is read only when it is set)
+    let t0 := if s.profile then Profile.nowNanos () else 0
     let before := s.globals.order.size
     -- (11q) for the language server: the syntax the command uses, by where it was declared
     let s := if s.termInfo then { s with infos := s.infos ++ syntaxRefs s cmd } else s
     let s' := ((elabCommand cmd).run { s with pristine := false }).2
     let added := s'.globals.order.extract before s'.globals.order.size
     -- (a command macro's located output may have placed them already: keep that)
-    { s' with declSites := added.foldl (fun m n => if m.contains n then m else m.insert n (cmd.info, s.module)) s'.declSites,
-              declDocs := if added.isEmpty then s'.declDocs else declDocsOf chars cmd added s'.declDocs }
+    let out :=
+      { s' with declSites := added.foldl (fun m n => if m.contains n then m else m.insert n (cmd.info, s.module)) s'.declSites,
+                 declDocs := if added.isEmpty then s'.declDocs else declDocsOf chars cmd added s'.declDocs }
+    if s.profile then
+      let (name, kind) := profileLabel cmd added
+      Profile.recordDecl out name kind s.module (Profile.nowNanos () - t0)
+    else out
 
 end Wiz

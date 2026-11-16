@@ -16,6 +16,13 @@ def usage : String := "usage:
   wiz build FILE -o OUT [--split N]  compile the program as N C units in parallel
                                    (default 1: one unit; a split build is faster but the
                                    generated program runs somewhat slower, stage 15k)
+  wiz build FILE -o OUT [--profile] [--profile-json FILE]
+                                   time the build: per declaration and per imported
+                                   module, the IR passes, code generation, the object
+                                   file and the link, cache hits and misses, and the
+                                   total. --profile prints a table (by cost, with a
+                                   percentage); --profile-json writes the same numbers
+                                   as JSON for tooling (scripts/profile-build.sh)
   wiz build FILE -o OUT --lib      … or the exported functions to an object file, with OUT.h
   wiz build FILE -o OUT --no-main  … or the exported functions, linked without a `main`
                                    (say, a Wasm module: --cc emcc --ldflags --no-entry)
@@ -204,6 +211,24 @@ def takeCachePrune : List String → Except String (Option Nat × List String)
 (0: automatically, for a large program; 1: one unit). -/
 initialize splitOpt : IO.Ref Nat ← IO.mkRef 0
 
+/-- (`wiz build --profile`) Whether to time the build, and where to write the JSON. Off by
+default; see `Wiz/Profile.lean`. -/
+initialize profileOpt : IO.Ref Bool ← IO.mkRef false
+
+/-- Take `--profile` and `--profile-json FILE` out of the arguments. -/
+def takeProfileOpt : List String → Except String (Bool × Option String × List String)
+  | "--profile" :: rest => do
+    let (p, j, rest) ← takeProfileOpt rest
+    return (true, j, rest)
+  | "--profile-json" :: f :: rest => do
+    let (p, _, rest) ← takeProfileOpt rest
+    return (p, some f, rest)
+  | "--profile-json" :: [] => throw "--profile-json needs a file"
+  | a :: rest => do
+    let (p, j, rest) ← takeProfileOpt rest
+    return (p, j, a :: rest)
+  | [] => return (false, none, [])
+
 /-- Take `--split N` out of the arguments. -/
 def takeSplitOpt : List String → Except String (Option Nat × List String)
   | "--split" :: n :: rest => do
@@ -255,6 +280,7 @@ def initState (tc : Toolchain) (path : String) (input : String) :
     ({ info := {}, severity := .warning,
        text := s!"{p} is ignored: module {n} is the toolchain's own ({roots.head!}), which a module root cannot replace" } : Msg)
   let strictP ← strictPrivacyOpt.get
+  let profiling ← profileOpt.get
   let useNotation := !(← ppAllOpt.get)
   let smt ← tc.smt.resolve
   let pp : PPTable := { useNotation := useNotation }
@@ -267,7 +293,8 @@ def initState (tc : Toolchain) (path : String) (input : String) :
       globals := { regularity, predicativeProp, lazyProofs, inertReg, unboxStructs, proofSteps, traceProofSteps,
                    strictPrivacy := strictP, pp := pp },
       trustedModule := own.contains, trustNative := tc.trustNative,
-      nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := smt }
+      nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := smt,
+      profile := profiling }
   pure (init, headers)
 
 /-- Elaborate a file, through the toolchain's cache (if any). -/
@@ -532,11 +559,22 @@ def takeTarget : List String → Except String (Option String × List String)
     pure (t, a :: rest)
 
 def buildCmd (tc : Toolchain) (path out : String) (target : String) (lib : Bool := false)
-    (noMain : Bool := false) (split : Nat := 0) : IO UInt32 := do
-  let some s ← elabFile tc path | pure 1
-  match ← Build.build tc s "main" out (target == "llvm") lib noMain split (target == "wasm") with
-  | .error e => IO.eprintln e; pure 1
-  | .ok _ => pure 0
+    (noMain : Bool := false) (split : Nat := 0) (profile : Bool := false)
+    (profileJson : Option String := none) : IO UInt32 := do
+  if profile then Profile.start
+  -- (`--profile`: the total starts before elaboration; start-up and option handling are
+  -- outside it, and are listed as not attributed)
+  let t0 ← if profile then IO.monoNanosNow else pure 0
+  let elab ← Profile.phase "elaboration" (elabFile tc path)
+  let r ← match elab with
+    | none => pure 1
+    | some s =>
+      match ← Build.build tc s "main" out (target == "llvm") lib noMain split (target == "wasm") with
+      | .error e => IO.eprintln e; pure 1
+      | .ok _ => pure 0
+  if profile then
+    Profile.finish ((← IO.monoNanosNow) - t0) profile profileJson
+  pure r
 
 def runCmd (tc : Toolchain) (path : String) (target : String) (split : Nat := 0) : IO UInt32 := do
   let some s ← elabFile tc path | pure 1
@@ -609,6 +647,15 @@ def main (args : List String) : IO UInt32 := do
       if let some k := k then cachePruneOpt.set (some k)
       pure a
     | .error e => do IO.eprintln e; return 1
+  -- (`--profile`: a build option; it is taken out before the command is matched)
+  let (profileFlag, profileJsonArg, args) ← match takeProfileOpt args with
+    | .ok (p, j, a) => do
+      if p || j.isSome then profileOpt.set true
+      pure (p || j.isSome, j, a)
+    | .error e => do IO.eprintln e; return 1
+  if profileFlag && args.head? != some "build" then
+    IO.eprintln "--profile and --profile-json apply to `wiz build`"
+    return 2
   -- a `panic!` (a kernel-internal failure) ends a batch command with status 1 instead of
   -- going on with a default value; the language server keeps running
   unless args.head? == some "lsp" do exitOnPanic
@@ -627,10 +674,13 @@ def main (args : List String) : IO UInt32 := do
   | "cache" :: "verify" :: rest => cacheVerifyCmd tc rest
   | "cache" :: "manifest" :: rest => cacheManifestCmd tc rest
   | ["check", path] => checkCmd tc path
-  | ["build", path, "-o", out] => buildCmd tc path out target (split := split)
-  | ["build", path, "-o", out, "--lib"] => buildCmd tc path out target true (split := split)
+  | ["build", path, "-o", out] =>
+    buildCmd tc path out target (split := split) (profile := profileFlag) (profileJson := profileJsonArg)
+  | ["build", path, "-o", out, "--lib"] =>
+    buildCmd tc path out target true (split := split) (profile := profileFlag) (profileJson := profileJsonArg)
   | ["build", path, "-o", out, "--no-main"] =>
-    buildCmd tc path out target (noMain := true) (split := split)
+    buildCmd tc path out target (noMain := true) (split := split) (profile := profileFlag)
+      (profileJson := profileJsonArg)
   | "doc" :: rest => docCmd tc rest
   | "fmt" :: rest => fmtCmd tc rest
   | ["run", path] => runCmd tc path target (split := split)

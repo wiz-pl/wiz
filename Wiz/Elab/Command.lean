@@ -180,6 +180,9 @@ structure CommandState (R : Type) where
   localProcs : List Nat := []
   /-- (11w) `local instance`s: their positions in `instances` (numbered from the oldest) -/
   localInsts : List Nat := []
+  /-- (`wiz build --profile`) time each command; off by default, one `Bool` test per
+  command in the frontend (`Wiz/Profile.lean`) -/
+  profile : Bool := false
 
   /-- (11r) unexpanders declared with `app_unexpander c` and `attribute [app_unexpander c] f`,
   latest first, and which of them are `local` (numbered from the oldest) -/
@@ -188,6 +191,7 @@ structure CommandState (R : Type) where
   /-- (11r) the atoms of `syntax`/`notation` rules as declared, whitespace included, by
   node kind: they decide the spacing of printed notation -/
   rawAtoms : Std.HashMap Name (Array String) := {}
+  deriving Inhabited
 
 /-- Run a kernel entry on a declaration, with the proof markers the kernel requires
 (`Mark`) **when it asks for them**. The marking pass is a typed traversal of the whole

@@ -2,6 +2,7 @@ import Lean.CompactedRegion
 import Std.Time.DateTime.Timestamp
 import Wiz.Query
 import Wiz.Module
+import Wiz.Profile
 import Wiz.Smt.Sha256
 
 /-!
@@ -2218,6 +2219,11 @@ where
   seen it, then replay it from the cache. -/
   importModule (keys : IO.Ref (Std.HashMap Name Key)) (base : CommandState R) (stack : List Name)
       (s : CommandState R) (m : Name) (src : String) : IO (CommandState R × Nat) := do
+    -- (`--profile`: one wall-clock span per imported module; the `go` inside records
+    -- its declarations and its cache hits/misses on their own)
+    let prof := init.profile
+    let t0 ← if prof then IO.monoNanosNow else pure 0
+    let miss0 ← if prof then do let (_, n) ← Profile.cacheCounts; pure n else pure 0
     let k ← keyOf keys m
     -- (the module's output manifest, if a layer has one: its entries gate the text and
     -- region lookups below)
@@ -2269,6 +2275,12 @@ where
           pure ()
       | none => pure ()
     -- after a fresh isolated run, the hits are that run's (the replay reads what it wrote)
+    if prof then
+      -- (`fresh` is `some` also on a warm process's first import of a module: the
+      -- isolated pass still reads the cache. A miss is a command that was elaborated.)
+      let miss1 ← do let (_, n) ← Profile.cacheCounts; pure n
+      Profile.recordModule m (if fresh.isSome && miss1 > miss0 then "miss" else "hit")
+        ((← IO.monoNanosNow) - t0)
     pure (s', fresh.getD h)
   go (keys : IO.Ref (Std.HashMap Name Key)) (base : CommandState R) (stack : List Name) (input : String)
       (s₀ : CommandState R) (key₀ : Key) (mode : Mode)
@@ -2365,6 +2377,7 @@ where
             | none => store.getEntry key
         match cached with
         | some (e, hit) =>
+          if init.profile then Profile.cacheHit
           if let some sink := sink then do
             sink.effects.modify (·.push e)
             sink.keys.modify (·.push key.fast)
@@ -2378,6 +2391,7 @@ where
           s := e.apply s
           hits := hits + 1
         | none =>
+          if init.profile then Profile.cacheMiss
           let s' := Query.elaborate.elabOne input base chars pos stop s
           if cacheable? && mode matches .write then
             let e := effectOf s s'

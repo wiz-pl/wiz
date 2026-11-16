@@ -1,4 +1,5 @@
 import Wiz.Version
+import Wiz.Profile
 import Wiz.Rig
 import Wiz.Rig.Instances
 import Wiz.Core.Term
