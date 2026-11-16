@@ -183,6 +183,24 @@ def group : Group where
           "def t3 (x : Nat) (xs ys : List Nat) (h : xs = ys) : List.cons x xs = List.cons x ys :=\n" ++
           "  Eq.congrArg (List.cons x) h\n" ++
           "def t4 (a b : Nat) (h : a = b) : Nat.succ a = Nat.succ b := Eq.congrArg Nat.succ h") },
+    -- (#257) the expected equation is stuck on the third argument of `Eq.trans`
+    -- (`L = ?c`), and the given equation's type has already computed to a Σ of field
+    -- equations: the unifier reads the original sides off the Σ (`eqDataSides?`, #256)
+    -- and solves `?c`, instead of a rigid mismatch between the equation and the Σ.
+    { name := "#257: Eq.trans takes an equation whose type has computed (sides on the Σ)", run := fun _ => do
+        let pre := "import Logic\n" ++
+          "def L : List Nat := .cons 1 (.cons 2 .nil)\n" ++
+          "def L2 : List Nat := .cons 1 (.cons 2 .nil)\n" ++
+          "def e1 : L = L2 := refl L\n"
+        okLib (pre ++
+          "def t (y : List Nat) (h : y = L) : y = L2 := Eq.trans h e1\n" ++
+          "def t2 (y : List Nat) (h : y = L) : y = L2 := Eq.trans h (refl L)")
+        -- the issue's own reproducer: a lemma's equation (data `Int`) computed first
+        okLibs ("import Int\nimport Logic\n" ++
+          "def c2 (a : Nat) : Int.ofNat a + 0 = Int.ofNat a := Eq.trans (Int.add_zero (Int.ofNat a)) rfl")
+        -- only the sides that unify are accepted
+        failsLibW (pre ++ "def L3 : List Nat := .cons 1 (.cons 3 .nil)\n" ++
+          "def bad (y : List Nat) (h : y = L) : y = L3 := Eq.trans h e1") "type mismatch" },
     -- agent/elab-stretch
     { name := "numerals and notation in class field types (numerals-in-class-decls)", run := fun _ =>
         okLib ("import Prelude\ninductive HwTy where\n  | bits (n : Nat)\nclass Hw (r : HwTy → Type) where\n" ++

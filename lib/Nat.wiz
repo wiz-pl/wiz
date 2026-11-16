@@ -365,3 +365,15 @@ def Nat.add_sub_of_le : (a b : Nat) → Nat.Le a b → a + (b - a) = b
   | .zero, _, _ => rfl
   | .succ a, .zero, h => absurd (Nat.not_succ_le_zero a h)
   | .succ a, .succ b, h => congrArg Nat.succ (Eq.trans (congrArg (fun x => a + x) (Nat.succ_sub_succ b a)) (Nat.add_sub_of_le a b h))
+
+-- ## The default `simp` set
+--
+-- The Nat identities in normal-form orientation (`docs/stages/06-macros/simp.md`).
+-- `Nat.zero_add`, `Nat.zero_mul` and the power rules are deliberately not registered:
+-- their left sides compute to a variable or a bare value, so matching up to conversion
+-- would match anything or has already computed away in the goal; use them explicitly.
+
+attribute [simp] Nat.add_zero
+attribute [simp] Nat.mul_one
+attribute [simp] Nat.one_mul
+attribute [simp] Nat.mul_zero
