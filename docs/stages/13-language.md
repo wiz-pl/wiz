@@ -121,6 +121,17 @@ without a definition does not type-check (`drafts/rust/lowered/03_get_mut.wiz`,
 `get_mut.is_place` and `get_mut.spec_under`). With the flag a type with private parts is
 abstract for proofs as well.
 
+**`wiz --trace-guess-fallback`** (a diagnostic, off by default). Every hole a guess can
+meet records its type, apart from a pruned hole whose own function type lost a binder
+and a constant whose declared type is not a function there. Even so, a guess can still
+reach the whole-declaration recheck: its type can mention a variable the hole is not
+applied to, the guessed head's type can't be read off, or the comparison can meet a
+hole. The flag prints one line per declaration that reaches the recheck, with the
+reasons: `guess-fallback: <module> <declaration> recheck=ran|skipped reasons=…`
+(`skipped`: no other module's private type is in view, so the recheck has nothing to
+hide). `scripts/guess-fallback-stats.sh` counts them over `lib/` and the test corpus.
+The goal is zero, so the recheck can go.
+
 The motivating use is `lib/Region.wiz` ([22g](22-numbers.md)): the constructors of the borrow handles
 `Shr`, `Uniq`, `Mut` and `Lent` are private, so a handle at a region comes only from a
 scope or an operation of the library, and hand-written Wiz can't forge one

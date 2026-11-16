@@ -381,7 +381,13 @@ def checkGuessedDecl (info : SourceInfo) (name : Name) (ty : Term R) (val : Opti
     ElabM R Unit := do
   if (← get).unifyGuessed then
     let g := (← getGlobals).fullView
-    if !(foreignOpaques g).isEmpty then
+    let recheck := !(foreignOpaques g).isEmpty
+    -- (`--trace-guess-fallback`) one line per declaration that reaches the fallback: the
+    -- count to drive to zero (`scripts/guess-fallback-stats.sh`)
+    if g.traceGuesses then
+      let reasons := "; ".intercalate (← get).guessReasons.toList
+      dbgTrace s!"guess-fallback: {if g.module.isEmpty then "_" else g.module} {name} recheck={if recheck then "ran" else "skipped"} reasons={reasons}" fun _ => pure ()
+    if recheck then
       -- (a partial definition's signature is already a global: the checked copy gets
       -- an internal name, and the message the declaration's)
       let internal := if g.contains name then name ++ "✝" else name

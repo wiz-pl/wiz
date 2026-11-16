@@ -308,6 +308,9 @@ structure ElabState (R : Type) where
   declaration is then checked again where opaque types have no definition
   (`checkGuessedDecl`), which closes a shape-based forgery in that case too. -/
   unifyGuessed : Bool := false
+  /-- why each guess was left untyped (`markGuessed`), for `--trace-guess-fallback`. It is
+  state, so a guess that unification backtracks out of takes its reason with it -/
+  guessReasons : Array String := #[]
   /-- comparisons of two glued values without metavariables that failed, with the failure's
   message: the two sides quoted (with levels for free variables), bucketed by their head. Valid
   while the globals stay as they are (the elaborator clears it when it changes them). -/
