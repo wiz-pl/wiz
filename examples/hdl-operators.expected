@@ -1,0 +1,8 @@
+examples/hdl-operators.wiz:43:1: info: (.true, .true, .true)
+examples/hdl-operators.wiz:47:1: info: .cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 (.cons 6 (.cons 7 (.cons 8 (.cons 9 (.cons 0 (.cons 1 .nil)))))))))))
+examples/hdl-operators.wiz:51:1: info: ((72, 25), (201, 201), 0, 0)
+examples/hdl-operators.wiz:52:1: info: "module count(input clk, input [0:0] x, output [3:0] y);\n  reg [3:0] r; initial r = 4'd0;\n  wire [0:0] n3 = r == 4'd9;\n  wire [3:0] n6 = r + 4'd1;\n  wire [3:0] n7 = n3 ? 4'd0 : n6;\n  always @(posedge clk) r <= n7;\n  assign y = r;\nendmodule\n"
+examples/hdl-operators.wiz:55:1: info: fun c x y => if c then x + 1 &&& ~~~y else x <<< 2 ||| y >>> 3 : Wire Bit → Wire B8 → Wire B8 → Wire B8
+examples/hdl-operators.wiz:56:1: info: fun x y => x === y ||| x <ᵤ 3 : Wire B8 → Wire B8 → Wire HwTy.bit
+examples/hdl-operators.wiz:57:1: info: fun c x => if c then x else 0 : Wire Bit → Wire B8 → Wire B8
+examples/hdl-operators.wiz:64:1: info: (1, 24, 14)

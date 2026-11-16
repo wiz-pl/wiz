@@ -1,0 +1,74 @@
+import Sys
+import Json
+import Scry.Fuzz
+/-!
+# Scry.FuzzCmd: the `scry fuzz-span` command
+
+```
+scry fuzz-span FILE [--offset N] [--json] [--out FILE]
+```
+
+`FILE` is parsed as raw bytes by the vendored tree-sitter shim. Without `--json` the
+command prints a short CST summary; `--json` prints the same summary plus `crash_offset`
+and `crash_span` when `--offset` names a byte. A parse that produces `ERROR`/`MISSING`
+nodes is data (exit 0); only an unreadable file or a shim-level failure is an error
+(exit 1). The fuzz driver (`fuzz/run.py`) embeds the JSON in its dynamic-evidence
+report.
+-/
+
+/-- The command's flags. -/
+structure Scry.FuzzSpanOpts where
+  file : Option String
+  offset : Option Nat
+  json : Bool
+  out : Option String
+
+/-- The usage text. -/
+def Scry.fuzzSpanUsage : String :=
+  "usage: scry fuzz-span FILE [--offset N] [--json] [--out FILE]\n"
+
+partial def Scry.fuzzSpanArgsGo (o : Scry.FuzzSpanOpts) :
+    List String → Except String Scry.FuzzSpanOpts
+  | .nil => match o.file with
+    | .none => .error Scry.fuzzSpanUsage
+    | .some _ => .ok o
+  | .cons a rest => match a with
+    | "--offset" => match rest with
+      | .cons n more => match String.parseNat n with
+        | .none => .error ("--offset needs a natural number, got \"" ++ n ++ "\"")
+        | .some k => Scry.fuzzSpanArgsGo { o with offset := .some k } more
+      | .nil => .error "--offset needs a byte offset"
+    | "--json" => Scry.fuzzSpanArgsGo { o with json := .true } rest
+    | "--out" => match rest with
+      | .cons p more => Scry.fuzzSpanArgsGo { o with out := .some p } more
+      | .nil => .error "--out needs a file"
+    | "--help" => .error Scry.fuzzSpanUsage
+    | _ => match String.startsWith a "--" with
+      | .true => .error ("unknown flag " ++ a ++ "\n" ++ Scry.fuzzSpanUsage)
+      | .false => match o.file with
+        | .none => Scry.fuzzSpanArgsGo { o with file := .some a } rest
+        | .some _ => .error ("unexpected argument " ++ a ++ "\n" ++ Scry.fuzzSpanUsage)
+
+/-- Parse `fuzz-span`'s arguments. -/
+def Scry.fuzzSpanArgs (args : List String) : Except String Scry.FuzzSpanOpts :=
+  Scry.fuzzSpanArgsGo (Scry.FuzzSpanOpts.mk .none .none .false .none) args
+
+/-- `scry fuzz-span FILE [--offset N] [--json] [--out FILE]`. -/
+def Scry.fuzzSpanCmd (args : List String) : EIO Nat :=
+  match Scry.fuzzSpanArgs args with
+  | .error e => EIO.fail e
+  | .ok o => match o.file with
+    | .none => EIO.fail Scry.fuzzSpanUsage
+    | .some file => do
+      p ← Scry.Fuzz.parseFile file;
+      let j := Scry.fuzzInputJsonAt p o.offset;
+      match o.out with
+      | .some out => do
+        FS.writeFile out (String.append (Json.render j) "\n");
+        EIO.lift (IO.println ("wrote fuzz-span evidence to " ++ out));
+        EIO.pure 0
+      | .none => do
+        match o.json with
+        | .true => EIO.lift (IO.println (Json.render j))
+        | .false => EIO.lift (IO.println (Scry.fuzzInputText p.input));
+        EIO.pure 0

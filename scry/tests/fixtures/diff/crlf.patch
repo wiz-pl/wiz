@@ -1,0 +1,15 @@
+diff --git a/data.bin b/data.bin
+index e42ac44..817b4d1 100644
+Binary files a/data.bin and b/data.bin differ
+diff --git a/src/crlf.c b/src/crlf.c
+index b87108a..9a61681 100644
+--- a/src/crlf.c
++++ b/src/crlf.c
+@@ -2,0 +3 @@ line2
++added
+diff --git a/src/ctx.c b/src/ctx.c
+index a82bf91..d486713 100644
+--- a/src/ctx.c
++++ b/src/ctx.c
+@@ -12,0 +13 @@ line12
++int added;

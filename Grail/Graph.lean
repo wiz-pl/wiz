@@ -413,6 +413,12 @@ def Runner.prep (r : Runner) (update : Bool) (results : TestResults) (n : Node)
       | .error e =>
         let f ← r.judgeTest file update results (.error e)
         return .fail e f.log
+    -- a skipped example has no expected output and no job: it is reported apart
+    match kind with
+    | .skip reason =>
+      results.modify (·.insert file { file, ok := true, skipped := true, message := reason })
+      return .done default s!"  ⊘ {file} (skipped{if reason.isEmpty then "" else s!": {reason}"})\n"
+    | _ => pure ()
     let (_, expected) ← expectedOf r.ctx.dir file
     let key ← r.testKey file kind expected
     -- (9f) a `run` test also depends on its executable's link (its `link_c` files' contents)

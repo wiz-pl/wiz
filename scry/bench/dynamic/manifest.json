@@ -1,0 +1,119 @@
+{
+  "format": "scry-dynamic-corpus",
+  "version": 1,
+  "description": "Small dynamic-execution corpus: a concrete ASAN/UBSAN/leak event (or a clean run) per case, correlated with the static findings. Tiers follow prior-art/symbolic-execution.md: T1 CWE-78/134, T2 CWE-22/416/476, T3 CWE-190/787/121. CWE-120/242/362 are out of scope for a witness.",
+  "cases": [
+    {
+      "id": "dyn/t1/cwe78/exec-clean",
+      "cwe": "CWE-78",
+      "tier": "T1",
+      "file": "exec-clean.c",
+      "dynamic": {
+        "expect": "clean"
+      },
+      "note": "the command executes; no dynamic event is evidence for this input only"
+    },
+    {
+      "id": "dyn/t1/cwe78/exec-taint-clean",
+      "cwe": "CWE-78",
+      "tier": "T1",
+      "file": "exec-taint.c",
+      "dynamic": {
+        "expect": "clean"
+      },
+      "note": "getenv is unset: system(NULL) executes, but no attacker-controlled command is run"
+    },
+    {
+      "id": "dyn/t1/cwe134/format-unreached",
+      "cwe": "CWE-134",
+      "tier": "T1",
+      "file": "format-taint.c",
+      "dynamic": {
+        "expect": "clean"
+      },
+      "note": "the guard is false, so the format sink is not reached; coverage should show it"
+    },
+    {
+      "id": "dyn/t2/cwe416/uaf",
+      "cwe": "CWE-416",
+      "tier": "T2",
+      "file": "uaf.c",
+      "dynamic": {
+        "expect": "event",
+        "kind": "crash",
+        "sanitizer": "address",
+        "line": 5
+      }
+    },
+    {
+      "id": "dyn/t2/cwe476/null-deref",
+      "cwe": "CWE-476",
+      "tier": "T2",
+      "file": "null-deref.c",
+      "dynamic": {
+        "expect": "event",
+        "kind": "ub",
+        "sanitizer": "undefined",
+        "line": 3
+      }
+    },
+    {
+      "id": "dyn/t3/cwe121/stack-oob",
+      "cwe": "CWE-121",
+      "tier": "T3",
+      "file": "stack-oob.c",
+      "dynamic": {
+        "expect": "event",
+        "kind": "crash",
+        "sanitizer": "address",
+        "line": 4
+      }
+    },
+    {
+      "id": "dyn/t3/cwe787/heap-oob",
+      "cwe": "CWE-787",
+      "tier": "T3",
+      "file": "heap-oob.c",
+      "dynamic": {
+        "expect": "event",
+        "kind": "crash",
+        "sanitizer": "address",
+        "line": 4
+      }
+    },
+    {
+      "id": "dyn/t3/cwe190/ub-overflow",
+      "cwe": "CWE-190",
+      "tier": "T3",
+      "file": "ub-overflow.c",
+      "dynamic": {
+        "expect": "event",
+        "kind": "ub",
+        "sanitizer": "undefined",
+        "line": 3
+      }
+    },
+    {
+      "id": "dyn/cwe401/leak",
+      "cwe": "CWE-401",
+      "tier": "n/a",
+      "file": "leak.c",
+      "dynamic": {
+        "expect": "event",
+        "kind": "leak",
+        "sanitizer": "leak",
+        "line": 3
+      },
+      "note": "leaks are collected; CWE-401 is not a witness tier target"
+    },
+    {
+      "id": "dyn/clean/array",
+      "cwe": "none",
+      "tier": "n/a",
+      "file": "clean.c",
+      "dynamic": {
+        "expect": "clean"
+      }
+    }
+  ]
+}

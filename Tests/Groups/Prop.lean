@@ -90,10 +90,10 @@ compile until it is added here (and to `ctorName`). -/
   | .dhrec q H j D => return .dhrec (← f 0 q) (← f 0 H) (← f 0 j) (← f 0 D)
   | .delim v P a b c h D =>
     return .delim (← fl v) (← f 0 P) (← f 0 a) (← f 0 b) (← f 0 c) (← f 0 h) (← f 0 D)
-  | .mu l I D i s h => return .mu (← fl l) (← f 0 I) (← f 0 D) (← f 0 i) (← f 0 s) (← h.mapM hint)
+  | .mu l I D i s h p => return .mu (← fl l) (← f 0 I) (← f 0 D) (← f 0 i) (← f 0 s) (← h.mapM hint) p
   | .con x => return .con (← f 0 x)
-  | .ind l I D v P mt i x =>
-    return .ind (← fl l) (← f 0 I) (← f 0 D) (← fl v) (← f 0 P) (← f 0 mt) (← f 0 i) (← f 0 x)
+  | .ind l I D v P mt i x p =>
+    return .ind (← fl l) (← f 0 I) (← f 0 D) (← fl v) (← f 0 P) (← f 0 mt) (← f 0 i) (← f 0 x) p
   | .nu l I D i s h => return .nu (← fl l) (← f 0 I) (← f 0 D) (← f 0 i) (← f 0 s) (← h.mapM hint)
   | .out x => return .out (← f 0 x)
   | .size => pure .size
@@ -179,10 +179,10 @@ partial def hashTm : Tm → UInt64
   | .dhrec q H j D => h 35 (h (hashTm q) (h (hashTm H) (h (hashTm j) (hashTm D))))
   | .delim v P a b c e D =>
     h 36 (h (hash v) (h (hashTm P) (h (hashTm a) (h (hashTm b) (h (hashTm c) (h (hashTm e) (hashTm D)))))))
-  | .mu l I D i sz hh =>
+  | .mu l I D i sz hh _ =>
     h 37 (h (hash l) (h (hashTm I) (h (hashTm D) (h (hashTm i) (h (hashTm sz) (hintHash hh))))))
   | .con x => h 38 (hashTm x)
-  | .ind l I D v P m i x =>
+  | .ind l I D v P m i x _ =>
     h 39 (h (hash l) (h (hashTm I) (h (hashTm D) (h (hash v) (h (hashTm P) (h (hashTm m) (h (hashTm i) (hashTm x))))))))
   | .nu l I D i sz hh =>
     h 40 (h (hash l) (h (hashTm I) (h (hashTm D) (h (hashTm i) (h (hashTm sz) (hintHash hh))))))
@@ -290,7 +290,7 @@ partial def stripSorts (t : Tm) : Tm :=
 partial def mentionsSize (t : Tm) : Bool :=
   match t with
   | .size | .szSuc _ | .sizeLt _ | .sfix .. | .scase .. | .scofix .. | .cocon _ => true
-  | .mu _ _ _ _ s _ | .nu _ _ _ _ s _ => s != .szInf ||
+  | .mu _ _ _ _ s _ _ | .nu _ _ _ _ s _ => s != .szInf ||
     ((mapKidsM (m := StateM Bool) pure (fun _ c => do
       if mentionsSize c then set true
       pure c) t).run false).2
@@ -558,13 +558,13 @@ partial def toM : Tm → Option MTm
   | .dhrec (.qlit .many) H j E => return .dhrec (← toM H) (← toM j) (← toM E)
   | .delim v P a b c h D =>
     return .delim (← v.toNat?) (← toM P) (← toM a) (← toM b) (← toM c) (← toM h) (← toM D)
-  | .mu l I D i .szInf _ => return .mu (← l.toNat?) (← toM I) (← toM D) (← toM i)
-  | .mu l I D i s _ => return .mus (← l.toNat?) (← toM I) (← toM D) (← toM i) (← toM s)
+  | .mu l I D i .szInf _ false => return .mu (← l.toNat?) (← toM I) (← toM D) (← toM i)
+  | .mu l I D i s _ false => return .mus (← l.toNat?) (← toM I) (← toM D) (← toM i) (← toM s)
   | .nu l I D i s _ => return .nu (← l.toNat?) (← toM I) (← toM D) (← toM i) (← toM s)
   | .out x => return .out (← toM x)
   | .cocon x => return .cocon (← toM x)
   | .con x => return .con (← toM x)
-  | .ind l I D v P m i x =>
+  | .ind l I D v P m i x false =>
     return .ind (← l.toNat?) (← toM I) (← toM D) (← v.toNat?) (← toM P) (← toM m) (← toM i) (← toM x)
   | .scofix l I D A f s i a =>
     return .scofix (← l.toNat?) (← toM I) (← toM D) (← toM A) (← toM f) (← toM s) (← toM i) (← toM a)
@@ -959,7 +959,7 @@ partial def genTy (cx : Cx) (l : Level) (fuel : Nat) : Gen Tm := do
         let sizes : Array Tm := if !w.sizes then #[.szInf] else #[.szInf, .szSuc .szInf] ++
           cx.varsOfTy .size ++ (cx.varsOfTy .size).map .szSuc
         let s := sizes.getD (← choose sizes.size) .szInf
-        return if isMu then .mu l' I D i s none else .nu l' I D i s none
+        return if isMu then .mu l' I D i s none false else .nu l' I D i s none
       alts := alts ++ #[data true, data false]
     -- lifting (also a proposition, to `Prop`)
     if levelIs l 0 then alts := alts.push (do return .ulift 0 0 (← genTy cx 0 f))
@@ -1101,13 +1101,13 @@ partial def genTm (cx : Cx) (T : Tm) (fuel : Nat) : Gen Tm := do
     | .desc l I => #[genDesc cx l I fuel]
     | .eq A a _ => #[pure (.refl A a)]
     | .eqTy A _ => #[pure (.reflTy A)]
-    | .mu l I D i s _ =>
+    | .mu l I D i s _ pr =>
       if fuel == 0 && !leaves.isEmpty then #[] else
       match sizePred? (cx.k.eval s) with
       | some s' =>
         let vI := cx.k.eval I
         let vD := cx.k.eval D
-        let P := quote g cx.k.lvl (vInterp g l vI vD (muFamilyAt l vI vD s') (cx.k.eval i))
+        let P := quote g cx.k.lvl (vInterp g l vI vD (muFamilyAt l vI vD s' pr) (cx.k.eval i) pr)
         #[do return .con (← genTm cx P f)]
       | none => #[]
     | .nu l I D i s _ =>
@@ -1207,7 +1207,7 @@ partial def genTm (cx : Cx) (T : Tm) (fuel : Nat) : Gen Tm := do
           return .transp A a (.lam "b" (.lam "e" (liftT 2 T))) p b e)
       -- eliminators with a constant motive; the kernel gives the methods' types
       for dt in w.dataTys do
-        if let .mu ld I D i _ _ := cx.whq dt then
+        if let .mu ld I D i _ _ pr := cx.whq dt then
           let vI := cx.k.eval I
           let vD := cx.k.eval D
           let P : Tm := .lam "i" (.lam "x" (liftT 2 T))
@@ -1215,7 +1215,7 @@ partial def genTm (cx : Cx) (T : Tm) (fuel : Nat) : Gen Tm := do
           alts := alts.push
             (do let m ← genTm cx (quote g cx.k.lvl (indMethodTy g ld l vI vD vP .many)) f
                 let x ← genTm cx dt f
-                return .ind ld I D l P m i x)
+                return .ind ld I D l P m i x pr)
           if w.sizes then alts := alts ++ #[
             (do let m ← genTm cx (quote g cx.k.lvl (scaseMethodTy g ld l vI vD vP .szInf (.qlit .many))) f
                 let x ← genTm cx dt f
@@ -1477,7 +1477,7 @@ partial def countTm (g : Gl) (t : Tm) (applied : Nat := 0) : StateM (Array Strin
     | .var _ => add "feature cast along a hypothesis"
     | _ => add "feature cast along a built proof (suspended)"
   | .transp .. => add "feature transp (suspended proofs)"
-  | .mu _ _ _ _ s _ | .nu _ _ _ _ s _ => add (if s == .szInf then "feature data at size ∞" else "feature data at a size")
+  | .mu _ _ _ _ s _ _ | .nu _ _ _ _ s _ => add (if s == .szInf then "feature data at size ∞" else "feature data at a size")
   | _ => pure ()
   let _ ← mapKidsM (m := StateM (Array String))
     (fun l => do

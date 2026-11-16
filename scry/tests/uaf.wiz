@@ -1,0 +1,98 @@
+-- test: run
+import Sys
+import Json
+import Scry.TaintCmd
+import Scry.Rules
+-- CWE-416 lifetime rule over the fixtures in `fixtures/uaf-*.c`.
+--
+--   scry taint FILE.c --rules ../lib/Scry/rules/uaf.scry
+--
+-- Nine vulnerable fixtures (basic, conditional free, alias, double free, loop,
+-- interprocedural free, strdup, and the CVE-2020-1752 / CVE-2019-7317 shapes) must each yield
+-- one `use-after-free` finding whose path is alloc -> free -> use. Six safe fixtures
+-- (cleared double free, null after free, realloc reassignment, a freeing branch that
+-- returns, escape-then-free-elsewhere, union type punning) must yield none.
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+def opts (args : List String) : EIO Scry.TaintOpts :=
+  match Scry.taintArgs args with
+  | .ok o => EIO.pure o
+  | .error e => EIO.fail e
+
+def pathHasKind (path : List Scry.PathNode) (k : String) : Bool :=
+  List.any (fun p => String.eq (Scry.PathKind.show p.kind) k) path
+
+def nthPath : List Scry.PathNode → Nat → Option Scry.PathNode
+  | .nil, _ => .none
+  | .cons p _, .zero => .some p
+  | .cons _ ps, .succ k => nthPath ps k
+
+def firstFinding (rep : Scry.TaintReport) : Option Scry.RuleFinding :=
+  match rep.findings with
+  | .cons f _ => .some f
+  | .nil => .none
+
+/-- The memory diagnostics the lifetime rule itself leaves: every `scry/memory/*` rule
+except the explicit unmodelled-external report (a call the model table does not know,
+such as the `strdup` in the strdup fixture, is *supposed* to warn). -/
+def ruleWarnings (rep : Scry.TaintReport) : List Scry.BoundaryFinding :=
+  List.filter (fun b => Bool.not (String.eq b.rule "scry/memory/unmodelled-external"))
+    rep.memory
+
+def checkRule (label : String) (rep : Scry.TaintReport) : EIO Unit := do
+  check (label ++ ": one memory rule in the pack")
+    (Nat.beq (List.length (Scry.RulePack.memoryRules rep.pack)) 1);
+  check (label ++ ": no leftover memory warning")
+    (Nat.beq (List.length (ruleWarnings rep)) 0)
+
+/-- A vulnerable fixture: one finding, `memory` kind, an alloc -> free -> sink path, and
+the free is in `freeFunc` (the callee for an interprocedural/callback free). -/
+def checkUaf (label file freeFunc : String) (arg : Nat) : EIO Unit := do
+  o ← opts [file, "--rules", "../lib/Scry/rules/uaf.scry"];
+  rep ← Scry.analyzeFile o;
+  check (label ++ ": one finding") (Nat.beq (List.length rep.findings) 1);
+  checkRule label rep;
+  match firstFinding rep with
+  | .none => check (label ++ ": finding exists") .false
+  | .some f => do
+    check (label ++ ": rule") (String.eq f.rule "use-after-free");
+    check (label ++ ": kind") (String.eq (Scry.FindingKind.show f.kind) "memory");
+    check (label ++ ": severity") (String.eq (Scry.Severity.show f.severity) "error");
+    check (label ++ ": path has alloc") (pathHasKind f.path "alloc");
+    check (label ++ ": path has free") (pathHasKind f.path "free");
+    check (label ++ ": path ends at sink") (pathHasKind f.path "sink");
+    check (label ++ ": free is in " ++ freeFunc)
+      (match nthPath f.path 1 with
+        | .some p => String.eq p.func freeFunc
+        | .none => .false);
+    check (label ++ ": argument " ++ Nat.repr arg) (Nat.beq f.arg arg)
+
+def checkSafe (label file : String) : EIO Unit := do
+  o ← opts [file, "--rules", "../lib/Scry/rules/uaf.scry"];
+  rep ← Scry.analyzeFile o;
+  check (label ++ ": zero findings") (Nat.beq (List.length rep.findings) 0);
+  checkRule label rep
+
+def main : IO Unit := EIO.toIO (do
+  checkUaf "basic" "tests/fixtures/uaf-basic.c" "main" 0;
+  checkUaf "conditional" "tests/fixtures/uaf-conditional.c" "main" 0;
+  checkUaf "alias" "tests/fixtures/uaf-alias.c" "main" 0;
+  checkUaf "double-free" "tests/fixtures/uaf-double-free.c" "main" 0;
+  checkUaf "loop" "tests/fixtures/uaf-loop.c" "main" 0;
+  checkUaf "interproc" "tests/fixtures/uaf-interproc.c" "release" 0;
+  checkUaf "strdup" "tests/fixtures/uaf-strdup.c" "main" 0;
+  checkUaf "cve-2020-1752" "tests/fixtures/uaf-cve-2020-1752.c" "main" 1;
+  checkUaf "cve-2019-7317" "tests/fixtures/uaf-cve-2019-7317.c"
+    "png_image_free_function" 0;
+
+  checkSafe "safe-double-free" "tests/fixtures/uaf-safe-double-free.c";
+  checkSafe "safe-null" "tests/fixtures/uaf-safe-null.c";
+  checkSafe "safe-realloc" "tests/fixtures/uaf-safe-realloc.c";
+  checkSafe "safe-branch" "tests/fixtures/uaf-safe-branch.c";
+  checkSafe "safe-escape" "tests/fixtures/uaf-safe-escape.c";
+  checkSafe "safe-union" "tests/fixtures/uaf-safe-union.c")
