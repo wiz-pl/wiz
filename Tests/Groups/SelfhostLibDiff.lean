@@ -237,11 +237,21 @@ def libDiffRun (cmd : String) (args : Array String) (secs memMB : Nat) :
     { cmd := "sh", args := #["-c", script, cmd] ++ args, stdin := .null }
   pure (out.exitCode, out.stdout, out.stderr)
 
-/-- `status` from a bounded run's exit code. -/
+/-- `status` from a bounded run's exit code. 3 is the self-hosted runtime giving up
+(`die`/`unreach` in selfhost/rt.c, `wiz_panic` in runtime/rt_core.inc): "out of memory"
+when a `malloc` fails under the `ulimit -v` bound, or "applying a non-function". It
+prints `wiz: REASON` and no diagnostics, so read as an exit status it looked like an
+accepted file with no declarations (lib/BitVecAdd.wiz: "self ok (0 decls)"). -/
 def libDiffStatus (code : UInt32) : String :=
   if code == 124 then "timeout"
-  else if code == 137 || code == 139 then "crash"
+  else if code == 137 || code == 139 || code == 3 then "crash"
   else "ok"
+
+/-- The runtime's `wiz: REASON` line on stderr, if it gave up (exit 3). -/
+def libDiffRuntimeNote (err : String) : String :=
+  match (err.splitOn "\n").reverse.find? (·.startsWith "wiz: ") with
+  | some l => (l.take 200).toString
+  | none => ""
 
 /-- Run the self-hosted compiler's `check FILE --types` and read its diagnostics. -/
 def libDiffSelf (exe : System.FilePath) (file : String) (secs memMB : Nat) : IO Side := do
@@ -261,7 +271,8 @@ def libDiffSelf (exe : System.FilePath) (file : String) (secs memMB : Nat) : IO 
          line := first.map (·.line) |>.getD 0,
          col := first.map (·.col) |>.getD 0,
          msg := first.map (·.msg) |>.getD "",
-         status := libDiffStatus code }
+         status := libDiffStatus code,
+         note := if libDiffStatus code == "crash" then libDiffRuntimeNote err else "" }
 
 /-! ## Comparing the two -/
 
@@ -358,7 +369,8 @@ def libDiffCompare (file : String) (h s : Side) : LibRec :=
   let note :=
     if bounded then
       (if h.status != "ok" then s!"host {h.status}" else "") ++
-      (if s.status != "ok" then (if h.status != "ok" then "; " else "") ++ s!"self {s.status}" else "")
+      (if s.status != "ok" then (if h.status != "ok" then "; " else "") ++ s!"self {s.status}" ++
+        (if s.note.isEmpty then "" else s!" ({s.note})") else "")
     else if !s.accepted && s.efile != "" && s.efile != file then s!"in {s.efile}"
     else ""
   { file, host := h, self := s, verdict, divergence, klass, note }
@@ -654,7 +666,18 @@ def libDiffGroup : Group where
         | some recs =>
           let sum := libDiffSummarize recs
           libDiffWriteReport recs sum
-          note s!"libdiff files={recs.size} ok={sum.ok} rejected={sum.rejected} diverging={sum.diverging} bounded={sum.bounded}" }
+          note s!"libdiff files={recs.size} ok={sum.ok} rejected={sum.rejected} diverging={sum.diverging} bounded={sum.bounded}" },
+    { name := "a self-hosted run that exits 3 (the runtime gave up) is bounded, with its reason; not accepted", run := fun _ => do
+        checkEq "crash" (libDiffStatus 3)
+        checkEq "ok" (libDiffStatus 1)
+        checkEq "wiz: out of memory" (libDiffRuntimeNote "partial\nwiz: out of memory\n")
+        let h : Side := { accepted := true, decls := 30 }
+        let s : Side := { accepted := true, exitCode := 3, status := libDiffStatus 3,
+                          note := libDiffRuntimeNote "wiz: out of memory\n" }
+        let r := libDiffCompare "lib/BitVecAdd.wiz" h s
+        checkEq "bounded" r.verdict
+        checkEq "run" r.divergence
+        checkEq "self crash (wiz: out of memory)" r.note }
   ]
 
 builtin_initialize registerGroup libDiffGroup
