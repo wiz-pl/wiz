@@ -383,6 +383,48 @@ def hdlGroup : Group where
             let r ← IO.Process.output { cmd := "vvp", args := #["-n", (dir / "t.vvp").toString], cwd := dir }
             unless (r.stdout.splitOn pass).length > 1 do
               throw (IO.userError s!"test bench {m}: {r.stdout}{r.stderr}") },
+    { name := "H14 V2: seeded stimulus, reset/drive helpers, an independent oracle and node/op/state coverage (examples/hdl-stimulus.wiz)", run := fun _ => do
+        -- `Rng.trace` is reproducible; the directed trace resets then counts, the random
+        -- trace adds random go/en; the oracle passes both; the instrumented run equals
+        -- `Netlist.simulate`; coverage reports nodes/ops/states and both traces reach
+        -- every reachable counter state (10/16; the denominator is the 4-bit encoding)
+        okLibs (← IO.FS.readFile "examples/hdl-stimulus.wiz")
+          [".cons 0 (.cons 3 (.cons 3 (.cons 1 (.cons 0 .nil))))",
+           "\"PASS counter-mod-10: 24 cycles, 0 mismatches\"",
+           "\"PASS counter-mod-10: 18 cycles, 0 mismatches\"",
+           "\"coverage: nodes 8/8, ops 5/5, states 10/16\"",
+           "\"PASS counter-mod-10: 64 cycles, 0 mismatches\"",
+           "\"coverage: nodes 8/8, ops 5/5, states 10/16\"",
+           ".true", ".true"] },
+    { name := "H14 V2 mutation test: one injected bug (wrap at 9) is killed by the oracle and loses a state (Tests/Fixtures/hdl-stimulus-mutant.wiz)", run := fun _ => do
+        -- the mutant is outside lib/: the specification and oracle are unchanged, the
+        -- first mismatch is at cycle 11 (2 reset + 9 count cycles) and state coverage
+        -- drops from 10/16 to 9/16; node and op coverage alone do not catch it
+        okLibs (← IO.FS.readFile "Tests/Fixtures/hdl-stimulus-mutant.wiz")
+          ["\"FAIL mutant-counter-mod-10: 18 cycles, 7 mismatches, first at cycle 11\"",
+           "\"coverage: nodes 8/8, ops 5/5, states 9/16\"",
+           ".true"] },
+    { name := "H14 V2: Icarus Verilog replays the stimulus's vectors on the emitted module (skipped without iverilog)", run := fun _ => do
+        let found ← (do let o ← IO.Process.output { cmd := "iverilog", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
+        unless found do skip "no iverilog"; return
+        let src ← IO.FS.readFile "examples/hdl-stimulus.wiz"
+        let s := runFrontend (R := ZeroOneMany)
+          (src ++ "\n#eval Verilog.emit net\n#eval Hdl.concat (Testbench.lines net directed runD.outs)\n#eval Testbench.verilog net \"stim.vec\" 18\n")
+          { trustedModule := Tests.libModule, loader := ← libLoader }
+        let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
+        unless errs.isEmpty do throw (IO.userError s!"unexpected errors: {errs}")
+        let texts := (s.messages.toList.map (·.text)).drop 8
+        if texts.length < 3 then throw (IO.userError s!"expected 3 texts, got {texts.length}")
+        let unq (t : String) : String := ((t.drop 1).dropRight 1).replace "\\n" "\n" |>.replace "\\\"" "\""
+        IO.FS.withTempDir fun dir => do
+          IO.FS.writeFile (dir / "counter.v") (unq texts[0]!)
+          IO.FS.writeFile (dir / "stim.vec") (unq texts[1]!)
+          IO.FS.writeFile (dir / "tb.v") (unq texts[2]!)
+          let o ← IO.Process.output { cmd := "iverilog", args := #["-g2005", "-o", (dir / "tb.vvp").toString, (dir / "tb.v").toString, (dir / "counter.v").toString], cwd := dir }
+          unless o.exitCode == 0 do throw (IO.userError s!"iverilog rejects the stimulus bench:\n{o.stderr}")
+          let r ← IO.Process.output { cmd := "vvp", args := #["-n", (dir / "tb.vvp").toString], cwd := dir }
+          unless (r.stdout.splitOn "PASS counter: 18 cycles").length > 1 do
+            throw (IO.userError s!"stimulus bench: {r.stdout}{r.stderr}") },
     { name := "fast netlist simulation (Hdl.Sim, compiled): = Netlist.simulate = Circuit.run, cycle for cycle; not well formed falls back", run := fun _ => do
         -- examples/hdl-sim.wiz: every netlist operation (shifts by a signal too), 70-bit widths, reset and enable, a
         -- table tree, composition, memories (two write ports, read-during-write, a ROM,

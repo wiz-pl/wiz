@@ -1,0 +1,494 @@
+import Hdl.Core
+/-!
+# Hdl.Stimulus: random and directed stimulus, coverage and an oracle hook
+
+Validation infrastructure for the HDL library (`import Hdl.Stimulus`), not hardware:
+
+* **A seeded PRNG.** `Rng.seed`, `Rng.next`, `Rng.bits`, `Rng.below`, `Rng.trace` and
+  `Rng.trace256`. The generator is the LCG the HDL examples already used
+  (`s * 1103515245 + 12345 mod 2^31`), so a trace is reproducible from its seed and the
+  same seed gives the same trace everywhere. It is *not* a statistical generator: the
+  low bits are weak, so `Rng.bits` keeps the higher ones (a divide before the modulo), and
+  nothing here claims cryptographic or high-quality randomness. A test that needs a
+  distribution should say which one; this is coverage stimulus, not a fuzzer.
+* **Input generators.** `Stimulus.randomVecs` (one value per input port per cycle),
+  `Stimulus.corners` (all-zero, all-ones, one, mid), `Stimulus.repeat`, and
+  `Stimulus.randomInputs` for a typed `Circuit` input (leaves generated, `HwTy.ofLeaves`
+  packs them).
+* **Reset and drive helpers.** `Stimulus.setAt`, `Stimulus.setNamed` and
+  `Stimulus.drivePort` override one input port in every cycle; `Stimulus.resetFor` holds
+  `rst` high and `en` low for the first `k` cycles and releases them after; `driveRE`
+  and `resetInputs` do the same for a typed input of `Circuit.withResetEnable`.
+* **An independent oracle hook.** `Oracle` is a Mealy model over leaf values (model
+  state, input leaves ↦ output leaves, next model state), written separately from the
+  circuit. `checkNetlist` compares `Netlist.simulate` with it, `checkCircuit` compares
+  `Circuit.runLeaves`, and `Check.report` prints `PASS`/`FAIL`, the cycle count, the
+  mismatch count and the first failing cycle. The model may be a hand-written
+  specification, a different implementation, or a reference run; the point is that it is
+  not extracted from the netlist under test.
+* **Coverage.** `Netlist.simCov` runs the same cycle semantics as `Netlist.simulate`
+  while counting, over the netlist's nodes:
+  * `nodes`: nodes whose value changed at least once, over the nodes that can change
+    (inputs, registers, memory reads, instances and anything downstream of them; constant
+    and clock nodes are excluded from both sides);
+  * `ops`: distinct `NetOp` kinds among the nodes that changed, over the distinct kinds
+    present among the nodes that can change;
+  * `states`: distinct values observed in the registers, over the encoding bound
+    `Σ 2^width` (that is a bound on the *encoding*, not a reachability claim: an
+    unreachable value counts as uncovered, and a reachable one that the stimulus did not
+    reach counts as a miss).
+  `Cov.report` prints the line `coverage: nodes x/y, ops a/b, states s/t`.
+  `Run.outs` is checked against `Netlist.simulate` by the `hdl` test group, so the
+  instrumented run is the same run.
+
+The coverage is *functional* coverage of a netlist under one stimulus, not code coverage
+of the Wiz source, not transition coverage of an FSM, and not a proof. It catches a
+design that never reaches a state or never toggles a node; it cannot see a bug in a node
+that toggles correctly, and a 100 % report is not a correctness claim. The mutation test
+(`Tests/Fixtures/hdl-stimulus-mutant.wiz` and the `hdl` group) is the evidence that the
+counters are not vacuous: one injected bug (a counter wrapping at 9 instead of 10) is
+caught by the oracle and by the state counter (10/16 becomes 9/16).
+-/
+
+------------------------------------------------------------------------------------
+-- A seeded generator
+
+/-- A generator state: one number (the LCG state). -/
+structure Rng where
+  state : Nat
+
+/-- The next LCG state (`s * 1103515245 + 12345 mod 2^31`). -/
+def Rng.advance (s : Nat) : Nat := Nat.mod (s * 1103515245 + 12345) 2147483648
+/-- A generator from a seed (cut to the LCG's modulus first). -/
+def Rng.seed (s : Nat) : Rng := Rng.mk (Nat.mod s 2147483648)
+/-- The next state, and its value. -/
+def Rng.next (r : Rng) : Nat × Rng :=
+  let s := Rng.advance r.state;
+  (s, Rng.mk s)
+/-- A value below `2^w` (the high bits of the LCG state, so the weak low bits are not
+used for the value). -/
+def Rng.bits (r : Rng) (w : Nat) : Nat × Rng :=
+  let p := Rng.next r;
+  (Nat.mod (Nat.div p.1 256) (Nat.pow 2 w), p.2)
+/-- A value below `m` (0 when `m` is 0). -/
+def Rng.below (r : Rng) (m : Nat) : Nat × Rng :=
+  let p := Rng.next r;
+  (match Nat.beq m 0 with
+    | .true => 0
+    | .false => Nat.mod (Nat.div p.1 256) m, p.2)
+/-- `m`-ary trace from state `s`, one value per cycle. -/
+def Rng.traceAux (m : Nat) : Nat → Nat → List Nat
+  | .zero, _ => .nil
+  | .succ k, s => List.cons (Nat.mod (Nat.div s 65536) m) (Rng.traceAux m k (Rng.advance s))
+/-- A trace of `k` values below `m` from a seed: `Rng.trace m k s` (the form the HDL
+examples use; value `i` comes from state `i`, so the first value is the seed's). -/
+def Rng.trace (m : Nat) : Nat → Nat → List Nat := Rng.traceAux m
+/-- The same trace, taking bits 8 and above (the form `examples/hdl-sim.wiz` uses). -/
+def Rng.trace256Aux (m : Nat) : Nat → Nat → List Nat
+  | .zero, _ => .nil
+  | .succ k, s => List.cons (Nat.mod (Nat.div s 256) m) (Rng.trace256Aux m k (Rng.advance s))
+/-- A trace of `k` values below `m`, taking bits 8 and above. -/
+def Rng.trace256 (m : Nat) : Nat → Nat → List Nat := Rng.trace256Aux m
+
+------------------------------------------------------------------------------------
+-- Input generators (one value per input port)
+
+/-- Repeat a vector `k` times. -/
+def Stimulus.repeat : Nat → List Nat → List (List Nat)
+  | .zero, _ => .nil
+  | .succ j, v => List.cons v (Stimulus.repeat j v)
+
+/-- One random value per port, and the next generator. -/
+def Stimulus.oneVec : List NetPort → Rng → List Nat × Rng
+  | .nil, r => (.nil, r)
+  | .cons p ps, r =>
+      let x := Rng.bits r p.width;
+      let y := Stimulus.oneVec ps x.2;
+      (List.cons x.1 y.1, y.2)
+
+/-- `k` random input vectors for the ports (value `i` of port `p` below `2^width p`). -/
+def Stimulus.randomVecs : Nat → List NetPort → Rng → List (List Nat) × Rng
+  | .zero, _, r => (.nil, r)
+  | .succ k, ports, r =>
+      let v := Stimulus.oneVec ports r;
+      let w := Stimulus.randomVecs k ports v.2;
+      (List.cons v.1 w.1, w.2)
+
+/-- Every port at the value `v` (cut to the port's width by the generator; a directed
+vector is not cut, so a caller can drive an out-of-range value on purpose). -/
+def Stimulus.everyPort (ports : List NetPort) (v : Nat) : List Nat :=
+  Hdl.map (fun (p : NetPort) => Nat.mod v (Nat.pow 2 p.width)) ports
+
+/-- Four directed vectors: all zero, all ones (at each port's width), one, mid. -/
+def Stimulus.corners (ports : List NetPort) : List (List Nat) :=
+  List.cons (Stimulus.everyPort ports 0)
+    (List.cons (Stimulus.everyPort ports (Nat.sub (Nat.pow 2 64) 1))
+    (List.cons (Stimulus.everyPort ports 1)
+    (List.cons (Stimulus.everyPort ports (Nat.pow 2 63)) .nil)))
+
+/-- `f` over a list with its indices, from `k`. -/
+def Stimulus.indexed {A B : Type} (f : Nat → A → B) : Nat → List A → List B
+  | _, .nil => .nil
+  | k, .cons x xs => List.cons (f k x) (Stimulus.indexed f (Nat.succ k) xs)
+
+/-- Replace element `k` of a vector. -/
+def Stimulus.setAt : List Nat → Nat → Nat → List Nat
+  | .nil, _, _ => .nil
+  | .cons x xs, .zero, v => List.cons v xs
+  | .cons x xs, .succ j, v => List.cons x (Stimulus.setAt xs j v)
+
+/-- The index of the port with this name, if any. -/
+def Stimulus.index (name : String) : List NetPort → Nat → Option Nat
+  | .nil, _ => .none
+  | .cons p ps, k =>
+      match Hdl.strEq p.name name with
+      | .true => .some k
+      | .false => Stimulus.index name ps (Nat.succ k)
+
+/-- Set the input port called `name` in one vector (an unknown name is left alone). -/
+def Stimulus.setNamed (n : Netlist) (name : String) (v : Nat) (x : List Nat) : List Nat :=
+  match Stimulus.index name n.inputs 0 with
+  | .none => x
+  | .some k => Stimulus.setAt x k v
+
+/-- Drive the input port called `name` to `v` in every cycle. -/
+def Stimulus.drivePort (n : Netlist) (name : String) (v : Nat) (xs : List (List Nat)) : List (List Nat) :=
+  Hdl.map (fun (x : List Nat) => Stimulus.setNamed n name v x) xs
+
+/-- Drive `rst` high and `en` low for the first `k` cycles, then `rst` low and `en` high.
+(Other ports keep the values the trace gave them; a netlist without `rst` or `en` is
+left alone on that port.) -/
+def Stimulus.resetFor (n : Netlist) (k : Nat) (xs : List (List Nat)) : List (List Nat) :=
+  let f := fun (i : Nat) (x : List Nat) =>
+    let rst := match Nat.lt i k with
+      | .true => 1
+      | .false => 0;
+    let en := match Nat.lt i k with
+      | .true => 0
+      | .false => 1;
+    Stimulus.setNamed n "en" en (Stimulus.setNamed n "rst" rst x);
+  Stimulus.indexed f 0 xs
+
+/-- One typed input for `Circuit.withResetEnable`: `(rst, (en, x))`. -/
+def Stimulus.driveRE {ω i : HwTy} (rst en : Bool) (x : HwTy.El i) :
+    HwTy.El (HwTy.prod (HwTy.named "rst" HwTy.bit) (HwTy.prod (HwTy.named "en" HwTy.bit) i)) :=
+  (Bool.toBits rst, (Bool.toBits en, x))
+
+/-- Random leaf values, one per width. -/
+def Stimulus.leafValues : List Nat → Rng → List Nat × Rng
+  | .nil, r => (.nil, r)
+  | .cons w ws, r =>
+      let p := Rng.bits r w;
+      let q := Stimulus.leafValues ws p.2;
+      (List.cons p.1 q.1, q.2)
+
+/-- `k` random inputs for a typed circuit input: the leaves are generated at their
+widths and packed with `HwTy.ofLeaves`. -/
+def Stimulus.randomInputsAux {ω i : HwTy} : Nat → Rng → List (HwTy.El i) × Rng
+  | .zero, r => (.nil, r)
+  | .succ k, r =>
+      let p := Stimulus.leafValues (HwTy.leafWidths i) r;
+      let q := Stimulus.randomInputsAux k p.2;
+      (List.cons (HwTy.ofLeaves i p.1) q.1, q.2)
+
+/-- `k` random inputs for a typed circuit input. -/
+def Stimulus.randomInputs {ω i : HwTy} (r : Rng) (k : Nat) : List (HwTy.El i) × Rng :=
+  Stimulus.randomInputsAux k r
+
+/-- Random payloads with `rst` high (and `en` low) for the first `k` cycles, then `en`
+high: stimulus for a circuit made with `Circuit.withResetEnable`. -/
+def Stimulus.resetInputs {ω i : HwTy} (r : Rng) (cycles k : Nat) :
+    List (HwTy.El (HwTy.prod (HwTy.named "rst" HwTy.bit) (HwTy.prod (HwTy.named "en" HwTy.bit) i))) × Rng :=
+  let p : List (HwTy.El i) × Rng := Stimulus.randomInputs r cycles;
+  (Stimulus.indexed (fun (j : Nat) (x : HwTy.El i) =>
+      Stimulus.driveRE (Nat.lt j k) (Bool.not (Nat.lt j k)) x) 0 p.1, p.2)
+
+------------------------------------------------------------------------------------
+-- Coverage over netlist nodes, operations and register state
+
+/-- Whether any boolean is true. -/
+def Hdl.anyTrue : List Bool → Bool
+  | .nil => .false
+  | .cons x xs =>
+      match x with
+      | .true => .true
+      | .false => Hdl.anyTrue xs
+
+/-- `Hdl.nthD` at `Bool`, for the places where the expected type would otherwise be
+ambiguous. -/
+def Stimulus.nthBool (d : Bool) (xs : List Bool) (k : Nat) : Bool := Hdl.nthD d xs k
+/-- `Hdl.nthD` at `List Nat`. -/
+def Stimulus.nthVec (d : List Nat) (xs : List (List Nat)) (k : Nat) : List Nat := Hdl.nthD d xs k
+
+/-- The number of true booleans. -/
+def Hdl.countTrue : List Bool → Nat
+  | .nil => 0
+  | .cons x xs =>
+      match x with
+      | .true => Nat.succ (Hdl.countTrue xs)
+      | .false => Hdl.countTrue xs
+
+/-- Whether a list of numbers contains `k`. -/
+def Hdl.hasNat (k : Nat) : List Nat → Bool
+  | .nil => .false
+  | .cons x xs =>
+      match Nat.beq k x with
+      | .true => .true
+      | .false => Hdl.hasNat k xs
+
+/-- `k` inserted if it is not there (the coverage counters' sets). -/
+def Hdl.insertNat (k : Nat) (ks : List Nat) : List Nat :=
+  match Hdl.hasNat k ks with
+  | .true => ks
+  | .false => List.cons k ks
+
+/-- The kind of a netlist operation, for the `ops` counter: constants of different values
+are one kind here (the operation is `const`). -/
+def NetOp.kind : NetOp → Nat
+  | .input _ => 0
+  | .const _ => 1
+  | .reg _ => 2
+  | .add => 3
+  | .sub => 4
+  | .mul => 5
+  | .and => 6
+  | .or => 7
+  | .xor => 8
+  | .not => 9
+  | .eq => 10
+  | .ult => 11
+  | .mux => 12
+  | .concat => 13
+  | .slice _ => 14
+  | .resetTo _ => 15
+  | .hold => 16
+  | .memRead _ => 17
+  | .shl => 18
+  | .lshr => 19
+  | .ashr => 20
+  | .slt => 21
+  | .inst _ => 22
+  | .instOut _ _ => 23
+  | .clock _ => 24
+
+/-- Whether a node's value can change: an input, a register, a memory read, an instance
+or its output always can; a constant or a clock never can; anything else can if one of
+its arguments can. -/
+def NetNode.movable (prior : List Bool) (nd : NetNode) : Bool :=
+  match nd.op with
+  | .input _ => .true
+  | .reg _ => .true
+  | .memRead _ => .true
+  | .inst _ => .true
+  | .instOut _ _ => .true
+  | .const _ => .false
+  | .clock _ => .false
+  | _ => Hdl.anyTrue (Hdl.map (fun (k : Nat) => Stimulus.nthBool .false prior k) nd.args)
+
+/-- The nodes that can change, in node order. -/
+def Netlist.movableAux : List NetNode → List Bool → List Bool
+  | .nil, acc => acc
+  | .cons nd nds, acc =>
+      Netlist.movableAux nds (List.append acc (List.cons (NetNode.movable acc nd) .nil))
+
+/-- The netlist's nodes that can change (constants and clocks are not counted). -/
+def Netlist.movable (n : Netlist) : List Bool := Netlist.movableAux n.nodes .nil
+
+/-- The distinct operation kinds of the nodes that can change. -/
+def Netlist.opKindsOfAux (hit : List Bool) : List (Nat × NetNode) → List Nat → List Nat
+  | .nil, acc => acc
+  | .cons p ps, acc =>
+      let acc2 := match Stimulus.nthBool .false hit p.1 with
+        | .true => Hdl.insertNat (NetOp.kind p.2.op) acc
+        | .false => acc;
+      Netlist.opKindsOfAux hit ps acc2
+
+/-- The distinct operation kinds among the nodes marked in `hit`. -/
+def Netlist.opKindsOf (hit : List Bool) (n : Netlist) : List Nat :=
+  Netlist.opKindsOfAux hit (Hdl.indexed 0 n.nodes) .nil
+
+/-- The distinct operation kinds present among the nodes that can change (the `ops`
+denominator). -/
+def Netlist.opKinds (n : Netlist) : List Nat := Netlist.opKindsOf (Netlist.movable n) n
+
+/-- The state counter's denominator: the sum of the encodings' sizes (`2^width` per
+register; a bound on the encoding, not a reachability claim). -/
+def Netlist.stateBound (n : Netlist) : Nat :=
+  Hdl.sum (Hdl.map (fun (r : NetReg) => Nat.pow 2 r.width) n.regs)
+
+/-- Coverage state: which nodes have changed, the previous node values, the distinct
+value sets of the registers, and the cycle count. -/
+structure Cov where
+  hit : List Bool
+  prev : List Nat
+  states : List (List Nat)
+  cycles : Nat
+
+/-- The initial coverage: no node hit, each register at its initial value. -/
+def Cov.init (n : Netlist) : Cov :=
+  Cov.mk (Hdl.repeatD .false (List.length n.nodes)) .nil
+    (Hdl.map (fun (r : NetReg) => List.cons r.init .nil) n.regs) 0
+
+/-- Per node, whether its value changed from the previous cycle. -/
+def Cov.changed : List Nat → List Nat → List Bool
+  | .nil, _ => .nil
+  | _, .nil => .nil
+  | .cons p ps, .cons v vs => List.cons (Bool.not (Nat.beq p v)) (Cov.changed ps vs)
+
+/-- Register value sets, each with `regs`' current values added. -/
+def Cov.addStates : List (List Nat) → List Nat → List (List Nat)
+  | .nil, _ => .nil
+  | .cons seen ss, regs =>
+      match regs with
+      | .nil => List.cons seen ss
+      | .cons v vs =>
+          List.cons (match Hdl.hasNat v seen with
+            | .true => seen
+            | .false => List.cons v seen) (Cov.addStates ss vs)
+
+/-- Pointwise `(old || active) && movable`, accumulated in reverse. -/
+def Stimulus.or3 : List Bool → List Bool → List Bool → List Bool → List Bool
+  | .nil, _, _, acc => Hdl.reverse acc
+  | .cons m ms, .cons a as, .cons h hs, acc =>
+      Stimulus.or3 ms as hs (List.cons (Bool.and m (Bool.or h a)) acc)
+  | _, _, _, acc => Hdl.reverse acc
+
+/-- One cycle: the node values, the register values at the start of the cycle. On the
+first cycle a node is hit if its value is non-zero; afterwards if its value changed. -/
+def Cov.step (mov : List Bool) (regs : List Nat) (vals : List Nat) (c : Cov) : Cov :=
+  let act := match c.cycles with
+    | .zero => Hdl.map (fun (v : Nat) => Bool.not (Nat.beq v 0)) vals
+    | .succ _ => Cov.changed c.prev vals;
+  Cov.mk (Stimulus.or3 mov act c.hit .nil) vals
+    (Cov.addStates c.states regs) (Nat.succ c.cycles)
+
+/-- Add the registers' final values (the state after the last cycle). -/
+def Cov.addRegs (regs : List Nat) (c : Cov) : Cov :=
+  Cov.mk c.hit c.prev (Cov.addStates c.states regs) c.cycles
+
+/-- The number of nodes hit. -/
+def Cov.nodeHit (c : Cov) : Nat := Hdl.countTrue c.hit
+/-- The number of operations hit. -/
+def Cov.opHit (n : Netlist) (c : Cov) : Nat := List.length (Netlist.opKindsOf c.hit n)
+/-- The number of distinct register values observed. -/
+def Cov.stateHit (c : Cov) : Nat := Hdl.sum (Hdl.map (fun (s : List Nat) => List.length s) c.states)
+
+/-- The coverage line: `coverage: nodes x/y, ops a/b, states s/t`. -/
+def Cov.report (n : Netlist) (c : Cov) : String :=
+  "coverage: nodes " <+> Hdl.show (Cov.nodeHit c) <+> "/" <+> Hdl.show (Hdl.countTrue (Netlist.movable n))
+  <+> ", ops " <+> Hdl.show (Cov.opHit n c) <+> "/" <+> Hdl.show (List.length (Netlist.opKinds n))
+  <+> ", states " <+> Hdl.show (Cov.stateHit c) <+> "/" <+> Hdl.show (Netlist.stateBound n)
+
+/-- An instrumented run: the outputs and the coverage. -/
+structure Run where
+  outs : List (List Nat)
+  cov : Cov
+
+/-- Convert a simulation vector to a list in node order. -/
+def Hdl.Vec.toList {A : Type} (d : A) (v : Hdl.Vec A) : List A :=
+  Hdl.map (fun (k : Nat) => Hdl.Vec.get d v k) (Hdl.upto v.count 0)
+
+/-- `Netlist.simulate`'s loop, folding the coverage counters and keeping the outputs. -/
+def Netlist.simCovGo (n : Netlist) (prog : List SimNode) (mov : List Bool) :
+    List Nat → List (HTrie Nat) → List (List Nat) → Cov → List (List Nat) → Run
+  | regs, _, .nil, c, acc => Run.mk (Hdl.reverse acc) (Cov.addRegs regs c)
+  | regs, mems, .cons ins rest, c, acc =>
+      let vals := SimNode.evalAll ins (Hdl.Vec.ofList regs) (Hdl.Vec.ofList mems) prog Hdl.Vec.empty;
+      let c2 := Cov.step mov regs (Hdl.Vec.toList 0 vals) c;
+      let regs2 := NetReg.loadAll vals n.regs regs;
+      let mems2 := NetMem.storeAll vals n.mems mems;
+      Netlist.simCovGo n prog mov regs2 mems2 rest c2 (List.cons (Hdl.map (NetPort.read vals) n.outputs) acc)
+
+/-- The netlist's outputs together with coverage: `r.outs = Netlist.simulate n xs`. -/
+def Netlist.simCov (n : Netlist) (inputs : List (List Nat)) : Run :=
+  Netlist.simCovGo n (SimNode.ofNodes n.nodes Hdl.Vec.empty) (Netlist.movable n)
+    (Hdl.map (fun (r : NetReg) => r.init) n.regs)
+    (Hdl.map (fun (m : NetMem) => Hdl.memOf m.init) n.mems)
+    inputs (Cov.init n) .nil
+
+/-- Whether two traces are equal. -/
+def Stimulus.tracesEq : List (List Nat) → List (List Nat) → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (Stimulus.tracesEq as bs)
+  | _, _ => .false
+
+/-- Whether the instrumented run agrees with `Netlist.simulate`. -/
+def Stimulus.covAgrees (n : Netlist) (xs : List (List Nat)) (r : Run) : Bool :=
+  Stimulus.tracesEq r.outs (Netlist.simulate n xs)
+
+------------------------------------------------------------------------------------
+-- An independent oracle (a Mealy model over leaf values)
+
+/-- An independent model: a name, an initial model state, and one step from the model
+state and the input leaves to the output leaves and the next model state. -/
+structure Oracle where
+  name : String
+  init : List Nat
+  step : List Nat → List Nat → List Nat × List Nat
+
+/-- The result of an oracle check: cycles compared, mismatches, the first failing cycle. -/
+structure Check where
+  name : String
+  cycles : Nat
+  mismatches : Nat
+  firstBad : Option Nat
+
+/-- Whether the check found no mismatch. -/
+def Check.ok (c : Check) : Bool := Nat.beq c.mismatches 0
+
+/-- `PASS name: N cycles, 0 mismatches` or `FAIL name: N cycles, M mismatches, first at
+cycle K` (cycle numbers start at 0). -/
+def Check.report (c : Check) : String :=
+  (match Check.ok c with
+    | .true => "PASS "
+    | .false => "FAIL ") <+> c.name <+> ": " <+> Hdl.show c.cycles <+> " cycles, "
+  <+> Hdl.show c.mismatches <+> " mismatches"
+  <+> (match c.firstBad with
+    | .none => ""
+    | .some k => ", first at cycle " <+> Hdl.show k)
+
+/-- The oracle check's accumulator: the model state, the cycle count, the mismatch count
+and the first failing cycle. -/
+structure CheckAcc where
+  st : List Nat
+  k : Nat
+  bad : Nat
+  first : Option Nat
+
+/-- The first failing cycle: keep the old one, or `k` if there is none. -/
+def Stimulus.firstOf (k : Nat) (old : Option Nat) : Option Nat :=
+  match old with
+  | .none => .some k
+  | .some f => .some f
+
+/-- No failing cycle yet. -/
+def Stimulus.noCycle : Option Nat := .none
+
+/-- One pass over the input vectors, indexing the actual outputs by the cycle count. -/
+def Stimulus.checkFold (or : Oracle) (actual : List (List Nat)) :
+    List (List Nat) → CheckAcc → CheckAcc
+  | .nil, acc => acc
+  | .cons x xs, acc =>
+      let p := or.step acc.st x;
+      let y := Stimulus.nthVec .nil actual acc.k;
+      let same := Hdl.natsEq p.1 y;
+      let bad := match same with
+        | .true => acc.bad
+        | .false => Nat.succ acc.bad;
+      let first := match same with
+        | .true => acc.first
+        | .false => Stimulus.firstOf acc.k acc.first;
+      Stimulus.checkFold or actual xs (CheckAcc.mk p.2 (Nat.succ acc.k) bad first)
+
+/-- Compare an oracle with the inputs and the actual outputs, carrying the model state. -/
+def Stimulus.checkGo (inputs : List (List Nat)) (actual : List (List Nat)) (or : Oracle) : Check :=
+  let acc := Stimulus.checkFold or actual inputs (CheckAcc.mk or.init 0 0 Stimulus.noCycle);
+  Check.mk or.name acc.k acc.bad acc.first
+
+/-- Compare `Netlist.simulate n xs` with an independent oracle. -/
+def Stimulus.checkNetlist (or : Oracle) (n : Netlist) (xs : List (List Nat)) : Check :=
+  Stimulus.checkGo xs (Netlist.simulate n xs) or
+
+/-- Compare `Circuit.runLeaves c xs` with an independent oracle. -/
+def Stimulus.checkCircuit {ω i o : HwTy} (or : Oracle) (c : Circuit i o) (xs : List (HwTy.El i)) : Check :=
+  Stimulus.checkGo (Hdl.map (HwTy.leaves i) xs) (Circuit.runLeaves c xs) or

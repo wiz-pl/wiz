@@ -2,6 +2,7 @@
 -- netlist, emitters. Each circuit is simulated by values (`Circuit.run`) and by its
 -- netlist (`Netlist.simulate`), which must agree. Checked by the `hdl` test group.
 import Hdl.Core
+import Hdl.Stimulus
 
 def Bit : HwTy := HwTy.bits 1
 def B4 : HwTy := HwTy.bits 4
@@ -69,11 +70,6 @@ def counterRE : Circuit (HwTy.prod (HwTy.named "rst" HwTy.bit) (HwTy.prod (HwTy.
 
 ------------------------------------------------------------------------------------
 -- Traces: a linear congruential generator, so resets and enables come at arbitrary cycles.
-
-def Rng.next (s : Nat) : Nat := Nat.mod (s * 1103515245 + 12345) 2147483648
-def Rng.trace (m : Nat) : Nat → Nat → List Nat
-  | .zero, _ => .nil
-  | .succ k, s => .cons (Nat.mod (Nat.div s 65536) m) (Rng.trace m k (Rng.next s))
 
 def agree {ω i o : HwTy} (c : Circuit i o) (xs : List Nat) : Bool × List Nat :=
   let ω ys := Circuit.runPacked c xs;

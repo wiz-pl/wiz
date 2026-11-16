@@ -723,6 +723,66 @@ about 14 ms per case for eight word operations, so the kernel stops near 2¹² i
 A computing reflection (`bit_decide`) is in drafts/hdl-verified/, for when the check is
 fast (compiled, or a faster kernel evaluator).
 
+## H14 V2: stimulus, coverage and mutation testing (`lib/Hdl/Stimulus.wiz`)
+
+`lib/Hdl/Stimulus.wiz` (`import Hdl.Stimulus`) is validation infrastructure for the HDL
+fragment, not hardware. It provides:
+
+* **A seeded PRNG.** `Rng.seed`, `Rng.next`, `Rng.bits`, `Rng.below`, `Rng.trace` (the
+  LCG `s * 1103515245 + 12345 mod 2^31`, the one the HDL examples already used) and
+  `Rng.trace256`. The same seed gives the same trace; the low LCG bits are weak, so
+  `Rng.bits` divides before taking the modulo. This is reproducible coverage stimulus,
+  not a statistical fuzzer.
+* **Input generators.** `Stimulus.randomVecs` (one value per input port per cycle),
+  `Stimulus.corners` (zero, all ones, one, mid), `Stimulus.repeat`, and
+  `Stimulus.randomInputs` for a typed `Circuit` input (leaves at their widths, packed
+  by `HwTy.ofLeaves`).
+* **Reset and drive helpers.** `Stimulus.setAt`, `setNamed` and `drivePort` override
+  one input port; `Stimulus.resetFor` holds `rst` high and `en` low for the first `k`
+  cycles and releases them after; `driveRE`/`resetInputs` do the same at the typed
+  input of `Circuit.withResetEnable`.
+* **An independent oracle.** `Oracle` is a Mealy model over leaf values (model state,
+  input leaves ↦ output leaves, next state), written separately from the circuit.
+  `Stimulus.checkNetlist` compares `Netlist.simulate` with it, `checkCircuit` compares
+  `Circuit.runLeaves`, and `Check.report` prints `PASS`/`FAIL name: N cycles, M
+  mismatches, first at cycle K`.
+* **Coverage.** `Netlist.simCov` runs the same cycle semantics as `Netlist.simulate`
+  (the test checks `r.outs = Netlist.simulate n xs`) while counting, over netlist nodes:
+  * `nodes`: nodes whose value changed, over the nodes that can change (constants and
+    clocks are excluded from both sides);
+  * `ops`: distinct `NetOp` kinds among the changed nodes, over the distinct kinds
+    present among the nodes that can change;
+  * `states`: distinct values observed in the registers, over `Σ 2^width` (the encoding
+    bound, not reachability).
+  `Cov.report` prints `coverage: nodes x/y, ops a/b, states s/t`.
+
+`examples/hdl-compose.wiz` and `examples/hdl-sim.wiz` now take their traces from
+`Rng.trace`/`Rng.trace256` instead of carrying a local copy, and
+`examples/hdl-stimulus.wiz` is the worked example (a 4-bit counter, reset and enable,
+directed and random stimulus, an arithmetic oracle). Its directed trace (2 reset cycles,
+then `go` high for 16 cycles) and its 64-cycle seeded random trace both reach every
+reachable counter state: `coverage: nodes 8/8, ops 5/5, states 10/16`. Node and operation coverage is
+complete for this design; the state denominator is the 4-bit encoding bound (16), of
+which the ten reachable values are all reached.
+
+**Mutation test.** `Tests/Fixtures/hdl-stimulus-mutant.wiz` is a copy of the counter with
+one bug injected (`n == 9` where the specification says `n == 10`); it is outside
+`lib/`, so no library code contains the bug. With the same stimulus and the same
+unchanged oracle it reports
+`FAIL mutant-counter-mod-10: 18 cycles, 7 mismatches, first at cycle 11` and
+`coverage: nodes 8/8, ops 5/5, states 9/16`: the oracle kills it, and state coverage
+alone also catches it by losing state 9. Node and operation coverage do not.
+
+**Limits.** This is functional coverage of one netlist under one stimulus: not Wiz code
+coverage, not FSM transition coverage, and not a proof. A 100 % report is not a
+correctness claim; a bug in a node that toggles correctly is invisible. The state
+denominator is an encoding bound, so unreachable values count as misses and a design
+with a wide register has a large denominator. `simCov` inherits `Netlist.simulate`'s
+one-tick semantics and does not add a multi-clock schedule or a primitive-model check.
+The `hdl` group runs the example, the mutant, and (when `iverilog` is installed) a replay
+of the stimulus's vectors on the emitted Verilog; the replay skips cleanly without the
+tool.
+
 ## H14 C4: bit-level reasoning (`lib/Hdl/Bits.wiz`)
 
 The toy CPU's finding C2: `rfl` reduces a multiplexer on a known select but not a gate on

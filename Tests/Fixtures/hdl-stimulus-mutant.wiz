@@ -1,0 +1,52 @@
+-- MUTANT FIXTURE, not a library and not an example: a copy of the counter of
+-- `examples/hdl-stimulus.wiz` with one injected bug (`n == 9` where the specification
+-- says `n == 10`). The `hdl` test group runs it with the same stimulus and the same
+-- independent oracle; the oracle must fail and the state coverage must lose the value
+-- 9. It is kept outside `lib/` so no library code contains the bug.
+import Hdl.Core
+import Hdl.Stimulus
+
+def B1 : HwTy := HwTy.bits 1
+def B4 : HwTy := HwTy.bits 4
+
+-- THE MUTANT: wraps at 9 instead of 10.
+def mutStep {r : HwTy → Type} [Hw r] (s : r B4) (go : r B1) : r (HwTy.prod B4 B4) :=
+  let n := Hw.add s (Hw.lit 4 1);
+  let wrap := Hw.mux (Hw.eq n (Hw.lit 4 9)) (Hw.lit 4 0) n;
+  Hw.pair (Hw.mux go wrap s) s
+
+def mut : Circuit B1 B4 := Circuit.mk B4 (BitVec.ofNat 4 0) mutStep
+
+def mutRE : Circuit (HwTy.prod (HwTy.named "rst" B1) (HwTy.prod (HwTy.named "en" B1) B1)) B4 :=
+  Circuit.withResetEnable mut
+
+def mutNet : Netlist := Circuit.netlist "mutant" mutRE
+
+-- The same independent oracle as the good design (the specification did not change).
+def oracleStep (st : List Nat) (x : List Nat) : List Nat × List Nat :=
+  let cur := Hdl.nthD 0 st 0;
+  let rst := Hdl.nthD 0 x 0;
+  let en := Hdl.nthD 0 x 1;
+  let go := Hdl.nthD 0 x 2;
+  let next := match Nat.beq rst 0 with
+    | .false => 0
+    | .true => match Nat.beq en 0 with
+      | .true => cur
+      | .false => match Nat.beq go 0 with
+        | .true => cur
+        | .false => Nat.mod (cur + 1) 10;
+  (List.cons cur List.nil, List.cons next List.nil)
+
+def mutOracle : Oracle := Oracle.mk "mutant-counter-mod-10" (List.cons 0 List.nil) oracleStep
+
+def zeroVec : List Nat := Stimulus.everyPort mutNet.inputs 0
+def runVec : List Nat := Stimulus.setAt (Stimulus.setNamed mutNet "en" 1 zeroVec) 2 1
+def directed : List (List Nat) :=
+  List.append (Stimulus.repeat 2 (Stimulus.setNamed mutNet "en" 0 (Stimulus.setNamed mutNet "rst" 1 zeroVec)))
+    (Stimulus.repeat 16 runVec)
+
+def run : Run := Netlist.simCov mutNet directed
+
+#eval Check.report (Stimulus.checkNetlist mutOracle mutNet directed)
+#eval Cov.report mutNet run.cov
+#eval Stimulus.covAgrees mutNet directed run

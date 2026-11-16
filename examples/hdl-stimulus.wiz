@@ -1,0 +1,71 @@
+-- Stimulus, coverage and an independent oracle (`import Hdl.Stimulus`, H14 V2). A
+-- 4-bit counter that counts 0 … 9 while `go` is high, with a synchronous reset and a
+-- clock enable. The same design is driven by directed vectors (reset, then `go` held
+-- high) and by a seeded random trace; the oracle is a separate arithmetic model, not
+-- the circuit's code. Run by the `hdl` test group.
+import Hdl.Core
+import Hdl.Stimulus
+
+def B1 : HwTy := HwTy.bits 1
+def B4 : HwTy := HwTy.bits 4
+
+def ctrStep {r : HwTy → Type} [Hw r] (s : r B4) (go : r B1) : r (HwTy.prod B4 B4) :=
+  let n := Hw.add s (Hw.lit 4 1);
+  let wrap := Hw.mux (Hw.eq n (Hw.lit 4 10)) (Hw.lit 4 0) n;
+  Hw.pair (Hw.mux go wrap s) s
+
+def ctr : Circuit B1 B4 := Circuit.mk B4 (BitVec.ofNat 4 0) ctrStep
+
+-- the input is `(rst, (en, go))`; the output is the current count
+def ctrRE : Circuit (HwTy.prod (HwTy.named "rst" B1) (HwTy.prod (HwTy.named "en" B1) B1)) B4 :=
+  Circuit.withResetEnable ctr
+
+def net : Netlist := Circuit.netlist "counter" ctrRE
+
+-- A separately written model of the same specification: `rst` wins over `en`, `en`
+-- wins over `go`, and the count wraps at 10. The model's state is the count.
+def oracleStep (st : List Nat) (x : List Nat) : List Nat × List Nat :=
+  let cur := Hdl.nthD 0 st 0;
+  let rst := Hdl.nthD 0 x 0;
+  let en := Hdl.nthD 0 x 1;
+  let go := Hdl.nthD 0 x 2;
+  let next := match Nat.beq rst 0 with
+    | .false => 0
+    | .true => match Nat.beq en 0 with
+      | .true => cur
+      | .false => match Nat.beq go 0 with
+        | .true => cur
+        | .false => Nat.mod (cur + 1) 10;
+  (List.cons cur List.nil, List.cons next List.nil)
+
+def ctrOracle : Oracle := Oracle.mk "counter-mod-10" (List.cons 0 List.nil) oracleStep
+
+-- Directed stimulus: two cycles of reset, then `go` held high for 16 cycles. Every
+-- other port stays at zero, so `en` has to be driven as well.
+def zeroVec : List Nat := Stimulus.everyPort net.inputs 0
+def runVec : List Nat := Stimulus.setAt (Stimulus.setNamed net "en" 1 zeroVec) 2 1
+def directed : List (List Nat) :=
+  List.append (Stimulus.repeat 2 (Stimulus.setNamed net "en" 0 (Stimulus.setNamed net "rst" 1 zeroVec)))
+    (Stimulus.repeat 16 runVec)
+
+-- Random stimulus: 64 cycles from seed 7, with reset held for the first two cycles.
+-- `Stimulus.resetFor` drives `rst` and `en`; the generator drives all three ports.
+def randomTrace : List (List Nat) :=
+  Stimulus.resetFor net 2 (Stimulus.randomVecs 64 net.inputs (Rng.seed 7)).1
+
+def runD : Run := Netlist.simCov net directed
+def runR : Run := Netlist.simCov net randomTrace
+
+-- The typed path: `resetInputs` generates a `(rst, (en, go))` input for
+-- `Circuit.withResetEnable`; `checkCircuit` runs it against `Circuit.runLeaves`.
+def typedTrace : List (HwTy.El (HwTy.prod (HwTy.named "rst" B1) (HwTy.prod (HwTy.named "en" B1) B1))) :=
+  (Stimulus.resetInputs (Rng.seed 3) 24 2).1
+
+#eval Rng.trace 4 5 3
+#eval Check.report (Stimulus.checkCircuit ctrOracle ctrRE typedTrace)
+#eval Check.report (Stimulus.checkNetlist ctrOracle net directed)
+#eval Cov.report net runD.cov
+#eval Check.report (Stimulus.checkNetlist ctrOracle net randomTrace)
+#eval Cov.report net runR.cov
+#eval Stimulus.covAgrees net directed runD
+#eval Stimulus.covAgrees net randomTrace runR

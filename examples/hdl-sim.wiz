@@ -7,6 +7,7 @@
 -- by the `hdl` test group.
 import Hdl.Core
 import Hdl.Sim
+import Hdl.Stimulus
 import IO
 
 def Bit : HwTy := HwTy.bits 1
@@ -107,11 +108,6 @@ def shiftStep {r : HwTy → Type} [Hw r] (s : r B70) (x : r B8) : r (HwTy.prod B
     (Hw.xor (Hw.slice 0 8 s) (Hw.mux (Hw.slt x (Hw.slice 62 8 s)) (Hw.ashrBy x (Hw.slice 4 4 x)) (Hw.shlBy x (Hw.slice 5 3 x))))
 def shifter : Circuit B8 B8 := Circuit.mk B70 (BitVec.ofNat 70 1000000000000000000001) shiftStep
 
-def Rng.next (s : Nat) : Nat := Nat.mod (s * 1103515245 + 12345) 2147483648
-def Rng.trace (m : Nat) : Nat → Nat → List Nat
-  | .zero, _ => .nil
-  | .succ k, s => .cons (Nat.mod (Nat.div s 256) m) (Rng.trace m k (Rng.next s))
-
 def leavesEq : List (List Nat) → List (List Nat) → Bool
   | .nil, .nil => .true
   | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
@@ -145,22 +141,22 @@ def badNet : Netlist :=
     (.cons (NetPort.mk "y" 4 1 "clk") (.cons (NetPort.mk "z" 4 7 "clk") .nil))
     .nil .nil (.cons ClockDomain.sys .nil) .nil
 
-def badIns : List (List Nat) := Hdl.map (fun (k : Nat) => List.cons k List.nil) (Rng.trace 16 20 9)
+def badIns : List (List Nat) := Hdl.map (fun (k : Nat) => List.cons k List.nil) (Rng.trace256 16 20 9)
 
 -- the RAM's netlist on raw port values beyond the ports' widths (addresses past the
 -- memory: `Netlist.simulate` keeps any address; so must `simFast`)
 def rawIns : Nat → Nat → List (List Nat)
   | .zero, _ => .nil
   | .succ k, s => .cons (.cons (Nat.mod (Nat.div s 256) 4) (.cons (Nat.mod (Nat.div s 1024) 80) (.cons (Nat.mod (Nat.div s 4096) 300)
-      (.cons (Nat.mod (Nat.div s 65536) 80) .nil)))) (rawIns k (Rng.next s))
+      (.cons (Nat.mod (Nat.div s 65536) 80) .nil)))) (rawIns k (Rng.advance s))
 
 def main : IO Unit := do
-  IO.println (report "alu" alu (Rng.trace 1024 3000 1));
-  IO.println (report "alu with reset and enable" aluRE (Rng.trace 4096 3000 2));
-  IO.println (report "piped" piped (Rng.trace 1024 3000 3));
-  IO.println (report "memories" memC (Rng.trace 4194304 3000 4));
+  IO.println (report "alu" alu (Rng.trace256 1024 3000 1));
+  IO.println (report "alu with reset and enable" aluRE (Rng.trace256 4096 3000 2));
+  IO.println (report "piped" piped (Rng.trace256 1024 3000 3));
+  IO.println (report "memories" memC (Rng.trace256 4194304 3000 4));
   IO.println ("memories, raw out-of-range values: simFast = simulate: " <+> yes (leavesEq (Netlist.simFast (Circuit.netlist "m" memC) (rawIns 3000 5))
     (Netlist.simulate (Circuit.netlist "m" memC) (rawIns 3000 5))));
-  IO.println (report "shifter" shifter (Rng.trace 256 3000 4));
+  IO.println (report "shifter" shifter (Rng.trace256 256 3000 4));
   IO.println ("not well formed: " <+> yes (Bool.not (Netlist.wellFormed badNet)) <+> ", simFast = simulate: "
     <+> yes (leavesEq (Netlist.simFast badNet badIns) (Netlist.simulate badNet badIns)))
