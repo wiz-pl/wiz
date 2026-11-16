@@ -623,6 +623,22 @@ def metaAppType? (m : Nat) (args : Array (Val R)) (l : Lvl) : ElabM R (Option (V
     | _ => return none
   return some (ty, tys)
 
+/-- (13b) The type of the next argument of the constant `n` (at levels `us`) applied to
+`args`: the Π domain of its declared type after them, for a hole made to stand for that
+argument (`MetaEntry.type?`). `none` when there is no such constant or the type is not a Π
+there. -/
+def constArgType? (n : Name) (us : List Level) (args : List (Val R)) : ElabM R (Option (VTy R)) := do
+  let g ← getGlobals
+  let some d := g.find? n | return none
+  let mut ty : VTy R := eval g [] (d.type.instLevels d.levelParams us)
+  for a in args do
+    match ← force ty with
+    | .pi _ _ _ _ cod _ => ty ← instM cod a
+    | _ => return none
+  match ← force ty with
+  | .pi _ _ _ dom _ _ => return some dom
+  | _ => return none
+
 mutual
 
 /-- **Exercise 3.5.** Unify two values in a context of `l` variables, throwing on

@@ -1218,7 +1218,9 @@ partial def elabCalc (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy 
         let meet := match prevRhs? with
           | some m => m
           | none => lhs
-        let rM ← freshMeta ctx "the relation this calc step composes to"
+        -- (13b) typed by `Trans`'s third parameter (`MetaEntry.type?`)
+        let rTy? ← constArgType? "Trans" [] [← evalIn ctx resType, propTy]
+        let rM ← freshMeta ctx "the relation this calc step composes to" rTy?
         let goalTy : VTy R := vApp g (vApp g (vApp g (eval g [] (.const "Trans" []))
           (← evalIn ctx resType)) propTy) (← evalIn ctx rM)
         let some inst ← (try synthInstance ctx goalTy catch _ => pure none) | do
