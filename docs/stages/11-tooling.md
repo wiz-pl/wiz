@@ -848,9 +848,10 @@ page runs.
   no file of its own: a `link_c` path (also one inside a `:load`ed file) is resolved
   relative to the current directory.
 
-* **`wiz test-driver [GROUPS…] [--jobs N] [--list]`** (`testDriverCmd`): a thin wrapper
-  that runs the test driver with these arguments unchanged. It looks for the driver named
-  by `WIZ_TESTS` (when it is a file), else beside the `wiz` binary (a checkout's
+* **`wiz test-driver [--driver PATH] [GROUPS…] [--jobs N] [--list]`** (`testDriverCmd`): a
+  thin wrapper that runs the test driver with the other arguments unchanged. It looks for
+  the driver named by `--driver PATH` (when it is a file; a flag, since `wiz` reads no
+  environment variables), else beside the `wiz` binary (a checkout's
   `.lake/build/bin/tests`), else `.lake/build/bin/tests` in the current directory. Without
   a driver it says how to build one (`lake build wiz tests`) and exits 2. It is not a
   second runner: selectors, `--jobs`, `--list`, `--timings` and the summary are the

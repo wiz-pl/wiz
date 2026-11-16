@@ -73,8 +73,8 @@ IR. A `link_c` path (also one inside a `:load`ed file) is resolved relative to t
 directory: the session has no file of its own. Tests are the `wiz repl:` cases of the
 `tooling` group.
 
-`wiz test-driver [GROUPS…] [--jobs N] [--list]` runs `.lake/build/bin/tests` (or the
-`WIZ_TESTS` path) with these arguments unchanged; build the driver first. The single-file
+`wiz test-driver [--driver PATH] [GROUPS…] [--jobs N] [--list]` runs `.lake/build/bin/tests`
+(or `PATH`) with the other arguments unchanged; build the driver first. The single-file
 form is `wiz test FILE` (stage 11ah).
 
 ### Running cases in parallel (`--jobs`)
