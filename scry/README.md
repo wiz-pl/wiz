@@ -18,7 +18,7 @@ offset is unchanged), and maps each node's preprocessed span back to the origina
 file/line/column in `Wil.Span`. `scry-cst -E [-D…] [-I…] FILE` runs `cc -E` and spills
 the blanked text, which is how `corpus/c2wil/preproc/main.i.cst` was generated.
 
-The C# frontend's first slice (`wiz-notes/scry-csharp.md`) is `src/Scry/CsParse.wiz`, a
+The C# frontend's first slice (design: `CSHARP.md`) is `src/Scry/CsParse.wiz`, a
 hand-written lexer and parser whose rows use tree-sitter-c-sharp's node vocabulary, and
 `src/Scry/CsLower.wiz`, which views them as a `Scry.Cst` and lowers methods to Wil
 (receiver as argument 0, `using`-resolved BCL names). Its fixtures and rule pack are in

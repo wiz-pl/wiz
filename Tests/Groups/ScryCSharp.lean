@@ -95,7 +95,7 @@ def evalString (imports : String) (expr : String) : IO String := do
 
 /-- Compare `actual` with the golden file `path` (see the module doc for `SCRY_CS_WRITE`). -/
 def golden (path : String) (actual : String) : IO Unit := do
-  let actual := String.mk (actual.toList.reverse.dropWhile Char.isWhitespace).reverse ++ "\n"
+  let actual := String.ofList (actual.toList.reverse.dropWhile Char.isWhitespace).reverse ++ "\n"
   if (← IO.getEnv "SCRY_CS_WRITE").isSome then
     IO.FS.writeFile path actual
     throw (IO.userError s!"SCRY_CS_WRITE: wrote {path}; review the diff and rerun without it")
