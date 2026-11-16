@@ -48,7 +48,7 @@ inductive RVal where
   | pap (op : PapOp) (args : Array RVal)
   /-- a natural number of a type registered with `builtin nat` -/
   | nat (n : Nat)
-  /-- a byte buffer (the interpreters' model of `Bytes`, stage 21ad): the runtime
+  /-- a byte buffer (the interpreters' model of `Bytes`, stage 21ag): the runtime
   natives are implemented on it here, since the interpreters cannot call C -/
   | bytes (data : ByteArray)
   /-- a native operation waiting for arguments -/
@@ -254,7 +254,7 @@ def nativeArity (key : Name) : Nat :=
 
 end RVal
 
-/-! The interpreters' model of `Bytes` (stage 21ad). `#eval` and `#run` cannot call C,
+/-! The interpreters' model of `Bytes` (stage 21ag). `#eval` and `#run` cannot call C,
 so the nine runtime natives (`runtime/rt_data.inc`, `runtime/rt_sys.inc`) are
 implemented here on a `ByteArray`, as `wiz_nat_show` already is; compiled code still
 calls the runtime. `ofCString`/`toCString` mirror the C boundary exactly: a `String` is
@@ -337,7 +337,7 @@ partial def stringChars? (l : RVal) (acc : String) (fuel : Nat) : Option String 
 
 partial def stringValue? (v : RVal) : Option String := stringChars? (v.field 0) "" 1000000
 
-/-- The `Bytes` native operations (stage 21ad), by the C name the runtime exports.
+/-- The `Bytes` native operations (stage 21ag), by the C name the runtime exports.
 `none` for every other native, and for a `Bytes` operation whose arguments are not
 what the compiler passes (the model stops there instead of inventing a value). -/
 def bytesNative? (op : Name) (args : Array RVal) (num : Nat → Nat) : Option RVal :=
@@ -549,7 +549,7 @@ strings of the registered `nat` and `string` types print as literals. -/
 partial def readback (g : Globals R) (builtins : List (Name × Name)) (ty : VTy R) (v : RVal) : Term R :=
   let readback := readback g builtins
   match whnf ty, v with
-  | .mu _ _ _ _ _ hint, v =>
+  | .mu _ _ _ _ _ hint _ , v =>
     -- (the same test as erasure's: a type shaped like `Nat` is a number, R3)
     if isNatTy { g with builtins := builtins } ty then
       match v.toNat? with
@@ -589,7 +589,7 @@ partial def readback (g : Globals R) (builtins : List (Name × Name)) (ty : VTy 
 where
   readbackData (ty : VTy R) (v : RVal) : Term R :=
     match whnf ty with
-    | .mu l I D i _ hint =>
+    | .mu l I D i _ hint prop =>
       -- a native value (stage 22d), printed as a number: the model's object around it
       let _ := hint
       let v := match v, reprOfTy? { g with builtins := builtins } ty with
@@ -599,7 +599,7 @@ where
       let v := match v with
         | .nat n => if isNatTy { g with builtins := builtins } ty then RVal.natView n else unflat D v
         | v => unflat D v
-      .con (readback g builtins (vInterp g l I D (muFamily l I D) i) v)
+      .con (readback g builtins (vInterp g l I D (muFamily l I D prop) i prop) v)
     | _ => .tt
   /-- The payload of a flat value, walking the description (as a value). -/
   unflat (D : Val R) (v : RVal) : RVal :=

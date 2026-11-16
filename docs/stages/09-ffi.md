@@ -542,7 +542,7 @@ buffer for the call*:
 
 Both toolchains implement the kind: the Lean frontend/backends in `Elab/Command.lean`
 and `Compiler/C.lean`, the self-hosted one in `selfhost/Frontend.wiz`/`Backend.wiz` with
-the same two C arguments (21ad). Tests: `=selfhost` "Bytes (21ad): a
+the same two C arguments (21ag). Tests: `=selfhost` "Bytes (21ag): a
 char*/uint8_t*/unsigned char* buffer and its length, borrowed for the call" and "Bytes
-(21ad): a c_struct with a Bytes field through glue" (host and self-hosted, collector and
+(21ag): a c_struct with a Bytes field through glue" (host and self-hosted, collector and
 reference counting), plus the `ffi-structs` buffer case.

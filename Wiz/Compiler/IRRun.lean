@@ -16,14 +16,14 @@ constructor tag; any other field of one is an error (see `natField`).
 namespace Wiz.IR
 
 /-- Lean core has no `Repr` for `ByteArray`; the IR interpreter's error messages print
-a byte buffer as its bytes (stage 21ad). -/
+a byte buffer as its bytes (stage 21ag). -/
 instance : Repr ByteArray := ⟨fun b _ => "bytes" ++ toString b.toList⟩
 
 inductive IVal where
   | num (n : Nat)
   | tag (t : Nat)
   | erased
-  /-- a byte buffer (`Bytes`, stage 21ad): a scalar, like a number -/
+  /-- a byte buffer (`Bytes`, stage 21ag): a scalar, like a number -/
   | bytes (data : ByteArray)
   | ptr (id : Nat)
   deriving Inhabited, BEq, Repr
@@ -55,7 +55,7 @@ def getObj (id : Nat) : RunM (Nat × Obj) := do
   | none => throw s!"use of a freed object (#{id})"
 
 /-- An IR value as an interpreter value, for `readback` (and for the model of a
-`Bytes` operation that takes or returns text, stage 21ad). -/
+`Bytes` operation that takes or returns text, stage 21ag). -/
 partial def toRVal (h : Heap) : IVal → RVal
   | .num n => .nat n
   | .tag t => .obj t #[]

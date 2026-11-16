@@ -51,6 +51,32 @@ file; the rule and its ambiguity failure are in `docs/trust-ledger.md`). A local
 driver is not cloned and CI cannot set it, so run `scripts/trust-ledger.sh --check`
 after a merge; `scripts/trust-ledger-merge_test.sh` tests the driver without a build.
 
+### The REPL (`wiz repl`)
+
+`wiz repl` reads one Wiz command per line on standard input and elaborates it into one
+persistent `CommandState` with the ordinary frontend (the same command loop as
+`wiz check`), so definitions, `syntax`, `macro`, `instance` and `import` stay in scope for
+later lines; an error is printed and the session continues. The Prelude is imported at the
+start. The REPL's own commands are `:type EXPR` (its type, like `#check`), `:load FILE`
+(elaborate a file into the session: its definitions stay), `:run NAME` (build and run a
+definition, with `--llvm` for LLVM), `:reset`, `:help` and `:quit` (EOF exits too). A
+terminal gets a prompt; a pipe is a script, and its output is only the commands' output.
+`--prelude MODULE`/`-p MODULE` (repeatable, comma-separated) imports modules after the
+Prelude and before the first prompt, composing with `-I`; a missing module is a startup
+error. A tool that ships a prelude module can wrap the ordinary REPL instead of forking
+it (`scry repl` is `wiz repl -I <scry>/lib --prelude Scry.Repl`).
+
+Limits: input is one line per command (no continuation, history or line editing, and no
+completion or goal display — that is `wiz lsp` and the infoview). The REPL is a frontend
+session, not a second evaluator: `#eval` and `:run` are the elaborator's interpreter and
+IR. A `link_c` path (also one inside a `:load`ed file) is resolved relative to the current
+directory: the session has no file of its own. Tests are the `wiz repl:` cases of the
+`tooling` group.
+
+`wiz test-driver [--driver PATH] [GROUPS…] [--jobs N] [--list]` runs `.lake/build/bin/tests`
+(or `PATH`) with the other arguments unchanged; build the driver first. The single-file
+form is `wiz test FILE` (stage 11ah).
+
 ### Running cases in parallel (`--jobs`)
 
 `lake test -- --jobs N` (default 1) runs the cases of a group that opted in N at a time, in
@@ -197,6 +223,30 @@ Adding a test group touches no shared file:
 * `scripts/migrate-tests.py` made this layout from the old single `Tests/Elab.lean`,
   deterministically; a branch that still edits the old file replays its changes with it
   (AGENTS.md, "Test layout").
+
+### The rejection corpus (`=reject`)
+
+The suite is mostly about programs that must be accepted; `Tests/Groups/Reject.lean` is
+the other side: programs the elaborator must turn down, with the diagnostic they must
+produce. It covers universe- and level-escapes, `Sort` misuse, missing and looping
+instances (an overlapping instance is accepted by design, and an `accept:` case pins
+that), ill-typed `implemented_by`, non-structural recursion, missing pattern coverage,
+quantity and linearity violations, foreign-function and `glue` mistakes, duplicate
+declarations and module names, malformed attributes, bad `deriving`, and private and
+opaque-type escapes. A case names the stable error code (or that the error has
+none yet) and a fragment of the source its span must cover, so a rejection for the wrong
+reason does not pass.
+
+`Tests/Reject.lean` elaborates each program in process through the shared cache
+(`/tmp/wiz-reject-corpus-cache`, warmed by the first case) and checks the code, the span
+and that no `panic!` was reached. A representative case per class also runs `wiz check`
+and requires a nonzero exit (an accepted neighbour requires zero); running it on every
+case would add about a second per case. `accept:` cases are neighbours that must stay
+accepted, so the corpus cannot be gamed by over-rejection. An `xfail:` case records a
+program that is currently accepted but should not be: the reason is in a `Tests.note`
+(visible with `--timings`), and the case fails once the elaborator starts rejecting it,
+which is when it becomes a `rejected` case. Run the group alone with
+`lake test -- '=reject'` (build `wiz` too: `lake build wiz tests`).
 
 ## The grail package registry (23m)
 

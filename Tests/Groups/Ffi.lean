@@ -127,7 +127,7 @@ def ffiGroup : Group where
         ioRun ("import IO\ndef fill : Nat → Bytes → Bytes\n  | .zero, b => b\n  | .succ n, b => Bytes.push (fill n b) (65 + n)\n" ++
           "def main : IO Unit := do\n  IO.println (Bytes.toString (fill 3 Bytes.empty));\n" ++
           "  IO.println (Nat.toString (Bytes.size (Bytes.ofString \"λx\")))") "ABC\n3\n" },
-    { name := "byte buffers in #eval and #run (the interpreters' model, 21ad)", run := fun _ =>
+    { name := "byte buffers in #eval and #run (the interpreters' model, 21ag)", run := fun _ =>
         okLib ("import Std\n" ++
           "#eval Bytes.show (Bytes.ofList (List.cons 1 (List.cons 2 (List.cons 300 .nil))))\n" ++
           "#eval Bytes.size (Bytes.push Bytes.empty 256)\n" ++

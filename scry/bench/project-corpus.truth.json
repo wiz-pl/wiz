@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "projects": [
+    {
+      "id": "synthetic",
+      "dir": "corpus/project/taint",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "file": "io.c", "function": "run_cmd"},
+        {"rule": "command-injection", "file": "util.c", "function": "util_unsafe"}
+      ],
+      "safe": [
+        {"file": "app.c", "note": "escape_shell sanitises the second call"}
+      ]
+    }
+  ]
+}
