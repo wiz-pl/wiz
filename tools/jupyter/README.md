@@ -7,14 +7,16 @@ batch fallback — plus cell magics for `%%scry` (taint findings),
 `%%sh` (shell), `%%time` (wall clock and peak RSS) and `%%scry --progress`
 (live progress for long analyses), and interactive widgets (`Web.Widget` +
 Jupyter comms, rendered by `static/widget.js` on the React framework's patch
-applier).
+applier). `tools/jupyter/wiz-nb export FILE.ipynb` turns a notebook's stored
+outputs into a self-contained static HTML page or Markdown.
 
 ```sh
 python3 -m wiz_kernel install --user          # from this directory
 jupyter console --kernel wiz-kernel
+tools/jupyter/wiz-nb export docs/notebooks/tour.ipynb
 ```
 
-Install, backends, magics, widgets, limits and tests: **[docs/tools/jupyter.md](../../docs/tools/jupyter.md)**.
+Install, backends, magics, widgets, export, limits and tests: **[docs/tools/jupyter.md](../../docs/tools/jupyter.md)**.
 
 Quick tests:
 
@@ -24,6 +26,7 @@ python3 -m unittest discover -s tools/jupyter/tests -v   # protocol (jupyter_cli
 PYTHONPATH=tools/jupyter python3 -m wiz_kernel --self-test
 WIZ=wiz web/widget/test.sh                          # widget VDOM + patches (Node)
 node tools/jupyter/static/widget_test.mjs           # widget front end (headless Chrome if installed)
+python3 -m unittest discover -s tools/jupyter/tests -p 'test_export.py' -v
 ```
 
 Not part of the dev shell, `lake`, or CI's default test groups. The widget

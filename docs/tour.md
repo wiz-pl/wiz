@@ -14,6 +14,10 @@ This is a tour, not a reference. The language is specified by the kernel's rules
 [CoreSpec.md](CoreSpec.md) and by the stage docs ([index.md](index.md)), which explain
 how each feature is built; the tour links to them as it goes.
 
+The tour is also a runnable notebook: [`notebooks/tour.ipynb`](notebooks/tour.ipynb)
+([exported page](notebooks/tour.html)) has one chapter per section, with each example
+as a cell that runs under the Wiz kernel.
+
 Contents: [0 A program](#0-a-program) · [1 Values and functions](#1-values-and-functions)
 · [2 Inductive types](#2-inductive-types-and-pattern-matching) ·
 [3 Structures](#3-structures) · [4 Type classes and numerals](#4-type-classes-and-numerals) ·
