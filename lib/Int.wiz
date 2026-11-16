@@ -129,6 +129,37 @@ def Int.add_zero : (a : Int) → a + 0 = a
 def Int.zero_add : (a : Int) → 0 + a = a
   | .ofNat _ => rfl
   | .negSucc _ => rfl
+/-- `a - 0 = a`. -/
+def Int.sub_zero (a : Int) : a - 0 = a := Int.add_zero a
+/-- `n * 1 = n` for natural numbers (a helper for `Int.mul_one`). -/
+def Int.natMul_one : (n : Nat) → n * 1 = n
+  | .zero => rfl
+  | .succ n => Int.congrArg Nat.succ (Int.natMul_one n)
+/-- `1 * n = n` for natural numbers (a helper for `Int.one_mul`). -/
+def Int.natOne_mul : (n : Nat) → 1 * n = n
+  | .zero => rfl
+  | .succ n => Int.congrArg Nat.succ (Int.natAdd_zero n)
+/-- `n * 0 = 0` for natural numbers (a helper for `Int.mul_zero`). -/
+def Int.natMul_zero : (n : Nat) → n * 0 = 0
+  | .zero => rfl
+  | .succ n => Int.natMul_zero n
+/-- `a * 1 = a`. -/
+def Int.mul_one : (a : Int) → a * 1 = a
+  | .ofNat n => Int.congrArg Int.ofNat (Int.natMul_one n)
+  -- the equation of two `negSucc` payloads computes to the field equation and `True`s
+  | .negSucc n => (Int.natMul_one n, ((), ()))
+/-- `1 * a = a`. -/
+def Int.one_mul : (a : Int) → 1 * a = a
+  | .ofNat n => Int.congrArg Int.ofNat (Int.natOne_mul n)
+  | .negSucc n => (Int.natOne_mul n, ((), ()))
+/-- `a * 0 = 0`. -/
+def Int.mul_zero : (a : Int) → a * 0 = 0
+  | .ofNat n => Int.congrArg Int.ofNat (Int.natMul_zero n)
+  | .negSucc n => Int.congrArg Int.negOfNat (Int.natMul_zero n)
+/-- `0 * a = 0`. -/
+def Int.zero_mul : (a : Int) → 0 * a = 0
+  | .ofNat _ => rfl
+  | .negSucc _ => rfl
 /-- Negation keeps the magnitude: `|-a| = |a|`. -/
 def Int.natAbs_neg : (a : Int) → Int.natAbs (-a) = Int.natAbs a
   | .ofNat .zero => rfl
@@ -178,3 +209,15 @@ def Int.abs_neg : (a : Int) → Int.abs (-a) = Int.abs a
   | .ofNat .zero => rfl
   | .ofNat (.succ _) => rfl
   | .negSucc _ => rfl
+
+-- ## The default `simp` set
+--
+-- The Int identities in normal-form orientation (`docs/stages/06-macros/simp.md`).
+
+attribute [simp] Int.add_zero
+attribute [simp] Int.zero_add
+attribute [simp] Int.sub_zero
+attribute [simp] Int.mul_one
+attribute [simp] Int.one_mul
+attribute [simp] Int.mul_zero
+attribute [simp] Int.zero_mul

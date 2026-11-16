@@ -13,10 +13,16 @@ notation), not a Boolean test: `List.any`/`List.all` are the Boolean versions, a
 `List.any_eq_true`/`List.all_eq_true` are the bridge between them.
 
 The lemmas are ordinary definitions, proved by structural recursion (no axiom and no
-`sorry`; the trust ledger is unchanged). There is no `simp` tactic in Wiz, so there is no
-`[simp]` attribute to mark them with: they are stated left to right, the way `rw` uses
-them (`rw h; rfl`). The `_cons_true`/`_cons_false` lemmas are the equations `filter`,
-`any` and `all` need for a case split on their predicate.
+`sorry`; the trust ledger is unchanged). They are stated left to right, the way `rw` uses
+them (`rw h; rfl`) and the way `simp` (stage 6h) orients them, and the safe ones are
+registered with `attribute [simp]` at the end of the file: `import ListLemmas` gives
+`simp` a terminating normal form for `map`, `append`, `reverse`, `filter`, `any` and
+`all`. The rules that are deliberately not registered — identities whose left side
+computes away, associativity, the `↔` membership lemmas, and the `_cons_true`/
+`_cons_false` equations whose premise (`p x = true`) needs a discharger (S3) — are listed
+at the end of the file with the reason.
+
+`simp` rewrites and leaves the closing step to the user, so a normal form is `simp; rfl`:
 
 ```
 import ListLemmas
@@ -25,8 +31,16 @@ def mapMap (f g : Nat → Nat) (l : List Nat) :
     List.map f (List.map g l) = List.map (fun x => f (g x)) l :=
   List.map_map f g l
 
+def appendNils {A : Type} (xs : List A) : (xs ++ []) ++ [] = xs := by
+  simp
+  rfl
+
 def allThree : (3 ∈ [1, 2, 3]) := Or.inr (Or.inr (Or.inl (refl 3)))
 ```
+
+`appendNils` needs two `List.append_nil` rewrites, three lines by `rw`
+(`rw (List.append_nil (xs ++ []))`, then `rw (List.append_nil xs)`, then `rfl`); `simp`
+finds them and restarts after each rewrite.
 -/
 
 -- ## Membership
@@ -471,3 +485,55 @@ def List.mem_reverse {0 A : Type} (x : A) (l : List A) :
   Iff.intro
     (fun h => Or.elim ((List.mem_revApp x l List.nil).1 h) (fun hx => hx) (fun hn => False.elim hn))
     (fun h => (List.mem_revApp x l List.nil).2 (Or.inl h))
+
+-- ## The default `simp` set
+--
+-- The oriented equations above, in the order `simp` tries them within one priority
+-- (`docs/stages/06-macros/simp.md`): identities first, then the rules that push `map`,
+-- `reverse`, `filter`, `any` and `all` through `++` and through each other. Every rule
+-- here is a definitional equation or a structural induction that reduces the left side;
+-- none of them can grow a term without bound.
+--
+-- What is **not** registered, and why:
+--
+-- * `List.nil_append`: its left side `[] ++ l` computes to `l`, so the goal never
+--   contains `List.append List.nil l` to match (`List.nil_append` stays available to
+--   `rw` and `simp only [...]`).
+-- * `List.map_nil`, `List.map_cons`: `map f []` computes to `[]`, and
+--   `map f (x :: xs)` computes to a constructor carrying the rule's variables;
+--   `Tac.rewriteAt` refuses a constructor-valued pattern with variables (the goal has
+--   already computed it too). Both are used explicitly by `lib/Std` proofs and the
+--   `std` tests.
+-- * `List.append_assoc`: associativity has no normal form to aim at, for the same reason
+--   `Nat.add_assoc` stays out of the default set.
+-- * `List.revApp_append`, `List.revApp_eq_append`, `List.map_revApp`,
+--   `List.length_revApp`: `revApp` is the accumulator behind `reverse`. The user-facing
+--   normal form is stated for `reverse` (below); rewriting inside the accumulator is a
+--   proof device, so these stay explicit.
+-- * `List.mem_cons_iff`, `List.mem_append`, `List.mem_map`, `List.mem_filter`,
+--   `List.mem_revApp`, `List.mem_reverse`: they are `↔`, not equations; a simp rule is
+--   `∀ x₁ … xₙ, lhs = rhs`.
+-- * `List.not_mem_nil`, `List.mem_cons_self`, `List.mem_cons_of_mem`, `List.ex_mem_cons`,
+--   `List.mem_map_of_mem`, `List.mem_of_mem_map`, `List.filter_sound`,
+--   `List.filter_complete`, `List.All`: propositions (a negation, a membership, an
+--   existential, a conjunction), not equations.
+-- * `List.filter_cons_true`, `List.filter_cons_false`, `List.any_cons_true`,
+--   `List.any_cons_false`, `List.all_cons_true`, `List.all_cons_false`: an equation with a
+--   premise (`p x = .true`/`.false`) before it; a conditional rule needs a discharger
+--   (S3).
+
+attribute [simp] List.append_nil
+attribute [simp] List.map_id
+attribute [simp] List.map_map
+attribute [simp] List.map_append
+attribute [simp] List.length_map
+attribute [simp] List.length_append_eq
+attribute [simp] List.reverse_cons
+attribute [simp] List.reverse_append
+attribute [simp] List.reverse_reverse
+attribute [simp] List.map_reverse
+attribute [simp] List.length_reverse
+attribute [simp] List.filter_map
+attribute [simp] List.filter_filter
+attribute [simp] List.any_append
+attribute [simp] List.all_append

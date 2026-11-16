@@ -495,6 +495,14 @@ inductive Expr where
   | lit (n : Nat)
   | opaque (id : Nat)
 
+/-- What one `Tac.rewriteAt` attempt did (stage 6h): the rule did not match (`noMatch`,
+the goal is unchanged), it rewrote the goal (`rewritten`, with the new goal and its type
+reflected), or the lemma is malformed (`error`, for `simp`'s message). -/
+inductive RewriteResult where
+  | noMatch
+  | rewritten (goal : Nat) (type : Expr)
+  | error (msg : String)
+
 -- Reflection (HD8): a declared inductive type or structure as command macros see it.
 -- Types are syntax, written with the names of the binders in scope (the parameters,
 -- then the earlier fields), not de Bruijn indices.
@@ -598,6 +606,13 @@ inductive Tac where
   -- (28e) decide the closed `e = .true` by running it (the trusted evaluator of 27a:
   -- --trust-native); the axiom that says so
   | nativeDecide (g : Nat) (e : Expr) (k : Expr → Tac)
+  -- (6h) match `lemma`'s left side against a subterm of goal `g` (its `∀` binders become
+  -- metavariables), rewrite every occurrence of it (`all`) or the first one, and return
+  -- the result (`RewriteResult`); `rtl` uses the equation right to left
+  | rewriteAt (g : Nat) (lemma : Expr) (rtl : Bool) (all : Bool) (k : RewriteResult → Tac)
+  -- (6h S2) the default `simp` set: each registered lemma's name and (constant) `Expr`,
+  -- in the order the driver tries them (priority, then registration)
+  | getSimpLemmas (g : Nat) (k : List (String × Expr) → Tac)
 
 /-- The metaprogramming monad: requests to the elaborator (`Tac`) in
 continuation-passing style, so `bind` is just composition. Macros (`MacroM`) and
@@ -685,6 +700,17 @@ def TacticM.unfold (g : Nat) (n : String) (e : Expr) : TacticM Expr := fun k => 
 /-- Rewrite goal `g` with `h : a = b` (a complete term): every `a` in it becomes `b` (or
 every `b` becomes `a`, if `rtl`). The new goal. -/
 def TacticM.rewrite (g : Nat) (h : Expr) (rtl : Bool) : TacticM Nat := fun k => Tac.rewrite g h rtl k
+/-- One matching rewrite: the side of `lemma`'s equation that the direction selects (the
+left one, or the right one when `rtl`) is matched against a subterm of goal `g`; the
+lemma's `∀` binders become metavariables, solved by the match. Every occurrence of the
+matched term (or only the first, if `all` is false) becomes the equation's other side.
+The result says whether the rule matched (`RewriteResult`); a rule that is not an
+equation is an `error`. -/
+def TacticM.rewriteAt (g : Nat) (lemma : Expr) (rtl : Bool) (all : Bool) :
+    TacticM RewriteResult := fun k => Tac.rewriteAt g lemma rtl all k
+/-- The default `simp` set: the `[simp]` lemmas registered so far, each with its name
+(priority first, then registration order; `simp` decides what to do with them). -/
+def TacticM.getSimpLemmas (g : Nat) : TacticM (List (String × Expr)) := fun k => Tac.getSimpLemmas g k
 /-- Is the constant `n` a constructor of an inductive type? Then the type's name, its
 number of parameters and the constructor's number of fields: `List.cons` is
 `("List", 1, 2)`, and `List.cons A x L` has the fields `x` and `L` after one parameter. -/
@@ -1319,6 +1345,119 @@ def Tactic.rwBack : Tactic := fun stx => do
   g' ← TacticM.rewrite g p.1 .true;
   TacticM.replaceMainGoal (.cons g' .nil)
 attribute [tactic tactic.rwBack] Tactic.rwBack
+
+-- ## `simp` (stage 6h)
+--
+-- The driver is Wiz (for self-hosting: the self-hosted frontend can run the same
+-- tactic once its `Tac`/`Expr` layer reaches parity; `wiz-notes/simp-design.md` §6.6).
+-- `simp` uses the default set (the `[simp]` lemmas registered so far); `simp [h₁, …]`
+-- adds the listed equations; `simp only [h₁, …]` uses exactly those. Rules are tried in
+-- the listed order (explicit arguments first, then the default set), each in the
+-- direction written (`← h` for right to left), until no rule applies. A rule is a
+-- complete term whose type is a telescope `∀ x₁ … xₙ, lhs = rhs`; `Tac.rewriteAt`
+-- matches `lhs` against a subterm (its binders become metavariables), which is what lets
+-- `simp [Nat.add_zero]` fire without the user instantiating `n`.
+--
+-- Policy here, matching there: this loop owns the rule order, the fuel, the direction
+-- order and the messages; the request owns `Term`, unification and the transport.
+-- There is no automatic closer: `simp` only rewrites (Wiz keeps computation and closing
+-- explicit: `rfl`, `exact`, `assumption`). Conditional lemmas (a premise before the
+-- equation) are not used yet: their premise is a metavariable that matching does not
+-- determine, so the rule does not fire (and `attribute [simp]` rejects one; S3 adds the
+-- discharger).
+
+/-- How many rewrites `simp` may do before it gives up: the bound that makes a looping
+or growing rule set terminate. Exhausting it is an error, never a silent "normal form". -/
+def Simp.fuel : Nat := 100
+
+/-- A `simp` rule argument: an equation, or `← h` for right to left. -/
+declare_syntax_cat simp_arg
+syntax (name := simpArgFwd) term : simp_arg
+syntax (name := simpArgBack) "←" term : simp_arg
+
+/-- A rule argument: its term, and whether it rewrites right to left (`← h`). -/
+def Simp.arg (stx : Syntax) : Syntax × Bool := match stx with
+  | .node _ (.cons (.atom _) (.cons t _)) => (t, .true)
+  | .node _ (.cons t _) => (t, .false)
+  | _ => (stx, .false)
+/-- The rule arguments of a `sepBy(simp_arg, ",")` node, skipping its `,` atoms. -/
+def Simp.argTerms {b : Bool} : SyntaxF b → List (Syntax × Bool)
+  | .cons (.atom _) ts => Simp.argTerms ts
+  | .cons t ts => .cons (Simp.arg t) (Simp.argTerms ts)
+  | _ => .nil
+/-- The rule arguments in a `[h₁, ← h₂]` argument node (none for a missing or empty
+one). -/
+def Simp.args (stx : Syntax) : List (Syntax × Bool) := match stx with
+  | .node _ xs => Simp.argTerms xs
+  | _ => .nil
+
+/-- Elaborate each rule argument in goal `g`'s context: the term and its direction. -/
+def TacticM.elabArgs : Nat → List (Syntax × Bool) → TacticM (List (Expr × Bool))
+  | _, .nil => TacticM.pure .nil
+  | g, .cons s ss => do
+    p ← TacticM.elabInfer g s.1;
+    rest ← TacticM.elabArgs g ss;
+    TacticM.pure (.cons (p.1, s.2) rest)
+
+/-- The default set as rules: registered lemmas are used left to right. -/
+def Simp.defaultRules : List (String × Expr) → List (Expr × Bool)
+  | .nil => .nil
+  | .cons p ps => .cons (p.2, .false) (Simp.defaultRules ps)
+
+/-- One `simp` step: try rule `r` on goal `g` in its direction `rtl`; the new goal and
+its type, or `.none` when it does not match. A rule that is not an equation after its
+`∀` binders is an error. On success the old goal is replaced by the new one. -/
+def TacticM.simpStep (g : Nat) (r : Expr) (rtl : Bool) : TacticM (Option (Nat × Expr)) := do
+  res ← TacticM.rewriteAt g r rtl .true;
+  match res with
+  | .noMatch => TacticM.pure .none
+  | .error msg => TacticM.fail (String.append "simp: expected an equation: " msg)
+  | .rewritten g' ty' => do
+    TacticM.replaceMainGoal (.cons g' .nil);
+    TacticM.pure (.some (g', ty'))
+
+/-- The `simp` loop. `rules` is the set, `rest` the rules not yet tried in this pass; a
+rewrite restarts the pass, and a pass that changes nothing returns the goal. `fuel`
+counts the rewrites (not the attempts). -/
+partial def TacticM.simpGo : Nat → Nat → List (Expr × Bool) → List (Expr × Bool) → TacticM Nat
+  | .zero, _, _, _ => TacticM.fail "simp: maximum steps (100) reached: possible loop (a lemma keeps growing the goal)"
+  | .succ _, g, _, .nil => TacticM.pure g
+  | .succ fuel, g, rules, .cons r rs => do
+    s ← TacticM.simpStep g r.1 r.2;
+    match s with
+    | .some p => TacticM.simpGo fuel p.1 rules rules
+    | .none => TacticM.simpGo (Nat.succ fuel) g rules rs
+
+/-- `simp`'s body: the explicit rules (if any), then the default set unless `only`;
+rewrite until none applies. -/
+def TacticM.simpMain (arg : Syntax) (only : Bool) : TacticM Unit := do
+  g ← TacticM.mainGoal;
+  ls ← TacticM.elabArgs g (Simp.args arg);
+  ds ← match only with
+    | .true => TacticM.pure .nil
+    | .false => TacticM.getSimpLemmas g;
+  let rules := List.append ls (Simp.defaultRules ds);
+  n ← TacticM.simpGo Simp.fuel g rules rules;
+  TacticM.pure ()
+
+syntax (name := simp) "simp" "[" sepBy(simp_arg, ",") "]" : tactic
+/-- `simp [h₁, ← h₂]`: rewrite the goal with the default set and the equations `h₁ …`
+(explicit rules first) until none applies; `← h` uses `h` right to left. -/
+def Tactic.simp : Tactic := fun stx => TacticM.simpMain (Syntax.getArg stx 2) .false
+attribute [tactic tactic.simp] Tactic.simp
+syntax (name := simpNil) "simp" : tactic
+/-- `simp`: rewrite with the default set (the registered `[simp]` lemmas). -/
+def Tactic.simpNil : Tactic := fun _ => TacticM.simpMain .missing .false
+attribute [tactic tactic.simpNil] Tactic.simpNil
+syntax (name := simpOnly) "simp" "only" "[" sepBy(simp_arg, ",") "]" : tactic
+/-- `simp only [h₁, …]`: rewrite the goal with exactly the equations `h₁ …`, not the
+default set. -/
+def Tactic.simpOnly : Tactic := fun stx => TacticM.simpMain (Syntax.getArg stx 3) .true
+attribute [tactic tactic.simpOnly] Tactic.simpOnly
+syntax (name := simpOnlyNil) "simp" "only" : tactic
+/-- `simp only`: as `simp only []`: no rules, so the goal is unchanged (identity). -/
+def Tactic.simpOnlyNil : Tactic := fun _ => TacticM.simpMain .missing .true
+attribute [tactic tactic.simpOnlyNil] Tactic.simpOnlyNil
 
 -- ## Notation: `++` and list literals (agent/notation)
 --

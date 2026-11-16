@@ -1,6 +1,6 @@
 examples/classes.wiz:13:1: info: Inhabited.default : {A : Type} → [self : Inhabited A] → A
 examples/classes.wiz:14:1: info: .cons (.cons .true .nil) .nil
 examples/classes.wiz:20:1: info: 0
-examples/classes.wiz:29:1: info: 4
-examples/classes.wiz:41:1: info: .some 3
-examples/classes.wiz:42:1: info: .none
+examples/classes.wiz:28:1: info: 4
+examples/classes.wiz:40:1: info: .some 3
+examples/classes.wiz:41:1: info: .none
