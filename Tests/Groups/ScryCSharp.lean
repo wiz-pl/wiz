@@ -129,19 +129,27 @@ def lowerGolden (name : String) : IO Unit := do
   | [m] => golden s!"scry/corpus/csharp/lower/{name}.wil" (unquote m)
   | ms => throw (IO.userError s!"expected one #eval message, got {ms.length}: {ms}")
 
-/-- A spill's language and whether its root spans the text (only whitespace after it). -/
+/-- A spill's freshness, read from its text (no Wiz evaluation): the `language` is
+`c_sharp`, the `bytes` row is the `.cs` file's UTF-8 size, and the root's span starts at
+0 with only whitespace after it. -/
 def spillCheck (dir name : String) : IO String := do
   let (src, spill) ← fixture dir name
-  let body := fixtureDefs src spill ++
-    "def ws (cs : List Char) : Bool := List.all (fun ch => Bool.or (Nat.beq (Char.code ch) 32) (Bool.or (Nat.beq (Char.code ch) 10) (Nat.beq (Char.code ch) 13))) cs\n" ++
-    "#eval match Scry.CstStore.ofText spill with\n" ++
-    "  | .error e => e\n" ++
-    "  | .ok s => match String.eq s.language \"c_sharp\", Nat.beq (Scry.CstStore.spanOf s 0).start 0, ws (String.chars (String.drop (Scry.CstStore.spanOf s 0).stop src)) with\n" ++
-    "    | .true, .true, .true => \"ok\"\n" ++
-    "    | _, _, _ => \"stale: \" ++ s.language ++ \" root \" ++ Nat.repr (Scry.CstStore.spanOf s 0).stop ++ \" of \" ++ Nat.repr (String.length src)\n"
-  match ← runProbe parseImports body with
-  | [m] => pure s!"{dir}/{name}: {unquote m}"
-  | ms => throw (IO.userError s!"expected one #eval message, got {ms.length}: {ms}")
+  let lines := (spill.splitOn "\n").toArray
+  let after (h : String) : Option String := do
+    let i ← lines.findIdx? (· == h)
+    lines[i + 1]?
+  let lang := (lines.find? (·.startsWith "language\t")).map (·.drop 9)
+  let bytes := after "bytes\t1"
+  let root := (lines.find? (·.startsWith "nodes\t")).bind fun h =>
+    (lines.findIdx? (· == h)).bind fun i => lines[i + 1]?
+  let (start, stop) := match root.map (·.splitOn "\t") with
+    | some [_, _, _, _, _, a, b] => (a.toNat!, b.toNat!)
+    | _ => (1, 0)
+  let tailWs := (src.toList.drop stop).all (fun c => c == ' ' || c == '\n' || c == '\r')
+  if lang == some "c_sharp" && bytes == some (toString src.utf8ByteSize) && start == 0 && tailWs then
+    pure s!"{dir}/{name}: ok"
+  else
+    pure s!"{dir}/{name}: stale (language {lang}, bytes {bytes} of {src.utf8ByteSize}, root {start}..{stop})"
 
 /-- The findings of the C# rule pack on a taint fixture, one `rule func arg` line each. -/
 def taintFindings (name : String) : IO (List String) := do
