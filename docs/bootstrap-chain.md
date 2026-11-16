@@ -486,3 +486,33 @@ compile a copy named `wizc.c`. **Found and not fixed:** an executable built in t
 dev environment carries that environment's RUNPATH (the cc wrapper adds the Nix
 profile's library directories), so a dev-shell build and a sandbox build of the same C
 differ; the chain uses only the Nix build, and the static release has no RUNPATH.
+
+### The Nix prototype: the static release from the Lean host (reference counting)
+
+`heavy --mem 3G nix build .#wizc-release` at this branch (nixpkgs `02c087f3`, the
+Lean host `packages.wiz` substituted from Cachix):
+
+| derivation | what it did | time |
+|---|---|---|
+| `wiz-selfhost-seed` | grail (Lean host) assembled `compiler.wiz`/`self.wiz`, built the stage-1 compiler, which printed `seed.c` (`--rc`, 14 MB) | 4 min 48 s |
+| `wizc-fixpoint` | static musl cc of `seed.c` as `wizc.c`, then `wizc --rc` on `self.wiz` | 9 min 8 s |
+| `wizc`, `wizc-release` | `self.c = seed.c` checked; tarball packed | seconds |
+
+* `compiler.wiz` and `self.wiz` assembled in the sandbox are byte-identical to the ones
+  `scripts/GenSelfhost.lean` wrote in both repro builds (`4a1ff239…`, `9aacf779…`), so
+  grail's assembly and the script's agree.
+* **Fixpoint across C libraries:** the static musl `wizc` prints exactly `seed.c`
+  (sha256 `de270e93…1dea`), the C the dynamically linked, glibc, Lean-built compiler
+  printed. `C*` does not depend on the libc either compiler ran on.
+* **Self-contained:** `wizc` (15,502,792 B, sha256 `02a751f9…4b87`) is
+  `statically linked`, has no program interpreter and no dynamic section, contains no
+  `/nix/store` string (the release derivation checks this), and its store path has no
+  references (`nix-store -q --references` is empty). It ran under `env -i` outside
+  Nix on a small program.
+* **The release:** `wizc-x86_64-linux.tar.gz`, 4.7 MB, sha256
+  `02b1a15655410072858d3371801607ee64a9bb35ddf730623acbba72d00e1587`
+  (`sha256-ArGhVlVBAHKFjTNxgBYH7mSpuzXd9zBiOsu6ctAOFYc=`).
+* **Fetching from any source:** after `nix store add-file` of the tarball under the
+  FOD's name, `fetchToolchain { commit; hash; }` built with substituters disabled and
+  no network: the fetch was satisfied by the local copy, and the unpacked `wizc` is
+  byte-identical to the release's.
