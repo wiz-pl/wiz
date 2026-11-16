@@ -481,6 +481,20 @@ def depMatchDecls : List (String × Bool) := [
     "  | .succ _, .zero, h => rfl\n  | .succ i, .succ n, h => ltBad i n h\n", false),
   ("def bz (b : Bool) : Bool.and b .false = .false := match b with\n  | .true => rfl\n  | .false => rfl\n", true)]
 
+/-- The dependent-matching gaps of the self-hosted frontend, pinned: the
+Lean frontend accepts each, the self-hosted one rejects it. (1) a scrutinee that is not
+a variable keeps the constant motive; (2) a variable pattern of a dependent split below
+the top binds the unrefined scrutinee; (3) an inductive family's indices are not
+abstracted in the motive. -/
+def depMatchGapHeader : String :=
+  "axiom bb : (n : Nat) → Nat.beq n n = .true\n" ++
+  "inductive V (A : Type) : Nat → Type where\n  | nil : V A Nat.zero\n" ++
+  "  | cons {n : Nat} (a : A) (rest : V A n) : V A (Nat.succ n)\n"
+def depMatchGaps : List (String × Bool × Bool) := [
+  ("def k1 (n : Nat) : Bool.and (Nat.beq n n) .false = .false := match Nat.beq n n with\n  | .true => rfl\n  | .false => rfl\n", true, false),
+  ("def k2 (a b : Nat) : Nat.beq b b = .true := match a, b with\n  | .zero, .zero => rfl\n  | _, m => bb m\n", true, false),
+  ("def k3 {n : Nat} (v : V Nat n) : Nat.beq n n = .true := match v with\n  | .nil => rfl\n  | .cons a r => bb _\n", true, false)]
+
 /-- (stage 21x) Constructor fields with quantities (`Desc.arg q S D`) and implicit
 constructor fields (at 0, filled in at the call, not named by patterns): the same
 verdicts in both frontends. -/
@@ -1698,6 +1712,8 @@ def selfHostGroup : Group where
         selfhostAgrees "" absurdUnitDecls },
     { name := "the self-hosted frontend: dependent pattern matching (lib/Word.wiz, lib/Vec.wiz)", run := fun _ =>
         selfhostAgrees "" depMatchDecls },
+    { name := "the self-hosted frontend: dependent matching's known gaps (non-variable scrutinee, variable pattern below the top, indices), pinned", run := fun _ =>
+        selfhostVerdicts depMatchGapHeader depMatchGaps },
     { name := "the self-hosted frontend: lib/Word.wiz's Nat lemmas (proofs by equations), as in the Lean frontend", run := fun _ => do
         let src ← IO.FS.readFile "lib/Word.wiz"
         -- (from the first lemma to the word types, which need more than the Prelude)
