@@ -219,15 +219,34 @@ structure Prepared where
 def somePrepared (p : Prepared) : IO (Option Prepared) := IO.pure (.some p)
 def nonePrepared : IO (Option Prepared) := IO.pure (.none : Option Prepared)
 
+-- the loader's graph before elaboration: the modules and the root's `import_c` headers.
+-- A cache lookup needs the key first; `moduleRootSourcesAs` only parses `import` lines,
+-- so it is cheap compared with checking the same modules.
+structure Graph where
+  tab : List ModSrc
+  headers : List Header
+
+def someGraph (g : Graph) : IO (Option Graph) := IO.pure (.some g)
+def noneGraph : IO (Option Graph) := IO.pure (.none : Option Graph)
+
 -- the frontend's loader (A14): `import M` is `M.wiz` under the `-I` roots, then the
 -- working directory; the root module is `Main`, its path the FILE the user named
-def prepare (roots : List String) (file : String) : IO (Option Prepared) :=
+def loadGraph (roots : List String) (file : String) : IO (Option Graph) :=
   IO.bind (readIf file) (fun t => match t with
-    | .none => nonePrepared
+    | .none => noneGraph
     | .some text => IO.bind (moduleHeaderTexts text) (fun hs =>
         IO.bind (moduleRootSourcesAs cats tokens roots "Main" file text) (fun tab =>
-          match modCheckRunH cats tokens hs tab (.cons "Main" .nil) with
-          | .mk run _ _ order => somePrepared (Prepared.mk tab run order))))
+          someGraph (Graph.mk tab hs))))
+
+def runGraph (g : Graph) : Prepared := match g with
+  | .mk tab hs => match modCheckRunH cats tokens hs tab (.cons "Main" .nil) with
+    | .mk run _ _ order => Prepared.mk tab run order
+
+-- the whole program: the loader, every module checked, and the run it produced
+def prepare (roots : List String) (file : String) : IO (Option Prepared) :=
+  IO.bind (loadGraph roots file) (fun g => match g with
+    | .none => nonePrepared
+    | .some g => somePrepared (runGraph g))
 
 -- the module `name`'s path (for a diagnostic; the name itself when there is no entry)
 def modFile (tab : List ModSrc) (name : String) : String := match modFind tab name with
@@ -604,10 +623,22 @@ def hashParts : List String → Nat → Nat
   | .nil, h => h
   | .cons s rest, h => hashParts rest (hashStep (charsOf s) (Nat.mod (Nat.add (Nat.mul h 16777619) 31) 4294967291))
 
-def keyOf (o : Opts) (kind : String) (p : Prepared) : String :=
-  Nat.toString (hashParts (.cons kind (.cons toolchainId
-    (.cons (Nat.toString (moduleGraphKey p.order p.tab))
-      (List.append o.backend (modPathsOf p.tab p.order))))) 2166136261)
+-- the `import_c` headers are read at check time, so their contents belong to the key (a
+-- changed header must not be served from a cache entry written for the old one)
+def headerHash : List Header → Nat → Nat
+  | .nil, h => h
+  | .cons (.mk n t) rest, h => headerHash rest (modHash (modHash h n) t)
+
+-- (the cache key) the graph alone: every module's name and text, the paths they were
+-- found at, the root's header texts, and the backend flags. This is the same before and
+-- after elaboration, so a warm `check`/`run` can answer it without running a command.
+def keyOfGraph (o : Opts) (kind : String) (g : Graph) : String := match g with
+  | .mk tab hs =>
+    let names := tabNames tab;
+    Nat.toString (hashParts (.cons kind (.cons toolchainId
+      (.cons (Nat.toString (moduleGraphKey names tab))
+        (.cons (Nat.toString (headerHash hs 17))
+          (List.append o.backend (modPathsOf tab names)))))) 2166136261)
 
 def cachePath (dir key ext : String) : String :=
   String.append dir (String.append "/" (String.append key ext))
@@ -668,6 +699,23 @@ def cacheWriteDo (dir key ext : String) (status : Nat) (payload : String) : IO B
 def cacheWrite (o : Opts) (key ext : String) (status : Nat) (payload : String) : IO Bool := match o.cache with
   | .none => IO.pure (Bool.false)
   | .some dir => cacheWriteDo dir key ext status payload
+
+-- `--no-cache` paths: no key, no read, no write (the caller decides once whether the run
+-- is cached, and these keep the cache out of the warm/cold split)
+def cacheReadIf (o : Opts) (use : Bool) (key ext : String) : IO (Option Cached) := match use with
+  | .true => cacheRead o key ext
+  | .false => noneCached
+
+def cacheWriteIf (o : Opts) (use : Bool) (key ext : String) (status : Nat) (payload : String) : IO Bool :=
+  match use with
+  | .true => cacheWrite o key ext status payload
+  | .false => IO.pure (Bool.false)
+
+-- `-v` still says a run was not served from the cache; without a cache there is no key,
+-- so the line names the reason instead
+def cacheMissMsg (o : Opts) (use : Bool) (key : String) : IO Unit := match use with
+  | .true => if o.verbose then IO.ePrintln (String.append "cache miss: " key) else IO.pure ()
+  | .false => if o.verbose then IO.ePrintln "cache miss: no-cache" else IO.pure ()
 
 -- ------------------------------------------------------------------------------------
 -- The command line
@@ -836,37 +884,50 @@ def statusOf (ds : List Diag) : Nat := match hasError ds with
 
 def linesOf (r : Run) : List String := List.reverseOf (Run.out r) .nil
 
-def checkPrepared (o : Opts) (p : Prepared) : IO Unit := do
-  let key := keyOf o "check" p;
-  cached ← cacheRead o key ".check";
-  match cached with
-  | .some (.mk st payload) => do
-    if o.verbose then IO.ePrintln (String.append "cache hit: " key) else IO.pure ();
-    let ds := diagsOf p.tab (mapChars (fun cs => String.mk cs) (splitLines payload));
-    emitDiags o ds;
-    match Nat.beq st 0 with
-    | .true => IO.pure ()
-    | .false => Process.exit 1
-  | .none => do
-    if o.verbose then IO.ePrintln (String.append "cache miss: " key) else IO.pure ();
-    let lines := linesOf p.run;
-    let ds := diagsOf p.tab lines;
-    let st := statusOf ds;
-    cacheWrite o key ".check" st (linesPayload lines);
-    emitDiags o ds;
-    match Nat.beq st 0 with
-    | .true => IO.pure ()
-    | .false => Process.exit 1
+def checkGraph (o : Opts) (g : Graph) : IO Unit := match g with
+  | .mk tab _ => match o.cache with
+    -- no cache: do not even build the key (it hashes every module's text)
+    | .none => do
+      cacheMissMsg o .false "";
+      let p := runGraph g;
+      let ds := diagsOf p.tab (linesOf p.run);
+      let st := statusOf ds;
+      emitDiags o ds;
+      match Nat.beq st 0 with
+      | .true => IO.pure ()
+      | .false => Process.exit 1
+    | .some _ => do
+      let key := keyOfGraph o "check" g;
+      cached ← cacheRead o key ".check";
+      match cached with
+      | .some (.mk st payload) => do
+        if o.verbose then IO.ePrintln (String.append "cache hit: " key) else IO.pure ();
+        let ds := diagsOf tab (mapChars (fun cs => String.mk cs) (splitLines payload));
+        emitDiags o ds;
+        match Nat.beq st 0 with
+        | .true => IO.pure ()
+        | .false => Process.exit 1
+      | .none => do
+        if o.verbose then IO.ePrintln (String.append "cache miss: " key) else IO.pure ();
+        let p := runGraph g;
+        let lines := linesOf p.run;
+        let ds := diagsOf p.tab lines;
+        let st := statusOf ds;
+        cacheWrite o key ".check" st (linesPayload lines);
+        emitDiags o ds;
+        match Nat.beq st 0 with
+        | .true => IO.pure ()
+        | .false => Process.exit 1
 
 def missingFile (file : String) : IO Unit := do
   IO.ePrintln (diagLine (Diag.mk .error file 1 1 "no such file" ""));
   Process.exit 1
 
 def checkCmd (o : Opts) (file : String) : IO Unit := do
-  prep ← prepare o.roots file;
-  match prep with
+  gopt ← loadGraph o.roots file;
+  match gopt with
   | .none => missingFile file
-  | .some p => checkPrepared o p
+  | .some g => checkGraph o g
 
 -- ------------------------------------------------------------------------------------
 -- build: the C, to OUT
@@ -951,19 +1012,19 @@ def compileAndRun (o : Opts) (key : String) (ctext : String) (extra : List Strin
         IO.ePrintln (String.append "error: the program exited with code " (Nat.toString (exitCodeOf st2)));
         Process.exit 1
 
-def runPrepared (o : Opts) (p : Prepared) (extra : List String) : IO Unit := do
-  let key := keyOf o "c" p;
-  cached ← cacheRead o key ".c";
+def runPrepared (o : Opts) (useCache : Bool) (cKey checkKey : String) (p : Prepared)
+    (extra : List String) : IO Unit := do
+  cached ← cacheReadIf o useCache cKey ".c";
   match cached with
   | .some (.mk st ctext) => do
-    if o.verbose then IO.ePrintln (String.append "cache hit: " key) else IO.pure ();
-    compileAndRun o key ctext extra
+    if o.verbose then IO.ePrintln (String.append "cache hit: " cKey) else IO.pure ();
+    compileAndRun o cKey ctext extra
   | .none => do
-    if o.verbose then IO.ePrintln (String.append "cache miss: " key) else IO.pure ();
+    cacheMissMsg o useCache cKey;
     let lines := linesOf p.run;
     let ds := diagsOf p.tab lines;
     let st := statusOf ds;
-    cacheWrite o (keyOf o "check" p) ".check" st (linesPayload lines);
+    cacheWriteIf o useCache checkKey ".check" st (linesPayload lines);
     match Nat.beq st 0 with
     | .false => do emitErrors ds; Process.exit 1
     | .true => do
@@ -973,14 +1034,23 @@ def runPrepared (o : Opts) (p : Prepared) (extra : List String) : IO Unit := do
       | .nil => do
         let ctext := String.append (commentsOf (mapS (fun l => stripAt l) lines))
           (docsText (genProgramArgs o.backend (modTextOr p.tab "Main" "") (Run.gs p.run)));
-        cacheWrite o key ".c" 0 ctext;
-        compileAndRun o key ctext extra
+        cacheWriteIf o useCache cKey ".c" 0 ctext;
+        compileAndRun o cKey ctext extra
 
 def runCmd (o : Opts) (file : String) (extra : List String) : IO Unit := do
-  prep ← prepare o.roots file;
-  match prep with
+  gopt ← loadGraph o.roots file;
+  match gopt with
   | .none => missingFile file
-  | .some p => runPrepared o p extra
+  | .some g => match o.cache with
+    | .none => runPrepared o .false "nocache" "" (runGraph g) extra
+    | .some _ => do
+      let cKey := keyOfGraph o "c" g;
+      cached ← cacheRead o cKey ".c";
+      match cached with
+      | .some (.mk st ctext) => do
+        if o.verbose then IO.ePrintln (String.append "cache hit: " cKey) else IO.pure ();
+        compileAndRun o cKey ctext extra
+      | .none => runPrepared o .true cKey (keyOfGraph o "check" g) (runGraph g) extra
 
 -- ------------------------------------------------------------------------------------
 -- the one-shot mode: input.wiz → standard output (the fixpoint and the tests), the

@@ -333,9 +333,15 @@ self-hosted frontend does the first of those, and only for the ordinary declarat
   behaviour) is one module, `input`: private names are visible throughout the file.
 * **Cache.** A module's elaborated output is unchanged, so the cache's module key/graph
   key (`moduleGraphKey`, a hash of the modules' names and texts) stays as it is; the
-  visibility check is a lookup on every elaboration, so a warm cache hit can only replay
-  the diagnostics of the same graph (the key covers every module's text, and the toolchain
-  id every selfhost source).
+  visibility check is a lookup on every elaboration, so a warm cache hit replays the
+  diagnostics of the same graph (the key covers every module's text, and the toolchain
+  id every selfhost source). The driver builds that key from the loader's discovery
+  table before elaborating (`tabNames`/`keyOfGraph` in `Cli.wiz`, plus the root's
+  `import_c` header texts), so a warm `check`/`run` repeats no command; `--no-cache`
+  does not construct the key at all. Before this, `prepare` elaborated the graph first
+  and the hit only saved the rendering, so a warm check cost the same as a cold one
+  (measured in `bench/selfhost-bench.py`: compiler.wiz warm 10.6 s vs cold 38.3 s after
+  the fix; 1.8x the host's RSS, 1.2x its cold time).
 
 **Left for later slices.** Constructor- and field-level `private` (`| private c`,
 `private f : T`, `private mk ::`) is still parsed and *stripped*: it is not a
