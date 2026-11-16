@@ -98,6 +98,8 @@ line below.
 * [The value-level semantics matrix](semantics-matrix.md): every numeric and textual
   boundary, with the value the spec asks for and which backends were compared
 * [Stage 29: native data structures](stages/29-natives.md): word arrays, word maps, interned strings
+* [Stage 34: Clash-style signals](stages/34-hdl-signals.md): `Signal d A` as a ν-stream
+  over the HDL's `Circuit`, with registers, Mealy machines, bundles and the bridge theorem
 * [Libraries](libraries.md)
 * [Reference manual](https://wiz-pl.github.io/wiz/docs/reference.html): every
   standard-library declaration with its full signature, doc comment and class instances,

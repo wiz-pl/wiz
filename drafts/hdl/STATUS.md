@@ -12,6 +12,12 @@ netlist interpreter, Verilog) is library code, checked and tested (`lake test --
 examples in `examples/hdl.wiz`); `Synth.wiz` keeps the design notes and `Circuit.sim` over
 `Signal`.
 
+**Revived (2026-11-17, stage 34a):** the stream half of `Signal.wiz` is library code in
+`lib/Hdl/Signal.wiz` (`import Hdl.Signal`), on `ClockDomain` and lib/BitVec rather than
+`Shim`/`Bits`, with `Signal.ofCircuit` bridging to `Circuit` and its proof against
+`Circuit.trace`; tests in the `hdl-signal` group, docs/stages/34-hdl-signals.md.
+`Signal.fix` is still wishful (sized `scofix`, lane L2 of wiz-notes/clash-hdl-plan.md).
+
 **Drift (2026-11-10):** the drafts predate lib/BitVec.wiz (H0c, 22h) and the 22a Nat natives:
 `Shim.wiz` now redeclares `Nat.mod`, `Nat.div`, … (errors), and `Bits.wiz` declares its own
 `BitVec`, which clashes with lib's once `Synth` imports `Hdl.Core`. The fix is to drop the

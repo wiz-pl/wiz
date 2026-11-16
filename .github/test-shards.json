@@ -64,6 +64,7 @@
     "=grail-jobs",
     "=grail-vendor",
     "=hdl",
+    "=hdl-signal",
     "infoview",
     "=json",
     "language",
