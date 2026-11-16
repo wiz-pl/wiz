@@ -1,21 +1,46 @@
 #!/bin/sh
-# Rebuild the fixture archives and their hashes. Deterministic: the same sources give
-# the same bytes (fixed mtime, owners, sorted members, gzip -n), so this is safe to run.
+# Render the fixture index into OUT: the release archives and the index entries with
+# their hashes. Nothing generated is committed; the `grail-deps` tests run this into a
+# fresh temporary directory for each case (Tests/Grail.lean, `indexFixture`).
+#
+#   1. sources/NAME-VERSION/  -> OUT/packages/NAME-VERSION.tar.gz, deterministically
+#   2. entries/NAME.sexpr.in  -> OUT/index/NAME.sexpr, each @SHA:NAME-VERSION@ filled in
+#   3. registry.sexpr         -> OUT/registry.sexpr
+#
+# Deterministic: the same sources give the same bytes (sorted members, fixed mtime and
+# owners, `gzip -n`, and modes normalised to 644/755, so a read-only copy such as the Nix
+# store gives the same archive as a checkout), so the hashes are a function of the
+# sources. Needs GNU tar.
+#
+#   usage: Tests/fixtures/grail-index/make.sh OUT
 set -eu
-cd "$(dirname "$0")"
-mkdir -p packages
+here=$(cd "$(dirname "$0")" && pwd)
+out=${1:?usage: make.sh OUT}
+mkdir -p "$out/packages" "$out/index"
+out=$(cd "$out" && pwd)
+cd "$here"
+
 for src in sources/*/; do
-  name=${src#sources/}
-  name=${name%/}
-  tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
-    -C sources -cf - "$name" | gzip -n > "packages/$name.tar.gz"
+  rel=${src#sources/}
+  rel=${rel%/}
+  tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --mode=u+w,go-w,a+rX \
+    -C sources -cf - "$rel" | gzip -n > "$out/packages/$rel.tar.gz"
 done
 
-sha() { sha256sum "packages/$1-$2.tar.gz" | cut -d' ' -f1; }
+for tmpl in entries/*.sexpr.in; do
+  base=${tmpl##*/}
+  base=${base%.sexpr.in}
+  text=$(cat "$tmpl")
+  for src in sources/*/; do
+    rel=${src#sources/}
+    rel=${rel%/}
+    sha=$(sha256sum "$out/packages/$rel.tar.gz" | cut -d' ' -f1)
+    text=$(printf '%s\n' "$text" | sed "s|@SHA:$rel@|$sha|g")
+  done
+  case "$text" in
+    *@SHA:*) echo "make.sh: $tmpl names a release with no sources/ directory" >&2; exit 1 ;;
+  esac
+  printf '%s\n' "$text" > "$out/index/$base.sexpr"
+done
 
-sed -i "s/@STD_0_1_0_SHA@/$(sha std 0.1.0)/" index/std.sexpr
-sed -i "s/@TEXT_1_0_0_SHA@/$(sha text 1.0.0)/" index/text.sexpr
-sed -i "s/@TEXT_1_1_0_SHA@/$(sha text 1.1.0)/" index/text.sexpr
-sed -i "s/@GREET_1_0_0_SHA@/$(sha greet 1.0.0)/" index/greet.sexpr
-sed -i "s/@GREET_1_2_0_SHA@/$(sha greet 1.2.0)/" index/greet.sexpr
-sed -i "s/@GREET_2_0_0_SHA@/$(sha greet 2.0.0)/" index/greet.sexpr
+cp registry.sexpr "$out/registry.sexpr"

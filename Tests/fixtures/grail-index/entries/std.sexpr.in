@@ -4,5 +4,5 @@
     (repo "https://example.org/wiz/std")
     (version "0.1.0"
       (source "packages/std-0.1.0.tar.gz")
-      (sha256 "d0dabcba92571bb1cd963eb4ff4ba08a00c5e169f086256151a77a7a06cef370")
+      (sha256 "@SHA:std-0.1.0@")
       (deps))))

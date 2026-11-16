@@ -272,7 +272,8 @@
             };
         in { inherit wiz unwrapped tower tests wiz-nvim nvim-wiz; default = wiz; };
     in {
-      packages = forAll packagesFor;
+      # plus the generated docs and test data (nix/generated.nix), which are never committed
+      packages = forAll (pkgs: packagesFor pkgs // import ./nix/generated.nix { inherit pkgs; });
 
       apps = forAll (pkgs:
         let

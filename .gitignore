@@ -19,6 +19,17 @@ __pycache__/
 # tower: a developer's own toolchain override (docs/stages/26-tower.md, 26a)
 wiz-toolchain.local
 
+# generated, never committed (built by Nix, CI or the tests themselves):
+# the semantics matrix (`nix build .#semantics-matrix`, scripts/gen-semantics-matrix.py)
+/docs/semantics-matrix.md
+/Tests/Semantics/
+# notebook pages (`nix build .#notebook-pages`, tools/jupyter/export-notebooks.sh)
+/docs/notebooks/*.html
+!/docs/notebooks/index.html
+# the grail-index fixture's archives and index (Tests/fixtures/grail-index/make.sh OUT)
+/Tests/fixtures/grail-index/packages/
+/Tests/fixtures/grail-index/index/
+
 # nightly benchmark outputs (artifacts; see .github/workflows/bench.yml)
 bench-out/
 bench/history.jsonl

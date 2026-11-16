@@ -1714,13 +1714,20 @@ def registryTree : IO (System.FilePath × System.FilePath × String × Toolchain
     ("app.wiz", "import Greet.Hello\n#eval hello + 1\n")]
   pure (root, dir, sha, { cacheDir := some cache })
 
-/-- The checked-in local index fixture (`Tests/fixtures/grail-index`): one `index/`
-directory of S-expressions, relative `source` paths and their archives. Hermetic: no git,
-no network, no generated tarballs. -/
+/-- The local index fixture (`Tests/fixtures/grail-index`): one `index/` directory of
+S-expressions, relative `source` paths and their archives. The archives and the hashes in
+`index/` are generated, not committed: each call renders the fixture's sources and entry
+templates into a fresh temporary directory with its `make.sh` (deterministic: tar with
+fixed metadata, `gzip -n`). Hermetic: no git, no network. -/
 def indexFixture : IO System.FilePath := do
-  let p ← IO.FS.realPath "Tests/fixtures/grail-index"
+  let src ← IO.FS.realPath "Tests/fixtures/grail-index"
+  unless ← (src / "make.sh").pathExists do
+    throw (IO.userError s!"{src}: no make.sh (run the tests from the repository root)")
+  let out ← IO.FS.createTempDir
+  let _ ← runIn src "sh" [(src / "make.sh").toString, out.toString]
+  let p ← IO.FS.realPath out
   unless ← (p / "index").isDir do
-    throw (IO.userError s!"{p}: no index/ directory (run the tests from the repository root)")
+    throw (IO.userError s!"{p}: make.sh wrote no index/ directory")
   pure p
 
 /-- The checked-in example index (`examples/grail-index`): the `grail-index` repository

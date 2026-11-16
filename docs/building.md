@@ -296,8 +296,8 @@ grail build
 `grail cache path|list|verify` inspects the shared cache; `verify` re-hashes every
 archive and checks every unpacked tree's stamp, and exits 1 on a corrupt entry.
 
-The hermetic fixture is `Tests/fixtures/grail-index/` (`index/NAME.sexpr`,
-`packages/NAME-V.tar.gz`, `sources/` and `make.sh`); `=grail-deps` covers exact/range
+The hermetic fixture is `Tests/fixtures/grail-index/` (`sources/`, `entries/NAME.sexpr.in`
+and `make.sh`, which renders `index/` and `packages/` into a directory); `=grail-deps` covers exact/range
 versions, the transitive closure, a missing package, a hash mismatch, stale locks,
 `fetch --locked` with cold/warm caches, scoped `index/@org/name.sexpr` files, index
 rollback, and lock v3 (round-trip, old locks, upgrade, `grail.local.wiz` overrides).
@@ -306,8 +306,9 @@ rollback, and lock v3 (round-trip, old locks, upgrade, `grail.local.wiz` overrid
 includes three signed-snapshot cases (a throwaway Ed25519 key via `ssh-keygen`; they
 skip when it is absent): the lock records the fingerprint/sequence, offline
 verification from the pinned key, and refusal of a tampered or re-signed snapshot, an
-expired key, a lower sequence and a same-sequence rewrite. Rebuild the archives with
-`cd Tests/fixtures/grail-index && ./make.sh`. There is no network in these tests.
+expired key, a lower sequence and a same-sequence rewrite. The archives and index are
+not committed: each case runs `Tests/fixtures/grail-index/make.sh TMPDIR` (GNU tar,
+`gzip -n`, deterministic). There is no network in these tests.
 
 There is also a complete example **index repository** at `examples/grail-index/`
 (`index.wiz`, `registry.sexpr`, `index/`, `entries/`, `sources/`, `packages/`, `make.sh`)
