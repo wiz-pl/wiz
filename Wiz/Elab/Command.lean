@@ -779,7 +779,8 @@ the colon moves the (trailing) explicit binders after it first (`varyParamsAsEqn
 #267); the rest is `elabDefEqnsCore`. -/
 def elabDefEqns (name : Name) (cmd : Syntax) (isPartial : Bool := false) :
     ElabM R (Term R × Term R × Option (Term R)) :=
-  elabDefEqnsCore name ((varyParamsAsEqns? name cmd).getD cmd) isPartial
+  -- (a partial definition's recursive calls may already change any parameter)
+  elabDefEqnsCore name (if isPartial then cmd else (varyParamsAsEqns? name cmd).getD cmd) isPartial
 
 /-- Does the identifier `n` occur anywhere in `stx`? -/
 partial def mentionsIdent (n : Name) (stx : Syntax) : Bool :=

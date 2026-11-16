@@ -305,10 +305,11 @@ are not written in the match (as Lean generalises them): `def f (b : Bool) (h : 
 A parameter *before* the colon that a recursive call changes is moved after the colon
 (the trailing explicit binders become match columns), so `def run (s : Nat) : List Nat →
 Nat | .nil => s | .cons x xs => run (Nat.add s x) xs` is accepted. Index *variables*
-are generalised by the motive, which is Cockx's solution rule without an equation. Other indices get an equation `idx_c = ξ`, which
-observational equality computes. When it contains `False`, the case is closed
-automatically with `absurd`. Recursive calls on a recursive field of the first
-argument compile through `T.rec`, and the other arguments may change between calls.
+are generalised by the motive, which is Cockx's solution rule without an equation. Other
+indices get an equation `idx_c = ξ`, which observational equality computes. When it
+contains `False`, the case is closed automatically with `absurd`. Recursive calls on a
+recursive field of the first argument compile through `T.rec`, and the other arguments
+may change between calls.
 
 The solution rule *with* an equation is supported too (`tail`, `zip`). When the
 computed equation contains `y = t` for a constructor field `y`, the later fields are

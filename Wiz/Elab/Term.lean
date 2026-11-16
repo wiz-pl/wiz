@@ -3195,8 +3195,10 @@ partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Ela
   -- written `match b, h with | .true, h => … | .false, h => …`.
   let mut targets := ts.toList
   let mut extraNames : List Name := []
-  for lvl in [0:ctx.lvl] do
-    let idx := ctx.lvl - lvl - 1
+  -- (oldest first: a later hypothesis may mention an earlier one that is reverted, so
+  -- by the time it is reached, the earlier one is in `targets` too)
+  for idx in [0:ctx.lvl] do
+    let lvl := ctx.lvl - idx - 1
     -- (the dependency is on the type with its solved holes replaced: `t : ?m b` with
     -- `?m` solved to a constant is not about `b`; a type that is still a hole says
     -- nothing either, and reverting it would generalise the hole itself)
@@ -3211,7 +3213,9 @@ partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Ela
       let x := ctx.names[idx]!
       ts := ts.push (.var idx)
       binders := binders.push ("x✝", quote g ctx.lvl ctx.types[idx]!)
-      linearScruts := linearScruts.push false
+      -- (a reverted hypothesis keeps its quantity: a linear one is bound at 1 again,
+      -- so each branch may use it once)
+      linearScruts := linearScruts.push (ctx.linearLvls.contains lvl)
       extraNames := extraNames ++ [x]
       targets := targets ++ [.var idx]
   let clauses := if extraNames.isEmpty then clauses else
