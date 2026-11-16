@@ -203,7 +203,7 @@ jobs:
         run: |
           mkdir -p .lake/build/bin
           ln -sf "${{ steps.nix.outputs.tests }}/bin/tests" .lake/build/bin/tests
-          scripts/trust-ledger.sh --check
+          scripts/trust-ledger.sh --check --strict-legacy
           Tests/trust-ledger/run.sh
           scripts/trust-ledger-merge_test.sh
           python3 scripts/host-unsafe-ledger.py --check
