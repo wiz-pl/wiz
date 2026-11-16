@@ -26,9 +26,19 @@ export function applyPatches(root, patches, parse = parseHtml) {
         n.textContent = p.text;
         break;
       }
-      case "setAttr":
-        nodeAt(root, p.path).setAttribute(p.name, p.value);
+      case "setAttr": {
+        const n = nodeAt(root, p.path);
+        n.setAttribute(p.name, p.value);
+        // A form control's `value` attribute is only its *default* value.  Once the
+        // user has edited the control the live `value` property keeps what they chose
+        // (the HTML "dirty value flag"), so a patch that only calls setAttribute
+        // leaves a slider showing the old value.  Mirror the attribute into the
+        // property; no minidom test double has one, so only a real DOM catches this.
+        if (p.name === "value" && "value" in n) {
+          try { n.value = p.value; } catch { /* file inputs refuse a non-empty value */ }
+        }
         break;
+      }
       case "removeAttr":
         nodeAt(root, p.path).removeAttribute(p.name);
         break;
