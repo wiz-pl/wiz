@@ -460,28 +460,19 @@ def Scry.Repl.analyzeUnit (rules : Option String) (u : Scry.Repl.Unit) :
       IO.println ("taint: " ++ u.cst ++ ": " ++ e);
       IO.pure .none
     | .ok cst => do
-      pack ← Scry.Repl.optEIO "taint" (Scry.loadTaintPack rules);
-      match pack with
-      | .none => IO.pure .none
-      | .some pack => do
-        let c := Scry.Cst.ofStore source cst;
-        let tu := Scry.lowerTU u.source c;
-        let prog := Wil.program tu.funcs;
-        let pr := Scry.analyze prog pack;
-        let findings := Scry.programFindings pr;
-        let origins := Scry.originEntries u.source source tu.funcs;
-        let boundaries := Scry.boundaryFindings u.source source tu;
-        let memory := Scry.memoryFindings origins pr.warnings;
-        let certificates := List.map (fun f => Scry.certifyFinding pr f) findings;
-        let checks := List.map Scry.certVerified certificates;
-        let errs := Scry.CstStore.errorCount cst;
-        match Nat.lt 0 errs with
-        | .true => do
-          IO.println ("taint: " ++ u.source ++ ": " ++ Nat.repr errs
-            ++ " parse error node(s); load a clean file");
-          IO.pure .none
-        | .false => IO.pure (.some (Scry.TaintReport.mk u.source errs pack tu findings checks
-            certificates origins boundaries memory pr.pointsTo))
+      let errs := Scry.CstStore.errorCount cst;
+      match Nat.lt 0 errs with
+      | .true => do
+        IO.println ("taint: " ++ u.source ++ ": " ++ Nat.repr errs
+          ++ " parse error node(s); load a clean file");
+        IO.pure .none
+      | .false => do
+        -- the same pipeline as `scry taint` (`Scry.analyzeStore`), from the cached store
+        let o := Scry.TaintOpts.mk u.source rules .none .false .false .false .false .none .none
+          .none (.some 300) (.some 2000000) .none .false;
+        startMs ← Scry.nowMs;
+        Scry.Repl.optEIO "taint" (Scry.analyzeStore o startMs source (Scry.lineStartsOf source)
+          cst (Scry.CstStore.nodeCount cst))
 
 def Scry.Repl.taintJson (ru : Scry.Repl.ReportUnit) : Json :=
   let rep := ru.report;
