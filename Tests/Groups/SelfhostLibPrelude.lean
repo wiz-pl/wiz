@@ -98,6 +98,19 @@ def main : IO Unit := do
   IO.println (Float64.toString (Float64.ofNat 3))
 "
 
+/-- `build` of a program the backend refuses: the driver reports the refusal (the
+backend's `#error` line, as `error: …`), exits 1, and writes neither the C file nor a
+cache entry (selfhost/Cli.wiz, `cErrors`). -/
+def libPreludeRefused (exe : System.FilePath) (prog want : String) : IO Unit := do
+  let sh ← libPreludeArgs #[]
+  let dir ← cliDiffInit #[("prog.wiz", prog)]
+  let s ← cliDiffExec exe dir sh #["build", "prog.wiz", "-o", "prog.c"]
+  checkEq 1 s.code
+  cliCheck s.err want "the refusal"
+  check (!((s.err.splitOn "#error").length > 1)) s!"the refusal is printed as a C line:\n{s.err}"
+  check (!(← (dir / "prog.c").pathExists)) "build wrote the C file"
+  check ((← cliDiffEntries (dir / "home" / ".cache" / "wiz")) == 0) "build wrote a cache entry"
+
 def libPreludeGroup : Group where
   name := "selfhost-lib-prelude"
   exercise := "stage 21 (A14): the self-hosted backend on lib/Prelude.wiz"
@@ -151,18 +164,12 @@ def libPreludeGroup : Group where
           checkEq ["18446744073709551616", "true"] (hl.take 2)
           checkEq ["0", "false"] (sl.take 2)
           checkEq (hl.drop 2) (sl.drop 2) },
-    { name := "build: an extern of a wiz_ function rt.c lacks is an error naming it", run := fun _ => withSelfhostCli fun exe => do
-        let sh ← libPreludeArgs #[]
-        let dir ← cliDiffInit #[("prog.wiz", libPreludeMissing)]
-        let s ← cliDiffExec exe dir sh #["build", "prog.wiz", "-o", "prog.c"]
-        let c ← IO.FS.readFile (dir / "prog.c")
-        cliCheck (s.err ++ c) "#error extern \"wiz_sys_errno\" myErrno: the self-hosted runtime (selfhost/rt.c) has no wiz_sys_errno" "the refusal" },
-    { name := "build: an extern of a native's name with another shape is an error naming both", run := fun _ => withSelfhostCli fun exe => do
-        let sh ← libPreludeArgs #[]
-        let dir ← cliDiffInit #[("prog.wiz", libPreludeMismatch)]
-        let s ← cliDiffExec exe dir sh #["build", "prog.wiz", "-o", "prog.c"]
-        let c ← IO.FS.readFile (dir / "prog.c")
-        cliCheck (s.err ++ c) "is the runtime's native Nat.toString of 1 argument" "the refusal" }
+    { name := "build: an extern of a wiz_ function rt.c lacks is an error naming it (exit 1, no C, no cache)", run := fun _ => withSelfhostCli fun exe =>
+        libPreludeRefused exe libPreludeMissing
+          "error: extern \"wiz_sys_errno\" myErrno: the self-hosted runtime (selfhost/rt.c) has no wiz_sys_errno" },
+    { name := "build: an extern of a native's name with another shape is an error naming both (exit 1, no C, no cache)", run := fun _ => withSelfhostCli fun exe =>
+        libPreludeRefused exe libPreludeMismatch
+          "is the runtime's native Nat.toString of 1 argument" }
   ]
 
 builtin_initialize registerGroup libPreludeGroup
