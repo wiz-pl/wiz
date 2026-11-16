@@ -1,0 +1,217 @@
+{
+  "schema": 1,
+  "corpus_version": 1,
+  "created": "2026-11-15T21:17:51Z",
+  "generator": "scripts/mem-bench.py",
+  "commit": "aac54906d9e19cb01f905069e6cc773f6c429f57",
+  "branch": "agent/mem-bench",
+  "wiz": ".lake/build/bin/wiz",
+  "checker": "cached",
+  "reps": 3,
+  "interval_s": 0.02,
+  "tolerance_pct": 25,
+  "machine": {
+    "host": "noobnoob",
+    "kernel": "7.3.3",
+    "machine": "x86_64",
+    "cpus": 32,
+    "cpu_model": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+    "mem_total_mib": 27690,
+    "python": "3.14.10"
+  },
+  "invocations": {
+    "check-prelude": {
+      "samples_mib": [
+        96.2,
+        98.9,
+        99.3
+      ],
+      "peak_mib": 99.3,
+      "median_mib": 98.9,
+      "argv": [
+        "{wiz}",
+        "check",
+        "--no-cache",
+        "lib/Prelude.wiz"
+      ],
+      "command": [
+        "/workspace/wt/mem-bench/.lake/build/bin/wiz",
+        "check",
+        "--no-cache",
+        "lib/Prelude.wiz"
+      ],
+      "cap_mib": 1024,
+      "note": "cold check of the standard prelude (the hard-cap example: must fit in 1 GiB)",
+      "reps": 3,
+      "exit": 0,
+      "timed_out": false,
+      "wall_s": 1.14
+    },
+    "check-std": {
+      "samples_mib": [
+        104.2,
+        101.7,
+        103.9
+      ],
+      "peak_mib": 104.2,
+      "median_mib": 103.9,
+      "argv": [
+        "{wiz}",
+        "check",
+        "--no-cache",
+        "lib/Std.wiz"
+      ],
+      "command": [
+        "/workspace/wt/mem-bench/.lake/build/bin/wiz",
+        "check",
+        "--no-cache",
+        "lib/Std.wiz"
+      ],
+      "cap_mib": 1024,
+      "note": "cold check of the largest single standard-library module",
+      "reps": 3,
+      "exit": 0,
+      "timed_out": false,
+      "wall_s": 1.748
+    },
+    "check-text": {
+      "samples_mib": [
+        104.4,
+        102.7,
+        103.2
+      ],
+      "peak_mib": 104.4,
+      "median_mib": 103.2,
+      "argv": [
+        "{wiz}",
+        "check",
+        "--no-cache",
+        "lib/Text.wiz"
+      ],
+      "command": [
+        "/workspace/wt/mem-bench/.lake/build/bin/wiz",
+        "check",
+        "--no-cache",
+        "lib/Text.wiz"
+      ],
+      "cap_mib": 1024,
+      "note": "cold check of Text (string/list heavy)",
+      "reps": 3,
+      "exit": 0,
+      "timed_out": false,
+      "wall_s": 1.467
+    },
+    "check-json": {
+      "samples_mib": [
+        101.9,
+        104.9,
+        100.5
+      ],
+      "peak_mib": 104.9,
+      "median_mib": 101.9,
+      "argv": [
+        "{wiz}",
+        "check",
+        "--no-cache",
+        "lib/Json.wiz"
+      ],
+      "command": [
+        "/workspace/wt/mem-bench/.lake/build/bin/wiz",
+        "check",
+        "--no-cache",
+        "lib/Json.wiz"
+      ],
+      "cap_mib": 1024,
+      "note": "cold check of the JSON parser/serialiser",
+      "reps": 3,
+      "exit": 0,
+      "timed_out": false,
+      "wall_s": 2.26
+    },
+    "check-example-hdl": {
+      "samples_mib": [
+        139.8
+      ],
+      "peak_mib": 139.8,
+      "median_mib": 139.8,
+      "argv": [
+        "{wiz}",
+        "check",
+        "--no-cache",
+        "examples/hdl-temporal.wiz"
+      ],
+      "command": [
+        "/workspace/wt/mem-bench/.lake/build/bin/wiz",
+        "check",
+        "--no-cache",
+        "examples/hdl-temporal.wiz"
+      ],
+      "cap_mib": 2048,
+      "note": "cold check of a large example (the temporal-properties UART, 294 lines)",
+      "reps": 1,
+      "exit": 0,
+      "timed_out": false,
+      "wall_s": 35.086
+    },
+    "build-stdlib-bench": {
+      "samples_mib": [
+        222.0,
+        183.6
+      ],
+      "peak_mib": 222.0,
+      "median_mib": 202.8,
+      "argv": [
+        "{wiz}",
+        "build",
+        "--no-cache",
+        "bench/stdlib-bench.wiz",
+        "-o",
+        "{out}"
+      ],
+      "command": [
+        "/workspace/wt/mem-bench/.lake/build/bin/wiz",
+        "build",
+        "--no-cache",
+        "bench/stdlib-bench.wiz",
+        "-o",
+        "/workspace/wt/mem-bench/bench/.build/mem/program",
+        "--cflags",
+        "-I/nix/store/58cds16cp7zyiywadnfih6x99vd7f9fq-gmp-with-cxx-6.3.0-dev/include",
+        "--ldflags",
+        "-L/nix/store/3z4n8rmy4cfp0km5jaczz7f404j9sa64-gmp-with-cxx-6.3.0/lib -Wl,-rpath,/nix/store/3z4n8rmy4cfp0km5jaczz7f404j9sa64-gmp-with-cxx-6.3.0/lib"
+      ],
+      "cap_mib": 2048,
+      "note": "build (elaborate, lower, emit C, cc) of the standard-library benchmark",
+      "reps": 2,
+      "exit": 0,
+      "timed_out": false,
+      "wall_s": 145.831
+    },
+    "selfhost-checker": {
+      "samples_mib": [
+        412.5,
+        408.6
+      ],
+      "peak_mib": 412.5,
+      "median_mib": 410.6,
+      "argv": [
+        "{checker}"
+      ],
+      "command": [
+        "/workspace/wt/mem-bench/bench/.build/mem/selfhost-checker"
+      ],
+      "cap_mib": 1024,
+      "note": "the self-hosted checker checking the whole frontend (413 MiB target)",
+      "reps": 2,
+      "exit": 0,
+      "timed_out": false,
+      "wall_s": 31.338
+    }
+  },
+  "wiz_info": {
+    "version": "wiz 0.1.0-dev",
+    "size": 142299744,
+    "mtime": "2026-11-15T19:22:43Z",
+    "path": ".lake/build/bin/wiz"
+  }
+}

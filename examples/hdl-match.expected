@@ -1,0 +1,10 @@
+examples/hdl-match.wiz:29:1: info: .cons 0 (.cons 1 (.cons 2 (.cons 3 .nil)))
+examples/hdl-match.wiz:30:1: info: .cons 0 (.cons 1 (.cons 2 (.cons 3 .nil)))
+examples/hdl-match.wiz:32:1: info: (15, 15)
+examples/hdl-match.wiz:33:1: info: .true
+examples/hdl-match.wiz:51:1: info: .cons 7 (.cons 9 .nil)
+examples/hdl-match.wiz:52:1: info: .cons 7 (.cons 9 .nil)
+examples/hdl-match.wiz:65:1: info: .cons 10 (.cons 20 .nil)
+examples/hdl-match.wiz:81:1: info: .cons 1 (.cons 2 .nil)
+examples/hdl-match.wiz:99:1: info: .cons 5 (.cons 6 (.cons 1 (.cons 2 (.cons 3 .nil))))
+examples/hdl-match.wiz:109:1: info: .cons 4 (.cons 5 (.cons 6 (.cons 7 .nil)))

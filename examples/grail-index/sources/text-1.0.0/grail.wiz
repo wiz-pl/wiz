@@ -1,0 +1,6 @@
+import Grail
+def package : Package := Package.new "text"
+  |> Package.version "1.0.0"
+  |> Package.toolchain ">=0.1.0 <0.3.0"
+  |> Package.require "base" "^0.1"
+  |> Package.lib "text" "src"

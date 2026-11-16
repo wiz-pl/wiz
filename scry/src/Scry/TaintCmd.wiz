@@ -963,6 +963,77 @@ def Scry.certVerified : Option Scry.Certificate → Bool
   | .some c => c.verified
   | .none => .false
 
+/-- The pipeline from a parsed store to the report: lower, analyse, certify-status,
+locate. `Scry.analyzeFile` calls it after parsing; `scry repl` calls it on a cached store,
+so a session does not parse the C again. -/
+def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (starts : U32Array)
+    (cst : Scry.CstStore) (nodes : Nat) : EIO Scry.TaintReport := do
+  let errs := Scry.CstStore.errorCount cst;
+  match Bool.and (Nat.lt 0 errs) (Bool.not o.allowErrors) with
+  | .true => EIO.fail (o.file ++ ": " ++ Nat.repr errs
+      ++ " parse error node(s); pass --allow-errors to analyse the recovered tree")
+  | .false => do
+    Scry.checkDeadline o startMs "parse";
+    pack ← Scry.loadTaintPack o.rules;
+    let c := Scry.Cst.ofStore text cst;
+    let tu := Scry.lowerTU o.file c;
+    Scry.reportStage o startMs "lower" (Nat.repr (List.length tu.funcs) ++ " functions, "
+      ++ Nat.repr (List.length tu.warnings) ++ " boundary warnings");
+    Scry.checkDeadline o startMs "lower";
+    let prog := Wil.program tu.funcs;
+    let pt := Scry.pointsToBounded prog o.maxRounds;
+    Scry.reportStage o startMs "points-to" (Nat.repr (Scry.ptVarCount pt)
+      ++ " vars, " ++ Nat.repr (Scry.ptLocCount pt) ++ " locations, "
+      ++ Nat.repr pt.rounds ++ " round(s)"
+      ++ (match pt.complete with
+        | .true => ""
+        | .false => " (incomplete)"));
+    Scry.checkDeadline o startMs "points-to";
+    let graph := Scry.callGraph prog pt;
+    /-- The C-ABI policy: a non-`static`, non-`main` function with no caller and no
+    address taken is an exported entry, so its parameters are sources. -/
+    let entries := Scry.entrySources prog graph;
+    let sums0 := List.map (fun fn => Scry.Summary.mk fn.name .nil .false .nil) prog.funcs;
+    let summaryFuel := Scry.summaryFuel o prog pt;
+    sums ← Scry.summaryRounds o startMs prog graph pack pt entries summaryFuel 0 sums0;
+    Scry.checkDeadline o startMs "summaries";
+    results ← Scry.evalAllStaged o startMs "results" graph pack pt entries sums.1
+      prog.funcs 0 (List.length prog.funcs);
+    Scry.checkDeadline o startMs "results";
+    let hasLifetime : Bool := match pack.memoryRuleFor "use-after-free" with
+      | .some _ => .true
+      | .none => .false;
+    let bounds := Scry.boundsCheck prog pt pack results;
+    let warnings := Scry.dedupWarnings (List.append
+      (List.filter (Scry.keepMemWarning hasLifetime)
+        (List.append
+          (Scry.concatLists (fun r => r.plan.memWarnings) results)
+          (Scry.concatLists (fun r => Scry.unmodelledWarningsOf prog r) results)))
+      bounds.warnings);
+    let memoryFindings := List.append (Scry.lifetimeFindings prog pt pack) bounds.findings;
+    let pr := Scry.ProgramResult.mk results sums.1 graph pt warnings memoryFindings;
+    Scry.reportStage o startMs "analyse" (Nat.repr (List.length results)
+      ++ " function(s), " ++ Nat.repr sums.2.1 ++ " summary round(s)"
+      ++ (match sums.2.2 with
+        | .true => ""
+        | .false => " (incomplete)"));
+    let findings := Scry.programFindings pr;
+    let origins := Scry.originEntries o.file starts tu.funcs;
+    Scry.reportStage o startMs "origins" (Nat.repr (List.length origins) ++ " entries");
+    Scry.checkDeadline o startMs "origins";
+    let boundaries := List.append (Scry.parseRecoveryFindings o.file text cst errs
+      (List.length tu.funcs)) (Scry.boundaryFindings o.file starts tu);
+    let memory := Scry.memoryFindings origins pr.warnings;
+    let certificates := List.map (fun f => Scry.certifyFinding pr f) findings;
+    let checks := List.map Scry.certVerified certificates;
+    let notes := List.append (Scry.pointsToBudgetNotes o.maxRounds pr.pointsTo)
+      (Scry.summariesBudgetNotes o.maxRounds sums.2.1 sums.2.2);
+    let truncated := Bool.or (Bool.not pr.pointsTo.complete) (Bool.not sums.2.2);
+    endMs ← EIO.lift Scry.nowMs;
+    EIO.pure (Scry.TaintReport.mk o.file errs pack tu findings checks certificates origins
+      boundaries memory pr.pointsTo nodes (Nat.sub endMs startMs) truncated sums.2.1
+      sums.2.2 notes)
+
 /-- The pipeline up to the report: parse, lower, analyse, certify-status, locate. -/
 def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do
   startMs ← EIO.lift Scry.nowMs;
@@ -981,71 +1052,8 @@ def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do
     cst ← EIO.lift (Scry.Native.toCstStore o.file st);
     Scry.reportStage o startMs "store" (Nat.repr (Scry.CstStore.nodeCount cst) ++ " nodes, "
       ++ Nat.repr (Scry.CstStore.edgeCount cst) ++ " edges");
-    let errs := Scry.CstStore.errorCount cst;
-    match Bool.and (Nat.lt 0 errs) (Bool.not o.allowErrors) with
-    | .true => EIO.fail (o.file ++ ": " ++ Nat.repr errs
-        ++ " parse error node(s); pass --allow-errors to analyse the recovered tree")
-    | .false => do
-      Scry.checkDeadline o startMs "parse";
-      pack ← Scry.loadTaintPack o.rules;
-      let c := Scry.Cst.ofStore text cst;
-      let tu := Scry.lowerTU o.file c;
-      Scry.reportStage o startMs "lower" (Nat.repr (List.length tu.funcs) ++ " functions, "
-        ++ Nat.repr (List.length tu.warnings) ++ " boundary warnings");
-      Scry.checkDeadline o startMs "lower";
-      let prog := Wil.program tu.funcs;
-      let pt := Scry.pointsToBounded prog o.maxRounds;
-      Scry.reportStage o startMs "points-to" (Nat.repr (Scry.ptVarCount pt)
-        ++ " vars, " ++ Nat.repr (Scry.ptLocCount pt) ++ " locations, "
-        ++ Nat.repr pt.rounds ++ " round(s)"
-        ++ (match pt.complete with
-          | .true => ""
-          | .false => " (incomplete)"));
-      Scry.checkDeadline o startMs "points-to";
-      let graph := Scry.callGraph prog pt;
-      /-- The C-ABI policy: a non-`static`, non-`main` function with no caller and no
-      address taken is an exported entry, so its parameters are sources. -/
-      let entries := Scry.entrySources prog graph;
-      let sums0 := List.map (fun fn => Scry.Summary.mk fn.name .nil .false .nil) prog.funcs;
-      let summaryFuel := Scry.summaryFuel o prog pt;
-      sums ← Scry.summaryRounds o startMs prog graph pack pt entries summaryFuel 0 sums0;
-      Scry.checkDeadline o startMs "summaries";
-      results ← Scry.evalAllStaged o startMs "results" graph pack pt entries sums.1
-        prog.funcs 0 (List.length prog.funcs);
-      Scry.checkDeadline o startMs "results";
-      let hasLifetime : Bool := match pack.memoryRuleFor "use-after-free" with
-        | .some _ => .true
-        | .none => .false;
-      let bounds := Scry.boundsCheck prog pt pack results;
-      let warnings := Scry.dedupWarnings (List.append
-        (List.filter (Scry.keepMemWarning hasLifetime)
-          (List.append
-            (Scry.concatLists (fun r => r.plan.memWarnings) results)
-            (Scry.concatLists (fun r => Scry.unmodelledWarningsOf prog r) results)))
-        bounds.warnings);
-      let memoryFindings := List.append (Scry.lifetimeFindings prog pt pack) bounds.findings;
-      let pr := Scry.ProgramResult.mk results sums.1 graph pt warnings memoryFindings;
-      Scry.reportStage o startMs "analyse" (Nat.repr (List.length results)
-        ++ " function(s), " ++ Nat.repr sums.2.1 ++ " summary round(s)"
-        ++ (match sums.2.2 with
-          | .true => ""
-          | .false => " (incomplete)"));
-      let findings := Scry.programFindings pr;
-      let origins := Scry.originEntries o.file starts tu.funcs;
-      Scry.reportStage o startMs "origins" (Nat.repr (List.length origins) ++ " entries");
-      Scry.checkDeadline o startMs "origins";
-      let boundaries := List.append (Scry.parseRecoveryFindings o.file text cst errs
-        (List.length tu.funcs)) (Scry.boundaryFindings o.file starts tu);
-      let memory := Scry.memoryFindings origins pr.warnings;
-      let certificates := List.map (fun f => Scry.certifyFinding pr f) findings;
-      let checks := List.map Scry.certVerified certificates;
-      let notes := List.append (Scry.pointsToBudgetNotes o.maxRounds pr.pointsTo)
-        (Scry.summariesBudgetNotes o.maxRounds sums.2.1 sums.2.2);
-      let truncated := Bool.or (Bool.not pr.pointsTo.complete) (Bool.not sums.2.2);
-      endMs ← EIO.lift Scry.nowMs;
-      EIO.pure (Scry.TaintReport.mk o.file errs pack tu findings checks certificates origins
-        boundaries memory pr.pointsTo nodes (Nat.sub endMs startMs) truncated sums.2.1
-        sums.2.2 notes)
+    Scry.analyzeStore o startMs text starts cst nodes
+
 
 /-- `(finding, checked)` pairs in the findings' order. -/
 def Scry.zipFindings (fs : List Scry.RuleFinding) (cs : List Bool) :

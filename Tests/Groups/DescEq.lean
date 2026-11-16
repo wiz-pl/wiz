@@ -89,7 +89,7 @@ def descEqGroup : Group where
           ["fun q => Desc.arg q Unit (fun _ => Desc.ret ()) = Desc.arg 1 Unit (fun _ => Desc.ret ())"] },
     { name := "sizes compare as conversion does: μ^{↑∞} ≡ μ^∞ computes like μ^∞ ≡ μ^∞", run := fun _ => do
         let g : Globals ZeroOneMany := {}
-        let mu (s : Val ZeroOneMany) : Val ZeroOneMany := .mu 0 (.unit 1) (.dret .tt) .tt s none
+        let mu (s : Val ZeroOneMany) : Val ZeroOneMany := .mu 0 (.unit 1) (.dret .tt) .tt s none false
         let q (v : Val ZeroOneMany) : Term ZeroOneMany := quote g 0 v
         let inf := q (vEqType g (mu .szInf) (mu .szInf))
         check (match inf with | .eqTy .. => false | _ => true) "μ^∞ ≡ μ^∞ should compute"

@@ -21,9 +21,11 @@ Writing the lexer and parser in Wiz showed what the language lacked:
 
 ## 13a: named arguments
 
-```
+```wiz
 class BitPack (A : Type) where
   width : Nat
+instance : BitPack Bool where
+  width := 1
 def bitWidth (0 A : Type) [BitPack A] : Nat := BitPack.width (A := A)
 def sub (a b : Nat) : Nat := Nat.sub a b
 #eval sub (b := 1) 5                    -- 4
@@ -40,7 +42,7 @@ one fills its parameter; an explicit parameter before it with no argument is an 
 
 ## 13b: private declarations and private constructors
 
-```
+```wiz no-check
 private def secret : Nat := 42          -- visible only in this module
 structure Shr (ρ : Region) (A : Type) where
   private mk ::                         -- only this module makes a `Shr`
@@ -125,7 +127,7 @@ scope or an operation of the library, and hand-written Wiz can't forge one
 (`drafts/rust/rejected/forge_handle.wiz`; test group `regions`). `MutOpt`'s constructors
 stay public: their fields are handles already.
 
-```
+```wiz no-check
 inductive Tok where
   | num (n : Nat)
   | private secret (n : Nat)            -- only this module makes a `.secret`
@@ -173,7 +175,7 @@ code builds and observes them only through the library's combinators and `sample
 
 ## 13c: `if`, `&&`, `||`, `!` in the Prelude
 
-```
+```wiz
 import Prelude
 def clamp (n : Nat) : Nat := if Nat.lt n 10 then n else 10
 #eval Nat.beq 1 1 && !(Nat.beq 2 3) || Bool.false    -- .true
@@ -197,7 +199,7 @@ Tests: group `language`.
 
 ## 13d: `Functor` and `Applicative` (`import Functor`)
 
-```
+```wiz no-check
 import Functor
 #eval Nat.add <$> Option.some 1 <*> Option.some 2          -- .some 3
 #eval (fun (a b : Nat) => (a, b)) <$> List.cons 1 (List.cons 2 .nil) <*> List.cons 3 .nil
@@ -224,7 +226,7 @@ Tests: group `language`.
 
 ## 13e: `∃ x, P`, `¬`, and ASCII spellings
 
-```
+```wiz
 import Logic
 def two : ∃ n : Nat, n + n = 4 := Ex.intro _ 2 rfl
 def swap {A : Type} {P : A → A → Prop} (h : ∃ x y, P x y) : ∃ y x, P x y :=
@@ -248,7 +250,7 @@ lemmas with them (`hexists J h` is `∃ a : A, J a h`; `star` is
 
 ## 13f: `let` with tuple patterns of any length
 
-```
+```wiz no-check
 def f (p : Nat × Nat × Nat) : Nat := let (a, b, c) := p; a + b * c
 def lin (1 p : Nat × Tok × Tok) : Unit × Unit :=
   let 1 (n, s, t) := p;
@@ -264,7 +266,7 @@ apart now that linear pairs aren't projected. Tests: group `language`.
 
 ## 13g: as-patterns `x@p`
 
-```
+```wiz
 def last (A : Type) (d : A) : List A → A
   | .nil => d
   | .cons x .nil => x
@@ -306,7 +308,7 @@ whose pattern is a bare name (`x@y`, a second name for the same value) is not av
 
 ## 13h: patterns on structures, `⟨…⟩`
 
-```
+```wiz
 structure Stats where
   hits : Nat
   misses : Nat
@@ -368,7 +370,7 @@ structure pattern …"), `parser: terms`.
 
 ## 13i: structure update `{ s with f := v }`
 
-```
+```wiz no-check
 def bump (s : Stats) : Stats := { s with hits := Nat.succ s.hits }
 def reset (s : Stats) : Stats := { s with hits := 0, misses := 0 }
 ```
@@ -438,7 +440,7 @@ Tests: `parser: commands and syntax`, `language`.
 `[a, b, c]` is `List.cons a (List.cons b (List.cons c List.nil))` and `[]` is `List.nil`,
 in terms and in patterns:
 
-```
+```wiz
 def xs : List Nat := [1, 2, 3]
 def len : List Nat → Nat
   | [] => 0
@@ -480,7 +482,7 @@ Tests: group `language`.
 A grammar command marked `local` stays in its module: modules that import it don't see
 the syntax.
 
-```
+```wiz
 local infixr:67 " & " => String.append
 local syntax (name := shout) "shout" term : term
 local macro_rules
@@ -576,7 +578,7 @@ Tests: groups `language`, `seplogic`. Audit and table: `wiz-notes/dsl-convention
 
 ## 13p: nested structure update `{ s with a.b := v }`, printed back
 
-```
+```wiz
 structure In where
   x : Nat
   y : Nat
@@ -621,7 +623,7 @@ Tests: `language` ("13p: …"), `lsp` ("13p–q: an updated field's hover and de
 
 ## 13q: numeral and literal patterns
 
-```
+```wiz no-check
 def cls : Nat → Nat
   | 0 => 10
   | 1 => 11
@@ -722,7 +724,7 @@ the chain proves the last step's relation between its first left endpoint and it
 right endpoint. It is a term (`term.calc`, `Wiz/Parser/Builtin.lean`, `elabCalc` in
 `Wiz/Elab/Term.lean`):
 
-```
+```wiz no-check
 import Nat
 
 def t (a b c d : Nat) (h1 : a ≤ b) (h2 : b < c) (h3 : c = d) : a < d :=
@@ -749,7 +751,7 @@ def t (a b c d : Nat) (h1 : a ≤ b) (h2 : b < c) (h3 : c = d) : a < d :=
   `lib/Nat.wiz`, `lib/IntOrder.wiz` and `lib/Rat.wiz`. A program registers its own
   relation the same way:
 
-  ```
+  ```wiz no-check
   def Same (a b : Nat) : Prop := (a ≤ b) ∧ (b ≤ a)
   infix:50 " ≈≈ " => Same
   def Same.trans {a b c : Nat} (h1 : a ≈≈ b) (h2 : b ≈≈ c) : a ≈≈ c := …
@@ -784,3 +786,6 @@ def t (a b c d : Nat) (h1 : a ≤ b) (h2 : b < c) (h3 : c = d) : a < d :=
 Tests: `calc` (the mixed chains at `Nat`, `Int` and `Q`, `↔` and propositional `=`, `_`
 and explicit intermediates, a user-registered relation, and the three errors). The
 unrelated `calc_e` syntax category in the `language` group is untouched.
+
+The `simp` tactic (stage 6h) is library code written in Wiz, with only one new host
+request (`Tac.rewriteAt`): [13-language/simp.md](13-language/simp.md).

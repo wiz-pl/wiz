@@ -1,4 +1,5 @@
 import Sys
+import Json
 import Scry.Query
 import Scry.Parse
 import Scry.CstStore
@@ -7,6 +8,7 @@ import Scry.DynamicCmd
 import Scry.BenchCmd
 import Scry.ProjectIO
 import Scry.WorkflowCmd
+import Scry.Repl
 import Scry.FuzzCmd
 /-!
 # Scry.Cli: the `scry` command line
@@ -62,6 +64,9 @@ def Scry.usage : String :=
   ++ "        [--no-timing] [--quiet] [--fail-on-regression]\n"
   ++ "        [--dynamic] [--cc PATH] [--no-coverage]\n"
   ++ "                             run the taint corpus and compare with expectations\n"
+  ++ "  repl [FILE.c] [--script FILE] [--init CMD] [--llvm]\n"
+  ++ "                             the Wiz REPL with Scry.Repl preloaded (load once,\n"
+  ++ "                             then query it as ordinary Wiz values)\n"
   ++ "  project DIR [--compdb FILE] [--cc CMD] [--allow-errors] [--facts OUT]\n"
   ++ "              [--taint] [--rules FILE] [--json] [--sarif OUT]\n"
   ++ "              [--cache[=DIR]] [--cache-stats] [--fail-on-finding]\n"
@@ -168,6 +173,30 @@ def Scry.cstCmd (file : String) (out : String) : EIO Nat := do
     ++ Nat.repr (Scry.CstStore.relationCount s) ++ " relations to " ++ out);
   EIO.pure 0
 
+
+
+
+
+/-- `scry repl [FILE]`: literally `wiz repl --prelude Scry.Repl -I …`, with `FILE`
+loaded through `Scry.Repl.load` before the first input. -/
+def Scry.replCmd (args : List String) : EIO Nat := do
+  let roots := ["lib", "src", "../lib", "../scry/src"];
+  let wizPath := "wiz";
+  let rootArgs := List.concat (List.map (fun r => ["-I", r]) roots);
+  let (file, rest) := match args with
+    | .cons a more => match String.startsWith a "--" with
+      | .true => ((Option.none : Option String), args)
+      | .false => ((Option.some a : Option String), more)
+    | .nil => ((Option.none : Option String), ([] : List String));
+  step ← (match file with
+    | .some f => do
+      s ← EIO.lift (Scry.Repl.load f);
+      EIO.pure s
+    | .none => EIO.pure ());
+  st ← Process.runWith wizPath (List.append ["repl", "--prelude", "Scry.Repl"]
+    (List.append rootArgs rest)) SpawnOptions.default;
+  EIO.pure (match st with | .exited n => n | _ => 1)
+
 /-- Run one command; the result is the exit status or an error message. -/
 def Scry.dispatch (args : List String) : EIO Nat := match args with
   | .nil => do
@@ -201,6 +230,7 @@ def Scry.dispatch (args : List String) : EIO Nat := match args with
   | .cons "taint" rest => Scry.taintCmd rest
   | .cons "dynamic" rest => Scry.dynCmd rest
   | .cons "bench" rest => Scry.benchCmd rest
+  | .cons "repl" rest => Scry.replCmd rest
   | .cons "findings" rest => Scry.findingsCmd rest
   | .cons "fuzz-span" rest => Scry.fuzzSpanCmd rest
   | .cons cmd rest => EIO.fail ("unknown command \"" ++ cmd ++ "\" (see scry help)")

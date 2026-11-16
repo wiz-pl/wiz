@@ -7,12 +7,13 @@
 --   wiz-selfhost run FILE [ARG…]       compile `main` and run it (also `eval`)
 --   wiz-selfhost version | help
 --   options: -I DIR (module root, repeatable), -o OUT, --cache DIR, --no-cache,
---            -v (cache hits/misses), --types (print each declaration's type),
+--            --cache-verify off|warn|strict, --target c (the backend the host names;
+--            llvm/wasm are C5), -v (cache hits/misses), --types (each declaration's type),
 --            --cc, --rt, --cflags, --ldflags (the C toolchain for `run`),
 --            --rc | --rc-owned | --gc | --lib | --no-main | --header (the backend),
 --            --version, -h | --help
---   exit codes: 0 ok, 1 user error (no file, the frontend's errors, cc, the program),
---               2 usage (unknown command or option, missing argument)
+--   exit codes: 0 ok, 1 user error (no file, the frontend's errors, cc, the program,
+--               a bad `--target`), 2 usage (unknown command or option, missing argument)
 --
 -- Without a subcommand it is the tool it was: `input.wiz` in the working directory to
 -- standard output (the fixpoint and the selfhost tests use that), and the first argument
@@ -32,16 +33,20 @@
 -- (`ErrorCode.lean`). A stack trace is never printed: every failure is one line, and a
 -- missing file is checked with `access` first.
 --
--- Cache: `--cache DIR` (default `.wiz-cache`) keys an entry by the toolchain id
+-- Cache: `--cache DIR` (default `~/.cache/wiz`) keys an entry by the toolchain id
 -- (`toolchainId`, injected by `Wiz/Selfhost.lean` from the selfhost sources and the
 -- version), the subcommand's backend flags, the loader's module graph key (every
--- module's name and text, in load order) and the modules' paths. A `.check` entry is the
--- tagged lines and the exit status; a `.c` entry is the C `run` would print, so a warm
--- run skips elaboration and code generation.
+-- module's name and text, from the graph before elaboration: `keyOfGraph`), the root's
+-- `import_c` header texts and the modules' paths. A `.check` entry is the
+-- tagged lines and the exit status; a `.c` entry is the C `build` writes (and `run`
+-- prints), so a warm build or run skips elaboration and code generation.
 
 -- ------------------------------------------------------------------------------------
 -- Options
 
+-- `verify` is `--cache-verify off|warn|strict`, the Lean-hosted `wiz`'s flag (D5); the
+-- driver's cache has no manifests, so `strict` never trusts an entry (see `cacheRead`).
+-- `target` is `--target c`, the only backend the self-hosted code generator has (C5).
 structure Opts where
   roots : List String
   cache : Option String
@@ -53,18 +58,35 @@ structure Opts where
   cflags : List String
   ldflags : List String
   backend : List String
+  verify : String
+  target : Option String
 
+-- (the cache directory is `$HOME/.cache/wiz` unless `--cache` says otherwise; the
+-- `.cache/wiz` here is the fallback for a process without `HOME`, as the host's is)
 def optsDefault : Opts :=
-  Opts.mk .nil (.some ".wiz-cache") .none .false .false "cc" "selfhost" .nil .nil .nil
+  Opts.mk .nil (.some ".cache/wiz") .none .false .false "cc" "selfhost" .nil .nil .nil
+    "warn" .none
 
 -- ------------------------------------------------------------------------------------
 -- The file system (whole-file read and write, directories; `access` is `Backend.wiz`'s
 -- `cAccessFails`)
 
 extern "wiz_sys_write_file" cWriteFile : String → String → Nat → IO Nat
+-- the Lean-hosted `wiz`'s default cache is `~/.cache/wiz` (`Main.lean`); the driver has
+-- the same default. `wiz_sys_getenv` is the Lean runtime's (`runtime/rt_sys.inc`) and
+-- the selfhost runtime's (`rt.c`), so the driver builds with either.
+extern "wiz_sys_getenv" cGetenv : String → IO String
 extern "mkdir" (header := "sys/stat.h") cMkdir : String → Nat → IO Nat
 extern "rename" (header := "stdio.h") cRename : String → String → IO Nat
 extern "system" (header := "stdlib.h") cSystem : String → IO Nat
+
+-- the default cache directory: `$HOME/.cache/wiz` (the Lean-hosted toolchain's), or
+-- `./.cache/wiz` in the working directory when there is no `HOME` (the host reads
+-- `$HOME` with `.` as its default too: `Main.lean`)
+def defaultCache : IO String :=
+  IO.bind (cGetenv "HOME") (fun home => IO.pure (match strEq home "" with
+    | .true => "./.cache/wiz"
+    | .false => String.append home "/.cache/wiz"))
 
 def pathExists (p : String) : IO Bool :=
   IO.bind (cAccessFails p 0) (fun bad => IO.pure (Bool.not bad))
@@ -198,15 +220,34 @@ structure Prepared where
 def somePrepared (p : Prepared) : IO (Option Prepared) := IO.pure (.some p)
 def nonePrepared : IO (Option Prepared) := IO.pure (.none : Option Prepared)
 
+-- the loader's graph before elaboration: the modules and the root's `import_c` headers.
+-- A cache lookup needs the key first; `moduleRootSourcesAs` only parses `import` lines,
+-- so it is cheap compared with checking the same modules.
+structure Graph where
+  tab : List ModSrc
+  headers : List Header
+
+def someGraph (g : Graph) : IO (Option Graph) := IO.pure (.some g)
+def noneGraph : IO (Option Graph) := IO.pure (.none : Option Graph)
+
 -- the frontend's loader (A14): `import M` is `M.wiz` under the `-I` roots, then the
 -- working directory; the root module is `Main`, its path the FILE the user named
-def prepare (roots : List String) (file : String) : IO (Option Prepared) :=
+def loadGraph (roots : List String) (file : String) : IO (Option Graph) :=
   IO.bind (readIf file) (fun t => match t with
-    | .none => nonePrepared
+    | .none => noneGraph
     | .some text => IO.bind (moduleHeaderTexts text) (fun hs =>
         IO.bind (moduleRootSourcesAs cats tokens roots "Main" file text) (fun tab =>
-          match modCheckRunH cats tokens hs tab (.cons "Main" .nil) with
-          | .mk run _ _ order => somePrepared (Prepared.mk tab run order))))
+          someGraph (Graph.mk tab hs))))
+
+def runGraph (g : Graph) : Prepared := match g with
+  | .mk tab hs => match modCheckRunH cats tokens hs tab (.cons "Main" .nil) with
+    | .mk run _ _ order => Prepared.mk tab run order
+
+-- the whole program: the loader, every module checked, and the run it produced
+def prepare (roots : List String) (file : String) : IO (Option Prepared) :=
+  IO.bind (loadGraph roots file) (fun g => match g with
+    | .none => nonePrepared
+    | .some g => somePrepared (runGraph g))
 
 -- the module `name`'s path (for a diagnostic; the name itself when there is no entry)
 def modFile (tab : List ModSrc) (name : String) : String := match modFind tab name with
@@ -254,6 +295,9 @@ inductive Sev where
   | error
   | warning
   | info
+  -- an `info` the Lean-hosted `wiz check` prints without `--types` (`#check`, `#reduce`,
+  -- `#eval`); a declaration's own type line waits for `--types` (D6)
+  | infoEval
 
 inductive Diag where
   | mk (sev : Sev) (file : String) (line : Nat) (col : Nat) (msg : String) (code : String)
@@ -262,6 +306,7 @@ def sevName : Sev → String
   | .error => "error"
   | .warning => "warning"
   | .info => "info"
+  | .infoEval => "info"
 
 inductive NumRest where
   | mk (n : Nat) (rest : List Char)
@@ -309,6 +354,17 @@ def parseDetail (s : String) : String := match stripPrefix "parse " s with
     | .some u => match u with
       | .mk us => match readNat us 0 with
         | .mk _ after => afterColonSp after
+
+-- the offset a parse error names (`parse error 57: …`): the parser reports the token it
+-- stopped at, where the Lean-hosted `wiz` reports it, not the command's start
+def parseOff (s : String) : Option Nat := match stripPrefix "parse error " s with
+  | .none => .none
+  | .some t => match readNat (charsOf t) 0 with
+    | .mk n after => match after with
+      | .cons c _ => match strEqC c 58 with
+        | .true => .some n
+        | .false => .none
+      | .nil => .none
 
 def sevOf (s : String) : Sev := match stripPrefix "error: " s with
   | .some _ => .error
@@ -398,11 +454,89 @@ def taggedOf (l : String) : Tagged := match l with
                 | .false => Tagged.mk "Main" 0 l
               | .nil => Tagged.mk "Main" 0 l
 
+-- the first `n` characters dropped
+def dropChars : Nat → List Char → List Char
+  | .zero, cs => cs
+  | .succ _, .nil => .nil
+  | .succ k, .cons _ cs => dropChars k cs
+
+-- leading whitespace (spaces, tabs, newlines) dropped
+def skipSpaceChars : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => match strEqC c 32 with
+    | .true => skipSpaceChars cs
+    | .false => match strEqC c 9 with
+      | .true => skipSpaceChars cs
+      | .false => match strEqC c 10 with
+        | .true => skipSpaceChars cs
+        | .false => match strEqC c 13 with
+          | .true => skipSpaceChars cs
+          | .false => .cons c cs
+
+-- the command that starts at `off`: the first token of the text there
+def cmdAt (text : String) (off : Nat) : String := match text with
+  | .mk cs => String.mk (skipSpaceChars (dropChars off cs))
+
+-- the characters up to the end of their line
+def takeLineChars : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => match strEqC c 10 with
+    | .true => .nil
+    | .false => .cons c (takeLineChars cs)
+
+def dropSpaces : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => match strEqC c 32 with
+    | .true => dropSpaces cs
+    | .false => .cons c cs
+
+-- the characters without their trailing spaces
+def rtrimChars (cs : List Char) : List Char :=
+  List.reverseOf (dropSpaces (List.reverseOf cs .nil)) .nil
+
+-- (a `#check c` prints `c : T`, as the Lean-hosted `wiz` does; the self-hosted
+-- frontend's own line carries the type alone. The source text stands in for the
+-- elaborator's pretty-printed term, which the driver has not got.)
+def infoPrefix (tab : List ModSrc) (m : String) (off : Nat) : String :=
+  match modTextOf tab m with
+  | .none => ""
+  | .some t => match stripPrefix "#check" (cmdAt t off) with
+    | .none => ""
+    | .some arg => match rtrimChars (takeLineChars (skipSpaceChars (charsOf arg))) with
+      | .nil => ""
+      | a => String.append (String.mk a) " : "
+
+-- (`#check c`, `#reduce c` and `#eval c` print their result without `--types`, as the
+-- Lean-hosted `wiz check` does; a declaration's own type line does not)
+def printsInfo (tab : List ModSrc) (m : String) (off : Nat) : Bool :=
+  match modTextOf tab m with
+  | .none => .false
+  | .some t => match cmdAt t off with
+    | s => Bool.or (strStarts "#check" s) (Bool.or (strStarts "#reduce" s) (strStarts "#eval" s))
+
+def sevOfTagged (tab : List ModSrc) (m : String) (off : Nat) (rest : String) : Sev :=
+  match sevOf rest with
+  | .info => match printsInfo tab m off with
+    | .true => .infoEval
+    | .false => .info
+  | s => s
+
+-- the message: a `#check`'s with the term in front (see `infoPrefix`)
+def msgOfTagged (tab : List ModSrc) (m : String) (off : Nat) (rest : String) : String :=
+  match sevOf rest with
+  | .info => String.append (infoPrefix tab m off) (msgOf rest)
+  | _ => msgOf rest
+
 def diagOf (tab : List ModSrc) (l : String) : Diag := match taggedOf l with
-  | .mk m off rest => match modTextOf tab m with
-    | .none => Diag.mk (sevOf rest) (modFile tab m) 1 1 (msgOf rest) (codeOf rest)
-    | .some t => match lineCol t off with
-      | .mk ln col => Diag.mk (sevOf rest) (modFile tab m) ln col (msgOf rest) (codeOf rest)
+  | .mk m off rest =>
+    -- a parse error reports the token it stopped at, not its command's start
+    let off' := match parseOff rest with
+      | .some n => n
+      | .none => off;
+    match modTextOf tab m with
+    | .none => Diag.mk (sevOfTagged tab m off' rest) (modFile tab m) 1 1 (msgOfTagged tab m off' rest) (codeOf rest)
+    | .some t => match lineCol t off' with
+      | .mk ln col => Diag.mk (sevOfTagged tab m off' rest) (modFile tab m) ln col (msgOfTagged tab m off' rest) (codeOf rest)
 
 def diagsOf (tab : List ModSrc) : List String → List Diag
   | .nil => .nil
@@ -429,11 +563,25 @@ def emitDiag (o : Opts) (d : Diag) : IO Unit := match d with
     | .info => match o.types with
       | .true => IO.println (diagLine d)
       | .false => IO.pure ()
-    | _ => IO.ePrintln (diagLine d)
+    | .infoEval => IO.println (diagLine d)
+    -- (`check` prints a warning, on standard output, as the Lean-hosted `wiz` does)
+    | .warning => IO.println (diagLine d)
+    | .error => IO.ePrintln (diagLine d)
 
 def emitDiags (o : Opts) : List Diag → IO Unit
   | .nil => IO.pure ()
   | .cons d rest => IO.bind (emitDiag o d) (fun u => emitDiags o rest)
+
+-- `build` and `run` report the errors only (the Lean-hosted `wiz` drops the warnings
+-- there: `Main.elabFile`)
+def emitErrorOnly (d : Diag) : IO Unit := match d with
+  | .mk sev _ _ _ _ _ => match sev with
+    | .error => IO.ePrintln (diagLine d)
+    | _ => IO.pure ()
+
+def emitErrors : List Diag → IO Unit
+  | .nil => IO.pure ()
+  | .cons d rest => IO.bind (emitErrorOnly d) (fun u => emitErrors rest)
 
 def ePrintAll : List String → IO Unit
   | .nil => IO.pure ()
@@ -476,10 +624,22 @@ def hashParts : List String → Nat → Nat
   | .nil, h => h
   | .cons s rest, h => hashParts rest (hashStep (charsOf s) (Nat.mod (Nat.add (Nat.mul h 16777619) 31) 4294967291))
 
-def keyOf (o : Opts) (kind : String) (p : Prepared) : String :=
-  Nat.toString (hashParts (.cons kind (.cons toolchainId
-    (.cons (Nat.toString (moduleGraphKey p.order p.tab))
-      (List.append o.backend (modPathsOf p.tab p.order))))) 2166136261)
+-- the `import_c` headers are read at check time, so their contents belong to the key (a
+-- changed header must not be served from a cache entry written for the old one)
+def headerHash : List Header → Nat → Nat
+  | .nil, h => h
+  | .cons (.mk n t) rest, h => headerHash rest (modHash (modHash h n) t)
+
+-- (the cache key) the graph alone: every module's name and text, the paths they were
+-- found at, the root's header texts, and the backend flags. This is the same before and
+-- after elaboration, so a warm `check`/`run` can answer it without running a command.
+def keyOfGraph (o : Opts) (kind : String) (g : Graph) : String := match g with
+  | .mk tab hs =>
+    let names := tabNames tab;
+    Nat.toString (hashParts (.cons kind (.cons toolchainId
+      (.cons (Nat.toString (moduleGraphKey names tab))
+        (.cons (Nat.toString (headerHash hs 17))
+          (List.append o.backend (modPathsOf tab names)))))) 2166136261)
 
 def cachePath (dir key ext : String) : String :=
   String.append dir (String.append "/" (String.append key ext))
@@ -511,13 +671,22 @@ def entryOf (text : String) : Option Cached := match splitFirstLine text with
 def someCached (c : Cached) : IO (Option Cached) := IO.pure (.some c)
 def noneCached : IO (Option Cached) := IO.pure (.none : Option Cached)
 
+-- `--cache-verify strict` (`require` is the host's synonym): only an entry listed in an
+-- output manifest is used. The driver's cache has no manifests (D5), so strict is always
+-- a miss; the host, which writes manifests, has a warm hit. The output is the same either
+-- way; only the work is not saved here. `off` and `warn` (the default) read the entry.
+def strictVerify (o : Opts) : Bool :=
+  Bool.or (strEq o.verify "strict") (strEq o.verify "require")
+
 def cacheRead (o : Opts) (key ext : String) : IO (Option Cached) := match o.cache with
   | .none => noneCached
-  | .some dir => IO.bind (readIf (cachePath dir key ext)) (fun t => match t with
-    | .none => noneCached
-    | .some text => match entryOf text with
+  | .some dir => match strictVerify o with
+    | .true => noneCached
+    | .false => IO.bind (readIf (cachePath dir key ext)) (fun t => match t with
       | .none => noneCached
-      | .some c => someCached c)
+      | .some text => match entryOf text with
+        | .none => noneCached
+        | .some c => someCached c)
 
 def cacheWriteDo (dir key ext : String) (status : Nat) (payload : String) : IO Bool := do
   ensureDir dir;
@@ -532,12 +701,33 @@ def cacheWrite (o : Opts) (key ext : String) (status : Nat) (payload : String) :
   | .none => IO.pure (Bool.false)
   | .some dir => cacheWriteDo dir key ext status payload
 
+-- `--no-cache` paths: no key, no read, no write (the caller decides once whether the run
+-- is cached, and these keep the cache out of the warm/cold split)
+def cacheReadIf (o : Opts) (use : Bool) (key ext : String) : IO (Option Cached) := match use with
+  | .true => cacheRead o key ext
+  | .false => noneCached
+
+def cacheWriteIf (o : Opts) (use : Bool) (key ext : String) (status : Nat) (payload : String) : IO Bool :=
+  match use with
+  | .true => cacheWrite o key ext status payload
+  | .false => IO.pure (Bool.false)
+
+-- `-v` still says a run was not served from the cache; without a cache there is no key,
+-- so the line names the reason instead
+def cacheMissMsg (o : Opts) (use : Bool) (key : String) : IO Unit := match use with
+  | .true => if o.verbose then IO.ePrintln (String.append "cache miss: " key) else IO.pure ()
+  | .false => if o.verbose then IO.ePrintln "cache miss: no-cache" else IO.pure ()
+
 -- ------------------------------------------------------------------------------------
 -- The command line
 
 inductive Arg where
   | ok (o : Opts) (file : String) (extra : List String)
+  -- a usage error: the message, then the usage hint, exit 2 (the host's `_` case)
   | err (msg : String)
+  -- the host's `--target`/`--cache-verify` errors inside its `take*` helpers: the
+  -- message alone (no usage), exit 1
+  | fail (msg : String)
   | version
   | help
 
@@ -551,33 +741,57 @@ def isBackendFlag (a : String) : Bool :=
   Bool.or (strEq a "--rc") (Bool.or (strEq a "--rc-owned") (Bool.or (strEq a "--gc")
     (Bool.or (strEq a "--lib") (Bool.or (strEq a "--no-main") (strEq a "--header")))))
 
+-- a word in a list
+def listHas (s : String) : List String → Bool
+  | .nil => .false
+  | .cons x rest => match strEq s x with
+    | .true => .true
+    | .false => listHas s rest
+
+-- `--target`: the host's names are c, llvm and wasm; the self-hosted backend emits C
+-- only (C5), so `c` is the one it can select
+def targetModes : List String := .cons "c" (.cons "llvm" (.cons "wasm" .nil))
+
+def targetOk (t : String) : Bool := strEq t "c"
+def targetKnown (t : String) : Bool := listHas t targetModes
+
+-- `--cache-verify`: the host's modes (`Cache.VerifyMode.ofString?`; `require` is strict)
+def verifyOk (m : String) : Bool :=
+  Bool.or (strEq m "off") (Bool.or (strEq m "warn") (Bool.or (strEq m "strict") (strEq m "require")))
+
+def verifyErr (m : String) : String :=
+  String.append "--cache-verify: unknown mode " (String.append m " (off, warn, strict)")
+
 -- options may come before or after FILE; after FILE, a non-option is a program
--- argument (`run FILE ARG…`), and `--` makes everything after it an argument
+-- argument (`run FILE ARG…`), and `--` makes everything after it an argument.
+-- The messages match the Lean-hosted `wiz` (`Main.lean`): `unknown flag: X`,
+-- `unknown command: …` and exit 2; a value-taking option without its value is an
+-- unknown flag there too (its `parseFlags` leaves both words over).
 partial def parseOptsGo : List String → Opts → Option String → List String → Arg
   | .nil, o, file, extra => match file with
-    | .none => .err "no FILE (try `wiz-selfhost help`)"
+    | .none => .err "no FILE"
     | .some f => .ok o f (List.reverseOf extra .nil)
   | .cons a rest, o, file, extra => match strEq a "--" with
     | .true => match file with
       | .none => match rest with
-        | .nil => .err "no FILE after --"
+        | .nil => .err "unknown flag: --"
         | .cons f r2 => .ok o f r2
       | .some f => .ok o f (List.append (List.reverseOf extra .nil) rest)
     | .false => match strEq a "-I" with
       | .true => match rest with
-        | .nil => .err "-I needs a directory"
+        | .nil => .err "unknown flag: -I"
         | .cons d r2 => parseOptsGo r2 { o with roots := List.append o.roots (singleton d) } file extra
       | .false => match strEq a "--include" with
         | .true => match rest with
-          | .nil => .err "--include needs a directory"
+          | .nil => .err "unknown flag: --include"
           | .cons d r2 => parseOptsGo r2 { o with roots := List.append o.roots (singleton d) } file extra
         | .false => match strEq a "-o" with
           | .true => match rest with
-            | .nil => .err "-o needs a file"
+            | .nil => .err "unknown flag: -o"
             | .cons p r2 => parseOptsGo r2 { o with out := .some p } file extra
           | .false => match strEq a "--cache" with
             | .true => match rest with
-              | .nil => .err "--cache needs a directory"
+              | .nil => .err "unknown flag: --cache"
               | .cons d r2 => parseOptsGo r2 { o with cache := .some d } file extra
             | .false => match strEq a "--no-cache" with
               | .true => parseOptsGo rest { o with cache := .none } file extra
@@ -589,30 +803,43 @@ partial def parseOptsGo : List String → Opts → Option String → List String
                     | .true => parseOptsGo rest { o with types := .true } file extra
                     | .false => match strEq a "--cc" with
                       | .true => match rest with
-                        | .nil => .err "--cc needs a command"
+                        | .nil => .err "unknown flag: --cc"
                         | .cons c r2 => parseOptsGo r2 { o with cc := c } file extra
                       | .false => match strEq a "--rt" with
                         | .true => match rest with
-                          | .nil => .err "--rt needs a directory (the selfhost runtime, rt.c)"
+                          | .nil => .err "unknown flag: --rt"
                           | .cons d r2 => parseOptsGo r2 { o with rt := d } file extra
                         | .false => match strEq a "--cflags" with
                           | .true => match rest with
-                            | .nil => .err "--cflags needs flags"
+                            | .nil => .err "unknown flag: --cflags"
                             | .cons f r2 => parseOptsGo r2 { o with cflags := List.append o.cflags (singleton f) } file extra
                           | .false => match strEq a "--ldflags" with
                             | .true => match rest with
-                              | .nil => .err "--ldflags needs flags"
+                              | .nil => .err "unknown flag: --ldflags"
                               | .cons f r2 => parseOptsGo r2 { o with ldflags := List.append o.ldflags (singleton f) } file extra
-                            | .false => match strEq a "--version" with
-                              | .true => .version
-                              | .false => match strEq a "--help" with
-                                | .true => .help
-                                | .false => match strEq a "-h" with
-                                  | .true => .help
-                                  | .false => match isBackendFlag a with
+                            -- (the host's `takeTarget` messages and exit 1)
+                            | .false => match strEq a "--target" with
+                              | .true => match rest with
+                                | .nil => .fail "--target needs c, llvm or wasm"
+                                | .cons t r2 => match targetOk t with
+                                  | .true => parseOptsGo r2 { o with target := .some t } file extra
+                                  | .false => match targetKnown t with
+                                    | .true => .fail (String.append "unsupported target " (String.append t ": the self-hosted backend emits C only (C5)"))
+                                    | .false => .fail (String.append "unknown target " (String.append t " (choose c, llvm or wasm)"))
+                              | .false => match strEq a "--cache-verify" with
+                                | .true => match rest with
+                                  | .nil => .err "unknown flag: --cache-verify"
+                                  | .cons m r2 => match verifyOk m with
+                                    | .true => parseOptsGo r2 { o with verify := m } file extra
+                                    | .false => .err (verifyErr m)
+                                | .false => match stripPrefix "--cache-verify=" a with
+                                  | .some m => match verifyOk m with
+                                    | .true => parseOptsGo rest { o with verify := m } file extra
+                                    | .false => .err (verifyErr m)
+                                  | .none => match isBackendFlag a with
                                     | .true => parseOptsGo rest { o with backend := List.append o.backend (singleton a) } file extra
                                     | .false => match strStarts "-" a with
-                                      | .true => .err (String.append "unknown option " a)
+                                      | .true => .err (String.append "unknown flag: " a)
                                       | .false => match file with
                                         | .none => parseOptsGo rest o (.some a) extra
                                         | .some _ => parseOptsGo rest o file (.cons a extra)
@@ -631,8 +858,11 @@ def usageText : String :=
   "\n" +++
   "options: -I DIR (a module root, repeatable; an `import M` is M.wiz there, then\n" +++
   "  in the working directory),\n" +++
-  "  -o OUT (the C `run` compiles, kept), --cache DIR (default .wiz-cache),\n" +++
-  "  --no-cache, -v (cache hits and misses), --types (each declaration's type),\n" +++
+  "  -o OUT (the C `run` compiles, kept), --cache DIR (default ~/.cache/wiz, as\n" +++
+  "  the Lean-hosted `wiz`'s),\n" +++
+  "  --no-cache, --cache-verify off|warn|strict (the driver's cache has no output\n" +++
+  "  manifests yet, so strict never trusts an entry), --target c (the only backend),\n" +++
+  "  -v (cache hits and misses), --types (each declaration's type),\n" +++
   "  --cc CMD, --rt DIR (the selfhost runtime, default selfhost), --cflags FLAGS,\n" +++
   "  --ldflags FLAGS; backend: --rc, --rc-owned, --gc, --lib, --no-main, --header\n" +++
   "\n" +++
@@ -640,9 +870,10 @@ def usageText : String :=
 
 def versionText : String := String.append "wiz-selfhost " wizVersion
 
+-- the Lean-hosted `wiz`'s usage errors: the message, then the usage, exit 2
 def usageError (msg : String) : IO Unit := do
-  IO.ePrintln (String.append "wiz-selfhost: " msg);
-  IO.ePrintln "usage: wiz-selfhost help";
+  IO.ePrintln msg;
+  IO.ePrintln usageText;
   Process.exit 2
 
 -- ------------------------------------------------------------------------------------
@@ -654,37 +885,50 @@ def statusOf (ds : List Diag) : Nat := match hasError ds with
 
 def linesOf (r : Run) : List String := List.reverseOf (Run.out r) .nil
 
-def checkPrepared (o : Opts) (p : Prepared) : IO Unit := do
-  let key := keyOf o "check" p;
-  cached ← cacheRead o key ".check";
-  match cached with
-  | .some (.mk st payload) => do
-    if o.verbose then IO.ePrintln (String.append "cache hit: " key) else IO.pure ();
-    let ds := diagsOf p.tab (mapChars (fun cs => String.mk cs) (splitLines payload));
-    emitDiags o ds;
-    match Nat.beq st 0 with
-    | .true => IO.pure ()
-    | .false => Process.exit 1
-  | .none => do
-    if o.verbose then IO.ePrintln (String.append "cache miss: " key) else IO.pure ();
-    let lines := linesOf p.run;
-    let ds := diagsOf p.tab lines;
-    let st := statusOf ds;
-    cacheWrite o key ".check" st (linesPayload lines);
-    emitDiags o ds;
-    match Nat.beq st 0 with
-    | .true => IO.pure ()
-    | .false => Process.exit 1
+def checkGraph (o : Opts) (g : Graph) : IO Unit := match g with
+  | .mk tab _ => match o.cache with
+    -- no cache: do not even build the key (it hashes every module's text)
+    | .none => do
+      cacheMissMsg o .false "";
+      let p := runGraph g;
+      let ds := diagsOf p.tab (linesOf p.run);
+      let st := statusOf ds;
+      emitDiags o ds;
+      match Nat.beq st 0 with
+      | .true => IO.pure ()
+      | .false => Process.exit 1
+    | .some _ => do
+      let key := keyOfGraph o "check" g;
+      cached ← cacheRead o key ".check";
+      match cached with
+      | .some (.mk st payload) => do
+        if o.verbose then IO.ePrintln (String.append "cache hit: " key) else IO.pure ();
+        let ds := diagsOf tab (mapChars (fun cs => String.mk cs) (splitLines payload));
+        emitDiags o ds;
+        match Nat.beq st 0 with
+        | .true => IO.pure ()
+        | .false => Process.exit 1
+      | .none => do
+        if o.verbose then IO.ePrintln (String.append "cache miss: " key) else IO.pure ();
+        let p := runGraph g;
+        let lines := linesOf p.run;
+        let ds := diagsOf p.tab lines;
+        let st := statusOf ds;
+        cacheWrite o key ".check" st (linesPayload lines);
+        emitDiags o ds;
+        match Nat.beq st 0 with
+        | .true => IO.pure ()
+        | .false => Process.exit 1
 
 def missingFile (file : String) : IO Unit := do
   IO.ePrintln (diagLine (Diag.mk .error file 1 1 "no such file" ""));
   Process.exit 1
 
 def checkCmd (o : Opts) (file : String) : IO Unit := do
-  prep ← prepare o.roots file;
-  match prep with
+  gopt ← loadGraph o.roots file;
+  match gopt with
   | .none => missingFile file
-  | .some p => checkPrepared o p
+  | .some g => checkGraph o g
 
 -- ------------------------------------------------------------------------------------
 -- build: the C, to OUT
@@ -693,30 +937,54 @@ def cOf (o : Opts) (p : Prepared) : IO (Option String) := do
   let lines := linesOf p.run;
   let ds := diagsOf p.tab lines;
   match hasError ds with
-  | .true => IO.bind (emitDiags o ds) (fun u => noneIO)
+  | .true => IO.bind (emitErrors ds) (fun u => noneIO)
   | .false => IO.bind (missingLinks (List.reverseOf (Globals.ffi (Run.gs p.run)) .nil)) (fun missing => match missing with
     | .cons _ _ => IO.bind (ePrintAll missing) (fun u => noneIO)
     | .nil => someIO (String.append (commentsOf (mapS (fun l => stripAt l) lines))
         (docsText (genProgramArgs o.backend (modTextOr p.tab "Main" "") (Run.gs p.run)))))
 
-def buildWith (o : Opts) (out : String) (p : Prepared) : IO Unit := do
+def writeOut (out text : String) : IO Unit := do
+  ok ← writeFile out text;
+  match ok with
+  | .true => IO.pure ()
+  | .false => do IO.ePrintln (String.append "error: cannot write " out); Process.exit 1
+
+-- the C for `p`, through the cache: `build` and `run` share the `.c` entry (the key
+-- covers the backend flags), so a second build is a hit, as the Lean-hosted `wiz`'s is.
+-- The key is the graph's (`keyOfGraph`), so a hit skips elaboration; a miss, or
+-- `--no-cache` (no key at all), elaborates.
+def buildMiss (o : Opts) (useCache : Bool) (cKey checkKey : String) (out : String) (p : Prepared) : IO Unit := do
   c ← cOf o p;
   match c with
   | .none => Process.exit 1
   | .some ctext => do
-    ok ← writeFile out ctext;
-    match ok with
-    | .true => IO.pure ()
-    | .false => do IO.ePrintln (String.append "error: cannot write " out); Process.exit 1
+    cacheWriteIf o useCache checkKey ".check" 0 (linesPayload (linesOf p.run));
+    cacheWriteIf o useCache cKey ".c" 0 ctext;
+    writeOut out ctext
+
+def buildWith (o : Opts) (out : String) (g : Graph) : IO Unit := match o.cache with
+  | .none => do
+    cacheMissMsg o .false "";
+    buildMiss o .false "" "" out (runGraph g)
+  | .some _ => do
+    let key := keyOfGraph o "c" g;
+    cached ← cacheRead o key ".c";
+    match cached with
+    | .some (.mk st ctext) => do
+      if o.verbose then IO.ePrintln (String.append "cache hit: " key) else IO.pure ();
+      writeOut out ctext
+    | .none => do
+      cacheMissMsg o .true key;
+      buildMiss o .true key (keyOfGraph o "check" g) out (runGraph g)
 
 def buildCmd (o : Opts) (file : String) : IO Unit :=
   match o.out with
   | .none => usageError "build needs -o OUT"
   | .some out => do
-    prep ← prepare o.roots file;
-    match prep with
+    gopt ← loadGraph o.roots file;
+    match gopt with
     | .none => missingFile file
-    | .some p => buildWith o out p
+    | .some g => buildWith o out g
 
 -- ------------------------------------------------------------------------------------
 -- run / eval
@@ -754,21 +1022,21 @@ def compileAndRun (o : Opts) (key : String) (ctext : String) (extra : List Strin
         IO.ePrintln (String.append "error: the program exited with code " (Nat.toString (exitCodeOf st2)));
         Process.exit 1
 
-def runPrepared (o : Opts) (p : Prepared) (extra : List String) : IO Unit := do
-  let key := keyOf o "c" p;
-  cached ← cacheRead o key ".c";
+def runPrepared (o : Opts) (useCache : Bool) (cKey checkKey : String) (p : Prepared)
+    (extra : List String) : IO Unit := do
+  cached ← cacheReadIf o useCache cKey ".c";
   match cached with
   | .some (.mk st ctext) => do
-    if o.verbose then IO.ePrintln (String.append "cache hit: " key) else IO.pure ();
-    compileAndRun o key ctext extra
+    if o.verbose then IO.ePrintln (String.append "cache hit: " cKey) else IO.pure ();
+    compileAndRun o cKey ctext extra
   | .none => do
-    if o.verbose then IO.ePrintln (String.append "cache miss: " key) else IO.pure ();
+    cacheMissMsg o useCache cKey;
     let lines := linesOf p.run;
     let ds := diagsOf p.tab lines;
     let st := statusOf ds;
-    cacheWrite o (keyOf o "check" p) ".check" st (linesPayload lines);
+    cacheWriteIf o useCache checkKey ".check" st (linesPayload lines);
     match Nat.beq st 0 with
-    | .false => do emitDiags o ds; Process.exit 1
+    | .false => do emitErrors ds; Process.exit 1
     | .true => do
       missing ← missingLinks (List.reverseOf (Globals.ffi (Run.gs p.run)) .nil);
       match missing with
@@ -776,14 +1044,23 @@ def runPrepared (o : Opts) (p : Prepared) (extra : List String) : IO Unit := do
       | .nil => do
         let ctext := String.append (commentsOf (mapS (fun l => stripAt l) lines))
           (docsText (genProgramArgs o.backend (modTextOr p.tab "Main" "") (Run.gs p.run)));
-        cacheWrite o key ".c" 0 ctext;
-        compileAndRun o key ctext extra
+        cacheWriteIf o useCache cKey ".c" 0 ctext;
+        compileAndRun o cKey ctext extra
 
 def runCmd (o : Opts) (file : String) (extra : List String) : IO Unit := do
-  prep ← prepare o.roots file;
-  match prep with
+  gopt ← loadGraph o.roots file;
+  match gopt with
   | .none => missingFile file
-  | .some p => runPrepared o p extra
+  | .some g => match o.cache with
+    | .none => runPrepared o .false "nocache" "" (runGraph g) extra
+    | .some _ => do
+      let cKey := keyOfGraph o "c" g;
+      cached ← cacheRead o cKey ".c";
+      match cached with
+      | .some (.mk st ctext) => do
+        if o.verbose then IO.ePrintln (String.append "cache hit: " cKey) else IO.pure ();
+        compileAndRun o cKey ctext extra
+      | .none => runPrepared o .true cKey (keyOfGraph o "check" g) (runGraph g) extra
 
 -- ------------------------------------------------------------------------------------
 -- the one-shot mode: input.wiz → standard output (the fixpoint and the tests), the
@@ -819,47 +1096,146 @@ def legacyCmd (args : List String) : IO Unit := do
 -- ------------------------------------------------------------------------------------
 -- dispatch
 
-def parseThen (k : Kind) (args : List String) : IO Unit :=
-  match parseOpts args optsDefault with
+def kindName : Kind → String
+  | .check => "check"
+  | .build => "build"
+  | .run => "run"
+  | .eval => "eval"
+
+-- a command and its arguments as the user wrote them, for `unknown command: …`
+def argv (words : List String) : String := joinSpaces words
+
+def parseThen (k : Kind) (args : List String) : IO Unit := do
+  cache ← defaultCache;
+  match parseOpts args { optsDefault with cache := .some cache } with
   | .version => IO.println versionText
   | .help => IO.println usageText
-  | .err msg => usageError msg
+  -- (the host's `takeTarget`/`--cache-verify` mode errors print the message alone, exit 1)
+  | .fail msg => do IO.ePrintln msg; Process.exit 1
+  -- (the Lean-hosted `wiz` answers a command without its FILE or with extra arguments
+  -- with `unknown command: …`; its flags are positional, and it has no `-o` for check)
+  | .err msg => match strEq msg "no FILE" with
+    | .true => usageError (String.append "unknown command: " (kindName k))
+    | .false => usageError msg
   | .ok o file extra => match k with
-    | .check => match extra with
-      | .nil => match o.out with
-        | .some _ => usageError "check does not write an output file (-o)"
-        | .none => checkCmd o file
-      | .cons _ _ => usageError (String.append "check takes one FILE, not " (joinSpaces (.cons file extra)))
+    | .check => match o.out with
+      -- (the host finds the first flag-looking argument; `-o` is not a `check` option)
+      | .some _ => usageError "unknown flag: -o"
+      | .none => match o.backend with
+        | .cons b _ => usageError (String.append "unknown flag: " b)
+        | .nil => match extra with
+          | .nil => checkCmd o file
+          | .cons _ _ => usageError (String.append "unknown command: " (argv (.cons "check" (.cons file extra))))
     | .build => match extra with
-      | .nil => buildCmd o file
-      | .cons _ _ => usageError (String.append "build takes one FILE, not " (joinSpaces (.cons file extra)))
+      | .nil => match o.out with
+        | .none => usageError (String.append "unknown command: " (argv (.cons "build" (.cons file extra))))
+        | .some _ => buildCmd o file
+      | .cons _ _ => usageError (String.append "unknown command: " (argv (.cons "build" (.cons file extra))))
     | .run => runCmd o file extra
     | .eval => runCmd o file extra
 
+-- (the Lean-hosted `wiz` takes its toolchain flags before the command too:
+-- `wiz -I src check f.wiz`, `wiz --cache d build f.wiz -o out`; `-o`/`--cache`/`-I`
+-- take a value, the rest do not)
+def takesValueFlag (a : String) : Bool :=
+  Bool.or (strEq a "-I") (Bool.or (strEq a "--include") (Bool.or (strEq a "-o")
+    (Bool.or (strEq a "--cache") (Bool.or (strEq a "--cache-verify") (Bool.or (strEq a "--target")
+      (Bool.or (strEq a "--cc") (Bool.or (strEq a "--rt")
+        (Bool.or (strEq a "--cflags") (strEq a "--ldflags")))))))))
+
+def knownTopFlag (a : String) : Bool :=
+  match stripPrefix "--cache-verify=" a with
+  | .some _ => .true
+  | .none => Bool.or (takesValueFlag a) (Bool.or (strEq a "--no-cache") (Bool.or (strEq a "-v")
+    (Bool.or (strEq a "--verbose") (strEq a "--types"))))
+
+inductive LeadSplit where
+  | mk (lead : List String) (rest : List String)
+
+-- the flags before the command (values kept beside them) and the rest; a
+-- `--version`/`--help`/`-h` ends the flags even though it starts with `-`
+partial def splitLeadGo (lead : List String) : List String → LeadSplit
+  | .nil => LeadSplit.mk (List.reverseOf lead .nil) .nil
+  | .cons a rest => match Bool.or (strEq a "--version") (Bool.or (strEq a "--help") (strEq a "-h")) with
+    | .true => LeadSplit.mk (List.reverseOf lead .nil) (.cons a rest)
+    | .false => match strStarts "-" a with
+      | .false => LeadSplit.mk (List.reverseOf lead .nil) (.cons a rest)
+      | .true => match takesValueFlag a with
+        | .true => match rest with
+          | .nil => LeadSplit.mk (List.reverseOf (.cons a lead) .nil) .nil
+          | .cons v r2 => splitLeadGo (.cons v (.cons a lead)) r2
+        | .false => splitLeadGo (.cons a lead) rest
+
+-- a leading flag that neither the driver nor the backend knows: host `wiz` errors on
+-- it; so does the driver (`unknown flag: …`, exit 2). A value-taking flag's word is its
+-- value, not a flag (the host's `parseFlags` consumes it the same way).
+partial def unknownTopFlag : List String → Option String
+  | .nil => .none
+  | .cons a rest => match takesValueFlag a with
+    | .true => match rest with
+      | .nil => .none
+      | .cons _ r2 => unknownTopFlag r2
+    | .false => match knownTopFlag a with
+      | .true => unknownTopFlag rest
+      | .false => match isBackendFlag a with
+        | .true => unknownTopFlag rest
+        | .false => .some a
+
+def hasBackendFlag : List String → Bool
+  | .nil => .false
+  | .cons a rest => match isBackendFlag a with
+    | .true => .true
+    | .false => hasBackendFlag rest
+
 def dispatch : List String → IO Unit
   | .nil => legacyCmd .nil
-  | .cons a rest => match strEq a "check" with
-    | .true => parseThen .check rest
-    | .false => match strEq a "build" with
-      | .true => parseThen .build rest
-      | .false => match strEq a "run" with
-        | .true => parseThen .run rest
-        | .false => match strEq a "eval" with
-          | .true => parseThen .eval rest
-          | .false => match strEq a "version" with
-            | .true => IO.println versionText
-            | .false => match strEq a "help" with
-              | .true => IO.println usageText
-              | .false => match strEq a "--version" with
+  | .cons a rest => match splitLeadGo .nil (.cons a rest) with
+    | .mk lead rest2 => match rest2 with
+      -- (`selfhost --rc` and `selfhost` are the one-shot mode; other flags alone are the
+      -- host's usage, exit 0)
+      | .nil => match unknownTopFlag lead with
+        | .some f => usageError (String.append "unknown flag: " f)
+        -- (flags alone: the host still validates `--cache-verify MODE` before its usage,
+        -- and `--target`'s errors come from `takeTarget`; a valid flag set is the usage,
+        -- exit 0, as the host's)
+        | .none => match parseOpts lead optsDefault with
+          | .err msg => match strEq msg "no FILE" with
+            | .true => match hasBackendFlag lead with
+              | .true => legacyCmd lead
+              | .false => IO.println usageText
+            | .false => usageError msg
+          | .fail msg => do IO.ePrintln msg; Process.exit 1
+          | .ok _ _ _ => IO.println usageText
+          | .version => IO.println versionText
+          | .help => IO.println usageText
+      | .cons b rest3 => match strEq b "check" with
+        | .true => parseThen .check (List.append lead rest3)
+        | .false => match strEq b "build" with
+          | .true => parseThen .build (List.append lead rest3)
+          | .false => match strEq b "run" with
+            | .true => parseThen .run (List.append lead rest3)
+            | .false => match strEq b "eval" with
+              | .true => parseThen .eval (List.append lead rest3)
+              | .false => match strEq b "version" with
                 | .true => IO.println versionText
-                | .false => match strEq a "--help" with
+                | .false => match strEq b "help" with
                   | .true => IO.println usageText
-                  | .false => match strEq a "-h" with
-                    | .true => IO.println usageText
-                    | .false => match strStarts "-" a with
-                      | .true => legacyCmd (.cons a rest)
-                      | .false => usageError (String.append "unknown command " a)
+                  | .false => match strEq b "--version" with
+                    | .true => match rest3 with
+                      | .nil => IO.println versionText
+                      | .cons _ _ => usageError "unknown flag: --version"
+                    | .false => match strEq b "--help" with
+                      | .true => match rest3 with
+                        | .nil => IO.println usageText
+                        | .cons _ _ => usageError "unknown flag: --help"
+                      | .false => match strEq b "-h" with
+                        | .true => match rest3 with
+                          | .nil => IO.println usageText
+                          | .cons _ _ => usageError "unknown flag: -h"
+                        | .false => match unknownTopFlag lead with
+                          | .some f => usageError (String.append "unknown flag: " f)
+                          | .none => match strStarts "-" b with
+                            | .true => usageError (String.append "unknown flag: " b)
+                            | .false => usageError (String.append "unknown command: " (argv (.cons b rest3)))
 
-def main : IO Unit := do
-  args ← IO.args;
-  dispatch args
+-- (`main` is `selfhost/Main.wiz`: the entry point is a module of its own, last.)

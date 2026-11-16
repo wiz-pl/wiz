@@ -2,7 +2,7 @@
 
 ## 10a: effects as a library, commutation as proofs
 
-```
+```wiz no-check
 import Eff
 def prog : Eff (Row.cons (State Nat) (Row.cons (Exn String) (Row.cons Console Row.nil))) Nat := do
   n ← get;
@@ -41,7 +41,7 @@ a monad (`StateT S IO`, `ReaderT E IO`, `IO`), where every operation is a plain 
 and no tree is built. In a 200,000-step state loop the fused version is about 4.5×
 faster.
 
-```
+```wiz no-check
 def prog {m : Type → Type} [Monad m] [MonadState Nat m] [MonadConsole m] : m Nat := …
 runConsole (runState (prog : Eff (Row.cons (State Nat) (Row.cons Console Row.nil)) Nat) 0)   -- tree
 (prog : StateT Nat IO Nat) 0                                                                 -- fused
@@ -49,7 +49,7 @@ runConsole (runState (prog : Eff (Row.cons (State Nat) (Row.cons Console Row.nil
 
 ## 10c: one-shot effects
 
-```
+```wiz no-check
 structure Coin where
   value : Nat
 def prog {R : Type} (1 c : Coin) : Eff1 1 (Row.cons (State Nat) Row.nil) R Coin :=
