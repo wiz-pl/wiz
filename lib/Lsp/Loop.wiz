@@ -1,0 +1,156 @@
+import Lsp.Core
+/-!
+# Lsp.Loop
+
+The event loop of a cooperative, single-threaded server, as data (concurrency plan,
+stage E2): a `Loop` is a state machine with `feed` (one input at a time), `work` (one
+quantum), `wake` (the next deadline) and `stop`. Two kinds of driver run it:
+
+* `Loop.runScript` (here, pure): a virtual clock, a script of timed inputs, a fixed cost
+  per quantum. It is the loop's semantics and the tests' driver: events in, messages out,
+  every run the same.
+* real ones that block on input until `wake`'s deadline: lib/Lsp/Stdio.wiz (`Fd.poll`
+  on stdin, compiled by the Lean toolchain), and later a Web Worker in the playground
+  (`feed` from `onmessage`, `work` from a zero-delay timer).
+
+Inputs that arrive while a quantum runs are taken after it: that is the only
+cancellation point, and it is where the core drops work an edit made stale.
+
+`Lsp.loop` is the language-server core as a `Loop`; `Lsp.Send` builds the client's
+messages so scripts stay readable:
+
+```
+import Lsp.Loop
+import Lsp.Fake
+#eval Lsp.transcript Lsp.fake Lsp.Config.default 10
+  [(0, Lsp.Send.initialize 1 .false), (0, Lsp.Send.initialized),
+   (0, Lsp.Send.didOpen "file:///a.wiz" 1 "def a\ncheck b\n")]
+```
+-/
+
+/-- A cooperative event loop: inputs `M`, outputs `O`, state `S`. Times are milliseconds
+on the driver's clock. `work s now` runs one quantum; `wake s` is when it must next run
+(`none`: wait for input); `stop s`: the loop is over. -/
+structure Loop (S M O : Type) where
+  feed : S → Nat → M → S × List O
+  work : S → Nat → S × List O
+  wake : S → Option Nat
+  stop : S → Bool
+
+/-- Outputs stamped with the virtual time they were produced at, onto `acc` (reversed). -/
+def Loop.stamp {O : Type} (t : Nat) : List O → List (Nat × O) → List (Nat × O)
+  | .nil, acc => acc
+  | .cons o os, acc => Loop.stamp t os (.cons (t, o) acc)
+
+/-- The virtual-clock driver. `cost` is what one quantum takes; `fuel` bounds the number
+of steps (a run that needs more ends with the state it reached, and `Loop.runScript`
+says so). At each step: if a quantum is due before the next input arrives, it runs (and
+the clock moves by `cost`); otherwise the next input is fed at its time (or at the
+current time, if a quantum ran past it). -/
+def Loop.go {S M O : Type} (l : Loop S M O) (cost : Nat) : Nat → S → Nat → List (Nat × M) → List (Nat × O) → S × Bool × List (Nat × O)
+  | .zero, s, _, _, acc => (s, .false, acc)
+  | .succ f, s, t, inputs, acc => match l.stop s with
+    | .true => (s, .true, acc)
+    | .false =>
+      let due : Option Nat := match l.wake s with
+        | .none => .none
+        | .some d => .some (Nat.max t d);
+      let runWork : Bool := match due, inputs with
+        | .none, _ => .false
+        | .some _, .nil => .true
+        | .some d, .cons i _ => Nat.lt d i.1;
+      match runWork, due, inputs with
+      | .true, .some d, _ =>
+        let r := l.work s d;
+        Loop.go l cost f r.1 (d + cost) inputs (Loop.stamp d r.2 acc)
+      | _, _, .nil => (s, .true, acc)
+      | _, _, .cons i rest =>
+        let ti := Nat.max t i.1;
+        let r := l.feed s ti i.2;
+        Loop.go l cost f r.1 ti rest (Loop.stamp ti r.2 acc)
+
+/-- A script's run: the final state, whether it finished within the fuel, and every
+output with its time, in order. -/
+structure Loop.Run (S O : Type) where
+  state : S
+  finished : Bool
+  outputs : List (Nat × O)
+
+/-- Run a script of `(time, input)` pairs (in time order) to the end: every input is fed,
+then quanta run until nothing is due. -/
+def Loop.runScript {S M O : Type} (l : Loop S M O) (cost fuel : Nat) (s : S) (script : List (Nat × M)) : Loop.Run S O :=
+  let r := Loop.go l cost fuel s 0 script .nil;
+  Loop.Run.mk r.1 r.2.1 (List.reverse r.2.2)
+
+/-- A transcript, one line per output: `t=TIME TEXT`, and a last line if the fuel ran out. -/
+def Loop.transcript {S : Type} (r : Loop.Run S String) : List String :=
+  let ls := List.map (fun p => String.join ["t=", Nat.repr p.1, " ", p.2]) r.outputs;
+  match r.finished with
+  | .true => ls
+  | .false => List.append ls ["(out of fuel)"]
+
+-- ## The language-server core as a loop
+
+/-- The core as a `Loop` over JSON-RPC texts. -/
+def Lsp.loopOf {G : Type} : Loop (Lsp.Core G) String String :=
+  Loop.mk (fun s t m => Lsp.feed s (.message t m))
+    (fun s t => Lsp.work (Lsp.Core.withNow s t))
+    Lsp.wake Lsp.Core.exited
+
+/-- A script run of the core for an elaborator from a fresh state. -/
+def Lsp.runScript {G : Type} (e : Lsp.Elab G) (cfg : Lsp.Config) (cost fuel : Nat) (script : List (Nat × String)) : Loop.Run (Lsp.Core G) String :=
+  Loop.runScript Lsp.loopOf cost fuel (Lsp.Core.init e cfg) script
+
+/-- The transcript of a script run, then `steps=N` (how many commands were elaborated:
+what prefix reuse saves). -/
+def Lsp.transcript {G : Type} (e : Lsp.Elab G) (cfg : Lsp.Config) (cost : Nat) (script : List (Nat × String)) : List String :=
+  let r := Lsp.runScript e cfg cost 10000 script;
+  List.append (Loop.transcript r) [String.append "steps=" (Nat.repr r.state.steps)]
+
+-- ## Client messages (for scripts and tests)
+
+/-- A request. -/
+def Lsp.Send.request (id : Nat) (method : String) (params : Json) : String :=
+  Json.render (Json.mkObj [("jsonrpc", Json.mkStr "2.0"), ("id", Json.ofNat id),
+    ("method", Json.mkStr method), ("params", params)])
+
+/-- A notification. -/
+def Lsp.Send.notify (method : String) (params : Json) : String := Lsp.notify method params
+
+/-- `initialize`, asking for `wiz/elaborated` or not. -/
+def Lsp.Send.initialize (id : Nat) (elaborated : Bool) : String :=
+  Lsp.Send.request id "initialize" (Json.mkObj [("processId", .null),
+    ("capabilities", Json.mkObj [("experimental", Json.mkObj [("wizElaborated", Json.mkBool elaborated)])])])
+
+/-- `initialized`. -/
+def Lsp.Send.initialized : String := Lsp.Send.notify "initialized" (Json.mkObj .nil)
+
+/-- `textDocument/didOpen`. -/
+def Lsp.Send.didOpen (uri : String) (version : Nat) (text : String) : String :=
+  Lsp.Send.notify "textDocument/didOpen" (Json.mkObj [("textDocument", Json.mkObj [("uri", Json.mkStr uri),
+    ("languageId", Json.mkStr "wiz"), ("version", Json.ofNat version), ("text", Json.mkStr text)])])
+
+/-- `textDocument/didChange` with the whole new text. -/
+def Lsp.Send.didChange (uri : String) (version : Nat) (text : String) : String :=
+  Lsp.Send.notify "textDocument/didChange" (Json.mkObj [
+    ("textDocument", Json.mkObj [("uri", Json.mkStr uri), ("version", Json.ofNat version)]),
+    ("contentChanges", Json.mkArr [Json.mkObj [("text", Json.mkStr text)]])])
+
+/-- `textDocument/didClose`. -/
+def Lsp.Send.didClose (uri : String) : String :=
+  Lsp.Send.notify "textDocument/didClose" (Json.mkObj [("textDocument", Json.mkObj [("uri", Json.mkStr uri)])])
+
+/-- A position request (`wiz/plainGoal`, `wiz/plainTermGoal`, `textDocument/hover`, …). -/
+def Lsp.Send.position (id : Nat) (method uri : String) (line col : Nat) : String :=
+  Lsp.Send.request id method (Json.mkObj [("textDocument", Json.mkObj [("uri", Json.mkStr uri)]),
+    ("position", Json.mkObj [("line", Json.ofNat line), ("character", Json.ofNat col)])])
+
+/-- `$/cancelRequest`. -/
+def Lsp.Send.cancel (id : Nat) : String :=
+  Lsp.Send.notify "$/cancelRequest" (Json.mkObj [("id", Json.ofNat id)])
+
+/-- `shutdown`. -/
+def Lsp.Send.shutdown (id : Nat) : String := Lsp.Send.request id "shutdown" .null
+
+/-- `exit`. -/
+def Lsp.Send.exit : String := Lsp.Send.notify "exit" .null

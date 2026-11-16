@@ -1,0 +1,692 @@
+import Prelude
+import Text
+import Json
+/-!
+# Lsp.Core
+
+The language server as a pure state machine (concurrency plan, stage E1). It owns the
+documents, the per-command snapshots and the request queue; it does no input or output
+and has no clock of its own. A driver gives it events and writes out what it returns:
+
+* `Lsp.feed : Core G → Event → Core G × List String`: one incoming message (or a clock
+  reading). Cheap: it never elaborates.
+* `Lsp.work : Core G → Core G × List String`: one quantum, i.e. one command of one
+  document, then whatever that made answerable (`publishDiagnostics`, queued requests).
+* `Lsp.wake : Core G → Option Nat`: when `work` must be called next (milliseconds on
+  the driver's clock); `none` means "nothing to do until the next message".
+
+The strings returned are JSON-RPC messages (one JSON text each, unframed); the driver
+frames them (`Content-Length` on stdio, one frame on a WebSocket, one `postMessage` in a
+Web Worker).
+
+The elaborator is abstract: `Elab G` elaborates **one command** from an offset and
+returns where it stopped, the state after it, its diagnostics and its info entries
+(the expected type, the tactic goals or the hover text at a span). `G` is the
+elaborator's state between commands (for the self-hosted frontend, `StepR.next`'s
+`Globals`, categories and tokens); it is kept once per command, so it should be a
+persistent structure. lib/Lsp/Fake.wiz is a toy elaborator used by the tests.
+
+**Snapshots and prefix reuse.** Each elaborated command leaves a `Snap`: its span, the
+state after it, its diagnostics and infos. After a change, every snapshot whose command
+(plus `Elab.lookahead` characters after it) lies before the first changed character is
+kept, and elaboration restarts from the newest kept one. Cancellation is at command
+boundaries: a change arrives between two quanta, so the work it invalidates is simply
+dropped.
+
+**Requests.** `wiz/plainGoal`, `wiz/plainTermGoal` and `textDocument/hover` are answered
+from the infos of the snapshot covering the position. If elaboration has not reached the
+position yet, the request waits in the queue (as in Lean's server) and is answered by the
+`work` call that passes it. A change to the document answers the requests waiting on it
+with `ContentModified` (-32801); `$/cancelRequest` answers one with `RequestCancelled`
+(-32800). The interactive methods answer `MethodNotFound`, which makes the playground's
+pane fall back to the plain ones (docs/playground-lsp.md).
+
+**Positions.** Offsets inside the core are code points into the document's text (what
+`String.chars` counts and what the self-hosted frontend reports). At the protocol edge
+they become LSP positions: a 0-based line and a UTF-16 column (characters outside the
+Basic Multilingual Plane count two).
+
+Everything here is pure and checks with `#eval`; lib/Lsp/Loop.wiz drives it on a
+virtual clock, lib/Lsp/Stdio.wiz on stdin/stdout with `Fd.poll`.
+-/
+
+-- ## The elaborator interface
+
+/-- A message about a span `[start, stop)` of code points. `severity` is LSP's: 1 error,
+2 warning, 3 information, 4 hint. -/
+structure Lsp.Diag where
+  start : Nat
+  stop : Nat
+  severity : Nat
+  message : String
+
+/-- What an info entry describes: the tactic goals at a span, the expected type of the
+term there, or a hover text. -/
+inductive Lsp.InfoKind where
+  | goal
+  | term
+  | hover
+
+/-- One entry of the info list: at `[start, stop]` (both ends inclusive, so a caret just
+after a word still finds it), `lines` (goals one per line, or a single text). -/
+structure Lsp.Info where
+  start : Nat
+  stop : Nat
+  kind : Lsp.InfoKind
+  lines : List String
+
+/-- The result of elaborating from an offset: no command is left (only blanks and
+comments), or one command ended at `stop` (exclusive, a code-point offset into the whole
+text) leaving the state `g`. Spans in `diags` and `infos` are offsets into the whole text. -/
+inductive Lsp.Step (G : Type) where
+  | done
+  | cmd (stop : Nat) (g : G) (diags : List Lsp.Diag) (infos : List Lsp.Info)
+
+/-- An elaborator, one command at a time. `step g text off rest` elaborates the command
+that starts at or after `off` in `text`, in the state `g`; `rest` is `text` from `off`
+on (so a splitter can walk forward without counting from the start).
+
+`lookahead` is how many characters after a command's end can still change the command
+(the splitter of `Lsp.splitNext` decides where a command ends by looking at the first
+character of the next line: 1). A snapshot is reused after an edit only if its end plus
+`lookahead` is at or before the first changed character. -/
+structure Lsp.Elab (G : Type) where
+  init : G
+  lookahead : Nat
+  step : G → String → Nat → List Char → Lsp.Step G
+
+-- ## Splitting commands (for elaborators that have no parser of their own yet)
+
+/-- Whether a code point is a blank (space, tab, carriage return, newline). -/
+def Lsp.isBlank (c : Nat) : Bool :=
+  Bool.or (Bool.or (Nat.beq c 32) (Nat.beq c 9)) (Bool.or (Nat.beq c 13) (Nat.beq c 10))
+
+/-- Skip blanks and `--` line comments (`inComment`: inside one, up to its newline): how
+many characters were skipped (`n` so far) and the rest. -/
+partial def Lsp.skipGo : List Char → Bool → Nat → Nat × List Char
+  | .nil, _, n => (n, .nil)
+  | .cons c cs, .true, n => Lsp.skipGo cs (Bool.not (Nat.beq (Char.code c) 10)) (n + 1)
+  | .cons c cs, .false, n => match Lsp.isBlank (Char.code c) with
+    | .true => Lsp.skipGo cs .false (n + 1)
+    | .false => match Nat.beq (Char.code c) 45, cs with
+      | .true, .cons d ds => match Nat.beq (Char.code d) 45 with
+        | .true => Lsp.skipGo ds .true (n + 2)
+        | .false => (n, .cons c cs)
+      | _, _ => (n, .cons c cs)
+
+/-- Skip blanks and `--` line comments: how many characters and the rest. -/
+def Lsp.skipBlank (cs : List Char) (n : Nat) : Nat × List Char := Lsp.skipGo cs .false n
+
+/-- The length of a command's text: up to and including the newline that is followed by a
+character in column 0 that is not a blank (the start of the next command), or to the
+end. The characters of the command are collected reversed in `acc`. -/
+def Lsp.cmdLen : List Char → Nat → List Char → Nat × List Char
+  | .nil, n, acc => (n, acc)
+  | .cons c cs, n, acc => match Nat.beq (Char.code c) 10, cs with
+    | .true, .cons d _ => match Lsp.isBlank (Char.code d) with
+      | .true => Lsp.cmdLen cs (n + 1) (.cons c acc)
+      | .false => (n + 1, .cons c acc)
+    | _, _ => Lsp.cmdLen cs (n + 1) (.cons c acc)
+
+/-- The next command from offset `off` (`rest` is the text from there): its start, its
+end and its text, or `none` if only blanks and comments are left. A command starts at the
+first character that is not blank or in a comment and ends where the next line starts in
+column 0 with a non-blank (Lean's and Wiz's layout rule, as a cheap approximation of the
+parser). The end is exclusive and includes the newline. -/
+def Lsp.splitNext (off : Nat) (rest : List Char) : Option (Nat × Nat × List Char) :=
+  let sk := Lsp.skipBlank rest 0;
+  match sk.2 with
+  | .nil => .none
+  | .cons _ _ =>
+    let cl := Lsp.cmdLen sk.2 0 .nil;
+    .some (off + sk.1, off + sk.1 + cl.1, List.reverse cl.2)
+
+/-- Every command of a text as `(start, stop)`, for tests. -/
+partial def Lsp.splitFrom (off : Nat) (rest : List Char) : List (Nat × Nat) :=
+  match Lsp.splitNext off rest with
+  | .none => .nil
+  | .some r => .cons (r.1, r.2.1) (Lsp.splitFrom r.2.1 (List.drop (r.2.1 - off) rest))
+
+/-- Every command of a text as `(start, stop)`. -/
+def Lsp.splitAll (text : String) : List (Nat × Nat) := Lsp.splitFrom 0 (String.chars text)
+
+-- ## Positions: code points and LSP's (line, UTF-16 column)
+
+/-- How many UTF-16 code units a code point takes. -/
+def Lsp.utf16Len (c : Nat) : Nat := match Nat.lt c 65536 with
+  | .true => 1
+  | .false => 2
+
+/-- The position of code-point offset `off` (walking `cs` from `line`, `col`). An offset
+past the end is the end. -/
+def Lsp.posGo : List Char → Nat → Nat → Nat → Nat × Nat
+  | .nil, _, line, col => (line, col)
+  | .cons c cs, off, line, col => match off with
+    | .zero => (line, col)
+    | .succ k => match Nat.beq (Char.code c) 10 with
+      | .true => Lsp.posGo cs k (line + 1) 0
+      | .false => Lsp.posGo cs k line (col + Lsp.utf16Len (Char.code c))
+
+/-- The LSP position `(line, character)` of a code-point offset. -/
+def Lsp.posOf (cs : List Char) (off : Nat) : Nat × Nat := Lsp.posGo cs off 0 0
+
+/-- Within one line: the offset of UTF-16 column `col` (a column inside a surrogate pair
+or past the line's end is the next character or the line's end). -/
+def Lsp.colGo : List Char → Nat → Nat → Nat
+  | .nil, _, n => n
+  | .cons c cs, col, n => match Nat.beq col 0, Nat.beq (Char.code c) 10 with
+    | .true, _ => n
+    | _, .true => n
+    | _, _ => Lsp.colGo cs (col - Lsp.utf16Len (Char.code c)) (n + 1)
+
+/-- The code-point offset of line `line`, then column `col`. -/
+partial def Lsp.offGo : List Char → Nat → Nat → Nat → Nat
+  | cs, .zero, col, n => Lsp.colGo cs col n
+  | .nil, .succ _, _, n => n
+  | .cons c cs, .succ l, col, n => match Nat.beq (Char.code c) 10 with
+    | .true => Lsp.offGo cs l col (n + 1)
+    | .false => Lsp.offGo cs (.succ l) col (n + 1)
+
+/-- The code-point offset of the LSP position `(line, character)`; clamped to the line's
+end, and to the text's end. -/
+def Lsp.offsetOf (cs : List Char) (line col : Nat) : Nat := Lsp.offGo cs line col 0
+
+/-- An LSP position object. -/
+def Lsp.posJson (p : Nat × Nat) : Json :=
+  Json.mkObj [("line", Json.ofNat p.1), ("character", Json.ofNat p.2)]
+
+/-- An LSP range object for code-point offsets `[start, stop)`. -/
+def Lsp.rangeJson (cs : List Char) (start stop : Nat) : Json :=
+  Json.mkObj [("start", Lsp.posJson (Lsp.posOf cs start)), ("end", Lsp.posJson (Lsp.posOf cs stop))]
+
+-- ## State
+
+/-- One elaborated command: its span, the elaborator's state after it, what it said. -/
+structure Lsp.Snap (G : Type) where
+  start : Nat
+  stop : Nat
+  g : G
+  diags : List Lsp.Diag
+  infos : List Lsp.Info
+
+/-- An open document. `snaps` is the elaborated prefix, newest first; `rest` is the text
+from the frontier (the newest snapshot's end) on. `complete`: no command is left.
+`due`: elaboration does not start before this time (the debounce after a change).
+`published`: this version's diagnostics have been sent. `session` changes on every open
+and change (the protocol's `session` number). -/
+structure Lsp.Doc (G : Type) where
+  uri : String
+  version : Nat
+  session : Nat
+  text : String
+  snaps : List (Lsp.Snap G)
+  rest : List Char
+  complete : Bool
+  due : Nat
+  published : Bool
+
+/-- What a waiting request asks for. -/
+inductive Lsp.Query where
+  | goal
+  | term
+  | hover
+
+/-- A request waiting for elaboration to reach `offset` in document `uri`. `id` is the
+JSON-RPC id (a number or a string) as it came. -/
+structure Lsp.Pending where
+  id : Json
+  uri : String
+  offset : Nat
+  query : Lsp.Query
+
+/-- Settings: `debounce` (milliseconds between a change and the start of its
+elaboration), `elaborated` (send `wiz/elaborated` after the diagnostics; set by the
+client's `experimental.wizElaborated`), and the name the server reports. -/
+structure Lsp.Config where
+  debounce : Nat
+  elaborated : Bool
+  name : String
+
+/-- 200 ms debounce, no `wiz/elaborated` until a client asks. -/
+def Lsp.Config.default : Lsp.Config := Lsp.Config.mk 200 .false "wiz-lsp-core"
+
+/-- The server. `phase`: 0 before `initialize`, 1 running, 2 after `shutdown`, 3 after
+`exit`. `sessions` numbers the sessions; `steps` counts `Elab.step` calls (the tests read
+it to see which commands were reused). -/
+structure Lsp.Core (G : Type) where
+  elab : Lsp.Elab G
+  config : Lsp.Config
+  now : Nat
+  phase : Nat
+  docs : List (Lsp.Doc G)
+  queue : List Lsp.Pending
+  sessions : Nat
+  steps : Nat
+
+/-- A fresh server for an elaborator. -/
+def Lsp.Core.init {G : Type} (e : Lsp.Elab G) (cfg : Lsp.Config) : Lsp.Core G :=
+  Lsp.Core.mk e cfg 0 0 .nil .nil 0 0
+
+/-- Whether the client has sent `exit` (the driver stops). -/
+def Lsp.Core.exited {G : Type} (s : Lsp.Core G) : Bool := Nat.beq s.phase 3
+
+/-- An input: a JSON-RPC message (its text) received at `now`, or just the time. Times are
+milliseconds on the driver's clock and must not go backwards. -/
+inductive Lsp.Event where
+  | message (now : Nat) (body : String)
+  | clock (now : Nat)
+
+-- small setters (no record update syntax in the self-hosted subset)
+
+def Lsp.Core.withNow {G : Type} (s : Lsp.Core G) (t : Nat) : Lsp.Core G :=
+  Lsp.Core.mk s.elab s.config (Nat.max s.now t) s.phase s.docs s.queue s.sessions s.steps
+def Lsp.Core.withPhase {G : Type} (s : Lsp.Core G) (p : Nat) : Lsp.Core G :=
+  Lsp.Core.mk s.elab s.config s.now p s.docs s.queue s.sessions s.steps
+def Lsp.Core.withDocs {G : Type} (s : Lsp.Core G) (ds : List (Lsp.Doc G)) : Lsp.Core G :=
+  Lsp.Core.mk s.elab s.config s.now s.phase ds s.queue s.sessions s.steps
+def Lsp.Core.withQueue {G : Type} (s : Lsp.Core G) (q : List Lsp.Pending) : Lsp.Core G :=
+  Lsp.Core.mk s.elab s.config s.now s.phase s.docs q s.sessions s.steps
+def Lsp.Core.withConfig {G : Type} (s : Lsp.Core G) (c : Lsp.Config) : Lsp.Core G :=
+  Lsp.Core.mk s.elab c s.now s.phase s.docs s.queue s.sessions s.steps
+def Lsp.Core.nextSession {G : Type} (s : Lsp.Core G) : Lsp.Core G :=
+  Lsp.Core.mk s.elab s.config s.now s.phase s.docs s.queue (s.sessions + 1) s.steps
+def Lsp.Core.stepped {G : Type} (s : Lsp.Core G) : Lsp.Core G :=
+  Lsp.Core.mk s.elab s.config s.now s.phase s.docs s.queue s.sessions (s.steps + 1)
+
+-- ## Documents
+
+/-- The document `uri`, if it is open. -/
+def Lsp.findDoc {G : Type} (uri : String) : List (Lsp.Doc G) → Option (Lsp.Doc G)
+  | .nil => .none
+  | .cons d ds => match String.eq d.uri uri with
+    | .true => .some d
+    | .false => Lsp.findDoc uri ds
+
+/-- The documents without `uri`. -/
+def Lsp.dropDoc {G : Type} (uri : String) : List (Lsp.Doc G) → List (Lsp.Doc G)
+  | .nil => .nil
+  | .cons d ds => match String.eq d.uri uri with
+    | .true => Lsp.dropDoc uri ds
+    | .false => .cons d (Lsp.dropDoc uri ds)
+
+/-- Replace the document with `d`'s uri in place, or add `d` at the end. -/
+def Lsp.putDoc {G : Type} (d : Lsp.Doc G) : List (Lsp.Doc G) → List (Lsp.Doc G)
+  | .nil => .cons d .nil
+  | .cons e es => match String.eq e.uri d.uri with
+    | .true => .cons d es
+    | .false => .cons e (Lsp.putDoc d es)
+
+/-- Where elaboration of a document stands: the newest snapshot's end (0 if none). -/
+def Lsp.Doc.frontier {G : Type} (d : Lsp.Doc G) : Nat := match d.snaps with
+  | .nil => 0
+  | .cons sn _ => sn.stop
+
+/-- The length of the common prefix of two texts (the first changed offset). -/
+def Lsp.commonPrefix : List Char → List Char → Nat → Nat
+  | .cons a as, .cons b bs, n => match Nat.beq (Char.code a) (Char.code b) with
+    | .true => Lsp.commonPrefix as bs (n + 1)
+    | .false => n
+  | _, _, n => n
+
+/-- The snapshots (newest first) that end, with `look` characters after them, at or before
+offset `o`. Ends grow with age reversed, so this drops from the front. -/
+def Lsp.keepBefore {G : Type} (o look : Nat) : List (Lsp.Snap G) → List (Lsp.Snap G)
+  | .nil => .nil
+  | .cons sn ss => match Nat.le (sn.stop + look) o with
+    | .true => .cons sn ss
+    | .false => Lsp.keepBefore o look ss
+
+/-- A new version of a document: keep the snapshots before the first change, restart
+from there. `due` is when elaboration may start. -/
+def Lsp.Doc.change {G : Type} (d : Lsp.Doc G) (look : Nat) (version session : Nat) (text : String) (due : Nat) : Lsp.Doc G :=
+  let cs := String.chars text;
+  let o := Lsp.commonPrefix (String.chars d.text) cs 0;
+  let o2 : Nat := match Nat.beq (List.length (String.chars d.text)) (List.length cs) with
+    | .true => match Nat.beq o (List.length cs) with
+      | .true => o + look
+      | .false => o
+    | .false => o;
+  let kept := Lsp.keepBefore o2 look d.snaps;
+  let fr : Nat := match kept with
+    | .nil => 0
+    | .cons sn _ => sn.stop;
+  Lsp.Doc.mk d.uri version session text kept (List.drop fr cs) .false due .false
+
+/-- A newly opened document. -/
+def Lsp.Doc.opened {G : Type} (uri : String) (version session : Nat) (text : String) (due : Nat) : Lsp.Doc G :=
+  Lsp.Doc.mk uri version session text .nil (String.chars text) .false due .false
+
+-- ## JSON-RPC messages
+
+/-- A response with a result. -/
+def Lsp.result (id : Json) (r : Json) : String :=
+  Json.render (Json.mkObj [("jsonrpc", Json.mkStr "2.0"), ("id", id), ("result", r)])
+
+/-- An error response (`code` is negative in the protocol: pass its absolute value). -/
+def Lsp.error (id : Json) (code : Nat) (msg : String) : String :=
+  Json.render (Json.mkObj [("jsonrpc", Json.mkStr "2.0"), ("id", id),
+    ("error", Json.mkObj [("code", Json.int .true code), ("message", Json.mkStr msg)])])
+
+/-- A notification. -/
+def Lsp.notify (method : String) (params : Json) : String :=
+  Json.render (Json.mkObj [("jsonrpc", Json.mkStr "2.0"), ("method", Json.mkStr method), ("params", params)])
+
+/-- Whether two request ids are the same (compared as JSON text). -/
+def Lsp.sameId (a b : Json) : Bool := String.eq (Json.render a) (Json.render b)
+
+/-- A diagnostic object. -/
+def Lsp.diagJson (cs : List Char) (dg : Lsp.Diag) : Json :=
+  Json.mkObj [("range", Lsp.rangeJson cs dg.start dg.stop), ("severity", Json.ofNat dg.severity),
+    ("source", Json.mkStr "wiz"), ("message", Json.mkStr dg.message)]
+
+/-- The diagnostics of the snapshots (newest first) onto `acc`, in text order. -/
+def Lsp.allDiags {G : Type} : List (Lsp.Snap G) → List Lsp.Diag → List Lsp.Diag
+  | .nil, acc => acc
+  | .cons sn ss, acc => Lsp.allDiags ss (List.append sn.diags acc)
+
+/-- `textDocument/publishDiagnostics` for a document's current version. -/
+def Lsp.publish {G : Type} (d : Lsp.Doc G) : String :=
+  let cs := String.chars d.text;
+  Lsp.notify "textDocument/publishDiagnostics" (Json.mkObj [("uri", Json.mkStr d.uri),
+    ("version", Json.ofNat d.version),
+    ("diagnostics", Json.mkArr (List.map (Lsp.diagJson cs) (Lsp.allDiags d.snaps .nil)))])
+
+/-- `wiz/elaborated` for a document's current version. -/
+def Lsp.elaborated {G : Type} (d : Lsp.Doc G) : String :=
+  Lsp.notify "wiz/elaborated" (Json.mkObj [("uri", Json.mkStr d.uri),
+    ("version", Json.ofNat d.version), ("session", Json.ofNat d.session)])
+
+/-- The messages to send once a document is completely elaborated. -/
+def Lsp.finished {G : Type} (cfg : Lsp.Config) (d : Lsp.Doc G) : List String := match cfg.elaborated with
+  | .true => [Lsp.publish d, Lsp.elaborated d]
+  | .false => [Lsp.publish d]
+
+-- ## Answering position requests
+
+/-- Whether an info is of the kind a query wants. -/
+def Lsp.kindIs (q : Lsp.Query) (k : Lsp.InfoKind) : Bool := match q, k with
+  | .goal, .goal => .true
+  | .term, .term => .true
+  | .hover, .hover => .true
+  | _, _ => .false
+
+/-- The innermost info of kind `q` covering `off` (the smallest span; the first of equal
+ones). -/
+def Lsp.bestInfo (q : Lsp.Query) (off : Nat) : List Lsp.Info → Option Lsp.Info → Option Lsp.Info
+  | .nil, best => best
+  | .cons i is, best =>
+    match Bool.and (Lsp.kindIs q i.kind) (Bool.and (Nat.le i.start off) (Nat.le off i.stop)) with
+    | .false => Lsp.bestInfo q off is best
+    | .true => match best with
+      | .none => Lsp.bestInfo q off is (.some i)
+      | .some b => match Nat.lt (i.stop - i.start) (b.stop - b.start) with
+        | .true => Lsp.bestInfo q off is (.some i)
+        | .false => Lsp.bestInfo q off is best
+
+/-- The snapshot of the command an offset belongs to: the oldest one ending after it
+(blanks before a command belong to it). Snapshots are newest first. -/
+def Lsp.snapAt {G : Type} (off : Nat) : List (Lsp.Snap G) → Option (Lsp.Snap G) → Option (Lsp.Snap G)
+  | .nil, found => found
+  | .cons sn ss, found => match Nat.lt off sn.stop with
+    | .true => Lsp.snapAt off ss (.some sn)
+    | .false => found
+
+/-- Whether a request at `off` can be answered: the command there has been elaborated, or
+the document is complete. -/
+def Lsp.Doc.covers {G : Type} (d : Lsp.Doc G) (off : Nat) : Bool := Bool.or d.complete (Nat.lt off (Lsp.Doc.frontier d))
+
+/-- The answer to a query from the info list at the offset (`null` if none). -/
+def Lsp.answer {G : Type} (d : Lsp.Doc G) (q : Lsp.Query) (off : Nat) : Json :=
+  let cs := String.chars d.text;
+  let info : Option Lsp.Info := match Lsp.snapAt off d.snaps .none with
+    | .none => .none
+    | .some sn => Lsp.bestInfo q off sn.infos .none;
+  match info with
+  | .none => .null
+  | .some i => match q with
+    | .goal => Json.mkObj [("goals", Json.mkArr (List.map Json.mkStr i.lines)),
+        ("rendered", Json.mkStr (String.intercalate "\n\n" i.lines))]
+    | .term => Json.mkObj [("goal", Json.mkStr (String.intercalate "\n" i.lines)),
+        ("range", Lsp.rangeJson cs i.start i.stop)]
+    | .hover => Json.mkObj [("contents", Json.mkObj [("kind", Json.mkStr "plaintext"),
+          ("value", Json.mkStr (String.intercalate "\n" i.lines))]),
+        ("range", Lsp.rangeJson cs i.start i.stop)]
+
+/-- Answer every waiting request that has become answerable; keep the rest, in order. -/
+def Lsp.answerReady {G : Type} (docs : List (Lsp.Doc G)) : List Lsp.Pending → List Lsp.Pending × List String
+  | .nil => (.nil, .nil)
+  | .cons p ps =>
+    let r := Lsp.answerReady docs ps;
+    match Lsp.findDoc p.uri docs with
+    | .none => (r.1, .cons (Lsp.error p.id 32801 "the document was closed") r.2)
+    | .some d => match Lsp.Doc.covers d p.offset with
+      | .true => (r.1, .cons (Lsp.result p.id (Lsp.answer d p.query p.offset)) r.2)
+      | .false => (.cons p r.1, r.2)
+
+/-- `answerReady` on the server. -/
+def Lsp.Core.drain {G : Type} (s : Lsp.Core G) : Lsp.Core G × List String :=
+  let r := Lsp.answerReady s.docs s.queue;
+  (Lsp.Core.withQueue s r.1, r.2)
+
+/-- Remove the waiting requests on `uri`, answering each with `ContentModified`. -/
+def Lsp.dropUri (uri : String) : List Lsp.Pending → List Lsp.Pending × List String
+  | .nil => (.nil, .nil)
+  | .cons p ps =>
+    let r := Lsp.dropUri uri ps;
+    match String.eq p.uri uri with
+    | .true => (r.1, .cons (Lsp.error p.id 32801 "the document changed") r.2)
+    | .false => (.cons p r.1, r.2)
+
+/-- Remove the waiting request `id`; whether it was there. -/
+def Lsp.dropId (id : Json) : List Lsp.Pending → List Lsp.Pending × Bool
+  | .nil => (.nil, .false)
+  | .cons p ps => match Lsp.sameId p.id id with
+    | .true => (ps, .true)
+    | .false =>
+      let r := Lsp.dropId id ps;
+      (.cons p r.1, r.2)
+
+-- ## Feeding messages
+
+/-- The capabilities `initialize` answers with. -/
+def Lsp.capabilities (cfg : Lsp.Config) : Json :=
+  Json.mkObj [("capabilities", Json.mkObj [("textDocumentSync", Json.ofNat 1),
+      ("positionEncoding", Json.mkStr "utf-16"),
+      ("hoverProvider", Json.mkBool .true),
+      ("experimental", Json.mkObj [("wizInfoview", Json.mkObj [("version", Json.mkStr "0.1"),
+        ("methods", Json.mkArr [Json.mkStr "wiz/plainGoal", Json.mkStr "wiz/plainTermGoal"])])])]),
+    ("serverInfo", Json.mkObj [("name", Json.mkStr cfg.name), ("version", Json.mkStr "0.1")])]
+
+/-- A field of the params, `null` if missing. -/
+def Lsp.param (j : Json) (path : List String) : Json := match Json.getPath j (.cons "params" path) with
+  | .some v => v
+  | .none => .null
+
+/-- The text of a full-sync `didChange`: the last content change's `text`. -/
+def Lsp.changeText : List Json → Option String
+  | .nil => .none
+  | .cons c .nil => Json.asString (match Json.get c "text" with
+    | .some t => t
+    | .none => .null)
+  | .cons _ cs => Lsp.changeText cs
+
+/-- `didOpen`. -/
+def Lsp.Core.didOpen {G : Type} (s : Lsp.Core G) (j : Json) : Lsp.Core G × List String :=
+  let uri := Json.getStr (Lsp.param j ["textDocument"]) "uri";
+  let td := Lsp.param j ["textDocument"];
+  let s1 := Lsp.Core.nextSession s;
+  let d : Lsp.Doc G := Lsp.Doc.opened uri (Json.getNat td "version") s1.sessions (Json.getStr td "text") s.now;
+  let q := Lsp.dropUri uri s1.queue;
+  (Lsp.Core.withQueue (Lsp.Core.withDocs s1 (Lsp.putDoc d s1.docs)) q.1, q.2)
+
+/-- `didChange` (full text): prefix reuse, the debounce, `ContentModified` for the
+requests waiting on the old text. -/
+def Lsp.Core.didChange {G : Type} (s : Lsp.Core G) (j : Json) : Lsp.Core G × List String :=
+  let td := Lsp.param j ["textDocument"];
+  let uri := Json.getStr td "uri";
+  match Lsp.findDoc uri s.docs, Lsp.changeText (Json.asList (Lsp.param j ["contentChanges"])) with
+  | .some d, .some text =>
+    let s1 := Lsp.Core.nextSession s;
+    let d1 := Lsp.Doc.change d s.elab.lookahead (Json.getNat td "version") s1.sessions text (s.now + s.config.debounce);
+    let q := Lsp.dropUri uri s1.queue;
+    (Lsp.Core.withQueue (Lsp.Core.withDocs s1 (Lsp.putDoc d1 s1.docs)) q.1, q.2)
+  | _, _ => (s, .nil)
+
+/-- `didClose`: forget the document, clear its diagnostics. -/
+def Lsp.Core.didClose {G : Type} (s : Lsp.Core G) (j : Json) : Lsp.Core G × List String :=
+  let uri := Json.getStr (Lsp.param j ["textDocument"]) "uri";
+  let q := Lsp.dropUri uri s.queue;
+  (Lsp.Core.withQueue (Lsp.Core.withDocs s (Lsp.dropDoc uri s.docs)) q.1,
+    List.append q.2 [Lsp.notify "textDocument/publishDiagnostics"
+      (Json.mkObj [("uri", Json.mkStr uri), ("diagnostics", Json.mkArr .nil)])])
+
+/-- A position request: queue it, then answer what is answerable. -/
+def Lsp.Core.ask {G : Type} (s : Lsp.Core G) (id : Json) (j : Json) (q : Lsp.Query) : Lsp.Core G × List String :=
+  let uri := Json.getStr (Lsp.param j ["textDocument"]) "uri";
+  let pos := Lsp.param j ["position"];
+  match Lsp.findDoc uri s.docs with
+  | .none => (s, [Lsp.error id 32602 (String.append "document not open: " uri)])
+  | .some d =>
+    let off := Lsp.offsetOf (String.chars d.text) (Json.getNat pos "line") (Json.getNat pos "character");
+    Lsp.Core.drain (Lsp.Core.withQueue s (List.append s.queue [Lsp.Pending.mk id uri off q]))
+
+/-- `$/cancelRequest`: a waiting request is answered with `RequestCancelled`; one already
+answered (or unknown) is ignored. -/
+def Lsp.Core.cancel {G : Type} (s : Lsp.Core G) (j : Json) : Lsp.Core G × List String :=
+  let id := Lsp.param j ["id"];
+  let r := Lsp.dropId id s.queue;
+  match r.2 with
+  | .true => (Lsp.Core.withQueue s r.1, [Lsp.error id 32800 "cancelled"])
+  | .false => (s, .nil)
+
+/-- Whether the client asked for `wiz/elaborated`. -/
+def Lsp.wantsElaborated (j : Json) : Bool :=
+  match Json.getPath j ["params", "capabilities", "experimental", "wizElaborated"] with
+  | .some (.bool b) => b
+  | _ => .false
+
+/-- A request (it has an id). -/
+def Lsp.Core.request {G : Type} (s : Lsp.Core G) (id : Json) (m : String) (j : Json) : Lsp.Core G × List String :=
+  match String.eq m "initialize" with
+  | .true =>
+    let c := s.config;
+    let s1 := Lsp.Core.withPhase (Lsp.Core.withConfig s (Lsp.Config.mk c.debounce (Lsp.wantsElaborated j) c.name)) 1;
+    (s1, [Lsp.result id (Lsp.capabilities c)])
+  | .false => match Nat.beq s.phase 0 with
+    | .true => (s, [Lsp.error id 32002 "the server is not initialized"])
+    | .false => match String.eq m "shutdown" with
+      | .true => (Lsp.Core.withPhase s 2, [Lsp.result id .null])
+      | .false => match String.eq m "wiz/plainGoal" with
+        | .true => Lsp.Core.ask s id j .goal
+        | .false => match String.eq m "wiz/plainTermGoal" with
+          | .true => Lsp.Core.ask s id j .term
+          | .false => match String.eq m "textDocument/hover" with
+            | .true => Lsp.Core.ask s id j .hover
+            | .false => (s, [Lsp.error id 32601 (String.append "method not found: " m)])
+
+/-- A notification (no id). Unknown ones are ignored, as the protocol says. -/
+def Lsp.Core.notification {G : Type} (s : Lsp.Core G) (m : String) (j : Json) : Lsp.Core G × List String :=
+  match String.eq m "exit" with
+  | .true => (Lsp.Core.withPhase s 3, .nil)
+  | .false => match Nat.beq s.phase 0 with
+    | .true => (s, .nil)
+    | .false => match String.eq m "textDocument/didOpen" with
+      | .true => Lsp.Core.didOpen s j
+      | .false => match String.eq m "textDocument/didChange" with
+        | .true => Lsp.Core.didChange s j
+        | .false => match String.eq m "textDocument/didClose" with
+          | .true => Lsp.Core.didClose s j
+          | .false => match String.eq m "$/cancelRequest" with
+            | .true => Lsp.Core.cancel s j
+            | .false => (s, .nil)
+
+/-- One parsed message. Responses from the client (an id, no method) are ignored. -/
+def Lsp.Core.message {G : Type} (s : Lsp.Core G) (j : Json) : Lsp.Core G × List String :=
+  match Json.get j "method", Json.get j "id" with
+  | .some (.str m), .some id => Lsp.Core.request s id m j
+  | .some (.str m), .none => Lsp.Core.notification s m j
+  | .some _, .some id => (s, [Lsp.error id 32600 "invalid request"])
+  | _, _ => (s, .nil)
+
+/-- Take one event. Never elaborates. -/
+def Lsp.feed {G : Type} (s : Lsp.Core G) (e : Lsp.Event) : Lsp.Core G × List String := match e with
+  | .clock t => (Lsp.Core.withNow s t, .nil)
+  | .message t body =>
+    let s1 := Lsp.Core.withNow s t;
+    match Json.parse body with
+    | .error msg => (s1, [Lsp.error .null 32700 (String.append "parse error: " msg)])
+    | .ok j => Lsp.Core.message s1 j
+
+-- ## Working
+
+/-- Whether a document has work that may run at `now`. -/
+def Lsp.Doc.ready {G : Type} (now : Nat) (d : Lsp.Doc G) : Bool :=
+  Bool.and (Bool.not d.complete) (Nat.le d.due now)
+
+/-- Whether a request waits on `uri`. -/
+def Lsp.waitsOn (uri : String) : List Lsp.Pending → Bool
+  | .nil => .false
+  | .cons p ps => Bool.or (String.eq p.uri uri) (Lsp.waitsOn uri ps)
+
+/-- The document to work on: the first ready one that a request waits on, else the first
+ready one. -/
+def Lsp.pick {G : Type} (now : Nat) (q : List Lsp.Pending) (ds : List (Lsp.Doc G)) : Option (Lsp.Doc G) :=
+  match List.find (fun d => Bool.and (Lsp.Doc.ready now d) (Lsp.waitsOn d.uri q)) ds with
+  | .some d => .some d
+  | .none => List.find (Lsp.Doc.ready now) ds
+
+/-- One command of one document. -/
+def Lsp.Doc.step {G : Type} (e : Lsp.Elab G) (d : Lsp.Doc G) : Lsp.Doc G :=
+  let off := Lsp.Doc.frontier d;
+  let g : G := match d.snaps with
+    | .nil => e.init
+    | .cons sn _ => sn.g;
+  let finish := Lsp.Doc.mk d.uri d.version d.session d.text d.snaps .nil .true d.due d.published;
+  match e.step g d.text off d.rest with
+  | .done => finish
+  | .cmd stop g2 diags infos => match Nat.lt off stop with
+    | .false => finish
+    | .true =>
+      let rest := List.drop (stop - off) d.rest;
+      let start := off + (Lsp.skipBlank d.rest 0).1;
+      Lsp.Doc.mk d.uri d.version d.session d.text (.cons (Lsp.Snap.mk start stop g2 diags infos) d.snaps)
+        rest (List.isEmpty rest) d.due d.published
+
+/-- Move a document to the end of the list (round robin between documents). -/
+def Lsp.toBack {G : Type} (d : Lsp.Doc G) (ds : List (Lsp.Doc G)) : List (Lsp.Doc G) :=
+  List.append (Lsp.dropDoc d.uri ds) [d]
+
+/-- One quantum: elaborate one command of the most urgent document; when that completes
+the document, publish its diagnostics; then answer the requests it made answerable. With
+nothing ready, nothing happens. -/
+def Lsp.work {G : Type} (s : Lsp.Core G) : Lsp.Core G × List String :=
+  match Lsp.pick s.now s.queue s.docs with
+  | .none => (s, .nil)
+  | .some d =>
+    let d1 := Lsp.Doc.step s.elab d;
+    let fin : Bool := Bool.and d1.complete (Bool.not d1.published);
+    let d2 : Lsp.Doc G := match fin with
+      | .true => Lsp.Doc.mk d1.uri d1.version d1.session d1.text d1.snaps d1.rest .true d1.due .true
+      | .false => d1;
+    let outs : List String := match fin with
+      | .true => Lsp.finished s.config d2
+      | .false => .nil;
+    let r := Lsp.Core.drain (Lsp.Core.withDocs (Lsp.Core.stepped s) (Lsp.toBack d2 s.docs));
+    (r.1, List.append outs r.2)
+
+/-- The earliest due time of an unfinished document. -/
+def Lsp.earliest {G : Type} : List (Lsp.Doc G) → Option Nat → Option Nat
+  | .nil, best => best
+  | .cons d ds, best => match d.complete with
+    | .true => Lsp.earliest ds best
+    | .false => match best with
+      | .none => Lsp.earliest ds (.some d.due)
+      | .some b => Lsp.earliest ds (.some (match Nat.lt d.due b with
+        | .true => d.due
+        | .false => b))
+
+/-- When `work` must be called next: `none` when there is nothing to do until a message
+comes; a time at or before `now` means at once. -/
+def Lsp.wake {G : Type} (s : Lsp.Core G) : Option Nat := match Lsp.Core.exited s with
+  | .true => .none
+  | .false => Lsp.earliest s.docs .none

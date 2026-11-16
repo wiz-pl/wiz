@@ -1,0 +1,89 @@
+import Lsp.Core
+/-!
+# Lsp.Fake
+
+A toy elaborator for the language-server core (lib/Lsp/Core.wiz): it splits commands
+with `Lsp.splitNext` and understands four of them, enough to exercise diagnostics, the
+info list and prefix reuse without the real frontend.
+
+* `def NAME …`: defines `NAME`; a hover over the name says `NAME : def #K` (K counts the
+  definitions so far, so a transcript shows whether the state came from a snapshot).
+* `check NAME`: an information message `NAME : def #K` and a term info `NAME` over the
+  name, or the error `unknown identifier 'NAME'`.
+* `goal A | B | …`: a goal info over the whole command, one goal per `|`-separated part.
+* `fail TEXT`: a warning with the text.
+* anything else: the error `unknown command 'WORD'` over the first word.
+
+The state is the defined names, newest first, with their numbers.
+
+```
+import Lsp.Fake
+#eval Lsp.splitAll "def a\ncheck a\n  -- still check\ngoal x\n"
+-- [(0, 6), (6, 31), (31, 38)]
+```
+-/
+
+/-- Whether a character ends a word (a blank). -/
+def Lsp.Fake.isSep (c : Char) : Bool := Lsp.isBlank (Char.code c)
+
+/-- The first word of `cs` (reversed in `acc`), its length, and the rest after it. -/
+def Lsp.Fake.word : List Char → List Char → Nat → List Char × Nat × List Char
+  | .nil, acc, n => (List.reverse acc, n, .nil)
+  | .cons c cs, acc, n => match Lsp.Fake.isSep c with
+    | .true => (List.reverse acc, n, .cons c cs)
+    | .false => Lsp.Fake.word cs (.cons c acc) (n + 1)
+
+/-- Skip spaces and tabs only (not newlines): how many, and the rest. -/
+def Lsp.Fake.spaces : List Char → Nat → Nat × List Char
+  | .nil, n => (n, .nil)
+  | .cons c cs, n => match Bool.or (Nat.beq (Char.code c) 32) (Nat.beq (Char.code c) 9) with
+    | .true => Lsp.Fake.spaces cs (n + 1)
+    | .false => (n, .cons c cs)
+
+/-- The number of `name` in the state, if it is defined. -/
+def Lsp.Fake.lookup (name : String) : List (String × Nat) → Option Nat
+  | .nil => .none
+  | .cons p ps => match String.eq p.1 name with
+    | .true => .some p.2
+    | .false => Lsp.Fake.lookup name ps
+
+/-- `NAME : def #K`. -/
+def Lsp.Fake.sig (name : String) (k : Nat) : String :=
+  String.join [name, " : def #", Nat.repr k]
+
+/-- The `|`-separated parts of a goal command, trimmed. -/
+def Lsp.Fake.goals (cs : List Char) : List String :=
+  List.map String.trim (String.splitOn (String.trim (String.mk cs)) "|")
+
+/-- Elaborate one command (`start` is its offset, `text` its characters). -/
+def Lsp.Fake.command (g : List (String × Nat)) (start stop : Nat) (text : List Char) : Lsp.Step (List (String × Nat)) :=
+  let w := Lsp.Fake.word text .nil 0;
+  let kw := String.mk w.1;
+  let sp := Lsp.Fake.spaces w.2.2 0;
+  let a := Lsp.Fake.word sp.2 .nil 0;
+  let arg := String.mk a.1;
+  let aStart := start + w.2.1 + sp.1;
+  let aStop := aStart + a.2.1;
+  match String.eq kw "def" with
+  | .true =>
+    let k := List.length g + 1;
+    .cmd stop (.cons (arg, k) g) .nil [Lsp.Info.mk aStart aStop .hover [Lsp.Fake.sig arg k]]
+  | .false => match String.eq kw "check" with
+    | .true => match Lsp.Fake.lookup arg g with
+      | .some k => .cmd stop g [Lsp.Diag.mk aStart aStop 3 (Lsp.Fake.sig arg k)]
+          [Lsp.Info.mk aStart aStop .term [arg]]
+      | .none => .cmd stop g [Lsp.Diag.mk aStart aStop 1 (String.join ["unknown identifier '", arg, "'"])] .nil
+    | .false => match String.eq kw "goal" with
+      | .true => .cmd stop g .nil [Lsp.Info.mk start stop .goal (Lsp.Fake.goals sp.2)]
+      | .false => match String.eq kw "fail" with
+        | .true => .cmd stop g [Lsp.Diag.mk start (start + w.2.1) 2 (String.trim (String.mk sp.2))] .nil
+        | .false => .cmd stop g [Lsp.Diag.mk start (start + w.2.1) 1 (String.join ["unknown command '", kw, "'"])] .nil
+
+/-- One step: split off the next command and elaborate it. -/
+def Lsp.Fake.step (g : List (String × Nat)) (text : String) (off : Nat) (rest : List Char) : Lsp.Step (List (String × Nat)) :=
+  match Lsp.splitNext off rest with
+  | .none => .done
+  | .some r => Lsp.Fake.command g r.1 r.2.1 r.2.2
+
+/-- The fake elaborator (lookahead 1, as `Lsp.splitNext` needs). -/
+def Lsp.fake : Lsp.Elab (List (String × Nat)) := Lsp.Elab.mk .nil 1 Lsp.Fake.step
