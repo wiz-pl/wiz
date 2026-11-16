@@ -83,6 +83,22 @@ allows `*`.
 For another MCP client, run the same command over stdio; there is nothing
 OpenCode-specific in the server.
 
+### Claude Code and the launcher
+
+The repository root has a project-scoped `.mcp.json` that starts the bridge
+through `tools/wiz-mcp/wiz-mcp.sh`. The launcher picks the `wiz` executable so
+that a worktree without its own build still works, and logs its choice to
+stderr: `$WIZ_BIN`, then `./.lake/build/bin/wiz`, then `tower which wiz` (the
+tower toolchain for the directory), then `wiz` on `PATH`. Claude Code lists a
+project server as "pending approval" until you approve it once in `claude`
+(or `/mcp`). The tools are then `mcp__wiz__check`, `mcp__wiz__goals`, and so
+on. A one-shot check that needs no approval:
+
+```sh
+claude -p 'call mcp__wiz__version' --mcp-config .mcp.json --strict-mcp-config \
+  --allowedTools mcp__wiz__version
+```
+
 ## Tools
 
 | MCP tool (OpenCode name) | arguments | backend |
