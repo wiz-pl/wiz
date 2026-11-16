@@ -818,7 +818,8 @@ structure Scry.TaintReport where
   certificates : List (Option Scry.Certificate)
   origins : Scry.OriginMap
   boundaries : List Scry.BoundaryFinding
-  /-- Points-to diagnostics: unknown memory, use after free, unresolved indirect calls. -/
+  /-- Points-to diagnostics not promoted by a `kind memory` rule: unknown memory and
+  unresolved indirect calls (use after free is a finding when the pack has the rule). -/
   memory : List Scry.BoundaryFinding
   /-- The points-to solution (locations and indirect targets), for `--origin-map`-style
   inspection and the tests. -/

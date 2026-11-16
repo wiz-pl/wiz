@@ -277,12 +277,21 @@ def main : IO Unit := EIO.toIO (do
   | .some f => check "mem-params: path starts in main" (String.eq (firstFunc f.path) "main")
   | .none => check "mem-params: finding exists" .false;
 
-  -- memory: use after free is reported and the flow is still kept
+  -- memory: use after free is reported and the flow is still kept. The pack's
+  -- `kind memory` rule promotes the warning to a finding, so it is not also a warning.
   oM8 ← opts ["tests/fixtures/mem-free.c"];
   repM8 ← Scry.analyzeFile oM8;
-  checkOne "mem-free" repM8 "command-injection" "main";
-  check "mem-free: one use-after-free warning"
-    (Nat.beq (countMemRule repM8 "scry/memory/use-after-free") 1);
+  check "mem-free: two findings (taint + use-after-free)"
+    (Nat.beq (List.length repM8.findings) 2);
+  check "mem-free: the taint finding is still checked"
+    (List.any (fun f => Bool.and (String.eq f.rule "command-injection")
+      (String.eq f.func "main")) repM8.findings);
+  check "mem-free: use-after-free is a memory finding"
+    (List.any (fun f => Bool.and (String.eq f.rule "use-after-free")
+      (Bool.and (String.eq (Scry.FindingKind.show f.kind) "memory")
+        (String.eq f.name "load"))) repM8.findings);
+  check "mem-free: the promoted warning is not duplicated"
+    (Bool.and (Nat.beq (List.length repM8.memory) 0) (Nat.beq (List.length (memKinds repM8)) 0));
 
   -- memory: an indirect call with a known target propagates
   oM9 ← opts ["tests/fixtures/mem-indirect.c"];
@@ -577,8 +586,8 @@ def main : IO Unit := EIO.toIO (do
     check "sarif: one run" (Nat.beq (List.length (Json.getList j "runs")) 1);
     let run := nthJ (Json.getList j "runs") 0;
     check "sarif: driver name" (String.eq (jStr run ["tool", "driver", "name"]) "scry");
-    check "sarif: six rule descriptors (five pack rules and one model rule)"
-      (Nat.beq (List.length (Json.getList (jAt run ["tool", "driver"]) "rules")) 6);
+    check "sarif: nine rule descriptors (eight pack rules and one model rule)"
+      (Nat.beq (List.length (Json.getList (jAt run ["tool", "driver"]) "rules")) 9);
     check "sarif: one result" (Nat.beq (List.length (Json.getList run "results")) 1);
     let res := nthJ (Json.getList run "results") 0;
     check "sarif: rule id" (String.eq (Json.getStr res "ruleId") "scry/c/command-injection");

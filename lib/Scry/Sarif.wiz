@@ -170,36 +170,41 @@ def Scry.sanListJson (r : Scry.TaintRule) : Json :=
 def Scry.callListJson (r : Scry.ForbiddenRule) : Json :=
   Json.mkArr (List.map (fun c => Json.mkStr c) r.calls)
 
+def Scry.checkListJson (r : Scry.MemoryRule) : Json :=
+  Json.mkArr (List.map (fun c => Json.mkStr c) r.checks)
+
 /-- A stable, **namespaced** SARIF rule id: `scry/c/<pack rule id>`. The namespace keeps
 Scry's ids distinct from CodeQL's (`cpp/…`) and Semgrep's when results are aggregated in
 one dashboard, and the id does not encode an array index or a version. Findings keep the
 short pack id in `properties.packRuleId`, so the human line and the JSON stay readable. -/
 def Scry.sarifRuleId (id : String) : String := String.append "scry/c/" id
 
-/-- A rule's SARIF metadata (`reportingDescriptor`). -/
+/-- A rule's SARIF metadata (`reportingDescriptor`). `properties.cwe` carries the pack's
+CWE tag, and `properties.kind` the pack kind (`taint`, `forbidden`, `memory`). -/
 def Scry.ruleJson (r : Scry.PackRule) : Json :=
-  let props := match r with
+  let kindProps := match r with
     | .taint t =>
-      Json.mkObj
-        [ ("kind", Json.mkStr "taint")
-        , ("sinks", Scry.sinkListJson t)
-        , ("sources", Scry.sourceListJson t)
-        , ("sanitisers", Scry.sanListJson t) ]
+      [ ("kind", Json.mkStr "taint")
+      , ("sinks", Scry.sinkListJson t)
+      , ("sources", Scry.sourceListJson t)
+      , ("sanitisers", Scry.sanListJson t) ]
     | .forbidden f =>
-      Json.mkObj
-        [ ("kind", Json.mkStr "forbidden")
-        , ("calls", Scry.callListJson f) ]
+      [ ("kind", Json.mkStr "forbidden")
+      , ("calls", Scry.callListJson f) ]
     | .memory m =>
-      Json.mkObj
-        [ ("kind", Json.mkStr "memory")
-        , ("check", Json.mkStr m.check) ];
+      [ ("kind", Json.mkStr "memory")
+      , ("check", Json.mkStr m.check)
+      , ("checks", Scry.checkListJson m) ];
+  let cweProps := match String.isEmpty (Scry.PackRule.cwe r) with
+    | .true => []
+    | .false => [ ("cwe", Json.mkStr (Scry.PackRule.cwe r)) ];
   Json.mkObj
     [ ("id", Json.mkStr (Scry.sarifRuleId (Scry.PackRule.id r)))
     , ("name", Json.mkStr (Scry.PackRule.id r))
     , ("shortDescription", Json.mkObj [("text", Json.mkStr (Scry.PackRule.message r))])
     , ("defaultConfiguration", Json.mkObj
         [("level", Json.mkStr (Scry.Severity.sarif (Scry.PackRule.severity r)))])
-    , ("properties", props) ]
+    , ("properties", Json.mkObj (List.append kindProps cweProps)) ]
 
 def Scry.ruleIndexFrom (rs : List Scry.PackRule) (id : String) (i : Nat) : Nat :=
   match rs with

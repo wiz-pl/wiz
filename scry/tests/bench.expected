@@ -13,6 +13,7 @@ path: taint source -> flow -> sink: ok
 path: taint without a source is invalid: ok
 path: a path not ending at the sink is invalid: ok
 path: forbidden call is the sink: ok
+path: a memory access is the sink: ok
 outcome: unsafe match is TP: ok
 outcome: unsafe miss is FN: ok
 outcome: safe clean is TN: ok

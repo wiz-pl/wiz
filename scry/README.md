@@ -173,26 +173,27 @@ measurement below runs with the flag. Functions longer than `Scry.maxNullPoints`
 program points) are skipped: the list-based worklist is a prototype and the pass must not
 turn a one-minute CVE analysis into a ten-minute one.
 
-## Path traversal (opt-in pack)
+## Path traversal (default rule and opt-in pack)
 
-`lib/Scry/rules/path-traversal.scry` is the default pack **plus** a `path-traversal`
-rule: taint from `getenv`/`read`/`recv`/`fgets`/`getline`/`fread` or C's `argv` reaches
-`open`, `openat`, `creat`, `fopen`, `freopen`, `stat`/`lstat`, `unlink`, `remove`,
-`rename`, `chdir`, `opendir`, `access`, `mkdir` or `rmdir`. Run it with
+The default pack has a `path-traversal` rule (CWE-22): taint from `getenv`/`recv`/
+`read`/`fgets` reaches `fopen`, `freopen`, `open`, `openat`, `creat`, `stat`/`lstat`,
+`unlink`, `remove`, `rename`, `chdir`, `opendir`, `access` or `mkdir`, unless a policy
+sanitiser (`sanitize_path`, `confine_path`) cleans it.
+
+`lib/Scry/rules/path-traversal.scry` is the wider opt-in variant: command injection,
+format strings and the forbidden calls **plus** a `path-traversal` rule that also takes
+`getline`/`fread` and C's `argv`, adds `rmdir`, and trusts `realpath`. Run it with
 `--rules ../lib/Scry/rules/path-traversal.scry`.
 
 `source argv result` is a pack directive, not a call pattern: it seeds the second
-parameter of `main` as a source. It is in this pack only, so the default pack's results do
-not change.
+parameter of `main` as a source. (`Scry.Models` also seeds `main`'s `argv` at the entry
+for every pack; the directive keeps the path pack explicit about it.)
 
-`realpath` is a model (`Scry.Models`): it sanitises its **result** and the destination it
-writes (argument 1), never its input. `realpath(user, buf); open(buf)` is clean;
-`realpath(user, buf); open(user)` is still reported; `p = realpath(user, 0); open(p)` is
-clean.
+`realpath` is a policy model (`Scry.Models`): when a pack names it, it sanitises its
+**result** and the destination it writes (argument 1), never its input.
+`realpath(user, buf); open(buf)` is clean; `realpath(user, buf); open(user)` is still
+reported; `p = realpath(user, 0); open(p)` is clean. The default pack does not name it.
 
-**Decision: opt-in.** A path API is not a bug by itself, and the rule needs a source
-policy (`argv`) that would change the default pack's behaviour. The default pack keeps
-its four rules and its pinned counts; the path pack is a deliberate `--rules` choice.
 `tests/fixtures/path-*.c` and `tests/taint.wiz` cover the vulnerable/`realpath` pairs,
 including the "sanitiser result used, input still used" control.
 
@@ -224,8 +225,9 @@ Fixtures and their expected results are in `tests/fixtures/mem-*.c` and asserted
 different slot (0), struct fields and a global field (2, and the sibling field 0), array
 elements (1, sibling elements/arrays 0), a variable index (`a[i]` keeps the array, so 1
 finding and no false positive on `b[i]`), heap (1), pointer-to-pointer (1), aliased
-parameters (1 across two calls), `free` then use (1 finding + `use-after-free`), known
-indirect target (1), unknown indirect target (0 findings + `unknown-indirect`),
+parameters (1 across two calls), `free` then use (2 findings: the taint flow and the
+`use-after-free` memory rule), known indirect target (1), unknown indirect target
+(0 findings + `unknown-indirect`),
 returned pointer (1), `strcpy` into one array (1, the other array 0), and an unmodelled
 external's pointer (1 finding + two `unknown-memory` warnings and one `unmodelled-external`).
 
@@ -356,11 +358,12 @@ function pointers resolve only through the points-to analysis.
 
 `scry bench` runs the same pipeline as `scry taint` over `bench/corpus/manifest.json`,
 compares the findings with the manifest's expectations, and writes stable JSON and
-Markdown. The checked-in corpus is **S0/S2** (48 cases on this branch): the existing
-`tests/fixtures/taint-*.c` goldens plus hand-authored safe/unsafe pairs for CWE-78
-(command injection), CWE-134 (format string), CWE-242 (`gets`) and CWE-120/121
-(`strcpy`/`strcat`), and the external-model cases. S1/S3/S4 are optional external
-corpora (`--extra DIR`); no third-party corpus is checked in.
+Markdown. The checked-in corpus is **S0/S2**: the existing `tests/fixtures/taint-*.c`
+goldens plus hand-authored safe/unsafe pairs for CWE-22 (path traversal), CWE-78
+(command injection), CWE-120/121/242/787 (unbounded copy, `gets`, tainted copy length),
+CWE-134 (format string), CWE-190 (tainted allocation size) and CWE-416 (use after free).
+S1/S3/S4 are optional external corpora (`--extra DIR`); no third-party corpus is checked
+in.
 
 ```sh
 grail run scry -- bench                         # build/bench.json + build/bench.md

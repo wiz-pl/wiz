@@ -1604,12 +1604,17 @@ are unchanged; `examples/scry-datalog-bench.wiz` is the benchmark and
 
 The S4 rule pack and interprocedural slice are separate modules:
 
-* `import Scry.Rules` — named rules with an id, severity and message, sources/sinks/
-  sanitisers **per argument** (`source read arg 1`, `sanitise sanitize arg 0`), a textual
-  `.scry` block format (`Scry.parseRulePack`) and `*` function-name matching. A sink is
-  `sink NAME arg K` or `sink NAME args`; the latter checks every argument of a variadic
-  call (`execl`), while the finding still names the concrete tainted index.
-  `lib/Scry/rules/default.scry` is the demo pack as a real spec file.
+* `import Scry.Rules` — named rules with an id, severity, message and CWE tag,
+  sources/sinks/sanitisers **per argument** (`source read arg 1`, `sanitise sanitize
+  arg 0`), a textual `.scry` block format (`Scry.parseRulePack`) and `*` function-name
+  matching. Three kinds: `taint`, `forbidden` (an unconditionally unsafe call) and
+  `memory` (a lifetime analysis reported as findings, today `check use-after-free`).
+  A sink is `sink NAME arg K` or `sink NAME args`; the latter checks every argument of
+  a variadic call (`execl`), while the finding still names the concrete tainted index. `lib/Scry/rules/default.scry` is the demo pack as a real spec
+  file; it targets CWE-78, CWE-134, CWE-787/CWE-120/CWE-242, CWE-190, CWE-22 and
+  CWE-416. A `memory` finding is always `unchecked`: its evidence is the points-to model,
+  not a source -> sink derivation. The pack's source/sink/sanitiser table is in the file's
+  header and in `wiz-notes/scry-taint.md` §12.9.
 * `import Scry.RuleTaint` — variable-indexed taint as Datalog over a rule pack; an
   argument source/sanitiser becomes an extra definition point, and a `gen` fact is the
   ordinary definition a statement's tainted input transfers to.
@@ -1647,15 +1652,17 @@ The S4 rule pack and interprocedural slice are separate modules:
 * `import Scry.RuleTaint` also carries the memory rules: `mstore`/`mload`/`mtainted`
   make a `store` taint the locations it may alias and a later `load` receive it, with
   `store`/`load` path nodes. Diagnostics that are not findings (unknown memory, use after
-  free, unresolved indirect call) are `Scry.MemWarning`s with a function and program
-  point.
+  free, unresolved indirect call) are `Scry.MemWarning`s with a function, program point,
+  access (`store`/`load`/`external …`) and detail. A pack `kind memory` rule turns the
+  warning kinds it checks into findings; the remaining warnings stay diagnostics.
 * `import Scry.Sarif` — SARIF 2.1.0 JSON with rule metadata, primary and related
   locations from an `OriginMap` (S2's `Wil.Span` supplies the entries; a finding's
   `properties.derivation` is `checked`/`unchecked`), namespaced rule ids
   (`scry/c/<rule>`, `scry/lowering/boundary`, `scry/lowering/parse-recovery`,
-  `scry/memory/<kind>`) and `columnKind: utf16CodeUnits`;
-  `Scry.boundaryResultJson` emits a warning result whose
-  location is the offending statement's span.
+  `scry/memory/<kind>`) and
+  `columnKind: utf16CodeUnits`; `Scry.boundaryResultJson` emits a warning result whose
+  location is the offending statement's span. Each rule descriptor carries
+  `properties.kind` and, when the pack gives one, `properties.cwe`.
 * `import Scry.Certify` — a finding as a `Scry.Derivation` checked by `Scry.Cert`
   against the function's EDB, reporting its axioms and the interprocedural assumptions
   the path walk supplies.
@@ -1664,9 +1671,10 @@ The S4 rule pack and interprocedural slice are separate modules:
 `scry taint` command wires the whole pipeline: S1's tree-sitter parse, S2's
 `Scry.Lower` (spans on every statement), these S4 modules with
 `lib/Scry/rules/default.scry`, and SARIF 2.1.0. `Scry.Nullness` adds the
-`scry/memory/null-dereference` diagnostic with `--null-deref` (opt-in); the CWE-22 `path-traversal` rule is
-opt-in as `lib/Scry/rules/path-traversal.scry` (the default pack plus the rule, with
-`realpath` modelled as a sanitiser of its result and destination, not its input).
+`scry/memory/null-dereference` diagnostic with `--null-deref` (opt-in); the default pack's CWE-22
+`path-traversal` rule covers the call sources; `lib/Scry/rules/path-traversal.scry` is
+the opt-in variant that adds `main`'s `argv` (`source argv result`) and trusts
+`realpath` as a sanitiser of its result and destination, not its input.
 Memory is modelled: structs, arrays,
 pointers, `&`/`*`, allocation and `free`, globals, function pointers and pointer returns
 are lowered to slots/heaps/`gep`/`load`/`store`, and points-to + the memory taint rules

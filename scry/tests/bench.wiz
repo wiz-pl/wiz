@@ -34,6 +34,10 @@ def forbiddenFinding : Scry.RuleFinding :=
   Scry.RuleFinding.mk "gets-overflow" Scry.Severity.error "m" Scry.FindingKind.forbidden "main" 2 "gets" 0
     (path Scry.PathKind.sink "main" 2)
 
+def memoryFinding : Scry.RuleFinding :=
+  Scry.RuleFinding.mk "use-after-free" Scry.Severity.error "m" Scry.FindingKind.memory
+    "main" 5 "load" 0 (path Scry.PathKind.sink "main" 5)
+
 def benchFinding (rule : String) (kind : Scry.FindingKind) (valid : Bool) :
     Scry.BenchFinding :=
   Scry.BenchFinding.mk rule "main" "system" 0 3 kind .true .true valid .true .none .none
@@ -85,6 +89,8 @@ def main : IO Unit := EIO.toIO (do
        Scry.PathNode.mk "main" 2 0 Scry.PathKind.flow])));
   check "path: forbidden call is the sink"
     (Scry.benchValidPath forbiddenFinding);
+  check "path: a memory access is the sink"
+    (Scry.benchValidPath memoryFinding);
 
   -- outcome rules
   let vTp := Scry.benchOutcome "unsafe" (expectOne "command-injection")

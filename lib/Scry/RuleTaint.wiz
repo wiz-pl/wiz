@@ -157,11 +157,14 @@ def Scry.MemWarnKind.show : Scry.MemWarnKind → String
   | .nullDereference => "null-dereference"
 
 /-- A memory diagnostic: a finding the taint rules cannot express, with the statement it
-belongs to. `detail` names the locations or the callee for a human. -/
+belongs to. `op` is the access (`store`, `load`, `external <callee>`, `indirect call`),
+which a memory rule reports as the finding's callee; `detail` names the locations or the
+callee for a human. -/
 structure Scry.MemWarning where
   kind : Scry.MemWarnKind
   func : String
   point : Nat
+  op : String
   detail : String
 
 /-- A **tainted location** and the store that put the taint there. Memory is
@@ -344,8 +347,8 @@ structure Scry.MemScan where
 def Scry.memInter (xs ys : List Nat) : List Nat :=
   List.filter (fun x => List.any (Nat.beq x) ys) xs
 
-def Scry.memWarning (k : Scry.MemWarnKind) (func : String) (point : Nat) (detail : String) :
-    Scry.MemWarning := Scry.MemWarning.mk k func point detail
+def Scry.memWarning (k : Scry.MemWarnKind) (func : String) (point : Nat) (op : String)
+    (detail : String) : Scry.MemWarning := Scry.MemWarning.mk k func point op detail
 
 /-- The location closure of a pointer register and its unknown-memory diagnostic. -/
 def Scry.ptrAccess (pt : Scry.PtResult) (func : String) (point : Nat) (var : Nat)
@@ -354,7 +357,7 @@ def Scry.ptrAccess (pt : Scry.PtResult) (func : String) (point : Nat) (var : Nat
   let unknown := Scry.memInter locs (Scry.unknownId pt);
   let w1 : List Scry.MemWarning := match unknown with
     | .nil => .nil
-    | _ => .cons (Scry.memWarning Scry.MemWarnKind.unknownMemory func point
+    | _ => .cons (Scry.memWarning Scry.MemWarnKind.unknownMemory func point what
         (what ++ " through a pointer with an unknown target")) .nil;
   (locs, w1)
 
@@ -522,7 +525,7 @@ def Scry.freedWarning (pt : Scry.PtResult) (info : Scry.FnInfo)
     (locs : List Nat) (what : String) : List Scry.MemWarning :=
   match Scry.freedHit pt info frees n v locs with
   | .nil => .nil
-  | .cons h _ => .cons (Scry.memWarning Scry.MemWarnKind.useAfterFree func n
+  | .cons h _ => .cons (Scry.memWarning Scry.MemWarnKind.useAfterFree func n what
       (what ++ " to a location freed by free at point " ++ Nat.repr h)) .nil
 
 /-- A call's memory effects that are copies. `Scry.Models.copyPairsOf` expands a
@@ -578,6 +581,7 @@ def Scry.memScan (pt : Scry.PtResult) (fn : Wil.Func) (info : Scry.FnInfo) : Scr
         let w : List Scry.MemWarning := match t.unknown with
           | .false => .nil
           | .true => .cons (Scry.memWarning Scry.MemWarnKind.unknownIndirect fn.name n
+              "indirect call"
               ("indirect call through register " ++ Nat.repr fv.index
                ++ " has no fully known target")) .nil;
         Scry.MemScan.mk acc.stores acc.loads (List.append w acc.warnings)

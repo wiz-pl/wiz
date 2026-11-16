@@ -108,6 +108,7 @@ structure Scry.BenchCaseResult where
   extra : Nat
   taintFindings : Nat
   forbiddenFindings : Nat
+  memoryFindings : Nat
   validPaths : Nat
   reachSink : Nat
   checked : Nat
@@ -160,6 +161,7 @@ structure Scry.BenchSummary where
   findings : Nat
   taintFindings : Nat
   forbiddenFindings : Nat
+  memoryFindings : Nat
   validPaths : Nat
   reachSink : Nat
   checked : Nat
@@ -415,7 +417,8 @@ def Scry.benchPathStartsAtSource (f : Scry.RuleFinding) : Bool :=
     | _ => .false
 
 /-- A taint path is valid when it starts at a source and ends at the reported sink. A
-forbidden finding's evidence is the call itself, so only the sink end is required. -/
+forbidden finding's evidence is the call itself and a memory finding's evidence is the
+offending access, so for those only the sink end is required. -/
 def Scry.benchValidPath (f : Scry.RuleFinding) : Bool :=
   Bool.and (Scry.benchPathReachesSink f)
     (match f.kind with
@@ -616,6 +619,7 @@ def Scry.benchSummaryOf (rs : List Scry.BenchCaseResult) : Scry.BenchSummary :=
     (List.foldl (fun n r => Nat.add n r.findings) 0 rs)
     (List.foldl (fun n r => Nat.add n r.taintFindings) 0 rs)
     (List.foldl (fun n r => Nat.add n r.forbiddenFindings) 0 rs)
+    (List.foldl (fun n r => Nat.add n r.memoryFindings) 0 rs)
     (List.foldl (fun n r => Nat.add n r.validPaths) 0 rs)
     (List.foldl (fun n r => Nat.add n r.reachSink) 0 rs)
     (List.foldl (fun n r => Nat.add n r.checked) 0 rs)
@@ -631,11 +635,11 @@ def Scry.benchOptsFor (c : Scry.BenchCase) : Scry.TaintOpts :=
   { Scry.emptyTaintOpts c.path with rules := c.rules }
 
 def Scry.benchCaseResult (c : Scry.BenchCase) (outcome : String) (findings expected
-    matched extra taint forbidden valid reach checked boundary blocking : Nat)
+    matched extra taint forbidden memory valid reach checked boundary blocking : Nat)
     (unknown : Bool) (bytes ms : Nat) (error note : String) : Scry.BenchCaseResult :=
   Scry.BenchCaseResult.mk c.id c.suite c.cwe c.file c.expect outcome findings expected
-    matched extra taint forbidden valid reach checked boundary blocking unknown bytes ms
-    error note
+    matched extra taint forbidden memory valid reach checked boundary blocking unknown
+    bytes ms error note
 
 /-- Analyse one case. Errors are data (a case can be a parse error or an unsupported
 frontend construct); a missing file is `skipped`, not an analysis failure. -/
@@ -643,7 +647,7 @@ def Scry.benchRunCase (measure : Bool) (c : Scry.BenchCase) : EIO Scry.BenchCase
   fileExists ← EIO.lift (FS.exists c.path);
   match fileExists with
   | .false => EIO.pure (Scry.benchCaseResult c "skipped" 0 (List.length c.findings)
-      0 0 0 0 0 0 0 0 0 .true 0 0 ("missing file " ++ c.path) c.note)
+      0 0 0 0 0 0 0 0 0 0 .true 0 0 ("missing file " ++ c.path) c.note)
   | .true => do
     text ← FS.readFile c.path;
     let bytes := String.length text;
@@ -655,7 +659,7 @@ def Scry.benchRunCase (measure : Bool) (c : Scry.BenchCase) : EIO Scry.BenchCase
       | .false => 0;
     match rep with
     | .error e => EIO.pure (Scry.benchCaseResult c "error" 0 (List.length c.findings)
-        0 0 0 0 0 0 0 0 0 .true bytes ms e c.note)
+        0 0 0 0 0 0 0 0 0 0 .true bytes ms e c.note)
     | .ok r => do
       let actual := Scry.benchFindingsOf r;
       let boundary := List.length r.boundaries;
@@ -663,9 +667,11 @@ def Scry.benchRunCase (measure : Bool) (c : Scry.BenchCase) : EIO Scry.BenchCase
         r.boundaries);
       let v := Scry.benchOutcome c.expect c.findings actual blocking;
       let taint := List.length (List.filter (fun f => match f.kind with
-        | .taint => .true | .forbidden => .false | .memory => .false) actual);
+        | .taint => .true | _ => .false) actual);
       let forbidden := List.length (List.filter (fun f => match f.kind with
         | .forbidden => .true | _ => .false) actual);
+      let memory := List.length (List.filter (fun f => match f.kind with
+        | .memory => .true | _ => .false) actual);
       let valid := List.length (List.filter (fun f => f.validPath) actual);
       let reach := List.length (List.filter (fun f => f.reachSink) actual);
       let checked := List.length (List.filter (fun f => f.checked) actual);
@@ -673,8 +679,8 @@ def Scry.benchRunCase (measure : Bool) (c : Scry.BenchCase) : EIO Scry.BenchCase
         | .true => c.reason
         | .false => c.note;
       EIO.pure (Scry.benchCaseResult c v.outcome (List.length actual)
-        (List.length c.findings) v.matched v.extra taint forbidden valid reach checked
-        boundary blocking v.unknown bytes ms "" note)
+        (List.length c.findings) v.matched v.extra taint forbidden memory valid reach
+        checked boundary blocking v.unknown bytes ms "" note)
 
 partial def Scry.benchRunCases (measure : Bool) (cs : List Scry.BenchCase) :
     EIO (List Scry.BenchCaseResult) :=
@@ -761,6 +767,7 @@ def Scry.benchCaseJson (r : Scry.BenchCaseResult) : Json :=
     , ("extra", Json.ofNat r.extra)
     , ("taint_findings", Json.ofNat r.taintFindings)
     , ("forbidden_findings", Json.ofNat r.forbiddenFindings)
+    , ("memory_findings", Json.ofNat r.memoryFindings)
     , ("valid_paths", Json.ofNat r.validPaths)
     , ("reach_sink", Json.ofNat r.reachSink)
     , ("checked", Json.ofNat r.checked)
@@ -782,6 +789,7 @@ def Scry.benchBaselineCaseJson (r : Scry.BenchCaseResult) : Json :=
     , ("matched", Json.ofNat r.matched)
     , ("extra", Json.ofNat r.extra)
     , ("valid_paths", Json.ofNat r.validPaths)
+    , ("memory_findings", Json.ofNat r.memoryFindings)
     , ("reach_sink", Json.ofNat r.reachSink)
     , ("checked", Json.ofNat r.checked)
     , ("boundary", Json.ofNat r.boundary)
@@ -829,6 +837,7 @@ def Scry.benchReportJson (run : Scry.BenchRun) : Json :=
         [ ("findings", Json.ofNat run.summary.findings)
         , ("taint_findings", Json.ofNat run.summary.taintFindings)
         , ("forbidden_findings", Json.ofNat run.summary.forbiddenFindings)
+        , ("memory_findings", Json.ofNat run.summary.memoryFindings)
         , ("valid_paths", Json.ofNat run.summary.validPaths)
         , ("reach_sink", Json.ofNat run.summary.reachSink)
         , ("valid_path_fraction", Json.dec (Scry.benchDec4
@@ -920,6 +929,8 @@ def Scry.benchMarkdown (run : Scry.BenchRun) : String :=
         ++ Nat.repr run.summary.findings ++ " (" ++ Scry.benchPct pathFrac ++ ") |")
     , String.append "| certificates checked | " (Nat.repr run.summary.checked ++ " / "
         ++ Nat.repr run.summary.findings ++ " (" ++ Scry.benchPct certFrac ++ ") |")
+    , String.append "| memory findings (unchecked by design) | "
+        (Nat.repr run.summary.memoryFindings ++ " |")
     , String.append "| boundary warnings | " (Nat.repr run.summary.boundary ++ " ("
         ++ Nat.repr run.summary.blocking ++ " blocking, "
         ++ Nat.repr run.summary.casesWithBlocking ++ " cases) |")

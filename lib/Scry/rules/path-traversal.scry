@@ -1,9 +1,10 @@
 # scry's opt-in path-traversal pack (CWE-22)
 #
-# This file is the default pack (`default.scry`) plus the `path-traversal` rule,
-# so `--rules lib/Scry/rules/path-traversal.scry` keeps command injection, format
-# strings and the forbidden calls and adds file-path sinks. It is opt-in: the
-# default pack does not ship it (see scry/README.md, "Rules").
+# This file is a small pack (command injection, format strings, the forbidden calls)
+# plus a wider `path-traversal` rule, so `--rules lib/Scry/rules/path-traversal.scry`
+# adds `argv` and the `realpath` sanitiser to the file-path sinks. It is opt-in; the
+# default pack's own `path-traversal` rule has the call sources only (see
+# scry/README.md, "Rules").
 #
 # Taint reaches a path API through `getenv`, `read`/`recv`/`fgets`/`getline`/
 # `fread`, or C's `argv`. The `source argv result` line is a pack directive, not a

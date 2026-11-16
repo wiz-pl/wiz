@@ -319,7 +319,8 @@ def Scry.findResult (pr : Scry.ProgramResult) (name : String) : Option Scry.Func
 /-- Deduplicate diagnostics (a function is evaluated once per summary round only in the
 final pass, but be defensive). -/
 def Scry.memWarnKey (w : Scry.MemWarning) : String :=
-  (Scry.MemWarnKind.show w.kind) ++ "|" ++ w.func ++ "|" ++ Nat.repr w.point ++ "|" ++ w.detail
+  (Scry.MemWarnKind.show w.kind) ++ "|" ++ w.func ++ "|" ++ Nat.repr w.point ++ "|"
+  ++ w.op ++ "|" ++ w.detail
 
 def Scry.dedupWarnings (ws : List Scry.MemWarning) : List Scry.MemWarning :=
   List.foldl (fun acc w =>
@@ -582,7 +583,9 @@ def Scry.insertRuleFinding (f : Scry.RuleFinding) (fs : List Scry.RuleFinding) :
 def Scry.sortRuleFindings (fs : List Scry.RuleFinding) : List Scry.RuleFinding :=
   List.foldr (fun f acc => Scry.insertRuleFinding f acc) .nil fs
 
-/-- All findings of an analysed program, with interprocedural paths. -/
+/-- All findings of an analysed program, with interprocedural paths. Taint and forbidden
+findings come from the Datalog engine; memory findings come from the lifetime analysis a
+`kind memory` rule turns on (`Scry.lifetimeFindings`). -/
 def Scry.programFindings (pr : Scry.ProgramResult) : List Scry.RuleFinding :=
   Scry.sortRuleFindings (List.append pr.memoryFindings
     (Scry.concatLists (fun r =>

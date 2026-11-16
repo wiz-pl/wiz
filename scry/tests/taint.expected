@@ -74,12 +74,10 @@ mem-params: rule command-injection: ok
 mem-params: sink function sink_q: ok
 mem-params: sink span known: ok
 mem-params: path starts in main: ok
-mem-free: one finding: ok
-mem-free: checked: ok
-mem-free: rule command-injection: ok
-mem-free: sink function main: ok
-mem-free: sink span known: ok
-mem-free: one use-after-free warning: ok
+mem-free: two findings (taint + use-after-free): ok
+mem-free: the taint finding is still checked: ok
+mem-free: use-after-free is a memory finding: ok
+mem-free: the promoted warning is not duplicated: ok
 mem-indirect: one finding: ok
 mem-indirect: checked: ok
 mem-indirect: rule command-injection: ok
