@@ -107,6 +107,24 @@ and is built from source. The evidence is in
 `/nix/store` string, `disallowedReferences` forbids musl's store path, and the C that
 the static executable prints equals the C the glibc build prints.
 
+**Against a relocated Nix build.** A third shape has been proposed for tower's
+toolchain tarballs: a `wiz-release` flake output that copies the Nix build, sets an
+`$ORIGIN`-relative RUNPATH with patchelf and bundles the non-glibc shared libraries
+(GMP, the collector) beside it, using the host's glibc. Compared with the static `wizc`:
+
+| | relocated Nix build (`wiz-release`, proposed) | static musl `wizc` (`wizc-release`) |
+|---|---|---|
+| host requirement | glibc at least the pinned nixpkgs' glibc (2.44 at `02c087f3`); the current tarball's floor is 2.27 (its bundled sysroot) | any x86_64 Linux kernel; no libc on the host |
+| bytes | patched after the build: the published bytes are not the store output, so the patching is part of the recipe the attestation must cover | the store output itself, packed |
+| interpreter | the host's `/lib64/ld-linux-x86-64.so.2` | none |
+| what it ships | the whole toolchain (`wiz`, `grail`, `lib/`, the C toolchain) | the chain's compiler only |
+| fits the chain | possible, but a nixpkgs bump raises the glibc floor, and the floor is part of what a link means | yes: the bytes do not depend on the host |
+
+They answer different questions. `wiz-release` is how a *user's toolchain* could be
+published from the Nix build; `wizc-release` is the *chain's* link, which must run on
+any builder and stay byte-identical. A later full toolchain could be built *from* the
+chain's `wizc` and relocated like `wiz-release`; the chain itself stays static.
+
 **Mode: reference counting (`--rc`).** The release is built and checked in RC mode:
 no collector to link, a self-compile peaks near 1.7 GB and takes about four minutes
 (the collector's peaks at 5.7 GB and takes about fourteen), and a leak is a hard error
@@ -409,19 +427,6 @@ audit re-uploads it to every source that lost it and records the restoration in 
 issue. Different: the link is unverifiable, which is a chain failure, not a retention
 one; the issue says so and nothing is re-uploaded. A missing release is never replaced
 by bytes that do not match the pin.
-
-## Open questions
-
-* **Release builds vs the flake's build (unconfirmed, being verified).** A bisect saw
-  the Nix-built `wiz` check a file in about 62 s while prebuilt release snapshots took
-  240 to 900+ s on the same file. If that holds, the tarball workflow
-  (`release.yml`, `scripts/release-tarball.sh`) builds a much slower binary than
-  `nix build .#wiz` does, and a release and the flake disagree about what "the
-  toolchain at commit X" is. The chain avoids that by construction: its release *is*
-  the Nix build's output (`packages.wizc-release`), packed without rebuilding, so there
-  is one recipe and one set of bytes. Whether tower's snapshots should move to the
-  same rule (publish the Nix output, made self-contained, instead of a second build) is
-  open, pending the measurement.
 
 ## Prerequisites before the root
 
