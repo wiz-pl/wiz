@@ -179,7 +179,7 @@ def termClassify : String → Option (List Nat)
   | "Level" | "Option Level" => some [0, 1]
   | "List Level" | "BinderSorts" => some [0, 2]
   | "Option (Name × List Level × List (Term R))" => some [2, 2]
-  | "Name" | "Nat" | "BinderInfo" | "R" | "List Name" => some [0, 0]
+  | "Name" | "Nat" | "Bool" | "BinderInfo" | "R" | "List Name" => some [0, 0]
   | _ => none
 
 /-- One row per constructor of `Term`, in the order of `Wiz/Core/Term.lean`. -/
@@ -422,7 +422,7 @@ def valClassify : String → Option (List Nat)
   -- fields describe (an unfolding, a proof's value); an `ecase`'s branches and a
   -- suspended proof's term are closed by the environment next to them
   | "Head R" | "Array (Elim R)" | "Thunk (Val R)" | "List (Term R)" | "Term R" => some [0, 0, 0]
-  | "Name" | "Nat" | "Lvl" | "BinderInfo" | "R" | "List Name" => some [0, 0, 0]
+  | "Name" | "Nat" | "Bool" | "Lvl" | "BinderInfo" | "R" | "List Name" => some [0, 0, 0]
   | _ => none
 
 def thunk (v : Val R) : Thunk (Val R) := Thunk.mk fun _ => v
