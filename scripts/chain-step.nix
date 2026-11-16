@@ -4,19 +4,22 @@
 # their bytes.
 #
 #   nix build -f scripts/chain-step.nix --argstr root "$PWD" --argstr commit SHA \
-#     [--argstr hash sha256-…=] ATTR
-{ root, commit, hash ? null, system ? builtins.currentSystem }:
+#     [--argstr hash sha256-…=] [--argstr predCommit SHA] ATTR
+#
+# The predecessor is the release of `predCommit` (default: `commit` itself) with sha256
+# `hash`, fetched by fetchToolchain (it must be in the store or a substituter).
+{ root, commit, hash ? null, predCommit ? commit, system ? builtins.currentSystem }:
 let
   flake = builtins.getFlake "git+file://${root}?rev=${commit}";
   chain = flake.legacyPackages.${system}.bootstrapChain;
-  pred = chain.fetchToolchain { inherit commit hash system; };
+  pred = chain.fetchToolchain { commit = predCommit; inherit hash system; };
   step = chain.step { inherit pred; };
 in
 {
   # path A: the Lean host's seed.c, compiled statically, checked to reproduce itself
   seed = flake.packages.${system}.wizc-seed;
   lean-release = flake.packages.${system}.wizc-release;
-  # path B: the release (fetched by commit and hash) compiles the same source
+  # path B: a release (fetched by commit and hash) compiles this commit's source
   inherit pred step;
   c1 = step.c1; # pred's C for self.wiz
   stage1 = step.s1; # wizc built from c1; stage1/self.c is c2
