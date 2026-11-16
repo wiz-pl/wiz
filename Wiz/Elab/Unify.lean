@@ -50,6 +50,15 @@ namespace Wiz
 
 variable {R : Type} [QRig R] [DecidableEq R] [QuantitySyntax R]
 
+/-- Are there still metavariables in this term? (Local: the public `Term.mvars` lives in
+`Zonk.lean`, which imports this file.) Used to keep the proof-field rule from skipping a
+unification that would solve a hole.) -/
+partial def Term.hasMVar (t : Term R) : Bool :=
+  match t with
+  | .mvar _ => true
+  | t => (t.forChildren (m := StateM Bool) (fun _ => pure ())
+      (fun _ c => modify (· || Term.hasMVar c)) |>.run false).2
+
 /-- (Given) `vElims`, but an elimination that doesn't fit the value (applying a number,
 projecting a function) is an elaboration error, not a panic in the evaluator. Heuristic
 solutions (the first-order approximation, which is untyped) can be ill-typed:
@@ -583,8 +592,23 @@ partial def unify (l : Lvl) (t u : Val R) : ElabM R Unit := do
       unify (l + 1) (← instM b (Val.var l)) (← instM b' (Val.var l))
   | .sigma _ q a b _, .sigma _ q' a' b' _ =>
     unify l q q'
-    unify l a a'
-    unify (l + 1) (← instM b (Val.var l)) (← instM b' (Val.var l))
+    -- a component at quantity 0 whose type is a proposition is a proof field: its type
+    -- is erased, and two propositions are accepted by proof irrelevance. Do not walk the
+    -- `transp`/cast spines in that type (they may have different (but equal) shapes).
+    -- Only proposition-valued 0 fields; otherwise the structural comparison.
+    let g ← getGlobals
+    let zero (x : Val R) : Bool := match x.toPoly? with
+      | some p => p.isErased
+      | none => false
+    let prop (x : Val R) : Bool := propSort? (whnf x) == some true
+    let noMeta (x : Val R) : Bool := !(Term.hasMVar (quote g l x))
+    let proofField := zero q && zero q' && prop a && prop a' && noMeta a && noMeta a'
+    unless proofField do unify l a a'
+    let tail := ← instM b (Val.var l)
+    let tail' := ← instM b' (Val.var l)
+    -- the remainder of a 0 proof field is itself a proposition: likewise a proof field
+    let proofTail := zero q && zero q' && prop tail && prop tail' && noMeta tail && noMeta tail'
+    unless proofTail do unify (l + 1) tail tail'
   | .pair a b, .pair a' b' => unify l a a'; unify l b b'
   | .pair a b, t'@(.neutral ..) => unify l a (vFst t'); unify l b (vSnd t')
   | t'@(.neutral ..), .pair a b => unify l (vFst t') a; unify l (vSnd t') b
