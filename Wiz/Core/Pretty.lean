@@ -137,6 +137,9 @@ def spine : Term R → Array (Term R) → Term R × Array (Term R)
 def sep (xs : List TT) (s : String) : TT :=
   cat (xs.zipIdx.flatMap fun (x, i) => if i == 0 then [x] else [txt s, x])
 
+/-- The anonymous constructor `⟨a₁, …, aₙ⟩` (the surface form of a structure value). -/
+def anon (xs : List TT) : TT := cat [txt "⟨", sep xs ", ", txt "⟩"]
+
 /-! ### Delaboration to syntax, and formatting (11r) -/
 
 /-- A subterm a syntax node was made from, with its context. -/
@@ -387,6 +390,61 @@ partial def structUpdateView? (g : Globals R) (t : Term R) : Option (Term R × L
       | some (s', fs') => if own == some s' then fs'.map fun (p, v) => (f :: p, v) else [([f], a)]
       | none => [([f], a)])
 
+/-- The fields of a constructor value: the payload without its last two components (the
+index equation and the final unit). -/
+def conFields (rest : Term R) : List (Term R) :=
+  let fs := (tuple rest #[]).toList
+  fs.take (fs.length - 2)
+
+/-- The elements of a data value that is a proper `List.cons … List.nil` spine, innermost
+first; `none` for any other value (a variable tail, a different type). -/
+partial def listSpine (t : Term R) : Option (List (Term R)) :=
+  match t with
+  | .con (.pair (.tag ls i) rest) | .con (.pair (.up (.tag ls i)) rest) =>
+    match ls[i]? with
+    | some n =>
+      if n == "List.nil" then some []
+      else if n == "List.cons" then
+        match conFields rest with
+        | [x, xs] => (x :: ·) <$> listSpine xs
+        | _ => none
+      else none
+    | none => none
+  | _ => none
+
+/-- The fields of a structure value (`S.mk …`), in declaration order, without the marker
+components of its Σ; `none` when the value is not a structure. -/
+def structValue? (g : Globals R) (t : Term R) : Option (List (Term R)) := do
+  let (c, args) ← match t with
+    | .con (.pair (.tag ls i) rest) | .con (.pair (.up (.tag ls i)) rest) =>
+      let some n := ls[i]? | none
+      pure (n, conFields rest)
+    | _ => none
+  guard (c.endsWith ".mk")
+  let L ← structLayoutWith? (fun _ => false) g (c.dropEnd 3).toString
+  guard (!L.fields.isEmpty)
+  let mut out : List (Term R) := []
+  let mut k := 0
+  for comp in L.comps do
+    if comp matches .field _ then
+      match args[k]? with
+      | some v => out := out ++ [v]
+      | none => pure ()
+    k := k + 1
+  guard (out.length == L.fields.length)
+  pure out
+
+/-- The fields of an application of a structure constructor (`S.mk a₁ … aₙ`), for printing
+it as the anonymous constructor `⟨a₁, …, aₙ⟩`; `none` when it is not one, or when an
+argument is implicit (then the application is not the literal). -/
+def structApp? (g : Globals R) (t : Term R) : Option (List (Term R)) := do
+  let (.const c _, args) := spine t #[] | none
+  guard (c.endsWith ".mk")
+  let L ← structLayoutWith? (fun _ => false) g (c.dropEnd 3).toString
+  let ex := explicitArgs g c args
+  guard (ex.size == L.fields.length)
+  pure ex.toList
+
 mutual
 
 /-- Print `t` at precedence `prec`. With `env`, applications print as notation (except at
@@ -420,6 +478,11 @@ partial def printNode (env : Option (Globals R)) (names : List Name) (tys : List
       if let some (s, fs) := structUpdateView? g t then
         let fields ← fs.mapM fun (p, v) => do pure (cat [txt (".".intercalate p ++ " := "), ← sub 0 v])
         return cat [txt "{ ", ← sub 0 s, txt " with ", sep fields ", ", txt " }"]
+      -- a structure constructor as its literal `⟨…⟩`; notation for the constructor (if
+      -- declared) already had its chance above
+      if let some es := structApp? g t then
+        let fs ← es.mapM (sub 0)
+        return anon fs
   match t with
   | .var ix => pure (txt (names[ix]?.getD s!"#{ix}"))
   | .const n _ => pure (txt (Globals.privateBase n))
@@ -509,9 +572,19 @@ partial def printNode (env : Option (Globals R)) (names : List Name) (tys : List
   | .mu _ _ D i s none =>
     app (← if s matches .szInf then pure (txt "μ") else pure (cat [txt "μ^", ← sub 1024 s])) [D, i]
   | .con (.pair (.tag ls i) rest) | .con (.pair (.up (.tag ls i)) rest) =>
-    -- `.c f₁ … fₙ`: the payload ends with the index equation and `()`
-    let fields := (tuple rest #[]).toList
-    let fields := fields.take (fields.length - 2)
+    -- the payload ends with the index equation and `()`
+    let fields := conFields rest
+    -- (11r follow-up) a data value prints as its surface literal: a proper list as
+    -- `[a, b, c]`, a structure as `⟨a, b⟩`; anything else keeps the constructor form
+    if let some g := env then
+      if g.pp.useNotation && !noUnexp then
+        if let some es := listSpine t then
+          if es.isEmpty then return txt "[]"
+          let ts ← es.mapM (sub 0)
+          return cat [txt "[", sep ts ", ", txt "]"]
+        else if let some es := structValue? g t then
+          let ts ← es.mapM (sub 0)
+          return anon ts
     -- (a `mutual` block's tag `A.c` is written `.c`, `ctorShort`)
     let c := txt s!".{ctorShort (ls[i]?.getD s!"#{i}")}"
     if fields.isEmpty then pure c else app c fields

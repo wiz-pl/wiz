@@ -57,6 +57,9 @@ inductive Doc where
   | txt (s : String)
   | cat (ds : Array Doc)
   | line (hard : Bool)
+  /-- a break opportunity that prints nothing when the group is flat (`[` and `]` of a
+  list literal: `[1, 2]`, not `[ 1, 2 ]`) -/
+  | soft
   | nest (n : Int) (d : Doc)
   /-- indent what follows like the construct it belongs to: at the line's indentation
   when the construct starts its line, else two columns deeper (`match`'s alternatives,
@@ -114,6 +117,8 @@ partial def fits (w : Int) : List Cmd → Bool
       -- a hard break ends the line the group is measured on
       if hard then true
       else if c.flat then (if w <= 0 then false else fits (w - 1) rest) else true
+    | .soft =>
+      if c.flat then fits w rest else true
 
 /-- Render a document at most `width` columns wide (text with no break point in it may
 be longer).
@@ -146,6 +151,11 @@ partial def render (width : Nat) (d : Doc) : String :=
           else go (out ++ "\n" ++ String.ofList (List.replicate ind.toNat ' ')) ind ind rest
         else if col == lineIndent then go out col lineIndent rest
         else go (out ++ " ") (col + 1) lineIndent rest
+      | .soft =>
+        if c.flat || col == lineIndent then go out col lineIndent rest
+        else
+          let ind := if c.indent < 0 then 0 else c.indent
+          go (out ++ "\n" ++ String.ofList (List.replicate ind.toNat ' ')) ind ind rest
   go "" 0 0 [{ indent := 0, flat := false, doc := d }]
 
 /-! ### Chunks: tokens, and the spacing the grammar asks for
@@ -162,6 +172,8 @@ inductive Chunk where
   | text (doc : Doc) (first last : Option Char) (raw : Option String) (sep : Bool := false)
       (start stop : Nat := 0)
   | brk (hard : Bool)
+  /-- a break opportunity that takes no space when flat (the inside of a list's `[ ]`) -/
+  | brk0
   /-- nest what follows in this node (a negative number dedents) -/
   | nest (n : Int)
   /-- indent what follows like its construct (`match`'s alternatives, `by`'s tactics) -/
@@ -255,6 +267,7 @@ partial def joinChunks (cs : List Chunk) : Doc :=
       -- two breaks in a row would be a blank line (a comment already ends the line)
       let rest := rest.dropWhile (fun c => c matches .brk _)
       go rest none true (out.push (.line h))
+    | .brk0 :: rest => go rest none true (out.push .soft)
     | .nest n :: rest => .cat (out.push (.nest n (go rest prev glue #[])))
     | .align :: rest => .cat (out.push (.align (go rest prev glue #[])))
     -- (comments are turned into text before the loop; this keeps the match total)
@@ -290,8 +303,16 @@ blocks at their construct's indent re-parses the same way: `match`'s alternative
 def layoutAfter (kind : Name) (tok : String) : List Chunk :=
   match kind, tok with
   | "command.def", ":=" => [.nest 2, .brk false]
+  -- the term of an evaluator command is laid out like a `def`'s body
+  | "command.eval", "#eval" | "command.reduce", "#reduce"
+  | "command.check", "#check" | "command.run", "#run" => [.nest 2, .brk false]
   | "term.fun", "=>" | "term.fun", "↦" => [.nest 2, .brk false]
   | "match.alt", "=>" => [.nest 2, .brk false]
+  -- an expression inside parentheses nests its continuation lines (a `let` chain in an
+  -- argument would otherwise end at the line's indent, left of the `let`)
+  | "term.paren", "(" => [.nest 2]
+  -- a list literal breaks before `]`, one element per line, as the library writes long
+  -- lists (the first element stays on the `[` line)
   -- a `let` starts a line: the parser remembers its column (`withPosition`) for the
   -- terms after it, so a `let` in the middle of a line would forbid the continuation
   -- lines (of the `let`'s own body) to its left
@@ -303,6 +324,7 @@ def layoutAfter (kind : Name) (tok : String) : List Chunk :=
 def layoutBefore (kind : Name) (tok : String) : List Chunk :=
   match kind, tok with
   | "command.mutual", "end" => [.nest (-2), .brk true]
+  | "term.listLit", "]" => [.brk0]
   | "command.inductive", "deriving" | "command.structure", "deriving" | "command.cStruct", "deriving" =>
     [.brk true]
   | _, _ => []
@@ -465,19 +487,25 @@ partial def walk (ctx : Ctx) (cat : Name) (kind : Name) (f : PPFormat) (args : A
     match args[i]? with
     | some a@(.atom _ v) =>
       if v != tok then throw s!"{kind}: expected '{tok}', found '{v}'"
-      let cs := leafChunks ctx a (rawOf f tok)
+      -- a structure update is written with a space inside its braces (`{ s with … }`)
+      let raw :=
+        if kind == "term.structUpdate" then
+          if tok == "{" then some "{ " else if tok == "}" then some " }" else rawOf f tok
+        else rawOf f tok
+      let cs := leafChunks ctx a raw
+      -- a break after a keyword or a separator is a hard one when what follows must
+      -- start its own line (a `let` chain, or a comment)
+      let after := layoutAfter kind tok
       let after :=
-        if (kind == "command.def" && tok == ":=") || (kind == "match.alt" && tok == "=>") ||
-            (kind == "term.fun" && (tok == "=>" || tok == "↦")) ||
-            (kind.startsWith "term.let" && tok == ";") then
+        if after.any (fun c => c matches .brk false) then
           match args[i + 1]? with
           | some body => if needsOwnLine ctx body then
-              (layoutAfter kind tok).map fun c => match c with
+              after.map fun c => match c with
                 | .brk _ => .brk true
                 | c => c
-            else layoutAfter kind tok
-          | none => layoutAfter kind tok
-        else layoutAfter kind tok
+            else after
+          | none => after
+        else after
       pure ((layoutBefore kind tok).toArray ++ cs ++ after.toArray, i + 1)
     | _ => throw s!"{kind}: expected '{tok}'"
   | .ident =>
@@ -556,8 +584,10 @@ partial def walk (ctx : Ctx) (cat : Name) (kind : Name) (f : PPFormat) (args : A
     | some (.node _ "null" es) =>
       if d matches .sepBy1 .. && es.isEmpty then throw s!"{kind}: expected one more item"
       -- (breaking a separated list at its separators is only useful where the
-      -- separators are data, as in a tuple: in a binder list it would break the header)
-      let breaks := kind == "term.tuple" || kind == "term.anon"
+      -- separators are data, as in a tuple, an anonymous constructor, a list literal
+      -- or a structure update: in a binder list it would break the header)
+      let breaks := kind == "term.tuple" || kind == "term.anon" || kind == "term.listLit" ||
+        kind == "term.structUpdate"
       let mut acc : Array Chunk := #[]
       for (e, k) in es.toList.zipIdx do
         if k % 2 == 1 then
