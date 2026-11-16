@@ -4,7 +4,7 @@ import Functor
 # Scry's common IR: Wil
 
 Wil is the small three-address IR the `scry` analyser (design:
-`/workspace/wiz-notes/code-analysis-design.md`, §4.3) lowers C, C# and Python into. It is
+`wiz-notes/code-analysis-design.md`, §4.3) lowers C, C# and Python into. It is
 deliberately smaller than a compiler IR: enough to state a concrete semantics, so the
 abstract domains of stage S5 can be proved sound against it, and enough for the graph
 layers (CFG, dominators, CDG, def-use) of S2/S4.

@@ -479,6 +479,7 @@ Like Lean's doc-gen4: a static site from a set of modules. Design notes:
 `wiz-notes/scroll.md`.
 
     wiz doc [MODULE|FILE|DIR …] -o OUT [--lib] [--source-url URL] [--title T] [--web DIR]
+            [--reference DIR [--check]]
     grail doc [TARGET…] [-o OUT] [--source-url URL] [--title T]
 
 `--lib` documents the toolchain's library; a directory, every module under it (it is a
@@ -517,6 +518,27 @@ package's `lib` targets with its module roots (dependencies included), into
   (`/` focuses the box): names first, then doc comments, then signatures, and a hit
   says which matched. The pages are complete HTML: they read without JS, and the
   search works from `file://`.
+* **The reference manual** (`Wiz/Doc/Reference.lean`, `--reference DIR`). The pages are
+  for browsing; the manual is for looking a name up. `DIR/index.md` has a contents list,
+  the **notation table**, then one section per module and one subsection per declaration
+  with its kind, its full elaborated signature (implicit arguments included; the same
+  tagged printer as the pages), its doc comment as Markdown, and the instances of a class
+  (or for a type) with their signatures. The notation table is read from the parser
+  tables and macro rules the modules registered, not from the source text: an operator
+  rule's shape (`term op term`) gives the operator, its precedence and (from its operands'
+  precedences, as `notationRule` writes them) its associativity, and the macro rule of the
+  same kind gives what it expands to, so the table cannot disagree with the parser. An
+  anchor is the declaration's name (or `module-<M>` for a module), so links do not move
+  when the source does. `reference.html` is the same manual as a page of the site:
+  every module page links each declaration and the module heading to it.
+  The standard library's manual is built, not committed: the flake's `reference` package
+  (`nix build .#reference`) runs `wiz doc --lib --reference` with the packaged `wiz`, so it
+  cannot go stale and a rebuild is a Cachix hit while the compiler and `lib/` are
+  unchanged; CI builds it with `wiz` and the docs job publishes it. For a project that
+  commits its own manual, `--check` writes nothing and exits 1 when `DIR/index.md`
+  differs from what the modules say. The group `doc` checks a fixture (an implicit
+  argument, a class with two instances, an infix operator, markup, a module without doc
+  comments), and `--check` passing and failing on it.
 * **Interactive signatures, with the infoview's Wasm.** Each page carries its data as
   JSON (`<script id="wiz-doc-data">`, and `A.B.json`): per declaration the signature in
   the infoview protocol's tagged-text format and the table of its subterms, each a
@@ -534,6 +556,20 @@ package's `lib` targets with its module roots (dependencies included), into
   copies the site's scripts and `scroll.css`; `wiz doc` takes them from `share/wiz/web`
   of a release, `web/out` of a checkout, or `--web DIR`. Without them the pages are
   plain HTML (and `wiz doc` says so).
+* **Live documentation (`wiz doc --serve`, with `--lsp PORT`).** The site is static by
+  default. `--serve` serves the output tree over HTTP on `127.0.0.1` (`--port N`,
+  default 8000) and adds `web/doc-live.js` to the module pages only: with `--lsp PORT`,
+  hovering or clicking a declaration asks a separate `wiz lsp --ws PORT` for its
+  `textDocument/hover` (the real type and doc comment) and for the goals, expected type
+  and diagnostics at that position, rendered by the playground's `web/goals.js`; the
+  client is the playground's `web/lsp-client.js`. The server also serves each module's
+  source at `/sources/A.B.wiz`, which the page opens with `didOpen`, so the positions
+  are the generated ones. Without `--lsp` the client is inert (no socket, no fetch) and
+  the page is the static documentation; `index.html` and `api.html` never carry it.
+  `wiz doc`'s own output is unchanged without `--serve` (byte for byte). The server is
+  a development one: loopback, `GET`, no caching. Search stays static; code actions need
+  an editor's cursor and are not live here. See `docs/building.md`, "Live
+  documentation".
 * **CI** builds the library's documentation on `master` and publishes it: the `docs` job
   runs `wiz doc --lib` on a push (never a pull request), with source links to the
   commit and the Wasm module, into `doc-site/docs`, assembles the landing page at the
@@ -551,7 +587,8 @@ package's `lib` targets with its module roots (dependencies included), into
   cache; Markdown; `wiz doc` on a small package with doc comments (kinds, docs, source
   links, instances, the index); every cross-link resolves; every declaration is in the
   search index, with its doc summary and signature; the API index and `api.json` list
-  every module and declaration; the pages without JS; `grail doc`; and the page model of the Wasm module
+  every module and declaration; the reference manual and its `--check`; the pages without
+  JS; `grail doc`; and the page model of the Wasm module
   run natively on a page's JSON (hover, click, keys); and that the core library is
   documented (every public declaration of `Prelude`, `Std`, `Vec` and `Word` has a doc
   comment, and each has a module doc). The search box's ranking and result rendering

@@ -1,0 +1,52 @@
+-- A fixture for web/widget/test.mjs: each widget kind rendered and displayed, then an
+-- event through `Widget.handle` and the patches it produces. The Node test applies the
+-- patches with web/framework/runtime.js and web/framework/minidom.mjs, the same halves
+-- the React framework test uses.
+--
+--   .lake/build/bin/wiz run -I lib web/widget/gen.wiz
+import IO
+import Json
+import Text
+import Web.Widget
+
+-- The callback a notebook author writes: set the value of the widget that fired.
+def onEvent (e : Widget.Event) (ws : List Widget.Widget) : List Widget.Widget :=
+  List.map (fun w => match String.eq w.id e.widget with
+    | .true => Widget.setValue w e.value
+    | .false => w) ws
+
+def slider : Widget.Widget := Widget.sliderRange "gain" "input" "0.50" "onEvent" "0" "1" "0.05"
+def button : Widget.Widget := Widget.buttonValue "play" "click" "play" "Play" "onEvent"
+def textBox : Widget.Widget := Widget.text "name" "input" "ada" "onEvent"
+def plot : Widget.Widget := Widget.plot "trace" "click" "{\"points\":[1,2,3]}" "onEvent"
+
+def widgets : List Widget.Widget := [slider, button, textBox, plot]
+def moved : List Widget.Widget := Widget.widgetsOf (Widget.handle onEvent (Widget.display widgets) "gain" "input" "0.75")
+def rotated : List Widget.Widget := [button, textBox, plot, slider]
+def edited : List Widget.Widget := [slider, textBox, plot]
+
+def str (s : String) : Json := Json.mkStr s
+def jbool (b : Bool) : Json := Json.mkBool b
+
+def fields : List (String × Json) := [
+  Json.field "sliderHtml" (str (Widget.html (List.cons slider List.nil))),
+  Json.field "buttonHtml" (str (Widget.html (List.cons button List.nil))),
+  Json.field "textHtml" (str (Widget.html (List.cons textBox List.nil))),
+  Json.field "plotHtml" (str (Widget.html (List.cons plot List.nil))),
+  Json.field "allHtml" (str (Widget.html widgets)),
+  Json.field "display" (str (Widget.display widgets)),
+  Json.field "oldHtml" (str (Widget.html widgets)),
+  Json.field "newHtml" (str (Widget.html moved)),
+  Json.field "patches" (Widget.patches widgets moved),
+  Json.field "rotateOld" (str (Widget.html widgets)),
+  Json.field "rotateNew" (str (Widget.html rotated)),
+  Json.field "rotatePatches" (Widget.patches widgets rotated),
+  Json.field "editOld" (str (Widget.html widgets)),
+  Json.field "editNew" (str (Widget.html edited)),
+  Json.field "editPatches" (Widget.patches widgets edited),
+  Json.field "deterministic" (jbool (String.eq (Widget.display widgets) (Widget.display widgets))),
+  Json.field "keys" (Json.mkArr (List.map (fun (w : Widget.Widget) => str w.id) widgets))
+]
+
+def main : IO Unit := do
+  IO.println (Json.render (Json.mkObj fields))

@@ -372,12 +372,30 @@ class Client:
                     and message.content.get("execution_state") == "idle"):
                 return messages
 
-    def execute(self, code: str):
+    def iopub_until(self, predicate, msg_id: str | None = None,
+                    timeout: float = 120.0) -> list:
+        """Collect iopub messages until `predicate` accepts one (comm messages have no
+        busy/idle bracket, so `iopub_until_idle` cannot be used for them)."""
+        self.iopub.setsockopt(self.zmq.RCVTIMEO, int(timeout * 1000))
+        messages = []
+        while True:
+            try:
+                frames = self.iopub.recv_multipart()
+            except self.zmq.Again:
+                raise TimeoutError("no matching iopub message")
+            message = self.session.deserialize(frames)
+            if msg_id is not None and message.parent_header.get("msg_id") != msg_id:
+                continue
+            messages.append(message)
+            if predicate(message):
+                return messages
+
+    def execute(self, code: str, timeout: float = 120.0):
         msg_id = self.send("execute_request", {
             "code": code, "silent": False, "store_history": True,
             "user_expressions": {}, "allow_stdin": False, "stop_on_error": True})
-        reply = self.reply(msg_id)
-        return reply, self.iopub_until_idle(msg_id)
+        reply = self.reply(msg_id, timeout=timeout)
+        return reply, self.iopub_until_idle(msg_id, timeout=timeout)
 
     def close(self) -> None:
         self.shell.close(0)
