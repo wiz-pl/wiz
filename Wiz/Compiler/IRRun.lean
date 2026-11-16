@@ -212,6 +212,9 @@ def nativeOp (op : Name) (args : Array IVal) : RunM IVal := do
         | some (.bytes b) => some b
         | _ => none
       let r ← match c, bs 0, bs 1 with
+        -- `Nat.toStringSmall` (`Nat.toString`'s word-sized digits), as `Run.lean` knows it:
+        -- `Bytes.show` prints its elements with it
+        | "wiz_nat_show", _, _ => pure (some (← strIVal (toString (n 0))))
         | "wiz_bytes_empty", _, _ => pure (some (.bytes ByteArray.empty))
         | "wiz_bytes_push", some b, _ => pure (some (.bytes (BytesModel.push b (n 1))))
         | "wiz_bytes_size", some b, _ => pure (some (.num b.size))
