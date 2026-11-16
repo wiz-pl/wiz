@@ -1158,6 +1158,4 @@ def dispatch : List String → IO Unit
                             | .true => usageError (String.append "unknown flag: " b)
                             | .false => usageError (String.append "unknown command: " (argv (.cons b rest3)))
 
-def main : IO Unit := do
-  args ← IO.args;
-  dispatch args
+-- (`main` is `selfhost/Main.wiz`: the entry point is a module of its own, last.)

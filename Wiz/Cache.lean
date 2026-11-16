@@ -1068,6 +1068,9 @@ def ModuleManifest.toSx (m : ModuleManifest) : Sx :=
   let region := match m.region with
     | some e => node "region" [e.toSx]
     | none => node "region" [.a "none"]
+  -- (canonical order: entries are a set, and the order they were written in depends on
+  -- which commands were cache hits; the Merkle root already sorts them)
+  let entries := (m.entries.qsort fun a b => a.toSx.render < b.toSx.render).toList
   node "module-manifest" [
     node "format" [nat m.format],
     node "module" [str (toString m.module)],
@@ -1081,7 +1084,7 @@ def ModuleManifest.toSx (m : ModuleManifest) : Sx :=
     node "prev" [str m.prev],
     node "valid-until" [nat m.validUntil],
     region,
-    node "entries" [list (m.entries.toList.map ManifestEntry.toSx)],
+    node "entries" [list (entries.map ManifestEntry.toSx)],
     node "root" [str m.root]]
 
 def ModuleManifest.ofSx? (x : Sx) : Option ModuleManifest := do
@@ -1426,8 +1429,27 @@ def ManifestStore.writeManifest (m : ManifestStore) (key : Key) (module : Name)
           if acc.any (fun a => a.key == e.key && a.keySha == e.keySha) then acc else acc.push e) o.entries
       else entries
     | none => entries
-  let prev := old.map (·.root) |>.getD ""
   let validUntil := if validUntil == 0 then (old.map (·.validUntil) |>.getD 0) else validUntil
+  -- A refresh that adds nothing is a no-op: `prev` is the hash chain of the previous
+  -- manifest, so rewriting an unchanged manifest (a module checked again in the same
+  -- build, or in a later build) would make the cache bytes depend on how many times it
+  -- was written. Compare entries as a set (the canonical order is in `toSx`).
+  let unchanged := match old with
+    | none => false
+    | some o =>
+      o.module == module && o.key == key.fast && o.keySha == key.strong &&
+      o.binary == m.binary && o.toolchain == m.toolchain &&
+      o.toolchainTag == key.toolchain && o.targetTag == key.target && o.rig == m.rig &&
+      o.validUntil == validUntil && o.region == region &&
+      o.entries.size == entries.size && o.entries.all (entries.contains ·)
+  if unchanged then
+    m.present.modify (·.insert id)
+    m.valid.modify (·.insert id)
+    return
+  -- (a rewrite keeps the generation base the manifest started from: the number of
+  -- rewrites depends on which commands were cache hits, not on the module's inputs.
+  -- The layer's `manifest.sexpr` is a snapshot for the same reason.)
+  let prev := old.map (·.prev) |>.getD ""
   let m0 : ModuleManifest := { module, key := key.fast, keySha := key.strong,
                                binary := m.binary, toolchain := m.toolchain,
                                toolchainTag := key.toolchain, targetTag := key.target,
@@ -1453,12 +1475,27 @@ def ManifestStore.flush (m : ManifestStore) : IO Unit := do
   let ws ← m.written.get
   if ws.isEmpty then return
   let old ← readGeneration dir
-  let oldMods := old.map (·.modules) |>.getD #[]
-  let mods := ws.foldl (fun acc (key, name, file, sha) =>
-    (acc.filter (fun x => x.1 != key.fast || x.2.1 != key.strong)).push
-      (key.fast, key.strong, toString name, file, sha)) oldMods
-  let g0 := Generation.mk ((old.map (·.generation) |>.getD 0) + 1)
-    (old.map (·.root) |>.getD "") (old.map (·.validUntil) |>.getD 0) mods ""
+  -- (the index is a snapshot of every valid module manifest in the layer, not just the
+  -- ones this process wrote: with `-j` the jobs write their manifests concurrently, and
+  -- a last-writer index of only its own writes would miss the others.)
+  let mdir := dir / manifestDirName
+  let files ← if ← mdir.pathExists then mdir.readDir else pure #[]
+  let mut mods : Array (UInt64 × String × String × String × String) := #[]
+  for e in files do
+    if !e.fileName.endsWith ".wizmf" then continue
+    let text ← try pure ((String.fromUTF8? (← IO.FS.readBinFile e.path)).getD "") catch _ => pure ""
+    match parseManifest text with
+    | some man =>
+      if man.valid { fast := man.key, strong := man.keySha,
+                     toolchain := man.toolchainTag, target := man.targetTag } man.binary "" "" then
+        mods := mods.push (man.key, man.keySha, (toString man.module), e.fileName,
+          Smt.Sha256.hexBytes text.toUTF8)
+    | none => pure ()
+  -- (a write-cache index is a snapshot, not a log: its generation and previous root
+  -- cannot record how many processes or `-j` jobs wrote it, or the cache bytes would
+  -- depend on scheduling.)
+  let g0 := Generation.mk (max 1 mods.size) ""
+    (old.map (·.validUntil) |>.getD 0) mods ""
   let g := { g0 with root := g0.rootOf }
   writeAtomic (generationFile dir) (g.toSx.render ++ "\n")
 
@@ -1555,8 +1592,7 @@ def sealLayer (dir : System.FilePath) (write : Bool) (validUntil : Nat := 0) : I
     let old ← readGeneration dir
     let mergedMods := (old.map (·.modules) |>.getD #[]).foldl (fun acc x =>
       (acc.filter (fun y => y.1 != x.1 || y.2.1 != x.2.1)).push x) mods
-    let g0 := Generation.mk ((old.map (·.generation) |>.getD 0) + 1)
-      (old.map (·.root) |>.getD "")
+    let g0 := Generation.mk (max 1 mergedMods.size) ""
       (if validUntil == 0 then (old.map (·.validUntil) |>.getD 0) else validUntil) mergedMods ""
     let g := { g0 with root := g0.rootOf }
     writeAtomic (generationFile dir) (g.toSx.render ++ "\n")

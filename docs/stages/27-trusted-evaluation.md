@@ -78,8 +78,9 @@ acceptance is never replayed without the flag, nor the error without it replayed
 The first run with the flag elaborates the imports again.
 
 **The self-hosted toolchain** has no native evaluation and no flag. The grammar entry
-reaches its parser only through the tables generated at build time from the Lean parser's
-(`Selfhost.wizTables`; it is not in `selfhost/Parse.wiz`), so it rejects `native_refl`
+reaches its parser only through the tables generated from the Lean parser's
+(`selfhost/Tables.wiz`, `Selfhost.wizTables`; they are not in `selfhost/Parse.wiz`), so it
+rejects `native_refl`
 either as "unsupported syntax term.nativeRefl" or as an unknown identifier (not run here;
 either way it fails closed). It checks sources itself and never receives the Lean
 toolchain's declarations, so it never sees a `.native✝` axiom; if it did, it would be an
