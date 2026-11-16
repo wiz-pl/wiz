@@ -618,6 +618,16 @@ def freshLevelMeta (info : SourceInfo := {}) (desc : String := "") : ElabM R Lev
                            levelMetaInfo := s.levelMetaInfo.push (info, desc) }
   pure (.mvar m)
 
+/-- (13b) A fresh hole for a type: its recorded type is `Sort ?u` (`MetaEntry.type?`),
+with `?u` a fresh level hole. `?u` occurs only in that record: a guess's check may solve
+it, nothing else reads it, so it never reaches a declaration (no default, no "could not
+infer a universe level"). A level comparison that fails on it is not final
+(`unifyLevel` notes the hole), so it can't reject a guess, only leave it to
+`checkGuessedDecl`. -/
+def freshTypeMeta (ctx : LocalCtx R) (desc : String) : ElabM R (Term R) := do
+  let u ← freshLevelMeta
+  freshMeta ctx desc (some (.sort u))
+
 /-- Replace solved level metavariables. -/
 def instLevel (l : Level) : ElabM R Level := do
   let ls := (← get).levelMetas

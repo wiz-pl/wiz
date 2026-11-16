@@ -1989,7 +1989,7 @@ partial def inferFun (ctx : LocalCtx R) (bs : List BinderView) (body : Syntax) :
   | b :: rest =>
     let ty ← match b.type with
       | some s => pure (← checkType ctx s).1
-      | none => freshMeta ctx s!"the type of {b.name}"
+      | none => freshTypeMeta ctx s!"the type of {b.name}"
     let q ← elabQuantity ctx b.bi b.qty
     let vty ← evalIn ctx ty
     recordBinder ctx b.info b.name vty
@@ -2356,7 +2356,7 @@ partial def inferApp (ctx : LocalCtx R) (stx : Syntax) (postpone : Bool := true)
   -- (a lambda argument with unannotated binders is postponed: `checkApp` against an
   -- unknown type does that)
   if postpone && !explicitMode && ((stx.getArg 1).args.any postponable || (← numOperands ctx stx)) then
-    let T ← freshMeta ctx "the type of an application"
+    let T ← freshTypeMeta ctx "the type of an application"
     let vT ← evalIn ctx T
     let t ← checkApp ctx stx vT
     return (t, vT)
@@ -2378,9 +2378,9 @@ partial def inferApp (ctx : LocalCtx R) (stx : Syntax) (postpone : Bool := true)
     let fty' ← match ← force fty with
       | ty@(.pi ..) => pure ty
       | ty@(.neutral (.mvar _) _) =>
-        let a ← freshMeta ctx "a function domain"
+        let a ← freshTypeMeta ctx "a function domain"
         let va ← evalIn ctx a
-        let b ← freshMeta (ctx.bind "x" va) "a function codomain"
+        let b ← freshTypeMeta (ctx.bind "x" va) "a function codomain"
         let pi : Val R := .pi "x" .default (.qlit QuantitySyntax.explicitDefault) va (.mk ctx.env b) .hole
         unifyAt ctx fStx ty pi
         pure pi
@@ -3575,7 +3575,7 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
     let t ← check ctx (stx.getArg 1) vty
     return (.ann t ty, vty)
   | "term.hole" | "term.syntheticHole" =>
-    let a ← freshMeta ctx "the type of a hole"
+    let a ← freshTypeMeta ctx "the type of a hole"
     let desc := if stx.isOfKind "term.hole" then "_" else s!"?{((stx.getArg 1).getId?).getD "_"}"
     let va ← evalIn ctx a
     return (← freshMeta ctx desc va, va)
@@ -3689,7 +3689,7 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
     let firstIx (n : Name) : Option Nat := ctx.names.findIdx? (· == n)
     let hidden := scrut.filterMap firstIx
     let ctx' := { ctx with bound := ctx.bound.zipIdx.map fun (b, i) => b && !hidden.contains i }
-    let ty ← evalIn ctx (← freshMeta ctx' "the type of this match")
+    let ty ← evalIn ctx (← freshTypeMeta ctx' "the type of this match")
     return (← check ctx stx ty, ty)
   | "term.calc" => elabCalc ctx stx
   | "term.letPair" | "term.letTuple" | "term.absurd" | "term.rfl" =>

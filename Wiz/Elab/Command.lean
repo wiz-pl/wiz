@@ -401,7 +401,7 @@ def elabDeclTerms (binders : Array Syntax) (typeStx : Option Syntax) (valStx : O
   let (ctx, tele) ← elabTelescope { info } (binders.flatMap binderViews).toList
   let ty ← match typeStx with
     | some s => pure (← Elab.checkType ctx s).1
-    | none => freshMeta ctx "the type of this definition"
+    | none => freshTypeMeta ctx "the type of this definition"
   -- (for the language server) the type after the binders, and where ` : T` would go
   if let some (n, ni, at_) := declName? then
     pushInfo (.decl ni n ctx ty typeStx.isSome at_)
