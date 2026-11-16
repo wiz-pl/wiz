@@ -1,6 +1,6 @@
 import Wiz
 import Wiz.Version
-import Wiz.Doc.Site
+import Wiz.Doc.Build
 import Wiz.Doc.Serve
 
 open Wiz
@@ -25,11 +25,15 @@ def usage : String := "usage:
   wiz doc [MODULE|FILE|DIR…] -o OUT [--lib] [--source-url URL] [--title T] [--web DIR]
                                   [--serve [--port N] [--lsp PORT]]
                                    documentation: a static site (one page per module,
-                                   index, search); --lib: the toolchain's library;
+                                   index, search, reference); --lib: the toolchain's library;
                                    source links are URL + path in its root + #L<line>;
                                    --serve: also serve OUT on 127.0.0.1 (default port
                                    8000); --lsp PORT: the pages ask `wiz lsp --ws PORT`
                                    for live types and docs in a panel
+  wiz doc … --reference DIR [--check]
+                                   also the reference manual (full signatures, doc comments,
+                                   class instances, notation table) into DIR/index.md;
+                                   --check: change nothing, exit 1 when DIR/index.md differs
   wiz fmt [FILE|-] [--check] [--width N] [--explain]
                                    reprint a file from its syntax tree (stdin/stdout;
                                    --check: change nothing, exit 1 when it differs)
@@ -317,6 +321,8 @@ structure DocArgs where
   port : Option Nat := none
   /-- the port of the language server the pages ask (`wiz lsp --ws PORT`) -/
   lsp : Option Nat := none
+  reference : Option String := none
+  check : Bool := false
   inputs : List String := []
 
 def docArgs (a : DocArgs) : List String → Except String DocArgs
@@ -335,6 +341,8 @@ def docArgs (a : DocArgs) : List String → Except String DocArgs
     let some p := n.toNat? | throw s!"wiz doc: --lsp needs a port number, not {n}"
     if p ≥ 65536 then throw s!"wiz doc: --lsp port must be below 65536, not {n}"
     docArgs { a with lsp := some p } rest
+  | "--reference" :: d :: rest => docArgs { a with reference := some d } rest
+  | "--check" :: rest => docArgs { a with check := true } rest
   | x :: rest => if x.startsWith "-" then throw s!"wiz doc: unknown option {x}" else docArgs { a with inputs := x :: a.inputs } rest
 
 /-- The path of `p` relative to `root` (`p` itself if it isn't under it). -/
@@ -351,6 +359,8 @@ def docCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   let some out := a.out | IO.eprintln "wiz doc: -o OUT is required"; return 2
   if !a.serve && (a.port.isSome || a.lsp.isSome) then
     IO.eprintln "wiz doc: --port and --lsp need --serve"; return 2
+  if a.check && a.reference.isNone then
+    IO.eprintln "wiz doc: --check needs --reference DIR"; return 2
   -- every input that is a directory or a file is a module root
   let mut tc := tc
   let mut wanted : Array (String × System.FilePath × System.FilePath) := #[]
@@ -384,10 +394,17 @@ def docCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   let base := lib.parent.getD "."
   let assets : List System.FilePath :=
     (web.toList ++ [base / "web", base / "share" / "wiz" / "web"]).eraseDups
-  let o : Doc.Options := { out, sourceUrl := a.sourceUrl, title := a.title.getD "Wiz documentation", web, assets, serve := a.serve, lsp := a.lsp }
-  let n ← Doc.run (fun m => elaborate tc "<doc>" s!"import {m}\n") mods o
-  IO.println s!"wiz doc: {n} modules, {out}/index.html"
+  let title := a.title.getD (if a.reference.isSome then "Wiz standard library reference" else "Wiz documentation")
+  let o : Doc.Options := { out := out, sourceUrl := a.sourceUrl, title := title, web := web, assets := assets, serve := a.serve, lsp := a.lsp, reference := a.reference.map System.FilePath.mk, check := a.check }
+  let r ← Doc.run (fun m => elaborate tc "<doc>" s!"import {m}\n") mods o
+  IO.println s!"wiz doc: {r.pages} modules, {out}/index.html"
+  for f in r.written do IO.println s!"wiz doc: wrote {f}"
   if web.isNone then IO.println "wiz doc: no Wasm module (web/build.sh): the pages are plain HTML"
+  if !r.stale.isEmpty then
+    for f in r.stale do
+      IO.eprintln s!"wiz doc --check: {f} is out of date (regenerate with `wiz doc --lib --reference {a.reference.getD ""}`)"
+    return 1
+  if a.check then IO.println s!"wiz doc --check: {a.reference.getD ""}/index.md is up to date"
   unless a.serve do return 0
   -- (11s) serve the tree; the module sources go with it, for the live client to open
   let site : Doc.Serve.Site :=

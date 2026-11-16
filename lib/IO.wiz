@@ -61,7 +61,7 @@ instance : Monad1 IO where
 back a linear value (a token, a handle) in direct style instead of to a continuation.
 `IO A`'s result is unrestricted, so a linear value can't come out of it; this one's can.
 Additive: `IO` is unchanged, and unifying the two is a later design question
-(/workspace/wiz-notes/cohesion-resources.md §10). In `do1`, `x ⇐ e;` binds the
+(wiz-notes/cohesion-resources.md §10). In `do1`, `x ⇐ e;` binds the
 result of an `IO1` action at quantity 1 and goes on in `IO` (`(x, y) ⇐ e;` takes a
 pair apart). -/
 def IO1 (A : Type) : Type := (1 w : World) → (1 _ : A) × World

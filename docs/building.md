@@ -804,7 +804,8 @@ relative, so the project-site prefix (or a custom domain root) works either way:
 
 The `docs` job builds the two Wasm modules (`web/build.sh` for the documentation's
 interactive signatures, `web/build-playground.sh` for the playground), runs `wiz doc
---lib -o doc-site/docs --web web/out` (source links to the commit), assembles the
+--lib -o doc-site/docs --web web/out --reference docs/reference --check` (source links to
+the commit; the last two flags check the committed reference manual), assembles the
 landing page, the benchmark page and the playground with `web/build-site.sh doc-site
 web/out`, checks the result with `web/check-site.sh doc-site` (the four entry points
 exist and the landing page's and benchmark page's local links resolve; no server), and
@@ -824,8 +825,10 @@ tests and the site-check rules for it are in `web/test-bench.sh`.
 | `docs/index.html` | the documentation index: the documented modules and their summaries |
 | `docs/api.html` | the API index: every module and declaration, with signatures and doc summaries |
 | `docs/api.json` | the same index as data, for tools |
+| `docs/reference.html` | the reference manual: full signatures, doc comments, class instances, the notation table (same data as `docs/reference/index.md`) |
 | `docs/A.B.html` | one page per module (its declarations, signatures, docs, source links) |
 | `docs/A.B.json` | the same page's data, for the interactive signatures |
+| `docs/reference/index.md` | the reference manual as committed Markdown (in the checkout, not the published tree) |
 | `docs/search.js`, `docs/scroll.css`, `docs/scroll.js`, `docs/tagged.js`, `docs/scroll-search.js` | the documentation's scripts and styles (search covers names, doc comments and signatures) |
 | `docs/wiz-infoview.mjs`, `docs/wiz-infoview.wasm` | the infoview's Wasm module, when `web/build.sh` built it |
 | `playground/index.html` | the playground page |
@@ -837,7 +840,7 @@ To build the site locally from a checkout (after `nix develop` and `lake build w
 ```sh
 sh web/build.sh web/out                         # the infoview module, scroll assets
 sh web/build-playground.sh web/out              # the playground module
-.lake/build/bin/wiz doc --lib -o doc-site/docs --web web/out
+.lake/build/bin/wiz doc --lib -o doc-site/docs --web web/out --reference docs/reference --check
 sh web/build-site.sh doc-site web/out           # landing page, /bench/ and /playground/
 sh web/check-site.sh doc-site                   # the entry points and the links
 sh web/test-bench.sh                            # the generator's fixtures and /bench/
