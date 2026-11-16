@@ -6944,10 +6944,6 @@ def unwrapPrivate (s : Syntax) : Syntax := match strEq (kindOf s) "command.priva
   | .false => s
 -- (A11) the deriver table. `attribute [deriver C] f` records `f` as `C`'s deriver
 -- (`CommandState.derivers` in the host); `deriving C` runs the one the table names.
--- `p` is a prefix of `s`
-def strPrefix (p s : String) : Bool := match p with
-  | .mk ps => match s with
-    | .mk cs => strEq (String.mk (takeL (List.length ps) cs)) p
 -- a deriver's name without the `Derive.` namespace (the derivers may be imported under
 -- it): `Derive.deriveBEq` and `deriveBEq` are the same deriver
 def deriverBase (f : String) : String := match f with
