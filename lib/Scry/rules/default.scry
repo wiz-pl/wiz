@@ -27,7 +27,9 @@
 #
 # A `kind memory` rule turns on a memory-lifetime analysis (`check use-after-free`)
 # and reports its results as findings; such a finding is `unchecked` (its evidence is
-# the memory model, not a source -> sink derivation).
+# the memory model, not a source -> sink derivation). This pack has none: CWE-416 is
+# opt-in with `lib/Scry/rules/uaf.scry`, and without it a use after free stays a
+# `scry/memory/use-after-free` diagnostic.
 #
 # The CWE tags are the *targeted* weakness, not a claim that a finding proves the
 # weakness. A taint rule says "attacker-controlled data reaches this argument"; whether
@@ -213,12 +215,4 @@ rule path-traversal
   sink opendir arg 0
   sink access arg 0
   sink mkdir arg 0
-end
-
-rule use-after-free
-  kind memory
-  severity error
-  cwe CWE-416
-  message A memory location is accessed after a free on some path
-  check use-after-free
 end

@@ -28,10 +28,11 @@ Point numbering follows `Scry.Analysis` (statements then a terminator per block)
 comments name the interesting ones.
 
 The rule pack is `Scry.demoPackText` / `Scry.demoRules`: command injection, format
-strings, copy/read lengths, `gets`, unbounded `strcpy`/`sprintf` hints, integer sizes, path
-traversal and use after free (the `kind memory` rule). `lib/Scry/rules/default.scry` is
-the same pack as a real spec file; `Scry.demoPackText` mirrors it so the tests exercise
-the parser without file IO.
+strings, copy/read lengths, `gets`, unbounded `strcpy`/`sprintf` hints, integer sizes
+and path traversal. It has no `kind memory` rule (use after free is opt-in with
+`lib/Scry/rules/uaf.scry`). `lib/Scry/rules/default.scry` is the same pack as a real
+spec file; `Scry.demoPackText` mirrors it so the tests exercise the parser without
+file IO.
 -/
 
 def Scry.rtv (n : Nat) : Wil.Var := Wil.var n Wil.i32
@@ -68,7 +69,9 @@ def Scry.demoPackText : String :=
   "#\n" ++
   "# A `kind memory` rule turns on a memory-lifetime analysis (`check use-after-free`)\n" ++
   "# and reports its results as findings; such a finding is `unchecked` (its evidence is\n" ++
-  "# the memory model, not a source -> sink derivation).\n" ++
+  "# the memory model, not a source -> sink derivation). This pack has none: CWE-416 is\n" ++
+  "# opt-in with `lib/Scry/rules/uaf.scry`, and without it a use after free stays a\n" ++
+  "# `scry/memory/use-after-free` diagnostic.\n" ++
   "#\n" ++
   "# The CWE tags are the *targeted* weakness, not a claim that a finding proves the\n" ++
   "# weakness. A taint rule says \"attacker-controlled data reaches this argument\"; whether\n" ++
@@ -254,14 +257,6 @@ def Scry.demoPackText : String :=
   "  sink opendir arg 0\n" ++
   "  sink access arg 0\n" ++
   "  sink mkdir arg 0\n" ++
-  "end\n" ++
-  "\n" ++
-  "rule use-after-free\n" ++
-  "  kind memory\n" ++
-  "  severity error\n" ++
-  "  cwe CWE-416\n" ++
-  "  message A memory location is accessed after a free on some path\n" ++
-  "  check use-after-free\n" ++
   "end\n"
 
 def Scry.demoRules : Scry.RulePack := Scry.parseRulePack Scry.demoPackText

@@ -10,7 +10,8 @@ This directory is the checked-in S0/S2 corpus (48 cases on `agent/scry-models`) 
 * `cwe134/` — format strings (`printf`, `fprintf`, `syslog`).
 * `cwe190/` — CWE-190 attacker-controlled allocation size.
 * `cwe242/` — `gets`.
-* `cwe416/` — CWE-416 use after free (a `kind memory` rule; the finding is unchecked).
+* `cwe416/` — CWE-416 use after free (run with the opt-in `uaf.scry` memory rule; the
+  finding is unchecked).
 * `cwe787/` — CWE-787 attacker-controlled copy length.
 * `../../tests/fixtures/taint-*.c` — the S0 fixtures the taint test group already uses.
 * `../../tests/fixtures/model-*.c` — the external-model cases: the `exec*` variadic

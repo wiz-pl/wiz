@@ -831,23 +831,25 @@
       "suite": "S2",
       "cwe": "CWE-416",
       "file": "cwe416/uaf-unsafe.c",
+      "rules": "../../../lib/Scry/rules/uaf.scry",
       "expect": "unsafe",
       "findings": [
         {
-          "rule": "use-after-free",
+          "rule": "scry/memory/use-after-free",
           "function": "main",
           "callee": "load",
           "argument": 0,
           "sinkLine": 10
         }
       ],
-      "note": "a memory rule; the evidence is the points-to model and the finding is unchecked"
+      "note": "the opt-in lifetime pack (uaf.scry); the finding is unchecked by design"
     },
     {
       "id": "s2/cwe416/uaf-safe",
       "suite": "S2",
       "cwe": "CWE-416",
       "file": "cwe416/uaf-safe.c",
+      "rules": "../../../lib/Scry/rules/uaf.scry",
       "expect": "safe"
     }
 

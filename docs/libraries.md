@@ -1610,10 +1610,12 @@ The S4 rule pack and interprocedural slice are separate modules:
   matching. Three kinds: `taint`, `forbidden` (an unconditionally unsafe call) and
   `memory` (a lifetime analysis reported as findings, today `check use-after-free`).
   A sink is `sink NAME arg K` or `sink NAME args`; the latter checks every argument of
-  a variadic call (`execl`), while the finding still names the concrete tainted index. `lib/Scry/rules/default.scry` is the demo pack as a real spec
-  file; it targets CWE-78, CWE-134, CWE-787/CWE-120/CWE-242, CWE-190, CWE-22 and
-  CWE-416. A `memory` finding is always `unchecked`: its evidence is the points-to model,
-  not a source -> sink derivation. The pack's source/sink/sanitiser table is in the file's
+  a variadic call (`execl`), while the finding still names the concrete tainted index.
+  `lib/Scry/rules/default.scry` is the demo pack as a real spec file; it targets
+  CWE-78, CWE-134, CWE-787/CWE-120/CWE-242, CWE-190 and CWE-22. CWE-416 is the opt-in
+  `lib/Scry/rules/uaf.scry` memory rule. A `memory` finding is always `unchecked`: its
+  evidence is the points-to and lifetime model, not a source -> sink derivation. The
+  pack's source/sink/sanitiser table is in the file's
   header and in `wiz-notes/scry-taint.md` §12.9.
 * `import Scry.RuleTaint` — variable-indexed taint as Datalog over a rule pack; an
   argument source/sanitiser becomes an extra definition point, and a `gen` fact is the
