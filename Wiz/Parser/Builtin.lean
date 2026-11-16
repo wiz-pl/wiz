@@ -284,12 +284,13 @@ continue onto a line starting at the command's column.
 | `command.structure`          | "structure" ident [".{" us "}"] [binders] [":" T] where [fields] ["deriving" C,+] (where: `structure.where`, "where" [["private"] ident "::"]) |
 | `command.private`            | "private" command (every name it declares is private to the module) |
 | `command.sealed`             | "sealed" command (an `inductive`: no other declaration is this type) |
-| `command.local`              | "local" command (13m: a `syntax`, `notation`, `infix…`, `macro_rules` or `attribute [macro …]` whose syntax stays in the module; 11w: an `instance` found only in the module) |
+| `command.local`              | "local" command (13m: a `syntax`, `notation`, `infix…`, `macro_rules` or `attribute [macro …]` whose syntax stays in the module; 11w: an `instance` found only in the module; 6h: `attribute [simp]`) |
 | `command.deriving`           | "deriving" "instance" C,+ "for" T,+ |
 | `command.attrDeriver`        | "attribute" "[" "deriver" ident "]" ident |
 | `command.attrInline`         | "attribute" "[" "inline" "]" ident |
 | `command.attrDefaultInstance`| "attribute" "[" "default_instance" [num] "]" ident (7f) |
 | `command.attrBinop`          | "attribute" "[" "binop" "]" ident (7f) |
+| `command.attrSimp`           | "attribute" "[" "simp" [num] "]" ident (6h: the default `simp` set; 1000 unless a priority is given) |
 | `command.coinductive`        | like `structure`; the fields are observations |
 | `command.defEqns`            | "def" ident [".{" us "}"] [binders] ":" T [alts] |
 | `command.partial`            | "partial" ["(" "default" ":=" w ")"] command (a `def`) |
@@ -370,6 +371,9 @@ def commandLeading : List LeadingParser := [
     p := seqs ["attribute", "[", nonReserved "default_instance", optional num, "]", ident] },
   { kind := "command.attrBinop", prec := maxPrec,
     p := seqs ["attribute", "[", nonReserved "binop", "]", ident] },
+  -- 6h (S2): `attribute [simp] f` (and `[simp 500] f`) puts a theorem in the default set
+  { kind := "command.attrSimp", prec := maxPrec,
+    p := seqs ["attribute", "[", nonReserved "simp", optional num, "]", ident] },
   -- HD8: `deriving`
   { kind := "command.attrDeriver", prec := maxPrec,
     p := seqs ["attribute", "[", nonReserved "deriver", ident, "]", ident] },
