@@ -1,0 +1,42 @@
+import Nat
+
+def Pv.rev4 (a b c d : Nat) : Nat.add d (Nat.add c (Nat.add b a)) = Nat.add a (Nat.add b (Nat.add c d)) :=
+  Eq.trans (Eq.symm (Nat.add_assoc d c (Nat.add b a)))
+  (Eq.trans (Eq.congrArg (fun t => Nat.add t (Nat.add b a)) (Nat.add_comm d c))
+  (Eq.trans (Eq.congrArg (fun t => Nat.add (Nat.add c d) t) (Nat.add_comm b a))
+  (Eq.trans (Eq.symm (Nat.add_assoc (Nat.add c d) a b))
+  (Eq.trans (Eq.congrArg (fun t => Nat.add t b) (Nat.add_comm (Nat.add c d) a))
+    (Nat.add_assoc a (Nat.add c d) b)))))
+
+def Pv.E1 (A B : Nat) :
+    Nat.mul 256 (Nat.add B (Nat.mul 256 A))
+      = Nat.add (Nat.mul B 256) (Nat.mul A 65536) :=
+  Eq.trans (Nat.mul_add 256 B (Nat.mul 256 A))
+    (Eq.trans
+      (Eq.congrArg (fun t => Nat.add t (Nat.mul 256 (Nat.mul 256 A))) (Nat.mul_comm 256 B))
+      (Eq.congrArg (fun t => Nat.add (Nat.mul B 256) t)
+        (Eq.trans (Eq.symm (Nat.mul_assoc 256 256 A)) (Nat.mul_comm 65536 A))))
+
+def Pv.INNER (A B : Nat) :
+    Nat.mul 256 (Nat.mul 256 (Nat.add B (Nat.mul 256 A)))
+      = Nat.add (Nat.mul B 65536) (Nat.mul A 16777216) :=
+  Eq.trans (Eq.symm (Nat.mul_assoc 256 256 (Nat.add B (Nat.mul 256 A))))
+    (Eq.trans (Nat.mul_add 65536 B (Nat.mul 256 A))
+      (Eq.trans
+        (Eq.congrArg (fun t => Nat.add (Nat.mul 65536 B) t)
+          (Eq.trans (Eq.symm (Nat.mul_assoc 65536 256 A)) (Nat.mul_comm 16777216 A)))
+        (Eq.congrArg (fun t => Nat.add t (Nat.mul A 16777216)) (Nat.mul_comm 65536 B))))
+
+def Pv.E2 (A B C : Nat) :
+    Nat.mul 256 (Nat.add C (Nat.mul 256 (Nat.add B (Nat.mul 256 A))))
+      = Nat.add (Nat.mul C 256) (Nat.add (Nat.mul B 65536) (Nat.mul A 16777216)) :=
+  Eq.trans (Nat.mul_add 256 C (Nat.mul 256 (Nat.add B (Nat.mul 256 A))))
+    (Eq.trans
+      (Eq.congrArg (fun t => Nat.add t (Nat.mul 256 (Nat.mul 256 (Nat.add B (Nat.mul 256 A))))) (Nat.mul_comm 256 C))
+      (Eq.congrArg (fun t => Nat.add (Nat.mul C 256) t) (Pv.INNER A B)))
+
+def Pv.load_form (A B C D : Nat) :
+    Nat.add D (Nat.mul 256 (Nat.add C (Nat.mul 256 (Nat.add B (Nat.mul 256 A)))))
+      = Nat.add (Nat.mul A (Nat.pow 2 24)) (Nat.add (Nat.mul B (Nat.pow 2 16)) (Nat.add (Nat.mul C (Nat.pow 2 8)) D)) :=
+  Eq.trans (Eq.congrArg (fun t => Nat.add D t) (Pv.E2 A B C))
+    (Pv.rev4 (Nat.mul A (Nat.pow 2 24)) (Nat.mul B (Nat.pow 2 16)) (Nat.mul C (Nat.pow 2 8)) D)

@@ -1,0 +1,25 @@
+import BitVecMem
+
+def Pv.byteAddr (k : BitVec 9) (i : Nat) : BitVec 32 :=
+  BitVec.ofNat 32 (Nat.add (Nat.mul 4 k.toNat) i)
+
+def bc {a a' b b' : Nat} (e : a = a') (e' : b = b') : Nat.beq a b = Nat.beq a' b' :=
+  Eq.trans (Eq.congrArg (fun t => Nat.beq t b) e) (Eq.congrArg (fun t => Nat.beq a' t) e')
+
+def Pv.bound (k : BitVec 9) (l : Nat) (hl : Nat.lt l 4 = .true) :
+    Nat.lt (Nat.add (Nat.mul 4 k.toNat) l) (Nat.pow 2 32) = .true :=
+  let hk : Nat.Le k.toNat 512 := Nat.le_of_lt k.toNat 512 (UIntN.toNat_lt k);
+  let hm : Nat.Le (Nat.mul 4 k.toNat) (Nat.mul 4 512) := Nat.mul_le_mul_left 4 k.toNat 512 hk;
+  let hl4 : Nat.Le l 4 := Nat.le_trans l (Nat.succ l) 4 (Nat.le_succ l) hl;
+  Nat.lt_of_le_of_lt (Nat.add (Nat.mul 4 k.toNat) l) (Nat.add (Nat.mul 4 512) 4) (Nat.pow 2 32)
+    (Nat.add_le_add (Nat.mul 4 k.toNat) (Nat.mul 4 512) l 4 hm hl4) rfl
+
+def S1 (k : BitVec 9) (l j : Nat) :
+    BitVec.beq (Pv.byteAddr k l) (BitVec.ofNat 32 j)
+      = Nat.beq (Bits.low 32 (Nat.add (Nat.mul 4 k.toNat) l)) (Bits.low 32 j) :=
+  bc (Bits.wofNat_val 32 (Nat.add (Nat.mul 4 k.toNat) l)) (Bits.wofNat_val 32 j)
+
+def S2 (k : BitVec 9) (l j : Nat) (hl : Nat.lt l 4 = .true) (hj : Nat.lt j 4 = .true) :
+    BitVec.beq (Pv.byteAddr k l) (BitVec.ofNat 32 j) = Nat.beq (Nat.add (Nat.mul 4 k.toNat) l) j :=
+  Eq.trans (S1 k l j)
+    (bc (Bits.low_of_lt 32 (Nat.add (Nat.mul 4 k.toNat) l) (Pv.bound k l hl)) (Bits.low_of_lt 32 j (Nat.lt_trans j 4 (Nat.pow 2 32) hj rfl)))

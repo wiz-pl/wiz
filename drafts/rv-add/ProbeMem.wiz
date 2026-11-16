@@ -1,0 +1,225 @@
+import Rv.Proofs
+import BitVecMem
+-- scratch probe for the whole-state memory claims (not part of the library)
+
+def Pv.byteAddr (k : BitVec 9) (i : Nat) : BitVec 32 :=
+  BitVec.ofNat 32 (Nat.add (Nat.mul 4 k.toNat) i)
+
+-- ## `Nat.beq`, the inequality forms
+
+def Pv.beq_comm : (a b : Nat) → Nat.beq a b = Nat.beq b a
+  | .zero, .zero => rfl
+  | .zero, .succ b => rfl
+  | .succ a, .zero => rfl
+  | .succ a, .succ b => Pv.beq_comm a b
+
+def Pv.beq_false_of_lt (a b : Nat) (h : Nat.lt b a = .true) : Nat.beq a b = .false :=
+  Or.elim (Bool.cases (Nat.beq a b))
+    (fun (hb : Nat.beq a b = .true) =>
+      False.elim (Nat.lt_irrefl b (Eq.substProp (fun (t : Nat) => Nat.lt b t = .true) (Nat.beq_eq a b hb) h)))
+    (fun (hb : Nat.beq a b = .false) => hb)
+
+def Pv.beq_lt_false (Z j : Nat) (hj : Nat.lt j 4 = .true) (hZ : Nat.Le 4 Z) : Nat.beq Z j = .false :=
+  Or.elim (Bool.cases (Nat.beq Z j))
+    (fun (hb : Nat.beq Z j = .true) =>
+      False.elim (Nat.not_lt_of_le 4 j (Eq.substProp (fun (t : Nat) => Nat.Le 4 t) (Nat.beq_eq Z j hb) hZ) hj))
+    (fun (hb : Nat.beq Z j = .false) => hb)
+
+def Pv.le_four_mul (m : Nat) : Nat.Le 4 (Nat.mul 4 (Nat.succ m)) :=
+  Nat.mul_le_mul_left 4 1 (Nat.succ m) rfl
+
+def Pv.beq_succ (l j : Nat) (hj : Nat.lt j 4 = .true) (m : Nat) :
+    Nat.beq (Nat.add (Nat.mul 4 (Nat.succ m)) l) j = .false :=
+  Pv.beq_lt_false (Nat.add (Nat.mul 4 (Nat.succ m)) l) j hj
+    (Nat.le_trans 4 (Nat.mul 4 (Nat.succ m)) (Nat.add (Nat.mul 4 (Nat.succ m)) l)
+      (Pv.le_four_mul m) (Nat.le_add_right (Nat.mul 4 (Nat.succ m)) l))
+
+-- ## The address range, `k < 512` gives `4k + l < 2^32`
+
+def Pv.bound (k : BitVec 9) (l : Nat) (hl : Nat.lt l 4 = .true) :
+    Nat.lt (Nat.add (Nat.mul 4 k.toNat) l) (Nat.pow 2 32) = .true :=
+  let hk : Nat.Le k.toNat 512 := Nat.le_of_lt k.toNat 512 (UIntN.toNat_lt k);
+  let hm : Nat.Le (Nat.mul 4 k.toNat) (Nat.mul 4 512) := Nat.mul_le_mul_left 4 k.toNat 512 hk;
+  let hl4 : Nat.Le l 4 := Nat.le_trans l (Nat.succ l) 4 (Nat.le_succ l) hl;
+  Nat.lt_of_le_of_lt (Nat.add (Nat.mul 4 k.toNat) l) (Nat.add (Nat.mul 4 512) 4) (Nat.pow 2 32)
+    (Nat.add_le_add (Nat.mul 4 k.toNat) (Nat.mul 4 512) l 4 hm hl4) rfl
+
+-- ## `Nat.beq` shifts: `Nat.beq (4k + l) j`
+
+def Pv.nat00 : (k : Nat) → Nat.beq (Nat.add (Nat.mul 4 k) 0) 0 = Nat.beq 0 k
+  | .zero => rfl
+  | .succ m => Pv.beq_succ 0 0 rfl m
+
+def Pv.nat11 : (k : Nat) → Nat.beq (Nat.add (Nat.mul 4 k) 1) 1 = Nat.beq 0 k
+  | .zero => rfl
+  | .succ m => Pv.beq_succ 1 1 rfl m
+
+def Pv.nat22 : (k : Nat) → Nat.beq (Nat.add (Nat.mul 4 k) 2) 2 = Nat.beq 0 k
+  | .zero => rfl
+  | .succ m => Pv.beq_succ 2 2 rfl m
+
+def Pv.nat33 : (k : Nat) → Nat.beq (Nat.add (Nat.mul 4 k) 3) 3 = Nat.beq 0 k
+  | .zero => rfl
+  | .succ m => Pv.beq_succ 3 3 rfl m
+
+def Pv.nat01 : (k : Nat) → Nat.beq (Nat.add (Nat.mul 4 k) 0) 1 = .false
+  | .zero => rfl
+  | .succ m => Pv.beq_succ 0 1 rfl m
+
+def Pv.nat02 : (k : Nat) → Nat.beq (Nat.add (Nat.mul 4 k) 0) 2 = .false
+  | .zero => rfl
+  | .succ m => Pv.beq_succ 0 2 rfl m
+
+def Pv.nat03 : (k : Nat) → Nat.beq (Nat.add (Nat.mul 4 k) 0) 3 = .false
+  | .zero => rfl
+  | .succ m => Pv.beq_succ 0 3 rfl m
+
+def Pv.nat10 : (k : Nat) → Nat.beq (Nat.add (Nat.mul 4 k) 1) 0 = .false
+  | .zero => rfl
+  | .succ m => Pv.beq_succ 1 0 rfl m
+
+def Pv.nat12 : (k : Nat) → Nat.beq (Nat.add (Nat.mul 4 k) 1) 2 = .false
+  | .zero => rfl
+  | .succ m => Pv.beq_succ 1 2 rfl m
+
+def Pv.nat13 : (k : Nat) → Nat.beq (Nat.add (Nat.mul 4 k) 1) 3 = .false
+  | .zero => rfl
+  | .succ m => Pv.beq_succ 1 3 rfl m
+
+def Pv.nat20 : (k : Nat) → Nat.beq (Nat.add (Nat.mul 4 k) 2) 0 = .false
+  | .zero => rfl
+  | .succ m => Pv.beq_succ 2 0 rfl m
+
+def Pv.nat21 : (k : Nat) → Nat.beq (Nat.add (Nat.mul 4 k) 2) 1 = .false
+  | .zero => rfl
+  | .succ m => Pv.beq_succ 2 1 rfl m
+
+def Pv.nat23 : (k : Nat) → Nat.beq (Nat.add (Nat.mul 4 k) 2) 3 = .false
+  | .zero => rfl
+  | .succ m => Pv.beq_succ 2 3 rfl m
+
+def Pv.nat30 : (k : Nat) → Nat.beq (Nat.add (Nat.mul 4 k) 3) 0 = .false
+  | .zero => rfl
+  | .succ m => Pv.beq_succ 3 0 rfl m
+
+def Pv.nat31 : (k : Nat) → Nat.beq (Nat.add (Nat.mul 4 k) 3) 1 = .false
+  | .zero => rfl
+  | .succ m => Pv.beq_succ 3 1 rfl m
+
+def Pv.nat32 : (k : Nat) → Nat.beq (Nat.add (Nat.mul 4 k) 3) 2 = .false
+  | .zero => rfl
+  | .succ m => Pv.beq_succ 3 2 rfl m
+
+-- ## `byteAddr` comparisons
+
+def Pv.bc {a a' b b' : Nat} (e : a = a') (e' : b = b') : Nat.beq a b = Nat.beq a' b' :=
+  Eq.trans (Eq.congrArg (fun t => Nat.beq t b) e) (Eq.congrArg (fun t => Nat.beq a' t) e')
+
+def Pv.step1 (k : BitVec 9) (l j : Nat) :
+    BitVec.beq (Pv.byteAddr k l) (BitVec.ofNat 32 j)
+      = Nat.beq (Bits.low 32 (Nat.add (Nat.mul 4 k.toNat) l)) (Bits.low 32 j) :=
+  Pv.bc (Bits.wofNat_val 32 (Nat.add (Nat.mul 4 k.toNat) l)) (Bits.wofNat_val 32 j)
+
+def Pv.byte_beq_nat (k : BitVec 9) (l j : Nat) (hl : Nat.lt l 4 = .true) (hj : Nat.lt j 4 = .true) :
+    BitVec.beq (Pv.byteAddr k l) (BitVec.ofNat 32 j) = Nat.beq (Nat.add (Nat.mul 4 k.toNat) l) j :=
+  Eq.trans (Pv.step1 k l j)
+    (Pv.bc (Bits.low_of_lt 32 (Nat.add (Nat.mul 4 k.toNat) l) (Pv.bound k l hl))
+      (Bits.low_of_lt 32 j (Nat.lt_trans j 4 (Nat.pow 2 32) hj rfl)))
+
+def Pv.zk_step (k : BitVec 9) :
+    BitVec.beq (BitVec.ofNat 9 0) k = Nat.beq (Bits.low 9 0) k.toNat :=
+  Pv.bc (Bits.wofNat_val 9 0) rfl
+
+def Pv.zk (k : BitVec 9) : BitVec.beq (BitVec.ofNat 9 0) k = Nat.beq 0 k.toNat :=
+  Eq.trans (Pv.zk_step k) rfl
+
+def Pv.addr00 (k : BitVec 9) :
+    BitVec.beq (Pv.byteAddr k 0) (BitVec.ofNat 32 0) = BitVec.beq (BitVec.ofNat 9 0) k :=
+  Eq.trans (Pv.byte_beq_nat k 0 0 rfl rfl) (Eq.trans (Pv.nat00 k.toNat) (Eq.symm (Pv.zk k)))
+
+def Pv.addr11 (k : BitVec 9) :
+    BitVec.beq (Pv.byteAddr k 1) (BitVec.ofNat 32 1) = BitVec.beq (BitVec.ofNat 9 0) k :=
+  Eq.trans (Pv.byte_beq_nat k 1 1 rfl rfl) (Eq.trans (Pv.nat11 k.toNat) (Eq.symm (Pv.zk k)))
+
+def Pv.addr22 (k : BitVec 9) :
+    BitVec.beq (Pv.byteAddr k 2) (BitVec.ofNat 32 2) = BitVec.beq (BitVec.ofNat 9 0) k :=
+  Eq.trans (Pv.byte_beq_nat k 2 2 rfl rfl) (Eq.trans (Pv.nat22 k.toNat) (Eq.symm (Pv.zk k)))
+
+def Pv.addr33 (k : BitVec 9) :
+    BitVec.beq (Pv.byteAddr k 3) (BitVec.ofNat 32 3) = BitVec.beq (BitVec.ofNat 9 0) k :=
+  Eq.trans (Pv.byte_beq_nat k 3 3 rfl rfl) (Eq.trans (Pv.nat33 k.toNat) (Eq.symm (Pv.zk k)))
+
+def Pv.addr01 (k : BitVec 9) : BitVec.beq (Pv.byteAddr k 0) (BitVec.ofNat 32 1) = .false :=
+  Eq.trans (Pv.byte_beq_nat k 0 1 rfl rfl) (Pv.nat01 k.toNat)
+def Pv.addr02 (k : BitVec 9) : BitVec.beq (Pv.byteAddr k 0) (BitVec.ofNat 32 2) = .false :=
+  Eq.trans (Pv.byte_beq_nat k 0 2 rfl rfl) (Pv.nat02 k.toNat)
+def Pv.addr03 (k : BitVec 9) : BitVec.beq (Pv.byteAddr k 0) (BitVec.ofNat 32 3) = .false :=
+  Eq.trans (Pv.byte_beq_nat k 0 3 rfl rfl) (Pv.nat03 k.toNat)
+def Pv.addr10 (k : BitVec 9) : BitVec.beq (Pv.byteAddr k 1) (BitVec.ofNat 32 0) = .false :=
+  Eq.trans (Pv.byte_beq_nat k 1 0 rfl rfl) (Pv.nat10 k.toNat)
+def Pv.addr12 (k : BitVec 9) : BitVec.beq (Pv.byteAddr k 1) (BitVec.ofNat 32 2) = .false :=
+  Eq.trans (Pv.byte_beq_nat k 1 2 rfl rfl) (Pv.nat12 k.toNat)
+def Pv.addr13 (k : BitVec 9) : BitVec.beq (Pv.byteAddr k 1) (BitVec.ofNat 32 3) = .false :=
+  Eq.trans (Pv.byte_beq_nat k 1 3 rfl rfl) (Pv.nat13 k.toNat)
+def Pv.addr20 (k : BitVec 9) : BitVec.beq (Pv.byteAddr k 2) (BitVec.ofNat 32 0) = .false :=
+  Eq.trans (Pv.byte_beq_nat k 2 0 rfl rfl) (Pv.nat20 k.toNat)
+def Pv.addr21 (k : BitVec 9) : BitVec.beq (Pv.byteAddr k 2) (BitVec.ofNat 32 1) = .false :=
+  Eq.trans (Pv.byte_beq_nat k 2 1 rfl rfl) (Pv.nat21 k.toNat)
+def Pv.addr23 (k : BitVec 9) : BitVec.beq (Pv.byteAddr k 2) (BitVec.ofNat 32 3) = .false :=
+  Eq.trans (Pv.byte_beq_nat k 2 3 rfl rfl) (Pv.nat23 k.toNat)
+def Pv.addr30 (k : BitVec 9) : BitVec.beq (Pv.byteAddr k 3) (BitVec.ofNat 32 0) = .false :=
+  Eq.trans (Pv.byte_beq_nat k 3 0 rfl rfl) (Pv.nat30 k.toNat)
+def Pv.addr31 (k : BitVec 9) : BitVec.beq (Pv.byteAddr k 3) (BitVec.ofNat 32 1) = .false :=
+  Eq.trans (Pv.byte_beq_nat k 3 1 rfl rfl) (Pv.nat31 k.toNat)
+def Pv.addr32 (k : BitVec 9) : BitVec.beq (Pv.byteAddr k 3) (BitVec.ofNat 32 2) = .false :=
+  Eq.trans (Pv.byte_beq_nat k 3 2 rfl rfl) (Pv.nat32 k.toNat)
+
+-- ## The store chains
+
+def Pv.chain (c0 c1 c2 c3 : Bool) (b0 b1 b2 b3 old : BitVec 8) : BitVec 8 :=
+  if c3 then b3 else if c2 then b2 else if c1 then b1 else if c0 then b0 else old
+
+def Pv.b0 (v : Nat) : BitVec 8 := BitVec.ofNat 8 (Nat.mod v 256)
+def Pv.b1 (v : Nat) : BitVec 8 := BitVec.ofNat 8 (Nat.mod (Nat.div v 256) 256)
+def Pv.b2 (v : Nat) : BitVec 8 := BitVec.ofNat 8 (Nat.mod (Nat.div (Nat.div v 256) 256) 256)
+def Pv.b3 (v : Nat) : BitVec 8 := BitVec.ofNat 8 (Nat.mod (Nat.div (Nat.div (Nat.div v 256) 256) 256) 256)
+
+def Pv.store1_at (m : BitVec 32 → BitVec 8) (v : Nat) (b : BitVec 32) :
+    Rv.store 1 Pf.cfg m (BitVec.ofNat 32 0) v b
+      = (if BitVec.beq b (BitVec.ofNat 32 0) then Pv.b0 v else m b) := rfl
+
+def Pv.store4_at (m : BitVec 32 → BitVec 8) (v : Nat) (b : BitVec 32) :
+    Rv.store 4 Pf.cfg m (BitVec.ofNat 32 0) v b
+      = Pv.chain (BitVec.beq b (BitVec.ofNat 32 0)) (BitVec.beq b (BitVec.ofNat 32 1))
+          (BitVec.beq b (BitVec.ofNat 32 2)) (BitVec.beq b (BitVec.ofNat 32 3))
+          (Pv.b0 v) (Pv.b1 v) (Pv.b2 v) (Pv.b3 v) (m b) := rfl
+
+-- ## Byte `l` of a word, as the spec's `Nat.mod (Nat.div …) 256`
+
+def Pv.slice_val (x : BitVec 32) (l : Nat) :
+    Hw.slice (r := HwTy.El) (Nat.mul 8 l) 8 x
+      = BitVec.ofNat 8 (Nat.mod (Nat.div x.toNat (Nat.pow 2 (Nat.mul 8 l))) 256) :=
+  let Y := Nat.div x.toNat (Nat.pow 2 (Nat.mul 8 l));
+  UIntN.ext _ _
+    (Eq.trans
+      (Eq.trans (Bits.wofNat_val 8 (Nat.shiftRight x.toNat (Nat.mul 8 l))) rfl)
+      (Eq.symm
+        (Eq.trans (Bits.wofNat_val 8 (Nat.mod Y 256))
+          (Eq.trans (Eq.congrArg (fun t => Bits.low 8 t) (Bits.mod_pow 8 Y))
+            (Bits.low_low 8 8 Y rfl)))))
+
+def Pv.spec_b0 (v : Nat) :
+    Pv.b0 v = BitVec.ofNat 8 (Nat.mod (Nat.div v (Nat.pow 2 0)) 256) :=
+  Eq.congrArg (fun t => BitVec.ofNat 8 (Nat.mod t 256)) (Eq.symm (Bits.div_one v))
+
+def Pv.spec_b1 (v : Nat) :
+    Pv.b1 v = BitVec.ofNat 8 (Nat.mod (Nat.div v (Nat.pow 2 8)) 256) := rfl
+
+def Pv.spec_b2 (v : Nat) :
+    Pv.b2 v = BitVec.ofNat 8 (Nat.mod (Nat.div v (Nat.pow 2 16)) 256) :=
+  Eq.congrArg (fun t => BitVec.ofNat 8 (Nat.mod t 256)) (Bits.div_div 8 8 v)
+
+def Pv.spec_b3 (v : Nat) :
+    Pv.b3 v = BitVec.ofNat 8 (Nat.mod (Nat.div v (Nat.pow 2 24)) 256) :=
+  Eq.congrArg (fun t => BitVec.ofNat 8 (Nat.mod t 256))
+    (Eq.trans (Eq.congrArg (fun t => Nat.div t 256) (Bits.div_div 8 8 v)) (Bits.div_div 16 8 v))
