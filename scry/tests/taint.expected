@@ -167,6 +167,21 @@ mem-unknown: an unknown location: ok
 mem-indirect-unknown: zero findings: ok
 mem-indirect-unknown: one unknown-indirect warning: ok
 mem-indirect-unknown: an unknown location: ok
+path-unsafe: one path-traversal finding: ok
+path-unsafe: the sink is open: ok
+path-safe-realpath: zero findings: ok
+path-safe-realpath-result: zero findings: ok
+path-unsafe-realpath-input: realpath does not clean its input: ok
+path-unsafe-argv: argv is a source in the opt-in pack: ok
+null-unsafe-malloc: a null-dereference warning: ok
+null-safe-malloc: the !p guard kills the warning: ok
+null-unsafe-getenv: a null-dereference warning: ok
+null-safe-getenv: the p == 0 early return kills the warning: ok
+null-unsafe-call: a call result that is not checked: ok
+null-safe-call: the !p guard kills the warning: ok
+null-unsafe-status: the ignored failure status leaves req null: ok
+null-safe-status: the constant-false status guard is unreachable: ok
+null-safe-param: a parameter is non-null at entry: ok
 macro errors: refused without --allow-errors: ok
 macro errors: recovered with --allow-errors: ok
 macro errors: not a silent empty unit: ok

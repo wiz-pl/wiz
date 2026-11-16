@@ -144,6 +144,58 @@ object, external calls' memory effects outside the model table, heap shape (a li
 through two allocation sites is two sets), context sensitivity, and offsets past one
 `anyOff` level.
 
+## Null dereference (S5 alarm, opt-in)
+
+`Scry.Nullness` wires the S5 abstract-interpretation alarm (`Scry.AiFixpoint`'s
+`Alarm.nullDeref`) to Wil and therefore to `scry taint`. It builds the `ACfg` of each
+function, runs the same worklist/fixpoint engine, and reports a
+`scry/memory/null-dereference` warning at a load or store through a pointer that may be
+null:
+
+* a failed allocation (`malloc`/`calloc`/`realloc`), a `fopen`/`getenv` result, or any
+  other call result that is dereferenced without a check;
+* a pointer set to `NULL` and used without a guard;
+* a pointer that is **not** an access through a parameter: a parameter is assumed to be a
+  valid object at entry. That is the documented false-negative boundary; nullness does not
+  flow into a callee.
+
+The check-kills-null rule is the branch condition: `if (p)`, `if (p != NULL)` and
+`if (!p)` refine nullness on each edge, so an early return removes the null value from the
+path that reaches the dereference. A constant-false branch is pruned before alarms are
+read (the fixed CVE-2017-7659 control: the helper always returns `APR_ENOMEM`, so
+`if (status == APR_SUCCESS) { req->method; }` is unreachable).
+
+**Decision: opt-in.** `scry taint --null-deref` runs it (`Scry.analyzeWithNull` in the
+library); the default `scry taint` does not. Unchecked allocations are common in real C,
+so the pass adds a warning on every `p = malloc(...); p->x`; keeping it off preserves the
+default pack's pinned results and lets a user choose the diagnostic. The CVE-476
+measurement below runs with the flag. Functions longer than `Scry.maxNullPoints` (300
+program points) are skipped: the list-based worklist is a prototype and the pass must not
+turn a one-minute CVE analysis into a ten-minute one.
+
+## Path traversal (opt-in pack)
+
+`lib/Scry/rules/path-traversal.scry` is the default pack **plus** a `path-traversal`
+rule: taint from `getenv`/`read`/`recv`/`fgets`/`getline`/`fread` or C's `argv` reaches
+`open`, `openat`, `creat`, `fopen`, `freopen`, `stat`/`lstat`, `unlink`, `remove`,
+`rename`, `chdir`, `opendir`, `access`, `mkdir` or `rmdir`. Run it with
+`--rules ../lib/Scry/rules/path-traversal.scry`.
+
+`source argv result` is a pack directive, not a call pattern: it seeds the second
+parameter of `main` as a source. It is in this pack only, so the default pack's results do
+not change.
+
+`realpath` is a model (`Scry.Models`): it sanitises its **result** and the destination it
+writes (argument 1), never its input. `realpath(user, buf); open(buf)` is clean;
+`realpath(user, buf); open(user)` is still reported; `p = realpath(user, 0); open(p)` is
+clean.
+
+**Decision: opt-in.** A path API is not a bug by itself, and the rule needs a source
+policy (`argv`) that would change the default pack's behaviour. The default pack keeps
+its four rules and its pinned counts; the path pack is a deliberate `--rules` choice.
+`tests/fixtures/path-*.c` and `tests/taint.wiz` cover the vulnerable/`realpath` pairs,
+including the "sanitiser result used, input still used" control.
+
 ## External function models
 
 `Scry.Models` is one table of libc/syscall effects: `source` (a written buffer,

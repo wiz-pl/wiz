@@ -45,7 +45,8 @@ fixpoint early and marks the result `truncated`, with a `scry/budget/*` diagnost
   silent false negative.
 * **analyse.** `Scry.analyze` (`Scry.Interproc`): the default pack is
   `lib/Scry/rules/default.scry`, or `--rules FILE`; the intraprocedural engine is
-  `Scry.RuleTaint`, and direct-call summaries stitch the paths.
+  `Scry.RuleTaint`, and direct-call summaries stitch the paths. `--null-deref` adds the
+  S5 nullness pass (`Scry.analyzeWithNull` / `Scry.Nullness`); it is off by default.
 * **derive.** `Scry.Certify.certifyFinding` checks each alert's derivation against the
   function's EDB. A finding is `checked` when its certificate verifies and `unchecked`
   otherwise (e.g. no provenance), and the status is printed and put in SARIF.
@@ -98,6 +99,9 @@ structure Scry.TaintOpts where
   maxRounds : Option Nat
   /-- `--progress`: print one stage line per phase on stderr. -/
   progress : Bool
+  /-- `--null-deref`: run the S5 nullness pass and add
+  `scry/memory/null-dereference` diagnostics. Off by default. -/
+  nullDeref : Bool
 
 /-- The defaults are a **contract**, not an accident: a single file is analysed under a
 300 s wall-clock limit and a 2 M-node CST cap, so an unexpectedly large input produces a
@@ -105,7 +109,7 @@ clear refusal instead of an unbounded run. `--timeout 0` and `--max-nodes 0` dis
 the respective limit. -/
 def Scry.emptyTaintOpts (file : String) : Scry.TaintOpts :=
   Scry.TaintOpts.mk file .none .none .false .false .false .false .none .none .none
-    (.some 300) (.some 2000000) .none .false
+    (.some 300) (.some 2000000) .none .false .false
 
 /-- The budget view of the options (`--progress` is included there too). -/
 def Scry.TaintOpts.toBudget (o : Scry.TaintOpts) : Scry.RunBudget :=
@@ -123,6 +127,7 @@ def Scry.taintUsage : String :=
   ++ "                      [--progress]\n"
   ++ "  limits: default --timeout 300 --max-nodes 2000000; 0 disables a limit.\n"
   ++ "  A truncated fixpoint is reported as scry/budget/* and \"truncated\": true.\n"
+  ++ "                      [--null-deref]\n"
 
 /-- Parse the flags after `scry taint`. Flags may come in any order; the first
 non-flag argument is the C source. -/
@@ -169,6 +174,7 @@ partial def Scry.taintArgsGo (file : Option String) (o : Scry.TaintOpts) :
         | .none => .error ("--diff-context needs a number, not \"" ++ p ++ "\"")
       | .nil => .error "--diff-context needs a number"
     | "--progress" => Scry.taintArgsGo file { o with progress := .true } rest
+    | "--null-deref" => Scry.taintArgsGo file { o with nullDeref := .true } rest
     | "--help" => .error Scry.taintUsage
     | _ => match String.startsWith a "--" with
       | .true => .error ("unknown flag " ++ a ++ "\n" ++ Scry.taintUsage)
@@ -1020,6 +1026,10 @@ def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do
         (List.append
           (Scry.concatLists (fun r => r.plan.memWarnings) results)
           (Scry.concatLists (fun r => Scry.unmodelledWarningsOf prog r) results)));
+      /-- `--null-deref` appends the opt-in S5 nullness pass. -/
+      let warnings := match o.nullDeref with
+        | .true => Scry.dedupWarnings (List.append warnings (Scry.nullDerefWarnings prog))
+        | .false => warnings;
       let memoryFindings := Scry.lifetimeFindings prog pt pack;
       let pr := Scry.ProgramResult.mk results sums.1 graph pt warnings memoryFindings;
       Scry.reportStage o startMs "analyse" (Nat.repr (List.length results)

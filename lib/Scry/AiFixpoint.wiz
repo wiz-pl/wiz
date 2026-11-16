@@ -84,12 +84,16 @@ partial def solveGo (m : AiMach) (cfg : ACfg) (st : AState) (queue : List AEdge)
             | .false => List.cons e.dst seen
           solveGo m cfg st' (ACfg.enqueue cfg rest e.dst) seen'
 
-/-- The least fixed point above the initial state, starting from the entry block. The
+/-- The least fixed point above a given entry state, starting from the entry block. The
 engine widens at every re-reached block (a simple WTO stand-in; a Bourdoncle order can
 replace it without changing the checker). -/
-def fixpoint (m : AiMach) (cfg : ACfg) : AState :=
-  let init := AState.set cfg.entry (AiEnv.topOf cfg.vars) (AState.bot cfg)
+def fixpointFrom (m : AiMach) (cfg : ACfg) (entryEnv : AiEnv) : AState :=
+  let init := AState.set cfg.entry entryEnv (AState.bot cfg)
   solveGo m cfg init (ACfg.outEdges cfg cfg.entry) (([cfg.entry]) : List Nat)
+
+/-- The least fixed point above the all-unknown entry state. -/
+def fixpoint (m : AiMach) (cfg : ACfg) : AState :=
+  fixpointFrom m cfg (AiEnv.topOf cfg.vars)
 
 /-- The join of the transfers of all incoming edges of `q`. -/
 def incomingJoin (m : AiMach) (cfg : ACfg) (st : AState) (q : Nat) : Option AiEnv :=
@@ -139,6 +143,24 @@ def Interval.within (m : AiMach) : Interval → Bool
   | .range _ hi => Nat.lt hi (AiMach.modulus m)
   | .top => .false
 
+/-- The null and bounds alarms of a memory access, without the index expression's own
+alarms. `bot` is unreachable (silent); `top` is an alarm. -/
+def AExpr.nullRangeAlarms (m : AiMach) (at : Nat) (env : AiEnv) (arr : Nat)
+    (idx : AExpr) (len : Nat) : List Alarm :=
+  let iv := AExpr.eval m env idx
+  let av := AiEnv.getD env arr Value.top
+  let nullAlarm : List Alarm := match Null.mayBeNull av.nul with
+    | .true => List.cons (Alarm.nullDeref at) Alarm.none
+    | .false => Alarm.none
+  let rangeAlarm : List Alarm := match iv.itv with
+    | .bot => Alarm.none
+    | .top => List.cons (Alarm.outOfBounds at 0 len) Alarm.none
+    | .range _ hi =>
+        match Nat.lt hi len with
+        | .true => Alarm.none
+        | .false => List.cons (Alarm.outOfBounds at hi len) Alarm.none
+  List.append nullAlarm rangeAlarm
+
 /-- Alarm of an expression. An arithmetic operation alarms when its abstract result is
 `top` (the range may leave the machine word); a load alarms on a possibly-null array or
 a possibly-out-of-bounds index; a load of a `bot` index is unreachable and silent. -/
@@ -175,20 +197,12 @@ def AExpr.alarms (m : AiMach) (at : Nat) (env : AiEnv) : AExpr → List Alarm
            | .false => List.cons (Alarm.overflow at "mul") Alarm.none))
   | .alloc e => AExpr.alarms m at env e
   | .load arr idx len =>
-      let iv := AExpr.eval m env idx
-      let av := AiEnv.getD env arr Value.top
-      let nullAlarm : List Alarm := match Null.mayBeNull av.nul with
-        | .true => List.cons (Alarm.nullDeref at) Alarm.none
-        | .false => Alarm.none
-      let rangeAlarm : List Alarm := match iv.itv with
-        | .bot => Alarm.none
-        | .top => List.cons (Alarm.outOfBounds at 0 len) Alarm.none
-        | .range _ hi =>
-            match Nat.lt hi len with
-            | .true => Alarm.none
-            | .false => List.cons (Alarm.outOfBounds at hi len) Alarm.none
-      List.append (AExpr.alarms m at env idx)
-        (List.append nullAlarm rangeAlarm)
+      List.append (AExpr.alarms m at env idx) (AExpr.nullRangeAlarms m at env arr idx len)
+
+/-- The alarms of a memory access, including the index expression's own alarms. -/
+def AExpr.memAlarms (m : AiMach) (at : Nat) (env : AiEnv) (arr : Nat) (idx : AExpr)
+    (len : Nat) : List Alarm :=
+  List.append (AExpr.alarms m at env idx) (AExpr.nullRangeAlarms m at env arr idx len)
 
 /-- Alarm of a guard's expression. -/
 def ACond.alarms (m : AiMach) (at : Nat) (env : AiEnv) : ACond → List Alarm
@@ -205,6 +219,7 @@ def ACond.alarms (m : AiMach) (at : Nat) (env : AiEnv) : ACond → List Alarm
 def AStmt.alarms (m : AiMach) (at : Nat) (env : AiEnv) : AStmt → List Alarm
   | .assign _ e => AExpr.alarms m at env e
   | .assume c => ACond.alarms m at env c
+  | .store arr idx len => AExpr.memAlarms m at env arr idx len
   | .skip => Alarm.none
 
 -- ## The checker

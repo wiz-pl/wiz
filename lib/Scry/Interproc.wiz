@@ -4,6 +4,7 @@ import Scry.PointsTo
 import Scry.Rules
 import Scry.Models
 import Scry.Lifetime
+import Scry.Nullness
 import Text
 /-!
 # Scry.Interproc
@@ -224,6 +225,16 @@ which keeps the provenance — a fact seeded as EDB would shadow its derivation)
 def Scry.seedsFor (sums : List Scry.Summary) (func : String) : List Scry.MemSeed :=
   List.filter (fun m => Bool.not (String.eq m.func func)) (Scry.allMemSeeds sums)
 
+/-- The parameter positions a rule pack declares as sources regardless of the caller.
+Today one such policy exists: `source argv result` asks for `main`'s second parameter
+(the C `argv` array). The default pack does not declare it, so argv taint is opt-in. -/
+def Scry.argvParamsOf (pack : Scry.RulePack) (fn : Wil.Func) : List Nat :=
+  match Scry.RulePack.sourcesArgv pack, String.eq fn.name "main" with
+  | .true, .true => match Wil.listNth fn.params 1 with
+    | .some _ => List.cons 1 .nil
+    | .none => .nil
+  | _, _ => .nil
+
 /-- Evaluate one function under the current summaries (the unit of the summary
 fixpoint). Exposed so a driver can checkpoint between functions for `--timeout`. The
 entry sources are the C-ABI policy's parameter seeds for exported entries. -/
@@ -231,7 +242,7 @@ def Scry.evalWithEntries (graph : Scry.CallGraph) (pack : Scry.RulePack)
     (pt : Scry.PtResult) (entries : List (String × Nat)) (sums : List Scry.Summary)
     (fn : Wil.Func) : Scry.FuncResult :=
   Scry.evaluateFuncWith fn pack pt (Scry.seedsFor sums fn.name)
-    (Scry.summaryOf sums fn.name).params
+    (Scry.unionNat (Scry.summaryOf sums fn.name).params (Scry.argvParamsOf pack fn))
     (Scry.retSeedsOf graph sums fn.name)
     (Scry.entrySourcesFor entries fn.name)
 
@@ -255,7 +266,8 @@ def Scry.growSummaries (p : Wil.Program) (graph : Scry.CallGraph)
   let mems := Scry.dedupSeeds (Scry.concatLists (fun r => Scry.resultMemSeeds r) results);
   List.map (fun fn =>
     let old := Scry.summaryOf prev fn.name;
-    let contrib := Scry.paramContributions graph results fn.name;
+    let contrib := Scry.unionNat (Scry.paramContributions graph results fn.name)
+      (Scry.argvParamsOf pack fn);
     let ret := match List.find (fun r => String.eq r.fn.name fn.name) results with
       | .some r => Scry.returnsTainted r
       | .none => (.false : Bool);
@@ -354,9 +366,10 @@ model rule descriptors, so a model-only sink (`execl`, `sprintf`, `read`'s bound
 rule id even when the textual pack does not repeat it. `entryMode` enables the C-ABI
 policy that seeds the parameters of exported entries; the library/old API passes
 `false` through `Scry.analyze`. `maxRounds` bounds the points-to fixpoint (a partial
-result when it is hit). -/
-def Scry.analyzeEntriesBounded (p : Wil.Program) (pack0 : Scry.RulePack)
-    (entryMode : Bool) (maxRounds : Option Nat) : Scry.ProgramResult :=
+result when it is hit). `withNull` appends the opt-in S5 nullness pass
+(`scry/memory/null-dereference`). -/
+def Scry.analyzeCore (p : Wil.Program) (pack0 : Scry.RulePack)
+    (entryMode : Bool) (withNull : Bool) (maxRounds : Option Nat) : Scry.ProgramResult :=
   let pack := Scry.RulePack.withModels pack0;
   let pt := Scry.pointsToBounded p maxRounds;
   let graph := Scry.callGraph p pt;
@@ -371,12 +384,21 @@ def Scry.analyzeEntriesBounded (p : Wil.Program) (pack0 : Scry.RulePack)
   let hasLifetime : Bool := match pack.memoryRuleFor "use-after-free" with
     | .some _ => .true
     | .none => .false;
-  let warnings := Scry.dedupWarnings (List.filter (Scry.keepMemWarning hasLifetime)
+  let baseWarnings := Scry.dedupWarnings (List.filter (Scry.keepMemWarning hasLifetime)
     (List.append
       (Scry.concatLists (fun r => r.plan.memWarnings) results)
       (Scry.concatLists (fun r => Scry.unmodelledWarningsOf p r) results)));
+  let nulls : List Scry.MemWarning := match withNull with
+    | .true => Scry.nullDerefWarnings p
+    | .false => .nil;
+  let warnings := Scry.dedupWarnings (List.append baseWarnings nulls);
   let memoryFindings := Scry.lifetimeFindings p pt pack;
   Scry.ProgramResult.mk results sums graph pt warnings memoryFindings
+
+/-- The bounded analysis without the nullness pass. -/
+def Scry.analyzeEntriesBounded (p : Wil.Program) (pack0 : Scry.RulePack)
+    (entryMode : Bool) (maxRounds : Option Nat) : Scry.ProgramResult :=
+  Scry.analyzeCore p pack0 entryMode .false maxRounds
 
 /-- The library analysis: no exported-entry policy, the historical round bound. -/
 def Scry.analyze (p : Wil.Program) (pack : Scry.RulePack) : Scry.ProgramResult :=
@@ -396,6 +418,17 @@ def Scry.analyzeEntries (p : Wil.Program) (pack : Scry.RulePack)
 def Scry.analyzeBounded (p : Wil.Program) (pack : Scry.RulePack)
     (maxRounds : Option Nat) : Scry.ProgramResult :=
   Scry.analyzeEntriesBounded p pack .false maxRounds
+
+/-- The same analysis with the S5 nullness pass appended to the memory diagnostics.
+The pass is **opt-in** (here, or `scry taint --null-deref`): it is a memory diagnostic
+with a different precision trade-off from the taint rules, and the default pack's
+results stay pinned. -/
+def Scry.analyzeWithNull (p : Wil.Program) (pack0 : Scry.RulePack) : Scry.ProgramResult :=
+  Scry.analyzeCore p pack0 .false .true .none
+
+/-- The default analysis; kept as the historical name. -/
+def Scry.analyzeWithoutNull (p : Wil.Program) (pack0 : Scry.RulePack) : Scry.ProgramResult :=
+  Scry.analyzeCore p pack0 .false .false .none
 
 -- ## Stitching paths across calls
 
