@@ -952,6 +952,14 @@ check `Γ⁰ ⊢ s ⇐ Size` (one line in each kernel).
 `MTm.sizeArgs` (`tt` and `Enum 2` as sizes are rejected) in the Lean verdicts and the
 differential samples.
 
+**Guard (TT-06).** The size alone does not reject `μ X. X`: a `μ` description must also
+be guarded (every `rec`/`hrec` under a non-recursive `arg` field). Both kernels check it
+(`descGuarded`, "unguarded recursive description"); `ν` is not constrained (`ν X. X` is a
+valid coinductive type; its productivity is `cocon`/`out`). The surface elaborators still
+own positivity, and the self-hosted one now reports the Lean message. Tests:
+`MTm.muSize` (also in the differential samples), the `inductive` group, and the selfhost
+positivity case; see `wiz-notes/mu-size.md`.
+
 ### Q1 / R1. Projections drop linear components — **fixed**: projections need an unrestricted pair (lin-proj; both kernels)
 
 `p.2` on `p : (1 x : A) × B` uses `p` once and discards `x` (§7.1); `p.1` discards the
