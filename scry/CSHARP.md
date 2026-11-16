@@ -1,9 +1,10 @@
 # scry C# frontend
 
-Status: **design + first slice, parsing on vendored tree-sitter-c-sharp** (2026-11-16;
+Status: **design + first slice, parsing on tree-sitter-c-sharp** (2026-11-16;
 the working copy of this note is `wiz-notes/scry-csharp.md`). The user chose option B
 of §1 on 2026-11-16: the hand-written parser of the first draft is gone, and
-`native/tree-sitter-c-sharp/` (v0.23.5) parses C# through the same shim as C. The branch is based on `agent/scry-integrate` (PR #376), because
+tree-sitter-c-sharp v0.23.5 (fetched by Nix, `.#tree-sitter-c-sharp`) parses C# through
+the same shim as C. The branch is based on `agent/scry-integrate` (PR #376), because
 the pieces the frontend plugs into exist only there: `Scry.Cst` (the read-only CST view
 the C lowering walks), `Scry.Warning`/`Scry.TU`, `Wil.Span` origins on every
 statement, and the rule-pack taint engine (`Scry.RuleTaint`, `Scry.Interproc`,
@@ -29,10 +30,13 @@ Three candidates. None may need the network at analysis time.
 recursive-descent parser in Wiz whose rows used tree-sitter-c-sharp's vocabulary, behind
 `Scry.Cst`); it was replaced by B in the same PR:
 
-* `native/tree-sitter-c-sharp/` is the upstream generated `parser.c` + `scanner.c` of
-  tag v0.23.5 (`native/README.md`: licence, commit, hash). `parser.c` is 29.7 MB on disk,
-  about 1.3 MB compressed in git, and compiles at `-O2` in about 1.5 s. It was not
-  regenerated: the copy came from the Nix binary cache's source of that tag.
+* tree-sitter-c-sharp is the upstream generated `parser.c` + `scanner.c` of tag v0.23.5
+  (`native/README.md`: licence, commit, hash). Generated code is not committed, so
+  `flake.nix` fetches it (`fetchFromGitHub`, pinned commit and hash) and builds it with
+  the shim and the vendored runtime as `.#scry-native` (pushed to Cachix). A native scry
+  build compiles it through the uncommitted out-link `native/tree-sitter-c-sharp`
+  (`nix build .#tree-sitter-c-sharp -o scry/native/tree-sitter-c-sharp`). `parser.c` is
+  29.7 MB and compiles at `-O2` in about 1.5 s; it is not regenerated.
 * `ts_shim.c`'s `scry_parse` takes `"c_sharp"`; `Scry.Native.parseFile` picks the
   language by extension, so `scry-cst FILE.cs` spills a C# store.
 * `Scry.CsCst` is the adapter: the store's view as the `Scry.Cst` the lowering reads,
@@ -182,7 +186,7 @@ Total ≈ 4 weeks, in line with §4.8.
 
 | file | contents |
 |---|---|
-| `scry/native/tree-sitter-c-sharp/` | the vendored grammar (v0.23.5, MIT) |
+| `flake.nix` (`tree-sitter-c-sharp`, `scry-native`) | the fetched grammar (v0.23.5, MIT) and the Nix build of the native parse library; `scry/native/tree-sitter-c-sharp` is its uncommitted out-link |
 | `scry/native/ts_shim.c`, `scry/src/Scry/Native.wiz` | `scry_parse "c_sharp"`; `languageOf` picks C# for `*.cs`; `toCstStoreIn` records the spill's language |
 | `scry/tools/CstMain.wiz` | `scry-cst FILE.cs` spills a C# store (refuses a tree with `ERROR`/`MISSING` nodes, as for C) |
 | `scry/src/Scry/CsCst.wiz` | `Scry.Cs.ofStore` (store → the lowering's `Scry.Cst`, with the normalised fields), `Scry.Cs.renderSpill` (S-expression golden renderer) |
@@ -200,6 +204,13 @@ pre-existing `__isoc23_strtol` glibc/gmp mismatch). The freshness case fails whe
 spill's root does not span its `.cs` text. Goldens are regenerated with
 `SCRY_CS_WRITE=1 tests =scry-csharp`, which writes the files **and fails**, so a new
 golden is always reviewed in the diff.
+
+The spills are tool output, but they stay checked in as small goldens (9 files, 70 KB):
+the test groups run Wiz in the Lean interpreter, which can't call the native shim, and
+neither the `.#tests` closure nor CI builds `scry-cst` (it needs the out-link, a C
+compile of the grammar and a `wiz build` of `CstMain`). This is the same arrangement as
+`scry-c2wil`'s spills. The fetched `src/` is byte-identical to the copy the spills were
+generated from, so they are current.
 
 Known approximations in slice 1 (all listed in `CsLower`'s module doc): `X.Y.M()` where
 `X` is a type and `Y` a static property (`Console.Error.WriteLine`) resolves as a type

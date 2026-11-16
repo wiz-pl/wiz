@@ -4,8 +4,8 @@ import Tests.Harness
 /-!
 # Tests for scry's C# frontend (`Scry.CsCst`, `Scry.CsLower`)
 
-The design is `scry/CSHARP.md`. C# is parsed by the vendored **tree-sitter-c-sharp**
-(`scry/native/README.md`) through the shim; every fixture under `scry/corpus/csharp/`
+The design is `scry/CSHARP.md`. C# is parsed by **tree-sitter-c-sharp** (fetched by Nix,
+`scry/native/README.md`) through the shim; every fixture under `scry/corpus/csharp/`
 has its checked-in `scry-cst` spill next to it (`FILE.cs` → `FILE.cst`, regenerated with
 `scry-cst FILE.cs > FILE.cst`), so the tests need no native build, like `scry-c2wil`.
 
