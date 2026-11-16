@@ -1,0 +1,142 @@
+import IO
+import Session
+import SessionDirect
+/-!
+Direct-style sessions over finite protocols (docs/stages/25-concurrency.md, 25i):
+ping-pong, a calculator server, and a stream whose length is sent first. Compiled,
+`main` prints `42`, `[7, 12, 8]`, `5050` and `2`; each child thread runs on its own end.
+-/
+
+-- ## Ping-pong: send a number, get its successor back
+
+def PingPong : Proto := .send Nat (fun _ => .recv Nat (fun _ => .done))
+
+def ponger (1 c : Chan (Proto.dual PingPong)) : IO Unit := do1
+  (n, c) ⇐ Chan.recvD c;
+  c ⇐ Chan.sendD c (n + 1);
+  Chan.closeD c
+
+def pinger (n : Nat) : IO Nat := do1
+  c ⇐ Chan.forkD PingPong ponger;
+  c ⇐ Chan.sendD c n;
+  (m, c) ⇐ Chan.recvD c;
+  Chan.closeD c;
+  IO.pure m
+
+-- ## A calculator: the operation decides how many arguments follow
+
+inductive Op where
+  | add
+  | mul
+  | double
+
+/-- The arguments of an operation, then `k`. -/
+def Op.args (k : Proto) : Op → Proto
+  | .add => .send Nat (fun _ => .send Nat (fun _ => k))
+  | .mul => .send Nat (fun _ => .send Nat (fun _ => k))
+  | .double => .send Nat (fun _ => k)
+
+/-- One request: an operation, its arguments, and the answer back. -/
+def Calc : Proto := .send Op (fun op => Op.args (.recv Nat (fun _ => .done)) op)
+
+def answer (1 c : Chan (Proto.dual (.recv Nat (fun _ => .done)))) (r : Nat) : IO Unit := do1
+  c ⇐ Chan.sendD c r;
+  Chan.closeD c
+
+/-- The server side of one operation's arguments. -/
+def serveOp : (op : Op) → (1 c : Chan (Proto.dual (Op.args (.recv Nat (fun _ => .done)) op))) → IO Unit
+  | .add => fun c => do1
+      (x, c) ⇐ Chan.recvD c;
+      (y, c) ⇐ Chan.recvD c;
+      answer c (x + y)
+  | .mul => fun c => do1
+      (x, c) ⇐ Chan.recvD c;
+      (y, c) ⇐ Chan.recvD c;
+      answer c (x * y)
+  | .double => fun c => do1
+      (x, c) ⇐ Chan.recvD c;
+      answer c (x + x)
+
+def calcServer (1 c : Chan (Proto.dual Calc)) : IO Unit := do1
+  (op, c) ⇐ Chan.recvD c;
+  serveOp op c
+
+def ask (1 c : Chan (.recv Nat (fun _ => .done))) : IO Nat := do1
+  (r, c) ⇐ Chan.recvD c;
+  Chan.closeD c;
+  IO.pure r
+
+/-- The client side of one operation's arguments. -/
+def sendArgs (x y : Nat) : (op : Op) → (1 c : Chan (Op.args (.recv Nat (fun _ => .done)) op)) → IO Nat
+  | .add => fun c => do1
+      c ⇐ Chan.sendD c x;
+      c ⇐ Chan.sendD c y;
+      ask c
+  | .mul => fun c => do1
+      c ⇐ Chan.sendD c x;
+      c ⇐ Chan.sendD c y;
+      ask c
+  | .double => fun c => do1
+      c ⇐ Chan.sendD c x;
+      ask c
+
+/-- A client: one server thread per request. -/
+def calc2 (op : Op) (x y : Nat) : IO Nat := do1
+  c ⇐ Chan.forkD Calc calcServer;
+  c ⇐ Chan.sendD c op;
+  sendArgs x y op c
+
+-- ## A stream of known length: send `n`, then `n` numbers, get the sum back
+
+def sendMany (k : Proto) : Nat → Proto
+  | .zero => k
+  | .succ n => .send Nat (fun _ => sendMany k n)
+def Sum : Proto := .send Nat (fun n => sendMany (.recv Nat (fun _ => .done)) n)
+
+def sumMany : (n : Nat) → (acc : Nat) →
+    (1 c : Chan (Proto.dual (sendMany (.recv Nat (fun _ => .done)) n))) → IO Unit
+  | .zero, acc => fun c => answer c acc
+  | .succ n, acc => fun c => do1
+      (x, c) ⇐ Chan.recvD c;
+      sumMany n (acc + x) c
+
+def summer (1 c : Chan (Proto.dual Sum)) : IO Unit := do1
+  (n, c) ⇐ Chan.recvD c;
+  sumMany n 0 c
+
+def streamOut : (n : Nat) → (1 c : Chan (sendMany (.recv Nat (fun _ => .done)) n)) → IO Nat
+  | .zero => fun c => ask c
+  | .succ n => fun c => do1
+      c ⇐ Chan.sendD c (n + 1);
+      streamOut n c
+
+def sumTo (n : Nat) : IO Nat := do1
+  c ⇐ Chan.forkD Sum summer;
+  c ⇐ Chan.sendD c n;
+  streamOut n c
+
+-- ## The two styles on one channel: a CPS server (`Proc.run`) and a direct client
+
+def pongProc : Proc Unit (Proto.dual PingPong) := fun n => (n + 1, ())
+def pingMixed (n : Nat) : IO Nat := do1
+  c ⇐ Chan.forkD PingPong (fun c => Proc.run (Proto.dual PingPong) pongProc c);
+  c ⇐ Chan.sendD c n;
+  (m, c) ⇐ Chan.recvD c;
+  Chan.closeD c;
+  IO.pure m
+
+def show3 (x y z : Nat) : String :=
+  String.append "[" (String.append (Nat.toString x) (String.append ", "
+    (String.append (Nat.toString y) (String.append ", " (String.append (Nat.toString z) "]")))))
+
+def main : IO Unit := do1
+  a ← pinger 41;
+  IO.println (Nat.toString a);
+  x ← calc2 .add 3 4;
+  y ← calc2 .mul 3 4;
+  z ← calc2 .double 4 0;
+  IO.println (show3 x y z);
+  s ← sumTo 100;
+  IO.println (Nat.toString s);
+  b ← pingMixed 1;
+  IO.println (Nat.toString b)
