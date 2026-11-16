@@ -1,0 +1,13 @@
+-- The self-hosted compiler's entry point (stage 23e). The command line is
+-- `selfhost/Cli.wiz` (`dispatch`: `check`/`build`/`run`/`eval`, or, with no subcommand,
+-- the one-shot tool that reads `input.wiz` and prints C).
+--
+-- `main` is a module of its own, named as the frontend's root module (`Main`), so the
+-- program is built from checked-in source only: the tables are `selfhost/Tables.wiz`,
+-- the driver is `selfhost/Cli.wiz`, and this file is last. `Wiz/Selfhost.compilerSource`
+-- puts the two build identity values (`wizVersion`, `toolchainId`) before it; they are
+-- the release string and a hash of these sources, i.e. data a build must pass in, not
+-- Wiz code.
+def main : IO Unit := do
+  args ← IO.args;
+  dispatch args

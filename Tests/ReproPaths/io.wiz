@@ -1,0 +1,17 @@
+-- A path-reproducibility corpus program: IO and a checked-in data file.
+import IO
+
+def fib : Nat → Nat
+  | .zero => 0
+  | .succ .zero => 1
+  | .succ n => fib n + fib n
+
+def slurp : String → IO Nat := fun path => do
+  s ← IO.readFile path;
+  IO.pure (Bytes.size (Bytes.ofString s))
+
+def main : IO Unit := do
+  IO.print "repro: ";
+  IO.println (Nat.toString (fib 10));
+  b ← slurp "data/hello.txt";
+  IO.println (Nat.toString b)

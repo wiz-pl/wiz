@@ -1012,7 +1012,7 @@ made both kernels loop (Status.md, D1). Regularity is now off in both kernels
 
 The Prelude declares
 
-```
+```wiz no-check
 axiom castRefl.{u} {0 A : Type u} (0 e : A = A) (0 a : A) : (cast e a : A) = a
 ```
 

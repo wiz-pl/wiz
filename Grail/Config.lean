@@ -75,11 +75,26 @@ structure Dep where
   rev : String
   deriving Repr, Inhabited, BEq
 
+/-- (23m) A package from the registry: its name and version requirement -/
+structure Req where
+  name : String
+  req : String
+  deriving Repr, Inhabited, BEq
+
 structure Package where
   name : String
   targets : List Target
   settings : List (String × String)
   deps : List Dep := []
+  /-- (23m) this package's version ("" when it has none) -/
+  version : String := ""
+  /-- (23m) the toolchain it was tested with (a version requirement) -/
+  toolchain : String := ""
+  /-- (23m) registry dependencies -/
+  requires : List Req := []
+  /-- (lock v3, R37) machine-local overrides from `grail.local.wiz`:
+  `Package.override NAME PATH` takes `NAME` from `PATH` instead of the registry -/
+  overrides : List (String × String) := []
   deriving Repr, Inhabited
 
 open Cache in
@@ -137,7 +152,13 @@ def decodeCommand (name : String) (tool : Sx) (steps : Sx) : Except String Comma
 
 open Cache in
 def decodePackage (x : Sx) : Except String Package := do
-  let .l #[.a "package", .a name, ts, ss, ds] := x | throw "expected (package name targets settings deps)"
+  -- (23m) the last three fields (version, toolchain, requires) are optional, so a
+  -- manifest written for an older grail still decodes
+  let .l xs := x | throw "expected (package name targets settings deps)"
+  let (name, ts, ss, ds, extra) ← match xs with
+    | #[.a "package", .a name, ts, ss, ds] => pure (name, ts, ss, ds, #[])
+    | #[.a "package", .a name, ts, ss, ds, v, tc, rs] => pure (name, ts, ss, ds, #[v, tc, rs])
+    | _ => throw "expected (package name targets settings deps [version toolchain requires])"
   let some ts := items? ts | throw "targets: expected a list"
   let targets ← ts.toList.drop 1 |>.mapM fun
     | .l #[.a "lib", .a n, .a r] => pure (Target.lib n r)
@@ -156,7 +177,16 @@ def decodePackage (x : Sx) : Except String Package := do
   let deps ← ds.toList.drop 1 |>.mapM fun
     | .l #[.a "dep", .a name, .a url, .a rev] => pure { name, url, rev : Dep }
     | d => throw s!"bad dependency {d.render}"
-  pure { name, targets, settings := ← decodeSettings ss, deps }
+  let (version, toolchain, requires) ← match extra with
+    | #[] => pure ("", "", [])
+    | #[.a v, .a tc, rs] =>
+      let some rs := items? rs | throw "requires: expected a list"
+      let requires ← rs.toList.drop 1 |>.mapM fun
+        | .l #[.a "require", .a n, .a r] => pure { name := n, req := r : Req }
+        | r => throw s!"bad requirement {r.render}"
+      pure (v, tc, requires)
+    | _ => throw "expected (package name targets settings deps version toolchain requires)"
+  pure { name, targets, settings := ← decodeSettings ss, deps, version, toolchain, requires }
 
 /-- Evaluate `expr` (a `String`) in the build file `path`. -/
 def evalBuildFile (tc : Toolchain) (salt : UInt64) (roots : List System.FilePath) (path : System.FilePath)
@@ -170,6 +200,12 @@ def evalBuildFile (tc : Toolchain) (salt : UInt64) (roots : List System.FilePath
   | .ok str => match Cache.Sx.parse str with
     | some x => pure (.ok x)
     | none => pure (.error s!"{path}: could not read {str}")
+
+/-- `grail.local.wiz` names an override with `Package.override NAME PATH`, which renders as
+the setting `(set "override NAME" "PATH")`. These are not toolchain settings: they are
+removed from the settings list and recorded on the package (R37). -/
+def isOverrideKey (k : String) : Bool := k.startsWith "override "
+def overrideName (k : String) : String := (k.drop "override ".length).toString
 
 /-- Read `grail.wiz` (and `grail.local.wiz`, if there is one) in `dir`. -/
 def readConfig (tc : Toolchain) (salt : UInt64) (std dir : System.FilePath) :
@@ -188,6 +224,55 @@ def readConfig (tc : Toolchain) (salt : UInt64) (std dir : System.FilePath) :
   | .error e => pure (.error e)
   | .ok x => match decodeSettings x with
     | .error e => pure (.error s!"{localFile}: {e}")
-    | .ok ss => pure (.ok (pkg, ss))
+    | .ok ss =>
+      -- (R37) overrides are machine-local and uncommitted, like the toolchain settings;
+      -- they are recorded on the package and in the lock, never treated as toolchain keys
+      let overrides := ss.filterMap fun (k, v) =>
+        if isOverrideKey k then some (overrideName k, v) else none
+      pure (.ok ({ pkg with overrides }, ss.filter fun (k, _) => !isOverrideKey k))
+
+/-- (23m) The manifest of a `grail-index` repository (`index.wiz`): the index's name,
+its format, and the packages it publishes. `Index.render` turns it into
+`(index (name "…") (format N) (package "…") …)`, which `grail index check` compares
+with the static `index/*.sexpr` files. Keeping it Wiz code means the index repository
+is described by the same kind of program as a package. -/
+structure IndexManifest where
+  name : String
+  format : Nat
+  packages : List String
+  deriving Repr, Inhabited, BEq
+
+open Cache in
+/-- Decode `Index.render`'s output: `(index (name S) (format N) (package P) …)`. -/
+def decodeIndexManifest (x : Sx) : Except String IndexManifest := do
+  let .l xs := x | throw s!"expected (index …), got {x.render}"
+  match xs.toList with
+  | .a "index" :: fields =>
+    let mut m : IndexManifest := { name := "", format := 0, packages := [] }
+    for f in fields do
+      match f with
+      | .l #[.a "name", .a s] => m := { m with name := s }
+      | .l #[.a "format", .a n] =>
+        match n.toNat? with
+        | some k => m := { m with format := k }
+        | none => throw s!"format {n} is not a number"
+      | .l #[.a "package", .a p] => m := { m with packages := m.packages ++ [p] }
+      | _ => throw s!"unknown field {f.render} (expected (name …), (format …), (package …))"
+    if m.name.isEmpty then throw "no (name …)"
+    if m.format == 0 then throw "no (format N)"
+    pure m
+  | _ => throw s!"expected (index …), got {x.render}"
+
+/-- Read the index repository's `index.wiz`, if it has one. It is evaluated like a
+build file (`evalBuildFile`): the file imports `Grail` and defines `index : Index`. -/
+def readIndexManifest (tc : Toolchain) (salt : UInt64) (std dir : System.FilePath) :
+    IO (Except String (Option IndexManifest)) := do
+  let file := dir / "index.wiz"
+  if !(← file.pathExists) then return .ok none
+  match ← evalBuildFile tc salt [std, dir] file "Index.render index" with
+  | .error e => pure (.error e)
+  | .ok x => match decodeIndexManifest x with
+    | .error e => pure (.error s!"{file}: {e}")
+    | .ok m => pure (.ok (some m))
 
 end Grail
