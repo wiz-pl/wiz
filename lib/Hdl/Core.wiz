@@ -480,7 +480,7 @@ class ShareLet (A B : Type) where
   share : A → (A → B) → B
 
 /-- Auto-share for hardware code: a `let` of a signal is `Hw.share`. -/
-instance {r : HwTy → Type} [Hw r] {ω a b : HwTy} : ShareLet (r a) (r b) where
+instance {0 r : HwTy → Type} [Hw r] {ω a b : HwTy} : ShareLet (r a) (r b) where
   share := fun x f => Hw.share x f
 
 /-- A boolean as one bit: `.true` is 1, `.false` is 0. -/
