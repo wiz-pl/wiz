@@ -387,7 +387,8 @@ structure Scry.DataDep where
   var : Nat
 
 def Scry.memDep (d : Scry.DataDep) (ds : List Scry.DataDep) : Bool :=
-  List.any (fun e => Bool.and (Nat.beq d.from e.from) (Nat.beq d.to e.to)) ds
+  List.any (fun e => Bool.and (Nat.beq d.from e.from)
+    (Bool.and (Nat.beq d.to e.to) (Nat.beq d.var e.var))) ds
 
 def Scry.insertDep (d : Scry.DataDep) (ds : List Scry.DataDep) : List Scry.DataDep :=
   match Scry.memDep d ds with

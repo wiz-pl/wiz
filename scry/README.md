@@ -146,17 +146,21 @@ through two allocation sites is two sets), context sensitivity, and offsets past
 
 ## External function models
 
-`Scry.Models` is one table of libc/syscall effects: `source` (a written buffer or
-`getenv`'s result), `sink` (a command/format/length/size argument), `sanitise` (a policy
-sanitiser's result or in-place clean), `copy`/`copyArgs` (`strcpy`, `sprintf`'s formatted
-destination), `alloc`/`free` (`malloc`/`calloc`/`realloc`/`free`) and the explicit
+`Scry.Models` is one table of libc/syscall effects: `source` (a written buffer,
+`getenv`'s result, `main`'s `argv`, a `getopt` option), `sink` (a command/format/length/
+size argument), `sanitise` (a policy sanitiser's result or in-place clean),
+`copy`/`copyArgs` (`strcpy`, `sprintf`'s formatted destination, `asprintf`'s output
+pointer), `alloc`/`free` (`malloc`/`calloc`/`realloc`/`free`) and the explicit
 `unknown` fallback. A policy sanitiser is only applied when the pack names it
 (`RulePack.trustsSanitiser`), so a pack that omits `sanitize` keeps the no-sanitiser
 behaviour. The rule pack's own lines are applied first; model facts are a
 deduplicated fallback, so `system` is not reported twice. A model sink makes the
 `exec*` family's **variadic argv** a command sink (argument 3 of
-`execl("/bin/sh", "sh", "-c", cmd)`, not only the path), `sprintf`'s format argument a
-format-string sink, and `sprintf`'s formatted arguments a copy into the destination.
+`execl("/bin/sh", "sh", "-c", cmd)`, not only the path), the `v*printf`/`syslog`/
+`dprintf`/`asprintf` formats format-string sinks, and `sprintf`/`asprintf`'s formatted
+arguments a copy into the destination (a tainted `va_list` contributes to the
+destination too). `strcpy-overflow` is a `note`/hint: it cannot distinguish a
+fixed-size overflow from a buffer whose capacity is unknown.
 
 An external call with a pointer result or argument and no model is an explicit
 `unmodelled-external` warning at the call point; its pointer result stays `Loc.unknown`,
@@ -506,3 +510,22 @@ A concolic-witness slot is reserved for the future S6a slice
 `scry-workflow-witness/1` document only when its `authority` is L2/L3 and it is
 `validated`, uses its `input` as the deterministic input, and records its path condition
 and model. The prototype does **not** run symbolic execution.
+
+## Real CVE corpus (opt-in)
+
+`bench/cases/cve-*/` holds twelve reduced reproducers of historical CVEs (CWE-78/134/22/
+416/476/190/787/125), each with its upstream vulnerable revision, licence and expected
+result in `case.json`. `scripts/cve-bench.sh` compiles each one with a plain C compiler,
+runs `scry taint` per case with `--timeout`/`--max-nodes`, and records wall time, peak
+RSS, expected/matched findings and extras. It is **opt-in only**: it is not part of
+`scry bench`, `grail test`, the fast gate or CI, and one case takes about a minute.
+
+```sh
+cd scry
+scripts/cve-bench.sh                       # build/cve/summary.{json,md}
+scripts/cve-bench.sh --case cve-2020-1752  # one case
+```
+
+The checked-in table, the honest precision/recall (0/6 in-scope CVEs detected today),
+the per-case miss reasons and the top analysis gaps are in `bench/cve.md`. Treat the
+synthetic `scry bench` rates as a regression corpus, not as real-world recall.

@@ -213,6 +213,23 @@ def Scry.sourceFread : Scry.FnModel :=
   Scry.FnModel.mk "fread" "libc" (List.cons (.source (.arg 0)) .nil)
     "fills buffer argument 0"
 
+/-- `main`'s second parameter is the process argument vector. The values in it are
+chosen by whoever started the program (a shell, `execve` from another process, a
+service manager), so they are environment-dependent inputs in the same sense as
+`getenv`. This model is applied at the **entry** of `main`, not at a call: see
+`Scry.Models.entrySourceArgs`. -/
+def Scry.sourceMain : Scry.FnModel :=
+  Scry.FnModel.mk "main" "entry" (List.cons (.source (.arg 1)) .nil)
+    "argv is the process argument vector: environment-dependent input"
+
+def Scry.sourceGetopt : Scry.FnModel :=
+  Scry.FnModel.mk "getopt" "libc" (List.cons (.source .result) .nil)
+    "the option character comes from the command line (optarg is not modelled)"
+
+def Scry.sourceGetoptLong : Scry.FnModel :=
+  Scry.FnModel.mk "getopt_long" "libc" (List.cons (.source .result) .nil)
+    "the option value comes from the command line (optarg is not modelled)"
+
 def Scry.sinkSystem : Scry.FnModel :=
   Scry.FnModel.mk "system" "libc" (List.cons (.sink 0 .command) .nil)
     "argument 0 is passed to the shell"
@@ -307,23 +324,53 @@ def Scry.sinkVfprintf : Scry.FnModel :=
 
 def Scry.sinkVsprintf : Scry.FnModel :=
   Scry.FnModel.mk "vsprintf" "libc"
-    (List.cons (.sink 1 .format) (List.cons (.copyArgs 0 1) .nil))
-    "argument 1 is the format; the formatted arguments are copied into the destination"
+    (List.cons (.sink 1 .format)
+      (List.cons (.copy 0 2) (List.cons (.copyArgs 0 1) .nil)))
+    "argument 1 is the format; the va_list argument 2 is copied into the destination"
 
 def Scry.sinkVsnprintf : Scry.FnModel :=
   Scry.FnModel.mk "vsnprintf" "libc"
     (List.cons (.sink 1 .length)
       (List.cons (.sink 2 .format)
-        (List.cons (.copyArgs 0 2) .nil)))
-    "argument 1 is the bound, argument 2 the format; the formatted arguments are copied"
+        (List.cons (.copy 0 3) (List.cons (.copyArgs 0 2) .nil))))
+    "argument 1 is the bound, argument 2 the format; the va_list argument 3 is copied"
 
 def Scry.sinkSyslog : Scry.FnModel :=
   Scry.FnModel.mk "syslog" "libc" (List.cons (.sink 1 .format) .nil)
     "argument 1 is the format string"
 
+def Scry.sinkVsyslog : Scry.FnModel :=
+  Scry.FnModel.mk "vsyslog" "libc" (List.cons (.sink 1 .format) .nil)
+    "argument 1 is the format string; the va_list is argument 2"
+
 def Scry.sinkDprintf : Scry.FnModel :=
   Scry.FnModel.mk "dprintf" "libc" (List.cons (.sink 1 .format) .nil)
     "argument 1 is the format string"
+
+def Scry.sinkVdprintf : Scry.FnModel :=
+  Scry.FnModel.mk "vdprintf" "libc" (List.cons (.sink 1 .format) .nil)
+    "argument 1 is the format string; the va_list is argument 2"
+
+/-- `asprintf`/`easprintf` allocate a formatted result through argument 0. The
+formatted arguments (the format and every value after it) are copied into the
+object argument 0 points at, so a later load of the result carries the taint. -/
+def Scry.sinkAsprintf : Scry.FnModel :=
+  Scry.FnModel.mk "asprintf" "libc"
+    (List.cons (.sink 1 .format) (List.cons (.copyArgs 0 1) .nil))
+    "argument 1 is the format; the formatted result is stored through argument 0"
+
+def Scry.sinkEasprintf : Scry.FnModel :=
+  Scry.FnModel.mk "easprintf" "libc"
+    (List.cons (.sink 1 .format) (List.cons (.copyArgs 0 1) .nil))
+    "argument 1 is the format; the formatted result is stored through argument 0"
+
+/-- `vasprintf` is `asprintf` with a `va_list`: the list itself is also a source of
+the formatted result, so a tainted list reaches the destination. -/
+def Scry.sinkVasprintf : Scry.FnModel :=
+  Scry.FnModel.mk "vasprintf" "libc"
+    (List.cons (.sink 1 .format)
+      (List.cons (.copy 0 3) (List.cons (.copyArgs 0 1) .nil)))
+    "argument 1 is the format; the va_list argument 3 is copied into argument 0's object"
 
 def Scry.copyStrcpy : Scry.FnModel :=
   Scry.FnModel.mk "strcpy" "libc" (List.cons (.copy 0 1) .nil)
@@ -425,6 +472,24 @@ def Scry.sanClampSize : Scry.FnModel :=
   Scry.FnModel.mk "clamp_size" "policy" (List.cons (.sanitise .result) .nil)
     "returns a size clamped to a bound"
 
+-- These three are **bounds/path** sanitisers. The model effect is opt-in per pack,
+-- but it is not scoped by rule: a pack that names `strlcpy` also trusts it for the
+-- command/format rules. The default pack does not name them; use them only where a
+-- length/bounds rule owns the finding. `snprintf` truncation is deliberately absent.
+
+def Scry.sanRealpath : Scry.FnModel :=
+  Scry.FnModel.mk "realpath" "policy"
+    (List.cons (.sanitise .result) (List.cons (.sanitise (.arg 1)) .nil))
+    "canonicalises a path; a path-traversal sanitiser, not a shell/format sanitiser"
+
+def Scry.sanStrlcpy : Scry.FnModel :=
+  Scry.FnModel.mk "strlcpy" "policy" (List.cons (.sanitise (.arg 0)) .nil)
+    "bounds the destination write; a length/bounds sanitiser only"
+
+def Scry.sanStrlcat : Scry.FnModel :=
+  Scry.FnModel.mk "strlcat" "policy" (List.cons (.sanitise (.arg 0)) .nil)
+    "bounds the destination append; a length/bounds sanitiser only"
+
 -- Pure/read-only calls: an empty effect list is a positive model, not `unknown`.
 -- It says "this call does not copy attacker data, write memory or allocate"; the
 -- analysis still keeps the argument's own register untainted (nothing is laundered).
@@ -433,24 +498,30 @@ def Scry.pureName (name : String) : Scry.FnModel :=
   Scry.FnModel.mk name "pure" .nil "modelled as pure: no taint, memory or allocation effect"
 
 def Scry.pureModels : List Scry.FnModel :=
-  List.map Scry.pureName
-    [ "strlen", "strnlen", "strcmp", "strncmp", "strchr", "strrchr", "strstr"
-    , "memcmp", "memchr", "atoi", "atol", "strtol", "strtoul", "strtod", "abs"
-    , "isdigit", "isspace", "isalpha", "toupper", "tolower", "puts", "fputs"
-    , "fwrite", "fflush", "close", "perror" ]
+  List.append
+    (List.map Scry.pureName
+      [ "strlen", "strnlen", "strcmp", "strncmp", "strchr", "strrchr", "strstr"
+      , "memcmp", "memchr", "strspn", "strcspn", "strpbrk", "atoi" ])
+    (List.map Scry.pureName
+      [ "atol", "strtol", "strtoul", "strtod", "abs", "isdigit", "isspace"
+      , "isalpha", "toupper", "tolower", "puts", "fputs", "fwrite" ])
+    ++ List.map Scry.pureName [ "fflush", "close", "perror" ]
+
 
 def Scry.libcModels : List Scry.FnModel :=
-  [ Scry.sourceGetenv
+  List.append (List.append (List.append ([ Scry.sourceGetenv
   , Scry.sourceRead
   , Scry.sourceRecv
   , Scry.sourceFgets
   , Scry.sourceGetline
   , Scry.sourceFread
+  , Scry.sourceMain
+  , Scry.sourceGetopt
+  , Scry.sourceGetoptLong
   , Scry.sinkSystem
   , Scry.sinkPopen
   , Scry.sinkExec
-  , Scry.sinkExeclp
-  , Scry.sinkExecle
+  , Scry.sinkExeclp ]) ([ Scry.sinkExecle
   , Scry.sinkExecv
   , Scry.sinkExecvp
   , Scry.sinkExecvpe
@@ -462,16 +533,19 @@ def Scry.libcModels : List Scry.FnModel :=
   , Scry.sinkSprintf
   , Scry.sinkSnprintf
   , Scry.sinkVprintf
-  , Scry.sinkVfprintf
-  , Scry.sinkVsprintf
+  , Scry.sinkVfprintf ])) ([ Scry.sinkVsprintf
   , Scry.sinkVsnprintf
   , Scry.sinkSyslog
   , Scry.sinkDprintf
+  , Scry.sinkVsyslog
+  , Scry.sinkVdprintf
+  , Scry.sinkAsprintf
+  , Scry.sinkEasprintf
+  , Scry.sinkVasprintf
   , Scry.copyStrcpy
   , Scry.copyStrncpy
   , Scry.copyStrcat
-  , Scry.copyStrncat
-  , Scry.copyStpcpy
+  , Scry.copyStrncat ])) ([ Scry.copyStpcpy
   , Scry.copyStrlcpy
   , Scry.copyStrlcat
   , Scry.copyMemcpy
@@ -479,11 +553,10 @@ def Scry.libcModels : List Scry.FnModel :=
   , Scry.allocMalloc
   , Scry.allocCalloc
   , Scry.allocRealloc
-  , Scry.freeFree
-  ]
+  , Scry.freeFree ])
 
 def Scry.policyModels : List Scry.FnModel :=
-  [ Scry.sanEscapeShell
+    [ Scry.sanEscapeShell
   , Scry.sanShellescape
   , Scry.sanQuoteArg
   , Scry.sanSanitize
@@ -493,7 +566,9 @@ def Scry.policyModels : List Scry.FnModel :=
   , Scry.sanCheckedSize
   , Scry.sanClampLen
   , Scry.sanClampSize
-  ]
+  , Scry.sanRealpath
+  , Scry.sanStrlcpy
+  , Scry.sanStrlcat ]
 
 def Scry.models : List Scry.FnModel :=
   List.append Scry.libcModels (List.append Scry.policyModels Scry.pureModels)
@@ -529,6 +604,14 @@ def Scry.sansOf (name : String) : List Scry.ArgRef :=
 def Scry.sinksOf (name : String) : List (Nat × Scry.SinkClass) :=
   Scry.modelSinkArgs (Scry.modelFor name)
 
+/-- Argument positions a model marks as sources of the **function itself** rather than of
+a call's result. Only `main` (argv) uses this today: a source that arrives at a program
+entry has no call site, so the analysis seeds it at the entry parameter instead. -/
+def Scry.entrySourceArgs (name : String) : List Nat :=
+  Scry.modelFlat (fun ref => match ref with
+    | .arg k => List.cons k .nil
+    | .result => .nil) (Scry.sourcesOf name)
+
 def Scry.copyPairsOf (name : String) (arity : Nat) : List (Nat × Nat) :=
   Scry.modelCopyPairs (Scry.modelFor name) arity
 
@@ -553,6 +636,8 @@ def Scry.Models.sourcesOf (name : String) : List Scry.ArgRef := Scry.sourcesOf n
 def Scry.Models.sansOf (name : String) : List Scry.ArgRef := Scry.sansOf name
 
 def Scry.Models.sinksOf (name : String) : List (Nat × Scry.SinkClass) := Scry.sinksOf name
+
+def Scry.Models.entrySourceArgs (name : String) : List Nat := Scry.entrySourceArgs name
 
 def Scry.Models.copyPairsOf (name : String) (arity : Nat) : List (Nat × Nat) :=
   Scry.copyPairsOf name arity

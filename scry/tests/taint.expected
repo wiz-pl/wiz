@@ -146,6 +146,21 @@ model-realloc: no use-after-free from realloc: ok
 model-sanitise: zero findings: ok
 model-unknown: zero findings: ok
 model-unknown: an explicit unmodelled-external warning: ok
+model-argv: one finding: ok
+model-argv: checked: ok
+model-argv: rule format-string: ok
+model-argv: sink function main: ok
+model-argv: sink span known: ok
+model-valist: one finding: ok
+model-valist: checked: ok
+model-valist: rule format-string: ok
+model-valist: sink function static:v: ok
+model-valist: sink span known: ok
+model-asprintf: one finding: ok
+model-asprintf: checked: ok
+model-asprintf: rule format-string: ok
+model-asprintf: sink function main: ok
+model-asprintf: sink span known: ok
 mem-unknown: one finding (the flow is kept): ok
 mem-unknown: two unknown-memory warnings and one explicit unmodelled call: ok
 mem-unknown: an unknown location: ok

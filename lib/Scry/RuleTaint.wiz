@@ -555,7 +555,14 @@ def Scry.prepareFuncWith (fn : Wil.Func) (pack0 : Scry.RulePack) (pt : Scry.PtRe
   let g := Scry.flatten fn;
   let taintRules := Scry.RulePack.taintRules pack;
   let forbidden := Scry.RulePack.forbiddenRules pack;
-  let paramDefs := List.map (fun p => (Scry.entryNode g, p.2)) (Scry.paramMap 0 fn.params);
+  let paramLayout := Scry.paramMap 0 fn.params;
+  let paramDefs := List.map (fun p => (Scry.entryNode g, p.2)) paramLayout;
+  /-- A model source attached to the function name (`main`'s argv) arrives at the
+  entry, not at a call, so seed the parameter register there. -/
+  let entrySrcs := Scry.concatLists (fun k =>
+    match Scry.paramVarAt paramLayout k with
+    | .some v => List.cons (Scry.entryNode g, v) .nil
+    | .none => .nil) (Scry.Models.entrySourceArgs fn.name);
   let scan := Scry.concatLists (fun n =>
     match Scry.nodeStmt g n with
     | .none => .nil
@@ -591,7 +598,8 @@ def Scry.prepareFuncWith (fn : Wil.Func) (pack0 : Scry.RulePack) (pt : Scry.PtRe
   let info : Scry.FnInfo := { baseInfo with deps := List.append selfDeps baseInfo.deps };
   let entryFacts := Scry.entrySourceFacts (Scry.entryNode g)
     (Scry.paramMap 0 fn.params) entrySources;
-  let sources := List.append entryFacts (Scry.rulePackConcat (fun p => p.sources) scan);
+  let sources := List.append (Scry.dedupPairs (List.append entryFacts entrySrcs))
+    (Scry.rulePackConcat (fun p => p.sources) scan);
   let sans := Scry.rulePackConcat (fun p => p.sans) scan;
   let sinks := Scry.rulePackConcat (fun p => p.sinks) scan;
   let bads := Scry.rulePackConcat (fun p => p.bads) scan;

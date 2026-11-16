@@ -45,6 +45,11 @@ def Scry.demoPackText : String :=
   "  source getenv result\n" ++
   "  source recv result\n" ++
   "  source read arg 1\n" ++
+  "  source fgets arg 0\n" ++
+  "  source getline arg 0\n" ++
+  "  source fread arg 0\n" ++
+  "  source getopt result\n" ++
+  "  source getopt_long result\n" ++
   "  sanitise escape_shell result\n" ++
   "  sanitise shellescape result\n" ++
   "  sanitise sanitize arg 0\n" ++
@@ -52,9 +57,15 @@ def Scry.demoPackText : String :=
   "  sink popen arg 0\n" ++
   "  sink execl args\n" ++
   "  sink execlp args\n" ++
+  "  sink execle arg 0\n" ++
   "  sink execv arg 0\n" ++
+  "  sink execv arg 1\n" ++
   "  sink execvp arg 0\n" ++
+  "  sink execvp arg 1\n" ++
   "  sink execve arg 0\n" ++
+  "  sink execve arg 1\n" ++
+  "  sink execvpe arg 0\n" ++
+  "  sink execvpe arg 1\n" ++
   "  sink posix_spawn arg 1\n" ++
   "  sink posix_spawn arg 4\n" ++
   "  sink posix_spawnp arg 1\n" ++
@@ -66,9 +77,27 @@ def Scry.demoPackText : String :=
   "  message Attacker-controlled data is used as a format string\n" ++
   "  source getenv result\n" ++
   "  source recv result\n" ++
+  "  source read arg 1\n" ++
+  "  source fgets arg 0\n" ++
+  "  source getline arg 0\n" ++
+  "  source fread arg 0\n" ++
   "  sanitise escape_shell result\n" ++
+  "  sanitise sanitize_format result\n" ++
   "  sink printf arg 0\n" ++
   "  sink fprintf arg 1\n" ++
+  "  sink sprintf arg 1\n" ++
+  "  sink snprintf arg 2\n" ++
+  "  sink vprintf arg 0\n" ++
+  "  sink vfprintf arg 1\n" ++
+  "  sink vsprintf arg 1\n" ++
+  "  sink vsnprintf arg 2\n" ++
+  "  sink syslog arg 1\n" ++
+  "  sink vsyslog arg 1\n" ++
+  "  sink dprintf arg 1\n" ++
+  "  sink vdprintf arg 1\n" ++
+  "  sink asprintf arg 1\n" ++
+  "  sink vasprintf arg 1\n" ++
+  "  sink easprintf arg 1\n" ++
   "end\n" ++
   "rule gets-overflow\n" ++
   "  kind forbidden\n" ++
@@ -78,8 +107,8 @@ def Scry.demoPackText : String :=
   "end\n" ++
   "rule strcpy-overflow\n" ++
   "  kind forbidden\n" ++
-  "  severity warning\n" ++
-  "  message strcpy does not bound the copy; use strlcpy or a checked length\n" ++
+  "  severity note\n" ++
+  "  message hint, not a finding: unbounded strcpy/strcat; destination capacity unknown\n" ++
   "  call strcpy\n" ++
   "  call strcat\n" ++
   "end\n"
