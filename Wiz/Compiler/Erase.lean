@@ -418,7 +418,7 @@ which conversion ignores, so a type convertible to `Nat` (a copy of its declarat
 the `μ` written out) must get `Nat`'s representation (R3). The name is only a shortcut. -/
 def isNatTy (g : Globals R) (ty : Val R) : Bool :=
   match g.builtins.lookup "nat", whnf ty with
-  | some N, .mu _ I D _ _ hint =>
+  | some N, .mu _ I D _ _ hint _ =>
     (match hint with | some (T, _, _) => T == N | none => false) || natShaped g I D
   | _, _ => false
 
@@ -444,7 +444,7 @@ by the seal of a sealed type (a native representation needs `sealed`), never by 
 display name. -/
 def nativeTy? (g : Globals R) (ty : Val R) : Option (Name × ReprInfo) :=
   match whnf ty with
-  | .mu _ I _ _ _ _ =>
+  | .mu _ I _ _ _ _ _ =>
     match sealedIx? g I with
     | some T => (reprOf? g.builtins T).map (T, ·)
     | none => none
@@ -604,7 +604,7 @@ partial def quickType (ctx : Ctx R) (t : Term R) : TCM (VTy R) := do
     | .ulift _ _ A => pure A
     | _ => return (← infer { ctx with erased := true } t).1
   | .ecase _ m s _ => pure (Closure.inst g (.mk ctx.env m) (ctx.eval s))
-  | .ind _ _ _ _ P _ i x => pure (vApp g (vApp g (ctx.eval P) (ctx.eval i)) (ctx.eval x))
+  | .ind _ _ _ _ P _ i x _ => pure (vApp g (vApp g (ctx.eval P) (ctx.eval i)) (ctx.eval x))
   | _ => return (← infer { ctx with erased := true } t).1
 
 /-- **Exercise 5.1a.** Erase `t`, checking it against `ty`.
@@ -650,9 +650,9 @@ partial def eraseCheck (ctx : Ctx R) (t : Term R) (ty : VTy R) (inDesc : Bool :=
     if unboxedSigma g ctx.lvl ty then return a'
     let b' ← eraseCheck ctx b (ctx.instArg B a)
     return .obj 0 #[a', b']
-  | .con x, .mu l I D i s _ =>
+  | .con x, .mu l I D i s _ prop =>
     if let some (T, home) := nativeHome? g ty then throw (nativeHomeError T home)
-    let x' ← eraseCheck ctx x (vInterp g l I D (muFamilyAt l I D ((sizePred? s).getD .szInf)) i)
+    let x' ← eraseCheck ctx x (vInterp g l I D (muFamilyAt l I D ((sizePred? s).getD .szInf) prop) i prop)
     -- a native representation: the native constructor, applied to the runtime field
     if let some ri := reprOfTy? g ty then
       match flatCon g ctx D x x' with
@@ -802,10 +802,10 @@ partial def eraseInfer (ctx : Ctx R) (t : Term R) (known : Option (VTy R) := non
     | .cast A _ _ x => eraseCheck ctx x (ctx.eval A)
     | .absurd .. => pure (.prim .unreachable #[])
     -- eliminators: their function arguments are erased against the kernel's types
-    | .ind l I D v P m i x => do
+    | .ind l I D v P m i x prop => do
       let w := QuantitySyntax.explicitDefault
       let (vI, vD, vP) := (ctx.eval I, ctx.eval D, ctx.eval P)
-      let m' ← eraseCheck ctx m (indMethodTy g l v vI vD vP w)
+      let m' ← eraseCheck ctx m (indMethodTy g l v vI vD vP w prop)
       -- case analysis (the method ignores its hypotheses): don't compute them
       let isCases := match m with
         | .lam _ (.lam _ (.lam _ body)) => !(Wiz.IR.freeIdx' body).contains 0

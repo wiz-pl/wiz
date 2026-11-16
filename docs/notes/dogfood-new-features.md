@@ -22,7 +22,7 @@ stack that is not on master yet; the workstream starts only after that merges.
 | `include_str` | **after stack** | `wiz-notes/include-str.md`; selfhost parity not implemented. |
 | `wiz fmt` | **after stack** | `wiz-notes/wiz-fmt.md`; no `Wiz/Format.lean`. |
 | `wiz lint` | **after stack** | `wiz-notes/ward.md`; no `Wiz/Lint.lean`. |
-| `wiz repl`, `wiz test` | **roadmap** | Not on master and not on a branch; `wiz test` is a proposal only (`wiz-notes/name-candidates.md:31`). |
+| `wiz repl`, `wiz test-driver` | **now** | `Main.lean` (`replCmd`: `:type`, `:load`, `--prelude`; `testDriverCmd`); docs/stages/11-tooling.md, 11ac. The single-file `wiz test FILE` is still a proposal (`wiz-notes/name-candidates.md:31`). |
 | `ResultQ`/`ResultH`, q-variable fields | **after stack** | `wiz-notes/result-q.md`, `wiz-notes/qty-result-io.md`. `Result1`/`Result`/`Monad Result` are **now** (`lib/Region.wiz:106`, `lib/Result.wiz:34-44`). |
 | `PMap`/`PSet` | **after stack** | `wiz-notes/persistent-data.md` (`lib/PMap.wiz`). Not merged at the audit commit. |
 | `U64Map`, `StrMap`, `Intern`, `U32Array`/`U64Array`, `WordMap` | **now** | `lib/WordMap.wiz`, `lib/WordArray.wiz`, `lib/Intern.wiz`, `lib/Std.wiz`. |

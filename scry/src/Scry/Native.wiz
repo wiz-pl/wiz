@@ -71,6 +71,18 @@ extern "scry_field_name" Scry.Native.fieldName : ScryStore → Nat → String
 /-- tree-sitter's field id of compact field `i`. -/
 extern "scry_field_symbol" Scry.Native.fieldSymbol : ScryStore → Nat → Nat
 
+-- ## A hard wall-clock guard
+
+/-- Arm `SIGALRM` for `secs` (0 = disarm). The handler writes a fixed timeout
+message to stderr and exits 124, so `--timeout` holds even inside a stage that cannot
+poll the clock. -/
+extern "scry_install_timeout" Scry.Native.installTimeoutRaw : Nat → IO Unit
+/-- Disarm the guard (after a successful run). -/
+extern "scry_cancel_timeout" Scry.Native.cancelTimeoutRaw : IO Unit
+
+def Scry.Native.installTimeout (secs : Nat) : IO Unit := Scry.Native.installTimeoutRaw secs
+def Scry.Native.cancelTimeout : IO Unit := Scry.Native.cancelTimeoutRaw
+
 -- ## The columns (owned word arrays, copied from the shim)
 
 /-- Node kind ids (`U32Array`). -/
@@ -126,6 +138,15 @@ def Scry.Native.parseChecked (path : String) : EIO ScryStore := do
   | .false => EIO.fail (path ++ ": " ++ Nat.repr (Scry.Native.errorCount st)
       ++ " ERROR/MISSING node(s); the file is not valid C")
 
+/-- Parse C source text (not a file: the preprocessed text after its marker lines were
+blanked), refusing a tree with `ERROR`/`MISSING` nodes. `name` is for the error message. -/
+def Scry.Native.parseCheckedText (name : String) (text : String) : EIO ScryStore := do
+  st ← Scry.Native.parse "c" text;
+  match Nat.beq (Scry.Native.errorCount st) 0 with
+  | .true => EIO.pure st
+  | .false => EIO.fail (name ++ ": " ++ Nat.repr (Scry.Native.errorCount st)
+      ++ " ERROR/MISSING node(s); the preprocessed text is not valid C")
+
 -- ## Names and columns into the model store
 
 /-- `f 0, f 1, … f (n - 1)`. -/
@@ -160,10 +181,14 @@ def Scry.Native.toCstStore (path : String) (st : ScryStore) : IO Scry.CstStore :
   edgeSrc ← Scry.Native.edgeSrcColumn st;
   edgeDst ← Scry.Native.edgeDstColumn st;
   edgeLabel0 ← Scry.Native.edgeLabelColumn st;
-  let edgeLabel := U32Array.ofList (List.map (fun x =>
-    match UIntN.beq x (U32.ofNat 0) with
-    | .true => childId
-    | .false => x) (U32Array.toList edgeLabel0));
+  /-- Relabel the "no field" edge (id 0) as `child` without materialising the whole
+  column as a list: on a 1.1 M-node file the `toList`/`map`/`ofList` round trip allocates
+  millions of cons cells, which dominated the peak RSS. `foldl` + `push` stay in the
+  native array. -/
+  let edgeLabel := U32Array.foldl (fun acc x =>
+    U32Array.push acc (match UIntN.beq x (U32.ofNat 0) with
+      | .true => childId
+      | .false => x)) U32Array.empty edgeLabel0;
   let bytes := U64Array.ofList
     (List.cons (U64.ofNat (Scry.Native.storeBytes st)) .nil);
   IO.pure (Scry.CstStore.mk "c" kinds fields paths kindCol fieldCol flags parent spans

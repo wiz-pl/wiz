@@ -72,5 +72,6 @@ that already holds. That is why (a) is dropped rather than "started small".
 * `drafts/hdl/Staged.wiz` stays as a historical sketch; `STATUS.md` now says so.
 
 Recorded in `wiz-notes/wishful/hdl-staging-2ltt.md` (status `dropped`) and
-`wiz-notes/wishful/hdl-match-signals.md` (status `wanted`). `docs/libraries.md` H14 S4
-"Not done" now points at the latter instead of "staged match".
+`wiz-notes/wishful/hdl-match-signals.md` (status `done`, 2026-11-15: the case-tree
+elaboration `matchMux?`; probe `02-match-on-wire.wiz` now checks). `docs/libraries.md`
+H14 S4 describes the `match` bullet instead of "staged match".

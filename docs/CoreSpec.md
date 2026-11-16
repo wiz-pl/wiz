@@ -1244,9 +1244,11 @@ At a type that is a proposition, any two elements are convertible (§11.2):
      Γ ⊢ a ≡ b : A
 ```
 
-There are **no inductive propositions** (`μ` always lives in `Sort (l+1)`, §9), so there
-is no large elimination out of `Prop` except through `absurd` (from `False`) and `split`
-on a Σ of propositions (whose components are propositions too: subsingleton elimination).
+An **inductive proposition** (§9.3) may be eliminated into `Prop` always, and into any
+other sort only when it is a subsingleton: no constructor, or one constructor whose
+fields are all (sub)singleton types. So large elimination out of `Prop` is exactly
+singleton elimination; beyond it there are only `absurd` (from `False`) and `split` on
+a Σ of propositions (whose components are propositions too).
 
 ### 8.6 Proofs are never evaluated (P2)
 
@@ -1270,9 +1272,11 @@ conv at a proposition       true, before either side is unfolded
   rule needs a proof's value.
 * **Why no rule needs it.** Every elimination of a proof yields a proof: Σ is
   predicative, so a Σ that is a proposition has proof components; a Π into `Prop`
-  applied to anything is a proof; there are no inductive propositions; `absurd` is
-  stuck; `eq` is rejected at propositions. `split` with a relevant motive is the one
-  exception, and η for Σ covers it.
+  applied to anything is a proof; an inductive proposition eliminates into `Prop` (or,
+  when it is a subsingleton, into any sort, in which case `vInd` forces the proof's
+  body once to reach its constructor); `absurd` is stuck; `eq` is rejected at
+  propositions. `split` with a relevant motive is the one exception, and η for Σ
+  covers it.
 * **Reading back.** The kernel's own read-back (`quoteErasesProofs`; `quoteM .false` in
   `Kernel.wiz`) reads every proof head as `()`: it neither evaluates nor compares proofs.
   It is used by the kernel's messages and, in the Lean kernel, by the shortcut that
@@ -1560,7 +1564,18 @@ never type-checks them, and their Π/Σ types carry hand-written component sorts
      ind P m i (con xs)  ⟶  m i xs (hyps D (μ D) P (λj y. ind P m j y) i xs)                vIndStep, Eval.lean:409–423
 ```
 
-* `μ` is always in `Sort (l+1)`: there are no inductive propositions.
+* `μ` is in `Sort (l+1)`, unless its `prop` flag is set, in which case it is an
+  **inductive proposition** in `Sort 0` (#252). The formation premises are unchanged:
+  `I` is still exactly in `Sort (l+1)` and `D ⇐ Desc.{l} I`, so a proposition's fields
+  may live in any `Sort (l+1)`; only its elimination is restricted. `ind` on a
+  proposition checks the same premises and allows a motive in `Sort v` only when
+  `v ≡ 0` or the description is a singleton (no constructor, or one whose fields are
+  all (sub)singleton types: `descSingleton` in `Eval.lean`). A non-singleton
+  proposition's generated eliminator therefore has no motive level parameter; a raw
+  core term with a larger motive is rejected ("large elimination from an inductive
+  proposition"). Singleton elimination evaluates a suspended proof (`vInd` forces its
+  body) because the elimination computes on its constructor; a proof motive stays
+  suspended.
 * **The hint** [impl, Lean kernel only]. A `μ`/`ν` term carries an optional hint
   `(T, us, args)`, its nominal form `T.{us} args`. Conversion ignores it; the elaborator
   reads it back (a type's name, constructors and arguments), and `eval` evaluates `args`.

@@ -1,0 +1,68 @@
+-- test: run
+import Sys
+import Json
+import Text
+import Scry.Fuzz
+-- Dynamic-evidence tests: map a malformed C fixture to scry's own CST spans.
+--
+-- These are properties of the checked-in fixture and the pinned tree-sitter
+-- grammar, not of a fuzz campaign: a parse error is data (the front end recovers),
+-- and a span says where the parser was, not that the program is safe.
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+def checkNat (label : String) (got want : Nat) : EIO Unit :=
+  EIO.lift (match Nat.beq got want with
+    | .true => IO.println (label ++ ": " ++ Nat.repr got)
+    | .false => IO.bind
+        (IO.println (label ++ ": got " ++ Nat.repr got ++ ", want " ++ Nat.repr want))
+        (fun _ => Process.exit 1))
+
+def isEmpty (o : Option Scry.FuzzSpan) : Bool := match o with
+  | .none => .true
+  | .some _ => .false
+
+def main : IO Unit := EIO.toIO (do
+  p ← Scry.Fuzz.parseFile "fixtures/broken.c";
+  let x := p.input;
+  checkNat "broken: bytes" x.bytes 34;
+  checkNat "broken: nodes" x.nodes 14;
+  checkNat "broken: errors" x.errors 2;
+  checkNat "broken: error spans" (List.length x.errorSpans) 2;
+  check "broken: one root" (Nat.beq x.roots 1);
+  check "broken: root starts at 0" (Nat.beq x.root.span.start 0);
+  check "broken: root stops at EOF" (Nat.beq x.root.span.stop 34);
+  check "broken: root kind" (String.eq x.root.kind "translation_unit");
+  check "broken: not truncated" (Bool.not x.truncated);
+
+  let first := match x.errorSpans with
+    | .cons s _ => s
+    | .nil => x.root;
+  check "broken: first error is ERROR" (String.eq first.status "ERROR");
+  check "broken: first error is on line 1" (Nat.beq first.line 1);
+  check "broken: first error has a span" (Nat.le first.span.start first.span.stop);
+
+  -- the crash offset maps to a node that contains it (the smallest one)
+  match Scry.fuzzBestAt p.text p.cst first.span.start with
+  | .none => check "offset: maps to a span" .false
+  | .some s =>
+    check "offset: maps to a span"
+      (Bool.and (Nat.le s.span.start first.span.start)
+        (Nat.le first.span.start s.span.stop));
+  check "offset: past EOF has no span"
+    (isEmpty (Scry.fuzzBestAt p.text p.cst (Nat.succ x.bytes)));
+
+  let j := Json.render (Scry.fuzzInputJsonAt p (.some first.span.start));
+  check "json: format" (String.contains j "\"format\":\"scry-fuzz-input\"");
+  check "json: dynamic kind" (String.contains j "\"kind\":\"dynamic\"");
+  check "json: crash offset" (String.contains j "\"crash_offset\":");
+  check "json: crash span" (String.contains j "\"crash_span\":{\"node\":");
+  check "json: error spans" (String.contains j "\"error_spans\":[");
+  let j0 := Json.render (Scry.fuzzInputJsonAt p .none);
+  check "json: no offset is null" (String.contains j0 "\"crash_span\":null");
+  check "json: no crash offset is null" (String.contains j0 "\"crash_offset\":null")
+)
