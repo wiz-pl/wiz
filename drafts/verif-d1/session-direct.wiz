@@ -1,3 +1,25 @@
+-- DRAFT (stage 25g, plan D1): a section to append to lib/Session.wiz by the sessions /
+-- cleanup lane that owns it. It can't live in a new file: it needs Session's private
+-- natives (`Chan.forkRaw/sendRaw/recvRaw/closeRaw`), and re-binding the natives in a new
+-- file would add trust-ledger rows. Checked by appending it to a scratch copy of
+-- lib/Session.wiz (master 0a0262cb) with master's `wiz check`; the examples at the bottom
+-- check (positive) or fail as stated (negatives), and become `conc` group cases once applied.
+--
+-- Doc section for docs/stages/25-concurrency.md:
+--
+--   ## 25g: direct-style channels
+--
+--   `Chan.forkD : (p : Proto) → (1 child : (1 c : Chan (Proto.dual p)) → IO Unit) → IO1 (Chan p)`,
+--   `Chan.sendD : (1 c : Chan (.send A k)) → (a : A) → IO1 (Chan (k a))`,
+--   `Chan.recvD : (1 c : Chan (.recv A k)) → IO1 ((a : A) × Chan (k a))`,
+--   `Chan.closeD`, `Chan.cancelD : … → IO Unit`. The CPS API of 25c with the endpoint
+--   returned from an `IO1` action (9e), so a protocol reads top to bottom in `do1`:
+--   `c ⇐ Chan.sendD c m;`, `(r, c) ⇐ Chan.recvD c;`. A pair held at 1 splits into its
+--   first field at the field's quantity (ω: the value) and its second at 1 (the
+--   endpoint), so no linear Σ field syntax is needed. Same natives, same guarantees:
+--   an endpoint dropped or used twice is a quantity error, a wrong step a type mismatch,
+--   and the deadlock-freedom claim of 25c covers programs in either style.
+--
 -- ## 4. Direct style (stage 25g, plan D1)
 --
 -- The same channels, with the endpoint handed back as the result of an `IO1` action
@@ -26,3 +48,42 @@ def Chan.closeD (1 c : Chan Proto.done) : IO Unit := fun w => Chan.closeRaw c w
 /-- Cancel at a send point of a cancellable protocol: tell the peer, and close. -/
 def Chan.cancelD {A : Type} {k : A → Proto} (1 c : Chan (Proto.sendC A k)) : IO Unit := fun w =>
   let 1 (c', w') := Chan.sendRaw c Msg.cancel w; Chan.closeRaw c' w'
+
+-- Examples (tests once applied):
+-- import IO
+-- import SessionProbe
+-- def P : Proto := .send Nat (fun _ => .recv Nat (fun _ => .done))
+-- def serveD (1 c : Chan (Proto.dual P)) : IO Unit := do1
+--   (n, c) ⇐ Chan.recvD c;
+--   c ⇐ Chan.sendD c (n + n);
+--   Chan.closeD c
+-- def clientD (m : Nat) : IO Nat := do1
+--   c ⇐ Chan.forkD P serveD;
+--   c ⇐ Chan.sendD c m;
+--   (r, c) ⇐ Chan.recvD c;
+--   IO.then1 (Chan.closeD c) (IO.pure r)
+-- def main : IO Unit := IO.bind (clientD 21) (fun r => IO.println (Nat.toString r))
+--   expected: compiled run prints 42
+-- import IO
+-- import SessionProbe
+-- def P : Proto := .send Nat (fun _ => .recv Nat (fun _ => .done))
+-- -- the endpoint is dropped after the send
+-- def leak (1 c : Chan P) : IO Unit := do1
+--   c ⇐ Chan.sendD c 1;
+--   IO.pure ()
+-- import IO
+-- import SessionProbe
+-- def P : Proto := .send Nat (fun _ => .recv Nat (fun _ => .done))
+-- -- the old endpoint is used again after the send
+-- def twice (1 c : Chan P) : IO Unit := do1
+--   d ⇐ Chan.sendD c 1;
+--   e ⇐ Chan.sendD c 2;
+--   IO.pure ()
+-- import IO
+-- import SessionProbe
+-- def P : Proto := .send Nat (fun _ => .recv Nat (fun _ => .done))
+-- -- wrong step: receiving where the protocol sends
+-- def wrong (1 c : Chan P) : IO Unit := do1
+--   (n, c) ⇐ Chan.recvD c;
+--   Chan.closeD c
+--   expected: d2 "quantity 1" (dropped), d3 "quantity 1" (reused), d4 "mismatch"
