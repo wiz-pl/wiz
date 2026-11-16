@@ -1,0 +1,954 @@
+import Sys
+import Json
+import Text
+import Scry.Native
+import Scry.CstStore
+import Scry.Facts
+import Scry.Parse
+import Scry.Query
+import Scry.Lower
+import Scry.Rules
+import Scry.RuleTaint
+import Scry.Interproc
+import Scry.Certify
+import Scry.TaintCmd
+import Scry.Workflow
+import Scry.WorkflowCmd
+import Scry.Repro
+import Scry.Diff
+/-!
+# Scry.Repl: the Scry analysis as ordinary Wiz values
+
+`import Scry.Repl` is the prelude `scry repl` loads. It is **not** a command language: the
+session is the normal Wiz REPL, and every Scry action is an ordinary `IO` definition you
+can `#check`, `#eval`, compose with `List.map`/`filter`/`foldl`, or wrap in your own
+helper. The surface is deliberately close to Joern's shell: load once, then query the
+loaded unit from an ordinary language.
+
+The session state is a small cache under `.scry-repl/` (relative to the working
+directory): `state.json` names the loaded source files and their cached CST columns,
+`uN.cst` holds `Scry.CstStore.render`'s spill format, `findings.json` is the workflow
+store, `taint.json` is the last report, and `config.json` holds the JSON-mode and diff
+settings. `load` parses a file with tree-sitter once and writes the columns; `facts`,
+`query`, `functions`, `calls` and `callers` read those columns and never re-parse the C.
+`taint` lowers the cached columns once and records the findings; `findings`,
+`taintPaths`, `show`, `triage` and `repro` read that record. Calling `load` again replaces
+the state (the previous unit is forgotten); `loadDir` replaces it with every `.c` under a
+directory.
+
+The functions print a readable result and return the useful value (`facts` returns the
+stats, `queryKind` the nodes, `taint` the finding count, `findings` the ids, …). `jsonOn`
+switches the printing to one JSON object per call, using the same schema names as the
+`scry taint`/`scry findings` commands. An error is printed and the function returns its
+empty value, so a REPL session continues.
+-/
+
+-- ## Cache paths
+
+def Scry.Repl.dir : String := ".scry-repl"
+def Scry.Repl.statePath : String := ".scry-repl/state.json"
+def Scry.Repl.taintPath : String := ".scry-repl/taint.json"
+def Scry.Repl.findingsPath : String := ".scry-repl/findings.json"
+def Scry.Repl.configPath : String := ".scry-repl/config.json"
+def Scry.Repl.diffPath : String := ".scry-repl/diff.json"
+
+def Scry.Repl.ioOr {A : Type} (what : String) (d : A) (x : EIO A) : IO A :=
+  IO.bind x (fun r => match r with
+    | .ok a => IO.pure a
+    | .error e => IO.bind (IO.println (what ++ ": " ++ e)) (fun _ => IO.pure d))
+
+partial def Scry.Repl.ensureDir (p : String) : IO Unit := do
+  ok ← FS.exists p;
+  match ok with
+  | .true => IO.pure ()
+  | .false => Scry.Repl.ioOr p () (FS.createDir p)
+
+def Scry.Repl.pjoin (a b : String) : String := String.append a (String.append "/" b)
+
+def Scry.Repl.optEIO {A : Type} (what : String) (x : EIO A) : IO (Option A) :=
+  Scry.Repl.ioOr what .none (EIO.bind x (fun a => EIO.pure (.some a)))
+
+def Scry.Repl.write (p text : String) : IO Unit :=
+  Scry.Repl.ioOr p () (FS.writeFile p text)
+
+def Scry.Repl.readOpt (p : String) : IO (Option String) := do
+  ok ← FS.exists p;
+  match ok with
+  | .false => IO.pure .none
+  | .true => Scry.Repl.ioOr p .none (EIO.bind (FS.readFile p) (fun t => EIO.pure (.some t)))
+
+def Scry.Repl.readJsonOpt (p : String) : IO (Option Json) := do
+  t ← Scry.Repl.readOpt p;
+  match t with
+  | .none => IO.pure .none
+  | .some s => match Json.parse s with
+    | .ok j => IO.pure (.some j)
+    | .error _ => IO.pure .none
+
+-- ## Configuration (JSON mode)
+
+def Scry.Repl.jsonMode : IO Bool := do
+  j ← Scry.Repl.readJsonOpt Scry.Repl.configPath;
+  match j with
+  | .none => IO.pure .false
+  | .some j => IO.pure (match Json.get j "json" with | .some (.bool b) => b | _ => .false)
+
+def Scry.Repl.setJson (on : Bool) : IO Unit := do
+  Scry.Repl.ensureDir Scry.Repl.dir;
+  Scry.Repl.write Scry.Repl.configPath (String.append (Json.render (Json.mkObj
+    [("schema", Json.mkStr "scry-repl-config/1"), ("json", Json.mkBool on)])) "\n")
+
+def Scry.Repl.jsonOn : IO Unit := do
+  Scry.Repl.setJson .true;
+  IO.println "{\"schema\":\"scry-repl/1\",\"command\":\"json\",\"json\":true}"
+
+def Scry.Repl.jsonOff : IO Unit := do
+  Scry.Repl.setJson .false;
+  IO.println "json: off"
+
+def Scry.Repl.emit (human : String) (j : Json) : IO Unit := do
+  on ← Scry.Repl.jsonMode;
+  match on with
+  | .true => IO.println (Json.render j)
+  | .false => IO.println human
+
+-- ## The loaded units
+
+structure Scry.Repl.Unit where
+  source : String
+  cst : String
+
+def Scry.Repl.unitJson (u : Scry.Repl.Unit) : Json := Json.mkObj
+  [("source", Json.mkStr u.source), ("cst", Json.mkStr u.cst)]
+
+def Scry.Repl.unitOfJson (j : Json) : Option Scry.Repl.Unit :=
+  let source := Json.getStr j "source";
+  let cst := Json.getStr j "cst";
+  match String.isEmpty source with
+  | .true => .none
+  | .false => .some (Scry.Repl.Unit.mk source cst)
+
+partial def Scry.Repl.unitsOfJson : List Json → List Scry.Repl.Unit
+  | .nil => .nil
+  | .cons j rest => match Scry.Repl.unitOfJson j with
+    | .some u => List.cons u (Scry.Repl.unitsOfJson rest)
+    | .none => Scry.Repl.unitsOfJson rest
+
+def Scry.Repl.readUnits : IO (List Scry.Repl.Unit) := do
+  j ← Scry.Repl.readJsonOpt Scry.Repl.statePath;
+  match j with
+  | .none => IO.pure .nil
+  | .some j => IO.pure (Scry.Repl.unitsOfJson (Json.getList j "units"))
+
+def Scry.Repl.saveUnits (us : List Scry.Repl.Unit) : IO Unit := do
+  Scry.Repl.ensureDir Scry.Repl.dir;
+  Scry.Repl.write Scry.Repl.statePath (String.append (Json.render (Json.mkObj
+    [ ("schema", Json.mkStr "scry-repl-state/1")
+    , ("units", Json.mkArr (List.map Scry.Repl.unitJson us)) ])) "\n")
+
+/-- Parse one C file and cache its CST columns. -/
+def Scry.Repl.loadOne (i : Nat) (path : String) : IO (Option Scry.Repl.Unit) := do
+  text ← Scry.Repl.ioOr path "" (FS.readFile path);
+  match String.isEmpty text with
+  | .true => IO.pure .none
+  | .false => do
+    st ← Scry.Repl.optEIO path (Scry.Native.parse "c" text);
+    match st with
+    | .none => IO.pure .none
+    | .some st => do
+      cst ← Scry.Repl.optEIO path (EIO.lift (Scry.Native.toCstStore path st));
+      match cst with
+      | .none => IO.pure .none
+      | .some cst => do
+        let p := Scry.Repl.pjoin Scry.Repl.dir (String.append "u" (String.append (Nat.repr i) ".cst"));
+        Scry.Repl.write p (Scry.CstStore.render cst);
+        IO.pure (.some (Scry.Repl.Unit.mk path p))
+
+partial def Scry.Repl.sortGo (x : String) : List String → List String
+  | .nil => List.cons x .nil
+  | .cons y rest => match String.lt x y with
+    | .true => List.cons x (List.cons y rest)
+    | .false => List.cons y (Scry.Repl.sortGo x rest)
+
+def Scry.Repl.sortStrings : List String → List String
+  | .nil => .nil
+  | .cons x rest => Scry.Repl.sortGo x (Scry.Repl.sortStrings rest)
+
+mutual
+partial def Scry.Repl.cFilesGo (dir : String) (acc : List String) : List String → IO (List String)
+  | .nil => IO.pure (Scry.Repl.sortStrings acc)
+  | .cons e rest => do
+    let p := String.append dir (String.append "/" e);
+    isD ← FS.isDir p;
+    match isD with
+    | .true => match String.startsWith e "." with
+      | .true => Scry.Repl.cFilesGo dir acc rest
+      | .false => do
+        more ← Scry.Repl.cFiles dir;
+        Scry.Repl.cFilesGo dir (List.append acc more) rest
+    | .false => match String.endsWith e ".c" with
+      | .true => Scry.Repl.cFilesGo dir (List.cons p acc) rest
+      | .false => Scry.Repl.cFilesGo dir acc rest
+
+def Scry.Repl.cFiles (dir : String) : IO (List String) := do
+  entries ← Scry.Repl.ioOr dir (.nil : List String) (FS.listDir dir);
+  Scry.Repl.cFilesGo dir .nil entries
+end
+
+partial def Scry.Repl.loadEach (i : Nat) : List String → IO (List Scry.Repl.Unit)
+  | .nil => IO.pure .nil
+  | .cons p rest => do
+    u ← Scry.Repl.loadOne i p;
+    us ← Scry.Repl.loadEach (Nat.succ i) rest;
+    match u with
+    | .some u => IO.pure (List.cons u us)
+    | .none => IO.pure us
+
+/-- `loadDir "proj"`: parse every `.c` under a directory once; the session holds them all. -/
+def Scry.Repl.loadDir (dir : String) : IO Unit := do
+  files ← Scry.Repl.cFiles dir;
+  match files with
+  | .nil => IO.println ("loadDir: no .c files under " ++ dir)
+  | _ => do
+    us ← Scry.Repl.loadEach 0 files;
+    match us with
+    | .nil => IO.println ("loadDir: could not load " ++ dir)
+    | _ => do
+      Scry.Repl.saveUnits us;
+      IO.println ("loaded " ++ Nat.repr (List.length us) ++ " unit(s) from " ++ dir)
+
+/-- `load "file.c"`: parse a C file once and make it the session's unit. -/
+def Scry.Repl.load (path : String) : IO Unit := do
+  isD ← FS.isDir path;
+  match isD with
+  | .true => Scry.Repl.loadDir path
+  | .false => do
+    there ← FS.exists path;
+    match there with
+    | .false => IO.println ("load: no such file: " ++ path)
+    | .true => do
+      u ← Scry.Repl.loadOne 0 path;
+      match u with
+      | .none => IO.println ("load: could not load " ++ path)
+      | .some u => do
+        Scry.Repl.saveUnits (List.cons u .nil);
+        IO.println ("loaded " ++ path ++ " (1 unit; use facts/query/functions)")
+
+
+
+-- ## Reading the cached columns
+
+def Scry.Repl.unitFacts (u : Scry.Repl.Unit) : IO (Option Scry.Facts) := do
+  text ← Scry.Repl.readOpt u.cst;
+  match text with
+  | .none => IO.pure .none
+  | .some text => match Scry.CstStore.ofText text with
+    | .error e => IO.bind (IO.println ("cst " ++ u.cst ++ ": " ++ e)) (fun _ => IO.pure .none)
+    | .ok s => match Scry.CstStore.toFacts s with
+      | .error e => IO.bind (IO.println ("cst " ++ u.cst ++ ": " ++ e)) (fun _ => IO.pure .none)
+      | .ok f => IO.pure (.some f)
+
+def Scry.Repl.unitStats (u : Scry.Repl.Unit) : IO (Option Scry.Stats) := do
+  text ← Scry.Repl.readOpt u.cst;
+  match text with
+  | .none => IO.pure .none
+  | .some text => match Scry.CstStore.ofText text with
+    | .error e => IO.bind (IO.println ("cst " ++ u.cst ++ ": " ++ e)) (fun _ => IO.pure .none)
+    | .ok s => IO.pure (.some (Scry.CstStore.statsOf s))
+
+def Scry.Repl.unitText (u : Scry.Repl.Unit) : IO String := do
+  t ← Scry.Repl.readOpt u.source;
+  match t with | .some s => IO.pure s | .none => IO.pure ""
+
+partial def Scry.Repl.statsList : List Scry.Repl.Unit → IO (List Scry.Stats)
+  | .nil => IO.pure .nil
+  | .cons u rest => do
+    s ← Scry.Repl.unitStats u;
+    ss ← Scry.Repl.statsList rest;
+    match s with | .some s => IO.pure (List.cons s ss) | .none => IO.pure ss
+
+def Scry.Repl.statsAdd (a b : Scry.Stats) : Scry.Stats := Scry.statsSum a b
+
+def Scry.Repl.statsTotal : List Scry.Stats → Scry.Stats
+  | .nil => Scry.emptyStats
+  | .cons s rest => Scry.Repl.statsAdd s (Scry.Repl.statsTotal rest)
+
+def Scry.Repl.statsJson (s : Scry.Stats) : Json := Json.mkObj
+  [ ("files", Json.ofNat s.files), ("nodes", Json.ofNat s.nodes)
+  , ("edges", Json.ofNat s.edges), ("relations", Json.ofNat s.relations)
+  , ("tuples", Json.ofNat s.tuples), ("roots", Json.ofNat s.roots)
+  , ("maxDepth", Json.ofNat s.maxDepth), ("errors", Json.ofNat s.errors) ]
+
+def Scry.Repl.statsText (s : Scry.Stats) : String :=
+  "  files: " ++ Nat.repr s.files ++ "  nodes: " ++ Nat.repr s.nodes
+  ++ "  edges: " ++ Nat.repr s.edges ++ "  relations: " ++ Nat.repr s.relations
+  ++ "\n  tuples: " ++ Nat.repr s.tuples ++ "  roots: " ++ Nat.repr s.roots
+  ++ "  max depth: " ++ Nat.repr s.maxDepth ++ "  errors: " ++ Nat.repr s.errors
+
+-- ## Facts and query
+
+def Scry.Repl.pairUnits : List Scry.Repl.Unit → List Scry.Stats → List (Scry.Repl.Unit × Scry.Stats)
+  | .nil, _ => .nil
+  | .cons u us, .cons s ss => List.cons (u, s) (Scry.Repl.pairUnits us ss)
+  | .cons _ _, .nil => .nil
+
+/-- Print the store counts (per unit and total) and return the stats. -/
+def Scry.Repl.facts : IO (List Scry.Stats) := do
+  us ← Scry.Repl.readUnits;
+  ss ← Scry.Repl.statsList us;
+  match ss with
+  | .nil => do
+    IO.println "facts: nothing loaded (try load \"file.c\")";
+    Scry.Repl.emit "facts: nothing loaded" (Json.mkObj
+      [("schema", Json.mkStr "scry-repl/1"), ("command", Json.mkStr "facts"),
+       ("units", Json.mkArr .nil)]);
+    IO.pure .nil
+  | _ => do
+    let total := Scry.Repl.statsTotal ss
+    let human := "facts:\n" ++ String.intercalate "\n"
+      (List.map (fun p => "  " ++ p.1.source ++ "\n" ++ Scry.Repl.statsText p.2)
+        (Scry.Repl.pairUnits us ss))
+      ++ "\n  total\n" ++ Scry.Repl.statsText total
+    Scry.Repl.emit human (Json.mkObj
+      [ ("schema", Json.mkStr "scry-repl/1"), ("command", Json.mkStr "facts")
+      , ("units", Json.mkArr (List.map (fun p => Json.mkObj
+          [("source", Json.mkStr p.1.source), ("stats", Scry.Repl.statsJson p.2)])
+          (Scry.Repl.pairUnits us ss)))
+      , ("total", Scry.Repl.statsJson total) ]);
+    IO.pure ss
+
+
+
+def Scry.Repl.nodeJson (n : Scry.Node) : Json := Json.mkObj
+  [ ("id", Json.ofNat n.id.n), ("kind", Json.mkStr n.kind)
+  , ("field", Json.mkStr n.field)
+  , ("span", Json.mkArr [Json.ofNat n.span.start, Json.ofNat n.span.stop])
+  , ("error", Json.mkBool n.isError), ("missing", Json.mkBool n.missing) ]
+
+partial def Scry.Repl.collectFacts : List Scry.Repl.Unit → IO (List Scry.Facts)
+  | .nil => IO.pure .nil
+  | .cons u rest => do
+    f ← Scry.Repl.unitFacts u;
+    fs ← Scry.Repl.collectFacts rest;
+    match f with | .some f => IO.pure (List.cons f fs) | .none => IO.pure fs
+
+/-- Nodes of a kind across the loaded units, without printing (for composition). -/
+def Scry.Repl.kindNodes (kind : String) : IO (List Scry.Node) := do
+  us ← Scry.Repl.readUnits;
+  fs ← Scry.Repl.collectFacts us;
+  IO.pure (List.concat (List.map (fun f => Scry.queryKind f kind) fs))
+
+/-- Nodes of a kind across the loaded units. -/
+def Scry.Repl.queryKind (kind : String) : IO (List Scry.Node) := do
+  ns ← Scry.Repl.kindNodes kind;
+  let human := "query kind " ++ kind ++ ": " ++ Nat.repr (List.length ns) ++ " match(es)"
+    ++ List.foldr (fun n acc => "\n  " ++ Scry.renderNodeLine n ++ acc) "" ns;
+  Scry.Repl.emit human (Json.mkObj
+    [ ("schema", Json.mkStr "scry-repl/1"), ("command", Json.mkStr "query")
+    , ("query", Json.mkStr "kind"), ("kind", Json.mkStr kind)
+    , ("nodes", Json.mkArr (List.map Scry.Repl.nodeJson ns)) ]);
+  IO.pure ns
+
+/-- Edges with a label across the loaded units. -/
+def Scry.Repl.queryEdge (label : String) : IO (List Scry.Edge) := do
+  us ← Scry.Repl.readUnits;
+  fs ← Scry.Repl.collectFacts us;
+  let es := List.concat (List.map (fun f => Scry.queryEdge f label) fs);
+  let human := "query edge " ++ label ++ ": " ++ Nat.repr (List.length es) ++ " match(es)"
+    ++ List.foldr (fun e acc => "\n  " ++ Nat.repr e.src.n ++ " -> " ++ Nat.repr e.dst.n
+        ++ " " ++ e.label ++ acc) "" es;
+  Scry.Repl.emit human (Json.mkObj
+    [ ("schema", Json.mkStr "scry-repl/1"), ("command", Json.mkStr "query")
+    , ("query", Json.mkStr "edge"), ("edge", Json.mkStr label)
+    , ("edges", Json.mkArr (List.map (fun e => Json.mkObj
+        [("src", Json.ofNat e.src.n), ("dst", Json.ofNat e.dst.n),
+         ("label", Json.mkStr e.label)]) es)) ]);
+  IO.pure es
+
+/-- Tuples of a relation across the loaded units. -/
+def Scry.Repl.queryRel (name : String) : IO (List (List Nat)) := do
+  us ← Scry.Repl.readUnits;
+  fs ← Scry.Repl.collectFacts us;
+  let ts := List.concat (List.map (fun f => match Scry.findRelation f.relations name with
+    | .some r => r.tuples | .none => .nil) fs);
+  let human := "query relation " ++ name ++ ": " ++ Nat.repr (List.length ts) ++ " tuple(s)"
+    ++ List.foldr (fun t acc => "\n  " ++ Scry.renderTuple t ++ acc) "" ts;
+  Scry.Repl.emit human (Json.mkObj
+    [ ("schema", Json.mkStr "scry-repl/1"), ("command", Json.mkStr "query")
+    , ("query", Json.mkStr "rel"), ("rel", Json.mkStr name)
+    , ("tuples", Json.mkArr (List.map (fun t =>
+        Json.mkArr (List.map Json.ofNat t)) ts)) ]);
+  IO.pure ts
+
+/-- Arcs out of one node (its children, with their field labels). -/
+def Scry.Repl.queryEdgeSrc (id : Nat) : IO (List (Scry.NodeId × String)) := do
+  us ← Scry.Repl.readUnits;
+  fs ← Scry.Repl.collectFacts us;
+  let arcs := match fs with
+    | .cons f _ => Scry.arcsAt f.out id
+    | .nil => (.nil : List (Scry.NodeId × String));
+  let human := "query edge-src " ++ Nat.repr id ++ ": " ++ Nat.repr (List.length arcs) ++ " arc(s)"
+    ++ List.foldr (fun p acc => "\n  " ++ Nat.repr id ++ " -> " ++ Nat.repr p.1.n
+        ++ " " ++ p.2 ++ acc) "" arcs;
+  Scry.Repl.emit human (Json.mkObj
+    [ ("schema", Json.mkStr "scry-repl/1"), ("command", Json.mkStr "query")
+    , ("query", Json.mkStr "edge-src"), ("node", Json.ofNat id)
+    , ("arcs", Json.mkArr (List.map (fun p => Json.mkObj
+        [("dst", Json.ofNat p.1.n), ("label", Json.mkStr p.2)]) arcs)) ]);
+  IO.pure arcs
+
+/-- Explain one node (span, parent, children, incoming, relation tuples). -/
+def Scry.Repl.explain (id : Nat) : IO String := do
+  us ← Scry.Repl.readUnits;
+  fs ← Scry.Repl.collectFacts us;
+  match fs with
+  | .nil => do
+    IO.println "explain: nothing loaded";
+    IO.pure ""
+  | .cons f _ => match Scry.explainNode f (Scry.nodeId id) with
+    | .error e => do
+      IO.println ("explain: " ++ e);
+      IO.pure ""
+    | .ok s => do
+      Scry.Repl.emit s (Json.mkObj
+        [("schema", Json.mkStr "scry-repl/1"), ("command", Json.mkStr "explain"),
+         ("node", Json.ofNat id), ("text", Json.mkStr s)]);
+      IO.pure s
+
+-- ## Taint
+
+structure Scry.Repl.ReportUnit where
+  source : String
+  report : Scry.TaintReport
+
+def Scry.Repl.findingRecordJson (rep : Scry.TaintReport) (st : Scry.WfStore)
+    (now : Nat) (f : Scry.RuleFinding) (cert : Option Scry.Certificate) : Json × Scry.WfRecord :=
+  let id := Scry.wfId f rep.file;
+  let key := Scry.wfSemanticKey f rep.file;
+  let lineHash := Scry.wfLineHash f "";
+  let checked := Scry.certVerified cert;
+  let finding := Scry.findingJson rep.origins f checked;
+  let old := Scry.wfFind st id;
+  let firstSeen := match old with | .some r => r.firstSeen | .none => now;
+  let history := match old with
+    | .some r => r.history
+    | .none => [Scry.WfHistory.mk .new now "scry repl" "first seen by Scry.Repl.taint"];
+  let state := match old with | .some r => r.state | .none => (.new : Scry.WfState);
+  let artifacts := Scry.Repl.pjoin (Scry.Repl.pjoin Scry.Repl.dir "artifacts") id;
+  (finding, Scry.WfRecord.mk id key lineHash state history rep.file .none .false finding
+    artifacts .none .none .none firstSeen now)
+
+def Scry.Repl.recordOfPair (rep : Scry.TaintReport) (st : Scry.WfStore) (now : Nat)
+    (pair : Scry.RuleFinding × Option Scry.Certificate) : Scry.WfRecord :=
+  let r := Scry.Repl.findingRecordJson rep st now pair.1 pair.2;
+  r.2
+
+def Scry.Repl.addRecords (rep : Scry.TaintReport) (st : Scry.WfStore) (now : Nat)
+    (pairs : List (Scry.RuleFinding × Option Scry.Certificate)) : Scry.WfStore :=
+  List.foldr (fun pair st => Scry.wfUpsert st (Scry.Repl.recordOfPair rep st now pair)) st pairs
+
+def Scry.Repl.analyzeUnit (rules : Option String) (u : Scry.Repl.Unit) :
+    IO (Option Scry.TaintReport) := do
+  text ← Scry.Repl.readOpt u.cst;
+  source ← Scry.Repl.unitText u;
+  match text with
+  | .none => do
+    IO.println ("taint: no cached store for " ++ u.source);
+    IO.pure .none
+  | .some text => match Scry.CstStore.ofText text with
+    | .error e => do
+      IO.println ("taint: " ++ u.cst ++ ": " ++ e);
+      IO.pure .none
+    | .ok cst => do
+      let errs := Scry.CstStore.errorCount cst;
+      match Nat.lt 0 errs with
+      | .true => do
+        IO.println ("taint: " ++ u.source ++ ": " ++ Nat.repr errs
+          ++ " parse error node(s); load a clean file");
+        IO.pure .none
+      | .false => do
+        -- the same pipeline as `scry taint` (`Scry.analyzeStore`), from the cached store
+        let o := Scry.TaintOpts.mk u.source rules .none .false .false .false .false .none .none
+          .none (.some 300) (.some 2000000) .none .false;
+        startMs ← Scry.nowMs;
+        Scry.Repl.optEIO "taint" (Scry.analyzeStore o startMs source (Scry.lineStartsOf source)
+          cst (Scry.CstStore.nodeCount cst))
+
+def Scry.Repl.taintJson (ru : Scry.Repl.ReportUnit) : Json :=
+  let rep := ru.report;
+  Json.mkObj
+    [ ("source", Json.mkStr ru.source)
+    , ("file", Json.mkStr rep.file)
+    , ("rules", Json.ofNat (List.length rep.pack.rules))
+    , ("parseErrors", Json.ofNat rep.parseErrors)
+    , ("findings", Json.mkArr (List.map (fun p => Scry.findingJson rep.origins p.1 p.2)
+        (Scry.zipFindings rep.findings rep.checks)))
+    , ("boundary", Json.mkArr (List.map Scry.boundaryJson rep.boundaries))
+    , ("memory", Json.mkArr (List.map Scry.boundaryJson rep.memory))
+    , ("counts", Json.mkObj
+        [ ("findings", Json.ofNat (List.length rep.findings))
+        , ("checked", Json.ofNat (Scry.checkedCount rep.checks))
+        , ("unchecked", Json.ofNat (Nat.sub (List.length rep.findings)
+            (Scry.checkedCount rep.checks)))
+        , ("boundary", Json.ofNat (List.length rep.boundaries))
+        , ("memory", Json.ofNat (List.length rep.memory)) ]) ]
+
+partial def Scry.Repl.runTaintUnits (rules : Option String) (st : Scry.WfStore) (now : Nat) :
+    List Scry.Repl.Unit → IO (List Scry.Repl.ReportUnit × Scry.WfStore)
+  | .nil => IO.pure (.nil, st)
+  | .cons u rest => do
+    rep ← Scry.Repl.analyzeUnit rules u;
+    match rep with
+    | .none => Scry.Repl.runTaintUnits rules st now rest
+    | .some rep => do
+      let st' := Scry.Repl.addRecords rep st now
+        (Scry.wfCertList rep.findings rep.certificates);
+      pair ← Scry.Repl.runTaintUnits rules st' now rest;
+      let rs := pair.1;
+      let st2 := pair.2;
+      IO.pure (List.cons (Scry.Repl.ReportUnit.mk u.source rep) rs, st2)
+
+def Scry.Repl.saveTaint (rus : List Scry.Repl.ReportUnit) : IO Unit := do
+  Scry.Repl.write Scry.Repl.taintPath (String.append (Json.render (Json.mkObj
+    [ ("schema", Json.mkStr "scry-repl-taint/1")
+    , ("units", Json.mkArr (List.map Scry.Repl.taintJson rus)) ])) "\n")
+
+def Scry.Repl.renderFindingLine (rep : Scry.TaintReport) (f : Scry.RuleFinding)
+    (checked : Bool) : String :=
+  Scry.renderFinding rep.origins f checked
+
+/-- Run the taint pipeline over every loaded unit (from the cached CST, never re-parsing
+the C), record the findings in the workflow store, and return the finding count. -/
+def Scry.Repl.taintWith (rules : Option String) : IO Nat := do
+  us ← Scry.Repl.readUnits;
+  match us with
+  | .nil => do
+    IO.println "taint: nothing loaded (try load \"file.c\")";
+    Scry.Repl.emit "taint: nothing loaded" (Json.mkObj
+      [("schema", Json.mkStr "scry-repl/1"), ("command", Json.mkStr "taint"),
+       ("counts", Json.mkObj [("findings", Json.ofNat 0)])]);
+    IO.pure 0
+  | _ => do
+    now ← IO.bind Clock.wall (fun d => IO.pure d.ns);
+    st0 ← Scry.Repl.ioOr "findings" Scry.wfEmptyStore (Scry.wfLoadStore Scry.Repl.findingsPath);
+    pair ← Scry.Repl.runTaintUnits rules st0 now us;
+    let rus := pair.1;
+    let st := pair.2;
+    Scry.Repl.saveTaint rus;
+    Scry.Repl.ensureDir Scry.Repl.dir;
+    Scry.Repl.write Scry.Repl.findingsPath (Scry.wfStoreText st);
+    let reports := List.map (fun r => r.report) rus;
+    let findings := List.concat (List.map (fun r => r.findings) reports);
+    let checks := List.concat (List.map (fun r => r.checks) reports);
+    let boundaries := List.concat (List.map (fun r => r.boundaries) reports);
+    let memory := List.concat (List.map (fun r => r.memory) reports);
+    let checked := Scry.checkedCount checks;
+    let human := String.intercalate "\n" (List.map (fun r =>
+        "taint: " ++ r.file ++ " (" ++ Nat.repr (List.length r.pack.rules) ++ " rules)\n"
+        ++ String.intercalate "\n" (List.map (fun p => Scry.Repl.renderFindingLine r p.1 p.2)
+            (Scry.zipFindings r.findings r.checks))
+        ++ (match List.length (List.append r.boundaries r.memory) with
+          | .zero => ""
+          | _ => "\n" ++ String.intercalate "\n"
+              (List.map Scry.renderBoundary (List.append r.boundaries r.memory)))) reports)
+      ++ "\ntaint: " ++ Nat.repr (List.length findings) ++ " finding(s), "
+      ++ Nat.repr checked ++ " checked, "
+      ++ Nat.repr (Nat.sub (List.length findings) checked) ++ " unchecked, "
+      ++ Nat.repr (List.length boundaries) ++ " boundary warning(s), "
+      ++ Nat.repr (List.length memory) ++ " memory warning(s)";
+    Scry.Repl.emit human (Json.mkObj
+      [ ("schema", Json.mkStr "scry-repl/1"), ("command", Json.mkStr "taint")
+      , ("tool", Json.mkStr "scry")
+      , ("units", Json.mkArr (List.map Scry.Repl.taintJson rus))
+      , ("findings", Json.mkArr (List.concat (List.map (fun r =>
+          Json.getList (Scry.Repl.taintJson (Scry.Repl.ReportUnit.mk r.file r)) "findings") reports)))
+      , ("boundary", Json.mkArr (List.concat (List.map (fun r =>
+          Json.getList (Scry.Repl.taintJson (Scry.Repl.ReportUnit.mk r.file r)) "boundary") reports)))
+      , ("memory", Json.mkArr (List.concat (List.map (fun r =>
+          Json.getList (Scry.Repl.taintJson (Scry.Repl.ReportUnit.mk r.file r)) "memory") reports)))
+      , ("counts", Json.mkObj
+          [ ("findings", Json.ofNat (List.length findings))
+          , ("checked", Json.ofNat checked)
+          , ("unchecked", Json.ofNat (Nat.sub (List.length findings) checked))
+          , ("boundary", Json.ofNat (List.length boundaries))
+          , ("memory", Json.ofNat (List.length memory)) ]) ]);
+    IO.pure (List.length findings)
+
+/-- `taint`: the default rule pack. -/
+def Scry.Repl.taint : IO Nat := Scry.Repl.taintWith .none
+
+/-- Memory warnings that are use-after-free (run taint first if there is no report). -/
+partial def Scry.Repl.uaf : IO Nat := do
+  j ← Scry.Repl.readJsonOpt Scry.Repl.taintPath;
+  match j with
+  | .none => do
+    n ← Scry.Repl.taint;
+    match n with | .zero => IO.pure 0 | _ => Scry.Repl.uaf
+  | .some j => do
+    let mem := Json.getList j "units";
+    let warnings := List.concat (List.map (fun u => Json.getList u "memory") mem);
+    let uaf := List.filter (fun w => String.contains (Json.getStr w "rule") "use-after-free") warnings;
+    let human := match List.length uaf with
+      | .zero => "uaf: 0 use-after-free warning(s)"
+      | _ => "uaf: " ++ Nat.repr (List.length uaf) ++ " use-after-free warning(s)\n"
+          ++ String.intercalate "\n" (List.map (fun w => "  " ++ Scry.renderBoundary
+              (Scry.BoundaryFinding.mk (Json.getStr w "rule") (Json.getStr w "message")
+                (Json.getStr w "function") 0 .none)) uaf)
+    Scry.Repl.emit human (Json.mkObj
+      [("schema", Json.mkStr "scry-repl/1"), ("command", Json.mkStr "uaf"),
+       ("memory", Json.mkArr uaf), ("count", Json.ofNat (List.length uaf))]);
+    IO.pure (List.length uaf)
+
+-- ## Findings, show, triage, repro
+
+structure Scry.Repl.Finding where
+  id : String
+  state : String
+  rule : String
+  callee : String
+  source : String
+  location : Json
+  path : List Scry.PathNode
+
+def Scry.Repl.saveStore (st : Scry.WfStore) : IO Unit :=
+  Scry.Repl.write Scry.Repl.findingsPath (Scry.wfStoreText st)
+
+def Scry.Repl.findingsStore : IO Scry.WfStore :=
+  Scry.Repl.ioOr "findings" Scry.wfEmptyStore (Scry.wfLoadStore Scry.Repl.findingsPath)
+
+def Scry.Repl.recordLine (r : Scry.WfRecord) : String :=
+  r.id ++ "  " ++ Scry.WfState.show r.state ++ "  "
+  ++ Json.getStr r.finding "rule" ++ "  " ++ Json.getStr r.finding "callee"
+  ++ "  " ++ r.source
+
+partial def Scry.Repl.printRecords : List Scry.WfRecord → IO Unit
+  | .nil => IO.pure ()
+  | .cons r rest => do
+    IO.println (Scry.Repl.recordLine r);
+    Scry.Repl.printRecords rest
+
+/-- List the recorded findings; returns their ids. -/
+partial def Scry.Repl.findings : IO (List String) := do
+  st ← Scry.Repl.findingsStore;
+  match st.findings with
+  | .nil => do
+    n ← Scry.Repl.taint;
+    match n with
+    | .zero => do
+      Scry.Repl.emit "findings: none" (Json.mkObj
+        [("schema", Json.mkStr "scry-repl/1"), ("command", Json.mkStr "findings"),
+         ("findings", Json.mkArr .nil)]);
+      IO.pure .nil
+    | _ => Scry.Repl.findings
+  | recs => do
+    Scry.Repl.emit (String.intercalate "\n" (List.map Scry.Repl.recordLine recs))
+      (Json.mkObj
+        [ ("schema", Json.mkStr "scry-repl/1"), ("command", Json.mkStr "findings")
+        , ("findings", Json.mkArr (List.map Scry.wfRecordJson recs)) ]);
+    IO.pure (List.map (fun r => r.id) recs)
+
+def Scry.Repl.show (id : String) : IO Unit := do
+  st ← Scry.Repl.findingsStore;
+  match Scry.wfFind st id with
+  | .none => IO.println ("show: no such finding: " ++ id)
+  | .some r => do
+    let human := Scry.Repl.recordLine r ++ "\n  key: " ++ r.key ++ "\n  lineHash: "
+      ++ r.lineHash ++ "\n  artifacts: " ++ r.artifacts
+      ++ "\n  static: " ++ (match r.staticRel with | .some s => s | .none => "(none)")
+      ++ "\n  dynamic: " ++ (match r.dynamicRel with | .some s => s | .none => "(none)");
+    Scry.Repl.emit human (Json.mkObj
+      [("schema", Json.mkStr "scry-repl/1"), ("command", Json.mkStr "show"),
+       ("finding", Scry.wfRecordJson r)])
+
+/-- Move a finding through the triage state machine and persist the store. -/
+def Scry.Repl.triage (id : String) (state : String) : IO Unit := do
+  st ← Scry.Repl.findingsStore;
+  match Scry.wfFind st id with
+  | .none => IO.println ("triage: no such finding: " ++ id)
+  | .some r => match Scry.WfState.parse state with
+    | .none => IO.println ("triage: unknown state \"" ++ state ++ "\"")
+    | .some to => do
+      now ← IO.bind Clock.wall (fun d => IO.pure d.ns);
+      match Scry.wfTriage r to "scry repl" "" now with
+      | .error e => IO.println ("triage: " ++ e)
+      | .ok r' => do
+        Scry.Repl.write Scry.Repl.findingsPath (Scry.wfStoreText (Scry.wfUpsert st r'));
+        Scry.Repl.emit (r'.id ++ ": " ++ Scry.WfState.show r.state ++ " -> "
+          ++ Scry.WfState.show r'.state)
+          (Json.mkObj [("schema", Json.mkStr "scry-repl/1"),
+            ("command", Json.mkStr "triage"), ("finding", Scry.wfRecordJson r')])
+
+def Scry.Repl.withDynamic (now : Nat) (r : Scry.WfRecord) : Scry.WfRecord :=
+  { r with dynamicRel := .some "dynamic.json", lastSeen := now }
+
+def Scry.Repl.emitRepro (id : String) (res : Scry.ReproResult) : IO Unit :=
+  let human := id ++ ": repro " ++ res.status ++ " (exit " ++ res.exitKind ++ " "
+    ++ Nat.repr (match String.eq res.exitKind "signaled" with
+      | .true => res.signal | .false => res.exitCode) ++ ")";
+  Scry.Repl.emit human (Json.mkObj
+    [("schema", Json.mkStr "scry-repl/1"), ("command", Json.mkStr "repro"),
+     ("finding", Json.mkStr id), ("dynamic", res.json)])
+
+/-- Build and run a reproducer for one finding, recording `dynamic.json` beside it. -/
+def Scry.Repl.repro (id : String) : IO Nat := do
+  st ← Scry.Repl.findingsStore;
+  match Scry.wfFind st id with
+  | .none => do IO.println ("repro: no such finding: " ++ id); IO.pure 1
+  | .some r => do
+    ok ← FS.exists r.source;
+    match ok with
+    | .false => do IO.println ("repro: source not found: " ++ r.source); IO.pure 1
+    | .true => do
+      Scry.Repl.ensureDir r.artifacts;
+      let cfg := Scry.ReproConfig.mk "cc" "none" .none .none "" 5 .nil .none "absent" "L0";
+      res ← Scry.Repl.ioOr "repro" (Scry.ReproResult.mk "compile-failed" "none" .false
+          .false .false .false "exited" 127 0 Json.mkNull "" .nil)
+          (Scry.reproRun cfg r.source r.artifacts "repro");
+      now ← IO.bind Clock.wall (fun d => IO.pure d.ns);
+      Scry.Repl.saveStore (Scry.wfUpsert st (Scry.Repl.withDynamic now r));
+      Scry.Repl.emitRepro r.id res;
+      IO.pure (match String.eq res.status "ran" with | .true => 0 | .false => 1)
+
+-- ## Diff-aware findings
+
+def Scry.Repl.gitDiff (base source : String) : IO (List Scry.DiffFile) := do
+  out ← Scry.wfTryOutput "git" ["diff", "-U0", "--no-color", "-M", base, "--", source] "" SpawnOptions.default;
+  match out with
+  | .none => do
+    IO.println "diff: git not found";
+    IO.pure .nil
+  | .some o => IO.pure (Scry.parseDiff o.stdout)
+
+def Scry.Repl.findingLine (r : Scry.WfRecord) : Option Nat :=
+  match Json.getPath r.finding ["location", "startLine"] with
+  | .some (.int _ n) => .some n
+  | _ => .none
+
+def Scry.Repl.inRanges (line : Nat) (rs : List (Nat × Nat)) : Bool :=
+  Scry.diffLineInRanges line rs
+
+partial def Scry.Repl.filterRanges (rs : List (Nat × Nat)) : List Scry.WfRecord → List Scry.WfRecord
+  | .nil => .nil
+  | .cons r rest => match Scry.Repl.findingLine r with
+    | .some line => match Scry.Repl.inRanges line rs with
+      | .true => List.cons r (Scry.Repl.filterRanges rs rest)
+      | .false => Scry.Repl.filterRanges rs rest
+    | .none => List.cons r (Scry.Repl.filterRanges rs rest)
+
+partial def Scry.Repl.gatherDiffs (base : String) : List String → IO (List Scry.DiffFile)
+  | .nil => IO.pure .nil
+  | .cons s rest => do
+    fs ← Scry.Repl.gitDiff base s;
+    more ← Scry.Repl.gatherDiffs base rest;
+    IO.pure (List.append fs more)
+
+/-- Show the findings on the changed lines of `git diff BASE`; `diff "all"` clears it.
+Returns the number of shown findings. -/
+def Scry.Repl.diff (base : String) : IO Nat := do
+  st ← Scry.Repl.findingsStore;
+  match String.eq base "all" with
+  | .true => do
+    let n := List.length st.findings;
+    Scry.Repl.write Scry.Repl.diffPath (Json.render (Json.mkObj
+      [("schema", Json.mkStr "scry-repl-diff/1"), ("base", Json.mkStr "all"),
+       ("ranges", Json.mkArr .nil)]));
+    Scry.Repl.emit ("diff all: " ++ Nat.repr n ++ " finding(s), no filter")
+      (Json.mkObj [("schema", Json.mkStr "scry-repl/1"), ("command", Json.mkStr "diff"),
+        ("base", Json.mkStr "all"), ("shown", Json.ofNat n), ("suppressed", Json.ofNat 0)]);
+    IO.pure n
+  | .false => do
+    let sources := List.map (fun r => r.source) st.findings;
+    files ← Scry.Repl.gatherDiffs base sources;
+    let ranges := List.concat (List.map (fun r =>
+        (Scry.diffSelect r.source 0 files).ranges) st.findings);
+    let uniq := Scry.diffMergeRanges ranges;
+    let shown := Scry.Repl.filterRanges uniq st.findings;
+    let suppressed := Nat.sub (List.length st.findings) (List.length shown);
+    Scry.Repl.write Scry.Repl.diffPath (String.append (Json.render (Json.mkObj
+      [ ("schema", Json.mkStr "scry-repl-diff/1")
+      , ("base", Json.mkStr base)
+      , ("ranges", Json.mkArr (List.map (fun p => Json.mkArr
+          [Json.ofNat p.1, Json.ofNat p.2]) uniq)) ])) "\n");
+    let human := "diff " ++ base ++ ": " ++ Nat.repr (List.length uniq) ++ " changed range(s), "
+      ++ Nat.repr (List.length shown) ++ " shown, " ++ Nat.repr suppressed ++ " suppressed"
+      ++ (match shown with | .nil => "" | _ => "\n"
+          ++ String.intercalate "\n" (List.map Scry.Repl.recordLine shown));
+    Scry.Repl.emit human (Json.mkObj
+      [ ("schema", Json.mkStr "scry-repl/1"), ("command", Json.mkStr "diff")
+      , ("base", Json.mkStr base)
+      , ("ranges", Json.mkArr (List.map (fun p => Json.mkArr
+          [Json.ofNat p.1, Json.ofNat p.2]) uniq))
+      , ("shown", Json.ofNat (List.length shown))
+      , ("suppressed", Json.ofNat suppressed)
+      , ("findings", Json.mkArr (List.map Scry.wfRecordJson shown)) ]);
+    IO.pure (List.length shown)
+
+-- ## Composable CST accessors (Joern's `u.methods`, `u.calls`)
+
+structure Scry.Repl.CallSite where
+  function : String
+  callee : String
+  line : Nat
+  column : Nat
+  source : String
+
+def Scry.Repl.callSiteJson (c : Scry.Repl.CallSite) : Json := Json.mkObj
+  [("function", Json.mkStr c.function), ("callee", Json.mkStr c.callee),
+   ("source", Json.mkStr c.source), ("line", Json.ofNat c.line),
+   ("column", Json.ofNat c.column)]
+
+partial def Scry.Repl.sourceAt (text : String) (sp : Scry.Span) : String :=
+  String.take (Nat.sub sp.stop sp.start) (String.drop sp.start text)
+
+partial def Scry.Repl.childWithField (f : Scry.Facts) (id : Nat) (field : String) :
+    Option Scry.NodeId :=
+  match List.find (fun p => String.eq p.2 field) (Scry.arcsAt f.out id) with
+  | .some p => .some p.1
+  | .none => .none
+
+partial def Scry.Repl.functionNameOf (f : Scry.Facts) (text : String) (id : Nat) (fuel : Nat) :
+    Option String :=
+  match fuel with
+  | .zero => .none
+  | .succ k => match Scry.findNode f.nodes (Scry.nodeId id) with
+    | .none => .none
+    | .some n => match String.eq n.kind "identifier" with
+      | .true => .some (Scry.Repl.sourceAt text n.span)
+      | .false => match Scry.Repl.childWithField f id "declarator" with
+        | .some c => Scry.Repl.functionNameOf f text c.n k
+        | .none => match Scry.Repl.childWithField f id "name" with
+          | .some c => Scry.Repl.functionNameOf f text c.n k
+          | .none => .none
+
+partial def Scry.Repl.enclosingFunction (f : Scry.Facts) (text : String) (id : Nat) (fuel : Nat) :
+    Option String :=
+  match fuel with
+  | .zero => .none
+  | .succ k => match Scry.findNode f.nodes (Scry.nodeId id) with
+    | .none => .none
+    | .some n => match String.eq n.kind "function_definition" with
+      | .true => Scry.Repl.functionNameOf f text id (Nat.succ k)
+      | .false => match n.parent with
+        | .some p => Scry.Repl.enclosingFunction f text p.n k
+        | .none => .none
+
+partial def Scry.Repl.filterMap {A B : Type} (f : A → Option B) : List A → List B
+  | .nil => .nil
+  | .cons x xs => match f x with
+    | .some y => List.cons y (Scry.Repl.filterMap f xs)
+    | .none => Scry.Repl.filterMap f xs
+
+partial def Scry.Repl.functionsOf (f : Scry.Facts) (text : String) : List String :=
+  Scry.Repl.filterMap (fun n => match String.eq n.kind "function_definition" with
+    | .true => Scry.Repl.functionNameOf f text n.id.n 8
+    | .false => .none) f.nodes
+
+/-- Names of the functions defined in the loaded units. -/
+partial def Scry.Repl.functionsGo (acc : List String) : List Scry.Repl.Unit → IO (List String)
+  | .nil => IO.pure acc
+  | .cons u rest => do
+    f ← Scry.Repl.unitFacts u;
+    text ← Scry.Repl.unitText u;
+    match f with
+    | .some f => Scry.Repl.functionsGo (List.append acc (Scry.Repl.functionsOf f text)) rest
+    | .none => Scry.Repl.functionsGo acc rest
+
+def Scry.Repl.functions : IO (List String) := do
+  us ← Scry.Repl.readUnits;
+  fs ← Scry.Repl.functionsGo .nil us;
+  Scry.Repl.emit ("functions: " ++ Nat.repr (List.length fs) ++ "\n"
+      ++ String.intercalate "\n" (List.map (fun s => "  " ++ s) fs))
+    (Json.mkObj [("schema", Json.mkStr "scry-repl/1"),
+      ("command", Json.mkStr "functions"),
+      ("functions", Json.mkArr (List.map Json.mkStr fs))]);
+  IO.pure fs
+
+partial def Scry.Repl.callsOf (f : Scry.Facts) (text : String) (callee : String) :
+    List Scry.Repl.CallSite :=
+  Scry.Repl.filterMap (fun n => match String.eq n.kind "call_expression" with
+    | .true => match Scry.Repl.childWithField f n.id.n "function" with
+      | .some fid => match Scry.findNode f.nodes fid with
+        | .some fn => match String.eq (Scry.Repl.sourceAt text fn.span) callee with
+          | .true =>
+            let (line, col) := Scry.lineColAt text n.span.start;
+            .some (Scry.Repl.CallSite.mk
+              (match Scry.Repl.enclosingFunction f text n.id.n 64 with
+                | .some x => x | .none => "?")
+              callee line col (Scry.Repl.sourceAt text n.span))
+          | .false => .none
+        | .none => .none
+      | .none => .none
+    | .false => .none) f.nodes
+
+/-- Call sites of `callee` across the loaded units. -/
+partial def Scry.Repl.callsGo (callee : String) (acc : List Scry.Repl.CallSite) :
+    List Scry.Repl.Unit → IO (List Scry.Repl.CallSite)
+  | .nil => IO.pure acc
+  | .cons u rest => do
+    f ← Scry.Repl.unitFacts u;
+    text ← Scry.Repl.unitText u;
+    match f with
+    | .some f => Scry.Repl.callsGo callee (List.append acc (Scry.Repl.callsOf f text callee)) rest
+    | .none => Scry.Repl.callsGo callee acc rest
+
+def Scry.Repl.calls (callee : String) : IO (List Scry.Repl.CallSite) := do
+  us ← Scry.Repl.readUnits;
+  cs ← Scry.Repl.callsGo callee .nil us;
+  Scry.Repl.emit ("calls " ++ callee ++ ": " ++ Nat.repr (List.length cs)
+      ++ "\n" ++ String.intercalate "\n" (List.map (fun c => "  " ++ c.function ++ ":"
+          ++ Nat.repr c.line ++ ":" ++ Nat.repr c.column ++ "  " ++ c.source) cs))
+    (Json.mkObj [("schema", Json.mkStr "scry-repl/1"),
+      ("command", Json.mkStr "calls"), ("callee", Json.mkStr callee),
+      ("calls", Json.mkArr (List.map Scry.Repl.callSiteJson cs))]);
+  IO.pure cs
+
+partial def Scry.Repl.uniqCallers (acc : List String) : List Scry.Repl.CallSite → List String
+  | .nil => acc
+  | .cons c rest => match List.any (fun x => String.eq x c.function) acc with
+    | .true => Scry.Repl.uniqCallers acc rest
+    | .false => Scry.Repl.uniqCallers (List.append acc (List.cons c.function .nil)) rest
+
+/-- Functions that call `callee` (deduplicated). -/
+def Scry.Repl.callers (callee : String) : IO (List String) := do
+  cs ← Scry.Repl.calls callee;
+  let fs := Scry.Repl.uniqCallers .nil cs;
+  Scry.Repl.emit ("callers " ++ callee ++ ": " ++ Nat.repr (List.length fs) ++ "\n"
+      ++ String.intercalate "\n" (List.map (fun s => "  " ++ s) fs))
+    (Json.mkObj [("schema", Json.mkStr "scry-repl/1"),
+      ("command", Json.mkStr "callers"), ("callee", Json.mkStr callee),
+      ("callers", Json.mkArr (List.map Json.mkStr fs))]);
+  IO.pure fs
+
+-- ## Taint paths as values
+
+def Scry.Repl.pathKindOf (s : String) : Scry.PathKind :=
+  match s with
+  | "source" => .source | "parameter" => .param | "call" => .call
+  | "return" => .returnSeed | "return-value" => .returnValue | "flow" => .flow
+  | "store" => .store | "load" => .load | "sink" => .sink
+  | "recursion" => .recursion | "assumed" => .assumed | _ => .flow
+
+def Scry.Repl.pathOfJson : List Json → List Scry.PathNode
+  | .nil => .nil
+  | .cons j rest => List.cons (Scry.PathNode.mk
+      (Json.getStr j "function")
+      (match Json.get j "point" with | .some (.int _ n) => n | _ => 0)
+      (match Json.get j "var" with | .some (.int _ n) => n | _ => 0)
+      (Scry.Repl.pathKindOf (Json.getStr j "kind"))) (Scry.Repl.pathOfJson rest)
+
+def Scry.Repl.findingOfRecord (r : Scry.WfRecord) : Scry.Repl.Finding :=
+  Scry.Repl.Finding.mk r.id (Scry.WfState.show r.state)
+    (Json.getStr r.finding "rule") (Json.getStr r.finding "callee") r.source
+    (match Json.get r.finding "location" with | .some l => l | .none => Json.mkNull)
+    (Scry.Repl.pathOfJson (Json.getList r.finding "path"))
+
+/-- Findings as values (id, rule, sink, path) for filtering and mapping. -/
+partial def Scry.Repl.taintPaths : IO (List Scry.Repl.Finding) := do
+  st ← Scry.Repl.findingsStore;
+  match st.findings with
+  | .nil => do
+    n ← Scry.Repl.taint;
+    match n with
+    | .zero => IO.pure .nil
+    | _ => Scry.Repl.taintPaths
+  | recs => IO.pure (List.map Scry.Repl.findingOfRecord recs)

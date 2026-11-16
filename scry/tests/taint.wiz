@@ -1,0 +1,512 @@
+-- test: run
+import Sys
+import Json
+import Scry.TaintCmd
+import Scry.Interproc
+import Scry.Sarif
+import Scry.Certify
+-- `scry taint` end to end over the fixtures in `fixtures/`:
+--
+--   unsafe      getenv -> system (one command-injection finding, checked)
+--   safe        the same with escape_shell (the sanitiser; no finding)
+--   chain       argument taint crosses a direct call into `run`'s sink
+--   clean       no source and no sink (zero findings)
+--   boundary    a struct field is havoc plus a lowering-boundary warning
+--   macro       BEGIN/END macros leave ERROR nodes; refused unless --allow-errors
+--   model-*     external function models: exec argv, sprintf copy/format, strcpy,
+--               read/recv buffers, realloc, a policy sanitiser and the explicit
+--               unmodelled-external warning
+--
+-- It also checks the CLI's SARIF shape (version, driver, result, physical location and
+-- related spans), `--fail-on-finding` exit status, and that `--sarif` writes a parseable
+-- file. Spans come from `Wil.Span` through `Scry.originEntries`.
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+def opts (args : List String) : EIO Scry.TaintOpts :=
+  match Scry.taintArgs args with
+  | .ok o => EIO.pure o
+  | .error e => EIO.fail e
+
+partial def jAt (j : Json) (path : List String) : Json :=
+  match path with
+  | .nil => j
+  | .cons k rest => match Json.get j k with
+    | .some x => jAt x rest
+    | .none => Json.mkNull
+
+def jNat (j : Json) (path : List String) : Nat :=
+  match jAt j path with
+  | .int _ n => n
+  | _ => 0
+
+def jStr (j : Json) (path : List String) : String :=
+  match jAt j path with
+  | .str s => s
+  | _ => ""
+
+def nthJ (xs : List Json) (i : Nat) : Json := Scry.nthD Json.mkNull xs i
+
+def jList (j : Json) (path : List String) : List Json :=
+  match jAt j path with
+  | .arr xs => Jsons.toList xs
+  | _ => .nil
+
+def firstFunc : List Scry.PathNode → String
+  | .nil => ""
+  | .cons p _ => p.func
+
+def lastFunc : List Scry.PathNode → String
+  | .nil => ""
+  | .cons p .nil => p.func
+  | .cons _ ps => lastFunc ps
+
+def pathHasKind (path : List Scry.PathNode) (k : String) : Bool :=
+  List.any (fun p => String.eq (Scry.PathKind.show p.kind) k) path
+
+def findingPath (f : Scry.RuleFinding) : List Scry.PathNode := f.path
+
+/-- Does the points-to table contain a location of this kind? -/
+def hasLocKind (rep : Scry.TaintReport) (k : String) : Bool :=
+  List.any (fun i => String.eq (Scry.locKindAt rep.pointsTo i) k)
+    (Scry.range (Scry.ptLocCount rep.pointsTo))
+
+def memKinds (rep : Scry.TaintReport) : List String :=
+  List.map (fun b => b.rule) rep.memory
+
+def firstFinding (rep : Scry.TaintReport) : Option Scry.RuleFinding :=
+  match rep.findings with
+  | .cons f _ => .some f
+  | .nil => .none
+
+def checkOne (label : String) (rep : Scry.TaintReport) (rule func : String) : EIO Unit := do
+  check (label ++ ": one finding") (Nat.beq (List.length rep.findings) 1);
+  check (label ++ ": checked") (List.all (fun b => b) rep.checks);
+  match firstFinding rep with
+  | .some f => do
+    check (label ++ ": rule " ++ rule) (String.eq f.rule rule);
+    check (label ++ ": sink function " ++ func) (String.eq f.func func);
+    check (label ++ ": sink span known")
+      (match Scry.originAt rep.origins f.func f.sink with
+        | .some o => Nat.lt 0 o.line
+        | .none => .false)
+  | .none => check (label ++ ": finding exists") .false
+
+def main : IO Unit := EIO.toIO (do
+  -- unsafe: one taint finding, checked, no boundary warning
+  o1 ← opts ["tests/fixtures/taint-unsafe.c"];
+  rep1 ← Scry.analyzeFile o1;
+  checkOne "unsafe" rep1 "command-injection" "main";
+  check "unsafe: no lowering-boundary warning" (Nat.beq (List.length rep1.boundaries) 0);
+  check "unsafe: no parse errors" (Nat.beq rep1.parseErrors 0);
+
+  -- safe: the result sanitiser kills the flow
+  o2 ← opts ["tests/fixtures/taint-safe.c"];
+  rep2 ← Scry.analyzeFile o2;
+  check "safe: zero findings" (Nat.beq (List.length rep2.findings) 0);
+  check "safe: zero boundary warnings" (Nat.beq (List.length rep2.boundaries) 0);
+
+  -- call chain: argument taint reaches the callee's sink, path starts in main
+  o3 ← opts ["tests/fixtures/taint-chain.c"];
+  rep3 ← Scry.analyzeFile o3;
+  checkOne "chain" rep3 "command-injection" "run";
+  match firstFinding rep3 with
+  | .some f => do
+    check "chain: path starts in main" (String.eq (firstFunc f.path) "main");
+    check "chain: path ends in run" (String.eq (lastFunc f.path) "run")
+  | .none => check "chain: finding exists" .false;
+
+  -- exec family: system and every exec variant is a command sink. execl/execlp are
+  -- variadic, so the tainted word is argument 3, not the program path at argument 0.
+  oE1 ← opts ["tests/fixtures/taint-exec-unsafe.c"];
+  repE1 ← Scry.analyzeFile oE1;
+  check "exec: eight findings" (Nat.beq (List.length repE1.findings) 8);
+  check "exec: every finding is command-injection"
+    (List.all (fun f => String.eq f.rule "command-injection") repE1.findings);
+  check "exec: every finding is checked" (List.all (fun b => b) repE1.checks);
+  check "exec: covers execl/execlp/execv/execvp/execve/posix_spawn/posix_spawnp/system"
+    (List.all (fun name => List.any (fun f => String.eq f.name name) repE1.findings)
+      ["execl", "execlp", "execv", "execvp", "execve", "posix_spawn", "posix_spawnp", "system"]);
+  check "exec: execl reports the tainted word at argument 3"
+    (List.any (fun f => Bool.and (String.eq f.name "execl") (Nat.beq f.arg 3))
+      repE1.findings);
+  check "exec: no memory warnings" (Nat.beq (List.length repE1.memory) 0);
+  let sarifExec := Scry.renderSarifWith "scry" repE1.origins repE1.pack
+    (Scry.zipFindings repE1.findings repE1.checks)
+    (List.map (fun b => Scry.boundaryResultJson b.rule b.origin b.func b.point b.message)
+      (List.append repE1.boundaries repE1.memory));
+  match Json.parse sarifExec with
+  | .error e => check ("exec sarif: parses (" ++ e ++ ")") .false
+  | .ok jE => do
+    let runE := nthJ (Json.getList jE "runs") 0;
+    let execResults := Json.getList runE "results";
+    check "exec sarif: eight command-injection results"
+      (Nat.beq (List.length (List.filter (fun r =>
+          String.eq (jStr r ["ruleId"]) "scry/c/command-injection") execResults)) 8);
+    check "exec sarif: namespaced command-injection id"
+      (String.eq (jStr (nthJ (Json.getList runE "results") 0) ["ruleId"])
+        "scry/c/command-injection");
+    check "exec sarif: execl descriptor has the any-argument selector"
+      (match List.find (fun r => String.eq (jStr r ["name"]) "command-injection")
+          (jList (jAt runE ["tool", "driver"]) ["rules"]) with
+        | .none => .false
+        | .some r => List.any (fun s =>
+            Bool.and (String.eq (jStr s ["name"]) "execl")
+              (String.eq (jStr s ["argument"]) "any"))
+            (jList (jAt r ["properties"]) ["sinks"]));
+
+  -- the same calls with a constant command: no source, no finding
+  oE2 ← opts ["tests/fixtures/taint-exec-safe.c"];
+  repE2 ← Scry.analyzeFile oE2;
+  check "exec-safe: zero findings" (Nat.beq (List.length repE2.findings) 0);
+
+  -- exported C-ABI entry: an external-linkage function with no caller in the unit has
+  -- attacker-controlled parameters, even though no getenv/recv appears in the file
+  oN1 ← opts ["tests/fixtures/taint-entry-unsafe.c"];
+  repN1 ← Scry.analyzeFile oN1;
+  checkOne "entry" repN1 "command-injection" "iv_spawn";
+  match firstFinding repN1 with
+  | .some f => do
+    check "entry: execl argument 3" (Bool.and (String.eq f.name "execl") (Nat.beq f.arg 3));
+    check "entry: path starts at a source" (pathHasKind f.path "source")
+  | .none => check "entry: finding exists" .false;
+
+  -- precision: an internally called function is not an entry, and a static function is
+  -- internal even when nothing calls it
+  oN2 ← opts ["tests/fixtures/taint-entry-safe.c"];
+  repN2 ← Scry.analyzeFile oN2;
+  check "entry-safe: zero findings" (Nat.beq (List.length repN2.findings) 0);
+
+  -- clean: no source, no sink
+  o4 ← opts ["tests/fixtures/taint-clean.c"];
+  rep4 ← Scry.analyzeFile o4;
+  check "clean: zero findings" (Nat.beq (List.length rep4.findings) 0);
+  check "clean: zero boundary warnings" (Nat.beq (List.length rep4.boundaries) 0);
+
+  -- boundary: havoc is a warning, not a silent false negative
+  o5 ← opts ["tests/fixtures/taint-boundary.c"];
+  rep5 ← Scry.analyzeFile o5;
+  check "boundary: zero findings" (Nat.beq (List.length rep5.findings) 0);
+  check "boundary: two havoc warnings" (Nat.beq (List.length rep5.boundaries) 2);
+  check "boundary: warnings are unchecked" (List.all (fun b => match b.origin with
+    | .some _ => .true | .none => .false) rep5.boundaries);
+  check "boundary: spans are on the offending statements"
+    (match rep5.boundaries with
+      | .cons a (.cons b _) => match a.origin, b.origin with
+        | .some x, .some y => Bool.and (Nat.lt 0 x.line)
+            (Bool.and (Nat.lt 0 y.line) (Bool.not (Nat.beq x.line y.line)))
+        | _, _ => .false
+      | _ => .false);
+
+  -- memory: store then load through the same stack slot is a flow
+  oM1 ← opts ["tests/fixtures/mem-slot.c"];
+  repM1 ← Scry.analyzeFile oM1;
+  checkOne "mem-slot" repM1 "command-injection" "main";
+  check "mem-slot: no memory warnings" (Nat.beq (List.length repM1.memory) 0);
+  check "mem-slot: path goes through memory"
+    (List.all (fun b => b) (List.map (fun f =>
+      Bool.and (pathHasKind f.path "store") (pathHasKind f.path "load")) repM1.findings));
+  check "mem-slot: a stack slot is a location" (hasLocKind repM1 "stack");
+
+  -- memory: a different slot is a known no-alias
+  oM2 ← opts ["tests/fixtures/mem-distinct.c"];
+  repM2 ← Scry.analyzeFile oM2;
+  check "mem-distinct: zero findings" (Nat.beq (List.length repM2.findings) 0);
+  check "mem-distinct: zero memory warnings" (Nat.beq (List.length repM2.memory) 0);
+  check "mem-distinct: two stack slots, no unknown"
+    (Bool.and (Nat.beq (List.length (List.filter (fun i =>
+        String.eq (Scry.locKindAt repM2.pointsTo i) "stack")
+        (Scry.range (Scry.ptLocCount repM2.pointsTo)))) 2)
+      (Bool.not (hasLocKind repM2 "unknown")));
+
+  -- memory: struct fields are separate cells; a global's field flows too
+  oM3 ← opts ["tests/fixtures/mem-struct.c"];
+  repM3 ← Scry.analyzeFile oM3;
+  check "mem-struct: two findings (s.x and g.x)"
+    (Nat.beq (List.length repM3.findings) 2);
+  check "mem-struct: no memory warnings" (Nat.beq (List.length repM3.memory) 0);
+  check "mem-struct: both sinks are in main"
+    (List.all (fun f => String.eq f.func "main") repM3.findings);
+  check "mem-struct: field and global locations"
+    (Bool.and (hasLocKind repM3 "field") (hasLocKind repM3 "global"));
+
+  -- memory: array elements are separate cells
+  oM4 ← opts ["tests/fixtures/mem-array.c"];
+  repM4 ← Scry.analyzeFile oM4;
+  check "mem-array: one finding" (Nat.beq (List.length repM4.findings) 1);
+  check "mem-array: no memory warnings" (Nat.beq (List.length repM4.memory) 0);
+
+  -- memory: a heap object carries the flow, and free after the last use is clean
+  oM5 ← opts ["tests/fixtures/mem-heap.c"];
+  repM5 ← Scry.analyzeFile oM5;
+  checkOne "mem-heap" repM5 "command-injection" "main";
+  check "mem-heap: no memory warnings" (Nat.beq (List.length repM5.memory) 0);
+  check "mem-heap: a heap location" (hasLocKind repM5 "heap");
+
+  -- memory: pointer-to-pointer
+  oM6 ← opts ["tests/fixtures/mem-ptrptr.c"];
+  repM6 ← Scry.analyzeFile oM6;
+  checkOne "mem-ptrptr" repM6 "command-injection" "main";
+  check "mem-ptrptr: no memory warnings" (Nat.beq (List.length repM6.memory) 0);
+
+  -- memory: aliased parameters (both refer to main's x)
+  oM7 ← opts ["tests/fixtures/mem-params.c"];
+  repM7 ← Scry.analyzeFile oM7;
+  checkOne "mem-params" repM7 "command-injection" "sink_q";
+  match firstFinding repM7 with
+  | .some f => check "mem-params: path starts in main" (String.eq (firstFunc f.path) "main")
+  | .none => check "mem-params: finding exists" .false;
+
+  -- memory: use after free is reported and the flow is still kept
+  oM8 ← opts ["tests/fixtures/mem-free.c"];
+  repM8 ← Scry.analyzeFile oM8;
+  checkOne "mem-free" repM8 "command-injection" "main";
+  check "mem-free: one use-after-free warning"
+    (Bool.and (Nat.beq (List.length repM8.memory) 1)
+      (List.all (fun s => String.eq s "scry/memory/use-after-free") (memKinds repM8)));
+
+  -- memory: an indirect call with a known target propagates
+  oM9 ← opts ["tests/fixtures/mem-indirect.c"];
+  repM9 ← Scry.analyzeFile oM9;
+  checkOne "mem-indirect" repM9 "command-injection" "tainted_sink";
+  check "mem-indirect: no memory warnings" (Nat.beq (List.length repM9.memory) 0);
+  match firstFinding repM9 with
+  | .some f => check "mem-indirect: path starts in main"
+      (String.eq (firstFunc f.path) "main")
+  | .none => check "mem-indirect: finding exists" .false;
+
+  -- memory: a returned pointer's summary carries the target across the call
+  oM11 ← opts ["tests/fixtures/mem-ret.c"];
+  repM11 ← Scry.analyzeFile oM11;
+  checkOne "mem-ret" repM11 "command-injection" "main";
+  check "mem-ret: no memory warnings" (Nat.beq (List.length repM11.memory) 0);
+  check "mem-ret: a global location" (hasLocKind repM11 "global");
+
+  -- memory: an external copy model (strcpy) taints the destination object only
+  oM12 ← opts ["tests/fixtures/mem-external.c"];
+  repM12 ← Scry.analyzeFile oM12;
+  check "mem-external: one finding" (Nat.beq (List.length repM12.findings) 1);
+  check "mem-external: no memory warnings" (Nat.beq (List.length repM12.memory) 0);
+  check "mem-external: no lowering-boundary warning"
+    (Nat.beq (List.length repM12.boundaries) 0);
+
+  -- memory: a variable index keeps the array base (a[i] flows, b[i] does not)
+  oM13 ← opts ["tests/fixtures/mem-array-var.c"];
+  repM13 ← Scry.analyzeFile oM13;
+  check "mem-array-var: one finding" (Nat.beq (List.length repM13.findings) 1);
+  check "mem-array-var: no memory warnings" (Nat.beq (List.length repM13.memory) 0);
+
+  -- external models: exec family, sprintf/snprintf, strcpy family, read/recv, and alloc
+  oModel1 ← opts ["tests/fixtures/model-exec.c"];
+  repModel1 ← Scry.analyzeFile oModel1;
+  checkOne "model-exec" repModel1 "command-injection" "main";
+  match firstFinding repModel1 with
+  | .some f => check "model-exec: the variadic argv argument is the sink"
+      (Bool.and (Nat.beq f.arg 3) (String.eq f.name "execl"))
+  | .none => check "model-exec: finding exists" .false;
+  check "model-exec: no memory warnings" (Nat.beq (List.length repModel1.memory) 0);
+
+  oModel2 ← opts ["tests/fixtures/model-exec-safe.c"];
+  repModel2 ← Scry.analyzeFile oModel2;
+  check "model-exec-safe: zero findings" (Nat.beq (List.length repModel2.findings) 0);
+
+  oModel3 ← opts ["tests/fixtures/model-sprintf-copy.c"];
+  repModel3 ← Scry.analyzeFile oModel3;
+  checkOne "model-sprintf-copy" repModel3 "command-injection" "main";
+  match firstFinding repModel3 with
+  | .some f => check "model-sprintf-copy: the sink is system, not sprintf"
+      (Bool.and (Nat.beq f.arg 0) (String.eq f.name "system"))
+  | .none => check "model-sprintf-copy: finding exists" .false;
+
+  oModel4 ← opts ["tests/fixtures/model-sprintf-format.c"];
+  repModel4 ← Scry.analyzeFile oModel4;
+  checkOne "model-sprintf-format" repModel4 "format-string" "main";
+  match firstFinding repModel4 with
+  | .some f => check "model-sprintf-format: the format argument"
+      (Bool.and (Nat.beq f.arg 1) (String.eq f.name "sprintf"))
+  | .none => check "model-sprintf-format: finding exists" .false;
+
+  oModelS1 ← opts ["tests/fixtures/model-snprintf-copy.c"];
+  repModelS1 ← Scry.analyzeFile oModelS1;
+  checkOne "model-snprintf-copy" repModelS1 "command-injection" "main";
+  match firstFinding repModelS1 with
+  | .some f => check "model-snprintf-copy: the sink is system"
+      (Bool.and (Nat.beq f.arg 0) (String.eq f.name "system"))
+  | .none => check "model-snprintf-copy: finding exists" .false;
+
+  oModelS2 ← opts ["tests/fixtures/model-snprintf-length.c"];
+  repModelS2 ← Scry.analyzeFile oModelS2;
+  check "model-snprintf-length: one buffer-overflow finding"
+    (Bool.and (Nat.beq (List.length repModelS2.findings) 1)
+      (match firstFinding repModelS2 with
+        | .some f => Bool.and (String.eq f.rule "buffer-overflow")
+            (Bool.and (Nat.beq f.arg 1) (String.eq f.name "snprintf"))
+        | .none => .false));
+
+  oModelC ← opts ["tests/fixtures/model-calloc.c"];
+  repModelC ← Scry.analyzeFile oModelC;
+  check "model-calloc: forbidden and copy findings"
+    (Bool.and (Nat.beq (List.length repModelC.findings) 2)
+      (List.all (fun f => Bool.or (String.eq f.rule "strcpy-overflow")
+        (String.eq f.rule "command-injection")) repModelC.findings));
+
+  oModel5 ← opts ["tests/fixtures/model-strcpy.c"];
+  repModel5 ← Scry.analyzeFile oModel5;
+  check "model-strcpy: forbidden and copy findings"
+    (Bool.and (Nat.beq (List.length repModel5.findings) 2)
+      (List.all (fun f => Bool.or (String.eq f.rule "strcpy-overflow")
+        (String.eq f.rule "command-injection")) repModel5.findings));
+
+  oModel6 ← opts ["tests/fixtures/model-strncpy-safe.c"];
+  repModel6 ← Scry.analyzeFile oModel6;
+  check "model-strncpy-safe: zero findings" (Nat.beq (List.length repModel6.findings) 0);
+
+  oModel7 ← opts ["tests/fixtures/model-read.c"];
+  repModel7 ← Scry.analyzeFile oModel7;
+  checkOne "model-read" repModel7 "command-injection" "main";
+  check "model-read: no memory warnings" (Nat.beq (List.length repModel7.memory) 0);
+
+  oModel8 ← opts ["tests/fixtures/model-recv.c"];
+  repModel8 ← Scry.analyzeFile oModel8;
+  checkOne "model-recv" repModel8 "command-injection" "main";
+  check "model-recv: no memory warnings" (Nat.beq (List.length repModel8.memory) 0);
+
+  oModel9 ← opts ["tests/fixtures/model-realloc.c"];
+  repModel9 ← Scry.analyzeFile oModel9;
+  check "model-realloc: forbidden and copy findings"
+    (Bool.and (Nat.beq (List.length repModel9.findings) 2)
+      (List.all (fun f => Bool.or (String.eq f.rule "strcpy-overflow")
+        (String.eq f.rule "command-injection")) repModel9.findings));
+  check "model-realloc: no use-after-free from realloc"
+    (Nat.beq (List.length repModel9.memory) 0);
+
+  oModel10 ← opts ["tests/fixtures/model-sanitise.c"];
+  repModel10 ← Scry.analyzeFile oModel10;
+  check "model-sanitise: zero findings" (Nat.beq (List.length repModel10.findings) 0);
+
+  oModel11 ← opts ["tests/fixtures/model-unknown.c"];
+  repModel11 ← Scry.analyzeFile oModel11;
+  check "model-unknown: zero findings" (Nat.beq (List.length repModel11.findings) 0);
+  check "model-unknown: an explicit unmodelled-external warning"
+    (Bool.and (Nat.beq (List.length repModel11.memory) 1)
+      (List.all (fun s => String.eq s "scry/memory/unmodelled-external") (memKinds repModel11)));
+
+  -- memory: an unmodelled external's pointer is unknown: taint flows, both accesses warn
+  oM14 ← opts ["tests/fixtures/mem-unknown.c"];
+  repM14 ← Scry.analyzeFile oM14;
+  check "mem-unknown: one finding (the flow is kept)" (Nat.beq (List.length repM14.findings) 1);
+  check "mem-unknown: two unknown-memory warnings and one explicit unmodelled call"
+    (Bool.and (Nat.beq (List.length repM14.memory) 3)
+      (Bool.and (List.any (fun s => String.eq s "scry/memory/unmodelled-external") (memKinds repM14))
+        (Nat.beq (List.length (List.filter (fun s => String.eq s "scry/memory/unknown-memory") (memKinds repM14))) 2)));
+  check "mem-unknown: an unknown location" (hasLocKind repM14 "unknown");
+
+  -- memory: an unresolved indirect call is unknown and warned, not silently dropped
+  oM10 ← opts ["tests/fixtures/mem-indirect-unknown.c"];
+  repM10 ← Scry.analyzeFile oM10;
+  check "mem-indirect-unknown: zero findings" (Nat.beq (List.length repM10.findings) 0);
+  check "mem-indirect-unknown: one unknown-indirect warning"
+    (Bool.and (Nat.beq (List.length repM10.memory) 1)
+      (List.all (fun s => String.eq s "scry/memory/unknown-indirect") (memKinds repM10)));
+  check "mem-indirect-unknown: an unknown location" (hasLocKind repM10 "unknown");
+
+  -- parse errors: refused by default, recovered with --allow-errors
+  o6 ← opts ["tests/fixtures/taint-macro-errors.c"];
+  r6 ← EIO.lift (Scry.analyzeFile o6);
+  check "macro errors: refused without --allow-errors"
+    (match r6 with | .error _ => .true | .ok _ => .false);
+  o6a ← opts ["tests/fixtures/taint-macro-errors.c", "--allow-errors"];
+  rep6 ← Scry.analyzeFile o6a;
+  check "macro errors: recovered with --allow-errors" (Nat.lt 0 rep6.parseErrors);
+  check "macro errors: not a silent empty unit"
+    (List.any (fun b => String.eq b.rule "scry/lowering/parse-recovery") rep6.boundaries);
+
+  -- parse recovery: tree-sitter puts every function after the syntax error into one
+  -- top-level ERROR. The lowering must unwrap it, keep the facts and report the
+  -- recovered strcpy calls instead of an empty unit with zero findings.
+  o7 ← opts ["tests/fixtures/taint-recovery-wizard.c", "--allow-errors"];
+  rep7 ← Scry.analyzeFile o7;
+  check "recovery wizard: parse errors" (Nat.lt 0 rep7.parseErrors);
+  check "recovery wizard: functions recovered"
+    (Nat.le 2 (List.length rep7.tu.funcs));
+  check "recovery wizard: two strcpy findings"
+    (Bool.and (Nat.beq (List.length rep7.findings) 2)
+      (List.all (fun f => Bool.and (String.eq f.rule "strcpy-overflow")
+        (String.eq f.name "strcpy")) rep7.findings));
+  check "recovery wizard: sink spans known"
+    (List.all (fun f => match Scry.originAt rep7.origins f.func f.sink with
+      | .some o => Nat.lt 0 o.line
+      | .none => .false) rep7.findings);
+  check "recovery wizard: parse-recovery warning"
+    (List.any (fun b => String.eq b.rule "scry/lowering/parse-recovery")
+      rep7.boundaries);
+
+  o8 ← opts ["tests/fixtures/taint-recovery-droste.c", "--allow-errors"];
+  rep8 ← Scry.analyzeFile o8;
+  check "recovery droste: parse errors" (Nat.lt 0 rep8.parseErrors);
+  check "recovery droste: functions recovered"
+    (Nat.le 2 (List.length rep8.tu.funcs));
+  check "recovery droste: two strcpy findings"
+    (Bool.and (Nat.beq (List.length rep8.findings) 2)
+      (List.all (fun f => Bool.and (String.eq f.rule "strcpy-overflow")
+        (String.eq f.name "strcpy")) rep8.findings));
+  check "recovery droste: sink spans known"
+    (List.all (fun f => match Scry.originAt rep8.origins f.func f.sink with
+      | .some o => Nat.lt 0 o.line
+      | .none => .false) rep8.findings);
+  check "recovery droste: parse-recovery warning"
+    (List.any (fun b => String.eq b.rule "scry/lowering/parse-recovery")
+      rep8.boundaries);
+
+  -- SARIF 2.1.0 shape, derivation status, primary span and related spans
+  let sarifText := Scry.renderSarifWith "scry" rep1.origins rep1.pack
+    (Scry.zipFindings rep1.findings rep1.checks)
+    (List.map (fun b => Scry.boundaryResultJson b.rule b.origin b.func b.point b.message)
+      rep1.boundaries);
+  match Json.parse sarifText with
+  | .error e => check ("sarif: parses (" ++ e ++ ")") .false
+  | .ok j => do
+    check "sarif: version 2.1.0" (String.eq (Json.getStr j "version") "2.1.0");
+    check "sarif: one run" (Nat.beq (List.length (Json.getList j "runs")) 1);
+    let run := nthJ (Json.getList j "runs") 0;
+    check "sarif: driver name" (String.eq (jStr run ["tool", "driver", "name"]) "scry");
+    check "sarif: six rule descriptors (four pack rules and two model rules)"
+      (Nat.beq (List.length (Json.getList (jAt run ["tool", "driver"]) "rules")) 6);
+    check "sarif: one result" (Nat.beq (List.length (Json.getList run "results")) 1);
+    let res := nthJ (Json.getList run "results") 0;
+    check "sarif: rule id" (String.eq (Json.getStr res "ruleId") "scry/c/command-injection");
+    check "sarif: namespaced rule descriptor"
+      (String.eq (jStr (nthJ (jList (jAt run ["tool", "driver"]) ["rules"]) 0) ["id"])
+        "scry/c/command-injection");
+    check "sarif: utf16 column kind"
+      (String.eq (Json.getStr run "columnKind") "utf16CodeUnits");
+    check "sarif: derivation checked" (String.eq (jStr res ["properties", "derivation"]) "checked");
+    let locs := jList res ["locations"];
+    check "sarif: one primary location" (Nat.beq (List.length locs) 1);
+    check "sarif: primary span line"
+      (Nat.lt 0 (jNat (nthJ locs 0) ["physicalLocation", "region", "startLine"]));
+    check "sarif: related spans present" (Nat.lt 0 (List.length (jList res ["relatedLocations"])));
+
+  -- CLI: --sarif writes a parseable file; --fail-on-finding is the gate
+  buildOk ← EIO.lift (FS.exists "build");
+  buildUnit ← (match buildOk with
+    | .true => EIO.pure ()
+    | .false => FS.createDir "build");
+  oS ← opts ["tests/fixtures/taint-unsafe.c", "--json", "--sarif", "build/taint-unsafe.sarif"];
+  nS ← Scry.runTaint oS;
+  check "cli --sarif: exit 0" (Nat.beq nS 0);
+  sarifFile ← EIO.lift (IO.readFile "build/taint-unsafe.sarif");
+  check "cli --sarif: file parses"
+    (match Json.parse sarifFile with | .ok _ => .true | .error _ => .false);
+  rFail ← Scry.taintCmd ["tests/fixtures/taint-unsafe.c", "--json", "--fail-on-finding"];
+  check "cli --fail-on-finding: unsafe exits 1" (Nat.beq rFail 1);
+  rClean ← Scry.taintCmd ["tests/fixtures/taint-clean.c", "--json", "--fail-on-finding"];
+  check "cli --fail-on-finding: clean exits 0" (Nat.beq rClean 0);
+  -- the JSON golden for a memory finding: the path has store/load nodes, the warning is a
+  -- namespaced memory rule, and the counts include it
+  rMem ← Scry.taintCmd ["tests/fixtures/mem-free.c", "--json"];
+  check "cli --json memory: exit 0" (Nat.beq rMem 0))

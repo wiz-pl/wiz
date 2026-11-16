@@ -254,18 +254,20 @@ def ctorDesc (nΔ : Nat) (fields : List (Name × Term R × Term R)) (target : Li
   --| sorry
   --sol>
 
-/-- Peel a type signature `(ξ₁ : X₁) → … → Type l` into indices and `l`. -/
-def peelSignature : Term R → Except String (List (Name × BinderInfo × Term R × Term R) × Level)
+/-- Peel a type signature `(ξ₁ : X₁) → … → Type l` into indices and `l`. For
+`… → Prop`, the third component says so (`prop := true`) and `l` is `0` (the
+description's level is then inferred from the fields). -/
+def peelSignature : Term R → Except String (List (Name × BinderInfo × Term R × Term R) × Level × Bool)
   | .pi x bi q X B _ => do
-    let (xs, l) ← peelSignature B
-    pure ((x, bi, q, X) :: xs, l)
+    let (xs, l, prop) ← peelSignature B
+    pure ((x, bi, q, X) :: xs, l, prop)
   | .sort l => match l with
-    | .succ l => pure ([], l)
+    | .succ l => pure ([], l, false)
     | l => match l.toNat? with
-      | some (n + 1) => pure ([], Level.ofNat n)
-      | some 0 => throw "inductive propositions are not supported yet (declare it in Type)"
-      | _ => throw s!"the type of an inductive must end in Type u, not Sort {l}"
-  | _ => throw "the type of an inductive must be a sequence of arrows ending in Type u"
+      | some (n + 1) => pure ([], Level.ofNat n, false)
+      | some 0 => pure ([], .zero, true)
+      | _ => throw s!"the type of an inductive must end in Type u or Prop, not Sort {l}"
+  | _ => throw "the type of an inductive must be a sequence of arrows ending in Type u or Prop"
 
 private def pisTm (bs : List (Name × BinderInfo × Term R × Term R)) (b : Term R) : Term R :=
   bs.foldr (fun (x, bi, q, A) acc => .pi x bi q A acc .hole) b
@@ -305,9 +307,30 @@ def elabInductive (cmd : Syntax) (levelParams : List Name) : ElabM R (List (Decl
       pure (.sort (.succ l))
   finishInstances
   let sig ← zonk ctxΔ.lvl sig
-  let (Ξ, l) ← match peelSignature sig with
+  let (Ξ, l₀, prop) ← match peelSignature sig with
     | .ok r => pure r
     | .error e => fail (cmd.child "sig") e
+  -- (an inductive proposition has no level in its signature: infer the description's
+  -- level from the fields and the index types, as the `Type`-inferred signature does)
+  let l ← if prop then do
+      let g ← getGlobals
+      let ctxT0 := ctxΔ.bind T (eval g [] (pisTm Δ.toList sig))
+      let saved ← get
+      let mut l : Level := .zero
+      let tys := ctxΔ.types.reverse.toArray
+      for (_, _, _, X) in Ξ do
+        match typeSort? g tys (eval g ((List.range ctxΔ.lvl).reverse.map Val.var) X) with
+        | some k => unless k.hasMVar do l := l.join k.predBound
+        | none => pure ()
+      for c in (cmd.child "ctors").args do
+        let (ctxF, fs) ← elabTelescope ctxT0 ((c.child "binders").args.flatMap binderViews).toList
+        let mut tysF := #[]
+        for (_, _, _, A) in fs, k in [0:fs.size] do tysF := tysF.push (← zonk (ctxT0.lvl + k) A)
+        for (lA, _) in ← fieldLevels ctxF ctxT0.lvl tysF.toList do
+          if let some k := lA then unless k.hasMVar do l := l.join k.predBound
+      set saved
+      pure l
+    else pure l₀
   let nΞ := Ξ.length
   -- the index type: (ξ₁ : X₁) × … × Unit
   let I : Term R := Ξ.foldr (fun (x, _, q, X) acc => .sigma x q X acc .hole) (.unit (.succ l))
@@ -379,7 +402,7 @@ def elabInductive (cmd : Syntax) (levelParams : List Name) : ElabM R (List (Decl
   let Δvars := telescopeVars nΔ nΞ
   let ξvars := telescopeVars nΞ 0
   let muTm : Term R := .mu l (I.lift nΞ) ((Δvars.foldl .app (.const descName us)))
-    (tupleWith (tailV.lift nΞ) ξvars) .szInf (some (T, us, Δvars ++ ξvars))
+    (tupleWith (tailV.lift nΞ) ξvars) .szInf (some (T, us, Δvars ++ ξvars)) prop
   let typeDecl : Decl R :=
     { name := T, levelParams := levelParams,
       type := pisTm ΔBinders sig, value := some (lamsTm (ΔNames ++ ξNames) muTm) }
@@ -423,7 +446,8 @@ def elabCoinductive (cmd : Syntax) (levelParams : List Name) :
   finishInstances
   let sig ← zonk ctxΔ.lvl sig
   let l ← match peelSignature sig with
-    | .ok ([], l) => pure l
+    | .ok ([], l, false) => pure l
+    | .ok (_, _, true) => throwAt (cmd.child "sig").info "a coinductive type must be in Type u, not Prop"
     | .ok _ => throwAt (cmd.child "sig").info "a coinductive type has no indices (yet)"
     | .error e => throwAt (cmd.child "sig").info e
   let ctxT := ctxΔ.bind T (eval (← getGlobals) [] (pisTm Δ.toList sig))
@@ -537,7 +561,8 @@ def elabStructure (cmd : Syntax) (levelParams : List Name) : ElabM R (List (Decl
   finishInstances
   let sig ← zonk ctxΔ.lvl sig
   let l ← match peelSignature sig with
-    | .ok ([], l) => pure l
+    | .ok ([], l, false) => pure l
+    | .ok (_, _, true) => throwAt (cmd.child "sig").info "a structure must be in Type u, not Prop"
     | .ok _ => throwAt (cmd.child "sig").info "a structure has no indices"
     | .error e => throwAt (cmd.child "sig").info e
   let body : Term R := fs'.toList.foldr (fun (x, _, q, A) acc => .sigma x q A acc .hole) (.unit (.succ l))

@@ -1,0 +1,113 @@
+-- test: check
+import Text
+import Scry.Optics
+import Scry.CstOptics
+import Scry.OpticsExamples
+import Scry.Query
+import Scry.CstStore
+-- The read-only optics over the small CST/Wil fixture: composition, traversal, a query
+-- path, a pure rewrite, and that the native store and points-to results are the same
+-- values as before (the optics module does not touch either).
+--
+-- Every line is one compact string so a failure names the case.
+
+/-- `a,b,c` for a list of naturals. -/
+def showNats (xs : List Nat) : String :=
+  String.intercalate "," (List.map Nat.repr xs)
+
+/-- `a,b,c` for a list of node ids. -/
+def showIds (xs : List Scry.NodeId) : String :=
+  showNats (List.map (fun n => n.n) xs)
+
+/-- The start byte of every span, in order. -/
+def spanStarts (xs : List Wil.Span) : String :=
+  showNats (List.map (fun sp => sp.start) xs)
+
+/-- Node kinds of a fact store, in traversal order. -/
+def kindList (f : Scry.Facts) : String :=
+  String.intercalate "," (Scry.CstOptics.kinds f)
+
+/-- The node kinds at a path `Facts.nodeF id` then `nodeKind`. -/
+def focusedKinds (f : Scry.Facts) (id : Nat) : String :=
+  String.intercalate "," (Scry.Fold.toList
+    (Scry.Fold.mapGetter (Scry.Facts.nodeF (Scry.nodeId id)) Scry.Cst.nodeKind) f)
+
+/-- Tuples as `a-b,c-d`. -/
+def showTuples (ts : List (List Nat)) : String :=
+  String.intercalate ";" (List.map (fun t => showNats t) ts)
+
+-- 1. The fixture is the one the rest of the tests use.
+#eval match Scry.Facts.ofText Scry.demoFactsText with
+  | .error e => "fixture: " ++ e
+  | .ok f => "cst " ++ Nat.repr (Scry.Fold.length Scry.Facts.nodesF f)
+      ++ "/" ++ Nat.repr (Scry.Fold.length Scry.Facts.edgesF f)
+      ++ "/" ++ Nat.repr (Scry.Fold.length Scry.Facts.relationsF f)
+
+-- 2. A Fold composes with a Getter: every node kind, in order.
+#eval "kinds " ++ kindList Scry.demoFacts
+
+-- 3. A zero-or-one focus composes the same way (`node 4` is the call expression).
+#eval "focus4 " ++ focusedKinds Scry.demoFacts 4
+
+-- 4. A filter + Getter path is the one-line edge query, and the additive CLI query
+--    `--edge-src` uses exactly that path (the older `--edge` output is unchanged).
+#eval "edges function " ++ showIds (Scry.CstOptics.edgeSources Scry.demoFacts "function")
+#eval Scry.renderQueryEdge Scry.demoFacts "function"
+#eval Scry.renderQueryEdgeSrc Scry.demoFacts "function"
+
+-- 5. Relations are folds too; a named relation composes with its tuple list.
+#eval "cfg " ++ showTuples (Scry.CstOptics.relationTuples Scry.demoFacts "cfg")
+#eval "tuples " ++ Nat.repr (Scry.Fold.length Scry.Facts.allTuplesF Scry.demoFacts)
+
+-- 6. The Wil analysis: fold statements, then uses and definitions.
+#eval "uses " ++ showNats (Scry.Optics.fnUses Scry.demoFnInfo)
+#eval "defs " ++ showNats (List.map (fun p => p.2) (Scry.Optics.fnDefs Scry.demoFnInfo))
+
+-- 7. The traversal over all statement origins, and a pure rewrite of every span.
+#eval "origins " ++ spanStarts (Scry.Fold.toList
+  (Scry.Traversal.toFold Scry.Wil.funcStmtOriginsT) Scry.demoWil)
+#eval "shifted " ++ spanStarts (Scry.Fold.toList
+  (Scry.Traversal.toFold Scry.Wil.funcStmtOriginsT)
+  (Scry.Optics.shiftStmtOrigins 100 Scry.demoWil))
+
+-- 8. Lens and Traversal laws, on the fixture and on the canonical list traversal.
+#eval "lens-id " ++ (match Scry.Lens.over Scry.Wil.stmtOriginL (fun sp => sp) 
+  (Wil.withOrigin (Wil.copy (Wil.var 1 Wil.i32) (Wil.var 0 Wil.i32)) (Wil.Span.mk 0 3 4 1 0 0)) with
+  | .assign x e o => Nat.repr o.start
+  | _ => "other")
+#eval "lens-getOver " ++ (match Scry.Lens.over Scry.Wil.stmtOriginL
+    (fun sp => Wil.Span.mk sp.file (Nat.add sp.start 5) sp.stop sp.node sp.line sp.col)
+    (Wil.withOrigin (Wil.copy (Wil.var 1 Wil.i32) (Wil.var 0 Wil.i32)) (Wil.Span.mk 0 3 4 1 0 0)) with
+  | .assign x e o => Nat.repr (Wil.stmtOrigin (.assign x e o)).start
+  | _ => "other")
+#eval "lens-overOver " ++ (match Scry.Lens.over Scry.Wil.stmtOriginL
+    (fun sp => Wil.Span.mk sp.file (Nat.add sp.start 1) sp.stop sp.node sp.line sp.col)
+    (Scry.Lens.over Scry.Wil.stmtOriginL
+      (fun sp => Wil.Span.mk sp.file (Nat.add sp.start 2) sp.stop sp.node sp.line sp.col)
+      (Wil.withOrigin (Wil.copy (Wil.var 1 Wil.i32) (Wil.var 0 Wil.i32)) (Wil.Span.mk 0 3 4 1 0 0))) with
+  | .assign x e o => Nat.repr o.start
+  | _ => "other")
+#eval "origins-law " ++ spanStarts (Scry.Fold.toList
+  (Scry.Traversal.toFold Scry.Wil.funcStmtOriginsT)
+  (Scry.Traversal.over Scry.Wil.funcStmtOriginsT
+    (fun sp => Wil.Span.mk sp.file (Nat.add sp.start 7) sp.stop sp.node sp.line sp.col) Scry.demoWil))
+#eval "traversal-list " ++ showNats
+  (Scry.Traversal.over Scry.Traversal.list (fun n => Nat.add n 1) [1, 2, 3])
+#eval "traversal-list-id " ++ showNats
+  (Scry.Traversal.over Scry.Traversal.list (fun n => n) [1, 2, 3])
+
+-- 9. The native store view is unchanged, and the points-to counts are the same as the
+--    direct analysis (the optics module only reads them).
+#eval match Scry.Facts.ofText Scry.demoFactsText with
+  | .error e => "native: " ++ e
+  | .ok f =>
+    let s := Scry.CstStore.ofFacts f;
+    "native " ++ Nat.repr (Scry.Fold.length Scry.CstStore.nodesF s)
+      ++ "/" ++ Nat.repr (Scry.Fold.length Scry.CstStore.edgesF s)
+      ++ "/" ++ Nat.repr (Scry.Fold.length Scry.CstStore.relationsF s)
+#eval "pt " ++ Nat.repr (Scry.ptVarCount Scry.demoPt)
+  ++ "/" ++ Nat.repr (Scry.ptLocCount Scry.demoPt)
+
+-- 10. A data-dependence rewrite: rename every edge's register, pure.
+#eval "depvars " ++ showNats (List.map (fun d => d.var)
+  (Scry.Optics.fnDeps (Scry.Optics.renameDepVars (fun n => Nat.add n 10) Scry.demoFnInfo)))

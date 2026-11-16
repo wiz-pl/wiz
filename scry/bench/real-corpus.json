@@ -1,0 +1,1281 @@
+{
+  "harness": "scry/scripts/real-corpus.sh",
+  "note": "wall time is informational on a shared machine; not a perf-run measurement",
+  "limit_seconds": 300,
+  "analysis": "scry taint --json --allow-errors --sarif (parse -> lower -> points-to -> taint -> certify)",
+  "totals": {
+    "files": 24,
+    "present": 24,
+    "findings": 2,
+    "checked": 2,
+    "unchecked": 0,
+    "boundary": 6477,
+    "memory": 45,
+    "parse_errors": 2168,
+    "ms": 366431,
+    "timeouts": 0,
+    "failures": 0,
+    "missing": 0
+  },
+  "projects": {
+    "wiz-lang": {
+      "files": 6,
+      "present": 6,
+      "findings": 1,
+      "checked": 1,
+      "unchecked": 0,
+      "boundary": 1331,
+      "memory": 1,
+      "parse_errors": 161,
+      "ms": 53654,
+      "timeouts": 0,
+      "failures": 0,
+      "missing": 0,
+      "entries": [
+        {
+          "file": "c/proc.c",
+          "status": "ok",
+          "ms": 53,
+          "findings": 0,
+          "checked": 0,
+          "boundary": 25,
+          "memory": 0,
+          "parse_errors": 0,
+          "detail": [],
+          "memory_detail": [],
+          "boundary_detail": [
+            {
+              "function": "grail_path_executable",
+              "line": 48,
+              "message": "identifier w not modelled: havoc i32"
+            },
+            {
+              "function": "grail_path_executable",
+              "line": 48,
+              "message": "cast not modelled: havoc i32"
+            },
+            {
+              "function": "grail_path_executable",
+              "line": 47,
+              "message": "operator && not modelled: havoc i32"
+            },
+            {
+              "function": "grail_path_executable",
+              "line": 47,
+              "message": "identifier S_IXUSR not modelled: havoc i32"
+            },
+            {
+              "function": "grail_path_executable",
+              "line": 47,
+              "message": "struct field access not modelled: havoc i32"
+            }
+          ]
+        },
+        {
+          "file": "c/sockets.c",
+          "status": "ok",
+          "ms": 1857,
+          "findings": 0,
+          "checked": 0,
+          "boundary": 202,
+          "memory": 0,
+          "parse_errors": 0,
+          "detail": [],
+          "memory_detail": [],
+          "boundary_detail": [
+            {
+              "function": "wiz_exit_on_panic",
+              "line": 208,
+              "message": "identifier w not modelled: havoc i32"
+            },
+            {
+              "function": "wiz_exit_on_panic",
+              "line": 207,
+              "message": "identifier flag not modelled: havoc i32"
+            },
+            {
+              "function": "wiz_unix_close",
+              "line": 197,
+              "message": "identifier w not modelled: havoc i32"
+            },
+            {
+              "function": "wiz_unix_close",
+              "line": 196,
+              "message": "call to undeclared function unlink (external)"
+            },
+            {
+              "function": "wiz_unix_close",
+              "line": 196,
+              "message": "struct field access not modelled: havoc i32"
+            }
+          ]
+        },
+        {
+          "file": "lib/serial.c",
+          "status": "ok",
+          "ms": 22756,
+          "findings": 0,
+          "checked": 0,
+          "boundary": 226,
+          "memory": 0,
+          "parse_errors": 11,
+          "detail": [],
+          "memory_detail": [],
+          "boundary_detail": [
+            {
+              "function": "zser_pty_name(u",
+              "line": 124,
+              "message": "identifier zser_name;\n not modelled: havoc i32"
+            },
+            {
+              "function": "zser_pty_name(u",
+              "line": 123,
+              "message": "implicit conversion i32 to unknown"
+            },
+            {
+              "function": "zser_pty_name(u",
+              "line": 123,
+              "message": "integer literal \n not modelled: havoc i32"
+            },
+            {
+              "function": "zser_pty_name(u",
+              "line": 123,
+              "message": "integer literal   not modelled: havoc i32"
+            },
+            {
+              "function": "zser_pty_name(u",
+              "line": 123,
+              "message": "identifier zser_name[0 not modelled: havoc i32"
+            }
+          ]
+        },
+        {
+          "file": "infoview/term.c",
+          "status": "ok",
+          "ms": 10126,
+          "findings": 1,
+          "checked": 1,
+          "boundary": 292,
+          "memory": 0,
+          "parse_errors": 0,
+          "detail": [
+            {
+              "rule": "strcpy-overflow",
+              "severity": "warning",
+              "function": "static:iv_addr",
+              "callee": "strcpy",
+              "argument": 0,
+              "derivation": "checked",
+              "line": 100,
+              "message": "strcpy does not bound the copy; use strlcpy or a checked length"
+            }
+          ],
+          "memory_detail": [],
+          "boundary_detail": [
+            {
+              "function": "iv_exit",
+              "line": 273,
+              "message": "implicit return (undefined in C): ret none"
+            },
+            {
+              "function": "iv_exit",
+              "line": 273,
+              "message": "call to undeclared function exit (external)"
+            },
+            {
+              "function": "iv_exit",
+              "line": 273,
+              "message": "cast not modelled: havoc i32"
+            },
+            {
+              "function": "iv_realpath",
+              "line": 270,
+              "message": "conditional expression ?: not modelled: havoc i32"
+            },
+            {
+              "function": "iv_spawn",
+              "line": 264,
+              "message": "cast not modelled: havoc i32"
+            }
+          ]
+        },
+        {
+          "file": "selfhost/rt.c",
+          "status": "ok",
+          "ms": 18858,
+          "findings": 0,
+          "checked": 0,
+          "boundary": 586,
+          "memory": 1,
+          "parse_errors": 146,
+          "detail": [],
+          "memory_detail": [
+            {
+              "rule": "scry/memory/unknown-indirect",
+              "function": "*p ",
+              "line": 301,
+              "message": "indirect call through register 29 has no fully known target"
+            }
+          ],
+          "boundary_detail": [
+            {
+              "function": "t rlimit",
+              "line": 1262,
+              "message": "implicit return (undefined in C): ret none"
+            },
+            {
+              "function": "t rlimit",
+              "line": 1271,
+              "message": "call to undeclared function  (external)"
+            },
+            {
+              "function": "t rlimit",
+              "line": 1271,
+              "message": "call to undeclared function  (external)"
+            },
+            {
+              "function": "t rlimit",
+              "line": 1271,
+              "message": "identifier  not modelled: havoc i32"
+            },
+            {
+              "function": "t rlimit",
+              "line": 1271,
+              "message": "string literal not modelled: havoc i8*"
+            }
+          ]
+        },
+        {
+          "file": "web/js.c",
+          "status": "ok",
+          "ms": 4,
+          "findings": 0,
+          "checked": 0,
+          "boundary": 0,
+          "memory": 0,
+          "parse_errors": 4,
+          "detail": [],
+          "memory_detail": [],
+          "boundary_detail": []
+        }
+      ]
+    },
+    "wiz-rv": {
+      "files": 8,
+      "present": 8,
+      "findings": 1,
+      "checked": 1,
+      "unchecked": 0,
+      "boundary": 783,
+      "memory": 14,
+      "parse_errors": 0,
+      "ms": 54993,
+      "timeouts": 0,
+      "failures": 0,
+      "missing": 0,
+      "entries": [
+        {
+          "file": "sw/ctest/ctest.c",
+          "status": "ok",
+          "ms": 1288,
+          "findings": 1,
+          "checked": 1,
+          "boundary": 35,
+          "memory": 2,
+          "parse_errors": 0,
+          "detail": [
+            {
+              "rule": "strcpy-overflow",
+              "severity": "warning",
+              "function": "main",
+              "callee": "strcpy",
+              "argument": 0,
+              "derivation": "checked",
+              "line": 20,
+              "message": "strcpy does not bound the copy; use strlcpy or a checked length"
+            }
+          ],
+          "memory_detail": [
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "static:puts_",
+              "line": 10,
+              "message": "load through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "static:puts_",
+              "line": 10,
+              "message": "load through a pointer with an unknown target"
+            }
+          ],
+          "boundary_detail": [
+            {
+              "function": "main",
+              "line": 30,
+              "message": "character literal '\\n' not modelled (0)"
+            },
+            {
+              "function": "main",
+              "line": 30,
+              "message": "cast not modelled: havoc i32"
+            },
+            {
+              "function": "main",
+              "line": 29,
+              "message": "character literal ' ' not modelled (0)"
+            },
+            {
+              "function": "main",
+              "line": 29,
+              "message": "cast not modelled: havoc i32"
+            },
+            {
+              "function": "main",
+              "line": 28,
+              "message": "character literal ' ' not modelled (0)"
+            }
+          ]
+        },
+        {
+          "file": "sw/doomgeneric_wizrv.c",
+          "status": "ok",
+          "ms": 4664,
+          "findings": 0,
+          "checked": 0,
+          "boundary": 89,
+          "memory": 4,
+          "parse_errors": 0,
+          "detail": [],
+          "memory_detail": [
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "DG_GetKey",
+              "line": 89,
+              "message": "store through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "DG_GetKey",
+              "line": 89,
+              "message": "store through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "DG_GetKey",
+              "line": 92,
+              "message": "store through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "DG_GetKey",
+              "line": 92,
+              "message": "store through a pointer with an unknown target"
+            }
+          ],
+          "boundary_detail": [
+            {
+              "function": "main",
+              "line": 100,
+              "message": "call to undeclared function doomgeneric_Create (external)"
+            },
+            {
+              "function": "main",
+              "line": 100,
+              "message": "identifier args not modelled: havoc i32"
+            },
+            {
+              "function": "main",
+              "line": 99,
+              "message": "call to undeclared function printf (external)"
+            },
+            {
+              "function": "main",
+              "line": 99,
+              "message": "cast not modelled: havoc i32"
+            },
+            {
+              "function": "main",
+              "line": 99,
+              "message": "string literal not modelled: havoc i8*"
+            }
+          ]
+        },
+        {
+          "file": "sw/iss/iss.c",
+          "status": "ok",
+          "ms": 36417,
+          "findings": 0,
+          "checked": 0,
+          "boundary": 159,
+          "memory": 4,
+          "parse_errors": 0,
+          "detail": [],
+          "memory_detail": [
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "static:key_at",
+              "line": 43,
+              "message": "load through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "static:key_at",
+              "line": 44,
+              "message": "load through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "static:key_at",
+              "line": 47,
+              "message": "load through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "main",
+              "line": 232,
+              "message": "load through a pointer with an unknown target"
+            }
+          ],
+          "boundary_detail": [
+            {
+              "function": "main",
+              "line": 258,
+              "message": "conditional expression ?: not modelled: havoc i32"
+            },
+            {
+              "function": "main",
+              "line": 256,
+              "message": "call to undeclared function fprintf (external)"
+            },
+            {
+              "function": "main",
+              "line": 256,
+              "message": "string literal not modelled: havoc i8*"
+            },
+            {
+              "function": "main",
+              "line": 256,
+              "message": "identifier stderr not modelled: havoc i32"
+            },
+            {
+              "function": "main",
+              "line": 255,
+              "message": "call to undeclared function fclose (external)"
+            }
+          ]
+        },
+        {
+          "file": "sw/iss/mustest.c",
+          "status": "ok",
+          "ms": 5370,
+          "findings": 0,
+          "checked": 0,
+          "boundary": 51,
+          "memory": 2,
+          "parse_errors": 0,
+          "detail": [],
+          "memory_detail": [
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "main",
+              "line": 13,
+              "message": "load through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "main",
+              "line": 19,
+              "message": "load through a pointer with an unknown target"
+            }
+          ],
+          "boundary_detail": [
+            {
+              "function": "main",
+              "line": 32,
+              "message": "call to undeclared function fprintf (external)"
+            },
+            {
+              "function": "main",
+              "line": 32,
+              "message": "string literal not modelled: havoc i8*"
+            },
+            {
+              "function": "main",
+              "line": 32,
+              "message": "identifier stderr not modelled: havoc i32"
+            },
+            {
+              "function": "main",
+              "line": 31,
+              "message": "call to undeclared function fclose (external)"
+            },
+            {
+              "function": "main",
+              "line": 24,
+              "message": "implicit conversion i32 to unknown"
+            }
+          ]
+        },
+        {
+          "file": "sw/mus_synth.c",
+          "status": "ok",
+          "ms": 586,
+          "findings": 0,
+          "checked": 0,
+          "boundary": 90,
+          "memory": 0,
+          "parse_errors": 0,
+          "detail": [],
+          "memory_detail": [],
+          "boundary_detail": [
+            {
+              "function": "ple(void) ",
+              "line": 103,
+              "message": "integer literal * ( not modelled: havoc i32"
+            },
+            {
+              "function": "ple(void) ",
+              "line": 103,
+              "message": "integer literal   not modelled: havoc i32"
+            },
+            {
+              "function": "ple(void) ",
+              "line": 103,
+              "message": "identifier e * 3 / (2 not modelled: havoc i32"
+            },
+            {
+              "function": "ple(void) ",
+              "line": 103,
+              "message": "integer literal _v not modelled: havoc i32"
+            },
+            {
+              "function": "ple(void) ",
+              "line": 103,
+              "message": "integer literal ) *  not modelled: havoc i32"
+            }
+          ]
+        },
+        {
+          "file": "sw/sound_wizrv.c",
+          "status": "ok",
+          "ms": 6272,
+          "findings": 0,
+          "checked": 0,
+          "boundary": 268,
+          "memory": 0,
+          "parse_errors": 0,
+          "detail": [],
+          "memory_detail": [],
+          "boundary_detail": [
+            {
+              "function": "ng(void) { ",
+              "line": 132,
+              "message": "identifier \n\nmusi not modelled: havoc i32"
+            },
+            {
+              "function": "void) { ",
+              "line": 131,
+              "message": "implicit return (undefined in C): ret none"
+            },
+            {
+              "function": "void) { ",
+              "line": 131,
+              "message": "implicit conversion i32 to unknown"
+            },
+            {
+              "function": "void) { ",
+              "line": 131,
+              "message": "integer literal S not modelled: havoc i32"
+            },
+            {
+              "function": "void) { ",
+              "line": 131,
+              "message": "assignment to unknown 0; for not modelled"
+            }
+          ]
+        },
+        {
+          "file": "sw/syscalls.c",
+          "status": "ok",
+          "ms": 388,
+          "findings": 0,
+          "checked": 0,
+          "boundary": 88,
+          "memory": 2,
+          "parse_errors": 0,
+          "detail": [],
+          "memory_detail": [
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "_read",
+              "line": 40,
+              "message": "external memcpy through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "_read",
+              "line": 46,
+              "message": "store through a pointer with an unknown target"
+            }
+          ],
+          "boundary_detail": [
+            {
+              "function": "mkdir",
+              "line": 93,
+              "message": "assignment to unknown errno not modelled"
+            },
+            {
+              "function": "mkdir",
+              "line": 93,
+              "message": "identifier EROFS not modelled: havoc i32"
+            },
+            {
+              "function": "mkdir",
+              "line": 93,
+              "message": "cast not modelled: havoc i32"
+            },
+            {
+              "function": "mkdir",
+              "line": 93,
+              "message": "cast not modelled: havoc i32"
+            },
+            {
+              "function": "_link",
+              "line": 92,
+              "message": "assignment to unknown errno not modelled"
+            }
+          ]
+        },
+        {
+          "file": "sw/tone/tone.c",
+          "status": "ok",
+          "ms": 8,
+          "findings": 0,
+          "checked": 0,
+          "boundary": 3,
+          "memory": 0,
+          "parse_errors": 0,
+          "detail": [],
+          "memory_detail": [],
+          "boundary_detail": [
+            {
+              "function": "main",
+              "line": 8,
+              "message": "implicit conversion i32 to unknown"
+            },
+            {
+              "function": "main",
+              "line": 7,
+              "message": "call to undeclared function printf (external)"
+            },
+            {
+              "function": "main",
+              "line": 7,
+              "message": "string literal not modelled: havoc i8*"
+            }
+          ]
+        }
+      ]
+    },
+    "tree-sitter": {
+      "files": 8,
+      "present": 8,
+      "findings": 0,
+      "checked": 0,
+      "unchecked": 0,
+      "boundary": 4363,
+      "memory": 30,
+      "parse_errors": 23,
+      "ms": 256887,
+      "timeouts": 0,
+      "failures": 0,
+      "missing": 0,
+      "entries": [
+        {
+          "file": "alloc.c",
+          "status": "ok",
+          "ms": 51,
+          "findings": 0,
+          "checked": 0,
+          "boundary": 32,
+          "memory": 0,
+          "parse_errors": 4,
+          "detail": [],
+          "memory_detail": [],
+          "boundary_detail": [
+            {
+              "function": "ts_set_allocator",
+              "line": 38,
+              "message": "implicit return (undefined in C): ret none"
+            },
+            {
+              "function": "ts_set_allocator",
+              "line": 47,
+              "message": "assignment to unknown ts_current_free not modelled"
+            },
+            {
+              "function": "ts_set_allocator",
+              "line": 47,
+              "message": "conditional expression ?: not modelled: havoc i32"
+            },
+            {
+              "function": "ts_set_allocator",
+              "line": 46,
+              "message": "implicit conversion i32 to fn2->unknown**"
+            },
+            {
+              "function": "ts_set_allocator",
+              "line": 46,
+              "message": "conditional expression ?: not modelled: havoc i32"
+            }
+          ]
+        },
+        {
+          "file": "language.c",
+          "status": "ok",
+          "ms": 1160,
+          "findings": 0,
+          "checked": 0,
+          "boundary": 211,
+          "memory": 0,
+          "parse_errors": 2,
+          "detail": [],
+          "memory_detail": [],
+          "boundary_detail": [
+            {
+              "function": "ts_lookahead_iterator_current_symbol_name",
+              "line": 393,
+              "message": "struct field access not modelled: havoc i32"
+            },
+            {
+              "function": "ts_lookahead_iterator_current_symbol_name",
+              "line": 393,
+              "message": "field access on unknown"
+            },
+            {
+              "function": "ts_lookahead_iterator_current_symbol_name",
+              "line": 393,
+              "message": "struct field access not modelled: havoc i32"
+            },
+            {
+              "function": "ts_lookahead_iterator_current_symbol_name",
+              "line": 393,
+              "message": "field access on unknown"
+            },
+            {
+              "function": "ts_lookahead_iterator_current_symbol_name",
+              "line": 392,
+              "message": "identifier LookaheadPositioned not modelled: havoc i32"
+            }
+          ]
+        },
+        {
+          "file": "lexer.c",
+          "status": "ok",
+          "ms": 3441,
+          "findings": 0,
+          "checked": 0,
+          "boundary": 417,
+          "memory": 5,
+          "parse_errors": 2,
+          "detail": [],
+          "memory_detail": [
+            {
+              "rule": "scry/memory/unknown-indirect",
+              "function": "static:ts_lexer__get_chunk",
+              "line": 91,
+              "message": "indirect call through register 2 has no fully known target"
+            },
+            {
+              "rule": "scry/memory/unknown-indirect",
+              "function": "static:ts_lexer__log",
+              "line": 372,
+              "message": "indirect call through register 11 has no fully known target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "ts_lexer_init",
+              "line": 378,
+              "message": "store through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "ts_lexer_finish",
+              "line": 469,
+              "message": "load through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "ts_lexer_finish",
+              "line": 470,
+              "message": "store through a pointer with an unknown target"
+            }
+          ],
+          "boundary_detail": [
+            {
+              "function": "ts_lexer_included_ranges",
+              "line": 508,
+              "message": "struct field access not modelled: havoc i32"
+            },
+            {
+              "function": "ts_lexer_included_ranges",
+              "line": 508,
+              "message": "field access on unknown"
+            },
+            {
+              "function": "ts_lexer_included_ranges",
+              "line": 508,
+              "message": "identifier self not modelled: havoc i32"
+            },
+            {
+              "function": "ts_lexer_included_ranges",
+              "line": 507,
+              "message": "implicit conversion i32 to unknown"
+            },
+            {
+              "function": "ts_lexer_included_ranges",
+              "line": 507,
+              "message": "struct field access not modelled: havoc i32"
+            }
+          ]
+        },
+        {
+          "file": "node.c",
+          "status": "ok",
+          "ms": 13532,
+          "findings": 0,
+          "checked": 0,
+          "boundary": 326,
+          "memory": 2,
+          "parse_errors": 0,
+          "detail": [],
+          "memory_detail": [
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "ts_node_edit",
+              "line": 862,
+              "message": "load through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "ts_node_edit",
+              "line": 863,
+              "message": "load through a pointer with an unknown target"
+            }
+          ],
+          "boundary_detail": [
+            {
+              "function": "ts_node_edit",
+              "line": 861,
+              "message": "implicit return (undefined in C): ret none"
+            },
+            {
+              "function": "ts_node_edit",
+              "line": 869,
+              "message": "implicit conversion i32 to unknown"
+            },
+            {
+              "function": "ts_node_edit",
+              "line": 869,
+              "message": "struct field access not modelled: havoc i32"
+            },
+            {
+              "function": "ts_node_edit",
+              "line": 869,
+              "message": "field access on unknown"
+            },
+            {
+              "function": "ts_node_edit",
+              "line": 869,
+              "message": "struct field access not modelled: havoc i32"
+            }
+          ]
+        },
+        {
+          "file": "parser.c",
+          "status": "ok",
+          "ms": 79146,
+          "findings": 0,
+          "checked": 0,
+          "boundary": 1271,
+          "memory": 8,
+          "parse_errors": 1,
+          "detail": [],
+          "memory_detail": [
+            {
+              "rule": "scry/memory/unknown-indirect",
+              "function": "static:ts_parser__log",
+              "line": 159,
+              "message": "indirect call through register 3 has no fully known target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "static:ts_parser__breakdown_lookahead",
+              "line": 240,
+              "message": "load through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "static:ts_parser__breakdown_lookahead",
+              "line": 241,
+              "message": "store through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "static:ts_parser__breakdown_lookahead",
+              "line": 242,
+              "message": "load through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-indirect",
+              "function": "static:ts_parser__external_scanner_destroy",
+              "line": 383,
+              "message": "indirect call through register 12 has no fully known target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "static:ts_parser__check_progress",
+              "line": 1583,
+              "message": "load through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-indirect",
+              "function": "static:ts_parser__check_progress",
+              "line": 1588,
+              "message": "indirect call through register 15 has no fully known target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "static:ts_parser__check_progress",
+              "line": 1591,
+              "message": "load through a pointer with an unknown target"
+            }
+          ],
+          "boundary_detail": [
+            {
+              "function": "ts_parser_take_wasm_store",
+              "line": 2311,
+              "message": "assignment to field_expression not modelled"
+            },
+            {
+              "function": "ts_parser_take_wasm_store",
+              "line": 2311,
+              "message": "field access on unknown"
+            },
+            {
+              "function": "ts_parser_take_wasm_store",
+              "line": 2311,
+              "message": "identifier self not modelled: havoc i32"
+            },
+            {
+              "function": "ts_parser_take_wasm_store",
+              "line": 2310,
+              "message": "implicit conversion i32 to unknown*"
+            },
+            {
+              "function": "ts_parser_take_wasm_store",
+              "line": 2310,
+              "message": "struct field access not modelled: havoc i32"
+            }
+          ]
+        },
+        {
+          "file": "query.c",
+          "status": "ok",
+          "ms": 149221,
+          "findings": 0,
+          "checked": 0,
+          "boundary": 1473,
+          "memory": 9,
+          "parse_errors": 14,
+          "detail": [],
+          "memory_detail": [
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "static:ts_query_cursor__push_finished_state",
+              "line": 636,
+              "message": "load through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "static:analysis_state__compare",
+              "line": 1078,
+              "message": "load through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "static:analysis_state__compare",
+              "line": 1078,
+              "message": "load through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "static:analysis_state__compare",
+              "line": 1092,
+              "message": "load through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "static:analysis_state__compare",
+              "line": 1092,
+              "message": "load through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "static:analysis_state__compare",
+              "line": 1093,
+              "message": "load through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "static:analysis_state__compare",
+              "line": 1093,
+              "message": "load through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "ts_query_cursor__compare_captures",
+              "line": 3700,
+              "message": "store through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "ts_query_cursor__compare_captures",
+              "line": 3701,
+              "message": "store through a pointer with an unknown target"
+            }
+          ],
+          "boundary_detail": [
+            {
+              "function": "ts_query_cursor_set_max_start_depth",
+              "line": 4874,
+              "message": "implicit return (undefined in C): ret none"
+            },
+            {
+              "function": "ts_query_cursor_set_max_start_depth",
+              "line": 4878,
+              "message": "assignment to field_expression not modelled"
+            },
+            {
+              "function": "ts_query_cursor_set_max_start_depth",
+              "line": 4878,
+              "message": "field access on unknown"
+            },
+            {
+              "function": "ts_query_cursor_next_capture",
+              "line": 4736,
+              "message": "implicit return (undefined in C): ret none"
+            },
+            {
+              "function": "ts_query_cursor_remove_match",
+              "line": 4696,
+              "message": "implicit return (undefined in C): ret none"
+            }
+          ]
+        },
+        {
+          "file": "tree.c",
+          "status": "ok",
+          "ms": 414,
+          "findings": 0,
+          "checked": 0,
+          "boundary": 142,
+          "memory": 0,
+          "parse_errors": 0,
+          "detail": [],
+          "memory_detail": [],
+          "boundary_detail": [
+            {
+              "function": "ts_tree_get_changed_ranges",
+              "line": 135,
+              "message": "call to undeclared function array_delete (external)"
+            },
+            {
+              "function": "ts_tree_get_changed_ranges",
+              "line": 135,
+              "message": "pointer expression not modelled: havoc i32"
+            },
+            {
+              "function": "ts_tree_get_changed_ranges",
+              "line": 135,
+              "message": "field access on unknown"
+            },
+            {
+              "function": "ts_tree_get_changed_ranges",
+              "line": 134,
+              "message": "call to undeclared function array_delete (external)"
+            },
+            {
+              "function": "ts_tree_get_changed_ranges",
+              "line": 134,
+              "message": "pointer expression not modelled: havoc i32"
+            }
+          ]
+        },
+        {
+          "file": "tree_cursor.c",
+          "status": "ok",
+          "ms": 9922,
+          "findings": 0,
+          "checked": 0,
+          "boundary": 491,
+          "memory": 6,
+          "parse_errors": 0,
+          "detail": [],
+          "memory_detail": [
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "ts_tree_cursor_current_status",
+              "line": 525,
+              "message": "load through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "ts_tree_cursor_current_status",
+              "line": 526,
+              "message": "store through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "ts_tree_cursor_current_status",
+              "line": 527,
+              "message": "store through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "ts_tree_cursor_current_status",
+              "line": 528,
+              "message": "store through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "ts_tree_cursor_current_status",
+              "line": 529,
+              "message": "store through a pointer with an unknown target"
+            },
+            {
+              "rule": "scry/memory/unknown-memory",
+              "function": "ts_tree_cursor_current_status",
+              "line": 530,
+              "message": "store through a pointer with an unknown target"
+            }
+          ],
+          "boundary_detail": [
+            {
+              "function": "ts_tree_cursor_reset_to",
+              "line": 726,
+              "message": "implicit return (undefined in C): ret none"
+            },
+            {
+              "function": "ts_tree_cursor_reset_to",
+              "line": 732,
+              "message": "call to undeclared function array_push_all (external)"
+            },
+            {
+              "function": "ts_tree_cursor_reset_to",
+              "line": 732,
+              "message": "pointer expression not modelled: havoc i32"
+            },
+            {
+              "function": "ts_tree_cursor_reset_to",
+              "line": 732,
+              "message": "field access on unknown"
+            },
+            {
+              "function": "ts_tree_cursor_reset_to",
+              "line": 732,
+              "message": "pointer expression not modelled: havoc i32"
+            }
+          ]
+        }
+      ]
+    },
+    "generated": {
+      "files": 2,
+      "present": 2,
+      "findings": 0,
+      "checked": 0,
+      "unchecked": 0,
+      "boundary": 0,
+      "memory": 0,
+      "parse_errors": 1984,
+      "ms": 897,
+      "timeouts": 0,
+      "failures": 0,
+      "missing": 0,
+      "entries": [
+        {
+          "file": "old-wizard.c",
+          "status": "ok",
+          "ms": 312,
+          "findings": 0,
+          "checked": 0,
+          "boundary": 0,
+          "memory": 0,
+          "parse_errors": 1004,
+          "detail": [],
+          "memory_detail": [],
+          "boundary_detail": []
+        },
+        {
+          "file": "droste.c",
+          "status": "ok",
+          "ms": 585,
+          "findings": 0,
+          "checked": 0,
+          "boundary": 0,
+          "memory": 0,
+          "parse_errors": 980,
+          "detail": [],
+          "memory_detail": [],
+          "boundary_detail": []
+        }
+      ]
+    }
+  },
+  "bench": {
+    "cases": 34,
+    "files": 34,
+    "bytes": 8197,
+    "overall": {
+      "tp": 20,
+      "fn": 0,
+      "tn": 11,
+      "fp": 1,
+      "unknown": 2,
+      "error": 0,
+      "skipped": 0,
+      "tpr": 1.0,
+      "fpr": 0.0833,
+      "youden": 0.9167,
+      "precision": 0.9524,
+      "f1": 0.9756,
+      "tpr_defined": true,
+      "fpr_defined": true,
+      "youden_defined": true,
+      "tpr_bp": 10000,
+      "fpr_bp": 833,
+      "youden_bp": 9167,
+      "youden_negative": false
+    },
+    "macro": {
+      "tpr": 1.0,
+      "fpr": 0.0312,
+      "youden": 0.9688
+    },
+    "path_validity": {
+      "findings": 22,
+      "taint_findings": 17,
+      "forbidden_findings": 5,
+      "valid_paths": 22,
+      "reach_sink": 22,
+      "valid_path_fraction": 1.0
+    },
+    "certificate": {
+      "findings": 22,
+      "checked": 22,
+      "checked_fraction": 1.0
+    }
+  }
+}

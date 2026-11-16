@@ -136,9 +136,9 @@ partial def term : Term R → Sx
   | .drec q j D => node "drec" [term q, term j, term D]
   | .dhrec q H j D => node "dhrec" [term q, term H, term j, term D]
   | .delim v P a b c h D => node "delim" [level v, term P, term a, term b, term c, term h, term D]
-  | .mu l I D i s h => node "mu" [level l, term I, term D, term i, term s, hint h]
+  | .mu l I D i s h prop => node "mu" [level l, term I, term D, term i, term s, hint h, .a (toString prop)]
   | .con x => node "con" [term x]
-  | .ind l I D v P m i x => node "ind" [level l, term I, term D, level v, term P, term m, term i, term x]
+  | .ind l I D v P m i x prop => node "ind" [level l, term I, term D, level v, term P, term m, term i, term x, .a (toString prop)]
   | .nu l I D i s h => node "nu" [level l, term I, term D, term i, term s, hint h]
   | .out x => node "out" [term x]
   | .size => .a "size"
@@ -204,6 +204,7 @@ partial def dterm : Sx → Option (Term R)
         some (some (nm, ← (← items? us).toList.mapM dlevel, ← (← items? as).toList.mapM dterm))
       | _ => none
     let sorts (i : Nat) : Option BinderSorts := return ⟨← lv i, ← lv (i + 1)⟩
+    let b (i : Nat) : Option Bool := (s i).map (· == "true")
     match tag with
     | "var" => return .var (← n 1)
     | "const" => return .const (← s 1) (← (← items? (x 2)).toList.mapM dlevel)
@@ -239,9 +240,9 @@ partial def dterm : Sx → Option (Term R)
     | "drec" => return .drec (← t 1) (← t 2) (← t 3)
     | "dhrec" => return .dhrec (← t 1) (← t 2) (← t 3) (← t 4)
     | "delim" => return .delim (← lv 1) (← t 2) (← t 3) (← t 4) (← t 5) (← t 6) (← t 7)
-    | "mu" => return .mu (← lv 1) (← t 2) (← t 3) (← t 4) (← t 5) (← hint 6)
+    | "mu" => return .mu (← lv 1) (← t 2) (← t 3) (← t 4) (← t 5) (← hint 6) (← b 7)
     | "con" => return .con (← t 1)
-    | "ind" => return .ind (← lv 1) (← t 2) (← t 3) (← lv 4) (← t 5) (← t 6) (← t 7) (← t 8)
+    | "ind" => return .ind (← lv 1) (← t 2) (← t 3) (← lv 4) (← t 5) (← t 6) (← t 7) (← t 8) (← b 9)
     | "nu" => return .nu (← lv 1) (← t 2) (← t 3) (← t 4) (← t 5) (← hint 6)
     | "out" => return .out (← t 1)
     | "szSuc" => return .szSuc (← t 1)

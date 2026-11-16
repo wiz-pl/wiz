@@ -429,7 +429,7 @@ strings of the registered `nat` and `string` types print as literals. -/
 partial def readback (g : Globals R) (builtins : List (Name × Name)) (ty : VTy R) (v : RVal) : Term R :=
   let readback := readback g builtins
   match whnf ty, v with
-  | .mu _ _ _ _ _ hint, v =>
+  | .mu _ _ _ _ _ hint _ , v =>
     -- (the same test as erasure's: a type shaped like `Nat` is a number, R3)
     if isNatTy { g with builtins := builtins } ty then
       match v.toNat? with
@@ -467,7 +467,7 @@ partial def readback (g : Globals R) (builtins : List (Name × Name)) (ty : VTy 
 where
   readbackData (ty : VTy R) (v : RVal) : Term R :=
     match whnf ty with
-    | .mu l I D i _ hint =>
+    | .mu l I D i _ hint prop =>
       -- a native value (stage 22d), printed as a number: the model's object around it
       let _ := hint
       let v := match v, reprOfTy? { g with builtins := builtins } ty with
@@ -477,7 +477,7 @@ where
       let v := match v with
         | .nat n => if isNatTy { g with builtins := builtins } ty then RVal.natView n else unflat D v
         | v => unflat D v
-      .con (readback g builtins (vInterp g l I D (muFamily l I D) i) v)
+      .con (readback g builtins (vInterp g l I D (muFamily l I D prop) i prop) v)
     | _ => .tt
   /-- The payload of a flat value, walking the description (as a value). -/
   unflat (D : Val R) (v : RVal) : RVal :=

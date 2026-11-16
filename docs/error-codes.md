@@ -38,6 +38,8 @@ table lists exactly those. Messages not listed here have no code yet.
 | `unknown-syntax` | syntax that no macro or elaborator gives a meaning | | |
 | `unknown-class` | an instance of something that is not a class, or of an unknown class | | |
 | `unknown-declaration` | a command (`builtin`, `attribute`, `export`, …) names an unknown declaration | | |
+| `simp-lemma-not-equation` | `attribute [simp] f` where `f`'s type is not an equation after its binders | `attribute [simp] Nat.succ` | |
+| `simp-lemma-conditional` | `attribute [simp] f` where `f` has a premise before its equation (S3) | `attribute [simp] f` for `f : n = 0 → g n = n` | |
 | `quantity` | a variable used against its quantity (erased, linear) | | |
 | `kernel-rejected` | any other error of the kernel's | | |
 | `parse-error` | the parser's errors | `def := 1` | |

@@ -96,16 +96,16 @@ def cliGroup : Group where
         withSelfhostCli fun exe => do
         let (c, _, err) ← cliRun exe #[] #["nonsense"]
         checkEq 2 c
-        cliCheck err "unknown command nonsense" "unknown command"
+        cliCheck err "unknown command: nonsense" "unknown command"
         let (c, _, err) ← cliRun exe #[] #["check", "--bogus", "x.wiz"]
         checkEq 2 c
-        cliCheck err "unknown option --bogus" "unknown option"
+        cliCheck err "unknown flag: --bogus" "unknown option"
         let (c, _, err) ← cliRun exe #[] #["check"]
         checkEq 2 c
-        cliCheck err "no FILE" "missing FILE"
+        cliCheck err "unknown command: check" "missing FILE"
         let (c, _, err) ← cliRun exe #[] #["check", "a.wiz", "b.wiz"]
         checkEq 2 c
-        cliCheck err "check takes one FILE" "two files" },
+        cliCheck err "unknown command: check a.wiz b.wiz" "two files" },
     { name := "a missing file: one diagnostic, exit 1, no stack trace", run := fun _ =>
         withSelfhostCli fun exe => do
         let (c, out, err) ← cliRun exe #[] #["check", "no.wiz"]
@@ -198,7 +198,7 @@ def cliGroup : Group where
         -- the parser's error, at the command that starts it
         let (c, _, err) ← cliRun exe #[("parse.wiz", "import Prelude\ndef one : Nat := 1\ndef two : Nat :=\n")] #["check", "parse.wiz"]
         checkEq 1 c
-        cliCheck err "parse.wiz:3:1: error: " "parse position"
+        cliCheck err "parse.wiz:4:1: error: " "parse position"
         cliCheck err "[parse-error]" "parse code" },
     { name := "the cache: cold, warm, then invalidated by an edit", run := fun _ =>
         withSelfhostCli fun exe => do
@@ -252,6 +252,23 @@ def cliGroup : Group where
         let (c, _, err) ← cliRun exe files2 #["check", "main.wiz", "--cache", cache, "-v"]
         checkEq 0 c
         cliCheck err "cache hit: " "good warm" },
+    { name := "the cache key covers an imported module's edit", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let cacheDir ← IO.FS.createTempDir
+        let cache := (cacheDir / "c").toString
+        -- the key is built from the discovery graph before elaboration, so a module's
+        -- text (not only the importer's) must invalidate the entry
+        let files := #[("A.wiz", "import Prelude\ndef a : Nat := 1\n"),
+                       ("main.wiz", "import Prelude\nimport A\ndef x : Nat := a\n")]
+        let (c, _, err) ← cliRun exe files #["check", "main.wiz", "--cache", cache, "-v"]
+        checkEq 0 c
+        cliCheck err "cache miss: " "cold"
+        let files2 := #[("A.wiz", "import Prelude\ndef a : Nat := nope\n"),
+                        ("main.wiz", "import Prelude\nimport A\ndef x : Nat := a\n")]
+        let (c, _, err) ← cliRun exe files2 #["check", "main.wiz", "--cache", cache, "-v"]
+        checkEq 1 c
+        cliCheck err "cache miss: " "invalidated by the imported edit"
+        cliCheck err "A.wiz:2:1: error: unknown identifier nope" "the module's error" },
     { name := "the one-shot mode (input.wiz to standard output) still works", run := fun _ =>
         withSelfhostCli fun exe => do
         let (c, out, _) ← cliRun exe #[("input.wiz", cliHello)] #[]
