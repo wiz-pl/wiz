@@ -550,6 +550,14 @@ scripts/cve-bench.sh                       # build/cve/summary.{json,md}
 scripts/cve-bench.sh --case cve-2020-1752  # one case
 ```
 
+**No third-party code is checked in.** Each case directory holds our `harness.c` (the
+reduction) and `upstream.json`, which pins every source (tags resolved to commits, a
+SHA-256 per file) and the line ranges of the few spans that are verbatim upstream code;
+`scripts/cve-fetch.py assemble` fetches them into a content-addressed cache and writes
+the compilable `case.c` files under `build/cve-src/`. The bench drivers run it first.
+Of the 38 case files (v1 and v2), 8 contain upstream spans (214 lines in all); the other
+30 are rewritten reductions and fetch nothing.
+
 The checked-in table, the honest precision/recall (0/6 in-scope CVEs detected today),
 the per-case miss reasons and the top analysis gaps are in `bench/cve.md`. Treat the
 synthetic `scry bench` rates as a regression corpus, not as real-world recall.

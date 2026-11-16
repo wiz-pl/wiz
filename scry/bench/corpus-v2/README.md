@@ -11,6 +11,15 @@ their in-scope vulnerable files and adds patched controls beside them.
   fixed half of a new pair.
 * `cases/cve-<id>-vuln/` — the vulnerable half of a new pair.
 
+Like v1, a case directory holds `harness.c` and `upstream.json`, not third-party code:
+`scry/scripts/cve-fetch.py assemble` builds each `case.c` under
+`scry/build/cve-src/corpus-v2/` from pinned upstream source, and `cve-bench-v2` reads that
+tree. A patched control's fix lives in its harness. `upstream.json` also corrects three
+source URLs: CVE-2019-18408 is in the RAR (v4) reader (`archive_read_support_format_rar.c`,
+not the rar5 one, which 3.3.3 does not have), CVE-2020-1971's vulnerable release is
+OpenSSL 1.1.1h (1.1.1i fixed it) at `crypto/x509v3/v3_genn.c`, and wu-ftpd 2.6.0 comes
+from Debian's snapshot archive (the original FTP host is gone).
+
 A **pair** is the unit: one vulnerable case and, for every in-scope pair, one
 patched control with the same shape and the fix applied. The four fix shapes
 are bounded copy, sanitiser, `snprintf` with a size, and a reordered/removed
