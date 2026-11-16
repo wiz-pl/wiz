@@ -418,12 +418,27 @@ released? This is the flow-sensitive part of the freed diagnostic: every definit
 answer is "may" (a conservative boundary). The points-to table itself stays
 flow-insensitive; this only refines the *use* test, so `free(p); p = 0; *p` is not a
 use-after-free, while `free(p); q = p; *q` and the loop back edge still are. -/
+def Scry.stillDanglingFuel (pt : Scry.PtResult) (info : Scry.FnInfo) (f : Nat)
+    (locs : List Nat) : Nat → Nat → Nat → Bool
+  | 0, _, _ => .true
+  | .succ fuel, n, v =>
+    let ds := Scry.rdForVar info.defs info.rd n v;
+    match ds with
+    | .nil => .true
+    | _ => List.any (fun d =>
+      match Scry.nodeStmt info.g d with
+      | .some (.assign _ (.gep q _) _) => Scry.stillDanglingFuel pt info f locs fuel d q.index
+      | .some (.assign _ (.gepVar q _ _) _) =>
+        Scry.stillDanglingFuel pt info f locs fuel d q.index
+      | _ => Bool.not (Scry.defKillsAlias pt info f d locs)) ds
+
+/-- An interior pointer (`p[0]`, `p->x`: a `gep` of `p`) dangles exactly when its base
+does, so a `gep` definition asks the same question of the base register at the `gep`.
+`free(p); p = 0; if (p) p[0] = 1;` is then not a use-after-free. The fuel (the point
+count) bounds a `gep` cycle around a loop; running out answers "may". -/
 def Scry.stillDangling (pt : Scry.PtResult) (info : Scry.FnInfo) (f n v : Nat)
     (locs : List Nat) : Bool :=
-  let ds := Scry.rdForVar info.defs info.rd n v;
-  match ds with
-  | .nil => .true
-  | _ => Bool.not (List.all (fun d => Scry.defKillsAlias pt info f d locs) ds)
+  Scry.stillDanglingFuel pt info f locs (Nat.succ info.g.count) n v
 
 /-- The free points that reach `n` and may free one of `locs` (an empty list: no
 use-after-free on any path to this access). A free is dropped when the register's
