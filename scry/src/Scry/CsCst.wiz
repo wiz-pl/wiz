@@ -1,0 +1,177 @@
+import Text
+import WordArray
+import Scry.CstStore
+import Scry.Lower
+/-!
+# Scry.CsCst: the tree-sitter-c-sharp CST as the C# lowering's view
+
+scry parses C# with the vendored **tree-sitter-c-sharp v0.23.5** (`native/README.md`)
+through the same shim as C (`scry_parse "c_sharp"`); `scry-cst FILE.cs` spills the
+store, and the tests read checked-in spills (`corpus/csharp/**/*.cst`). This module
+turns such a `Scry.CstStore` into the `Scry.Cst` that `Scry.CsLower` walks.
+
+The store has every tree-sitter node, punctuation included. The view keeps a node's
+**named** children and its anonymous tokens that sit on a field (`operator: "+"`,
+`name: "get"`), and normalises the few places where the grammar leaves a child
+without a field, so the lowering reads one vocabulary (design `CSHARP.md` §6):
+
+| node | grammar | view |
+|---|---|---|
+| `method_declaration` | `returns:` | `type:` |
+| `variable_declarator` | the initialiser has no field | `value:` |
+| `argument` | the expression has no field; `ref`/`out`/`in` are bare tokens | `expression:`; a `modifier` node |
+| `prefix_`/`postfix_unary_expression` | operand and operator have no field | `operand:`, `operator:` |
+| `interpolation` | the hole has no field | `expression:` |
+| `as_expression` | `left:`/`right:` | `expression:`/`type:` |
+| `conditional_access_expression` | `condition:` + `member_binding_expression` | `expression:` + the binding's `name:` |
+| `(implicit_)array_creation_expression` | the initialiser has no field | `initializer:` |
+| `switch_section` | `case`/`default` are bare tokens before the patterns | patterns are `case_switch_label`, `default` is `default_switch_label` |
+| `this`/`base` | anonymous tokens | `this_expression`/`base_expression` |
+
+A file whose tree has an `ERROR` or `MISSING` node is refused before it gets here:
+`Scry.Native.parseChecked` (and so `scry-cst`) fails on it with the node count.
+-/
+
+/-- Is `k` a statement kind (what a `switch_section` holds after its labels)? -/
+def Scry.Cs.isStmtKind (k : String) : Bool :=
+  Bool.or (String.endsWith k "_statement") (String.eq k "block")
+
+/-- Node `j`'s parent kind in the store (`""` for the root). -/
+def Scry.Cs.parentKind (s : Scry.CstStore) (j : Nat) : String :=
+  match Scry.CstStore.parentOf s j with
+  | .some p => Scry.CstStore.kindName s p.n
+  | .none => ""
+
+/-- Is `pk` a unary expression (operand and operator without fields)? -/
+def Scry.Cs.isUnary (pk : String) : Bool :=
+  Bool.or (String.eq pk "prefix_unary_expression") (String.eq pk "postfix_unary_expression")
+
+/-- Is the anonymous token `k` an argument's passing mode? -/
+def Scry.Cs.isPassMode (k : String) : Bool :=
+  Bool.or (String.eq k "ref") (Bool.or (String.eq k "out") (String.eq k "in"))
+
+/-- Does the view keep child `j` of a node of kind `pk`? -/
+def Scry.Cs.keeps (s : Scry.CstStore) (pk : String) (j : Nat) : Bool :=
+  if Scry.CstStore.namedOf s j then .true
+  else
+    let k := Scry.CstStore.kindName s j;
+    if Bool.not (String.isEmpty (Scry.CstStore.fieldName s j)) then .true
+    else if Scry.Cs.isUnary pk then .true
+    else if Bool.and (String.eq pk "argument") (Scry.Cs.isPassMode k) then .true
+    else if Bool.and (String.eq pk "switch_section") (String.eq k "default") then .true
+    else Bool.or (String.eq k "this") (String.eq k "base")
+
+/-- Node `j`'s kind in the view. -/
+def Scry.Cs.viewKind (s : Scry.CstStore) (j : Nat) : String :=
+  let k := Scry.CstStore.kindName s j;
+  let pk := Scry.Cs.parentKind s j;
+  if Scry.CstStore.namedOf s j then
+    if Bool.and (String.eq pk "switch_section")
+        (Bool.and (Bool.not (Scry.Cs.isStmtKind k)) (Bool.not (String.eq k "comment")))
+    then "case_switch_label" else k
+  else if String.eq k "this" then "this_expression"
+  else if String.eq k "base" then "base_expression"
+  else if Bool.and (String.eq pk "argument") (Scry.Cs.isPassMode k) then "modifier"
+  else if Bool.and (String.eq pk "switch_section") (String.eq k "default") then "default_switch_label"
+  else k
+
+/-- Node `j`'s field in the view. -/
+def Scry.Cs.viewField (s : Scry.CstStore) (j : Nat) : String :=
+  let f := Scry.CstStore.fieldName s j;
+  let k := Scry.CstStore.kindName s j;
+  let pk := Scry.Cs.parentKind s j;
+  let named := Scry.CstStore.namedOf s j;
+  if String.eq f "returns" then "type"
+  else if Bool.not (String.isEmpty f) then
+    if String.eq pk "as_expression" then
+      (if String.eq f "left" then "expression" else if String.eq f "right" then "type" else f)
+    else if Bool.and (String.eq pk "conditional_access_expression") (String.eq f "condition") then "expression"
+    else f
+  else if Bool.not named then
+    (if Scry.Cs.isUnary pk then "operator" else "")
+  else if String.eq k "comment" then ""
+  else if String.eq pk "variable_declarator" then
+    (if Bool.or (String.eq k "bracketed_argument_list") (String.eq k "tuple_pattern") then "" else "value")
+  else if String.eq pk "argument" then "expression"
+  else if Scry.Cs.isUnary pk then "operand"
+  else if String.eq pk "interpolation" then
+    (if Bool.or (String.eq k "interpolation_brace")
+        (Bool.or (String.eq k "interpolation_alignment_clause") (String.eq k "interpolation_format_clause"))
+     then "" else "expression")
+  else if Bool.and (String.eq k "initializer_expression")
+      (Bool.or (String.eq pk "array_creation_expression") (String.eq pk "implicit_array_creation_expression"))
+  then "initializer"
+  else ""
+
+/-- Node `i`'s children in the view: the kept ones, with a `member_binding_expression`
+of a conditional access replaced by its own children (its `name:`). -/
+def Scry.Cs.viewChildren (s : Scry.CstStore) (i : Nat) : List Nat :=
+  let pk := Scry.CstStore.kindName s i;
+  let kept := List.filter (fun j => Scry.Cs.keeps s pk j)
+    (List.map (fun x => x.n) (Scry.CstStore.childrenOf s i));
+  match String.eq pk "conditional_access_expression" with
+  | .false => kept
+  | .true => List.concat (List.map (fun j =>
+      match String.eq (Scry.CstStore.kindName s j) "member_binding_expression" with
+      | .true => List.filter (fun x => Scry.CstStore.namedOf s x)
+          (List.map (fun x => x.n) (Scry.CstStore.childrenOf s j))
+      | .false => .cons j .nil) kept)
+
+/-- The C# view of a tree-sitter-c-sharp store whose spans index `text`. -/
+def Scry.Cs.ofStore (text : String) (s : Scry.CstStore) : Scry.Cst :=
+  let b := Scry.Cst.ofStore text s;
+  Scry.Cst.mk b.count
+    (fun i => Scry.Cs.viewKind s i)
+    (fun i => Scry.Cs.viewField s i)
+    b.spanOf b.parentOf
+    (fun i => Scry.Cs.viewChildren s i)
+    b.fileText b.filePath b.fileCount b.nodeText
+
+-- ## An S-expression of the view (the parse golden format)
+
+/-- One character of a quoted text. -/
+def Scry.Cs.escChar (ch : Char) : String :=
+  if Nat.beq (Char.code ch) 34 then "\\\""
+  else if Nat.beq (Char.code ch) 92 then "\\\\"
+  else if Nat.beq (Char.code ch) 10 then "\\n"
+  else String.ofChars (.cons ch .nil)
+
+/-- The `"…"` quoting of a token or leaf text (newlines and quotes escaped). -/
+def Scry.Cs.quoteText (t : String) : String :=
+  "\"" ++ String.intercalate "" (List.map Scry.Cs.escChar (String.chars t)) ++ "\""
+
+/-- `n` spaces. -/
+def Scry.Cs.spaces : Nat → String
+  | .zero => ""
+  | .succ k => " " ++ Scry.Cs.spaces k
+
+/-- Append `)` to the last line. -/
+def Scry.Cs.closeLines : List String → List String
+  | .nil => .nil
+  | .cons l .nil => .cons (l ++ ")") .nil
+  | .cons l rest => .cons l (Scry.Cs.closeLines rest)
+
+/-- Node `i` at indentation `d`: `field: (kind …)`, a leaf with its text, an anonymous
+token as its quoted spelling (or `(kind "text")` when the view renames it). -/
+partial def Scry.Cs.renderView (s : Scry.CstStore) (c : Scry.Cst) (d : Nat) (i : Nat) : List String :=
+  let pad := Scry.Cs.spaces (Nat.mul 2 d);
+  let f := c.fieldOf i;
+  let pre := match String.isEmpty f with
+    | .true => pad
+    | .false => pad ++ f ++ ": ";
+  let ks := List.filter (fun j => Bool.not (String.eq (c.kindOf j) "comment")) (c.childrenOf i);
+  match Scry.CstStore.namedOf s i with
+  | .false => match String.eq (c.kindOf i) (Scry.CstStore.kindName s i) with
+    | .true => .cons (pre ++ Scry.Cs.quoteText (c.kindOf i)) .nil
+    -- a token the view renames (`ref` as a `modifier`, `this` as `this_expression`)
+    | .false => .cons (pre ++ "(" ++ c.kindOf i ++ " " ++ Scry.Cs.quoteText (c.nodeText i) ++ ")") .nil
+  | .true => match ks with
+    | .nil => .cons (pre ++ "(" ++ c.kindOf i ++ " " ++ Scry.Cs.quoteText (c.nodeText i) ++ ")") .nil
+    | .cons _ _ => Scry.Cs.closeLines (.cons (pre ++ "(" ++ c.kindOf i)
+        (List.concat (List.map (Scry.Cs.renderView s c (Nat.succ d)) ks)))
+
+/-- The view of a spill as an S-expression. -/
+def Scry.Cs.renderSpill (path : String) (text : String) (spill : String) : String :=
+  match Scry.CstStore.ofText spill with
+  | .error e => path ++ ": error: bad spill: " ++ e
+  | .ok s => String.intercalate "\n" (Scry.Cs.renderView s (Scry.Cs.ofStore text s) 0 0)

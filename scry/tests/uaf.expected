@@ -1,0 +1,117 @@
+basic: one finding: ok
+basic: one memory rule in the pack: ok
+basic: no leftover memory warning: ok
+basic: rule: ok
+basic: kind: ok
+basic: severity: ok
+basic: path has alloc: ok
+basic: path has free: ok
+basic: path ends at sink: ok
+basic: free is in main: ok
+basic: argument 0: ok
+conditional: one finding: ok
+conditional: one memory rule in the pack: ok
+conditional: no leftover memory warning: ok
+conditional: rule: ok
+conditional: kind: ok
+conditional: severity: ok
+conditional: path has alloc: ok
+conditional: path has free: ok
+conditional: path ends at sink: ok
+conditional: free is in main: ok
+conditional: argument 0: ok
+alias: one finding: ok
+alias: one memory rule in the pack: ok
+alias: no leftover memory warning: ok
+alias: rule: ok
+alias: kind: ok
+alias: severity: ok
+alias: path has alloc: ok
+alias: path has free: ok
+alias: path ends at sink: ok
+alias: free is in main: ok
+alias: argument 0: ok
+double-free: one finding: ok
+double-free: one memory rule in the pack: ok
+double-free: no leftover memory warning: ok
+double-free: rule: ok
+double-free: kind: ok
+double-free: severity: ok
+double-free: path has alloc: ok
+double-free: path has free: ok
+double-free: path ends at sink: ok
+double-free: free is in main: ok
+double-free: argument 0: ok
+loop: one finding: ok
+loop: one memory rule in the pack: ok
+loop: no leftover memory warning: ok
+loop: rule: ok
+loop: kind: ok
+loop: severity: ok
+loop: path has alloc: ok
+loop: path has free: ok
+loop: path ends at sink: ok
+loop: free is in main: ok
+loop: argument 0: ok
+interproc: one finding: ok
+interproc: one memory rule in the pack: ok
+interproc: no leftover memory warning: ok
+interproc: rule: ok
+interproc: kind: ok
+interproc: severity: ok
+interproc: path has alloc: ok
+interproc: path has free: ok
+interproc: path ends at sink: ok
+interproc: free is in release: ok
+interproc: argument 0: ok
+strdup: one finding: ok
+strdup: one memory rule in the pack: ok
+strdup: no leftover memory warning: ok
+strdup: rule: ok
+strdup: kind: ok
+strdup: severity: ok
+strdup: path has alloc: ok
+strdup: path has free: ok
+strdup: path ends at sink: ok
+strdup: free is in main: ok
+strdup: argument 0: ok
+cve-2020-1752: one finding: ok
+cve-2020-1752: one memory rule in the pack: ok
+cve-2020-1752: no leftover memory warning: ok
+cve-2020-1752: rule: ok
+cve-2020-1752: kind: ok
+cve-2020-1752: severity: ok
+cve-2020-1752: path has alloc: ok
+cve-2020-1752: path has free: ok
+cve-2020-1752: path ends at sink: ok
+cve-2020-1752: free is in main: ok
+cve-2020-1752: argument 1: ok
+cve-2019-7317: one finding: ok
+cve-2019-7317: one memory rule in the pack: ok
+cve-2019-7317: no leftover memory warning: ok
+cve-2019-7317: rule: ok
+cve-2019-7317: kind: ok
+cve-2019-7317: severity: ok
+cve-2019-7317: path has alloc: ok
+cve-2019-7317: path has free: ok
+cve-2019-7317: path ends at sink: ok
+cve-2019-7317: free is in png_image_free_function: ok
+cve-2019-7317: argument 0: ok
+safe-double-free: zero findings: ok
+safe-double-free: one memory rule in the pack: ok
+safe-double-free: no leftover memory warning: ok
+safe-null: zero findings: ok
+safe-null: one memory rule in the pack: ok
+safe-null: no leftover memory warning: ok
+safe-realloc: zero findings: ok
+safe-realloc: one memory rule in the pack: ok
+safe-realloc: no leftover memory warning: ok
+safe-branch: zero findings: ok
+safe-branch: one memory rule in the pack: ok
+safe-branch: no leftover memory warning: ok
+safe-escape: zero findings: ok
+safe-escape: one memory rule in the pack: ok
+safe-escape: no leftover memory warning: ok
+safe-union: zero findings: ok
+safe-union: one memory rule in the pack: ok
+safe-union: no leftover memory warning: ok

@@ -1,0 +1,630 @@
+import Json
+import Optic
+import Tagged
+/-!
+# Web.React
+
+A React-style UI framework for Wiz: components, local state, typed event handlers,
+keyed lists, a pure virtual DOM, deterministic server-side rendering (HTML strings),
+and a keyed diff that produces small DOM patches. `web/framework/` has the browser
+half (a patch applier and event delegation) and a demo; `wiz-notes/react-framework.md`
+is the design note and the survey this comes from.
+
+The model is **VDOM, not fine-grained signals**, and it is chosen for the way the
+existing web pages already work (web/Web.wiz, web/infoview.js):
+
+* A page's state is a Wiz value held by JavaScript and handed back on every event
+  (`wiz_web_step : state → event → state`). So the UI is a pure function
+  `state → tree`, which is exactly what a virtual DOM wants. A signal graph would need
+  a mutable heap, stable node identity and a subscription order that the step-function
+  FFI does not have.
+* The same `state → tree` function is the server-side renderer: `React.toHtml` is
+  deterministic and needs no DOM, so `wiz doc` and the static pages can render a
+  component tree without a browser.
+* Keyed diffing is ~150 lines and has no runtime beyond the tree itself; a signal
+  runtime (cells, dependency tracking, effect queue) would be larger in Wiz and would
+  still need the diff for first paint.
+
+Updates are **VDOM patches addressed by a child-index path** (`"0.2.1"`), through the
+same `js_*` FFI the infoview uses: `React.patchesJson` gives JavaScript a list of
+operations, and `web/framework/runtime.js` applies them. Nothing in this file is
+`unsafe`, and no proof in it is evaluated natively (it trusts no native axiom).
+
+## Components and local state
+
+A component is a record of `init`, `update` and `view` (`React.Component`), with props
+`P`, state `S` and messages `M`. Local state is addressed by a **lens**
+(`lib/Optic.wiz`) into the application state: `useState` is `Lens.get`, `setState` is
+`Lens.over`. Two components' lenses are disjoint paths, so their updates commute
+(`Lens.Indep`), and the lens laws give read-after-write. This fits quantities: an
+ordinary component's state is unrestricted data at ω.
+
+A component that owns a **one-shot resource** (an in-flight request, a focus lease)
+uses `React.Owned S`: a linear state cell (quantity 1). Every step takes the token and
+must return it, so the kernel rejects using it twice and rejects dropping it on a
+branch -- `React.Owned` is the `Uniq` pattern of `lib/Region.wiz` without regions.
+
+```
+import Optic
+import Web.React
+
+inductive Msg where
+  | inc
+  | dec
+
+structure Model where
+  count : Nat
+
+def countL : Lens Model Nat := fun s => (s.count, fun n => Model.mk n)
+
+def view (s : Model) : React.VNode Msg :=
+  React.el "div" [React.class "counter"]
+    [React.on "click" Msg.inc (React.el "button" List.nil [React.text "+"]),
+     React.text "count: ", React.text (Nat.toString s.count)]   -- `import IO` for Nat.toString
+
+def app : React.App Model Msg := React.App.mk (Model.mk 0)
+  (fun m s => match m with
+    | .inc => React.setState countL Nat.succ s
+    | .dec => React.setState countL (fun n => Nat.sub n 1) s)
+  view
+
+#eval (React.App.render app (Model.mk 2)).html   -- the HTML string
+```
+-/
+
+-- ## Nodes
+
+/-- An HTML attribute: a name and a value. Both are escaped when rendered. -/
+def React.Attr : Type := String × String
+/-- An attribute, `React.attr "class" "pane"`. -/
+def React.attr (name value : String) : React.Attr := (name, value)
+/-- The `class` attribute. -/
+def React.class (value : String) : React.Attr := React.attr "class" value
+/-- The `id` attribute. -/
+def React.id (value : String) : React.Attr := React.attr "id" value
+
+/-- A virtual node, as a first-child/next-sibling forest (Wiz has no nested inductive
+types, so children are a `children` chain and a node's `next` is its following
+sibling). Build nodes with the smart constructors below, which take ordinary `List`s
+and always end a chain at `.nil`.
+
+`on event msg node` attaches a typed message to `node`'s DOM `event` (`click`, `input`,
+`keydown`, …); `render` numbers handlers in document order and dispatch passes the
+message to the app's `update`. `raw html` inserts `html` unescaped: it is the one trust
+boundary (see `React.raw`). -/
+inductive React.VNode (M : Type) where
+  | nil
+  | text (s : String) (next : React.VNode M)
+  | raw (html : String) (next : React.VNode M)
+  | el (tag : String) (key : String) (attrs : List React.Attr) (children : React.VNode M) (next : React.VNode M)
+  | on (event : String) (msg : M) (body : React.VNode M) (next : React.VNode M)
+
+/-- Put `rest` after the sibling chain `x`. -/
+def React.append {M : Type} : React.VNode M → React.VNode M → React.VNode M
+  | .nil, rest => rest
+  | .text s n, rest => .text s (React.append n rest)
+  | .raw h n, rest => .raw h (React.append n rest)
+  | .el t k a cs n, rest => .el t k a cs (React.append n rest)
+  | .on e m b n, rest => .on e m b (React.append n rest)
+
+/-- `x` followed by the chain `rest`, merging two adjacent text nodes into one. HTML
+merges adjacent text nodes when it parses a page, so the tree must merge them too: a
+patch's child-index path addresses DOM nodes, and two text children would be one node
+there. (Raw HTML is one element; see `React.raw`.) -/
+def React.mergeText {M : Type} (x : React.VNode M) (rest : React.VNode M) : React.VNode M :=
+  match x, rest with
+  | .text a .nil, .text b r => .text (String.append a b) r
+  | _, _ => React.append x rest
+
+/-- A sibling chain from a list (adjacent text merged, as the DOM would). -/
+def React.ofList {M : Type} : List (React.VNode M) → React.VNode M
+  | .nil => .nil
+  | .cons x xs => React.mergeText x (React.ofList xs)
+
+/-- A text node (escaped when rendered; a patch carries its unescaped text). -/
+def React.text {M : Type} (s : String) : React.VNode M := .text s .nil
+/-- Raw HTML, **not escaped**: only for output that is already trusted HTML (for
+instance `TT.toHtml`, which escapes its own text). Every other text path escapes. -/
+def React.raw {M : Type} (html : String) : React.VNode M := .raw html .nil
+/-- An element: a tag, attributes and children. -/
+def React.el {M : Type} (tag : String) (attrs : List React.Attr) (kids : List (React.VNode M)) : React.VNode M :=
+  .el tag "" attrs (React.ofList kids) .nil
+/-- A keyed element: its key is matched across renders when its siblings are reordered
+(`React.diffChildren`). Only elements take keys; a key on anything else is ignored, and
+keys must be unique among their siblings (a duplicate is matched to the first). -/
+def React.keyed {M : Type} (key : String) (node : React.VNode M) : React.VNode M := match node with
+  | .el t _ a cs n => .el t key a cs n
+  | other => other
+/-- Attach a message to a DOM event on `node`: one handler per event per element (the
+last `on` for the same event wins, as in the DOM). -/
+def React.on {M : Type} (event : String) (msg : M) (node : React.VNode M) : React.VNode M :=
+  .on event msg node .nil
+/-- A group of siblings, for a children list (do not use a group as one child). -/
+def React.seq {M : Type} (kids : List (React.VNode M)) : React.VNode M := React.ofList kids
+
+-- ## Rendering
+
+/-- The rendered tree: text is raw (escaped when written out), attributes are strings,
+and event handlers have become `data-wiz-on-EVENT="index"` attributes. -/
+inductive React.RNode where
+  | nil
+  | text (s : String) (next : React.RNode)
+  | raw (html : String) (next : React.RNode)
+  | el (tag : String) (key : String) (attrs : List React.Attr) (children : React.RNode) (next : React.RNode)
+
+/-- Put `rest` after the sibling chain `x`. -/
+def React.RNode.append : React.RNode → React.RNode → React.RNode
+  | .nil, rest => rest
+  | .text s n, rest => .text s (React.RNode.append n rest)
+  | .raw h n, rest => .raw h (React.RNode.append n rest)
+  | .el t k a cs n, rest => .el t k a cs (React.RNode.append n rest)
+
+/-- A sibling chain from a list. -/
+def React.RNode.ofList : List React.RNode → React.RNode
+  | .nil => .nil
+  | .cons x xs => React.RNode.append x (React.RNode.ofList xs)
+
+/-- The siblings of a rendered node, detached (each with no `next`). -/
+def React.RNode.siblings : React.RNode → List React.RNode
+  | .nil => .nil
+  | .text s n => .cons (.text s .nil) (React.RNode.siblings n)
+  | .raw h n => .cons (.raw h .nil) (React.RNode.siblings n)
+  | .el t k a cs n => .cons (.el t k a cs .nil) (React.RNode.siblings n)
+
+/-- The key of a rendered node (empty for text, raw text and unkeyed elements). -/
+def React.RNode.key : React.RNode → String
+  | .nil => ""
+  | .text _ _ => ""
+  | .raw _ _ => ""
+  | .el _ k _ _ _ => k
+
+/-- The state of a render: the output (reversed characters), the number of the next
+handler, and the handlers so far (reversed). -/
+structure React.Out (M : Type) where
+  acc : List Char
+  next : Nat
+  handlers : List (String × M)
+
+/-- Whether `s` is in `xs`. -/
+def React.member (s : String) : List String → Bool
+  | .nil => .false
+  | .cons x xs => match String.eq s x with
+    | .true => .true
+    | .false => React.member s xs
+
+/-- Void HTML elements: no closing tag. -/
+def React.void (tag : String) : Bool :=
+  React.member tag (List.cons "area" (List.cons "base" (List.cons "br" (List.cons "col"
+    (List.cons "embed" (List.cons "hr" (List.cons "img" (List.cons "input" (List.cons "link"
+      (List.cons "meta" (List.cons "param" (List.cons "source" (List.cons "track"
+        (List.cons "wbr" List.nil))))))))))))))
+
+/-- The attribute name of a handler: one attribute per event, so an element can carry a
+`click` and a `keydown` handler at once (`data-wiz-on-click="0"`). -/
+def React.eventAttr (event : String) : String := String.append "data-wiz-on-" event
+
+/-- The `data-wiz-on-EVENT` value of a handler: its index in the rendered handler table. -/
+def React.eventValue (index : Nat) : String :=
+  String.mk (Json.natChars index List.nil)
+
+/-- Attach the handler attribute for `event` (number `index`) to the head of `node`.
+Nested `on`s put more attributes on the same element; a text node is wrapped in a
+`span` so that it has somewhere to carry the attribute. -/
+def React.attach {M : Type} (event : String) (index : Nat) : React.VNode M → React.VNode M
+  | .el t k a cs n => .el t k (List.append a (.cons (React.attr (React.eventAttr event) (React.eventValue index)) List.nil)) cs n
+  | .on e m b n => .on e m (React.attach event index b) n
+  | .text s n => .el "span" "" (.cons (React.attr (React.eventAttr event) (React.eventValue index)) List.nil) (.text s .nil) n
+  | .raw h n => .el "span" "" (.cons (React.attr (React.eventAttr event) (React.eventValue index)) List.nil) (.raw h .nil) n
+  | .nil => .el "span" "" (.cons (React.attr (React.eventAttr event) (React.eventValue index)) List.nil) .nil .nil
+
+/-- Turn a virtual tree into a rendered tree, numbering handlers in document order
+(pre-order: the node's own handlers, then its children, then its next sibling). -/
+partial def React.toR {M : Type} : React.VNode M → React.Out M → React.RNode × React.Out M
+  | .nil, o => (.nil, o)
+  | .text s n, o =>
+    let r := React.toR n o;
+    (.text s r.1, r.2)
+  | .raw h n, o =>
+    let r := React.toR n o;
+    (.raw h r.1, r.2)
+  | .el t k a cs n, o =>
+    let rc := React.toR cs o;
+    let rn := React.toR n rc.2;
+    (.el t k a rc.1 rn.1, rn.2)
+  | .on e m b n, o =>
+    let index := o.next;
+    let o1 : React.Out M := { o with next := index + 1, handlers := .cons (e, m) o.handlers };
+    let r := React.toR (React.append (React.attach e index b) n) o1;
+    (r.1, r.2)
+
+/-- An attribute's HTML: ` name="value"`, escaped. -/
+def React.attrHtml (a : React.Attr) (h : Html) : Html :=
+  Html.lit "\"" (Html.lit (Tagged.esc a.2) (Html.lit "=\"" (Html.lit a.1 (Html.lit " " h))))
+
+/-- Attributes' HTML, left to right. -/
+def React.attrsHtml : List React.Attr → Html → Html
+  | .nil, h => h
+  | .cons a rest, h => React.attrsHtml rest (React.attrHtml a h)
+
+/-- An opening tag, `<tag attrs>`, before `h`. -/
+def React.openTag (tag : String) (attrs : List React.Attr) (h : Html) : Html :=
+  Html.lit ">" (React.attrsHtml attrs (Html.lit tag (Html.lit "<" h)))
+
+/-- A closing tag, `</tag>`, before `h`. -/
+def React.closeTag (tag : String) (h : Html) : Html :=
+  Html.lit ">" (Html.lit tag (Html.lit "</" h))
+
+/-- A rendered node and its following siblings, as HTML, before `h`. -/
+def React.renderRNode : React.RNode → Html → Html
+  | .nil, h => h
+  | .text s n, h => React.renderRNode n (Html.lit (Tagged.esc s) h)
+  | .raw r n, h => React.renderRNode n (Html.lit r h)
+  | .el t k a cs n, h =>
+    let opened := React.openTag t a h;
+    match React.void t with
+    | .true => React.renderRNode n opened
+    | .false => React.renderRNode n (React.closeTag t (React.renderRNode cs opened))
+
+/-- A rendered tree as an HTML string. -/
+def React.htmlOf (n : React.RNode) : String := match React.renderRNode n (Html.mk List.nil 0) with
+  | .mk acc _ => String.mk (List.revOnto acc List.nil)
+
+/-- A rendered view: its tree (for diffing), its HTML, and its handler table
+(`event, message`, in document order). -/
+structure React.Rendered (M : Type) where
+  tree : React.RNode
+  html : String
+  handlers : List (String × M)
+
+/-- Render a virtual tree: HTML for SSR, handlers for dispatch, and the tree for a
+later `React.Rendered.diff`. Deterministic: no clock, no hashing, no allocation order. -/
+def React.render {M : Type} (v : React.VNode M) : React.Rendered M :=
+  let o : React.Out M := React.Out.mk List.nil 0 List.nil;
+  let r := React.toR v o;
+  React.Rendered.mk r.1 (React.htmlOf r.1) (List.revOnto r.2.handlers List.nil)
+
+/-- A virtual tree as an HTML string (SSR). -/
+def React.toHtml {M : Type} (v : React.VNode M) : String := (React.render v).html
+
+-- ## Patches
+
+/-- A DOM update. Paths are child indices from the container (text nodes count too):
+`"0"` is the first child, `"0.2"` its third child, `""` the container itself.
+`insert` takes HTML for a new child; `move` removes the child at `src` and reinserts it
+so that it ends up at index `dst`; `remove` removes at `index`. -/
+inductive React.Patch where
+  | replace (path : String) (html : String)
+  | text (path : String) (s : String)
+  | setAttr (path : String) (name : String) (value : String)
+  | removeAttr (path : String) (name : String)
+  | insert (path : String) (index : Nat) (html : String)
+  | remove (path : String) (index : Nat)
+  | move (path : String) (src : Nat) (dst : Nat)
+
+/-- The element at `n`, if any. -/
+partial def React.at {A : Type} (n : Nat) : List A → Option A
+  | .nil => .none
+  | .cons x xs => match Nat.beq n 0 with
+    | .true => .some x
+    | .false => React.at (n - 1) xs
+
+/-- The element at `n`, or `d`. -/
+partial def React.atD {A : Type} (d : A) (n : Nat) : List A → A
+  | .nil => d
+  | .cons x xs => match Nat.beq n 0 with
+    | .true => x
+    | .false => React.atD d (n - 1) xs
+
+/-- Insert `x` before position `n`. -/
+partial def React.insertAt {A : Type} (n : Nat) (x : A) : List A → List A
+  | .nil => .cons x .nil
+  | .cons y ys => match Nat.beq n 0 with
+    | .true => .cons x (.cons y ys)
+    | .false => .cons y (React.insertAt (n - 1) x ys)
+
+/-- Remove the element at `n`. -/
+partial def React.removeAt {A : Type} (n : Nat) : List A → List A
+  | .nil => .nil
+  | .cons x xs => match Nat.beq n 0 with
+    | .true => xs
+    | .false => .cons x (React.removeAt (n - 1) xs)
+
+/-- Move the element at `src` so that it ends up at index `dst`. -/
+def React.moveTo {A : Type} (src dst : Nat) (xs : List A) : List A :=
+  match React.at src xs with
+  | .some x => React.insertAt dst x (React.removeAt src xs)
+  | .none => xs
+
+/-- The key of the node; empty for text/raw. -/
+def React.keyOf (n : React.RNode) : String := React.RNode.key n
+
+/-- Whether the list has a key equal to `k`. -/
+def React.hasKey (k : String) : List React.RNode → Bool
+  | .nil => .false
+  | .cons x xs => match String.eq (React.keyOf x) k with
+    | .true => .true
+    | .false => React.hasKey k xs
+
+/-- The first index at or after `from` whose key is `k`. -/
+partial def React.findKeyFrom (k : String) (from : Nat) : List React.RNode → Option Nat
+  | .nil => .none
+  | .cons x xs => match Nat.beq from 0 with
+    | .true => match String.eq (React.keyOf x) k with
+      | .true => .some 0
+      | .false => (match React.findKeyFrom k 0 xs with
+        | .some n => .some (n + 1)
+        | .none => .none)
+    | .false => (match React.findKeyFrom k (from - 1) xs with
+      | .some n => .some (n + 1)
+      | .none => .none)
+
+/-- Whether every node in the list is an element with a non-empty key. -/
+def React.allKeyed : List React.RNode → Bool
+  | .nil => .true
+  | .cons x xs => match String.eq (React.keyOf x) "" with
+    | .true => .false
+    | .false => React.allKeyed xs
+
+/-- Whether the parent is the root (whose child paths have no leading dot). -/
+def React.childPath (parent : String) (i : Nat) : String :=
+  match String.eq parent "" with
+  | .true => String.mk (Json.natChars i List.nil)
+  | .false => String.mk (List.append (String.chars parent)
+      (List.append (String.chars ".") (Json.natChars i List.nil)))
+
+/-- An attribute's value by name. -/
+def React.attrValue (name : String) : List React.Attr → Option String
+  | .nil => .none
+  | .cons a rest => match String.eq a.1 name with
+    | .true => .some a.2
+    | .false => React.attrValue name rest
+
+/-- Remove the attributes of `old` that `new` does not have. -/
+def React.removedAttrs (path : String) : List React.Attr → List React.Attr → List React.Patch
+  | .nil, _ => List.nil
+  | .cons a rest, new => match React.attrValue a.1 new with
+    | .some _ => React.removedAttrs path rest new
+    | .none => .cons (.removeAttr path a.1) (React.removedAttrs path rest new)
+
+/-- Set the attributes of `new` that are absent from `old` or have another value. -/
+def React.setAttrs (path : String) (old : List React.Attr) : List React.Attr → List React.Patch
+  | .nil => List.nil
+  | .cons a rest => match React.attrValue a.1 old with
+    | .some v => match String.eq v a.2 with
+      | .true => React.setAttrs path old rest
+      | .false => .cons (.setAttr path a.1 a.2) (React.setAttrs path old rest)
+    | .none => .cons (.setAttr path a.1 a.2) (React.setAttrs path old rest)
+
+/-- Patches for the attributes: remove the ones that went away, set the new or changed
+ones. -/
+def React.diffAttrs (path : String) (old new : List React.Attr) : List React.Patch :=
+  List.append (React.removedAttrs path old new) (React.setAttrs path old new)
+
+-- (diffNode and diffChildren are mutual: an element's children are diffed by the same
+-- function that diffs nodes.)
+
+mutual
+/-- Patches turning the node `old` into `new` at `path` (both are single nodes). -/
+partial def React.diffNode (path : String) (old : React.RNode) (new : React.RNode) : List React.Patch :=
+  match old, new with
+  | .nil, .nil => List.nil
+  | .text s _, .text s' _ => match String.eq s s' with
+    | .true => List.nil
+    | .false => .cons (.text path s') List.nil
+  | .raw h _, .raw h' _ => match String.eq h h' with
+    | .true => List.nil
+    | .false => .cons (.replace path h') List.nil
+  | .el t k a cs _, .el t' k' a' cs' _ =>
+    match String.eq t t' with
+    | .false => .cons (.replace path (React.htmlOf new)) List.nil
+    | .true => match String.eq k k' with
+      | .false => .cons (.replace path (React.htmlOf new)) List.nil
+      | .true => List.append (React.diffAttrs path a a')
+          (React.diffChildren path (React.RNode.siblings cs) (React.RNode.siblings cs'))
+  | _, _ => .cons (.replace path (React.htmlOf new)) List.nil
+
+/-- Patches for a children list at `base` (which ends with `.`, or is empty at the
+root): keyed when both lists are fully keyed, positional otherwise. -/
+partial def React.diffChildren (base : String) (old new : List React.RNode) : List React.Patch :=
+  match React.allKeyed old with
+  | .true => match React.allKeyed new with
+    | .true => React.diffKeyed base old new
+    | .false => React.diffPositional base 0 old new
+  | .false => React.diffPositional base 0 old new
+
+/-- Positional diff: pair by index, then insert or remove at the tail. -/
+partial def React.diffPositional (base : String) (i : Nat) : List React.RNode → List React.RNode → List React.Patch
+  | .nil, .nil => List.nil
+  | .nil, .cons n ns =>
+    .cons (.insert base i (React.htmlOf n)) (React.diffPositional base (i + 1) List.nil ns)
+  | .cons o os, .nil =>
+    .cons (.remove base i) (React.diffPositional base i os List.nil)
+  | .cons o os, .cons n ns =>
+    List.append (React.diffNode (React.childPath base i) o n)
+      (React.diffPositional base (i + 1) os ns)
+
+/-- Keyed diff: drop the old children that are gone, then walk the new list, moving a
+matching child into place (or inserting it), and finally remove the leftovers. -/
+partial def React.diffKeyed (base : String) (old new : List React.RNode) : List React.Patch :=
+  let kept := React.dropMissing base new 0 old;
+  let walked := React.keyedLoop base 0 kept.1 new List.nil;
+  List.append kept.2 walked.2
+
+/-- The old children still present in `new`, with `remove` patches for the others.
+`j` is the child's current index (the number kept so far). -/
+def React.dropMissing (base : String) (new : List React.RNode) (j : Nat) :
+    List React.RNode → List React.RNode × List React.Patch
+  | .nil => (List.nil, List.nil)
+  | .cons o os =>
+    match React.hasKey (React.keyOf o) new with
+    | .true => let rest := React.dropMissing base new (j + 1) os; (.cons o rest.1, rest.2)
+    | .false => let rest := React.dropMissing base new j os;
+      (rest.1, .cons (.remove base j) rest.2)
+
+/-- Walk `new` at index `i` over the current list `cur`, producing patches. -/
+partial def React.keyedLoop (base : String) (i : Nat) (cur : List React.RNode) :
+    List React.RNode → List React.Patch → List React.RNode × List React.Patch
+  | .nil, acc => (cur, List.append acc (React.removeTail base i (List.length cur - i)))
+  | .cons n ns, acc =>
+    match React.at i cur with
+    | .some c => match String.eq (React.keyOf c) (React.keyOf n) with
+      | .true => React.keyedLoop base (i + 1) cur ns
+          (List.append acc (React.diffNode (React.childPath base i) c n))
+      | .false => match React.findKeyFrom (React.keyOf n) (i + 1) cur with
+        | .some j => React.keyedLoop base (i + 1) (React.moveTo j i cur) ns
+            (List.append acc (.cons (.move base j i)
+              (React.diffNode (React.childPath base i) (React.atD n j cur) n)))
+        | .none => React.keyedLoop base (i + 1) (React.insertAt i n cur) ns
+            (List.append acc (.cons (.insert base i (React.htmlOf n)) List.nil))
+    | .none => React.keyedLoop base (i + 1) (React.insertAt i n cur) ns
+        (List.append acc (.cons (.insert base i (React.htmlOf n)) List.nil))
+
+/-- Remove `k` children at index `i` (each removal shifts the next into place). -/
+def React.removeTail (base : String) (i : Nat) : Nat → List React.Patch
+  | .zero => List.nil
+  | .succ k => .cons (.remove base i) (React.removeTail base i k)
+end
+
+/-- Patches from one rendered view to another. -/
+def React.Rendered.diff {M : Type} (old new : React.Rendered M) : List React.Patch :=
+  React.diffChildren "" (React.RNode.siblings old.tree) (React.RNode.siblings new.tree)
+
+-- ## JSON, for the browser half
+
+/-- `map`, locally (the framework does not import lib/Text.wiz). -/
+def React.map {A B : Type} (f : A → B) : List A → List B
+  | .nil => .nil
+  | .cons x xs => .cons (f x) (React.map f xs)
+
+/-- One patch as JSON (`web/framework/runtime.js` applies it). -/
+def React.Patch.toJson (p : React.Patch) : Json := match p with
+  | .replace path html => Json.mkObj (.cons (Json.field "op" (Json.mkStr "replace"))
+      (.cons (Json.field "path" (Json.mkStr path)) (.cons (Json.field "html" (Json.mkStr html)) List.nil)))
+  | .text path s => Json.mkObj (.cons (Json.field "op" (Json.mkStr "text"))
+      (.cons (Json.field "path" (Json.mkStr path)) (.cons (Json.field "text" (Json.mkStr s)) List.nil)))
+  | .setAttr path name value => Json.mkObj (.cons (Json.field "op" (Json.mkStr "setAttr"))
+      (.cons (Json.field "path" (Json.mkStr path)) (.cons (Json.field "name" (Json.mkStr name))
+        (.cons (Json.field "value" (Json.mkStr value)) List.nil))))
+  | .removeAttr path name => Json.mkObj (.cons (Json.field "op" (Json.mkStr "removeAttr"))
+      (.cons (Json.field "path" (Json.mkStr path)) (.cons (Json.field "name" (Json.mkStr name)) List.nil)))
+  | .insert path index html => Json.mkObj (.cons (Json.field "op" (Json.mkStr "insert"))
+      (.cons (Json.field "path" (Json.mkStr path)) (.cons (Json.field "index" (Json.ofNat index))
+        (.cons (Json.field "html" (Json.mkStr html)) List.nil))))
+  | .remove path index => Json.mkObj (.cons (Json.field "op" (Json.mkStr "remove"))
+      (.cons (Json.field "path" (Json.mkStr path)) (.cons (Json.field "index" (Json.ofNat index)) List.nil)))
+  | .move path src dst => Json.mkObj (.cons (Json.field "op" (Json.mkStr "move"))
+      (.cons (Json.field "path" (Json.mkStr path)) (.cons (Json.field "src" (Json.ofNat src))
+        (.cons (Json.field "dst" (Json.ofNat dst)) List.nil))))
+
+/-- A patch list as JSON, for `js_patch`. -/
+def React.patchesJson (ps : List React.Patch) : String :=
+  Json.render (Json.mkArr (React.map React.Patch.toJson ps))
+
+-- ## Components, state, dispatch
+
+/-- Read a component's local state: `useState` is a lens's get. -/
+def React.useState {S A : Type} (l : Lens S A) (s : S) : A := Lens.get l s
+/-- Update a component's local state: `setState` is a lens's over. The lens laws
+(`Lens.GetPut`, `Lens.PutGet`) give read-after-write; two components' lenses on
+independent paths commute (`Lens.Indep`). -/
+def React.setState {S A : Type} (l : Lens S A) (f : A → A) (s : S) : S := Lens.over l f s
+/-- A reducer on a component's local state (`useReducer`). -/
+def React.useReducer {S A M : Type} (l : Lens S A) (step : M → A → A) (m : M) (s : S) : S :=
+  Lens.over l (step m) s
+
+/-- A component: its initial state from props, its update, and its view. -/
+structure React.Component (P S M : Type) where
+  init : P → S
+  update : M → S → S
+  view : P → S → React.VNode M
+
+/-- Render a component (`props`, `state`) to a `Rendered`. -/
+def React.Component.render {P S M : Type} (c : React.Component P S M) (p : P) (s : S) : React.Rendered M :=
+  React.render (c.view p s)
+
+/-- A whole app: initial state, update and view. -/
+structure React.App (S M : Type) where
+  init : S
+  update : M → S → S
+  view : S → React.VNode M
+
+/-- The app's view at `s`, rendered. -/
+def React.App.render {S M : Type} (a : React.App S M) (s : S) : React.Rendered M :=
+  React.render (a.view s)
+
+/-- SSR: the app at `s` as HTML. -/
+def React.App.html {S M : Type} (a : React.App S M) (s : S) : String := (React.App.render a s).html
+
+/-- The message of handler `i` (document order), if any. -/
+partial def React.handlerAt {M : Type} (i : Nat) : List (String × M) → Option M
+  | .nil => .none
+  | .cons h hs => match Nat.beq i 0 with
+    | .true => .some h.2
+    | .false => React.handlerAt (i - 1) hs
+
+/-- Dispatch handler `i` (the browser sends its `data-wiz-on-EVENT` index): the next state. -/
+def React.App.dispatch {S M : Type} (a : React.App S M) (s : S) (i : Nat) : S :=
+  match React.handlerAt i (React.App.render a s).handlers with
+  | .some m => a.update m s
+  | .none => s
+
+/-- Dispatch only if the handler's event name is `event` (the browser sends both, so a
+stale index from a previous render cannot fire the wrong message). -/
+def React.App.event {S M : Type} (a : React.App S M) (s : S) (event : String) (i : Nat) : S :=
+  match React.at i (React.App.render a s).handlers with
+  | .some h => match String.eq h.1 event with
+    | .true => a.update h.2 s
+    | .false => s
+  | .none => s
+
+/-- The patches from the app's state `s` to `s'` (render both, keyed-diff). -/
+def React.App.patch {S M : Type} (a : React.App S M) (s s' : S) : List React.Patch :=
+  React.Rendered.diff (React.App.render a s) (React.App.render a s')
+
+/-- `React.App.patch` as JSON, for `js_patch`. -/
+def React.App.patches {S M : Type} (a : React.App S M) (s s' : S) : String :=
+  React.patchesJson (React.App.patch a s s')
+
+-- ## Owned (linear) state
+
+/-- A one-shot state cell: the token is used at quantity 1, so the kernel rejects
+using it twice and rejects dropping it. The state itself is ordinary (ω) data, as in
+`Uniq`. Only this module constructs it (`private mk`). -/
+inductive React.Owned (S : Type) where
+  | private mk (state : S)
+
+/-- A new one-shot cell. -/
+def React.Owned.new {S : Type} (s : S) : React.Owned S := React.Owned.mk s
+
+/-- Use the cell once: run `k` on the state and return its result. -/
+def React.Owned.read {S B : Type} (1 o : React.Owned S) (k : S → B) : B :=
+  match o with
+  | .mk s => k s
+
+/-- The state, and the cell back (`*o` in direct style). -/
+def React.Owned.peek {S : Type} (1 o : React.Owned S) : S × React.Owned S :=
+  match o with
+  | .mk s => (s, React.Owned.mk s)
+
+/-- Update the state, giving the cell back. -/
+def React.Owned.update {S : Type} (1 o : React.Owned S) (f : S → S) : React.Owned S :=
+  match o with
+  | .mk s => React.Owned.mk (f s)
+
+/-- Replace the state, giving the cell back. -/
+def React.Owned.set {S : Type} (1 o : React.Owned S) (s : S) : React.Owned S :=
+  match o with
+  | .mk _ => React.Owned.mk s
+
+/-- End the one-shot state: its final value (the only way to discard the cell, and it
+must be written on every path). -/
+def React.Owned.end {S : Type} (1 o : React.Owned S) : S :=
+  match o with
+  | .mk s => s
+
+attribute [inline] React.Owned.new
+attribute [inline] React.Owned.read
+attribute [inline] React.Owned.peek
+attribute [inline] React.Owned.update
+attribute [inline] React.Owned.set
+attribute [inline] React.Owned.end

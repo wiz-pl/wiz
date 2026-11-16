@@ -9287,14 +9287,40 @@ def moduleCheck (cats : List Cat) (tokens : List String) (tab : List ModSrc) (ro
   match modCheckRun cats tokens tab roots with
   | .mk run _ _ _ => stripAts (List.reverseOf (Run.out run) .nil)
 
--- the driver: the `-I` roots and `--key` among the command-line arguments
+-- `s` after `p` when `s` starts with `p`; `none` when it does not or nothing is left
+def modAfterPrefix (p s : String) : Option String := match p with
+  | .mk ps => match s with
+    | .mk cs => match dropPrefix ps cs with
+      | .none => .none
+      | .some rest => match rest with
+        | .nil => .none
+        | .cons _ _ => .some (.mk rest)
+
+-- a module root written with its directory: `-IDIR`, `-I=DIR`, `--include=DIR`
+def modAttachedRoot (a : String) : Option String :=
+  match modAfterPrefix "-I" a with
+  | .some d => match modAfterPrefix "=" d with
+    | .some e => .some e
+    | .none => match strEq d "=" with
+      | .true => .none
+      | .false => .some d
+  | .none => modAfterPrefix "--include=" a
+
+-- the driver: the `-I` roots (`-I DIR`, `-IDIR`, `--include DIR`, `--include=DIR`) and
+-- `--key` among the command-line arguments
 partial def modRoots : List String → List String
   | .nil => .nil
   | .cons a rest => match strEq a "-I" with
     | .true => match rest with
       | .nil => .nil
       | .cons d ds => .cons d (modRoots ds)
-    | .false => modRoots rest
+    | .false => match strEq a "--include" with
+      | .true => match rest with
+        | .nil => .nil
+        | .cons d ds => .cons d (modRoots ds)
+      | .false => match modAttachedRoot a with
+        | .some d => .cons d (modRoots rest)
+        | .none => modRoots rest
 def modHasFlag : List String → String → Bool
   | .nil, _ => .false
   | .cons a rest, f => match strEq a f with
