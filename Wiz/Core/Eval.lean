@@ -144,6 +144,48 @@ def vBuiltin? (g : Globals R) (n : Name) : Option (Val R) := do
   else if natOpArity k == 1 then some (.lam "a" (.mk [] (.natOp k #[.var 0])))
   else some (.lam "a" (.mk [] (.lam "b" (.natOp k #[.var 1, .var 0]))))
 
+/-- Is this glued operation one whose result can be far larger than its arguments
+(`Nat.pow`, `Nat.shiftLeft`)? Computing one costs as much memory as its value, so a caller
+that only asks "is this a numeral?" is better off with the stuck application. -/
+def expansiveOp (g : Globals R) (n : Name) : Bool :=
+  match g.builtinKey? n with
+  | some "nat.pow" | some "nat.shiftLeft" => true
+  | _ => false
+
+/-- Would forcing this value need the value of an expansive operation? A glued operation
+does if it is expansive itself, or if an argument on its spine is (`Nat.sub h (Nat.pow …)`
+is as expensive to unfold as the power: `subFrom` matches on its second argument). Used by
+`whnfNumeral` to keep such a value stuck when a caller only asks for its shape. -/
+partial def expensiveVal (g : Globals R) : Val R → Bool
+  | .unfold n _ sp _ =>
+    expansiveOp g n || sp.any (fun e => match e with
+      | .app a => expensiveVal g a
+      | _ => false)
+  | _ => false
+
+/-- `whnf`, but a glued value that would need an expansive operation's value is not
+forced: its result may need as much memory as the value, and not forcing it is always
+sound (it is computed if something really asks for it). `Nat.pow 2 (Nat.pow 2 34)` is the
+probe: a comparison that wants only "is this the same application?" must not materialise
+it, and Lean's own `^` aborts the process ("Nat.pow exponent is too big") at that size.
+(`expensiveVal` also covers a glue *around* one, such as `Nat.sub h (Nat.pow …)`.) -/
+partial def whnfNumeral (g : Globals R) : Val R → Val R
+  | v@(.unfold n _ _ _) => if expensiveVal g v then v else whnf v
+  | v => whnf v
+
+/-- Would computing this operation natively materialise a value far larger than its
+arguments? `Nat.pow` and `Nat.shiftLeft` are the two: `Nat.pow`'s bit size is about
+`a.log2 * b` and `Nat.shiftLeft`'s about `a.log2 + b`, so a big exponent means a number
+that is slow to build and easy to run out of memory on. Such a result stays *glued* (the
+definition's unfolding, as for any other operation whose arguments are not numerals) and
+is computed natively only when something forces its value. (Not in `nf`, which asks for
+every value: `#reduce` keeps computing them.) -/
+def natExpansive? (op : Name) (ns : Array Nat) : Bool :=
+  match op, ns with
+  | "nat.pow", #[a, b] => a > 1 && a.log2 * b > 4096
+  | "nat.shiftLeft", #[a, b] => a != 0 && b > 4096
+  | _, _ => false
+
 /-- `absurd` is always stuck: the empty type has no constructors. (A glued value is
 unfolded first, as `Kernel.wiz` does: `absurd (lemma h)` was a panic, and the value that
 came back was `Sort 0`; `wiz-notes/soundness-audit.md`, F2.) -/
@@ -216,6 +258,18 @@ partial def sizePred? : Val R → Option (Val R)
 space), so no user term evaluates to a closure that carries it. -/
 def eqReductMark : Val R := .neutral (.global " eq-reduct" []) #[]
 
+/-- The original sides `(A, a, b)` of a **data type's** computed equation: the payload Σ
+that `markDataEq` carries them on, at the end of its environment after `eqDataMark`.
+(The structural Σ rule's equation carries `eqReductMark` instead; `eqSigmaSides?` reads
+both.) The unifier uses this narrow form: a data Σ's sides are what a stuck equation
+has lost when its type computed (`Eq.trans h e1`, #257). -/
+def eqDataSides? : Val R → Option (Val R × Val R × Val R)
+  | .sigma _ _ _ (.mk env _) _ =>
+    match env.reverse with
+    | .neutral (.global " eq-reduct-data" []) #[] :: A :: a :: b :: _ => some (A, a, b)
+    | _ => none
+  | _ => none
+
 /-- The equation `a =_A b` that `vEq` computed to this Σ, read back from its closure:
 `(A, a, b)`. A structural Σ carries `eqReductMark`; a data type's payload Σ carries
 `eqDataMark` at the end of its environment. With `Globals.quoteEqs` (the elaborator),
@@ -226,11 +280,7 @@ def eqSigmaSides? : Val R → Option (Val R × Val R × Val R)
   | .sigma "e" _ _ (.mk [b, a, _, _, A, .neutral (.global " eq-reduct" []) #[]] _) _ => some (A, a, b)
   -- a data type's equation (`vEq` at a `μ`): the original sides ride at the end of the
   -- outermost Σ's environment, after `eqDataMark`
-  | .sigma _ _ _ (.mk env _) _ =>
-    match env.reverse with
-    | .neutral (.global " eq-reduct-data" []) #[] :: A :: a :: b :: _ => some (A, a, b)
-    | _ => none
-  | _ => none
+  | v => eqDataSides? v
 
 /-- The mark a data type's computed equation carries (as `eqReductMark` does for a
 structural Σ). The name cannot be written, so no user term builds a closure with it. -/
@@ -594,22 +644,26 @@ argument: `Nat.add 0 x ↦ x`, `Nat.mul 0 x ↦ 0`, `Nat.sub x 0 ↦ x`, `Nat.po
 These are the definition's own reductions (the pattern match selects the zero branch
 first), but they must not *force* the other argument: `Nat.mul 0 x` would otherwise
 `whnf` an expensive or stuck `x` (a `Nat.div` under comparison) just to check whether it
-is a numeral. -/
-partial def natFast? (op : Name) (args : Array (Val R)) : Option (Val R) :=
+is a numeral. (`whnfNumeral`: not through an expansive `Nat.pow`/`Nat.shiftLeft` either.) -/
+partial def natFast? (g : Globals R) (op : Name) (args : Array (Val R)) : Option (Val R) :=
   match op, args with
-  | "nat.mul", #[x, _] => match whnf x with | .natLit 0 => some (.natLit 0) | _ => none
-  | "nat.add", #[x, y] => match whnf x with | .natLit 0 => some y | _ => none
-  | "nat.sub", #[x, y] => match whnf y with | .natLit 0 => some x | _ => none
-  | "nat.pow", #[_, y] => match whnf y with | .natLit 0 => some (.natLit 1) | _ => none
+  | "nat.mul", #[x, _] => match whnfNumeral g x with | .natLit 0 => some (.natLit 0) | _ => none
+  | "nat.add", #[x, y] => match whnfNumeral g x with | .natLit 0 => some y | _ => none
+  | "nat.sub", #[x, y] => match whnfNumeral g y with | .natLit 0 => some x | _ => none
+  | "nat.pow", #[_, y] => match whnfNumeral g y with | .natLit 0 => some (.natLit 1) | _ => none
   | _, _ => none
 
 /-- A registered operation applied to all its arguments: native arithmetic on literals,
 otherwise the operation's definition. -/
 partial def vNatOp (g : Globals R) (op : Name) (args : Array (Val R)) : Val R :=
-  if let some v := natFast? op args then v else
+  if let some v := natFast? g op args then v else
   -- the arguments as numerals, stopping at the first that isn't one: forcing the rest
   -- could run a numeral's recursion all the way down (`d * 2^64` is `d + d * (2^64 - 1)`,
-  -- whose second argument is the next step, and so on)
+  -- whose second argument is the next step, and so on). The scan *does* force an expansive
+  -- `Nat.pow`/`Nat.shiftLeft` here (`whnf`, not `whnfNumeral`): every earlier argument is a
+  -- numeral, so this operation is about to compute its native result and really needs the
+  -- value. Refusing to force it here made `Nat.log2 (Nat.pow 2 5000)` unfold `log2`'s
+  -- definition instead of computing natively, and `rfl` on it ran for minutes.
   let lits : Option (Array Nat) := args.foldlM (init := #[]) fun acc a => match whnf a with
     | .natLit n => some (acc.push n)
     | _ => none
@@ -623,8 +677,17 @@ partial def vNatOp (g : Globals R) (op : Name) (args : Array (Val R)) : Val R :=
   -- stuck application instead, compared by its arguments. (Not on a metavariable: it may
   -- still compute.)
   let unfold : Unit → Val R := fun _ =>
-    let stuckSub : Bool := op == "nat.sub" && match args.map whnf with
-      | #[.neutral h _, .natLit (_ + 1)] => !(h matches .mvar _)
+    let stuckSub : Bool := op == "nat.sub" && match args with
+      -- `Nat.subFrom` (and so `Nat.sub x n`) recurses on its *second* argument, and only a
+      -- numeral there can cost `n` steps; the first argument merely has to be stuck. Ask
+      -- the second one for its numeral without forcing an expansive operation (that is
+      -- what made `Nat.sub h (Nat.pow 2 (Nat.pow 2 34))` abort: the check forced the
+      -- power just to see that it is not `n + 1`).
+      | #[x, y] =>
+        let firstStuck := match whnfNumeral g x with
+          | .neutral h _ => !(h matches .mvar _)
+          | _ => false
+        firstStuck && (match whnfNumeral g y with | .natLit (_ + 1) => true | _ => false)
       | _ => false
     match g.builtins.lookup op with
     | some n =>
@@ -633,14 +696,27 @@ partial def vNatOp (g : Globals R) (op : Name) (args : Array (Val R)) : Val R :=
       else .unfold n [] (args.map .app) (memoThunk fun _ => args.foldl (vApp g) d)
     | none => panic! s!"no definition for builtin {op}"
   match lits with
-  | some ns => match natNative? op ns, op, ns with
-    | some n, _, _ => .natLit n
-    -- comparisons return a `Bool`: the definition's own result on small numerals
-    | none, "nat.beq", #[a, b] =>
-      whnf (vApp g (vApp g d (.natLit 0)) (.natLit (if a == b then 0 else 1)))
-    | none, "nat.blt", #[a, b] =>
-      whnf (vApp g (vApp g d (.natLit 0)) (.natLit (if a < b then 1 else 0)))
-    | none, _, _ => unfold ()
+  | some ns =>
+    if natExpansive? op ns && !g.eager then
+      -- the result is huge: keep it glued, as the definition's unfolding would compute it,
+      -- and materialise it natively only if something forces the value. `rfl` on two equal
+      -- applications compares their arguments (`convGlued`) and never asks; `Nat.mul 0 _`
+      -- or `Nat.add 0 _` short-circuit before it (`natFast?`). Before this, evaluating the
+      -- argument at all was a process abort, needed or not.
+      match g.builtins.lookup op with
+      | some n => .unfold n [] (args.map .app) (memoThunk fun _ =>
+          match natNative? op ns with
+          | some r => .natLit r
+          | none => args.foldl (vApp g) d)
+      | none => panic! s!"no definition for builtin {op}"
+    else match natNative? op ns, op, ns with
+      | some n, _, _ => .natLit n
+      -- comparisons return a `Bool`: the definition's own result on small numerals
+      | none, "nat.beq", #[a, b] =>
+        whnf (vApp g (vApp g d (.natLit 0)) (.natLit (if a == b then 0 else 1)))
+      | none, "nat.blt", #[a, b] =>
+        whnf (vApp g (vApp g d (.natLit 0)) (.natLit (if a < b then 1 else 0)))
+      | none, _, _ => unfold ()
   | none => unfold ()
 
 /-- `hyps D X P f i xs` by `Templates.hypsTm`: the definition. -/
@@ -797,13 +873,17 @@ partial def vEq (g : Globals R) (A a b : Val R) : Val R :=
   let A0 := A
   let a0 := a
   let b0 := b
-  -- numerals: decide directly, or else look one step inside (`vNatView`)
-  if let (.natLit n, .natLit m) := (whnf a, whnf b) then (if n == m then .unit 0 else .empty 0) else
+  -- numerals: decide directly, or else look one step inside (`vNatView`). (`whnfNumeral`
+  -- does not force an expansive `Nat.pow`/`Nat.shiftLeft` to find out: the equal sides of
+  -- a `rfl` are then compared by their arguments, and a huge value is never built just to
+  -- ask whether it is a numeral.)
+  if let (.natLit n, .natLit m) := (whnfNumeral g a, whnfNumeral g b) then
+    (if n == m then .unit 0 else .empty 0) else
   -- (stuck, it keeps its sides as written: their names, for display and for `match`)
   let stuck : Val R := .neutral (.eq A a b) #[]
-  let A := whnf A
-  let a := vNatView g (whnf a)
-  let b := vNatView g (whnf b)
+  let A := whnfNumeral g A
+  let a := vNatView g (whnfNumeral g a)
+  let b := vNatView g (whnfNumeral g b)
   -- (given) Q4: at `ULift A`, by `A`: the boxed values are equal when their contents are;
   -- a lifted proposition has one inhabitant up to η, so the equation is `True`
   if let .ulift k _ A₁ := A then
