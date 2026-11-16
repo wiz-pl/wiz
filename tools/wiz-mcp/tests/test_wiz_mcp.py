@@ -499,7 +499,14 @@ class StdioDaemonTests(unittest.TestCase):
         server = self.server()
         envelope = server.call_tool("diagnostics", {"path": "probe.wiz", "text": "abc"})
         self.assertTrue(envelope["ok"], envelope)
-        self.assertEqual(envelope["result"][0]["message"], "fake: 3 chars")
+        result = envelope["result"]
+        self.assertEqual(result["diagnostics"][0]["message"], "fake: 3 chars")
+        self.assertEqual(result["counts"], {"error": 1, "warning": 0, "info": 0})
+        self.assertEqual(result["source"], "lsp")
+        # The language server's own objects stay available, unchanged.
+        self.assertEqual(result["raw"][0]["message"], "fake: 3 chars")
+        self.assertEqual(result["raw"][0]["severity"], 1)
+        self.assertEqual(result["diagnostics"][0]["range"], result["raw"][0]["range"])
         proc = server.daemon.proc
         envelope = server.call_tool("hover", {"path": "probe.wiz", "line": 0, "character": 4})
         self.assertTrue(envelope["ok"], envelope)

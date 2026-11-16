@@ -108,7 +108,7 @@ claude -p 'call mcp__wiz__version' --mcp-config .mcp.json --strict-mcp-config \
 | `parse` (`wiz_parse`) | `path` | `wiz parse PATH` |
 | `fmt` (`wiz_fmt`) | `path`, `check?`, `width?` | `wiz fmt PATH [--check] [--width N]` |
 | `build` (`wiz_build`) | `path`, `out`, `lib?` | `wiz build PATH -o OUT [--lib]`; **only with `--allow-build`** |
-| `diagnostics` (`wiz_diagnostics`) | `path`, `text?` | `didOpen` → `publishDiagnostics` → `didClose` |
+| `diagnostics` (`wiz_diagnostics`) | `path`, `text?` | `didOpen` → `publishDiagnostics` → `didClose`; `check`'s result shape, LSP objects under `raw` |
 | `hover` (`wiz_hover`) | `path`, `text?`, `line`, `character` | `textDocument/hover` |
 | `goals` (`wiz_goals`) | `path`, `text?`, `line`, `character` | `wiz/interactiveGoals` |
 
@@ -213,6 +213,11 @@ message as data:
   stable error `code` (`type-mismatch`, `parse-error`, `unknown-identifier`, …;
   see `docs/error-codes.md`). `exit` is null and `ok` is "no errors".
 * Messages are sorted by position. `counts` has every severity, zeros included.
+
+The `diagnostics` tool returns the same object (`source: "lsp"`) with one more
+field, `raw`: the language server's `Diagnostic` objects exactly as it sent
+them (with `data` for code actions). Until 2026-11-17 `result` *was* that list;
+a client that read it should read `result.raw` now.
 
 No `wiz` in the workspace is a normal error envelope, not a broken server:
 `initialize` still succeeds, the tools return `wiz_not_found` with the path it

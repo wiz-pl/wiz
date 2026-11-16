@@ -213,9 +213,10 @@ def run(argv: list[str]) -> int:
             first_ms = (time.monotonic() - started) * 1000
             if not diagnostics["ok"] or diagnostics["error"]:
                 raise RuntimeError(f"diagnostics failed: {diagnostics}")
-            if not isinstance(diagnostics["result"], list):
-                raise RuntimeError(f"diagnostics result is not a list: {diagnostics['result']!r}")
-            print(f"diagnostics: ok ({first_ms:.0f} ms including daemon startup), {len(diagnostics['result'])} messages")
+            result = diagnostics["result"]
+            if not isinstance(result, dict) or not isinstance(result.get("diagnostics"), list) or not isinstance(result.get("raw"), list):
+                raise RuntimeError(f"diagnostics result is not the normalized shape: {result!r}")
+            print(f"diagnostics: ok ({first_ms:.0f} ms including daemon startup), {len(result['diagnostics'])} messages")
 
             daemons = daemon_pids(bridge)
             if not daemons:

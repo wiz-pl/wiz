@@ -1042,7 +1042,10 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "diagnostics",
         "annotations": {"title": "Language-server diagnostics", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
-        "description": "Diagnostics from the language server for a file (or for `text`), from this worktree's daemon.",
+        "description": (
+            "Diagnostics from this worktree's language server for a file (or for unsaved `text`), "
+            "in the same shape as check's result (diagnostics, counts), with the LSP objects under `raw`."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1253,7 +1256,10 @@ class Server:
         uri = path_to_uri(path)
         if name == "diagnostics":
             text = self._text_of(args, path)
-            result = self.daemon.diagnostics(uri, text, deadline)
+            raw = self.daemon.diagnostics(uri, text, deadline)
+            diagnostics = [lsp_diagnostic(path, d) for d in raw if isinstance(d, dict)]
+            # The normalized shape `check` returns, with the LSP objects kept under `raw`.
+            result = dict(check_result("lsp", diagnostics), raw=raw)
             return make_envelope(name, path=path, result=result)
         if name in ("hover", "goals"):
             line = _position_arg(args, "line")
