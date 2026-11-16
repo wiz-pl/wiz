@@ -1,14 +1,13 @@
 # HD5/H14 staging: decision record (2026-11-15)
 
-Branch `agent/2ltt-eval`, worktree `/workspace/wt/2ltt-eval`, from `origin/master`
-`627b48f6`. Question: **is two-level type theory staging still wanted?** Entry
-`wiz-notes/wishful/hdl-staging-2ltt.md` said "designing" since 2026-11-10; decisions
-SD1–SD11 were taken; implementation S2 never started. `wishful/TRIAGE.md` (2026-11-15)
-flagged the same question.
+Based on `origin/master` `627b48f6`. Question: **is two-level type theory staging still
+wanted?** The wish-list entry for HDL staging had said "designing" since 2026-11-10;
+decisions SD1–SD11 were taken; implementation S2 never started. A triage of the wish
+list (2026-11-15) flagged the same question.
 
 **Decision: dropped (superseded).** The ten-week L3 type theory is not wanted. The one
 remaining item, `match` on a signal, is a small case-tree elaboration and is now
-`wiz-notes/wishful/hdl-match-signals.md` — deliberately *not* a staging feature.
+its own wish-list item, deliberately *not* a staging feature.
 
 ## 1. Premise check: is the pain still real?
 
@@ -53,7 +52,7 @@ type theory.
 | **(a)** 2LTT staging (SD1–SD11, S2–S5) | ASCII `Code A` / `[| t |]` / splice, `hw` blocks, object `match`, `Gen`, auto-share, PHOAS | 6–9 expert-weeks remaining of the 9–14 total (S2 2–3, S3 2–3, S4 1–2), plus optional S6/S8 | medium: elaborator mode/ postponement, path explosion in `splitHw`, BitPack layout agreement, and a second surface for code that already type-checks; `HwTy` codes + `r`-polymorphism already provide the guarantee SD1 was going to prove | reject: pays 6–9 weeks for sugar over an existing guarantee |
 | **(b)** small stage marker in the elaborator (`Hdl.Stage`, no new type theory) | label meta vs hardware values and reject mixing | 1–2 weeks for the marker + `match` case tree | low | reject the *marker*: mixing is already rejected by ordinary typing (probe 2), so the marker would improve messages only. Its one useful part is the `match` case tree, which needs no marker. |
 | **(c)** status quo + `hdl-commands` (+ `hdl-let-names`) | keep L2; add `#netlist`/`#verilog`/`attribute [hdl]` and named `let` wires | `hdl-commands` days; `hdl-let-names` days | low | **accept.** It covers the remaining *emission* asks and does not touch the object language. |
-| **(d)** the residual `match`, as its own elaboration | `matchMux?` next to `ifMux?`: scrutinee `r T` with `T` an enum code (or `bits n` literals) → `Hw.eq` per constructor + right-nested `Hw.mux`; auto-share the scrutinee; size lint above a case threshold (SD10) | 0.5–1.5 weeks | low–medium (constructor enumeration from `BitPack`; expected-type discipline; nesting) | **accept as `wishful/hdl-match-signals.md`**, not as staging |
+| **(d)** the residual `match`, as its own elaboration | `matchMux?` next to `ifMux?`: scrutinee `r T` with `T` an enum code (or `bits n` literals) → `Hw.eq` per constructor + right-nested `Hw.mux`; auto-share the scrutinee; size lint above a case threshold (SD10) | 0.5–1.5 weeks | low–medium (constructor enumeration from `BitPack`; expected-type discipline; nesting) | **accept as its own wish-list item**, not as staging |
 
 A one-week vertical slice of (a) would have proved: `[| … |]`/splice round-trips and one
 negative stage error. It would not have proved anything about synthesisability, because
@@ -71,7 +70,6 @@ that already holds. That is why (a) is dropped rather than "started small".
   core without a staging layer; a third `Hw` instance can be added whenever it pays.
 * `drafts/hdl/Staged.wiz` stays as a historical sketch; `STATUS.md` now says so.
 
-Recorded in `wiz-notes/wishful/hdl-staging-2ltt.md` (status `dropped`) and
-`wiz-notes/wishful/hdl-match-signals.md` (status `done`, 2026-11-15: the case-tree
-elaboration `matchMux?`; probe `02-match-on-wire.wiz` now checks). `docs/libraries.md`
+Outcome: the staging item is dropped, and `match` on a signal is done (2026-11-15: the
+case-tree elaboration `matchMux?` in `Wiz/Elab/Term.lean`; probe `02-match-on-wire.wiz` now checks). `docs/libraries.md`
 H14 S4 describes the `match` bullet instead of "staged match".

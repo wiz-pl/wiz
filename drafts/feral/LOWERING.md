@@ -1,7 +1,7 @@
 # Feral: the surface language and its lowering rules
 
-Plan: `/workspace/wiz-notes/rust-dsl-plan.md`, `borrows-as-optics.md`, `uniqueness.md`.
-Decisions RD1–RD16 are the user's (roadmap memory). This file pins down what the front end
+RD1–RD16 number the decisions of Feral's design plan, which is not published; where a
+rule depends on one, the text beside the number says what it decided. This file pins down what the front end
 emits. The front end exists: `lib/Feral.wiz`, a command macro written in Wiz (RD4;
 docs/stages/22-numbers.md, 22j), whose comments cite the rule numbers below.
 `lowered/NN_*.wiz` were written by hand following these rules before it existed; the test

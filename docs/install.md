@@ -291,7 +291,7 @@ Details: [stages/11-tooling.md](stages/11-tooling.md), 11l–11o.
 `wiz lsp` is a standard language server on stdin/stdout. Any LSP client can use it: run
 `wiz lsp` (or `grail lsp` in a grail package) with the project root as the working
 directory. The infoview is extra protocol (`wiz/interactiveGoals` and friends,
-`wiz-notes/infoview-protocol.md`), so other clients get diagnostics, hover and the rest,
+[the infoview protocol](design/infoview-protocol.md)), so other clients get diagnostics, hover and the rest,
 but not the infoview, unless they run one of the clients above.
 
 ## Troubleshooting

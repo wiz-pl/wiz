@@ -1,10 +1,9 @@
 # Dogfooding the new features: where Wiz and the libraries should adopt them
 
-Read-only audit, 2026-11-14, of `origin/master` `aeaa34ef` (the `dogfood-audit` worktree).
-No library edits, no build, no push/PR. Evidence is static
-(reads and greps; `/tmp/dogfood-audit.log`) plus measurements recorded in other notes, named at
-each claim. Where this note says "est.", nothing has been measured yet; the last section lists
-the measurements wanted, and none of the numbers here are mine to claim.
+Read-only audit, 2026-11-14, of `master` at `aeaa34ef`. No library edits, no build. Evidence
+is static (reads and greps) plus measurements taken separately during development; those are
+informal (not from a controlled benchmark run) and marked so at each claim. Where this note says
+"est.", nothing has been measured yet; the last section lists the measurements wanted.
 
 Legend: **now** = on master at the audit commit. **after stack** = implemented on a branch, PR or
 stack that is not on master yet; the workstream starts only after that merges.
@@ -39,22 +38,22 @@ The other candidates (equality lemmas at `Sort u`, `BEq` in the Prelude, the HDL
 |---|---|---|
 | `--cache-ro` (read-only cache layers) | **now** | `Wiz/Toolchain.lean:29-31,104-111`; grail passes it to jobs (`Grail/Elab.lean:67`); `docs/building.md:258`. CI never passes it; the Nix package ships no store cache. |
 | `--region-cache`, `--region-stats` | **now, `wiz` only** | `Main.lean:148-157,223-227,309-311`; `Wiz/Cache.lean:603-853`. Grail never builds a `RegionStore` (`elaborate` in `Grail/Elab.lean`). |
-| `--split N` for `wiz build` | **after stack** | `wiz-notes/parallel-build.md` §4.2, `wiz-notes/perf-queue.md` ("parallel-build split"). CI's shard `"split"` is a different feature (`.github/test-shards.json`). |
-| Grail one-job (`build F` = check+IR+C) | **now** | `Grail/Graph.lean:51-56,132-143`; measured 262.3 s → 160.7 s in `wiz-notes/parallel-build.md` §3. |
+| `--split N` for `wiz build` | **after stack** | now [15k](../stages/15-performance.md). CI's shard `"split"` is a different feature (`.github/test-shards.json`). |
+| Grail one-job (`build F` = check+IR+C) | **now** | `Grail/Graph.lean:51-56,132-143`; measured 262.3 s → 160.7 s (informal). |
 | tower / Nix packaging | **now** | `tower/`, `flake.nix:83-109`. No warmed cache; `source nix` and `toolchain link` are in `docs/building.md`. |
-| `calc` + `Trans` | **after stack** | `wiz-notes/calc.md`. No `term.calc` in `Wiz/Parser` or `Wiz/Elab` today; the workaround is `Eq.via` (`lib/Nat.wiz:57`) and nested `Eq.trans`. |
-| `include_str` | **after stack** | `wiz-notes/include-str.md`; selfhost parity not implemented. |
-| `wiz fmt` | **after stack** | `wiz-notes/wiz-fmt.md`; no `Wiz/Format.lean`. |
-| `wiz lint` | **after stack** | `wiz-notes/ward.md`; no `Wiz/Lint.lean`. |
-| `wiz repl`, `wiz test-driver` | **now** | `Main.lean` (`replCmd`: `:type`, `:load`, `--prelude`; `testDriverCmd`); docs/stages/11-tooling.md, 11ac. The single-file `wiz test FILE` is still a proposal (`wiz-notes/name-candidates.md:31`). |
-| `ResultQ`/`ResultH`, q-variable fields | **after stack** | `wiz-notes/result-q.md`, `wiz-notes/qty-result-io.md`. `Result1`/`Result`/`Monad Result` are **now** (`lib/Region.wiz:106`, `lib/Result.wiz:34-44`). |
-| `PMap`/`PSet` | **after stack** | `wiz-notes/persistent-data.md` (`lib/PMap.wiz`). Not merged at the audit commit. |
+| `calc` + `Trans` | **after stack** | now [13s](../stages/13-language.md). No `term.calc` in `Wiz/Parser` or `Wiz/Elab` today; the workaround is `Eq.via` (`lib/Nat.wiz:57`) and nested `Eq.trans`. |
+| `include_str` | **after stack** | now [include-str.md](../stages/13-language/include-str.md); at the audit, selfhost parity was not implemented. |
+| `wiz fmt` | **after stack** | now [11aa](../stages/11-tooling.md); at the audit, no `Wiz/Format.lean`. |
+| `wiz lint` | **after stack** | designed, not on `master` (no `Wiz/Lint.lean`). |
+| `wiz repl`, `wiz test-driver` | **now** | `Main.lean` (`replCmd`: `:type`, `:load`, `--prelude`; `testDriverCmd`); docs/stages/11-tooling.md, 11ac. The single-file `wiz test FILE` is still a proposal. |
+| `ResultQ`/`ResultH`, q-variable fields | **after stack** | now in [libraries.md](../libraries.md) (`ResultQ`, `ResultH`). `Result1`/`Result`/`Monad Result` are **now** (`lib/Region.wiz:106`, `lib/Result.wiz:34-44`). |
+| `PMap`/`PSet` | **after stack** | `lib/PMap.wiz`, now in [libraries.md](../libraries.md) ("Persistent data structures"). Not merged at the audit commit. |
 | `U64Map`, `StrMap`, `Intern`, `U32Array`/`U64Array`, `WordMap` | **now** | `lib/WordMap.wiz`, `lib/WordArray.wiz`, `lib/Intern.wiz`, `lib/Std.wiz`. |
 | `Optic`/`OpticDerive`, `Functor`, `Eff`/`Handle`, `Region`/`Result1` | **now** | `lib/Optic.wiz`, `lib/OpticDerive.wiz`, `lib/Functor.wiz`, `lib/Eff.wiz`, `lib/Handle.wiz`, `lib/Region.wiz`. |
-| `sat_decide_native` | **not a PR** | `wiz-notes/smt.md` §9: no gain, more trust. Do not adopt. |
-| scry typed columns / e-graph | **after stack** | `wiz-notes/scry-stack.md`; `lib/Scry/*` and the `scry/` package only exist on that stack. |
+| `sat_decide_native` | **not a PR** | an axiom whose statement mentions the certificate costs as much as the check itself: no gain, more trust. Do not adopt. (It has since been added anyway as [28e](../stages/28-solvers.md), behind `--trust-native`.) |
+| scry typed columns / e-graph | **after stack** | `lib/Scry/*` and the `scry/` package only exist on that stack. |
 | Hdl named ports / bundles / reset / enable | **now** | `lib/Hdl/Core.wiz:148,1749-1785,2534-2660`; structured wires (`Wire t := NetM (HwTy.Ids t)`, `Core.wiz:931`). |
-| Hdl multi-clock / CDC | **after stack** | `wiz-notes/hdl-cdc.md` (design + prototype; no library change). |
+| Hdl multi-clock / CDC | **after stack** | design and prototype only at the audit; now `Multi`, `Clocking.domains` and `lib/Hdl/Cdc.wiz` ([libraries.md](../libraries.md), H14 P2). |
 
 `--trust-native` appears only in examples and tests (`examples/hdl-verified-*.wiz`,
 `Tests/Native.lean`), with a trust note at each use; no library file uses `native_refl`
@@ -76,16 +75,16 @@ the workstreams' main prizes and should not be read as rejected.
 | 3 | Delete the duplicated Text utilities (**now**) | `lib/Json.wiz:57-88` (`divMod`, `natChars`, `charsEq`, `revOnto`, despite `import Text` at `:2`); `lib/Feral.wiz:137-175,160-168,1016-1024` (`leq`, `seq`, `lpre`, `map`, `any`, `splitGo`, `wordsOf`) | 1 | −~90 lines, one copy of list/string helpers; `Json.divMod` becomes the native `Nat.div`/`Nat.mod`, and the two O(n²) one-char-at-a-time accumulates in Feral become linear | 10.0 |
 | 4 | `do` blocks in the I/O library (**now**) | `lib/Sys.wiz` (31 `IO.bind`/`EIO.bind`, e.g. `:205-236`), `lib/IO.wiz:189-194`, `lib/Handle.wiz` | 1 | −~40 lines of `bind (fun x => …)`; `Monad IO`/`Monad1 IO` already exist (`lib/IO.wiz:52-59`), so this is semantics-preserving | 10.0 |
 | 5 | Modernize the HDL examples and drop the local list helpers (**now**) | `examples/hdl-gaps.wiz:145-154`, `examples/hdl-mem.wiz:65-72`, `examples/hdl-sim.wiz:62`, `examples/hdl-compose.wiz:67,115-116`; `lib/Hdl/Core.wiz:63-70` (`Hdl.map`/`Hdl.rev`), `:81` (`Hdl.natsEq`), `:948` (`Hdl.wEq`) | 1 | a `Circuit.RstEn`/`HwTy.rstEn` alias next to `withResetEnable` (`Core.wiz:1771`) removes the 3-line `prod (named "rst") (prod (named "en") …)` from 5 files; `BEq` for `List Nat`/triples removes 3 hand-written equalities (~40 lines) | 10.0 |
-| 6 | `wiz build --split 4/8` in the fixpoint and CI selfhost builds (**after stack**) | `scripts/fixpoint.sh:26`; the CI selfhost compile step (`grail selfhost`/`wiz build` in `Grail/Selfhost.lean`) | 1 | stage-1 selfhost compile 146.9 → 85.8 s at `--split 8` (1.71×), net −48 s for the fixpoint after the built binary's +12.5 s regression (`wiz-notes/perf-queue.md`, informal heavy probes) | 9.0 |
-| 7 | Ship the Nix package with a warmed read-only cache (**after stack**) | `flake.nix:88-103` (installPhase), plus `--cache-ro $out/share/wiz/cache` in the wrappers | 1 | clean-`HOME` `grail build` of a one-target package 3.2 → 0.9 s, 437 store entries hit (`wiz-notes/perf-queue.md`, nix-cache, informal) | 8.0 |
-| 8 | Give Grail jobs the region cache (**now feature, plumbing ours**) | `Wiz/Toolchain.lean:28-31,104-111`; `Grail/Elab.lean:66-69` (`elaborate`); `Grail/Cli.lean:96-118` (the job process) | 2 | ~1.0 s of a 3.3 s warm `wiz check` of `examples/hdl-compose.wiz` is `.wizc` decode (12 modules, 15.5 MB text vs 5.5 MB regions; `wiz-notes/module-mmap.md`), so est. 15–25% off warm grail builds plus lower RSS | 6.0 |
+| 6 | `wiz build --split 4/8` in the fixpoint and CI selfhost builds (**after stack**) | `scripts/fixpoint.sh:26`; the CI selfhost compile step (`grail selfhost`/`wiz build` in `Grail/Selfhost.lean`) | 1 | stage-1 selfhost compile 146.9 → 85.8 s at `--split 8` (1.71×), net −48 s for the fixpoint after the built binary's +12.5 s regression (informal) | 9.0 |
+| 7 | Ship the Nix package with a warmed read-only cache (**after stack**) | `flake.nix:88-103` (installPhase), plus `--cache-ro $out/share/wiz/cache` in the wrappers | 1 | clean-`HOME` `grail build` of a one-target package 3.2 → 0.9 s, 437 store entries hit (informal) | 8.0 |
+| 8 | Give Grail jobs the region cache (**now feature, plumbing ours**) | `Wiz/Toolchain.lean:28-31,104-111`; `Grail/Elab.lean:66-69` (`elaborate`); `Grail/Cli.lean:96-118` (the job process) | 2 | ~1.0 s of a 3.3 s warm `wiz check` of `examples/hdl-compose.wiz` is `.wizc` decode (12 modules, 15.5 MB text vs 5.5 MB regions; informal), so est. 15–25% off warm grail builds plus lower RSS | 6.0 |
 | 9 | Thread the hash through `HTrie`, cheapen `NatList.hash` (**now**) | `lib/Hdl/Core.wiz:761-766` (hash), `:785-810` (find/insert: 20 × `Nat.testBit h d`, each a division by `2^d`) | 1 | one shift per level instead of 20 `div`+`pow` per emitted node; est. 5–15% off `Circuit.netlist` on big designs (measure `examples/hdl-temporal.wiz`) | 6.0 |
-| 10 | Native store and array-backed e-graph for scry (**after stack**) | `lib/Scry/Store.wiz:30-95` (`memRow`/`insert` linear), `lib/Scry/Egraph.wiz:177-250` (`List.append g.parent [id]` per node, linear `find`); `scry/src/Scry/CstStore.wiz` (already `U32Array`/`U64Array`) | 4 | the Wiz-side copy into the model is ~85% of parse wall time (0.53–0.91 MB/s vs the shim's 3.3–6.5; `wiz-notes/scry-bench.md`); store/e-graph go from O(n²) to near-linear | 5.0 (6.25 if the native store lands as designed) |
+| 10 | Native store and array-backed e-graph for scry (**after stack**) | `lib/Scry/Store.wiz:30-95` (`memRow`/`insert` linear), `lib/Scry/Egraph.wiz:177-250` (`List.append g.parent [id]` per node, linear `find`); `scry/src/Scry/CstStore.wiz` (already `U32Array`/`U64Array`) | 4 | the Wiz-side copy into the model is ~85% of parse wall time (0.53–0.91 MB/s vs the shim's 3.3–6.5; informal); store/e-graph go from O(n²) to near-linear | 5.0 (6.25 if the native store lands as designed) |
 
 **Big rocks, not in the scored top 10** (high impact, high effort, confidence still medium):
 
 * **CAF caching of closed top-level definitions**: the OLED demo's value simulation rebuilds
-  `RomT` tables every cycle and spends ~60% of its time in malloc/RC (`wiz-notes/wishful/compiled-closed-constants.md`);
+  `RomT` tables every cycle and spends ~60% of its time in malloc/RC (profiled informally; caching closed constants is an open request);
   compiler work (`Wiz/Compiler/{Reuse,C}.lean`), not a library change. Impact 5, confidence 2, effort 5 → 2.0.
 * **Selfhost `StrMap` keys**: `selfhost/Frontend.wiz:43-49` (`Scope.lookup`) converts the Wiz `String` to a native key
   with `Str.ofString` on every global lookup, and `selfhost/Backend.wiz:445,2465` does the same per
@@ -96,7 +95,7 @@ the workstreams' main prizes and should not be read as rejected.
   `ResultQ` merges, `ResultH 1 B V` is definitionally `Result1 B V`, so the pair plumbing can go.
   Impact 3, confidence 3, effort 2 → 4.5.
 
-## 2. Workstreams (agent-sized)
+## 2. Workstreams (one PR each)
 
 Each is one branch/PR, ordered so the ones that need no dependency come first.
 
@@ -138,7 +137,7 @@ Goal: make warm builds and the fixpoint use what the toolchain already has.
 
 Expected: warm grail builds −15–25% (region decode 1.0 s of 3.3 s on hdl-compose), fixpoint stage 1
 −40%, clean-install first build −2 s. The Nix wrapper passes `--cache-ro` itself once the store
-cache ships. Measure with `perf-run` (commands in §5).
+cache ships. Measure with a controlled benchmark run (commands in §5).
 
 Risk: `--region-cache` is experimental and versioned by `regionFormat` (`Wiz/Cache.lean:627`); the
 store is per job process (regions hold pointers and live for the process's lifetime), and stats
@@ -162,7 +161,7 @@ from several jobs must be summed by the scheduler.
   (fine; `ofList` folds native inserts), `U32Array`/`U64Array` in scry (W6).
 * After `PMap` merges: use it where a *pure* map is needed and the list model is O(n) per op
   (`lib/Scry/Store.wiz` assoc lists), not to replace native `U64Map` in compiled hot paths:
-  at 100k operations pmap is ~0.31 s vs umap ~0.03 s (`wiz-notes/persistent-data.md`).
+  at 100k operations pmap is ~0.31 s vs umap ~0.03 s (informal).
 
 Expected: checking time for ring-heavy files (est. 5–15% on `lib/Rat.wiz`/`lib/IntRing.wiz`),
 netlist build 5–15% (`Circuit.netlist` on `examples/hdl-temporal.wiz`), fewer allocations.
@@ -195,7 +194,7 @@ Expected: −80–120 lines, clearer specs; `=regions`, `=effects`, `=seplogic` 
   instances are derived (W7).
   Caveat: the `Hdl.` prefix was chosen so importers keep the general names; with `private`
   (wishful `private-decls`) the reason disappears.
-* After CDC merges (`wiz-notes/hdl-cdc.md`): a second register domain per composed top, CDC cells
+* After CDC merges (it has since, see the table at the top): a second register domain per composed top, CDC cells
   (`sync2`, `asyncFifo`) and domain annotations on wires; the prototype `examples/hdl-cdc.wiz`
   already emits two clocks but cannot clock a register, and crossing domains is silently
   accepted. Port `wiz-rv/src/Rv/{Core,Pipe,Board}.wiz` (already `deriving Bundle`) and check the
@@ -217,12 +216,11 @@ Expected: ~40 lines and clearer reset/enable ports now; CDC unblocks multi-clock
   its lemmas for the kernel. `rebuild`/`compress` (`:241-286`) currently copy lists per pass.
 * `lib/Scry/Eval.wiz`: the delta loop over list stores; the store interface is the seam.
 * `scry/src/Scry/CstStore.wiz` is already struct-of-arrays (`U32Array`/`U64Array`); the remaining
-  cost is the Wiz-side copy (`Scry.Native.toCstStore`), which the native store work addresses
-  (`wiz-notes/scry-bench.md`).
+  cost is the Wiz-side copy (`Scry.Native.toCstStore`), which the native store work addresses.
 
 Expected: parse 5–6× (to the shim's 3.3–6.5 MB/s) and e-graph saturation from O(n²) to near-linear;
 biggest single performance win in the stack, highest effort. Measure with `scry parse --stats` and
-the e-graph benchmarks (`wiz-notes/scry-bench.md`, `wiz-notes/scry-egraph.md`).
+the e-graph benchmarks.
 
 ### W7. Library and toolchain hygiene (**now + after stack**)
 
@@ -239,7 +237,7 @@ the e-graph benchmarks (`wiz-notes/scry-bench.md`, `wiz-notes/scry-egraph.md`).
   `lib/BitBlast.wiz`, `lib/Hdl/Core.wiz` (236/165/164/121/113 lines over 110 columns today) and
   keep a `--check` gate for new files.
 * After `wiz lint` merges: `wiz lint lib/Prelude.wiz` reports 26 warnings including 2 real binder
-  shadows in `Eq.subst`/`Eq.substBack` (`wiz-notes/ward.md`); fix those 2 and run lint over `lib/`
+  shadows in `Eq.subst`/`Eq.substBack` (found by the linter's prototype); fix those 2 and run lint over `lib/`
   in CI (the import-shadowing bug is a frontend error already, so lint's shadow rule is the one
   that pays).
 * After `include_str` merges: extract `preludeText` (`selfhost/Frontend.wiz:4650` at the audit, a 6.7 kB
@@ -266,7 +264,7 @@ and a selfhost prelude that cannot drift.
   :1828,3560-3603`); hoist the ones in recursive loops (e.g. `np` is recomputed per constructor).
 * `selfhost/Backend.wiz:2349-2350,2869-2870`: the final program is a left-nested `List.append` of
   ~10 chunks; fine today (O(k·n), k≈10), but a single accumulator would make the intent clear.
-* Parity: `wiz-notes/selfhost-parity.md` lists the known gaps; the prelude duplication above is the
+* Parity: the known gaps are tracked with the selfhost work ([21-bootstrap.md](../stages/21-bootstrap.md)); the prelude duplication above is the
   one most likely to hide a difference.
 
 Expected: a few percent of selfcheck and stage-1 (est.; measure `=selfhost` and the fixpoint),
@@ -278,19 +276,19 @@ plus fewer duplicated utilities. Do not change `selfhost/*.wiz` while a test rea
 | area | elegance | performance | correctness/debt |
 |---|---|---|---|
 | `lib/Prelude` | `Eq.cast`/`subst` are fine; `List.append`/`length` are structural and used everywhere | `String.append` copies its left side (`Prelude.wiz:136`; cost model at `lib/Text.wiz:9-20`), so `a ++ b` in a loop is quadratic; `Nat.testBit` (`:270`) divides by `2^i` per call | `Nat.beq`/`Nat.lt` are the only comparisons registered as builtins; `Nat.cmp` (`lib/Nat.wiz:167`) builds an `Ordering` and is used by `Ring.Key.cmp` |
-| `Nat` | 24 `Eq.trans`/26 `congrArg`; `Eq.via` (`:57`) exists only because `calc` is missing | `Nat.pow`/`Nat.div` are builtins, so they cost nothing at run time; only symbolic statements keep the calls (proof-time conversion) | order is the Boolean `Nat.le = true` encoding (`:32-36`), which makes many proofs `rfl` but makes `omega`-style automation harder (`wiz-notes/wishful/nat-arith-proofs.md`) |
+| `Nat` | 24 `Eq.trans`/26 `congrArg`; `Eq.via` (`:57`) exists only because `calc` is missing | `Nat.pow`/`Nat.div` are builtins, so they cost nothing at run time; only symbolic statements keep the calls (proof-time conversion) | order is the Boolean `Nat.le = true` encoding (`:32-36`), which makes many proofs `rfl` but makes `omega`-style automation harder (Nat arithmetic automation is an open request) |
 | `Word` / `BitVec` / `BitBlast` | BitBlast has the densest chains (`:525-533,680-740`); `Bits.low_shift` is the clearest calc example | all word ops have natives (`lib/Word.wiz:502-618`); `Bits.bit` uses native `Nat.isOdd`/`Nat.div` (`:140-143`), `Bits.low` is structural (proof only) | `Bits.bit` vs `Bits.odd`/`half` duality is documented and bridged; no sorry/axiom |
 | `Logic` | `Eq.symm`/`trans`/`congrArg` are `Type`-only (`:197-206`) while `Nat.congrArg` is universe-polymorphic (`lib/Nat.wiz:43`): two copies, one too small | none | `transp` itself is universe-polymorphic, so the fix is local; `Iff`/`propext` are theorem-level (no axiom) |
 | `Order` | 31 lines of class/notation; fine | none | `Equiv` exists for `Rat`'s `≈`; adding `Trans` instances (calc branch) is the only work |
 | `Int*` | `IntRing` 64 `Eq.trans`/50 `congrArg`, many with explicit `@Eq.trans Int …` (`:96-110`); `Int.beq` is hand-written (`lib/Int.wiz:84-88`) | ring reflection normalises polynomials with sorted-list inserts (`lib/Ring.wiz:81-123`), quadratic in the monomial count; small goals only | `Int`'s pair representation is sound and well documented; `Int.beq`/`Int.lt` are candidates for `deriving BEq`/instances |
 | `Rat` | `Q.trans`/`Q.add_congr`/`Q.mul_congr` are 4-deep `Eq.via` chains (`:208-237`), the best calc target after BitVecShift | `q_ring!`/`int_ring!` run at check time; the Ring fast paths (W3) help | `≈` is a setoid over unreduced fractions; `Q.ofEq`/`Q.refl` are fine |
-| `Vec` | 13 `Eq.trans`, 16 `congrArg`; induction lemmas (`Vec.get_set`, `Vec.map_map`) | `Vec.length` counts the list (`:77`), used in proofs; `Vec.fromList`/`toList` are the runtime representation | indices are erased, so runtime is a list; the missing Nat div/mod lemmas block the `BitVec.toVec`/`ofVec` round-trips (`wiz-notes/wishful/nat-arith-proofs.md`) |
-| `Hdl/*` | bundles/`deriving Bundle`/`Hw.label` are adopted in `examples/hdl-compose.wiz` and wiz-rv; `Hdl.map`/`natsEq` are leftovers | `HTrie` uses 20 `Nat.testBit` per lookup (`Core.wiz:785-810`); `simFast` is already array-based (`Sim.wiz:362-385`); netlists are `List Nat` (kernel-friendly) | CDC absent (after stack); async reset not supported (`wiz-notes/wishful/hdl-reset-enable.md`); the state is one register per leaf, documented |
+| `Vec` | 13 `Eq.trans`, 16 `congrArg`; induction lemmas (`Vec.get_set`, `Vec.map_map`) | `Vec.length` counts the list (`:77`), used in proofs; `Vec.fromList`/`toList` are the runtime representation | indices are erased, so runtime is a list; the missing Nat div/mod lemmas block the `BitVec.toVec`/`ofVec` round-trips (an open request) |
+| `Hdl/*` | bundles/`deriving Bundle`/`Hw.label` are adopted in `examples/hdl-compose.wiz` and wiz-rv; `Hdl.map`/`natsEq` are leftovers | `HTrie` uses 20 `Nat.testBit` per lookup (`Core.wiz:785-810`); `simFast` is already array-based (`Sim.wiz:362-385`); netlists are `List Nat` (kernel-friendly) | CDC absent (after stack); async reset not supported (an open request); the state is one register per leaf, documented |
 | `Hoare*` / `HProp` / seplogic | `Heap.trans` (`HProp.wiz:112`) and `:312` use explicit `@Eq.trans`; `HEquiv` has no `Trans` instance | `Heap` is a function `Nat → Option V`, so a state is symbolic; the tactics do list scans over `starL`, which is the design | `HProp`'s heap is a total function (no partiality), and `Result.Holds`/`Triple` line up; no axioms |
 | `Region`/`Result`/`Eff`/`IO` | `Region.wiz:133-215` nests `match` on the handle inside the result match; `Sys.wiz` uses 31 explicit binds | region scopes are `[inline]` and unboxed (`Region.wiz:73-76`); `Eff` interprets a tree (no native path), unused outside `EffHeap` | `Region` has 6 documented lifetime axioms; `Result1` and `Outlives` are the only unsafe surface; `IO1`/`Monad1` are the linear I/O story |
-| `Grail` | one-job is in (`Graph.lean:51-56`); `addCheck` and `addCheckImports` (`:102-124`) read and parse the same imports twice | region cache not used (main gap); `-j` default `min(cores,4)` (`Cli.lean:107`) is deliberate: 8 jobs only bought 1.27× (`wiz-notes/parallel-build.md` §2) | scheduler is serial for keys but measured at 1.3 s for a 59-node no-op build (`parallel-build.md` P5), not a bottleneck |
+| `Grail` | one-job is in (`Graph.lean:51-56`); `addCheck` and `addCheckImports` (`:102-124`) read and parse the same imports twice | region cache not used (main gap); `-j` default `min(cores,4)` (`Cli.lean:107`) is deliberate: 8 jobs only bought 1.27× (informal) | scheduler is serial for keys but measured at 1.3 s for a 59-node no-op build (informal), not a bottleneck |
 | `tower` | 613-line CLI with a few `List.length (String.splitOn …)` idioms (`Cli.wiz:373,490,580`); fine | file sizes are tiny (settings/toolchain files); `git ls-remote` dominates installs | the port follows the Lean reference definition by definition; `tower/tests/pure.wiz` covers settings parsing, while `update`/`install` need git/nix and have no unit tests |
-| `selfhost` | embedded prelude (`preludeText`, `Frontend.wiz:4650` at the audit) duplicates `lib/Prelude.wiz`; Feral-style helpers are duplicated in `Backend`/`Frontend` | `Scope.lookup`/`Env.lookup` linear; `Str.ofString` per map op; 19 `List.length` in Frontend loops; non-tail `List.map` over big declaration lists (stack depth is fine at these sizes) | parity gaps in `wiz-notes/selfhost-parity.md`; the embedded prelude is the drift risk (W7) |
+| `selfhost` | embedded prelude (`preludeText`, `Frontend.wiz:4650` at the audit) duplicates `lib/Prelude.wiz`; Feral-style helpers are duplicated in `Backend`/`Frontend` | `Scope.lookup`/`Env.lookup` linear; `Str.ofString` per map op; 19 `List.length` in Frontend loops; non-tail `List.map` over big declaration lists (stack depth is fine at these sizes) | parity gaps tracked with the selfhost work; the embedded prelude is the drift risk (W7) |
 | `scry` | the stack's modules are documented and tested; `Store`/`Egraph` are deliberately pure list models | store/e-graph are O(n²); the native columns are already used in CstStore; the Wiz-side copy is 85% of parse time | native store/egraph work is in progress; no axioms beyond the documented natives |
 | `wiz-rv`/`wiz-reals`/`wiz-cats` | wiz-rv already derives `Bundle` everywhere (43-field `CoreSt`, `src/Rv/Core.wiz:61-105`) and has no `.1/.2` chains; wiz-reals has 4 `Eq.trans` (`QSeq.wiz:31-35`); wiz-cats carries `Cats/Eq.wiz` because of G1 | wiz-rv's emulator/sim uses `Hdl.Sim`; no list hot spots found; the pinned toolchain (`wiz-toolchain: … master-50cd3e7`) predates the newest lib | wiz-cats `FINDINGS.md` G1–G8 are the best source of library papercuts (G1 fixed by W1/W7; G2 proof-usage, G3 implicit quantities, G4 transp-computed equations remain language-level) |
 
@@ -298,21 +296,21 @@ plus fewer duplicated utilities. Do not change `selfhost/*.wiz` while a test rea
 
 * **Map/trie LRAT clause database** (`lib/Sat.wiz:222`): measured *slower* in the kernel (8-bit
   chain 18 s list vs 72 s for a 24-bit trie), and the bottleneck is the evaluator's per-step cost,
-  not the list scan (`wiz-notes/smt.md` §10). Do not do it without a faster evaluator.
+  not the list scan. Do not do it without a faster evaluator.
 * **Raise grail's `-j` default**: 4 → 8 jobs buys 1.27× on a cold `std` build and raises memory;
-  the default stays (`wiz-notes/parallel-build.md` §2).
+  the default stays.
 * **`sat_decide_native`**: an axiom whose statement mentions the certificate costs as much as the
-  check (`wiz-notes/smt.md` §9). Not worth the trust.
+  check. Not worth the trust (since added as [28e](../stages/28-solvers.md), opt-in).
 * **Blanket `Array` conversion of the kernel context**: `Env`/`TCtx` are cons lists
   (`selfhost/Kernel.wiz:195-199,2002-2052`); `bind` would copy an array on every extension and the
   selfhost kernel is parity-tested, not proved. Use a persistent random-access structure (or
   measure an array first) before touching it.
 * **`PMap` as a replacement for native maps**: at 100k operations pmap ~0.31 s vs U64Map ~0.03 s
-  and list ~367 s (`wiz-notes/persistent-data.md`); PMap is the pure/kernel model, not the fast
+  and list ~367 s (informal); PMap is the pure/kernel model, not the fast
   compiled map.
 * **`native_refl` in the libraries**: only examples use it, with a trust note; keep it that way.
 
-## 5. Measurements wanted (add to `wiz-notes/perf-queue.md`; the perf window runs them)
+## 5. Measurements wanted
 
 1. **calc**: no timing expectation; record line counts of the four proof files and check time of
    `wiz check` on them before/after (must be neutral).
@@ -321,12 +319,12 @@ plus fewer duplicated utilities. Do not change `selfhost/*.wiz` while a test rea
    interleaved rounds, wall + peak RSS; plus `--region-stats` hits/misses.
 3. **`--split`**: `scripts/fixpoint.sh` stage 1/2 wall on base vs `--split 4/8`, and the built
    binary's run time (the known regression is 38.0 → 50.5 s on `compiler-self.wiz`,
-   `wiz-notes/perf-queue.md`).
+   informal).
 4. **Nix store cache**: clean-`HOME` `grail build` of a one-target package, installPhase wall,
-   store hits (`wiz-notes/perf-queue.md`, nix-cache).
+   store hits.
 5. **HTrie/ring**: `Circuit.netlist` on `examples/hdl-temporal.wiz` (wall/RSS), and `wiz check` of
    `lib/Rat.wiz`/`lib/IntRing.wiz` for the ring fast paths.
-6. **scry**: `scry parse --stats` corpus and the e-graph bench (`wiz-notes/scry-bench.md`).
+6. **scry**: `scry parse --stats` corpus and the e-graph bench.
 7. **selfhost**: `lake test -- '=selfhost'` and selfcheck wall/RSS after the Scope/intern changes.
 8. **Logic universes**: none (compile-time only); check that `wiz-cats` can delete `Cats/Eq.wiz`
    and still check.
