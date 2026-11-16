@@ -19,11 +19,12 @@ malformed manifest is an error. `--fail-on-regression` makes a baseline mismatch
 def Scry.benchUsage : String :=
   "usage: scry bench [--corpus DIR] [--baseline FILE] [--extra DIR]...\n"
   ++ "                 [--json OUT] [--markdown OUT] [--update-baseline FILE]\n"
-  ++ "                 [--no-timing] [--quiet] [--fail-on-regression]\n"
+  ++ "                 [--no-baseline] [--no-timing] [--quiet] [--fail-on-regression]\n"
+  ++ "                 [--dynamic] [--cc PATH] [--no-coverage]\n"
 
 def Scry.benchDefaultOpts : Scry.BenchOpts :=
   Scry.BenchOpts.mk "bench/corpus" (.some "bench/baseline.json") .nil .none .none .none
-    .false .false .false
+    .false .false .false .false .none .true
 
 partial def Scry.benchArgsGo (o : Scry.BenchOpts) : List String → Except String Scry.BenchOpts
   | .nil => .ok o
@@ -49,6 +50,11 @@ partial def Scry.benchArgsGo (o : Scry.BenchOpts) : List String → Except Strin
     | "--no-timing" => Scry.benchArgsGo { o with noTiming := .true } rest
     | "--quiet" => Scry.benchArgsGo { o with quiet := .true } rest
     | "--fail-on-regression" => Scry.benchArgsGo { o with failOnRegression := .true } rest
+    | "--dynamic" => Scry.benchArgsGo { o with dynamic := .true } rest
+    | "--cc" => match rest with
+      | .cons p more => Scry.benchArgsGo { o with cc := .some p } more
+      | .nil => .error "--cc needs a path"
+    | "--no-coverage" => Scry.benchArgsGo { o with coverage := .false } rest
     | "--no-baseline" => Scry.benchArgsGo { o with baseline := .none } rest
     | "--help" => .error Scry.benchUsage
     | _ => match String.startsWith a "--" with
@@ -100,6 +106,12 @@ def Scry.benchSummaryLine (run : Scry.BenchRun) : String :=
     ++ ", J " ++ Scry.benchPctSigned o.youden
     ++ ", paths " ++ Scry.benchPct pathFrac
     ++ ", checked " ++ Scry.benchPct certFrac
+    ++ (match run.dynamic with
+      | .none => ""
+      | .some d => ", dynamic " ++ Nat.repr (Scry.dynBenchCount d "matched") ++ " matched/"
+          ++ Nat.repr (Scry.dynBenchCount d "missed") ++ " missed/"
+          ++ Nat.repr (Scry.dynBenchCount d "clean") ++ " clean/"
+          ++ Nat.repr (Scry.dynBenchCount d "skipped") ++ " skipped")
     ++ ", " ++ Nat.repr run.totalMs ++ " ms (informational)"
 
 def Scry.benchResolveBaseline (b : Option String) : EIO (Option String) :=

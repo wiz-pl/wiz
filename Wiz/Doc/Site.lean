@@ -8,9 +8,10 @@ import Wiz.Parser.DocComment
 `wiz doc` makes a static site from a set of modules: one page per module, every
 declaration with its kind, its signature (the infoview's tagged printer,
 `Term.prettyTagged`), its doc comment (Markdown), a link to its source, the instances of
-each class and for each type, cross-links on every constant of a signature, a search
-index (`search.js`) and an index page. See `wiz-notes/scroll.md` and
-`docs/stages/11-tooling.md`, 11s.
+each class and for each type, cross-links on every constant of a signature, an API
+index (`api.html`, `api.json`) of every module and declaration, a search index
+(`search.js`, over names, doc comments and signatures) and a landing page. See
+`wiz-notes/scroll.md` and `docs/stages/11-tooling.md`, 11s.
 
 Each page is complete HTML (readable without JS). It also carries its data as JSON: per
 declaration its signature as tagged text (the infoview protocol's format) and the table
@@ -62,6 +63,12 @@ structure Entry where
   data : Json
   /-- the fallback signature (links, no tags) -/
   sigHtml : String
+  /-- the signature as tagged text and its subterms, so that it can be rendered again in
+  another context (the API index: every signature links to its module's page) -/
+  tt : TT
+  subs : Array (Subterm ZeroOneMany)
+  /-- the signature as plain text, for the search index -/
+  sigText : String
   children : Array Entry := #[]
   instances : Array Name := #[]
 
@@ -130,7 +137,7 @@ def instanceTypes (t : Term ZeroOneMany) : List Name :=
   let (_, args) := spine (body t)
   args.filterMap fun a => match (spine a).1 with
     | .const n _ => some n
-    | .mu _ _ _ _ _ (some (n, _, _)) | .nu _ _ _ _ _ (some (n, _, _)) => some n
+    | .mu _ _ _ _ _ (some (n, _, _)) _ | .nu _ _ _ _ _ (some (n, _, _)) => some n
     | _ => none
 
 /-- Make the entry of declaration `n`; `counter` numbers the signatures. -/
@@ -146,7 +153,7 @@ def entry (c : Ctx) (src : String) (n : Name) (counter : Nat) : Option Entry := 
     | some d => if d.start > 0 then d.start else site.start
     | none => site.start
   pure { name := n, kind := kindOf c.st n, doc := dd.bind (·.doc), line := (lineCol src start).1 + 1,
-         sigId, data, sigHtml := fallbackHtml c subs tt }
+         sigId, data, sigHtml := fallbackHtml c subs tt, tt, subs, sigText := tt.flatten }
 
 /-- The documented declarations of the module (in source order), with their
 constructors and fields. -/
@@ -227,6 +234,52 @@ def entryHtml (c : Ctx) (o : Options) (m : Module) (e : Entry) : String :=
   s!"<div class=\"decl-head\"><span class=\"kind\">{htmlEscape e.kind}</span> <a class=\"anchor\" href=\"#{htmlEscape e.name}\">{htmlEscape e.name}</a>{sourceLink o m e.line}</div>" ++
   sigBlock c e "" ++ docHtml c e.doc ++ kids ++ instancesHtml c e.instances ++ "</div>\n"
 
+/-- The first paragraph of a doc comment that is not a heading, as plain text. -/
+def docSummary (doc : Option String) : String :=
+  match doc with
+  | some d =>
+    let p := ((d.splitOn "\n\n").find? fun (p : String) => !p.startsWith "#").getD ""
+    (p.replace "\n" " ").trimAscii.toString
+  | none => ""
+
+/-- A doc comment as one line of plain text, for the search index. -/
+def docText (doc : Option String) : String :=
+  match doc with
+  | some d => (d.replace "\n" " ").trimAscii.toString
+  | none => ""
+
+/-- Where a declaration is documented: always its module's page, even from `api.html`. -/
+def apiHref (m : Module) (e : Entry) : String := s!"{pageOf m.name}#{e.name}"
+
+/-- One declaration in the API index: kind, name, signature (with cross-links) and the
+first paragraph of its doc. -/
+def apiRow (c : Ctx) (m : Module) (e : Entry) (child : Bool) : String :=
+  let cls := if child then "api-decl child" else "api-decl"
+  s!"<tr class=\"{cls}\" id=\"api-{htmlEscape e.name}\">" ++
+  s!"<td class=\"kind\">{htmlEscape e.kind}</td>" ++
+  s!"<td class=\"name\"><a href=\"{htmlEscape (apiHref m e)}\"><code>{htmlEscape e.name}</code></a></td>" ++
+  s!"<td class=\"api-sig\"><code>{fallbackHtml c e.subs e.tt}</code></td>" ++
+  s!"<td class=\"summary\">{inline (docLink c) ((docSummary e.doc).take 200 |>.toString)}</td></tr>"
+
+/-- A module's section of the API index: every declaration and its constructors or
+fields, with links back to the module page. -/
+def apiSection (c : Ctx) (m : Module) (es : Array Entry) : String :=
+  let count := es.foldl (fun n e => n + 1 + e.children.size) 0
+  let rows := es.toList.map fun e =>
+    apiRow c m e false ++ String.join (e.children.toList.map fun k => apiRow c m k true)
+  let plural := if count == 1 then "" else "s"
+  s!"<section class=\"api-module\" id=\"module-{htmlEscape m.name}\">" ++
+  s!"<h2><a href=\"{htmlEscape (pageOf m.name)}\">{htmlEscape m.name}</a>" ++
+  s!" <span class=\"count\">{count} declaration{plural}</span></h2>" ++
+  s!"<table class=\"api-table\"><thead><tr><th>kind</th><th>name</th><th>signature</th><th>docs</th></tr></thead>" ++
+  s!"<tbody>{String.join rows}</tbody></table></section>\n"
+
+/-- The API index's rows as JSON (`api.json`): the machine-readable form of `api.html`. -/
+def apiRows (m : Module) (es : Array Entry) : Array Json :=
+  es.flatMap fun e => (#[e] ++ e.children).map fun x =>
+    Json.mkObj [("name", x.name), ("module", m.name), ("kind", x.kind),
+      ("sig", x.sigText), ("doc", docText x.doc), ("href", apiHref m x)]
+
 /-- JSON inside `<script>`: `</` can't end the element. -/
 def scriptJson (j : Json) : String := (j.compress.replace "</" "<\\/")
 
@@ -239,7 +292,8 @@ def head (o : Options) (title : String) (wasm : Bool) : String :=
   "<script src=\"search.js\" defer></script><script src=\"scroll-search.js\" defer></script>" ++
   (if wasm then "<script type=\"module\" src=\"scroll.js\"></script>" else "") ++
   s!"</head><body>\n<header><a class=\"site\" href=\"index.html\">{htmlEscape o.title}</a>" ++
-  "<input id=\"search\" type=\"search\" placeholder=\"Search declarations\" autocomplete=\"off\" aria-label=\"Search\">" ++
+  "<a class=\"api-link\" href=\"api.html\">API index</a>" ++
+  "<input id=\"search\" type=\"search\" placeholder=\"Search declarations, docs and signatures\" autocomplete=\"off\" aria-label=\"Search declarations, docs and signatures\">" ++
   "<div id=\"results\" hidden></div></header>\n"
 
 def nav (mods : List String) (current : String) : String :=
@@ -260,18 +314,39 @@ def modulePage (c : Ctx) (o : Options) (m : Module) (es : Array Entry) (wasm : B
   "<div id=\"info\" hidden></div>" ++
   s!"<script type=\"application/json\" id=\"wiz-doc-data\">{scriptJson data}</script>\n</body></html>\n"
 
-def indexPage (o : Options) (mods : List (String × Option String)) (wasm : Bool) : String :=
+def indexPage (o : Options) (mods : List (String × Option String)) : String :=
   let items := mods.map fun (m, doc) =>
     -- (the first paragraph that is not a heading)
     let summary := match doc with
       | some d => inline (fun _ => none) ((((d.splitOn "\n\n").find? fun (p : String) => !p.startsWith "#").getD "").replace "\n" " ")
       | none => ""
     s!"<li><a href=\"{htmlEscape (pageOf m)}\">{htmlEscape m}</a><div class=\"summary\">{summary}</div></li>"
-  head o o.title wasm ++ nav (mods.map (·.1)) "" ++
-  s!"<main><h1>{htmlEscape o.title}</h1><ul class=\"modules\">{String.join items}</ul></main>\n</body></html>\n"
+  head o o.title false ++ nav (mods.map (·.1)) "" ++
+  s!"<main><h1>{htmlEscape o.title}</h1>" ++
+  s!"<p class=\"lede\">{mods.length} module{(if mods.length == 1 then "" else "s")}. " ++
+  s!"Browse the <a href=\"api.html\">API index</a> for every declaration and signature, " ++
+  s!"or search names, doc comments and signatures from the box above.</p>" ++
+  s!"<ul class=\"modules\">{String.join items}</ul></main>\n</body></html>\n"
 
-/-- The search index: every documented declaration (name, module, kind, the first line
-of its doc), as a script (so that it loads from `file://` too). -/
+/-- The API/library index: every documented module with all its declarations, their
+kinds, signatures (with the same cross-links as the pages) and doc summaries. It is
+generated from the same data as `A.B.json` and written with them (`api.json`). -/
+def apiPage (o : Options) (mods : List String) (sections : Array String)
+    (moduleCount declCount : Nat) : String :=
+  let mp := if moduleCount == 1 then "" else "s"
+  let dp := if declCount == 1 then "" else "s"
+  head o s!"API index — {o.title}" false ++ nav mods "" ++
+  s!"<main class=\"api\"><h1>API index</h1>" ++
+  s!"<p class=\"lede\">{moduleCount} module{mp}, {declCount} declaration{dp}. " ++
+  s!"Every name links to its signature on its module page; the search box above also " ++
+  s!"matches doc comments and signatures. <a href=\"index.html\">Back to the modules</a>; " ++
+  s!"the same index is <a href=\"api.json\">api.json</a>.</p>" ++
+  String.join sections.toList ++ "</main>\n</body></html>\n"
+
+/-- The search index: every documented module and declaration, with its name, module,
+kind, doc summary, signature text and target, as a script (so that it loads from
+`file://` too). `scroll-search.js` matches names first, then doc comments and
+signatures. -/
 def searchJs (rows : Array Json) : String :=
   s!"window.wizSearchIndex = {(Json.arr rows).compress};\n"
 
@@ -298,6 +373,9 @@ def run (elabMod : String → IO St) (mods : Array Module) (o : Options) : IO Na
       discard <| copyIf (a / f) (o.out / f)
   let mut rows : Array Json := #[]
   let mut summaries : Array (String × Option String) := #[]
+  let mut apiSections : Array String := #[]
+  let mut apiDecls : Array Json := #[]
+  let mut declCount := 0
   for m in mods do
     let st ← elabMod m.name
     for msg in st.messages do
@@ -307,15 +385,29 @@ def run (elabMod : String → IO St) (mods : Array Module) (o : Options) : IO Na
     IO.FS.writeFile (o.out / pageOf m.name) (modulePage c o m es wasm)
     IO.FS.writeFile (o.out / s!"{m.name}.json")
       (Json.mkObj [("module", m.name), ("decls", Json.arr (es.flatMap fun e => #[e.data] ++ e.children.map (·.data)))]).compress
-    summaries := summaries.push (m.name, moduleDocOf m.src)
+    let doc := moduleDocOf m.src
+    summaries := summaries.push (m.name, doc)
+    -- (the API index: all modules, every declaration, the same cross-links)
+    let ac : Ctx := { st, modules := names, current := "" }
+    apiSections := apiSections.push (apiSection ac m es)
+    apiDecls := apiDecls ++ apiRows m es
+    declCount := declCount + es.foldl (fun n e => n + 1 + e.children.size) 0
+    -- (the search: the module itself, then its declarations)
+    rows := rows.push (Json.mkObj [("n", m.name), ("m", m.name), ("k", "module"),
+      ("d", (docText doc).take 500 |>.toString), ("s", ""), ("u", pageOf m.name)])
     for e in es do
       for x in #[e] ++ e.children do
-        let first := match x.doc with
-          | some d => (d.splitOn "\n\n").headD "" |>.replace "\n" " "
-          | none => ""
-        rows := rows.push (Json.mkObj [("n", x.name), ("m", m.name), ("k", x.kind), ("d", (first.take 160).toString)])
+        rows := rows.push (Json.mkObj [("n", x.name), ("m", m.name), ("k", x.kind),
+          ("d", (docText x.doc).take 500 |>.toString),
+          ("s", (x.sigText.take 500).toString), ("u", apiHref m x)])
   IO.FS.writeFile (o.out / "search.js") (searchJs rows)
-  IO.FS.writeFile (o.out / "index.html") (indexPage o summaries.toList wasm)
+  -- (the landing and API pages have no signatures to render: no Wasm module script)
+  IO.FS.writeFile (o.out / "index.html") (indexPage o summaries.toList)
+  IO.FS.writeFile (o.out / "api.html") (apiPage o names apiSections mods.size declCount)
+  let apiModules := summaries.map fun (m, doc) =>
+    Json.mkObj [("name", m), ("href", pageOf m), ("doc", docText doc)]
+  IO.FS.writeFile (o.out / "api.json")
+    (Json.mkObj [("title", o.title), ("modules", Json.arr apiModules), ("decls", Json.arr apiDecls)]).compress
   pure mods.size
 
 end Wiz.Doc

@@ -1,0 +1,417 @@
+{
+  "baseline_ratios": {
+    "cold": {
+      "files": {
+        "bench/.build/compiler.wiz": 1.2281,
+        "bench/.build/selfhost-all.wiz": 1.2226,
+        "selfhost/Kernel.wiz": 1.0018,
+        "selfhost/Lex.wiz": 0.1531
+      },
+      "total": 1.1544
+    },
+    "warm": {
+      "files": {
+        "bench/.build/compiler.wiz": 0.3861,
+        "bench/.build/selfhost-all.wiz": 0.2692,
+        "selfhost/Kernel.wiz": 0.022,
+        "selfhost/Lex.wiz": 0.0357
+      },
+      "total": 0.2536
+    }
+  },
+  "branch": "agent/sh-perf",
+  "commit": "627b48f6b29c1a50cdc1e18565f4b5389744dee6",
+  "corpus": [
+    {
+      "bytes": 13140,
+      "kind": "small",
+      "lines": 279,
+      "path": "selfhost/Lex.wiz"
+    },
+    {
+      "bytes": 213925,
+      "kind": "medium",
+      "lines": 4225,
+      "path": "selfhost/Kernel.wiz"
+    },
+    {
+      "bytes": 684923,
+      "kind": "large (Lex+Parse+Kernel+CParse+CGlue+Frontend)",
+      "lines": 12950,
+      "path": "bench/.build/selfhost-all.wiz"
+    },
+    {
+      "bytes": 865219,
+      "kind": "xlarge (the whole toolchain)",
+      "lines": 16822,
+      "path": "bench/.build/compiler.wiz"
+    }
+  ],
+  "created": "2026-11-15T21:04:45Z",
+  "generator": "bench/selfhost-bench.py",
+  "host": "noobnoob",
+  "host_binary": "/workspace/wt/sh-perf/.lake/build/bin/wiz",
+  "modes": [
+    "cold",
+    "warm"
+  ],
+  "rejected": [
+    {
+      "path": "lib/Prelude.wiz",
+      "why": "unsupported command command.builtin"
+    },
+    {
+      "path": "lib/Std.wiz",
+      "why": "'Array' has already been declared (the embedded prelude)"
+    },
+    {
+      "path": "lib/Vec.wiz",
+      "why": "imports Logic: unsupported term.absurd / notation"
+    },
+    {
+      "path": "lib/Json.wiz",
+      "why": "imports Text: 'List.map' has already been declared"
+    },
+    {
+      "path": "examples/run.wiz",
+      "why": "unknown identifier Size (sized types)"
+    },
+    {
+      "path": "examples/streams.wiz",
+      "why": "unsupported command command.coinductive"
+    },
+    {
+      "path": "examples/tactics.wiz",
+      "why": "parse error in a tactic quotation"
+    },
+    {
+      "path": "examples/std.wiz",
+      "why": "unknown identifier Str.append"
+    }
+  ],
+  "reps": 3,
+  "results": {
+    "cold": {
+      "files": {
+        "bench/.build/compiler.wiz": {
+          "host": {
+            "max_s": 34.084777,
+            "median_s": 31.154501,
+            "min_s": 30.975245,
+            "rss_mb": 267.9,
+            "samples_rss_mb": [
+              267.9,
+              266.6,
+              269.6
+            ],
+            "samples_s": [
+              34.084777,
+              31.154501,
+              30.975245
+            ]
+          },
+          "ratio": 1.2281,
+          "rss_ratio": 1.9765,
+          "selfhost": {
+            "max_s": 38.855019,
+            "median_s": 38.261078,
+            "min_s": 37.860945,
+            "rss_mb": 529.5,
+            "samples_rss_mb": [
+              528.7,
+              529.5,
+              529.5
+            ],
+            "samples_s": [
+              38.855019,
+              38.261078,
+              37.860945
+            ]
+          },
+          "status": "ok"
+        },
+        "bench/.build/selfhost-all.wiz": {
+          "host": {
+            "max_s": 27.435374,
+            "median_s": 26.45815,
+            "min_s": 26.245566,
+            "rss_mb": 246.5,
+            "samples_rss_mb": [
+              246.5,
+              249.4,
+              236.7
+            ],
+            "samples_s": [
+              27.435374,
+              26.245566,
+              26.45815
+            ]
+          },
+          "ratio": 1.2226,
+          "rss_ratio": 1.8686,
+          "selfhost": {
+            "max_s": 32.391997,
+            "median_s": 32.348923,
+            "min_s": 31.935051,
+            "rss_mb": 460.6,
+            "samples_rss_mb": [
+              460.4,
+              460.6,
+              460.6
+            ],
+            "samples_s": [
+              31.935051,
+              32.391997,
+              32.348923
+            ]
+          },
+          "status": "ok"
+        },
+        "selfhost/Kernel.wiz": {
+          "host": {
+            "max_s": 12.752105,
+            "median_s": 12.717348,
+            "min_s": 12.551532,
+            "rss_mb": 187.0,
+            "samples_rss_mb": [
+              186.2,
+              187.1,
+              187.0
+            ],
+            "samples_s": [
+              12.752105,
+              12.551532,
+              12.717348
+            ]
+          },
+          "ratio": 1.0018,
+          "rss_ratio": 0.946,
+          "selfhost": {
+            "max_s": 15.916724,
+            "median_s": 12.740636,
+            "min_s": 12.361098,
+            "rss_mb": 176.9,
+            "samples_rss_mb": [
+              176.9,
+              176.9,
+              177.5
+            ],
+            "samples_s": [
+              15.916724,
+              12.740636,
+              12.361098
+            ]
+          },
+          "status": "ok"
+        },
+        "selfhost/Lex.wiz": {
+          "host": {
+            "max_s": 2.403583,
+            "median_s": 2.156628,
+            "min_s": 1.982682,
+            "rss_mb": 105.8,
+            "samples_rss_mb": [
+              105.9,
+              105.8,
+              105.5
+            ],
+            "samples_s": [
+              2.403583,
+              2.156628,
+              1.982682
+            ]
+          },
+          "ratio": 0.1531,
+          "rss_ratio": 0.1267,
+          "selfhost": {
+            "max_s": 0.336425,
+            "median_s": 0.330115,
+            "min_s": 0.288292,
+            "rss_mb": 13.4,
+            "samples_rss_mb": [
+              12.9,
+              13.4,
+              13.5
+            ],
+            "samples_s": [
+              0.336425,
+              0.330115,
+              0.288292
+            ]
+          },
+          "status": "ok"
+        }
+      },
+      "total": {
+        "host_rss_mb": 267.9,
+        "host_s": 72.486627,
+        "ratio": 1.1544,
+        "rss_ratio": 1.9765,
+        "selfhost_rss_mb": 529.5,
+        "selfhost_s": 83.680752
+      }
+    },
+    "warm": {
+      "files": {
+        "bench/.build/compiler.wiz": {
+          "host": {
+            "max_s": 27.555089,
+            "median_s": 27.527059,
+            "min_s": 25.748142,
+            "rss_mb": 299.9,
+            "samples_rss_mb": [
+              231.6,
+              299.9,
+              319.7
+            ],
+            "samples_s": [
+              27.555089,
+              27.527059,
+              25.748142
+            ]
+          },
+          "ratio": 0.3861,
+          "rss_ratio": 0.3745,
+          "selfhost": {
+            "max_s": 10.706287,
+            "median_s": 10.628411,
+            "min_s": 10.601109,
+            "rss_mb": 112.3,
+            "samples_rss_mb": [
+              112.3,
+              112.4,
+              112.0
+            ],
+            "samples_s": [
+              10.628411,
+              10.706287,
+              10.601109
+            ]
+          },
+          "status": "ok"
+        },
+        "bench/.build/selfhost-all.wiz": {
+          "host": {
+            "max_s": 23.141053,
+            "median_s": 22.55747,
+            "min_s": 22.326495,
+            "rss_mb": 248.5,
+            "samples_rss_mb": [
+              285.7,
+              248.5,
+              224.4
+            ],
+            "samples_s": [
+              22.55747,
+              22.326495,
+              23.141053
+            ]
+          },
+          "ratio": 0.2692,
+          "rss_ratio": 0.359,
+          "selfhost": {
+            "max_s": 6.134792,
+            "median_s": 6.071652,
+            "min_s": 5.964407,
+            "rss_mb": 89.2,
+            "samples_rss_mb": [
+              89.2,
+              89.6,
+              88.3
+            ],
+            "samples_s": [
+              6.071652,
+              5.964407,
+              6.134792
+            ]
+          },
+          "status": "ok"
+        },
+        "selfhost/Kernel.wiz": {
+          "host": {
+            "max_s": 89.652881,
+            "median_s": 16.305252,
+            "min_s": 15.309859,
+            "rss_mb": 120.0,
+            "samples_rss_mb": [
+              116.9,
+              120.0,
+              122.7
+            ],
+            "samples_s": [
+              15.309859,
+              16.305252,
+              89.652881
+            ]
+          },
+          "ratio": 0.022,
+          "rss_ratio": 0.2508,
+          "selfhost": {
+            "max_s": 0.408677,
+            "median_s": 0.359031,
+            "min_s": 0.339071,
+            "rss_mb": 30.1,
+            "samples_rss_mb": [
+              29.9,
+              30.3,
+              30.1
+            ],
+            "samples_s": [
+              0.408677,
+              0.359031,
+              0.339071
+            ]
+          },
+          "status": "ok"
+        },
+        "selfhost/Lex.wiz": {
+          "host": {
+            "max_s": 1.408523,
+            "median_s": 1.027192,
+            "min_s": 0.962514,
+            "rss_mb": 113.2,
+            "samples_rss_mb": [
+              115.0,
+              113.2,
+              112.4
+            ],
+            "samples_s": [
+              1.408523,
+              1.027192,
+              0.962514
+            ]
+          },
+          "ratio": 0.0357,
+          "rss_ratio": 0.0574,
+          "selfhost": {
+            "max_s": 0.048245,
+            "median_s": 0.036647,
+            "min_s": 0.036329,
+            "rss_mb": 6.5,
+            "samples_rss_mb": [
+              6.2,
+              6.7,
+              6.5
+            ],
+            "samples_s": [
+              0.048245,
+              0.036329,
+              0.036647
+            ]
+          },
+          "status": "ok"
+        }
+      },
+      "total": {
+        "host_rss_mb": 299.9,
+        "host_s": 67.416973,
+        "ratio": 0.2536,
+        "rss_ratio": 0.3745,
+        "selfhost_rss_mb": 112.3,
+        "selfhost_s": 17.095741
+      }
+    }
+  },
+  "schema": 1,
+  "selfhost_binary": "/workspace/wt/sh-perf/bench/.build/selfhost"
+}

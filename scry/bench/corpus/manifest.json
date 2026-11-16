@@ -319,6 +319,197 @@
         {"rule": "strcpy-overflow", "function": "main", "callee": "strcpy", "argument": 0, "sinkLine": 8}
       ],
       "note": "detected, but the destination array is a lowering boundary"
+    },
+    {
+      "id": "s2/cwe78/exec-model-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/model-exec.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "execl", "argument": 3, "sinkLine": 7, "sourceLine": 6}
+      ],
+      "note": "the exec* model checks the variadic argv, not only the path at argument 0"
+    },
+    {
+      "id": "s2/cwe78/exec-model-safe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/model-exec-safe.c",
+      "expect": "safe",
+      "note": "a constant exec has no tainted argv"
+    },
+    {
+      "id": "s2/cwe134/sprintf-model-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-134",
+      "file": "../../tests/fixtures/model-sprintf-format.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "format-string", "function": "main", "callee": "sprintf", "argument": 1, "sinkLine": 7, "sourceLine": 6}
+      ],
+      "note": "the sprintf model's format argument"
+    },
+    {
+      "id": "s2/cwe78/sprintf-copy-model-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/model-sprintf-copy.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 10, "sourceLine": 8}
+      ],
+      "note": "the sprintf copyArgs model taints the destination from a variadic argument"
+    },
+    {
+      "id": "s2/cwe120/strcpy-model-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-120",
+      "file": "../../tests/fixtures/model-strcpy.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "strcpy-overflow", "function": "main", "callee": "strcpy", "argument": 0, "sinkLine": 9},
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 10, "sourceLine": 8}
+      ],
+      "note": "the copy model carries the taint through the destination and the forbidden rule still fires"
+    },
+    {
+      "id": "s2/cwe120/strncpy-model-safe",
+      "suite": "S2",
+      "cwe": "CWE-120",
+      "file": "../../tests/fixtures/model-strncpy-safe.c",
+      "expect": "safe",
+      "note": "a bounded copy with a constant source"
+    },
+    {
+      "id": "s2/cwe78/read-model-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/model-read.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 7, "sourceLine": 6}
+      ],
+      "note": "read's buffer argument is a model source (argument 1), independent of arrays"
+    },
+    {
+      "id": "s2/cwe78/recv-model-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/model-recv.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 7, "sourceLine": 6}
+      ],
+      "note": "recv's buffer argument is the source, not its result"
+    },
+    {
+      "id": "s2/cwe78/realloc-model-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/model-realloc.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "strcpy-overflow", "function": "main", "callee": "strcpy", "argument": 0, "sinkLine": 11},
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 12, "sourceLine": 11}
+      ],
+      "note": "malloc and realloc are allocation effects; the copy and sink stay precise"
+    },
+    {
+      "id": "s2/cwe78/model-sanitised-safe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/model-sanitise.c",
+      "expect": "safe",
+      "note": "a policy sanitiser's result is clean"
+    },
+    {
+      "id": "s2/cwe78/model-unknown-safe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/model-unknown.c",
+      "expect": "safe",
+      "note": "an unmodelled external with a pointer argument gets an unmodelled-external warning, not a finding"
+    },
+    {
+      "id": "s2/cwe78/snprintf-copy-model-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/model-snprintf-copy.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 10, "sourceLine": 8}
+      ],
+      "note": "the snprintf copyArgs model taints the destination; the explicit bound is clean"
+    },
+    {
+      "id": "s2/cwe787/snprintf-length-model-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-787",
+      "file": "../../tests/fixtures/model-snprintf-length.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "buffer-overflow", "function": "main", "callee": "snprintf", "argument": 1, "sinkLine": 8, "sourceLine": 7}
+      ],
+      "note": "snprintf's size argument is a length sink"
+    },
+    {
+      "id": "s2/cwe78/calloc-model-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/model-calloc.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "strcpy-overflow", "function": "main", "callee": "strcpy", "argument": 0, "sinkLine": 9},
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 10, "sourceLine": 9}
+      ],
+      "note": "calloc is an allocation effect; the copy and sink stay precise"
+    },
+    {
+      "id": "s2/cwe78/exec-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/taint-exec-unsafe.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "execl", "argument": 3, "sinkLine": 18, "sourceLine": 17},
+        {"rule": "command-injection", "function": "main", "callee": "execlp", "argument": 3, "sinkLine": 19, "sourceLine": 17},
+        {"rule": "command-injection", "function": "main", "callee": "execv", "argument": 0, "sinkLine": 20, "sourceLine": 17},
+        {"rule": "command-injection", "function": "main", "callee": "execvp", "argument": 0, "sinkLine": 21, "sourceLine": 17},
+        {"rule": "command-injection", "function": "main", "callee": "execve", "argument": 0, "sinkLine": 22, "sourceLine": 17},
+        {"rule": "command-injection", "function": "main", "callee": "posix_spawn", "argument": 1, "sinkLine": 23, "sourceLine": 17},
+        {"rule": "command-injection", "function": "main", "callee": "posix_spawnp", "argument": 1, "sinkLine": 24, "sourceLine": 17},
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 25, "sourceLine": 17}
+      ],
+      "note": "the exec family, including the variadic execl argument selector and posix_spawn's path"
+    },
+    {
+      "id": "s2/cwe78/exec-safe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/taint-exec-safe.c",
+      "expect": "safe",
+      "note": "the same exec-family calls with a constant command"
+    },
+    {
+      "id": "s2/cwe78/entry-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/taint-entry-unsafe.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "iv_spawn", "callee": "execl", "argument": 3, "sinkLine": 6, "sourceLine": 6}
+      ],
+      "note": "an exported C-ABI entry with no caller: its parameter is a source"
+    },
+    {
+      "id": "s2/cwe78/entry-safe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/taint-entry-safe.c",
+      "expect": "safe",
+      "note": "an internally called function and a static function are not exported entries"
     }
+
   ]
 }

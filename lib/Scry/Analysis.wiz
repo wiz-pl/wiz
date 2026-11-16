@@ -322,7 +322,7 @@ def Scry.mapsSetEq (g : Scry.Fn) (a b : List (Nat × List Nat)) : Bool :=
 def Scry.rdStep (defs : List (Nat × Nat)) (g : Scry.Fn) (n : Nat) (inp : List Nat) : List Nat :=
   Scry.unionNat (Scry.genOfD defs n) (Scry.diffNat inp (Scry.killOf defs g n))
 
-partial def Scry.rdLoop (defs : List (Nat × Nat)) (g : Scry.Fn) (fuel : Nat)
+def Scry.rdLoop (defs : List (Nat × Nat)) (g : Scry.Fn) (fuel : Nat)
     (ins : List (Nat × List Nat)) : List (Nat × List Nat) :=
   match fuel with
   | .zero => ins
@@ -349,7 +349,7 @@ def Scry.interAll : List (List Nat) → List Nat
   | .nil => .nil
   | .cons s rest => List.foldr (fun x acc => Scry.interNat x acc) s rest
 
-partial def Scry.domLoop (g : Scry.Fn) (fuel : Nat) (dom : List (Nat × List Nat)) :
+def Scry.domLoop (g : Scry.Fn) (fuel : Nat) (dom : List (Nat × List Nat)) :
     List (Nat × List Nat) :=
   match fuel with
   | .zero => dom

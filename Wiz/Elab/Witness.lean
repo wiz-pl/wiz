@@ -50,8 +50,8 @@ its shape (an inductive type's name, or an axiom). -/
 private partial def headNames (v : Val R) (acc : List Name := []) : ElabM R (List Name) := do
   match ← forceMeta v with
   | .unfold n _ _ v => headNames v.get (acc ++ [n])
-  | .lazyInd _ _ _ _ _ _ _ _ _ v => headNames v.get acc
-  | .mu _ _ _ _ _ (some (T, _, _)) | .nu _ _ _ _ _ (some (T, _, _)) => pure (acc ++ [T])
+  | .lazyInd _ _ _ _ _ _ _ _ _ _ v => headNames v.get acc
+  | .mu _ _ _ _ _ (some (T, _, _)) _ | .nu _ _ _ _ _ (some (T, _, _)) => pure (acc ++ [T])
   | .neutral (.global T _) _ => pure (acc ++ [T])
   | _ => pure acc
 

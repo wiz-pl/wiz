@@ -26,6 +26,9 @@ The cases cover:
 * points-to and memory: same-slot store/load, a known no-alias pair, field sensitivity,
   a location tainted in one function and read in another (the memory summary), known and
   unknown indirect targets, the location lattice's kinds and `locOverlap`;
+* external models: the `Scry.Models` effect queries (source/sink/sanitiser/copy/alloc/
+  free/unknown), a model sink on `execl` argument 3, and idempotent model rule
+  descriptors;
 * certificates: a finding's derivation checks, reports its axioms and assumptions, and a
   tampered derivation is rejected;
 * SARIF 2.1.0 shape, locations from an origin map, related locations, and the JSON
@@ -72,6 +75,7 @@ def ruleImports : String :=
   "import Scry.Taint\n" ++
   "import Scry.TaintExamples\n" ++
   "import Scry.Rules\n" ++
+  "import Scry.Models\n" ++
   "import Scry.RuleTaint\n" ++
   "import Scry.Interproc\n" ++
   "import Scry.Sarif\n" ++
@@ -145,7 +149,7 @@ def rulePrelude : String := prelude ++
   "  match k with\n" ++
   "  | .source => 1 | .param => 2 | .call => 3 | .returnSeed => 4\n" ++
   "  | .returnValue => 5 | .flow => 6 | .sink => 7 | .recursion => 8 | .assumed => 9\n" ++
-  "  | .store => 10 | .load => 11\n" ++
+  "  | .store => 10 | .load => 11 | .alloc => 12 | .free => 13\n" ++
   "def kindsCode : List Scry.PathNode → Nat\n" ++
   "  | .nil => 0\n" ++
   "  | .cons p ps => Nat.add (Nat.mul 10 (kindsCode ps)) (kindCode p.kind)\n" ++
@@ -260,7 +264,7 @@ def group : Group where
           "#eval Nat.add (Nat.mul (List.length Scry.demoRules.rules) 10000) (Nat.add (Nat.mul (List.length (Scry.RulePack.taintRules Scry.demoRules)) 1000) (Nat.add (Nat.mul (List.length (Scry.RulePack.forbiddenRules Scry.demoRules)) 100) (Nat.add (Nat.mul (totalSinks (Scry.RulePack.taintRules Scry.demoRules)) 10) (totalSources (Scry.RulePack.taintRules Scry.demoRules)))))\n" ++
           "#eval if Scry.nameMatches \"mem*\" \"memcpy\" then 1 else 0\n" ++
           "#eval if Scry.nameMatches \"strcpy*\" \"astrcpy\" then 1 else 0\n" ++
-          "#eval match Scry.Program.check Scry.ruleTaintProgram with | .none => 999 | .some st => List.length st") [42245, 1, 0, 14]
+          "#eval match Scry.Program.check Scry.ruleTaintProgram with | .none => 999 | .some st => List.length st") [42335, 1, 0, 14]
         evalRuleTexts (rulePrelude ++
           "#eval ruleSev Scry.demoRules.rules \"gets-overflow\"\n" ++
           "#eval ruleKind Scry.demoRules.rules \"gets-overflow\"")
@@ -386,6 +390,45 @@ def group : Group where
          "#eval Nat.add (if Scry.locEq (Scry.addOff h 0) h then 100 else 0)\n" ++
          "  (Nat.add (if Scry.locOverlap (Scry.Loc.field h 0) (Scry.Loc.field h 1) then 10 else 0)\n" ++
          "    (Nat.add (if Scry.locOverlap (Scry.Loc.field h 0) (Scry.Loc.anyOff h) then 1 else 0) 0))") [101] },
+    { name := "external models: source, sink, sanitiser, copy, alloc and free effects",
+      run := fun _ => evalRuleNats (rulePrelude ++
+        "def allocShape (s : Option Scry.AllocShape) : Nat :=\n" ++
+        "  match s with\n" ++
+        "  | .none => 999\n" ++
+        "  | .some a => Nat.add (Nat.mul (match a.sizeArg with | .some k => k | .none => 9) 10)\n" ++
+        "      (match a.countArg with | .some k => k | .none => 9)\n" ++
+        "#eval List.length (Scry.Models.sourcesOf \"getenv\")\n" ++
+        "#eval List.length (Scry.Models.sourcesOf \"read\")\n" ++
+        "#eval List.length (Scry.Models.sinksOf \"system\")\n" ++
+        "#eval List.length (Scry.Models.sinksOf \"execl\")\n" ++
+        "#eval Nat.add (Nat.mul (List.length (Scry.Models.copyPairsOf \"strcpy\" 2)) 10)\n" ++
+        "  (List.length (Scry.Models.copyPairsOf \"sprintf\" 4))\n" ++
+        "#eval allocShape (Scry.Models.allocOf \"malloc\")\n" ++
+        "#eval allocShape (Scry.Models.allocOf \"calloc\")\n" ++
+        "#eval match Scry.Models.freeArgOf \"free\" with | .some k => k | .none => 9\n" ++
+        "#eval List.length (Scry.Models.sansOf \"sanitize\")\n" ++
+        "#eval if Scry.Models.isModelled \"mystery_external\" then 0 else 1\n" ++
+        "#eval if Scry.Models.isUnknownModel (Scry.Models.modelFor \"mystery_external\") then 1 else 0\n" ++
+        "#eval if Scry.RulePack.trustsSanitiser Scry.demoRules \"sanitize\" then 1 else 0\n" ++
+        "#eval if Scry.RulePack.trustsSanitiser Scry.demoRulesNoSan \"sanitize\" then 0 else 1")
+        [1, 1, 1, 8, 13, 9, 10, 0, 1, 1, 1, 1, 1] },
+    { name := "external models: a model sink on execl argument 3 is a command-injection finding",
+      run := fun _ => do
+        evalRuleNats (rulePrelude ++
+          "def prE : Scry.ProgramResult := Scry.analyze Scry.execModelProgram Scry.demoRules\n" ++
+          "def ef : List Scry.RuleFinding := Scry.programFindings prE\n" ++
+          "#eval List.length ef\n" ++
+          "#eval match ef with | .cons f _ => f.arg | .nil => 9\n" ++
+          "#eval match ef with | .cons f _ => kindsCode f.path | .nil => 0\n") [1, 3, 71]
+        evalRuleTexts (rulePrelude ++
+          "def prE : Scry.ProgramResult := Scry.analyze Scry.execModelProgram Scry.demoRules\n" ++
+          "#eval match Scry.programFindings prE with | .cons f _ => f.rule | .nil => \"\"\n" ++
+          "#eval match Scry.programFindings prE with | .cons f _ => f.name | .nil => \"\"") ["\"command-injection\"", "\"execl\""] },
+    { name := "external models: the pack gains model rule descriptors exactly once",
+      run := fun _ => evalRuleNats
+        ("#eval List.length (Scry.RulePack.withModels Scry.demoRules).rules\n" ++
+         "#eval List.length (Scry.RulePack.withModels (Scry.RulePack.withModels Scry.demoRules)).rules\n" ++
+         "#eval List.length (Scry.RulePack.withModels (Scry.parseRulePack \"\")).rules") [6, 6, 4] },
     { name := "certificates: the derivation checks, reports axioms, and a tampered one is rejected",
       run := fun _ => do
         evalRuleNats (rulePrelude ++

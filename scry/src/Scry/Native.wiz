@@ -138,6 +138,15 @@ def Scry.Native.parseChecked (path : String) : EIO ScryStore := do
   | .false => EIO.fail (path ++ ": " ++ Nat.repr (Scry.Native.errorCount st)
       ++ " ERROR/MISSING node(s); the file is not valid C")
 
+/-- Parse C source text (not a file: the preprocessed text after its marker lines were
+blanked), refusing a tree with `ERROR`/`MISSING` nodes. `name` is for the error message. -/
+def Scry.Native.parseCheckedText (name : String) (text : String) : EIO ScryStore := do
+  st ← Scry.Native.parse "c" text;
+  match Nat.beq (Scry.Native.errorCount st) 0 with
+  | .true => EIO.pure st
+  | .false => EIO.fail (name ++ ": " ++ Nat.repr (Scry.Native.errorCount st)
+      ++ " ERROR/MISSING node(s); the preprocessed text is not valid C")
+
 -- ## Names and columns into the model store
 
 /-- `f 0, f 1, … f (n - 1)`. -/

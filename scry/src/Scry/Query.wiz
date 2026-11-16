@@ -1,12 +1,15 @@
 import Scry.Facts
+import Scry.CstOptics
 /-!
 # Scry.Query: a trivial query and `explain`
 
-The S1 skeleton has one traversal (`--kind`), one edge query (`--edge`) and one relation
-query (`--rel`); the real query language (traversals and Datalog, design §4.5) is S3.
-The point here is that the store's typed view and CSR adjacency answer queries without
-scanning object graphs: `--kind` filters the node column, `--edge` reads the edge
-columns, `--rel` projects a relation, and `explain` reads one node plus its CSR slices.
+The S1 skeleton has one traversal (`--kind`), one edge query (`--edge`), one edge-source
+query (`--edge-src`, the additive optics path) and one relation query (`--rel`); the real
+query language (traversals and Datalog, design §4.5) is S3. The point here is that the
+store's typed view and CSR adjacency answer queries without scanning object graphs:
+`--kind` filters the node column, `--edge` reads the edge columns, `--edge-src` composes
+the edge filter with the source accessor in `Scry.CstOptics`, `--rel` projects a
+relation, and `explain` reads one node plus its CSR slices.
 
 `scry explain` is also where a finding's witness will go (S8): a node, its origin span,
 its incident arcs, and the relation tuples that mention it.
@@ -53,6 +56,14 @@ def Scry.renderQueryEdge (f : Scry.Facts) (label : String) : String :=
   "query edge " ++ label ++ ": " ++ Nat.repr (List.length es) ++ " match(es)"
   ++ List.foldr (fun e acc => "\n  " ++ Nat.repr e.src.n ++ " -> " ++ Nat.repr e.dst.n
       ++ " " ++ e.label ++ acc) "" es
+
+/-- The lines of `scry query --edge-src L`: only the sources of the edges, the
+composition `edges -> filter label -> source` in `Scry.CstOptics`. This is an additive
+query: the older `--edge` output is unchanged. -/
+def Scry.renderQueryEdgeSrc (f : Scry.Facts) (label : String) : String :=
+  let ids := Scry.CstOptics.edgeSources f label;
+  "query edge source " ++ label ++ ": " ++ Nat.repr (List.length ids) ++ " match(es)"
+  ++ List.foldr (fun id acc => "\n  " ++ Nat.repr id.n ++ acc) "" ids
 
 /-- The lines of `scry query --rel R`, or an error when the relation is absent. -/
 def Scry.renderQueryRel (f : Scry.Facts) (name : String) : Except String String :=

@@ -3,13 +3,17 @@ import Functor
 import WordArray
 import Scry.Wil
 import Scry.CstStore
+import Scry.Models
+import Scry.Preproc
 /-!
 # Scry.Lower: C to Wil, with origins
 
 The vertical slice of S2's C frontend (design `wiz-notes/code-analysis-design.md` §4.3,
 §6 S2; note `wiz-notes/scry-c2wil.md`): lower a C **function body** from the S1 CST
 (`Scry.CstStore`, filled by `native/ts_shim.c`) into `Wil`, then derive the CFG, the
-direct-call graph and the facts EDB of §4.3.
+direct-call graph and the facts EDB of §4.3. `Scry.Cst.ofStore` reads a direct parse;
+`Scry.Cst.ofPreprocessed` takes the `cc -E` pipeline's line map (`Scry.Preproc`), so
+every origin is in the original file, line and column.
 
 The boundary is deliberate. What lowers:
 
@@ -18,27 +22,30 @@ The boundary is deliberate. What lowers:
 * integer literals, identifiers, parentheses, `+ - * / % & | ^ << >>`, the comparisons,
   unary `- ~ ! +`, `=`, `+= -= *= /= %= &= |= ^= <<= >>=`, `++`/`--`;
 * `if`/`else`, `while`, `for` (desugared to a header block, a body and an update block),
-  `break`, `continue`, `return`, compound statements and declarations;
+  `switch` (a compare/branch chain with fallthrough and `default`), `break`,
+  `continue`, `return`, compound statements and declarations;
 * direct calls to functions defined (or prototyped) in the translation unit;
 * **memory**: a struct/union local or an array is a stack slot (`Wil.Rhs.slot`) with a
   cell layout, so `p.x`, `a[0]`, `a[i]` and `*p` are `gep`/`gepVar` + `load`/`store`; an
-  address-taken scalar (`&x`) is a one-cell slot; `malloc`/`calloc` are `Wil.Rhs.alloc`,
-  `free` is `Wil.free`, a module global is `Wil.Rhs.globalRef`, a function used as a
-  value is `Wil.Rhs.fnptr`, and a call through a function pointer is
-  `Wil.Callee.indirect`;
+  address-taken scalar (`&x`) is a one-cell slot; `malloc`/`calloc`/`realloc` are
+  `Wil.Rhs.alloc` and `free` is `Wil.free`, both read from the external model table
+  (`Scry.Models`), a module global is `Wil.Rhs.globalRef`, a function used as a value is
+  `Wil.Rhs.fnptr`, and a call through a function pointer is `Wil.Callee.indirect`;
 * `strcpy`/`strncpy`/`strcat`/`memcpy`/`memmove` are ordinary external calls; the taint
-  layer models their memory effect (`Scry.RuleTaint.copyModel`).
+  layer models their memory effect from the same table (`Scry.Models.copyPairsOf`), so
+  `sprintf`'s formatted arguments are a copy too.
 
 Everything else is **havoc plus a warning**, never a silent wrong value: a cast, `?:`,
 `sizeof`, a string literal, `&&`/`||` as a value, an unknown identifier, an unmodelled
-aggregate initialiser, `realloc`, a `switch`/`do`/`goto`, an unsupported declaration. A
+aggregate initialiser, `do`/`goto`, an unsupported declaration. A
 havoc'd value is the type's default (zero/null). Each warning carries the offending
 statement's `Wil.Span`, so `Scry.TU.warnings` is a list of
 `Scry.Warning {func, message, span}` and `scry taint` places the diagnostic on the
 statement, not the function definition.
 
-`Wil.Stmt`/`Wil.Term` carry `origin : Wil.Span` (file, byte range, CST node id), so
-every lowered statement points at source; `Scry.edbOf` exports the §4.3 EDB:
+`Wil.Stmt`/`Wil.Term` carry `origin : Wil.Span` (file, byte range, CST node id, line,
+column), so every lowered statement points at original source; `Scry.edbOf` exports the
+§4.3 EDB:
 `assign`, `cfg`, `call`, `def`, `use`, `span`.
 -/
 
@@ -60,38 +67,58 @@ structure Scry.Cst where
   /-- The source text of file `i` (byte offsets index it; ASCII in this slice). Retained
   for `Scry.spanText` and the lowering tests. -/
   fileText : Nat → String
-  /-- The same source as a word array: `textOf` slices this, which is O(span) rather
-  than O(file). A `String` is a `List Char` in this runtime, so taking a token from the
-  middle with `String.drop` was O(file) per identifier, i.e. quadratic on a real file.
-  A `U32Array` (not `Bytes`) is deliberate: it has a pure list model, so the same
-  lowering runs in the Lean test interpreter as well as in compiled code. -/
-  fileBytes : Nat → U32Array
-
-/-- The view of a `Scry.CstStore`, with the source text its spans index. The shim's
-store has one file per parse, so `text` is file 0. -/
-def Scry.Cst.ofStore (text : String) (s : Scry.CstStore) : Scry.Cst :=
-  let bytes := List.foldl (fun a c => U32Array.push a (U32.ofNat (Char.code c)))
-    U32Array.empty (String.chars text);
-  Scry.Cst.mk (Scry.CstStore.nodeCount s)
-    (fun i => Scry.CstStore.kindName s i)
-    (fun i => Scry.CstStore.fieldName s i)
-    (fun i => let sp := Scry.CstStore.spanOf s i; Wil.Span.mk 0 sp.start sp.stop i)
-    (fun i => match Scry.CstStore.parentOf s i with
-      | .none => .none
-      | .some x => .some x.n)
-    (fun i => List.map (fun x => x.n) (Scry.CstStore.childrenOf s i))
-    (fun _ => text)
-    (fun _ => bytes)
+  /-- The path of file `i` (as the preprocessor or the caller named it). -/
+  filePath : Nat → String
+  /-- The number of source files (`fileText`/`filePath` are meaningful for
+  `0 … count-1`). -/
+  fileCount : Nat
+  /-- Node `i`'s text as the parser saw it. For a preprocessed unit this is the text
+  tree-sitter parsed (so a macro-expanded literal reads `5`), while `spanOf` maps the
+  node back to the original source; token spellings come from here. It is sliced from a
+  precomputed word array of `pre.text`, in O(span) rather than O(file): a `String` is a
+  `List Char` in this runtime, so taking a token from the middle with `String.drop` was
+  O(file) per identifier, i.e. quadratic on a real file. A `U32Array` (not `Bytes`) is
+  deliberate: it has a pure list model, so the same lowering runs in the Lean test
+  interpreter as well as in compiled code. -/
+  nodeText : Nat → String
 
 /-- The text of words `[start, start + len)` as a string. -/
 def Scry.Cst.wordsText (a : U32Array) (start len : Nat) : String :=
   String.ofChars (List.map (fun x => Char.mk (UIntN.toNat x))
     (U32Array.toList (U32Array.slice a start len)))
 
-/-- The text of node `i`'s span, sliced from the word view in O(span length). -/
-def Scry.Cst.textOf (c : Scry.Cst) (i : Nat) : String :=
-  let sp := c.spanOf i;
-  Scry.Cst.wordsText (c.fileBytes sp.file) sp.start (Nat.sub sp.stop sp.start)
+/-- The view of a *preprocessed* shim store: every node's span is mapped back through
+the `cc -E` line markers to the original file, byte range, line and column, and
+`fileText` serves the original texts. This is what `Scry.lowerTU` lowers, so the
+lowering never sees a preprocessed offset. -/
+def Scry.Cst.ofPreprocessed (pre : Scry.Preprocessed) (s : Scry.CstStore) : Scry.Cst :=
+  let nodeBytes := List.foldl (fun a c => U32Array.push a (U32.ofNat (Char.code c)))
+    U32Array.empty (String.chars pre.text);
+  Scry.Cst.mk (Scry.CstStore.nodeCount s)
+    (fun i => Scry.CstStore.kindName s i)
+    (fun i => Scry.CstStore.fieldName s i)
+    (fun i => let sp := Scry.CstStore.spanOf s i;
+      Scry.mapSpan pre i sp.start sp.stop)
+    (fun i => match Scry.CstStore.parentOf s i with
+      | .none => .none
+      | .some x => .some x.n)
+    (fun i => List.map (fun x => x.n) (Scry.CstStore.childrenOf s i))
+    (fun f => List.getD pre.texts f "")
+    (fun f => List.getD pre.paths f "")
+    (List.length pre.paths)
+    (fun i => let sp := Scry.CstStore.spanOf s i;
+      Scry.Cst.wordsText nodeBytes sp.start (Nat.sub sp.stop sp.start))
+
+/-- The view of a `Scry.CstStore`, with the source text its spans index. The shim's
+store has one file per parse, so `text` is file 0. Line and column of every node's
+origin are derived from the text (a direct parse, not preprocessed). -/
+def Scry.Cst.ofStore (text : String) (s : Scry.CstStore) : Scry.Cst :=
+  Scry.Cst.ofPreprocessed (Scry.Preprocessed.plain (Scry.CstStore.pathName s 0) text) s
+
+/-- The text of node `i` as the parser saw it (`nodeText`), sliced in O(span). Byte
+offsets are used as character indices: the fixtures are ASCII (the shim's offsets are
+bytes; a UTF-8 identifier would need a byte slice, noted in `wiz-notes/scry-c2wil.md`). -/
+def Scry.Cst.textOf (c : Scry.Cst) (i : Nat) : String := c.nodeText i
 
 /-- The text of an origin. -/
 def Scry.spanText (files : List String) (sp : Wil.Span) : String :=
@@ -919,6 +946,50 @@ expression kinds and drop out). -/
 def Scry.exprKids (c : Scry.Cst) (n : Nat) : List Nat :=
   List.filter (fun j => Scry.isExprK c j) (c.childrenOf n)
 
+-- ## Switch labels
+
+/-- One `case`/`default` label of a `switch`: its CST node, the case value (`none` for
+`default`) and the statements it guards (which fall through to the next label). -/
+structure Scry.Case where
+  node : Nat
+  value : Option Nat
+  stmts : List Nat
+
+/-- The label of a `case_statement` node (`none` for another kind of statement). -/
+def Scry.caseOf (c : Scry.Cst) (n : Nat) : Option Scry.Case :=
+  match Scry.isK c n "case_statement" with
+  | .false => .none
+  | .true => .some (Scry.Case.mk n (Scry.childF c n "value")
+      (List.filter (fun j => Scry.isStmtK c j) (c.childrenOf n)))
+
+/-- The `case`/`default` labels directly in a `switch` body, in source order. -/
+def Scry.casesOf (c : Scry.Cst) (body : Nat) : List Scry.Case :=
+  List.concat (List.map (fun j => match Scry.caseOf c j with
+    | .some k => .cons k .nil
+    | .none => .nil) (c.childrenOf body))
+
+/-- Pair each label with its block, in order. -/
+partial def Scry.zipCases (cases : List Scry.Case) : List Nat → List (Scry.Case × Nat)
+  | .nil => .nil
+  | .cons b bs => match cases with
+    | .nil => .nil
+    | .cons k ks => .cons (k, b) (Scry.zipCases ks bs)
+
+/-- The index of the first `default` label. -/
+def Scry.defaultIndexOf : Nat → List Scry.Case → Option Nat
+  | _, .nil => .none
+  | i, .cons k rest => match k.value with
+    | .none => .some i
+    | .some _ => Scry.defaultIndexOf (Nat.succ i) rest
+
+/-- `n` fresh block names, in order. -/
+def Scry.newBlocks : Nat → Scry.LM (List Nat)
+  | .zero => Scry.lret .nil
+  | .succ k => do
+    b ← Scry.newBlock;
+    rest ← Scry.newBlocks k;
+    Scry.lret (.cons b rest)
+
 -- ## The aggregate layout
 
 /-- The fields of the record with this id (`[]` when the id is not a known struct). -/
@@ -1308,7 +1379,7 @@ def Scry.lowerStmt (c : Scry.Cst) (n : Nat) : Scry.LM Unit :=
     | .some b => Scry.sealTo b (Scry.originOf c n)
   | .typeDef => Scry.learnTypedef c n
   | .doS => Scry.warnAt c n "do/while not modelled: statement skipped"
-  | .switchS => Scry.warnAt c n "switch not modelled: statement skipped"
+  | .switchS => Scry.lowerSwitch c n
   | .gotoS => Scry.warnAt c n "goto not modelled: statement skipped"
   | .labelS => Scry.warnAt c n "labeled statement not modelled: statement skipped"
   | .otherS => match Scry.isK c n "comment" with
@@ -1494,6 +1565,79 @@ def Scry.lowerFor (c : Scry.Cst) (n : Nat) : Scry.LM Unit := do
     Scry.sealTo header o;
   Scry.startBlock exitB;
   Scry.modify (fun s => { s with breakTo := saved.breakTo, contTo := saved.contTo })
+
+/-- The dispatch of a `switch`: one comparison and branch per `case`, chained, ending at
+`default` (or the exit when there is none). `switch` does not use `Scry.Cond.cmp`'s
+`&&`/`||`; each case value is lowered once, in the current block. -/
+def Scry.emitDispatch (c : Scry.Cst) (v : Wil.Var) (o : Wil.Span) (defaultB : Nat) :
+    List (Scry.Case × Nat) → Scry.LM Unit
+  | .nil => Scry.sealTo defaultB o
+  | .cons (k, b) rest => match k.value with
+    | .none => Scry.emitDispatch c v o defaultB rest
+    | .some vn => do
+      cv ← Scry.lowerExpr c vn;
+      match Scry.tyEq v.ty cv.ty with
+      | .false => do
+        Scry.warnAt c vn ("switch case " ++ c.textOf vn ++ " of type " ++ Scry.tyShow cv.ty
+          ++ " against " ++ Scry.tyShow v.ty ++ ": case not dispatched");
+        Scry.emitDispatch c v o defaultB rest
+      | .true => do
+        nextB ← Scry.newBlock;
+        Scry.seal (Wil.withTermOrigin (.br (.cmp .eq v cv) (Wil.mkBlockId b)
+          (Wil.mkBlockId nextB) Wil.noSpan) o);
+        Scry.startBlock nextB;
+        Scry.emitDispatch c v o defaultB rest
+
+/-- The bodies of a `switch`'s labels, in source order: each is a block, and falls
+through to the next label's block (or the exit) when it ends without a terminator.
+`break` targets the exit and `continue` keeps the enclosing loop's target. -/
+def Scry.emitCases (c : Scry.Cst) (o : Wil.Span) (exitB : Nat) :
+    List (Scry.Case × Nat) → Scry.LM Unit
+  | .nil => Scry.lret ()
+  | .cons (k, b) rest => do
+    Scry.startBlock b;
+    saved ← Scry.get;
+    Scry.modify (fun s => { s with breakTo := .some exitB });
+    Scry.lowerStmts c k.stmts;
+    s ← Scry.get;
+    match s.live with
+    | .true => do
+      let next : Nat := match rest with
+        | .cons (_, b2) _ => b2
+        | .nil => exitB;
+      Scry.sealTo next o
+    | .false => Scry.lret ();
+    Scry.modify (fun st => { st with breakTo := saved.breakTo });
+    Scry.emitCases c o exitB rest
+
+/-- `switch`: evaluate the condition once, then a chain of `==` comparisons branching to
+the case blocks (fallthrough is the natural block order), with `default` as the fallback
+and an exit block after. Case labels this slice cannot compare (a type mismatch) are
+warned and left unreachable; the body still lowers, so no effects are silently added. -/
+def Scry.lowerSwitch (c : Scry.Cst) (n : Nat) : Scry.LM Unit := do
+  let o := Scry.originOf c n;
+  let condN := match Scry.childF c n "condition" with
+    | .some x => x
+    | .none => n;
+  v ← match Scry.exprKids c condN with
+    | .cons e _ => Scry.lowerExpr c e
+    | .nil => Scry.lowerExpr c condN;
+  let body := match Scry.childF c n "body" with
+    | .some b => b
+    | .none => n;
+  match Scry.casesOf c body with
+  | .nil => Scry.warnAt c n "switch with no case labels: statement skipped"
+  | .cons k ks => do
+    let cases : List Scry.Case := .cons k ks;
+    blocks ← Scry.newBlocks (List.length cases);
+    exitB ← Scry.newBlock;
+    let pairs := Scry.zipCases cases blocks;
+    let defaultB := match Scry.defaultIndexOf 0 cases with
+      | .some i => List.getD blocks i exitB
+      | .none => exitB;
+    Scry.emitDispatch c v o defaultB pairs;
+    Scry.emitCases c o exitB pairs;
+    Scry.startBlock exitB
 
 /-- `return`; a fallthrough is an explicit `ret none` with a warning (C's implicit
 `return 0` only for `main`). -/
@@ -1941,55 +2085,67 @@ def Scry.lowerCall (c : Scry.Cst) (n : Nat) : Scry.LM Wil.Var := do
         | .false => Scry.directCall c n name argNodes
       | .none => Scry.directCall c n name argNodes
 
-/-- The name-based part of `Scry.lowerCall` (also the path for an external function). -/
+/-- An allocation call whose shape the external model table supplies. `malloc` is
+`(size, no count)`, `calloc` is `(size at 1, count at 0)` and `realloc` is `(size at 1)`.
+The size/count expressions are looked up in the *syntactic* argument list, so a model
+whose argument positions do not match the call is a havoc with a warning, not a silent
+misread. -/
+def Scry.allocCallByShape (c : Scry.Cst) (n : Nat) (name : String) (argNodes : List Nat)
+    (shape : Scry.AllocShape) : Scry.LM Wil.Var :=
+  match shape.sizeArg with
+  | .none => Scry.havocAt c n (Wil.Ty.ptr Wil.Ty.unknown) (name ++ " without a size model")
+  | .some si => match Wil.listNth argNodes si with
+    | .none => Scry.havocAt c n (Wil.Ty.ptr Wil.Ty.unknown)
+        (name ++ " without its size argument")
+    | .some sz =>
+      let count := match shape.countArg with
+        | .some ci => match Wil.listNth argNodes ci with
+          | .some cn => match Scry.constInt c cn with
+            | .some v => v
+            | .none => 1
+          | .none => 1
+        | .none => 1;
+      Scry.allocCall c n name sz count
+
+/-- The name-based part of `Scry.lowerCall` (also the path for an external function).
+Allocation and `free` are read from `Scry.Models`, so the lowering and the taint model
+agree on which names allocate and which free; every other call keeps its ordinary
+`Wil.call` and its result is the declared type (or `i32` when undeclared). -/
 def Scry.directCall (c : Scry.Cst) (n : Nat) (name : String) (argNodes : List Nat) :
     Scry.LM Wil.Var :=
-  match String.eq name "malloc" with
-  | .true => match argNodes with
-    | .cons sz _ => Scry.allocCall c n name sz 1
-    | .nil => Scry.havocAt c n (Wil.Ty.ptr Wil.Ty.unknown) "malloc without a size"
-  | .false => match String.eq name "calloc" with
-    | .true => match argNodes with
-      | .cons cnt (.cons sz _) =>
-        let k := match Scry.constInt c cnt with
-          | .some v => v
-          | .none => 1;
-        Scry.allocCall c n name sz k
-      | .cons sz _ => Scry.allocCall c n name sz 1
-      | .nil => Scry.havocAt c n (Wil.Ty.ptr Wil.Ty.unknown) "calloc without a size"
-    | .false => match String.eq name "free" with
-      | .true => do
-        v ← Scry.zeroAt c n Wil.i32;
-        match argNodes with
-        | .cons a _ => do
-          p ← Scry.lowerExpr c a;
-          Scry.emitAt c n (Wil.free p);
-          Scry.lret v
-        | .nil => do
-          Scry.warnAt c n "free without an argument";
-          Scry.lret v
-      | .false => match String.eq name "realloc" with
-        | .true => Scry.havocAt c n (Wil.Ty.ptr Wil.Ty.unknown) "realloc"
-        | .false => do
-          args ← Scry.lowerExprs c argNodes;
-          s ← Scry.get;
-          match List.find (fun y => String.eq y.name name) s.syms with
-          | .none => do
-            Scry.warnAt c n ("call to undeclared function " ++ name ++ " (external)");
-            r ← Scry.fresh Wil.i32;
-            Scry.emitAt c n (Wil.call (.some r) name args);
-            Scry.lret r
-          | .some sym => do
-            match Nat.beq (List.length args) sym.arity with
-            | .false => Scry.warnAt c n ("arity mismatch calling " ++ name ++ " ("
-                ++ Nat.repr (List.length args) ++ " vs " ++ Nat.repr sym.arity ++ ")")
-            | .true => Scry.lret ();
-            let qname := match sym.isStatic with
-              | .true => "static:" ++ name
-              | .false => name;
-            r ← Scry.fresh sym.ret;
-            Scry.emitAt c n (Wil.call (.some r) qname args);
-            Scry.lret r
+  match Scry.Models.allocOf name with
+  | .some shape => Scry.allocCallByShape c n name argNodes shape
+  | .none => match Scry.Models.freeArgOf name with
+    | .some ai => do
+      v ← Scry.zeroAt c n Wil.i32;
+      match Wil.listNth argNodes ai with
+      | .some a => do
+        p ← Scry.lowerExpr c a;
+        Scry.emitAt c n (Wil.free p);
+        Scry.lret v
+      | .none => do
+        Scry.warnAt c n (name ++ " without its pointer argument");
+        Scry.lret v
+    | .none => do
+      args ← Scry.lowerExprs c argNodes;
+      s ← Scry.get;
+      match List.find (fun y => String.eq y.name name) s.syms with
+      | .none => do
+        Scry.warnAt c n ("call to undeclared function " ++ name ++ " (external)");
+        r ← Scry.fresh Wil.i32;
+        Scry.emitAt c n (Wil.call (.some r) name args);
+        Scry.lret r
+      | .some sym => do
+        match Nat.beq (List.length args) sym.arity with
+        | .false => Scry.warnAt c n ("arity mismatch calling " ++ name ++ " ("
+            ++ Nat.repr (List.length args) ++ " vs " ++ Nat.repr sym.arity ++ ")")
+        | .true => Scry.lret ();
+        let qname := match sym.isStatic with
+          | .true => "static:" ++ name
+          | .false => name;
+        r ← Scry.fresh sym.ret;
+        Scry.emitAt c n (Wil.call (.some r) qname args);
+        Scry.lret r
 
 /-- A condition: a comparison is a `Wil.Cond` (no register), `&&`/`||` combine
 conditions, and anything else becomes `v != 0`. `&&`/`||` operands are lowered eagerly:
@@ -2149,6 +2305,8 @@ structure Scry.TU where
   path : String
   /-- The source texts (file 0 is the unit's source; origins index them). -/
   files : List String
+  /-- The source paths, aligned with `files`. -/
+  paths : List String
   /-- Lowered functions, in source order. -/
   funcs : List Wil.Func
   /-- Warnings, newest first, each with the offending statement's origin. -/
@@ -2195,14 +2353,32 @@ def Scry.externalOf (funcs : List Wil.Func) : List (String × String) :=
         | .some _ => .false
         | .none => .true) (Scry.dedup (Scry.calleesOf f)))) funcs)
 
+/-- The translation unit's top-level nodes with recovery `ERROR` nodes unwrapped, in
+source order. Tree-sitter often recovers from one bad construct by wrapping every later
+declaration in a single top-level `ERROR` (the generated `old-wizard.c`/`droste.c` both
+have one `ERROR` holding all 1 000-odd functions). Walking only `translation_unit`'s
+direct children would lower none of them, so a partial tree is still analysed function
+by function instead of becoming an empty unit. Nested `ERROR`s are unwrapped too; a
+node is never included twice. -/
+partial def Scry.recoverTop (c : Scry.Cst) : List Nat → List Nat
+  | .nil => .nil
+  | .cons i rest =>
+    match Scry.isK c i "ERROR" with
+    | .true => List.append (Scry.recoverTop c (c.childrenOf i)) (Scry.recoverTop c rest)
+    | .false => .cons i (Scry.recoverTop c rest)
+
 /-- Lower a translation unit's CST. The typedef/struct and function-symbol passes run
-first, so a call sees a definition that appears later in the file (C's rule). -/
+first, so a call sees a definition that appears later in the file (C's rule). Parsing is
+recoverable: the passes and the function walk use `Scry.recoverTop`, so functions inside
+tree-sitter's `ERROR` nodes keep their partial AST and facts. -/
 def Scry.lowerTU (path : String) (c : Scry.Cst) : Scry.TU :=
-  let top := c.childrenOf 0;
+  let top := Scry.recoverTop c (c.childrenOf 0);
   let s1 := (Scry.runLM (Scry.scanTypes c top) Scry.emptyState).1;
   let s2 := (Scry.runLM (Scry.scanSyms c top) s1).1;
   let r := Scry.lowerFuncs c top s2 .nil;
-  Scry.TU.mk path (.cons (c.fileText 0) .nil) r.2 r.1.warnings (Scry.externalOf r.2)
+  let files := List.map (fun i => c.fileText i) (Scry.schemaRange c.fileCount);
+  let paths := List.map (fun i => c.filePath i) (Scry.schemaRange c.fileCount);
+  Scry.TU.mk path files paths r.2 r.1.warnings (Scry.externalOf r.2)
 
 -- ## The CFG
 
