@@ -170,6 +170,10 @@ same `wrap`/`unwrap` shape as the host. A field whose sort is *above* `Sort (lv+
 lifted too, so the kernel rejects it with the host's message
 (`ULift.{l} can't lift A, which is in Sort k`).
 
+Explicit level arguments with several levels (`Duo.{1, 0}`) are read without their `,`
+separators (the list used to count them, so `Duo.{1, 0}` was refused for having two
+parameters).
+
 Tests (`=selfhost`): `structure Box.{u} (A : Type u)` and `Box.{1} (Type 0)`; `Duo` at
 `Nat`/`String` with reductions through `unbox`/`duoSnd`; generic instances
 `instance {A : Type} [Repr A] : Repr (List A)` and `Inhabited` for `Option`/`List`; a
@@ -182,4 +186,5 @@ generic instance such as `Repr (List A)` is at `Type 0` (the class may be
 `Repr.{u}`); an indexed family whose index expression mentions a lifted field is not
 unwrapped in `absurdBranch`; mutual inductives still reject universe parameters
 (`mutualInductiveCmd`); and the result universe of a data type whose field is itself
-`Type u` is not inferred.
+`Type u` is not inferred. A generic instance's level is printed unnormalised
+(`Repr.{max(0, 0)} (List x0)`): the printer does not simplify it.

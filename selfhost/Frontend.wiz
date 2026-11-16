@@ -3365,7 +3365,7 @@ def inferHead (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : HE :=
     | .true => identHead gs es cx (identOf s)
     | .false => match strEq k "term.identUniv" with
       | .true => match kid s 0 with
-        | .ident n => identUnivHead gs es cx n (kids (kid s 2))
+        | .ident n => identUnivHead gs es cx n (nonAtoms (kids (kid s 2)))
         | _ => HE.err "universe levels need a name"
       | .false => match strEq k "term.explicit" with
       -- `@f`: no implicit arguments are inserted
