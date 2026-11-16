@@ -410,6 +410,19 @@ issue. Different: the link is unverifiable, which is a chain failure, not a rete
 one; the issue says so and nothing is re-uploaded. A missing release is never replaced
 by bytes that do not match the pin.
 
+## Open questions
+
+* **Release builds vs the flake's build (unconfirmed, being verified).** A bisect saw
+  the Nix-built `wiz` check a file in about 62 s while prebuilt release snapshots took
+  240 to 900+ s on the same file. If that holds, the tarball workflow
+  (`release.yml`, `scripts/release-tarball.sh`) builds a much slower binary than
+  `nix build .#wiz` does, and a release and the flake disagree about what "the
+  toolchain at commit X" is. The chain avoids that by construction: its release *is*
+  the Nix build's output (`packages.wizc-release`), packed without rebuilding, so there
+  is one recipe and one set of bytes. Whether tower's snapshots should move to the
+  same rule (publish the Nix output, made self-contained, instead of a second build) is
+  open, pending the measurement.
+
 ## Prerequisites before the root
 
 | # | what | state |
