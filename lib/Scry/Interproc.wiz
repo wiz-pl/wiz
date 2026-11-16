@@ -19,22 +19,33 @@ target set is empty or contains a non-function/unknown location is recorded as
 
 ## The model
 
+Summaries are **1-call-site context-sensitive**: a function is evaluated once per call
+site that invokes it (`Scry.siteCtx caller point`), and a function with no caller in the
+unit is evaluated in the `@root` context with its pointer parameters `unknown`. So the
+same callee called with a source at one site and a constant at another has a tainted
+parameter/return only in the source site's summary. A recursive call at the same site
+shares that site's context (the k=1 limit; a deeper call string is not modelled).
+
 For a direct call `r = f(a0, …, an)` at point `n`:
 
 * **argument -> parameter.** If `ai` is tainted at `n` (a tainted definition reaches the
-  call), then parameter `i` of `f` is marked tainted. A tainted parameter is seeded at
-  `f`'s entry as an extra definition (`Scry.Analysis.fnInfoWith`), so the intraprocedural
-  rules carry it from there.
-* **return value.** A function summarises to `retTainted` when a `ret x` uses a tainted
-  `x`. At every call site to a function whose summary says so, the call's result
-  register is seeded with `retsrc`, so the caller's def-use graph carries the taint on.
-* **recursion.** Both summaries are monotone, so a round-robin fixpoint over `params`
-  (sets of positions) and `retTainted` (a boolean) terminates; the number of rounds is
-  bounded by the number of functions plus parameters.
+  call), then parameter `i` of `f` is marked tainted **in the callee context for this
+  site**. A tainted parameter is seeded at `f`'s entry as an extra definition
+  (`Scry.Analysis.fnInfoWith`), so the intraprocedural rules carry it from there.
+* **return value.** A function context summarises to `retTainted` when a `ret x` uses a
+  tainted `x`. At a call site, the result register is seeded with `retsrc` only from the
+  callee context of **that** site.
+* **memory.** Tainted locations are summaries too. Stack/heap locations allocated inside
+  a context are context-qualified, so two callers do not share the callee's locals;
+  caller objects passed as arguments keep the caller's locations and stay visible to any
+  callee that receives them.
+* **recursion.** Both summaries are monotone, so a round-robin fixpoint over every active
+  `(context, function)` pair terminates.
 
 The fixpoint uses `Scry.RuleTaint.evaluateFunc`, which is one Datalog evaluation per
-function per round. The final results are recomputed once with the stable summaries; the
-findings and paths are read from those.
+context per round. The final results are recomputed once with the stable summaries; the
+findings and paths are read from those. A sink reached in several contexts is reported
+once (same rule/function/sink/argument), with the first deterministic context's path.
 
 ## Paths
 
@@ -49,6 +60,8 @@ the parameter seeds the path walk justifies interprocedurally.
 -- ## The call graph
 
 structure Scry.CallSite where
+  /-- The caller's 1-call-site context. -/
+  ctx : String
   caller : String
   node : Nat
   callee : String
@@ -57,72 +70,87 @@ structure Scry.CallSite where
 
 structure Scry.CallGraph where
   sites : List Scry.CallSite
-  /-- `(caller, point)` of every call through a function value. -/
-  indirect : List (String × Nat)
+  /-- `(context, caller, point)` of every call through a function value. -/
+  indirect : List (String × String × Nat)
 
-def Scry.siteOfCall (fn : Wil.Func) (pt : Scry.PtResult) (n : Nat) (r : Option Wil.Var)
-    (args : List Wil.Var) (name : String) : Scry.CallSite :=
-  Scry.CallSite.mk fn.name n name
+def Scry.siteOfCall (ctx : String) (fn : Wil.Func) (pt : Scry.PtResult) (n : Nat)
+    (r : Option Wil.Var) (args : List Wil.Var) (name : String) : Scry.CallSite :=
+  Scry.CallSite.mk ctx fn.name n name
     (List.map (fun v => v.index) args)
     (match r with
       | .some v => .some v.index
       | .none => .none)
 
-/-- The direct and resolved-indirect call sites of a function. -/
-def Scry.sitesOfFunc (fn : Wil.Func) (pt : Scry.PtResult) : List Scry.CallSite :=
+/-- The direct and resolved-indirect call sites of a function in a context. -/
+def Scry.sitesOfFunc (fn : Wil.Func) (pt : Scry.PtResult) (ctx : String) : List Scry.CallSite :=
   let g := Scry.flatten fn;
   Scry.concatLists (fun n =>
     match Scry.nodeStmt g n with
     | .none => .nil
     | .some s => match s with
       | .call r callee args _ => match callee with
-        | .direct name => List.cons (Scry.siteOfCall fn pt n r args name) .nil
+        | .direct name => List.cons (Scry.siteOfCall ctx fn pt n r args name) .nil
         | .indirect _ =>
-          List.map (fun name => Scry.siteOfCall fn pt n r args name)
-            (Scry.indirectAt pt fn.name n).names
+          List.map (fun name => Scry.siteOfCall ctx fn pt n r args name)
+            (Scry.indirectAt pt ctx fn.name n).names
       | _ => .nil) (Scry.range g.count)
 
-def Scry.indirectOfFunc (fn : Wil.Func) : List (String × Nat) :=
+def Scry.indirectOfFunc (fn : Wil.Func) (ctx : String) : List (String × String × Nat) :=
   let g := Scry.flatten fn;
   Scry.concatLists (fun n =>
     match Scry.nodeStmt g n with
     | .none => .nil
     | .some s => match s with
-      | .call _ (.indirect _) _ _ => List.cons (fn.name, n) .nil
+      | .call _ (.indirect _) _ _ => List.cons (ctx, fn.name, n) .nil
       | _ => .nil) (Scry.range g.count)
 
 /-- The direct-call graph of a program plus every resolved indirect target; the unresolved
-indirect calls are listed in `indirect` (and warned about). -/
+indirect calls are listed in `indirect` (and warned about). Every active context is
+visited, so a call site records the context its caller was analysed in. -/
 def Scry.callGraph (p : Wil.Program) (pt : Scry.PtResult) : Scry.CallGraph :=
-  Scry.CallGraph.mk
-    (Scry.concatLists (fun fn => Scry.sitesOfFunc fn pt) p.funcs)
-    (Scry.concatLists Scry.indirectOfFunc p.funcs)
+  let pairs := pt.ctxs;
+  let sites := Scry.concatLists (fun (k : Scry.CtxKey) =>
+    match Wil.findFunc p k.func with
+    | .none => .nil
+    | .some fn => Scry.sitesOfFunc fn pt k.ctx) pairs;
+  let indirect := Scry.concatLists (fun (k : Scry.CtxKey) =>
+    match Wil.findFunc p k.func with
+    | .none => .nil
+    | .some fn => Scry.indirectOfFunc fn k.ctx) pairs;
+  Scry.CallGraph.mk sites indirect
 
-def Scry.siteAt (g : Scry.CallGraph) (caller : String) (node : Nat) : Option Scry.CallSite :=
-  List.find (fun s => Bool.and (String.eq s.caller caller) (Nat.beq s.node node)) g.sites
+def Scry.siteAt (g : Scry.CallGraph) (ctx : String) (caller : String) (node : Nat) :
+    Option Scry.CallSite :=
+  List.find (fun s => Bool.and (String.eq s.ctx ctx)
+    (Bool.and (String.eq s.caller caller) (Nat.beq s.node node))) g.sites
 
-def Scry.sitesTo (g : Scry.CallGraph) (callee : String) : List Scry.CallSite :=
-  List.filter (fun s => String.eq s.callee callee) g.sites
+/-- The sites whose **callee context** is `ctx` (`Scry.siteCtx caller point`). -/
+def Scry.sitesTo (g : Scry.CallGraph) (ctx : String) (callee : String) : List Scry.CallSite :=
+  List.filter (fun s => Bool.and (String.eq (Scry.siteCtx s.caller s.node) ctx)
+    (String.eq s.callee callee)) g.sites
 
-def Scry.sitesFrom (g : Scry.CallGraph) (caller : String) : List Scry.CallSite :=
-  List.filter (fun s => String.eq s.caller caller) g.sites
+def Scry.sitesFrom (g : Scry.CallGraph) (ctx : String) (caller : String) : List Scry.CallSite :=
+  List.filter (fun s => Bool.and (String.eq s.ctx ctx) (String.eq s.caller caller)) g.sites
 
 -- ## Summaries
 
 structure Scry.Summary where
+  /-- The 1-call-site context this summary is for. -/
+  ctx : String
   name : String
   /-- Tainted parameter positions. -/
   params : List Nat
   retTainted : Bool
   /-- Tainted memory locations and the stores that put the taint there. Memory is
   program-wide: a store in one function must be visible to a load in another, so the
-  summary carries locations, not just parameters. -/
+  summary carries locations, not just parameters. Locations allocated inside a context are
+  context-qualified, so two callers do not share the callee's locals. -/
   mems : List Scry.MemSeed
 
-def Scry.summaryOf (sums : List Scry.Summary) (name : String) : Scry.Summary :=
-  match List.find (fun s => String.eq s.name name) sums with
+def Scry.summaryOf (sums : List Scry.Summary) (ctx : String) (name : String) : Scry.Summary :=
+  match List.find (fun s => Bool.and (String.eq s.ctx ctx) (String.eq s.name name)) sums with
   | .some s => s
-  | .none => Scry.Summary.mk name .nil .false .nil
+  | .none => Scry.Summary.mk ctx name .nil .false .nil
 
 def Scry.seedSetEq (a b : List Scry.MemSeed) : Bool :=
   Bool.and (List.all (fun m => List.any (fun x =>
@@ -130,16 +158,22 @@ def Scry.seedSetEq (a b : List Scry.MemSeed) : Bool :=
     (List.all (fun m => List.any (fun x =>
       String.eq (Scry.memSeedKey x) (Scry.memSeedKey m)) a) b)
 
-def Scry.summariesEq (a b : List Scry.Summary) : Bool :=
-  List.foldr (fun s acc =>
-    if acc then
-      let t := Scry.summaryOf b s.name;
-      if Scry.setEq s.params t.params then
-        if Scry.seedSetEq s.mems t.mems then
-          Nat.beq (if s.retTainted then 1 else 0) (if t.retTainted then 1 else 0)
+def Scry.summaryEq (a b : Scry.Summary) : Bool :=
+  if String.eq a.ctx b.ctx then
+    if String.eq a.name b.name then
+      if Scry.setEq a.params b.params then
+        if Scry.seedSetEq a.mems b.mems then
+          Nat.beq (if a.retTainted then 1 else 0) (if b.retTainted then 1 else 0)
         else .false
       else .false
-    else .false) .true a
+    else .false
+  else .false
+
+def Scry.summariesEq (a b : List Scry.Summary) : Bool :=
+  Bool.and (List.all (fun s =>
+      List.any (fun t => Scry.summaryEq s t) b) a)
+    (List.all (fun t =>
+      List.any (fun s => Scry.summaryEq s t) a) b)
 
 def Scry.totalParams (fs : List Wil.Func) : Nat :=
   List.foldr (fun fn acc => Nat.add acc (List.length fn.params)) 0 fs
@@ -148,59 +182,78 @@ def Scry.indexedNats : Nat → List Nat → List (Nat × Nat)
   | _, .nil => .nil
   | i, .cons v vs => List.cons (i, v) (Scry.indexedNats (Nat.succ i) vs)
 
-/-- For a callee, every argument position some caller passes a tainted value at. -/
+/-- For a callee context, every argument position a caller at that call site passes a
+tainted value at. Only the caller result for that site's own context counts, so a tainted
+argument at one call site does not taint the callee in another site's context. -/
 def Scry.paramContributions (graph : Scry.CallGraph) (results : List Scry.FuncResult)
-    (callee : String) : List Nat :=
+    (calleeCtx : String) (callee : String) : List Nat :=
   Scry.concatLists (fun r =>
     Scry.concatLists (fun site =>
-      if Bool.and (String.eq site.caller r.fn.name) (String.eq site.callee callee) then
+      if Bool.and (String.eq site.ctx r.plan.ctx)
+          (Bool.and (String.eq site.caller r.fn.name)
+            (Bool.and (String.eq (Scry.siteCtx site.caller site.node) calleeCtx)
+              (String.eq site.callee callee))) then
         Scry.concatLists (fun p =>
           if Scry.argTainted r site.node p.2 then List.cons p.1 .nil else .nil)
           (Scry.indexedNats 0 site.args)
       else .nil) graph.sites) results
 
-/-- The call results a function gets from callees that return tainted values. -/
+/-- The call results a function in `ctx` gets from callees that return tainted values, in
+the callee's own call-site context. -/
 def Scry.retSeedsOf (graph : Scry.CallGraph) (sums : List Scry.Summary)
-    (caller : String) : List (Nat × Nat) :=
+    (ctx : String) (caller : String) : List (Nat × Nat) :=
   Scry.concatLists (fun site =>
-    if Bool.and (String.eq site.caller caller)
-        (Scry.summaryOf sums site.callee).retTainted then
-      match site.result with
-      | .some r => List.cons (site.node, r) .nil
-      | .none => .nil
+    if Bool.and (String.eq site.ctx ctx) (String.eq site.caller caller) then
+      if (Scry.summaryOf sums (Scry.siteCtx site.caller site.node) site.callee).retTainted then
+        match site.result with
+        | .some r => List.cons (site.node, r) .nil
+        | .none => .nil
+      else .nil
     else .nil) graph.sites
 
 /-- Every location any summary knows to be tainted (deduplicated by location). -/
 def Scry.allMemSeeds (sums : List Scry.Summary) : List Scry.MemSeed :=
   Scry.dedupSeeds (Scry.concatLists (fun s => s.mems) sums)
 
-/-- The seeds one function's evaluation starts from: every summary's tainted locations
-**except the ones this function produces itself** (those are re-derived by its own rules,
-which keeps the provenance — a fact seeded as EDB would shadow its derivation). -/
-def Scry.seedsFor (sums : List Scry.Summary) (func : String) : List Scry.MemSeed :=
-  List.filter (fun m => Bool.not (String.eq m.func func)) (Scry.allMemSeeds sums)
+/-- The seeds one function context's evaluation starts from: every summary's tainted
+locations **except the ones this context produces itself** (those are re-derived by its
+own rules, which keeps the provenance — a fact seeded as EDB would shadow its derivation).
+A seed from another context of the same function is kept: its locations are different
+unless the shared location really is caller-owned memory. -/
+def Scry.seedsFor (sums : List Scry.Summary) (ctx : String) (func : String) :
+    List Scry.MemSeed :=
+  List.filter (fun m => Bool.not (Bool.and (String.eq m.ctx ctx) (String.eq m.func func)))
+    (Scry.allMemSeeds sums)
 
 def Scry.resultsWith (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
     (pt : Scry.PtResult) (sums : List Scry.Summary) : List Scry.FuncResult :=
-  List.map (fun fn =>
-    Scry.evaluateFunc fn pack pt (Scry.seedsFor sums fn.name)
-      (Scry.summaryOf sums fn.name).params
-      (Scry.retSeedsOf graph sums fn.name)) p.funcs
+  Scry.ptFilterMap (fun (k : Scry.CtxKey) =>
+    match Wil.findFunc p k.func with
+    | .none => .none
+    | .some fn =>
+      .some (Scry.evaluateFunc fn pack pt k.ctx (Scry.seedsFor sums k.ctx fn.name)
+        (Scry.summaryOf sums k.ctx fn.name).params
+        (Scry.retSeedsOf graph sums k.ctx fn.name))) pt.ctxs
 
-/-- One summary round: evaluate every function under `prev`, then grow every summary
-with the argument-taint contributions the results expose and the return flags. -/
+/-- One summary round: evaluate every context under `prev`, then grow every summary with
+the argument-taint contributions its **own** call site exposes and the return flags. A
+contribution at one site only grows the callee summary for that site's context. -/
 def Scry.stepSummaries (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
     (pt : Scry.PtResult) (prev : List Scry.Summary) : List Scry.Summary :=
   let results := Scry.resultsWith p pack graph pt prev;
   let mems := Scry.dedupSeeds (Scry.concatLists (fun r => Scry.resultMemSeeds r) results);
-  List.map (fun fn =>
-    let old := Scry.summaryOf prev fn.name;
-    let contrib := Scry.paramContributions graph results fn.name;
-    let ret := match List.find (fun r => String.eq r.fn.name fn.name) results with
-      | .some r => Scry.returnsTainted r
-      | .none => (.false : Bool);
-    Scry.Summary.mk fn.name (Scry.unionNat old.params contrib)
-      (Bool.or old.retTainted ret) (Scry.dedupSeeds (List.append old.mems mems))) p.funcs
+  Scry.ptFilterMap (fun (k : Scry.CtxKey) =>
+    match Wil.findFunc p k.func with
+    | .none => .none
+    | .some fn =>
+      let old := Scry.summaryOf prev k.ctx fn.name;
+      let contrib := Scry.paramContributions graph results k.ctx fn.name;
+      let ret := match List.find (fun r => Bool.and (String.eq r.plan.ctx k.ctx)
+          (String.eq r.fn.name fn.name)) results with
+        | .some r => Scry.returnsTainted r
+        | .none => (.false : Bool);
+      .some (Scry.Summary.mk k.ctx fn.name (Scry.unionNat old.params contrib)
+        (Bool.or old.retTainted ret) (Scry.dedupSeeds (List.append old.mems mems)))) pt.ctxs
 
 partial def Scry.summaryLoop (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
     (pt : Scry.PtResult) (fuel : Nat) (sums : List Scry.Summary) : List Scry.Summary :=
@@ -223,11 +276,11 @@ structure Scry.ProgramResult where
   /-- Memory diagnostics (unknown target, use after free, unresolved indirect call). -/
   warnings : List Scry.MemWarning
 
-def Scry.findResult (pr : Scry.ProgramResult) (name : String) : Option Scry.FuncResult :=
-  List.find (fun r => String.eq r.fn.name name) pr.results
+def Scry.findResult (pr : Scry.ProgramResult) (ctx : String) (name : String) :
+    Option Scry.FuncResult :=
+  List.find (fun r => Bool.and (String.eq r.plan.ctx ctx) (String.eq r.fn.name name)) pr.results
 
-/-- Deduplicate diagnostics (a function is evaluated once per summary round only in the
-final pass, but be defensive). -/
+/-- Deduplicate diagnostics (a context may report the same warning at the same point). -/
 def Scry.memWarnKey (w : Scry.MemWarning) : String :=
   (Scry.MemWarnKind.show w.kind) ++ "|" ++ w.func ++ "|" ++ Nat.repr w.point ++ "|" ++ w.detail
 
@@ -238,13 +291,14 @@ def Scry.dedupWarnings (ws : List Scry.MemWarning) : List Scry.MemWarning :=
     | .false => List.append acc (.cons w .nil)) .nil ws
 
 /-- Analyse a program: points-to first (the memory model every later stage uses), then the
-summary fixpoint, then one final evaluation per function. -/
+summary fixpoint over every active context, then one final evaluation per context. -/
 def Scry.analyze (p : Wil.Program) (pack : Scry.RulePack) : Scry.ProgramResult :=
   let pt := Scry.pointsTo p;
   let graph := Scry.callGraph p pt;
-  let sums0 := List.map (fun fn => Scry.Summary.mk fn.name .nil .false .nil) p.funcs;
-  let fuel := Nat.add 8 (Nat.add (Nat.add (List.length p.funcs) (Scry.totalParams p.funcs))
-    (Scry.ptLocCount pt));
+  let sums0 := List.map (fun (k : Scry.CtxKey) => Scry.Summary.mk k.ctx k.func .nil .false .nil)
+    pt.ctxs;
+  let fuel := Nat.add 8 (Nat.add (Nat.add (List.length pt.ctxs) (List.length pt.ctxs))
+    (Nat.mul (Scry.totalParams p.funcs) (Nat.succ (List.length pt.ctxs))));
   let sums := Scry.summaryLoop p pack graph pt fuel sums0;
   let results := Scry.resultsWith p pack graph pt sums;
   let warnings := Scry.dedupWarnings (Scry.concatLists (fun r => r.plan.memWarnings) results);
@@ -280,8 +334,8 @@ def Scry.returnChain (r : Scry.FuncResult) : List Scry.PathNode :=
     match Scry.defReaching r p.1 p.2 with
     | .none => .nil
     | .some d =>
-      List.append (Scry.chainToDef r.fn.name r.plan.seeds st d p.2)
-        (List.cons (Scry.PathNode.mk r.fn.name p.1 p.2 Scry.PathKind.returnValue) .nil)
+      List.append (Scry.chainToDef r.fn.name r.plan.ctx r.plan.seeds st d p.2)
+        (List.cons (Scry.PathNode.mk r.fn.name r.plan.ctx p.1 p.2 Scry.PathKind.returnValue) .nil)
 
 /-- A caller path to the argument at `pos` of a call site, if one is tainted. -/
 def Scry.argPath (r : Scry.FuncResult) (site : Scry.CallSite) (pos : Nat) :
@@ -296,29 +350,34 @@ def Scry.argPath (r : Scry.FuncResult) (site : Scry.CallSite) (pos : Nat) :
       match Scry.defReaching r site.node v with
       | .none => .none
       | .some d =>
-        .some (List.append (Scry.chainToDef r.fn.name r.plan.seeds st d v)
-          (List.cons (Scry.PathNode.mk r.fn.name site.node v Scry.PathKind.call) .nil))
+        .some (List.append (Scry.chainToDef r.fn.name r.plan.ctx r.plan.seeds st d v)
+          (List.cons (Scry.PathNode.mk r.fn.name r.plan.ctx site.node v Scry.PathKind.call) .nil))
     else .none
 
-/-- Find a caller that passes taint into parameter `pos` of `callee`. -/
-partial def Scry.findParamSourceIn (callee : String) (pos : Nat) :
+/-- Find a caller at the call site that opened `calleeCtx` passing taint into parameter
+`pos`. The caller must also be the result's own context, so the evidence is the analysis
+that actually produced the parameter seed. -/
+partial def Scry.findParamSourceIn (calleeCtx : String) (callee : String) (pos : Nat) :
     List (Scry.FuncResult × Scry.CallSite) → Option (Scry.FuncResult × Scry.CallSite)
   | .nil => .none
   | .cons pair rest =>
-    if String.eq pair.2.callee callee then
+    if Bool.and (String.eq pair.2.callee callee)
+        (Bool.and (String.eq (Scry.siteCtx pair.2.caller pair.2.node) calleeCtx)
+          (String.eq pair.2.ctx pair.1.plan.ctx)) then
       match Wil.listNth pair.2.args pos with
       | .some v =>
         if Scry.argTainted pair.1 pair.2.node v then .some pair
-        else Scry.findParamSourceIn callee pos rest
-      | .none => Scry.findParamSourceIn callee pos rest
-    else Scry.findParamSourceIn callee pos rest
+        else Scry.findParamSourceIn calleeCtx callee pos rest
+      | .none => Scry.findParamSourceIn calleeCtx callee pos rest
+    else Scry.findParamSourceIn calleeCtx callee pos rest
 
-/-- Find a caller that passes taint into parameter `pos` of `callee`. -/
-def Scry.findParamSource (pr : Scry.ProgramResult) (callee : String) (pos : Nat) :
-    Option (Scry.FuncResult × Scry.CallSite) :=
-  Scry.findParamSourceIn callee pos
+/-- Find a caller that passes taint into parameter `pos` of `callee` in `calleeCtx`. -/
+def Scry.findParamSource (pr : Scry.ProgramResult) (calleeCtx : String) (callee : String)
+    (pos : Nat) : Option (Scry.FuncResult × Scry.CallSite) :=
+  Scry.findParamSourceIn calleeCtx callee pos
     (Scry.concatLists (fun (r : Scry.FuncResult) =>
-      List.map (fun (site : Scry.CallSite) => (r, site)) (Scry.sitesFrom pr.graph r.fn.name))
+      List.map (fun (site : Scry.CallSite) => (r, site))
+        (Scry.sitesFrom pr.graph r.plan.ctx r.fn.name))
       pr.results)
 
 /-- Replace a parameter or return seed in `path` by the interprocedural evidence behind
@@ -335,13 +394,14 @@ partial def Scry.extendPath (pr : Scry.ProgramResult) (stack : List (String × N
       let seen := List.any (fun q => Bool.and (String.eq q.1 fr.fn.name) (Nat.beq q.2 root.point))
         stack;
       let stack' := List.cons (fr.fn.name, root.point) stack;
-      if seen then List.cons (Scry.PathNode.mk fr.fn.name root.point root.var Scry.PathKind.recursion) rest
+      if seen then List.cons (Scry.PathNode.mk fr.fn.name fr.plan.ctx root.point root.var
+          Scry.PathKind.recursion) rest
       else match root.kind with
         | .param =>
           match Scry.paramPosOf fr.plan root.var with
           | .none => path
           | .some pos =>
-            match Scry.findParamSource pr fr.fn.name pos with
+            match Scry.findParamSource pr fr.plan.ctx fr.fn.name pos with
             | .none => path
             | .some pair =>
               match Scry.argPath pair.1 pair.2 pos with
@@ -350,10 +410,10 @@ partial def Scry.extendPath (pr : Scry.ProgramResult) (stack : List (String × N
                 let callerPath := Scry.extendPath pr stack' k pair.1 callerPath;
                 List.append callerPath path
         | .returnSeed =>
-          match Scry.siteAt pr.graph fr.fn.name root.point with
+          match Scry.siteAt pr.graph fr.plan.ctx fr.fn.name root.point with
           | .none => path
           | .some site =>
-            match Scry.findResult pr site.callee with
+            match Scry.findResult pr (Scry.siteCtx site.caller site.node) site.callee with
             | .none => path
             | .some callee =>
               match Scry.returnChain callee with
@@ -362,12 +422,13 @@ partial def Scry.extendPath (pr : Scry.ProgramResult) (stack : List (String × N
                 let chain := Scry.extendPath pr stack' k callee chain;
                 List.append chain path
         | .store =>
-          /-- A memory seed produced by another function: expand it into that function's
-          chain for the value stored at its store point. -/
-          match Scry.findResult pr root.func with
+          /-- A memory seed produced by another function context: expand it into that
+          context's chain for the value stored at its store point. -/
+          match Scry.findResult pr root.ctx root.func with
           | .none => path
           | .some producer =>
-            if String.eq producer.fn.name fr.fn.name then path
+            if Bool.and (String.eq producer.fn.name fr.fn.name)
+                (String.eq producer.plan.ctx fr.plan.ctx) then path
             else match List.find (fun m => Nat.beq m.node root.point) producer.plan.mstores with
               | .none => path
               | .some m =>
@@ -377,7 +438,8 @@ partial def Scry.extendPath (pr : Scry.ProgramResult) (stack : List (String × N
                   let pst := match producer.state with
                     | .none => Scry.State.empty
                     | .some s2 => s2;
-                  let chain := Scry.chainToDef producer.fn.name producer.plan.seeds pst d m.var;
+                  let chain := Scry.chainToDef producer.fn.name producer.plan.ctx
+                    producer.plan.seeds pst d m.var;
                   let chain := Scry.extendPath pr stack' k producer chain;
                   List.append chain path
         | _ => path
@@ -402,16 +464,34 @@ def Scry.insertRuleFinding (f : Scry.RuleFinding) (fs : List Scry.RuleFinding) :
 def Scry.sortRuleFindings (fs : List Scry.RuleFinding) : List Scry.RuleFinding :=
   List.foldr (fun f acc => Scry.insertRuleFinding f acc) .nil fs
 
-/-- All findings of an analysed program, with interprocedural paths. -/
+/-- Two findings describe the same sink when rule, function, sink point and argument
+agree. Contexts are evidence, not identity: two contexts that both reach the sink produce
+one result (the first in deterministic order). -/
+def Scry.sameSinkFinding (a b : Scry.RuleFinding) : Bool :=
+  Bool.and (String.eq a.rule b.rule)
+    (Bool.and (String.eq a.func b.func)
+      (Bool.and (Nat.beq a.sink b.sink) (Nat.beq a.arg b.arg)))
+
+def Scry.dedupRuleFindings (fs : List Scry.RuleFinding) : List Scry.RuleFinding :=
+  List.foldl (fun acc f =>
+    match List.any (fun x => Scry.sameSinkFinding x f) acc with
+    | .true => acc
+    | .false => List.append acc (.cons f .nil)) .nil fs
+
+/-- All findings of an analysed program, with interprocedural paths. A sink reached from
+several contexts is reported once, with the path of the first (deterministic) context. -/
 def Scry.programFindings (pr : Scry.ProgramResult) : List Scry.RuleFinding :=
-  Scry.sortRuleFindings (Scry.concatLists (fun r =>
+  let all := Scry.concatLists (fun r =>
     List.map (fun f =>
       { f with path := Scry.extendPath pr .nil 16 r f.path }) (Scry.resultFindings r))
-    pr.results)
+    pr.results;
+  Scry.sortRuleFindings (Scry.dedupRuleFindings all)
 
-/-- The findings of one function (its intraprocedural part; the path is not stitched). -/
-def Scry.funcFindings (pr : Scry.ProgramResult) (name : String) : List Scry.RuleFinding :=
-  match Scry.findResult pr name with
+/-- The findings of one function context (its intraprocedural part; the path is not
+stitched). -/
+def Scry.funcFindings (pr : Scry.ProgramResult) (ctx : String) (name : String) :
+    List Scry.RuleFinding :=
+  match Scry.findResult pr ctx name with
   | .none => .nil
   | .some r => Scry.resultFindings r
 

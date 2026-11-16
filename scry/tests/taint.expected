@@ -89,6 +89,14 @@ mem-indirect-unknown: one unknown-indirect warning: ok
 mem-indirect-unknown: an unknown location: ok
 macro errors: refused without --allow-errors: ok
 macro errors: recovered with --allow-errors: ok
+ctx-return: one finding (the safe call is clean): ok
+ctx-return: no memory or boundary warnings: ok
+ctx-return: path starts in main: ok
+ctx-store: one finding (the safe load is clean): ok
+ctx-store: the finding is in tainted_sink: ok
+ctx-store: no safe_sink finding: ok
+ctx-store: no memory warnings: ok
+ctx-store: path goes through memory: ok
 sarif: version 2.1.0: ok
 sarif: one run: ok
 sarif: driver name: ok

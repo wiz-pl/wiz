@@ -59,7 +59,7 @@ def Scry.assumptionsOf (f : Scry.RuleFinding) : List String :=
 provenance. -/
 def Scry.certifyFinding (pr : Scry.ProgramResult) (f : Scry.RuleFinding) :
     Option Scry.Certificate :=
-  match Scry.findResult pr f.func with
+  match Scry.findResult pr f.ctx f.func with
   | .none => .none
   | .some fr =>
     match fr.state with

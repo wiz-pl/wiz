@@ -122,6 +122,8 @@ def Scry.PathKind.show : Scry.PathKind → String
 
 structure Scry.PathNode where
   func : String
+  /-- The context the point belongs to (`@root` for an entry function). -/
+  ctx : String
   point : Nat
   var : Nat
   kind : Scry.PathKind
@@ -141,6 +143,10 @@ structure Scry.RuleFinding where
   name : String
   /-- The checked argument index. -/
   arg : Nat
+  /-- The 1-call-site context the finding was derived in (the call site that reached the
+  sink's function, or `@root`). Evidence for the path; two contexts may yield the same
+  sink, which is why findings are deduplicated. -/
+  ctx : String
   path : List Scry.PathNode
 
 -- ## The rules

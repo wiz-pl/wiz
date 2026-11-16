@@ -62,17 +62,20 @@ them in SARIF; they are `unchecked` (there is no derivation, and the value is un
 
 ## Points-to and memory
 
-`Scry.PointsTo` is a **flow-insensitive, field-sensitive** Andersen-style points-to
-analysis over the lowered Wil; the taint rules consume it, so a `store` propagates taint
-into the locations it may alias and a later `load` receives it.
+`Scry.PointsTo` is a **flow-insensitive, field-sensitive, 1-call-site context-sensitive**
+Andersen-style points-to analysis over the lowered Wil; the taint rules consume it, so a
+`store` propagates taint into the locations it may alias and a later `load` receives it.
+A function is analysed once per call site that invokes it (the context), so two callers
+of the same callee do not share its parameter sets or its locals; a function with no
+caller gets the `@root` context and its pointer parameters are `unknown`.
 
 The location lattice is a set of
 
 | location | meaning |
 |---|---|
-| `Loc.stack f p` | a stack slot: an address-taken scalar, or a struct/array local |
-| `Loc.glob n` | a module-level global |
-| `Loc.heap f p` | a heap object (`malloc`/`calloc`) |
+| `Loc.stack ctx f p` | a stack slot in context `ctx`: an address-taken scalar, or a struct/array local |
+| `Loc.glob n` | a module-level global (shared by every context) |
+| `Loc.heap ctx f p` | a heap object (`malloc`/`calloc`) in context `ctx` |
 | `Loc.fn n` | a function address (function pointers) |
 | `Loc.field b k` | cell `k` of `b` (a field, an array element, pointer arithmetic) |
 | `Loc.anyOff b` | *some* cell of `b` (a variable index) |
@@ -82,7 +85,8 @@ Offset 0 is the identity, so `*p` and `p[0]` are the same cell; `anyOff b` overl
 and every `field b k`, which is the array policy ("smash first, refine later"). The
 solution is a set of monotone inclusions (`x = y`, `x = p + k`, `x = *p`, `*p = y`,
 `free(p)`, parameter and return flow across resolved calls), a fixed point over the whole
-program: context-insensitive, field-sensitive, and cheap enough for the corpus.
+program: 1-call-site and field-sensitive. Within a context it stays flow-insensitive,
+and recursion at the same call site shares that site's context (the k=1 limit).
 
 **No alias and unknown are different.** An empty location set means the pointer is null or
 a constant: it aliases nothing, so there is no flow and no warning. A set containing
@@ -100,11 +104,11 @@ by a constant or a variable index, `malloc`/`calloc`/`free`, globals, function p
 (assigned, copied, passed as an argument, stored in memory), pointer returns
 (`p = f()`), aliased parameters, and the `strcpy`-family copy model. Not modelled:
 `realloc`, external calls' memory effects outside that table, heap shape (a linked list
-through two allocation sites is two sets, not a shape), context sensitivity, and
-offsets past one `anyOff` level.
+through two allocation sites is two sets, not a shape), call strings deeper than one
+call site, and offsets past one `anyOff` level.
 
-Fixtures and their expected results are in `tests/fixtures/mem-*.c` and asserted by
-`tests/taint.wiz`: same-slot store/load (1 finding, path through `store`/`load`),
+Fixtures and their expected results are in `tests/fixtures/mem-*.c` and `ctx-*.c` and
+asserted by `tests/taint.wiz`: same-slot store/load (1 finding, path through `store`/`load`),
 different slot (0), struct fields and a global field (2, and the sibling field 0), array
 elements (1, sibling elements/arrays 0), a variable index (`a[i]` keeps the array, so 1
 finding and no false positive on `b[i]`), heap (1), pointer-to-pointer (1), aliased

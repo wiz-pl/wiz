@@ -263,6 +263,34 @@ def main : IO Unit := EIO.toIO (do
   rep6 ← Scry.analyzeFile o6a;
   check "macro errors: recovered with --allow-errors" (Nat.lt 0 rep6.parseErrors);
 
+  -- context: an unsafe call site does not taint a safe sibling's return value
+  oC1 ← opts ["tests/fixtures/ctx-return.c"];
+  repC1 ← Scry.analyzeFile oC1;
+  check "ctx-return: one finding (the safe call is clean)"
+    (Nat.beq (List.length repC1.findings) 1);
+  check "ctx-return: no memory or boundary warnings"
+    (Bool.and (Nat.beq (List.length repC1.memory) 0)
+      (Nat.beq (List.length repC1.boundaries) 0));
+  match firstFinding repC1 with
+  | .some f => check "ctx-return: path starts in main"
+      (String.eq (firstFunc f.path) "main")
+  | .none => check "ctx-return: finding exists" .false;
+
+  -- context: stores through two different caller objects do not meet
+  oC2 ← opts ["tests/fixtures/ctx-store.c"];
+  repC2 ← Scry.analyzeFile oC2;
+  check "ctx-store: one finding (the safe load is clean)"
+    (Nat.beq (List.length repC2.findings) 1);
+  check "ctx-store: the finding is in tainted_sink"
+    (List.all (fun f => String.eq f.func "tainted_sink") repC2.findings);
+  check "ctx-store: no safe_sink finding"
+    (List.all (fun f => Bool.not (String.eq f.func "safe_sink")) repC2.findings);
+  check "ctx-store: no memory warnings"
+    (Nat.beq (List.length repC2.memory) 0);
+  check "ctx-store: path goes through memory"
+    (List.all (fun f => Bool.and (pathHasKind f.path "store")
+      (pathHasKind f.path "load")) repC2.findings);
+
   -- SARIF 2.1.0 shape, derivation status, primary span and related spans
   let sarifText := Scry.renderSarifWith "scry" rep1.origins rep1.pack
     (Scry.zipFindings rep1.findings rep1.checks)

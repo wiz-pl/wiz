@@ -22,7 +22,13 @@ Hand-built Wil programs for the S4 rule pack and interprocedural engine
 * `safePrograms` — the false-positive controls: a result sanitiser, a clean format
   argument, and the in-place sanitiser all yield no finding;
 * `indirectProgram` — a call through a function value: the graph records it as unknown,
-  so neither its argument nor its result carries taint.
+  so neither its argument nor its result carries taint;
+* `contextReturnProgram` — one callee called with a source and with a constant; only the
+  source site's return is tainted (the safe sink is not a false positive);
+* `contextStoreProgram` — two call sites of `store` pass different caller objects; the
+  clean object's load stays clean and only the tainted object's sink is reported;
+* `contextSinkProgram` — two callers reach one sink; it is reported once, from the
+  tainted caller.
 
 Point numbering follows `Scry.Analysis` (statements then a terminator per block); the
 comments name the interesting ones.
@@ -307,3 +313,102 @@ def Scry.indirectMainFn : Wil.Func :=
 
 def Scry.indirectProgram : Wil.Program :=
   Wil.program [Scry.indirectMainFn, Scry.indirectCalleeFn]
+
+-- ## Context-sensitive summaries
+
+/-- `ctxId(x) { return x }`. Points: 0 return (empty block, one terminator). -/
+def Scry.contextIdFn : Wil.Func :=
+  let x := Scry.rtv 0;
+  Wil.func "ctxId" [x] [] [ Wil.block [] (Wil.retV x) ]
+
+/-- `main() { a = getenv(); u = ctxId(a); system(u); z = 0; c = ctxId(z); system(c) }`.
+Two callers of one identity function: the source reaches the first sink, and the **clean
+argument at the second call site must not be tainted by the first call's return summary**.
+Points: 0 source, 1 safe call, 2 sink, 3 const, 4 clean call, 5 clean sink, 6 ret. -/
+def Scry.contextReturnMain : Wil.Func :=
+  let a := Scry.rtv 0;
+  let u := Scry.rtv 1;
+  let z := Scry.rtv 2;
+  let c := Scry.rtv 3;
+  Wil.func "ctxRetMain" [] [a, u, z, c]
+    [ Wil.block
+        [ Wil.call (.some a) "getenv" []
+        , Wil.call (.some u) "ctxId" [a]
+        , Wil.call .none "system" [u]
+        , Wil.num z 0
+        , Wil.call (.some c) "ctxId" [z]
+        , Wil.call .none "system" [c] ]
+        (Wil.ret .none) ]
+
+def Scry.contextReturnProgram : Wil.Program :=
+  Wil.program [Scry.contextReturnMain, Scry.contextIdFn]
+
+/-- `ctxStore(p, v) { *p = v }`. Points: 0 store, 1 return. -/
+def Scry.contextStoreFn : Wil.Func :=
+  let p := Wil.var 0 (.ptr Wil.i32);
+  let v := Scry.rtv 1;
+  Wil.func "ctxStore" [p, v] [] [ Wil.block [Wil.store p v] (Wil.ret .none) ]
+
+/-- `ctxLoadSafe(p) { x = *p; system(x) }` (the clean sibling). Points: 0 load, 1 sink,
+2 return. -/
+def Scry.contextLoadSafeFn : Wil.Func :=
+  let p := Wil.var 0 (.ptr Wil.i32);
+  let x := Scry.rtv 1;
+  Wil.func "ctxLoadSafe" [p] []
+    [ Wil.block [Wil.load x p, Wil.call .none "system" [x]] (Wil.ret .none) ]
+
+/-- `ctxLoadTainted(p) { x = *p; system(x) }` (the unsafe sibling). The two loads are
+different sink identities, so a context-insensitive merge of the two caller objects shows
+up as a false positive in `ctxLoadSafe`. Points: 0 load, 1 sink, 2 return. -/
+def Scry.contextLoadTaintedFn : Wil.Func :=
+  let p := Wil.var 0 (.ptr Wil.i32);
+  let x := Scry.rtv 1;
+  Wil.func "ctxLoadTainted" [p] []
+    [ Wil.block [Wil.load x p, Wil.call .none "system" [x]] (Wil.ret .none) ]
+
+/-- `main() { slot a; slot b; t = getenv(); ctxStore(a, t); z = 0; ctxStore(b, z);
+ctxLoadSafe(b); ctxLoadTainted(a) }`. The two stores go to **different caller objects**;
+the load of `b` must stay clean and the load of `a` must be flagged. Points: 0 slot a,
+1 slot b, 2 source, 3 store a, 4 const, 5 store b, 6 clean load, 7 tainted load, 8 ret. -/
+def Scry.contextStoreMain : Wil.Func :=
+  let a := Wil.var 0 (.ptr Wil.i32);
+  let b := Wil.var 1 (.ptr Wil.i32);
+  let t := Scry.rtv 2;
+  let z := Scry.rtv 3;
+  Wil.func "ctxStoreMain" [] [a, b, t, z]
+    [ Wil.block
+        [ Wil.slot a 1
+        , Wil.slot b 1
+        , Wil.call (.some t) "getenv" []
+        , Wil.call .none "ctxStore" [a, t]
+        , Wil.num z 0
+        , Wil.call .none "ctxStore" [b, z]
+        , Wil.call .none "ctxLoadSafe" [b]
+        , Wil.call .none "ctxLoadTainted" [a] ]
+        (Wil.ret .none) ]
+
+def Scry.contextStoreProgram : Wil.Program :=
+  Wil.program [Scry.contextStoreMain, Scry.contextStoreFn,
+    Scry.contextLoadSafeFn, Scry.contextLoadTaintedFn]
+
+/-- `ctxSink(x) { system(x) }`. -/
+def Scry.contextSinkFn : Wil.Func :=
+  let x := Scry.rtv 0;
+  Wil.func "ctxSink" [x] [] [ Wil.block [Wil.call .none "system" [x]] (Wil.ret .none) ]
+
+/-- Two callers reach one sink: `main() { a = getenv(); ctxSink(a); z = 0; ctxSink(z) }`.
+Only the unsafe call may be reported (and just once). Points: 0 source, 1 unsafe call,
+2 const, 3 clean call, 4 ret. -/
+def Scry.contextSinkMain : Wil.Func :=
+  let a := Scry.rtv 0;
+  let z := Scry.rtv 1;
+  Wil.func "ctxSinkMain" [] [a, z]
+    [ Wil.block
+        [ Wil.call (.some a) "getenv" []
+        , Wil.call .none "ctxSink" [a]
+        , Wil.num z 0
+        , Wil.call .none "ctxSink" [z] ]
+        (Wil.ret .none) ]
+
+def Scry.contextSinkProgram : Wil.Program :=
+  Wil.program [Scry.contextSinkMain, Scry.contextSinkFn]

@@ -292,7 +292,7 @@ def group : Group where
       run := fun _ => do
         evalRuleNats (rulePrelude ++
           "def prR : Scry.ProgramResult := Scry.analyze Scry.recursionProgram Scry.demoRules\n" ++
-          "#eval Nat.add (Nat.mul (List.length (Scry.summaryOf prR.summaries \"rec\").params) 10) (if Scry.memNat 1 (Scry.summaryOf prR.summaries \"rec\").params then 1 else 0)\n" ++
+          "#eval Nat.add (Nat.mul (List.length (Scry.summaryOf prR.summaries (Scry.siteCtx \"main\" 3) \"rec\").params) 10) (if Scry.memNat 1 (Scry.summaryOf prR.summaries (Scry.siteCtx \"main\" 3) \"rec\").params then 1 else 0)\n" ++
           "#eval match Scry.programFindings prR with | .cons f .nil => pathCode3 f.path | _ => 0\n" ++
           "#eval match Scry.programFindings prR with | .cons f _ => kindsCode f.path | .nil => 0") [11, 4000001, 7231]
         evalRuleTexts (rulePrelude ++
@@ -300,6 +300,38 @@ def group : Group where
           "#eval match Scry.programFindings prR with | .cons f _ => firstFn f.path | .nil => \"\"\n" ++
           "#eval match Scry.programFindings prR with | .cons f _ => lastFn f.path | .nil => \"\"")
           ["\"main\"", "\"rec\""] },
+    { name := "context: an unsafe call site does not taint a safe sibling's return",
+      run := fun _ => evalRuleNats (rulePrelude ++
+          "def atSink (fs : List Scry.RuleFinding) (n : Nat) : Nat :=\n" ++
+          "  List.length (List.filter (fun f => Nat.beq f.sink n) fs)\n" ++
+          "def prC : Scry.ProgramResult := Scry.analyze Scry.contextReturnProgram Scry.demoRules\n" ++
+          "def cf : List Scry.RuleFinding := Scry.programFindings prC\n" ++
+          "#eval atSink cf 2\n" ++
+          "#eval atSink cf 5\n" ++
+          "#eval List.length prC.pointsTo.ctxs\n" ++
+          "#eval match cf with | .cons f _ => Nat.add (if String.eq (firstFn f.path) \"ctxRetMain\" then 10 else 0) (if String.eq (lastFn f.path) \"ctxRetMain\" then 1 else 0) | .nil => 0") [1, 0, 3, 11] },
+    { name := "context: stores through different caller objects do not meet",
+      run := fun _ => evalRuleNats (rulePrelude ++
+          "def atSink (fs : List Scry.RuleFinding) (n : Nat) : Nat :=\n" ++
+          "  List.length (List.filter (fun f => Nat.beq f.sink n) fs)\n" ++
+          "def prS : Scry.ProgramResult := Scry.analyze Scry.contextStoreProgram Scry.demoRules\n" ++
+          "def sf : List Scry.RuleFinding := Scry.programFindings prS\n" ++
+          "#eval List.length sf\n" ++
+          "#eval List.length prS.warnings\n" ++
+          "#eval match sf with | .cons f _ => kindsCode f.path | .nil => 0\n" ++
+          "#eval match sf with | .cons f _ => Nat.add (if String.eq f.func \"ctxLoadTainted\" then 10 else 0) (if String.eq (firstFn f.path) \"ctxStoreMain\" then 1 else 0) | .nil => 0") [1, 0, 820231, 11] },
+    { name := "context: two callers to one sink report it once, from the tainted caller",
+      run := fun _ => do
+        evalRuleNats (rulePrelude ++
+          "def prK : Scry.ProgramResult := Scry.analyze Scry.contextSinkProgram Scry.demoRules\n" ++
+          "def kf : List Scry.RuleFinding := Scry.programFindings prK\n" ++
+          "#eval List.length kf\n" ++
+          "#eval List.length prK.pointsTo.ctxs\n" ++
+          "#eval match kf with | .cons f _ => f.sink | .nil => 999") [1, 3, 0]
+        evalRuleTexts (rulePrelude ++
+          "def prK : Scry.ProgramResult := Scry.analyze Scry.contextSinkProgram Scry.demoRules\n" ++
+          "#eval match Scry.programFindings prK with | .cons f _ => firstFn f.path | .nil => \"\"")
+          ["\"ctxSinkMain\""] },
     { name := "per-argument sources, in-place sanitisers, and per-argument sinks",
       run := fun _ => evalRuleNats
         ("#eval List.length (Scry.programFindings (Scry.analyze Scry.argSourceProgram Scry.demoRules))\n" ++
@@ -382,7 +414,7 @@ def group : Group where
         "  (Scry.ptVarCount ptF))") ["\"heap/field\"", "\"23\""] },
     { name := "points-to: overlap is exact for constant offsets and wildcard for anyOff",
       run := fun _ => evalRuleNats
-        ("def h := Scry.Loc.heap \"f\" 1\n" ++
+        ("def h := Scry.Loc.heap Scry.ctxRoot \"f\" 1\n" ++
          "#eval Nat.add (if Scry.locEq (Scry.addOff h 0) h then 100 else 0)\n" ++
          "  (Nat.add (if Scry.locOverlap (Scry.Loc.field h 0) (Scry.Loc.field h 1) then 10 else 0)\n" ++
          "    (Nat.add (if Scry.locOverlap (Scry.Loc.field h 0) (Scry.Loc.anyOff h) then 1 else 0) 0))") [101] },
@@ -397,7 +429,7 @@ def group : Group where
           "#eval match Scry.certifyAll prG with | .cons c .nil => Nat.add (if c.verified then 100 else 0) (Nat.add (Nat.mul (List.length c.axioms) 10) (List.length c.assumptions)) | _ => 0") [131, 131, 110]
         evalRuleTexts (rulePrelude ++
           "def prI : Scry.ProgramResult := Scry.analyze Scry.interprocProgram Scry.demoRules\n" ++
-          "#eval match Scry.certifyAll prI with | .cons c _ => (match Scry.findResult prI c.finding.func with | .some r => Scry.Derivation.check Scry.ruleTaintProgram r.edb.db { c.derivation with root := 999 } | .none => (.false : Bool)) | .nil => (.false : Bool)") [".false"] },
+          "#eval match Scry.certifyAll prI with | .cons c _ => (match Scry.findResult prI c.finding.ctx c.finding.func with | .some r => Scry.Derivation.check Scry.ruleTaintProgram r.edb.db { c.derivation with root := 999 } | .none => (.false : Bool)) | .nil => (.false : Bool)") [".false"] },
     { name := "SARIF: version, driver, rules, result, locations, related locations and round-trip",
       run := fun _ => do
         evalRuleNats (rulePrelude ++

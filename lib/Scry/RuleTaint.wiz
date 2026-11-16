@@ -71,7 +71,11 @@ call that writes an argument is handled by the same rules. The self-edge for a p
 used by the entry statement is added in `Scry.prepareFunc`.
 
 Every point here is a program point of the analysed function; the function name is not
-in the fact. `Scry.Interproc` keys results by function name.
+in the fact. `Scry.Interproc` keys results by `(context, function)` and passes the
+context to `Scry.prepareFunc`/`Scry.evaluateFunc`: the `param`/`retsrc` seeds are the
+ones for that call-site context, and the memory locations of that context's locals are
+context-qualified. Within one evaluation the Datalog rules are unchanged and remain
+flow-insensitive.
 -/
 
 -- ## Relation numbers
@@ -152,12 +156,14 @@ producing store, so a finding's path can name it (and `Scry.Interproc.extendPath
 expand it into the producer's own chain). -/
 structure Scry.MemSeed where
   loc : Nat
+  /-- The context the producing store ran in (a call site, or `@root`). -/
+  ctx : String
   func : String
   point : Nat
   var : Nat
 
 def Scry.memSeedKey (m : Scry.MemSeed) : String :=
-  Nat.repr m.loc ++ "|" ++ m.func ++ "|" ++ Nat.repr m.point ++ "|" ++ Nat.repr m.var
+  Nat.repr m.loc ++ "|" ++ m.ctx ++ "|" ++ m.func ++ "|" ++ Nat.repr m.point ++ "|" ++ Nat.repr m.var
 
 /-- Deduplicate seeds, keeping the first for each location (one producer per location is
 enough for a may analysis; the first is deterministic). -/
@@ -186,6 +192,8 @@ structure Scry.FuncPlan where
   memWarnings : List Scry.MemWarning
   /-- The tainted-location seeds this evaluation started from (for path provenance). -/
   seeds : List Scry.MemSeed
+  /-- The 1-call-site context this plan was built for. -/
+  ctx : String
 
 def Scry.paramMap : Nat → List Wil.Var → List (Nat × Nat)
   | _, .nil => .nil
@@ -312,9 +320,9 @@ def Scry.memWarning (k : Scry.MemWarnKind) (func : String) (point : Nat) (detail
     Scry.MemWarning := Scry.MemWarning.mk k func point detail
 
 /-- The location closure of a pointer register and its unknown-memory diagnostic. -/
-def Scry.ptrAccess (pt : Scry.PtResult) (func : String) (point : Nat) (var : Nat)
-    (what : String) : List Nat × List Scry.MemWarning :=
-  let locs := Scry.ptClosure pt func var;
+def Scry.ptrAccess (pt : Scry.PtResult) (ctx : String) (func : String) (point : Nat)
+    (var : Nat) (what : String) : List Nat × List Scry.MemWarning :=
+  let locs := Scry.ptClosure pt ctx func var;
   let unknown := Scry.memInter locs (Scry.unknownId pt);
   let w1 : List Scry.MemWarning := match unknown with
     | .nil => .nil
@@ -341,10 +349,10 @@ def Scry.cfgReaches (g : Scry.Fn) (a b : Nat) : Bool :=
   Scry.cfgReachGo g (Nat.succ g.count) (.cons a .nil) b
 
 /-- The `free` points of a function and the locations each may free. -/
-def Scry.fnFrees (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn) : List (Nat × List Nat) :=
+def Scry.fnFrees (pt : Scry.PtResult) (ctx : String) (fn : Wil.Func) (g : Scry.Fn) : List (Nat × List Nat) :=
   List.foldr (fun n acc =>
     match Scry.nodeStmt g n with
-    | .some (.free p _) => .cons (n, Scry.ptClosure pt fn.name p.index) acc
+    | .some (.free p _) => .cons (n, Scry.ptClosure pt ctx fn.name p.index) acc
     | _ => acc) .nil (Scry.range g.count)
 
 /-- The free points that reach `n` and may free one of `locs` (an empty list: no
@@ -384,14 +392,14 @@ def Scry.freedWarning (g : Scry.Fn) (frees : List (Nat × List Nat)) (func : Str
   | .cons h _ => .cons (Scry.memWarning Scry.MemWarnKind.useAfterFree func n
       (what ++ " to a location freed by free at point " ++ Nat.repr h)) .nil
 
-def Scry.memScan (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn) : Scry.MemScan :=
-  let frees := Scry.fnFrees pt fn g;
+def Scry.memScan (pt : Scry.PtResult) (ctx : String) (fn : Wil.Func) (g : Scry.Fn) : Scry.MemScan :=
+  let frees := Scry.fnFrees pt ctx fn g;
   List.foldr (fun n acc =>
     match Scry.nodeStmt g n with
     | .none => acc
     | .some s => match s with
       | .store p v _ =>
-        let r := Scry.ptrAccess pt fn.name n p.index "store";
+        let r := Scry.ptrAccess pt ctx fn.name n p.index "store";
         let op : List Scry.MemOp := match r.1 with
           | .nil => .nil
           | locs => .cons (Scry.MemOp.mk n v.index locs) .nil;
@@ -399,7 +407,7 @@ def Scry.memScan (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn) : Scry.MemSc
           (List.append (List.append r.2
             (Scry.freedWarning g frees fn.name n r.1 "store")) acc.warnings)
       | .assign x (.load p) _ =>
-        let r := Scry.ptrAccess pt fn.name n p.index "load";
+        let r := Scry.ptrAccess pt ctx fn.name n p.index "load";
         let op : List Scry.MemOp := match r.1 with
           | .nil => .nil
           | locs => .cons (Scry.MemOp.mk n x.index locs) .nil;
@@ -410,7 +418,7 @@ def Scry.memScan (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn) : Scry.MemSc
         | .none => acc
         | .some pos => match Wil.listNth args pos.1, Wil.listNth args pos.2 with
           | .some dst, .some src =>
-            let r := Scry.ptrAccess pt fn.name n dst.index ("external " ++ name)
+            let r := Scry.ptrAccess pt ctx fn.name n dst.index ("external " ++ name)
             let op : List Scry.MemOp := match r.1 with
               | .nil => .nil
               | locs => .cons (Scry.MemOp.mk n src.index locs) .nil;
@@ -419,7 +427,7 @@ def Scry.memScan (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn) : Scry.MemSc
                 (Scry.freedWarning g frees fn.name n r.1 ("external " ++ name))) acc.warnings)
           | _, _ => acc
       | .call _ (.indirect fv) _ _ =>
-        let t := Scry.indirectAt pt fn.name n;
+        let t := Scry.indirectAt pt ctx fn.name n;
         let w : List Scry.MemWarning := match t.unknown with
           | .false => .nil
           | .true => .cons (Scry.memWarning Scry.MemWarnKind.unknownIndirect fn.name n
@@ -431,7 +439,8 @@ def Scry.memScan (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn) : Scry.MemSc
 /-- Build a function's plan for a rule pack. Extra definitions are the tainted-parameter
 definitions at entry and the arguments a source/sanitiser writes, so the def-use layer
 already connects them. The points-to result supplies the memory rows of the plan. -/
-def Scry.prepareFunc (fn : Wil.Func) (pack : Scry.RulePack) (pt : Scry.PtResult) : Scry.FuncPlan :=
+def Scry.prepareFunc (fn : Wil.Func) (pack : Scry.RulePack) (pt : Scry.PtResult)
+    (ctx : String) : Scry.FuncPlan :=
   let g := Scry.flatten fn;
   let taintRules := Scry.RulePack.taintRules pack;
   let forbidden := Scry.RulePack.forbiddenRules pack;
@@ -467,10 +476,10 @@ def Scry.prepareFunc (fn : Wil.Func) (pack : Scry.RulePack) (pt : Scry.PtResult)
   let sans := Scry.rulePackConcat (fun p => p.sans) scan;
   let sinks := Scry.rulePackConcat (fun p => p.sinks) scan;
   let bads := Scry.rulePackConcat (fun p => p.bads) scan;
-  let mem := Scry.memScan pt fn g;
+  let mem := Scry.memScan pt ctx fn g;
   Scry.FuncPlan.mk info (Scry.entryNode g) (Scry.paramMap 0 fn.params)
     (Scry.retPoints g) sources sans sinks bads
-    mem.stores mem.loads mem.warnings .nil
+    mem.stores mem.loads mem.warnings .nil ctx
 
 -- ## The Datalog program
 
@@ -645,16 +654,22 @@ walked (the common case) and `some f` when the walk crossed into another functio
 evaluation through a memory seed. The kinds are assigned while walking. -/
 structure Scry.ChainNode where
   func : Option String
+  ctx : Option String
   point : Nat
   var : Nat
   kind : Scry.PathKind
 
 def Scry.mkK (p : Nat × Nat) (k : Scry.PathKind) : Scry.ChainNode :=
-  Scry.ChainNode.mk .none p.1 p.2 k
+  Scry.ChainNode.mk .none .none p.1 p.2 k
 
 def Scry.chainFunc (d : String) (n : Scry.ChainNode) : String :=
   match n.func with
   | .some f => f
+  | .none => d
+
+def Scry.chainCtx (d : String) (n : Scry.ChainNode) : String :=
+  match n.ctx with
+  | .some c => c
   | .none => d
 
 /-- Walk a derivation back to its seed, collecting nodes oldest first. A plain
@@ -673,7 +688,7 @@ partial def Scry.rtChainKinds {L : Type} (st : Scry.State L) (seeds : List Scry.
       | .none =>
         let loc := Scry.rtRowNat step.fact.args 0;
         match List.find (fun m => Nat.beq m.loc loc) seeds with
-        | .some m => List.cons (Scry.ChainNode.mk (.some m.func) m.point m.var
+        | .some m => List.cons (Scry.ChainNode.mk (.some m.func) (.some m.ctx) m.point m.var
             Scry.PathKind.store) .nil
         | .none => .nil
       | .some pid =>
@@ -712,14 +727,14 @@ def Scry.rtSeedKind (st : Scry.State Nat) (n v : Nat) : Scry.PathKind :=
         | .some _ => .returnSeed
         | .none => .assumed
 
-def Scry.chainNodeToPath (d : String) (n : Scry.ChainNode) : Scry.PathNode :=
-  Scry.PathNode.mk (Scry.chainFunc d n) n.point n.var n.kind
+def Scry.chainNodeToPath (d : String) (dctx : String) (n : Scry.ChainNode) : Scry.PathNode :=
+  Scry.PathNode.mk (Scry.chainFunc d n) (Scry.chainCtx dctx n) n.point n.var n.kind
 
 /-- The path from the taint seed to the definition `(n, v)` in this function, using the
 engine's provenance (through memory when the definition is a load, and across functions
 through a memory seed). The last node is `(n, v)`; an untainted query gives `[]`. -/
-def Scry.chainToDef (func : String) (seeds : List Scry.MemSeed) (st : Scry.State Nat)
-    (n v : Nat) : List Scry.PathNode :=
+def Scry.chainToDef (func : String) (ctx : String) (seeds : List Scry.MemSeed)
+    (st : Scry.State Nat) (n v : Nat) : List Scry.PathNode :=
   match Scry.State.whyTuple st Scry.rtOps Scry.rtTainted [U64.ofNat n, U64.ofNat v] with
   | .none => .nil
   | .some step =>
@@ -727,9 +742,9 @@ def Scry.chainToDef (func : String) (seeds : List Scry.MemSeed) (st : Scry.State
     | .nil => .nil
     | .cons x rest =>
       let first := match x.func with
-        | .some _ => Scry.chainNodeToPath func x
-        | .none => Scry.PathNode.mk func x.point x.var (Scry.rtSeedKind st x.point x.var);
-      List.cons first (List.map (Scry.chainNodeToPath func) rest)
+        | .some _ => Scry.chainNodeToPath func ctx x
+        | .none => Scry.PathNode.mk func ctx x.point x.var (Scry.rtSeedKind st x.point x.var);
+      List.cons first (List.map (Scry.chainNodeToPath func ctx) rest)
 
 /-- The tainted definition reaching a sink argument, from the alert's provenance. -/
 def Scry.alertDef (st : Scry.State Nat) (sink arg : Nat) : Option (Nat × Nat) :=
@@ -751,9 +766,9 @@ structure Scry.FuncResult where
   state : Option (Scry.State Nat)
 
 def Scry.evaluateFunc (fn : Wil.Func) (pack : Scry.RulePack) (pt : Scry.PtResult)
-    (memSeeds : List Scry.MemSeed) (paramTaint : List Nat) (retSeeds : List (Nat × Nat)) :
-    Scry.FuncResult :=
-  let plan0 := Scry.prepareFunc fn pack pt;
+    (ctx : String) (memSeeds : List Scry.MemSeed) (paramTaint : List Nat)
+    (retSeeds : List (Nat × Nat)) : Scry.FuncResult :=
+  let plan0 := Scry.prepareFunc fn pack pt ctx;
   let plan := { plan0 with seeds := Scry.dedupSeeds memSeeds };
   let edb := Scry.planInput plan paramTaint retSeeds;
   Scry.FuncResult.mk fn plan edb (Scry.eval (Scry.ruleTaintProgramFor plan) edb)
@@ -768,7 +783,7 @@ def Scry.resultMemSeeds (r : Scry.FuncResult) : List Scry.MemSeed :=
   let locs := List.map (fun row => Scry.rtRowNat row 0) (Scry.rtRows st Scry.rtMTainted);
   Scry.ptFilterMap (fun l =>
     match List.find (fun m => List.any (Nat.beq l) m.locs) r.plan.mstores with
-    | .some m => .some (Scry.MemSeed.mk l r.fn.name m.node m.var)
+    | .some m => .some (Scry.MemSeed.mk l r.plan.ctx r.fn.name m.node m.var)
     | .none => .none) locs
 
 def Scry.resultTaint (r : Scry.FuncResult) : List (Nat × Nat) :=
@@ -810,21 +825,22 @@ def Scry.resultTaintFindings (r : Scry.FuncResult) : List Scry.RuleFinding :=
     let facts := List.filter (fun f => Bool.and (Nat.beq f.node sink) (Nat.beq f.arg arg))
       r.plan.sinks;
     let path := match Scry.alertDef st sink arg with
-      | .some d => List.append (Scry.chainToDef r.fn.name r.plan.seeds st d.1 d.2)
-          (List.cons (Scry.PathNode.mk r.fn.name sink d.2 Scry.PathKind.sink) .nil)
-      | .none => List.cons (Scry.PathNode.mk r.fn.name sink 0 Scry.PathKind.sink) .nil;
+      | .some d => List.append (Scry.chainToDef r.fn.name r.plan.ctx r.plan.seeds st d.1 d.2)
+          (List.cons (Scry.PathNode.mk r.fn.name r.plan.ctx sink d.2 Scry.PathKind.sink) .nil)
+      | .none => List.cons (Scry.PathNode.mk r.fn.name r.plan.ctx sink 0 Scry.PathKind.sink) .nil;
     List.map (fun f => Scry.RuleFinding.mk f.rule f.severity f.message Scry.FindingKind.taint
-      r.fn.name sink f.name f.arg path) facts) alerts
+      r.fn.name sink f.name f.arg r.plan.ctx path) facts) alerts
 
 def Scry.resultForbiddenFindings (r : Scry.FuncResult) : List Scry.RuleFinding :=
   let bad := Scry.resultBadAlerts r;
   List.map (fun node =>
     match List.find (fun b => Nat.beq b.node node) r.plan.badCalls with
     | .some b => Scry.RuleFinding.mk b.rule b.severity b.message Scry.FindingKind.forbidden
-        r.fn.name node b.name 0
-        (List.cons (Scry.PathNode.mk r.fn.name node 0 Scry.PathKind.sink) .nil)
+        r.fn.name node b.name 0 r.plan.ctx
+        (List.cons (Scry.PathNode.mk r.fn.name r.plan.ctx node 0 Scry.PathKind.sink) .nil)
     | .none => Scry.RuleFinding.mk "" .note "" Scry.FindingKind.forbidden r.fn.name node "" 0
-        (List.cons (Scry.PathNode.mk r.fn.name node 0 Scry.PathKind.sink) .nil)) bad
+        r.plan.ctx
+        (List.cons (Scry.PathNode.mk r.fn.name r.plan.ctx node 0 Scry.PathKind.sink) .nil)) bad
 
 def Scry.resultFindings (r : Scry.FuncResult) : List Scry.RuleFinding :=
   List.append (Scry.resultTaintFindings r) (Scry.resultForbiddenFindings r)

@@ -1031,17 +1031,22 @@ The S4 rule pack and interprocedural slice are separate modules:
 * `import Scry.RuleTaint` — variable-indexed taint as Datalog over a rule pack; an
   argument source/sanitiser becomes an extra definition point, and a `gen` fact is the
   ordinary definition a statement's tainted input transfers to.
-* `import Scry.PointsTo` — a flow-insensitive, field-sensitive points-to analysis over
-  the lowered Wil: the location lattice `Loc.stack/glob/heap/fn/field/anyOff/unknown`,
-  per-register location sets (`Scry.ptIds`), per-location pointer contents (`mem`, for
-  `**pp` and stored function pointers), `free` tracking, and indirect-call target
-  resolution. `Loc.unknown` is an explicit may-location (a warning at the access) and an
-  empty set is a *known* no-alias. `Scry.locOverlap`/`Scry.expandIds` decide whether two
-  accesses may meet (constant offsets exactly, a variable index as `anyOff`).
+* `import Scry.PointsTo` — a flow-insensitive, field-sensitive, **1-call-site
+  context-sensitive** points-to analysis over the lowered Wil: the location lattice
+  `Loc.stack/glob/heap/fn/field/anyOff/unknown` (stack/heap locations carry their
+  allocation context), per-`(context, register)` location sets (`Scry.ptIds`),
+  per-location pointer contents (`mem`, for `**pp` and stored function pointers), `free`
+  tracking, and indirect-call target resolution. `Loc.unknown` is an explicit
+  may-location (a warning at the access) and an empty set is a *known* no-alias.
+  `Scry.locOverlap`/`Scry.expandIds` decide whether two accesses may meet (constant
+  offsets exactly, a variable index as `anyOff`).
 * `import Scry.Interproc` — a direct- and resolved-indirect-call graph, argument ->
-  parameter taint, return-value summaries and a summary fixpoint for recursion; an
-  unresolved indirect call is recorded and warned about (`unknown-indirect`). Findings
-  carry their rule metadata and a stitched source -> sink path.
+  parameter taint, return-value summaries and a summary fixpoint for recursion, all keyed
+  by `(context, function)`; a function with no caller gets the `@root` context (its
+  pointer parameters are `unknown`), and a recursive call at the same site shares that
+  site's context (the k=1 limit). An unresolved indirect call is recorded and warned
+  about (`unknown-indirect`). Findings carry their rule metadata and a stitched
+  source -> sink path; a sink reached from several contexts is reported once.
 * `import Scry.RuleTaint` also carries the memory rules: `mstore`/`mload`/`mtainted`
   make a `store` taint the locations it may alias and a later `load` receive it, with
   `store`/`load` path nodes. Diagnostics that are not findings (unknown memory, use after
@@ -1065,6 +1070,6 @@ pointers, `&`/`*`, allocation and `free`, globals, function pointers and pointer
 are lowered to slots/heaps/`gep`/`load`/`store`, and points-to + the memory taint rules
 carry a flow through them. What remains outside the model is listed in
 `wiz-notes/scry-taint.md` (heap shape, `realloc`, external memory effects beyond the copy
-model, context sensitivity, non-ASCII columns); the lowering still warns (havoc) for the
-constructs it does not lower. `wiz-notes/scry-taint.md` has the design, the `.scry`
-format and the gaps.
+model, call strings deeper than one call site, non-ASCII columns); the lowering still
+warns (havoc) for the constructs it does not lower. `wiz-notes/scry-taint.md` has the
+design, the `.scry` format and the gaps.
