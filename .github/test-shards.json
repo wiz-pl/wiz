@@ -106,6 +106,7 @@
     "=tower",
     "trust",
     "vec",
+    "=verif-deadlock",
     "word"
   ]},
   {"name": "scaling", "split": 2, "select": [
