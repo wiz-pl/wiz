@@ -2427,7 +2427,8 @@ def elaborateCached (write : Option System.FilePath) (reads : List System.FilePa
     IO (CommandState R × Nat) := do
   let binary ← match binary with | some b => pure b | none => binaryId write
   let binaryTag ← if region.isSome || verify != .off then toolchainTag write else pure ""
-  let store ← match region with
+  -- (13b) `--trace-guess-fallback` reports from the elaborator: nothing may come from a cache
+  let store ← if ← traceGuessesRef.get then Store.memory else match region with
     | some opts => Store.layeredRegion write reads binary opts verify rig stats
     | none => Store.layered write reads binary verify rig stats
   let result ← elaborateWith store input init key₀ toolchain strongToolchain targetTag rootTag binaryTag

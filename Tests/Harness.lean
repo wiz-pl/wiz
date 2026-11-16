@@ -139,6 +139,17 @@ def caseResult (c : Case) (index : Nat) (exitCode : UInt32) (stdout stderr : Str
     else (stderr ++ stdoutText).trimAscii.toString.replace "\n" "\n      "
   { index, name := c.name, ok := exitCode == 0, ms, notes, skipped, output }
 
+/-- (13b) The `--trace-guess-fallback` lines of a case's process (its stderr), on the
+driver's stderr, with the case's own file (module `_`) named `GROUP#INDEX`:
+`scripts/guess-fallback-stats.sh --tests` counts them. Only a traced run has such lines. -/
+def forwardGuessLines (g : Group) (index : Nat) (stderr : String) : IO Unit := do
+  let tag := "guess-fallback: "
+  for l in stderr.splitOn "\n" do
+    if l.startsWith tag then
+      let rest := (l.drop tag.length).toString
+      let rest := if rest.startsWith "_ " then s!"{g.name}#{index} " ++ (rest.drop 2).toString else rest
+      IO.eprintln (tag ++ rest)
+
 /-- Run each case in a child process (`<self> --run-case <group> <index>`), because an
 executed `sorry` aborts the whole process; `only` restricts the run to the cases with
 these indices. Prints each case with its wall time (`✓` passed, `✗` failed, with its
@@ -158,6 +169,7 @@ def Group.run (g : Group) (only : Option (List Nat) := none)
     let out ← IO.Process.output
       { cmd := self.toString, args := #["--run-case", g.name, toString i] ++ (← flagsRef.get).toArray }
     let ms := (← IO.monoMsNow) - start
+    forwardGuessLines g i out.stderr
     let r := caseResult c i out.exitCode out.stdout out.stderr ms
     IO.println (renderResult r)
     stdout.flush
@@ -238,6 +250,7 @@ def Group.runJobs (g : Group) (jobs : Nat) (only : Option (List Nat) := none)
         live.set rest
         let some c := g.cases[l.index]?
           | throw (IO.userError s!"no case {l.index} in {g.name}")
+        forwardGuessLines g l.index stderr
         let r := caseResult c l.index code stdout stderr ms
         IO.println (renderResult r)
         (← IO.getStdout).flush

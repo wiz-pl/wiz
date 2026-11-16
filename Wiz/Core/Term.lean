@@ -614,9 +614,6 @@ structure Globals (R : Type) where
   budget : Option Budget := none
   /-- (P2, `--trace-proof-steps`) print the steps each read-back of a proof took (stderr) -/
   traceProofSteps : Bool := false
-  /-- (13b, `--trace-guess-fallback`) print each declaration that reaches the fallback
-  recheck of a guessed hole solution (`checkGuessedDecl`), and why (stderr) -/
-  traceGuesses : Bool := false
   /-- (tests only; off) the checker skips a hole in a `Π`/`Σ`/`ULift` sort instead of
   rejecting it: for the differential tests' pre-check of a raw random term, which must be
   known to be well typed before the sorts pass (which evaluates it) may run on it -/

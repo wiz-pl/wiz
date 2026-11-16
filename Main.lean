@@ -147,9 +147,6 @@ initialize strictPrivacyOpt : IO.Ref Bool ← IO.mkRef false
 /-- (11r) `--pp-all`: terms print without notation. -/
 initialize ppAllOpt : IO.Ref Bool ← IO.mkRef false
 
-/-- (13b) `--trace-guess-fallback`: say which declarations reach `checkGuessedDecl`. -/
-initialize traceGuessesOpt : IO.Ref Bool ← IO.mkRef false
-
 /-- P2: proofs are never evaluated, unless `--eager-proofs` (the old behaviour). -/
 initialize lazyProofsOpt : IO.Ref Bool ← IO.mkRef true
 
@@ -256,8 +253,7 @@ def initStateOf (tc : Toolchain) (lib : Std.HashMap Name String) (headers : Std.
     { loader := (lib[·]?), cHeaders := (headers[·]?), cSources, includes,
       messages,
       globals := { regularity, predicativeProp, lazyProofs, inertReg, unboxStructs, proofSteps, traceProofSteps,
-                   strictPrivacy := ← strictPrivacyOpt.get, pp := { useNotation := !(← ppAllOpt.get) },
-                   traceGuesses := ← traceGuessesOpt.get },
+                   strictPrivacy := ← strictPrivacyOpt.get, pp := { useNotation := !(← ppAllOpt.get) } },
       trustedModule := own.contains, trustNative := tc.trustNative,
       nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := ← tc.smt.resolve }
   pure init
@@ -298,7 +294,7 @@ def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandSta
   -- the cache doesn't know the experimental options
   let cacheOn := regularity == .off && !predicativeProp && lazyProofs && inertReg == .conv && !unboxStructs &&
       proofSteps == Budget.defaultSteps && !traceProofSteps && !(← strictPrivacyOpt.get) && !(← ppAllOpt.get) &&
-      !(← traceGuessesOpt.get)
+      !(← traceGuessesRef.get)
   if cacheOn && (tc.cacheDir.isSome || !tc.readCaches.isEmpty) then
     -- the key starts from the headers the file sees; modules enter it by their own keys
     let key₀ := hash (toString (headers.toList.map (·.2)))
@@ -823,7 +819,7 @@ def main (args : List String) : IO UInt32 := do
   let args := args.filter (· != "--strict-privacy")
   if args.contains "--pp-all" then ppAllOpt.set true
   let args := args.filter (· != "--pp-all")
-  if args.contains "--trace-guess-fallback" then traceGuessesOpt.set true
+  if args.contains "--trace-guess-fallback" then traceGuessesRef.set true
   let args := args.filter (· != "--trace-guess-fallback")
   if args.contains "--unbox-structs" then unboxOpt.set true
   let args := args.filter (· != "--unbox-structs")
