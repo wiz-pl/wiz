@@ -50,11 +50,11 @@ structure Wishbone.Resp (dw : Nat) (r : HwTy → Type) where
   deriving Bundle
 
 /-- A quiet Wishbone response. -/
-def Wishbone.noResp {0 r : HwTy → Type} [Hw r] {ω dw : Nat} : Wishbone.Resp dw r :=
+def Wishbone.noResp {r : HwTy → Type} [Hw r] {ω dw : Nat} : Wishbone.Resp dw r :=
   Wishbone.Resp.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit dw 0)
 
 /-- A quiet Wishbone request. -/
-def Wishbone.noReq {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat} : Wishbone.Req aw dw r :=
+def Wishbone.noReq {r : HwTy → Type} [Hw r] {ω aw dw : Nat} : Wishbone.Req aw dw r :=
   Wishbone.Req.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 1 0)
     (Hw.lit aw 0) (Hw.lit dw 0) (Hw.lit (Nat.div dw 8) 0)
 
@@ -75,7 +75,7 @@ structure Wishbone.Out (aw dw : Nat) (r : HwTy → Type) where
 
 /-- The Wishbone signals for a bus request: `CYC`/`STB` are `valid`, and the rest map
 field by field. -/
-def Wishbone.reqOf {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat} (q : Bus.ReqW aw dw r) :
+def Wishbone.reqOf {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (q : Bus.ReqW aw dw r) :
     Wishbone.Req aw dw r :=
   Wishbone.Req.mk q.valid q.valid q.we q.addr q.wdata q.wstrb
 
@@ -83,7 +83,7 @@ def Wishbone.reqOf {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat} (q : Bus.ReqW a
 and a Wishbone `ACK`/`ERR`/`RTY` answers the bus. `RTY` becomes `err` (no retry on the
 bus), and every response is gated by `valid`, so a stray slave response cannot answer a
 request that is not there. -/
-def Wishbone.busToWbComb (aw dw : Nat) {0 r : HwTy → Type} [Hw r]
+def Wishbone.busToWbComb (aw dw : Nat) {r : HwTy → Type} [Hw r]
     (x : r (Wishbone.In.code aw dw)) : r (Wishbone.Out.code aw dw) :=
   let i := Wishbone.In.unpack aw dw x;
   let q := i.req;
@@ -114,19 +114,19 @@ structure Wishbone.ToBusOut (aw dw : Nat) (r : HwTy → Type) where
 
 /-- The bus request a Wishbone transfer makes: both `CYC` and `STB` (classic, not
 pipelined) are the bus `valid`. -/
-def Wishbone.toBusReq {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat} (p : Wishbone.Req aw dw r) :
+def Wishbone.toBusReq {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (p : Wishbone.Req aw dw r) :
     Bus.ReqW aw dw r :=
   Bus.ReqW.mk (Hw.and p.cyc p.stb) p.we p.adr p.dat p.sel
 
 /-- The Wishbone answer for a bus answer, gated by the request (`CYC && STB`). -/
-def Wishbone.respOfBus {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat}
+def Wishbone.respOfBus {r : HwTy → Type} [Hw r] {ω aw dw : Nat}
     (p : Wishbone.Req aw dw r) (b : Bus.Resp dw r) : Wishbone.Resp dw r :=
   let go := Hw.and p.cyc p.stb;
   let ack := Hw.and go (Hw.or b.ready b.rvalid);
   Wishbone.Resp.mk ack (Hw.and ack b.err) (Hw.lit 1 0) (Hw.lit 1 0) b.rdata
 
 /-- The combinational Wishbone-to-bus adapter. -/
-def Wishbone.wbToBusComb (aw dw : Nat) {0 r : HwTy → Type} [Hw r]
+def Wishbone.wbToBusComb (aw dw : Nat) {r : HwTy → Type} [Hw r]
     (x : r (Wishbone.ToBusIn.code aw dw)) : r (Wishbone.ToBusOut.code aw dw) :=
   let i := Wishbone.ToBusIn.unpack aw dw x;
   Wishbone.ToBusOut.pack aw dw (Wishbone.ToBusOut.mk

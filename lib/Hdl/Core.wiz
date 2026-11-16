@@ -470,7 +470,7 @@ class Hw (r : HwTy → Type) where
 
 /-- The implicit clock (`ClockDomain.sys`), as a clock net for primitives' clock ports.
 `Hw.clockOf d` is the clock of another domain. -/
-def Hw.clock {0 r : HwTy → Type} [Hw r] : r HwTy.clock := Hw.clockOf ClockDomain.sys
+def Hw.clock {r : HwTy → Type} [Hw r] : r HwTy.clock := Hw.clockOf ClockDomain.sys
 
 /-- Auto-share: the elaborator turns `let x := v; body` into `ShareLet.share v (fun x =>
 body)` when an instance `ShareLet A B` exists for the value's type `A` and the body's
@@ -480,7 +480,7 @@ class ShareLet (A B : Type) where
   share : A → (A → B) → B
 
 /-- Auto-share for hardware code: a `let` of a signal is `Hw.share`. -/
-instance {0 r : HwTy → Type} [Hw r] {ω a b : HwTy} : ShareLet (r a) (r b) where
+instance {r : HwTy → Type} [Hw r] {ω a b : HwTy} : ShareLet (r a) (r b) where
   share := fun x f => Hw.share x f
 
 /-- A boolean as one bit: `.true` is 1, `.false` is 0. -/
@@ -1697,7 +1697,7 @@ def counter : Circuit (HwTy.bits 0) (HwTy.bits 8) :=
 structure Circuit (i o : HwTy) where
   st : HwTy
   init : HwTy.El st
-  step : {0 r : HwTy → Type} → [Hw r] → r st → r i → r (HwTy.prod st o)
+  step : {r : HwTy → Type} → [Hw r] → r st → r i → r (HwTy.prod st o)
 
 /-- The step on values (the representation is found from the result type). -/
 def Circuit.stepEl {0 i o : HwTy} (c : Circuit i o) (s : HwTy.El c.st) (x : HwTy.El i) : HwTy.El (HwTy.prod c.st o) := c.step s x
@@ -1769,7 +1769,7 @@ def Circuit.run_take {0 i o : HwTy} (c : Circuit i o) (n : Nat) (xs : Trace (HwT
 
 /-- Combinational code: a function at every representation (`fun x => Hw.xor x k`, or a
 definition `{r : HwTy → Type} → [Hw r] → r i → r o` by name). -/
-def Comb (i o : HwTy) : Type 1 := {0 r : HwTy → Type} → [Hw r] → r i → r o
+def Comb (i o : HwTy) : Type 1 := {r : HwTy → Type} → [Hw r] → r i → r o
 
 /-- A stateless circuit: combinational code (`Circuit.runFrom_comb`). -/
 def Circuit.comb {ω i o : HwTy} (f : Comb i o) : Circuit i o :=
@@ -1827,7 +1827,7 @@ def Circuit.outputName {ω i o : HwTy} (name : String) (c : Circuit i o) : Circu
 
 /-- An instance of `c` inside another step: `s` is its state (a part of the caller's state,
 starting at `c.init`), the result its next state and its output. -/
-def Circuit.inst {0 r : HwTy → Type} [Hw r] {0 i o : HwTy} (c : Circuit i o) (s : r c.st) (x : r i) : r (HwTy.prod c.st o) :=
+def Circuit.inst {r : HwTy → Type} [Hw r] {0 i o : HwTy} (c : Circuit i o) (s : r c.st) (x : r i) : r (HwTy.prod c.st o) :=
   c.step s x
 
 /-- A synchronous reset: while `rst` (a new first input) is high the next state is `c.init`
@@ -1871,7 +1871,7 @@ def Circuit.registerRE (ω t : HwTy) (init : HwTy.El t) :
 /-- inside a step function: `init` under `rst`, else `next` under `en`, else `cur` (for the
 netlist to see a reset, `init` must be the register's initial value; to see an enable,
 `cur` must be the register itself) -/
-def Hw.regNext {0 r : HwTy → Type} [Hw r] {ω t : HwTy} (rst en : r HwTy.bit) (init : HwTy.El t) (cur next : r t) : r t :=
+def Hw.regNext {r : HwTy → Type} [Hw r] {ω t : HwTy} (rst en : r HwTy.bit) (init : HwTy.El t) (cur next : r t) : r t :=
   Hw.resetTo rst init (Hw.hold en next cur)
 
 ------------------------------------------------------------------------------------
@@ -3332,8 +3332,8 @@ structures with the same field types are one type and instance resolution could 
 tell their bundles apart. -/
 structure Bundle (F : (HwTy → Type) → Type) where
   code : HwTy
-  pack : {0 r : HwTy → Type} → [Hw r] → F r → r code
-  unpack : {0 r : HwTy → Type} → [Hw r] → r code → F r
+  pack : {r : HwTy → Type} → [Hw r] → F r → r code
+  unpack : {r : HwTy → Type} → [Hw r] → r code → F r
 
 -- (A bundle is a plain value, not an instance: structures are structural types, so two
 -- structures with the same field types are one type, and instance resolution could not
@@ -3341,17 +3341,17 @@ structure Bundle (F : (HwTy → Type) → Type) where
 -- instance once declared types get kernel-level brands.)
 
 /-- A bundle value as a value of its code. -/
-def Bundle.toEl {0 F : (HwTy → Type) → Type} (b : Bundle F) (v : F HwTy.El) : HwTy.El b.code :=
+def Bundle.toEl {F : (HwTy → Type) → Type} (b : Bundle F) (v : F HwTy.El) : HwTy.El b.code :=
   b.pack v
 /-- A value of a bundle's code as the bundle's structure. -/
-def Bundle.ofEl {0 F : (HwTy → Type) → Type} (b : Bundle F) (v : HwTy.El b.code) : F HwTy.El :=
+def Bundle.ofEl {F : (HwTy → Type) → Type} (b : Bundle F) (v : HwTy.El b.code) : F HwTy.El :=
   b.unpack v
 
 /-- A circuit whose state, input and output are bundles: the step takes the state and the
 input as structures and returns the packed next state and output
 (`Hw.pair (S.pack s') (O.pack o)`). -/
-def Circuit.bundled {0 S I O : (HwTy → Type) → Type} (bs : Bundle S) (bi : Bundle I) (bo : Bundle O)
-    (init : S HwTy.El) (f : {0 r : HwTy → Type} → [Hw r] → S r → I r → r (HwTy.prod bs.code bo.code)) : Circuit bi.code bo.code :=
+def Circuit.bundled {S I O : (HwTy → Type) → Type} (bs : Bundle S) (bi : Bundle I) (bo : Bundle O)
+    (init : S HwTy.El) (f : {r : HwTy → Type} → [Hw r] → S r → I r → r (HwTy.prod bs.code bo.code)) : Circuit bi.code bo.code :=
   Circuit.mk bs.code (bs.pack init) (fun s x => f (bs.unpack s) (bi.unpack x))
 
 ------------------------------------------------------------------------------------
@@ -3611,13 +3611,13 @@ attribute [deriver Bundle] deriveBundle
 -- (concatenations and slices), at any representation.
 
 /-- A value as one bit vector (the first component in the high bits, as `HwTy.pack`). -/
-def Hw.packBits {0 r : HwTy → Type} [Hw r] : (ω t : HwTy) → r t → r (HwTy.bits (HwTy.width t))
+def Hw.packBits {r : HwTy → Type} [Hw r] : (ω t : HwTy) → r t → r (HwTy.bits (HwTy.width t))
   | .bits n, x => x
   | .prod a b, x => Hw.share x (fun y => Hw.cat (Hw.packBits a (Hw.fst y)) (Hw.packBits b (Hw.snd y)))
   | .named _ t, x => Hw.packBits t (Hw.untag x)
   | .mem _ _, x => Hw.const (HwTy.bits 0) (BitVec.ofNat 0 0)
 /-- Take a packed bit vector apart again (concatenations and slices only). -/
-def Hw.unpackBits {0 r : HwTy → Type} [Hw r] : (ω t : HwTy) → r (HwTy.bits (HwTy.width t)) → r t
+def Hw.unpackBits {r : HwTy → Type} [Hw r] : (ω t : HwTy) → r (HwTy.bits (HwTy.width t)) → r t
   | .bits n, x => x
   | .prod a b, x => Hw.share x (fun y =>
     Hw.pair (Hw.unpackBits a (Hw.slice (HwTy.width b) (HwTy.width a) y)) (Hw.unpackBits b (Hw.slice 0 (HwTy.width b) y)))
@@ -4106,31 +4106,31 @@ def Design.runLeaves (d : Design) (xs : List (List Nat)) : List (List Nat) :=
 -- tighter than the bitwise operations, so `x === 0 &&& y <ᵤ k` needs no parentheses.
 
 /-- A numeral at `r (HwTy.bits n)` is a constant of that width. -/
-instance {0 r : HwTy → Type} [Hw r] {ω n k : Nat} : OfNat (r (HwTy.bits n)) k := OfNat.mk (Hw.lit n k)
+instance {r : HwTy → Type} [Hw r] {ω n k : Nat} : OfNat (r (HwTy.bits n)) k := OfNat.mk (Hw.lit n k)
 /-- A numeral as a signal whose width comes from the expected type. -/
-def Hw.ofNat {0 r : HwTy → Type} [Hw r] {ω n : Nat} (k : Nat) : r (HwTy.bits n) := Hw.lit n k
+def Hw.ofNat {r : HwTy → Type} [Hw r] {ω n : Nat} (k : Nat) : r (HwTy.bits n) := Hw.lit n k
 
 /-- `a + b` on hardware signals is `Hw.add`. -/
-instance {0 r : HwTy → Type} [Hw r] {ω n : Nat} : Add (r (HwTy.bits n)) := Add.mk (fun a b => Hw.add a b)
+instance {r : HwTy → Type} [Hw r] {ω n : Nat} : Add (r (HwTy.bits n)) := Add.mk (fun a b => Hw.add a b)
 /-- `a - b` on hardware signals is `Hw.sub`. -/
-instance {0 r : HwTy → Type} [Hw r] {ω n : Nat} : Sub (r (HwTy.bits n)) := Sub.mk (fun a b => Hw.sub a b)
+instance {r : HwTy → Type} [Hw r] {ω n : Nat} : Sub (r (HwTy.bits n)) := Sub.mk (fun a b => Hw.sub a b)
 /-- `a * b` on hardware signals is `Hw.mul`. -/
-instance {0 r : HwTy → Type} [Hw r] {ω n : Nat} : Mul (r (HwTy.bits n)) := Mul.mk (fun a b => Hw.mul a b)
+instance {r : HwTy → Type} [Hw r] {ω n : Nat} : Mul (r (HwTy.bits n)) := Mul.mk (fun a b => Hw.mul a b)
 /-- `-a` on hardware signals is `Hw.sub (Hw.lit n 0) a`. -/
-instance {0 r : HwTy → Type} [Hw r] {ω n : Nat} : Neg (r (HwTy.bits n)) := Neg.mk (fun a => Hw.sub (Hw.lit n 0) a)
+instance {r : HwTy → Type} [Hw r] {ω n : Nat} : Neg (r (HwTy.bits n)) := Neg.mk (fun a => Hw.sub (Hw.lit n 0) a)
 /-- `a &&& b` on hardware signals is `Hw.and`. -/
-instance {0 r : HwTy → Type} [Hw r] {ω n : Nat} : AndOp (r (HwTy.bits n)) := AndOp.mk (fun a b => Hw.and a b)
+instance {r : HwTy → Type} [Hw r] {ω n : Nat} : AndOp (r (HwTy.bits n)) := AndOp.mk (fun a b => Hw.and a b)
 /-- `a ||| b` on hardware signals is `Hw.or`. -/
-instance {0 r : HwTy → Type} [Hw r] {ω n : Nat} : OrOp (r (HwTy.bits n)) := OrOp.mk (fun a b => Hw.or a b)
+instance {r : HwTy → Type} [Hw r] {ω n : Nat} : OrOp (r (HwTy.bits n)) := OrOp.mk (fun a b => Hw.or a b)
 /-- `a ^^^ b` on hardware signals is `Hw.xor`. -/
-instance {0 r : HwTy → Type} [Hw r] {ω n : Nat} : XorOp (r (HwTy.bits n)) := XorOp.mk (fun a b => Hw.xor a b)
+instance {r : HwTy → Type} [Hw r] {ω n : Nat} : XorOp (r (HwTy.bits n)) := XorOp.mk (fun a b => Hw.xor a b)
 /-- `~~~a` on hardware signals is `Hw.not`. -/
-instance {0 r : HwTy → Type} [Hw r] {ω n : Nat} : Complement (r (HwTy.bits n)) := Complement.mk (fun a => Hw.not a)
+instance {r : HwTy → Type} [Hw r] {ω n : Nat} : Complement (r (HwTy.bits n)) := Complement.mk (fun a => Hw.not a)
 
 /-- Shifts by a fixed number of places are wiring: `a <<< k` is the low `n` bits of `a`
 with `k` zeros below it, `a >>> k` the high `n` bits of `k` zeros above `a` (a
 concatenation and a slice: no shifter). By 0 places, `a`; by `n` or more, `0`. -/
-def Hw.shl {0 r : HwTy → Type} [Hw r] {ω n : Nat} (a : r (HwTy.bits n)) (k : Nat) : r (HwTy.bits n) :=
+def Hw.shl {r : HwTy → Type} [Hw r] {ω n : Nat} (a : r (HwTy.bits n)) (k : Nat) : r (HwTy.bits n) :=
   match Nat.beq k 0 with
   | .true => a
   | .false => (match Nat.lt k n with
@@ -4138,34 +4138,34 @@ def Hw.shl {0 r : HwTy → Type} [Hw r] {ω n : Nat} (a : r (HwTy.bits n)) (k : 
     | .false => Hw.lit n 0)
 /-- A logical right shift by a fixed `k` places is wiring (zeros in at the top); by `n`
 or more, `0`. -/
-def Hw.lshr {0 r : HwTy → Type} [Hw r] {ω n : Nat} (a : r (HwTy.bits n)) (k : Nat) : r (HwTy.bits n) :=
+def Hw.lshr {r : HwTy → Type} [Hw r] {ω n : Nat} (a : r (HwTy.bits n)) (k : Nat) : r (HwTy.bits n) :=
   match Nat.beq k 0 with
   | .true => a
   | .false => (match Nat.lt k n with
     | .true => Hw.slice k n (Hw.cat (Hw.lit k 0) a)
     | .false => Hw.lit n 0)
 /-- `a <<< k` on hardware signals is `Hw.shl` (wiring for a `Nat`). -/
-instance {0 r : HwTy → Type} [Hw r] {ω n : Nat} : ShiftLeft (r (HwTy.bits n)) := ShiftLeft.mk (fun a k => Hw.shl a k)
+instance {r : HwTy → Type} [Hw r] {ω n : Nat} : ShiftLeft (r (HwTy.bits n)) := ShiftLeft.mk (fun a k => Hw.shl a k)
 /-- `a >>> k` on hardware signals is `Hw.lshr` (wiring for a `Nat`). -/
-instance {0 r : HwTy → Type} [Hw r] {ω n : Nat} : ShiftRight (r (HwTy.bits n)) := ShiftRight.mk (fun a k => Hw.lshr a k)
+instance {r : HwTy → Type} [Hw r] {ω n : Nat} : ShiftRight (r (HwTy.bits n)) := ShiftRight.mk (fun a k => Hw.lshr a k)
 
 -- (H14 S4) Shifts by a signal `s : r (HwTy.bits m)`: `a <<< s`, `a >>> s` are barrel
 -- shifters (`Hw.shlBy`, `Hw.lshrBy`; Verilog `<<`, `>>`). A `Nat` amount stays wiring.
 /-- `a <<< s` by a signal is a barrel shifter (`Hw.shlBy`). -/
-instance {0 r : HwTy → Type} [Hw r] {ω n m : Nat} : HShiftLeft (r (HwTy.bits n)) (r (HwTy.bits m)) (r (HwTy.bits n)) :=
+instance {r : HwTy → Type} [Hw r] {ω n m : Nat} : HShiftLeft (r (HwTy.bits n)) (r (HwTy.bits m)) (r (HwTy.bits n)) :=
   HShiftLeft.mk (fun a s => Hw.shlBy a s)
 /-- `a >>> s` by a signal is a barrel shifter (`Hw.lshrBy`). -/
-instance {0 r : HwTy → Type} [Hw r] {ω n m : Nat} : HShiftRight (r (HwTy.bits n)) (r (HwTy.bits m)) (r (HwTy.bits n)) :=
+instance {r : HwTy → Type} [Hw r] {ω n m : Nat} : HShiftRight (r (HwTy.bits n)) (r (HwTy.bits m)) (r (HwTy.bits n)) :=
   HShiftRight.mk (fun a s => Hw.lshrBy a s)
 
 /-- Arithmetic shift right, `a >>>ₛ k` (copies of the sign bit come in): by a fixed `k :
 Nat` it is wiring (the sign bit repeated `k` times on top, then a slice); by a signal,
 `Hw.ashrBy` (Verilog `$signed(a) >>> s`). -/
-def Hw.signs {0 r : HwTy → Type} [Hw r] {ω n : Nat} (a : r (HwTy.bits n)) (k : Nat) : r (HwTy.bits k) :=
+def Hw.signs {r : HwTy → Type} [Hw r] {ω n : Nat} (a : r (HwTy.bits n)) (k : Nat) : r (HwTy.bits k) :=
   Hw.mux (Hw.slice (n - 1) 1 a) (Hw.lit k (Nat.pow 2 k - 1)) (Hw.lit k 0)
 /-- An arithmetic right shift by a fixed `k` places (copies of the sign bit in); by a
 signal, `Hw.ashrBy`. -/
-def Hw.ashr {0 r : HwTy → Type} [Hw r] {ω n : Nat} (a : r (HwTy.bits n)) (k : Nat) : r (HwTy.bits n) :=
+def Hw.ashr {r : HwTy → Type} [Hw r] {ω n : Nat} (a : r (HwTy.bits n)) (k : Nat) : r (HwTy.bits n) :=
   match Nat.beq k 0, Nat.beq n 0 with
   | .true, _ => a
   | _, .true => a
@@ -4176,21 +4176,21 @@ def Hw.ashr {0 r : HwTy → Type} [Hw r] {ω n : Nat} (a : r (HwTy.bits n)) (k :
 class AShiftRight (A B : Type) (C : outParam Type) where
   ashr : A → B → C
 /-- `a >>>ₛ k` by a fixed amount is `Hw.ashr` (wiring). -/
-instance {0 r : HwTy → Type} [Hw r] {ω n : Nat} : AShiftRight (r (HwTy.bits n)) Nat (r (HwTy.bits n)) :=
+instance {r : HwTy → Type} [Hw r] {ω n : Nat} : AShiftRight (r (HwTy.bits n)) Nat (r (HwTy.bits n)) :=
   AShiftRight.mk (fun a k => Hw.ashr a k)
 /-- `a >>>ₛ s` by a signal is `Hw.ashrBy`. -/
-instance {0 r : HwTy → Type} [Hw r] {ω n m : Nat} : AShiftRight (r (HwTy.bits n)) (r (HwTy.bits m)) (r (HwTy.bits n)) :=
+instance {r : HwTy → Type} [Hw r] {ω n m : Nat} : AShiftRight (r (HwTy.bits n)) (r (HwTy.bits m)) (r (HwTy.bits n)) :=
   AShiftRight.mk (fun a s => Hw.ashrBy a s)
 infixl:75 " >>>ₛ " => AShiftRight.ashr
 
 /-- comparisons: one bit -/
-def Hw.neq {0 r : HwTy → Type} [Hw r] {ω n : Nat} (a b : r (HwTy.bits n)) : r HwTy.bit := Hw.not (Hw.eq a b)
+def Hw.neq {r : HwTy → Type} [Hw r] {ω n : Nat} (a b : r (HwTy.bits n)) : r HwTy.bit := Hw.not (Hw.eq a b)
 /-- Unsigned `a ≤ b`, as one bit. -/
-def Hw.ule {0 r : HwTy → Type} [Hw r] {ω n : Nat} (a b : r (HwTy.bits n)) : r HwTy.bit := Hw.not (Hw.ult b a)
+def Hw.ule {r : HwTy → Type} [Hw r] {ω n : Nat} (a b : r (HwTy.bits n)) : r HwTy.bit := Hw.not (Hw.ult b a)
 /-- Unsigned `a > b`, as one bit. -/
-def Hw.ugt {0 r : HwTy → Type} [Hw r] {ω n : Nat} (a b : r (HwTy.bits n)) : r HwTy.bit := Hw.ult b a
+def Hw.ugt {r : HwTy → Type} [Hw r] {ω n : Nat} (a b : r (HwTy.bits n)) : r HwTy.bit := Hw.ult b a
 /-- Unsigned `a ≥ b`, as one bit. -/
-def Hw.uge {0 r : HwTy → Type} [Hw r] {ω n : Nat} (a b : r (HwTy.bits n)) : r HwTy.bit := Hw.not (Hw.ult a b)
+def Hw.uge {r : HwTy → Type} [Hw r] {ω n : Nat} (a b : r (HwTy.bits n)) : r HwTy.bit := Hw.not (Hw.ult a b)
 infix:61 " === " => Hw.eq
 infix:61 " =/= " => Hw.neq
 infix:62 " <ᵤ " => Hw.ult
@@ -4199,11 +4199,11 @@ infix:62 " >ᵤ " => Hw.ugt
 infix:62 " ≥ᵤ " => Hw.uge
 
 /-- (H14 S4) signed comparisons (two's complement), one bit: `<ₛ ≤ₛ >ₛ ≥ₛ` -/
-def Hw.sle {0 r : HwTy → Type} [Hw r] {ω n : Nat} (a b : r (HwTy.bits n)) : r HwTy.bit := Hw.not (Hw.slt b a)
+def Hw.sle {r : HwTy → Type} [Hw r] {ω n : Nat} (a b : r (HwTy.bits n)) : r HwTy.bit := Hw.not (Hw.slt b a)
 /-- Signed (two's complement) `a > b`, as one bit. -/
-def Hw.sgt {0 r : HwTy → Type} [Hw r] {ω n : Nat} (a b : r (HwTy.bits n)) : r HwTy.bit := Hw.slt b a
+def Hw.sgt {r : HwTy → Type} [Hw r] {ω n : Nat} (a b : r (HwTy.bits n)) : r HwTy.bit := Hw.slt b a
 /-- Signed (two's complement) `a ≥ b`, as one bit. -/
-def Hw.sge {0 r : HwTy → Type} [Hw r] {ω n : Nat} (a b : r (HwTy.bits n)) : r HwTy.bit := Hw.not (Hw.slt a b)
+def Hw.sge {r : HwTy → Type} [Hw r] {ω n : Nat} (a b : r (HwTy.bits n)) : r HwTy.bit := Hw.not (Hw.slt a b)
 infix:62 " <ₛ " => Hw.slt
 infix:62 " ≤ₛ " => Hw.sle
 infix:62 " >ₛ " => Hw.sgt
@@ -4211,7 +4211,7 @@ infix:62 " ≥ₛ " => Hw.sge
 
 -- `if` on a one-bit signal (lib/Prelude.wiz, `Mux`): a multiplexer at any type
 /-- `if c then x else y` on hardware signals is `Hw.mux`. -/
-instance {0 r : HwTy → Type} [Hw r] {ω t : HwTy} : Mux (r HwTy.bit) (r t) := Mux.mk (fun c a b => Hw.mux c a b)
+instance {r : HwTy → Type} [Hw r] {ω t : HwTy} : Mux (r HwTy.bit) (r t) := Mux.mk (fun c a b => Hw.mux c a b)
 -- and `Hw.mux c a b` prints as that `if`
 app_unexpander Hw.mux
   | `(term| $f $c $a $b) => `(term| if $c then $a else $b)

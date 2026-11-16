@@ -160,10 +160,10 @@ def Affine.comp {0 A B S : Type} (x : Affine A S) (m : A → Affine B A) : Affin
 order, threading `σ`, stopping at the first error. Instances should run in place (take
 each element, run the body, put it back). -/
 class TraverseMut (S : Type) (A : outParam Type) where
-  traverseM : {0 σ : Type} → (A → σ → Result (A × σ)) → S → σ → Result (S × σ)
+  traverseM : {σ : Type} → (A → σ → Result (A × σ)) → S → σ → Result (S × σ)
 
 /-- `iter_mut` over a list (`TraverseMut`'s instance for `List`). -/
-def List.traverseM {0 A σ : Type} (f : A → σ → Result (A × σ)) : List A → σ → Result (List A × σ)
+def List.traverseM {A σ : Type} (f : A → σ → Result (A × σ)) : List A → σ → Result (List A × σ)
   | .nil, st => .ok ((List.nil : List A), st)
   | .cons x xs, st => match f x st with
     | .ok r => (match List.traverseM f xs r.2 with
@@ -172,7 +172,7 @@ def List.traverseM {0 A σ : Type} (f : A → σ → Result (A × σ)) : List A 
     | .err e => .err e
 
 /-- Lists are traversed front to back, by `List.traverseM`. -/
-instance {0 A : Type} : TraverseMut (List A) A where
+instance {A : Type} : TraverseMut (List A) A where
   traverseM := fun f xs st => List.traverseM f xs st
 
 -- ## Laws (quantity 0: propositions, erased)

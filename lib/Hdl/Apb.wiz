@@ -51,11 +51,11 @@ structure Apb.Resp (dw : Nat) (r : HwTy → Type) where
   deriving Bundle
 
 /-- A quiet APB response (`pready` low, zero data, no error). -/
-def Apb.noResp {0 r : HwTy → Type} [Hw r] {ω dw : Nat} : Apb.Resp dw r :=
+def Apb.noResp {r : HwTy → Type} [Hw r] {ω dw : Nat} : Apb.Resp dw r :=
   Apb.Resp.mk (Hw.lit 1 0) (Hw.lit dw 0) (Hw.lit 1 0)
 
 /-- A quiet APB request (`PSEL` and `PENABLE` low, zero payload). -/
-def Apb.noReq {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat} : Apb.Req aw dw r :=
+def Apb.noReq {r : HwTy → Type} [Hw r] {ω aw dw : Nat} : Apb.Req aw dw r :=
   Apb.Req.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 1 0)
     (Hw.lit aw 0) (Hw.lit dw 0) (Hw.lit (Nat.div dw 8) 0)
 
@@ -81,7 +81,7 @@ def Apb.stInit (aw dw : Nat) : Apb.St aw dw HwTy.El :=
 /-- The APB signals for the current state. IDLE drives `PSEL` low (the captured payload
 is ignored there); SETUP drives `PSEL` high and `PENABLE` low; ACCESS drives both high.
 `PSTRB` is zero for reads, as APB4 requires. -/
-def Apb.reqOf {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat} (s : Apb.St aw dw r) :
+def Apb.reqOf {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (s : Apb.St aw dw r) :
     Apb.Req aw dw r :=
   let idle := Bus.isK s.phase 0;
   let access := Bus.isK s.phase 2;
@@ -110,7 +110,7 @@ always becomes ACCESS; ACCESS ends on `PREADY` and answers the bus in that same 
 (`ready` for both kinds, `rvalid` only for a read). A bus master that drops `valid` in
 IDLE starts nothing; one that violates the bus obligation mid-transfer cannot shorten
 the APB transfer, which completes normally. -/
-def Apb.step {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat} (s : Apb.St aw dw r)
+def Apb.step {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (s : Apb.St aw dw r)
     (i : Apb.In aw dw r) : r (HwTy.prod (Apb.St.code aw dw) (Apb.Out.code aw dw)) :=
   let q := i.req;
   let idle := Bus.isK s.phase 0;
@@ -158,20 +158,20 @@ structure Apb.ToBusOut (aw dw : Nat) (r : HwTy → Type) where
 /-- The bus request an APB ACCESS phase makes. SETUP (`PENABLE` low) is not a bus
 request, so the bus sees `valid` only in ACCESS and the APB master holds the fields
 until `PREADY` (the bus source obligation). -/
-def Apb.toBusReq {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat} (p : Apb.Req aw dw r) :
+def Apb.toBusReq {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (p : Apb.Req aw dw r) :
     Bus.ReqW aw dw r :=
   Bus.ReqW.mk (Hw.and p.psel p.penable) p.pwrite p.paddr p.pwdata p.pstrb
 
 /-- The APB answer for a bus answer: `PREADY` only in ACCESS and only when the bus
 answered, `PRDATA` is the bus data and `PSLVERR` the bus error. -/
-def Apb.respOfBus {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat} (p : Apb.Req aw dw r)
+def Apb.respOfBus {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (p : Apb.Req aw dw r)
     (b : Bus.Resp dw r) : Apb.Resp dw r :=
   let access := Hw.and p.psel p.penable;
   let ack := Hw.and access (Hw.or b.ready b.rvalid);
   Apb.Resp.mk ack b.rdata (Hw.and ack b.err)
 
 /-- The combinational APB-to-bus adapter. -/
-def Apb.apbToBusComb (aw dw : Nat) {0 r : HwTy → Type} [Hw r]
+def Apb.apbToBusComb (aw dw : Nat) {r : HwTy → Type} [Hw r]
     (x : r (Apb.ToBusIn.code aw dw)) : r (Apb.ToBusOut.code aw dw) :=
   let i := Apb.ToBusIn.unpack aw dw x;
   Apb.ToBusOut.pack aw dw (Apb.ToBusOut.mk

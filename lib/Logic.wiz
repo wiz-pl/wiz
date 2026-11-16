@@ -71,7 +71,7 @@ def And.elim {0 P Q : Prop} {0 R : Prop} (h : P ∧ Q) (k : P → Q → R) : R :
 /-- `∧` is commutative. -/
 def And.symm {0 P Q : Prop} (h : P ∧ Q) : Q ∧ P := (h.2, h.1)
 /-- Map both halves of a conjunction. -/
-def And.imp {0 P Q P' Q' : Prop} (f : P → P') (g : Q → Q') (h : P ∧ Q) : P' ∧ Q' := (f h.1, g h.2)
+def And.imp {P Q P' Q' : Prop} (f : P → P') (g : Q → Q') (h : P ∧ Q) : P' ∧ Q' := (f h.1, g h.2)
 
 -- ## Disjunction
 
@@ -93,7 +93,7 @@ def Or.elim {0 P Q : Prop} {0 R : Prop} (h : P ∨ Q) (l : P → R) (r : Q → R
 /-- `∨` is commutative. -/
 def Or.symm {0 P Q : Prop} (h : P ∨ Q) : Q ∨ P := h (Q ∨ P) (fun p => Or.inr p) (fun q => Or.inl q)
 /-- Map both sides of a disjunction. -/
-def Or.imp {0 P Q P' Q' : Prop} (f : P → P') (g : Q → Q') (h : P ∨ Q) : P' ∨ Q' :=
+def Or.imp {P Q P' Q' : Prop} (f : P → P') (g : Q → Q') (h : P ∨ Q) : P' ∨ Q' :=
   h (P' ∨ Q') (fun p => Or.inl (f p)) (fun q => Or.inr (g q))
 /-- The disjunctive syllogism: from `P ∨ Q` and `¬ P`, `Q`. -/
 def Or.resolveLeft {0 P Q : Prop} (h : P ∨ Q) (n : ¬ P) : Q := h Q (fun p => absurd (n p)) (fun q => q)
@@ -131,9 +131,9 @@ def Ex {0 A : Type} (P : A → Prop) : Prop := (0 R : Prop) → ((a : A) → P a
 The predicate is explicit (it can't be inferred from the witness). -/
 def Ex.intro {0 A : Type} (0 P : A → Prop) (a : A) (p : P a) : Ex P := fun R k => k a p
 /-- Use an existential: get `R` from any witness and its proof. -/
-def Ex.elim {0 A : Type} {0 P : A → Prop} {0 R : Prop} (h : Ex P) (k : (a : A) → P a → R) : R := h R k
+def Ex.elim {0 A : Type} {P : A → Prop} {0 R : Prop} (h : Ex P) (k : (a : A) → P a → R) : R := h R k
 /-- Map the proof inside an existential, keeping the witness. -/
-def Ex.imp {0 A : Type} {0 P Q : A → Prop} (f : (a : A) → P a → Q a) (h : Ex P) : Ex Q :=
+def Ex.imp {0 A : Type} {P Q : A → Prop} (f : (a : A) → P a → Q a) (h : Ex P) : Ex Q :=
   h (Ex Q) (fun a p => Ex.intro Q a (f a p))
 
 -- ### Binder notation (stage 13e)
@@ -180,7 +180,7 @@ attribute [macro term.exAscii] Ex.binderMacro
 app_unexpander Ex
   | `(term| $f (fun $x => $b)) => `(term| ∃ $x, $b)
 /-- `∃` commutes with `∧` on a side that doesn't mention the witness. -/
-def Ex.andRight {0 A : Type} {0 P : A → Prop} {0 Q : Prop} (h : (∃ a, P a) ∧ Q) : ∃ a, P a ∧ Q :=
+def Ex.andRight {0 A : Type} {P : A → Prop} {0 Q : Prop} (h : (∃ a, P a) ∧ Q) : ∃ a, P a ∧ Q :=
   h.1 (∃ a, P a ∧ Q) (fun a p => Ex.intro (fun a => P a ∧ Q) a (p, h.2))
 
 -- ## Universal quantification
@@ -188,10 +188,10 @@ def Ex.andRight {0 A : Type} {0 P : A → Prop} {0 Q : Prop} (h : (∃ a, P a) �
 -- `∀` is the Π type `(a : A) → P a`, a proposition whenever `P a` is (impredicativity).
 -- `∀` and `∃` interact as usual:
 /-- If some `a` has `P a`, it is not the case that every `a` has `¬ P a`. -/
-def Ex.notForall {0 A : Type} {0 P : A → Prop} (h : ∃ a, P a) (n : ∀ a, ¬ P a) : False :=
+def Ex.notForall {0 A : Type} {P : A → Prop} (h : ∃ a, P a) (n : ∀ a, ¬ P a) : False :=
   h False (fun a p => n a p)
 /-- If no `a` has `P a`, every `a` has `¬ P a`. -/
-def Forall.notEx {0 A : Type} {0 P : A → Prop} (n : ¬ ∃ a, P a) (a : A) : ¬ P a :=
+def Forall.notEx {0 A : Type} {P : A → Prop} (n : ¬ ∃ a, P a) (a : A) : ¬ P a :=
   fun p => n (Ex.intro P a p)
 
 -- ## Equality

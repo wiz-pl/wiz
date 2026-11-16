@@ -21,7 +21,7 @@ def builtinGroup : Group where
   exercise := "Stage 6b"
   cases := [
     { name := "import the prelude", run := fun _ =>
-        okLib "import Prelude\n#check List.append" ["List.append : {A : Type} → List A → List A → List A"] },
+        okLib "import Prelude\n#check List.append" ["List.append : {0 A : Type} → List A → List A → List A"] },
     { name := "a stuck number times a big numeral, in a type (nat-pow-blowup)", run := fun _ =>
         okLib ("import Word\naxiom Q : Nat → Type\naxiom y : (n : Nat) → Q (Nat.mod n 18446744073709551616)\n" ++
           "def bump (a : I64) : I64 := IntN.ofNat 64 (Nat.mod (Nat.add a.toNat 1) (Nat.pow 2 64))") },

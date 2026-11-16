@@ -54,7 +54,7 @@ def Spi.divN (div : Nat) : Nat := Nat.max 1 div
 /-- Shift a bit in at the bottom of an 8-bit register (`x << 1 | b`), so the first bit
 sampled (mode 0 samples the most significant bit first) ends at the top. This is the
 same order as the generic `Spi.shiftIn`. -/
-def Spi.shiftIn8 {0 r : HwTy → Type} [Hw r] (x : r Spi.B8) (b : r Spi.Bit) : r Spi.B8 :=
+def Spi.shiftIn8 {r : HwTy → Type} [Hw r] (x : r Spi.B8) (b : r Spi.Bit) : r Spi.B8 :=
   Hw.cat (Hw.slice 0 7 x) b
 
 /-- The master's state: the pins are registers, plus the transfer's phase, its
@@ -94,7 +94,7 @@ structure Spi.Out (r : HwTy → Type) where
   deriving Bundle
 
 /-- One cycle of the mode 0 master. -/
-def Spi.masterStep {0 r : HwTy → Type} [Hw r] (div : Nat) (s : Spi.St r) (x : Spi.In r) :
+def Spi.masterStep {r : HwTy → Type} [Hw r] (div : Nat) (s : Spi.St r) (x : Spi.In r) :
     r (HwTy.prod Spi.St.code Spi.Out.code) :=
   let last := s.cnt === Hw.ofNat (Spi.divN div - 1);
   let lowEnd := s.busy &&& (~~~s.phase &&& last);
@@ -126,7 +126,7 @@ structure Spi.Cmd (r : HwTy → Type) where
   deriving Bundle
 
 /-- One cycle of the master with its `mosi` fed back into `miso`. -/
-def Spi.loopStep {0 r : HwTy → Type} [Hw r] (div : Nat) (s : Spi.St r) (x : Spi.Cmd r) :
+def Spi.loopStep {r : HwTy → Type} [Hw r] (div : Nat) (s : Spi.St r) (x : Spi.Cmd r) :
     r (HwTy.prod Spi.St.code Spi.Out.code) :=
   Circuit.inst (Spi.masterC div) (Spi.St.pack s) (Spi.In.pack (Spi.In.mk s.mosi x.start x.data))
 
@@ -157,7 +157,7 @@ def Spi.allCS (ncs : Nat) : Nat := Nat.pow 2 ncs - 1
 /-- Shift a bit in at the bottom of a `w`-bit register: `x << 1 | b`, so the first bit
 sampled (the most significant of the word) ends at the top. `Spi.shiftIn8` uses the
 same order for 8 bits. -/
-def Spi.shiftIn {0 r : HwTy → Type} [Hw r] {ω w : Nat} (x : r (HwTy.bits w))
+def Spi.shiftIn {r : HwTy → Type} [Hw r] {ω w : Nat} (x : r (HwTy.bits w))
     (b : r Spi.Bit) : r (HwTy.bits w) :=
   Hw.or (Hw.shl x 1) (Hw.mux b (Hw.lit w 1) (Hw.lit w 0))
 
@@ -204,7 +204,7 @@ structure Spi.OutW (w ncs : Nat) (r : HwTy → Type) where
 /-- One cycle of the generic mode 0 master. On `start` the selected chip select goes low
 and the top bit of `data` goes out; the last falling edge raises every chip select and
 pulses `done`, with the received word in `data`. -/
-def Spi.masterStepW (w cw ncs div : Nat) {0 r : HwTy → Type} [Hw r]
+def Spi.masterStepW (w cw ncs div : Nat) {r : HwTy → Type} [Hw r]
     (s : Spi.StW w cw ncs r) (x : Spi.InW w ncs r) :
     r (HwTy.prod (Spi.StW.code w cw ncs) (Spi.OutW.code w ncs)) :=
   let last := s.cnt === Hw.ofNat (Spi.divN div - 1);
@@ -243,7 +243,7 @@ structure Spi.CmdW (w ncs : Nat) (r : HwTy → Type) where
   deriving Bundle
 
 /-- One cycle of the generic master with its `mosi` fed back into `miso`. -/
-def Spi.loopStepW (w cw ncs div : Nat) {0 r : HwTy → Type} [Hw r]
+def Spi.loopStepW (w cw ncs div : Nat) {r : HwTy → Type} [Hw r]
     (s : Spi.StW w cw ncs r) (x : Spi.CmdW w ncs r) :
     r (HwTy.prod (Spi.StW.code w cw ncs) (Spi.OutW.code w ncs)) :=
   Circuit.inst (Spi.masterCW w cw ncs div) (Spi.StW.pack w cw ncs s)

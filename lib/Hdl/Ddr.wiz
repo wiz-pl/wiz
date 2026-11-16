@@ -74,12 +74,12 @@ structure Ddr.Resp (r : HwTy → Type) where
 
 /-- Byte `j` of the masked word: the new byte where `m`'s bit `j` is high, else the old
 one. -/
-def Ddr.byte {0 r : HwTy → Type} [Hw r] (j : Nat) (old new : r Ddr.Word) (m : r Ddr.Mask) :
+def Ddr.byte {r : HwTy → Type} [Hw r] (j : Nat) (old new : r Ddr.Word) (m : r Ddr.Mask) :
     r (HwTy.bits 8) :=
   Hw.mux (Hw.slice j 1 m) (Hw.slice (8 * j) 8 new) (Hw.slice (8 * j) 8 old)
 
 /-- `new` where `m` is high, `old` where it is low, byte by byte. -/
-def Ddr.maskedWord {0 r : HwTy → Type} [Hw r] (old new : r Ddr.Word) (m : r Ddr.Mask) : r Ddr.Word :=
+def Ddr.maskedWord {r : HwTy → Type} [Hw r] (old new : r Ddr.Word) (m : r Ddr.Mask) : r Ddr.Word :=
   Hw.cat (Ddr.byte 15 old new m)
     (Hw.cat (Ddr.byte 14 old new m)
     (Hw.cat (Ddr.byte 13 old new m)
@@ -115,7 +115,7 @@ def Ddr.Model.init : Ddr.Model HwTy.El :=
 
 /-- One cycle of the model: take at most one request when `ready`, write it or start a
 read response, and present the response. -/
-def Ddr.modelStep {0 r : HwTy → Type} [Hw r] (s : Ddr.Model r) (q : Ddr.Req r) :
+def Ddr.modelStep {r : HwTy → Type} [Hw r] (s : Ddr.Model r) (q : Ddr.Req r) :
     r (HwTy.prod Ddr.Model.code Ddr.Resp.code) :=
   let ready := ~~~s.rv;
   let take := q.valid &&& ready;

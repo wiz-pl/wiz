@@ -86,26 +86,26 @@ structure Bus.ReqW (aw dw : Nat) (r : HwTy → Type) where
   deriving Bundle
 
 /-- An idle request (at any representation). -/
-def Bus.noReq {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat} : Bus.Req aw dw r :=
+def Bus.noReq {r : HwTy → Type} [Hw r] {ω aw dw : Nat} : Bus.Req aw dw r :=
   Bus.Req.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit aw 0) (Hw.lit dw 0)
 
 /-- An idle byte-enabled request: no bytes written. -/
-def Bus.noReqW {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat} : Bus.ReqW aw dw r :=
+def Bus.noReqW {r : HwTy → Type} [Hw r] {ω aw dw : Nat} : Bus.ReqW aw dw r :=
   Bus.ReqW.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit aw 0) (Hw.lit dw 0) (Hw.lit (Nat.div dw 8) 0)
 
 /-- Forget the byte enables: the word-level request. -/
-def Bus.ReqW.toReq {0 r : HwTy → Type} {0 aw dw : Nat} (q : Bus.ReqW aw dw r) : Bus.Req aw dw r :=
+def Bus.ReqW.toReq {r : HwTy → Type} {0 aw dw : Nat} (q : Bus.ReqW aw dw r) : Bus.Req aw dw r :=
   Bus.Req.mk q.valid q.we q.addr q.wdata
 
 /-- The word-level request with every byte enabled (the `Bus.Req` API in `Bus.ReqW`). -/
-def Bus.ReqW.ofReq {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat} (q : Bus.Req aw dw r) : Bus.ReqW aw dw r :=
+def Bus.ReqW.ofReq {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (q : Bus.Req aw dw r) : Bus.ReqW aw dw r :=
   Bus.ReqW.mk q.valid q.we q.addr q.wdata
     (Hw.lit (Nat.div dw 8) (Nat.sub (Nat.pow 2 (Nat.div dw 8)) 1))
 
 /-- The byte mask of a strobe: bit `8 * k` through `8 * k + 7` are set when strobe bit
 `k` is. Built with slices, a byte-wide `mux` and a constant shift, so it is in the same
 synthesisable subset as the rest of `Hdl.Bus` (no loops over widths at run time). -/
-def Bus.byteMaskAux {0 r : HwTy → Type} [Hw r] (dw nb : Nat) : (fuel i : Nat) → r (HwTy.bits nb) → r (HwTy.bits dw)
+def Bus.byteMaskAux {r : HwTy → Type} [Hw r] (dw nb : Nat) : (fuel i : Nat) → r (HwTy.bits nb) → r (HwTy.bits dw)
   | .zero, _, _ => Hw.lit dw 0
   | .succ fuel, i, strb =>
     let bit := Hw.slice i 1 strb;
@@ -115,23 +115,23 @@ def Bus.byteMaskAux {0 r : HwTy → Type} [Hw r] (dw nb : Nat) : (fuel i : Nat) 
 
 /-- `Bus.byteMask dw nb strb`: a `dw`-bit mask from `nb` byte strobes (`nb = dw / 8`
 for a bus). -/
-def Bus.byteMask {0 r : HwTy → Type} [Hw r] {ω dw nb : Nat} (strb : r (HwTy.bits nb)) : r (HwTy.bits dw) :=
+def Bus.byteMask {r : HwTy → Type} [Hw r] {ω dw nb : Nat} (strb : r (HwTy.bits nb)) : r (HwTy.bits dw) :=
   Bus.byteMaskAux dw nb nb 0 strb
 
 /-- A response that is not answering anything. -/
-def Bus.noResp {0 r : HwTy → Type} [Hw r] {ω dw : Nat} : Bus.Resp dw r :=
+def Bus.noResp {r : HwTy → Type} [Hw r] {ω dw : Nat} : Bus.Resp dw r :=
   Bus.Resp.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit dw 0) (Hw.lit 1 0)
 
 /-- `x === k`, as one bit (the `isK` of golem's `Rv.Core`). -/
-def Bus.isK {0 r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) (k : Nat) : r Bus.Bit :=
+def Bus.isK {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) (k : Nat) : r Bus.Bit :=
   Hw.eq x (Hw.lit n k)
 
 /-- `a` is in `[base, base + size)`: golem's `GMap.addrIn`, at any address width. -/
-def Bus.addrIn {0 r : HwTy → Type} [Hw r] {ω aw : Nat} (base size : Nat) (a : r (HwTy.bits aw)) : r Bus.Bit :=
+def Bus.addrIn {r : HwTy → Type} [Hw r] {ω aw : Nat} (base size : Nat) (a : r (HwTy.bits aw)) : r Bus.Bit :=
   Hw.and (Hw.not (Hw.ult a (Hw.lit aw base))) (Hw.ult a (Hw.lit aw (base + size)))
 
 /-- The decode helper: whether `addr` is in the window `[base, base + size)`. -/
-def Bus.decode {0 r : HwTy → Type} [Hw r] {ω aw : Nat} (base size : Nat) (addr : r (HwTy.bits aw)) : r Bus.Bit :=
+def Bus.decode {r : HwTy → Type} [Hw r] {ω aw : Nat} (base size : Nat) (addr : r (HwTy.bits aw)) : r Bus.Bit :=
   Bus.addrIn base size addr
 
 ------------------------------------------------------------------------------------
@@ -156,7 +156,7 @@ def Bus.arbInit : Bus.Arb HwTy.El :=
 
 /-- Who gets the bus this cycle (0: master `a`, 1: master `b`): the owner while a request
 is in flight, else the master that did not go last, else the other one. -/
-def Bus.pick {0 r : HwTy → Type} [Hw r] (s : Bus.Arb r) (av bv : r Bus.Bit) : r Bus.Bit :=
+def Bus.pick {r : HwTy → Type} [Hw r] (s : Bus.Arb r) (av bv : r Bus.Bit) : r Bus.Bit :=
   let preferB := Hw.not s.last;
   let idlePick := Hw.mux preferB (Hw.mux bv (Hw.lit 1 1) (Hw.lit 1 0))
     (Hw.mux av (Hw.lit 1 0) (Hw.lit 1 1));
@@ -181,7 +181,7 @@ master `a`, `g = 1` to master `b`. This is the indexed form of `Bus.arbStep` (th
 arbiter's choice is an input to the step, not part of it), so a proof can fix `g` and
 case-split on the small control bits. `Bus.arbStep` is the definition with
 `g = Bus.pick s a.valid b.valid`. -/
-def Bus.arbStepAtBits {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat}
+def Bus.arbStepAtBits {r : HwTy → Type} [Hw r] {ω aw dw : Nat}
     (busy owner last : r Bus.Bit) (g : r Bus.Bit)
     (a b : Bus.Req aw dw r) (resp : Bus.Resp dw r) :
     r (HwTy.prod Bus.Arb.code (Bus.ArbOut.code aw dw)) :=
@@ -202,7 +202,7 @@ def Bus.arbStepAtBits {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat}
       (Bus.Resp.unpack dw (Hw.mux g one zero))))
 
 /-- The indexed step on a packed state: `Bus.arbStepAtBits` of its three bits. -/
-def Bus.arbStepAt {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat} (s : Bus.Arb r) (g : r Bus.Bit)
+def Bus.arbStepAt {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (s : Bus.Arb r) (g : r Bus.Bit)
     (a b : Bus.Req aw dw r) (resp : Bus.Resp dw r) :
     r (HwTy.prod Bus.Arb.code (Bus.ArbOut.code aw dw)) :=
   Bus.arbStepAtBits s.busy s.owner s.last g a b resp
@@ -210,7 +210,7 @@ def Bus.arbStepAt {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat} (s : Bus.Arb r) 
 /-- One cycle of the arbiter: choose the grant by the round-robin rule, then run the
 indexed step. Keeping the choice out of `Bus.arbStepAt` makes the properties of one
 grant a two-case proof (`g = 0` or `g = 1`). -/
-def Bus.arbStep {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat} (s : Bus.Arb r)
+def Bus.arbStep {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (s : Bus.Arb r)
     (a b : Bus.Req aw dw r) (resp : Bus.Resp dw r) :
     r (HwTy.prod Bus.Arb.code (Bus.ArbOut.code aw dw)) :=
   Bus.arbStepAt s (Bus.pick s a.valid b.valid) a b resp
@@ -315,39 +315,39 @@ def Bus.prodN : Nat → HwTy → HwTy
   | .succ n, t => HwTy.prod t (Bus.prodN n t)
 
 /-- The elements of a `Bus.prodN n t` signal, in index order (projections: no hardware). -/
-def Bus.prodNToList {0 r : HwTy → Type} [Hw r] {ω t : HwTy} :
+def Bus.prodNToList {r : HwTy → Type} [Hw r] {ω t : HwTy} :
     (n : Nat) → r (Bus.prodN n t) → List (r t)
   | .zero, _ => .nil
   | .succ n, x => .cons (Hw.fst x) (Bus.prodNToList n (Hw.snd x))
 
 /-- The nested product of a list of signals. `d` is used for missing elements (the
 circuits below pass exactly `n`); the empty product is a zero-width leaf. -/
-def Bus.listToProdN {0 r : HwTy → Type} [Hw r] {ω t : HwTy} (d : r t) :
+def Bus.listToProdN {r : HwTy → Type} [Hw r] {ω t : HwTy} (d : r t) :
     (n : Nat) → List (r t) → r (Bus.prodN n t)
   | .zero, _ => Hw.lit 0 0
   | .succ n, .cons x xs => Hw.pair x (Bus.listToProdN d n xs)
   | .succ n, .nil => Hw.pair d (Bus.listToProdN d n .nil)
 
 /-- The `valid` bit of a packed request (by unpacking its bundle field; no hardware). -/
-def Bus.reqValidHw {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat}
+def Bus.reqValidHw {r : HwTy → Type} [Hw r] {ω aw dw : Nat}
     (q : r (Bus.Req.code aw dw)) : r Bus.Bit :=
   (Bus.Req.unpack aw dw q).valid
 
 /-- A zero response at a packed code (the default of `Bus.listToProdN`). -/
-def Bus.zeroResp {0 r : HwTy → Type} [Hw r] {ω dw : Nat} : r (Bus.Resp.code dw) :=
+def Bus.zeroResp {r : HwTy → Type} [Hw r] {ω dw : Nat} : r (Bus.Resp.code dw) :=
   Hw.const (Bus.Resp.code dw)
     (Bundle.toEl (Bus.Resp.bundle dw) (Bus.noResp : Bus.Resp dw HwTy.El))
 
 /-- `xs` with the element at index `k = g` (a signal): a multiplexer chain. `d` is the
 value when `g` is out of range. -/
-def Bus.muxAt {0 r : HwTy → Type} [Hw r] {ω t : HwTy} (n : Nat)
+def Bus.muxAt {r : HwTy → Type} [Hw r] {ω t : HwTy} (n : Nat)
     (g : r (HwTy.bits n)) (d : r t) : (k : Nat) → List (r t) → r t
   | _, .nil => d
   | k, .cons x xs => Hw.mux (Hw.eq g (Hw.lit n k)) x (Bus.muxAt n g d (Nat.succ k) xs)
 
 /-- The first index at or after `lo` whose `valid` is high, or `n`: the scan of
 `Bus.firstFrom` from a signal `lo`. -/
-def Bus.firstGE {0 r : HwTy → Type} [Hw r] (n : Nat) (lo : r (HwTy.bits n)) :
+def Bus.firstGE {r : HwTy → Type} [Hw r] (n : Nat) (lo : r (HwTy.bits n)) :
     (k : Nat) → List (r Bus.Bit) → r (HwTy.bits n) × r Bus.Bit
   | _, .nil => (Hw.lit n n, Hw.lit 1 0)
   | k, .cons v vs =>
@@ -357,7 +357,7 @@ def Bus.firstGE {0 r : HwTy → Type} [Hw r] (n : Nat) (lo : r (HwTy.bits n)) :
 
 /-- The first index at or before `hi` whose `valid` is high, or `n`: the wrapping half of
 `Bus.pickN` (the scan `Bus.firstFrom` from 0 up to `last + 1`). -/
-def Bus.firstLE {0 r : HwTy → Type} [Hw r] (n : Nat) (hi : r (HwTy.bits n)) :
+def Bus.firstLE {r : HwTy → Type} [Hw r] (n : Nat) (hi : r (HwTy.bits n)) :
     (k : Nat) → List (r Bus.Bit) → r (HwTy.bits n) × r Bus.Bit
   | _, .nil => (Hw.lit n n, Hw.lit 1 0)
   | k, .cons v vs =>
@@ -368,7 +368,7 @@ def Bus.firstLE {0 r : HwTy → Type} [Hw r] (n : Nat) (hi : r (HwTy.bits n)) :
 /-- The round-robin choice as a signal: `Bus.pickN` with the `last` index and the
 `valid` bits as signals. The first valid master after `last` (wrapping) wins; if none,
 the first at or before `last`; if none at all, the grant is `n` (out of range). -/
-def Bus.pickNHw {0 r : HwTy → Type} [Hw r] (n : Nat) (last : r (HwTy.bits n))
+def Bus.pickNHw {r : HwTy → Type} [Hw r] (n : Nat) (last : r (HwTy.bits n))
     (vs : List (r Bus.Bit)) : r (HwTy.bits n) :=
   let lp1 := Hw.add last (Hw.lit n 1);
   let start := Hw.mux (Hw.ult lp1 (Hw.lit n n)) lp1 (Hw.lit n 0);
@@ -377,12 +377,12 @@ def Bus.pickNHw {0 r : HwTy → Type} [Hw r] (n : Nat) (last : r (HwTy.bits n))
   Hw.mux a.2 a.1 (Hw.mux b.2 b.1 (Hw.lit n n))
 
 /-- The response to master `i`: the slave's response when `g = i`, else quiet. -/
-def Bus.respAtHw {0 r : HwTy → Type} [Hw r] {ω n dw : Nat}
+def Bus.respAtHw {r : HwTy → Type} [Hw r] {ω n dw : Nat}
     (g : r (HwTy.bits n)) (resp : Bus.Resp dw r) (i : Nat) : r (Bus.Resp.code dw) :=
   Hw.mux (Hw.eq g (Hw.lit n i)) (Bus.Resp.pack dw resp) (Bus.zeroResp (dw := dw))
 
 /-- `m` responses from index `k`: one per master, the grant's one the slave's answer. -/
-def Bus.respListHw {0 r : HwTy → Type} [Hw r] {ω n dw : Nat}
+def Bus.respListHw {r : HwTy → Type} [Hw r] {ω n dw : Nat}
     (g : r (HwTy.bits n)) (resp : Bus.Resp dw r) :
     (m k : Nat) → List (r (Bus.Resp.code dw))
   | .zero, _ => .nil
@@ -415,7 +415,7 @@ structure Bus.ArbNOut (n aw dw : Nat) (r : HwTy → Type) where
 owner while busy, else `Bus.pickNHw`; the owner keeps the bus until the slave answers or
 drops `valid`; the forwarded request is the granted one (quiet when there is none); only
 the granted master gets the response. -/
-def Bus.arbNCStep {0 r : HwTy → Type} [Hw r] {ω n aw dw : Nat}
+def Bus.arbNCStep {r : HwTy → Type} [Hw r] {ω n aw dw : Nat}
     (busy : r Bus.Bit) (owner last : r (HwTy.bits n))
     (qs : r (Bus.prodN n (Bus.Req.code aw dw))) (resp : Bus.Resp dw r) :
     r (HwTy.prod (Bus.ArbNS.code n) (Bus.ArbNOut.code n aw dw)) :=
@@ -467,7 +467,7 @@ structure Bus.RouteOut (aw dw : Nat) (r : HwTy → Type) where
   deriving Bundle
 
 /-- The combinational decode/route step. -/
-def Bus.routeStep {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat} (base size : Nat)
+def Bus.routeStep {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (base size : Nat)
     (q : Bus.Req aw dw r) (slave : Bus.Resp dw r) :
     r (HwTy.prod (Bus.Req.code aw dw) (Bus.Resp.code dw)) :=
   let hit := Bus.decode base size q.addr;
@@ -477,7 +477,7 @@ def Bus.routeStep {0 r : HwTy → Type} [Hw r] {ω aw dw : Nat} (base size : Nat
     (Hw.mux hit (Bus.Resp.pack dw slave) (Bus.Resp.pack dw miss))
 
 /-- The router as combinational code, for `Circuit.comb`. -/
-def Bus.routeComb (aw dw base size : Nat) {0 r : HwTy → Type} [Hw r]
+def Bus.routeComb (aw dw base size : Nat) {r : HwTy → Type} [Hw r]
     (x : r (Bus.RouteIn.code aw dw)) : r (Bus.RouteOut.code aw dw) :=
   let i := Bus.RouteIn.unpack aw dw x;
   let o := Bus.routeStep base size i.req i.slave;
@@ -510,7 +510,7 @@ def Bus.ramInit (ab dw : Nat) : Bus.Ram ab dw HwTy.El :=
 /-- One cycle of the RAM: after two cycles of `valid` the request is answered; a write
 is applied then, a read returns the old word. The request must be held until the answer
 (the usual valid/ready rule). -/
-def Bus.ramStep {0 r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
+def Bus.ramStep {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
     (s : Bus.Ram ab dw r) (q : Bus.Req aw dw r) :
     r (HwTy.prod (Bus.Ram.code ab dw) (Bus.Resp.code dw)) :=
   let go := Hw.and q.valid (Bus.isK s.wait 2);
@@ -530,7 +530,7 @@ def Bus.ramC (shift aw ab dw : Nat) : Circuit (Bus.Req.code aw dw) (Bus.Resp.cod
 /-- One cycle of the byte-enabled RAM. It is `Bus.ramStep` with a write mask: the word
 written is `wdata` in the enabled bytes and the old word in the others. Reads answer with
 the old word (the store lands at the clock edge, after this cycle's read). -/
-def Bus.ramWStep {0 r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
+def Bus.ramWStep {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
     (s : Bus.Ram ab dw r) (q : Bus.ReqW aw dw r) :
     r (HwTy.prod (Bus.Ram.code ab dw) (Bus.Resp.code dw)) :=
   let go := Hw.and q.valid (Bus.isK s.wait 2);

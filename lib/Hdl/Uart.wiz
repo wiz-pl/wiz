@@ -77,13 +77,13 @@ def Uart.cntW10 : Nat := 10
 -- Bit-level vocabulary (the same as the iCEstick project's `Icestick.Gates`).
 
 /-- The 9-bit shift register of a frame: the stop bit on top of the data. -/
-def Uart.frame9 {0 r : HwTy → Type} [Hw r] (d : r Uart.B8) : r Uart.B9 :=
+def Uart.frame9 {r : HwTy → Type} [Hw r] (d : r Uart.B8) : r Uart.B9 :=
   Hw.cat (Hw.lit 1 1) d
 /-- Shift a bit in at the top of a 9-bit register (data goes out at the bottom). -/
-def Uart.shiftIn9 {0 r : HwTy → Type} [Hw r] (x : r Uart.B9) (b : r Uart.Bit) : r Uart.B9 :=
+def Uart.shiftIn9 {r : HwTy → Type} [Hw r] (x : r Uart.B9) (b : r Uart.Bit) : r Uart.B9 :=
   Hw.cat b (Hw.slice 1 8 x)
 /-- Shift a bit in at the top of an 8-bit register (data goes out at the bottom). -/
-def Uart.shiftIn8 {0 r : HwTy → Type} [Hw r] (x : r Uart.B8) (b : r Uart.Bit) : r Uart.B8 :=
+def Uart.shiftIn8 {r : HwTy → Type} [Hw r] (x : r Uart.B8) (b : r Uart.Bit) : r Uart.B8 :=
   Hw.cat b (Hw.slice 1 7 x)
 
 ------------------------------------------------------------------------------------
@@ -101,7 +101,7 @@ def Uart.Baud.init (w : Nat) : Uart.Baud w HwTy.El :=
 
 /-- One cycle of the baud generator: count while `ce`, tick at `n - 1`, wrap to 0, hold
 when `ce` is low. -/
-def Uart.baudStep (w n : Nat) {0 r : HwTy → Type} [Hw r] (s : Uart.Baud w r) (ce : r Uart.Bit) :
+def Uart.baudStep (w n : Nat) {r : HwTy → Type} [Hw r] (s : Uart.Baud w r) (ce : r Uart.Bit) :
     r (HwTy.prod (Uart.Baud.code w) Uart.Bit) :=
   let last := s.cnt === Hw.ofNat (n - 1);
   let tick := ce &&& last;
@@ -148,7 +148,7 @@ structure Uart.TxOut (r : HwTy → Type) where
   deriving Bundle
 
 /-- One cycle of the transmitter. -/
-def Uart.txStep (w n : Nat) {0 r : HwTy → Type} [Hw r] (s : Uart.Tx w r) (x : Uart.TxIn r) :
+def Uart.txStep (w n : Nat) {r : HwTy → Type} [Hw r] (s : Uart.Tx w r) (x : Uart.TxIn r) :
     r (HwTy.prod (Uart.Tx.code w) Uart.TxOut.code) :=
   let idle := s.left === 0;
   let go := idle &&& x.start;
@@ -206,7 +206,7 @@ structure Uart.RxOut (r : HwTy → Type) where
   deriving Bundle
 
 /-- One cycle of the receiver. -/
-def Uart.rxStep (w n : Nat) {0 r : HwTy → Type} [Hw r] (s : Uart.Rx w r) (x : Uart.RxIn r) :
+def Uart.rxStep (w n : Nat) {r : HwTy → Type} [Hw r] (s : Uart.Rx w r) (x : Uart.RxIn r) :
     r (HwTy.prod (Uart.Rx.code w) Uart.RxOut.code) :=
   let idle := s.ph === 0;
   let inStart := s.ph === 10;
@@ -249,7 +249,7 @@ structure Uart.LoopOut (r : HwTy → Type) where
   deriving Bundle
 
 /-- One cycle of the loopback: run the transmitter, feed its line to the receiver. -/
-def Uart.loopStep (w n : Nat) {0 r : HwTy → Type} [Hw r] (s : Uart.Loop w r) (x : Uart.TxIn r) :
+def Uart.loopStep (w n : Nat) {r : HwTy → Type} [Hw r] (s : Uart.Loop w r) (x : Uart.TxIn r) :
     r (HwTy.prod (Uart.Loop.code w) Uart.LoopOut.code) :=
   let t := Circuit.inst (Uart.txCw w n) (Uart.Tx.pack w s.tx) (Uart.TxIn.pack x);
   let to := Uart.TxOut.unpack (Hw.snd t);

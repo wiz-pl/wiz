@@ -274,10 +274,10 @@ structure Flow (i o : HwTy) where
   st : HwTy
   init : HwTy.El st
   /-- The stage's `in_ready`, from the state and the downstream's `ready`. -/
-  ready : {0 r : HwTy → Type} → [Hw r] → r st → r HwTy.bit → r HwTy.bit
+  ready : {r : HwTy → Type} → [Hw r] → r st → r HwTy.bit → r HwTy.bit
   /-- One cycle: state, input data, input valid, downstream ready → next state, output
   data, output valid. -/
-  step : {0 r : HwTy → Type} → [Hw r] → r st → r i → r HwTy.bit → r HwTy.bit →
+  step : {r : HwTy → Type} → [Hw r] → r st → r i → r HwTy.bit → r HwTy.bit →
     r (HwTy.prod st (HwTy.prod o HwTy.bit))
 
 /-- The identity flow: passes data and valid straight through, ready straight back. -/

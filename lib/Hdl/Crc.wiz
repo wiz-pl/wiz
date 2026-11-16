@@ -31,27 +31,27 @@ def Crc.B8 : HwTy := HwTy.bits 8
 def Crc.B4 : HwTy := HwTy.bits 4
 
 /-- Shift an 8-bit register up by one place, zeros in at the bottom. -/
-def Crc.shl1 {0 r : HwTy → Type} [Hw r] (c : r Crc.B8) : r Crc.B8 :=
+def Crc.shl1 {r : HwTy → Type} [Hw r] (c : r Crc.B8) : r Crc.B8 :=
   Hw.cat (Hw.slice 0 7 c) (Hw.lit 1 0)
 
 /-- One bit of the hardware CRC: shift left, and subtract (xor) the polynomial if a one
 fell out of the top. -/
-def Crc.hwBit {0 r : HwTy → Type} [Hw r] (c : r Crc.B8) : r Crc.B8 :=
+def Crc.hwBit {r : HwTy → Type} [Hw r] (c : r Crc.B8) : r Crc.B8 :=
   let sh := Crc.shl1 c;
   if Hw.slice 7 1 c then Hw.xor sh (Hw.lit 8 7) else sh
 
 /-- `n` copies of `Crc.hwBit` (a meta-level recursion: the netlist has the copies, not a
 loop). -/
-def Crc.hwIter {0 r : HwTy → Type} [Hw r] : Nat → r Crc.B8 → r Crc.B8
+def Crc.hwIter {r : HwTy → Type} [Hw r] : Nat → r Crc.B8 → r Crc.B8
   | .zero, c => c
   | .succ k, c => Crc.hwIter k (Crc.hwBit c)
 
 /-- The CRC after one more byte `d`: eight copies of `Crc.hwBit`, unrolled, on `c XOR d`. -/
-def Crc.hwStep {0 r : HwTy → Type} [Hw r] (c d : r Crc.B8) : r Crc.B8 :=
+def Crc.hwStep {r : HwTy → Type} [Hw r] (c d : r Crc.B8) : r Crc.B8 :=
   Crc.hwIter 8 (Hw.xor c d)
 
 /-- A nibble as an ASCII hexadecimal digit (upper case). -/
-def Crc.hexDigit {0 r : HwTy → Type} [Hw r] (nib : r Crc.B4) : r Crc.B8 :=
+def Crc.hexDigit {r : HwTy → Type} [Hw r] (nib : r Crc.B4) : r Crc.B8 :=
   let z := Hw.cat (Hw.lit 4 0) nib;
   if Hw.ult nib (Hw.lit 4 10) then Hw.add z (Hw.lit 8 48) else Hw.add z (Hw.lit 8 55)
 
@@ -107,7 +107,7 @@ structure Crc.Out (r : HwTy → Type) where
   deriving Bundle
 
 /-- One cycle: on `valid`, advance the CRC by `data`; the output shows the new value. -/
-def Crc.streamStep {0 r : HwTy → Type} [Hw r] (s : Crc.St r) (x : Crc.In r) :
+def Crc.streamStep {r : HwTy → Type} [Hw r] (s : Crc.St r) (x : Crc.In r) :
     r (HwTy.prod Crc.St.code Crc.Out.code) :=
   let c := Hw.mux x.valid (Crc.hwStep s.crc x.data) s.crc;
   Hw.pair (Crc.St.pack (Crc.St.mk c)) (Crc.Out.pack (Crc.Out.mk x.valid c))

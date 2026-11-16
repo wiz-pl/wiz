@@ -44,16 +44,16 @@ def Hdl.zoom_frame {0 S T U I O : Type} (l : Lens S T) (m : Lens S U) (h : Lens.
 
 -- the structure inside the packed value
 /-- The structure inside a bundle's packed value, as a lens at values. -/
-def Bundle.lens {0 F : (HwTy → Type) → Type} (b : Bundle F) : Lens (HwTy.El b.code) (F HwTy.El) :=
+def Bundle.lens {F : (HwTy → Type) → Type} (b : Bundle F) : Lens (HwTy.El b.code) (F HwTy.El) :=
   fun (v : HwTy.El b.code) => (Bundle.ofEl b v, fun (s : F HwTy.El) => Bundle.toEl b s)
 
 -- packing and unpacking are inverse (`deriving Bundle` gives such bundles: `rfl`)
 /-- Packing and unpacking are inverse (`deriving Bundle` gives such bundles: by `rfl`). -/
-def Bundle.Lawful {0 F : (HwTy → Type) → Type} (b : Bundle F) : Prop :=
+def Bundle.Lawful {F : (HwTy → Type) → Type} (b : Bundle F) : Prop :=
   ((v : HwTy.El b.code) → Bundle.toEl b (Bundle.ofEl b v) = v) × ((s : F HwTy.El) → Bundle.ofEl b (Bundle.toEl b s) = s)
 
 /-- `Bundle.lens b` is lawful when the bundle's packing is. -/
-def Bundle.lens_lawful {0 F : (HwTy → Type) → Type} (b : Bundle F) (h : Bundle.Lawful b) : Lens.Lawful (Bundle.lens b) :=
+def Bundle.lens_lawful {F : (HwTy → Type) → Type} (b : Bundle F) (h : Bundle.Lawful b) : Lens.Lawful (Bundle.lens b) :=
   (h.1, fun (v : HwTy.El b.code) (s : F HwTy.El) => h.2 s, fun (v : HwTy.El b.code) (s t : F HwTy.El) => rfl)
 
 ------------------------------------------------------------------------------------
