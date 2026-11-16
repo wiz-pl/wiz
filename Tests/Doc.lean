@@ -487,7 +487,7 @@ def docGroup : Group where
         checkHas md "Sized Nat"
         -- (its field, with a doc comment)
         checkHas md "<a id=\"Sized.size\"></a>"
-        checkHas md "<p>how big it is</p>"
+        checkHas md "— how big it is"
         -- (the module's own infix operator, with precedence and associativity)
         checkHas md "| `+?` | infixl | 33 | left |"
         -- (doc comments are Markdown, links included)
