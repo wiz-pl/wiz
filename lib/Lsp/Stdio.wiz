@@ -1,0 +1,171 @@
+import Sys
+import Lsp.Loop
+/-!
+# Lsp.Stdio
+
+The native driver of a `Loop` (lib/Lsp/Loop.wiz) over two descriptors, usually stdin and
+stdout, with the Language Server Protocol's framing (`Content-Length: N\r\n\r\n` and N
+bytes of UTF-8). It is the loop of the concurrency plan (§2.3), single-threaded:
+
+1. every complete frame already read is fed, in order (input first, so an edit
+   cancels stale work before the next quantum);
+2. if a quantum is due (`wake` at or before now), run one and write its messages;
+3. otherwise `Fd.poll` the input until `wake`'s deadline (forever when there is none),
+   and read what came.
+
+At the end of the input the loop finishes the work that is due (sleeping until a
+deadline if it must), then returns; after `exit` (`stop`) it returns at once.
+
+It uses `Fd.poll`, `Fd.read` and `Clock.monotonic` from lib/Sys.wiz, whose natives are
+in `runtime/`: so for now it runs when compiled by the Lean toolchain (`wiz build`); the
+self-hosted backend's `rt.c` does not have them yet.
+
+```
+-- a server over stdio for an elaborator `e` (wiz no-check: needs an elaborator)
+def main : IO Unit := EIO.toIO (do
+  _ ← Lsp.Stdio.serve (Lsp.loopOf) (Lsp.Core.init e Lsp.Config.default);
+  EIO.pure ())
+```
+-/
+
+-- ## Framing
+
+/-- The index just after the first `\r\n\r\n` at or after `i` (`fuel` bounds the search). -/
+def Lsp.Stdio.headerEnd (b : Bytes) : Nat → Nat → Option Nat
+  | .zero, _ => .none
+  | .succ fuel, i => match Nat.lt (i + 3) (Bytes.size b) with
+    | .false => .none
+    | .true => match Bool.and (Bool.and (Nat.beq (Bytes.get b i) 13) (Nat.beq (Bytes.get b (i + 1)) 10))
+        (Bool.and (Nat.beq (Bytes.get b (i + 2)) 13) (Nat.beq (Bytes.get b (i + 3)) 10)) with
+      | .true => .some (i + 4)
+      | .false => Lsp.Stdio.headerEnd b fuel (i + 1)
+
+/-- ASCII lower case. -/
+def Lsp.Stdio.lower (s : String) : String :=
+  String.mk (List.map (fun c => match Bool.and (Nat.le 65 (Char.code c)) (Nat.le (Char.code c) 90) with
+    | .true => Char.mk (Char.code c + 32)
+    | .false => c) (String.chars s))
+
+/-- The `Content-Length` of a header block (any case; other headers are ignored). -/
+def Lsp.Stdio.contentLength : List String → Option Nat
+  | .nil => .none
+  | .cons l ls => match String.stripPrefix (Lsp.Stdio.lower l) "content-length:" with
+    | .some v => String.parseNat (String.trim v)
+    | .none => Lsp.Stdio.contentLength ls
+
+/-- What the front of the input buffer holds. -/
+inductive Lsp.Stdio.Frame where
+  | incomplete
+  | message (body : String) (rest : Bytes)
+  | broken (why : String) (rest : Bytes)
+
+/-- One frame from the front of the buffer: a whole message, not all of it yet, or a frame
+that cannot be read (skipped, with the reason). -/
+def Lsp.Stdio.unframe (b : Bytes) : Lsp.Stdio.Frame :=
+  match Lsp.Stdio.headerEnd b (Bytes.size b) 0 with
+  | .none => .incomplete
+  | .some h =>
+    let header : String := match Bytes.toUtf8 (Bytes.slice b 0 h) with
+      | .ok s => s
+      | .error _ => "";
+    let after := Bytes.slice b h (Bytes.size b - h);
+    match Lsp.Stdio.contentLength (String.splitOn header "\r\n") with
+    | .none => .broken "a header without Content-Length" after
+    | .some n => match Nat.lt (Bytes.size after) n with
+      | .true => .incomplete
+      | .false =>
+        let rest := Bytes.slice after n (Bytes.size after - n);
+        match Bytes.toUtf8 (Bytes.slice after 0 n) with
+        | .ok body => .message body rest
+        | .error e => .broken e rest
+
+/-- A message framed for the wire. -/
+def Lsp.Stdio.frame (body : String) : Bytes :=
+  let b := Bytes.ofUtf8 body;
+  Bytes.append (Bytes.ofUtf8 (String.join ["Content-Length: ", Nat.repr (Bytes.size b), "\r\n\r\n"])) b
+
+-- ## The loop
+
+/-- The monotonic clock in milliseconds. -/
+def Lsp.Stdio.nowMs : EIO Nat := do
+  d ← EIO.lift Clock.monotonic;
+  EIO.pure (Duration.toMillis d)
+
+/-- Write messages, framed, in order. -/
+def Lsp.Stdio.writeAll (out : Fd) : List String → EIO Unit
+  | .nil => EIO.pure ()
+  | .cons m ms => do
+    Fd.write out (Lsp.Stdio.frame m);
+    Lsp.Stdio.writeAll out ms
+
+/-- What to do next when no complete frame is buffered: work now, wait for input (until a
+deadline, or forever), or (at the end of the input) sleep until a deadline or finish. -/
+inductive Lsp.Stdio.Next where
+  | work
+  | wait (timeout : Option Nat)
+  | sleep (ms : Nat)
+  | finish
+
+/-- The decision of `Lsp.Stdio.Next` from `wake`, the time and whether the input ended. -/
+def Lsp.Stdio.next (wake : Option Nat) (now : Nat) (eof : Bool) : Lsp.Stdio.Next :=
+  match wake, eof with
+  | .some d, _ => match Nat.le d now, eof with
+    | .true, _ => .work
+    | .false, .false => .wait (.some (d - now))
+    | .false, .true => .sleep (d - now)
+  | .none, .false => .wait .none
+  | .none, .true => .finish
+
+/-- Read what is there (after a poll said so): the new buffer, or `none` at the end. -/
+def Lsp.Stdio.readMore (inp : Fd) (buf : Bytes) : EIO (Option Bytes) := do
+  got ← Fd.read inp 65536;
+  EIO.pure (match got with
+    | .some b => .some (Bytes.append buf b)
+    | .none => .none)
+
+/-- Wait for input for at most `t` milliseconds (`none`: no limit); whether it is readable. -/
+def Lsp.Stdio.poll (inp : Fd) (t : Option Nat) : EIO Bool := do
+  rs ← (match t with
+    | .some ms => Fd.poll [(inp, Interest.readable)] (Duration.millis ms)
+    | .none => Fd.pollForever [(inp, Interest.readable)]);
+  EIO.pure (Bool.not (List.isEmpty rs))
+
+/-- Run the loop on `inp`/`out` from state `s` with `buf` already read; `eof`: the input
+has ended. Returns the final state. -/
+partial def Lsp.Stdio.run {S : Type} (l : Loop S String String) (inp out : Fd) (s : S) (buf : Bytes) (eof : Bool) : EIO S :=
+  match l.stop s with
+  | .true => EIO.pure s
+  | .false => match Lsp.Stdio.unframe buf with
+    | .message body rest => do
+      now ← Lsp.Stdio.nowMs;
+      let r := l.feed s now body;
+      Lsp.Stdio.writeAll out r.2;
+      Lsp.Stdio.run l inp out r.1 rest eof
+    | .broken why rest => Lsp.Stdio.run l inp out s rest eof
+    | .incomplete => do
+      now ← Lsp.Stdio.nowMs;
+      match Lsp.Stdio.next (l.wake s) now eof with
+      | .work =>
+        let r := l.work s now;
+        do
+          Lsp.Stdio.writeAll out r.2;
+          Lsp.Stdio.run l inp out r.1 buf eof
+      | .finish => EIO.pure s
+      | .sleep ms => do
+        EIO.lift (Clock.sleep (Duration.millis ms));
+        Lsp.Stdio.run l inp out s buf eof
+      | .wait t => do
+        ready ← Lsp.Stdio.poll inp t;
+        match ready with
+        | .false => Lsp.Stdio.run l inp out s buf eof
+        | .true => do
+          more ← Lsp.Stdio.readMore inp buf;
+          match more with
+          | .some b => Lsp.Stdio.run l inp out s b eof
+          | .none => Lsp.Stdio.run l inp out s buf .true
+
+/-- Serve on stdin and stdout until `exit` or the end of the input. -/
+def Lsp.Stdio.serve {S : Type} (l : Loop S String String) (s : S) : EIO S := do
+  inp ← EIO.lift Fd.stdin;
+  out ← EIO.lift Fd.stdout;
+  Lsp.Stdio.run l inp out s Bytes.empty .false

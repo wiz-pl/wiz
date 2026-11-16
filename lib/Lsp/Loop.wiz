@@ -16,15 +16,19 @@ quantum), `wake` (the next deadline) and `stop`. Two kinds of driver run it:
 Inputs that arrive while a quantum runs are taken after it: that is the only
 cancellation point, and it is where the core drops work an edit made stale.
 
-`Lsp.loop` is the language-server core as a `Loop`; `Lsp.Send` builds the client's
+`Lsp.loopOf` is the language-server core as a `Loop`; `Lsp.Send` builds the client's
 messages so scripts stay readable:
 
+Run scripts compiled (`wiz run`): the kernel's `#eval` does not share `let`-bound pairs,
+so threading the state through pairs is exponential there.
+
 ```
+import IO
 import Lsp.Loop
 import Lsp.Fake
-#eval Lsp.transcript Lsp.fake Lsp.Config.default 10
+def main : IO Unit := IO.println (String.intercalate "\n" (Lsp.transcript Lsp.fake Lsp.Config.default 10
   [(0, Lsp.Send.initialize 1 .false), (0, Lsp.Send.initialized),
-   (0, Lsp.Send.didOpen "file:///a.wiz" 1 "def a\ncheck b\n")]
+   (0, Lsp.Send.didOpen "file:///a.wiz" 1 "def a\ncheck b\n")]))
 ```
 -/
 

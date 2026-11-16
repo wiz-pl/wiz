@@ -46,7 +46,7 @@ pane fall back to the plain ones (docs/playground-lsp.md).
 they become LSP positions: a 0-based line and a UTF-16 column (characters outside the
 Basic Multilingual Plane count two).
 
-Everything here is pure and checks with `#eval`; lib/Lsp/Loop.wiz drives it on a
+Everything here is pure (run sessions compiled: `#eval` re-evaluates `let`-bound pairs); lib/Lsp/Loop.wiz drives it on a
 virtual clock, lib/Lsp/Stdio.wiz on stdin/stdout with `Fd.poll`.
 -/
 
